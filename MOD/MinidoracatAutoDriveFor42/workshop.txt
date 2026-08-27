@@ -1,0 +1,51 @@
+version=1
+title=Minidoracat MiniMap - AutoDrive for B42
+description=[h1]🚗 Minidoracat MiniMap - AutoDrive for B42[/h1]
+description=[h3]By Minidoracat[/h3]
+description=
+description=[hr][/hr]
+description=
+description=[h2]✨ What is this[/h2]
+description=Item-driven vehicle navigation and autodrive: plan routes with a GPS Navigator, then let the Autopilot Module drive along the road network
+description=
+description=[h2]🧰 Features[/h2]
+description=[list]
+description=[*] [b]GPS Navigator[/b]: loot or craft one, then pick a destination on the world map to plan a route along the road network
+description=[*] [b]Autopilot Module[/b]: install it into a vehicle to drive along the planned route automatically, stopping on arrival
+description=[*] [b]Crafting[/b]: both devices craftable with the Electricity skill (sandbox toggles for crafting and item requirements)
+description=[*] [b]Power drain[/b]: runs on its own battery when carried, or on the vehicle battery once installed; drain rate adjustable in sandbox (0 = no drain)
+description=[*] [b]Performance first[/b]: precomputed route speed profiles and event-driven dodging keep per-frame cost minimal
+description=[*] [b]Map mod support out of the box[/b]: the road network comes from the game's official street data, so subscribed map mods just work
+description=[/list]
+description=
+description=[h2]⚠️ Requirements[/h2]
+description=[list]
+description=[*] Requires the base mod: [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763913359]Minidoracat MiniMap for B42[/url]
+description=[/list]
+description=
+description=[h2]🔗 Mod Series[/h2]
+description=[list]
+description=[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763913359]Minidoracat MiniMap for B42[/url] (base mod, required)
+description=[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3768276209]Minidoracat MiniMap Zones[/url]
+description=[/list]
+description=
+description=[h2]📋 Mod Info[/h2]
+description=[list]
+description=[*] [b]Mod ID:[/b] MinidoracatAutoDriveFor42
+description=[*] [b]Supported version:[/b] Build 42.20.4+
+description=[*] [b]Singleplayer / Multiplayer:[/b] both supported
+description=[/list]
+description=
+description=[h2]💬 Feedback[/h2]
+description=[list]
+description=[*] [url=https://discord.gg/Gur2V67]Discord community[/url]
+description=[/list]
+description=
+description=[h2]📺 Follow the author[/h2]
+description=[list]
+description=[*] [url=https://www.twitch.tv/minidoracat]Twitch[/url]
+description=[/list]
+description=
+description=[b]#Minidoracat[/b]
+tags=Build 42;Interface;Vehicles;Multiplayer
+visibility=public
