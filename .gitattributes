@@ -1,0 +1,15 @@
+# PZ Lua/JSON 對行尾敏感，統一 LF（CRLF 會讓翻譯檔被引擎靜默忽略）
+*.json text eol=lf
+*.lua text eol=lf
+*.txt text eol=lf
+*.py text eol=lf
+*.ps1 text eol=lf
+*.bat text eol=lf
+*.md text eol=lf
+*.sh text eol=lf
+mod.info text eol=lf
+
+# workshop.txt 例外：遊戲內 Workshop 工具上傳時會把整檔回寫成 CRLF。
+# 跟著遊戲的格式走，上傳後就不會每次都跳出「已修改」的假差異（入庫仍正規化為 LF）。
+# 對應地，scripts/gen_workshop_txt.py 也以 CRLF 寫出，兩邊產物一致。
+MOD/*/workshop.txt text eol=crlf

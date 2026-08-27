@@ -1,0 +1,45 @@
+# Claude Code / AI 工具本機設定（不進版控）
+.claude/
+.mcp.json
+CLAUDE.md
+AGENTS.md
+.agents/
+.omc/
+.omx/
+.codex/
+.code-review-graph/
+.gitnexus/
+
+# 系統檔案
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 反編譯產物（預設放專案同層 ../pz-decompiled-reference/）
+pz-decompiled-reference/
+decompiled/
+vineflower-*.jar
+*.class
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+luac.out
+
+temp/
+tmp/
+
+# poster 產生器輸出（正式檔已部署至 MOD 目錄，此為重產暫存）
+scripts/poster/posters/
+# 未採用的封面候選（留在本機備查，不進版控）
+scripts/poster/candidates/
+scripts/poster/variant_*.png
+scripts/poster/*.bak
