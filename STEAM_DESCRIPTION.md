@@ -39,9 +39,4 @@
 [*] [url=https://discord.gg/Gur2V67]Discord 社群[/url]
 [/list]
 
-[h2]📺 關注作者[/h2]
-[list]
-[*] [url=https://www.twitch.tv/minidoracat]Twitch 直播[/url]
-[/list]
-
 [b]#Minidoracat[/b]

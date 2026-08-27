@@ -39,9 +39,4 @@
 [*] [url=https://discord.gg/Gur2V67]Discordコミュニティ[/url]
 [/list]
 
-[h2]📺 作者をフォロー[/h2]
-[list]
-[*] [url=https://www.twitch.tv/minidoracat]Twitch配信[/url]
-[/list]
-
 [b]#Minidoracat[/b]

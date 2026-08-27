@@ -39,9 +39,4 @@ Item-driven vehicle navigation and autodrive: plan routes with a GPS Navigator, 
 [*] [url=https://discord.gg/Gur2V67]Discord community[/url]
 [/list]
 
-[h2]📺 Follow the author[/h2]
-[list]
-[*] [url=https://www.twitch.tv/minidoracat]Twitch[/url]
-[/list]
-
 [b]#Minidoracat[/b]

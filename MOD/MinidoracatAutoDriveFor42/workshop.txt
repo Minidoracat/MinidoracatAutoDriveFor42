@@ -41,11 +41,6 @@ description=[list]
 description=[*] [url=https://discord.gg/Gur2V67]Discord community[/url]
 description=[/list]
 description=
-description=[h2]📺 Follow the author[/h2]
-description=[list]
-description=[*] [url=https://www.twitch.tv/minidoracat]Twitch[/url]
-description=[/list]
-description=
 description=[b]#Minidoracat[/b]
 tags=Build 42;Interface;Vehicles;Multiplayer
 visibility=public
