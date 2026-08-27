@@ -16,7 +16,7 @@
                            （語法合法、標準 Lua 有這些函式），只能靜態掃描
   6. table.sort 禁用      — Kahlua 的 sort 是遞迴 quicksort（coroutine 堆疊上限 3000），
                            已排序輸入退化 O(n) 深度、數百筆即溢位；一律用迭代 merge sort
-  7. MOD/ 樹雜物          — .omc/.claude/.gitnexus；Workshop 整包上傳不看 .gitignore
+  7. MOD/ 樹雜物          — .omc/.claude/.gitnexus 目錄與 .gitkeep 檔；Workshop 整包上傳不看 .gitignore
   8. 佔位符殘留            — {{TOKEN}} 漏替換
   9. Steam 描述位元組      — 各語言 ≤8000 UTF-8 bytes（中日文 3 bytes/字，容易低估）
  10. 沙盒選項翻譯配對       — 每個 option 要有 Sandbox_<translation> 標題＋ _tooltip＋分頁名
@@ -221,13 +221,20 @@ fail("無 table.sort（用迭代 sortSafe，見 AGENTS.md）", hits_sort) if hit
     else ok("無 table.sort")
 
 # ---- 7. MOD/ 樹雜物 ----
+# .gitkeep 也算雜物：引擎會把 MOD 樹內任何檔案列舉成 mod 資源（console 出現
+# "overrides media/lua/client/.gitkeep"），且 Workshop 上傳整包不看 .gitignore。
+# MOD/ 樹內空目錄不撐 .gitkeep，靠首個實檔建立（引擎對不存在的 lua 子目錄不報錯）。
 junk = []
-for base, dirs, _ in os.walk(os.path.join(REPO, "MOD")):
+for base, dirs, files in os.walk(os.path.join(REPO, "MOD")):
     for d in list(dirs):
         if d in (".omc", ".claude", ".gitnexus"):
             junk.append(os.path.relpath(os.path.join(base, d), REPO))
             dirs.remove(d)
-fail("MOD/ 樹無 AI 工具狀態目錄", junk) if junk else ok("MOD/ 樹無 AI 工具狀態目錄")
+    for name in files:
+        if name == ".gitkeep":
+            junk.append(os.path.relpath(os.path.join(base, name), REPO))
+fail("MOD/ 樹無雜物（AI 狀態目錄／.gitkeep）", junk) if junk \
+    else ok("MOD/ 樹無雜物（AI 狀態目錄／.gitkeep）")
 
 # ---- 8. 佔位符殘留 ----
 tokens = []
