@@ -1,0 +1,14 @@
+{
+    "UI_MinidoracatAutoDrive_NeedGPS": "需要有電的 GPS 導航儀才能規劃路線。",
+    "UI_MinidoracatAutoDrive_InstallGPS": "安裝 GPS 導航儀",
+    "UI_MinidoracatAutoDrive_InstallAuto": "安裝自動駕駛模組",
+    "UI_MinidoracatAutoDrive_UninstallGPS": "拆下 GPS 導航儀",
+    "UI_MinidoracatAutoDrive_UninstallAuto": "拆下自動駕駛模組",
+    "UI_MinidoracatAutoDrive_NoBattery": "這輛車沒有電瓶，無法安裝。",
+    "UI_MinidoracatAutoDrive_NoScrewdriver": "需要螺絲起子。",
+    "UI_MinidoracatAutoDrive_NeedElectricity1": "需要電工 1 級。",
+    "UI_MinidoracatAutoDrive_AlreadyInstalled": "這輛車已經裝過了。",
+    "UI_MinidoracatAutoDrive_NavApiMissing": "導航 API 不相容，請更新 Minidoracat MiniMap",
+    "UI_MinidoracatAutoDrive_InstallFailed": "安裝失敗。",
+    "UI_MinidoracatAutoDrive_TooFar": "距離太遠，請下車並站到電瓶艙旁邊。"
+}

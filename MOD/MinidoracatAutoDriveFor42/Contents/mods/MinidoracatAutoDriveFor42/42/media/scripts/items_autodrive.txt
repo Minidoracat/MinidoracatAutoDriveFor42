@@ -1,0 +1,45 @@
+module MinidoracatAutoDrive
+{
+    /*
+        GPSNavigator：隨身導航儀。
+        ItemType = base:drainable（DrainableComboItem），並帶 base:usesbattery，
+        原版 InsertBattery / RemoveBattery 的輸入條件是 tags[base:flashlight;base:usesbattery]
+        （tags[] 是「任一符合」而非「全部符合」），因此不必自訂換電池配方
+        （見 recipes_electrical.txt:3-35）。
+        刻意不加 base:flashlight／ActivatedItem／TorchCone：只為了避免變成手電筒
+        （會發光、吃手電筒專屬的裝備行為）——**不是**為了避開拆解：
+        DismantleElectronics 的輸入是 tags[base:camera;base:digital;base:miscelectronic;base:flashlight]
+        （recipes_electrical.txt:37-53），本物品帶 base:miscelectronic 就已經符合，
+        玩家一樣能用螺絲起子把它拆成 ElectronicsScrap。這是刻意接受的（原版電子小物皆然）。
+        UseDelta 對齊 HandTorch 的 0.006（drainable.txt:993）。
+    */
+    item GPSNavigator
+    {
+        DisplayCategory = Electronics,
+        ItemType = base:drainable,
+        Weight = 0.5,
+        Icon = GPSNavigator,
+        MetalValue = 8.0,
+        UseDelta = 0.006,
+        UseWhileEquipped = false,
+        DisappearOnUse = false,
+        KeepOnDeplete = true,
+        cantBeConsolided = true,
+        WorldStaticModel = WalkieTalkieMakeshift,
+        Tags = base:usesbattery;base:miscelectronic;base:hasmetal,
+    }
+
+    /*
+        AutopilotModule：裝在車上的自駕運算模組，本體不吃電池（吃車輛電瓶）。
+        對齊原版電子零件寫法（normal.txt:4496 Amplifier、:4646 ScannerModule）。
+    */
+    item AutopilotModule
+    {
+        DisplayCategory = Electronics,
+        ItemType = base:normal,
+        Weight = 0.3,
+        Icon = AutopilotModule,
+        MetalValue = 7.0,
+        Tags = base:hasmetal;base:miscelectronic,
+    }
+}

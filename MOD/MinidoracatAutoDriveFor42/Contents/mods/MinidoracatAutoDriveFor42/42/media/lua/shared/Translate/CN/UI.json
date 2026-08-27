@@ -1,0 +1,14 @@
+{
+    "UI_MinidoracatAutoDrive_NeedGPS": "需要有电的 GPS 导航仪才能规划路线。",
+    "UI_MinidoracatAutoDrive_InstallGPS": "安装 GPS 导航仪",
+    "UI_MinidoracatAutoDrive_InstallAuto": "安装自动驾驶模块",
+    "UI_MinidoracatAutoDrive_UninstallGPS": "拆下 GPS 导航仪",
+    "UI_MinidoracatAutoDrive_UninstallAuto": "拆下自动驾驶模块",
+    "UI_MinidoracatAutoDrive_NoBattery": "这辆车没有电瓶，无法安装。",
+    "UI_MinidoracatAutoDrive_NoScrewdriver": "需要螺丝刀。",
+    "UI_MinidoracatAutoDrive_NeedElectricity1": "需要电工 1 级。",
+    "UI_MinidoracatAutoDrive_AlreadyInstalled": "这辆车已经装过了。",
+    "UI_MinidoracatAutoDrive_NavApiMissing": "导航 API 不兼容，请更新 Minidoracat MiniMap",
+    "UI_MinidoracatAutoDrive_InstallFailed": "安装失败。",
+    "UI_MinidoracatAutoDrive_TooFar": "距离太远，请下车并站到电瓶舱旁边。"
+}

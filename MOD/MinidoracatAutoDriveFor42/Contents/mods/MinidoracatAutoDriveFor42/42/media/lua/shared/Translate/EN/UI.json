@@ -1,0 +1,14 @@
+{
+    "UI_MinidoracatAutoDrive_NeedGPS": "A charged GPS Navigator is required to plot a route.",
+    "UI_MinidoracatAutoDrive_InstallGPS": "Install GPS Navigator",
+    "UI_MinidoracatAutoDrive_InstallAuto": "Install Autopilot Module",
+    "UI_MinidoracatAutoDrive_UninstallGPS": "Remove GPS Navigator",
+    "UI_MinidoracatAutoDrive_UninstallAuto": "Remove Autopilot Module",
+    "UI_MinidoracatAutoDrive_NoBattery": "This vehicle has no battery, so nothing can be installed.",
+    "UI_MinidoracatAutoDrive_NoScrewdriver": "A screwdriver is required.",
+    "UI_MinidoracatAutoDrive_NeedElectricity1": "Electrical level 1 is required.",
+    "UI_MinidoracatAutoDrive_AlreadyInstalled": "This vehicle already has one installed.",
+    "UI_MinidoracatAutoDrive_NavApiMissing": "Navigation API is incompatible. Please update Minidoracat MiniMap.",
+    "UI_MinidoracatAutoDrive_InstallFailed": "Installation failed.",
+    "UI_MinidoracatAutoDrive_TooFar": "Too far away. Step out of the vehicle and stand next to the battery bay."
+}

@@ -1,0 +1,22 @@
+VERSION = 1,
+
+option MinidoracatAutoDrive.NeedItemForNav
+{type = boolean, default = false, page = MinidoracatAutoDrive, translation = MinidoracatAutoDriveNeedItemForNav,}
+
+option MinidoracatAutoDrive.NeedItemForAutoDrive
+{type = boolean, default = true, page = MinidoracatAutoDrive, translation = MinidoracatAutoDriveNeedItemForAutoDrive,}
+
+option MinidoracatAutoDrive.AllowCraftGPS
+{type = boolean, default = true, page = MinidoracatAutoDrive, translation = MinidoracatAutoDriveAllowCraftGPS,}
+
+option MinidoracatAutoDrive.AllowCraftAutopilot
+{type = boolean, default = true, page = MinidoracatAutoDrive, translation = MinidoracatAutoDriveAllowCraftAutopilot,}
+
+option MinidoracatAutoDrive.DrainPercent
+{type = integer, min = 0, max = 500, default = 100, page = MinidoracatAutoDrive, translation = MinidoracatAutoDriveDrainPercent,}
+
+option MinidoracatAutoDrive.InstallSkillGate
+{type = boolean, default = true, page = MinidoracatAutoDrive, translation = MinidoracatAutoDriveInstallSkillGate,}
+
+option MinidoracatAutoDrive.AutoDriveMaxSpeed
+{type = integer, min = 5, max = 120, default = 70, page = MinidoracatAutoDrive, translation = MinidoracatAutoDriveAutoDriveMaxSpeed,}

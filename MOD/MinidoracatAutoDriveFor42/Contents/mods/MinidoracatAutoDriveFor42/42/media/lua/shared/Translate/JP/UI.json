@@ -1,0 +1,14 @@
+{
+    "UI_MinidoracatAutoDrive_NeedGPS": "ルートを設定するには電池の残ったGPSナビゲーターが必要です。",
+    "UI_MinidoracatAutoDrive_InstallGPS": "GPSナビゲーターを取り付ける",
+    "UI_MinidoracatAutoDrive_InstallAuto": "オートパイロットモジュールを取り付ける",
+    "UI_MinidoracatAutoDrive_UninstallGPS": "GPSナビゲーターを取り外す",
+    "UI_MinidoracatAutoDrive_UninstallAuto": "オートパイロットモジュールを取り外す",
+    "UI_MinidoracatAutoDrive_NoBattery": "この車にはバッテリーがないため取り付けできません。",
+    "UI_MinidoracatAutoDrive_NoScrewdriver": "ドライバーが必要です。",
+    "UI_MinidoracatAutoDrive_NeedElectricity1": "電気技師レベル1が必要です。",
+    "UI_MinidoracatAutoDrive_AlreadyInstalled": "この車には既に取り付けられています。",
+    "UI_MinidoracatAutoDrive_NavApiMissing": "ナビゲーションAPIが非対応です。Minidoracat MiniMap を更新してください。",
+    "UI_MinidoracatAutoDrive_InstallFailed": "取り付けに失敗しました。",
+    "UI_MinidoracatAutoDrive_TooFar": "距離が遠すぎます。車から降りてバッテリー室の横に立ってください。"
+}

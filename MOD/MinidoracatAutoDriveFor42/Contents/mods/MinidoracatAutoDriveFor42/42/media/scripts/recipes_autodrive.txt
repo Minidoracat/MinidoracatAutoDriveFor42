@@ -1,0 +1,63 @@
+module MinidoracatAutoDrive
+{
+    /*
+        B42 craftRecipe（不是 B41 recipe{}）。版型對齊 recipes_radio.txt:78-105
+        CraftMakeshiftWalkieTalkie 與 recipes_electrical.txt:101-126 MakeImprovisedFlashlight。
+
+        OnTest 是引擎對每個候選輸入物品呼叫的 Lua 判定（CraftRecipe.OnTestItem →
+        LuaManager.getFunctionObject 依 "表.函式" 解析全域），沙盒關閉時全部回 false，
+        配方即無可用材料、無法執行。函式在 media/lua/shared/MDAD_Recipe.lua。
+
+        產出的 GPSNavigator 帶 flags[HasNoUses]＝空電出廠，玩家再用原版 InsertBattery
+        裝 Base.Battery（GPSNavigator 有 base:usesbattery tag，符合原版配方輸入條件）。
+    */
+    craftRecipe CraftGPSNavigator
+    {
+        timedAction = MakingElectrical,
+        time = 100,
+        NeedToBeLearn = true,
+        SkillRequired = Electricity:3,
+        AutoLearnAny = Electricity:6,
+        OnTest = MDAD_Recipe.canCraftGPS,
+        Tags = AnySurfaceCraft,
+        category = Electrical,
+        xpAward = Electricity:10,
+        inputs
+        {
+            item 1 tags[base:screwdriver] mode:keep flags[NoBrokenItems],
+            item 4 [Base.ElectronicsScrap] flags[NoBrokenItems],
+            item 1 [Base.RadioReceiver] flags[NoBrokenItems],
+            item 1 [Base.ElectricWire] flags[NoBrokenItems],
+        }
+        outputs
+        {
+            item 1 MinidoracatAutoDrive.GPSNavigator flags[HasNoUses],
+        }
+    }
+
+    craftRecipe CraftAutopilotModule
+    {
+        timedAction = MakingElectrical,
+        time = 150,
+        NeedToBeLearn = true,
+        SkillRequired = Electricity:6,
+        AutoLearnAny = Electricity:8,
+        OnTest = MDAD_Recipe.canCraftAutopilot,
+        Tags = AnySurfaceCraft,
+        category = Electrical,
+        xpAward = Electricity:20,
+        inputs
+        {
+            item 1 tags[base:screwdriver] mode:keep flags[NoBrokenItems],
+            item 1 [MinidoracatAutoDrive.GPSNavigator] mode:destroy,
+            item 6 [Base.ElectronicsScrap] flags[NoBrokenItems],
+            item 1 [Base.ScannerModule] flags[NoBrokenItems],
+            item 1 [Base.Amplifier] flags[NoBrokenItems],
+            item 2 [Base.ElectricWire] flags[NoBrokenItems],
+        }
+        outputs
+        {
+            item 1 MinidoracatAutoDrive.AutopilotModule,
+        }
+    }
+}

@@ -1,0 +1,17 @@
+{
+    "Sandbox_MinidoracatAutoDrive": "Minidoracat AutoDrive",
+    "Sandbox_MinidoracatAutoDriveNeedItemForNav": "Navigation requires a GPS Navigator",
+    "Sandbox_MinidoracatAutoDriveNeedItemForNav_tooltip": "When enabled, the player must carry a charged GPS Navigator, or the vehicle must have a GPS Navigator installed and a battery with charge, before a route can be plotted.\nDisabled (default) means anyone can plot a route at any time.\nTakes effect as soon as an admin clicks Apply.",
+    "Sandbox_MinidoracatAutoDriveNeedItemForAutoDrive": "Auto-drive requires an Autopilot Module",
+    "Sandbox_MinidoracatAutoDriveNeedItemForAutoDrive_tooltip": "When enabled (default), the vehicle must have an Autopilot Module installed before auto-drive can start.\nDisabled means any vehicle can auto-drive, which suits testing or casual play.\nTakes effect as soon as an admin clicks Apply.",
+    "Sandbox_MinidoracatAutoDriveAllowCraftGPS": "Allow crafting the GPS Navigator",
+    "Sandbox_MinidoracatAutoDriveAllowCraftGPS_tooltip": "Allows players to craft the GPS Navigator with the electrical recipe (Electrical 3 required).\nWhen disabled the recipe cannot be performed and the item can only be looted; items already crafted are unaffected.\nTakes effect as soon as an admin clicks Apply.",
+    "Sandbox_MinidoracatAutoDriveAllowCraftAutopilot": "Allow crafting the Autopilot Module",
+    "Sandbox_MinidoracatAutoDriveAllowCraftAutopilot_tooltip": "Allows players to craft the Autopilot Module with the electrical recipe (Electrical 6 required).\nWhen disabled the recipe cannot be performed and the item can only be looted; items already crafted are unaffected.\nTakes effect as soon as an admin clicks Apply.",
+    "Sandbox_MinidoracatAutoDriveDrainPercent": "Power drain multiplier (percent)",
+    "Sandbox_MinidoracatAutoDriveDrainPercent_tooltip": "Multiplier applied to the power drain of navigation and auto-drive.\n100 is the default rate, 50 drains half, 200 drains double, 0 disables drain entirely.\nThe vehicle battery is never drained while the engine runs, since the alternator is charging it; drain is only counted when the engine is off.\nA carried GPS Navigator runs on its own battery and uses the same multiplier.\nTakes effect as soon as an admin clicks Apply.",
+    "Sandbox_MinidoracatAutoDriveInstallSkillGate": "Installing requires the Electrical skill",
+    "Sandbox_MinidoracatAutoDriveInstallSkillGate_tooltip": "When enabled (default), installing or removing a GPS Navigator or Autopilot Module on a vehicle requires Electrical 1.\nA screwdriver and a vehicle battery are always required regardless of this setting.\nDisabled means anyone can install and remove the devices.\nTakes effect as soon as an admin clicks Apply.",
+    "Sandbox_MinidoracatAutoDriveAutoDriveMaxSpeed": "Auto-drive speed limit (km/h)",
+    "Sandbox_MinidoracatAutoDriveAutoDriveMaxSpeed_tooltip": "Highest speed allowed while auto-driving.\nLower values are safer and less likely to hit obstacles; higher values are faster but riskier.\nActual speed is still limited by road conditions, vehicle performance and cornering slowdown.\nTakes effect as soon as an admin clicks Apply."
+}

@@ -1,0 +1,17 @@
+{
+    "Sandbox_MinidoracatAutoDrive": "Minidoracat 自動駕駛",
+    "Sandbox_MinidoracatAutoDriveNeedItemForNav": "導航需要 GPS 導航儀",
+    "Sandbox_MinidoracatAutoDriveNeedItemForNav_tooltip": "開啟後，玩家必須帶著有電的 GPS 導航儀，或車上裝了 GPS 導航儀且電瓶還有電，才能規劃車輛導航路線。\n關閉（預設）＝任何人隨時都能規劃路線，適合休閒或單機。\n管理員按「套用」後立即生效。",
+    "Sandbox_MinidoracatAutoDriveNeedItemForAutoDrive": "自動駕駛需要自動駕駛模組",
+    "Sandbox_MinidoracatAutoDriveNeedItemForAutoDrive_tooltip": "開啟（預設）後，車上必須裝有自動駕駛模組才能啟動自駕。\n關閉＝任何車輛都能直接自駕，適合測試或休閒玩法。\n管理員按「套用」後立即生效。",
+    "Sandbox_MinidoracatAutoDriveAllowCraftGPS": "允許製作 GPS 導航儀",
+    "Sandbox_MinidoracatAutoDriveAllowCraftGPS_tooltip": "允許玩家用電工配方製作 GPS 導航儀（需電工 3 級）。\n關閉後配方無法執行，道具只能靠搜刮取得；已經做出來的不受影響。\n管理員按「套用」後立即生效。",
+    "Sandbox_MinidoracatAutoDriveAllowCraftAutopilot": "允許製作自動駕駛模組",
+    "Sandbox_MinidoracatAutoDriveAllowCraftAutopilot_tooltip": "允許玩家用電工配方製作自動駕駛模組（需電工 6 級）。\n關閉後配方無法執行，道具只能靠搜刮取得；已經做出來的不受影響。\n管理員按「套用」後立即生效。",
+    "Sandbox_MinidoracatAutoDriveDrainPercent": "耗電倍率（百分比）",
+    "Sandbox_MinidoracatAutoDriveDrainPercent_tooltip": "導航與自動駕駛耗電速率的倍率。\n100＝預設速率；50＝只耗一半；200＝兩倍；0＝完全不耗電。\n引擎運轉中不扣車輛電瓶（發電機正在充電），熄火待機或滑行時才計算。\n隨身 GPS 導航儀吃自己的電池，一樣套用這個倍率。\n管理員按「套用」後立即生效。",
+    "Sandbox_MinidoracatAutoDriveInstallSkillGate": "安裝需要電工技能",
+    "Sandbox_MinidoracatAutoDriveInstallSkillGate_tooltip": "開啟（預設）後，在車上安裝或拆下 GPS 導航儀／自動駕駛模組需要電工 1 級。\n不論這項是否開啟，都需要螺絲起子，而且車上要有電瓶。\n關閉＝任何人都能安裝拆卸。\n管理員按「套用」後立即生效。",
+    "Sandbox_MinidoracatAutoDriveAutoDriveMaxSpeed": "自動駕駛速度上限（公里／小時）",
+    "Sandbox_MinidoracatAutoDriveAutoDriveMaxSpeed_tooltip": "自動駕駛時允許的最高時速。\n值越低越安全、越不容易撞上障礙；越高越快但風險越大。\n實際速度仍受路況、車輛性能與轉彎減速限制。\n管理員按「套用」後立即生效。"
+}
