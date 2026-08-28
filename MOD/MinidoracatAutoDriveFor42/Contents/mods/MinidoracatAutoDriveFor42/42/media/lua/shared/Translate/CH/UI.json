@@ -20,5 +20,15 @@
     "UI_MinidoracatAutoDrive_ManualOverride": "已交還手動操作，自動駕駛待命中。",
     "UI_MinidoracatAutoDrive_Arrived": "已抵達目的地。",
     "UI_MinidoracatAutoDrive_LostRoute": "路線遺失，自動駕駛已關閉。",
-    "UI_MinidoracatAutoDrive_StopStuck": "車輛卡住無法前進，自動駕駛已關閉。"
+    "UI_MinidoracatAutoDrive_StopStuck": "車輛卡住無法前進，自動駕駛已關閉。",
+    "UI_MinidoracatAutoDrive_Blocked": "前方路線被擋住，自動駕駛煞停等待。",
+    "UI_MinidoracatAutoDrive_Unstick": "車輛卡住，嘗試倒車脫困……",
+    "UI_MinidoracatAutoDrive_Resume": "自動駕駛恢復控制。",
+    "UI_MinidoracatAutoDrive_Dodge": "偵測到前方障礙，減速繞行中。",
+    "UI_MinidoracatAutoDrive_GearSlice": "切換檔位：%1",
+    "UI_MinidoracatAutoDrive_GearChill": "輕鬆（30 公里）",
+    "UI_MinidoracatAutoDrive_GearStandard": "標準（50 公里）",
+    "UI_MinidoracatAutoDrive_GearSport": "運動（70 公里）",
+    "UI_MinidoracatAutoDrive_GearInsane": "瘋狂（車輛極速）",
+    "UI_MinidoracatAutoDrive_Detour": "前方堵死，改道繞行。"
 }

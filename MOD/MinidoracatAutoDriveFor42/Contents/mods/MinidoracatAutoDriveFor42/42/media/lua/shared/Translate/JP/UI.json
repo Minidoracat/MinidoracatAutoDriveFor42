@@ -20,5 +20,15 @@
     "UI_MinidoracatAutoDrive_ManualOverride": "手動操作に切り替えました。オートドライブは待機中です。",
     "UI_MinidoracatAutoDrive_Arrived": "目的地に到着しました。",
     "UI_MinidoracatAutoDrive_LostRoute": "ルートを見失いました。オートドライブを停止します。",
-    "UI_MinidoracatAutoDrive_StopStuck": "車両がスタックして進めません。オートドライブを停止します。"
+    "UI_MinidoracatAutoDrive_StopStuck": "車両がスタックして進めません。オートドライブを停止します。",
+    "UI_MinidoracatAutoDrive_Blocked": "前方のルートがふさがれています。オートドライブはブレーキをかけて待機します。",
+    "UI_MinidoracatAutoDrive_Unstick": "車両がスタックしました。バックで脱出を試みます……",
+    "UI_MinidoracatAutoDrive_Resume": "オートドライブが運転を再開します。",
+    "UI_MinidoracatAutoDrive_Dodge": "前方に障害物を検知。減速して回避します。",
+    "UI_MinidoracatAutoDrive_GearSlice": "運転モード切替：%1",
+    "UI_MinidoracatAutoDrive_GearChill": "のんびり（30 km/h）",
+    "UI_MinidoracatAutoDrive_GearStandard": "標準（50 km/h）",
+    "UI_MinidoracatAutoDrive_GearSport": "スポーツ（70 km/h）",
+    "UI_MinidoracatAutoDrive_GearInsane": "インセイン（車両の最高速）",
+    "UI_MinidoracatAutoDrive_Detour": "ルートが塞がれています。迂回します。"
 }

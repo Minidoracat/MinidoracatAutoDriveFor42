@@ -6,6 +6,11 @@ MDAD = MDAD or {}
 MDAD.MOD_ID = "MinidoracatAutoDriveFor42"
 MDAD.TYPE_GPS = "MinidoracatAutoDrive.GPSNavigator"
 MDAD.TYPE_AUTO = "MinidoracatAutoDrive.AutopilotModule"
+-- build 印記：載入時印進 console（不受 getDebug 管）——實機回報「行為沒變」時
+-- 第一件事就是對這行，判定使用者跑的是不是新版（2026-08-28 三場撞樹回報
+-- 無法從 log 判定 code 版本的教訓）。每次行為修正遞增尾碼。
+MDAD.BUILD = "m55a-20260829av"
+print("[MinidoracatAutoDrive] build " .. MDAD.BUILD)
 
 -- client → server 的安裝／卸載請求（server/MDAD_Server.lua 收）與失敗回報
 MDAD.CMD_DEVICE = "Device"
@@ -67,6 +72,25 @@ function MDAD.sandbox(name, default)
     local v = sb and sb[name]
     if v == nil then return default end
     return v
+end
+
+-- 三態減速政策（ZombieAreaSlowdown / CorpseSlowdown）：1=強制減速
+-- 2=由玩家決定 3=強制全速。**tolerant 讀取**吸收兩類舊值：
+--   boolean——ZombieAreaSlowdown 在 0.16.x 以前是 boolean，舊存檔的
+--   _SandboxVars.lua 或 MP 舊伺服器仍會給 true/false：true（舊「會減速」）
+--   映射 1、false（舊「全速輾」）映射 3，行為與升級前一致；
+--   非法值（超界數字、字串、nil）——回 default（呼叫端一律傳 2）。
+-- 引擎啟動正規化可能把舊 boolean 重設成 enum default（2＝玩家自選＋偏好
+-- 預設開＝照樣減速），任何路徑都不會讓舊伺服器的行為靜默翻面。
+MDAD.POLICY_FORCE_ON = 1
+MDAD.POLICY_PLAYER = 2
+MDAD.POLICY_FORCE_OFF = 3
+function MDAD.policy3(name, default)
+    local v = MDAD.sandbox(name, default)
+    if v == true then return 1 end
+    if v == false then return 3 end
+    if v == 1 or v == 2 or v == 3 then return v end
+    return default
 end
 
 function MDAD.drainScale()

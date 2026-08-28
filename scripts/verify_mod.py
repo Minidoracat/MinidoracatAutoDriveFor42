@@ -498,6 +498,11 @@ SANDBOX_SPEC = {                            # key: (type, default, min, max)
     "DrainPercent":         ("integer", "100", "0", "500"),
     "InstallSkillGate":     ("boolean", "true", None, None),
     "AutoDriveMaxSpeed":    ("integer", "70", "5", "120"),
+    "ZombieAreaSlowdown":   ("enum", "2", None, None),
+    "CorpseSlowdown":       ("enum", "2", None, None),
+    "ObstaclePolicy":       ("enum", "1", None, None),
+    "RightLaneBias":        ("double", "1.0", "0.0", "2.0"),
+    "DebugOverlay":         ("boolean", "false", None, None),
 }
 for m in MEDIA_DIRS:
     sb = os.path.join(m, "sandbox-options.txt")

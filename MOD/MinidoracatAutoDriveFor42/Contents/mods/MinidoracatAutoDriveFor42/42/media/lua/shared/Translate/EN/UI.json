@@ -20,5 +20,15 @@
     "UI_MinidoracatAutoDrive_ManualOverride": "Manual control taken. Autodrive is standing by.",
     "UI_MinidoracatAutoDrive_Arrived": "Destination reached.",
     "UI_MinidoracatAutoDrive_LostRoute": "Route lost. Autodrive disengaged.",
-    "UI_MinidoracatAutoDrive_StopStuck": "Vehicle is stuck. Autodrive disengaged."
+    "UI_MinidoracatAutoDrive_StopStuck": "Vehicle is stuck. Autodrive disengaged.",
+    "UI_MinidoracatAutoDrive_Blocked": "Route ahead is blocked. Autodrive is braking to a stop.",
+    "UI_MinidoracatAutoDrive_Unstick": "Vehicle stuck. Reversing to break free...",
+    "UI_MinidoracatAutoDrive_Resume": "Autodrive resuming control.",
+    "UI_MinidoracatAutoDrive_Dodge": "Obstacle ahead. Slowing down to swerve around.",
+    "UI_MinidoracatAutoDrive_GearSlice": "Drive mode: %1",
+    "UI_MinidoracatAutoDrive_GearChill": "Chill (30 km/h)",
+    "UI_MinidoracatAutoDrive_GearStandard": "Standard (50 km/h)",
+    "UI_MinidoracatAutoDrive_GearSport": "Sport (70 km/h)",
+    "UI_MinidoracatAutoDrive_GearInsane": "Insane (vehicle max)",
+    "UI_MinidoracatAutoDrive_Detour": "Route blocked. Taking a detour."
 }

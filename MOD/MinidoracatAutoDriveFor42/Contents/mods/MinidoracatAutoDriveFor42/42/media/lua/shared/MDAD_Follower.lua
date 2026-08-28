@@ -35,7 +35,7 @@
 --                  getRealworldSecondsSinceLastUpdate()＝GameTime.java:192-193，
 --                  60fps 約 0.0167）。非有限或超出 [DT_MIN, DT_MAX] 一律夾限，
 --                不讓 PID 的 I／D 被爛 dt 炸掉。
---     回 steer, targetSpeed, remaining, reached, headingError
+--     回 steer, targetSpeed, remaining, reached, headingError, lateralSq
 --       steer         ±STEER_MAX；正號＝往「heading 角度變大」的方向轉（(x,y) 平面 CCW）。
 --                     steer / STEER_MAX 就是 -1..1 的正規化轉向強度。
 --       targetSpeed   km/h（可直接餵 setRegulator）。唯一的下限：沿線 remaining 已經
@@ -50,6 +50,8 @@
 --                     呼叫端就在半路上煞停宣告到站。歐氏檢查用平方比較（省一次 sqrt）。
 --                     這個判定同時是上面那條速度下限的觸發條件。
 --       headingError  弧度，已 wrap 到 ±pi。
+--     lateralSq     車到路線投影點的距離**平方**（公尺²；甩出路面判定用，
+--                   平方省 sqrt——呼叫端用門檻平方比較）。防呆早退時回 0。
 --     **不配置任何 table**：只讀 profile、只就地寫 state 的數值欄位。
 --
 -- state 由呼叫端持有（每個 session 一顆，重複使用）。空 table {} 直接可用：
@@ -95,8 +97,11 @@ local TWO_PI = PI * 2
 local MS_PER_KMH = 1 / 3.6
 local KMH_PER_MS = 3.6
 
-local ACCEL = 2.0             -- m/s²：前向加速上限
-local BRAKE = 3.0             -- m/s²：減速上限
+local ACCEL = 2.5             -- m/s²：前向加速上限
+local BRAKE = 6.0             -- m/s²：減速上限——引擎實煞 ~10，取六成留雨天餘裕。
+                              -- 3.0 時代的煞停曲線過長（40km/h 提前 20m 收油、
+                              -- 120km/h 提前 185m），終點與進彎都太早減速
+                              --（2026-08-29 使用者裁定：按真實煞停距動態化）
 local LAT_ACCEL = 3.5         -- m/s²：過彎橫向加速預算（決定曲率限速）
 local MIN_SPEED_KMH = 12      -- 曲率限速的下限（見上方說明）
 local MAX_SPEED_CAP_KMH = 160 -- maxSpeed 的上界（防呆，不是遊戲設定）
@@ -111,8 +116,15 @@ local LOOKAHEAD_MAX = 18
 local LOOKAHEAD_WALK_MAX = 64 -- 前視推進的段數硬上限（碎段路線不得變成 O(n) 迴圈）
 
 local SEARCH_BACK = 12        -- 投影搜尋窗口：往後 12 段
+-- 折點角度限速下限（不除 ds，路網點距稀釋不掉；理由見 geometryStep 內註解）
+local TURN_SOFT_RAD = 20 * PI / 180  -- 折角超過 20° 開始壓
+local TURN_HARD_RAD = 40 * PI / 180  -- 折角 40° 以上一律爬到 TURN_HARD_MS
+local TURN_HARD_MS = 18 / 3.6        -- 急折點的硬上限：18 km/h
 local SEARCH_FWD = 12         -- 往前 12 段
 local REWIND_MAX = 1          -- 單幀最多允許倒退 1 段
+local OV_STEP = 1.0           -- M6 世界 offset 折線的取樣步距（公尺）
+local OV_MAX = 96             -- 折線表槽數（預配置；車位→d+1 最長 ~80m）
+local OV_BLEND = 2.0          -- 折點法向混合半徑：距段端這麼近時與鄰段做角度插值
 
 local KP, KI, KD = 2.2, 0.15, 0.35
 local I_MAX = 0.5             -- 積分項飽和
@@ -206,6 +218,19 @@ local function geometryStep(p, i)
             if dth > 0 then
                 -- kappa = dth / ds；v = sqrt(a_lat / kappa) = sqrt(a_lat * ds / dth)
                 local lim = sqrt(LAT_ACCEL * ds / dth)
+                -- **折點角度下限**：路網 polyline 在交叉口的點距常常很大（20m+），
+                -- 45° 的急轉被長段攤薄成小曲率，上面的公式算出 60+ km/h 的「限速」
+                -- ——2026-08-28 實機：61.5 km/h 過路口直接甩出路面。角度本身另設
+                -- 上限：超過 TURN_HARD_RAD 的折點一律 ≤ TURN_HARD_MS，中等角度線性
+                -- 過渡；這個上限不除 ds，點距再大也稀釋不掉。
+                if dth >= TURN_HARD_RAD then
+                    if lim > TURN_HARD_MS then lim = TURN_HARD_MS end
+                elseif dth >= TURN_SOFT_RAD then
+                    -- dth 從 SOFT 到 HARD：上限從 maxSpeed 線性壓到 TURN_HARD_MS
+                    local t = (dth - TURN_SOFT_RAD) / (TURN_HARD_RAD - TURN_SOFT_RAD)
+                    local cap = p.maxSpeedMs + (TURN_HARD_MS - p.maxSpeedMs) * t
+                    if lim > cap then lim = cap end
+                end
                 if lim < MIN_SPEED_MS then lim = MIN_SPEED_MS end
                 if lim > p.maxSpeedMs then lim = p.maxSpeedMs end
                 if p.v[m] > lim then p.v[m] = lim end
@@ -325,11 +350,11 @@ end
 -- 每幀控制。零配置：只讀 profile、只就地寫 state 的數值欄位。
 function MDADFollower.control(profile, state, x, y, heading, speed, dt)
     if type(profile) ~= "table" or profile.ready ~= true or type(state) ~= "table" then
-        return 0, 0, 0, false, 0
+        return 0, 0, 0, false, 0, 0, 0
     end
     if not isFinite(x) or not isFinite(y) or not isFinite(heading) then
         -- 車輛座標壞掉（換載具／剛傳送）：不轉向、不給速度，把剩餘距離照實回報
-        return 0, 0, profile.length, false, 0
+        return 0, 0, profile.length, false, 0, 0, 0
     end
     if not isFinite(speed) then speed = 0 end
     if not isFinite(dt) then
@@ -378,6 +403,16 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
     end
     state.idx = bestI
 
+    -- 帶號橫偏（第 7 回傳值）：車相對投影點沿 CCW 法向的距離——正＝行進方向
+    -- 右側，與 laneBias/offL 同一座標。呼叫端用它對「期望橫向位置」（laneBias
+    -- ＋側偏剖面）做偏離判定：舊的 |到中心線距離| 判法會把合法的大側偏繞行
+    -- （offL 4.5）誤判成甩出路面（2026-08-28 對抗審 BLOCKING）。兩次乘加、
+    -- 零 sqrt、零配置；無號的 lateralSq（第 6 值）保留向後相容。
+    local pjx = px[bestI] + (px[bestI + 1] - px[bestI]) * bestT
+    local pjy = py[bestI] + (py[bestI + 1] - py[bestI]) * bestT
+    local hProj = profile.segH[bestI]
+    local latSigned = (x - pjx) * -sin(hProj) + (y - pjy) * cos(hProj)
+
     local sNow = s[bestI] + segLen[bestI] * bestT
     local remaining = profile.length - sNow
     if remaining < 0 then remaining = 0 end
@@ -409,6 +444,61 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
     local tx = px[j] + (px[j + 1] - px[j]) * tj
     local ty = py[j] + (py[j + 1] - py[j]) * tj
 
+    -- ---- 側偏疊加（車道偏置＋M4 繞行剖面）----
+    -- 只動「前視點」：投影、remaining、reached 全部仍以中心線為準。
+    -- laneBias＝常駐車道偏置（setLaneBias；靠右行駛＝正值）：路網折線在路中央，
+    -- 沿中心線開會與對向車對頭——常駐偏到右車道，會車時雙方自然錯開。
+    -- 繞行剖面（setOffset）作用時，橫向位置從 bias 平滑過渡到 offL（路線中心線
+    -- 座標系的絕對 lane）再回到 bias：lane(s) = bias + (offL - bias) * t，
+    -- t 是三段 smoothstep（端點斜率 0，切入點不吃階梯誤差）。進入段的斜率天然
+    -- 抬高航向誤差 → 誤差減速自動收油，繞行段本來就該慢，兩機制同向。
+    -- 法向取前視點所在段的數學 CCW 法向（l > 0＝PZ 世界的行進方向**右側**：
+    -- 世界 Y 向南，俯視下數學 CCW＝實際順時針——別再標成「左」，真踩過）。
+    local bias = state.laneBias
+    if not isFinite(bias) then bias = 0 end
+    local lt = bias
+    local offL = state.offL
+    local ovUsed = false
+    if offL ~= nil and isFinite(offL) then
+        local sEff = s[j] + lj * tj
+        -- M6 世界 offset 折線：commit 時烘好的連續前視線（折點法向混合）。
+        -- 舊「逐段法向×offL」在折點不連續（45° 折點 offL 4.25 跳 3.25m，
+        -- 掃掠與實走軌跡都斜切彎角——2026-08-29 codex 架構裁決的根因）。
+        local ovN = state.ovN or 0
+        if ovN >= 2 then
+            local fi = (sEff - state.ovS0) / OV_STEP + 1
+            if fi >= 1 and fi <= ovN then
+                local i0 = fi - fi % 1
+                if i0 >= ovN then i0 = ovN - 1 end
+                local ft = fi - i0
+                local ovX, ovY = state.ovX, state.ovY
+                tx = ovX[i0] + (ovX[i0 + 1] - ovX[i0]) * ft
+                ty = ovY[i0] + (ovY[i0 + 1] - ovY[i0]) * ft
+                ovUsed = true -- 表點已含 bias 與剖面
+            end
+        end
+        if not ovUsed then
+            local oa, ob, oc, od = state.offA, state.offB, state.offC, state.offD
+            if sEff > oa and sEff < od then
+                local t
+                if sEff < ob then
+                    t = (sEff - oa) / (ob - oa)
+                elseif sEff > oc then
+                    t = (od - sEff) / (od - oc)
+                else
+                    t = 1
+                end
+                t = t * t * (3 - 2 * t)
+                lt = bias + (offL - bias) * t
+            end
+        end
+    end
+    if not ovUsed and lt ~= 0 then
+        local h = profile.segH[j]
+        tx = tx - sin(h) * lt
+        ty = ty + cos(h) * lt
+    end
+
     -- ---- 朝向誤差 ----
     local fx, fy = cos(heading), sin(heading)
     local vx, vy = tx - x, ty - y
@@ -431,9 +521,30 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
     end
     state.rotating = rotating
 
-    -- ---- 目標速度（段內線性插值；曲率／制動／加速都已經烘進 v）----
+    -- ---- 目標速度（段內物理包絡；曲率／制動／加速已烘進端點 v）----
+    -- 不能用線性插值：v 只在「點」上有值，長段內線性連 v[i]→v[i+1] 是物理錯誤。
+    -- 2026-08-28 實機（163 號公路長直路）：nav 路網節點在路口，末段是 ~233m 的
+    -- 單一線段，段尾 v[n]=0（終點）——線性插值把整段畫成 20→0 的長斜坡，車在
+    -- 233m 外就以 target=0.087×remaining 龜速爬完全程（遙測 target 20.1→4.3 與
+    -- remaining 嚴格成正比）。正確剖面是段內延拓 build pass 的同一組式子：
+    --   加速曲線 sqrt(v[i]²  + 2·ACCEL·(s-s[i]))   —— 出折點後可以加速
+    --   制動曲線 sqrt(v[i+1]² + 2·BRAKE·(s[i+1]-s)) —— 進折點／終點前才需要煞
+    -- 取 min 再夾 maxSpeed：短段（點距 ≤ 4m）與舊行為幾乎重合且更保守（線性
+    -- 在段中點本來就高於 sqrt 包絡＝該處煞不住），長段回到「巡航→晚煞車」。
+    -- 端點極限：ds→0 收斂到 v[i]、ds→L 收斂到 v[i+1]，折點限速一樣被尊重。
     local v = profile.v
-    local targetSpeed = (v[bestI] + (v[bestI + 1] - v[bestI]) * bestT) * KMH_PER_MS
+    local targetSpeed
+    do
+        local vA, vB = v[bestI], v[bestI + 1]
+        local lenI = segLen[bestI]
+        local dsA = lenI * bestT
+        local accLim = sqrt(vA * vA + 2 * ACCEL * dsA)
+        local brkLim = sqrt(vB * vB + 2 * BRAKE * (lenI - dsA))
+        targetSpeed = accLim
+        if brkLim < targetSpeed then targetSpeed = brkLim end
+        if targetSpeed > profile.maxSpeedMs then targetSpeed = profile.maxSpeedMs end
+        targetSpeed = targetSpeed * KMH_PER_MS
+    end
 
     -- ---- 航向誤差減速 ----
     -- aerr 上面剛算好（調頭遲滯用的同一份）。t 從 1（誤差 ≤ START）線性降到
@@ -496,7 +607,7 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         state.errPrev = err
     end
 
-    return steer, targetSpeed, remaining, reached, err
+    return steer, targetSpeed, remaining, reached, err, bestD, latSigned
 end
 
 -- 就地重設（不配置）。換 route 時對同一顆 state 呼叫這個。
@@ -509,7 +620,148 @@ function MDADFollower.resetState(state)
     -- 第一幀微分項貢獻 0。若填 0，車頭原本偏 130° 時第一幀會吃到 (2.27-0)/dt 的假尖刺。
     state.errPrev = nil
     state.rotating = false
+    state.offL = nil
+    state.ovN = 0
     return state
+end
+
+-- 只清「控制歷史」（PID 積分／微分／誤差歷史／調頭旗標／側偏剖面），**保留投影
+-- 游標 idx**。給「路線沒換、控制脈絡斷了」的情境用——倒車脫困成功就是典型：
+-- 車還在同一條路線的同一段附近，若連 idx 一起歸 1（resetState），投影窗口
+-- （±SEARCH_BACK/FWD 段）會從路線起點慢慢爬回來，這期間 remaining ≈ 全長、
+-- 前視點在路線開頭，車會朝起點打滿方向（2026-08-28 M4 review 兩條 lane 同時
+-- 抓到的 blocker）。脫困的小幅倒退由投影的 REWIND_MAX 自行收斂。
+function MDADFollower.resetControl(state)
+    if type(state) ~= "table" then return state end
+    state.iTerm = 0
+    state.dFilt = 0
+    state.errPrev = nil -- 同 resetState：留空讓第一幀微分項為 0
+    state.rotating = false
+    state.offL = nil
+    return state
+end
+
+-- 設定繞行側偏剖面（M4）：a < b <= c < d 為弧長斷點（進入起、保持起、保持終、
+-- 回歸終），l 為峰值側偏（公尺，> 0＝PZ 世界的行進方向右側）。引數不合法回 false 且不動 state——
+-- 呼叫端（driver）必須檢查回傳，忽略等於「以為在繞、其實直直開進障礙」。
+-- b == c 允許（保持段長 0＝越過點狀障礙）；**l == 0 是合法剖面**（借中心線
+-- 超越路緣障礙——靠右行駛時最常見的繞行線就是中線；2026-08-28 codex 對抗審
+-- BLOCKING：0 當 inactive sentinel 會讓「借中線」被拒收、車只停不繞）。
+-- 無剖面＝offL 為 nil（clearOffset），不再用數值 0 當哨兵。
+-- srcX/srcY/srcN/srcS0（可省略）＝M6 世界 offset 折線：buildOffsetLine 產出的
+-- 表內容複製進 state 預配置槽（commit 冷路徑一次 96 寫；control 熱路徑 O(1)
+-- 查表零配置）。省略＝退回舊「逐段法向」求值（向後相容，直路等價）。
+function MDADFollower.setOffset(state, a, b, c, d, l, srcX, srcY, srcN, srcS0)
+    if type(state) ~= "table" then return false end
+    if not (isFinite(a) and isFinite(b) and isFinite(c) and isFinite(d) and isFinite(l)) then
+        return false
+    end
+    if not (a < b and b <= c and c < d) then return false end
+    state.offA, state.offB, state.offC, state.offD, state.offL = a, b, c, d, l
+    if type(srcX) == "table" and type(srcN) == "number" and srcN >= 2
+            and isFinite(srcS0) then
+        local dx = state.ovX
+        local dy = state.ovY
+        if type(dx) ~= "table" then
+            dx = {}
+            dy = {}
+            state.ovX = dx
+            state.ovY = dy
+        end
+        local n2 = srcN
+        if n2 > OV_MAX then n2 = OV_MAX end
+        for k = 1, n2 do
+            dx[k] = srcX[k]
+            dy[k] = srcY[k]
+        end
+        state.ovN = n2
+        state.ovS0 = srcS0
+    else
+        state.ovN = 0
+    end
+    return true
+end
+
+function MDADFollower.clearOffset(state)
+    if type(state) ~= "table" then return end
+    state.offL = nil
+    state.ovN = 0
+end
+
+-- M6：建世界 offset 折線。沿 route s∈[s0, d+1] 每 OV_STEP 取樣，每點＝
+-- 路線點＋lane(s)·n̂(s)：lane 用與 control 相同的 smoothstep（bias→l→bias），
+-- n̂ 在距段端 OV_BLEND 內與鄰段法向做**角度插值**——折點連續是 M6 的全部
+-- 意義（舊逐段法向在折點跳 2|l|sin(θ/2)）。寫進呼叫端預配置陣列（零配置），
+-- 回 (點數, s0)。s0＝呼叫端指定的掃掠起點（含車位前的 bias 段一併烘進表，
+-- 掃掠與前視驗的、走的是同一條線）。
+function MDADFollower.buildOffsetLine(profile, s0, a, b, c, d, l, bias, outX, outY)
+    if type(profile) ~= "table" or profile.ready ~= true then return 0, 0 end
+    if not (isFinite(s0) and isFinite(a) and isFinite(d) and isFinite(l)) then return 0, 0 end
+    if not isFinite(bias) then bias = 0 end
+    local px, py = profile.x, profile.y
+    local ss, segLen, segH = profile.s, profile.segLen, profile.segH
+    local n = profile.n
+    if s0 < 0 then s0 = 0 end
+    local s1 = d + 1
+    if s1 > profile.length then s1 = profile.length end
+    local count = (s1 - s0) / OV_STEP + 1
+    count = count - count % 1
+    if count > OV_MAX then count = OV_MAX end
+    if count < 2 then return 0, 0 end
+    local j = 1
+    for k = 1, count do
+        local sk = s0 + (k - 1) * OV_STEP
+        while j < n - 1 and ss[j + 1] < sk do j = j + 1 end
+        local lenJ = segLen[j]
+        local t = 0
+        if lenJ > 0 then
+            t = (sk - ss[j]) / lenJ
+            if t < 0 then t = 0 elseif t > 1 then t = 1 end
+        end
+        local bx = px[j] + (px[j + 1] - px[j]) * t
+        local by = py[j] + (py[j + 1] - py[j]) * t
+        local h = segH[j]
+        local dEnd = ss[j + 1] - sk
+        local dStart = sk - ss[j]
+        if dEnd < OV_BLEND and j + 1 <= n - 1 then
+            local dh = segH[j + 1] - h
+            while dh > 3.14159265 do dh = dh - 6.2831853 end
+            while dh < -3.14159265 do dh = dh + 6.2831853 end
+            h = h + dh * (1 - dEnd / OV_BLEND) * 0.5
+        elseif dStart < OV_BLEND and j > 1 then
+            local dh = segH[j - 1] - h
+            while dh > 3.14159265 do dh = dh - 6.2831853 end
+            while dh < -3.14159265 do dh = dh + 6.2831853 end
+            h = h + dh * (1 - dStart / OV_BLEND) * 0.5
+        end
+        local lane = bias
+        if sk > a and sk < d then
+            local t2
+            if sk < b then
+                t2 = (sk - a) / (b - a)
+            elseif sk > c then
+                t2 = (d - sk) / (d - c)
+            else
+                t2 = 1
+            end
+            t2 = t2 * t2 * (3 - 2 * t2)
+            lane = bias + (l - bias) * t2
+        end
+        outX[k] = bx - sin(h) * lane
+        outY[k] = by + cos(h) * lane
+    end
+    return count, s0
+end
+
+-- 常駐車道偏置（公尺，> 0＝PZ 世界的行進方向**右**、< 0＝左；靠右行駛給正值）。與繞行剖面不同，
+-- 這是「設定」不是「狀態」：resetState／resetControl 都**不清**它——換路線、
+-- 脫困、讓位恢復後照樣靠右。非有限值當 0（關閉）。設定入口收在這裡，
+-- 呼叫端不要直接寫 state.laneBias。
+function MDADFollower.setLaneBias(state, bias)
+    if type(state) ~= "table" then return false end
+    if not isFinite(bias) then bias = 0 end
+    state.laneBias = bias
+    return true
 end
 
 function MDADFollower.newState()
