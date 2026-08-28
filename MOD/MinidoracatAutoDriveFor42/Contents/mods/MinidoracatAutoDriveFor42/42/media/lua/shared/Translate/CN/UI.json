@@ -10,5 +10,15 @@
     "UI_MinidoracatAutoDrive_AlreadyInstalled": "这辆车已经装过了。",
     "UI_MinidoracatAutoDrive_NavApiMissing": "导航 API 不兼容，请更新 Minidoracat MiniMap",
     "UI_MinidoracatAutoDrive_InstallFailed": "安装失败。",
-    "UI_MinidoracatAutoDrive_TooFar": "距离太远，请下车并站到电瓶舱旁边。"
+    "UI_MinidoracatAutoDrive_TooFar": "距离太远，请下车并站到电瓶舱旁边。",
+    "UI_MinidoracatAutoDrive_Start": "启动自动驾驶",
+    "UI_MinidoracatAutoDrive_Stop": "关闭自动驾驶",
+    "UI_MinidoracatAutoDrive_NeedModule": "这辆车要先安装自动驾驶模块。",
+    "UI_MinidoracatAutoDrive_RouteNotReady": "还没有路线，请先在地图上设置导航目标。",
+    "UI_MinidoracatAutoDrive_NotDriver": "要坐在驾驶座才能自动驾驶。",
+    "UI_MinidoracatAutoDrive_EngineOff": "需要引擎运转中，而且电瓶还有电。",
+    "UI_MinidoracatAutoDrive_ManualOverride": "已交还手动操作，自动驾驶待命中。",
+    "UI_MinidoracatAutoDrive_Arrived": "已抵达目的地。",
+    "UI_MinidoracatAutoDrive_LostRoute": "路线丢失，自动驾驶已关闭。",
+    "UI_MinidoracatAutoDrive_StopStuck": "车辆卡住无法前进，自动驾驶已关闭。"
 }

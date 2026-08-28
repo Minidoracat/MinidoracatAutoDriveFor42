@@ -10,5 +10,15 @@
     "UI_MinidoracatAutoDrive_AlreadyInstalled": "This vehicle already has one installed.",
     "UI_MinidoracatAutoDrive_NavApiMissing": "Navigation API is incompatible. Please update Minidoracat MiniMap.",
     "UI_MinidoracatAutoDrive_InstallFailed": "Installation failed.",
-    "UI_MinidoracatAutoDrive_TooFar": "Too far away. Step out of the vehicle and stand next to the battery bay."
+    "UI_MinidoracatAutoDrive_TooFar": "Too far away. Step out of the vehicle and stand next to the battery bay.",
+    "UI_MinidoracatAutoDrive_Start": "Engage Autodrive",
+    "UI_MinidoracatAutoDrive_Stop": "Disengage Autodrive",
+    "UI_MinidoracatAutoDrive_NeedModule": "An Autopilot Module must be installed in this vehicle.",
+    "UI_MinidoracatAutoDrive_RouteNotReady": "No route yet. Set a navigation target on the map first.",
+    "UI_MinidoracatAutoDrive_NotDriver": "You must be in the driver's seat.",
+    "UI_MinidoracatAutoDrive_EngineOff": "The engine must be running with a live battery.",
+    "UI_MinidoracatAutoDrive_ManualOverride": "Manual control taken. Autodrive is standing by.",
+    "UI_MinidoracatAutoDrive_Arrived": "Destination reached.",
+    "UI_MinidoracatAutoDrive_LostRoute": "Route lost. Autodrive disengaged.",
+    "UI_MinidoracatAutoDrive_StopStuck": "Vehicle is stuck. Autodrive disengaged."
 }

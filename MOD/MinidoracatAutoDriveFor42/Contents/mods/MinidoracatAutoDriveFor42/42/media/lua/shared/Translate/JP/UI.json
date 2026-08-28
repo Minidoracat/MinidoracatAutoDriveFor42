@@ -10,5 +10,15 @@
     "UI_MinidoracatAutoDrive_AlreadyInstalled": "この車には既に取り付けられています。",
     "UI_MinidoracatAutoDrive_NavApiMissing": "ナビゲーションAPIが非対応です。Minidoracat MiniMap を更新してください。",
     "UI_MinidoracatAutoDrive_InstallFailed": "取り付けに失敗しました。",
-    "UI_MinidoracatAutoDrive_TooFar": "距離が遠すぎます。車から降りてバッテリー室の横に立ってください。"
+    "UI_MinidoracatAutoDrive_TooFar": "距離が遠すぎます。車から降りてバッテリー室の横に立ってください。",
+    "UI_MinidoracatAutoDrive_Start": "オートドライブを開始",
+    "UI_MinidoracatAutoDrive_Stop": "オートドライブを停止",
+    "UI_MinidoracatAutoDrive_NeedModule": "この車にオートパイロットモジュールを取り付ける必要があります。",
+    "UI_MinidoracatAutoDrive_RouteNotReady": "ルートがありません。先に地図でナビ目標を設定してください。",
+    "UI_MinidoracatAutoDrive_NotDriver": "運転席に座っている必要があります。",
+    "UI_MinidoracatAutoDrive_EngineOff": "エンジンが動いていて、バッテリーに電力が残っている必要があります。",
+    "UI_MinidoracatAutoDrive_ManualOverride": "手動操作に切り替えました。オートドライブは待機中です。",
+    "UI_MinidoracatAutoDrive_Arrived": "目的地に到着しました。",
+    "UI_MinidoracatAutoDrive_LostRoute": "ルートを見失いました。オートドライブを停止します。",
+    "UI_MinidoracatAutoDrive_StopStuck": "車両がスタックして進めません。オートドライブを停止します。"
 }

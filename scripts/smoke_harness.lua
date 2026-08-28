@@ -11,10 +11,12 @@
 本檔載入的 production（全部真檔，無任何 source-text 斷言）：
     shared/MDAD.lua
     shared/MDAD_Recipe.lua
+    shared/MDAD_Follower.lua
     shared/TimedActions/ISAutoDriveDeviceAction.lua
     server/Items/MDAD_Distributions.lua
     server/MDAD_Server.lua
     client/MDAD_Client.lua
+    client/MDAD_Driver.lua
 
 三條派送路徑都走真的程式碼，不再測早已不存在的 complete()：
 - SP：TimedAction:perform() → MDAD.applyDeviceChange（同 process 直接突變）
@@ -22,6 +24,20 @@
 - MP server：Events.OnClientCommand → MDAD_Server → MDAD.applyDeviceChange
   （actor 取事件第三參數，不採 payload；vehicleId／itemId 一律重新解析）
 單一 process 靠切換 isClient()／isServer() 假旗標模擬三種佈署。
+
+M3 自駕核心（client/MDAD_Driver.lua）走的是**每幀熱路徑**，斷言的重點與上面三條
+派送路徑不同——它的回歸不會丟例外，只會讓玩家的車撞牆或掉 FPS：
+- 假的 BaseVehicle 向量池會記帳（alloc／release／水位／重複 release），
+  addImpulse 記錄「同一幀被呼叫幾次」——單槽陷阱（BaseVehicle.java:678-689）
+  同幀第二次呼叫會讓整幀不施力，只有計數器抓得到
+- 沒有人在自駕時，OnPlayerUpdate 用一顆絆線玩家（任何方法被呼叫都計數）證明
+  「零 Java 呼叫」
+- 力矩由 relPos × impulse 就地算出來，斷言的是**符號關係**（誤差反號→力矩反號、
+  幀奇偶讓中心力反號但力矩同向），不抄 production 的力學係數
+- 衝量的**量級**另外圈區間（推得動 1200kg／不甩尾、隨速度單調且會封頂）：符號全對
+  但推力小兩個數量級＝實機「按了自駕卻完全不轉彎」，符號斷言一條都抓不到
+- 診斷輸出（getDebug()）：關閉時 print 與 string.format 的呼叫數必須都是 0，
+  開啟時跟線遙測每秒只有一行——每幀一行會洗爆 console 也吃 FPS
 
 限制（必須誠實面對）：這是標準 Lua，不是遊戲的 Kahlua。
 - 標準 Lua 有 next/assert/xpcall，Kahlua 沒有——本 harness **測不出**誤用，
@@ -102,10 +118,58 @@ local stats = {
 -- 刻意**不**放進 stats（resetStats 會歸零），才能在收尾一次證明全程沒被呼叫。
 local distCalls = 0
 
+-- M3 自駕的觀測面。全部掛在一顆 table 上有兩個理由：一是「哪些是自駕核心的
+-- 觀測點」一目了然；二是本檔主 chunk 的 local 數量已經接近 Lua 的 200 個上限，
+-- 再往上堆扁平 local 會直接編不過。
+local drive = {
+    -- BaseVehicle 的 thread-local 向量池水位（BaseVehicle.java:507-521）。
+    -- live（沒還回來的顆數）與 bad（還了一顆不在手上的向量）是累積證據，
+    -- 刻意不隨觀測窗歸零，才能在收尾一次證明全程都沒發生。
+    pool = { alloc = 0, release = 0, live = 0, bad = 0 },
+    free = {},                -- 已回收、可再發的向量（引擎的池也會重複發同一顆）
+    mult = 1.6,               -- getGameTime():getMultiplier()；1.6＝30fps 基準
+    keys = {},                -- isKeyDown（Left／Right／Forward／Backward／Brake）
+    -- getTexture：完整 media 路徑刻意查不到，逼 production 走無路徑的退路
+    textures = { ["Item_AutopilotModule"] = "tex:AutopilotModule" },
+    texCalls = {},            -- getTexture 的查詢序列（證明先試完整路徑、且只查一次）
+    menus = {},               -- getPlayerRadialMenu
+    orig = { n = 0 },         -- 原版 ISVehicleMenu.showRadialMenu 被呼叫幾次
+    paused = false,            -- UIManager speedControls：true 模擬遊戲暫停
+    -- 主 MOD 導航查詢面的可控狀態：tx 為 nil＝地圖上沒有目標
+    nav = { targetCalls = 0, routeCalls = 0, tx = nil, ty = nil, route = nil, state = "ok" },
+    calls = {
+        setRegulator = 0, regulatorOn = 0, regulatorOff = 0,
+        setRegulatorSpeed = 0, maxRegSpeed = 0, badRegSpeed = 0,
+        forceBrake = 0, getForwardVector = 0,
+    },
+    -- 每幀不變式的違規計數＋首次違規的幀號（0＝沒有違規）
+    bad = { impulse = 0, atImpulse = 0, pair = 0, atPair = 0, live = 0, atLive = 0 },
+    frames = 0,
+    trip = { n = 0 },
+    spy = { begin = 0, reset = 0, control = 0 },
+    -- 診斷輸出的觀測面：debug＝getDebug() 回什麼、logs＝熱路徑攔下來的 print 行、
+    -- fmt＝string.format 被呼叫幾次（關閉診斷時連字串都不該生成，計數是唯一證據）
+    debug = false,
+    logs = {},
+    fmt = 0,
+}
+
+-- 絆線玩家：任何方法被呼叫都計數。用來證明「沒有人在自駕時 OnPlayerUpdate 連玩家
+-- 都不碰」——這是熱路徑第一鐵則（sessionCount == 0 一次整數比較就 return），
+-- 少了它每幀會多好幾次跨 Lua↔Java 邊界的呼叫，而且不會有任何錯誤訊息。
+drive.tripPlayer = setmetatable({}, {
+    __index = function()
+        return function()
+            drive.trip.n = drive.trip.n + 1
+            return nil
+        end
+    end,
+})
+
 -- 網路與 UI 的觀測佇列
 local sentClient = {}    -- sendClientCommand（client → server）
 local sentServer = {}    -- sendServerCommand（server → client）
-local halos = {}         -- HaloTextHelper.addBadText
+local halos = {}         -- HaloTextHelper.addBadText／addGoodText（kind 分紅綠字）
 local uiCalls = { exit = {}, toInventory = {}, equip = {}, queue = {} }
 
 local function clearList(t)
@@ -140,9 +204,15 @@ function sendServerCommand(player, module, command, args)
         { player = player, module = module, command = command, args = args }
 end
 
+-- HaloTextHelper.addBadText 用例 ISVehiclePartMenu.lua:252；addGoodText 用例
+-- ISReadABook.lua:95。kind 一起記下來：自駕的「讓位／抵達／啟動」是綠字，
+-- 失效停止才是紅字，兩者互換是實際的 UX 回歸。
 HaloTextHelper = {
     addBadText = function(playerObj, text)
-        halos[#halos + 1] = { player = playerObj, text = text }
+        halos[#halos + 1] = { player = playerObj, text = text, kind = "bad" }
+    end,
+    addGoodText = function(playerObj, text)
+        halos[#halos + 1] = { player = playerObj, text = text, kind = "good" }
     end,
 }
 
@@ -207,6 +277,120 @@ IsoObjectPicker = {
 
 function getMouseXScaled() return 0 end
 function getMouseYScaled() return 0 end
+
+-- =====================================================================
+-- M3 自駕核心用到的假 PZ 全域
+-- =====================================================================
+
+-- Vector3f 的最小面：driver 只用 set／x／y／z
+local function newVec3()
+    local v = { _x = 0, _y = 0, _z = 0, _held = false }
+    function v:set(x, y, z)
+        self._x, self._y, self._z = x, y, z
+        return self
+    end
+    function v:x() return self._x end
+    function v:y() return self._y end
+    function v:z() return self._z end
+    return v
+end
+
+-- BaseVehicle.allocVector3f／releaseVector3f＝BaseVehicle.java:507-521。
+-- 引擎的池是 thread-local 且回收後會再發同一顆，這裡照樣重複發——這樣
+-- 「用了一顆已經 release 的向量」才會被 addImpulse 的 _held 檢查抓到。
+BaseVehicle = {
+    allocVector3f = function()
+        local p = drive.pool
+        p.alloc = p.alloc + 1
+        p.live = p.live + 1
+        local v = table.remove(drive.free) or newVec3()
+        v._held = true
+        return v:set(0, 0, 0)
+    end,
+    releaseVector3f = function(v)
+        local p = drive.pool
+        p.release = p.release + 1
+        -- 還一顆不在手上的向量＝把別人正在用的格子讓出去（引擎會靜靜地壞掉）
+        if type(v) ~= "table" or v._held ~= true then
+            p.bad = p.bad + 1
+            return
+        end
+        v._held = false
+        p.live = p.live - 1
+        drive.free[#drive.free + 1] = v
+    end,
+}
+
+-- getGameTime():getMultiplier()＝真實秒數係數；driver 用 /48 換 dt，也用它縮放施力
+local gameTime = {}
+function gameTime:getMultiplier() return drive.mult end
+function getGameTime() return gameTime end
+
+-- UIManager.getSpeedControls：radial wrapper 用呼叫前狀態區分 open／close，另擋暫停。
+UIManager = {
+    getSpeedControls = function()
+        return {
+            getCurrentGameSpeed = function()
+                if drive.paused then return 0 end
+                return 1
+            end,
+        }
+    end,
+}
+
+-- isKeyDown(bindingName)：driver 讀的就是 CarController.java:938-942 那幾個綁定名
+function isKeyDown(name) return drive.keys[name] == true end
+
+-- getDebug()＝Core 的除錯模式旗標（原版各處拿它守門診斷輸出）。driver 的遙測全部
+-- 掛在它下面，所以情境可以直接切換來驗「關閉時是零成本」。
+function getDebug() return drive.debug == true end
+
+-- string.format 的絆線：關閉診斷時 driver 連字串都不該生成。print 只證明「沒印出來」，
+-- 抓不到「算了一整條格式字串然後丟掉」——那在每幀熱路徑上一樣是成本。
+-- 本 harness 與其他 production 檔都不用 string.format，計數乾淨。
+local realFormat = string.format
+string.format = function(...)
+    drive.fmt = drive.fmt + 1
+    return realFormat(...)
+end
+
+-- 材質缺漏時 getTexture 回 nil（RadialMenu.java:144-145 有 null 檢查）
+function getTexture(name)
+    drive.texCalls[#drive.texCalls + 1] = name
+    return drive.textures[name]
+end
+
+-- getPlayerRadialMenu(playerNum)＝ISPlayerData.lua:143-152。初始不可見；_delayVisible
+-- 模擬 UIManager.AddUI 後同一 call stack 尚未回報 really-visible 的實機時序。
+local function newRadialMenu()
+    local m = { slices = {}, _visible = false, _delayVisible = false }
+    function m:isReallyVisible() return self._visible end
+    -- addSlice(text, texture, command, arg1..arg6)＝ISRadialMenu.lua:44-52
+    function m:addSlice(text, texture, command, arg1)
+        self.slices[#self.slices + 1] =
+            { text = text, texture = texture, command = command, arg1 = arg1 }
+    end
+    return m
+end
+
+function getPlayerRadialMenu(playerNum) return drive.menus[playerNum] end
+
+-- 原版 showRadialMenu：暫停時早退；原本可見時這次是 toggle-close；open 才
+-- clear→建片→addToUIManager。_delayVisible 只延後 visibility 回報，不影響片建立。
+ISVehicleMenu.showRadialMenu = function(playerObj)
+    drive.orig.n = drive.orig.n + 1
+    drive.orig.player = playerObj
+    local menu = playerObj and getPlayerRadialMenu(playerObj:getPlayerNum())
+    if not menu then return end
+    if drive.paused then return end
+    if menu._visible then
+        menu._visible = false
+        return
+    end
+    clearList(menu.slices)
+    menu.slices[1] = { text = "VANILLA" }
+    menu._visible = menu._delayVisible ~= true
+end
 
 -- ISBaseObject/ISBaseTimedAction 的 derive/new 語意：實例的 metatable 是子類，
 -- 子類的 metatable 是父類，方法沿鏈往上找
@@ -476,7 +660,7 @@ local function newSquare()
     return sq
 end
 
--- opts: num、electricity、z、instant、username
+-- opts: num、electricity、z、instant、username、remote（isLocalPlayer 回 false）
 local function newPlayer(opts)
     opts = opts or {}
     local p = {
@@ -492,6 +676,9 @@ local function newPlayer(opts)
         _useable = nil,
         _near = nil,
         _hand = nil,
+        -- 伺服器端與遠端玩家的 isLocalPlayer 恆 false（IsoPlayer.java:6493）：
+        -- 自駕只在駕駛自己的 client 跑，這個旗標是那條早退的唯一入口
+        _local = opts.remote ~= true,
         removedFromHands = 0,
         faced = 0,
     }
@@ -501,6 +688,7 @@ local function newPlayer(opts)
         return 0
     end
     function p:getVehicle() return self._vehicle end
+    function p:isLocalPlayer() return self._local == true end
     function p:getZ() return self._z end
     -- 絆線：canReachVehicle 已不准用距離判定，被呼叫就會在收尾被抓出來
     function p:DistToSquared(_)
@@ -539,7 +727,9 @@ function getVehicleById(id)
     return vehiclesById[id]
 end
 
--- opts: battery、noBattery、area、inArea、z、engineRunning
+-- opts: battery、noBattery、area、inArea、z、engineRunning，
+--       以下為 M3 自駕：x／y（世界座標）、fwdX／fwdY（車頭前向）、speed（km/h，
+--       有號）、mass、steering（getCurrentSteering）、stopped、driver（isDriver 認的人）
 local function newVehicle(opts)
     opts = opts or {}
     local v = {
@@ -549,6 +739,20 @@ local function newVehicle(opts)
         _engine = opts.engineRunning == true,
         _inArea = opts.inArea == true,
         _square = newSquare(),
+        -- 自駕控制面
+        _x = opts.x or 0,
+        _y = opts.y or 0,
+        _fwdX = opts.fwdX or 1,
+        _fwdY = opts.fwdY or 0,
+        _speed = opts.speed or 0,
+        _mass = opts.mass or 1200,
+        _steering = opts.steering or 0,
+        _stopped = opts.stopped == true,
+        _driver = opts.driver,
+        _regulator = nil,
+        _regSpeed = nil,
+        -- 每幀施力的帳：frame＝本幀次數、max＝觀測窗內單幀最高、total＝總次數
+        _imp = { frame = 0, max = 0, total = 0, useAfterRelease = 0 },
     }
     nextVehicleId = nextVehicleId + 1
     vehiclesById[v._id] = v
@@ -572,6 +776,69 @@ local function newVehicle(opts)
     end
     function v:transmitPartUsedDelta(_) stats.transmitUsedDelta = stats.transmitUsedDelta + 1 end
     function v:transmitPartModData(_) stats.transmitModData = stats.transmitModData + 1 end
+
+    -- isDriver(chr) ⇔ getSeat(chr)==0（BaseVehicle.java:1853-1864）
+    function v:isDriver(chr) return self._driver ~= nil and self._driver == chr end
+    function v:getX() return self._x end
+    function v:getY() return self._y end
+    function v:getMass() return self._mass end
+    -- getCurrentSpeedKmHour 可負（倒車）＝BaseVehicle.java:4268
+    function v:getCurrentSpeedKmHour() return self._speed end
+    -- getCurrentSteering 由 CarController 每幀從 clientControls 寫入（:321）
+    function v:getCurrentSteering() return self._steering end
+    -- isStopped＝|速度|<0.8 且沒踩油門（BaseVehicle.java:4259-4260）
+    function v:isStopped() return self._stopped end
+
+    -- getForwardVector(out)＝BaseVehicle.java:4242-4244：寫進呼叫端給的容器。
+    -- Bullet 的 y 是上方向，世界 (X,Y) 對應 (x,z)（CarController.java:406,416 同讀法）
+    function v:getForwardVector(out)
+        drive.calls.getForwardVector = drive.calls.getForwardVector + 1
+        return out:set(self._fwdX, 0, self._fwdY)
+    end
+
+    -- addImpulse(impulse, relPos)＝BaseVehicle.java:678-689／3311-3313。**單槽**：
+    -- 同幀第二次呼叫且新向量較長時會 enable=false 並把常駐向量推回池，結果是這幀
+    -- 完全不施力還汙染下一幀。只記錄次數與向量，讓斷言證明「每幀最多一次」。
+    function v:addImpulse(impulse, relPos)
+        local imp = self._imp
+        imp.frame = imp.frame + 1
+        imp.total = imp.total + 1
+        if imp.frame > imp.max then imp.max = imp.frame end
+        -- 池向量會被回收再發，必須立刻抄純量而不是留引用
+        imp.x, imp.y, imp.z = impulse:x(), impulse:y(), impulse:z()
+        imp.rx, imp.ry, imp.rz = relPos:x(), relPos:y(), relPos:z()
+        -- (r × F)_y = r_z*F_x - r_x*F_z：繞 +y 的偏航力矩（就地算，不抄 production）
+        imp.torqueY = imp.rz * imp.x - imp.rx * imp.z
+        if impulse._held ~= true or relPos._held ~= true then
+            imp.useAfterRelease = imp.useAfterRelease + 1
+        end
+    end
+
+    -- setRegulator／setRegulatorSpeed＝BaseVehicle.java:9821-9831
+    function v:setRegulator(on)
+        self._regulator = on
+        local c = drive.calls
+        c.setRegulator = c.setRegulator + 1
+        if on == true then
+            c.regulatorOn = c.regulatorOn + 1
+        else
+            c.regulatorOff = c.regulatorOff + 1
+        end
+    end
+
+    function v:setRegulatorSpeed(kmh)
+        self._regSpeed = kmh
+        local c = drive.calls
+        c.setRegulatorSpeed = c.setRegulatorSpeed + 1
+        if type(kmh) ~= "number" or kmh < 0 then
+            c.badRegSpeed = c.badRegSpeed + 1
+        elseif kmh > c.maxRegSpeed then
+            c.maxRegSpeed = kmh
+        end
+    end
+
+    -- setForceBrake 寫 clientControls.forceBrake，效期 1 秒（CarController.java:973-979）
+    function v:setForceBrake() drive.calls.forceBrake = drive.calls.forceBrake + 1 end
     return v
 end
 
@@ -585,6 +852,8 @@ local loaded = {
     ["TimedActions/ISBaseTimedAction"] = true,
     ["ISBaseObject"] = true,
     ["luautils"] = true,
+    -- MDAD_Driver require 原版的 radial 選單檔；上面的假 ISVehicleMenu 頂替
+    ["Vehicles/ISUI/ISVehicleMenu"] = true,
 }
 
 -- loadfile 對「檔案不存在」和「語法錯誤」都回 nil，直接吞掉會把 production 的語法錯
@@ -619,6 +888,11 @@ require "MDAD_Server"
 -- MDAD_Client 在載入期就會呼叫一次 registerNavGate()。此時 MinidoracatMiniMapAPI
 -- 刻意不存在，好讓「主 MOD 未安裝」這條路徑真的被走到；診斷訊息留給情境去斷言。
 local clientLoadLog = capturePrint(function() require "MDAD_Client" end)
+
+-- MDAD_Driver 只 require 它自己需要的東西：這一行同時證明它的 require 鏈
+-- （MDAD、MDAD_Follower、原版 ISVehicleMenu）沒有斷。載入期會註冊 OnPlayerUpdate
+-- 並把 ISVehicleMenu.showRadialMenu 包起來；沒有 session 時前者是零成本的。
+require "MDAD_Driver"
 
 -- =====================================================================
 -- 測試工具
@@ -2497,16 +2771,1161 @@ checkEq(stats.pickVehicle, 0, "人在車上時直接用該車，不做滑鼠拾�
 checkEq(ctx.options[1].args[1], veh, "人在車上：目標就是所在的車")
 ch._vehicle = nil
 
+-- =====================================================================
+-- M3 自駕情境的共用工具（clientFlag 維持 true：MDAD_Driver 是 client-only）
+-- =====================================================================
+
+-- M3 新增的翻譯鍵集中成一顆表：主 chunk 的 local 數量已接近 Lua 的 200 上限
+local DKEY = {
+    NEED_MODULE = "UI_MinidoracatAutoDrive_NeedModule",
+    ROUTE = "UI_MinidoracatAutoDrive_RouteNotReady",
+    LOST = "UI_MinidoracatAutoDrive_LostRoute",
+    NOT_DRIVER = "UI_MinidoracatAutoDrive_NotDriver",
+    ENGINE = "UI_MinidoracatAutoDrive_EngineOff",
+    MANUAL = "UI_MinidoracatAutoDrive_ManualOverride",
+    ARRIVED = "UI_MinidoracatAutoDrive_Arrived",
+    START = "UI_MinidoracatAutoDrive_Start",
+    STOP = "UI_MinidoracatAutoDrive_Stop",
+    STUCK = "UI_MinidoracatAutoDrive_StopStuck",
+}
+
+-- 取第 i 則提示的翻譯鍵並登記（登記過的鍵由最後一個情境逐一驗四語翻譯）
+local function haloKey(i)
+    local h = halos[i or 1]
+    return noteReason(h and h.text)
+end
+
+-- 車頭前向（世界 X,Y）。driver 自己會正規化，但給單位向量最貼近實機。
+local function setHeading(vehicle, rad)
+    vehicle._fwdX, vehicle._fwdY = math.cos(rad), math.sin(rad)
+end
+
+-- 主 MOD 的 route 物件：follower 只讀 pts（扁平 x,y）。每次呼叫回**新** table——
+-- route 的 identity 就是版本號，driver 靠它判斷主 MOD 有沒有重算過路線。
+local function newRoute(n, x0, y0, dx, dy)
+    local pts = {}
+    for i = 1, n do
+        pts[i * 2 - 1] = x0 + dx * (i - 1)
+        pts[i * 2] = y0 + dy * (i - 1)
+    end
+    return { pts = pts }
+end
+
+-- 主 MOD 的導航查詢面。目標／路線／狀態都放在 drive.nav 由情境直接改；
+-- 呼叫計數用來證明 250ms 節流真的有節流。
+local function installNavApi(version)
+    MinidoracatMiniMapAPI = {
+        navApiVersion = version,
+        registerNavGate = function() return true end,
+        getNavTarget = function(playerNum)
+            local nav = drive.nav
+            nav.targetCalls = nav.targetCalls + 1
+            nav.lastTargetNum = playerNum
+            if nav.tx == nil then return nil end
+            return nav.tx, nav.ty
+        end,
+        requestRoute = function(playerNum, tx, ty)
+            local nav = drive.nav
+            nav.routeCalls = nav.routeCalls + 1
+            nav.lastRouteNum, nav.lastTx, nav.lastTy = playerNum, tx, ty
+            return nav.route, nav.state
+        end,
+    }
+end
+
+-- 開一段新的觀測窗：M2 的 stats／halos 與 M3 的計數器一起歸零。
+-- drive.pool.live 刻意不歸零——它就是「有向量沒還」的累積證據。
+local function driveReset(vehicle)
+    resetStats()
+    local d = drive
+    for k in pairs(d.calls) do d.calls[k] = 0 end
+    for k in pairs(d.bad) do d.bad[k] = 0 end
+    d.frames = 0
+    -- pool.bad 與 pool.live 一樣是累積證據（收尾一次證明全程沒發生），不歸零
+    d.pool.alloc, d.pool.release = 0, 0
+    d.trip.n = 0
+    d.nav.targetCalls, d.nav.routeCalls = 0, 0
+    d.orig.n = 0
+    d.spy.begin, d.spy.reset, d.spy.control = 0, 0, 0
+    clearList(d.texCalls)
+    clearList(d.logs)
+    d.fmt = 0
+    d.paused = false
+    for _, menu in pairs(d.menus) do
+        menu._visible = false
+        menu._delayVisible = false
+    end
+    if vehicle then
+        local imp = vehicle._imp
+        imp.frame, imp.total, imp.max, imp.useAfterRelease = 0, 0, 0, 0
+        imp.torqueY = nil
+    end
+end
+
+-- 熱路徑的 print 攔截器：診斷行要能斷言內容與頻率，而且關閉診斷時必須一行都沒有。
+-- 定義成具名函式（不是每幀新建 closure），免得絆線自己變成觀測對象。
+local function recordPrint(...)
+    local parts = {}
+    for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end
+    drive.logs[#drive.logs + 1] = table.concat(parts, "\t")
+end
+
+-- 跑一個遊戲幀：歸零本幀的施力帳、觸發真正的 OnPlayerUpdate，再檢查三條**每幀**
+-- 不變式。做成累計違規數＋首次違規幀號，才有辦法一口氣跑 60 幀而不是寫 180 條斷言。
+-- 這一幀印出來的東西全部收進 drive.logs，不會噴到測試輸出上。
+local function driveTick(player, vehicle)
+    local d = drive
+    d.frames = d.frames + 1
+    local imp = vehicle and vehicle._imp
+    if imp then imp.frame = 0 end
+    local a0, r0 = d.pool.alloc, d.pool.release
+    local saved = print
+    print = recordPrint
+    fire("OnPlayerUpdate", player)
+    print = saved
+    if imp and imp.frame > 1 then
+        d.bad.impulse = d.bad.impulse + 1
+        if d.bad.atImpulse == 0 then d.bad.atImpulse = d.frames end
+    end
+    if (d.pool.alloc - a0) ~= (d.pool.release - r0) then
+        d.bad.pair = d.bad.pair + 1
+        if d.bad.atPair == 0 then d.bad.atPair = d.frames end
+    end
+    if d.pool.live ~= 0 then
+        d.bad.live = d.bad.live + 1
+        if d.bad.atLive == 0 then d.bad.atLive = d.frames end
+    end
+end
+
+-- 這一幀真的施出去的衝量大小。符號關係另外驗；量級必須單獨看——實機「按了自駕卻
+-- 完全不轉彎」就是符號全對、量級小兩個數量級，任何符號斷言都抓不到。
+local function impulseMag(vehicle)
+    local imp = vehicle._imp
+    return math.sqrt(imp.x * imp.x + imp.z * imp.z)
+end
+
+-- 自駕的玩家與車。車頭刻意偏 0.3 rad：完全對準路線時轉向落在死區不施力，
+-- 那條路徑另外測，其他情境需要「每幀真的施一次力」才驗得到單槽不變式。
+local dp = newPlayer({ num = 0, electricity = 2, username = "autodrive0" })
+local dveh = newVehicle({
+    battery = newItem("Base.CarBattery", { uses = 0.8 }),
+    engineRunning = true, mass = 1200, speed = 20,
+})
+local droute = nil
+
+-- 每個失效情境都要一顆乾淨的 session：復原車況、換一條新路線、啟動，
+-- 再跑一幀把剖面建完並進入跟線，最後開新的觀測窗。
+local function armDrive()
+    MDAD.Drive.stop(0, nil)
+    dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = 0, 0, 20, 0, false
+    dveh._engine, dveh._driver = true, dp
+    dveh._part._item._uses = 0.8
+    dp._vehicle, dp._dead, dp._local = dveh, false, true
+    setHeading(dveh, 0.3)
+    drive.nav.tx, drive.nav.ty, drive.nav.state = 300, 0, "ok"
+    drive.nav.route = newRoute(40, 0, 0, 4, 0)
+    if not MDAD.Drive.start(dp) then return false end
+    driveTick(dp, dveh)
+    driveReset(dveh)
+    return MDAD.Drive.isActive(0)
+end
+
+-- 前面的情境把 nowMs 推進過，但 navGate 的 draw 快取（1 秒）可能還留著別的玩家
+-- 的結果；先跨過 TTL，讓 M3 從乾淨狀態開始。
+nowMs = nowMs + 5000
+players[0], players[1], players[2], players[3], players[4], players[5] = dp, nil, nil, nil, nil, nil
+activePlayers = 1
+
+-- =====================================================================
+-- 情境十六：自駕熱路徑（沒有人在自駕時 OnPlayerUpdate 必須是零成本）
+-- =====================================================================
+scenario("自駕熱路徑：沒有 session 時 OnPlayerUpdate 一次整數比較就 return，零 Java 呼叫")
+
+checkEq(type(MDAD.Drive), "table", "production client/MDAD_Driver.lua 真的載入了")
+checkEq(type(MDADFollower), "table", "driver 的 require 把 shared/MDAD_Follower.lua 一起帶進來")
+checkEq(type(MDAD.Drive.start), "function", "Drive.start 是 radial 回呼的實作")
+checkEq(type(MDAD.Drive.toggle), "function", "Drive.toggle 是 radial 交出去的指令")
+checkEq(#(eventHandlers["OnPlayerUpdate"] or {}), 1,
+    "driver 只註冊一個 OnPlayerUpdate（雙載會變兩個＝同幀兩次 addImpulse）")
+checkFalse(MDAD.Drive.isActive(0), "初始沒有任何 session")
+
+driveReset(nil)
+fire("OnPlayerUpdate", drive.tripPlayer)
+fire("OnPlayerUpdate", drive.tripPlayer)
+checkEq(drive.trip.n, 0, "沒有 session 時完全不呼叫玩家的任何方法")
+checkEq(drive.pool.alloc, 0, "沒有 session 時不向 BaseVehicle 取向量")
+checkEq(drive.calls.setRegulator, 0, "沒有 session 時不動 regulator")
+checkEq(drive.calls.forceBrake, 0, "沒有 session 時不動煞車")
+checkEq(drive.nav.targetCalls, 0, "沒有 session 時不查導航目標")
+checkEq(drive.pool.live, 0, "沒有 session 時池水位不動")
+
+-- =====================================================================
+-- 情境十七：Drive.start 的每一道閘門
+-- =====================================================================
+scenario("自駕啟動閘門：nav API v2、駕駛座、引擎、電瓶、自駕模組、GPS、導航目標、路線")
+
+setSandbox({ InstallSkillGate = true, NeedItemForNav = false,
+             NeedItemForAutoDrive = true, AutoDriveMaxSpeed = 40 })
+dp._vehicle = dveh
+dveh._driver = dp
+droute = newRoute(40, 0, 0, 4, 0)
+
+driveReset(dveh)
+checkFalse(MDAD.Drive.start(nil), "playerObj 為 nil：不啟動")
+checkEq(#halos, 0, "沒有玩家就沒有提示對象")
+
+dp._local = false
+driveReset(dveh)
+checkFalse(MDAD.Drive.start(dp), "遠端玩家（isLocalPlayer false）：不啟動")
+checkEq(#halos, 0, "遠端玩家不提示（自駕只在駕駛自己的 client 跑）")
+dp._local = true
+
+-- MDAD_Follower 不見了＝本 MOD 的檔案樹壞掉：印診斷＋紅字優雅退場，
+-- 不能讓 radial 回呼丟出 nil index 錯誤
+drive.savedFollower = MDADFollower
+MDADFollower = nil
+driveReset(dveh)
+log = capturePrint(function() ok = MDAD.Drive.start(dp) end)
+MDADFollower = drive.savedFollower
+checkFalse(ok, "MDAD_Follower 沒載入：不啟動")
+checkTrue(logHas(log, "MDAD_Follower not loaded"), "缺 follower 留下 console 診斷")
+checkTrue(logHas(log, MOD_ID), "診斷帶 MOD 名稱前綴")
+checkEq(haloKey(), DKEY.ROUTE, "缺 follower 提示 RouteNotReady")
+
+-- nav API：沒裝、版本太舊、缺任一必要函式，一律視同沒裝
+MinidoracatMiniMapAPI = nil
+driveReset(dveh)
+checkFalse(MDAD.Drive.start(dp), "主 MOD 沒裝：不啟動")
+checkEq(haloKey(), NAV_API_MISSING, "沒有 nav API 提示 NavApiMissing")
+
+installNavApi(1)
+driveReset(dveh)
+checkFalse(MDAD.Drive.start(dp), "nav API 只有 v1（沒有 getNavTarget 契約）：不啟動")
+checkEq(haloKey(), NAV_API_MISSING, "v1 視同缺 API")
+
+installNavApi(2)
+MinidoracatMiniMapAPI.getNavTarget = nil
+driveReset(dveh)
+checkFalse(MDAD.Drive.start(dp), "v2 但缺 getNavTarget：不啟動")
+installNavApi(2)
+MinidoracatMiniMapAPI.requestRoute = nil
+driveReset(dveh)
+checkFalse(MDAD.Drive.start(dp), "v2 但缺 requestRoute：不啟動")
+checkEq(haloKey(), NAV_API_MISSING, "缺函式視同缺 API")
+
+installNavApi(2)
+drive.nav.tx, drive.nav.ty = 300, 0
+drive.nav.route, drive.nav.state = droute, "ok"
+
+-- 駕駛座
+dp._vehicle = nil
+driveReset(dveh)
+checkFalse(MDAD.Drive.start(dp), "人不在車上：不啟動")
+checkEq(haloKey(), DKEY.NOT_DRIVER, "不在車上提示 NotDriver")
+checkEq(drive.nav.targetCalls, 0, "閘門沒過就不去查導航目標")
+dp._vehicle = dveh
+
+dveh._driver = nil
+driveReset(dveh)
+checkFalse(MDAD.Drive.start(dp), "坐在副駕：不啟動")
+checkEq(haloKey(), DKEY.NOT_DRIVER, "非駕駛提示 NotDriver")
+dveh._driver = dp
+
+-- 引擎與電瓶
+dveh._engine = false
+driveReset(dveh)
+checkFalse(MDAD.Drive.start(dp), "引擎沒發動：不啟動（M3 不代客發動）")
+checkEq(haloKey(), DKEY.ENGINE, "熄火提示 EngineOff")
+dveh._engine = true
+
+dveh._part._item._uses = 0
+driveReset(dveh)
+checkFalse(MDAD.Drive.start(dp), "電瓶沒電：不啟動")
+checkEq(haloKey(), DKEY.ENGINE, "電瓶死掉沿用 EngineOff（電系已不成立）")
+dveh._part._item._uses = 0.8
+
+-- 自駕模組（沙盒 NeedItemForAutoDrive 預設 true）
+driveReset(dveh)
+checkFalse(MDAD.Drive.start(dp), "車上沒裝自駕模組：不啟動")
+checkEq(haloKey(), DKEY.NEED_MODULE, "缺模組提示 NeedModule")
+
+setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40 })
+driveReset(dveh)
+checkTrue(MDAD.Drive.start(dp), "沙盒關掉模組需求時不裝模組也能開")
+MDAD.Drive.stop(0, nil)
+setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = true, AutoDriveMaxSpeed = 40 })
+st = MDAD.ensureState(dveh:getBattery())
+st.auto = true
+
+-- 導航道具閘門（M2 既有的 MDAD.navGate，自駕沿用同一顆）
+setSandbox({ NeedItemForNav = true, NeedItemForAutoDrive = true, AutoDriveMaxSpeed = 40 })
+driveReset(dveh)
+checkFalse(MDAD.Drive.start(dp), "需要 GPS 但身上沒有：不啟動")
+checkEq(haloKey(), NEED_GPS, "缺 GPS 提示 NeedGPS")
+
+st.nav = true
+driveReset(dveh)
+checkTrue(MDAD.Drive.start(dp), "車上已裝 nav 且車電有電：不必再帶隨身 GPS")
+MDAD.Drive.stop(0, nil)
+st.nav = nil
+setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = true, AutoDriveMaxSpeed = 40 })
+
+-- 導航目標與路線
+drive.nav.tx = nil
+driveReset(dveh)
+checkFalse(MDAD.Drive.start(dp), "地圖上沒有導航目標：不啟動")
+checkEq(haloKey(), DKEY.ROUTE, "沒目標提示 RouteNotReady")
+checkEq(drive.nav.targetCalls, 1, "查了一次目標")
+checkEq(drive.nav.routeCalls, 0, "沒有目標就不去要路線")
+
+drive.nav.tx, drive.nav.ty = 300, 0
+drive.nav.state = "pending"
+driveReset(dveh)
+checkFalse(MDAD.Drive.start(dp), "路線還在算（state ~= ok）：不啟動")
+checkEq(haloKey(), DKEY.ROUTE, "路線未就緒提示 RouteNotReady")
+drive.nav.state = "ok"
+
+-- 失敗的啟動不得碰玩家的 regulator：他自己設的定速要原封不動留著
+dveh._regulator = true
+drive.nav.route = { pts = { 1, 1 } }
+driveReset(dveh)
+checkFalse(MDAD.Drive.start(dp), "路線只有一個點：follower 判 badroute，不啟動")
+checkEq(haloKey(), DKEY.ROUTE, "badroute 提示 RouteNotReady")
+checkEq(drive.calls.setRegulator, 0, "啟動失敗不動 regulator（閘門在寫 session 之前）")
+checkTrue(dveh._regulator, "啟動失敗：玩家自己設的定速原封不動")
+drive.nav.route = droute
+
+-- 條件齊備
+driveReset(dveh)
+checkTrue(MDAD.Drive.start(dp), "條件齊備：啟動成功")
+checkTrue(MDAD.Drive.isActive(0), "啟動後 isActive")
+checkEq(#halos, 1, "啟動只提示一次")
+checkEq(haloKey(), DKEY.START, "啟動提示 Start")
+checkEq(halos[1] and halos[1].kind, "good", "啟動是綠字（addGoodText）")
+checkEq(drive.nav.lastTargetNum, 0, "查目標帶的是玩家 slot 編號")
+checkEq(drive.nav.lastTx, 300, "要路線時把目標座標原樣傳進去")
+checkEq(drive.nav.lastTy, 0, "目標 y 也原樣傳進去")
+-- 啟動時唯一一次 regulator 動作＝關掉。玩家上車前自己設的定速（或前一位駕駛留下的）
+-- 若原封不動留著，剖面分幀建構的那七八幀車子會照舊速繼續衝，而 stepFollow 還沒開始跑，
+-- 沒有任何人在控速——玩家看到的是「按下自駕，車子加速衝出去」。
+checkEq(drive.calls.setRegulator, 1, "啟動動一次 regulator（把上車前的舊定速關掉）")
+checkEq(drive.calls.regulatorOff, 1, "動的方向是關掉")
+checkEq(drive.calls.regulatorOn, 0, "啟動本身不供油（要等第一幀才控速）")
+checkEq(drive.calls.setRegulatorSpeed, 0, "啟動本身不設定速")
+checkEq(dveh._regulator, false, "啟動後舊的巡航定速不再生效")
+checkEq(drive.pool.alloc, 0, "啟動本身不取向量池")
+
+driveReset(dveh)
+checkTrue(MDAD.Drive.start(dp), "已在自駕再按一次：回 true 但不重開 session")
+checkEq(#halos, 0, "重複啟動不再提示")
+checkEq(drive.nav.targetCalls, 0, "重複啟動不重查導航目標")
+checkEq(drive.calls.setRegulator, 0, "重複啟動不再動 regulator（既有 session 直接回 true）")
+
+-- OnPlayerUpdate 的兩道早退：不是本機玩家、以及這個 slot 沒有 session
+driveReset(dveh)
+it = newPlayer({ num = 0, remote = true })
+fire("OnPlayerUpdate", it)
+checkEq(drive.calls.getForwardVector, 0, "遠端玩家擋在最前面（就算他的 slot 有 session）")
+checkEq(drive.pool.alloc, 0, "遠端玩家不取向量池")
+
+players[1] = newPlayer({ num = 1, username = "autodrive1" })
+fire("OnPlayerUpdate", players[1])
+checkEq(drive.calls.getForwardVector, 0, "別的 slot 在自駕不會誤動這個 slot 的車")
+checkEq(drive.pool.alloc, 0, "沒有自己的 session：不取向量池")
+players[1] = nil
+
+-- =====================================================================
+-- 情境十八：限速剖面分幀建構
+-- =====================================================================
+scenario("限速剖面分幀建構：每幀 128 點、建構期不控速也不施力")
+
+-- 300 點、每段 4 公尺（1196 公尺）。follower 的建表運算量＝geometry n ＋ brake n-1
+-- ＋ accel n-1 ＝ 3n-2 ＝ 898 個點運算；driver 每幀給 128 → 需要 8 次 stepBuild，
+-- 也就是前 7 幀還在建表、第 8 幀才開始控車。一次算完的話玩家會看到啟動瞬間卡一下。
+MDAD.Drive.stop(0, nil)
+drive.nav.route = newRoute(300, 0, 0, 4, 0)
+dveh._x, dveh._y, dveh._speed, dveh._steering = 0, 0, 20, 0
+setHeading(dveh, 0.3)
+dveh._regulator = true   -- 玩家上車前自己設的定速：建構期必須是關著的
+driveReset(dveh)
+checkTrue(MDAD.Drive.start(dp), "長路線也能啟動（建表攤到後續幀）")
+checkEq(drive.calls.regulatorOff, 1, "長路線一樣在啟動當下就把舊定速關掉")
+checkEq(dveh._regulator, false, "建表還沒開始，舊定速就已經失效")
+
+driveReset(dveh)
+for _ = 1, 7 do driveTick(dp, dveh) end
+checkEq(dveh._imp.total, 0, "剖面還沒建好：不施力")
+checkEq(drive.calls.setRegulator, 0, "剖面還沒建好：不動 regulator")
+checkEq(dveh._regulator, false, "整段建構期舊定速都不生效（start 關掉、建構幀不再碰）")
+checkEq(drive.calls.setRegulatorSpeed, 0, "剖面還沒建好：不設定速")
+checkEq(drive.calls.forceBrake, 0, "剖面還沒建好：不煞車")
+checkEq(drive.calls.getForwardVector, 0, "剖面還沒建好：連前向向量都不讀")
+checkEq(drive.pool.alloc, 0, "建構幀不取向量池（stepBuild 沒完成就 return）")
+checkEq(drive.nav.targetCalls, 0, "250ms 節流內不重查導航目標")
+checkTrue(MDAD.Drive.isActive(0), "建構期間 session 還活著")
+
+driveTick(dp, dveh)
+checkEq(dveh._imp.total, 1, "第 8 幀剖面建好，開始控車（每幀恰一次施力）")
+checkEq(drive.calls.setRegulatorSpeed, 1, "第 8 幀開始控速")
+checkEq(drive.calls.regulatorOn, 1, "沒超速：regulator 開著供油")
+checkEq(drive.calls.getForwardVector, 1, "控制幀只讀一次前向向量")
+checkEq(drive.pool.alloc, 2, "控制幀取兩顆池向量（forward／relPos 共用一顆＋impulse 一顆）")
+checkEq(drive.pool.release, 2, "取幾顆就還幾顆")
+checkEq(drive.pool.live, 0, "幀末池水位歸零")
+checkEq(drive.bad.impulse + drive.bad.pair + drive.bad.live, 0, "8 幀都沒有違反每幀不變式")
+
+-- =====================================================================
+-- 情境十九：跟線 60 幀的每幀不變式
+-- =====================================================================
+scenario("跟線 60 幀：每幀最多一次 addImpulse、向量池成對歸零、定速不超過沙盒上限")
+
+-- 沿用情境十八建好的 session。20 km/h ＝ 5.556 m/s，dt ＝ 1.6/48 秒，
+-- 所以每幀前進 0.1852 公尺——讓進度真的推進（投影窗口、前視點都會跟著動）。
+driveReset(dveh)
+for _ = 1, 60 do
+    dveh._x = dveh._x + 0.1852
+    driveTick(dp, dveh)
+end
+checkEq(drive.frames, 60, "跑了 60 幀")
+checkEq(dveh._imp.max, 1, "單幀施力次數的最高水位是 1（addImpulse 是單槽）")
+checkEq(drive.bad.impulse, 0,
+    "沒有任何一幀施力超過一次（首次違規幀 " .. tostring(drive.bad.atImpulse) .. "）")
+checkEq(drive.bad.pair, 0,
+    "每幀 alloc 與 release 成對（首次違規幀 " .. tostring(drive.bad.atPair) .. "）")
+checkEq(drive.bad.live, 0,
+    "每幀結束時池水位歸零（首次違規幀 " .. tostring(drive.bad.atLive) .. "）")
+checkEq(drive.pool.live, 0, "60 幀跑完沒有任何向量沒還")
+checkEq(drive.pool.alloc, 120, "60 個控制幀各取兩顆向量")
+checkEq(drive.pool.alloc, drive.pool.release, "取還總數相同")
+checkEq(drive.pool.bad, 0, "沒有 release 過不在手上的向量")
+checkEq(dveh._imp.useAfterRelease, 0, "施力用的向量都還在手上（沒有 use-after-release）")
+checkEq(dveh._imp.total, 60, "60 幀各施力一次")
+checkEq(drive.calls.getForwardVector, 60, "每幀只讀一次前向向量")
+checkEq(drive.calls.setRegulatorSpeed, 60, "60 幀各設一次定速")
+checkEq(drive.calls.badRegSpeed, 0, "定速不曾是負數或非數字")
+checkTrue(drive.calls.maxRegSpeed <= 40,
+    "定速不超過沙盒 AutoDriveMaxSpeed=40（實得 " .. tostring(drive.calls.maxRegSpeed) .. "）")
+checkEq(drive.calls.forceBrake, 0, "正常跟線不搶煞車")
+checkEq(drive.nav.targetCalls, 0, "60 幀都在 250ms 節流窗內：完全沒重查導航目標")
+
+-- 沙盒上限的三段夾限：太小夾到 5、太大夾到 120、非數字回預設 70。
+-- 一律用 300 點的長路線，才有足夠跑道讓起點速度真的頂到上限（短路線會被
+-- follower 的反向制動壓低，測不到夾限）。車頭要幾乎對準路線（< 誤差減速的
+-- 10° 門檻）：帶著 0.3 rad 誤差時 follower 會收油，觀測到的是「夾限×收油」
+-- 的合成值而不是夾限本身。
+for _, ok in ipairs({ { 1, 5 }, { 999, 120 }, { "fast", 70 } }) do
+    MDAD.Drive.stop(0, nil)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = true, AutoDriveMaxSpeed = ok[1] })
+    dveh._x, dveh._y, dveh._speed = 0, 0, 0
+    setHeading(dveh, 0.05)
+    drive.nav.route = newRoute(300, 0, 0, 4, 0)
+    checkTrue(MDAD.Drive.start(dp), "AutoDriveMaxSpeed=" .. tostring(ok[1]) .. " 可以啟動")
+    driveReset(dveh)
+    for _ = 1, 8 do driveTick(dp, dveh) end
+    checkTrue(drive.calls.maxRegSpeed > ok[2] - 1 and drive.calls.maxRegSpeed <= ok[2],
+        "AutoDriveMaxSpeed=" .. tostring(ok[1]) .. " 夾到 " .. ok[2] ..
+        " km/h（實得 " .. tostring(drive.calls.maxRegSpeed) .. "）")
+    checkEq(drive.calls.badRegSpeed, 0, "夾限後的定速仍是非負數字")
+end
+setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = true, AutoDriveMaxSpeed = 40 })
+
+-- =====================================================================
+-- 情境二十：轉向的符號關係與力的量級（力矩由 relPos × impulse 就地算，不抄 production 係數）
+-- =====================================================================
+scenario("轉向符號與量級：誤差反號則力矩反號、幀奇偶只翻中心力、衝量落在推得動又不甩尾的區間")
+
+-- 車頭比路線朝向大 0.3 rad（車頭偏左）→ 前視點落在右手邊 → 誤差為負。
+-- 繞 +y 的正向旋轉會讓 (x,z) 向量順時針轉，也就是 heading 變小；因此
+-- 「要往右修（誤差為負）」對應的是**正**的偏航力矩。
+MDAD.Drive.stop(0, nil)
+dveh._x, dveh._y, dveh._speed, dveh._steering = 0, 0, 20, 0
+setHeading(dveh, 0.3)
+drive.nav.route = newRoute(40, 0, 0, 4, 0)
+checkTrue(MDAD.Drive.start(dp), "短路線啟動（40 點＝118 個點運算，第一幀就建完表）")
+driveReset(dveh)
+driveTick(dp, dveh)
+checkEq(dveh._imp.total, 1, "短路線第一幀就建完剖面並施力")
+drive.snapTorque = dveh._imp.torqueY
+drive.snapForce = dveh._imp.x
+drive.snapRelX = dveh._imp.rx
+checkTrue(drive.snapTorque > 0,
+    "車頭偏左（誤差為負）：偏航力矩為正（實得 " .. tostring(drive.snapTorque) .. "）")
+checkEq(dveh._imp.y, 0, "impulse 沒有垂直分量（帶垂直分量會變成翻滾／俯仰力矩）")
+checkEq(dveh._imp.ry, 0, "relPos 沒有垂直分量")
+checkTrue(dveh._imp.rx * dveh._fwdX + dveh._imp.rz * dveh._fwdY < 0,
+    "施力點落在車尾（relPos 沿前向為負）")
+
+driveTick(dp, dveh)
+checkEq(dveh._imp.total, 2, "第二幀也只施力一次")
+checkTrue(dveh._imp.x * drive.snapForce > 0,
+    "側向橫推的中心力兩幀同向（力矩來源是持續的側推，不是幀間交替）")
+checkTrue(dveh._imp.torqueY * drive.snapTorque > 0, "力矩與幀奇偶無關，持續同向")
+checkNear(dveh._imp.x * dveh._fwdX + dveh._imp.z * dveh._fwdY, 0, 1e-6,
+    "中心力是純側向（與前向點積 0）：縱向推力為零，不干擾 regulator 控速")
+checkTrue(dveh._imp.rx ~= drive.snapRelX,
+    "幀奇偶擺動施力點（車尾左右角交替，防同點數值共振）")
+
+-- 鏡像：車頭偏右（誤差為正）→ 力矩必須反號
+MDAD.Drive.stop(0, nil)
+dveh._x, dveh._y = 0, 0
+setHeading(dveh, -0.3)
+drive.nav.route = newRoute(40, 0, 0, 4, 0)
+checkTrue(MDAD.Drive.start(dp), "鏡像情境重新啟動（新 session 沒有舊誤差歷史）")
+driveReset(dveh)
+driveTick(dp, dveh)
+checkEq(dveh._imp.total, 1, "鏡像情境第一幀施力一次")
+checkTrue(dveh._imp.torqueY < 0,
+    "車頭偏右（誤差為正）：偏航力矩為負（實得 " .. tostring(dveh._imp.torqueY) .. "）")
+checkTrue(dveh._imp.torqueY * drive.snapTorque < 0, "朝向誤差反號 → 力矩反號")
+
+-- 對準路線：轉向落在死區，不施力也不取 impulse 向量（免無謂抖動）
+MDAD.Drive.stop(0, nil)
+dveh._x, dveh._y = 0, 0
+setHeading(dveh, 0)
+drive.nav.route = newRoute(40, 0, 0, 4, 0)
+checkTrue(MDAD.Drive.start(dp), "對準路線也能啟動")
+driveReset(dveh)
+driveTick(dp, dveh)
+checkEq(dveh._imp.total, 0, "朝向已對準：轉向落在死區，不施力")
+checkEq(drive.calls.setRegulatorSpeed, 1, "死區不施力但照樣控速")
+checkEq(drive.pool.alloc, 1, "沒施力時只取一顆向量（forward）")
+checkEq(drive.pool.release, 1, "沒施力也要把 forward 還回池子")
+checkEq(drive.pool.live, 0, "死區這條路徑同樣不能漏 release")
+
+-- 力的量級：符號全對但推力小兩個數量級＝實機「按了自駕，車直直開過路口」；
+-- 2026-08-28 二輪實測連「純力矩×0.8m 臂」的 43k-122k 都只換到每秒 5-9° 偏航。
+-- 幾何（2.2m 車尾臂＋側向衝量）與量級改採 Derpy 在整個 Workshop 用戶群驗證過的
+-- 標定。把車頭轉到幾乎反向（2.8 rad＝160° > 原地調頭門檻 135°），follower 必定
+-- 給飽和轉向，量到的就是這台車拿得到的最大轉向衝量。不抄 production 的係數，
+-- 只圈出可用區間：下界＝夠力過路口，上界＝不會把車彈飛。
+MDAD.Drive.stop(0, nil)
+dveh._x, dveh._y, dveh._steering = 0, 0, 0
+dveh._speed, dveh._mass = 30, 1200
+setHeading(dveh, 2.8)
+drive.nav.route = newRoute(40, 0, 0, 4, 0)
+checkTrue(MDAD.Drive.start(dp), "轉向飽和情境啟動")
+driveReset(dveh)
+driveTick(dp, dveh)
+checkEq(dveh._imp.total, 1, "轉向飽和幀照樣只施力一次")
+drive.f30 = impulseMag(dveh)
+checkTrue(drive.f30 >= 50000, "1200kg／30km/h／轉向飽和：衝量至少 50000（實得 "
+    .. tostring(drive.f30) .. "；純力矩模型的 43k 實測過彎偏航率差一個數量級）")
+checkTrue(drive.f30 <= 150000, "同一組條件下衝量不超過 150000（實得 "
+    .. tostring(drive.f30) .. "；再大就是甩尾／彈飛）")
+
+-- 速度增益：0 km/h 仍有轉向權威、隨速度單調上升、封頂後不再發散
+dveh._speed = 0
+driveReset(dveh)
+driveTick(dp, dveh)
+drive.f0 = impulseMag(dveh)
+dveh._speed = 70
+driveReset(dveh)
+driveTick(dp, dveh)
+drive.f70 = impulseMag(dveh)
+dveh._speed = 200
+driveReset(dveh)
+driveTick(dp, dveh)
+drive.f200 = impulseMag(dveh)
+checkTrue(drive.f0 > 0 and drive.f0 == drive.f0 and drive.f0 < math.huge,
+    "0 km/h 仍有有限且非零的轉向權威（原地掉頭要推得動，實得 " .. tostring(drive.f0) .. "）")
+checkTrue(drive.f70 > drive.f0, "轉向衝量隨速度單調上升（0 km/h＝" .. tostring(drive.f0)
+    .. "、70 km/h＝" .. tostring(drive.f70) .. "）")
+checkTrue(drive.f70 <= 250000,
+    "70 km/h 的衝量仍在上界內（實得 " .. tostring(drive.f70)
+    .. "；量級上限採計速度封頂在 60 km/h，不隨車速無限成長）")
+checkNear(drive.f200, drive.f70, 1e-6, "70 km/h 以上封頂：速度再高衝量都不成長（200 km/h 實得 "
+    .. tostring(drive.f200) .. "）")
+
+-- =====================================================================
+-- 情境二十一：玩家讓位與恢復
+-- =====================================================================
+scenario("玩家讓位：當幀零施力＋關 regulator，連續 10 個乾淨幀才恢復跟線")
+
+MDAD.Drive.stop(0, nil)
+dveh._x, dveh._y, dveh._speed, dveh._steering = 0, 0, 20, 0
+setHeading(dveh, 0.3)
+drive.nav.route = newRoute(40, 0, 0, 4, 0)
+checkTrue(MDAD.Drive.start(dp), "讓位情境啟動")
+driveReset(dveh)
+driveTick(dp, dveh)
+checkEq(dveh._imp.total, 1, "正常跟線會施力（讓位斷言才有對照）")
+
+-- getCurrentSteering 的門檻是 0.01：手把的類比轉向會有微小殘值，不能一碰就讓位
+dveh._steering = 0.005
+driveReset(dveh)
+driveTick(dp, dveh)
+checkEq(dveh._imp.total, 1, "轉向 0.005 在門檻以下：不算玩家輸入")
+
+dveh._steering = 0.02
+driveReset(dveh)
+driveTick(dp, dveh)
+checkEq(dveh._imp.total, 0, "玩家在轉方向盤：當幀完全不施力")
+checkEq(drive.calls.regulatorOff, 1, "讓位時關掉 regulator")
+checkEq(drive.calls.regulatorOn, 0, "讓位時不再供油")
+checkEq(drive.calls.setRegulatorSpeed, 0, "讓位時不設定速")
+checkEq(drive.calls.forceBrake, 0, "讓位不搶煞車（玩家要自己接手）")
+checkEq(drive.pool.alloc, 0, "讓位幀不取向量池")
+checkEq(#halos, 1, "讓位提示一次")
+checkEq(haloKey(), DKEY.MANUAL, "讓位提示 ManualOverride")
+checkEq(halos[1] and halos[1].kind, "good", "讓位是綠字（不是錯誤）")
+checkTrue(MDAD.Drive.isActive(0), "讓位不結束 session（待命中）")
+
+driveReset(dveh)
+driveTick(dp, dveh)
+driveTick(dp, dveh)
+checkEq(#halos, 0, "持續讓位不重複提示")
+checkEq(dveh._imp.total, 0, "持續讓位持續不施力")
+checkEq(drive.calls.regulatorOff, 0, "已經在 yield 就不重複關 regulator")
+
+-- 放手：前 9 幀還在觀察，第 10 個乾淨幀才恢復
+dveh._steering = 0
+driveReset(dveh)
+for _ = 1, 9 do driveTick(dp, dveh) end
+checkEq(dveh._imp.total, 0, "放手後前 9 幀還在觀察，不施力")
+checkEq(drive.calls.setRegulatorSpeed, 0, "觀察期不控速")
+checkEq(drive.pool.alloc, 0, "觀察期不取向量池")
+driveTick(dp, dveh)
+checkEq(dveh._imp.total, 1, "第 10 個乾淨幀恢復跟線並施力")
+checkEq(drive.calls.setRegulatorSpeed, 1, "恢復後重新控速")
+
+-- 油門／煞車沒有等價的類比觀測（isGasPedalPressed 在 regulator 供油時恆真），
+-- 所以改看鍵位；五個綁定名都必須讓位
+for _, ok in ipairs({ "Left", "Right", "Forward", "Backward", "Brake" }) do
+    drive.keys[ok] = true
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkEq(dveh._imp.total, 0, ok .. " 鍵按下：當幀不施力")
+    checkTrue(MDAD.Drive.isActive(0), ok .. " 鍵按下不結束 session")
+    drive.keys[ok] = false
+    for _ = 1, 10 do driveTick(dp, dveh) end
+end
+driveReset(dveh)
+driveTick(dp, dveh)
+checkEq(dveh._imp.total, 1, "五個鍵都放開並等滿乾淨幀後回到跟線")
+
+-- =====================================================================
+-- 情境二十二：超速主動煞車與抵達停車
+-- =====================================================================
+scenario("超速主動煞車；抵達目的地煞停，停妥後交還控制權，途中玩家接手立刻放手")
+
+-- regulator 只會「不再供油」，下坡或超速時它不會煞車，所以超出目標太多要自己煞
+driveReset(dveh)
+driveTick(dp, dveh)
+checkEq(drive.calls.regulatorOn, 1, "沒超速時 regulator 開著供油")
+checkEq(drive.calls.forceBrake, 0, "沒超速不煞車")
+
+dveh._speed = 100      -- 目標約 40 km/h，超出 60 > OVERSPEED_BRAKE(15)
+driveReset(dveh)
+driveTick(dp, dveh)
+checkEq(drive.calls.forceBrake, 1, "超速超過門檻：主動煞車")
+checkEq(drive.calls.regulatorOff, 1, "煞車時關掉 regulator")
+checkEq(drive.calls.regulatorOn, 0, "煞車時不供油")
+checkEq(drive.calls.setRegulatorSpeed, 0, "煞車時不設定速")
+checkEq(dveh._imp.total, 1, "超速煞車時照樣修正轉向（每幀仍只施力一次）")
+checkEq(drive.pool.live, 0, "煞車路徑同樣不漏 release")
+dveh._speed = 20
+
+-- 抵達：用短路線（8 點×4 公尺＝28 公尺）。follower 的投影搜尋窗只有前後 12 段，
+-- 把車瞬移到長路線的終點不會被判定為抵達——那是刻意的防瞬移設計，不是 bug。
+MDAD.Drive.stop(0, nil)
+dveh._x, dveh._y, dveh._speed, dveh._steering = 0, 0, 20, 0
+setHeading(dveh, 0.3)
+drive.nav.route = newRoute(8, 0, 0, 4, 0)
+checkTrue(MDAD.Drive.start(dp), "短路線啟動")
+driveReset(dveh)
+driveTick(dp, dveh)
+checkEq(dveh._imp.total, 1, "還沒到：照常施力")
+-- 假抵達守衛：車移到終點前 2 公尺、但橫向偏離 20 公尺（被撞開／擦身而過）。
+-- 沿路徑剩餘距離同樣是 2m，只看 remaining 的話這裡就會宣告到站並煞停，
+-- 而車其實還在 20 公尺外的路邊。
+dveh._x, dveh._y = 26, 20
+driveReset(dveh)
+driveTick(dp, dveh)
+checkEq(drive.calls.forceBrake, 0, "橫向偏離終點 20m：不進抵達煞停")
+checkEq(drive.calls.regulatorOff, 0, "橫向偏離終點：不關 regulator")
+checkEq(dveh._imp.total, 1, "橫向偏離終點：照常跟線施力（要往終點收斂）")
+checkTrue(MDAD.Drive.isActive(0), "橫向偏離終點：session 繼續跟線，不是 arrive")
+-- 而且不能只是「不宣告抵達」：制動剖面在這裡只給 8.8 km/h、再往終點靠會收到 0，
+-- 定速 0 的車停在路邊等一個永遠不會成立的 reached。follower 的末段脫困地板把目標
+-- 速度抬到爬行 12 km/h，車才有動力自己開回終點（沙盒上限 40 在這之上，不夾）
+checkEq(drive.calls.setRegulatorSpeed, 1, "橫向偏離終點：照樣控速")
+checkNear(dveh._regSpeed, 12, 1e-9, "橫向偏離終點：定速抬到爬行 12 km/h（不是 0 速卡死）")
+checkEq(drive.calls.regulatorOn, 1, "橫向偏離終點：regulator 開著供油（要把車開回終點）")
+dveh._y = 0
+
+dveh._x = 26           -- 沿路徑剩 2 公尺、離終點直線距離也是 2 公尺 <= ARRIVE_M(5)
+driveReset(dveh)
+driveTick(dp, dveh)
+checkEq(dveh._imp.total, 0, "抵達當幀不再施力（停車時不能還在推車）")
+checkEq(drive.calls.forceBrake, 1, "抵達當幀開始煞車")
+checkEq(drive.calls.regulatorOff, 1, "抵達關掉 regulator")
+checkEq(dveh._regulator, false, "抵達後 regulator 是關的")
+checkEq(drive.pool.alloc, 1, "抵達幀只取 forward 一顆向量")
+checkEq(drive.pool.live, 0, "抵達幀也要把向量還回池子")
+checkTrue(MDAD.Drive.isActive(0), "還沒停妥：session 繼續（要把車停好）")
+
+-- 煞停途中就算引擎熄火也不能半路放手
+dveh._engine = false
+driveReset(dveh)
+driveTick(dp, dveh)
+checkTrue(MDAD.Drive.isActive(0), "煞停途中熄火仍不放手（arrive 排在其他閘門之前）")
+checkEq(drive.calls.forceBrake, 1, "繼續送煞車")
+checkEq(dveh._imp.total, 0, "煞停途中不施力")
+checkEq(drive.calls.getForwardVector, 0, "煞停途中不做跟線運算")
+checkEq(drive.pool.alloc, 0, "煞停途中不取向量池")
+checkEq(#halos, 0, "還沒停妥不提示")
+dveh._engine = true
+
+dveh._stopped = true
+driveReset(dveh)
+driveTick(dp, dveh)
+checkFalse(MDAD.Drive.isActive(0), "停妥後結束 session")
+checkEq(drive.calls.forceBrake, 0, "停妥後不再送煞車")
+checkEq(drive.calls.regulatorOff, 1, "停妥時關掉 regulator")
+checkEq(#halos, 1, "抵達提示一次")
+checkEq(haloKey(), DKEY.ARRIVED, "抵達提示 Arrived")
+checkEq(halos[1] and halos[1].kind, "good", "抵達是綠字")
+dveh._stopped = false
+
+-- 煞停途中玩家自己踩煞車：立刻交還，不跟他搶（已送出的 forceBrake 1 秒後自行失效）
+MDAD.Drive.stop(0, nil)
+dveh._x, dveh._y = 0, 0
+drive.nav.route = newRoute(8, 0, 0, 4, 0)
+checkTrue(MDAD.Drive.start(dp), "重新啟動以再測一次抵達")
+driveTick(dp, dveh)
+dveh._x = 26
+driveTick(dp, dveh)
+checkTrue(MDAD.Drive.isActive(0), "已進入煞停")
+drive.keys.Brake = true
+driveReset(dveh)
+driveTick(dp, dveh)
+checkFalse(MDAD.Drive.isActive(0), "煞停途中玩家踩煞車：立刻交還控制權")
+checkEq(drive.calls.forceBrake, 0, "交還後不再送煞車")
+checkEq(drive.calls.regulatorOff, 1, "交還時把 regulator 關掉（不留定速給下一個上車的人）")
+checkEq(#halos, 0, "玩家自己接手不彈紅字")
+drive.keys.Brake = false
+
+-- =====================================================================
+-- 情境二十三：失效停止
+-- =====================================================================
+scenario("失效停止：下車／換車／非駕駛／死亡靜默結束；引擎、電瓶、模組、GPS、nav API、路線各自紅字")
+
+checkTrue(armDrive(), "失效情境的基準 session 建立成功")
+dp._vehicle = nil
+driveTick(dp, dveh)
+checkFalse(MDAD.Drive.isActive(0), "玩家下車：靜默結束")
+checkEq(#halos, 0, "下車不是錯誤，不彈紅字")
+checkEq(drive.calls.regulatorOff, 1, "下車也要把 regulator 關掉")
+
+checkTrue(armDrive(), "換車情境重新啟動")
+veh = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }), engineRunning = true })
+veh._driver = dp
+dp._vehicle = veh
+driveTick(dp, dveh)
+checkFalse(MDAD.Drive.isActive(0), "換到另一輛車：靜默結束")
+checkEq(#halos, 0, "換車不彈紅字")
+checkEq(dveh._regulator, false, "關掉的是**原本**那台車的 regulator")
+
+checkTrue(armDrive(), "非駕駛情境重新啟動")
+dveh._driver = nil
+driveTick(dp, dveh)
+checkFalse(MDAD.Drive.isActive(0), "被擠到副駕：靜默結束")
+checkEq(#halos, 0, "換座位不彈紅字")
+
+checkTrue(armDrive(), "死亡情境重新啟動")
+dp._dead = true
+driveTick(dp, dveh)
+checkFalse(MDAD.Drive.isActive(0), "玩家死亡：靜默結束")
+checkEq(#halos, 0, "死亡不彈紅字")
+checkEq(drive.calls.getForwardVector, 0, "死亡當幀不再算控制")
+checkEq(drive.pool.alloc, 0, "死亡當幀不取向量池")
+
+checkTrue(armDrive(), "熄火情境重新啟動")
+dveh._engine = false
+driveTick(dp, dveh)
+checkFalse(MDAD.Drive.isActive(0), "引擎熄火：結束自駕")
+checkEq(haloKey(), DKEY.ENGINE, "熄火提示 EngineOff")
+checkEq(halos[1] and halos[1].kind, "bad", "失效停止是紅字")
+
+checkTrue(armDrive(), "電瓶情境重新啟動")
+dveh._part._item._uses = 0
+driveTick(dp, dveh)
+checkFalse(MDAD.Drive.isActive(0), "行進中電瓶沒電：結束自駕")
+checkEq(haloKey(), DKEY.ENGINE, "電瓶死掉沿用 EngineOff")
+
+checkTrue(armDrive(), "模組情境重新啟動")
+st.auto = nil
+driveTick(dp, dveh)
+checkFalse(MDAD.Drive.isActive(0), "自駕模組被拆掉：結束自駕")
+checkEq(haloKey(), DKEY.NEED_MODULE, "缺模組提示 NeedModule")
+st.auto = true
+
+-- 導航道具閘門在行進中失效。driveGate 每幀用 context="draw"，隨身搜尋有 1 秒快取，
+-- 所以要跨過 TTL 才會重掃背包——這正是「每幀不掃背包」的效能設計。
+setSandbox({ NeedItemForNav = true, NeedItemForAutoDrive = true, AutoDriveMaxSpeed = 40 })
+dp:getInventory():AddItem(newItem(GPS_T, { uses = 0.5, useDelta = 0.006 }))
+nowMs = nowMs + 2000
+checkTrue(armDrive(), "帶著有電 GPS 可以啟動（NeedItemForNav=true）")
+it = MDAD.findChargedPortableGPS(dp)
+checkTrue(it ~= nil, "GPS 真的在背包裡")
+dp:getInventory():DoRemoveItem(it)
+driveReset(dveh)
+driveTick(dp, dveh)
+checkTrue(MDAD.Drive.isActive(0), "GPS 剛掉：draw 快取還沒過期，自駕不受影響")
+checkEq(stats.scanTypeEval, 0, "快取有效期內完全不掃背包")
+nowMs = nowMs + 1001
+driveReset(dveh)
+driveTick(dp, dveh)
+checkEq(stats.scanTypeEval, 1, "跨過 1 秒快取才重掃一次背包")
+checkFalse(MDAD.Drive.isActive(0), "行進中 GPS 掉了：結束自駕")
+checkEq(haloKey(), NEED_GPS, "缺 GPS 提示 NeedGPS")
+setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = true, AutoDriveMaxSpeed = 40 })
+
+checkTrue(armDrive(), "nav API 情境重新啟動")
+MinidoracatMiniMapAPI = nil
+driveTick(dp, dveh)
+checkFalse(MDAD.Drive.isActive(0), "行進中主 MOD 被拔掉：結束自駕")
+checkEq(haloKey(), NAV_API_MISSING, "缺 API 提示 NavApiMissing")
+installNavApi(2)
+
+-- 路線遺失的三條路徑（都要跨過 250ms 節流才會重查）
+checkTrue(armDrive(), "目標消失情境重新啟動")
+drive.nav.tx = nil
+nowMs = nowMs + 250
+driveTick(dp, dveh)
+checkFalse(MDAD.Drive.isActive(0), "導航目標被清掉：結束自駕")
+checkEq(haloKey(), DKEY.LOST, "目標消失提示 LostRoute")
+
+checkTrue(armDrive(), "路線重算中情境重新啟動")
+drive.nav.state = "pending"
+nowMs = nowMs + 250
+driveTick(dp, dveh)
+checkFalse(MDAD.Drive.isActive(0), "路線重算中拿不到路線：結束自駕")
+checkEq(haloKey(), DKEY.LOST, "路線拿不到提示 LostRoute")
+
+checkTrue(armDrive(), "壞路線情境重新啟動")
+drive.nav.route = { pts = { 5, 5 } }
+nowMs = nowMs + 250
+driveTick(dp, dveh)
+checkFalse(MDAD.Drive.isActive(0), "新路線 follower 收不了：結束自駕")
+checkEq(haloKey(), DKEY.LOST, "壞路線提示 LostRoute")
+
+-- =====================================================================
+-- 情境二十四：route identity 換了才重建剖面
+-- =====================================================================
+scenario("路線換 identity 才重建剖面：重建期不控速、follower 狀態就地重設")
+
+-- 監看 follower 的四個入口：只是順路記一筆，真正的實作照樣執行
+drive.spy.beginReal = MDADFollower.begin
+drive.spy.resetReal = MDADFollower.resetState
+drive.spy.controlReal = MDADFollower.control
+MDADFollower.begin = function(route, maxSpeed)
+    drive.spy.begin = drive.spy.begin + 1
+    return drive.spy.beginReal(route, maxSpeed)
+end
+MDADFollower.resetState = function(state)
+    drive.spy.reset = drive.spy.reset + 1
+    drive.spy.resetState = state
+    return drive.spy.resetReal(state)
+end
+MDADFollower.control = function(profile, state, x, y, heading, speed, dt)
+    drive.spy.control = drive.spy.control + 1
+    drive.spy.idxIn = state.idx
+    drive.spy.state = state
+    return drive.spy.controlReal(profile, state, x, y, heading, speed, dt)
+end
+
+MDAD.Drive.stop(0, nil)
+dveh._x, dveh._y, dveh._speed, dveh._steering = 0, 0, 20, 0
+dveh._engine, dveh._driver = true, dp
+dveh._part._item._uses = 0.8
+dp._vehicle = dveh
+setHeading(dveh, 0.3)
+drive.nav.tx, drive.nav.ty, drive.nav.state = 300, 0, "ok"
+drive.nav.route = newRoute(40, 0, 0, 4, 0)
+driveReset(dveh)
+checkTrue(MDAD.Drive.start(dp), "route identity 情境啟動")
+checkEq(drive.spy.begin, 1, "啟動時建一次剖面")
+checkEq(drive.spy.control, 0, "啟動本身不呼叫 control")
+driveTick(dp, dveh)
+checkEq(drive.spy.control, 1, "第一幀剖面建完並呼叫一次 control")
+drive.spy.firstState = drive.spy.state
+checkEq(type(drive.spy.firstState), "table", "control 拿到的 follower state 是 table")
+
+for _ = 1, 5 do
+    dveh._x = dveh._x + 4
+    driveTick(dp, dveh)
+end
+checkEq(drive.spy.state, drive.spy.firstState, "每幀重用同一顆 state（不是每幀新配一顆）")
+checkTrue(drive.spy.idxIn > 1,
+    "進度真的推進了（進 control 時的 idx＝" .. tostring(drive.spy.idxIn) .. "）")
+
+-- 同一顆 route：節流到期也不重建
+nowMs = nowMs + 250
+driveReset(dveh)
+driveTick(dp, dveh)
+checkEq(drive.nav.targetCalls, 1, "節流到期會重查一次導航目標")
+checkEq(drive.nav.routeCalls, 1, "有目標才去要路線")
+checkEq(drive.spy.begin, 0, "route 是同一顆：不重建剖面")
+checkEq(drive.spy.reset, 0, "route 沒換：不重設 follower 狀態")
+checkEq(dveh._imp.total, 1, "沒重建就照常跟線")
+
+-- 換一顆新 route table＝主 MOD 重算過（改目標、偏航重算）：整份重建
+drive.nav.route = newRoute(300, 0, 0, 4, 0)
+nowMs = nowMs + 250
+driveReset(dveh)
+driveTick(dp, dveh)
+checkEq(drive.spy.begin, 1, "route 換 identity：重建剖面")
+checkEq(drive.spy.reset, 1, "重建時重設 follower 狀態（否則吃到舊路線的誤差歷史）")
+checkEq(drive.spy.resetState, drive.spy.firstState, "就地重設同一顆 state，不換 table")
+checkEq(drive.spy.control, 0, "重建當幀不呼叫 control")
+checkEq(dveh._imp.total, 0, "重建當幀不施力")
+checkEq(drive.calls.setRegulatorSpeed, 0, "重建當幀不控速")
+checkEq(drive.calls.regulatorOff, 1, "重建期間鬆油門讓車滑行")
+checkEq(drive.calls.forceBrake, 0, "重建期間不煞車（剖面通常一兩幀就好）")
+checkEq(drive.pool.alloc, 0, "重建幀不取向量池")
+
+-- 新剖面同樣分幀建：重建那一幀已經是第 1 次 stepBuild，還要 7 幀才建完
+driveReset(dveh)
+for _ = 1, 6 do driveTick(dp, dveh) end
+checkEq(dveh._imp.total, 0, "新剖面建構期同樣不施力")
+driveTick(dp, dveh)
+checkEq(dveh._imp.total, 1, "建完新剖面就恢復跟線")
+checkEq(drive.spy.idxIn, 1, "重設後從路線起點重新投影（idx 歸 1）")
+
+MDADFollower.begin = drive.spy.beginReal
+MDADFollower.resetState = drive.spy.resetReal
+MDADFollower.control = drive.spy.controlReal
+
+-- =====================================================================
+-- 情境二十五：車輛 radial 選單
+-- =====================================================================
+scenario("車輛 radial：片補在原版之後、只給駕駛、選單看得見才加、標題隨狀態、回呼真的切換")
+
+MDAD.Drive.stop(0, nil)
+drive.menus[0] = newRadialMenu()
+dp._vehicle, dveh._driver = dveh, dp
+dveh._x, dveh._y, dveh._steering = 0, 0, 0
+setHeading(dveh, 0.3)
+drive.nav.route = newRoute(40, 0, 0, 4, 0)
+
+driveReset(dveh)
+ISVehicleMenu.showRadialMenu(dp)
+checkEq(drive.orig.n, 1, "原版 showRadialMenu 有被呼叫（wrapper 沒把它吃掉）")
+checkEq(drive.orig.player, dp, "原樣把玩家傳給原版")
+checkEq(#drive.menus[0].slices, 2, "原版的片還在，自駕片補在後面")
+checkEq(drive.menus[0].slices[1].text, "VANILLA",
+    "第一片是原版自己加的（我們的片必須在原版 clear() 之後才加）")
+opt = drive.menus[0].slices[2]
+checkEq(noteReason(opt.text), DKEY.START, "沒在自駕時標題是啟動")
+checkEq(opt.command, MDAD.Drive.toggle, "回呼交出的就是 production 的 Drive.toggle")
+checkEq(opt.arg1, dp, "回呼帶操作者")
+checkEq(opt.texture, "tex:AutopilotModule", "自駕片帶到自訂圖示")
+checkEq(drive.texCalls[1], "media/textures/Item_AutopilotModule.png", "先試完整 media 路徑")
+checkEq(drive.texCalls[2], "Item_AutopilotModule", "完整路徑拿不到就退回無路徑寫法")
+checkEq(#drive.texCalls, 2, "只查兩次貼圖")
+
+driveReset(dveh)
+ISVehicleMenu.showRadialMenu(dp)
+checkEq(#drive.texCalls, 0, "第二次開選單不再查貼圖（已快取）")
+checkEq(#drive.menus[0].slices, 2, "第二次開選單仍然只補一片")
+
+-- 回呼：啟動 → 標題變成停止 → 再按一次關閉
+driveReset(dveh)
+opt.command(opt.arg1)
+checkTrue(MDAD.Drive.isActive(0), "radial 回呼真的啟動自駕")
+checkEq(haloKey(), DKEY.START, "啟動提示 Start")
+driveTick(dp, dveh)
+checkEq(dveh._regulator, true, "radial 啟動的 session 真的在控速（regulator 開著）")
+driveReset(dveh)
+ISVehicleMenu.showRadialMenu(dp)
+opt = drive.menus[0].slices[2]
+checkEq(noteReason(opt.text), DKEY.STOP, "正在自駕時標題是停止")
+driveReset(dveh)
+opt.command(opt.arg1)
+checkFalse(MDAD.Drive.isActive(0), "再按一次關閉自駕")
+checkEq(haloKey(), DKEY.STOP, "關閉提示 Stop")
+checkEq(halos[1] and halos[1].kind, "good", "關閉是綠字")
+checkEq(dveh._regulator, false, "關閉自駕時把 regulator 關掉")
+
+-- 不補片的輸入路徑，以及實機抓到的 delayed-visibility 開啟時序
+driveReset(dveh)
+checkTrue(pcall(ISVehicleMenu.showRadialMenu, nil), "playerObj 為 nil 不炸")
+checkEq(drive.orig.n, 1, "nil 玩家也照樣先呼叫原版")
+
+dp._vehicle = nil
+ISVehicleMenu.showRadialMenu(dp)
+checkEq(#drive.menus[0].slices, 1, "人不在車上（車外 radial）：不補自駕片")
+dp._vehicle = dveh
+
+driveReset(dveh)
+dveh._driver = nil
+ISVehicleMenu.showRadialMenu(dp)
+checkEq(#drive.menus[0].slices, 1, "不是駕駛：不補自駕片")
+dveh._driver = dp
+
+driveReset(dveh)
+clearList(drive.menus[0].slices)
+drive.paused = true
+ISVehicleMenu.showRadialMenu(dp)
+checkEq(#drive.menus[0].slices, 0, "遊戲暫停：原版不開選單，本 MOD 也不補片")
+
+driveReset(dveh)
+drive.menus[0].slices[1] = { text = "EXISTING" }
+drive.menus[0]._visible = true
+ISVehicleMenu.showRadialMenu(dp)
+checkEq(#drive.menus[0].slices, 1, "選單原本已開：這次是 toggle-close，不補第二片")
+checkFalse(drive.menus[0]._visible, "toggle-close 後選單不可見")
+
+driveReset(dveh)
+drive.menus[0]._delayVisible = true
+ISVehicleMenu.showRadialMenu(dp)
+checkFalse(drive.menus[0]._visible,
+    "模擬 addToUIManager 後同 call stack 尚未回報 really-visible")
+checkEq(#drive.menus[0].slices, 2,
+    "post-call visibility 尚未更新時仍補片（2026-08-28 實機回歸）")
+
+drive.savedMenu = drive.menus[0]
+drive.menus[0] = nil
+checkTrue(pcall(ISVehicleMenu.showRadialMenu, dp), "拿不到 radial 選單時不炸")
+drive.menus[0] = drive.savedMenu
+
+-- 雙載保險：client 目錄的檔案會被引擎自動載入，別的檔案又 require 一次也不能包兩層
+loaded["MDAD_Driver"] = nil
+require "MDAD_Driver"
+checkEq(#(eventHandlers["OnPlayerUpdate"] or {}), 1,
+    "重複載入不會註冊第二個 OnPlayerUpdate（每幀跑兩遍＝同幀兩次 addImpulse）")
+driveReset(dveh)
+ISVehicleMenu.showRadialMenu(dp)
+checkEq(drive.orig.n, 1, "重複載入不會把 wrapper 包兩層（原版只被呼叫一次）")
+checkEq(#drive.menus[0].slices, 2, "重複載入不會把自駕片加兩次")
+
 clientFlag, serverFlag = false, true
 
 -- =====================================================================
--- 情境十六：理由鍵不得缺翻譯（鍵是 runtime 真的吐出來的，不是抄原始碼）
+-- 情境二十六：低頻診斷輸出（實機「按了關閉、感覺沒關」的唯一證據來源）
+-- =====================================================================
+scenario("診斷輸出：關閉時零 print 零 string.format；開啟時每秒一行跟線遙測、start/stop 留痕")
+
+drive.debug = false
+checkTrue(armDrive(), "診斷情境的基準 session 建立成功")
+
+-- ① 旗標關閉：熱路徑一行都不印，連格式字串都不生成
+driveReset(dveh)
+for _ = 1, 60 do driveTick(dp, dveh) end
+checkEq(#drive.logs, 0, "getDebug() 為 false：跟線 60 幀一行診斷都沒印")
+checkEq(drive.fmt, 0, "getDebug() 為 false：連 string.format 都沒呼叫（字串生成也是每幀成本）")
+checkEq(dveh._imp.total, 60, "關閉診斷不影響控制（60 幀照樣各施力一次）")
+
+-- ② 旗標開啟：同一毫秒內跑幾幀都只印一行
+drive.debug = true
+driveReset(dveh)
+for _ = 1, 60 do driveTick(dp, dveh) end
+checkEq(#drive.logs, 1, "同一毫秒內連跑 60 幀：跟線遙測只印一行（1 秒節流）")
+checkTrue(drive.fmt > 0, "開啟診斷才走 string.format")
+
+nowMs = nowMs + 1000
+driveReset(dveh)
+driveTick(dp, dveh)
+checkEq(#drive.logs, 1, "跨過 1 秒才印下一行")
+drive.line = drive.logs[1] or ""
+checkTrue(drive.line:find("[MDAD Drive]", 1, true) ~= nil,
+    "跟線遙測帶 MOD 前綴（實得 " .. drive.line .. "）")
+-- 欄位缺一不可：只有同一行同時看到 errDeg 與 force，才分得出「誤差沒算出來」
+-- 與「算對了但推力太小」——這兩種在遊戲裡都是「車不轉彎」
+for _, ok in ipairs({ "pn=", "mode=", "speed=", "target=", "errDeg=",
+                      "steer=", "force=", "remaining=", "regulator=" }) do
+    checkTrue(drive.line:find(ok, 1, true) ~= nil, "跟線遙測含欄位 " .. ok)
+end
+
+-- ③ start／stop／toggle 的結果都要留痕：玩家回報「按了沒反應」時，這是唯一能分辨
+--    「session 根本沒開」與「開了但車不動」的證據
+log = capturePrint(function() MDAD.Drive.stop(0, DKEY.LOST) end)
+checkTrue(logHas(log, "stop"), "停止會留下診斷")
+checkTrue(logHas(log, DKEY.LOST), "失效停止的診斷帶失效原因鍵")
+checkTrue(logHas(log, "regulator=off"), "診斷寫明 regulator 已關掉")
+checkTrue(logHas(log, "nobrake"),
+    "診斷寫明沒有硬煞：車還在滑就是慣性，不是 session 沒關（Stop 的契約沒變）")
+
+log = capturePrint(function() MDAD.Drive.stop(0, nil) end)
+checkEq(#log, 0, "沒有 session 時停止不印任何東西（不是每按一次就刷 log）")
+
+dveh._engine = false
+log = capturePrint(function() MDAD.Drive.start(dp) end)
+checkTrue(logHas(log, "blocked"), "啟動被閘門擋下也留一行")
+checkTrue(logHas(log, DKEY.ENGINE), "擋下的診斷帶原因鍵（與紅字同一個鍵）")
+dveh._engine = true
+
+log = capturePrint(function() MDAD.Drive.start(dp) end)
+checkTrue(MDAD.Drive.isActive(0), "引擎恢復後重新啟動成功")
+checkTrue(logHas(log, "ok maxSpeed="), "啟動成功的那行標成 ok 並帶上限速")
+
+driveReset(dveh)
+log = capturePrint(function() MDAD.Drive.toggle(dp) end)
+checkFalse(MDAD.Drive.isActive(0), "toggle 把自駕關掉")
+checkTrue(logHas(log, "toggle"), "toggle 自己也留一行")
+checkTrue(logHas(log, "manual"), "玩家自己關的：停止診斷標成 manual，不是失效原因")
+checkEq(drive.calls.regulatorOff, 1, "關閉自駕只關 regulator")
+checkEq(drive.calls.forceBrake, 0, "關閉自駕不硬煞（車繼續滑是慣性）")
+
+-- ④ 旗標關回去：後面的情境與收尾斷言都在零診斷狀態下跑
+drive.debug = false
+
+-- =====================================================================
+-- 情境二十七：卡死偵測（M3 不避障：撞上障礙時不能讓 regulator 永遠推牆）
+-- =====================================================================
+scenario("卡死偵測：速度／沿線進度／航向三凍結滿 5 秒才自動停車；原地調頭與正常行駛不誤觸")
+
+-- 卡死形狀（實機 2026-08-28）：車頭抵牆，speed≈0、remaining 不動、errDeg 不動，
+-- regulator 開著硬推。fake 車的位置由測試控制，speed 歸零＋位置凍結＝完美重現。
+checkTrue(armDrive(), "卡死情境啟動")
+dveh._speed = 0
+-- 第 1 幀只是「開始觀測到凍結」（記下計時起點），從那一幀起算滿 5 秒才停：
+-- 5 幀 ×1000ms 後經過 4000ms，session 必須還活著
+for i = 1, 5 do
+    nowMs = nowMs + 1000
+    driveTick(dp, dveh)
+end
+checkTrue(MDAD.Drive.isActive(0), "凍結 4 秒（未滿 5 秒）：session 還活著（不能太急著放棄）")
+checkEq(dveh._regulator, true, "凍結期間 regulator 照常在推（這正是要被斷路的狀態）")
+nowMs = nowMs + 1000
+driveReset(dveh)
+driveTick(dp, dveh)
+checkFalse(MDAD.Drive.isActive(0), "三觀測凍結滿 5 秒：自動停車")
+checkEq(haloKey(), DKEY.STUCK, "卡死提示 StopStuck")
+checkEq(halos[1] and halos[1].kind, "bad", "卡死是紅字（要玩家來處理）")
+checkEq(drive.calls.regulatorOff, 1, "卡死停車關掉 regulator")
+checkEq(drive.calls.forceBrake, 0, "卡死停車不硬煞（車本來就不動；倒車脫困不被搶煞車）")
+checkEq(dveh._regulator, false, "停車後 regulator 是關的")
+
+-- 原地調頭不誤觸：速度近零但航向每幀在轉（> STUCK_ERR_EPS），計時不斷重置
+checkTrue(armDrive(), "原地調頭情境啟動")
+dveh._speed = 0
+for i = 1, 7 do
+    setHeading(dveh, 0.3 + i * 0.15)
+    nowMs = nowMs + 1000
+    driveTick(dp, dveh)
+end
+checkTrue(MDAD.Drive.isActive(0), "航向持續在轉：7 秒也不算卡死（原地調頭是正常動作）")
+
+-- 正常行駛不誤觸：速度在動就直接重置（其餘兩個觀測連看都不看）
+checkTrue(armDrive(), "行駛情境啟動")
+dveh._speed = 20
+nowMs = nowMs + 6000
+driveTick(dp, dveh)
+checkTrue(MDAD.Drive.isActive(0), "速度 20 km/h：跨 6 秒的單幀也不觸發（moving 直接重置）")
+MDAD.Drive.stop(0, nil)
+
+-- =====================================================================
+-- 情境二十八：理由鍵不得缺翻譯（鍵是 runtime 真的吐出來的，不是抄原始碼）
 -- =====================================================================
 scenario("理由鍵覆蓋：每個分支都跑到，且四語 UI.json 都有對應翻譯")
 
 checkEq(type(MDAD), "table", "production MDAD.lua 真的載入了")
 checkEq(type(MDAD_Recipe), "table", "production MDAD_Recipe.lua 真的載入了")
 checkEq(type(ISAutoDriveDeviceAction), "table", "production TimedAction 真的載入了")
+checkEq(type(MDADFollower), "table", "production MDAD_Follower.lua 真的載入了")
+checkEq(type(MDAD.Drive), "table", "production client/MDAD_Driver.lua 真的載入了")
 checkEq(MDAD.MOD_ID, MOD_ID, "MOD_ID 常數")
 checkEq(MDAD.TYPE_GPS, GPS_T, "TYPE_GPS 與 items 腳本一致")
 checkEq(MDAD.TYPE_AUTO, AUTO_T, "TYPE_AUTO 與 items 腳本一致")
@@ -2523,6 +3942,12 @@ checkTrue(#(eventHandlers["OnFillWorldObjectContextMenu"] or {}) > 0,
 checkTrue(#(eventHandlers["OnServerCommand"] or {}) > 0, "client 掛上了 OnServerCommand 失敗回報")
 checkTrue(#(eventHandlers["OnGameStart"] or {}) > 0, "client 掛上了 OnGameStart 重試註冊")
 checkTrue(#(eventHandlers["OnCreatePlayer"] or {}) > 0, "client 掛上了 OnCreatePlayer")
+checkTrue(#(eventHandlers["OnPlayerUpdate"] or {}) > 0, "client/MDAD_Driver.lua 掛上了 OnPlayerUpdate")
+
+-- 自駕的向量池絆線：所有情境跑完，BaseVehicle 的池必須是空的。
+-- 漏一顆 releaseVector3f 在遊戲裡的表徵是「開久了就沒有轉向」，沒有任何錯誤訊息。
+checkEq(drive.pool.live, 0, "全程沒有任何池向量沒還（allocVector3f／releaseVector3f 成對）")
+checkEq(drive.pool.bad, 0, "全程沒有 release 過不在手上的向量")
 
 -- 距離判定的絆線：整份測試（含 apply／server／client 全鏈）都不該碰 DistToSquared
 checkEq(distCalls, 0, "全程沒有任何程式碼呼叫 DistToSquared（距離 fallback 不得復活）")
@@ -2542,6 +3967,16 @@ local EXPECT_KEYS = {
     "UI_MinidoracatAutoDrive_InstallAuto",
     "UI_MinidoracatAutoDrive_UninstallGPS",
     "UI_MinidoracatAutoDrive_UninstallAuto",
+    -- M3 自駕：每一個鍵都對應一條真的被執行過的分支
+    "UI_MinidoracatAutoDrive_NeedModule",
+    "UI_MinidoracatAutoDrive_RouteNotReady",
+    "UI_MinidoracatAutoDrive_NotDriver",
+    "UI_MinidoracatAutoDrive_EngineOff",
+    "UI_MinidoracatAutoDrive_ManualOverride",
+    "UI_MinidoracatAutoDrive_Arrived",
+    "UI_MinidoracatAutoDrive_LostRoute",
+    "UI_MinidoracatAutoDrive_Start",
+    "UI_MinidoracatAutoDrive_Stop",
 }
 for _, ok in ipairs(EXPECT_KEYS) do
     check(reasonKeys[ok] == true, "分支有被執行到並吐出 " .. ok)

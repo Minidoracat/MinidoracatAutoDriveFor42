@@ -10,5 +10,15 @@
     "UI_MinidoracatAutoDrive_AlreadyInstalled": "這輛車已經裝過了。",
     "UI_MinidoracatAutoDrive_NavApiMissing": "導航 API 不相容，請更新 Minidoracat MiniMap",
     "UI_MinidoracatAutoDrive_InstallFailed": "安裝失敗。",
-    "UI_MinidoracatAutoDrive_TooFar": "距離太遠，請下車並站到電瓶艙旁邊。"
+    "UI_MinidoracatAutoDrive_TooFar": "距離太遠，請下車並站到電瓶艙旁邊。",
+    "UI_MinidoracatAutoDrive_Start": "啟動自動駕駛",
+    "UI_MinidoracatAutoDrive_Stop": "關閉自動駕駛",
+    "UI_MinidoracatAutoDrive_NeedModule": "這輛車要先安裝自動駕駛模組。",
+    "UI_MinidoracatAutoDrive_RouteNotReady": "還沒有路線，請先在地圖上設定導航目標。",
+    "UI_MinidoracatAutoDrive_NotDriver": "要坐在駕駛座才能自動駕駛。",
+    "UI_MinidoracatAutoDrive_EngineOff": "需要引擎運轉中，而且電瓶還有電。",
+    "UI_MinidoracatAutoDrive_ManualOverride": "已交還手動操作，自動駕駛待命中。",
+    "UI_MinidoracatAutoDrive_Arrived": "已抵達目的地。",
+    "UI_MinidoracatAutoDrive_LostRoute": "路線遺失，自動駕駛已關閉。",
+    "UI_MinidoracatAutoDrive_StopStuck": "車輛卡住無法前進，自動駕駛已關閉。"
 }
