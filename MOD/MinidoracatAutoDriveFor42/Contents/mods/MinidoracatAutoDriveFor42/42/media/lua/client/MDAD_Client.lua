@@ -1,4 +1,4 @@
--- MDAD_Client.lua — registerNavGate＋車輛右鍵安裝／卸載（不做 radial，M3 再加）
+-- MDAD_Client.lua — registerNavGate＋actor-bound GPS usage heartbeat＋車輛右鍵拆裝。
 
 require "MDAD"
 require "TimedActions/ISAutoDriveDeviceAction"
@@ -62,6 +62,71 @@ Events.OnGameStart.Add(onGameStart)
 Events.OnCreatePlayer.Add(function(playerNum)
     if navGateStarted then warnNavGateMissing(playerNum) end
 end)
+
+-- GPS billing heartbeat：player modData 可被其他 MP client 覆寫，不能拿 TX/TY 當 server
+-- 權威。每約 1 秒只查本機 MiniMap API；on 轉態立即送並於 1.1 秒快速重試，之後每
+-- 5 秒續期；off 只在轉態送一次。payload 只有 active，server 從 actor 推導來源。
+local NAV_USAGE_CHECK_TICKS = 60
+local NAV_USAGE_HEARTBEAT_MS = 5000
+local NAV_USAGE_FIRST_RETRY_MS = 1100
+local navUsageTick = NAV_USAGE_CHECK_TICKS - 1
+local navUsageState = {}
+
+local function localNavActive(playerNum)
+    local api = MinidoracatMiniMapAPI
+    if type(api) ~= "table" or type(api.getNavTarget) ~= "function" then return false end
+    local tx, ty = api.getNavTarget(playerNum)
+    return type(tx) == "number" and tx * 0 == 0
+        and type(ty) == "number" and ty * 0 == 0
+end
+
+local function reportNavUsage(playerObj, active, state)
+    if isClient() then
+        state.args.active = active == true
+        sendClientCommand(playerObj, MDAD.MOD_ID, MDAD.CMD_NAV_USAGE, state.args)
+    elseif active == true then
+        MDAD.setNavUsage(playerObj)
+    else
+        MDAD.clearNavUsage(playerObj)
+    end
+end
+
+local function onNavUsageTick()
+    navUsageTick = navUsageTick + 1
+    if navUsageTick < NAV_USAGE_CHECK_TICKS then return end
+    navUsageTick = 0
+    local now = getTimestampMs()
+    local count = getNumActivePlayers()
+    for playerNum = 0, count - 1 do
+        local playerObj = getSpecificPlayer(playerNum)
+        if playerObj and playerObj:isLocalPlayer() then
+            local active = not playerObj:isDead() and localNavActive(playerNum)
+            local vehicle = playerObj:getVehicle()
+            local vehicleId = vehicle and vehicle:getId() or -1
+            local state = navUsageState[playerNum]
+            if not state then
+                state = { active = false, vehicleId = vehicleId,
+                    nextMs = 0, args = { active = false } }
+                navUsageState[playerNum] = state
+            end
+            local changed = state.active ~= active
+                or (active and state.vehicleId ~= vehicleId)
+            if changed or (active and now >= state.nextMs) then
+                reportNavUsage(playerObj, active, state)
+                if changed and active then
+                    state.nextMs = now + NAV_USAGE_FIRST_RETRY_MS
+                else
+                    state.nextMs = now + NAV_USAGE_HEARTBEAT_MS
+                end
+            end
+            state.active = active
+            state.vehicleId = vehicleId
+        end
+    end
+    for playerNum = count, 3 do navUsageState[playerNum] = nil end
+end
+
+Events.OnTick.Add(onNavUsageTick)
 
 
 local function disableOption(option, key)

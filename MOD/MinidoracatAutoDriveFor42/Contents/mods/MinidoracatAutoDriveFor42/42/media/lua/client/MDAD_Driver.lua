@@ -16,18 +16,13 @@
 --   ⑤ 診斷輸出（getDebug()）：跟線遙測每 1000ms 最多一行，旗標為假時連 string.format
 --      都不呼叫。每幀一行會洗爆 console 也吃掉 FPS。
 --
--- MP 現實（M3 不做伺服器狀態，刻意的）：
---   物理只在非 dedicated server 端跑（Bullet.addVehicle 僅 !GameServer.server＝
---   CarController.java:86；impulse 套用同樣 !GameServer.server＝BaseVehicle.java:3308），
---   權威在**駕駛自己的 client**。因此自駕狀態只活在駕駛端記憶體：斷線／死亡／下車
---   由本檔的早退條件自然收斂，不需要（也沒有）伺服器端的玩家離線 Lua 事件
---   （GameServer.disconnectPlayer:2590 不 triggerEvent；Events.OnDisconnect 是本機
---   連線失敗，不是「某人離開伺服器」）。
---
--- 電力（M3 契約）：自駕只在引擎運轉中才能啟動，運轉中由發電機供電——與原版收音機
---   「引擎運轉不耗車電」同款處理（Vehicles.lua:683-686）。M3 因此**不呼叫**
---   MDAD.consumeVehiclePower、不建伺服器 AutoState 表，實際車電扣除留待後續里程碑；
---   但每幀仍檢查電瓶還活著（isBatteryLive），電瓶死了就交還控制權。
+-- MP 權威分工：
+--   車輛物理仍只在駕駛 client 控制（Bullet 車體不在 dedicated server 模擬），但資源
+--   消耗由 server 決定。client 送 GPS `{active}` 與 Auto `{vehicleId,active}` 兩種
+--   heartbeat；server 只採 OnClientCommand actor，重驗 onlineID、駕駛座、來源裝置、
+--   引擎、電瓶與模組，15 秒 TTL 過期即停算。client 從不送座標、item、電量、油量、
+--   倍率或 elapsed time。SP 走同一份 shared registry 直接登記。
+--   原版 Vehicles.Update.Battery 照常讓發電機充電；GPS／自駕負載再由 server 相加補扣。
 
 require "MDAD"
 require "MDAD_Follower"
@@ -55,6 +50,8 @@ local sin, cos = math.sin, math.cos
 --------------------------------------------------------------------------------
 
 local ROUTE_REFRESH_MS = 250   -- 導航目標／路線刷新節流（毫秒）
+local USAGE_HEARTBEAT_MS = 5000 -- server registry TTL=15s；start/stop 另有即時封包
+local USAGE_FIRST_RETRY_MS = 1100 -- 初始封包被 server 1s flood gate 吃掉時快速自癒
 -- 目標消失時的「抵達接管」半徑（世界格，平方比較）：主 MOD 在玩家距目標
 -- NAV_ARRIVE_DIST（5 格）內會**自動清除**導航目標（小地圖的「走到旗子就收旗」，
 -- MinidoracatMiniMap.lua navCheckArrival，每幀跑）；自駕的到達判定（follower
@@ -145,7 +142,7 @@ local STUCK_MS = 5000          -- 三者都凍結持續這麼久＝卡死，自�
 -- 三層相依見 MDAD_Sensor.lua 檔頭）。速度上限檔位：全部是「疊在剖面之上的 min」，
 -- 不改剖面本身；殭屍／屍體檔位受三態沙盒政策×玩家偏好控制（refreshPolicies）。
 local NEED_HALF = 1.4          -- 車半寬＋margin（公尺）：縫隙可行性的車體投影
-local DODGE_CAP = 24           -- 繞行段速度上限（km/h；M6 折線連續後由 2026-08-29 使用者裁定自 18 上調）
+local DODGE_CAP = 24           -- 繞行 entry／exit 基準速度；保持段另放寬到 28 km/h
 local ZOMBIE_CAP_1 = 25        -- 走廊內 ≥1 隻殭屍
 local ZOMBIE_CAP_4 = 15        -- ≥4 隻
 local ZOMBIE_CAP_8 = 10        -- ≥8 隻
@@ -156,15 +153,16 @@ local POLICY_DODGE = 1         -- 沙盒 ObstaclePolicy enum：1=繞行 2=停車
 local BLOCK_STOP_DIST = 15     -- 距障礙群這麼近才煞停等待；更遠先滑行接近
 local BLOCK_APPROACH_KMH = 12  -- blocked 接近段的速度上限（掃描逼近後縫隙判定更準）
 local WAIT_TIMEOUT_MS = 20000  -- 停等（blocked/跟車 0）獨立超時：紅字請玩家接手
--- 推撞偵測（幽靈車兜底）：輪速明明夠快、沿線進度卻近零＝頂著看不見的實體
--- 空推（MP 車輛 streaming 抖動時 cell:getVehicles() 都列舉不到那台車，感知
--- 全瞎，但碰撞是 server 權威——2026-08-29 實測輪速 17 km/h、5 秒只前進 5m
--- 一路推著前車走）。8 km/h 的正常進度率 ≥2.2 m/s，2.5 秒窗至少 5.5m；連
--- 3m 都走不到＝失配 2:1 以上。blocked／followHold 停等與調頭近停旋轉都到
--- 不了 8 km/h，彎道爬行 12 的進度率 ≥3.3 m/s 會不斷重臂——天然不誤觸。
+-- 推撞偵測（幽靈車兜底）：輪速明明夠快、車體世界位移卻近零＝頂著看不見
+-- 的實體空推（MP 車輛 streaming 抖動時感知可能全漏，但碰撞仍是 server 權威）。
+-- 必須量世界位移，不量沿線 s：8106,11769 十字路口回線時，車以 15 km/h
+-- 橫向移動 20→4m，remaining 暫時固定 603.6；舊算法把合法回線連判三次
+-- push mismatch。直線 8 km/h 在 2.5 秒約走 5.5m；世界弦長連 3m
+-- （理論直線位移的 55%）都不到才判失配。
 local PUSH_MIN_KMH = 8         -- 輪速下限：低於此速交給既有卡死三凍結
 local PUSH_MS = 2500           -- 失配持續窗
-local PUSH_FREE_M = 3.0        -- 窗內沿線進度達標線（達標＝重臂計時）
+local PUSH_FREE_M = 3.0        -- 窗內車體世界位移達標線（達標＝重臂計時）
+local PUSH_FREE_SQ = PUSH_FREE_M * PUSH_FREE_M -- 載入期算一次，熱路徑不重乘
 local SCAN_WARM_CAP = 12       -- 感知空窗（首輪掃描未完成）的爬行上限
 -- 堵死改道（nav API v3 requestDetour）：blocked 停等一段時間仍未解除，就帶
 -- 堵點座標請主 MOD 重算避讓路線（A* 對經過堵點圈的路網邊加軟封鎖罰）。
@@ -198,9 +196,10 @@ local ROAD_CLAMP = 3           -- 單輪樣本與累積校正的限幅（公尺�
 local BIAS_MAX = 3             -- 合成行駛線限幅（offroad 門檻 4m 內留 1m 裕度）
 local SOFT_CAP = 20            -- 走廊內有可輾過的軟障礙（家具／雜物）時的速度上限
 local CORPSE_CAP = 20          -- 走廊內有地面屍體（壓得過，但不減速輾過的體感就是撞擊）
--- 甩出路面判定（車到路線投影點的橫偏；平方比較省 sqrt）：走廊可行帶 ±3.6，
--- 超過 4m＝車已在感知走廊保護範圍之外，斜插回線一律爬行
-local OFFROAD_LAT_SQ = 16      -- 橫偏 > 4 公尺（平方）
+-- 甩出判定：車實際橫向位置對期望線（laneBias＋側偏剖面）的偏差，平方比較省 sqrt。
+-- 偏離 4m 代表跟線已失效（合法可行帶雖到 ±5.6，但正常繞行對期望線的偏差應接近 0），
+-- 因此斜插回線一律爬行。
+local OFFROAD_LAT_SQ = 16      -- 對期望線偏差 > 4 公尺（平方）
 local OFFROAD_CAP = 15         -- 甩出後的回線爬行上限（km/h）
 -- 原地調頭的車周安全探測：耦力旋轉的車身掃掠 ~2.5m，貼牆貼樹貼車旋轉會撞。
 -- 半徑 4（車身掃掠對角 ~2.5＋樹幹偏格心＋餘裕；3 太貼邊——2026-08-28 實機
@@ -214,12 +213,10 @@ local ROTATE_PROBE_MS = 500
 local HS_BASE_KMH = 70
 local HS_ERR_RAD = 0.1745      -- 10°
 
--- 感知閉環的物理上限：掃描帶只到車前 SCAN_AHEAD（36m）、輪距 250ms＋分幀
--- ~180ms＝資訊延遲 ~0.4 秒；「看到障礙→煞停」要在掃描帶內完成，車速就有
--- 硬上限——85 km/h（23.6 m/s）煞停 ~28m ＜ 30m 可用；118 km/h 要 55m＝必撞
--- （2026-08-28 實機：沙盒 120＋瘋狂檔，target 118 直接輾過路口車陣）。
--- 無條件 min：任何檔位／沙盒組合都壓不過感知能力。要放行更高速，先把
--- SCAN_AHEAD 與掃描預算一起拉長。
+-- 感知閉環的標準／高速組態分界：標準掃描帶前伸 48m，一輪最慢約 200ms，
+-- 再受 250ms 啟動節流影響；85 km/h 是既有標準組態的保守相容上限與高速檔
+-- 啟用門檻，不宣稱是所有載具／路況的形式化煞停證明。沙盒上限超過 85 時，
+-- session 會把掃描帶改成 110m、感知上限改成 120；兩者必須一起切換。
 local PERCEPTION_CAP_KMH = 85
 -- 高速檔（2026-08-29 使用者需求：瘋狂檔要能跑 120）：沙盒上限 > 85 時把掃描
 -- 帶拉到 110m、感知上限放到 120——120 km/h 煞停 ~56m＋輪距反應 ~21m ≈ 77m
@@ -252,7 +249,7 @@ local PREF_CORPSE_MD = "MDADCorpseSlow" -- 同上，屍體
 -- 且繞行速度壓到爬行（2026-08-28 實機：轉彎處繞行擦撞）。
 local CURVE_TIGHT_RAD = 0.44   -- ≈25°：障礙群所在路段的累計轉角門檻
 local CURVE_NEED_EXTRA = 0.6   -- 彎道繞行的需求半寬加碼（內輪差＋切內彎的一階補償）
-local DODGE_TIGHT_CAP = 16     -- 彎道繞行段速度上限（M6 折線把內輪差烘進幾何後自 12 上調）
+local DODGE_TIGHT_CAP = 16     -- 彎道 a..b 上限；b..c 為 20，c..d 已過折點後回 24
 -- 繞行線的世界空間掃掠複驗：沿剖面每 SWEEP_STEP 公尺取繞行線世界點，對每個硬
 -- 障礙的**世界座標**驗最小淨距。弧座標 (s,l) 在路線折點附近的障礙表示會失真
 -- （膨脹點沿弧線展開、世界位置偏離實體數米），縫隙判定「判得過但實際會撞」——
@@ -354,6 +351,21 @@ local function driveGate(playerObj, vehicle, playerNum, context)
     return nil
 end
 
+-- HUD 停用態的唯讀原因：沿用啟動守門，context="draw" 讓 GPS 背包掃描吃
+-- MDAD.navGate 的 1 秒快取；route 走主 MOD 的 requestRoute cache，只在
+-- route/state 已真正可用時顯示「可以啟動」，不建立 follower profile。
+function Drive.hudStartReason(playerNum)
+    local playerObj = getSpecificPlayer(playerNum)
+    if not playerObj then return KEY_NOT_DRIVER end
+    local reason = driveGate(playerObj, playerObj:getVehicle(), playerNum, "draw")
+    if reason then return reason end
+    local api = navApi()
+    if not api then return KEY_API end
+    local route = fetchRoute(api, playerNum)
+    if not route then return KEY_ROUTE end
+    return nil
+end
+
 -- 玩家有沒有在自己操作？有就讓位。
 -- getCurrentSteering 由 CarController 每幀從 clientControls 寫入（CarController.java:321、
 -- 用例 Vehicles.lua:731），手把的類比轉向也會進到這裡，是唯一跨鍵鼠／手把的轉向觀測點。
@@ -383,9 +395,9 @@ end
 -- 速度檔位與減速偏好（per-player；M5.5）
 --------------------------------------------------------------------------------
 
--- 存 player modData：家族先例＝主 MOD navSaveModData 把導航目標存
--- md.MinidoracatMiniMapTX/TY（MinidoracatMiniMap.lua:1463-1466 恢復路徑），
--- 跨 session 跟角色走、MP 由引擎同步，實證可靠。讀取一律 tolerant。
+-- 檔位／減速偏好存 player modData，讓角色跨 session 保留 UI 選擇。這只作本機行為與
+-- 持久資料；MP 任意 client 可偽造別人的 ObjectModData，資源 billing 一律改讀
+-- server actor-bound NavUsage／Usage registry，不把本 table 當權威。
 local function playerMd(playerNum)
     local p = getSpecificPlayer(playerNum)
     if not p then return nil end
@@ -423,6 +435,14 @@ local function gearCapKmh(playerNum, vehicle)
     local vm = vehicle and vehicle.getMaxSpeed and vehicle:getMaxSpeed()
     if type(vm) ~= "number" or vm ~= vm or vm <= 0 then return maxSpeedKmh() end
     return vm
+end
+
+-- 檔位×沙盒的有效巡航上限；HUD 在 session 尚未啟動時也要顯示同一真相。
+function Drive.effectiveCap(playerNum, vehicle)
+    local cap = maxSpeedKmh()
+    local gearCap = gearCapKmh(playerNum, vehicle)
+    if gearCap > 0 and gearCap < cap then cap = gearCap end
+    return cap
 end
 
 -- 政策快取進 session（250ms 路線刷新節流窗＋set* 即時重算）：殭屍／屍體分支
@@ -465,14 +485,29 @@ function Drive.setSlowPref(playerNum, kind, on)
     return true
 end
 
+-- HUD tooltip 的唯讀策略常數；速度 caps 直接回 Driver 使用值，掃描範圍優先讀
+-- MDADSensor export。Sensor 尚未自動載入時只退回同值 2/48/3，不讓 HUD 因載入次序炸掉。
+function Drive.slowdownInfo(playerNum)
+    local sensor = type(MDADSensor) == "table" and MDADSensor or nil
+    local nearM = sensor and sensor.SCAN_NEAR or 2
+    local baseAhead = sensor and sensor.SCAN_AHEAD or 48
+    local bandM = sensor and sensor.SLOW_BAND_HALF or 3
+    local ahead = maxSpeedKmh() > PERCEPTION_CAP_KMH and HISPEED_AHEAD_M or baseAhead
+    local s = sessions[playerNum]
+    local sensorAhead = s and s.sensor and s.sensor.aheadM
+    if type(sensorAhead) == "number" and sensorAhead >= baseAhead then ahead = sensorAhead end
+    return nearM, ahead, bandM,
+        ZOMBIE_CAP_1, ZOMBIE_CAP_4, ZOMBIE_CAP_8, CORPSE_CAP
+end
+
 -- HUD 唯讀狀態（M5.5b 面板的資料面）。回**多值純量**、不洩漏 session table
 -- （session 是可變內部狀態，交出參考＝UI 能繞過所有入口改駕駛行為）：
 --   statusKey, gearId, effectiveCapKmh, zombieSlowOn, corpseSlowOn
 -- statusKey ∈ arrive/yield/unstick/blocked/dodging/build/follow；nil＝無 session。
 -- 顯示優先序（狀態是 mode＋正交旗標的混合，UI 不該自己拼）：
 -- arrive > yield > unstick > blocked > dodging > build > follow。
--- effectiveCap＝min(檔位, 沙盒)——HUD 顯示這個值，玩家才看得出「運動 70 被
--- 沙盒 50 壓住」為什麼切檔沒感覺。
+-- effectiveCap＝min(session 啟動時沙盒上限, 當前檔位)。AutoDriveMaxSpeed 要重開
+-- session 才重建 profile；HUD 不得先讀新沙盒值而顯示車子尚未套用的上限。
 function Drive.hudState(playerNum)
     local s = sessions[playerNum]
     if not s then return nil end
@@ -485,16 +520,35 @@ function Drive.hudState(playerNum)
     elseif s.mode == "build" then key = "build"
     else key = "follow" end
     local cap = s.maxSpeed
-    if s.gearCap > 0 and s.gearCap < cap then cap = s.gearCap end
+    if s.gearCap and s.gearCap > 0 and s.gearCap < cap then cap = s.gearCap end
     return key, Drive.getGear(playerNum), cap, s.zombieSlow, s.corpseSlow
 end
 
+local function reportAutoUsage(playerObj, vehicle, active, args, navArgs)
+    if not playerObj or not vehicle then return end
+    if isClient() then
+        if not args then return end
+        if active == true and navArgs then
+            sendClientCommand(playerObj, MDAD.MOD_ID, MDAD.CMD_NAV_USAGE, navArgs)
+        end
+        args.active = active == true
+        sendClientCommand(playerObj, MDAD.MOD_ID, MDAD.CMD_USAGE, args)
+    elseif active == true then
+        MDAD.setNavUsage(playerObj)
+        MDAD.setAutoUsage(playerObj, vehicle)
+    else
+        MDAD.clearAutoUsage(playerObj, vehicle:getId())
+    end
+end
+
 local function clearSession(playerNum)
-    if sessions[playerNum] == nil then return end
+    local s = sessions[playerNum]
+    if not s then return end
+    reportAutoUsage(getSpecificPlayer(playerNum), s.vehicle, false, s.usageArgs, s.navUsageArgs)
     sessions[playerNum] = nil
     sessionCount = sessionCount - 1
-    -- debug 視覺化的 marker 掛在世界上，session 沒了必須跟著消失
-    if type(MDADOverlay) == "table" then MDADOverlay.clear() end
+    -- 一般軌跡快取與 debug markers 都綁 session；停止／失效當下立即清。
+    if type(MDADOverlay) == "table" then MDADOverlay.clear(playerNum) end
 end
 
 -- 停止＝只關 regulator，**不搶煞車**：停止的原因多半是玩家要自己接手（讓位逾時、下車、
@@ -561,6 +615,7 @@ local function startSession(playerObj, playerNum)
     -- 駕駛留下的）就會原封不動繼續拉著車跑——啟動自駕的下一秒車子照舊速衝出去。
     -- 失敗的啟動一律走上面的 early return，不會碰到這行，玩家的定速保持原狀。
     vehicle:setRegulator(false)
+    local startedAt = getTimestampMs()
     sessions[playerNum] = {
         vehicle = vehicle,
         route = route,
@@ -569,7 +624,10 @@ local function startSession(playerObj, playerNum)
         maxSpeed = maxSpeed,
         perceptionCap = maxSpeed > PERCEPTION_CAP_KMH and HISPEED_CAP_KMH or PERCEPTION_CAP_KMH,
         mode = "build",  -- build → follow ⇄ yield → arrive
-        nextRouteMs = getTimestampMs() + ROUTE_REFRESH_MS,
+        nextRouteMs = startedAt + ROUTE_REFRESH_MS,
+        nextUsageMs = startedAt + USAGE_FIRST_RETRY_MS,
+        usageArgs = { vehicleId = vehicle:getId(), active = true },
+        navUsageArgs = { active = true },
         nextDebugMs = 0, -- 下一次允許印跟線遙測的時間戳（0＝第一幀就印）
         cleanSinceMs = 0, -- yield 中「連續乾淨輸入」的起點時戳（0＝還沒開始計）
         parity = 1,
@@ -598,14 +656,14 @@ local function startSession(playerObj, playerNum)
         corpseSlow = true,  -- 同上，地面屍體
         rotProbeMs = 0,     -- 下一次允許車周探測的時戳（0＝第一次調頭幀就探）
         rotProbeClear = false, -- 上次探測結果：車周淨空可原地旋轉
-        offroad = false,    -- 車在感知走廊外（優先回線；遲滯 4m 進／2m 出）
+        offroad = false,    -- 對期望線偏差過大（遲滯 4m 進／2m 出）
         clearStreak = 0,    -- 連續 clear 輪數（堵住解除遲滯）
         followHold = false, -- 跟車分級把目標壓 0（停等豁免卡死偵測用）
         waitSince = 0,      -- 停等起點時戳（0＝非停等；獨立超時紅字）
-        pushSince = 0,      -- 推撞失配計時起點（0＝未累計）
+        pushSince = 0,      -- 推撞失配計時起點（0＝未累計，此時 pushX/pushY 是廢值）
         detourTried = false, -- 本次 blocked episode 已試過改道（解除時重臂）
-        dodgeCrawl = false, -- 承諾剖面是爬行檔（貼障礙段速度由 dodgeMargin 縮放）
-        dodgeMargin = 1,    -- commit 時掃掠全程最小餘裕（貼障礙段速度縮放輸入）
+        dodgeCrawl = false, -- 承諾剖面是 squeeze 檔（entry／hold／exit 全段上限 10）
+        dodgeMargin = 1,    -- commit 時 a..c 最小餘裕（entry／hold 速度縮放輸入）
         pushBanL = nil,     -- 推撞實證不可行的縫（本 episode 不再提案；nil＝無）
         cornerLatch = false, -- BLOCKED_CORNER：障礙貼折點、軌跡契約不支援（快速改道）
         cornerS = 0,        -- corner latch 時的沿線弧長（前進 CORNER_RETRY_DIST 即撤銷重枚舉）
@@ -616,7 +674,7 @@ local function startSession(playerObj, playerNum)
         blockHitY = nil,
         pushBanS = 0,       -- 推撞發生位置（ban 虛擬點的縱向錨）
         dodgeNeed = 1.3,    -- 承諾剖面的世界掃掠淨距基準（守護輪沿用提案檔位）
-        pushS = 0,          -- 推撞計時起點的沿線弧長
+        pushX = 0, pushY = 0, -- 推撞計時起點的車體世界座標（預建鍵免熱路徑 rehash）
         sandBias = laneBias, -- 沙盒靠右偏置（start 時夾限完的值；路面校正的基底）
         roadBias = 0,       -- 路面對中校正量（EMA；行駛線＝sandBias + roadBias）
     }
@@ -629,6 +687,8 @@ local function startSession(playerObj, playerNum)
     end
     sessionCount = sessionCount + 1
     refreshPolicies(sessions[playerNum], vehicle, playerNum)
+    reportAutoUsage(playerObj, vehicle, true,
+        sessions[playerNum].usageArgs, sessions[playerNum].navUsageArgs)
     return nil
 end
 
@@ -733,10 +793,13 @@ local function applySpeed(s, vehicle, targetSpeed, speedKmh)
         vehicle:setForceBrake()
         return false
     end
-    -- setRegulator／setRegulatorSpeed＝BaseVehicle.java:9821-9831；
-    -- regulator 開著且現速低於設定速時 CarController 才供油（CarController.java:240-245）
+    -- 原版儀表直接 `getRegulatorSpeed() .. ""`（ISVehicleDashboard.lua:405-408），
+    -- 不做格式化；把物理 target 原值送入會露出十多位小數。煞車判定已在上方用
+    -- 精確 target 完成，寫進 regulator 時才四捨五入成整數 km/h（誤差 <=0.5）。
+    local commandSpeed = math.floor(targetSpeed + 0.5)
+    if commandSpeed > s.maxSpeed then commandSpeed = math.floor(s.maxSpeed) end
     vehicle:setRegulator(true)
-    vehicle:setRegulatorSpeed(targetSpeed)
+    vehicle:setRegulatorSpeed(commandSpeed)
     return true
 end
 
@@ -822,7 +885,7 @@ local function sweepClear(s, profile, a, b, c, d, offL, tag, needBase)
     local sen = s.sensor
     local hn = sen.hardN
     if hn == 0 then return true, 9 end
-    local minMargin = 9 -- 成功時第二回傳：全程對點雲的最小餘裕（寬度→速度縮放）
+    local minMargin = 9 -- 成功時第二回傳：a..c 對點雲的最小餘裕（寬度→速度縮放）
     local hx, hy, hr = sen.hardX, sen.hardY, sen.hardR
     local bias = laneBiasOf(s)
     -- 掃掠起點提前到車位：過渡段後移（出彎後才側移）時，折點前的 bias
@@ -844,6 +907,7 @@ local function sweepClear(s, profile, a, b, c, d, offL, tag, needBase)
         local px, py, nx, ny = posAt(profile, sPos)
         local wx = px + nx * lane
         local wy = py + ny * lane
+        local inCap = sPos >= a and sPos <= c
         for i = 1, hn do
             local ox = hx[i]
             if ox then
@@ -887,12 +951,14 @@ local function sweepClear(s, profile, a, b, c, d, offL, tag, needBase)
                     return false, clr - dist, (sen.hardS and sen.hardS[i]) or sPos,
                         phase, sPos, ox, hy[i] or 0
                 end
-                -- 成功路徑順算全程最小餘裕（寬度→速度縮放）：先平方粗篩，
-                -- 只在可能刷新最小值時才開根號（餘裕大的點連 sqrt 都不用）
-                local probe = clr + minMargin
-                if d2 < probe * probe then
-                    local mg = sqrt(d2) - clr
-                    if mg < minMargin then minMargin = mg end
+                -- 速度 margin 只量真正吃動態 cap 的 entry＋hold（a..c）。
+                -- baseline 用不同物理門檻、exit 本來固定回 24，混進來單位不一致。
+                if inCap then
+                    local probe = clr + minMargin
+                    if d2 < probe * probe then
+                        local mg = sqrt(d2) - clr
+                        if mg < minMargin then minMargin = mg end
+                    end
                 end
             end
         end
@@ -914,6 +980,7 @@ local function sweepLine(s, lx, ly, ln, lS0, a, b, c, d, offL, tag, needBase)
         local sk = lS0 + (k - 1) * 1.0
         local wx = lx[k]
         local wy = ly[k]
+        local inCap = sk >= a and sk <= c
         for i = 1, hn do
             local ox = hx[i]
             if ox then
@@ -944,10 +1011,12 @@ local function sweepLine(s, lx, ly, ln, lS0, a, b, c, d, offL, tag, needBase)
                     return false, clr - dist, (sen.hardS and sen.hardS[i]) or sk,
                         phase, sk, ox, hy[i] or 0
                 end
-                local probe = clr + minMargin
-                if d2 < probe * probe then
-                    local mg = sqrt(d2) - clr
-                    if mg < minMargin then minMargin = mg end
+                if inCap then
+                    local probe = clr + minMargin
+                    if d2 < probe * probe then
+                        local mg = sqrt(d2) - clr
+                        if mg < minMargin then minMargin = mg end
+                    end
                 end
             end
         end
@@ -1109,7 +1178,7 @@ local function replan(s, vehicle, playerNum)
         end
         mode, a, b, c, d, offL = MDADCorridor.plan(
             sen.hardS, sen.hardL, planN, NEED_HALF, MDADSensor.CORRIDOR_HALF,
-            prefer, sen.hardR, baseL, sen.roadLo, sen.roadHi)
+            prefer, sen.hardR, baseL, sen.roadLo, sen.roadHi, s.pushBanL == nil)
         s.dodgeTight = false
         s.dodgeCrawl = false
         local needUsed = NEED_HALF
@@ -1123,7 +1192,8 @@ local function replan(s, vehicle, playerNum)
         if mode == "dodge" and routeTurnWithin(s.profile, a, d) > CURVE_TIGHT_RAD then
             local m2, a2, b2, c2, d2, o2 = MDADCorridor.plan(
                 sen.hardS, sen.hardL, planN, NEED_HALF + CURVE_NEED_EXTRA,
-                MDADSensor.CORRIDOR_HALF, prefer, sen.hardR, baseL, sen.roadLo, sen.roadHi)
+                MDADSensor.CORRIDOR_HALF, prefer, sen.hardR, baseL,
+                sen.roadLo, sen.roadHi, s.pushBanL == nil)
             s.dodgeTight = true
             if m2 == "dodge" then
                 mode, a, b, c, d, offL = m2, a2, b2, c2, d2, o2
@@ -1220,7 +1290,7 @@ local function replan(s, vehicle, playerNum)
                             nb = SQUEEZE_NEED - 0.1
                             local mq, aq, bq, cq, dq, oq = MDADCorridor.plan(
                                 sen.hardS, sen.hardL, planN, nu, MDADSensor.CORRIDOR_HALF,
-                                prefer, sen.hardR, baseL, sen.roadLo, sen.roadHi)
+                                prefer, sen.hardR, baseL, sen.roadLo, sen.roadHi, false)
                             if mq ~= "dodge" then break end
                             pa, pb, pc, pd, po = aq, bq, cq, dq, oq
                             pa, pb, pc, pd = shapeProfile(s, s.profile, pa, pb, pc, pd)
@@ -1260,7 +1330,7 @@ local function replan(s, vehicle, playerNum)
                             sen.hardR[banN] = 0.25
                             local mk, ak, bk, ck, dk, ok2 = MDADCorridor.plan(
                                 sen.hardS, sen.hardL, banN, nu, MDADSensor.CORRIDOR_HALF,
-                                prefer, sen.hardR, baseL, sen.roadLo, sen.roadHi)
+                                prefer, sen.hardR, baseL, sen.roadLo, sen.roadHi, false)
                             if mk ~= "dodge" then break end
                             pa, pb, pc, pd, po = ak, bk, ck, dk, ok2
                             pa, pb, pc, pd = shapeProfile(s, s.profile, pa, pb, pc, pd)
@@ -1476,6 +1546,7 @@ end
 
 local function stepFollow(s, vehicle, playerNum, now)
     local speedKmh = vehicle:getCurrentSpeedKmHour() -- 可負（倒車）＝BaseVehicle.java:4268
+    local vx, vy = vehicle:getX(), vehicle:getY()
     local mult = getGameTime():getMultiplier()
     if mult < MULT_MIN then mult = MULT_MIN end
     if mult > MULT_MAX then mult = MULT_MAX end
@@ -1494,7 +1565,7 @@ local function stepFollow(s, vehicle, playerNum, now)
         fx, fy = fx * inv, fy * inv
         -- control 回 steer, targetSpeed, remaining, reached, headingError, lateralSq
         local steer, targetSpeed, remaining, done, headingError, lateralSq, latSigned = MDADFollower.control(
-            s.profile, s.fstate, vehicle:getX(), vehicle:getY(),
+            s.profile, s.fstate, vx, vy,
             MDADFollower.headingFromForward(fx, fy), speedKmh, mult * SECONDS_PER_MULT)
         reached = done == true
         -- 目前沿線弧長：M4 感知與脫困額度重臂共用（sensor 缺席時脫困仍要用，
@@ -1515,7 +1586,8 @@ local function stepFollow(s, vehicle, playerNum, now)
             -- 也要進 replan 做「連續第二輪 clear」的確認，否則確認永遠不會來、
             -- blocked/dodge 卡死不解除。遲滯結束（解除或重新出現障礙）就回到
             -- 純事件驅動。
-            if MDADSensor.step(s.sensor, s.profile, s.lastSNow, vehicle, now, getCell()) then
+            local cell = getCell()
+            if MDADSensor.step(s.sensor, s.profile, s.lastSNow, vehicle, now, cell) then
                 -- 路面對中：每輪完成都校正（與 replan 無關的常態動作）。roadC＝
                 -- 路面帶中心相對 nav 線的偏移，EMA 平滑（防單輪雜訊跳行駛線）；
                 -- 無樣本（路口外／無路面）衰減回 0——nav 線是唯一剩下的參考。
@@ -1544,15 +1616,10 @@ local function stepFollow(s, vehicle, playerNum, now)
                     s.planSig = s.sensor.sig
                     replan(s, vehicle, playerNum)
                 end
-                -- debug 視覺化（沙盒 DebugOverlay）：輪完成才重建 marker（250ms
-                -- 節流天然成立）；關閉時清空。模組缺席（檔案樹壞）靜默跳過。
+                -- 一般玩家軌跡每輪更新常駐點列；debugOn 只控制紅／綠／橙 markers。
+                -- LineDrawer 每 tick 畫連續線，幾何仍只在 250ms 輪完成時重算。
                 if type(MDADOverlay) == "table" then
-                    if s.overlayOn then
-                        MDADOverlay.update(s, vehicle, getCell())
-                    elseif s.overlayCleared ~= true then
-                        MDADOverlay.clear()
-                    end
-                    s.overlayCleared = not s.overlayOn
+                    MDADOverlay.update(playerNum, s, vehicle, cell, s.overlayOn)
                 end
             end
             -- 速度檔位：全部是疊在剖面上的 min，cap<0＝本幀沒有任何檔位介入
@@ -1580,13 +1647,11 @@ local function stepFollow(s, vehicle, playerNum, now)
                         print(LOG .. "pn=" .. playerNum .. " dodge released (profile done)")
                     end
                 else
-                    -- 分段限速：c..d 收回段已駛過障礙本體，恢復普通繞行速——
-                    -- 龜速只花在真正貼障礙的 a..c 段（使用者裁定：確定角度後
-                    -- 對靜止障礙不需要誇張減速）
-                    -- 貼障礙段速度＝commit 時 sweep 實測最小餘裕連續縮放
-                    -- （2026-08-29 使用者裁定：寬度夠就該相對快）：margin 0
-                    -- → 8 km/h、0.8+ → 18 全額；彎道剖面另設 12 天花板（內
-                    -- 輪差不因縫寬消失）。收回段（≥offC）已過障礙本體＝18。
+                    -- 分段限速：c..d 收回段已駛過障礙本體，回 DODGE_CAP 24。
+                    -- a..c 依 commit 時 sweep 的 entry＋hold 最小餘裕連續縮放：
+                    -- entry 的 margin 0 → 10 km/h、0.8+ → 24；hold 再加 6，
+                    -- 上限 28。彎道 entry 上限 16、hold 20。baseline／exit
+                    -- 仍完整做碰撞驗證，但不拿不同相位的餘裕污染 a..c 速度。
                     local dcap
                     local fsC = s.fstate.offC
                     local fsA2 = s.fstate.offA
@@ -1619,6 +1684,10 @@ local function stepFollow(s, vehicle, playerNum, now)
                             end
                             if dcap > tcap then dcap = tcap end
                         end
+                    end
+                    -- squeeze 檔只比車體多 0.3m；無論 entry/hold/exit 都維持平坦爬行上限。
+                    if dcap ~= nil and s.dodgeCrawl and dcap > SQUEEZE_CAP then
+                        dcap = SQUEEZE_CAP
                     end
                     if dcap ~= nil and (cap < 0 or dcap < cap) then cap = dcap end
                 end
@@ -1682,8 +1751,8 @@ local function stepFollow(s, vehicle, playerNum, now)
         -- 退回 M3 純跟線）時檔位照樣生效（codex M5.5 對抗審 BLOCKING）。
         -- 只往下壓：瘋狂檔（gearCap＝載具極速）高於剖面上限時由剖面壓住。
         if s.gearCap > 0 and targetSpeed > s.gearCap then targetSpeed = s.gearCap end
-        -- 感知閉環上限（理由見 PERCEPTION_CAP_KMH 常數註解）：無條件 min，
-        -- 檔位／沙盒都壓不過——118 km/h 的煞停距離 55m > 掃描帶 36m＝物理必撞
+        -- 感知閉環上限（理由見 PERCEPTION_CAP_KMH）：標準組態上限 85；
+        -- 高速組態同時切到 110m 掃描帶與 120 上限。
         local pcap = s.perceptionCap or PERCEPTION_CAP_KMH
         if targetSpeed > pcap then targetSpeed = pcap end
         -- 感知空窗爬行（2026-08-29 實測）：改導航目標＝route cutover 會作廢
@@ -1878,25 +1947,21 @@ local function stepFollow(s, vehicle, playerNum, now)
             end
         end
         -- ---- 推撞偵測（理由見 PUSH_* 常數註解）----
-        -- 輪速 ≥8 km/h 而沿線進度連 3m/2.5s 都不到＝頂著看不見的實體空推，
-        -- 視同卡死交給下方脫困分支（倒車正好退開；額度用完紅字交還玩家）。
-        -- 只在「感知看得到東西」（硬障礙／車輛快照／行進車）時累計：頂著的
-        -- 東西通常伴隨周邊結構（路緣欄杆、車陣）；感知全空的高速零進度交給
-        -- 既有卡死三凍結。已知限制：空曠地帶＋障礙完全隱形（快照 0↔1 閃爍）
-        -- 時累計會被反覆重置抓不到——實測場景（路旁有欄杆 hardN 47+）抓得到。
-        local sen2 = s.sensor -- 缺席時是 false 非 nil，用 truthiness 判
-        local pushEligible = sen2 and (sen2.hardN > 0 or sen2.vehN > 0 or sen2.movingVeh)
+        -- 輪速 ≥8 km/h 而車體世界位移連 3m/2.5s 都不到＝頂著看不見的實體
+        -- 空推。沿線 s 不可當物理位移：回線／切換路段會橫向移動但 s 暫停。
+        -- 只在感知非空時累計；全空的高速零位移交給既有卡死三凍結。
+        local sen = s.sensor -- 缺席時是 false 非 nil，用 truthiness 判
+        local pushEligible = sen and (sen.hardN > 0 or sen.vehN > 0 or sen.movingVeh)
         if not stuck and pushEligible
                 and (speedKmh >= PUSH_MIN_KMH or speedKmh <= -PUSH_MIN_KMH) then
             if s.pushSince == 0 then
                 s.pushSince = now
-                s.pushS = s.lastSNow
+                s.pushX, s.pushY = vx, vy
             else
-                local dS = s.lastSNow - s.pushS
-                if dS < 0 then dS = -dS end
-                if dS >= PUSH_FREE_M then
+                local pdx, pdy = vx - s.pushX, vy - s.pushY
+                if pdx * pdx + pdy * pdy >= PUSH_FREE_SQ then
                     s.pushSince = now
-                    s.pushS = s.lastSNow
+                    s.pushX, s.pushY = vx, vy
                 elseif now - s.pushSince >= PUSH_MS then
                     if s.dodging and s.pushBanL == nil then
                         -- 繞行中第一次推撞＝物理實證此縫不可行（sweep 理論淨空
@@ -1941,11 +2006,11 @@ local function stepFollow(s, vehicle, playerNum, now)
         if MDAD.sandbox("ObstaclePolicy", POLICY_DODGE) == POLICY_DODGE
                 and s.unstickCount < UNSTICK_MAX then
             s.unstickCount = s.unstickCount + 1
-            s.unstickX = vehicle:getX()
-            s.unstickY = vehicle:getY()
+            s.unstickX, s.unstickY = vx, vy -- 本幀開頭已讀；同一 tick 內車體不動
             s.unstickS = s.lastSNow or 0
             s.unstickUntil = now + UNSTICK_MS
             s.mode = "unstick"
+            s.pushSince = 0 -- mode 切換作廢推撞窗；不可把觸發前錨點帶回 follow
             s.stuckSince = 0
             vehicle:setRegulator(false)
             local playerObj = getSpecificPlayer(playerNum)
@@ -1991,6 +2056,12 @@ local function onPlayerUpdate(player)
         return
     end
 
+    local now = getTimestampMs()
+    if now >= s.nextUsageMs then
+        s.nextUsageMs = now + USAGE_HEARTBEAT_MS
+        reportAutoUsage(player, vehicle, true, s.usageArgs, s.navUsageArgs)
+    end
+
     -- 到達停車：只煞到停妥為止。這段刻意排在其他閘門之前——煞車途中就算引擎熄火
     -- （沒油）也要把車停好，不能半路放手。isStopped＝|速度|<0.8 且沒踩油門
     -- （BaseVehicle.java:4259-4260；原版同門檻 ISStopVehicle.lua:12）
@@ -2024,7 +2095,7 @@ local function onPlayerUpdate(player)
 
     -- 目標／路線刷新（節流）。route 換了 identity＝主 MOD 重算過（改目標、偏航重算），
     -- 舊的限速剖面對不上新點集，整份重建。
-    local now = getTimestampMs()
+    -- 本幀 now 已由 usage heartbeat 共用；不為 250ms route refresh 再跨一次 Java。
     if now >= s.nextRouteMs then
         s.nextRouteMs = now + ROUTE_REFRESH_MS
         -- 政策快取同窗刷新：管理員改沙盒、玩家在別的入口改偏好，最晚 250ms 生效
@@ -2059,6 +2130,19 @@ local function onPlayerUpdate(player)
             s.profile = profile
             s.mode = "build"
             if type(MDADFollower.resetState) == "function" then MDADFollower.resetState(s.fstate) end
+            -- roadBias 是「舊 route 法向」上的純量；路線轉向後保留等於把舊
+            -- 東西偏移旋轉到新方向。實機 8262,11511：remaining 71→726 換線
+            -- 仍帶 roadBias=1.85，首輪掃描直接偏向停車場／鐵欄。route cutover
+            -- 必回沙盒基準，Sensor 新輪也從同一條線開始；後續 roadC 再重新收斂。
+            s.roadBias = 0
+            if type(MDADFollower.setLaneBias) == "function" then
+                MDADFollower.setLaneBias(s.fstate, s.sandBias)
+            end
+            if s.sensor then s.sensor.scanBias = s.sandBias end
+            if type(MDADOverlay) == "table"
+                    and type(MDADOverlay.clearTrail) == "function" then
+                MDADOverlay.clearTrail(playerNum)
+            end
             -- M4 旗標一併作廢：舊障礙是對舊幾何的弧長，新路線要重掃重規劃
             -- （sensor 的快照失效由 step 認 profile 參考變化自理）
             s.dodging = false
@@ -2070,7 +2154,6 @@ local function onPlayerUpdate(player)
             s.followHold = false
             s.waitSince = 0
             s.pushSince = 0
-            s.pushS = 0
             s.detourTried = false
             s.dodgeCrawl = false
             s.dodgeNeed = 1.3
@@ -2175,7 +2258,7 @@ local function onPlayerUpdate(player)
             MDADFollower.resetControl(s.fstate)
         end
         s.stuckSince = 0
-        s.pushSince = 0 -- yield 期間玩家亂開，推撞基準（弧長/時戳）已失效
+        s.pushSince = 0 -- yield 期間玩家亂開，推撞基準（世界座標／時戳）已失效
         haloGood(player, "UI_MinidoracatAutoDrive_Resume")
     end
 

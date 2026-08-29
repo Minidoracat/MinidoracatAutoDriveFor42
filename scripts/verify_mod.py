@@ -17,6 +17,7 @@
   6. table.sort 禁用      — Kahlua 的 sort 是遞迴 quicksort（coroutine 堆疊上限 3000），
                            已排序輸入退化 O(n) 深度、數百筆即溢位；一律用迭代 merge sort
   7. MOD/ 樹雜物          — .omc/.claude/.gitnexus 目錄與 .gitkeep 檔；Workshop 整包上傳不看 .gitignore
+ 7b. mod.info 多值語法     — require/incompatible/load order 只接受逗號且 key 緊貼 =
   8. 佔位符殘留            — {{TOKEN}} 漏替換
   9. Steam 描述位元組      — 各語言 ≤8000 UTF-8 bytes（中日文 3 bytes/字，容易低估）
  10. 沙盒選項翻譯配對       — 每個 option 要有 Sandbox_<translation> 標題＋ _tooltip＋分頁名
@@ -28,8 +29,8 @@
                            OnTest 的「表.函式」要在 Lua 有實作；Autopilot 配方必須消耗
                            GPS。這類漂移引擎一律靜默處理（icon 顯示問號、配方永遠湊不齊
                            材料、分佈表不生成物品），console 不一定留下訊息
- 13. 沙盒選項規格          —— 7 個選項的 type/min/max/default 對表；改壞 default 玩家端
-                           只是「行為不對」，沒有任何錯誤訊息可查
+ 13. 沙盒選項規格          —— 17 個選項的 type/min/max/default 對表；改壞 default
+                           玩家端只是「行為不對」，沒有任何錯誤訊息可查
 
 新增檢查時：同步把對應的坑記進 AGENTS.md 踩坑錄，並依「踩坑進化協議」回流到
 pz-mod-template（見 AGENTS.md）。
@@ -243,6 +244,60 @@ for base, dirs, files in os.walk(os.path.join(REPO, "MOD")):
             junk.append(os.path.relpath(os.path.join(base, name), REPO))
 fail("MOD/ 樹無雜物（AI 狀態目錄／.gitkeep）", junk) if junk \
     else ok("MOD/ 樹無雜物（AI 狀態目錄／.gitkeep）")
+# ---- 7b. mod.info 依賴語法 ----
+# ChooseGameInfo.java:224/226/228/230 用 contains("key=") 後直接 split(",")：
+# key 前可有空白，但不能有註解/其他文字；key 與 = 間不能有空格；值不能帶行尾註解。
+manifest_bad = []
+required_deps = {"MinidoracatUIFor42", "MinidoracatMiniMapFor42"}
+multi_keys = ("require", "incompatible", "loadModAfter", "loadModBefore")
+canonical_re = re.compile(
+    r"^\s*(require|incompatible|loadModAfter|loadModBefore)=(.*)$")
+for m in MEDIA_DIRS:
+    info = os.path.join(os.path.dirname(m), "mod.info")
+    rel_info = os.path.relpath(info, REPO)
+    if not os.path.isfile(info):
+        manifest_bad.append(f"缺 mod.info: {rel_info}")
+        continue
+    with open(info, encoding="utf-8") as fh:
+        lines = [(lineno, line.rstrip("\r\n")) for lineno, line in enumerate(fh, 1)
+                 if line.strip()]
+    fields = {key: [] for key in multi_keys}
+    for lineno, line in lines:
+        for key in multi_keys:
+            marker = key + "="
+            if marker in line:
+                match = canonical_re.match(line)
+                if not match or match.group(1) != key:
+                    manifest_bad.append(
+                        f"{rel_info}:{lineno}: {key}= 前不得有註解或其他文字")
+                    continue
+                value = match.group(2)
+                fields[key].append(value)
+                if "#" in value:
+                    manifest_bad.append(
+                        f"{rel_info}:{lineno}: mod.info 不支援 {key} 行尾註解")
+                if ";" in value:
+                    manifest_bad.append(
+                        f"{rel_info}:{lineno}: {key} 多值必須用逗號，不是分號")
+            elif re.search(rf"{key}\s+=", line):
+                manifest_bad.append(
+                    f"{rel_info}:{lineno}: {key}= 鍵名與等號間不得有空格")
+    require_lines = fields["require"]
+    if len(require_lines) != 1:
+        manifest_bad.append(f"{rel_info}: require= 必須恰有一行")
+        raw_require = ""
+    else:
+        raw_require = require_lines[0]
+    deps = {value.strip() for value in raw_require.split(",") if value.strip()}
+    missing = sorted(required_deps - deps)
+    if missing:
+        manifest_bad.append(f"{rel_info}: 缺 require {', '.join(missing)}")
+    incompatible = {item.strip() for value in fields["incompatible"]
+                    for item in value.split(",") if item.strip()}
+    if "Navigator" not in incompatible:
+        manifest_bad.append(f"{rel_info}: 缺 incompatible=Navigator")
+fail("mod.info 依賴／衝突語法", manifest_bad) if manifest_bad \
+    else ok("mod.info 依賴／衝突語法")
 
 # ---- 8. 佔位符殘留 ----
 tokens = []
@@ -495,7 +550,12 @@ SANDBOX_SPEC = {                            # key: (type, default, min, max)
     "NeedItemForAutoDrive": ("boolean", "true", None, None),
     "AllowCraftGPS":        ("boolean", "true", None, None),
     "AllowCraftAutopilot":  ("boolean", "true", None, None),
-    "DrainPercent":         ("integer", "100", "0", "500"),
+    "SpawnGPS":            ("boolean", "true", None, None),
+    "SpawnAutopilot":      ("boolean", "true", None, None),
+    "GPSPowerPercent":     ("integer", "100", "0", "500"),
+    "AutoDrivePowerPercent": ("integer", "100", "0", "500"),
+    "GPSFuelPercent":      ("integer", "100", "0", "500"),
+    "AutoDriveFuelPercent": ("integer", "100", "0", "500"),
     "InstallSkillGate":     ("boolean", "true", None, None),
     "AutoDriveMaxSpeed":    ("integer", "70", "5", "120"),
     "ZombieAreaSlowdown":   ("enum", "2", None, None),

@@ -12,8 +12,23 @@ option MinidoracatAutoDrive.AllowCraftGPS
 option MinidoracatAutoDrive.AllowCraftAutopilot
 {type = boolean, default = true, page = MinidoracatAutoDrive, translation = MinidoracatAutoDriveAllowCraftAutopilot,}
 
-option MinidoracatAutoDrive.DrainPercent
-{type = integer, min = 0, max = 500, default = 100, page = MinidoracatAutoDrive, translation = MinidoracatAutoDriveDrainPercent,}
+option MinidoracatAutoDrive.SpawnGPS
+{type = boolean, default = true, page = MinidoracatAutoDrive, translation = MinidoracatAutoDriveSpawnGPS,}
+
+option MinidoracatAutoDrive.SpawnAutopilot
+{type = boolean, default = true, page = MinidoracatAutoDrive, translation = MinidoracatAutoDriveSpawnAutopilot,}
+
+option MinidoracatAutoDrive.GPSPowerPercent
+{type = integer, min = 0, max = 500, default = 100, page = MinidoracatAutoDrive, translation = MinidoracatAutoDriveGPSPowerPercent,}
+
+option MinidoracatAutoDrive.AutoDrivePowerPercent
+{type = integer, min = 0, max = 500, default = 100, page = MinidoracatAutoDrive, translation = MinidoracatAutoDriveAutoDrivePowerPercent,}
+
+option MinidoracatAutoDrive.GPSFuelPercent
+{type = integer, min = 0, max = 500, default = 100, page = MinidoracatAutoDrive, translation = MinidoracatAutoDriveGPSFuelPercent,}
+
+option MinidoracatAutoDrive.AutoDriveFuelPercent
+{type = integer, min = 0, max = 500, default = 100, page = MinidoracatAutoDrive, translation = MinidoracatAutoDriveAutoDriveFuelPercent,}
 
 option MinidoracatAutoDrive.InstallSkillGate
 {type = boolean, default = true, page = MinidoracatAutoDrive, translation = MinidoracatAutoDriveInstallSkillGate,}

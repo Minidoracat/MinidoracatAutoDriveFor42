@@ -166,13 +166,14 @@ end
 -- =====================================================================
 scenario("dodge：單一擋線障礙往反側偏，左右鏡像對稱、斷點單調")
 do
-    -- 障礙在 l = +1.5（右側偏一點）。可行 lane 必須 |l - 1.5| >= 2.1 → l <= -0.6；
-    -- 格點錨在 0、步長 0.25 → 最靠中線的可行格點是 -0.75
+    -- 障礙在 l=+1.5。原最近 safe lane 是 -0.75；comfort refinement 只沿同一
+    -- 側最多外推 0.75m，第一條達 need+0.7 的 lane 是 -1.50。
     local mode, a, b, c, d, offL = C.plan({ 30 }, { 1.5 }, 1, NEED, CORR)
     checkEq(mode, "dodge", "障礙在右 → dodge")
     checkTrue(offL < 0, "障礙在右（l > 0）→ 往左偏（offL 為負）")
-    checkEq(offL, -0.75, "offL ＝ 最靠中線的可行格點")
-    checkTrue(math.abs(offL - 1.5) >= CLR - EPS, "選出的 lane 對障礙保有膨脹淨空")
+    checkEq(offL, -1.5, "offL ＝ 同側最近的 comfort lane")
+    checkTrue(math.abs(offL - 1.5) >= CLR + 0.7 - EPS,
+        "comfort lane 對障礙多保留 0.7m（供 24 km/h margin）")
     checkEq(a, 30 - 8, "a ＝ sObs0 - ENTRY")
     checkEq(b, 30 - 2, "b ＝ sObs0 - GAP")
     checkEq(c, 30 + 2, "c ＝ sObs1 + GAP")
@@ -182,7 +183,7 @@ do
     -- 鏡像：同一場景左右翻轉必須得到符號相反、大小相同的結果
     local mMir, aMir, bMir, cMir, dMir, offMir = C.plan({ 30 }, { -1.5 }, 1, NEED, CORR)
     checkEq(mMir, "dodge", "鏡像場景同樣 dodge")
-    checkEq(offMir, 0.75, "障礙在左 → 往右偏（offL ＝ +0.75，與鏡像大小相同）")
+    checkEq(offMir, 1.5, "障礙在左 → 往右 comfort lane（與鏡像大小相同）")
     checkEq(aMir, a, "鏡像不影響 a")
     checkEq(bMir, b, "鏡像不影響 b")
     checkEq(cMir, c, "鏡像不影響 c")
@@ -195,7 +196,7 @@ do
     checkEq(bNear, 2, "進入段壓到 MIN_SEG ＝ 2")
     checkEq(cNear, 3, "c ＝ sObs1 + GAP（未被夾限）")
     checkEq(dNear, 9, "d ＝ sObs1 + EXIT")
-    checkEq(offNear, -0.75, "近距離不改變 lane 選擇")
+    checkEq(offNear, -1.5, "近距離不改變 comfort lane 選擇")
     checkMono(aNear, bNear, cNear, dNear, "障礙就在眼前")
 end
 
@@ -221,13 +222,11 @@ do
     checkEq(mBad, "dodge", "hardR 壞值：該點退 OBS_HALF（保守擋線）")
     local mNil = C.plan({ 30 }, { 1.9 }, 1, NEED, CORR, 0, nil)
     checkEq(mNil, "dodge", "hardR 缺席：全部肥半徑（向後相容）")
-    -- baseL 行駛基準線：樹 l=1.5 不擋中心線（1.5 ≥ 1.4）但擋 bias=1.0 的行駛線
-    -- （|1.5-1|=0.5 < 1.4）→ 觸發繞行；縫隙搜尋以 prefer=1.0 由近而遠，第一個
-    -- 對樹保有 1.4 淨空的格點是中心線 lane 0＝「借中線超樹段」（2026-08-28
-    -- 實機：以中心線判擋線漏掉這類樹，車 lat=1.2 完美跟線直接蹭樹卡死 ×3）
+    -- baseL 行駛基準線：樹 l=1.5 不擋中心線、但擋 bias=1.0 的行駛線。
+    -- 最近 safe 是 0；同側向左外推到 -0.75 才達 comfort。
     local mBase, _, _, _, _, offBase = C.plan({ 30 }, { 1.5 }, 1, NEED, 6.0, 1.0, { 0 }, 1.0)
     checkEq(mBase, "dodge", "樹擋行駛線（bias 1.0）：觸發繞行")
-    checkEq(offBase, 0, "縫選中心線 lane 0（借中線超樹，距樹 1.5 ≥ 1.4）")
+    checkEq(offBase, -0.75, "從中心線 safe lane 同側外推至 -0.75 comfort lane")
     checkEq(C.plan({ 30 }, { 1.5 }, 1, NEED, 6.0, 0, { 0 }, 0), "clear",
         "同一棵樹、沿中心線行駛（baseL 0）：不擋線")
     checkEq(C.plan({ 30 }, { 1.5 }, 1, NEED, 6.0, 1.0, { 0 }, 0 / 0), "clear",
@@ -263,34 +262,26 @@ do
     checkEq(cTight, 30, "blocked 的 c ＝ 障礙群終點")
     checkEq(dTight, 30, "blocked 的 d ＝ 障礙群終點")
 
-    -- 同 |l| 時偏「數學負」＝PZ 世界的行進方向左側（Y 向南、數學 CCW＝實際順時針；
-    -- 1993 肯塔基右側通行，超車走左）：障礙正對中線、走廊夠寬
+    -- 同 |l| 時先選實際左側的最近 safe，再保持同側最多外推 0.75m 找 comfort。
     local _, _, _, _, _, offTie = C.plan({ 30 }, { 0 }, 1, NEED, 6.0)
-    checkEq(offTie, -2.25, "障礙正對中線、左右對稱可行 → 走實際左側（數學負號）")
+    checkEq(offTie, -3.0, "對稱障礙：左側 safe -2.25 同側外推到 comfort -3.0")
 
-    -- preferL 側別黏著：同一顆中線障礙左右都可行時，跟著上輪的側別走，
-    -- 不因量化跳動而換邊（換邊＝前視點單幀橫跳、車在障礙前左右甩）
+    -- preferL 側別黏著：不換側，只沿既有 safe lane 的同一側外推。
     local _, _, _, _, _, offRight = C.plan({ 30 }, { 0 }, 1, NEED, 6.0, 2.25)
-    checkEq(offRight, 2.25, "上輪走右 → 沿用右側")
+    checkEq(offRight, 3.0, "上輪走右 → 右側 comfort 3.0")
     local _, _, _, _, _, offBad = C.plan({ 30 }, { 0 }, 1, NEED, 6.0, 0 / 0)
-    checkEq(offBad, -2.25, "preferL 為 NaN → 當 0（回到實際左側預設），不炸")
-    -- 首次繞行（driver 傳 laneBias 而非 0）：縫隙掃描以「現在實際行駛線」為
-    -- 中心——障礙居中、左右縫對稱時，靠右行駛（bias +1.0）就該選右縫（橫移
-    -- 1.25m）而不是 tie-break 固定的左縫（橫移 3.25m）
+    checkEq(offBad, -3.0, "preferL NaN → 當 0，走左側 comfort")
     local _, _, _, _, _, offBias = C.plan({ 30 }, { 0 }, 1, NEED, 6.0, 1.0)
-    checkEq(offBias, 2.25, "首次繞行以 laneBias 為中心（+1.0 靠右）→ 選右縫")
-    -- preferL 不是 STEP 倍數也必須比較原始距離，不能先四捨五入後固定左優先：
-    -- +0.1 到右縫 +2.25 是 2.15m，到左縫 -2.25 是 2.35m。
+    checkEq(offBias, 3.0, "首次靠右 bias → 選右 safe，再同側外推 comfort")
     local _, _, _, _, _, offSmallRight = C.plan({ 30 }, { 0 }, 1, NEED, 6.0, 0.1)
-    checkEq(offSmallRight, 2.25, "非格點 bias +0.1：右縫真實距離較近 → 選右")
+    checkEq(offSmallRight, 3.0, "非格點 bias +0.1：維持右側並外推")
     local _, _, _, _, _, offSmallLeft = C.plan({ 30 }, { 0 }, 1, NEED, 6.0, -0.1)
-    checkEq(offSmallLeft, -2.25, "鏡像：非格點 bias -0.1 → 選左")
-    -- 恰在兩格中點時兩者到 preferL 等距，應取較小 l（實際左側）。
+    checkEq(offSmallLeft, -3.0, "鏡像 bias -0.1：維持左側並外推")
+    -- safe tie-break 仍先較小 l；若同側 0.75m 內找到 comfort，才往外。
     local _, _, _, _, _, offHalfRight = C.plan({ 30 }, { -1.5 }, 1, NEED, 6.0, 1.125)
-    checkEq(offHalfRight, 1.0, "正半格 tie：1.0/1.25 等距 → 取較左的 1.0")
+    checkEq(offHalfRight, 1.0, "正半格 tie：safe 1.0 已無同側 comfort，逐位元 fallback")
     local _, _, _, _, _, offHalfLeft = C.plan({ 30 }, { 1.5 }, 1, NEED, 6.0, -1.125)
-    checkEq(offHalfLeft, -1.25, "負半格 tie：-1.25/-1.0 等距 → 取較左的 -1.25")
-    -- 偏好側不可行時照樣換邊（黏著不是死守）：走廊半寬 4、第二顆障礙 l=+1.5
+    checkEq(offHalfLeft, -1.5, "負半格 tie：safe -1.25 同側外推到 comfort -1.5")
     -- 把右側（lane ≥ -0.6 全被 2.1 淨空要求吃掉）封死，唯一縫在左緣
     local _, _, _, _, _, offForce = C.plan({ 30, 30 }, { 0, 1.5 }, 2, NEED, 4.0, 2.25)
     checkTrue(offForce < 0, "偏好右側但右側被第二顆障礙封死 → 換左側（實得 "
@@ -429,11 +420,11 @@ do
         checkTrue(a == ra and b == rb and c == rc and d == rd,
             "非法 corridorHalf 回落預設：四個斷點一致")
     end
-    checkEq(ro, -0.75, "預設半寬下的 offL（作為上面兩組比較的基準值本身要正確）")
+    checkEq(ro, -1.5, "預設半寬下的 comfort offL 基準值")
 
-    -- 加寬走廊不改變「近中線優先」的選擇
+    -- 加寬走廊不會把 satisficing 變成 max-margin；達 0.8 即止。
     local _, _, _, _, _, offWide = C.plan(sArr, lArr, 1, NEED, 10.0)
-    checkEq(offWide, ro, "走廊加寬到半寬 10 公尺 → 仍選最靠中線的同一格點")
+    checkEq(offWide, ro, "走廊加寬仍在同一條最近 comfort lane 停止")
 
     -- 回傳值一律六個純量、恆非 nil
     local m6, a6, b6, c6, d6, o6 = C.plan(sArr, lArr, 1, NEED, CORR)
@@ -505,30 +496,63 @@ end
 -- =====================================================================
 scenario("路面帶：帶內縫優先（即使帶外縫離 preferL 更近）、無帶資訊退回全域")
 do
-    -- 障礙 l=+0.5（擋中線；r 預設 0.7 → 擋帶 (-1.6, 2.6)）。可行 lane：<= -1.75
-    -- 或 >= 2.75。走廊用 production 的 ±5（檔內 CORR=3 的可行域 ±1.6 兩側縫都
-    -- 放不下）。preferL=0 時全域最近縫是 -1.75（|−1.75| < |2.75|）。
-    -- 路面帶 [-1, 4]：-1.75 在帶外（草地）、2.75 在帶內 → 帶內優先選 2.75
-    -- （2026-08-28 實機：右樹排把縫逼到左外 3.5m，車繞出路面在草地上跑）。
+    -- 障礙 l=+0.5。最近 safe 是 -1.75／+2.75；同側 comfort 外推後是
+    -- -2.50／+3.50。路面帶 [-1,4] 只容得右 comfort，因此選 +3.50。
     local sArr, lArr = { 30 }, { 0.5 }
     local mode, _, _, _, _, offL = C.plan(sArr, lArr, 1, NEED, 5, 0, nil, 0, -1, 4)
     checkEq(mode, "dodge", "路面帶內有縫：dodge")
-    checkEq(offL, 2.75, "帶內縫 2.75 優先於較近的帶外縫 -1.75")
+    checkEq(offL, 3.5, "路面內右 comfort 優先於較近的帶外 safe")
 
-    -- 無帶資訊（nil）＝舊行為：全域最近縫 -1.75
+    -- 無帶資訊：全域先選左 safe -1.75，再同側外推到 -2.50。
     local m2, _, _, _, _, off2 = C.plan(sArr, lArr, 1, NEED, 5, 0, nil, 0)
     checkEq(m2, "dodge", "無路面資訊：照樣 dodge")
-    checkEq(off2, -1.75, "無路面資訊退回全域最近縫（向後相容）")
+    checkEq(off2, -2.5, "無路面資訊：全域左 comfort")
 
-    -- 帶內全滅（帶只涵蓋被擋的範圍）→ 放開全域，仍回 -1.75 而不是 blocked
+    -- 帶內全滅 → 放開全域 comfort，不會變 blocked。
     local m3, _, _, _, _, off3 = C.plan(sArr, lArr, 1, NEED, 5, 0, nil, 0, -1, 2.5)
-    checkEq(m3, "dodge", "帶內全滅：放開全域仍找得到縫（草地縫是最後手段、不是禁區）")
-    checkEq(off3, -1.75, "全域縫＝-1.75")
+    checkEq(m3, "dodge", "帶內全滅：放開全域仍找得到縫")
+    checkEq(off3, -2.5, "全域 comfort＝-2.50")
 
     -- 壞帶（lo >= hi）＝無資訊
     local m4, _, _, _, _, off4 = C.plan(sArr, lArr, 1, NEED, 5, 0, nil, 0, 3, -3)
     checkEq(m4, "dodge", "壞帶（lo>=hi）：當無資訊處理")
-    checkEq(off4, -1.75, "壞帶退回全域行為")
+    checkEq(off4, -2.5, "壞帶退回全域 comfort")
+end
+
+-- =====================================================================
+-- 情境十：comfort refinement — 寬縫滿額、窄縫逐位元 fallback、路面與側別不變
+-- =====================================================================
+scenario("comfort refinement：同側最多外推 0.75m，找不到即回原 safe lane")
+do
+    -- 靠路邊停車的兩個箱型點；最近 safe=2.75，向同側 3 格到 3.50 即達 comfort。
+    local mode, _, _, _, _, off = C.plan(
+        { 30, 30 }, { -0.5, 0.5 }, 2, NEED, 7, 1.0, { 0.7, 0.7 }, 1.0)
+    checkEq(mode, "dodge", "黑車情境仍是 dodge")
+    checkEq(off, 3.5, "黑車情境選最近同側 comfort lane 3.50")
+    local _, _, _, _, _, offSafe = C.plan(
+        { 30, 30 }, { -0.5, 0.5 }, 2, NEED, 7, 1.0, { 0.7, 0.7 }, 1.0,
+        nil, nil, false)
+    checkEq(offSafe, 2.75, "禁用 refinement 時保留 first-safe lane，供實體回饋 ban 重規劃")
+    local minDist = math.min(math.abs(off + 0.5), math.abs(off - 0.5))
+    checkNear(minDist - 2.0, 1.0, EPS,
+        "對 Driver sweep 門檻 2.0 的推導 margin 為 1.0（可吃滿 24）")
+
+    -- 走廊邊界只容得 normal safe，沒有 need+0.7 comfort；不得改 blocked。
+    local mNarrow, _, _, _, _, offNarrow = C.plan({ 30 }, { 1.5 }, 1, NEED, 2.4, 0)
+    checkEq(mNarrow, "dodge", "無 comfort 的窄走廊仍 fallback dodge")
+    checkEq(offNarrow, -0.75, "窄走廊逐位元保留原 first-safe lane")
+
+    -- 路面帶內只有 safe，帶外有 comfort；路面優先高於速度 comfort。
+    local mRoad, _, _, _, _, offRoad = C.plan(
+        { 30 }, { 0.5 }, 1, NEED, 5, 0, nil, 0, -2.0, -1.7)
+    checkEq(mRoad, "dodge", "路面內 safe 仍可用")
+    checkEq(offRoad, -1.75, "不為帶外 comfort 放棄路面內 safe")
+
+    -- refinement 不換側、橫移硬上限 0.75m；達標即止，不跑到走廊邊緣。
+    local _, _, _, _, _, offSide = C.plan({ 30 }, { 0 }, 1, NEED, 6, 2.25)
+    checkTrue(offSide > 0, "既有右側 safe 維持右側")
+    checkNear(offSide - 2.25, 0.75, EPS, "同側外推量恰為上限 0.75m")
+    checkEq(C.COMFORT_EXTRA, 0.7, "comfort extra 由既有 margin 飽和點固定為 0.7")
 end
 
 -- =====================================================================

@@ -1,4 +1,4 @@
--- MDAD_Server.lua — 安裝／卸載的伺服器端權威入口（MP）。
+-- MDAD_Server.lua — 裝置拆裝與 GPS／自駕 usage heartbeat 的伺服器端權威入口（MP）。
 --
 -- 為什麼不能留在 TimedAction 的 complete()：B42 MP 的伺服器端跑的不是玩家那個 Lua
 -- TimedAction 物件，而是 NetTimedAction 鏡像——鏡像的 perform() 唯一做的事就是呼叫
@@ -25,6 +25,9 @@ require "MDAD"
 -- per-player 節流：偽造封包每次都會觸發一輪背包重解析＋可及性檢查，而 OnClientCommand
 -- 是在伺服器主執行緒同步跑的。合法操作有 150 tick 工時，間隔遠大於此，不會誤傷。
 local MIN_INTERVAL_MS = 250
+local USAGE_MIN_INTERVAL_MS = 1000 -- client 合法 cadence 5s；較長窗擋 heartbeat flood
+local THROTTLE_ENTRY_TTL_MS = 60000
+local lastSweepMs = 0
 local lastAt = {}
 
 -- 失敗回報：伺服器不能畫 UI，回一則翻譯鍵給操作者，由 client 端 HaloTextHelper 顯示。
@@ -53,20 +56,64 @@ local function onDevice(player, args)
     end
 end
 
--- 只有認得的 command 才進節流表：若未知 command 也先寫入，任意偽造字串可讓 lastAt
--- 無界成長（記憶體 DoS）。table lookup 對非字串 command 也安全。
+-- client 只宣告「這位 OnClientCommand actor 正在／不再控制這台車」；server 不接受
+-- 任意耗用量或時間，並在 shared registry 重新驗證駕駛座、引擎、電瓶、模組與導航目標。
+local function onUsage(player, args)
+    if type(args) ~= "table" or type(args.active) ~= "boolean" then return false end
+    if not MDAD.isFiniteInt(args.vehicleId) then return false end
+    if args.active == false then
+        return MDAD.clearAutoUsage(player, args.vehicleId)
+    end
+    local vehicle = getVehicleById(args.vehicleId)
+    if not vehicle then return false end
+    return MDAD.setAutoUsage(player, vehicle)
+end
+
+-- GPS heartbeat payload 只有 active；vehicle/source/item 全由 actor 的 server state 推導。
+local function onNavUsage(player, args)
+    if type(args) ~= "table" or type(args.active) ~= "boolean" then return false end
+    if args.active == false then return MDAD.clearNavUsage(player) end
+    return MDAD.setNavUsage(player)
+end
+
+-- 只有認得的 command 才進節流表；未知 command 不得建立 key。已知 key 每分鐘清
+-- 過期項，避免公開服靠大量短命角色讓 lifetime table 無界成長。
 local HANDLERS = {}
 HANDLERS[MDAD.CMD_DEVICE] = onDevice
+HANDLERS[MDAD.CMD_USAGE] = onUsage
+HANDLERS[MDAD.CMD_NAV_USAGE] = onNavUsage
 
 -- OnClientCommand 簽名（module, command, player, args）＝ClientCommands.lua:1249-1260
 local function onClientCommand(module, command, player, args)
     if module ~= MDAD.MOD_ID or not player then return end
     local handler = HANDLERS[command]
     if not handler then return end
-    local key = player:getUsername()
+    local username = player:getUsername() or ""
+    local onlineId = player:getOnlineID()
+    if not MDAD.isFiniteInt(onlineId) or onlineId < 0 then return end
+    -- actor 身分由 server connection 解出；onlineID 能區分同連線分割畫面角色。
+    local key = tostring(#username) .. ":" .. username .. ":"
+        .. tostring(onlineId) .. ":" .. command
     local now = getTimestampMs()
+    if now < lastSweepMs or now - lastSweepMs >= THROTTLE_ENTRY_TTL_MS then
+        for oldKey, at in pairs(lastAt) do
+            if type(at) ~= "number" or now < at or now - at >= THROTTLE_ENTRY_TTL_MS then
+                lastAt[oldKey] = nil
+            end
+        end
+        lastSweepMs = now
+    end
+    local usageCommand = command == MDAD.CMD_USAGE or command == MDAD.CMD_NAV_USAGE
+    -- active=false 必須即時處理；只有真的清到 actor 自己的 ACTIVE entry，才一併清
+    -- 該 command timestamp，讓快速 off→on 不被舊 heartbeat 吃掉；空 off 不能繞 flood gate。
+    local bypass = usageCommand and type(args) == "table" and args.active == false
+    if bypass then
+        if handler(player, args) == true then lastAt[key] = nil end
+        return
+    end
     local last = lastAt[key]
-    if last and now - last < MIN_INTERVAL_MS then return end
+    local interval = usageCommand and USAGE_MIN_INTERVAL_MS or MIN_INTERVAL_MS
+    if last and now - last < interval then return end
     lastAt[key] = now
     handler(player, args)
 end

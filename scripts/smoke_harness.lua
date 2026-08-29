@@ -15,6 +15,7 @@
     shared/TimedActions/ISAutoDriveDeviceAction.lua
     server/Items/MDAD_Distributions.lua
     server/MDAD_Server.lua
+    server/MDAD_Consumption.lua
     client/MDAD_Client.lua
     client/MDAD_Driver.lua
 
@@ -23,6 +24,9 @@
 - MP client：TimedAction:perform() → sendClientCommand（只送四個純量，本地不突變）
 - MP server：Events.OnClientCommand → MDAD_Server → MDAD.applyDeviceChange
   （actor 取事件第三參數，不採 payload；vehicleId／itemId 一律重新解析）
+資源路徑另走真實 `NavUsage`／`Usage` command：client 只宣告 active，server 從事件
+actor 重驗 onlineID／vehicle／裝置來源後建立 TTL lease，再由 GasTank wrapper 與
+EveryOneMinute 決定實際油電 amount；player modData 不參與 billing。
 單一 process 靠切換 isClient()／isServer() 假旗標模擬三種佈署。
 
 M3 自駕核心（client/MDAD_Driver.lua）走的是**每幀熱路徑**，斷言的重點與上面三條
@@ -89,6 +93,7 @@ function round(num, idp)
     return math.floor(num * mult + 0.5) / mult
 end
 
+function instanceof(obj, cls) return type(obj) == "table" and obj._class == cls end
 ItemTag = { SCREWDRIVER = "SCREWDRIVER" }
 Perks = { Electricity = "Electricity" }
 Metabolics = { MediumWork = "MediumWork" }
@@ -96,9 +101,12 @@ Metabolics = { MediumWork = "MediumWork" }
 -- 觀測計數器：用來證明「沒有做不該做的事」
 local stats = {
     setUsedDelta = 0,        -- 寫入電量的次數（雙扣／重複寫的唯一證據）
-    transmitUsedDelta = 0,   -- 車電同步（chargeChanged 門檻）
+    transmitUsedDelta = 0,   -- 車電同步（VehicleUtils.compareFloats 門檻）
     transmitModData = 0,     -- part modData 同步
     sendItemStats = 0,       -- 隨身物品同步
+    setFuel = 0,             -- GasTank content 寫入（vanilla＋extra 分開可觀測）
+    gasUpdates = 0,          -- vanilla GasTank updater 呼叫次數
+    transmitFuel = 0,        -- extra/vanilla fuel part sync
     sendAddItem = 0,
     sendRemoveItem = 0,
     addWorldItem = 0,        -- 掉地上
@@ -139,7 +147,7 @@ local drive = {
     nav = { targetCalls = 0, routeCalls = 0, tx = nil, ty = nil, route = nil, state = "ok" },
     calls = {
         setRegulator = 0, regulatorOn = 0, regulatorOff = 0,
-        setRegulatorSpeed = 0, maxRegSpeed = 0, badRegSpeed = 0,
+        setRegulatorSpeed = 0, maxRegSpeed = 0, badRegSpeed = 0, fractionalRegSpeed = 0,
         forceBrake = 0, getForwardVector = 0,
     },
     -- 每幀不變式的違規計數＋首次違規的幀號（0＝沒有違規）
@@ -152,6 +160,8 @@ local drive = {
     debug = false,
     logs = {},
     fmt = 0,
+    worldAge = 0,             -- getGameTime():getWorldAgeHours()
+    online = {},              -- getOnlinePlayers() 的 server roster
 }
 
 -- 絆線玩家：任何方法被呼叫都計數。用來證明「沒有人在自駕時 OnPlayerUpdate 連玩家
@@ -324,7 +334,13 @@ BaseVehicle = {
 -- getGameTime():getMultiplier()＝真實秒數係數；driver 用 /48 換 dt，也用它縮放施力
 local gameTime = {}
 function gameTime:getMultiplier() return drive.mult end
+function gameTime:getWorldAgeHours() return drive.worldAge end
 function getGameTime() return gameTime end
+
+OnlinePlayersStub = {}
+function OnlinePlayersStub:size() return #drive.online end
+function OnlinePlayersStub:get(index) return drive.online[index + 1] end
+function getOnlinePlayers() return OnlinePlayersStub end
 
 -- UIManager.getSpeedControls：radial wrapper 用呼叫前狀態區分 open／close，另擋暫停。
 UIManager = {
@@ -672,6 +688,7 @@ local function newPlayer(opts)
         _num = opts.num or 0,
         _instant = opts.instant == true,
         _username = opts.username or ("player" .. tostring(opts.num or 0)),
+        _onlineId = opts.onlineId or (1000 + (opts.num or 0)),
         _dead = false,
         _useable = nil,
         _near = nil,
@@ -699,6 +716,7 @@ local function newPlayer(opts)
     function p:getCurrentSquare() return self._square end
     function p:getPlayerNum() return self._num end
     function p:getUsername() return self._username end
+    function p:getOnlineID() return self._onlineId end
     function p:isDead() return self._dead end
     function p:isTimedActionInstant() return self._instant == true end
     -- player modData（IsoPlayer 恆有；檔位／減速偏好的持久面）
@@ -718,6 +736,20 @@ local function newBatteryPart(battery, area)
     function part:getModData() return self._md end
     function part:getInventoryItem() return self._item end
     function part:getArea() return self._area end
+    return part
+end
+
+local function newGasPart(amount, capacity)
+    local part = { _amount = amount or 0, _capacity = capacity or 1, _gas = true,
+        _item = newItem("Base.PetrolCanEmpty") }
+    function part:getInventoryItem() return self._item end
+    function part:getContainerContentAmount() return self._amount end
+    function part:getContainerCapacity() return self._capacity end
+    function part:setContainerContentAmount(value)
+        if value < 0 then value = 0 elseif value > self._capacity then value = self._capacity end
+        self._amount = value
+        stats.setFuel = stats.setFuel + 1
+    end
     return part
 end
 
@@ -765,6 +797,7 @@ local function newVehicle(opts)
     function v:getMaxSpeed() return self._maxSpeed end
     function v:getSquare() return self._square end
     function v:getBattery() return self._part end
+    function v:getDriver() return self._driver end
     function v:getBatteryCharge()
         local bat = self._part and self._part._item
         if not bat or bat.getCurrentUsesFloat == nil then return 0 end
@@ -780,7 +813,10 @@ local function newVehicle(opts)
         return self._inArea
     end
     function v:transmitPartUsedDelta(_) stats.transmitUsedDelta = stats.transmitUsedDelta + 1 end
-    function v:transmitPartModData(_) stats.transmitModData = stats.transmitModData + 1 end
+    function v:transmitPartModData(part)
+        stats.transmitModData = stats.transmitModData + 1
+        if part and part._gas then stats.transmitFuel = stats.transmitFuel + 1 end
+    end
 
     -- isDriver(chr) ⇔ getSeat(chr)==0（BaseVehicle.java:1853-1864）
     function v:isDriver(chr) return self._driver ~= nil and self._driver == chr end
@@ -840,11 +876,31 @@ local function newVehicle(opts)
         elseif kmh > c.maxRegSpeed then
             c.maxRegSpeed = kmh
         end
+        if type(kmh) == "number" and kmh == kmh and kmh % 1 ~= 0 then
+            c.fractionalRegSpeed = c.fractionalRegSpeed + 1
+        end
     end
 
     -- setForceBrake 寫 clientControls.forceBrake，效期 1 秒（CarController.java:973-979）
     function v:setForceBrake() drive.calls.forceBrake = drive.calls.forceBrake + 1 end
     return v
+end
+
+VehicleUtils = {
+    compareFloats = function(a, b, precision)
+        if (a == 0.0) ~= (b == 0.0) then return true end
+        if (a == 1.0) ~= (b == 1.0) then return true end
+        return round(a, precision) ~= round(b, precision)
+    end,
+}
+Vehicles = { Update = {} }
+function Vehicles.Update.GasTank(vehicle, part, elapsedMinutes)
+    stats.gasUpdates = stats.gasUpdates + 1
+    local old = part:getContainerContentAmount()
+    part:setContainerContentAmount(old - (drive.fuelBurn or 0.1) * elapsedMinutes, false, true)
+    local amount = part:getContainerContentAmount()
+    local precision = amount < 0.5 and 2 or 1
+    if VehicleUtils.compareFloats(old, amount, precision) then vehicle:transmitPartModData(part) end
 end
 
 -- =====================================================================
@@ -890,6 +946,7 @@ require "TimedActions/ISAutoDriveDeviceAction"
 require "MDAD_Distributions"
 -- MDAD_Server 開頭是 `if isClient() then return end`：要在 clientFlag=false 時載入
 require "MDAD_Server"
+require "MDAD_Consumption"
 -- MDAD_Client 在載入期就會呼叫一次 registerNavGate()。此時 MinidoracatMiniMapAPI
 -- 刻意不存在，好讓「主 MOD 未安裝」這條路徑真的被走到；診斷訊息留給情境去斷言。
 local clientLoadLog = capturePrint(function() require "MDAD_Client" end)
@@ -1020,9 +1077,9 @@ checkFalse(MDAD_Recipe.canCraftGPS(), "數值 1 不等於 true：擋住")
 checkFalse(MDAD_Recipe.canCraftAutopilot(), "字串 \"true\" 不等於 true：擋住")
 
 -- =====================================================================
--- 情境二：戰利品注入（MDAD_Distributions，OnPostDistributionMerge）
+-- 情境二：戰利品注入＋OnFillContainer 生成政策
 -- =====================================================================
-scenario("戰利品注入：連跑三次不重複、權重不疊、items 成對、缺表不炸")
+scenario("戰利品：merge 防重，GPS／自駕在容器生成時各自過濾")
 
 local DIST_NAMES = {
     "ArmyStorageElectronics", "ElectronicStoreMisc", "EngineerTools", "CrateElectronics",
@@ -1055,11 +1112,34 @@ local function countIn(items, fullType)
     return n, weight
 end
 
+local function newLootContainer(types)
+    local container = { _items = {} }
+    for i = 1, #types do container._items[i] = newItem(types[i]) end
+    local list = {}
+    function list:size() return #container._items end
+    function list:get(index) return container._items[index + 1] end
+    function container:getItems() return list end
+    function container:DoRemoveItem(item)
+        for i = #self._items, 1, -1 do
+            if self._items[i] == item then table.remove(self._items, i) end
+        end
+    end
+    function container:count(fullType)
+        local count = 0
+        for i = 1, #self._items do
+            if self._items[i]:getFullType() == fullType then count = count + 1 end
+        end
+        return count
+    end
+    return container
+end
+
 ProceduralDistributions = { list = {} }
 for _, name in ipairs(DIST_NAMES) do
     local e = BASE_ENTRY[name]
     ProceduralDistributions.list[name] = { items = { e[1], e[2] } }
 end
+setSandbox({ SpawnGPS = true, SpawnAutopilot = true })
 
 fire("OnPostDistributionMerge")
 
@@ -1095,6 +1175,72 @@ checkEq(#ProceduralDistributions.list.CrateRandomJunk.items, 2, "不在目標清
 checkEq(#ProceduralDistributions.list.ArmyStorageElectronics.items, 6,
     "同時是兩種道具目標的表補了兩組 pair")
 checkEq(#ProceduralDistributions.list.EngineerTools.items, 4, "單一道具目標只補一組 pair")
+
+-- Merge 發生在 SandboxOptions.load 前：即使此刻 Spawn=false，兩個 pair 都必須留給
+-- ItemPicker parse；真正政策在 OnFillContainer（已載入沙盒）執行。
+setSandbox({ SpawnGPS = false, SpawnAutopilot = true })
+fire("OnPostDistributionMerge")
+checkEq(countIn(ProceduralDistributions.list.ArmyStorageElectronics.items, GPS_T), 1,
+    "SpawnGPS=false 不在過早的 merge 階段移除 GPS pair")
+checkEq(countIn(ProceduralDistributions.list.ArmyStorageElectronics.items, AUTO_T), 1,
+    "merge 階段仍保留自駕 pair")
+
+do
+    local loot = newLootContainer({ GPS_T, AUTO_T, "Base.Plank" })
+    fire("OnFillContainer", "garage", "crate", loot)
+    checkEq(loot:count(GPS_T), 0, "SpawnGPS=false：新生成容器移除 GPS")
+    checkEq(loot:count(AUTO_T), 1, "關閉 GPS 不影響自駕模組")
+    checkEq(loot:count("Base.Plank"), 1, "生成過濾不碰原版物品")
+
+    setSandbox({ SpawnGPS = true, SpawnAutopilot = false })
+    loot = newLootContainer({ GPS_T, AUTO_T, "Base.Plank" })
+    fire("OnFillContainer", "garage", "crate", loot)
+    checkEq(loot:count(GPS_T), 1, "關閉自駕模組不影響 GPS")
+    checkEq(loot:count(AUTO_T), 0, "SpawnAutopilot=false：新生成容器移除自駕模組")
+
+    setSandbox({ SpawnGPS = false, SpawnAutopilot = false })
+    loot = newLootContainer({ GPS_T, AUTO_T, "Base.Plank" })
+    fire("OnFillContainer", "garage", "crate", loot)
+    checkEq(#loot._items, 1, "兩個生成開關都關：只保留原版物品")
+    local child = newLootContainer({ GPS_T, AUTO_T, "Base.Nails" })
+    local bag = newItem("Base.Bag_DuffelBag")
+    bag._class = "InventoryContainer"
+    function bag:getInventory() return child end
+    loot = newLootContainer({ "Base.Plank" })
+    loot._items[#loot._items + 1] = bag
+    local nested = { bag }
+    function loot:getAllEvalRecurse(predicate)
+        local matches = {}
+        for i = 1, #nested do
+            if predicate(nested[i]) then matches[#matches + 1] = nested[i] end
+        end
+        return {
+            size = function() return #matches end,
+            get = function(_, index) return matches[index + 1] end,
+        }
+    end
+    fire("OnFillContainer", "garage", "crate", loot)
+    checkEq(child:count(GPS_T), 0, "正常外層 event 會遞迴清掉巢狀 bag 的 GPS")
+    checkEq(child:count(AUTO_T), 0, "正常外層 event 會遞迴清掉巢狀 bag 的自駕模組")
+    checkEq(child:count("Base.Nails"), 1, "巢狀過濾不碰原版物品")
+
+    setSandbox({ SpawnGPS = true, SpawnAutopilot = true })
+    loot = newLootContainer({ GPS_T, AUTO_T, "Base.Plank" })
+    fire("OnFillContainer", "garage", "crate", loot)
+    checkEq(#loot._items, 3, "兩個生成開關都開：容器內容完全不動")
+
+    clientFlag = true
+    setSandbox({ SpawnGPS = false, SpawnAutopilot = false })
+    loot = newLootContainer({ GPS_T, AUTO_T })
+    fire("OnFillContainer", "garage", "crate", loot)
+    checkEq(#loot._items, 2, "MP client 不改 server 權威生成內容")
+    clientFlag = false
+    checkTrue(pcall(fire, "OnFillContainer", "garage", "crate", nil),
+        "OnFillContainer 缺 container 時安全早退")
+    checkTrue(pcall(fire, "OnFillContainer", "Zombie Bag", "bag", {}),
+        "vanilla 誤傳 ItemPickerContainer（無 getItems/DoRemoveItem）時安全早退")
+    setSandbox({ SpawnGPS = true, SpawnAutopilot = true })
+end
 
 -- 原版改名／移除某張表時必須靜靜跳過，不能整包炸
 ProceduralDistributions.list.EngineerTools = nil
@@ -1434,7 +1580,7 @@ checkEq(distCalls, 0, "整段可及性判定都沒有呼叫 DistToSquared（距�
 -- =====================================================================
 -- 情境六：車電耗電（server-authoritative）
 -- =====================================================================
-scenario("車電耗電：DrainPercent 0/100/500、nav 對 auto 倍率、引擎運轉、單次扣值、同步門檻")
+scenario("車電耗電：GPS／自駕倍率獨立、同輪相加、引擎負載、滿電短路與同步門檻")
 
 local RATE_NAV, RATE_AUTO = 0.00002, 0.0001
 local dv, db
@@ -1444,107 +1590,116 @@ local function drainVehicle(charge, engineRunning)
     dv = newVehicle({ battery = db, engineRunning = engineRunning })
 end
 
-setSandbox({ DrainPercent = 100 })
+setSandbox({ GPSPowerPercent = 100, AutoDrivePowerPercent = 100 })
 drainVehicle(0.5)
 resetStats()
-checkTrue(MDAD.consumeVehiclePower(dv, "nav", 10), "nav 扣電後仍有電：回 true")
-checkNear(db._uses, 0.5 - RATE_NAV * 10, EPS, "nav 10 分鐘只扣一次 rate*minutes（雙扣會失敗）")
+checkTrue(MDAD.consumeVehiclePowerModes(dv, true, false, 10), "GPS 扣電後仍有電：回 true")
+checkNear(db._uses, 0.5 - RATE_NAV * 10, EPS, "GPS 10 分鐘只扣一次 rate*minutes")
 checkEq(stats.setUsedDelta, 1, "單次呼叫只寫一次 usedDelta")
-checkEq(stats.transmitUsedDelta, 0, "round 2 位沒變、未跨 0/1：不同步（避免每分鐘廣播）")
-local navDrop = 0.5 - db._uses
+checkEq(stats.transmitUsedDelta, 0, "round 2 位沒變、未跨 0/1：不同步")
 
 drainVehicle(0.5)
-MDAD.consumeVehiclePower(dv, "auto", 10)
-checkNear(0.5 - db._uses, navDrop * 5, EPS, "auto 費率是 nav 的 5 倍")
-checkNear(0.5 - db._uses, RATE_AUTO * 10, EPS, "auto 10 分鐘扣 RATE_AUTO*minutes")
+MDAD.consumeVehiclePowerModes(dv, false, true, 10)
+checkNear(0.5 - db._uses, RATE_AUTO * 10, EPS, "自駕 10 分鐘扣自己的 RATE_AUTO")
 
-setSandbox({ DrainPercent = 0 })
 drainVehicle(0.5)
 resetStats()
-checkTrue(MDAD.consumeVehiclePower(dv, "nav", 10), "DrainPercent=0：仍回報有電")
-checkEq(db._uses, 0.5, "DrainPercent=0：電量完全不動")
-checkEq(stats.setUsedDelta, 0, "DrainPercent=0：不寫 usedDelta")
-checkEq(stats.transmitUsedDelta, 0, "DrainPercent=0：不同步")
-drainVehicle(0)
-checkFalse(MDAD.consumeVehiclePower(dv, "nav", 10), "DrainPercent=0 且電量 0：回 false")
+MDAD.consumeVehiclePowerModes(dv, true, true, 10)
+checkNear(0.5 - db._uses, (RATE_NAV + RATE_AUTO) * 10, EPS,
+    "GPS＋自駕同時啟用時，各費率只相加一次")
+checkEq(stats.setUsedDelta, 1, "疊加模式合併成一次 usedDelta write")
 
-setSandbox({ DrainPercent = 500 })
+setSandbox({ GPSPowerPercent = 0, AutoDrivePowerPercent = 100 })
 drainVehicle(0.5)
-MDAD.consumeVehiclePower(dv, "nav", 10)
-checkNear(db._uses, 0.5 - RATE_NAV * 10 * 5, EPS, "DrainPercent=500：扣 5 倍")
-local drop500 = 0.5 - db._uses
+MDAD.consumeVehiclePowerModes(dv, true, true, 10)
+checkNear(0.5 - db._uses, RATE_AUTO * 10, EPS,
+    "GPSPowerPercent=0 只關 GPS，不影響自駕")
 
-setSandbox({ DrainPercent = 100000 })
+setSandbox({ GPSPowerPercent = 100, AutoDrivePowerPercent = 0 })
 drainVehicle(0.5)
-MDAD.consumeVehiclePower(dv, "nav", 10)
-checkNear(0.5 - db._uses, drop500, EPS, "DrainPercent 超過 500 截斷為 500")
+MDAD.consumeVehiclePowerModes(dv, true, true, 10)
+checkNear(0.5 - db._uses, RATE_NAV * 10, EPS,
+    "AutoDrivePowerPercent=0 只關自駕，不影響 GPS")
 
-setSandbox({ DrainPercent = -50 })
+setSandbox({ GPSPowerPercent = 50, AutoDrivePowerPercent = 200 })
 drainVehicle(0.5)
-checkTrue(MDAD.consumeVehiclePower(dv, "nav", 10), "DrainPercent 負值：仍回報有電")
-checkEq(db._uses, 0.5, "DrainPercent 負值截斷為 0：不耗電")
+MDAD.consumeVehiclePowerModes(dv, true, true, 10)
+checkNear(0.5 - db._uses, (RATE_NAV * 0.5 + RATE_AUTO * 2) * 10, EPS,
+    "兩個非預設倍率分別縮放後再相加")
 
-setSandbox({ DrainPercent = "abc" })
-drainVehicle(0.5)
-MDAD.consumeVehiclePower(dv, "nav", 10)
-checkNear(db._uses, 0.5 - RATE_NAV * 10, EPS, "DrainPercent 非數字時退回 100")
-
+setSandbox({ GPSPowerPercent = 500, AutoDrivePowerPercent = 500 })
+checkNear(MDAD.powerScale("nav"), 5, EPS, "GPSPowerPercent=500 → 5 倍")
+checkNear(MDAD.powerScale("auto"), 5, EPS, "AutoDrivePowerPercent=500 → 5 倍")
+checkTrue(RATE_NAV * 5 + RATE_AUTO * 5 < 0.001,
+    "雙 500% 最大負載仍小於 vanilla 發電機每分鐘 0.001 充電")
+setSandbox({ GPSPowerPercent = 100000, AutoDrivePowerPercent = -50 })
+checkNear(MDAD.powerScale("nav"), 5, EPS, "GPS 倍率超過 500 截到 500")
+checkNear(MDAD.powerScale("auto"), 0, EPS, "自駕倍率負值截到 0")
+setSandbox({ GPSPowerPercent = "abc", AutoDrivePowerPercent = 0 / 0 })
+checkNear(MDAD.powerScale("nav"), 1, EPS, "GPS 倍率非數字退回 100")
+checkNear(MDAD.powerScale("auto"), 1, EPS, "自駕倍率 NaN 退回 100")
 setSandbox(nil)
-drainVehicle(0.5)
-MDAD.consumeVehiclePower(dv, "nav", 10)
-checkNear(db._uses, 0.5 - RATE_NAV * 10, EPS, "沙盒未載入時用預設 100")
+checkNear(MDAD.powerScale("nav"), 1, EPS, "沙盒未載入時 GPS 使用預設 100")
+checkNil(MDAD.powerScale("radio"), "未知 power mode 沒有倍率")
 
-setSandbox({ DrainPercent = 100 })
+setSandbox({ GPSPowerPercent = 100, AutoDrivePowerPercent = 100 })
 drainVehicle(0.5, true)
 resetStats()
-checkTrue(MDAD.consumeVehiclePower(dv, "auto", 60), "引擎運轉中回報有電")
-checkEq(db._uses, 0.5, "引擎運轉中完全不耗車電（發電機在充）")
-checkEq(stats.setUsedDelta, 0, "引擎運轉中不寫 usedDelta")
-checkEq(stats.transmitUsedDelta, 0, "引擎運轉中不同步")
-drainVehicle(0, true)
-checkFalse(MDAD.consumeVehiclePower(dv, "auto", 60), "引擎運轉但電量 0：回 false")
+checkTrue(MDAD.consumeVehiclePowerModes(dv, true, true, 60),
+    "引擎運轉、電瓶未滿時照計兩項裝置負載")
+checkNear(db._uses, 0.5 - (RATE_NAV + RATE_AUTO) * 60, EPS,
+    "發電機與裝置負載並存：本函式只補扣負載")
+checkEq(stats.setUsedDelta, 1, "引擎運轉未滿電仍寫入負載")
+
+drainVehicle(1.0, true)
+resetStats()
+checkTrue(MDAD.consumeVehiclePowerModes(dv, true, true, 60), "滿電＋引擎運轉回 true")
+checkEq(db._uses, 1.0, "滿電由發電機 headroom 供應，不製造 1.0↔0.999x 抖動")
+checkEq(stats.setUsedDelta, 0, "滿電短路不寫 usedDelta")
+checkEq(stats.transmitUsedDelta, 0, "滿電短路不廣播")
 
 drainVehicle(0.5)
 resetStats()
-checkFalse(MDAD.consumeVehiclePower(nil, "nav", 10), "無車輛")
-checkFalse(MDAD.consumeVehiclePower(dv, "radio", 10), "未知 mode")
-checkFalse(MDAD.consumeVehiclePower(dv, nil, 10), "mode 為 nil")
-checkTrue(MDAD.consumeVehiclePower(dv, "nav", 0), "minutes=0：不耗電但回報有電")
-checkTrue(MDAD.consumeVehiclePower(dv, "nav", -5), "minutes 負值：不耗電")
-checkTrue(MDAD.consumeVehiclePower(dv, "nav", "10"), "minutes 非數字：不耗電")
+checkFalse(MDAD.consumeVehiclePowerModes(nil, true, false, 10), "無車輛")
+checkTrue(MDAD.consumeVehiclePowerModes(dv, false, false, 10), "兩個 mode 都未啟用：不耗電")
+checkTrue(MDAD.consumeVehiclePowerModes(dv, true, false, 0), "minutes=0：不耗電但回報有電")
+checkTrue(MDAD.consumeVehiclePowerModes(dv, true, false, -5), "minutes 負值：不耗電")
+checkTrue(MDAD.consumeVehiclePowerModes(dv, true, false, "10"), "minutes 非數字：不耗電")
 checkEq(db._uses, 0.5, "無效參數一律不動電量")
 checkEq(stats.setUsedDelta, 0, "無效參數不寫 usedDelta")
-checkFalse(MDAD.consumeVehiclePower(newVehicle({ noBattery = true }), "nav", 10), "無電瓶 part")
-checkFalse(MDAD.consumeVehiclePower(newVehicle({}), "nav", 10), "電瓶槽沒有 item")
-checkFalse(MDAD.consumeVehiclePower(newVehicle({ battery = newItem("Base.Plank") }), "nav", 10),
+checkFalse(MDAD.consumeVehiclePowerModes(newVehicle({ noBattery = true }), true, false, 10),
+    "無電瓶 part")
+checkFalse(MDAD.consumeVehiclePowerModes(newVehicle({}), true, false, 10),
+    "電瓶槽沒有 item")
+checkFalse(MDAD.consumeVehiclePowerModes(
+    newVehicle({ battery = newItem("Base.Plank") }), true, false, 10),
     "電瓶槽塞了非 drainable 物品")
 
 drainVehicle(0.0001)
 resetStats()
-checkFalse(MDAD.consumeVehiclePower(dv, "nav", 100), "電量歸零時回 false")
+checkFalse(MDAD.consumeVehiclePowerModes(dv, true, false, 100), "電量歸零時回 false")
 checkEq(db._uses, 0, "clamp01 截到 0，不會變負數")
 checkEq(stats.transmitUsedDelta, 1, "跨越 0 邊界一定同步")
 resetStats()
-checkFalse(MDAD.consumeVehiclePower(dv, "nav", 100), "已經 0 電再呼叫仍回 false")
+checkFalse(MDAD.consumeVehiclePowerModes(dv, true, false, 100), "已經 0 電再呼叫仍回 false")
 checkEq(stats.setUsedDelta, 0, "電量已是 0：不重複寫入")
-checkEq(stats.transmitUsedDelta, 0, "電量沒變化：不重複廣播")
 
 drainVehicle(0.5)
 resetStats()
-MDAD.consumeVehiclePower(dv, "auto", 100)
-checkNear(db._uses, 0.49, EPS, "auto 100 分鐘扣 0.01")
+MDAD.consumeVehiclePowerModes(dv, false, true, 100)
+checkNear(db._uses, 0.49, EPS, "自駕 100 分鐘扣 0.01")
 checkEq(stats.transmitUsedDelta, 1, "round 2 位由 0.50 變 0.49：同步")
 
-drainVehicle(1.0)
+drainVehicle(1.0, false)
 resetStats()
-MDAD.consumeVehiclePower(dv, "nav", 10)
-checkNear(db._uses, 1.0 - RATE_NAV * 10, EPS, "滿電車也照樣耗")
-checkEq(stats.transmitUsedDelta, 1, "離開滿電 1.0：round 沒變也要同步")
+MDAD.consumeVehiclePowerModes(dv, true, false, 10)
+checkNear(db._uses, 1.0 - RATE_NAV * 10, EPS, "熄火滿電仍由電瓶供應 GPS")
+checkEq(stats.transmitUsedDelta, 1, "熄火離開滿電 1.0 邊界一定同步")
 
 drainVehicle(0.5)
 clientFlag = true
 resetStats()
-checkFalse(MDAD.consumeVehiclePower(dv, "nav", 10), "MP client 直接 return false")
+checkFalse(MDAD.consumeVehiclePowerModes(dv, true, false, 10), "MP client 直接 return false")
 checkEq(db._uses, 0.5, "MP client 不動電量（server-authoritative）")
 checkEq(stats.setUsedDelta, 0, "MP client 不寫 usedDelta")
 clientFlag = false
@@ -1552,98 +1707,322 @@ clientFlag = false
 -- =====================================================================
 -- 情境七：隨身 GPS 耗電
 -- =====================================================================
-scenario("隨身耗電：UseDelta 採用規則、auto 同為 5 倍、非法 mode、耗盡、sendItemStats 條件")
+scenario("隨身 GPS 耗電：UseDelta、獨立 GPS 倍率、耗盡與 sendItemStats")
 
-setSandbox({ DrainPercent = 100 })
+setSandbox({ GPSPowerPercent = 100, AutoDrivePowerPercent = 100 })
 local pi = newItem(GPS_T, { uses = 0.5, useDelta = 0.006 })
 resetStats()
-checkTrue(MDAD.consumePortablePower(pi, "nav", 10), "nav 扣電後仍有電")
-local portNavDrop = 0.5 - pi._uses
-checkNear(portNavDrop, 0.006 * 10, EPS, "nav 採用 item 自己的 UseDelta（0.006/分）")
+checkTrue(MDAD.consumePortablePower(pi, 10), "GPS 扣電後仍有電")
+checkNear(0.5 - pi._uses, 0.006 * 10, EPS, "採用 item 自己的 UseDelta（0.006/分）")
 checkEq(stats.setUsedDelta, 1, "單次呼叫只寫一次 usedDelta")
 checkEq(stats.sendItemStats, 1, "MP server 上同步 item 狀態")
 
-pi = newItem(GPS_T, { uses = 1.0, useDelta = 0.006 })
-MDAD.consumePortablePower(pi, "auto", 10)
-checkNear(1.0 - pi._uses, portNavDrop * 5, EPS, "auto 是 nav 的 5 倍（與車電同倍率）")
-
--- 沒有 getUseDelta 的物品要退回內建費率，且維持同一倍率關係
 pi = newItem(GPS_T, { uses = 0.5 })
-MDAD.consumePortablePower(pi, "nav", 10)
-checkNear(0.5 - pi._uses, 0.06, EPS, "沒有 getUseDelta 時退回內建 nav 0.006")
-pi = newItem(GPS_T, { uses = 0.5 })
-MDAD.consumePortablePower(pi, "auto", 10)
-checkNear(0.5 - pi._uses, 0.3, EPS, "沒有 getUseDelta 時退回內建 auto 0.03（仍是 5 倍）")
-
+MDAD.consumePortablePower(pi, 10)
+checkNear(0.5 - pi._uses, 0.06, EPS, "沒有 getUseDelta 時退回內建 0.006")
 pi = newItem(GPS_T, { uses = 0.5, useDelta = 0 })
-MDAD.consumePortablePower(pi, "nav", 10)
+MDAD.consumePortablePower(pi, 10)
 checkNear(0.5 - pi._uses, 0.06, EPS, "UseDelta=0 不被採用（否則永不耗電）")
 pi = newItem(GPS_T, { uses = 0.5, useDelta = -1 })
-MDAD.consumePortablePower(pi, "nav", 10)
+MDAD.consumePortablePower(pi, 10)
 checkNear(0.5 - pi._uses, 0.06, EPS, "UseDelta 負值不被採用（否則會充電）")
 pi = newItem(GPS_T, { uses = 0.5, useDelta = "0.5" })
-MDAD.consumePortablePower(pi, "nav", 10)
+MDAD.consumePortablePower(pi, 10)
 checkNear(0.5 - pi._uses, 0.06, EPS, "UseDelta 非數字不被採用")
 pi = newItem(GPS_T, { uses = 1.0, useDelta = 0.02 })
-MDAD.consumePortablePower(pi, "nav", 10)
-checkNear(1.0 - pi._uses, 0.2, EPS, "UseDelta 被改大時費率跟著改（真的讀 item 資料）")
+MDAD.consumePortablePower(pi, 10)
+checkNear(1.0 - pi._uses, 0.2, EPS, "UseDelta 被改大時費率跟著改")
 
 pi = newItem(GPS_T, { uses = 0.5, useDelta = 0.006 })
 resetStats()
-checkFalse(MDAD.consumePortablePower(pi, "gps", 10), "未知 mode")
-checkFalse(MDAD.consumePortablePower(pi, nil, 10), "mode 為 nil")
-checkEq(pi._uses, 0.5, "非法 mode 不動電量")
-checkEq(stats.setUsedDelta, 0, "非法 mode 不寫 usedDelta")
-checkEq(stats.sendItemStats, 0, "非法 mode 不發同步")
-checkTrue(MDAD.consumePortablePower(pi, "nav", 0), "minutes=0：不耗電但回報有電")
-checkTrue(MDAD.consumePortablePower(pi, "nav", "10"), "minutes 非數字：不耗電")
+checkTrue(MDAD.consumePortablePower(pi, 0), "minutes=0：不耗電但回報有電")
+checkTrue(MDAD.consumePortablePower(pi, "10"), "minutes 非數字：不耗電")
 checkEq(pi._uses, 0.5, "無效 minutes 不動電量")
 checkEq(stats.setUsedDelta, 0, "無效 minutes 不寫 usedDelta")
-checkFalse(MDAD.consumePortablePower(nil, "nav", 10), "無物品")
-checkFalse(MDAD.consumePortablePower(newItem(AUTO_T), "nav", 10),
-    "非 drainable 物品（AutopilotModule 沒有 usedDelta）不被扣電")
+checkFalse(MDAD.consumePortablePower(nil, 10), "無物品")
+checkFalse(MDAD.consumePortablePower(newItem(AUTO_T), 10),
+    "AutopilotModule 不是 drainable，不存在 portable-auto 假路徑")
 
-setSandbox({ DrainPercent = 0 })
+setSandbox({ GPSPowerPercent = 0, AutoDrivePowerPercent = 500 })
 pi = newItem(GPS_T, { uses = 0.5, useDelta = 0.006 })
 resetStats()
-checkTrue(MDAD.consumePortablePower(pi, "nav", 10), "DrainPercent=0：仍回報有電")
-checkEq(pi._uses, 0.5, "DrainPercent=0：電量完全不動")
-checkEq(stats.sendItemStats, 0, "DrainPercent=0：不發同步")
-setSandbox({ DrainPercent = 500 })
+checkTrue(MDAD.consumePortablePower(pi, 10), "GPSPowerPercent=0：仍回報有電")
+checkEq(pi._uses, 0.5, "GPSPowerPercent=0：隨身 GPS 電量完全不動")
+checkEq(stats.sendItemStats, 0, "GPSPowerPercent=0：不發同步")
+setSandbox({ GPSPowerPercent = 500, AutoDrivePowerPercent = 0 })
 pi = newItem(GPS_T, { uses = 1.0, useDelta = 0.006 })
-MDAD.consumePortablePower(pi, "nav", 10)
-checkNear(1.0 - pi._uses, 0.3, EPS, "DrainPercent=500：隨身也扣 5 倍")
+MDAD.consumePortablePower(pi, 10)
+checkNear(1.0 - pi._uses, 0.3, EPS, "GPSPowerPercent=500：隨身 GPS 扣 5 倍")
 
-setSandbox({ DrainPercent = 100 })
+setSandbox({ GPSPowerPercent = 100, AutoDrivePowerPercent = 100 })
 pi = newItem(GPS_T, { uses = 0.05, useDelta = 0.006 })
 resetStats()
-checkFalse(MDAD.consumePortablePower(pi, "nav", 10), "電量歸零時回 false")
+checkFalse(MDAD.consumePortablePower(pi, 10), "電量歸零時回 false")
 checkEq(pi._uses, 0, "clamp01 截到 0，不會變負數")
 checkEq(stats.setUsedDelta, 1, "耗盡那一次要寫入")
 checkEq(stats.sendItemStats, 1, "耗盡那一次要同步")
 resetStats()
-checkFalse(MDAD.consumePortablePower(pi, "nav", 10), "已經 0 電再呼叫仍回 false")
+checkFalse(MDAD.consumePortablePower(pi, 10), "已經 0 電再呼叫仍回 false")
 checkEq(stats.setUsedDelta, 0, "電量已是 0：不重複寫入")
-checkEq(stats.sendItemStats, 0, "電量沒變化：不重複同步（KeepOnDeplete 物品每分鐘廣播是實災）")
+checkEq(stats.sendItemStats, 0, "電量沒變化：不重複同步")
 
--- SP（isClient/isServer 皆 false）：照扣電，但不發網路同步
 pi = newItem(GPS_T, { uses = 0.5, useDelta = 0.006 })
 serverFlag = false
 resetStats()
-checkTrue(MDAD.consumePortablePower(pi, "nav", 10), "SP 照樣耗電")
+checkTrue(MDAD.consumePortablePower(pi, 10), "SP 照樣耗電")
 checkNear(0.5 - pi._uses, 0.06, EPS, "SP 扣的量與 MP server 相同")
-checkEq(stats.setUsedDelta, 1, "SP 寫入 usedDelta")
 checkEq(stats.sendItemStats, 0, "SP 不發 sendItemStats")
 serverFlag = true
 
 pi = newItem(GPS_T, { uses = 0.5, useDelta = 0.006 })
 clientFlag = true
 resetStats()
-checkFalse(MDAD.consumePortablePower(pi, "nav", 10), "MP client 直接 return false")
+checkFalse(MDAD.consumePortablePower(pi, 10), "MP client 直接 return false")
 checkEq(pi._uses, 0.5, "MP client 不動電量")
-checkEq(stats.setUsedDelta, 0, "MP client 不寫 usedDelta")
 checkEq(stats.sendItemStats, 0, "MP client 不發同步")
 clientFlag = false
+
+-- =====================================================================
+-- Fuel wrapper＋EveryOneMinute power collector（server/SP 權威）
+-- =====================================================================
+scenario("資源整合：heartbeat TTL、原生油耗比例加成、四倍率相加、同車去重與跳分鐘補償")
+do
+    local c = {}
+    clientFlag, serverFlag = false, true
+    setSandbox({
+        NeedItemForAutoDrive = true,
+        GPSPowerPercent = 100, AutoDrivePowerPercent = 100,
+        GPSFuelPercent = 100, AutoDriveFuelPercent = 100,
+    })
+
+    c.wrapper = Vehicles.Update.GasTank
+    c.minuteHandlers = #(eventHandlers.EveryOneMinute or {})
+    loaded.MDAD_Consumption = nil
+    require "MDAD_Consumption"
+    checkEq(Vehicles.Update.GasTank, c.wrapper,
+        "Consumption chunk 重載不會把 GasTank wrapper 疊包")
+    checkEq(#(eventHandlers.EveryOneMinute or {}), c.minuteHandlers,
+        "Consumption chunk 重載不會重複註冊 EveryOneMinute")
+    Vehicles.Update.GasTank = function() end
+    c.hookLog = capturePrint(function() fire("OnServerStarted") end)
+    checkTrue(logHas(c.hookLog, "fuel hook slot changed after install"),
+        "第三方在載入後覆寫 GasTank slot 會留下明確相容性診斷")
+    Vehicles.Update.GasTank = c.wrapper
+
+    c.driver = newPlayer({ num = 0, username = "fuel-driver", remote = true })
+    c.battery = newItem("Base.CarBattery", { uses = 0.5 })
+    c.vehicle = newVehicle({ battery = c.battery, engineRunning = true, driver = c.driver })
+    c.driver._vehicle = c.vehicle
+    c.driver._modData.MinidoracatMiniMapTX = 100
+    c.driver._modData.MinidoracatMiniMapTY = 200
+    c.state = MDAD.ensureState(c.vehicle:getBattery())
+    c.state.nav, c.state.auto = true, true
+
+    nowMs = nowMs + 1001
+    resetStats()
+    fire("OnClientCommand", MOD_ID, MDAD.CMD_NAV_USAGE, c.driver,
+        { active = true, victimOnlineId = 9999, amount = -999 })
+    checkTrue(MDAD.isNavUsageActive(c.driver, c.vehicle),
+        "NavUsage 只採 server actor；不接受 victim／座標／amount")
+    fire("OnClientCommand", MOD_ID, MDAD.CMD_USAGE, c.driver,
+        { vehicleId = c.vehicle:getId(), active = true, amount = -999 })
+    checkTrue(MDAD.isAutoUsageActive(c.vehicle),
+        "Usage command 只採 actor／vehicleId／active，忽略 client 偽造 amount")
+    checkEq(stats.getVehicleById, 1, "合法 Usage heartbeat 由 server 以 id 重查車輛")
+    fire("OnClientCommand", MOD_ID, MDAD.CMD_USAGE, c.driver,
+        { vehicleId = c.vehicle:getId(), active = false })
+    checkFalse(MDAD.isAutoUsageActive(c.vehicle),
+        "active=false 在同一節流窗仍立即清除，不留下幽靈成本")
+    resetStats()
+    fire("OnClientCommand", MOD_ID, MDAD.CMD_USAGE, c.driver,
+        { vehicleId = c.vehicle:getId(), active = true })
+    checkTrue(MDAD.isAutoUsageActive(c.vehicle),
+        "成功 off 會清 throttle timestamp，立即重開也能當場 ACTIVE")
+    checkEq(stats.getVehicleById, 1, "快速 off→on 的新 on 沒被舊 heartbeat timestamp 吃掉")
+    resetStats()
+    fire("OnClientCommand", MOD_ID, MDAD.CMD_USAGE, c.driver,
+        { vehicleId = 999999, active = false })
+    fire("OnClientCommand", MOD_ID, MDAD.CMD_USAGE, c.driver,
+        { vehicleId = c.vehicle:getId(), active = true })
+    checkEq(stats.getVehicleById, 0,
+        "沒有清到 entry 的偽造 off 不會重設 throttle、不能拿來繞 flood gate")
+    nowMs = nowMs + 1001
+    resetStats()
+    fire("OnClientCommand", MOD_ID, MDAD.CMD_USAGE, c.driver,
+        { vehicleId = 0 / 0, active = true })
+    checkEq(stats.getVehicleById, 0, "NaN vehicleId 在進 Java getVehicleById 前拒絕")
+
+    checkTrue(MDAD.setAutoUsage(c.driver, c.vehicle), "合法駕駛 heartbeat 建立 ACTIVE registry")
+    checkTrue(MDAD.isAutoUsageActive(c.vehicle), "ACTIVE registry 可被燃油／電力消費點讀到")
+    c.driver._modData.MinidoracatMiniMapTX = nil
+    c.driver._modData.MinidoracatMiniMapTY = nil
+    checkTrue(MDAD.isAutoUsageActive(c.vehicle),
+        "任意 client 就算毒化／清除 player modData，也不能改變 actor-bound billing")
+    fire("OnClientCommand", MOD_ID, MDAD.CMD_NAV_USAGE, c.driver, { active = false })
+    checkFalse(MDAD.isNavUsageActive(c.driver, c.vehicle),
+        "NavUsage off 立即停止 GPS billing，不等待 15s TTL")
+    c.attacker = newPlayer({ num = 3, username = "attacker", remote = true, onlineId = 9003 })
+    c.attackerPortable = newItem(GPS_T, { uses = 1.0, useDelta = 0.006 })
+    c.attacker:getInventory():AddItem(c.attackerPortable)
+    fire("OnClientCommand", MOD_ID, MDAD.CMD_NAV_USAGE, c.attacker,
+        { active = true, victimOnlineId = c.driver:getOnlineID() })
+    checkFalse(MDAD.isNavUsageActive(c.driver, c.vehicle),
+        "別人的 actor-bound NavUsage 無法替受害者建立／延長 billing")
+    checkTrue(MDAD.isNavUsageActive(c.attacker, nil),
+        "同一偽造封包最多只讓 attacker 自己的 portable 付費")
+    fire("OnClientCommand", MOD_ID, MDAD.CMD_NAV_USAGE, c.attacker, { active = false })
+    checkTrue(MDAD.isAutoUsageActive(c.vehicle),
+        "NeedItemForNav=false 時 Auto billing 獨立，不因 GPS off 被誤清")
+    fire("OnClientCommand", MOD_ID, MDAD.CMD_USAGE, c.driver,
+        { vehicleId = c.vehicle:getId(), active = false })
+    checkFalse(MDAD.isAutoUsageActive(c.vehicle), "Auto Usage off 獨立停止自駕 billing")
+    fire("OnClientCommand", MOD_ID, MDAD.CMD_NAV_USAGE, c.driver, { active = true })
+    fire("OnClientCommand", MOD_ID, MDAD.CMD_USAGE, c.driver,
+        { vehicleId = c.vehicle:getId(), active = true })
+    checkTrue(MDAD.isAutoUsageActive(c.vehicle), "兩個 actor-bound heartbeat 都可立即恢復")
+    c.passenger = newPlayer({ num = 1, username = "passenger", remote = true })
+    c.passenger._vehicle = c.vehicle
+    checkFalse(MDAD.setAutoUsage(c.passenger, c.vehicle), "乘客偽造 heartbeat 被 driver identity 擋住")
+    nowMs = nowMs + MDAD.AUTO_USAGE_TTL_MS + 1
+    checkFalse(MDAD.isNavUsageActive(c.driver, c.vehicle), "GPS NavUsage 同樣在 15 秒 TTL 失效")
+    checkFalse(MDAD.isAutoUsageActive(c.vehicle), "heartbeat 過 15 秒 TTL 自動失效")
+    checkTrue(MDAD.setNavUsage(c.driver), "TTL 後先恢復 actor-bound GPS heartbeat")
+    checkTrue(MDAD.setAutoUsage(c.driver, c.vehicle), "TTL 後合法 auto heartbeat 可重新啟用")
+    c.vehicle._driver = c.passenger
+    checkFalse(MDAD.isAutoUsageActive(c.vehicle), "同車換座立刻失效，不持有舊 player object")
+    c.vehicle._driver = c.driver
+    checkTrue(MDAD.setNavUsage(c.driver), "換回原駕駛先恢復 GPS heartbeat")
+    checkTrue(MDAD.setAutoUsage(c.driver, c.vehicle), "換回原駕駛可重新啟用 auto")
+
+    checkNear(MDAD.extraFuelFactor(true, true), 0.30, EPS,
+        "雙 100%＝GPS +5% 加自駕 +25%，合計 +30%")
+    setSandbox({
+        NeedItemForAutoDrive = true,
+        GPSPowerPercent = 100, AutoDrivePowerPercent = 100,
+        GPSFuelPercent = 0, AutoDriveFuelPercent = 500,
+    })
+    checkNear(MDAD.extraFuelFactor(true, true), 1.25, EPS,
+        "GPSFuel=0、AutoFuel=500 只留下自駕 +125%")
+    setSandbox({
+        NeedItemForAutoDrive = true,
+        GPSPowerPercent = 100, AutoDrivePowerPercent = 100,
+        GPSFuelPercent = 100, AutoDriveFuelPercent = 100,
+    })
+
+    drive.fuelBurn = 0.1
+    c.gas = newGasPart(1.0, 1.0)
+    resetStats()
+    Vehicles.Update.GasTank(c.vehicle, c.gas, 1)
+    checkNear(c.gas._amount, 0.87, EPS,
+        "vanilla 0.10L 只扣一次，再加 GPS 0.005L＋自駕 0.025L")
+    checkEq(stats.gasUpdates, 1, "wrapper 每次只呼叫一次 vanilla GasTank")
+    checkEq(stats.setFuel, 2, "vanilla write＋單次 extra write，沒有第三次重扣")
+
+    MDAD.clearAutoUsage(c.driver, c.vehicle:getId())
+    c.gas = newGasPart(1.0, 1.0)
+    Vehicles.Update.GasTank(c.vehicle, c.gas, 1)
+    checkNear(c.gas._amount, 0.895, EPS, "只有車載 GPS 時原生 0.10L 再加 5%")
+
+    c.state.nav = false
+    checkTrue(MDAD.setAutoUsage(c.driver, c.vehicle), "沒有車載 GPS 仍可獨立啟用自駕 registry")
+    c.gas = newGasPart(1.0, 1.0)
+    Vehicles.Update.GasTank(c.vehicle, c.gas, 1)
+    checkNear(c.gas._amount, 0.875, EPS, "只有自駕時原生 0.10L 再加 25%")
+    MDAD.clearAutoUsage(c.driver, c.vehicle:getId())
+    c.driverPortable = newItem(GPS_T, { uses = 1.0, useDelta = 0.006 })
+    c.driver:getInventory():AddItem(c.driverPortable)
+    checkTrue(MDAD.setNavUsage(c.driver), "隨身 GPS 加入後 actor heartbeat 建立 portable nav")
+    c.gas = newGasPart(1.0, 1.0)
+    Vehicles.Update.GasTank(c.vehicle, c.gas, 1)
+    checkNear(c.gas._amount, 0.895, EPS,
+        "駕駛以帶電隨身 GPS 導航時，也套 GPSFuel +5%")
+    checkTrue(MDAD.setAutoUsage(c.driver, c.vehicle), "隨身 GPS＋自駕可同時 ACTIVE")
+    c.gas = newGasPart(1.0, 1.0)
+    Vehicles.Update.GasTank(c.vehicle, c.gas, 1)
+    checkNear(c.gas._amount, 0.87, EPS,
+        "隨身 GPS＋自駕同時運作仍相加為 +30%")
+    c.driver:getInventory():DoRemoveItem(c.driverPortable)
+    c.state.nav = true
+
+    setSandbox({
+        NeedItemForAutoDrive = true,
+        GPSPowerPercent = 100, AutoDrivePowerPercent = 100,
+        GPSFuelPercent = 0, AutoDriveFuelPercent = 500,
+    })
+    c.gas = newGasPart(1.0, 1.0)
+    Vehicles.Update.GasTank(c.vehicle, c.gas, 1)
+    checkNear(c.gas._amount, 0.775, EPS,
+        "GPSFuel=0／AutoFuel=500：0.10L 原生＋0.125L 自駕，沒有 GPS 分量")
+
+    c.gas = newGasPart(0.05, 1.0)
+    Vehicles.Update.GasTank(c.vehicle, c.gas, 1)
+    checkEq(c.gas._amount, 0, "vanilla 已扣到零時 extra clamp 仍不會產生負油量")
+
+    setSandbox({
+        NeedItemForAutoDrive = true,
+        GPSPowerPercent = 100, AutoDrivePowerPercent = 100,
+        GPSFuelPercent = 100, AutoDriveFuelPercent = 100,
+    })
+    c.state.nav = true
+    c.battery._uses = 0.5
+    checkTrue(MDAD.setAutoUsage(c.driver, c.vehicle), "power collector 前續期 registry")
+    c.passenger._modData.MinidoracatMiniMapTX = 300
+    c.passenger._modData.MinidoracatMiniMapTY = 400
+    checkFalse(MDAD.setNavUsage(c.passenger),
+        "乘客不能用別人的車機建立 billing；可偽造 modData 也無效")
+    c.passengerPortable = newItem(GPS_T, { uses = 1.0, useDelta = 0.006 })
+    c.passenger:getInventory():AddItem(c.passengerPortable)
+    checkTrue(MDAD.setNavUsage(c.passenger), "乘客自己的 charged portable 可建立自己的 billing")
+    drive.online = { c.driver, c.passenger }
+    drive.worldAge = 100
+    resetStats()
+    fire("EveryOneMinute")
+    checkNear(c.battery._uses, 0.5 - RATE_NAV - RATE_AUTO, EPS,
+        "driver 車機 GPS 與自駕各扣一份，不因乘客 heartbeat 多扣車電")
+    checkNear(c.passengerPortable._uses, 0.994, EPS,
+        "乘客導航成本落在自己的 portable，不落在駕駛車機")
+    checkEq(stats.setUsedDelta, 2,
+        "車輛 GPS＋自駕合併一 write，乘客 portable 另一 write")
+
+    c.walker = newPlayer({ num = 2, username = "walker", remote = true })
+    c.walker._modData.MinidoracatMiniMapTX = 500
+    c.walker._modData.MinidoracatMiniMapTY = 600
+    c.portable = newItem(GPS_T, { uses = 1.0, useDelta = 0.006 })
+    c.walker:getInventory():AddItem(c.portable)
+    checkTrue(MDAD.setNavUsage(c.walker), "步行者 charged portable 建立 actor-bound NavUsage")
+    drive.online = { c.driver, c.passenger, c.walker }
+    drive.worldAge = drive.worldAge + 1 / 60
+    fire("EveryOneMinute")
+    checkNear(c.portable._uses, 0.994, EPS,
+        "步行導航每分鐘重找 charged portable 並扣自己的電池")
+
+    c.beforeJump = c.battery._uses
+    drive.worldAge = drive.worldAge + 10 / 60
+    fire("EveryOneMinute")
+    checkNear(c.beforeJump - c.battery._uses, (RATE_NAV + RATE_AUTO) * 5, EPS,
+        "單次跨 10 遊戲分鐘按 worldAge 補償，但寬容 clamp 在 5 分鐘")
+
+    c.battery._uses = 1.0
+    drive.worldAge = drive.worldAge + 1 / 60
+    resetStats()
+    fire("EveryOneMinute")
+    checkEq(c.battery._uses, 1.0, "EveryOneMinute 遇滿電運轉車不製造邊界抖動")
+    checkEq(stats.transmitUsedDelta, 0, "滿電運轉不發 PartUsedDelta")
+
+    drive.online = {}
+    drive.worldAge = drive.worldAge + 1 / 60
+    resetStats()
+    fire("EveryOneMinute")
+    checkEq(stats.scanTypeEval, 0, "零在線玩家直接 return，不掃任何背包")
+    checkEq(stats.setUsedDelta, 0, "零在線玩家不寫任何裝置電量")
+
+    MDAD.clearAutoUsage(c.driver, c.vehicle:getId())
+    MDAD.clearNavUsage(c.driver)
+    MDAD.clearNavUsage(c.passenger)
+    MDAD.clearNavUsage(c.walker)
+    drive.online = {}
+    clientFlag, serverFlag = false, true
+end
 
 -- =====================================================================
 -- 情境八～十：MDAD.applyDeviceChange（安裝／卸載的唯一突變點）
@@ -1653,7 +2032,7 @@ clientFlag = false
 -- =====================================================================
 scenario("apply 安裝：nav 保存 delta＋從實際容器移除＋同步；auto 只動 auto 欄位")
 
-setSandbox({ InstallSkillGate = true, DrainPercent = 100 })
+setSandbox({ InstallSkillGate = true })
 clientFlag, serverFlag = false, true
 safehouseAllow = true
 
@@ -2597,6 +2976,46 @@ resetStats()
 capturePrint(function() fire("OnCreatePlayer", 5) end)
 checkEq(#halos, 0, "註冊成功後新 slot 也不提示")
 
+-- actor-bound GPS billing heartbeat：只送 active，不送目標／vehicle／item／amount。
+players[2], players[3], players[4], players[5] = nil, nil, nil, nil
+activePlayers = 2
+drive.clientNavTargets = { [0] = { 10, 20 } }
+MinidoracatMiniMapAPI.navApiVersion = 2
+MinidoracatMiniMapAPI.getNavTarget = function(playerNum)
+    local target = drive.clientNavTargets[playerNum]
+    if not target then return nil end
+    return target[1], target[2]
+end
+resetStats()
+fire("OnTick")
+checkEq(#sentClient, 1, "首次 check 只替有導航的 slot 送 on；無導航 slot 不送空 off")
+checkEq(sentClient[1] and sentClient[1].command, MDAD.CMD_NAV_USAGE,
+    "GPS billing 使用獨立 NavUsage command")
+checkEq(sentClient[1] and sentClient[1].args.active, true, "有目標的 slot 宣告 active=true")
+checkNil(sentClient[1] and sentClient[1].args.vehicleId, "NavUsage 不讓 client 指定 vehicle")
+checkNil(sentClient[1] and sentClient[1].args.tx, "NavUsage 不送座標")
+nowMs = nowMs + 1100
+resetStats()
+for _ = 1, 60 do fire("OnTick") end
+checkEq(#sentClient, 1, "on 轉態 1.1 秒後快速重試，自癒 server 1 秒節流")
+resetStats()
+for _ = 1, 60 do fire("OnTick") end
+checkEq(#sentClient, 0, "快速重試後、未滿 5 秒不再送")
+nowMs = nowMs + 5000
+resetStats()
+for _ = 1, 60 do fire("OnTick") end
+checkEq(#sentClient, 1, "穩態滿 5 秒只替 active slot 續期")
+checkEq(sentClient[1] and sentClient[1].args.active, true, "續期維持 slot0 active=true")
+resetStats()
+drive.clientNavTargets[0] = nil
+for _ = 1, 60 do fire("OnTick") end
+checkEq(#sentClient, 1, "目標清除在下一個約 1 秒檢查立即送 off")
+checkEq(sentClient[1] and sentClient[1].args.active, false, "目標清除的 NavUsage 是 active=false")
+resetStats()
+nowMs = nowMs + 5000
+for _ = 1, 60 do fire("OnTick") end
+checkEq(#sentClient, 0, "off 狀態不送永久性 5 秒空 heartbeat")
+
 -- 遠端失敗提示：以 args.to 定位本機玩家（分割畫面共用一條連線）
 resetStats()
 fire("OnServerCommand", MOD_ID, MDAD.CMD_DEVICE_FAILED, { reason = TOO_FAR, to = "slot1" })
@@ -2989,6 +3408,16 @@ scenario("自駕啟動閘門：nav API v2、駕駛座、引擎、電瓶、自駕
 
 setSandbox({ InstallSkillGate = true, NeedItemForNav = false,
              NeedItemForAutoDrive = true, AutoDriveMaxSpeed = 40 })
+do
+    local info = { MDAD.Drive.slowdownInfo(0) }
+    checkEq(table.concat(info, ","), "2,48,3,25,15,10,20",
+        "HUD slowdownInfo 與 production 判定常數同源：range／band／三階殭屍／屍體 cap")
+    setSandbox({ AutoDriveMaxSpeed = 100 })
+    info = { MDAD.Drive.slowdownInfo(0) }
+    checkEq(info[2], 110, "高速沙盒設定時 tooltip 前視範圍同步成 110 公尺")
+    setSandbox({ InstallSkillGate = true, NeedItemForNav = false,
+        NeedItemForAutoDrive = true, AutoDriveMaxSpeed = 40 })
+end
 dp._vehicle = dveh
 dveh._driver = dp
 droute = newRoute(40, 0, 0, 4, 0)
@@ -3125,9 +3554,27 @@ checkTrue(MDAD.Drive.isActive(0), "啟動後 isActive")
 checkEq(#halos, 1, "啟動只提示一次")
 checkEq(haloKey(), DKEY.START, "啟動提示 Start")
 checkEq(halos[1] and halos[1].kind, "good", "啟動是綠字（addGoodText）")
+checkEq(#sentClient, 2, "啟動成功即送 NavUsage＋Auto Usage 兩則 actor-bound heartbeat")
+checkEq(sentClient[1] and sentClient[1].command, MDAD.CMD_NAV_USAGE,
+    "啟動先續期 GPS NavUsage")
+checkEq(sentClient[1] and sentClient[1].args.active, true, "NavUsage 只宣告 active=true")
+checkEq(sentClient[2] and sentClient[2].command, MDAD.CMD_USAGE,
+    "自駕使用獨立 Usage command")
+checkEq(sentClient[2] and sentClient[2].args.vehicleId, dveh:getId(),
+    "Auto heartbeat 只帶 server 可重查的 vehicleId")
+checkEq(sentClient[2] and sentClient[2].args.active, true, "Auto heartbeat 宣告 active=true")
 checkEq(drive.nav.lastTargetNum, 0, "查目標帶的是玩家 slot 編號")
 checkEq(drive.nav.lastTx, 300, "要路線時把目標座標原樣傳進去")
 checkEq(drive.nav.lastTy, 0, "目標 y 也原樣傳進去")
+do
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = true,
+        AutoDriveMaxSpeed = 100, RightLaneBias = 0 })
+    local _, _, shownCap = MDAD.Drive.hudState(0)
+    checkEq(shownCap, 40,
+        "active HUD 顯示 session 實際 40 上限，不先顯示尚未重啟套用的 sandbox 100")
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = true,
+        AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+end
 -- 啟動時唯一一次 regulator 動作＝關掉。玩家上車前自己設的定速（或前一位駕駛留下的）
 -- 若原封不動留著，剖面分幀建構的那七八幀車子會照舊速繼續衝，而 stepFollow 還沒開始跑，
 -- 沒有任何人在控速——玩家看到的是「按下自駕，車子加速衝出去」。
@@ -3143,6 +3590,15 @@ checkTrue(MDAD.Drive.start(dp), "已在自駕再按一次：回 true 但不重�
 checkEq(#halos, 0, "重複啟動不再提示")
 checkEq(drive.nav.targetCalls, 0, "重複啟動不重查導航目標")
 checkEq(drive.calls.setRegulator, 0, "重複啟動不再動 regulator（既有 session 直接回 true）")
+checkEq(#sentClient, 0, "重複 start 不重送 heartbeat")
+
+nowMs = nowMs + 1100
+driveReset(dveh)
+driveTick(dp, dveh)
+checkEq(#sentClient, 2, "active session 1.1 秒快速重試初始 heartbeat，之後改每 5 秒")
+checkEq(sentClient[1] and sentClient[1].command, MDAD.CMD_NAV_USAGE,
+    "快速重試先續期 GPS")
+checkEq(sentClient[2] and sentClient[2].args.active, true, "快速重試的 Auto heartbeat 維持 active=true")
 
 -- OnPlayerUpdate 的兩道早退：不是本機玩家、以及這個 slot 沒有 session
 driveReset(dveh)
@@ -3165,7 +3621,12 @@ scenario("限速剖面分幀建構：每幀 128 點、建構期不控速也不�
 -- 300 點、每段 4 公尺（1196 公尺）。follower 的建表運算量＝geometry n ＋ brake n-1
 -- ＋ accel n-1 ＝ 3n-2 ＝ 898 個點運算；driver 每幀給 128 → 需要 8 次 stepBuild，
 -- 也就是前 7 幀還在建表、第 8 幀才開始控車。一次算完的話玩家會看到啟動瞬間卡一下。
+resetStats()
 MDAD.Drive.stop(0, nil)
+checkEq(#sentClient, 1, "clearSession 對 stop／抵達／失效共用 best-effort off")
+checkEq(sentClient[1] and sentClient[1].command, MDAD.CMD_USAGE,
+    "停止使用同一 Usage command")
+checkEq(sentClient[1] and sentClient[1].args.active, false, "停止 heartbeat 宣告 active=false")
 drive.nav.route = newRoute(300, 0, 0, 4, 0)
 dveh._x, dveh._y, dveh._speed, dveh._steering = 0, 0, 20, 0
 setHeading(dveh, 0.3)
@@ -3226,10 +3687,38 @@ checkEq(dveh._imp.total, 60, "60 幀各施力一次")
 checkEq(drive.calls.getForwardVector, 60, "每幀只讀一次前向向量")
 checkEq(drive.calls.setRegulatorSpeed, 60, "60 幀各設一次定速")
 checkEq(drive.calls.badRegSpeed, 0, "定速不曾是負數或非數字")
+checkEq(drive.calls.fractionalRegSpeed, 0,
+    "寫進原版 regulator 的速度是整數（儀表不露出長小數）")
 checkTrue(drive.calls.maxRegSpeed <= 40,
     "定速不超過沙盒 AutoDriveMaxSpeed=40（實得 " .. tostring(drive.calls.maxRegSpeed) .. "）")
 checkEq(drive.calls.forceBrake, 0, "正常跟線不搶煞車")
 checkEq(drive.nav.targetCalls, 0, "60 幀都在 250ms 節流窗內：完全沒重查導航目標")
+
+-- 原版定速 UI 的整數化必須發生在精確 target 的煞車判定**之後**：
+-- target=29.6，OVERSPEED_BRAKE=15。44.7 差 15.1 要煞；44.5 差 14.9 不煞，
+-- 但寫進 regulator 的 command 都是 30。
+do
+    local realControl = MDADFollower.control
+    local savedSpeed = dveh._speed
+    MDADFollower.control = function()
+        return 0, 29.6, 100, false, 0, 0, 0
+    end
+    dveh._speed = 44.7
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkEq(drive.calls.forceBrake, 1,
+        "精確 target 29.6：44.7 差 15.1，整數化前先判定超速煞車")
+    checkEq(drive.calls.setRegulatorSpeed, 0, "超速煞車幀不寫 regulator")
+    dveh._speed = 44.5
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkEq(drive.calls.forceBrake, 0,
+        "精確 target 29.6：44.5 差 14.9，不因先 round 成 30 而改判定")
+    checkEq(drive.calls.setRegulatorSpeed, 1, "未超速幀照常寫 regulator")
+    checkEq(dveh._regSpeed, 30, "精確判定完成後才把 UI command 四捨五入成 30")
+    MDADFollower.control = realControl
+    dveh._speed = savedSpeed
+end
 
 -- 沙盒上限的三段夾限：太小夾到 5、太大夾到 120、非數字回預設 70。
 -- 一律用 300 點的長路線，才有足夠跑道讓起點速度真的頂到上限（短路線會被
@@ -3279,6 +3768,23 @@ do
     checkEq(hudZ, true, "hudState 殭屍減速：政策預設由玩家決定＋偏好預設開")
     checkEq(hudC, true, "hudState 屍體減速：同上")
     checkEq(MDAD.Drive.hudState(9), nil, "無 session 的槽回 nil")
+    checkEq(MDAD.Drive.effectiveCap(0, dveh), 30,
+        "effectiveCap：無論 session 是否存在都與 hudState 同一上限")
+    checkEq(MDAD.Drive.hudStartReason(0), nil,
+        "hudStartReason：引擎／模組／導航目標齊全可啟動")
+    local savedState, savedRoute = drive.nav.state, drive.nav.route
+    drive.nav.state = "building"
+    checkEq(MDAD.Drive.hudStartReason(0), DKEY.ROUTE,
+        "hudStartReason：路網仍在 building 不得誤顯示可啟動")
+    drive.nav.state, drive.nav.route = "noroad", nil
+    checkEq(MDAD.Drive.hudStartReason(0), DKEY.ROUTE,
+        "hudStartReason：noroad 沒有可用路線時回 RouteNotReady")
+    drive.nav.state, drive.nav.route = savedState, savedRoute
+    local savedTX = drive.nav.tx
+    drive.nav.tx = nil
+    checkEq(MDAD.Drive.hudStartReason(0), DKEY.ROUTE,
+        "hudStartReason：未設導航目標回短狀態可用的原因鍵")
+    drive.nav.tx = savedTX
     -- 偏好切換即時反映（setSlowPref 直接刷新 active session 快取）
     MDAD.Drive.setSlowPref(0, "zombie", false)
     local _, _, _, hudZ2 = MDAD.Drive.hudState(0)
@@ -4275,6 +4781,32 @@ function drive.putSolid(x, y, name)
     }
 end
 
+-- 城市路邊物件：分開模擬 collision／HitByCar／StopCar。引擎是 StopCar 才把
+-- tile type 設成 isMoveAbleObject；tile 的 IsMoveAble 屬性本身不會。
+function drive.putSpriteObject(x, y, name, collision, hitByCar, stopCar)
+    local props = {
+        has = function(_, key)
+            if key == "HitByCar" then return hitByCar == true end
+            if key == "StopCar" then return stopCar == true end
+            return false
+        end,
+    }
+    local sprite = {
+        shouldHaveCollision = function() return collision == true end,
+        getProperties = function() return props end,
+    }
+    local sq = drive.world[x * 100000 + y] or drive.mkSquare(x, y)
+    sq._objs[#sq._objs + 1] = {
+        getSpriteName = function() return name end,
+        getSprite = function() return sprite end,
+        getProperties = function() return props end,
+        getType = function()
+            if stopCar then return IsoObjectType.isMoveAbleObject end
+            return nil
+        end,
+    }
+end
+
 -- 樹：sprite **無**碰撞 flag（實機樹對 shouldHaveCollision 隱形，靠
 -- instanceof IsoTree 判 HARD——2026-08-28 撞樹鬼打牆的修正）
 function drive.putTree(x, y, name)
@@ -4312,8 +4844,7 @@ function drive.clearCell(x, y)
     for i = #sq._smv, 1, -1 do sq._smv[i] = nil end
 end
 
--- 跑完一整輪掃描＋規劃：280 格 ÷ 32 格/幀 ≈ 9 幀，12 幀含規劃與餘裕；
--- nowMs 先跨過 250ms 節流窗
+-- 跑完一整輪掃描＋規劃；nowMs 先跨過 250ms 節流窗。
 function drive.scanRound()
     nowMs = nowMs + 300
     -- ±6.5×48m 帶 ~658 格／56 格每幀 ≈ 12 幀；前一情境可能留半截舊輪（先吃掉
@@ -4336,8 +4867,160 @@ checkEq(drive.calls.maxRegSpeed, 40, "走廊淨空：直線中段吃滿沙盒上
 checkEq(drive.calls.forceBrake, 0, "走廊淨空：不煞車")
 checkEq(#halos, 0, "走廊淨空：無提示")
 
--- ② 單格中線障礙 → 繞行：可行帶 ±2.6、障礙（l=+0.5）膨脹佔 [-1.6, 2.6] →
---    縫隙在左側 [-2.6, -1.6]，offL 取 |l| 最小的格點 -1.75（往左繞）
+-- ①a 真正無 physics body 的 HitByCar 小物：小郵箱／輪式垃圾桶已在 shipped
+-- 分類順序正確放行，不應產生 hard 或 soft 限速。
+drive.putSpriteObject(20, 0, "street_decoration_01_18", false, true, false)
+drive.putSpriteObject(22, 1, "trashcontainers_01_0", false, true, false)
+drive.scanRound()
+driveReset(dveh)
+driveTick(dp, dveh)
+checkEq(drive.calls.maxRegSpeed, 40,
+    "無 collision／StopCar 的 HitByCar 小郵箱＋輪式垃圾桶：維持 40")
+checkEq(#halos, 0, "無 physics body 的城市小物不顯示繞行提示")
+drive.clearCell(20, 0)
+drive.clearCell(22, 1)
+
+-- ①b prefix 不能 blanket-ignore：實體 public mailbox 即使有 HitByCar，也先被
+-- solidtrans/StopCar 收編。
+checkTrue(armDrive(), "實體郵筒對照重臂")
+setHeading(dveh, 0.05)
+driveReset(dveh)
+drive.putSpriteObject(20, 0, "street_decoration_01_8", true, true, true)
+drive.scanRound()
+checkEq(haloKey(), DKEY.DODGE, "solidtrans＋StopCar public mailbox 仍觸發繞行")
+drive.clearCell(20, 0)
+
+checkTrue(armDrive(), "水泥路障對照重臂")
+setHeading(dveh, 0.05)
+driveReset(dveh)
+drive.putSpriteObject(20, 0, "street_decoration_01_28", false, false, true)
+drive.scanRound()
+checkEq(haloKey(), DKEY.DODGE, "StopCar 水泥路障即使無 collision flag 仍觸發繞行")
+drive.clearCell(20, 0)
+
+checkTrue(armDrive(), "大型 dumpster 對照重臂")
+setHeading(dveh, 0.05)
+driveReset(dveh)
+drive.putSpriteObject(24, 0, "trashcontainers_01_8", true, false, false)
+drive.scanRound()
+checkEq(haloKey(), DKEY.DODGE, "沒有 HitByCar 的 solid 大型 dumpster 仍觸發繞行")
+drive.clearCell(24, 0)
+
+-- 使用者實景：路邊停放的黑車橫跨三格；另在 a 前放合法近樹，並在距車群
+-- 7m 的 c..d 收回段放 l=-1.5 細樹（不擋 baseL、不會被 GROUP_GAP 併群）。
+-- 兩者若誤納 minMargin 都會降速；碰撞仍要驗，但不得污染 entry＋hold cap。
+local blackParked = drive.putVehicle(20, 0, true)
+drive.vehGeo[20 * 100000 - 1] = blackParked
+drive.vehGeo[20 * 100000 + 1] = blackParked
+drive.putTree(4, 1, "vegetation_trees_01_5")
+drive.putTree(27, -2, "vegetation_trees_01_7")
+checkTrue(armDrive(), "黑色停車 comfort speed 重臂")
+setHeading(dveh, 0.05)
+driveReset(dveh)
+drive.scanRound()
+checkEq(haloKey(), DKEY.DODGE, "黑色停車仍觸發繞行，不靠忽略實體障礙提速")
+driveReset(dveh)
+driveTick(dp, dveh)
+checkEq(drive.calls.maxRegSpeed, 24,
+    "寬城市縫選 same-side comfort lane；baseline／exit 合法近物不污染 a..c cap")
+drive.vehGeo[20 * 100000 - 1] = nil
+drive.clearVehicle(20, 0)
+drive.vehGeo[20 * 100000 + 1] = nil
+drive.clearCell(4, 1)
+drive.clearCell(27, -2)
+
+-- squeeze 檔：主障礙的 normal comfort lane 會在 entry 段撞上左右兩棵細樹；
+-- 三條 normal retry 也分別撞左右樹。縮到 need=1.2 後 first-safe 側偏較小，
+-- entry 與兩樹距離超過 1.1m，world sweep 才能通過。這條成功路徑必全段限 10。
+drive.putSolid(20, 0, "harness_squeeze_main")
+drive.putTree(15, -3, "vegetation_trees_01_5")
+drive.putTree(15, 2, "vegetation_trees_01_6")
+checkTrue(armDrive(), "窄縫 squeeze cap 重臂")
+setHeading(dveh, 0.05)
+driveReset(dveh)
+drive.scanRound()
+checkEq(haloKey(), DKEY.DODGE, "normal 候選全敗後 squeeze 縫仍可繞行")
+driveReset(dveh)
+driveTick(dp, dveh)
+checkEq(drive.calls.maxRegSpeed, 10, "squeeze 成功路徑強制 SQUEEZE_CAP 10")
+checkEq(drive.calls.forceBrake, 0, "squeeze 有安全縫：不煞停")
+dveh._x = 20
+driveTick(dp, dveh)
+driveReset(dveh)
+driveTick(dp, dveh)
+checkEq(drive.calls.maxRegSpeed, 10, "squeeze 保持段仍強制 10")
+dveh._x = 26
+driveTick(dp, dveh)
+driveReset(dveh)
+driveTick(dp, dveh)
+checkEq(drive.calls.maxRegSpeed, 10, "squeeze 收回段仍強制 10")
+drive.clearCell(20, 0)
+drive.clearCell(15, -3)
+drive.clearCell(15, 2)
+
+-- 對抗式 phase collision：把已烘好的第一個 baseline 點壓到一棵「弧座標不擋線」
+-- 的樹上。若碰撞判定被錯包進 a..c 的 inCap，這條會誤 commit。
+do
+    local realBuild = MDADFollower.buildOffsetLine
+    local realSetOffset = MDADFollower.setOffset
+    local commits = 0
+    MDADFollower.buildOffsetLine = function(profile, s0, a, b, c, d, off, bias, outX, outY)
+        local n, lineS0 = realBuild(profile, s0, a, b, c, d, off, bias, outX, outY)
+        if n >= 1 then outX[1], outY[1] = 4.5, 1.5 end
+        return n, lineS0
+    end
+    MDADFollower.setOffset = function(...)
+        commits = commits + 1
+        return realSetOffset(...)
+    end
+    drive.putSolid(20, 0, "harness_phase_baseline_main")
+    drive.putTree(4, 1, "vegetation_trees_01_8")
+    checkTrue(armDrive(), "baseline sweep collision 重臂")
+    setHeading(dveh, 0.05)
+    driveReset(dveh)
+    drive.scanRound()
+    MDADFollower.buildOffsetLine = realBuild
+    MDADFollower.setOffset = realSetOffset
+    checkEq(commits, 0, "baseline 實碰撞：不得 commit 繞行剖面")
+    checkEq(haloKey(), DKEY.BLOCKED, "baseline 實碰撞：分類 blocked")
+    drive.clearCell(20, 0)
+    drive.clearCell(4, 1)
+end
+
+-- 同一守衛的 exit 負向案例：每條候選烘線的末點都壓到 c 後細樹上。
+-- margin 不計 exit，不代表碰撞可以不驗；normal 與 squeeze 都必須拒絕。
+do
+    local realBuild = MDADFollower.buildOffsetLine
+    local realSetOffset = MDADFollower.setOffset
+    local commits = 0
+    MDADFollower.buildOffsetLine = function(profile, s0, a, b, c, d, off, bias, outX, outY)
+        local n, lineS0 = realBuild(profile, s0, a, b, c, d, off, bias, outX, outY)
+        if n >= 1 then outX[n], outY[n] = 25.5, -1.5 end
+        return n, lineS0
+    end
+    MDADFollower.setOffset = function(...)
+        commits = commits + 1
+        return realSetOffset(...)
+    end
+    drive.putSolid(20, 0, "harness_phase_exit_main")
+    drive.putTree(25, -2, "vegetation_trees_01_9")
+    checkTrue(armDrive(), "exit sweep collision 重臂")
+    setHeading(dveh, 0.05)
+    driveReset(dveh)
+    drive.scanRound()
+    MDADFollower.buildOffsetLine = realBuild
+    MDADFollower.setOffset = realSetOffset
+    checkEq(commits, 0, "exit 實碰撞：不得 commit 繞行剖面")
+    checkEq(haloKey(), DKEY.BLOCKED, "exit 實碰撞：分類 blocked")
+    drive.clearCell(20, 0)
+    drive.clearCell(25, -2)
+end
+checkTrue(armDrive(), "一般硬障礙情境重臂")
+setHeading(dveh, 0.05)
+driveReset(dveh)
+
+-- ② 單格中線障礙 → 繞行：first-safe 是左側 -1.75；same-side refinement
+--    最多再外推 0.75m 到 -2.50，取得足夠餘裕後以 24 km/h 通過。
 drive.debug = true
 drive.putSolid(20, 0, "harness_barrel")
 drive.scanRound()
@@ -4349,8 +5032,8 @@ drive.scanRound()
 checkEq(#halos, 1, "持續繞行期間不重複轟提示（sig 每輪微變、replan 反覆進來也只提示一次）")
 driveReset(dveh)
 driveTick(dp, dveh)
-checkTrue(drive.calls.maxRegSpeed > 0 and drive.calls.maxRegSpeed <= 18,
-    "繞行段速度壓到 DODGE_CAP 18 以內（實得 " .. tostring(drive.calls.maxRegSpeed) .. "）")
+checkEq(drive.calls.maxRegSpeed, 24,
+    "寬縫繞行吃滿 DODGE_CAP 24")
 checkEq(drive.calls.forceBrake, 0, "有縫隙：繞行不煞停")
 checkTrue(MDAD.Drive.isActive(0), "繞行不結束 session")
 
@@ -4405,9 +5088,8 @@ drive.scanRound() -- 守護驗證連續通過：blocked 解除（單輪抖動自
 driveReset(dveh)
 driveTick(dp, dveh)
 checkEq(dveh._regulator, true, "障礙消失：自動恢復供油")
-checkTrue(drive.calls.maxRegSpeed > 0 and drive.calls.maxRegSpeed <= 18,
-    "承諾未走完：繞行速度帽仍在（immutable，不因 clear 提前釋放；實得 "
-    .. tostring(drive.calls.maxRegSpeed) .. "）")
+checkEq(drive.calls.maxRegSpeed, 24,
+    "承諾未走完：same-side comfort 繞行帽仍在 24（immutable，不因 clear 提前釋放）")
 -- 駛過剖面末端（d≈28.5）：**每幀**釋放承諾、繞行帽解除——不依賴 replan
 -- （replan 是障礙簽章事件驅動；通過後路面乾淨 sig 不變，釋放若只在 replan
 -- 會永遠沒人跑，爬行帽在開闊直路掛死——2026-08-29 圖 4 實測 bug）
@@ -4424,7 +5106,7 @@ setHeading(dveh, 0.05)
 dveh._speed = 20
 driveReset(dveh)
 
--- ⑤ 殭屍密度減速：1 隻 → 25；4 隻 → 15；沙盒關閉 → 不減速
+-- ⑤ 殭屍密度減速：1 隻 → 25；4 隻 → 15；8 隻 → 10；沙盒關閉 → 不減速
 drive.putMoving(25, 0, { _class = "IsoZombie" })
 drive.scanRound()
 driveReset(dveh)
@@ -4437,6 +5119,16 @@ drive.scanRound()
 driveReset(dveh)
 driveTick(dp, dveh)
 checkEq(drive.calls.maxRegSpeed, 15, "走廊內 4 隻殭屍：壓到 15")
+drive.putMoving(27, -1, { _class = "IsoZombie" })
+drive.putMoving(27, 0, { _class = "IsoZombie" })
+drive.putMoving(27, 1, { _class = "IsoZombie" })
+drive.putMoving(28, 0, { _class = "IsoZombie" })
+drive.scanRound()
+driveReset(dveh)
+driveTick(dp, dveh)
+checkEq(drive.calls.maxRegSpeed, 10, "走廊內 8 隻殭屍：壓到 10")
+drive.clearCell(27, -1); drive.clearCell(27, 0)
+drive.clearCell(27, 1); drive.clearCell(28, 0)
 setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
     AutoDriveMaxSpeed = 40, ZombieAreaSlowdown = false, RightLaneBias = 0 })
 drive.scanRound()
@@ -4501,17 +5193,16 @@ drive.scanRound()
 checkEq(haloKey(), DKEY.DODGE, "路中一棵樹：硬障礙 → 繞行")
 driveReset(dveh)
 driveTick(dp, dveh)
-checkTrue(drive.calls.maxRegSpeed > 0 and drive.calls.maxRegSpeed <= 18,
-    "繞樹減速（實得 " .. tostring(drive.calls.maxRegSpeed) .. "）")
+checkEq(drive.calls.maxRegSpeed, 24,
+    "寬縫繞樹採 comfort lane，速度上限 24")
 drive.clearCell(20, 0)
 drive.scanRound()
 drive.scanRound() -- 守護驗證連續通過（樹已清）：不轉 blocked
 driveReset(dveh)
 driveTick(dp, dveh)
 checkEq(dveh._regulator, true, "樹清除：恢復行駛")
-checkTrue(drive.calls.maxRegSpeed > 0 and drive.calls.maxRegSpeed <= 18,
-    "樹清除但承諾未走完：繞行帽仍在（immutable；實得 "
-    .. tostring(drive.calls.maxRegSpeed) .. "）")
+checkEq(drive.calls.maxRegSpeed, 24,
+    "樹清除但承諾未走完：comfort 繞行帽仍在 24（immutable）")
 -- 路緣樹段要乾淨旗標：重臂
 checkTrue(armDrive(), "⑤c→路緣樹 重臂")
 setHeading(dveh, 0.05)
@@ -4607,10 +5298,11 @@ drive.putVehicle(16, 0, false)
 drive.scanRound()
 driveReset(dveh)
 driveTick(dp, dveh)
--- 新語意（跨輪靜止判定）：貼近的「假行進」車兩輪即判 still → 直接當障礙
--- 繞行（margin 縮放低速）——與煞停同屬安全結局，都不會全速跟撞
-checkTrue(drive.calls.forceBrake > 0 or drive.calls.maxRegSpeed <= 16,
-    "前車貼到 10m 內：煞停或低速繞行（實得 forceBrake="
+-- 新語意（跨輪靜止判定）：貼近的「假行進」車兩輪即判 still → 直接當障礙。
+-- 世界掃掠通過才允許在寬縫以 24 繞行，否則煞停；兩者都不會全速跟撞。
+checkTrue(drive.calls.forceBrake > 0
+        or (drive.calls.maxRegSpeed > 0 and drive.calls.maxRegSpeed <= 24),
+    "前車貼到 10m 內：煞停或掃掠通過後以繞行上限 24 通過（實得 forceBrake="
     .. tostring(drive.calls.forceBrake) .. " maxReg=" .. tostring(drive.calls.maxRegSpeed) .. "）")
 drive.clearVehicle(16, 0)
 drive.scanRound()
@@ -4656,9 +5348,9 @@ MDAD.Drive.stop(0, nil)
 
 -- ⑨ 彎道繞行（不禁止，算進去）：障礙群落在轉角段（累計轉角 > 25°）時，縫隙判定
 --    用放大的需求半寬（+0.6）重算——內輪差與 pure pursuit 切內彎吃掉的餘裕先扣
---    再判。判得過＝真有寬縫照繞、速度壓爬行 12；判不過＝blocked 煞停，不硬擠。
---    手組 L 型路線：直行到 (76,0) 後右轉往南（+Y），障礙放轉角後（障礙群 b..c
---    涵蓋 45° 折點）。
+--    再判。判得過＝真有寬縫照繞、速度受彎道 16 km/h 天花板限制；判不過＝
+--    blocked 煞停，不硬擠。手組 L 型路線：直行到 (76,0) 後右轉往南（+Y），
+--    障礙放轉角後（障礙群 b..c 涵蓋 45° 折點）。
 do
     local pts = {}
     for i = 0, 19 do pts[#pts + 1] = i * 4; pts[#pts + 1] = 0 end       -- (0,0)..(76,0)
@@ -4672,15 +5364,15 @@ setHeading(dveh, 0.05)
 dp._vehicle, dveh._driver = dveh, dp
 checkTrue(MDAD.Drive.start(dp), "彎道情境啟動")
 driveReset(dveh) -- 清掉 Start 綠字
--- ⑨a 彎中單格中線障礙：放大後仍有寬縫（需求半寬 2.0、可行帶 ±3 → 縫在 ±2.75/±3）
---     → 照繞（綠字 Dodge）＋速度壓爬行 12（直路繞行是 18）
+-- ⑨a 彎中單格中線障礙：放大後仍有寬縫 → 照繞（綠字 Dodge），但仍受
+--     DODGE_TIGHT_CAP 16 限制。
 drive.putSolid(80, 4, "harness_curve_obs")
 drive.scanRound()
 checkEq(haloKey(), DKEY.DODGE, "彎中單格障礙：放大縫寬後仍可行 → 照樣繞行（不禁止）")
 driveReset(dveh)
 driveTick(dp, dveh)
-checkTrue(drive.calls.maxRegSpeed > 0 and drive.calls.maxRegSpeed <= 12,
-    "彎道繞行段速度壓到爬行 12（直路繞行是 18；實得 "
+checkTrue(drive.calls.maxRegSpeed > 0 and drive.calls.maxRegSpeed <= 16,
+    "彎道繞行段維持 DODGE_TIGHT_CAP 16（實得 "
     .. tostring(drive.calls.maxRegSpeed) .. "）")
 checkTrue(MDAD.Drive.isActive(0), "彎道繞行不結束 session")
 
@@ -4692,7 +5384,7 @@ checkTrue(MDAD.Drive.start(dp), "⑨b 重臂")
 driveReset(dveh) -- 清掉 Start 綠字
 -- ⑨b 彎中並排三格（加嚴後無寬縫、**普通縫仍在** ±3.25）：窄縫降級爬行——
 --    不再直接 blocked（2026-08-28 實機：彎道兩台並排車被加嚴判死 → 卡死
---    鬼打牆；真擦撞由 sweepClear 世界空間複驗把關），速度仍壓爬行 12
+--    鬼打牆；真擦撞由世界空間複驗把關），entry 仍受 16 km/h 上限。
 drive.putSolid(79, 4, "harness_curve_obs_b")
 drive.putSolid(81, 4, "harness_curve_obs_c")
 drive.scanRound()
@@ -4702,7 +5394,7 @@ checkTrue(drive.calls.maxRegSpeed > 0 and drive.calls.maxRegSpeed <= 16,
     "彎中窄縫：降級爬行（彎道天花板 16）而非 blocked（實得 "
     .. tostring(drive.calls.maxRegSpeed) .. "）")
 checkTrue(MDAD.Drive.isActive(0), "彎中窄縫：session 活著")
--- ⑨c 彎中真堵死（**普通 needHalf 也無縫**：五顆並排聯集 ±5.1 ⊇ 可行帶 ±3.6）
+-- ⑨c 彎中真堵死（普通 needHalf 也無縫：七顆並排蓋過可行帶 ±5.6）
 --    → blocked 煞停等待，這才是「不硬擠」的底線
 drive.putSolid(77, 4, "harness_curve_obs_d")
 drive.putSolid(83, 4, "harness_curve_obs_e")
@@ -4725,10 +5417,9 @@ driveTick(dp, dveh)
 checkEq(dveh._regulator, true, "彎中障礙清除：自動恢復行駛")
 MDAD.Drive.stop(0, nil)
 
--- ⑨d BLOCKED_CORNER（codex sol max 裁決紅測試）：障礙貼折點——折點處逐段
---    法向不連續、任何 offL 的過渡/收回線都斜切障礙（換 lane 沒有新資訊）
---    → 不 commit、分類 corner、改道等待縮短（CORNER_DETOUR_MS 1.5s，普通
---    blocked 是 4s）
+-- ⑨d 折點旁障礙：最近 safe lane 會斜切障礙，但同側外推後的 comfort lane
+--    仍須經完整 entry／hold／exit 世界掃掠；掃掠通過才 commit，不因「靠近
+--    折點」標籤一律誤判 blocked／改道。
 do
     dveh._x, dveh._y, dveh._speed, dveh._steering = 50, 0, 20, 0
     setHeading(dveh, 0.05)
@@ -4748,27 +5439,24 @@ do
     drive.nav.detourRoute.len = 200
     drive.scanRound()
     MDADFollower.setOffset = realSetOffset
-    checkEq(commits, 0, "⑨d 貼折點障礙：不 commit 任何剖面")
-    checkEq(haloKey(), DKEY.BLOCKED, "⑨d 分類 blocked（紅字）")
-    -- corner 精確分類（entry/exit 近折點）依賴弧↔世界失真，假世界兩者恆
-    -- 一致原理性造不出——corner log 與 1.5s 快速改道靠實測遙測驗證；
-    -- 這裡驗行為鏈：blocked → 停等 → 改道請求發出
+    checkEq(commits, 1, "⑨d comfort lane 通過世界掃掠後只 commit 一次")
+    checkEq(haloKey(), DKEY.DODGE, "⑨d 分類 dodge（綠字）")
     dveh._speed = 0
     driveReset(dveh)
-    driveTick(dp, dveh)  -- waitSince 起算
-    nowMs = nowMs + 4200 -- 普通 blocked 檔改道等待
     driveTick(dp, dveh)
-    checkEq(drive.nav.detourCalls, 1, "⑨d blocked → 改道請求發出")
+    nowMs = nowMs + 4200
+    driveTick(dp, dveh)
+    checkEq(drive.nav.detourCalls, 0, "⑨d 已有安全繞行線：不誤送改道請求")
+    checkTrue(MDAD.Drive.isActive(0), "⑨d 安全繞行保持 session")
     drive.clearCell(79, 3)
     drive.clearCell(80, 4)
     drive.nav.detourRoute = nil
     MDAD.Drive.stop(0, nil)
 end
 
--- ⑩ 首次繞行以 laneBias 為中心（driver→corridor 接線）：同一顆 (20,0) 障礙
---    （l=+0.5），RightLaneBias=0 時情境②選左縫 -1.75；開靠右 1m 後右縫 +2.75
---    離行駛線更近（橫移 1.75 vs 2.75）→ 該換選右側。offL 用 setOffset spy 觀察
---    （follower state 是 driver 的 local，halo/速度看不出側別）。
+-- ⑩ 首次繞行以 laneBias 為中心（driver→corridor 接線）：同一顆 (20,0) 障礙，
+--    開靠右 1m 後 first-safe 右縫 +2.75 比左縫更近，先選右側，再同側外推至
+--    comfort +3.50。offL 用 setOffset spy 觀察（halo／速度看不出側別）。
 setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
     AutoDriveMaxSpeed = 40, RightLaneBias = 1 })
 do
@@ -4783,17 +5471,15 @@ do
     drive.scanRound()
     MDADFollower.setOffset = realSetOffset
     checkEq(haloKey(), DKEY.DODGE, "靠右行駛遇中線障礙：照樣繞行")
-    checkEq(spyOffL, 2.75, "首次繞行以 laneBias 為中心：右縫離行駛線近 → 選右（+2.75）")
+    checkEq(spyOffL, 3.5, "首次繞行以 laneBias 為中心：選右側後同側外推至 comfort +3.50")
     drive.clearCell(20, 0)
     MDAD.Drive.stop(0, nil)
 end
 
--- ⑩b 擋線判定以行駛線為中心（plan 第八參 baseL 接線）＋ offL=0 合法（借中線）：
---    路緣樹 (20,1)＝l=+1.5、r=0（細桿）——對**中心線**不擋（1.5 ≥ needHalf 1.4，
---    舊版 baseL 恆 0 會回 clear、車直直蹭樹），對**行駛線**（bias=+1）擋
---    （|1.5-1|=0.5 < 1.4）。縫隙離行駛線最近的合法候選是 lane=0（|1.5-0|=1.5 ≥ 1.4）
---    ＝借中心線。offL=0 修好前會被 setOffset 當 inactive 拒收降 blocked——
---    本情境同時是兩個 codex BLOCKING 的端到端回歸。
+-- ⑩b 擋線判定以行駛線為中心（plan 第八參 baseL 接線）：路緣樹 (20,1)
+--    對中心線不擋，對 bias=+1 的行駛線會擋。first-safe 是中心線 0，
+--    comfort refinement 維持左側再推到 -0.75。這同時保留 offL=0 可用的
+--    planner 契約；不得把它當 inactive 哨兵。
 do
     local realSetOffset = MDADFollower.setOffset
     local spyOffL, spyRet = nil, nil
@@ -4807,16 +5493,16 @@ do
     drive.scanRound()
     MDADFollower.setOffset = realSetOffset
     checkEq(haloKey(), DKEY.DODGE, "路緣樹擋行駛線（不擋中線）：觸發繞行而非直行蹭樹")
-    checkEq(spyOffL, 0, "繞行線＝借中心線（offL=0，離行駛線最近的合法縫隙）")
-    checkEq(spyRet, true, "offL=0 被 setOffset 接受（不再當 inactive 哨兵拒收）")
+    checkEq(spyOffL, -0.75, "先借中心線，再同側外推 0.75m 取得 comfort 餘裕")
+    checkEq(spyRet, true, "comfort offL 被 setOffset 接受")
     drive.clearCell(20, 1)
     MDAD.Drive.stop(0, nil)
 end
 
 -- ⑩c 側別記憶只限當前剖面（黏側修正）：群1 兩顆箱物堵死中線與左側 → 只能借
 --    右外側；車駛過剖面末端後，群2 路緣樹只擋行駛線（中線可行）→ 新繞行段
---    必須回到以行駛線為基準選縫＝借中線 0。修正前 prefer 沿用 lastOffL（2.75）
---    會選 3 黏在路肩——實機 2026-08-28：路口車陣借右後沿路肩草地走完整段路。
+--    必須回到以行駛線為基準選左側，再取 comfort -0.75。修正前 prefer 沿用
+--    lastOffL 會黏在路肩——實機 2026-08-28 曾沿草地走完整段路。
 do
     local realSetOffset = MDADFollower.setOffset
     local offs = {}
@@ -4840,8 +5526,8 @@ do
     drive.scanRound() -- 首輪收舊帶（0..36 起點鎖定於輪首）：clear 遲滯 +1
     drive.scanRound() -- 新帶 40..76 掃到樹 → 新繞行段
     MDADFollower.setOffset = realSetOffset
-    checkEq(offs[#offs], 0,
-        "剖面走完後的新繞行回行駛線基準：借中線 0（全序列 "
+    checkEq(offs[#offs], -0.75,
+        "剖面走完後的新繞行回行駛線基準側，再取同側 comfort -0.75（全序列 "
         .. table.concat(tuples, " | ", 1, #tuples) .. "；halo=" .. tostring(haloKey())
         .. " n=" .. tostring(#offs) .. "）")
     drive.clearCell(55, 1)
@@ -4867,15 +5553,115 @@ do
         "行駛線向實際路面中心校正（期望 ≈-2.3、實得 " .. tostring(spyBias) .. "）")
     drive.fillWorld(-2, 70, -7, 7) -- 重建無地板世界＝路面樣本消失
     for _ = 1, 12 do drive.scanRound() end -- 衰減 0.85^12 ≈ 0.14
+    checkTrue(spyBias ~= nil and spyBias > -0.5 and spyBias < -0.1,
+        "無路面樣本：roadBias 逐輪衰減回 nav 線（實得 " .. tostring(spyBias) .. "）")
     MDADFollower.setLaneBias = realSetBias
-    checkTrue(spyBias ~= nil and spyBias > -0.5 and spyBias < 0.5,
-        "無路面樣本：校正衰減回 nav 線（實得 " .. tostring(spyBias) .. "）")
+    MDAD.Drive.stop(0, nil)
+end
+
+-- ⑫-2 route cutover：roadBias 與 scanBias 都是舊 route 法向上的量。換線當幀
+-- follower 必立刻回 sandBias；新 route 首輪掃描也須以 sandBias 置中，且首輪
+-- 完成後不能讓舊 EMA 值復活。
+do
+    local realSetBias = MDADFollower.setLaneBias
+    local spyBias = nil
+    MDADFollower.setLaneBias = function(st2, b)
+        spyBias = b
+        return realSetBias(st2, b)
+    end
+    drive.putRoad(0, 70, -5, -1)
+    checkTrue(armDrive(), "route cutover roadBias 情境啟動")
+    for _ = 1, 8 do drive.scanRound() end
+    checkTrue(spyBias ~= nil and spyBias < -1.8,
+        "換線前先建立非零 roadBias（實得 " .. tostring(spyBias) .. "）")
+    drive.fillWorld(-2, 70, -7, 7)
+    drive.nav.route = newRoute(80, 0, 0, 4, 0)
+    nowMs = nowMs + 300
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkTrue(spyBias ~= nil and spyBias > -0.1 and spyBias < 0.1,
+        "route cutover 當幀立即回 sandBias（實得 " .. tostring(spyBias) .. "）")
+    local realGetGridSquare = drive.cell.getGridSquare
+    local scanMinY, scanMaxY = 999, -999
+    drive.cell.getGridSquare = function(self, x, y, z)
+        if y < scanMinY then scanMinY = y end
+        if y > scanMaxY then scanMaxY = y end
+        return realGetGridSquare(self, x, y, z)
+    end
+    -- 當幀的 spy 只證明 follower 槽被覆寫；若內部 s.roadBias 沒清，這個
+    -- 無路面輪會把舊值乘 0.85 後重新送回 follower，所以下方斷言獨立守該槽。
+    drive.scanRound()
+    drive.cell.getGridSquare = realGetGridSquare
+    checkTrue(scanMinY <= -7 and scanMaxY >= 6,
+        "新 route 首輪掃描以 sandBias=0 置中（y="
+        .. tostring(scanMinY) .. ".." .. tostring(scanMaxY) .. "）")
+    checkTrue(spyBias ~= nil and spyBias > -0.1 and spyBias < 0.1,
+        "新 route 首輪後舊 roadBias 不復活（實得 " .. tostring(spyBias) .. "）")
+    MDADFollower.setLaneBias = realSetBias
+    MDAD.Drive.stop(0, nil)
+end
+
+-- ⑫a 停車場歧義：Rosewood 座標 8262,11511 的官方街道寬 6m，但西側
+-- `blends_street` 停車場與路面連成 11 格寬。fixture 兩緣都在掃描帶內，
+-- 單獨守住 span >9 的拒絕；若把整條鋪面當街道平均，roadC 會偏 -0.5m。
+do
+    local realSetBias = MDADFollower.setLaneBias
+    local spyBias = nil
+    MDADFollower.setLaneBias = function(st2, b)
+        spyBias = b
+        return realSetBias(st2, b)
+    end
+    drive.putRoad(0, 70, -6, 4) -- 11 格、中心 -0.5m、span 10，兩緣完整可見
+    checkTrue(armDrive(), "停車場歧義情境啟動")
+    for _ = 1, 8 do drive.scanRound() end
+    MDADFollower.setLaneBias = realSetBias
+    checkTrue(spyBias ~= nil and spyBias > -0.1 and spyBias < 0.1,
+        "過寬鋪面不校正行駛線，退回 nav 線（實得 " .. tostring(spyBias) .. "）")
+    drive.fillWorld(-2, 70, -7, 7)
+    MDAD.Drive.stop(0, nil)
+end
+
+-- ⑫a-2 門檻邊界：10 格合法寬路＝格心 span 9，必須仍可校正；`>=` 寫錯
+-- 會把 vanilla 10m 街道誤殺。
+do
+    local realSetBias = MDADFollower.setLaneBias
+    local spyBias = nil
+    MDADFollower.setLaneBias = function(st2, b)
+        spyBias = b
+        return realSetBias(st2, b)
+    end
+    drive.putRoad(0, 70, -6, 3) -- 10 格、中心 -1m、span 恰 9
+    checkTrue(armDrive(), "10m 合法寬路情境啟動")
+    for _ = 1, 8 do drive.scanRound() end
+    MDADFollower.setLaneBias = realSetBias
+    checkTrue(spyBias ~= nil and spyBias < -0.6 and spyBias > -1.2,
+        "10m 邊界樣本仍向路中心校正（實得 " .. tostring(spyBias) .. "）")
+    drive.fillWorld(-2, 70, -7, 7)
+    MDAD.Drive.stop(0, nil)
+end
+
+-- ⑫a-3 帶截斷拒絕：11 格鋪面的西端在 ±6.5 掃描帶外，表面上只看到
+-- span 9；因鋪面碰到帶端，這只是寬度下界，必須全輪拒絕，不能啟動正回饋。
+do
+    local realSetBias = MDADFollower.setLaneBias
+    local spyBias = nil
+    MDADFollower.setLaneBias = function(st2, b)
+        spyBias = b
+        return realSetBias(st2, b)
+    end
+    drive.putRoad(0, 70, -8, 2)
+    checkTrue(armDrive(), "停車場帶截斷拒絕情境啟動")
+    for _ = 1, 12 do drive.scanRound() end
+    MDADFollower.setLaneBias = realSetBias
+    checkTrue(spyBias ~= nil and spyBias > -0.1 and spyBias < 0.1,
+        "截斷寬度只是下界：全輪拒絕、roadBias 留在 nav 線（實得 " .. tostring(spyBias) .. "）")
+    drive.fillWorld(-2, 70, -7, 7)
     MDAD.Drive.stop(0, nil)
 end
 
 -- ⑫b 縫隙帶內優先（plan 第 9/10 參端到端）：路面帶格心 [-0.5,3.5]（roadLo/Hi＝
---    [-1,4]），障礙 l=0.5 擋 (-1.6,2.6) → 全域最近縫 -1.75 在帶外（草地）、
---    帶內縫 2.75 → 必須選 2.75（實機 2026-08-28：車繞出路面在草地上跑的修正）。
+--    [-1,4]），障礙 l=0.5 擋掉中間；帶內 first-safe 2.75，再同側外推至
+--    comfort 3.50。不得改選帶外較近的草地縫。
 do
     local realSetOffset = MDADFollower.setOffset
     local spyOffL = nil
@@ -4889,25 +5675,48 @@ do
     for _ = 1, 3 do drive.scanRound() end
     MDADFollower.setOffset = realSetOffset
     checkEq(haloKey(), DKEY.DODGE, "帶內優先情境：繞行觸發")
-    checkTrue(spyOffL ~= nil and spyOffL >= 2.25 and spyOffL <= 3.25,
-        "繞行縫優先選路面帶內右縫 ~2.75（±0.5 取樣量化），不選較近的帶外草地縫"
+    checkTrue(spyOffL ~= nil and spyOffL >= 3.25 and spyOffL <= 3.75,
+        "繞行縫優先留在路面帶內右側並外推至 comfort ~3.50，不選帶外草地縫"
         .. "（實得 " .. tostring(spyOffL) .. "）")
     drive.clearCell(20, 0)
     drive.fillWorld(-2, 70, -7, 7)
     MDAD.Drive.stop(0, nil)
 end
 
--- ⑬ debug 視覺化（MDAD_Overlay）：沙盒 DebugOverlay 開＝輪完成重建一批 marker
---    （軌跡點列＋障礙紅圈＋路面帶邊界）；關＝全清；停止自駕＝全清。
---    marker 生命週期是本情境的重點——洩漏的 marker 會永遠掛在世界上。
+-- ⑬ 世界軌跡與 debug 標記：一般玩家 active session 在 OnPostRender 以
+-- renderIsoLine 畫單一半透明藍／黃線；DebugOverlay 只加紅／綠／橙 marker。
+-- 關 debug 不影響線，route cutover 與 stop 都要立即清線。
 drive.markerN = 0
+drive.markerAlphaN = 0
+drive.markerAlpha = nil
+drive.worldLines = {}
+drive.trajectoryVisible = true
+drive.trajectoryWidth = 2
+drive.renderPlayerNum = 0
+MDAD.HUD = {
+    trajectoryVisible = function() return drive.trajectoryVisible end,
+    trajectoryWidth = function() return drive.trajectoryWidth end,
+}
+drive.renderPlayer = { getPlayerNum = function() return drive.renderPlayerNum or 0 end }
+function getPlayer() return drive.renderPlayer end
+function renderIsoLine(x, y, z, x2, y2, z2, thickness, r, g, b, a)
+    local n = #drive.worldLines + 1
+    drive.worldLines[n] = {
+        x = x, y = y, z = z, x2 = x2, y2 = y2, z2 = z2,
+        thickness = thickness, r = r, g = g, b = b, a = a,
+    }
+end
+drive.overlayRenderBefore = #(eventHandlers.OnPostRender or {})
 function getWorldMarkers()
     return {
         addGridSquareMarker = function(_, sq, r, g, b, doAlpha, size)
             drive.markerN = drive.markerN + 1
             local alive = true
             return {
-                setAlpha = function() end, -- FBO alpha 抬升（production 必呼叫）
+                setAlpha = function(_, a)
+                    drive.markerAlphaN = drive.markerAlphaN + 1
+                    drive.markerAlpha = a
+                end,
                 remove = function()
                     if alive then
                         alive = false
@@ -4920,28 +5729,141 @@ function getWorldMarkers()
 end
 require "MDAD_Overlay"
 checkEq(type(MDADOverlay), "table", "production client/MDAD_Overlay.lua 真的載入了")
-do
+checkEq(#(eventHandlers.OnPostRender or {}), drive.overlayRenderBefore + 1,
+    "Overlay 只註冊一個 OnPostRender 世界線 renderer")
+checkTrue(type(MDADFollower.OV_STEP) == "number" and MDADFollower.OV_STEP > 0,
+    "Follower 導出有效的 M6 折線步距供 Overlay 共用")
+checkFalse(MDADOverlay.setTrajectoryWidth(0 / 0), "Overlay 拒絕 NaN 軌跡粗細")
+checkTrue(MDADOverlay.setTrajectoryWidth(2), "Overlay 接受合法標準軌跡粗細")
+local function testTrajectoryOverlay()
     setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
-        AutoDriveMaxSpeed = 40, RightLaneBias = 0, DebugOverlay = true })
-    checkTrue(armDrive(), "overlay 情境啟動")
+        AutoDriveMaxSpeed = 40, RightLaneBias = 0, DebugOverlay = false })
+    checkTrue(armDrive(), "一般玩家軌跡情境啟動")
     drive.putRoad(0, 70, -2, 2)
     drive.putSolid(20, 0, "harness_ovl_obs")
+    local overlayState = nil
+    local realOverlayUpdate = MDADOverlay.update
+    MDADOverlay.update = function(pn, s, ...)
+        if pn == 0 then overlayState = s end
+        return realOverlayUpdate(pn, s, ...)
+    end
+    drive.scanRound()
+    MDADOverlay.update = realOverlayUpdate
+    checkEq(type(overlayState), "table", "Driver 把 active session 交給 Overlay 更新")
+    checkEq(drive.markerN, 0, "DebugOverlay 關閉：一般軌跡不建立 marker 圈")
+
+    clearList(drive.worldLines)
+    drive.renderPlayerNum = 0
+    fire("OnPostRender")
+    checkTrue(#drive.worldLines > 10,
+        "一般玩家 active session：OnPostRender 送出連續線段（實得 "
+        .. tostring(#drive.worldLines) .. "）")
+    local standardLineN = #drive.worldLines
+    local standardFirst = drive.worldLines[1]
+    local sawBlue, sawYellow, lineStyleOk = false, false, true
+    for i = 1, #drive.worldLines do
+        local ln = drive.worldLines[i]
+        if not (ln.a > 0 and ln.a < 1 and ln.thickness == 3
+                and (ln.x ~= ln.x2 or ln.y ~= ln.y2) and ln.z == ln.z2) then
+            lineStyleOk = false
+        end
+        if ln.r < 0.3 and ln.g > 0.7 and ln.b > 0.8 then sawBlue = true end
+        if ln.r > 0.8 and ln.g > 0.7 and ln.b < 0.3 then sawYellow = true end
+    end
+    checkTrue(lineStyleOk, "標準軌跡是單一 thickness=3 半透明直線")
+    checkTrue(sawBlue, "正常 follower 段使用藍線")
+    checkTrue(sawYellow, "障礙 dodge 承諾段使用黃線")
+
+    drive.trajectoryWidth = 1
+    drive.scanRound()
+    clearList(drive.worldLines)
+    fire("OnPostRender")
+    local thinLineN = #drive.worldLines
+    local thinFirst = drive.worldLines[1]
+    checkEq(thinLineN, standardLineN, "細／標準每段都只提交一條線")
+    checkTrue(thinFirst and thinFirst.thickness == 1, "細線使用 thickness=1")
+    checkNear(thinFirst.x, standardFirst.x, 1e-6, "改粗細不改軌跡 x")
+    checkNear(thinFirst.y, standardFirst.y, 1e-6, "改粗細不改軌跡 y")
+
+    drive.trajectoryWidth = 3
+    drive.scanRound()
+    clearList(drive.worldLines)
+    fire("OnPostRender")
+    checkEq(#drive.worldLines, thinLineN, "粗線仍是每段單次 client draw")
+    checkTrue(drive.worldLines[1].thickness == 7, "粗線使用 thickness=7")
+    checkNear(drive.worldLines[1].x, thinFirst.x, 1e-6, "粗線仍沿同一條中心軌跡 x")
+    checkNear(drive.worldLines[1].y, thinFirst.y, 1e-6, "粗線仍沿同一條中心軌跡 y")
+    drive.trajectoryWidth = 0 / 0
+    drive.scanRound()
+    clearList(drive.worldLines)
+    fire("OnPostRender")
+    checkTrue(drive.worldLines[1].thickness == 3, "NaN 軌跡粗細退回標準 thickness=3")
+
+    drive.trajectoryVisible = false
+    drive.scanRound()
+    clearList(drive.worldLines)
+    fire("OnPostRender")
+    checkEq(#drive.worldLines, 0, "關閉顯示軌跡：active session 也不提交線段")
+    drive.trajectoryVisible = true
+    drive.trajectoryWidth = 2
+    drive.scanRound()
+
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
+        AutoDriveMaxSpeed = 40, RightLaneBias = 0, DebugOverlay = true })
     drive.scanRound()
     checkTrue(drive.markerN > 10,
-        "DebugOverlay 開啟：輪完成掛上一批 marker（實得 " .. tostring(drive.markerN) .. "）")
+        "DebugOverlay 開啟：紅／綠診斷 markers 額外出現（實得 "
+        .. tostring(drive.markerN) .. "）")
+    checkTrue(drive.markerAlphaN > 0 and drive.markerAlpha == 1,
+        "Debug marker 建立後立刻 setAlpha(1)，FBO 路徑不隱形")
+    local slot0Markers = drive.markerN
+    MDADOverlay.update(1, overlayState, dveh, drive.cell, true)
+    checkTrue(drive.markerN > slot0Markers,
+        "split slot1 debug markers 與 slot0 並存（實得 "
+        .. tostring(slot0Markers) .. "→" .. tostring(drive.markerN) .. "）")
+    MDADOverlay.clear(0)
+    checkTrue(drive.markerN > 0, "清 slot0 不會抹掉 slot1 debug markers")
+    clearList(drive.worldLines)
+    drive.renderPlayerNum = 1
+    fire("OnPostRender")
+    checkTrue(#drive.worldLines > 0, "清 slot0 後 slot1 viewport 軌跡仍存在")
+    MDADOverlay.clear(1)
+    checkEq(drive.markerN, 0, "清 slot1 後 split debug markers 才歸零")
+    MDADOverlay.update(0, overlayState, dveh, drive.cell, true)
+    clearList(drive.worldLines)
+    drive.renderPlayerNum = 0
+    fire("OnPostRender")
+    checkTrue(#drive.worldLines > 0, "DebugOverlay 開啟時一般藍／黃線仍照畫")
+
     setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
         AutoDriveMaxSpeed = 40, RightLaneBias = 0, DebugOverlay = false })
     drive.scanRound()
-    checkEq(drive.markerN, 0, "DebugOverlay 關閉：marker 全清（不留鬼圈）")
-    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
-        AutoDriveMaxSpeed = 40, RightLaneBias = 0, DebugOverlay = true })
+    checkEq(drive.markerN, 0, "DebugOverlay 關閉：debug markers 全清")
+    clearList(drive.worldLines)
+    fire("OnPostRender")
+    checkTrue(#drive.worldLines > 0, "關閉 debug 不會關掉一般玩家軌跡線")
+
+    drive.nav.route = newRoute(300, 0, 0, 4, 0)
+    nowMs = nowMs + 300
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    clearList(drive.worldLines)
+    fire("OnPostRender")
+    checkEq(#drive.worldLines, 0, "route cutover 建構期：舊軌跡立即清除")
     drive.scanRound()
-    checkTrue(drive.markerN > 0, "重新開啟：marker 回來")
+    clearList(drive.worldLines)
+    fire("OnPostRender")
+    checkTrue(#drive.worldLines > 0, "新 route 首輪完成：軌跡線重新出現")
+
     MDAD.Drive.stop(0, nil)
-    checkEq(drive.markerN, 0, "停止自駕：marker 全清")
+    clearList(drive.worldLines)
+    fire("OnPostRender")
+    checkEq(#drive.worldLines, 0, "停止自駕：下一 viewport render 不再提交軌跡線")
+    checkEq(drive.markerN, 0, "停止自駕：debug markers 亦全清")
     drive.clearCell(20, 0)
     drive.fillWorld(-2, 70, -7, 7)
 end
+testTrajectoryOverlay()
 setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
 
 -- ⑪ 調頭安全探測：原地耦力旋轉前先探車周 3m——淨空＝耦力（衝量幀間反向、
@@ -5055,7 +5977,7 @@ do
     checkEq(haloKey(), DKEY.DODGE, "(b) 寬障礙：外側縫繞行")
     checkTrue(type(spyOffL) == "number" and (spyOffL > 4 or spyOffL < -4),
         "(b) 縫在大側偏（|offL|>4；實得 " .. tostring(spyOffL) .. "）")
-    -- 車擺在剖面保持段的期望位置：dev≈0 → 不觸發 offroad（cap 維持繞行 18）
+    -- 車擺在剖面保持段的期望位置：dev≈0 → 不觸發 offroad，也不額外壓到 15
     dveh._x = 20
     dveh._y = spyOffL
     driveTick(dp, dveh) -- 投影跟上（40m 路線段長 10m、前向搜索 12 段）
@@ -5141,15 +6063,14 @@ do
 end
 
 -- (d) 推撞偵測（幽靈車兜底）：MP streaming 抖動下實體車可能完全不在
---     cell:getVehicles() 裡（2026-08-29 實測 veh=2→1→0 波動、輪速 17 km/h
---     頂著看不見的車推 5 秒）——感知救不了，靠「輪速 ≥8 而沿線進度近零」
---     的物理失配把它當卡死交給脫困（倒車退開；額度用完紅字）。累計要求
---     感知非空（實測場景路旁欄杆 hardN 47+）：放一棵不擋線的路緣樹當錨。
+--     感知裡；靠「輪速 ≥8 而車體世界位移近零」交給脫困。不能用沿線 s：
+--     十字路口橫向回線時 s 暫停但車體真正在動。累計要求感知非空（實測場景
+--     路旁欄杆 hardN 47+）：放一棵不擋線的路緣樹當錨。
 do
     checkTrue(armDrive(), "(d) 啟動")
     drive.putTree(10, 5, "harness_push_anchor") -- l=5.5 不擋線：只讓 hardN>0
     drive.scanRound() -- 首輪完成（過感知空窗）＋感知非空（推撞累計 gate 開）
-    dveh._speed = 17 -- 輪速 17 km/h，但假車 _x 不動＝沿線零進度（頂著幽靈推）
+    dveh._speed = 17 -- 輪速 17 km/h，但假車世界座標不動＝頂著幽靈推
     driveReset(dveh)
     driveTick(dp, dveh)  -- pushSince 起算
     nowMs = nowMs + 2600 -- 逾 PUSH_MS 2.5 秒窗
@@ -5161,15 +6082,24 @@ do
     drive.scanRound()
     dveh._speed = 17
     driveReset(dveh)
-    driveTick(dp, dveh)  -- 起算（pushS=0）
+    driveTick(dp, dveh)  -- 起算（pushX/Y=0）
     nowMs = nowMs + 2000
-    dveh._x = 4          -- 窗內前進 4m ≥ PUSH_FREE_M 3 → 重臂
+    dveh._x = 4          -- 窗內世界位移 4m ≥ PUSH_FREE_M 3 → 重臂
     driveTick(dp, dveh)
     nowMs = nowMs + 2000 -- 距重臂僅 2 秒 < 2.5 秒窗
     driveTick(dp, dveh)
     checkTrue(haloKey() ~= DKEY.UNSTICK and haloKey() ~= DKEY.STUCK,
         "(d) 進度正常：累計 4 秒不誤觸（實得 " .. tostring(haloKey()) .. "）")
     checkTrue(MDAD.Drive.isActive(0), "(d) 對照組 session 活著")
+    -- 十字路口回線對照：沿線 x 不動、只橫移 y。舊 pushS 算法會在原窗
+    -- 逾 2.5 秒時誤判；世界位移算法必因 4m 橫移重臂。
+    dveh._y = 4
+    driveTick(dp, dveh)
+    nowMs = nowMs + 1000
+    driveTick(dp, dveh)
+    checkTrue(haloKey() ~= DKEY.UNSTICK and haloKey() ~= DKEY.STUCK,
+        "(d) 橫向回線 4m：沿線進度暫停也不誤觸（實得 " .. tostring(haloKey()) .. "）")
+    checkTrue(MDAD.Drive.isActive(0), "(d) 橫向回線對照組 session 活著")
     drive.clearCell(10, 5)
     MDAD.Drive.stop(0, nil)
 end
@@ -5292,6 +6222,8 @@ checkEq(MDAD.TYPE_GPS, GPS_T, "TYPE_GPS 與 items 腳本一致")
 checkEq(MDAD.TYPE_AUTO, AUTO_T, "TYPE_AUTO 與 items 腳本一致")
 checkEq(MDAD.CMD_DEVICE, "Device", "CMD_DEVICE 常數（client／server 共用的封包名）")
 checkEq(MDAD.CMD_DEVICE_FAILED, "DeviceFailed", "CMD_DEVICE_FAILED 常數")
+checkEq(MDAD.CMD_USAGE, "Usage", "Auto Usage command 常數")
+checkEq(MDAD.CMD_NAV_USAGE, "NavUsage", "GPS NavUsage command 常數")
 checkEq(MDAD.FAIL_GENERIC, FAILED, "FAIL_GENERIC 常數")
 checkEq(MDAD.FAIL_NO_BATTERY, NO_BATTERY, "FAIL_NO_BATTERY 常數")
 checkEq(MDAD.FAIL_TOO_FAR, TOO_FAR, "FAIL_TOO_FAR 常數")
@@ -5303,6 +6235,9 @@ checkTrue(#(eventHandlers["OnFillWorldObjectContextMenu"] or {}) > 0,
 checkTrue(#(eventHandlers["OnServerCommand"] or {}) > 0, "client 掛上了 OnServerCommand 失敗回報")
 checkTrue(#(eventHandlers["OnGameStart"] or {}) > 0, "client 掛上了 OnGameStart 重試註冊")
 checkTrue(#(eventHandlers["OnCreatePlayer"] or {}) > 0, "client 掛上了 OnCreatePlayer")
+checkTrue(#(eventHandlers["OnTick"] or {}) > 0, "client 掛上 NavUsage 低頻 heartbeat")
+checkTrue(#(eventHandlers["EveryOneMinute"] or {}) > 0, "server/SP 掛上電力消耗週期")
+checkTrue(#(eventHandlers["OnFillContainer"] or {}) > 0, "loot 生成後掛上 Spawn* 政策過濾")
 checkTrue(#(eventHandlers["OnPlayerUpdate"] or {}) > 0, "client/MDAD_Driver.lua 掛上了 OnPlayerUpdate")
 
 -- 自駕的向量池絆線：所有情境跑完，BaseVehicle 的池必須是空的。

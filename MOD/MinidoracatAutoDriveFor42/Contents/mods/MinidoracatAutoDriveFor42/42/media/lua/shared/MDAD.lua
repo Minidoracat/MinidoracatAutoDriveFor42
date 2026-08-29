@@ -9,20 +9,27 @@ MDAD.TYPE_AUTO = "MinidoracatAutoDrive.AutopilotModule"
 -- build 印記：載入時印進 console（不受 getDebug 管）——實機回報「行為沒變」時
 -- 第一件事就是對這行，判定使用者跑的是不是新版（2026-08-28 三場撞樹回報
 -- 無法從 log 判定 code 版本的教訓）。每次行為修正遞增尾碼。
-MDAD.BUILD = "m55a-20260829av"
+MDAD.BUILD = "m55b-20260829m"
 print("[MinidoracatAutoDrive] build " .. MDAD.BUILD)
 
 -- client → server 的安裝／卸載請求（server/MDAD_Server.lua 收）與失敗回報
 MDAD.CMD_DEVICE = "Device"
 MDAD.CMD_DEVICE_FAILED = "DeviceFailed"
+MDAD.CMD_USAGE = "Usage"
+MDAD.CMD_NAV_USAGE = "NavUsage"
 
 MDAD.FAIL_GENERIC = "UI_MinidoracatAutoDrive_InstallFailed"
 MDAD.FAIL_NO_BATTERY = "UI_MinidoracatAutoDrive_NoBattery"
 MDAD.FAIL_TOO_FAR = "UI_MinidoracatAutoDrive_TooFar"
 
--- 車電費率：收音機熄火 -0.000025/分（Vehicles.lua:683-686）；自駕約 4–5×
+-- 裝置電力基準（電瓶 usedDelta／遊戲分鐘）與 fuel 原生實耗加成基準。
+-- 四個 sandbox 百分比各自縮放；GPS＋自駕同時啟用時只相加一次。
 MDAD.RATE_NAV = 0.00002
 MDAD.RATE_AUTO = 0.0001
+MDAD.FUEL_OVERHEAD_NAV = 0.05
+MDAD.FUEL_OVERHEAD_AUTO = 0.25
+MDAD.AUTO_USAGE_TTL_MS = 15000
+MDAD.NAV_USAGE_TTL_MS = 15000
 
 local GATE_REASON = "UI_MinidoracatAutoDrive_NeedGPS"
 local GATE_TTL_MS = 1000
@@ -60,12 +67,6 @@ function MDAD.isFiniteInt(n)
     return math.floor(n) == n
 end
 
--- VehicleUtils.compareFloats（Vehicles.lua:1284-1287）：0/1 邊界或 round 2 位有變才值得同步
-local function chargeChanged(old, new)
-    if (old == 0.0) ~= (new == 0.0) then return true end
-    if (old == 1.0) ~= (new == 1.0) then return true end
-    return round(old, 2) ~= round(new, 2)
-end
 
 function MDAD.sandbox(name, default)
     local sb = SandboxVars and SandboxVars.MinidoracatAutoDrive
@@ -75,7 +76,7 @@ function MDAD.sandbox(name, default)
 end
 
 -- 三態減速政策（ZombieAreaSlowdown / CorpseSlowdown）：1=強制減速
--- 2=由玩家決定 3=強制全速。**tolerant 讀取**吸收兩類舊值：
+-- 2=由玩家決定 3=強制關閉該項專屬減速。**tolerant 讀取**吸收兩類舊值：
 --   boolean——ZombieAreaSlowdown 在 0.16.x 以前是 boolean，舊存檔的
 --   _SandboxVars.lua 或 MP 舊伺服器仍會給 true/false：true（舊「會減速」）
 --   映射 1、false（舊「全速輾」）映射 3，行為與升級前一致；
@@ -93,12 +94,34 @@ function MDAD.policy3(name, default)
     return default
 end
 
-function MDAD.drainScale()
-    local v = MDAD.sandbox("DrainPercent", 100)
-    if type(v) ~= "number" then v = 100 end
-    if v < 0 then v = 0 end
-    if v > 500 then v = 500 end
+local function percentScale(name)
+    local v = MDAD.sandbox(name, 100)
+    if type(v) ~= "number" or v ~= v then v = 100 end
+    if v < 0 then v = 0 elseif v > 500 then v = 500 end
     return v / 100
+end
+
+function MDAD.powerScale(mode)
+    if mode == "nav" then return percentScale("GPSPowerPercent") end
+    if mode == "auto" then return percentScale("AutoDrivePowerPercent") end
+    return nil
+end
+
+function MDAD.fuelScale(mode)
+    if mode == "nav" then return percentScale("GPSFuelPercent") end
+    if mode == "auto" then return percentScale("AutoDriveFuelPercent") end
+    return nil
+end
+
+function MDAD.extraFuelFactor(navOn, autoOn)
+    local factor = 0
+    if navOn == true then
+        factor = factor + MDAD.FUEL_OVERHEAD_NAV * MDAD.fuelScale("nav")
+    end
+    if autoOn == true then
+        factor = factor + MDAD.FUEL_OVERHEAD_AUTO * MDAD.fuelScale("auto")
+    end
+    return factor
 end
 
 -- vehicle:getBattery()＝VehicleParts.java:148-149（腳踏車／拖車可能無此 part）
@@ -109,11 +132,10 @@ end
 
 function MDAD.getState(vehicle)
     local part = MDAD.getBatteryPart(vehicle)
-    if not part then return nil, nil end
-    local md = part:getModData()
+    local md = part and part:getModData()
     local st = md and md.MDAD
-    if type(st) ~= "table" then return nil, part end
-    return st, part
+    if type(st) ~= "table" then return nil end
+    return st
 end
 
 function MDAD.ensureState(part)
@@ -144,10 +166,183 @@ function MDAD.isBatteryLive(vehicle)
 end
 
 function MDAD.hasVehicleNavPower(vehicle)
-    local st, part = MDAD.getState(vehicle)
-    if not (st and st.nav == true and part) then return false end
-    local bat = part:getInventoryItem()
-    return bat ~= nil and bat.getCurrentUsesFloat ~= nil and bat:getCurrentUsesFloat() > 0
+    return MDAD.isNavInstalled(vehicle) and MDAD.isBatteryLive(vehicle)
+end
+
+-- GPS／自駕 billing 都只能信任 OnClientCommand 第三參數 actor 的短效 heartbeat。
+-- **禁止**再以 IsoPlayer modData 的 TX/TY 當權威：42.20.4 ObjectModDataPacket 只要求
+-- LoginOnServer，沒有 connection ownership，惡意 client 能覆寫別人的 player modData。
+-- registry 只存 server-derived identity／vehicle id／timestamp 純量，不持 Java object。
+local navUsage = {}
+local autoUsage = {}
+
+local function playerIdentity(player)
+    if not player then return nil, nil end
+    local username = player:getUsername()
+    local playerId
+    if isServer() then
+        playerId = player:getOnlineID()
+    else
+        playerId = player:getPlayerNum()
+    end
+    if type(username) ~= "string" or not MDAD.isFiniteInt(playerId) or playerId < 0 then
+        return nil, nil
+    end
+    return username, playerId
+end
+
+local function playerUsageKey(username, playerId)
+    return tostring(#username) .. ":" .. username .. ":" .. tostring(playerId)
+end
+
+local function currentVehicle(player)
+    local vehicle = player and player:getVehicle()
+    if not vehicle then return nil, -1 end
+    local vehicleId = vehicle:getId()
+    if not MDAD.isFiniteInt(vehicleId) then return nil, nil end
+    return vehicle, vehicleId
+end
+
+-- 車機只准由實際 driver 計費；乘客不能靠車機讓別人的車付帳。乘客／步行者若有
+-- charged portable，成本只落在 actor 自己的 item。NeedItemForNav=false 且沒裝置
+-- 代表免費導航，不虛構 GPS 裝置成本。
+local function navUsageSource(player, vehicle)
+    if vehicle and vehicle:isDriver(player) and MDAD.hasVehicleNavPower(vehicle) then
+        return "vehicle"
+    end
+    if MDAD.findChargedPortableGPS(player) then return "portable" end
+    return nil
+end
+
+function MDAD.setNavUsage(player)
+    if isClient() then return false end
+    local username, playerId = playerIdentity(player)
+    if not username then return false end
+    local vehicle, vehicleId = currentVehicle(player)
+    if vehicleId == nil or not navUsageSource(player, vehicle) then return false end
+    local key = playerUsageKey(username, playerId)
+    local entry = navUsage[key]
+    if not entry then
+        entry = {}
+        navUsage[key] = entry
+    end
+    entry.username = username
+    entry.playerId = playerId
+    entry.vehicleId = vehicleId
+    entry.at = getTimestampMs()
+    return true
+end
+
+function MDAD.clearNavUsage(player)
+    if isClient() then return false end
+    local username, playerId = playerIdentity(player)
+    if not username then return false end
+    local key = playerUsageKey(username, playerId)
+    if not navUsage[key] then return false end
+    navUsage[key] = nil
+    return true
+end
+
+function MDAD.isNavUsageActive(player, expectedVehicle)
+    local username, playerId = playerIdentity(player)
+    if not username then return false end
+    local key = playerUsageKey(username, playerId)
+    local entry = navUsage[key]
+    if not entry then return false end
+    local now = getTimestampMs()
+    local vehicle, vehicleId = currentVehicle(player)
+    local source = navUsageSource(player, vehicle)
+    if type(entry.at) ~= "number" or now < entry.at
+        or now - entry.at > MDAD.NAV_USAGE_TTL_MS
+        or entry.username ~= username or entry.playerId ~= playerId
+        or entry.vehicleId ~= vehicleId
+        or (expectedVehicle ~= nil and vehicle ~= expectedVehicle)
+        or not source then
+        navUsage[key] = nil
+        return false
+    end
+    return true, source
+end
+
+function MDAD.pruneNavUsage()
+    local now = getTimestampMs()
+    for key, entry in pairs(navUsage) do
+        if type(entry.at) ~= "number" or now < entry.at
+            or now - entry.at > MDAD.NAV_USAGE_TTL_MS then
+            navUsage[key] = nil
+        end
+    end
+end
+
+function MDAD.clearAutoUsage(player, vehicleId)
+    if isClient() or not MDAD.isFiniteInt(vehicleId) then return false end
+    local username, playerId = playerIdentity(player)
+    local entry = autoUsage[vehicleId]
+    if not username or not entry or entry.username ~= username
+        or entry.playerId ~= playerId then return false end
+    autoUsage[vehicleId] = nil
+    return true
+end
+
+function MDAD.setAutoUsage(player, vehicle)
+    if isClient() or not player or not vehicle then return false end
+    if not vehicle:isDriver(player) or not vehicle:isEngineRunning() then return false end
+    if not MDAD.isBatteryLive(vehicle) then return false end
+    if MDAD.sandbox("NeedItemForAutoDrive", true) == true
+        and not MDAD.isAutoInstalled(vehicle) then return false end
+    -- AutoDrive 本身可在 NeedItemForNav=false 下合法運作；若 actor 確有 GPS source，
+    -- server 順手續期 nav，確保 auto＋GPS 的兩份成本不能靠漏送 NavUsage 拆開。
+    MDAD.setNavUsage(player)
+    local vehicleId = vehicle:getId()
+    local username, playerId = playerIdentity(player)
+    if not MDAD.isFiniteInt(vehicleId) or not username then return false end
+    local entry = autoUsage[vehicleId]
+    if not entry then
+        entry = {}
+        autoUsage[vehicleId] = entry
+    end
+    entry.username = username
+    entry.playerId = playerId
+    entry.at = getTimestampMs()
+    return true
+end
+
+function MDAD.isAutoUsageActive(vehicle)
+    if not vehicle then return false end
+    local vehicleId = vehicle:getId()
+    if not MDAD.isFiniteInt(vehicleId) then return false end
+    local entry = autoUsage[vehicleId]
+    if not entry then return false end
+    local now = getTimestampMs()
+    local driver = vehicle:getDriver()
+    local username, playerId = playerIdentity(driver)
+    if type(entry.at) ~= "number" or now < entry.at
+        or now - entry.at > MDAD.AUTO_USAGE_TTL_MS
+        or entry.username ~= username or entry.playerId ~= playerId
+        or not vehicle:isEngineRunning() or not MDAD.isBatteryLive(vehicle)
+        or (MDAD.sandbox("NeedItemForAutoDrive", true) == true
+            and not MDAD.isAutoInstalled(vehicle)) then
+        autoUsage[vehicleId] = nil
+        return false
+    end
+    return true
+end
+
+function MDAD.pruneAutoUsage()
+    local now = getTimestampMs()
+    for vehicleId, entry in pairs(autoUsage) do
+        if type(entry.at) ~= "number" or now < entry.at
+            or now - entry.at > MDAD.AUTO_USAGE_TTL_MS then
+            autoUsage[vehicleId] = nil
+        end
+    end
+end
+
+function MDAD.vehicleUsageModes(vehicle)
+    if not vehicle then return false, false, nil end
+    local driver = vehicle:getDriver()
+    local navOn = driver ~= nil and MDAD.isNavUsageActive(driver, vehicle)
+    return navOn, MDAD.isAutoUsageActive(vehicle), driver
 end
 
 function MDAD.findScrewdriver(player)
@@ -387,62 +582,45 @@ function MDAD.navGate(playerNum, context)
     return false, GATE_REASON
 end
 
-local function modeRate(mode, portable)
-    if mode ~= "nav" and mode ~= "auto" then return nil end
-    if portable then
-        -- 隨身 GPS UseDelta=0.006（items_autodrive.txt）→ DrainPercent=100 約 2.8 遊戲時
-        if mode == "auto" then return 0.03 end
-        return 0.006
-    end
-    if mode == "auto" then return MDAD.RATE_AUTO end
-    return MDAD.RATE_NAV
-end
 
--- server-authoritative；引擎運轉中不耗車電（收音機先例 Vehicles.lua:683-686）。
--- 不呼叫 VehicleUtils.chargeBattery（:1308-1321 把 delta 加兩次）。
-function MDAD.consumeVehiclePower(vehicle, mode, minutes)
-    if isClient() then return false end
-    if not vehicle then return false end
-    local rate = modeRate(mode, false)
-    if not rate then return false end
+-- server-authoritative。原版 Vehicles.Update.Battery 仍照引擎狀態充電；本函式只補扣
+-- 裝置負載，因此引擎運轉時是「發電機充電 − GPS − 自駕」，不是把裝置成本免除。
+-- navOn／autoOn 同一輪合併成一次 usedDelta write，避免疊加時互踩與重複同步。
+function MDAD.consumeVehiclePowerModes(vehicle, navOn, autoOn, minutes)
+    if isClient() or not vehicle then return false end
     local part = MDAD.getBatteryPart(vehicle)
     local bat = part and part:getInventoryItem()
     if not bat or not bat.getCurrentUsesFloat or not bat.setUsedDelta then return false end
-    if vehicle:isEngineRunning() then
-        return bat:getCurrentUsesFloat() > 0
-    end
-    -- 縮放歸零或 minutes 無效：不動電量，只回報還有沒有電
-    local scale = MDAD.drainScale()
-    if scale <= 0 or type(minutes) ~= "number" or minutes <= 0 then
-        return bat:getCurrentUsesFloat() > 0
-    end
     local old = bat:getCurrentUsesFloat()
-    local charge = clamp01(old - rate * minutes * scale)
+    -- 滿電＋引擎運轉時由發電機 headroom 直接供應，避免 vanilla 每分鐘充回 1.0、
+    -- 本函式又拉到 0.999x，造成 1.0 邊界雙向同步抖動。未滿電仍照扣＝充電變慢。
+    if old >= 1 and vehicle:isEngineRunning() then return true end
+    if type(minutes) ~= "number" or minutes <= 0 then return old > 0 end
+    local rate = 0
+    if navOn == true then rate = rate + MDAD.RATE_NAV * MDAD.powerScale("nav") end
+    if autoOn == true then rate = rate + MDAD.RATE_AUTO * MDAD.powerScale("auto") end
+    if rate <= 0 then return old > 0 end
+    local charge = clamp01(old - rate * minutes)
     if charge ~= old then
         bat:setUsedDelta(charge)
-        if chargeChanged(old, charge) then
+        if VehicleUtils.compareFloats(old, charge, 2) then
             vehicle:transmitPartUsedDelta(part)
         end
     end
     return charge > 0
 end
 
-function MDAD.consumePortablePower(item, mode, minutes)
+
+-- 隨身裝置只有 GPS；AutoDrive module 不是 drainable，拒絕維護不存在的 portable-auto 路徑。
+function MDAD.consumePortablePower(item, minutes)
     if isClient() then return false end
     if not item or not item.getCurrentUsesFloat or not item.setUsedDelta then return false end
-    local rate = modeRate(mode, true)
-    if not rate then return false end
+    local rate = 0.006
     if item.getUseDelta then
         local ud = item:getUseDelta()
-        if type(ud) == "number" and ud > 0 then
-            if mode == "auto" then
-                rate = ud * 5
-            else
-                rate = ud
-            end
-        end
+        if type(ud) == "number" and ud > 0 then rate = ud end
     end
-    local scale = MDAD.drainScale()
+    local scale = MDAD.powerScale("nav")
     if scale <= 0 or type(minutes) ~= "number" or minutes <= 0 then
         return item:getCurrentUsesFloat() > 0
     end
@@ -450,9 +628,7 @@ function MDAD.consumePortablePower(item, mode, minutes)
     local charge = clamp01(old - rate * minutes * scale)
     if charge ~= old then
         item:setUsedDelta(charge)
-        if isServer() then
-            sendItemStats(item)
-        end
+        if isServer() then sendItemStats(item) end
     end
     return charge > 0
 end

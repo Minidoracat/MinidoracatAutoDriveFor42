@@ -12,7 +12,7 @@
 -- ---------------------------------------------------------------------------
 -- 介面契約（唯一入口；感知層與 driver 依此接線，勿在此處加入 PZ 相依）
 -- ---------------------------------------------------------------------------
--- MDADCorridor.plan(hardS, hardL, hardN, needHalf, corridorHalf, preferL?)
+-- MDADCorridor.plan(hardS, hardL, hardN, needHalf, corridorHalf, preferL?, hardR?, baseL?, roadLo?, roadHi?, refineComfort?)
 --     hardS, hardL ＝ 硬障礙點的扁平陣列（**兩條平行陣列**，第 i 點＝hardS[i], hardL[i]）。
 --                    hardS[i] ＝ 該點投影到路線的弧長 s（公尺，與 follower 的 profile.s 同一空間）。
 --                    hardL[i] ＝ 橫向偏移 l（公尺；PZ 世界 Y 向南，數學 CCW 法向＝行進方向右側，故正號＝右）。
@@ -22,6 +22,12 @@
 --     corridorHalf ＝ 走廊半寬（典型 3.0，即 6 公尺道寬）。非有限正數 → 預設 3.0。
 --     preferL       ＝ 候選搜尋中心（選填）；按實際橫移距離選最近可行 lane。
 --                     非有限數 → 0；只改搜尋順序，不改候選集與淨空門檻。
+--     hardR         ＝ 逐點障礙半徑平行陣列（選填）；壞值保守回落 OBS_HALF。
+--     baseL         ＝ 實際行駛基準線（選填）；擋線判定以它為中心。
+--     roadLo/roadHi ＝ 路面帶邊界（選填）；有帶內縫時不為 comfort 偏到帶外。
+--     refineComfort ＝ 是否在 safe lane 同側找額外餘裕（選填，預設 true）。
+--                     false 保留原 first-safe lane，供 ban 後重規劃（物理推撞 ban
+--                     與 world-sweep 候選枚舉）使用，避免又走回剛否決的縫。
 --     筆數防呆：hardN 非有限非負整數、hardS／hardL 不是 table、或 1..hardN 之間
 --               **任一格缺項／非有限數** → 整批不信，fail-safe 回 "blocked"；
 --               只有合法的 hardN == 0 才回 "clear"。缺項代表呼叫端 buffer 沒填滿
@@ -29,7 +35,7 @@
 --               只會生出一份看似完整、其實有洞的規劃。
 --
 --     回 mode, a, b, c, d, offL（六個純量，恆非 nil）
---       mode ＝ "clear"   沒有任何障礙擋住中心線。a..offL 全為 0。
+--       mode ＝ "clear"   沒有任何障礙擋住 baseL 行駛基準線。a..offL 全為 0。
 --       mode ＝ "dodge"   找到縫隙。四個斷點是側偏剖面的 s 座標（絕對弧長）：
 --                         a  開始離開呼叫端的 baseline（通常是 laneBias）
 --                         b  側移到位（此後 offset 恆為 offL）
@@ -44,10 +50,10 @@
 --     "clear"／"dodge"／"blocked" 是 chunk 的常數字串，也不配置。
 --
 -- ---------------------------------------------------------------------------
--- 演算法（三步；為什麼是這三步）
+-- 演算法（四步；為什麼是這四步）
 -- ---------------------------------------------------------------------------
--- ① 擋中線篩選：把車半寬一次性膨脹進障礙，淨空門檻 clr ＝ OBS_HALF + needHalf。
---    |l| < clr 的障礙才算「擋住中心線」（車沿 l = 0 開會撞上）。全部沒有 → "clear"。
+-- ① 擋行駛線篩選：把車半寬一次性膨脹進障礙，淨空門檻 clr ＝ 點半徑 + needHalf。
+--    |l - baseL| < clr 才算擋線。全部沒有 → "clear"。
 --    膨脹（Minkowski sum）做在這裡的好處：之後所有判定都退化成「點可行性」，
 --    不必在縫隙寬度、車寬、障礙寬之間反覆換算——那正是這類程式最會寫錯的地方。
 --
@@ -62,14 +68,21 @@
 --    最壞排序下 8 輪只能串 8 節，群被截短的後果僅是「繞行段偏短」，而繞行是事件
 --    驅動的——下一輪掃描會用新的錨再算一次。
 --
--- ③ 縫隙搜尋：在群的 s 範圍（各向擴張 OBS_HALF）內，取**全部**硬障礙（含不擋
---    中心線的），因為決定縫隙邊界的正是那些側邊障礙。可行的 l 必須與每個點都
---    保持 clr 的橫向距離。在 [-(corridorHalf - needHalf), corridorHalf - needHalf]
---    內用固定步長 STEP ＝ 0.25 的格點線性掃描；候選集錨在 l = 0，但搜尋順序依
---    與原始 preferL（預設 0）的實際距離由近而遠。完全等距時偏左——1993 肯塔基
---    右側通行，超車走左側。找到 → "dodge"，找不到 → "blocked"。
---    格點錨在 0 讓左右候選集完全對稱；preferL 只改順序、不改可行域。代價是貼
---    走廊邊緣最後不到 0.25 公尺的縫隙掃不到——那種縫吃不下感知誤差，不要也罷。
+-- ③ safe 縫隙搜尋：在群的 s 範圍（各向擴張 OBS_HALF）內，取**全部**硬障礙
+--    （含不擋中心線的），因為決定縫隙邊界的正是那些側邊障礙。可行的 l 必須與
+--    每個點都保持 clr 的橫向距離。在
+--    [-(corridorHalf - needHalf), corridorHalf - needHalf] 內用固定步長
+--    STEP＝0.25 的格點線性掃描；候選集錨在 l＝0，搜尋順序依與 preferL 的實際
+--    距離由近而遠。完全等距時偏左。找到第一條 safe lane；找不到 → "blocked"。
+--    格點錨在 0 讓左右候選集完全對稱；代價是走廊邊緣最後不到 0.25 公尺的縫隙
+--    掃不到——那種縫吃不下感知誤差，不要也罷。
+--
+-- ④ comfort refinement：first-safe 的格點殘差只有 0.10..0.35m，若直接映射
+--    sweep margin，正常寬縫也會被系統性壓到約 12..16 km/h。保留已選側別與
+--    路面優先級，最多再往同側外推 3 格（0.75m），取第一條達
+--    needHalf + COMFORT_EXTRA 的 lane；沒有就逐位元回傳原 safe lane。不是
+--    max-margin 搜尋，不會一路跑到走廊／人行道邊緣；offL == preferL 無既有
+--    側別時，refinement 固定往正側（右）嘗試。
 --
 -- 明確不做（規劃書 D6 §2.4）：同倫類枚舉、elastic band 迭代、動態障礙重規劃、
 -- 倒車規劃。理由不是難寫，是**每幀全軌跡優化的成本吃掉整個 0.5ms 預算**，而
@@ -104,6 +117,7 @@ local EXIT = 8                    -- 回歸段長度（公尺）：d = sObs1 + E
 local GAP = 2                     -- 障礙前後的保持餘裕（公尺）：b = sObs0 - GAP、c = sObs1 + GAP
 local MIN_SEG = 2                 -- 進入／回歸段的最小長度（障礙就在眼前時的下限）
 local STEP = 0.25                 -- 橫向格點步長（公尺）
+local COMFORT_EXTRA = 0.7         -- 淨空加碼；含 planner/sweep 的 0.1 差後，margin 可達 0.8
 local NEED_HALF_DEFAULT = 1.4     -- needHalf 預設（車半寬 + margin）
 local CORRIDOR_HALF_DEFAULT = 3.0 -- corridorHalf 預設（6 公尺道寬）
 
@@ -115,6 +129,7 @@ MDADCorridor.EXIT = EXIT
 MDADCorridor.GAP = GAP
 MDADCorridor.MIN_SEG = MIN_SEG
 MDADCorridor.STEP = STEP
+MDADCorridor.COMFORT_EXTRA = COMFORT_EXTRA
 MDADCorridor.NEED_HALF_DEFAULT = NEED_HALF_DEFAULT
 MDADCorridor.CORRIDOR_HALF_DEFAULT = CORRIDOR_HALF_DEFAULT
 
@@ -169,10 +184,11 @@ end
 -- roadLo／roadHi（選填）＝路面帶邊界（相對中心線；Sensor 的地板 sprite 統計）。
 -- 縫隙搜尋改**兩遍**：第一遍只接受「車中心落在路面帶內」的候選，一個都沒有
 -- 才放開第二遍全域——繞出路面（草地）是最後手段，不是與路面縫平權的選項
--- （2026-08-28 實機：右樹排把縫逼到左外 3.5m，車在路外草地上繞行）。任一邊
--- 非有限數或 roadLo >= roadHi＝無路面資訊，單遍全域（行為與舊版完全相同）。
+-- 壞值／反向邊界視為無帶資訊，直接走單遍全域；不讓壞資料把所有候選排除。
+-- 2026-08-28 實機：右樹排曾把縫逼到左外 3.5m，帶內優先修正車繞上草地。
+-- refineComfort=false 時停在 first-safe lane；driver 的 world-sweep ban 重試必用此模式。
 function MDADCorridor.plan(hardS, hardL, hardN, needHalf, corridorHalf, preferL, hardR, baseL,
-        roadLo, roadHi)
+        roadLo, roadHi, refineComfort)
     if type(hardR) ~= "table" then hardR = nil end
     if type(baseL) ~= "number" or baseL * 0 ~= 0 then baseL = 0 end
     if not isFinitePos(needHalf) then needHalf = NEED_HALF_DEFAULT end
@@ -260,6 +276,7 @@ function MDADCorridor.plan(hardS, hardL, hardN, needHalf, corridorHalf, preferL,
     local sLo, sHi = sObs0 - OBS_HALF, sObs1 + OBS_HALF
     local limit = corridorHalf - needHalf   -- lane 中心的可用半幅
     local offL = nil
+    local foundPass = 0
     -- 路面帶有效性：任一邊壞值或帶寬非正＝無路面資訊，直接單遍全域。
     local roadOK = type(roadLo) == "number" and roadLo * 0 == 0
         and type(roadHi) == "number" and roadHi * 0 == 0 and roadLo < roadHi
@@ -287,6 +304,7 @@ function MDADCorridor.plan(hardS, hardL, hardN, needHalf, corridorHalf, preferL,
                     if (pass == 2 or (cand >= roadLo and cand <= roadHi))
                         and laneFree(hardS, hardL, hardR, n, sLo, sHi, cand, needHalf) then
                         offL = cand
+                        foundPass = pass
                         break
                     end
                 end
@@ -297,12 +315,30 @@ function MDADCorridor.plan(hardS, hardL, hardN, needHalf, corridorHalf, preferL,
                         if (pass == 2 or (cand >= roadLo and cand <= roadHi))
                             and laneFree(hardS, hardL, hardR, n, sLo, sHi, cand, needHalf) then
                             offL = cand
+                            foundPass = pass
                             break
                         end
                     end
                 end
             end
             if offL ~= nil then break end
+        end
+    end
+    -- first-feasible 只多出 0.10..0.35m 的格點殘差，若直接拿它映射速度，所有
+    -- 正常繞行都只剩 12..16 km/h。保留最近 safe lane 的側別，最多外推 3 格
+    -- （0.75m）找第一條 comfort lane；相等於 preferL 時固定往正側，找不到回原 lane。
+    if offL ~= nil and refineComfort ~= false then
+        local dir = offL < preferL and -1 or 1
+        local safeL = offL
+        for k = 1, 3 do
+            local cand = safeL + dir * k * STEP
+            if cand < -limit or cand > limit then break end
+            if foundPass == 1 and (cand < roadLo or cand > roadHi) then break end
+            if laneFree(hardS, hardL, hardR, n, sLo, sHi, cand,
+                    needHalf + COMFORT_EXTRA) then
+                offL = cand
+                break
+            end
         end
     end
     if offL == nil then

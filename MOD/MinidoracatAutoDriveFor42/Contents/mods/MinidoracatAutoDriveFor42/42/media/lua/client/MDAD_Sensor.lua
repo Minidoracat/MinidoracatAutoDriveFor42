@@ -1,6 +1,6 @@
 -- MDAD_Sensor.lua — M4 走廊掃描（client：整個自駕唯一會讀「世界格」的地方）
 --
--- 分層：本檔只回答「路線前方 36 公尺的走廊裡，哪些位置是硬障礙」，不做任何決策。
+-- 分層：本檔只回答「路線前方 48 公尺（高速組態 110 公尺）的走廊裡，哪些位置是硬障礙」，不做任何決策。
 -- 縫隙規劃是 shared/MDAD_Corridor.lua 的事（純數學、離線可測），把方向盤轉下去是
 -- client/MDAD_Driver.lua 的事。感知／規劃／執行三層各自只有一種相依：
 --   Sensor → PZ 世界（本檔）｜Corridor → 無｜Driver → Follower + Corridor + 本檔的結果欄位。
@@ -47,8 +47,8 @@
 -- 效能守則（step 每幀跑，且每一格都是跨 Lua↔Java 邊界的呼叫）
 -- ---------------------------------------------------------------------------
 -- ① 節流：沒有進行中的掃描時，一次數字比較就 return（SCAN_INTERVAL_MS 250ms 一輪）。
--- ② 分幀：一輪約 35 步 × 10 條橫向 ＝ 350 格，每幀最多 SCAN_BUDGET 格，
---    約 11 幀（60fps 下 ~183ms）跑完，仍小於 250ms 的輪距，不會前後輪重疊。
+-- ② 分幀：一輪 47 個縱向樣本 × 14 條橫向 ＝ 658 格，每幀最多 56 格，
+--    12 幀（60fps 下 200ms）跑完，仍小於 250ms 的輪距，不會前後輪重疊。
 -- ③ 零配置：step 內不建 table、不建 closure、不做字串串接。橫向偏移表與成本常數
 --    都是載入期的 upvalue；硬障礙緩衝區重複使用（第一輪把陣列撐到定容後就不再成長）。
 -- ④ 世界格去重：同一輪內相鄰步的橫向取樣會落在同一格（1 公尺步長 × 1 公尺格），
@@ -75,7 +75,7 @@ local SCAN_NEAR = 2            -- 掃描起點：車前 2 公尺（車身本體�
 local SCAN_AHEAD = 48          -- 掃描終點：車前 48 公尺（85km/h 約 2 秒反應＋更早定側減少繞行震盪）
 local SCAN_STEP = 1            -- 沿路線的取樣步長（公尺，＝一格）
 local SCAN_BUDGET = 56         -- 每幀最多實際查詢幾格世界格（±6.5×48m 帶 ~658 格/輪 → ~12 幀）
-local HARD_MAX = 768           -- 硬障礙緩衝上限（一輪最多 490 格＋車輛膨脹，防呆不是門檻）
+local HARD_MAX = 768           -- 硬障礙緩衝上限（掃描帶最多 658 個唯一格，保留 110 格防呆）
 local VISITED_ROUNDS = 64      -- 每幾輪重建一次 visited 表
 local SPRITE_CACHE_MAX = 4096  -- sprite 成本快取條目上限
 local VEH_LAT_HALF = 1.2       -- 車輛橫向半寬（膨脹前；配合既有 ±1 膨脹點 → 實體全覆蓋）
@@ -87,7 +87,7 @@ local VEH_LAT_HALF = 1.2       -- 車輛橫向半寬（膨脹前；配合既有 
 -- 0.5m），但**兩台並排**（實佔 l∈[-2,3]、膨脹後 [-4.1,5.1]）就整帶堵死——
 -- 2026-08-28 實機：路口兩台並排車，左右明明有空間（在走廊外）卻 blocked 停死。
 -- ±7 走廊（可行帶 ±5.6）讓並排車側邊的縫進得了候選集；代價是每輪掃描
--- 14×35=490 格（原 350，SCAN_BUDGET 同步 32→48，一輪仍 ~11 幀 <250ms 節流）。
+-- 14×47=658 格（舊 ±5/36m 為 350 格），SCAN_BUDGET 32→56，仍是 12 幀。
 -- 取樣點放在格心（±0.5 … ±6.5）而不是格界，避免 floor 之後兩條相鄰橫向落到
 -- 同一格、白掃一次。
 local LAT = { -6.5, -5.5, -4.5, -3.5, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5 }
@@ -101,26 +101,29 @@ local KEY_MUL = 100000
 
 local COST_NONE, COST_SOFT, COST_HARD = 0, 1, 2
 local COST_HARD_THIN = 3       -- 細桿硬障礙（樹幹）：擋不擋線用 0 半徑判（樹幹 ~0.3 格）
-local SLOW_BAND_HALF = 3       -- 減速計數帶半寬（±3＝路面帶；hard 仍收全走廊 ±5）
+local SLOW_BAND_HALF = 3       -- 減速計數帶半寬（±3＝路面帶；hard 仍收全走廊 ±6.5）
 local OBS_HALF_R = 0.7         -- 整格箱型硬障礙的半徑（＝Corridor 的 OBS_HALF；樹幹用 0）
--- 路面對中（2026-08-28 實機：163 號公路的 nav 線偏到路面東緣外 2-4m——
--- streets.xml 是「世界地圖畫線」精度的概略 polyline，當車輛級中心線用必須
--- 用實際路面校正）：掃描順路統計「路面格」相對 nav 線的橫向平均，輪末產出
--- roadC 樣本給 driver 做 EMA 行駛線校正。路面判定＝地板 sprite 名前綴，
--- 三個 [FLOOR] 家族（tileset 歸類 BrushToolChooseTileUI.lua:76-98；spriteName
--- 判定慣例 ISShovelGroundCursor.lua:109-112）：blends_street（柏油/碎石 blends）、
--- floors_exterior_street（鋪面街道）、street_curbs（路緣石含 blend 變體——
--- 車壓得過的路肩邊石，算進路面帶讓帶邊界貼實際路緣）。
+-- 路面對中（2026-08-28 實機：163 號公路的 nav 線偏到路面東緣外 2-4m）：
+-- 掃描順路統計地板 sprite 的橫向平均，輪末產出 roadC 給 driver 做 EMA。
+-- 路面家族＝blends_street／floors_exterior_street／street_curbs（tileset 歸類
+-- BrushToolChooseTileUI.lua:76-98；名稱判定慣例 ISShovelGroundCursor.lua:109-112）。
+-- 但 blends_street 也鋪停車場：Rosewood 8262,11511 的 6m Butterfly St 與
+-- 西側停車場連成 11 格寬，舊平均被拉 1.625m，再疊 RightLaneBias 把車送到
+-- 石碑／鐵欄。可辨識街道最大接受 10m（格心 span 9）；更寬＝停車場／路口
+-- 歧義，fail-safe 不校正、不提供 road band，退回 streets.xml nav 線。
 local ROAD_PREFIX_1 = "blends_street"
 local ROAD_PREFIX_2 = "floors_exterior_street"
 local ROAD_PREFIX_3 = "street_curbs"
 local ROAD_MIN_N = 24          -- 一輪至少這麼多路面格才給樣本（濾掉零星補丁）
+local ROAD_MAX_SPAN = 9        -- 路面格心最大橫跨（＝10m 實際寬）；更寬視為歧義
+local ROAD_EDGE_GAP = 0.25     -- 兩緣不得落最外圈取樣；LAT 間距 1m，0<gap<1 行為等價
 local ROAD_CACHE_MAX = 256     -- 地板名 → 是否路面 的快取上限（防模組地圖無上限）
 
 MDADSensor.SCAN_AHEAD = SCAN_AHEAD
 MDADSensor.SCAN_NEAR = SCAN_NEAR
 MDADSensor.SCAN_INTERVAL_MS = SCAN_INTERVAL_MS
 MDADSensor.CORRIDOR_HALF = CORRIDOR_HALF
+MDADSensor.SLOW_BAND_HALF = SLOW_BAND_HALF
 
 --------------------------------------------------------------------------------
 -- 延後綁定的引擎枚舉
@@ -154,10 +157,11 @@ end
 -- v1 刻意不做方向性半格阻擋（北牆只擋北半格）：牆的朝向要配合車的行進方向才有意義，
 -- 判錯的代價是直接撞牆，先整格保守擋住。
 --
--- 無碰撞的 sprite：門框（doorN/doorW）是可穿越的開口，不能當障礙；可搬動家具
--- （isMoveAbleObject）與帶 HitByCar 的路邊物件撞得過但會減速／損傷，算 SOFT；
--- 但路燈裝飾與垃圾桶這兩類（street_decoration / trashcontainers）在原版就是設計成
--- 被車輾過的，當障礙會讓車在市區寸步難行，直接放行。
+-- 無碰撞的 sprite：門框（doorN/doorW）是開口，不能當障礙。`isMoveAbleObject`
+-- 是引擎由 StopCar 設的 vehicle collision type（**不是** tile 的 IsMoveAble 屬性），
+-- 仍算 SOFT。其後才處理 HitByCar：沒有 collision/StopCar 的
+-- street_decoration／trashcontainers 小物可直接放行；實體郵筒、標誌等已在前兩關
+-- 收編，不可因 prefix 被穿透。
 local function classifySprite(obj, name)
     local sprite = obj:getSprite()                     -- 用例 ISWorldObjectContextMenu.lua:1347
     if sprite == nil then return COST_NONE end
@@ -168,7 +172,7 @@ local function classifySprite(obj, name)
     -- （0.7）讓路緣籬笆排把「路線本身過彎」都判成擦撞（2026-08-29 回程路口：
     -- bias 直行線離籬笆 1.33m 被 0.7+needBase 判死、原生導航天天照走）。
     -- r=0 後 needHalf/needBase 的 margin 仍保護實體薄片。
-    if find(name, "fencing_", 1, true) then return COST_HARD_THIN end
+    if find(name, "fencing_", 1, true) == 1 then return COST_HARD_THIN end
 
     if sprite:shouldHaveCollision() then               -- IsoSprite.java:2083-2093
         return COST_HARD
@@ -185,10 +189,13 @@ local function classifySprite(obj, name)
 
     if props:has(F_doorN) then return COST_NONE end
     if props:has(F_doorW) then return COST_NONE end
+    -- 原版通常會把 StopCar/Hoppable 合成 collision；顯式 guard 保護未合成或 MOD tile，
+    -- 也避免緊接著的 isMoveAbleObject 分支把真正會停車的物件降成 SOFT。
+    if props:has("StopCar") then return COST_HARD end
     if obj:getType() == T_moveable then return COST_SOFT end
     if props:has("HitByCar") then                      -- PropertyContainer.java:187（has(String) 過載）
-        if find(name, "street_decoration", 1, true) then return COST_NONE end
-        if find(name, "trashcontainers", 1, true) then return COST_NONE end
+        if find(name, "street_decoration", 1, true) == 1 then return COST_NONE end
+        if find(name, "trashcontainers", 1, true) == 1 then return COST_NONE end
         return COST_SOFT
     end
     return COST_NONE
@@ -481,9 +488,13 @@ local function finishRound(state, now)
     -- 簽章：障礙的「數量 + 縱向分布 + 橫向分布」三者任一有變就會變。純整數運算，
     -- 呼叫端只拿它做 ~= 比較（不是雜湊安全性），碰撞的代價只是少重規劃一次。
     state.sig = state.wHardN * 7919 + state.wSumS * 31 + state.wSumL
-    -- 路面對中樣本：帶內路面格的橫向平均（相對 nav 線；正＝右）。樣本太少＝
-    -- 路口外荒地／停車場／無路面路段 → nil，呼叫端衰減校正量、不硬掰。
-    if state.wRoadN >= ROAD_MIN_N then
+    -- 樣本不足、橫跨 >10m、或鋪面碰到掃描帶端點＝無路面／停車場／路口歧義。
+    -- 端點截斷時觀測 span 只是寬度下界，不能拿「看見 10m」證明整體只有 10m。
+    -- 歧義時 roadC 與 road band 一起撤銷，退回 nav 線，不硬掰。
+    local roadSpan = state.wRoadHi - state.wRoadLo
+    local roadEdgesVisible = state.wRoadLo > state.bandBias + LAT[1] + ROAD_EDGE_GAP
+        and state.wRoadHi < state.bandBias + LAT[LAT_N] - ROAD_EDGE_GAP
+    if state.wRoadN >= ROAD_MIN_N and roadSpan <= ROAD_MAX_SPAN and roadEdgesVisible then
         state.roadC = state.wRoadSumL / state.wRoadN
         -- 帶邊界：格心 ± 半格（格心 l=-4.5 的路面格實際覆蓋 [-5,-4]）
         state.roadLo = state.wRoadLo - 0.5
@@ -637,8 +648,9 @@ function MDADSensor.reset(state)
 end
 
 -- working buffer 推一個硬點（含簽章累加；l4＝l*4 的整數版；r＝該點半徑——
--- 樹幹 0、整格箱型物 OBS_HALF，Corridor/sweep 逐點膨脹用）。滿了靜默丟棄——
--- HARD_MAX=512 而一輪掃描本體最多 350 格＋車體膨脹點，防呆不是門檻。
+-- 樹幹 0、整格箱型物 OBS_HALF，Corridor/sweep 逐點膨脹用）。滿了靜默丟棄；
+-- HARD_MAX=768 對掃描帶最多 658 個唯一格留 110 格。Driver 另在快照尾端附加
+-- 最多 4 個虛擬 ban，不經 pushHard，也不占這個 sensor 上限。
 local function pushHard(state, s, l, l4, wx, wy, r)
     local n = state.wHardN
     if n >= HARD_MAX then return end

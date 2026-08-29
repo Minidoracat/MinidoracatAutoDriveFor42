@@ -156,6 +156,7 @@ MDADFollower.STEER_MAX = STEER_MAX
 MDADFollower.ARRIVE_M = ARRIVE_M
 MDADFollower.MIN_SPEED_KMH = MIN_SPEED_KMH
 MDADFollower.BUDGET_MAX = BUDGET_MAX
+MDADFollower.OV_STEP = OV_STEP
 
 -- n * 0 == 0 一次擋掉 NaN 與 ±Inf（有限數乘 0 必為 0，這兩者乘 0 都是 NaN），
 -- 不用 math.huge（Kahlua 未保證提供；shared/MDAD.lua 的 isFiniteInt 同一理由）

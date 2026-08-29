@@ -10,8 +10,8 @@ Item-driven vehicle navigation and autodrive: plan routes with a GPS Navigator, 
 [list]
 [*] [b]GPS Navigator[/b]: loot or craft one, then pick a destination on the world map to plan a route along the road network
 [*] [b]Autopilot Module[/b]: install it into a vehicle to drive along the planned route automatically, stopping on arrival
-[*] [b]Crafting[/b]: both devices craftable with the Electricity skill (sandbox toggles for crafting and item requirements)
-[*] [b]Power drain[/b]: runs on its own battery when carried, or on the vehicle battery once installed; drain rate adjustable in sandbox (0 = no drain)
+[*] [b]Item availability[/b]: both devices can be crafted or found in world loot, with separate crafting and spawn toggles for GPS and auto-drive
+[*] [b]Power and fuel costs[/b]: GPS and auto-drive each have independent 0–500% power and extra-fuel settings that stack; at 100%, active GPS navigation adds 5% fuel use and auto-drive adds 25%
 [*] [b]Performance first[/b]: precomputed route speed profiles and event-driven dodging keep per-frame cost minimal
 [*] [b]Map mod support out of the box[/b]: the road network comes from the game's official street data, so subscribed map mods just work
 [/list]
@@ -19,6 +19,8 @@ Item-driven vehicle navigation and autodrive: plan routes with a GPS Navigator, 
 [h2]⚠️ Requirements[/h2]
 [list]
 [*] Requires the base mod: [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763913359]Minidoracat MiniMap for B42[/url]
+[*] Requires the UI framework: [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3789836701]Minidoracat UI Library for B42[/url]
+[*] Incompatible with Navigator (both use the area above the vehicle dashboard)
 [/list]
 
 [h2]🔗 Mod Series[/h2]
