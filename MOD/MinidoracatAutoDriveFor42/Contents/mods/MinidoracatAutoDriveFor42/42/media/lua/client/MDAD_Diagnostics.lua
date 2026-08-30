@@ -661,6 +661,17 @@ local function readPointer()
     return nil
 end
 
+-- Windows/PZ may reject getFileReader while the append writer is open. A live
+-- session already passed the durable-header checkpoint, so it is safe to expose
+-- its path without reopening the same file.
+local function latestExists(name)
+    for _, s in pairs(sessions) do
+        if s and s.active and s.slot and slotFile(s.slot) == name then return true end
+    end
+    local line = readLine1(DIR .. "/" .. name)
+    return type(line) == "string" and line ~= ""
+end
+
 function D.start(pn, vehicle, profile)
     if sessions[pn] then D.stop(pn, "restart") end
     if not telemetryOn() then return false end
@@ -777,9 +788,7 @@ end
 
 function D.hasLatest()
     local name = readPointer()
-    if type(name) ~= "string" or name == "" then return false end
-    local line = readLine1(DIR .. "/" .. name)
-    return type(line) == "string" and line ~= ""
+    return type(name) == "string" and name ~= "" and latestExists(name)
 end
 
 function D.copyLatestPath(pn)
@@ -793,8 +802,7 @@ function D.copyLatestPath(pn)
         halo(pn, false, "UI_MinidoracatAutoDrive_TelemetryCopyFailed", "copy failed")
         return false
     end
-    local line = readLine1(DIR .. "/" .. name)
-    if type(line) ~= "string" or line == "" then
+    if not latestExists(name) then
         halo(pn, false, "UI_MinidoracatAutoDrive_TelemetryNoFile", "no diagnostic log yet")
         return false
     end

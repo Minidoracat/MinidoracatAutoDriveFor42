@@ -67,10 +67,12 @@ local readerCalls = 0
 local listCalls = 0
 local writerCloses = 0
 local writerOpens = {}
+local openWriters = {}
 local failWriter = false
 local failOpenAt = nil
 local throwWrite = false
 local silentDrop = false
+local lockLiveReads = false
 local nowMs = 1000000
 local enabled = true
 local days = 7
@@ -88,10 +90,12 @@ local function resetFs()
     listCalls = 0
     writerCloses = 0
     writerOpens = {}
+    openWriters = {}
     failWriter = false
     failOpenAt = nil
     throwWrite = false
     silentDrop = false
+    lockLiveReads = false
     clipText = nil
     clipFail = false
     halos = {}
@@ -171,17 +175,25 @@ function getFileWriter(path, _, append)
     writerOpens[#writerOpens + 1] = { path = path, append = append == true }
     if failWriter or writerCalls == failOpenAt then return nil end
     if not append or files[path] == nil then files[path] = "" end
+    openWriters[path] = (openWriters[path] or 0) + 1
+    local closed = false
     return {
         write = function(_, s)
             if throwWrite then error("io") end
             if not silentDrop then files[path] = files[path] .. (s or "") end
         end,
-        close = function() writerCloses = writerCloses + 1 end,
+        close = function()
+            if closed then return end
+            closed = true
+            writerCloses = writerCloses + 1
+            openWriters[path] = (openWriters[path] or 1) - 1
+        end,
     }
 end
 
 function getFileReader(path, _)
     readerCalls = readerCalls + 1
+    if lockLiveReads and (openWriters[path] or 0) > 0 then return nil end
     local content = files[path]
     if content == nil then return nil end
     local lines = splitLines(content)
@@ -412,15 +424,22 @@ check(MDADDiagnostics.copyLatestPath(0) == false, "copy latest fails")
 checkEq(halos[#halos] and halos[#halos].kind, "bad", "latest miss is Halo bad")
 check(MDADDiagnostics.copyFolderPath(0) == true, "folder copy works empty")
 checkEq(clipText, "C:/Zomboid/Lua/MinidoracatAutoDrive/Telemetry", "folder abs path")
-MDADDiagnostics.start(0, nil, profile)
+lockLiveReads = true
+checkEq(MDADDiagnostics.start(0, nil, profile), true, "active copy session starts")
+local readsBeforeLiveCopy = readerCalls
+check(MDADDiagnostics.hasLatest() == true, "live session is latest without reopening writer")
+checkEq(readerCalls, readsBeforeLiveCopy, "live hasLatest performs no file read")
+halos = {}
+check(MDADDiagnostics.copyLatestPath(0) == true, "copy latest works while writer is active")
+checkEq(readerCalls, readsBeforeLiveCopy, "live copy bypasses locked file reader")
+checkEq(clipText, "C:/Zomboid/Lua/MinidoracatAutoDrive/Telemetry/session-001.log",
+    "active latest abs path")
+checkEq(halos[#halos] and halos[#halos].kind, "good", "active copy Halo good")
 nowMs = 51000
 MDADDiagnostics.stop(0, "end")
+lockLiveReads = false
 check(MDADDiagnostics.hasLatest() == true, "hasLatest after session")
-halos = {}
-check(MDADDiagnostics.copyLatestPath(0) == true, "copy latest ok")
-checkEq(clipText, "C:/Zomboid/Lua/MinidoracatAutoDrive/Telemetry/session-001.log",
-    "latest abs path")
-checkEq(halos[#halos] and halos[#halos].kind, "good", "latest copy Halo good")
+check(MDADDiagnostics.copyLatestPath(0) == true, "copy latest still works after close")
 
 --------------------------------------------------------------------------------
 scenario("main menu closes writer, flushes tail, and frees runtime session")
