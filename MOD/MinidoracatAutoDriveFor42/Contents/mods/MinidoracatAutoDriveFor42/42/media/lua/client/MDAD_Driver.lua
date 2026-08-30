@@ -26,6 +26,8 @@
 
 require "MDAD"
 require "MDAD_Follower"
+require "MDAD_VehicleProfile"
+require "MDAD_Diagnostics"
 require "Vehicles/ISUI/ISVehicleMenu"
 
 MDAD = MDAD or {}
@@ -551,6 +553,28 @@ local function clearSession(playerNum)
     if type(MDADOverlay) == "table" then MDADOverlay.clear(playerNum) end
 end
 
+-- opt-in telemetry：HUD 缺席／關閉時零 I/O。熱路徑只在 opt-in session 進
+-- pcall；sample 回 false 或丟錯就關閉該 session 的診斷，絕不打斷駕駛。
+-- start／event／stop 同樣隔離。
+local function diagEnabled()
+    local hud = MDAD.HUD
+    if type(hud) ~= "table" or type(hud.telemetryEnabled) ~= "function" then
+        return false
+    end
+    local ok, en = pcall(hud.telemetryEnabled)
+    return ok and en == true
+end
+
+local function diagEvent(s, playerNum, name, a, b, c, d)
+    if not s or not s.diag then return end
+    pcall(MDADDiagnostics.event, playerNum, name, a, b, c, d)
+end
+
+local function diagStop(s, playerNum, reason)
+    if not s or not s.diag then return end
+    pcall(MDADDiagnostics.stop, playerNum, reason)
+end
+
 -- 停止＝只關 regulator，**不搶煞車**：停止的原因多半是玩家要自己接手（讓位逾時、下車、
 -- 換車），這時候突然硬煞比放手更危險。到達停車的煞車是 arrive 分支自己做的。
 -- regulator 是我們開的就由我們關：即使玩家已經不在車上（下車／換車），仍然關掉，
@@ -558,6 +582,7 @@ end
 function Drive.stop(playerNum, reasonKey)
     local s = sessions[playerNum]
     if not s then return false end
+    diagStop(s, playerNum, reasonKey or "manual")
     clearSession(playerNum)
     if s.vehicle then s.vehicle:setRegulator(false) end
     -- 實機回報「按了關閉、感覺沒關」時這行就是分水嶺：印出來＝session 真的收掉、
@@ -677,6 +702,8 @@ local function startSession(playerObj, playerNum)
         pushX = 0, pushY = 0, -- 推撞計時起點的車體世界座標（預建鍵免熱路徑 rehash）
         sandBias = laneBias, -- 沙盒靠右偏置（start 時夾限完的值；路面校正的基底）
         roadBias = 0,       -- 路面對中校正量（EMA；行駛線＝sandBias + roadBias）
+        vehicleProfile = nil, -- Phase 1 diagnostic cache；與 follower 的 s.profile 分名，控制不讀
+        diag = false,       -- telemetry session 是否啟動（熱路徑 boolean）
     }
     do
         -- 高速檔：沙盒上限 > 85 → 掃描帶拉長（120 km/h 的煞停＋反應 ~77m < 110）
@@ -689,6 +716,21 @@ local function startSession(playerObj, playerNum)
     refreshPolicies(sessions[playerNum], vehicle, playerNum)
     reportAutoUsage(playerObj, vehicle, true,
         sessions[playerNum].usageArgs, sessions[playerNum].navUsageArgs)
+    do
+        local sNew = sessions[playerNum]
+        local vehicleProfile = nil
+        if type(MDADVehicleProfile) == "table" and type(MDADVehicleProfile.build) == "function" then
+            local pok, built = pcall(MDADVehicleProfile.build, vehicle)
+            if pok and type(built) == "table" then vehicleProfile = built end
+        end
+        sNew.vehicleProfile = vehicleProfile
+        if diagEnabled() then
+            local dok, active = pcall(MDADDiagnostics.start, playerNum, vehicle, vehicleProfile)
+            sNew.diag = dok and active == true
+            if not dok then pcall(MDADDiagnostics.stop, playerNum, "error") end
+            if sNew.diag then pcall(MDADDiagnostics.event, playerNum, "start") end
+        end
+    end
     return nil
 end
 
@@ -1074,6 +1116,7 @@ end
 local function replan(s, vehicle, playerNum)
     local sen = s.sensor
     if not sen.ready then return end
+    diagEvent(s, playerNum, "replan")
     -- 掃描摘要：只在布局變化（sig 變）才進 replan，一行不會洗版——實機分析
     -- 「感知有沒有看到那棵樹／那台車」全靠這行（2026-08-28 使用者授權加強診斷）
     if getDebug() then
@@ -1128,6 +1171,7 @@ local function replan(s, vehicle, playerNum)
                         s.blockedNotified = true
                         local playerObj = getSpecificPlayer(playerNum)
                         if playerObj then haloBad(playerObj, KEY_BLOCKED) end
+                        diagEvent(s, playerNum, "blocked")
                     end
                     if getDebug() then
                         print(LOG .. "pn=" .. playerNum .. " dodge guard failed: hold & brake")
@@ -1428,6 +1472,7 @@ local function replan(s, vehicle, playerNum)
                 s.dodgeNotified = true
                 local playerObj = getSpecificPlayer(playerNum)
                 if playerObj then haloGood(playerObj, KEY_DODGE) end
+                diagEvent(s, playerNum, "dodge")
             end
             if getDebug() then
                 print(string.format("%spn=%d dodge a=%.1f b=%.1f c=%.1f d=%.1f offL=%.2f",
@@ -1469,6 +1514,7 @@ local function replan(s, vehicle, playerNum)
         s.blockedNotified = true
         local playerObj = getSpecificPlayer(playerNum)
         if playerObj then haloBad(playerObj, KEY_BLOCKED) end
+        diagEvent(s, playerNum, "blocked")
         if getDebug() then
             -- 點雲摘要（冷路徑一次 O(hardN)）：判「無縫」合不合理的第一手資料
             local lMin, lMax = 99, -99
@@ -1564,9 +1610,10 @@ local function stepFollow(s, vehicle, playerNum, now)
         local inv = 1 / sqrt(flen2)
         fx, fy = fx * inv, fy * inv
         -- control 回 steer, targetSpeed, remaining, reached, headingError, lateralSq
+        local heading = MDADFollower.headingFromForward(fx, fy)
         local steer, targetSpeed, remaining, done, headingError, lateralSq, latSigned = MDADFollower.control(
             s.profile, s.fstate, vx, vy,
-            MDADFollower.headingFromForward(fx, fy), speedKmh, mult * SECONDS_PER_MULT)
+            heading, speedKmh, mult * SECONDS_PER_MULT)
         reached = done == true
         -- 目前沿線弧長：M4 感知與脫困額度重臂共用（sensor 缺席時脫困仍要用，
         -- 所以重臂判定放在 sensor 塊之外）
@@ -1791,6 +1838,7 @@ local function stepFollow(s, vehicle, playerNum, now)
                 if dev2 < OFFROAD_EXIT_SQ then s.offroad = false end
             elseif dev2 > OFFROAD_LAT_SQ then
                 s.offroad = true
+                diagEvent(s, playerNum, "offroad")
                 if s.dodging then
                     MDADFollower.clearOffset(s.fstate)
                     s.dodging = false
@@ -1903,6 +1951,17 @@ local function stepFollow(s, vehicle, playerNum, now)
                 (headingError or 0) * DEG_PER_RAD, steer or 0, force, remaining or 0,
                 sqrt(lateralSq or 0), s.roadBias, Drive.getGear(playerNum), tostring(regOn)))
         end
+        if s.diag then
+            local ok, live = pcall(MDADDiagnostics.sample, playerNum, now,
+                vx, vy, heading, speedKmh, targetSpeed or 0, remaining or 0,
+                latSigned or 0, headingError or 0, steer or 0, force, s.mode,
+                Drive.getGear(playerNum), regOn, s.sensor,
+                s.blocked or s.dodging or s.offroad or s.mode == "unstick")
+            if not ok or live ~= true then
+                s.diag = false
+                pcall(MDADDiagnostics.stop, playerNum, not ok and "error" or "stopped")
+            end
+        end
         -- ---- 卡死偵測 ----
         -- 三個觀測都凍結才累計：|速度| < STUCK_SPEED_KMH、沿線進度變化 < STUCK_REM_EPS、
         -- 航向變化 < STUCK_ERR_EPS。原地調頭時速度近零但航向在動、末段挪車時 remaining
@@ -2010,6 +2069,7 @@ local function stepFollow(s, vehicle, playerNum, now)
             s.unstickS = s.lastSNow or 0
             s.unstickUntil = now + UNSTICK_MS
             s.mode = "unstick"
+            diagEvent(s, playerNum, "unstick")
             s.pushSince = 0 -- mode 切換作廢推撞窗；不可把觸發前錨點帶回 follow
             s.stuckSince = 0
             vehicle:setRegulator(false)
@@ -2074,6 +2134,7 @@ local function onPlayerUpdate(player)
         end
         vehicle:setRegulator(false)
         if vehicle:isStopped() then
+            diagStop(s, playerNum, "arrive")
             clearSession(playerNum)
             haloGood(player, "UI_MinidoracatAutoDrive_Arrived")
         else
@@ -2129,6 +2190,7 @@ local function onPlayerUpdate(player)
             s.route = route
             s.profile = profile
             s.mode = "build"
+            diagEvent(s, playerNum, "route")
             if type(MDADFollower.resetState) == "function" then MDADFollower.resetState(s.fstate) end
             -- roadBias 是「舊 route 法向」上的純量；路線轉向後保留等於把舊
             -- 東西偏移旋轉到新方向。實機 8262,11511：remaining 71→726 換線
@@ -2274,6 +2336,22 @@ local function onPlayerUpdate(player)
 end
 
 Events.OnPlayerUpdate.Add(onPlayerUpdate)
+
+-- 回主選單時 OnPlayerUpdate 已不可靠；主動收掉 drive state 與 telemetry writer。
+-- Diagnostics 也有自己的同事件保險，兩邊 stop 都是冪等。
+local function onMainMenuEnter()
+    for playerNum = 0, 3 do
+        local s = sessions[playerNum]
+        if s then
+            diagStop(s, playerNum, "menu")
+            clearSession(playerNum)
+            if s.vehicle then
+                pcall(function() s.vehicle:setRegulator(false) end)
+            end
+        end
+    end
+end
+Events.OnMainMenuEnter.Add(onMainMenuEnter)
 
 --------------------------------------------------------------------------------
 -- 車輛 radial 選單

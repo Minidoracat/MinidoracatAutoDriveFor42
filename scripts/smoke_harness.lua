@@ -1026,8 +1026,9 @@ require "MDAD_Consumption"
 local clientLoadLog = capturePrint(function() require "MDAD_Client" end)
 
 -- MDAD_Driver 只 require 它自己需要的東西：這一行同時證明它的 require 鏈
--- （MDAD、MDAD_Follower、原版 ISVehicleMenu）沒有斷。載入期會註冊 OnPlayerUpdate
--- 並把 ISVehicleMenu.showRadialMenu 包起來；沒有 session 時前者是零成本的。
+-- （MDAD、MDAD_Follower、MDAD_VehicleProfile、MDAD_Diagnostics、原版
+-- ISVehicleMenu）沒有斷。載入期會註冊 OnPlayerUpdate 並把
+-- ISVehicleMenu.showRadialMenu 包起來；沒有 session 時前者是零成本的。
 require "MDAD_Driver"
 
 -- =====================================================================
@@ -6591,6 +6592,195 @@ do
     clientFlag = false
     setSandbox({ AllowCraftGPS = true, AllowCraftAutopilot = true,
         SpawnGPS = true, SpawnAutopilot = true })
+end
+
+-- =====================================================================
+-- 情境二十八d：opt-in telemetry 接線（production Diagnostics／VehicleProfile）
+-- =====================================================================
+scenario("opt-in telemetry：lifecycle／pn／單檔路徑／關閉零呼叫／失敗不中斷／vprofile 不進控制")
+
+do
+    checkEq(type(MDADVehicleProfile), "table", "production MDAD_VehicleProfile.lua 真的載入了")
+    checkEq(type(MDADDiagnostics), "table", "production MDAD_Diagnostics.lua 真的載入了")
+    checkEq(type(MDADVehicleProfile.build), "function", "VehicleProfile.build 存在")
+    checkEq(type(MDADDiagnostics.start), "function", "Diagnostics.start 存在")
+    checkEq(type(MDADDiagnostics.sample), "function", "Diagnostics.sample 存在")
+    checkEq(type(MDADDiagnostics.event), "function", "Diagnostics.event 存在")
+    checkEq(type(MDADDiagnostics.stop), "function", "Diagnostics.stop 存在")
+
+    if type(MDAD.HUD) ~= "table" then MDAD.HUD = {} end
+    local hudTelem = MDAD.HUD.telemetryEnabled
+    MDAD.HUD.telemetryEnabled = function() return drive.telemOn == true end
+
+    local oldDocumentFolder = getMyDocumentFolder
+    local oldFileSeparator = getFileSeparator
+    local oldClipboard = Clipboard
+    local copiedPath = nil
+    getMyDocumentFolder = function() return "C:/Zomboid" end
+    getFileSeparator = function() return "/" end
+    Clipboard = {
+        setClipboard = function(text) copiedPath = text end,
+    }
+
+    drive.telemOn = false
+    drive.diag = {
+        start = 0, sample = 0, critical = 0, event = 0, stop = 0,
+        startPn = nil, samplePn = nil, stopPn = nil, stopReason = nil,
+        names = {},
+    }
+
+    local origStart = MDADDiagnostics.start
+    local origSample = MDADDiagnostics.sample
+    local origEvent = MDADDiagnostics.event
+    local origStop = MDADDiagnostics.stop
+    local origBuild = MDADVehicleProfile.build
+
+    MDADDiagnostics.start = function(pn, vehicle, profile)
+        drive.diag.start = drive.diag.start + 1
+        drive.diag.startPn = pn
+        drive.diag.startProfile = profile
+        return true -- Driver lifecycle spy; production file IO is covered by test_diagnostics.lua
+    end
+    MDADDiagnostics.sample = function(pn, nowMsArg, x, y, heading, speed, target, remaining, lat, err, steer, force, mode, gear, regulator, sensor, critical)
+        drive.diag.sample = drive.diag.sample + 1
+        drive.diag.samplePn = pn
+        if critical == true then drive.diag.critical = drive.diag.critical + 1 end
+        return true -- Driver lifecycle spy; production sampling is covered separately
+    end
+    MDADDiagnostics.event = function(pn, name, a, b, c, d)
+        drive.diag.event = drive.diag.event + 1
+        drive.diag.names[name] = true
+        if origEvent then return origEvent(pn, name, a, b, c, d) end
+    end
+    MDADDiagnostics.stop = function(pn, reason)
+        drive.diag.stop = drive.diag.stop + 1
+        drive.diag.stopPn = pn
+        drive.diag.stopReason = reason
+        if origStop then return origStop(pn, reason) end
+    end
+
+    drive.telemOn = false
+    checkTrue(armDrive(), "telemetry off 仍可啟動")
+    driveReset(dveh)
+    for _ = 1, 8 do driveTick(dp, dveh) end
+    checkEq(dveh._imp.max, 1, "off：每幀最多一次 addImpulse")
+    MDAD.Drive.stop(0, nil)
+    checkEq(drive.diag.start, 0, "off：零 start")
+    checkEq(drive.diag.sample, 0, "off：零 sample")
+    checkEq(drive.diag.event, 0, "off：零 event")
+    checkEq(drive.diag.stop, 0, "off：零 stop")
+
+    drive.diag.start, drive.diag.sample, drive.diag.event, drive.diag.stop = 0, 0, 0, 0
+    drive.diag.names = {}
+    drive.telemOn = true
+    checkTrue(armDrive(), "telemetry on 啟動")
+    checkEq(drive.diag.start, 1, "on：start 一次")
+    checkEq(drive.diag.startPn, 0, "start 用精確 pn")
+    checkTrue(drive.diag.sample > 0, "on：sample 有接到")
+    checkEq(drive.diag.samplePn, 0, "sample 用精確 pn")
+    checkTrue(drive.diag.names.start == true, "event start 有接到")
+    driveReset(dveh)
+    for _ = 1, 5 do
+        dveh._x = dveh._x + 0.1852
+        driveTick(dp, dveh)
+    end
+    checkEq(dveh._imp.max, 1, "on：每幀最多一次 addImpulse")
+    checkEq(drive.bad.impulse, 0, "on：無單幀兩次 impulse")
+
+    drive.nav.route = newRoute(40, 0, 0, 4, 0)
+    nowMs = nowMs + 250
+    driveTick(dp, dveh)
+    checkTrue(drive.diag.names.route == true, "route cutover 有 event")
+
+    dveh._y = 20
+    driveTick(dp, dveh)
+    checkTrue(drive.diag.names.offroad == true, "offroad 有 event")
+    checkTrue(drive.diag.critical > 0, "offroad sample 切到 10Hz critical flag")
+    dveh._y = 0
+
+    MDAD.Drive.stop(0, nil)
+    checkEq(drive.diag.stop, 1, "stop 在 session 移除前呼叫一次")
+    checkEq(drive.diag.stopPn, 0, "stop 用精確 pn")
+    checkTrue(drive.diag.stopReason ~= nil, "stop 帶 reason")
+
+    local copied = false
+    pcall(function()
+        if type(MDADDiagnostics.hasLatest) == "function" and MDADDiagnostics.hasLatest() then
+            copied = MDADDiagnostics.copyLatestPath(0)
+        end
+        if not copied and type(MDADDiagnostics.copyFolderPath) == "function" then
+            copied = MDADDiagnostics.copyFolderPath(0)
+        end
+    end)
+    checkTrue(copied, "session 檔路徑複製成功")
+    checkEq(type(copiedPath), "string", "剪貼簿收到一個 session 檔路徑")
+    checkTrue(string.find(copiedPath, "Telemetry", 1, true) ~= nil,
+        "路徑落在 Lua/MinidoracatAutoDrive/Telemetry")
+    checkTrue(string.find(copiedPath, "Steam", 1, true) == nil, "路徑不含 SteamID")
+
+    local stopsBeforeMenu = drive.diag.stop
+    checkTrue(armDrive(), "menu cleanup 情境啟動")
+    dveh._regulator = true
+    fire("OnMainMenuEnter")
+    checkFalse(MDAD.Drive.isActive(0), "回主選單清除 drive session")
+    checkEq(drive.diag.stop, stopsBeforeMenu + 1, "回主選單關閉 telemetry writer")
+    checkEq(drive.diag.stopReason, "menu", "回主選單記錄 menu end reason")
+    checkEq(dveh._regulator, false, "回主選單關閉原車 regulator")
+
+    local sampleSpy = MDADDiagnostics.sample
+    MDADDiagnostics.sample = function() error("sample-fail") end
+    driveReset(dveh)
+    checkTrue(MDAD.Drive.start(dp), "Diagnostics.sample 丟錯仍啟動")
+    driveTick(dp, dveh)
+    checkTrue(MDAD.Drive.isActive(0), "sample 失敗只停診斷、不拆 drive session")
+    checkEq(dveh._imp.max, 1, "sample 失敗不改變 addImpulse")
+    checkEq(drive.diag.stopReason, "error", "sample 失敗主動收掉 telemetry session")
+    MDAD.Drive.stop(0, nil)
+    MDADDiagnostics.sample = sampleSpy
+
+    MDADDiagnostics.start = function() error("diag-fail") end
+    drive.telemOn = true
+    driveReset(dveh)
+    checkTrue(MDAD.Drive.start(dp), "Diagnostics.start 丟錯仍啟動")
+    checkTrue(MDAD.Drive.isActive(0), "diag 失敗不拆 session")
+    driveTick(dp, dveh)
+    checkEq(dveh._imp.max, 1, "diag 失敗不改變 addImpulse")
+    MDAD.Drive.stop(0, nil)
+    MDADDiagnostics.start = function(pn, vehicle, profile)
+        drive.diag.start = drive.diag.start + 1
+        drive.diag.startPn = pn
+        return true
+    end
+
+    MDADVehicleProfile.build = function(_)
+        return {
+            valid = true, fallback = false, scriptName = "x",
+            bodyW = 99, bodyL = 99, halfW = 99, halfL = 99,
+            mass = 1, maxSpeed = 1, wheelbase = 1, track = 1,
+            clamp0 = 0, clamp30 = 0, clampMax = 0,
+            wheelFriction = 0, delta0Safe = 0, deltaVSafe = 0,
+            rMin = 0, lookScale = 0, rearArm = 0, needHalf = 99, probeR = 0,
+        }
+    end
+    drive.telemOn = true
+    checkTrue(armDrive(), "wild vprofile 仍啟動")
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkEq(dveh._imp.total, 1, "vprofile 不改變 addImpulse 次數")
+    checkTrue(dveh._imp.torqueY ~= 0 or dveh._imp.x ~= 0,
+        "wild rearArm=0 仍用 Driver REAR_ARM 施力")
+    MDAD.Drive.stop(0, nil)
+
+    MDADDiagnostics.start = origStart
+    MDADDiagnostics.sample = origSample
+    MDADDiagnostics.event = origEvent
+    MDADDiagnostics.stop = origStop
+    MDADVehicleProfile.build = origBuild
+    MDAD.HUD.telemetryEnabled = hudTelem
+    drive.telemOn = false
+    getMyDocumentFolder = oldDocumentFolder
+    getFileSeparator = oldFileSeparator
+    Clipboard = oldClipboard
 end
 
 -- =====================================================================

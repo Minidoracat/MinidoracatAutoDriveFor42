@@ -37,6 +37,8 @@
                            成品的 Researchablerecipes 必須是精確的短名清單。整條鏈的每一種漂移
                            都是靜默失敗：引擎把查不到的配方名照抄進表，玩家永遠學不到，
                            console 也不留訊息（「做得出來但零產出」的成因）
+ 15. Phase 1 telemetry 靜態契約 — 新模組檔、HUD 選項／reader、翻譯鍵必須存在；
+                           聚焦測試檔列入閘門但只檢查存在、不執行（主流程才跑）
 
 新增檢查時：同步把對應的坑記進 AGENTS.md 踩坑錄，並依「踩坑進化協議」回流到
 pz-mod-template（見 AGENTS.md）。
@@ -721,6 +723,69 @@ for m in MEDIA_DIRS:
                         "（Item.java:3499 會把查不到的名字照抄進表，永遠學不到又不報錯）")
     fail("學習欄位只用配方短名", bad_short) if bad_short else ok("學習欄位只用配方短名")
 
+# ---- 15. Phase 1 telemetry 靜態契約（不執行測試）----
+# 模組／選項／翻譯由本閘門靜態確認；聚焦 Lua 測試只驗證檔案存在，不在這裡 lua 執行。
+LUA_BASENAMES = {os.path.basename(f) for f in LUA_FILES}
+phase1 = []
+if "MDAD_VehicleProfile.lua" not in LUA_BASENAMES and "MDADVehicleProfile.lua" not in LUA_BASENAMES:
+    phase1.append("缺 MDADVehicleProfile 模組（client/MDAD_VehicleProfile.lua）")
+if "MDAD_Diagnostics.lua" not in LUA_BASENAMES and "MDADDiagnostics.lua" not in LUA_BASENAMES:
+    phase1.append("缺 MDADDiagnostics 模組（client/MDAD_Diagnostics.lua）")
+hud_src = ""
+for f in LUA_FILES:
+    if os.path.basename(f) == "MDAD_HUD.lua":
+        with open(f, encoding="utf-8") as fh:
+            hud_src = fh.read()
+        break
+if not hud_src:
+    phase1.append("缺 MDAD_HUD.lua")
+else:
+    for token in ("ExportTelemetry", "TelemetryRetentionDays",
+                  "telemetryEnabled", "telemetryRetentionDays",
+                  "setTelemetryEnabled", "setTelemetryRetentionDays"):
+        if token not in hud_src:
+            phase1.append(f"MDAD_HUD.lua 缺 {token}")
+TELEM_KEYS = (
+    "UI_MinidoracatAutoDrive_ExportTelemetry",
+    "UI_MinidoracatAutoDrive_ExportTelemetry_tooltip",
+    "UI_MinidoracatAutoDrive_TelemetryRetentionDays",
+    "UI_MinidoracatAutoDrive_TelemetryRetentionDays_tooltip",
+    "UI_MinidoracatAutoDrive_TelemetryRetention1",
+    "UI_MinidoracatAutoDrive_TelemetryRetention3",
+    "UI_MinidoracatAutoDrive_TelemetryRetention7",
+    "UI_MinidoracatAutoDrive_TelemetryRetention14",
+    "UI_MinidoracatAutoDrive_TelemetryRetention30",
+    "UI_MinidoracatAutoDrive_CopyLatestTelemetry",
+    "UI_MinidoracatAutoDrive_CopyLatestTelemetry_tooltip",
+    "UI_MinidoracatAutoDrive_CopyTelemetryFolder",
+    "UI_MinidoracatAutoDrive_CopyTelemetryFolder_tooltip",
+    "UI_MinidoracatAutoDrive_TelemetryNoFile",
+    "UI_MinidoracatAutoDrive_TelemetryCopied",
+    "UI_MinidoracatAutoDrive_TelemetryCopyFailed",
+    "UI_MinidoracatAutoDrive_TelemetrySlotsFull",
+    "UI_MinidoracatAutoDrive_TelemetryWriteFailed",
+    "UI_MinidoracatAutoDrive_TelemetryFileFull",
+)
+for m in MEDIA_DIRS:
+    en = os.path.join(m, "lua", "shared", "Translate", "EN", "UI.json")
+    if not os.path.isfile(en):
+        phase1.append(f"缺 {os.path.relpath(en, REPO)}")
+        continue
+    with open(en, encoding="utf-8") as fh:
+        en_keys = json.load(fh)
+    for key in TELEM_KEYS:
+        if key not in en_keys:
+            phase1.append(f"EN/UI.json 缺 {key}")
+FOCUSED_TESTS = (
+    "scripts/test_hud.lua",
+    "scripts/test_vehicle_profile.lua",
+    "scripts/test_diagnostics.lua",
+)
+for rel in FOCUSED_TESTS:
+    if not os.path.isfile(os.path.join(REPO, rel)):
+        phase1.append(f"缺聚焦測試 {rel}（閘門只檢查存在，不執行）")
+fail("Phase 1 telemetry 靜態契約", phase1) if phase1 else ok(
+    "Phase 1 telemetry 靜態契約（模組／選項／翻譯／聚焦測試檔存在且未執行）")
 # ---- 總結 ----
 print()
 print(f"PASS {len(passed)} / FAIL {len(failed)} / SKIP {len(skipped)}")

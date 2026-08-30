@@ -43,6 +43,7 @@ local LAYOUT_FULL = 1
 local LAYOUT_COMPACT = 2
 local OPTION_ID = "MinidoracatAutoDrive"
 local TRAJECTORY_WIDTH_DEFAULT = 2
+local RETENTION_DAYS = { 1, 3, 7, 14, 30 }
 local COLLAPSED_MD_KEY = "MDADHudCollapsed"
 local SCALES = { 0.75, 1.0, 1.25 }
 local GEAR_SHORT = { "30", "50", "70", "MAX" }
@@ -198,6 +199,51 @@ local function setTrajectoryWidth(value)
     if value < 1 or value > 3 then return false end
     return setClientOption("TrajectoryWidth", value)
 end
+
+local function telemetryEnabled()
+    return optionBool("ExportTelemetry", false)
+end
+
+local function telemetryRetentionDays()
+    return RETENTION_DAYS[optionIndex("TelemetryRetentionDays", 3, 5)] or 7
+end
+
+local function setTelemetryEnabled(value)
+    return setClientOption("ExportTelemetry", value == true)
+end
+
+local function setTelemetryRetentionDays(value)
+    if type(value) ~= "number" or value ~= value then return false end
+    value = math.floor(value)
+    for i = 1, #RETENTION_DAYS do
+        if RETENTION_DAYS[i] == value then
+            return setClientOption("TelemetryRetentionDays", i)
+        end
+    end
+    return false
+end
+
+local function setTelemetryRetentionIndex(value)
+    if type(value) ~= "number" or value ~= value then return false end
+    value = math.floor(value)
+    if value < 1 or value > 5 then return false end
+    return setClientOption("TelemetryRetentionDays", value)
+end
+
+local function copyLatestTelemetry(playerNum)
+    local diag = MDADDiagnostics
+    if diag and type(diag.copyLatestPath) == "function" then
+        diag.copyLatestPath(playerNum)
+    end
+end
+
+local function copyTelemetryFolder(playerNum)
+    local diag = MDADDiagnostics
+    if diag and type(diag.copyFolderPath) == "function" then
+        diag.copyFolderPath(playerNum)
+    end
+end
+
 
 local function optionScale()
     return SCALES[optionIndex("HUDScale", 2, 3)] or 1.0
@@ -951,6 +997,15 @@ if PZAPI and PZAPI.ModOptions then
     trajectoryWidthOption:addItem("UI_MinidoracatAutoDrive_TrajectoryWidthThin", false)
     trajectoryWidthOption:addItem("UI_MinidoracatAutoDrive_TrajectoryWidthStandard", true)
     trajectoryWidthOption:addItem("UI_MinidoracatAutoDrive_TrajectoryWidthThick", false)
+    modOptions:addTickBox("ExportTelemetry", "UI_MinidoracatAutoDrive_ExportTelemetry", false,
+        "UI_MinidoracatAutoDrive_ExportTelemetry_tooltip")
+    local telemetryRetention = modOptions:addComboBox("TelemetryRetentionDays",
+        "UI_MinidoracatAutoDrive_TelemetryRetentionDays")
+    telemetryRetention:addItem("UI_MinidoracatAutoDrive_TelemetryRetention1", false)
+    telemetryRetention:addItem("UI_MinidoracatAutoDrive_TelemetryRetention3", false)
+    telemetryRetention:addItem("UI_MinidoracatAutoDrive_TelemetryRetention7", true)
+    telemetryRetention:addItem("UI_MinidoracatAutoDrive_TelemetryRetention14", false)
+    telemetryRetention:addItem("UI_MinidoracatAutoDrive_TelemetryRetention30", false)
     local theme = modOptions:addComboBox("HUDTheme", "UI_MinidoracatAutoDrive_HUDTheme")
     theme:addItem("UI_MinidoracatAutoDrive_HUDThemeMetal", true)
     theme:addItem("UI_MinidoracatAutoDrive_HUDThemeMinimal", false)
@@ -1005,23 +1060,30 @@ HUD.trajectoryVisible = trajectoryVisible
 HUD.trajectoryWidth = trajectoryWidth
 HUD.setTrajectoryVisible = setTrajectoryVisible
 HUD.setTrajectoryWidth = setTrajectoryWidth
+HUD.telemetryEnabled = telemetryEnabled
+HUD.telemetryRetentionDays = telemetryRetentionDays
+HUD.setTelemetryEnabled = setTelemetryEnabled
+HUD.setTelemetryRetentionDays = setTelemetryRetentionDays
 MDAD.HUD = HUD
 
 -- MiniMap 齒輪視窗的 addon section：值與 ESC MOD Options 共用同一 option 物件，
 -- MiniMap 只當第二個 UI 入口，不複製設定、不碰伺服器。
-local miniMapSettingsRegistered = false
+local miniMapSettingsApi = 0
 local function registerMiniMapSettings()
-    if miniMapSettingsRegistered then return end
     local api = MinidoracatMiniMapAPI
     if not (api and type(api.settingsApiVersion) == "number"
             and api.settingsApiVersion >= 1
             and type(api.registerSettingsSection) == "function") then return end
-    miniMapSettingsRegistered = api.registerSettingsSection(MDAD.MOD_ID, {
+    if miniMapSettingsApi >= api.settingsApiVersion then return end
+    local spec = {
         label = "UI_MinidoracatAutoDrive_Options",
         ticks = {
             { label = "UI_MinidoracatAutoDrive_ShowTrajectory",
                 tooltip = "UI_MinidoracatAutoDrive_ShowTrajectory_tooltip",
                 get = trajectoryVisible, set = setTrajectoryVisible },
+            { label = "UI_MinidoracatAutoDrive_ExportTelemetry",
+                tooltip = "UI_MinidoracatAutoDrive_ExportTelemetry_tooltip",
+                get = telemetryEnabled, set = setTelemetryEnabled },
         },
         combos = {
             { label = "UI_MinidoracatAutoDrive_TrajectoryWidth",
@@ -1033,8 +1095,35 @@ local function registerMiniMapSettings()
                 },
                 default = TRAJECTORY_WIDTH_DEFAULT,
                 get = trajectoryWidth, set = setTrajectoryWidth },
+            { label = "UI_MinidoracatAutoDrive_TelemetryRetentionDays",
+                tooltip = "UI_MinidoracatAutoDrive_TelemetryRetentionDays_tooltip",
+                items = {
+                    "UI_MinidoracatAutoDrive_TelemetryRetention1",
+                    "UI_MinidoracatAutoDrive_TelemetryRetention3",
+                    "UI_MinidoracatAutoDrive_TelemetryRetention7",
+                    "UI_MinidoracatAutoDrive_TelemetryRetention14",
+                    "UI_MinidoracatAutoDrive_TelemetryRetention30",
+                },
+                default = 3,
+                get = function()
+                    return optionIndex("TelemetryRetentionDays", 3, 5)
+                end,
+                set = setTelemetryRetentionIndex },
         },
-    }) == true
+    }
+    if api.settingsApiVersion >= 2 then
+        spec.actions = {
+            { label = "UI_MinidoracatAutoDrive_CopyLatestTelemetry",
+                tooltip = "UI_MinidoracatAutoDrive_CopyLatestTelemetry_tooltip",
+                run = copyLatestTelemetry },
+            { label = "UI_MinidoracatAutoDrive_CopyTelemetryFolder",
+                tooltip = "UI_MinidoracatAutoDrive_CopyTelemetryFolder_tooltip",
+                run = copyTelemetryFolder },
+        }
+    end
+    if api.registerSettingsSection(MDAD.MOD_ID, spec) == true then
+        miniMapSettingsApi = api.settingsApiVersion
+    end
 end
 
 registerMiniMapSettings()

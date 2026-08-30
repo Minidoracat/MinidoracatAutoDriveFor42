@@ -1,5 +1,6 @@
 -- MDAD_HUD.lua 離線行為測試：假 ISUI/PZAPI 驅動 production HUD。
--- 測可見性、250ms getter 節流、按鈕入口、政策鎖、收合持久化、ModOptions 與零 getter render。
+-- 測可見性、250ms getter 節流、按鈕入口、政策鎖、收合持久化、ModOptions、
+-- MiniMap v1/v2 設定、telemetry 預設／setter 與零 getter render。
 
 local assertions = 0
 local failures = 0
@@ -81,6 +82,7 @@ local texts = {
     UI_MinidoracatAutoDrive_HUDCollapse = "COLLAPSE",
     UI_MinidoracatAutoDrive_HUDExpand = "EXPAND",
     UI_MinidoracatAutoDrive_EngineOff = "ENGINE REASON",
+    UI_MinidoracatAutoDrive_TelemetryNoFile = "NO LOG",
 }
 
 local getTextCalls = 0
@@ -611,9 +613,38 @@ check(options:getOption("ShowTrajectory"):getValue() == true
 check(type(registeredMiniMapSection) == "table"
     and registeredMiniMapOwner == "MinidoracatAutoDriveFor42"
     and registeredMiniMapSection.lane == nil
-    and #registeredMiniMapSection.ticks == 1
-    and #registeredMiniMapSection.combos == 1,
-    "AutoDrive registers one owner-scoped shared settings category without host layout fields")
+    and registeredMiniMapSection.actions == nil
+    and #registeredMiniMapSection.ticks == 2
+    and #registeredMiniMapSection.combos == 2,
+    "v1 MiniMap spec registers ticks/combos without actions or host layout fields")
+check(options:getOption("ExportTelemetry"):getValue() == false
+    and options:getOption("TelemetryRetentionDays"):getValue() == 3
+    and MDAD.HUD.telemetryEnabled() == false
+    and MDAD.HUD.telemetryRetentionDays() == 7,
+    "telemetry defaults to off and 7-day retention")
+local telemetrySaves = optionSaveCalls
+check(MDAD.HUD.setTelemetryEnabled(true)
+    and MDAD.HUD.telemetryEnabled()
+    and options:getOption("ExportTelemetry"):getValue() == true
+    and optionSaveCalls == telemetrySaves + 1,
+    "telemetry enabled setter persists")
+check(MDAD.HUD.setTelemetryRetentionDays(14)
+    and MDAD.HUD.telemetryRetentionDays() == 14
+    and options:getOption("TelemetryRetentionDays"):getValue() == 4,
+    "retention setter maps 14 days to combo index 4")
+local invalidRetentionSaves = optionSaveCalls
+check(not MDAD.HUD.setTelemetryRetentionDays(2)
+    and MDAD.HUD.telemetryRetentionDays() == 14
+    and optionSaveCalls == invalidRetentionSaves,
+    "invalid retention days rejected without saving")
+registeredMiniMapSection.ticks[2].set(false)
+check(not MDAD.HUD.telemetryEnabled()
+    and options:getOption("ExportTelemetry"):getValue() == false,
+    "MiniMap telemetry tick writes the same AutoDrive ModOptions value")
+registeredMiniMapSection.combos[2].set(5)
+check(MDAD.HUD.telemetryRetentionDays() == 30
+    and options:getOption("TelemetryRetentionDays"):getValue() == 5,
+    "MiniMap retention combo writes shared option as days")
 local trajectorySaves = optionSaveCalls
 check(MDAD.HUD.setTrajectoryVisible(false), "trajectory visibility setter accepts false")
 check(options:getOption("ShowTrajectory"):getValue() == false
@@ -638,6 +669,44 @@ MDAD.HUD.setTrajectoryWidth(2)
 fire(Events.OnGameBoot)
 check(miniMapRegisterCalls == 1,
     "OnGameBoot does not duplicate a successful MiniMap settings registration")
+local copyLatestPn = nil
+local copyFolderPn = nil
+MDADDiagnostics = {
+    copyLatestPath = function(pn)
+        copyLatestPn = pn
+        return true
+    end,
+    copyFolderPath = function(pn)
+        copyFolderPn = pn
+        return true
+    end,
+}
+MinidoracatMiniMapAPI.settingsApiVersion = 2
+fire(Events.OnGameBoot)
+checkEq(miniMapRegisterCalls, 2, "API v2 upgrade re-registers settings once")
+check(registeredMiniMapSection.actions ~= nil
+    and #registeredMiniMapSection.actions == 2
+    and #registeredMiniMapSection.ticks == 2
+    and #registeredMiniMapSection.combos == 2,
+    "v2 MiniMap spec keeps ticks/combos and adds two actions")
+local latestAction = registeredMiniMapSection.actions[1]
+local folderAction = registeredMiniMapSection.actions[2]
+check(latestAction.label == "UI_MinidoracatAutoDrive_CopyLatestTelemetry"
+    and type(latestAction.tooltip) == "string" and latestAction.tooltip ~= ""
+    and type(latestAction.run) == "function"
+    and latestAction.enabled == nil,
+    "copy-latest action omits builder-time disk probing")
+check(folderAction.label == "UI_MinidoracatAutoDrive_CopyTelemetryFolder"
+    and type(folderAction.tooltip) == "string" and folderAction.tooltip ~= ""
+    and type(folderAction.run) == "function"
+    and folderAction.enabled == nil,
+    "copy-folder action has required fields and omits enabled")
+latestAction.run(1)
+checkEq(copyLatestPn, 1, "copy-latest run receives playerNum")
+folderAction.run(0)
+checkEq(copyFolderPn, 0, "copy-folder run receives playerNum")
+latestAction.run(0)
+checkEq(copyLatestPn, 0, "copy-latest click handles no-file state inside Diagnostics")
 options:getOption("HUDTheme"):setValue(2)
 options:getOption("HUDLayout"):setValue(2)
 options:getOption("HUDScale"):setValue(1)
