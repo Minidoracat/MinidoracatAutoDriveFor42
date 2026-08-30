@@ -1,4 +1,4 @@
--- MDAD_Client.lua — registerNavGate＋actor-bound GPS usage heartbeat＋車輛右鍵拆裝。
+-- MDAD_Client.lua — nav gate＋配方補學＋GPS usage heartbeat＋車輛右鍵拆裝。
 
 require "MDAD"
 require "TimedActions/ISAutoDriveDeviceAction"
@@ -41,6 +41,43 @@ local function warnNavGateMissing(playerNum)
     HaloTextHelper.addBadText(playerObj, getText("UI_MinidoracatAutoDrive_NavApiMissing"))
 end
 
+-- 登入補學。引擎只在兩個時機檢查 AutoLearnAny：升等瞬間
+-- （XpUpdate.lua:204 的 getScriptManager():checkAutoLearn）與單機開局
+-- （IsoWorld.java:2410，只針對 IsoPlayer.getInstance()）。因此：
+--   · MP：每個本機 slot 送空 payload，伺服器只依 OnClientCommand actor 補學；
+--   · SP：就地逐配方補學，連後加入的分割畫面 slot 也覆蓋。
+-- client 不指定角色或配方；MP 的具體 playerObj 讓同連線的分割畫面角色不混用。
+local recipeRescanWarned = {}
+
+local function rescanLocalRecipe(sm, playerObj, name)
+    local recipe = sm:getCraftRecipe(name)
+    if recipe then
+        recipe:checkAutoLearnAnySkills(playerObj)
+    elseif not recipeRescanWarned[name] then
+        recipeRescanWarned[name] = true
+        print(LOG .. "build " .. MDAD.BUILD .. " craftRecipe not found: " .. name)
+    end
+end
+
+local function requestRecipeRescan(playerNum)
+    local playerObj = getSpecificPlayer(playerNum)
+    if not playerObj then return end
+    if isClient() then
+        sendClientCommand(playerObj, MDAD.MOD_ID, MDAD.CMD_RECIPE_RESCAN, {})
+        return
+    end
+    local sm = getScriptManager()
+    if not sm then
+        if not recipeRescanWarned.manager then
+            recipeRescanWarned.manager = true
+            print(LOG .. "build " .. MDAD.BUILD .. " ScriptManager unavailable")
+        end
+        return
+    end
+    rescanLocalRecipe(sm, playerObj, MDAD.RECIPE_GPS)
+    rescanLocalRecipe(sm, playerObj, MDAD.RECIPE_AUTO)
+end
+
 -- 載入期 registerNavGate 可能早於主 MOD 的 API 建立（載入順序不保證），所以 OnGameStart
 -- 再重試一次；重試後才是最終狀態，這時才提示。
 -- getNumActivePlayers()＋getSpecificPlayer 走訪本機 slot 是原版慣例（ISJoyPadListBox.lua:23-24）。
@@ -51,6 +88,7 @@ local function onGameStart()
     navGateStarted = true
     for i = 0, getNumActivePlayers() - 1 do
         warnNavGateMissing(i)
+        requestRecipeRescan(i)
     end
 end
 
@@ -60,7 +98,9 @@ Events.OnGameStart.Add(onGameStart)
 -- （原版慣例 TutorialSetup.lua:34-35）；載入期的 OnCreatePlayer 早於 OnGameStart 重試，
 -- 那時註冊狀態還沒定案，因此以 navGateStarted 擋掉、交給 onGameStart 的迴圈負責。
 Events.OnCreatePlayer.Add(function(playerNum)
-    if navGateStarted then warnNavGateMissing(playerNum) end
+    if not navGateStarted then return end
+    warnNavGateMissing(playerNum)
+    requestRecipeRescan(playerNum)
 end)
 
 -- GPS billing heartbeat：player modData 可被其他 MP client 覆寫，不能拿 TX/TY 當 server

@@ -31,6 +31,12 @@
                            材料、分佈表不生成物品），console 不一定留下訊息
  13. 沙盒選項規格          —— 17 個選項的 type/min/max/default 對表；改壞 default
                            玩家端只是「行為不對」，沒有任何錯誤訊息可查
+ 14. 配方學習鏈          —— 兩個配方必須留在 module Base（無點短名只會在 Base 查表）、
+                           NeedToBeLearn／SkillRequired／AutoLearnAny／ResearchSkillLevel
+                           對表、專屬手冊的 ItemType／OnCreate／LearnedRecipes 與兩個
+                           成品的 Researchablerecipes 必須是精確的短名清單。整條鏈的每一種漂移
+                           都是靜默失敗：引擎把查不到的配方名照抄進表，玩家永遠學不到，
+                           console 也不留訊息（「做得出來但零產出」的成因）
 
 新增檢查時：同步把對應的坑記進 AGENTS.md 踩坑錄，並依「踩坑進化協議」回流到
 pz-mod-template（見 AGENTS.md）。
@@ -381,8 +387,10 @@ if os.path.isfile(_cl):
 VANILLA_NS = {"Base"}       # 原版命名空間：本檔不讀原版 scripts，無從驗證，放行
 ICON_SIZE = 64              # 原版背包 icon 一律 64x64；scripts/icon/ 來源也輸出這個規格
 ICON_PNG = (8, 6)           # PNG IHDR 的 (bit depth, colour type)：8-bit RGBA
-# 進度閘門：自駕模組是 GPS 的升級品，配方必須真的把 GPS 吃掉（mode:keep 不算消耗）
-RECIPE_MUST_CONSUME = {"CraftAutopilotModule": "GPSNavigator"}
+# 進度閘門：自駕模組是 GPS 的升級品，配方必須真的把 GPS 吃掉（mode:keep 不算消耗）。
+# 這裡寫完整 fullType 而不是短名——配方宣告在 module Base（見 14），短名會被補成
+# Base.GPSNavigator 而永遠對不上輸入寫的 MinidoracatAutoDrive.GPSNavigator。
+RECIPE_MUST_CONSUME = {"CraftAutopilotModule": "MinidoracatAutoDrive.GPSNavigator"}
 BARE_TYPE_RE = re.compile(r"([A-Za-z]\w*(?:\.\w+)?)(?![\w.\[])")
 ITEM_ENTRY_RE = re.compile(r"(?m)^\s*item\s+\d+\s+(.+?)\s*,?\s*$")
 
@@ -450,6 +458,25 @@ def png_spec(path):
     return w, h, head[24], head[25]
 
 
+def parse_scripts(sdir):
+    """掃一個 media/scripts/，回傳 (declared, recipes, modules)。
+
+    declared: {fullType: (欄位 dict, 相對路徑)}；recipes: [(module, 名稱, 內容, 相對路徑)]。
+    """
+    declared, recipes, modules = {}, [], set()
+    for f in sorted(iter_files(sdir, {".txt"})):
+        rel = os.path.relpath(f, REPO)
+        with open(f, encoding="utf-8") as fh:
+            text = re.sub(r"/\*.*?\*/", "", fh.read(), flags=re.S)
+        for mod, mbody in parse_blocks(text, "module"):
+            modules.add(mod)
+            for name, ibody in parse_blocks(mbody, "item"):
+                declared[f"{mod}.{name}"] = (parse_fields(ibody), rel)
+            for name, rbody in parse_blocks(mbody, "craftRecipe"):
+                recipes.append((mod, name, rbody, rel))
+    return declared, recipes, modules
+
+
 LUA_SRC = ""
 for f in LUA_FILES:
     with open(f, encoding="utf-8") as fh:
@@ -459,24 +486,15 @@ for m in MEDIA_DIRS:
     sdir = os.path.join(m, "scripts")
     if not os.path.isdir(sdir):
         continue
-    declared, recipes, modules = {}, [], set()
-    for f in sorted(iter_files(sdir, {".txt"})):
-        rel = os.path.relpath(f, REPO)
-        with open(f, encoding="utf-8") as fh:
-            text = re.sub(r"/\*.*?\*/", "", fh.read(), flags=re.S)
-        for mod, mbody in parse_blocks(text, "module"):
-            modules.add(mod)
-            for name, ibody in parse_blocks(mbody, "item"):
-                declared[f"{mod}.{name}"] = (parse_fields(ibody).get("Icon"), rel)
-            for name, rbody in parse_blocks(mbody, "craftRecipe"):
-                recipes.append((mod, name, rbody, rel))
+    declared, recipes, modules = parse_scripts(sdir)
     if not declared and not recipes:
         continue
 
     # 12a. Icon → textures/Item_<Icon>.png
     tex = os.path.join(m, "textures")
     bad = []
-    for full, (icon, rel) in sorted(declared.items()):
+    for full, (ifields, rel) in sorted(declared.items()):
+        icon = ifields.get("Icon")
         if not icon:
             bad.append(f"{rel}: {full} 沒有 Icon 欄位（背包會顯示問號）")
             continue
@@ -515,12 +533,11 @@ for m in MEDIA_DIRS:
                           "（引擎解析不到會當成沒有可用材料，靜默鎖死配方）")
         want = RECIPE_MUST_CONSUME.get(name)
         if want:
-            full = f"{mod}.{want}"
-            hits = [raw for types, raw in inputs if full in types]
+            hits = [raw for types, raw in inputs if want in types]
             if not hits:
-                bad_gate.append(f"{name} 的 inputs 沒有 {full}")
+                bad_gate.append(f"{name} 的 inputs 沒有 {want}")
             elif all("mode:keep" in raw for raw in hits):
-                bad_gate.append(f"{name} 的 {full} 是 mode:keep，沒有真的被消耗")
+                bad_gate.append(f"{name} 的 {want} 是 mode:keep，沒有真的被消耗")
     bad_ref = sorted(set(bad_ref))
     fail("配方物品引用存在", bad_ref) if bad_ref else ok(f"配方物品引用存在（{len(recipes)} 配方）")
     fail("配方 OnTest 有 Lua 實作", bad_cb) if bad_cb else ok("配方 OnTest 有 Lua 實作")
@@ -534,6 +551,9 @@ for m in MEDIA_DIRS:
         with open(f, encoding="utf-8") as fh:
             txt = fh.read()
         for mod in sorted(modules):
+            # 配方搬進 module Base 後 modules 會含 Base；原版 fullType 本檔無從驗證，放行
+            if mod in VANILLA_NS:
+                continue
             for mm in re.finditer(rf'"({re.escape(mod)}\.\w+)"', txt):
                 if mm.group(1) not in declared:
                     bad_use.append(f"{rel}: 參照不存在的物品 {mm.group(1)}")
@@ -587,6 +607,119 @@ for m in MEDIA_DIRS:
             diff.append(f"{k}: boolean 選項不該有 min/max")
     fail("沙盒選項規格（型別／範圍／預設）", diff) if diff \
         else ok(f"沙盒選項規格（{len(mine)} 選項）")
+
+# ---- 14. 配方學習鏈（module Base／NeedToBeLearn／雜誌／研究） ----
+# 「配方做得出來卻沒人學得到」的每一段都是靜默失敗，只能靠對表擋（皆為 42.20.4 反編譯出處）：
+#   * ScriptBucketCollection.java:72-81 —— getScript(name) 對不含 '.' 的名字一律查
+#     getModule("Base")。LearnedRecipes / Researchablerecipes 寫的是短名，所以配方本身
+#     必須宣告在 module Base；搬回自家 module 後雜誌與研究都查不到，且沒有任何錯誤訊息。
+#   * Item.java:3494-3500 —— addResearchableRecipe() 查不到配方時把字串「照抄」進
+#     researchableRecipes。模組限定名（含 '.'）因此不會報錯，只變成永遠學不到的死項目。
+#   * Item.java:3513-3516 —— 只有 canBeResearched() 為真才進表，而 CraftRecipe.java:181
+#     的 canBeResearched() 需要 needToBeLearn = true；拿掉 true 整條研究路徑直接消失。
+#   * CraftRecipe.java:1221-1232 —— ResearchSkillLevel 沒寫時引擎自己推
+#     round(最高技能需求 * 2/3)（Electricity:3 → 2、:6 → 4），與本 MOD 要的 3／6 不同，
+#     所以一定要明寫並對表；寫成 0 還會讓 canAlwaysBeResearched() 為真而完全跳過閘門。
+#   * ScriptManager.java:1043-1048 —— needToBeLearn 又沒有 AutoLearn 也沒有雜誌教的配方，
+#     只在 console 印一行 "is not learnable"，發版前沒人會看到。
+# 只驗證腳本文字。「手冊真的刷得出來／登入補學真的跑」屬行為面，歸 scripts/smoke_harness.lua。
+# 手冊 icon 的 64x64 RGBA 材質由 12a 一併覆蓋（它掃所有宣告過的 item），此處不重複。
+LEARN_MODULE = "Base"
+MANUAL_FULL = "MinidoracatAutoDrive.NavigationRepairManual"
+MANUAL_ICON = "NavigationRepairManual"
+MANUAL_LEARNED = "CraftGPSNavigator;CraftAutopilotModule"
+MANUAL_ITEM_TYPE = "base:literature"
+MANUAL_ON_CREATE = "ItemCodeOnCreate.onCreateRecipeMagazine"
+RECIPE_LEARN_SPEC = {          # 配方短名: (SkillRequired, AutoLearnAny, ResearchSkillLevel)
+    "CraftGPSNavigator":    ("Electricity:3", "Electricity:6", "3"),
+    "CraftAutopilotModule": ("Electricity:6", "Electricity:8", "6"),
+}
+RESEARCHABLE_SPEC = {          # 成品 fullType: Researchablerecipes 的精確值
+    "MinidoracatAutoDrive.GPSNavigator":    "CraftGPSNavigator",
+    "MinidoracatAutoDrive.AutopilotModule": "CraftGPSNavigator;CraftAutopilotModule",
+}
+for m in MEDIA_DIRS:
+    sdir = os.path.join(m, "scripts")
+    if not os.path.isdir(sdir):
+        continue
+    declared, recipes, _ = parse_scripts(sdir)
+    if not declared and not recipes:
+        continue
+
+    # 14a. 配方所在 module ＋ 學習欄位對表
+    bad_learn = []
+    for want_name, (skill, auto, research) in sorted(RECIPE_LEARN_SPEC.items()):
+        found = [(mod, rbody, rel) for mod, name, rbody, rel in recipes if name == want_name]
+        if not found:
+            bad_learn.append(f"找不到 craftRecipe {want_name}"
+                             "（雜誌與研究都靠這個短名查表，改名等於整條學習鏈斷掉）")
+            continue
+        if len(found) > 1:
+            bad_learn.append(f"{want_name} 宣告了 {len(found)} 次，引擎只留一個，"
+                             "實際行為看載入順序")
+        for mod, rbody, rel in found:
+            if mod != LEARN_MODULE:
+                bad_learn.append(
+                    f"{rel}: {want_name} 在 module {mod}，必須是 module {LEARN_MODULE}"
+                    "（短名只在 Base 查得到，見 ScriptBucketCollection.java:77）")
+            rfields = parse_fields(rbody)
+            if (rfields.get("NeedToBeLearn") or "").lower() != "true":
+                bad_learn.append(
+                    f"{rel}: {want_name} 的 NeedToBeLearn = {rfields.get('NeedToBeLearn')}，"
+                    "必須是 true（false 則開局就會，雜誌與研究全部失去意義）")
+            for field, expect in (("SkillRequired", skill), ("AutoLearnAny", auto),
+                                  ("ResearchSkillLevel", research)):
+                if rfields.get(field) != expect:
+                    bad_learn.append(f"{rel}: {want_name} 的 {field} = "
+                                     f"{rfields.get(field)}，規格是 {expect}")
+    fail("配方學習閘門（module Base／NeedToBeLearn／技能對表）", bad_learn) if bad_learn \
+        else ok(f"配方學習閘門（{len(RECIPE_LEARN_SPEC)} 配方）")
+
+    # 14b. 專屬手冊（唯一雜誌來源）＋ 兩個成品的研究來源
+    bad_src = []
+    manual = declared.get(MANUAL_FULL)
+    if manual is None:
+        bad_src.append(f"缺 item {MANUAL_FULL}"
+                       "（沒有專屬雜誌就只剩 AutoLearn 與成品研究）")
+    else:
+        mfields, mrel = manual
+        if mfields.get("ItemType") != MANUAL_ITEM_TYPE:
+            bad_src.append(f"{mrel}: {MANUAL_FULL} 的 ItemType = "
+                           f"{mfields.get('ItemType')}，規格是 {MANUAL_ITEM_TYPE}"
+                           "（非 literature 就無法閱讀學會配方）")
+        if mfields.get("OnCreate") != MANUAL_ON_CREATE:
+            bad_src.append(f"{mrel}: {MANUAL_FULL} 的 OnCreate = "
+                           f"{mfields.get('OnCreate')}，規格是 {MANUAL_ON_CREATE}"
+                           "（維持原版配方雜誌的已讀狀態）")
+        if mfields.get("Icon") != MANUAL_ICON:
+            bad_src.append(f"{mrel}: {MANUAL_FULL} 的 Icon = {mfields.get('Icon')}，"
+                           f"規格是 {MANUAL_ICON}")
+        if mfields.get("LearnedRecipes") != MANUAL_LEARNED:
+            bad_src.append(f"{mrel}: {MANUAL_FULL} 的 LearnedRecipes = "
+                           f"{mfields.get('LearnedRecipes')}，規格是 {MANUAL_LEARNED}"
+                           "（一本手冊教兩個配方）")
+    for full, expect in sorted(RESEARCHABLE_SPEC.items()):
+        entry = declared.get(full)
+        if entry is None:
+            bad_src.append(f"缺 item {full}，無從掛 Researchablerecipes")
+            continue
+        ifields, rel = entry
+        if ifields.get("Researchablerecipes") != expect:
+            bad_src.append(f"{rel}: {full} 的 Researchablerecipes = "
+                           f"{ifields.get('Researchablerecipes')}，規格是 {expect}")
+    fail("配方學習來源（手冊 LearnedRecipes／成品 Researchablerecipes）", bad_src) if bad_src \
+        else ok("配方學習來源（手冊 LearnedRecipes／成品 Researchablerecipes）")
+
+    # 14c. 短名不變式：學習欄位一律短名，帶模組前綴會變成查不到的死項目
+    bad_short = []
+    for full, (ifields, rel) in sorted(declared.items()):
+        for field in ("LearnedRecipes", "Researchablerecipes"):
+            for entry in (s.strip() for s in (ifields.get(field) or "").split(";")):
+                if entry and "." in entry:
+                    bad_short.append(
+                        f"{rel}: {full} 的 {field} 有模組限定名 {entry}，只能寫配方短名"
+                        "（Item.java:3499 會把查不到的名字照抄進表，永遠學不到又不報錯）")
+    fail("學習欄位只用配方短名", bad_short) if bad_short else ok("學習欄位只用配方短名")
 
 # ---- 總結 ----
 print()

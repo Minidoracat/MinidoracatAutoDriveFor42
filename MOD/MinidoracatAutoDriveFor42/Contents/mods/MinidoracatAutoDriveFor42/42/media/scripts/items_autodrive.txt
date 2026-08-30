@@ -27,6 +27,14 @@ module MinidoracatAutoDrive
         cantBeConsolided = true,
         WorldStaticModel = WalkieTalkieMakeshift,
         Tags = base:usesbattery;base:miscelectronic;base:hasmetal,
+        /*
+            逆向研究：撿到成品即可研究做法，這是 NeedToBeLearn 配方的第三條取得
+            管道；ISResearchRecipe 不消耗成品。值必須是**短名**，引擎用
+            ScriptBucketCollection.getScript 解析，不含 '.' 一律查 module Base——
+            所以 recipes_autodrive.txt 的兩個 craftRecipe 寫在 module Base（見該檔
+            註解）。門檻由配方的 ResearchSkillLevel 決定（此處＝電工 3）。
+        */
+        Researchablerecipes = CraftGPSNavigator,
     }
 
     /*
@@ -41,5 +49,45 @@ module MinidoracatAutoDrive
         Icon = AutopilotModule,
         MetalValue = 7.0,
         Tags = base:hasmetal;base:miscelectronic,
+        /*
+            自駕模組是 GPS 的上位品，研究它會同時逆推出兩張配方（門檻分別為
+            ResearchSkillLevel 3／6，電工 3 時只會學到 GPS 那張）。
+        */
+        Researchablerecipes = CraftGPSNavigator;CraftAutopilotModule,
+    }
+
+    /*
+        NavigationRepairManual：專屬配方手冊，唯一「不看電工等級、也不用先有成品」
+        的取得管道，補上 MP 玩家做不出東西時完全沒有替代路徑的空洞。
+
+        版型完全對齊原版電子雜誌 ElectronicsMag1-5（literature.txt:5307-5380）：
+        ItemType = base:literature（＝Java zombie.inventory.types.Literature，
+        getLearnedRecipes／isLiteratureRead 等原版行為全都吃得到）。
+
+        LearnedRecipes 只能寫短名，理由同上：不含 '.' 的名稱只在 module Base 解析。
+        一本教兩張，避免拆成兩本讓 loot 命中率減半。
+
+        OnCreate 沿用原版 ItemCodeOnCreate.onCreateRecipeMagazine（反編譯確認其內容
+        只有 getModData().literatureTitle = getFullType()）：讓 ISReadABook 的
+        addReadLiterature 與 ISInventoryPane 的「已讀」灰字正常運作。它不改名，
+        不會蓋掉四語 DisplayName，也不需要任何自訂 Lua。
+
+        base:magazine 讓它跟原版雜誌一樣可當裁縫護甲填充料
+        （recipes_tailoring_armor.txt:363）——刻意接受的原版一致行為。
+        WorldStaticModel 直接借原版 MagazineElec1Ground，不另外做模型。
+    */
+    item NavigationRepairManual
+    {
+        DisplayCategory = RecipeResource,
+        ItemType = base:literature,
+        Weight = 0.5,
+        Icon = NavigationRepairManual,
+        BoredomChange = -20,
+        StressChange = -15,
+        LearnedRecipes = CraftGPSNavigator;CraftAutopilotModule,
+        StaticModel = Magazine,
+        WorldStaticModel = MagazineElec1Ground,
+        Tags = base:magazine,
+        OnCreate = ItemCodeOnCreate.onCreateRecipeMagazine,
     }
 }

@@ -1,12 +1,32 @@
-module MinidoracatAutoDrive
+module Base
 {
     /*
         B42 craftRecipe（不是 B41 recipe{}）。版型對齊 recipes_radio.txt:78-105
         CraftMakeshiftWalkieTalkie 與 recipes_electrical.txt:101-126 MakeImprovisedFlashlight。
 
+        ★ 為什麼是 module Base，而不是 module MinidoracatAutoDrive：
+        ScriptBucketCollection.getScript(String)（projectzomboid.jar
+        zombie/scripting/ScriptBucketCollection）在名稱**不含 '.'** 時，是寫死
+        getModule("Base") 去拿 bucket 的。也就是說任何「短名」配方引用只有在
+        module Base 裡才解析得到。item 端的 LearnedRecipes 與 Researchablerecipes
+        走的正是短名（原版 ElectronicsMag1 的 LearnedRecipes = MakeRemoteControllerV1…
+        亦然），配方若留在自訂 module，這些引用永遠解析成 nil。
+        物品本身不搬家：inputs/outputs 仍用 full type MinidoracatAutoDrive.*，
+        items_autodrive.txt 也仍在 module MinidoracatAutoDrive。
+
+        NeedToBeLearn = true ⇒ 沒有取得管道就永遠學不到。雜誌與研究都以無點短名
+        lookup，故依賴本檔留在 Base；登入補學同樣用短名 getCraftRecipe。AutoLearnAny
+        則由引擎直接掃 craftRecipe 本體，不靠短名 lookup。三條玩家取得管道為：
+        ① AutoLearnAny：電工到等級自動會（GPS 6／自駕 8）。
+        ② 專屬手冊 MinidoracatAutoDrive.NavigationRepairManual 的 LearnedRecipes。
+        ③ ResearchSkillLevel：拿成品逆向研究配方（GPS 3／自駕 6，對應
+           items_autodrive.txt 兩件成品的 Researchablerecipes；研究不消耗成品）。
+        SkillRequired 只擋「能不能做」，不是取得管道，別跟上面三條混為一談。
+
         OnTest 是引擎對每個候選輸入物品呼叫的 Lua 判定（CraftRecipe.OnTestItem →
-        LuaManager.getFunctionObject 依 "表.函式" 解析全域），沙盒關閉時全部回 false，
-        配方即無可用材料、無法執行。函式在 media/lua/shared/MDAD_Recipe.lua。
+        LuaManager.getFunctionObject 依 "表.函式" 解析**全域 Lua**，與 script module
+        無關，搬到 Base 不影響），沙盒關閉時全部回 false，配方即無可用材料、無法執行。
+        函式在 media/lua/shared/MDAD_Recipe.lua。
 
         產出的 GPSNavigator 帶 flags[HasNoUses]＝空電出廠，玩家再用原版 InsertBattery
         裝 Base.Battery（GPSNavigator 有 base:usesbattery tag，符合原版配方輸入條件）。
@@ -18,6 +38,8 @@ module MinidoracatAutoDrive
         NeedToBeLearn = true,
         SkillRequired = Electricity:3,
         AutoLearnAny = Electricity:6,
+        /* 研究門檻與 SkillRequired 同級：學會時也已具備實際製作能力。 */
+        ResearchSkillLevel = 3,
         OnTest = MDAD_Recipe.canCraftGPS,
         Tags = AnySurfaceCraft,
         category = Electrical,
@@ -42,6 +64,8 @@ module MinidoracatAutoDrive
         NeedToBeLearn = true,
         SkillRequired = Electricity:6,
         AutoLearnAny = Electricity:8,
+        /* 同上，與 SkillRequired 同級。 */
+        ResearchSkillLevel = 6,
         OnTest = MDAD_Recipe.canCraftAutopilot,
         Tags = AnySurfaceCraft,
         category = Electrical,

@@ -6,10 +6,19 @@ MDAD = MDAD or {}
 MDAD.MOD_ID = "MinidoracatAutoDriveFor42"
 MDAD.TYPE_GPS = "MinidoracatAutoDrive.GPSNavigator"
 MDAD.TYPE_AUTO = "MinidoracatAutoDrive.AutopilotModule"
+-- 專屬雜誌：教兩個配方的維修手冊（一本教兩個短名）。戰利品注入與生成過濾都用
+-- 這個 full type，不在 server/Items 那邊再抄一份字串。
+MDAD.TYPE_MANUAL = "MinidoracatAutoDrive.NavigationRepairManual"
+-- craftRecipe 的**短名**：兩個配方已移進 `module Base`，所以配方名不帶命名空間
+-- 前綴（items 的 full type 仍是 MinidoracatAutoDrive.*，兩者是不同的名字空間）。
+-- 配方名是 getScriptManager():getCraftRecipe 的鍵、也是 LearnedRecipes 與
+-- Researchablerecipes 寫的值；登入補學（server/MDAD_Server.lua）就靠這兩個常數。
+MDAD.RECIPE_GPS = "CraftGPSNavigator"
+MDAD.RECIPE_AUTO = "CraftAutopilotModule"
 -- build 印記：載入時印進 console（不受 getDebug 管）——實機回報「行為沒變」時
 -- 第一件事就是對這行，判定使用者跑的是不是新版（2026-08-28 三場撞樹回報
 -- 無法從 log 判定 code 版本的教訓）。每次行為修正遞增尾碼。
-MDAD.BUILD = "m55b-20260829m"
+MDAD.BUILD = "m56-20260830a"
 print("[MinidoracatAutoDrive] build " .. MDAD.BUILD)
 
 -- client → server 的安裝／卸載請求（server/MDAD_Server.lua 收）與失敗回報
@@ -17,6 +26,9 @@ MDAD.CMD_DEVICE = "Device"
 MDAD.CMD_DEVICE_FAILED = "DeviceFailed"
 MDAD.CMD_USAGE = "Usage"
 MDAD.CMD_NAV_USAGE = "NavUsage"
+-- client 登入／分割畫面新 slot 上線時請伺服器替**該 actor** 重掃本 MOD 的兩個配方
+-- （AutoLearnAny 只在升等瞬間與 SP 開局被檢查，MP 既有角色永遠補不上）。payload 空。
+MDAD.CMD_RECIPE_RESCAN = "RecipeRescan"
 
 MDAD.FAIL_GENERIC = "UI_MinidoracatAutoDrive_InstallFailed"
 MDAD.FAIL_NO_BATTERY = "UI_MinidoracatAutoDrive_NoBattery"

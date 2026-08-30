@@ -1,4 +1,4 @@
--- MDAD_Server.lua — 裝置拆裝與 GPS／自駕 usage heartbeat 的伺服器端權威入口（MP）。
+-- MDAD_Server.lua — actor-bound 配方補學、裝置拆裝與 GPS／自駕 usage heartbeat（MP）。
 --
 -- 為什麼不能留在 TimedAction 的 complete()：B42 MP 的伺服器端跑的不是玩家那個 Lua
 -- TimedAction 物件，而是 NetTimedAction 鏡像——鏡像的 perform() 唯一做的事就是呼叫
@@ -76,12 +76,64 @@ local function onNavUsage(player, args)
     return MDAD.setNavUsage(player)
 end
 
+-- 登入補學（scoped）：只補本 MOD 自己的兩個配方，且只補給 OnClientCommand 的 actor。
+-- payload 完全不讀——client 說不了「補哪個配方」也說不了「補給誰」，偽造或空封包
+-- 走的都是同一條「替自己重掃這兩個」路徑。
+--
+-- 為什麼需要：AutoLearnAny 只在兩個時機被檢查——升等瞬間
+-- （XpUpdate.lua:204 → ScriptManager.checkAutoLearn＝ScriptManager.java:1141-1154）
+-- 與**單機**開局（IsoWorld.java:2410，只針對 IsoPlayer.getInstance()）。專用伺服器
+-- 上的既有角色兩個都碰不到，電力技能早就達標的老角色永遠學不到新加的配方。
+--
+-- 為什麼**不**呼叫 getScriptManager():checkAutoLearn(player)：那支掃的是
+-- craftRecipes 的全部腳本（ScriptManager.java:1142），一次登入就會替玩家補學整個
+-- 伺服器所有 MOD 的 AutoLearn 配方——那不是本 MOD 有權做的事。
+-- 也**不**把技能等級抄進 Lua：門檻只寫在 scripts 的 AutoLearnAny，抄一份必漂移；
+-- CraftRecipe.checkAutoLearnAnySkills 自己就會驗「未學過＋有門檻＋技能達標」
+-- （CraftRecipe.java:858-872、890-905，含 Inventive 特質扣 1 級的原版行為）。
+--
+-- 出處：
+--   getScriptManager():getCraftRecipe(name)＝ScriptManager.java:1004
+--     （原版 Lua 用例 ISFirearmRadialMenu.lua:465）；
+--   IsoGameCharacter.getKnownRecipes()＝IsoGameCharacter.java:11531，learnRecipe
+--     就是往這條 list 加（:11583-11585），所以 size 變化＝真的學到新配方；
+--   sendSyncPlayerFields(player, 0x01)＝LuaManager.java:4274，0x01＝PF_Recipes
+--     （SyncPlayerFieldsPacket.java:22；原版 Lua 用例 ISResearchRecipe.lua:85）。
+--     沒學到就不送：每次登入白送一則封包沒有意義。
+local RESCAN_RECIPES = { MDAD.RECIPE_GPS, MDAD.RECIPE_AUTO }
+-- 配方腳本沒載入（scripts 打錯名、被別的 MOD 蓋掉）是安裝問題，不是每次登入都要
+-- 洗 log 的事件：每個配方名最多印一次（表最多兩個鍵）。
+local rescanWarned = {}
+
+local function onRecipeRescan(player)
+    local sm = getScriptManager()
+    if not sm then return false end
+    local known = player:getKnownRecipes()
+    if not known then return false end
+    local before = known:size()
+    for i = 1, #RESCAN_RECIPES do
+        local name = RESCAN_RECIPES[i]
+        local recipe = sm:getCraftRecipe(name)
+        if recipe then
+            recipe:checkAutoLearnAnySkills(player)
+        elseif not rescanWarned[name] then
+            rescanWarned[name] = true
+            print("[" .. MDAD.MOD_ID .. "] build " .. MDAD.BUILD
+                .. " craftRecipe not found: " .. name)
+        end
+    end
+    if known:size() == before then return false end
+    sendSyncPlayerFields(player, 0x01)
+    return true
+end
+
 -- 只有認得的 command 才進節流表；未知 command 不得建立 key。已知 key 每分鐘清
 -- 過期項，避免公開服靠大量短命角色讓 lifetime table 無界成長。
 local HANDLERS = {}
 HANDLERS[MDAD.CMD_DEVICE] = onDevice
 HANDLERS[MDAD.CMD_USAGE] = onUsage
 HANDLERS[MDAD.CMD_NAV_USAGE] = onNavUsage
+HANDLERS[MDAD.CMD_RECIPE_RESCAN] = onRecipeRescan
 
 -- OnClientCommand 簽名（module, command, player, args）＝ClientCommands.lua:1249-1260
 local function onClientCommand(module, command, player, args)

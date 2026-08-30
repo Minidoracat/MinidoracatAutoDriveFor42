@@ -186,6 +186,68 @@ local function clearList(t)
     for i = #t, 1, -1 do t[i] = nil end
 end
 
+-- 配方系統的最小假面（MP 登入補學路徑）。全部掛在一顆 table 上：本檔主 chunk 的
+-- local 數量已接近 Lua 的 200 上限。
+-- 出處：
+--   getScriptManager():getCraftRecipe(name)＝ScriptManager.java:1004
+--     （原版 Lua 用例 ISFirearmRadialMenu.lua:465）；
+--   CraftRecipe.checkAutoLearnAnySkills(chr)＝CraftRecipe.java:858-872＋890-905；
+--   IsoGameCharacter.getKnownRecipes()＝IsoGameCharacter.java:11531（learnRecipe
+--     就是往這條 list 加，:11583-11585）；
+--   sendSyncPlayerFields(player, flags)＝LuaManager.java:4274，PF_Recipes=0x01
+--     ＝SyncPlayerFieldsPacket.java:22（原版 Lua 用例 ISResearchRecipe.lua:85）。
+local recipeWorld = { defs = {}, lookups = {}, learns = {}, syncs = {}, globalScans = 0 }
+
+-- Java List<String> 的最小面：Lua 端只用 size／contains／add
+function recipeWorld.newKnownList()
+    local list = { _v = {} }
+    function list:size() return #self._v end
+    function list:contains(name)
+        for i = 1, #self._v do
+            if self._v[i] == name then return true end
+        end
+        return false
+    end
+    function list:add(name) self._v[#self._v + 1] = name end
+    return list
+end
+
+-- 假 CraftRecipe 照抄引擎 checkAutoLearnAnySkills 的三個前提（未學過、有
+-- AutoLearnAny 門檻、技能達標）才 learnRecipe。**故意不無條件學會**：production
+-- 若哪天自己抄一份等級判定、或繞過引擎直接 learnRecipe，斷言才抓得到。
+-- level 為 nil＝該配方沒有 AutoLearnAny（getAutoLearnAnySkillCount()==0，
+-- CraftRecipe.java:952）：引擎在那種情況什麼都不做。
+function recipeWorld.newRecipe(name, perk, level)
+    local r = {}
+    function r:checkAutoLearnAnySkills(chr)
+        recipeWorld.learns[#recipeWorld.learns + 1] = { name = name, chr = chr }
+        if level == nil then return end
+        if chr:getKnownRecipes():contains(name) then return end
+        if chr:getPerkLevel(perk) < level then return end
+        chr:learnRecipe(name, false)
+    end
+    return r
+end
+
+recipeWorld.sm = {}
+function recipeWorld.sm:getCraftRecipe(name)
+    recipeWorld.lookups[#recipeWorld.lookups + 1] = name
+    return recipeWorld.defs[name]
+end
+
+-- 絆線：ScriptManager.checkAutoLearn 掃的是全伺服器所有 MOD 的 craftRecipes
+-- （ScriptManager.java:1142），本 MOD 一次登入補學就會替玩家學走整包不相關配方。
+-- 刻意**不**放進 resetStats，才能在收尾一次證明全程沒被呼叫。
+function recipeWorld.sm:checkAutoLearn(_)
+    recipeWorld.globalScans = recipeWorld.globalScans + 1
+end
+
+function getScriptManager() return recipeWorld.sm end
+
+function sendSyncPlayerFields(player, flags)
+    recipeWorld.syncs[#recipeWorld.syncs + 1] = { player = player, flags = flags }
+end
+
 local function resetStats()
     for k in pairs(stats) do stats[k] = 0 end
     clearList(sentClient)
@@ -195,6 +257,9 @@ local function resetStats()
     clearList(uiCalls.toInventory)
     clearList(uiCalls.equip)
     clearList(uiCalls.queue)
+    clearList(recipeWorld.lookups)
+    clearList(recipeWorld.learns)
+    clearList(recipeWorld.syncs)
 end
 
 function sendItemStats(_) stats.sendItemStats = stats.sendItemStats + 1 end
@@ -728,6 +793,15 @@ local function newPlayer(opts)
     function p:getUseableVehicle() return self._useable end
     function p:getNearVehicle() return self._near end
     function p:getPrimaryHandItem() return self._hand end
+    -- 已學會的配方（IsoGameCharacter.getKnownRecipes()＝IsoGameCharacter.java:11531；
+    -- learnRecipe(name, checkMetaRecipe) 就是往這條 list 加，:11583-11585）
+    p._known = recipeWorld.newKnownList()
+    function p:getKnownRecipes() return self._known end
+    function p:learnRecipe(name, _)
+        if self._known:contains(name) then return false end
+        self._known:add(name)
+        return true
+    end
     return p
 end
 
@@ -1172,12 +1246,12 @@ for _, name in ipairs(DIST_NAMES) do
 end
 
 checkEq(#ProceduralDistributions.list.CrateRandomJunk.items, 2, "不在目標清單的表完全沒被碰")
-checkEq(#ProceduralDistributions.list.ArmyStorageElectronics.items, 6,
-    "同時是兩種道具目標的表補了兩組 pair")
+checkEq(#ProceduralDistributions.list.ArmyStorageElectronics.items, 8,
+    "同時是三種目標的表補了 GPS／自駕／手冊三組 pair")
 checkEq(#ProceduralDistributions.list.EngineerTools.items, 4, "單一道具目標只補一組 pair")
 
--- Merge 發生在 SandboxOptions.load 前：即使此刻 Spawn=false，兩個 pair 都必須留給
--- ItemPicker parse；真正政策在 OnFillContainer（已載入沙盒）執行。
+-- Merge 發生在 SandboxOptions.load 前：即使此刻 Spawn/Craft=false，三組 pair 都必須
+-- 留給 ItemPicker parse；真正政策在 OnFillContainer（已載入沙盒）執行。
 setSandbox({ SpawnGPS = false, SpawnAutopilot = true })
 fire("OnPostDistributionMerge")
 checkEq(countIn(ProceduralDistributions.list.ArmyStorageElectronics.items, GPS_T), 1,
@@ -6208,6 +6282,306 @@ end
 
 
 -- =====================================================================
+-- 情境二十八c：MP 登入補學（client 逐 slot 請求 → server actor-bound 補學）
+--              ＋專屬雜誌的戰利品注入與生成政策
+--
+-- 實機病徵：MP 玩家「完成製作但零產出」。NeedToBeLearn=true 的配方對既有角色
+-- 永遠沒學到——AutoLearnAny 只在升等瞬間（XpUpdate.lua:204 →
+-- ScriptManager.checkAutoLearn＝ScriptManager.java:1141-1154）與**單機**開局
+-- （IsoWorld.java:2410，只針對 IsoPlayer.getInstance()）被檢查，專用伺服器上的
+-- 遠端角色兩個時機都碰不到。
+-- =====================================================================
+scenario("MP 登入補學：逐 slot 請求、只信 actor、只補自己的兩個配方、學到才同步；雜誌注入與生成政策")
+
+-- (1) client 端：開局逐本機 slot、新 slot 上線補一則，payload 空且不指定角色／配方
+do
+    clientFlag, serverFlag = true, false
+    setSandbox({ InstallSkillGate = true, NeedItemForNav = false })
+    local a = newPlayer({ num = 0, username = "rescan0", onlineId = 7001 })
+    local b = newPlayer({ num = 1, username = "rescan1", onlineId = 7002 })
+    players[0], players[1], players[2] = a, b, nil
+    activePlayers = 2
+
+    resetStats()
+    capturePrint(function() fire("OnGameStart") end)
+    checkEq(#sentClient, 2, "開局替每個本機 slot 各送一則登入補學請求")
+    checkEq(sentClient[1] and sentClient[1].module, MOD_ID, "請求帶自己的 module 名")
+    checkEq(sentClient[1] and sentClient[1].command, MDAD.CMD_RECIPE_RESCAN,
+        "使用獨立的 RecipeRescan command")
+    -- 分割畫面共用一條連線：伺服器只能靠具體玩家物件分辨 actor，送 slot 索引等於
+    -- 讓兩位玩家的補學互相蓋掉
+    checkEq(sentClient[1] and sentClient[1].player, a, "slot 0 的請求帶 slot 0 的玩家物件")
+    checkEq(sentClient[2] and sentClient[2].player, b, "slot 1 的請求帶 slot 1 的玩家物件")
+    checkEq(type(sentClient[1] and sentClient[1].args), "table", "payload 是表（空表）")
+    checkNil(sentClient[1] and sentClient[1].args.recipe, "client 不指定要補哪個配方")
+    checkNil(sentClient[1] and sentClient[1].args.target, "client 不指定要補給誰")
+    checkNil(sentClient[1] and sentClient[1].args.username, "client 不指定角色名")
+    checkEq(#halos, 0, "登入補學不對玩家丟提示（NeedItemForNav 關閉時本來就無感）")
+
+    players[2] = newPlayer({ num = 2, username = "rescan2", onlineId = 7003 })
+    activePlayers = 3
+    resetStats()
+    capturePrint(function() fire("OnCreatePlayer", 2) end)
+    checkEq(#sentClient, 1, "分割畫面新 slot 上線只補送自己那一則")
+    checkEq(sentClient[1] and sentClient[1].player, players[2], "補送的是新 slot 的玩家物件")
+
+    -- 玩家物件還沒建立的 slot：不能送 nil actor 的請求
+    players[2] = nil
+    resetStats()
+    capturePrint(function() fire("OnCreatePlayer", 2) end)
+    checkEq(#sentClient, 0, "玩家物件還沒建立時不送請求")
+
+    -- SP：P0 由引擎開局補學，但後加入的分割畫面 slot 沒有該 Java 路徑；
+    -- client 檔因此就地逐配方重掃，且不發 client command／同步封包。
+    clientFlag, serverFlag = false, false
+    recipeWorld.defs[MDAD.RECIPE_GPS] =
+        recipeWorld.newRecipe(MDAD.RECIPE_GPS, Perks.Electricity, 6)
+    recipeWorld.defs[MDAD.RECIPE_AUTO] =
+        recipeWorld.newRecipe(MDAD.RECIPE_AUTO, Perks.Electricity, 8)
+    players[0] = newPlayer({ num = 0, electricity = 9, username = "sp0", onlineId = -1 })
+    players[1] = newPlayer({ num = 1, electricity = 9, username = "sp1", onlineId = -1 })
+    activePlayers = 2
+    resetStats()
+    capturePrint(function() fire("OnGameStart") end)
+    checkEq(#sentClient, 0, "SP 就地補學，不發 client command")
+    checkTrue(players[0]:getKnownRecipes():contains(MDAD.RECIPE_GPS)
+        and players[0]:getKnownRecipes():contains(MDAD.RECIPE_AUTO),
+        "SP slot 0 兩份配方皆按門檻補學")
+    checkTrue(players[1]:getKnownRecipes():contains(MDAD.RECIPE_GPS)
+        and players[1]:getKnownRecipes():contains(MDAD.RECIPE_AUTO),
+        "SP 後加入的 split-screen slot 也補學")
+    checkEq(#recipeWorld.syncs, 0, "SP 本機狀態不送 PF_Recipes 封包")
+    players[2] = newPlayer({ num = 2, electricity = 9, username = "sp2", onlineId = -1 })
+    activePlayers = 3
+    resetStats()
+    capturePrint(function() fire("OnCreatePlayer", 2) end)
+    checkEq(#sentClient, 0, "SP 後加入 slot 不發 client command")
+    checkTrue(players[2]:getKnownRecipes():contains(MDAD.RECIPE_GPS)
+        and players[2]:getKnownRecipes():contains(MDAD.RECIPE_AUTO),
+        "SP 後加入 slot 由 OnCreatePlayer 就地補學")
+    checkEq(#recipeWorld.syncs, 0, "SP 後加入 slot 不送 PF_Recipes")
+    recipeWorld.defs[MDAD.RECIPE_GPS] = nil
+    players[3] = newPlayer({ num = 3, electricity = 9, username = "sp3", onlineId = -1 })
+    activePlayers = 4
+    resetStats()
+    local missingLog1 = capturePrint(function() fire("OnCreatePlayer", 3) end)
+    resetStats()
+    local missingLog2 = capturePrint(function() fire("OnCreatePlayer", 3) end)
+    checkTrue(logHas(missingLog1, "craftRecipe not found: " .. MDAD.RECIPE_GPS),
+        "SP 缺配方留下含短名的診斷")
+    checkFalse(logHas(missingLog2, "craftRecipe not found: " .. MDAD.RECIPE_GPS),
+        "SP 同一缺配方只記錄一次")
+    recipeWorld.defs[MDAD.RECIPE_GPS] =
+        recipeWorld.newRecipe(MDAD.RECIPE_GPS, Perks.Electricity, 6)
+end
+
+-- (2) server 端：只信事件 actor、只碰自己的兩個配方、真的學到才同步
+do
+    clientFlag, serverFlag = false, true
+    recipeWorld.defs[MDAD.RECIPE_GPS] =
+        recipeWorld.newRecipe(MDAD.RECIPE_GPS, Perks.Electricity, 6)
+    recipeWorld.defs[MDAD.RECIPE_AUTO] =
+        recipeWorld.newRecipe(MDAD.RECIPE_AUTO, Perks.Electricity, 8)
+
+    local veteran = newPlayer({ num = 0, electricity = 9, username = "veteran", onlineId = 7101 })
+    local rookie = newPlayer({ num = 1, electricity = 2, username = "rookie", onlineId = 7102 })
+    local mid = newPlayer({ num = 2, electricity = 6, username = "mid", onlineId = 7103 })
+
+    -- 技能早就達標卻沒學過（正是實機那批老角色）：兩個配方都補上，同步一次
+    nowMs = nowMs + 1000
+    resetStats()
+    fire("OnClientCommand", MOD_ID, MDAD.CMD_RECIPE_RESCAN, veteran, {})
+    checkTrue(veteran:getKnownRecipes():contains(MDAD.RECIPE_GPS), "技能 9：補學 GPS 配方")
+    checkTrue(veteran:getKnownRecipes():contains(MDAD.RECIPE_AUTO), "技能 9：補學自駕配方")
+    checkEq(#recipeWorld.lookups, 2, "只查本 MOD 自己的兩個配方")
+    checkEq(recipeWorld.lookups[1], MDAD.RECIPE_GPS, "查的第一支是 GPS 配方短名")
+    checkEq(recipeWorld.lookups[2], MDAD.RECIPE_AUTO, "查的第二支是自駕配方短名")
+    checkEq(#recipeWorld.learns, 2, "兩支都交給引擎的 checkAutoLearnAnySkills 判定")
+    checkEq(recipeWorld.learns[1] and recipeWorld.learns[1].chr, veteran,
+        "判定對象是事件 actor")
+    checkEq(recipeWorld.learns[2] and recipeWorld.learns[2].chr, veteran,
+        "第二支的判定對象也是同一位 actor")
+    checkEq(#recipeWorld.syncs, 1, "真的學到新配方才送一次 PF_Recipes")
+    checkEq(recipeWorld.syncs[1] and recipeWorld.syncs[1].flags, 0x01,
+        "同步旗標是 PF_Recipes（0x01）")
+    checkEq(recipeWorld.syncs[1] and recipeWorld.syncs[1].player, veteran,
+        "同步的是 actor 自己")
+
+    -- 重播：已經學會 → knownRecipes 沒變 → 不再送封包
+    nowMs = nowMs + 1000
+    resetStats()
+    fire("OnClientCommand", MOD_ID, MDAD.CMD_RECIPE_RESCAN, veteran, {})
+    checkEq(#recipeWorld.learns, 2, "已學會仍照樣交給引擎重判（判定權不搬進 Lua）")
+    checkEq(#recipeWorld.syncs, 0, "已學會時不送同步（每次登入白送封包沒意義）")
+    checkEq(veteran:getKnownRecipes():size(), 2, "不會重複塞同一個配方")
+
+    -- 技能不足：一個都不補、也不同步
+    nowMs = nowMs + 1000
+    resetStats()
+    fire("OnClientCommand", MOD_ID, MDAD.CMD_RECIPE_RESCAN, rookie, {})
+    checkEq(#recipeWorld.learns, 2, "技能不足也照樣問引擎（門檻只寫在 scripts）")
+    checkEq(rookie:getKnownRecipes():size(), 0, "技能 2：不補學")
+    checkEq(#recipeWorld.syncs, 0, "沒學到就不送同步")
+
+    -- 只達 GPS 門檻：部分補學也要同步一次
+    nowMs = nowMs + 1000
+    resetStats()
+    fire("OnClientCommand", MOD_ID, MDAD.CMD_RECIPE_RESCAN, mid, {})
+    checkTrue(mid:getKnownRecipes():contains(MDAD.RECIPE_GPS), "技能 6：補學 GPS 配方")
+    checkFalse(mid:getKnownRecipes():contains(MDAD.RECIPE_AUTO), "技能 6 未達自駕門檻：不補")
+    checkEq(#recipeWorld.syncs, 1, "只補到一支也要同步一次")
+
+    -- 偽造 payload：不能替別人補、不能指定配方、不能宣告等級
+    local victim = newPlayer({
+        num = 3, electricity = 9, username = "victim", onlineId = 7106,
+    })
+    nowMs = nowMs + 1000
+    resetStats()
+    fire("OnClientCommand", MOD_ID, MDAD.CMD_RECIPE_RESCAN, rookie,
+        { target = victim, username = "victim", recipe = "Herbalist",
+            recipes = { "Herbalist" }, electricity = 10, level = 10 })
+    checkEq(rookie:getKnownRecipes():size(), 0, "偽造等級不能讓技能不足者補學")
+    checkFalse(rookie:getKnownRecipes():contains("Herbalist"), "client 指定的配方一律不學")
+    checkEq(#recipeWorld.lookups, 2, "偽造 recipe 欄位不會多查一支配方")
+    checkEq(recipeWorld.lookups[1], MDAD.RECIPE_GPS, "偽造封包查的仍是自己的 GPS 配方")
+    checkEq(#recipeWorld.syncs, 0, "偽造封包不觸發任何同步")
+    checkEq(victim:getKnownRecipes():size(), 0, "偽造 target 不能替別人補學")
+    checkEq(recipeWorld.learns[1] and recipeWorld.learns[1].chr, rookie,
+        "偽造 payload 後引擎判定對象仍是事件 actor")
+
+    -- 空／非表 payload 走同一條路（production 完全不讀 payload）
+    nowMs = nowMs + 1000
+    resetStats()
+    fire("OnClientCommand", MOD_ID, MDAD.CMD_RECIPE_RESCAN, mid, nil)
+    checkEq(#recipeWorld.lookups, 2, "payload 為 nil 照樣替 actor 重掃")
+    nowMs = nowMs + 1000
+    resetStats()
+    fire("OnClientCommand", MOD_ID, MDAD.CMD_RECIPE_RESCAN, mid, "forged")
+    checkEq(#recipeWorld.lookups, 2, "payload 是字串也不影響（完全不讀）")
+
+    -- 沒有 actor／別的 module：不處理
+    nowMs = nowMs + 1000
+    resetStats()
+    fire("OnClientCommand", MOD_ID, MDAD.CMD_RECIPE_RESCAN, nil, {})
+    fire("OnClientCommand", "SomeOtherMod", MDAD.CMD_RECIPE_RESCAN, veteran, {})
+    checkEq(#recipeWorld.lookups, 0, "沒有 actor 或別的 module 的封包完全不處理")
+
+    -- 沿用既有 250ms per-player 節流：洪水封包不能每發都重掃配方
+    nowMs = nowMs + 1000
+    resetStats()
+    fire("OnClientCommand", MOD_ID, MDAD.CMD_RECIPE_RESCAN, rookie, {})
+    checkEq(#recipeWorld.lookups, 2, "節流窗外的請求正常處理")
+    fire("OnClientCommand", MOD_ID, MDAD.CMD_RECIPE_RESCAN, rookie, {})
+    checkEq(#recipeWorld.lookups, 2, "同一 actor 250ms 內的重發被既有節流擋掉")
+    nowMs = nowMs + 250
+    fire("OnClientCommand", MOD_ID, MDAD.CMD_RECIPE_RESCAN, rookie, {})
+    checkEq(#recipeWorld.lookups, 4, "滿 250ms 後放行")
+
+    -- 配方腳本缺失（scripts 打錯名／被別的 MOD 蓋掉）：帶配方名的診斷，最多一次
+    nowMs = nowMs + 1000
+    recipeWorld.defs[MDAD.RECIPE_AUTO] = nil
+    local fresh = newPlayer({ num = 3, electricity = 9, username = "fresh", onlineId = 7104 })
+    resetStats()
+    local rlog = capturePrint(function()
+        fire("OnClientCommand", MOD_ID, MDAD.CMD_RECIPE_RESCAN, fresh, {})
+    end)
+    checkTrue(logHas(rlog, "craftRecipe not found: " .. MDAD.RECIPE_AUTO),
+        "配方腳本缺失留下帶配方名的 console 診斷")
+    checkTrue(logHas(rlog, MDAD.BUILD), "診斷帶 build 印記（實機才判得出跑的是哪版）")
+    checkTrue(fresh:getKnownRecipes():contains(MDAD.RECIPE_GPS),
+        "一支配方缺失不影響另一支的補學")
+    checkEq(#recipeWorld.syncs, 1, "缺一支仍替學到的那支同步一次")
+
+    nowMs = nowMs + 1000
+    local other = newPlayer({ num = 4, electricity = 9, username = "other", onlineId = 7105 })
+    resetStats()
+    rlog = capturePrint(function()
+        fire("OnClientCommand", MOD_ID, MDAD.CMD_RECIPE_RESCAN, other, {})
+    end)
+    checkEq(#rlog, 0, "同一支缺失的配方不重複洗 log（每個配方名最多印一次）")
+    recipeWorld.defs[MDAD.RECIPE_AUTO] =
+        recipeWorld.newRecipe(MDAD.RECIPE_AUTO, Perks.Electricity, 8)
+end
+
+-- (3) 專屬雜誌：戰利品注入的目標／權重／防重，與 AllowCraft* 生成政策
+do
+    clientFlag, serverFlag = false, true
+    local names = { "ArmyStorageElectronics", "ElectronicStoreMisc", "BookstoreComputer",
+        "LibraryComputer", "MagazineRackMixed", "CrateRandomJunk" }
+    local expect = { ArmyStorageElectronics = 1, ElectronicStoreMisc = 2,
+        BookstoreComputer = 2, LibraryComputer = 1, MagazineRackMixed = 0.5 }
+    ProceduralDistributions = { list = {} }
+    for i = 1, #names do
+        ProceduralDistributions.list[names[i]] = { items = { "Base.Plank", 3 } }
+    end
+    setSandbox({ AllowCraftGPS = true, AllowCraftAutopilot = true,
+        SpawnGPS = true, SpawnAutopilot = true })
+
+    fire("OnPostDistributionMerge")
+    local sizes = {}
+    for i = 1, #names do sizes[names[i]] = #ProceduralDistributions.list[names[i]].items end
+    -- 同一行程回主選單再讀檔＝事件再觸發；ProceduralDistributions 不重置
+    fire("OnPostDistributionMerge")
+    fire("OnPostDistributionMerge")
+    for i = 1, #names do
+        local items = ProceduralDistributions.list[names[i]].items
+        local n, w = countIn(items, MDAD.TYPE_MANUAL)
+        checkEq(#items, sizes[names[i]], names[i] .. "：連跑三次長度不變（雜誌沒有重複注入）")
+        checkEq(#items % 2, 0, names[i] .. "：items 一定成對（type, weight）")
+        checkEq(n, expect[names[i]] and 1 or 0, names[i] .. "：雜誌出現次數")
+        if expect[names[i]] then
+            checkEq(w, expect[names[i]], names[i] .. "：雜誌權重沒有被疊加")
+        end
+        checkEq(items[1], "Base.Plank", names[i] .. "：原版既有條目沒被動到")
+        checkEq(items[2], 3, names[i] .. "：原版既有權重沒被改")
+    end
+    checkEq(#ProceduralDistributions.list.CrateRandomJunk.items, 2,
+        "不在雜誌目標清單的表完全沒被碰")
+
+    -- 生成政策：手冊教的是那兩個配方，只要還有一個做得出來就有用。
+    -- 與 SpawnGPS／SpawnAutopilot 分開判斷——那兩個管的是裝置本體的生成。
+    local loot = newLootContainer({ MDAD.TYPE_MANUAL, GPS_T, "Base.Plank" })
+    fire("OnFillContainer", "bookstore", "shelves", loot)
+    checkEq(loot:count(MDAD.TYPE_MANUAL), 1, "兩個製作開關都開：保留手冊")
+
+    setSandbox({ AllowCraftGPS = true, AllowCraftAutopilot = false,
+        SpawnGPS = true, SpawnAutopilot = true })
+    loot = newLootContainer({ MDAD.TYPE_MANUAL, "Base.Plank" })
+    fire("OnFillContainer", "bookstore", "shelves", loot)
+    checkEq(loot:count(MDAD.TYPE_MANUAL), 1, "只開 GPS 製作：手冊仍有用，保留")
+
+    setSandbox({ AllowCraftGPS = false, AllowCraftAutopilot = true,
+        SpawnGPS = true, SpawnAutopilot = true })
+    loot = newLootContainer({ MDAD.TYPE_MANUAL, "Base.Plank" })
+    fire("OnFillContainer", "bookstore", "shelves", loot)
+    checkEq(loot:count(MDAD.TYPE_MANUAL), 1, "只開自駕製作：手冊仍有用，保留")
+
+    setSandbox({ AllowCraftGPS = false, AllowCraftAutopilot = false,
+        SpawnGPS = true, SpawnAutopilot = true })
+    loot = newLootContainer({ MDAD.TYPE_MANUAL, GPS_T, AUTO_T, "Base.Plank" })
+    fire("OnFillContainer", "bookstore", "shelves", loot)
+    checkEq(loot:count(MDAD.TYPE_MANUAL), 0, "兩個製作開關都關才移除手冊")
+    checkEq(loot:count(GPS_T), 1, "關閉製作不影響 SpawnGPS 開著的 GPS 本體")
+    checkEq(loot:count(AUTO_T), 1, "關閉製作不影響 SpawnAutopilot 開著的自駕模組本體")
+    checkEq(loot:count("Base.Plank"), 1, "手冊過濾不碰原版物品")
+
+    -- 沙盒未載入（主選單／載入中）：預設是「留著」，不得誤刪
+    setSandbox(nil)
+    loot = newLootContainer({ MDAD.TYPE_MANUAL })
+    fire("OnFillContainer", "bookstore", "shelves", loot)
+    checkEq(loot:count(MDAD.TYPE_MANUAL), 1, "沙盒未載入時不移除手冊（fail-open）")
+
+    clientFlag = true
+    setSandbox({ AllowCraftGPS = false, AllowCraftAutopilot = false })
+    loot = newLootContainer({ MDAD.TYPE_MANUAL })
+    fire("OnFillContainer", "bookstore", "shelves", loot)
+    checkEq(loot:count(MDAD.TYPE_MANUAL), 1, "MP client 不改 server 權威的生成內容")
+    clientFlag = false
+    setSandbox({ AllowCraftGPS = true, AllowCraftAutopilot = true,
+        SpawnGPS = true, SpawnAutopilot = true })
+end
+
+-- =====================================================================
 -- 情境二十九：理由鍵不得缺翻譯（鍵是 runtime 真的吐出來的，不是抄原始碼）
 -- =====================================================================
 scenario("理由鍵覆蓋：每個分支都跑到，且四語 UI.json 都有對應翻譯")
@@ -6220,6 +6594,13 @@ checkEq(type(MDAD.Drive), "table", "production client/MDAD_Driver.lua 真的載�
 checkEq(MDAD.MOD_ID, MOD_ID, "MOD_ID 常數")
 checkEq(MDAD.TYPE_GPS, GPS_T, "TYPE_GPS 與 items 腳本一致")
 checkEq(MDAD.TYPE_AUTO, AUTO_T, "TYPE_AUTO 與 items 腳本一致")
+checkEq(MDAD.TYPE_MANUAL, "MinidoracatAutoDrive.NavigationRepairManual",
+    "TYPE_MANUAL 與 items 腳本一致")
+-- 配方名是短名（兩個 craftRecipe 已在 module Base），與 items 的
+-- MinidoracatAutoDrive.* full type 是不同的名字空間，混用會查不到配方
+checkEq(MDAD.RECIPE_GPS, "CraftGPSNavigator", "GPS 配方短名（module Base）")
+checkEq(MDAD.RECIPE_AUTO, "CraftAutopilotModule", "自駕配方短名（module Base）")
+checkEq(MDAD.CMD_RECIPE_RESCAN, "RecipeRescan", "登入補學 command 常數")
 checkEq(MDAD.CMD_DEVICE, "Device", "CMD_DEVICE 常數（client／server 共用的封包名）")
 checkEq(MDAD.CMD_DEVICE_FAILED, "DeviceFailed", "CMD_DEVICE_FAILED 常數")
 checkEq(MDAD.CMD_USAGE, "Usage", "Auto Usage command 常數")
@@ -6247,6 +6628,11 @@ checkEq(drive.pool.bad, 0, "全程沒有 release 過不在手上的向量")
 
 -- 距離判定的絆線：整份測試（含 apply／server／client 全鏈）都不該碰 DistToSquared
 checkEq(distCalls, 0, "全程沒有任何程式碼呼叫 DistToSquared（距離 fallback 不得復活）")
+
+-- 全域補學的絆線：本 MOD 只准補自己的兩個配方，一次登入把玩家沒接觸過的
+-- 整包 MOD 配方全學走是不可逆的存檔污染，而且不會有任何錯誤訊息
+checkEq(recipeWorld.globalScans, 0,
+    "全程沒有呼叫 ScriptManager.checkAutoLearn（禁止全域補學）")
 
 -- 這些鍵必須在前面的情境中「真的被 production 回傳過」，
 -- 否則代表某條分支根本沒被執行到（測試自己失去防護力）
