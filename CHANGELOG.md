@@ -20,8 +20,9 @@
 - 新增段落索引，可依每段紀錄的開始／結束 timestamp、檔案大小與結束原因快速找到正確檔案；仍維持每次自動駕駛一個檔，不把同日多段行駛混在一起
 - 複製最新紀錄或資料夾路徑成功時，改用右上角通知顯示完成回饋；舊版 UI 框架或通知失敗時仍會顯示頭上提示
 - 診斷紀錄補上碰撞前後的規劃狀態，以及最近障礙的尺寸與位置，能更快分辨是感知、規劃或車輛控制出了問題
+- 開啟診斷紀錄時會一併記下當下的引擎／煞車／輪胎與路況物理狀態，方便判斷低速蠕動是偏離路面、在煞車、輪胎打滑還是機械限制；關閉診斷時自駕行為不變
 
-> 技術要點：client-only、預設關；固定 64×2MiB、每 session 一檔；保留天數 1／3／7／14／30（預設 7）；`session-index.txt` 以 raw epoch ms 固定最多 64 列。JSONL additive 欄位為 pm/rs/bs/dm/dn/rb/bhx/bhy/fi/cr/bl/dg/or/cn/cp，sensor stamp 變更時 nearest 最多 8 點附 r/x/y。planMode／lastCoupled／vehicleProfile 純觀測；bhx/bhy 只是把既有 sweep hit 寫入 log，沒有新增控制輸入。MiniMap API v2 才有複製路徑按鈕，v1 仍可改 tick／combo。
+> 技術要點：client-only、預設關；固定 64×2MiB、每 session 一檔；保留天數 1／3／7／14／30（預設 7）；`session-index.txt` 以 raw epoch ms 固定最多 64 列。JSONL additive 欄位為 pm/rs/bs/dm/dn/rb/bhx/bhy/fi/cr/bl/dg/or/cn/cp，sensor stamp 變更時 nearest 最多 8 點附 r/x/y。Phase A 再 additive：profile 的 enginePower/brakingForce/offroadEfficiency/rollInfluence/centerOfMassY/tireFrictionMin/Avg/Count/isAnyTireMissing；sample 的 po/ib/sk/vl/vt/es/tn/rgs/el/ld/rst/rlo/rhi/us/acr 與 cap 純量。數值缺值省略、布林顯式。新 Java getter 只在 `s.diag`。planMode／lastCoupled／vehicleProfile 純觀測；bhx/bhy 只是把既有 sweep hit 寫入 log，沒有新增控制輸入。MiniMap API v2 才有複製路徑按鈕，v1 仍可改 tick／combo。build `m61-20260831a`。
 
 ### 修正
 

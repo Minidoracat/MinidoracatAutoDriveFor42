@@ -67,6 +67,9 @@ local PK = {
     "clamp0", "clamp30", "clampMax", "wheelFriction",
     "delta0Safe", "deltaVSafe", "rMin", "lookScale",
     "rearArm", "needHalf", "probeR",
+    "enginePower", "brakingForce", "offroadEfficiency", "rollInfluence",
+    "centerOfMassY", "tireFrictionMin", "tireFrictionAvg", "tireFrictionCount",
+    "isAnyTireMissing",
 }
 
 local function logOnce(msg)
@@ -710,8 +713,10 @@ local function encodeProfile(profile)
         local chunk = nil
         if k == "scriptName" then
             if type(v) == "string" then chunk = '"' .. k .. '":' .. jstr(v) end
-        elseif k == "valid" or k == "fallback" then
-            chunk = '"' .. k .. '":' .. (v == true and "true" or "false")
+        elseif k == "valid" or k == "fallback" or k == "isAnyTireMissing" then
+            if type(v) == "boolean" then
+                chunk = '"' .. k .. '":' .. (v and "true" or "false")
+            end
         elseif finite(v) then
             chunk = '"' .. k .. '":' .. tostring(v)
         end
@@ -851,14 +856,64 @@ end
 -- 煞停錨、dm／dn＝承諾剖面的餘裕與掃掠淨距、rb＝路面對中校正、bhx／bhy＝掃掠
 -- 真命中的世界座標、fi＝follower 投影游標、cr＝這一幀採用的 10Hz 判定、
 -- bl／dg／or／cn／cp＝blocked／dodging／offroad／corner-latch／耦力調頭。
+-- Phase A 物理狀態（最後一參 phys table，缺席＝舊簽章）：po／ib＝Java
+-- isDoingOffroad／isBraking、sk＝minWheelSkid、vl／vt＝縱／橫向速度、
+-- es／tn／rgs＝引擎轉速／檔位／regulatorSpeed、el／ld＝期望車道與橫偏、
+-- rst／rlo／rhi／us＝路面帶狀態與未載入弧長、acr＋csen／cg／cpc／cw／cof／
+-- ch／cbl／cdg＝綁定 cap 原因與各檔純量。數值缺值省略、布林有值才顯式寫出。
 -- 為什麼要這些：舊 sample 缺 pm，無法直接看出 replan 是否走 offroad-suppress；
 -- 也缺 cp，無法區分真正耦力旋轉與一般橫推。倒車脫困仍由 unstick event／mode
 -- 與負 spd 判讀；cp 不代表倒車（2026-08-31 實機分析）。
+local function encodePhys(phys)
+    if type(phys) ~= "table" then return "" end
+    local bits = ""
+    local function addBool(src, json)
+        local v = phys[src]
+        if v == true then
+            bits = bits .. ',"' .. json .. '":true'
+        elseif v == false then
+            bits = bits .. ',"' .. json .. '":false'
+        end
+    end
+    local function addNum(src, json)
+        local v = phys[src]
+        if finite(v) then bits = bits .. ',"' .. json .. '":' .. tostring(v) end
+    end
+    local function addStr(src, json)
+        local v = phys[src]
+        if type(v) == "string" then bits = bits .. ',"' .. json .. '":' .. jstr(v) end
+    end
+    addBool("physicalOffroad", "po")
+    addBool("isBraking", "ib")
+    addNum("minWheelSkid", "sk")
+    addNum("vLong", "vl")
+    addNum("vLat", "vt")
+    addNum("engineSpeed", "es")
+    addNum("transmissionNumber", "tn")
+    addNum("regulatorSpeed", "rgs")
+    addNum("expectedLane", "el")
+    addNum("latDev", "ld")
+    addStr("roadState", "rst")
+    addNum("roadLo", "rlo")
+    addNum("roadHi", "rhi")
+    addNum("unloadedS", "us")
+    addStr("activeCapReason", "acr")
+    addNum("capSensor", "csen")
+    addNum("capGear", "cg")
+    addNum("capPerception", "cpc")
+    addNum("capWarm", "cw")
+    addNum("capOffroad", "cof")
+    addNum("capHeading", "ch")
+    addNum("capBlocked", "cbl")
+    addNum("capDodge", "cdg")
+    return bits
+end
+
 local function encodeSample(s, now, x, y, heading, speed, target, remaining, lat, err,
         steer, force, mode, gear, regulator, sensor, critical,
         planMode, routeS, blockS, dodgeMargin, dodgeNeed, roadBias,
         blockHitX, blockHitY, followerIdx,
-        blocked, dodging, offroad, corner, coupled)
+        blocked, dodging, offroad, corner, coupled, phys)
     local mjson = "null"
     if type(mode) == "string" then
         mjson = jstr(mode)
@@ -869,6 +924,7 @@ local function encodeSample(s, now, x, y, heading, speed, target, remaining, lat
     if type(sensor) == "table" then
         extra = ',"sen":' .. encodeSensor(s, sensor)
     end
+    extra = extra .. encodePhys(phys)
     local pmjson = "null"
     if type(planMode) == "string" then pmjson = jstr(planMode) end
     local plan = ',"pm":' .. pmjson
@@ -1036,21 +1092,38 @@ function D.start(pn, vehicle, profile)
     return true
 end
 
-function D.sample(pn, now, x, y, heading, speed, target, remaining, lat, err,
-        steer, force, mode, gear, regulator, sensor, critical,
-        planMode, routeS, blockS, dodgeMargin, dodgeNeed, roadBias,
-        blockHitX, blockHitY, followerIdx,
-        blocked, dodging, offroad, corner, coupled)
-    local s = sessions[pn]
+-- 純查詢：這一幀 sample() 會不會真的 enqueue，第二回值＝這一幀採用的 10Hz
+-- 判定（crit），由 sample() 直接沿用，不重算。不碰 lastSample。
+-- Driver 只在 true 時才跑新 Java getter，避免 5/10Hz gate 被 UI 幀繞過。
+local function sampleWouldEnqueue(s, now, mode, err, critical)
     if not s or not s.active then return false end
-    if not finite(now) then return true end
+    if not finite(now) then return false end
     local crit = critical == true or isCritical(mode, err)
     local gap = HZ_N
     if crit then gap = HZ_C end
     if s.lastSample ~= nil and now >= s.lastNow
             and now - s.lastSample < gap then
-        return true
+        return false
     end
+    return true, crit
+end
+
+function D.shouldSample(pn, now, mode, err, critical)
+    -- 對外只回單一布林：多回值會漏進呼叫端的參數列。
+    local want = sampleWouldEnqueue(sessions[pn], now, mode, err, critical)
+    return want
+end
+
+function D.sample(pn, now, x, y, heading, speed, target, remaining, lat, err,
+        steer, force, mode, gear, regulator, sensor, critical,
+        planMode, routeS, blockS, dodgeMargin, dodgeNeed, roadBias,
+        blockHitX, blockHitY, followerIdx,
+        blocked, dodging, offroad, corner, coupled, phys)
+    local s = sessions[pn]
+    if not s or not s.active then return false end
+    -- now 非有限、或還在 gate 內：不 enqueue，但 session 照樣算活著。
+    local want, crit = sampleWouldEnqueue(s, now, mode, err, critical)
+    if not want then return true end
     s.lastNow = now
     s.lastSample = now
     -- 記進 log 的是**這一幀真正採用的** 10Hz 判定（呼叫端旗標 or 誤差/模式推導），
@@ -1059,7 +1132,7 @@ function D.sample(pn, now, x, y, heading, speed, target, remaining, lat, err,
         steer, force, mode, gear, regulator, sensor, crit,
         planMode, routeS, blockS, dodgeMargin, dodgeNeed, roadBias,
         blockHitX, blockHitY, followerIdx,
-        blocked, dodging, offroad, corner, coupled), now)
+        blocked, dodging, offroad, corner, coupled, phys), now)
     return s.active == true
 end
 
@@ -1068,6 +1141,21 @@ function D.event(pn, name, a, b, c, d)
     if not s or not s.active then return end
     local now = nowMs()
     enqueue(s, encodeEvent(now, name, a, b, c, d), now)
+end
+
+-- Non-I/O diagnostics faults share one visible terminal path: preserve the
+-- actionable detail in the console, close the durable session as error, and
+-- tell the player that only recording stopped.
+function D.fail(pn, detail)
+    local s = sessions[pn]
+    if not s then return false end
+    local okText, text = pcall(tostring, detail)
+    if not okText or type(text) ~= "string" or text == "" then text = "unknown error" end
+    logOnce("diagnostics failed: " .. text)
+    halo(pn, false, "UI_MinidoracatAutoDrive_TelemetryWriteFailed",
+        "diagnostic logging stopped")
+    D.stop(pn, "error")
+    return true
 end
 
 function D.stop(pn, reason)

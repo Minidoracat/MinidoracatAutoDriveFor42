@@ -313,6 +313,10 @@ local profile = {
     clamp0 = 0.9, clamp30 = 0.64, clampMax = 0.3,
     wheelFriction = 1.2, delta0Safe = 0.72, deltaVSafe = 0.24,
     rMin = 3.2, lookScale = 1.3, rearArm = 2.9, needHalf = 1.4, probeR = 3.5,
+    enginePower = 4000, brakingForce = 80, offroadEfficiency = 1.1,
+    rollInfluence = 0.7, centerOfMassY = 0.55,
+    tireFrictionMin = 1.4, tireFrictionAvg = 1.5, tireFrictionCount = 4,
+    isAnyTireMissing = false,
 }
 
 loadProd()
@@ -352,6 +356,34 @@ checkEq(countNeedle(body, '"t":"s"'), 4, "two normal + two critical samples")
 checkEq(countNeedle(body, '"t":"e"'), 1, "event recorded between gated samples")
 check(string.find(body, '"n":"ping"', 1, true) ~= nil, "event payload present")
 
+--------------------------------------------------------------------------------
+scenario("shouldSample shares the 200/100ms gate and does not mutate it")
+resetFs()
+loadProd()
+nowMs = 5000
+checkEq(MDADDiagnostics.shouldSample(0, 5000, "follow", 0, false), false,
+    "no session → shouldSample false")
+checkEq(MDADDiagnostics.start(0, nil, profile), true, "start for shouldSample")
+checkEq(MDADDiagnostics.shouldSample(0, 5000, "follow", 0, false), true,
+    "first sample would enqueue")
+checkEq(MDADDiagnostics.shouldSample(0, 5000, "follow", 0, false), true,
+    "shouldSample is pure: still true before sample")
+MDADDiagnostics.sample(0, 5000, 1, 2, 0, 10, 10, 50, 0, 0, 0, 0, "follow", 1, false, nil)
+checkEq(MDADDiagnostics.shouldSample(0, 5100, "follow", 0, false), false,
+    "100ms later normal gate still closed")
+checkEq(MDADDiagnostics.shouldSample(0, 5200, "follow", 0, false), true,
+    "200ms later normal gate opens")
+MDADDiagnostics.sample(0, 5200, 1, 2, 0, 10, 10, 50, 0, 0, 0, 0, "follow", 1, false, nil)
+checkEq(MDADDiagnostics.shouldSample(0, 5250, "follow", 0, true), false,
+    "critical 50ms still gated")
+checkEq(MDADDiagnostics.shouldSample(0, 5300, "follow", 0, true), true,
+    "critical 100ms opens")
+checkEq(MDADDiagnostics.shouldSample(0, 0 / 0, "follow", 0, false), false,
+    "non-finite now → shouldSample false")
+nowMs = 7000
+MDADDiagnostics.stop(0, "end")
+local gateBody = files[sessionPath(1)] or ""
+checkEq(countNeedle(gateBody, '"t":"s"'), 2, "shouldSample queries did not enqueue extra samples")
 --------------------------------------------------------------------------------
 scenario("batching 1s/8KiB/64 and 60s checkpoint reopen")
 resetFs()
@@ -450,6 +482,10 @@ check(string.find(body, '"delta0Safe":0.72', 1, true) ~= nil,
     "approved steering envelope serialized")
 check(string.find(body, '"maxSpeed":70', 1, true) ~= nil,
     "runtime max speed serialized")
+check(string.find(body, '"enginePower":4000', 1, true) ~= nil,
+    "runtime enginePower serialized")
+check(string.find(body, '"isAnyTireMissing":false', 1, true) ~= nil,
+    "isAnyTireMissing explicit false")
 check(string.find(body, '"x":10700.25', 1, true) ~= nil, "opt-in absolute x allowed")
 check(string.find(body, "username", 1, true) == nil, "no username")
 check(string.find(body, "steamId", 1, true) == nil, "no steamId")
@@ -462,6 +498,39 @@ check(string.find(body, '"hardS"', 1, true) == nil, "no full sensor S array")
 check(countNeedle(body, '"near":') == 1, "near list only when stamp changes")
 check(countNeedle(body, '{"s":') <= 8, "at most 8 near records")
 check(string.find(body, '"hardN":12', 1, true) ~= nil, "sensor aggregate kept")
+--------------------------------------------------------------------------------
+scenario("unknown optional profile fields are omitted, not serialized as safe values")
+do
+    resetFs()
+    loadProd()
+    nowMs = 45000
+    local unknown = {}
+    for k, v in pairs(profile) do unknown[k] = v end
+    unknown.enginePower = nil
+    unknown.brakingForce = nil
+    unknown.offroadEfficiency = nil
+    unknown.rollInfluence = nil
+    unknown.centerOfMassY = nil
+    unknown.tireFrictionMin = nil
+    unknown.tireFrictionAvg = nil
+    unknown.tireFrictionCount = nil
+    unknown.isAnyTireMissing = nil
+    checkEq(MDADDiagnostics.start(0, nil, unknown), true, "unknown profile starts")
+    nowMs = 45100
+    MDADDiagnostics.stop(0, "end")
+    local unknownBody = files[sessionPath(1)] or ""
+    check(string.find(unknownBody, '"valid":true', 1, true) ~= nil,
+        "legacy valid semantics remain serialized")
+    check(string.find(unknownBody, '"fallback":false', 1, true) ~= nil,
+        "legacy fallback semantics remain serialized")
+    check(string.find(unknownBody, '"enginePower"', 1, true) == nil,
+        "unknown enginePower omitted")
+    check(string.find(unknownBody, '"tireFrictionCount"', 1, true) == nil,
+        "unknown tire aggregate omitted")
+    check(string.find(unknownBody, '"isAnyTireMissing"', 1, true) == nil,
+        "unknown tire state omitted instead of false")
+end
+
 
 --------------------------------------------------------------------------------
 scenario("copy latest/folder absolute paths and Halo")
@@ -508,6 +577,37 @@ checkEq(MDADDiagnostics.sample(0, nowMs + 100, 1, 1, 0, 0, 0, 0,
 nowMs = 56000
 checkEq(MDADDiagnostics.start(0, nil, profile), true, "new session starts after menu cleanup")
 MDADDiagnostics.stop(0, "end")
+--------------------------------------------------------------------------------
+scenario("explicit diagnostics failure records error reason, log, and Halo")
+do
+    resetFs()
+    loadProd()
+    nowMs = 56500
+    checkEq(MDADDiagnostics.start(0, nil, profile), true, "failure scenario starts")
+    halos = {}
+    local originalPrint = print
+    local logged = {}
+    print = function(...)
+        logged[#logged + 1] = tostring((select(1, ...)))
+    end
+    local okFail, handled = pcall(MDADDiagnostics.fail, 0,
+        "physics collection failed: velocity-read")
+    print = originalPrint
+    check(okFail and handled == true, "failure boundary handles the active session")
+    local failBody = files[sessionPath(1)] or ""
+    check(string.find(failBody, '"r":"error"', 1, true) ~= nil,
+        "session footer records error")
+    checkEq(indexRow(1) and indexRow(1).reason, "error",
+        "session index records error")
+    checkEq(halos[#halos] and halos[#halos].kind, "bad",
+        "diagnostics failure is visible through Halo")
+    check(string.find(table.concat(logged, "\n"), "velocity-read", 1, true) ~= nil,
+        "console log preserves actionable failure detail")
+    checkEq(MDADDiagnostics.sample(0, nowMs + 100, 1, 1, 0, 0, 0, 0,
+        0, 0, 0, 0, "follow", 1, false, nil), false,
+        "failed diagnostics session is no longer live")
+end
+
 
 --------------------------------------------------------------------------------
 scenario("start handshake is transactional and detects silent PrintWriter loss")
@@ -1044,6 +1144,69 @@ check(string.find(exBody, '"cn":false', 1, true) ~= nil, "corner-latch flag writ
 check(string.find(exBody, '"cp":true', 1, true) ~= nil, "coupled-rotation flag written")
 check(string.find(exBody, '"cp":false', 1, true) ~= nil,
     "a lateral-push frame records coupled false")
+
+--------------------------------------------------------------------------------
+scenario("sample records physical state; missing values omit, bools explicit")
+resetFs()
+loadProd()
+nowMs = 9200000
+MDADDiagnostics.start(0, nil, profile)
+MDADDiagnostics.sample(0, 9200000, 100, 200, 0.25, 12, 15, 40, 1.5, 0.2, 0.3, 1200,
+    "follow", 2, true, nil, false,
+    "clear", 10, nil, nil, nil, nil, nil, nil, 1,
+    false, false, false, false, false, {
+        physicalOffroad = true,
+        isBraking = false,
+        minWheelSkid = 0.4,
+        vLong = 3.2,
+        vLat = -0.1,
+        engineSpeed = 2200,
+        transmissionNumber = 3,
+        regulatorSpeed = 15,
+        expectedLane = 1.0,
+        latDev = 0.5,
+        roadState = "band",
+        roadLo = -3,
+        roadHi = 3,
+        unloadedS = 40,
+        activeCapReason = "gear",
+        capGear = 50,
+        capPerception = 85,
+    })
+MDADDiagnostics.sample(0, 9200500, 101, 201, 0.25, 12, 15, 39, 1.4, 0.1, 0.3, 1200,
+    "follow", 2, true, nil, false,
+    "clear", 11, nil, nil, nil, nil, nil, nil, 2,
+    false, false, false, false, false, {
+        physicalOffroad = false,
+        expectedLane = 1.0,
+        activeCapReason = "sensor",
+        capSensor = 15,
+    })
+nowMs = 9201000
+MDADDiagnostics.stop(0, "end")
+local physBody = files[sessionPath(1)] or ""
+check(string.find(physBody, '"po":true', 1, true) ~= nil, "physicalOffroad true")
+check(string.find(physBody, '"po":false', 1, true) ~= nil, "physicalOffroad false written")
+check(string.find(physBody, '"ib":false', 1, true) ~= nil, "isBraking explicit false")
+check(string.find(physBody, '"sk":0.4', 1, true) ~= nil, "minWheelSkid recorded")
+check(string.find(physBody, '"vl":3.2', 1, true) ~= nil, "vLong recorded")
+check(string.find(physBody, '"vt":-0.1', 1, true) ~= nil, "vLat recorded")
+check(string.find(physBody, '"es":2200', 1, true) ~= nil, "engineSpeed recorded")
+check(string.find(physBody, '"tn":3', 1, true) ~= nil, "transmissionNumber recorded")
+check(string.find(physBody, '"rgs":15', 1, true) ~= nil, "regulatorSpeed recorded")
+check(string.find(physBody, '"el":1', 1, true) ~= nil, "expectedLane recorded")
+check(string.find(physBody, '"ld":0.5', 1, true) ~= nil, "latDev recorded")
+check(string.find(physBody, '"rst":"band"', 1, true) ~= nil, "roadState recorded")
+check(string.find(physBody, '"rlo":-3', 1, true) ~= nil, "roadLo recorded")
+check(string.find(physBody, '"rhi":3', 1, true) ~= nil, "roadHi recorded")
+check(string.find(physBody, '"us":40', 1, true) ~= nil, "unloadedS recorded")
+check(string.find(physBody, '"acr":"gear"', 1, true) ~= nil, "activeCapReason recorded")
+check(string.find(physBody, '"cg":50', 1, true) ~= nil, "capGear recorded")
+checkEq(countNeedle(physBody, '"sk":'), 1, "absent skid omits the field, not 0")
+checkEq(countNeedle(physBody, '"vl":'), 1, "absent vLong omits the field")
+checkEq(countNeedle(physBody, '"ib":'), 1, "absent isBraking omits rather than false")
+check(string.find(physBody, '"acr":"sensor"', 1, true) ~= nil, "second sample reason")
+check(string.find(physBody, '"csen":15', 1, true) ~= nil, "capSensor recorded")
 
 closeScenario()
 print()

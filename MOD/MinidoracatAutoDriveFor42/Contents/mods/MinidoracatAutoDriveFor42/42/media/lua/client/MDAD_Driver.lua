@@ -554,8 +554,8 @@ local function clearSession(playerNum)
 end
 
 -- opt-in telemetry：HUD 缺席／關閉時零 I/O。熱路徑只在 opt-in session 進
--- pcall；sample 回 false 或丟錯就關閉該 session 的診斷，絕不打斷駕駛。
--- start／event／stop 同樣隔離。
+-- protected boundary；shouldSample／collection／sample 任一錯誤只終止診斷，
+-- 絕不打斷駕駛。start／event／stop 同樣隔離。
 local function diagEnabled()
     local hud = MDAD.HUD
     if type(hud) ~= "table" or type(hud.telemetryEnabled) ~= "function" then
@@ -574,6 +574,20 @@ local function diagStop(s, playerNum, reason)
     if not s or not s.diag then return end
     pcall(MDADDiagnostics.stop, playerNum, reason)
 end
+local function diagFail(s, playerNum, stage, err)
+    if not s or not s.diag then return end
+    s.diag = false
+    local detail = stage
+    local okText, text = pcall(tostring, err)
+    if okText and type(text) == "string" and text ~= "" then
+        detail = stage .. ": " .. text
+    end
+    local fail = type(MDADDiagnostics) == "table" and MDADDiagnostics.fail
+    local handled = false
+    if type(fail) == "function" then handled = pcall(fail, playerNum, detail) end
+    if not handled then pcall(MDADDiagnostics.stop, playerNum, "error") end
+end
+
 
 -- 停止＝只關 regulator，**不搶煞車**：停止的原因多半是玩家要自己接手（讓位逾時、下車、
 -- 換車），這時候突然硬煞比放手更危險。到達停車的煞車是 arrive 分支自己做的。
@@ -724,13 +738,14 @@ local function startSession(playerObj, playerNum)
         sessions[playerNum].usageArgs, sessions[playerNum].navUsageArgs)
     do
         local sNew = sessions[playerNum]
-        local vehicleProfile = nil
-        if type(MDADVehicleProfile) == "table" and type(MDADVehicleProfile.build) == "function" then
-            local pok, built = pcall(MDADVehicleProfile.build, vehicle)
-            if pok and type(built) == "table" then vehicleProfile = built end
-        end
-        sNew.vehicleProfile = vehicleProfile
         if diagEnabled() then
+            local vehicleProfile = nil
+            if type(MDADVehicleProfile) == "table"
+                    and type(MDADVehicleProfile.build) == "function" then
+                local pok, built = pcall(MDADVehicleProfile.build, vehicle)
+                if pok and type(built) == "table" then vehicleProfile = built end
+            end
+            sNew.vehicleProfile = vehicleProfile
             local dok, active = pcall(MDADDiagnostics.start, playerNum, vehicle, vehicleProfile)
             sNew.diag = dok and active == true
             if not dok then pcall(MDADDiagnostics.stop, playerNum, "error") end
@@ -922,6 +937,121 @@ local function laneBiasOf(s)
     local lb = s.fstate.laneBias
     if type(lb) ~= "number" or lb ~= lb then return 0 end
     return lb
+end
+
+-- 期望行駛線＝laneBias＋（繞行中）smoothstep 側偏。與 follower 前視／sweepClear
+-- 同一段；抽出只為遙測 el／ld 與甩出判定共用，語意逐位元不變。
+local function expectedLaneOf(s)
+    local expL = laneBiasOf(s)
+    local offL = s.fstate.offL
+    if s.dodging and type(offL) == "number" then
+        local oa, ob, oc, od = s.fstate.offA, s.fstate.offB, s.fstate.offC, s.fstate.offD
+        local sN = s.lastSNow
+        if sN > oa and sN < od then
+            local t
+            if sN < ob then t = (sN - oa) / (ob - oa)
+            elseif sN > oc then t = (od - sN) / (od - oc)
+            else t = 1 end
+            t = t * t * (3 - 2 * t)
+            expL = expL + (offL - expL) * t
+        end
+    end
+    return expL
+end
+
+-- NaN／非數值收口（與 MDAD_Diagnostics 的 finite 同語意；不用 math.huge）
+local function finite(n)
+    return type(n) == "number" and n * 0 == 0
+end
+
+local function jindex(obj, name)
+    return obj[name]
+end
+
+local function jget(obj, name)
+    if obj == nil then return nil end
+    local okLookup, fn = pcall(jindex, obj, name)
+    if not okLookup then error("getter lookup " .. name .. ": " .. tostring(fn)) end
+    if type(fn) ~= "function" then return nil end
+    return fn(obj)
+end
+
+-- 線性速度：世界 (X,Y)＝Bullet (x,z)。vLong＝前向分量、vLat＝CCW 側向。
+-- 只在 opt-in 診斷呼叫；getter 缺席不取池，配置成功後任何讀取錯誤都先歸還。
+local function sampleVelocity(vehicle, fx, fy)
+    local okLookup, fn = pcall(jindex, vehicle, "getLinearVelocity")
+    if not okLookup then
+        error("getter lookup getLinearVelocity: " .. tostring(fn))
+    end
+    if type(fn) ~= "function" then return nil, nil end
+    local vel = BaseVehicle.allocVector3f()
+    if vel == nil then error("allocVector3f returned nil") end
+    local okRead, vx, vz = pcall(function()
+        fn(vehicle, vel)
+        return vel:x(), vel:z()
+    end)
+    local okRelease, releaseErr = pcall(function()
+        BaseVehicle.releaseVector3f(vel)
+    end)
+    if not okRead then error("getLinearVelocity failed: " .. tostring(vx)) end
+    if not okRelease then error("releaseVector3f failed: " .. tostring(releaseErr)) end
+    if not finite(vx) or not finite(vz) then return nil, nil end
+    return vx * fx + vz * fy, -vx * fy + vz * fx
+end
+
+local function collectPhys(s, vehicle, fx, fy, expL, latDev)
+    local phys = {}
+    local po = jget(vehicle, "isDoingOffroad")
+    if type(po) == "boolean" then phys.physicalOffroad = po end
+    local ib = jget(vehicle, "isBraking")
+    if type(ib) == "boolean" then phys.isBraking = ib end
+    local sk = jget(vehicle, "getMinWheelSkid")
+    if finite(sk) then phys.minWheelSkid = sk end
+    local vLong, vLat = sampleVelocity(vehicle, fx, fy)
+    if vLong ~= nil then phys.vLong = vLong end
+    if vLat ~= nil then phys.vLat = vLat end
+    local es = jget(vehicle, "getEngineSpeed")
+    if finite(es) then phys.engineSpeed = es end
+    local tn = jget(vehicle, "getTransmissionNumber")
+    if finite(tn) then phys.transmissionNumber = tn end
+    local rgs = jget(vehicle, "getRegulatorSpeed")
+    if finite(rgs) then phys.regulatorSpeed = rgs end
+    if finite(expL) then phys.expectedLane = expL end
+    if finite(latDev) then phys.latDev = latDev end
+    local sen = s.sensor
+    if type(sen) == "table" then
+        if finite(sen.roadLo) and finite(sen.roadHi) then
+            phys.roadState = "band"
+            phys.roadLo = sen.roadLo
+            phys.roadHi = sen.roadHi
+        else
+            phys.roadState = "none"
+        end
+        if finite(sen.unloadedS) then
+            phys.unloadedS = sen.unloadedS
+        end
+        if finite(s.lastSensorCap) then phys.capSensor = s.lastSensorCap end
+        if sen.stamp == 0 then phys.capWarm = SCAN_WARM_CAP end
+    end
+    if finite(s.gearCap) and s.gearCap > 0 then phys.capGear = s.gearCap end
+    if finite(s.perceptionCap) then phys.capPerception = s.perceptionCap end
+    if s.offroad then phys.capOffroad = OFFROAD_CAP end
+    if s.blocked and not s.offroad then
+        local stopDist = s.cornerLatch and CORNER_STOP_DIST or BLOCK_STOP_DIST
+        if s.lastSNow >= s.blockS - stopDist then
+            phys.capBlocked = 0
+        else
+            phys.capBlocked = BLOCK_APPROACH_KMH
+        end
+    end
+    if s.dodging and finite(s.lastDcap) then
+        phys.capDodge = s.lastDcap
+    end
+    if finite(s.lastHeadingCap) then
+        phys.capHeading = s.lastHeadingCap
+    end
+    if type(s.lastCapReason) == "string" then phys.activeCapReason = s.lastCapReason end
+    return phys
 end
 
 -- 繞行線掃掠複驗（理由見 SWEEP_STEP 常數註解）。回 true＝全程淨空。
@@ -1618,6 +1748,12 @@ local function stepFollow(s, vehicle, playerNum, now)
     if mult > MULT_MAX then mult = MULT_MAX end
     -- 每幀先歸零，applySteering 真的走耦力時才寫 true（純觀測；一個 boolean 寫入）
     s.lastCoupled = false
+    s.lastCapReason = nil
+    s.lastHeadingCap = nil
+    s.lastDcap = nil
+    s.lastSensorCap = nil
+    s.diagExpL = nil
+    s.diagLatDev = nil
 
     -- 池向量：一顆當 forward／relPos 共用，一顆在 applySteering 內當 impulse。
     -- 這段中間沒有 early return，release 一定會執行。
@@ -1693,11 +1829,13 @@ local function stepFollow(s, vehicle, playerNum, now)
             end
             -- 速度檔位：全部是疊在剖面上的 min，cap<0＝本幀沒有任何檔位介入
             local cap = -1
+            local capReason = nil
             if not s.sensor.ready then
                 -- 首輪掃描還沒完成（剛啟動／換路線／脫困後重掃）＝「不知道前面有
                 -- 什麼」，與未載入同級保守：不加這條會在盲區全速衝 ~150ms，
                 -- 剛脫困退開的 3 公尺一半就被吃回去（M4 review blocker）
                 cap = UNLOADED_CAP
+                capReason = "sensor"
             end
             if s.dodging then
                 -- 每幀釋放檢查（2026-08-29 圖 4 實測 bug）：replan 是「障礙簽章
@@ -1758,7 +1896,13 @@ local function stepFollow(s, vehicle, playerNum, now)
                     if dcap ~= nil and s.dodgeCrawl and dcap > SQUEEZE_CAP then
                         dcap = SQUEEZE_CAP
                     end
-                    if dcap ~= nil and (cap < 0 or dcap < cap) then cap = dcap end
+                    if dcap ~= nil then
+                        s.lastDcap = dcap
+                        if cap < 0 or dcap < cap then
+                            cap = dcap
+                            capReason = "dodge"
+                        end
+                    end
                 end
             end
             -- 殭屍／屍體減速：三態政策×玩家偏好已在 refreshPolicies 合成快取，
@@ -1768,12 +1912,16 @@ local function stepFollow(s, vehicle, playerNum, now)
                 local zcap = ZOMBIE_CAP_1
                 if zn >= 8 then zcap = ZOMBIE_CAP_8
                 elseif zn >= 4 then zcap = ZOMBIE_CAP_4 end
-                if cap < 0 or zcap < cap then cap = zcap end
+                if cap < 0 or zcap < cap then
+                    cap = zcap
+                    capReason = "zombie"
+                end
             end
             local cn = s.sensor.corpseN
             if cn and cn > 0 and s.corpseSlow
                     and (cap < 0 or CORPSE_CAP < cap) then
                 cap = CORPSE_CAP
+                capReason = "corpse"
             end
             -- 跟車分級（不能只 cap 15 一路跟到撞）：MP 半更新狀態的靜止車會被
             -- isStopped 誤判成「行進中」不進硬障礙（2026-08-28 實機：黑車不在
@@ -1790,7 +1938,10 @@ local function stepFollow(s, vehicle, playerNum, now)
                         s.followHold = true -- 合法停等（卡死豁免＋獨立超時）
                     elseif gap < 20 then mcap = 8 end
                 end
-                if cap < 0 or mcap < cap then cap = mcap end
+                if cap < 0 or mcap < cap then
+                    cap = mcap
+                    capReason = "moving"
+                end
             end
             if s.sensor.unloaded then
                 -- 動態煞停距（2026-08-29 使用者裁定）：未載入格在煞停距外＝
@@ -1806,24 +1957,40 @@ local function stepFollow(s, vehicle, playerNum, now)
                         local vsafe = sqrt(room * 166)
                         if vsafe > ucap then ucap = vsafe end
                     end
-                    if cap < 0 or ucap < cap then cap = ucap end
+                    if cap < 0 or ucap < cap then
+                        cap = ucap
+                        capReason = "unloaded"
+                    end
                 end
             end
             -- 軟障礙（可推家具／HitByCar 雜物）：輾得過但要先減速——不減速輾過的
             -- 體感就是「撞到東西」（2026-08-28 實機路口擦撞回報的嫌疑之一）
             local sn = s.sensor.softN
-            if sn and sn > 0 and (cap < 0 or SOFT_CAP < cap) then cap = SOFT_CAP end
-            if cap >= 0 and targetSpeed > cap then targetSpeed = cap end
+            if sn and sn > 0 and (cap < 0 or SOFT_CAP < cap) then
+                cap = SOFT_CAP
+                capReason = "soft"
+            end
+            if cap >= 0 then s.lastSensorCap = cap end
+            if cap >= 0 and targetSpeed > cap then
+                targetSpeed = cap
+                s.lastCapReason = capReason
+            end
         end
 
         -- 速度檔位 cap：刻意放在 sensor 塊**之外**——感知模組缺席（檔案樹壞、
         -- 退回 M3 純跟線）時檔位照樣生效（codex M5.5 對抗審 BLOCKING）。
         -- 只往下壓：瘋狂檔（gearCap＝載具極速）高於剖面上限時由剖面壓住。
-        if s.gearCap > 0 and targetSpeed > s.gearCap then targetSpeed = s.gearCap end
+        if s.gearCap > 0 and targetSpeed > s.gearCap then
+            targetSpeed = s.gearCap
+            s.lastCapReason = "gear"
+        end
         -- 感知閉環上限（理由見 PERCEPTION_CAP_KMH）：標準組態上限 85；
         -- 高速組態同時切到 110m 掃描帶與 120 上限。
         local pcap = s.perceptionCap or PERCEPTION_CAP_KMH
-        if targetSpeed > pcap then targetSpeed = pcap end
+        if targetSpeed > pcap then
+            targetSpeed = pcap
+            s.lastCapReason = "perception"
+        end
         -- 感知空窗爬行（2026-08-29 實測）：改導航目標＝route cutover 會作廢
         -- 感知快照（sensor 認 profile identity 重置、stamp 歸零）＋清繞行旗標
         -- ——新路線首輪掃描完成前 plan 看到的「hardN=0」不是淨空而是**還不
@@ -1833,6 +2000,7 @@ local function stepFollow(s, vehicle, playerNum, now)
         -- session 起步同理：先看再走。
         if s.sensor and s.sensor.stamp == 0 and targetSpeed > SCAN_WARM_CAP then
             targetSpeed = SCAN_WARM_CAP
+            s.lastCapReason = "warm"
         end
         -- 甩出判定（對抗審 BLOCKING R1 修正）：偏離量＝帶號橫偏對**期望橫向
         -- 位置**（laneBias＋側偏剖面 smoothstep）的差——舊判法量「到 nav 中心線
@@ -1840,22 +2008,11 @@ local function stepFollow(s, vehicle, playerNum, now)
         -- 觸發 offroad、清剖面、回線、再繞行的鋸齒循環，任何 |offL|>4 的縫
         -- 都執行不完。期望線公式與 follower 前視點/sweepClear 同一段 smoothstep。
         if latSigned then
-            local expL = laneBiasOf(s)
-            local offL2 = s.fstate.offL
-            if s.dodging and offL2 ~= nil and type(offL2) == "number" then
-                local oa, ob, oc, od = s.fstate.offA, s.fstate.offB, s.fstate.offC, s.fstate.offD
-                local sN = s.lastSNow
-                if sN > oa and sN < od then
-                    local t
-                    if sN < ob then t = (sN - oa) / (ob - oa)
-                    elseif sN > oc then t = (od - sN) / (od - oc)
-                    else t = 1 end
-                    t = t * t * (3 - 2 * t)
-                    expL = expL + (offL2 - expL) * t
-                end
-            end
-            local dev = latSigned - expL
-            local dev2 = dev * dev
+            local expL = expectedLaneOf(s)
+            local latDev = latSigned - expL
+            local dev2 = latDev * latDev
+            s.diagExpL = expL
+            s.diagLatDev = latDev
             if s.offroad then
                 if dev2 < OFFROAD_EXIT_SQ then s.offroad = false end
             elseif dev2 > OFFROAD_LAT_SQ then
@@ -1871,12 +2028,13 @@ local function stepFollow(s, vehicle, playerNum, now)
                 end
                 if getDebug() then
                     print(LOG .. "pn=" .. playerNum .. " offroad: returning to route (dev="
-                        .. string.format("%.1f", dev) .. "m)")
+                        .. string.format("%.1f", latDev) .. "m)")
                 end
             end
         end
         if s.offroad and targetSpeed > OFFROAD_CAP then
             targetSpeed = OFFROAD_CAP
+            s.lastCapReason = "offroad"
         end
         -- 高速誤差護欄：>70 km/h 的目標速度按航向誤差線性折返回 70——誤差 0 給
         -- 滿速、≥HS_ERR_RAD（10°）壓回 70。轉向與曲率限速都在 ≤70 標定；高速下
@@ -1888,8 +2046,14 @@ local function stepFollow(s, vehicle, playerNum, now)
             if ae2 < 0 then ae2 = -ae2 end
             if ae2 >= HS_ERR_RAD then
                 targetSpeed = HS_BASE_KMH
+                s.lastCapReason = "heading"
+                s.lastHeadingCap = HS_BASE_KMH
             else
                 targetSpeed = HS_BASE_KMH + (targetSpeed - HS_BASE_KMH) * (1 - ae2 / HS_ERR_RAD)
+                if ae2 > 0 then
+                    s.lastCapReason = "heading"
+                    s.lastHeadingCap = targetSpeed
+                end
             end
         end
 
@@ -1906,6 +2070,7 @@ local function stepFollow(s, vehicle, playerNum, now)
             vehicle:setRegulator(false)
             vehicle:setForceBrake()
             targetSpeed = 0
+            s.lastCapReason = "blocked"
             -- immutable DODGE 的守護驗證失敗會帶著剖面轉 blocked（車在動時清
             -- 剖面＝目標線瞬跳）：近停後才清承諾，之後停等重提案照常
             if s.dodging and speedKmh < 1 and speedKmh > -1 then
@@ -1921,7 +2086,10 @@ local function stepFollow(s, vehicle, playerNum, now)
                 -- blocked 但障礙還在 BLOCK_STOP_DIST 之外：以爬行速度滑行接近，
                 -- 不急煞——掃描逼近後的縫隙判定比 30 公尺外那輪準，很多「遠看
                 -- 堵死」在近距離會變成可繞（量化誤差隨距離縮小）
-                if targetSpeed > BLOCK_APPROACH_KMH then targetSpeed = BLOCK_APPROACH_KMH end
+                if targetSpeed > BLOCK_APPROACH_KMH then
+                    targetSpeed = BLOCK_APPROACH_KMH
+                    s.lastCapReason = "blocked"
+                end
             end
             regOn = applySpeed(s, vehicle, targetSpeed, speedKmh)
             if not reached then
@@ -1974,20 +2142,47 @@ local function stepFollow(s, vehicle, playerNum, now)
                 sqrt(lateralSq or 0), s.roadBias, Drive.getGear(playerNum), tostring(regOn)))
         end
         if s.diag then
-            -- 全部是**讀既有狀態**：一個欄位都不新算、不改控制。實機碰撞分析要的
-            -- 最小證據集（2026-08-31：截圖那一幀只看得到 spd/tgt/lat，判不出
-            -- replan 走了哪條離場路徑、有沒有在耦力旋轉、煞停錨在哪）。
-            local ok, live = pcall(MDADDiagnostics.sample, playerNum, now,
-                vx, vy, heading, speedKmh, targetSpeed or 0, remaining or 0,
-                latSigned or 0, headingError or 0, steer or 0, force, s.mode,
-                Drive.getGear(playerNum), regOn, s.sensor,
-                s.blocked or s.dodging or s.offroad or s.mode == "unstick",
-                s.planMode, s.lastSNow, s.blockS, s.dodgeMargin, s.dodgeNeed,
-                s.roadBias, s.blockHitX, s.blockHitY, s.fstate.idx,
-                s.blocked, s.dodging, s.offroad, s.cornerLatch, s.lastCoupled)
-            if not ok or live ~= true then
-                s.diag = false
-                pcall(MDADDiagnostics.stop, playerNum, not ok and "error" or "stopped")
+            -- 新 Java getter 只在這一幀確定會 enqueue sample 時才跑；
+            -- shouldSample 與 D.sample 共用同一 5/10Hz gate。
+            local critFlag = s.blocked or s.dodging or s.offroad or s.mode == "unstick"
+            local want = true
+            local failed = false
+            if type(MDADDiagnostics.shouldSample) == "function" then
+                local okW, w = pcall(MDADDiagnostics.shouldSample, playerNum, now,
+                    s.mode, headingError, critFlag)
+                if not okW then
+                    diagFail(s, playerNum, "shouldSample failed", w)
+                    failed = true
+                else
+                    want = w == true
+                end
+            end
+            local phys
+            if not failed and want then
+                local okPhys, collected = pcall(collectPhys, s, vehicle, fx, fy,
+                    s.diagExpL, s.diagLatDev)
+                if not okPhys then
+                    diagFail(s, playerNum, "physics collection failed", collected)
+                    failed = true
+                else
+                    phys = collected
+                end
+            end
+            if not failed then
+                local ok, live = pcall(MDADDiagnostics.sample, playerNum, now,
+                    vx, vy, heading, speedKmh, targetSpeed or 0, remaining or 0,
+                    latSigned or 0, headingError or 0, steer or 0, force, s.mode,
+                    Drive.getGear(playerNum), regOn, s.sensor, critFlag,
+                    s.planMode, s.lastSNow, s.blockS, s.dodgeMargin, s.dodgeNeed,
+                    s.roadBias, s.blockHitX, s.blockHitY, s.fstate.idx,
+                    s.blocked, s.dodging, s.offroad, s.cornerLatch, s.lastCoupled,
+                    phys)
+                if not ok then
+                    diagFail(s, playerNum, "sample failed", live)
+                elseif live ~= true then
+                    s.diag = false
+                    pcall(MDADDiagnostics.stop, playerNum, "stopped")
+                end
             end
         end
         -- ---- 卡死偵測 ----

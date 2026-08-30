@@ -149,6 +149,9 @@ local drive = {
         setRegulator = 0, regulatorOn = 0, regulatorOff = 0,
         setRegulatorSpeed = 0, maxRegSpeed = 0, badRegSpeed = 0, fractionalRegSpeed = 0,
         forceBrake = 0, getForwardVector = 0,
+        isDoingOffroad = 0, isBraking = 0, getMinWheelSkid = 0,
+        getEngineSpeed = 0, getTransmissionNumber = 0, getRegulatorSpeed = 0,
+        getLinearVelocity = 0,
     },
     -- 每幀不變式的違規計數＋首次違規的幀號（0＝沒有違規）
     bad = { impulse = 0, atImpulse = 0, pair = 0, atPair = 0, live = 0, atLive = 0 },
@@ -957,6 +960,36 @@ local function newVehicle(opts)
 
     -- setForceBrake 寫 clientControls.forceBrake，效期 1 秒（CarController.java:973-979）
     function v:setForceBrake() drive.calls.forceBrake = drive.calls.forceBrake + 1 end
+    -- Phase A 診斷 getter：只應在 s.diag 真時被呼叫。
+    function v:isDoingOffroad()
+        drive.calls.isDoingOffroad = drive.calls.isDoingOffroad + 1
+        return self._offroad == true
+    end
+    function v:isBraking()
+        drive.calls.isBraking = drive.calls.isBraking + 1
+        return self._braking == true
+    end
+    function v:getMinWheelSkid()
+        drive.calls.getMinWheelSkid = drive.calls.getMinWheelSkid + 1
+        return self._skid or 1
+    end
+    function v:getEngineSpeed()
+        drive.calls.getEngineSpeed = drive.calls.getEngineSpeed + 1
+        return self._engineSpeed or 800
+    end
+    function v:getTransmissionNumber()
+        drive.calls.getTransmissionNumber = drive.calls.getTransmissionNumber + 1
+        return self._trans or 2
+    end
+    function v:getRegulatorSpeed()
+        drive.calls.getRegulatorSpeed = drive.calls.getRegulatorSpeed + 1
+        return self._regSpeed or 0
+    end
+    function v:getLinearVelocity(out)
+        drive.calls.getLinearVelocity = drive.calls.getLinearVelocity + 1
+        local ms = (self._speed or 0) / 3.6
+        return out:set(self._fwdX * ms, 0, self._fwdY * ms)
+    end
     return v
 end
 
@@ -6599,7 +6632,7 @@ end
 -- =====================================================================
 scenario("opt-in telemetry：lifecycle／pn／單檔路徑／關閉零呼叫／失敗不中斷／vprofile 不進控制")
 
-do
+local function scenarioTelemetry()
     checkEq(type(MDADVehicleProfile), "table", "production MDAD_VehicleProfile.lua 真的載入了")
     checkEq(type(MDADDiagnostics), "table", "production MDAD_Diagnostics.lua 真的載入了")
     checkEq(type(MDADVehicleProfile.build), "function", "VehicleProfile.build 存在")
@@ -6607,6 +6640,7 @@ do
     checkEq(type(MDADDiagnostics.sample), "function", "Diagnostics.sample 存在")
     checkEq(type(MDADDiagnostics.event), "function", "Diagnostics.event 存在")
     checkEq(type(MDADDiagnostics.stop), "function", "Diagnostics.stop 存在")
+    checkEq(type(MDADDiagnostics.fail), "function", "Diagnostics.fail 存在")
 
     if type(MDAD.HUD) ~= "table" then MDAD.HUD = {} end
     local hudTelem = MDAD.HUD.telemetryEnabled
@@ -6624,9 +6658,9 @@ do
 
     drive.telemOn = false
     drive.diag = {
-        start = 0, sample = 0, critical = 0, event = 0, stop = 0,
+        build = 0, start = 0, sample = 0, critical = 0, event = 0, stop = 0, fail = 0,
         startPn = nil, samplePn = nil, stopPn = nil, stopReason = nil,
-        names = {},
+        failPn = nil, failMessage = nil, names = {},
         last = {}, -- 最後一幀的碰撞證據欄位（Driver 端接線用；編碼由 test_diagnostics 驗）
     }
 
@@ -6634,7 +6668,14 @@ do
     local origSample = MDADDiagnostics.sample
     local origEvent = MDADDiagnostics.event
     local origStop = MDADDiagnostics.stop
+    local origFail = MDADDiagnostics.fail
+    local origShould = MDADDiagnostics.shouldSample
     local origBuild = MDADVehicleProfile.build
+    local forceShould = nil
+    MDADVehicleProfile.build = function(vehicle)
+        drive.diag.build = drive.diag.build + 1
+        return origBuild(vehicle)
+    end
 
     MDADDiagnostics.start = function(pn, vehicle, profile)
         drive.diag.start = drive.diag.start + 1
@@ -6645,7 +6686,7 @@ do
     MDADDiagnostics.sample = function(pn, nowMsArg, x, y, heading, speed, target, remaining, lat, err, steer, force, mode, gear, regulator, sensor, critical,
             planMode, routeS, blockS, dodgeMargin, dodgeNeed, roadBias,
             blockHitX, blockHitY, followerIdx,
-            blocked, dodging, offroad, corner, coupled)
+            blocked, dodging, offroad, corner, coupled, phys)
         drive.diag.sample = drive.diag.sample + 1
         drive.diag.samplePn = pn
         if critical == true then drive.diag.critical = drive.diag.critical + 1 end
@@ -6664,6 +6705,7 @@ do
         last.offroad = offroad
         last.corner = corner
         last.coupled = coupled
+        last.phys = phys
         return true -- Driver lifecycle spy; production sampling is covered separately
     end
     MDADDiagnostics.event = function(pn, name, a, b, c, d)
@@ -6677,6 +6719,17 @@ do
         drive.diag.stopReason = reason
         if origStop then return origStop(pn, reason) end
     end
+    MDADDiagnostics.fail = function(pn, detail)
+        drive.diag.fail = drive.diag.fail + 1
+        drive.diag.failPn = pn
+        drive.diag.failMessage = detail
+        MDADDiagnostics.stop(pn, "error")
+        return true
+    end
+    MDADDiagnostics.shouldSample = function()
+        if forceShould ~= nil then return forceShould end
+        return true
+    end
 
     drive.telemOn = false
     checkTrue(armDrive(), "telemetry off 仍可啟動")
@@ -6685,15 +6738,24 @@ do
     checkEq(dveh._imp.max, 1, "off：每幀最多一次 addImpulse")
     MDAD.Drive.stop(0, nil)
     checkEq(drive.diag.start, 0, "off：零 start")
+    checkEq(drive.diag.build, 0, "off：零 VehicleProfile.build／零新增物理 getter")
     checkEq(drive.diag.sample, 0, "off：零 sample")
     checkEq(drive.diag.event, 0, "off：零 event")
     checkEq(drive.diag.stop, 0, "off：零 stop")
+    checkEq(drive.calls.isDoingOffroad, 0, "off：零 isDoingOffroad")
+    checkEq(drive.calls.isBraking, 0, "off：零 isBraking")
+    checkEq(drive.calls.getMinWheelSkid, 0, "off：零 getMinWheelSkid")
+    checkEq(drive.calls.getEngineSpeed, 0, "off：零 getEngineSpeed")
+    checkEq(drive.calls.getTransmissionNumber, 0, "off：零 getTransmissionNumber")
+    checkEq(drive.calls.getRegulatorSpeed, 0, "off：零 getRegulatorSpeed")
+    checkEq(drive.calls.getLinearVelocity, 0, "off：零 getLinearVelocity")
 
     drive.diag.start, drive.diag.sample, drive.diag.event, drive.diag.stop = 0, 0, 0, 0
     drive.diag.names = {}
     drive.telemOn = true
     checkTrue(armDrive(), "telemetry on 啟動")
     checkEq(drive.diag.start, 1, "on：start 一次")
+    checkEq(drive.diag.build, 1, "on：VehicleProfile.build 一次")
     checkEq(drive.diag.startPn, 0, "start 用精確 pn")
     checkTrue(drive.diag.sample > 0, "on：sample 有接到")
     checkEq(drive.diag.samplePn, 0, "sample 用精確 pn")
@@ -6719,7 +6781,42 @@ do
     checkEq(dlast.corner, false, "跟線幀 corner latch=false")
     checkEq(dlast.coupled, false, "橫推跟線幀 coupled=false（不是耦力調頭）")
     checkEq(dveh._imp.max, 1, "擴充遙測欄位不改變 addImpulse 次數")
+    checkEq(drive.pool.live, 0, "on：物理速度向量成對歸還")
+    check(drive.calls.isDoingOffroad > 0, "on：讀 isDoingOffroad")
+    check(drive.calls.getLinearVelocity > 0, "on：讀 getLinearVelocity")
+    checkEq(type(dlast.phys), "table", "sample 帶 phys table")
+    checkEq(type(dlast.phys.physicalOffroad), "boolean", "phys.physicalOffroad")
+    checkEq(type(dlast.phys.isBraking), "boolean", "phys.isBraking")
+    checkEq(type(dlast.phys.minWheelSkid), "number", "phys.minWheelSkid")
+    checkEq(type(dlast.phys.vLong), "number", "phys.vLong")
+    checkEq(type(dlast.phys.vLat), "number", "phys.vLat")
+    checkEq(type(dlast.phys.engineSpeed), "number", "phys.engineSpeed")
+    checkEq(type(dlast.phys.transmissionNumber), "number", "phys.transmissionNumber")
+    checkEq(type(dlast.phys.regulatorSpeed), "number", "phys.regulatorSpeed")
+    checkEq(type(dlast.phys.expectedLane), "number", "phys.expectedLane")
+    checkEq(type(dlast.phys.latDev), "number", "phys.latDev")
+    checkEq(type(dlast.phys.roadState), "string", "phys.roadState")
+    checkEq(type(dlast.phys.capPerception), "number", "phys.capPerception")
+    checkEq(dlast.phys.physicalOffroad, false, "跟線幀 Java offroad=false")
 
+    driveReset(dveh)
+    drive.diag.sample = 0
+    for _ = 1, 5 do
+        dveh._x = dveh._x + 0.1852
+        driveTick(dp, dveh)
+    end
+    check(drive.diag.sample > 0, "對齊窗有 sample")
+    checkEq(drive.calls.isDoingOffroad, drive.diag.sample, "isDoingOffroad 次數 = sample")
+    checkEq(drive.calls.getLinearVelocity, drive.diag.sample, "getLinearVelocity 次數 = sample")
+
+    forceShould = false
+    driveReset(dveh)
+    drive.diag.sample = 0
+    for _ = 1, 5 do driveTick(dp, dveh) end
+    checkEq(drive.calls.isDoingOffroad, 0, "gate skip 零 isDoingOffroad")
+    checkEq(drive.calls.getLinearVelocity, 0, "gate skip 零 getLinearVelocity")
+    check(drive.diag.sample > 0, "gate skip 仍呼叫 sample 探活")
+    forceShould = nil
     drive.nav.route = newRoute(40, 0, 0, 4, 0)
     nowMs = nowMs + 250
     driveTick(dp, dveh)
@@ -6763,14 +6860,137 @@ do
 
     local sampleSpy = MDADDiagnostics.sample
     MDADDiagnostics.sample = function() error("sample-fail") end
+    drive.diag.fail, drive.diag.failMessage, drive.diag.stopReason = 0, nil, nil
     driveReset(dveh)
     checkTrue(MDAD.Drive.start(dp), "Diagnostics.sample 丟錯仍啟動")
     driveTick(dp, dveh)
     checkTrue(MDAD.Drive.isActive(0), "sample 失敗只停診斷、不拆 drive session")
     checkEq(dveh._imp.max, 1, "sample 失敗不改變 addImpulse")
-    checkEq(drive.diag.stopReason, "error", "sample 失敗主動收掉 telemetry session")
+    checkEq(drive.pool.live, 0, "sample 失敗仍歸還外層向量")
+    checkEq(drive.diag.fail, 1, "sample 失敗走單一 diagnostics fail boundary")
+    checkTrue(string.find(drive.diag.failMessage or "", "sample-fail", 1, true) ~= nil,
+        "sample failure 保留原始錯誤")
+    checkEq(drive.diag.stopReason, "error", "sample 失敗以 error 收掉 telemetry session")
     MDAD.Drive.stop(0, nil)
     MDADDiagnostics.sample = sampleSpy
+
+    local gateSpy = MDADDiagnostics.shouldSample
+    MDADDiagnostics.shouldSample = function() error("gate-fail") end
+    drive.diag.fail, drive.diag.failMessage, drive.diag.stopReason = 0, nil, nil
+    checkTrue(armDrive(), "Diagnostics.shouldSample 丟錯仍維持 drive session")
+    MDADDiagnostics.shouldSample = gateSpy
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkTrue(MDAD.Drive.isActive(0), "gate 失敗後 Drive 繼續")
+    checkEq(dveh._imp.max, 1, "gate 失敗後下一幀控制照常")
+    checkEq(drive.calls.isDoingOffroad, 0, "gate 失敗在 physics getter 前收口")
+    checkEq(drive.pool.live, 0, "gate 失敗仍歸還外層向量")
+    checkEq(drive.diag.fail, 1, "gate 失敗走單一 fail boundary")
+    checkTrue(string.find(drive.diag.failMessage or "", "gate-fail", 1, true) ~= nil,
+        "gate failure 保留原始錯誤")
+    checkEq(drive.diag.stopReason, "error", "gate 失敗記 error")
+    MDAD.Drive.stop(0, nil)
+
+    checkTrue(armDrive(), "getter lookup failure 情境啟動")
+    local lookupGetter = dveh.isDoingOffroad
+    local lookupMeta = getmetatable(dveh)
+    dveh.isDoingOffroad = nil
+    setmetatable(dveh, {
+        __index = function(obj, key)
+            if key == "isDoingOffroad" then error("lookup-fail") end
+            local inherited = lookupMeta and lookupMeta.__index
+            if type(inherited) == "function" then return inherited(obj, key) end
+            if type(inherited) == "table" then return inherited[key] end
+            return nil
+        end,
+    })
+    drive.diag.fail, drive.diag.failMessage, drive.diag.stopReason = 0, nil, nil
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    dveh.isDoingOffroad = lookupGetter
+    setmetatable(dveh, lookupMeta)
+    checkTrue(MDAD.Drive.isActive(0), "getter lookup 丟錯不拆 Drive")
+    checkEq(drive.pool.live, 0, "getter lookup 丟錯仍歸還外層向量")
+    checkEq(drive.diag.fail, 1, "getter lookup 丟錯走 fail boundary")
+    checkTrue(string.find(drive.diag.failMessage or "", "lookup-fail", 1, true) ~= nil,
+        "getter lookup failure 保留原始錯誤")
+    checkEq(drive.diag.stopReason, "error", "getter lookup failure 記 error")
+    MDAD.Drive.stop(0, nil)
+
+    checkTrue(armDrive(), "velocity allocation failure 情境啟動")
+    local allocSpy = BaseVehicle.allocVector3f
+    local skidSpy = dveh.getMinWheelSkid
+    local physicsAlloc = false
+    dveh.getMinWheelSkid = function(self)
+        physicsAlloc = true
+        return skidSpy(self)
+    end
+    BaseVehicle.allocVector3f = function()
+        if physicsAlloc then
+            physicsAlloc = false
+            error("alloc-fail")
+        end
+        return allocSpy()
+    end
+    drive.diag.fail, drive.diag.failMessage, drive.diag.stopReason = 0, nil, nil
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    BaseVehicle.allocVector3f = allocSpy
+    dveh.getMinWheelSkid = skidSpy
+    checkTrue(MDAD.Drive.isActive(0), "velocity alloc 丟錯不拆 Drive")
+    checkEq(drive.pool.live, 0, "velocity alloc 丟錯仍歸還外層向量")
+    checkEq(drive.diag.fail, 1, "velocity alloc 丟錯走 fail boundary")
+    checkTrue(string.find(drive.diag.failMessage or "", "alloc-fail", 1, true) ~= nil,
+        "velocity alloc failure 保留原始錯誤")
+    checkEq(drive.diag.stopReason, "error", "velocity alloc failure 記 error")
+    MDAD.Drive.stop(0, nil)
+
+    checkTrue(armDrive(), "velocity read failure 情境啟動")
+    local velocitySpy = dveh.getLinearVelocity
+    dveh.getLinearVelocity = function() error("velocity-read-fail") end
+    drive.diag.fail, drive.diag.failMessage, drive.diag.stopReason = 0, nil, nil
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    dveh.getLinearVelocity = velocitySpy
+    checkTrue(MDAD.Drive.isActive(0), "velocity read 丟錯不拆 Drive")
+    checkEq(drive.pool.live, 0, "velocity read 丟錯先歸還 inner 與 outer 向量")
+    checkEq(drive.bad.pair, 0, "velocity read 丟錯該幀 alloc/release 成對")
+    checkEq(drive.diag.fail, 1, "velocity read 丟錯走 fail boundary")
+    checkTrue(string.find(drive.diag.failMessage or "", "velocity-read-fail", 1, true) ~= nil,
+        "velocity read failure 保留原始錯誤")
+    checkEq(drive.diag.stopReason, "error", "velocity read failure 記 error")
+    MDAD.Drive.stop(0, nil)
+
+    -- 同幀 dodge 候選 24 與 8 隻殭屍 10 競合：最終 winner 必須是 zombie；
+    -- dodge 候選仍獨立保留，不能用 s.dodging 推測 active reason。
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
+        AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    MDAD.Drive.setSlowPref(0, "zombie", true)
+    drive.fillWorld(-2, 70, -7, 7)
+    drive.putSolid(20, 0, "telemetry_winner")
+    drive.putMoving(25, 0, { _class = "IsoZombie" })
+    drive.putMoving(25, -1, { _class = "IsoZombie" })
+    drive.putMoving(26, 0, { _class = "IsoZombie" })
+    drive.putMoving(26, 1, { _class = "IsoZombie" })
+    drive.putMoving(27, -1, { _class = "IsoZombie" })
+    drive.putMoving(27, 0, { _class = "IsoZombie" })
+    drive.putMoving(27, 1, { _class = "IsoZombie" })
+    drive.putMoving(28, 0, { _class = "IsoZombie" })
+    drive.diag.last = {}
+    checkTrue(armDrive(), "dodge+zombie winner 情境啟動")
+    setHeading(dveh, 0.05)
+    dveh._speed = 20
+    driveReset(dveh)
+    drive.scanRound()
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    local winnerPhys = drive.diag.last.phys or {}
+    checkEq(drive.calls.maxRegSpeed, 10, "dodge+zombie 最終 target 由 zombie 10 勝出")
+    checkEq(winnerPhys.activeCapReason, "zombie", "activeCapReason 保存真正 winner")
+    checkEq(winnerPhys.capSensor, 10, "capSensor 保存聚合後 winner value")
+    checkTrue(type(winnerPhys.capDodge) == "number" and winnerPhys.capDodge > 10,
+        "capDodge 獨立保存未勝出的 dodge candidate")
+    MDAD.Drive.stop(0, nil)
 
     MDADDiagnostics.start = function() error("diag-fail") end
     drive.telemOn = true
@@ -6809,6 +7029,8 @@ do
     MDADDiagnostics.sample = origSample
     MDADDiagnostics.event = origEvent
     MDADDiagnostics.stop = origStop
+    MDADDiagnostics.fail = origFail
+    MDADDiagnostics.shouldSample = origShould
     MDADVehicleProfile.build = origBuild
     MDAD.HUD.telemetryEnabled = hudTelem
     drive.telemOn = false
@@ -6816,10 +7038,12 @@ do
     getFileSeparator = oldFileSeparator
     Clipboard = oldClipboard
 end
+scenarioTelemetry()
 
 -- =====================================================================
 -- 情境二十九：理由鍵不得缺翻譯（鍵是 runtime 真的吐出來的，不是抄原始碼）
 -- =====================================================================
+local function scenarioReasonKeys()
 scenario("理由鍵覆蓋：每個分支都跑到，且四語 UI.json 都有對應翻譯")
 
 checkEq(type(MDAD), "table", "production MDAD.lua 真的載入了")
@@ -6927,6 +7151,8 @@ for _, ok in ipairs({ "EN", "CH", "CN", "JP" }) do
         end
     end
 end
+end
+scenarioReasonKeys()
 
 -- =====================================================================
 -- 總結

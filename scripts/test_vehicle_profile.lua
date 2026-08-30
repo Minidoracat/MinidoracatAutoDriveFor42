@@ -83,19 +83,32 @@ local KEYS = {
     "mass", "maxSpeed", "wheelbase", "track", "clamp0", "clamp30", "clampMax",
     "wheelFriction", "delta0Safe", "deltaVSafe", "rMin", "lookScale",
     "rearArm", "needHalf", "probeR",
+    "enginePower", "brakingForce", "offroadEfficiency", "rollInfluence",
+    "centerOfMassY", "tireFrictionMin", "tireFrictionAvg", "tireFrictionCount",
+    "isAnyTireMissing",
 }
+local OPTIONAL_KEYS = {
+    enginePower = true, brakingForce = true, offroadEfficiency = true,
+    rollInfluence = true, centerOfMassY = true,
+    tireFrictionMin = true, tireFrictionAvg = true, tireFrictionCount = true,
+    isAnyTireMissing = true,
+}
+
 
 local function checkKeys(p, label)
     for i = 1, #KEYS do
         local k = KEYS[i]
-        check(p[k] ~= nil, label .. " has " .. k)
-        if k ~= "valid" and k ~= "fallback" and k ~= "scriptName" then
-            check(type(p[k]) == "number" and p[k] * 0 == 0,
-                label .. " " .. k .. " finite scalar")
+        local v = p[k]
+        if not OPTIONAL_KEYS[k] then check(v ~= nil, label .. " has " .. k) end
+        if v ~= nil then
+            if k == "valid" or k == "fallback" or k == "isAnyTireMissing" then
+                check(type(v) == "boolean", label .. " " .. k .. " boolean")
+            elseif k ~= "scriptName" then
+                check(type(v) == "number" and v * 0 == 0,
+                    label .. " " .. k .. " finite scalar")
+            end
         end
     end
-    check(type(p.valid) == "boolean", label .. " valid boolean")
-    check(type(p.fallback) == "boolean", label .. " fallback boolean")
     check(type(p.scriptName) == "string", label .. " scriptName string")
 end
 
@@ -134,16 +147,51 @@ local function vec(x, y, z, counts)
     })
 end
 
-local function wheel(x, z, counts)
+local function wheel(x, z, counts, id)
     local o = {}
     function o:getOffset()
         if counts then counts.offset = (counts.offset or 0) + 1 end
         return vec(x, 0, z, counts)
     end
+    function o:getId()
+        if counts then counts.wheelId = (counts.wheelId or 0) + 1 end
+        return id
+    end
     return setmetatable(o, {
         __index = function(_, k) error("field access: " .. tostring(k)) end,
         __newindex = function(_, k) error("field write: " .. tostring(k)) end,
     })
+end
+
+local function tirePart(friction, hasItem, counts)
+    local o = {}
+    function o:getWheelFriction()
+        if counts then counts.partFric = (counts.partFric or 0) + 1 end
+        return friction
+    end
+    function o:getInventoryItem()
+        if counts then counts.partItem = (counts.partItem or 0) + 1 end
+        if hasItem == false then return nil end
+        return {}
+    end
+    return setmetatable(o, {
+        __index = function(_, k) error("field access: " .. tostring(k)) end,
+        __newindex = function(_, k) error("field write: " .. tostring(k)) end,
+    })
+end
+
+-- 標準四輪 id 的固定順序：mock getWheel(i) 的索引順序就照這份
+local WHEEL_IDS = { "FrontLeft", "FrontRight", "RearLeft", "RearRight" }
+
+-- 依固定順序列出「還在車上」的輪 id（nil／false＝拆掉）。getWheelCount 與
+-- getWheel 共用同一份，兩邊的數量與順序不可能漂移。
+local function presentWheelIds(wheels)
+    local present = {}
+    for i = 1, #WHEEL_IDS do
+        local id = WHEEL_IDS[i]
+        if wheels[id] then present[#present + 1] = id end
+    end
+    return present
 end
 
 local function makeVehicle(opts)
@@ -172,7 +220,7 @@ local function makeVehicle(opts)
         counts.wheel = (counts.wheel or 0) + 1
         local w = wheels[id]
         if w == false then return nil end
-        if w then return wheel(w[1], w[2], counts) end
+        if w then return wheel(w[1], w[2], counts, id) end
         return nil
     end
     function script:getSteeringClamp(speed)
@@ -184,6 +232,38 @@ local function makeVehicle(opts)
     function script:getWheelFriction()
         counts.friction = (counts.friction or 0) + 1
         return opts.friction
+    end
+    if not opts.oldOnly then
+        function script:getOffroadEfficiency()
+            counts.offroadEff = (counts.offroadEff or 0) + 1
+            if opts.throwOffroadEfficiency then error("offroadEfficiency") end
+            return opts.offroadEfficiency
+        end
+        function script:getRollInfluence()
+            counts.roll = (counts.roll or 0) + 1
+            if opts.throwRollInfluence then error("rollInfluence") end
+            return opts.rollInfluence
+        end
+        function script:getCenterOfMassOffset()
+            counts.com = (counts.com or 0) + 1
+            if opts.throwCenterOfMass then error("centerOfMass") end
+            return vec(0, opts.centerOfMassY, 0, counts)
+        end
+        function script:getWheelCount()
+            counts.wheelCount = (counts.wheelCount or 0) + 1
+            if opts.throwWheelCount then error("wheelCount") end
+            if opts.wheelCount ~= nil then return opts.wheelCount end
+            return #presentWheelIds(wheels)
+        end
+        function script:getWheel(index)
+            counts.getWheel = (counts.getWheel or 0) + 1
+            if opts.throwWheelIndex == index then error("wheel " .. tostring(index)) end
+            local present = presentWheelIds(wheels)
+            local id = present[index + 1]
+            if not id then return nil end
+            local w = wheels[id]
+            return wheel(w[1], w[2], counts, id)
+        end
     end
     setmetatable(script, {
         __index = function(_, k) error("field access: " .. tostring(k)) end,
@@ -206,6 +286,41 @@ local function makeVehicle(opts)
     function vehicle:getMaxSpeed()
         counts.maxSpeed = (counts.maxSpeed or 0) + 1
         return opts.maxSpeed or 70
+    end
+    if not opts.oldOnly then
+        function vehicle:getEnginePower()
+            counts.enginePower = (counts.enginePower or 0) + 1
+            if opts.throwEnginePower then error("enginePower") end
+            return opts.enginePower
+        end
+        function vehicle:getBrakingForce()
+            counts.brakingForce = (counts.brakingForce or 0) + 1
+            if opts.throwBrakingForce then error("brakingForce") end
+            return opts.brakingForce
+        end
+        if not opts.noTireMissingGetter then
+            function vehicle:isAnyTireMissing()
+                counts.tireMissing = (counts.tireMissing or 0) + 1
+                if opts.throwTireMissing then error("tireMissing") end
+                if opts.tireMissing == nil then return false end
+                return opts.tireMissing == true
+            end
+        end
+        if not opts.noPartLookup then
+            function vehicle:getPartById(id)
+                counts.partById = (counts.partById or 0) + 1
+                if opts.throwPartLookup then error("partById") end
+                local parts = opts.parts
+                if type(parts) ~= "table" then
+                    if opts.tireFriction == nil then return nil end
+                    if type(id) ~= "string" or string.sub(id, 1, 4) ~= "Tire" then
+                        return nil
+                    end
+                    return tirePart(opts.tireFriction, opts.tireItem ~= false, counts)
+                end
+                return parts[id]
+            end
+        end
     end
     setmetatable(vehicle, {
         __index = function(_, k) error("field access: " .. tostring(k)) end,
@@ -232,6 +347,12 @@ local PICKUP = {
     friction = 1.5,
     steeringClamp = 0.3,
     maxSpeed = 70,
+    enginePower = 4000,
+    brakingForce = 80,
+    offroadEfficiency = 1.1,
+    rollInfluence = 0.7,
+    centerOfMassY = 0.55,
+    tireFriction = 1.5,
     wheels = quad(0.3462 * 1.82, 0.7582 * 1.82, -0.5879 * 1.82),
 }
 local F150 = {
@@ -242,6 +363,12 @@ local F150 = {
     friction = 1.7,
     steeringClamp = 0.3,
     maxSpeed = 80,
+    enginePower = 4800,
+    brakingForce = 90,
+    offroadEfficiency = 1.1,
+    rollInfluence = 0.8,
+    centerOfMassY = 0.50,
+    tireFriction = 1.7,
     wheels = quad(0.8333 * 0.9, 2.1667 * 0.9, -0.7667 * 0.9),
 }
 local F250 = {
@@ -252,6 +379,12 @@ local F250 = {
     friction = 1.7,
     steeringClamp = 0.3,
     maxSpeed = 80,
+    enginePower = 5000,
+    brakingForce = 100,
+    offroadEfficiency = 1.15,
+    rollInfluence = 0.8,
+    centerOfMassY = 0.52,
+    tireFriction = 1.7,
     wheels = quad(0.8333 * 0.9, 2.1667 * 0.9, -1.1667 * 0.9),
 }
 local F350 = {
@@ -262,6 +395,12 @@ local F350 = {
     friction = 1.7,
     steeringClamp = 0.3,
     maxSpeed = 85,
+    enginePower = 5500,
+    brakingForce = 110,
+    offroadEfficiency = 1.2,
+    rollInfluence = 0.85,
+    centerOfMassY = 0.54,
+    tireFriction = 1.7,
     wheels = quad(0.8333 * 0.9, 2.1667 * 0.9, -2.0444 * 0.9),
 }
 
@@ -316,6 +455,18 @@ local function checkSpec(spec, label)
     checkNear(p.probeR, probeR, 1e-9, label .. " probeR")
     checkNear(p.rMin, p.wheelbase / math.tan(delta0Safe), 1e-9, label .. " rMin")
     checkNear(p.lookScale, clamp(scale, 0.85, 1.5), 1e-9, label .. " lookScale")
+    if spec.enginePower then
+        checkEq(p.enginePower, spec.enginePower, label .. " enginePower")
+        checkEq(p.brakingForce, spec.brakingForce, label .. " brakingForce")
+        checkEq(p.offroadEfficiency, spec.offroadEfficiency, label .. " offroadEfficiency")
+        checkEq(p.rollInfluence, spec.rollInfluence, label .. " rollInfluence")
+        checkNear(p.centerOfMassY, spec.centerOfMassY, 1e-9, label .. " centerOfMassY")
+        checkEq(p.tireFrictionCount, 4, label .. " tireFrictionCount")
+        checkNear(p.tireFrictionMin, spec.tireFriction, 1e-9, label .. " tireFrictionMin")
+        checkNear(p.tireFrictionAvg, spec.tireFriction, 1e-9, label .. " tireFrictionAvg")
+        checkFalse(p.isAnyTireMissing, label .. " tires present")
+        checkTrue(p.valid, label .. " physics does not flip valid")
+    end
     return p
 end
 
@@ -517,6 +668,12 @@ do
         friction = 1.5,
         steeringClamp = 0.3,
         maxSpeed = 70,
+        enginePower = 4000,
+        brakingForce = 80,
+        offroadEfficiency = 1.1,
+        rollInfluence = 0.7,
+        centerOfMassY = 0.55,
+        tireFriction = 1.5,
         wheels = PICKUP.wheels,
     })
     local p = P.build(v)
@@ -529,8 +686,18 @@ do
     checkEq(counts.friction, 1, "getWheelFriction once")
     checkEq(counts.clamp, 3, "getSteeringClamp three speeds")
     checkEq(counts.wheel, 4, "getWheelById four standard ids")
+    checkEq(counts.enginePower, 1, "getEnginePower once")
+    checkEq(counts.brakingForce, 1, "getBrakingForce once")
+    checkEq(counts.offroadEff, 1, "getOffroadEfficiency once")
+    checkEq(counts.roll, 1, "getRollInfluence once")
+    checkEq(counts.com, 1, "getCenterOfMassOffset once")
+    checkEq(counts.wheelCount, 1, "getWheelCount once")
+    checkEq(counts.getWheel, 4, "getWheel four indices")
+    checkEq(counts.partById, 4, "getPartById four tires")
+    checkEq(counts.tireMissing, 1, "isAnyTireMissing once")
     check(counts.x and counts.x >= 2, "Vector3f:x() used")
     check(counts.z and counts.z >= 2, "Vector3f:z() used")
+    check(counts.y and counts.y >= 1, "Vector3f:y() used for CoM")
     check(counts.offset and counts.offset >= 4, "getOffset used")
 end
 
@@ -580,6 +747,115 @@ do
     checkNear(pickup.clamp0, 0.9, 1e-9, "pickup clamp0 = 0.9")
     checkNear(pickup.clampMax, 0.3, 1e-9, "pickup clampMax = steeringClamp")
     checkNear(pickup.clamp30, javaClamp(30, 0.3, 70), 1e-9, "pickup clamp30")
+end
+
+--------------------------------------------------------------------------------
+scenario("additive physics unknowns are omitted without changing legacy geometry")
+do
+    local base = {
+        fullName = "Base.PickUpTruck",
+        bodyW = PICKUP.bodyW,
+        bodyL = PICKUP.bodyL,
+        mass = 1030,
+        friction = 1.5,
+        steeringClamp = 0.3,
+        maxSpeed = 70,
+        wheels = PICKUP.wheels,
+    }
+    local old = {}
+    for k, v in pairs(base) do old[k] = v end
+    old.oldOnly = true
+    local p = P.build(makeVehicle(old))
+    checkKeys(p, "oldOnly")
+    checkTrue(p.valid, "missing physics API keeps valid")
+    checkFalse(p.fallback, "missing physics API does not set fallback")
+    checkEq(p.scriptName, "Base.PickUpTruck", "oldOnly keeps scriptName")
+    checkEq(p.enginePower, nil, "missing enginePower omitted")
+    checkEq(p.brakingForce, nil, "missing brakingForce omitted")
+    checkEq(p.offroadEfficiency, nil, "missing offroadEfficiency omitted")
+    checkEq(p.rollInfluence, nil, "missing rollInfluence omitted")
+    checkEq(p.centerOfMassY, nil, "missing CoM y omitted")
+    checkEq(p.tireFrictionCount, nil, "missing wheel enumeration omitted")
+    checkEq(p.isAnyTireMissing, nil, "unknown tire state omitted")
+
+    local thrown = {}
+    for k, v in pairs(base) do thrown[k] = v end
+    thrown.enginePower = 4000
+    thrown.brakingForce = 80
+    thrown.offroadEfficiency = 1.1
+    thrown.rollInfluence = 0.7
+    thrown.centerOfMassY = 0.55
+    thrown.tireFriction = 1.5
+    thrown.throwEnginePower = true
+    thrown.throwBrakingForce = true
+    thrown.throwOffroadEfficiency = true
+    thrown.throwRollInfluence = true
+    thrown.throwCenterOfMass = true
+    thrown.throwWheelIndex = 2
+    thrown.throwTireMissing = true
+    local pThrown = P.build(makeVehicle(thrown))
+    checkTrue(pThrown.valid, "throwing physics getters keep legacy geometry valid")
+    checkFalse(pThrown.fallback, "throwing physics getters do not set legacy fallback")
+    checkEq(pThrown.enginePower, nil, "throwing enginePower omitted")
+    checkEq(pThrown.brakingForce, nil, "throwing brakingForce omitted")
+    checkEq(pThrown.offroadEfficiency, nil, "throwing offroadEfficiency omitted")
+    checkEq(pThrown.rollInfluence, nil, "throwing rollInfluence omitted")
+    checkEq(pThrown.centerOfMassY, nil, "throwing CoM omitted")
+    checkEq(pThrown.tireFrictionCount, nil, "partial wheel enumeration omitted")
+    checkEq(pThrown.isAnyTireMissing, nil,
+        "throwing runtime getter plus incomplete enumeration stays unknown")
+
+    local pBad = P.build(makeVehicle({
+        fullName = "Base.WildPhysics",
+        bodyW = PICKUP.bodyW,
+        bodyL = PICKUP.bodyL,
+        mass = 1030,
+        friction = 1.5,
+        steeringClamp = 0.3,
+        maxSpeed = 70,
+        wheels = PICKUP.wheels,
+        enginePower = 1e9,
+        brakingForce = -4,
+        offroadEfficiency = 0,
+        rollInfluence = 9,
+        centerOfMassY = 50,
+        tireFriction = 800,
+        tireMissing = true,
+    }))
+    checkKeys(pBad, "wild physics")
+    checkTrue(pBad.valid, "illegal physics does not invalidate geometry")
+    checkFalse(pBad.fallback, "illegal physics does not set fallback")
+    checkEq(pBad.enginePower, nil, "OOB enginePower omitted")
+    checkEq(pBad.brakingForce, nil, "OOB brakingForce omitted")
+    checkEq(pBad.offroadEfficiency, nil, "OOB offroadEfficiency omitted")
+    checkEq(pBad.rollInfluence, nil, "OOB rollInfluence omitted")
+    checkEq(pBad.centerOfMassY, nil, "OOB CoM y omitted")
+    checkEq(pBad.tireFrictionMin, nil, "OOB tire friction min omitted")
+    checkEq(pBad.tireFrictionAvg, nil, "OOB tire friction average omitted")
+    checkEq(pBad.tireFrictionCount, nil, "OOB tire friction aggregate omitted")
+    checkTrue(pBad.isAnyTireMissing, "runtime tire getter true is kept")
+
+    local enumerated = {}
+    for k, v in pairs(base) do enumerated[k] = v end
+    enumerated.enginePower = 4000
+    enumerated.brakingForce = 80
+    enumerated.offroadEfficiency = 1.1
+    enumerated.rollInfluence = 0.7
+    enumerated.centerOfMassY = 0.55
+    enumerated.tireFriction = 1.4
+    enumerated.noTireMissingGetter = true
+    local pEnumerated = P.build(makeVehicle(enumerated))
+    checkFalse(pEnumerated.isAnyTireMissing,
+        "complete wheel enumeration proves no tire missing")
+
+    enumerated.tireItem = false
+    local pMiss = P.build(makeVehicle(enumerated))
+    checkTrue(pMiss.valid, "missing tire items keep profile")
+    checkEq(pMiss.tireFrictionCount, 0, "complete enumeration counts zero installed tires")
+    checkEq(pMiss.tireFrictionMin, nil, "zero installed tires has no fake minimum")
+    checkEq(pMiss.tireFrictionAvg, nil, "zero installed tires has no fake average")
+    checkTrue(pMiss.isAnyTireMissing,
+        "complete wheel enumeration proves a tire is missing without runtime getter")
 end
 
 --------------------------------------------------------------------------------
