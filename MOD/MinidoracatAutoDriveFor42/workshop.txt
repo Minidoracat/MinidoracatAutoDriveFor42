@@ -23,6 +23,7 @@ description=[*] [b]Future trajectory[/b]: translucent blue for the normal route 
 description=[*] [b]Item availability[/b]: both devices can be crafted or found in world loot, with separate crafting and spawn toggles for GPS and autodrive
 description=[*] [b]Power and fuel costs[/b]: GPS and autodrive each have independent 0–500% power and extra-fuel settings that stack; at 100%, active GPS navigation adds 5% fuel use and autodrive adds 25%
 description=[*] [b]Map mod support out of the box[/b]: the road network comes from the game's official street data, so subscribed map mods just work
+description=[*] [b]Three ways to learn the recipes[/b]: read the dedicated Electronic Navigation Repair Manual; reverse-engineer without consuming the device—a GPS teaches its recipe at Electricity 3, while an Autopilot Module teaches the GPS recipe at 3 and its own at 6; or auto-learn at Electricity 6/8. Crafting still requires Electricity 3/6. The manual appears only in electronic, computer-book, library, and magazine containers whose loot has not yet generated; existing containers are not backfilled
 description=[/list]
 description=
 description=[h2]⚠️ Requirements[/h2]
