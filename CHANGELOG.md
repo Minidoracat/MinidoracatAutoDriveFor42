@@ -16,13 +16,16 @@
 
 ### 新增
 
-- 新增可選的自動駕駛診斷紀錄，預設關閉；開啟後只在本機固定紀錄槽寫入含絕對世界座標與精確時間戳的紀錄檔。新版 MiniMap「自動駕駛」分類可複製最新檔或資料夾的絕對路徑；MiniMap API v1 與 ESC 選項仍可改開關及保留天數，但沒有複製按鈕
+- 新增可選的自動駕駛診斷紀錄，預設關閉；開啟後只在本機固定紀錄槽寫入含絕對世界座標與原始 epoch 毫秒時間戳（不做時區轉換）的紀錄檔。新版 MiniMap「自動駕駛」分類可複製最新檔或資料夾的絕對路徑；MiniMap API v1 與 ESC 選項仍可改開關及保留天數，但沒有複製按鈕
+- 新增段落索引，可依每段紀錄的開始／結束 timestamp、檔案大小與結束原因快速找到正確檔案；仍維持每次自動駕駛一個檔，不把同日多段行駛混在一起
+- 複製最新紀錄或資料夾路徑成功時，改用右上角通知顯示完成回饋；舊版 UI 框架或通知失敗時仍會顯示頭上提示
+- 診斷紀錄補上碰撞前後的規劃狀態，以及最近障礙的尺寸與位置，能更快分辨是感知、規劃或車輛控制出了問題
 
-> 技術要點：client-only、預設關；固定 64×2MiB、每 session 一檔；保留天數 1／3／7／14／30（預設 7）；MiniMap API v2 才有複製路徑按鈕，v1 仍可改 tick／combo。每段自駕另快取 runtime mass、車身、軸距與保守轉向 envelope；Phase 1 只寫入診斷，不餵控制。
+> 技術要點：client-only、預設關；固定 64×2MiB、每 session 一檔；保留天數 1／3／7／14／30（預設 7）；`session-index.txt` 以 raw epoch ms 固定最多 64 列。JSONL additive 欄位為 pm/rs/bs/dm/dn/rb/bhx/bhy/fi/cr/bl/dg/or/cn/cp，sensor stamp 變更時 nearest 最多 8 點附 r/x/y。planMode／lastCoupled／vehicleProfile 純觀測；bhx/bhy 只是把既有 sweep hit 寫入 log，沒有新增控制輸入。MiniMap API v2 才有複製路徑按鈕，v1 仍可改 tick／combo。
 
 ### 修正
 
-- 修正自動駕駛進行中可能因紀錄檔仍由 writer 開啟，而無法複製最新紀錄路徑；現在活躍 session 可直接複製，不必先停止自動駕駛
+- 修正自動駕駛進行中無法複製最新紀錄路徑；現在不必先停止自動駕駛
 
 ## [42.20.4-0.1.2] - 2026-08-31
 

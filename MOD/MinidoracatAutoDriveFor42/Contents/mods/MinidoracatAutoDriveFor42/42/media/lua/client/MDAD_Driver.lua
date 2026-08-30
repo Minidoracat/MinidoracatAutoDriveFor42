@@ -704,6 +704,12 @@ local function startSession(playerObj, playerNum)
         roadBias = 0,       -- 路面對中校正量（EMA；行駛線＝sandBias + roadBias）
         vehicleProfile = nil, -- Phase 1 diagnostic cache；與 follower 的 s.profile 分名，控制不讀
         diag = false,       -- telemetry session 是否啟動（熱路徑 boolean）
+        -- 遙測用純觀測欄位（控制端不讀）：planMode＝最近一次 replan 離場分類；
+        -- init＝尚未完成分類，其他值為 guard／guard-blocked／corner-latched／
+        -- offroad-suppress／clear／clear-hold／dodge／blocked。lastCoupled＝這一幀
+        -- applySteering 是否真的走耦力調頭（每幀先重設 false）。
+        planMode = "init",
+        lastCoupled = false,
     }
     do
         -- 高速檔：沙盒上限 > 85 → 掃描帶拉長（120 km/h 的煞停＋反應 ~77m < 110）
@@ -810,6 +816,9 @@ local function applySteering(s, vehicle, fwd, fx, fy, steer, speedKmh, mult, cou
         -- 它對力矩的貢獻本來就是零（與 impulse 平行）。力量另乘 ROTATE_FORCE_SCALE：
         -- 跟線量級是為對抗高速自回正標定的，原地調頭用全額＝快速旋轉。
         local rf = force * ROTATE_FORCE_SCALE
+        -- 純觀測：這一幀真的走了耦力（呼叫端的 coupled 可能被車周探測否決成
+        -- 橫推，遙測要記「實際施力模式」而不是「原本想用哪種」）
+        s.lastCoupled = true
         force = rf -- 遙測回傳實際施出去的力
         impulse:set(parity * rf * px, 0, parity * rf * py)
         fwd:set(parity * (-REAR_ARM) * fx + LATERAL_JITTER * px, 0,
@@ -1182,6 +1191,9 @@ local function replan(s, vehicle, playerNum)
                 s.blocked = false
                 s.blockedNotified = false
             end
+            -- 純觀測分類（遙測用；不影響任何決策）：守護輪的兩種結局在 log 裡
+            -- 必須分得開——同樣是 dodging，guard-blocked 那幀是煞停的起因。
+            s.planMode = s.blocked and "guard-blocked" or "guard"
             return
         end
     end
@@ -1190,7 +1202,10 @@ local function replan(s, vehicle, playerNum)
     -- 「靠很近開導航就能繞」：近距下路線折點退化、障礙變普通直路障礙），
     -- 前進 CORNER_RETRY_DIST 就撤銷 latch 重新枚舉——手動近開流程的自動化。
     if s.blocked and s.cornerLatch and sen.hardN > 0 then
-        if s.lastSNow - s.cornerS < CORNER_RETRY_DIST then return end
+        if s.lastSNow - s.cornerS < CORNER_RETRY_DIST then
+            s.planMode = "corner-latched"
+            return
+        end
         s.cornerLatch = false
     end
     local mode, a, b, c, d, offL
@@ -1453,6 +1468,7 @@ local function replan(s, vehicle, playerNum)
             if getDebug() then
                 print(LOG .. "pn=" .. playerNum .. " offroad: dodge suppressed, return to route first")
             end
+            s.planMode = "offroad-suppress"
             return
         end
     end
@@ -1478,6 +1494,7 @@ local function replan(s, vehicle, playerNum)
                 print(string.format("%spn=%d dodge a=%.1f b=%.1f c=%.1f d=%.1f offL=%.2f",
                     LOG, playerNum, a, b, c, d, offL))
             end
+            s.planMode = "dodge"
             return
         end
         mode = "blocked"
@@ -1489,6 +1506,7 @@ local function replan(s, vehicle, playerNum)
         -- 在函式開頭 return），舊的 release 守門已被「剖面走完才釋放」取代。
         if s.blocked and s.clearStreak + 1 < CLEAR_STREAK_N then
             s.clearStreak = s.clearStreak + 1
+            s.planMode = "clear-hold"
             return
         end
         s.clearStreak = 0
@@ -1498,6 +1516,7 @@ local function replan(s, vehicle, playerNum)
         s.pushBanL = nil -- 走廊淨空＝episode 結束，物理 ban 一併解除
         s.cornerLatch = false
         s.blockHitX = nil
+        s.planMode = "clear"
         return
     end
     s.clearStreak = 0
@@ -1510,6 +1529,7 @@ local function replan(s, vehicle, playerNum)
     s.blocked = true
     -- a＝Corridor blocked 時的 sObs0；缺 Corridor 的保守分支沒有 a → 0＝立即煞停
     s.blockS = a or 0
+    s.planMode = "blocked"
     if not s.blockedNotified then
         s.blockedNotified = true
         local playerObj = getSpecificPlayer(playerNum)
@@ -1596,6 +1616,8 @@ local function stepFollow(s, vehicle, playerNum, now)
     local mult = getGameTime():getMultiplier()
     if mult < MULT_MIN then mult = MULT_MIN end
     if mult > MULT_MAX then mult = MULT_MAX end
+    -- 每幀先歸零，applySteering 真的走耦力時才寫 true（純觀測；一個 boolean 寫入）
+    s.lastCoupled = false
 
     -- 池向量：一顆當 forward／relPos 共用，一顆在 applySteering 內當 impulse。
     -- 這段中間沒有 early return，release 一定會執行。
@@ -1952,11 +1974,17 @@ local function stepFollow(s, vehicle, playerNum, now)
                 sqrt(lateralSq or 0), s.roadBias, Drive.getGear(playerNum), tostring(regOn)))
         end
         if s.diag then
+            -- 全部是**讀既有狀態**：一個欄位都不新算、不改控制。實機碰撞分析要的
+            -- 最小證據集（2026-08-31：截圖那一幀只看得到 spd/tgt/lat，判不出
+            -- replan 走了哪條離場路徑、有沒有在耦力旋轉、煞停錨在哪）。
             local ok, live = pcall(MDADDiagnostics.sample, playerNum, now,
                 vx, vy, heading, speedKmh, targetSpeed or 0, remaining or 0,
                 latSigned or 0, headingError or 0, steer or 0, force, s.mode,
                 Drive.getGear(playerNum), regOn, s.sensor,
-                s.blocked or s.dodging or s.offroad or s.mode == "unstick")
+                s.blocked or s.dodging or s.offroad or s.mode == "unstick",
+                s.planMode, s.lastSNow, s.blockS, s.dodgeMargin, s.dodgeNeed,
+                s.roadBias, s.blockHitX, s.blockHitY, s.fstate.idx,
+                s.blocked, s.dodging, s.offroad, s.cornerLatch, s.lastCoupled)
             if not ok or live ~= true then
                 s.diag = false
                 pcall(MDADDiagnostics.stop, playerNum, not ok and "error" or "stopped")

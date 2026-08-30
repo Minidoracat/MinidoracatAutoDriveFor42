@@ -1,8 +1,8 @@
 --[[
 MDAD_Diagnostics.lua offline tests: load production module with an in-memory
-fake filesystem. Covers allocation-off, slot reuse/retention/clock rollback/
-full capacity, size cap, one-file/session, manifest recovery, batching/
-checkpoint, escaping, privacy exclusions, and copy paths.
+fake filesystem. Covers allocation-off, retention and slot reuse failures,
+size and I/O caps, one-file/session, manifest/index recovery and checkpoints,
+escaping/privacy, collision evidence, clipboard paths, Toast, and Halo fallback.
 ]]
 
 local MEDIA = "MOD/MinidoracatAutoDriveFor42/Contents/mods/MinidoracatAutoDriveFor42/42/media/lua"
@@ -70,8 +70,11 @@ local writerOpens = {}
 local openWriters = {}
 local failWriter = false
 local failOpenAt = nil
+-- 只讓某一個路徑的 writer 開不起來：管理檔（索引）與紀錄檔的失敗要能分開驗
+local failPath = nil
 local throwWrite = false
 local silentDrop = false
+local dropPath = nil
 local lockLiveReads = false
 local nowMs = 1000000
 local enabled = true
@@ -93,8 +96,10 @@ local function resetFs()
     openWriters = {}
     failWriter = false
     failOpenAt = nil
+    failPath = nil
     throwWrite = false
     silentDrop = false
+    dropPath = nil
     lockLiveReads = false
     clipText = nil
     clipFail = false
@@ -173,14 +178,18 @@ end
 function getFileWriter(path, _, append)
     writerCalls = writerCalls + 1
     writerOpens[#writerOpens + 1] = { path = path, append = append == true }
-    if failWriter or writerCalls == failOpenAt then return nil end
+    if failWriter or writerCalls == failOpenAt or (failPath and path == failPath) then
+        return nil
+    end
     if not append or files[path] == nil then files[path] = "" end
     openWriters[path] = (openWriters[path] or 0) + 1
     local closed = false
     return {
         write = function(_, s)
             if throwWrite then error("io") end
-            if not silentDrop then files[path] = files[path] .. (s or "") end
+            if not silentDrop and path ~= dropPath then
+                files[path] = files[path] .. (s or "")
+            end
         end,
         close = function()
             if closed then return end
@@ -242,13 +251,52 @@ local function countNeedle(s, needle)
     end
 end
 
+-- 只數 session-NNN.log：管理檔 session-index.txt 也含 "session-"，用寬鬆的
+-- 前綴比對會把索引算成一份紀錄檔，「固定 64 槽」的斷言就變成 65。
 local function sessionFiles()
     local n = 0
     local path
     for path in pairs(files) do
-        if string.find(path, "session%-", 1) then n = n + 1 end
+        if string.find(path, "session%-%d%d%d%.log$") then n = n + 1 end
     end
     return n
+end
+
+local INDEX_PATH = "MinidoracatAutoDrive/Telemetry/session-index.txt"
+local MANIFEST_PATH = "MinidoracatAutoDrive/Telemetry/manifest.txt"
+
+-- 索引列 → { slot, startTs, endTs, bytes, reason, file } 的陣列（順序保留）
+local function indexRows()
+    local rows = {}
+    local content = files[INDEX_PATH]
+    if type(content) ~= "string" then return rows end
+    local lines = splitLines(content)
+    local i = 1
+    while i <= #lines do
+        local slot, st, en, bytes, reason, file = string.match(lines[i],
+            "^(%d+)\t([%-%d%.]+)\t([%-%d%.]+)\t([%-%d%.]+)\t([^\t]*)\t(.+)$")
+        if slot then
+            rows[#rows + 1] = {
+                slot = tonumber(slot), startTs = tonumber(st), endTs = tonumber(en),
+                bytes = tonumber(bytes), reason = reason, file = file,
+                raw = lines[i],
+            }
+        else
+            rows[#rows + 1] = { raw = lines[i], malformed = true }
+        end
+        i = i + 1
+    end
+    return rows
+end
+
+local function indexRow(slot)
+    local rows = indexRows()
+    local i = 1
+    while i <= #rows do
+        if rows[i].slot == slot then return rows[i] end
+        i = i + 1
+    end
+    return nil
 end
 
 local function sessionPath(i)
@@ -618,6 +666,384 @@ checkEq(MDADDiagnostics.start(0, nil, profile), false, "throwing writer rejects 
 checkEq(MDADDiagnostics.sample(0, 80100, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0,
     "follow", 1, false, nil), false, "failed writer leaves no live session")
 throwWrite = false
+
+--------------------------------------------------------------------------------
+scenario("session index: raw epoch rows, occupied-only, bounded 64, retention clears")
+resetFs()
+loadProd()
+days = 7
+nowMs = 1788113696982
+checkEq(MDADDiagnostics.start(0, nil, profile), true, "index scenario starts")
+local irow = indexRow(1)
+check(irow ~= nil, "index carries a row for the committed slot")
+if irow then
+    checkEq(irow.startTs, 1788113696982, "startTs is raw epoch ms")
+    checkEq(irow.endTs, 0, "a live session has endTs 0")
+    checkEq(irow.reason, "active", "committed start records active")
+    checkEq(irow.file, "session-001.log", "row names its session file")
+    check(irow.bytes > 0, "row carries the committed header bytes")
+    check(string.find(irow.raw, ":", 1, true) == nil, "no clock formatting in the index")
+    check(string.find(irow.raw, "+", 1, true) == nil, "no timezone offset in the index")
+end
+checkEq(#indexRows(), 1, "index lists occupied slots only")
+nowMs = 1788113900123
+MDADDiagnostics.stop(0, "arrive")
+irow = indexRow(1)
+check(irow ~= nil, "a stopped slot stays in the index")
+if irow then
+    checkEq(irow.endTs, 1788113900123, "stop writes the raw epoch endTs")
+    checkEq(irow.reason, "arrive", "stop reason lands in the index")
+    check(irow.bytes > 0, "stop refreshes the byte count")
+end
+
+resetFs()
+loadProd()
+days = 1
+local idxN = 1
+while idxN <= 64 do
+    nowMs = 2000000 + idxN
+    MDADDiagnostics.start(0, nil, profile)
+    MDADDiagnostics.stop(0, "end")
+    idxN = idxN + 1
+end
+checkEq(#indexRows(), 64, "index never grows past the 64 fixed slots")
+nowMs = 2000000 + DAY_MS + 5000
+MDADDiagnostics.start(0, nil, profile)
+MDADDiagnostics.stop(0, "end")
+checkEq(#indexRows(), 1, "retention cleanup drops expired rows from the index")
+checkEq(indexRows()[1] and indexRows()[1].slot, 1, "the reused slot is the only row left")
+
+resetFs()
+loadProd()
+days = 1
+nowMs = 3000000
+MDADDiagnostics.start(0, nil, profile)
+MDADDiagnostics.stop(0, "end")
+checkEq(#indexRows(), 1, "one recorded session before expiry")
+nowMs = 3000000 + DAY_MS + 1000
+failPath = sessionPath(1)
+checkEq(MDADDiagnostics.start(0, nil, profile), true,
+    "unwritable expired slot is skipped for the next free slot")
+failPath = nil
+MDADDiagnostics.stop(0, "end")
+checkEq(#indexRows(), 2, "failed retention keeps the old row visible and adds slot 2")
+check(indexRow(1) ~= nil and #(files[sessionPath(1)] or "") > 0,
+    "untruncated coordinate log remains indexed")
+checkEq(indexRow(2) and indexRow(2).slot, 2, "new session uses slot 2")
+
+--------------------------------------------------------------------------------
+scenario("index recovery: reason survives reload; stale active becomes interrupted")
+resetFs()
+loadProd()
+days = 7
+nowMs = 4000000
+checkEq(MDADDiagnostics.start(0, nil, profile), true, "reason recovery scenario starts")
+nowMs = 4001000
+MDADDiagnostics.stop(0, "UI_MinidoracatAutoDrive_Stuck")
+checkEq(indexRow(1) and indexRow(1).reason, "UI_MinidoracatAutoDrive_Stuck",
+    "translation-key reasons survive the TSV")
+local stoppedEnd = indexRow(1) and indexRow(1).endTs
+local stoppedBytes = indexRow(1) and indexRow(1).bytes
+files[MANIFEST_PATH] = "corrupt\n"
+loadProd()
+nowMs = 4002000
+checkEq(MDADDiagnostics.start(0, nil, profile), true,
+    "index restores a stopped slot when manifest is corrupt")
+checkEq(indexRow(1) and indexRow(1).reason, "UI_MinidoracatAutoDrive_Stuck",
+    "recovery preserves the old reason")
+checkEq(indexRow(1) and indexRow(1).endTs, stoppedEnd,
+    "recovery preserves the old endTs")
+checkEq(indexRow(1) and indexRow(1).bytes, stoppedBytes,
+    "recovery preserves the old durable bytes")
+checkEq(indexRow(2) and indexRow(2).reason, "active", "the new session is the active row")
+nowMs = 4003000
+MDADDiagnostics.stop(0, "end")
+
+resetFs()
+loadProd()
+nowMs = 5000000
+checkEq(MDADDiagnostics.start(0, nil, profile), true, "crash simulation starts")
+local headerBytes = indexRow(1) and indexRow(1).bytes or 0
+nowMs = 5061000
+checkEq(MDADDiagnostics.sample(0, nowMs, 1, 1, 0, 5, 5, 9, 0, 0, 0, 0,
+    "follow", 1, false, nil), true, "60s sample checkpoint remains live")
+local checkpointBytes = indexRow(1) and indexRow(1).bytes or 0
+check(checkpointBytes > headerBytes, "periodic checkpoint persists newer durable bytes")
+loadProd() -- 沒有 stop：模擬當掉／強制關閉
+nowMs = 5062000
+checkEq(MDADDiagnostics.start(0, nil, profile), true, "session after a crash starts")
+checkEq(indexRow(1) and indexRow(1).reason, "interrupted",
+    "an active row with no live session recovers as interrupted")
+checkEq(indexRow(1) and indexRow(1).bytes, checkpointBytes,
+    "crash recovery keeps the last durable checkpoint bytes")
+MDADDiagnostics.stop(0, "end")
+
+resetFs()
+loadProd()
+nowMs = 6000000
+MDADDiagnostics.start(0, nil, profile)
+nowMs = 6001000
+MDADDiagnostics.stop(0, "menu")
+files[INDEX_PATH] = nil
+loadProd()
+nowMs = 6002000
+checkEq(MDADDiagnostics.start(0, nil, profile), true, "start works without an index file")
+checkEq(indexRow(1) and indexRow(1).reason, "menu",
+    "a missing index falls back to the last end record of the newest slot")
+MDADDiagnostics.stop(0, "end")
+
+--------------------------------------------------------------------------------
+scenario("index write failure never takes down a durable session")
+resetFs()
+loadProd()
+nowMs = 7000000
+failPath = INDEX_PATH
+checkEq(MDADDiagnostics.start(0, nil, profile), true,
+    "index failure does not reject an otherwise durable start")
+checkEq(MDADDiagnostics.sample(0, 7000000, 1, 1, 0, 5, 5, 9, 0, 0, 0, 0,
+    "follow", 1, false, nil), true, "the session keeps recording without an index")
+nowMs = 7001000
+MDADDiagnostics.stop(0, "end")
+check(string.find(files[sessionPath(1)] or "", '"r":"end"', 1, true) ~= nil,
+    "session data still ends durably")
+checkEq(files[INDEX_PATH], nil, "no index file was produced")
+failPath = nil
+
+resetFs()
+loadProd()
+nowMs = 7020000
+checkEq(MDADDiagnostics.start(0, nil, profile), true,
+    "stale-active index scenario starts with a durable index")
+checkEq(indexRow(1) and indexRow(1).reason, "active",
+    "the initial index row records an active session")
+failPath = INDEX_PATH
+nowMs = 7021000
+MDADDiagnostics.stop(0, "arrive")
+checkEq(indexRow(1) and indexRow(1).reason, "active",
+    "failed index finalization leaves the earlier active row on disk")
+check(string.find(files[sessionPath(1)] or "", '"r":"arrive"', 1, true) ~= nil,
+    "the session footer still records the true final reason")
+failPath = nil
+loadProd()
+nowMs = 7022000
+checkEq(MDADDiagnostics.start(0, nil, profile), true,
+    "reload repairs a stale active index from manifest and footer")
+checkEq(indexRow(1) and indexRow(1).reason, "arrive",
+    "a normally closed session is not mislabeled interrupted")
+checkEq(indexRow(1) and indexRow(1).endTs, 7021000,
+    "repair preserves the manifest final timestamp")
+MDADDiagnostics.stop(0, "end")
+
+--------------------------------------------------------------------------------
+scenario("final manifest failure stays indexed and self-heals on reload")
+resetFs()
+loadProd()
+nowMs = 7050000
+checkEq(MDADDiagnostics.start(0, nil, profile), true, "manifest-finalization scenario starts")
+failPath = MANIFEST_PATH
+nowMs = 7051000
+MDADDiagnostics.stop(0, "arrive")
+failPath = nil
+local finalizationRow = indexRow(1)
+checkEq(finalizationRow and finalizationRow.reason, "arrive",
+    "index still commits the final reason when manifest finalization fails")
+check(finalizationRow and finalizationRow.bytes > 0,
+    "index still commits durable bytes when manifest finalization fails")
+local finalizationBytes = finalizationRow and finalizationRow.bytes
+loadProd()
+nowMs = 7052000
+checkEq(MDADDiagnostics.start(0, nil, profile), true,
+    "a later start recovers from the newer index row")
+checkEq(indexRow(1) and indexRow(1).reason, "arrive",
+    "recovery repairs the stale active manifest without losing the reason")
+checkEq(indexRow(1) and indexRow(1).bytes, finalizationBytes,
+    "recovery repairs the stale active manifest without losing durable bytes")
+MDADDiagnostics.stop(0, "end")
+
+--------------------------------------------------------------------------------
+scenario("I/O failure reason outranks normal stop and size; durable bytes survive reload")
+resetFs()
+loadProd()
+nowMs = 7100000
+checkEq(MDADDiagnostics.start(0, nil, profile), true, "checkpoint failure scenario starts")
+local beforeFailureBytes = indexRow(1) and indexRow(1).bytes or 0
+failPath = sessionPath(1)
+nowMs = 7161000
+checkEq(MDADDiagnostics.sample(0, nowMs, 1, 1, 0, 5, 5, 9, 0, 0, 0, 0,
+    "follow", 1, false, nil), false, "append reopen failure stops diagnostics")
+failPath = nil
+local errorRow = indexRow(1)
+checkEq(errorRow and errorRow.reason, "error", "checkpoint I/O failure persists error")
+checkEq(errorRow and errorRow.endTs, 7161000, "error row records failure timestamp")
+check(errorRow and errorRow.bytes > beforeFailureBytes,
+    "error row records the last verified durable bytes")
+local errorBytes = errorRow and errorRow.bytes
+loadProd()
+nowMs = 7162000
+checkEq(MDADDiagnostics.start(0, nil, profile), true, "reload after I/O failure starts")
+checkEq(indexRow(1) and indexRow(1).reason, "error", "error survives reload")
+checkEq(indexRow(1) and indexRow(1).bytes, errorBytes, "durable error bytes survive reload")
+MDADDiagnostics.stop(0, "end")
+
+resetFs()
+loadProd()
+nowMs = 7200000
+MDADDiagnostics.start(0, nil, profile)
+dropPath = sessionPath(1)
+nowMs = 7201000
+MDADDiagnostics.stop(0, "arrive")
+dropPath = nil
+checkEq(indexRow(1) and indexRow(1).reason, "error",
+    "stop durability failure cannot be mislabeled arrive")
+
+resetFs()
+loadProd()
+nowMs = 7300000
+MDADDiagnostics.start(0, nil, profile)
+dropPath = sessionPath(1)
+local bigDrop = string.rep("z", 8000)
+local dropN = 1
+while dropN <= 400 do
+    MDADDiagnostics.event(0, bigDrop)
+    dropN = dropN + 1
+end
+dropPath = nil
+checkEq(indexRow(1) and indexRow(1).reason, "error",
+    "size-full durability failure cannot be mislabeled size")
+
+--------------------------------------------------------------------------------
+scenario("copy success uses the shared framework Toast; Halo is the fallback")
+resetFs()
+loadProd()
+nowMs = 8000000
+local toasts = {}
+MinidoracatUI = { v1 = {
+    API_MAJOR = 1,
+    CAPABILITIES = { toast = true },
+    Toast = { show = function(opts)
+        toasts[#toasts + 1] = opts
+        return opts
+    end },
+} }
+MDADDiagnostics.start(0, nil, profile)
+nowMs = 8001000
+MDADDiagnostics.stop(0, "end")
+halos = {}
+check(MDADDiagnostics.copyLatestPath(0) == true, "copy latest works with the framework")
+checkEq(#toasts, 1, "copy latest raises exactly one Toast")
+checkEq(toasts[1] and toasts[1].title, "UI_MinidoracatAutoDrive_Options",
+    "Toast title resolves through the options translation key")
+checkEq(toasts[1] and toasts[1].message, "UI_MinidoracatAutoDrive_TelemetryCopied",
+    "Toast message resolves through the copied translation key")
+checkEq(#halos, 0, "the shared Toast replaces the good Halo")
+check(MDADDiagnostics.copyFolderPath(0) == true, "copy folder works with the framework")
+checkEq(#toasts, 2, "the folder button raises a Toast too")
+
+MinidoracatUI.v1.CAPABILITIES.toast = false
+halos = {}
+check(MDADDiagnostics.copyFolderPath(0) == true, "capability off still copies")
+checkEq(#halos, 1, "capability off falls back to exactly one Halo")
+checkEq(halos[1] and halos[1].kind, "good", "the capability-off fallback Halo is good")
+
+MinidoracatUI.v1.CAPABILITIES.toast = true
+MinidoracatUI.v1.Toast.show = function() error("toast") end
+halos = {}
+check(MDADDiagnostics.copyFolderPath(0) == true, "a throwing Toast still reports success")
+checkEq(#halos, 1, "a throwing Toast falls back to one Halo")
+checkEq(halos[1] and halos[1].kind, "good", "the throwing-Toast fallback Halo is good")
+
+MinidoracatUI.v1.Toast.show = function() return nil end
+halos = {}
+check(MDADDiagnostics.copyFolderPath(0) == true, "a pending or dropped Toast still reports success")
+checkEq(#halos, 1, "a nil Toast result falls back to one immediate Halo")
+checkEq(halos[1] and halos[1].kind, "good", "the nil-Toast fallback Halo is good")
+
+clipFail = true
+halos = {}
+check(MDADDiagnostics.copyFolderPath(0) == false, "clipboard failure still reports false")
+checkEq(halos[#halos] and halos[#halos].kind, "bad", "failures stay on the bad Halo")
+clipFail = false
+MinidoracatUI = nil
+
+--------------------------------------------------------------------------------
+scenario("nearest hard points carry r/x/y for collision analysis")
+resetFs()
+loadProd()
+nowMs = 9000000
+MDADDiagnostics.start(0, nil, profile)
+local nhS, nhL, nhR, nhX, nhY = {}, {}, {}, {}, {}
+local nhi = 1
+while nhi <= 3 do
+    nhS[nhi] = 10 + nhi
+    nhL[nhi] = nhi * 0.125
+    nhR[nhi] = 0.6
+    nhX[nhi] = 3724 + nhi
+    nhY[nhi] = 8388 + nhi
+    nhi = nhi + 1
+end
+-- 第 4 顆只有 x 沒有 y：半個世界座標比沒有更容易誤讀，整組不寫
+nhS[4] = 14
+nhL[4] = 0.5
+nhR[4] = 0.25
+nhX[4] = 1
+local nsen = {
+    hardN = 4, hardS = nhS, hardL = nhL, hardR = nhR, hardX = nhX, hardY = nhY,
+    softN = 0, zombieN = 0, corpseN = 0, vehN = 12, movingVeh = true,
+    unloaded = false, ready = true, sig = 3, stamp = 21, scanS = 10, roadN = 2,
+}
+MDADDiagnostics.sample(0, 9000000, 3724, 8388, 0.5, 0.2, 15, 40,
+    5.57, 0.1, 0.2, 900, "follow", 2, true, nsen)
+nowMs = 9001000
+MDADDiagnostics.stop(0, "end")
+local nearBody = files[sessionPath(1)] or ""
+check(string.find(nearBody, '{"s":1,"l":0.125,"r":0.6,"x":3725,"y":8389}', 1, true) ~= nil,
+    "the nearest point serializes s/l/r/x/y together")
+checkEq(countNeedle(nearBody, '"r":0.6'), 3, "every point with a radius reports it")
+check(string.find(nearBody, '{"s":4,"l":0.5,"r":0.25}', 1, true) ~= nil,
+    "half a world coordinate is dropped, radius kept")
+check(string.find(nearBody, '"hardR"', 1, true) == nil, "no full sensor R array")
+check(string.find(nearBody, '"hardX"', 1, true) == nil, "no full sensor X array")
+
+--------------------------------------------------------------------------------
+scenario("sample records plan mode, route/block anchors and control-state flags")
+resetFs()
+loadProd()
+nowMs = 9100000
+MDADDiagnostics.start(0, nil, profile)
+MDADDiagnostics.sample(0, 9100000, 100, 200, 0.25, 12, 15, 40, 1.5, 0.2, 0.3, 1200,
+    "offroad", 2, true, nil, false,
+    "offroad-suppress", 123.5, 140.25, 0.8, 1.3, -0.75, 3724, 8388, 17,
+    false, true, true, false, true)
+MDADDiagnostics.sample(0, 9100500, 101, 201, 0.25, 12, 15, 39, 1.4, 0.1, 0.3, 1200,
+    "follow", 2, true, nil, false,
+    nil, 124, nil, nil, nil, nil, nil, nil, 18,
+    false, false, false, false, false)
+nowMs = 9101000
+MDADDiagnostics.stop(0, "end")
+local exBody = files[sessionPath(1)] or ""
+check(string.find(exBody, '"pm":"offroad-suppress"', 1, true) ~= nil, "plan mode recorded")
+check(string.find(exBody, '"pm":null', 1, true) ~= nil, "absent plan mode is explicit null")
+check(string.find(exBody, '"rs":123.5', 1, true) ~= nil, "route arc length recorded")
+check(string.find(exBody, '"bs":140.25', 1, true) ~= nil, "block anchor recorded")
+check(string.find(exBody, '"dm":0.8', 1, true) ~= nil, "dodge margin recorded")
+check(string.find(exBody, '"dn":1.3', 1, true) ~= nil, "dodge sweep clearance recorded")
+check(string.find(exBody, '"rb":-0.75', 1, true) ~= nil, "road-centring bias recorded")
+check(string.find(exBody, '"bhx":3724,"bhy":8388', 1, true) ~= nil,
+    "sweep hit world point recorded as a pair")
+check(string.find(exBody, '"fi":17', 1, true) ~= nil, "follower cursor recorded")
+checkEq(countNeedle(exBody, '"bs":'), 1, "an absent block anchor omits the field, not writes 0")
+checkEq(countNeedle(exBody, '"dm":'), 1, "an absent margin omits the field")
+checkEq(countNeedle(exBody, '"bhx":'), 1, "an absent sweep hit omits the pair")
+check(string.find(exBody, '"cr":true', 1, true) ~= nil,
+    "the effective 10Hz decision is recorded, not the caller flag")
+check(string.find(exBody, '"cr":false', 1, true) ~= nil, "a normal frame records cr false")
+check(string.find(exBody, '"bl":false', 1, true) ~= nil, "blocked is written even when false")
+check(string.find(exBody, '"dg":true', 1, true) ~= nil, "dodging flag written")
+check(string.find(exBody, '"or":true', 1, true) ~= nil, "offroad flag written")
+check(string.find(exBody, '"cn":false', 1, true) ~= nil, "corner-latch flag written")
+check(string.find(exBody, '"cp":true', 1, true) ~= nil, "coupled-rotation flag written")
+check(string.find(exBody, '"cp":false', 1, true) ~= nil,
+    "a lateral-push frame records coupled false")
 
 closeScenario()
 print()

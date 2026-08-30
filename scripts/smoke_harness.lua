@@ -6627,6 +6627,7 @@ do
         start = 0, sample = 0, critical = 0, event = 0, stop = 0,
         startPn = nil, samplePn = nil, stopPn = nil, stopReason = nil,
         names = {},
+        last = {}, -- 最後一幀的碰撞證據欄位（Driver 端接線用；編碼由 test_diagnostics 驗）
     }
 
     local origStart = MDADDiagnostics.start
@@ -6641,10 +6642,28 @@ do
         drive.diag.startProfile = profile
         return true -- Driver lifecycle spy; production file IO is covered by test_diagnostics.lua
     end
-    MDADDiagnostics.sample = function(pn, nowMsArg, x, y, heading, speed, target, remaining, lat, err, steer, force, mode, gear, regulator, sensor, critical)
+    MDADDiagnostics.sample = function(pn, nowMsArg, x, y, heading, speed, target, remaining, lat, err, steer, force, mode, gear, regulator, sensor, critical,
+            planMode, routeS, blockS, dodgeMargin, dodgeNeed, roadBias,
+            blockHitX, blockHitY, followerIdx,
+            blocked, dodging, offroad, corner, coupled)
         drive.diag.sample = drive.diag.sample + 1
         drive.diag.samplePn = pn
         if critical == true then drive.diag.critical = drive.diag.critical + 1 end
+        local last = drive.diag.last
+        last.planMode = planMode
+        last.routeS = routeS
+        last.blockS = blockS
+        last.dodgeMargin = dodgeMargin
+        last.dodgeNeed = dodgeNeed
+        last.roadBias = roadBias
+        last.blockHitX = blockHitX
+        last.blockHitY = blockHitY
+        last.followerIdx = followerIdx
+        last.blocked = blocked
+        last.dodging = dodging
+        last.offroad = offroad
+        last.corner = corner
+        last.coupled = coupled
         return true -- Driver lifecycle spy; production sampling is covered separately
     end
     MDADDiagnostics.event = function(pn, name, a, b, c, d)
@@ -6687,6 +6706,20 @@ do
     checkEq(dveh._imp.max, 1, "on：每幀最多一次 addImpulse")
     checkEq(drive.bad.impulse, 0, "on：無單幀兩次 impulse")
 
+    -- 碰撞證據欄位真的從 Driver 接到 Diagnostics（值來源＝既有 session 狀態）
+    local dlast = drive.diag.last
+    checkEq(type(dlast.planMode), "string", "sample 帶 replan 離場分類 planMode")
+    checkEq(type(dlast.routeS), "number", "sample 帶沿線弧長 routeS")
+    checkEq(type(dlast.blockS), "number", "sample 帶煞停錨 blockS")
+    checkEq(type(dlast.dodgeNeed), "number", "sample 帶掃掠淨距 dodgeNeed")
+    checkEq(type(dlast.roadBias), "number", "sample 帶路面對中校正")
+    checkEq(type(dlast.followerIdx), "number", "sample 帶 follower 投影游標")
+    checkEq(dlast.blocked, false, "跟線幀 blocked=false")
+    checkEq(dlast.dodging, false, "跟線幀 dodging=false")
+    checkEq(dlast.corner, false, "跟線幀 corner latch=false")
+    checkEq(dlast.coupled, false, "橫推跟線幀 coupled=false（不是耦力調頭）")
+    checkEq(dveh._imp.max, 1, "擴充遙測欄位不改變 addImpulse 次數")
+
     drive.nav.route = newRoute(40, 0, 0, 4, 0)
     nowMs = nowMs + 250
     driveTick(dp, dveh)
@@ -6696,6 +6729,7 @@ do
     driveTick(dp, dveh)
     checkTrue(drive.diag.names.offroad == true, "offroad 有 event")
     checkTrue(drive.diag.critical > 0, "offroad sample 切到 10Hz critical flag")
+    checkEq(drive.diag.last.offroad, true, "offroad 旗標進到 sample 欄位")
     dveh._y = 0
 
     MDAD.Drive.stop(0, nil)
