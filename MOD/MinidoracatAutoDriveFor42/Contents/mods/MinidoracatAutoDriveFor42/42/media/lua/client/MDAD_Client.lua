@@ -44,7 +44,7 @@ end
 -- 登入補學。引擎只在兩個時機檢查 AutoLearnAny：升等瞬間
 -- （XpUpdate.lua:204 的 getScriptManager():checkAutoLearn）與單機開局
 -- （IsoWorld.java:2410，只針對 IsoPlayer.getInstance()）。因此：
---   · MP：每個本機 slot 送空 payload，伺服器只依 OnClientCommand actor 補學；
+--   · MP：伺服器依 OnClientCommand actor 補學，但主玩家必須等首個 OnTick 才送；
 --   · SP：就地逐配方補學，連後加入的分割畫面 slot 也覆蓋。
 -- client 不指定角色或配方；MP 的具體 playerObj 讓同連線的分割畫面角色不混用。
 local recipeRescanWarned = {}
@@ -77,19 +77,33 @@ local function requestRecipeRescan(playerNum)
     rescanLocalRecipe(sm, playerObj, MDAD.RECIPE_GPS)
     rescanLocalRecipe(sm, playerObj, MDAD.RECIPE_AUTO)
 end
+-- MP 的 OnGameStart 發生在 sendPlayerConnect 與 onlineId 指派前
+-- （IngameState.java:762、765-775），此時 GameClient.ingame 仍是 false，
+-- sendClientCommand 會誤走 SinglePlayerClient 虛擬連線，dedicated server 收不到
+-- （LuaManager.java:8912-8924；SinglePlayerClient.java:41-60、101-123）。
+-- 首個 OnTick 前 UpdateStuff 已把 ingame 設成 true（IngameState.java:564、1530-1534）。
+local function requestRecipeRescanAfterConnect()
+    Events.OnTick.Remove(requestRecipeRescanAfterConnect)
+    for i = 0, getNumActivePlayers() - 1 do
+        requestRecipeRescan(i)
+    end
+end
 
 -- 載入期 registerNavGate 可能早於主 MOD 的 API 建立（載入順序不保證），所以 OnGameStart
--- 再重試一次；重試後才是最終狀態，這時才提示。
+-- 再重試一次；重試後才是最終狀態，這時才提示。SP 可立即就地補學；MP 的 command
+-- 延到首個 OnTick，避開上面的連線時序窗。
 -- getNumActivePlayers()＋getSpecificPlayer 走訪本機 slot 是原版慣例（ISJoyPadListBox.lua:23-24）。
 local navGateStarted = false
 
 local function onGameStart()
     registerNavGate()
     navGateStarted = true
+    local multiplayer = isClient()
     for i = 0, getNumActivePlayers() - 1 do
         warnNavGateMissing(i)
-        requestRecipeRescan(i)
+        if not multiplayer then requestRecipeRescan(i) end
     end
+    if multiplayer then Events.OnTick.Add(requestRecipeRescanAfterConnect) end
 end
 
 registerNavGate()

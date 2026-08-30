@@ -3062,12 +3062,19 @@ MinidoracatMiniMapAPI.getNavTarget = function(playerNum)
 end
 resetStats()
 fire("OnTick")
-checkEq(#sentClient, 1, "首次 check 只替有導航的 slot 送 on；無導航 slot 不送空 off")
-checkEq(sentClient[1] and sentClient[1].command, MDAD.CMD_NAV_USAGE,
+local navUsageMessages = {}
+for i = 1, #sentClient do
+    if sentClient[i].command == MDAD.CMD_NAV_USAGE then
+        navUsageMessages[#navUsageMessages + 1] = sentClient[i]
+    end
+end
+checkEq(#navUsageMessages, 1, "首次 check 只替有導航的 slot 送 on；無導航 slot 不送空 off")
+local navUsageMessage = navUsageMessages[1]
+checkEq(navUsageMessage and navUsageMessage.command, MDAD.CMD_NAV_USAGE,
     "GPS billing 使用獨立 NavUsage command")
-checkEq(sentClient[1] and sentClient[1].args.active, true, "有目標的 slot 宣告 active=true")
-checkNil(sentClient[1] and sentClient[1].args.vehicleId, "NavUsage 不讓 client 指定 vehicle")
-checkNil(sentClient[1] and sentClient[1].args.tx, "NavUsage 不送座標")
+checkEq(navUsageMessage and navUsageMessage.args.active, true, "有目標的 slot 宣告 active=true")
+checkNil(navUsageMessage and navUsageMessage.args.vehicleId, "NavUsage 不讓 client 指定 vehicle")
+checkNil(navUsageMessage and navUsageMessage.args.tx, "NavUsage 不送座標")
 nowMs = nowMs + 1100
 resetStats()
 for _ = 1, 60 do fire("OnTick") end
@@ -6291,9 +6298,9 @@ end
 -- （IsoWorld.java:2410，只針對 IsoPlayer.getInstance()）被檢查，專用伺服器上的
 -- 遠端角色兩個時機都碰不到。
 -- =====================================================================
-scenario("MP 登入補學：逐 slot 請求、只信 actor、只補自己的兩個配方、學到才同步；雜誌注入與生成政策")
+scenario("MP 登入補學：主玩家延到首個 Tick、逐 slot 請求、只信 actor、只補自己的兩個配方、學到才同步；雜誌注入與生成政策")
 
--- (1) client 端：開局逐本機 slot、新 slot 上線補一則，payload 空且不指定角色／配方
+-- (1) client 端：OnGameStart 尚不能送 command；首個 Tick 逐本機 slot，新 slot 上線再補一則
 do
     clientFlag, serverFlag = true, false
     setSandbox({ InstallSkillGate = true, NeedItemForNav = false })
@@ -6304,7 +6311,9 @@ do
 
     resetStats()
     capturePrint(function() fire("OnGameStart") end)
-    checkEq(#sentClient, 2, "開局替每個本機 slot 各送一則登入補學請求")
+    checkEq(#sentClient, 0, "OnGameStart 尚未 ingame，不提前送登入補學請求")
+    capturePrint(function() fire("OnTick", 0) end)
+    checkEq(#sentClient, 2, "首個 Tick 替每個本機 slot 各送一則登入補學請求")
     checkEq(sentClient[1] and sentClient[1].module, MOD_ID, "請求帶自己的 module 名")
     checkEq(sentClient[1] and sentClient[1].command, MDAD.CMD_RECIPE_RESCAN,
         "使用獨立的 RecipeRescan command")
@@ -6317,6 +6326,9 @@ do
     checkNil(sentClient[1] and sentClient[1].args.target, "client 不指定要補給誰")
     checkNil(sentClient[1] and sentClient[1].args.username, "client 不指定角色名")
     checkEq(#halos, 0, "登入補學不對玩家丟提示（NeedItemForNav 關閉時本來就無感）")
+    local sentAfterReady = #sentClient
+    capturePrint(function() fire("OnTick", 1) end)
+    checkEq(#sentClient, sentAfterReady, "登入補學 Tick callback 執行一次後即移除")
 
     players[2] = newPlayer({ num = 2, username = "rescan2", onlineId = 7003 })
     activePlayers = 3
