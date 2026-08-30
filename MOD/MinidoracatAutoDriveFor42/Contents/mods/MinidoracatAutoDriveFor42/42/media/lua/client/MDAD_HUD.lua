@@ -1018,7 +1018,6 @@ local function registerMiniMapSettings()
             and type(api.registerSettingsSection) == "function") then return end
     miniMapSettingsRegistered = api.registerSettingsSection(MDAD.MOD_ID, {
         label = "UI_MinidoracatAutoDrive_Options",
-        lane = 1,
         ticks = {
             { label = "UI_MinidoracatAutoDrive_ShowTrajectory",
                 tooltip = "UI_MinidoracatAutoDrive_ShowTrajectory_tooltip",

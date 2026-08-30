@@ -9,7 +9,7 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 # ============================================
 $MOD_FOLDER = "MinidoracatAutoDriveFor42"          # MOD/<資料夾名>，也是 Workshop 連結名
 $MOD_ID     = "MinidoracatAutoDriveFor42"              # mod.info 的 id，也是 mods 連結名（通常 = $MOD_FOLDER）
-$REQUIRED_MOD_IDS = @("MinidoracatMiniMapFor42")  # addon 填主 MOD id（寫入 Mods= 時依賴排在前面）；主 MOD 留空
+$REQUIRED_MOD_IDS = @("MinidoracatUIFor42", "MinidoracatMiniMapFor42")  # 依賴順序同 mod.info；寫入 Mods= 時排在 addon 前
 
 # ============================================
 # 路徑偵測（支援 bat 啟動器和直接執行兩種模式）

@@ -12,6 +12,7 @@ Project Zomboid Build 42 MOD。
 - 安裝狀態隨車保存；GPS 卸下時保留原有電量
 - 車輛 radial 選單可啟停自駕；沿導航路線分幀建立限速剖面，以前瞻 PID 跟線、彎道與航向未對正時先減速、目的地煞停
 - 駕駛 HUD 與原版車輛儀表可見邊緣融合，金屬主題沿用原版 #343434 面板與斜角樣式；顯示狀態、車速、巡航上限、檔位、減速政策與電油量，可直接啟停與切檔。滑鼠停在殭屍／屍體政策上會顯示判定範圍、分級限速、非障礙物行為與伺服器鎖定狀態；原版儀表內建收放鈕與 M/S 主題切換鈕，另有簡約／精簡／收合模式。HUD 使用與原版儀表相同的一般 UI 層，設定與管理視窗會正常顯示在其上方
+- **速度檔位與瘋狂模式**：HUD 可切換 30／50／70 km/h 與「瘋狂（車輛極速）」四檔。首發版的瘋狂檔刻意沿用穩定的跟線、過彎與障礙安全機制，目前主要差異是巡航上限；後續版本會重新調整為更激進、更瘋狂的駕駛行為
 - 自駕啟動期間會在世界中顯示未來行駛軌跡：正常路徑為半透明藍線，偵測障礙後已承諾的繞行段改為半透明黃線；停止或失效即消失。可從 ESC 的 MOD Options 或支援 client-settings API v1 的 MiniMap 齒輪「自動駕駛」分類開關，並選擇 1／3／7 像素的細／標準／粗單線；三檔每段都只呼叫一次 client renderer，粗線只增加少量客戶端像素填充，完全不使用伺服器資源。舊版 MiniMap 不顯示齒輪分類，ESC 選項仍可用。紅色障礙圈、路面帶等診斷標記仍只在 DebugOverlay 顯示
 - **靠右行駛**：沿路線右車道行駛（偏移量沙盒可調 0-2 公尺，0＝關閉），會車時雙方自然錯開；繞行時從右車道平滑切換到繞行線再回來
 - 轉向採側向橫推車尾的衝量模型（量級隨車重與車速縮放），過彎帶輕微甩尾屬正常特性；原地調頭改用力偶模式，緩慢平穩迴轉不橫滑
@@ -25,9 +26,17 @@ Project Zomboid Build 42 MOD。
 - GPS 與自駕各有獨立電量／燃油倍率（0–500%），同時使用時相加。電量負載與原版發電機充電並存；現行倍率範圍內，引擎正常運轉時電瓶仍淨充電，倍率反映在回充速度（熄火 GPS 則直接放電）。燃油 100% 時，GPS 導航中的車輛在原生實際油耗上加 5%、自駕加 25%（同時啟用共加 30%）。隨身 GPS 的電量只扣自身電池，但用它導航行駛時仍套用 GPS 油耗加成
 - 目前開發階段為 M6（世界軌跡繞行＋駕駛 HUD）；GameProfiler 效能實測完成前不發布
 
+## 截圖
+
+| 自動駕駛 HUD＋導航路線 | 路口跟線＋小地圖同步 |
+|---|---|
+| ![自動駕駛 HUD 與導航路線](docs/screenshots/01-autodrive-hud-route.png) | ![路口跟線與小地圖同步](docs/screenshots/02-autodrive-route-intersection.png) |
+| 沙盒設定 | GPS／自動駕駛道具 |
+| ![AutoDrive 沙盒設定](docs/screenshots/03-autodrive-sandbox-settings.png) | ![GPS 導航儀與自動駕駛模組](docs/screenshots/04-autodrive-items.png) |
+
 ## 安裝
 
-- Steam Workshop：（首次上傳後補上連結）
+- Steam Workshop：[Minidoracat MiniMap - AutoDrive for B42](https://steamcommunity.com/sharedfiles/filedetails/?id=3792675881)
 - 手動安裝：把 `MOD/MinidoracatAutoDriveFor42/Contents/mods/MinidoracatAutoDriveFor42` 複製到 `%USERPROFILE%\Zomboid\mods\` 並將資料夾改名為 `MinidoracatAutoDriveFor42`
 
 本 addon 需要 [Minidoracat MiniMap for B42](https://steamcommunity.com/sharedfiles/filedetails/?id=3763913359)

@@ -610,9 +610,10 @@ check(options:getOption("ShowTrajectory"):getValue() == true
     "trajectory options register visible=true and standard width defaults")
 check(type(registeredMiniMapSection) == "table"
     and registeredMiniMapOwner == "MinidoracatAutoDriveFor42"
+    and registeredMiniMapSection.lane == nil
     and #registeredMiniMapSection.ticks == 1
     and #registeredMiniMapSection.combos == 1,
-    "AutoDrive registers one owner-scoped shared settings category in MiniMap")
+    "AutoDrive registers one owner-scoped shared settings category without host layout fields")
 local trajectorySaves = optionSaveCalls
 check(MDAD.HUD.setTrajectoryVisible(false), "trajectory visibility setter accepts false")
 check(options:getOption("ShowTrajectory"):getValue() == false
