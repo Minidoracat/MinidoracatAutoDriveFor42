@@ -183,12 +183,9 @@ local SURFACE_NAME = {
     [MDADFollower.SURFACE_DIRT] = "dirt",
 }
 
--- n * 0 == 0 一次擋掉 NaN 與 ±Inf（有限數乘 0 必為 0，這兩者乘 0 都是 NaN），
--- 不用 math.huge（Kahlua 未保證提供；shared/MDAD.lua 的 isFiniteInt 同一理由）
-local function isFinite(n)
-    if type(n) ~= "number" then return false end
-    return n * 0 == 0
-end
+-- 與 MDADDynamics.finite 同一實作（n*0==0 一次擋 NaN 與 ±Inf；shared 依字母序
+-- Dynamics 先載入，載入期取值安全）。留 local alias 是熱路徑呼叫慣例。
+local isFinite = MDADDynamics.finite
 
 -- 只用在「兩個 atan2 輸出相減」上，差值必在 ±2pi 內，迴圈最多跑一次
 local function wrapPi(a)
@@ -882,23 +879,12 @@ local function releaseExactLine(state)
     end
 end
 
--- 就地重設（不配置）。換 route 時對同一顆 state 呼叫這個。
+-- 就地重設（不配置）。換 route 時對同一顆 state 呼叫這個：
+-- 清全部控制歷史（resetControl）並把投影游標 idx 拉回路線起點。
 function MDADFollower.resetState(state)
     if type(state) ~= "table" then return state end
     state.idx = 1
-    state.iTerm = 0
-    state.dFilt = 0
-    -- errPrev 刻意留空（不是 0）：control 對缺值會用「當幀誤差」當歷史，因此重設後的
-    -- 第一幀微分項貢獻 0。若填 0，車頭原本偏 130° 時第一幀會吃到 (2.27-0)/dt 的假尖刺。
-    state.errPrev = nil
-    state.rotating = false
-    state.curveValid = false
-    state.curveKappa = 0
-    state.curveHardActive = false
-    state.curveCapKmh = 0
-    state.offL = nil
-    releaseExactLine(state)
-    return state
+    return MDADFollower.resetControl(state)
 end
 
 -- 只清「控制歷史」（PID 積分／微分／誤差歷史／調頭旗標／側偏剖面），**保留投影
@@ -911,7 +897,9 @@ function MDADFollower.resetControl(state)
     if type(state) ~= "table" then return state end
     state.iTerm = 0
     state.dFilt = 0
-    state.errPrev = nil -- 同 resetState：留空讓第一幀微分項為 0
+    -- errPrev 刻意留空（不是 0）：control 對缺值會用「當幀誤差」當歷史，因此重設後的
+    -- 第一幀微分項貢獻 0。若填 0，車頭原本偏 130° 時第一幀會吃到 (2.27-0)/dt 的假尖刺。
+    state.errPrev = nil
     state.rotating = false
     state.curveValid = false
     state.curveHardActive = false
@@ -920,6 +908,23 @@ function MDADFollower.resetControl(state)
     state.offL = nil
     releaseExactLine(state)
     return state
+end
+
+-- setOffset／setExactLine 共用的 M6 折線驗證：srcX/srcY 型別、srcN/srcS0/srcS1
+-- 有限、點數上限、srcS1 落在最末取樣段內（srcN>=2 時 lastStart>=srcS0，因此也
+-- 涵蓋 srcS1<=srcS0 的退化輸入）、逐點有限。回 floor 後的 srcN；不合法回 nil。
+local function validLine(srcX, srcY, srcN, srcS0, srcS1)
+    if type(srcX) ~= "table" or type(srcY) ~= "table"
+            or not isFinite(srcN) or not isFinite(srcS0)
+            or not isFinite(srcS1) then return nil end
+    srcN = srcN - srcN % 1
+    local lastStart = srcS0 + (srcN - 2) * OV_STEP
+    if srcN < 2 or srcN > OV_MAX or srcS1 <= lastStart
+            or srcS1 > lastStart + OV_STEP + 1e-6 then return nil end
+    for i = 1, srcN do
+        if not isFinite(srcX[i]) or not isFinite(srcY[i]) then return nil end
+    end
+    return srcN
 end
 
 -- 設定繞行側偏剖面（M4）：a < b <= c < d 為弧長斷點（進入起、保持起、保持終、
@@ -938,18 +943,8 @@ function MDADFollower.setOffset(state, a, b, c, d, l,
         return false
     end
     if not (a < b and b <= c and c < d) then return false end
-    if type(srcX) ~= "table" or type(srcY) ~= "table"
-            or not isFinite(srcN) or not isFinite(srcS0)
-            or not isFinite(srcS1) then return false end
-    srcN = srcN - srcN % 1
-    local lastStart = srcS0 + (srcN - 2) * OV_STEP
-    if srcN < 2 or srcN > OV_MAX or srcS1 < d + 1 - 1e-6
-            or srcS1 <= lastStart or srcS1 > lastStart + OV_STEP + 1e-6 then
-        return false
-    end
-    for i = 1, srcN do
-        if not isFinite(srcX[i]) or not isFinite(srcY[i]) then return false end
-    end
+    srcN = validLine(srcX, srcY, srcN, srcS0, srcS1)
+    if not srcN or srcS1 < d + 1 - 1e-6 then return false end
     state.offA, state.offB, state.offC, state.offD, state.offL = a, b, c, d, l
     state.ovX, state.ovY = srcX, srcY
     state.ovN, state.ovS0, state.ovEndS = srcN, srcS0, srcS1
@@ -960,18 +955,9 @@ end
 -- RETURN commits the exact array that the Driver already swept. Unlike dodge,
 -- no copy is allowed: identity/content equality is part of the safety contract.
 function MDADFollower.setExactLine(state, srcX, srcY, srcN, srcS0, srcS1)
-    if type(state) ~= "table" or type(srcX) ~= "table" or type(srcY) ~= "table"
-            or not isFinite(srcN) or not isFinite(srcS0) or not isFinite(srcS1)
-            or srcS1 <= srcS0 then
-        return false
-    end
-    srcN = srcN - srcN % 1
-    local lastStart = srcS0 + (srcN - 2) * OV_STEP
-    if srcN < 2 or srcN > OV_MAX or srcS1 <= lastStart
-            or srcS1 > lastStart + OV_STEP + 1e-6 then return false end
-    for i = 1, srcN do
-        if not isFinite(srcX[i]) or not isFinite(srcY[i]) then return false end
-    end
+    if type(state) ~= "table" then return false end
+    srcN = validLine(srcX, srcY, srcN, srcS0, srcS1)
+    if not srcN then return false end
     state.offL = nil
     state.ovX, state.ovY = srcX, srcY
     state.ovN, state.ovS0, state.ovEndS = srcN, srcS0, srcS1

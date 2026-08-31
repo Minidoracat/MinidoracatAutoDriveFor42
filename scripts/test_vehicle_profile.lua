@@ -24,6 +24,8 @@ local function loadProduction(rel)
     error("missing " .. rel)
 end
 
+loadProduction("shared/MDAD_Dynamics.lua")   -- Follower 於 chunk 期引用 MDADDynamics.finite
+loadProduction("shared/MDAD_Follower.lua")   -- priors/configureFollower 讀 MDADFollower.SURFACE_*（協定常數單一出處）
 loadProduction("client/MDAD_VehicleProfile.lua")
 
 local P = MDADVehicleProfile
@@ -966,10 +968,10 @@ scenario("surface/tire/engine/brake priors only tighten legacy envelopes")
 do
     local p = P.build(makeVehicle(PICKUP))
     local ad, bd, ld, fsd, ftd, coast =
-        P.priors(p, p.mass, P.SURFACE_PAVED, false, false, true)
-    local aw, bw, lw, fsw = P.priors(p, p.mass, P.SURFACE_PAVED, true, false, true)
-    local au, bu, lu, fsu = P.priors(p, p.mass, P.SURFACE_UNKNOWN, false, false, true)
-    local ao = P.priors(p, p.mass, P.SURFACE_PAVED, false, true, true)
+        P.priors(p, p.mass, MDADFollower.SURFACE_PAVED, false, false, true)
+    local aw, bw, lw, fsw = P.priors(p, p.mass, MDADFollower.SURFACE_PAVED, true, false, true)
+    local au, bu, lu, fsu = P.priors(p, p.mass, MDADFollower.SURFACE_UNKNOWN, false, false, true)
+    local ao = P.priors(p, p.mass, MDADFollower.SURFACE_PAVED, false, true, true)
     check(ad <= 2.5 and bd <= 6 and ld <= 3.5, "dry paved never exceeds legacy")
     checkNear(fsd, 1, 1e-12, "dry paved surface factor")
     checkNear(fsw, 0.7, 1e-12, "wet paved surface factor")
@@ -980,7 +982,7 @@ do
     checkNear(ftd, 1, 1e-12, "known complete tires retain factor one")
     checkNear(coast, 0.6, 1e-12, "coast prior stays fixed at 0.6")
     p.rollInfluence, p.centerOfMassY = 0, 3
-    local ar, br, lr = P.priors(p, p.mass, P.SURFACE_PAVED, false, false, true)
+    local ar, br, lr = P.priors(p, p.mass, MDADFollower.SURFACE_PAVED, false, false, true)
     checkNear(ar, ad, 1e-12, "rollInfluence/COMY do not enter drive prior")
     checkNear(br, bd, 1e-12, "rollInfluence/COMY do not enter brake prior")
     checkNear(lr, ld, 1e-12, "rollInfluence/COMY do not enter lateral prior")
@@ -994,7 +996,7 @@ do
         tireFriction = PICKUP.tireFriction, wheels = PICKUP.wheels,
     }))
     local _, bm, lm, _, ftm = P.priors(
-        missing, missing.mass, P.SURFACE_PAVED, false, false, true)
+        missing, missing.mass, MDADFollower.SURFACE_PAVED, false, false, true)
     checkNear(ftm, 0.35, 1e-12, "missing tire clamps factor to 0.35")
     check(bm < bd and lm < ld, "missing tire tightens brake/lateral")
 
@@ -1005,11 +1007,11 @@ do
         oldOnly = true, wheels = PICKUP.wheels,
     }))
     local _, _, _, _, ftu = P.priors(
-        unknown, unknown.mass, P.SURFACE_PAVED, false, false, false)
+        unknown, unknown.mass, MDADFollower.SURFACE_PAVED, false, false, false)
     checkNear(ftu, 0.8, 1e-12, "unknown tire reading tightens to 0.8")
     p.enginePower, p.brakingForce = 0, 0
     local zeroDrive, zeroBrake = P.priors(
-        p, p.mass, P.SURFACE_PAVED, false, false, true)
+        p, p.mass, MDADFollower.SURFACE_PAVED, false, false, true)
     checkNear(zeroDrive, 0, 1e-12, "zero engine prior stays zero")
     checkNear(zeroBrake, 0, 1e-12, "zero braking prior stays zero")
 end

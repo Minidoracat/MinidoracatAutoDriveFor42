@@ -126,7 +126,6 @@ local C = {
     selected = { r = 0.36, g = 0.27, b = 0.11, a = 0.92 },
     danger = { r = 0.30, g = 0.13, b = 0.12, a = 0.95 },
     start = { r = 0.12, g = 0.24, b = 0.13, a = 0.95 },
-    transparent = { r = 0, g = 0, b = 0, a = 0 },
 }
 
 local FW = nil
@@ -1060,10 +1059,6 @@ end
 
 HUD.Panel = MDADHUDPanel
 HUD.ensure = ensurePanel
-HUD.refresh = refreshCharacter
-HUD.applyOptions = applyAllOptions
-HUD.destroyAll = destroyAll
-HUD.modOptions = modOptions
 HUD.trajectoryVisible = trajectoryVisible
 HUD.trajectoryWidth = trajectoryWidth
 HUD.setTrajectoryVisible = setTrajectoryVisible

@@ -96,32 +96,31 @@ function ISAutoDriveDeviceAction:perform()
     if self.item then
         self.item:setJobDelta(0)
     end
-    if self.character and self.vehicle then
-        -- 只送純量：vehicleId／kind／install／itemId。actor 不送（server 用連線身分），
-        -- partId／navDelta／state 也不送（server 自己解析與讀取）。
-        -- sendClientCommand(player, module, command, args)＝LuaManager.java:8912
-        -- （原版用例 ISVehicleMechanics.lua:585 的 isClient() 分流同款）；
-        -- vehicle:getId()＝BaseVehicle.java:8402，server 端以 getVehicleById 重查。
-        local itemId = -1
-        if self.item then itemId = self.item:getID() end
-        if isClient() then
-            sendClientCommand(self.character, MDAD.MOD_ID, MDAD.CMD_DEVICE, {
-                vehicleId = self.vehicle:getId(),
-                kind = self.kind,
-                install = self.install == true,
-                itemId = itemId,
-            })
-        else
-            -- SP：沒有網路權威問題，直接走同一份 shared apply（不經 OnClientCommand，
-            -- 因此不會與 server handler 重複執行）
-            local ok, reason = MDAD.applyDeviceChange(self.character, self.vehicle,
-                self.kind, self.install == true, itemId)
-            -- 與 MP 的失敗提示對齊（MP 走 server → OnServerCommand → client）。
-            -- isServer() 守衛：專用伺服器不畫 UI（正常情況這條分支只在 SP 走到）。
-            -- HaloTextHelper.addBadText 在 shared TimedAction 內的原版用例：ISReadABook.lua:7
-            if not ok and reason and not isServer() then
-                HaloTextHelper.addBadText(self.character, getText(reason))
-            end
+    -- character／vehicle 由 isValid 把關（nil 即 invalid，引擎不會走到 perform）。
+    -- 只送純量：vehicleId／kind／install／itemId。actor 不送（server 用連線身分），
+    -- partId／navDelta／state 也不送（server 自己解析與讀取）。
+    -- sendClientCommand(player, module, command, args)＝LuaManager.java:8912
+    -- （原版用例 ISVehicleMechanics.lua:585 的 isClient() 分流同款）；
+    -- vehicle:getId()＝BaseVehicle.java:8402，server 端以 getVehicleById 重查。
+    local itemId = -1
+    if self.item then itemId = self.item:getID() end
+    if isClient() then
+        sendClientCommand(self.character, MDAD.MOD_ID, MDAD.CMD_DEVICE, {
+            vehicleId = self.vehicle:getId(),
+            kind = self.kind,
+            install = self.install == true,
+            itemId = itemId,
+        })
+    else
+        -- SP：沒有網路權威問題，直接走同一份 shared apply（不經 OnClientCommand，
+        -- 因此不會與 server handler 重複執行）
+        local ok, reason = MDAD.applyDeviceChange(self.character, self.vehicle,
+            self.kind, self.install == true, itemId)
+        -- 與 MP 的失敗提示對齊（MP 走 server → OnServerCommand → client）。
+        -- isServer() 守衛：專用伺服器不畫 UI（正常情況這條分支只在 SP 走到）。
+        -- HaloTextHelper.addBadText 在 shared TimedAction 內的原版用例：ISReadABook.lua:7
+        if not ok and reason and not isServer() then
+            HaloTextHelper.addBadText(self.character, getText(reason))
         end
     end
     ISBaseTimedAction.perform(self)

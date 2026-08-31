@@ -53,10 +53,6 @@
 --   footprint/probe values derive from full extents. No script-name behavior branches.
 
 MDADVehicleProfile = MDADVehicleProfile or {}
-MDADVehicleProfile.SURFACE_UNKNOWN = 0
-MDADVehicleProfile.SURFACE_PAVED = 1
-MDADVehicleProfile.SURFACE_GRAVEL = 2
-MDADVehicleProfile.SURFACE_DIRT = 3
 if MDADVehicleProfile.build then return end
 
 
@@ -491,7 +487,7 @@ function MDADVehicleProfile.priors(profile, runtimeMass, surfaceId, raining,
     adaptive = adaptive == true and profile.valid == true
         and profile.geometryValid == true
 
-    local fSurface = surfaceId == MDADVehicleProfile.SURFACE_PAVED and 1 or 0.7
+    local fSurface = surfaceId == MDADFollower.SURFACE_PAVED and 1 or 0.7
     -- Unknown weather is wet until a sensor snapshot proves dry.
     if raining ~= false then fSurface = fSurface - 0.3 end
     if fSurface < 0.4 then fSurface = 0.4 end
@@ -578,21 +574,21 @@ function MDADVehicleProfile.configureFollower(follower, profile, runtimeMass, ra
     while i < follower.n do
         local sid = follower.segSurface[i]
         local aDrive, aBrake, aLat, aCoast
-        if sid == MDADVehicleProfile.SURFACE_PAVED then
+        if sid == MDADFollower.SURFACE_PAVED then
             if not have1 then
                 a1, b1, l1, _, _, c1 = MDADVehicleProfile.priors(
                     profile, runtimeMass, sid, raining, false, adaptive)
                 have1 = true
             end
             aDrive, aBrake, aLat, aCoast = a1, b1, l1, c1
-        elseif sid == MDADVehicleProfile.SURFACE_GRAVEL then
+        elseif sid == MDADFollower.SURFACE_GRAVEL then
             if not have2 then
                 a2, b2, l2, _, _, c2 = MDADVehicleProfile.priors(
                     profile, runtimeMass, sid, raining, false, adaptive)
                 have2 = true
             end
             aDrive, aBrake, aLat, aCoast = a2, b2, l2, c2
-        elseif sid == MDADVehicleProfile.SURFACE_DIRT then
+        elseif sid == MDADFollower.SURFACE_DIRT then
             if not have3 then
                 a3, b3, l3, _, _, c3 = MDADVehicleProfile.priors(
                     profile, runtimeMass, sid, raining, false, adaptive)
@@ -602,7 +598,7 @@ function MDADVehicleProfile.configureFollower(follower, profile, runtimeMass, ra
         else
             if not have0 then
                 a0, b0, l0, _, _, c0 = MDADVehicleProfile.priors(
-                    profile, runtimeMass, MDADVehicleProfile.SURFACE_UNKNOWN,
+                    profile, runtimeMass, MDADFollower.SURFACE_UNKNOWN,
                     raining, false, adaptive)
                 have0 = true
             end

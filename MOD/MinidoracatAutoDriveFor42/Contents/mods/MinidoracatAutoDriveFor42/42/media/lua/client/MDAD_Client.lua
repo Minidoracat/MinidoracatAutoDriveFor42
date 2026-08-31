@@ -183,13 +183,6 @@ end
 Events.OnTick.Add(onNavUsageTick)
 
 
-local function disableOption(option, key)
-    option.notAvailable = true
-    local tip = ISWorldObjectContextMenu.addToolTip()
-    tip.description = getText(key)
-    option.toolTip = tip
-end
-
 local function queueDeviceAction(playerObj, vehicle, kind, install, item)
     if playerObj:getVehicle() == vehicle then
         ISVehicleMenu.onExit(playerObj)
@@ -214,7 +207,10 @@ local function addDeviceOption(context, playerObj, vehicle, kind, install, item,
     local option = context:addOption(getText(labelKey), playerObj, queueDeviceAction, vehicle, kind, install, item)
     local reason = MDAD.deviceBlockReason(playerObj, vehicle, kind, install)
     if reason then
-        disableOption(option, reason)
+        option.notAvailable = true
+        local tip = ISWorldObjectContextMenu.addToolTip()
+        tip.description = getText(reason)
+        option.toolTip = tip
     end
 end
 

@@ -124,14 +124,11 @@ local ROAD_CACHE_MAX = 256     -- 地板名 → 是否路面 的快取上限（�
 
 MDADSensor.SCAN_AHEAD = SCAN_AHEAD
 MDADSensor.SCAN_NEAR = SCAN_NEAR
-MDADSensor.SCAN_INTERVAL_MS = SCAN_INTERVAL_MS
 MDADSensor.CORRIDOR_HALF = CORRIDOR_HALF
 MDADSensor.SLOW_BAND_HALF = SLOW_BAND_HALF
 
 MDADSensor.SURFACE_UNKNOWN = SURFACE_UNKNOWN
 MDADSensor.SURFACE_PAVED = SURFACE_PAVED
-MDADSensor.SURFACE_GRAVEL = SURFACE_GRAVEL
-MDADSensor.SURFACE_DIRT = SURFACE_DIRT
 --------------------------------------------------------------------------------
 -- 延後綁定的引擎枚舉
 --------------------------------------------------------------------------------
@@ -139,12 +136,11 @@ MDADSensor.SURFACE_DIRT = SURFACE_DIRT
 -- IsoFlagType／IsoObjectType 是引擎曝露的全域（原版 Lua 遍布 IsoFlagType.solid
 -- 等用例）。在載入期直接取 upvalue 會綁死載入順序，也讓離線 harness 沒有插手空間；
 -- 改成第一輪掃描開始時綁一次，之後每輪只多一次 boolean 比較。
-local F_water, F_solidfloor, F_doorN, F_doorW, T_moveable
+local F_water, F_doorN, F_doorW, T_moveable
 local flagsBound = false
 
 local function bindFlags()
     F_water = IsoFlagType.water
-    F_solidfloor = IsoFlagType.solidfloor
     F_doorN = IsoFlagType.doorN
     F_doorW = IsoFlagType.doorW
     T_moveable = IsoObjectType.isMoveAbleObject   -- 枚舉序 28（SpriteDetails/IsoObjectType.java:36）
@@ -247,6 +243,22 @@ end
 -- 單格掃描
 --------------------------------------------------------------------------------
 
+-- name→cost 查快取；miss 時 classifySprite 並在上限內收錄。上限保護：模組化地圖
+-- 的 sprite 名稱數量沒有上限，滿了就**停收新條目**（本格照樣用剛算出的 cost，
+-- 只是不記憶）：整表重建會把幾千條熱條目一起丟掉、之後每格重算一整輪，
+-- 抖動比失憶更貴。scanCell 與 probeSquareHard 共用。
+local function spriteCostOf(state, obj, name)
+    local cost = state.spriteCost[name]
+    if cost == nil then
+        cost = classifySprite(obj, name)
+        if state.spriteN < SPRITE_CACHE_MAX then
+            state.spriteCost[name] = cost
+            state.spriteN = state.spriteN + 1
+        end
+    end
+    return cost
+end
+
 -- 回 boolean：這一格是不是硬障礙。軟障礙／殭屍／屍體／行進中車輛／未載入 chunk
 -- 直接就地累加到 state 的 working 欄位（回傳只有一個值才不用配置）。
 -- l＝本取樣點的橫向偏移（相對 nav 線）：**減速計數**（殭屍/屍體/軟障礙/跟車）
@@ -302,22 +314,11 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
     if not hard then
         local objs = square:getObjects()               -- IsoGridSquare.java:9635（回 PZArrayList）
         local nObj = objs:size()                       -- 迭代慣例 ISButtonPrompt.lua:535-536
-        local cache = state.spriteCost
         for i = 1, nObj do
             local obj = objs:get(i - 1)
             local name = obj:getSpriteName()           -- IsoObject.java:2235
             if name ~= nil then
-                local cost = cache[name]
-                if cost == nil then
-                    cost = classifySprite(obj, name)
-                    -- 上限保護：模組化地圖的 sprite 名稱數量沒有上限。滿了就**停收新
-                    -- 條目**（本格照樣用剛算出的 cost，只是不記憶）：整表重建會把幾千
-                    -- 條熱條目一起丟掉、之後每格重算一整輪，抖動比失憶更貴。
-                    if state.spriteN < SPRITE_CACHE_MAX then
-                        cache[name] = cost
-                        state.spriteN = state.spriteN + 1
-                    end
-                end
+                local cost = spriteCostOf(state, obj, name)
                 if cost == COST_HARD or cost == COST_HARD_THIN then
                     hard = true
                     if cost == COST_HARD_THIN then thin = true end
@@ -853,14 +854,7 @@ local function probeSquareHard(state, square)
         local obj = objs:get(i - 1)
         local name = obj:getSpriteName()
         if name ~= nil then
-            local cost = cache[name]
-            if cost == nil then
-                cost = classifySprite(obj, name)
-                if state.spriteN < SPRITE_CACHE_MAX then
-                    cache[name] = cost
-                    state.spriteN = state.spriteN + 1
-                end
-            end
+            local cost = spriteCostOf(state, obj, name)
             if cost == COST_HARD then return true, "hard" end
             if cost == COST_HARD_THIN then return true, "hardThin" end
         end
