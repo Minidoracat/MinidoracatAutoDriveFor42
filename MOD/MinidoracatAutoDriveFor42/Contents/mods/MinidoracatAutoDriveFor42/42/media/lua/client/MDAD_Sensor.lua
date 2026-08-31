@@ -42,6 +42,9 @@
 --     state.sig        整數簽章：障礙布局有變才會變（呼叫端拿它省掉重複規劃）
 --     state.scanS      本輪掃描起點弧長；state.scanEndS 終點弧長
 --     state.stamp      本輪完成時的 now（判資料新鮮度）
+--     state.rain       本輪 weather snapshot；nil＝API unknown（控制端視為 wet）
+--     state.actualSurfaceId  車身當前 floor：unknown/paved/gravel/dirt numeric id
+--     state.roundStartedAt   本輪開始時戳；與 stamp（完成）界定 immutable snapshot
 --
 -- ---------------------------------------------------------------------------
 -- 效能守則（step 每幀跑，且每一格都是跨 Lua↔Java 邊界的呼叫）
@@ -103,6 +106,7 @@ local COST_NONE, COST_SOFT, COST_HARD = 0, 1, 2
 local COST_HARD_THIN = 3       -- 細桿硬障礙（樹幹）：擋不擋線用 0 半徑判（樹幹 ~0.3 格）
 local SLOW_BAND_HALF = 3       -- 減速計數帶半寬（±3＝路面帶；hard 仍收全走廊 ±6.5）
 local OBS_HALF_R = 0.7         -- 整格箱型硬障礙的半徑（＝Corridor 的 OBS_HALF；樹幹用 0）
+local SURFACE_UNKNOWN, SURFACE_PAVED, SURFACE_GRAVEL, SURFACE_DIRT = 0, 1, 2, 3
 -- 路面對中（2026-08-28 實機：163 號公路的 nav 線偏到路面東緣外 2-4m）：
 -- 掃描順路統計地板 sprite 的橫向平均，輪末產出 roadC 給 driver 做 EMA。
 -- 路面家族＝blends_street／floors_exterior_street／street_curbs（tileset 歸類
@@ -125,6 +129,10 @@ MDADSensor.SCAN_INTERVAL_MS = SCAN_INTERVAL_MS
 MDADSensor.CORRIDOR_HALF = CORRIDOR_HALF
 MDADSensor.SLOW_BAND_HALF = SLOW_BAND_HALF
 
+MDADSensor.SURFACE_UNKNOWN = SURFACE_UNKNOWN
+MDADSensor.SURFACE_PAVED = SURFACE_PAVED
+MDADSensor.SURFACE_GRAVEL = SURFACE_GRAVEL
+MDADSensor.SURFACE_DIRT = SURFACE_DIRT
 --------------------------------------------------------------------------------
 -- 延後綁定的引擎枚舉
 --------------------------------------------------------------------------------
@@ -142,6 +150,41 @@ local function bindFlags()
     F_doorW = IsoFlagType.doorW
     T_moveable = IsoObjectType.isMoveAbleObject   -- 枚舉序 28（SpriteDetails/IsoObjectType.java:36）
     flagsBound = true
+end
+
+-- Runtime floor classification mirrors the offline road-surface source. Gravel,
+-- sand/clay and dirt lists come from vanilla
+-- ISShovelGroundCursor.GetDirtGravelSand (ISShovelGroundCursor.lua:108-130).
+-- This is evidence only; unknown never decides a RETURN mismatch.
+local function floorSurfaceId(name)
+    if type(name) ~= "string" then return SURFACE_UNKNOWN end
+    if name == "floors_exterior_natural_01_13"
+            or name == "blends_street_01_48"
+            or name == "blends_street_01_53"
+            or name == "blends_street_01_54"
+            or name == "blends_street_01_55"
+            or find(name, "street_curbs_01_blend_gravel", 1, true) == 1 then
+        return SURFACE_GRAVEL
+    end
+    if name == "blends_natural_01_0" or name == "blends_natural_01_5"
+            or name == "blends_natural_01_6" or name == "blends_natural_01_7"
+            or name == "floors_exterior_natural_01_24"
+            or name == "blends_natural_01_96" or name == "blends_natural_01_101"
+            or name == "blends_natural_01_102" or name == "blends_natural_01_103"
+            or find(name, "carpentry_02", 1, true) == 1 then
+        return SURFACE_UNKNOWN
+    end
+    if find(name, "street_curbs_01_blend_dirt", 1, true) == 1
+            or find(name, "blends_natural_01_", 1, true) == 1
+            or find(name, "floors_exterior_natural", 1, true) == 1 then
+        return SURFACE_DIRT
+    end
+    if find(name, ROAD_PREFIX_1, 1, true) == 1
+            or find(name, ROAD_PREFIX_2, 1, true) == 1
+            or find(name, ROAD_PREFIX_3, 1, true) == 1 then
+        return SURFACE_PAVED
+    end
+    return SURFACE_UNKNOWN
 end
 
 --------------------------------------------------------------------------------
@@ -417,6 +460,9 @@ local function beginRound(state, p, sNow, vehicle, now, len, cell)
     state.scanning = true
     state.nextMs = now + SCAN_INTERVAL_MS
     state.gen = state.gen + 1          -- 去重代數往前推一格，等於「清空」visited 但零成本
+    state.wRoundStartedAt = now
+    state.wRain = nil
+    state.wActualSurfaceId = SURFACE_UNKNOWN
 
     state.wHardN = 0
     state.wZombieN = 0
@@ -456,7 +502,27 @@ local function beginRound(state, p, sNow, vehicle, now, len, cell)
 
     local z = vehicle:getZ()                            -- IsoMovingObject 座標慣例（車在地面層）
     state.z = z - z % 1
-
+    -- Lua global getClimateManager() is LuaManager.java:11469-11472;
+    -- ClimateManager.isRaining is ClimateManager.java:588-590. Unknown stays
+    -- nil (wet-conservative downstream) rather than silently treated as dry.
+    if type(getClimateManager) == "function" then
+        local climate = getClimateManager()
+        if climate ~= nil and type(climate.isRaining) == "function" then
+            state.wRain = climate:isRaining() == true
+        end
+    end
+    -- Current-floor evidence is sampled once per round, not per frame:
+    -- IsoCell.getGridSquare :3189, IsoGridSquare.getFloor :5025 and
+    -- IsoObject.getSpriteName :2235 in the 42.20.4 decompiled source.
+    local wx, wy = vehicle:getX(), vehicle:getY()
+    wx, wy = wx - wx % 1, wy - wy % 1
+    local square = cell:getGridSquare(wx, wy, state.z)
+    if square ~= nil then
+        local floorObj = square:getFloor()
+        if floorObj ~= nil then
+            state.wActualSurfaceId = floorSurfaceId(floorObj:getSpriteName())
+        end
+    end
 end
 
 local function finishRound(state, now)
@@ -485,6 +551,10 @@ local function finishRound(state, now)
     state.vehN = state.wVehN
     state.unloaded = state.wUnloaded
     state.unloadedS = state.wUnloadedS
+    state.rain = state.wRain
+    state.actualSurfaceId = state.wActualSurfaceId
+    state.roundStartedAt = state.wRoundStartedAt
+    state.completedBandBias = state.bandBias
     -- 簽章：障礙的「數量 + 縱向分布 + 橫向分布」三者任一有變就會變。純整數運算，
     -- 呼叫端只拿它做 ~= 比較（不是雜湊安全性），碰撞的代價只是少重規劃一次。
     state.sig = state.wHardN * 7919 + state.wSumS * 31 + state.wSumL
@@ -567,6 +637,9 @@ function MDADSensor.newState()
         scanBias = 0,       -- 行駛線相對 nav 線的偏移（driver 每輪同步；帶跟隨用）
         bandBias = 0,       -- 本輪鎖定的帶偏移（beginRound 快照 scanBias）
         wScanS = 0,
+        wRain = nil,
+        wActualSurfaceId = SURFACE_UNKNOWN,
+        wRoundStartedAt = 0,
 
         -- 已完成的結果（呼叫端只讀這一組）
         hardS = {}, hardL = {}, hardX = {}, hardY = {}, hardR = {}, -- hardX/Y＝世界座標（掃掠複驗）；hardR＝逐點半徑（樹幹 0）
@@ -592,6 +665,10 @@ function MDADSensor.newState()
         scanS = 0,
         scanEndS = 0,
         stamp = 0,
+        rain = nil,            -- nil＝weather API unavailable; control treats as wet
+        actualSurfaceId = SURFACE_UNKNOWN,
+        roundStartedAt = 0,
+        completedBandBias = 0,
     }
 end
 
@@ -625,6 +702,9 @@ function MDADSensor.reset(state)
     state.wRoadLo = 999
     state.wRoadHi = -999
     state.wScanS = 0
+    state.wRain = nil
+    state.wActualSurfaceId = SURFACE_UNKNOWN
+    state.wRoundStartedAt = 0
     state.vehN = 0
     state.wVehN = 0
 
@@ -645,6 +725,10 @@ function MDADSensor.reset(state)
     state.scanS = 0
     state.scanEndS = 0
     state.stamp = 0
+    state.rain = nil
+    state.actualSurfaceId = SURFACE_UNKNOWN
+    state.roundStartedAt = 0
+    state.completedBandBias = 0
 end
 
 -- working buffer 推一個硬點（含簽章累加；l4＝l*4 的整數版；r＝該點半徑——
@@ -806,7 +890,7 @@ end
 -- near/rear 共用實作。public API 用 pcall 包住本函式：任一 Java getter／pool
 -- 失敗都回 unloaded，而不是把未知誤報成 clear。函式內只有純量 local。
 local function probeDirectional(state, vehicle, cell, bodyX, bodyY,
-        fx, fy, nx, ny, halfW, halfL, rear, travelM)
+        fx, fy, nx, ny, halfW, halfL, rear, travelM, lateralM)
     if type(state) ~= "table" or vehicle == nil or cell == nil
             or not finite(bodyX) or not finite(bodyY)
             or not finite(fx) or not finite(fy) or not finite(nx) or not finite(ny)
@@ -825,7 +909,16 @@ local function probeDirectional(state, vehicle, cell, bodyX, bodyY,
     end
 
     local rectX, rectY, halfF, halfN
-    if rear then
+    if finite(lateralM) then
+        local lateralAbs = lateralM
+        if lateralAbs < 0 then lateralAbs = -lateralAbs end
+        -- Union of current body swept laterally laneStart→target, with the near
+        -- longitudinal horizon [s0-halfL, s0+halfL+2].
+        rectX = bodyX + fx + nx * lateralM * 0.5
+        rectY = bodyY + fy + ny * lateralM * 0.5
+        halfF = halfL + 1 + 0.15
+        halfN = halfW + lateralAbs * 0.5 + 0.15
+    elseif rear then
         local d = travelM
         if d == nil then d = 4 end
         if not finite(d) or d <= 0 then
@@ -986,6 +1079,15 @@ function MDADSensor.probeNear(state, vehicle, cell, bodyX, bodyY,
     local ok, status, hitX, hitY, kind = pcall(probeDirectional,
         state, vehicle, cell, bodyX, bodyY, fx, fy, nx, ny,
         halfW, halfL, false, 0)
+    if not ok then return "unloaded", bodyX, bodyY, "getter", tostring(status) end
+    return status, hitX, hitY, kind, nil
+end
+
+function MDADSensor.probeLateral(state, vehicle, cell, bodyX, bodyY,
+        fx, fy, nx, ny, halfW, halfL, lateralM)
+    local ok, status, hitX, hitY, kind = pcall(probeDirectional,
+        state, vehicle, cell, bodyX, bodyY, fx, fy, nx, ny,
+        halfW, halfL, false, 0, lateralM)
     if not ok then return "unloaded", bodyX, bodyY, "getter", tostring(status) end
     return status, hitX, hitY, kind, nil
 end

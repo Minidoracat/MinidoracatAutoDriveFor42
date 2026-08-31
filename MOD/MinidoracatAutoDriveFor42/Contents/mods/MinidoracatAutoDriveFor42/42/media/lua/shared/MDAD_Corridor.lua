@@ -170,6 +170,77 @@ local function footprintFailClosed()
     return true, 0, 0, 0, 0, 0, 0, 0, false
 end
 
+-- Prepared hot-loop helper: caller supplies normalized F and the already
+-- transformed COM centre. No type checks, normalization, COM work or sqrt.
+function MDADCorridor.orientedDistanceSqUnchecked(cx, cy, fx, fy, halfW, halfL,
+        pointX, pointY)
+    local dx, dy = pointX - cx, pointY - cy
+    local u = dx * fx + dy * fy
+    local v = -dx * fy + dy * fx
+    if u < 0 then u = -u end
+    if v < 0 then v = -v end
+    u, v = u - halfL, v - halfW
+    if u < 0 then u = 0 end
+    if v < 0 then v = 0 end
+    return u * u + v * v
+end
+
+-- Squared OBB distance from an origin pose. Project local +X is vehicle-left
+-- (`-Nright`), so centre = origin + forward*comZ - Nright*comX.
+function MDADCorridor.orientedDistanceSq(originX, originY, fx, fy, halfW, halfL,
+        comX, comZ, pointX, pointY)
+    if type(originX) ~= "number" or originX * 0 ~= 0
+            or type(originY) ~= "number" or originY * 0 ~= 0
+            or type(fx) ~= "number" or fx * 0 ~= 0
+            or type(fy) ~= "number" or fy * 0 ~= 0
+            or type(halfW) ~= "number" or halfW * 0 ~= 0 or halfW <= 0
+            or type(halfL) ~= "number" or halfL * 0 ~= 0 or halfL <= 0
+            or type(comX) ~= "number" or comX * 0 ~= 0
+            or type(comZ) ~= "number" or comZ * 0 ~= 0
+            or type(pointX) ~= "number" or pointX * 0 ~= 0
+            or type(pointY) ~= "number" or pointY * 0 ~= 0 then return nil end
+    local fl2 = fx * fx + fy * fy
+    if fl2 <= 1e-12 then return nil end
+    if fl2 < 0.999999 or fl2 > 1.000001 then
+        local inv = 1 / sqrt(fl2)
+        fx, fy = fx * inv, fy * inv
+    end
+    local cx = originX + fx * comZ + fy * comX
+    local cy = originY + fy * comZ - fx * comX
+    return MDADCorridor.orientedDistanceSqUnchecked(
+        cx, cy, fx, fy, halfW, halfL, pointX, pointY)
+end
+
+-- One oriented vehicle rectangle against one obstacle disk. Driver's trajectory
+-- sweep uses the same halfW/halfL geometry as currentFootprintHit, so a long
+-- vehicle's front corner cannot pass merely because its centreline is clear.
+-- Returns signed clearance (<=0 means hit), or nil for malformed input.
+function MDADCorridor.orientedClearance(cx, cy, fx, fy, halfW, halfL,
+        pointX, pointY, radius, padding)
+    if type(cx) ~= "number" or cx * 0 ~= 0
+            or type(cy) ~= "number" or cy * 0 ~= 0
+            or type(fx) ~= "number" or fx * 0 ~= 0
+            or type(fy) ~= "number" or fy * 0 ~= 0
+            or type(halfW) ~= "number" or halfW * 0 ~= 0 or halfW <= 0
+            or type(halfL) ~= "number" or halfL * 0 ~= 0 or halfL <= 0
+            or type(pointX) ~= "number" or pointX * 0 ~= 0
+            or type(pointY) ~= "number" or pointY * 0 ~= 0
+            or type(radius) ~= "number" or radius * 0 ~= 0 or radius < 0
+            or type(padding) ~= "number" or padding * 0 ~= 0 or padding < 0 then
+        return nil
+    end
+    local fl2 = fx * fx + fy * fy
+    if fl2 <= 1e-12 then return nil end
+    if fl2 < 0.999999 or fl2 > 1.000001 then
+        local inv = 1 / sqrt(fl2)
+        fx, fy = fx * inv, fy * inv
+    end
+    local d2 = MDADCorridor.orientedDistanceSq(
+        cx, cy, fx, fy, halfW, halfL, 0, 0, pointX, pointY)
+    if d2 == nil then return nil end
+    return sqrt(d2) - radius - padding
+end
+
 -- 目前車身的 oriented rectangle 對 Sensor 點 disk。世界座標優先；只有整組
 -- hardX/hardY 都未提供才走 Frenet fallback。此函式是 plan() 之外的安全 OR-gate，
 -- 不能拿 latSigned 覆寫 planner baseline，否則 follower 仍追 expectedLane 時兩邊會打架。

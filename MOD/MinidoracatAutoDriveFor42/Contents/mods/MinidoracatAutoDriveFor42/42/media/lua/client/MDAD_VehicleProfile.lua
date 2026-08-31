@@ -8,6 +8,12 @@
 --   clampMax, wheelFriction, delta0Safe, deltaVSafe, rMin, lookScale, rearArm,
 --   needHalf, probeR, enginePower, brakingForce, offroadEfficiency, rollInfluence,
 --   tireFrictionMin, tireFrictionAvg, tireFrictionCount, isAnyTireMissing
+-- Pure scalar/cold-path helpers:
+--   steeringKappa(profile,speedKmh) -> kappa
+--   priors(profile,runtimeMass,surfaceId,raining,physicalOffroad,adaptive)
+--     -> aDrive,aBrake,aLat,fSurface,fTire,aCoast
+--   updateEWMA(mean,dev,seconds,observation,dt) -> mean,dev,seconds,confidence,lower
+--   configureFollower(followerProfile,vehicleProfile,runtimeMass,raining) -> adaptive
 -- Units: body/axle/radius/arm/centerOfMass are metres; mass is kg; maxSpeed is km/h;
 -- enginePower is the runtime engineForce integer (BaseVehicle.java:8077-8078);
 -- brakingForce is the accumulated part brake force (BaseVehicle.java:9005-9006);
@@ -48,6 +54,10 @@
 --   footprint/probe values derive from full extents. No script-name behavior branches.
 
 MDADVehicleProfile = MDADVehicleProfile or {}
+MDADVehicleProfile.SURFACE_UNKNOWN = 0
+MDADVehicleProfile.SURFACE_PAVED = 1
+MDADVehicleProfile.SURFACE_GRAVEL = 2
+MDADVehicleProfile.SURFACE_DIRT = 3
 if MDADVehicleProfile.build then return end
 
 
@@ -77,6 +87,12 @@ local LOOK_LO, LOOK_HI = 0.85, 1.5
 local ARM_REF, ARM_SCALE_LO, ARM_SCALE_HI = 2.2, 0.85, 1.35
 local NEED_BASE, NEED_MARGIN = 1.4, 0.4
 local PROBE_EXTRA, PROBE_LO, PROBE_HI = 1, 3, 7
+
+-- Reference force/mass densities of the calibration sedan (4000 N engine force,
+-- 80 N brake force at 1200 kg) that the legacy 2.5/6 m/s^2 envelopes were tuned
+-- on. A density ratio below 1 means "weaker than reference", so it only lowers.
+local ENG_REF_DENSITY, BRAKE_REF_DENSITY = 4000 / 1200, 80 / 1200
+local TIRE_SCALE_LO = 0.35     -- worst tire-grip fraction; also the missing-tire floor
 
 local function isFinite(n)
     return type(n) == "number" and n * 0 == 0
@@ -452,4 +468,169 @@ function MDADVehicleProfile.build(vehicle)
     end)
     if ok and type(profile) == "table" then return profile end
     return safePack("")
+end
+
+-- VehicleScript.getSteeringClamp(speed) linearly interpolates clamp0 to clampMax
+-- over vehicle max speed (VehicleScript.java:1678-1687). This pure scalar is the
+-- conservative bicycle-model envelope; it never reads Java or allocates.
+function MDADVehicleProfile.steeringKappa(profile, speedKmh)
+    if type(profile) ~= "table" or not isFinite(speedKmh)
+            or not inOpenHi(profile.maxSpeed, 0, MAX_SPEED_HI)
+            or not inClosed(profile.delta0Safe, SAFE_DV_LO, SAFE_D0_HI)
+            or not inClosed(profile.deltaVSafe, SAFE_DV_LO, profile.delta0Safe)
+            or not inClosed(profile.wheelbase, WB_LO, WB_HI) then
+        return 0
+    end
+    local av = speedKmh
+    if av < 0 then av = -av end
+    local t = av / profile.maxSpeed
+    if t > 1 then t = 1 end
+    local delta = profile.delta0Safe
+        + (profile.deltaVSafe - profile.delta0Safe) * t
+    return math.tan(delta) / profile.wheelbase
+end
+
+-- sqrt of a getter-derived force/mass density normalised against the reference
+-- sedan. Never negative; the caller uses it only to lower a legacy envelope.
+local function densityScale(force, mass, refDensity)
+    local rho = (force / mass) / refDensity
+    if rho < 0 then rho = 0 end
+    return math.sqrt(rho)
+end
+
+-- Conservative priors only lower the legacy ACCEL/BRAKE/LAT envelopes.
+-- BaseVehicle.isDoingOffroad and the rain/tire multipliers are sourced from
+-- BaseVehicle.java:9029-9042,9165-9190,9231-9241. Getter values remain priors:
+-- CarController applies RPM/gear/speed/offroad factors after enginePower.
+-- Returns aDrive, aBrake, aLat, fSurface, fTire as scalars.
+function MDADVehicleProfile.priors(profile, runtimeMass, surfaceId, raining,
+        physicalOffroad, adaptive)
+    if type(profile) ~= "table" then profile = {} end
+    local mass = runtimeMass
+    if not inClosed(mass, MASS_LO, MASS_HI) then mass = profile.mass end
+    if not inClosed(mass, MASS_LO, MASS_HI) then mass = SAFE_MASS end
+    adaptive = adaptive == true and profile.valid == true
+        and profile.geometryValid == true
+
+    local fSurface = surfaceId == MDADVehicleProfile.SURFACE_PAVED and 1 or 0.7
+    -- Unknown weather is wet until a sensor snapshot proves dry.
+    if raining ~= false then fSurface = fSurface - 0.3 end
+    if fSurface < 0.4 then fSurface = 0.4 end
+
+    local fTire = 0.8
+    if adaptive and inOpenHi(profile.tireFrictionMin, TIRE_FRIC_LO, TIRE_FRIC_HI)
+            and inOpenHi(profile.wheelFriction, FRIC_LO, FRIC_HI) then
+        fTire = clamp(profile.tireFrictionMin / profile.wheelFriction,
+            TIRE_SCALE_LO, 1)
+    end
+    if profile.isAnyTireMissing == true and fTire > TIRE_SCALE_LO then
+        fTire = TIRE_SCALE_LO -- a missing tire always takes the worst grip
+    end
+
+    local aDrive = 2.5
+    if adaptive and inClosed(profile.enginePower, ENG_LO, ENG_HI) then
+        local rho = densityScale(profile.enginePower, mass, ENG_REF_DENSITY)
+        if rho < 1 then aDrive = aDrive * rho end
+    end
+    if physicalOffroad == true then
+        local off = 0.6
+        if adaptive and inOpenHi(profile.offroadEfficiency,
+                OFFROAD_EFF_LO, OFFROAD_EFF_HI) then
+            off = 0.6 * profile.offroadEfficiency
+            if off > 1 then off = 1 end
+        end
+        aDrive = aDrive * off
+    end
+
+    local brakeScale = 1
+    if adaptive and inClosed(profile.brakingForce, BRAKE_LO, BRAKE_HI) then
+        local rho = densityScale(profile.brakingForce, mass, BRAKE_REF_DENSITY)
+        if rho < brakeScale then brakeScale = rho end
+    end
+    return aDrive, 6 * fSurface * fTire * brakeScale,
+        3.5 * fSurface * fTire, fSurface, fTire, 0.6
+end
+
+-- Exact approved EWMA scalar update. The caller owns traction-key resets and
+-- decides which stable samples are valid; this helper has no hidden state.
+function MDADVehicleProfile.updateEWMA(mean, dev, validSeconds, observation, dt)
+    if not isFinite(mean) then mean = 0 end
+    if not isFinite(dev) or dev < 0 then dev = 0 end
+    if not isFinite(validSeconds) or validSeconds < 0 then validSeconds = 0 end
+    if not isFinite(observation) or observation < 0
+            or not isFinite(dt) or dt <= 0 then
+        local confidence = validSeconds / 20
+        if confidence > 1 then confidence = 1 end
+        local lower = mean - 2 * dev
+        if lower < 0 then lower = 0 end
+        return mean, dev, validSeconds, confidence, lower
+    end
+    local alpha = dt / (10 + dt)
+    mean = mean + alpha * (observation - mean)
+    local delta = observation - mean
+    if delta < 0 then delta = -delta end
+    dev = dev + alpha * (delta - dev)
+    validSeconds = validSeconds + dt
+    local confidence = validSeconds / 20
+    if confidence > 1 then confidence = 1 end
+    local lower = mean - 2 * dev
+    if lower < 0 then lower = 0 end
+    return mean, dev, validSeconds, confidence, lower
+end
+
+-- Cold-path wiring: fill the Follower's preallocated per-segment dynamics arrays
+-- from one coherent session profile. No table is created here.
+function MDADVehicleProfile.configureFollower(follower, profile, runtimeMass, raining)
+    if type(follower) ~= "table" or type(profile) ~= "table"
+            or type(follower.segSurface) ~= "table"
+            or type(follower.segAccel) ~= "table"
+            or type(follower.segBrake) ~= "table"
+            or type(follower.segLat) ~= "table"
+            or type(follower.n) ~= "number" then
+        return false
+    end
+    local adaptive = profile.valid == true and profile.geometryValid == true
+    follower.adaptive = adaptive
+    follower.lookScale = adaptive and profile.lookScale or 1
+    local have0, have1, have2, have3 = false, false, false, false
+    local a0, b0, l0, a1, b1, l1, a2, b2, l2, a3, b3, l3
+    local i = 1
+    while i < follower.n do
+        local sid = follower.segSurface[i]
+        local aDrive, aBrake, aLat
+        if sid == MDADVehicleProfile.SURFACE_PAVED then
+            if not have1 then
+                a1, b1, l1 = MDADVehicleProfile.priors(
+                    profile, runtimeMass, sid, raining, false, adaptive)
+                have1 = true
+            end
+            aDrive, aBrake, aLat = a1, b1, l1
+        elseif sid == MDADVehicleProfile.SURFACE_GRAVEL then
+            if not have2 then
+                a2, b2, l2 = MDADVehicleProfile.priors(
+                    profile, runtimeMass, sid, raining, false, adaptive)
+                have2 = true
+            end
+            aDrive, aBrake, aLat = a2, b2, l2
+        elseif sid == MDADVehicleProfile.SURFACE_DIRT then
+            if not have3 then
+                a3, b3, l3 = MDADVehicleProfile.priors(
+                    profile, runtimeMass, sid, raining, false, adaptive)
+                have3 = true
+            end
+            aDrive, aBrake, aLat = a3, b3, l3
+        else
+            if not have0 then
+                a0, b0, l0 = MDADVehicleProfile.priors(
+                    profile, runtimeMass, MDADVehicleProfile.SURFACE_UNKNOWN,
+                    raining, false, adaptive)
+                have0 = true
+            end
+            aDrive, aBrake, aLat = a0, b0, l0
+        end
+        follower.segAccel[i], follower.segBrake[i], follower.segLat[i] =
+            aDrive, aBrake, aLat
+        i = i + 1
+    end
+    return adaptive
 end

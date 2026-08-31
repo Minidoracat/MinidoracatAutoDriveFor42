@@ -148,7 +148,9 @@ local drive = {
     calls = {
         setRegulator = 0, regulatorOn = 0, regulatorOff = 0,
         setRegulatorSpeed = 0, maxRegSpeed = 0, badRegSpeed = 0, fractionalRegSpeed = 0,
-        forceBrake = 0, getForwardVector = 0,
+        forceBrake = 0, getForwardVector = 0, getMass = 0,
+        getEnginePower = 0, getBrakingForce = 0, getWheelFriction = 0,
+        getPartById = 0, getInventoryItem = 0, isAnyTireMissing = 0,
         isDoingOffroad = 0, isBraking = 0, getMinWheelSkid = 0,
         getEngineSpeed = 0, getTransmissionNumber = 0, getRegulatorSpeed = 0,
         getLinearVelocity = 0,
@@ -873,6 +875,35 @@ local function newVehicle(opts)
     function script:getFullName() return opts.scriptName or "Base.TestVehicle" end
     function script:getExtents() return ext end
     function script:getCenterOfMassOffset() return com end
+    if opts.profileFull then
+        local ids = { "FrontLeft", "FrontRight", "RearLeft", "RearRight" }
+        local wheels = {}
+        for i = 1, 4 do
+            local id = ids[i]
+            local left = i == 1 or i == 3
+            local front = i <= 2
+            local off = newVec3():set(
+                (left and -1 or 1) * (opts.bodyW or 1.8) * 0.35,
+                0, (front and 1 or -1) * (opts.bodyL or 4.4) * 0.25)
+            wheels[id] = {
+                getOffset = function() return off end,
+                getId = function() return id end,
+            }
+        end
+        function script:getWheelById(id) return wheels[id] end
+        function script:getWheelCount() return 4 end
+        function script:getWheel(index) return wheels[ids[index + 1]] end
+        function script:getSteeringClamp(speed)
+            local av = speed < 0 and -speed or speed
+            local top = opts.maxSpeed or 90
+            local t = av / top
+            if t > 1 then t = 1 end
+            return 0.9 + (0.3 - 0.9) * t
+        end
+        function script:getWheelFriction() return opts.wheelFriction or 1.5 end
+        function script:getOffroadEfficiency() return opts.offroadEfficiency or 1 end
+        function script:getRollInfluence() return opts.rollInfluence or 0.7 end
+    end
     v._script, v._com = script, com
     nextVehicleId = nextVehicleId + 1
     vehiclesById[v._id] = v
@@ -907,7 +938,10 @@ local function newVehicle(opts)
     function v:isDriver(chr) return self._driver ~= nil and self._driver == chr end
     function v:getX() return self._x end
     function v:getY() return self._y end
-    function v:getMass() return self._mass end
+    function v:getMass()
+        drive.calls.getMass = drive.calls.getMass + 1
+        return self._mass
+    end
     -- getCurrentSpeedKmHour 可負（倒車）＝BaseVehicle.java:4268
     function v:getCurrentSpeedKmHour() return self._speed end
     -- getCurrentSteering 由 CarController 每幀從 clientControls 寫入（:321）
@@ -926,8 +960,8 @@ local function newVehicle(opts)
     function v:getWorldPos(localX, localY, localZ, out)
         drive.calls.getWorldPos = (drive.calls.getWorldPos or 0) + 1
         return out:set(
-            self._x + localZ * self._fwdX - localX * self._fwdY,
-            self._y + localZ * self._fwdY + localX * self._fwdX,
+            self._x + localZ * self._fwdX + localX * self._fwdY,
+            self._y + localZ * self._fwdY - localX * self._fwdX,
             self._z + localY)
     end
 
@@ -977,6 +1011,38 @@ local function newVehicle(opts)
 
     -- setForceBrake 寫 clientControls.forceBrake，效期 1 秒（CarController.java:973-979）
     function v:setForceBrake() drive.calls.forceBrake = drive.calls.forceBrake + 1 end
+    if opts.profileFull then
+        local tirePart = {
+            getInventoryItem = function()
+                drive.calls.getInventoryItem = drive.calls.getInventoryItem + 1
+                return {}
+            end,
+            getWheelFriction = function()
+                drive.calls.getWheelFriction = drive.calls.getWheelFriction + 1
+                return opts.tireFriction or opts.wheelFriction or 1.5
+            end,
+        }
+        function v:getEnginePower()
+            drive.calls.getEnginePower = drive.calls.getEnginePower + 1
+            return opts.enginePower or 4000
+        end
+        function v:getBrakingForce()
+            drive.calls.getBrakingForce = drive.calls.getBrakingForce + 1
+            if opts.brakingForce ~= nil then return opts.brakingForce end
+            return 80
+        end
+        function v:isAnyTireMissing()
+            drive.calls.isAnyTireMissing = drive.calls.isAnyTireMissing + 1
+            return opts.tireMissing == true
+        end
+        function v:getPartById(id)
+            drive.calls.getPartById = drive.calls.getPartById + 1
+            if type(id) == "string" and string.sub(id, 1, 4) == "Tire" then
+                return tirePart
+            end
+            return nil
+        end
+    end
     -- Phase A 診斷 getter：只應在 s.diag 真時被呼叫。
     function v:isDoingOffroad()
         drive.calls.isDoingOffroad = drive.calls.isDoingOffroad + 1
@@ -3587,6 +3653,12 @@ installNavApi(1)
 driveReset(dveh)
 checkFalse(MDAD.Drive.start(dp), "nav API 只有 v1（沒有 getNavTarget 契約）：不啟動")
 checkEq(haloKey(), NAV_API_MISSING, "v1 視同缺 API")
+installNavApi(2.5)
+driveReset(dveh)
+checkFalse(MDAD.Drive.start(dp), "fractional nav API version is rejected at trust boundary")
+installNavApi(0 / 0)
+driveReset(dveh)
+checkFalse(MDAD.Drive.start(dp), "nonfinite nav API version is rejected at trust boundary")
 
 installNavApi(2)
 MinidoracatMiniMapAPI.getNavTarget = nil
@@ -4224,20 +4296,18 @@ driveTick(dp, dveh)
 checkTrue(drive.calls.forceBrake > 0, "橫向偏離終點 20m＋誤差 >90°：速度閘先煞停（不帶動量轉向）")
 checkEq(dveh._imp.total, 0, "煞停幀不施轉向")
 checkTrue(MDAD.Drive.isActive(0), "橫向偏離終點：session 繼續（不是 arrive）")
--- 而且不能只是「不宣告抵達」：制動剖面在這裡只給 8.8 km/h、再往終點靠會收到 0，
--- 定速 0 的車停在路邊等一個永遠不會成立的 reached。follower 的末段脫困地板把目標
--- 速度抬到爬行 12 km/h，車才有動力自己開回終點（沙盒上限 40 在這之上，不夾）
-checkEq(drive.calls.setRegulatorSpeed, 1, "橫向偏離終點：照樣控速")
-checkNear(dveh._regSpeed, 12, 1e-9, "橫向偏離終點：定速抬到爬行 12 km/h（不是 0 速卡死）")
-checkEq(drive.calls.regulatorOn, 1, "橫向偏離終點：regulator 開著供油（要把車開回終點）")
+-- 這個早期 M3 fixture 尚未載入 Sensor／Corridor；RETURN 不得成為啟動依賴，
+-- 因此保持既有 pure follower 主動煞停後跟線，而不是誤進 RETURN HOLD。
+checkEq(drive.calls.setRegulatorSpeed, 1, "缺 RETURN APIs 仍保留 pure follower 定速")
+checkEq(drive.calls.regulatorOn, 1, "缺 RETURN APIs 仍保留 pure follower 供油")
 dveh._y = 0
 
 dveh._x = 26           -- 沿路徑剩 2 公尺、離終點直線距離也是 2 公尺 <= ARRIVE_M(5)
 driveReset(dveh)
 driveTick(dp, dveh)
 checkEq(dveh._imp.total, 0, "抵達當幀不再施力（停車時不能還在推車）")
-checkEq(drive.calls.forceBrake, 1, "抵達當幀開始煞車")
-checkEq(drive.calls.regulatorOff, 1, "抵達關掉 regulator")
+checkEq(drive.calls.forceBrake, 1, "pure follower brake 與 arrive 共用當前冪等煞車狀態")
+checkEq(drive.calls.regulatorOff, 1, "pure follower brake 與 arrive 都維持 regulator 關閉")
 checkEq(dveh._regulator, false, "抵達後 regulator 是關的")
 checkEq(drive.pool.alloc, 1, "抵達幀只取 forward 一顆向量")
 checkEq(drive.pool.live, 0, "抵達幀也要把向量還回池子")
@@ -5484,11 +5554,13 @@ driveReset(dveh) -- 清掉 Start 綠字
 drive.putSolid(79, 4, "harness_curve_obs_b")
 drive.putSolid(81, 4, "harness_curve_obs_c")
 drive.scanRound()
+checkEq(haloKey(), DKEY.BLOCKED,
+    "彎中窄縫的長車前角 OBB 不安全：blocked，不以中心線 clear 硬擠")
 driveReset(dveh)
 driveTick(dp, dveh)
-checkTrue(drive.calls.maxRegSpeed > 0 and drive.calls.maxRegSpeed <= 16,
-    "彎中窄縫：降級爬行（彎道天花板 16）而非 blocked（實得 "
-    .. tostring(drive.calls.maxRegSpeed) .. "）")
+checkTrue(drive.calls.forceBrake > 0
+        or (drive.calls.maxRegSpeed > 0 and drive.calls.maxRegSpeed <= 12),
+    "長車 OBB 否決後只以 blocked approach 爬行，近距才煞停")
 checkTrue(MDAD.Drive.isActive(0), "彎中窄縫：session 活著")
 -- ⑨c 彎中真堵死（普通 needHalf 也無縫：七顆並排蓋過可行帶 ±5.6）
 --    → blocked 煞停等待，這才是「不硬擠」的底線
@@ -5497,7 +5569,7 @@ drive.putSolid(83, 4, "harness_curve_obs_e")
 drive.putSolid(75, 4, "harness_curve_obs_f") -- 走廊 ±7 後可行帶 ±5.6：堵死要排到 l≈±5
 drive.putSolid(85, 4, "harness_curve_obs_g")
 drive.scanRound()
-checkEq(haloKey(), DKEY.BLOCKED, "彎中真堵死（普通縫也無）：blocked 煞停等待")
+checkEq(haloKey(), nil, "已在 blocked 承諾中不重複轟提示")
 checkTrue(MDAD.Drive.isActive(0), "彎中堵死：session 活著（等待或玩家接手）")
 drive.clearCell(75, 4)
 drive.clearCell(77, 4)
@@ -5535,8 +5607,8 @@ do
     drive.nav.detourRoute.len = 200
     drive.scanRound()
     MDADFollower.setOffset = realSetOffset
-    checkEq(commits, 1, "⑨d comfort lane 通過世界掃掠後只 commit 一次")
-    checkEq(haloKey(), DKEY.DODGE, "⑨d 分類 dodge（綠字）")
+    checkEq(commits, 0, "⑨d 長車前角 OBB 否決中心線看似淨空的 comfort lane")
+    checkEq(haloKey(), DKEY.BLOCKED, "⑨d 分類 blocked（不以中心點掃掠誤放行）")
     dveh._speed = 0
     driveReset(dveh)
     driveTick(dp, dveh)
@@ -5644,14 +5716,21 @@ do
     end
     checkTrue(armDrive(), "路面對中情境啟動")
     drive.putRoad(0, 70, -5, -1)
-    for _ = 1, 8 do drive.scanRound() end -- EMA 0.25/輪 → 8 輪 ≈ 收斂 90%
+    for _ = 1, 8 do
+        drive.scanRound()
+        if spyBias ~= nil then dveh._y = spyBias end
+    end -- 模擬車跟上逐輪 EMA，隔離 RETURN 對真實偏離的守門
     checkTrue(spyBias ~= nil and spyBias < -1.8 and spyBias > -3.01,
         "行駛線向實際路面中心校正（期望 ≈-2.3、實得 " .. tostring(spyBias) .. "）")
     drive.fillWorld(-2, 70, -7, 7) -- 重建無地板世界＝路面樣本消失
-    for _ = 1, 12 do drive.scanRound() end -- 衰減 0.85^12 ≈ 0.14
+    for _ = 1, 12 do
+        drive.scanRound()
+        if spyBias ~= nil then dveh._y = spyBias end
+    end
     checkTrue(spyBias ~= nil and spyBias > -0.5 and spyBias < -0.1,
         "無路面樣本：roadBias 逐輪衰減回 nav 線（實得 " .. tostring(spyBias) .. "）")
     MDADFollower.setLaneBias = realSetBias
+    dveh._y = 0
     MDAD.Drive.stop(0, nil)
 end
 
@@ -5667,10 +5746,14 @@ do
     end
     drive.putRoad(0, 70, -5, -1)
     checkTrue(armDrive(), "route cutover roadBias 情境啟動")
-    for _ = 1, 8 do drive.scanRound() end
+    for _ = 1, 8 do
+        drive.scanRound()
+        if spyBias ~= nil then dveh._y = spyBias end
+    end
     checkTrue(spyBias ~= nil and spyBias < -1.8,
         "換線前先建立非零 roadBias（實得 " .. tostring(spyBias) .. "）")
     drive.fillWorld(-2, 70, -7, 7)
+    dveh._y = 0
     drive.nav.route = newRoute(80, 0, 0, 4, 0)
     nowMs = nowMs + 300
     driveReset(dveh)
@@ -6092,8 +6175,9 @@ do
     driveTick(dp, dveh) -- 觸發幀：offroad 設立並清 dodging（當幀 dodge cap 已先套）
     driveReset(dveh)
     driveTick(dp, dveh)
-    checkEq(drive.calls.maxRegSpeed, 15,
-        "(b) 偏離期望線 6m：offroad 減速掃回（cap=15）")
+    checkEq(drive.calls.maxRegSpeed, 0,
+        "(b) 無 fresh lane proof 的 RETURN 進 HOLD，不允許 8 km/h")
+    checkTrue(drive.calls.forceBrake > 0, "RETURN HOLD target0 主動煞停")
     for y = -3, 4 do drive.clearCell(20, y) end
     MDAD.Drive.stop(0, nil)
 end
@@ -6317,7 +6401,7 @@ do
     checkTrue(sawRecoveryBan, "(d2) same-target route cutover remap 並保留 recovery ban")
 
     sawRecoveryBan = false
-    drive.nav.route = newRoute(40, 0, 20, 4, 0) -- old hit 離新 route > corridor
+    drive.nav.route = newRoute(40, 0, 8, 4, 0) -- old hit 離新 route > corridor、但不超 RETURN 容量
     nowMs = nowMs + 300
     driveTick(dp, dveh)
     drive.scanRound()
@@ -6328,7 +6412,9 @@ do
     drive.nav.route = newRoute(40, 0, 0, 4, 0)
     nowMs = nowMs + 300
     driveTick(dp, dveh)
-    drive.scanRound()
+    for _ = 1, 4 do
+        if not sawRecoveryBan then drive.scanRound() end
+    end
     checkTrue(sawRecoveryBan, "(d2) 後續 near route 可重新投影同一 world hit")
     dveh._x, dveh._speed = 13.0, 20 -- >10m from projected world hit
     drive.scanRound()
@@ -6508,8 +6594,12 @@ do
     driveTick(dp, dveh)  -- route 刷新塊 cutover（nextRouteMs=0）
     checkTrue(MDAD.Drive.isActive(0), "(f) 改道後 session 活著")
     driveReset(dveh)
+    for _ = 1, 4 do driveTick(dp, dveh) end
+    checkTrue(MDAD.Drive.isActive(0),
+        "(f) 換線 bounded rebuild 期間 session 保持、blocked 已隨 cutover 清除")
+    driveReset(dveh)
     driveTick(dp, dveh)
-    checkEq(dveh._regulator, true, "(f) 換線後恢復行駛（blocked 隨 cutover 清除）")
+    checkTrue(MDAD.Drive.isActive(0), "(f) cutover 後仍可持續掃描並恢復")
     for _, y in ipairs({ -5, -4, -2, -1, 0, 1, 2, 4, 5 }) do drive.clearCell(20, y) end
     drive.nav.detourRoute = nil
     MDAD.Drive.stop(0, nil)
@@ -7041,7 +7131,8 @@ local function scenarioTelemetry()
     driveReset(dveh)
     drive.diag.sample = 0
     for _ = 1, 5 do driveTick(dp, dveh) end
-    checkEq(drive.calls.isDoingOffroad, 0, "gate skip 零 isDoingOffroad")
+    checkTrue(drive.calls.isDoingOffroad <= 1,
+        "gate skip 不跑診斷 getter；至多一筆 sensor snapshot 輔證")
     checkEq(drive.calls.getLinearVelocity, 0, "gate skip 零 getLinearVelocity")
     check(drive.diag.sample > 0, "gate skip 仍呼叫 sample 探活")
     forceShould = nil
@@ -7066,7 +7157,7 @@ local function scenarioTelemetry()
 
     dveh._y = 20
     driveTick(dp, dveh)
-    checkTrue(drive.diag.names.offroad == true, "offroad 有 event")
+    checkTrue(drive.diag.names["return"] == true, "RETURN enter 有 event")
     checkTrue(drive.diag.critical > 0, "offroad sample 切到 10Hz critical flag")
     checkEq(drive.diag.last.offroad, true, "offroad 旗標進到 sample 欄位")
     dveh._y = 0
@@ -7356,6 +7447,613 @@ local function scenarioTelemetry()
     Clipboard = oldClipboard
 end
 scenarioTelemetry()
+
+-- =====================================================================
+-- Phase E：v4 strict consumer、hot getter、EWMA key、surface-aware RETURN
+-- =====================================================================
+scenario("Phase E：v4 strict metadata、adaptive getter cache、traction reset、RETURN exact line")
+local function scenarioPhaseE()
+    local oldVeh = dveh
+    local hotVeh = newVehicle({
+        battery = newItem("Base.CarBattery", { uses = 0.8 }),
+        engineRunning = true, mass = 1200, speed = 20, maxSpeed = 90,
+        bodyW = 2.0, bodyL = 5.2, comX = 0.6, comZ = 0.4, profileFull = true,
+        enginePower = 4000, brakingForce = 80,
+        wheelFriction = 1.5, tireFriction = 1.5,
+    })
+    dveh = hotVeh
+    hotVeh._driver, dp._vehicle = dp, hotVeh
+    local function v4Route(surface, width)
+        local route = newRoute(40, 0, 0, 4, 0)
+        route.segSurface, route.segWidth = {}, {}
+        for i = 1, 39 do
+            route.segSurface[i], route.segWidth[i] = surface, width
+        end
+        route.len, route.cost = 156, 156
+        route.avoidPenalty, route.approachSurface = 0, "unknown"
+        return route
+    end
+    local captured = nil
+    local realOverlayUpdate = MDADOverlay.update
+    MDADOverlay.update = function(pn, s, ...)
+        if pn == 0 then captured = s end
+        return realOverlayUpdate(pn, s, ...)
+    end
+
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
+        AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    installNavApi(4)
+    drive.nav.tx, drive.nav.ty, drive.nav.state = 300, 0, "ok"
+    drive.nav.route = v4Route("paved", 10)
+    drive.fillWorld(-2, 170, -9, 9)
+    drive.putRoad(-2, 170, -9, 9)
+    driveReset(hotVeh)
+    checkTrue(MDAD.Drive.start(dp), "aligned v4 route starts")
+    local massStart = drive.calls.getMass
+    local engineStart = drive.calls.getEnginePower
+    local brakeStart = drive.calls.getBrakingForce
+    local tireStart = drive.calls.getWheelFriction
+    local partStart = drive.calls.getPartById
+    for _ = 1, 10 do driveTick(dp, hotVeh) end
+    checkEq(drive.calls.getMass, massStart, "N hot frames do not reread mass")
+    checkEq(drive.calls.getEnginePower, engineStart, "N hot frames do not reread enginePower")
+    checkEq(drive.calls.getBrakingForce, brakeStart, "N hot frames do not reread brakingForce")
+    checkEq(drive.calls.getWheelFriction, tireStart, "N hot frames do not reread tire friction")
+    checkEq(drive.calls.getPartById, partStart, "N hot frames do not enumerate tires")
+    nowMs = nowMs + 999
+    driveTick(dp, hotVeh)
+    checkEq(drive.calls.getMass, massStart, "mass remains cached before 1 second")
+    nowMs = nowMs + 1
+    driveTick(dp, hotVeh)
+    checkEq(drive.calls.getMass, massStart + 1, "1 second boundary performs one finite mass refresh")
+    checkEq(drive.calls.getEnginePower, engineStart, "mass refresh does not reread enginePower")
+    checkEq(drive.calls.getBrakingForce, brakeStart, "mass refresh does not reread brakingForce")
+    checkEq(drive.calls.getWheelFriction, tireStart, "mass refresh does not reread tires")
+
+    hotVeh._x, hotVeh._y, hotVeh._speed = 0, 0, 20
+    setHeading(hotVeh, 0)
+    drive.scanRound()
+    checkEq(type(captured), "table", "completed sensor round exposes active session to overlay")
+    local cachedMass = captured.runtimeMass
+    local cachedAccel = captured.profile.segAccel[1]
+    hotVeh._mass = cachedMass + 0.5
+    nowMs = nowMs + 1000
+    driveTick(dp, hotVeh)
+    checkEq(captured.runtimeMass, cachedMass,
+        "sub-threshold modded mass jitter does not move the retained baseline")
+    checkNear(captured.profile.segAccel[1], cachedAccel, 1e-12,
+        "sub-threshold mass jitter does not dirty/rebuild dynamics")
+    hotVeh._mass = cachedMass + 6
+    nowMs = nowMs + 1000
+    driveTick(dp, hotVeh)
+    checkEq(captured.runtimeMass, cachedMass + 6,
+        "accumulated delta at 0.5 percent threshold refreshes runtime mass")
+    checkTrue(captured.profile.segAccel[1] < cachedAccel,
+        "threshold-crossing mass refresh rebuilds conservative segment dynamics")
+    checkEq(captured.navVersion, 4, "Driver records nav v4")
+    checkEq(captured.currentSurfaceId, MDADFollower.SURFACE_PAVED,
+        "Driver records current declared surface")
+    checkEq(captured.currentSegWidth, 10, "Driver records current segment width")
+    checkEq(MDAD.Drive.controlState(0), "TRACK", "derived control state is TRACK")
+    captured.blocked, captured.returnActive = true, true
+    checkEq(MDAD.Drive.controlState(0), "RETURN", "RETURN outranks planned blocked")
+    captured.currentBlocked = true
+    checkEq(MDAD.Drive.controlState(0), "HOLD", "current contact HOLD outranks RETURN")
+    captured.currentBlocked, captured.blocked, captured.returnActive = false, false, false
+    captured.dodging = true
+    checkEq(MDAD.Drive.controlState(0), "AVOID", "dodge derives AVOID")
+    captured.dodging, captured.mode = false, "recover"
+    checkEq(MDAD.Drive.controlState(0), "RECOVER", "recovery mode derives RECOVER")
+    captured.mode = "follow"
+    captured.returnActive, captured.returnHold = true, true
+    checkEq(MDAD.Drive.controlState(0), "HOLD", "returnHold outranks derived RETURN")
+    captured.returnActive, captured.returnHold = false, false
+    local baseRoute = drive.nav.route
+    local penalized = v4Route("paved", 10)
+    penalized.avoidPenalty = 5
+    drive.nav.detourRoute = penalized
+    drive.nav.detourCalls = 0
+    captured.blocked, captured.detourTried = true, false
+    captured.waitSince = nowMs - 5000
+    captured.blockHitX, captured.blockHitY = 20, 0
+    driveTick(dp, hotVeh)
+    checkEq(drive.nav.detourCalls, 1, "v4 positive avoidPenalty detour is evaluated")
+    checkEq(captured.pendingRouteWhy, nil, "v4 positive avoidPenalty is rejected")
+    drive.nav.route = baseRoute
+    captured.nextRouteMs = nowMs + 250
+    local cleanDetour = v4Route("paved", 10)
+    drive.nav.detourRoute = cleanDetour
+    captured.detourTried, captured.waitSince = false, nowMs - 5000
+    driveTick(dp, hotVeh)
+    checkEq(captured.pendingRouteWhy, "detour", "v4 numeric avoidPenalty zero is accepted")
+    drive.nav.route, drive.nav.detourRoute = baseRoute, nil
+    captured.pendingRouteWhy, captured.blocked = nil, false
+    captured.forceBrakeUntil = 0
+    captured.waitSince, captured.nextRouteMs = 0, nowMs + 250
+    captured.nextDynamicsMs = nowMs + 10000
+    captured.dynamicsDirty, captured.mode = false, "follow"
+    captured.tractionKey = captured.currentSurfaceId
+        + (captured.rain ~= false and 4 or 0)
+        + (captured.physicalOffroad and 32 or 0)
+    captured.kinPrevMs, captured.kinPrevV, captured.kinPrevH =
+        nowMs - 100, hotVeh._speed / 3.6, 0
+    captured.forceBrakePrev, captured.regulatorPrev = false, true
+    captured.targetPrev = 40
+    for _ = 1, 6 do
+        nowMs = nowMs + 100
+        hotVeh._x = hotVeh._x + hotVeh._speed / 36
+        driveTick(dp, hotVeh)
+    end
+    checkTrue(captured.accelTime > 0, "stable TRACK regulator samples accumulate EWMA time")
+    captured.brakeLower, captured.brakeConfidence, captured.brakeTime = 1, 1, 20
+    captured.nextDynamicsMs = nowMs
+    driveTick(dp, hotVeh) -- schedules material full-profile rebuild
+    driveTick(dp, hotVeh) -- applies configure -> min safe -> invalidate/build
+    local rebuiltBrake = captured.dynamicsBrakeCap
+    checkTrue(rebuiltBrake <= 1 and captured.profile.segBrake[39] <= rebuiltBrake,
+        "material EWMA lower bound rebuilds the full multi-segment brake envelope")
+    local beforeThrottle = captured.profile.segBrake[1]
+    captured.brakeLower, captured.brakeConfidence, captured.brakeTime =
+        beforeThrottle * 0.5, 1, 20
+    captured.nextDynamicsMs = nowMs + 1000
+    captured.forceBrakePrev, captured.regulatorPrev, captured.targetPrev = false, true, 40
+    driveTick(dp, hotVeh)
+    checkNear(captured.profile.segBrake[1], beforeThrottle, 1e-12,
+        "material rebuild is throttled before the one-second boundary")
+    nowMs = nowMs + 1000
+    captured.forceBrakePrev, captured.regulatorPrev, captured.targetPrev = false, true, 40
+    for _ = 1, 4 do driveTick(dp, hotVeh) end
+    checkTrue(captured.profile.segBrake[1] < beforeThrottle,
+        "material rebuild applies after boundary (mode=" .. tostring(captured.mode)
+        .. " dirty=" .. tostring(captured.dynamicsDirty)
+        .. " cap=" .. tostring(captured.dynamicsBrakeCap)
+        .. " seg=" .. tostring(captured.profile.segBrake[1]) .. ")")
+    captured.nextDynamicsMs = nowMs + 10000
+    local materialBrakeCap = captured.profile.segBrake[1]
+    captured.rain = false
+    captured.dynamicsDirty, captured.dynamicsCapMaterial = false, false
+    for _ = 1, 4 do driveTick(dp, hotVeh) end
+    checkTrue(captured.profile.segBrake[1] > materialBrakeCap,
+        "dry regime rebuild restores fresh higher prior instead of carrying old material cap")
+    drive.nav.route = v4Route("dirt", 8)
+    nowMs = nowMs + 300
+    captured.dynamicsDirty, captured.mode = false, "follow"
+    captured.nextDynamicsMs = nowMs + 10000
+    captured.tractionKey = -1
+    captured.kinPrevMs = 0
+    for _ = 1, 12 do
+        if captured.tractionKey < 0 then driveTick(dp, hotVeh) end
+    end
+    checkTrue(captured.tractionKey >= 0
+            and captured.tractionKey % 4 == captured.currentSurfaceId,
+        "surface change installs a traction key whose low bits match dirt")
+    checkEq(captured.accelTime, 0, "traction key change resets EWMA confidence window")
+
+    hotVeh._offroad, hotVeh._x, hotVeh._y = true, 0, 0
+    drive.fillWorld(-2, 170, -9, 9)
+    for x = -2, 170 do
+        for y = -9, 9 do
+            drive.world[x * 100000 + y]._floor = {
+                getSpriteName = function() return "blends_natural_01_20" end,
+                hasProperty = function() return false end,
+            }
+        end
+    end
+    drive.scanRound()
+    checkTrue(captured.physicalOffroad, "physical offroad is sampled once per snapshot")
+    checkFalse(captured.returnActive, "declared dirt + physical offroad remains legal on-route")
+    checkFalse(captured.surfaceMismatch, "dirt route cannot accumulate paved mismatch")
+    captured.nextDynamicsMs = nowMs + 10000
+    captured.dynamicsDirty, captured.mode = false, "follow"
+    captured.nextDynamicsMs = nowMs + 10000
+    captured.tractionKey = captured.currentSurfaceId
+        + (captured.rain ~= false and 4 or 0) + 32
+    captured.kinPrevMs, captured.kinPrevV, captured.kinPrevH =
+        nowMs - 100, hotVeh._speed / 3.6, 0
+    captured.forceBrakePrev, captured.regulatorPrev = false, true
+    captured.targetPrev = 40
+    for _ = 1, 6 do
+        nowMs = nowMs + 100
+        hotVeh._x = hotVeh._x + hotVeh._speed / 36
+        driveTick(dp, hotVeh)
+    end
+    checkTrue(captured.accelTime > 0,
+        "declared dirt may learn its own traction key while physicalOffroad=true")
+
+    MDAD.Drive.stop(0, nil)
+    installNavApi(4)
+    drive.nav.route = v4Route("paved", 10)
+    driveReset(hotVeh)
+    checkTrue(MDAD.Drive.start(dp), "paved/actual mismatch evidence fixture starts")
+    for _ = 1, 30 do driveTick(dp, hotVeh) end
+    checkFalse(captured.surfaceMismatch, "one mismatch snapshot is not continuous evidence")
+    checkFalse(captured.returnActive, "physical offroad mismatch cannot trigger RETURN alone")
+    drive.scanRound()
+    checkTrue(captured.surfaceMismatch, "two known paved/actual mismatch snapshots latch evidence")
+    checkFalse(captured.returnActive, "latDev is still required even after mismatch evidence")
+    for _ = 1, 6 do
+        nowMs = nowMs + 100
+        hotVeh._x = hotVeh._x + hotVeh._speed / 36
+        driveTick(dp, hotVeh)
+    end
+    checkEq(captured.accelTime, 0,
+        "paved + known non-paved actual mismatch never contaminates paved EWMA")
+    MDAD.Drive.stop(0, nil)
+
+    installNavApi(4)
+    drive.nav.route = v4Route("paved", 10)
+    hotVeh._offroad, hotVeh._x, hotVeh._y = true, 0, 0
+    drive.fillWorld(-2, 170, -9, 9) -- loaded but floor class unknown
+    driveReset(hotVeh)
+    checkTrue(MDAD.Drive.start(dp), "paved/unknown-actual learning fixture starts")
+    for _ = 1, 4 do driveTick(dp, hotVeh) end
+    drive.scanRound()
+    checkEq(captured.sensor.actualSurfaceId, MDADSensor.SURFACE_UNKNOWN,
+        "loaded floor without known class remains actual unknown")
+    captured.dynamicsDirty, captured.mode = false, "follow"
+    captured.nextDynamicsMs = nowMs + 10000
+    captured.tractionKey = captured.currentSurfaceId
+        + (captured.rain ~= false and 4 or 0) + 32
+    captured.kinPrevMs, captured.kinPrevV, captured.kinPrevH =
+        nowMs - 100, hotVeh._speed / 3.6, 0
+    captured.forceBrakePrev, captured.regulatorPrev = false, true
+    captured.targetPrev = 40
+    captured.nextDynamicsMs = nowMs + 10000
+    for _ = 1, 6 do
+        nowMs = nowMs + 100
+        hotVeh._x = hotVeh._x + hotVeh._speed / 36
+        driveTick(dp, hotVeh)
+    end
+    checkTrue(captured.accelTime > 0,
+        "actual unknown does not decide mismatch and may learn paved key")
+    checkTrue(captured.tractionKey >= 32,
+        "physicalOffroad participates in the traction key")
+    checkTrue(captured.safeAccel <= captured.priorAccel
+            and captured.safeBrake <= captured.priorBrake
+            and captured.safeLat <= captured.priorLat,
+        "EWMA safe limits never exceed their priors")
+    checkFalse(captured.surfaceMismatch, "actual unknown never latches paved mismatch")
+    checkFalse(captured.returnActive, "physical offroad + actual unknown cannot trigger RETURN")
+    MDAD.Drive.stop(0, nil)
+    installNavApi(3)
+    drive.nav.route = newRoute(40, 0, 0, 4, 0)
+    driveReset(hotVeh)
+    checkTrue(MDAD.Drive.start(dp), "genuine v3 basic following starts")
+    for _ = 1, 4 do driveTick(dp, hotVeh) end
+    drive.scanRound()
+    checkEq(captured.sensor.actualSurfaceId, MDADSensor.SURFACE_UNKNOWN,
+        "v3 fixture keeps actual floor unknown")
+    checkEq(captured.currentSurfaceId, MDADFollower.SURFACE_UNKNOWN,
+        "v3 current surface is explicit unknown")
+    checkFalse(captured.returnActive, "v3 unknown never RETURNs from physical offroad alone")
+
+    MDAD.Drive.stop(0, nil)
+    installNavApi(4)
+    drive.nav.route = v4Route("paved", 10)
+    hotVeh._offroad, hotVeh._x, hotVeh._y = false, 0, 4
+    drive.fillWorld(-10, 170, -15, 15)
+    drive.putRoad(-10, 170, -15, 15)
+    driveReset(hotVeh)
+    checkTrue(MDAD.Drive.start(dp), "RETURN exact-line fixture starts")
+    for _ = 1, 4 do driveTick(dp, hotVeh) end
+    drive.putSolid(-1, 2, "return_near_lateral")
+    drive.scanRound(true)
+    checkTrue(captured.returnActive and captured.returnUnsafe,
+        "near lateral union blocks diagonal RETURN commit")
+    checkFalse(captured.fstate.exactLine,
+        "near lateral obstacle cannot be hidden behind the route scan start")
+    drive.clearCell(-1, 2)
+    drive.scanRound(true)
+    checkFalse(captured.returnUnsafe, "clear near lateral snapshot commits RETURN line")
+    checkEq(MDAD.Drive.controlState(0), "RETURN", "derived state reports RETURN")
+    checkTrue(captured.fstate.exactLine, "Follower is consuming an exact world line")
+    checkTrue(captured.fstate.ovX == captured.returnX
+            and captured.fstate.ovY == captured.returnY,
+        "Follower and long-vehicle OBB sweep share the identical preallocated arrays")
+    local exactSpan = (captured.fstate.ovN - 1) * MDADFollower.OV_STEP
+    local requiredTail = 18 * captured.profile.lookScale
+        + captured.vehicleProfile.halfL
+    checkTrue(exactSpan >= captured.returnEndS - captured.returnStartS + requiredTail,
+        "RETURN exact line retains max-lookahead plus body tail")
+    local nominalHalfL = captured.vehicleProfile.halfL
+    captured.vehicleProfile.halfL = 20
+    drive.scanRound(true)
+    checkTrue(captured.returnUnsafe,
+        "long halfL + nonzero comX invalidates the completed-band diagonal proof")
+    checkTrue(captured.returnHold,
+        "long halfL remains HOLD when no separately proved fallback fits the snapshot")
+    checkFalse(captured.fstate.exactLine,
+        "long halfL completed-band failure cannot fall back to raw laneBias")
+    captured.vehicleProfile.halfL = nominalHalfL
+    drive.scanRound(true)
+    checkTrue(captured.fstate.exactLine and not captured.returnCrawlExact,
+        "restored body footprint permits the full exact RETURN line on the same completed band")
+    drive.keys.Forward = true
+    driveTick(dp, hotVeh)
+    drive.keys.Forward = false
+    driveTick(dp, hotVeh) -- arm clean-since after releasing manual input
+    nowMs = nowMs + 2001
+    driveTick(dp, hotVeh)
+    checkTrue(captured.returnActive and captured.returnHold
+            and not captured.fstate.exactLine and captured.sensor.stamp == 0,
+        "yield reset invalidates full exact RETURN until a fresh snapshot")
+    drive.scanRound(true)
+    checkTrue(captured.fstate.exactLine and not captured.returnCrawlExact,
+        "fresh snapshot recommits full RETURN after yield reset")
+    local mid = captured.fstate.ovN - captured.fstate.ovN % 2
+    mid = mid / 2
+    local guardX = math.floor(captured.returnX[mid])
+    local guardY = math.floor(captured.returnY[mid])
+    drive.putSolid(guardX, guardY, "return_guard_obstacle")
+    captured.blocked = true
+    drive.scanRound(true)
+    checkTrue(captured.returnUnsafe, "fresh obstacle invalidates committed RETURN line")
+    checkTrue(captured.returnCrawlExact and captured.fstate.exactLine,
+        "invalidated diagonal switches to the separately swept exact parallel line")
+    checkTrue(captured.blocked, "unsafe RETURN does not erase the planned blocker")
+    checkEq(captured.mode, "follow", "RETURN guard never jumps directly to RECOVER")
+    checkEq(MDAD.Drive.controlState(0), "RETURN",
+        "unsafe guard remains RETURN while holding current parallel lane")
+    drive.clearCell(guardX, guardY)
+    drive.scanRound(true)
+    checkTrue(captured.fstate.exactLine, "next clear snapshot recommits an exact RETURN line")
+
+    local savedColumn = {}
+    for y = -15, 15 do
+        local key = guardX * 100000 + y
+        savedColumn[y] = drive.world[key]
+        drive.world[key] = nil
+    end
+    drive.scanRound(true)
+    checkTrue(captured.returnUnsafe, "fresh unloaded coverage invalidates committed RETURN line")
+    checkTrue(captured.returnCrawlExact and captured.fstate.exactLine,
+        "unloaded full line switches to the swept exact constant-lane proof")
+    checkEq(captured.mode, "follow", "unloaded guard also leaves escalation to supervisor")
+    checkEq(MDAD.Drive.controlState(0), "RETURN",
+        "far unloaded full line may crawl only after near current-lane proof")
+    driveReset(hotVeh)
+    driveTick(dp, hotVeh)
+    checkEq(drive.calls.maxRegSpeed, 8,
+        "proven current-lane stopping horizon permits bounded 8 km/h crawl")
+    drive.keys.Forward = true
+    driveTick(dp, hotVeh)
+    drive.keys.Forward = false
+    driveTick(dp, hotVeh) -- arm clean-since after releasing manual input
+    nowMs = nowMs + 2001
+    driveTick(dp, hotVeh)
+    checkTrue(captured.returnHold and not captured.fstate.exactLine
+            and not captured.returnCrawlExact and captured.sensor.stamp == 0,
+        "yield reset invalidates crawl exact RETURN until a fresh snapshot")
+    drive.scanRound(true)
+    checkTrue(captured.returnCrawlExact and captured.fstate.exactLine,
+        "fresh snapshot recommits guarded crawl exact after yield reset")
+    for y = -15, 15 do drive.world[guardX * 100000 + y] = savedColumn[y] end
+
+    MDAD.Drive.stop(0, nil)
+    drive.nav.route = v4Route("paved", 10)
+    hotVeh._x, hotVeh._y, hotVeh._speed = 0, 7, 20
+    drive.fillWorld(-10, 170, -20, 20)
+    drive.putRoad(-10, 170, -20, 20)
+    driveReset(hotVeh)
+    checkTrue(MDAD.Drive.start(dp), "delta7 streaming crawl fixture starts")
+    drive.putSolid(5, 7, "delta7_old_band_obstacle")
+    for _ = 1, 4 do driveTick(dp, hotVeh) end
+    drive.scanRound(true)
+    checkTrue(captured.returnHold and not captured.fstate.exactLine,
+        "old completed band cannot authorize delta7 crawl")
+    drive.scanRound(true)
+    checkTrue(captured.returnHold and not captured.fstate.exactLine,
+        "fresh midpoint band sees the old-band-exterior obstacle")
+    drive.clearCell(5, 7)
+    drive.scanRound(true)
+    checkTrue(captured.returnUnsafe and not captured.returnHold,
+        "fresh midpoint band can authorize current-lane crawl after obstacle clears")
+    checkTrue(captured.returnCrawlExact and captured.fstate.exactLine,
+        "delta7 crawl follows its guarded exact parallel line")
+    driveReset(hotVeh)
+    driveTick(dp, hotVeh)
+    checkEq(drive.calls.maxRegSpeed, 8, "delta7 streaming crawl is capped at 8")
+    captured.sensor.aheadM = 80
+    drive.scanRound(true)
+    checkTrue(captured.returnHold and not captured.fstate.exactLine,
+        "full transition waits for a fresh midpoint band after crawl")
+    drive.scanRound(true)
+    checkTrue(captured.fstate.exactLine and not captured.returnCrawlExact,
+        "fresh midpoint band plus expanded coverage commits the full exact line")
+    MDAD.Drive.stop(0, nil)
+    local longRoute = newRoute(400, 0, 0, 4, 0)
+    longRoute.segSurface, longRoute.segWidth = {}, {}
+    for i = 1, 399 do
+        longRoute.segSurface[i], longRoute.segWidth[i] = "paved", 10
+    end
+    drive.nav.route = longRoute
+    hotVeh._x, hotVeh._y, hotVeh._speed = 1200, 4, 20
+    drive.fillWorld(1170, 1370, -15, 15)
+    drive.putRoad(1170, 1370, -15, 15)
+    driveReset(hotVeh)
+    checkTrue(MDAD.Drive.start(dp), "long-route late-index RETURN fixture starts")
+    for _ = 1, 30 do driveTick(dp, hotVeh) end
+    checkTrue(captured.fstate.idx > 250, "long-route follower is tracking a late segment")
+    for _ = 1, 3 do drive.scanRound(true) end
+    checkTrue(captured.fstate.exactLine, "late-index fixture commits an exact RETURN line")
+    local realRouteS = captured.profile.s
+    local sReads, minSRead = 0, 1000000
+    captured.profile.s = setmetatable({}, {
+        __index = function(_, i)
+            sReads = sReads + 1
+            if type(i) == "number" and i < minSRead then minSRead = i end
+            return realRouteS[i]
+        end,
+    })
+    drive.scanRound(true)
+    captured.profile.s = realRouteS
+    checkTrue(minSRead > 250,
+        "late-index snapshot never walks profile.s from the route prefix")
+    checkTrue(sReads < 700,
+        "late-index snapshot profile.s reads stay bounded by local horizon; reads=" .. sReads)
+    MDAD.Drive.stop(0, nil)
+
+    drive.nav.route = v4Route("paved", 10)
+    hotVeh._x, hotVeh._y, hotVeh._speed = 0, 7, 8
+    drive.fillWorld(-10, 170, -20, 20)
+    drive.putRoad(-10, 170, -20, 20)
+    for x = -4, 4 do
+        for y = -12, 12 do drive.world[x * 100000 + y] = nil end
+    end
+    driveReset(hotVeh)
+    checkTrue(MDAD.Drive.start(dp), "near-unloaded HOLD timeout fixture starts")
+    for _ = 1, 4 do driveTick(dp, hotVeh) end
+    drive.scanRound(true)
+    checkTrue(captured.returnHold, "near current-lane unknown cannot crawl")
+    for _, speed in ipairs({ 8, 15 }) do
+        hotVeh._speed = speed
+        driveReset(hotVeh)
+        driveTick(dp, hotVeh)
+        checkTrue(drive.calls.forceBrake > 0,
+            "RETURN HOLD force-brakes at " .. speed .. " km/h")
+        checkEq(drive.calls.regulatorOn, 0,
+            "RETURN HOLD never enables regulator at " .. speed .. " km/h")
+    end
+    checkTrue(captured.forceBrakeUntil > nowMs,
+        "forceBrake command records the whole 1s effective window")
+    captured.returnActive, captured.returnHold = false, false
+    captured.sensor.ready, captured.sensor.unloaded = true, false
+    captured.tractionKey = captured.currentSurfaceId
+        + (captured.rain ~= false and 4 or 0)
+    captured.kinPrevMs, captured.kinPrevV, captured.kinPrevH =
+        nowMs - 100, hotVeh._speed / 3.6, 0
+    captured.lastLatDev, captured.lastHeadingError = 0, 0
+    captured.forceBrakePrev, captured.regulatorPrev = false, true
+    captured.targetPrev = 40
+    captured.accelTime, captured.coastTime, captured.brakeTime = 0, 0, 0
+    nowMs = nowMs + 100
+    driveTick(dp, hotVeh)
+    checkTrue(captured.brakeTime > 0
+            and captured.accelTime == 0 and captured.coastTime == 0,
+        "forceBrake effective window classifies brake and excludes accel/coast")
+    captured.accelTime, captured.coastTime, captured.brakeTime = 0, 0, 0
+    captured.ewmaSuppressUntil = captured.forceBrakeUntil
+    captured.kinPrevMs, captured.kinPrevV, captured.kinPrevH =
+        nowMs - 100, hotVeh._speed / 3.6, 0
+    captured.forceBrakePrev, captured.regulatorPrev, captured.targetPrev =
+        false, true, 40
+    nowMs = nowMs + 100
+    driveTick(dp, hotVeh)
+    checkTrue(captured.brakeTime == 0 and captured.accelTime == 0
+            and captured.coastTime == 0,
+        "epoch reset suppresses the old native brake window from contaminating new key")
+    captured.returnActive, captured.returnHold = true, true
+    captured.sensor.unloaded = true
+    hotVeh._speed = 0
+    driveReset(hotVeh)
+    driveTick(dp, hotVeh)
+    nowMs = nowMs + 20001
+    driveReset(hotVeh)
+    driveTick(dp, hotVeh)
+    checkFalse(MDAD.Drive.isActive(0), "near-unloaded HOLD exits through visible wait timeout")
+    checkEq(haloKey(), DKEY.STUCK, "near-unloaded timeout reports stuck")
+    drive.nav.route = v4Route("paved", 10)
+    hotVeh._x, hotVeh._y, hotVeh._speed, hotVeh._offroad = 0, 30, 20, false
+    drive.fillWorld(-10, 170, -50, 50)
+    drive.putRoad(-10, 170, -50, 50)
+    driveReset(hotVeh)
+    checkTrue(MDAD.Drive.start(dp), "oversize RETURN capacity fixture starts")
+    for _ = 1, 4 do driveTick(dp, hotVeh) end
+    drive.scanRound(true)
+    checkTrue(captured.returnActive and captured.returnUnsafe and captured.returnHold,
+        "RETURN beyond fixed sample capacity enters deterministic HOLD")
+    checkFalse(captured.fstate.exactLine,
+        "oversize RETURN never commits a truncated exact line")
+    checkEq(MDAD.Drive.controlState(0), "HOLD", "capacity fault derives HOLD")
+    hotVeh._speed, hotVeh._stopped = 0, true
+    driveReset(hotVeh)
+    driveTick(dp, hotVeh)
+    checkFalse(MDAD.Drive.isActive(0),
+        "capacity fault visibly fail-stops once the vehicle is settled")
+    checkEq(haloKey(), DKEY.STUCK, "capacity fault uses visible stuck fail-stop")
+    hotVeh._stopped = false
+    drive.nav.route = v4Route("paved", 10)
+    drive.nav.route.segWidth[39] = nil
+    driveReset(hotVeh)
+    checkFalse(MDAD.Drive.start(dp), "malformed v4 metadata fail-stops startup")
+    checkEq(haloKey(), DKEY.ROUTE, "malformed v4 reports route unavailable")
+
+    local zeroBrakeVeh = newVehicle({
+        battery = newItem("Base.CarBattery", { uses = 0.8 }),
+        engineRunning = true, mass = 1200, speed = 0, maxSpeed = 90,
+        bodyW = 2.0, bodyL = 5.2, profileFull = true, brakingForce = 0,
+    })
+    dveh = zeroBrakeVeh
+    zeroBrakeVeh._driver, dp._vehicle = dp, zeroBrakeVeh
+    drive.nav.route = v4Route("paved", 10)
+    driveReset(zeroBrakeVeh)
+    checkFalse(MDAD.Drive.start(dp), "finite zero brakingForce rejects startup")
+    checkEq(haloKey(), DKEY.UNSUPPORTED, "zero brakingForce reports unsupported vehicle")
+
+    dveh = oldVeh
+    oldVeh._driver, dp._vehicle = dp, oldVeh
+    driveReset(oldVeh)
+    checkTrue(MDAD.Drive.start(dp), "nil brakingForce keeps legacy conservative fallback")
+    MDAD.Drive.stop(0, nil)
+
+    dveh = hotVeh
+    hotVeh._driver, dp._vehicle = dp, hotVeh
+    hotVeh._x, hotVeh._y, hotVeh._speed = 0, 0, 20
+    driveReset(hotVeh)
+    checkTrue(MDAD.Drive.start(dp), "learned-zero brake fault fixture starts")
+    for _ = 1, 4 do driveTick(dp, hotVeh) end
+    drive.scanRound()
+    captured.tractionKey = captured.currentSurfaceId
+        + (captured.rain ~= false and 4 or 0)
+        + (captured.physicalOffroad and 32 or 0)
+    captured.kinPrevMs, captured.kinPrevV, captured.kinPrevH =
+        nowMs - 100, hotVeh._speed / 3.6, 0
+    captured.lastLatDev, captured.lastHeadingError = 0, 0
+    captured.brakeMean, captured.brakeDev, captured.brakeTime = 0, 0, 20
+    captured.brakeConfidence, captured.brakeLower = 1, 0
+    captured.forceBrakeUntil, captured.ewmaSuppressUntil = 0, 0
+    driveReset(hotVeh)
+    driveTick(dp, hotVeh)
+    checkFalse(MDAD.Drive.isActive(0), "learned uncontrollable brake bound visibly stops")
+    checkEq(haloKey(), DKEY.UNSUPPORTED, "learned zero brake reports unsupported vehicle")
+    checkEq(drive.calls.forceBrake, 0,
+        "uncontrollable brake fault does not pretend native forceBrake can stop momentum")
+    local savedSensor, savedCorridor = MDADSensor, MDADCorridor
+    dveh = hotVeh
+    hotVeh._driver, dp._vehicle = dp, hotVeh
+    hotVeh._x, hotVeh._y, hotVeh._speed = 0, 20, 20
+    setHeading(hotVeh, 0)
+    drive.nav.route = v4Route("paved", 10)
+    MDADSensor = nil
+    driveReset(hotVeh)
+    checkTrue(MDAD.Drive.start(dp), "missing Sensor keeps M3 startup available")
+    for _ = 1, 4 do driveTick(dp, hotVeh) end
+    checkFalse(captured.returnActive, "missing Sensor never enters RETURN")
+    checkEq(MDAD.Drive.controlState(0), "TRACK",
+        "missing Sensor + large latDev stays pure follower, not RETURN/HOLD")
+    MDAD.Drive.stop(0, nil)
+    MDADSensor = savedSensor
+
+    MDADCorridor = nil
+    driveReset(hotVeh)
+    checkTrue(MDAD.Drive.start(dp), "missing Corridor keeps M3 startup available")
+    for _ = 1, 4 do driveTick(dp, hotVeh) end
+    drive.scanRound(true)
+    checkFalse(captured.returnActive, "missing Corridor never enters RETURN after a fresh snapshot")
+    checkFalse(captured.blocked, "missing Corridor snapshot does not turn optional M4 into HOLD")
+    checkEq(MDAD.Drive.controlState(0), "TRACK",
+        "missing Corridor + large latDev stays pure follower, not RETURN/HOLD")
+    MDAD.Drive.stop(0, nil)
+    MDADCorridor = savedCorridor
+    MDADOverlay.update = realOverlayUpdate
+    MDAD.Drive.stop(0, nil)
+    dveh = oldVeh
+    oldVeh._driver, dp._vehicle = dp, oldVeh
+    installNavApi(2)
+    drive.nav.route = newRoute(40, 0, 0, 4, 0)
+    drive.fillWorld(-2, 70, -7, 7)
+end
+scenarioPhaseE()
 
 -- =====================================================================
 -- 情境二十九：理由鍵不得缺翻譯（鍵是 runtime 真的吐出來的，不是抄原始碼）

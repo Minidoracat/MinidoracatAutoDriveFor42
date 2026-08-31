@@ -1159,6 +1159,150 @@ do
 end
 
 -- =====================================================================
+-- nav API v4 metadata：嚴格對齊；真正 v2/v3 一律 unknown
+-- =====================================================================
+scenario("nav v4 metadata strict-copy；v2/v3 ignore similarly named fields")
+do
+    local route = {
+        pts = { 0, 0, 10, 0, 20, 0 },
+        segSurface = { "paved", "dirt" },
+        segWidth = { 6, 4.5 },
+    }
+    local p4 = F.begin(route, MAXV, 4)
+    checkEq(type(p4), "table", "aligned v4 accepted")
+    checkEq(p4.navVersion, 4, "nav version copied")
+    checkEq(p4.segSurface[1], F.SURFACE_PAVED, "paved string mapped to numeric id")
+    checkEq(p4.segSurface[2], F.SURFACE_DIRT, "dirt string mapped to numeric id")
+    checkNear(p4.segWidth[1], 6, 1e-12, "width copied")
+    route.segSurface[1], route.segWidth[1] = "gravel", 99
+    checkEq(p4.segSurface[1], F.SURFACE_PAVED, "Follower owns metadata copy")
+    checkNear(p4.segWidth[1], 6, 1e-12, "width copy is immutable from route mutation")
+
+    local function reject(surface, width, label)
+        local p = F.begin({
+            pts = { 0, 0, 10, 0, 20, 0 },
+            segSurface = surface,
+            segWidth = width,
+        }, MAXV, 4)
+        checkNil(p, label)
+    end
+    reject(nil, { 6, 6 }, "v4 missing segSurface fail-stop")
+    reject({ "paved" }, { 6, 6 }, "v4 wrong surface length fail-stop")
+    reject({ "paved", "mud" }, { 6, 6 }, "v4 invalid surface enum fail-stop")
+    reject({ "paved", "dirt" }, { 6 }, "v4 wrong width length fail-stop")
+    reject({ "paved", "dirt" }, { 6, 0 }, "v4 nonpositive width fail-stop")
+    reject({ "paved", "dirt" }, { 6, 0 / 0 }, "v4 nonfinite width fail-stop")
+    reject({ "paved", "dirt" }, { 6, 0.5 }, "v4 width below 1m fail-stop")
+    reject({ "paved", "dirt" }, { 6, 65 }, "v4 width above 64m fail-stop")
+    reject({ "paved", "dirt" }, { 6, 1e308 }, "v4 extreme finite width fail-stop")
+    local boundary = F.begin({
+        pts = { 0, 0, 10, 0, 20, 0 },
+        segSurface = { "paved", "dirt" },
+        segWidth = { 1, 64 },
+    }, MAXV, 4)
+    checkEq(type(boundary), "table", "v4 width boundaries 1/64 accepted")
+
+    for version = 2, 3 do
+        local legacy = F.begin({
+            pts = { 0, 0, 10, 0, 20, 0 },
+            segSurface = { "paved" },
+            segWidth = { -1 },
+        }, MAXV, version)
+        checkEq(type(legacy), "table", "v" .. version .. " basic following accepted")
+        checkEq(legacy.segSurface[1], F.SURFACE_UNKNOWN,
+            "v" .. version .. " segment 1 explicitly unknown")
+        checkEq(legacy.segSurface[2], F.SURFACE_UNKNOWN,
+            "v" .. version .. " segment 2 explicitly unknown")
+        checkEq(legacy.segWidth[1], 0, "v" .. version .. " width unknown sentinel")
+    end
+    local trustRoute = { pts = { 0, 0, 10, 0 } }
+    checkNil(F.begin(trustRoute, MAXV, 0 / 0), "explicit NaN nav version is malformed")
+    checkNil(F.begin(trustRoute, MAXV, 2.5), "fractional nav version is malformed")
+    checkNil(F.begin(trustRoute, MAXV, 1), "explicit version below 2 is malformed")
+    checkEq(type(F.begin(trustRoute, MAXV, nil)), "table",
+        "only nil direct legacy version defaults to v2")
+end
+
+-- =====================================================================
+-- Adaptive lookScale + RETURN exact world line
+-- =====================================================================
+scenario("adaptive lookScale changes pursuit; RETURN smoothstep line is borrowed by identity")
+do
+    local p = buildRoute(straight(20, 5), MAXV)
+    local normal, scaled = F.newState(), F.newState()
+    p.lookScale = 1
+    local steerNormal = F.control(p, normal, 20, 4, 0, 30, DT)
+    p.lookScale = 1.5
+    local steerScaled = F.control(p, scaled, 20, 4, 0, 30, DT)
+    checkTrue(math.abs(steerScaled) < math.abs(steerNormal),
+        "longer adaptive lookahead reduces same-offset steering demand")
+
+    local rx, ry = {}, {}
+    local n, s0 = F.buildReturnLine(p, 10, 30, 4, 1, rx, ry)
+    checkTrue(n >= 20, "RETURN line covers the requested longitudinal span")
+    checkEq(s0, 10, "RETURN line keeps exact s0")
+    checkNear(ry[1], 4, 1e-9, "smoothstep starts at measured lane")
+    checkNear(ry[n], 1, 1e-9, "tail reaches target lane")
+    local monotonic = true
+    for i = 2, n do
+        if ry[i] > ry[i - 1] + 1e-9 then monotonic = false end
+    end
+    checkTrue(monotonic, "laneStart->laneTarget is monotonic")
+    local st = F.newState()
+    checkTrue(F.setExactLine(st, rx, ry, n, s0), "exact line commit accepted")
+    checkTrue(st.ovX == rx and st.ovY == ry,
+        "Follower borrows the exact arrays swept by Driver; no second trajectory")
+    checkTrue(st.exactLine, "exact-line mode recorded")
+    F.clearOffset(st)
+    checkFalse(st.exactLine, "clear releases exact-line mode")
+    checkTrue(st.ovX == st.ownOvX and st.ovY == st.ownOvY,
+        "clear restores preallocated owned dodge buffers")
+    local tailProfile = buildRoute(straight(40, 5), 120)
+    local tailN, tailS0 = F.buildReturnLine(
+        tailProfile, 10, 18, 4, 1, rx, ry, 32)
+    checkTrue(tailN >= 40 and tailS0 + tailN - 1 >= 50,
+        "short RETURN retains max-lookahead/body tail on the exact line")
+    checkNear(ry[tailN], 1, 1e-9, "RETURN tail stays on target lane")
+    local longProfile = buildRoute(straight(60, 5), MAXV)
+    local tooLong, _, tooLongReason =
+        F.buildReturnLine(longProfile, 0, 200, 50, 0, rx, ry)
+    checkEq(tooLong, 0,
+        "RETURN required samples beyond fixed capacity fail unsafe instead of truncating")
+    checkEq(tooLongReason, "capacity", "capacity overflow has deterministic reason")
+end
+
+-- =====================================================================
+-- Full-route adaptive caps：遠端 braking/curve 都吃 safe lower bound，0 可 fail-safe
+-- =====================================================================
+scenario("full-route dynamics cap propagates across segments and accepts zero fail-safe")
+do
+    local pts = straight(11, 10)
+    local base = buildRoute(pts, 60)
+    local capped = F.begin(mkRoute(pts), 60, 2)
+    checkTrue(F.capSegmentLimits(capped, 0.5, 1.0, 0.8),
+        "material safe limits cap every preallocated segment")
+    while not F.stepBuild(capped, 4096) do end
+    local allCapped = true
+    for i = 1, capped.n - 1 do
+        if capped.segAccel[i] > 0.5 or capped.segBrake[i] > 1
+                or capped.segLat[i] > 0.8 then allCapped = false end
+    end
+    checkTrue(allCapped, "all route segments retain the safe caps")
+    checkTrue(capped.v[1] < base.v[1],
+        "low brake cap propagates backward from a far endpoint")
+
+    local zero = F.begin(mkRoute(pts), 60, 2)
+    checkTrue(F.capSegmentLimits(zero, 0, 0, 0), "zero segment limits accepted")
+    while not F.stepBuild(zero, 4096) do end
+    checkNear(zero.v[1], 0, 1e-12, "zero brake fail-safe propagates stop across route")
+    local st = F.newState()
+    checkTrue(F.setRuntimeLimits(st, 0, 0, 0), "zero runtime limits accepted")
+    checkEq(st.accelSafe, 0, "zero runtime accel retained")
+    checkEq(st.brakeSafe, 0, "zero runtime brake retained")
+    checkEq(st.latSafe, 0, "zero runtime lateral retained")
+end
+
+-- =====================================================================
 -- 總結
 -- =====================================================================
 closeScenario()

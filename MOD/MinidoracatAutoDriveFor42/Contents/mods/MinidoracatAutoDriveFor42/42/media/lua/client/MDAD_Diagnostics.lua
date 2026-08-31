@@ -79,6 +79,7 @@ local EK = {
     "phase", "oldX", "oldY", "x", "y", "why", "tg", "rg", "len", "pts", "target",
     "eid", "attempt", "s", "l", "d", "dt", "wd", "ds", "dyaw", "hit", "gear",
     "progress", "duration", "speed", "rear", "kind", "detail", "poseOnly",
+    "navVersion", "currentSurface", "currentSegWidth", "cost", "avoidPenalty",
 }
 
 local function logOnce(msg)
@@ -833,6 +834,18 @@ local function encodeSensor(s, sensor)
     if finite(sensor.roadC) then
         bits = bits .. ',"roadC":' .. tostring(sensor.roadC)
     end
+    if type(sensor.rain) == "boolean" then
+        bits = bits .. ',"rain":' .. (sensor.rain and "true" or "false")
+    end
+    if finite(sensor.actualSurfaceId) then
+        bits = bits .. ',"actualSurfaceId":' .. tostring(sensor.actualSurfaceId)
+    end
+    if finite(sensor.roundStartedAt) then
+        bits = bits .. ',"roundStartedAt":' .. tostring(sensor.roundStartedAt)
+    end
+    if finite(sensor.completedBandBias) then
+        bits = bits .. ',"completedBandBias":' .. tostring(sensor.completedBandBias)
+    end
     return bits .. near .. "}"
 end
 
@@ -916,6 +929,37 @@ local function encodePhys(phys)
     addNum("capHeading", "ch")
     addNum("capBlocked", "cbl")
     addNum("capDodge", "cdg")
+    addNum("navVersion", "nv")
+    addNum("currentSurfaceId", "sid")
+    addStr("currentSurface", "surf")
+    addNum("currentSegWidth", "sw")
+    addStr("controlState", "ctl")
+    addBool("adaptive", "ad")
+    addBool("raining", "rn")
+    addBool("returnActive", "ra")
+    addBool("returnUnsafe", "ru")
+    addBool("returnHold", "rh")
+    addBool("returnCapacityFault", "rcf")
+    addBool("surfaceMismatch", "sm")
+    addNum("tractionKey", "tk")
+    addNum("runtimeMass", "rm")
+    addNum("priorAccel", "pa")
+    addNum("priorCoast", "pco")
+    addNum("priorBrake", "pb")
+    addNum("priorLat", "pl")
+    addNum("safeAccel", "sa")
+    addNum("safeBrake", "sb")
+    addNum("safeLat", "sl")
+    addNum("accelConfidence", "acf")
+    addNum("coastConfidence", "ccf")
+    addNum("coastLower", "cl")
+    addNum("accelLower", "al")
+    addNum("brakeConfidence", "bcf")
+    addNum("brakeLower", "bal")
+    addNum("yawConfidence", "ycf")
+    addNum("yawLower", "yl")
+    addNum("steeringKappa", "kap")
+    addNum("capReturn", "crt")
     return bits
 end
 

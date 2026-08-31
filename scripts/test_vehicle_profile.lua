@@ -343,6 +343,22 @@ local function quad(hx, fz, rz)
 end
 
 -- Scaled extents/offsets as VehicleScript.Loaded() would return.
+local SMALL_CAR = {
+    fullName = "Base.SmallCar",
+    bodyW = 1.6,
+    bodyL = 3.5,
+    mass = 900,
+    friction = 1.5,
+    steeringClamp = 0.3,
+    maxSpeed = 90,
+    enginePower = 2600,
+    brakingForce = 65,
+    offroadEfficiency = 0.9,
+    rollInfluence = 0.7,
+    centerOfMassY = 0.45,
+    tireFriction = 1.5,
+    wheels = quad(0.7, 1.2, -0.9),
+}
 local PICKUP = {
     fullName = "Base.PickUpTruck",
     bodyW = 0.8681 * 1.82,
@@ -358,6 +374,22 @@ local PICKUP = {
     centerOfMassY = 0.55,
     tireFriction = 1.5,
     wheels = quad(0.3462 * 1.82, 0.7582 * 1.82, -0.5879 * 1.82),
+}
+local VAN = {
+    fullName = "Base.Van",
+    bodyW = 2.1,
+    bodyL = 5.6,
+    mass = 1800,
+    friction = 1.6,
+    steeringClamp = 0.3,
+    maxSpeed = 75,
+    enginePower = 4200,
+    brakingForce = 90,
+    offroadEfficiency = 0.8,
+    rollInfluence = 0.8,
+    centerOfMassY = 0.65,
+    tireFriction = 1.6,
+    wheels = quad(0.85, 1.8, -1.8),
 }
 local F150 = {
     fullName = "Base.93fordF150",
@@ -478,8 +510,10 @@ local function checkSpec(spec, label)
 end
 
 --------------------------------------------------------------------------------
-scenario("vanilla pickup / F150 / F250 / F350 geometry and clamps")
+scenario("SmallCar / Van / pickup / F150 / F250 / F350 geometry and clamps")
 do
+    checkSpec(SMALL_CAR, "SmallCar")
+    checkSpec(VAN, "Van")
     checkSpec(PICKUP, "pickup")
     checkSpec(F150, "F150")
     checkSpec(F250, "F250")
@@ -911,6 +945,127 @@ do
     checkTrue(badMass.geometryValid, "valid extents/COM stay usable despite bad mass")
     checkNear(badMass.centerOfMassX, 0.1, 1e-9, "COM x retained")
     checkNear(badMass.centerOfMassZ, -0.2, 1e-9, "COM z retained")
+end
+
+--------------------------------------------------------------------------------
+scenario("derived geometry is monotonic; steering kappa shrinks with speed")
+do
+    local small = P.build(makeVehicle(SMALL_CAR))
+    local van = P.build(makeVehicle(VAN))
+    check(van.wheelbase > small.wheelbase, "fixture wheelbase grows")
+    check(van.lookScale >= small.lookScale, "wheelbase up => lookScale nondecreasing")
+    check(van.rearArm >= small.rearArm, "wheelbase up => rearArm nondecreasing")
+    check(van.rMin >= small.rMin, "wheelbase up => rMin nondecreasing")
+    check(van.bodyW > small.bodyW and van.needHalf > small.needHalf,
+        "body width up => needHalf grows")
+    check(van.probeR > small.probeR, "body diagonal up => probeR grows")
+    local k0 = P.steeringKappa(van, 0)
+    local k30 = P.steeringKappa(van, 30)
+    local kMax = P.steeringKappa(van, van.maxSpeed)
+    check(k0 > 0 and k30 > 0 and kMax > 0, "steering kappa finite positive")
+    check(k0 >= k30 and k30 >= kMax, "speed up => steering kappa nonincreasing")
+    checkEq(P.steeringKappa(nil, 30), 0, "malformed profile returns zero kappa")
+end
+
+--------------------------------------------------------------------------------
+scenario("surface/tire/engine/brake priors only tighten legacy envelopes")
+do
+    local p = P.build(makeVehicle(PICKUP))
+    local ad, bd, ld, fsd, ftd, coast =
+        P.priors(p, p.mass, P.SURFACE_PAVED, false, false, true)
+    local aw, bw, lw, fsw = P.priors(p, p.mass, P.SURFACE_PAVED, true, false, true)
+    local au, bu, lu, fsu = P.priors(p, p.mass, P.SURFACE_UNKNOWN, false, false, true)
+    local ao = P.priors(p, p.mass, P.SURFACE_PAVED, false, true, true)
+    check(ad <= 2.5 and bd <= 6 and ld <= 3.5, "dry paved never exceeds legacy")
+    checkNear(fsd, 1, 1e-12, "dry paved surface factor")
+    checkNear(fsw, 0.7, 1e-12, "wet paved surface factor")
+    checkNear(fsu, 0.7, 1e-12, "unknown surface uses offroad factor")
+    check(bw < bd and lw < ld, "rain tightens brake and lateral priors")
+    check(bu < bd and lu < ld, "unknown surface tightens brake and lateral priors")
+    check(ao < ad, "physical offroad tightens drive prior only")
+    checkNear(ftd, 1, 1e-12, "known complete tires retain factor one")
+    checkNear(coast, 0.6, 1e-12, "coast prior stays fixed at 0.6")
+    p.rollInfluence, p.centerOfMassY = 0, 3
+    local ar, br, lr = P.priors(p, p.mass, P.SURFACE_PAVED, false, false, true)
+    checkNear(ar, ad, 1e-12, "rollInfluence/COMY do not enter drive prior")
+    checkNear(br, bd, 1e-12, "rollInfluence/COMY do not enter brake prior")
+    checkNear(lr, ld, 1e-12, "rollInfluence/COMY do not enter lateral prior")
+
+    local missing = P.build(makeVehicle({
+        fullName = PICKUP.fullName, bodyW = PICKUP.bodyW, bodyL = PICKUP.bodyL,
+        mass = PICKUP.mass, friction = PICKUP.friction,
+        steeringClamp = PICKUP.steeringClamp, maxSpeed = PICKUP.maxSpeed,
+        enginePower = PICKUP.enginePower, brakingForce = PICKUP.brakingForce,
+        offroadEfficiency = PICKUP.offroadEfficiency, tireMissing = true,
+        tireFriction = PICKUP.tireFriction, wheels = PICKUP.wheels,
+    }))
+    local _, bm, lm, _, ftm = P.priors(
+        missing, missing.mass, P.SURFACE_PAVED, false, false, true)
+    checkNear(ftm, 0.35, 1e-12, "missing tire clamps factor to 0.35")
+    check(bm < bd and lm < ld, "missing tire tightens brake/lateral")
+
+    local unknown = P.build(makeVehicle({
+        fullName = PICKUP.fullName, bodyW = PICKUP.bodyW, bodyL = PICKUP.bodyL,
+        mass = PICKUP.mass, friction = PICKUP.friction,
+        steeringClamp = PICKUP.steeringClamp, maxSpeed = PICKUP.maxSpeed,
+        oldOnly = true, wheels = PICKUP.wheels,
+    }))
+    local _, _, _, _, ftu = P.priors(
+        unknown, unknown.mass, P.SURFACE_PAVED, false, false, false)
+    checkNear(ftu, 0.8, 1e-12, "unknown tire reading tightens to 0.8")
+    p.enginePower, p.brakingForce = 0, 0
+    local zeroDrive, zeroBrake = P.priors(
+        p, p.mass, P.SURFACE_PAVED, false, false, true)
+    checkNear(zeroDrive, 0, 1e-12, "zero engine prior stays zero")
+    checkNear(zeroBrake, 0, 1e-12, "zero braking prior stays zero")
+end
+
+--------------------------------------------------------------------------------
+scenario("EWMA mean/dev/confidence/lower bound follows the approved scalar formula")
+do
+    local mean, dev, seconds = 2, 0, 0
+    local confidence, lower
+    for _ = 1, 20 do
+        mean, dev, seconds, confidence, lower =
+            P.updateEWMA(mean, dev, seconds, 2, 1)
+    end
+    checkNear(mean, 2, 1e-12, "constant observation keeps mean")
+    checkNear(dev, 0, 1e-12, "constant observation keeps deviation zero")
+    checkNear(seconds, 20, 1e-12, "valid sample seconds accumulate")
+    checkNear(confidence, 1, 1e-12, "20 seconds reaches full confidence")
+    checkNear(lower, 2, 1e-12, "lower bound is mean-2dev")
+    local m2, d2, s2, c2, l2 = P.updateEWMA(mean, dev, seconds, 0, 1)
+    check(m2 < mean and d2 > 0, "new lower observation moves mean/dev")
+    checkNear(s2, 21, 1e-12, "next valid second accumulates")
+    checkNear(c2, 1, 1e-12, "confidence remains clamped")
+    check(l2 >= 0 and l2 <= m2, "lower bound remains nonnegative and conservative")
+end
+
+--------------------------------------------------------------------------------
+scenario("configureFollower caches priors by four surface ids, independent of route length")
+do
+    local p = P.build(makeVehicle(PICKUP))
+    local follower = {
+        n = 401, segSurface = {}, segAccel = {}, segBrake = {}, segLat = {},
+    }
+    for i = 1, 400 do follower.segSurface[i] = (i - 1) % 4 end
+    local originalPriors, originalSqrt = P.priors, math.sqrt
+    local priorCalls, sqrtCalls = 0, 0
+    P.priors = function(...)
+        priorCalls = priorCalls + 1
+        return originalPriors(...)
+    end
+    math.sqrt = function(v)
+        sqrtCalls = sqrtCalls + 1
+        return originalSqrt(v)
+    end
+    local ok = P.configureFollower(follower, p, p.mass, false)
+    math.sqrt, P.priors = originalSqrt, originalPriors
+    checkTrue(ok, "long follower remains adaptive")
+    checkEq(priorCalls, 4, "one prior calculation per surface id")
+    check(sqrtCalls <= 8, "sqrt count bounded by four surfaces, not 400 segments")
+    checkEq(follower.segAccel[1], follower.segAccel[5],
+        "same surface reuses identical cached prior")
 end
 
 --------------------------------------------------------------------------------

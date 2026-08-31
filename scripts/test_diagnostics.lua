@@ -466,7 +466,8 @@ local sen = {
     hardN = 12, hardS = hardS, hardL = hardL, hardX = { 9999 }, hardY = { 8888 },
     softN = 1, zombieN = 2, corpseN = 3, vehN = 0, movingVeh = false,
     unloaded = false, ready = true, sig = 7, stamp = 11, scanS = 10, roadN = 4,
-    roadC = 0.5,
+    roadC = 0.5, rain = false, actualSurfaceId = 2, roundStartedAt = 39950,
+    completedBandBias = 1.25,
 }
 MDADDiagnostics.sample(0, 40000, 10700.25, 9800.5, 1.2, 33, 30, 12, 0.4, 8, 0.2, 1,
     "follow", 2, true, sen)
@@ -501,6 +502,13 @@ check(string.find(body, "chat", 1, true) == nil, "no chat")
 check(string.find(body, "modlist", 1, true) == nil, "no modlist")
 check(string.find(body, '"hardX"', 1, true) == nil, "no full sensor world X")
 check(string.find(body, '"hardY"', 1, true) == nil, "no full sensor world Y")
+check(string.find(body, '"rain":false', 1, true) ~= nil, "sensor rain false explicit")
+check(string.find(body, '"actualSurfaceId":2', 1, true) ~= nil,
+    "sensor actual surface id recorded")
+check(string.find(body, '"roundStartedAt":39950', 1, true) ~= nil,
+    "sensor round start timestamp recorded")
+check(string.find(body, '"completedBandBias":1.25', 1, true) ~= nil,
+    "sensor completed band bias recorded")
 check(string.find(body, '"hardS"', 1, true) == nil, "no full sensor S array")
 check(countNeedle(body, '"near":') == 1, "near list only when stamp changes")
 check(countNeedle(body, '{"s":') <= 8, "at most 8 near records")
@@ -1179,6 +1187,28 @@ MDADDiagnostics.sample(0, 9200000, 100, 200, 0.25, 12, 15, 40, 1.5, 0.2, 0.3, 12
         activeCapReason = "gear",
         capGear = 50,
         capPerception = 85,
+        navVersion = 4,
+        currentSurfaceId = 1,
+        currentSurface = "paved",
+        currentSegWidth = 6,
+        controlState = "TRACK",
+        adaptive = true,
+        raining = false,
+        returnActive = false,
+        returnUnsafe = false,
+        returnHold = false,
+        returnCapacityFault = false,
+        surfaceMismatch = false,
+        tractionKey = 1,
+        runtimeMass = 1200,
+        priorAccel = 2.5, priorBrake = 6, priorLat = 3.5, priorCoast = 0.6,
+        coastConfidence = 0.2, coastLower = 0.4,
+        safeAccel = 2.2, safeBrake = 5.5, safeLat = 3.1,
+        accelConfidence = 0.5, accelLower = 1.9,
+        brakeConfidence = 0.25, brakeLower = 4.0,
+        yawConfidence = 0.1, yawLower = 2.5,
+        steeringKappa = 0.12,
+        capReturn = 15,
     }, 7, 9, 3, "verify", 2, -1.5, 2.75, "clear", 450, 120,
     0.25, 1.5, true, 123, 456)
 MDADDiagnostics.sample(0, 9200500, 101, 201, 0.25, 12, 15, 39, 1.4, 0.1, 0.3, 1200,
@@ -1192,7 +1222,8 @@ MDADDiagnostics.sample(0, 9200500, 101, 201, 0.25, 12, 15, 39, 1.4, 0.1, 0.3, 12
     })
 MDADDiagnostics.event(0, "target", {
     phase = "change", oldX = 1, oldY = 2, x = 3, y = 4,
-    why = "user", tg = 7,
+    why = "user", tg = 7, navVersion = 4, currentSurface = "paved",
+    currentSegWidth = 6, cost = 123.5, avoidPenalty = 0,
 })
 MDADDiagnostics.event(0, "unstick", {
     phase = "success", eid = 3, attempt = 2, x = 10, y = 20,
@@ -1224,6 +1255,31 @@ checkEq(countNeedle(physBody, '"vl":'), 1, "absent vLong omits the field")
 checkEq(countNeedle(physBody, '"ib":'), 1, "absent isBraking omits rather than false")
 check(string.find(physBody, '"acr":"sensor"', 1, true) ~= nil, "second sample reason")
 check(string.find(physBody, '"csen":15', 1, true) ~= nil, "capSensor recorded")
+check(string.find(physBody, '"nv":4', 1, true) ~= nil, "nav version recorded")
+check(string.find(physBody, '"surf":"paved"', 1, true) ~= nil, "declared surface recorded")
+check(string.find(physBody, '"sw":6', 1, true) ~= nil, "segment width recorded")
+check(string.find(physBody, '"ctl":"TRACK"', 1, true) ~= nil, "derived control state recorded")
+check(string.find(physBody, '"ad":true', 1, true) ~= nil, "adaptive gate recorded")
+check(string.find(physBody, '"rn":false', 1, true) ~= nil, "dry snapshot explicit")
+check(string.find(physBody, '"ra":false', 1, true) ~= nil, "RETURN false explicit")
+check(string.find(physBody, '"tk":1', 1, true) ~= nil, "traction key recorded")
+check(string.find(physBody, '"rh":false', 1, true) ~= nil, "RETURN HOLD false explicit")
+check(string.find(physBody, '"rcf":false', 1, true) ~= nil, "RETURN capacity fault false explicit")
+check(string.find(physBody, '"rm":1200', 1, true) ~= nil, "runtime mass recorded")
+check(string.find(physBody, '"pa":2.5', 1, true) ~= nil, "drive prior recorded")
+check(string.find(physBody, '"pco":0.6', 1, true) ~= nil, "coast prior recorded")
+check(string.find(physBody, '"ccf":0.2', 1, true) ~= nil, "coast confidence recorded")
+check(string.find(physBody, '"sb":5.5', 1, true) ~= nil, "safe brake recorded")
+check(string.find(physBody, '"acf":0.5', 1, true) ~= nil, "accel confidence recorded")
+check(string.find(physBody, '"bal":4', 1, true) ~= nil, "brake lower bound recorded")
+check(string.find(physBody, '"kap":0.12', 1, true) ~= nil, "steering kappa recorded")
+check(string.find(physBody, '"crt":15', 1, true) ~= nil, "RETURN cap recorded")
+check(string.find(physBody, '"navVersion":4', 1, true) ~= nil,
+    "route event additive nav version")
+check(string.find(physBody, '"currentSurface":"paved"', 1, true) ~= nil,
+    "route event additive surface")
+check(string.find(physBody, '"avoidPenalty":0', 1, true) ~= nil,
+    "route event additive numeric avoidPenalty zero")
 check(string.find(physBody, '"tg":7', 1, true) ~= nil, "target generation recorded")
 check(string.find(physBody, '"rg":9', 1, true) ~= nil, "route generation recorded")
 check(string.find(physBody, '"eid":3', 1, true) ~= nil, "episode id recorded")

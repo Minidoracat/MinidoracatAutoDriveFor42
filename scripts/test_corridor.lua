@@ -697,6 +697,40 @@ do
 end
 
 -- =====================================================================
+-- Long-vehicle trajectory OBB：中心點淨空但前角命中
+-- =====================================================================
+scenario("swept OBB：同一障礙對 SmallCar clear、對長車前角 hit")
+do
+    local px, py = 3.0, 1.2
+    local centreRadius = math.sqrt(px * px + py * py)
+    checkTrue(centreRadius > 1.0 + 0.2 + 0.15,
+        "legacy centre-distance/half-width circle would report clear")
+    local small = C.orientedClearance(0, 0, 1, 0, 1.0, 1.8, px, py, 0.2, 0.15)
+    local long = C.orientedClearance(0, 0, 1, 0, 1.0, 3.0, px, py, 0.2, 0.15)
+    checkTrue(type(small) == "number" and small > 0, "SmallCar front does not reach obstacle")
+    checkTrue(type(long) == "number" and long <= 0, "long vehicle front corner hits obstacle")
+    local rotated = C.orientedClearance(0, 0, 0, 1, 1.0, 3.0, px, py, 0.2, 0.15)
+    checkTrue(rotated > 0, "OBB heading, not an axis-aligned length box, controls the hit")
+    checkEq(C.orientedClearance(0, 0, 0, 0, 1, 3, px, py, 0.2, 0.15), nil,
+        "zero forward vector fails closed to caller")
+    local noCom = C.orientedDistanceSq(0, 0, 1, 0, 1, 2, 0, 0, 0, -2.2)
+    local shiftedCom = C.orientedDistanceSq(0, 0, 1, 0, 1, 2, 1, 0, 0, -2.2)
+    checkTrue(shiftedCom < noCom,
+        "positive local COM x rotates toward vehicle-left (-Nright)")
+    checkNear(shiftedCom, 0.04, 1e-9, "COM-shifted OBB distance uses transformed centre")
+    local unchecked = C.orientedDistanceSqUnchecked(0, -1, 1, 0, 1, 2, 0, -2.2)
+    checkNear(unchecked, shiftedCom, 1e-12,
+        "prepared unchecked distance is equivalent to public checked wrapper")
+    local realType, typeCalls = type, 0
+    _G.type = function(v) typeCalls = typeCalls + 1; return realType(v) end
+    for _ = 1, 100 do
+        C.orientedDistanceSqUnchecked(0, -1, 1, 0, 1, 2, 0, -2.2)
+    end
+    _G.type = realType
+    checkEq(typeCalls, 0, "unchecked hard-pair helper performs no repeated type validation")
+end
+
+-- =====================================================================
 -- 總結
 -- =====================================================================
 closeScenario()

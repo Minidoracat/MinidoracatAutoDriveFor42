@@ -21,8 +21,16 @@
 - 複製最新紀錄或資料夾路徑成功時，改用右上角通知顯示完成回饋；舊版 UI 框架或通知失敗時仍會顯示頭上提示
 - 診斷紀錄補上碰撞前後的規劃狀態，以及最近障礙的尺寸與位置，能更快分辨是感知、規劃或車輛控制出了問題
 - 開啟診斷紀錄時會一併記下當下的引擎／煞車／輪胎與路況物理狀態，方便判斷低速蠕動是偏離路面、在煞車、輪胎打滑還是機械限制；關閉診斷時自駕行為不變
+- 自動駕駛現在會依實際車型的車寬、車長、軸距、轉向角、重量、引擎、煞車與輪胎狀態
+  調整前視距離、轉向力臂、碰撞掃掠與加減速能力；小車、廂型車與長軸皮卡不再共用
+  同一組固定車身假設。
+- 搭配 MiniMap 導航 API v4 時，自動駕駛會讀取每段道路的寬度與鋪裝／碎石／土路分類，
+  合法碎石路與土路不會因遊戲判定為越野就反覆拉回鋪裝；舊版 MiniMap 仍以保守的
+  未知路面模式正常跟線。
+- 車輛偏離行駛線時會先建立並完整掃掠平滑回線軌跡；資料未載入、目前車道受阻、
+  車身過長或缺少可靠煞車時會停住並顯示原因，不再沿未驗證斜線或錯誤車道繼續前進。
 
-> 技術要點：client-only、預設關；固定 64×2MiB、每 session 一檔；保留天數 1／3／7／14／30（預設 7）；`session-index.txt` 以 raw epoch ms 固定最多 64 列。JSONL 保留既有欄位並 additive tg/rg/eid/ps/ua/ban/ud/rear/rf/rms/ac/pc/fb/fhx/fhy；event 支援固定順序 named fields 且保留舊 a-d。Vehicle profile 每 session 冷路徑只建一次，控制與診斷共用 geometryValid、COM x/y/z；geometry invalid 直接拒絕啟動。進度 transition 才讀一次 offroad／transmission，unstick sample 走 100ms gate；route cutover 與 build-ready 分事件記錄真實長度。build `m62-20260831a`。
+> 技術要點：client-only、預設關；固定 64×2MiB、每 session 一檔；保留天數 1／3／7／14／30（預設 7）；`session-index.txt` 以 raw epoch ms 固定最多 64 列。JSONL 保留既有欄位並 additive tg/rg/eid/ps/ua/ban/ud/rear/rf/rms/ac/pc/fb/fhx/fhy；event 支援固定順序 named fields 且保留舊 a-d。Vehicle profile 每 session 冷路徑只建一次，控制與診斷共用 geometryValid、COM x/y/z；geometry invalid 直接拒絕啟動。進度 transition 才讀一次 offroad／transmission，unstick sample 走 100ms gate；route cutover 與 build-ready 分事件記錄真實長度。build `m63-20260831a`。
 
 ### 修正
 
