@@ -1046,7 +1046,7 @@ scenario("configureFollower caches priors by four surface ids, independent of ro
 do
     local p = P.build(makeVehicle(PICKUP))
     local follower = {
-        n = 401, segSurface = {}, segAccel = {}, segBrake = {}, segLat = {},
+        n = 401, segSurface = {}, segAccel = {}, segBrake = {}, segCoast = {}, segLat = {},
     }
     for i = 1, 400 do follower.segSurface[i] = (i - 1) % 4 end
     local originalPriors, originalSqrt = P.priors, math.sqrt

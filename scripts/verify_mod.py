@@ -731,6 +731,8 @@ if "MDAD_VehicleProfile.lua" not in LUA_BASENAMES and "MDADVehicleProfile.lua" n
     phase1.append("缺 MDADVehicleProfile 模組（client/MDAD_VehicleProfile.lua）")
 if "MDAD_Diagnostics.lua" not in LUA_BASENAMES and "MDADDiagnostics.lua" not in LUA_BASENAMES:
     phase1.append("缺 MDADDiagnostics 模組（client/MDAD_Diagnostics.lua）")
+if "MDAD_Dynamics.lua" not in LUA_BASENAMES:
+    phase1.append("缺 shared/MDAD_Dynamics.lua")
 hud_src = ""
 for f in LUA_FILES:
     if os.path.basename(f) == "MDAD_HUD.lua":
@@ -780,6 +782,8 @@ FOCUSED_TESTS = (
     "scripts/test_hud.lua",
     "scripts/test_vehicle_profile.lua",
     "scripts/test_diagnostics.lua",
+    "scripts/test_dynamics.lua",
+    "scripts/test_follower.lua",
 )
 for rel in FOCUSED_TESTS:
     if not os.path.isfile(os.path.join(REPO, rel)):

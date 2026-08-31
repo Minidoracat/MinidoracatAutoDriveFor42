@@ -54,6 +54,7 @@ local function loadProduction(rel)
     error("找不到 " .. rel .. "（請從 repo 根目錄或 scripts/ 執行）")
 end
 
+loadProduction("shared/MDAD_Dynamics.lua")
 loadProduction("shared/MDAD_Follower.lua")
 
 local F = MDADFollower
@@ -207,6 +208,14 @@ end
 local pLine   -- 21 點、每段 10m、全長 200m 的東向直線
 local pSine   -- 41 點的 S 彎
 
+local function exactOffset(state, a, b, c, d, l)
+    local ox, oy = {}, {}
+    local n, s0, reason, s1 = F.buildOffsetLine(
+        pLine, 0, a, b, c, d, l, 0, ox, oy)
+    if reason ~= "ok" then return false end
+    return F.setOffset(state, a, b, c, d, l, ox, oy, n, s0, s1)
+end
+
 -- =====================================================================
 -- 情境一：begin — route 形狀／有限值／退化路徑／maxSpeed 夾限
 -- =====================================================================
@@ -260,10 +269,10 @@ end
 -- =====================================================================
 scenario("stepBuild：相位單向推進、每 call 最多 budget 個點運算、BUDGET_MAX 硬上限")
 do
-    -- 點運算總數 ＝ geometry n ＋ brake (n-1) ＋ accel (n-1) ＝ 3n-2
+    -- Geometry/speed passes cost 5n-3; range tree costs 2*pow2ceil(n-1)-1.
     local p200, calls200 = buildRoute(straight(200, 10), MAXV, 8)
-    checkTrue(p200.ready, "增量建表最終 ready")
-    checkEq(calls200, 75, "budget=8：3*200-2=598 個點運算需要 ceil(598/8)=75 次呼叫")
+    checkTrue(p200.ready and p200.rangeReady, "增量建表與 range minima 最終 ready")
+    checkEq(calls200, 126, "budget=8：1005 個 bounded build ops 需要 126 次呼叫")
     checkTrue(F.stepBuild(p200, 8), "已 ready 再呼叫：直接回 true")
     checkEq(p200.cursor, p200.n, "已 ready 不再推進 cursor")
 
@@ -276,17 +285,16 @@ do
         if seen[#seen] ~= pPhase.phase then seen[#seen + 1] = pPhase.phase end
         oneByOne = oneByOne + 1
     end
-    checkEq(table.concat(seen, ">"), "geometry>brake>accel>ready", "相位單向推進，不回頭")
-    checkEq(oneByOne, 3 * 5 - 2 + 1,
-        "budget=1、5 點：13 個點運算＋1 次收尾（budget 用完的那一幀還看不到 accel 結束）")
+    checkEq(table.concat(seen, ">"),
+        "geometry>coast>brake>merge>accel>ready",
+        "相位單向推進；空 block-tree transitions 不另耗 call")
+    checkEq(oneByOne, 23, "budget=1、5 點：22 個 build ops＋1 次收尾")
 
-    -- BUDGET_MAX 硬上限：5000 點＝3*5000-2＝14998 個點運算，呼叫端給再大的 budget 也
-    -- 不能一次做完（geometry 相位本身就有 5000 個運算 > 4096，第一次呼叫必然停在
-    -- geometry 中途——這是「每幀最多花多少時間」的唯一保證）
+    -- BUDGET_MAX still bounds each call with speed passes and the range tree.
     local pBig = F.begin(mkRoute(straight(5000, 2)), MAXV)
     checkEq(F.BUDGET_MAX, 4096, "BUDGET_MAX 常數")
     checkFalse(F.stepBuild(pBig, 1e9), "budget 給 10 億：仍被 BUDGET_MAX 夾住，一次做不完")
-    checkEq(pBig.cursor, 4096 + 1, "第一次呼叫恰好做了 4096 個點運算（cursor 從 1 前進 4096）")
+    checkEq(pBig.cursor, 4096 + 1, "第一次呼叫恰好做了 4096 個點運算")
     checkEq(pBig.phase, "geometry", "第一次呼叫還停在 geometry 相位")
     local bigCalls = 1
     while not pBig.ready and bigCalls < 100 do
@@ -294,7 +302,7 @@ do
         bigCalls = bigCalls + 1
     end
     checkTrue(pBig.ready, "續呼叫可以做完")
-    checkEq(bigCalls, 4, "14998 個點運算 ÷ 4096 ＝ 4 次呼叫（ceil）")
+    checkEq(bigCalls, 7, "speed passes＋354 block-tree ops remain within 7 bounded calls")
 
     -- 爛 budget 一律夾成「至少推進一格」，不得空轉（空轉＝自駕永遠啟動不了）
     local function budgetProbe(budget, expectCursor, label)
@@ -355,15 +363,17 @@ do
     checkEq(over, 0, "沒有任何一點超過 maxSpeed")
     checkTrue(maxDecelDemand(pLine) <= 6 + 1e-6, "直線：沒有路段的減速需求超過 BRAKE=6 m/s²")
 
-    -- 8m 段的直角彎：kappa=(pi/2)/8，v=sqrt(a_lat*ds/dθ)=sqrt(3.5*8/(pi/2))≈4.22 m/s≈15.2 km/h
+    -- 8m 段的直角彎：三點 circumcircle kappa=2|cross|/(|AB||BC||AC|)。
     local pCorner = buildRoute({ 0, 0, 8, 0, 16, 0, 24, 0, 24, 8, 24, 16, 24, 24 }, MAXV)
-    local expect90 = math.sqrt(3.5 * 8 / (math.pi / 2))
-    checkNear(pCorner.v[4], expect90, 1e-9, "直角彎頂點速度＝sqrt(a_lat*ds/dθ)")
+    local k90 = 2 * 64 / (8 * 8 * math.sqrt(8 * 8 + 8 * 8))
+    local expect90 = math.sqrt(3.5 / k90)
+    checkNear(pCorner.v[4], expect90, 1e-9, "直角彎頂點速度＝sqrt(a_lat/kappa_circumcircle)")
     checkTrue(pCorner.v[4] * KMH > F.MIN_SPEED_KMH, "直角彎沒有撞到 12 km/h 下限（約 15.2）")
     checkTrue(pCorner.v[4] * KMH < MAXV * 0.5, "直角彎確實遠慢於 maxSpeed")
     checkTrue(pCorner.v[3] > pCorner.v[4], "彎前一點比彎頂快（反向制動生效）")
-    checkNear(pCorner.v[3], math.sqrt(pCorner.v[4] * pCorner.v[4] + 2 * 6 * 8), 1e-9,
-        "彎前制動量＝2*BRAKE*L（BRAKE=6）")
+    checkNear(pCorner.v[3],
+        math.sqrt(pCorner.v[4] * pCorner.v[4] + 2 * 0.6 * 8), 1e-9,
+        "彎前使用 coast envelope，不動用 active brake")
     checkNear(pCorner.v[5], math.sqrt(pCorner.v[4] * pCorner.v[4] + 2 * 2.5 * 8), 1e-9,
         "彎後一點被前向加速上限壓住＝sqrt(v_corner^2+2*ACCEL*L)（ACCEL=2.5）")
     checkTrue(maxDecelDemand(pCorner) <= 6 + 1e-6,
@@ -388,11 +398,11 @@ do
         dupPts[#dupPts + 1] = k * 10
     end
     local pDup = buildRoute(dupPts, MAXV)
-    checkNear(pDup.segLen[2], 0, 1e-12, "重合段長度 0")
+    checkEq(pDup.n, #dupPts / 2 - 1, "連續重合點在 owned profile canonicalize")
+    checkNear(pDup.segLen[2], 10, 1e-12, "canonical profile 不保留零長 segment")
     checkNear(pDup.segH[1], math.pi / 2, 1e-12, "北向段朝向＝90°")
-    checkNear(pDup.segH[2], pDup.segH[1], 1e-12, "重合段沿用前一段朝向")
     checkNear(pDup.v[2] * KMH, MAXV, 1e-9, "重合點沒有被偽造的急彎拖慢")
-    checkNear(pDup.v[3] * KMH, MAXV, 1e-9, "重合點後一點同樣不受影響")
+    checkNear(pDup.v[3] * KMH, MAXV, 1e-9, "canonical 下一點同樣不受影響")
 
     -- 兩點路線（最短的合法路線）
     local pTwo = buildRoute({ 0, 0, 30, 0 }, MAXV)
@@ -419,17 +429,18 @@ do
     local cap25 = (MAXV / KMH) + (18 / KMH - MAXV / KMH) * 0.25
     checkNear(p25.v[3], cap25, 1e-9,
         "25° 折點（SOFT 與 HARD 之間）：線性過渡上限（≈49.5 km/h）")
-    -- 小折角（< 20°）不受影響：8m 段 10° 折點的曲率限速 sqrt(3.5*8/0.1745)
-    -- ≈ 12.67 m/s < maxSpeed → 曲率值本身生效，角度上限不介入。
-    -- 路線尾巴多留 32m：終點反向制動鏈 sqrt(2*3*32)=13.9 > 12.67 才不會蓋過曲率值
+    -- 小折角（< 20°）不受角度 hard cap；仍使用三點 circumcircle 曲率。
+    -- 路線尾巴多留 32m，避免終點反向制動鏈蓋過曲率值。
     local a10 = 10 * math.pi / 180
     local q3, q4 = 16 + 8 * math.cos(a10), 8 * math.sin(a10)
     local c10, s10 = math.cos(a10), math.sin(a10)
     local p10 = buildRoute({ 0, 0, 8, 0, 16, 0, q3, q4,
         q3 + 8 * c10, q4 + 8 * s10, q3 + 16 * c10, q4 + 16 * s10,
         q3 + 24 * c10, q4 + 24 * s10, q3 + 32 * c10, q4 + 32 * s10 }, MAXV)
-    checkNear(p10.v[3], math.sqrt(3.5 * 8 / a10), 1e-9,
-        "10° 小折角：照走曲率公式，角度上限不介入")
+    local chord10 = math.sqrt((q3 - 8) * (q3 - 8) + q4 * q4)
+    local k10 = 2 * (8 * q4) / (8 * 8 * chord10)
+    checkNear(p10.v[3], math.sqrt(3.5 / k10), 1e-9,
+        "10° 小折角：circumcircle 曲率生效，角度上限不介入")
 end
 
 -- =====================================================================
@@ -870,9 +881,9 @@ do
     checkFalse(F.setOffset(st, 1, 3, 2, 4, 2), "b>c：拒絕")
     checkFalse(F.setOffset(st, 0 / 0, 2, 3, 4, 2), "NaN 斷點：拒絕")
     checkEq(st.offL, nil, "全部拒絕後 state 未被污染（無剖面＝offL 為 nil）")
-    checkTrue(F.setOffset(st, 1, 2, 3, 4, 0), "l==0（借中心線）：合法剖面")
-    checkTrue(F.setOffset(st, 1, 2, 3, 4, 2), "合法剖面：接受")
-    checkTrue(F.setOffset(st, 1, 2, 2, 4, 2), "b==c（保持段長 0）：接受")
+    checkTrue(exactOffset(st, 1, 2, 3, 4, 0), "l==0（借中心線）：合法剖面")
+    checkTrue(exactOffset(st, 1, 2, 3, 4, 2), "合法剖面：接受")
+    checkTrue(exactOffset(st, 1, 2, 2, 4, 2), "b==c（保持段長 0）：接受")
 
     -- 幾何：車在 pLine (50,0) 壓線、heading=0、speed=30 → look=9.6、前視點弧長 59.6。
     -- 測試自算參考值：err = atan2(偏移量, 9.6)。
@@ -880,7 +891,7 @@ do
     local function errWith(a, b, c, d, l)
         local st2 = F.newState()
         if a then
-            if not F.setOffset(st2, a, b, c, d, l) then error("setOffset 意外失敗") end
+            if not exactOffset(st2, a, b, c, d, l) then error("setOffset 意外失敗") end
         end
         local _, _, rem, _, err = F.control(pLine, st2, 50, 0, 0, 30, DT)
         return err, rem
@@ -897,7 +908,7 @@ do
     local tRaw = (59.6 - 55) / 10
     local tSm = tRaw * tRaw * (3 - 2 * tRaw)
     local errEntry = errWith(55, 65, 70, 80, 2)
-    checkNear(errEntry, math.atan2 and math.atan2(2 * tSm, look) or math.atan(2 * tSm / look), 1e-9,
+    checkNear(errEntry, math.atan2 and math.atan2(2 * tSm, look) or math.atan(2 * tSm / look), 2e-4,
         "進入段：smoothstep 插值（t=0.46 → 偏移 " .. string.format("%.3f", 2 * tSm) .. "m）")
     checkTrue(errEntry > 0 and errEntry < errHold, "進入段偏移小於峰值")
 
@@ -914,19 +925,19 @@ do
     local _, _, _, _, errBias = F.control(pLine, stZero, 50, 0, 0, 30, DT)
     checkNear(errBias, math.atan2 and math.atan2(2, look) or math.atan(2 / look), 1e-9,
         "bias=2 基準：前視點偏離中心線 2m")
-    checkTrue(F.setOffset(stZero, 50, 58, 70, 78, 0), "offL=0 剖面：接受")
+    checkTrue(exactOffset(stZero, 50, 58, 70, 78, 0), "offL=0 剖面：接受")
     local _, _, _, _, errZero = F.control(pLine, stZero, 50, 0, 0, 30, DT)
     checkNear(errZero, 0, 1e-9, "保持段：bias 被壓回中心線（offL=0 生效、非 inactive）")
 
     local st3 = F.newState()
-    checkTrue(F.setOffset(st3, 50, 58, 70, 78, 2), "先掛上側偏")
+    checkTrue(exactOffset(st3, 50, 58, 70, 78, 2), "先掛上側偏")
     F.clearOffset(st3)
     local _, _, _, _, errCleared = F.control(pLine, st3, 50, 0, 0, 30, DT)
     checkNear(errCleared, 0, 1e-12, "clearOffset 後回到壓線零誤差")
     checkEq(st3.offL, nil, "clearOffset 後 offL 為 nil（數值哨兵退場）")
 
     local stReset = F.newState()
-    checkTrue(F.setOffset(stReset, 50, 58, 70, 78, 2), "resetState 前掛上側偏")
+    checkTrue(exactOffset(stReset, 50, 58, 70, 78, 2), "resetState 前掛上側偏")
     F.resetState(stReset)
     checkEq(stReset.offL, nil, "resetState 一併清側偏（換路線不得帶舊剖面）")
 end
@@ -948,7 +959,7 @@ do
     checkNear(remB, 150, 1e-9, "偏置不改 remaining（進度仍以中心線為準）")
 
     -- 繞行剖面作用時：保持段的橫向位置＝offL（絕對車道），不是 bias + offL
-    checkTrue(F.setOffset(st, 50, 58, 70, 78, -2), "掛上繞行剖面（offL=-2，反側）")
+    checkTrue(exactOffset(st, 50, 58, 70, 78, -2), "掛上繞行剖面（offL=-2，反側）")
     local _, _, _, _, errMix = F.control(pLine, st, 50, 0, 0, 30, DT)
     checkNear(errMix, math.atan2 and math.atan2(-2, look) or math.atan(-2 / look), 1e-9,
         "保持段（t=1）：lane ＝ offL 絕對值 -2（Corridor 已以中心線為基準算好，不疊 bias）")
@@ -1156,6 +1167,25 @@ do
     -- 引數防呆
     local n3 = F.buildOffsetLine(nil, 0, 1, 2, 3, 4, 1, 0, ox, oy)
     checkEq(n3, 0, "無 profile 回 0")
+    local st = F.newState()
+    checkTrue(F.setOffset(st, 10, 16, 24, 30, -1.75, ox, oy, n2, 5, 31),
+        "validated dodge line commit accepted")
+    checkTrue(st.ovX == ox and st.ovY == oy,
+        "dodge sweep and control borrow the identical arrays")
+    F.clearOffset(st)
+    local fracX, fracY = {}, {}
+    local fracN, fracS0, fracWhy, fracS1 = F.buildOffsetLine(
+        pS, 5, 10, 16, 24, 30.4, -1.75, 0.3, fracX, fracY)
+    checkEq(fracWhy, "ok", "fractional endpoint line builds")
+    checkNear(fracS1, 31.4, 1e-12, "returned ovEndS is the sampled endpoint arclength")
+    checkNear(fracX[fracN], fracS1, 1e-12,
+        "fractional final point uses the same arclength parameter")
+    checkTrue(F.setOffset(st, 10, 16, 24, 30.4, -1.75,
+        fracX, fracY, fracN, fracS0, fracS1), "fractional exact line commit accepted")
+    checkNear(st.ovEndS, fracS1, 1e-12, "control state retains exact fractional ovEndS")
+    F.clearOffset(st)
+    checkTrue(st.ovX == st.ownOvX and st.ovY == st.ownOvY,
+        "dodge release restores owned buffers")
 end
 
 -- =====================================================================
@@ -1238,7 +1268,7 @@ do
         "longer adaptive lookahead reduces same-offset steering demand")
 
     local rx, ry = {}, {}
-    local n, s0 = F.buildReturnLine(p, 10, 30, 4, 1, rx, ry)
+    local n, s0, _, s1 = F.buildReturnLine(p, 10, 30, 4, 1, rx, ry)
     checkTrue(n >= 20, "RETURN line covers the requested longitudinal span")
     checkEq(s0, 10, "RETURN line keeps exact s0")
     checkNear(ry[1], 4, 1e-9, "smoothstep starts at measured lane")
@@ -1249,7 +1279,7 @@ do
     end
     checkTrue(monotonic, "laneStart->laneTarget is monotonic")
     local st = F.newState()
-    checkTrue(F.setExactLine(st, rx, ry, n, s0), "exact line commit accepted")
+    checkTrue(F.setExactLine(st, rx, ry, n, s0, s1), "exact line commit accepted")
     checkTrue(st.ovX == rx and st.ovY == ry,
         "Follower borrows the exact arrays swept by Driver; no second trajectory")
     checkTrue(st.exactLine, "exact-line mode recorded")
@@ -1279,7 +1309,7 @@ do
     local pts = straight(11, 10)
     local base = buildRoute(pts, 60)
     local capped = F.begin(mkRoute(pts), 60, 2)
-    checkTrue(F.capSegmentLimits(capped, 0.5, 1.0, 0.8),
+    checkTrue(F.capSegmentLimits(capped, 0.5, 1.0, 0.8, 0.3),
         "material safe limits cap every preallocated segment")
     while not F.stepBuild(capped, 4096) do end
     local allCapped = true
@@ -1292,14 +1322,213 @@ do
         "low brake cap propagates backward from a far endpoint")
 
     local zero = F.begin(mkRoute(pts), 60, 2)
-    checkTrue(F.capSegmentLimits(zero, 0, 0, 0), "zero segment limits accepted")
+    checkTrue(F.capSegmentLimits(zero, 0, 0, 0, 0), "zero segment limits accepted")
     while not F.stepBuild(zero, 4096) do end
     checkNear(zero.v[1], 0, 1e-12, "zero brake fail-safe propagates stop across route")
     local st = F.newState()
-    checkTrue(F.setRuntimeLimits(st, 0, 0, 0), "zero runtime limits accepted")
+    checkTrue(F.setRuntimeLimits(st, 0, 0, 0, 0), "zero runtime limits accepted")
     checkEq(st.accelSafe, 0, "zero runtime accel retained")
     checkEq(st.brakeSafe, 0, "zero runtime brake retained")
     checkEq(st.latSafe, 0, "zero runtime lateral retained")
+end
+
+-- =====================================================================
+-- Phase F：v4 adaptive C1 fillet、road-band、metadata 與 proof line
+-- =====================================================================
+scenario("adaptive v4 fillet is C1/band-safe with aligned metadata and explicit fallback")
+do
+    local vp = {
+        valid = true, geometryValid = true, halfW = 1, rMin = 3,
+        wheelbase = 2.5, delta0Safe = 0.7, deltaVSafe = 0.25, maxSpeed = 120,
+    }
+    local sourcePts = { 0, 0, 30, 0, 30, 30 }
+    local sourceCopy = {}
+    for i = 1, #sourcePts do sourceCopy[i] = sourcePts[i] end
+    local route = {
+        pts = sourcePts,
+        segSurface = { "paved", "gravel" },
+        segWidth = { 12, 10 },
+    }
+    local p = F.begin(route, 120, 4, vp)
+    checkTrue(p ~= nil and p.route == route, "profile retains original route identity")
+    while not F.stepBuild(p, 4096) do end
+    checkEq(p.filletN, 1, "20-90° feasible corner becomes one fillet")
+    checkEq(p.filletFallbackN, 0, "feasible fillet has no fallback")
+    checkTrue(p.n > p.sourcePointCount, "arc samples expand the owned profile only")
+    checkEq(#p.segSurface, p.n - 1, "fillet segSurface aligned")
+    checkEq(#p.segWidth, p.n - 1, "fillet segWidth aligned")
+    checkEq(#p.segKind, p.n - 1, "fillet kind aligned")
+    checkEq(route.pts, sourcePts, "route.pts identity remains immutable")
+    local sourceDrift = false
+    for i = 1, #sourcePts do if sourcePts[i] ~= sourceCopy[i] then sourceDrift = true end end
+    checkFalse(sourceDrift, "fillet never mutates source coordinates")
+
+    local firstArc, maxK = nil, 0
+    for i = 1, p.n - 1 do
+        if (p.kappa[i] or 0) > maxK then maxK = p.kappa[i] end
+        if p.segKind[i] == 1 then
+            firstArc = firstArc or i
+            local mx = (p.x[i] + p.x[i + 1]) * 0.5
+            local my = (p.y[i] + p.y[i + 1]) * 0.5
+            local d1 = MDADDynamics.distanceToSegmentSq(mx, my, 0, 0, 30, 0)
+            local d2 = MDADDynamics.distanceToSegmentSq(mx, my, 30, 0, 30, 30)
+            local b1, b2 = 12 / 2 - vp.halfW - 0.4, 10 / 2 - vp.halfW - 0.4
+            checkTrue(d1 <= b1 * b1 + 1e-8 or d2 <= b2 * b2 + 1e-8,
+                "arc segment remains in adjacent source road-band union #" .. i)
+            checkTrue(p.filletRadius[i] >= vp.rMin, "arc radius >= rMin #" .. i)
+        end
+    end
+    checkTrue(firstArc ~= nil and firstArc > 1, "arc has a source-line predecessor")
+    checkTrue(maxK <= 1 / vp.rMin + 1e-3, "profile kappa <= 1/rMin")
+    local lineState = F.newState()
+    lineState.idx = 1
+    F.setRuntimeLimits(lineState, 3, 6, 3.5, 0.6)
+    F.control(p, lineState, (p.x[1] + p.x[2]) * 0.5,
+        (p.y[1] + p.y[2]) * 0.5, p.segH[1], 10, DT)
+    checkFalse(lineState.curveHardActive,
+        "straight segment never arms the current-arc hard brake")
+    checkNear(lineState.curveKappa, 0, 1e-12,
+        "future arc curvature is not published as current hard curvature")
+    local arcState = F.newState()
+    arcState.idx = firstArc
+    F.setRuntimeLimits(arcState, 3, 6, 3.5, 0.6)
+    F.control(p, arcState, (p.x[firstArc] + p.x[firstArc + 1]) * 0.5,
+        (p.y[firstArc] + p.y[firstArc + 1]) * 0.5,
+        p.segH[firstArc], 10, DT)
+    local highArcCap = arcState.curveCapKmh
+    checkTrue(arcState.curveHardActive and arcState.curveKappa > 0,
+        "current SEG_ARC arms the hard curvature envelope")
+    local retainedSegLat = p.segLat[firstArc]
+    F.setRuntimeLimits(arcState, 3, 6, 0.2, 0.6)
+    F.control(p, arcState, (p.x[firstArc] + p.x[firstArc + 1]) * 0.5,
+        (p.y[firstArc] + p.y[firstArc + 1]) * 0.5,
+        p.segH[firstArc], 10, DT)
+    checkTrue(arcState.curveCapKmh < highArcCap,
+        "runtime safeLat drop tightens the active arc before profile rebuild")
+    checkNear(p.segLat[firstArc], retainedSegLat, 1e-12,
+        "immediate runtime tightening does not mutate the still-high profile")
+    checkTrue(arcState.curveValid, "successful control explicitly publishes valid curve state")
+    F.control(p, arcState, 0 / 0, 0, 0, 10, DT)
+    checkFalse(arcState.curveValid, "invalid-coordinate return clears curve validity first")
+    checkFalse(arcState.curveHardActive,
+        "invalid-coordinate return cannot retain stale current-arc hard state")
+    checkNear(arcState.curveKappa, 0, 1e-12, "invalid-coordinate return clears stale kappa")
+    checkNear(arcState.curveCapKmh, 0, 1e-12, "invalid-coordinate return clears stale cap")
+    local coastPts = { 0, 0, 10, 0, 20, 0, 30, 0, 40, 0, 50, 0, 60, 0, 60, 30 }
+    local coastRoute = { pts = coastPts, segSurface = {}, segWidth = {} }
+    for i = 1, #coastPts / 2 - 1 do
+        coastRoute.segSurface[i], coastRoute.segWidth[i] = "paved", 12
+    end
+    local highCoastProfile = F.begin(coastRoute, 120, 4, vp)
+    local lowCoastProfile = F.begin(coastRoute, 120, 4, vp)
+    checkTrue(F.capSegmentLimits(lowCoastProfile, 3, 6, 3.5, 0.05),
+        "lower learned coast limit is accepted before rebuild")
+    while not F.stepBuild(highCoastProfile, 4096) do end
+    while not F.stepBuild(lowCoastProfile, 4096) do end
+    local coastArc = 1
+    while coastArc < highCoastProfile.n - 1
+            and highCoastProfile.segKind[coastArc] ~= MDADDynamics.SEG_ARC do
+        coastArc = coastArc + 1
+    end
+    local coastLeadSegments = 0
+    for i = 1, coastArc - 1 do
+        if lowCoastProfile.coastV[i] < highCoastProfile.coastV[i] - 1e-9 then
+            coastLeadSegments = coastLeadSegments + 1
+        end
+    end
+    checkTrue(coastLeadSegments > 1,
+        "safeCoast decline propagates earlier coast across multiple approach segments")
+    local ix, iy = p.x[firstArc] - p.x[firstArc - 1], p.y[firstArc] - p.y[firstArc - 1]
+    local ax, ay = p.x[firstArc + 1] - p.x[firstArc], p.y[firstArc + 1] - p.y[firstArc]
+    local tangentCross = math.abs(ix * ay - iy * ax)
+        / math.sqrt((ix * ix + iy * iy) * (ax * ax + ay * ay))
+    checkTrue(tangentCross < 0.08, "line-to-arc tangent is C1 at <=1m sampling")
+
+    local lx, ly = {}, {}
+    local lineEnd = p.length
+    if lineEnd > 50 then lineEnd = 50 end
+    local ln, ls0, lreason, lastIdx = F.buildLaneLine(p, 0, lineEnd, 1, lx, ly)
+    checkTrue(ln >= 2 and ls0 == 0 and lreason == "ok", "preallocated lane proof line builds")
+    checkTrue(lastIdx >= 1 and lastIdx < p.n, "proof line reports verified segment index")
+    local spacingOk = true
+    for i = 2, ln do
+        local dx, dy = lx[i] - lx[i - 1], ly[i] - ly[i - 1]
+        if math.sqrt(dx * dx + dy * dy) > 1.01 then spacingOk = false end
+    end
+    checkTrue(spacingOk, "lane proof line spacing <=1m")
+
+    local narrow = F.begin({
+        pts = { 0, 0, 30, 0, 30, 30 },
+        segSurface = { "paved", "paved" }, segWidth = { 3, 3 },
+    }, 120, 4, vp)
+    while not F.stepBuild(narrow, 4096) do end
+    checkEq(narrow.filletN, 0, "insufficient road-band preserves source corner")
+    checkTrue(narrow.filletFallbackN >= 1, "insufficient road-band is explicit fallback")
+    checkEq(narrow.n, narrow.sourcePointCount, "fallback keeps original point count")
+    local fallbackKind = false
+    for i = 1, narrow.n - 1 do
+        if narrow.segKind[i] == MDADDynamics.SEG_FALLBACK then fallbackKind = true end
+    end
+    checkTrue(fallbackKind, "Follower localizes raw fallback in per-segment kind")
+
+    local capX, capY = {}, {}
+    local capN, _, capReason = F.buildOffsetLine(
+        pLine, 0, 1, 10, 130, 150, 2, 0, capX, capY)
+    checkEq(capN, 0, "long dodge line never truncates to OV_MAX")
+    checkEq(capReason, "capacity", "long dodge capacity rejection is named")
+
+    local minP = F.begin(mkRoute(straight(6, 10)), 60, 2)
+    minP.segBrake[3], minP.segLat[4], minP.segCoast[2] = 1.25, 0.75, 0.2
+    while not F.stepBuild(minP, 4096) do end
+    local minBrake, minLat, minCoast = F.minDynamics(minP, 5, 45, 1)
+    checkNear(minBrake, 1.25, 1e-12, "future horizon takes minimum segment brake")
+    checkNear(minLat, 0.75, 1e-12, "future horizon takes minimum segment lateral")
+    local tinyPts = {}
+    for i = 0, 4096 do
+        tinyPts[#tinyPts + 1] = i * 0.01
+        tinyPts[#tinyPts + 1] = 0
+    end
+    local tiny = F.begin(mkRoute(tinyPts), 60, 2)
+    tiny.segBrake[2500], tiny.segLat[2600], tiny.segCoast[2700] = 0.7, 0.6, 0.1
+    tiny.segKind[2800] = MDADDynamics.SEG_FALLBACK
+    while not F.stepBuild(tiny, 4096) do end
+    local rawS, sReads = tiny.s, 0
+    tiny.s = setmetatable({}, {
+        __index = function(_, k) sReads = sReads + 1; return rawS[k] end,
+    })
+    local tb, tl, tc = F.minDynamics(tiny, 20, 30, 2000)
+    checkNear(tb, 0.7, 1e-12, "tiny-segment RMQ returns brake minimum")
+    checkNear(tl, 0.6, 1e-12, "tiny-segment RMQ returns lateral minimum")
+    checkNear(tc, 0.1, 1e-12, "tiny-segment RMQ returns coast minimum")
+    checkTrue(sReads < 80, "tiny-segment query is O(log n), profile.s reads=" .. sReads)
+    checkTrue(F.rangeHasFallback(tiny, 2000, 3000),
+        "build-time range metadata finds fallback without segment scan")
+    checkNear(minCoast, 0.2, 1e-12, "future horizon takes minimum segment coast")
+    local tinyX, tinyY, tinySeg = {}, {}, {}
+    sReads = 0
+    local tinyN, _, tinyReason = F.buildLaneLine(
+        tiny, 20, 30, 0, tinyX, tinyY, 2000, tinySeg)
+    checkTrue(tinyN >= 2 and tinyReason == "ok",
+        "tiny-segment proof line builds with bounded binary seeks")
+    checkTrue(sReads < 200,
+        "proof sampling is O(samples*log n), profile.s reads=" .. sReads)
+    local highP = buildRoute(straight(11, 10), 60)
+    local highState, lowState = F.newState(), F.newState()
+    F.setRuntimeLimits(highState, 3, 6, 3.5, 0.6)
+    F.setRuntimeLimits(lowState, 3, 0.2, 3.5, 0.05)
+    local _, highTarget = F.control(highP, highState, 85, 0, 0, 30, DT)
+    local _, lowTarget = F.control(highP, lowState, 85, 0, 0, 30, DT)
+    checkTrue(lowTarget < highTarget,
+        "runtime safeBrake/coast drop tightens command while profile remains high")
+    checkTrue(highP.segBrake[lowState.idx] > 0.2
+            and highP.segCoast[lowState.idx] > 0.05,
+        "safe drop regression leaves stored segment minima deliberately stale/high")
+
+    local legacy = F.begin({
+        pts = { 0, 0, 30, 0, 30, 30 },
+        segSurface = { "paved", "paved" }, segWidth = { 12, 12 },
+    }, 120, 3, vp)
+    checkEq(legacy.filletN, 0, "v2/v3 never trusts similarly named widths for fillet")
 end
 
 -- =====================================================================

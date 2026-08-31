@@ -179,12 +179,21 @@ local function trailPoint(profile, fstate, sPos, startIdx)
     local dodging = false
     local offL = fstate.offL
     -- M6：承諾折線在就直接畫它（畫的＝掃的＝走的同一條世界線）
-    if offL ~= nil and (fstate.ovN or 0) >= 2 then
-        local fi = (sPos - fstate.ovS0) / OV_STEP + 1
-        if fi >= 1 and fi <= fstate.ovN then
-            local i0 = fi - fi % 1
-            if i0 >= fstate.ovN then i0 = fstate.ovN - 1 end
-            local ft = fi - i0
+    if offL ~= nil and type(fstate.ovN) == "number" and fstate.ovN >= 2
+            and type(fstate.ovS0) == "number" and fstate.ovS0 == fstate.ovS0
+            and type(fstate.ovEndS) == "number" and fstate.ovEndS == fstate.ovEndS then
+        local ovN, ovS0, ovEndS = fstate.ovN, fstate.ovS0, fstate.ovEndS
+        local lastStart = ovS0 + (ovN - 2) * OV_STEP
+        if ovEndS > lastStart and sPos >= ovS0 and sPos <= ovEndS then
+            local i0, ft
+            if sPos >= lastStart then
+                i0 = ovN - 1
+                ft = (sPos - lastStart) / (ovEndS - lastStart)
+            else
+                local fi = (sPos - ovS0) / OV_STEP + 1
+                i0 = fi - fi % 1
+                ft = fi - i0
+            end
             local ovX, ovY = fstate.ovX, fstate.ovY
             local wx = ovX[i0] + (ovX[i0 + 1] - ovX[i0]) * ft
             local wy = ovY[i0] + (ovY[i0 + 1] - ovY[i0]) * ft

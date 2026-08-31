@@ -585,6 +585,7 @@ function MDADVehicleProfile.configureFollower(follower, profile, runtimeMass, ra
             or type(follower.segSurface) ~= "table"
             or type(follower.segAccel) ~= "table"
             or type(follower.segBrake) ~= "table"
+            or type(follower.segCoast) ~= "table"
             or type(follower.segLat) ~= "table"
             or type(follower.n) ~= "number" then
         return false
@@ -593,43 +594,43 @@ function MDADVehicleProfile.configureFollower(follower, profile, runtimeMass, ra
     follower.adaptive = adaptive
     follower.lookScale = adaptive and profile.lookScale or 1
     local have0, have1, have2, have3 = false, false, false, false
-    local a0, b0, l0, a1, b1, l1, a2, b2, l2, a3, b3, l3
+    local a0, b0, l0, c0, a1, b1, l1, c1, a2, b2, l2, c2, a3, b3, l3, c3
     local i = 1
     while i < follower.n do
         local sid = follower.segSurface[i]
-        local aDrive, aBrake, aLat
+        local aDrive, aBrake, aLat, aCoast
         if sid == MDADVehicleProfile.SURFACE_PAVED then
             if not have1 then
-                a1, b1, l1 = MDADVehicleProfile.priors(
+                a1, b1, l1, _, _, c1 = MDADVehicleProfile.priors(
                     profile, runtimeMass, sid, raining, false, adaptive)
                 have1 = true
             end
-            aDrive, aBrake, aLat = a1, b1, l1
+            aDrive, aBrake, aLat, aCoast = a1, b1, l1, c1
         elseif sid == MDADVehicleProfile.SURFACE_GRAVEL then
             if not have2 then
-                a2, b2, l2 = MDADVehicleProfile.priors(
+                a2, b2, l2, _, _, c2 = MDADVehicleProfile.priors(
                     profile, runtimeMass, sid, raining, false, adaptive)
                 have2 = true
             end
-            aDrive, aBrake, aLat = a2, b2, l2
+            aDrive, aBrake, aLat, aCoast = a2, b2, l2, c2
         elseif sid == MDADVehicleProfile.SURFACE_DIRT then
             if not have3 then
-                a3, b3, l3 = MDADVehicleProfile.priors(
+                a3, b3, l3, _, _, c3 = MDADVehicleProfile.priors(
                     profile, runtimeMass, sid, raining, false, adaptive)
                 have3 = true
             end
-            aDrive, aBrake, aLat = a3, b3, l3
+            aDrive, aBrake, aLat, aCoast = a3, b3, l3, c3
         else
             if not have0 then
-                a0, b0, l0 = MDADVehicleProfile.priors(
+                a0, b0, l0, _, _, c0 = MDADVehicleProfile.priors(
                     profile, runtimeMass, MDADVehicleProfile.SURFACE_UNKNOWN,
                     raining, false, adaptive)
                 have0 = true
             end
-            aDrive, aBrake, aLat = a0, b0, l0
+            aDrive, aBrake, aLat, aCoast = a0, b0, l0, c0
         end
-        follower.segAccel[i], follower.segBrake[i], follower.segLat[i] =
-            aDrive, aBrake, aLat
+        follower.segAccel[i], follower.segBrake[i], follower.segLat[i],
+            follower.segCoast[i] = aDrive, aBrake, aLat, aCoast
         i = i + 1
     end
     return adaptive

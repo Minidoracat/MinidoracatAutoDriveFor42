@@ -29,8 +29,11 @@
   未知路面模式正常跟線。
 - 車輛偏離行駛線時會先建立並完整掃掠平滑回線軌跡；資料未載入、目前車道受阻、
   車身過長或缺少可靠煞車時會停住並顯示原因，不再沿未驗證斜線或錯誤車道繼續前進。
+- 導航 API v4 的一般彎道會在可行道路寬度內改成平滑圓角（底層圓弧相切，行駛折線以最長 1 公尺、切線誤差不超過 2° 取樣）；塞不進路面帶的折點保留並爬行。前方彎道只參與 coast 預降，只有車身已進入圓角段且實速突破當段硬曲率包絡才完整煞停
+- 全速行駛現在必須同時通過感知就緒與新鮮、完整煞停距離、走廊與車身掃掠、跟線狀態、回線完成、連續對正、進度健康、圓角與路面帶證明；110 公尺不足以安全停下時會依實際可視距離降速
+- 繞行速度改依側移長度、曲率、剩餘淨距與可視距離動態計算；寬裕靜態障礙可更流暢通過，車輛與窄縫仍維持低速
 
-> 技術要點：client-only、預設關；固定 64×2MiB、每 session 一檔；保留天數 1／3／7／14／30（預設 7）；`session-index.txt` 以 raw epoch ms 固定最多 64 列。JSONL 保留既有欄位並 additive tg/rg/eid/ps/ua/ban/ud/rear/rf/rms/ac/pc/fb/fhx/fhy；event 支援固定順序 named fields 且保留舊 a-d。Vehicle profile 每 session 冷路徑只建一次，控制與診斷共用 geometryValid、COM x/y/z；geometry invalid 直接拒絕啟動。進度 transition 才讀一次 offroad／transmission，unstick sample 走 100ms gate；route cutover 與 build-ready 分事件記錄真實長度。build `m63-20260831a`。
+> 技術要點：client-only、預設關；固定 64×2MiB、每 session 一檔；保留天數 1／3／7／14／30（預設 7）；`session-index.txt` 以 raw epoch ms 固定最多 64 列。JSONL 保留既有欄位並 additive tg/rg/eid/ps/ua/ban/ud/rear/rf/rms/ac/pc/fb/fhx/fhy，以及 fullGate/gateReason/cmdV/cmdA/jerkBypass/curveValid/curveKappa/curveHardActive/laneCurveEnvelope/envelopeBuildLat/envelopeBuildCoast/visibilityCap/filletN/filletFallbackN/dodgeDesignSpeed/dodgeBaseCap/dodgeCapPending/dodge caps。Vehicle profile 每 session 冷路徑建一次 32 段 block range-min tree；v4 fillet 的底層圓弧相切，行駛折線採 1m／2° 取樣，world-line proof 不改原 route identity。build `m64-20260831a`。
 
 ### 修正
 

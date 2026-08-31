@@ -1209,6 +1209,21 @@ MDADDiagnostics.sample(0, 9200000, 100, 200, 0.25, 12, 15, 40, 1.5, 0.2, 0.3, 12
         yawConfidence = 0.1, yawLower = 2.5,
         steeringKappa = 0.12,
         capReturn = 15,
+        fullGate = true, gateReason = "clear",
+        cmdV = 11.1, cmdA = 0.4, jerkBypass = "visibility",
+        curveValid = true, curveKappa = 0.02, curveHardActive = true,
+        curveCap = 47, visibilityCap = 52,
+        curveVerifiedUntilS = 88, filletN = 2, filletFallbackN = 1,
+        dodgeKappa = 0.03, dodgeClearance = 1.2,
+        dodgeCurveCap = 38, dodgeClearanceCap = 42,
+        dodgeVisibilityCap = 50,
+        dodgeSpaceCap = 35, dodgeDesignSpeed = 22,
+        dodgeBaseCap = 36, dodgeCapPending = false,
+        dodgeSpeedCap = 34, dodgeClass = 1,
+        verifyLineReason = "band", proofKappa = 0.04, proofCurveCap = 31,
+        laneCurveEnvelope = 26, envelopeBuildLat = 1.2, envelopeBuildCoast = 0.35,
+        dodgeBuildReason = "capacity", dodgeBlockReason = "dodge-cap",
+        dodgeCommittedLength = 18, stateError = "full-target", invalid = true,
     }, 7, 9, 3, "verify", 2, -1.5, 2.75, "clear", 450, 120,
     0.25, 1.5, true, 123, 456)
 MDADDiagnostics.sample(0, 9200500, 101, 201, 0.25, 12, 15, 39, 1.4, 0.1, 0.3, 1200,
@@ -1274,6 +1289,41 @@ check(string.find(physBody, '"acf":0.5', 1, true) ~= nil, "accel confidence reco
 check(string.find(physBody, '"bal":4', 1, true) ~= nil, "brake lower bound recorded")
 check(string.find(physBody, '"kap":0.12', 1, true) ~= nil, "steering kappa recorded")
 check(string.find(physBody, '"crt":15', 1, true) ~= nil, "RETURN cap recorded")
+check(string.find(physBody, '"fullGate":true', 1, true) ~= nil, "full-speed gate recorded")
+check(string.find(physBody, '"gateReason":"clear"', 1, true) ~= nil, "gate reason recorded")
+check(string.find(physBody, '"cmdV":11.1', 1, true) ~= nil, "jerk command speed recorded")
+check(string.find(physBody, '"cmdA":0.4', 1, true) ~= nil, "jerk command acceleration recorded")
+check(string.find(physBody, '"jerkBypass":"visibility"', 1, true) ~= nil, "named jerk bypass recorded")
+check(string.find(physBody, '"curveKappa":0.02', 1, true) ~= nil, "curve kappa recorded")
+check(string.find(physBody, '"curveValid":true', 1, true) ~= nil,
+    "fresh curve-state validity recorded")
+check(string.find(physBody, '"curveHardActive":true', 1, true) ~= nil,
+    "current-segment curve hard flag recorded")
+check(string.find(physBody, '"visibilityCap":52', 1, true) ~= nil, "visibility cap recorded")
+check(string.find(physBody, '"filletN":2', 1, true) ~= nil, "fillet count recorded")
+check(string.find(physBody, '"dodgeCurveCap":38', 1, true) ~= nil, "dodge curve cap recorded")
+check(string.find(physBody, '"dodgeClearanceCap":42', 1, true) ~= nil,
+    "dodge clearance cap recorded")
+check(string.find(physBody, '"dodgeVisibilityCap":50', 1, true) ~= nil,
+    "dodge visibility cap recorded")
+check(string.find(physBody, '"laneCurveEnvelope":26', 1, true) ~= nil,
+    "actual-lane future curve coast envelope recorded")
+check(string.find(physBody, '"envelopeBuildCoast":0.35', 1, true) ~= nil,
+    "lane envelope snapshot coast limit recorded")
+check(string.find(physBody, '"dodgeSpaceCap":35', 1, true) ~= nil, "dodge space cap recorded")
+check(string.find(physBody, '"dodgeDesignSpeed":22', 1, true) ~= nil,
+    "dodge intended design speed recorded")
+check(string.find(physBody, '"dodgeBaseCap":36', 1, true) ~= nil,
+    "immutable dodge base cap recorded")
+check(string.find(physBody, '"dodgeCapPending":false', 1, true) ~= nil,
+    "transient dodge cap pending state recorded")
+check(string.find(physBody, '"dodgeSpeedCap":34', 1, true) ~= nil, "dodge final cap recorded")
+check(string.find(physBody, '"verifyLineReason":"band"', 1, true) ~= nil,
+    "proof-line reason recorded")
+check(string.find(physBody, '"stateError":"full-target"', 1, true) ~= nil,
+    "control invariant stateError recorded")
+check(string.find(physBody, '"invalid":true', 1, true) ~= nil,
+    "invalid control invariant is explicit, never omitted")
 check(string.find(physBody, '"navVersion":4', 1, true) ~= nil,
     "route event additive nav version")
 check(string.find(physBody, '"currentSurface":"paved"', 1, true) ~= nil,

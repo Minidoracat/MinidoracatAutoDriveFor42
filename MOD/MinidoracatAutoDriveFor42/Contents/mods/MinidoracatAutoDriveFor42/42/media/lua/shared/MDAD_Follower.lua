@@ -10,7 +10,7 @@
 -- ---------------------------------------------------------------------------
 -- 介面契約（client/MDAD_Drive 依此接線，勿在此處加入 PZ 相依）
 -- ---------------------------------------------------------------------------
--- MDADFollower.begin(route, maxSpeed, navVersion)
+-- MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile)
 --     route    ＝ MiniMap nav API requestRoute 的唯讀 route。pts 為扁平 x,y。
 --     navVersion >=4 時 segSurface/segWidth 必須各恰 n-1 且逐項合法，否則
 --                fail-stop "badroute"；真正 v2/v3 明確複製為 unknown/width 0。
@@ -83,6 +83,8 @@
 -- 因此全部庫函式在載入期取成 local upvalue；夾限一律用純 Lua 比較，不呼叫
 -- math.max/min；control() 每幀只剩 cos/sin/atan2 三次跨界，sqrt 全在建表期。
 
+if not MDADDynamics then require "MDAD_Dynamics" end
+
 MDADFollower = MDADFollower or {}
 
 -- math.atan2 在遊戲的 Kahlua 裡存在（原版用例：client/Foraging/ISBaseIcon.lua:210、
@@ -123,7 +125,12 @@ local SEARCH_FWD = 12         -- 往前 12 段
 local REWIND_MAX = 1          -- 單幀最多允許倒退 1 段
 local OV_STEP = 1.0           -- M6 世界 offset 折線的取樣步距（公尺）
 local OV_MAX = 96             -- 折線表槽數（預配置；車位→d+1 最長 ~80m）
+local LANE_MAX = 128          -- 全速證明線槽數（110m 感知線＋端點）；步距沿用
+                              -- OV_STEP——Driver 的 sweepLine 以 OV_STEP 反推弧長，
+                              -- 兩者若不同一個常數，掃掠會對錯位置的障礙判定
 local OV_BLEND = 2.0          -- 折點法向混合半徑：距段端這麼近時與鄰段做角度插值
+local RANGE_INF = 1e30        -- segment-tree padding; finite for Kahlua portability
+local RANGE_BLOCK = 32        -- bounded edge scan; block tree handles the interior
 
 local KP, KI, KD = 2.2, 0.15, 0.35
 local I_MAX = 0.5             -- 積分項飽和
@@ -156,6 +163,7 @@ MDADFollower.ARRIVE_M = ARRIVE_M
 MDADFollower.MIN_SPEED_KMH = MIN_SPEED_KMH
 MDADFollower.BUDGET_MAX = BUDGET_MAX
 MDADFollower.OV_STEP = OV_STEP
+MDADFollower.LANE_MAX = LANE_MAX
 MDADFollower.SURFACE_UNKNOWN = 0
 MDADFollower.SURFACE_PAVED = 1
 MDADFollower.SURFACE_GRAVEL = 2
@@ -206,11 +214,12 @@ end
 -- 建表期的單點運算：抄座標、算段長／段朝向／累積弧長，並在資料到齊時補算內點曲率。
 -- 曲率需要三點，所以拿到第 i 點時算的是內點 i-1 的限速。
 local function geometryStep(p, i)
-    local pts = p.route.pts
+    local pts = p.pts
     local x, y = pts[i * 2 - 1], pts[i * 2]
     local px, py = p.x, p.y
     px[i], py[i] = x, y
     p.v[i] = p.maxSpeedMs
+    p.curveV[i] = p.maxSpeedMs
     p.kappa[i] = 0
     if i == 1 then
         p.s[1] = 0
@@ -224,41 +233,44 @@ local function geometryStep(p, i)
         segH[i - 1] = atan2(dy, dx)
     else
         -- 重合點：atan2(0, 0) 回 0＝假的「朝東」，會在直路上偽造一個急彎。
-        -- 沿用前一段朝向（第一段就重合時只能給 0，此時曲率本來也算不出東西）
         segH[i - 1] = (i >= 3 and segH[i - 2]) or 0
     end
     p.s[i] = p.s[i - 1] + len
     if i >= 3 then
         local m = i - 1
-        local ds = (segLen[m - 1] + segLen[m]) * 0.5
-        if ds > 0 then
-            local dth = wrapPi(segH[m] - segH[m - 1])
-            if dth < 0 then dth = -dth end
-            if dth > 0 then
-                local kappa = dth / ds
-                p.kappa[m] = kappa
-                local aLat = p.segLat[m - 1] or LAT_ACCEL
-                local nextLat = p.segLat[m] or aLat
-                if nextLat < aLat then aLat = nextLat end
-                -- kappa = dth / ds；v = sqrt(a_lat / kappa)
-                local lim = sqrt(aLat / kappa)
-                -- **折點角度下限**：路網 polyline 在交叉口的點距常常很大（20m+），
-                -- 45° 的急轉被長段攤薄成小曲率，上面的公式算出 60+ km/h 的「限速」
-                -- ——2026-08-28 實機：61.5 km/h 過路口直接甩出路面。角度本身另設
-                -- 上限：超過 TURN_HARD_RAD 的折點一律 ≤ TURN_HARD_MS，中等角度線性
-                -- 過渡；這個上限不除 ds，點距再大也稀釋不掉。
-                if dth >= TURN_HARD_RAD then
-                    if lim > TURN_HARD_MS then lim = TURN_HARD_MS end
-                elseif dth >= TURN_SOFT_RAD then
-                    local t = (dth - TURN_SOFT_RAD) / (TURN_HARD_RAD - TURN_SOFT_RAD)
-                    local cap = p.maxSpeedMs + (TURN_HARD_MS - p.maxSpeedMs) * t
-                    if lim > cap then lim = cap end
-                end
-                if lim < MIN_SPEED_MS then lim = MIN_SPEED_MS end
-                if lim > p.maxSpeedMs then lim = p.maxSpeedMs end
-                if p.v[m] > lim then p.v[m] = lim end
+        local dth = wrapPi(segH[m] - segH[m - 1])
+        if dth < 0 then dth = -dth end
+        local kappa = MDADDynamics.circumcircleKappa(
+            px[m - 1], py[m - 1], px[m], py[m], px[m + 1], py[m + 1])
+        p.kappa[m] = kappa
+        local aLat = p.segLat[m - 1] or LAT_ACCEL
+        local nextLat = p.segLat[m] or aLat
+        if nextLat < aLat then aLat = nextLat end
+        local lim = p.maxSpeedMs
+        if kappa > 0 then
+            lim = sqrt(aLat / kappa)
+            if p.filletAdaptive then
+                local cap = MDADDynamics.curveSpeedCapKmh(kappa, aLat,
+                    p.wheelbase, p.delta0Safe, p.deltaVSafe, p.vehicleMaxSpeed)
+                    * MS_PER_KMH
+                if cap < lim then lim = cap end
             end
         end
+        -- >90° and U-turns are outside the fillet contract: preserve the source
+        -- vertex and use the explicit crawl fallback instead of inventing an arc.
+        if dth > PI * 0.5 then
+            lim = MIN_SPEED_MS
+        elseif dth >= TURN_HARD_RAD then
+            if lim > TURN_HARD_MS then lim = TURN_HARD_MS end
+        elseif dth >= TURN_SOFT_RAD then
+            local t = (dth - TURN_SOFT_RAD) / (TURN_HARD_RAD - TURN_SOFT_RAD)
+            local cap = p.maxSpeedMs + (TURN_HARD_MS - p.maxSpeedMs) * t
+            if lim > cap then lim = cap end
+        end
+        if lim < MIN_SPEED_MS then lim = MIN_SPEED_MS end
+        if lim > p.maxSpeedMs then lim = p.maxSpeedMs end
+        p.curveV[m] = lim
+        if p.v[m] > lim then p.v[m] = lim end
     end
 end
 
@@ -268,7 +280,7 @@ end
 --   所有點重合（路徑長 0，投影／曲率／前視全部沒有意義）。
 -- 點數 1（#pts == 2）是 nav 真的會回的情況（A* 起錨後續節點全與前一點重合），
 -- 對應 production 的 `if np < 2 then` 早退，不是假想輸入。
-function MDADFollower.begin(route, maxSpeed, navVersion)
+function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile)
     if type(route) ~= "table" then return nil, "badroute" end
     local pts = route.pts
     if type(pts) ~= "table" then return nil, "badroute" end
@@ -290,60 +302,143 @@ function MDADFollower.begin(route, maxSpeed, navVersion)
     if maxKmh > MAX_SPEED_CAP_KMH then maxKmh = MAX_SPEED_CAP_KMH end
 
     if navVersion == nil then
-        navVersion = 2 -- direct legacy caller only
+        navVersion = 2
     elseif not isFinite(navVersion) or navVersion < 2 or navVersion % 1 ~= 0 then
         return nil, "badroute"
     end
-    local n = np / 2
-    local segSurface, segWidth = {}, {}
-    local segAccel, segBrake, segLat = {}, {}, {}
+    local sourceN = np / 2
+    local sourceSurface, sourceWidth = {}, {}
     if navVersion >= 4 then
         local srcSurface, srcWidth = route.segSurface, route.segWidth
         if type(srcSurface) ~= "table" or type(srcWidth) ~= "table"
-                or #srcSurface ~= n - 1 or #srcWidth ~= n - 1 then
+                or #srcSurface ~= sourceN - 1 or #srcWidth ~= sourceN - 1 then
             return nil, "badroute"
         end
-        for i = 1, n - 1 do
+        for i = 1, sourceN - 1 do
             local surface = srcSurface[i]
             local sid
             if type(surface) == "string" then sid = SURFACE_ID[surface] end
             if sid == nil then return nil, "badroute" end
             local width = srcWidth[i]
             if not isFinite(width) or width < 1 or width > 64 then return nil, "badroute" end
-            segSurface[i], segWidth[i] = sid, width
+            sourceSurface[i], sourceWidth[i] = sid, width
         end
     else
-        -- Genuine v2/v3 has no trustworthy edge metadata even if a producer happens
-        -- to attach similarly named fields. Every segment is explicitly unknown.
-        for i = 1, n - 1 do
-            segSurface[i], segWidth[i] = MDADFollower.SURFACE_UNKNOWN, 0
+        for i = 1, sourceN - 1 do
+            sourceSurface[i], sourceWidth[i] = MDADFollower.SURFACE_UNKNOWN, 0
         end
     end
-    -- 動態上限一律從 legacy 常數起手；adaptive 收緊由 configureFollower 覆寫。
-    for i = 1, n - 1 do
-        segAccel[i], segBrake[i], segLat[i] = ACCEL, BRAKE, LAT_ACCEL
+
+    -- Canonicalize consecutive duplicate points before any fillet math. The
+    -- original route remains untouched and source-map entries retain raw segments.
+    local buildPts, buildSurface, buildWidth = pts, sourceSurface, sourceWidth
+    local rawSourceMap
+    if sourceN <= MDADDynamics.FILLET_SOURCE_MAX then
+        buildPts, buildSurface, buildWidth, rawSourceMap = {}, {}, {}, {}
+        buildPts[1], buildPts[2] = pts[1], pts[2]
+        local cn, lastX, lastY = 1, pts[1], pts[2]
+        for i = 1, sourceN - 1 do
+            local nx, ny = pts[i * 2 + 1], pts[i * 2 + 2]
+            if nx ~= lastX or ny ~= lastY then
+                buildSurface[cn], buildWidth[cn], rawSourceMap[cn] =
+                    sourceSurface[i], sourceWidth[i], i
+                cn = cn + 1
+                buildPts[cn * 2 - 1], buildPts[cn * 2] = nx, ny
+                lastX, lastY = nx, ny
+            end
+        end
     end
+    local buildN = #buildPts / 2
+    local pathPts, segSurface, segWidth = {}, {}, {}
+    local segKind, segSourceA, segSourceB, filletRadius = {}, {}, {}, {}
+    local n, filletN, filletFallbackN = 0, 0, 0
+    local filletBandValid = navVersion >= 4
+    local filletReason
+    local filletAdaptive = navVersion >= 4 and type(vehicleProfile) == "table"
+        and vehicleProfile.valid == true and vehicleProfile.geometryValid == true
+        and isFinite(vehicleProfile.halfW) and vehicleProfile.halfW > 0
+        and isFinite(vehicleProfile.rMin) and vehicleProfile.rMin > 0
+        and isFinite(vehicleProfile.wheelbase) and vehicleProfile.wheelbase > 0
+        and isFinite(vehicleProfile.delta0Safe) and isFinite(vehicleProfile.deltaVSafe)
+        and isFinite(vehicleProfile.maxSpeed) and vehicleProfile.maxSpeed > 0
+    if filletAdaptive and sourceN <= MDADDynamics.FILLET_SOURCE_MAX then
+        n, filletN, filletFallbackN, filletBandValid, filletReason =
+            MDADDynamics.buildFilletPath(
+                buildPts, buildSurface, buildWidth, vehicleProfile.halfW, vehicleProfile.rMin,
+                pathPts, segSurface, segWidth, segKind, segSourceA, segSourceB, filletRadius)
+    end
+    if n >= 2 and rawSourceMap then
+        for i = 1, n - 1 do
+            segSourceA[i] = rawSourceMap[segSourceA[i]] or segSourceA[i]
+            segSourceB[i] = rawSourceMap[segSourceB[i]] or segSourceB[i]
+        end
+    end
+    if n < 2 then
+        n, filletN = buildN, 0
+        if filletAdaptive and sourceN > MDADDynamics.FILLET_SOURCE_MAX then
+            filletReason, filletFallbackN = "capacity", buildN - 2
+        end
+        for i = 1, #buildPts do pathPts[i] = buildPts[i] end
+        for i = 1, buildN - 1 do
+            segSurface[i], segWidth[i] = buildSurface[i], buildWidth[i]
+            segSourceA[i] = rawSourceMap and rawSourceMap[i] or i
+            segSourceB[i], filletRadius[i] = segSourceA[i], 0
+            segKind[i] = filletReason and MDADDynamics.SEG_FALLBACK
+                or MDADDynamics.SEG_LINE
+        end
+    end
+
+    local segAccel, segBrake, segCoast, segLat = {}, {}, {}, {}
+    for i = 1, n - 1 do
+        segAccel[i], segBrake[i], segCoast[i], segLat[i] =
+            ACCEL, BRAKE, 0.6, LAT_ACCEL
+    end
+    local rangeBlockCount = ((n - 2) - (n - 2) % RANGE_BLOCK) / RANGE_BLOCK + 1
+    local rangeBase = 1
+    while rangeBase < rangeBlockCount do rangeBase = rangeBase * 2 end
 
     return {
         route = route,
+        pts = pathPts,
         navVersion = navVersion,
         n = n,
         pointCount = n,
+        sourcePointCount = sourceN,
         maxSpeed = maxKmh,
         maxSpeedMs = maxKmh * MS_PER_KMH,
         lookScale = 1,
         adaptive = false,
+        filletAdaptive = filletAdaptive,
+        filletN = filletN,
+        filletFallbackN = filletFallbackN,
+        filletBandValid = filletBandValid == true,
+        filletReason = filletReason,
+        wheelbase = filletAdaptive and vehicleProfile.wheelbase or 0,
+        delta0Safe = filletAdaptive and vehicleProfile.delta0Safe or 0,
+        deltaVSafe = filletAdaptive and vehicleProfile.deltaVSafe or 0,
+        vehicleMaxSpeed = filletAdaptive and vehicleProfile.maxSpeed or maxKmh,
         x = {}, y = {},
         s = {},
         segLen = {},
         segH = {},
         segSurface = segSurface,
         segWidth = segWidth,
+        segKind = segKind,
+        segSourceA = segSourceA,
+        segSourceB = segSourceB,
+        filletRadius = filletRadius,
         segAccel = segAccel,
         segBrake = segBrake,
         segLat = segLat,
+        segCoast = segCoast,
         kappa = {},
+        curveV = {},
+        coastV = {},
+        brakeV = {},
         v = {},
+        rangeBase = rangeBase, rangeBlockCount = rangeBlockCount,
+        rangeBrake = {}, rangeLat = {}, rangeCoast = {}, rangeFallback = {},
+        rangeReady = false,
         length = 0,
         phase = "geometry",
         cursor = 1,
@@ -351,64 +446,124 @@ function MDADFollower.begin(route, maxSpeed, navVersion)
     }
 end
 
--- 增量建表。每次呼叫最多做 budget 個點運算；相位切換本身不算運算，
--- 但相位是單向的（geometry → brake → accel → ready），所以不會空轉。
+-- 增量建表。每次呼叫最多做 budget 個 ops；相位切換本身不算運算。
+-- 最後以每 32 段一葉的 block tree 建 range minima／fallback metadata。
 function MDADFollower.stepBuild(profile, budget)
     if type(profile) ~= "table" then return false end
     if profile.ready == true then return true end
-
     if not isFinite(budget) then budget = BUDGET_DEFAULT end
-    budget = budget - budget % 1        -- 純 Lua floor（不跨界呼叫 math.floor）
+    budget = budget - budget % 1
     if budget < 1 then budget = 1 end
     if budget > BUDGET_MAX then budget = BUDGET_MAX end
 
-    local n = profile.n
-    local v, segLen = profile.v, profile.segLen
+    local n, segLen = profile.n, profile.segLen
+    local v, coastV, brakeV = profile.v, profile.coastV, profile.brakeV
     local ops = 0
     while ops < budget do
-        local phase = profile.phase
+        local phase, i = profile.phase, profile.cursor
         if phase == "geometry" then
-            local i = profile.cursor
             if i > n then
-                v[n] = 0                    -- 終點必須停下；反向制動段由此展開
                 profile.length = profile.s[n]
-                profile.phase = "brake"
-                profile.cursor = n - 1
+                coastV[n] = profile.curveV[n] or profile.maxSpeedMs
+                profile.phase, profile.cursor = "coast", n - 1
             else
                 geometryStep(profile, i)
-                profile.cursor = i + 1
-                ops = ops + 1
+                profile.cursor, ops = i + 1, ops + 1
+            end
+        elseif phase == "coast" then
+            if i < 1 then
+                brakeV[n] = 0
+                profile.phase, profile.cursor = "brake", n - 1
+            else
+                local coast = profile.segCoast[i] or 0.6
+                local lim = sqrt(coastV[i + 1] * coastV[i + 1]
+                    + 2 * coast * segLen[i])
+                local curve = profile.curveV[i] or profile.maxSpeedMs
+                coastV[i] = curve < lim and curve or lim
+                profile.cursor, ops = i - 1, ops + 1
             end
         elseif phase == "brake" then
-            local i = profile.cursor
             if i < 1 then
-                profile.phase = "accel"
-                profile.cursor = 1
+                profile.phase, profile.cursor = "merge", 1
             else
                 local brake = profile.segBrake[i] or BRAKE
-                local lim = sqrt(v[i + 1] * v[i + 1] + 2 * brake * segLen[i])
-                if v[i] > lim then v[i] = lim end
-                profile.cursor = i - 1
-                ops = ops + 1
+                local lim = sqrt(brakeV[i + 1] * brakeV[i + 1]
+                    + 2 * brake * segLen[i])
+                if lim > profile.maxSpeedMs then lim = profile.maxSpeedMs end
+                brakeV[i] = lim
+                profile.cursor, ops = i - 1, ops + 1
+            end
+        elseif phase == "merge" then
+            if i > n then
+                profile.phase, profile.cursor = "accel", 1
+            else
+                local cv, bv = coastV[i], brakeV[i]
+                v[i] = cv < bv and cv or bv
+                profile.cursor, ops = i + 1, ops + 1
             end
         elseif phase == "accel" then
-            local i = profile.cursor
             if i > n - 1 then
-                profile.phase = "ready"
-                profile.cursor = n
-                profile.ready = true
-                return true
+                profile.rangeReady = false
+                profile.phase, profile.cursor = "range-pad", profile.rangeBlockCount + 1
             else
                 local accel = profile.segAccel[i] or ACCEL
                 local lim = sqrt(v[i] * v[i] + 2 * accel * segLen[i])
                 if v[i + 1] > lim then v[i + 1] = lim end
-                profile.cursor = i + 1
-                ops = ops + 1
+                local z = i - 1
+                local block = (z - z % RANGE_BLOCK) / RANGE_BLOCK + 1
+                local node = profile.rangeBase + block - 1
+                if z % RANGE_BLOCK == 0 then
+                    profile.rangeBrake[node] = profile.segBrake[i]
+                    profile.rangeLat[node] = profile.segLat[i]
+                    profile.rangeCoast[node] = profile.segCoast[i]
+                    profile.rangeFallback[node] =
+                        profile.segKind[i] == MDADDynamics.SEG_FALLBACK and 1 or 0
+                else
+                    if profile.segBrake[i] < profile.rangeBrake[node] then
+                        profile.rangeBrake[node] = profile.segBrake[i]
+                    end
+                    if profile.segLat[i] < profile.rangeLat[node] then
+                        profile.rangeLat[node] = profile.segLat[i]
+                    end
+                    if profile.segCoast[i] < profile.rangeCoast[node] then
+                        profile.rangeCoast[node] = profile.segCoast[i]
+                    end
+                    if profile.segKind[i] == MDADDynamics.SEG_FALLBACK then
+                        profile.rangeFallback[node] = 1
+                    end
+                end
+                profile.cursor, ops = i + 1, ops + 1
+            end
+        elseif phase == "range-pad" then
+            local base = profile.rangeBase
+            if i > base then
+                profile.phase, profile.cursor = "range-tree", base - 1
+            else
+                local node = base + i - 1
+                profile.rangeBrake[node], profile.rangeLat[node],
+                    profile.rangeCoast[node], profile.rangeFallback[node] =
+                    RANGE_INF, RANGE_INF, RANGE_INF, 0
+                profile.cursor, ops = i + 1, ops + 1
+            end
+        elseif phase == "range-tree" then
+            if i < 1 then
+                profile.rangeReady = true
+                profile.phase, profile.cursor, profile.ready = "ready", n, true
+                return true
+            else
+                local left, right = i * 2, i * 2 + 1
+                local lb, rb = profile.rangeBrake[left], profile.rangeBrake[right]
+                local ll, rl = profile.rangeLat[left], profile.rangeLat[right]
+                local lc, rc = profile.rangeCoast[left], profile.rangeCoast[right]
+                profile.rangeBrake[i] = lb < rb and lb or rb
+                profile.rangeLat[i] = ll < rl and ll or rl
+                profile.rangeCoast[i] = lc < rc and lc or rc
+                local lf, rf = profile.rangeFallback[left], profile.rangeFallback[right]
+                profile.rangeFallback[i] = lf > rf and lf or rf
+                profile.cursor, ops = i - 1, ops + 1
             end
         else
-            -- 未知相位（profile 被外部改壞）：當成完成，別讓呼叫端每幀空轉
-            profile.phase = "ready"
-            profile.ready = true
+            profile.phase, profile.ready = "ready", true
             return true
         end
     end
@@ -417,6 +572,12 @@ end
 
 -- 每幀控制。零配置：只讀 profile、只就地寫 state 的數值欄位。
 function MDADFollower.control(profile, state, x, y, heading, speed, dt)
+    if type(state) == "table" then
+        state.curveValid = false
+        state.curveHardActive = false
+        state.curveKappa = 0
+        state.curveCapKmh = 0
+    end
     if type(profile) ~= "table" or profile.ready ~= true or type(state) ~= "table" then
         return 0, 0, 0, false, 0, 0, 0
     end
@@ -534,17 +695,24 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
     -- Both immutable dodge and RETURN can supply one exact prevalidated world line.
     -- RETURN borrows the caller's preallocated array; dodge uses state-owned storage.
     local ovN = state.ovN or 0
-    if ovN >= 2 then
-        local fi = (sEff - state.ovS0) / OV_STEP + 1
-        if fi >= 1 and fi <= ovN then
-            local i0 = fi - fi % 1
-            if i0 >= ovN then i0 = ovN - 1 end
-            local ft = fi - i0
-            local ovX, ovY = state.ovX, state.ovY
-            tx = ovX[i0] + (ovX[i0 + 1] - ovX[i0]) * ft
-            ty = ovY[i0] + (ovY[i0 + 1] - ovY[i0]) * ft
-            ovUsed = true
+    local ovEndS = state.ovEndS
+    if ovN >= 2 and isFinite(ovEndS)
+            and sEff >= state.ovS0 and sEff <= ovEndS then
+        local i0, ft
+        local lastStart = state.ovS0 + (ovN - 2) * OV_STEP
+        if sEff >= lastStart then
+            i0 = ovN - 1
+            local lastSpan = ovEndS - lastStart
+            if lastSpan > 0 then ft = (sEff - lastStart) / lastSpan else ft = 1 end
+        else
+            local fi = (sEff - state.ovS0) / OV_STEP + 1
+            i0 = fi - fi % 1
+            ft = fi - i0
         end
+        local ovX, ovY = state.ovX, state.ovY
+        tx = ovX[i0] + (ovX[i0 + 1] - ovX[i0]) * ft
+        ty = ovY[i0] + (ovY[i0 + 1] - ovY[i0]) * ft
+        ovUsed = true
     end
     if not ovUsed and offL ~= nil and isFinite(offL) then
         local oa, ob, oc, od = state.offA, state.offB, state.offC, state.offD
@@ -603,33 +771,49 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
     local v = profile.v
     local targetSpeed
     do
-        local vA, vB = v[bestI], v[bestI + 1]
+        local vA = v[bestI]
         local lenI = segLen[bestI]
-        local dsA = lenI * bestT
+        local dsA, remainI = lenI * bestT, lenI * (1 - bestT)
         local accel = profile.segAccel[bestI] or ACCEL
         local brake = profile.segBrake[bestI] or BRAKE
-        local runtimeAccel, runtimeBrake = state.accelSafe, state.brakeSafe
+        local coast = profile.segCoast[bestI] or 0.6
+        local runtimeAccel, runtimeBrake, runtimeCoast =
+            state.accelSafe, state.brakeSafe, state.coastSafe
         if isFinite(runtimeAccel) and runtimeAccel >= 0 and runtimeAccel < accel then
             accel = runtimeAccel
         end
         if isFinite(runtimeBrake) and runtimeBrake >= 0 and runtimeBrake < brake then
             brake = runtimeBrake
         end
-        local accLim = sqrt(vA * vA + 2 * accel * dsA)
-        local brkLim = sqrt(vB * vB + 2 * brake * (lenI - dsA))
-        targetSpeed = accLim
-        if brkLim < targetSpeed then targetSpeed = brkLim end
-        if targetSpeed > profile.maxSpeedMs then targetSpeed = profile.maxSpeedMs end
-        local runtimeLat = state.latSafe
-        if isFinite(runtimeLat) and runtimeLat >= 0 then
-            local kappa = profile.kappa[bestI] or 0
-            local nextKappa = profile.kappa[bestI + 1] or 0
-            if nextKappa > kappa then kappa = nextKappa end
-            if kappa > 0 then
-                local latLim = sqrt(runtimeLat / kappa)
-                if latLim < targetSpeed then targetSpeed = latLim end
-            end
+        if isFinite(runtimeCoast) and runtimeCoast >= 0 and runtimeCoast < coast then
+            coast = runtimeCoast
         end
+        local accLim = sqrt(vA * vA + 2 * accel * dsA)
+        local coastNext = profile.coastV[bestI + 1] or profile.maxSpeedMs
+        local brakeNext = profile.brakeV[bestI + 1] or 0
+        local coastLim = sqrt(coastNext * coastNext + 2 * coast * remainI)
+        local stopLim = sqrt(brakeNext * brakeNext + 2 * brake * remainI)
+        targetSpeed = accLim
+        if coastLim < targetSpeed then targetSpeed = coastLim end
+        if stopLim < targetSpeed then targetSpeed = stopLim end
+        if targetSpeed > profile.maxSpeedMs then targetSpeed = profile.maxSpeedMs end
+        local curveHardActive = profile.segKind[bestI] == MDADDynamics.SEG_ARC
+        local actualKappa = 0
+        if curveHardActive then
+            actualKappa = profile.kappa[bestI] or 0
+            local nextKappa = profile.kappa[bestI + 1] or 0
+            if nextKappa > actualKappa then actualKappa = nextKappa end
+        end
+        local curveCap = profile.maxSpeedMs
+        local runtimeLat = state.latSafe
+        if isFinite(runtimeLat) and runtimeLat >= 0 and actualKappa > 0 then
+            curveCap = sqrt(runtimeLat / actualKappa)
+            if curveCap < targetSpeed then targetSpeed = curveCap end
+        end
+        state.curveHardActive = curveHardActive
+        state.curveKappa = actualKappa
+        state.curveCapKmh = curveCap * KMH_PER_MS
+        state.curveValid = true
         targetSpeed = targetSpeed * KMH_PER_MS
     end
 
@@ -701,6 +885,7 @@ end
 -- state 自有槽並清點數。三個「不再有前視折線」的入口共用同一份釋放語意。
 local function releaseExactLine(state)
     state.ovN = 0
+    state.ovEndS = nil
     state.exactLine = false
     if type(state.ownOvX) == "table" then
         state.ovX, state.ovY = state.ownOvX, state.ownOvY
@@ -717,6 +902,10 @@ function MDADFollower.resetState(state)
     -- 第一幀微分項貢獻 0。若填 0，車頭原本偏 130° 時第一幀會吃到 (2.27-0)/dt 的假尖刺。
     state.errPrev = nil
     state.rotating = false
+    state.curveValid = false
+    state.curveKappa = 0
+    state.curveHardActive = false
+    state.curveCapKmh = 0
     state.offL = nil
     releaseExactLine(state)
     return state
@@ -734,6 +923,10 @@ function MDADFollower.resetControl(state)
     state.dFilt = 0
     state.errPrev = nil -- 同 resetState：留空讓第一幀微分項為 0
     state.rotating = false
+    state.curveValid = false
+    state.curveHardActive = false
+    state.curveKappa = 0
+    state.curveCapKmh = 0
     state.offL = nil
     releaseExactLine(state)
     return state
@@ -746,55 +939,52 @@ end
 -- 超越路緣障礙——靠右行駛時最常見的繞行線就是中線；2026-08-28 codex 對抗審
 -- BLOCKING：0 當 inactive sentinel 會讓「借中線」被拒收、車只停不繞）。
 -- 無剖面＝offL 為 nil（clearOffset），不再用數值 0 當哨兵。
--- srcX/srcY/srcN/srcS0（可省略）＝M6 世界 offset 折線：buildOffsetLine 產出的
--- 表內容複製進 state 預配置槽（commit 冷路徑一次 96 寫；control 熱路徑 O(1)
--- 查表零配置）。省略＝退回舊「逐段法向」求值（向後相容，直路等價）。
-function MDADFollower.setOffset(state, a, b, c, d, l, srcX, srcY, srcN, srcS0)
+-- srcX/srcY/srcN/srcS0/srcS1＝Driver 已掃掠的同一條 M6 世界折線；srcS1 是
+-- 最末點真正取樣的弧長（最後一格可短於 OV_STEP）。
+function MDADFollower.setOffset(state, a, b, c, d, l,
+        srcX, srcY, srcN, srcS0, srcS1)
     if type(state) ~= "table" then return false end
     if not (isFinite(a) and isFinite(b) and isFinite(c) and isFinite(d) and isFinite(l)) then
         return false
     end
     if not (a < b and b <= c and c < d) then return false end
-    state.offA, state.offB, state.offC, state.offD, state.offL = a, b, c, d, l
-    if type(srcX) == "table" and type(srcN) == "number" and srcN >= 2
-            and isFinite(srcS0) then
-        local dx = state.ownOvX
-        local dy = state.ownOvY
-        if type(dx) ~= "table" then
-            dx, dy = {}, {}
-            state.ownOvX, state.ownOvY = dx, dy
-        end
-        state.ovX, state.ovY = dx, dy
-        state.exactLine = false
-        local n2 = srcN
-        if n2 > OV_MAX then n2 = OV_MAX end
-        for k = 1, n2 do
-            dx[k] = srcX[k]
-            dy[k] = srcY[k]
-        end
-        state.ovN = n2
-        state.ovS0 = srcS0
-    else
-        state.ovN = 0
+    if type(srcX) ~= "table" or type(srcY) ~= "table"
+            or not isFinite(srcN) or not isFinite(srcS0)
+            or not isFinite(srcS1) then return false end
+    srcN = srcN - srcN % 1
+    local lastStart = srcS0 + (srcN - 2) * OV_STEP
+    if srcN < 2 or srcN > OV_MAX or srcS1 < d + 1 - 1e-6
+            or srcS1 <= lastStart or srcS1 > lastStart + OV_STEP + 1e-6 then
+        return false
     end
+    for i = 1, srcN do
+        if not isFinite(srcX[i]) or not isFinite(srcY[i]) then return false end
+    end
+    state.offA, state.offB, state.offC, state.offD, state.offL = a, b, c, d, l
+    state.ovX, state.ovY = srcX, srcY
+    state.ovN, state.ovS0, state.ovEndS = srcN, srcS0, srcS1
+    state.exactLine = false
     return true
 end
 
 -- RETURN commits the exact array that the Driver already swept. Unlike dodge,
 -- no copy is allowed: identity/content equality is part of the safety contract.
-function MDADFollower.setExactLine(state, srcX, srcY, srcN, srcS0)
+function MDADFollower.setExactLine(state, srcX, srcY, srcN, srcS0, srcS1)
     if type(state) ~= "table" or type(srcX) ~= "table" or type(srcY) ~= "table"
-            or not isFinite(srcN) or not isFinite(srcS0) then
+            or not isFinite(srcN) or not isFinite(srcS0) or not isFinite(srcS1)
+            or srcS1 <= srcS0 then
         return false
     end
     srcN = srcN - srcN % 1
-    if srcN < 2 or srcN > OV_MAX then return false end
+    local lastStart = srcS0 + (srcN - 2) * OV_STEP
+    if srcN < 2 or srcN > OV_MAX or srcS1 <= lastStart
+            or srcS1 > lastStart + OV_STEP + 1e-6 then return false end
     for i = 1, srcN do
         if not isFinite(srcX[i]) or not isFinite(srcY[i]) then return false end
     end
     state.offL = nil
     state.ovX, state.ovY = srcX, srcY
-    state.ovN, state.ovS0 = srcN, srcS0
+    state.ovN, state.ovS0, state.ovEndS = srcN, srcS0, srcS1
     state.exactLine = true
     return true
 end
@@ -813,22 +1003,27 @@ end
 -- 掃掠與前視驗的、走的是同一條線）。
 function MDADFollower.buildOffsetLine(profile, s0, a, b, c, d, l, bias, outX, outY,
         returnLaneStart, returnLaneTarget, returnLaneEnd)
-    if type(profile) ~= "table" or profile.ready ~= true then return 0, 0 end
-    if not (isFinite(s0) and isFinite(a) and isFinite(d) and isFinite(l)) then return 0, 0 end
+    if type(profile) ~= "table" or profile.ready ~= true then return 0, 0, "invalid", 0 end
+    if not (isFinite(s0) and isFinite(a) and isFinite(d) and isFinite(l)) then
+        return 0, 0, "invalid", 0
+    end
     if not isFinite(bias) then bias = 0 end
     local px, py = profile.x, profile.y
     local ss, segLen, segH = profile.s, profile.segLen, profile.segH
     local n = profile.n
     if s0 < 0 then s0 = 0 end
-    local s1 = d + 1
-    if s1 > profile.length then s1 = profile.length end
-    local count = (s1 - s0) / OV_STEP + 1
-    count = count - count % 1
-    if count > OV_MAX then count = OV_MAX end
-    if count < 2 then return 0, 0 end
+    local requiredEnd = d + 1
+    if requiredEnd > profile.length then return 0, 0, "coverage", profile.length end
+    local span = (requiredEnd - s0) / OV_STEP
+    local whole = span - span % 1
+    if whole < span then whole = whole + 1 end
+    local count = whole + 1
+    if count > OV_MAX then return 0, 0, "capacity", 0 end
+    if count < 2 then return 0, 0, "invalid", 0 end
     local j = 1
     for k = 1, count do
         local sk = s0 + (k - 1) * OV_STEP
+        if k == count then sk = requiredEnd end
         while j < n - 1 and ss[j + 1] < sk do j = j + 1 end
         local lenJ = segLen[j]
         local t = 0
@@ -874,7 +1069,60 @@ function MDADFollower.buildOffsetLine(profile, s0, a, b, c, d, l, bias, outX, ou
         outX[k] = bx - sin(h) * lane
         outY[k] = by + cos(h) * lane
     end
-    return count, s0
+    return count, s0, "ok", requiredEnd
+end
+
+-- Completed-snapshot proof line for the actual lane-biased smoothed profile.
+function MDADFollower.buildLaneLine(profile, s0, s1, lane, outX, outY, startIdx, outSeg)
+    if type(profile) ~= "table" or profile.ready ~= true
+            or not isFinite(s0) or not isFinite(s1) or s1 <= s0
+            or not isFinite(lane) or type(outX) ~= "table" or type(outY) ~= "table" then
+        return 0, 0, "invalid", 0
+    end
+    if s0 < 0 then s0 = 0 end
+    if s1 > profile.length then s1 = profile.length end
+    if s1 <= s0 then return 0, 0, "invalid", 0 end
+    local span = (s1 - s0) / OV_STEP
+    local whole = span - span % 1
+    local count = whole + 1
+    if whole < span then count = count + 1 end
+    if count > LANE_MAX then return 0, 0, "capacity", 0 end
+    local px, py = profile.x, profile.y
+    local ss, segLen, segH = profile.s, profile.segLen, profile.segH
+    local n, j = profile.n, startIdx
+    if not isFinite(j) then j = 1 else j = j - j % 1 end
+    if j < 1 then j = 1 elseif j > n - 1 then j = n - 1 end
+    local lo, hi = 1, n - 1
+    if ss[j] <= s0 then lo = j else hi = j end
+    while lo < hi do
+        local sum = lo + hi
+        local mid = (sum - sum % 2) / 2
+        if ss[mid + 1] <= s0 then lo = mid + 1 else hi = mid end
+    end
+    j = lo
+    for k = 1, count do
+        local sk = s0 + (k - 1) * OV_STEP
+        if sk > s1 then sk = s1 end
+        if j < n - 1 and ss[j + 1] < sk then
+            lo, hi = j + 1, n - 1
+            while lo < hi do
+                local sum = lo + hi
+                local mid = (sum - sum % 2) / 2
+                if ss[mid + 1] < sk then lo = mid + 1 else hi = mid end
+            end
+            j = lo
+        end
+        local t = 0
+        if segLen[j] > 0 then
+            t = (sk - ss[j]) / segLen[j]
+            if t < 0 then t = 0 elseif t > 1 then t = 1 end
+        end
+        local h = segH[j]
+        outX[k] = px[j] + (px[j + 1] - px[j]) * t - sin(h) * lane
+        if type(outSeg) == "table" then outSeg[k] = j end
+        outY[k] = py[j] + (py[j + 1] - py[j]) * t + cos(h) * lane
+    end
+    return count, s0, "ok", j
 end
 
 function MDADFollower.buildReturnLine(profile, s0, s1, laneStart, laneTarget,
@@ -902,24 +1150,122 @@ function MDADFollower.buildReturnLine(profile, s0, s1, laneStart, laneTarget,
         laneTarget, laneTarget, outX, outY, laneStart, laneTarget, s1)
 end
 
-function MDADFollower.setRuntimeLimits(state, accel, brake, lat)
+-- Build-time block tree query: at most 62 edge segments plus O(log blocks),
+-- allocation-free and independent of total tiny-segment count.
+local function rangeQuery(profile, first, last)
+    local brake, lat, coast, fallback = RANGE_INF, RANGE_INF, RANGE_INF, 0
+    while first <= last and (first - 1) % RANGE_BLOCK ~= 0 do
+        local b, l, c = profile.segBrake[first],
+            profile.segLat[first], profile.segCoast[first]
+        if b < brake then brake = b end
+        if l < lat then lat = l end
+        if c < coast then coast = c end
+        if profile.segKind[first] == MDADDynamics.SEG_FALLBACK then fallback = 1 end
+        first = first + 1
+    end
+    while first <= last and last % RANGE_BLOCK ~= 0 do
+        local b, l, c = profile.segBrake[last],
+            profile.segLat[last], profile.segCoast[last]
+        if b < brake then brake = b end
+        if l < lat then lat = l end
+        if c < coast then coast = c end
+        if profile.segKind[last] == MDADDynamics.SEG_FALLBACK then fallback = 1 end
+        last = last - 1
+    end
+    if first <= last then
+        local firstBlock = (first - 1) / RANGE_BLOCK + 1
+        local lastBlock = last / RANGE_BLOCK
+        local left = profile.rangeBase + firstBlock - 1
+        local right = profile.rangeBase + lastBlock - 1
+        while left <= right do
+            if left % 2 == 1 then
+                local b, l, c = profile.rangeBrake[left],
+                    profile.rangeLat[left], profile.rangeCoast[left]
+                if b < brake then brake = b end
+                if l < lat then lat = l end
+                if c < coast then coast = c end
+                if profile.rangeFallback[left] > fallback then
+                    fallback = profile.rangeFallback[left]
+                end
+                left = left + 1
+            end
+            if right % 2 == 0 then
+                local b, l, c = profile.rangeBrake[right],
+                    profile.rangeLat[right], profile.rangeCoast[right]
+                if b < brake then brake = b end
+                if l < lat then lat = l end
+                if c < coast then coast = c end
+                if profile.rangeFallback[right] > fallback then
+                    fallback = profile.rangeFallback[right]
+                end
+                right = right - 1
+            end
+            left = (left - left % 2) / 2
+            right = (right - right % 2) / 2
+        end
+    end
+    return brake, lat, coast, fallback
+end
+
+-- Bounded future dynamics query. Segment indices are found by hint-bounded
+-- binary search; minima come from the build-time tree rather than a tiny-segment scan.
+function MDADFollower.minDynamics(profile, s0, s1, startIdx)
+    if type(profile) ~= "table" or profile.ready ~= true
+            or profile.rangeReady ~= true or not isFinite(s0)
+            or not isFinite(s1) or s1 < s0 then return 0, 0, 0, 0 end
+    local nseg = profile.n - 1
+    local hint = startIdx
+    if not isFinite(hint) then hint = 1 else hint = hint - hint % 1 end
+    if hint < 1 then hint = 1 elseif hint > nseg then hint = nseg end
+    local lo, hi = 1, nseg
+    if profile.s[hint] <= s0 then lo = hint else hi = hint end
+    while lo < hi do
+        local sum = lo + hi
+        local mid = (sum - sum % 2) / 2
+        if profile.s[mid + 1] <= s0 then lo = mid + 1 else hi = mid end
+    end
+    local first = lo
+    lo, hi = first, nseg
+    while lo < hi do
+        local sum = lo + hi + 1
+        local mid = (sum - sum % 2) / 2
+        if profile.s[mid] < s1 then lo = mid else hi = mid - 1 end
+    end
+    local last = lo
+    local brake, lat, coast = rangeQuery(profile, first, last)
+    return brake, lat, coast, last + 1
+end
+
+function MDADFollower.rangeHasFallback(profile, first, last)
+    if type(profile) ~= "table" or profile.ready ~= true
+            or profile.rangeReady ~= true or not isFinite(first)
+            or not isFinite(last) then return true end
+    first, last = first - first % 1, last - last % 1
+    if first < 1 or last < first or last > profile.n - 1 then return true end
+    local _, _, _, fallback = rangeQuery(profile, first, last)
+    return fallback > 0
+end
+
+function MDADFollower.setRuntimeLimits(state, accel, brake, lat, coast)
     if type(state) ~= "table" then return false end
     if not isFinite(accel) or accel < 0 or not isFinite(brake) or brake < 0
-            or not isFinite(lat) or lat < 0 then
+            or not isFinite(lat) or lat < 0 or not isFinite(coast) or coast < 0 then
         return false
     end
-    state.accelSafe, state.brakeSafe, state.latSafe = accel, brake, lat
+    state.accelSafe, state.brakeSafe, state.latSafe, state.coastSafe =
+        accel, brake, lat, coast
     return true
 end
 
-function MDADFollower.capSegmentLimits(profile, accel, brake, lat)
+function MDADFollower.capSegmentLimits(profile, accel, brake, lat, coast)
     if type(profile) ~= "table" or not isFinite(accel) or accel < 0
-            or not isFinite(brake) or brake < 0
-            or not isFinite(lat) or lat < 0 then return false end
+            or not isFinite(brake) or brake < 0 or not isFinite(lat) or lat < 0
+            or not isFinite(coast) or coast < 0 then return false end
     for i = 1, profile.n - 1 do
         if profile.segAccel[i] > accel then profile.segAccel[i] = accel end
         if profile.segBrake[i] > brake then profile.segBrake[i] = brake end
         if profile.segLat[i] > lat then profile.segLat[i] = lat end
+        if profile.segCoast[i] > coast then profile.segCoast[i] = coast end
     end
     return true
 end
@@ -930,6 +1276,7 @@ function MDADFollower.invalidateDynamics(profile)
     profile.phase = "geometry"
     profile.cursor = 1
     profile.length = 0
+    profile.rangeReady = false
     return true
 end
 

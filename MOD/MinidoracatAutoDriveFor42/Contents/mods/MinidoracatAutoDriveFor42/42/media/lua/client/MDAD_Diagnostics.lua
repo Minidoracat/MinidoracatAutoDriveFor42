@@ -882,8 +882,8 @@ end
 -- Phase A 物理狀態（最後一參 phys table，缺席＝舊簽章）：po／ib＝Java
 -- isDoingOffroad／isBraking、sk＝minWheelSkid、vl／vt＝縱／橫向速度、
 -- es／tn／rgs＝引擎轉速／檔位／regulatorSpeed、el／ld＝期望車道與橫偏、
--- rst／rlo／rhi／us＝路面帶狀態與未載入弧長、acr＋csen／cg／cpc／cw／cof／
--- ch／cbl／cdg＝綁定 cap 原因與各檔純量。數值缺值省略、布林有值才顯式寫出。
+-- ch／cbl／cdg＝綁定 cap 原因與既有檔位；Phase F/G 再 additive fullGate／
+-- gateReason／cmdV／cmdA／jerkBypass／curveKappa／visibilityCap／fillet 與 dodge caps。
 -- 為什麼要這些：舊 sample 缺 pm，無法直接看出 replan 是否走 offroad-suppress；
 -- 也缺 cp，無法區分真正耦力旋轉與一般橫推。倒車脫困仍由 unstick event／mode
 -- 與負 spd 判讀；cp 不代表倒車（2026-08-31 實機分析）。
@@ -960,6 +960,41 @@ local function encodePhys(phys)
     addNum("yawLower", "yl")
     addNum("steeringKappa", "kap")
     addNum("capReturn", "crt")
+    addBool("fullGate", "fullGate")
+    addStr("gateReason", "gateReason")
+    addNum("cmdV", "cmdV")
+    addNum("cmdA", "cmdA")
+    addStr("jerkBypass", "jerkBypass")
+    addNum("curveKappa", "curveKappa")
+    addBool("curveValid", "curveValid")
+    addBool("curveHardActive", "curveHardActive")
+    addNum("curveCap", "curveCap")
+    addNum("visibilityCap", "visibilityCap")
+    addNum("curveVerifiedUntilS", "curveVerifiedUntilS")
+    addNum("filletN", "filletN")
+    addNum("filletFallbackN", "filletFallbackN")
+    addNum("dodgeKappa", "dodgeKappa")
+    addNum("dodgeClearance", "dodgeClearance")
+    addNum("dodgeCurveCap", "dodgeCurveCap")
+    addNum("dodgeClearanceCap", "dodgeClearanceCap")
+    addNum("dodgeVisibilityCap", "dodgeVisibilityCap")
+    addNum("dodgeSpaceCap", "dodgeSpaceCap")
+    addNum("dodgeDesignSpeed", "dodgeDesignSpeed")
+    addNum("dodgeBaseCap", "dodgeBaseCap")
+    addBool("dodgeCapPending", "dodgeCapPending")
+    addNum("dodgeSpeedCap", "dodgeSpeedCap")
+    addNum("dodgeClass", "dodgeClass")
+    addStr("verifyLineReason", "verifyLineReason")
+    addNum("proofKappa", "proofKappa")
+    addNum("proofCurveCap", "proofCurveCap")
+    addNum("laneCurveEnvelope", "laneCurveEnvelope")
+    addNum("envelopeBuildLat", "envelopeBuildLat")
+    addNum("envelopeBuildCoast", "envelopeBuildCoast")
+    addStr("dodgeBuildReason", "dodgeBuildReason")
+    addStr("dodgeBlockReason", "dodgeBlockReason")
+    addNum("dodgeCommittedLength", "dodgeCommittedLength")
+    addStr("stateError", "stateError")
+    addBool("invalid", "invalid")
     return bits
 end
 

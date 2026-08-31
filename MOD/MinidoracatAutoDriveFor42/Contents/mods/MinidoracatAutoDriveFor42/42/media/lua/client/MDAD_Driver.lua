@@ -26,6 +26,7 @@
 
 require "MDAD"
 require "MDAD_Follower"
+require "MDAD_Dynamics"
 require "MDAD_VehicleProfile"
 require "MDAD_Diagnostics"
 require "Vehicles/ISUI/ISVehicleMenu"
@@ -416,6 +417,19 @@ function Drive.controlState(playerNum)
     return controlStateOf(sessions[playerNum])
 end
 
+function Drive.invalidateCommandState(s, actualSpeedKmh, controlState)
+    if type(s) ~= "table" then return end
+    local v = actualSpeedKmh
+    if not MDADDynamics.finite(v) then v = 0 elseif v < 0 then v = -v end
+    s.cmdV, s.cmdA, s.cmdInitialized = v / 3.6, 0, true
+    s.fullGate, s.gateReason, s.alignSince = false, "state", 0
+    s.curveVerifiedUntilS = 0
+    s.verifyBand, s.verifySweep = false, false
+    s.verifyLineReason = "state"
+    s.commandControlState = controlState or controlStateOf(s)
+    s.jerkBypassReason = nil
+end
+
 -- 繞行承諾釋放：這五個旗標永遠一起回到「無承諾」狀態，dodgeNeed 回基準淨距。
 -- 不含 clearOffset：剖面何時清由呼叫端時序決定（車還在動時清＝目標線瞬跳）。
 local function releaseDodge(s)
@@ -424,6 +438,22 @@ local function releaseDodge(s)
     s.dodgeCrawl = false
     s.dodgeTight = false
     s.dodgeNeed = s.sweepBase
+    s.dodgeKappa = 0
+    s.dodgeClearance = 0
+    s.dodgeCurveCap = 0
+    s.dodgeClearanceCap = 0
+    s.dodgeVisibilityCap = 0
+    s.dodgeSpaceCap = 0
+    s.dodgeSpeedCap = 0
+    s.dodgeBaseCap = 0
+    s.dodgeCapPending = false
+    s.dodgeShiftLength = 0
+    s.dodgeDesignSpeed = 0
+    s.lastOvEndS, s.tmpOvEndS = 0, 0
+    s.dodgeCommittedLength = 0
+    s.dodgeBuildReason = nil
+    s.dodgeBlockReason = nil
+    s.dodgeClass = MDADDynamics.DODGE_STATIC
 end
 
 --------------------------------------------------------------------------------
@@ -693,7 +723,7 @@ local function startSession(playerObj, playerNum)
             and vehicleProfile.brakingForce <= 0 then
         return KEY_UNSUPPORTED
     end
-    local profile = MDADFollower.begin(route, maxSpeed, api.navApiVersion)
+    local profile = MDADFollower.begin(route, maxSpeed, api.navApiVersion, vehicleProfile)
     if not profile then return KEY_ROUTE end
     local runtimeMass = vehicleProfile.mass
     if type(runtimeMass) ~= "number" or runtimeMass * 0 ~= 0
@@ -708,10 +738,10 @@ local function startSession(playerObj, playerNum)
     local fstate = nil
     if type(MDADFollower.newState) == "function" then fstate = MDADFollower.newState() end
     if type(fstate) ~= "table" then fstate = {} end
-    local aDrive, aBrake, aLat = MDADVehicleProfile.priors(
+    local aDrive, aBrake, aLat, _, _, aCoast = MDADVehicleProfile.priors(
         vehicleProfile, runtimeMass, profile.segSurface[1], nil, false, adaptive)
     if type(MDADFollower.setRuntimeLimits) == "function" then
-        MDADFollower.setRuntimeLimits(fstate, aDrive, aBrake, aLat)
+        MDADFollower.setRuntimeLimits(fstate, aDrive, aBrake, aLat, aCoast)
     end
     local rearArm = adaptive and vehicleProfile.rearArm or REAR_ARM
     local needHalf = adaptive and vehicleProfile.needHalf or NEED_HALF
@@ -741,8 +771,34 @@ local function startSession(playerObj, playerNum)
         route = route,
         profile = profile,
         fstate = fstate,
+        playerNum = playerNum,
         maxSpeed = maxSpeed,
         perceptionCap = maxSpeed > PERCEPTION_CAP_KMH and HISPEED_CAP_KMH or PERCEPTION_CAP_KMH,
+        fullGate = false,
+        gateReason = "sensor",
+        alignSince = 0,
+        cmdV = 0, cmdA = 0, cmdInitialized = false,
+        commandControlState = "HOLD",
+        jerkBypassReason = nil,
+        curveValid = false,
+        profileEnvelope = 0,
+        curveKappa = 0,
+        curveHardActive = false,
+        curveCap = 0,
+        proofKappa = 0,
+        proofCurveCap = 0,
+        visibilityCap = 0,
+        curveVerifiedUntilS = 0,
+        verifyBand = false,
+        verifySweep = false,
+        verifyLineReason = "sensor",
+        verifyX = {}, verifyY = {}, verifySeg = {},
+        verifyKappa = {}, verifyLocalCap = {}, verifyDist = {}, verifyEnvelope = {},
+        verifyLineN = 0,
+        laneCurveEnvelope = 0, laneCurveStamp = -1,
+        envelopeBuildLat = -1, envelopeBuildCoast = -1, laneEnvelopeScale = 1,
+        stateError = nil,
+        invalid = false,
         mode = "build",  -- build → follow/gear-reset/recover/unstick/settle ⇄ yield → arrive
         navVersion = api.navApiVersion,
         adaptive = adaptive,
@@ -755,7 +811,10 @@ local function startSession(playerObj, playerNum)
         dynamicsFault = false,
         dynamicsDirty = false,
         nextDynamicsMs = startedAt + 1000,
-        dynamicsAccelCap = aDrive, dynamicsBrakeCap = aBrake, dynamicsLatCap = aLat,
+        dynamicsAccelCap = aDrive, dynamicsBrakeCap = aBrake,
+        dynamicsLatCap = aLat, dynamicsCoastCap = aCoast,
+        horizonMinBrake = aBrake, horizonMinLat = aLat, horizonMinCoast = aCoast,
+        horizonStamp = -1,
         sweepBase = needHalf - 0.1,
         squeezeSweepBase = squeezeNeed - 0.1,
         probeR = probeR,
@@ -766,6 +825,7 @@ local function startSession(playerObj, playerNum)
         surfaceMismatchRounds = 0,
         surfaceMismatch = false,
         tractionKey = -1,
+        safeCoast = aCoast,
         priorAccel = aDrive, priorBrake = aBrake, priorLat = aLat, priorCoast = 0.6,
         safeAccel = aDrive, safeBrake = aBrake, safeLat = aLat,
         kinPrevMs = 0, kinPrevV = 0, kinPrevH = 0,
@@ -841,13 +901,30 @@ local function startSession(playerObj, playerNum)
         returnX = {}, returnY = {},
         clearStreak = 0,    -- 連續 clear 輪數（堵住解除遲滯）
         followHold = false, -- 跟車分級把目標壓 0（停等豁免卡死偵測用）
+        dodgeCommittedLength = 0,
+        dodgeBuildReason = nil,
+        dodgeBlockReason = nil,
         waitSince = 0,      -- 合法 blocked/followHold 停等；只走既有 20s timeout
         detourTried = false,
         dodgeCrawl = false, -- 承諾剖面是 squeeze 檔（entry／hold／exit 全段上限 10）
         dodgeMargin = 1,    -- commit 時 a..c 最小餘裕（entry／hold 速度縮放輸入）
+        dodgeKappa = 0,
+        dodgeClearance = 0,
+        dodgeCurveCap = 0,
+        dodgeClearanceCap = 0,
+        dodgeVisibilityCap = 0,
+        dodgeSpaceCap = 0,
+        dodgeSpeedCap = 0,
+        dodgeBaseCap = 0,
+        dodgeCapPending = false,
+        dodgeShiftLength = 0,
+        dodgeDesignSpeed = 0,
+        dodgeClass = MDADDynamics.DODGE_STATIC,
         pushBanL = nil,     -- planner ban；recovery episode 可跨 clear/route 保留
         cornerLatch = false, -- BLOCKED_CORNER：障礙貼折點、軌跡契約不支援（快速改道）
         cornerS = 0,        -- corner latch 時的沿線弧長（前進 CORNER_RETRY_DIST 即撤銷重枚舉）
+        lastOvEndS = 0,
+        tmpOvEndS = 0,
         tmpOvX = {}, tmpOvY = {}, -- M6 候選折線工作表（buildOffsetLine 輸出、commit 時複製進 fstate）
         lastOvN = 0,        -- 最後成功候選的折線點數（setOffset 交表用）
         lastOvS0 = 0,
@@ -1028,27 +1105,35 @@ local function applySteering(s, vehicle, fwd, fx, fy, steer, speedKmh, mult, cou
 end
 
 local function commandForceBrake(s, vehicle, now)
-    vehicle:setForceBrake()
+    local ok, err = pcall(vehicle.setForceBrake, vehicle)
+    if not ok then
+        pcall(vehicle.setRegulator, vehicle, false)
+        s.dynamicsFault, s.invalid, s.stateError, s.brakeTerminalFault =
+            true, true, "forceBrake", true
+        if not s.forceBrakeErrorLogged then
+            s.forceBrakeErrorLogged = true
+            print(LOG .. "forceBrake failed: " .. tostring(err))
+            local playerObj = getSpecificPlayer(s.playerNum)
+            if playerObj then haloBad(playerObj, KEY_UNSUPPORTED) end
+            diagEvent(s, s.playerNum, "state-error", { why = "forceBrake" })
+        end
+        return false
+    end
     s.forceBrakeThis = true
     if type(now) ~= "number" or now * 0 ~= 0 then now = getTimestampMs() end
     local untilMs = now + 1000
     if untilMs > s.forceBrakeUntil then s.forceBrakeUntil = untilMs end
+    return true
 end
 
--- 速度指令：regulator 只會「不再供油」，下坡或超速時它不會煞車，因此超出目標太多時
--- 改用 setForceBrake（寫 clientControls.forceBrake，效期 1 秒＝CarController.java:973-979；
--- 原版停車用例 ISStopVehicle.lua:15）。回傳這一幀 regulator 是開還是關（遙測用）。
-local function applySpeed(s, vehicle, targetSpeed, speedKmh, now)
+-- Regulator command only. Ordinary curves and straight-line overspeed coast through
+-- the backward envelope and jerk state. forceBrake remains in the owning state paths:
+-- HOLD/RECOVER/ARRIVE/contact/blocked, unsafe RETURN or dynamics, hard envelope breach,
+-- and high-speed rotate preparation.
+local function applySpeed(s, vehicle, targetSpeed)
     if type(targetSpeed) ~= "number" or targetSpeed < 0 then targetSpeed = 0 end
     if targetSpeed > s.maxSpeed then targetSpeed = s.maxSpeed end
-    if speedKmh - targetSpeed > OVERSPEED_BRAKE then
-        vehicle:setRegulator(false)
-        commandForceBrake(s, vehicle, now)
-        return false
-    end
-    -- 原版儀表直接 `getRegulatorSpeed() .. ""`（ISVehicleDashboard.lua:405-408），
-    -- 不做格式化；把物理 target 原值送入會露出十多位小數。煞車判定已在上方用
-    -- 精確 target 完成，寫進 regulator 時才四捨五入成整數 km/h（誤差 <=0.5）。
+    -- 原版儀表直接 `getRegulatorSpeed() .. ""`；物理判定完成後才整數化。
     local commandSpeed = math.floor(targetSpeed + 0.5)
     if commandSpeed > s.maxSpeed then commandSpeed = math.floor(s.maxSpeed) end
     vehicle:setRegulator(true)
@@ -1149,6 +1234,18 @@ end
 -- NaN／非數值收口（與 MDAD_Diagnostics 的 finite 同語意；不用 math.huge）
 local function finite(n)
     return type(n) == "number" and n * 0 == 0
+end
+
+-- 可見終點弧長：掃描終點與未載入格的近者。繞行 cap、全速證明與可視距離 cap
+-- 三處必須同一定義，否則同一幀裡「看得到多遠」會彼此矛盾。
+local function visibleEndS(sen, fallbackS)
+    local endS = sen.scanEndS
+    if not finite(endS) then return fallbackS end
+    if sen.unloaded then
+        if not finite(sen.unloadedS) then return fallbackS end
+        if sen.unloadedS < endS then endS = sen.unloadedS end
+    end
+    return endS
 end
 
 local function jindex(obj, name)
@@ -1270,7 +1367,8 @@ local function updateTraction(s, now, speedKmh, heading, headingError, latDev)
             s.accelMean, s.accelDev, s.accelTime,
                 s.accelConfidence, s.accelLower = MDADVehicleProfile.updateEWMA(
                     s.accelMean, s.accelDev, s.accelTime, obs, dt)
-        elseif not s.regulatorPrev then
+        elseif not s.regulatorPrev
+                or s.targetPrev <= s.kinPrevV * 3.6 + 1 then
             local obs = -dv
             if obs < 0 then obs = 0 end
             if s.coastTime == 0 then s.coastMean = obs end
@@ -1297,19 +1395,29 @@ local function updateTraction(s, now, speedKmh, heading, headingError, latDev)
     local safeAccel = tightenLimit(aDrive, s.accelLower, s.accelConfidence, 2.5)
     local safeBrake = tightenLimit(aBrake, s.brakeLower, s.brakeConfidence, 6)
     local safeLat = tightenLimit(aLat, s.yawLower, s.yawConfidence, 3.5)
-    s.safeAccel, s.safeBrake, s.safeLat = safeAccel, safeBrake, safeLat
-    MDADFollower.setRuntimeLimits(s.fstate, safeAccel, safeBrake, safeLat)
+    local safeCoast = tightenLimit(s.priorCoast, s.coastLower, s.coastConfidence, 0.6)
+    s.safeAccel, s.safeBrake, s.safeLat, s.safeCoast =
+        safeAccel, safeBrake, safeLat, safeCoast
+    MDADFollower.setRuntimeLimits(
+        s.fstate, safeAccel, safeBrake, safeLat, safeCoast)
     if safeBrake <= 0.05 then s.dynamicsFault = true end
     if now >= s.nextDynamicsMs then
         local da = s.dynamicsAccelCap - safeAccel
         local db = s.dynamicsBrakeCap - safeBrake
         local dl = s.dynamicsLatCap - safeLat
-        local ta, tb, tl = s.dynamicsAccelCap * 0.02,
-            s.dynamicsBrakeCap * 0.02, s.dynamicsLatCap * 0.02
+        local dc = s.dynamicsCoastCap - safeCoast
+        if da < 0 then da = -da end
+        if db < 0 then db = -db end
+        if dl < 0 then dl = -dl end
+        if dc < 0 then dc = -dc end
+        local ta, tb, tl, tc = s.dynamicsAccelCap * 0.02,
+            s.dynamicsBrakeCap * 0.02, s.dynamicsLatCap * 0.02,
+            s.dynamicsCoastCap * 0.02
         if ta < 0.05 then ta = 0.05 end
         if tb < 0.05 then tb = 0.05 end
         if tl < 0.05 then tl = 0.05 end
-        if da >= ta or db >= tb or dl >= tl then
+        if tc < 0.02 then tc = 0.02 end
+        if da >= ta or db >= tb or dl >= tl or dc >= tc then
             s.dynamicsDirty = true
             s.dynamicsCapMaterial = true
             s.nextDynamicsMs = now + 1000
@@ -1426,6 +1534,36 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
         phys.capHeading = s.lastHeadingCap
     end
     if type(s.lastCapReason) == "string" then phys.activeCapReason = s.lastCapReason end
+    phys.fullGate = s.fullGate
+    phys.gateReason = s.gateReason
+    phys.cmdV, phys.cmdA = s.cmdV, s.cmdA
+    phys.jerkBypass = s.jerkBypassReason
+    phys.curveKappa, phys.curveCap = s.curveKappa, s.curveCap
+    phys.curveValid = s.curveValid
+    phys.curveHardActive = s.curveHardActive
+    phys.visibilityCap = s.visibilityCap
+    phys.curveVerifiedUntilS = s.curveVerifiedUntilS
+    phys.filletN = s.profile.filletN
+    phys.filletFallbackN = s.profile.filletFallbackN
+    phys.dodgeKappa = s.dodgeKappa
+    phys.dodgeClearance = s.dodgeClearance
+    phys.dodgeCurveCap = s.dodgeCurveCap
+    phys.dodgeClearanceCap = s.dodgeClearanceCap
+    phys.dodgeVisibilityCap = s.dodgeVisibilityCap
+    phys.dodgeSpaceCap = s.dodgeSpaceCap
+    phys.dodgeBaseCap, phys.dodgeCapPending =
+        s.dodgeBaseCap, s.dodgeCapPending
+    phys.dodgeDesignSpeed = s.dodgeDesignSpeed
+    phys.dodgeSpeedCap = s.dodgeSpeedCap
+    phys.dodgeClass = s.dodgeClass
+    phys.verifyLineReason = s.verifyLineReason
+    phys.laneCurveEnvelope, phys.envelopeBuildLat, phys.envelopeBuildCoast =
+        s.laneCurveEnvelope, s.envelopeBuildLat, s.envelopeBuildCoast
+    phys.proofKappa, phys.proofCurveCap = s.proofKappa, s.proofCurveCap
+    phys.dodgeBuildReason, phys.dodgeBlockReason =
+        s.dodgeBuildReason, s.dodgeBlockReason
+    phys.dodgeCommittedLength = s.dodgeCommittedLength
+    phys.stateError, phys.invalid = s.stateError, s.invalid
     return phys
 end
 
@@ -1505,6 +1643,8 @@ local function banRecoveryLane(s, latSigned, anchorS)
     local lane = latSigned
     if s.dodging and finite(s.fstate.offL) then lane = s.fstate.offL end
     if not finite(lane) then return end
+    local minAnchor = s.lastSNow + 2 * s.vehicleProfile.halfL + 5
+    if not finite(anchorS) or anchorS < minAnchor then anchorS = minAnchor end
     s.pushBanL, s.pushBanS = lane, anchorS
     s.banFromRecovery = true
 end
@@ -1745,8 +1885,48 @@ local function sampleRecovery(s, vehicle, playerNum, now, x, y, speed, fx, fy, h
     end
 end
 
--- 掃掠幾何：車身 OBB 半尺寸，加上「規劃淨距扣掉物理半寬」後剩下的餘裕。兩條
--- 掃掠（弧線重算與 M6 世界折線）共用這一份，同一檔位不會出現兩套門檻。
+-- Builds the snapshot's soft future-curve coast envelope in caller-owned arrays.
+-- Per-frame EWMA changes scale this cached envelope in O(1); they never rebuild it.
+local function refreshLaneCurveEnvelope(s, coast, lat)
+    local n = s.verifyLineN or 0
+    if n < 2 or not finite(coast) or coast < 0
+            or not finite(lat) or lat < 0 then
+        s.laneCurveEnvelope, s.envelopeBuildLat, s.envelopeBuildCoast =
+            0, lat, coast
+        return false
+    end
+    local caps, kappas = s.verifyLocalCap, s.verifyKappa
+    local vp, minCap = s.vehicleProfile, s.vehicleProfile.maxSpeed
+    for k = 1, n do
+        local cap = MDADDynamics.curveSpeedCapKmh(
+            kappas[k], lat, vp.wheelbase, vp.delta0Safe, vp.deltaVSafe, vp.maxSpeed)
+        caps[k] = cap
+        if cap < minCap then minCap = cap end
+    end
+    s.proofCurveCap, s.envelopeBuildLat = minCap, lat
+    local dist, envelope = s.verifyDist, s.verifyEnvelope
+    local nextCap = caps[n]
+    if not finite(nextCap) or nextCap < 0 then
+        s.laneCurveEnvelope, s.envelopeBuildCoast = 0, coast
+        return false
+    end
+    envelope[n] = nextCap
+    for k = n - 1, 1, -1 do
+        local localCap, d = caps[k], dist[k]
+        if not finite(localCap) or localCap < 0 or not finite(d) or d < 0 then
+            s.laneCurveEnvelope, s.envelopeBuildCoast = 0, coast
+            return false
+        end
+        local nextMs = nextCap / 3.6
+        local coastCap = sqrt(nextMs * nextMs + 2 * coast * d) * 3.6
+        nextCap = localCap < coastCap and localCap or coastCap
+        envelope[k] = nextCap
+    end
+    s.laneCurveEnvelope, s.envelopeBuildCoast = nextCap, coast
+    return true
+end
+-- 掃掠幾何：車身 OBB 半尺寸，加上「規劃淨距扣掉物理半寬」後剩下的餘裕。
+-- 弧線重算與世界折線掃掠共用這一份，同一檔位不會出現兩套門檻。
 local function sweepGeom(s, needBase)
     local halfW, halfL = s.vehicleProfile.halfW, s.vehicleProfile.halfL
     local pad = (needBase or s.sweepBase or SWEEP_BASE) - halfW
@@ -1846,10 +2026,19 @@ end
 -- M6 世界折線掃掠：驗的是 buildOffsetLine 烘好的**同一條**前視線（折點法向
 -- 混合、連續）——「驗的線＝走的線」是 M6 軌跡契約的核心（舊 sweepClear 沿
 -- 「逐段法向×offL」重算，折點處與實走軌跡分歧 3m 級）。回傳同 sweepClear。
-local function sweepLine(s, lx, ly, ln, lS0, a, b, c, d, offL, tag, needBase, startK)
+local function sweepLine(s, lx, ly, ln, lS0, lS1,
+        a, b, c, d, offL, tag, needBase, startK)
     local sen = s.sensor
+    if not finite(ln) or ln < 2 or not finite(lS0) or not finite(lS1) then
+        return false, 99, s.lastSNow, 1, s.lastSNow, 0, 0
+    end
+    local lastStart = lS0 + (ln - 2) * MDADFollower.OV_STEP
+    if lS1 <= lastStart
+            or lS1 > lastStart + MDADFollower.OV_STEP + 1e-6 then
+        return false, 99, s.lastSNow, 1, s.lastSNow, 0, 0
+    end
     local hn = sen.hardN
-    if hn == 0 or ln < 2 then return true, 9 end
+    if hn == 0 then return true, 9 end
     local hx, hy, hr = sen.hardX, sen.hardY, sen.hardR
     if type(hx) ~= "table" or type(hy) ~= "table" or type(hr) ~= "table" then
         return false, 99, s.lastSNow, 1, s.lastSNow, 0, 0
@@ -1871,7 +2060,8 @@ local function sweepLine(s, lx, ly, ln, lS0, a, b, c, d, offL, tag, needBase, st
     if startK < 1 then startK = 1 end
     if startK > ln then return true, minMargin end
     for k = startK, ln do
-        local sk = lS0 + (k - 1) * MDADFollower.OV_STEP
+        local sk = k == ln and lS1
+            or (lS0 + (k - 1) * MDADFollower.OV_STEP)
         local wx, wy = lx[k], ly[k]
         local k0, k1 = k, k + 1
         if k1 > ln then k0, k1 = k - 1, k end
@@ -1963,11 +2153,15 @@ local function probeReturnLateral(s, vehicle, lateralM)
     return clear
 end
 
-local function returnLineBandCovers(s, lx, ly, ln, lineS0, pad, startK)
+local function returnLineBandCovers(s, lx, ly, ln, lineS0, lineS1, pad, startK)
     local band = s.sensor and s.sensor.completedBandBias
-    if not finite(band) or not finite(lineS0) or not finite(pad)
-            or type(lx) ~= "table" or type(ly) ~= "table"
-            or not finite(ln) or ln < 2 then return false end
+    if not finite(ln) or ln < 2 or not finite(lineS0)
+            or not finite(lineS1) then return false end
+    local lastStart = lineS0 + (ln - 2) * MDADFollower.OV_STEP
+    if not finite(band) or lineS1 <= lastStart
+            or lineS1 > lastStart + MDADFollower.OV_STEP + 1e-6
+            or not finite(pad) or type(lx) ~= "table"
+            or type(ly) ~= "table" then return false end
     if not finite(startK) then startK = 1 else startK = startK - startK % 1 end
     if startK < 1 then startK = 1 end
     local profile = s.profile
@@ -1982,7 +2176,8 @@ local function returnLineBandCovers(s, lx, ly, ln, lineS0, pad, startK)
         band + MDADSensor.CORRIDOR_HALF
     local obs = MDADCorridor.OBS_HALF or 0.7
     for k = startK, ln do
-        local sk = lineS0 + (k - 1) * MDADFollower.OV_STEP
+        local sk = k == ln and lineS1
+            or (lineS0 + (k - 1) * MDADFollower.OV_STEP)
         while seg < profile.n - 1 and profile.s[seg + 1] < sk do seg = seg + 1 end
         local segLen = profile.segLen[seg]
         local t = segLen > 0 and (sk - profile.s[seg]) / segLen or 0
@@ -2058,14 +2253,15 @@ local function holdUnsafeReturn(s, vehicle, latSigned, reason)
     if s1 <= s0 or s.sensor.scanEndS < coverageEnd
             or (s.sensor.unloaded and finite(s.sensor.unloadedS)
                 and s.sensor.unloadedS <= coverageEnd) then return end
-    local n, lineS0 = MDADFollower.buildReturnLine(
+    local n, lineS0, _, lineS1 = MDADFollower.buildReturnLine(
         s.profile, s0, s1, latSigned, latSigned, s.returnX, s.returnY, 1)
     if n < 2 then return end
-    if not returnLineBandCovers(s, s.returnX, s.returnY, n, lineS0, pad, 1) then return end
-    local clear = sweepLine(s, s.returnX, s.returnY, n, lineS0,
+    if not returnLineBandCovers(
+            s, s.returnX, s.returnY, n, lineS0, lineS1, pad, 1) then return end
+    local clear = sweepLine(s, s.returnX, s.returnY, n, lineS0, lineS1,
         s0, s1, s1, coverageEnd, latSigned, "return-crawl", s.sweepBase)
     if clear and MDADFollower.setExactLine(
-            s.fstate, s.returnX, s.returnY, n, lineS0) then
+            s.fstate, s.returnX, s.returnY, n, lineS0, lineS1) then
         s.returnHold = false
         s.returnCrawlExact = true
         s.returnStartS, s.returnEndS = s0, s1
@@ -2126,17 +2322,19 @@ local function updateReturnSnapshot(s, vehicle, playerNum, latSigned)
         local startK = (s.lastSNow - ovS0) / MDADFollower.OV_STEP + 1
         startK = startK - startK % 1
         if startK < 1 then startK = 1 end
-        local lineEnd = ovS0 + (ovN - 1) * MDADFollower.OV_STEP
+        local lineEnd = s.fstate.ovEndS
         local guardEnd = lineEnd
         local bandOk = returnLineBandCovers(
-            s, s.fstate.ovX, s.fstate.ovY, ovN, ovS0, returnPad, startK)
+            s, s.fstate.ovX, s.fstate.ovY, ovN, ovS0, lineEnd,
+            returnPad, startK)
         local guardUnloaded = not bandOk or sen.scanEndS < guardEnd
             or (sen.unloaded and finite(sen.unloadedS) and sen.unloadedS <= guardEnd)
         local guardOk = false
         local lateral = s.returnLaneTarget - latSigned
         if not guardUnloaded and startK <= ovN
                 and probeReturnLateral(s, vehicle, lateral) then
-            guardOk = sweepLine(s, s.fstate.ovX, s.fstate.ovY, ovN, ovS0,
+            guardOk = sweepLine(
+                s, s.fstate.ovX, s.fstate.ovY, ovN, ovS0, lineEnd,
                 s.returnStartS, s.returnEndS, s.returnEndS, lineEnd,
                 s.returnLaneTarget, "return-guard", s.sweepBase, startK)
         end
@@ -2173,14 +2371,15 @@ local function updateReturnSnapshot(s, vehicle, playerNum, latSigned)
     local wholeTail = tailSteps - tailSteps % 1
     if tailSteps > wholeTail then coverageEnd = s0 + (wholeTail + 1) * MDADFollower.OV_STEP end
     if coverageEnd > s.profile.length then coverageEnd = s.profile.length end
-    local lineN, lineS0, buildReason = MDADFollower.buildReturnLine(
+    local lineN, lineS0, buildReason, lineS1 = MDADFollower.buildReturnLine(
         s.profile, s0, s1, laneStart, laneTarget, s.returnX, s.returnY, tail)
+    coverageEnd = lineS1
     if buildReason == "capacity" then
         holdUnsafeReturn(s, vehicle, laneStart, "capacity")
         return
     end
     if not returnLineBandCovers(
-            s, s.returnX, s.returnY, lineN, lineS0, pad, 1) then
+            s, s.returnX, s.returnY, lineN, lineS0, lineS1, pad, 1) then
         holdUnsafeReturn(s, vehicle, laneStart, "band")
         return
     end
@@ -2196,11 +2395,11 @@ local function updateReturnSnapshot(s, vehicle, playerNum, latSigned)
     end
     local safe = false
     if lineN >= 2 then
-        safe = sweepLine(s, s.returnX, s.returnY, lineN, lineS0,
+        safe = sweepLine(s, s.returnX, s.returnY, lineN, lineS0, lineS1,
             s0, s1, s1, coverageEnd, laneTarget, "return", s.sweepBase)
     end
     if safe and MDADFollower.setExactLine(
-            s.fstate, s.returnX, s.returnY, lineN, lineS0) then
+            s.fstate, s.returnX, s.returnY, lineN, lineS0, lineS1) then
         s.returnUnsafe, s.returnHold, s.returnCapacityFault = false, false, false
         s.returnCrawlExact = false
         s.returnStartS, s.returnEndS = s0, s1
@@ -2222,41 +2421,112 @@ end
 -- 剖面塑形：進入段（a..b）與收回段（c..d）都不得跨路線折點——offL 在折點
 -- 兩側指向不同世界方向，跨折點的過渡線必然斜切彎角障礙（2026-08-29 回程皮卡
 -- 兩役：進入段半途 lane 打槍→後移策略；收回段半途 lane 打槍→延後收回）。
-local function shapeProfile(s, profile, a, b, c, d)
+local function shapeProfile(s, profile, a, b, c, d, offL, baseL)
     local sTurn = turnPeakS(profile, a, d + 6)
-    if not sTurn then return a, b, c, d end
     local minA = s.lastSNow + 1
-    -- 進入段：折點前完成（前移）或折點後才開始（後移壓縮 3m）
-    if b > sTurn - CURVE_LEAD and a < sTurn then
-        local span = b - a
-        local a2 = sTurn - CURVE_LEAD - span
-        local placed = false
-        if a2 >= minA then
-            local b2 = a2 + span
-            if b2 > sTurn then b2 = sTurn end
-            if b2 > a2 and b2 <= c then
-                a, b = a2, b2
-                placed = true
+    if sTurn then
+        if b > sTurn - CURVE_LEAD and a < sTurn then
+            local span = b - a
+            local a2 = sTurn - CURVE_LEAD - span
+            local placed = false
+            if a2 >= minA then
+                local b2 = a2 + span
+                if b2 > sTurn then b2 = sTurn end
+                if b2 > a2 and b2 <= c then
+                    a, b = a2, b2
+                    placed = true
+                end
+            end
+            if not placed then
+                local a3 = sTurn + 0.5
+                if a3 < minA then a3 = minA end
+                local sp3 = span
+                if sp3 > 3 then sp3 = 3 end
+                local b3 = a3 + sp3
+                if b3 < c and a3 < b3 then a, b = a3, b3 end
             end
         end
-        if not placed then
-            local a3 = sTurn + 0.5
-            if a3 < minA then a3 = minA end
-            local sp3 = span
-            if sp3 > 3 then sp3 = 3 end
-            local b3 = a3 + sp3
-            if b3 < c and a3 < b3 then a, b = a3, b3 end
+        if sTurn > c - 2 and d < sTurn + 4 and sTurn >= b then
+            local span2 = d - c
+            if span2 > 4 then span2 = 4 end
+            c = sTurn + 1
+            d = c + span2
         end
     end
-    -- 收回段：折點落在 [c-2, d+4] → 延後收回（保持側偏過完彎、出彎再回線；
-    -- 剖面變長只是多繞幾公尺，比斜切彎角安全）
-    if sTurn > c - 2 and d < sTurn + 4 and sTurn >= b then
-        local span2 = d - c
-        if span2 > 4 then span2 = 4 end
-        c = sTurn + 1
-        d = c + span2
+
+    local dl = offL - baseL
+    if dl < 0 then dl = -dl end
+    local intended = profile.maxSpeed
+    if finite(s.profileEnvelope) and s.profileEnvelope >= 0
+            and s.profileEnvelope < intended then intended = s.profileEnvelope end
+    if finite(s.gearCap) and s.gearCap >= 0
+            and s.gearCap < intended then intended = s.gearCap end
+    if finite(s.visibilityCap) and s.visibilityCap >= 0
+            and s.visibilityCap < intended then intended = s.visibilityCap end
+    local crawl = MDADDynamics.DODGE_SQUEEZE_CAP
+    if intended < crawl then intended = crawl end
+    local vp = s.vehicleProfile
+    local kSteer = MDADDynamics.steeringKappa(
+        vp.wheelbase, vp.delta0Safe, vp.deltaVSafe, vp.maxSpeed, intended)
+    if kSteer <= 0 then kSteer = 1 / 6 end
+    local _, aLat = MDADFollower.minDynamics(
+        profile, a, d, s.fstate.idx)
+    if finite(s.safeLat) and s.safeLat >= 0 and s.safeLat < aLat then
+        aLat = s.safeLat
     end
-    return a, b, c, d
+    if not finite(aLat) or aLat <= 0 then
+        s.dodgeSpaceCap = 0
+        return a, b, c, d, false
+    end
+    s.dodgeDesignSpeed = intended
+    local required = MDADDynamics.shiftLength(
+        dl, intended / 3.6, aLat, kSteer, vp.halfL, MDADDynamics.LATERAL_JERK_MAX)
+    local crawlK = MDADDynamics.steeringKappa(
+        vp.wheelbase, vp.delta0Safe, vp.deltaVSafe, vp.maxSpeed, crawl)
+    if crawlK <= 0 then crawlK = 1 / 6 end
+    local minimum = MDADDynamics.shiftLength(
+        dl, 0, aLat, crawlK, vp.halfL, MDADDynamics.LATERAL_JERK_MAX)
+    local entryAvail, exitAvail = b - minA, profile.length - c
+    s.dodgeShiftLength = required
+    s.dodgeSpaceCap = profile.maxSpeed
+    if required <= 0 or minimum <= 0 or entryAvail <= 0 or exitAvail <= 0 then
+        s.dodgeSpaceCap = 0
+        return a, b, c, d, false
+    end
+    local entryLen, exitLen = b - a, d - c
+    if entryLen < minimum then entryLen = minimum end
+    if exitLen < minimum then exitLen = minimum end
+    if entryLen > required then entryLen = required end
+    if exitLen > required then exitLen = required end
+    if entryLen > entryAvail then entryLen = entryAvail end
+    if exitLen > exitAvail then exitLen = exitAvail end
+    local entryCap = MDADDynamics.shiftSpaceSpeedCapKmh(
+        dl, entryLen, aLat, vp.wheelbase, vp.delta0Safe, vp.deltaVSafe,
+        vp.maxSpeed, MDADDynamics.LATERAL_JERK_MAX)
+    local exitCap = MDADDynamics.shiftSpaceSpeedCapKmh(
+        dl, exitLen, aLat, vp.wheelbase, vp.delta0Safe, vp.deltaVSafe,
+        vp.maxSpeed, MDADDynamics.LATERAL_JERK_MAX)
+    s.dodgeSpaceCap = entryCap
+    if exitCap < s.dodgeSpaceCap then s.dodgeSpaceCap = exitCap end
+    s.dodgeCommittedLength = entryLen
+    if exitLen < s.dodgeCommittedLength then s.dodgeCommittedLength = exitLen end
+    a, d = b - entryLen, c + exitLen
+    return a, b, c, d, true
+end
+
+-- Candidate sweep and commitment consume the same complete preallocated line.
+local function sweepCandidate(s, shapeOk, a, b, c, d, offL, baseL, tag, needBase)
+    if not shapeOk then return 0, 0, false, 99, b, 3, b, 0, 0 end
+    local ovN, ovS0, buildReason, lastCovered = MDADFollower.buildOffsetLine(
+        s.profile, s.lastSNow, a, b, c, d, offL, baseL, s.tmpOvX, s.tmpOvY)
+    s.dodgeBuildReason = buildReason
+    if ovN < 2 or buildReason ~= "ok" or lastCovered < d + 1 - 1e-6 then
+        return 0, ovS0, false, 99, b, 3, b, 0, 0
+    end
+    s.tmpOvEndS = lastCovered
+    return ovN, ovS0, sweepLine(
+        s, s.tmpOvX, s.tmpOvY, ovN, ovS0, lastCovered,
+        a, b, c, d, offL, tag, needBase)
 end
 
 -- 掃描輪完成或障礙簽章變化時重規劃（事件驅動：布局沒變就一次都不算）。
@@ -2287,16 +2557,64 @@ local function replan(s, vehicle, playerNum)
             MDADFollower.clearOffset(fs)
             releaseDodge(s)
         else
-            local guardOk
-            if MDAD.sandbox("ObstaclePolicy", POLICY_DODGE) ~= POLICY_DODGE then
-                guardOk = false
-            elseif (fs.ovN or 0) >= 2 then
-                -- M6：守護驗的是 commit 時烘好的同一條世界折線
-                guardOk = sweepLine(s, fs.ovX, fs.ovY, fs.ovN, fs.ovS0,
-                    fs.offA, fs.offB, fs.offC, fs.offD, curOffL, "guard", s.dodgeNeed)
-            else
-                guardOk = sweepClear(s, s.profile, fs.offA, fs.offB, fs.offC, fs.offD,
+            local guardOk, guardMargin = false, 0
+            if MDAD.sandbox("ObstaclePolicy", POLICY_DODGE) == POLICY_DODGE
+                    and (fs.ovN or 0) >= 2 then
+                guardOk, guardMargin = sweepLine(
+                    s, fs.ovX, fs.ovY, fs.ovN, fs.ovS0, fs.ovEndS,
+                    fs.offA, fs.offB, fs.offC, fs.offD,
                     curOffL, "guard", s.dodgeNeed)
+            end
+            if guardOk then
+                local minBrake, minLat = MDADFollower.minDynamics(
+                    s.profile, fs.offA, fs.offD, s.fstate.idx)
+                if finite(s.safeBrake) and s.safeBrake >= 0
+                        and s.safeBrake < minBrake then minBrake = s.safeBrake end
+                if finite(s.safeLat) and s.safeLat >= 0
+                        and s.safeLat < minLat then minLat = s.safeLat end
+                local kappa = MDADDynamics.polylineKappaMax(fs.ovX, fs.ovY, fs.ovN)
+                local curveCap = MDADDynamics.curveSpeedCapKmh(kappa, minLat,
+                    s.vehicleProfile.wheelbase, s.vehicleProfile.delta0Safe,
+                    s.vehicleProfile.deltaVSafe, s.vehicleProfile.maxSpeed)
+                local visibilityCap = MDADDynamics.visibilityCapKmh(
+                    visibleEndS(sen, s.lastSNow) - s.lastSNow,
+                    0.5, minBrake, s.vehicleProfile.halfL)
+                local dl = curOffL - laneBiasOf(s)
+                if dl < 0 then dl = -dl end
+                local sh = 0.05
+                if finite(s.dodgeCommittedLength) and s.dodgeCommittedLength > 0 then
+                    sh = 1.5 * dl / s.dodgeCommittedLength
+                    if sh > 1 then sh = 1 end
+                end
+                local clearanceCap = MDADDynamics.clearanceCapKmh(
+                    guardMargin, 0.4, 0.5, minLat, sh)
+                local classId = sen.vehN and sen.vehN > 0
+                    and MDADDynamics.DODGE_VEHICLE or MDADDynamics.DODGE_STATIC
+                local newCap, _, capReason = MDADDynamics.dodgeSpeedCapKmh(
+                    s.gearCap, s.profileEnvelope, curveCap, clearanceCap,
+                    visibilityCap, classId, s.dodgeCrawl)
+                s.dodgeClearance, s.dodgeClass = guardMargin, classId
+                s.dodgeCurveCap, s.dodgeClearanceCap = curveCap, clearanceCap
+                s.dodgeVisibilityCap = visibilityCap
+                local baseCap = s.dodgeBaseCap
+                if not finite(baseCap) or baseCap < 0 then
+                    s.dodgeSpeedCap = 0
+                    s.invalid, s.stateError, s.dynamicsFault =
+                        true, "dodge-base-cap", true
+                else
+                    s.dodgeSpeedCap = newCap < baseCap and newCap or baseCap
+                end
+                s.dodgeCapPending = s.dodgeSpeedCap <= 0
+                if not s.dodgeCapPending then s.dodgeBlockReason = nil end
+                if capReason == "dynamics-invalid" then
+                    s.invalid, s.stateError, s.dynamicsFault =
+                        true, "dodge-cap", true
+                end
+                if s.dodgeSpeedCap <= 0 then
+                    guardOk = false
+                    s.dodgeBlockReason = capReason or "dodge-cap"
+                    s.planSig = -1
+                end
             end
             if not guardOk then
                 -- 守護驗證失敗：轉 blocked，剖面保留——車還在動時清剖面＝目標
@@ -2451,23 +2769,17 @@ local function replan(s, vehicle, playerNum)
                 nonCornerFail = true
                 return false
             end
-            a, b, c, d = shapeProfile(s, s.profile, a, b, c, d)
-            -- M6：先烘世界折線（含車位→a 的路線段），掃掠與 commit 用同一條
-            local ovN, ovS0 = MDADFollower.buildOffsetLine(s.profile,
-                s.lastSNow, a, b, c, d, offL, baseL, s.tmpOvX, s.tmpOvY)
-            local okS, mgS, hitS, phS, hpsS, hxS, hyS
-            if ovN >= 2 then
-                okS, mgS, hitS, phS, hpsS, hxS, hyS = sweepLine(s,
-                    s.tmpOvX, s.tmpOvY, ovN, ovS0, a, b, c, d, offL, "plan", needBase)
-            else
-                okS, mgS, hitS, phS, hpsS, hxS, hyS =
-                    sweepClear(s, s.profile, a, b, c, d, offL, "plan", needBase)
-            end
+            local shapeOk
+            a, b, c, d, shapeOk = shapeProfile(
+                s, s.profile, a, b, c, d, offL, baseL)
+            local ovN, ovS0, okS, mgS, hitS, phS, hpsS, hxS, hyS = sweepCandidate(
+                s, shapeOk, a, b, c, d, offL, baseL, "plan", needBase)
             if okS then
                 commitNb = needBase
                 s.dodgeMargin = mgS
                 s.lastOvN = ovN
                 s.lastOvS0 = ovS0
+                s.lastOvEndS = s.tmpOvEndS
             else
                 firstHit, firstHitX, firstHitY = hitS, hxS, hyS
                 local abortAll = classify(phS, hpsS)
@@ -2488,17 +2800,13 @@ local function replan(s, vehicle, playerNum)
                                 prefer, sen.hardR, baseL, sen.roadLo, sen.roadHi, false)
                             if mq ~= "dodge" then break end
                             pa, pb, pc, pd, po = aq, bq, cq, dq, oq
-                            pa, pb, pc, pd = shapeProfile(s, s.profile, pa, pb, pc, pd)
-                            ovN, ovS0 = MDADFollower.buildOffsetLine(s.profile,
-                                s.lastSNow, pa, pb, pc, pd, po, baseL, s.tmpOvX, s.tmpOvY)
+                            local shapeQ
+                            pa, pb, pc, pd, shapeQ = shapeProfile(
+                                s, s.profile, pa, pb, pc, pd, po, baseL)
                             local okQ, mgQ, hQ, phQ, hpsQ, hxQ, hyQ
-                            if ovN >= 2 then
-                                okQ, mgQ, hQ, phQ, hpsQ, hxQ, hyQ = sweepLine(s,
-                                    s.tmpOvX, s.tmpOvY, ovN, ovS0, pa, pb, pc, pd, po, "crawl", nb)
-                            else
-                                okQ, mgQ, hQ, phQ, hpsQ, hxQ, hyQ =
-                                    sweepClear(s, s.profile, pa, pb, pc, pd, po, "crawl", nb)
-                            end
+                            ovN, ovS0, okQ, mgQ, hQ, phQ, hpsQ, hxQ, hyQ =
+                                sweepCandidate(s, shapeQ, pa, pb, pc, pd, po,
+                                    baseL, "crawl", nb)
                             if okQ then
                                 a, b, c, d, offL = pa, pb, pc, pd, po
                                 committed = true
@@ -2507,6 +2815,7 @@ local function replan(s, vehicle, playerNum)
                                 s.dodgeCrawl = true
                                 s.lastOvN = ovN
                                 s.lastOvS0 = ovS0
+                                s.lastOvEndS = s.tmpOvEndS
                                 break
                             end
                             if hQ ~= nil and (firstHit == nil or hQ < firstHit) then
@@ -2528,19 +2837,13 @@ local function replan(s, vehicle, playerNum)
                                 prefer, sen.hardR, baseL, sen.roadLo, sen.roadHi, false)
                             if mk ~= "dodge" then break end
                             pa, pb, pc, pd, po = ak, bk, ck, dk, ok2
-                            pa, pb, pc, pd = shapeProfile(s, s.profile, pa, pb, pc, pd)
-                            ovN, ovS0 = MDADFollower.buildOffsetLine(s.profile,
-                                s.lastSNow, pa, pb, pc, pd, po, baseL, s.tmpOvX, s.tmpOvY)
+                            local shapeK
+                            pa, pb, pc, pd, shapeK = shapeProfile(
+                                s, s.profile, pa, pb, pc, pd, po, baseL)
                             local okK, mgK, hK, phK, hpsK, hxK, hyK
-                            if ovN >= 2 then
-                                okK, mgK, hK, phK, hpsK, hxK, hyK = sweepLine(s,
-                                    s.tmpOvX, s.tmpOvY, ovN, ovS0, pa, pb, pc, pd, po,
+                            ovN, ovS0, okK, mgK, hK, phK, hpsK, hxK, hyK =
+                                sweepCandidate(s, shapeK, pa, pb, pc, pd, po, baseL,
                                     phase == 2 and "crawl" or "retry", nb)
-                            else
-                                okK, mgK, hK, phK, hpsK, hxK, hyK =
-                                    sweepClear(s, s.profile, pa, pb, pc, pd, po,
-                                        phase == 2 and "crawl" or "retry", nb)
-                            end
                             if okK then
                                 a, b, c, d, offL = pa, pb, pc, pd, po
                                 committed = true
@@ -2549,6 +2852,7 @@ local function replan(s, vehicle, playerNum)
                                 if phase == 2 then s.dodgeCrawl = true end
                                 s.lastOvN = ovN
                                 s.lastOvS0 = ovS0
+                                s.lastOvEndS = s.tmpOvEndS
                                 break
                             end
                             if hK ~= nil and (firstHit == nil or hK < firstHit) then
@@ -2586,6 +2890,54 @@ local function replan(s, vehicle, playerNum)
                 end
             end
         end
+        if mode == "dodge" then
+            local vp = s.vehicleProfile
+            local minBrake, minLat = MDADFollower.minDynamics(
+                s.profile, a, d, s.fstate.idx)
+            if finite(s.safeBrake) and s.safeBrake >= 0
+                    and s.safeBrake < minBrake then minBrake = s.safeBrake end
+            if finite(s.safeLat) and s.safeLat >= 0
+                    and s.safeLat < minLat then minLat = s.safeLat end
+            local kappa = MDADDynamics.polylineKappaMax(
+                s.tmpOvX, s.tmpOvY, s.lastOvN or 0)
+            local curveCap = MDADDynamics.curveSpeedCapKmh(
+                kappa, minLat, vp.wheelbase, vp.delta0Safe, vp.deltaVSafe, vp.maxSpeed)
+            local visible = visibleEndS(sen, s.lastSNow) - s.lastSNow
+            local visibilityCap = MDADDynamics.visibilityCapKmh(
+                visible, 0.5, minBrake, vp.halfL)
+            local dl = offL - baseL
+            if dl < 0 then dl = -dl end
+            local sinHeading = 0.05
+            if finite(s.dodgeCommittedLength) and s.dodgeCommittedLength > 0 then
+                sinHeading = 1.5 * dl / s.dodgeCommittedLength
+                if sinHeading > 1 then sinHeading = 1 end
+            end
+            local clearanceCap = MDADDynamics.clearanceCapKmh(
+                s.dodgeMargin, 0.4, 0.5, minLat, sinHeading)
+            local profileCap = s.profileEnvelope
+            if finite(s.dodgeSpaceCap) and s.dodgeSpaceCap < profileCap then
+                profileCap = s.dodgeSpaceCap
+            end
+            local classId = sen.vehN and sen.vehN > 0
+                and MDADDynamics.DODGE_VEHICLE or MDADDynamics.DODGE_STATIC
+            s.dodgeKappa, s.dodgeClearance = kappa, s.dodgeMargin
+            s.dodgeCurveCap, s.dodgeClearanceCap = curveCap, clearanceCap
+            s.dodgeVisibilityCap, s.dodgeClass = visibilityCap, classId
+            local capReason
+            s.dodgeSpeedCap, _, capReason = MDADDynamics.dodgeSpeedCapKmh(
+                s.gearCap, profileCap, curveCap, clearanceCap, visibilityCap,
+                classId, s.dodgeCrawl)
+            if capReason == "dynamics-invalid" then
+                s.invalid, s.stateError, s.dynamicsFault =
+                    true, "dodge-cap", true
+            end
+            if s.dodgeSpeedCap <= 0 then
+                mode = "blocked"
+                s.dodgeBlockReason = capReason or "dodge-cap"
+                if not capReason then s.dodgeBlockReason = "dodge-cap" end
+                s.planSig = -1
+            end
+        end
         -- 偏離道路中（使用者定案：優先回線）：不疊繞行側偏——車在走廊外時
         -- 弧座標表示失真、掃描窗隨投影漂移，dodge 在這種輸入下只會左右震盪。
         -- RETURN 期間 planned blocker 的 Frenet 錨不可信；不另疊 dodge，也不以
@@ -2603,10 +2955,13 @@ local function replan(s, vehicle, playerNum)
         s.clearStreak = 0
         -- 也不能無側偏直直開進障礙
         if MDADFollower.setOffset(s.fstate, a, b, c, d, offL,
-                s.tmpOvX, s.tmpOvY, s.lastOvN or 0, s.lastOvS0 or 0) then
+                s.tmpOvX, s.tmpOvY, s.lastOvN or 0, s.lastOvS0 or 0,
+                s.lastOvEndS or 0) then
             s.dodging = true
             s.blocked = false
             s.blockedNotified = false
+            s.dodgeBaseCap = s.dodgeSpeedCap
+            s.dodgeCapPending = false
             s.dodgeNeed = commitNb or s.sweepBase -- 承諾檔淨距（守護輪同契約）
             -- 玩家可見的減速要有理由：繞行開始提示一次（持續繞行時 sig 每輪微變、
             -- replan 反覆進來，靠 dodgeNotified 防轟；clear/blocked 時重臂）
@@ -2684,6 +3039,15 @@ end
 local function stepUnstick(s, vehicle, playerNum, now)
     local vx, vy = vehicle:getX(), vehicle:getY()
     local speedKmh = vehicle:getCurrentSpeedKmHour()
+    if not finite(speedKmh) then
+        vehicle:setRegulator(false)
+        s.dynamicsFault, s.invalid, s.stateError = true, true, "speed"
+        Drive.stop(playerNum, KEY_UNSUPPORTED)
+        return
+    end
+    if s.commandControlState ~= "RECOVER" then
+        Drive.invalidateCommandState(s, speedKmh, "RECOVER")
+    end
     local dx, dy = vx - s.unstickX, vy - s.unstickY
     local dist2 = dx * dx + dy * dy
     s.unstickDistance = sqrt(dist2)
@@ -2780,13 +3144,22 @@ local function stepUnstick(s, vehicle, playerNum, now)
     local fwd = BaseVehicle.allocVector3f()
     vehicle:getForwardVector(fwd)
     local fx, fy = fwd:x(), fwd:z()
-    local flen2 = fx * fx + fy * fy
-    local heading = 0
-    if flen2 > 1e-6 then
-        local inv = 1 / sqrt(flen2)
-        fx, fy = fx * inv, fy * inv
-        heading = MDADFollower.headingFromForward(fx, fy)
+    if not finite(fx) or not finite(fy) then
+        BaseVehicle.releaseVector3f(fwd)
+        s.dynamicsFault, s.invalid, s.stateError = true, true, "forward"
+        Drive.stop(playerNum, KEY_UNSUPPORTED)
+        return
     end
+    local flen2 = fx * fx + fy * fy
+    if flen2 <= 1e-6 then
+        BaseVehicle.releaseVector3f(fwd)
+        s.dynamicsFault, s.invalid, s.stateError = true, true, "forward-zero"
+        Drive.stop(playerNum, KEY_UNSUPPORTED)
+        return
+    end
+    local inv = 1 / sqrt(flen2)
+    fx, fy = fx * inv, fy * inv
+    local heading = MDADFollower.headingFromForward(fx, fy)
 
     -- Re-probe before the impulse on each 100ms boundary. Any non-clear result
     -- produces zero reverse impulse and a rear-blocked event for the active attempt.
@@ -2833,6 +3206,20 @@ end
 
 local function stepFollow(s, vehicle, playerNum, now)
     local speedKmh = vehicle:getCurrentSpeedKmHour() -- 可負（倒車）＝BaseVehicle.java:4268
+    if not finite(speedKmh) then
+        vehicle:setRegulator(false)
+        s.dynamicsFault, s.invalid, s.stateError = true, true, "speed"
+        Drive.stop(playerNum, KEY_UNSUPPORTED)
+        return
+    end
+    if not s.cmdInitialized then
+        s.cmdV = speedKmh / 3.6
+        if s.cmdV < 0 then s.cmdV = -s.cmdV end
+        if not finite(s.cmdV) then s.cmdV = 0 end
+        s.cmdA, s.cmdInitialized = 0, true
+    end
+    s.lastSpeedKmh = speedKmh
+    s.jerkBypassReason = nil
     local vx, vy = vehicle:getX(), vehicle:getY()
     local mult = getGameTime():getMultiplier()
     if mult < MULT_MIN then mult = MULT_MIN end
@@ -2856,6 +3243,14 @@ local function stepFollow(s, vehicle, playerNum, now)
     local flen2 = fx * fx + fy * fy
     local reached = false
     local postAction = nil
+    if not finite(fx) or not finite(fy) then
+        s.dynamicsFault, s.invalid, s.stateError = true, true, "forward"
+        postAction, flen2 = "dynamics-fault", 0
+    elseif flen2 <= 1e-6 then
+        vehicle:setRegulator(false)
+        s.dynamicsFault, s.invalid, s.stateError = true, true, "forward-zero"
+        postAction, flen2 = "dynamics-fault", 0
+    end
     if flen2 > 1e-6 then
         local inv = 1 / sqrt(flen2)
         fx, fy = fx * inv, fy * inv
@@ -2866,6 +3261,26 @@ local function stepFollow(s, vehicle, playerNum, now)
         local steer, targetSpeed, remaining, done, headingError, lateralSq, latSigned = MDADFollower.control(
             s.profile, s.fstate, vx, vy,
             heading, speedKmh, mult * SECONDS_PER_MULT)
+        local curveKappa, curveCap =
+            s.fstate.curveKappa, s.fstate.curveCapKmh
+        local curveHardActive = s.fstate.curveHardActive == true
+        local curveValid = s.fstate.curveValid == true
+            and finite(curveKappa) and curveKappa >= 0
+            and finite(curveCap) and curveCap >= 0
+            and (not curveHardActive or curveKappa > 0)
+        if not finite(targetSpeed) or targetSpeed < 0 or not curveValid then
+            targetSpeed, s.profileEnvelope = 0, 0
+            s.curveValid, s.curveHardActive = false, false
+            s.curveKappa, s.curveCap = 0, 0
+            s.dynamicsFault, s.invalid, s.stateError =
+                true, true, curveValid and "profile-target" or "curve-state"
+            postAction = "dynamics-fault"
+        else
+            s.profileEnvelope = targetSpeed
+            s.curveValid, s.curveHardActive =
+                true, curveHardActive
+            s.curveKappa, s.curveCap = curveKappa, curveCap
+        end
         reached = done == true
         -- 目前沿線弧長：M4 感知與脫困額度重臂共用（sensor 缺席時脫困仍要用，
         -- 所以重臂判定放在 sensor 塊之外）
@@ -2935,22 +3350,165 @@ local function stepFollow(s, vehicle, playerNum, now)
                 local nb = s.sandBias + s.roadBias
                 if nb > BIAS_MAX then nb = BIAS_MAX
                 elseif nb < -BIAS_MAX then nb = -BIAS_MAX end
-                -- 承諾期凍結（oracle R7）：dodge 執行中 bias 不再更新——EMA 微調
-                -- 會讓 hard 點 l 座標逐輪漂移（實測 hl 3.02↔3.12）、guard 與
                 -- 枚舉的邊界判定跟著抖。承諾釋放後恢復跟隨。
                 if s.dodging or s.returnActive then nb = laneBiasOf(s) end
                 if type(MDADFollower.setLaneBias) == "function" then
                     MDADFollower.setLaneBias(s.fstate, nb)
                 end
+                s.verifyLineN = 0
+                s.laneCurveEnvelope, s.laneCurveStamp,
+                    s.laneCurveS0, s.laneCurveEnd,
+                    s.envelopeBuildLat, s.envelopeBuildCoast,
+                    s.laneEnvelopeScale = 0, -1, 0, 0, -1, -1, 1
                 s.sensor.scanBias = nb -- 掃描帶跟隨行駛線（下一輪 beginRound 鎖定）
                 -- Current-body OBB is a safety OR-gate in front of the existing planner.
                 -- It consumes this completed immutable snapshot even when sig is unchanged.
                 footprintSnapshot(s, vehicle, playerNum, fwd, heading, vx, vy, latSigned)
                 updateReturnSnapshot(s, vehicle, playerNum, latSigned)
-                if s.sensor.sig ~= s.planSig or s.clearStreak > 0 then
+                if s.sensor.sig ~= s.planSig or s.clearStreak > 0 or s.dodging then
                     s.planSig = s.sensor.sig
                     replan(s, vehicle, playerNum)
                     if s.currentBlocked then s.planMode = "current-blocked" end
+                end
+                local horizonEnd = visibleEndS(s.sensor, s.lastSNow)
+                if horizonEnd > s.profile.length then horizonEnd = s.profile.length end
+                s.horizonMinBrake, s.horizonMinLat, s.horizonMinCoast =
+                    MDADFollower.minDynamics(s.profile, s.lastSNow, horizonEnd, segI)
+                if finite(s.safeBrake) and s.safeBrake >= 0
+                        and s.safeBrake < s.horizonMinBrake then
+                    s.horizonMinBrake = s.safeBrake
+                end
+                if finite(s.safeLat) and s.safeLat >= 0
+                        and s.safeLat < s.horizonMinLat then
+                    s.horizonMinLat = s.safeLat
+                end
+                if finite(s.safeCoast) and s.safeCoast >= 0
+                        and s.safeCoast < s.horizonMinCoast then
+                    s.horizonMinCoast = s.safeCoast
+                end
+                s.horizonStamp = s.sensor.stamp
+                -- The actual lane line is the single proof object for loaded coverage,
+                -- raw-source road-band union, curvature and long-vehicle OBB sweep.
+                s.verifyBand, s.verifySweep = false, false
+                s.verifyLineReason, s.curveVerifiedUntilS = "state", 0
+                s.proofKappa, s.proofCurveCap = 0, 0
+                if s.adaptive and not s.dodging and not s.returnActive
+                        and not s.blocked and not s.currentBlocked then
+                    local proofEnd = visibleEndS(s.sensor, s.lastSNow)
+                    if proofEnd > s.profile.length then proofEnd = s.profile.length end
+                    local lane = laneBiasOf(s)
+                    local lineN, lineS0, lineReason, lastIdx = MDADFollower.buildLaneLine(
+                        s.profile, s.lastSNow, proofEnd, lane,
+                        s.verifyX, s.verifyY, segI, s.verifySeg)
+                    s.verifyLineReason = lineReason
+                    local rawPts, rawWidths = s.route.pts, s.route.segWidth
+                    local bandOk = lineN >= 2 and s.navVersion >= 4
+                        and s.profile.filletBandValid == true
+                        and type(rawPts) == "table" and type(rawWidths) == "table"
+                    local arcOk = lineN >= 2
+                    local checkN = lineN >= 2 and lineN or 0
+                    for k = 1, checkN do
+                        local si = s.verifySeg[k]
+                        if not finite(si) then bandOk, arcOk = false, false; break end
+                        if bandOk then
+                            local sa, sb =
+                                s.profile.segSourceA[si], s.profile.segSourceB[si]
+                            local wx, wy = s.verifyX[k], s.verifyY[k]
+                            if not MDADDynamics.rawBandContains(
+                                    rawPts, rawWidths, sa,
+                                    s.vehicleProfile.halfW, wx, wy)
+                                    and not MDADDynamics.rawBandContains(
+                                        rawPts, rawWidths, sb,
+                                        s.vehicleProfile.halfW, wx, wy) then
+                                bandOk = false
+                                break
+                            end
+                        end
+                    end
+                    local rangeN = lineN >= 2 and finite(lastIdx)
+                        and lastIdx - segI + 1 or 0
+                    if rangeN < 1 or rangeN > MDADFollower.LANE_MAX then
+                        lineReason, bandOk, arcOk = "capacity", false, false
+                    else
+                        arcOk = not MDADFollower.rangeHasFallback(
+                            s.profile, segI, lastIdx)
+                        -- Every driven profile chord is split at its midpoint.
+                        -- Each half must share one convex eroded source capsule;
+                        -- endpoint-only membership is insufficient for a non-convex union.
+                        for si = segI, (bandOk and lastIdx or segI - 1) do
+                            local h = s.profile.segH[si]
+                            local x0 = s.profile.x[si] - sin(h) * lane
+                            local y0 = s.profile.y[si] + cos(h) * lane
+                            local x1 = s.profile.x[si + 1] - sin(h) * lane
+                            local y1 = s.profile.y[si + 1] + cos(h) * lane
+                            local sa, sb =
+                                s.profile.segSourceA[si], s.profile.segSourceB[si]
+                            if not MDADDynamics.chordCoveredByBand(
+                                    rawPts, rawWidths, sa, sb,
+                                    s.vehicleProfile.halfW, x0, y0, x1, y1) then
+                                bandOk = false
+                                break
+                            end
+                        end
+                    end
+                    local minBrake, minLat, minCoast =
+                        s.horizonMinBrake, s.horizonMinLat, s.horizonMinCoast
+                    local kappa, curveCap = 0, s.vehicleProfile.maxSpeed
+                    local envelopeOk = false
+                    if lineN >= 2 and finite(minLat) and minLat >= 0
+                            and finite(minCoast) and minCoast >= 0 then
+                        s.verifyLineN = lineN
+                        for k = 1, lineN do
+                            local localKappa = 0
+                            if k > 1 and k < lineN then
+                                localKappa = MDADDynamics.circumcircleKappa(
+                                    s.verifyX[k - 1], s.verifyY[k - 1],
+                                    s.verifyX[k], s.verifyY[k],
+                                    s.verifyX[k + 1], s.verifyY[k + 1])
+                            end
+                            if localKappa > kappa then kappa = localKappa end
+                            s.verifyKappa[k] = localKappa
+                            if k < lineN then
+                                local dx = s.verifyX[k + 1] - s.verifyX[k]
+                                local dy = s.verifyY[k + 1] - s.verifyY[k]
+                                s.verifyDist[k] = sqrt(dx * dx + dy * dy)
+                            end
+                        end
+                        s.envelopeBuildLat, s.envelopeBuildCoast = -1, -1
+                        s.laneCurveS0, s.laneCurveEnd = lineS0, proofEnd
+                        s.proofKappa = kappa
+                        envelopeOk = refreshLaneCurveEnvelope(s, minCoast, minLat)
+                        if envelopeOk then
+                            curveCap = s.proofCurveCap
+                            s.laneCurveStamp = s.sensor.stamp
+                        else
+                            curveCap = 0
+                        end
+                    end
+                    s.proofKappa = kappa
+                    local loaded = lineN >= 2 and finite(minBrake) and minBrake > 0
+                        and s.sensor.scanEndS >= proofEnd
+                        and not (s.sensor.unloaded
+                            and (not finite(s.sensor.unloadedS) or s.sensor.unloadedS <= proofEnd))
+                    local sweepOk = false
+                    if loaded and bandOk and arcOk and envelopeOk
+                            and finite(curveCap) then
+                        sweepOk = sweepLine(
+                            s, s.verifyX, s.verifyY, lineN, lineS0, proofEnd,
+                            s.lastSNow, s.lastSNow, proofEnd, proofEnd,
+                            lane, "profile", s.sweepBase)
+                    end
+                    s.verifyBand, s.verifySweep = bandOk and arcOk, sweepOk == true
+                    if lineReason ~= "ok" then s.verifyLineReason = lineReason
+                    elseif not arcOk then s.verifyLineReason = "fallback"
+                    elseif not envelopeOk then s.verifyLineReason = "dynamics"
+                    elseif not bandOk then s.verifyLineReason = "band"
+                    elseif not loaded then s.verifyLineReason = "unloaded"
+                    elseif not sweepOk then s.verifyLineReason = "sweep"
+                    else
+                        s.verifyLineReason = "ok"
+                        s.curveVerifiedUntilS = proofEnd
+                    end
                 end
                 -- 一般玩家軌跡每輪更新常駐點列；debugOn 只控制紅／綠／橙 markers。
                 -- LineDrawer 每 tick 畫連續線，幾何仍只在 250ms 輪完成時重算。
@@ -2969,10 +3527,7 @@ local function stepFollow(s, vehicle, playerNum, now)
                 capReason = "sensor"
             end
             if s.dodging then
-                -- 每幀釋放檢查（2026-08-29 圖 4 實測 bug）：replan 是「障礙簽章
-                -- 變化」事件驅動——通過障礙後路面乾淨、sig 不再變、replan 裡的
-                -- 釋放分支永遠沒人跑，爬行 cap 在開闊直路掛死。釋放屬於運動
-                -- 進度事件，跟感知簽章無關，必須每幀查（一次數值比較，零成本）。
+                -- Motion completion releases the immutable line; layout signatures do not.
                 local fsD = s.fstate.offD
                 if type(fsD) ~= "number" or s.lastSNow >= fsD then
                     MDADFollower.clearOffset(s.fstate)
@@ -2981,50 +3536,18 @@ local function stepFollow(s, vehicle, playerNum, now)
                         print(LOG .. "pn=" .. playerNum .. " dodge released (profile done)")
                     end
                 else
-                    -- 分段限速：c..d 收回段已駛過障礙本體，回 DODGE_CAP 24。
-                    -- a..c 依 commit 時 sweep 的 entry＋hold 最小餘裕連續縮放：
-                    -- entry 的 margin 0 → 10 km/h、0.8+ → 24；hold 再加 6，
-                    -- 上限 28。彎道 entry 上限 16、hold 20。baseline／exit
-                    -- 仍完整做碰撞驗證，但不拿不同相位的餘裕污染 a..c 速度。
-                    local dcap
-                    local fsC = s.fstate.offC
-                    local fsA2 = s.fstate.offA
-                    local fsB2 = s.fstate.offB
-                    -- 減速界隨速縮放：40 km/h 的煞停距 ~8m＋掃描/反應延遲，
-                    -- 固定 12m 對瘋狂檔不夠（2026-08-29 實測高速輕擦後由推撞
-                    -- ban 倒退解除——防線有效但不該走到那）
-                    local slowZone = speedKmh * 0.5
-                    if slowZone < 12 then slowZone = 12 end
-                    if type(fsA2) == "number" and s.lastSNow < fsA2 - slowZone then
-                        dcap = nil -- 剖面還在減速界外：接近段照常速
-                    elseif type(fsC) == "number" and s.lastSNow >= fsC then
-                        dcap = DODGE_CAP
+                    local dcap = s.dodgeSpeedCap
+                    if not finite(dcap) or dcap < 0 then dcap = 0 end
+                    s.lastDcap = dcap
+                    local slowZone
+                    if not finite(s.safeCoast) or s.safeCoast <= 0 then
+                        slowZone = s.profile.length
                     else
-                        local mg = s.dodgeMargin
-                        if type(mg) ~= "number" then mg = 0 end
-                        dcap = 10 + mg * 17.5 -- margin 0→10、0.8→24 全額
-                        if type(fsB2) == "number" and s.lastSNow >= fsB2 then
-                            -- 保持段（b..c）：轉向已完成、直線貼障礙行駛——比
-                            -- 轉向中的過渡段快一檔（2026-08-29 使用者裁定）
-                            dcap = dcap + 6
-                            if dcap > 28 then dcap = 28 end
-                        elseif dcap > DODGE_CAP then
-                            dcap = DODGE_CAP
-                        end
-                        if s.dodgeTight then
-                            local tcap = DODGE_TIGHT_CAP
-                            if type(fsB2) == "number" and s.lastSNow >= fsB2 then
-                                tcap = DODGE_TIGHT_CAP + 4 -- 彎中保持段同步放一檔
-                            end
-                            if dcap > tcap then dcap = tcap end
-                        end
+                        slowZone = MDADDynamics.stoppingDistance(
+                            speedKmh / 3.6, 0.5, s.safeCoast, s.vehicleProfile.halfL)
                     end
-                    -- squeeze 檔只比車體多 0.3m；無論 entry/hold/exit 都維持平坦爬行上限。
-                    if dcap ~= nil and s.dodgeCrawl and dcap > SQUEEZE_CAP then
-                        dcap = SQUEEZE_CAP
-                    end
-                    if dcap ~= nil then
-                        s.lastDcap = dcap
+                    local fsA = s.fstate.offA
+                    if not finite(fsA) or s.lastSNow >= fsA - slowZone then
                         if cap < 0 or dcap < cap then
                             cap = dcap
                             capReason = "dodge"
@@ -3068,26 +3591,6 @@ local function stepFollow(s, vehicle, playerNum, now)
                 if cap < 0 or mcap < cap then
                     cap = mcap
                     capReason = "moving"
-                end
-            end
-            if s.sensor.unloaded then
-                -- 動態煞停距（2026-08-29 使用者裁定）：未載入格在煞停距外＝
-                -- 不減速（接近時 chunk 自然載入）；高速檔帶 110m 的帶尾恆超出
-                -- streaming 半徑，一律壓 15 等於永遠 15。距內按「能在該距離
-                -- 停住的速度」漸進壓（下限 UNLOADED_CAP）。
-                local ugap = (s.sensor.unloadedS or 0) - s.lastSNow
-                local safe = speedKmh * speedKmh / 166 + speedKmh * 0.19 + 6
-                if ugap < safe then
-                    local ucap = UNLOADED_CAP
-                    local room = ugap - 6
-                    if room > 0 then
-                        local vsafe = sqrt(room * 166)
-                        if vsafe > ucap then ucap = vsafe end
-                    end
-                    if cap < 0 or ucap < cap then
-                        cap = ucap
-                        capReason = "unloaded"
-                    end
                 end
             end
             -- 軟障礙（可推家具／HitByCar 雜物）：輾得過但要先減速——不減速輾過的
@@ -3139,24 +3642,183 @@ local function stepFollow(s, vehicle, playerNum, now)
             if targetSpeed > returnCap then targetSpeed = returnCap end
             s.lastCapReason = s.returnUnsafe and "return-unsafe" or "return"
         end
-        -- 高速誤差護欄：>70 km/h 的目標速度按航向誤差線性折返回 70——誤差 0 給
-        -- 滿速、≥HS_ERR_RAD（10°）壓回 70。轉向與曲率限速都在 ≤70 標定；高速下
-        -- 橫向漂移量隨速度平方放大，8-10° 的「小」誤差在 target=100 時就足以
-        -- 甩出路面（2026-08-28 實機遙測：35 km/h 加速段 errDeg -8~-10 出界撞樹）。
-        -- 沙盒 ≤70 時 targetSpeed 永遠不超 70，本護欄零作用。
-        if targetSpeed > HS_BASE_KMH then
-            local ae2 = headingError or 0
-            if ae2 < 0 then ae2 = -ae2 end
-            if ae2 >= HS_ERR_RAD then
-                targetSpeed = HS_BASE_KMH
-                s.lastCapReason = "heading"
-                s.lastHeadingCap = HS_BASE_KMH
+        -- Strict cruise aggregation: one malformed cap collapses to a named invalid stop.
+        local vehicleMax = s.vehicleProfile.maxSpeed
+        local fullValid = finite(s.profileEnvelope) and s.profileEnvelope >= 0
+            and finite(s.gearCap) and s.gearCap >= 0
+            and finite(pcap) and pcap >= 0 and finite(vehicleMax) and vehicleMax >= 0
+        local laneEnvelopeValid = s.sensor and s.verifyLineReason == "ok"
+            and s.laneCurveStamp == s.sensor.stamp
+        local envelopeScale, scaleCandidate = s.laneEnvelopeScale, 1
+        if laneEnvelopeValid then
+            local buildLat, buildCoast =
+                s.envelopeBuildLat, s.envelopeBuildCoast
+            if not (finite(envelopeScale) and envelopeScale >= 0 and envelopeScale <= 1
+                    and finite(s.safeLat) and s.safeLat >= 0
+                    and finite(s.safeCoast) and s.safeCoast >= 0
+                    and finite(buildLat) and buildLat >= 0
+                    and finite(buildCoast) and buildCoast >= 0) then
+                fullValid = false
             else
-                targetSpeed = HS_BASE_KMH + (targetSpeed - HS_BASE_KMH) * (1 - ae2 / HS_ERR_RAD)
-                if ae2 > 0 then
-                    s.lastCapReason = "heading"
-                    s.lastHeadingCap = targetSpeed
+                if buildLat > 0 and s.safeLat < buildLat then
+                    scaleCandidate = sqrt(s.safeLat / buildLat)
                 end
+                if buildCoast > 0 and s.safeCoast < buildCoast then
+                    local coastScale = sqrt(s.safeCoast / buildCoast)
+                    if coastScale < scaleCandidate then scaleCandidate = coastScale end
+                end
+                if scaleCandidate < envelopeScale then
+                    envelopeScale = scaleCandidate
+                    s.laneEnvelopeScale = scaleCandidate
+                end
+            end
+        end
+        if laneEnvelopeValid then
+            local currentS, lineS0, lineEnd =
+                s.lastSNow, s.laneCurveS0, s.laneCurveEnd
+            if not (finite(currentS) and finite(lineS0) and finite(lineEnd))
+                    or currentS > lineEnd + 1e-6 or lineEnd <= lineS0 then
+                laneEnvelopeValid, fullValid = false, false
+                s.invalid, s.stateError, s.dynamicsFault =
+                    true, "lane-envelope", true
+            else
+                local offset = (currentS - lineS0) / MDADFollower.OV_STEP
+                if offset < 0 then offset = 0 end
+                local whole = offset - offset % 1
+                local index = whole + 1
+                if index >= s.verifyLineN then index = s.verifyLineN - 1 end
+                if index < 1 then index = 1 end
+                local currentCap = s.verifyEnvelope[index]
+                local nextCap = s.verifyEnvelope[index + 1]
+                if not finite(currentCap) or currentCap < 0
+                        or not finite(nextCap) or nextCap < 0 then
+                    laneEnvelopeValid, fullValid = false, false
+                    s.invalid, s.stateError, s.dynamicsFault =
+                        true, "lane-envelope", true
+                else
+                    local baseCap =
+                        currentCap < nextCap and currentCap or nextCap
+                    s.laneCurveEnvelope = baseCap * envelopeScale
+                end
+            end
+        end
+        local fullTarget = 0
+        if fullValid then
+            fullTarget = s.profileEnvelope
+            if s.gearCap < fullTarget then fullTarget = s.gearCap end
+            if pcap < fullTarget then fullTarget = pcap end
+            if vehicleMax < fullTarget then fullTarget = vehicleMax end
+            if laneEnvelopeValid then
+                if not finite(s.laneCurveEnvelope) or s.laneCurveEnvelope < 0 then
+                    fullValid = false
+                else
+                    if s.laneCurveEnvelope < fullTarget then
+                        fullTarget = s.laneCurveEnvelope
+                    end
+                    if s.laneCurveEnvelope < targetSpeed then
+                        targetSpeed = s.laneCurveEnvelope
+                        s.lastCapReason = "curve-coast"
+                    end
+                end
+            end
+        else
+            s.invalid, s.dynamicsFault = true, true
+            if s.stateError == nil then s.stateError = "full-target" end
+            targetSpeed = 0
+        end
+        if not fullValid then
+            fullTarget, targetSpeed = 0, 0
+            s.invalid, s.dynamicsFault = true, true
+            if s.stateError == nil then s.stateError = "full-target" end
+        end
+
+        local sensorReady, fresh, brakeLoaded = false, false, false
+        local corridorClear, obbClear = false, false
+        local tau, stopEnd = 0.5, s.lastSNow
+        local visibilityCap = s.sensor and 0 or 15
+        if s.sensor and s.sensor.ready and finite(s.sensor.stamp) then
+            sensorReady = true
+            local age = now - s.sensor.stamp
+            fresh = age >= 0 and age <= MDADDynamics.SNAPSHOT_FRESH_MS
+            tau = age / 1000 + 0.25
+            if tau < 0.5 then tau = 0.5 end
+            local visibleEnd = visibleEndS(s.sensor, s.lastSNow)
+            local minBrakeVisible = s.horizonStamp == s.sensor.stamp
+                and s.horizonMinBrake or 0
+            if finite(s.safeBrake) and s.safeBrake >= 0 then
+                if s.safeBrake < minBrakeVisible then
+                    minBrakeVisible = s.safeBrake
+                    s.horizonMinBrake = s.safeBrake
+                end
+            else
+                minBrakeVisible = 0
+                s.invalid, s.stateError, s.dynamicsFault =
+                    true, "brake-limit", true
+            end
+            if finite(s.safeLat) and s.safeLat >= 0
+                    and s.safeLat < s.horizonMinLat then
+                s.horizonMinLat = s.safeLat
+            end
+            if finite(s.safeCoast) and s.safeCoast >= 0
+                    and s.safeCoast < s.horizonMinCoast then
+                s.horizonMinCoast = s.safeCoast
+            end
+            visibilityCap = MDADDynamics.visibilityCapKmh(
+                visibleEnd - s.lastSNow, tau, minBrakeVisible, s.vehicleProfile.halfL)
+            stopEnd = s.lastSNow + MDADDynamics.stoppingDistance(
+                fullTarget / 3.6, tau, minBrakeVisible, s.vehicleProfile.halfL)
+            if stopEnd > s.profile.length then stopEnd = s.profile.length end
+            brakeLoaded = finite(minBrakeVisible) and minBrakeVisible > 0
+                and visibleEnd >= stopEnd
+            corridorClear = s.sensor.hardN == 0 and not s.sensor.movingVeh
+                and (s.sensor.zombieN or 0) == 0 and (s.sensor.corpseN or 0) == 0
+                and (s.sensor.softN or 0) == 0 and not s.blocked and not s.dodging
+            obbClear = (not s.adaptive or s.verifySweep) and not s.currentBlocked
+        end
+        if not finite(visibilityCap) or visibilityCap < 0 then
+            visibilityCap = 0
+            s.invalid, s.stateError, s.dynamicsFault = true, "visibility", true
+        end
+        s.visibilityCap = visibilityCap
+        if targetSpeed > visibilityCap then
+            targetSpeed, s.lastCapReason = visibilityCap, "visibility"
+        end
+
+        local latTol = 0.5
+        if finite(s.currentSegWidth) and s.currentSegWidth > 0 then
+            latTol = 0.25 * (s.currentSegWidth - 2 * s.vehicleProfile.halfW)
+            if latTol < 0.35 then latTol = 0.35 elseif latTol > 0.75 then latTol = 0.75 end
+        end
+        local absHeading = headingError or 0
+        if absHeading < 0 then absHeading = -absHeading end
+        local alignedNow = absDev <= latTol and absHeading <= MDADDynamics.ALIGN_HEADING_RAD
+        if alignedNow then
+            if s.alignSince == 0 then s.alignSince = now end
+        else
+            s.alignSince = 0
+        end
+        local aligned = alignedNow and now - s.alignSince >= MDADDynamics.ALIGN_HOLD_MS
+        local progressHealthy = s.progressState == "watch"
+            and s.progressSince > 0 and now - s.progressSince <= 1000
+        local pathVerified = s.curveVerifiedUntilS >= stopEnd
+        s.fullGate, s.gateReason = MDADDynamics.fullSpeedGate(
+            sensorReady, fresh, brakeLoaded, corridorClear, obbClear,
+            fullValid and controlStateOf(s) == "TRACK",
+            not s.returnActive and not s.returnHold, aligned, progressHealthy,
+            s.adaptive and pathVerified and s.verifyLineReason == "ok",
+            s.verifyBand and pathVerified, s.verifySweep and pathVerified)
+        if s.fullGate then
+            targetSpeed, s.lastCapReason = fullTarget, nil
+        else
+            local alignCap = MDADDynamics.alignmentCapKmh(
+                fullTarget, headingError, latDev, latTol, aligned)
+            local ungated, gateReason = MDADDynamics.ungatedCapKmh(
+                fullTarget, s.gateReason, alignCap)
+            if ungated < targetSpeed then targetSpeed = ungated end
+            s.lastCapReason, s.gateReason = gateReason, gateReason
+            if gateReason == "align" then s.lastHeadingCap = ungated end
+            if gateReason == "dynamics-invalid" then
+                s.invalid, s.stateError, s.dynamicsFault = true, "ungated", true
             end
         end
 
@@ -3178,8 +3840,8 @@ local function stepFollow(s, vehicle, playerNum, now)
         if s.returnCapacityFault and s.returnHold and avProgress < 1 then
             postAction = "return-fault"
         end
-        local legalWait = not s.currentBlocked and targetSpeed <= 0
-            and (s.blocked or s.followHold or s.returnHold)
+        local legalWait = not s.currentBlocked and not s.banFromRecovery
+            and targetSpeed <= 0 and (s.blocked or s.followHold or s.returnHold)
         if legalWait and avProgress < 1 then
             if s.waitSince == 0 then
                 s.waitSince = now
@@ -3224,7 +3886,8 @@ local function stepFollow(s, vehicle, playerNum, now)
             if avProgress < 1 then postAction = "recover" end
         elseif s.mode ~= "gear-reset" then
             local demand = not reached and not legalWait
-                and (targetSpeed >= 8 or s.currentBlocked)
+                and (s.profileEnvelope >= 8 or s.currentBlocked
+                    or (s.blocked and s.banFromRecovery))
             if not demand then
                 s.progressState = "disarmed"
                 s.progressSince = 0
@@ -3327,13 +3990,119 @@ local function stepFollow(s, vehicle, playerNum, now)
             end
         end
 
+        if s.blocked and not reached and not s.returnActive and not blockedStop
+                and targetSpeed > BLOCK_APPROACH_KMH then
+            targetSpeed, s.lastCapReason = BLOCK_APPROACH_KMH, "blocked"
+        end
+        if s.dynamicsFault then postAction = "dynamics-fault" end
+        local commandState = controlStateOf(s)
+        if commandState ~= s.commandControlState then
+            Drive.invalidateCommandState(s, speedKmh, commandState)
+        end
+        local hardCapV, hardClampReason = s.visibilityCap / 3.6, "visibility"
+        if not finite(hardCapV) or hardCapV < 0 then
+            hardCapV, hardClampReason = 0, "dynamics-invalid"
+            s.invalid, s.stateError, s.dynamicsFault =
+                true, "hard-cap", true
+            postAction = "dynamics-fault"
+        end
+        local okHard = true
+        if not s.fullGate then
+            hardCapV, hardClampReason, okHard = MDADDynamics.lowerHardCap(
+                hardCapV, hardClampReason, targetSpeed / 3.6, s.gateReason)
+        end
+        if s.followHold then
+            hardCapV, hardClampReason, okHard =
+                MDADDynamics.lowerHardCap(hardCapV, hardClampReason, 0, "moving")
+        end
+        if s.dodging and s.dodgeClass == MDADDynamics.DODGE_VEHICLE then
+            hardCapV, hardClampReason, okHard = MDADDynamics.lowerHardCap(
+                hardCapV, hardClampReason, s.dodgeSpeedCap / 3.6, "moving")
+        end
+        if s.currentBlocked then
+            hardCapV, hardClampReason, okHard =
+                MDADDynamics.lowerHardCap(hardCapV, hardClampReason, 0, "contact")
+        end
+        if s.mode == "recover" then
+            hardCapV, hardClampReason, okHard =
+                MDADDynamics.lowerHardCap(hardCapV, hardClampReason, 0, "recover")
+        end
+        if s.returnHold then
+            hardCapV, hardClampReason, okHard =
+                MDADDynamics.lowerHardCap(hardCapV, hardClampReason, 0, "return")
+        elseif s.returnActive then
+            hardCapV, hardClampReason, okHard = MDADDynamics.lowerHardCap(
+                hardCapV, hardClampReason, targetSpeed / 3.6, "return")
+        end
+        if blockedStop then
+            hardCapV, hardClampReason, okHard =
+                MDADDynamics.lowerHardCap(hardCapV, hardClampReason, 0, "blocked")
+        end
+        if reached then
+            hardCapV, hardClampReason, okHard =
+                MDADDynamics.lowerHardCap(hardCapV, hardClampReason, 0, "arrive")
+        end
+        local curveKindActive = s.curveHardActive == true
+        local hardCurveActive = curveKindActive
+            and finite(s.curveKappa) and s.curveKappa > 0
+        local hardCurveCap = s.curveCap
+        if curveKindActive and not finite(s.curveKappa) then
+            okHard = false
+        elseif hardCurveActive then
+            if finite(hardCurveCap) and hardCurveCap >= 0 then
+                hardCapV, hardClampReason, okHard = MDADDynamics.lowerHardCap(
+                    hardCapV, hardClampReason, hardCurveCap / 3.6, "curve")
+            else
+                okHard = false
+            end
+        end
+        if not okHard then
+            s.invalid, s.stateError, s.dynamicsFault =
+                true, "hard-cap", true
+            postAction = "dynamics-fault"
+        end
+        local actualSpeed = speedKmh
+        if actualSpeed < 0 then actualSpeed = -actualSpeed end
+        local hardBrakeReason
+        local curveBreached = hardCurveActive and finite(hardCurveCap)
+            and hardCurveCap >= 0 and actualSpeed > hardCurveCap + 0.5
+        local visibilityBreached = sensorReady and finite(s.visibilityCap)
+            and actualSpeed > s.visibilityCap + 0.5
+        if curveBreached then hardBrakeReason = "curve" end
+        if visibilityBreached
+                and (not curveBreached or s.visibilityCap <= hardCurveCap) then
+            hardBrakeReason = "visibility"
+        end
+        if s.mode == "gear-reset" then
+            hardBrakeReason = nil
+        end
+        if s.followHold or s.currentBlocked or s.mode == "recover"
+                or s.returnHold or blockedStop or reached then
+            hardBrakeReason = hardClampReason
+        end
+        s.cmdV, s.cmdA, s.jerkBypassReason = MDADDynamics.jerkCommand(
+            s.cmdV, s.cmdA, targetSpeed / 3.6, mult * SECONDS_PER_MULT,
+            s.safeAccel, s.safeBrake, MDADDynamics.JERK_MAX,
+            hardCapV, hardClampReason)
+        if s.jerkBypassReason == "dynamics-invalid" then
+            s.invalid, s.stateError, s.dynamicsFault =
+                true, "command", true
+            postAction = "dynamics-fault"
+        end
+        targetSpeed = s.cmdV * 3.6
+        if hardBrakeReason then s.lastCapReason = hardBrakeReason end
+
         local regOn = false
         local force = 0
-        if s.dynamicsFault then
+        if hardBrakeReason ~= nil then
             vehicle:setRegulator(false)
+            commandForceBrake(s, vehicle, now)
+            if hardCapV <= 0 then targetSpeed = 0 end
+        elseif s.dynamicsFault then
+            vehicle:setRegulator(false)
+            commandForceBrake(s, vehicle, now)
             targetSpeed = 0
         elseif s.mode == "gear-reset" then
-            -- Neutral pulse: regulator off and exactly zero impulse/brake.
             vehicle:setRegulator(false)
         elseif s.mode == "recover" or s.currentBlocked then
             vehicle:setRegulator(false)
@@ -3354,21 +4123,16 @@ local function stepFollow(s, vehicle, playerNum, now)
             s.lastCapReason = "blocked"
             -- immutable DODGE 的守護驗證失敗會帶著剖面轉 blocked（車在動時清
             -- 剖面＝目標線瞬跳）：近停後才清承諾，之後停等重提案照常
-            if s.dodging and speedKmh < 1 and speedKmh > -1 then
+            if s.dodging and not s.dodgeCapPending
+                    and speedKmh < 1 and speedKmh > -1 then
                 MDADFollower.clearOffset(s.fstate)
                 releaseDodge(s)
             end
+        elseif hardBrakeReason ~= nil then
+            vehicle:setRegulator(false)
+            commandForceBrake(s, vehicle, now)
         else
-            if s.blocked and not reached and not s.returnActive then
-                -- blocked 但障礙還在 BLOCK_STOP_DIST 之外：以爬行速度滑行接近，
-                -- 不急煞——掃描逼近後的縫隙判定比 30 公尺外那輪準，很多「遠看
-                -- 堵死」在近距離會變成可繞（量化誤差隨距離縮小）
-                if targetSpeed > BLOCK_APPROACH_KMH then
-                    targetSpeed = BLOCK_APPROACH_KMH
-                    s.lastCapReason = "blocked"
-                end
-            end
-            regOn = applySpeed(s, vehicle, targetSpeed, speedKmh, now)
+            regOn = applySpeed(s, vehicle, targetSpeed)
             if not reached then
                 local aerr = headingError or 0
                 if aerr < 0 then aerr = -aerr end
@@ -3476,6 +4240,10 @@ local function stepFollow(s, vehicle, playerNum, now)
         s.steerPrev = steer or 0
     end
     BaseVehicle.releaseVector3f(fwd)
+    if s.brakeTerminalFault then
+        Drive.stop(playerNum, KEY_UNSUPPORTED)
+        return
+    end
 
     if postAction == "dynamics-fault" then
         vehicle:setRegulator(false)
@@ -3504,8 +4272,10 @@ local function stepFollow(s, vehicle, playerNum, now)
         end
         clearEpisode(s)
         s.mode = "arrive"
-        vehicle:setRegulator(false)
-        commandForceBrake(s, vehicle, now)
+        if not s.forceBrakeThis then
+            vehicle:setRegulator(false)
+            commandForceBrake(s, vehicle, now)
+        end
     end
 end
 
@@ -3532,6 +4302,10 @@ local function onPlayerUpdate(player)
     end
 
     local now = getTimestampMs()
+    if s.brakeTerminalFault then
+        Drive.stop(playerNum, KEY_UNSUPPORTED)
+        return
+    end
     if refreshMass(s, vehicle, now) then
         s.dynamicsDirty, s.dynamicsCapMaterial = true, false
     end
@@ -3556,7 +4330,9 @@ local function onPlayerUpdate(player)
             clearSession(playerNum)
             haloGood(player, "UI_MinidoracatAutoDrive_Arrived")
         else
-            commandForceBrake(s, vehicle, now)
+            if not commandForceBrake(s, vehicle, now) then
+                Drive.stop(playerNum, KEY_UNSUPPORTED)
+            end
         end
         return
     end
@@ -3595,7 +4371,9 @@ local function onPlayerUpdate(player)
             if arrived then
                 s.mode = "arrive"
                 vehicle:setRegulator(false)
-                commandForceBrake(s, vehicle, now)
+                if not commandForceBrake(s, vehicle, now) then
+                    Drive.stop(playerNum, KEY_UNSUPPORTED)
+                end
                 return
             end
             Drive.stop(playerNum, KEY_LOST)
@@ -3622,19 +4400,21 @@ local function onPlayerUpdate(player)
 
         local versionChanged = api.navApiVersion ~= s.navVersion
         if route ~= s.route or versionChanged then
-            local profile = MDADFollower.begin(route, s.maxSpeed, api.navApiVersion)
+            local profile = MDADFollower.begin(
+                route, s.maxSpeed, api.navApiVersion, s.vehicleProfile)
             if not profile then
                 Drive.stop(playerNum, KEY_LOST)
                 return
             end
             MDADVehicleProfile.configureFollower(
                 profile, s.vehicleProfile, s.runtimeMass, s.rain)
-            s.safeAccel, s.safeBrake, s.safeLat =
-                profile.segAccel[1], profile.segBrake[1], profile.segLat[1]
-            s.dynamicsAccelCap, s.dynamicsBrakeCap, s.dynamicsLatCap =
-                s.safeAccel, s.safeBrake, s.safeLat
+            s.safeAccel, s.safeBrake, s.safeLat, s.safeCoast =
+                profile.segAccel[1], profile.segBrake[1],
+                profile.segLat[1], profile.segCoast[1]
+            s.dynamicsAccelCap, s.dynamicsBrakeCap, s.dynamicsLatCap,
+                s.dynamicsCoastCap = s.safeAccel, s.safeBrake, s.safeLat, s.safeCoast
             MDADFollower.setRuntimeLimits(
-                s.fstate, s.safeAccel, s.safeBrake, s.safeLat)
+                s.fstate, s.safeAccel, s.safeBrake, s.safeLat, s.safeCoast)
             local routeWhy = s.pendingRouteWhy
             if routeWhy == nil then routeWhy = targetChanged and "target" or "deviation" end
             s.pendingRouteWhy = nil
@@ -3653,6 +4433,7 @@ local function onPlayerUpdate(player)
             s.route = route
             s.profile = profile
             s.navVersion = api.navApiVersion
+            Drive.invalidateCommandState(s, vehicle:getCurrentSpeedKmHour(), "HOLD")
             s.adaptive = profile.adaptive == true
             s.dynamicsDirty, s.dynamicsCapMaterial = false, false
             if targetSettling then
@@ -3729,6 +4510,10 @@ local function onPlayerUpdate(player)
             s.blockHitX, s.blockHitY = nil, nil
             s.planSig = -1 -- route 首輪 clear 也必 replan，讓 remapped ban 進 planner
             s.lastSNow = 0
+            s.fullGate, s.gateReason, s.alignSince = false, "sensor", 0
+            s.curveVerifiedUntilS = 0
+            s.verifyBand, s.verifySweep = false, false
+            s.jerkBypassReason = nil
             if s.episodeActive and not targetChanged then
                 s.episodeMapPending = s.banFromRecovery and finite(s.episodeHitX)
                     and finite(s.episodeHitY)
@@ -3745,27 +4530,36 @@ local function onPlayerUpdate(player)
         end
     end
 
-    -- Regime changes rebuild from fresh priors; only material EWMA decreases
-    -- carry a global safe cap into all segments.
+    -- Every dynamics rebuild changes the profile epoch, so no completed-snapshot
+    -- minima or lane envelope may survive even for regime/mass/key changes.
     if s.dynamicsDirty and s.mode == "follow" then
+        Drive.invalidateCommandState(s, vehicle:getCurrentSpeedKmHour(), "HOLD")
         local material = s.dynamicsCapMaterial == true
         MDADVehicleProfile.configureFollower(
             s.profile, s.vehicleProfile, s.runtimeMass, s.rain)
+        s.horizonStamp = -1
+        s.horizonMinBrake, s.horizonMinLat, s.horizonMinCoast = 0, 0, 0
+        s.verifyLineN = 0
+        s.laneCurveEnvelope, s.laneCurveStamp,
+            s.laneCurveS0, s.laneCurveEnd,
+            s.envelopeBuildLat, s.envelopeBuildCoast,
+            s.laneEnvelopeScale = 0, -1, 0, 0, -1, -1, 1
         if material then
             MDADFollower.capSegmentLimits(
-                s.profile, s.safeAccel, s.safeBrake, s.safeLat)
+                s.profile, s.safeAccel, s.safeBrake, s.safeLat, s.safeCoast)
         else
             local idx = s.fstate.idx or 1
             idx = idx - idx % 1
             if idx < 1 then idx = 1 elseif idx >= s.profile.n then idx = s.profile.n - 1 end
-            s.safeAccel, s.safeBrake, s.safeLat =
-                s.profile.segAccel[idx], s.profile.segBrake[idx], s.profile.segLat[idx]
+            s.safeAccel, s.safeBrake, s.safeLat, s.safeCoast =
+                s.profile.segAccel[idx], s.profile.segBrake[idx],
+                s.profile.segLat[idx], s.profile.segCoast[idx]
             MDADFollower.setRuntimeLimits(
-                s.fstate, s.safeAccel, s.safeBrake, s.safeLat)
+                s.fstate, s.safeAccel, s.safeBrake, s.safeLat, s.safeCoast)
         end
         MDADFollower.invalidateDynamics(s.profile)
-        s.dynamicsAccelCap, s.dynamicsBrakeCap, s.dynamicsLatCap =
-            s.safeAccel, s.safeBrake, s.safeLat
+        s.dynamicsAccelCap, s.dynamicsBrakeCap, s.dynamicsLatCap,
+            s.dynamicsCoastCap = s.safeAccel, s.safeBrake, s.safeLat, s.safeCoast
         s.tractionKey, s.kinPrevMs = -1, 0
         s.accelMean, s.accelDev, s.accelTime = 0, 0, 0
         s.accelConfidence, s.accelLower = 0, 0
@@ -3838,6 +4632,9 @@ local function onPlayerUpdate(player)
 
     -- 限速剖面分幀建構：ready 之前不控速也不施力。
     if s.mode == "build" then
+        if s.commandControlState ~= "HOLD" then
+            Drive.invalidateCommandState(s, vehicle:getCurrentSpeedKmHour(), "HOLD")
+        end
         if not MDADFollower.stepBuild(s.profile, BUILD_BUDGET) then return end
         if s.routeReadyEventPending then
             s.routeReadyEventPending = false
@@ -3877,6 +4674,7 @@ local function onPlayerUpdate(player)
         if s.mode ~= "yield" then
             s.mode = "yield"
             vehicle:setRegulator(false)
+            Drive.invalidateCommandState(s, vehicle:getCurrentSpeedKmHour(), "YIELD")
             if not s.yieldNotified then
                 s.yieldNotified = true
                 haloGood(player, "UI_MinidoracatAutoDrive_ManualOverride")
@@ -3904,6 +4702,7 @@ local function onPlayerUpdate(player)
             MDADFollower.resetControl(s.fstate)
         end
         invalidateReturnControl(s)
+        Drive.invalidateCommandState(s, vehicle:getCurrentSpeedKmHour(), "TRACK")
         s.progressState = "disarmed"
         s.progressSince = 0
         haloGood(player, "UI_MinidoracatAutoDrive_Resume")
@@ -3913,6 +4712,7 @@ local function onPlayerUpdate(player)
     -- already yielded above, so neither path can fight the player.
     if s.mode == "unstick" or s.mode == "settle" then
         stepUnstick(s, vehicle, playerNum, now)
+        if s.brakeTerminalFault then Drive.stop(playerNum, KEY_UNSUPPORTED) end
         return
     end
 
