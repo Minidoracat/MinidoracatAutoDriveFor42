@@ -86,7 +86,6 @@ TUNE.ROTATE_ERR_RAD = 1.5708   -- 90°
 -- 標定的，原地調頭阻力小得多，全額力矩＝原地快速旋轉（實機回報「快速循轉」），
 -- 收到 0.4 讓調頭變成緩慢平穩的迴轉。過慢調大、仍太快調小。
 local ROTATE_FORCE_SCALE = 0.4
-local OVERSPEED_BRAKE = 15     -- 現速超出目標速這麼多 km/h 就主動煞（regulator 只會鬆油門）
 local STEER_INPUT_EPS = 0.01   -- getCurrentSteering 視為「玩家在轉」的門檻
 local STEER_DEADZONE = 0.1     -- follower steer（±5）的死區：低於此值不施力（免無謂抖動）
 
@@ -156,7 +155,6 @@ local SETTLE_MS = 4000
 -- 三層相依見 MDAD_Sensor.lua 檔頭）。速度上限檔位：全部是「疊在剖面之上的 min」，
 -- 不改剖面本身；殭屍／屍體檔位受三態沙盒政策×玩家偏好控制（refreshPolicies）。
 local NEED_HALF = 1.4          -- legacy fallback；adaptive session 改用 profile.needHalf
-local DODGE_CAP = 24           -- 繞行 entry／exit 基準速度；保持段另放寬到 28 km/h
 TUNE.ZOMBIE_CAP_1 = 25         -- 走廊內 ≥1 隻殭屍
 TUNE.ZOMBIE_CAP_4 = 15         -- ≥4 隻
 TUNE.ZOMBIE_CAP_8 = 10         -- ≥8 隻
@@ -181,10 +179,9 @@ local DETOUR_FAIL_LEN = 90000  -- detour 路線長 ≥ 此值＝吃了軟封鎖�
 -- 候選枚舉與爬行檔（codex 對抗審方案 6，2026-08-29 路口實測落地）：
 -- 舊版 sweep 打槍只 retry 一次就 blocked，更遠的可行縫從沒被試過。改為
 -- 單輪內 ban→重規劃→world sweep 枚舉；普通／彎道檔全敗後 plan 與 sweep
--- **對稱**縮到爬行檔重枚舉（契約一致，非單邊放寬）、速度壓 SQUEEZE_CAP。
+-- **對稱**縮到爬行檔重枚舉（契約一致，非單邊放寬）、速度壓 Dynamics.DODGE_SQUEEZE_CAP。
 local DODGE_CANDIDATES = 3     -- 每檔位最多枚舉幾條候選縫
 local SQUEEZE_NEED = 1.2       -- legacy fallback；adaptive＝halfW+0.25
-local SQUEEZE_CAP = 10         -- 爬行檔速度上限（km/h；2026-08-29 使用者裁定 6 過慢）
 local SWEEP_BASE = 1.3         -- legacy fallback；adaptive＝needHalf-0.1
 local SWEEP_PHYS_PAD = 0.05    -- baseline 段（a 之前＝路線本身）只驗物理必撞：車身
                                -- OBB 之外只留這麼多餘裕，不套規劃檔位的淨距
@@ -225,10 +222,6 @@ local MASS_VALID_LO, MASS_VALID_HI = 200, 5000 -- getMass 可信區間（kg）
 local MASS_FALLBACK = 1200     -- 區間外／讀取失敗時沿用的標定車質量（kg）
 TUNE.ASSIST_MASS_MIN = 1300
 TUNE.ASSIST_MAX_ERR_RAD = 20 * math.pi / 180
--- 高速誤差護欄：>70 的目標速度按航向誤差線性折返回 70（誤差 0＝滿速、
--- ≥10°＝70）。轉向標定 ≤70；沙盒 ≤70 時零作用。
-local HS_BASE_KMH = 70
-local HS_ERR_RAD = 0.1745      -- 10°
 
 -- 感知閉環的標準／高速組態分界：標準掃描帶前伸 48m，一輪最慢約 200ms，
 -- 再受 250ms 啟動節流影響；85 km/h 是既有標準組態的保守相容上限與高速檔
@@ -266,15 +259,6 @@ local PREF_CORPSE_MD = "MDADCorpseSlow" -- 同上，屍體
 -- 且繞行速度壓到爬行（2026-08-28 實機：轉彎處繞行擦撞）。
 local CURVE_TIGHT_RAD = 0.44   -- ≈25°：障礙群所在路段的累計轉角門檻
 local CURVE_NEED_EXTRA = 0.6   -- 彎道繞行的需求半寬加碼（內輪差＋切內彎的一階補償）
-local DODGE_TIGHT_CAP = 16     -- 彎道 a..b 上限；b..c 為 20，c..d 已過折點後回 24
--- 繞行線的世界空間掃掠複驗：沿剖面每 SWEEP_STEP 公尺取繞行線世界點，對每個硬
--- 障礙的**世界座標**驗最小淨距。弧座標 (s,l) 在路線折點附近的障礙表示會失真
--- （膨脹點沿弧線展開、世界位置偏離實體數米），縫隙判定「判得過但實際會撞」——
--- 2026-08-28 實機：路口左轉繞皮卡直接撞上。世界座標怎麼失真都騙不過這一驗；
--- 直路彎路統一驗，是 setOffset 前的最後防線。
-local SWEEP_STEP = 2
--- 掃掠淨距為逐點計算：車半寬 0.9＋該點半徑（sen.hardR：樹幹 0、整格物 0.7）
--- ＋pursuit 誤差餘裕 0.4——見 sweepClear 內的 clr。
 -- 倒車脫困（unstick）：卡死時 regulator 不會倒車（CarController 只向前供油），
 -- 改用向後衝量直接推車（Derpy towing 同法：relPos=(0,0,0) 純中心力，
 -- map_nav.lua:7847-7850 的工程事實）。退夠距離或超時就收手。
@@ -646,7 +630,7 @@ end
 
 local diagFail
 
--- Driver 一律送具名 payload（Diagnostics 的 a-d 位置式舊介面只留給外部呼叫端）。
+-- Driver 一律送具名 payload。
 local function diagEvent(s, playerNum, name, payload)
     if not s or not s.diag then return end
     local ok, err = pcall(MDADDiagnostics.event, playerNum, name, payload)
@@ -772,9 +756,7 @@ local function startSession(playerObj, playerNum)
     if type(laneBias) ~= "number" or laneBias ~= laneBias then laneBias = 1.0 end
     if laneBias < 0 then laneBias = 0 end
     if laneBias > 2 then laneBias = 2 end
-    if type(MDADFollower.setLaneBias) == "function" then
-        MDADFollower.setLaneBias(fstate, laneBias)
-    end
+    MDADFollower.setLaneBias(fstate, laneBias)
     -- 所有閘門都過了才動玩家的車：先把 regulator 關掉一次。剖面要分幀建（長路線
     -- 七八幀），這段期間 stepFollow 根本不會跑，玩家上車前自己設的定速（或上一位
     -- 駕駛留下的）就會原封不動繼續拉著車跑——啟動自駕的下一秒車子照舊速衝出去。
@@ -911,7 +893,6 @@ local function startSession(playerObj, playerNum)
         returnCapacityFault = false,
         returnStartS = 0, returnEndS = 0,
         returnLaneStart = 0, returnLaneTarget = 0,
-        returnSoftLimit = 2,
         returnReason = nil, returnClearRounds = 0,
         returnX = {}, returnY = {},
         clearStreak = 0,    -- 連續 clear 輪數（堵住解除遲滯）
@@ -1236,7 +1217,7 @@ local function laneBiasOf(s)
     return lb
 end
 
--- 期望行駛線＝laneBias＋（繞行中）smoothstep 側偏。與 follower 前視／sweepClear
+-- 期望行駛線＝laneBias＋（繞行中）smoothstep 側偏。與 follower 前視／sweepLine
 -- 同一段；抽出只為遙測 el／ld 與甩出判定共用，語意逐位元不變。
 local function expectedLaneOf(s)
     local expL = laneBiasOf(s)
@@ -1522,8 +1503,9 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
         s.brakeConfidence, s.brakeLower
     phys.yawConfidence, phys.yawLower =
         s.yawConfidence, s.yawLower
-    phys.steeringKappa = MDADVehicleProfile.steeringKappa(
-        s.vehicleProfile, s.kinPrevV * 3.6)
+    phys.steeringKappa = MDADDynamics.steeringKappa(
+        s.vehicleProfile.wheelbase, s.vehicleProfile.delta0Safe,
+        s.vehicleProfile.deltaVSafe, s.vehicleProfile.maxSpeed, s.kinPrevV * 3.6)
     local sen = s.sensor
     if type(sen) == "table" then
         if finite(sen.roadLo) and finite(sen.roadHi) then
@@ -1730,7 +1712,7 @@ local function footprintSnapshot(s, vehicle, playerNum, out, heading, vx, vy, la
             MDADCorridor.currentFootprintHit(
                 sen.hardS, sen.hardL, sen.hardX, sen.hardY, sen.hardR, sen.hardN,
                 bx, by, heading, s.vehicleProfile.halfW, s.vehicleProfile.halfL,
-                s.lastSNow, latSigned, routeH, expectedLaneOf(s))
+                expectedLaneOf(s))
     else
         -- Corridor 是選配；缺它不能做 OBB 判定，但仍須保留 M3 pure follower。
         blocked, actual, planned, hitI, hitS, hitL, hitX, hitY, poseOnly =
@@ -1958,96 +1940,6 @@ local function sweepGeom(s, needBase)
     local pad = (needBase or s.sweepBase or SWEEP_BASE) - halfW
     if pad < SWEEP_PHYS_PAD then pad = SWEEP_PHYS_PAD end
     return halfW, halfL, pad
-end
-
--- 繞行線掃掠複驗（理由見 SWEEP_STEP 常數註解）。回 true＝全程淨空。
--- tag＝呼叫點標籤（guard/plan/retry）：失敗時印違規點細節——「plan 判可行、
--- sweep 打槍」循環卡死的復盤全靠這行（2026-08-29 路口實測：只有 failed 一行
--- 無從判斷是折角投影失真還是縫真的不夠寬）。
--- needBase（可省略＝SWEEP_BASE）：世界淨距基準。與規劃半寬保持「needBase＝
--- needHalf − 0.1」的固定關係（普通 1.4→1.3、彎道 2.0→1.9、爬行 1.2→1.1），
--- 檔位由提案端決定、掃掠與承諾期守護沿用同值（codex 對抗審：單邊放寬會用
--- 弱門檻掩蓋強檔位的安全語意）。
-local function sweepClear(s, profile, a, b, c, d, offL, tag, needBase)
-    local sen = s.sensor
-    local hn = sen.hardN
-    if hn == 0 then return true, 9 end
-    local minMargin = 9
-    local hx, hy, hr = sen.hardX, sen.hardY, sen.hardR
-    if type(hx) ~= "table" or type(hy) ~= "table" or type(hr) ~= "table" then
-        return false, 99, s.lastSNow, 1, s.lastSNow, 0, 0
-    end
-    for i = 1, hn do
-        if not finite(hx[i]) or not finite(hy[i])
-                or not finite(hr[i]) or hr[i] < 0 then
-            return false, 99, s.lastSNow, 1, s.lastSNow, 0, 0
-        end
-    end
-    if not obbDistanceSq then obbDistanceSq = MDADCorridor.orientedDistanceSqUnchecked end
-    if type(obbDistanceSq) ~= "function" then
-        return false, 99, s.lastSNow, 1, s.lastSNow, 0, 0
-    end
-    local bias = laneBiasOf(s)
-    local halfW, halfL, pad = sweepGeom(s, needBase)
-    local sPos = s.lastSNow
-    if sPos >= a then sPos = a end
-    while sPos <= d do
-        local t
-        if sPos < b then
-            t = (sPos - a) / (b - a)
-            if t < 0 then t = 0 end
-        elseif sPos > c then
-            t = (d - sPos) / (d - c)
-        else
-            t = 1
-        end
-        t = t * t * (3 - 2 * t)
-        local lane = bias + (offL - bias) * t
-        local px, py, nx, ny = posAt(profile, sPos)
-        local wx, wy = px + nx * lane, py + ny * lane
-        local inCap = sPos >= a and sPos <= c
-        local pointPad = sPos < a and SWEEP_PHYS_PAD or pad
-        local poseFx, poseFy = ny, -nx
-        local comX, comZ = s.vehicleProfile.centerOfMassX, s.vehicleProfile.centerOfMassZ
-        local bodyX = wx + poseFx * comZ + poseFy * comX
-        local bodyY = wy + poseFy * comZ - poseFx * comX
-        for i = 1, hn do
-            local ox = hx[i]
-            if ox then
-                local r = hr[i]
-                local d2 = obbDistanceSq(
-                    bodyX, bodyY, poseFx, poseFy, halfW, halfL, ox, hy[i])
-                local rr = MDADDynamics.sweepRadius(
-                    r, pointPad, SWEEP_PHYS_PAD, TUNE.SWEEP_QUANT_COMP)
-                if d2 == nil or d2 <= rr * rr then
-                    local clearance = d2 and (sqrt(d2) - rr) or -99
-                    local phase
-                    if sPos < a then phase = 1
-                    elseif sPos < b then phase = 2
-                    elseif sPos <= c then phase = 3
-                    else phase = 4 end
-                    if getDebug() then
-                        print(string.format(
-                            "%ssweep OBB fail[%s] p%d offL=%.2f @s=%.1f lane=%.2f at=(%.1f,%.1f) hit#%d hw=(%.1f,%.1f) clearance=%.2f",
-                            LOG, tostring(tag or "?"), phase, offL, sPos, lane,
-                            wx, wy, i, ox, hy[i] or 0, clearance))
-                    end
-                    return false, -clearance,
-                        (sen.hardS and sen.hardS[i]) or sPos,
-                        phase, sPos, ox, hy[i] or 0
-                end
-                if inCap then
-                    local probe = rr + minMargin
-                    if d2 < probe * probe then
-                        local clearance = sqrt(d2) - rr
-                        if clearance < minMargin then minMargin = clearance end
-                    end
-                end
-            end
-        end
-        sPos = sPos + SWEEP_STEP
-    end
-    return true, minMargin
 end
 
 -- M6 世界折線掃掠：驗的是 buildOffsetLine 烘好的**同一條**前視線（折點法向
@@ -2925,7 +2817,7 @@ local function replan(s, vehicle, playerNum)
         -- 彎道繞行：障礙群（b..c＝含保持餘裕的實體範圍）落在彎道段時，用放大的
         -- 需求半寬重算——內輪差與切內彎吃掉的餘裕先扣掉再判縫隙。判得過＝採
         -- 加嚴縫（位置更保守）；判不過＝**沿用普通縫降級爬行**，不直接 blocked
-        -- ——內輪差的一階補償在爬行速度下大幅縮小，真擦撞由 sweepClear 世界
+        -- ——內輪差的一階補償在爬行速度下大幅縮小，真擦撞由 sweepLine 世界
         -- 空間複驗把關（2026-08-28 實機：彎道兩台並排車，普通縫過得去卻被
         -- 加嚴判死 → blocked → 煞停 → 卡死脫困鬼打牆；使用者定案：有障礙時
         -- 允許離開道路繞行）。兩種 case 都壓爬行（dodgeTight）。
@@ -3447,7 +3339,6 @@ local function stepFollow(s, vehicle, playerNum, now)
         if not finite(s.cmdV) then s.cmdV = 0 end
         s.cmdA, s.cmdInitialized = 0, true
     end
-    s.lastSpeedKmh = speedKmh
     s.jerkBypassReason = nil
     local vx, vy = vehicle:getX(), vehicle:getY()
     local mult = getGameTime():getMultiplier()
@@ -3532,7 +3423,6 @@ local function stepFollow(s, vehicle, playerNum, now)
             available = s.currentSegWidth * 0.5 - s.vehicleProfile.halfW - 0.4
         end
         if available < 1 then available = 1 elseif available > 3 then available = 3 end
-        s.returnSoftLimit = available
         local absDev = latDev
         if absDev < 0 then absDev = -absDev end
         if not s.returnActive and absDev > available and returnAvailable(s) then
@@ -3582,9 +3472,7 @@ local function stepFollow(s, vehicle, playerNum, now)
                 elseif nb < -TUNE.BIAS_MAX then nb = -TUNE.BIAS_MAX end
                 -- 枚舉的邊界判定跟著抖。承諾釋放後恢復跟隨。
                 if s.dodging or s.returnActive then nb = laneBiasOf(s) end
-                if type(MDADFollower.setLaneBias) == "function" then
-                    MDADFollower.setLaneBias(s.fstate, nb)
-                end
+                MDADFollower.setLaneBias(s.fstate, nb)
                 s.verifyLineN = 0
                 s.laneCurveEnvelope, s.laneCurveStamp,
                     s.laneCurveS0, s.laneCurveEnd,
@@ -4606,9 +4494,7 @@ local function onPlayerUpdate(player)
                 MDADFollower.resetState(s.fstate)
             end
             s.roadBias = 0
-            if type(MDADFollower.setLaneBias) == "function" then
-                MDADFollower.setLaneBias(s.fstate, s.sandBias)
-            end
+            MDADFollower.setLaneBias(s.fstate, s.sandBias)
             if s.sensor then s.sensor.scanBias = s.sandBias end
             if type(MDADOverlay) == "table"
                     and type(MDADOverlay.clearTrail) == "function" then

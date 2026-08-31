@@ -3398,7 +3398,7 @@ ch._vehicle = nil
 -- =====================================================================
 
 -- M3 新增的翻譯鍵集中成一顆表：主 chunk 的 local 數量已接近 Lua 的 200 上限
-local DODGE_CAP_TEST = 24 -- production DODGE_CAP（速度斷言上限）
+local DODGE_CAP_TEST = 24 -- 繞行速度斷言上限（動態 dodge cap 的保守外包絡）
 local DKEY = {
     NEED_MODULE = "UI_MinidoracatAutoDrive_NeedModule",
     ROUTE = "UI_MinidoracatAutoDrive_RouteNotReady",
@@ -7380,9 +7380,7 @@ local function scenarioTelemetry()
 
     local copied = false
     pcall(function()
-        if type(MDADDiagnostics.hasLatest) == "function" and MDADDiagnostics.hasLatest() then
-            copied = MDADDiagnostics.copyLatestPath(0)
-        end
+        copied = MDADDiagnostics.copyLatestPath(0)
         if not copied and type(MDADDiagnostics.copyFolderPath) == "function" then
             copied = MDADDiagnostics.copyFolderPath(0)
         end

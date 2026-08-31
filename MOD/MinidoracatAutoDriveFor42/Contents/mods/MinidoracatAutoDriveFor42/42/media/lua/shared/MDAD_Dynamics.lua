@@ -9,7 +9,6 @@ local sqrt, sin, cos, tan = math.sqrt, math.sin, math.cos, math.tan
 local acos = math.acos
 local atan2 = math.atan2 or math.atan
 local PI = math.pi
-local TWO_PI = PI * 2
 local DEG20 = 20 * PI / 180
 local DEG90 = PI * 0.5
 local EPS = 1e-9
@@ -35,28 +34,12 @@ D.SEG_FALLBACK = 2
 
 D.DODGE_STATIC = 1
 D.DODGE_VEHICLE = 2
-D.DODGE_OTHER = 3
 D.DODGE_STATIC_CAP = 160
 D.DODGE_VEHICLE_CAP = 15
-D.DODGE_OTHER_CAP = 24
 D.DODGE_SQUEEZE_CAP = 10
 
 function D.finite(n)
     return type(n) == "number" and n * 0 == 0
-end
-
-function D.clamp(n, lo, hi)
-    if not D.finite(n) then return lo end
-    if n < lo then return lo end
-    if n > hi then return hi end
-    return n
-end
-
-function D.wrapPi(a)
-    if not D.finite(a) then return 0 end
-    while a > PI do a = a - TWO_PI end
-    while a < -PI do a = a + TWO_PI end
-    return a
 end
 
 function D.distanceToSegmentSq(px, py, ax, ay, bx, by)
@@ -440,8 +423,7 @@ function D.dodgeSpeedCapKmh(gearCap, profileCap, curveCap, clearanceCap,
             and D.finite(curveCap) and curveCap >= 0
             and D.finite(clearanceCap) and clearanceCap >= 0
             and D.finite(visibilityCap) and visibilityCap >= 0)
-            or (classId ~= D.DODGE_STATIC and classId ~= D.DODGE_VEHICLE
-                and classId ~= D.DODGE_OTHER) then
+            or (classId ~= D.DODGE_STATIC and classId ~= D.DODGE_VEHICLE) then
         return 0, 0, "dynamics-invalid"
     end
     local cap = gearCap
@@ -449,9 +431,8 @@ function D.dodgeSpeedCapKmh(gearCap, profileCap, curveCap, clearanceCap,
     if curveCap < cap then cap = curveCap end
     if clearanceCap < cap then cap = clearanceCap end
     if visibilityCap < cap then cap = visibilityCap end
-    local classCap = D.DODGE_OTHER_CAP
-    if classId == D.DODGE_STATIC then classCap = D.DODGE_STATIC_CAP
-    elseif classId == D.DODGE_VEHICLE then classCap = D.DODGE_VEHICLE_CAP end
+    local classCap = D.DODGE_STATIC_CAP
+    if classId == D.DODGE_VEHICLE then classCap = D.DODGE_VEHICLE_CAP end
     if squeeze == true and D.DODGE_SQUEEZE_CAP < classCap then
         classCap = D.DODGE_SQUEEZE_CAP
     end

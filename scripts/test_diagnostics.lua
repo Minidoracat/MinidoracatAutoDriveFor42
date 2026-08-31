@@ -330,13 +330,12 @@ nowMs = 1000000
 local w0, r0, l0 = writerCalls, readerCalls, listCalls
 checkEq(MDADDiagnostics.start(0, nil, profile), false, "disabled start reports inactive")
 MDADDiagnostics.sample(0, nowMs, 10, 20, 0, 30, 30, 100, 0, 0, 0, 0, "follow", 2, true, nil)
-MDADDiagnostics.event(0, "x", 1, 2, 3, 4)
+MDADDiagnostics.event(0, "x")
 MDADDiagnostics.stop(0, "end")
 checkEq(writerCalls, w0, "no getFileWriter")
 checkEq(readerCalls, r0, "no getFileReader")
 checkEq(listCalls, l0, "no listFiles")
 checkEq(sessionFiles(), 0, "no session files")
-check(not MDADDiagnostics.hasLatest(), "hasLatest false")
 enabled = true
 
 --------------------------------------------------------------------------------
@@ -346,7 +345,7 @@ nowMs = 5000
 checkEq(MDADDiagnostics.start(0, nil, profile), true, "enabled start reports active")
 MDADDiagnostics.sample(0, 5000, 1, 2, 0, 10, 10, 50, 0, 0, 0, 0, "follow", 1, false, nil)
 MDADDiagnostics.sample(0, 5100, 1, 2, 0, 10, 10, 50, 0, 0, 0, 0, "follow", 1, false, nil)
-MDADDiagnostics.event(0, "ping", 1)
+MDADDiagnostics.event(0, "ping")
 MDADDiagnostics.sample(0, 5200, 1, 2, 0, 10, 10, 50, 0, 0, 0, 0, "follow", 1, false, nil)
 MDADDiagnostics.sample(0, 5300, 1, 2, 0, 10, 10, 50, 0, 0, 0, 0, "follow", 1, false, nil, true)
 MDADDiagnostics.sample(0, 5400, 1, 2, 0, 10, 10, 50, 0, 1.6, 0, 0, "follow", 1, false, nil)
@@ -473,7 +472,7 @@ MDADDiagnostics.sample(0, 40000, 10700.25, 9800.5, 1.2, 33, 30, 12, 0.4, 8, 0.2,
     "follow", 2, true, sen)
 MDADDiagnostics.sample(0, 40200, 10700.25, 9800.5, 1.2, 33, 30, 12, 0.4, 8, 0.2, 1,
     "follow", 2, true, sen)
-MDADDiagnostics.event(0, 'a"b\\c' .. string.char(1), "ok", 2)
+MDADDiagnostics.event(0, 'a"b\\c' .. string.char(1))
 nowMs = 42000
 MDADDiagnostics.stop(0, "end")
 body = files[sessionPath(1)] or ""
@@ -551,7 +550,6 @@ end
 scenario("copy latest/folder absolute paths and Halo")
 resetFs()
 nowMs = 50000
-check(not MDADDiagnostics.hasLatest(), "no latest before a session")
 check(MDADDiagnostics.copyLatestPath(0) == false, "copy latest fails")
 checkEq(halos[#halos] and halos[#halos].kind, "bad", "latest miss is Halo bad")
 check(MDADDiagnostics.copyFolderPath(0) == true, "folder copy works empty")
@@ -559,8 +557,6 @@ checkEq(clipText, "C:/Zomboid/Lua/MinidoracatAutoDrive/Telemetry", "folder abs p
 lockLiveReads = true
 checkEq(MDADDiagnostics.start(0, nil, profile), true, "active copy session starts")
 local readsBeforeLiveCopy = readerCalls
-check(MDADDiagnostics.hasLatest() == true, "live session is latest without reopening writer")
-checkEq(readerCalls, readsBeforeLiveCopy, "live hasLatest performs no file read")
 halos = {}
 check(MDADDiagnostics.copyLatestPath(0) == true, "copy latest works while writer is active")
 checkEq(readerCalls, readsBeforeLiveCopy, "live copy bypasses locked file reader")
@@ -570,7 +566,6 @@ checkEq(halos[#halos] and halos[#halos].kind, "good", "active copy Halo good")
 nowMs = 51000
 MDADDiagnostics.stop(0, "end")
 lockLiveReads = false
-check(MDADDiagnostics.hasLatest() == true, "hasLatest after session")
 check(MDADDiagnostics.copyLatestPath(0) == true, "copy latest still works after close")
 
 --------------------------------------------------------------------------------
@@ -1245,7 +1240,6 @@ MDADDiagnostics.event(0, "unstick", {
     phase = "success", eid = 3, attempt = 2, x = 10, y = 20,
     s = 30, d = 3.1, duration = 850, speed = -0.5, rear = "clear",
 })
-MDADDiagnostics.event(0, "legacy", 1, 2, 3, 4)
 nowMs = 9201000
 MDADDiagnostics.stop(0, "end")
 local physBody = files[sessionPath(1)] or ""
@@ -1354,8 +1348,6 @@ check(string.find(physBody,
 check(string.find(physBody,
     '"n":"unstick","phase":"success","x":10,"y":20,"eid":3,"attempt":2,"s":30,"d":3.1,"duration":850,"speed":-0.5,"rear":"clear"',
     1, true) ~= nil, "settle completion event records final speed in fixed order")
-check(string.find(physBody, '"n":"legacy","a":1,"b":2,"c":3,"d":4', 1, true) ~= nil,
-    "legacy a-d event payload remains compatible")
 
 closeScenario()
 print()

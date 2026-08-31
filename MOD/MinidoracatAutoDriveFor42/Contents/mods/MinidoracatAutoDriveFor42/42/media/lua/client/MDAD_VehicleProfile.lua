@@ -9,7 +9,6 @@
 --   needHalf, probeR, enginePower, brakingForce, offroadEfficiency, rollInfluence,
 --   tireFrictionMin, tireFrictionAvg, tireFrictionCount, isAnyTireMissing
 -- Pure scalar/cold-path helpers:
---   steeringKappa(profile,speedKmh) -> kappa
 --   priors(profile,runtimeMass,surfaceId,raining,physicalOffroad,adaptive)
 --     -> aDrive,aBrake,aLat,fSurface,fTire,aCoast
 --   updateEWMA(mean,dev,seconds,observation,dt) -> mean,dev,seconds,confidence,lower
@@ -468,26 +467,6 @@ function MDADVehicleProfile.build(vehicle)
     end)
     if ok and type(profile) == "table" then return profile end
     return safePack("")
-end
-
--- VehicleScript.getSteeringClamp(speed) linearly interpolates clamp0 to clampMax
--- over vehicle max speed (VehicleScript.java:1678-1687). This pure scalar is the
--- conservative bicycle-model envelope; it never reads Java or allocates.
-function MDADVehicleProfile.steeringKappa(profile, speedKmh)
-    if type(profile) ~= "table" or not isFinite(speedKmh)
-            or not inOpenHi(profile.maxSpeed, 0, MAX_SPEED_HI)
-            or not inClosed(profile.delta0Safe, SAFE_DV_LO, SAFE_D0_HI)
-            or not inClosed(profile.deltaVSafe, SAFE_DV_LO, profile.delta0Safe)
-            or not inClosed(profile.wheelbase, WB_LO, WB_HI) then
-        return 0
-    end
-    local av = speedKmh
-    if av < 0 then av = -av end
-    local t = av / profile.maxSpeed
-    if t > 1 then t = 1 end
-    local delta = profile.delta0Safe
-        + (profile.deltaVSafe - profile.delta0Safe) * t
-    return math.tan(delta) / profile.wheelbase
 end
 
 -- sqrt of a getter-derived force/mass density normalised against the reference

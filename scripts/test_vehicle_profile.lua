@@ -959,12 +959,6 @@ do
     check(van.bodyW > small.bodyW and van.needHalf > small.needHalf,
         "body width up => needHalf grows")
     check(van.probeR > small.probeR, "body diagonal up => probeR grows")
-    local k0 = P.steeringKappa(van, 0)
-    local k30 = P.steeringKappa(van, 30)
-    local kMax = P.steeringKappa(van, van.maxSpeed)
-    check(k0 > 0 and k30 > 0 and kMax > 0, "steering kappa finite positive")
-    check(k0 >= k30 and k30 >= kMax, "speed up => steering kappa nonincreasing")
-    checkEq(P.steeringKappa(nil, 30), 0, "malformed profile returns zero kappa")
 end
 
 --------------------------------------------------------------------------------

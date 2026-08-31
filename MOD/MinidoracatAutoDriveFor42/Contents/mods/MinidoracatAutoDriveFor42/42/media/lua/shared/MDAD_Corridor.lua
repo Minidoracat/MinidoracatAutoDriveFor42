@@ -51,11 +51,10 @@
 --
 -- MDADCorridor.currentFootprintHit(
 --     hardS, hardL, hardX, hardY, hardR, hardN,
---     bodyX, bodyY, vehicleH, halfW, halfL, sNow, latSigned, routeH, expectedLane)
+--     bodyX, bodyY, vehicleH, halfW, halfL, expectedLane)
 --     ＝ expected-path planner 之外的 current-body OR-gate；不改 plan() 的 baseline。
---       hardX／hardY 都是 table 時，以世界座標為權威；兩者都 nil 時才用
---       ds=hardS-sNow、dl=hardL-latSigned 與 vehicleH-routeH 轉回車身座標。
---       只給一條 world array、table 內有洞、或任一必要純量非有限時，保守回 blocked。
+--       位置一律以世界座標 hardX／hardY 為權威（Sensor 永遠成對配置）；
+--       陣列缺失、table 內有洞、或任一必要純量非有限時，保守回 blocked。
 --     bodyX/bodyY ＝車身 OBB 中心；halfW/halfL ＝ script extents 的一半。
 --       呼叫端應用 vehicle:getWorldPos(COM offset) 算中心；PZ 原生碰撞多邊形同樣以
 --       COM transform 與 extents 建四角（zombie/vehicles/VehiclePoly.java:52-88）。
@@ -185,77 +184,18 @@ function MDADCorridor.orientedDistanceSqUnchecked(cx, cy, fx, fy, halfW, halfL,
     return u * u + v * v
 end
 
--- Squared OBB distance from an origin pose. Project local +X is vehicle-left
--- (`-Nright`), so centre = origin + forward*comZ - Nright*comX.
-function MDADCorridor.orientedDistanceSq(originX, originY, fx, fy, halfW, halfL,
-        comX, comZ, pointX, pointY)
-    if type(originX) ~= "number" or originX * 0 ~= 0
-            or type(originY) ~= "number" or originY * 0 ~= 0
-            or type(fx) ~= "number" or fx * 0 ~= 0
-            or type(fy) ~= "number" or fy * 0 ~= 0
-            or type(halfW) ~= "number" or halfW * 0 ~= 0 or halfW <= 0
-            or type(halfL) ~= "number" or halfL * 0 ~= 0 or halfL <= 0
-            or type(comX) ~= "number" or comX * 0 ~= 0
-            or type(comZ) ~= "number" or comZ * 0 ~= 0
-            or type(pointX) ~= "number" or pointX * 0 ~= 0
-            or type(pointY) ~= "number" or pointY * 0 ~= 0 then return nil end
-    local fl2 = fx * fx + fy * fy
-    if fl2 <= 1e-12 then return nil end
-    if fl2 < 0.999999 or fl2 > 1.000001 then
-        local inv = 1 / sqrt(fl2)
-        fx, fy = fx * inv, fy * inv
-    end
-    local cx = originX + fx * comZ + fy * comX
-    local cy = originY + fy * comZ - fx * comX
-    return MDADCorridor.orientedDistanceSqUnchecked(
-        cx, cy, fx, fy, halfW, halfL, pointX, pointY)
-end
-
--- One oriented vehicle rectangle against one obstacle disk. Driver's trajectory
--- sweep uses the same halfW/halfL geometry as currentFootprintHit, so a long
--- vehicle's front corner cannot pass merely because its centreline is clear.
--- Returns signed clearance (<=0 means hit), or nil for malformed input.
-function MDADCorridor.orientedClearance(cx, cy, fx, fy, halfW, halfL,
-        pointX, pointY, radius, padding)
-    if type(cx) ~= "number" or cx * 0 ~= 0
-            or type(cy) ~= "number" or cy * 0 ~= 0
-            or type(fx) ~= "number" or fx * 0 ~= 0
-            or type(fy) ~= "number" or fy * 0 ~= 0
-            or type(halfW) ~= "number" or halfW * 0 ~= 0 or halfW <= 0
-            or type(halfL) ~= "number" or halfL * 0 ~= 0 or halfL <= 0
-            or type(pointX) ~= "number" or pointX * 0 ~= 0
-            or type(pointY) ~= "number" or pointY * 0 ~= 0
-            or type(radius) ~= "number" or radius * 0 ~= 0 or radius < 0
-            or type(padding) ~= "number" or padding * 0 ~= 0 or padding < 0 then
-        return nil
-    end
-    local fl2 = fx * fx + fy * fy
-    if fl2 <= 1e-12 then return nil end
-    if fl2 < 0.999999 or fl2 > 1.000001 then
-        local inv = 1 / sqrt(fl2)
-        fx, fy = fx * inv, fy * inv
-    end
-    local d2 = MDADCorridor.orientedDistanceSq(
-        cx, cy, fx, fy, halfW, halfL, 0, 0, pointX, pointY)
-    if d2 == nil then return nil end
-    return sqrt(d2) - radius - padding
-end
-
--- 目前車身的 oriented rectangle 對 Sensor 點 disk。世界座標優先；只有整組
--- hardX/hardY 都未提供才走 Frenet fallback。此函式是 plan() 之外的安全 OR-gate，
--- 不能拿 latSigned 覆寫 planner baseline，否則 follower 仍追 expectedLane 時兩邊會打架。
+-- 目前車身的 oriented rectangle 對 Sensor 點 disk。位置一律用世界座標
+-- hardX／hardY，整組缺失或有洞直接 fail-closed。此函式是 plan() 之外的安全
+-- OR-gate，不能拿感知快照覆寫 planner baseline。
 function MDADCorridor.currentFootprintHit(hardS, hardL, hardX, hardY, hardR, hardN,
-        bodyX, bodyY, vehicleH, halfW, halfL, sNow, latSigned, routeH, expectedLane)
+        bodyX, bodyY, vehicleH, halfW, halfL, expectedLane)
     if type(hardS) ~= "table" or type(hardL) ~= "table" or type(hardR) ~= "table"
+        or type(hardX) ~= "table" or type(hardY) ~= "table"
         or type(hardN) ~= "number" or hardN * 0 ~= 0
         or hardN < 0 or floor(hardN) ~= hardN then
         return footprintFailClosed()
     end
 
-    local useWorld = hardX ~= nil or hardY ~= nil
-    if useWorld and (type(hardX) ~= "table" or type(hardY) ~= "table") then
-        return footprintFailClosed()
-    end
     if type(bodyX) ~= "number" or bodyX * 0 ~= 0
         or type(bodyY) ~= "number" or bodyY * 0 ~= 0
         or type(vehicleH) ~= "number" or vehicleH * 0 ~= 0
@@ -264,19 +204,9 @@ function MDADCorridor.currentFootprintHit(hardS, hardL, hardX, hardY, hardR, har
         or type(expectedLane) ~= "number" or expectedLane * 0 ~= 0 then
         return footprintFailClosed()
     end
-    if not useWorld and (type(sNow) ~= "number" or sNow * 0 ~= 0
-        or type(latSigned) ~= "number" or latSigned * 0 ~= 0
-        or type(routeH) ~= "number" or routeH * 0 ~= 0) then
-        return footprintFailClosed()
-    end
 
     local cv, sv = cos(vehicleH), sin(vehicleH)
-    local cd, sd = 0, 0
-    if not useWorld then
-        local delta = vehicleH - routeH
-        cd, sd = cos(delta), sin(delta)
-    end
-    if cv * 0 ~= 0 or sv * 0 ~= 0 or cd * 0 ~= 0 or sd * 0 ~= 0 then
+    if cv * 0 ~= 0 or sv * 0 ~= 0 then
         return footprintFailClosed()
     end
 
@@ -290,26 +220,14 @@ function MDADCorridor.currentFootprintHit(hardS, hardL, hardX, hardY, hardR, har
             return footprintFailClosed()
         end
 
-        local hx, hy, u, v
-        if useWorld then
-            hx, hy = hardX[i], hardY[i]
-            if type(hx) ~= "number" or hx * 0 ~= 0
-                or type(hy) ~= "number" or hy * 0 ~= 0 then
-                return footprintFailClosed()
-            end
-            local dx, dy = hx - bodyX, hy - bodyY
-            u = dx * cv + dy * sv
-            v = -dx * sv + dy * cv
-        else
-            local ds, dl = hs - sNow, hl - latSigned
-            u = ds * cd + dl * sd
-            v = -ds * sd + dl * cd
-            hx = bodyX + u * cv - v * sv
-            hy = bodyY + u * sv + v * cv
-        end
-        if u * 0 ~= 0 or v * 0 ~= 0 or hx * 0 ~= 0 or hy * 0 ~= 0 then
+        local hx, hy = hardX[i], hardY[i]
+        if type(hx) ~= "number" or hx * 0 ~= 0
+            or type(hy) ~= "number" or hy * 0 ~= 0 then
             return footprintFailClosed()
         end
+        local dx, dy = hx - bodyX, hy - bodyY
+        local u = dx * cv + dy * sv
+        local v = -dx * sv + dy * cv
 
         local au, av = u, v
         if au < 0 then au = -au end

@@ -81,7 +81,6 @@ local SCAN_BUDGET = 56         -- 每幀最多實際查詢幾格世界格（±6.
 local HARD_MAX = 768           -- 硬障礙緩衝上限（掃描帶最多 658 個唯一格，保留 110 格防呆）
 local VISITED_ROUNDS = 64      -- 每幾輪重建一次 visited 表
 local SPRITE_CACHE_MAX = 4096  -- sprite 成本快取條目上限
-local VEH_LAT_HALF = 1.2       -- 車輛橫向半寬（膨脹前；配合既有 ±1 膨脹點 → 實體全覆蓋）
 
 -- 橫向取樣：以路線中心線的數學 CCW 法向為正（PZ 世界 Y 向南，這個方向是實際的
 -- 行進方向**右側**），涵蓋 ±6.5 公尺的走廊（路面＋兩側路肩＋緊鄰草地）。

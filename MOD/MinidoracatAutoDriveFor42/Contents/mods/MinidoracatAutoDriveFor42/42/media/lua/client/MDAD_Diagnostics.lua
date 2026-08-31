@@ -15,7 +15,7 @@
 -- HaloTextHelper.addGoodText ISReadABook.lua:95
 --   MinidoracatUI/Widgets/Toast.lua Toast.show（家族框架共享堆疊；NBToast 同款）
 --
--- Telemetry off: start returns before writer/buffer/Java file IO. hasLatest/copy
+-- Telemetry off: start returns before writer/buffer/Java file IO. Copy actions
 -- are explicit user actions that may read old logs; the settings builder never probes.
 -- sample periods: 200ms normal / 100ms critical (5Hz/10Hz); events are ungated.
 -- D.start returns true only after writer, durable header, and append reopen succeed.
@@ -58,7 +58,6 @@ local CRITICAL_ERR_RAD = 1.5707963267949
 local sessions = {}
 local meta = {}
 local ioLogged = {}
-local indexLogged = false
 local lastName = nil
 
 local PK = {
@@ -85,14 +84,6 @@ local EK = {
 local function logOnce(msg)
     if ioLogged[msg] then return end
     ioLogged[msg] = true
-    print(LOG .. msg)
-end
-
--- index 的失敗獨立一支 one-shot：它只是索引，寫不進去不代表 session data 有事，
--- 也不應與 session／manifest 的不同 I/O 故障互相抑制。
-local function logIndexOnce(msg)
-    if indexLogged then return end
-    indexLogged = true
     print(LOG .. msg)
 end
 
@@ -522,7 +513,7 @@ end
 -- index 寫失敗只留一行診斷：session data 已經 durable，索引不該回頭把它判死。
 local function commitIndex()
     if dumpIndex() then return end
-    logIndexOnce("diagnostics session index write failed")
+    logOnce("diagnostics session index write failed")
 end
 
 -- 段落收尾的唯一出口。ioFailed 優先於呼叫端的 arrive／size／stop：
@@ -859,9 +850,6 @@ local function isCritical(mode, err)
         return mode == "blocked" or mode == "dodging" or mode == "offroad"
             or mode == "unstick"
     end
-    if type(mode) == "table" then
-        return mode.blocked == true or mode.dodging == true or mode.offroad == true
-    end
     return false
 end
 
@@ -1083,7 +1071,7 @@ local function encodeSample(s, now, x, y, heading, speed, target, remaining, lat
         .. extra .. '}'
 end
 
-local function encodeEvent(now, name, a, b, c, d)
+local function encodeEvent(now, name, a)
     local line = '{"t":"e","ts":' .. jnum(now) .. ',"n":' .. jstr(tostring(name or ""))
     local function add(k, v)
         if v == nil then return end
@@ -1103,11 +1091,6 @@ local function encodeEvent(now, name, a, b, c, d)
             add(k, a[k])
             i = i + 1
         end
-    else
-        add("a", a)
-        add("b", b)
-        add("c", c)
-        add("d", d)
     end
     return line .. "}"
 end
@@ -1269,11 +1252,11 @@ function D.sample(pn, now, x, y, heading, speed, target, remaining, lat, err,
     return s.active == true
 end
 
-function D.event(pn, name, a, b, c, d)
+function D.event(pn, name, a)
     local s = sessions[pn]
     if not s or not s.active then return end
     local now = nowMs()
-    enqueue(s, encodeEvent(now, name, a, b, c, d), now)
+    enqueue(s, encodeEvent(now, name, a), now)
 end
 
 -- Non-I/O diagnostics faults share one visible terminal path: preserve the
@@ -1315,11 +1298,6 @@ function D.stop(pn, reason)
     s.writer = nil
     s.buf = nil
     sessions[pn] = nil
-end
-
-function D.hasLatest()
-    local name = readPointer()
-    return type(name) == "string" and name ~= "" and latestExists(name)
 end
 
 function D.copyLatestPath(pn)

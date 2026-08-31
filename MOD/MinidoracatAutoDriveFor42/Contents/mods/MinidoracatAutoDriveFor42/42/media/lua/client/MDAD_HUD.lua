@@ -245,17 +245,10 @@ local function setTelemetryRetentionIndex(value)
     return setClientOption("TelemetryRetentionDays", value)
 end
 
-local function copyLatestTelemetry(playerNum)
+local function copyDiag(playerNum, method)
     local diag = MDADDiagnostics
-    if diag and type(diag.copyLatestPath) == "function" then
-        diag.copyLatestPath(playerNum)
-    end
-end
-
-local function copyTelemetryFolder(playerNum)
-    local diag = MDADDiagnostics
-    if diag and type(diag.copyFolderPath) == "function" then
-        diag.copyFolderPath(playerNum)
+    if diag and type(diag[method]) == "function" then
+        diag[method](playerNum)
     end
 end
 
@@ -1130,10 +1123,10 @@ local function registerMiniMapSettings()
         spec.actions = {
             { label = "UI_MinidoracatAutoDrive_CopyLatestTelemetry",
                 tooltip = "UI_MinidoracatAutoDrive_CopyLatestTelemetry_tooltip",
-                run = copyLatestTelemetry },
+                run = function(pn) copyDiag(pn, "copyLatestPath") end },
             { label = "UI_MinidoracatAutoDrive_CopyTelemetryFolder",
                 tooltip = "UI_MinidoracatAutoDrive_CopyTelemetryFolder_tooltip",
-                run = copyTelemetryFolder },
+                run = function(pn) copyDiag(pn, "copyFolderPath") end },
         }
     end
     if api.registerSettingsSection(MDAD.MOD_ID, spec) == true then

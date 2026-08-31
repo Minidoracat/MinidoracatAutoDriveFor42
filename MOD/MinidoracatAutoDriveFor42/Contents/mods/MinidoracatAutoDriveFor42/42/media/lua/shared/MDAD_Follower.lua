@@ -398,12 +398,9 @@ function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile)
     while rangeBase < rangeBlockCount do rangeBase = rangeBase * 2 end
 
     return {
-        route = route,
         pts = pathPts,
         navVersion = navVersion,
         n = n,
-        pointCount = n,
-        sourcePointCount = sourceN,
         maxSpeed = maxKmh,
         maxSpeedMs = maxKmh * MS_PER_KMH,
         lookScale = 1,
@@ -412,7 +409,6 @@ function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile)
         filletN = filletN,
         filletFallbackN = filletFallbackN,
         filletBandValid = filletBandValid == true,
-        filletReason = filletReason,
         wheelbase = filletAdaptive and vehicleProfile.wheelbase or 0,
         delta0Safe = filletAdaptive and vehicleProfile.delta0Safe or 0,
         deltaVSafe = filletAdaptive and vehicleProfile.deltaVSafe or 0,
@@ -426,7 +422,6 @@ function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile)
         segKind = segKind,
         segSourceA = segSourceA,
         segSourceB = segSourceB,
-        filletRadius = filletRadius,
         segAccel = segAccel,
         segBrake = segBrake,
         segLat = segLat,
@@ -1032,14 +1027,10 @@ function MDADFollower.buildOffsetLine(profile, s0, a, b, c, d, l, bias, outX, ou
         local dEnd = ss[j + 1] - sk
         local dStart = sk - ss[j]
         if dEnd < OV_BLEND and j + 1 <= n - 1 then
-            local dh = segH[j + 1] - h
-            while dh > 3.14159265 do dh = dh - 6.2831853 end
-            while dh < -3.14159265 do dh = dh + 6.2831853 end
+            local dh = wrapPi(segH[j + 1] - h)
             h = h + dh * (1 - dEnd / OV_BLEND) * 0.5
         elseif dStart < OV_BLEND and j > 1 then
-            local dh = segH[j - 1] - h
-            while dh > 3.14159265 do dh = dh - 6.2831853 end
-            while dh < -3.14159265 do dh = dh + 6.2831853 end
+            local dh = wrapPi(segH[j - 1] - h)
             h = h + dh * (1 - dStart / OV_BLEND) * 0.5
         end
         local lane = bias

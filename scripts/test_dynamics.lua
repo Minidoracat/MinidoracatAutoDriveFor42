@@ -41,8 +41,6 @@ scenario("finite／clamp／circumcircle")
 eq(D.finite(1), true, "有限數")
 eq(D.finite(0 / 0), false, "NaN")
 eq(D.finite(math.huge), false, "Inf")
-eq(D.clamp(-1, 0, 2), 0, "下限")
-eq(D.clamp(3, 0, 2), 2, "上限")
 near(D.circumcircleKappa(1, 0, 0, 1, -1, 0), 1, 1e-12, "單位圓曲率")
 near(D.circumcircleKappa(0, 0, 1, 0, 2, 0), 0, 1e-12, "共線曲率為零")
 local lPts, lWidths = { 0, 0, 10, 0, 10, 10 }, { 4, 4 }

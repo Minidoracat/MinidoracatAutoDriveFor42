@@ -472,7 +472,7 @@ do
     local fpBefore = footprintChecksum()
     for k = 1, 500 do
         C.currentFootprintHit(fpS, fpL, fpX, fpY, fpR, 2,
-            100, 200, 0, 0.8, 2.9, 10, 0, 0, 2.5)
+            100, 200, 0, 0.8, 2.9, 2.5)
     end
     checkEq(footprintChecksum(), fpBefore,
         "currentFootprintHit 跑 500 次完全不改動五條輸入陣列")
@@ -494,7 +494,7 @@ do
         if mode == "dodge" then accN = accN + 1 end
         local blocked, actual, planned, hitIndex, hitS, hitL, hitX, hitY, poseOnly =
             C.currentFootprintHit(fpS, fpL, fpX, fpY, fpR, 2,
-                100, 200, 0, 0.8, 2.9, 10, 0, 0, 2.5)
+                100, 200, 0, 0.8, 2.9, 2.5)
         fpAcc = fpAcc + actual + planned + hitIndex + hitS + hitL + hitX + hitY
         if blocked and poseOnly then fpHits = fpHits + 1 end
     end
@@ -587,7 +587,7 @@ do
 end
 
 -- =====================================================================
--- 情境十一：current-pose 車身 OBB — world 權威、Frenet fallback、壞資料 fail-closed
+-- 情境十一：current-pose 車身 OBB — world 權威、壞資料 fail-closed
 -- =====================================================================
 scenario("current footprint：長車旋轉 OBB 對 point disk，另與 expected lane 做 OR-gate 歸因")
 do
@@ -600,7 +600,7 @@ do
     local xArr, yArr, rArr = { 104, 103.1 }, { 200, 200.2 }, { 0, 0.7 }
     local blocked, actual, planned, hitIndex, hitS, hitL, hitX, hitY, poseOnly =
         C.currentFootprintHit(sArr, lArr, xArr, yArr, rArr, 2,
-            bodyX, bodyY, 0, halfW, halfL, 10, 0, 0, 2.5)
+            bodyX, bodyY, 0, halfW, halfL, 2.5)
     checkTrue(blocked, "F350 u=3.1／v=0.2／r=0.7 命中 current body")
     checkNear(actual, -0.65, EPS, "rectangle-vs-disk actual clearance")
     checkNear(planned, 0.65, EPS, "同一點對 expected lane 尚有正淨空")
@@ -613,7 +613,7 @@ do
 
     local nearBlocked, _, nearPlanned, _, _, _, _, _, nearPoseOnly =
         C.currentFootprintHit({ 13.1 }, { 0.2 }, { 103.1 }, { 200.2 }, { 0.7 }, 1,
-            bodyX, bodyY, 0, halfW, halfL, 10, 0, 0, 0.2)
+            bodyX, bodyY, 0, halfW, halfL, 0.2)
     checkTrue(nearBlocked, "planned lane 靠近時 current body 仍命中")
     checkNear(nearPlanned, -1.65, EPS, "expected lane 貼點時 planned clearance 為負")
     checkEq(nearPoseOnly, false, "planned lane 也受威脅 → 非 poseOnly")
@@ -622,7 +622,7 @@ do
     -- sqrt(0.2²+1.0²)-0.85 > 0，不應只因落在 OBB 的 AABB 就誤擋。
     local clear, clearActual, _, clearIndex =
         C.currentFootprintHit({ 13.1 }, { 1.8 }, { 103.1 }, { 201.8 }, { 0.7 }, 1,
-            bodyX, bodyY, 0, halfW, halfL, 10, 0, 0, 2.5)
+            bodyX, bodyY, 0, halfW, halfL, 2.5)
     checkEq(clear, false, "u=3.1／v=1.8 已離開 rounded OBB")
     checkNear(clearActual, math.sqrt(0.2 * 0.2 + 1.0) - 0.85, EPS,
         "未命中仍回最小正 actual clearance")
@@ -631,10 +631,10 @@ do
     -- 半徑是逐點契約：同一 u=3.2，細桿 r=0 尚有 0.15m，箱型 r=0.7 已侵入 0.55m。
     local thin, thinActual = C.currentFootprintHit(
         { 13.2 }, { 0 }, { 103.2 }, { 200 }, { 0 }, 1,
-        bodyX, bodyY, 0, halfW, halfL, 10, 0, 0, 0)
+        bodyX, bodyY, 0, halfW, halfL, 0)
     local box, boxActual = C.currentFootprintHit(
         { 13.2 }, { 0 }, { 103.2 }, { 200 }, { 0.7 }, 1,
-        bodyX, bodyY, 0, halfW, halfL, 10, 0, 0, 0)
+        bodyX, bodyY, 0, halfW, halfL, 0)
     checkEq(thin, false, "hardR=0 細桿不命中")
     checkNear(thinActual, 0.15, EPS, "hardR=0 的 actual clearance")
     checkTrue(box, "hardR=0.7 箱型點命中")
@@ -647,7 +647,7 @@ do
     local y45 = bodyY + u45 * c45 + v45 * c45
     local cornerHit, cornerActual = C.currentFootprintHit(
         { 13.45 }, { 1.35 }, { x45 }, { y45 }, { 0.7 }, 1,
-        bodyX, bodyY, h45, halfW, halfL, 10, 0, h45, 1.35)
+        bodyX, bodyY, h45, halfW, halfL, 1.35)
     checkTrue(cornerHit, "45° 長車前角與 disk 相交")
     checkNear(cornerActual, math.sqrt(0.55 * 0.55 + 0.55 * 0.55) - 0.85, EPS,
         "45° 前角用 oriented rectangle 淨空")
@@ -657,41 +657,37 @@ do
     local yOutside = bodyY + uOutside * c45 + vOutside * c45
     local cornerClear, cornerClearance = C.currentFootprintHit(
         { 13.7 }, { 1.2 }, { xOutside }, { yOutside }, { 0.7 }, 1,
-        bodyX, bodyY, h45, halfW, halfL, 10, 0, h45, 1.2)
+        bodyX, bodyY, h45, halfW, halfL, 1.2)
     checkEq(cornerClear, false, "45° expanded AABB 角落不誤判為 OBB-disk 命中")
     checkNear(cornerClearance, math.sqrt(0.8 * 0.8 + 0.4 * 0.4) - 0.85, EPS,
         "AABB 角落保留正 clearance")
 
-    -- X/Y 整組缺失才走 Frenet：delta=45° 的 ds/dl 轉回 u=3.1、v=0.2。
-    local ds = 3.1 * c45 - 0.2 * c45
-    local dl = 3.1 * c45 + 0.2 * c45
-    local fallback, fallbackActual, _, _, _, _, fallbackX, fallbackY =
-        C.currentFootprintHit({ 10 + ds }, { dl }, nil, nil, { 0.7 }, 1,
-            bodyX, bodyY, h45, halfW, halfL, 10, 0, 0, 0)
-    checkTrue(fallback, "hardX/Y 整組缺失時用 heading-delta Frenet fallback 命中")
-    checkNear(fallbackActual, -0.65, EPS, "Frenet fallback actual clearance 與 world 模式一致")
-    checkNear(fallbackX, bodyX + ds, EPS, "fallback 重建 hitX")
-    checkNear(fallbackY, bodyY + dl, EPS, "fallback 重建 hitY")
+    -- X/Y 整組缺失＝感知快照破損：不做 Frenet 重建，一律 fail-closed。
+    local noWorld, _, _, noWorldIndex = C.currentFootprintHit(
+        { 13.1 }, { 0.2 }, nil, nil, { 0.7 }, 1,
+        bodyX, bodyY, h45, halfW, halfL, 0)
+    checkTrue(noWorld, "hardX/Y 整組缺失 → fail-closed blocked")
+    checkEq(noWorldIndex, 0, "缺 world 陣列回 invalid hitIndex=0")
 
     -- 任一必要 parallel 格有洞／NaN 都拒絕整份 snapshot；hitIndex=0 是 invalid sentinel。
     local badNaN, _, _, badNaNIndex = C.currentFootprintHit(
         { 0 / 0 }, { 0.2 }, { 103.1 }, { 200.2 }, { 0.7 }, 1,
-        bodyX, bodyY, 0, halfW, halfL, 10, 0, 0, 2.5)
+        bodyX, bodyY, 0, halfW, halfL, 2.5)
     checkTrue(badNaN, "hardS NaN → fail-closed")
     checkEq(badNaNIndex, 0, "NaN snapshot 回 invalid hitIndex=0")
     local badMissing, _, _, badMissingIndex = C.currentFootprintHit(
         { 13.1 }, {}, { 103.1 }, { 200.2 }, { 0.7 }, 1,
-        bodyX, bodyY, 0, halfW, halfL, 10, 0, 0, 2.5)
+        bodyX, bodyY, 0, halfW, halfL, 2.5)
     checkTrue(badMissing, "hardL 缺項 → fail-closed")
     checkEq(badMissingIndex, 0, "缺項 snapshot 回 invalid hitIndex=0")
     local badWorld, _, _, badWorldIndex = C.currentFootprintHit(
         { 13.1 }, { 0.2 }, { 103.1 }, {}, { 0.7 }, 1,
-        bodyX, bodyY, 0, halfW, halfL, 10, 0, 0, 2.5)
-    checkTrue(badWorld, "只缺一格 hardY 不得偷走 Frenet fallback")
+        bodyX, bodyY, 0, halfW, halfL, 2.5)
+    checkTrue(badWorld, "hardY 有洞 → fail-closed")
     checkEq(badWorldIndex, 0, "world parallel array 有洞 → invalid hitIndex=0")
     local badRadius, _, _, badRadiusIndex = C.currentFootprintHit(
         { 13.1 }, { 0.2 }, { 103.1 }, { 200.2 }, {}, 1,
-        bodyX, bodyY, 0, halfW, halfL, 10, 0, 0, 2.5)
+        bodyX, bodyY, 0, halfW, halfL, 2.5)
     checkTrue(badRadius, "hardR 缺項 → fail-closed")
     checkEq(badRadiusIndex, 0, "radius parallel array 有洞 → invalid hitIndex=0")
 end
@@ -705,22 +701,13 @@ do
     local centreRadius = math.sqrt(px * px + py * py)
     checkTrue(centreRadius > 1.0 + 0.2 + 0.15,
         "legacy centre-distance/half-width circle would report clear")
-    local small = C.orientedClearance(0, 0, 1, 0, 1.0, 1.8, px, py, 0.2, 0.15)
-    local long = C.orientedClearance(0, 0, 1, 0, 1.0, 3.0, px, py, 0.2, 0.15)
-    checkTrue(type(small) == "number" and small > 0, "SmallCar front does not reach obstacle")
-    checkTrue(type(long) == "number" and long <= 0, "long vehicle front corner hits obstacle")
-    local rotated = C.orientedClearance(0, 0, 0, 1, 1.0, 3.0, px, py, 0.2, 0.15)
-    checkTrue(rotated > 0, "OBB heading, not an axis-aligned length box, controls the hit")
-    checkEq(C.orientedClearance(0, 0, 0, 0, 1, 3, px, py, 0.2, 0.15), nil,
-        "zero forward vector fails closed to caller")
-    local noCom = C.orientedDistanceSq(0, 0, 1, 0, 1, 2, 0, 0, 0, -2.2)
-    local shiftedCom = C.orientedDistanceSq(0, 0, 1, 0, 1, 2, 1, 0, 0, -2.2)
-    checkTrue(shiftedCom < noCom,
-        "positive local COM x rotates toward vehicle-left (-Nright)")
-    checkNear(shiftedCom, 0.04, 1e-9, "COM-shifted OBB distance uses transformed centre")
-    local unchecked = C.orientedDistanceSqUnchecked(0, -1, 1, 0, 1, 2, 0, -2.2)
-    checkNear(unchecked, shiftedCom, 1e-12,
-        "prepared unchecked distance is equivalent to public checked wrapper")
+    local rr = 0.2 + 0.15
+    local small = C.orientedDistanceSqUnchecked(0, 0, 1, 0, 1.0, 1.8, px, py)
+    local long = C.orientedDistanceSqUnchecked(0, 0, 1, 0, 1.0, 3.0, px, py)
+    checkTrue(small > rr * rr, "SmallCar front does not reach obstacle")
+    checkTrue(long <= rr * rr, "long vehicle front corner hits obstacle")
+    local rotated = C.orientedDistanceSqUnchecked(0, 0, 0, 1, 1.0, 3.0, px, py)
+    checkTrue(rotated > rr * rr, "OBB heading, not an axis-aligned length box, controls the hit")
     local realType, typeCalls = type, 0
     _G.type = function(v) typeCalls = typeCalls + 1; return realType(v) end
     for _ = 1, 100 do

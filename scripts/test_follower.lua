@@ -248,8 +248,6 @@ do
     checkEq(p.phase, "geometry", "起始相位是 geometry")
     checkEq(p.cursor, 1, "起始 cursor")
     checkEq(p.n, 2, "點數＝#pts/2")
-    checkEq(p.pointCount, 2, "pointCount 對外可讀")
-    checkEq(p.route, okRoute, "profile 帶原 route 引用（呼叫端比對 identity 用）")
     checkEq(p.maxSpeed, 50, "maxSpeed 照收（km/h）")
     checkNear(p.maxSpeedMs, 50 / KMH, 1e-12, "maxSpeedMs＝maxSpeed/3.6")
 
@@ -1355,11 +1353,11 @@ do
         segWidth = { 12, 10 },
     }
     local p = F.begin(route, 120, 4, vp)
-    checkTrue(p ~= nil and p.route == route, "profile retains original route identity")
+    checkTrue(p ~= nil, "profile builds for fillet route")
     while not F.stepBuild(p, 4096) do end
     checkEq(p.filletN, 1, "20-90° feasible corner becomes one fillet")
     checkEq(p.filletFallbackN, 0, "feasible fillet has no fallback")
-    checkTrue(p.n > p.sourcePointCount, "arc samples expand the owned profile only")
+    checkTrue(p.n > #sourcePts / 2, "arc samples expand the owned profile only")
     checkEq(#p.segSurface, p.n - 1, "fillet segSurface aligned")
     checkEq(#p.segWidth, p.n - 1, "fillet segWidth aligned")
     checkEq(#p.segKind, p.n - 1, "fillet kind aligned")
@@ -1380,7 +1378,6 @@ do
             local b1, b2 = 12 / 2 - vp.halfW - 0.4, 10 / 2 - vp.halfW - 0.4
             checkTrue(d1 <= b1 * b1 + 1e-8 or d2 <= b2 * b2 + 1e-8,
                 "arc segment remains in adjacent source road-band union #" .. i)
-            checkTrue(p.filletRadius[i] >= vp.rMin, "arc radius >= rMin #" .. i)
         end
     end
     checkTrue(firstArc ~= nil and firstArc > 1, "arc has a source-line predecessor")
@@ -1469,7 +1466,7 @@ do
     while not F.stepBuild(narrow, 4096) do end
     checkEq(narrow.filletN, 0, "insufficient road-band preserves source corner")
     checkTrue(narrow.filletFallbackN >= 1, "insufficient road-band is explicit fallback")
-    checkEq(narrow.n, narrow.sourcePointCount, "fallback keeps original point count")
+    checkEq(narrow.n, 3, "fallback keeps original point count")
     local fallbackKind = false
     for i = 1, narrow.n - 1 do
         if narrow.segKind[i] == MDADDynamics.SEG_FALLBACK then fallbackKind = true end
