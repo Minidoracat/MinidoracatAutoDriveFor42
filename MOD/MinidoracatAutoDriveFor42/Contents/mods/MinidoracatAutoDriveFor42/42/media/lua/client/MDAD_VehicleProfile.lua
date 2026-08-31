@@ -1,13 +1,14 @@
--- MDAD_VehicleProfile.lua -- cached vehicle scalars for telemetry (Phase A).
--- Observational only: never feeds AutoDrive control, speed, path, footprint, or steer force.
+-- MDAD_VehicleProfile.lua -- one cached vehicle profile per AutoDrive session.
+-- Built only on the session-start cold path and shared by control + diagnostics;
+-- no profile getter is re-read per frame.
 --
 -- MDADVehicleProfile.build(vehicle) -> table of scalars:
---   valid, fallback, scriptName, bodyW, bodyL, halfW, halfL, mass, maxSpeed,
---   wheelbase, track, clamp0, clamp30, clampMax, wheelFriction,
---   delta0Safe, deltaVSafe, rMin, lookScale, rearArm, needHalf, probeR,
---   enginePower, brakingForce, offroadEfficiency, rollInfluence, centerOfMassY,
+--   valid, fallback, geometryValid, scriptName, bodyW, bodyL, halfW, halfL,
+--   centerOfMassX/Y/Z, mass, maxSpeed, wheelbase, track, clamp0, clamp30,
+--   clampMax, wheelFriction, delta0Safe, deltaVSafe, rMin, lookScale, rearArm,
+--   needHalf, probeR, enginePower, brakingForce, offroadEfficiency, rollInfluence,
 --   tireFrictionMin, tireFrictionAvg, tireFrictionCount, isAnyTireMissing
--- Units: body/axle/radius/arm/centerOfMassY are metres; mass is kg; maxSpeed is km/h;
+-- Units: body/axle/radius/arm/centerOfMass are metres; mass is kg; maxSpeed is km/h;
 -- enginePower is the runtime engineForce integer (BaseVehicle.java:8077-8078);
 -- brakingForce is the accumulated part brake force (BaseVehicle.java:9005-9006);
 -- steering clamps are radians; lookScale, wheelFriction, offroadEfficiency,
@@ -23,15 +24,17 @@
 -- Runtime tire friction: script getWheel(i):getId() → vehicle:getPartById("Tire"..id)
 -- → part:getWheelFriction (VehicleScript.java:1721-1723,2701-2702;
 -- VehiclePartOwner.java:44-45; VehiclePart.java:915-916).
--- Script physics: getOffroadEfficiency / getRollInfluence / getCenterOfMassOffset():y()
--- (VehicleScript.java:2002-2003,1670-1671,1650-1651).
+-- Script physics: getOffroadEfficiency / getRollInfluence / getCenterOfMassOffset():x()/:y()/:z()
+-- (VehicleScript.java:2002-2003,1670-1671,1650-1651,2701-2707).
 --
 -- Finite domains (unsupported legacy geometry -> valid=false, safe fallback, never throw):
 --   bodyW [0.6, 3.5], bodyL [1.5, 12], runtime mass [200, 5000],
 --   runtime maxSpeed (0, 1000], wheelbase [0.8, 7], track [0, 4],
 --   wheelFriction (0, 2000] and all sampled clamps [0.1, 0.9], monotonic by sample speed.
--- Additive physics fields never affect valid/fallback. Missing APIs, throws and
--- out-of-domain values stay nil so the telemetry encoder omits unknown readings:
+-- geometryValid depends only on extents and finite in-body COM x/z. Invalid COM x/z
+-- safely falls back to 0; mass, tires, steering and additive telemetry never poison it.
+-- Additive physics fields never affect valid/fallback/geometryValid. Missing APIs,
+-- throws and out-of-domain values stay nil so the telemetry encoder omits unknown:
 --   enginePower [0, 50000], brakingForce [0, 5000], offroadEfficiency (0, 10],
 --   rollInfluence [0, 2], centerOfMassY [-2, 3], runtime tire friction (0, 5],
 --   tireFrictionCount [0, 16].
@@ -150,9 +153,10 @@ local function derive(bodyW, bodyL, wheelbase, clamp0, clampMax)
         rearArm, needHalf, probeR
 end
 
-local function pack(valid, fallback, scriptName, bodyW, bodyL, mass, maxSpeed,
+local function pack(valid, fallback, geometryValid, scriptName, bodyW, bodyL,
+        centerOfMassX, centerOfMassY, centerOfMassZ, mass, maxSpeed,
         wheelbase, track, clamp0, clamp30, clampMax, wheelFriction,
-        enginePower, brakingForce, offroadEfficiency, rollInfluence, centerOfMassY,
+        enginePower, brakingForce, offroadEfficiency, rollInfluence,
         tireFrictionMin, tireFrictionAvg, tireFrictionCount, isAnyTireMissing)
     local halfW, halfL, delta0Safe, deltaVSafe, rMin, lookScale,
         rearArm, needHalf, probeR =
@@ -160,11 +164,15 @@ local function pack(valid, fallback, scriptName, bodyW, bodyL, mass, maxSpeed,
     return {
         valid = valid == true,
         fallback = fallback == true,
+        geometryValid = geometryValid == true,
         scriptName = scriptName,
         bodyW = bodyW,
         bodyL = bodyL,
         halfW = halfW,
         halfL = halfL,
+        centerOfMassX = centerOfMassX,
+        centerOfMassY = centerOfMassY,
+        centerOfMassZ = centerOfMassZ,
         mass = mass,
         maxSpeed = maxSpeed,
         wheelbase = wheelbase,
@@ -184,7 +192,6 @@ local function pack(valid, fallback, scriptName, bodyW, bodyL, mass, maxSpeed,
         brakingForce = brakingForce,
         offroadEfficiency = offroadEfficiency,
         rollInfluence = rollInfluence,
-        centerOfMassY = centerOfMassY,
         tireFrictionMin = tireFrictionMin,
         tireFrictionAvg = tireFrictionAvg,
         tireFrictionCount = tireFrictionCount,
@@ -194,9 +201,9 @@ end
 
 local function safePack(scriptName)
     local wb = clamp(WB_BODY * SAFE_L, WB_LO, WB_FALLBACK_HI)
-    return pack(false, true, scriptName or "", SAFE_W, SAFE_L, SAFE_MASS,
-        SAFE_MAX_SPEED, wb, SAFE_TRACK, SAFE_C0, SAFE_C30, SAFE_CMAX, SAFE_FRIC,
-        nil, nil, nil, nil, nil, nil, nil, nil, nil)
+    return pack(false, true, false, scriptName or "", SAFE_W, SAFE_L, 0, nil, 0,
+        SAFE_MASS, SAFE_MAX_SPEED, wb, SAFE_TRACK, SAFE_C0, SAFE_C30, SAFE_CMAX,
+        SAFE_FRIC, nil, nil, nil, nil, nil, nil, nil, nil)
 end
 
 function MDADVehicleProfile.build(vehicle)
@@ -216,6 +223,7 @@ function MDADVehicleProfile.build(vehicle)
 
         local valid = true
         local fallback = false
+        local geometryValid = true
 
         local ext = call(script, "getExtents")
         local bodyW = axis(ext, "x")
@@ -224,11 +232,13 @@ function MDADVehicleProfile.build(vehicle)
             bodyW = SAFE_W
             valid = false
             fallback = true
+            geometryValid = false
         end
         if not inClosed(bodyL, BODY_L_LO, BODY_L_HI) then
             bodyL = SAFE_L
             valid = false
             fallback = true
+            geometryValid = false
         end
 
         local mass = call(vehicle, "getMass")
@@ -342,6 +352,22 @@ function MDADVehicleProfile.build(vehicle)
             fallback = true
         end
 
+        -- COM x/z defines the OBB centre used by VehiclePoly. It is control geometry,
+        -- not optional telemetry: missing/out-of-body values fall back to origin and
+        -- make geometryValid=false without coupling mass/tire/steering validity.
+        local com = call(script, "getCenterOfMassOffset")
+        local centerOfMassX = axis(com, "x")
+        local centerOfMassZ = axis(com, "z")
+        local comHalfW, comHalfL = bodyW * 0.5, bodyL * 0.5
+        if not inClosed(centerOfMassX, -comHalfW, comHalfW) then
+            centerOfMassX = 0
+            geometryValid = false
+        end
+        if not inClosed(centerOfMassZ, -comHalfL, comHalfL) then
+            centerOfMassZ = 0
+            geometryValid = false
+        end
+
         -- Additive physics: unknown/illegal readings stay nil and never affect geometry.
         local enginePower = call(vehicle, "getEnginePower")
         if not inClosed(enginePower, ENG_LO, ENG_HI) then enginePower = nil end
@@ -353,7 +379,6 @@ function MDADVehicleProfile.build(vehicle)
         end
         local rollInfluence = call(script, "getRollInfluence")
         if not inClosed(rollInfluence, ROLL_LO, ROLL_HI) then rollInfluence = nil end
-        local com = call(script, "getCenterOfMassOffset")
         local centerOfMassY = axis(com, "y")
         if not inClosed(centerOfMassY, COMY_LO, COMY_HI) then centerOfMassY = nil end
 
@@ -419,9 +444,10 @@ function MDADVehicleProfile.build(vehicle)
             else isAnyTireMissing = nil end
         end
 
-        return pack(valid, fallback, scriptName, bodyW, bodyL, mass, maxSpeed,
+        return pack(valid, fallback, geometryValid, scriptName, bodyW, bodyL,
+            centerOfMassX, centerOfMassY, centerOfMassZ, mass, maxSpeed,
             wheelbase, track, clamp0, clamp30, clampMax, wheelFriction,
-            enginePower, brakingForce, offroadEfficiency, rollInfluence, centerOfMassY,
+            enginePower, brakingForce, offroadEfficiency, rollInfluence,
             tireFrictionMin, tireFrictionAvg, tireFrictionCount, isAnyTireMissing)
     end)
     if ok and type(profile) == "table" then return profile end

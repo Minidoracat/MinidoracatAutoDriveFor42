@@ -17,6 +17,7 @@
     "UI_MinidoracatAutoDrive_RouteNotReady": "還沒有路線，請先在地圖上設定導航目標。",
     "UI_MinidoracatAutoDrive_NotDriver": "要坐在駕駛座才能自動駕駛。",
     "UI_MinidoracatAutoDrive_EngineOff": "需要引擎運轉中，而且電瓶還有電。",
+    "UI_MinidoracatAutoDrive_UnsupportedVehicle": "這輛車的車身幾何資料不完整，無法安全啟動自動駕駛。",
     "UI_MinidoracatAutoDrive_ManualOverride": "已交還手動操作，自動駕駛待命中。",
     "UI_MinidoracatAutoDrive_Arrived": "已抵達目的地。",
     "UI_MinidoracatAutoDrive_LostRoute": "路線遺失，自動駕駛已關閉。",

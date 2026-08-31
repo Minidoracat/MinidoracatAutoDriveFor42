@@ -1,15 +1,15 @@
 --[[
-繞行縫隙規劃器的離線測試：載入**真正的** shared/MDAD_Corridor.lua，跑數值情境並斷言。
+繞行縫隙規劃器與 current-pose footprint guard 的離線測試：載入真正的 production Lua。
 
     lua scripts/test_corridor.lua        （repo 根目錄或 scripts/ 執行皆可；標準 Lua 5.x）
 
-為什麼需要（縫隙判定的錯誤 luac -p 與 smoke_harness 都抓不到）：
+為什麼需要（縫隙／車身幾何判定的錯誤 luac -p 與 smoke_harness 都抓不到）：
 - 「車半寬有沒有膨脹進障礙」寫錯，遊戲裡的表徵是車擦著障礙開過去或明明過得去卻
   停在路中央。肉眼分不出是門檻少加了 OBS_HALF、還是群聚合把遠障礙拉進來
 - 群聚合是「多輪線性掃描直到邊界不再擴張」（Kahlua 不准 table.sort），輪數上限
   截短群的行為必須有測試釘住，否則之後有人把上限改小會安靜地生出偏短的繞行段
 - 斷點單調（a < b <= c < d）是側偏剖面的前提；障礙就在眼前時的夾限最容易破壞它
-- 「零 table 配置」沒有計數器就無法證明
+- 兩個純函式的「零 table 配置」沒有計數器就無法證明
 
 本檔載入的 production（真檔，無任何 source-text 斷言）：
     shared/MDAD_Corridor.lua
@@ -20,10 +20,10 @@
 情境用的暫時變數若全放檔案層級會頂到上限，之後新增一條斷言就編譯不過。
 
 限制（必須誠實面對）：
-- 本檔只驗「給定 (s, l) 點集 → 側偏剖面」這一層。點集本身正不正確（sprite 分類、
-  走廊投影）屬 client/MDAD_Sensor 的責任，不在此驗
-- 所有期望值都由測試自己按契約手算（膨脹半徑 clr = 0.7 + needHalf、格點 0.25 錨在
-  l = 0、群間距 6），刻意不重用 production 的常數推導，否則常數打錯兩邊一起錯
+- 本檔驗「(s, l) 點集 → 側偏剖面」與「hard 點集 → current OBB 淨空」兩層。
+  點集本身正不正確（sprite 分類、走廊投影）屬 client/MDAD_Sensor 的責任，不在此驗
+- 所有期望值都由測試自己按契約手算（planner 膨脹半徑、格點／群距，以及 footprint
+  的 rectangle-vs-disk 與固定 0.15m），刻意不重用 production 常數推導
 - 這是標準 Lua 不是 Kahlua：next/assert/xpcall/table.sort 的誤用由 scripts/verify_mod.py
   的靜態掃描負責（本檔在 42/media 之外，可自由用標準函式庫）
 ]]
@@ -435,13 +435,23 @@ do
 end
 
 -- =====================================================================
--- 情境七：熱路徑守則 — plan 不改動輸入陣列、零 table 配置
+-- 情境七：熱路徑守則 — 兩個純函式都不改輸入陣列、零 table 配置
 -- =====================================================================
-scenario("熱路徑守則：plan 視輸入為唯讀、單次與多次呼叫都不配置 table")
+scenario("熱路徑守則：plan／currentFootprintHit 唯讀，且呼叫期間不配置 table")
 do
     local sArr = { 12, 18, 30, 34, 41, 60 }
     local lArr = { 2.6, -0.4, 1.5, 1.5, -2.9, 0.2 }
     local N = 6
+    local fpS, fpL = { 14, 13.1 }, { 0, 0.2 }
+    local fpX, fpY, fpR = { 104, 103.1 }, { 200, 200.2 }, { 0, 0.7 }
+    local function footprintChecksum()
+        local acc = 0
+        for i = 1, 2 do
+            acc = acc + fpS[i] * 3 + fpL[i] * 5 + fpX[i] * 7 + fpY[i] * 11
+                + fpR[i] * 13
+        end
+        return acc
+    end
 
     local function checksum()
         local acc = 0
@@ -459,9 +469,22 @@ do
     checkEq(#sArr, N, "hardS 長度沒被動到")
     checkEq(#lArr, N, "hardL 長度沒被動到")
 
+    local fpBefore = footprintChecksum()
+    for k = 1, 500 do
+        C.currentFootprintHit(fpS, fpL, fpX, fpY, fpR, 2,
+            100, 200, 0, 0.8, 2.9, 10, 0, 0, 2.5)
+    end
+    checkEq(footprintChecksum(), fpBefore,
+        "currentFootprintHit 跑 500 次完全不改動五條輸入陣列")
+    checkEq(#fpS, 2, "footprint hardS 長度沒被動到")
+    checkEq(#fpL, 2, "footprint hardL 長度沒被動到")
+    checkEq(#fpX, 2, "footprint hardX 長度沒被動到")
+    checkEq(#fpY, 2, "footprint hardY 長度沒被動到")
+    checkEq(#fpR, 2, "footprint hardR 長度沒被動到")
+
     -- 零配置：關掉 GC 讓堆增量純粹反映配置量。
     -- 每次呼叫若建一個 table（Lua 5.4 空表約 56 bytes），2 萬次會多出 1MB 以上。
-    local accS, accN = 0, 0
+    local accS, accN, fpAcc, fpHits = 0, 0, 0, 0
     collectgarbage("collect")
     collectgarbage("stop")
     local kb0 = collectgarbage("count")
@@ -469,16 +492,24 @@ do
         local mode, a, b, c, d, offL = C.plan(sArr, lArr, N, 1.2 + (k % 5) * 0.1, CORR)
         accS = accS + a + b + c + d + offL
         if mode == "dodge" then accN = accN + 1 end
+        local blocked, actual, planned, hitIndex, hitS, hitL, hitX, hitY, poseOnly =
+            C.currentFootprintHit(fpS, fpL, fpX, fpY, fpR, 2,
+                100, 200, 0, 0.8, 2.9, 10, 0, 0, 2.5)
+        fpAcc = fpAcc + actual + planned + hitIndex + hitS + hitL + hitX + hitY
+        if blocked and poseOnly then fpHits = fpHits + 1 end
     end
     local kb1 = collectgarbage("count")
     collectgarbage("restart")
     checkTrue(accS == accS, "累加值是有限數（迴圈真的跑完了）")
     checkTrue(accN > 0, "迴圈裡確實走過 dodge 分支（不是空轉）")
-    checkTrue(kb1 - kb0 < 16, "20000 次 plan 的堆增量 < 16KB（實得 "
+    checkTrue(fpAcc == fpAcc, "footprint 累加值是有限數（迴圈真的跑完了）")
+    checkEq(fpHits, 20000, "配置 spy 每圈都走 footprint hit／poseOnly 分支")
+    checkTrue(kb1 - kb0 < 16, "20000 次 plan＋currentFootprintHit 的堆增量 < 16KB（實得 "
         .. string.format("%.1f", kb1 - kb0) .. "KB；每次建一個 table 會是 1MB 以上）")
 
     -- 模組表面：該有的都在，且沒有任何 PZ 相依
     checkEq(type(C.plan), "function", "plan 存在")
+    checkEq(type(C.currentFootprintHit), "function", "currentFootprintHit 存在")
     checkEq(C.OBS_HALF, 0.7, "OBS_HALF 常數")
     checkEq(C.GROUP_GAP, 6, "GROUP_GAP 常數")
     checkEq(C.ROUNDS_MAX, 8, "ROUNDS_MAX 常數")
@@ -553,6 +584,116 @@ do
     checkTrue(offSide > 0, "既有右側 safe 維持右側")
     checkNear(offSide - 2.25, 0.75, EPS, "同側外推量恰為上限 0.75m")
     checkEq(C.COMFORT_EXTRA, 0.7, "comfort extra 由既有 margin 飽和點固定為 0.7")
+end
+
+-- =====================================================================
+-- 情境十一：current-pose 車身 OBB — world 權威、Frenet fallback、壞資料 fail-closed
+-- =====================================================================
+scenario("current footprint：長車旋轉 OBB 對 point disk，另與 expected lane 做 OR-gate 歸因")
+do
+    local bodyX, bodyY = 100, 200
+    local halfW, halfL = 0.8, 2.9 -- F350 近似 extents；長車前緣比 planner 掃描起點更早碰障礙
+
+    -- 最近 actual clearance 必選第二點：車身座標 u=3.1、v=0.2、r=0.7。
+    -- du=0.2、dv=0、disk=0.85，所以 actual=-0.65；expected lane=2.5 則 planned=+0.65。
+    local sArr, lArr = { 14, 13.1 }, { 0, 0.2 }
+    local xArr, yArr, rArr = { 104, 103.1 }, { 200, 200.2 }, { 0, 0.7 }
+    local blocked, actual, planned, hitIndex, hitS, hitL, hitX, hitY, poseOnly =
+        C.currentFootprintHit(sArr, lArr, xArr, yArr, rArr, 2,
+            bodyX, bodyY, 0, halfW, halfL, 10, 0, 0, 2.5)
+    checkTrue(blocked, "F350 u=3.1／v=0.2／r=0.7 命中 current body")
+    checkNear(actual, -0.65, EPS, "rectangle-vs-disk actual clearance")
+    checkNear(planned, 0.65, EPS, "同一點對 expected lane 尚有正淨空")
+    checkEq(hitIndex, 2, "多點時選 actual clearance 最小者")
+    checkNear(hitS, 13.1, EPS, "回傳命中點 hardS")
+    checkNear(hitL, 0.2, EPS, "回傳命中點 hardL")
+    checkNear(hitX, 103.1, EPS, "world 模式原樣回傳權威 hardX")
+    checkNear(hitY, 200.2, EPS, "world 模式原樣回傳權威 hardY")
+    checkTrue(poseOnly, "actual hit 但 expected path clear → poseOnly")
+
+    local nearBlocked, _, nearPlanned, _, _, _, _, _, nearPoseOnly =
+        C.currentFootprintHit({ 13.1 }, { 0.2 }, { 103.1 }, { 200.2 }, { 0.7 }, 1,
+            bodyX, bodyY, 0, halfW, halfL, 10, 0, 0, 0.2)
+    checkTrue(nearBlocked, "planned lane 靠近時 current body 仍命中")
+    checkNear(nearPlanned, -1.65, EPS, "expected lane 貼點時 planned clearance 為負")
+    checkEq(nearPoseOnly, false, "planned lane 也受威脅 → 非 poseOnly")
+
+    -- 同一顆障礙移到 v=1.8：du=0.2、dv=1.0，圓角淨距
+    -- sqrt(0.2²+1.0²)-0.85 > 0，不應只因落在 OBB 的 AABB 就誤擋。
+    local clear, clearActual, _, clearIndex =
+        C.currentFootprintHit({ 13.1 }, { 1.8 }, { 103.1 }, { 201.8 }, { 0.7 }, 1,
+            bodyX, bodyY, 0, halfW, halfL, 10, 0, 0, 2.5)
+    checkEq(clear, false, "u=3.1／v=1.8 已離開 rounded OBB")
+    checkNear(clearActual, math.sqrt(0.2 * 0.2 + 1.0) - 0.85, EPS,
+        "未命中仍回最小正 actual clearance")
+    checkEq(clearIndex, 1, "合法非命中 snapshot 仍回最近點索引")
+
+    -- 半徑是逐點契約：同一 u=3.2，細桿 r=0 尚有 0.15m，箱型 r=0.7 已侵入 0.55m。
+    local thin, thinActual = C.currentFootprintHit(
+        { 13.2 }, { 0 }, { 103.2 }, { 200 }, { 0 }, 1,
+        bodyX, bodyY, 0, halfW, halfL, 10, 0, 0, 0)
+    local box, boxActual = C.currentFootprintHit(
+        { 13.2 }, { 0 }, { 103.2 }, { 200 }, { 0.7 }, 1,
+        bodyX, bodyY, 0, halfW, halfL, 10, 0, 0, 0)
+    checkEq(thin, false, "hardR=0 細桿不命中")
+    checkNear(thinActual, 0.15, EPS, "hardR=0 的 actual clearance")
+    checkTrue(box, "hardR=0.7 箱型點命中")
+    checkNear(boxActual, -0.55, EPS, "hardR=0.7 的 actual clearance")
+
+    -- 45° 長車：先將車身座標的前角點旋回世界。corner distance 逐軸算，不用 AABB。
+    local h45, c45 = math.pi * 0.25, math.sqrt(0.5)
+    local u45, v45 = 3.45, 1.35
+    local x45 = bodyX + u45 * c45 - v45 * c45
+    local y45 = bodyY + u45 * c45 + v45 * c45
+    local cornerHit, cornerActual = C.currentFootprintHit(
+        { 13.45 }, { 1.35 }, { x45 }, { y45 }, { 0.7 }, 1,
+        bodyX, bodyY, h45, halfW, halfL, 10, 0, h45, 1.35)
+    checkTrue(cornerHit, "45° 長車前角與 disk 相交")
+    checkNear(cornerActual, math.sqrt(0.55 * 0.55 + 0.55 * 0.55) - 0.85, EPS,
+        "45° 前角用 oriented rectangle 淨空")
+
+    local uOutside, vOutside = 3.7, 1.2
+    local xOutside = bodyX + uOutside * c45 - vOutside * c45
+    local yOutside = bodyY + uOutside * c45 + vOutside * c45
+    local cornerClear, cornerClearance = C.currentFootprintHit(
+        { 13.7 }, { 1.2 }, { xOutside }, { yOutside }, { 0.7 }, 1,
+        bodyX, bodyY, h45, halfW, halfL, 10, 0, h45, 1.2)
+    checkEq(cornerClear, false, "45° expanded AABB 角落不誤判為 OBB-disk 命中")
+    checkNear(cornerClearance, math.sqrt(0.8 * 0.8 + 0.4 * 0.4) - 0.85, EPS,
+        "AABB 角落保留正 clearance")
+
+    -- X/Y 整組缺失才走 Frenet：delta=45° 的 ds/dl 轉回 u=3.1、v=0.2。
+    local ds = 3.1 * c45 - 0.2 * c45
+    local dl = 3.1 * c45 + 0.2 * c45
+    local fallback, fallbackActual, _, _, _, _, fallbackX, fallbackY =
+        C.currentFootprintHit({ 10 + ds }, { dl }, nil, nil, { 0.7 }, 1,
+            bodyX, bodyY, h45, halfW, halfL, 10, 0, 0, 0)
+    checkTrue(fallback, "hardX/Y 整組缺失時用 heading-delta Frenet fallback 命中")
+    checkNear(fallbackActual, -0.65, EPS, "Frenet fallback actual clearance 與 world 模式一致")
+    checkNear(fallbackX, bodyX + ds, EPS, "fallback 重建 hitX")
+    checkNear(fallbackY, bodyY + dl, EPS, "fallback 重建 hitY")
+
+    -- 任一必要 parallel 格有洞／NaN 都拒絕整份 snapshot；hitIndex=0 是 invalid sentinel。
+    local badNaN, _, _, badNaNIndex = C.currentFootprintHit(
+        { 0 / 0 }, { 0.2 }, { 103.1 }, { 200.2 }, { 0.7 }, 1,
+        bodyX, bodyY, 0, halfW, halfL, 10, 0, 0, 2.5)
+    checkTrue(badNaN, "hardS NaN → fail-closed")
+    checkEq(badNaNIndex, 0, "NaN snapshot 回 invalid hitIndex=0")
+    local badMissing, _, _, badMissingIndex = C.currentFootprintHit(
+        { 13.1 }, {}, { 103.1 }, { 200.2 }, { 0.7 }, 1,
+        bodyX, bodyY, 0, halfW, halfL, 10, 0, 0, 2.5)
+    checkTrue(badMissing, "hardL 缺項 → fail-closed")
+    checkEq(badMissingIndex, 0, "缺項 snapshot 回 invalid hitIndex=0")
+    local badWorld, _, _, badWorldIndex = C.currentFootprintHit(
+        { 13.1 }, { 0.2 }, { 103.1 }, {}, { 0.7 }, 1,
+        bodyX, bodyY, 0, halfW, halfL, 10, 0, 0, 2.5)
+    checkTrue(badWorld, "只缺一格 hardY 不得偷走 Frenet fallback")
+    checkEq(badWorldIndex, 0, "world parallel array 有洞 → invalid hitIndex=0")
+    local badRadius, _, _, badRadiusIndex = C.currentFootprintHit(
+        { 13.1 }, { 0.2 }, { 103.1 }, { 200.2 }, {}, 1,
+        bodyX, bodyY, 0, halfW, halfL, 10, 0, 0, 2.5)
+    checkTrue(badRadius, "hardR 缺項 → fail-closed")
+    checkEq(badRadiusIndex, 0, "radius parallel array 有洞 → invalid hitIndex=0")
 end
 
 -- =====================================================================

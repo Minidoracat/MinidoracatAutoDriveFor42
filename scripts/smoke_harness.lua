@@ -867,11 +867,19 @@ local function newVehicle(opts)
         -- 每幀施力的帳：frame＝本幀次數、max＝觀測窗內單幀最高、total＝總次數
         _imp = { frame = 0, max = 0, total = 0, useAfterRelease = 0 },
     }
+    local ext = newVec3():set(opts.bodyW or 1.8, 1, opts.bodyL or 4.4)
+    local com = newVec3():set(opts.comX or 0, opts.comY or 0.5, opts.comZ or 0)
+    local script = {}
+    function script:getFullName() return opts.scriptName or "Base.TestVehicle" end
+    function script:getExtents() return ext end
+    function script:getCenterOfMassOffset() return com end
+    v._script, v._com = script, com
     nextVehicleId = nextVehicleId + 1
     vehiclesById[v._id] = v
 
     function v:getId() return self._id end
     function v:getMaxSpeed() return self._maxSpeed end
+    function v:getScript() return self._script end
     function v:getSquare() return self._square end
     function v:getBattery() return self._part end
     function v:getDriver() return self._driver end
@@ -912,6 +920,15 @@ local function newVehicle(opts)
     function v:getForwardVector(out)
         drive.calls.getForwardVector = drive.calls.getForwardVector + 1
         return out:set(self._fwdX, 0, self._fwdY)
+    end
+    -- getWorldPos(float,float,float,out) returns PZ world x/y/z in Vector3f x/y/z
+    -- (BaseVehicle.java:1871-1889). Local z is forward; local x is lateral.
+    function v:getWorldPos(localX, localY, localZ, out)
+        drive.calls.getWorldPos = (drive.calls.getWorldPos or 0) + 1
+        return out:set(
+            self._x + localZ * self._fwdX - localX * self._fwdY,
+            self._y + localZ * self._fwdY + localX * self._fwdX,
+            self._z + localY)
     end
 
     -- addImpulse(impulse, relPos)＝BaseVehicle.java:678-689／3311-3313。**單槽**：
@@ -3322,6 +3339,7 @@ local DKEY = {
     LOST = "UI_MinidoracatAutoDrive_LostRoute",
     NOT_DRIVER = "UI_MinidoracatAutoDrive_NotDriver",
     ENGINE = "UI_MinidoracatAutoDrive_EngineOff",
+    UNSUPPORTED = "UI_MinidoracatAutoDrive_UnsupportedVehicle",
     MANUAL = "UI_MinidoracatAutoDrive_ManualOverride",
     ARRIVED = "UI_MinidoracatAutoDrive_Arrived",
     START = "UI_MinidoracatAutoDrive_Start",
@@ -3661,6 +3679,19 @@ checkEq(haloKey(), DKEY.ROUTE, "badroute 提示 RouteNotReady")
 checkEq(drive.calls.setRegulator, 0, "啟動失敗不動 regulator（閘門在寫 session 之前）")
 checkTrue(dveh._regulator, "啟動失敗：玩家自己設的定速原封不動")
 drive.nav.route = droute
+
+-- 控制幾何必須是原車 script 的可信 extents/COM；不可拿 fallback 盒啟動。
+do
+    local realBuild = MDADVehicleProfile.build
+    MDADVehicleProfile.build = function()
+        return { geometryValid = false, halfW = 0.9, halfL = 2.2 }
+    end
+    driveReset(dveh)
+    checkFalse(MDAD.Drive.start(dp), "geometryValid=false：拒絕啟動")
+    checkEq(haloKey(), DKEY.UNSUPPORTED, "不支援載具提示 UnsupportedVehicle")
+    MDADVehicleProfile.build = realBuild
+end
+
 
 -- 條件齊備
 driveReset(dveh)
@@ -4655,106 +4686,45 @@ checkEq(drive.calls.forceBrake, 0, "關閉自駕不硬煞（車繼續滑是慣�
 drive.debug = false
 
 -- =====================================================================
--- 情境二十七：卡死偵測與倒車脫困（M4：卡死先倒車自救，救不了才紅字停車）
+-- 情境二十七：單一 progress supervisor（Sensor 缺席時 rear unknown fail-closed）
 -- =====================================================================
-scenario("卡死偵測與倒車脫困：三凍結滿 5 秒進倒車、退 3m 回跟線、超時紅字；停車政策直接紅字；調頭與行駛不誤觸")
+scenario("進度監督：70km/h 輪速但 2.5s 僅移 0.04m 進 suspect；rear unknown 零倒車衝量；旋轉 10° 視為健康")
 
--- 卡死形狀（實機 2026-08-28）：車頭抵牆，speed≈0、remaining 不動、errDeg 不動，
--- regulator 開著硬推。fake 車的位置由測試控制，speed 歸零＋位置凍結＝完美重現。
--- 本情境 harness 未載 MDADSensor（session.sensor=false＝M3 fallback）——脫困刻意
--- 不依賴感知，純靠卡死偵測與向後衝量。
-checkTrue(armDrive(), "卡死情境啟動")
--- 車先開到路線後段（x=140，第 35 段）再卡死：「脫困成功保留投影游標」的回歸只在
--- 遠離起點時驗得出來——若游標被歸零，投影窗（±12 段）會夾在路線開頭、前視點落到
--- 車後方 80 公尺、車頭誤差 ~180° 進原地調頭把定速壓到 12（M4 review 的測試盲點：
--- 舊測試在起點脫困，游標本來就是 1）。投影窗每幀最多前進 12 段，先跑幾幀跟上。
-dveh._x = 140
-for _ = 1, 4 do driveTick(dp, dveh) end
-dveh._speed = 0
--- 第 1 幀只是「開始觀測到凍結」（記下計時起點），從那一幀起算滿 5 秒才升級：
--- 5 幀 ×1000ms 後經過 4000ms，session 必須還在跟線
-for i = 1, 5 do
-    nowMs = nowMs + 1000
-    driveTick(dp, dveh)
-end
-checkTrue(MDAD.Drive.isActive(0), "凍結 4 秒（未滿 5 秒）：session 還活著（不能太急著放棄）")
-checkEq(dveh._regulator, true, "凍結期間 regulator 照常在推（這正是要被斷路的狀態）")
-nowMs = nowMs + 1000
-driveReset(dveh)
-driveTick(dp, dveh)
-checkTrue(MDAD.Drive.isActive(0), "滿 5 秒：不直接放棄，session 轉入倒車脫困")
-checkEq(haloKey(), DKEY.UNSTICK, "脫困開始提示 Unstick")
-checkEq(halos[1] and halos[1].kind, "good", "脫困是綠字（自救中，不是失敗）")
-checkEq(drive.calls.regulatorOff, 1, "進脫困先關 regulator（不能邊推油門邊倒退）")
-
--- 脫困幀：向後衝量（與車頭前向點積為負）、每幀仍只施力一次、不搶煞車
-driveReset(dveh)
-driveTick(dp, dveh)
-checkEq(dveh._imp.total, 1, "脫困幀恰施力一次（單槽鐵則不因模式而異）")
-checkTrue(dveh._imp.x * dveh._fwdX + dveh._imp.z * dveh._fwdY < 0,
-    "衝量朝車尾（與前向點積為負）＝倒車")
-checkEq(dveh._imp.rx, 0, "relPos 全零＝純中心力（Derpy towing 同法，不產生力矩）")
-checkEq(dveh._imp.rz, 0, "relPos 全零（z 分量）")
-checkEq(drive.calls.forceBrake, 0, "脫困不搶煞車")
-
--- 成功：退離卡點 3 公尺 → 回跟線（fstate 側偏與誤差歷史一併重設）
-dveh._x = 136.9
-driveReset(dveh)
-driveTick(dp, dveh)
-checkTrue(MDAD.Drive.isActive(0), "退夠 3 公尺：session 還活著")
-driveReset(dveh)
-driveTick(dp, dveh)
-checkTrue(dveh._regulator, "脫困成功回跟線：regulator 重新供油")
-checkTrue(drive.calls.maxRegSpeed > 12,
-    "恢復幀定速走剖面而非調頭爬行（實得 " .. tostring(drive.calls.maxRegSpeed)
-    .. "；投影游標若被歸零，前視點跳回路線開頭、誤差 ~180° 進調頭、定速壓 12）")
-
--- 失敗：再卡一次、時限內退不出去（位置凍結）→ 紅字 StopStuck、session 結束
-dveh._x, dveh._speed = 136.9, 0
-for i = 1, 6 do
-    nowMs = nowMs + 1000
-    driveTick(dp, dveh)
-end
-checkTrue(MDAD.Drive.isActive(0), "第二次卡死：又轉入脫困（額度 3 次，前進歸零前用不完不放棄）")
-nowMs = nowMs + 4000
-driveReset(dveh)
-driveTick(dp, dveh)
-checkFalse(MDAD.Drive.isActive(0), "脫困超時（4 秒退不到 3m＝後方也頂死）：紅字停車")
-checkEq(haloKey(), DKEY.STUCK, "放棄提示 StopStuck")
-checkEq(halos[1] and halos[1].kind, "bad", "放棄是紅字（要玩家來處理）")
-checkEq(dveh._regulator, false, "停車後 regulator 是關的")
-
--- 停車政策（ObstaclePolicy=2）：卡死不倒車，直接紅字（最保守的伺服器設定）
 setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
-    AutoDriveMaxSpeed = 40, ObstaclePolicy = 2, RightLaneBias = 0 })
-checkTrue(armDrive(), "停車政策情境啟動")
-dveh._speed = 0
-for i = 1, 6 do
-    nowMs = nowMs + 1000
-    driveTick(dp, dveh)
-end
-checkFalse(MDAD.Drive.isActive(0), "停車政策：卡死滿 5 秒直接停車不倒車")
-checkEq(haloKey(), DKEY.STUCK, "停車政策的卡死提示 StopStuck")
-setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
-
--- 原地調頭不誤觸：速度近零但航向每幀在轉（> STUCK_ERR_EPS），計時不斷重置
-checkTrue(armDrive(), "原地調頭情境啟動")
-dveh._speed = 0
-for i = 1, 7 do
-    setHeading(dveh, 0.3 + i * 0.15)
-    nowMs = nowMs + 1000
-    driveTick(dp, dveh)
-end
-checkTrue(MDAD.Drive.isActive(0), "航向持續在轉：7 秒也不算卡死（原地調頭是正常動作）")
-
--- 正常行駛不誤觸：速度在動就直接重置（其餘兩個觀測連看都不看）
-checkTrue(armDrive(), "行駛情境啟動")
-dveh._speed = 20
-nowMs = nowMs + 6000
+    AutoDriveMaxSpeed = 70, ObstaclePolicy = 1, RightLaneBias = 0 })
+dp._modData.MDADGear = 3
+checkTrue(armDrive(), "高速零進度情境啟動")
+dveh._speed = 70
+-- armDrive 的第一個 follow 幀已建立 progress anchor；保持同 heading，只移 0.04m。
+nowMs = nowMs + 2501
+dveh._x = 0.04
+driveReset(dveh)
 driveTick(dp, dveh)
-checkTrue(MDAD.Drive.isActive(0), "速度 20 km/h：跨 6 秒的單幀也不觸發（moving 直接重置）")
-MDAD.Drive.stop(0, nil)
+checkTrue(MDAD.Drive.isActive(0), "2.5s 零進度先進 recover stop，不在向量仍借出時停 session")
+checkTrue(drive.calls.forceBrake >= 1, "suspect 的 unknown near 進 recovery brake")
+checkEq(dveh._imp.total, 0, "suspect/recover transition 零 impulse")
 
+-- reported wheel speed 收到 0 後才做 rear check；Sensor 缺席＝unknown/unloaded，
+-- 必須 fail-closed 停止，不能沿用舊版「感知缺席也直接倒車」。
+dveh._speed = 0
+nowMs = nowMs + 16
+driveReset(dveh)
+driveTick(dp, dveh)
+checkFalse(MDAD.Drive.isActive(0), "rear unknown：停止 session")
+checkEq(haloKey(), DKEY.STUCK, "rear unknown 使用 StopStuck 提示")
+checkEq(dveh._imp.total, 0, "rear unknown 全程零 reverse impulse")
+
+-- Rotation itself is progress: 12° > 10° re-arms the 2.5s window even at zero world/S.
+checkTrue(armDrive(), "旋轉進度情境啟動")
+dveh._speed = 0
+nowMs = nowMs + 2600
+setHeading(dveh, 0.52)
+driveReset(dveh)
+driveTick(dp, dveh)
+checkTrue(MDAD.Drive.isActive(0), "原地 yaw 12° 視為健康，不進 recovery")
+checkTrue(haloKey() ~= DKEY.UNSTICK and haloKey() ~= DKEY.STUCK,
+    "旋轉進度無脫困／放棄提示")
+MDAD.Drive.stop(0, nil)
 
 -- =====================================================================
 -- 情境二十八：走廊感知與繞行（真 MDAD_Sensor + MDAD_Corridor，假世界）
@@ -4960,12 +4930,23 @@ function drive.clearCell(x, y)
 end
 
 -- 跑完一整輪掃描＋規劃；nowMs 先跨過 250ms 節流窗。
-function drive.scanRound()
+function drive.scanRound(freezeProgress)
     nowMs = nowMs + 300
-    -- ±6.5×48m 帶 ~658 格／56 格每幀 ≈ 12 幀；前一情境可能留半截舊輪（先吃掉
-    -- 最多 12 幀），28 幀保證「殘留輪＋本輪」都完成。250ms 節流保證一次呼叫
-    -- 至多開始一個新輪，輪次語意（遲滯計數）不受 tick 數影響。
+    -- Most sensor-policy fixtures report a non-zero wheel speed. Keep their mock world
+    -- physically consistent with the progress supervisor without changing final geometry:
+    -- after the round is complete (nextMs is in the future), move >1m for one tick and
+    -- return for one tick. Intentional stuck/contact cases pass true to suppress this.
     for _ = 1, 28 do driveTick(dp, dveh) end
+    local av = dveh._speed
+    if av < 0 then av = -av end
+    if not freezeProgress and av >= 1 and MDAD.Drive.isActive(0) then
+        local ox, oy = dveh._x, dveh._y
+        dveh._x = ox + dveh._fwdX * 1.1
+        dveh._y = oy + dveh._fwdY * 1.1
+        driveTick(dp, dveh)
+        dveh._x, dveh._y = ox, oy
+        driveTick(dp, dveh)
+    end
 end
 
 -- ① 淨空：跑完一輪，沒有任何檔位介入，定速吃滿剖面（沙盒 40）
@@ -6124,6 +6105,10 @@ do
     for _, y in ipairs({ -5, -4, -2, -1, 0, 1, 2, 4, 5 }) do
         drive.putSolid(20, y, "harness_wall_" .. y)
     end
+    -- 先進入 blocked 的 15m 煞停線；x=0 仍屬 target=12 接近段，
+    -- 不適合驗 target=0 的合法停等豁免。
+    dveh._x = 8
+    driveTick(dp, dveh)
     drive.scanRound()
     checkEq(haloKey(), DKEY.BLOCKED, "(c) 堵死紅字")
     dveh._speed = 0 -- 車停妥（blocked 等待）
@@ -6177,76 +6162,301 @@ do
     MDAD.Drive.stop(0, nil)
 end
 
--- (d) 推撞偵測（幽靈車兜底）：MP streaming 抖動下實體車可能完全不在
---     感知裡；靠「輪速 ≥8 而車體世界位移近零」交給脫困。不能用沿線 s：
---     十字路口橫向回線時 s 暫停但車體真正在動。累計要求感知非空（實測場景
---     路旁欄杆 hardN 47+）：放一棵不擋線的路緣樹當錨。
+-- (d) 2.5s supervisor：near-clear 的高檔只 pulse 一次；VERIFY 失敗後 rear-clear
+--     才進 unstick。倒車期間每 100ms rear 重查，新增障礙的那幀必須 0 impulse。
 do
-    checkTrue(armDrive(), "(d) 啟動")
-    drive.putTree(10, 5, "harness_push_anchor") -- l=5.5 不擋線：只讓 hardN>0
-    drive.scanRound() -- 首輪完成（過感知空窗）＋感知非空（推撞累計 gate 開）
-    dveh._speed = 17 -- 輪速 17 km/h，但假車世界座標不動＝頂著幽靈推
-    driveReset(dveh)
-    driveTick(dp, dveh)  -- pushSince 起算
-    nowMs = nowMs + 2600 -- 逾 PUSH_MS 2.5 秒窗
-    driveTick(dp, dveh)
-    checkEq(haloKey(), DKEY.UNSTICK, "(d) 高速零進度 2.6 秒：視同卡死進倒車脫困")
-    MDAD.Drive.stop(0, nil)
-    -- 對照：進度正常時計時不斷重臂——同樣的時間跨度不觸發
-    checkTrue(armDrive(), "(d) 對照組啟動")
+    drive.fillWorld(-10, 70, -7, 7)
+    dveh._com:set(0, 0.5, 1.1) -- valid non-zero COM，舊 bodyCenter anchor 會與 vehicle origin 差 >1m
+    checkTrue(armDrive(), "(d) gear-reset/rear 情境啟動")
+    setHeading(dveh, 0)
+    driveTick(dp, dveh) -- yaw progress，重臂到 heading=0
     drive.scanRound()
-    dveh._speed = 17
+    dveh._x = 8
+    driveTick(dp, dveh) -- new-route verify 必須以既有 s>1 的同座標系重新 anchor
+    dveh._speed, dveh._trans = 70, 3
+    local gearReads = 0
+    local realTransmission = dveh.getTransmissionNumber
+    dveh.getTransmissionNumber = function(self)
+        gearReads = gearReads + 1
+        return realTransmission(self)
+    end
+    nowMs = nowMs + 2501
     driveReset(dveh)
-    driveTick(dp, dveh)  -- 起算（pushX/Y=0）
-    nowMs = nowMs + 2000
-    dveh._x = 4          -- 窗內世界位移 4m ≥ PUSH_FREE_M 3 → 重臂
     driveTick(dp, dveh)
-    nowMs = nowMs + 2000 -- 距重臂僅 2 秒 < 2.5 秒窗
+    checkTrue(MDAD.Drive.isActive(0), "(d) suspect 後 session 活著")
+    checkEq(dveh._imp.total, 0, "(d) gear-reset transition 0 impulse")
+    checkEq(drive.calls.forceBrake, 0, "(d) 150ms neutral pulse 不混 forceBrake")
+    dveh._speed = 0
+    nowMs = nowMs + 100
+    driveReset(dveh)
     driveTick(dp, dveh)
-    checkTrue(haloKey() ~= DKEY.UNSTICK and haloKey() ~= DKEY.STUCK,
-        "(d) 進度正常：累計 4 秒不誤觸（實得 " .. tostring(haloKey()) .. "）")
-    checkTrue(MDAD.Drive.isActive(0), "(d) 對照組 session 活著")
-    -- 十字路口回線對照：沿線 x 不動、只橫移 y。舊 pushS 算法會在原窗
-    -- 逾 2.5 秒時誤判；世界位移算法必因 4m 橫移重臂。
-    dveh._y = 4
+    checkEq(dveh._regulator, false, "(d) pulse 未滿 150ms 繼續 regulator off")
+    checkEq(dveh._imp.total, 0, "(d) pulse 未滿 150ms 仍 0 impulse")
+    checkEq(drive.calls.forceBrake, 0, "(d) pulse 未滿 150ms 仍不 forceBrake")
+    drive.nav.route = newRoute(40, 0, 0, 4, 0) -- same-target cutover after pulse deadline
+    nowMs = nowMs + 150
+    driveReset(dveh)
     driveTick(dp, dveh)
-    nowMs = nowMs + 1000
+    checkTrue(MDAD.Drive.isActive(0),
+        "(d) gear-reset cutover build 後重新 anchor 2s VERIFY")
+    nowMs = nowMs + 2001
+    driveReset(dveh)
+    driveTick(dp, dveh) -- VERIFY timeout → recovery stop → initial rear clear → unstick
+    checkEq(gearReads, 1, "(d) 同 episode 高檔 getter/pulse 恰一次")
+    checkEq(haloKey(), DKEY.UNSTICK, "(d) rear clear 才開始 unstick")
+    drive.putSolid(4, 0, "harness_rear_mid") -- 車在 x=8、COM forward offset=1.1；rear sweep 約 x=3..7
+    nowMs = nowMs + 100
+    driveReset(dveh)
     driveTick(dp, dveh)
-    checkTrue(haloKey() ~= DKEY.UNSTICK and haloKey() ~= DKEY.STUCK,
-        "(d) 橫向回線 4m：沿線進度暫停也不誤觸（實得 " .. tostring(haloKey()) .. "）")
-    checkTrue(MDAD.Drive.isActive(0), "(d) 橫向回線對照組 session 活著")
-    drive.clearCell(10, 5)
+    checkFalse(MDAD.Drive.isActive(0), "(d) unstick 中途 rear hard 立即停用")
+    checkEq(dveh._imp.total, 0, "(d) rear hard 命中幀零 reverse impulse")
+    checkEq(haloKey(), DKEY.STUCK, "(d) rear hard 使用 StopStuck")
+    dveh.getTransmissionNumber = realTransmission
+    dveh._com:set(0, 0.5, 0)
+end
+
+-- (d1b) Sensor probe Java errors preserve detail through the public pcall boundary.
+-- Driver fails closed, logs the detail once, and sends no reverse impulse.
+do
+    drive.fillWorld(-10, 70, -7, 7)
+    checkTrue(armDrive(), "(d1b) probe throw 啟動")
+    setHeading(dveh, 0)
+    driveTick(dp, dveh)
+    dveh._speed, dveh._trans = 0, 1
+    local realGrid = drive.cell.getGridSquare
+    drive.cell.getGridSquare = function(self, x, y, z)
+        if x == -4 then error("probe-grid-boom") end -- rear strip only；不炸 forward Sensor.step
+        return realGrid(self, x, y, z)
+    end
+    nowMs = nowMs + 2501
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    drive.cell.getGridSquare = realGrid
+    checkFalse(MDAD.Drive.isActive(0), "(d1b) probe throw fail-closed 停止")
+    checkEq(dveh._imp.total, 0, "(d1b) probe throw 0 reverse impulse")
+    local sawDetail = false
+    for _, line in ipairs(drive.logs) do
+        if line:find("probe-grid-boom", 1, true) then sawDetail = true end
+    end
+    checkTrue(sawDetail, "(d1b) probe throw detail log once 可見")
+    dveh._trans = 2
+end
+
+-- (d2) current-body contact 產生 episode ban；成功倒 3m 先 SETTLE 到 <1km/h，
+--      sensor reset 與 same-target route cutover 都保留 ban；前進 10m＋兩輪 clear 才 rearm。
+do
+    drive.fillWorld(-10, 70, -7, 7)
+    local realPlan = MDADCorridor.plan
+    local sawRecoveryBan = false
+    MDADCorridor.plan = function(hs, hl, hn, need, corr, prefer, hr, ...)
+        if type(hr) == "table" then
+            for i = 1, hn do
+                if hr[i] == 0.6 then sawRecoveryBan = true end
+            end
+        end
+        return realPlan(hs, hl, hn, need, corr, prefer, hr, ...)
+    end
+    checkTrue(armDrive(), "(d2) contact/settle 情境啟動")
+    setHeading(dveh, 0)
+    driveTick(dp, dveh)
+    dveh._trans = 1 -- contact 不走 gear-reset；低檔也不應 pulse
+    drive.putSolid(2, 0, "harness_current_contact")
+    drive.scanRound(true)
+    dveh._x = 1.1 -- 已跨舊 progress anchor 1m，但車身仍包住 x=2.5 障礙
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkEq(dveh._regulator, false,
+        "(d2) world progress 達標不得旁路 currentBlocked")
+    checkTrue(drive.calls.forceBrake >= 1,
+        "(d2) currentBlocked 只由兩輪 footprint clear 解除")
+    drive.clearCell(2, 0)
+    drive.scanRound()
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkEq(dveh._regulator, false, "(d2) 一輪 footprint clear 仍保持 currentBlocked")
+    drive.scanRound()
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkEq(dveh._regulator, true, "(d2) 連續兩輪 footprint clear 才解除 currentBlocked")
+    drive.putSolid(2, 0, "harness_current_contact_again")
+    drive.scanRound(true)
+    dveh._x = 0
+    dveh._speed = 0
+    driveReset(dveh)
+    driveTick(dp, dveh) -- 先以目前卡點重臂 progress anchor，再累計完整 2.5s
+    nowMs = nowMs + 2501
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkEq(haloKey(), DKEY.UNSTICK, "(d2) current contact rear-clear 後開始 unstick")
+    nowMs = nowMs + 16
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkEq(dveh._imp.total, 1, "(d2) unstick 幀恰一次 reverse impulse")
+    checkTrue(dveh._imp.x * dveh._fwdX + dveh._imp.z * dveh._fwdY < 0,
+        "(d2) reverse impulse 無 longitudinal forward 分量")
+
+    dveh._x, dveh._speed = -3.1, -13
+    nowMs = nowMs + 16
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkTrue(MDAD.Drive.isActive(0), "(d2) 退 3m 成功後進 settle，session 保留")
+    checkEq(dveh._regulator, false, "(d2) settle regulator off")
+    checkTrue(drive.calls.forceBrake >= 1, "(d2) -13km/h settle 強制煞停")
+    checkEq(dveh._imp.total, 0, "(d2) settle 0 impulse")
+    dveh._speed = -0.5
+    nowMs = nowMs + 100
+    driveReset(dveh)
+    driveTick(dp, dveh) -- settle 完成，sensor reset + forced replan
+    drive.clearCell(2, 0) -- remap 不得依賴首輪仍掃到舊 hard point
+
+    sawRecoveryBan = false
+    drive.nav.route = newRoute(40, 0, 0, 4, 0) -- same target deviation
+    nowMs = nowMs + 300
+    driveTick(dp, dveh)
+    drive.scanRound()
+    checkTrue(sawRecoveryBan, "(d2) same-target route cutover remap 並保留 recovery ban")
+
+    sawRecoveryBan = false
+    drive.nav.route = newRoute(40, 0, 20, 4, 0) -- old hit 離新 route > corridor
+    nowMs = nowMs + 300
+    driveTick(dp, dveh)
+    drive.scanRound()
+    checkFalse(sawRecoveryBan,
+        "(d2) world hit 離新 route 太遠：保留 attempts/world memory 但不套 Frenet ban")
+
+    sawRecoveryBan = false
+    drive.nav.route = newRoute(40, 0, 0, 4, 0)
+    nowMs = nowMs + 300
+    driveTick(dp, dveh)
+    drive.scanRound()
+    checkTrue(sawRecoveryBan, "(d2) 後續 near route 可重新投影同一 world hit")
+    dveh._x, dveh._speed = 13.0, 20 -- >10m from projected world hit
+    drive.scanRound()
+    drive.scanRound() -- >10m world + 連續兩輪 footprint clear
+    sawRecoveryBan = false
+    drive.putSolid(20, 0, "harness_rearmed")
+    drive.scanRound()
+    checkFalse(sawRecoveryBan, "(d2) 10m＋兩輪 clear 後 episode rearmed、ban 清除")
+    MDADCorridor.plan = realPlan
+    drive.clearCell(20, 0)
+    dveh._trans = 2
     MDAD.Drive.stop(0, nil)
 end
 
--- (d2) 推撞物理回饋：繞行中第一次推撞不倒車——ban 該縫、強制重規劃換縫
---     （2026-08-29 實測：sweep 理論淨空但實體卡住，倒車後又 commit 同縫循環）
+-- (d2b) SETTLE itself is bounded: non-finite speed or a brake phase exceeding its
+-- deadline stops instead of holding forceBrake forever.
 do
-    local realSetOffset = MDADFollower.setOffset
-    local offs = {}
-    MDADFollower.setOffset = function(st2, a2, b2, c2, d2, off, ...)
-        offs[#offs + 1] = off
-        return realSetOffset(st2, a2, b2, c2, d2, off, ...)
+    local function enterSettle(label)
+        drive.fillWorld(-10, 70, -7, 7)
+        checkTrue(armDrive(), label .. " 啟動")
+        setHeading(dveh, 0)
+        driveTick(dp, dveh)
+        dveh._trans = 1
+        drive.putSolid(2, 0, "harness_settle_bound")
+        drive.scanRound(true)
+        dveh._speed = 0
+        nowMs = nowMs + 2501
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        dveh._x, dveh._speed = -3.1, -13
+        nowMs = nowMs + 16
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        checkTrue(MDAD.Drive.isActive(0), label .. " 已進 settle")
     end
-    checkTrue(armDrive(), "(d2) 啟動")
-    drive.putSolid(20, 0, "harness_pushban")
-    drive.scanRound()
-    checkEq(haloKey(), DKEY.DODGE, "(d2) 繞行提案")
-    local firstOff = offs[#offs]
-    dveh._speed = 17 -- 輪速 17、位置卡死＝沿承諾線頂住看不見的實體
+
+    enterSettle("(d2b) NaN")
+    dveh._speed = 0 / 0
+    nowMs = nowMs + 16
+    driveTick(dp, dveh)
+    checkFalse(MDAD.Drive.isActive(0), "(d2b) settle NaN fail-stop")
+
+    enterSettle("(d2b) deadline")
+    dveh._speed = -5
+    nowMs = nowMs + 4001
+    driveTick(dp, dveh)
+    checkFalse(MDAD.Drive.isActive(0), "(d2b) settle deadline fail-stop")
+    dveh._trans = 2
+end
+
+-- (d2c) A true target change never preserves recovery state. Mid-unstick it first
+-- enters bounded settle (zero impulse), then builds the new route after stopping.
+do
+    drive.fillWorld(-10, 70, -7, 7)
+    checkTrue(armDrive(), "(d2c) target change mid-unstick 啟動")
+    setHeading(dveh, 0)
+    driveTick(dp, dveh)
+    dveh._trans = 1
+    drive.putSolid(2, 0, "harness_target_change_recovery")
+    drive.scanRound(true)
+    driveReset(dveh)
+    driveTick(dp, dveh) -- current contact 完成後明確建立 2.5s progress anchor
+    dveh._speed = 0
+    nowMs = nowMs + 2501
+    driveTick(dp, dveh)
+    checkEq(haloKey(), DKEY.UNSTICK, "(d2c) 已進 unstick")
+    dveh._speed = -5
+    drive.nav.tx = 300.1
+    drive.nav.route = newRoute(40, 0, 0, 4, 0)
+    nowMs = nowMs + 250
     driveReset(dveh)
     driveTick(dp, dveh)
-    nowMs = nowMs + 2600
-    driveTick(dp, dveh)
-    checkTrue(haloKey() ~= DKEY.UNSTICK and haloKey() ~= DKEY.STUCK,
-        "(d2) 繞行中第一次推撞：不倒車（實得 " .. tostring(haloKey()) .. "）")
-    drive.scanRound() -- 強制重規劃（planSig 已歸零）：ban 舊縫、提新縫
-    MDADFollower.setOffset = realSetOffset
-    local lastOff = offs[#offs]
-    checkTrue(#offs >= 2 and lastOff ~= firstOff,
-        "(d2) 換縫重提案（首縫 " .. tostring(firstOff) .. " → 新縫 " .. tostring(lastOff) .. "）")
-    drive.clearCell(20, 0)
+    checkTrue(MDAD.Drive.isActive(0), "(d2c) true target change 保留 bounded settle session")
+    checkEq(dveh._imp.total, 0, "(d2c) target change 當幀停止 reverse impulse")
+    checkTrue(drive.calls.forceBrake >= 1, "(d2c) target change mid-unstick 先 settle")
+    dveh._speed = 0
+    nowMs = nowMs + 16
+    driveTick(dp, dveh) -- settle 完成 → build
+    driveReset(dveh)
+    driveTick(dp, dveh) -- build ready；首輪新 snapshot 前仍須保留 current contact
+    checkTrue(MDAD.Drive.isActive(0), "(d2c) 停妥後建立新 route")
+    checkEq(dveh._regulator, false,
+        "(d2c) true target change 不得清掉世界座標 current contact")
+    checkTrue(drive.calls.forceBrake >= 1,
+        "(d2c) 新 route 首輪 snapshot 前仍 fail-closed 煞停")
+    drive.nav.tx = 300
+    dveh._trans = 2
     MDAD.Drive.stop(0, nil)
+end
+
+-- (d3) attempt budget belongs to the episode, not a route identity. Three successful
+-- reverse attempts without 10m rearm are allowed; the fourth recovery request stops.
+do
+    drive.fillWorld(-10, 70, -7, 7)
+    checkTrue(armDrive(), "(d3) max-attempt episode 啟動")
+    setHeading(dveh, 0)
+    driveTick(dp, dveh)
+    dveh._trans = 1
+    drive.putSolid(2, 0, "harness_attempt_limit")
+    drive.scanRound(true)
+    for attempt = 1, 3 do
+        dveh._speed = 0
+        nowMs = nowMs + 2501
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        checkEq(haloKey(), DKEY.UNSTICK,
+            "(d3) attempt " .. tostring(attempt) .. " starts")
+        dveh._x, dveh._speed = -3.1, -13
+        nowMs = nowMs + 16
+        driveReset(dveh)
+        driveTick(dp, dveh) -- success → settle
+        dveh._speed = 0
+        nowMs = nowMs + 16
+        driveTick(dp, dveh) -- settle complete
+        if attempt < 3 then
+            dveh._x = 0
+            drive.scanRound() -- same episode contact again；world progress <10m
+        end
+    end
+    dveh._x, dveh._speed = 0, 0
+    drive.scanRound()
+    nowMs = nowMs + 2501
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkFalse(MDAD.Drive.isActive(0), "(d3) fourth recovery request stops")
+    checkEq(haloKey(), DKEY.STUCK, "(d3) max3 uses StopStuck")
+    dveh._trans = 2
+    drive.clearCell(2, 0) -- 不把 current-contact fixture 洩漏到 warm／detour 情境
 end
 
 -- (e) 感知空窗爬行：session 起步／route cutover 後首輪掃描完成前，
@@ -6274,6 +6484,8 @@ end
 do
     checkTrue(armDrive(), "(f) 啟動")
     setHeading(dveh, 0.05)
+    dveh._x = 8 -- 進 blocked 停止線，detour 計時只從近停後起算
+    driveTick(dp, dveh) -- detour 計時只在近停 planned-blocked wait 啟動
     for _, y in ipairs({ -5, -4, -2, -1, 0, 1, 2, 4, 5 }) do
         drive.putSolid(20, y, "harness_dwall_" .. y)
     end
@@ -6303,6 +6515,8 @@ do
     MDAD.Drive.stop(0, nil)
     -- 對照：無替代路（requestDetour 回 noroad）→ 不換線、本次 episode 只試一次
     checkTrue(armDrive(), "(f) 對照組啟動")
+    dveh._x = 8
+    driveTick(dp, dveh)
     for _, y in ipairs({ -5, -4, -2, -1, 0, 1, 2, 4, 5 }) do
         drive.putSolid(20, y, "harness_dwall2_" .. y)
     end
@@ -6660,7 +6874,7 @@ local function scenarioTelemetry()
     drive.diag = {
         build = 0, start = 0, sample = 0, critical = 0, event = 0, stop = 0, fail = 0,
         startPn = nil, samplePn = nil, stopPn = nil, stopReason = nil,
-        failPn = nil, failMessage = nil, names = {},
+        failPn = nil, failMessage = nil, names = {}, fields = {}, phases = {},
         last = {}, -- 最後一幀的碰撞證據欄位（Driver 端接線用；編碼由 test_diagnostics 驗）
     }
 
@@ -6710,6 +6924,11 @@ local function scenarioTelemetry()
     end
     MDADDiagnostics.event = function(pn, name, a, b, c, d)
         drive.diag.event = drive.diag.event + 1
+        if type(a) == "table" then
+            drive.diag.fields = drive.diag.fields or {}
+            drive.diag.fields[name] = a
+            drive.diag.phases[name .. ":" .. tostring(a.phase)] = a
+        end
         drive.diag.names[name] = true
         if origEvent then return origEvent(pn, name, a, b, c, d) end
     end
@@ -6738,7 +6957,7 @@ local function scenarioTelemetry()
     checkEq(dveh._imp.max, 1, "off：每幀最多一次 addImpulse")
     MDAD.Drive.stop(0, nil)
     checkEq(drive.diag.start, 0, "off：零 start")
-    checkEq(drive.diag.build, 0, "off：零 VehicleProfile.build／零新增物理 getter")
+    checkEq(drive.diag.build, 1, "off：session-start 仍恰 build 一次共用 profile")
     checkEq(drive.diag.sample, 0, "off：零 sample")
     checkEq(drive.diag.event, 0, "off：零 event")
     checkEq(drive.diag.stop, 0, "off：零 stop")
@@ -6750,14 +6969,23 @@ local function scenarioTelemetry()
     checkEq(drive.calls.getRegulatorSpeed, 0, "off：零 getRegulatorSpeed")
     checkEq(drive.calls.getLinearVelocity, 0, "off：零 getLinearVelocity")
 
-    drive.diag.start, drive.diag.sample, drive.diag.event, drive.diag.stop = 0, 0, 0, 0
-    drive.diag.names = {}
+    drive.diag.start, drive.diag.sample, drive.diag.event, drive.diag.stop,
+        drive.diag.build = 0, 0, 0, 0, 0
+    drive.diag.names, drive.diag.fields, drive.diag.phases = {}, {}, {}
     drive.telemOn = true
     checkTrue(armDrive(), "telemetry on 啟動")
     checkEq(drive.diag.start, 1, "on：start 一次")
     checkEq(drive.diag.build, 1, "on：VehicleProfile.build 一次")
     checkEq(drive.diag.startPn, 0, "start 用精確 pn")
     checkTrue(drive.diag.sample > 0, "on：sample 有接到")
+    checkEq(drive.diag.fields.target and drive.diag.fields.target.phase, "set",
+        "initial target event phase=set")
+    checkEq(drive.diag.fields.route and drive.diag.fields.route.why, "initial",
+        "initial route event why=initial")
+    checkEq(drive.diag.phases["route:cutover"].len, nil,
+        "initial cutover 無 route.len 時省略，不寫假 0")
+    checkNear(drive.diag.phases["route:ready"].len, 156, 1e-9,
+        "profile build ready event 寫入精確非零 length")
     checkEq(drive.diag.samplePn, 0, "sample 用精確 pn")
     checkTrue(drive.diag.names.start == true, "event start 有接到")
     driveReset(dveh)
@@ -6818,9 +7046,23 @@ local function scenarioTelemetry()
     check(drive.diag.sample > 0, "gate skip 仍呼叫 sample 探活")
     forceShould = nil
     drive.nav.route = newRoute(40, 0, 0, 4, 0)
+    drive.nav.route.len = 156
     nowMs = nowMs + 250
     driveTick(dp, dveh)
+    checkEq(drive.diag.fields.route and drive.diag.fields.route.why, "deviation",
+        "same-target route cutover event why=deviation")
     checkTrue(drive.diag.names.route == true, "route cutover 有 event")
+    checkNear(drive.diag.phases["route:cutover"].len, 156, 1e-9,
+        "cutover 優先寫 finite route.len")
+
+    drive.nav.tx = 300.1
+    drive.nav.route = newRoute(40, 0, 0, 4, 0)
+    nowMs = nowMs + 250
+    driveTick(dp, dveh)
+    checkEq(drive.diag.fields.target and drive.diag.fields.target.phase, "change",
+        "任意非零 target 座標差都算 true target change")
+    checkEq(drive.diag.fields.route and drive.diag.fields.route.why, "target",
+        "小於 0.5m 的 target change route 仍分類 target")
 
     dveh._y = 20
     driveTick(dp, dveh)
@@ -6889,6 +7131,80 @@ local function scenarioTelemetry()
     checkTrue(string.find(drive.diag.failMessage or "", "gate-fail", 1, true) ~= nil,
         "gate failure 保留原始錯誤")
     checkEq(drive.diag.stopReason, "error", "gate 失敗記 error")
+    MDAD.Drive.stop(0, nil)
+
+
+    -- Recovery-only sampling owns its own vector. Allocation/getter failure must stop
+    -- telemetry through diagFail while SETTLE control continues and the pool stays balanced.
+    drive.fillWorld(-10, 70, -7, 7)
+    forceShould = true
+    checkTrue(armDrive(), "recovery telemetry boundary 情境啟動")
+    setHeading(dveh, 0)
+    driveTick(dp, dveh)
+    dveh._trans = 1
+    drive.putSolid(2, 0, "harness_recovery_diag")
+    drive.scanRound(true)
+    dveh._speed = 0
+    nowMs = nowMs + 2501
+    driveTick(dp, dveh)
+    dveh._x, dveh._speed = -3.1, -13
+    local recoveryAlloc = BaseVehicle.allocVector3f
+    BaseVehicle.allocVector3f = function() error("recovery-alloc-fail") end
+    drive.diag.fail, drive.diag.failMessage = 0, nil
+    nowMs = nowMs + 16
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    BaseVehicle.allocVector3f = recoveryAlloc
+    forceShould = nil
+    checkTrue(MDAD.Drive.isActive(0), "recovery telemetry alloc 失敗不拆控制 session")
+    checkTrue(drive.calls.forceBrake >= 1, "telemetry 失敗後 settle brake 仍執行")
+    checkEq(drive.diag.fail, 1, "recovery telemetry 失敗走 diagFail")
+    checkTrue(string.find(drive.diag.failMessage or "", "recovery-alloc-fail", 1, true) ~= nil,
+        "recovery telemetry 保留原始錯誤")
+    checkEq(drive.pool.live, 0, "recovery telemetry alloc failure 無池洩漏")
+    checkTrue(drive.diag.phases["unstick:settle"] ~= nil,
+        "倒足 3m 先記 settle transition")
+    checkEq(drive.diag.phases["unstick:success"], nil,
+        "尚未停到 |speed|<1 前不得宣告 success")
+    dveh._trans = 2
+    MDAD.Drive.stop(0, nil)
+
+    drive.diag.phases = {}
+    forceShould = true
+    drive.fillWorld(-10, 70, -7, 7)
+    checkTrue(armDrive(), "settle success event 情境啟動")
+    setHeading(dveh, 0)
+    driveTick(dp, dveh)
+    dveh._trans = 1
+    drive.putSolid(2, 0, "harness_settle_event")
+    drive.scanRound(true)
+    dveh._speed = 0
+    nowMs = nowMs + 2501
+    driveTick(dp, dveh)
+    dveh._x, dveh._speed = -3.1, -13
+    nowMs = nowMs + 16
+    driveTick(dp, dveh)
+    checkEq(drive.diag.phases["unstick:success"], nil,
+        "settle entry 仍沒有 success event")
+    dveh._speed = -0.5
+    nowMs = nowMs + 100
+    driveTick(dp, dveh)
+    forceShould = nil
+    checkNear(drive.diag.phases["unstick:success"].speed, -0.5, 1e-9,
+        "真正停妥才記 success 與 final speed")
+    dveh._trans = 2
+    MDAD.Drive.stop(0, nil)
+
+    local eventSpy = MDADDiagnostics.event
+    MDADDiagnostics.event = function() error("event-fail") end
+    drive.diag.fail, drive.diag.failMessage, drive.diag.stopReason = 0, nil, nil
+    checkTrue(armDrive(), "Diagnostics.event 丟錯仍維持 drive session")
+    MDADDiagnostics.event = eventSpy
+    checkTrue(MDAD.Drive.isActive(0), "event 失敗只停診斷、不拆 Drive")
+    checkEq(drive.diag.fail, 1, "event 失敗走單一 fail boundary")
+    checkTrue(string.find(drive.diag.failMessage or "", "event-fail", 1, true) ~= nil,
+        "event failure 保留原始錯誤")
+    checkEq(drive.diag.stopReason, "error", "event 失敗記 error")
     MDAD.Drive.stop(0, nil)
 
     checkTrue(armDrive(), "getter lookup failure 情境啟動")
@@ -7008,8 +7324,9 @@ local function scenarioTelemetry()
 
     MDADVehicleProfile.build = function(_)
         return {
-            valid = true, fallback = false, scriptName = "x",
-            bodyW = 99, bodyL = 99, halfW = 99, halfL = 99,
+            valid = true, fallback = false, geometryValid = true, scriptName = "x",
+            bodyW = 1.8, bodyL = 4.4, halfW = 0.9, halfL = 2.2,
+            centerOfMassX = 0, centerOfMassY = 0.5, centerOfMassZ = 0,
             mass = 1, maxSpeed = 1, wheelbase = 1, track = 1,
             clamp0 = 0, clamp30 = 0, clampMax = 0,
             wheelFriction = 0, delta0Safe = 0, deltaVSafe = 0,
@@ -7017,10 +7334,10 @@ local function scenarioTelemetry()
         }
     end
     drive.telemOn = true
-    checkTrue(armDrive(), "wild vprofile 仍啟動")
+    checkTrue(armDrive(), "wild non-geometry vprofile 仍啟動")
     driveReset(dveh)
     driveTick(dp, dveh)
-    checkEq(dveh._imp.total, 1, "vprofile 不改變 addImpulse 次數")
+    checkEq(dveh._imp.total, 1, "non-geometry profile scalars 不改變 addImpulse 次數")
     checkTrue(dveh._imp.torqueY ~= 0 or dveh._imp.x ~= 0,
         "wild rearArm=0 仍用 Driver REAR_ARM 施力")
     MDAD.Drive.stop(0, nil)
@@ -7114,6 +7431,7 @@ local EXPECT_KEYS = {
     "UI_MinidoracatAutoDrive_RouteNotReady",
     "UI_MinidoracatAutoDrive_NotDriver",
     "UI_MinidoracatAutoDrive_EngineOff",
+    "UI_MinidoracatAutoDrive_UnsupportedVehicle",
     "UI_MinidoracatAutoDrive_ManualOverride",
     "UI_MinidoracatAutoDrive_Arrived",
     "UI_MinidoracatAutoDrive_LostRoute",

@@ -22,11 +22,13 @@
 - 診斷紀錄補上碰撞前後的規劃狀態，以及最近障礙的尺寸與位置，能更快分辨是感知、規劃或車輛控制出了問題
 - 開啟診斷紀錄時會一併記下當下的引擎／煞車／輪胎與路況物理狀態，方便判斷低速蠕動是偏離路面、在煞車、輪胎打滑還是機械限制；關閉診斷時自駕行為不變
 
-> 技術要點：client-only、預設關；固定 64×2MiB、每 session 一檔；保留天數 1／3／7／14／30（預設 7）；`session-index.txt` 以 raw epoch ms 固定最多 64 列。JSONL additive 欄位為 pm/rs/bs/dm/dn/rb/bhx/bhy/fi/cr/bl/dg/or/cn/cp，sensor stamp 變更時 nearest 最多 8 點附 r/x/y。Phase A 再 additive：profile 的 enginePower/brakingForce/offroadEfficiency/rollInfluence/centerOfMassY/tireFrictionMin/Avg/Count/isAnyTireMissing；sample 的 po/ib/sk/vl/vt/es/tn/rgs/el/ld/rst/rlo/rhi/us/acr 與 cap 純量。數值缺值省略、布林顯式。新 Java getter 只在 `s.diag`。planMode／lastCoupled／vehicleProfile 純觀測；bhx/bhy 只是把既有 sweep hit 寫入 log，沒有新增控制輸入。MiniMap API v2 才有複製路徑按鈕，v1 仍可改 tick／combo。build `m61-20260831a`。
+> 技術要點：client-only、預設關；固定 64×2MiB、每 session 一檔；保留天數 1／3／7／14／30（預設 7）；`session-index.txt` 以 raw epoch ms 固定最多 64 列。JSONL 保留既有欄位並 additive tg/rg/eid/ps/ua/ban/ud/rear/rf/rms/ac/pc/fb/fhx/fhy；event 支援固定順序 named fields 且保留舊 a-d。Vehicle profile 每 session 冷路徑只建一次，控制與診斷共用 geometryValid、COM x/y/z；geometry invalid 直接拒絕啟動。進度 transition 才讀一次 offroad／transmission，unstick sample 走 100ms gate；route cutover 與 build-ready 分事件記錄真實長度。build `m62-20260831a`。
 
 ### 修正
 
 - 修正自動駕駛進行中無法複製最新紀錄路徑；現在不必先停止自動駕駛
+- 修正長車或車身已有偏角時，前方規劃線看似淨空卻仍由目前車身擦撞障礙；現在每輪感知完成都會以車身實際中心與尺寸做獨立碰撞守門
+- 修正卡住後可能反覆倒退撞回同一處、帶著倒車速度立刻重新向前，以及後方未知或被車牆擋住仍嘗試倒車；現在會先檢查後方、倒車期間持續重查，成功後先停穩，並保留同一目的地的失敗路線記憶
 
 ## [42.20.4-0.1.2] - 2026-08-31
 

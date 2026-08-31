@@ -62,14 +62,23 @@ local indexLogged = false
 local lastName = nil
 
 local PK = {
-    "valid", "fallback", "scriptName",
-    "bodyW", "bodyL", "halfW", "halfL", "mass", "maxSpeed", "wheelbase", "track",
+    "valid", "fallback", "geometryValid", "scriptName",
+    "bodyW", "bodyL", "halfW", "halfL",
+    "centerOfMassX", "centerOfMassY", "centerOfMassZ",
+    "mass", "maxSpeed", "wheelbase", "track",
     "clamp0", "clamp30", "clampMax", "wheelFriction",
     "delta0Safe", "deltaVSafe", "rMin", "lookScale",
     "rearArm", "needHalf", "probeR",
     "enginePower", "brakingForce", "offroadEfficiency", "rollInfluence",
-    "centerOfMassY", "tireFrictionMin", "tireFrictionAvg", "tireFrictionCount",
+    "tireFrictionMin", "tireFrictionAvg", "tireFrictionCount",
     "isAnyTireMissing",
+}
+-- Named event tables are intentionally closed-schema and emitted in this order.
+-- Transition paths may allocate one table; telemetry samples never do.
+local EK = {
+    "phase", "oldX", "oldY", "x", "y", "why", "tg", "rg", "len", "pts", "target",
+    "eid", "attempt", "s", "l", "d", "dt", "wd", "ds", "dyaw", "hit", "gear",
+    "progress", "duration", "speed", "rear", "kind", "detail", "poseOnly",
 }
 
 local function logOnce(msg)
@@ -713,7 +722,8 @@ local function encodeProfile(profile)
         local chunk = nil
         if k == "scriptName" then
             if type(v) == "string" then chunk = '"' .. k .. '":' .. jstr(v) end
-        elseif k == "valid" or k == "fallback" or k == "isAnyTireMissing" then
+        elseif k == "valid" or k == "fallback" or k == "geometryValid"
+                or k == "isAnyTireMissing" then
             if type(v) == "boolean" then
                 chunk = '"' .. k .. '":' .. (v and "true" or "false")
             end
@@ -913,7 +923,10 @@ local function encodeSample(s, now, x, y, heading, speed, target, remaining, lat
         steer, force, mode, gear, regulator, sensor, critical,
         planMode, routeS, blockS, dodgeMargin, dodgeNeed, roadBias,
         blockHitX, blockHitY, followerIdx,
-        blocked, dodging, offroad, corner, coupled, phys)
+        blocked, dodging, offroad, corner, coupled, phys,
+        targetGen, routeGen, episodeId, progressState, attempt, ban,
+        unstickDistance, rearStatus, reverseForce, remainingMs,
+        actualClearance, plannedClearance, footprintBlocked, footHitX, footHitY)
     local mjson = "null"
     if type(mode) == "string" then
         mjson = jstr(mode)
@@ -939,6 +952,31 @@ local function encodeSample(s, now, x, y, heading, speed, target, remaining, lat
             .. ',"bhy":' .. tostring(blockHitY)
     end
     if finite(followerIdx) then plan = plan .. ',"fi":' .. tostring(followerIdx) end
+    if finite(targetGen) then plan = plan .. ',"tg":' .. tostring(targetGen) end
+    if finite(routeGen) then plan = plan .. ',"rg":' .. tostring(routeGen) end
+    if finite(episodeId) then plan = plan .. ',"eid":' .. tostring(episodeId) end
+    if type(progressState) == "string" then
+        plan = plan .. ',"ps":' .. jstr(progressState)
+    end
+    if finite(attempt) then plan = plan .. ',"ua":' .. tostring(attempt) end
+    if finite(ban) then
+        plan = plan .. ',"ban":' .. tostring(ban)
+    elseif type(ban) == "boolean" then
+        plan = plan .. ',"ban":' .. (ban and "true" or "false")
+    end
+    if finite(unstickDistance) then plan = plan .. ',"ud":' .. tostring(unstickDistance) end
+    if type(rearStatus) == "string" then plan = plan .. ',"rear":' .. jstr(rearStatus) end
+    if finite(reverseForce) then plan = plan .. ',"rf":' .. tostring(reverseForce) end
+    if finite(remainingMs) then plan = plan .. ',"rms":' .. tostring(remainingMs) end
+    if finite(actualClearance) then plan = plan .. ',"ac":' .. tostring(actualClearance) end
+    if finite(plannedClearance) then plan = plan .. ',"pc":' .. tostring(plannedClearance) end
+    if type(footprintBlocked) == "boolean" then
+        plan = plan .. ',"fb":' .. (footprintBlocked and "true" or "false")
+    end
+    if finite(footHitX) and finite(footHitY) then
+        plan = plan .. ',"fhx":' .. tostring(footHitX)
+            .. ',"fhy":' .. tostring(footHitY)
+    end
     return '{"t":"s","ts":' .. jnum(now)
         .. ',"x":' .. jnum(x)
         .. ',"y":' .. jnum(y)
@@ -978,10 +1016,19 @@ local function encodeEvent(now, name, a, b, c, d)
             line = line .. ',"' .. k .. '":' .. jstr(v)
         end
     end
-    add("a", a)
-    add("b", b)
-    add("c", c)
-    add("d", d)
+    if type(a) == "table" then
+        local i = 1
+        while i <= #EK do
+            local k = EK[i]
+            add(k, a[k])
+            i = i + 1
+        end
+    else
+        add("a", a)
+        add("b", b)
+        add("c", c)
+        add("d", d)
+    end
     return line .. "}"
 end
 
@@ -1118,7 +1165,10 @@ function D.sample(pn, now, x, y, heading, speed, target, remaining, lat, err,
         steer, force, mode, gear, regulator, sensor, critical,
         planMode, routeS, blockS, dodgeMargin, dodgeNeed, roadBias,
         blockHitX, blockHitY, followerIdx,
-        blocked, dodging, offroad, corner, coupled, phys)
+        blocked, dodging, offroad, corner, coupled, phys,
+        targetGen, routeGen, episodeId, progressState, attempt, ban,
+        unstickDistance, rearStatus, reverseForce, remainingMs,
+        actualClearance, plannedClearance, footprintBlocked, footHitX, footHitY)
     local s = sessions[pn]
     if not s or not s.active then return false end
     -- now 非有限、或還在 gate 內：不 enqueue，但 session 照樣算活著。
@@ -1132,7 +1182,10 @@ function D.sample(pn, now, x, y, heading, speed, target, remaining, lat, err,
         steer, force, mode, gear, regulator, sensor, crit,
         planMode, routeS, blockS, dodgeMargin, dodgeNeed, roadBias,
         blockHitX, blockHitY, followerIdx,
-        blocked, dodging, offroad, corner, coupled, phys), now)
+        blocked, dodging, offroad, corner, coupled, phys,
+        targetGen, routeGen, episodeId, progressState, attempt, ban,
+        unstickDistance, rearStatus, reverseForce, remainingMs,
+        actualClearance, plannedClearance, footprintBlocked, footHitX, footHitY), now)
     return s.active == true
 end
 

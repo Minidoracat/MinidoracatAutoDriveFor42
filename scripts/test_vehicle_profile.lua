@@ -79,12 +79,14 @@ local function scenario(title)
 end
 
 local KEYS = {
-    "valid", "fallback", "scriptName", "bodyW", "bodyL", "halfW", "halfL",
+    "valid", "fallback", "geometryValid", "scriptName",
+    "bodyW", "bodyL", "halfW", "halfL",
+    "centerOfMassX", "centerOfMassY", "centerOfMassZ",
     "mass", "maxSpeed", "wheelbase", "track", "clamp0", "clamp30", "clampMax",
     "wheelFriction", "delta0Safe", "deltaVSafe", "rMin", "lookScale",
     "rearArm", "needHalf", "probeR",
     "enginePower", "brakingForce", "offroadEfficiency", "rollInfluence",
-    "centerOfMassY", "tireFrictionMin", "tireFrictionAvg", "tireFrictionCount",
+    "tireFrictionMin", "tireFrictionAvg", "tireFrictionCount",
     "isAnyTireMissing",
 }
 local OPTIONAL_KEYS = {
@@ -101,7 +103,8 @@ local function checkKeys(p, label)
         local v = p[k]
         if not OPTIONAL_KEYS[k] then check(v ~= nil, label .. " has " .. k) end
         if v ~= nil then
-            if k == "valid" or k == "fallback" or k == "isAnyTireMissing" then
+            if k == "valid" or k == "fallback" or k == "geometryValid"
+                    or k == "isAnyTireMissing" then
                 check(type(v) == "boolean", label .. " " .. k .. " boolean")
             elseif k ~= "scriptName" then
                 check(type(v) == "number" and v * 0 == 0,
@@ -247,7 +250,8 @@ local function makeVehicle(opts)
         function script:getCenterOfMassOffset()
             counts.com = (counts.com or 0) + 1
             if opts.throwCenterOfMass then error("centerOfMass") end
-            return vec(0, opts.centerOfMassY, 0, counts)
+            return vec(opts.centerOfMassX or 0, opts.centerOfMassY,
+                opts.centerOfMassZ or 0, counts)
         end
         function script:getWheelCount()
             counts.wheelCount = (counts.wheelCount or 0) + 1
@@ -427,6 +431,9 @@ local function checkSpec(spec, label)
     checkNear(p.bodyL, spec.bodyL, 1e-9, label .. " bodyL")
     checkNear(p.halfW, spec.bodyW * 0.5, 1e-9, label .. " halfW")
     checkNear(p.halfL, spec.bodyL * 0.5, 1e-9, label .. " halfL")
+    checkTrue(p.geometryValid, label .. " geometryValid")
+    checkNear(p.centerOfMassX, spec.centerOfMassX or 0, 1e-9, label .. " centerOfMassX")
+    checkNear(p.centerOfMassZ, spec.centerOfMassZ or 0, 1e-9, label .. " centerOfMassZ")
     checkEq(p.mass, spec.mass, label .. " mass")
     checkEq(p.maxSpeed, spec.maxSpeed, label .. " maxSpeed")
     local wb, tr = expectGeom(spec)
@@ -769,6 +776,9 @@ do
     checkKeys(p, "oldOnly")
     checkTrue(p.valid, "missing physics API keeps valid")
     checkFalse(p.fallback, "missing physics API does not set fallback")
+    checkFalse(p.geometryValid, "missing COM API invalidates only control geometry")
+    checkEq(p.centerOfMassX, 0, "missing COM x safely falls back 0")
+    checkEq(p.centerOfMassZ, 0, "missing COM z safely falls back 0")
     checkEq(p.scriptName, "Base.PickUpTruck", "oldOnly keeps scriptName")
     checkEq(p.enginePower, nil, "missing enginePower omitted")
     checkEq(p.brakingForce, nil, "missing brakingForce omitted")
@@ -796,6 +806,9 @@ do
     local pThrown = P.build(makeVehicle(thrown))
     checkTrue(pThrown.valid, "throwing physics getters keep legacy geometry valid")
     checkFalse(pThrown.fallback, "throwing physics getters do not set legacy fallback")
+    checkFalse(pThrown.geometryValid, "throwing COM invalidates only control geometry")
+    checkEq(pThrown.centerOfMassX, 0, "throwing COM x falls back 0")
+    checkEq(pThrown.centerOfMassZ, 0, "throwing COM z falls back 0")
     checkEq(pThrown.enginePower, nil, "throwing enginePower omitted")
     checkEq(pThrown.brakingForce, nil, "throwing brakingForce omitted")
     checkEq(pThrown.offroadEfficiency, nil, "throwing offroadEfficiency omitted")
@@ -856,6 +869,48 @@ do
     checkEq(pMiss.tireFrictionAvg, nil, "zero installed tires has no fake average")
     checkTrue(pMiss.isAnyTireMissing,
         "complete wheel enumeration proves a tire is missing without runtime getter")
+end
+
+--------------------------------------------------------------------------------
+scenario("geometryValid isolates extents/COM from mass and additive physics")
+do
+    local badCom = P.build(makeVehicle({
+        fullName = "Base.BadCOM",
+        bodyW = PICKUP.bodyW, bodyL = PICKUP.bodyL,
+        centerOfMassX = 99, centerOfMassZ = -99,
+        mass = 1030, friction = 1.5, steeringClamp = 0.3, maxSpeed = 70,
+        wheels = PICKUP.wheels,
+    }))
+    checkTrue(badCom.valid, "bad COM does not poison legacy valid")
+    checkFalse(badCom.fallback, "bad COM does not set legacy fallback")
+    checkFalse(badCom.geometryValid, "out-of-body COM fails control geometry")
+    checkEq(badCom.centerOfMassX, 0, "bad COM x falls back 0")
+    checkEq(badCom.centerOfMassZ, 0, "bad COM z falls back 0")
+
+    local halfOutside = P.build(makeVehicle({
+        fullName = "Base.HalfOutsideCOM",
+        bodyW = 2, bodyL = 6,
+        centerOfMassX = 1.1, centerOfMassZ = -3.1,
+        mass = 1030, friction = 1.5, steeringClamp = 0.3, maxSpeed = 70,
+        wheels = PICKUP.wheels,
+    }))
+    checkFalse(halfOutside.geometryValid,
+        "half extent < |COM| <= full extent still fails control geometry")
+    checkEq(halfOutside.centerOfMassX, 0, "half-outside COM x falls back 0")
+    checkEq(halfOutside.centerOfMassZ, 0, "half-outside COM z falls back 0")
+
+    local badMass = P.build(makeVehicle({
+        fullName = "Base.BadMass",
+        bodyW = PICKUP.bodyW, bodyL = PICKUP.bodyL,
+        centerOfMassX = 0.1, centerOfMassZ = -0.2,
+        mass = 1, friction = 1.5, steeringClamp = 0.3, maxSpeed = 70,
+        wheels = PICKUP.wheels,
+    }))
+    checkFalse(badMass.valid, "bad mass still fails legacy valid")
+    checkTrue(badMass.fallback, "bad mass still uses legacy fallback")
+    checkTrue(badMass.geometryValid, "valid extents/COM stay usable despite bad mass")
+    checkNear(badMass.centerOfMassX, 0.1, 1e-9, "COM x retained")
+    checkNear(badMass.centerOfMassZ, -0.2, 1e-9, "COM z retained")
 end
 
 --------------------------------------------------------------------------------

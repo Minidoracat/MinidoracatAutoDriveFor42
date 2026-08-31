@@ -307,14 +307,15 @@ local function sessionPath(i)
 end
 
 local profile = {
-    valid = true, fallback = false, scriptName = 'Base.Car"X',
-    bodyW = 1.8, bodyL = 4.5, halfW = 0.9, halfL = 2.25, mass = 1200,
-    maxSpeed = 70, wheelbase = 2.6, track = 1.5,
+    valid = true, fallback = false, geometryValid = true, scriptName = 'Base.Car"X',
+    bodyW = 1.8, bodyL = 4.5, halfW = 0.9, halfL = 2.25,
+    centerOfMassX = 0.1, centerOfMassY = 0.55, centerOfMassZ = -0.2,
+    mass = 1200, maxSpeed = 70, wheelbase = 2.6, track = 1.5,
     clamp0 = 0.9, clamp30 = 0.64, clampMax = 0.3,
     wheelFriction = 1.2, delta0Safe = 0.72, deltaVSafe = 0.24,
     rMin = 3.2, lookScale = 1.3, rearArm = 2.9, needHalf = 1.4, probeR = 3.5,
     enginePower = 4000, brakingForce = 80, offroadEfficiency = 1.1,
-    rollInfluence = 0.7, centerOfMassY = 0.55,
+    rollInfluence = 0.7,
     tireFrictionMin = 1.4, tireFrictionAvg = 1.5, tireFrictionCount = 4,
     isAnyTireMissing = false,
 }
@@ -486,6 +487,12 @@ check(string.find(body, '"enginePower":4000', 1, true) ~= nil,
     "runtime enginePower serialized")
 check(string.find(body, '"isAnyTireMissing":false', 1, true) ~= nil,
     "isAnyTireMissing explicit false")
+check(string.find(body, '"geometryValid":true', 1, true) ~= nil,
+    "control geometry validity serialized")
+check(string.find(body, '"centerOfMassX":0.1', 1, true) ~= nil,
+    "COM x serialized")
+check(string.find(body, '"centerOfMassZ":-0.2', 1, true) ~= nil,
+    "COM z serialized")
 check(string.find(body, '"x":10700.25', 1, true) ~= nil, "opt-in absolute x allowed")
 check(string.find(body, "username", 1, true) == nil, "no username")
 check(string.find(body, "steamId", 1, true) == nil, "no steamId")
@@ -1172,7 +1179,8 @@ MDADDiagnostics.sample(0, 9200000, 100, 200, 0.25, 12, 15, 40, 1.5, 0.2, 0.3, 12
         activeCapReason = "gear",
         capGear = 50,
         capPerception = 85,
-    })
+    }, 7, 9, 3, "verify", 2, -1.5, 2.75, "clear", 450, 120,
+    0.25, 1.5, true, 123, 456)
 MDADDiagnostics.sample(0, 9200500, 101, 201, 0.25, 12, 15, 39, 1.4, 0.1, 0.3, 1200,
     "follow", 2, true, nil, false,
     "clear", 11, nil, nil, nil, nil, nil, nil, 2,
@@ -1182,6 +1190,15 @@ MDADDiagnostics.sample(0, 9200500, 101, 201, 0.25, 12, 15, 39, 1.4, 0.1, 0.3, 12
         activeCapReason = "sensor",
         capSensor = 15,
     })
+MDADDiagnostics.event(0, "target", {
+    phase = "change", oldX = 1, oldY = 2, x = 3, y = 4,
+    why = "user", tg = 7,
+})
+MDADDiagnostics.event(0, "unstick", {
+    phase = "success", eid = 3, attempt = 2, x = 10, y = 20,
+    s = 30, d = 3.1, duration = 850, speed = -0.5, rear = "clear",
+})
+MDADDiagnostics.event(0, "legacy", 1, 2, 3, 4)
 nowMs = 9201000
 MDADDiagnostics.stop(0, "end")
 local physBody = files[sessionPath(1)] or ""
@@ -1207,6 +1224,29 @@ checkEq(countNeedle(physBody, '"vl":'), 1, "absent vLong omits the field")
 checkEq(countNeedle(physBody, '"ib":'), 1, "absent isBraking omits rather than false")
 check(string.find(physBody, '"acr":"sensor"', 1, true) ~= nil, "second sample reason")
 check(string.find(physBody, '"csen":15', 1, true) ~= nil, "capSensor recorded")
+check(string.find(physBody, '"tg":7', 1, true) ~= nil, "target generation recorded")
+check(string.find(physBody, '"rg":9', 1, true) ~= nil, "route generation recorded")
+check(string.find(physBody, '"eid":3', 1, true) ~= nil, "episode id recorded")
+check(string.find(physBody, '"ps":"verify"', 1, true) ~= nil, "progress state recorded")
+check(string.find(physBody, '"ua":2', 1, true) ~= nil, "attempt recorded")
+check(string.find(physBody, '"ban":-1.5', 1, true) ~= nil, "episode ban lane recorded")
+check(string.find(physBody, '"ud":2.75', 1, true) ~= nil, "unstick distance recorded")
+check(string.find(physBody, '"rear":"clear"', 1, true) ~= nil, "rear status recorded")
+check(string.find(physBody, '"rf":450', 1, true) ~= nil, "reverse force recorded")
+check(string.find(physBody, '"rms":120', 1, true) ~= nil, "remaining recovery time recorded")
+check(string.find(physBody, '"ac":0.25', 1, true) ~= nil, "actual clearance recorded")
+check(string.find(physBody, '"pc":1.5', 1, true) ~= nil, "planned clearance recorded")
+check(string.find(physBody, '"fb":true', 1, true) ~= nil, "footprint block explicit")
+check(string.find(physBody, '"fhx":123', 1, true) ~= nil
+    and string.find(physBody, '"fhy":456', 1, true) ~= nil, "footprint hit XY recorded")
+check(string.find(physBody,
+    '"n":"target","phase":"change","oldX":1,"oldY":2,"x":3,"y":4,"why":"user","tg":7',
+    1, true) ~= nil, "named event fields use fixed order")
+check(string.find(physBody,
+    '"n":"unstick","phase":"success","x":10,"y":20,"eid":3,"attempt":2,"s":30,"d":3.1,"duration":850,"speed":-0.5,"rear":"clear"',
+    1, true) ~= nil, "settle completion event records final speed in fixed order")
+check(string.find(physBody, '"n":"legacy","a":1,"b":2,"c":3,"d":4', 1, true) ~= nil,
+    "legacy a-d event payload remains compatible")
 
 closeScenario()
 print()

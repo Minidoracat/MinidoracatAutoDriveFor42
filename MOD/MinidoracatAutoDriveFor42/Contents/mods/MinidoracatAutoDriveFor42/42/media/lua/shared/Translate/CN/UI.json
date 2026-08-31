@@ -17,6 +17,7 @@
     "UI_MinidoracatAutoDrive_RouteNotReady": "还没有路线，请先在地图上设置导航目标。",
     "UI_MinidoracatAutoDrive_NotDriver": "要坐在驾驶座才能自动驾驶。",
     "UI_MinidoracatAutoDrive_EngineOff": "需要引擎运转中，而且电瓶还有电。",
+    "UI_MinidoracatAutoDrive_UnsupportedVehicle": "这辆车的车身几何数据不完整，无法安全启动自动驾驶。",
     "UI_MinidoracatAutoDrive_ManualOverride": "已交还手动操作，自动驾驶待命中。",
     "UI_MinidoracatAutoDrive_Arrived": "已抵达目的地。",
     "UI_MinidoracatAutoDrive_LostRoute": "路线丢失，自动驾驶已关闭。",

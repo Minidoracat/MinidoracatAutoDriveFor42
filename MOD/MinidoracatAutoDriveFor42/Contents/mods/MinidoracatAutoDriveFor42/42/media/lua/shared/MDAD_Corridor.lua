@@ -1,16 +1,16 @@
--- MDAD_Corridor.lua — 繞行的「縫隙規劃器」：純數學，不碰任何 PZ API。
+-- MDAD_Corridor.lua — 繞行縫隙規劃與 current-pose 車身守門：純數學，不碰任何 PZ API。
 --
 -- 這個檔案裡沒有 getGridSquare、沒有 vehicle、沒有 SandboxVars、沒有 Events、
--- 沒有 userdata。輸入全是純量與扁平陣列，輸出全是純量（六個回傳值）。
+-- 沒有 userdata。輸入全是純量與扁平陣列，輸出也全是純量。
 -- 理由與 shared/MDAD_Follower.lua 同一套：
 --   1. 離線可測：scripts/test_corridor.lua 直接 loadfile 本檔就能跑完整情境，
 --      不需要任何假全域。縫隙判定算錯在遊戲裡的表徵是「車擦著障礙開過去」，
 --      那種回歸靠肉眼看不出是「膨脹半徑漏加車寬」還是「群聚合把遠障礙拉進來」。
---   2. 職責邊界清楚：感知（client/MDAD_Sensor）負責把世界掃成 (s, l) 點集，
---      本模組只負責「給定點集，車該往哪一側偏多少、從哪裡開始偏」。
+--   2. 職責邊界清楚：感知（client/MDAD_Sensor）負責把世界掃成扁平點集，
+--      本模組只做縫隙規劃與「目前車身是否已碰到點集」的純幾何判定。
 --
 -- ---------------------------------------------------------------------------
--- 介面契約（唯一入口；感知層與 driver 依此接線，勿在此處加入 PZ 相依）
+-- 介面契約（感知層與 driver 依此接線，勿在此處加入 PZ 相依）
 -- ---------------------------------------------------------------------------
 -- MDADCorridor.plan(hardS, hardL, hardN, needHalf, corridorHalf, preferL?, hardR?, baseL?, roadLo?, roadHi?, refineComfort?)
 --     hardS, hardL ＝ 硬障礙點的扁平陣列（**兩條平行陣列**，第 i 點＝hardS[i], hardL[i]）。
@@ -49,8 +49,28 @@
 --     **零 table 配置**：不建陣列、不建 closure、多回傳值走 Lua 堆疊。
 --     "clear"／"dodge"／"blocked" 是 chunk 的常數字串，也不配置。
 --
+-- MDADCorridor.currentFootprintHit(
+--     hardS, hardL, hardX, hardY, hardR, hardN,
+--     bodyX, bodyY, vehicleH, halfW, halfL, sNow, latSigned, routeH, expectedLane)
+--     ＝ expected-path planner 之外的 current-body OR-gate；不改 plan() 的 baseline。
+--       hardX／hardY 都是 table 時，以世界座標為權威；兩者都 nil 時才用
+--       ds=hardS-sNow、dl=hardL-latSigned 與 vehicleH-routeH 轉回車身座標。
+--       只給一條 world array、table 內有洞、或任一必要純量非有限時，保守回 blocked。
+--     bodyX/bodyY ＝車身 OBB 中心；halfW/halfL ＝ script extents 的一半。
+--       呼叫端應用 vehicle:getWorldPos(COM offset) 算中心；PZ 原生碰撞多邊形同樣以
+--       COM transform 與 extents 建四角（zombie/vehicles/VehiclePoly.java:52-88）。
+--     點視為半徑 hardR+0.15 的 disk；0.15m 與原生擴張 poly 的安全圈一致
+--       （zombie/vehicles/BaseVehicle.java:4133-4168）。
+--     回 blocked, actualClearance, plannedClearance, hitIndex, hitS, hitL, hitX, hitY,
+--       poseOnly（九個純量，恆非 nil）。actualClearance 取全部點的最小
+--       rectangle-vs-disk 淨空；plannedClearance 是同一點對 expectedLane 的橫向淨空。
+--       blocked iff actualClearance <= 0；poseOnly iff blocked 且 plannedClearance > 0。
+--       合法 hardN==0 回 false 與八個 0/false；壞 snapshot 回 true、hitIndex=0，
+--       讓呼叫端能 fail-closed 又不把資料破損誤記成真實障礙。
+--     **零 table 配置且唯讀**：不建陣列、不改任何輸入，只回多個純量。
+--
 -- ---------------------------------------------------------------------------
--- 演算法（四步；為什麼是這四步）
+-- plan() 演算法（四步；為什麼是這四步）
 -- ---------------------------------------------------------------------------
 -- ① 擋行駛線篩選：把車半寬一次性膨脹進障礙，淨空門檻 clr ＝ 點半徑 + needHalf。
 --    |l - baseL| < clr 才算擋線。全部沒有 → "clear"。
@@ -94,7 +114,7 @@
 --   進退區間裡的**不擋線**障礙，不參與 offL 的可行性——它們在側移過程中理論上
 --   可能被擦到。真正擋線的那些不受影響（GROUP_GAP ＝ 6 > GAP ＝ 2，早被拉進群）。
 --   把窗口開到 [a, d] 會讓遠處的路肩障礙否決掉眼前這條真的過得去的縫。
--- * 本模組不知道車現在在哪（沒有 sNow）：s 一律當「路線絕對弧長」，只餵前方點
+-- * plan() 不知道車現在在哪（沒有 sNow）：s 一律當「路線絕對弧長」，只餵前方點
 --   是呼叫端的責任。a 夾在 >= 0（路線起點）只是防呆，不是「車後方」的語意。
 --
 -- 效能守則（Kahlua）：庫函式都是 JavaFunction，每次呼叫都跨 Lua↔Java 邊界。
@@ -108,8 +128,10 @@ MDADCorridor = MDADCorridor or {}
 -- 2n+4 次，跨界成本無感；而 self-init 寫法會被 check_lua_bindings 的前向引用掃描
 -- 誤判（bytecode 看到 GETGLOBAL 撞同名 local）。floor 從 math 表取不受影響。
 local floor = math.floor
+local sqrt, cos, sin = math.sqrt, math.cos, math.sin
 
 local OBS_HALF = 0.7              -- 障礙格半寬（公尺）：B42 一格 1 公尺，取略小於半格
+local FOOTPRINT_PAD = 0.15        -- current body 對點障礙的固定安全圈（見介面契約來源）
 local GROUP_GAP = 6               -- 群聚合的 s 間距上限（公尺）
 local ROUNDS_MAX = 8              -- 群邊界擴張的輪數上限（見上方 ② 的說明）
 local ENTRY = 8                   -- 進入段長度（公尺）：a = sObs0 - ENTRY
@@ -141,6 +163,109 @@ local function isFinitePos(n)
     return n > 0
 end
 
+-- currentFootprintHit 的 fail-closed 出口。九個回傳值只在這裡寫一次：把字面值
+-- 複製到九個檢查點時，任何一處漏一個 0 就是把「資料破損」靜靜回成「淨空」，
+-- 而這個函式正是安全 OR-gate，回錯方向不會有第二道關卡攔得住。
+local function footprintFailClosed()
+    return true, 0, 0, 0, 0, 0, 0, 0, false
+end
+
+-- 目前車身的 oriented rectangle 對 Sensor 點 disk。世界座標優先；只有整組
+-- hardX/hardY 都未提供才走 Frenet fallback。此函式是 plan() 之外的安全 OR-gate，
+-- 不能拿 latSigned 覆寫 planner baseline，否則 follower 仍追 expectedLane 時兩邊會打架。
+function MDADCorridor.currentFootprintHit(hardS, hardL, hardX, hardY, hardR, hardN,
+        bodyX, bodyY, vehicleH, halfW, halfL, sNow, latSigned, routeH, expectedLane)
+    if type(hardS) ~= "table" or type(hardL) ~= "table" or type(hardR) ~= "table"
+        or type(hardN) ~= "number" or hardN * 0 ~= 0
+        or hardN < 0 or floor(hardN) ~= hardN then
+        return footprintFailClosed()
+    end
+
+    local useWorld = hardX ~= nil or hardY ~= nil
+    if useWorld and (type(hardX) ~= "table" or type(hardY) ~= "table") then
+        return footprintFailClosed()
+    end
+    if type(bodyX) ~= "number" or bodyX * 0 ~= 0
+        or type(bodyY) ~= "number" or bodyY * 0 ~= 0
+        or type(vehicleH) ~= "number" or vehicleH * 0 ~= 0
+        or type(halfW) ~= "number" or halfW * 0 ~= 0 or halfW <= 0
+        or type(halfL) ~= "number" or halfL * 0 ~= 0 or halfL <= 0
+        or type(expectedLane) ~= "number" or expectedLane * 0 ~= 0 then
+        return footprintFailClosed()
+    end
+    if not useWorld and (type(sNow) ~= "number" or sNow * 0 ~= 0
+        or type(latSigned) ~= "number" or latSigned * 0 ~= 0
+        or type(routeH) ~= "number" or routeH * 0 ~= 0) then
+        return footprintFailClosed()
+    end
+
+    local cv, sv = cos(vehicleH), sin(vehicleH)
+    local cd, sd = 0, 0
+    if not useWorld then
+        local delta = vehicleH - routeH
+        cd, sd = cos(delta), sin(delta)
+    end
+    if cv * 0 ~= 0 or sv * 0 ~= 0 or cd * 0 ~= 0 or sd * 0 ~= 0 then
+        return footprintFailClosed()
+    end
+
+    local bestClear, bestPlanned = 0, 0
+    local bestI, bestS, bestL, bestX, bestY = 0, 0, 0, 0, 0
+    for i = 1, hardN do
+        local hs, hl, r = hardS[i], hardL[i], hardR[i]
+        if type(hs) ~= "number" or hs * 0 ~= 0
+            or type(hl) ~= "number" or hl * 0 ~= 0
+            or type(r) ~= "number" or r * 0 ~= 0 or r < 0 then
+            return footprintFailClosed()
+        end
+
+        local hx, hy, u, v
+        if useWorld then
+            hx, hy = hardX[i], hardY[i]
+            if type(hx) ~= "number" or hx * 0 ~= 0
+                or type(hy) ~= "number" or hy * 0 ~= 0 then
+                return footprintFailClosed()
+            end
+            local dx, dy = hx - bodyX, hy - bodyY
+            u = dx * cv + dy * sv
+            v = -dx * sv + dy * cv
+        else
+            local ds, dl = hs - sNow, hl - latSigned
+            u = ds * cd + dl * sd
+            v = -ds * sd + dl * cd
+            hx = bodyX + u * cv - v * sv
+            hy = bodyY + u * sv + v * cv
+        end
+        if u * 0 ~= 0 or v * 0 ~= 0 or hx * 0 ~= 0 or hy * 0 ~= 0 then
+            return footprintFailClosed()
+        end
+
+        local au, av = u, v
+        if au < 0 then au = -au end
+        if av < 0 then av = -av end
+        local du, dv = au - halfL, av - halfW
+        if du < 0 then du = 0 end
+        if dv < 0 then dv = 0 end
+        local actual = sqrt(du * du + dv * dv) - (r + FOOTPRINT_PAD)
+        local planned = hl - expectedLane
+        if planned < 0 then planned = -planned end
+        planned = planned - (halfW + r + FOOTPRINT_PAD)
+        if actual * 0 ~= 0 or planned * 0 ~= 0 then
+            return footprintFailClosed()
+        end
+
+        if bestI == 0 or actual < bestClear then
+            bestClear, bestPlanned = actual, planned
+            bestI, bestS, bestL, bestX, bestY = i, hs, hl, hx, hy
+        end
+    end
+
+    if bestI == 0 then return false, 0, 0, 0, 0, 0, 0, 0, false end
+    local blocked = bestClear <= 0
+    return blocked, bestClear, bestPlanned, bestI, bestS, bestL, bestX, bestY,
+        blocked and bestPlanned > 0
+end
+
 -- 候選 lane l 是否與 [sLo, sHi] 內每個硬障礙都保持「該點半徑＋needHalf」的
 -- 橫向淨空。hardR＝逐點半徑（nil＝全部 OBS_HALF）：樹幹（r=0）與整格箱型物
 -- （r=0.7）的危險帶差 0.7 公尺——統一肥半徑會把路緣樹排判成擋路、車長期
@@ -162,7 +287,7 @@ local function laneFree(hardS, hardL, hardR, hardN, sLo, sHi, l, needHalf)
     return true
 end
 
--- 唯一入口。零配置：只讀入來的兩條陣列，只回純量。
+-- 規劃入口。零配置：只讀入來的兩條陣列，只回純量。
 -- preferL（選填）＝縫隙掃描的中心，「距 preferL 最近的可行 lane」優先（而不是
 -- 「距中線最近」）。呼叫端的兩種用法：
 --   繞行中傳上輪側偏——感知層的 l 記錄有 ±0.5 的量化跳動，同一顆障礙在連續

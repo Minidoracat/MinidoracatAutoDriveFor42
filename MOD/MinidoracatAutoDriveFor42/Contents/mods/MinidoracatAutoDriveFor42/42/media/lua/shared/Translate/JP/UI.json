@@ -17,6 +17,7 @@
     "UI_MinidoracatAutoDrive_RouteNotReady": "ルートがありません。先に地図でナビ目標を設定してください。",
     "UI_MinidoracatAutoDrive_NotDriver": "運転席に座っている必要があります。",
     "UI_MinidoracatAutoDrive_EngineOff": "エンジンが動いていて、バッテリーに電力が残っている必要があります。",
+    "UI_MinidoracatAutoDrive_UnsupportedVehicle": "この車両は車体形状データが不完全なため、オートドライブを安全に開始できません。",
     "UI_MinidoracatAutoDrive_ManualOverride": "手動操作に切り替えました。オートドライブは待機中です。",
     "UI_MinidoracatAutoDrive_Arrived": "目的地に到着しました。",
     "UI_MinidoracatAutoDrive_LostRoute": "ルートを見失いました。オートドライブを停止します。",

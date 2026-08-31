@@ -17,6 +17,7 @@
     "UI_MinidoracatAutoDrive_RouteNotReady": "No route yet. Set a navigation target on the map first.",
     "UI_MinidoracatAutoDrive_NotDriver": "You must be in the driver's seat.",
     "UI_MinidoracatAutoDrive_EngineOff": "The engine must be running with a live battery.",
+    "UI_MinidoracatAutoDrive_UnsupportedVehicle": "This vehicle has incomplete body geometry data, so Autodrive cannot start safely.",
     "UI_MinidoracatAutoDrive_ManualOverride": "Manual control taken. Autodrive is standing by.",
     "UI_MinidoracatAutoDrive_Arrived": "Destination reached.",
     "UI_MinidoracatAutoDrive_LostRoute": "Route lost. Autodrive disengaged.",

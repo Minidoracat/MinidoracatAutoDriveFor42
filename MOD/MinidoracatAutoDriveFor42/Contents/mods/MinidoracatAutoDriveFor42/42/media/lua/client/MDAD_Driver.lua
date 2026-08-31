@@ -131,14 +131,15 @@ local MULT_NORM = 0.8          -- 60fps 的 getMultiplier 基準
 -- relPos（水平）× impulse（垂直）會產生**翻滾／俯仰**力矩而不只是壓車，
 -- 高速時等於自己把車掀翻。要壓車得另闢 API，不在 M3 範圍。
 
--- 卡死偵測：M3 不避障，撞上障礙物時 regulator 會永遠推牆（實機 2026-08-28：
--- speed≈0、errDeg 卡在 76°、remaining 十秒不動，玩家只能自己按停）。三個條件
--- 缺一不可才算卡死——速度近零「且」沿線進度凍結「且」車頭也沒在轉；原地調頭
--- （速度近零但 errDeg 在動）與末段挪車（remaining 在動）都不會誤觸。
-local STUCK_SPEED_KMH = 1.0    -- |速度| 低於此值才可能算卡死
-local STUCK_ERR_EPS = 0.1      -- 弧度（≈6°）：航向變化超過就算「還在轉」，重置計時
-local STUCK_REM_EPS = 1.0      -- 公尺：沿線進度變化超過就算「還在動」，重置計時
-local STUCK_MS = 5000          -- 三者都凍結持續這麼久＝卡死，自動停車＋紅字
+-- 單一進度監督取代舊的低速 stuck 與高速 push 雙 watchdog。需求成立後，
+-- 世界位移／沿線進度／偏航任一達標就重臂；2.5 秒皆無才進 suspect。
+local PROGRESS_MS = 2500
+local PROGRESS_M_SQ = 1
+local PROGRESS_S = 1
+local PROGRESS_YAW = 0.17453292519943 -- 10°
+local GEAR_RESET_MS = 150
+local VERIFY_MS = 2000
+local SETTLE_MS = 4000
 
 -- M4 感知與繞行（Sensor 掃走廊 → Corridor 算縫隙 → follower.setOffset 疊側偏；
 -- 三層相依見 MDAD_Sensor.lua 檔頭）。速度上限檔位：全部是「疊在剖面之上的 min」，
@@ -155,16 +156,11 @@ local POLICY_DODGE = 1         -- 沙盒 ObstaclePolicy enum：1=繞行 2=停車
 local BLOCK_STOP_DIST = 15     -- 距障礙群這麼近才煞停等待；更遠先滑行接近
 local BLOCK_APPROACH_KMH = 12  -- blocked 接近段的速度上限（掃描逼近後縫隙判定更準）
 local WAIT_TIMEOUT_MS = 20000  -- 停等（blocked/跟車 0）獨立超時：紅字請玩家接手
--- 推撞偵測（幽靈車兜底）：輪速明明夠快、車體世界位移卻近零＝頂著看不見
--- 的實體空推（MP 車輛 streaming 抖動時感知可能全漏，但碰撞仍是 server 權威）。
--- 必須量世界位移，不量沿線 s：8106,11769 十字路口回線時，車以 15 km/h
--- 橫向移動 20→4m，remaining 暫時固定 603.6；舊算法把合法回線連判三次
--- push mismatch。直線 8 km/h 在 2.5 秒約走 5.5m；世界弦長連 3m
--- （理論直線位移的 55%）都不到才判失配。
-local PUSH_MIN_KMH = 8         -- 輪速下限：低於此速交給既有卡死三凍結
-local PUSH_MS = 2500           -- 失配持續窗
-local PUSH_FREE_M = 3.0        -- 窗內車體世界位移達標線（達標＝重臂計時）
-local PUSH_FREE_SQ = PUSH_FREE_M * PUSH_FREE_M -- 載入期算一次，熱路徑不重乘
+-- recovery 方向探測與 episode 重臂。rear 每 100ms 重查；成功倒退後 ban
+-- 跨 sensor reset／same-target route cutover 保留，前進 10m 且兩輪 footprint clear 才清。
+local REAR_PROBE_MS = 100
+local REAR_TRAVEL_M = 4
+local EPISODE_REARM_SQ = 100
 local SCAN_WARM_CAP = 12       -- 感知空窗（首輪掃描未完成）的爬行上限
 -- 堵死改道（nav API v3 requestDetour）：blocked 停等一段時間仍未解除，就帶
 -- 堵點座標請主 MOD 重算避讓路線（A* 對經過堵點圈的路網邊加軟封鎖罰）。
@@ -279,6 +275,7 @@ local KEY_LOST = "UI_MinidoracatAutoDrive_LostRoute"
 local KEY_NOT_DRIVER = "UI_MinidoracatAutoDrive_NotDriver"
 local KEY_ENGINE = "UI_MinidoracatAutoDrive_EngineOff"
 local KEY_API = "UI_MinidoracatAutoDrive_NavApiMissing"
+local KEY_UNSUPPORTED = "UI_MinidoracatAutoDrive_UnsupportedVehicle"
 local KEY_STUCK = "UI_MinidoracatAutoDrive_StopStuck"
 local KEY_BLOCKED = "UI_MinidoracatAutoDrive_Blocked"
 local KEY_UNSTICK = "UI_MinidoracatAutoDrive_Unstick"
@@ -506,8 +503,8 @@ end
 -- （session 是可變內部狀態，交出參考＝UI 能繞過所有入口改駕駛行為）：
 --   statusKey, gearId, effectiveCapKmh, zombieSlowOn, corpseSlowOn
 -- statusKey ∈ arrive/yield/unstick/blocked/dodging/build/follow；nil＝無 session。
--- 顯示優先序（狀態是 mode＋正交旗標的混合，UI 不該自己拼）：
--- arrive > yield > unstick > blocked > dodging > build > follow。
+-- 顯示優先序：arrive > yield > recovery（unstick/recover/settle）>
+-- current/planned blocked > dodging > build > follow。
 -- effectiveCap＝min(session 啟動時沙盒上限, 當前檔位)。AutoDriveMaxSpeed 要重開
 -- session 才重建 profile；HUD 不得先讀新沙盒值而顯示車子尚未套用的上限。
 function Drive.hudState(playerNum)
@@ -516,8 +513,9 @@ function Drive.hudState(playerNum)
     local key
     if s.mode == "arrive" then key = "arrive"
     elseif s.mode == "yield" then key = "yield"
-    elseif s.mode == "unstick" then key = "unstick"
-    elseif s.blocked then key = "blocked"
+    elseif s.mode == "unstick" or s.mode == "recover" or s.mode == "settle" then
+        key = "unstick"
+    elseif s.currentBlocked or s.blocked then key = "blocked"
     elseif s.dodging then key = "dodging"
     elseif s.mode == "build" then key = "build"
     else key = "follow" end
@@ -565,16 +563,21 @@ local function diagEnabled()
     return ok and en == true
 end
 
-local function diagEvent(s, playerNum, name, a, b, c, d)
+local diagFail
+
+-- Driver 一律送具名 payload（Diagnostics 的 a-d 位置式舊介面只留給外部呼叫端）。
+local function diagEvent(s, playerNum, name, payload)
     if not s or not s.diag then return end
-    pcall(MDADDiagnostics.event, playerNum, name, a, b, c, d)
+    local ok, err = pcall(MDADDiagnostics.event, playerNum, name, payload)
+    if not ok then diagFail(s, playerNum, "event " .. tostring(name) .. " failed", err) end
 end
 
 local function diagStop(s, playerNum, reason)
     if not s or not s.diag then return end
     pcall(MDADDiagnostics.stop, playerNum, reason)
 end
-local function diagFail(s, playerNum, stage, err)
+
+diagFail = function(s, playerNum, stage, err)
     if not s or not s.diag then return end
     s.diag = false
     local detail = stage
@@ -637,6 +640,23 @@ local function startSession(playerObj, playerNum)
     local fstate = nil
     if type(MDADFollower.newState) == "function" then fstate = MDADFollower.newState() end
     if type(fstate) ~= "table" then fstate = {} end
+    -- Vehicle geometry/physics is read exactly once on this cold path. Control and
+    -- diagnostics retain the same table; a broken profile module fails startup instead
+    -- of silently re-reading Java getters from the hot path.
+    local vehicleProfile = nil
+    if type(MDADVehicleProfile) == "table"
+            and type(MDADVehicleProfile.build) == "function" then
+        local pok, built = pcall(MDADVehicleProfile.build, vehicle)
+        if pok and type(built) == "table" then vehicleProfile = built end
+    end
+    if not vehicleProfile then return KEY_ROUTE end
+    if vehicleProfile.geometryValid ~= true
+            or type(vehicleProfile.halfW) ~= "number"
+            or vehicleProfile.halfW * 0 ~= 0 or vehicleProfile.halfW <= 0
+            or type(vehicleProfile.halfL) ~= "number"
+            or vehicleProfile.halfL * 0 ~= 0 or vehicleProfile.halfL <= 0 then
+        return KEY_UNSUPPORTED
+    end
     -- 靠右行駛：常駐把前視點偏到右車道，會車時雙方自然錯開；繞行剖面作用時
     -- follower 會從右車道平滑過渡到繞行線再回來。沙盒 0＝關（沿中心線）。
     -- 符號：**l 正＝行進方向右側**——PZ 世界座標 Y 向南（地圖原點在西北角），
@@ -662,34 +682,48 @@ local function startSession(playerObj, playerNum)
         fstate = fstate,
         maxSpeed = maxSpeed,
         perceptionCap = maxSpeed > PERCEPTION_CAP_KMH and HISPEED_CAP_KMH or PERCEPTION_CAP_KMH,
-        mode = "build",  -- build → follow ⇄ yield → arrive
+        mode = "build",  -- build → follow/gear-reset/recover/unstick/settle ⇄ yield → arrive
         nextRouteMs = startedAt + ROUTE_REFRESH_MS,
         nextUsageMs = startedAt + USAGE_FIRST_RETRY_MS,
         usageArgs = { vehicleId = vehicle:getId(), active = true },
         navUsageArgs = { active = true },
-        nextDebugMs = 0, -- 下一次允許印跟線遙測的時間戳（0＝第一幀就印）
-        cleanSinceMs = 0, -- yield 中「連續乾淨輸入」的起點時戳（0＝還沒開始計）
+        nextDebugMs = 0,
+        cleanSinceMs = 0,
         parity = 1,
         yieldNotified = false,
-        stuckSince = 0,  -- 0＝目前不在「疑似卡死」狀態；非 0＝開始凍結的時間戳
-        stuckErr = 0,    -- 疑似卡死起點的航向誤差（弧度）
-        stuckRem = 0,    -- 疑似卡死起點的沿線剩餘距離（公尺）
+        progressState = "disarmed",
+        progressSince = 0,
+        progressX = 0, progressY = 0, progressS = 0, progressH = 0,
+        progressUntil = 0,
+        resumeProgressPhase = nil,
+        resumeProgressUntil = 0,
+        verifyArmPending = false,
+        verifyArmUntil = 0,
+        routeReadyEventPending = true,
+        routeReadyWhy = "initial",
         -- M4 感知與繞行。sensor 缺席（檔案樹壞）＝感知停用、退回 M3 純跟線，
         -- 不算錯誤：繞行是加值功能，跟線本體不依賴它。
         sensor = (type(MDADSensor) == "table" and type(MDADSensor.newState) == "function")
             and MDADSensor.newState() or false,
-        planSig = 0,        -- 上次餵給 Corridor 的障礙簽章（sig 沒變就不重規劃）
+        planSig = -1,       -- -1 不可能是 sensor sig：首輪 clear 也必進一次 replan
         dodging = false,    -- 側偏剖面目前掛在 fstate 上
         dodgeTight = false, -- 本次繞行在彎道段（速度壓爬行；replan 每次重判）
         dodgeNotified = false, -- 繞行提示只出一次（clear/blocked/換路線時重臂）
-        lastSNow = 0,       -- 最近一幀的沿線弧長（脫困額度重臂＋進 unstick 時記錨）
-        blocked = false,    -- 前方無縫隙：煞停等待（障礙消失或玩家接手）
-        blockedNotified = false, -- blocked 紅字只提示一次（解除後重臂）
-        unstickCount = 0,   -- 連續脫困次數（沿線前進 UNSTICK_PROGRESS 即歸零）
-        unstickS = 0,       -- 進入 unstick 當下的沿線弧長（算前進量用）
-        unstickX = 0, unstickY = 0, unstickUntil = 0, -- 脫困起點與時限
-        blockS = 0,         -- blocked 障礙群起點弧長（漸進接近的距離錨；0＝立即煞停）
-        lastTx = tx, lastTy = ty, -- 最後一次成功查到的導航目標（抵達接管判定用）
+        lastSNow = 0,
+        blocked = false,
+        blockedNotified = false,
+        currentBlocked = false, -- current-body safety OR-gate；與前方 planned blocked 獨立
+        currentClearRounds = 0,
+        unstickX = 0, unstickY = 0, unstickUntil = 0,
+        settleUntil = 0,
+        unstickStartedAt = 0,
+        nextRearProbeMs = 0,
+        rearStatus = "unknown",
+        reverseForce = 0,
+        unstickDistance = 0,
+        blockS = 0,
+        lastTx = tx, lastTy = ty,
+        targetGen = 1, routeGen = 1, pendingRouteWhy = nil,
         gearCap = 0,        -- 檔位巡航上限快取（refreshPolicies 維護；>0 才生效）
         zombieSlow = true,  -- 政策×偏好合成快取：這位玩家要不要為殭屍減速
         corpseSlow = true,  -- 同上，地面屍體
@@ -698,12 +732,11 @@ local function startSession(playerObj, playerNum)
         offroad = false,    -- 對期望線偏差過大（遲滯 4m 進／2m 出）
         clearStreak = 0,    -- 連續 clear 輪數（堵住解除遲滯）
         followHold = false, -- 跟車分級把目標壓 0（停等豁免卡死偵測用）
-        waitSince = 0,      -- 停等起點時戳（0＝非停等；獨立超時紅字）
-        pushSince = 0,      -- 推撞失配計時起點（0＝未累計，此時 pushX/pushY 是廢值）
-        detourTried = false, -- 本次 blocked episode 已試過改道（解除時重臂）
+        waitSince = 0,      -- 合法 blocked/followHold 停等；只走既有 20s timeout
+        detourTried = false,
         dodgeCrawl = false, -- 承諾剖面是 squeeze 檔（entry／hold／exit 全段上限 10）
         dodgeMargin = 1,    -- commit 時 a..c 最小餘裕（entry／hold 速度縮放輸入）
-        pushBanL = nil,     -- 推撞實證不可行的縫（本 episode 不再提案；nil＝無）
+        pushBanL = nil,     -- planner ban；recovery episode 可跨 clear/route 保留
         cornerLatch = false, -- BLOCKED_CORNER：障礙貼折點、軌跡契約不支援（快速改道）
         cornerS = 0,        -- corner latch 時的沿線弧長（前進 CORNER_RETRY_DIST 即撤銷重枚舉）
         tmpOvX = {}, tmpOvY = {}, -- M6 候選折線工作表（buildOffsetLine 輸出、commit 時複製進 fstate）
@@ -711,12 +744,32 @@ local function startSession(playerObj, playerNum)
         lastOvS0 = 0,
         blockHitX = nil,    -- sweep 真命中世界座標（detour 避讓圈直接用，不經弧長轉換）
         blockHitY = nil,
-        pushBanS = 0,       -- 推撞發生位置（ban 虛擬點的縱向錨）
-        dodgeNeed = 1.3,    -- 承諾剖面的世界掃掠淨距基準（守護輪沿用提案檔位）
-        pushX = 0, pushY = 0, -- 推撞計時起點的車體世界座標（預建鍵免熱路徑 rehash）
-        sandBias = laneBias, -- 沙盒靠右偏置（start 時夾限完的值；路面校正的基底）
-        roadBias = 0,       -- 路面對中校正量（EMA；行駛線＝sandBias + roadBias）
-        vehicleProfile = nil, -- Phase 1 diagnostic cache；與 follower 的 s.profile 分名，控制不讀
+        pushBanS = 0,
+        banFromRecovery = false,
+        probeErrorLogged = false,
+        dodgeNeed = 1.3,
+        sandBias = laneBias,
+        roadBias = 0,
+        vehicleProfile = vehicleProfile,
+        -- Recovery episode 全為 scalar；route identity 改變只改映射，不清 attempts/ban。
+        episodeSeq = 0,
+        episodeId = 0,
+        episodeActive = false,
+        episodeAttempts = 0,
+        episodeStartX = 0, episodeStartY = 0, episodeStartS = 0,
+        episodeRouteGen = 1,
+        episodeHitX = nil, episodeHitY = nil,
+        episodeHitS = 0, episodeHitL = 0,
+        episodeReason = nil,
+        episodeGearResetTried = false,
+        episodeClearRounds = 0,
+        episodeMapPending = false,
+        actualClearance = 0,
+        plannedClearance = 0,
+        footprintBlocked = false,
+        footprintPoseOnly = false,
+        footprintHitX = nil, footprintHitY = nil,
+        footprintHitS = 0, footprintHitL = 0,
         diag = false,       -- telemetry session 是否啟動（熱路徑 boolean）
         -- 遙測用純觀測欄位（控制端不讀）：planMode＝最近一次 replan 離場分類；
         -- init＝尚未完成分類，其他值為 guard／guard-blocked／corner-latched／
@@ -739,17 +792,24 @@ local function startSession(playerObj, playerNum)
     do
         local sNew = sessions[playerNum]
         if diagEnabled() then
-            local vehicleProfile = nil
-            if type(MDADVehicleProfile) == "table"
-                    and type(MDADVehicleProfile.build) == "function" then
-                local pok, built = pcall(MDADVehicleProfile.build, vehicle)
-                if pok and type(built) == "table" then vehicleProfile = built end
-            end
-            sNew.vehicleProfile = vehicleProfile
-            local dok, active = pcall(MDADDiagnostics.start, playerNum, vehicle, vehicleProfile)
+            local dok, active = pcall(MDADDiagnostics.start,
+                playerNum, vehicle, sNew.vehicleProfile)
             sNew.diag = dok and active == true
             if not dok then pcall(MDADDiagnostics.stop, playerNum, "error") end
-            if sNew.diag then pcall(MDADDiagnostics.event, playerNum, "start") end
+            if sNew.diag then
+                diagEvent(sNew, playerNum, "start")
+                diagEvent(sNew, playerNum, "target", {
+                    phase = "set", x = tx, y = ty, why = "user", tg = sNew.targetGen,
+                })
+                local pointN = type(route.pts) == "table" and #route.pts / 2 or 0
+                local routeLen = type(route.len) == "number"
+                    and route.len * 0 == 0 and route.len or nil
+                diagEvent(sNew, playerNum, "route", {
+                    phase = "cutover", why = "initial", rg = sNew.routeGen,
+                    tg = sNew.targetGen, len = routeLen, pts = pointN,
+                    target = tostring(tx) .. "," .. tostring(ty),
+                })
+            end
         end
     end
     return nil
@@ -1054,6 +1114,318 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     return phys
 end
 
+-- Recovery episode survives sensor resets and same-target route identities. Only a true
+-- target change/arrive/stop or the 10m+two-clear rearm path calls this reset.
+local function clearEpisode(s)
+    s.episodeActive = false
+    s.episodeId = 0
+    s.episodeAttempts = 0
+    s.episodeStartX, s.episodeStartY, s.episodeStartS = 0, 0, 0
+    s.episodeHitX, s.episodeHitY = nil, nil
+    s.episodeHitS, s.episodeHitL = 0, 0
+    s.episodeReason = nil
+    s.episodeGearResetTried = false
+    s.episodeClearRounds = 0
+    s.episodeMapPending = false
+    s.pushBanL, s.pushBanS = nil, 0
+    s.banFromRecovery = false
+end
+
+local function beginEpisode(s, reason, x, y)
+    if s.episodeActive then return end
+    s.episodeSeq = s.episodeSeq + 1
+    s.episodeId = s.episodeSeq
+    s.episodeActive = true
+    s.episodeAttempts = 0
+    s.episodeStartX, s.episodeStartY, s.episodeStartS = x, y, s.lastSNow
+    s.episodeRouteGen = s.routeGen
+    s.episodeReason = reason
+    s.episodeGearResetTried = false
+    s.episodeClearRounds = 0
+end
+
+-- BaseVehicle.getWorldPos(float,float,float,out) transforms the script COM into PZ world
+-- x/y (BaseVehicle.java:1871-1889). The caller owns/reuses the pooled vector.
+local function bodyCenter(s, vehicle, out)
+    local p = s.vehicleProfile
+    if type(p) ~= "table" or p.geometryValid ~= true
+            or not finite(p.centerOfMassX) or not finite(p.centerOfMassZ) then
+        return nil, nil
+    end
+    local okLookup, fn = pcall(jindex, vehicle, "getWorldPos")
+    if not okLookup or type(fn) ~= "function" then return nil, nil end
+    local ok = pcall(fn, vehicle, p.centerOfMassX, 0, p.centerOfMassZ, out)
+    if not ok then return nil, nil end
+    local x, y = out:x(), out:y()
+    if not finite(x) or not finite(y) then return nil, nil end
+    return x, y
+end
+
+
+-- 後方 swept-strip 探測的共用包裝（recovery 起手與 unstick 每 100ms 重查共用）：
+-- bodyCenter 取不到、或 Sensor 缺席，都回 unloaded 而非 clear——呼叫端一律以
+-- status ~= "clear" 判定不可倒車。out 會被 bodyCenter 覆寫成世界座標，呼叫端必須
+-- 先取完 forward 分量；fx/fy 需已正規化。
+local function rearProbe(s, vehicle, out, fx, fy, vx, vy)
+    local bx, by = bodyCenter(s, vehicle, out)
+    if bx == nil or type(MDADSensor) ~= "table"
+            or type(MDADSensor.probeRear) ~= "function" then
+        return "unloaded", vx, vy, "geometry", "body center or rear probe unavailable"
+    end
+    return MDADSensor.probeRear(s.sensor, vehicle, getCell(), bx, by, fx, fy, -fy, fx,
+        s.vehicleProfile.halfW, s.vehicleProfile.halfL, REAR_TRAVEL_M)
+end
+
+local function noteProbeError(s, where, status, kind, detail)
+    if s.probeErrorLogged or type(detail) ~= "string" or detail == "" then return end
+    s.probeErrorLogged = true
+    print(LOG .. where .. " probe fail-closed status=" .. tostring(status)
+        .. " kind=" .. tostring(kind) .. " detail=" .. detail)
+end
+
+-- recovery 的物理實證 ban：繞行已承諾側偏就 ban 那條縫，否則 ban 車目前的橫向
+-- 位置。「本 episode 尚未 ban」的守門留在呼叫端（footprint 要求真命中、suspect
+-- 要求近場非淨空），這裡只負責 lane 取值與寫入，兩條路徑共用同一套規則。
+local function banRecoveryLane(s, latSigned, anchorS)
+    local lane = latSigned
+    if s.dodging and finite(s.fstate.offL) then lane = s.fstate.offL end
+    if not finite(lane) then return end
+    s.pushBanL, s.pushBanS = lane, anchorS
+    s.banFromRecovery = true
+end
+
+-- Project a retained world hit directly onto a newly-built route. This does not depend
+-- on the first sensor snapshot containing the old obstacle (streaming/unloaded safe).
+local function remapEpisodeBan(s)
+    local p = s.profile
+    if not s.episodeMapPending or p.ready ~= true
+            or not finite(s.episodeHitX) or not finite(s.episodeHitY) then return end
+    local bestD2, bestS, bestL = nil, 0, 0
+    for i = 1, p.n - 1 do
+        local ax, ay = p.x[i], p.y[i]
+        local dx, dy = p.x[i + 1] - ax, p.y[i + 1] - ay
+        local len = p.segLen[i]
+        if finite(len) and len > 0 then
+            local t = ((s.episodeHitX - ax) * dx + (s.episodeHitY - ay) * dy)
+                / (len * len)
+            if t < 0 then t = 0 elseif t > 1 then t = 1 end
+            local qx, qy = ax + dx * t, ay + dy * t
+            local ex, ey = s.episodeHitX - qx, s.episodeHitY - qy
+            local d2 = ex * ex + ey * ey
+            if bestD2 == nil or d2 < bestD2 then
+                local h = p.segH[i]
+                bestD2 = d2
+                bestS = p.s[i] + len * t
+                bestL = ex * (-sin(h)) + ey * cos(h)
+            end
+        end
+    end
+    local corridorHalf = type(MDADSensor) == "table" and MDADSensor.CORRIDOR_HALF or 7
+    if bestD2 ~= nil and bestD2 <= corridorHalf * corridorHalf then
+        s.pushBanS, s.pushBanL = bestS, bestL
+    else
+        s.pushBanS, s.pushBanL = 0, nil
+    end
+    s.episodeMapPending = false
+end
+
+-- Runs once per completed sensor snapshot, before the expected-path planner. It updates
+-- the current-body OR-gate, episode ban/rearm, and scalar telemetry without allocating.
+local function footprintSnapshot(s, vehicle, playerNum, out, heading, vx, vy, latSigned)
+    local sen = s.sensor
+
+    remapEpisodeBan(s)
+
+    local blocked, actual, planned, hitI, hitS, hitL, hitX, hitY, poseOnly
+    local bx, by = bodyCenter(s, vehicle, out)
+    local idx = s.fstate.idx or 1
+    local routeH = s.profile.segH[idx]
+    if bx ~= nil and finite(routeH) and type(MDADCorridor) == "table"
+            and type(MDADCorridor.currentFootprintHit) == "function" then
+        blocked, actual, planned, hitI, hitS, hitL, hitX, hitY, poseOnly =
+            MDADCorridor.currentFootprintHit(
+                sen.hardS, sen.hardL, sen.hardX, sen.hardY, sen.hardR, sen.hardN,
+                bx, by, heading, s.vehicleProfile.halfW, s.vehicleProfile.halfL,
+                s.lastSNow, latSigned, routeH, expectedLaneOf(s))
+    else
+        blocked, actual, planned, hitI, hitS, hitL, hitX, hitY, poseOnly =
+            true, 0, 0, 0, 0, 0, 0, 0, false
+    end
+    s.actualClearance, s.plannedClearance = actual, planned
+    s.footprintBlocked = blocked == true
+    s.footprintPoseOnly = poseOnly == true
+    if hitI and hitI > 0 then
+        s.footprintHitS, s.footprintHitL = hitS, hitL
+        s.footprintHitX, s.footprintHitY = hitX, hitY
+    else
+        s.footprintHitS, s.footprintHitL = 0, 0
+        s.footprintHitX, s.footprintHitY = nil, nil
+    end
+
+    if blocked then
+        s.currentBlocked = true
+        s.currentClearRounds = 0
+        s.episodeClearRounds = 0
+        beginEpisode(s, hitI > 0 and "contact" or "unknown", vx, vy)
+        if hitI > 0 and s.episodeHitX == nil then
+            s.episodeHitX, s.episodeHitY = hitX, hitY
+            s.episodeHitS, s.episodeHitL = hitS, hitL
+        end
+        if hitI > 0 and s.pushBanL == nil then
+            banRecoveryLane(s, latSigned, hitS)
+        end
+        s.planMode = "current-blocked"
+    else
+        s.currentClearRounds = s.currentClearRounds + 1
+        if s.currentBlocked and s.currentClearRounds >= CLEAR_STREAK_N then
+            s.currentBlocked = false
+        end
+        if s.episodeActive then
+            s.episodeClearRounds = s.episodeClearRounds + 1
+        end
+    end
+
+    if s.episodeActive and s.episodeClearRounds >= CLEAR_STREAK_N then
+        local rearmed = false
+        if s.routeGen == s.episodeRouteGen then
+            rearmed = s.lastSNow - s.episodeStartS >= UNSTICK_PROGRESS
+        else
+            local ax, ay = s.episodeHitX, s.episodeHitY
+            if not finite(ax) or not finite(ay) then
+                ax, ay = s.episodeStartX, s.episodeStartY
+            end
+            local dx, dy = vx - ax, vy - ay
+            rearmed = dx * dx + dy * dy >= EPISODE_REARM_SQ
+        end
+        if rearmed then
+            diagEvent(s, playerNum, "progress", {
+                phase = "rearmed", eid = s.episodeId, s = s.lastSNow,
+                d = UNSTICK_PROGRESS,
+            })
+            clearEpisode(s)
+        end
+    end
+end
+
+-- Called only after stepFollow released its hot-path vector. Rear unknown is fail-closed;
+-- an attempt is consumed only after a clear 4m swept-strip check.
+local function startRecoveryAttempt(s, vehicle, playerNum, now, vx, vy)
+    if MDAD.sandbox("ObstaclePolicy", POLICY_DODGE) ~= POLICY_DODGE
+            or s.episodeAttempts >= UNSTICK_MAX then
+        diagEvent(s, playerNum, "unstick", {
+            phase = "timeout", eid = s.episodeId, attempt = s.episodeAttempts,
+            x = vx, y = vy, s = s.lastSNow, rear = "attempt-limit",
+        })
+        Drive.stop(playerNum, KEY_STUCK)
+        return
+    end
+
+    local out = BaseVehicle.allocVector3f()
+    vehicle:getForwardVector(out)
+    local fx, fy = out:x(), out:z()
+    local flen2 = fx * fx + fy * fy
+    local status, hitX, hitY, kind, detail = "unloaded", vx, vy, "geometry",
+        "invalid forward vector"
+    if flen2 > 1e-6 then
+        local inv = 1 / sqrt(flen2)
+        fx, fy = fx * inv, fy * inv
+        status, hitX, hitY, kind, detail = rearProbe(s, vehicle, out, fx, fy, vx, vy)
+    end
+    BaseVehicle.releaseVector3f(out)
+    s.rearStatus = status
+    if status ~= "clear" then
+        noteProbeError(s, "rear-start", status, kind, detail)
+        diagEvent(s, playerNum, "unstick", {
+            phase = "rear-blocked", eid = s.episodeId,
+            attempt = s.episodeAttempts, x = hitX, y = hitY,
+            s = s.lastSNow, rear = status, kind = kind, detail = detail,
+        })
+        Drive.stop(playerNum, KEY_STUCK)
+        return
+    end
+
+    s.episodeAttempts = s.episodeAttempts + 1
+    s.unstickX, s.unstickY = vx, vy
+    s.unstickUntil = now + UNSTICK_MS
+    s.unstickStartedAt = now
+    s.nextRearProbeMs = now + REAR_PROBE_MS
+    s.unstickDistance = 0
+    s.reverseForce = 0
+    s.mode = "unstick"
+    s.progressState = "recover"
+    diagEvent(s, playerNum, "unstick", {
+        phase = "start", eid = s.episodeId, attempt = s.episodeAttempts,
+        x = vx, y = vy, s = s.lastSNow, d = 0, rear = status,
+    })
+    vehicle:setRegulator(false)
+    local playerObj = getSpecificPlayer(playerNum)
+    if playerObj then haloGood(playerObj, KEY_UNSTICK) end
+end
+
+-- Recovery modes bypass stepFollow, so they use the same Diagnostics gate explicitly.
+-- Telemetry off returns before every new physics getter; no per-frame table is created.
+local function sampleRecovery(s, vehicle, playerNum, now, x, y, speed, fx, fy, heading)
+    if not s.diag then return end
+    local okW, want = pcall(MDADDiagnostics.shouldSample,
+        playerNum, now, s.mode, 0, true)
+    if not okW then
+        diagFail(s, playerNum, "shouldSample failed", want)
+        return
+    end
+    if want ~= true then return end
+
+    local vec, phys, gear
+    local okPrep, prepErr = pcall(function()
+        if not finite(fx) or not finite(fy) then
+            vec = BaseVehicle.allocVector3f()
+            if vec == nil then error("allocVector3f returned nil") end
+            vehicle:getForwardVector(vec)
+            fx, fy = vec:x(), vec:z()
+            local flen2 = fx * fx + fy * fy
+            if flen2 > 1e-6 then
+                local inv = 1 / sqrt(flen2)
+                fx, fy = fx * inv, fy * inv
+                heading = MDADFollower.headingFromForward(fx, fy)
+            else
+                fx, fy, heading = 1, 0, 0
+            end
+        end
+        phys = collectPhys(s, vehicle, fx, fy, nil, nil)
+        gear = Drive.getGear(playerNum)
+    end)
+    if vec ~= nil then
+        local okRelease, releaseErr = pcall(BaseVehicle.releaseVector3f, vec)
+        if not okRelease and okPrep then
+            okPrep, prepErr = false, releaseErr
+        end
+    end
+    if not okPrep then
+        diagFail(s, playerNum, "recovery physics collection failed", prepErr)
+        return
+    end
+
+    local deadline = s.mode == "settle" and s.settleUntil or s.unstickUntil
+    local remainingMs = deadline - now
+    if remainingMs < 0 then remainingMs = 0 end
+    local ok, live = pcall(MDADDiagnostics.sample, playerNum, now,
+        x, y, heading or 0, speed, 0, 0, 0, 0, 0, s.reverseForce,
+        s.mode, gear, false, s.sensor, true,
+        s.planMode, s.lastSNow, s.blockS, s.dodgeMargin, s.dodgeNeed,
+        s.roadBias, s.blockHitX, s.blockHitY, s.fstate.idx,
+        s.blocked or s.currentBlocked, s.dodging, s.offroad, s.cornerLatch, false, phys,
+        s.targetGen, s.routeGen, s.episodeId, s.progressState, s.episodeAttempts,
+        s.pushBanL ~= nil and s.pushBanL or false, s.unstickDistance,
+        s.rearStatus, s.reverseForce, remainingMs,
+        s.actualClearance, s.plannedClearance, s.footprintBlocked,
+        s.footprintHitX, s.footprintHitY)
+    if not ok then
+        diagFail(s, playerNum, "sample failed", live)
+    elseif live ~= true then
+        s.diag = false
+        pcall(MDADDiagnostics.stop, playerNum, "stopped")
+    end
+end
+
 -- 繞行線掃掠複驗（理由見 SWEEP_STEP 常數註解）。回 true＝全程淨空。
 -- tag＝呼叫點標籤（guard/plan/retry）：失敗時印違規點細節——「plan 判可行、
 -- sweep 打槍」循環卡死的復盤全靠這行（2026-08-29 路口實測：只有 failed 一行
@@ -1340,7 +1712,7 @@ local function replan(s, vehicle, playerNum)
     end
     local mode, a, b, c, d, offL
     local commitNb = nil -- 本輪 commit 的掃掠淨距檔位（setOffset 成功時寫進承諾守護）
-    if sen.hardN == 0 then
+    if sen.hardN == 0 and s.pushBanL == nil then
         mode = "clear"
     elseif type(MDADCorridor) ~= "table" or type(MDADCorridor.plan) ~= "function" then
         -- 檔案樹缺 Corridor（require 沒帶到）：算不了縫隙，保守停車
@@ -1643,10 +2015,12 @@ local function replan(s, vehicle, playerNum)
         s.blocked = false
         s.blockedNotified = false
         s.dodgeNotified = false
-        s.pushBanL = nil -- 走廊淨空＝episode 結束，物理 ban 一併解除
+        if not s.banFromRecovery then
+            s.pushBanL, s.pushBanS = nil, 0
+        end
         s.cornerLatch = false
         s.blockHitX = nil
-        s.planMode = "clear"
+        s.planMode = s.currentBlocked and "current-blocked" or "clear"
         return
     end
     s.clearStreak = 0
@@ -1684,59 +2058,154 @@ end
 -- 「每幀最多一次 addImpulse」在此同樣成立——unstick 幀不跑 stepFollow，不會疊加。
 -- 玩家接手（讓位）與失效閘門都在呼叫端先行，這裡只管推車與收手判定。
 local function stepUnstick(s, vehicle, playerNum, now)
-    -- 成功：退離卡點 3 公尺 → 回跟線，重掃重規劃
-    local dx = vehicle:getX() - s.unstickX
-    local dy = vehicle:getY() - s.unstickY
-    if dx * dx + dy * dy >= UNSTICK_DIST_SQ then
-        s.mode = "follow"
-        s.stuckSince = 0
-        -- 只清控制歷史（PID／調頭／側偏），**保留投影游標 idx**：路線沒換，
-        -- 歸零 idx 會讓投影窗口從路線起點慢慢爬回來、車朝起點打滿方向
-        -- （M4 review 兩條 lane 同時抓到的 blocker）。小幅倒退交給 REWIND_MAX。
+    local vx, vy = vehicle:getX(), vehicle:getY()
+    local speedKmh = vehicle:getCurrentSpeedKmHour()
+    local dx, dy = vx - s.unstickX, vy - s.unstickY
+    local dist2 = dx * dx + dy * dy
+    s.unstickDistance = sqrt(dist2)
+    s.reverseForce = 0
+    vehicle:setRegulator(false)
+
+    -- Success does not immediately hand reverse velocity back to forward control.
+    if s.mode == "settle" then
+        if not finite(speedKmh) then
+            diagEvent(s, playerNum, "unstick", {
+                phase = "timeout", eid = s.episodeId, attempt = s.episodeAttempts,
+                x = vx, y = vy, s = s.lastSNow, d = s.unstickDistance,
+                duration = now - s.unstickStartedAt, rear = "settle-speed",
+            })
+            Drive.stop(playerNum, KEY_STUCK)
+            return
+        end
+        local av = speedKmh
+        if av < 0 then av = -av end
+        if av >= 1 and now >= s.settleUntil then
+            diagEvent(s, playerNum, "unstick", {
+                phase = "timeout", eid = s.episodeId, attempt = s.episodeAttempts,
+                x = vx, y = vy, s = s.lastSNow, d = s.unstickDistance,
+                duration = now - s.unstickStartedAt, rear = "settle-timeout",
+            })
+            sampleRecovery(s, vehicle, playerNum, now, vx, vy, speedKmh)
+            Drive.stop(playerNum, KEY_STUCK)
+            return
+        end
+        if av >= 1 then
+            vehicle:setForceBrake()
+            sampleRecovery(s, vehicle, playerNum, now, vx, vy, speedKmh)
+            return
+        end
+
+        diagEvent(s, playerNum, "unstick", {
+            phase = "success", eid = s.episodeId, attempt = s.episodeAttempts,
+            x = vx, y = vy, s = s.lastSNow, d = s.unstickDistance,
+            duration = now - s.unstickStartedAt, rear = s.rearStatus,
+            speed = speedKmh,
+        })
+        sampleRecovery(s, vehicle, playerNum, now, vx, vy, speedKmh)
         if type(MDADFollower.resetControl) == "function" then
             MDADFollower.resetControl(s.fstate)
         end
+        MDADFollower.clearOffset(s.fstate)
         s.dodging = false
         s.dodgeNotified = false
+        s.dodgeCrawl = false
+        s.dodgeTight = false
+        s.dodgeNeed = 1.3
         s.blocked = false
         s.blockedNotified = false
-        s.planSig = 0
+        s.planSig = -1 -- sensor reset 後即使 hardN=0／sig=0 也必重套 episode ban
         s.clearStreak = 0
-        if s.sensor then MDADSensor.reset(s.sensor) end -- nextMs 歸零＝立即重掃
-        if getDebug() then print(LOG .. "unstick pn=" .. playerNum .. " ok") end
+        s.detourTried = false
+        s.progressState = "disarmed"
+        if s.sensor then MDADSensor.reset(s.sensor) end
+        s.mode = s.profile.ready == true and "follow" or "build"
         return
     end
-    -- 失敗：時限內沒退出去（後方也頂死）→ 紅字停車
+
+    if dist2 >= UNSTICK_DIST_SQ then
+        s.mode = "settle"
+        s.progressState = "settle"
+        s.settleUntil = now + SETTLE_MS
+        s.currentBlocked = false
+        s.currentClearRounds = 0
+        s.episodeClearRounds = 0
+        diagEvent(s, playerNum, "unstick", {
+            phase = "settle", eid = s.episodeId, attempt = s.episodeAttempts,
+            x = vx, y = vy, s = s.lastSNow, d = s.unstickDistance,
+            duration = now - s.unstickStartedAt, rear = s.rearStatus,
+        })
+        vehicle:setForceBrake()
+        sampleRecovery(s, vehicle, playerNum, now, vx, vy, speedKmh)
+        return
+    end
+
     if now >= s.unstickUntil then
+        diagEvent(s, playerNum, "unstick", {
+            phase = "timeout", eid = s.episodeId, attempt = s.episodeAttempts,
+            x = vx, y = vy, s = s.lastSNow, d = s.unstickDistance,
+            duration = now - s.unstickStartedAt, rear = s.rearStatus,
+        })
+        sampleRecovery(s, vehicle, playerNum, now, vx, vy, speedKmh)
         Drive.stop(playerNum, KEY_STUCK)
         return
     end
-    vehicle:setRegulator(false)
+
     local mult = getGameTime():getMultiplier()
     if mult < MULT_MIN then mult = MULT_MIN end
     if mult > MULT_MAX then mult = MULT_MAX end
-    -- getMass 負值當 1（BaseVehicle.java:8963-8970）
-    local mass = vehicle:getMass()
-    if mass < 1 then mass = 1 end
+    local mass = s.vehicleProfile.mass
+    if not finite(mass) or mass < 1 then mass = 1 end
     local fwd = BaseVehicle.allocVector3f()
-    vehicle:getForwardVector(fwd) -- basis 第 2 欄＝BaseVehicle.java:4242-4244
+    vehicle:getForwardVector(fwd)
     local fx, fy = fwd:x(), fwd:z()
     local flen2 = fx * fx + fy * fy
+    local heading = 0
     if flen2 > 1e-6 then
         local inv = 1 / sqrt(flen2)
         fx, fy = fx * inv, fy * inv
+        heading = MDADFollower.headingFromForward(fx, fy)
+    end
+
+    -- Re-probe before the impulse on each 100ms boundary. Any non-clear result
+    -- produces zero reverse impulse and a rear-blocked event for the active attempt.
+    if now >= s.nextRearProbeMs then
+        s.nextRearProbeMs = now + REAR_PROBE_MS
+        local status, hitX, hitY, kind, detail = "unloaded", vx, vy, "geometry",
+            "invalid forward vector"
+        if flen2 > 1e-6 then
+            status, hitX, hitY, kind, detail = rearProbe(s, vehicle, fwd, fx, fy, vx, vy)
+        end
+        s.rearStatus = status
+        if status ~= "clear" then
+            BaseVehicle.releaseVector3f(fwd)
+            noteProbeError(s, "rear-unstick", status, kind, detail)
+            diagEvent(s, playerNum, "unstick", {
+                phase = "rear-blocked", eid = s.episodeId, attempt = s.episodeAttempts,
+                x = hitX, y = hitY, s = s.lastSNow, d = s.unstickDistance,
+                duration = now - s.unstickStartedAt,
+                rear = status, kind = kind, detail = detail,
+            })
+            sampleRecovery(s, vehicle, playerNum, now, vx, vy, speedKmh, fx, fy, heading)
+            Drive.stop(playerNum, KEY_STUCK)
+            return
+        end
+    end
+
+    if flen2 > 1e-6 then
         local force = UNSTICK_PUSH * MASS_BASE * mass * IMPULSE_SCALE * (mult / MULT_NORM)
         local impulse = BaseVehicle.allocVector3f()
         impulse:set(-force * fx, 0, -force * fy)
         fwd:set(0, 0, 0)
         vehicle:addImpulse(impulse, fwd)
         BaseVehicle.releaseVector3f(impulse)
+        s.reverseForce = force
     end
     BaseVehicle.releaseVector3f(fwd)
+    sampleRecovery(s, vehicle, playerNum, now, vx, vy, speedKmh, fx, fy, heading)
     if getDebug() and now >= s.nextDebugMs then
         s.nextDebugMs = now + DEBUG_MS
-        print(string.format("%spn=%d mode=unstick speed=%.1f n=%d",
-            LOG, playerNum, vehicle:getCurrentSpeedKmHour(), s.unstickCount))
+        print(string.format("%spn=%d mode=unstick speed=%.1f attempt=%d rear=%s",
+            LOG, playerNum, speedKmh, s.episodeAttempts, tostring(s.rearStatus)))
     end
 end
 
@@ -1763,7 +2232,7 @@ local function stepFollow(s, vehicle, playerNum, now)
     local fx, fy = fwd:x(), fwd:z()
     local flen2 = fx * fx + fy * fy
     local reached = false
-    local stuck = false
+    local postAction = nil
     if flen2 > 1e-6 then
         local inv = 1 / sqrt(flen2)
         fx, fy = fx * inv, fy * inv
@@ -1776,10 +2245,6 @@ local function stepFollow(s, vehicle, playerNum, now)
         -- 目前沿線弧長：M4 感知與脫困額度重臂共用（sensor 缺席時脫困仍要用，
         -- 所以重臂判定放在 sensor 塊之外）
         s.lastSNow = s.profile.length - (remaining or 0)
-        -- 沿線前進夠遠＝上次脫困真的有用，重臂脫困額度
-        if s.unstickCount > 0 and s.lastSNow - s.unstickS > UNSTICK_PROGRESS then
-            s.unstickCount = 0
-        end
 
         -- ---- M4 感知（sensor 缺席＝退回 M3 純跟線）----
         -- 排在 applySpeed 之前：速度檔位要 min 進本幀的 targetSpeed 才有效。
@@ -1817,9 +2282,13 @@ local function stepFollow(s, vehicle, playerNum, now)
                     MDADFollower.setLaneBias(s.fstate, nb)
                 end
                 s.sensor.scanBias = nb -- 掃描帶跟隨行駛線（下一輪 beginRound 鎖定）
+                -- Current-body OBB is a safety OR-gate in front of the existing planner.
+                -- It consumes this completed immutable snapshot even when sig is unchanged.
+                footprintSnapshot(s, vehicle, playerNum, fwd, heading, vx, vy, latSigned)
                 if s.sensor.sig ~= s.planSig or s.clearStreak > 0 then
                     s.planSig = s.sensor.sig
                     replan(s, vehicle, playerNum)
+                    if s.currentBlocked then s.planMode = "current-blocked" end
                 end
                 -- 一般玩家軌跡每輪更新常駐點列；debugOn 只控制紅／綠／橙 markers。
                 -- LineDrawer 每 tick 畫連續線，幾何仍只在 250ms 輪完成時重算。
@@ -2057,13 +2526,183 @@ local function stepFollow(s, vehicle, playerNum, now)
             end
         end
 
+        -- Final target is known before the supervisor. Planned blocked/followHold at target
+        -- zero are legal waits; current-body contact remains a recovery demand.
+        -- blockedStop 在監督段與致動段各要用一次，而監督段之後不再改動它的任一
+        -- 輸入（blocked／reached／offroad／lastSNow／blockS／cornerLatch），算一次即可。
+        local blockedStop = s.blocked and not reached and not s.offroad
+            and s.lastSNow >= s.blockS
+                - (s.cornerLatch and CORNER_STOP_DIST or BLOCK_STOP_DIST)
+        if blockedStop then targetSpeed = 0 end
+        if s.currentBlocked then
+            targetSpeed = 0
+            s.lastCapReason = "contact"
+            s.planMode = "current-blocked"
+        end
+
+        local avProgress = speedKmh
+        if avProgress < 0 then avProgress = -avProgress end
+        local legalWait = not s.currentBlocked and targetSpeed <= 0
+            and (s.blocked or s.followHold)
+        if legalWait and avProgress < 1 then
+            if s.waitSince == 0 then
+                s.waitSince = now
+            elseif now - s.waitSince >= WAIT_TIMEOUT_MS then
+                postAction = "wait"
+            end
+        else
+            s.waitSince = 0
+        end
+
+        local skipProgressCompare = false
+        if s.verifyArmPending then
+            s.verifyArmPending = false
+            s.progressState = "verify"
+            s.progressUntil = s.verifyArmUntil
+            s.verifyArmUntil = 0
+            s.progressSince = now
+            s.progressX, s.progressY = vx, vy
+            s.progressS, s.progressH = s.lastSNow, heading
+            skipProgressCompare = true
+        end
+
+        -- 150ms neutral pulse: regulator off, no brake, no steering impulse. The next
+        -- physics update selects N; after the pulse VERIFY grants two seconds to move.
+        if s.mode == "gear-reset" then
+            if now < s.progressUntil then
+                targetSpeed = 0
+                s.lastCapReason = "gear-reset"
+            else
+                s.mode = "follow"
+                s.progressState = "verify"
+                s.progressUntil = now + VERIFY_MS
+                s.progressSince = now
+                s.progressX, s.progressY = vx, vy
+                s.progressS, s.progressH = s.lastSNow, heading
+            end
+        end
+
+        if s.mode == "recover" then
+            targetSpeed = 0
+            s.lastCapReason = "recover"
+            if avProgress < 1 then postAction = "recover" end
+        elseif s.mode ~= "gear-reset" then
+            local demand = not reached and not legalWait
+                and (targetSpeed >= 8 or s.currentBlocked)
+            if not demand then
+                s.progressState = "disarmed"
+                s.progressSince = 0
+            elseif skipProgressCompare then
+                -- Same coordinate frame as the next comparison; arming itself is not progress.
+            elseif s.progressState == "disarmed" then
+                s.progressState = "watch"
+                s.progressSince = now
+                s.progressX, s.progressY = vx, vy
+                s.progressS, s.progressH = s.lastSNow, heading
+            elseif s.progressState == "watch" or s.progressState == "verify" then
+                local pdx, pdy = vx - s.progressX, vy - s.progressY
+                local wd2 = pdx * pdx + pdy * pdy
+                local ds = s.lastSNow - s.progressS
+                local dyaw = heading - s.progressH
+                if dyaw > 3.14159265358979 then dyaw = dyaw - 6.28318530717959
+                elseif dyaw < -3.14159265358979 then dyaw = dyaw + 6.28318530717959 end
+                local ayaw = dyaw
+                if ayaw < 0 then ayaw = -ayaw end
+                if wd2 >= PROGRESS_M_SQ or ds >= PROGRESS_S or ayaw >= PROGRESS_YAW then
+                    if s.progressState == "verify" then
+                        diagEvent(s, playerNum, "progress", {
+                            phase = "verified", eid = s.episodeId,
+                            dt = now - s.progressSince, wd = sqrt(wd2),
+                            ds = ds, dyaw = ayaw,
+                        })
+                    end
+                    s.progressState = "watch"
+                    s.progressSince = now
+                    s.progressX, s.progressY = vx, vy
+                    s.progressS, s.progressH = s.lastSNow, heading
+                elseif s.progressState == "verify" and now >= s.progressUntil then
+                    s.progressState = "recover"
+                    s.mode = "recover"
+                    targetSpeed = 0
+                    s.lastCapReason = "recover"
+                    diagEvent(s, playerNum, "progress", {
+                        phase = "recover", eid = s.episodeId,
+                        dt = now - s.progressSince, wd = sqrt(wd2),
+                        ds = ds, dyaw = ayaw, hit = s.rearStatus,
+                    })
+                    if avProgress < 1 then postAction = "recover" end
+                elseif s.progressState == "watch"
+                        and now - s.progressSince >= PROGRESS_MS then
+                    beginEpisode(s, s.currentBlocked and "contact" or "progress", vx, vy)
+                    s.progressState = "suspect"
+                    local nearStatus, nearX, nearY, nearKind, nearDetail =
+                        "unloaded", vx, vy, "geometry", "body center or near probe unavailable"
+                    local bx, by = bodyCenter(s, vehicle, fwd)
+                    if bx ~= nil and type(MDADSensor) == "table"
+                            and type(MDADSensor.probeNear) == "function" then
+                        nearStatus, nearX, nearY, nearKind, nearDetail = MDADSensor.probeNear(
+                            s.sensor, vehicle, getCell(), bx, by, fx, fy, -fy, fx,
+                            s.vehicleProfile.halfW, s.vehicleProfile.halfL)
+                    end
+                    if nearStatus ~= "clear" then
+                        noteProbeError(s, "near", nearStatus, nearKind, nearDetail)
+                    end
+                    local okOff, physicalOffroad = pcall(jget, vehicle, "isDoingOffroad")
+                    local okGear, transmission = pcall(jget, vehicle, "getTransmissionNumber")
+                    diagEvent(s, playerNum, "progress", {
+                        phase = "suspect", eid = s.episodeId,
+                        dt = now - s.progressSince, wd = sqrt(wd2),
+                        ds = ds, dyaw = ayaw, hit = nearStatus,
+                        gear = okGear and transmission or nil, detail = nearDetail,
+                    })
+                    if (s.currentBlocked or nearStatus ~= "clear") and s.pushBanL == nil then
+                        banRecoveryLane(s, latSigned, s.lastSNow + 4)
+                        if finite(nearX) and finite(nearY) and s.episodeHitX == nil then
+                            s.episodeHitX, s.episodeHitY = nearX, nearY
+                            s.episodeHitS, s.episodeHitL = s.lastSNow, latSigned or 0
+                        end
+                    end
+                    if nearStatus == "clear" and not s.currentBlocked
+                            and okOff and physicalOffroad == false
+                            and okGear and finite(transmission) and transmission >= 2
+                            and not s.episodeGearResetTried then
+                        s.episodeGearResetTried = true
+                        s.mode = "gear-reset"
+                        s.progressState = "gear-reset"
+                        s.progressUntil = now + GEAR_RESET_MS
+                        targetSpeed = 0
+                        s.lastCapReason = "gear-reset"
+                        diagEvent(s, playerNum, "progress", {
+                            phase = "gear-reset", eid = s.episodeId, gear = transmission,
+                        })
+                    else
+                        s.mode = "recover"
+                        s.progressState = "recover"
+                        targetSpeed = 0
+                        s.lastCapReason = "recover"
+                        diagEvent(s, playerNum, "progress", {
+                            phase = "recover", eid = s.episodeId,
+                            hit = nearStatus, x = nearX, y = nearY, kind = nearKind,
+                            detail = nearDetail,
+                        })
+                        if avProgress < 1 then postAction = "recover" end
+                    end
+                end
+            end
+        end
+
         local regOn = false
         local force = 0
+        if s.mode == "gear-reset" then
+            -- Neutral pulse: regulator off and exactly zero impulse/brake.
+            vehicle:setRegulator(false)
+        elseif s.mode == "recover" or s.currentBlocked then
+            vehicle:setRegulator(false)
+            vehicle:setForceBrake()
+            targetSpeed = 0
         -- offroad 豁免：blocked 的煞停錨是「沿線障礙群」的座標，車在路外時
         -- 這個錨無意義——按著煞車就是把車停死在草地上（回線優先，見 replan）
-        if s.blocked and not reached and not s.offroad
-                and s.lastSNow >= s.blockS
-                    - (s.cornerLatch and CORNER_STOP_DIST or BLOCK_STOP_DIST) then
+        elseif blockedStop then
             -- 前方無縫隙且已逼近障礙群：主動煞停等待（不是 Drive.stop——session
             -- 活著，掃描持續，障礙消失由 replan 解除；玩家接手走讓位）。停死後
             -- 卡死偵測會接手升級成倒車脫困→紅字停車，整條鏈自然收斂。
@@ -2144,7 +2783,8 @@ local function stepFollow(s, vehicle, playerNum, now)
         if s.diag then
             -- 新 Java getter 只在這一幀確定會 enqueue sample 時才跑；
             -- shouldSample 與 D.sample 共用同一 5/10Hz gate。
-            local critFlag = s.blocked or s.dodging or s.offroad or s.mode == "unstick"
+            local critFlag = s.blocked or s.currentBlocked or s.dodging or s.offroad
+                or s.mode == "gear-reset" or s.mode == "recover"
             local want = true
             local failed = false
             if type(MDADDiagnostics.shouldSample) == "function" then
@@ -2169,14 +2809,21 @@ local function stepFollow(s, vehicle, playerNum, now)
                 end
             end
             if not failed then
+                local recoveryMs = s.progressUntil - now
+                if recoveryMs < 0 then recoveryMs = 0 end
                 local ok, live = pcall(MDADDiagnostics.sample, playerNum, now,
                     vx, vy, heading, speedKmh, targetSpeed or 0, remaining or 0,
                     latSigned or 0, headingError or 0, steer or 0, force, s.mode,
                     Drive.getGear(playerNum), regOn, s.sensor, critFlag,
                     s.planMode, s.lastSNow, s.blockS, s.dodgeMargin, s.dodgeNeed,
                     s.roadBias, s.blockHitX, s.blockHitY, s.fstate.idx,
-                    s.blocked, s.dodging, s.offroad, s.cornerLatch, s.lastCoupled,
-                    phys)
+                    s.blocked or s.currentBlocked, s.dodging, s.offroad,
+                    s.cornerLatch, s.lastCoupled, phys,
+                    s.targetGen, s.routeGen, s.episodeId, s.progressState,
+                    s.episodeAttempts, s.pushBanL ~= nil and s.pushBanL or false,
+                    s.unstickDistance, s.rearStatus, 0, recoveryMs,
+                    s.actualClearance, s.plannedClearance, s.footprintBlocked,
+                    s.footprintHitX, s.footprintHitY)
                 if not ok then
                     diagFail(s, playerNum, "sample failed", live)
                 elseif live ~= true then
@@ -2185,132 +2832,30 @@ local function stepFollow(s, vehicle, playerNum, now)
                 end
             end
         end
-        -- ---- 卡死偵測 ----
-        -- 三個觀測都凍結才累計：|速度| < STUCK_SPEED_KMH、沿線進度變化 < STUCK_REM_EPS、
-        -- 航向變化 < STUCK_ERR_EPS。原地調頭時速度近零但航向在動、末段挪車時 remaining
-        -- 在動、煞停途中 remaining 也在動，都會不斷重置計時；headingError 在 ±pi 跳變
-        -- （調頭穿過正後方）時差值巨大，同樣走重置——誤差方向永遠是「不誤停」。
-        local moving = speedKmh > STUCK_SPEED_KMH or speedKmh < -STUCK_SPEED_KMH
-        -- 停等豁免（對抗審 BLOCKING）：blocked 煞停與跟車目標 0 是**合法等待**
-        -- ——前車臨停、隊友擋路、路口讓行都常超過 5 秒。對等待倒車既危險
-        -- （車隊裡倒車）又必然放棄（停等不產生沿線前進，脫困額度永不重臂，
-        -- 三次後紅字）。豁免期間卡死計時凍結；等待有自己的超時（紅字請玩家
-        -- 接手），不會無限等。
-        local waiting = (s.blocked or s.followHold) and not moving
-        if waiting then
-            s.stuckSince = 0
-            if s.waitSince == 0 then
-                s.waitSince = now
-            elseif now - s.waitSince >= WAIT_TIMEOUT_MS then
-                BaseVehicle.releaseVector3f(fwd)
-                Drive.stop(playerNum, KEY_STUCK)
-                return
-            end
-        else
-            s.waitSince = 0
-        end
-        if reached or moving or waiting then
-            s.stuckSince = 0
-        elseif s.stuckSince == 0 then
-            s.stuckSince = now
-            s.stuckErr = headingError or 0
-            s.stuckRem = remaining or 0
-        else
-            local dErr = (headingError or 0) - s.stuckErr
-            if dErr < 0 then dErr = -dErr end
-            local dRem = (remaining or 0) - s.stuckRem
-            if dRem < 0 then dRem = -dRem end
-            if dErr > STUCK_ERR_EPS or dRem > STUCK_REM_EPS then
-                s.stuckSince = now
-                s.stuckErr = headingError or 0
-                s.stuckRem = remaining or 0
-            elseif now - s.stuckSince >= STUCK_MS then
-                stuck = true
-            end
-        end
-        -- ---- 推撞偵測（理由見 PUSH_* 常數註解）----
-        -- 輪速 ≥8 km/h 而車體世界位移連 3m/2.5s 都不到＝頂著看不見的實體
-        -- 空推。沿線 s 不可當物理位移：回線／切換路段會橫向移動但 s 暫停。
-        -- 只在感知非空時累計；全空的高速零位移交給既有卡死三凍結。
-        local sen = s.sensor -- 缺席時是 false 非 nil，用 truthiness 判
-        local pushEligible = sen and (sen.hardN > 0 or sen.vehN > 0 or sen.movingVeh)
-        if not stuck and pushEligible
-                and (speedKmh >= PUSH_MIN_KMH or speedKmh <= -PUSH_MIN_KMH) then
-            if s.pushSince == 0 then
-                s.pushSince = now
-                s.pushX, s.pushY = vx, vy
-            else
-                local pdx, pdy = vx - s.pushX, vy - s.pushY
-                if pdx * pdx + pdy * pdy >= PUSH_FREE_SQ then
-                    s.pushSince = now
-                    s.pushX, s.pushY = vx, vy
-                elseif now - s.pushSince >= PUSH_MS then
-                    if s.dodging and s.pushBanL == nil then
-                        -- 繞行中第一次推撞＝物理實證此縫不可行（sweep 理論淨空
-                        -- 但碰撞箱／跟線誤差／格心量化疊加後實體卡住：2026-08-29
-                        -- 實測 offL=-1.50 貼皮卡反覆卡→倒車→同縫再 commit 循環）。
-                        -- 先 ban 該縫強制重規劃換縫；倒車留給換縫也解不了的情況。
-                        s.pushBanL = s.fstate.offL
-                        s.pushBanS = s.lastSNow + 4
-                        MDADFollower.clearOffset(s.fstate)
-                        s.dodging = false
-                        s.dodgeNotified = false
-                        s.dodgeCrawl = false
-                        s.dodgeTight = false
-                        s.dodgeNeed = 1.3
-                        s.planSig = 0 -- 障礙布局沒變也要強制重提案
-                        s.pushSince = 0
-                        if getDebug() then
-                            print(string.format(
-                                "%spn=%d push mismatch: ban lane %.2f, replanning",
-                                LOG, playerNum, s.pushBanL or 0))
-                        end
-                    else
-                        stuck = true
-                        if getDebug() then
-                            print(LOG .. "pn=" .. playerNum
-                                .. " push mismatch: wheels moving, no progress (ghost obstacle?)")
-                        end
-                    end
-                end
-            end
-        else
-            s.pushSince = 0
-        end
     end
     BaseVehicle.releaseVector3f(fwd)
 
-    -- 卡死（池向量已歸還才走到這裡）：M3 只會紅字停車；M4 起先試倒車脫困。
-    -- Drive.stop 只關 regulator、不硬煞——卡死時車本來就不動。
-    if stuck then
-        -- 政策允許且額度未用完 → 倒車脫困；否則紅字停車（M3 行為）。
-        -- 額度綁「沿線前進」：原地反覆卡→試 UNSTICK_MAX 次就放棄，不無限鬼打牆。
-        if MDAD.sandbox("ObstaclePolicy", POLICY_DODGE) == POLICY_DODGE
-                and s.unstickCount < UNSTICK_MAX then
-            s.unstickCount = s.unstickCount + 1
-            s.unstickX, s.unstickY = vx, vy -- 本幀開頭已讀；同一 tick 內車體不動
-            s.unstickS = s.lastSNow or 0
-            s.unstickUntil = now + UNSTICK_MS
-            s.mode = "unstick"
-            diagEvent(s, playerNum, "unstick")
-            s.pushSince = 0 -- mode 切換作廢推撞窗；不可把觸發前錨點帶回 follow
-            s.stuckSince = 0
-            vehicle:setRegulator(false)
-            local playerObj = getSpecificPlayer(playerNum)
-            if playerObj then haloGood(playerObj, KEY_UNSTICK) end
-            if getDebug() then
-                print(LOG .. "unstick pn=" .. playerNum .. " begin n=" .. s.unstickCount)
-            end
-        else
-            Drive.stop(playerNum, KEY_STUCK)
-        end
+    if postAction == "wait" then
+        Drive.stop(playerNum, KEY_STUCK)
+        return
+    elseif postAction == "recover" then
+        startRecoveryAttempt(s, vehicle, playerNum, now, vx, vy)
         return
     end
 
     -- 抵達只認 follower 的 reached：它同時要求「沿線剩餘距離夠短」與「車真的在終點
     -- 附近」。這裡不得再加一條只看 remaining 的旁路——投影點滑到終點時 remaining 會
     -- 歸零，車卻可能還在幾十公尺外的路邊，那條旁路就是半路煞停宣告到站的來源。
-    if reached then
+    if reached and not s.currentBlocked then
+        if s.lastTx then
+            s.targetGen = s.targetGen + 1
+            diagEvent(s, playerNum, "target", {
+                phase = "clear", oldX = s.lastTx, oldY = s.lastTy,
+                why = "arrive", tg = s.targetGen,
+            })
+            s.lastTx, s.lastTy = nil, nil
+        end
+        clearEpisode(s)
         s.mode = "arrive"
         vehicle:setRegulator(false)
         vehicle:setForceBrake()
@@ -2377,48 +2922,104 @@ local function onPlayerUpdate(player)
         return
     end
 
-    -- 目標／路線刷新（節流）。route 換了 identity＝主 MOD 重算過（改目標、偏航重算），
-    -- 舊的限速剖面對不上新點集，整份重建。
-    -- 本幀 now 已由 usage heartbeat 共用；不為 250ms route refresh 再跨一次 Java。
+    -- Target and route generations are independent: any finite coordinate change advances
+    -- tg exactly like MiniMap target identity; a new route identity advances rg.
     if now >= s.nextRouteMs then
         s.nextRouteMs = now + ROUTE_REFRESH_MS
-        -- 政策快取同窗刷新：管理員改沙盒、玩家在別的入口改偏好，最晚 250ms 生效
         refreshPolicies(s, vehicle, playerNum)
         local route, tx, ty = fetchRoute(api, playerNum)
         if not route then
-            -- 目標消失（tx 為 nil）且車已在剛才目標的抵達圈附近＝主 MOD 的抵達
-            -- 自動清除搶在 follower reached 之前收走目標——這是「到達」不是
-            -- 「遺失」：轉入既有 arrive 流程（煞停→停妥→綠字已抵達）。
-            -- 距離還遠的目標消失（玩家手動清除、分享方收回）照走紅字。
+            local arrived = false
             if tx == nil and s.lastTx then
                 local ddx = s.lastTx - vehicle:getX()
                 local ddy = s.lastTy - vehicle:getY()
-                if ddx * ddx + ddy * ddy <= ARRIVE_CLEAR_SQ then
-                    s.mode = "arrive"
-                    vehicle:setRegulator(false)
-                    vehicle:setForceBrake()
-                    return
-                end
+                arrived = ddx * ddx + ddy * ddy <= ARRIVE_CLEAR_SQ
+                s.targetGen = s.targetGen + 1
+                diagEvent(s, playerNum, "target", {
+                    phase = "clear", oldX = s.lastTx, oldY = s.lastTy,
+                    why = arrived and "arrive" or "lost", tg = s.targetGen,
+                })
+                clearEpisode(s)
+                s.lastTx, s.lastTy = nil, nil
+            end
+            if arrived then
+                s.mode = "arrive"
+                vehicle:setRegulator(false)
+                vehicle:setForceBrake()
+                return
             end
             Drive.stop(playerNum, KEY_LOST)
             return
         end
+
+        local targetChanged = finite(s.lastTx) and finite(s.lastTy)
+            and finite(tx) and finite(ty)
+            and (tx ~= s.lastTx or ty ~= s.lastTy)
+        if targetChanged then
+            local oldX, oldY = s.lastTx, s.lastTy
+            s.targetGen = s.targetGen + 1
+            diagEvent(s, playerNum, "target", {
+                phase = "change", oldX = oldX, oldY = oldY,
+                x = tx, y = ty, why = "user", tg = s.targetGen,
+            })
+            clearEpisode(s)
+            s.verifyArmPending = false
+            s.resumeProgressPhase = nil
+            s.resumeProgressUntil = 0
+            s.pendingRouteWhy = "target"
+        end
         s.lastTx, s.lastTy = tx, ty
+
         if route ~= s.route then
             local profile = MDADFollower.begin(route, s.maxSpeed)
             if not profile then
                 Drive.stop(playerNum, KEY_LOST)
                 return
             end
+            local routeWhy = s.pendingRouteWhy
+            if routeWhy == nil then routeWhy = targetChanged and "target" or "deviation" end
+            s.pendingRouteWhy = nil
+            s.routeGen = s.routeGen + 1
+            local oldMode, oldProgress, oldUntil = s.mode, s.progressState, s.progressUntil
+            local preservingRecovery = not targetChanged
+                and (oldMode == "unstick" or oldMode == "settle" or oldMode == "recover")
+            local targetSettling = targetChanged
+                and (oldMode == "unstick" or oldMode == "settle")
+            local resumePhase = nil
+            if not targetChanged and oldMode == "gear-reset" then
+                resumePhase = "gear-reset"
+            elseif not targetChanged and oldProgress == "verify" then
+                resumePhase = "verify"
+            end
             s.route = route
             s.profile = profile
-            s.mode = "build"
-            diagEvent(s, playerNum, "route")
-            if type(MDADFollower.resetState) == "function" then MDADFollower.resetState(s.fstate) end
-            -- roadBias 是「舊 route 法向」上的純量；路線轉向後保留等於把舊
-            -- 東西偏移旋轉到新方向。實機 8262,11511：remaining 71→726 換線
-            -- 仍帶 roadBias=1.85，首輪掃描直接偏向停車場／鐵欄。route cutover
-            -- 必回沙盒基準，Sensor 新輪也從同一條線開始；後續 roadC 再重新收斂。
+            if targetSettling then
+                s.mode = "settle"
+                s.progressState = "settle"
+                s.reverseForce = 0
+                if oldMode == "unstick" then
+                    s.settleUntil = now + SETTLE_MS
+                    diagEvent(s, playerNum, "unstick", {
+                        phase = "settle", eid = 0, attempt = 0,
+                        x = vehicle:getX(), y = vehicle:getY(), s = 0,
+                        d = s.unstickDistance, rear = "target-change",
+                    })
+                end
+            elseif resumePhase ~= nil or not preservingRecovery then
+                s.mode = "build"
+            end
+            s.routeReadyEventPending = true
+            s.routeReadyWhy = routeWhy
+            local pointN = type(route.pts) == "table" and #route.pts / 2 or 0
+            local routeLen = finite(route.len) and route.len or nil
+            diagEvent(s, playerNum, "route", {
+                phase = "cutover", why = routeWhy, rg = s.routeGen,
+                tg = s.targetGen, len = routeLen, pts = pointN,
+                target = tostring(tx) .. "," .. tostring(ty),
+            })
+            if type(MDADFollower.resetState) == "function" then
+                MDADFollower.resetState(s.fstate)
+            end
             s.roadBias = 0
             if type(MDADFollower.setLaneBias) == "function" then
                 MDADFollower.setLaneBias(s.fstate, s.sandBias)
@@ -2428,8 +3029,6 @@ local function onPlayerUpdate(player)
                     and type(MDADOverlay.clearTrail) == "function" then
                 MDADOverlay.clearTrail(playerNum)
             end
-            -- M4 旗標一併作廢：舊障礙是對舊幾何的弧長，新路線要重掃重規劃
-            -- （sensor 的快照失效由 step 認 profile 參考變化自理）
             s.dodging = false
             s.dodgeNotified = false
             s.blocked = false
@@ -2438,21 +3037,26 @@ local function onPlayerUpdate(player)
             s.clearStreak = 0
             s.followHold = false
             s.waitSince = 0
-            s.pushSince = 0
             s.detourTried = false
             s.dodgeCrawl = false
+            s.dodgeTight = false
             s.dodgeNeed = 1.3
-            s.pushBanL = nil
             s.cornerLatch = false
-            s.blockHitX = nil
-            s.planSig = 0
-            -- 卡死觀測與脫困額度綁舊 profile 的弧長空間，跨 identity 保留會拿
-            -- 舊值比新值：計時直接歸零、額度重臂基準對齊新空間
-            s.stuckSince = 0
-            s.unstickCount = 0
-            s.unstickS = 0
+            s.blockHitX, s.blockHitY = nil, nil
+            s.planSig = -1 -- route 首輪 clear 也必 replan，讓 remapped ban 進 planner
             s.lastSNow = 0
-            -- 重建期間沒有速度剖面可用，先鬆油門讓車滑行（不煞車：剖面通常一兩幀就好）
+            if s.episodeActive and not targetChanged then
+                s.episodeMapPending = s.banFromRecovery and finite(s.episodeHitX)
+                    and finite(s.episodeHitY)
+                s.pushBanL, s.pushBanS = nil, 0
+            end
+            if resumePhase ~= nil then
+                s.resumeProgressPhase = resumePhase
+                s.resumeProgressUntil = oldUntil
+            elseif not preservingRecovery and not targetSettling then
+                s.progressState = "disarmed"
+                s.progressSince = 0
+            end
             vehicle:setRegulator(false)
         end
     end
@@ -2481,6 +3085,7 @@ local function onPlayerUpdate(player)
                     bx, by, DETOUR_AVOID_R)
                 if droute and droute ~= s.route
                         and type(droute.len) == "number" and droute.len < DETOUR_FAIL_LEN then
+                    s.pendingRouteWhy = "detour"
                     s.nextRouteMs = 0 -- 下一幀立刻走 route 刷新塊 cutover
                     local playerObj = getSpecificPlayer(playerNum)
                     if playerObj then haloGood(playerObj, KEY_DETOUR) end
@@ -2504,10 +3109,33 @@ local function onPlayerUpdate(player)
         s.detourTried = false
     end
 
-    -- 限速剖面分幀建構：ready 之前不控速也不施力
+    -- 限速剖面分幀建構：ready 之前不控速也不施力。
     if s.mode == "build" then
         if not MDADFollower.stepBuild(s.profile, BUILD_BUDGET) then return end
+        if s.routeReadyEventPending then
+            s.routeReadyEventPending = false
+            diagEvent(s, playerNum, "route", {
+                phase = "ready", why = s.routeReadyWhy, rg = s.routeGen,
+                tg = s.targetGen, len = s.profile.length, pts = s.profile.n,
+                target = s.lastTx and (tostring(s.lastTx) .. "," .. tostring(s.lastTy)) or nil,
+            })
+        end
         s.mode = "follow"
+        local resumePhase = s.resumeProgressPhase
+        local resumeUntil = s.resumeProgressUntil
+        s.resumeProgressPhase = nil
+        s.resumeProgressUntil = 0
+        if resumePhase == "gear-reset" and now < resumeUntil then
+            s.mode = "gear-reset"
+            s.progressState = "gear-reset"
+            s.progressUntil = resumeUntil
+        elseif resumePhase == "gear-reset" then
+            s.verifyArmPending = true
+            s.verifyArmUntil = now + VERIFY_MS
+        elseif resumePhase == "verify" then
+            s.verifyArmPending = true
+            s.verifyArmUntil = resumeUntil
+        end
     end
 
     -- 讓位：玩家一碰方向盤／油門／煞車就交還控制權，關掉 regulator（等同原版踩煞車
@@ -2542,14 +3170,14 @@ local function onPlayerUpdate(player)
         if type(MDADFollower.resetControl) == "function" then
             MDADFollower.resetControl(s.fstate)
         end
-        s.stuckSince = 0
-        s.pushSince = 0 -- yield 期間玩家亂開，推撞基準（世界座標／時戳）已失效
+        s.progressState = "disarmed"
+        s.progressSince = 0
         haloGood(player, "UI_MinidoracatAutoDrive_Resume")
     end
 
-    -- 倒車脫困：讓位與失效閘門都在上面先跑過（玩家碰輸入會走 yield 交還；引擎熄火
-    -- 走紅字）。yield 打斷脫困後 mode 回 follow——還卡著的話卡死偵測會再觸發一次。
-    if s.mode == "unstick" then
+    -- Reverse recovery and its settle phase bypass normal follow control. Manual input
+    -- already yielded above, so neither path can fight the player.
+    if s.mode == "unstick" or s.mode == "settle" then
         stepUnstick(s, vehicle, playerNum, now)
         return
     end

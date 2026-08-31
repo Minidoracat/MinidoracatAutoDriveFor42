@@ -63,7 +63,7 @@ MDADSensor = MDADSensor or {}
 -- 熱路徑庫函式在載入期取 local upvalue（Kahlua 的庫函式是 JavaFunction，
 -- 寫 math.sin 等於多一次 table 查詢）。與 shared/MDAD_Follower.lua 同一條守則。
 -- 取整一律用 `n - n % 1`（純 Lua floor，負座標也正確），不呼叫 math.floor。
-local sin, cos = math.sin, math.cos
+local sin, cos, abs = math.sin, math.cos, math.abs
 local find = string.find
 
 --------------------------------------------------------------------------------
@@ -750,6 +750,165 @@ function MDADSensor.step(state, profile, sNow, vehicle, now, cell)
     return false
 end
 
+-- 冷路徑探測共用的單格硬分類；只讀 square、只更新既有 sprite 快取，
+-- 不碰 wHardN／wUnloaded 等掃描 working buffer，也不配置 table。
+-- 回 true,kind＝水／硬物；false＝淨空；nil,kind＝getter 無法提供分類，呼叫端 fail-closed。
+local function probeSquareHard(state, square)
+    local floorObj = square:getFloor()
+    if floorObj ~= nil and floorObj:hasProperty(F_water) == true then
+        return true, "water"
+    end
+
+    local cache = state.spriteCost
+    if type(cache) ~= "table" or type(state.spriteN) ~= "number" then
+        return nil, "cache"
+    end
+    local objs = square:getObjects()
+    if objs == nil then return nil, "objects" end
+    local nObj = objs:size()
+    for i = 1, nObj do
+        local obj = objs:get(i - 1)
+        local name = obj:getSpriteName()
+        if name ~= nil then
+            local cost = cache[name]
+            if cost == nil then
+                cost = classifySprite(obj, name)
+                if state.spriteN < SPRITE_CACHE_MAX then
+                    cache[name] = cost
+                    state.spriteN = state.spriteN + 1
+                end
+            end
+            if cost == COST_HARD then return true, "hard" end
+            if cost == COST_HARD_THIN then return true, "hardThin" end
+        end
+    end
+    return false, nil
+end
+
+-- OBB（F/N 軸）對 1×1 世界格的完整 SAT：兩個 OBB 軸＋世界 X/Y 軸。
+-- 只傳純量；不建 corner table。邊界相切也算命中，安全探測不得把接觸判成 clear。
+local function orientedRectHitsSquare(cx, cy, fx, fy, nx, ny, halfF, halfN, gx, gy)
+    local dx = gx + 0.5 - cx
+    local dy = gy + 0.5 - cy
+    if abs(dx * fx + dy * fy) >
+            halfF + 0.5 * (abs(fx) + abs(fy)) then return false end
+    if abs(dx * nx + dy * ny) >
+            halfN + 0.5 * (abs(nx) + abs(ny)) then return false end
+    if abs(dx) > halfF * abs(fx) + halfN * abs(nx) + 0.5 then return false end
+    if abs(dy) > halfF * abs(fy) + halfN * abs(ny) + 0.5 then return false end
+    return true
+end
+
+local function finite(n)
+    return type(n) == "number" and n * 0 == 0
+end
+
+-- near/rear 共用實作。public API 用 pcall 包住本函式：任一 Java getter／pool
+-- 失敗都回 unloaded，而不是把未知誤報成 clear。函式內只有純量 local。
+local function probeDirectional(state, vehicle, cell, bodyX, bodyY,
+        fx, fy, nx, ny, halfW, halfL, rear, travelM)
+    if type(state) ~= "table" or vehicle == nil or cell == nil
+            or not finite(bodyX) or not finite(bodyY)
+            or not finite(fx) or not finite(fy) or not finite(nx) or not finite(ny)
+            or not finite(halfW) or halfW <= 0
+            or not finite(halfL) or halfL <= 0 then
+        return "unloaded", bodyX, bodyY, "geometry"
+    end
+
+    -- F/N 是呼叫端已正規化的車身平面基底；偏離單位正交基底就 fail-closed，
+    -- 否則 SAT 的投影半徑不再代表公尺。
+    local f2 = fx * fx + fy * fy
+    local n2 = nx * nx + ny * ny
+    if abs(f2 - 1) > 0.02 or abs(n2 - 1) > 0.02
+            or abs(fx * nx + fy * ny) > 0.02 then
+        return "unloaded", bodyX, bodyY, "geometry"
+    end
+
+    local rectX, rectY, halfF, halfN
+    if rear then
+        local d = travelM
+        if d == nil then d = 4 end
+        if not finite(d) or d <= 0 then
+            return "unloaded", bodyX, bodyY, "geometry"
+        end
+        -- 後保桿往後 d 公尺的直線 swept strip；前後／左右各加原生車體
+        -- polyPlusRadius 的 0.15m 餘裕（BaseVehicle.java:4133-4168）。
+        rectX = bodyX - (halfL + d * 0.5) * fx
+        rectY = bodyY - (halfL + d * 0.5) * fy
+        halfF = d * 0.5 + 0.15
+        halfN = halfW + 0.15
+    else
+        -- current OBB 與車頭前方 1m 的聯集仍是一個 OBB。
+        rectX = bodyX + 0.5 * fx
+        rectY = bodyY + 0.5 * fy
+        halfF = halfL + 0.5
+        halfN = halfW
+    end
+
+    if not flagsBound then bindFlags() end
+    local z = vehicle:getZ()
+    if not finite(z) then return "unloaded", bodyX, bodyY, "geometry" end
+    z = z - z % 1
+
+    local reachX = halfF * abs(fx) + halfN * abs(nx)
+    local reachY = halfF * abs(fy) + halfN * abs(ny)
+    -- 左／上多列舉一格，讓「矩形邊界恰在格界」的相切格也進 SAT；SAT 會濾掉
+    -- 其餘 AABB 外格，不會因多列舉而誤讀 nil chunk。
+    local gx0 = rectX - reachX
+    gx0 = gx0 - gx0 % 1 - 1
+    local gx1 = rectX + reachX
+    gx1 = gx1 - gx1 % 1
+    local gy0 = rectY - reachY
+    gy0 = gy0 - gy0 % 1 - 1
+    local gy1 = rectY + reachY
+    gy1 = gy1 - gy1 % 1
+
+    -- getGridSquare 用例 ISDestroyCursor.lua:278；nil 代表 candidate 所在 chunk
+    -- 未載入，定向安全探測必須回 unloaded。getVehicleContainer 的格級幾何來源為
+    -- IsoGridSquare.java:10252-10273（內部即呼叫 isIntersectingSquare）。
+    for gx = gx0, gx1 do
+        for gy = gy0, gy1 do
+            if orientedRectHitsSquare(rectX, rectY, fx, fy, nx, ny,
+                    halfF, halfN, gx, gy) then
+                local hitX, hitY = gx + 0.5, gy + 0.5
+                local square = cell:getGridSquare(gx, gy, z)
+                if square == nil then return "unloaded", hitX, hitY, "gridSquare" end
+                local hard, kind = probeSquareHard(state, square)
+                if hard == nil then return "unloaded", hitX, hitY, kind end
+                if hard then return "hard", hitX, hitY, kind end
+
+                local cv = square:getVehicleContainer()
+                if cv ~= nil and cv ~= vehicle then
+                    return "vehicle", hitX, hitY, "vehicle"
+                end
+            end
+        end
+    end
+
+    -- MP 的格級 container 可能先回自己、遮住同格第二台車；再走 IsoCell 全域 Set
+    -- （IsoCell.java:2731-2733），逐台以 BaseVehicle:isIntersectingSquare(gx,gy,z)
+    -- 的真車體多邊形判定（BaseVehicle.java:5704-5713），不使用中心距圓形替代。
+    local vehicles = cell:getVehicles()
+    if vehicles == nil then return "unloaded", rectX, rectY, "vehiclePool" end
+    local it = vehicles:iterator()
+    if it == nil then return "unloaded", rectX, rectY, "vehiclePool" end
+    while it:hasNext() do
+        local other = it:next()
+        if other ~= nil and other ~= vehicle then
+            for gx = gx0, gx1 do
+                for gy = gy0, gy1 do
+                    if orientedRectHitsSquare(rectX, rectY, fx, fy, nx, ny,
+                            halfF, halfN, gx, gy)
+                            and other:isIntersectingSquare(gx, gy, z) then
+                        return "vehicle", gx + 0.5, gy + 0.5, "vehicle"
+                    end
+                end
+            end
+        end
+    end
+    return "clear", nil, nil, nil
+end
+
 -- 車輛周邊環形探測（調頭安全檢查；事件驅動冷路徑，driver 節流呼叫、非每幀）。
 -- 回 true＝半徑內有硬障礙（牆／樹／水面／別台車）或未載入格（不知道就別原地轉，
 -- fail-safe）。走廊掃描沿**路線**掃——路線反向要調頭時，車後方與側面全是走廊
@@ -768,7 +927,7 @@ function MDADSensor.probeAround(state, vehicle, cell, radius)
     gx0 = gx0 - gx0 % 1
     local gy0 = cy - r
     gy0 = gy0 - gy0 % 1
-    local cache = state.spriteCost
+
     -- 車輛：**全域列舉**（cell:getVehicles() 回 Set，42.20.4 無 get(int)，用
     -- iterator——出處同 beginRound 的車輛快照註解）。不依賴逐格 movingObjects：
     -- MP 靜止車的 movingSquare 註冊不可靠，走廊掃描的同一個盲區在這裡的代價
@@ -797,27 +956,10 @@ function MDADSensor.probeAround(state, vehicle, cell, radius)
             if dx * dx + dy * dy <= r2 then
                 local square = cell:getGridSquare(gx, gy, z)
                 if square == nil then return true end
-                local fl = square:getFloor()
-                if fl ~= nil and fl:hasProperty(F_water) == true then return true end
-                local objs = square:getObjects()
-                local nObj = objs:size()
-                for i = 1, nObj do
-                    local obj = objs:get(i - 1)
-                    local name = obj:getSpriteName()
-                    if name ~= nil then
-                        local cost = cache[name]
-                        if cost == nil then
-                            cost = classifySprite(obj, name)
-                            if state.spriteN < SPRITE_CACHE_MAX then
-                                cache[name] = cost
-                                state.spriteN = state.spriteN + 1
-                            end
-                        end
-                        -- COST_HARD_THIN（樹）也算擋：探測曾只認 COST_HARD，
-                        -- 樹旁判「淨空」→ 原地旋轉直接掃到樹（2026-08-28 實機）
-                        if cost == COST_HARD or cost == COST_HARD_THIN then return true end
-                    end
-                end
+                -- 只有明確的 false（分類完成且淨空）才放行；nil＝sprite 快取或
+                -- getObjects 取不到分類，不知道就別原地轉（與 square == nil 同調）
+                local hard = probeSquareHard(state, square)
+                if hard ~= false then return true end
                 local movs = square:getMovingObjects()
                 local nMov = movs:size()
                 for i = 1, nMov do
@@ -832,4 +974,29 @@ function MDADSensor.probeAround(state, vehicle, cell, radius)
         end
     end
     return false
+end
+
+-- 事件驅動 near 探測：current OBB＋車頭前方 1m。
+-- bodyX/bodyY 與 F/N 由 Driver 冷路徑算好；本函式刻意不呼叫需要 caller 提供
+-- output vector 的 vehicle:getForwardVector（BaseVehicle.java:4242-4244），避免在
+-- Sensor 內取得／遺失 pooled Vector3f。回 status,hitX,hitY,kind,detail：
+-- clear|hard|vehicle|unloaded；只有 protected getter throw 時 detail 帶原始錯誤。
+function MDADSensor.probeNear(state, vehicle, cell, bodyX, bodyY,
+        fx, fy, nx, ny, halfW, halfL)
+    local ok, status, hitX, hitY, kind = pcall(probeDirectional,
+        state, vehicle, cell, bodyX, bodyY, fx, fy, nx, ny,
+        halfW, halfL, false, 0)
+    if not ok then return "unloaded", bodyX, bodyY, "getter", tostring(status) end
+    return status, hitX, hitY, kind, nil
+end
+
+-- 事件驅動 rear 探測：後保桿往後 travelM（預設 4m）的定向直線 strip。
+-- 禁止改用 probeAround 的圓形／中心距判定：前方 blocker 或側車不在倒車 sweep 內。
+function MDADSensor.probeRear(state, vehicle, cell, bodyX, bodyY,
+        fx, fy, nx, ny, halfW, halfL, travelM)
+    local ok, status, hitX, hitY, kind = pcall(probeDirectional,
+        state, vehicle, cell, bodyX, bodyY, fx, fy, nx, ny,
+        halfW, halfL, true, travelM)
+    if not ok then return "unloaded", bodyX, bodyY, "getter", tostring(status) end
+    return status, hitX, hitY, kind, nil
 end
