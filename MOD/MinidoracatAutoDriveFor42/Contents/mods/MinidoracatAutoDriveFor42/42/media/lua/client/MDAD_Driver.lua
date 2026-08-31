@@ -53,6 +53,15 @@ local obbDistanceSq
 -- 調校常數
 --------------------------------------------------------------------------------
 
+-- Kahlua 的 function 上限是 60 upvalues（Lua 5.1 LUAI_MAXUPVALUES）。stepFollow 是
+-- 單一每幀狀態機，把每個常數各自寫成 local 就等於各占一個 upvalue 槽——2026-08-31
+-- 實機：新版 Driver 直接 `function at line 3207 has more than 60 upvalues` 編譯失敗，
+-- 整個 MDAD.Drive 沒建起來，HUD 每幀吃 nil。非熱幀（掃描輪、blocked、recovery、
+-- 診斷）的常數一律掛在這張表上：一個 upvalue 槽承載全部，槽數不再隨常數增長。
+-- 每幀都讀的常數（SECONDS_PER_MULT／MULT_*／PROGRESS_*）維持獨立 local，省掉熱路徑
+-- 的 table 查詢。載入後只讀不寫（慣例；scripts/verify_mod.py 的 Kahlua 閘門守槽數）。
+local TUNE = {}
+
 local ROUTE_REFRESH_MS = 250   -- 導航目標／路線刷新節流（毫秒）
 local USAGE_HEARTBEAT_MS = 5000 -- server registry TTL=15s；start/stop 另有即時封包
 local USAGE_FIRST_RETRY_MS = 1100 -- 初始封包被 server 1s flood gate 吃掉時快速自癒
@@ -71,8 +80,8 @@ local YIELD_RESUME_MS = 2000   -- 讓位後連續無輸入這麼久才恢復自�
 -- 近停後才開始原地旋轉。帶動量旋轉＝漂移——實機兩代教訓：53 km/h 吃飽和側推
 -- 整台車甩飛（2026-08-28 yield 恢復）；舊值 20 允許 12-20 km/h 帶動量開轉，
 -- 原地轉＋動量把車甩出 22m 草地（st 88,113 遙測 lat 10→22.6）。
-local ROTATE_SPIN_MAX_KMH = 5
-local ROTATE_ERR_RAD = 1.5708  -- 90°
+TUNE.ROTATE_SPIN_MAX_KMH = 5
+TUNE.ROTATE_ERR_RAD = 1.5708   -- 90°
 -- 調頭力矩縮放：耦力模式的力量乘這個值。跟線橫推的量級是為了對抗高速輪胎自回正
 -- 標定的，原地調頭阻力小得多，全額力矩＝原地快速旋轉（實機回報「快速循轉」），
 -- 收到 0.4 讓調頭變成緩慢平穩的迴轉。過慢調大、仍太快調小。
@@ -139,8 +148,8 @@ local PROGRESS_MS = 2500
 local PROGRESS_M_SQ = 1
 local PROGRESS_S = 1
 local PROGRESS_YAW = 0.17453292519943 -- 10°
-local GEAR_RESET_MS = 150
-local VERIFY_MS = 2000
+TUNE.GEAR_RESET_MS = 150
+TUNE.VERIFY_MS = 2000
 local SETTLE_MS = 4000
 
 -- M4 感知與繞行（Sensor 掃走廊 → Corridor 算縫隙 → follower.setOffset 疊側偏；
@@ -148,22 +157,22 @@ local SETTLE_MS = 4000
 -- 不改剖面本身；殭屍／屍體檔位受三態沙盒政策×玩家偏好控制（refreshPolicies）。
 local NEED_HALF = 1.4          -- legacy fallback；adaptive session 改用 profile.needHalf
 local DODGE_CAP = 24           -- 繞行 entry／exit 基準速度；保持段另放寬到 28 km/h
-local ZOMBIE_CAP_1 = 25        -- 走廊內 ≥1 隻殭屍
-local ZOMBIE_CAP_4 = 15        -- ≥4 隻
-local ZOMBIE_CAP_8 = 10        -- ≥8 隻
-local MOVING_VEH_CAP = 15      -- 走廊內有行進中的別台車（跟車，不繞行）
-local UNLOADED_CAP = 15        -- 走廊內有未載入 chunk（不知道前面有什麼，先慢）
+TUNE.ZOMBIE_CAP_1 = 25         -- 走廊內 ≥1 隻殭屍
+TUNE.ZOMBIE_CAP_4 = 15         -- ≥4 隻
+TUNE.ZOMBIE_CAP_8 = 10         -- ≥8 隻
+TUNE.MOVING_VEH_CAP = 15       -- 走廊內有行進中的別台車（跟車，不繞行）
+TUNE.UNLOADED_CAP = 15         -- 走廊內有未載入 chunk（不知道前面有什麼，先慢）
 local POLICY_DODGE = 1         -- 沙盒 ObstaclePolicy enum：1=繞行 2=停車
 
-local BLOCK_STOP_DIST = 15     -- 距障礙群這麼近才煞停等待；更遠先滑行接近
-local BLOCK_APPROACH_KMH = 12  -- blocked 接近段的速度上限（掃描逼近後縫隙判定更準）
-local WAIT_TIMEOUT_MS = 20000  -- 停等（blocked/跟車 0）獨立超時：紅字請玩家接手
+TUNE.BLOCK_STOP_DIST = 15      -- 距障礙群這麼近才煞停等待；更遠先滑行接近
+TUNE.BLOCK_APPROACH_KMH = 12   -- blocked 接近段的速度上限（掃描逼近後縫隙判定更準）
+TUNE.WAIT_TIMEOUT_MS = 20000   -- 停等（blocked/跟車 0）獨立超時：紅字請玩家接手
 -- recovery 方向探測與 episode 重臂。rear 每 100ms 重查；成功倒退後 ban
 -- 跨 sensor reset／same-target route cutover 保留，前進 10m 且兩輪 footprint clear 才清。
 local REAR_PROBE_MS = 100
 local REAR_TRAVEL_M = 4
 local EPISODE_REARM_SQ = 100
-local SCAN_WARM_CAP = 12       -- 感知空窗（首輪掃描未完成）的爬行上限
+TUNE.SCAN_WARM_CAP = 12        -- 感知空窗（首輪掃描未完成）的爬行上限
 -- 堵死改道（nav API v3 requestDetour）：blocked 停等一段時間仍未解除，就帶
 -- 堵點座標請主 MOD 重算避讓路線（A* 對經過堵點圈的路網邊加軟封鎖罰）。
 local DETOUR_AFTER_MS = 4000   -- blocked 停等多久後嘗試改道（< WAIT_TIMEOUT 20s）
@@ -184,7 +193,7 @@ local CORNER_DETOUR_MS = 2500  -- BLOCKED_CORNER 的改道等待（近距重枚�
 local CORNER_RETRY_DIST = 3    -- corner latch 撤銷距離：漸進接近讓車前進這麼多＝
                                -- 幾何已變、重新枚舉——實測「靠很近開導航就能繞」
                                -- ＝近距下折點幾何退化成直路障礙，把手動流程自動化
-local CORNER_STOP_DIST = 8     -- corner 下的煞停線（普通 blocked 15m）：爬更近再停，
+TUNE.CORNER_STOP_DIST = 8      -- corner 下的煞停線（普通 blocked 15m）：爬更近再停，
                                -- 給近距重枚舉創造與「近開導航」相同的幾何條件
 local CURVE_LEAD = 8           -- 過渡段要在折點前多遠完成（公尺）：進彎前把側移
                                -- 做完、彎中全程保持目標線——過渡線切折角掃到彎
@@ -192,21 +201,21 @@ local CURVE_LEAD = 8           -- 過渡段要在折點前多遠完成（公尺�
 -- 路面對中（sensor 每輪產出 roadC＝路面帶中心相對 nav 線的橫向偏移）：
 -- streets.xml 的 nav 線只有「世界地圖畫線」精度（實測偏 2-4m），行駛線＝
 -- 沙盒靠右偏置＋EMA 平滑後的路面校正。無樣本（路口外／無路面）時衰減回 0。
-local ROAD_EMA = 0.25          -- 每輪（250ms）向新樣本收斂的比例（時常數 ~1s）
-local ROAD_DECAY = 0.85        -- 無樣本輪的衰減係數
-local ROAD_CLAMP = 3           -- 單輪樣本與累積校正的限幅（公尺）
-local BIAS_MAX = 3             -- 路面校正／RETURN laneTarget 的絕對限幅（公尺）
-local SOFT_CAP = 20            -- 走廊內有可輾過的軟障礙（家具／雜物）時的速度上限
-local CORPSE_CAP = 20          -- 走廊內有地面屍體（壓得過，但不減速輾過的體感就是撞擊）
+TUNE.ROAD_EMA = 0.25           -- 每輪（250ms）向新樣本收斂的比例（時常數 ~1s）
+TUNE.ROAD_DECAY = 0.85         -- 無樣本輪的衰減係數
+TUNE.ROAD_CLAMP = 3            -- 單輪樣本與累積校正的限幅（公尺）
+TUNE.BIAS_MAX = 3              -- 路面校正／RETURN laneTarget 的絕對限幅（公尺）
+TUNE.SOFT_CAP = 20             -- 走廊內有可輾過的軟障礙（家具／雜物）時的速度上限
+TUNE.CORPSE_CAP = 20           -- 走廊內有地面屍體（壓得過，但不減速輾過的體感就是撞擊）
 -- RETURN 進入門檻由 v4 segWidth 與實際車寬推導；v2/v3 width unknown 使用
 -- available=2m。physical isDoingOffroad 只作 paved/actual mismatch 輔證，永不單觸發。
-local RETURN_CAP = 15          -- 已驗證回線軌跡的速度上限（km/h）
-local RETURN_UNSAFE_CAP = 8    -- trajectory unsafe/unloaded：沿現 lane 平行前進
+TUNE.RETURN_CAP = 15           -- 已驗證回線軌跡的速度上限（km/h）
+TUNE.RETURN_UNSAFE_CAP = 8     -- trajectory unsafe/unloaded：沿現 lane 平行前進
 local RETURN_CLEAR_DEV = 0.75  -- 回到 target lane 的釋放偏差（m；快照連續兩輪）
 -- 原地調頭的車周安全探測：adaptive probe=max(現有4m, profile.probeR)。
 local ROTATE_PROBE_R = 4
 local CLEAR_STREAK_N = 2       -- 繞行/堵住要連續這麼多輪 clear 才解除（掃描窗漂移防抖）
-local ROTATE_PROBE_MS = 500
+TUNE.ROTATE_PROBE_MS = 500
 local MASS_REFRESH_MS = 1000   -- BaseVehicle.getMass cold refresh；熱幀只做時戳比較
 local MASS_VALID_LO, MASS_VALID_HI = 200, 5000 -- getMass 可信區間（kg）
 local MASS_FALLBACK = 1200     -- 區間外／讀取失敗時沿用的標定車質量（kg）
@@ -219,7 +228,7 @@ local HS_ERR_RAD = 0.1745      -- 10°
 -- 再受 250ms 啟動節流影響；85 km/h 是既有標準組態的保守相容上限與高速檔
 -- 啟用門檻，不宣稱是所有載具／路況的形式化煞停證明。沙盒上限超過 85 時，
 -- session 會把掃描帶改成 110m、感知上限改成 120；兩者必須一起切換。
-local PERCEPTION_CAP_KMH = 85
+TUNE.PERCEPTION_CAP_KMH = 85
 -- 高速檔（2026-08-29 使用者需求：瘋狂檔要能跑 120）：沙盒上限 > 85 時把掃描
 -- 帶拉到 110m、感知上限放到 120——120 km/h 煞停 ~56m＋輪距反應 ~21m ≈ 77m
 -- < 110 ✓。帶長只影響輪完成時間（分幀 budget 不變、fps 成本相同），障礙密集
@@ -291,8 +300,8 @@ local KEY_DETOUR = "UI_MinidoracatAutoDrive_Detour"
 -- 一行會直接把 console 洗爆並吃掉 FPS。getDebug()＝Core 的除錯模式旗標，原版到處
 -- 這樣守門；旗標為假時下面所有 string.format／print 連碰都不碰。
 local LOG = "[MDAD Drive] "
-local DEBUG_MS = 1000          -- 跟線診斷的最小間隔（毫秒）
-local DEG_PER_RAD = 180 / 3.14159265358979
+TUNE.DEBUG_MS = 1000           -- 跟線診斷的最小間隔（毫秒）
+TUNE.DEG_PER_RAD = 180 / 3.14159265358979
 
 -- HaloTextHelper.addBadText／addGoodText 用例：ISVehiclePartMenu.lua:252、ISReadABook.lua:95
 local function haloBad(playerObj, key)
@@ -557,12 +566,12 @@ function Drive.slowdownInfo(playerNum)
     local nearM = sensor and sensor.SCAN_NEAR or 2
     local baseAhead = sensor and sensor.SCAN_AHEAD or 48
     local bandM = sensor and sensor.SLOW_BAND_HALF or 3
-    local ahead = maxSpeedKmh() > PERCEPTION_CAP_KMH and HISPEED_AHEAD_M or baseAhead
+    local ahead = maxSpeedKmh() > TUNE.PERCEPTION_CAP_KMH and HISPEED_AHEAD_M or baseAhead
     local s = sessions[playerNum]
     local sensorAhead = s and s.sensor and s.sensor.aheadM
     if type(sensorAhead) == "number" and sensorAhead >= baseAhead then ahead = sensorAhead end
     return nearM, ahead, bandM,
-        ZOMBIE_CAP_1, ZOMBIE_CAP_4, ZOMBIE_CAP_8, CORPSE_CAP
+        TUNE.ZOMBIE_CAP_1, TUNE.ZOMBIE_CAP_4, TUNE.ZOMBIE_CAP_8, TUNE.CORPSE_CAP
 end
 
 -- HUD 唯讀狀態（M5.5b 面板的資料面）。回**多值純量**、不洩漏 session table
@@ -773,7 +782,7 @@ local function startSession(playerObj, playerNum)
         fstate = fstate,
         playerNum = playerNum,
         maxSpeed = maxSpeed,
-        perceptionCap = maxSpeed > PERCEPTION_CAP_KMH and HISPEED_CAP_KMH or PERCEPTION_CAP_KMH,
+        perceptionCap = maxSpeed > TUNE.PERCEPTION_CAP_KMH and HISPEED_CAP_KMH or TUNE.PERCEPTION_CAP_KMH,
         fullGate = false,
         gateReason = "sensor",
         alignSince = 0,
@@ -968,7 +977,7 @@ local function startSession(playerObj, playerNum)
         -- 高速檔：沙盒上限 > 85 → 掃描帶拉長（120 km/h 的煞停＋反應 ~77m < 110）
         local sNew = sessions[playerNum]
         if sNew.sensor then
-            sNew.sensor.aheadM = maxSpeed > PERCEPTION_CAP_KMH and HISPEED_AHEAD_M or 48
+            sNew.sensor.aheadM = maxSpeed > TUNE.PERCEPTION_CAP_KMH and HISPEED_AHEAD_M or 48
         end
     end
     sessionCount = sessionCount + 1
@@ -1511,20 +1520,20 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
             phys.unloadedS = sen.unloadedS
         end
         if finite(s.lastSensorCap) then phys.capSensor = s.lastSensorCap end
-        if sen.stamp == 0 then phys.capWarm = SCAN_WARM_CAP end
+        if sen.stamp == 0 then phys.capWarm = TUNE.SCAN_WARM_CAP end
     end
     if finite(s.gearCap) and s.gearCap > 0 then phys.capGear = s.gearCap end
     if finite(s.perceptionCap) then phys.capPerception = s.perceptionCap end
     if s.returnActive then
-        phys.capOffroad = s.returnUnsafe and RETURN_UNSAFE_CAP or RETURN_CAP
+        phys.capOffroad = s.returnUnsafe and TUNE.RETURN_UNSAFE_CAP or TUNE.RETURN_CAP
         phys.capReturn = phys.capOffroad
     end
     if s.blocked and not s.returnActive then
-        local stopDist = s.cornerLatch and CORNER_STOP_DIST or BLOCK_STOP_DIST
+        local stopDist = s.cornerLatch and TUNE.CORNER_STOP_DIST or TUNE.BLOCK_STOP_DIST
         if s.lastSNow >= s.blockS - stopDist then
             phys.capBlocked = 0
         else
-            phys.capBlocked = BLOCK_APPROACH_KMH
+            phys.capBlocked = TUNE.BLOCK_APPROACH_KMH
         end
     end
     if s.dodging and finite(s.lastDcap) then
@@ -3198,7 +3207,7 @@ local function stepUnstick(s, vehicle, playerNum, now)
     BaseVehicle.releaseVector3f(fwd)
     sampleRecovery(s, vehicle, playerNum, now, vx, vy, speedKmh, fx, fy, heading)
     if getDebug() and now >= s.nextDebugMs then
-        s.nextDebugMs = now + DEBUG_MS
+        s.nextDebugMs = now + TUNE.DEBUG_MS
         print(string.format("%spn=%d mode=unstick speed=%.1f attempt=%d rear=%s",
             LOG, playerNum, speedKmh, s.episodeAttempts, tostring(s.rearStatus)))
     end
@@ -3341,15 +3350,15 @@ local function stepFollow(s, vehicle, playerNum, now)
                 -- baseL/prefer、掃掠淨距全部自動吃到。
                 local rc = s.sensor.roadC
                 if rc ~= nil then
-                    if rc > ROAD_CLAMP then rc = ROAD_CLAMP
-                    elseif rc < -ROAD_CLAMP then rc = -ROAD_CLAMP end
-                    s.roadBias = s.roadBias + (rc - s.roadBias) * ROAD_EMA
+                    if rc > TUNE.ROAD_CLAMP then rc = TUNE.ROAD_CLAMP
+                    elseif rc < -TUNE.ROAD_CLAMP then rc = -TUNE.ROAD_CLAMP end
+                    s.roadBias = s.roadBias + (rc - s.roadBias) * TUNE.ROAD_EMA
                 else
-                    s.roadBias = s.roadBias * ROAD_DECAY
+                    s.roadBias = s.roadBias * TUNE.ROAD_DECAY
                 end
                 local nb = s.sandBias + s.roadBias
-                if nb > BIAS_MAX then nb = BIAS_MAX
-                elseif nb < -BIAS_MAX then nb = -BIAS_MAX end
+                if nb > TUNE.BIAS_MAX then nb = TUNE.BIAS_MAX
+                elseif nb < -TUNE.BIAS_MAX then nb = -TUNE.BIAS_MAX end
                 -- 枚舉的邊界判定跟著抖。承諾釋放後恢復跟隨。
                 if s.dodging or s.returnActive then nb = laneBiasOf(s) end
                 if type(MDADFollower.setLaneBias) == "function" then
@@ -3523,7 +3532,7 @@ local function stepFollow(s, vehicle, playerNum, now)
                 -- 首輪掃描還沒完成（剛啟動／換路線／脫困後重掃）＝「不知道前面有
                 -- 什麼」，與未載入同級保守：不加這條會在盲區全速衝 ~150ms，
                 -- 剛脫困退開的 3 公尺一半就被吃回去（M4 review blocker）
-                cap = UNLOADED_CAP
+                cap = TUNE.UNLOADED_CAP
                 capReason = "sensor"
             end
             if s.dodging then
@@ -3559,9 +3568,9 @@ local function stepFollow(s, vehicle, playerNum, now)
             -- 每幀只讀 boolean（250ms 刷新；切檔／切偏好即時重算）
             local zn = s.sensor.zombieN
             if zn and zn > 0 and s.zombieSlow then
-                local zcap = ZOMBIE_CAP_1
-                if zn >= 8 then zcap = ZOMBIE_CAP_8
-                elseif zn >= 4 then zcap = ZOMBIE_CAP_4 end
+                local zcap = TUNE.ZOMBIE_CAP_1
+                if zn >= 8 then zcap = TUNE.ZOMBIE_CAP_8
+                elseif zn >= 4 then zcap = TUNE.ZOMBIE_CAP_4 end
                 if cap < 0 or zcap < cap then
                     cap = zcap
                     capReason = "zombie"
@@ -3569,8 +3578,8 @@ local function stepFollow(s, vehicle, playerNum, now)
             end
             local cn = s.sensor.corpseN
             if cn and cn > 0 and s.corpseSlow
-                    and (cap < 0 or CORPSE_CAP < cap) then
-                cap = CORPSE_CAP
+                    and (cap < 0 or TUNE.CORPSE_CAP < cap) then
+                cap = TUNE.CORPSE_CAP
                 capReason = "corpse"
             end
             -- 跟車分級（不能只 cap 15 一路跟到撞）：MP 半更新狀態的靜止車會被
@@ -3579,7 +3588,7 @@ local function stepFollow(s, vehicle, playerNum, now)
             -- <10m 目標 0（煞停等待）、<20m 爬行 8、更遠照 MOVING_VEH_CAP。
             s.followHold = false
             if s.sensor.movingVeh then
-                local mcap = MOVING_VEH_CAP
+                local mcap = TUNE.MOVING_VEH_CAP
                 local va = s.sensor.vehAheadS
                 if va ~= nil then
                     local gap = va - s.lastSNow
@@ -3596,8 +3605,8 @@ local function stepFollow(s, vehicle, playerNum, now)
             -- 軟障礙（可推家具／HitByCar 雜物）：輾得過但要先減速——不減速輾過的
             -- 體感就是「撞到東西」（2026-08-28 實機路口擦撞回報的嫌疑之一）
             local sn = s.sensor.softN
-            if sn and sn > 0 and (cap < 0 or SOFT_CAP < cap) then
-                cap = SOFT_CAP
+            if sn and sn > 0 and (cap < 0 or TUNE.SOFT_CAP < cap) then
+                cap = TUNE.SOFT_CAP
                 capReason = "soft"
             end
             if cap >= 0 then s.lastSensorCap = cap end
@@ -3616,7 +3625,7 @@ local function stepFollow(s, vehicle, playerNum, now)
         end
         -- 感知閉環上限（理由見 PERCEPTION_CAP_KMH）：標準組態上限 85；
         -- 高速組態同時切到 110m 掃描帶與 120 上限。
-        local pcap = s.perceptionCap or PERCEPTION_CAP_KMH
+        local pcap = s.perceptionCap or TUNE.PERCEPTION_CAP_KMH
         if targetSpeed > pcap then
             targetSpeed = pcap
             s.lastCapReason = "perception"
@@ -3628,8 +3637,8 @@ local function stepFollow(s, vehicle, playerNum, now)
         -- 首輪掃完 blocked 才收到、物理已煞不住。首輪完成前壓爬行（250ms
         -- 節流＋~12 幀，體感 0.3-0.6 秒），事件驅動、不用固定等待計時；
         -- session 起步同理：先看再走。
-        if s.sensor and s.sensor.stamp == 0 and targetSpeed > SCAN_WARM_CAP then
-            targetSpeed = SCAN_WARM_CAP
+        if s.sensor and s.sensor.stamp == 0 and targetSpeed > TUNE.SCAN_WARM_CAP then
+            targetSpeed = TUNE.SCAN_WARM_CAP
             s.lastCapReason = "warm"
         end
         -- RETURN speed is a cap on the exact committed line. If the line could
@@ -3638,7 +3647,7 @@ local function stepFollow(s, vehicle, playerNum, now)
             targetSpeed = 0
             s.lastCapReason = s.returnCapacityFault and "return-capacity" or "return-hold"
         elseif s.returnActive then
-            local returnCap = s.returnUnsafe and RETURN_UNSAFE_CAP or RETURN_CAP
+            local returnCap = s.returnUnsafe and TUNE.RETURN_UNSAFE_CAP or TUNE.RETURN_CAP
             if targetSpeed > returnCap then targetSpeed = returnCap end
             s.lastCapReason = s.returnUnsafe and "return-unsafe" or "return"
         end
@@ -3827,7 +3836,7 @@ local function stepFollow(s, vehicle, playerNum, now)
         -- RETURN outranks planned blocked; current-body contact still outranks RETURN.
         local blockedStop = s.blocked and not reached and not s.returnActive
             and s.lastSNow >= s.blockS
-                - (s.cornerLatch and CORNER_STOP_DIST or BLOCK_STOP_DIST)
+                - (s.cornerLatch and TUNE.CORNER_STOP_DIST or TUNE.BLOCK_STOP_DIST)
         if blockedStop then targetSpeed = 0 end
         if s.currentBlocked then
             targetSpeed = 0
@@ -3845,7 +3854,7 @@ local function stepFollow(s, vehicle, playerNum, now)
         if legalWait and avProgress < 1 then
             if s.waitSince == 0 then
                 s.waitSince = now
-            elseif now - s.waitSince >= WAIT_TIMEOUT_MS then
+            elseif now - s.waitSince >= TUNE.WAIT_TIMEOUT_MS then
                 postAction = "wait"
             end
         else
@@ -3873,7 +3882,7 @@ local function stepFollow(s, vehicle, playerNum, now)
             else
                 s.mode = "follow"
                 s.progressState = "verify"
-                s.progressUntil = now + VERIFY_MS
+                s.progressUntil = now + TUNE.VERIFY_MS
                 s.progressSince = now
                 s.progressX, s.progressY = vx, vy
                 s.progressS, s.progressH = s.lastSNow, heading
@@ -3968,7 +3977,7 @@ local function stepFollow(s, vehicle, playerNum, now)
                         s.episodeGearResetTried = true
                         s.mode = "gear-reset"
                         s.progressState = "gear-reset"
-                        s.progressUntil = now + GEAR_RESET_MS
+                        s.progressUntil = now + TUNE.GEAR_RESET_MS
                         targetSpeed = 0
                         s.lastCapReason = "gear-reset"
                         diagEvent(s, playerNum, "progress", {
@@ -3991,8 +4000,8 @@ local function stepFollow(s, vehicle, playerNum, now)
         end
 
         if s.blocked and not reached and not s.returnActive and not blockedStop
-                and targetSpeed > BLOCK_APPROACH_KMH then
-            targetSpeed, s.lastCapReason = BLOCK_APPROACH_KMH, "blocked"
+                and targetSpeed > TUNE.BLOCK_APPROACH_KMH then
+            targetSpeed, s.lastCapReason = TUNE.BLOCK_APPROACH_KMH, "blocked"
         end
         if s.dynamicsFault then postAction = "dynamics-fault" end
         local commandState = controlStateOf(s)
@@ -4138,24 +4147,24 @@ local function stepFollow(s, vehicle, playerNum, now)
                 if aerr < 0 then aerr = -aerr end
                 local av = speedKmh
                 if av < 0 then av = -av end
-                if aerr > ROTATE_ERR_RAD and av > ROTATE_SPIN_MAX_KMH then
+                if aerr > TUNE.ROTATE_ERR_RAD and av > TUNE.ROTATE_SPIN_MAX_KMH then
                     -- 調頭需求但還有動量：主動煞停到近停，這幀不施轉向。
                     -- （follower 的調頭爬行 target 12 只會讓 regulator 鬆油，
                     -- 滑行等速太久——期間路線反覆重算會把震盪放大）
                     vehicle:setRegulator(false)
                     commandForceBrake(s, vehicle, now)
                     regOn = false
-                elseif aerr <= ROTATE_ERR_RAD or av <= ROTATE_SPIN_MAX_KMH then
+                elseif aerr <= TUNE.ROTATE_ERR_RAD or av <= TUNE.ROTATE_SPIN_MAX_KMH then
                     -- 誤差 > 90° 走耦力模式（coupled=true）：力矩恆定、側向中心力
                     -- 幀間抵消＝原地旋轉不橫滑（實機：橫推調頭會滑出路外撞東西）。
                     -- **原地旋轉前先探車周**（500ms 節流）：走廊沿路線掃，路線反向
                     -- 要調頭時車後方／側面全是走廊盲區——貼牆貼樹貼車旋轉＝車身
                     -- 掃掠直接撞。周邊不淨空（或未載入）就退回橫推大弧：爬行 12
                     -- 前進轉，空間不夠自然由卡死→脫困鏈接手。
-                    local coupled = aerr > ROTATE_ERR_RAD
+                    local coupled = aerr > TUNE.ROTATE_ERR_RAD
                     if coupled and s.sensor then
                         if now >= s.rotProbeMs then
-                            s.rotProbeMs = now + ROTATE_PROBE_MS
+                            s.rotProbeMs = now + TUNE.ROTATE_PROBE_MS
                             s.rotProbeClear = not MDADSensor.probeAround(
                                 s.sensor, vehicle, getCell(), s.probeR)
                             if getDebug() then
@@ -4175,11 +4184,11 @@ local function stepFollow(s, vehicle, playerNum, now)
         -- 只有同一行同時看到 errDeg 與 force 才分得開。旗標為假時整段完全不執行，
         -- 連字串都不會生成——這裡是每幀熱路徑。
         if getDebug() and now >= s.nextDebugMs then
-            s.nextDebugMs = now + DEBUG_MS
+            s.nextDebugMs = now + TUNE.DEBUG_MS
             print(string.format(
                 "%spn=%d mode=%s speed=%.1f target=%.1f errDeg=%.1f steer=%.2f force=%.0f remaining=%.1f lat=%.1f road=%.2f gear=%d regulator=%s",
                 LOG, playerNum, s.mode, speedKmh, targetSpeed or 0,
-                (headingError or 0) * DEG_PER_RAD, steer or 0, force, remaining or 0,
+                (headingError or 0) * TUNE.DEG_PER_RAD, steer or 0, force, remaining or 0,
                 sqrt(lateralSq or 0), s.roadBias, Drive.getGear(playerNum), tostring(regOn)))
         end
         if s.diag then
@@ -4661,7 +4670,7 @@ local function onPlayerUpdate(player)
             s.progressUntil = resumeUntil
         elseif resumePhase == "gear-reset" then
             s.verifyArmPending = true
-            s.verifyArmUntil = now + VERIFY_MS
+            s.verifyArmUntil = now + TUNE.VERIFY_MS
         elseif resumePhase == "verify" then
             s.verifyArmPending = true
             s.verifyArmUntil = resumeUntil

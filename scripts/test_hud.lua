@@ -392,10 +392,14 @@ MinidoracatMiniMapAPI = {
 }
 
 local realRequire = require
-require = function() return true end
 local source = "MOD/MinidoracatAutoDriveFor42/Contents/mods/MinidoracatAutoDriveFor42/42/media/lua/client/MDAD_HUD.lua"
-dofile(source)
-require = realRequire
+-- 測試環境沒有引擎的 ISUI 檔案，重新執行 HUD chunk 時要把 require 吃掉。
+local function loadHUD()
+    require = function() return true end
+    dofile(source)
+    require = realRequire
+end
+loadHUD()
 
 check(type(MDAD.HUD) == "table", "HUD facade published")
 check(type(MDAD.HUD.Panel) == "table", "HUD panel class published")
@@ -858,6 +862,36 @@ fire(Events.OnPlayerDeath, player2)
 check(not panel2.added and panel2.collapseButton:getParent() == nil
     and panel2.themeButton:getParent() == nil,
     "second split-screen panel and dashboard controls clean up independently")
+
+-- Driver 載入失敗（Kahlua 結構上限超標＝整個 MDAD_Driver.lua chunk 一行都不執行，
+-- MDAD.Drive 不存在）。HUD 必須印一行安裝級診斷就退場：不發布 facade、不註冊事件。
+-- 少了這條，每 250ms 一輪的 hudState 會變成 "attempted index: hudState of
+-- non-table" 洗爆 console，把真正的根因那一行推出捲軸。
+local function handlerCount()
+    local n = 0
+    for _, event in pairs(Events) do n = n + #event.handlers end
+    return n
+end
+local liveHUD, liveDrive = MDAD.HUD, MDAD.Drive
+for _, broken in ipairs({ { case = "MDAD.Drive missing", drive = nil },
+                          { case = "Drive.hudState missing", drive = {} } }) do
+    local baseline = handlerCount()
+    local logged = 0
+    local realPrint = print
+    print = function() logged = logged + 1 end
+    MDAD.HUD, MDAD.Drive = nil, broken.drive
+    loadHUD()
+    print = realPrint
+    check(MDAD.HUD == nil, broken.case .. ": HUD facade not published")
+    checkEq(handlerCount(), baseline, broken.case .. ": no engine events registered")
+    checkEq(logged, 1, broken.case .. ": exactly one install-level diagnostic line")
+end
+-- 正面對照：閘門不是「永遠退場」——Drive 完整時同一份檔案照樣發布 HUD。
+MDAD.Drive = liveDrive
+loadHUD()
+check(type(MDAD.HUD) == "table" and type(MDAD.HUD.Panel) == "table",
+    "intact Drive still publishes the HUD facade through the same guard")
+MDAD.HUD = liveHUD
 
 print("HUD assertions " .. assertions .. ", failures " .. failures)
 if failures > 0 then os.exit(1) end

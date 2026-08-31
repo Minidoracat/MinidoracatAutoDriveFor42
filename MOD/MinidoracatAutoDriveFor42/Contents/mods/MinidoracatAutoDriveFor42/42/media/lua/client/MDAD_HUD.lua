@@ -22,6 +22,21 @@ require "ISUI/ISButton"
 
 if MDAD.HUD then return end
 
+-- Driver 載入失敗的次生防線。Kahlua 是以整個 chunk 為編譯單位：MDAD_Driver.lua 只要
+-- 撞到結構上限（單一 function >60 upvalues／>190 locals）就整檔一行都不執行，
+-- MDAD.Drive 根本沒建起來——2026-08-31 實機 KahluaException
+-- 「MDAD_Driver.lua:4182: function at line 3207 has more than 60 upvalues」，
+-- 接著 HUD 每 250ms 一輪讀 Drive.hudState，console 被
+-- "attempted index: hudState of non-table: null" 洗爆，真正的根因那一行被推出捲軸，
+-- 比「HUD 根本沒出現」難查一個數量級。所以這裡印一行安裝級診斷（同 Driver
+-- startSession 對 MDADFollower 的慣例，不受 getDebug() 管）就退場：不建面板、
+-- 不註冊事件、不掛 dashboard 控制。根因由發版閘門守（scripts/verify_mod.py 檢查
+-- 1b 的 Kahlua 結構上限），這條只保證失敗安靜且訊息讀得到。
+if type(MDAD.Drive) ~= "table" or type(MDAD.Drive.hudState) ~= "function" then
+    print("[" .. MDAD.MOD_ID .. "] HUD disabled: MDAD_Driver not loaded")
+    return
+end
+
 if not (MinidoracatUI and MinidoracatUI.v1) then
     pcall(require, "MinidoracatUI/V1")
 end

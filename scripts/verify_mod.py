@@ -3,11 +3,20 @@
 
 用法（repo 根目錄或任意位置）：
     python scripts/verify_mod.py
+    python scripts/verify_mod.py --self-test   # 只跑 1b 的閘門自測（改閘門邏輯時的快速迴圈；
+                                               # 完整執行本來就會先跑一次，不是額外步驟）
 
 零設定：自動偵測 MOD/<folder>/Contents/mods/<folder>/42/。
 涵蓋的檢查與其對應的實際事故（皆有反編譯出處，詳見 AGENTS.md 踩坑錄）：
 
   1. luac -p 語法        — 需要 PATH 有 luac；沒有則列為 SKIP 而非 PASS
+ 1b. Kahlua 結構上限      — 單一 function >60 upvalues 或 >190 locals 是**載入期編譯
+                           失敗**（整個 chunk 不執行、命名空間不存在，依賴它的檔案
+                           每幀噴 nil）。luac -p 照過，只有 luac -l 的槽數看得到。
+                           因為它的失效模式是「靜默永遠 PASS」，每次執行都先自測
+                           parser 樣本＋luac 失敗路徑＋真實編譯的邊界值，自測不過就
+                           不掃檔案；luac 失敗／空輸出／解析不到 function 標頭一律
+                           FAIL，PASS 訊息會報實際比對過的 function 數
   2. BOM / CRLF          — 有 BOM 或 CRLF 的翻譯檔會被引擎「靜默忽略」
   3. 翻譯鍵集一致          — 缺鍵的語系會顯示原始 key
   4. 裸 % 檢查           — 42.20.1 起 formatted() 遇裸 % 崩潰；只允許 %1-%9 與 %%
@@ -50,6 +59,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -127,6 +137,177 @@ if not MEDIA_DIRS:
 LUA_FILES = [f for m in MEDIA_DIRS for f in iter_files(os.path.join(m, "lua"), {".lua"})
              if os.path.isdir(os.path.join(m, "lua"))]
 
+# ---- 1b 用：Kahlua 結構上限 ----
+# Kahlua（PZ 的 Lua 執行期，Lua 5.1 語義）對單一 function 的槽數有硬上限，超過不是
+# 執行期例外而是**載入期編譯失敗**：整個 chunk 一行都不跑，命名空間根本沒建起來，
+# 依賴它的檔案接著每幀噴 nil。2026-08-31 實機：
+#   KahluaException MDAD_Driver.lua:4182: function at line 3207 has more than
+#   60 upvalues  → MDAD.Drive == nil → HUD 每 250ms 一輪
+#   "attempted index: hudState of non-table: null" 洗爆 console。
+# luac -p 只驗語法，這種超限它照過；luac -l 會把每個 function 的 upvalue／local
+# 槽數列在標頭行，靜態就能判定。兩個上限取 Lua 5.1 的原始值：
+#   upvalues 60 = LUAI_MAXUPVALUES（Kahlua 訊息就是 "more than 60"，61 才爆）
+#   locals  190 = LUAI_MAXVARS(200) 留 10 槽餘裕（同一個 function 再長一點就撞牆）
+# 計數方向刻意保守（只會誤報、不會漏報）：luac 5.4 把 _ENV 也算一個 upvalue，
+# locals 欄位算的是「整個 function 宣告過的 local 總數」而非 5.1 的同時存活數，
+# 兩者都 ≥ Kahlua 的實際用量。修法是把非熱幀常數收成一張 table（一個槽承載全部），
+# 見 MDAD_Driver.lua 的 TUNE。
+#
+# 這個閘門唯一該怕的失效模式是**靜默永遠 PASS**：regex 對不上、luac 換版改標頭、
+# luac 這次沒吐東西——掃遍全 repo 也只會印一行 PASS，比沒有閘門更糟（有人信它）。
+# 所以三道反制全部必要，缺一不可：① 每次跑都先自測邊界值（不只 --self-test）；
+# ② 每個檔案都必須真的解析出 ≥1 個 function 標頭，0 個＝格式漂移＝FAIL；
+# ③ luac 失敗／空輸出一律 FAIL，不 continue（沉默地跳過就是漏報）。
+# 標頭措辭跨版本不同，兩種都吃：Lua 5.1 印 "N stacks"、5.2+ 印 "N slots"，
+# 且數量為 1 時全部退化成單數（"1 upvalue"、"1 local"）。
+KAHLUA_MAX_UPVALUES = 60
+KAHLUA_MAX_LOCALS = 190
+KAHLUA_PROTO_RE = re.compile(r"^(?:main|function) <.+:(\d+),(\d+)> \(\d+ instruction")
+KAHLUA_SLOT_RE = re.compile(
+    r"^\d+\+? params?, \d+ (?:slot|stack)s?, (\d+) upvalues?, (\d+) locals?,")
+
+
+def kahlua_listing(luac_bin, path):
+    """回傳 (listing, err)。err 非 None 代表拿不到可信列表，呼叫端必須當失敗處理。"""
+    r = subprocess.run([luac_bin, "-p", "-l", path], capture_output=True, text=True)
+    if r.returncode != 0:
+        tail = (r.stderr or r.stdout or "").strip().splitlines()
+        return None, f"luac -p -l 退出碼 {r.returncode}：{tail[-1] if tail else '無輸出'}"
+    if not r.stdout.strip():
+        return None, "luac -p -l 沒有輸出任何 function 列表（版本不支援？）"
+    return r.stdout, None
+
+
+def kahlua_over_limit(listing, label):
+    """回傳 (findings, protos)：超限清單與**實際解析到**的 function 標頭數。
+
+    protos 是給呼叫端判斷「有沒有真的看懂列表」用的——沒有它，格式漂移會讓
+    findings 永遠是空清單而看起來像全部合格。
+    """
+    out, protos, where = [], 0, None
+    for line in listing.splitlines():
+        mm = KAHLUA_PROTO_RE.match(line)
+        if mm:
+            protos += 1
+            where = f"{label}:{mm.group(1)}-{mm.group(2)}"
+            continue
+        mm = KAHLUA_SLOT_RE.match(line)
+        if not mm or where is None:
+            continue
+        ups, locs = int(mm.group(1)), int(mm.group(2))
+        if ups > KAHLUA_MAX_UPVALUES:
+            out.append(f"{where}: {ups} upvalues（上限 {KAHLUA_MAX_UPVALUES}）")
+        if locs > KAHLUA_MAX_LOCALS:
+            out.append(f"{where}: {locs} locals（上限 {KAHLUA_MAX_LOCALS}）")
+        where = None
+    return out, protos
+
+
+# 解析器的固定樣本：跨 luac 版本的措辭與單複數各驗一次，不依賴本機裝的是哪一版。
+# (標籤, 列表文字, 期望 protos, 期望 findings 筆數)
+KAHLUA_MOCK_LISTINGS = (
+    ("5.1 複數＋stacks＋超限", """
+main <t.lua:0,0> (5 instructions, 20 bytes at 0x1)
+0+ params, 2 stacks, 1 upvalue, 2 locals, 0 constants, 1 function
+
+function <t.lua:2,9> (3 instructions, 12 bytes at 0x2)
+0 params, 2 stacks, 61 upvalues, 3 locals, 0 constants, 0 functions
+""", 2, 1),
+    ("5.4 單數＋slots＋合格", """
+main <t.lua:0,0> (5 instructions at 0x1)
+0+ params, 2 slots, 1 upvalue, 2 locals, 0 constants, 1 function
+
+function <t.lua:2,2> (3 instructions at 0x2)
+0 params, 2 slots, 60 upvalues, 190 locals, 0 constants, 0 functions
+""", 2, 0),
+    ("locals 超限", """
+function <t.lua:7,80> (9 instructions at 0x3)
+2 params, 9 slots, 3 upvalues, 191 locals, 1 constant, 0 functions
+""", 1, 1),
+    ("同一 function 兩項都超限", """
+function <t.lua:1,2> (9 instructions at 0x4)
+0 params, 9 slots, 61 upvalues, 191 locals, 1 constant, 0 functions
+""", 1, 2),
+    ("格式漂移（認不出標頭）", "some future luac wrote something else entirely\n", 0, 0),
+)
+
+
+def kahlua_selftest(luac_bin):
+    """驗「閘門本身有效」：parser 對固定樣本、luac 失敗路徑、真實編譯的邊界值。
+
+    回傳問題清單（空＝閘門可信）。檔案掃描前一定會先跑這個，自測不過就不准
+    宣稱任何檔案合格。
+    """
+    bad = []
+    for label, listing, want_protos, want_findings in KAHLUA_MOCK_LISTINGS:
+        findings, protos = kahlua_over_limit(listing, label)
+        if protos != want_protos:
+            bad.append(f"樣本「{label}」: 解析到 {protos} 個 function 標頭"
+                       f"，期望 {want_protos}")
+        if len(findings) != want_findings:
+            bad.append(f"樣本「{label}」: {len(findings)} 筆 finding"
+                       f"，期望 {want_findings}；實得 {findings or '無'}")
+    cases = []
+    for n in (KAHLUA_MAX_UPVALUES, KAHLUA_MAX_UPVALUES + 1):
+        names = [f"u{i}" for i in range(n)]
+        src = "".join(f"local {x} = 1\n" for x in names) \
+            + f"local function f() return {' + '.join(names)} end\nreturn f\n"
+        cases.append((f"{n}-upvalue", src, n > KAHLUA_MAX_UPVALUES))
+    for n in (KAHLUA_MAX_LOCALS, KAHLUA_MAX_LOCALS + 1):
+        body = "".join(f"    local v{i} = 1\n" for i in range(n))
+        cases.append((f"{n}-local",
+                      f"local function g()\n{body}    return v0\nend\nreturn g\n",
+                      n > KAHLUA_MAX_LOCALS))
+    with tempfile.TemporaryDirectory() as tmp:
+        # luac 失敗路徑：檔案不存在與語法壞掉都必須回 err，不能被當成「沒有超限」
+        missing, err = kahlua_listing(luac_bin, os.path.join(tmp, "nope.lua"))
+        if missing is not None or not err:
+            bad.append("luac 失敗路徑: 不存在的檔案沒有回報錯誤")
+        broken = os.path.join(tmp, "broken.lua")
+        with open(broken, "w", encoding="utf-8") as fh:
+            fh.write("local = = end\n")
+        listing, err = kahlua_listing(luac_bin, broken)
+        if listing is not None or not err:
+            bad.append("luac 失敗路徑: 語法錯誤的檔案沒有回報錯誤")
+        for name, src, want_block in cases:
+            p = os.path.join(tmp, f"{name}.lua")
+            with open(p, "w", encoding="utf-8") as fh:
+                fh.write(src)
+            listing, err = kahlua_listing(luac_bin, p)
+            if listing is None:
+                # 本機 luac 是 Lua 5.1（上限與 Kahlua 相同）時，超限樣本會被
+                # 編譯器自己擋下——這正是要防的事發生了，算通過；
+                # 但「應該合格」的樣本編不出來就是閘門或環境有問題。
+                if want_block:
+                    continue
+                bad.append(f"{name}: 應可編譯卻失敗（{err}）")
+                continue
+            findings, protos = kahlua_over_limit(listing, name)
+            if protos == 0:
+                bad.append(f"{name}: 解析不到 function 標頭（luac 列表格式已改？）")
+                continue
+            if bool(findings) != want_block:
+                bad.append(f"{name}: 期望{'擋下' if want_block else '放行'}"
+                           f"，實得 {findings or '放行'}")
+    return bad
+
+
+KAHLUA_SELFTEST_LABEL = (f"Kahlua 結構上限閘門自測（parser 樣本 "
+                         f"{len(KAHLUA_MOCK_LISTINGS)} 組、luac 失敗路徑、邊界 "
+                         f"{KAHLUA_MAX_UPVALUES}/{KAHLUA_MAX_UPVALUES + 1} upvalues、"
+                         f"{KAHLUA_MAX_LOCALS}/{KAHLUA_MAX_LOCALS + 1} locals）")
+
+if "--self-test" in sys.argv:
+    # 單獨模式：只驗閘門本身，不掃 repo（改閘門邏輯時的快速迴圈）
+    _luac = shutil.which("luac")
+    if not _luac:
+        print("--self-test 需要 PATH 有 luac")
+        sys.exit(2)
+    _bad = kahlua_selftest(_luac)
+    fail(KAHLUA_SELFTEST_LABEL, _bad) if _bad else ok(KAHLUA_SELFTEST_LABEL)
+    sys.exit(1 if _bad else 0)
+
+
 # ---- 1. luac 語法 ----
 luac = shutil.which("luac")
 if not luac:
@@ -138,6 +319,37 @@ else:
         if r.returncode != 0:
             bad.append(r.stderr.strip().splitlines()[-1] if r.stderr else f)
     fail("Lua 語法（luac -p）", bad) if bad else ok(f"Lua 語法（luac -p，{len(LUA_FILES)} 檔）")
+
+# ---- 1b. Kahlua 結構上限（upvalue／local 槽數）----
+# 順序是契約的一部分：自測不過就不掃檔案，也不准印出任何「合格」結論。
+KAHLUA_LABEL = "Kahlua 結構上限（upvalue／local 槽數）"
+if not luac:
+    skip(KAHLUA_SELFTEST_LABEL, "PATH 沒有 luac")
+    skip(KAHLUA_LABEL, "PATH 沒有 luac")
+else:
+    selftest_bad = kahlua_selftest(luac)
+    fail(KAHLUA_SELFTEST_LABEL, selftest_bad) if selftest_bad else ok(KAHLUA_SELFTEST_LABEL)
+    if selftest_bad:
+        fail(KAHLUA_LABEL, ["閘門自測未通過，掃描結果不可信；先修閘門再談檔案"])
+    else:
+        bad, protos_total = [], 0
+        for f in LUA_FILES:
+            rel = os.path.relpath(f, REPO)
+            listing, err = kahlua_listing(luac, f)
+            if err:
+                # 不 continue：拿不到列表就是「這個檔沒被驗過」，必須紅
+                bad.append(f"{rel}: {err}")
+                continue
+            findings, protos = kahlua_over_limit(listing, rel)
+            bad.extend(findings)
+            if protos == 0:
+                bad.append(f"{rel}: 解析不到任何 function 標頭"
+                           f"（luac 列表格式已改？此檔等於沒驗）")
+            protos_total += protos
+        fail(KAHLUA_LABEL, bad) if bad \
+            else ok(f"{KAHLUA_LABEL}：≤{KAHLUA_MAX_UPVALUES} upvalues、"
+                    f"≤{KAHLUA_MAX_LOCALS} locals（{len(LUA_FILES)} 檔、"
+                    f"{protos_total} 個 function 實際解析並比對）")
 
 # ---- 2. BOM / CRLF ----
 bad = []
