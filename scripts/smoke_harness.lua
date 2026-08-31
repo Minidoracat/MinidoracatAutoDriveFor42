@@ -7760,6 +7760,15 @@ local function scenarioPhaseE()
                     and drive.calls.maxRegSpeed <= expected,
                 label .. " hard-clamps regulator speed on the first frame")
         end
+        local function assertFullSpeed(label)
+            armFullGateFrame()
+            driveTick(dp, hotVeh)
+            checkTrue(captured.fullGate, label .. " opens fullGate")
+            checkEq(captured.gateReason, "clear", label .. " reports clear")
+            checkEq(captured.lastSensorCap, nil, label .. " has no sensor cap")
+            checkEq(drive.calls.maxRegSpeed, 40,
+                label .. " keeps the gear/profile envelope")
+        end
 
         MDAD.Drive.setSlowPref(0, "corpse", false)
         drive.putTree(20, 6, "vegetation_trees_01_5")
@@ -7776,18 +7785,73 @@ local function scenarioPhaseE()
             "fallback metadata keeps the sampled lane proof valid")
         checkTrue(captured.verifySweep,
             "roadside hard point remains outside the driven-body OBB sweep")
-        armFullGateFrame()
-        driveTick(dp, hotVeh)
-        checkTrue(captured.fullGate,
-            "clear driven lane opens fullGate despite search-band clutter")
-        checkEq(captured.gateReason, "clear", "full-speed gate reports clear")
-        checkEq(captured.lastSensorCap, nil,
-            "disabled corpse preference does not synthesize a sensor cap")
-        checkEq(drive.calls.maxRegSpeed, 40,
-            "clear driven lane keeps the sandbox/gear/vehicle envelope instead of 15km/h")
+        assertFullSpeed("clear driven lane despite search-band clutter")
         drive.clearCell(20, 6)
         drive.clearCell(25, 0)
         MDAD.Drive.setSlowPref(0, "corpse", oldCorpsePref)
+        local farSeg = 11
+        local farWidth = captured.route.segWidth[farSeg]
+        captured.route.segWidth[farSeg] = 1
+        drive.scanRound()
+        checkEq(captured.verifyLineReason, "band",
+            "far road-band failure remains named")
+        assertFullSpeed("road-band failure beyond stopping horizon")
+        captured.route.segWidth[farSeg] = farWidth
+
+        local nearSeg = 5
+        local nearWidth = captured.route.segWidth[nearSeg]
+        captured.route.segWidth[nearSeg] = 1
+        drive.scanRound()
+        armFullGateFrame()
+        driveTick(dp, hotVeh)
+        checkFalse(captured.fullGate,
+            "road-band failure inside stopping horizon keeps gate closed")
+        checkTrue(drive.calls.maxRegSpeed > 0 and drive.calls.maxRegSpeed <= 15,
+            "near road-band failure keeps the conservative 15km/h cap")
+        captured.route.segWidth[nearSeg] = nearWidth
+        drive.scanRound()
+
+        drive.world[45 * 100000 + 0] = nil
+        drive.scanRound()
+        checkTrue(captured.sensor.unloaded and captured.visibilityCap > 40,
+            "far unloaded cell is visible beyond the 40km/h stopping horizon")
+        checkEq(captured.verifyLineReason, "unloaded",
+            "far unloaded prefix boundary remains named")
+        assertFullSpeed("unloaded boundary beyond stopping horizon")
+        drive.putRoad(45, 45, 0, 0)
+        drive.scanRound()
+
+        drive.world[15 * 100000 + 0] = nil
+        drive.scanRound()
+        armFullGateFrame()
+        driveTick(dp, hotVeh)
+        checkFalse(captured.fullGate,
+            "unloaded cell inside stopping horizon keeps gate closed")
+        checkTrue(drive.calls.maxRegSpeed < 40,
+            "near unloaded cell applies a real visibility cap")
+        drive.putRoad(15, 15, 0, 0)
+        drive.scanRound()
+        local realCorridorPlan = MDADCorridor.plan
+        MDADCorridor.plan = function() return "clear" end
+        drive.putSolid(40, 0, "far_sweep_prefix")
+        drive.scanRound()
+        checkEq(captured.verifyLineReason, "sweep",
+            "far world-sweep failure remains named")
+        assertFullSpeed("world-sweep failure beyond stopping horizon")
+        drive.clearCell(40, 0)
+        drive.scanRound()
+
+        drive.putSolid(15, 0, "near_sweep_prefix")
+        drive.scanRound()
+        armFullGateFrame()
+        driveTick(dp, hotVeh)
+        checkFalse(captured.fullGate,
+            "world-sweep failure inside stopping horizon keeps gate closed")
+        checkTrue(drive.calls.maxRegSpeed > 0 and drive.calls.maxRegSpeed <= 15,
+            "near world-sweep failure keeps the conservative 15km/h cap")
+        drive.clearCell(15, 0)
+        MDADCorridor.plan = realCorridorPlan
+        drive.scanRound()
 
         drive.putVehicle(15, 0, false)
         drive.scanRound()
@@ -8357,6 +8421,33 @@ local function scenarioPhaseE()
         "dodge geometry uses intended crawl-or-higher speed, not current zero")
     checkTrue(captured.dodgeSpaceCap > 0,
         "available entry/exit space yields a positive inverse speed cap")
+    checkFalse(captured.dodgeCrawl,
+        "ample ordinary dodge is not already a squeeze crawl fixture")
+    local realDodgeCap = MDADDynamics.dodgeSpeedCapKmh
+    local sawEpisodeCall, allEpisodeCrawl = false, true
+    MDADDynamics.dodgeSpeedCapKmh = function(
+            gearCap, profileCap, curveCap, clearanceCap,
+            visibilityCap, classId, crawl)
+        if captured.episodeActive then
+            sawEpisodeCall = true
+            allEpisodeCrawl = allEpisodeCrawl and crawl == true
+        end
+        return realDodgeCap(
+            gearCap, profileCap, curveCap, clearanceCap,
+            visibilityCap, classId, crawl)
+    end
+    captured.episodeActive = true
+    captured.episodeRouteGen = captured.routeGen
+    captured.episodeStartS = captured.lastSNow
+    captured.episodeClearRounds = 0
+    drive.scanRound(true)
+    MDADDynamics.dodgeSpeedCapKmh = realDodgeCap
+    checkTrue(sawEpisodeCall and allEpisodeCrawl,
+        "every unrearmed recovery cap evaluation uses crawl policy")
+    checkTrue(captured.dodgeSpeedCap <= MDADDynamics.DODGE_SQUEEZE_CAP,
+        "unrearmed recovery episode keeps the committed dodge at crawl speed")
+    captured.episodeActive = false
+    drive.scanRound(true)
     checkNear(captured.lastOvEndS, captured.fstate.ovEndS, 1e-12,
         "candidate sweep and committed dodge share the exact ovEndS")
     checkNear(captured.fstate.ovEndS, captured.fstate.offD + 1, 1e-9,

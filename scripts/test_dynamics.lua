@@ -70,6 +70,17 @@ near(D.steeringSpeedCapKmh(0.1, 2.5, 0.5, 0.5, 120), 120, 1e-12,
     "constant steering clamp accepts feasible required angle")
 near(D.steeringSpeedCapKmh(1, 2.5, 0.5, 0.5, 120), 0, 1e-12,
     "constant steering clamp rejects infeasible required angle")
+near(D.crossTrackSteer(2, 15), 0.3696, 1e-12,
+    "15km/h 右偏 2m 產生正向修正量")
+near(D.crossTrackSteer(-2, 15), -0.3696, 1e-12,
+    "cross-track 修正左右鏡像")
+local highSpeedCross = D.crossTrackSteer(1.9, 70)
+check(highSpeedCross > 0 and highSpeedCross < 0.08,
+    "70km/h 的 cross-track 修正保持小幅")
+near(D.crossTrackSteer(10, 0), 0.77, 1e-12,
+    "低速大偏離夾在獨立的安全轉向增量上限")
+near(D.crossTrackSteer(0 / 0, 15), 0, 1e-12,
+    "非法 cross-track 輸入不產生推力")
 
 scenario("full-speed gate truth table")
 local all = { true, true, true, true, true, true, true, true, true, true, true, true }

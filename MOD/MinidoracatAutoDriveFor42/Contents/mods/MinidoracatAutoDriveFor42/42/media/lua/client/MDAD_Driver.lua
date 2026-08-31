@@ -2033,8 +2033,9 @@ local function sweepClear(s, profile, a, b, c, d, offL, tag, needBase)
 end
 
 -- M6 世界折線掃掠：驗的是 buildOffsetLine 烘好的**同一條**前視線（折點法向
--- 混合、連續）——「驗的線＝走的線」是 M6 軌跡契約的核心（舊 sweepClear 沿
--- 「逐段法向×offL」重算，折點處與實走軌跡分歧 3m 級）。回傳同 sweepClear。
+-- 混合、連續）——「驗的線＝走的線」是 M6 軌跡契約的核心。回傳
+-- ok, clearance, hardS, phase, sampleS, hitX, hitY；hardS 是障礙弧長，
+-- sampleS 是失敗車身取樣弧長，proof prefix 必須使用後者。
 local function sweepLine(s, lx, ly, ln, lS0, lS1,
         a, b, c, d, offL, tag, needBase, startK)
     local sen = s.sensor
@@ -2123,6 +2124,184 @@ local function sweepLine(s, lx, ly, ln, lS0, lS1,
         end
     end
     return true, minMargin
+end
+-- Build one immutable proof object for loaded coverage, raw road-band, curvature
+-- and long-vehicle OBB sweep. Keep the longest verified prefix, bounded by the
+-- earliest failure; a farther failure cannot veto the current stopping horizon.
+local function buildSnapshotProof(s, segI, proofEnd)
+    s.verifyBand, s.verifySweep = false, false
+    s.verifyLineReason, s.curveVerifiedUntilS = "state", 0
+    s.proofKappa, s.proofCurveCap = 0, 0
+    if not s.adaptive or s.dodging or s.returnActive
+            or s.blocked or s.currentBlocked then return end
+
+    local prof, sen = s.profile, s.sensor
+    local verifyX, verifyY, verifySeg = s.verifyX, s.verifyY, s.verifySeg
+    local halfW = s.vehicleProfile.halfW
+    local lane = laneBiasOf(s)
+    local lineN, lineS0, lineReason, lastIdx = MDADFollower.buildLaneLine(
+        prof, s.lastSNow, proofEnd, lane,
+        verifyX, verifyY, segI, verifySeg)
+    if lineReason ~= "ok" then
+        s.verifyLineReason = lineReason
+        return
+    end
+    if lineN < 2 then
+        s.verifyLineReason = "capacity"
+        return
+    end
+
+    local verifiedEnd, failReason = proofEnd, nil
+    local rawPts, rawWidths = s.route.pts, s.route.segWidth
+    local sourceValid = s.navVersion >= 4
+        and prof.filletBandValid == true
+        and type(rawPts) == "table" and type(rawWidths) == "table"
+    if sourceValid then
+        for k = 1, lineN do
+            local si = verifySeg[k]
+            if not finite(si) then
+                sourceValid, verifiedEnd, failReason =
+                    false, lineS0, "capacity"
+                break
+            end
+            local sa, sb = prof.segSourceA[si], prof.segSourceB[si]
+            local wx, wy = verifyX[k], verifyY[k]
+            if not MDADDynamics.rawBandContains(
+                    rawPts, rawWidths, sa, halfW, wx, wy)
+                    and not MDADDynamics.rawBandContains(
+                        rawPts, rawWidths, sb, halfW, wx, wy) then
+                local failS = k == lineN and proofEnd
+                    or lineS0 + (k - 1) * MDADFollower.OV_STEP
+                failS = failS - MDADFollower.OV_STEP
+                if failS < lineS0 then failS = lineS0 end
+                if failS < verifiedEnd then
+                    verifiedEnd, failReason = failS, "band"
+                end
+                break
+            end
+        end
+        local rangeN = finite(lastIdx) and lastIdx - segI + 1 or 0
+        if rangeN < 1 or rangeN > MDADFollower.LANE_MAX then
+            sourceValid, verifiedEnd, failReason =
+                false, lineS0, "capacity"
+        else
+            -- Every driven chord is split at its midpoint. Each half must share
+            -- one convex eroded source capsule; endpoints alone cannot prove a
+            -- chord inside a non-convex source-band union.
+            for si = segI, lastIdx do
+                if prof.s[si] >= verifiedEnd then break end
+                local h = prof.segH[si]
+                local x0 = prof.x[si] - sin(h) * lane
+                local y0 = prof.y[si] + cos(h) * lane
+                local x1 = prof.x[si + 1] - sin(h) * lane
+                local y1 = prof.y[si + 1] + cos(h) * lane
+                local sa, sb = prof.segSourceA[si], prof.segSourceB[si]
+                if not MDADDynamics.chordCoveredByBand(
+                        rawPts, rawWidths, sa, sb,
+                        halfW, x0, y0, x1, y1) then
+                    local failS = prof.s[si] - MDADFollower.OV_STEP
+                    if failS < lineS0 then failS = lineS0 end
+                    if failS < verifiedEnd then
+                        verifiedEnd, failReason = failS, "band"
+                    end
+                    break
+                end
+            end
+        end
+    else
+        verifiedEnd, failReason = lineS0, "band"
+    end
+
+    -- SEG_FALLBACK already contributes its conservative corner speed to
+    -- profileEnvelope; the marker itself is never a proof veto.
+    local minBrake, minLat, minCoast =
+        s.horizonMinBrake, s.horizonMinLat, s.horizonMinCoast
+    local kappa, envelopeOk = 0, false
+    if finite(minBrake) and minBrake > 0
+            and finite(minLat) and minLat >= 0
+            and finite(minCoast) and minCoast >= 0 then
+        s.verifyLineN = lineN
+        for k = 1, lineN do
+            local localKappa = 0
+            if k > 1 and k < lineN then
+                localKappa = MDADDynamics.circumcircleKappa(
+                    verifyX[k - 1], verifyY[k - 1],
+                    verifyX[k], verifyY[k],
+                    verifyX[k + 1], verifyY[k + 1])
+            end
+            if localKappa > kappa then kappa = localKappa end
+            s.verifyKappa[k] = localKappa
+            if k < lineN then
+                local dx = verifyX[k + 1] - verifyX[k]
+                local dy = verifyY[k + 1] - verifyY[k]
+                s.verifyDist[k] = sqrt(dx * dx + dy * dy)
+            end
+        end
+        s.envelopeBuildLat, s.envelopeBuildCoast = -1, -1
+        s.laneCurveS0, s.laneCurveEnd = lineS0, proofEnd
+        envelopeOk = refreshLaneCurveEnvelope(s, minCoast, minLat)
+        if envelopeOk then s.laneCurveStamp = sen.stamp end
+    end
+    s.proofKappa = kappa
+    if not envelopeOk then
+        verifiedEnd, failReason = lineS0, "dynamics"
+    end
+
+    local loadedEnd = proofEnd
+    if not finite(sen.scanEndS) then
+        loadedEnd = lineS0
+    elseif sen.scanEndS < loadedEnd then
+        loadedEnd = sen.scanEndS
+    end
+    if sen.unloaded then
+        local unloadedEnd = sen.unloadedS
+        if finite(unloadedEnd) then
+            unloadedEnd = unloadedEnd - MDADFollower.OV_STEP
+        else
+            unloadedEnd = lineS0
+        end
+        if unloadedEnd < loadedEnd then loadedEnd = unloadedEnd end
+    end
+    if loadedEnd < lineS0 then loadedEnd = lineS0 end
+    if loadedEnd < verifiedEnd then
+        verifiedEnd, failReason = loadedEnd, "unloaded"
+    end
+
+    local sweepRan = false
+    if sourceValid and envelopeOk and verifiedEnd > lineS0 then
+        local sweepN, sweepEnd
+        -- buildLaneLine clamps its final point to proofEnd; floor-snapping here
+        -- would otherwise discard a final segment shorter than OV_STEP.
+        if verifiedEnd >= proofEnd - 1e-6 then
+            sweepN, sweepEnd = lineN, proofEnd
+        else
+            local span = (verifiedEnd - lineS0) / MDADFollower.OV_STEP
+            local whole = span - span % 1
+            sweepN = whole + 1
+            sweepEnd = lineS0 + whole * MDADFollower.OV_STEP
+        end
+        if sweepN >= 2 then
+            sweepRan = true
+            if sweepEnd < verifiedEnd then verifiedEnd = sweepEnd end
+            local sweepOk, _, _, _, sweepAt = sweepLine(
+                s, s.verifyX, s.verifyY, sweepN, lineS0, sweepEnd,
+                s.lastSNow, s.lastSNow, sweepEnd, sweepEnd,
+                lane, "profile", s.sweepBase)
+            if not sweepOk then
+                local safeEnd = finite(sweepAt)
+                    and sweepAt - MDADFollower.OV_STEP or lineS0
+                if safeEnd < lineS0 then safeEnd = lineS0 end
+                if safeEnd < verifiedEnd then
+                    verifiedEnd, failReason = safeEnd, "sweep"
+                end
+            end
+        end
+    end
+
+    s.verifyBand = sourceValid and verifiedEnd > lineS0
+    s.verifySweep = sweepRan and verifiedEnd > lineS0
+    s.curveVerifiedUntilS = verifiedEnd
+    s.verifyLineReason = failReason or "ok"
 end
 
 local function returnAvailable(s)
@@ -2599,9 +2778,11 @@ local function replan(s, vehicle, playerNum)
                     guardMargin, 0.4, 0.5, minLat, sh)
                 local classId = sen.vehN and sen.vehN > 0
                     and MDADDynamics.DODGE_VEHICLE or MDADDynamics.DODGE_STATIC
+                -- A recovery episode has not yet proved 10m of clean progress;
+                -- recommitted dodges stay at crawl speed instead of re-hitting the site.
                 local newCap, _, capReason = MDADDynamics.dodgeSpeedCapKmh(
                     s.gearCap, s.profileEnvelope, curveCap, clearanceCap,
-                    visibilityCap, classId, s.dodgeCrawl)
+                    visibilityCap, classId, s.dodgeCrawl or s.episodeActive)
                 s.dodgeClearance, s.dodgeClass = guardMargin, classId
                 s.dodgeCurveCap, s.dodgeClearanceCap = curveCap, clearanceCap
                 s.dodgeVisibilityCap = visibilityCap
@@ -2933,9 +3114,10 @@ local function replan(s, vehicle, playerNum)
             s.dodgeCurveCap, s.dodgeClearanceCap = curveCap, clearanceCap
             s.dodgeVisibilityCap, s.dodgeClass = visibilityCap, classId
             local capReason
+            -- Same unrearmed-episode crawl contract as the committed guard above.
             s.dodgeSpeedCap, _, capReason = MDADDynamics.dodgeSpeedCapKmh(
                 s.gearCap, profileCap, curveCap, clearanceCap, visibilityCap,
-                classId, s.dodgeCrawl)
+                classId, s.dodgeCrawl or s.episodeActive)
             if capReason == "dynamics-invalid" then
                 s.invalid, s.stateError, s.dynamicsFault =
                     true, "dodge-cap", true
@@ -3396,128 +3578,7 @@ local function stepFollow(s, vehicle, playerNum, now)
                     s.horizonMinCoast = s.safeCoast
                 end
                 s.horizonStamp = s.sensor.stamp
-                -- The actual lane line is the single proof object for loaded coverage,
-                -- raw-source road-band union, curvature and long-vehicle OBB sweep.
-                s.verifyBand, s.verifySweep = false, false
-                s.verifyLineReason, s.curveVerifiedUntilS = "state", 0
-                s.proofKappa, s.proofCurveCap = 0, 0
-                if s.adaptive and not s.dodging and not s.returnActive
-                        and not s.blocked and not s.currentBlocked then
-                    local proofEnd = visibleEndS(s.sensor, s.lastSNow)
-                    if proofEnd > s.profile.length then proofEnd = s.profile.length end
-                    local lane = laneBiasOf(s)
-                    local lineN, lineS0, lineReason, lastIdx = MDADFollower.buildLaneLine(
-                        s.profile, s.lastSNow, proofEnd, lane,
-                        s.verifyX, s.verifyY, segI, s.verifySeg)
-                    local rawPts, rawWidths = s.route.pts, s.route.segWidth
-                    local bandOk = lineN >= 2 and s.navVersion >= 4
-                        and s.profile.filletBandValid == true
-                        and type(rawPts) == "table" and type(rawWidths) == "table"
-                    local checkN = bandOk and lineN or 0
-                    for k = 1, checkN do
-                        local si = s.verifySeg[k]
-                        if not finite(si) then
-                            lineReason, bandOk = "capacity", false
-                            break
-                        end
-                        local sa, sb =
-                            s.profile.segSourceA[si], s.profile.segSourceB[si]
-                        local wx, wy = s.verifyX[k], s.verifyY[k]
-                        if not MDADDynamics.rawBandContains(
-                                rawPts, rawWidths, sa,
-                                s.vehicleProfile.halfW, wx, wy)
-                                and not MDADDynamics.rawBandContains(
-                                    rawPts, rawWidths, sb,
-                                    s.vehicleProfile.halfW, wx, wy) then
-                            bandOk = false
-                            break
-                        end
-                    end
-                    local rangeN = lineN >= 2 and finite(lastIdx)
-                        and lastIdx - segI + 1 or 0
-                    if rangeN < 1 or rangeN > MDADFollower.LANE_MAX then
-                        lineReason, bandOk = "capacity", false
-                    else
-                        -- Every driven profile chord is split at its midpoint.
-                        -- Each half must share one convex eroded source capsule;
-                        -- endpoint-only membership is insufficient for a non-convex union.
-                        for si = segI, (bandOk and lastIdx or segI - 1) do
-                            local h = s.profile.segH[si]
-                            local x0 = s.profile.x[si] - sin(h) * lane
-                            local y0 = s.profile.y[si] + cos(h) * lane
-                            local x1 = s.profile.x[si + 1] - sin(h) * lane
-                            local y1 = s.profile.y[si + 1] + cos(h) * lane
-                            local sa, sb =
-                                s.profile.segSourceA[si], s.profile.segSourceB[si]
-                            if not MDADDynamics.chordCoveredByBand(
-                                    rawPts, rawWidths, sa, sb,
-                                    s.vehicleProfile.halfW, x0, y0, x1, y1) then
-                                bandOk = false
-                                break
-                            end
-                        end
-                    end
-                    local minBrake, minLat, minCoast =
-                        s.horizonMinBrake, s.horizonMinLat, s.horizonMinCoast
-                    local kappa, curveCap = 0, s.vehicleProfile.maxSpeed
-                    -- SEG_FALLBACK already carries its conservative corner speed in
-                    -- profileEnvelope. The sampled lane envelope, raw band and OBB
-                    -- sweep still prove the actual path; the marker alone is not a veto.
-                    local envelopeOk = false
-                    if lineN >= 2 and finite(minLat) and minLat >= 0
-                            and finite(minCoast) and minCoast >= 0 then
-                        s.verifyLineN = lineN
-                        for k = 1, lineN do
-                            local localKappa = 0
-                            if k > 1 and k < lineN then
-                                localKappa = MDADDynamics.circumcircleKappa(
-                                    s.verifyX[k - 1], s.verifyY[k - 1],
-                                    s.verifyX[k], s.verifyY[k],
-                                    s.verifyX[k + 1], s.verifyY[k + 1])
-                            end
-                            if localKappa > kappa then kappa = localKappa end
-                            s.verifyKappa[k] = localKappa
-                            if k < lineN then
-                                local dx = s.verifyX[k + 1] - s.verifyX[k]
-                                local dy = s.verifyY[k + 1] - s.verifyY[k]
-                                s.verifyDist[k] = sqrt(dx * dx + dy * dy)
-                            end
-                        end
-                        s.envelopeBuildLat, s.envelopeBuildCoast = -1, -1
-                        s.laneCurveS0, s.laneCurveEnd = lineS0, proofEnd
-                        s.proofKappa = kappa
-                        envelopeOk = refreshLaneCurveEnvelope(s, minCoast, minLat)
-                        if envelopeOk then
-                            curveCap = s.proofCurveCap
-                            s.laneCurveStamp = s.sensor.stamp
-                        else
-                            curveCap = 0
-                        end
-                    end
-                    s.proofKappa = kappa
-                    local loaded = lineN >= 2 and finite(minBrake) and minBrake > 0
-                        and s.sensor.scanEndS >= proofEnd
-                        and not (s.sensor.unloaded
-                            and (not finite(s.sensor.unloadedS) or s.sensor.unloadedS <= proofEnd))
-                    local sweepOk = false
-                    if loaded and bandOk and envelopeOk
-                            and finite(curveCap) then
-                        sweepOk = sweepLine(
-                            s, s.verifyX, s.verifyY, lineN, lineS0, proofEnd,
-                            s.lastSNow, s.lastSNow, proofEnd, proofEnd,
-                            lane, "profile", s.sweepBase)
-                    end
-                    s.verifyBand, s.verifySweep = bandOk, sweepOk == true
-                    if lineReason ~= "ok" then s.verifyLineReason = lineReason
-                    elseif not envelopeOk then s.verifyLineReason = "dynamics"
-                    elseif not bandOk then s.verifyLineReason = "band"
-                    elseif not loaded then s.verifyLineReason = "unloaded"
-                    elseif not sweepOk then s.verifyLineReason = "sweep"
-                    else
-                        s.verifyLineReason = "ok"
-                        s.curveVerifiedUntilS = proofEnd
-                    end
-                end
+                buildSnapshotProof(s, segI, horizonEnd)
                 -- 一般玩家軌跡每輪更新常駐點列；debugOn 只控制紅／綠／橙 markers。
                 -- LineDrawer 每 tick 畫連續線，幾何仍只在 250ms 輪完成時重算。
                 if type(MDADOverlay) == "table" then
@@ -3657,7 +3718,7 @@ local function stepFollow(s, vehicle, playerNum, now)
         local fullValid = finite(s.profileEnvelope) and s.profileEnvelope >= 0
             and finite(s.gearCap) and s.gearCap >= 0
             and finite(pcap) and pcap >= 0 and finite(vehicleMax) and vehicleMax >= 0
-        local laneEnvelopeValid = s.sensor and s.verifyLineReason == "ok"
+        local laneEnvelopeValid = s.sensor
             and s.laneCurveStamp == s.sensor.stamp
         local envelopeScale, scaleCandidate = s.laneEnvelopeScale, 1
         if laneEnvelopeValid then
@@ -3812,11 +3873,14 @@ local function stepFollow(s, vehicle, playerNum, now)
         local progressHealthy = s.progressState == "watch"
             and s.progressSince > 0 and now - s.progressSince <= 1000
         local pathVerified = s.curveVerifiedUntilS >= stopEnd
+        -- Reclassify an insufficient adaptive prefix as OBB uncertainty so the
+        -- existing ungated policy applies the strict 15km/h cap, not the looser arc cap.
+        if s.adaptive and not pathVerified then obbClear = false end
         s.fullGate, s.gateReason = MDADDynamics.fullSpeedGate(
             sensorReady, fresh, brakeLoaded, corridorClear, obbClear,
             fullValid and controlStateOf(s) == "TRACK",
             not s.returnActive and not s.returnHold, aligned, progressHealthy,
-            s.adaptive and pathVerified and s.verifyLineReason == "ok",
+            s.adaptive and pathVerified,
             s.verifyBand and pathVerified, s.verifySweep and pathVerified)
         if s.fullGate then
             -- Keep an already stricter sensor-policy cap; full-path proof must not
@@ -4184,6 +4248,11 @@ local function stepFollow(s, vehicle, playerNum, now)
                             end
                         end
                         if not s.rotProbeClear then coupled = false end
+                    end
+                    if not coupled and targetSpeed > 0 and speedKmh >= 3
+                            and finite(latDev) then
+                        steer = (steer or 0)
+                            - MDADDynamics.crossTrackSteer(latDev, speedKmh)
                     end
                     force = applySteering(s, vehicle, fwd, fx, fy, steer or 0,
                         speedKmh, mult, coupled)

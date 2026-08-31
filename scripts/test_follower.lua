@@ -782,6 +782,11 @@ do
     checkNear(stepSteer, 2.2 * 0.1 + 0.15 * 0.1 * DT + 0.35 * 0.3 * (0.1 / DT), 1e-9,
         "階躍後 steer = P + I + KD*(D_ALPHA*Δerr/dt)")
     checkTrue(stepSteer < rawD, "D 有低通（沒有低通會是 " .. show(rawD) .. "）")
+    local stFlip = F.newState()
+    stFlip.iTerm, stFlip.errPrev, stFlip.dFilt = 0.5, -0.1, 0
+    local flipSteer = F.control(pLine, stFlip, 100, 0, 0.1, 0, DT)
+    checkTrue(flipSteer < 0 and stFlip.iTerm < 0,
+        "誤差換側時立即清掉反向積分，不再抵消回線轉向")
 end
 
 -- =====================================================================

@@ -152,6 +152,28 @@ function D.steeringSpeedCapKmh(kappa, wheelbase, delta0, deltaV, maxSpeedKmh)
     return cap
 end
 
+-- Stanley-style cross-track term in follower steer units. Driver subtracts the
+-- signed correction because positive latDev is right of the committed lane.
+-- Gain and clamp happen to share 0.77; they are independent tuning limits.
+local CROSS_TRACK_GAIN = 0.77
+local CROSS_TRACK_SPEED_FLOOR_MS = 2.5
+local CROSS_TRACK_MAX_STEER = 0.77
+function D.crossTrackSteer(latDev, speedKmh)
+    if not D.finite(latDev) or not D.finite(speedKmh) then return 0 end
+    local speedMs = speedKmh / 3.6
+    if speedMs < 0 then speedMs = -speedMs end
+    if speedMs < CROSS_TRACK_SPEED_FLOOR_MS then
+        speedMs = CROSS_TRACK_SPEED_FLOOR_MS
+    end
+    local correction = CROSS_TRACK_GAIN * latDev / speedMs
+    if correction > CROSS_TRACK_MAX_STEER then
+        correction = CROSS_TRACK_MAX_STEER
+    elseif correction < -CROSS_TRACK_MAX_STEER then
+        correction = -CROSS_TRACK_MAX_STEER
+    end
+    return correction
+end
+
 function D.curveSpeedCapKmh(kappa, aLat, wheelbase, delta0, deltaV, maxSpeedKmh)
     if not (D.finite(maxSpeedKmh) and maxSpeedKmh > 0) then return 0 end
     if not D.finite(kappa) or kappa <= EPS then return maxSpeedKmh end

@@ -33,7 +33,7 @@
 - 全速行駛現在必須同時通過感知就緒與新鮮、完整煞停距離、走廊與車身掃掠、跟線狀態、回線完成、連續對正、進度健康、圓角與路面帶證明；110 公尺不足以安全停下時會依實際可視距離降速
 - 繞行速度改依側移長度、曲率、剩餘淨距與可視距離動態計算；寬裕靜態障礙可更流暢通過，車輛與窄縫仍維持低速
 
-> 技術要點：client-only、預設關；固定 64×2MiB、每 session 一檔；保留天數 1／3／7／14／30（預設 7）；`session-index.txt` 以 raw epoch ms 固定最多 64 列。JSONL 保留既有欄位並 additive tg/rg/eid/ps/ua/ban/ud/rear/rf/rms/ac/pc/fb/fhx/fhy，以及 fullGate/gateReason/cmdV/cmdA/jerkBypass/curveValid/curveKappa/curveHardActive/laneCurveEnvelope/envelopeBuildLat/envelopeBuildCoast/visibilityCap/filletN/filletFallbackN/dodgeDesignSpeed/dodgeBaseCap/dodgeCapPending/dodge caps。Vehicle profile 每 session 冷路徑建一次 32 段 block range-min tree；v4 fillet 的底層圓弧相切，行駛折線採 1m／2° 取樣，world-line proof 不改原 route identity。build `m66-20260831a`。
+> 技術要點：client-only、預設關；固定 64×2MiB、每 session 一檔；保留天數 1／3／7／14／30（預設 7）；`session-index.txt` 以 raw epoch ms 固定最多 64 列。JSONL 保留既有欄位並 additive tg/rg/eid/ps/ua/ban/ud/rear/rf/rms/ac/pc/fb/fhx/fhy，以及 fullGate/gateReason/cmdV/cmdA/jerkBypass/curveValid/curveKappa/curveHardActive/laneCurveEnvelope/envelopeBuildLat/envelopeBuildCoast/visibilityCap/filletN/filletFallbackN/dodgeDesignSpeed/dodgeBaseCap/dodgeCapPending/dodge caps。Vehicle profile 每 session 冷路徑建一次 32 段 block range-min tree；v4 fillet 的底層圓弧相切，行駛折線採 1m／2° 取樣，world-line proof 不改原 route identity。build `m67-20260831a`。
 
 ### 修正
 
@@ -44,6 +44,9 @@
   或已由彎道速度包絡處理的折點，不再把整條前方路線誤判成不安全；實際行駛線完成
   車身掃掠後會恢復檔位、車輛與沙盒允許的速度；原有動態物與軟障礙限速仍保留，
   並在偵測當幀立即生效，不會從高速慢慢滑降
+- 修正長車在看似淨空的直路上逐漸偏向路肩、撞到路緣物後誤進脫困，以及安全證明因
+  煞停距離外的未載入區域或道路帶邊界而長時間鎖在低速；現在會提早消除反向積分、
+  依橫向偏離補足回線轉向，並只要求目前煞停視界內的道路帶、載入範圍與車身掃掠證明
 - 修正自動駕駛進行中無法複製最新紀錄路徑；現在不必先停止自動駕駛
 - 修正長車或車身已有偏角時，前方規劃線看似淨空卻仍由目前車身擦撞障礙；現在每輪感知完成都會以車身實際中心與尺寸做獨立碰撞守門
 - 修正卡住後可能反覆倒退撞回同一處、帶著倒車速度立刻重新向前，以及後方未知或被車牆擋住仍嘗試倒車；現在會先檢查後方、倒車期間持續重查，成功後先停穩，並保留同一目的地的失敗路線記憶

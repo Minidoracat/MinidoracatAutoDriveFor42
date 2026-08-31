@@ -850,6 +850,9 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         if not isFinite(dFilt) then dFilt = 0 end
         local iTerm = state.iTerm
         if not isFinite(iTerm) then iTerm = 0 end
+        -- Once the error changes side, the accumulated bias now pushes away from
+        -- the path. Drop it immediately instead of spending seconds unwinding.
+        if iTerm * err < 0 then iTerm = 0 end
 
         dFilt = dFilt + D_ALPHA * ((err - ePrev) / dt - dFilt)
 
