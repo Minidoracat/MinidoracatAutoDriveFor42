@@ -3238,7 +3238,7 @@ local function stepFollow(s, vehicle, playerNum, now)
     s.lastCapReason = nil
     s.lastHeadingCap = nil
     s.lastDcap = nil
-    s.lastSensorCap = nil
+    s.lastSensorCap, s.lastSensorReason = nil, nil
     s.diagExpL = nil
     s.diagLatDev = nil
     s.forceBrakeThis = false
@@ -3409,38 +3409,35 @@ local function stepFollow(s, vehicle, playerNum, now)
                     local lineN, lineS0, lineReason, lastIdx = MDADFollower.buildLaneLine(
                         s.profile, s.lastSNow, proofEnd, lane,
                         s.verifyX, s.verifyY, segI, s.verifySeg)
-                    s.verifyLineReason = lineReason
                     local rawPts, rawWidths = s.route.pts, s.route.segWidth
                     local bandOk = lineN >= 2 and s.navVersion >= 4
                         and s.profile.filletBandValid == true
                         and type(rawPts) == "table" and type(rawWidths) == "table"
-                    local arcOk = lineN >= 2
-                    local checkN = lineN >= 2 and lineN or 0
+                    local checkN = bandOk and lineN or 0
                     for k = 1, checkN do
                         local si = s.verifySeg[k]
-                        if not finite(si) then bandOk, arcOk = false, false; break end
-                        if bandOk then
-                            local sa, sb =
-                                s.profile.segSourceA[si], s.profile.segSourceB[si]
-                            local wx, wy = s.verifyX[k], s.verifyY[k]
-                            if not MDADDynamics.rawBandContains(
-                                    rawPts, rawWidths, sa,
-                                    s.vehicleProfile.halfW, wx, wy)
-                                    and not MDADDynamics.rawBandContains(
-                                        rawPts, rawWidths, sb,
-                                        s.vehicleProfile.halfW, wx, wy) then
-                                bandOk = false
-                                break
-                            end
+                        if not finite(si) then
+                            lineReason, bandOk = "capacity", false
+                            break
+                        end
+                        local sa, sb =
+                            s.profile.segSourceA[si], s.profile.segSourceB[si]
+                        local wx, wy = s.verifyX[k], s.verifyY[k]
+                        if not MDADDynamics.rawBandContains(
+                                rawPts, rawWidths, sa,
+                                s.vehicleProfile.halfW, wx, wy)
+                                and not MDADDynamics.rawBandContains(
+                                    rawPts, rawWidths, sb,
+                                    s.vehicleProfile.halfW, wx, wy) then
+                            bandOk = false
+                            break
                         end
                     end
                     local rangeN = lineN >= 2 and finite(lastIdx)
                         and lastIdx - segI + 1 or 0
                     if rangeN < 1 or rangeN > MDADFollower.LANE_MAX then
-                        lineReason, bandOk, arcOk = "capacity", false, false
+                        lineReason, bandOk = "capacity", false
                     else
-                        arcOk = not MDADFollower.rangeHasFallback(
-                            s.profile, segI, lastIdx)
                         -- Every driven profile chord is split at its midpoint.
                         -- Each half must share one convex eroded source capsule;
                         -- endpoint-only membership is insufficient for a non-convex union.
@@ -3463,6 +3460,9 @@ local function stepFollow(s, vehicle, playerNum, now)
                     local minBrake, minLat, minCoast =
                         s.horizonMinBrake, s.horizonMinLat, s.horizonMinCoast
                     local kappa, curveCap = 0, s.vehicleProfile.maxSpeed
+                    -- SEG_FALLBACK already carries its conservative corner speed in
+                    -- profileEnvelope. The sampled lane envelope, raw band and OBB
+                    -- sweep still prove the actual path; the marker alone is not a veto.
                     local envelopeOk = false
                     if lineN >= 2 and finite(minLat) and minLat >= 0
                             and finite(minCoast) and minCoast >= 0 then
@@ -3500,16 +3500,15 @@ local function stepFollow(s, vehicle, playerNum, now)
                         and not (s.sensor.unloaded
                             and (not finite(s.sensor.unloadedS) or s.sensor.unloadedS <= proofEnd))
                     local sweepOk = false
-                    if loaded and bandOk and arcOk and envelopeOk
+                    if loaded and bandOk and envelopeOk
                             and finite(curveCap) then
                         sweepOk = sweepLine(
                             s, s.verifyX, s.verifyY, lineN, lineS0, proofEnd,
                             s.lastSNow, s.lastSNow, proofEnd, proofEnd,
                             lane, "profile", s.sweepBase)
                     end
-                    s.verifyBand, s.verifySweep = bandOk and arcOk, sweepOk == true
+                    s.verifyBand, s.verifySweep = bandOk, sweepOk == true
                     if lineReason ~= "ok" then s.verifyLineReason = lineReason
-                    elseif not arcOk then s.verifyLineReason = "fallback"
                     elseif not envelopeOk then s.verifyLineReason = "dynamics"
                     elseif not bandOk then s.verifyLineReason = "band"
                     elseif not loaded then s.verifyLineReason = "unloaded"
@@ -3609,7 +3608,9 @@ local function stepFollow(s, vehicle, playerNum, now)
                 cap = TUNE.SOFT_CAP
                 capReason = "soft"
             end
-            if cap >= 0 then s.lastSensorCap = cap end
+            if cap >= 0 then
+                s.lastSensorCap, s.lastSensorReason = cap, capReason
+            end
             if cap >= 0 and targetSpeed > cap then
                 targetSpeed = cap
                 s.lastCapReason = capReason
@@ -3779,9 +3780,10 @@ local function stepFollow(s, vehicle, playerNum, now)
             if stopEnd > s.profile.length then stopEnd = s.profile.length end
             brakeLoaded = finite(minBrakeVisible) and minBrakeVisible > 0
                 and visibleEnd >= stopEnd
-            corridorClear = s.sensor.hardN == 0 and not s.sensor.movingVeh
-                and (s.sensor.zombieN or 0) == 0 and (s.sensor.corpseN or 0) == 0
-                and (s.sensor.softN or 0) == 0 and not s.blocked and not s.dodging
+            -- hardN spans the planner's full +/-7m search band, not the driven lane.
+            -- verifySweep owns hard-obstacle safety; the sensor cap stack above owns
+            -- moving vehicles, zombies, corpses and soft objects.
+            corridorClear = not s.blocked and not s.dodging
             obbClear = (not s.adaptive or s.verifySweep) and not s.currentBlocked
         end
         if not finite(visibilityCap) or visibilityCap < 0 then
@@ -3817,7 +3819,11 @@ local function stepFollow(s, vehicle, playerNum, now)
             s.adaptive and pathVerified and s.verifyLineReason == "ok",
             s.verifyBand and pathVerified, s.verifySweep and pathVerified)
         if s.fullGate then
-            targetSpeed, s.lastCapReason = fullTarget, nil
+            -- Keep an already stricter sensor-policy cap; full-path proof must not
+            -- overwrite moving/zombie/corpse/soft limits selected above.
+            if targetSpeed >= fullTarget then
+                targetSpeed, s.lastCapReason = fullTarget, nil
+            end
         else
             local alignCap = MDADDynamics.alignmentCapKmh(
                 fullTarget, headingError, latDev, latTol, aligned)
@@ -4019,6 +4025,10 @@ local function stepFollow(s, vehicle, playerNum, now)
         if not s.fullGate then
             hardCapV, hardClampReason, okHard = MDADDynamics.lowerHardCap(
                 hardCapV, hardClampReason, targetSpeed / 3.6, s.gateReason)
+        elseif finite(s.lastSensorCap) then
+            hardCapV, hardClampReason, okHard = MDADDynamics.lowerHardCap(
+                hardCapV, hardClampReason,
+                s.lastSensorCap / 3.6, s.lastSensorReason)
         end
         if s.followHold then
             hardCapV, hardClampReason, okHard =

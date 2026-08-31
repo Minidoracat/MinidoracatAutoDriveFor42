@@ -1490,7 +1490,6 @@ do
     end
     local tiny = F.begin(mkRoute(tinyPts), 60, 2)
     tiny.segBrake[2500], tiny.segLat[2600], tiny.segCoast[2700] = 0.7, 0.6, 0.1
-    tiny.segKind[2800] = MDADDynamics.SEG_FALLBACK
     while not F.stepBuild(tiny, 4096) do end
     local rawS, sReads = tiny.s, 0
     tiny.s = setmetatable({}, {
@@ -1501,8 +1500,6 @@ do
     checkNear(tl, 0.6, 1e-12, "tiny-segment RMQ returns lateral minimum")
     checkNear(tc, 0.1, 1e-12, "tiny-segment RMQ returns coast minimum")
     checkTrue(sReads < 80, "tiny-segment query is O(log n), profile.s reads=" .. sReads)
-    checkTrue(F.rangeHasFallback(tiny, 2000, 3000),
-        "build-time range metadata finds fallback without segment scan")
     checkNear(minCoast, 0.2, 1e-12, "future horizon takes minimum segment coast")
     local tinyX, tinyY, tinySeg = {}, {}, {}
     sReads = 0

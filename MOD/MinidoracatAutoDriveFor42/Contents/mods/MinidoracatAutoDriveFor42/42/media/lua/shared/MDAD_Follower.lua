@@ -437,7 +437,7 @@ function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile)
         brakeV = {},
         v = {},
         rangeBase = rangeBase, rangeBlockCount = rangeBlockCount,
-        rangeBrake = {}, rangeLat = {}, rangeCoast = {}, rangeFallback = {},
+        rangeBrake = {}, rangeLat = {}, rangeCoast = {},
         rangeReady = false,
         length = 0,
         phase = "geometry",
@@ -447,7 +447,7 @@ function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile)
 end
 
 -- 增量建表。每次呼叫最多做 budget 個 ops；相位切換本身不算運算。
--- 最後以每 32 段一葉的 block tree 建 range minima／fallback metadata。
+-- 最後以每 32 段一葉的 block tree 建 range minima。
 function MDADFollower.stepBuild(profile, budget)
     if type(profile) ~= "table" then return false end
     if profile.ready == true then return true end
@@ -516,8 +516,6 @@ function MDADFollower.stepBuild(profile, budget)
                     profile.rangeBrake[node] = profile.segBrake[i]
                     profile.rangeLat[node] = profile.segLat[i]
                     profile.rangeCoast[node] = profile.segCoast[i]
-                    profile.rangeFallback[node] =
-                        profile.segKind[i] == MDADDynamics.SEG_FALLBACK and 1 or 0
                 else
                     if profile.segBrake[i] < profile.rangeBrake[node] then
                         profile.rangeBrake[node] = profile.segBrake[i]
@@ -527,9 +525,6 @@ function MDADFollower.stepBuild(profile, budget)
                     end
                     if profile.segCoast[i] < profile.rangeCoast[node] then
                         profile.rangeCoast[node] = profile.segCoast[i]
-                    end
-                    if profile.segKind[i] == MDADDynamics.SEG_FALLBACK then
-                        profile.rangeFallback[node] = 1
                     end
                 end
                 profile.cursor, ops = i + 1, ops + 1
@@ -541,8 +536,7 @@ function MDADFollower.stepBuild(profile, budget)
             else
                 local node = base + i - 1
                 profile.rangeBrake[node], profile.rangeLat[node],
-                    profile.rangeCoast[node], profile.rangeFallback[node] =
-                    RANGE_INF, RANGE_INF, RANGE_INF, 0
+                    profile.rangeCoast[node] = RANGE_INF, RANGE_INF, RANGE_INF
                 profile.cursor, ops = i + 1, ops + 1
             end
         elseif phase == "range-tree" then
@@ -558,8 +552,6 @@ function MDADFollower.stepBuild(profile, budget)
                 profile.rangeBrake[i] = lb < rb and lb or rb
                 profile.rangeLat[i] = ll < rl and ll or rl
                 profile.rangeCoast[i] = lc < rc and lc or rc
-                local lf, rf = profile.rangeFallback[left], profile.rangeFallback[right]
-                profile.rangeFallback[i] = lf > rf and lf or rf
                 profile.cursor, ops = i - 1, ops + 1
             end
         else
@@ -1153,14 +1145,13 @@ end
 -- Build-time block tree query: at most 62 edge segments plus O(log blocks),
 -- allocation-free and independent of total tiny-segment count.
 local function rangeQuery(profile, first, last)
-    local brake, lat, coast, fallback = RANGE_INF, RANGE_INF, RANGE_INF, 0
+    local brake, lat, coast = RANGE_INF, RANGE_INF, RANGE_INF
     while first <= last and (first - 1) % RANGE_BLOCK ~= 0 do
         local b, l, c = profile.segBrake[first],
             profile.segLat[first], profile.segCoast[first]
         if b < brake then brake = b end
         if l < lat then lat = l end
         if c < coast then coast = c end
-        if profile.segKind[first] == MDADDynamics.SEG_FALLBACK then fallback = 1 end
         first = first + 1
     end
     while first <= last and last % RANGE_BLOCK ~= 0 do
@@ -1169,7 +1160,6 @@ local function rangeQuery(profile, first, last)
         if b < brake then brake = b end
         if l < lat then lat = l end
         if c < coast then coast = c end
-        if profile.segKind[last] == MDADDynamics.SEG_FALLBACK then fallback = 1 end
         last = last - 1
     end
     if first <= last then
@@ -1184,9 +1174,6 @@ local function rangeQuery(profile, first, last)
                 if b < brake then brake = b end
                 if l < lat then lat = l end
                 if c < coast then coast = c end
-                if profile.rangeFallback[left] > fallback then
-                    fallback = profile.rangeFallback[left]
-                end
                 left = left + 1
             end
             if right % 2 == 0 then
@@ -1195,16 +1182,13 @@ local function rangeQuery(profile, first, last)
                 if b < brake then brake = b end
                 if l < lat then lat = l end
                 if c < coast then coast = c end
-                if profile.rangeFallback[right] > fallback then
-                    fallback = profile.rangeFallback[right]
-                end
                 right = right - 1
             end
             left = (left - left % 2) / 2
             right = (right - right % 2) / 2
         end
     end
-    return brake, lat, coast, fallback
+    return brake, lat, coast
 end
 
 -- Bounded future dynamics query. Segment indices are found by hint-bounded
@@ -1234,16 +1218,6 @@ function MDADFollower.minDynamics(profile, s0, s1, startIdx)
     local last = lo
     local brake, lat, coast = rangeQuery(profile, first, last)
     return brake, lat, coast, last + 1
-end
-
-function MDADFollower.rangeHasFallback(profile, first, last)
-    if type(profile) ~= "table" or profile.ready ~= true
-            or profile.rangeReady ~= true or not isFinite(first)
-            or not isFinite(last) then return true end
-    first, last = first - first % 1, last - last % 1
-    if first < 1 or last < first or last > profile.n - 1 then return true end
-    local _, _, _, fallback = rangeQuery(profile, first, last)
-    return fallback > 0
 end
 
 function MDADFollower.setRuntimeLimits(state, accel, brake, lat, coast)

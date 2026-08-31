@@ -7730,6 +7730,107 @@ local function scenarioPhaseE()
     setHeading(hotVeh, 0)
     drive.scanRound()
     checkEq(type(captured), "table", "completed sensor round exposes active session to overlay")
+    do
+        -- hardN covers the full planner search band, while SEG_FALLBACK already owns
+        -- a conservative curve envelope. Neither may force 15km/h when the sampled
+        -- driven lane itself passes raw-band and OBB proof.
+        local fallbackSeg = captured.fstate.idx + 6
+        checkTrue(fallbackSeg < captured.profile.n,
+            "regression fallback segment fits the straight v4 fixture")
+        captured.profile.segKind[fallbackSeg] = MDADDynamics.SEG_FALLBACK
+        local oldCorpsePref = MDAD.Drive.getSlowPref(0, "corpse")
+        local oldZombiePref = MDAD.Drive.getSlowPref(0, "zombie")
+
+        local function armFullGateFrame()
+            captured.alignSince = nowMs - 1000
+            captured.progressState, captured.progressSince = "watch", nowMs
+            captured.cmdV, captured.cmdA, captured.cmdInitialized = 40 / 3.6, 0, true
+            driveReset(hotVeh)
+        end
+        local function assertSensorHardCap(expected, reason, label)
+            armFullGateFrame()
+            driveTick(dp, hotVeh)
+            checkTrue(captured.fullGate, label .. " keeps the static fullGate open")
+            checkEq(captured.gateReason, "clear", label .. " static proof remains clear")
+            checkEq(captured.lastSensorCap, expected, label .. " publishes the sensor cap")
+            checkEq(captured.lastCapReason, reason, label .. " keeps the active cap reason")
+            checkTrue(captured.cmdV * 3.6 <= expected + 1e-9,
+                label .. " hard-clamps cmdV on the first frame")
+            checkTrue(drive.calls.maxRegSpeed > 0
+                    and drive.calls.maxRegSpeed <= expected,
+                label .. " hard-clamps regulator speed on the first frame")
+        end
+
+        MDAD.Drive.setSlowPref(0, "corpse", false)
+        drive.putTree(20, 6, "vegetation_trees_01_5")
+        drive.putCorpse(25, 0)
+        drive.scanRound()
+        checkTrue(captured.sensor.hardN > 0,
+            "planner search band sees the roadside hard point")
+        checkTrue(captured.sensor.corpseN > 0,
+            "sensor sees the opted-out corpse inside its slowdown band")
+        local lastProofSeg = captured.verifySeg[captured.verifyLineN]
+        checkTrue(type(lastProofSeg) == "number" and fallbackSeg <= lastProofSeg,
+            "fallback metadata lies inside the sampled proof horizon")
+        checkEq(captured.verifyLineReason, "ok",
+            "fallback metadata keeps the sampled lane proof valid")
+        checkTrue(captured.verifySweep,
+            "roadside hard point remains outside the driven-body OBB sweep")
+        armFullGateFrame()
+        driveTick(dp, hotVeh)
+        checkTrue(captured.fullGate,
+            "clear driven lane opens fullGate despite search-band clutter")
+        checkEq(captured.gateReason, "clear", "full-speed gate reports clear")
+        checkEq(captured.lastSensorCap, nil,
+            "disabled corpse preference does not synthesize a sensor cap")
+        checkEq(drive.calls.maxRegSpeed, 40,
+            "clear driven lane keeps the sandbox/gear/vehicle envelope instead of 15km/h")
+        drive.clearCell(20, 6)
+        drive.clearCell(25, 0)
+        MDAD.Drive.setSlowPref(0, "corpse", oldCorpsePref)
+
+        drive.putVehicle(15, 0, false)
+        drive.scanRound()
+        local vehAheadS = captured.sensor.vehAheadS
+        checkTrue(type(vehAheadS) == "number",
+            "moving vehicle publishes an ahead anchor")
+        local movingGap = type(vehAheadS) == "number"
+            and vehAheadS - captured.lastSNow or -1
+        checkTrue(captured.sensor.movingVeh and movingGap >= 10 and movingGap < 20,
+            "moving fixture enters the 8km/h mid-gap tier")
+        assertSensorHardCap(8, "moving", "moving mid-gap")
+        drive.clearVehicle(15, 0)
+
+        drive.putSpriteObject(18, 0, "fixtures_soft_regression", false, true, false)
+        drive.scanRound()
+        checkTrue(captured.sensor.softN > 0, "soft fixture enters the slowdown band")
+        assertSensorHardCap(20, "soft", "soft obstacle")
+        drive.clearCell(18, 0)
+
+        MDAD.Drive.setSlowPref(0, "zombie", true)
+        drive.putMoving(18, 0, { _class = "IsoZombie" })
+        drive.scanRound()
+        checkTrue(captured.sensor.zombieN > 0, "zombie fixture enters the slowdown band")
+        assertSensorHardCap(25, "zombie", "single zombie")
+        drive.clearCell(18, 0)
+        MDAD.Drive.setSlowPref(0, "zombie", oldZombiePref)
+
+        MDAD.Drive.setSlowPref(0, "corpse", true)
+        drive.putCorpse(20, 0)
+        drive.scanRound()
+        checkTrue(captured.sensor.corpseN > 0, "corpse fixture enters the slowdown band")
+        assertSensorHardCap(20, "corpse", "corpse slowdown")
+        drive.clearCell(20, 0)
+        MDAD.Drive.setSlowPref(0, "corpse", oldCorpsePref)
+    end
+    MDAD.Drive.stop(0, nil)
+    hotVeh._x, hotVeh._y, hotVeh._speed = 0, 0, 20
+    setHeading(hotVeh, 0)
+    driveReset(hotVeh)
+    checkTrue(MDAD.Drive.start(dp), "Phase E mass session re-arms after gate regression")
+    for _ = 1, 10 do driveTick(dp, hotVeh) end
+    drive.scanRound()
+    checkEq(type(captured), "table", "re-armed mass session exposes its completed snapshot")
     local cachedMass = captured.runtimeMass
     local cachedAccel = captured.profile.segAccel[1]
     hotVeh._mass = cachedMass + 0.5
