@@ -18,7 +18,7 @@ MDAD.RECIPE_AUTO = "CraftAutopilotModule"
 -- build 印記：載入時印進 console（不受 getDebug 管）——實機回報「行為沒變」時
 -- 第一件事就是對這行，判定使用者跑的是不是新版（2026-08-28 三場撞樹回報
 -- 無法從 log 判定 code 版本的教訓）。每次行為修正遞增尾碼。
-MDAD.BUILD = "m67-20260831a"
+MDAD.BUILD = "m68-20260831a"
 print("[MinidoracatAutoDrive] build " .. MDAD.BUILD)
 
 -- client → server 的安裝／卸載請求（server/MDAD_Server.lua 收）與失敗回報

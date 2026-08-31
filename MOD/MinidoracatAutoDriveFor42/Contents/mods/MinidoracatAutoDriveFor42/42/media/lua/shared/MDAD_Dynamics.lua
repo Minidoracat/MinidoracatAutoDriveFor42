@@ -174,6 +174,21 @@ function D.crossTrackSteer(latDev, speedKmh)
     return correction
 end
 
+local ASSIST_MAX_RATIO = 0.15
+local ASSIST_GAP_MIN_KMH = 3
+local ASSIST_GAP_FULL_KMH = 10
+local ASSIST_SPEED_MAX_KMH = 25
+function D.longitudinalAssistRatio(speedKmh, targetKmh)
+    if not D.finite(speedKmh) or not D.finite(targetKmh)
+            or speedKmh < 0 or targetKmh <= speedKmh + ASSIST_GAP_MIN_KMH
+            or speedKmh >= ASSIST_SPEED_MAX_KMH then return 0 end
+    local ratio = (targetKmh - speedKmh - ASSIST_GAP_MIN_KMH)
+        / (ASSIST_GAP_FULL_KMH - ASSIST_GAP_MIN_KMH)
+    if ratio > 1 then ratio = 1 end
+    return ASSIST_MAX_RATIO * ratio
+end
+
+
 function D.curveSpeedCapKmh(kappa, aLat, wheelbase, delta0, deltaV, maxSpeedKmh)
     if not (D.finite(maxSpeedKmh) and maxSpeedKmh > 0) then return 0 end
     if not D.finite(kappa) or kappa <= EPS then return maxSpeedKmh end
@@ -392,6 +407,16 @@ function D.polylineKappaMax(xs, ys, n)
     end
     return best
 end
+-- 世界掃掠的有效碰撞半徑：整格障礙（r>=0.5）的圓形近似比 1x1 方格角落
+-- 多出量化肥邊，規劃 pad 夠厚才補償；扣除後永不低於物理 pad 包絡。
+function D.sweepRadius(r, pointPad, physPad, comp)
+    local rr = r + pointPad
+    if r >= 0.5 and pointPad > physPad + comp then
+        rr = rr - comp
+    end
+    return rr
+end
+
 
 function D.clearanceCapKmh(minClearance, errorReserve, tau, aLat, sinHeading)
     if not D.finite(minClearance) or not D.finite(aLat) or aLat <= 0 then return 0 end

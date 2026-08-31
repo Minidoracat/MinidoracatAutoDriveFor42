@@ -188,6 +188,10 @@ local SQUEEZE_CAP = 10         -- 爬行檔速度上限（km/h；2026-08-29 使�
 local SWEEP_BASE = 1.3         -- legacy fallback；adaptive＝needHalf-0.1
 local SWEEP_PHYS_PAD = 0.05    -- baseline 段（a 之前＝路線本身）只驗物理必撞：車身
                                -- OBB 之外只留這麼多餘裕，不套規劃檔位的淨距
+TUNE.SWEEP_QUANT_COMP = 0.1   -- 整格障礙圓近似比 1x1 方格角落多出的量化肥邊
+-- 幾何投影誤差下限（2026-08-28 對抗審定案）；低於此縫寬必須拒絕而非減速掩蓋。
+TUNE.DODGE_CLEARANCE_RESERVE = 0.4
+TUNE.DODGE_OV_SPAN = 93       -- OV_MAX=96，保留起點／d+1／防呆三格
 local CORNER_NEAR = 8          -- sweep 失敗點離折點多近算「折點衝突」（BLOCKED_CORNER 判定）
 local CORNER_DETOUR_MS = 2500  -- BLOCKED_CORNER 的改道等待（近距重枚舉也失敗才走）
 local CORNER_RETRY_DIST = 3    -- corner latch 撤銷距離：漸進接近讓車前進這麼多＝
@@ -219,6 +223,8 @@ TUNE.ROTATE_PROBE_MS = 500
 local MASS_REFRESH_MS = 1000   -- BaseVehicle.getMass cold refresh；熱幀只做時戳比較
 local MASS_VALID_LO, MASS_VALID_HI = 200, 5000 -- getMass 可信區間（kg）
 local MASS_FALLBACK = 1200     -- 區間外／讀取失敗時沿用的標定車質量（kg）
+TUNE.ASSIST_MASS_MIN = 1300
+TUNE.ASSIST_MAX_ERR_RAD = 20 * math.pi / 180
 -- 高速誤差護欄：>70 的目標速度按航向誤差線性折返回 70（誤差 0＝滿速、
 -- ≥10°＝70）。轉向標定 ≤70；沙盒 ≤70 時零作用。
 local HS_BASE_KMH = 70
@@ -846,7 +852,7 @@ local function startSession(playerObj, playerNum)
         brakeConfidence = 0, brakeLower = 0,
         yawMean = 0, yawDev = 0, yawTime = 0,
         yawConfidence = 0, yawLower = 0,
-        forceBrakeThis = false,
+        forceBrakeThis = false, lastAssistForce = 0,
         forceBrakeUntil = 0,
         ewmaSuppressUntil = 0,
         lastLatDev = 0, lastHeadingError = 0,
@@ -1055,62 +1061,72 @@ end
 -- 每幀控制
 --------------------------------------------------------------------------------
 
--- 把 follower 的 steer 翻成一次 addImpulse，回傳實際施出去的力（死區＝0，給遙測用）。
--- fwd 進來時已經是取好的池向量（同時是 forward 的容器與等一下的 relPos 容器），
--- 本函式不 release——由呼叫端統一收尾。
---
--- coupled（調頭模式，呼叫端在 |誤差| > 90° 時給 true）：衝量與施力主臂**同步**乘上
--- 幀奇偶——分量展開後 q² 相消，偏航力矩恆定同向，但側向中心力逐幀反向抵消＝
--- 原地旋轉不橫滑。橫推模式（跟線）的恆定側推在調頭時是災難：0 km/h 飽和側推
--- 24.7k 衝量把整台車推橫滑 24 km/h、滑出路外撞東西（2026-08-28 實機 telemetry）。
--- 跟線的小誤差修正仍用橫推：持續側推正是 PZ 輪胎模型下唯一夠力的過彎來源。
-local function applySteering(s, vehicle, fwd, fx, fy, steer, speedKmh, mult, coupled)
-    -- follower 的 steer 已飽和在 ±5；防呆再夾一次，死區直接用原值（±0.1）
-    if steer > 5 then steer = 5 end
-    if steer < -5 then steer = -5 end
-    if steer < STEER_DEADZONE and steer > -STEER_DEADZONE then return 0 end
+-- Compose lateral steering and bounded forward assist into the one BaseVehicle
+-- impulse slot. A forward component uses the body centerline, so it adds no yaw.
+local function applySteering(
+        s, vehicle, fwd, fx, fy, steer, speedKmh, mult, coupled, assistForce)
+    if steer > 5 then steer = 5 elseif steer < -5 then steer = -5 end
+    if steer < STEER_DEADZONE and steer > -STEER_DEADZONE then steer = 0 end
+    if type(assistForce) ~= "number" or assistForce * 0 ~= 0
+            or assistForce < 0 then assistForce = 0 end
+    if coupled then assistForce = 0 end
+    if steer == 0 and assistForce == 0 then return 0, 0 end
 
-    local px, py = -fy, fx -- 前向逆時針轉 90°（CCW 側向）
-    -- 量級採計速度：取 |speedKmh| 並封頂，倒車（速度為負）與超速都不會發散
+    local px, py = -fy, fx
     local av = speedKmh
     if av < 0 then av = -av end
     if av > SPEED_CAP_KMH then av = SPEED_CAP_KMH end
-    -- Runtime mass is read on the session cold path and at most once per second
-    -- (BaseVehicle.getMass source: BaseVehicle.java:8963-8970), never per frame.
     local mass = s.runtimeMass
-    if type(mass) ~= "number" or mass * 0 ~= 0 or mass < 1 then mass = MASS_FALLBACK end
+    if type(mass) ~= "number" or mass * 0 ~= 0 or mass < 1 then
+        mass = MASS_FALLBACK
+    end
     local arm = s.rearArm
     if type(arm) ~= "number" or arm * 0 ~= 0 or arm <= 0 then arm = REAR_ARM end
-    -- force 帶號：|steer| 進量級、sign(steer)*STEER_SIGN 進方向，合起來就是
-    -- steer * STEER_SIGN * base（不必真的拆開算）
-    local force = steer * STEER_SIGN * STEER_STRENGTH
-        * (MASS_K * mass * av * av + MASS_BASE * mass) * IMPULSE_SCALE * (mult / MULT_NORM)
+    local force = 0
+    if steer ~= 0 then
+        force = steer * STEER_SIGN * STEER_STRENGTH
+            * (MASS_K * mass * av * av + MASS_BASE * mass)
+            * IMPULSE_SCALE * (mult / MULT_NORM)
+    end
 
     local parity = s.parity
     s.parity = -parity
-
     local impulse = BaseVehicle.allocVector3f()
     if coupled then
-        -- 調頭：impulse 與主臂同乘 parity（torque = relZ*impX - relX*impZ 的展開
-        -- 只剩 q²＝1 的項 → 力矩恆定；中心力 q*F*p 幀間抵消）。jitter 項固定不翻，
-        -- 它對力矩的貢獻本來就是零（與 impulse 平行）。力量另乘 ROTATE_FORCE_SCALE：
-        -- 跟線量級是為對抗高速自回正標定的，原地調頭用全額＝快速旋轉。
         local rf = force * ROTATE_FORCE_SCALE
-        -- 純觀測：這一幀真的走了耦力（呼叫端的 coupled 可能被車周探測否決成
-        -- 橫推，遙測要記「實際施力模式」而不是「原本想用哪種」）
         s.lastCoupled = true
-        force = rf -- 遙測回傳實際施出去的力
+        force = rf
         impulse:set(parity * rf * px, 0, parity * rf * py)
         fwd:set(parity * (-arm) * fx + LATERAL_JITTER * px, 0,
             parity * (-arm) * fy + LATERAL_JITTER * py)
     else
-        impulse:set(force * px, 0, force * py)
-        fwd:set(-arm * fx + parity * LATERAL_JITTER * px, 0,
-            -arm * fy + parity * LATERAL_JITTER * py)
+        impulse:set(force * px + assistForce * fx, 0,
+            force * py + assistForce * fy)
+        if assistForce > 0 then
+            -- Forward impulse at the center when steering is idle; otherwise use
+            -- the rear centerline so lateral force retains yaw without assist yaw.
+            if force == 0 then
+                fwd:set(0, 0, 0)
+            else
+                fwd:set(-arm * fx, 0, -arm * fy)
+            end
+        else
+            fwd:set(-arm * fx + parity * LATERAL_JITTER * px, 0,
+                -arm * fy + parity * LATERAL_JITTER * py)
+        end
     end
     vehicle:addImpulse(impulse, fwd)
     BaseVehicle.releaseVector3f(impulse)
-    return force
+    return force, assistForce
+end
+
+local function longitudinalAssistForce(s, speedKmh, targetSpeed, mult)
+    local mass = s.runtimeMass
+    if type(mass) ~= "number" or mass * 0 ~= 0
+            or mass < TUNE.ASSIST_MASS_MIN then return 0 end
+    local ratio = MDADDynamics.longitudinalAssistRatio(speedKmh, targetSpeed)
+    if ratio <= 0 then return 0 end
+    return ratio * mass * IMPULSE_SCALE * (mult / MULT_NORM)
 end
 
 local function commandForceBrake(s, vehicle, now)
@@ -1492,6 +1508,7 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     phys.surfaceMismatch = s.surfaceMismatch
     phys.tractionKey = s.tractionKey
     phys.runtimeMass = s.runtimeMass
+    phys.assistForce = s.lastAssistForce
     phys.priorAccel, phys.priorBrake, phys.priorLat =
         s.priorAccel, s.priorBrake, s.priorLat
     phys.priorCoast = s.priorCoast
@@ -2000,7 +2017,8 @@ local function sweepClear(s, profile, a, b, c, d, offL, tag, needBase)
                 local r = hr[i]
                 local d2 = obbDistanceSq(
                     bodyX, bodyY, poseFx, poseFy, halfW, halfL, ox, hy[i])
-                local rr = r + pointPad
+                local rr = MDADDynamics.sweepRadius(
+                    r, pointPad, SWEEP_PHYS_PAD, TUNE.SWEEP_QUANT_COMP)
                 if d2 == nil or d2 <= rr * rr then
                     local clearance = d2 and (sqrt(d2) - rr) or -99
                     local phase
@@ -2095,7 +2113,8 @@ local function sweepLine(s, lx, ly, ln, lS0, lS1,
                 local r = hr[i]
                 local d2 = obbDistanceSq(
                     bodyX, bodyY, fx, fy, halfW, halfL, ox, hy[i])
-                local rr = r + pointPad
+                local rr = MDADDynamics.sweepRadius(
+                    r, pointPad, SWEEP_PHYS_PAD, TUNE.SWEEP_QUANT_COMP)
                 if d2 == nil or d2 <= rr * rr then
                     local clearance = d2 and (sqrt(d2) - rr) or -99
                     local phase
@@ -2675,19 +2694,37 @@ local function shapeProfile(s, profile, a, b, c, d, offL, baseL)
     local minimum = MDADDynamics.shiftLength(
         dl, 0, aLat, crawlK, vp.halfL, MDADDynamics.LATERAL_JERK_MAX)
     local entryAvail, exitAvail = b - minA, profile.length - c
+    -- 空間延長不得把已避開折點的轉場再拉回跨越折點：entry 只能延到折點後
+    -- 0.5m，exit 轉場整段停在下一折點前 2m（窗寬涵蓋整個可延長範圍，
+    -- 也擋住原 a..d+6 窗外的新折點）。放不進 minimum 就維持 blocked。
+    local entryPeak = turnPeakS(profile, minA, b)
+    if entryPeak and b > entryPeak then
+        local room = b - (entryPeak + 0.5)
+        if room < entryAvail then entryAvail = room end
+    end
+    local exitPeak = turnPeakS(
+        profile, c, s.lastSNow + TUNE.DODGE_OV_SPAN + 6)
+    if exitPeak and exitPeak > c then
+        local room = exitPeak - 2 - c
+        if room < exitAvail then exitAvail = room end
+    end
     s.dodgeShiftLength = required
     s.dodgeSpaceCap = profile.maxSpeed
     if required <= 0 or minimum <= 0 or entryAvail <= 0 or exitAvail <= 0 then
         s.dodgeSpaceCap = 0
         return a, b, c, d, false
     end
-    local entryLen, exitLen = b - a, d - c
-    if entryLen < minimum then entryLen = minimum end
-    if exitLen < minimum then exitLen = minimum end
-    if entryLen > required then entryLen = required end
-    if exitLen > required then exitLen = required end
-    if entryLen > entryAvail then entryLen = entryAvail end
-    if exitLen > exitAvail then exitLen = exitAvail end
+    if required < minimum then required = minimum end
+    local exitRoom = s.lastSNow + TUNE.DODGE_OV_SPAN - c
+    -- 最小（crawl 速）側移長度必須放得進實際空間，否則維持 blocked 停等；
+    -- 只有「超出最小值的延長」允許被可用空間截短。
+    if minimum > entryAvail or minimum > exitAvail or minimum > exitRoom then
+        s.dodgeSpaceCap = 0
+        return a, b, c, d, false
+    end
+    local entryLen = required > entryAvail and entryAvail or required
+    local exitLen = required > exitAvail and exitAvail or required
+    if exitLen > exitRoom then exitLen = exitRoom end
     local entryCap = MDADDynamics.shiftSpaceSpeedCapKmh(
         dl, entryLen, aLat, vp.wheelbase, vp.delta0Safe, vp.deltaVSafe,
         vp.maxSpeed, MDADDynamics.LATERAL_JERK_MAX)
@@ -2775,8 +2812,8 @@ local function replan(s, vehicle, playerNum)
                     if sh > 1 then sh = 1 end
                 end
                 local clearanceCap = MDADDynamics.clearanceCapKmh(
-                    guardMargin, 0.4, 0.5, minLat, sh)
-                local classId = sen.vehN and sen.vehN > 0
+                    guardMargin, TUNE.DODGE_CLEARANCE_RESERVE, 0.5, minLat, sh)
+                local classId = sen.movingVeh
                     and MDADDynamics.DODGE_VEHICLE or MDADDynamics.DODGE_STATIC
                 -- A recovery episode has not yet proved 10m of clean progress;
                 -- recommitted dodges stay at crawl speed instead of re-hitting the site.
@@ -3103,12 +3140,13 @@ local function replan(s, vehicle, playerNum)
                 if sinHeading > 1 then sinHeading = 1 end
             end
             local clearanceCap = MDADDynamics.clearanceCapKmh(
-                s.dodgeMargin, 0.4, 0.5, minLat, sinHeading)
+                s.dodgeMargin, TUNE.DODGE_CLEARANCE_RESERVE,
+                0.5, minLat, sinHeading)
             local profileCap = s.profileEnvelope
             if finite(s.dodgeSpaceCap) and s.dodgeSpaceCap < profileCap then
                 profileCap = s.dodgeSpaceCap
             end
-            local classId = sen.vehN and sen.vehN > 0
+            local classId = sen.movingVeh
                 and MDADDynamics.DODGE_VEHICLE or MDADDynamics.DODGE_STATIC
             s.dodgeKappa, s.dodgeClearance = kappa, s.dodgeMargin
             s.dodgeCurveCap, s.dodgeClearanceCap = curveCap, clearanceCap
@@ -3424,6 +3462,7 @@ local function stepFollow(s, vehicle, playerNum, now)
     s.diagExpL = nil
     s.diagLatDev = nil
     s.forceBrakeThis = false
+    s.lastAssistForce = 0
 
     -- 池向量：一顆當 forward／relPos 共用，一顆在 applySteering 內當 impulse。
     -- 這段中間沒有 early return，release 一定會執行。
@@ -4254,8 +4293,16 @@ local function stepFollow(s, vehicle, playerNum, now)
                         steer = (steer or 0)
                             - MDADDynamics.crossTrackSteer(latDev, speedKmh)
                     end
-                    force = applySteering(s, vehicle, fwd, fx, fy, steer or 0,
-                        speedKmh, mult, coupled)
+                    local assistForce = 0
+                    if regOn and not coupled and speedKmh >= 0
+                            and now >= s.forceBrakeUntil
+                            and aerr <= TUNE.ASSIST_MAX_ERR_RAD then
+                        assistForce = longitudinalAssistForce(
+                            s, speedKmh, targetSpeed, mult)
+                    end
+                    force, s.lastAssistForce = applySteering(
+                        s, vehicle, fwd, fx, fy, steer or 0,
+                        speedKmh, mult, coupled, assistForce)
                 end
             end
         end
@@ -4265,10 +4312,12 @@ local function stepFollow(s, vehicle, playerNum, now)
         if getDebug() and now >= s.nextDebugMs then
             s.nextDebugMs = now + TUNE.DEBUG_MS
             print(string.format(
-                "%spn=%d mode=%s speed=%.1f target=%.1f errDeg=%.1f steer=%.2f force=%.0f remaining=%.1f lat=%.1f road=%.2f gear=%d regulator=%s",
+                "%spn=%d mode=%s speed=%.1f target=%.1f errDeg=%.1f steer=%.2f force=%.0f thrust=%.0f remaining=%.1f lat=%.1f road=%.2f gear=%d regulator=%s",
                 LOG, playerNum, s.mode, speedKmh, targetSpeed or 0,
-                (headingError or 0) * TUNE.DEG_PER_RAD, steer or 0, force, remaining or 0,
-                sqrt(lateralSq or 0), s.roadBias, Drive.getGear(playerNum), tostring(regOn)))
+                (headingError or 0) * TUNE.DEG_PER_RAD, steer or 0,
+                force, s.lastAssistForce, remaining or 0,
+                sqrt(lateralSq or 0), s.roadBias,
+                Drive.getGear(playerNum), tostring(regOn)))
         end
         if s.diag then
             -- 新 Java getter 只在這一幀確定會 enqueue sample 時才跑；

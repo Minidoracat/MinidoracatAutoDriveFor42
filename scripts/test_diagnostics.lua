@@ -1208,6 +1208,7 @@ MDADDiagnostics.sample(0, 9200000, 100, 200, 0.25, 12, 15, 40, 1.5, 0.2, 0.3, 12
         brakeConfidence = 0.25, brakeLower = 4.0,
         yawConfidence = 0.1, yawLower = 2.5,
         steeringKappa = 0.12,
+        assistForce = 1234,
         capReturn = 15,
         fullGate = true, gateReason = "clear",
         cmdV = 11.1, cmdA = 0.4, jerkBypass = "visibility",
@@ -1288,6 +1289,8 @@ check(string.find(physBody, '"sb":5.5', 1, true) ~= nil, "safe brake recorded")
 check(string.find(physBody, '"acf":0.5', 1, true) ~= nil, "accel confidence recorded")
 check(string.find(physBody, '"bal":4', 1, true) ~= nil, "brake lower bound recorded")
 check(string.find(physBody, '"kap":0.12', 1, true) ~= nil, "steering kappa recorded")
+check(string.find(physBody, '"af":1234', 1, true) ~= nil,
+    "longitudinal assist force recorded")
 check(string.find(physBody, '"crt":15', 1, true) ~= nil, "RETURN cap recorded")
 check(string.find(physBody, '"fullGate":true', 1, true) ~= nil, "full-speed gate recorded")
 check(string.find(physBody, '"gateReason":"clear"', 1, true) ~= nil, "gate reason recorded")

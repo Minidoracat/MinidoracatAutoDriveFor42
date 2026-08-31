@@ -81,6 +81,24 @@ near(D.crossTrackSteer(10, 0), 0.77, 1e-12,
     "低速大偏離夾在獨立的安全轉向增量上限")
 near(D.crossTrackSteer(0 / 0, 15), 0, 1e-12,
     "非法 cross-track 輸入不產生推力")
+near(D.longitudinalAssistRatio(0, 15), 0.15, 1e-12,
+    "重車靜止且速度差充足時使用完整前推比例")
+near(D.longitudinalAssistRatio(8, 10), 0, 1e-12,
+    "距目標 3km/h 內不再前推")
+near(D.longitudinalAssistRatio(-1, 15), 0, 1e-12,
+    "倒退中不施加向前推力")
+near(D.longitudinalAssistRatio(25, 70), 0, 1e-12,
+    "25km/h 以上交還原生引擎與 regulator")
+near(D.longitudinalAssistRatio(0 / 0, 15), 0, 1e-12,
+    "非法速度不產生前推比例")
+near(D.sweepRadius(0.7, 0.35, 0.05, 0.1), 0.95, 1e-12,
+    "整格障礙的厚規劃 pad 補償 0.1 量化肥邊")
+near(D.sweepRadius(0.7, 0.06, 0.05, 0.1), 0.76, 1e-12,
+    "薄規劃 pad 不補償：規劃半徑永不低於物理包絡")
+near(D.sweepRadius(0.7, 0.15, 0.05, 0.1), 0.85, 1e-12,
+    "補償門檻邊界（pad=phys+comp）不觸發")
+near(D.sweepRadius(0.4, 0.35, 0.05, 0.1), 0.75, 1e-12,
+    "非整格障礙（樹幹細桿）不補償")
 
 scenario("full-speed gate truth table")
 local all = { true, true, true, true, true, true, true, true, true, true, true, true }

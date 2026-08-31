@@ -4201,6 +4201,27 @@ checkEq(drive.pool.alloc, 1, "沒施力時只取一顆向量（forward）")
 checkEq(drive.pool.release, 1, "沒施力也要把 forward 還回池子")
 checkEq(drive.pool.live, 0, "死區這條路徑同樣不能漏 release")
 
+-- 重車直線起步：前推與轉向共用同一個 addImpulse；無轉向時施力點在車身中心，
+-- 因此前推沒有額外 yaw，也不會突破每幀單槽不變式。
+MDAD.Drive.stop(0, nil)
+dveh._x, dveh._y, dveh._speed, dveh._mass = 0, 0, 0, 1600
+setHeading(dveh, 0)
+drive.nav.route = newRoute(40, 0, 0, 4, 0)
+checkTrue(MDAD.Drive.start(dp), "重車前推輔助情境啟動")
+driveReset(dveh)
+for _ = 1, 120 do driveTick(dp, dveh) end
+checkTrue(dveh._imp.total > 0, "重車直線起步會取得前推輔助")
+checkEq(dveh._imp.max, 1, "前推與轉向合成後每幀仍最多一次 addImpulse")
+checkTrue(dveh._imp.x * dveh._fwdX + dveh._imp.z * dveh._fwdY > 0,
+    "前推分量沿車頭方向")
+checkNear(dveh._imp.torqueY, 0, 1e-9, "純前推施力點在中心，沒有額外 yaw")
+checkNear(dveh._imp.rx, 0, 1e-12, "純前推 relPos.x 為零")
+checkNear(dveh._imp.rz, 0, 1e-12, "純前推 relPos.z 為零")
+checkEq(drive.bad.impulse, 0, "前推全程沒有第二次 impulse")
+checkEq(drive.pool.live, 0, "前推向量池幀末歸零")
+MDAD.Drive.stop(0, nil)
+dveh._mass = 1200
+
 -- 力的量級：符號全對但推力小兩個數量級＝實機「按了自駕，車直直開過路口」；
 -- 2026-08-28 二輪實測連「純力矩×0.8m 臂」的 43k-122k 都只換到每秒 5-9° 偏航。
 -- 幾何（2.2m 車尾臂＋側向衝量）與量級改採 Derpy 在整個 Workshop 用戶群驗證過的
@@ -8410,6 +8431,7 @@ local function scenarioPhaseE()
     drive.fillWorld(-10, 170, -20, 20)
     drive.putRoad(-10, 170, -20, 20)
     drive.putSolid(30, 0, "zero_speed_large_shift")
+    local sideParked = drive.putVehicle(35, 6, true)
     driveReset(hotVeh)
     checkTrue(MDAD.Drive.start(dp), "zero-speed intended-dodge fixture starts")
     for _ = 1, 6 do driveTick(dp, hotVeh) end
@@ -8421,6 +8443,15 @@ local function scenarioPhaseE()
         "dodge geometry uses intended crawl-or-higher speed, not current zero")
     checkTrue(captured.dodgeSpaceCap > 0,
         "available entry/exit space yields a positive inverse speed cap")
+    checkTrue(captured.sensor.vehN > 0 and not captured.sensor.movingVeh,
+        "停放車只提供靜態幾何，不冒充動態車")
+    checkEq(captured.dodgeClass, MDADDynamics.DODGE_STATIC,
+        "停放車群不再套用 moving vehicle class cap")
+    checkTrue(captured.dodgeCommittedLength > 6.5
+            and captured.dodgeSpaceCap >= 10,
+        "dodge 使用可用空間延長過渡，不再固定卡在 crawl 最小長度（length="
+        .. tostring(captured.dodgeCommittedLength) .. " space="
+        .. tostring(captured.dodgeSpaceCap) .. "）")
     checkFalse(captured.dodgeCrawl,
         "ample ordinary dodge is not already a squeeze crawl fixture")
     local realDodgeCap = MDADDynamics.dodgeSpeedCapKmh
@@ -8472,7 +8503,77 @@ local function scenarioPhaseE()
     checkTrue(drive.calls.maxRegSpeed > 0,
         "committed zero-speed dodge is allowed to accelerate")
     drive.clearCell(30, 0)
+    drive.clearVehicle(35, 6)
     MDAD.Drive.stop(0, nil)
+    do
+        -- review m68：native forceBrake 1 秒窗內前推歸零；窗過期恢復
+        local oldMass = hotVeh._mass
+        hotVeh._mass, hotVeh._x, hotVeh._y, hotVeh._speed = 1600, 0, 0, 15
+        setHeading(hotVeh, 0)
+        drive.nav.route = v4Route("paved", 10)
+        driveReset(hotVeh)
+        checkTrue(MDAD.Drive.start(dp), "重車煞車窗 fixture 啟動")
+        for _ = 1, 4 do driveTick(dp, hotVeh) end
+        drive.scanRound()
+        captured.cmdV, captured.cmdA, captured.cmdInitialized = 40 / 3.6, 0, true
+        driveReset(hotVeh)
+        driveTick(dp, hotVeh)
+        checkTrue(captured.lastAssistForce > 0, "重車低速跟線取得前推輔助")
+        captured.forceBrakeUntil = nowMs + 100000
+        captured.cmdV, captured.cmdA, captured.cmdInitialized = 40 / 3.6, 0, true
+        driveReset(hotVeh)
+        driveTick(dp, hotVeh)
+        checkEq(captured.lastAssistForce, 0,
+            "native forceBrake 1 秒窗內前推立即歸零")
+        captured.forceBrakeUntil = 0
+        captured.cmdV, captured.cmdA, captured.cmdInitialized = 40 / 3.6, 0, true
+        driveReset(hotVeh)
+        driveTick(dp, hotVeh)
+        checkTrue(captured.lastAssistForce > 0, "煞車窗過期後前推恢復")
+        hotVeh._mass = oldMass
+        MDAD.Drive.stop(0, nil)
+    end
+    do
+        -- review m68：空間延長不得把 entry 轉場拉回跨越折點（頂點 s=24；
+        -- 障礙在彎後 s≈39-41，掃描視界 48m 內）。此 fixture 鎖不變式
+        -- 「committed offA >= peak+0.5」：把延長寫成無視折點的
+        -- entryLen=entryAvail 類回歸會直接跨回 s<24 被抓；harness 低速
+        -- commit 的 required 較短，required 驅動的邊界細分另由
+        -- shapeProfile 的 clamp 算式保證。
+        local bendRoute = { pts = {}, segSurface = {}, segWidth = {},
+            avoidPenalty = 0, approachSurface = "unknown" }
+        for i = 0, 6 do
+            bendRoute.pts[#bendRoute.pts + 1] = i * 4
+            bendRoute.pts[#bendRoute.pts + 1] = 0
+        end
+        local bendA = math.rad(12)
+        for i = 1, 25 do
+            bendRoute.pts[#bendRoute.pts + 1] = 24 + math.cos(bendA) * i * 4
+            bendRoute.pts[#bendRoute.pts + 1] = math.sin(bendA) * i * 4
+        end
+        for i = 1, #bendRoute.pts / 2 - 1 do
+            bendRoute.segSurface[i], bendRoute.segWidth[i] = "paved", 10
+        end
+        drive.nav.route = bendRoute
+        hotVeh._x, hotVeh._y, hotVeh._speed = 0, 0, 15
+        setHeading(hotVeh, 0)
+        driveReset(hotVeh)
+        checkTrue(MDAD.Drive.start(dp), "折點延長 fixture 啟動")
+        for _ = 1, 4 do driveTick(dp, hotVeh) end
+        drive.putSolid(38, 3, "corner_ext_obs")
+        drive.putSolid(39, 2, "corner_ext_obs_b")
+        drive.putSolid(40, 2, "corner_ext_obs_c")
+        drive.scanRound()
+        local cornerOffA = captured.dodging and captured.fstate.offA or -1
+        checkTrue(captured.dodging, "彎後障礙仍可繞行")
+        checkTrue(cornerOffA >= 24.5 - 1e-9,
+            "entry 轉場延長停在折點後 0.5m，不跨回 s=24 折點（offA="
+            .. tostring(cornerOffA) .. "）")
+        drive.clearCell(38, 3)
+        drive.clearCell(39, 2)
+        drive.clearCell(40, 2)
+        MDAD.Drive.stop(0, nil)
+    end
     drive.nav.route = v4CurveRoute(45)
     hotVeh._x, hotVeh._y, hotVeh._speed = 0, 0, 30
     setHeading(hotVeh, 0)
