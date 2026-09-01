@@ -78,7 +78,11 @@ local SCAN_NEAR = 2            -- 掃描起點：車前 2 公尺（車身本體�
 local SCAN_AHEAD = 48          -- 掃描終點：車前 48 公尺（85km/h 約 2 秒反應＋更早定側減少繞行震盪）
 local SCAN_STEP = 1            -- 沿路線的取樣步長（公尺，＝一格）
 local SCAN_BUDGET = 56         -- 每幀最多實際查詢幾格世界格（±6.5×48m 帶 ~658 格/輪 → ~12 幀）
-local HARD_MAX = 768           -- 硬障礙緩衝上限（掃描帶最多 658 個唯一格，保留 110 格防呆）
+local HARD_MAX = 1472          -- 硬障礙緩衝上限：高速帶 aheadM=100 時掃描帶
+                               -- 數學上限 14×98=1372 個唯一格（2026-09-01 外部
+                               -- 審查抓漏：舊值 768 按 48m 帶設計，高速密集障礙
+                               -- 區前段塞滿後**遠段 hard 靜默丟失**）。1472＝
+                               -- 上限＋100 防呆；帶寬再改必須同步重算。
 local VISITED_ROUNDS = 64      -- 每幾輪重建一次 visited 表
 local SPRITE_CACHE_MAX = 4096  -- sprite 成本快取條目上限
 
@@ -103,8 +107,13 @@ local KEY_MUL = 100000
 
 local COST_NONE, COST_SOFT, COST_HARD = 0, 1, 2
 local COST_HARD_THIN = 3       -- 細桿硬障礙（樹幹）：擋不擋線用 0 半徑判（樹幹 ~0.3 格）
+local COST_HARD_SMALL = 4      -- 單格小物（solidtrans 非牆：郵筒/垃圾桶/路牌）：半格箱
 local SLOW_BAND_HALF = 3       -- 減速計數帶半寬（±3＝路面帶；hard 仍收全走廊 ±6.5）
 local OBS_HALF_R = 0.7         -- 整格箱型硬障礙的半徑（＝Corridor 的 OBS_HALF；樹幹用 0）
+local OBS_SMALL_R = 0.30       -- 小物半徑（2026-09-01 telemetry s016：blocked 縫
+                               -- 差距 m=1.0 vs need=1.1——桿類/栓類 0.35 疊 need
+                               -- 差 5-10cm 打槍「明明有空間」的縫；0.30 仍蓋
+                               -- 桿柱實體，量化肥邊另由 SWEEP_QUANT_COMP 補）
 local SURFACE_UNKNOWN, SURFACE_PAVED, SURFACE_GRAVEL, SURFACE_DIRT = 0, 1, 2, 3
 -- 路面對中（2026-08-28 實機：163 號公路的 nav 線偏到路面東緣外 2-4m）：
 -- 掃描順路統計地板 sprite 的橫向平均，輪末產出 roadC 給 driver 做 EMA。
@@ -137,12 +146,17 @@ MDADSensor.SURFACE_PAVED = SURFACE_PAVED
 -- 等用例）。在載入期直接取 upvalue 會綁死載入順序，也讓離線 harness 沒有插手空間；
 -- 改成第一輪掃描開始時綁一次，之後每輪只多一次 boolean 比較。
 local F_water, F_doorN, F_doorW, T_moveable
+local F_solidtrans, F_wallN, F_wallW, F_wallNW
 local flagsBound = false
 
 local function bindFlags()
     F_water = IsoFlagType.water
     F_doorN = IsoFlagType.doorN
     F_doorW = IsoFlagType.doorW
+    F_solidtrans = IsoFlagType.solidtrans
+    F_wallN = IsoFlagType.WallN
+    F_wallW = IsoFlagType.WallW
+    F_wallNW = IsoFlagType.WallNW
     T_moveable = IsoObjectType.isMoveAbleObject   -- 枚舉序 28（SpriteDetails/IsoObjectType.java:36）
     flagsBound = true
 end
@@ -213,6 +227,16 @@ local function classifySprite(obj, name)
     if find(name, "fencing_", 1, true) == 1 then return COST_HARD_THIN end
 
     if sprite:shouldHaveCollision() then               -- IsoSprite.java:2083-2093
+        -- 半徑分級（2026-09-01）：solidtrans 且非牆＝郵筒／垃圾桶／消防栓類
+        -- 單格 street furniture，實體碰撞箱半格級（solidtrans+StopCar 郵筒實例
+        -- newtiledefinitions.tiles.txt:226345-226439）——整格 0.7 會讓單物擋掉
+        -- 4m 寬帶（telemetry s042 dm=0.25 的幾何根源）。牆薄片（WallN/W/NW）
+        -- 與 solid 大箱（dumpster 等）維持整格保守半徑。
+        if props:has(F_solidtrans)
+                and not props:has(F_wallN) and not props:has(F_wallW)
+                and not props:has(F_wallNW) then
+            return COST_HARD_SMALL
+        end
         return COST_HARD
     end
 
@@ -309,7 +333,7 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
         end
     end
     local soft = false
-    local thin = false -- 硬障礙來源是細桿（樹幹）：push 時半徑 0
+    local hardR = OBS_HALF_R -- 硬障礙半徑：樹幹/籬笆 0、小物 0.35、整格箱 0.7
 
     if not hard then
         local objs = square:getObjects()               -- IsoGridSquare.java:9635（回 PZArrayList）
@@ -319,9 +343,11 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
             local name = obj:getSpriteName()           -- IsoObject.java:2235
             if name ~= nil then
                 local cost = spriteCostOf(state, obj, name)
-                if cost == COST_HARD or cost == COST_HARD_THIN then
+                if cost == COST_HARD or cost == COST_HARD_THIN
+                        or cost == COST_HARD_SMALL then
                     hard = true
-                    if cost == COST_HARD_THIN then thin = true end
+                    if cost == COST_HARD_THIN then hardR = 0
+                    elseif cost == COST_HARD_SMALL then hardR = OBS_SMALL_R end
                     break
                 elseif cost == COST_SOFT then
                     soft = true
@@ -410,7 +436,7 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
     if soft and not hard and inBand then
         state.wSoftN = state.wSoftN + 1
     end
-    return hard, thin
+    return hard, hardR
 end
 
 --------------------------------------------------------------------------------
@@ -732,12 +758,13 @@ function MDADSensor.reset(state)
 end
 
 -- working buffer 推一個硬點（含簽章累加；l4＝l*4 的整數版；r＝該點半徑——
--- 樹幹 0、整格箱型物 OBS_HALF，Corridor/sweep 逐點膨脹用）。滿了靜默丟棄；
--- HARD_MAX=768 對掃描帶最多 658 個唯一格留 110 格。Driver 另在快照尾端附加
+-- 樹幹 0、整格箱型物 OBS_HALF，Corridor/sweep 逐點膨脹用）。HARD_MAX 已抬到
+-- 掃描帶數學上限之上（不可達）；萬一未來帶寬改動造成溢出，不再靜默——
+-- 旗標 wHardOverflow 讓本輪快照可被判定不完整。Driver 另在快照尾端附加
 -- 最多 4 個虛擬 ban，不經 pushHard，也不占這個 sensor 上限。
 local function pushHard(state, s, l, l4, wx, wy, r)
     local n = state.wHardN
-    if n >= HARD_MAX then return end
+    if n >= HARD_MAX then state.wHardOverflow = true return end
     n = n + 1
     state.wHardN = n
     state.wHardS[n] = s
@@ -814,11 +841,11 @@ function MDADSensor.step(state, profile, sNow, vehicle, now, cell)
         local key = wx * KEY_MUL + wy
         if visited[key] ~= gen then
             visited[key] = gen
-            local hard, thin = scanCell(state, vehicle, cell, wx, wy, l)
+            local hard, hr = scanCell(state, vehicle, cell, wx, wy, l)
             if hard then
                 -- 世界座標記格心（掃掠複驗用真實幾何，不受弧座標折點失真影響）；
-                -- 樹幹＝細桿半徑 0（整格肥半徑會把路緣樹排判成擋路）
-                local pr = thin and 0 or OBS_HALF_R
+                -- 半徑由 scanCell 分級：樹幹/籬笆 0、小物 0.35、整格箱 0.7
+                local pr = hr
                 local l4 = l * 4
                 l4 = l4 - l4 % 1
                 pushHard(state, state.curS, l, l4, wx + 0.5, wy + 0.5, pr)
@@ -855,7 +882,7 @@ local function probeSquareHard(state, square)
         local name = obj:getSpriteName()
         if name ~= nil then
             local cost = spriteCostOf(state, obj, name)
-            if cost == COST_HARD then return true, "hard" end
+            if cost == COST_HARD or cost == COST_HARD_SMALL then return true, "hard" end
             if cost == COST_HARD_THIN then return true, "hardThin" end
         end
     end

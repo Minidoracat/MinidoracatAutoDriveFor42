@@ -31,7 +31,6 @@
     "UI_MinidoracatAutoDrive_GearStandard": "標準（50 公里）",
     "UI_MinidoracatAutoDrive_GearSport": "運動（70 公里）",
     "UI_MinidoracatAutoDrive_GearInsane": "瘋狂（車輛極速）",
-    "UI_MinidoracatAutoDrive_Detour": "前方堵死，改道繞行。",
     "UI_MinidoracatAutoDrive_HUDOptions": "自動駕駛 HUD",
     "UI_MinidoracatAutoDrive_HUDOptionsDescription": "顯示於原版車輛儀表上方。主題與佈局變更會立即套用。",
     "UI_MinidoracatAutoDrive_Options": "自動駕駛",
@@ -102,7 +101,7 @@
     "UI_MinidoracatAutoDrive_TelemetryNoFile": "還沒有診斷紀錄檔",
     "UI_MinidoracatAutoDrive_TelemetryCopied": "診斷紀錄路徑已複製到剪貼簿",
     "UI_MinidoracatAutoDrive_TelemetryCopyFailed": "無法複製診斷紀錄路徑",
-    "UI_MinidoracatAutoDrive_TelemetrySlotsFull": "64 個診斷紀錄槽都在保留期限內，這次不會寫入紀錄",
+    "UI_MinidoracatAutoDrive_TelemetrySlotsFull": "64 個診斷紀錄槽皆無法清空覆寫，這次不會寫入紀錄",
     "UI_MinidoracatAutoDrive_TelemetryWriteFailed": "診斷紀錄寫入失敗；這段自動駕駛已停止記錄",
     "UI_MinidoracatAutoDrive_TelemetryFileFull": "診斷紀錄已達 2MiB 上限；這段自動駕駛不再追加"
 }

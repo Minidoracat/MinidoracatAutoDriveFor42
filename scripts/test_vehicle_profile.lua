@@ -484,11 +484,11 @@ local function checkSpec(spec, label)
     local deltaVSafe = clamp(0.8 * p.clampMax, 0.1, delta0Safe)
     checkNear(p.delta0Safe, delta0Safe, 1e-9, label .. " delta0Safe")
     checkNear(p.deltaVSafe, deltaVSafe, 1e-9, label .. " deltaVSafe")
-    local needHalf = p.halfW + 0.4
-    if needHalf < 1.4 then needHalf = 1.4 end
+    local needHalf = p.halfW + 0.3 -- 2026-09-01 去保守：NEED_MARGIN 0.3／NEED_BASE 1.2
+    if needHalf < 1.2 then needHalf = 1.2 end
     checkNear(p.needHalf, needHalf, 1e-9, label .. " needHalf")
     local scale = math.sqrt(p.wheelbase / 1.35)
-    local rear = 2.2 * clamp(scale, 0.85, 1.35)
+    local rear = 2.2 * clamp(scale * scale, 0.85, 1.35) -- 慣量補償：線性 wb 因子
     checkNear(p.rearArm, rear, 1e-9, label .. " rearArm")
     check(p.rearArm <= 2.2 * 1.35 + 1e-12, label .. " rearArm cap+35%")
     local probeR = clamp(0.5 * math.sqrt(p.bodyW * p.bodyW + p.bodyL * p.bodyL)
@@ -972,7 +972,8 @@ do
     local aw, bw, lw, fsw = P.priors(p, p.mass, MDADFollower.SURFACE_PAVED, true, false, true)
     local au, bu, lu, fsu = P.priors(p, p.mass, MDADFollower.SURFACE_UNKNOWN, false, false, true)
     local ao = P.priors(p, p.mass, MDADFollower.SURFACE_PAVED, false, true, true)
-    check(ad <= 2.5 and bd <= 6 and ld <= 3.5, "dry paved never exceeds legacy")
+    -- aBrake 基準 8、aLat 基準 9（2026-09-02 二次激進化；天氣／胎況仍只降不升）
+    check(ad <= 2.5 and bd <= 8 and ld <= 9.0, "dry paved never exceeds base priors")
     checkNear(fsd, 1, 1e-12, "dry paved surface factor")
     checkNear(fsw, 0.7, 1e-12, "wet paved surface factor")
     checkNear(fsu, 0.7, 1e-12, "unknown surface uses offroad factor")
@@ -1062,6 +1063,53 @@ do
     check(sqrtCalls <= 8, "sqrt count bounded by four surfaces, not 400 segments")
     checkEq(follower.segAccel[1], follower.segAccel[5],
         "same surface reuses identical cached prior")
+end
+
+scenario("clearanceBudget：餘裕預算單一 authority（階段 2 主體 4）")
+do
+    -- 三個 mode 的預算值是契約，不是實作細節：cruise 巡航、squeeze 貼縫爬行、
+    -- probe 世界掃掠容許的剮蹭量（唯一允許為負者）。
+    checkNear(P.clearanceBudget("cruise"), 0.3, 1e-12, "cruise 預算 0.30")
+    checkNear(P.clearanceBudget("squeeze"), 0.1, 1e-12, "squeeze 預算 0.10")
+    checkNear(P.clearanceBudget("probe"), -0.1, 1e-12, "probe 預算 -0.10（剮蹭）")
+    checkNear(P.clearanceBudget("nonsense"), P.clearanceBudget("cruise"), 1e-12,
+        "未知 mode 退最保守的 cruise")
+    check(P.clearanceBudget("squeeze") < P.clearanceBudget("cruise"),
+        "squeeze 必須比 cruise 緊（否則爬行檔沒有存在意義）")
+    check(P.clearanceBudget("probe") < 0,
+        "probe 是唯一可為負的預算（容許剮蹭）")
+    checkNear(P.clearanceBudget("physical"), 0, 1e-12,
+        "physical 預算 0（物理終審只認車身本體）")
+    check(P.clearanceBudget("physical") < P.clearanceBudget("squeeze"),
+        "physical 比 squeeze 更貼身（它是最後一道枚舉檔）")
+    checkNear(P.planNeed(0.9, "physical"), 0.9, 1e-12, "physical need = halfW")
+    checkNear(P.planNeed(0.5, "physical"), 0.5, 1e-12, "physical 不吃 1.2 地板")
+    checkNear(P.sweepBase(0.9, "physical"), 0.8, 1e-12,
+        "physical sweep base = halfW-0.1（容許 10cm 名義重疊，不變）")
+    -- planNeed：halfW + 該 mode 預算；cruise 吃 1.2 絕對地板，squeeze 不吃
+    checkNear(P.planNeed(0.9, "cruise"), 1.2, 1e-12, "1.8m 車 cruise need 1.2")
+    checkNear(P.planNeed(1.2, "cruise"), 1.5, 1e-12, "寬車 cruise need = halfW+0.3")
+    checkNear(P.planNeed(0.5, "cruise"), 1.2, 1e-12, "窄車 cruise 吃 1.2 地板")
+    checkNear(P.planNeed(0.9, "squeeze"), 1.0, 1e-12, "squeeze need = halfW+0.1（無地板）")
+    check(P.planNeed(0.9, "squeeze") < P.planNeed(0.9, "cruise"),
+        "同車 squeeze need 嚴格小於 cruise need")
+    check(P.planNeed(1.4, "cruise") > P.planNeed(1.2, "cruise"),
+        "need 隨車寬單調遞增")
+    checkNear(P.planNeed(0 / 0, "cruise"), 1.2, 1e-12, "halfW 非有限值退地板")
+    -- sweepBase 必須恰好是 planNeed 再加 probe 預算：任何額外私扣都會讓
+    -- 餘裕疊加超支，把 2.4m 的縫對 1.8m 的車判死（第六層洋蔥的定罪點）。
+    for _, hw in ipairs({ 0.5, 0.9, 1.2, 1.6 }) do
+        for _, m in ipairs({ "cruise", "squeeze" }) do
+            checkNear(P.sweepBase(hw, m),
+                P.planNeed(hw, m) + P.clearanceBudget("probe"), 1e-12,
+                "sweepBase(" .. hw .. "," .. m .. ") 只扣一次 probe")
+        end
+    end
+    check(P.sweepBase(0.05, "squeeze") >= 0, "sweepBase 不得為負")
+    -- derive 出來的 needHalf 必須就是 authority 的值（不得有第二套公式）
+    local p = P.build(makeVehicle({}))
+    checkNear(p.needHalf, P.planNeed(p.halfW, "cruise"), 1e-12,
+        "profile.needHalf 由 planNeed 導出")
 end
 
 --------------------------------------------------------------------------------

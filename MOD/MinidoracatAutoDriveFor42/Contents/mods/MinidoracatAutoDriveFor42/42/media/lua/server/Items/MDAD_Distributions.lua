@@ -96,9 +96,14 @@ end
 
 local function filterSpawnedLoot(_, _, container)
     if isClient() or not container then return end
-    -- 42.20.4 的 Zombie Bag 一條 vanilla 路徑誤把 ItemPickerContainer 當第三參數
-    -- （ItemPickerJava.java:628-633）；method 缺席要安全跳過，不能炸斷整次 loot fill。
-    if not container.getItems or not container.DoRemoveItem then return end
+    -- 42.20.4 多條 vanilla 路徑把 ItemPickerContainer「分布物件」（非容器）當第三參數：
+    -- 屍體背包 ItemPickerJava.java:628-630 與容器 :1150-1151/:1404-1405 都傳
+    -- containerDist.bags。該內部類未暴露給 Kahlua＝沒有 __index metatable，索引它的
+    -- 「任何」屬性——包含 `container.getItems` 這種缺席探測本身——都直接 throw
+    -- （KahluaThread.tableget:1126-1137）；「缺 key 回 nil」只對已暴露類成立。
+    -- 唯一安全判別是 instanceof：走 Java isInstance，不進 Lua 索引路徑
+    -- （LuaManager.java:2948-2952；原版用例 ISInventoryPaneContextMenu.lua:2932）。
+    if not instanceof(container, "ItemContainer") then return end
     local allowGps = MDAD.sandbox("SpawnGPS", true) == true
     local allowAuto = MDAD.sandbox("SpawnAutopilot", true) == true
     -- 手冊刻意不給自己的沙盒開關：它唯一的價值就是教那兩張配方，兩個製作開關

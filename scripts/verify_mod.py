@@ -3,8 +3,8 @@
 
 用法（repo 根目錄或任意位置）：
     python scripts/verify_mod.py
-    python scripts/verify_mod.py --self-test   # 只跑 1b 的閘門自測（改閘門邏輯時的快速迴圈；
-                                               # 完整執行本來就會先跑一次，不是額外步驟）
+    python scripts/verify_mod.py --self-test   # 快速迴圈：只跑 parser helper 自測＋1b 閘門
+                                               # 自測後早退，不掃 repo（完整執行涵蓋全部）
 
 零設定：自動偵測 MOD/<folder>/Contents/mods/<folder>/42/。
 涵蓋的檢查與其對應的實際事故（皆有反編譯出處，詳見 AGENTS.md 踩坑錄）：
@@ -35,9 +35,15 @@
                            攻擊配方與玩家識別資訊機器認不出來，靠撰寫規則（AGENTS.md）
  12. 資產／腳本交叉引用     —— item 的 Icon 要有 textures/Item_<Icon>.png（64x64 8-bit
                            RGBA）；配方 inputs/outputs 引用的本 MOD 物品要真的宣告過；
-                           OnTest 的「表.函式」要在 Lua 有實作；Autopilot 配方必須消耗
-                           GPS。這類漂移引擎一律靜默處理（icon 顯示問號、配方永遠湊不齊
-                           材料、分佈表不生成物品），console 不一定留下訊息
+                           OnTest 的「表.函式」要在 Lua 有實作；Autopilot 配方必須以
+                           destroy mode＋ItemCount＋數量 1＋排他候選消耗 GPS，且拒任何
+                           電量狀態 flag（IsFull/IsEmpty/NotFull/NotEmpty）；mode 解析
+                           逐項對齊引擎 parser（key 字面敏感、值大小寫不敏感、use 為
+                           no-op、非法值＝載入期炸整條配方）；本 MOD drainable 輸入須
+                           ItemCount 或 IsFull/NotEmpty，非 destroy 時另要求物品宣告
+                           KeepOnDeplete（正式服 39 個空電 GPS 連坐全滅事故）。這類
+                           漂移引擎一律靜默處理（icon 顯示問號、配方永遠湊不齊材料、
+                           分佈表不生成物品），console 不一定留下訊息
  13. 沙盒選項規格          —— 17 個選項的 type/min/max/default 對表；改壞 default
                            玩家端只是「行為不對」，沒有任何錯誤訊息可查
  14. 配方學習鏈          —— 兩個配方必須留在 module Base（無點短名只會在 Base 查表）、
@@ -297,8 +303,315 @@ KAHLUA_SELFTEST_LABEL = (f"Kahlua 結構上限閘門自測（parser 樣本 "
                          f"{KAHLUA_MAX_UPVALUES}/{KAHLUA_MAX_UPVALUES + 1} upvalues、"
                          f"{KAHLUA_MAX_LOCALS}/{KAHLUA_MAX_LOCALS + 1} locals）")
 
+
+# 引擎逐 token 解析輸入行（InputScript.java:617 起 split 空白）：mode 的 key 是字面
+# `mode:`（大小寫敏感，:666 startsWith），值才 equalsIgnoreCase（:670-674）；沒寫
+# mode 是 ItemApplyMode.Normal（:68）；真正會賦值的只有 keep／destroy（:672、:674）
+# ——`mode:use` 落在守衛外、deprecated 的 useprop*/keepprop*/prop* 只印 error，
+# 全部**不**覆寫前值（:670、:675-686）；**非法值與 unknown token 在遇到的當下就
+# throw**（:687、:762）——載入期炸整條配方，閘門必須逐 token 驗證而非只看最終值。
+# 適用前提：輸入行無 `+`/`-` 續行——`+` 續行在 OnPostWorldDictionaryInit
+# 無條件把 mode 覆寫成 Keep（InputScript.java:817）；`-` 續行僅在非 Destroy 時轉
+# Keep（:834-835，Destroy 保留）；本 repo 目前無續行輸入。
+VALID_ITEM_MODES = {"use", "keep", "destroy", "useprop1", "useprop2",
+                    "keepprop1", "keepprop2", "prop1", "prop2"}
+# InputFlag 全枚舉（42.20.4 InputFlag.java 逐字抄錄；引擎 valueOf 大小寫敏感無 trim）。
+# 引擎升版新增 flag 時這裡會假紅——寧紅勿綠，補名單即可。
+INPUT_FLAGS = {
+    "HandcraftOnly", "AutomationOnly", "IsFull", "NotFull", "ItemIsUses",
+    "ItemIsFluid", "ItemIsEnergy", "IsEmpty", "NotEmpty", "Prop1", "Prop2",
+    "ToolLeft", "ToolRight", "IsDamaged", "IsUndamaged", "IsWholeFoodItem",
+    "IsEmptyContainer", "IsUncookedFoodItem", "IsCookedFoodItem", "IsNotDull",
+    "IsHeadPart", "IsSharpenable", "DontPutBack", "InheritColor",
+    "InheritCondition", "InheritEquipped", "InheritSharpness",
+    "InheritHeadCondition", "MayDegrade", "MayDegradeLight",
+    "MayDegradeVeryLight", "MayDegradeHeavy", "SharpnessCheck", "InheritUses",
+    "InheritUsesAndEmpty", "InheritFood", "InheritFoodAge", "InheritCooked",
+    "InheritModelVariation", "InheritWeight", "InheritName",
+    "InheritFreezingTime", "DontInheritCondition", "AllowFrozenItem",
+    "AllowRottenItem", "NoBrokenItems", "AllowDestroyedItem", "IsWorn",
+    "IsNotWorn", "InheritAmmunition", "CopyClothing", "AllowFavorite",
+    "InheritFavorite", "FakeOutput", "DontReplace", "CanBeDoneFromFloor",
+    "ItemCount", "IsExclusive", "RecordInput", "DontRecordInput",
+    "ResearchInput", "IsBlunt", "HasOneUse", "HasNoUses", "IsSealed",
+    "IsNotSealed", "Unseal", "EquipSecondary", "SetActivated",
+}
+
+
+def input_modes(raw):
+    """有序回傳同行全部 mode: token 的值（lower）。"""
+    return [tok[5:].rstrip(",").lower() for tok in raw.split()
+            if tok.startswith("mode:")]
+
+
+def input_mode(raw):
+    mode = "normal"
+    for v in input_modes(raw):
+        if v in ("keep", "destroy"):   # 只有這兩值真賦值；use 與 deprecated prop* 皆 no-op
+            mode = v
+    return mode
+
+
+def _bracket_union(raw, key):
+    """收集同行所有 `key…[...]` token 的分號項聯集。引擎以「token 起點」startsWith
+    分派（InputScript.java:722 tags、:742 flags），`flags-extra[...]` 這類任意後綴
+    也算同類 token，且逐 token 累積（:746-750 迴圈 input.flags.add）。起點必須是
+    空白邊界：`[GPS]flags[X]` 是單一 token、引擎走 selector 分支，flags 靜默丟失
+    ——regex 用 (?<!\\w) 會誤抽。各項刻意不 strip：flags 走 InputFlag.valueOf
+    無 trim（:748）。"""
+    out = set()
+    for mm in re.finditer(rf"(?:^|(?<=\s)){key}[^\s\[\]]*\[([^\]]+)\]", raw):
+        out.update(mm.group(1).split(";"))
+    return out
+
+
+def input_flags(raw):
+    return _bracket_union(raw, "flags")
+
+
+def norm_tag(t, trim=True):
+    """tag／ItemType 值走 ResourceLocation.of：lower＋無 namespace 補 base:
+    （ResourceLocation.java:18-19、:26-29）。trim 只對 item 側 Tags 欄位成立
+    （Item.java:2345 逐項 trim）；輸入行 tags[...] 的項目引擎**不** trim
+    （InputScript.java:727-732 原樣餵 ResourceLocation.of）——input 側呼叫
+    要傳 trim=False，帶空白的項目與引擎一樣永不命中。"""
+    if trim:
+        t = t.strip()
+    t = t.lower()
+    return t if ":" in t else f"base:{t}"
+
+
+def field_get(fields, key, default=""):
+    """欄位名大小寫不敏感讀取——引擎 DoParam 逐欄位 equalsIgnoreCase、單值欄位
+    後蓋前（Item.java:1970、:2341；CraftRecipe.LoadMainBlock:369-496 同）。
+    parse_fields 已把 key 統一成 lower（唯一 key、天然 last-wins），這裡 O(1) 查。"""
+    return fields.get(key.lower(), default)
+
+
+def _java_float(s):
+    """Java Float.parseFloat 的近似：Python float 另接受引擎合法的 f/F/d/D 尾綴
+    （`1.0f`）。回 float 或 None（None＝引擎 NumberFormatException）。"""
+    if s and s[-1] in "fFdD" and len(s) > 1:
+        s = s[:-1]
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def amount_load_error(amt_raw):
+    """引擎數量解析（InputScript.java:588-599）：contains("variable")（不是
+    startsWith）走 `[lo:hi]` 兩個 Float.parseFloat（:592-595，缺括號 substring
+    越界、缺第二值 values[1] 越界、非 float 皆炸）；否則整值 parseFloat（:597）。
+    回錯誤描述或 None。"""
+    if "variable" in amt_raw:
+        lb, rb = amt_raw.find("["), amt_raw.find("]")
+        if lb < 0 or rb < lb:
+            return "variable 數量缺括號（substring 越界炸，InputScript.java:592）"
+        parts = amt_raw[lb + 1:rb].split(":")
+        if len(parts) < 2:
+            return "variable 數量缺上限（values[1] 越界炸，InputScript.java:595）"
+        for p in parts[:2]:
+            if _java_float(p) is None:
+                return f"variable 數量 `{p}` 非 float（parseFloat 炸，InputScript.java:594-595）"
+        return None
+    if _java_float(amt_raw) is None:
+        return "數量非數值（Float.parseFloat 炸，InputScript.java:597）"
+    return None
+
+
+def field_show(fields, key):
+    """診斷訊息用：區分「未宣告」與「宣告了空值」（判定邏輯仍走 field_get）。"""
+    return repr(field_get(fields, key)) if key.lower() in fields else "(未宣告)"
+
+
+def _bracket_body(t, what, errs):
+    """token 內 `[...]` 取值；缺括號＝引擎 substring 越界炸（selector :620、
+    tags :727、flags :743、mappers :752 同型）。回 None 表示已記錯誤。"""
+    lb, rb = t.find("["), t.find("]")
+    if lb < 0 or rb < lb:
+        errs.append(f"`{t}`：{what} 缺括號（substring 越界炸）")
+        return None
+    return t[lb + 1:rb]
+
+
+def input_line_load_errors(raw):
+    """模擬引擎 InputScript.Load 對 Item 配方輸入行的**載入期 throw** 路徑
+    （InputScript.java:619-766 的 token 分派）。回傳錯誤清單；空＝可載入。
+    任一 throw 都是整條配方不存在——玩家端零訊息，只能靜態擋。"""
+    errs = []
+    for tok in raw.split():
+        t = tok.rstrip(",")
+        if not t:
+            continue
+        if t.startswith("["):
+            _bracket_body(t, "item selector", errs)
+        elif t.startswith("shapedIndex:"):
+            # Integer.parseInt 接受 +/- 前綴但限 32-bit（溢位＝NumberFormatException）
+            sv = t[12:]
+            if (not re.fullmatch(r"[+-]?\d+", sv)
+                    or not -2147483648 <= int(sv) <= 2147483647):
+                errs.append(f"`{t}`：shapedIndex 非 32-bit 整數（Integer.parseInt 炸，:659）")
+        elif t.startswith("apply:"):
+            errs.append(f"`{t}`：apply 已停用（引擎 throw，InputScript.java:663）")
+        elif t.startswith("mode:"):
+            if t[5:].lower() not in VALID_ITEM_MODES:
+                errs.append(f"`{t}`：非法 mode 值（引擎 throw，InputScript.java:687）")
+        elif t.startswith("tags"):
+            body = _bracket_body(t, "tags", errs)
+            if body is not None:
+                for entry in body.split(";"):
+                    # 空值／空 namespace／空 path 皆炸（ResourceLocation.java:15-22、:27-31）
+                    if not entry or entry.startswith(":") or entry.endswith(":"):
+                        errs.append(f"tags 項 `{entry}`：空值、空 namespace 或空 path"
+                                    f"（ResourceLocation.of 炸，:15-22/:27-31）")
+        elif t.startswith("categories"):
+            errs.append(f"`{t}`：categories 僅限 Fluid 輸入（Item 配方 throw，"
+                        f"InputScript.java:735-737）")
+        elif t.startswith("flags"):
+            body = _bracket_body(t, "flags", errs)
+            if body is not None:
+                for entry in body.split(";"):
+                    if entry not in INPUT_FLAGS:
+                        errs.append(f"flags 值 `{entry}`：不在 InputFlag 枚舉"
+                                    f"（valueOf 炸，InputScript.java:748；大小寫敏感無 trim）")
+        elif t.startswith("overlayMapper"):
+            pass    # 引擎直接註冊、不取括號（InputScript.java:761-766），裸 token 合法
+        elif t.startswith("mappers"):
+            _bracket_body(t, "mappers", errs)
+        else:
+            errs.append(f"`{t}`：unknown recipe param（引擎 throw，InputScript.java:762）")
+    return errs
+
+
+# parser helper 自測（全量執行與 --self-test 都先跑；壞一項即崩＝非零碼）
+assert input_mode("mode:destroy") == "destroy"
+assert input_mode("[X] flags[A]") == "normal"
+assert input_mode("mode:destroy mode:keep") == "keep"          # 重複取最後
+assert input_mode("mode:destroy mode:use") == "destroy"        # use 是 no-op
+assert input_mode("mode:destroy mode:prop1") == "destroy"      # deprecated prop* 也 no-op
+assert input_modes("mode:bogus mode:destroy") == ["bogus", "destroy"]
+assert input_flags("flags[A] flags[B]") == {"A", "B"}          # 逐 token 聯集
+assert input_flags("flags-extra[C]") == {"C"}                  # startsWith 任意後綴
+assert input_flags("flags[A; B]") == {"A", " B"}               # 不 strip（引擎同炸）
+assert norm_tag("UsesBattery") == "base:usesbattery"
+assert norm_tag(" Base:Drainable ") == "base:drainable"
+assert norm_tag(" base:x", trim=False) == " base:x"            # input 側不 trim＝永不命中
+assert field_get({"itemtype": "x"}, "ItemType") == "x"         # lower-key O(1) 查找
+assert input_line_load_errors("[A.B] mode:destroy flags[ItemCount]") == []
+assert input_line_load_errors("Mode:destroy") != []            # unknown param（:762 throw）
+assert input_line_load_errors("mode:bogus mode:destroy") != [] # 前置非法值先炸
+assert input_line_load_errors("flags[itemcount]") != []        # flag 值錯大小寫
+assert input_line_load_errors("flags[ItemCount; IsFull]") != []  # 帶空白項炸
+assert input_line_load_errors("[A.B") != []                    # selector 缺右括號炸
+assert input_line_load_errors("tags[]") != []                  # 空 tag 項炸
+assert input_line_load_errors("tags[:x]") != []                # 空 namespace 炸
+assert input_flags("[GPS]flags[X]") == set()                   # 非 token 起點不誤抽
+
+
+BARE_TYPE_RE = re.compile(r"([A-Za-z]\w*(?:\.\w+)?)(?![\w.\[])")
+# 引擎 keyword 與數量都寬鬆：equalsIgnoreCase("item")、數量 Float.parseFloat 或
+# variable[...]（InputScript.Load:564-588 區）；regex 收所有候選行，數量合法性
+# 由 parse_recipe_items 與載入期檢查分工。
+ITEM_ENTRY_RE = re.compile(r"(?mi)^\s*item\s+(\S+)\s+(.+?)\s*,?\s*$")
+
+
+def take_block(text, at):
+    """text[at] 必須是 '{'；用深度計數回傳區塊內容，巢狀 inputs{} 不會被提早截斷。"""
+    depth = 0
+    for i in range(at, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[at + 1:i]
+    return text[at + 1:]
+
+
+def parse_blocks(text, keyword):
+    """掃 `<keyword> <名稱> { … }`，回傳 [(名稱, 內容)]。"""
+    return [(mm.group(1), take_block(text, mm.end() - 1))
+            for mm in re.finditer(rf"(?<![\w.]){keyword}\s+([\w.]+)\s*\{{", text)]
+
+
+def sub_block(body, keyword):
+    """取無名子區塊（inputs / outputs）的內容。"""
+    mm = re.search(rf"(?<![\w.]){keyword}\s*\{{", body)
+    return take_block(body, mm.end() - 1) if mm else ""
+
+
+def parse_fields(body):
+    """`Key = value,` 逐項擷取；先剝掉子區塊，免得把 inputs 內容當成欄位。
+    key 一律轉 lower 儲存（引擎 DoParam equalsIgnoreCase＋單值欄位後蓋前——
+    lower 化天然 last-wins，混大小寫重複欄位也取檔案最後一筆）。
+    累積欄位例外：Tags（Item.java:2341-2347 itemTags.add）與
+    Researchablerecipes（Item.java:2776-2781 addResearchableRecipe）依引擎語意
+    join 累積，不後蓋前。"""
+    while True:
+        stripped = re.sub(r"\{[^{}]*\}", "", body)
+        if stripped == body:
+            break
+        body = stripped
+    fields = {}
+    acc = {"tags": [], "researchablerecipes": []}
+    for k, v in re.findall(r"(\w+)\s*=\s*([^,\r\n]*)", body):
+        k, v = k.lower(), v.strip()
+        if k in acc:
+            acc[k].append(v)
+            continue
+        fields[k] = v
+    for k, vals in acc.items():
+        if vals:
+            fields[k] = ";".join(vals)
+    return fields
+
+
+def parse_recipe_items(block, module):
+    """回傳 [(fullTypes, 原文, 數量, 數量原文)]。tags[…] 輸入沒有具體物品，
+    fullTypes 為空；數量無法解析成 float 時為 None（載入期檢查另行判定）。"""
+    out = []
+    for mm in ITEM_ENTRY_RE.finditer(block):
+        amt_raw, rest = mm.group(1), mm.group(2)
+        amount = _java_float(amt_raw)
+        br = re.search(r"(?<!\w)\[([^\]]+)\]", rest)   # `[A;B]`；flags[…]/tags[…] 前有字母，不算
+        if br:
+            raw = br.group(1)
+        else:
+            bare = BARE_TYPE_RE.match(rest)
+            raw = bare.group(1) if bare else ""
+        # 不帶模組前綴的名字由引擎補上所在 module——這裡照做，才抓得到未加前綴的錯字
+        types = [t if "." in t else f"{module}.{t}"
+                 for t in (s.strip() for s in raw.split(";")) if t]
+        out.append((types, rest, amount, amt_raw))
+    return out
+
+
+# 組合層自測（依賴 parse_fields／parse_recipe_items，故放定義後）
+assert field_get(parse_fields("tags = a,\ntags = b,"), "Tags") == "a;b"
+assert field_get(parse_fields("TAGS = a,\nTags = b,"), "Tags") == "a;b"   # 混大小寫也累積
+assert field_get(parse_fields("Icon = A,\nicon = B,\nIcon = C,"), "Icon") == "C"  # 引擎後蓋前
+assert field_get(parse_fields("Researchablerecipes = A,\nresearchablerecipes = B,"),
+                 "Researchablerecipes") == "A;B"               # 引擎累積（Item.java:2776-2781）
+assert parse_recipe_items("item 3 [A.B] mode:destroy,", "M")[0][2] == 3
+assert parse_recipe_items("ITEM 1.0 [A.B],", "M")[0][2] == 1   # keyword/數量同引擎寬鬆
+assert parse_recipe_items("item nope [A.B],", "M")[0][2] is None
+assert amount_load_error("1") is None and amount_load_error("1.0f") is None
+assert amount_load_error("variable[1:2]") is None
+assert amount_load_error("variable[1]") is not None            # 缺上限炸
+assert amount_load_error("variable[x:2]") is not None          # 非 float 炸
+assert amount_load_error("nope") is not None
+assert input_line_load_errors("shapedIndex:+1") == []          # parseInt 接受 + 前綴
+assert input_line_load_errors("shapedIndex:2147483648") != []  # 32-bit 溢位炸
+assert input_line_load_errors("tags[base:]") != []             # 空 path 炸
+assert input_line_load_errors("overlayMapper") == []           # 裸 token 合法（不取括號）
+assert input_line_load_errors("mappers") != []                 # mappers 缺括號炸
+assert field_show({"itemtype": ""}, "ItemType") == "''"
+assert field_show({}, "ItemType") == "(未宣告)"
+
 if "--self-test" in sys.argv:
-    # 單獨模式：只驗閘門本身，不掃 repo（改閘門邏輯時的快速迴圈）
+    # 快速迴圈：parser helpers＋兩組 module-level assert 已在上方執行，此處補跑
+    # 1b 閘門自測後即早退——位於第 1 節之前，1-15 節全部不掃（涵蓋面見 docstring）。
     _luac = shutil.which("luac")
     if not _luac:
         print("--self-test 需要 PATH 有 luac")
@@ -306,8 +619,6 @@ if "--self-test" in sys.argv:
     _bad = kahlua_selftest(_luac)
     fail(KAHLUA_SELFTEST_LABEL, _bad) if _bad else ok(KAHLUA_SELFTEST_LABEL)
     sys.exit(1 if _bad else 0)
-
-
 # ---- 1. luac 語法 ----
 luac = shutil.which("luac")
 if not luac:
@@ -605,61 +916,8 @@ ICON_PNG = (8, 6)           # PNG IHDR 的 (bit depth, colour type)：8-bit RGBA
 # 這裡寫完整 fullType 而不是短名——配方宣告在 module Base（見 14），短名會被補成
 # Base.GPSNavigator 而永遠對不上輸入寫的 MinidoracatAutoDrive.GPSNavigator。
 RECIPE_MUST_CONSUME = {"CraftAutopilotModule": "MinidoracatAutoDrive.GPSNavigator"}
-BARE_TYPE_RE = re.compile(r"([A-Za-z]\w*(?:\.\w+)?)(?![\w.\[])")
-ITEM_ENTRY_RE = re.compile(r"(?m)^\s*item\s+\d+\s+(.+?)\s*,?\s*$")
 
 
-def take_block(text, at):
-    """text[at] 必須是 '{'；用深度計數回傳區塊內容，巢狀 inputs{} 不會被提早截斷。"""
-    depth = 0
-    for i in range(at, len(text)):
-        if text[i] == "{":
-            depth += 1
-        elif text[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return text[at + 1:i]
-    return text[at + 1:]
-
-
-def parse_blocks(text, keyword):
-    """掃 `<keyword> <名稱> { … }`，回傳 [(名稱, 內容)]。"""
-    return [(mm.group(1), take_block(text, mm.end() - 1))
-            for mm in re.finditer(rf"(?<![\w.]){keyword}\s+([\w.]+)\s*\{{", text)]
-
-
-def sub_block(body, keyword):
-    """取無名子區塊（inputs / outputs）的內容。"""
-    mm = re.search(rf"(?<![\w.]){keyword}\s*\{{", body)
-    return take_block(body, mm.end() - 1) if mm else ""
-
-
-def parse_fields(body):
-    """`Key = value,` 逐項擷取；先剝掉子區塊，免得把 inputs 內容當成欄位。"""
-    while True:
-        stripped = re.sub(r"\{[^{}]*\}", "", body)
-        if stripped == body:
-            break
-        body = stripped
-    return {k: v.strip() for k, v in re.findall(r"(\w+)\s*=\s*([^,\r\n]*)", body)}
-
-
-def parse_recipe_items(block, module):
-    """回傳 [(fullTypes, 原文)]。tags[…] 輸入沒有具體物品，fullTypes 為空。"""
-    out = []
-    for mm in ITEM_ENTRY_RE.finditer(block):
-        rest = mm.group(1)
-        br = re.search(r"(?<!\w)\[([^\]]+)\]", rest)   # `[A;B]`；flags[…]/tags[…] 前有字母，不算
-        if br:
-            raw = br.group(1)
-        else:
-            bare = BARE_TYPE_RE.match(rest)
-            raw = bare.group(1) if bare else ""
-        # 不帶模組前綴的名字由引擎補上所在 module——這裡照做，才抓得到未加前綴的錯字
-        types = [t if "." in t else f"{module}.{t}"
-                 for t in (s.strip() for s in raw.split(";")) if t]
-        out.append((types, rest))
-    return out
 
 
 def png_spec(path):
@@ -708,7 +966,7 @@ for m in MEDIA_DIRS:
     tex = os.path.join(m, "textures")
     bad = []
     for full, (ifields, rel) in sorted(declared.items()):
-        icon = ifields.get("Icon")
+        icon = field_get(ifields, "Icon")
         if not icon:
             bad.append(f"{rel}: {full} 沒有 Icon 欄位（背包會顯示問號）")
             continue
@@ -725,12 +983,47 @@ for m in MEDIA_DIRS:
     fail("物品 Icon 有對應 64x64 RGBA PNG", bad) if bad \
         else ok(f"物品 Icon 有對應 64x64 RGBA PNG（{len(declared)} 物品）")
 
-    # 12b/c/d. 配方物品引用 / OnTest 實作 / 進度閘門
-    bad_ref, bad_cb, bad_gate = [], [], []
+    # 12b/c/d/f. 配方物品引用 / OnTest 實作 / 進度閘門 / drainable 消耗語意
+    #
+    # 12f 範圍：本 MOD 宣告的 drainable——含 fullType 直接引用與 tags[...] selector
+    # 命中本 MOD drainable 之 Tags 者（本檔不讀原版 scripts，原版 drainable 的配方
+    # 輸入這裡看不到）。CraftRecipeManager.java:633/652：無 flags[ItemCount] 時計量
+    # 按 getCurrentUses()，空件貢獻 0 卻仍被收進消耗集合（:621-630），湊滿那一刻
+    # 整批連坐銷毀（processDestroyAndUsedItems，CraftRecipeData.java:544-564）。
+    # 正式服實爆：39 個空電 GPS 一次製作全滅、只產出 1 個模組。
+    # 三種合法寫法：flags[ItemCount]（按件計，Base.Battery 型，recipes_electrical.txt:30）
+    # 、flags[IsFull]（滿件才可入料，Base.Claybag 型，recipes_sacks.txt:27）或
+    # flags[NotEmpty]（同拒空件入料，InputScript.java:1057-1058）——後兩者天然無空件
+    # 連坐。非 destroy mode 也不安全：空件同樣被收進消耗集合，且
+    # UseItem 對 uses<=0 且無 KeepOnDeplete=true 的物品一樣 RemoveItem
+    # （ItemUser.java:69-72）——本 MOD 現況安全只因 GPSNavigator 帶 KeepOnDeplete，
+    # 該前提由本閘門明確檢查，不靠默契。flags 比對不 strip 也不折大小寫：引擎
+    # split(";") 後直接 InputFlag.valueOf（InputScript.java:744-748，無 trim、大小寫
+    # 敏感），帶空白或錯大小寫是載入期 IllegalArgumentException。
+    # ItemType 值走 norm_tag 正規化（`Drainable`／`Base:Drainable` ≡ base:drainable，
+    # 引擎 Item.java:1970-1971 ItemType.get(ResourceLocation.of(val.trim()))）；
+    # 欄位名走 field_get（equalsIgnoreCase）；Tags 由 parse_fields 依引擎語意累積。
+    drainables = {ft: ifields for ft, (ifields, _) in declared.items()
+                  if norm_tag(field_get(ifields, "ItemType")) == "base:drainable"}
+    drain_tag_map = {ft: {norm_tag(t) for t in field_get(ifields, "Tags").split(";")
+                          if t.strip()}
+                     for ft, ifields in drainables.items()}
+    bad_ref, bad_cb, bad_gate, bad_drain = [], [], [], []
+    bad_mode = []
     for mod, name, rbody, rel in recipes:
         fields = parse_fields(rbody)
         inputs = parse_recipe_items(sub_block(rbody, "inputs"), mod)
-        for types, _raw in inputs + parse_recipe_items(sub_block(rbody, "outputs"), mod):
+        for types, raw, amt, amt_raw in inputs:
+            # 全 input 行的載入期驗證：引擎在第一個非法 token 就 throw（整條配方
+            # 炸掉不存在，玩家端零訊息）——「後面還有合法寫法」救不回來。
+            # 數量同屬載入期：引擎解析見 amount_load_error（variable[lo:hi] 或 parseFloat）。
+            amt_err = amount_load_error(amt_raw)
+            if amt_err:
+                bad_mode.append(f"{rel}: {name} 輸入數量 `{amt_raw}` {amt_err}"
+                                f"——載入期整條配方不存在")
+            for err in input_line_load_errors(raw):
+                bad_mode.append(f"{rel}: {name} 輸入 `{raw.strip()}` {err}")
+        for types, _raw, _amt, _ar in inputs + parse_recipe_items(sub_block(rbody, "outputs"), mod):
             for t in types:
                 ns = t.split(".", 1)[0]
                 if ns in VANILLA_NS:
@@ -740,23 +1033,81 @@ for m in MEDIA_DIRS:
                                    "（跨 MOD 相依請寫進 verify_ignore.txt 並註明查證依據）")
                 elif t not in declared:
                     bad_ref.append(f"{rel}: {name} 引用不存在的物品 {t}")
-        cb = fields.get("OnTest")
+        cb = field_get(fields, "OnTest")
         if cb and not re.search(rf"function\s+{re.escape(cb)}\s*\(|{re.escape(cb)}\s*=\s*function",
                                 LUA_SRC):
             bad_cb.append(f"{rel}: {name} 的 OnTest = {cb} 在 Lua 找不到實作"
                           "（引擎解析不到會當成沒有可用材料，靜默鎖死配方）")
         want = RECIPE_MUST_CONSUME.get(name)
         if want:
-            hits = [raw for types, raw in inputs if want in types]
-            if not hits:
-                bad_gate.append(f"{name} 的 inputs 沒有 {want}")
-            elif all("mode:keep" in raw for raw in hits):
-                bad_gate.append(f"{name} 的 {want} 是 mode:keep，沒有真的被消耗")
+            hits = [(raw, types, amt) for types, raw, amt, _ar in inputs if want in types]
+            if len(hits) != 1:
+                bad_gate.append(
+                    f"{name} 的 {want} 命中 {len(hits)} 條 input——公開契約是「固定只"
+                    f"消耗 1 個」，0 條＝沒消耗、多條＝引擎每條各吃一次")
+            for raw, htypes, amt in hits:
+                mode = input_mode(raw)
+                if mode != "destroy":
+                    bad_gate.append(
+                        f"{name} 的 {want} mode={mode}，必須 mode:destroy——非 destroy 時"
+                        f"耗盡的 KeepOnDeplete 物品仍留存（ItemUser.java:69-72），"
+                        f"同一件可重複製作")
+                if amt != 1:
+                    bad_gate.append(
+                        f"{name} 的 {want} 數量是 item {amt if amt is not None else '非數值'}"
+                        f"——公開契約是「固定只消耗 1 個」，多於 1 會整批多吃")
+                if len(htypes) != 1:
+                    bad_gate.append(
+                        f"{name} 的 {want} 候選集合 {htypes} 非排他——引擎可用其他候選"
+                        f"湊滿而零消耗 GPS，升級閘門失效")
+                gate_flags = input_flags(raw)
+                if "ItemCount" not in gate_flags:
+                    bad_gate.append(
+                        f"{name} 的 {want} 缺 flags[ItemCount]——電量狀態 flag 會拒料、"
+                        f"無 flag 會連坐吞噬，皆違反「空電可入料、固定吃一件」的"
+                        f"公開行為契約（CHANGELOG 已對玩家承諾）")
+                else:
+                    st = gate_flags & {"IsFull", "IsEmpty", "NotFull", "NotEmpty"}
+                    if st:
+                        bad_gate.append(
+                            f"{name} 的 {want} 帶電量狀態 flag {sorted(st)}——引擎逐 flag"
+                            f" 獨立套用（doesItemPassIsOrNotEmptyAndFullTests，"
+                            f"InputScript.java:1044-1059），ItemCount 不能抵銷，"
+                            f"「不看電量」的公開契約被限縮")
+        for types, raw, _amt, _ar in inputs:
+            hit_types = [t for t in types if t in drainables]
+            in_tags = {norm_tag(t, trim=False) for t in _bracket_union(raw, "tags")}
+            if in_tags:
+                hit_types += [ft for ft in drainables
+                              if ft not in hit_types and in_tags & drain_tag_map[ft]]
+            if not hit_types:
+                continue
+            in_flags = input_flags(raw)
+            mode = input_mode(raw)
+            if mode == "destroy":
+                # ItemCount（按件計）或 IsFull/NotEmpty（拒空件入料）都使連坐不可能
+                if not (in_flags & {"ItemCount", "IsFull", "NotEmpty"}):
+                    bad_drain.append(
+                        f"{rel}: {name} 輸入 `{raw.strip()}` —— drainable 走 destroy 必須帶 "
+                        f"flags[ItemCount]（或 IsFull/NotEmpty），否則空件被連坐吞噬")
+            elif not (in_flags & {"IsFull", "NotEmpty"}) and any(
+                    # 非 destroy：空件仍被連坐收集，UseItem 對 uses<=0 且無
+                    # KeepOnDeplete 者照樣 RemoveItem——ItemCount 不豁免此路徑
+                    field_get(drainables[t], "KeepOnDeplete").strip().lower() != "true"
+                    for t in hit_types):
+                bad_drain.append(
+                    f"{rel}: {name} 輸入 `{raw.strip()}` —— 非 destroy 的 drainable 輸入"
+                    f"（mode={mode}）需該物品宣告 KeepOnDeplete = true，否則空件耗盡被"
+                    f"靜默移除（ItemUser.java:69-72）且同樣被連坐收集")
     bad_ref = sorted(set(bad_ref))
     fail("配方物品引用存在", bad_ref) if bad_ref else ok(f"配方物品引用存在（{len(recipes)} 配方）")
     fail("配方 OnTest 有 Lua 實作", bad_cb) if bad_cb else ok("配方 OnTest 有 Lua 實作")
     fail("配方進度閘門（升級配方消耗前一階物品）", bad_gate) if bad_gate \
         else ok("配方進度閘門（升級配方消耗前一階物品）")
+    fail("配方輸入載入期擋炸（mode／flags／unknown token）", bad_mode) if bad_mode \
+        else ok("配方輸入載入期擋炸（mode／flags／unknown token）")
+    fail("drainable 輸入消耗語意（ItemCount/IsFull/KeepOnDeplete）", bad_drain) if bad_drain \
+        else ok("drainable 輸入消耗語意（ItemCount/IsFull/KeepOnDeplete；本 MOD drainable）")
 
     # 12e. Lua／翻譯檔字串裡的 fullType（分佈表、MDAD.TYPE_*、ItemName.json）
     bad_use = []
@@ -773,6 +1124,7 @@ for m in MEDIA_DIRS:
                     bad_use.append(f"{rel}: 參照不存在的物品 {mm.group(1)}")
     bad_use = sorted(set(bad_use))
     fail("Lua／翻譯參照的物品存在", bad_use) if bad_use else ok("Lua／翻譯參照的物品存在")
+
 
 # ---- 13. 沙盒選項規格 ----
 # type/min/max/default 對表。改壞 default 玩家端只會覺得「行為不對」，改壞 min/max 則是
@@ -877,15 +1229,16 @@ for m in MEDIA_DIRS:
                     f"{rel}: {want_name} 在 module {mod}，必須是 module {LEARN_MODULE}"
                     "（短名只在 Base 查得到，見 ScriptBucketCollection.java:77）")
             rfields = parse_fields(rbody)
-            if (rfields.get("NeedToBeLearn") or "").lower() != "true":
+            if field_get(rfields, "NeedToBeLearn").lower() != "true":
                 bad_learn.append(
-                    f"{rel}: {want_name} 的 NeedToBeLearn = {rfields.get('NeedToBeLearn')}，"
+                    f"{rel}: {want_name} 的 NeedToBeLearn = "
+                    f"{field_show(rfields, 'NeedToBeLearn')}，"
                     "必須是 true（false 則開局就會，雜誌與研究全部失去意義）")
             for field, expect in (("SkillRequired", skill), ("AutoLearnAny", auto),
                                   ("ResearchSkillLevel", research)):
-                if rfields.get(field) != expect:
+                if field_get(rfields, field) != expect:
                     bad_learn.append(f"{rel}: {want_name} 的 {field} = "
-                                     f"{rfields.get(field)}，規格是 {expect}")
+                                     f"{field_show(rfields, field)}，規格是 {expect}")
     fail("配方學習閘門（module Base／NeedToBeLearn／技能對表）", bad_learn) if bad_learn \
         else ok(f"配方學習閘門（{len(RECIPE_LEARN_SPEC)} 配方）")
 
@@ -897,20 +1250,20 @@ for m in MEDIA_DIRS:
                        "（沒有專屬雜誌就只剩 AutoLearn 與成品研究）")
     else:
         mfields, mrel = manual
-        if mfields.get("ItemType") != MANUAL_ITEM_TYPE:
+        if field_get(mfields, "ItemType") != MANUAL_ITEM_TYPE:
             bad_src.append(f"{mrel}: {MANUAL_FULL} 的 ItemType = "
-                           f"{mfields.get('ItemType')}，規格是 {MANUAL_ITEM_TYPE}"
+                           f"{field_show(mfields, 'ItemType')}，規格是 {MANUAL_ITEM_TYPE}"
                            "（非 literature 就無法閱讀學會配方）")
-        if mfields.get("OnCreate") != MANUAL_ON_CREATE:
+        if field_get(mfields, "OnCreate") != MANUAL_ON_CREATE:
             bad_src.append(f"{mrel}: {MANUAL_FULL} 的 OnCreate = "
-                           f"{mfields.get('OnCreate')}，規格是 {MANUAL_ON_CREATE}"
+                           f"{field_show(mfields, 'OnCreate')}，規格是 {MANUAL_ON_CREATE}"
                            "（維持原版配方雜誌的已讀狀態）")
-        if mfields.get("Icon") != MANUAL_ICON:
-            bad_src.append(f"{mrel}: {MANUAL_FULL} 的 Icon = {mfields.get('Icon')}，"
-                           f"規格是 {MANUAL_ICON}")
-        if mfields.get("LearnedRecipes") != MANUAL_LEARNED:
+        if field_get(mfields, "Icon") != MANUAL_ICON:
+            bad_src.append(f"{mrel}: {MANUAL_FULL} 的 Icon = "
+                           f"{field_show(mfields, 'Icon')}，規格是 {MANUAL_ICON}")
+        if field_get(mfields, "LearnedRecipes") != MANUAL_LEARNED:
             bad_src.append(f"{mrel}: {MANUAL_FULL} 的 LearnedRecipes = "
-                           f"{mfields.get('LearnedRecipes')}，規格是 {MANUAL_LEARNED}"
+                           f"{field_show(mfields, 'LearnedRecipes')}，規格是 {MANUAL_LEARNED}"
                            "（一本手冊教兩個配方）")
     for full, expect in sorted(RESEARCHABLE_SPEC.items()):
         entry = declared.get(full)
@@ -918,9 +1271,9 @@ for m in MEDIA_DIRS:
             bad_src.append(f"缺 item {full}，無從掛 Researchablerecipes")
             continue
         ifields, rel = entry
-        if ifields.get("Researchablerecipes") != expect:
+        if field_get(ifields, "Researchablerecipes") != expect:
             bad_src.append(f"{rel}: {full} 的 Researchablerecipes = "
-                           f"{ifields.get('Researchablerecipes')}，規格是 {expect}")
+                           f"{field_show(ifields, 'Researchablerecipes')}，規格是 {expect}")
     fail("配方學習來源（手冊 LearnedRecipes／成品 Researchablerecipes）", bad_src) if bad_src \
         else ok("配方學習來源（手冊 LearnedRecipes／成品 Researchablerecipes）")
 
@@ -928,7 +1281,7 @@ for m in MEDIA_DIRS:
     bad_short = []
     for full, (ifields, rel) in sorted(declared.items()):
         for field in ("LearnedRecipes", "Researchablerecipes"):
-            for entry in (s.strip() for s in (ifields.get(field) or "").split(";")):
+            for entry in (s.strip() for s in field_get(ifields, field).split(";")):
                 if entry and "." in entry:
                     bad_short.append(
                         f"{rel}: {full} 的 {field} 有模組限定名 {entry}，只能寫配方短名"
@@ -1002,6 +1355,203 @@ for rel in FOCUSED_TESTS:
         phase1.append(f"缺聚焦測試 {rel}（閘門只檢查存在，不執行）")
 fail("Phase 1 telemetry 靜態契約", phase1) if phase1 else ok(
     "Phase 1 telemetry 靜態契約（模組／選項／翻譯／聚焦測試檔存在且未執行）")
+
+# ---- 16. 意圖層階段 2 結構契約（RECOVER 單一進口）----
+# 2026-09-01 重構階段 2 主體 2：舊制五個需求方各自呼 startRecoveryAttempt，
+# 優先序靠賦值順序隱式決定。現在需求方一律只呼 requestRecover 設旗標＋原因，
+# 恢復動作由 stepFollow 尾端單一 dispatch 判定。這是結構不變式：離線行為測試
+# 抓不到「有人又加了第六個直接進口」（新進口自己也會動、測試照綠），只有
+# 靜態計數擋得住。
+phase2 = []
+drv_src = ""
+for f in LUA_FILES:
+    if os.path.basename(f) == "MDAD_Driver.lua":
+        with open(f, encoding="utf-8") as fh:
+            drv_src = fh.read()
+        break
+if not drv_src:
+    phase2.append("缺 client/MDAD_Driver.lua")
+else:
+    # 定義 1 次 + 呼叫 1 次；註解／字串裡的名字不帶左括號，故只數 "name("
+    calls = drv_src.count("startRecoveryAttempt(")
+    defs = drv_src.count("local function startRecoveryAttempt(")
+    if defs != 1:
+        phase2.append(f"startRecoveryAttempt 定義應為 1 處（實得 {defs}）")
+    if calls - defs != 1:
+        phase2.append(
+            f"startRecoveryAttempt 呼叫點應唯一（實得 {calls - defs}）"
+            "——恢復需求請改呼 requestRecover 設旗標")
+    if "local function requestRecover(" not in drv_src:
+        phase2.append("缺 requestRecover 單一進口函式")
+    if "TUNE.RECOVER_RANK" not in drv_src:
+        phase2.append("缺 TUNE.RECOVER_RANK 顯式優先序表")
+    # s.recoverWhy 的唯一賦值寫法：requestRecover 內一處，加上清旗標（= nil）
+    bad = [ln.strip() for ln in drv_src.splitlines()
+           if "s.recoverWhy =" in ln or "s.recoverWhy," in ln]
+    setters = [ln for ln in bad if "nil" not in ln]
+    if len(setters) != 1:
+        phase2.append(
+            f"s.recoverWhy 的設值點應唯一（requestRecover 內），實得 {len(setters)}")
+fail("階段 2 結構契約（RECOVER 單一進口）", phase2) if phase2 else ok(
+    "階段 2 結構契約（RECOVER 單一進口／顯式優先序）")
+
+# ---- 17. 意圖層階段 2 結構契約（餘裕預算單一 authority）----
+# 2026-09-01 重構階段 2 主體 4：sensor 半徑／needHalf／squeezeNeed／sweep base
+# ／QUANT_COMP 各自扣一層餘裕，疊加超支把 2.4m 的縫對 1.8m 的車判死。現在
+# need／base 一律由 MDADVehicleProfile.planNeed／sweepBase 從同一張預算表導出。
+# 這同樣是結構不變式：私扣一層 5cm 在離線測試裡看不出來（只有邊際縫才顯形），
+# 只有靜態禁寫法擋得住。
+phase2b = []
+prof_src = ""
+for f in LUA_FILES:
+    if os.path.basename(f) == "MDAD_VehicleProfile.lua":
+        with open(f, encoding="utf-8") as fh:
+            prof_src = fh.read()
+        break
+if not prof_src:
+    phase2b.append("缺 client/MDAD_VehicleProfile.lua")
+else:
+    for token in ("function MDADVehicleProfile.clearanceBudget(",
+                  "function MDADVehicleProfile.planNeed(",
+                  "function MDADVehicleProfile.sweepBase("):
+        if token not in prof_src:
+            phase2b.append(f"MDAD_VehicleProfile.lua 缺 {token[9:]}")
+    if prof_src.count("CLEARANCE_BUDGET = {") != 1:
+        phase2b.append("CLEARANCE_BUDGET 預算表應為唯一一張")
+# 禁止的私扣寫法：任何一行只要同時出現「餘裕識別字」與「±小數字面值」，就是
+# 在單一 authority 之外自己加減餘裕。註解不算（歷史說明用得到），具名常數
+# （例如 CURVE_NEED_EXTRA 這種有物理理由的加碼）也不算——只擋裸字面值。
+MARGIN_IDENT = re.compile(
+    r"\b(needHalf|needUsed|needBase|squeezeNeed|sweepBase|squeezeSweepBase"
+    r"|dodgeNeed|probeNeed|probeBase|halfW)\b")
+MARGIN_LITERAL = re.compile(r"[-+]\s*(?:0?\.\d|\d+\.\d)")
+for label, src in (("MDAD_Driver.lua", drv_src),
+                   ("MDAD_VehicleProfile.lua", prof_src)):
+    for i, line in enumerate(src.splitlines(), 1):
+        code = line.split("--", 1)[0]
+        if MARGIN_IDENT.search(code) and MARGIN_LITERAL.search(code):
+            phase2b.append(
+                f"{label}:{i} 私扣餘裕 `{code.strip()}`"
+                "——請改用 clearanceBudget／planNeed／sweepBase")
+fail("階段 2 結構契約（餘裕預算單一 authority）", phase2b) if phase2b else ok(
+    "階段 2 結構契約（餘裕預算單一 authority／禁私扣）")
+
+# ---- 18. 意圖層階段 2 結構契約（mode／progressState 契約值收斂）----
+# 2026-09-01 重構階段 2 主體 5：mode 只留「會繞過 stepFollow 或整段停控」的狀態；
+# 恢復鏈的內部階段一律在 progressState，「有恢復需求」是 s.recoverWhy 旗標。
+# 靜態掃描賦值字面值，任何新增的第三種狀態機值都會被擋下——這是離線行為測試
+# 抓不到的（新值自己也會走出一條路，測試照綠，語意卻又分裂成兩套）。
+MODE_CONTRACT = {"build", "follow", "unstick", "settle", "yield", "arrive"}
+PROGRESS_CONTRACT = {"disarmed", "watch", "verify", "suspect",
+                     "recover", "gear-reset", "settle"}
+phase2c = []
+if not drv_src:
+    phase2c.append("缺 client/MDAD_Driver.lua")
+else:
+    for field, allowed in (("mode", MODE_CONTRACT),
+                           ("progressState", PROGRESS_CONTRACT)):
+        pat = re.compile(r"""s\.%s\s*=\s*["']([^"']+)["']""" % field)
+        for i, line in enumerate(drv_src.splitlines(), 1):
+            code = line.split("--", 1)[0]
+            for value in pat.findall(code):
+                if value not in allowed:
+                    phase2c.append(
+                        f"MDAD_Driver.lua:{i} s.{field} 寫入非契約值 "
+                        f"\"{value}\"（契約：{sorted(allowed)}）")
+    # gear-reset／recover 必須已經離開 mode
+    for banned in ('s.mode = "gear-reset"', 's.mode = "recover"',
+                   's.mode == "gear-reset"', 's.mode == "recover"'):
+        if banned in drv_src:
+            phase2c.append(
+                f"MDAD_Driver.lua 仍有 `{banned}`"
+                "——恢復階段請用 progressState／recoverWhy")
+fail("階段 2 結構契約（mode／progressState 契約值）", phase2c) if phase2c else ok(
+    "階段 2 結構契約（mode／progressState 契約值收斂）")
+
+# ---- 19. 意圖層階段 2 結構契約（調頭單一權威）----
+# 2026-09-01 重構階段 2 主體 6：Driver 的 ROTATE_ERR_RAD=90° 與 Follower 的
+# ROTATE_ENTER=135°／EXIT=100° 在 90-135° 匯流區各說各話（Driver 判「要調頭」
+# 主動煞停，Follower 判「還在跟線」照給轉向）。調頭姿態的唯一權威是
+# fstate.rotating；Driver 不得再有第二條角度門檻。
+phase2d = []
+if not drv_src:
+    phase2d.append("缺 client/MDAD_Driver.lua")
+else:
+    if "ROTATE_ERR_RAD" in drv_src:
+        phase2d.append(
+            "MDAD_Driver.lua 仍有 ROTATE_ERR_RAD——調頭判定請讀 s.fstate.rotating")
+    if "s.fstate.rotating" not in drv_src:
+        phase2d.append("MDAD_Driver.lua 未讀 s.fstate.rotating（調頭單一權威）")
+fol_src = ""
+for f in LUA_FILES:
+    if os.path.basename(f) == "MDAD_Follower.lua":
+        with open(f, encoding="utf-8") as fh:
+            fol_src = fh.read()
+        break
+if not fol_src:
+    phase2d.append("缺 shared/MDAD_Follower.lua")
+elif "ROTATE_ENTER" not in fol_src or "ROTATE_EXIT" not in fol_src:
+    phase2d.append("MDAD_Follower.lua 缺 ROTATE_ENTER／ROTATE_EXIT 遲滯門檻")
+fail("階段 2 結構契約（調頭單一權威）", phase2d) if phase2d else ok(
+    "階段 2 結構契約（調頭單一權威＝fstate.rotating）")
+# ---- 20. 0902 結構契約（持有權仲裁／連續縮放／coverEnd／測試常數對齊）----
+# 2026-09-02 一輪快刀後的機器鎖：這些都是「離線行為測試抓得到症狀、抓不到
+# 結構回退」的契約——例如 dodgeSpeedCapKmh 若有人補回第 7 參 squeeze 帽，
+# harness 的速度上緣斷言照過（更保守也在區間內），只有簽章掃描擋得住。
+c0902 = []
+dyn_src = ""
+for f in LUA_FILES:
+    if os.path.basename(f) == "MDAD_Dynamics.lua":
+        with open(f, encoding="utf-8") as fh:
+            dyn_src = fh.read()
+        break
+if not drv_src or not dyn_src:
+    c0902.append("缺 MDAD_Driver.lua／MDAD_Dynamics.lua")
+else:
+    # ① one-size 爬行帽退役：dodgeSpeedCapKmh 六參，不得再有 squeeze 參
+    m = re.search(r"function D\.dodgeSpeedCapKmh\(([^)]*)\)", dyn_src)
+    if not m:
+        c0902.append("Dynamics 缺 dodgeSpeedCapKmh")
+    else:
+        params = [p.strip() for p in m.group(1).replace("\n", " ").split(",")]
+        if len(params) != 6 or "squeeze" in m.group(1):
+            c0902.append(
+                "dodgeSpeedCapKmh 簽章非六參（one-size 爬行帽已退役：速度只由"
+                "連續物理量決定，不得補回 squeeze 檔位參數）")
+    # ② fstate 單一持有權：profileOwner 定義唯一，且 replan 的 dodge commit
+    #    （setOffset 呼叫）之前必經 owner 判定
+    if len(re.findall(r"local function profileOwner\(", drv_src)) != 1:
+        c0902.append("profileOwner 定義數 ≠ 1（fstate 持有權仲裁必須單一）")
+    if "local owner = profileOwner(s)" not in drv_src:
+        c0902.append("replan 未讀 profileOwner（dodge commit 前必經仲裁）")
+    if "if owner == \"rotate\" or owner == \"dodge\" then return end" not in drv_src:
+        c0902.append("updateReturnSnapshot 未在 ROTATE／DODGE 持有時掛起 RETURN")
+    # ③ setOffset 呼叫必帶 coverEnd（d 可超 route 終點，覆蓋檢查要鉗 route 長）
+    for call in re.finditer(r"MDADFollower\.setOffset\(([^;]*?)\)\s*then", drv_src, re.S):
+        args = call.group(1)
+        if "coverEnd" not in args:
+            c0902.append("Driver 的 MDADFollower.setOffset 呼叫未傳 coverEnd（近目標 commit 會被舊 d+1 覆蓋契約拒收）")
+    # ④ 擋線判定單一定義：replan 內不得再手寫 |l-bias| < r+needHalf
+    if len(re.findall(r"local function blocksLine\(", drv_src)) != 1:
+        c0902.append("blocksLine 定義數 ≠ 1（擋線判定單一定義）")
+    if re.search(r"dl2? < r2? \+ (s\.needHalf|nh)", drv_src.split("local function replan(")[-1]):
+        c0902.append("replan 內出現手寫擋線判定——請走 blocksLine／lineBlockerAhead")
+    # ⑤ harness 測試常數與 production 對齊（TUNE 不 export，改靜態抽值比對）
+    mt = re.search(r"TUNE\.RETURN_UNSAFE_CAP\s*=\s*([0-9.]+)", drv_src)
+    harness_path = os.path.join(REPO, "scripts", "smoke_harness.lua")
+    if mt and os.path.exists(harness_path):
+        with open(harness_path, encoding="utf-8") as fh:
+            hs = fh.read()
+        mh = re.search(r"local TUNE_RETURN_UNSAFE_CAP_TEST\s*=\s*([0-9.]+)", hs)
+        if not mh:
+            c0902.append("smoke_harness 缺 TUNE_RETURN_UNSAFE_CAP_TEST")
+        elif float(mh.group(1)) != float(mt.group(1)):
+            c0902.append(
+                f"smoke_harness TUNE_RETURN_UNSAFE_CAP_TEST={mh.group(1)} ≠ "
+                f"Driver TUNE.RETURN_UNSAFE_CAP={mt.group(1)}（平行常數漂移）")
+fail("0902 結構契約", c0902) if c0902 else ok(
+    "0902 結構契約（六參 cap／持有權仲裁唯一／coverEnd／擋線單一定義／測試常數對齊）")
+
 # ---- 總結 ----
 print()
 print(f"PASS {len(passed)} / FAIL {len(failed)} / SKIP {len(skipped)}")

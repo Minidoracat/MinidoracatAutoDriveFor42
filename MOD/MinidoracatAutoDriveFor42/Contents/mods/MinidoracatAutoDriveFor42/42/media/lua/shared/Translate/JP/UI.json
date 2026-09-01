@@ -31,7 +31,6 @@
     "UI_MinidoracatAutoDrive_GearStandard": "標準（50 km/h）",
     "UI_MinidoracatAutoDrive_GearSport": "スポーツ（70 km/h）",
     "UI_MinidoracatAutoDrive_GearInsane": "インセイン（車両の最高速）",
-    "UI_MinidoracatAutoDrive_Detour": "ルートが塞がれています。迂回します。",
     "UI_MinidoracatAutoDrive_HUDOptions": "オートドライブ HUD",
     "UI_MinidoracatAutoDrive_HUDOptionsDescription": "標準の車両ダッシュボード上部に表示します。テーマとレイアウトの変更はすぐに反映されます。",
     "UI_MinidoracatAutoDrive_Options": "オートドライブ",
@@ -102,7 +101,7 @@
     "UI_MinidoracatAutoDrive_TelemetryNoFile": "診断ログファイルはまだありません",
     "UI_MinidoracatAutoDrive_TelemetryCopied": "診断ログのパスをクリップボードにコピーしました",
     "UI_MinidoracatAutoDrive_TelemetryCopyFailed": "診断ログのパスをコピーできませんでした",
-    "UI_MinidoracatAutoDrive_TelemetrySlotsFull": "64 個の診断ログ枠がすべて保持期間内のため、今回の走行は記録しません",
+    "UI_MinidoracatAutoDrive_TelemetrySlotsFull": "64 個の診断ログ枠をいずれも再利用できなかったため、今回の走行は記録しません",
     "UI_MinidoracatAutoDrive_TelemetryWriteFailed": "診断ログの書き込みに失敗したため、今回の走行の記録を停止しました",
     "UI_MinidoracatAutoDrive_TelemetryFileFull": "診断ログが 2MiB の上限に達したため、今回の走行にはこれ以上追記しません"
 }

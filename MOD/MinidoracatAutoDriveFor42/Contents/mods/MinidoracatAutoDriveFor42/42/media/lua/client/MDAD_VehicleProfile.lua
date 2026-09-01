@@ -80,7 +80,25 @@ local STEER_MARGIN = 0.8
 local SAFE_D0_LO, SAFE_D0_HI, SAFE_DV_LO = 0.35, 0.75, 0.1
 local LOOK_LO, LOOK_HI = 0.85, 1.5
 local ARM_REF, ARM_SCALE_LO, ARM_SCALE_HI = 2.2, 0.85, 1.35
-local NEED_BASE, NEED_MARGIN = 1.4, 0.4
+-- 餘裕預算單一 authority（2026-09-01 階段 2 主體 4，第六層洋蔥的教訓）：
+-- 舊制 sensor 半徑、needHalf（halfW+0.3）、squeezeNeed（halfW+0.10）、
+-- sweep base（need-0.1）、QUANT_COMP 各自扣一層餘裕，疊加超支把 2.4m 的縫
+-- 對 1.8m 的車判死。現在只有這一張表能定義「車身外要留多少」：
+--   cruise  = 0.30  巡航規劃淨距（真人過縫常態；感知端小物半徑已精確化
+--                   0.35，肥邊不再雙重疊加）
+--   squeeze  = 0.10  貼縫爬行檔（12 km/h；telemetry s016/s046 定罪 5-10cm
+--                    反覆打槍）
+--   physical = 0     物理終審檔：規劃只認車身本體，沒有任何舒適預算
+--                    （s016-s020 五輪定罪＋使用者裁定「視覺上有空間就該過」）
+--   probe    = -0.10 世界掃掠複驗容許的剮蹭量——**唯一合法的第二次扣除**，
+--                    只加在 sweep base 上，不得用於規劃 need
+-- 任何呼叫端都不准再私扣：need／base 一律走 planNeed／sweepBase 導出。
+-- NEED_BASE 只是 cruise 的絕對地板（窄車不得把巡航淨距壓到量化誤差以下）；
+-- squeeze／physical 是刻意貼身的檔位，不吃地板。
+local NEED_BASE = 1.2
+local CLEARANCE_BUDGET = {
+    cruise = 0.3, squeeze = 0.1, physical = 0, probe = -0.1,
+}
 local PROBE_EXTRA, PROBE_LO, PROBE_HI = 1, 3, 7
 
 -- Reference force/mass densities of the calibration sedan (4000 N engine force,
@@ -92,6 +110,29 @@ local TIRE_SCALE_LO = 0.35     -- worst tire-grip fraction; also the missing-tir
 local function isFinite(n)
     return type(n) == "number" and n * 0 == 0
 end
+function MDADVehicleProfile.clearanceBudget(mode)
+    local b = CLEARANCE_BUDGET[mode]
+    if b == nil then return CLEARANCE_BUDGET.cruise end
+    return b
+end
+
+-- 規劃需求半寬：車身半寬 + 該 mode 的預算。cruise 另吃絕對地板。
+function MDADVehicleProfile.planNeed(halfW, mode)
+    if not isFinite(halfW) or halfW < 0 then return NEED_BASE end
+    local need = halfW + MDADVehicleProfile.clearanceBudget(mode)
+    if mode == "cruise" and need < NEED_BASE then need = NEED_BASE end
+    if need < 0 then need = 0 end
+    return need
+end
+
+-- 世界掃掠 base：同一個 planNeed 再加 probe 預算（負值＝容許剮蹭）。
+function MDADVehicleProfile.sweepBase(halfW, mode)
+    local base = MDADVehicleProfile.planNeed(halfW, mode)
+        + MDADVehicleProfile.clearanceBudget("probe")
+    if base < 0 then base = 0 end
+    return base
+end
+
 
 local function clamp(n, lo, hi)
     if n < lo then return lo end
@@ -155,9 +196,12 @@ local function derive(bodyW, bodyL, wheelbase, clamp0, clampMax)
     local rMin = wheelbase / math.tan(delta0Safe)
     local scale = math.sqrt(wheelbase / WB_REF)
     local lookScale = clamp(scale, LOOK_LO, LOOK_HI)
-    local rearArm = ARM_REF * clamp(scale, ARM_SCALE_LO, ARM_SCALE_HI)
-    local needHalf = halfW + NEED_MARGIN
-    if needHalf < NEED_BASE then needHalf = NEED_BASE end
+    -- 慣量補償（2026-09-01 使用者核准提案 1）：yaw 慣量 ∝ mass×L²，力矩臂
+    -- 由 √scale 改線性 scale——長車（軸距長）拿到成比例更長的力臂，配平
+    -- 「同增益下長車轉不動」；上限 1.35 不變（甩尾由 lat 量測兜底）。
+    local rearArm = ARM_REF * clamp(scale * scale, ARM_SCALE_LO, ARM_SCALE_HI)
+    -- 餘裕只從單一 authority 取（階段 2 主體 4）：此處不得再私加常數
+    local needHalf = MDADVehicleProfile.planNeed(halfW, "cruise")
     local probeR = clamp(0.5 * math.sqrt(bodyW * bodyW + bodyL * bodyL)
         + PROBE_EXTRA, PROBE_LO, PROBE_HI)
     return halfW, halfL, delta0Safe, deltaVSafe, rMin, lookScale,
@@ -522,8 +566,9 @@ function MDADVehicleProfile.priors(profile, runtimeMass, surfaceId, raining,
         local rho = densityScale(profile.brakingForce, mass, BRAKE_REF_DENSITY)
         if rho < brakeScale then brakeScale = rho end
     end
-    return aDrive, 6 * fSurface * fTire * brakeScale,
-        3.5 * fSurface * fTire, fSurface, fTire, 0.6
+    return aDrive, 8 * fSurface * fTire * brakeScale,
+        9.0 * fSurface * fTire, fSurface, fTire, 0.6
+        -- aLat 基準 8.0→9.0（2026-09-02 二次激進化「過彎再快」，與 Follower 同輪）
 end
 
 -- Exact approved EWMA scalar update. The caller owns traction-key resets and

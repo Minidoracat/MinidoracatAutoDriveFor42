@@ -31,7 +31,6 @@
     "UI_MinidoracatAutoDrive_GearStandard": "Standard (50 km/h)",
     "UI_MinidoracatAutoDrive_GearSport": "Sport (70 km/h)",
     "UI_MinidoracatAutoDrive_GearInsane": "Insane (vehicle max)",
-    "UI_MinidoracatAutoDrive_Detour": "Route blocked. Taking a detour.",
     "UI_MinidoracatAutoDrive_HUDOptions": "Autodrive HUD",
     "UI_MinidoracatAutoDrive_HUDOptionsDescription": "Shown above the vanilla vehicle dashboard. Theme and layout changes apply immediately.",
     "UI_MinidoracatAutoDrive_Options": "Autodrive",
@@ -102,7 +101,7 @@
     "UI_MinidoracatAutoDrive_TelemetryNoFile": "No diagnostic log file yet",
     "UI_MinidoracatAutoDrive_TelemetryCopied": "Diagnostic log path copied to the clipboard",
     "UI_MinidoracatAutoDrive_TelemetryCopyFailed": "Could not copy the diagnostic log path",
-    "UI_MinidoracatAutoDrive_TelemetrySlotsFull": "All 64 diagnostic log slots are still within retention; this drive will not be recorded",
+    "UI_MinidoracatAutoDrive_TelemetrySlotsFull": "None of the 64 diagnostic log slots could be cleared for reuse; this drive will not be recorded",
     "UI_MinidoracatAutoDrive_TelemetryWriteFailed": "Diagnostic logging failed; recording has stopped for this drive",
     "UI_MinidoracatAutoDrive_TelemetryFileFull": "The diagnostic log reached its 2 MiB limit; this drive will not append more data"
 }

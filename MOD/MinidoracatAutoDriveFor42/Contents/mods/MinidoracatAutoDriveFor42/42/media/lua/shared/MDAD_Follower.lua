@@ -65,13 +65,17 @@
 -- * 幾何：折線＋累積弧長 s。投影只在 [idx-SEARCH_BACK, idx+SEARCH_FWD] 的窗口內找，
 --   全域最近點搜尋在自我交叉的路線（回頭路、繞圈）上會把進度瞬移到另一段。
 -- * 前視（pure pursuit）：lookahead ＝ lookScale*(6 + |speed|*0.12)，夾在
---   [6*lookScale,18*lookScale]；非 adaptive profile 的 lookScale=1。
--- * 曲率限速：v = sqrt(segLat / kappa)，kappa ＝ |Δθ| / ds。
+--   [6*lookScale,18*lookScale]；非 adaptive profile 的 lookScale=1。急彎再
+--   min(look, 0.75/κ)、下限 4.5m（2026-09-02：治切內又不放大增益到蛇行）。
+-- * 曲率限速：v = sqrt(segLat / kappa)，kappa ＝頂點外接圓曲率
+--   （circumcircleKappa；|Δθ| 只用於 TURN_* 折角帽）。
 --   夾 [MIN_SPEED_KMH, maxSpeed]：下限避免路網近 180° 假折點把車永遠停住。
 -- * 反向制動：v[i] <= sqrt(v[i+1]^2 + 2*segBrake[i]*L)。終點 v = 0，
 --   所以「彎前先減速」與「終點前煞停」由同一式推出。
--- * 前向加速：v[i+1] <= sqrt(v[i]^2 + 2*segAccel[i]*L)。runtime EWMA
---   lower bound 只能在 control 端再往下夾，不會抬高 getter-derived prior。
+-- * 前向加速不設剖面天花板（2026-09-01 三模型對抗審定案）：regulator 供油是
+--   二值全力（CarController.java:240-244 isGas；engineForce 不乘 throttle＝:755），
+--   剖面掐加速目標只會讓 regulator 目標貼著現速斷續供油、重車永遠加不上去。
+--   加速能力交還引擎；segAccel 保留為 ETA／遙測資料，不進控制。
 -- * PID：P 抓誤差、I 補系統性偏置（車體不對稱、路面阻力）、D 抑制擺盪。
 --   I 有 ±I_MAX 飽和 ＋ 條件積分（飽和且誤差同向就不累積）；D 先低通再進 PID，
 --   因為折線朝向是階梯狀的，raw (err-prev)/dt 在換段瞬間會打出尖刺。
@@ -98,12 +102,19 @@ local TWO_PI = PI * 2
 local MS_PER_KMH = 1 / 3.6
 local KMH_PER_MS = 3.6
 
-local ACCEL = 2.5             -- m/s²：前向加速上限
-local BRAKE = 6.0             -- m/s²：減速上限——引擎實煞 ~10，取六成留雨天餘裕。
-                              -- 3.0 時代的煞停曲線過長（40km/h 提前 20m 收油、
-                              -- 120km/h 提前 185m），終點與進彎都太早減速
-                              --（2026-08-29 使用者裁定：按真實煞停距動態化）
-local LAT_ACCEL = 3.5         -- m/s²：過彎橫向加速預算（決定曲率限速）
+local ACCEL_NOMINAL = 2.5     -- m/s²：segAccel 的名義預設。僅供 ETA／遙測與
+                              -- capSegmentLimits 的欄位收緊；**不進任何控制路徑**
+                              -- （前向加速無剖面天花板，見檔頭「前向加速」註解）
+local BRAKE = 8.0             -- m/s²：減速上限基準。引擎煞停力無 SI 反編譯出處
+                              -- （CarController brakingForce 的 10/15 是遊戲單位，
+                              -- 非 m/s²），8.0 是標定包絡。雨天／爛胎由
+                              -- VehicleProfile.priors 的 fSurface×fTire 另行縮放，
+                              -- 基準不再預扣——舊值 6.0（「實煞的六成留雨天餘裕」）
+                              -- 疊上 priors 天氣折＝晴天好胎被雙重保守，48m 感知帶
+                              -- 只能證明 72 km/h（2026-09-01 調實：a=8 → 82 km/h）
+local LAT_ACCEL = 9.0         -- m/s²：過彎橫向加速預算（2026-09-02 二次激進化
+                              -- 8.0→9.0「過彎應該再快一點」；滑移是合法手段，
+                              -- 輪胎/雨天縮放由 priors 另計）
 local MIN_SPEED_KMH = 12      -- 曲率限速的下限（見上方說明）
 local MAX_SPEED_CAP_KMH = 160 -- maxSpeed 的上界（防呆，不是遊戲設定）
 local MIN_SPEED_MS = MIN_SPEED_KMH * MS_PER_KMH
@@ -118,9 +129,11 @@ local LOOKAHEAD_WALK_MAX = 64 -- 前視推進的段數硬上限（碎段路線�
 
 local SEARCH_BACK = 12        -- 投影搜尋窗口：往後 12 段
 -- 折點角度限速下限（不除 ds，路網點距稀釋不掉；理由見 geometryStep 內註解）
-local TURN_SOFT_RAD = 20 * PI / 180  -- 折角超過 20° 開始壓
-local TURN_HARD_RAD = 40 * PI / 180  -- 折角 40° 以上一律爬到 TURN_HARD_MS
-local TURN_HARD_MS = 18 / 3.6        -- 急折點的硬上限：18 km/h
+local TURN_SOFT_RAD = 30 * PI / 180  -- 折角超過 30° 開始壓（激進化 25→30）
+local TURN_HARD_RAD = 55 * PI / 180  -- 折角 55° 以上一律爬到 TURN_HARD_MS
+local TURN_HARD_MS = 50 / 3.6        -- 急折點硬上限：50 km/h（激進化 40→50；
+                                     -- 甩尾過彎合法，61.5 甩出教訓風險由使用者
+                                     -- 明示接受）
 local SEARCH_FWD = 12         -- 往前 12 段
 local REWIND_MAX = 1          -- 單幀最多允許倒退 1 段
 local OV_STEP = 1.0           -- M6 世界 offset 折線的取樣步距（公尺）
@@ -147,10 +160,9 @@ local ROTATE_SPEED_KMH = 12   -- 爬行速度：原地調頭時的上限，也�
 -- 40°+，而剖面認為「彎後是直路」繼續給油——誤差越大車越快的正反饋，最後衝出路面。
 -- 同日 telemetry 也證明低速時力矩拉得回來（errDeg -46°→-3° 收斂），所以收油本身
 -- 就足以讓誤差重新收斂，不必靠加大力矩去硬撐高速。
-local ERR_SLOW_START = 10 * PI / 180
-local ERR_SLOW_END = 50 * PI / 180
+local ERR_SLOW_START = 25 * PI / 180 -- 激進化 20→25（甩尾裁定）
+local ERR_SLOW_END = 90 * PI / 180   -- 激進化 75→90：跟線姿態全域不再壓爬行
 local ERR_SLOW_RANGE = ERR_SLOW_END - ERR_SLOW_START
-
 local DT_MIN = 1 / 240
 local DT_MAX = 0.25
 local DT_FALLBACK = 1 / 30
@@ -388,7 +400,7 @@ function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile)
     local segAccel, segBrake, segCoast, segLat = {}, {}, {}, {}
     for i = 1, n - 1 do
         segAccel[i], segBrake[i], segCoast[i], segLat[i] =
-            ACCEL, BRAKE, 0.6, LAT_ACCEL
+            ACCEL_NOMINAL, BRAKE, 0.6, LAT_ACCEL
     end
     local rangeBlockCount = ((n - 2) - (n - 2) % RANGE_BLOCK) / RANGE_BLOCK + 1
     local rangeBase = 1
@@ -494,13 +506,13 @@ function MDADFollower.stepBuild(profile, budget)
                 profile.cursor, ops = i + 1, ops + 1
             end
         elseif phase == "accel" then
+            -- 本相位只建 range block minima（brake/lat/coast）。前向加速
+            -- forward pass 已拆除（理由見檔頭「前向加速」註解）：v[i] 只由
+            -- coast／brake 反向包絡與曲率決定，直路段＝maxSpeed 直給。
             if i > n - 1 then
                 profile.rangeReady = false
                 profile.phase, profile.cursor = "range-pad", profile.rangeBlockCount + 1
             else
-                local accel = profile.segAccel[i] or ACCEL
-                local lim = sqrt(v[i] * v[i] + 2 * accel * segLen[i])
-                if v[i + 1] > lim then v[i + 1] = lim end
                 local z = i - 1
                 local block = (z - z % RANGE_BLOCK) / RANGE_BLOCK + 1
                 local node = profile.rangeBase + block - 1
@@ -643,6 +655,22 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
     local lookMin, lookMax = LOOKAHEAD_MIN * lookScale, LOOKAHEAD_MAX * lookScale
     if look < lookMin then look = lookMin end
     if look > lookMax then look = lookMax end
+    -- 急彎前視收縮（2026-09-02 s017 定罪切內、s021 定罪震盪的平衡點）：
+    -- pure pursuit 轉向增益 ∝ 1/前視²——縮到 3m 治了切內（latDev max 2.86）
+    -- 但增益放大近 7 倍→過彎蛇行（err 翻轉 0.6 次/s、43 次）。改縮到
+    -- 0.75×彎半徑、下限 4.5m：增益放大收斂到 ~3 倍，貼線與穩定並存；
+    -- 直路 κ≈0 完全不縮。
+    local kap = profile.kappa
+    if kap then
+        local k1 = kap[bestI] or 0
+        local k2 = kap[bestI + 1] or 0
+        if k2 > k1 then k1 = k2 end
+        if k1 > 1e-6 then
+            local rShrink = 0.75 / k1
+            if rShrink < look then look = rShrink end
+            if look < 4.5 then look = 4.5 end
+        end
+    end
 
     local sTarget = sNow + look
     local j = bestI
@@ -741,44 +769,36 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
     end
     state.rotating = rotating
 
-    -- ---- 目標速度（段內物理包絡；曲率／制動／加速已烘進端點 v）----
+    -- ---- 目標速度（段內物理包絡；曲率／制動已烘進端點 v）----
     -- 不能用線性插值：v 只在「點」上有值，長段內線性連 v[i]→v[i+1] 是物理錯誤。
     -- 2026-08-28 實機（163 號公路長直路）：nav 路網節點在路口，末段是 ~233m 的
     -- 單一線段，段尾 v[n]=0（終點）——線性插值把整段畫成 20→0 的長斜坡，車在
     -- 233m 外就以 target=0.087×remaining 龜速爬完全程（遙測 target 20.1→4.3 與
     -- remaining 嚴格成正比）。正確剖面是段內延拓 build pass 的同一組式子：
-    --   加速曲線 sqrt(v[i]²  + 2·ACCEL·(s-s[i]))   —— 出折點後可以加速
     --   制動曲線 sqrt(v[i+1]² + 2·BRAKE·(s[i+1]-s)) —— 進折點／終點前才需要煞
-    -- 取 min 再夾 maxSpeed：短段（點距 ≤ 4m）與舊行為幾乎重合且更保守（線性
-    -- 在段中點本來就高於 sqrt 包絡＝該處煞不住），長段回到「巡航→晚煞車」。
-    -- 端點極限：ds→0 收斂到 v[i]、ds→L 收斂到 v[i+1]，折點限速一樣被尊重。
-    local v = profile.v
+    --   滑行曲線 sqrt(coastV[i+1]² + 2·coast·(s[i+1]-s)) —— 彎前收油包絡
+    -- 取 min 再夾 maxSpeed。加速側不設包絡（檔頭「前向加速」註解）：直路段
+    -- 直給 maxSpeed，供油連續性交還 regulator 的二值 isGas。
+    -- 端點極限：ds→L 收斂到 v[i+1]，折點限速一樣被尊重。
     local targetSpeed
     do
-        local vA = v[bestI]
         local lenI = segLen[bestI]
-        local dsA, remainI = lenI * bestT, lenI * (1 - bestT)
-        local accel = profile.segAccel[bestI] or ACCEL
+        local remainI = lenI * (1 - bestT)
         local brake = profile.segBrake[bestI] or BRAKE
         local coast = profile.segCoast[bestI] or 0.6
-        local runtimeAccel, runtimeBrake, runtimeCoast =
-            state.accelSafe, state.brakeSafe, state.coastSafe
-        if isFinite(runtimeAccel) and runtimeAccel >= 0 and runtimeAccel < accel then
-            accel = runtimeAccel
-        end
+        local runtimeBrake, runtimeCoast =
+            state.brakeSafe, state.coastSafe
         if isFinite(runtimeBrake) and runtimeBrake >= 0 and runtimeBrake < brake then
             brake = runtimeBrake
         end
         if isFinite(runtimeCoast) and runtimeCoast >= 0 and runtimeCoast < coast then
             coast = runtimeCoast
         end
-        local accLim = sqrt(vA * vA + 2 * accel * dsA)
         local coastNext = profile.coastV[bestI + 1] or profile.maxSpeedMs
         local brakeNext = profile.brakeV[bestI + 1] or 0
         local coastLim = sqrt(coastNext * coastNext + 2 * coast * remainI)
         local stopLim = sqrt(brakeNext * brakeNext + 2 * brake * remainI)
-        targetSpeed = accLim
-        if coastLim < targetSpeed then targetSpeed = coastLim end
+        targetSpeed = coastLim
         if stopLim < targetSpeed then targetSpeed = stopLim end
         if targetSpeed > profile.maxSpeedMs then targetSpeed = profile.maxSpeedMs end
         local curveHardActive = profile.segKind[bestI] == MDADDynamics.SEG_ARC
@@ -936,15 +956,21 @@ end
 -- 無剖面＝offL 為 nil（clearOffset），不再用數值 0 當哨兵。
 -- srcX/srcY/srcN/srcS0/srcS1＝Driver 已掃掠的同一條 M6 世界折線；srcS1 是
 -- 最末點真正取樣的弧長（最後一格可短於 OV_STEP）。
+-- coverEnd（選填）＝呼叫端要求的線覆蓋終點（2026-09-02 s-458.7k console 定罪：
+-- d 允許超出 route 終點後，折線只建到終點——覆蓋檢查若仍要求 d+1，commit
+-- 永遠在門口被拒、車每輪「curve dodge ok → setOffset REJECTED」死循環）。
+-- 上鉗 d+1（不得放寬超過原契約）；nil＝原契約 d+1。
 function MDADFollower.setOffset(state, a, b, c, d, l,
-        srcX, srcY, srcN, srcS0, srcS1)
+        srcX, srcY, srcN, srcS0, srcS1, coverEnd)
     if type(state) ~= "table" then return false end
     if not (isFinite(a) and isFinite(b) and isFinite(c) and isFinite(d) and isFinite(l)) then
         return false
     end
     if not (a < b and b <= c and c < d) then return false end
     srcN = validLine(srcX, srcY, srcN, srcS0, srcS1)
-    if not srcN or srcS1 < d + 1 - 1e-6 then return false end
+    local want = isFinite(coverEnd) and coverEnd or (d + 1)
+    if want > d + 1 then want = d + 1 end
+    if not srcN or srcS1 < want - 1e-6 then return false end
     state.offA, state.offB, state.offC, state.offD, state.offL = a, b, c, d, l
     state.ovX, state.ovY = srcX, srcY
     state.ovN, state.ovS0, state.ovEndS = srcN, srcS0, srcS1
@@ -989,7 +1015,9 @@ function MDADFollower.buildOffsetLine(profile, s0, a, b, c, d, l, bias, outX, ou
     local n = profile.n
     if s0 < 0 then s0 = 0 end
     local requiredEnd = d + 1
-    if requiredEnd > profile.length then return 0, 0, "coverage", profile.length end
+    -- d 允許超出 route 終點（近目標帶偏抵達，2026-09-01）：折線只建到終點，
+    -- 回線 smoothstep 用原 d 當幾何參數＝只走緩坡前半、曲率自然平緩。
+    if requiredEnd > profile.length then requiredEnd = profile.length end
     local span = (requiredEnd - s0) / OV_STEP
     local whole = span - span % 1
     if whole < span then whole = whole + 1 end

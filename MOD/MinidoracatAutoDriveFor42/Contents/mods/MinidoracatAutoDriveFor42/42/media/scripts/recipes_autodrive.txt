@@ -73,7 +73,18 @@ module Base
         inputs
         {
             item 1 tags[base:screwdriver] mode:keep flags[NoBrokenItems],
-            item 1 [MinidoracatAutoDrive.GPSNavigator] mode:destroy,
+            /*
+                GPSNavigator 是 drainable：沒有 flags[ItemCount] 時輸入計量按
+                getCurrentUses() 走（CraftRecipeManager.java:633、652）——空電 GPS 每件
+                貢獻 0 卻仍被收進消耗集合，湊滿需求的那一刻整批連坐銷毀
+                （consumeInputItem 收集 :621-630 → processDestroyAndUsedItems 銷毀，
+                CraftRecipeData.java:544-564）。正式服實爆：39 個空電 GPS 一次全滅。
+                vanilla 對「按件消耗」的 drainable destroy 輸入配 ItemCount
+                （recipes_electrical.txt:30 Base.Battery 同型）；另一合法型是
+                flags[IsFull]（recipes_sacks.txt:27 Base.Claybag——滿件才可入料，
+                天然無空件連坐）。本輸入要「不看電量吃一件」，故用 ItemCount。
+            */
+            item 1 [MinidoracatAutoDrive.GPSNavigator] mode:destroy flags[ItemCount],
             item 6 [Base.ElectronicsScrap] flags[NoBrokenItems],
             item 1 [Base.ScannerModule] flags[NoBrokenItems],
             item 1 [Base.Amplifier] flags[NoBrokenItems],

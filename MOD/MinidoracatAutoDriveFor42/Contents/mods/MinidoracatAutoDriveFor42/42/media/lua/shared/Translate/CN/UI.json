@@ -31,7 +31,6 @@
     "UI_MinidoracatAutoDrive_GearStandard": "标准（50 公里）",
     "UI_MinidoracatAutoDrive_GearSport": "运动（70 公里）",
     "UI_MinidoracatAutoDrive_GearInsane": "疯狂（车辆极速）",
-    "UI_MinidoracatAutoDrive_Detour": "前方堵死，改道绕行。",
     "UI_MinidoracatAutoDrive_HUDOptions": "自动驾驶 HUD",
     "UI_MinidoracatAutoDrive_HUDOptionsDescription": "显示在原版车辆仪表上方。主题与布局更改会立即生效。",
     "UI_MinidoracatAutoDrive_Options": "自动驾驶",
@@ -102,7 +101,7 @@
     "UI_MinidoracatAutoDrive_TelemetryNoFile": "还没有诊断记录文件",
     "UI_MinidoracatAutoDrive_TelemetryCopied": "诊断记录路径已复制到剪贴板",
     "UI_MinidoracatAutoDrive_TelemetryCopyFailed": "无法复制诊断记录路径",
-    "UI_MinidoracatAutoDrive_TelemetrySlotsFull": "64 个诊断记录槽都在保留期限内，本次不会写入记录",
+    "UI_MinidoracatAutoDrive_TelemetrySlotsFull": "64 个诊断记录槽均无法清空覆写，本次不会写入记录",
     "UI_MinidoracatAutoDrive_TelemetryWriteFailed": "诊断记录写入失败；本段自动驾驶已停止记录",
     "UI_MinidoracatAutoDrive_TelemetryFileFull": "诊断记录已达到 2MiB 上限；本段自动驾驶不再追加"
 }

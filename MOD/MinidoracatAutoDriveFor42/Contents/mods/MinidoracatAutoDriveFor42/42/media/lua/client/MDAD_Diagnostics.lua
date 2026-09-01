@@ -79,6 +79,9 @@ local EK = {
     "eid", "attempt", "s", "l", "d", "dt", "wd", "ds", "dyaw", "hit", "gear",
     "progress", "duration", "speed", "rear", "kind", "detail", "poseOnly",
     "navVersion", "currentSurface", "currentSegWidth", "cost", "avoidPenalty",
+    "m", "need", "hn", "corner", -- blocked payload：margin/need/hardN/corner latch
+    -- （2026-09-01：payload 鍵 "n" 與事件名稱欄 "n" 相撞——pairs 無序、誰蓋誰
+    -- 不確定，blocked 事件多輪「消失」實為名稱欄被 need 值覆寫。禁用 "n"。）
 }
 
 local function logOnce(msg)
@@ -583,6 +586,34 @@ local function allocSlot(now, retainMs)
         end
         i = i + 1
     end
+    -- 全部槽都在保留期內（2026-09-02 使用者裁定「滿了照樣寫，不該保留」）：
+    -- 覆蓋 started 最舊的非 live 槽。truncate 仍須驗證成功才移交（fail-closed
+    -- 家規不變：清不掉就換下一舊）；全部都清不掉才回 nil 放棄。
+    -- 不用 table.sort（Kahlua 禁用清單）：選擇式挑最舊，冷路徑一次 O(n²)。
+    local tried = {}
+    local round = 0
+    while round < SLOT_N do
+        round = round + 1
+        local oldest, oldestSt = nil, nil
+        local k = 1
+        while k <= SLOT_N do
+            if not live[k] and not tried[k] then
+                local st = meta[k].started or 0
+                if oldestSt == nil or st < oldestSt then oldest, oldestSt = k, st end
+            end
+            k = k + 1
+        end
+        if oldest == nil then break end
+        tried[oldest] = true
+        if truncateSlot(oldest) then
+            meta[oldest].started = 0
+            meta[oldest].bytes = 0
+            meta[oldest].ended = 0
+            meta[oldest].reason = ""
+            return oldest
+        end
+        logOnce("diagnostics oldest-slot truncate failed")
+    end
     return nil
 end
 
@@ -856,10 +887,15 @@ end
 local function encodeHeader(slot, now, days, profile)
     local b = MDAD and MDAD.BUILD
     if type(b) ~= "string" then b = "" end
+    -- rev＝開發版本戳（MDAD.Drive.REV；2026-09-02 使用者裁定：兩次「實測跑到
+    -- 修前版」都靠 mtime 考古才發現——header 直接帶戳，一眼判版本）
+    local rev = MDAD and MDAD.Drive and MDAD.Drive.REV
+    if type(rev) ~= "string" then rev = "" end
     local pjson = "null"
     if type(profile) == "table" then pjson = encodeProfile(profile) end
     return '{"v":1,"t":"h","slot":' .. slot .. ',"ts":' .. jnum(now)
-        .. ',"ret":' .. days .. ',"build":' .. jstr(b) .. ',"profile":' .. pjson .. '}'
+        .. ',"ret":' .. days .. ',"build":' .. jstr(b) .. ',"rev":' .. jstr(rev)
+        .. ',"profile":' .. pjson .. '}'
 end
 
 -- schema v1 相容：既有欄位一個都不改名、不改語意，新欄位純 additive。
@@ -984,6 +1020,14 @@ local function encodePhys(phys)
     addNum("dodgeCommittedLength", "dodgeCommittedLength")
     addStr("stateError", "stateError")
     addBool("invalid", "invalid")
+    -- 本幀速度裁決者與 gate 狀態（2026-09-01 使用者指示補齊離線可判數據）
+    addStr("capReason", "capReason")
+    addStr("sensorCapReason", "sensorCapReason")
+    addStr("gateReasonNow", "gateReasonNow")
+    addBool("fullGateNow", "fullGateNow")
+    addNum("visCap", "visCap")
+    addStr("holdReason", "holdReason")
+    addStr("intent", "intent")
     return bits
 end
 

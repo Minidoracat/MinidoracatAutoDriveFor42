@@ -693,7 +693,7 @@ local man = files["MinidoracatAutoDrive/Telemetry/manifest.txt"] or ""
 check(string.find(man, "1\t", 1, true) ~= nil, "rewrote manifest TSV")
 
 --------------------------------------------------------------------------------
-scenario("slot reuse after retention and clock rollback; protected-full refuse")
+scenario("slot reuse: retention, clock rollback; full ring overwrites oldest")
 resetFs()
 days = 1
 nowMs = 100000
@@ -707,25 +707,22 @@ end
 checkEq(sessionFiles(), 64, "64 fixed slots filled")
 local first = files[sessionPath(1)]
 nowMs = 100000 + 65
-checkEq(MDADDiagnostics.start(0, nil, profile), false,
-    "protected-full start reports inactive")
+-- 2026-09-02 使用者裁定「滿了照樣寫」：全槽都在保留期內時覆蓋 started 最舊
+-- 的槽（slot 1），不再拒寫。truncate 驗證與 fail-closed 家規不變。
+checkEq(MDADDiagnostics.start(0, nil, profile), true,
+    "full ring overwrites the oldest slot instead of refusing")
 MDADDiagnostics.sample(0, nowMs, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, "follow", 1, false, nil)
 MDADDiagnostics.stop(0, "end")
-checkEq(files[sessionPath(1)], first, "protected-full does not reuse slot 1")
-local sawFull = false
-local hi2 = 1
-while hi2 <= #halos do
-    if halos[hi2].kind == "bad" then sawFull = true end
-    hi2 = hi2 + 1
-end
-check(sawFull, "visible Halo when slots are full")
+check(files[sessionPath(1)] ~= first, "oldest slot content replaced")
+check(string.find(files[sessionPath(1)] or "", '"t":"h"', 1, true) ~= nil,
+    "overwritten slot starts with a fresh header")
+checkEq(sessionFiles(), 64, "overwrite never grows past 64 files")
 nowMs = 100000 + DAY_MS + 10000
 MDADDiagnostics.start(0, nil, profile)
 nowMs = nowMs + 1000
 MDADDiagnostics.stop(0, "end")
-check(string.find(files[sessionPath(1)] or "", '"t":"h"', 1, true) ~= nil,
-    "expired slot truncated and reused")
 checkEq(sessionFiles(), 64, "reuse never grows past 64 files")
+
 
 resetFs()
 days = 7
@@ -1304,14 +1301,14 @@ check(string.find(physBody, '"dodgeClearanceCap":42', 1, true) ~= nil,
 check(string.find(physBody, '"dodgeVisibilityCap":50', 1, true) ~= nil,
     "dodge visibility cap recorded")
 check(string.find(physBody, '"laneCurveEnvelope":26', 1, true) ~= nil,
-    "actual-lane future curve coast envelope recorded")
+    "actual-lane future curve envelope（brake 反推）recorded")
 check(string.find(physBody, '"envelopeBuildCoast":0.35', 1, true) ~= nil,
-    "lane envelope snapshot coast limit recorded")
+    "lane envelope snapshot decel（欄名 envelopeBuildCoast 沿用）recorded")
 check(string.find(physBody, '"dodgeSpaceCap":35', 1, true) ~= nil, "dodge space cap recorded")
 check(string.find(physBody, '"dodgeDesignSpeed":22', 1, true) ~= nil,
     "dodge intended design speed recorded")
 check(string.find(physBody, '"dodgeBaseCap":36', 1, true) ~= nil,
-    "immutable dodge base cap recorded")
+    "dodge base cap（telemetry 鏡像）recorded")
 check(string.find(physBody, '"dodgeCapPending":false', 1, true) ~= nil,
     "transient dodge cap pending state recorded")
 check(string.find(physBody, '"dodgeSpeedCap":34', 1, true) ~= nil, "dodge final cap recorded")
