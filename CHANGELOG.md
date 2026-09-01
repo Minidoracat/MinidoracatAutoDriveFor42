@@ -14,6 +14,8 @@
 
 ## [Unreleased]
 
+## [42.20.4-0.2.0] - 2026-09-02
+
 ### 新增
 
 - 新增可選的自動駕駛診斷紀錄，預設關閉；開啟後只在本機固定紀錄槽寫入含絕對世界座標與原始 epoch 毫秒時間戳（不做時區轉換）的紀錄檔。新版 MiniMap「自動駕駛」分類可複製最新檔或資料夾的絕對路徑；MiniMap API v1 與 ESC 選項仍可改開關及保留天數，但沒有複製按鈕
@@ -33,7 +35,12 @@
 - 全速行駛現在必須同時通過感知就緒與新鮮、完整煞停距離、走廊與車身掃掠、跟線狀態、回線完成、連續對正、進度健康、圓角與路面帶證明；110 公尺不足以安全停下時會依實際可視距離降速
 - 繞行速度改依側移長度、曲率、剩餘淨距與可視距離動態計算；寬裕靜態障礙可更流暢通過，車輛與窄縫仍維持低速
 
-> 技術要點：client-only、預設關；固定 64×2MiB、每 session 一檔；保留天數 1／3／7／14／30（預設 7）；`session-index.txt` 以 raw epoch ms 固定最多 64 列。JSONL 保留既有欄位並 additive tg/rg/eid/ps/ua/ban/ud/rear/rf/rms/ac/pc/fb/fhx/fhy/af，以及 fullGate/gateReason/cmdV/cmdA/jerkBypass/curveValid/curveKappa/curveHardActive/laneCurveEnvelope/envelopeBuildLat/envelopeBuildCoast/visibilityCap/filletN/filletFallbackN/dodgeDesignSpeed/dodgeBaseCap/dodgeCapPending/dodge caps。Vehicle profile 每 session 冷路徑建一次 32 段 block range-min tree；v4 fillet 的底層圓弧相切，行駛折線採 1m／2° 取樣，world-line proof 不改原 route identity。build `m68-20260831a`。
+### 移除
+
+- 暫時移除「道路完全堵死時自動更換路線」：實測它常拿到品質更差的替代路線，而且
+  每次重算都會把已經試過的繞行記憶清掉，反而更容易卡死。現在遇到完全堵死的路段
+  只會就地尋找繞行縫、停等，逾時後交還操控並提示；請手動重設目的地或換一條路。
+  自動更換路線會在路線品質問題解決後再回歸
 
 ### 修正
 
@@ -76,6 +83,8 @@
   對方剛建立的軌跡而原地打結；解析式速度公式一律只壓速不否決通行，是否可過只由
   世界掃掠決定
 - 診斷紀錄槽滿時改為覆寫最舊的紀錄，不再拒寫；紀錄檔頭補上開發版本戳
+
+> 技術要點：client-only、預設關；固定 64×2MiB、每 session 一檔；保留天數 1／3／7／14／30（預設 7）；`session-index.txt` 以 raw epoch ms 固定最多 64 列。JSONL 保留既有欄位並 additive tg/rg/eid/ps/ua/ban/ud/rear/rf/rms/ac/pc/fb/fhx/fhy/af，以及 fullGate/gateReason/cmdV/cmdA/jerkBypass/curveValid/curveKappa/curveHardActive/laneCurveEnvelope/envelopeBuildLat/envelopeBuildCoast/visibilityCap/filletN/filletFallbackN/dodgeDesignSpeed/dodgeBaseCap/dodgeCapPending/dodge caps。Vehicle profile 每 session 冷路徑建一次 32 段 block range-min tree；v4 fillet 的底層圓弧相切，行駛折線採 1m／2° 取樣，world-line proof 不改原 route identity。build `m68-20260831a`。
 
 ## [42.20.4-0.1.2] - 2026-08-31
 
