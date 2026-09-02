@@ -3468,7 +3468,15 @@ local function installNavApi(version)
             nav.lastRouteNum, nav.lastTx, nav.lastTy = playerNum, tx, ty
             return nav.route, nav.state
         end,
-        -- requestDetour stub 已隨 production detour 機制移除（2026-09-01）
+        -- 改道查詢面（nav API v3；2026-09-02 重新接回）：情境以 drive.nav.detour
+        -- 控制回傳，呼叫計數與參數留給斷言。
+        requestDetour = function(playerNum, tx, ty, ax, ay, r)
+            local nav = drive.nav
+            nav.detourCalls = (nav.detourCalls or 0) + 1
+            nav.lastDetour = { pn = playerNum, tx = tx, ty = ty, ax = ax, ay = ay, r = r }
+            if nav.detour == nil then return nil, "noroad" end
+            return nav.detour, nav.detourState or "ok"
+        end,
     }
 end
 
@@ -3587,6 +3595,17 @@ checkEq(type(MDAD.Drive.toggle), "function", "Drive.toggle 是 radial 交出去�
 checkEq(#(eventHandlers["OnPlayerUpdate"] or {}), 1,
     "driver 只註冊一個 OnPlayerUpdate（雙載會變兩個＝同幀兩次 addImpulse）")
 checkFalse(MDAD.Drive.isActive(0), "初始沒有任何 session")
+
+-- 語音提示（2026-09-02）：Driver 只透過 MDAD.Voice.play(event, playerNum) 開口，
+-- 樁記錄事件序列；缺席／拋錯都不得影響控制（Driver 端 pcall）——先植入拋錯樁證明。
+drive.voiceLog = {}
+MDAD.Voice = { play = function() error("voice boom") end }
+drive.lastVoice = function() return drive.voiceLog[#drive.voiceLog] end
+drive.voiceCount = function(event)
+    local n = 0
+    for i = 1, #drive.voiceLog do if drive.voiceLog[i] == event then n = n + 1 end end
+    return n
+end
 
 driveReset(nil)
 fire("OnPlayerUpdate", drive.tripPlayer)
@@ -3765,8 +3784,16 @@ end
 
 -- 條件齊備
 driveReset(dveh)
+checkTrue(MDAD.Drive.start(dp), "條件齊備：啟動成功（語音樁拋錯不影響）")
+MDAD.Voice = { play = function(event, pn) drive.voiceLog[#drive.voiceLog + 1] = event; return true end }
+MDAD.Drive.stop(0, nil)
+checkEq(drive.lastVoice(), "stop", "手動關閉開口 stop")
+driveReset(dveh)
+clearList(halos)
+clearList(sentClient)
 checkTrue(MDAD.Drive.start(dp), "條件齊備：啟動成功")
 checkTrue(MDAD.Drive.isActive(0), "啟動後 isActive")
+checkEq(drive.lastVoice(), "start", "啟動開口 start")
 checkEq(#halos, 1, "啟動只提示一次")
 checkEq(haloKey(), DKEY.START, "啟動提示 Start")
 checkEq(halos[1] and halos[1].kind, "good", "啟動是綠字（addGoodText）")
@@ -4496,6 +4523,7 @@ checkEq(drive.calls.regulatorOff, 1, "停妥時關掉 regulator")
 checkEq(#halos, 1, "抵達提示一次")
 checkEq(haloKey(), DKEY.ARRIVED, "抵達提示 Arrived")
 checkEq(halos[1] and halos[1].kind, "good", "抵達是綠字")
+checkEq(drive.lastVoice(), "arrive", "停妥開口 arrive")
 dveh._stopped = false
 
 -- 煞停途中玩家自己踩煞車：立刻交還，不跟他搶（已送出的 forceBrake 1 秒後自行失效）
@@ -4828,6 +4856,7 @@ checkFalse(MDAD.Drive.isActive(0), "再按一次關閉自駕")
 checkEq(haloKey(), DKEY.STOP, "關閉提示 Stop")
 checkEq(halos[1] and halos[1].kind, "good", "關閉是綠字")
 checkEq(dveh._regulator, false, "關閉自駕時把 regulator 關掉")
+checkEq(drive.lastVoice(), "stop", "radial 關閉開口 stop")
 
 -- 不補片的輸入路徑，以及實機抓到的 delayed-visibility 開啟時序
 driveReset(dveh)
@@ -5442,9 +5471,11 @@ drive.putSolid(20, 3, "harness_wreck_r0")
 drive.putSolid(20, 4, "harness_wreck_r1")
 drive.putSolid(20, 5, "harness_wreck_r2")
 drive.putSolid(20, 6, "harness_wreck_r3")
+drive.blockedVoicesBefore = drive.voiceCount("blocked")
 drive.scanRound()
 checkEq(haloKey(), DKEY.BLOCKED, "堵死提示 Blocked")
 checkEq(halos[1] and halos[1].kind, "bad", "堵死是紅字（要玩家注意）")
+checkEq(drive.voiceCount("blocked") - drive.blockedVoicesBefore, 1, "堵死開口 blocked")
 -- 車在 s≈0、障礙群 20：距離 >15 → 接近段（滑行不煞停）
 driveReset(dveh)
 driveTick(dp, dveh)
@@ -5462,6 +5493,7 @@ checkTrue(MDAD.Drive.isActive(0), "堵死不結束 session（障礙消失要能�
 local halosBefore = #halos
 drive.scanRound()
 checkEq(#halos, halosBefore, "堵死持續期間不重複轟紅字（只提示一次）")
+checkEq(drive.voiceCount("blocked") - drive.blockedVoicesBefore, 1, "堵死語音只開口一次（與紅字同 dedupe）")
 
 -- ④ 清障 → blocked 解除（守護驗證通過、恢復供油）。immutable 承諾**不因
 --    clear 提前釋放**——剖面（d≈28.5）走完才回全速（多繞幾公尺比換邊安全；
@@ -6513,9 +6545,155 @@ do
     driveTick(dp, dveh)
     checkTrue(not MDAD.Drive.isActive(0), "(c) 停等逾 20 秒：超時停用（交還玩家）")
     checkEq(haloKey(), DKEY.STUCK, "(c) 超時紅字 StopStuck")
+    checkEq(drive.lastVoice(), "handback", "(c) 超時交還開口 handback，不是 stop")
     for _, y in ipairs({ -5, -4, -2, -1, 0, 1, 2, 4, 5 }) do drive.clearCell(20, y) end
     for _, y in ipairs({ -1, 0, 1 }) do drive.clearCell(4, y) end
 end
+
+-- (c5) 改道（2026-09-02 車陣策略）：blocked 時 Drive.requestDetour 向主 MOD 要
+--      替代線並驗收——仍穿避讓圈（avoidPenalty>0）／起點太遠（snapDist>20）／
+--      長度超標一律拒（紅字 NoDetour＋語音 nodetour、session 活著）；合格＝綠字
+--      Detour＋語音 detour，下一幀 cutover 換線、blocked 解除。自動改道（ESC 選項）
+--      預設關；開了才在停等累計 10s 後自動要一次，同 episode 不重試。
+-- 主 chunk 的 local 槽已貼近 200 上限：情境包成函式，內部 local 不佔主 chunk。
+local function scenarioDetour()
+    checkTrue(armDrive(), "(c5) 啟動")
+    for _, y in ipairs({ -5, -4, -2, -1, 0, 1, 2, 4, 5 }) do
+        drive.putSolid(20, y, "harness_wall_" .. y)
+    end
+    dveh._x = 11
+    driveTick(dp, dveh)
+    drive.scanRound()
+    checkEq(haloKey(), DKEY.BLOCKED, "(c5) 堵死紅字")
+    dveh._speed = 0
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    local nav = drive.nav
+    nav.detourCalls = 0
+    local function detourRoute(len, penalty, snap)
+        local r = newRoute(10, 11, 0, -2, 0) -- 從車位往回的替代線
+        r.len, r.cost, r.avoidPenalty, r.snapDist = len, len, penalty, snap
+        return r
+    end
+    local halosBefore = #halos
+    nav.detour = detourRoute(60, 5, 1)
+    local ok, why = MDAD.Drive.requestDetour(0)
+    checkTrue(ok == false and why == "through", "(c5) 仍穿避讓圈的路線拒收（實得 " .. tostring(why) .. "）")
+    checkEq(nav.detourCalls, 1, "(c5) 真的問了主 MOD 一次")
+    checkEq(nav.lastDetour and nav.lastDetour.r, 40, "(c5) 避讓半徑 40")
+    checkEq(haloKey(#halos), noteReason("UI_MinidoracatAutoDrive_NoDetour"), "(c5) 拒收紅字 NoDetour")
+    checkEq(drive.lastVoice(), "nodetour", "(c5) 拒收語音 nodetour")
+    nav.detour = detourRoute(60, 0, 30)
+    ok, why = MDAD.Drive.requestDetour(0)
+    checkTrue(ok == false and why == "far", "(c5) 起點 30m 外的路線拒收")
+    nav.detour = detourRoute(5000, 0, 1)
+    ok, why = MDAD.Drive.requestDetour(0)
+    checkTrue(ok == false and why == "long", "(c5) 5km 替代線拒收（剩餘 ~150m）")
+    checkTrue(MDAD.Drive.isActive(0), "(c5) 三次拒收 session 仍活著")
+    nav.detour = detourRoute(120, 0, 1)
+    ok, why = MDAD.Drive.requestDetour(0)
+    checkTrue(ok == true, "(c5) 合格替代線接受（實得 " .. tostring(why) .. "）")
+    checkEq(halos[#halos] and halos[#halos].kind, "good", "(c5) 改道是綠字")
+    checkEq(haloKey(#halos), noteReason("UI_MinidoracatAutoDrive_Detour"), "(c5) 綠字 Detour")
+    checkEq(drive.lastVoice(), "detour", "(c5) 語音 detour")
+    -- 主 MOD 接受後覆寫快取：requestRoute 回替代線 → 下一幀 cutover
+    nav.route = nav.detour
+    driveReset(dveh)
+    local captured = nil
+    local realOverlayUpdate = MDADOverlay.update
+    MDADOverlay.update = function(pn, st, ...)
+        if pn == 0 then captured = st end
+        return realOverlayUpdate(pn, st, ...)
+    end
+    driveTick(dp, dveh)
+    drive.scanRound()
+    MDADOverlay.update = realOverlayUpdate
+    checkTrue(captured ~= nil and captured.route == nav.detour,
+        "(c5) 替代線下一幀 cutover（session.route 換成替代線）")
+    checkEq(captured and captured.pendingDetour, false, "(c5) cutover 後 pendingDetour 清空")
+    checkEq(captured and captured.avoidX, 20.5, "(c5) sticky 避讓圈記在堵點格心 x=20.5")
+    checkTrue(MDAD.Drive.hudState(0) ~= "blocked", "(c5) cutover 後不再 blocked（實得 " .. tostring(MDAD.Drive.hudState(0)) .. "）")
+    ok, why = MDAD.Drive.requestDetour(0)
+    checkTrue(ok == false and why == "not-blocked", "(c5) 沒堵時按改道＝not-blocked，不問主 MOD")
+    for _, y in ipairs({ -5, -4, -2, -1, 0, 1, 2, 4, 5 }) do drive.clearCell(20, y) end
+    MDAD.Drive.stop(0, nil)
+
+    -- 自動改道：預設關（HUD 缺席／選項關）→ 停等 12s 不問主 MOD；開了才問一次
+    nav.detour = nil
+    checkTrue(armDrive(), "(c5b) 啟動")
+    for _, y in ipairs({ -5, -4, -2, -1, 0, 1, 2, 4, 5 }) do
+        drive.putSolid(20, y, "harness_wall_" .. y)
+    end
+    for _, y in ipairs({ -1, 0, 1 }) do drive.putSolid(4, y, "harness_rearwall_" .. y) end
+    dveh._x = 11
+    driveTick(dp, dveh)
+    drive.scanRound()
+    dveh._speed = 0
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    nav.detourCalls = 0
+    if type(MDAD.HUD) ~= "table" then MDAD.HUD = {} end
+    local oldAuto = MDAD.HUD.autoDetour
+    MDAD.HUD.autoDetour = function() return false end
+    -- 與 (c5c) 同節奏：6s（blocked-retry 先試、soft fail）→ 6s（累計 12s）→ 2s
+    for _ = 1, 3 do
+        nowMs = nowMs + 6000
+        driveTick(dp, dveh)
+    end
+    checkEq(nav.detourCalls, 0, "(c5b) 自動改道關：停等 18s 不問主 MOD")
+    MDAD.Drive.stop(0, nil)
+    checkTrue(armDrive(), "(c5c) 啟動")
+    dveh._x = 11
+    driveTick(dp, dveh)
+    drive.scanRound()
+    dveh._speed = 0
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    nav.detourCalls = 0
+    MDAD.HUD.autoDetour = function() return true end
+    nowMs = nowMs + 6000
+    driveTick(dp, dveh)
+    checkEq(nav.detourCalls, 0, "(c5c) 自動改道開：6s 還沒到門檻（先讓 blocked-retry 試）")
+    nowMs = nowMs + 6000
+    driveTick(dp, dveh)
+    checkEq(nav.detourCalls, 1, "(c5c) 累計 12s 自動問主 MOD 一次")
+    checkEq(drive.lastVoice(), "nodetour", "(c5c) 主 MOD 無路：語音 nodetour")
+    nowMs = nowMs + 2000
+    driveTick(dp, dveh)
+    checkEq(nav.detourCalls, 1, "(c5c) 同一停等 episode 不重問")
+    MDAD.HUD.autoDetour = oldAuto
+    for _, y in ipairs({ -5, -4, -2, -1, 0, 1, 2, 4, 5 }) do drive.clearCell(20, y) end
+    for _, y in ipairs({ -1, 0, 1 }) do drive.clearCell(4, y) end
+    MDAD.Drive.stop(0, nil)
+
+    -- 路線起點太遠守門（s052/s053：吸到 67m 外平行路、車穿樹林卡死）。
+    -- snapDist 門檻只信 nav API v5 起：v4 沿用快取時是「玩家→pts[1]」，沿線前進後失真
+    -- （實機 2026-09-02：沿線開 100 格停車再啟動被拒「起點太遠」）。v4+ 的 route 要帶
+    -- 逐段 segSurface/segWidth，否則 Follower 判 badroute。
+    MDAD.Drive.stop(0, nil)
+    dveh._x, dveh._y, dveh._speed = 0, 0, 20
+    setHeading(dveh, 0)
+    nav.tx, nav.ty, nav.state = 300, 0, "ok"
+    nav.route = newRoute(40, 0, 0, 4, 0)
+    nav.route.segSurface, nav.route.segWidth = {}, {}
+    for i = 1, 39 do nav.route.segSurface[i], nav.route.segWidth[i] = "paved", 10 end
+    MinidoracatMiniMapAPI.navApiVersion = 5
+    nav.route.snapDist = 30
+    clearList(halos)
+    checkFalse(MDAD.Drive.start(dp), "(snap) v5 起點 30m 外：拒啟動")
+    checkEq(haloKey(), noteReason("UI_MinidoracatAutoDrive_RouteTooFar"), "(snap) 紅字 RouteTooFar")
+    nav.route.snapDist = 12
+    checkTrue(MDAD.Drive.start(dp), "(snap) v5 起點 12m：可啟動")
+    MDAD.Drive.stop(0, nil)
+    MinidoracatMiniMapAPI.navApiVersion = 4
+    nav.route.snapDist = 100
+    clearList(halos)
+    checkTrue(MDAD.Drive.start(dp), "(snap) v4 的 snapDist=100 不擋（舊語意＝到首點距離，不可信）")
+    MDAD.Drive.stop(0, nil)
+    nav.route.snapDist = nil
+    MinidoracatMiniMapAPI.navApiVersion = 2 -- 還原本區段其餘情境沿用的版本
+end
+scenarioDetour()
 
 -- (c3) 停等預算是「同 episode 累計」，不被零星動作續命（2026-09-01 階段 2
 --      主體 1 的違規證明）：舊制 waitSince 只要有一幀 avProgress>=1 就整個
@@ -6923,6 +7101,7 @@ do
     dveh._trans = 1
     drive.putSolid(2, 0, "harness_attempt_limit")
     drive.scanRound(true)
+    local unstickVoicesBefore = drive.voiceCount("unstick")
     for attempt = 1, 3 do
         dveh._speed = 0
         nowMs = nowMs + 2501
@@ -6930,6 +7109,8 @@ do
         driveTick(dp, dveh)
         checkEq(haloKey(), DKEY.UNSTICK,
             "(d3) attempt " .. tostring(attempt) .. " starts")
+        checkEq(drive.voiceCount("unstick") - unstickVoicesBefore, 1,
+            "(d3) attempt " .. tostring(attempt) .. "：同 episode 只在第一次倒退開口")
         dveh._x, dveh._speed = -3.1, -13
         nowMs = nowMs + 16
         driveReset(dveh)

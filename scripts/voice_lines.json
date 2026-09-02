@@ -1,0 +1,122 @@
+[
+  {
+    "id": "start_zh",
+    "text": "[excited, delighted, energetic] 自动驾驶启动啦！交给我吧，出发！"
+  },
+  {
+    "id": "stop_zh",
+    "text": "[gentle, warm] 自动驾驶关闭了，方向盘交还给你哦。"
+  },
+  {
+    "id": "blocked_zh",
+    "text": "[alarmed, urgent] 哎呀，前方有障碍！先刹停等一下。"
+  },
+  {
+    "id": "unstick_zh",
+    "text": "[determined, playful] 卡住了？没关系，我倒车绕一下，稍等！"
+  },
+  {
+    "id": "handback_zh",
+    "text": "[apologetic, sad] 对不起，我实在过不去了，请你手动驾驶吧。"
+  },
+  {
+    "id": "arrive_zh",
+    "text": "[overjoyed, cheerful] 到啦到啦！目的地到了，辛苦你啦！"
+  },
+  {
+    "id": "detour_zh",
+    "text": "[reassuring, upbeat] 前面堵住了，不过我找到新路线了，改道走！"
+  },
+  {
+    "id": "nodetour_zh",
+    "text": "[disappointed, apologetic] 唉，没有别的路可以绕了，请你接手处理。"
+  },
+  {
+    "id": "start_en",
+    "text": "[excited, delighted, energetic] Autopilot on! Leave it to me, here we go!"
+  },
+  {
+    "id": "stop_en",
+    "text": "[gentle, warm] Autopilot is off. The wheel is all yours."
+  },
+  {
+    "id": "blocked_en",
+    "text": "[alarmed, urgent] Whoa, obstacle ahead! Holding here for a moment."
+  },
+  {
+    "id": "unstick_en",
+    "text": "[determined, playful] Stuck? No problem, backing up, one second!"
+  },
+  {
+    "id": "handback_en",
+    "text": "[apologetic, sad] I'm sorry, I really can't get through. Please take over."
+  },
+  {
+    "id": "arrive_en",
+    "text": "[overjoyed, cheerful] We made it! We're here, great job!"
+  },
+  {
+    "id": "detour_en",
+    "text": "[reassuring, upbeat] The road is blocked, but I found another way. Rerouting!"
+  },
+  {
+    "id": "nodetour_en",
+    "text": "[disappointed, apologetic] No other way around. Please take the wheel."
+  },
+  {
+    "id": "start_ja",
+    "text": "[excited, delighted, energetic] 自動運転スタート！任せてね、出発！",
+    "voice": "d1a1a920956c40c0bac4ef6a92c92a20",
+    "temperature": 0.7,
+    "top_p": 0.7
+  },
+  {
+    "id": "stop_ja",
+    "text": "[gentle, warm] 自動運転を終了しました。ハンドルはお返ししますね。",
+    "voice": "d1a1a920956c40c0bac4ef6a92c92a20",
+    "temperature": 0.7,
+    "top_p": 0.7
+  },
+  {
+    "id": "blocked_ja",
+    "text": "[alarmed, urgent] わっ、前に障害物！いったん停車して待ちます。",
+    "voice": "d1a1a920956c40c0bac4ef6a92c92a20",
+    "temperature": 0.7,
+    "top_p": 0.7
+  },
+  {
+    "id": "unstick_ja",
+    "text": "[determined, playful] はまっちゃった？大丈夫、後退して抜けるね。少々お待ちを！",
+    "voice": "d1a1a920956c40c0bac4ef6a92c92a20",
+    "temperature": 0.7,
+    "top_p": 0.7
+  },
+  {
+    "id": "handback_ja",
+    "text": "[apologetic, sad] ごめんなさい、どうしても通れません。手動で運転してください。",
+    "voice": "d1a1a920956c40c0bac4ef6a92c92a20",
+    "temperature": 0.7,
+    "top_p": 0.7
+  },
+  {
+    "id": "arrive_ja",
+    "text": "[overjoyed, cheerful] 着いた着いた！目的地に到着です、お疲れさま！",
+    "voice": "d1a1a920956c40c0bac4ef6a92c92a20",
+    "temperature": 0.7,
+    "top_p": 0.7
+  },
+  {
+    "id": "detour_ja",
+    "text": "[reassuring, upbeat] 前が塞がってるけど、別のルートを見つけたよ。迂回します！",
+    "voice": "d1a1a920956c40c0bac4ef6a92c92a20",
+    "temperature": 0.7,
+    "top_p": 0.7
+  },
+  {
+    "id": "nodetour_ja",
+    "text": "[disappointed, apologetic] うーん、他に回れる道がありません。運転を代わってください。",
+    "voice": "d1a1a920956c40c0bac4ef6a92c92a20",
+    "temperature": 0.7,
+    "top_p": 0.7
+  }
+]

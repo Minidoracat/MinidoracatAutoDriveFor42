@@ -110,7 +110,9 @@ local function routeFromNav(sx, sy, tx, ty)
     end
     local b = NavCore.newBuild(streets, nil)
     while not NavCore.step(b, 100000) do end
-    local route, err = NavCore.findRoute(b.graph, sx, sy, tx, ty)
+    -- 車上權重 12（主 MOD ensureRoute 對車上玩家的值）；環境變數 MDAD_APPROACH_WEIGHT 可改
+    local weight = tonumber(os.getenv("MDAD_APPROACH_WEIGHT")) or 12
+    local route, err = NavCore.findRoute(b.graph, sx, sy, tx, ty, nil, nil, nil, weight)
     assert(route, "route NIL: " .. tostring(err))
     return route, VOLVO
 end

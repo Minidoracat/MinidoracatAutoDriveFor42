@@ -81,6 +81,17 @@ local texts = {
     UI_MinidoracatAutoDrive_HUDCorpseTipOff = "C DETECT %1-%2 BAND %3\nC CAP OFF\nOTHER SAFETY",
     UI_MinidoracatAutoDrive_HUDCollapse = "COLLAPSE",
     UI_MinidoracatAutoDrive_HUDExpand = "EXPAND",
+    UI_MinidoracatAutoDrive_HUDStyleButton = "STYLE",
+    UI_MinidoracatAutoDrive_HUDHideButton = "HIDE",
+    UI_MinidoracatAutoDrive_HUDShowButton = "SHOW",
+    UI_MinidoracatAutoDrive_HUDVoice = "VOICE",
+    UI_MinidoracatAutoDrive_HUDTheme = "THEME",
+    UI_MinidoracatAutoDrive_HUDDetourButton = "REROUTE",
+    UI_MinidoracatAutoDrive_HUDDetourTip = "REROUTE TIP",
+    UI_MinidoracatAutoDrive_HUDStatusBlocked = "HOLDING",
+    UI_MinidoracatAutoDrive_HUDThemeMetal = "METAL",
+    UI_MinidoracatAutoDrive_HUDThemeMinimal = "GLASS",
+    UI_MinidoracatAutoDrive_HUDThemeFamily = "FAMILY",
     UI_MinidoracatAutoDrive_EngineOff = "ENGINE REASON",
     UI_MinidoracatAutoDrive_TelemetryNoFile = "NO LOG",
 }
@@ -127,7 +138,10 @@ function ISPanel:instantiate()
     self.javaObject = true
     if self.createChildren then self:createChildren() end
 end
-function ISPanel:addChild(child) self.children[#self.children + 1] = child end
+function ISPanel:addChild(child)
+    self.children[#self.children + 1] = child
+    child.parent = self
+end
 function ISPanel:setVisible(value) self.visible = value == true end
 function ISPanel:isVisible() return self.visible end
 function ISPanel:setAlwaysOnTop(value) self.alwaysOnTopSet = value == true end
@@ -143,6 +157,8 @@ function ISPanel:getAbsoluteX() return self.x end
 function ISPanel:getAbsoluteY() return self.y end
 function ISPanel:getXScroll() return 0 end
 function ISPanel:getYScroll() return 0 end
+function ISPanel:setCapture(value) self.captured = value == true end
+function ISPanel:getMouseX() return self.mouseX or 0 end
 function ISPanel:drawRect(x, y, w, h, a, r, g, b)
     self.rects = (self.rects or 0) + 1
     if not self.firstRect then
@@ -171,6 +187,9 @@ function ISButton:setY(value) self.y = value end
 function ISButton:setWidth(value) self.width = value end
 function ISButton:setHeight(value) self.height = value end
 function ISButton:setVisible(value) self.visible = value == true end
+-- ISButton.lua:179-190：image／forceImageSize；render 以 textureColor 染色（:222-226）
+function ISButton:setImage(image) self.image = image end
+function ISButton:forceImageSize(w, h) self.forcedWidthImage, self.forcedHeightImage = w, h end
 function ISButton:setBackgroundRGBA(r, g, b, a)
     self.backgroundColor.r, self.backgroundColor.g = r, g
     self.backgroundColor.b, self.backgroundColor.a = b, a
@@ -239,6 +258,14 @@ local function newOptions(id)
         self.dict[optionId] = option
         return option
     end
+    -- PZAPI/ModOptions.lua:206-215：slider option 只有 value（數字）
+    function options:addSlider(optionId, _, min, max, step, default)
+        local option = { value = default, min = min, max = max, step = step }
+        function option:getValue() return self.value end
+        function option:setValue(value) self.value = value end
+        self.dict[optionId] = option
+        return option
+    end
     function options:getOption(optionId) return self.dict[optionId] end
     optionSets[id] = options
     return options
@@ -248,9 +275,15 @@ function PZAPI.ModOptions:create(id) return newOptions(id) end
 local optionSaveCalls = 0
 function PZAPI.ModOptions:save() optionSaveCalls = optionSaveCalls + 1 end
 
+-- MDAD_Voice 樁：只記錄呼叫，HUD 的語音回饋契約（開啟時試播 start、拉桿放開試播 arrive）靠它驗
+local voiceCalls = {}
+MDAD_VOICE_STUB = { play = function(event, pn) voiceCalls[#voiceCalls + 1] = event .. "@" .. tostring(pn); return true end,
+    PACKS = { "zh", "en", "ja" } }
+
 local nowMs = 1000
 function getTimestampMs() return nowMs end
 function isServer() return false end
+function getDebug() return false end
 function instanceof(object, name) return object and object._class == name end
 local activePlayers = 1
 local viewportWidth = 1920
@@ -261,7 +294,7 @@ function getPlayerScreenWidth() return viewportWidth end
 function getPlayerScreenHeight() return 1080 end
 local function newDashboard()
     local dash = {
-        width = 512, height = 110, y = 970, visible = true, inManager = true,
+        width = 512, height = 110, x = 704, y = 970, visible = true, inManager = true,
         vehicle = true, children = {},
         backgroundTex = {
             getWidth = function() return 512 end,
@@ -270,6 +303,7 @@ local function newDashboard()
     }
     function dash:getWidth() return self.width end
     function dash:getHeight() return self.height end
+    function dash:getX() return self.x end
     function dash:getY() return self.y end
     function dash:isReallyVisible() return self.visible and self.inManager end
     function dash:addChild(child)
@@ -341,6 +375,7 @@ MDAD = {
     POLICY_PLAYER = 2,
     POLICY_FORCE_OFF = 3,
 }
+MDAD.Voice = MDAD_VOICE_STUB
 function MDAD.sandbox(name, default)
     local value = sandbox[name]
     if value == nil then return default end
@@ -370,6 +405,13 @@ function MDAD.Drive.setSlowPref(_, kind, value)
 end
 function MDAD.Drive.toggle()
     state.active = not state.active
+end
+local detourCalls = 0
+local detourResult = true
+function MDAD.Drive.requestDetour(pn)
+    detourCalls = detourCalls + 1
+    if detourResult then state.token = "follow" end
+    return detourResult, detourResult and nil or "through"
 end
 
 local trajectoryClearCalls = 0
@@ -425,62 +467,150 @@ checkEq(panel.corpseButton.tooltip,
     "C DETECT 2-48 BAND 3\nC CAP 20\nC NON-OBSTACLE\nTOGGLE",
     "corpse tooltip states range, one-body cap, non-obstacle behavior, and player scope")
 check(panel.isCollapsed == nil, "does not use engine-reserved isCollapsed field")
-local dashboardControlsInPanel = false
-for i = 1, #panel.children do
-    if panel.children[i] == panel.collapseButton
-        or panel.children[i] == panel.themeButton then dashboardControlsInPanel = true end
+-- 2026-09-02 使用者裁定：四個控制（樣式／隱藏／語音／音量）都在 HUD 本體，
+-- 不再掛原版儀表板；金屬主題＝右側 2×2 方塊（樣式／隱藏 ↑，語音／音量 ↓）＋直分隔線。
+local function isChild(child)
+    for i = 1, #panel.children do
+        if panel.children[i] == child then return true end
+    end
+    return false
 end
-check(not dashboardControlsInPanel
-    and panel.collapseButton:getParent() == dashboards[0]
-    and panel.themeButton:getParent() == dashboards[0],
-    "collapse and theme controls are vanilla dashboard children")
-check(panel.collapseButton.y == 7 and panel.collapseButton.height == 18
-    and panel.themeButton.y == 7 and panel.themeButton.height == 18
-    and panel.themeButton.width == 28
-    and panel.themeButton.x + panel.themeButton.width + 4 == panel.collapseButton.x
-    and panel.collapseButton.x + panel.collapseButton.width == dashboards[0].width - 62,
-    "dashboard controls occupy measured visible top band")
+check(isChild(panel.themeButton) and isChild(panel.collapseButton)
+    and isChild(panel.voiceButton) and isChild(panel.volumeSlider)
+    and #dashboards[0].children == 0,
+    "style/hide/voice/volume controls are HUD children; vanilla dashboard untouched")
+check(panel.themeButton.visible and panel.collapseButton.visible
+    and panel.voiceButton.visible and panel.volumeSlider.visible,
+    "all four controls visible in full metal layout")
+check(panel.themeButton.title == "STYLE" and panel.collapseButton.title == "HIDE",
+    "control buttons carry translated labels, not glyph codes")
+check(panel.themeButton.y == panel.collapseButton.y
+    and panel.collapseButton.x == panel.themeButton.x + panel.themeButton.width + 4
+    and panel.voiceButton.y == panel.gearButtons[1].y
+    and panel.volumeSlider.x == panel.voiceButton.x + panel.voiceButton.width + 4
+    and panel.volumeSlider.y == panel.voiceButton.y
+    and panel.themeButton.x == panel.voiceButton.x,
+    "metal block is a 2x2 grid aligned with the two HUD rows")
+check(panel._blockX ~= nil and panel._blockX < panel.themeButton.x
+    and panel.actionButton.x + panel.actionButton.width < panel._blockX,
+    "metal block sits right of the action button behind a vertical divider")
+check(panel.themeButton.x + panel.themeButton.width <= panel.width - 6
+    and panel.volumeSlider.x + panel.volumeSlider.width <= panel.width - 6,
+    "metal block fits inside the panel")
+check(panel.voiceButton.title == "VOICE ON", "voice pill reflects option default on")
+checkEq(panel.volumeSlider.value, 70, "volume slider reflects option default")
 checkEq(panel.y + panel.height, dashboards[0].y + 7,
     "HUD overlaps transparent inset and touches first visible dashboard row")
 
 click(panel.themeButton)
-check(panel._style == 2 and panel.themeButton.title == "M/S"
+check(panel._style == 2
     and optionSets.MinidoracatAutoDrive:getOption("HUDTheme"):getValue() == 2,
-    "dashboard theme button switches to minimal and syncs ModOptions")
-checkEq(optionSaveCalls, 1, "theme button persists ModOptions immediately")
+    "style button cycles metal → glass and syncs ModOptions")
+checkEq(optionSaveCalls, 1, "style button persists ModOptions immediately")
+checkEq(panel.themeButton.tooltip, "THEME: GLASS", "style tooltip names the current theme")
+check(panel._blockX == nil and panel.voiceButton.y == panel.themeButton.y
+    and panel.themeButton.y == panel.actionButton.y + math.floor((panel.actionButton.height - panel.themeButton.height) / 2)
+    and panel.collapseButton.x == panel.themeButton.x + panel.themeButton.width + 4
+    and panel.voiceButton.x == panel.collapseButton.x + panel.collapseButton.width + 4
+    and panel.voiceButton.x + panel.voiceButton.width <= panel.actionButton.x
+    and panel.volumeSlider.y == panel.gearButtons[1].y
+    and panel.volumeSlider.x + panel.volumeSlider.width == panel.width - 8
+    and panel._energyX + 7 * #panel._energyText <= panel.volumeSlider.x,
+    "glass theme: trio inline on row one, slider at the right end of row two after energy")
 click(panel.themeButton)
-check(panel._style == 1 and panel.themeButton.title == "M/S",
-    "dashboard theme button switches back to vanilla-metal style")
-checkEq(optionSaveCalls, 2, "second theme switch persists")
+check(panel._style == 3
+    and optionSets.MinidoracatAutoDrive:getOption("HUDTheme"):getValue() == 3,
+    "style button cycles glass → family")
+check(panel._headerH > 0 and panel.themeButton.y < panel._headerH
+    and panel.voiceButton.y == panel.themeButton.y and panel.volumeSlider.y == panel.themeButton.y
+    and panel.volumeSlider.x == panel.voiceButton.x + panel.voiceButton.width + 4
+    and panel._dotY < panel._headerH and panel._speedY < panel._headerH
+    and panel._capLabelY >= panel._headerH and panel.actionButton.y >= panel._headerH
+    and panel.height > 78,
+    "family theme: header strip holds status/speed plus controls; cruise and action move below")
+click(panel.themeButton)
+check(panel._style == 4
+    and optionSets.MinidoracatAutoDrive:getOption("HUDTheme"):getValue() == 4,
+    "style button cycles family → wings")
+-- 側掛（2026-09-02 使用者裁定，設計稿 D1）：兩片貼在儀表板左右緣、高度等於可見儀表板，
+-- 中段完全不畫（讓出路面）；左右各有自己的 chevron 與 modData，可以只留左翼常駐。
+local dashX, dashY = dashboards[0].x, dashboards[0].y
+check(panel.height == dashboards[0].height - 7
+    and panel.y == dashY + 7
+    and panel.x + panel._wingLeftW == dashX
+    and panel._wingRightX == panel._wingLeftW + panel._wingDashW
+    and panel.width == panel._wingLeftW + panel._wingDashW + panel._wingRightW,
+    "wings theme: both wings hug the visible dashboard edges and leave the middle untouched")
+check(panel.actionButton.x + panel.actionButton.width <= panel._wingLeftW
+    and panel.wingButton.visible and panel.wingButton.y == panel.actionButton.y + math.floor((panel.actionButton.height - panel.wingButton.height) / 2)
+    and panel.wingButton.x + panel.wingButton.width + 4 == panel.actionButton.x
+    and panel.gearButtons[1].x >= panel._wingRightX
+    and panel.zombieButton.x >= panel._wingRightX
+    and panel.volumeSlider.x + panel.volumeSlider.width <= panel.width
+    and panel.wingButton.visible and panel.collapseButton.visible,
+    "wings theme: left wing owns the main button, right wing owns gear/policy/settings")
+local openLeftW, openRightW = panel._wingLeftW, panel._wingRightW
+click(panel.collapseButton)
+check(panel._wingR == true and panel._wingL == false
+    and player._md.MDADHudWingR == true and player._md.MDADHudWingL == nil
+    and panel._wingRightW < openRightW and panel._wingLeftW == openLeftW
+    and not panel.gearButtons[1].visible and not panel.volumeSlider.visible
+    and panel.actionButton.visible,
+    "folding the right wing keeps the left one resident and persists per side")
+click(panel.wingButton)
+check(panel._wingL == true and player._md.MDADHudWingL == true
+    and panel._wingLeftW < openLeftW and not panel.actionButton.visible
+    and panel.wingButton.visible and panel.collapseButton.visible,
+    "both wings folded leaves two badges with their own expand chevrons")
+click(panel.wingButton)
+click(panel.collapseButton)
+check(panel._wingL == false and panel._wingR == false
+    and panel._wingLeftW == openLeftW and panel._wingRightW == openRightW,
+    "expanding each wing restores its own geometry")
+-- 中段（儀表板所在）必須一個像素都不畫，否則「不遮路面」這個賣點就沒了。
+local wingBands = {}
+function panel:drawRect(x, y, w, h) wingBands[#wingBands + 1] = { x, w } end
+panel:drawBackground()
+panel.drawRect = nil
+local gapL, gapR = panel._wingLeftW, panel._wingRightX
+local painted = 0
+for i = 1, #wingBands do
+    local x, w = wingBands[i][1], wingBands[i][2]
+    if x + w > gapL and x < gapR then painted = painted + 1 end
+end
+check(#wingBands > 0 and painted == 0 and gapR > gapL,
+    "wings background paints both wings and leaves the dashboard gap untouched")
+click(panel.themeButton)
+check(panel._style == 1, "style button cycles wings → metal")
+check(not panel.wingButton.visible, "leaving the wings theme hides the left-wing chevron (2026-09-02 實機截圖回歸)")
+click(panel.collapseButton)
+check(not panel.wingButton.visible, "collapsed badge of a top-mounted theme never shows the wing chevron")
+click(panel.collapseButton)
+checkEq(optionSaveCalls, 4, "each style switch persists")
 
 escapeVisible = true
 panel:update()
-check(not panel.visible and not panel.collapseButton.visible and not panel.themeButton.visible,
-    "ESC root hides HUD and both dashboard controls before 250ms data refresh")
+check(not panel.visible, "ESC root hides HUD before 250ms data refresh")
 escapeVisible = false
 nowMs = nowMs + 100
 panel:update()
-check(panel.visible and panel.collapseButton.visible and panel.themeButton.visible,
-    "closing ESC root restores HUD and both dashboard controls")
+check(panel.visible, "closing ESC root restores HUD")
 escapeVisible = true
 checkEq(panel.bringToTopCalls or 0, 0,
     "ESC/dashboard hide-and-restore cycles never raise HUD root above existing modals")
 panel:prerender()
-check(not panel.visible and not panel.collapseButton.visible and not panel.themeButton.visible,
-    "ESC opened between UI ticks hides HUD and both dashboard controls")
+check(not panel.visible, "ESC opened between UI ticks hides HUD")
 escapeVisible = false
 nowMs = nowMs + 100
 panel:update()
 dashboards[0].inManager = false -- removeFromUIManager：visible 保持 true
 panel:update()
-check(dashboards[0].visible
-    and not panel.visible and not panel.collapseButton.visible and not panel.themeButton.visible,
-    "dashboard UIManager removal hides HUD and controls before 250ms data refresh")
+check(dashboards[0].visible and not panel.visible,
+    "dashboard UIManager removal hides HUD before 250ms data refresh")
 dashboards[0].inManager = true
 nowMs = nowMs + 100
 panel:update()
-check(panel.visible and panel.collapseButton.visible and panel.themeButton.visible,
-    "dashboard UIManager restore immediately recovers HUD and controls")
+check(panel.visible, "dashboard UIManager restore immediately recovers HUD")
 
 check(panel._capLabelY < panel._capValueY
     and panel._capValueY + 14 <= panel._dividerY,
@@ -527,6 +657,8 @@ do
         { 2, 8, pw - 4, ph - 16, 0.98, face, face, face },
         { 8, 2, pw - 16, 1, 0.72, 0.42, 0.42, 0.42 },
         { 8, ph - 4, pw - 16, 2, 0.88, 0.025, 0.025, 0.025 },
+        -- 控制方塊左側的直分隔線（2026-09-02 控制上 HUD）
+        { panel._blockX, 6, 1, ph - 12, 1.0, edge, edge, edge },
     }
     checkEq(#bands, #expected, "metal background draws exactly the measured chamfer bands")
     for i = 1, #expected do
@@ -542,8 +674,8 @@ end
 panel.vehicle = nil
 panel:setHudVisible(true)
 panel:prerender()
-check(not panel.visible and not panel.collapseButton.visible and not panel.themeButton.visible,
-    "prerender nil-vehicle guard hides root and dashboard controls, not only background")
+check(not panel.visible,
+    "prerender nil-vehicle guard hides root, not only background")
 panel.vehicle = vehicle
 panel._forceRefresh = true
 panel:update()
@@ -597,14 +729,94 @@ checkEq(panel._capText, "30", "inactive HUD recomputes cap via Drive.effectiveCa
 
 click(panel.collapseButton)
 checkEq(player._md.MDADHudCollapsed, true, "collapsed state persists in player modData")
-check(panel.width < 200 and panel.actionButton.visible == false,
-    "collapsed mode is badge only")
-check(panel.collapseButton.title == "^"
-    and panel.collapseButton:getParent() == dashboards[0],
-    "collapsed badge keeps expand control in vanilla dashboard")
+check(panel.width < 200 and panel.actionButton.visible == false
+    and not panel.themeButton.visible and not panel.voiceButton.visible
+    and not panel.volumeSlider.visible,
+    "collapsed mode is badge only: style/voice/volume hidden")
+check(panel.collapseButton.visible and panel.collapseButton.title == "SHOW"
+    and panel.collapseButton.x + panel.collapseButton.width <= panel.width,
+    "collapsed badge keeps the expand control on itself")
 click(panel.collapseButton)
 checkEq(player._md.MDADHudCollapsed, false, "expand persists")
-checkEq(panel.collapseButton.title, "v", "expanded dashboard control shows collapse direction")
+checkEq(panel.collapseButton.title, "HIDE", "expanded control shows the hide label")
+
+-- 語音開關：點擊翻轉 option 並落盤；開啟瞬間試播 start 給玩家聽音量
+local voiceOption = optionSets.MinidoracatAutoDrive:getOption("VoiceEnabled")
+local voiceCallsBefore = #voiceCalls
+click(panel.voiceButton)
+check(voiceOption:getValue() == false and panel.voiceButton.title == "VOICE OFF"
+    and #voiceCalls == voiceCallsBefore,
+    "voice pill turns the option off, restyles, and plays nothing")
+click(panel.voiceButton)
+check(voiceOption:getValue() == true and panel.voiceButton.title == "VOICE ON"
+    and voiceCalls[#voiceCalls] == "start@0",
+    "voice pill turns the option on and previews the start line")
+check(MDAD.HUD.voiceEnabled() == true and MDAD.HUD.voiceVolume() == 70,
+    "voice accessors expose option state for MDAD_Voice")
+
+-- 音量拉桿：拖曳中只改 option 值（不 apply／不落盤），放開才落盤＋試播 arrive；
+-- 滾輪＝±5 且視同放開。
+local volumeOption = optionSets.MinidoracatAutoDrive:getOption("VoiceVolume")
+local saveBefore = optionSaveCalls
+local layoutW = panel.width
+local slider = panel.volumeSlider
+slider.mouseX = 6 + slider:trackWidth() -- 拉到最右
+slider:onMouseDown(0, 0)
+check(slider.dragging and slider.captured and slider.value == 100
+    and volumeOption:getValue() == 100 and optionSaveCalls == saveBefore,
+    "mouse down jumps to the pointed value, captures, writes option without saving")
+slider.mouseX = 6 + math.floor(slider:trackWidth() / 2)
+slider:onMouseMove(0, 0)
+check(slider.value == 50 and volumeOption:getValue() == 50 and optionSaveCalls == saveBefore
+    and panel.width == layoutW,
+    "dragging updates value in 5-steps without saving or relayout")
+slider:onMouseUp(0, 0)
+check(not slider.dragging and not slider.captured and optionSaveCalls == saveBefore + 1
+    and voiceCalls[#voiceCalls] == "arrive@0" and MDAD.HUD.voiceVolume() == 50,
+    "mouse up persists once and previews the short arrive line")
+slider:onMouseWheel(-1)
+check(slider.value == 55 and volumeOption:getValue() == 55 and optionSaveCalls == saveBefore + 2,
+    "wheel up steps +5 and persists")
+slider:onMouseWheel(1)
+check(slider.value == 50 and optionSaveCalls == saveBefore + 3, "wheel down steps -5")
+slider.value = 100
+slider:onMouseWheel(-1)
+checkEq(slider.value, 100, "wheel cannot exceed 100")
+slider.value = 0
+slider:onMouseWheel(1)
+checkEq(slider.value, 0, "wheel cannot go below 0")
+voiceOption:setValue(false)
+local voiceCallsMuted = #voiceCalls
+panel:refresh(nowMs)
+slider:onMouseWheel(-1)
+checkEq(#voiceCalls, voiceCallsMuted, "volume preview stays silent while voice is off")
+voiceOption:setValue(true)
+-- 改道鈕（2026-09-02 車陣策略）：只在「煞停等待」出現、接在狀態字後、點了走 Drive.requestDetour
+check(not panel.detourButton.visible, "detour button hidden while inactive")
+state.active, state.startReason = true, nil
+state.token = "follow"
+panel:refresh(nowMs)
+check(not panel.detourButton.visible, "detour button hidden while following")
+state.token = "blocked"
+panel:refresh(nowMs)
+check(panel.detourButton.visible and panel.detourButton.title == "REROUTE"
+    and panel.detourButton.x == panel._statusX + #panel._statusText * 7 + 4
+    and panel.detourButton.x + panel.detourButton.width + 4 <= panel._speedX
+    and panel.detourButton.y >= 0,
+    "blocked status shows the reroute pill right after the status text, before the speed column")
+click(panel.detourButton)
+check(detourCalls == 1 and not panel.detourButton.visible and panel._statusText == "FOLLOW",
+    "reroute click asks the driver once and the pill disappears once unblocked")
+state.token = "blocked"
+panel:refresh(nowMs)
+click(panel.collapseButton)
+check(not panel.detourButton.visible, "collapsed badge never shows the reroute pill")
+click(panel.collapseButton)
+panel:refresh(nowMs)
+check(panel.detourButton.visible, "expanding restores the reroute pill while still blocked")
+state.token = "follow"
+state.active, state.startReason = false, "UI_MinidoracatAutoDrive_EngineOff"
+panel:refresh(nowMs)
 
 -- 記下切換前的完整版可見性，讓下面那條斷言驗的是「換過去」而不只是「換過來」。
 local fullLayoutShowedGears = panel.gearButtons[1].visible and not panel.cycleButton.visible
@@ -618,9 +830,26 @@ check(type(registeredMiniMapSection) == "table"
     and registeredMiniMapOwner == "MinidoracatAutoDriveFor42"
     and registeredMiniMapSection.lane == nil
     and registeredMiniMapSection.actions == nil
-    and #registeredMiniMapSection.ticks == 2
-    and #registeredMiniMapSection.combos == 2,
+    and #registeredMiniMapSection.ticks == 4
+    and #registeredMiniMapSection.combos == 3,
     "v1 MiniMap spec registers ticks/combos without actions or host layout fields")
+check(registeredMiniMapSection.ticks[2].label == "UI_MinidoracatAutoDrive_VoiceEnabled"
+    and registeredMiniMapSection.ticks[2].get() == true,
+    "MiniMap section exposes the voice tick between trajectory and telemetry")
+registeredMiniMapSection.ticks[2].set(false)
+check(MDAD.HUD.voiceEnabled() == false
+    and options:getOption("VoiceEnabled"):getValue() == false,
+    "MiniMap voice tick writes the shared VoiceEnabled option")
+registeredMiniMapSection.ticks[2].set(true)
+check(registeredMiniMapSection.ticks[3].label == "UI_MinidoracatAutoDrive_AutoDetour"
+    and registeredMiniMapSection.ticks[3].get() == false
+    and MDAD.HUD.autoDetour() == false,
+    "auto-detour tick defaults off and sits before telemetry")
+registeredMiniMapSection.ticks[3].set(true)
+check(MDAD.HUD.autoDetour() == true
+    and options:getOption("AutoDetour"):getValue() == true,
+    "MiniMap auto-detour tick writes the shared AutoDetour option")
+registeredMiniMapSection.ticks[3].set(false)
 check(options:getOption("ExportTelemetry"):getValue() == false
     and options:getOption("TelemetryRetentionDays"):getValue() == 3
     and MDAD.HUD.telemetryEnabled() == false
@@ -641,14 +870,34 @@ check(not MDAD.HUD.setTelemetryRetentionDays(2)
     and MDAD.HUD.telemetryRetentionDays() == 14
     and optionSaveCalls == invalidRetentionSaves,
     "invalid retention days rejected without saving")
-registeredMiniMapSection.ticks[2].set(false)
+registeredMiniMapSection.ticks[4].set(false)
 check(not MDAD.HUD.telemetryEnabled()
     and options:getOption("ExportTelemetry"):getValue() == false,
     "MiniMap telemetry tick writes the same AutoDrive ModOptions value")
-registeredMiniMapSection.combos[2].set(5)
+registeredMiniMapSection.combos[3].set(5)
 check(MDAD.HUD.telemetryRetentionDays() == 30
     and options:getOption("TelemetryRetentionDays"):getValue() == 5,
     "MiniMap retention combo writes shared option as days")
+-- 語音語言 combo（2026-09-02）：index 1 跟隨、2..4＝Voice.PACKS；MiniMap 與 ESC 共用同一 option
+local voiceLangCombo = registeredMiniMapSection.combos[2]
+check(voiceLangCombo.label == "UI_MinidoracatAutoDrive_VoiceLanguage"
+    and #voiceLangCombo.items == 4
+    and voiceLangCombo.items[1] == "UI_MinidoracatAutoDrive_VoiceLangAuto"
+    and voiceLangCombo.items[4] == "UI_MinidoracatAutoDrive_VoiceLang_ja"
+    and voiceLangCombo.default == 1,
+    "voice language combo lists follow + the three packs in Voice.PACKS order")
+checkEq(MDAD.HUD.voiceLanguage(), "auto", "voice language defaults to follow-game-language")
+voiceLangCombo.set(4)
+check(MDAD.HUD.voiceLanguage() == "ja"
+    and options:getOption("VoiceLanguage"):getValue() == 4,
+    "MiniMap voice language combo writes the shared option and maps index to pack")
+local voiceLangSaves = optionSaveCalls
+check(not MDAD.HUD.setVoiceLanguageIndex(5) and not MDAD.HUD.setVoiceLanguageIndex(0)
+    and MDAD.HUD.voiceLanguage() == "ja" and optionSaveCalls == voiceLangSaves,
+    "out-of-range voice language index rejected without saving")
+options:getOption("VoiceLanguage"):setValue(9)
+checkEq(MDAD.HUD.voiceLanguage(), "auto", "corrupt voice language option reads back as follow")
+voiceLangCombo.set(1)
 local trajectorySaves = optionSaveCalls
 check(MDAD.HUD.setTrajectoryVisible(false), "trajectory visibility setter accepts false")
 check(options:getOption("ShowTrajectory"):getValue() == false
@@ -690,8 +939,8 @@ fire(Events.OnGameBoot)
 checkEq(miniMapRegisterCalls, 2, "API v2 upgrade re-registers settings once")
 check(registeredMiniMapSection.actions ~= nil
     and #registeredMiniMapSection.actions == 2
-    and #registeredMiniMapSection.ticks == 2
-    and #registeredMiniMapSection.combos == 2,
+    and #registeredMiniMapSection.ticks == 4
+    and #registeredMiniMapSection.combos == 3,
     "v2 MiniMap spec keeps ticks/combos and adds two actions")
 local latestAction = registeredMiniMapSection.actions[1]
 local folderAction = registeredMiniMapSection.actions[2]
@@ -731,9 +980,9 @@ local capRight = panel._capValueX
 check(capRight + 3 <= panel.cycleButton.x,
     "compact cruise value ends before cycle button")
 click(panel.collapseButton)
-check(panel.collapseButton.title == "^"
+check(panel.collapseButton.title == "SHOW"
     and panel.y + panel.height == dashboards[0].y + 7,
-    "0.75x badge overlaps transparent inset while controls remain external")
+    "0.75x badge overlaps transparent inset and keeps its own expand control")
 click(panel.collapseButton)
 
 local compactWidth = panel.width
@@ -749,10 +998,9 @@ local replacementDashboard = newDashboard()
 replacementDashboard.y = 940
 dashboards[0] = replacementDashboard
 fire(Events.OnResolutionChange)
-check(panel.collapseButton:getParent() == replacementDashboard
-    and panel.themeButton:getParent() == replacementDashboard
-    and #oldDashboard.children == 0,
-    "dashboard recreation reparents both controls without orphan")
+check(panel._dashboard == replacementDashboard
+    and #oldDashboard.children == 0 and #replacementDashboard.children == 0,
+    "dashboard recreation re-docks the panel; vanilla dashboards never receive children")
 checkEq(panel.y + panel.height, replacementDashboard.y + 7,
     "dashboard recreation refreshes visible-edge docking anchor")
 
@@ -811,11 +1059,10 @@ for slot = 0, 1 do
         check(statusRight <= candidate._speedX,
             "split slot " .. slot .. " long status ends before speed column")
     end
-    check(candidate.collapseButton:getParent() == dash
-        and candidate.themeButton:getParent() == dash
-        and candidate.collapseButton.x + candidate.collapseButton.width <= dash.width
-        and candidate.themeButton.x >= 0,
-        "split slot " .. slot .. " controls attach inside own dashboard")
+    check(candidate.collapseButton.parent == candidate
+        and candidate.collapseButton.x + candidate.collapseButton.width <= candidate.width
+        and candidate.themeButton.x >= 0 and #dash.children == 0,
+        "split slot " .. slot .. " controls stay inside own HUD")
     check(candidate.zombieButton.visible == candidate.corpseButton.visible,
         "split slot " .. slot .. " policy pills hide or show as a pair")
     checkEq(candidate.y + candidate.height, dash.y + 7,
@@ -829,39 +1076,30 @@ activePlayers = 1
 vehicle._module = false
 sandbox.NeedItemForAutoDrive = true
 panel:refresh(nowMs)
-check(not panel.visible and not panel.collapseButton.visible and not panel.themeButton.visible,
-    "missing required module hides HUD and dashboard controls")
+check(not panel.visible, "missing required module hides HUD")
 sandbox.NeedItemForAutoDrive = false
 panel:refresh(nowMs)
-check(panel.visible and panel.collapseButton.visible and panel.themeButton.visible,
-    "sandbox bypass shows HUD and dashboard controls without module")
+check(panel.visible, "sandbox bypass shows HUD without module")
 ISUIHandler.allUIVisible = false
 panel:refresh(nowMs)
-check(not panel.visible and not panel.collapseButton.visible and not panel.themeButton.visible,
-    "global UI hide also hides HUD and dashboard controls")
+check(not panel.visible, "global UI hide also hides HUD")
 ISUIHandler.allUIVisible = true
 panel:refresh(nowMs)
-check(panel.visible and panel.collapseButton.visible and panel.themeButton.visible,
-    "HUD and dashboard controls converge visible after global UI returns")
+check(panel.visible, "HUD converges visible after global UI returns")
 
 player._vehicle = nil
 dashboards[0].vehicle = nil
 fire(Events.OnExitVehicle, player)
-check(not panel.visible and not panel.collapseButton.visible and not panel.themeButton.visible,
-    "exit event hides HUD and dashboard controls immediately")
+check(not panel.visible, "exit event hides HUD immediately")
 player._vehicle = vehicle
 dashboards[0].vehicle = true
 fire(Events.OnEnterVehicle, player)
-check(panel.visible and panel.collapseButton.visible and panel.themeButton.visible,
-    "enter event restores HUD and dashboard controls immediately")
+check(panel.visible, "enter event restores HUD immediately")
 fire(Events.OnPlayerDeath, player)
-check(not panel.added and panel.collapseButton:getParent() == nil
-    and panel.themeButton:getParent() == nil,
-    "player death removes panel and detaches dashboard controls")
+check(not panel.added and panel._dashboard == nil,
+    "player death removes panel and drops the dashboard reference")
 fire(Events.OnPlayerDeath, player2)
-check(not panel2.added and panel2.collapseButton:getParent() == nil
-    and panel2.themeButton:getParent() == nil,
-    "second split-screen panel and dashboard controls clean up independently")
+check(not panel2.added, "second split-screen panel cleans up independently")
 
 -- Driver 載入失敗（Kahlua 結構上限超標＝整個 MDAD_Driver.lua chunk 一行都不執行，
 -- MDAD.Drive 不存在）。HUD 必須印一行安裝級診斷就退場：不發布 facade、不註冊事件。
@@ -891,6 +1129,58 @@ MDAD.Drive = liveDrive
 loadHUD()
 check(type(MDAD.HUD) == "table" and type(MDAD.HUD.Panel) == "table",
     "intact Drive still publishes the HUD facade through the same guard")
+MDAD.HUD = liveHUD
+
+-- 圖示模式（2026-09-02 使用者裁定：控制鈕改圖示省空間，說明看 tooltip）：
+-- getTexture 回得到 hud_*.png 時，控制鈕／策略藥丸收成方鈕、標題清空、字形依狀態染色；
+-- 缺圖（getTexture 回 nil）＝整套退回文字寬與文字標題。快取在 chunk 層，故重載 HUD 再測。
+local iconLoads = {}
+function getTexture(path)
+    iconLoads[#iconLoads + 1] = path
+    if path:find("^media/ui/MinidoracatAutoDrive/hud_") then
+        return { path = path, getWidthOrig = function() return 32 end, getHeightOrig = function() return 32 end }
+    end
+    return nil
+end
+MDAD.HUD = nil -- 讓 chunk 重跑（頂部 `if MDAD.HUD then return end`），圖示快取歸零
+loadHUD()
+local iconPanel = MDAD.HUD.Panel:new(0)
+iconPanel:initialise(); iconPanel:instantiate()
+iconPanel:refresh(nowMs)
+check(iconPanel.themeButton.width == iconPanel.themeButton.height
+    and iconPanel.collapseButton.width == iconPanel.collapseButton.height
+    and iconPanel.voiceButton.width == iconPanel.voiceButton.height
+    and iconPanel.zombieButton.width == iconPanel.zombieButton.height,
+    "icons present: control buttons and policy pills become squares")
+check(iconPanel.themeButton.image and iconPanel.themeButton.image.path:find("hud_palette.png", 1, true)
+    and iconPanel.themeButton.title == ""
+    and iconPanel.collapseButton.image.path:find("hud_chevron_down.png", 1, true)
+    and iconPanel.voiceButton.image.path:find("hud_speaker_on.png", 1, true)
+    and iconPanel.zombieButton.image.path:find("hud_zombie.png", 1, true)
+    and iconPanel.corpseButton.image.path:find("hud_skull.png", 1, true),
+    "icons present: glyphs replace titles (palette / chevron / speaker / zombie / skull)")
+check(iconPanel.voiceButton.textureColor.g > 0.7 and iconPanel.voiceButton.textureColor.r < 0.5,
+    "voice-on glyph is tinted green (state lives in the tint, explanation in the tooltip)")
+iconPanel:setCollapsed(true)
+check(iconPanel.collapseButton.image.path:find("hud_chevron_up.png", 1, true),
+    "collapsed badge flips the chevron upward")
+iconPanel:setCollapsed(false)
+optionSets.MinidoracatAutoDrive:getOption("HUDTheme"):setValue(4)
+iconPanel:applyLayout()
+check(iconPanel.wingButton.image.path:find("hud_chevron_right.png", 1, true)
+    and iconPanel.collapseButton.image.path:find("hud_chevron_left.png", 1, true),
+    "wings theme: each chevron points toward the dashboard while expanded")
+iconPanel:setWing("left", true)
+check(iconPanel.wingButton.image.path:find("hud_chevron_left.png", 1, true),
+    "folded left wing points outward to expand")
+optionSets.MinidoracatAutoDrive:getOption("HUDTheme"):setValue(1)
+local seen = 0
+for i = 1, #iconLoads do if iconLoads[i]:find("hud_palette.png", 1, true) then seen = seen + 1 end end
+checkEq(seen, 1, "each icon is looked up once and cached for the chunk lifetime")
+iconPanel:removeFromUIManager()
+getTexture = nil
+MDAD.HUD = nil
+loadHUD()
 MDAD.HUD = liveHUD
 
 print("HUD assertions " .. assertions .. ", failures " .. failures)

@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0902m"
+Drive.REV = "0902t"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -183,6 +183,15 @@ TUNE.WAIT_TIMEOUT_MS = 15000   -- 停等總上限：紅字請玩家接手（2026
 TUNE.BLOCK_RETRY_MS = 5000     -- blocked 停等此時長仍無縫→主動倒退重掃換視角找路
                                -- （2026-09-01 使用者裁定：不乾等；rear clear 才退，
                                -- episode 3 次額度用盡才走紅字）
+-- 改道（2026-09-02 使用者裁定「車陣策略照建議」：先做 HUD 鈕、自動模式為 ESC 選項）。
+-- 舊自動改道 2026-09-01 拆掉的兩個實作問題在此收口：① 拿回 snap 退化的爛路線
+-- → 驗收（仍穿避讓圈／起點太遠／長度超標一律拒）；② 同目標 cutover 清空繞行記憶
+-- → 改道只由玩家或自動條件觸發一次，且 cutover 帶 why="detour"。
+TUNE.SNAP_MAX_M = 20           -- 路線起點離車超過此距離＝要越野接線（s053：75m 穿樹林卡死），拒啟動
+TUNE.DETOUR_AVOID_R = 40       -- 以堵點為圓心的軟封鎖半徑（主 MOD findRoute avoidR）
+TUNE.DETOUR_LEN_RATIO = 1.5    -- 替代路線長 ≤ 剩餘 × ratio + slack 才接受
+TUNE.DETOUR_LEN_SLACK = 200
+TUNE.AUTO_DETOUR_MS = 10000    -- 自動改道：停等累計此時長（blocked-retry 之後）才要替代路線
 -- recovery 方向探測與 episode 重臂。rear 每 100ms 重查；成功倒退後 ban
 -- 跨 sensor reset／same-target route cutover 保留，前進 10m 且兩輪 footprint clear 才清。
 local REAR_PROBE_MS = 100
@@ -330,6 +339,9 @@ local KEY_STUCK = "UI_MinidoracatAutoDrive_StopStuck"
 local KEY_BLOCKED = "UI_MinidoracatAutoDrive_Blocked"
 local KEY_UNSTICK = "UI_MinidoracatAutoDrive_Unstick"
 local KEY_DODGE = "UI_MinidoracatAutoDrive_Dodge"
+local KEY_ROUTE_FAR = "UI_MinidoracatAutoDrive_RouteTooFar"
+local KEY_DETOUR = "UI_MinidoracatAutoDrive_Detour"
+local KEY_NO_DETOUR = "UI_MinidoracatAutoDrive_NoDetour"
 
 -- 診斷輸出（只在 getDebug() 為真時存在）。實機回報「按了關閉但車還在跑」時，唯一能
 -- 分辨「session 沒關」與「只是慣性滑行」的證據就是這幾行；跟線那行必須節流，每幀
@@ -346,6 +358,14 @@ end
 
 local function haloGood(playerObj, key)
     HaloTextHelper.addGoodText(playerObj, getText(key))
+end
+
+-- 語音提示（MDAD_Voice.lua）：缺席／拋錯都不得影響控制——pcall 包住、回值不看。
+-- 六個事件：start／stop／blocked／unstick／handback／arrive；觸發點與 halo 同址。
+local function voice(event, playerNum)
+    local v = MDAD.Voice
+    if type(v) ~= "table" or type(v.play) ~= "function" then return end
+    pcall(v.play, event, playerNum)
 end
 
 local function maxSpeedKmh()
@@ -379,6 +399,61 @@ local function fetchRoute(api, playerNum)
     local route, state = api.requestRoute(playerNum, tx, ty)
     if not route or state ~= "ok" then return nil, tx, ty end
     return route, tx, ty
+end
+
+-- 路線起點太遠（`route.snapDist`＝玩家到路線最近點的投影距離＝出發前必須越野走完的
+-- 接線；MinidoracatMiniMap_NavRoute.lua:1386-1389、1827-1832）。判在啟動與換目標。
+-- 2026-09-02 s052/s053：目標點在平行小路旁 4m，路線吸到 67m 外那條路，車嘗試
+-- 穿 57m 樹林接線→卡死三輪倒車。**只信 nav API v5 起的 snapDist**：v4 沿用快取時
+-- 刷新成「玩家→pts[1]」，沿線前進 100 格後停車再啟動會報 100（實機：車在路上卻被
+-- 拒啟動「起點太遠」）；v4 以下與缺 snapDist 一律不擋，寧可放行也不鎖死玩家。
+-- `finite` 在本檔較後面才定義（:1426），這三個 helper 用 MDADDynamics.finite。
+local function routeTooFar(route)
+    local d = route and route.snapDist
+    return MDADDynamics.finite(d) and d > TUNE.SNAP_MAX_M
+end
+
+-- 快取路線的 snapDist 只有 v5 起才是投影距離；requestDetour 每次新算（不進快取），
+-- 其 snapDist 在任何版本都是建圖當下到首點的距離＝可信，不經此閘。
+local function cachedSnapTrusted(api)
+    return api ~= nil and type(api.navApiVersion) == "number" and api.navApiVersion >= 5
+end
+
+-- 路線是否穿過避讓圈（任一段到圓心距 ≤ r）；冷路徑 O(n)，只在 cutover 用。
+local function routeCrossesAvoid(route, ax, ay, r)
+    local pts = route and route.pts
+    if type(pts) ~= "table" or not MDADDynamics.finite(ax) or not MDADDynamics.finite(ay) then return false end
+    local n = #pts / 2
+    for i = 1, n - 1 do
+        local x1, y1, x2, y2 = pts[i * 2 - 1], pts[i * 2], pts[i * 2 + 1], pts[i * 2 + 2]
+        local dx, dy = x2 - x1, y2 - y1
+        local den = dx * dx + dy * dy
+        local t = 0
+        if den > 0 then
+            t = ((ax - x1) * dx + (ay - y1) * dy) / den
+            if t < 0 then t = 0 elseif t > 1 then t = 1 end
+        end
+        local ex, ey = ax - x1 - dx * t, ay - y1 - dy * t
+        if ex * ex + ey * ey <= r * r then return true end
+    end
+    return false
+end
+
+-- 向主 MOD 要「繞開 (ax,ay) 半徑 r」的替代路線並驗收。回 (route, nil) 或 (nil, 原因)。
+-- 驗收：仍穿避讓圈（avoidPenalty>0＝沒有替代路，主 MOD 是軟封鎖照樣給原線）、
+-- 起點太遠、長度 > 剩餘×ratio+slack 一律拒——這三條就是舊自動改道「拿回爛路線」的
+-- 全部型態。成功時主 MOD 已覆寫路線快取，下一次 requestRoute 回的就是替代線。
+local function requestDetourRoute(api, playerNum, tx, ty, ax, ay, remaining)
+    if type(api.requestDetour) ~= "function" then return nil, "api" end
+    local route, state = api.requestDetour(playerNum, tx, ty, ax, ay, TUNE.DETOUR_AVOID_R)
+    if not route or state ~= "ok" then return nil, state or "noroad" end
+    if MDADDynamics.finite(route.avoidPenalty) and route.avoidPenalty > 0 then return nil, "through" end
+    if routeTooFar(route) then return nil, "far" end
+    if MDADDynamics.finite(route.len) and MDADDynamics.finite(remaining)
+            and route.len > remaining * TUNE.DETOUR_LEN_RATIO + TUNE.DETOUR_LEN_SLACK then
+        return nil, "long"
+    end
+    return route, nil
 end
 
 -- 自駕先決條件（啟動與每幀共用同一份）。回 nil＝可以開／可以繼續，否則回翻譯鍵。
@@ -733,6 +808,9 @@ function Drive.stop(playerNum, reasonKey)
         local playerObj = getSpecificPlayer(playerNum)
         if playerObj then haloBad(playerObj, reasonKey) end
     end
+    -- 停等預算耗盡的紅字交還說「無法通過，請手動駕駛」；其餘（玩家關閉、讓位、
+    -- 引擎熄火…）一律「已關閉，請接管方向盤」。
+    voice(reasonKey == KEY_STUCK and "handback" or "stop", playerNum)
     return true
 end
 
@@ -755,6 +833,7 @@ local function startSession(playerObj, playerNum)
     if reason then return reason end
     local route, tx, ty = fetchRoute(api, playerNum)
     if not route then return KEY_ROUTE end
+    if cachedSnapTrusted(api) and routeTooFar(route) then return KEY_ROUTE_FAR end
     local maxSpeed = maxSpeedKmh()
     -- One coherent profile is built before Follower. Geometry invalid is fatal
     -- because every current/swept OBB depends on it; other invalid domains fall
@@ -979,6 +1058,9 @@ local function startSession(playerObj, playerNum)
         waitTickMs = 0,
         waitAnchorS = 0, waitAnchorLat = 0, waitAnchorErr = 0,
         blockRetryDone = false, -- 本次停等的主動倒退嘗試只做一次（soft fail 防洗版）
+        detourTried = false,    -- 自動改道每個停等 episode 只試一次（清除同 blockRetryDone）
+        avoidX = nil, avoidY = nil, -- 已接受的改道避讓圈（sticky：之後主 MOD 重算若穿回去再要一次）
+        pendingDetour = false,  -- requestDetour 已覆寫主 MOD 快取，等下一次 fetchRoute cutover
         -- RECOVER 單一進口（階段 2 主體 2）：why＝需求原因（nil＝無需求，
         -- 同時是舊 mode=="recover" 閂鎖的替代）；其餘三個是 suspect 探測留給
         -- dispatch 選動作用的純量，只有 why=="progress" 時有效。
@@ -1103,6 +1185,7 @@ function Drive.start(playerObj)
         return false
     end
     haloGood(playerObj, "UI_MinidoracatAutoDrive_Start")
+    voice("start", playerNum)
     if getDebug() then
         print(LOG .. "start pn=" .. playerNum .. " ok maxSpeed="
             .. sessions[playerNum].maxSpeed)
@@ -1123,6 +1206,44 @@ function Drive.toggle(playerObj)
     if getDebug() then
         print(LOG .. "toggle pn=" .. playerNum .. " on ok=" .. tostring(ok))
     end
+end
+
+-- 改道（HUD「改道」鈕與自動改道共用）：只在 blocked 停等時有意義。以堵點
+-- （群最近擋線點 blockHitX/Y，缺則車位）為圓心向主 MOD 要替代路線並驗收
+-- （requestDetourRoute）；成功＝主 MOD 快取已換線，這裡只記 sticky 避讓圈、
+-- 把 nextRouteMs 歸零讓下一幀 fetchRoute 立刻 cutover（why="detour"）。
+-- 回 (true) 或 (false, 原因)；原因供 HUD tooltip／console。
+function Drive.requestDetour(playerNum)
+    local s = sessions[playerNum]
+    if not s then return false, "inactive" end
+    if not s.blocked and not s.currentBlocked then return false, "not-blocked" end
+    local api = navApi()
+    if not api then return false, "api" end
+    local playerObj = getSpecificPlayer(playerNum)
+    local fin = MDADDynamics.finite -- 本檔的 local finite 定義在更後面（:1460+）
+    if not playerObj or not fin(s.lastTx) or not fin(s.lastTy) then return false, "target" end
+    local ax, ay = s.blockHitX, s.blockHitY
+    if not fin(ax) or not fin(ay) then
+        ax, ay = s.vehicle:getX(), s.vehicle:getY()
+    end
+    local remaining = s.profile and (s.profile.length - s.lastSNow) or nil
+    local route, why = requestDetourRoute(api, playerNum, s.lastTx, s.lastTy, ax, ay, remaining)
+    if getDebug() then
+        print(LOG .. "detour pn=" .. playerNum .. " avoid=(" .. tostring(ax) .. "," .. tostring(ay)
+            .. ") -> " .. (route and ("ok len=" .. tostring(route.len)) or ("rejected " .. tostring(why))))
+    end
+    if not route then
+        haloBad(playerObj, KEY_NO_DETOUR)
+        voice("nodetour", playerNum)
+        return false, why
+    end
+    s.avoidX, s.avoidY = ax, ay
+    s.pendingDetour = true
+    s.pendingRouteWhy = "detour"
+    s.nextRouteMs = 0
+    haloGood(playerObj, KEY_DETOUR)
+    voice("detour", playerNum)
+    return true
 end
 
 --------------------------------------------------------------------------------
@@ -1723,6 +1844,7 @@ local function clearEpisode(s)
     s.waitAccumMs, s.waitTickMs = 0, 0
     s.waitAnchorS, s.waitAnchorLat, s.waitAnchorErr = 0, 0, 0
     s.blockRetryDone = false
+    s.detourTried = false
     s.recoverWhy, s.recoverPulse = nil, false
 end
 
@@ -2002,6 +2124,8 @@ local function startRecoveryAttempt(s, vehicle, playerNum, now, vx, vy, softFail
         phase = "start", eid = s.episodeId, attempt = s.episodeAttempts,
         x = vx, y = vy, s = s.lastSNow, d = 0, rear = status,
     })
+    -- 只在 episode 第一次倒退開口：同一堵局的第 2、3 次重試不再重複唸。
+    if s.episodeAttempts <= 1 then voice("unstick", playerNum) end
     vehicle:setRegulator(false)
     local playerObj = getSpecificPlayer(playerNum)
     if playerObj then haloGood(playerObj, KEY_UNSTICK) end
@@ -3155,6 +3279,7 @@ local function replan(s, vehicle, playerNum)
                         s.blockedNotified = true
                         local playerObj = getSpecificPlayer(playerNum)
                         if playerObj then haloBad(playerObj, KEY_BLOCKED) end
+                        voice("blocked", playerNum)
                         diagEvent(s, playerNum, "blocked", {
                             s = s.blockS, m = s.dodgeMargin, need = s.dodgeNeed,
                             x = s.blockHitX, y = s.blockHitY, why = "guard",
@@ -3686,6 +3811,7 @@ local function replan(s, vehicle, playerNum)
         s.blockedNotified = true
         local playerObj = getSpecificPlayer(playerNum)
         if playerObj then haloBad(playerObj, KEY_BLOCKED) end
+        voice("blocked", playerNum)
         -- wd＝車到群最近擋線點世界距（blockedNear 第二回傳；退弧長時 nil）——
         -- 復盤「該滑行還是該停」一眼定生死
         local _, wd = MDADDynamics.blockedNear(
@@ -4632,6 +4758,17 @@ local function stepFollow(s, vehicle, playerNum, now)
             -- 倒不了（soft fail）回到合法停等，只試一次防洗版。
             requestRecover(s, "blocked-retry")
         end
+        -- 自動改道（ESC 選項，預設關）：blocked-retry 之後仍在停等、累計超過
+        -- AUTO_DETOUR_MS 才要替代路線；一個停等 episode 只試一次，失敗＝沒替代路，
+        -- 剩下交給 WAIT_TIMEOUT 紅字。玩家按 HUD「改道」鈕走同一條 Drive.requestDetour。
+        if s.blocked and not s.detourTried and s.recoverWhy == nil
+                and postAction == nil and s.intentShadow == "WAIT"
+                and s.waitAccumMs >= TUNE.AUTO_DETOUR_MS
+                and type(MDAD.HUD) == "table" and type(MDAD.HUD.autoDetour) == "function"
+                and MDAD.HUD.autoDetour() == true then
+            s.detourTried = true
+            Drive.requestDetour(playerNum)
+        end
         if s.waitAccumMs >= TUNE.WAIT_TIMEOUT_MS then postAction = "wait" end
 
         local skipProgressCompare = false
@@ -5233,6 +5370,7 @@ local function onPlayerUpdate(player)
             diagStop(s, playerNum, "arrive")
             clearSession(playerNum)
             haloGood(player, "UI_MinidoracatAutoDrive_Arrived")
+            voice("arrive", playerNum)
         else
             if not commandForceBrake(s, vehicle, now) then
                 Drive.stop(playerNum, KEY_UNSUPPORTED)
@@ -5299,6 +5437,12 @@ local function onPlayerUpdate(player)
             s.resumeProgressPhase = nil
             s.resumeProgressUntil = 0
             s.pendingRouteWhy = "target"
+            s.avoidX, s.avoidY, s.pendingDetour = nil, nil, false
+            -- 換目標後的新路線起點太遠（要越野接線）＝與啟動同一道閘門：交還玩家。
+            if cachedSnapTrusted(api) and routeTooFar(route) then
+                Drive.stop(playerNum, KEY_ROUTE_FAR)
+                return
+            end
         end
         s.lastTx, s.lastTy = tx, ty
 
@@ -5335,6 +5479,20 @@ local function onPlayerUpdate(player)
             end
             if same then s.route = route end
         end
+        -- sticky 避讓：主 MOD 之後因偏航／冷卻自行重算（不帶 avoid）若又穿回堵點，
+        -- 立刻以同一圈再要一次替代線，拿不到才照原線走（每次 cutover 最多一次）。
+        if route ~= s.route and not targetChanged and not s.pendingDetour
+                and finite(s.avoidX) and finite(s.avoidY)
+                and routeCrossesAvoid(route, s.avoidX, s.avoidY, TUNE.DETOUR_AVOID_R) then
+            local remaining = s.profile and (s.profile.length - s.lastSNow) or nil
+            local detour = requestDetourRoute(api, playerNum, tx, ty, s.avoidX, s.avoidY, remaining)
+            if detour then
+                route = detour
+                s.pendingRouteWhy = "detour"
+            else
+                s.avoidX, s.avoidY = nil, nil
+            end
+        end
         if route ~= s.route or versionChanged then
             local profile = MDADFollower.begin(
                 route, s.maxSpeed, api.navApiVersion, s.vehicleProfile)
@@ -5354,6 +5512,7 @@ local function onPlayerUpdate(player)
             local routeWhy = s.pendingRouteWhy
             if routeWhy == nil then routeWhy = targetChanged and "target" or "deviation" end
             s.pendingRouteWhy = nil
+            s.pendingDetour = false
             s.routeGen = s.routeGen + 1
             local oldMode, oldProgress, oldUntil = s.mode, s.progressState, s.progressUntil
             local preservingRecovery = not targetChanged
