@@ -741,24 +741,41 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
     -- 但增益放大近 7 倍→過彎蛇行（err 翻轉 0.6 次/s、43 次）。改縮到
     -- 0.75×彎半徑、下限 4.5m：增益放大收斂到 ~3 倍，貼線與穩定並存；
     -- 直路 κ≈0 完全不縮。
+    -- 曲率取**整個前視窗**的最大值，不只車所在段（2026-09-03 s015 定罪：弧建好了，
+    -- 車在弧前 10m、13 km/h 前視 11m 已伸進弧的後半，目標點落在右前方 → 直路上
+    -- 就提前右打、切內 1.9m 撞同一根路口圍籬角；舊版只看 kap[bestI]，直路 κ=0
+    -- 不縮，等車進弧才縮已經太晚）。先用原前視走一趟取窗內 κmax，縮了再走第二趟
+    -- （第二趟更短；兩趟都受 LOOKAHEAD_WALK_MAX 上界）。
     local kap = profile.kappa
-    if kap then
-        local k1 = kap[bestI] or 0
-        local k2 = kap[bestI + 1] or 0
-        if k2 > k1 then k1 = k2 end
-        if k1 > 1e-6 then
-            local rShrink = 0.75 / k1
-            if rShrink < look then look = rShrink end
-            if look < 4.5 then look = 4.5 end
-        end
-    end
-
     local sTarget = sNow + look
     local j = bestI
     local walked = 0
+    local kMax = 0
+    if kap then
+        kMax = kap[bestI] or 0
+        local k2 = kap[bestI + 1] or 0
+        if k2 > kMax then kMax = k2 end
+    end
     while j < n - 1 and s[j + 1] < sTarget and walked < LOOKAHEAD_WALK_MAX do
         j = j + 1
         walked = walked + 1
+        if kap then
+            local k = kap[j + 1] or 0
+            if k > kMax then kMax = k end
+        end
+    end
+    if kMax > 1e-6 then
+        local rShrink = 0.75 / kMax
+        if rShrink < look then
+            look = rShrink
+            if look < 4.5 then look = 4.5 end
+            sTarget = sNow + look
+            j, walked = bestI, 0
+            while j < n - 1 and s[j + 1] < sTarget and walked < LOOKAHEAD_WALK_MAX do
+                j = j + 1
+                walked = walked + 1
+            end
+        end
     end
     local tj = 0
     local lj = segLen[j]

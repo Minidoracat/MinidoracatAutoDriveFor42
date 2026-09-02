@@ -1706,6 +1706,53 @@ do
     checkEq(sharp.filletN, 0, "120° 急折仍保留折點")
 end
 
+-- =====================================================================
+-- 前視窗曲率收縮（2026-09-03 s015：弧建好了仍在弧前 10m 提前右打切內）
+-- =====================================================================
+scenario("前視窗內有急彎就縮前視：直路接近段不提前切內、前右角遠離路口內側圍籬")
+do
+    local vp = {
+        valid = true, geometryValid = true, halfW = 0.9, rMin = 4.32,
+        wheelbase = 3.79, delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 85,
+    }
+    local p = F.begin({
+        pts = { 0, 60, 0, 0, 108, 1.78 },
+        segSurface = { "paved", "paved" }, segWidth = { 6, 5 },
+    }, 85, 4, vp)
+    while not F.stepBuild(p, 4096) do end
+    checkEq(p.filletFallbackN, 0, "fixture 的路口有弧")
+    p.lookScale = 1.5  -- F350 的 lookScale（玩家 header）
+    -- 自行車模型（同情境十）：轉向對應曲率；rMin 取 4.0
+    local KAPPA_MAX = 1 / 4.0
+    local st = F.newState()
+    F.setLaneBias(st, 1.5)
+    F.setRuntimeLimits(st, 3, 8, 9, 0.6)
+    local x, y, h, spd = 1.5, 55, -math.pi / 2, 20
+    local arcStartY = 4.9  -- 弧入口 tangent 點（r 4.83 × tan(45.5°)）
+    local maxXApproach, minCorner, steps = -1e9, 1e9, 0
+    while steps < 3000 do
+        local steer, tspd, _, reached = F.control(p, st, x, y, h, spd, DT)
+        if reached or x > 30 then break end
+        spd = tspd
+        local ms = spd / KMH
+        h = h + ms * (steer / F.STEER_MAX) * KAPPA_MAX * DT
+        x = x + math.cos(h) * ms * DT
+        y = y + math.sin(h) * ms * DT
+        steps = steps + 1
+        if y > arcStartY and x > maxXApproach then maxXApproach = x end
+        -- 前右角到路口內側圍籬角（實機 (10645.5,10072.5) 相對路口＝(4.5, 4.0)）
+        local fx, fy = x + 2.9 * math.cos(h), y + 2.9 * math.sin(h)
+        local cx, cy = fx - 0.9 * math.sin(h), fy + 0.9 * math.cos(h)
+        local dc = math.sqrt((cx - 4.5) ^ 2 + (cy - 4.0) ^ 2)
+        if dc < minCorner then minCorner = dc end
+    end
+    checkTrue(steps > 200 and x > 20, "模擬跑過路口（步數 " .. steps .. "）")
+    checkTrue(maxXApproach <= 1.55,
+        "直路接近段不提前切內：橫向 ≤ 車道 1.5（實得 " .. string.format("%.2f", maxXApproach) .. "）")
+    checkTrue(minCorner >= 2.0,
+        "前右角離路口內側圍籬角 ≥ 2m（實得 " .. string.format("%.2f", minCorner) .. "）")
+end
+
 closeScenario()
 print()
 print("情境 " .. scenarios .. " 個、斷言 " .. assertions .. " 項")
