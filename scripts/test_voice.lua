@@ -52,6 +52,13 @@ function emitter:stopSound(ref) playing[ref] = nil; emitterLog[#emitterLog + 1] 
 
 local players = { [0] = { getEmitter = function() return emitter end } }
 function getSpecificPlayer(pn) return players[pn] end
+local clock = 0
+function getTimestampMs() return clock end
+-- 讓「同事件重播閘」放行：上一句播完＋超過冷卻
+local function settle()
+    for ref in pairs(playing) do playing[ref] = nil end
+    clock = clock + 9000
+end
 function require() return true end
 
 MDAD = { MOD_ID = "MinidoracatAutoDriveFor42" }
@@ -103,9 +110,26 @@ local before = #emitterLog
 V.play("start", 0)
 check(emitterLog[before + 1] == "play:MDAD_Voice_start_zh", "舊句已結束就不呼叫 stopSound")
 
+-- 同事件重播閘（2026-09-02：受阻煞停 7 秒念 6 次）：還在播不插、冷卻內不念、換事件照蓋
+before = #emitterLog
+checkEq(V.play("start", 0), false, "同事件、上一句還在播 → 不插播")
+checkEq(#emitterLog, before, "被閘住時零 emitter 呼叫")
+clock = clock + V.REPEAT_COOLDOWN_MS + 1
+checkEq(V.play("start", 0), false, "超過冷卻但上一句仍在播 → 仍不插")
+playing[nextRef] = nil
+clock = clock + 1
+checkEq(V.play("start", 0), true, "播完＋超過冷卻 → 可再念")
+checkEq(V.play("start", 0), false, "剛念完同事件立刻再觸發 → 冷卻內不念")
+playing[nextRef] = nil
+clock = clock + V.REPEAT_COOLDOWN_MS - 1
+checkEq(V.play("start", 0), false, "冷卻差 1ms → 仍不念")
+checkEq(V.play("arrive", 0), true, "冷卻內換事件 → 照播")
+settle()
+
 -- 未註冊 sound：回 false、只警告一次、不拋
 printed = {}
 languageName = "EN"
+settle()
 checkEq(V.play("start", 0), false, "未註冊 sound（start_en）回 false")
 checkEq(V.play("start", 0), false, "再試仍 false")
 checkEq(#printed, 1, "缺 sound 只警告一次")
@@ -121,10 +145,12 @@ hud.enabled = true
 hud.volume = 0
 checkEq(V.play("start", 0), false, "音量 0 不播")
 hud.volume = 250
+settle()
 V.play("start", 0)
 check(emitterLog[#emitterLog] == "vol:" .. nextRef .. ":1.00", "音量超界夾到 1.0")
 hud.volume = 70
 MDAD.HUD = nil
+settle()
 V.play("start", 0)
 check(emitterLog[#emitterLog] == "vol:" .. nextRef .. ":0.70", "HUD 缺席退預設 0.7／開啟")
 MDAD.HUD = { voiceEnabled = function() return hud.enabled end, voiceVolume = function() return hud.volume end,
@@ -139,6 +165,7 @@ checkEq(V.play("start", 0), false, "getEmitter 拋錯 → false 不拋")
 checkEq(#printed, 1, "emitter 失敗警告一次")
 players[0].getEmitter = function() return emitter end
 emitter.playSoundImpl = function() error("fmod down") end
+settle()
 checkEq(V.play("start", 0), false, "playSoundImpl 拋錯 → false 不拋")
 
 print = realPrint

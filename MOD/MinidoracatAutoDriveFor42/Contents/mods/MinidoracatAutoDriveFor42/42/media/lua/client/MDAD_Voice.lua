@@ -28,7 +28,13 @@ local EVENTS = {
 local SOUND_PREFIX = "MDAD_Voice_"
 local lastRef = {}       -- playerNum → emitter ref（long）
 local lastEmitter = {}   -- playerNum → emitter
+local lastEvent = {}     -- playerNum → 上一句事件名
+local lastAt = {}        -- playerNum → 上一句送出時刻（ms）
 local warned = {}
+-- 同一事件重複觸發不連播（2026-09-02 實機：受阻煞停 7 秒內念了 6 次——blocked 隨
+-- 每輪掃描翻轉，Driver 的 blockedNotified 每翻一次就重觸發）。同一玩家同一事件：
+-- 上一句還在播就不插，播完也要隔 REPEAT_COOLDOWN_MS 才准再念；換了事件照舊蓋舊句。
+Voice.REPEAT_COOLDOWN_MS = 8000
 
 local function warnOnce(key, msg)
     if warned[key] then return end
@@ -92,6 +98,13 @@ function Voice.soundName(event, lang)
     return SOUND_PREFIX .. event .. "_" .. (lang or Voice.language())
 end
 
+local function stillPlaying(playerNum)
+    local ref, emitter = lastRef[playerNum], lastEmitter[playerNum]
+    if not ref or not emitter then return false end
+    local ok, playing = pcall(function() return emitter:isPlaying(ref) end)
+    return ok and playing == true
+end
+
 local function stopPrevious(playerNum)
     local ref, emitter = lastRef[playerNum], lastEmitter[playerNum]
     lastRef[playerNum], lastEmitter[playerNum] = nil, nil
@@ -99,6 +112,20 @@ local function stopPrevious(playerNum)
     pcall(function()
         if emitter:isPlaying(ref) then emitter:stopSound(ref) end
     end)
+end
+
+local function nowMs()
+    local ok, t = pcall(getTimestampMs)
+    if ok and finite(t) then return t end
+    return 0
+end
+
+-- 同事件重播閘：上一句同事件仍在播，或距上一句送出不到 REPEAT_COOLDOWN_MS。
+local function repeatSuppressed(event, playerNum, now)
+    if lastEvent[playerNum] ~= event then return false end
+    if stillPlaying(playerNum) then return true end
+    local at = lastAt[playerNum]
+    return finite(at) and now - at < Voice.REPEAT_COOLDOWN_MS
 end
 
 -- 回 true＝真的送出播放。event 未知／關閉／音量 0／無玩家或 emitter 都回 false。
@@ -114,6 +141,8 @@ function Voice.play(event, playerNum)
         warnOnce("emitter", "player emitter unavailable")
         return false
     end
+    local now = nowMs()
+    if repeatSuppressed(event, playerNum, now) then return false end
     stopPrevious(playerNum)
     local name = Voice.soundName(event)
     local okPlay, ref = pcall(function() return emitter:playSoundImpl(name, nil) end)
@@ -128,6 +157,7 @@ function Voice.play(event, playerNum)
     end
     pcall(function() emitter:setVolume(ref, volume) end)
     lastRef[playerNum], lastEmitter[playerNum] = ref, emitter
+    lastEvent[playerNum], lastAt[playerNum] = event, now
     if getDebug() then
         print("[" .. MDAD.MOD_ID .. "] voice " .. name .. " vol=" .. tostring(volume))
     end

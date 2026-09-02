@@ -7046,6 +7046,44 @@ local function scenarioOutline()
 end
 scenarioOutline()
 
+-- (c8) MP 假速度域（2026-09-02 s012：regulator 70、直路 30 秒貼死 51 km/h）：
+--      CarController 用 v·lerp(1, fake, (v/min(120,SpeedLimit))²) 與 regulatorSpeed
+--      比，fake=120/min(SpeedLimit,120)。SpeedLimit 70 → fake 1.714；沙盒 40 的
+--      真速目標要寫成 40·(1+0.714·(40/70)²)=49。SP（fake 1／方法缺席）恆等。
+local function scenarioFakeSpeed()
+    local function maxRegAfterRun()
+        checkTrue(armDrive(), "(c8) 啟動")
+        driveReset(dveh)
+        for _ = 1, 60 do driveTick(dp, dveh) end
+        local m = drive.calls.maxRegSpeed
+        MDAD.Drive.stop(0, nil)
+        return m
+    end
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
+        AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    -- 40m 短路線受終點制動包絡壓住，真速目標峰值 < 40；同 fixture 重跑必同值，
+    -- 拿 SP 峰值當基準算映射期望值。
+    local plain = maxRegAfterRun()
+    checkTrue(plain > 0 and plain <= 40,
+        "(c8) 無 getFakeSpeedModifier（SP 假車）→ 定速＝真速（實得 " .. tostring(plain) .. "）")
+    local fake = 120 / 70
+    local d = plain * fake / 120
+    local expected = math.floor(plain * (1 + (fake - 1) * d * d) + 0.5)
+    BaseVehicle.getFakeSpeedModifier = function() return fake end
+    local mapped = maxRegAfterRun()
+    checkEq(mapped, expected, "(c8) SpeedLimit 70（fake 1.714）→ 定速寫成 v·(1+0.714·(v/70)²)")
+    checkTrue(mapped > plain, "(c8) 映射後的 regulator 值高於真速目標")
+    BaseVehicle.getFakeSpeedModifier = function() return 1 end
+    checkEq(maxRegAfterRun(), plain, "(c8) fake=1（SpeedLimit≥120）→ 恆等")
+    BaseVehicle.getFakeSpeedModifier = function() error("no server options") end
+    checkEq(maxRegAfterRun(), plain, "(c8) getFakeSpeedModifier 拋錯 → 退回真速、不拋")
+    BaseVehicle.getFakeSpeedModifier = nil
+    checkEq(drive.calls.fractionalRegSpeed, 0, "(c8) 映射後仍是整數 km/h")
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
+        AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+end
+scenarioFakeSpeed()
+
 -- (c3) 停等預算是「同 episode 累計」，不被零星動作續命（2026-09-01 階段 2
 --      主體 1 的違規證明）：舊制 waitSince 只要有一幀 avProgress>=1 就整個
 --      歸零，實測 blocked 現場車身被物理推得晃一下就無限續命（40s+ 僵局）。

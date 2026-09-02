@@ -220,6 +220,80 @@ local function projectT(px, py, ax, ay, bx, by, len)
     return t, dx * dx + dy * dy
 end
 
+-- 車道偏置的路面餘裕（2026-09-02 s013 定罪：F350 右轉，圓角半徑已取到 band 上限、
+-- 弧心線在彎中離兩臂中心線 1.7m，再疊 +1.5m 內側車道偏置＝車心出路面、車角切進
+-- 路口內側圍籬）。每段記「往右／往左最多能偏幾公尺」：直段＝路寬半－halfW－邊界；
+-- 弧段內側＝(帶寬－弧矢高)/cos(θ/2)（半徑吃滿 band 時＝0，整個彎沿弧心線走＝
+-- 人開窄路右轉會先讓到路中間），外側＝兩臂較窄帶。θ／轉向由弧兩側直段的 segH
+-- 取，所以只能在幾何相位完成後算一次；無路寬（v3 路線）或非 adaptive 不建表＝不夾。
+-- 只夾常駐 laneBias（control 前視點、offset／lane／return 線的 bias 底），繞行 offL
+-- 是掃掠驗過的絕對 lane，不經此表。
+local function buildLaneRoom(p)
+    local halfW = p.halfW
+    if not isFinite(halfW) or halfW <= 0 then return end
+    local n, kind, width, radius, segH = p.n, p.segKind, p.segWidth, p.filletRadius, p.segH
+    local margin = MDADDynamics.ROAD_EDGE_MARGIN
+    local roomR, roomL = {}, {}
+    local function bandOf(w)
+        if not isFinite(w) or w < 1 then return RANGE_INF end
+        local b = w * 0.5 - halfW - margin
+        return b > 0 and b or 0
+    end
+    local i = 1
+    while i <= n - 1 do
+        local i1 = i
+        if kind[i] == MDADDynamics.SEG_ARC then
+            while i1 + 1 <= n - 1 and kind[i1 + 1] == MDADDynamics.SEG_ARC do i1 = i1 + 1 end
+        end
+        local r = radius[i]
+        if i1 > i and i > 1 and i1 + 1 <= n - 1 and isFinite(r) and r > 0 then
+            local bandA, bandB = bandOf(width[i - 1]), bandOf(width[i1 + 1])
+            local wide, narrow = bandA, bandB
+            if narrow > wide then wide, narrow = narrow, wide end
+            local dh = wrapPi(segH[i1 + 1] - segH[i - 1])
+            local theta = dh < 0 and -dh or dh
+            local c = cos(theta * 0.5)
+            local inside = 0
+            if c > 1e-6 and wide < RANGE_INF then
+                inside = (wide - r * (1 - c)) / c
+                if inside < 0 then inside = 0 end
+            elseif wide >= RANGE_INF then
+                inside = RANGE_INF
+            end
+            local rr, ll = inside, narrow
+            if dh < 0 then rr, ll = narrow, inside end
+            for k = i, i1 do roomR[k], roomL[k] = rr, ll end
+        else
+            for k = i, i1 do
+                local band = bandOf(width[k])
+                roomR[k], roomL[k] = band, band
+            end
+        end
+        i = i1 + 1
+    end
+    p.laneRoomR, p.laneRoomL = roomR, roomL
+end
+
+local function clampLane(p, j, lane)
+    local roomR = p.laneRoomR
+    if roomR == nil then return lane end
+    local r = roomR[j]
+    if lane > r then return r end
+    local l = p.laneRoomL[j]
+    if lane < -l then return -l end
+    return lane
+end
+
+-- 段 segI 上常駐 laneBias 實際能落到的值（Driver 期望線／遙測 el 與 control 同一
+-- 張表）。profile 未 ready 或無表＝原值。
+function MDADFollower.laneBiasAt(profile, bias, segI)
+    if type(profile) ~= "table" or profile.laneRoomR == nil
+            or not isFinite(bias) or not isFinite(segI) then return bias end
+    segI = segI - segI % 1
+    if segI < 1 then segI = 1 elseif segI > profile.n - 1 then segI = profile.n - 1 end
+    return clampLane(profile, segI, bias)
+end
+
 -- 建表期的單點運算：抄座標、算段長／段朝向／累積弧長，並在資料到齊時補算內點曲率。
 -- 曲率需要三點，所以拿到第 i 點時算的是內點 i-1 的限速。
 local function geometryStep(p, i)
@@ -423,6 +497,7 @@ function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile)
         filletReason = filletReason,
         filletBandValid = filletBandValid == true,
         wheelbase = filletAdaptive and vehicleProfile.wheelbase or 0,
+        halfW = filletAdaptive and vehicleProfile.halfW or 0,
         delta0Safe = filletAdaptive and vehicleProfile.delta0Safe or 0,
         deltaVSafe = filletAdaptive and vehicleProfile.deltaVSafe or 0,
         vehicleMaxSpeed = filletAdaptive and vehicleProfile.maxSpeed or maxKmh,
@@ -435,6 +510,7 @@ function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile)
         segKind = segKind,
         segSourceA = segSourceA,
         segSourceB = segSourceB,
+        filletRadius = filletRadius,
         segAccel = segAccel,
         segBrake = segBrake,
         segLat = segLat,
@@ -473,6 +549,7 @@ function MDADFollower.stepBuild(profile, budget)
             if i > n then
                 profile.length = profile.s[n]
                 coastV[n] = profile.curveV[n] or profile.maxSpeedMs
+                buildLaneRoom(profile)
                 profile.phase, profile.cursor = "coast", n - 1
             else
                 geometryStep(profile, i)
@@ -702,8 +779,11 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
     -- 抬高航向誤差 → 誤差減速自動收油，繞行段本來就該慢，兩機制同向。
     -- 法向取前視點所在段的數學 CCW 法向（l > 0＝PZ 世界的行進方向**右側**：
     -- 世界 Y 向南，俯視下數學 CCW＝實際順時針——別再標成「左」，真踩過）。
+    -- 常駐偏置先過該段路面餘裕（buildLaneRoom）：彎內側吃不下的偏置就地歸零，
+    -- 前視點跨進弧段時目標橫移由 pure pursuit 自然攤成 S 形（無另建 ramp）。
     local bias = state.laneBias
     if not isFinite(bias) then bias = 0 end
+    bias = clampLane(profile, j, bias)
     local lt = bias
     local offL = state.offL
     local ovUsed = false
@@ -1051,13 +1131,15 @@ function MDADFollower.buildOffsetLine(profile, s0, a, b, c, d, l, bias, outX, ou
             local dh = wrapPi(segH[j - 1] - h)
             h = h + dh * (1 - dStart / OV_BLEND) * 0.5
         end
-        local lane = bias
+        local laneB = clampLane(profile, j, bias)
+        local lane = laneB
         if isFinite(returnLaneStart) and isFinite(returnLaneTarget) then
             local laneEnd = isFinite(returnLaneEnd) and returnLaneEnd or d
             local t2 = (sk - s0) / (laneEnd - s0)
             if t2 < 0 then t2 = 0 elseif t2 > 1 then t2 = 1 end
             t2 = t2 * t2 * (3 - 2 * t2)
-            lane = returnLaneStart + (returnLaneTarget - returnLaneStart) * t2
+            lane = returnLaneStart
+                + (clampLane(profile, j, returnLaneTarget) - returnLaneStart) * t2
         elseif sk > a and sk < d then
             local t2
             if sk < b then
@@ -1068,7 +1150,7 @@ function MDADFollower.buildOffsetLine(profile, s0, a, b, c, d, l, bias, outX, ou
                 t2 = 1
             end
             t2 = t2 * t2 * (3 - 2 * t2)
-            lane = bias + (l - bias) * t2
+            lane = laneB + (l - laneB) * t2
         end
         outX[k] = bx - sin(h) * lane
         outY[k] = by + cos(h) * lane
@@ -1122,9 +1204,10 @@ function MDADFollower.buildLaneLine(profile, s0, s1, lane, outX, outY, startIdx,
             if t < 0 then t = 0 elseif t > 1 then t = 1 end
         end
         local h = segH[j]
-        outX[k] = px[j] + (px[j + 1] - px[j]) * t - sin(h) * lane
+        local laneJ = clampLane(profile, j, lane)
+        outX[k] = px[j] + (px[j + 1] - px[j]) * t - sin(h) * laneJ
         if type(outSeg) == "table" then outSeg[k] = j end
-        outY[k] = py[j] + (py[j + 1] - py[j]) * t + cos(h) * lane
+        outY[k] = py[j] + (py[j + 1] - py[j]) * t + cos(h) * laneJ
     end
     return count, s0, "ok", j
 end

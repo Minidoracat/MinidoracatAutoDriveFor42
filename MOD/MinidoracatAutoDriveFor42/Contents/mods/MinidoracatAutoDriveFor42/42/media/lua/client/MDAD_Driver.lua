@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0902y"
+Drive.REV = "0902z"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -1394,6 +1394,25 @@ local function commandForceBrake(s, vehicle, now)
     return true
 end
 
+-- MP 假速度域（2026-09-02 s012 定罪：regulator 70、w=14 直路 30 秒貼死 51 km/h，
+-- 手動同車可到 64）。CarController 拿 speedLimited = v·lerp(1, fake, (v/min(120,
+-- SpeedLimit))²) 與 regulatorSpeed 比、達標就斷油（CarController.java:138-145、
+-- 240-244）；fake = 120/min(SpeedLimit,120)（BaseVehicle.java:663-669，SP 恆 1）。
+-- 伺服器 SpeedLimit 預設 70 → fake 1.714，真速 51 就被當 70。手動踩油門沒有這道
+-- 比較，所以只有自駕跑不到。原版儀表同樣顯示真速×fake（ISVehicleDashboard.lua:256）。
+-- 寫 regulator 前把目標映到同一域（單調；fake=1 恆等），HUD／遙測的 tgt 仍是真速。
+-- （`finite` 在本檔較後面才定義，這裡用 MDADDynamics.finite。）
+local function regulatorDomainKmh(kmh)
+    local cls = BaseVehicle
+    if cls == nil then return kmh end
+    local fn = cls.getFakeSpeedModifier
+    if type(fn) ~= "function" then return kmh end
+    local ok, fake = pcall(fn)
+    if not ok or not MDADDynamics.finite(fake) or fake <= 1 then return kmh end
+    local d = kmh * fake / 120  -- = kmh / min(SpeedLimit, 120)
+    return kmh * (1 + (fake - 1) * d * d)
+end
+
 -- Regulator command only. Ordinary curves and straight-line overspeed coast through
 -- the backward envelope and jerk state. forceBrake remains in the owning state paths:
 -- HOLD/RECOVER/ARRIVE/contact/blocked, unsafe RETURN or dynamics, hard envelope breach,
@@ -1404,6 +1423,7 @@ local function applySpeed(s, vehicle, targetSpeed)
     -- 原版儀表直接 `getRegulatorSpeed() .. ""`；物理判定完成後才整數化。
     local commandSpeed = math.floor(targetSpeed + 0.5)
     if commandSpeed > s.maxSpeed then commandSpeed = math.floor(s.maxSpeed) end
+    commandSpeed = math.floor(regulatorDomainKmh(commandSpeed) + 0.5)
     vehicle:setRegulator(true)
     vehicle:setRegulatorSpeed(commandSpeed)
     return true
@@ -1479,10 +1499,10 @@ local function laneBiasOf(s)
     return lb
 end
 
--- 期望行駛線＝laneBias＋（繞行中）smoothstep 側偏。與 follower 前視／sweepLine
--- 同一段；抽出只為遙測 el／ld 與甩出判定共用，語意逐位元不變。
+-- 期望行駛線＝laneBias（過該段路面餘裕，與 follower 前視／線建同一張表）＋
+-- （繞行中）smoothstep 側偏。抽出只為遙測 el／ld 與甩出判定共用，語意逐位元不變。
 local function expectedLaneOf(s)
-    local expL = laneBiasOf(s)
+    local expL = MDADFollower.laneBiasAt(s.profile, laneBiasOf(s), s.fstate.idx)
     local offL = s.fstate.offL
     if s.dodging and type(offL) == "number" then
         local oa, ob, oc, od = s.fstate.offA, s.fstate.offB, s.fstate.offC, s.fstate.offD
@@ -4233,7 +4253,10 @@ local function stepFollow(s, vehicle, playerNum, now)
             -- 探測與一般體系照管。
             s.returnActive, s.returnUnsafe, s.returnHold = true, true, false
             s.returnStartS, s.returnEndS = s.lastSNow, s.lastSNow
-            s.returnLaneStart, s.returnLaneTarget = latSigned, laneBiasOf(s)
+            -- 目標 lane 過該段路面餘裕（弧內側吃不下 1.5 就回 0.36），否則回線
+            -- 永遠到不了目標、只能靠 stall 釋放。
+            s.returnLaneStart, s.returnLaneTarget = latSigned,
+                MDADFollower.laneBiasAt(s.profile, laneBiasOf(s), segI)
             s.returnReason = s.surfaceMismatch and "lateral+mismatch" or "lateral"
             s.returnCapacityFault = false
             s.returnClearRounds = 0

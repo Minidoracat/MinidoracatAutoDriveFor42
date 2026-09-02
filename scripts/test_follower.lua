@@ -1603,6 +1603,109 @@ do
     checkTrue(partial.n <= 200, "輸出超限：profile 點數不超過上限")
 end
 
+-- =====================================================================
+-- 彎內側車道偏置餘裕（2026-09-02 s013：F350 右轉切進路口內側圍籬）
+-- =====================================================================
+scenario("車道偏置過路面餘裕：直段夾路寬、弧段內側夾圓角吃剩、外側保留、無路寬不夾")
+do
+    -- 玩家 s013 幾何：北行 w=6 → 東行 w=5 的 90.9° 右轉，F350（halfW 0.9、rMin 4.32）
+    local vp = {
+        valid = true, geometryValid = true, halfW = 0.9, rMin = 4.32,
+        wheelbase = 3.79, delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 85,
+    }
+    local function corner(rightTurn)
+        local ex = rightTurn and 108 or -108
+        return {
+            pts = { 0, 60, 0, 0, ex, 1.78 },  -- 出口向南偏 0.94°：折角 90.94°（玩家路線原樣）
+            segSurface = { "paved", "paved" },
+            segWidth = { 6, 5 },
+        }
+    end
+    local p = F.begin(corner(true), 85, 4, vp)
+    while not F.stepBuild(p, 4096) do end
+    checkEq(p.filletN, 1, "90.9° 路口（量化噪音）建弧而非保留折點")
+    checkEq(p.filletFallbackN, 0, "90.9° 路口無 fallback")
+    checkTrue(p.laneRoomR ~= nil and #p.laneRoomR == p.n - 1, "laneRoom 表逐段對齊")
+    local arcI, lastLine
+    for i = 1, p.n - 1 do
+        if p.segKind[i] == MDADDynamics.SEG_ARC then arcI = arcI or i else lastLine = i end
+    end
+    checkTrue(arcI ~= nil, "有弧段")
+    local bandIn = 6 / 2 - vp.halfW - MDADDynamics.ROAD_EDGE_MARGIN   -- 1.7
+    local bandOut = 5 / 2 - vp.halfW - MDADDynamics.ROAD_EDGE_MARGIN  -- 1.2
+    checkNear(p.laneRoomR[1], bandIn, 1e-9, "直段右餘裕＝路寬半－halfW－邊界")
+    checkNear(p.laneRoomL[1], bandIn, 1e-9, "直段左餘裕同值")
+    checkNear(p.laneRoomR[lastLine], bandOut, 1e-9, "出口直段（w=5）餘裕 1.2")
+    local r = p.filletRadius[arcI]
+    checkTrue(r >= vp.rMin, "弧半徑不小於 rMin")
+    local arcE = arcI
+    while p.segKind[arcE + 1] == MDADDynamics.SEG_ARC do arcE = arcE + 1 end
+    local theta = math.abs(p.segH[arcE + 1] - p.segH[arcI - 1])
+    checkTrue(theta > math.rad(90.5) and theta < math.rad(91.5),
+        "弧總轉角 ≈ 90.94°（實得 " .. tostring(math.deg(theta)) .. "）")
+    local c = math.cos(theta * 0.5)
+    local sag = r * (1 - c)
+    checkTrue(p.laneRoomR[arcI] < 0.5 and p.laneRoomR[arcI] >= 0,
+        "右轉弧段內側餘裕＝圓角吃剩（實得 " .. tostring(p.laneRoomR[arcI]) .. "）")
+    checkNear(sag + p.laneRoomR[arcI] * c, bandIn, 1e-6,
+        "弧心線矢高＋內側偏置·cos(θ/2) 恰等於寬臂 band")
+    checkNear(p.laneRoomL[arcI], bandOut, 1e-9, "右轉弧段外側餘裕＝兩臂較窄帶")
+    checkNear(F.laneBiasAt(p, 1.5, 1), 1.5, 1e-9, "w=6 直段 +1.5 不夾")
+    checkNear(F.laneBiasAt(p, 1.5, lastLine), bandOut, 1e-9, "w=5 直段 +1.5 夾到 1.2")
+    checkNear(F.laneBiasAt(p, 1.5, arcI), p.laneRoomR[arcI], 1e-9, "弧段 +1.5 夾到內側餘裕")
+    checkNear(F.laneBiasAt(p, -1.0, arcI), -1.0, 1e-9, "弧段外側 -1.0 不夾")
+    checkNear(F.laneBiasAt(p, 1.5, nil), 1.5, 1e-9, "無段索引回原值")
+
+    -- 同一張表驅動前視點：laneBias 1.5，前視點落在弧上時偏置不得超過餘裕
+    local st = F.newState()
+    F.setLaneBias(st, 1.5)
+    st.idx = arcI
+    F.setRuntimeLimits(st, 3, 6, 3.5, 0.6)
+    local lineX, lineY = {}, {}
+    local cnt = F.buildLaneLine(p, p.s[arcI], p.s[arcI] + 3, 1.5, lineX, lineY, arcI)
+    checkTrue(cnt >= 2, "弧段 lane 線可建")
+    local worst = 0
+    for k = 1, cnt do
+        local best = 1 / 0
+        for i = arcI, p.n - 1 do
+            local d = MDADDynamics.distanceToSegmentSq(lineX[k], lineY[k],
+                p.x[i], p.y[i], p.x[i + 1], p.y[i + 1])
+            if d < best then best = d end
+        end
+        best = math.sqrt(best)
+        if best > worst then worst = best end
+    end
+    checkTrue(worst <= p.laneRoomR[arcI] + 0.05,
+        "弧段 lane 線離弧心線 ≤ 內側餘裕（實得 " .. tostring(worst) .. "）")
+
+    -- 鏡像左轉：內側換到左邊
+    local q = F.begin(corner(false), 85, 4, vp)
+    while not F.stepBuild(q, 4096) do end
+    checkEq(q.filletN, 1, "左轉 90.9° 同樣建弧")
+    local arcJ
+    for i = 1, q.n - 1 do
+        if q.segKind[i] == MDADDynamics.SEG_ARC then arcJ = arcJ or i end
+    end
+    checkNear(q.laneRoomR[arcJ], bandOut, 1e-9, "左轉弧段右（外側）餘裕＝較窄帶")
+    checkTrue(q.laneRoomL[arcJ] < 0.5, "左轉弧段左（內側）餘裕＝圓角吃剩")
+    checkNear(F.laneBiasAt(q, 1.5, arcJ), bandOut, 1e-9, "左轉弧段 +1.5 夾到外側餘裕 1.2")
+
+    -- v3（無路寬）路線不建表、不夾
+    local v3 = F.begin({ pts = { 0, 60, 0, 0, 108, 1.78 } }, 85, 3, vp)
+    while not F.stepBuild(v3, 4096) do end
+    checkTrue(v3.laneRoomR == nil, "v3 路線無 laneRoom 表")
+    checkNear(F.laneBiasAt(v3, 1.5, 1), 1.5, 1e-9, "v3 路線偏置原值")
+
+    -- 違規證明：120° 仍保留折點（FILLET_MAX_RAD 只放過量化噪音）
+    local sharp = F.begin({
+        pts = { 0, 0, 40, 0, 20, 34.64 },
+        segSurface = { "paved", "paved" }, segWidth = { 20, 20 },
+    }, 85, 4, { valid = true, geometryValid = true, halfW = 1, rMin = 2,
+        wheelbase = 2.5, delta0Safe = 0.7, deltaVSafe = 0.25, maxSpeed = 120 })
+    while not F.stepBuild(sharp, 4096) do end
+    checkEq(sharp.filletN, 0, "120° 急折仍保留折點")
+end
+
 closeScenario()
 print()
 print("情境 " .. scenarios .. " 個、斷言 " .. assertions .. " 項")

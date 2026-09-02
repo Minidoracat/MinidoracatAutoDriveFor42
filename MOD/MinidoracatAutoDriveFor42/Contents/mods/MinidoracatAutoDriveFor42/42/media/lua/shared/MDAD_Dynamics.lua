@@ -10,7 +10,6 @@ local acos = math.acos
 local atan2 = math.atan2 or math.atan
 local PI = math.pi
 local DEG20 = 20 * PI / 180
-local DEG90 = PI * 0.5
 local EPS = 1e-9
 
 D.JERK_MAX = 2                 -- m/s^3, provisional until telemetry calibration
@@ -25,7 +24,11 @@ D.ALIGN_BREAK_RAD = 22 * PI / 180
 D.ALIGN_HEADING_RAD = 15 * PI / 180
 D.FILLET_SAMPLE_MAX_M = 1
 D.FILLET_MIN_RAD = DEG20
-D.FILLET_MAX_RAD = DEG90
+-- 90°→100°（2026-09-02 s013 定罪：vanilla 折線量化讓路口折角 90.9°，舊上限
+-- 90° 整數判為「>90° 急折」→ 不建弧、保留折點爬行；F350（rMin 4.3）根本轉不出
+-- 折點，pure pursuit 切內 1m 撞進路口內側圍籬）。弧能不能建仍由 band／臂長閘門
+-- 決定，這裡只放過量化噪音；真正的急折（120°、U-turn）照樣保留折點。
+D.FILLET_MAX_RAD = 100 * PI / 180
 D.FILLET_SEGMENT_SHARE = 0.45  -- two adjacent corners therefore consume <=90%
 D.ROAD_EDGE_MARGIN = 0.4
 D.FILLET_ANGLE_MAX_RAD = 2 * PI / 180
