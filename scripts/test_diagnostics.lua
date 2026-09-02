@@ -1069,7 +1069,32 @@ clipFail = true
 halos = {}
 check(MDADDiagnostics.copyFolderPath(0) == false, "clipboard failure still reports false")
 checkEq(halos[#halos] and halos[#halos].kind, "bad", "failures stay on the bad Halo")
+check(MDADDiagnostics.copyReportLink(0) == false, "report link clipboard failure reports false")
+checkEq(halos[#halos] and halos[#halos].kind, "bad", "report link failure is a bad Halo")
 clipFail = false
+
+-- 回報導航問題：複製固定的 GitHub 表單網址，Toast 走專屬的 ReportLinkCopied 鍵。
+MinidoracatUI.v1.Toast.show = function(opts)
+    toasts[#toasts + 1] = opts
+    return opts
+end
+toasts = {}
+halos = {}
+clipText = nil
+check(MDADDiagnostics.copyReportLink(0) == true, "report link copies")
+checkEq(clipText, "https://github.com/Minidoracat/MinidoracatAutoDriveFor42/issues/new/choose",
+    "report link is the GitHub issue chooser")
+checkEq(clipText, MDADDiagnostics.REPORT_URL, "REPORT_URL is what gets copied")
+checkEq(#toasts, 1, "report link raises one Toast")
+checkEq(toasts[1] and toasts[1].message, "UI_MinidoracatAutoDrive_ReportLinkCopied",
+    "report Toast uses the report-link translation key, not the path one")
+checkEq(#halos, 0, "report Toast replaces the Halo")
+MinidoracatUI.v1.CAPABILITIES.toast = false
+halos = {}
+check(MDADDiagnostics.copyReportLink(0) == true, "report link without Toast still copies")
+checkEq(halos[1] and halos[1].kind, "good", "report link falls back to a good Halo")
+check(halos[1] and halos[1].text == "UI_MinidoracatAutoDrive_ReportLinkCopied",
+    "report fallback Halo resolves the report-link key")
 MinidoracatUI = nil
 
 --------------------------------------------------------------------------------

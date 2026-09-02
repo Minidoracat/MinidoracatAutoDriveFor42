@@ -268,6 +268,13 @@ local function newOptions(id)
         self.dict[optionId] = option
         return option
     end
+    -- PZAPI/ModOptions.lua:230-245：button option 只記 onclick；MainOptions.lua:2979
+    -- 以 setOnClick(onclick, args) 接線，點擊呼叫 onclick(target, button)。
+    function options:addButton(optionId, name, tooltip, onclick)
+        local option = { type = "button", name = name, tooltip = tooltip, onclick = onclick }
+        self.dict[optionId] = option
+        return option
+    end
     function options:getOption(optionId) return self.dict[optionId] end
     optionSets[id] = options
     return options
@@ -955,6 +962,7 @@ check(miniMapRegisterCalls == 1,
     "OnGameBoot does not duplicate a successful MiniMap settings registration")
 local copyLatestPn = nil
 local copyFolderPn = nil
+local copyReportPn = nil
 MDADDiagnostics = {
     copyLatestPath = function(pn)
         copyLatestPn = pn
@@ -964,17 +972,22 @@ MDADDiagnostics = {
         copyFolderPn = pn
         return true
     end,
+    copyReportLink = function(pn)
+        copyReportPn = pn
+        return true
+    end,
 }
 MinidoracatMiniMapAPI.settingsApiVersion = 2
 fire(Events.OnGameBoot)
 checkEq(miniMapRegisterCalls, 2, "API v2 upgrade re-registers settings once")
 check(registeredMiniMapSection.actions ~= nil
-    and #registeredMiniMapSection.actions == 2
+    and #registeredMiniMapSection.actions == 3
     and #registeredMiniMapSection.ticks == 4
     and #registeredMiniMapSection.combos == 3,
-    "v2 MiniMap spec keeps ticks/combos and adds two actions")
+    "v2 MiniMap spec keeps ticks/combos and adds three actions")
 local latestAction = registeredMiniMapSection.actions[1]
 local folderAction = registeredMiniMapSection.actions[2]
+local reportAction = registeredMiniMapSection.actions[3]
 check(latestAction.label == "UI_MinidoracatAutoDrive_CopyLatestTelemetry"
     and type(latestAction.tooltip) == "string" and latestAction.tooltip ~= ""
     and type(latestAction.run) == "function"
@@ -991,6 +1004,21 @@ folderAction.run(0)
 checkEq(copyFolderPn, 0, "copy-folder run receives playerNum")
 latestAction.run(0)
 checkEq(copyLatestPn, 0, "copy-latest click handles no-file state inside Diagnostics")
+check(reportAction.label == "UI_MinidoracatAutoDrive_ReportIssue"
+    and reportAction.tooltip == "UI_MinidoracatAutoDrive_ReportIssue_tooltip"
+    and type(reportAction.run) == "function"
+    and reportAction.enabled == nil,
+    "report-issue action has label/tooltip/run and omits enabled")
+reportAction.run(1)
+checkEq(copyReportPn, 1, "report-issue run copies the link for the given playerNum")
+local reportButton = options:getOption("ReportIssue")
+check(reportButton ~= nil and reportButton.type == "button"
+    and reportButton.name == "UI_MinidoracatAutoDrive_ReportIssue"
+    and reportButton.tooltip == "UI_MinidoracatAutoDrive_ReportIssue_tooltip",
+    "ESC options register a report-issue button with label and tooltip")
+copyReportPn = nil
+reportButton.onclick(nil, reportButton)
+checkEq(copyReportPn, 0, "ESC report-issue button copies the link for the local main player")
 options:getOption("HUDTheme"):setValue(2)
 options:getOption("HUDLayout"):setValue(2)
 options:getOption("HUDScale"):setValue(1)

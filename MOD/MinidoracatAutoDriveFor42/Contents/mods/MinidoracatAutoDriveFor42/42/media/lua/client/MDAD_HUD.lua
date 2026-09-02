@@ -1700,6 +1700,14 @@ if PZAPI and PZAPI.ModOptions then
     end
     modOptions:addTickBox("AutoDetour", "UI_MinidoracatAutoDrive_AutoDetour", false,
         "UI_MinidoracatAutoDrive_AutoDetour_tooltip")
+    -- 回報導航問題：按鈕複製 GitHub 表單網址（PZAPI addButton＝ModOptions.lua:230；
+    -- MainOptions.lua:2978-2980 以 setOnClick(onclick, args) 接線，onclick(target, button)）。
+    -- ESC 選項是本機主玩家的，固定 playerNum 0。
+    if type(modOptions.addButton) == "function" then
+        modOptions:addButton("ReportIssue", "UI_MinidoracatAutoDrive_ReportIssue",
+            "UI_MinidoracatAutoDrive_ReportIssue_tooltip",
+            function() copyDiag(0, "copyReportLink") end)
+    end
     modOptions:addTickBox("ExportTelemetry", "UI_MinidoracatAutoDrive_ExportTelemetry", false,
         "UI_MinidoracatAutoDrive_ExportTelemetry_tooltip")
     local telemetryRetention = modOptions:addComboBox("TelemetryRetentionDays",
@@ -1837,6 +1845,9 @@ local function registerMiniMapSettings()
             { label = "UI_MinidoracatAutoDrive_CopyTelemetryFolder",
                 tooltip = "UI_MinidoracatAutoDrive_CopyTelemetryFolder_tooltip",
                 run = function(pn) copyDiag(pn, "copyFolderPath") end },
+            { label = "UI_MinidoracatAutoDrive_ReportIssue",
+                tooltip = "UI_MinidoracatAutoDrive_ReportIssue_tooltip",
+                run = function(pn) copyDiag(pn, "copyReportLink") end },
         }
     end
     if api.registerSettingsSection(MDAD.MOD_ID, spec) == true then

@@ -208,16 +208,17 @@ end
 
 -- 複製成功的唯一回饋出口（最新檔與資料夾共用）。Toast.show 回 nil 可能是 pending
 -- 或佇列滿丟棄；為了保證按鈕一定有立即回饋，nil／throw 都退 good Halo。
-local function copiedNotice(pn)
+local function copiedNotice(pn, key)
+    key = key or "UI_MinidoracatAutoDrive_TelemetryCopied"
     local fw = frameworkToast()
     if fw then
         local ok, shown = pcall(fw.show, {
             title = localized("UI_MinidoracatAutoDrive_Options", "AutoDrive"),
-            message = localized("UI_MinidoracatAutoDrive_TelemetryCopied", "copied"),
+            message = localized(key, "copied"),
         })
         if ok and shown ~= nil then return end
     end
-    halo(pn, true, "UI_MinidoracatAutoDrive_TelemetryCopied", "copied")
+    halo(pn, true, key, "copied")
 end
 
 local function absFolder()
@@ -1457,6 +1458,18 @@ function D.copyFolderPath(pn)
     end
     if clip(folder) then
         copiedNotice(pn)
+        return true
+    end
+    halo(pn, false, "UI_MinidoracatAutoDrive_TelemetryCopyFailed", "copy failed")
+    return false
+end
+
+-- 回報導航問題（2026-09-03）：把 GitHub issue 表單網址複製到剪貼簿；遊戲內開不了
+-- 瀏覽器，玩家貼到瀏覽器即可。與路徑複製同一條 Clipboard／Toast 路徑。
+D.REPORT_URL = "https://github.com/Minidoracat/MinidoracatAutoDriveFor42/issues/new/choose"
+function D.copyReportLink(pn)
+    if clip(D.REPORT_URL) then
+        copiedNotice(pn, "UI_MinidoracatAutoDrive_ReportLinkCopied")
         return true
     end
     halo(pn, false, "UI_MinidoracatAutoDrive_TelemetryCopyFailed", "copy failed")
