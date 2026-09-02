@@ -1550,8 +1550,22 @@ else:
             c0902.append(
                 f"smoke_harness TUNE_RETURN_UNSAFE_CAP_TEST={mh.group(1)} ≠ "
                 f"Driver TUNE.RETURN_UNSAFE_CAP={mt.group(1)}（平行常數漂移）")
+    # ⑥ 車陣蛇行（2026-09-02）：承諾必經世界掃掠（`safe and setExactLine`）、
+    #    釋放必經 releaseThread（不得手寫 threading=false）、owner 仲裁認 threading
+    if drv_src:
+        tt = drv_src.split("local function tryThread(")
+        if len(tt) != 2:
+            c0902.append("tryThread 定義數 ≠ 1")
+        else:
+            body = tt[1].split("\nlocal function replan(")[0]
+            if "if safe and MDADFollower.setExactLine(" not in body:
+                c0902.append("tryThread 的 setExactLine 未以 sweepLine 結果守門（掃掠是唯一否決權）")
+        if len(re.findall(r"s\.threading = false", drv_src)) != 1:
+            c0902.append("threading=false 只能寫在 releaseThread（承諾釋放單一出口）")
+        if "if s.dodging or s.threading then return \"dodge\" end" not in drv_src:
+            c0902.append("profileOwner 未把 threading 視為 dodge 等級持有者")
 fail("0902 結構契約", c0902) if c0902 else ok(
-    "0902 結構契約（六參 cap／持有權仲裁唯一／coverEnd／擋線單一定義／測試常數對齊）")
+    "0902 結構契約（六參 cap／持有權仲裁唯一／coverEnd／擋線單一定義／測試常數對齊／蛇行掃掠守門）")
 
 # ---- 33. 語音資產契約（2026-09-02）----
 # Voice.EVENTS × Voice.PACKS 每一格都要有 sound script 條目＋wav 檔＋語言下拉的翻譯鍵；

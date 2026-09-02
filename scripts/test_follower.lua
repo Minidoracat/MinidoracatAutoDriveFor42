@@ -999,6 +999,7 @@ end
 -- =====================================================================
 -- 情境十：閉環 — 從偏離狀態出發能收斂並開到終點（簡化自行車模型）
 -- =====================================================================
+
 scenario("閉環模擬：偏離 6m 出發能收斂並抵達終點、車頭反向能靠調頭救回")
 do
     -- 車輛模型：轉向對應**曲率**（yaw 速率 ＝ v * kappa），這是真車的行為——
@@ -1605,6 +1606,43 @@ end
 -- =====================================================================
 -- 總結
 -- =====================================================================
+-- =====================================================================
+scenario("蛇行線：節點間 smoothstep、節點外常值、尾段、setExactLine 可承諾、壞節點拒收")
+do
+    -- 東向直線（pLine）：世界 y 偏移＝lane（法向 (−sin h, cos h)＝(0,1)，h=0）
+    local nodeS = { 10, 14, 24, 28, 40 }
+    local nodeL = { 0, 0.5, 0.5, -1.0, -1.0 }
+    local X, Y = {}, {}
+    local count, s0, why, lineEnd = F.buildThreadLine(pLine, 8, nodeS, nodeL, 5, X, Y, 3)
+    checkEq(why, "ok", "蛇行線：合法節點 ok")
+    checkEq(s0, 8, "蛇行線：起點＝s0")
+    checkNear(lineEnd, 43, 1e-9, "蛇行線：終點＝末節點＋tail")
+    local function laneAtIdx(k) return Y[k] end
+    local function idxOf(s) return math.floor((s - 8) / F.OV_STEP + 0.5) + 1 end
+    checkNear(laneAtIdx(idxOf(8)), 0, 1e-9, "首節點前：首節點 lane")
+    checkNear(laneAtIdx(idxOf(12)), 0.25, 1e-9, "節點間中點：smoothstep 恰為一半")
+    checkNear(laneAtIdx(idxOf(20)), 0.5, 1e-9, "同 lane 節點間：常值")
+    checkNear(laneAtIdx(idxOf(26)), -0.25, 1e-9, "第二段中點：0.5→-1.0 的一半")
+    checkNear(laneAtIdx(idxOf(42)), -1.0, 1e-9, "末節點後（尾段）：末節點 lane")
+    checkNear(X[idxOf(20)], 20, 1e-9, "x＝弧長（直線）")
+    local st = F.newState()
+    checkTrue(F.setExactLine(st, X, Y, count, s0, lineEnd), "蛇行線可直接以 setExactLine 承諾")
+    checkEq(st.exactLine, true, "承諾後 exactLine=true")
+    -- 壞節點：s 非遞增／非有限／少於 2 點／尾段超出 route
+    local c2, _, why2 = F.buildThreadLine(pLine, 8, { 10, 10 }, { 0, 1 }, 2, X, Y, 1)
+    checkEq(why2, "invalid", "s 非遞增拒收")
+    c2, _, why2 = F.buildThreadLine(pLine, 8, { 10, 0 / 0 }, { 0, 1 }, 2, X, Y, 1)
+    checkEq(why2, "invalid", "NaN 節點拒收")
+    c2, _, why2 = F.buildThreadLine(pLine, 8, { 10 }, { 0 }, 1, X, Y, 1)
+    checkEq(why2, "invalid", "單節點拒收")
+    local c3, _, why3, end3 = F.buildThreadLine(pLine, 190, { 192, 199 }, { 0, 1 }, 2, X, Y, 5)
+    checkEq(why3, "ok", "尾段超出 route：鉗到終點仍 ok")
+    checkNear(end3, 200, 1e-9, "尾段鉗到 route 長")
+    -- 容量：OV_MAX 點以上拒收
+    local c4, _, why4 = F.buildThreadLine(pLine, 0, { 2, 199 }, { 0, 0 }, 2, X, Y, 1)
+    checkEq(why4, "capacity", "超過 OV_MAX 取樣拒收")
+end
+
 closeScenario()
 print()
 print("情境 " .. scenarios .. " 個、斷言 " .. assertions .. " 項")

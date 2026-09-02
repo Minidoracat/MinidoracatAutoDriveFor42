@@ -87,6 +87,8 @@ local EK = {
     -- route cutover：原始路線快照 src／srcW／srcS（離線重跑 fillet／band 用）。
     "filletN", "filletFallbackN", "filletBandValid", "filletReason",
     "src", "srcW", "srcS",
+    -- thread（車陣蛇行）：nodes／minExtra 餘裕／maxSlope 斜率／速度帽
+    "nodes", "extra", "slope", "cap",
 }
 
 local function logOnce(msg)

@@ -1154,6 +1154,79 @@ function MDADFollower.buildReturnLine(profile, s0, s1, laneStart, laneTarget,
         laneTarget, laneTarget, outX, outY, laneStart, laneTarget, s1)
 end
 
+-- 車陣蛇行線（2026-09-02）：Corridor.thread 的 (s, l) 折線 → 世界折線，供
+-- sweepLine 掃掠與 setExactLine 承諾。節點間 lane 用 smoothstep（節點處斜率 0，
+-- 折點處 C1 連續）；法向做與 buildOffsetLine 同款的角度插值。取樣自 s0 每
+-- OV_STEP 到 nodeS[nodeN]＋tailM（尾段沿末節點 lane 直行，讓掃掠蓋過車身）。
+-- 回 (count, s0, reason, lineEnd)：reason "ok"／"invalid"／"capacity"。
+function MDADFollower.buildThreadLine(profile, s0, nodeS, nodeL, nodeN, outX, outY, tailM)
+    if type(profile) ~= "table" or profile.ready ~= true
+            or not isFinite(s0) or type(nodeS) ~= "table" or type(nodeL) ~= "table"
+            or not isFinite(nodeN) or nodeN < 2 then
+        return 0, 0, "invalid", 0
+    end
+    nodeN = nodeN - nodeN % 1
+    for k = 1, nodeN do
+        if not isFinite(nodeS[k]) or not isFinite(nodeL[k]) then return 0, 0, "invalid", 0 end
+        if k > 1 and nodeS[k] <= nodeS[k - 1] then return 0, 0, "invalid", 0 end
+    end
+    if not isFinite(tailM) or tailM < 1 then tailM = 1 end
+    if s0 < 0 then s0 = 0 end
+    local desiredEnd = nodeS[nodeN] + tailM
+    if desiredEnd > profile.length then desiredEnd = profile.length end
+    if desiredEnd <= s0 then return 0, 0, "invalid", 0 end
+    local steps = (desiredEnd - s0) / OV_STEP
+    local whole = steps - steps % 1
+    if steps > whole then whole = whole + 1 end
+    local count = whole + 1
+    if count > OV_MAX then return 0, 0, "capacity", 0 end
+    if count < 2 then return 0, 0, "invalid", 0 end
+    local px, py = profile.x, profile.y
+    local ss, segLen, segH = profile.s, profile.segLen, profile.segH
+    local n = profile.n
+    local j, node = 1, 1
+    for k = 1, count do
+        local sk = s0 + (k - 1) * OV_STEP
+        if k == count then sk = desiredEnd end
+        while j < n - 1 and ss[j + 1] < sk do j = j + 1 end
+        local lenJ = segLen[j]
+        local t = 0
+        if lenJ > 0 then
+            t = (sk - ss[j]) / lenJ
+            if t < 0 then t = 0 elseif t > 1 then t = 1 end
+        end
+        local bx = px[j] + (px[j + 1] - px[j]) * t
+        local by = py[j] + (py[j + 1] - py[j]) * t
+        local h = segH[j]
+        local dEnd = ss[j + 1] - sk
+        local dStart = sk - ss[j]
+        if dEnd < OV_BLEND and j + 1 <= n - 1 then
+            local dh = wrapPi(segH[j + 1] - h)
+            h = h + dh * (1 - dEnd / OV_BLEND) * 0.5
+        elseif dStart < OV_BLEND and j > 1 then
+            local dh = wrapPi(segH[j - 1] - h)
+            h = h + dh * (1 - dStart / OV_BLEND) * 0.5
+        end
+        -- lane(sk)：首節點前＝首節點 lane、末節點後＝末節點 lane、節點間 smoothstep
+        while node < nodeN - 1 and nodeS[node + 1] < sk do node = node + 1 end
+        local lane
+        if sk <= nodeS[1] then
+            lane = nodeL[1]
+        elseif sk >= nodeS[nodeN] then
+            lane = nodeL[nodeN]
+        else
+            local sa, sb = nodeS[node], nodeS[node + 1]
+            local t2 = (sk - sa) / (sb - sa)
+            if t2 < 0 then t2 = 0 elseif t2 > 1 then t2 = 1 end
+            t2 = t2 * t2 * (3 - 2 * t2)
+            lane = nodeL[node] + (nodeL[node + 1] - nodeL[node]) * t2
+        end
+        outX[k] = bx - sin(h) * lane
+        outY[k] = by + cos(h) * lane
+    end
+    return count, s0, "ok", desiredEnd
+end
+
 -- Build-time block tree query: at most 62 edge segments plus O(log blocks),
 -- allocation-free and independent of total tiny-segment count.
 local function rangeQuery(profile, first, last)

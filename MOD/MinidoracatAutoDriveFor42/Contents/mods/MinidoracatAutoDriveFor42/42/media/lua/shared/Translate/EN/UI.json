@@ -26,6 +26,7 @@
     "UI_MinidoracatAutoDrive_Unstick": "Vehicle stuck. Reversing to break free...",
     "UI_MinidoracatAutoDrive_Resume": "Autodrive resuming control.",
     "UI_MinidoracatAutoDrive_Dodge": "Obstacle ahead. Slowing down to swerve around.",
+    "UI_MinidoracatAutoDrive_Thread": "Gap found. Threading through the jam at low speed.",
     "UI_MinidoracatAutoDrive_GearSlice": "Drive mode: %1",
     "UI_MinidoracatAutoDrive_GearChill": "Chill (30 km/h)",
     "UI_MinidoracatAutoDrive_GearStandard": "Standard (50 km/h)",

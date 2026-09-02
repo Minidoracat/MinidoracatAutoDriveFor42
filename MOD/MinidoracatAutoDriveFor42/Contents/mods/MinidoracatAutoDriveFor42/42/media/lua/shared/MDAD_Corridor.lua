@@ -473,3 +473,271 @@ function MDADCorridor.plan(hardS, hardL, hardN, needHalf, corridorHalf, preferL,
     if d < c + MIN_SEG then d = c + MIN_SEG end
     return "dodge", a, b, c, d, offL
 end
+
+-- ---------------------------------------------------------------------------
+-- thread()：車陣蛇行（2026-09-02 使用者裁定「這麼多車沒辦法掃出一個地方鑽嗎」）
+-- ---------------------------------------------------------------------------
+-- plan() 只找「一條固定側偏、貫穿整個障礙群」的直線縫；一排錯落的拋錨車（6m 內
+-- 串成一個 40m 群、hard 點橫跨整條 ±6.5m 掃描帶）沒有任何固定 lane 可行——實機
+-- 表徵是 blocked→倒車重掃三次→StopStuck。thread 是 plan 判 blocked 之後的第二層：
+-- 在 (s, l) 格點上找一條**斜率受限的折線**，第一台靠左過、第二台靠右過。
+--
+-- MDADCorridor.thread(hardS, hardL, hardR, hardN, needHalf, corridorHalf,
+--     sFrom, laneFrom, sTo, halfL, halfW, baseL, roadLo, roadHi, work, outS, outL, maxNodes)
+--   sFrom／laneFrom ＝ 車現在的弧長與橫向位置（折線從這裡起算，第一欄固定在 laneFrom）。
+--   sTo             ＝ 折線終點弧長（呼叫端給 sObs1 + EXIT）。
+--   halfL／halfW    ＝ 車半長／半寬（公尺）：每欄的可行性看「車身 s 窗」內的點，不是單點；
+--                     s 窗＝halfL＋r＋(needHalf−halfW)，與 Driver sweepLine 的點半徑
+--                     rr＝r＋pad（pad＝need−halfW）同源——窗少算 pad 就是「DP 說過得去、
+--                     世界掃掠在群尾打槍」（harness (c6) 第一版）。halfW 缺＝pad 0。
+--   baseL           ＝ 行駛基準線（終點偏好回到它；每欄離它越遠成本越高）。
+--   roadLo／roadHi  ＝ 路面帶（選填）：帶外 lane 每欄加大額成本＝草地是最後手段
+--                     （與 plan() 的兩遍語意同義，只是用成本表達）。
+--   work            ＝ 呼叫端持有的工作表（一次配置、重用）：整數鍵 1.. 的扁平陣列，
+--                     本函式只 rawset 數字，不建 table。需要 3×(欄數×lane 數) 格。
+--   outS／outL      ＝ 輸出折線節點（呼叫端預配置），maxNodes＝容量。
+--   回 nodeN, why, minExtra, maxSlope：
+--     nodeN   ＝ 節點數（0＝無路，why 說明："blocked"／"badargs"／"capacity"）
+--     minExtra＝ 折線每欄最小橫向淨空扣掉 needHalf 後的餘裕（公尺；速度帽用）
+--     maxSlope＝ 折線最陡的 |Δl|/Δs
+--
+-- 演算法：欄距 THREAD_DS＝2m、lane 步 STEP＝0.25m。每欄每 lane 的可行性＝與「車身
+-- s 窗 [s−halfL−r, s+halfL+r]」內每個點保持 r＋needHalf 的橫向淨空；斜行時車身
+-- 橫向外露 ≈ halfL×斜率，故轉換邊按 |Δl| 分三檔加寬需求（直行 0／緩 ≤2 格／陡
+-- ≤4 格），DP 走邊時用該檔的遮罩。遮罩用「逐點標記」建（每點只影響 ~3 欄 ×
+-- ~14 lane），不做逐格對全點掃描——Kahlua 下 65 欄×47 lane×400 點是 120 萬次比較。
+-- DP：cost(k,j)＝min over |j−j'|≤THREAD_SLOPE_J of cost(k−1,j')＋橫移成本＋離基準
+-- 成本＋帶外成本；終欄再加「離基準」終端成本。回溯後把共線節點壓縮。
+-- 世界空間 OBB 掃掠仍是唯一否決權（Driver sweepLine）：這裡只是提案。
+local THREAD_DS = 2               -- 欄距（公尺）
+local THREAD_COL_MAX = 64         -- 欄數上限（含起欄 65 欄＝128m）
+local THREAD_SLOPE_J = 4          -- 相鄰欄最多換 4 格＝1m/2m（≈27°）
+local THREAD_W_MOVE = 1.0         -- 每公尺橫移成本
+local THREAD_W_BASE = 0.08        -- 每欄每公尺離基準成本
+local THREAD_W_END = 2.0          -- 終欄每公尺離基準成本
+local THREAD_W_OFFROAD = 20       -- 帶外 lane 每欄成本（草地＝最後手段）
+local THREAD_INF = 1e9
+
+MDADCorridor.THREAD_DS = THREAD_DS
+MDADCorridor.THREAD_COL_MAX = THREAD_COL_MAX
+MDADCorridor.THREAD_SLOPE_J = THREAD_SLOPE_J
+
+-- 遮罩層數：0＝直行、1＝|dj|≤2、2＝|dj|≤4；各層的需求加寬＝halfL×斜率
+local function threadLevelOf(dj)
+    if dj < 0 then dj = -dj end
+    if dj == 0 then return 0 end
+    if dj <= 2 then return 1 end
+    return 2
+end
+
+function MDADCorridor.thread(hardS, hardL, hardR, hardN, needHalf, corridorHalf,
+        sFrom, laneFrom, sTo, halfL, halfW, baseL, roadLo, roadHi, work, outS, outL, maxNodes)
+    if type(hardR) ~= "table" then hardR = nil end
+    if not isFinitePos(needHalf) then needHalf = NEED_HALF_DEFAULT end
+    if not isFinitePos(corridorHalf) then corridorHalf = CORRIDOR_HALF_DEFAULT end
+    if not isFinitePos(halfL) then halfL = 2.2 end
+    local pad = 0
+    if isFinitePos(halfW) and needHalf > halfW then pad = needHalf - halfW end
+    if type(baseL) ~= "number" or baseL * 0 ~= 0 then baseL = 0 end
+    if type(laneFrom) ~= "number" or laneFrom * 0 ~= 0 then laneFrom = baseL end
+    if type(work) ~= "table" or type(outS) ~= "table" or type(outL) ~= "table"
+            or type(sFrom) ~= "number" or sFrom * 0 ~= 0
+            or type(sTo) ~= "number" or sTo * 0 ~= 0 or sTo <= sFrom
+            or type(maxNodes) ~= "number" or maxNodes < 2 then
+        return 0, "badargs", 0, 0
+    end
+    local n = 0
+    if type(hardS) == "table" and type(hardL) == "table"
+        and type(hardN) == "number" and hardN * 0 == 0
+        and hardN >= 0 and floor(hardN) == hardN then
+        n = hardN
+        for i = 1, n do
+            local s, l = hardS[i], hardL[i]
+            if type(s) ~= "number" or s * 0 ~= 0
+                or type(l) ~= "number" or l * 0 ~= 0 then
+                return 0, "badargs", 0, 0
+            end
+        end
+    else
+        return 0, "badargs", 0, 0
+    end
+    local limit = corridorHalf - needHalf
+    if limit < STEP then return 0, "blocked", 0, 0 end
+    local jMax = floor(limit / STEP)
+    local J = 2 * jMax + 1
+    local span = (sTo - sFrom) / THREAD_DS
+    local K = floor(span)
+    if K < span then K = K + 1 end
+    if K < 1 then K = 1 end
+    if K > THREAD_COL_MAX then return 0, "capacity", 0, 0 end
+    local cells = (K + 1) * J
+    local roadOK = type(roadLo) == "number" and roadLo * 0 == 0
+        and type(roadHi) == "number" and roadHi * 0 == 0 and roadLo < roadHi
+
+    -- work 佈局：[1..cells]＝遮罩（位元：1 直行擋、2 緩擋、4 陡擋）、
+    -- [cells+1..2cells]＝cost、[2cells+1..3cells]＝prev（前一欄的 j 索引，0＝無）
+    local maskBase, costBase, prevBase = 0, cells, 2 * cells
+    for idx = 1, cells do
+        work[idx] = 0
+        work[costBase + idx] = THREAD_INF
+        work[prevBase + idx] = 0
+    end
+    -- 三層需求加寬：斜率 = dj×STEP / DS
+    local extra1 = halfL * (2 * STEP / THREAD_DS)
+    local extra2 = halfL * (THREAD_SLOPE_J * STEP / THREAD_DS)
+    -- 逐點標記遮罩：點 i 影響 s 窗 [s−halfL−r, s+halfL+r] 覆蓋的欄；每欄把
+    -- |l_j − l_i| < r + need 的 lane 標成擋（三層各自的 need）。
+    for i = 1, n do
+        local s, l = hardS[i], hardL[i]
+        local r = hardR and hardR[i] or OBS_HALF
+        if type(r) ~= "number" or r ~= r or r < 0 then r = OBS_HALF end
+        local reach = halfL + r + pad
+        -- 影響欄：|s_k − s| ≤ reach ⇔ k ∈ [ceil((s−reach−sFrom)/DS), floor((s+reach−sFrom)/DS)]
+        local k0 = (s - reach - sFrom) / THREAD_DS
+        local k1 = (s + reach - sFrom) / THREAD_DS
+        local f0 = floor(k0)
+        if f0 < k0 then f0 = f0 + 1 end
+        k0 = f0
+        if k0 < 0 then k0 = 0 end
+        k1 = floor(k1)
+        if k1 > K then k1 = K end
+        if k0 <= k1 then
+            for level = 0, 2 do
+                local need = needHalf
+                if level == 1 then need = needHalf + extra1
+                elseif level == 2 then need = needHalf + extra2 end
+                local clr = r + need
+                local jLo = floor((l - clr) / STEP) + 1
+                local jHi = floor((l + clr) / STEP)
+                -- 邊界：|l_j − l| < clr 嚴格；格點恰在 clr 上算可行（與 laneFree 同）
+                if (jHi * STEP) - l >= clr then jHi = jHi - 1 end
+                if jLo < -jMax then jLo = -jMax end
+                if jHi > jMax then jHi = jMax end
+                if jLo <= jHi then
+                    local bit = 1
+                    if level == 1 then bit = 2 elseif level == 2 then bit = 4 end
+                    for k = k0, k1 do
+                        local rowBase = maskBase + k * J + jMax + 1
+                        for j = jLo, jHi do
+                            local idx = rowBase + j
+                            local m = work[idx]
+                            if m % (bit * 2) < bit then work[idx] = m + bit end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- DP。起欄：只有離 laneFrom 最近的格點成本 0（車就在那裡；直行遮罩必須可行）。
+    local jStart = floor(laneFrom / STEP + 0.5)
+    if jStart > jMax then jStart = jMax elseif jStart < -jMax then jStart = -jMax end
+    local startIdx = jMax + 1 + jStart
+    if work[maskBase + startIdx] % 2 == 1 then return 0, "blocked", 0, 0 end
+    work[costBase + startIdx] = 0
+    for k = 1, K do
+        local row = k * J + jMax + 1
+        local prow = (k - 1) * J + jMax + 1
+        for j = -jMax, jMax do
+            local idx = row + j
+            local m = work[maskBase + idx]
+            -- 直行擋＝這格連停都不能停，任何檔位都不可行
+            if m % 2 == 0 then
+                local lj = j * STEP
+                local dBase = lj - baseL
+                if dBase < 0 then dBase = -dBase end
+                local stay = dBase * THREAD_W_BASE
+                if roadOK and (lj < roadLo or lj > roadHi) then stay = stay + THREAD_W_OFFROAD end
+                local best, bestJ = THREAD_INF, 0
+                local dLo, dHi = -THREAD_SLOPE_J, THREAD_SLOPE_J
+                if j + dLo < -jMax then dLo = -jMax - j end
+                if j + dHi > jMax then dHi = jMax - j end
+                for dj = dLo, dHi do
+                    local pc = work[costBase + prow + j + dj]
+                    if pc < THREAD_INF then
+                        local level = threadLevelOf(dj)
+                        local ok = true
+                        if level == 1 then ok = m % 4 < 2
+                        elseif level == 2 then ok = m % 8 < 4 end
+                        if ok then
+                            local move = dj
+                            if move < 0 then move = -move end
+                            local c = pc + move * STEP * THREAD_W_MOVE
+                            if c < best then best, bestJ = c, j + dj end
+                        end
+                    end
+                end
+                if best < THREAD_INF then
+                    work[costBase + idx] = best + stay
+                    work[prevBase + idx] = bestJ
+                end
+            end
+        end
+    end
+    -- 終欄：加離基準的終端成本，取最小
+    local endRow = K * J + jMax + 1
+    local bestEnd, bestEndJ = THREAD_INF, 0
+    for j = -jMax, jMax do
+        local c = work[costBase + endRow + j]
+        if c < THREAD_INF then
+            local d = j * STEP - baseL
+            if d < 0 then d = -d end
+            c = c + d * THREAD_W_END
+            if c < bestEnd then bestEnd, bestEndJ = c, j end
+        end
+    end
+    if bestEnd >= THREAD_INF then return 0, "blocked", 0, 0 end
+
+    -- 回溯：先把每欄的 j 暫存進 prev 區之後的空位（重用 cost 區：已用完）
+    local j = bestEndJ
+    local maxSlope = 0
+    for k = K, 0, -1 do
+        work[costBase + k + 1] = j   -- cost 區前 K+1 格改存路徑 j（DP 已結束）
+        if k > 0 then
+            local pj = work[prevBase + k * J + jMax + 1 + j]
+            local dj = j - pj
+            if dj < 0 then dj = -dj end
+            local slope = dj * STEP / THREAD_DS
+            if slope > maxSlope then maxSlope = slope end
+            j = pj
+        end
+    end
+    -- 壓縮共線：首末欄必留，中間只留「進出斜率不同」的欄（折點）。終欄 s 可略
+    -- 超過 sTo（欄距取整），呼叫端以 outS[count] 為折線終點。
+    local count = 0
+    for k = 0, K do
+        local cj = work[costBase + k + 1]
+        local keep = (k == 0) or (k == K)
+        if not keep then
+            local dIn = cj - work[costBase + k]
+            local dOut = work[costBase + k + 2] - cj
+            keep = dIn ~= dOut
+        end
+        if keep then
+            count = count + 1
+            if count > maxNodes then return 0, "capacity", 0, 0 end
+            outS[count] = sFrom + k * THREAD_DS
+            outL[count] = cj * STEP
+        end
+    end
+    -- 折線的最小橫向餘裕（超出 needHalf 的部分）：沿路徑逐欄對全點量一次
+    local minExtra = corridorHalf
+    for k = 0, K do
+        local cj = work[costBase + k + 1]
+        local lj = cj * STEP
+        local sk = sFrom + k * THREAD_DS
+        for i = 1, n do
+            local r = hardR and hardR[i] or OBS_HALF
+            if type(r) ~= "number" or r ~= r or r < 0 then r = OBS_HALF end
+            local ds = hardS[i] - sk
+            if ds < 0 then ds = -ds end
+            if ds <= halfL + r + pad then
+                local d = hardL[i] - lj
+                if d < 0 then d = -d end
+                local extra = d - r - needHalf
+                if extra < minExtra then minExtra = extra end
+            end
+        end
+    end
+    return count, "ok", minExtra, maxSlope
+end

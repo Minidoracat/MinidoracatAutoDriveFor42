@@ -26,6 +26,7 @@
     "UI_MinidoracatAutoDrive_Unstick": "车辆卡住，尝试倒车脱困……",
     "UI_MinidoracatAutoDrive_Resume": "自动驾驶恢复控制。",
     "UI_MinidoracatAutoDrive_Dodge": "侦测到前方障碍，减速绕行中。",
+    "UI_MinidoracatAutoDrive_Thread": "找到缝隙，低速穿越车阵中。",
     "UI_MinidoracatAutoDrive_GearSlice": "切换驾驶模式：%1",
     "UI_MinidoracatAutoDrive_GearChill": "轻松（30 公里）",
     "UI_MinidoracatAutoDrive_GearStandard": "标准（50 公里）",
