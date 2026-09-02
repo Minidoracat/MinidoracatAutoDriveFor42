@@ -248,12 +248,8 @@ function D.visibilityCapKmh(visibleAhead, tau, aBrake, halfL)
             or not D.finite(aBrake) or aBrake <= 0 then return 0 end
     if not D.finite(tau) or tau < 0.5 then tau = 0.5 end
     if not D.finite(halfL) or halfL < 0 then halfL = 0 end
-    local room = visibleAhead - halfL - 2
-    if room <= 0 then return 0 end
-    local at = aBrake * tau
-    local v = -at + sqrt(at * at + 2 * aBrake * room)
-    if v < 0 then v = 0 end
-    return v * 3.6
+    -- 與 approachCapKmh 同一條式（出口速 0）；房間 ≤ 0 那邊回 exit＝0
+    return D.approachCapKmh(visibleAhead - halfL - 2, 0, tau, aBrake)
 end
 
 -- 接近某個限速區的最高進入速（2026-09-02 s064 定罪：舊制「進入 slowZone 就整段

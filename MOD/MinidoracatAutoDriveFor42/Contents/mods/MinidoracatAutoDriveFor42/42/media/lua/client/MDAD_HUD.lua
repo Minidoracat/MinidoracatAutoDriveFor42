@@ -340,8 +340,7 @@ end
 -- 語音模組是獨立檔（MDAD_Voice.lua）；缺席／拋錯都不得影響 HUD。
 local function playVoice(event, playerNum)
     local voice = MDAD.Voice
-    if type(voice) ~= "table" or type(voice.play) ~= "function" then return end
-    pcall(voice.play, event, playerNum)
+    if voice then pcall(voice.play, event, playerNum) end
 end
 
 local function copyDiag(playerNum, method)
@@ -718,6 +717,58 @@ function MDADHUDPanel:setControlsVisible(gearsOn, cycleOn, policiesOn, actionOn,
     self.detourButton:setVisible(self._detourAllowed and self._blocked == true)
 end
 
+-- 兩套版面（上掛三主題 applyLayout／側掛 layoutWings）共用的量測：字高、間距、
+-- 控制鈕高、各鈕最小寬、狀態字最長寬。只在 layout 跑（冷路徑），回一張表；
+-- 各版面自己再加邊距／地板。圖示可用時控制鈕與策略藥丸都收成方鈕（寬＝高）。
+local function measure(self, scale)
+    local tm = getTextManager()
+    local m = {}
+    m.fontH = tm:getFontHeight(UIFont.Small)
+    m.mediumH = tm:getFontHeight(UIFont.Medium)
+    m.pad = maximum(6, scaled(8, scale))
+    m.gap = maximum(3, scaled(4, scale))
+    m.ctrlH = maximum(m.fontH + 6, scaled(22, scale))
+    local statusW = 0
+    for i = 1, #STATUS_WIDTH_KEYS do
+        statusW = maximum(statusW, textWidth(UIFont.Small, getText(STATUS_WIDTH_KEYS[i])))
+    end
+    m.statusTextW = statusW
+    m.blockedW = textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDStatusBlocked"))
+    m.detourW = maximum(scaled(40, scale),
+        textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDDetourButton")) + 12)
+    m.speedValueW = textWidth(UIFont.Medium, "120")
+    m.unitW = textWidth(UIFont.Small, self._unitText)
+    m.capLabelW = textWidth(UIFont.Small, self._capLabel)
+    m.capValueW = textWidth(UIFont.Small, "120")
+    m.actionW = maximum(scaled(58, scale), maximum(
+        textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_Start")),
+        textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_Stop"))) + 16)
+    m.gearW = maximum(scaled(34, scale), textWidth(UIFont.Small, "MAX") + 12)
+    m.gearLabelW = textWidth(UIFont.Small, self._gearLabel) + m.gap
+    local forcedText = getText("UI_MinidoracatAutoDrive_HUDForcedOff")
+    m.policyW = maximum(scaled(70, scale), maximum(
+        textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDZombie") .. " " .. forcedText),
+        maximum(textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDCorpse") .. " " .. forcedText),
+            textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDAuto") .. " " .. forcedText))) + 14)
+    m.energyW = textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDEnergy", 100, 100))
+    -- 控制鈕寬：三顆同寬、取最長標題（樣式／隱藏／展開／語音 開／語音 關）
+    local voiceLabel = getText("UI_MinidoracatAutoDrive_HUDVoice")
+    m.ctrlW = maximum(scaled(44, scale), maximum(
+        maximum(textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDStyleButton")),
+            maximum(textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDHideButton")),
+                textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDShowButton")))),
+        maximum(textWidth(UIFont.Small, voiceLabel .. " " .. getText("UI_MinidoracatAutoDrive_HUDOn")),
+            textWidth(UIFont.Small, voiceLabel .. " " .. getText("UI_MinidoracatAutoDrive_HUDOff")))) + 12)
+    if iconsOn() then m.ctrlW, m.policyW = m.ctrlH, m.ctrlH end
+    m.valueW = textWidth(UIFont.Small, "100") + 4
+    m.sliderW = maximum(scaled(84, scale), SLIDER_KNOB * 3 + m.valueW)
+    m.controlsOn = modOptions ~= nil
+    m.policyN = m.controlsOn and 3 or 2 -- 殭屍／屍體＋自動改道（無 ModOptions 時不顯示）
+    local screenW = getPlayerScreenWidth(self.playerNum)
+    m.maxW = type(screenW) == "number" and screenW - 16 or 1904
+    return m
+end
+
 -- 側掛（2026-09-02 使用者裁定，設計稿 docs/design/hud-mockup-D1-wings-metal.png）：
 -- 兩片與可見儀表板同高同材質的側翼貼在儀表板左右緣，儀表板上方的路面完全不遮。
 -- 左右各有自己的 chevron、各自存 modData——「只留左翼常駐」是合法組合。
@@ -726,53 +777,19 @@ end
 -- 的點擊回 FALSE（UIElement.java:1123、1132），UIManager 繼續往下派送
 -- （UIManager.java:672-683 只在 consumed 才停），所以原版儀表板的 btn_partSpeed 照樣可點。
 function MDADHUDPanel:layoutWings(scale)
-    local tm = getTextManager()
-    local fontH = tm:getFontHeight(UIFont.Small)
-    local mediumH = tm:getFontHeight(UIFont.Medium)
-    local pad = maximum(6, scaled(8, scale))
-    local gap = maximum(3, scaled(4, scale))
-    local ctrlH = maximum(fontH + 6, scaled(22, scale))
-    local statusW = 0
-    for i = 1, #STATUS_WIDTH_KEYS do
-        statusW = maximum(statusW, textWidth(UIFont.Small, getText(STATUS_WIDTH_KEYS[i])))
-    end
-    local detourW = maximum(scaled(40, scale),
-        textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDDetourButton")) + 12)
-    statusW = maximum(statusW, textWidth(UIFont.Small,
-        getText("UI_MinidoracatAutoDrive_HUDStatusBlocked")) + gap + detourW)
-    local speedValueW = textWidth(UIFont.Medium, "120")
-    local speedW = speedValueW + 3 + textWidth(UIFont.Small, self._unitText)
-    local capLabelW = textWidth(UIFont.Small, self._capLabel)
-    local capW = capLabelW + gap + textWidth(UIFont.Small, "120")
-    local actionW = maximum(scaled(58, scale), maximum(
-        textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_Start")),
-        textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_Stop"))) + 16)
-    local gearW = maximum(scaled(34, scale), textWidth(UIFont.Small, "MAX") + 12)
-    local gearLabelW = textWidth(UIFont.Small, self._gearLabel) + gap
-    local forcedText = getText("UI_MinidoracatAutoDrive_HUDForcedOff")
-    local policyW = maximum(scaled(70, scale), maximum(
-        textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDZombie") .. " " .. forcedText),
-        maximum(textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDCorpse") .. " " .. forcedText),
-            textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDAuto") .. " " .. forcedText))) + 14)
-    local energyW = textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDEnergy", 100, 100))
-    local voiceLabel = getText("UI_MinidoracatAutoDrive_HUDVoice")
-    local ctrlW = maximum(scaled(44, scale), maximum(
-        maximum(textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDStyleButton")),
-            maximum(textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDHideButton")),
-                textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDShowButton")))),
-        maximum(textWidth(UIFont.Small, voiceLabel .. " " .. getText("UI_MinidoracatAutoDrive_HUDOn")),
-            textWidth(UIFont.Small, voiceLabel .. " " .. getText("UI_MinidoracatAutoDrive_HUDOff")))) + 12)
-    -- 圖示可用＝控制鈕與策略藥丸都收成方鈕（寬＝高），說明看 tooltip
-    if iconsOn() then ctrlW, policyW = ctrlH, ctrlH end
-    local valueW = textWidth(UIFont.Small, "100") + 4
-    local sliderW = maximum(scaled(84, scale), SLIDER_KNOB * 3 + valueW)
-    local controlsOn = modOptions ~= nil
-    local policyN = controlsOn and 3 or 2 -- 殭屍／屍體＋自動改道（無 ModOptions 時不顯示）
+    local m = measure(self, scale)
+    local fontH, mediumH, pad, gap, ctrlH = m.fontH, m.mediumH, m.pad, m.gap, m.ctrlH
+    local statusW = maximum(m.statusTextW, m.blockedW + gap + m.detourW)
+    local detourW, speedValueW = m.detourW, m.speedValueW
+    local speedW = speedValueW + 3 + m.unitW
+    local capLabelW = m.capLabelW
+    local capW = capLabelW + gap + m.capValueW
+    local actionW, gearW, gearLabelW, policyW, energyW = m.actionW, m.gearW, m.gearLabelW, m.policyW, m.energyW
+    local ctrlW, valueW, sliderW, controlsOn, policyN = m.ctrlW, m.valueW, m.sliderW, m.controlsOn, m.policyN
 
     local dashW, dashH, dashX = self:dashboardGeometry()
     local wingH = maximum(scaled(56, scale), dashH - DASH_VISIBLE_TOP_INSET)
-    local screenW = getPlayerScreenWidth(self.playerNum)
-    local maxW = type(screenW) == "number" and screenW - 16 or 1904
+    local maxW = m.maxW
 
     -- 展開／收合各自的寬度；空間不夠時先摺右翼再摺左翼（版面層強制，不動玩家的 modData）
     local leftOpenW = pad * 2 + maximum(16 + statusW + gap + speedW,
@@ -899,19 +916,20 @@ function MDADHUDPanel:layoutWings(scale)
     self:reposition()
 end
 
--- 儀表板幾何（寬／高／螢幕 x）；缺席時退 552×121 與螢幕中央，讓版面仍算得出來。
+-- 儀表板幾何（寬／高／螢幕 x／螢幕 y）；缺席時退 552×120、x／y nil（呼叫端自算置中）。
 function MDADHUDPanel:dashboardGeometry()
     local dashboard = getPlayerVehicleDashboard(self.playerNum)
-    local w, h, x = 552, 120, nil
+    local w, h, x, y = 552, 120, nil, nil
     if dashboard then
         if dashboard.backgroundTex then
             w = dashboard.backgroundTex:getWidth() or w
             h = dashboard.backgroundTex:getHeight() or h
-        end
+        elseif dashboard.getHeight then h = dashboard:getHeight() or h end
         if dashboard.getWidth then w = dashboard:getWidth() or w end
         if dashboard.getX then x = dashboard:getX() end
+        if dashboard.getY then y = dashboard:getY() end
     end
-    return w, h, x
+    return w, h, x, y
 end
 
 -- 三種主題只差「四個控制放哪」與底色：
@@ -928,59 +946,23 @@ function MDADHUDPanel:applyLayout()
     self._gearLabel = getText("UI_MinidoracatAutoDrive_HUDGear")
     -- 側掛的量測與擺位自成一套（無精簡單行／收合徽章分支），共用上面三個標籤字串。
     if self._style == STYLE_WINGS then return self:layoutWings(scale) end
-    local tm = getTextManager()
-    local fontH = tm:getFontHeight(UIFont.Small)
-    local mediumH = tm:getFontHeight(UIFont.Medium)
-    local pad = maximum(6, scaled(8, scale))
-    local gap = maximum(3, scaled(4, scale))
-    local buttonH = maximum(fontH + 6, scaled(22, scale))
+    local m = measure(self, scale)
+    local fontH, mediumH, pad, gap, buttonH = m.fontH, m.mediumH, m.pad, m.gap, m.ctrlH
     local topH = maximum(mediumH + 4, maximum(buttonH, fontH * 2 + 2))
-    local statusW = scaled(126, scale)
-    for i = 1, #STATUS_WIDTH_KEYS do
-        statusW = maximum(statusW,
-            textWidth(UIFont.Small, getText(STATUS_WIDTH_KEYS[i])) + pad * 3)
-    end
     -- 狀態欄要容得下「煞停等待 ＋ 改道鈕」（英文 Holding + Reroute 比中文寬）
-    local detourW = maximum(scaled(40, scale),
-        textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDDetourButton")) + 12)
-    statusW = maximum(statusW, 16 + textWidth(UIFont.Small,
-        getText("UI_MinidoracatAutoDrive_HUDStatusBlocked")) + gap + detourW + gap + pad)
-    local speedValueW = textWidth(UIFont.Medium, "120")
-    local speedW = maximum(scaled(62, scale),
-        speedValueW + 3 + textWidth(UIFont.Small, self._unitText) + gap)
-    local capLabelW = textWidth(UIFont.Small, self._capLabel)
-    local capValueW = textWidth(UIFont.Small, "120")
-    local capW = maximum(scaled(48, scale), capLabelW + gap + capValueW + gap)
-    local actionW = maximum(scaled(58, scale), maximum(
-        textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_Start")),
-        textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_Stop"))) + 16)
-    local gearW = maximum(scaled(34, scale), textWidth(UIFont.Small, "MAX") + 12)
-    local gearLabelW = textWidth(UIFont.Small, self._gearLabel) + gap
-    local forcedText = getText("UI_MinidoracatAutoDrive_HUDForcedOff")
-    local policyW = maximum(scaled(70, scale), maximum(
-        textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDZombie") .. " " .. forcedText),
-        maximum(textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDCorpse") .. " " .. forcedText),
-            textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDAuto") .. " " .. forcedText))) + 14)
-    local energyW = textWidth(UIFont.Small,
-        getText("UI_MinidoracatAutoDrive_HUDEnergy", 100, 100)) + gap
+    local detourW = m.detourW
+    local statusW = maximum(maximum(scaled(126, scale), m.statusTextW + pad * 3),
+        16 + m.blockedW + gap + detourW + gap + pad)
+    local speedValueW = m.speedValueW
+    local speedW = maximum(scaled(62, scale), speedValueW + 3 + m.unitW + gap)
+    local capLabelW = m.capLabelW
+    local capW = maximum(scaled(48, scale), capLabelW + gap + m.capValueW + gap)
+    local actionW, gearW, gearLabelW, policyW = m.actionW, m.gearW, m.gearLabelW, m.policyW
+    local energyW = m.energyW + gap
     local cycleW = maximum(scaled(44, scale), textWidth(UIFont.Small, "MAX") + 14)
-    -- 控制鈕寬：三顆同寬、取最長標題（樣式／隱藏／展開／語音 開／語音 關）。
-    local voiceLabel = getText("UI_MinidoracatAutoDrive_HUDVoice")
-    local ctrlW = maximum(scaled(44, scale), maximum(
-        maximum(textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDStyleButton")),
-            maximum(textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDHideButton")),
-                textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDShowButton")))),
-        maximum(textWidth(UIFont.Small, voiceLabel .. " " .. getText("UI_MinidoracatAutoDrive_HUDOn")),
-            textWidth(UIFont.Small, voiceLabel .. " " .. getText("UI_MinidoracatAutoDrive_HUDOff")))) + 12)
-    -- 圖示可用＝控制鈕與策略藥丸都收成方鈕（寬＝高），說明看 tooltip
-    if iconsOn() then ctrlW, policyW = buttonH, buttonH end
-    local valueW = textWidth(UIFont.Small, "100") + 4
-    local sliderW = maximum(scaled(84, scale), SLIDER_KNOB * 3 + valueW)
-    local controlsOn = modOptions ~= nil
-    local policyN = controlsOn and 3 or 2 -- 殭屍／屍體＋自動改道（無 ModOptions 時不顯示）
+    local ctrlW, valueW, sliderW, controlsOn, policyN = m.ctrlW, m.valueW, m.sliderW, m.controlsOn, m.policyN
     local trioW = controlsOn and (ctrlW * 3 + gap * 2) or (ctrlW + gap)
-    local screenW = getPlayerScreenWidth(self.playerNum)
-    local maxW = type(screenW) == "number" and screenW - 16 or 1904
+    local maxW = m.maxW
     if maxW < 64 then maxW = 64 end
     local fullBase = scaled(510, scale)
     local compactBase = scaled(482, scale)
@@ -1247,15 +1229,8 @@ function MDADHUDPanel:reposition()
     local top = getPlayerScreenTop(playerNum)
     local width = getPlayerScreenWidth(playerNum)
     local height = getPlayerScreenHeight(playerNum)
-    local dashboard = getPlayerVehicleDashboard(playerNum)
-    self._dashboard = dashboard
-    local dashboardH = 120
-    local dashboardY = nil
-    if dashboard then
-        if dashboard.backgroundTex then dashboardH = dashboard.backgroundTex:getHeight()
-        elseif dashboard.getHeight then dashboardH = dashboard:getHeight() end
-        if dashboard.getY then dashboardY = dashboard:getY() end
-    end
+    self._dashboard = getPlayerVehicleDashboard(playerNum)
+    local _, dashboardH, _, dashboardY = self:dashboardGeometry()
     -- 側掛：左翼右緣貼儀表板左緣、右翼左緣貼右緣，高度與可見儀表板同高。
     if self._style == STYLE_WINGS then
         local dashX = self._wingDashX
@@ -1735,10 +1710,7 @@ if PZAPI and PZAPI.ModOptions then
     telemetryRetention:addItem("UI_MinidoracatAutoDrive_TelemetryRetention14", false)
     telemetryRetention:addItem("UI_MinidoracatAutoDrive_TelemetryRetention30", false)
     local theme = modOptions:addComboBox("HUDTheme", "UI_MinidoracatAutoDrive_HUDTheme")
-    theme:addItem("UI_MinidoracatAutoDrive_HUDThemeMetal", true)
-    theme:addItem("UI_MinidoracatAutoDrive_HUDThemeMinimal", false)
-    theme:addItem("UI_MinidoracatAutoDrive_HUDThemeFamily", false)
-    theme:addItem("UI_MinidoracatAutoDrive_HUDThemeWings", false)
+    for i = 1, #THEME_KEYS do theme:addItem(THEME_KEYS[i], i == 1) end
     local layout = modOptions:addComboBox("HUDLayout", "UI_MinidoracatAutoDrive_HUDLayout")
     layout:addItem("UI_MinidoracatAutoDrive_HUDLayoutFull", true)
     layout:addItem("UI_MinidoracatAutoDrive_HUDLayoutCompact", false)

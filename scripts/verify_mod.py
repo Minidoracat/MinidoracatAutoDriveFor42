@@ -1536,7 +1536,7 @@ else:
     if len(re.findall(r"local function blocksLine\(", drv_src)) != 1:
         c0902.append("blocksLine 定義數 ≠ 1（擋線判定單一定義）")
     if re.search(r"dl2? < r2? \+ (s\.needHalf|nh)", drv_src.split("local function replan(")[-1]):
-        c0902.append("replan 內出現手寫擋線判定——請走 blocksLine／lineBlockerAhead")
+        c0902.append("replan 內出現手寫擋線判定——請走 blocksLine／nearestLineBlocker")
     # ⑤ harness 測試常數與 production 對齊（TUNE 不 export，改靜態抽值比對）
     mt = re.search(r"TUNE\.RETURN_UNSAFE_CAP\s*=\s*([0-9.]+)", drv_src)
     harness_path = os.path.join(REPO, "scripts", "smoke_harness.lua")

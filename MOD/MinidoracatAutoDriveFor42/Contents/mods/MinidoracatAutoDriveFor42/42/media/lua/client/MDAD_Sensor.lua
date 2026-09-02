@@ -316,6 +316,11 @@ local function pushHard(state, s, l, l4, wx, wy, r)
     state.wSumL = state.wSumL + l4
 end
 
+local function dist(ax, ay, bx, by)
+    local dx, dy = bx - ax, by - ay
+    return sqrt(dx * dx + dy * dy)
+end
+
 -- 車輛精確輪廓（常數註解見 VEH_OUTLINE_*）。回 true＝已把該車輪廓推進本輪點雲；
 -- false＝任何 getter 失敗（呼叫端退回格級佔位）。(s,l) 以**目前掃描步的局部框**
 -- 線性化（state.cx/cy 為路線點、nx/ny 法向、前向＝(ny,-nx)）：輪廓點離命中格
@@ -326,13 +331,10 @@ local function pushVehicleOutline(state, cv)
     -- 整台輪廓要嘛全進要嘛不進：緩衝剩餘不夠就退回格級（近車精確、遠車粗略、
     -- 再遠才被 HARD_MAX 丟——掃描由近而遠，這個退化順序是對的）。
     if HARD_MAX - state.wHardN < VEH_OUTLINE_MAX then return false end
-    local okS, script = pcall(function() return cv:getScript() end)
-    if not okS or script == nil then return false end
-    local okE, ext = pcall(function() return script:getExtents() end)
-    if not okE or ext == nil then return false end
-    local okC, com = pcall(function() return script:getCenterOfMassOffset() end)
-    if not okC or com == nil then return false end
+    -- script／extents／COM 任一 nil 在 pcall 內索引即 error → 同樣退回格級
     local okV, halfW, halfL, comX, comZ = pcall(function()
+        local script = cv:getScript()
+        local ext, com = script:getExtents(), script:getCenterOfMassOffset()
         return ext:x() * 0.5, ext:z() * 0.5, com:x(), com:z()
     end)
     if not okV or type(halfW) ~= "number" or halfW * 0 ~= 0 or halfW <= 0.3 or halfW > 3
@@ -370,17 +372,9 @@ local function pushVehicleOutline(state, cv)
     local fx, fy = ny, -nx
     local curS = state.curS
     -- 步距：周長／(MAX−1) 與 VEH_OUTLINE_STEP 取大者——長車放大步距而不是截斷
-    local perim = 0
-    do
-        local ex, ey = x2 - x1, y2 - y1
-        perim = perim + sqrt(ex * ex + ey * ey)
-        ex, ey = x3 - x2, y3 - y2
-        perim = perim + sqrt(ex * ex + ey * ey)
-        ex, ey = x4 - x3, y4 - y3
-        perim = perim + sqrt(ex * ex + ey * ey)
-        ex, ey = x1 - x4, y1 - y4
-        perim = perim + sqrt(ex * ex + ey * ey)
-    end
+    local e1, e2, e3, e4 = dist(x1, y1, x2, y2), dist(x2, y2, x3, y3),
+        dist(x3, y3, x4, y4), dist(x4, y4, x1, y1)
+    local perim = e1 + e2 + e3 + e4
     local step = VEH_OUTLINE_STEP
     if perim / step > VEH_OUTLINE_MAX - 1 then step = perim / (VEH_OUTLINE_MAX - 1) end
     local pushed = 0
@@ -393,21 +387,20 @@ local function pushVehicleOutline(state, cv)
         l4 = l4 - l4 % 1
         pushHard(state, s, l, l4, px, py, VEH_OUTLINE_R)
     end
-    local function edge(ax, ay, bx, by)
-        local dx, dy = bx - ax, by - ay
-        local len = sqrt(dx * dx + dy * dy)
+    local function edge(ax, ay, bx, by, len)
         local n = len / step
         n = n - n % 1
         if n < 1 then n = 1 end
+        local dx, dy = bx - ax, by - ay
         for k = 0, n - 1 do
             local t = k / n
             emit(ax + dx * t, ay + dy * t)
         end
     end
-    edge(x1, y1, x2, y2)
-    edge(x2, y2, x3, y3)
-    edge(x3, y3, x4, y4)
-    edge(x4, y4, x1, y1)
+    edge(x1, y1, x2, y2, e1)
+    edge(x2, y2, x3, y3, e2)
+    edge(x3, y3, x4, y4, e3)
+    edge(x4, y4, x1, y1, e4)
     emit((x1 + x3) * 0.5, (y1 + y3) * 0.5) -- 中心保底
     return pushed > 0
 end

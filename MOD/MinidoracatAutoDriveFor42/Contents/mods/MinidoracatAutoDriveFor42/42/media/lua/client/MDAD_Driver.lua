@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0903b"
+Drive.REV = "0903c"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -363,12 +363,12 @@ local function haloGood(playerObj, key)
     HaloTextHelper.addGoodText(playerObj, getText(key))
 end
 
--- 語音提示（MDAD_Voice.lua）：缺席／拋錯都不得影響控制——pcall 包住、回值不看。
--- 六個事件：start／stop／blocked／unstick／handback／arrive；觸發點與 halo 同址。
+-- 語音提示（MDAD_Voice.lua）：缺席／拋錯都不得影響控制——pcall 包住、回值不看
+-- （harness 以拋錯樁鎖住此契約）。事件：start／stop／blocked／unstick／handback／
+-- arrive／detour／nodetour，觸發點與 halo 同址。
 local function voice(event, playerNum)
     local v = MDAD.Voice
-    if type(v) ~= "table" or type(v.play) ~= "function" then return end
-    pcall(v.play, event, playerNum)
+    if v then pcall(v.play, event, playerNum) end
 end
 
 local function maxSpeedKmh()
@@ -428,16 +428,8 @@ local function routeCrossesAvoid(route, ax, ay, r)
     if type(pts) ~= "table" or not MDADDynamics.finite(ax) or not MDADDynamics.finite(ay) then return false end
     local n = #pts / 2
     for i = 1, n - 1 do
-        local x1, y1, x2, y2 = pts[i * 2 - 1], pts[i * 2], pts[i * 2 + 1], pts[i * 2 + 2]
-        local dx, dy = x2 - x1, y2 - y1
-        local den = dx * dx + dy * dy
-        local t = 0
-        if den > 0 then
-            t = ((ax - x1) * dx + (ay - y1) * dy) / den
-            if t < 0 then t = 0 elseif t > 1 then t = 1 end
-        end
-        local ex, ey = ax - x1 - dx * t, ay - y1 - dy * t
-        if ex * ex + ey * ey <= r * r then return true end
+        if MDADDynamics.distanceToSegmentSq(ax, ay, pts[i * 2 - 1], pts[i * 2],
+                pts[i * 2 + 1], pts[i * 2 + 2]) <= r * r then return true end
     end
     return false
 end
@@ -1077,7 +1069,6 @@ local function startSession(playerObj, playerNum)
         dodgeCrawl = false, -- 承諾剖面是 squeeze／physical／降檔（reserve 豁免＋intent CRAWL；速度仍連續縮放）
         dodgeApproachCap = 0, -- 接近段 envelope（telemetry：分辨「遠壓速」vs「縫本身的帽」）
         rejectedRoute = nil,  -- 本 MOD 拒收、但仍在主 MOD 快取裡的替代線 identity（cutover 跳過）
-        lastDetourRoute = nil,
         dodgeMargin = 1,    -- commit 時 a..c 最小餘裕（entry／hold 速度縮放輸入）
         dodgeKappa = 0,
         dodgeClearance = 0,
@@ -1251,7 +1242,6 @@ function Drive.requestDetour(playerNum)
     end
     local remaining = s.profile and (s.profile.length - s.lastSNow) or nil
     local route, why, rejected = requestDetourRoute(api, playerNum, s.lastTx, s.lastTy, ax, ay, remaining)
-    s.lastDetourRoute = rejected
     if getDebug() then
         print(LOG .. "detour pn=" .. playerNum .. " avoid=(" .. tostring(ax) .. "," .. tostring(ay)
             .. ") -> " .. (route and ("ok len=" .. tostring(route.len)) or ("rejected " .. tostring(why))))
@@ -1260,7 +1250,7 @@ function Drive.requestDetour(playerNum)
         -- 主 MOD 的 requestDetour 成功算出路線就已覆寫快取（含被本 MOD 拒收的
         -- far／long 線）；記住被拒的 identity，cutover 不得沿用（下一次 250ms 取
         -- 路仍會拿到同一個 table，直到主 MOD 冷卻後重算）。
-        s.rejectedRoute = s.lastDetourRoute
+        s.rejectedRoute = rejected
         haloBad(playerObj, KEY_NO_DETOUR)
         voice("nodetour", playerNum)
         return false, why
@@ -2701,6 +2691,14 @@ local function returnScanBias(s, latSigned)
     return latSigned
 end
 
+-- RETURN 結束的共同歸零（stall 釋放／不可用／對齊完成／dodge 接手／route cutover）：
+-- 五旗＋reason／rounds／holdSince。laneBias／scanBias／冷卻／event 由各站點自己決定。
+local function endReturn(s)
+    s.returnActive, s.returnUnsafe, s.returnHold = false, false, false
+    s.returnCrawlExact, s.returnCapacityFault = false, false
+    s.returnReason, s.returnClearRounds, s.returnHoldSince = nil, 0, 0
+end
+
 local function invalidateReturnControl(s)
     if not s.returnActive then return end
     MDADFollower.clearOffset(s.fstate)
@@ -2816,9 +2814,7 @@ local function updateReturnSnapshot(s, vehicle, playerNum, latSigned)
         local sp = vehicle:getCurrentSpeedKmHour()
         if finite(sp) and sp > -1 and sp < 1
                 and sen.stamp - s.returnHoldSince >= TUNE.RETURN_STALL_MS then
-            s.returnActive, s.returnUnsafe, s.returnHold = false, false, false
-            s.returnCrawlExact, s.returnCapacityFault = false, false
-            s.returnReason, s.returnClearRounds, s.returnHoldSince = nil, 0, 0
+            endReturn(s)
             s.returnBlockUntil = sen.stamp + TUNE.RETURN_STALL_BLOCK_MS
             MDADFollower.clearOffset(s.fstate)
             MDADFollower.setLaneBias(s.fstate, s.returnLaneTarget)
@@ -2843,14 +2839,11 @@ local function updateReturnSnapshot(s, vehicle, playerNum, latSigned)
     end
     if s.returnActive and not returnAvailable(s) then
         MDADFollower.clearOffset(s.fstate)
-        s.returnActive, s.returnUnsafe, s.returnHold = false, false, false
-        s.returnCrawlExact, s.returnCapacityFault = false, false
+        endReturn(s)
         return
     end
     if s.returnClearRounds >= 2 then
-        s.returnActive, s.returnUnsafe, s.returnHold = false, false, false
-        s.returnCrawlExact, s.returnCapacityFault = false, false
-        s.returnReason, s.returnClearRounds = nil, 0
+        endReturn(s)
         MDADFollower.clearOffset(s.fstate)
         MDADFollower.setLaneBias(s.fstate, s.returnLaneTarget)
         s.sensor.scanBias = s.returnLaneTarget
@@ -3087,7 +3080,7 @@ local function shapeProfile(s, profile, a, b, c, d, offL, baseL)
 end
 
 -- 「擋線點」判定（plan 檔語意、單一定義）：|l - bias| < r + needHalf。
--- resolveBlockAnchor（lineOnly）、lineBlockerAhead（exit 提前釋放）共用；不得
+-- resolveBlockAnchor（lineOnly）、nearestLineBlocker（exit 釋放／貼縫死路）共用；不得
 -- 在 replan 內再手寫一份（190-local 閘門＋三份漂移風險）。
 local function blocksLine(sen, i, bl, nh)
     local dl = sen.hardL[i] - bl
@@ -3097,28 +3090,17 @@ local function blocksLine(sen, i, bl, nh)
     return dl < r + nh
 end
 
--- 前方（弧長 ≥ minS）是否還有擋線點。O(hardN)、零配置；冷路徑（replan）用。
-local function lineBlockerAhead(s, sen, minS)
-    local bl, nh = laneBiasOf(s), s.needHalf
-    for i = 1, sen.hardN do
-        if sen.hardS[i] >= minS and blocksLine(sen, i, bl, nh) then return true end
-    end
-    return false
-end
-
--- 貼縫檔死路判定（2026-09-02 使用者裁定「複雜的障礙人工處理」）：繞行出口 d 之後
--- 路線若仍有擋線點＝多重障礙＝不鑽。回 (true, 第一個擋線點索引)；(false)＝出口後淨空。
--- 只在貼縫承諾點呼叫（O(hardN)、零配置）。
-local function crawlDeadEnd(s, sen, d)
+-- 前方（弧長 ≥ minS）最近的擋線點索引；nil＝淨空。O(hardN)、零配置；冷路徑用。
+-- 兩個消費者：exit 提前釋放（只問有沒有）、貼縫檔死路判定（2026-09-02 使用者裁定
+-- 「複雜的障礙人工處理」：繞行出口 d+1 之後仍有擋線點＝多重障礙＝不鑽，要點位）。
+local function nearestLineBlocker(s, sen, minS)
     local bl, nh = laneBiasOf(s), s.needHalf
     local bi = nil
     for i = 1, sen.hardN do
-        if sen.hardS[i] >= d + 1 and blocksLine(sen, i, bl, nh) then
-            if bi == nil or sen.hardS[i] < sen.hardS[bi] then bi = i end
-        end
+        if sen.hardS[i] >= minS and blocksLine(sen, i, bl, nh)
+                and (bi == nil or sen.hardS[i] < sen.hardS[bi]) then bi = i end
     end
-    if bi == nil then return false end
-    return true, bi
+    return bi
 end
 
 -- Candidate sweep and commitment consume the same complete preallocated line.
@@ -3152,16 +3134,15 @@ local function sweepCandidate(s, shapeOk, a, b, c, d, offL, baseL, tag, needBase
     -- 路線仍有擋線點＝拒收→blocked→改道／交還階梯。cruise 檔不受影響（速度不掉、
     -- 下一段由下一輪 plan 處理）；單一縫（出口後淨空）照 2026-09-01「物理可過即過」。
     if ok and needBase < s.sweepBase - 1e-6 then
-        local deadEnd, bi = crawlDeadEnd(s, s.sensor, d)
-        if deadEnd then
-            local sen = s.sensor
+        local sen = s.sensor
+        local bi = nearestLineBlocker(s, sen, d + 1)
+        if bi then
             if getDebug() then
                 print(string.format(
                     "%ssweep deadend[%s] offL=%.2f d=%.1f next blocker s=%.1f: crawl refused",
-                    LOG, tostring(tag or "?"), offL, d, bi and sen.hardS[bi] or -1))
+                    LOG, tostring(tag or "?"), offL, d, sen.hardS[bi]))
             end
-            return ovN, ovS0, false, 0, bi and sen.hardS[bi] or d + 1, 4, d,
-                bi and sen.hardX[bi] or 0, bi and sen.hardY[bi] or 0
+            return ovN, ovS0, false, 0, sen.hardS[bi], 4, d, sen.hardX[bi], sen.hardY[bi]
         end
     end
     return ovN, ovS0, ok, margin, hardS, phase, sampleS, hitX, hitY
@@ -3263,7 +3244,7 @@ local function replan(s, vehicle, playerNum)
         -- 防的是縫中途（<c）的抖動；過了 c 縫的幾何意義已結束，回線交回巡線由
         -- laneBias 平滑收斂。
         local exitClear = type(fs.offC) == "number" and s.lastSNow >= fs.offC
-            and not lineBlockerAhead(s, sen, s.lastSNow)
+            and nearestLineBlocker(s, sen, s.lastSNow) == nil
         if curOffL == nil or type(fs.offD) ~= "number" or s.lastSNow >= fs.offD
                 or exitClear then
             -- 剖面走完（或已被外部清除／exit 段淨空）：釋放承諾，本輪 fall
@@ -3857,9 +3838,7 @@ local function replan(s, vehicle, playerNum)
             -- hold 不能放。takeover＝RETURN 結束（線是掃掠驗過的），剖面走完 latDev
             -- 若仍大 RETURN 下一輪自然重進；冷卻與 stall 釋放同款。
             if s.returnActive then
-                s.returnActive, s.returnUnsafe, s.returnHold = false, false, false
-                s.returnCrawlExact, s.returnCapacityFault = false, false
-                s.returnReason, s.returnClearRounds, s.returnHoldSince = nil, 0, 0
+                endReturn(s)
                 s.returnBlockUntil = sen.stamp + TUNE.RETURN_STALL_BLOCK_MS
                 MDADFollower.setLaneBias(s.fstate, s.returnLaneTarget)
                 sen.scanBias = s.returnLaneTarget
@@ -5738,9 +5717,7 @@ local function onPlayerUpdate(player)
             releaseDodge(s)
             s.blocked = false
             s.blockedNotified = false
-            s.returnActive, s.returnUnsafe, s.returnHold = false, false, false
-            s.returnCrawlExact, s.returnCapacityFault = false, false
-            s.returnReason, s.returnClearRounds = nil, 0
+            endReturn(s)
             s.surfaceMismatch, s.surfaceMismatchRounds = false, 0
             s.physicalOffroad = false
             s.currentSurfaceId = profile.segSurface[1]

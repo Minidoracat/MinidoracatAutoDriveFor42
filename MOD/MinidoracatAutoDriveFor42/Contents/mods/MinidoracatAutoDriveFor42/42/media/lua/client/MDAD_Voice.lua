@@ -61,63 +61,54 @@ function Voice.autoLanguage()
     return "en"
 end
 
+-- HUD option 讀取（語言／開關／音量同款）：HUD 缺席、方法缺席或拋錯一律回 nil。
+local function hudOpt(name)
+    local hud = MDAD.HUD
+    if type(hud) ~= "table" or type(hud[name]) ~= "function" then return nil end
+    local ok, value = pcall(hud[name])
+    if ok then return value end
+    return nil
+end
+
 -- 玩家在選項指定的語音包（HUD.voiceLanguage 回 "auto" 或 pack 名）優先；缺席／
 -- 非法值一律退回跟隨遊戲語言，永不讓播放端拿到沒有音檔的 pack 名。
 function Voice.language()
-    local hud = MDAD.HUD
-    if type(hud) == "table" and type(hud.voiceLanguage) == "function" then
-        local ok, value = pcall(hud.voiceLanguage)
-        if ok and type(value) == "string" and PACK_SET[value] then return value end
-    end
+    local value = hudOpt("voiceLanguage")
+    if type(value) == "string" and PACK_SET[value] then return value end
     return Voice.autoLanguage()
 end
 
-function Voice.enabled()
-    local hud = MDAD.HUD
-    if type(hud) == "table" and type(hud.voiceEnabled) == "function" then
-        local ok, value = pcall(hud.voiceEnabled)
-        if ok and type(value) == "boolean" then return value end
-    end
+local function voiceEnabled()
+    local value = hudOpt("voiceEnabled")
+    if type(value) == "boolean" then return value end
     return true
 end
 
 -- 0..1
-function Voice.volume()
-    local hud = MDAD.HUD
-    if type(hud) == "table" and type(hud.voiceVolume) == "function" then
-        local ok, value = pcall(hud.voiceVolume)
-        if ok and finite(value) then
-            if value < 0 then value = 0 elseif value > 100 then value = 100 end
-            return value / 100
-        end
-    end
-    return 0.7
+local function voiceVolume()
+    local value = hudOpt("voiceVolume")
+    if not finite(value) then return 0.7 end
+    if value < 0 then value = 0 elseif value > 100 then value = 100 end
+    return value / 100
 end
 
-function Voice.soundName(event, lang)
-    return SOUND_PREFIX .. event .. "_" .. (lang or Voice.language())
+function Voice.soundName(event)
+    return SOUND_PREFIX .. event .. "_" .. Voice.language()
 end
 
 local function stillPlaying(playerNum)
     local ref, emitter = lastRef[playerNum], lastEmitter[playerNum]
     if not ref or not emitter then return false end
-    local ok, playing = pcall(function() return emitter:isPlaying(ref) end)
+    local ok, playing = pcall(emitter.isPlaying, emitter, ref)
     return ok and playing == true
 end
 
 local function stopPrevious(playerNum)
-    local ref, emitter = lastRef[playerNum], lastEmitter[playerNum]
+    if stillPlaying(playerNum) then
+        local emitter = lastEmitter[playerNum]
+        pcall(emitter.stopSound, emitter, lastRef[playerNum])
+    end
     lastRef[playerNum], lastEmitter[playerNum] = nil, nil
-    if not ref or not emitter then return end
-    pcall(function()
-        if emitter:isPlaying(ref) then emitter:stopSound(ref) end
-    end)
-end
-
-local function nowMs()
-    local ok, t = pcall(getTimestampMs)
-    if ok and finite(t) then return t end
-    return 0
 end
 
 -- 同事件重播閘：上一句同事件仍在播，或距上一句送出不到 REPEAT_COOLDOWN_MS。
@@ -131,8 +122,8 @@ end
 -- 回 true＝真的送出播放。event 未知／關閉／音量 0／無玩家或 emitter 都回 false。
 function Voice.play(event, playerNum)
     if not EVENTS[event] then return false end
-    if not Voice.enabled() then return false end
-    local volume = Voice.volume()
+    if not voiceEnabled() then return false end
+    local volume = voiceVolume()
     if volume <= 0 then return false end
     local playerObj = getSpecificPlayer(playerNum)
     if not playerObj then return false end
@@ -141,7 +132,7 @@ function Voice.play(event, playerNum)
         warnOnce("emitter", "player emitter unavailable")
         return false
     end
-    local now = nowMs()
+    local now = getTimestampMs()
     if repeatSuppressed(event, playerNum, now) then return false end
     stopPrevious(playerNum)
     local name = Voice.soundName(event)
@@ -162,10 +153,6 @@ function Voice.play(event, playerNum)
         print("[" .. MDAD.MOD_ID .. "] voice " .. name .. " vol=" .. tostring(volume))
     end
     return true
-end
-
-function Voice.stop(playerNum)
-    stopPrevious(playerNum)
 end
 
 MDAD.Voice = Voice

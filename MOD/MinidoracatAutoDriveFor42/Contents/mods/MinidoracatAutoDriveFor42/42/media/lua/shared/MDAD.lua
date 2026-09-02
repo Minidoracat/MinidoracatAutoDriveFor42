@@ -25,13 +25,9 @@ MDAD.RECIPE_AUTO = "CraftAutopilotModule"
 -- 開發期細粒度版本另看 telemetry header 的 rev（MDAD.Drive.REV）。
 MDAD.BUILD = "unknown"
 do
-    local ok, info = pcall(function()
-        return type(getModInfoByID) == "function" and getModInfoByID(MDAD.MOD_ID) or nil
-    end)
-    if ok and info ~= nil then
-        local okV, v = pcall(function() return info:getModVersion() end)
-        if okV and type(v) == "string" and v ~= "" then MDAD.BUILD = v end
-    end
+    -- API 缺席／info 為 nil 都在 pcall 內變成 error → 保持 "unknown"
+    local ok, v = pcall(function() return getModInfoByID(MDAD.MOD_ID):getModVersion() end)
+    if ok and type(v) == "string" and v ~= "" then MDAD.BUILD = v end
 end
 print("[MinidoracatAutoDrive] build " .. MDAD.BUILD)
 

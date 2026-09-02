@@ -234,8 +234,8 @@ local function buildLaneRoom(p)
     local n, kind, width, radius, segH = p.n, p.segKind, p.segWidth, p.filletRadius, p.segH
     local margin = MDADDynamics.ROAD_EDGE_MARGIN
     local roomR, roomL = {}, {}
+    -- 只在 filletAdaptive（v4 路線）建表，begin 已把 width<1 判 badroute——寬度必為 1..64
     local function bandOf(w)
-        if not isFinite(w) or w < 1 then return RANGE_INF end
         local b = w * 0.5 - halfW - margin
         return b > 0 and b or 0
     end
@@ -254,11 +254,9 @@ local function buildLaneRoom(p)
             local theta = dh < 0 and -dh or dh
             local c = cos(theta * 0.5)
             local inside = 0
-            if c > 1e-6 and wide < RANGE_INF then
+            if c > 1e-6 then
                 inside = (wide - r * (1 - c)) / c
                 if inside < 0 then inside = 0 end
-            elseif wide >= RANGE_INF then
-                inside = RANGE_INF
             end
             local rr, ll = inside, narrow
             if dh < 0 then rr, ll = narrow, inside end
@@ -770,11 +768,8 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
             look = rShrink
             if look < 4.5 then look = 4.5 end
             sTarget = sNow + look
-            j, walked = bestI, 0
-            while j < n - 1 and s[j + 1] < sTarget and walked < LOOKAHEAD_WALK_MAX do
-                j = j + 1
-                walked = walked + 1
-            end
+            -- 往回退到與前進走法同一個不變式：s[j] < sTarget ≤ s[j+1]
+            while j > bestI and s[j] >= sTarget do j = j - 1 end
         end
     end
     local tj = 0
