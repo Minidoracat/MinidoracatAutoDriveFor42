@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0902x"
+Drive.REV = "0902y"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -192,13 +192,6 @@ TUNE.DETOUR_AVOID_R = 40       -- 以堵點為圓心的軟封鎖半徑（主 MOD
 TUNE.DETOUR_LEN_RATIO = 1.5    -- 替代路線長 ≤ 剩餘 × ratio + slack 才接受
 TUNE.DETOUR_LEN_SLACK = 200
 TUNE.AUTO_DETOUR_MS = 10000    -- 自動改道：停等累計此時長才要替代路線（或倒車重掃過一次又再堵＝BLOCK_RETRY_MS 即問）
--- 車陣蛇行（2026-09-02）：plan/sweep 鏈全 blocked 時在 (s,l) 格點找斜率受限折線
--- 穿過錯落車陣（Corridor.thread），承諾為 exactLine（同 RETURN 機制）。爬行檔：
--- 餘裕 0 → MIN、餘裕 ≥1m → MAX；貼縫檔（squeezeNeed）固定 MIN。
-TUNE.THREAD_CAP_MIN_KMH = 8
-TUNE.THREAD_CAP_MAX_KMH = 18
-TUNE.THREAD_RETRY_MS = 2000    -- 無路後的重試冷卻（DP 是冷路徑但非免費）
-TUNE.THREAD_NODES_MAX = 64
 -- recovery 方向探測與 episode 重臂。rear 每 100ms 重查；成功倒退後 ban
 -- 跨 sensor reset／same-target route cutover 保留，前進 10m 且兩輪 footprint clear 才清。
 local REAR_PROBE_MS = 100
@@ -351,7 +344,6 @@ local KEY_UNSTICK = "UI_MinidoracatAutoDrive_Unstick"
 local KEY_DODGE = "UI_MinidoracatAutoDrive_Dodge"
 local KEY_ROUTE_FAR = "UI_MinidoracatAutoDrive_RouteTooFar"
 local KEY_DETOUR = "UI_MinidoracatAutoDrive_Detour"
-local KEY_THREAD = "UI_MinidoracatAutoDrive_Thread"
 local KEY_NO_DETOUR = "UI_MinidoracatAutoDrive_NoDetour"
 
 -- 診斷輸出（只在 getDebug() 為真時存在）。實機回報「按了關閉但車還在跑」時，唯一能
@@ -545,7 +537,7 @@ local function controlStateOf(s)
     if s.returnHold then return "HOLD" end
     if s.returnActive then return "RETURN" end
     if s.blocked or s.followHold or mode == "build" then return "HOLD" end
-    if s.dodging or s.threading then return "AVOID" end
+    if s.dodging then return "AVOID" end
     return "TRACK"
 end
 
@@ -569,19 +561,10 @@ function Drive.invalidateCommandState(s, actualSpeedKmh, controlState)
     s.jerkBypassReason = nil
 end
 
--- 車陣蛇行承諾釋放（exactLine 何時清同樣由呼叫端決定）。
-local function releaseThread(s)
-    s.threading = false
-    s.threadN = 0
-    s.threadGuardHardN = nil
-end
-
 -- 繞行承諾釋放：這五個旗標永遠一起回到「無承諾」狀態，dodgeNeed 回基準淨距。
 -- 不含 clearOffset：剖面何時清由呼叫端時序決定（車還在動時清＝目標線瞬跳）。
--- 同時釋放蛇行承諾：兩者同 owner 等級，所有「放棄承諾」的出口（blocked／
--- RETURN 進入／recover／cutover）都經這裡。
+-- 所有「放棄承諾」的出口（blocked／RETURN 進入／recover／cutover）都經這裡。
 local function releaseDodge(s)
-    releaseThread(s)
     s.dodging = false
     s.dodgeNotified = false
     s.dodgeCrawl = false
@@ -734,7 +717,7 @@ function Drive.hudState(playerNum)
             or s.recoverWhy ~= nil then
         key = "unstick"
     elseif s.currentBlocked or s.blocked then key = "blocked"
-    elseif s.dodging or s.threading then key = "dodging"
+    elseif s.dodging then key = "dodging"
     elseif s.mode == "build" then key = "build"
     else key = "follow" end
     local cap = s.maxSpeed
@@ -1068,16 +1051,6 @@ local function startSession(playerObj, playerNum)
         returnHoldSince = 0,   -- hold 起算（sensor 快照時戳；0＝未在 hold）
         returnBlockUntil = 0,  -- stall 釋放後的 RETURN 重入冷卻截止
         returnX = {}, returnY = {},
-        -- 車陣蛇行承諾（exactLine；owner 與 dodge 同級）
-        threading = false,
-        threadN = 0,           -- 折線節點數（threadS/threadL）
-        threadStartS = 0, threadEndS = 0, threadDoneS = 0,
-        threadCap = 0, threadNeed = 0,
-        threadNextMs = 0,      -- 無路後的重試冷卻
-        threadGuardHardN = nil,
-        threadX = {}, threadY = {}, -- 承諾線本體（setExactLine 持有 identity，不得與 tmpOv 共用）
-        threadS = {}, threadL = {}, -- Corridor.thread 節點
-        threadWork = {},           -- DP 工作表（一次配置、重用）
         clearStreak = 0,    -- 連續 clear 輪數（堵住解除遲滯）
         followHold = false, -- 跟車分級把目標壓 0（停等豁免卡死偵測用）
         dodgeCommittedLength = 0,
@@ -1510,21 +1483,6 @@ end
 -- 同一段；抽出只為遙測 el／ld 與甩出判定共用，語意逐位元不變。
 local function expectedLaneOf(s)
     local expL = laneBiasOf(s)
-    -- 蛇行中：期望線＝折線在當前弧長的 lane（節點間 smoothstep，與 buildThreadLine 同式）
-    if s.threading and s.threadN >= 2 then
-        local ts, tl, sN = s.threadS, s.threadL, s.lastSNow
-        if sN <= ts[1] then return tl[1] end
-        if sN >= ts[s.threadN] then return tl[s.threadN] end
-        for k = 1, s.threadN - 1 do
-            if sN <= ts[k + 1] then
-                local t = (sN - ts[k]) / (ts[k + 1] - ts[k])
-                if t < 0 then t = 0 elseif t > 1 then t = 1 end
-                t = t * t * (3 - 2 * t)
-                return tl[k] + (tl[k + 1] - tl[k]) * t
-            end
-        end
-        return tl[s.threadN]
-    end
     local offL = s.fstate.offL
     if s.dodging and type(offL) == "number" then
         local oa, ob, oc, od = s.fstate.offA, s.fstate.offB, s.fstate.offC, s.fstate.offD
@@ -2252,7 +2210,7 @@ local function sampleRecovery(s, vehicle, playerNum, now, x, y, speed, fx, fy, h
         s.mode, gear, false, s.sensor, true,
         s.planMode, s.lastSNow, s.blockS, s.dodgeMargin, s.dodgeNeed,
         s.roadBias, s.blockHitX, s.blockHitY, s.fstate.idx,
-        s.blocked or s.currentBlocked, s.dodging or s.threading, s.returnActive, s.cornerLatch, false, phys,
+        s.blocked or s.currentBlocked, s.dodging, s.returnActive, s.cornerLatch, false, phys,
         s.targetGen, s.routeGen, s.episodeId, s.progressState, s.episodeAttempts,
         s.pushBanL ~= nil and s.pushBanL or false, s.unstickDistance,
         s.rearStatus, s.reverseForce, remainingMs,
@@ -2419,7 +2377,7 @@ local function buildSnapshotProof(s, segI, proofEnd)
     s.verifyBand, s.verifySweep = false, false
     s.verifyLineReason, s.curveVerifiedUntilS = "state", 0
     s.proofKappa, s.proofCurveCap = 0, 0
-    if not s.adaptive or s.dodging or s.threading or s.returnActive
+    if not s.adaptive or s.dodging or s.returnActive
             or s.blocked or s.currentBlocked then return end
 
     local prof, sen = s.profile, s.sensor
@@ -2702,6 +2660,27 @@ local function returnLineBandCovers(s, lx, ly, ln, lineS0, lineS1, pad, startK)
     return true
 end
 
+-- RETURN 期間掃描帶的**唯一**錨點（2026-09-02 session-006 定罪：commit／hold／
+-- 守護通過三條路徑各自把帶心寫成目標 lane／現 lane／中點，相鄰兩輪的帶互相把對方
+-- 的線判成 band／unloaded → commit↔hold 週期 3 輪震盪，每次 hold 把速度命令歸零，
+-- 車 31 秒 0 km/h、路線畫面一直跳）。整段回線（起點 lane↔目標 lane＋車身＋pad）塞得進
+-- 走廊就錨在中點——斜線兩端與平行爬行線同一個帶都看得到；塞不進（跨距 > ~10.8m，
+-- RETURN_MAX_DEV 12 的極端）才退回舊制 streaming：帶跟現 lane、爬行等帶前伸。
+local function returnScanBias(s, latSigned)
+    local start, target = s.returnLaneStart, s.returnLaneTarget
+    if not finite(start) then start = latSigned end
+    if not finite(target) then target = laneBiasOf(s) end
+    local span = target - start
+    if span < 0 then span = -span end
+    local pad = s.sweepBase - s.vehicleProfile.halfW
+    if pad < SWEEP_PHYS_PAD then pad = SWEEP_PHYS_PAD end
+    local corridorHalf = type(MDADSensor) == "table" and MDADSensor.CORRIDOR_HALF or 7
+    if span * 0.5 + s.vehicleProfile.halfW + pad <= corridorHalf then
+        return (start + target) * 0.5
+    end
+    return latSigned
+end
+
 local function invalidateReturnControl(s)
     if not s.returnActive then return end
     MDADFollower.clearOffset(s.fstate)
@@ -2710,7 +2689,7 @@ local function invalidateReturnControl(s)
     if s.sensor and type(MDADSensor) == "table"
             and type(MDADSensor.reset) == "function" then
         MDADSensor.reset(s.sensor)
-        s.sensor.scanBias = (s.returnLaneStart + s.returnLaneTarget) * 0.5
+        s.sensor.scanBias = returnScanBias(s, s.lastLatSigned)
     end
 end
 
@@ -2761,7 +2740,7 @@ local function holdUnsafeReturn(s, vehicle, latSigned, reason)
         s.returnHold = false
         s.returnCrawlExact = true
         s.returnStartS, s.returnEndS = s0, s1
-        s.sensor.scanBias = latSigned
+        s.sensor.scanBias = returnScanBias(s, latSigned)
     end
 end
 
@@ -2778,7 +2757,7 @@ end
 -- return=sweep[return]；contact fail-closed 凌駕一切（targetSpeed 層）。
 local function profileOwner(s)
     if s.fstate.rotating == true then return "rotate" end
-    if s.dodging or s.threading then return "dodge" end
+    if s.dodging then return "dodge" end
     if s.returnActive and not s.returnHold then return "return" end
     return "free"
 end
@@ -2885,8 +2864,7 @@ local function updateReturnSnapshot(s, vehicle, playerNum, latSigned)
             MDADFollower.clearOffset(s.fstate)
             s.returnCrawlExact = false
         else
-            s.sensor.scanBias = s.returnCrawlExact
-                and latSigned or ((latSigned + s.returnLaneTarget) * 0.5)
+            s.sensor.scanBias = returnScanBias(s, latSigned)
             holdUnsafeReturn(s, vehicle, latSigned,
                 guardUnloaded and "unloaded" or "unsafe")
             return
@@ -2906,7 +2884,7 @@ local function updateReturnSnapshot(s, vehicle, playerNum, latSigned)
     local lookScale = s.profile.lookScale
     if not finite(lookScale) or lookScale <= 0 then lookScale = 1 end
     local pad = returnPad
-    s.sensor.scanBias = (laneStart + laneTarget) * 0.5
+    s.sensor.scanBias = returnScanBias(s, laneStart)
     local tail = 18 * lookScale + s.vehicleProfile.halfL + pad
     local coverageEnd = s1 + tail
     local tailSteps = (coverageEnd - s0) / MDADFollower.OV_STEP
@@ -3108,33 +3086,9 @@ local function lineBlockerAhead(s, sen, minS)
     return false
 end
 
--- 蛇行折線終點（tryThread／crawlDeadEnd 共用一份定義）：掃描帶內最遠擋線點＋EXIT，
--- 上限 THREAD_COL_MAX 欄，再鉗到已載入區（折線尾＝末節點最多比 sTo 多一欄＋tail，
--- 落在 scanEndS／unloadedS 之外整條線判 unloaded＝失敗）。回 sTo（可能 ≤ sFrom）。
-local function threadHorizon(s, sen, sFrom, sObs0)
-    local bl, nh = laneBiasOf(s), s.needHalf
-    local farS = finite(sObs0) and sObs0 or sFrom
-    for i = 1, sen.hardN do
-        local hs = sen.hardS[i]
-        if hs > farS and blocksLine(sen, i, bl, nh) then farS = hs end
-    end
-    local sTo = farS + MDADCorridor.EXIT
-    local maxTo = sFrom + MDADCorridor.THREAD_COL_MAX * MDADCorridor.THREAD_DS
-    if sTo > maxTo then sTo = maxTo end
-    local tail = s.vehicleProfile.halfL + 1
-    local loadedEnd = visibleEndS(sen, sFrom)
-    if sTo > loadedEnd - tail - MDADCorridor.THREAD_DS then
-        sTo = loadedEnd - tail - MDADCorridor.THREAD_DS
-    end
-    if sTo > s.profile.length then sTo = s.profile.length end
-    return sTo
-end
-
--- 貼縫檔死路判定（2026-09-02）：繞行出口 d 之後路線若仍被擋，用 thread DP 當
--- oracle 問「從 d 到可見盡頭有沒有任何折線可走」。回 (true, 第一個擋線點索引)＝
--- 死路（貼縫進去也立刻再 blocked）；(false)＝出口後淨空或整段可走。DP 失敗原因只有
--- band／start／nopath 算死路；badargs／capacity 不判（fail-open：舊行為是允許）。
--- 只在貼縫承諾點呼叫（冷路徑，一次 DP）；work 陣列與 tryThread 共用（純暫存）。
+-- 貼縫檔死路判定（2026-09-02 使用者裁定「複雜的障礙人工處理」）：繞行出口 d 之後
+-- 路線若仍有擋線點＝多重障礙＝不鑽。回 (true, 第一個擋線點索引)；(false)＝出口後淨空。
+-- 只在貼縫承諾點呼叫（O(hardN)、零配置）。
 local function crawlDeadEnd(s, sen, d)
     local bl, nh = laneBiasOf(s), s.needHalf
     local bi = nil
@@ -3144,19 +3098,7 @@ local function crawlDeadEnd(s, sen, d)
         end
     end
     if bi == nil then return false end
-    if type(MDADCorridor.thread) ~= "function" then return false end
-    local sTo = threadHorizon(s, sen, d, sen.hardS[bi])
-    if sTo - d < 4 then return false end
-    local planN = sen.hardN
-    if s.pushBanL ~= nil then planN = planN + 1 end
-    local need = s.squeezeNeed + MDADVehicleProfile.clearanceBudget("probe")
-    local n, why = MDADCorridor.thread(
-        sen.hardS, sen.hardL, sen.hardR, planN, need, MDADSensor.CORRIDOR_HALF,
-        d, bl, sTo, s.vehicleProfile.halfL, s.vehicleProfile.halfW, bl,
-        sen.roadLo, sen.roadHi, s.threadWork, s.threadS, s.threadL, TUNE.THREAD_NODES_MAX)
-    if n >= 2 then return false end
-    if why == "band" or why == "start" or why == "nopath" then return true, bi end
-    return false
+    return true, bi
 end
 
 -- Candidate sweep and commitment consume the same complete preallocated line.
@@ -3183,13 +3125,12 @@ local function sweepCandidate(s, shapeOk, a, b, c, d, offL, baseL, tag, needBase
     local ok, margin, hardS, phase, sampleS, hitX, hitY = sweepLine(
         s, s.tmpOvX, s.tmpOvY, ovN, ovS0, lastCovered,
         a, b, c, d, offL, tag, needBase)
-    -- 貼縫檔（squeeze／physical）不得鑽進死路（2026-09-02 s064／s001 兩輪定罪：
-    -- 車陣第一台以 margin 0.09 的貼縫承諾、4 km/h 爬 20m，出口落在第二排車前，
-    -- 整段車陣 DP nopath——就算擠過第一台也立刻再 blocked，代價是 40s＋接觸＋
-    -- 三次倒車 StopStuck）。貼縫是單一障礙的最後手段；出口之後路線仍被擋時，
-    -- 先問「可見車陣整段有沒有路」（thread DP 當 oracle），沒路＝拒收→blocked→
-    -- 改道／交還階梯，不浪費 40s 鑽進去。cruise 檔不受影響（速度不掉、下一段
-    -- 由下一輪 plan 處理）；單一縫（出口後淨空）照 2026-09-01 裁定「物理可過即過」。
+    -- 貼縫檔（squeeze／physical）不得鑽進多重障礙（2026-09-02 s064／s001 兩輪定罪：
+    -- 車陣第一台以 margin 0.09 的貼縫承諾、4 km/h 爬 20m，出口落在第二排車前——
+    -- 就算擠過第一台也立刻再 blocked，代價是 40s＋接觸＋三次倒車 StopStuck；
+    -- 使用者裁定「複雜的障礙人工處理」）。貼縫是單一障礙的最後手段：出口之後
+    -- 路線仍有擋線點＝拒收→blocked→改道／交還階梯。cruise 檔不受影響（速度不掉、
+    -- 下一段由下一輪 plan 處理）；單一縫（出口後淨空）照 2026-09-01「物理可過即過」。
     if ok and needBase < s.sweepBase - 1e-6 then
         local deadEnd, bi = crawlDeadEnd(s, s.sensor, d)
         if deadEnd then
@@ -3268,93 +3209,6 @@ local function demotePlan(s, sen, planN, prefer, baseL, playerNum)
             end
         end
     end
-    return false
-end
-
--- 車陣蛇行提案（2026-09-02 使用者「這麼多車沒辦法掃出一個地方鑽嗎」）：plan／
--- sweep 候選鏈全 blocked 之後的第二層。Corridor.thread 在 (s,l) 格點找斜率受限
--- 折線（DP，冷路徑）→ Follower.buildThreadLine 建世界折線 → sweepLine 世界 OBB
--- 掃掠（唯一否決權）→ setExactLine 承諾（同 RETURN 機制；threadX/Y 持有 identity）。
--- 兩檔需求：巡航 needHalf → 貼縫 squeezeNeed，皆加 probe 預算與 sweep 同源。
--- 無路＝THREAD_RETRY_MS 冷卻（DP 每次 ~ms 級，不每輪重跑）。回 true＝已承諾。
-local function tryThread(s, vehicle, playerNum, sObs0, sObs1, now)
-    local sen, prof = s.sensor, s.profile
-    if type(MDADCorridor.thread) ~= "function"
-            or type(MDADFollower.buildThreadLine) ~= "function" then return false end
-    if now < s.threadNextMs then return false end
-    local halfL = s.vehicleProfile.halfL
-    local sFrom = s.lastSNow
-    local laneFrom = s.lastLatSigned
-    if not finite(laneFrom) then laneFrom = laneBiasOf(s) end
-    -- 折線終點＝掃描帶內最遠擋線點＋EXIT（threadHorizon；與 crawlDeadEnd 同一定義）。
-    -- 第一版用第一群出口（sObs1＋EXIT）：終欄成本把折線拉回基準線、走到末節點
-    -- 釋放後下一群再蛇一次；lone car 後面緊接車陣時終欄落在車陣裡。
-    local sTo = threadHorizon(s, sen, sFrom, sObs0)
-    if not finite(sObs0) or sObs0 <= sFrom + 1 or sTo - sFrom < 4 then return false end
-    local planN = sen.hardN
-    if s.pushBanL ~= nil then planN = planN + 1 end -- 推撞 ban 點已在尾格（replan 寫入）
-    local probe = MDADVehicleProfile.clearanceBudget("probe")
-    local baseL = laneBiasOf(s)
-    local lastWhy, lastN = "none", 0
-    for pass = 1, 2 do
-        local need = (pass == 1 and s.needHalf or s.squeezeNeed) + probe
-        local n, why, minExtra, maxSlope = MDADCorridor.thread(
-            sen.hardS, sen.hardL, sen.hardR, planN, need, MDADSensor.CORRIDOR_HALF,
-            sFrom, laneFrom, sTo, halfL, s.vehicleProfile.halfW, baseL, sen.roadLo, sen.roadHi,
-            s.threadWork, s.threadS, s.threadL, TUNE.THREAD_NODES_MAX)
-        lastWhy, lastN = why, n
-        if n >= 2 then
-            local ln, lS0, reason, lS1 = MDADFollower.buildThreadLine(
-                prof, sFrom, s.threadS, s.threadL, n, s.threadX, s.threadY, tail)
-            local unloaded = not sen.ready or sen.scanEndS < lS1
-                or (sen.unloaded and finite(sen.unloadedS) and sen.unloadedS <= lS1)
-            if reason == "ok" and ln >= 2 and not unloaded then
-                local safe = sweepLine(s, s.threadX, s.threadY, ln, lS0, lS1,
-                    sFrom, sFrom, lS1, lS1, 0, "thread", need)
-                if safe and MDADFollower.setExactLine(
-                        s.fstate, s.threadX, s.threadY, ln, lS0, lS1) then
-                    local cap = TUNE.THREAD_CAP_MIN_KMH
-                    if pass == 1 then
-                        local t = minExtra
-                        if t < 0 then t = 0 elseif t > 1 then t = 1 end
-                        cap = cap + (TUNE.THREAD_CAP_MAX_KMH - TUNE.THREAD_CAP_MIN_KMH) * t
-                    end
-                    s.threading, s.threadN = true, n
-                    s.threadStartS, s.threadEndS = sFrom, lS1
-                    s.threadDoneS = s.threadS[n]
-                    s.threadCap, s.threadNeed = cap, need
-                    s.threadGuardHardN = nil
-                    s.dodging = false
-                    s.blocked, s.blockedNotified = false, false
-                    s.clearStreak = 0
-                    s.planMode = "thread"
-                    local playerObj = getSpecificPlayer(playerNum)
-                    if playerObj then haloGood(playerObj, KEY_THREAD) end
-                    diagEvent(s, playerNum, "thread", {
-                        phase = "commit", s = sFrom, d = lS1, nodes = n,
-                        extra = minExtra, slope = maxSlope, cap = cap, need = need,
-                        why = pass == 1 and "cruise" or "squeeze" })
-                    if getDebug() then
-                        print(string.format(
-                            "%spn=%d thread commit pass=%d nodes=%d s=%.1f..%.1f extra=%.2f slope=%.2f cap=%.0f",
-                            LOG, playerNum, pass, n, sFrom, lS1, minExtra, maxSlope, cap))
-                    end
-                    return true
-                elseif getDebug() then
-                    print(string.format("%spn=%d thread pass=%d nodes=%d sweep rejected",
-                        LOG, playerNum, pass, n))
-                end
-            elseif getDebug() then
-                print(string.format("%spn=%d thread pass=%d line %s unloaded=%s",
-                    LOG, playerNum, pass, tostring(reason), tostring(unloaded)))
-            end
-        elseif getDebug() then
-            print(string.format("%spn=%d thread pass=%d no path (%s)", LOG, playerNum, pass, tostring(why)))
-        end
-    end
-    s.threadNextMs = now + TUNE.THREAD_RETRY_MS
-    diagEvent(s, playerNum, "thread", {
-        phase = "fail", s = sFrom, d = sTo, why = lastWhy, nodes = lastN })
     return false
 end
 
@@ -3528,47 +3382,6 @@ local function replan(s, vehicle, playerNum)
             -- 必須分得開——同樣是 dodging，guard-blocked 那幀是煞停的起因。
             s.planMode = s.blocked and "guard-blocked" or "guard"
             return
-        end
-    end
-    -- ===== 蛇行承諾（exactLine）：與 dodge 同樣不可變，只做守護 =====
-    if s.threading then
-        local fs = s.fstate
-        if fs.exactLine ~= true or s.lastSNow >= s.threadDoneS then
-            MDADFollower.clearOffset(fs)
-            releaseThread(s)
-            s.planMode = "thread-done"
-            diagEvent(s, playerNum, "thread", { phase = "done", s = s.lastSNow })
-            if getDebug() then print(LOG .. "pn=" .. playerNum .. " thread released (line done)") end
-            -- fall through：本輪照常規劃
-        else
-            if s.threadGuardHardN == nil then s.threadGuardHardN = sen.hardN end
-            local worldGrew = sen.hardN > s.threadGuardHardN + 2
-            if sen.movingVeh or worldGrew then
-                s.threadGuardHardN = sen.hardN
-                local guardOk = sweepLine(s, fs.ovX, fs.ovY, fs.ovN, fs.ovS0, fs.ovEndS,
-                    s.threadStartS, s.threadStartS, fs.ovEndS, fs.ovEndS, 0,
-                    "thread-guard", s.threadNeed)
-                if not guardOk then
-                    guardOk = sweepLine(s, fs.ovX, fs.ovY, fs.ovN, fs.ovS0, fs.ovEndS,
-                        s.threadStartS, s.threadStartS, fs.ovEndS, fs.ovEndS, 0,
-                        "thread-guard-probe", MDADVehicleProfile.sweepBase(
-                            s.vehicleProfile.halfW, "physical"))
-                end
-                if not guardOk then
-                    -- 世界變了且物理檔也過不去：釋放承諾、交回本輪常規規劃
-                    -- （多半 blocked 煞停；車還在動時 exactLine 由 blocked 分支近停後清）
-                    releaseThread(s)
-                    s.planMode = "thread-fail"
-                    diagEvent(s, playerNum, "thread", { phase = "fail", s = s.lastSNow, why = "guard" })
-                    if getDebug() then print(LOG .. "pn=" .. playerNum .. " thread guard failed") end
-                else
-                    s.planMode = "thread"
-                    return
-                end
-            else
-                s.planMode = "thread"
-                return
-            end
         end
     end
     -- BLOCKED_CORNER latch：障礙仍在且**車沒移動**時不重跑候選鏈——原地
@@ -4063,12 +3876,6 @@ local function replan(s, vehicle, playerNum)
         return
     end
     s.clearStreak = 0
-    -- 車陣蛇行：候選鏈全 blocked、無承諾持有者、車身尚未接觸時，試一次折線穿越
-    -- （無路走 THREAD_RETRY_MS 冷卻）。承諾成功＝本輪結束；失敗照常 blocked 停等。
-    if mode == "blocked" and not s.currentBlocked and profileOwner(s) == "free"
-            and MDAD.sandbox("ObstaclePolicy", POLICY_DODGE) == POLICY_DODGE then
-        if tryThread(s, vehicle, playerNum, a, d, getTimestampMs()) then return end
-    end
     -- blocked：清側偏、漸進接近後煞停等待（掃描持續，障礙消失自動恢復；玩家接手
     -- 走讓位）。停等判距以「車到群最近 hard 點的世界距離」為權威（blockedNear；
     -- 投影弧長在繞遠／橫偏時虛高——s045 弧長差 1m/世界 18m）：>BLOCK_STOP_DIST
@@ -4076,7 +3883,6 @@ local function replan(s, vehicle, playerNum)
     MDADFollower.clearOffset(s.fstate)
     s.dodging = false
     s.dodgeNotified = false
-    releaseThread(s)
     s.blocked = true
     -- a＝Corridor blocked 時的 sObs0；缺 Corridor 的保守分支沒有 a → 0＝立即煞停
     s.blockS = a or 0
@@ -4378,7 +4184,7 @@ local function stepFollow(s, vehicle, playerNum, now)
         local latDev = latSigned - expL
         s.diagExpL, s.diagLatDev = expL, latDev
         s.lastLatDev, s.lastHeadingError = latDev, headingError or 0
-        s.lastLatSigned = latSigned -- replan（thread 起點 lane）用
+        s.lastLatSigned = latSigned
         local available = 2
         if finite(s.currentSegWidth) and s.currentSegWidth > 0 then
             -- 路面邊緣餘裕與障礙淨距是不同概念（前者是「不要壓到路肩」），
@@ -4406,7 +4212,7 @@ local function stepFollow(s, vehicle, playerNum, now)
         if routeErr > math.pi then routeErr = routeErr - 2 * math.pi
         elseif routeErr < -math.pi then routeErr = routeErr + 2 * math.pi end
         if routeErr < 0 then routeErr = -routeErr end
-        if not s.returnActive and not s.threading and absDev > available
+        if not s.returnActive and absDev > available
                 and absDev <= TUNE.RETURN_MAX_DEV
                 and s.fstate.rotating ~= true
                 -- 脫困冷卻（2026-09-01 telemetry s046：pm=guard 230 筆——unstick
@@ -4477,19 +4283,30 @@ local function stepFollow(s, vehicle, playerNum, now)
                 if nb > TUNE.BIAS_MAX then nb = TUNE.BIAS_MAX
                 elseif nb < -TUNE.BIAS_MAX then nb = -TUNE.BIAS_MAX end
                 -- 枚舉的邊界判定跟著抖。承諾釋放後恢復跟隨。
-                if s.dodging or s.threading or s.returnActive then nb = laneBiasOf(s) end
+                if s.dodging or s.returnActive then nb = laneBiasOf(s) end
                 MDADFollower.setLaneBias(s.fstate, nb)
                 s.verifyLineN = 0
                 s.laneCurveEnvelope, s.laneCurveStamp,
                     s.laneCurveS0, s.laneCurveEnd,
                     s.envelopeBuildLat, s.envelopeBuildCoast,
                     s.laneEnvelopeScale = 0, -1, 0, 0, -1, -1, 1
-                s.sensor.scanBias = nb -- 掃描帶跟隨行駛線（下一輪 beginRound 鎖定）
+                -- RETURN 活躍時掃描帶錨在「現位置↔目標 lane」的中點，不得跟著 fstate
+                -- 的 laneBias 走（2026-09-02 session-006 定罪：commit 把 laneBias 設成
+                -- 目標 1.5 → 下一輪帶心 +1.5，回線起點 −4 落在帶外 → 守護判 band/
+                -- unloaded → hold（帶心回 −1.25）→ 再 commit → 週期 3 輪的 commit↔hold
+                -- 震盪，每次 hold 都把速度命令歸零，車 31 秒原地 0 km/h、路線畫面一直跳）。
+                -- updateReturnSnapshot 的 commit／hold 分支各自寫的也是這個中點；
+                -- 守護通過提早 return 的那條路徑沒寫，帶心就被這行的 nb 帶走。
+                if s.returnActive then
+                    s.sensor.scanBias = returnScanBias(s, latSigned)
+                else
+                    s.sensor.scanBias = nb -- 掃描帶跟隨行駛線（下一輪 beginRound 鎖定）
+                end
                 -- Current-body OBB is a safety OR-gate in front of the existing planner.
                 -- It consumes this completed immutable snapshot even when sig is unchanged.
                 footprintSnapshot(s, vehicle, playerNum, fwd, heading, vx, vy, latSigned)
                 updateReturnSnapshot(s, vehicle, playerNum, latSigned)
-                if s.sensor.sig ~= s.planSig or s.clearStreak > 0 or s.dodging or s.threading then
+                if s.sensor.sig ~= s.planSig or s.clearStreak > 0 or s.dodging then
                     s.planSig = s.sensor.sig
                     replan(s, vehicle, playerNum)
                     if s.currentBlocked then s.planMode = "current-blocked" end
@@ -4527,23 +4344,6 @@ local function stepFollow(s, vehicle, playerNum, now)
                 -- 剛脫困退開的 3 公尺一半就被吃回去（M4 review blocker）
                 cap = TUNE.UNLOADED_CAP
                 capReason = "sensor"
-            end
-            if s.threading then
-                if s.lastSNow >= s.threadDoneS or s.fstate.exactLine ~= true then
-                    MDADFollower.clearOffset(s.fstate)
-                    releaseThread(s)
-                    if getDebug() then
-                        print(LOG .. "pn=" .. playerNum .. " thread released (line done)")
-                    end
-                else
-                    local tcap = s.threadCap
-                    if not finite(tcap) or tcap < 0 then tcap = 0 end
-                    s.lastDcap = tcap
-                    if cap < 0 or tcap < cap then
-                        cap = tcap
-                        capReason = "thread"
-                    end
-                end
             end
             if s.dodging then
                 -- Motion completion releases the immutable line; layout signatures do not.
@@ -4847,7 +4647,7 @@ local function stepFollow(s, vehicle, playerNum, now)
             -- （收成同式會吃掉 dodge/return 讓位）。
             obbClear = ((not s.adaptive or s.verifySweep
                     or s.curveVerifiedUntilS >= stopEnd)
-                or s.dodging or s.threading or s.returnActive) and not s.currentBlocked
+                or s.dodging or s.returnActive) and not s.currentBlocked
         end
         if not finite(visibilityCap) or visibilityCap < 0 then
             visibilityCap = 0
@@ -4902,7 +4702,7 @@ local function stepFollow(s, vehicle, playerNum, now)
         -- 這些狀態各有自己的 cap 體系（dodgeSpeedCap／RETURN_CAP／blocked 0）。
         local nearUnknown = (proofReason == "sweep" or proofReason == "unloaded")
             and not pathVerified
-            and not s.dodging and not s.threading and not s.returnActive and not s.blocked
+            and not s.dodging and not s.returnActive and not s.blocked
         s.fullGate, s.gateReason = MDADDynamics.fullSpeedGate(
             sensorReady, fresh, brakeLoaded, corridorClear, obbClear,
             fullValid and controlStateOf(s) == "TRACK",
@@ -5396,7 +5196,7 @@ local function stepFollow(s, vehicle, playerNum, now)
             s.lastCapReason = "blocked"
             -- immutable DODGE 的守護驗證失敗會帶著剖面轉 blocked（車在動時清
             -- 剖面＝目標線瞬跳）：近停後才清承諾，之後停等重提案照常
-            if ((s.dodging and not s.dodgeCapPending) or s.threading)
+            if s.dodging and not s.dodgeCapPending
                     and speedKmh < 1 and speedKmh > -1 then
                 MDADFollower.clearOffset(s.fstate)
                 releaseDodge(s)
@@ -5469,7 +5269,7 @@ local function stepFollow(s, vehicle, playerNum, now)
                     -- 正好在最需要推力的場景把 assist 整個切斷＝卡住的來源。
                     -- 這三種情境把上限放寬到 2×，並讓 ratio 吃越野補償。
                     -- forceBrakeUntil 期間仍一律不 assist（安全紅線不動）。
-                    local rough = s.dodging == true or s.threading == true or s.returnActive == true
+                    local rough = s.dodging == true or s.returnActive == true
                         or s.physicalOffroad == true
                     local assistErrMax = TUNE.ASSIST_MAX_ERR_RAD
                     if rough then assistErrMax = assistErrMax * 2 end
@@ -5502,7 +5302,7 @@ local function stepFollow(s, vehicle, playerNum, now)
         if s.diag then
             -- 新 Java getter 只在這一幀確定會 enqueue sample 時才跑；
             -- shouldSample 與 D.sample 共用同一 5/10Hz gate。
-            local critFlag = s.blocked or s.currentBlocked or s.dodging or s.threading or s.returnActive
+            local critFlag = s.blocked or s.currentBlocked or s.dodging or s.returnActive
                 or s.progressState == "gear-reset" or s.recoverWhy ~= nil
             local want = true
             local failed = false
@@ -5536,7 +5336,7 @@ local function stepFollow(s, vehicle, playerNum, now)
                     Drive.getGear(playerNum), regOn, s.sensor, critFlag,
                     s.planMode, s.lastSNow, s.blockS, s.dodgeMargin, s.dodgeNeed,
                     s.roadBias, s.blockHitX, s.blockHitY, s.fstate.idx,
-                    s.blocked or s.currentBlocked, s.dodging or s.threading, s.returnActive,
+                    s.blocked or s.currentBlocked, s.dodging, s.returnActive,
                     s.cornerLatch, s.lastCoupled, phys,
                     s.targetGen, s.routeGen, s.episodeId, s.progressState,
                     s.episodeAttempts, s.pushBanL ~= nil and s.pushBanL or false,

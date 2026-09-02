@@ -3425,7 +3425,6 @@ local DKEY = {
     BLOCKED = "UI_MinidoracatAutoDrive_Blocked",
     RESUME = "UI_MinidoracatAutoDrive_Resume",
     DODGE = "UI_MinidoracatAutoDrive_Dodge",
-    THREAD = "UI_MinidoracatAutoDrive_Thread",
 }
 
 -- 取第 i 則提示的翻譯鍵並登記（登記過的鍵由最後一個情境逐一驗四語翻譯）
@@ -5444,10 +5443,7 @@ do
     MDADFollower.buildOffsetLine = realBuild
     MDADFollower.setOffset = realSetOffset
     checkEq(commits, 0, "baseline 實碰撞：不得 commit 繞行剖面")
-    -- 2026-09-02 起 blocked 之後還有蛇行第二層（獨立建線、獨立掃掠）：這裡的
-    -- 契約是「壞掉的繞行線不得 commit」，結局可以是 blocked 或蛇行承諾，不得是 dodge
-    checkTrue(haloKey() == DKEY.BLOCKED or haloKey() == DKEY.THREAD,
-        "baseline 實碰撞：分類 blocked 或蛇行（實得 " .. tostring(haloKey()) .. "）")
+    checkEq(haloKey(), DKEY.BLOCKED, "baseline 實碰撞：分類 blocked")
     drive.clearCell(20, 0)
     drive.clearCell(4, 1)
 end
@@ -5476,10 +5472,7 @@ do
     MDADFollower.buildOffsetLine = realBuild
     MDADFollower.setOffset = realSetOffset
     checkEq(commits, 0, "exit 實碰撞：不得 commit 繞行剖面")
-    -- 2026-09-02 起 blocked 之後還有蛇行第二層（獨立建線、獨立掃掠）：這裡的
-    -- 契約是「壞掉的繞行線不得 commit」，結局可以是 blocked 或蛇行承諾，不得是 dodge
-    checkTrue(haloKey() == DKEY.BLOCKED or haloKey() == DKEY.THREAD,
-        "exit 實碰撞：分類 blocked 或蛇行（實得 " .. tostring(haloKey()) .. "）")
+    checkEq(haloKey(), DKEY.BLOCKED, "exit 實碰撞：分類 blocked")
     drive.clearCell(20, 0)
     drive.clearCell(25, -2)
 end
@@ -6888,156 +6881,6 @@ local function scenarioDetour()
 end
 scenarioDetour()
 
--- (c6) 車陣蛇行（2026-09-02 使用者「這麼多車沒辦法掃出一個地方鑽嗎」）：兩台
---      錯落拋錨車各占半條路（A 在左 l[-5,-1)、B 在右 l[1,5)，車距 8m），單次
---      側偏回不了基準線（回線落進 B 的車身 s 窗、掃掠必否決）→ 候選鏈全 blocked
---      → Corridor.thread 折線（右過 A、左過 B）→ 世界掃掠 → setExactLine 承諾。
---      契約：綠字 Thread、exactLine 承諾、速度帽 ≤ THREAD_CAP_MAX、沿線前進期間
---      承諾不變（sig 每輪變也不重規劃）、走到末節點釋放、之後常規 clear。
-local function scenarioThread()
-    checkTrue(armDrive(), "(c6) 啟動")
-    local function putCar(x0, y0)
-        for x = x0, x0 + 3 do
-            for y = y0, y0 + 3 do drive.putSolid(x, y, "harness_jam_" .. x .. "_" .. y) end
-        end
-    end
-    local function clearCar(x0, y0)
-        for x = x0, x0 + 3 do
-            for y = y0, y0 + 3 do drive.clearCell(x, y) end
-        end
-    end
-    putCar(12, -5)   -- A：l -4.5..-1.5
-    putCar(24, 1)    -- B：l  1.5..4.5
-    for x = 6, 40 do
-        drive.putSolid(x, -7, "harness_jam_fence_l" .. x) -- l -6.5
-        drive.putSolid(x, 6, "harness_jam_fence_r" .. x)  -- l  6.5
-    end
-    local captured = nil
-    local realOverlayUpdate = MDADOverlay.update
-    MDADOverlay.update = function(pn, st, ...)
-        if pn == 0 then captured = st end
-        return realOverlayUpdate(pn, st, ...)
-    end
-    driveReset(dveh)
-    drive.scanRound()
-    MDADOverlay.update = realOverlayUpdate
-    checkTrue(captured ~= nil, "(c6) session 捕獲")
-    checkEq(haloKey(), DKEY.THREAD, "(c6) 錯落車陣：綠字 Thread（實得 " .. tostring(haloKey()) .. "）")
-    checkTrue(captured and captured.threading == true, "(c6) threading 承諾旗標")
-    checkTrue(captured and captured.fstate.exactLine == true, "(c6) 承諾為 exactLine")
-    checkTrue(captured and captured.threadN >= 4, "(c6) 折線至少 4 節點（實得 " .. tostring(captured and captured.threadN) .. "）")
-    checkTrue(captured and not captured.dodging and not captured.blocked, "(c6) 蛇行時不是 dodge 也不是 blocked")
-    -- 折線幾何：A（s 12..16）右過＝lane > 0；B（s 24..28）左過＝lane < 0
-    local function laneAt(st, sq)
-        for k = 1, st.threadN - 1 do
-            if sq >= st.threadS[k] and sq <= st.threadS[k + 1] then
-                local t = (sq - st.threadS[k]) / (st.threadS[k + 1] - st.threadS[k])
-                return st.threadL[k] + (st.threadL[k + 1] - st.threadL[k]) * t
-            end
-        end
-        return st.threadL[st.threadN]
-    end
-    if captured and captured.threadN >= 2 then
-        checkTrue(laneAt(captured, 14) > 0, "(c6) A 從右邊過（lane " .. tostring(laneAt(captured, 14)) .. "）")
-        checkTrue(laneAt(captured, 26) < 0, "(c6) B 從左邊過（lane " .. tostring(laneAt(captured, 26)) .. "）")
-    end
-    -- 速度帽：爬行檔（供油但不超過 THREAD_CAP_MAX）
-    driveReset(dveh)
-    driveTick(dp, dveh)
-    checkTrue(drive.calls.maxRegSpeed > 0 and drive.calls.maxRegSpeed <= 18,
-        "(c6) 蛇行速度帽 ≤ 18（實得 " .. tostring(drive.calls.maxRegSpeed) .. "）")
-    -- 沿承諾線前進：每一步把車擺到線上的取樣點（heading 沿線），承諾不得中途釋放
-    local fs = captured.fstate
-    local ovN, ovX, ovY = fs.ovN, fs.ovX, fs.ovY
-    local released = false
-    local sig0 = drive.nav.route
-    for k = 2, ovN - 2, 4 do
-        local fx, fy = ovX[k + 1] - ovX[k], ovY[k + 1] - ovY[k]
-        dveh._x, dveh._y, dveh._speed = ovX[k], ovY[k], 10
-        setHeading(dveh, math.atan(fy, fx))
-        driveTick(dp, dveh)
-        drive.scanRound(true)
-        if not captured.threading and captured.lastSNow < captured.threadDoneS - 1 then released = true end
-    end
-    checkFalse(released, "(c6) 沿線前進期間承諾不中途釋放（掃描簽章每輪變也不重規劃）")
-    -- 走到末節點之後：釋放、回常規 clear（車已越過車陣）
-    dveh._x, dveh._y, dveh._speed = ovX[ovN], ovY[ovN], 10
-    setHeading(dveh, 0)
-    driveTick(dp, dveh)
-    drive.scanRound(true)
-    checkFalse(captured.threading, "(c6) 越過末節點釋放蛇行承諾")
-    checkTrue(MDAD.Drive.isActive(0), "(c6) 釋放後 session 存活")
-    checkTrue(captured.fstate.exactLine ~= true, "(c6) 釋放後 exactLine 清空")
-    clearCar(12, -5)
-    clearCar(24, 1)
-    for x = 6, 40 do drive.clearCell(x, -7); drive.clearCell(x, 6) end
-    MDAD.Drive.stop(0, nil)
-
-    -- 反面：DP 只看 sTo（群尾＋EXIT）以內的點；尾段之外的整寬牆 DP 看不到、
-    -- 世界掃掠（覆蓋到 lineEnd＋車身）看得到 → 提案必須被否決、不得承諾。
-    -- 這是「掃掠是唯一否決權」的違規證明錨點：拿掉 tryThread 的 sweepLine 就紅。
-    checkTrue(armDrive(), "(c6c) 啟動")
-    putCar(12, -5)
-    putCar(24, 1)
-    for x = 6, 46 do
-        drive.putSolid(x, -7, "harness_jam_fence_l" .. x)
-        drive.putSolid(x, 6, "harness_jam_fence_r" .. x)
-    end
-    for y = -6, 5 do drive.putSolid(36, y, "harness_jam_tailwall_" .. y) end
-    driveReset(dveh)
-    drive.scanRound()
-    checkEq(haloKey(), DKEY.BLOCKED, "(c6c) 尾段有牆：DP 提案被世界掃掠否決、不得承諾（實得 " .. tostring(haloKey()) .. "）")
-    clearCar(12, -5)
-    clearCar(24, 1)
-    for x = 6, 46 do drive.clearCell(x, -7); drive.clearCell(x, 6) end
-    for y = -6, 5 do drive.clearCell(36, y) end
-    MDAD.Drive.stop(0, nil)
-
-    -- 反面：整寬牆＝無折線（thread 不得憑空造縫），仍 blocked
-    checkTrue(armDrive(), "(c6b) 啟動")
-    for y = -6, 5 do drive.putSolid(20, y, "harness_jam_wall_" .. y) end
-    driveReset(dveh)
-    drive.scanRound()
-    checkEq(haloKey(), DKEY.BLOCKED, "(c6b) 整寬牆：無折線、仍 blocked")
-    for y = -6, 5 do drive.clearCell(20, y) end
-    MDAD.Drive.stop(0, nil)
-
-    -- (c6d) 遠視界（2026-09-02：折線終點＝掃描帶內最遠擋線點＋EXIT，不再是第一群
-    -- 出口）不得越過已載入區：x≥38 未載入（getGridSquare 回 nil），B 車尾 27.5＋EXIT 8
-    -- ＝35.5→末節點 36＋tail 3.2＝39.2 > 38 ⇒ 整條線 unloaded＝失敗。契約：sTo 先鉗到
-    -- 載入端−tail−一欄，仍能承諾、且 threadEndS 落在載入端之內（違規證明：拿掉鉗＝紅）。
-    checkTrue(armDrive(), "(c6d) 啟動")
-    putCar(12, -5)
-    putCar(24, 1)
-    for x = 6, 37 do
-        drive.putSolid(x, -7, "harness_jam_fence_l" .. x)
-        drive.putSolid(x, 6, "harness_jam_fence_r" .. x)
-    end
-    for x = 38, 70 do
-        for y = -7, 7 do drive.world[x * 100000 + y] = nil end
-    end
-    local cap6d = nil
-    local realOv6d = MDADOverlay.update
-    MDADOverlay.update = function(pn, st, ...)
-        if pn == 0 then cap6d = st end
-        return realOv6d(pn, st, ...)
-    end
-    driveReset(dveh)
-    drive.scanRound()
-    MDADOverlay.update = realOv6d
-    checkEq(haloKey(), DKEY.THREAD, "(c6d) 載入端 38 之前仍能蛇行承諾（實得 " .. tostring(haloKey()) .. "）")
-    checkTrue(cap6d and cap6d.threading == true and type(cap6d.threadEndS) == "number" and cap6d.threadEndS < 38,
-        "(c6d) 承諾線尾在載入端之內（threadEndS=" .. tostring(cap6d and cap6d.threadEndS) .. "）")
-    checkTrue(cap6d and type(cap6d.threadEndS) == "number" and cap6d.threadEndS > 30,
-        "(c6d) 線尾仍越過 B 車（27.5＋車身），不是退化成極短承諾（threadEndS=" .. tostring(cap6d and cap6d.threadEndS) .. "）")
-    clearCar(12, -5)
-    clearCar(24, 1)
-    for x = 6, 37 do drive.clearCell(x, -7); drive.clearCell(x, 6) end
-    drive.fillWorld(-2, 70, -7, 7)
-    MDAD.Drive.stop(0, nil)
-end
-scenarioThread()
-
 -- (c7) 車輛精確輪廓（2026-09-02 Dixie 車陣實爆）：兩台 1.8m 寬的車並排、真縫 2.8m
 --      （車寬 1.8＋兩側各 0.3 餘裕＝2.4 可過）。格級佔位把每台膨脹成 3 格＋0.7 圓，
 --      縫剩 0.2m＝永遠 blocked；改用 OBB 周長點（r=0.3）後 plan 必須提得出縫。
@@ -7185,14 +7028,14 @@ local function scenarioOutline()
     drive.scanRound()
     checkEq(haloKey(), DKEY.DODGE, "(c7e) 同一縫、出口後淨空：貼縫照過（實得 " .. tostring(haloKey()) .. "）")
     MDAD.Drive.stop(0, nil)
-    -- (c7f) 出口後有擋線點但**整段可走**（單台側停車、另一側淨空）：oracle 是 DP 不是
-    -- 「出口後有障礙就拒」——否則路肩每 20m 一台廢車的公路全部退化成 blocked
-    -- （違規證明：把 crawlDeadEnd 改成「有擋線點即死路」，本案紅）。
+    -- (c7f) 出口後仍有擋線點（單台側停車）＝多重障礙：使用者裁定「複雜的障礙人工處理」
+    -- （2026-09-02，車陣蛇行 DP 與死路 oracle 一併退役）——貼縫不鑽，blocked 交給
+    -- 改道／交還；cruise 檔的單次繞行不受此規則影響。
     checkTrue(armDrive(), "(c7f) 啟動")
-    local _, cD3 = drive.putVehicleGeom(46, -1.6, 0, 1.8, 4.4, true) -- 邊緣 l=-0.7：擋線，但右側整段可走
+    local _, cD3 = drive.putVehicleGeom(46, -1.6, 0, 1.8, 4.4, true) -- 邊緣 l=-0.7：擋線
     driveReset(dveh)
     drive.scanRound()
-    checkEq(haloKey(), DKEY.DODGE, "(c7f) 出口後單台側停車、整段可蛇行：貼縫照過（實得 " .. tostring(haloKey()) .. "）")
+    checkEq(haloKey(), DKEY.BLOCKED, "(c7f) 出口後仍有擋線點：貼縫不鑽、blocked（實得 " .. tostring(haloKey()) .. "）")
     drive.clearVehicleGeom(cD3)
     drive.clearVehicleGeom(cD1)
     drive.clearVehicleGeom(cD2)
@@ -9144,6 +8987,53 @@ local function scenarioPhaseE()
         "v3 current surface is explicit unknown")
     checkFalse(captured.returnActive, "v3 unknown never RETURNs from physical offroad alone")
 
+    -- （帶錨 fixture 需要 v4 route＋路面帶，與下方 exact-line fixture 同一世界）
+    MDAD.Drive.stop(0, nil)
+    installNavApi(4)
+    drive.nav.route = v4Route("paved", 10)
+    hotVeh._offroad = false
+    drive.fillWorld(-10, 170, -15, 15)
+    drive.putRoad(-10, 170, -15, 15)
+    -- 掃描帶錨定（2026-09-02 session-006 定罪：車在線外 4m 啟動，RETURN commit 把
+    -- fstate.laneBias 設成目標 lane → 下一輪帶心跟著跑到目標 → 回線起點落在帶外 →
+    -- 守護 band/unloaded → hold（帶心回中點）→ 再 commit … 週期 3 輪，每次 hold 把
+    -- 速度命令歸零，車 31 秒 0 km/h、路線畫面一直跳）。契約：RETURN 活躍期間帶心
+    -- ＝(起點 lane＋目標 lane)/2 且**連續多輪不進 hold**（違規證明：帶心跟 nb 走即紅）。
+    do
+        -- 與 session-006 同幾何：起點 lane −4、目標 lane +1.5（RightLaneBias），跨距 5.5
+        local speedWas6 = hotVeh._speed
+        setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
+            AutoDriveMaxSpeed = 40, ObstaclePolicy = 1, RightLaneBias = 1.5 })
+        hotVeh._x, hotVeh._y, hotVeh._speed = 0, -4, 0
+        setHeading(hotVeh, 0)
+        driveReset(hotVeh)
+        checkTrue(MDAD.Drive.start(dp), "RETURN 帶錨 fixture：線外 4m、目標 lane +1.5 啟動")
+        for _ = 1, 4 do driveTick(dp, hotVeh) end
+        drive.scanRound(true) -- 綁定 captured 到新 session（overlay 只在掃描輪完成時綁）
+        captured.sensor.aheadM = 80 -- 斜線（跨距 5.5 → 22m＋前視尾段 ~27m）要塞得進掃描帶
+        drive.scanRound(true)
+        checkTrue(captured.returnActive and captured.fstate.exactLine == true
+                and not captured.returnCrawlExact,
+            "RETURN 帶錨：首輪即 commit 整條斜線（實得 active=" .. tostring(captured.returnActive)
+            .. " exact=" .. tostring(captured.fstate.exactLine) .. " crawl=" .. tostring(captured.returnCrawlExact) .. "）")
+        local mid = (captured.returnLaneStart + captured.returnLaneTarget) * 0.5
+        local holds, biasDrift = 0, 0
+        for _ = 1, 6 do
+            drive.scanRound(true)
+            if captured.returnHold or captured.fstate.exactLine ~= true or captured.returnCrawlExact then
+                holds = holds + 1
+            end
+            local b = captured.sensor.scanBias
+            if type(b) ~= "number" or math.abs(b - mid) > 0.5 then biasDrift = biasDrift + 1 end
+        end
+        checkEq(holds, 0, "RETURN 帶錨：連續 6 輪整條斜線守護通過、不進 hold／爬行（實得 " .. holds .. " 輪）")
+        checkEq(biasDrift, 0, "RETURN 帶錨：帶心每輪都在起點↔目標中點（漂移 " .. biasDrift .. " 輪）")
+        MDAD.Drive.stop(0, nil)
+        setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
+            AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+        hotVeh._speed = speedWas6 -- 下方 exact-line fixture 的 stall 判定靠這個速度（靜止會觸發 RETURN_STALL 釋放）
+    end
+
     MDAD.Drive.stop(0, nil)
     installNavApi(4)
     drive.nav.route = v4Route("paved", 10)
@@ -9279,12 +9169,15 @@ local function scenarioPhaseE()
             and drive.calls.maxRegSpeed <= TUNE_RETURN_UNSAFE_CAP_TEST,
         "delta7 streaming crawl ramps smoothly within the unsafe-return crawl cap")
     captured.sensor.aheadM = 80
-    drive.scanRound(true)
-    checkTrue(captured.returnHold and not captured.fstate.exactLine,
-        "full transition waits for a fresh midpoint band after crawl")
+    -- 2026-09-02 起 RETURN 期間帶心固定在起點↔目標中點（returnScanBias，跨距 7 塞得進
+    -- 走廊）：爬行線與斜線同一個帶都看得到，覆蓋一前伸就直接換成整條斜線，不再多等
+    -- 一輪「fresh midpoint band」（舊制帶在現 lane 與中點之間切換＝session-006 的震盪源）。
     drive.scanRound(true)
     checkTrue(captured.fstate.exactLine and not captured.returnCrawlExact,
-        "fresh midpoint band plus expanded coverage commits the full exact line")
+        "expanded coverage commits the full exact line on the same midpoint band")
+    drive.scanRound(true)
+    checkTrue(captured.fstate.exactLine and not captured.returnCrawlExact and not captured.returnHold,
+        "full exact line is stable on the following round（無 commit↔hold 震盪）")
     MDAD.Drive.stop(0, nil)
     setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
         AutoDriveMaxSpeed = 40, ObstaclePolicy = 1, RightLaneBias = 0 })

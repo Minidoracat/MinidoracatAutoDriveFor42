@@ -115,7 +115,7 @@ local OBS_SMALL_R = 0.30       -- 小物半徑（2026-09-01 telemetry s016：blo
                                -- 差 5-10cm 打槍「明明有空間」的縫；0.30 仍蓋
                                -- 桿柱實體，量化肥邊另由 SWEEP_QUANT_COMP 補）
 -- 車輛精確輪廓（2026-09-02 車陣實爆：格級佔位把 1.8m 寬的車體膨脹成 3 格＋0.7
--- 圓＝4.4m，兩台車之間 2.8m 的真縫被吃到 0.2m，plan／thread 永遠 blocked）。發現
+-- 圓＝4.4m，兩台車之間 2.8m 的真縫被吃到 0.2m，plan 永遠 blocked）。發現
 -- 車輛仍靠 getVehicleContainer 的格級幾何查詢（可靠），幾何改用該車的 OBB：四角
 -- 走 getWorldPos(com.x±halfW, 0, com.z±halfL)——與引擎自己的碰撞多邊形同式
 -- （VehiclePoly.java:52-88；isIntersectingSquare 用 radius 0 的 poly，BaseVehicle.java:
@@ -319,7 +319,7 @@ end
 -- 車輛精確輪廓（常數註解見 VEH_OUTLINE_*）。回 true＝已把該車輪廓推進本輪點雲；
 -- false＝任何 getter 失敗（呼叫端退回格級佔位）。(s,l) 以**目前掃描步的局部框**
 -- 線性化（state.cx/cy 為路線點、nx/ny 法向、前向＝(ny,-nx)）：輪廓點離命中格
--- ≤ 5m，直路精確、彎道有曲率誤差——只影響 plan／thread 的提案品質；安全判定
+-- ≤ 5m，直路精確、彎道有曲率誤差——只影響 plan 的提案品質；安全判定
 -- （sweep／footprint／blockedNear）全用世界座標 wHardX/Y，不受影響。
 -- 零配置：一顆池向量四角各取一次，成對歸還（BaseVehicle.java:507-521）。
 local function pushVehicleOutline(state, cv)

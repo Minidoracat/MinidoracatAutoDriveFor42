@@ -26,7 +26,6 @@
     "UI_MinidoracatAutoDrive_Unstick": "車両がスタックしました。バックで脱出を試みます……",
     "UI_MinidoracatAutoDrive_Resume": "オートドライブが運転を再開します。",
     "UI_MinidoracatAutoDrive_Dodge": "前方に障害物を検知。減速して回避します。",
-    "UI_MinidoracatAutoDrive_Thread": "隙間を見つけました。低速で車列を縫って進みます。",
     "UI_MinidoracatAutoDrive_GearSlice": "運転モード切替：%1",
     "UI_MinidoracatAutoDrive_GearChill": "のんびり（30 km/h）",
     "UI_MinidoracatAutoDrive_GearStandard": "標準（50 km/h）",
