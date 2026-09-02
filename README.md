@@ -37,6 +37,12 @@ Project Zomboid Build 42 MOD。
 | ![自動駕駛 HUD 與導航路線](docs/screenshots/01-autodrive-hud-route.png) | ![路口跟線與小地圖同步](docs/screenshots/02-autodrive-route-intersection.png) |
 | 沙盒設定 | GPS／自動駕駛道具 |
 | ![AutoDrive 沙盒設定](docs/screenshots/03-autodrive-sandbox-settings.png) | ![GPS 導航儀與自動駕駛模組](docs/screenshots/04-autodrive-items.png) |
+| HUD 主題：金屬擬物 | HUD 主題：簡約玻璃 |
+| ![HUD 金屬擬物主題](docs/screenshots/05-hud-theme-metal.png) | ![HUD 簡約玻璃主題](docs/screenshots/06-hud-theme-glass.png) |
+| HUD 主題：家族卡片 | HUD 主題：側掛雙翼 |
+| ![HUD 家族卡片主題](docs/screenshots/07-hud-theme-family.png) | ![HUD 側掛雙翼主題](docs/screenshots/08-hud-theme-wings.png) |
+| MiniMap 設定「自動駕駛」分類 | |
+| ![MiniMap 自動駕駛設定](docs/screenshots/09-minimap-autodrive-settings.png) | |
 
 ## 安裝
 
