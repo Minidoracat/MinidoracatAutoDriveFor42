@@ -837,7 +837,7 @@ do
     local work, outS, outL = threadWork()
     local count, why = C.thread(S, L, R, n, 1.1, 7, 4, 0, 40, 2.2, 0.9, 0, nil, nil, work, outS, outL, 32)
     checkEq(count, 0, "thread：整寬牆無路")
-    checkEq(why, "blocked", "thread：無路 why=blocked")
+    checkEq(why, "nopath", "thread：無路 why=nopath（三種失敗分辨：band／start／nopath）")
     -- 兩台車緊貼（s 相鄰、左右互換）：2m 內要橫移 4m＝斜率 2 > 0.5，不可行
     S, L, R, n = {}, {}, {}, 0
     n = addCar(S, L, R, n, 14, -6, 4, 6)   -- 占 l [-6, 0)
@@ -863,7 +863,10 @@ do
     S, L, R, n = {}, {}, {}, 0
     n = n + 1; S[n], L[n], R[n] = 5, 0, 0.7
     count, why = C.thread(S, L, R, n, 1.1, 7, 4, 0, 40, 2.2, 0.9, 0, nil, nil, work, outS, outL, 32)
-    checkEq(why, "blocked", "thread：起欄被擋回 blocked")
+    checkEq(why, "start", "thread：起欄被擋回 start（車已貼著障礙，不是沒路）")
+    -- band：走廊寬度扣掉需求後放不下一格 lane
+    count, why = C.thread(S, L, R, 0, 7.0, 7, 4, 0, 40, 2.2, 0.9, 0, nil, nil, work, outS, outL, 32)
+    checkEq(why, "band", "thread：需求吃掉整條走廊回 band")
 end
 
 scenario("thread：直行可過時折線不亂扭；草地是最後手段")

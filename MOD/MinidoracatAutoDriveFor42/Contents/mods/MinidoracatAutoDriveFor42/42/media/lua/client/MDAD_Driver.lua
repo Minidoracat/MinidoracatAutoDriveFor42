@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0902v"
+Drive.REV = "0902w"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -229,6 +229,9 @@ TUNE.DODGE_CLEARANCE_RESERVE = 0.15 -- 2026-09-01 三次去保守 0.3→0.15（�
                                    -- 縮放輸入，不是通行資格門檻；邊際縫的
                                    -- 速度由 clearanceCap 連續縮放即可）
 TUNE.DODGE_OV_SPAN = 93       -- OV_MAX=96，保留起點／d+1／防呆三格
+TUNE.APPROACH_BRAKE_FRAC = 0.7 -- 接近限速區用 safeBrake 的這個比例反推（同 laneCurveEnvelope
+                               -- 的 decel 基準；2026-09-02 s064：舊制用 safeCoast 0.6 純滑行
+                               -- ＝繞行縫還在 100m 外車就爬行）
 local CORNER_NEAR = 8          -- sweep 失敗點離折點多近算「折點衝突」（BLOCKED_CORNER 判定）
 local CORNER_RETRY_DIST = 3    -- corner latch 撤銷距離：漸進接近讓車前進這麼多＝
                                -- 幾何已變、重新枚舉——實測「靠很近開導航就能繞」
@@ -592,6 +595,7 @@ local function releaseDodge(s)
     s.dodgeVisibilityCap = 0
     s.dodgeSpaceCap = 0
     s.dodgeSpeedCap = 0
+    s.dodgeApproachCap = 0
     s.dodgeBaseCap = 0
     s.dodgeCapPending = false
     s.dodgeShiftLength = 0
@@ -1098,6 +1102,7 @@ local function startSession(playerObj, playerNum)
         recoverHit = "unknown",
         recoverDetail = nil,
         dodgeCrawl = false, -- 承諾剖面是 squeeze／physical／降檔（reserve 豁免＋intent CRAWL；速度仍連續縮放）
+        dodgeApproachCap = 0, -- 接近段 envelope（telemetry：分辨「遠壓速」vs「縫本身的帽」）
         dodgeMargin = 1,    -- commit 時 a..c 最小餘裕（entry／hold 速度縮放輸入）
         dodgeKappa = 0,
         dodgeClearance = 0,
@@ -1845,6 +1850,7 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     phys.dodgeSpaceCap = s.dodgeSpaceCap
     phys.dodgeBaseCap, phys.dodgeCapPending =
         s.dodgeBaseCap, s.dodgeCapPending
+    phys.dodgeApproachCap = s.dodgeApproachCap
     phys.dodgeDesignSpeed = s.dodgeDesignSpeed
     phys.dodgeSpeedCap = s.dodgeSpeedCap
     phys.dodgeClass = s.dodgeClass
@@ -3214,12 +3220,14 @@ local function tryThread(s, vehicle, playerNum, sObs0, sObs1, now)
     if s.pushBanL ~= nil then planN = planN + 1 end -- 推撞 ban 點已在尾格（replan 寫入）
     local probe = MDADVehicleProfile.clearanceBudget("probe")
     local baseL = laneBiasOf(s)
+    local lastWhy, lastN = "none", 0
     for pass = 1, 2 do
         local need = (pass == 1 and s.needHalf or s.squeezeNeed) + probe
         local n, why, minExtra, maxSlope = MDADCorridor.thread(
             sen.hardS, sen.hardL, sen.hardR, planN, need, MDADSensor.CORRIDOR_HALF,
             sFrom, laneFrom, sTo, halfL, s.vehicleProfile.halfW, baseL, sen.roadLo, sen.roadHi,
             s.threadWork, s.threadS, s.threadL, TUNE.THREAD_NODES_MAX)
+        lastWhy, lastN = why, n
         if n >= 2 then
             local ln, lS0, reason, lS1 = MDADFollower.buildThreadLine(
                 prof, sFrom, s.threadS, s.threadL, n, s.threadX, s.threadY, tail)
@@ -3270,7 +3278,8 @@ local function tryThread(s, vehicle, playerNum, sObs0, sObs1, now)
         end
     end
     s.threadNextMs = now + TUNE.THREAD_RETRY_MS
-    diagEvent(s, playerNum, "thread", { phase = "fail", s = sFrom, d = sTo })
+    diagEvent(s, playerNum, "thread", {
+        phase = "fail", s = sFrom, d = sTo, why = lastWhy, nodes = lastN })
     return false
 end
 
@@ -4474,19 +4483,26 @@ local function stepFollow(s, vehicle, playerNum, now)
                     local dcap = s.dodgeSpeedCap
                     if not finite(dcap) or dcap < 0 then dcap = 0 end
                     s.lastDcap = dcap
-                    local slowZone
-                    if not finite(s.safeCoast) or s.safeCoast <= 0 then
-                        slowZone = s.profile.length
-                    else
-                        slowZone = MDADDynamics.stoppingDistance(
-                            speedKmh / 3.6, 0.5, s.safeCoast, s.vehicleProfile.halfL)
-                    end
+                    -- 接近段用煞車減速度反推的**單調**envelope（2026-09-02 s064）：
+                    -- 舊制以 safeCoast（0.6，純滑行）算 slowZone 再二值套帽——43 km/h
+                    -- 下 slowZone≈118m，縫還在 20m 外就被壓到 4 km/h；且門檻二值＝
+                    -- 減速→zone 縮→解帽→加速→套帽的自激震盪（telemetry tgt 43↔4.23
+                    -- 逐幀交替）。改成「到 offA 之前要降到 dcap，現在最多多快」，
+                    -- 縫遠不壓速、縫近連續收斂；縫本身的帽仍是 dcap。
+                    local applied = dcap
                     local fsA = s.fstate.offA
-                    if not finite(fsA) or s.lastSNow >= fsA - slowZone then
-                        if cap < 0 or dcap < cap then
-                            cap = dcap
-                            capReason = "dodge"
-                        end
+                    if finite(fsA) and s.lastSNow < fsA then
+                        local decel = s.safeBrake
+                        if not finite(decel) or decel <= 0 then decel = 0.6
+                        else decel = decel * TUNE.APPROACH_BRAKE_FRAC end
+                        applied = MDADDynamics.approachCapKmh(
+                            fsA - s.lastSNow - s.vehicleProfile.halfL,
+                            dcap, 0.5, decel)
+                    end
+                    s.dodgeApproachCap = applied
+                    if cap < 0 or applied < cap then
+                        cap = applied
+                        capReason = "dodge"
                     end
                 end
             end
@@ -5658,11 +5674,15 @@ local function onPlayerUpdate(player)
             s.resumeProgressUntil = 0
             s.pendingRouteWhy = "target"
             s.avoidX, s.avoidY, s.pendingDetour = nil, nil, false
-            -- 換目標後的新路線起點太遠（要越野接線）＝與啟動同一道閘門：交還玩家。
-            if cachedSnapTrusted(api) and routeTooFar(route) then
-                Drive.stop(playerNum, KEY_ROUTE_FAR)
-                return
-            end
+        end
+        -- 起點太遠（要越野接線）＝與啟動同一道閘門：交還玩家。**每一次 cutover 都驗**
+        -- （2026-09-02 s064 定罪：舊制只在啟動與換目標驗，偏航重算走的是同一個
+        -- requestRoute → 主 MOD 把起點吸到 65m 外的平行道路，addon 照跟＝車直接
+        -- 開進樹林，telemetry lat=63.5）。同目標的偏航重算沿線 snapDist 本來就小，
+        -- 這道閘門只會攔真的「路線不在車所在的路上」。
+        if cachedSnapTrusted(api) and routeTooFar(route) then
+            Drive.stop(playerNum, KEY_ROUTE_FAR)
+            return
         end
         s.lastTx, s.lastTy = tx, ty
 

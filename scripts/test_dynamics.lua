@@ -64,6 +64,23 @@ check(vis < 120, "110m＋保守 brake 不硬放 120")
 local stop = D.stoppingDistance(vis / 3.6, 0.5, 3, 2.2)
 check(stop <= 110 + 1e-9, "visibility 正根代回不超 D")
 near(D.visibilityCapKmh(stop, 0.5, 3, 2.2), vis, 1e-9, "二次式正根可逆")
+-- approachCapKmh（2026-09-02 s064）：到 d 之後要降到 exit，現在最多多快。
+-- 契約：exit=0 退化成 visibility 同一式、對 d 單調遞增、代回不超 d、
+-- d≤0 或 a≤0 回 exit（不得回 0＝把已可行的縫壓死）。
+near(D.approachCapKmh(110 - 2.2 - 2, 0, 0.5, 3), D.visibilityCapKmh(110, 0.5, 3, 2.2), 1e-9,
+    "approach exit=0 與 visibilityCap 同一二次式")
+local ap20 = D.approachCapKmh(20, 4.23, 0.5, 4.2)
+local ap5 = D.approachCapKmh(5, 4.23, 0.5, 4.2)
+check(ap20 > ap5 and ap5 > 4.23, "approach cap 隨剩餘距離單調遞增、且永不低於出口速")
+check(ap20 > 35, "20m＋4.2m/s² 只從 43 壓到 ~40，不是壓成爬行 4.23（s064 定罪值）")
+near(D.approachCapKmh(0, 4.23, 0.5, 4.2), 4.23, 1e-12, "抵達縫口＝出口速本身")
+near(D.approachCapKmh(-5, 4.23, 0.5, 4.2), 4.23, 1e-12, "已過縫口不放寬")
+near(D.approachCapKmh(20, 4.23, 0.5, 0), 4.23, 1e-12, "無煞車能力＝退回出口速，不回 0")
+near(D.approachCapKmh(20, 0 / 0, 0.5, 4.2), D.approachCapKmh(20, 0, 0.5, 4.2), 1e-12,
+    "出口速非有限＝當 0（fail-safe，不放寬）")
+local back = D.stoppingDistance(ap20 / 3.6, 0.5, 4.2, 0) - 2
+check(back >= 20 - 1e-6 and back <= 20 + 5,
+    "approach 正根代回：從 cap 煞到停的距離 ≥ 到縫口距離（出口速 >0 故略長）")
 near(D.steeringSpeedCapKmh(0.1, 2.5, 0.5, 0.5, 120), 120, 1e-12,
     "constant steering clamp accepts feasible required angle")
 near(D.steeringSpeedCapKmh(1, 2.5, 0.5, 0.5, 120), 0, 1e-12,

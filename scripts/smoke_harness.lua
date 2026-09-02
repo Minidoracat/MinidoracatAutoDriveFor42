@@ -6809,6 +6809,37 @@ local function scenarioDetour()
     clearList(halos)
     checkTrue(MDAD.Drive.start(dp), "(snap) v4 的 snapDist=100 不擋（舊語意＝到首點距離，不可信）")
     MDAD.Drive.stop(0, nil)
+    -- (snap2) 偏航重算的 cutover 也要驗（2026-09-02 s064 定罪：舊制只在啟動與換
+    -- 目標驗；車卡住後主 MOD 對**同一目標**重算，起點被吸到 65m 外的平行道路，
+    -- addon 照跟＝直接開進樹林，telemetry lat=63.5）。同目標的新路線 snapDist
+    -- 超門檻 → 立刻 RouteTooFar 交還，不得沿用。
+    MinidoracatMiniMapAPI.navApiVersion = 5
+    nav.route = newRoute(40, 0, 0, 4, 0)
+    nav.route.segSurface, nav.route.segWidth = {}, {}
+    for i = 1, 39 do nav.route.segSurface[i], nav.route.segWidth[i] = "paved", 10 end
+    nav.route.snapDist = 2
+    dveh._x, dveh._y, dveh._speed = 0, 0, 20
+    setHeading(dveh, 0)
+    clearList(halos)
+    checkTrue(MDAD.Drive.start(dp), "(snap2) 起點在車旁：正常啟動")
+    driveTick(dp, dveh)
+    checkTrue(MDAD.Drive.isActive(0), "(snap2) 同一條路線照常行駛")
+    -- 主 MOD 同目標重算：新 route identity、起點 65m 外
+    local farRoute = newRoute(40, 0, 0, 4, 0)
+    farRoute.segSurface, farRoute.segWidth = {}, {}
+    for i = 1, 39 do farRoute.segSurface[i], farRoute.segWidth[i] = "paved", 10 end
+    farRoute.snapDist = 65
+    nav.route = farRoute
+    clearList(halos)
+    nowMs = nowMs + 300 -- 越過 ROUTE_REFRESH_MS（250）才會重新 fetchRoute
+    driveTick(dp, dveh)
+    checkFalse(MDAD.Drive.isActive(0), "(snap2) 偏航重算起點 65m 外：交還而不是跟著開進樹林")
+    checkEq(haloKey(), noteReason("UI_MinidoracatAutoDrive_RouteTooFar"), "(snap2) 紅字 RouteTooFar")
+    MDAD.Drive.stop(0, nil)
+    nav.route = newRoute(40, 0, 0, 4, 0)
+    nav.route.segSurface, nav.route.segWidth = {}, {}
+    for i = 1, 39 do nav.route.segSurface[i], nav.route.segWidth[i] = "paved", 10 end
+    MinidoracatMiniMapAPI.navApiVersion = 4
     nav.route.snapDist = nil
     MinidoracatMiniMapAPI.navApiVersion = 2 -- 還原本區段其餘情境沿用的版本
 end
@@ -9361,6 +9392,47 @@ local function scenarioPhaseE()
                 and captured.dodgeSpeedCap <= baseCap,
             "next fresh positive proof restores speed（cap 隨守護輪浮動；"
             .. "dodgeBaseCap 為 telemetry 鏡像）")
+    end
+    -- 接近段 envelope（2026-09-02 s064 定罪：縫在 20m 外、車已被壓到 4 km/h 爬完
+    -- 整段接近；舊制 slowZone 用 safeCoast 0.6＝43 km/h 下 118m 前就套帽，而且是
+    -- 二值門檻＝減速→zone 縮→解帽→加速→套帽的自激震盪）。契約：
+    --   ① 本幀套用的帽＝approachCapKmh(到縫口距離, 縫帽, 0.5, safeBrake×0.7)
+    --      ——用**煞車**減速度反推，不是滑行；二值 slowZone 退役
+    --   ② 縫還遠時遠高於縫本身的帽（不得一路爬行過去）
+    do
+        local realDodgeCap = MDADDynamics.dodgeSpeedCapKmh
+        local pinned = function() return 4.23, 0, "clearance" end
+        MDADDynamics.dodgeSpeedCapKmh = pinned
+        drive.scanRound(true)
+        MDADDynamics.dodgeSpeedCapKmh = realDodgeCap
+        -- ① 公式身分（此刻車已貼近縫口，帽本來就該接近縫帽）
+        local nearDist = captured.fstate.offA - captured.lastSNow
+        checkNear(captured.dodgeApproachCap, MDADDynamics.approachCapKmh(
+                nearDist - captured.vehicleProfile.halfL, captured.dodgeSpeedCap,
+                0.5, captured.safeBrake * 0.7), 1e-9,
+            "① 帽＝approachCapKmh(到縫口距離, 縫帽, 0.5, safeBrake×0.7)")
+        local nearCap = captured.dodgeApproachCap
+        -- ② 同一縫、車退回起點重開 session（投影只准前進，換位必須重開）
+        MDAD.Drive.stop(0, nil)
+        hotVeh._x, hotVeh._y, hotVeh._speed = 0, 0, 0
+        setHeading(hotVeh, 0)
+        driveReset(hotVeh)
+        checkTrue(MDAD.Drive.start(dp), "接近段 fixture：車退回起點重開 session")
+        MDADDynamics.dodgeSpeedCapKmh = pinned
+        for _ = 1, 6 do driveTick(dp, hotVeh) end
+        drive.scanRound(true)
+        MDADDynamics.dodgeSpeedCapKmh = realDodgeCap
+        local farDist = captured.dodging and (captured.fstate.offA - captured.lastSNow) or 0
+        checkTrue(captured.dodging and farDist > 10,
+            "接近段 fixture：重開後縫口在 10m 外（實得 " .. tostring(farDist) .. "m）")
+        local farCap = captured.dodgeApproachCap
+        checkTrue(farCap > 3 * captured.dodgeSpeedCap and farCap > nearCap,
+            "② 縫遠時的帽遠高於縫帽、也高於貼近時（far=" .. tostring(farCap)
+            .. " near=" .. tostring(nearCap) .. " 縫帽=" .. tostring(captured.dodgeSpeedCap) .. "）")
+        checkNear(farCap, MDADDynamics.approachCapKmh(
+                farDist - captured.vehicleProfile.halfL, captured.dodgeSpeedCap,
+                0.5, captured.safeBrake * 0.7), 1e-9,
+            "② 遠距同樣走 approachCapKmh，不是二值門檻")
     end
     -- fstate 持有權仲裁（2026-09-02 使用者裁定「每個系統要有優先級、不要打結」）
     -- ① DODGE 持有：RETURN 啟動也不得寫 fstate（st462.29k：hold 的 clearOffset 每

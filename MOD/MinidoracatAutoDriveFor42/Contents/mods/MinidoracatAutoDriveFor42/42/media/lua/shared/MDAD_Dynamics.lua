@@ -252,6 +252,25 @@ function D.visibilityCapKmh(visibleAhead, tau, aBrake, halfL)
     if v < 0 then v = 0 end
     return v * 3.6
 end
+
+-- 接近某個限速區的最高進入速（2026-09-02 s064 定罪：舊制「進入 slowZone 就整段
+-- 套繞行帽」用 safeCoast（0.6 m/s² 純滑行）算 slowZone，43 km/h 下 slowZone
+-- ≈118m ⇒ 繞行縫還在 20m 外車就被壓到 4 km/h；而且門檻是二值的，車一減速
+-- slowZone 就縮、帽解除、又加速、又套帽——自激震盪，平均掉到 4 km/h 爬完整段）。
+-- 這裡回「距離 distance 之後要降到 exitKmh，現在最多能開多快」：
+--   distance = v*tau + (v² − exit²)/(2a)  ⇒  v = −a·tau + √((a·tau)² + exit² + 2a·d)
+-- 單調、無門檻、exit=0 時退化成 visibilityCapKmh 的同一式。
+function D.approachCapKmh(distance, exitKmh, tau, aBrake)
+    if not D.finite(exitKmh) or exitKmh < 0 then exitKmh = 0 end
+    if not D.finite(aBrake) or aBrake <= 0 then return exitKmh end
+    if not D.finite(distance) or distance <= 0 then return exitKmh end
+    if not D.finite(tau) or tau < 0 then tau = 0 end
+    local exit = exitKmh / 3.6
+    local at = aBrake * tau
+    local v = -at + sqrt(at * at + exit * exit + 2 * aBrake * distance)
+    if v < exit then v = exit end
+    return v * 3.6
+end
 -- Full-speed is an all-true proof. Reasons are interned literals, not allocations.
 -- sweep 檢查排在 arc/band 之前：煞停視界內的世界掃掠真命中必須歸因 "sweep"
 --（近場警戒帽 18，ungatedCapKmh），不得被同幀的證明距離不足搶先改名成

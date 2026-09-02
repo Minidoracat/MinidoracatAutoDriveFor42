@@ -497,7 +497,7 @@ end
 --                     本函式只 rawset 數字，不建 table。需要 3×(欄數×lane 數) 格。
 --   outS／outL      ＝ 輸出折線節點（呼叫端預配置），maxNodes＝容量。
 --   回 nodeN, why, minExtra, maxSlope：
---     nodeN   ＝ 節點數（0＝無路，why 說明："blocked"／"badargs"／"capacity"）
+--     nodeN   ＝ 節點數（0＝無路，why 說明："band"／"start"／"nopath"／"badargs"／"capacity"）
 --     minExtra＝ 折線每欄最小橫向淨空扣掉 needHalf 後的餘裕（公尺；速度帽用）
 --     maxSlope＝ 折線最陡的 |Δl|/Δs
 --
@@ -562,7 +562,12 @@ function MDADCorridor.thread(hardS, hardL, hardR, hardN, needHalf, corridorHalf,
         return 0, "badargs", 0, 0
     end
     local limit = corridorHalf - needHalf
-    if limit < STEP then return 0, "blocked", 0, 0 end
+    -- 三種失敗分開命名（2026-09-02 s064：console 三種都印 "blocked"，復盤分不出
+    -- 「車當下那格就不可行」與「真的沒路」，等於沒有診斷）：
+    --   band   走廊寬度扣掉需求後放不下一格 lane
+    --   start  起欄（車現在的 lane）被直行遮罩擋＝車已貼著障礙
+    --   nopath DP 走遍終欄都不可達
+    if limit < STEP then return 0, "band", 0, 0 end
     local jMax = floor(limit / STEP)
     local J = 2 * jMax + 1
     local span = (sTo - sFrom) / THREAD_DS
@@ -633,7 +638,7 @@ function MDADCorridor.thread(hardS, hardL, hardR, hardN, needHalf, corridorHalf,
     local jStart = floor(laneFrom / STEP + 0.5)
     if jStart > jMax then jStart = jMax elseif jStart < -jMax then jStart = -jMax end
     local startIdx = jMax + 1 + jStart
-    if work[maskBase + startIdx] % 2 == 1 then return 0, "blocked", 0, 0 end
+    if work[maskBase + startIdx] % 2 == 1 then return 0, "start", 0, 0 end
     work[costBase + startIdx] = 0
     for k = 1, K do
         local row = k * J + jMax + 1
@@ -686,7 +691,7 @@ function MDADCorridor.thread(hardS, hardL, hardR, hardN, needHalf, corridorHalf,
             if c < bestEnd then bestEnd, bestEndJ = c, j end
         end
     end
-    if bestEnd >= THREAD_INF then return 0, "blocked", 0, 0 end
+    if bestEnd >= THREAD_INF then return 0, "nopath", 0, 0 end
 
     -- 回溯：先把每欄的 j 暫存進 prev 區之後的空位（重用 cost 區：已用完）
     local j = bestEndJ
