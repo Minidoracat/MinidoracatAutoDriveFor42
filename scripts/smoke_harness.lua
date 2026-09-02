@@ -5149,6 +5149,54 @@ function drive.moveVehicle(v, x, y)
     drive.vehGeo[x * 100000 + y] = v
 end
 
+-- 有真幾何的假車（2026-09-02 車陣精確輪廓）：中心 (cx,cy)、朝向 heading（rad）、
+-- 尺寸 W×L；提供 getScript():getExtents()/getCenterOfMassOffset() 與
+-- getWorldPos(lx, ly, lz, out)（VehiclePoly.java:52-88 同式：x 軸＝車寬、z 軸＝車長），
+-- 並把 OBB 蓋到的每一格都登記進 vehGeo（＝isIntersectingSquare 的格級語意）。
+-- 回車物件與佔位格清單（clear 用）。
+function drive.putVehicleGeom(cx, cy, heading, W, L, stopped)
+    drive.vehIdSeq = drive.vehIdSeq + 1
+    local id = drive.vehIdSeq
+    local halfW, halfL = W * 0.5, L * 0.5
+    local fx, fy = math.cos(heading), math.sin(heading)
+    local nx, ny = -fy, fx
+    local ext = { x = function() return W end, z = function() return L end, y = function() return 1.5 end }
+    local com = { x = function() return 0 end, z = function() return 0 end, y = function() return 0 end }
+    local script = { getExtents = function() return ext end, getCenterOfMassOffset = function() return com end }
+    local v = { _class = "BaseVehicle", _stopped = stopped ~= false, _x = cx, _y = cy }
+    v.getX = function() return v._x end
+    v.getY = function() return v._y end
+    v.getId = function() return id end
+    v.isStopped = function() return v._stopped end
+    v.getScript = function() return script end
+    -- local (lx, ly, lz)：lx 沿車寬（法向）、lz 沿車長（前向）
+    v.getWorldPos = function(_, lx, _ly, lz, out)
+        return out:set(v._x + fx * lz + nx * lx, v._y + fy * lz + ny * lx, 0)
+    end
+    local cells = {}
+    local reach = halfL + halfW + 1
+    for gx = math.floor(cx - reach), math.floor(cx + reach) do
+        for gy = math.floor(cy - reach), math.floor(cy + reach) do
+            -- 格子四角＋格心任一落在 OBB 內＝相交（粗判，測試用）
+            local hit = false
+            for _, pt in ipairs({ { gx, gy }, { gx + 1, gy }, { gx, gy + 1 }, { gx + 1, gy + 1 }, { gx + 0.5, gy + 0.5 } }) do
+                local dx, dy = pt[1] - cx, pt[2] - cy
+                local u, w = dx * fx + dy * fy, dx * nx + dy * ny
+                if u >= -halfL and u <= halfL and w >= -halfW and w <= halfW then hit = true break end
+            end
+            if hit then
+                drive.vehGeo[gx * 100000 + gy] = v
+                cells[#cells + 1] = gx * 100000 + gy
+            end
+        end
+    end
+    return v, cells
+end
+
+function drive.clearVehicleGeom(cells)
+    for i = 1, #cells do drive.vehGeo[cells[i]] = nil end
+end
+
 -- 硬障礙：有碰撞、非地板（Sensor 分類器：shouldHaveCollision 且非 solidfloor＝HARD）
 function drive.putSolid(x, y, name)
     local props = { has = function() return false end }
@@ -6673,6 +6721,70 @@ local function scenarioDetour()
     for _, y in ipairs({ -1, 0, 1 }) do drive.clearCell(4, y) end
     MDAD.Drive.stop(0, nil)
 
+    -- (c5d) 實機序列（2026-09-02 定罪「勾了自動改道也沒效」）：後方淨空 → 5s
+    -- blocked-retry 真的倒車 → 開回原地又堵 → 非 WAIT 幀已清 blockRetryDone →
+    -- 舊碼同幀先判 blocked-retry 又設 recoverWhy → 改道永遠等不到 recoverWhy==nil。
+    -- 新契約：累計 ≥10s 時改道**先於**第二次倒車。
+    checkTrue(armDrive(), "(c5d) 啟動")
+    for _, y in ipairs({ -5, -4, -2, -1, 0, 1, 2, 4, 5 }) do
+        drive.putSolid(20, y, "harness_wall_" .. y)
+    end
+    dveh._x = 11
+    driveTick(dp, dveh)
+    drive.scanRound()
+    dveh._speed = 0
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    nav.detourCalls = 0
+    MDAD.HUD.autoDetour = function() return true end
+    nowMs = nowMs + 5500
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkEq(haloKey(), DKEY.UNSTICK, "(c5d) 5s 後 blocked-retry 真的倒車（後方淨空）")
+    checkEq(nav.detourCalls, 0, "(c5d) 倒車那幀不改道（accum < 10s）")
+    -- 倒 4m → settle → 開回原地（GO 幀清 blockRetryDone）→ 再堵
+    dveh._x, dveh._speed = 7.9, -13
+    nowMs = nowMs + 16
+    driveReset(dveh)
+    driveTick(dp, dveh) -- success → settle
+    dveh._speed = 0
+    nowMs = nowMs + 16
+    driveTick(dp, dveh) -- settle complete
+    dveh._speed = 8
+    for _ = 1, 3 do
+        nowMs = nowMs + 300
+        driveTick(dp, dveh)
+    end
+    dveh._x, dveh._speed = 11, 0
+    -- 改道那一刻的 session 狀態：必須是「倒車過一次、還沒開始第二次」
+    local cap5d = nil
+    local realOv5d = MDADOverlay.update
+    MDADOverlay.update = function(pn, st, ...)
+        if pn == 0 then cap5d = st end
+        return realOv5d(pn, st, ...)
+    end
+    local realReqDetour = MinidoracatMiniMapAPI.requestDetour
+    local atDetour = nil
+    MinidoracatMiniMapAPI.requestDetour = function(...)
+        atDetour = { attempts = cap5d and cap5d.episodeAttempts, mode = cap5d and cap5d.mode,
+            wait = cap5d and cap5d.waitAccumMs }
+        return realReqDetour(...)
+    end
+    drive.scanRound()
+    MinidoracatMiniMapAPI.requestDetour = realReqDetour
+    MDADOverlay.update = realOv5d
+    checkEq(nav.detourCalls, 1, "(c5d) 開回原地再堵：改道先於第二次倒車（實得 " .. tostring(nav.detourCalls) .. "）")
+    checkTrue(atDetour ~= nil and atDetour.attempts == 1 and atDetour.mode == "follow",
+        "(c5d) 改道當下：倒車過一次、尚未開始第二次（attempts=" .. tostring(atDetour and atDetour.attempts)
+        .. " mode=" .. tostring(atDetour and atDetour.mode) .. "）")
+    checkTrue(atDetour ~= nil and atDetour.wait >= 5000 and atDetour.wait < 10000,
+        "(c5d) 觸發靠「倒車過＋再堵」而非 10s 累計（wait=" .. tostring(atDetour and atDetour.wait) .. "）")
+    checkEq(drive.lastVoice(), "nodetour", "(c5d) 主 MOD 無路：語音 nodetour")
+    checkTrue(MDAD.Drive.isActive(0), "(c5d) 改道失敗 session 仍活著（交回停等／倒車階梯）")
+    MDAD.HUD.autoDetour = oldAuto
+    for _, y in ipairs({ -5, -4, -2, -1, 0, 1, 2, 4, 5 }) do drive.clearCell(20, y) end
+    MDAD.Drive.stop(0, nil)
+
     -- 路線起點太遠守門（s052/s053：吸到 67m 外平行路、車穿樹林卡死）。
     -- snapDist 門檻只信 nav API v5 起：v4 沿用快取時是「玩家→pts[1]」，沿線前進後失真
     -- （實機 2026-09-02：沿線開 100 格停車再啟動被拒「起點太遠」）。v4+ 的 route 要帶
@@ -6815,8 +6927,167 @@ local function scenarioThread()
     checkEq(haloKey(), DKEY.BLOCKED, "(c6b) 整寬牆：無折線、仍 blocked")
     for y = -6, 5 do drive.clearCell(20, y) end
     MDAD.Drive.stop(0, nil)
+
+    -- (c6d) 遠視界（2026-09-02：折線終點＝掃描帶內最遠擋線點＋EXIT，不再是第一群
+    -- 出口）不得越過已載入區：x≥38 未載入（getGridSquare 回 nil），B 車尾 27.5＋EXIT 8
+    -- ＝35.5→末節點 36＋tail 3.2＝39.2 > 38 ⇒ 整條線 unloaded＝失敗。契約：sTo 先鉗到
+    -- 載入端−tail−一欄，仍能承諾、且 threadEndS 落在載入端之內（違規證明：拿掉鉗＝紅）。
+    checkTrue(armDrive(), "(c6d) 啟動")
+    putCar(12, -5)
+    putCar(24, 1)
+    for x = 6, 37 do
+        drive.putSolid(x, -7, "harness_jam_fence_l" .. x)
+        drive.putSolid(x, 6, "harness_jam_fence_r" .. x)
+    end
+    for x = 38, 70 do
+        for y = -7, 7 do drive.world[x * 100000 + y] = nil end
+    end
+    local cap6d = nil
+    local realOv6d = MDADOverlay.update
+    MDADOverlay.update = function(pn, st, ...)
+        if pn == 0 then cap6d = st end
+        return realOv6d(pn, st, ...)
+    end
+    driveReset(dveh)
+    drive.scanRound()
+    MDADOverlay.update = realOv6d
+    checkEq(haloKey(), DKEY.THREAD, "(c6d) 載入端 38 之前仍能蛇行承諾（實得 " .. tostring(haloKey()) .. "）")
+    checkTrue(cap6d and cap6d.threading == true and type(cap6d.threadEndS) == "number" and cap6d.threadEndS < 38,
+        "(c6d) 承諾線尾在載入端之內（threadEndS=" .. tostring(cap6d and cap6d.threadEndS) .. "）")
+    checkTrue(cap6d and type(cap6d.threadEndS) == "number" and cap6d.threadEndS > 30,
+        "(c6d) 線尾仍越過 B 車（27.5＋車身），不是退化成極短承諾（threadEndS=" .. tostring(cap6d and cap6d.threadEndS) .. "）")
+    clearCar(12, -5)
+    clearCar(24, 1)
+    for x = 6, 37 do drive.clearCell(x, -7); drive.clearCell(x, 6) end
+    drive.fillWorld(-2, 70, -7, 7)
+    MDAD.Drive.stop(0, nil)
 end
 scenarioThread()
+
+-- (c7) 車輛精確輪廓（2026-09-02 Dixie 車陣實爆）：兩台 1.8m 寬的車並排、真縫 2.8m
+--      （車寬 1.8＋兩側各 0.3 餘裕＝2.4 可過）。格級佔位把每台膨脹成 3 格＋0.7 圓，
+--      縫剩 0.2m＝永遠 blocked；改用 OBB 周長點（r=0.3）後 plan 必須提得出縫。
+--      同時鎖：點雲來源是輪廓點（r=0.3、每台 ~21 顆）而不是格心（r=0.7）；任一
+--      getter 失敗（沒有 getScript 的舊假車）退回格級佔位（fail-safe）。
+local function scenarioOutline()
+    checkTrue(armDrive(), "(c7) 啟動")
+    -- 路線沿 +x、車在 l=0；兩台車朝向 +x，中心 y=-2.4 與 +2.4（內側邊 ±1.5 → 縫 3.0；
+    -- 再各往內 0.1 → 真縫 2.8）
+    local vA, cA = drive.putVehicleGeom(20, -2.3, 0, 1.8, 4.4, true)
+    local vB, cB = drive.putVehicleGeom(20, 2.3, 0, 1.8, 4.4, true)
+    -- 兩側圍籬（l=±4.5、±5.5）：不讓 plan 從車外側繞過去，縫只剩兩車之間
+    for x = 12, 28 do
+        for _, y in ipairs({ -6, -5, 4, 5 }) do drive.putSolid(x, y, "harness_c7_fence_" .. x .. "_" .. y) end
+    end
+    local captured = nil
+    local realOverlayUpdate = MDADOverlay.update
+    MDADOverlay.update = function(pn, st, ...)
+        if pn == 0 then captured = st end
+        return realOverlayUpdate(pn, st, ...)
+    end
+    driveReset(dveh)
+    drive.scanRound()
+    MDADOverlay.update = realOverlayUpdate
+    checkTrue(MDAD.Drive.hudState(0) ~= "blocked", "(c7) 2.8m 真縫：不 blocked（實得 " .. tostring(MDAD.Drive.hudState(0)) .. "）")
+    local sen = captured and captured.sensor
+    local outlineN, squareN = 0, 0
+    if sen then
+        for i = 1, sen.hardN do
+            if sen.hardR[i] == 0.15 then outlineN = outlineN + 1
+            elseif sen.hardR[i] == 0.7 and sen.hardL[i] > -4 and sen.hardL[i] < 4 then squareN = squareN + 1 end
+        end
+    end
+    checkTrue(outlineN >= 60 and outlineN <= 100, "(c7) 點雲＝兩台車的輪廓點（r=0.15，實得 " .. outlineN .. "）")
+    checkEq(squareN, 0, "(c7) 有幾何的車不再推格心 0.7 圓（車道帶內零格心點；圍籬在帶外）")
+    -- 池向量成對歸還（每台車 alloc/release 各一）
+    checkEq(drive.pool.live, 0, "(c7) 輪廓取角的池向量全部歸還")
+    drive.clearVehicleGeom(cA)
+    drive.clearVehicleGeom(cB)
+    MDAD.Drive.stop(0, nil)
+
+    -- 反面對照：同樣兩台車但用沒有幾何 getter 的舊假車（每格一顆 0.7 圓）→ blocked
+    checkTrue(armDrive(), "(c7b) 啟動")
+    local cellsOld = {}
+    for _, v in ipairs({ vA, vB }) do
+        local cx, cy = v._x, v._y
+        for gx = math.floor(cx - 2.2), math.floor(cx + 2.2) do
+            for gy = math.floor(cy - 0.9), math.floor(cy + 0.9) do
+                local old = { _class = "BaseVehicle", _stopped = true, _x = gx + 0.5, _y = gy + 0.5 }
+                drive.vehIdSeq = drive.vehIdSeq + 1
+                local id = drive.vehIdSeq
+                old.getX = function() return old._x end
+                old.getY = function() return old._y end
+                old.getId = function() return id end
+                old.isStopped = function() return true end
+                drive.vehGeo[gx * 100000 + gy] = old
+                cellsOld[#cellsOld + 1] = gx * 100000 + gy
+            end
+        end
+    end
+    driveReset(dveh)
+    drive.scanRound()
+    checkEq(haloKey(), DKEY.BLOCKED, "(c7b) 格級佔位（無幾何 getter）：同一縫 blocked（膨脹證明）")
+    drive.clearVehicleGeom(cellsOld)
+    for x = 12, 28 do
+        for _, y in ipairs({ -6, -5, 4, 5 }) do drive.clearCell(x, y) end
+    end
+    MDAD.Drive.stop(0, nil)
+
+    -- (c7c) 長車不截斷：巴士 2.5×8（周長 21m／0.3＝70 > 上限 63）→ 步距放大而不是砍尾。
+    -- 截斷＝車側破洞＝假縫；契約：該車輪廓點 ≤ 64、四條邊都有點（bbox 撐滿車身）、
+    -- 相鄰點最大間距 ≤ 周長／63＋量化餘裕。
+    checkTrue(armDrive(), "(c7c) 啟動")
+    local _, cBus = drive.putVehicleGeom(20, 0, 0, 2.5, 8.0, true)
+    local capBus = nil
+    local realOvBus = MDADOverlay.update
+    MDADOverlay.update = function(pn, st, ...)
+        if pn == 0 then capBus = st end
+        return realOvBus(pn, st, ...)
+    end
+    driveReset(dveh)
+    drive.scanRound()
+    MDADOverlay.update = realOvBus
+    local senB = capBus and capBus.sensor
+    local busN, minX, maxX, minY, maxY = 0, math.huge, -math.huge, math.huge, -math.huge
+    local pts = {}
+    if senB then
+        for i = 1, senB.hardN do
+            if senB.hardR[i] == 0.15 then
+                busN = busN + 1
+                local px, py = senB.hardX[i], senB.hardY[i]
+                pts[#pts + 1] = { px, py }
+                if px < minX then minX = px end
+                if px > maxX then maxX = px end
+                if py < minY then minY = py end
+                if py > maxY then maxY = py end
+            end
+        end
+    end
+    checkTrue(busN >= 40 and busN <= 64, "(c7c) 巴士輪廓點 ≤ 64（實得 " .. busN .. "）")
+    checkTrue(maxX - minX > 7.9 and maxY - minY > 2.4,
+        "(c7c) 四邊都有點：bbox 撐滿 8×2.5（實得 " .. string.format("%.2f×%.2f", maxX - minX, maxY - minY) .. "）")
+    -- 相鄰點最大間距**含收尾段**（最後一顆周長點 → 第一顆）：截斷會把洞留在周長末端，
+    -- 只看中段抓不到。中心保底點＝離 (20,0) 最近的那顆，排除後其餘依推入序成環。
+    local perimPts, centerIdx, centerD = {}, nil, math.huge
+    for i, pt in ipairs(pts) do
+        local d = (pt[1] - 20) ^ 2 + pt[2] ^ 2
+        if d < centerD then centerD, centerIdx = d, i end
+    end
+    checkTrue(centerIdx ~= nil and centerD < 0.01, "(c7c) 中心保底點存在（實得 d²=" .. tostring(centerD) .. "）")
+    for i, pt in ipairs(pts) do if i ~= centerIdx then perimPts[#perimPts + 1] = pt end end
+    local worstGap = 0
+    for i = 1, #perimPts do
+        local a, b = perimPts[i], perimPts[i % #perimPts + 1]
+        local dx, dy = b[1] - a[1], b[2] - a[2]
+        local g = math.sqrt(dx * dx + dy * dy)
+        if g > worstGap then worstGap = g end
+    end
+    checkTrue(worstGap > 0 and worstGap <= 21 / 63 + 0.05,
+        "(c7c) 相鄰輪廓點間距（含收尾段）≤ 周長／63（實得 " .. string.format("%.3f", worstGap) .. "）")
+    drive.clearVehicleGeom(cBus)
+    MDAD.Drive.stop(0, nil)
+end
+scenarioOutline()
 
 -- (c3) 停等預算是「同 episode 累計」，不被零星動作續命（2026-09-01 階段 2
 --      主體 1 的違規證明）：舊制 waitSince 只要有一幀 avProgress>=1 就整個

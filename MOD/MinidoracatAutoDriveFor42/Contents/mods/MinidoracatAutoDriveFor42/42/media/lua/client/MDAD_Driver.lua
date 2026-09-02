@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0902u"
+Drive.REV = "0902v"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -191,7 +191,7 @@ TUNE.SNAP_MAX_M = 20           -- 路線起點離車超過此距離＝要越野�
 TUNE.DETOUR_AVOID_R = 40       -- 以堵點為圓心的軟封鎖半徑（主 MOD findRoute avoidR）
 TUNE.DETOUR_LEN_RATIO = 1.5    -- 替代路線長 ≤ 剩餘 × ratio + slack 才接受
 TUNE.DETOUR_LEN_SLACK = 200
-TUNE.AUTO_DETOUR_MS = 10000    -- 自動改道：停等累計此時長（blocked-retry 之後）才要替代路線
+TUNE.AUTO_DETOUR_MS = 10000    -- 自動改道：停等累計此時長才要替代路線（或倒車重掃過一次又再堵＝BLOCK_RETRY_MS 即問）
 -- 車陣蛇行（2026-09-02）：plan/sweep 鏈全 blocked 時在 (s,l) 格點找斜率受限折線
 -- 穿過錯落車陣（Corridor.thread），承諾為 exactLine（同 RETURN 機制）。爬行檔：
 -- 餘裕 0 → MIN、餘裕 ≥1m → MAX；貼縫檔（squeezeNeed）固定 MIN。
@@ -3186,14 +3186,34 @@ local function tryThread(s, vehicle, playerNum, sObs0, sObs1, now)
     local sFrom = s.lastSNow
     local laneFrom = s.lastLatSigned
     if not finite(laneFrom) then laneFrom = laneBiasOf(s) end
-    local sTo = (finite(sObs1) and sObs1 or sObs0) + MDADCorridor.EXIT
+    -- 折線終點＝掃描帶內**最遠的擋線 hard 點**＋EXIT。第一版用第一群的出口
+    -- （sObs1＋EXIT）：plan 的群只看 6m 內串起來的第一群，終欄成本把折線拉回基準線、
+    -- 走到末節點釋放後下一群再蛇一次；lone car 後面緊接車陣時終欄落在車陣裡。
+    -- 蛇行要看到整段可見車陣才有意義（一次承諾）。不擋線的路緣點（樹排／圍籬）
+    -- 不算——否則終點永遠是掃描帶尾端。上限 THREAD_COL_MAX 欄、再鉗到已載入區。
+    local bl, nh = laneBiasOf(s), s.needHalf
+    local farS = finite(sObs0) and sObs0 or sFrom
+    for i = 1, sen.hardN do
+        local hs = sen.hardS[i]
+        if hs > farS and blocksLine(sen, i, bl, nh) then farS = hs end
+    end
+    local sTo = farS + MDADCorridor.EXIT
+    local maxTo = sFrom + MDADCorridor.THREAD_COL_MAX * MDADCorridor.THREAD_DS
+    if sTo > maxTo then sTo = maxTo end
+    -- 遠視界不得越過已掃且已載入的 s：折線尾（末節點最多比 sTo 多一欄＋tail）
+    -- 落在 scanEndS／unloadedS 之外整條線判 unloaded＝失敗——舊制（第一群出口）
+    -- 天然近，遠視界會撞到這條；寧可短承諾、走到末節點再蛇一次。
+    local tail = halfL + 1
+    local loadedEnd = visibleEndS(sen, sFrom)
+    if sTo > loadedEnd - tail - MDADCorridor.THREAD_DS then
+        sTo = loadedEnd - tail - MDADCorridor.THREAD_DS
+    end
     if sTo > prof.length then sTo = prof.length end
     if not finite(sObs0) or sObs0 <= sFrom + 1 or sTo - sFrom < 4 then return false end
     local planN = sen.hardN
     if s.pushBanL ~= nil then planN = planN + 1 end -- 推撞 ban 點已在尾格（replan 寫入）
     local probe = MDADVehicleProfile.clearanceBudget("probe")
     local baseL = laneBiasOf(s)
-    local tail = halfL + 1
     for pass = 1, 2 do
         local need = (pass == 1 and s.needHalf or s.squeezeNeed) + probe
         local n, why, minExtra, maxSlope = MDADCorridor.thread(
@@ -4939,7 +4959,26 @@ local function stepFollow(s, vehicle, playerNum, now)
             -- closed 照舊），4m＋settle 重掃後 rotate probe 空間自然變大。
             requestRecover(s, "uturn-blocked")
         end
-        if s.blocked and not s.banFromRecovery and s.recoverWhy == nil
+        -- 自動改道（ESC 選項，預設關）：blocked-retry 之後仍在停等、累計超過
+        -- AUTO_DETOUR_MS 才要替代路線；一個停等 episode 只試一次，失敗＝沒替代路，
+        -- 剩下交給 WAIT_TIMEOUT 紅字。玩家按 HUD「改道」鈕走同一條 Drive.requestDetour。
+        -- **排在 blocked-retry 之前**（2026-09-02 實機：自動改道勾了永遠不觸發）：
+        -- 倒車脫困後車開回原地再被堵，非 WAIT 幀已把 blockRetryDone 清掉，同一幀
+        -- 先判的 blocked-retry 又 requestRecover 設 recoverWhy → 改道的
+        -- recoverWhy==nil 永遠假；unstick 三次直接 StopStuck。累計 ≥10s 時改道優先，
+        -- 本幀不再倒車。harness (c5c) 第一版用後牆讓倒車 soft fail 才綠＝假綠。
+        -- 觸發時機：累計 ≥ AUTO_DETOUR_MS，或「已倒車重掃過一次（episodeAttempts≥1）
+        -- 又被同一處堵住」——倒車沒解掉的堵，第二次倒車也不會解，先問替代路線。
+        local autoDetourNow = s.blocked and not s.detourTried and s.recoverWhy == nil
+            and postAction == nil and s.intentShadow == "WAIT"
+            and (s.waitAccumMs >= TUNE.AUTO_DETOUR_MS
+                or (s.episodeAttempts >= 1 and s.waitAccumMs >= TUNE.BLOCK_RETRY_MS))
+            and type(MDAD.HUD) == "table" and type(MDAD.HUD.autoDetour) == "function"
+            and MDAD.HUD.autoDetour() == true
+        if autoDetourNow then
+            s.detourTried = true
+            Drive.requestDetour(playerNum)
+        elseif s.blocked and not s.banFromRecovery and s.recoverWhy == nil
                 and postAction == nil
                 and not s.blockRetryDone
                 and s.intentShadow == "WAIT"
@@ -4949,17 +4988,6 @@ local function stepFollow(s, vehicle, playerNum, now)
             -- 常能解鎖）。rear swept-strip clear 才退（fail-closed 照舊）；
             -- 倒不了（soft fail）回到合法停等，只試一次防洗版。
             requestRecover(s, "blocked-retry")
-        end
-        -- 自動改道（ESC 選項，預設關）：blocked-retry 之後仍在停等、累計超過
-        -- AUTO_DETOUR_MS 才要替代路線；一個停等 episode 只試一次，失敗＝沒替代路，
-        -- 剩下交給 WAIT_TIMEOUT 紅字。玩家按 HUD「改道」鈕走同一條 Drive.requestDetour。
-        if s.blocked and not s.detourTried and s.recoverWhy == nil
-                and postAction == nil and s.intentShadow == "WAIT"
-                and s.waitAccumMs >= TUNE.AUTO_DETOUR_MS
-                and type(MDAD.HUD) == "table" and type(MDAD.HUD.autoDetour) == "function"
-                and MDAD.HUD.autoDetour() == true then
-            s.detourTried = true
-            Drive.requestDetour(playerNum)
         end
         if s.waitAccumMs >= TUNE.WAIT_TIMEOUT_MS then postAction = "wait" end
 

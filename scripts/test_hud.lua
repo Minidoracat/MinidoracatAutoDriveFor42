@@ -88,6 +88,8 @@ local texts = {
     UI_MinidoracatAutoDrive_HUDTheme = "THEME",
     UI_MinidoracatAutoDrive_HUDDetourButton = "REROUTE",
     UI_MinidoracatAutoDrive_HUDDetourTip = "REROUTE TIP",
+    UI_MinidoracatAutoDrive_HUDAuto = "AUTO",
+    UI_MinidoracatAutoDrive_HUDAutoTip = "AUTO TIP",
     UI_MinidoracatAutoDrive_HUDStatusBlocked = "HOLDING",
     UI_MinidoracatAutoDrive_HUDThemeMetal = "METAL",
     UI_MinidoracatAutoDrive_HUDThemeMinimal = "GLASS",
@@ -502,6 +504,29 @@ checkEq(panel.volumeSlider.value, 70, "volume slider reflects option default")
 checkEq(panel.y + panel.height, dashboards[0].y + 7,
     "HUD overlaps transparent inset and touches first visible dashboard row")
 
+-- 自動改道藥丸（2026-09-02 使用者：ESC 選項也要在 HUD 上）：每個主題都緊接在屍體藥丸
+-- 之後、同列同尺寸、與其他藥丸同時顯示／隱藏；讀寫的是 ESC／MiniMap 共用的 AutoDetour 選項。
+local function checkAutoPill(label)
+    local a, c = panel.autoButton, panel.corpseButton
+    check(a.visible == c.visible and a.y == c.y and a.height == c.height and a.width == c.width
+        and a.x == c.x + c.width + 4 and a.x + a.width <= panel.width,
+        label .. ": auto-reroute pill follows the corpse pill on the same row")
+end
+checkAutoPill("metal")
+check(panel.autoButton.title == "AUTO OFF" and panel.autoButton.enable == true
+    and panel.autoButton.tooltip == "AUTO TIP\nTOGGLE",
+    "auto-reroute pill reflects the option default (off) and explains itself")
+click(panel.autoButton)
+check(MDAD.HUD.autoDetour() == true
+    and optionSets.MinidoracatAutoDrive:getOption("AutoDetour"):getValue() == true
+    and panel.autoButton.title == "AUTO ON",
+    "clicking the auto-reroute pill writes the shared AutoDetour option and relabels")
+checkEq(optionSaveCalls, 1, "auto-reroute pill persists ModOptions immediately")
+click(panel.autoButton)
+check(MDAD.HUD.autoDetour() == false and panel.autoButton.title == "AUTO OFF",
+    "second click turns auto-reroute back off")
+optionSaveCalls = 0
+
 click(panel.themeButton)
 check(panel._style == 2
     and optionSets.MinidoracatAutoDrive:getOption("HUDTheme"):getValue() == 2,
@@ -517,6 +542,7 @@ check(panel._blockX == nil and panel.voiceButton.y == panel.themeButton.y
     and panel.volumeSlider.x + panel.volumeSlider.width == panel.width - 8
     and panel._energyX + 7 * #panel._energyText <= panel.volumeSlider.x,
     "glass theme: trio inline on row one, slider at the right end of row two after energy")
+checkAutoPill("glass")
 click(panel.themeButton)
 check(panel._style == 3
     and optionSets.MinidoracatAutoDrive:getOption("HUDTheme"):getValue() == 3,
@@ -528,6 +554,7 @@ check(panel._headerH > 0 and panel.themeButton.y < panel._headerH
     and panel._capLabelY >= panel._headerH and panel.actionButton.y >= panel._headerH
     and panel.height > 78,
     "family theme: header strip holds status/speed plus controls; cruise and action move below")
+checkAutoPill("family")
 click(panel.themeButton)
 check(panel._style == 4
     and optionSets.MinidoracatAutoDrive:getOption("HUDTheme"):getValue() == 4,
@@ -549,12 +576,16 @@ check(panel.actionButton.x + panel.actionButton.width <= panel._wingLeftW
     and panel.volumeSlider.x + panel.volumeSlider.width <= panel.width
     and panel.wingButton.visible and panel.collapseButton.visible,
     "wings theme: left wing owns the main button, right wing owns gear/policy/settings")
+checkAutoPill("wings")
+check(panel.autoButton.x >= panel._wingRightX and panel.autoButton.visible,
+    "wings theme: auto-reroute pill lives on the right wing")
 local openLeftW, openRightW = panel._wingLeftW, panel._wingRightW
 click(panel.collapseButton)
 check(panel._wingR == true and panel._wingL == false
     and player._md.MDADHudWingR == true and player._md.MDADHudWingL == nil
     and panel._wingRightW < openRightW and panel._wingLeftW == openLeftW
     and not panel.gearButtons[1].visible and not panel.volumeSlider.visible
+    and not panel.autoButton.visible
     and panel.actionButton.visible,
     "folding the right wing keeps the left one resident and persists per side")
 click(panel.wingButton)
@@ -1063,8 +1094,9 @@ for slot = 0, 1 do
         and candidate.collapseButton.x + candidate.collapseButton.width <= candidate.width
         and candidate.themeButton.x >= 0 and #dash.children == 0,
         "split slot " .. slot .. " controls stay inside own HUD")
-    check(candidate.zombieButton.visible == candidate.corpseButton.visible,
-        "split slot " .. slot .. " policy pills hide or show as a pair")
+    check(candidate.zombieButton.visible == candidate.corpseButton.visible
+        and candidate.autoButton.visible == candidate.corpseButton.visible,
+        "split slot " .. slot .. " policy pills hide or show together")
     checkEq(candidate.y + candidate.height, dash.y + 7,
         "split slot " .. slot .. " HUD touches own visible dashboard edge")
 end
@@ -1157,8 +1189,10 @@ check(iconPanel.themeButton.image and iconPanel.themeButton.image.path:find("hud
     and iconPanel.collapseButton.image.path:find("hud_chevron_down.png", 1, true)
     and iconPanel.voiceButton.image.path:find("hud_speaker_on.png", 1, true)
     and iconPanel.zombieButton.image.path:find("hud_zombie.png", 1, true)
-    and iconPanel.corpseButton.image.path:find("hud_skull.png", 1, true),
-    "icons present: glyphs replace titles (palette / chevron / speaker / zombie / skull)")
+    and iconPanel.corpseButton.image.path:find("hud_skull.png", 1, true)
+    and iconPanel.autoButton.image.path:find("hud_detour.png", 1, true)
+    and iconPanel.autoButton.width == iconPanel.autoButton.height and iconPanel.autoButton.title == "",
+    "icons present: glyphs replace titles (palette / chevron / speaker / zombie / skull / detour)")
 check(iconPanel.voiceButton.textureColor.g > 0.7 and iconPanel.voiceButton.textureColor.r < 0.5,
     "voice-on glyph is tinted green (state lives in the tint, explanation in the tooltip)")
 iconPanel:setCollapsed(true)

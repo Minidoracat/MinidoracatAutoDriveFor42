@@ -650,6 +650,9 @@ function MDADHUDPanel:createChildren()
     self.cycleButton = makeButton(self, GEAR_SHORT[3], MDADHUDPanel.onCycleGear)
     self.zombieButton = makeButton(self, "", MDADHUDPanel.onZombie)
     self.corpseButton = makeButton(self, "", MDADHUDPanel.onCorpse)
+    -- 自動改道藥丸（2026-09-02 使用者：ESC 選項也要出現在 HUD 上）：與減速藥丸同列同款，
+    -- 讀寫同一個 ModOptions 選項（ESC／MiniMap 設定三處同源）；無 ModOptions＝不顯示。
+    self.autoButton = makeButton(self, "", MDADHUDPanel.onAutoDetour)
     self.actionButton = makeButton(self, getText("UI_MinidoracatAutoDrive_Start"), MDADHUDPanel.onAction)
     self.themeButton = makeButton(self, getText("UI_MinidoracatAutoDrive_HUDStyleButton"), MDADHUDPanel.onTheme)
     self.collapseButton = makeButton(self, getText("UI_MinidoracatAutoDrive_HUDHideButton"), MDADHUDPanel.onCollapse)
@@ -703,6 +706,7 @@ function MDADHUDPanel:setControlsVisible(gearsOn, cycleOn, policiesOn, actionOn,
     self.cycleButton:setVisible(cycleOn)
     self.zombieButton:setVisible(policiesOn)
     self.corpseButton:setVisible(policiesOn)
+    self.autoButton:setVisible(policiesOn and modOptions ~= nil)
     self.actionButton:setVisible(actionOn)
     -- 樣式／語音只在展開態；隱藏鈕永遠在（收合徽章上它就是「展開」）。
     self.themeButton:setVisible(not self._collapsed and modOptions ~= nil)
@@ -748,7 +752,8 @@ function MDADHUDPanel:layoutWings(scale)
     local forcedText = getText("UI_MinidoracatAutoDrive_HUDForcedOff")
     local policyW = maximum(scaled(70, scale), maximum(
         textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDZombie") .. " " .. forcedText),
-        textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDCorpse") .. " " .. forcedText)) + 14)
+        maximum(textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDCorpse") .. " " .. forcedText),
+            textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDAuto") .. " " .. forcedText))) + 14)
     local energyW = textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDEnergy", 100, 100))
     local voiceLabel = getText("UI_MinidoracatAutoDrive_HUDVoice")
     local ctrlW = maximum(scaled(44, scale), maximum(
@@ -762,6 +767,7 @@ function MDADHUDPanel:layoutWings(scale)
     local valueW = textWidth(UIFont.Small, "100") + 4
     local sliderW = maximum(scaled(84, scale), SLIDER_KNOB * 3 + valueW)
     local controlsOn = modOptions ~= nil
+    local policyN = controlsOn and 3 or 2 -- 殭屍／屍體＋自動改道（無 ModOptions 時不顯示）
 
     local dashW, dashH, dashX = self:dashboardGeometry()
     local wingH = maximum(scaled(56, scale), dashH - DASH_VISIBLE_TOP_INSET)
@@ -773,7 +779,7 @@ function MDADHUDPanel:layoutWings(scale)
         capW + gap * 2 + ctrlW + gap + actionW)
     local rightOpenW = pad * 2 + maximum(
         gearLabelW + gearW * 4 + gap * 3,
-        maximum(policyW * 2 + gap * 2 + energyW,
+        maximum(policyW * policyN + gap * policyN + energyW,
             (controlsOn and (ctrlW * 3 + gap * 3 + sliderW) or ctrlW)))
     local leftFoldW = pad * 2 + 16 + speedValueW + gap + ctrlW
     local rightFoldW = pad * 2 + textWidth(UIFont.Small, "MAX") + gap + ctrlW
@@ -799,6 +805,7 @@ function MDADHUDPanel:layoutWings(scale)
     self.cycleButton:setVisible(false)
     self.zombieButton:setVisible(not foldR)
     self.corpseButton:setVisible(not foldR)
+    self.autoButton:setVisible(not foldR and controlsOn)
     self.actionButton:setVisible(not foldL)
     self.themeButton:setVisible(not foldR and controlsOn)
     self.voiceButton:setVisible(not foldR and controlsOn)
@@ -861,6 +868,7 @@ function MDADHUDPanel:layoutWings(scale)
         local row2 = rowY + rowH + gap
         setButtonRect(self.zombieButton, rightX + pad, row2, policyW, rowH)
         setButtonRect(self.corpseButton, rightX + pad + policyW + gap, row2, policyW, rowH)
+        setButtonRect(self.autoButton, rightX + pad + (policyW + gap) * 2, row2, policyW, rowH)
         self._energyX = rightX + rightW - pad - energyW
         self._energyY = row2 + math.floor((rowH - fontH) / 2)
         local row3 = row2 + rowH + gap
@@ -951,7 +959,8 @@ function MDADHUDPanel:applyLayout()
     local forcedText = getText("UI_MinidoracatAutoDrive_HUDForcedOff")
     local policyW = maximum(scaled(70, scale), maximum(
         textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDZombie") .. " " .. forcedText),
-        textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDCorpse") .. " " .. forcedText)) + 14)
+        maximum(textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDCorpse") .. " " .. forcedText),
+            textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDAuto") .. " " .. forcedText))) + 14)
     local energyW = textWidth(UIFont.Small,
         getText("UI_MinidoracatAutoDrive_HUDEnergy", 100, 100)) + gap
     local cycleW = maximum(scaled(44, scale), textWidth(UIFont.Small, "MAX") + 14)
@@ -968,6 +977,7 @@ function MDADHUDPanel:applyLayout()
     local valueW = textWidth(UIFont.Small, "100") + 4
     local sliderW = maximum(scaled(84, scale), SLIDER_KNOB * 3 + valueW)
     local controlsOn = modOptions ~= nil
+    local policyN = controlsOn and 3 or 2 -- 殭屍／屍體＋自動改道（無 ModOptions 時不顯示）
     local trioW = controlsOn and (ctrlW * 3 + gap * 2) or (ctrlW + gap)
     local screenW = getPlayerScreenWidth(self.playerNum)
     local maxW = type(screenW) == "number" and screenW - 16 or 1904
@@ -984,8 +994,8 @@ function MDADHUDPanel:applyLayout()
         -- 圖示模式下左欄收成方鈕，方塊寬從 2×拉桿寬降到 方鈕＋拉桿
         blockW = ctrlW + gap + maximum(ctrlW, sliderW)
     end
-    local bottomContentW = pad * 2 + gearLabelW + gearW * 4 + gap * 6
-        + policyW * 2 + energyW
+    local bottomContentW = pad * 2 + gearLabelW + gearW * 4 + gap * (4 + policyN)
+        + policyW * policyN + energyW
     local topContentW = pad * 2 + statusW + speedW + capW + gap + actionW
     if style == STYLE_GLASS then
         topContentW = topContentW + trioW + gap
@@ -1000,7 +1010,7 @@ function MDADHUDPanel:applyLayout()
     local fullContentW = maximum(topContentW, bottomContentW)
     local fullW = maximum(fullBase, fullContentW)
     local compactPolicyContentW = pad * 2 + statusW + speedW + capW + cycleW
-        + policyW * 2 + trioW + actionW + gap * 4
+        + (policyW + gap) * policyN + trioW + actionW + gap * 2
     local compactEssentialContentW = pad * 2 + statusW + speedW + capW + cycleW
         + trioW + actionW + gap * 2
 
@@ -1057,6 +1067,10 @@ function MDADHUDPanel:applyLayout()
             x = x + policyW + gap
             setButtonRect(self.corpseButton, x, y, policyW, buttonH)
             x = x + policyW + gap
+            if controlsOn then
+                setButtonRect(self.autoButton, x, y, policyW, buttonH)
+                x = x + policyW + gap
+            end
         end
         self:placeControlTrio(x, y, ctrlW, ctrlH, gap, controlsOn)
         setButtonRect(self.actionButton, panelW - pad - actionW, y, actionW, buttonH)
@@ -1113,6 +1127,8 @@ function MDADHUDPanel:applyLayout()
         setButtonRect(self.zombieButton, x, bottomY, policyW, buttonH)
         x = x + policyW + gap
         setButtonRect(self.corpseButton, x, bottomY, policyW, buttonH)
+        x = x + policyW + gap
+        setButtonRect(self.autoButton, x, bottomY, policyW, buttonH)
         if style == STYLE_FAMILY then
             local headerTextY = math.floor((headerH - fontH) / 2)
             self._dotX = pad
@@ -1364,6 +1380,11 @@ function MDADHUDPanel:updateButtons()
         self._zombieOn, playerChoiceZombie, zombieTip, optionScale())
     applyPolicyButton(self.corpseButton, "UI_MinidoracatAutoDrive_HUDCorpse", "skull",
         self._corpseOn, playerChoiceCorpse, corpseTip, optionScale())
+    applyPolicyButton(self.autoButton, "UI_MinidoracatAutoDrive_HUDAuto", "detour",
+        autoDetour(), true,
+        getText("UI_MinidoracatAutoDrive_HUDAutoTip") .. "\n"
+            .. getText("UI_MinidoracatAutoDrive_HUDPolicyToggle"),
+        optionScale())
 
     self.actionButton:setTitle(getText(self._active
         and "UI_MinidoracatAutoDrive_Stop" or "UI_MinidoracatAutoDrive_Start"))
@@ -1563,6 +1584,12 @@ end
 function MDADHUDPanel:onCorpse()
     if self._corpsePolicy ~= MDAD.POLICY_PLAYER then return end
     Drive.setSlowPref(self.playerNum, "corpse", not self._corpseOn)
+    self._forceRefresh = true
+    self:refresh(getTimestampMs())
+end
+
+function MDADHUDPanel:onAutoDetour()
+    setAutoDetour(not autoDetour())
     self._forceRefresh = true
     self:refresh(getTimestampMs())
 end

@@ -66,7 +66,7 @@ MDADSensor = MDADSensor or {}
 -- 熱路徑庫函式在載入期取 local upvalue（Kahlua 的庫函式是 JavaFunction，
 -- 寫 math.sin 等於多一次 table 查詢）。與 shared/MDAD_Follower.lua 同一條守則。
 -- 取整一律用 `n - n % 1`（純 Lua floor，負座標也正確），不呼叫 math.floor。
-local sin, cos, abs = math.sin, math.cos, math.abs
+local sin, cos, abs, sqrt = math.sin, math.cos, math.abs, math.sqrt
 local find = string.find
 
 --------------------------------------------------------------------------------
@@ -114,6 +114,23 @@ local OBS_SMALL_R = 0.30       -- 小物半徑（2026-09-01 telemetry s016：blo
                                -- 差距 m=1.0 vs need=1.1——桿類/栓類 0.35 疊 need
                                -- 差 5-10cm 打槍「明明有空間」的縫；0.30 仍蓋
                                -- 桿柱實體，量化肥邊另由 SWEEP_QUANT_COMP 補）
+-- 車輛精確輪廓（2026-09-02 車陣實爆：格級佔位把 1.8m 寬的車體膨脹成 3 格＋0.7
+-- 圓＝4.4m，兩台車之間 2.8m 的真縫被吃到 0.2m，plan／thread 永遠 blocked）。發現
+-- 車輛仍靠 getVehicleContainer 的格級幾何查詢（可靠），幾何改用該車的 OBB：四角
+-- 走 getWorldPos(com.x±halfW, 0, com.z±halfL)——與引擎自己的碰撞多邊形同式
+-- （VehiclePoly.java:52-88；isIntersectingSquare 用 radius 0 的 poly，BaseVehicle.java:
+-- 4145、5704-5712）。周長每 VEH_OUTLINE_STEP 取一點、半徑 VEH_OUTLINE_R（相鄰圓相切
+-- ＝邊線連續覆蓋；0.15＝引擎自己的 polyPlusRadius 安全圈，BaseVehicle.java:4146）；
+-- 車體內部不取點——同尺寸車不可能整台鑽進另一台裡，中心點另補一顆保底。
+-- 餘裕帳：真縫 2.8m（兩台 1.8m 車並排）＝車寬 1.8＋兩側各 (0.15 圓＋0.3 need 餘裕)
+-- ＝2.7 → 過；r 取 0.3 會把同一縫算成不過（harness (c7) 定案）。
+-- 任何 getter 失敗＝退回格級佔位（fail-safe）。
+local VEH_OUTLINE_STEP = 0.3
+local VEH_OUTLINE_R = 0.15
+local VEH_OUTLINE_MAX = 64     -- 單台車輪廓點上限（含中心）：轎車 12.4m 周長／0.3＝41；
+                               -- 更長的車（巴士 21m）把步距放大到剛好塞進 63 點——
+                               -- **絕不截斷**（截斷＝車側破洞＝假縫）。點雲緩衝剩餘
+                               -- 不足 64 時整台退回格級佔位，同理。
 local SURFACE_UNKNOWN, SURFACE_PAVED, SURFACE_GRAVEL, SURFACE_DIRT = 0, 1, 2, 3
 -- 路面對中（2026-08-28 實機：163 號公路的 nav 線偏到路面東緣外 2-4m）：
 -- 掃描順路統計地板 sprite 的橫向平均，輪末產出 roadC 給 driver 做 EMA。
@@ -283,6 +300,118 @@ local function spriteCostOf(state, obj, name)
     return cost
 end
 
+-- 旗標 wHardOverflow 讓本輪快照可被判定不完整。Driver 另在快照尾端附加
+-- 最多 4 個虛擬 ban，不經 pushHard，也不占這個 sensor 上限。
+local function pushHard(state, s, l, l4, wx, wy, r)
+    local n = state.wHardN
+    if n >= HARD_MAX then state.wHardOverflow = true return end
+    n = n + 1
+    state.wHardN = n
+    state.wHardS[n] = s
+    state.wHardL[n] = l
+    state.wHardX[n] = wx
+    state.wHardY[n] = wy
+    state.wHardR[n] = r
+    state.wSumS = state.wSumS + (s - s % 1)
+    state.wSumL = state.wSumL + l4
+end
+
+-- 車輛精確輪廓（常數註解見 VEH_OUTLINE_*）。回 true＝已把該車輪廓推進本輪點雲；
+-- false＝任何 getter 失敗（呼叫端退回格級佔位）。(s,l) 以**目前掃描步的局部框**
+-- 線性化（state.cx/cy 為路線點、nx/ny 法向、前向＝(ny,-nx)）：輪廓點離命中格
+-- ≤ 5m，直路精確、彎道有曲率誤差——只影響 plan／thread 的提案品質；安全判定
+-- （sweep／footprint／blockedNear）全用世界座標 wHardX/Y，不受影響。
+-- 零配置：一顆池向量四角各取一次，成對歸還（BaseVehicle.java:507-521）。
+local function pushVehicleOutline(state, cv)
+    -- 整台輪廓要嘛全進要嘛不進：緩衝剩餘不夠就退回格級（近車精確、遠車粗略、
+    -- 再遠才被 HARD_MAX 丟——掃描由近而遠，這個退化順序是對的）。
+    if HARD_MAX - state.wHardN < VEH_OUTLINE_MAX then return false end
+    local okS, script = pcall(function() return cv:getScript() end)
+    if not okS or script == nil then return false end
+    local okE, ext = pcall(function() return script:getExtents() end)
+    if not okE or ext == nil then return false end
+    local okC, com = pcall(function() return script:getCenterOfMassOffset() end)
+    if not okC or com == nil then return false end
+    local okV, halfW, halfL, comX, comZ = pcall(function()
+        return ext:x() * 0.5, ext:z() * 0.5, com:x(), com:z()
+    end)
+    if not okV or type(halfW) ~= "number" or halfW * 0 ~= 0 or halfW <= 0.3 or halfW > 3
+            or type(halfL) ~= "number" or halfL * 0 ~= 0 or halfL <= 0.5 or halfL > 8
+            or type(comX) ~= "number" or comX * 0 ~= 0
+            or type(comZ) ~= "number" or comZ * 0 ~= 0 then
+        return false
+    end
+    if type(BaseVehicle) ~= "table" or type(BaseVehicle.allocVector3f) ~= "function" then
+        return false
+    end
+    local out = BaseVehicle.allocVector3f()
+    if out == nil then return false end
+    -- 四角（VehiclePoly.java:69-76 同序：-W+L、+W+L、+W-L、-W-L；y 取 0＝俯視）
+    local ok, x1, y1, x2, y2, x3, y3, x4, y4 = pcall(function()
+        cv:getWorldPos(comX - halfW, 0, comZ + halfL, out)
+        local ax, ay = out:x(), out:y()
+        cv:getWorldPos(comX + halfW, 0, comZ + halfL, out)
+        local bx, by = out:x(), out:y()
+        cv:getWorldPos(comX + halfW, 0, comZ - halfL, out)
+        local cx, cy = out:x(), out:y()
+        cv:getWorldPos(comX - halfW, 0, comZ - halfL, out)
+        return ax, ay, bx, by, cx, cy, out:x(), out:y()
+    end)
+    BaseVehicle.releaseVector3f(out)
+    if not ok then return false end
+    if type(x1) ~= "number" or x1 * 0 ~= 0 or type(y1) ~= "number" or y1 * 0 ~= 0
+            or type(x2) ~= "number" or x2 * 0 ~= 0 or type(y2) ~= "number" or y2 * 0 ~= 0
+            or type(x3) ~= "number" or x3 * 0 ~= 0 or type(y3) ~= "number" or y3 * 0 ~= 0
+            or type(x4) ~= "number" or x4 * 0 ~= 0 or type(y4) ~= "number" or y4 * 0 ~= 0 then
+        return false
+    end
+    -- 局部框：s＝curS＋前向分量、l＝法向分量（相對路線點）
+    local cx0, cy0, nx, ny = state.cx, state.cy, state.nx, state.ny
+    local fx, fy = ny, -nx
+    local curS = state.curS
+    -- 步距：周長／(MAX−1) 與 VEH_OUTLINE_STEP 取大者——長車放大步距而不是截斷
+    local perim = 0
+    do
+        local ex, ey = x2 - x1, y2 - y1
+        perim = perim + sqrt(ex * ex + ey * ey)
+        ex, ey = x3 - x2, y3 - y2
+        perim = perim + sqrt(ex * ex + ey * ey)
+        ex, ey = x4 - x3, y4 - y3
+        perim = perim + sqrt(ex * ex + ey * ey)
+        ex, ey = x1 - x4, y1 - y4
+        perim = perim + sqrt(ex * ex + ey * ey)
+    end
+    local step = VEH_OUTLINE_STEP
+    if perim / step > VEH_OUTLINE_MAX - 1 then step = perim / (VEH_OUTLINE_MAX - 1) end
+    local pushed = 0
+    local function emit(px, py)
+        pushed = pushed + 1
+        local dx, dy = px - cx0, py - cy0
+        local s = curS + dx * fx + dy * fy
+        local l = dx * nx + dy * ny
+        local l4 = l * 4
+        l4 = l4 - l4 % 1
+        pushHard(state, s, l, l4, px, py, VEH_OUTLINE_R)
+    end
+    local function edge(ax, ay, bx, by)
+        local dx, dy = bx - ax, by - ay
+        local len = sqrt(dx * dx + dy * dy)
+        local n = len / step
+        n = n - n % 1
+        if n < 1 then n = 1 end
+        for k = 0, n - 1 do
+            local t = k / n
+            emit(ax + dx * t, ay + dy * t)
+        end
+    end
+    edge(x1, y1, x2, y2)
+    edge(x2, y2, x3, y3)
+    edge(x3, y3, x4, y4)
+    edge(x4, y4, x1, y1)
+    emit((x1 + x3) * 0.5, (y1 + y3) * 0.5) -- 中心保底
+    return pushed > 0
+end
+
 -- 回 boolean：這一格是不是硬障礙。軟障礙／殭屍／屍體／行進中車輛／未載入 chunk
 -- 直接就地累加到 state 的 working 欄位（回傳只有一個值才不用配置）。
 -- l＝本取樣點的橫向偏移（相對 nav 線）：**減速計數**（殭屍/屍體/軟障礙/跟車）
@@ -398,7 +527,19 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
             state.vehStill[vid] = still
         end
         if still or cv:isStopped() then                -- BaseVehicle.java:4259-4260
-            hard = true                                -- 停著的車＝實體障礙，要繞
+            -- 停著的車＝實體障礙，要繞。幾何走精確輪廓（每台每輪一次）；輪廓取不到
+            -- 才退回「這一格＝0.7 圓」的格級佔位。同一台車後續命中的格只計數。
+            local og = state.vehOutlineGen[vid]
+            if og == state.gen then
+                -- 已推過輪廓：這格不再當障礙點
+            elseif og == -state.gen then
+                hard = true                            -- 本輪輪廓失敗：格級佔位
+            elseif pushVehicleOutline(state, cv) then
+                state.vehOutlineGen[vid] = state.gen
+            else
+                state.vehOutlineGen[vid] = -state.gen
+                hard = true
+            end
         elseif inBand then                             -- 行進中＝跟車情境（帶內才減速）
             state.wMovingVeh = true
             if state.wVehAheadS == nil or state.curS < state.wVehAheadS then
@@ -687,6 +828,7 @@ function MDADSensor.newState()
         -- 跨輪車輛位置快照（vehicleId 鍵、gen 過期標記——假動判定用；常駐
         -- 不清，鍵數＝見過的車輛數量級，值全為數字）
         vehPosX = {}, vehPosY = {}, vehPosGen = {}, vehStill = {},
+        vehOutlineGen = {}, -- vehicleId → gen：本輪已推過該車輪廓（格級命中只計數不再推點）
         aheadM = SCAN_AHEAD, -- 掃描帶前伸長（高速檔由 driver 拉長：120km/h 需 ~110m 才煞得住）
         scanS = 0,
         scanEndS = 0,
@@ -733,6 +875,7 @@ function MDADSensor.reset(state)
     state.wRoundStartedAt = 0
     state.vehN = 0
     state.wVehN = 0
+    for k in pairs(state.vehOutlineGen) do state.vehOutlineGen[k] = 0 end
 
     state.hardN = 0
     state.zombieN = 0
@@ -760,22 +903,6 @@ end
 -- working buffer 推一個硬點（含簽章累加；l4＝l*4 的整數版；r＝該點半徑——
 -- 樹幹 0、整格箱型物 OBS_HALF，Corridor/sweep 逐點膨脹用）。HARD_MAX 已抬到
 -- 掃描帶數學上限之上（不可達）；萬一未來帶寬改動造成溢出，不再靜默——
--- 旗標 wHardOverflow 讓本輪快照可被判定不完整。Driver 另在快照尾端附加
--- 最多 4 個虛擬 ban，不經 pushHard，也不占這個 sensor 上限。
-local function pushHard(state, s, l, l4, wx, wy, r)
-    local n = state.wHardN
-    if n >= HARD_MAX then state.wHardOverflow = true return end
-    n = n + 1
-    state.wHardN = n
-    state.wHardS[n] = s
-    state.wHardL[n] = l
-    state.wHardX[n] = wx
-    state.wHardY[n] = wy
-    state.wHardR[n] = r
-    state.wSumS = state.wSumS + (s - s % 1)
-    state.wSumL = state.wSumL + l4
-end
-
 -- 每幀呼叫。回 true ＝ 本輪剛完成（呼叫端此時拿結果去規劃）。
 function MDADSensor.step(state, profile, sNow, vehicle, now, cell)
     if type(state) ~= "table" then return false end
