@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0903a"
+Drive.REV = "0903b"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -3850,6 +3850,22 @@ local function replan(s, vehicle, playerNum)
             s.dodgeBaseCap = s.dodgeSpeedCap
             s.dodgeCapPending = false
             s.dodgeNeed = commitNb or s.sweepBase -- 承諾檔淨距（守護輪同契約）
+            -- RETURN hold 讓位給 dodge 不能只讓剖面（2026-09-03 s017：起步就 hold(probe)
+            -- → 「return line blocked: dodge takes over」→ 原地 15s 紅字）：
+            -- controlStateOf 的 returnHold=HOLD 仍壓 intent WAIT，而 updateReturnSnapshot
+            -- 在 dodge 持有時早退、stall 釋放永遠跑不到——dodge 有線不能走、RETURN 有
+            -- hold 不能放。takeover＝RETURN 結束（線是掃掠驗過的），剖面走完 latDev
+            -- 若仍大 RETURN 下一輪自然重進；冷卻與 stall 釋放同款。
+            if s.returnActive then
+                s.returnActive, s.returnUnsafe, s.returnHold = false, false, false
+                s.returnCrawlExact, s.returnCapacityFault = false, false
+                s.returnReason, s.returnClearRounds, s.returnHoldSince = nil, 0, 0
+                s.returnBlockUntil = sen.stamp + TUNE.RETURN_STALL_BLOCK_MS
+                MDADFollower.setLaneBias(s.fstate, s.returnLaneTarget)
+                sen.scanBias = s.returnLaneTarget
+                diagEvent(s, playerNum, "return", { phase = "release", why = "dodge",
+                    s = s.lastSNow })
+            end
             -- 玩家可見的減速要有理由：繞行開始提示一次（持續繞行時 sig 每輪微變、
             -- replan 反覆進來，靠 dodgeNotified 防轟；clear/blocked 時重臂）
             if not s.dodgeNotified then

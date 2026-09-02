@@ -9547,6 +9547,43 @@ local function scenarioPhaseE()
         drive.clearCell(-3, 2)
         MDAD.Drive.stop(0, nil)
     end
+    -- ③b RETURN hold 讓位 dodge＝RETURN 結束（2026-09-03 s017：起步就 hold(probe) →
+    --    「return line blocked: dodge takes over」→ controlStateOf 的 returnHold 仍派
+    --    HOLD／WAIT，而 updateReturnSnapshot 在 dodge 持有時早退、stall 釋放跑不到 →
+    --    dodge 有線不能走、RETURN 有 hold 不能放，原地 15s 紅字）。同 ③ 的側方障礙
+    --    讓回線 probe 打槍，再在車道前方放一顆硬障礙讓 dodge 有理由 commit。
+    do
+        drive.nav.route = v4Route("paved", 10)
+        drive.fillWorld(-10, 170, -20, 20)
+        drive.putRoad(-10, 170, -20, 20)
+        hotVeh._x, hotVeh._y, hotVeh._speed = 0, 3.6, 0
+        setHeading(hotVeh, 0)
+        drive.putSolid(-3, 2, "harness_takeover_side")
+        drive.putSolid(30, 4, "harness_takeover_ahead")
+        driveReset(hotVeh)
+        checkTrue(MDAD.Drive.start(dp), "(takeover) 啟動")
+        for _ = 1, 6 do driveTick(dp, hotVeh) end
+        drive.scanRound(true)
+        -- 同一輪內：RETURN 進入 → probe 打槍 hold → dodge commit → 接手釋放。
+        -- lastHoldReason 只在 RETURN 進入時歸 nil，留著 "probe" 即證明 hold 真發生過；
+        -- planMode=dodge（stall 釋放會是 return-stall）證明走的是接手路徑。
+        checkEq(captured.lastHoldReason, "probe",
+            "(takeover) 側方障礙讓回線 probe 打槍過（hold 真發生）")
+        checkTrue(captured.dodging, "(takeover) 回線走不了時前方障礙的 dodge 可 commit")
+        checkFalse(captured.returnActive, "(takeover) dodge 接手＝RETURN 結束")
+        checkFalse(captured.returnHold, "(takeover) returnHold 清除")
+        checkTrue(captured.planMode == "dodge" or captured.planMode == "guard",
+            "(takeover) 走的是 dodge 接手（dodge/guard），不是 stall 釋放（實得 "
+            .. tostring(captured.planMode) .. "）")
+        checkEq(MDAD.Drive.controlState(0), "AVOID", "(takeover) 派生狀態 AVOID、不是 HOLD")
+        checkTrue(captured.returnBlockUntil > nowMs, "(takeover) RETURN 重入冷卻")
+        driveReset(hotVeh)
+        for _ = 1, 3 do driveTick(dp, hotVeh) end
+        checkTrue(drive.calls.maxRegSpeed > 0, "(takeover) 接手後真的給油（regulator speed > 0）")
+        drive.clearCell(-3, 2)
+        drive.clearCell(30, 4)
+        MDAD.Drive.stop(0, nil)
+    end
     -- ④ 原始折點 ±RETURN_CORNER_M 內不進 RETURN（2026-09-02 s046 Bank Road→
     --    Garnettsville T 字左轉）：窄路（width 4→band 0.6m）放不下 rMin 圓角＝fallback
     --    折點；pure pursuit 切過折點時對折線的橫向偏差是幾何必然，不是甩出。
