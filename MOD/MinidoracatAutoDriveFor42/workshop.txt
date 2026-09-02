@@ -50,6 +50,7 @@ description=
 description=[h2]💬 Feedback[/h2]
 description=[list]
 description=[*] [url=https://discord.gg/Gur2V67]Discord community[/url]
+description=[*] [url=https://github.com/Minidoracat/MinidoracatAutoDriveFor42/issues/new/choose]GitHub navigation report[/url]: wrong route, stuck or unexpected stop - open an issue and attach the whole Telemetry log folder as a zip (enable "Export autodrive diagnostic log" in the options first)
 description=[/list]
 description=
 description=[b]#Minidoracat[/b]

@@ -47,6 +47,7 @@ Item-driven vehicle navigation and autodrive: plan routes with a GPS Navigator, 
 [h2]💬 Feedback[/h2]
 [list]
 [*] [url=https://discord.gg/Gur2V67]Discord community[/url]
+[*] [url=https://github.com/Minidoracat/MinidoracatAutoDriveFor42/issues/new/choose]GitHub navigation report[/url]: wrong route, stuck or unexpected stop - open an issue and attach the whole Telemetry log folder as a zip (enable "Export autodrive diagnostic log" in the options first)
 [/list]
 
 [b]#Minidoracat[/b]

@@ -47,6 +47,7 @@
 [h2]💬 フィードバック[/h2]
 [list]
 [*] [url=https://discord.gg/Gur2V67]Discordコミュニティ[/url]
+[*] [url=https://github.com/Minidoracat/MinidoracatAutoDriveFor42/issues/new/choose]GitHub ナビ問題報告[/url]：道を間違える・詰まる・突然止まる場合は Issue を作成し、Telemetry 診断ログフォルダ全体を zip で添付してください（先に設定で「オートドライブ診断ログを書き出す」をオンに）
 [/list]
 
 [b]#Minidoracat[/b]

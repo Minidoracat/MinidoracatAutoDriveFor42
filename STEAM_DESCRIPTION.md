@@ -47,6 +47,7 @@
 [h2]💬 意見回饋與交流[/h2]
 [list]
 [*] [url=https://discord.gg/Gur2V67]Discord 社群[/url]
+[*] [url=https://github.com/Minidoracat/MinidoracatAutoDriveFor42/issues/new/choose]GitHub 導航問題回報[/url]：走錯路、卡住、無故停下請開 Issue，並把整個 Telemetry 診斷紀錄資料夾壓縮附上（設定裡先開「匯出自動駕駛診斷紀錄」）
 [/list]
 
 [b]#Minidoracat[/b]
