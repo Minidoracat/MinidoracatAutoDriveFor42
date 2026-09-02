@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0902w"
+Drive.REV = "0902x"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -458,11 +458,11 @@ local function requestDetourRoute(api, playerNum, tx, ty, ax, ay, remaining)
     if type(api.requestDetour) ~= "function" then return nil, "api" end
     local route, state = api.requestDetour(playerNum, tx, ty, ax, ay, TUNE.DETOUR_AVOID_R)
     if not route or state ~= "ok" then return nil, state or "noroad" end
-    if MDADDynamics.finite(route.avoidPenalty) and route.avoidPenalty > 0 then return nil, "through" end
-    if routeTooFar(route) then return nil, "far" end
+    if MDADDynamics.finite(route.avoidPenalty) and route.avoidPenalty > 0 then return nil, "through", route end
+    if routeTooFar(route) then return nil, "far", route end
     if MDADDynamics.finite(route.len) and MDADDynamics.finite(remaining)
             and route.len > remaining * TUNE.DETOUR_LEN_RATIO + TUNE.DETOUR_LEN_SLACK then
-        return nil, "long"
+        return nil, "long", route
     end
     return route, nil
 end
@@ -1103,6 +1103,8 @@ local function startSession(playerObj, playerNum)
         recoverDetail = nil,
         dodgeCrawl = false, -- 承諾剖面是 squeeze／physical／降檔（reserve 豁免＋intent CRAWL；速度仍連續縮放）
         dodgeApproachCap = 0, -- 接近段 envelope（telemetry：分辨「遠壓速」vs「縫本身的帽」）
+        rejectedRoute = nil,  -- 本 MOD 拒收、但仍在主 MOD 快取裡的替代線 identity（cutover 跳過）
+        lastDetourRoute = nil,
         dodgeMargin = 1,    -- commit 時 a..c 最小餘裕（entry／hold 速度縮放輸入）
         dodgeKappa = 0,
         dodgeClearance = 0,
@@ -1255,17 +1257,37 @@ function Drive.requestDetour(playerNum)
     local playerObj = getSpecificPlayer(playerNum)
     local fin = MDADDynamics.finite -- 本檔的 local finite 定義在更後面（:1460+）
     if not playerObj or not fin(s.lastTx) or not fin(s.lastTy) then return false, "target" end
-    local ax, ay = s.blockHitX, s.blockHitY
-    if not fin(ax) or not fin(ay) then
-        ax, ay = s.vehicle:getX(), s.vehicle:getY()
+    local vx, vy = s.vehicle:getX(), s.vehicle:getY()
+    local hx, hy = s.blockHitX, s.blockHitY
+    if not fin(hx) or not fin(hy) then hx, hy = vx, vy end
+    -- 避讓圈圓心＝堵點沿「車→堵點」方向再推 R（2026-09-02 s064 定罪：舊制以堵點
+    -- 為圓心、R=40，車在圈內 9-13m → 任何從本路出發的替代線第一段就穿圈
+    -- （avoidPenalty>0）→ 全部拒收 "through"，只剩起點在別條路的線又被 "far" 拒
+    -- → 永遠 nodetour）。推 R 後：圈的近緣貼堵點、車必在圈外，圈覆蓋堵點後方
+    -- 整段車陣（2R 深）。堵點與車重合（無錨）時沿路線切線推。
+    local dx, dy = hx - vx, hy - vy
+    local dn = sqrt(dx * dx + dy * dy)
+    if dn < 0.5 then
+        local h = s.profile and s.profile.segH[s.fstate.idx or 1] or nil
+        if fin(h) then dx, dy, dn = cos(h), sin(h), 1 else dx, dy, dn = 0, 0, 0 end
+    end
+    local ax, ay = hx, hy
+    if dn > 0 then
+        ax = hx + dx / dn * TUNE.DETOUR_AVOID_R
+        ay = hy + dy / dn * TUNE.DETOUR_AVOID_R
     end
     local remaining = s.profile and (s.profile.length - s.lastSNow) or nil
-    local route, why = requestDetourRoute(api, playerNum, s.lastTx, s.lastTy, ax, ay, remaining)
+    local route, why, rejected = requestDetourRoute(api, playerNum, s.lastTx, s.lastTy, ax, ay, remaining)
+    s.lastDetourRoute = rejected
     if getDebug() then
         print(LOG .. "detour pn=" .. playerNum .. " avoid=(" .. tostring(ax) .. "," .. tostring(ay)
             .. ") -> " .. (route and ("ok len=" .. tostring(route.len)) or ("rejected " .. tostring(why))))
     end
     if not route then
+        -- 主 MOD 的 requestDetour 成功算出路線就已覆寫快取（含被本 MOD 拒收的
+        -- far／long 線）；記住被拒的 identity，cutover 不得沿用（下一次 250ms 取
+        -- 路仍會拿到同一個 table，直到主 MOD 冷卻後重算）。
+        s.rejectedRoute = s.lastDetourRoute
         haloBad(playerObj, KEY_NO_DETOUR)
         voice("nodetour", playerNum)
         return false, why
@@ -3066,6 +3088,77 @@ local function shapeProfile(s, profile, a, b, c, d, offL, baseL)
     return a, b, c, d, true
 end
 
+-- 「擋線點」判定（plan 檔語意、單一定義）：|l - bias| < r + needHalf。
+-- resolveBlockAnchor（lineOnly）、lineBlockerAhead（exit 提前釋放）共用；不得
+-- 在 replan 內再手寫一份（190-local 閘門＋三份漂移風險）。
+local function blocksLine(sen, i, bl, nh)
+    local dl = sen.hardL[i] - bl
+    if dl < 0 then dl = -dl end
+    local r = sen.hardR and sen.hardR[i] or 0
+    if type(r) ~= "number" or r ~= r or r < 0 then r = 0 end
+    return dl < r + nh
+end
+
+-- 前方（弧長 ≥ minS）是否還有擋線點。O(hardN)、零配置；冷路徑（replan）用。
+local function lineBlockerAhead(s, sen, minS)
+    local bl, nh = laneBiasOf(s), s.needHalf
+    for i = 1, sen.hardN do
+        if sen.hardS[i] >= minS and blocksLine(sen, i, bl, nh) then return true end
+    end
+    return false
+end
+
+-- 蛇行折線終點（tryThread／crawlDeadEnd 共用一份定義）：掃描帶內最遠擋線點＋EXIT，
+-- 上限 THREAD_COL_MAX 欄，再鉗到已載入區（折線尾＝末節點最多比 sTo 多一欄＋tail，
+-- 落在 scanEndS／unloadedS 之外整條線判 unloaded＝失敗）。回 sTo（可能 ≤ sFrom）。
+local function threadHorizon(s, sen, sFrom, sObs0)
+    local bl, nh = laneBiasOf(s), s.needHalf
+    local farS = finite(sObs0) and sObs0 or sFrom
+    for i = 1, sen.hardN do
+        local hs = sen.hardS[i]
+        if hs > farS and blocksLine(sen, i, bl, nh) then farS = hs end
+    end
+    local sTo = farS + MDADCorridor.EXIT
+    local maxTo = sFrom + MDADCorridor.THREAD_COL_MAX * MDADCorridor.THREAD_DS
+    if sTo > maxTo then sTo = maxTo end
+    local tail = s.vehicleProfile.halfL + 1
+    local loadedEnd = visibleEndS(sen, sFrom)
+    if sTo > loadedEnd - tail - MDADCorridor.THREAD_DS then
+        sTo = loadedEnd - tail - MDADCorridor.THREAD_DS
+    end
+    if sTo > s.profile.length then sTo = s.profile.length end
+    return sTo
+end
+
+-- 貼縫檔死路判定（2026-09-02）：繞行出口 d 之後路線若仍被擋，用 thread DP 當
+-- oracle 問「從 d 到可見盡頭有沒有任何折線可走」。回 (true, 第一個擋線點索引)＝
+-- 死路（貼縫進去也立刻再 blocked）；(false)＝出口後淨空或整段可走。DP 失敗原因只有
+-- band／start／nopath 算死路；badargs／capacity 不判（fail-open：舊行為是允許）。
+-- 只在貼縫承諾點呼叫（冷路徑，一次 DP）；work 陣列與 tryThread 共用（純暫存）。
+local function crawlDeadEnd(s, sen, d)
+    local bl, nh = laneBiasOf(s), s.needHalf
+    local bi = nil
+    for i = 1, sen.hardN do
+        if sen.hardS[i] >= d + 1 and blocksLine(sen, i, bl, nh) then
+            if bi == nil or sen.hardS[i] < sen.hardS[bi] then bi = i end
+        end
+    end
+    if bi == nil then return false end
+    if type(MDADCorridor.thread) ~= "function" then return false end
+    local sTo = threadHorizon(s, sen, d, sen.hardS[bi])
+    if sTo - d < 4 then return false end
+    local planN = sen.hardN
+    if s.pushBanL ~= nil then planN = planN + 1 end
+    local need = s.squeezeNeed + MDADVehicleProfile.clearanceBudget("probe")
+    local n, why = MDADCorridor.thread(
+        sen.hardS, sen.hardL, sen.hardR, planN, need, MDADSensor.CORRIDOR_HALF,
+        d, bl, sTo, s.vehicleProfile.halfL, s.vehicleProfile.halfW, bl,
+        sen.roadLo, sen.roadHi, s.threadWork, s.threadS, s.threadL, TUNE.THREAD_NODES_MAX)
+    if n >= 2 then return false end
+    if why == "band" or why == "start" or why == "nopath" then return true, bi end
+    return false
+end
+
 -- Candidate sweep and commitment consume the same complete preallocated line.
 local function sweepCandidate(s, shapeOk, a, b, c, d, offL, baseL, tag, needBase)
     if not shapeOk then return 0, 0, false, 99, b, 3, b, 0, 0 end
@@ -3087,29 +3180,30 @@ local function sweepCandidate(s, shapeOk, a, b, c, d, offL, baseL, tag, needBase
         return 0, ovS0, false, 99, b, 3, b, 0, 0
     end
     s.tmpOvEndS = lastCovered
-    return ovN, ovS0, sweepLine(
+    local ok, margin, hardS, phase, sampleS, hitX, hitY = sweepLine(
         s, s.tmpOvX, s.tmpOvY, ovN, ovS0, lastCovered,
         a, b, c, d, offL, tag, needBase)
-end
-
--- 「擋線點」判定（plan 檔語意、單一定義）：|l - bias| < r + needHalf。
--- resolveBlockAnchor（lineOnly）、lineBlockerAhead（exit 提前釋放）共用；不得
--- 在 replan 內再手寫一份（190-local 閘門＋三份漂移風險）。
-local function blocksLine(sen, i, bl, nh)
-    local dl = sen.hardL[i] - bl
-    if dl < 0 then dl = -dl end
-    local r = sen.hardR and sen.hardR[i] or 0
-    if type(r) ~= "number" or r ~= r or r < 0 then r = 0 end
-    return dl < r + nh
-end
-
--- 前方（弧長 ≥ minS）是否還有擋線點。O(hardN)、零配置；冷路徑（replan）用。
-local function lineBlockerAhead(s, sen, minS)
-    local bl, nh = laneBiasOf(s), s.needHalf
-    for i = 1, sen.hardN do
-        if sen.hardS[i] >= minS and blocksLine(sen, i, bl, nh) then return true end
+    -- 貼縫檔（squeeze／physical）不得鑽進死路（2026-09-02 s064／s001 兩輪定罪：
+    -- 車陣第一台以 margin 0.09 的貼縫承諾、4 km/h 爬 20m，出口落在第二排車前，
+    -- 整段車陣 DP nopath——就算擠過第一台也立刻再 blocked，代價是 40s＋接觸＋
+    -- 三次倒車 StopStuck）。貼縫是單一障礙的最後手段；出口之後路線仍被擋時，
+    -- 先問「可見車陣整段有沒有路」（thread DP 當 oracle），沒路＝拒收→blocked→
+    -- 改道／交還階梯，不浪費 40s 鑽進去。cruise 檔不受影響（速度不掉、下一段
+    -- 由下一輪 plan 處理）；單一縫（出口後淨空）照 2026-09-01 裁定「物理可過即過」。
+    if ok and needBase < s.sweepBase - 1e-6 then
+        local deadEnd, bi = crawlDeadEnd(s, s.sensor, d)
+        if deadEnd then
+            local sen = s.sensor
+            if getDebug() then
+                print(string.format(
+                    "%ssweep deadend[%s] offL=%.2f d=%.1f next blocker s=%.1f: crawl refused",
+                    LOG, tostring(tag or "?"), offL, d, bi and sen.hardS[bi] or -1))
+            end
+            return ovN, ovS0, false, 0, bi and sen.hardS[bi] or d + 1, 4, d,
+                bi and sen.hardX[bi] or 0, bi and sen.hardY[bi] or 0
+        end
     end
-    return false
+    return ovN, ovS0, ok, margin, hardS, phase, sampleS, hitX, hitY
 end
 
 -- blocked 座標錨解析（plan／guard 共用；Kahlua 190-local 閘門逼出的抽取）：
@@ -3192,29 +3286,10 @@ local function tryThread(s, vehicle, playerNum, sObs0, sObs1, now)
     local sFrom = s.lastSNow
     local laneFrom = s.lastLatSigned
     if not finite(laneFrom) then laneFrom = laneBiasOf(s) end
-    -- 折線終點＝掃描帶內**最遠的擋線 hard 點**＋EXIT。第一版用第一群的出口
-    -- （sObs1＋EXIT）：plan 的群只看 6m 內串起來的第一群，終欄成本把折線拉回基準線、
-    -- 走到末節點釋放後下一群再蛇一次；lone car 後面緊接車陣時終欄落在車陣裡。
-    -- 蛇行要看到整段可見車陣才有意義（一次承諾）。不擋線的路緣點（樹排／圍籬）
-    -- 不算——否則終點永遠是掃描帶尾端。上限 THREAD_COL_MAX 欄、再鉗到已載入區。
-    local bl, nh = laneBiasOf(s), s.needHalf
-    local farS = finite(sObs0) and sObs0 or sFrom
-    for i = 1, sen.hardN do
-        local hs = sen.hardS[i]
-        if hs > farS and blocksLine(sen, i, bl, nh) then farS = hs end
-    end
-    local sTo = farS + MDADCorridor.EXIT
-    local maxTo = sFrom + MDADCorridor.THREAD_COL_MAX * MDADCorridor.THREAD_DS
-    if sTo > maxTo then sTo = maxTo end
-    -- 遠視界不得越過已掃且已載入的 s：折線尾（末節點最多比 sTo 多一欄＋tail）
-    -- 落在 scanEndS／unloadedS 之外整條線判 unloaded＝失敗——舊制（第一群出口）
-    -- 天然近，遠視界會撞到這條；寧可短承諾、走到末節點再蛇一次。
-    local tail = halfL + 1
-    local loadedEnd = visibleEndS(sen, sFrom)
-    if sTo > loadedEnd - tail - MDADCorridor.THREAD_DS then
-        sTo = loadedEnd - tail - MDADCorridor.THREAD_DS
-    end
-    if sTo > prof.length then sTo = prof.length end
+    -- 折線終點＝掃描帶內最遠擋線點＋EXIT（threadHorizon；與 crawlDeadEnd 同一定義）。
+    -- 第一版用第一群出口（sObs1＋EXIT）：終欄成本把折線拉回基準線、走到末節點
+    -- 釋放後下一群再蛇一次；lone car 後面緊接車陣時終欄落在車陣裡。
+    local sTo = threadHorizon(s, sen, sFrom, sObs0)
     if not finite(sObs0) or sObs0 <= sFrom + 1 or sTo - sFrom < 4 then return false end
     local planN = sen.hardN
     if s.pushBanL ~= nil then planN = planN + 1 end -- 推撞 ban 點已在尾格（replan 寫入）
@@ -5674,6 +5749,7 @@ local function onPlayerUpdate(player)
             s.resumeProgressUntil = 0
             s.pendingRouteWhy = "target"
             s.avoidX, s.avoidY, s.pendingDetour = nil, nil, false
+            s.rejectedRoute = nil
         end
         -- 起點太遠（要越野接線）＝與啟動同一道閘門：交還玩家。**每一次 cutover 都驗**
         -- （2026-09-02 s064 定罪：舊制只在啟動與換目標驗，偏航重算走的是同一個
@@ -5725,13 +5801,21 @@ local function onPlayerUpdate(player)
                 and finite(s.avoidX) and finite(s.avoidY)
                 and routeCrossesAvoid(route, s.avoidX, s.avoidY, TUNE.DETOUR_AVOID_R) then
             local remaining = s.profile and (s.profile.length - s.lastSNow) or nil
-            local detour = requestDetourRoute(api, playerNum, tx, ty, s.avoidX, s.avoidY, remaining)
+            local detour, _, rejected = requestDetourRoute(api, playerNum, tx, ty, s.avoidX, s.avoidY, remaining)
             if detour then
                 route = detour
                 s.pendingRouteWhy = "detour"
             else
                 s.avoidX, s.avoidY = nil, nil
+                if rejected ~= nil then s.rejectedRoute = rejected end
             end
+        end
+        -- 被本 MOD 拒收的替代線（far／long／through）仍躺在主 MOD 快取裡（requestDetour
+        -- 成功即覆寫），下一次取路會原樣拿回同一個 table——不得當成一般 cutover 收下
+        -- （2026-09-02 s064：拒收 far 之後同一幀就以 "deviation" 名義跟著它開進樹林；
+        -- 主 MOD 冷卻後重算會換新 identity，屆時照常 cutover）。
+        if route ~= s.route and s.rejectedRoute ~= nil and route == s.rejectedRoute then
+            route = s.route
         end
         if route ~= s.route or versionChanged then
             local profile = MDADFollower.begin(
@@ -5768,6 +5852,7 @@ local function onPlayerUpdate(player)
             end
             s.route = route
             s.profile = profile
+            s.rejectedRoute = nil
             s.navVersion = api.navApiVersion
             Drive.invalidateCommandState(s, vehicle:getCurrentSpeedKmHour(), "HOLD")
             s.adaptive = profile.adaptive == true

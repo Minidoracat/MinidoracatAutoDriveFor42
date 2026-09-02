@@ -6645,6 +6645,42 @@ local function scenarioDetour()
     ok, why = MDAD.Drive.requestDetour(0)
     checkTrue(ok == false and why == "long", "(c5) 5km 替代線拒收（剩餘 ~150m）")
     checkTrue(MDAD.Drive.isActive(0), "(c5) 三次拒收 session 仍活著")
+    -- 被拒收的替代線仍躺在主 MOD 快取（requestDetour 成功即覆寫）：下一次 250ms 取路
+    -- 原樣拿回同一個 table，不得以 "deviation" 名義 cutover 跟著走（2026-09-02 s064：
+    -- 拒收 far 的線同幀被收下→lat=63.5 開進樹林）。主 MOD 冷卻重算＝新 identity 才收。
+    local poisoned = nav.detour -- 剛被拒的 5km 線
+    local routeWas = nav.route
+    local rgBefore
+    do
+        local cap = nil
+        local realOv = MDADOverlay.update
+        MDADOverlay.update = function(pn, st, ...) if pn == 0 then cap = st end return realOv(pn, st, ...) end
+        nav.route = poisoned
+        nowMs = nowMs + 300
+        driveTick(dp, dveh)
+        drive.scanRound() -- overlay 只在掃描輪完成時綁 session
+        MDADOverlay.update = realOv
+        checkTrue(cap ~= nil and cap.route ~= poisoned, "(c5) 剛拒收的替代線從快取拿回來也不 cutover")
+        rgBefore = cap and cap.routeGen
+        -- 主 MOD 冷卻後重算：新 identity（幾何同原線）→ 照常收
+        local rebuilt = newRoute(10, 11, 0, -2, 0)
+        rebuilt.len, rebuilt.cost, rebuilt.avoidPenalty, rebuilt.snapDist = 60, 60, 0, 1
+        nav.route = rebuilt
+        nowMs = nowMs + 300
+        MDADOverlay.update = function(pn, st, ...) if pn == 0 then cap = st end return realOv(pn, st, ...) end
+        driveTick(dp, dveh)
+        drive.scanRound()
+        MDADOverlay.update = realOv
+        checkTrue(cap ~= nil and cap.route == rebuilt, "(c5) 主 MOD 重算的新 identity 照常 cutover")
+        -- 還原：切回原線（新 identity→cutover），牆仍在 → 再度 blocked，後續斷言照舊
+        nav.route = routeWas
+        nowMs = nowMs + 300
+        driveTick(dp, dveh)
+        dveh._speed = 0
+        driveReset(dveh)
+        drive.scanRound()
+        checkEq(haloKey(), DKEY.BLOCKED, "(c5) 切回原線後仍 blocked（後續改道斷言的前提）")
+    end
     nav.detour = detourRoute(120, 0, 1)
     ok, why = MDAD.Drive.requestDetour(0)
     checkTrue(ok == true, "(c5) 合格替代線接受（實得 " .. tostring(why) .. "）")
@@ -6666,7 +6702,14 @@ local function scenarioDetour()
     checkTrue(captured ~= nil and captured.route == nav.detour,
         "(c5) 替代線下一幀 cutover（session.route 換成替代線）")
     checkEq(captured and captured.pendingDetour, false, "(c5) cutover 後 pendingDetour 清空")
-    checkEq(captured and captured.avoidX, 20.5, "(c5) sticky 避讓圈記在堵點格心 x=20.5")
+    -- 圓心＝堵點沿「車→堵點」方向再推 R=40（2026-09-02 s064：以堵點為圓心時車在圈內，
+    -- 本路出發的替代線第一段必穿圈＝全部 "through"，永遠 nodetour）：車在 x=11、
+    -- 堵點 x=20.5 → 圓心 x≈60.5（近緣貼堵點，車在圈外）。
+    checkTrue(captured and captured.avoidX > 60 and captured.avoidX < 61,
+        "(c5) sticky 避讓圈圓心＝堵點再往前推 R（x≈60.5，實得 " .. tostring(captured and captured.avoidX) .. "）")
+    checkTrue(nav.lastDetour and nav.lastDetour.ax > 60 and nav.lastDetour.ax < 61
+        and (nav.lastDetour.ax - 11) > nav.lastDetour.r,
+        "(c5) 主 MOD 收到的圓心離車 > R＝車在圈外")
     checkTrue(MDAD.Drive.hudState(0) ~= "blocked", "(c5) cutover 後不再 blocked（實得 " .. tostring(MDAD.Drive.hudState(0)) .. "）")
     ok, why = MDAD.Drive.requestDetour(0)
     checkTrue(ok == false and why == "not-blocked", "(c5) 沒堵時按改道＝not-blocked，不問主 MOD")
@@ -7116,6 +7159,46 @@ local function scenarioOutline()
     checkTrue(worstGap > 0 and worstGap <= 21 / 63 + 0.05,
         "(c7c) 相鄰輪廓點間距（含收尾段）≤ 周長／63（實得 " .. string.format("%.3f", worstGap) .. "）")
     drive.clearVehicleGeom(cBus)
+    MDAD.Drive.stop(0, nil)
+
+    -- (c7d) 貼縫檔不鑽死路（2026-09-02 s064／s001 兩輪定罪：車陣第一台以 margin 0.09 的
+    -- 貼縫承諾、4 km/h 爬 20m，出口落在第二排前、整段 DP nopath——擠過去也立刻再
+    -- blocked，代價 40s＋接觸＋三次倒車）。fixture：兩台車真縫 2.6m、偏離行駛線（邊緣
+    -- l −0.1／2.5）：cruise（1.35）與 squeeze（1.30）都找不到 lane，physical（1.05）在
+    -- l≈1.0-1.25 有縫＝貼縫 Dodge 候選；出口之後 14m 一道整寬牆。契約：拒收貼縫→blocked。
+    -- (c7e) 同一縫、牆拿掉＝出口後淨空→照 2026-09-01 裁定「物理可過即過」承諾貼縫 Dodge。
+    checkTrue(armDrive(), "(c7d) 啟動")
+    local _, cD1 = drive.putVehicleGeom(20, -1.0, 0, 1.8, 4.4, true)
+    local _, cD2 = drive.putVehicleGeom(20, 3.4, 0, 1.8, 4.4, true)
+    for x = 12, 28 do
+        for _, y in ipairs({ -6, -5, 6, 7 }) do drive.putSolid(x, y, "harness_c7d_fence_" .. x .. "_" .. y) end
+    end
+    for y = -6, 5 do drive.putSolid(44, y, "harness_c7d_wall_" .. y) end
+    driveReset(dveh)
+    drive.scanRound()
+    checkEq(haloKey(), DKEY.BLOCKED, "(c7d) 2.6m 貼縫＋出口後整寬牆：拒收貼縫、blocked（實得 " .. tostring(haloKey()) .. "）")
+    checkTrue(MDAD.Drive.hudState(0) == "blocked", "(c7d) HUD 狀態 blocked（實得 " .. tostring(MDAD.Drive.hudState(0)) .. "）")
+    for y = -6, 5 do drive.clearCell(44, y) end
+    MDAD.Drive.stop(0, nil)
+    checkTrue(armDrive(), "(c7e) 啟動")
+    driveReset(dveh)
+    drive.scanRound()
+    checkEq(haloKey(), DKEY.DODGE, "(c7e) 同一縫、出口後淨空：貼縫照過（實得 " .. tostring(haloKey()) .. "）")
+    MDAD.Drive.stop(0, nil)
+    -- (c7f) 出口後有擋線點但**整段可走**（單台側停車、另一側淨空）：oracle 是 DP 不是
+    -- 「出口後有障礙就拒」——否則路肩每 20m 一台廢車的公路全部退化成 blocked
+    -- （違規證明：把 crawlDeadEnd 改成「有擋線點即死路」，本案紅）。
+    checkTrue(armDrive(), "(c7f) 啟動")
+    local _, cD3 = drive.putVehicleGeom(46, -1.6, 0, 1.8, 4.4, true) -- 邊緣 l=-0.7：擋線，但右側整段可走
+    driveReset(dveh)
+    drive.scanRound()
+    checkEq(haloKey(), DKEY.DODGE, "(c7f) 出口後單台側停車、整段可蛇行：貼縫照過（實得 " .. tostring(haloKey()) .. "）")
+    drive.clearVehicleGeom(cD3)
+    drive.clearVehicleGeom(cD1)
+    drive.clearVehicleGeom(cD2)
+    for x = 12, 28 do
+        for _, y in ipairs({ -6, -5, 6, 7 }) do drive.clearCell(x, y) end
+    end
     MDAD.Drive.stop(0, nil)
 end
 scenarioOutline()
