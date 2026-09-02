@@ -52,6 +52,20 @@ Project Zomboid Build 42 MOD。
 本 addon 需要 [Minidoracat MiniMap for B42](https://steamcommunity.com/sharedfiles/filedetails/?id=3763913359)
 與 Minidoracat UI for B42；不與 Navigator 共存（兩者都佔用車輛儀表上方）。
 
+## 回報導航問題
+
+自動駕駛走錯路、卡住、無故停下或交還操控，請開 GitHub Issue（New issue → 「導航問題回報」），表單會逐欄要求資料。關鍵是**整個 `Telemetry` 資料夾的 zip**——靠 `session-index.txt` 的時間戳與各段紀錄才定位得到出問題的那一段：
+
+1. ESC → MOD 選項（或 MiniMap 齒輪 → 「自動駕駛」）勾選「匯出自動駕駛診斷紀錄」（預設關，下一段自動駕駛生效）
+2. 重現問題
+3. 同一頁按「複製紀錄資料夾路徑」→ 檔案總管網址列貼上 → Enter
+4. 對 `Telemetry` 資料夾右鍵 → 壓縮成 ZIP（整個資料夾）
+5. 把 zip 拖進表單的附件欄；只附 zip，不要貼路徑（含你的電腦帳號名稱）
+
+紀錄含遊戲內絕對座標、原始 epoch 毫秒時間戳與啟用的 MOD 清單，沒有帳號／Steam ID／IP／伺服器名稱；公開 repo 的附件任何人都能下載，請自行斟酌。zip 超過 25 MB 時只附 `session-index.txt`、`latest.txt`、`manifest.txt` 與最後幾段 `session-NNN.log`。
+
+English: open a GitHub issue with the "Navigation problem report" form and attach the whole `Telemetry` folder as a zip — the form lists the steps.
+
 ## 開發
 - `link_workshop.bat`：把 repo 掛載到 `Zomboid\Workshop\` 與 `Zomboid\mods\`（符號連結，repo 改動即時生效）
 - `PZ_Test.bat`：啟動測試（客戶端 / 專用伺服器 / 多客戶端組合）

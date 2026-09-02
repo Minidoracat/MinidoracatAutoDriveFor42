@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 一般問題／建議 / General questions & suggestions
+    url: https://steamcommunity.com/sharedfiles/filedetails/?id=3792675881
+    about: 不是導航故障的問題請到 Workshop 頁面留言；Issue 只收附 Telemetry zip 的導航回報。For anything that is not a navigation failure, comment on the Workshop page; issues here are for navigation reports with a Telemetry zip attached.

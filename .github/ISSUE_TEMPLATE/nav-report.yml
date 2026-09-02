@@ -1,0 +1,127 @@
+name: 導航問題回報 / Navigation problem report
+description: 自動駕駛走錯路、卡住、無故停下或交還操控——請附上整個 Telemetry 資料夾的 zip。AutoDrive took a wrong route, got stuck, stopped or handed back control — attach the whole Telemetry folder as a zip.
+title: "[Nav] "
+labels: ["navigation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 回報前先做這五步 / Do these five steps first
+
+        1. **開啟診斷紀錄**：ESC → MOD 選項（或 MiniMap 齒輪 → 「自動駕駛」分類）→ 勾選「匯出自動駕駛診斷紀錄」（預設關閉，從**下一段**自動駕駛開始生效）。
+        2. **重現問題**：再開一次自動駕駛，開到出問題的地方，讓它停下／交還。
+        3. **找到資料夾**：同一頁按「複製紀錄資料夾路徑」→ 開檔案總管 → 貼到網址列 → Enter。
+        4. **整個資料夾壓縮**：對 `Telemetry` 資料夾右鍵 → 壓縮成 ZIP。**整個資料夾**，不要挑檔案——我們靠 `session-index.txt` 的時間戳＋各段紀錄才找得到出問題的那一段。
+        5. **拖進下面的附件欄**。只附 zip，**不要貼路徑**（那串含你的電腦帳號名稱）。
+
+        1. **Enable the diagnostic log**: ESC → Mod Options (or MiniMap gear → "AutoDrive") → tick "Export autodrive diagnostic log" (off by default; takes effect from the **next** AutoDrive session).
+        2. **Reproduce**: start AutoDrive again and drive to where it goes wrong; let it stop / hand back.
+        3. **Find the folder**: on the same page press "Copy log folder path" → open File Explorer → paste into the address bar → Enter.
+        4. **Zip the whole folder**: right-click the `Telemetry` folder → Compress to ZIP. The **whole folder**, not selected files — the timestamps in `session-index.txt` plus the per-session logs are what let us locate the failing drive.
+        5. **Drag the zip into the attachment field below.** Attach the zip only; **do not paste the path** (it contains your computer account name).
+
+        紀錄內容 / What the logs contain：遊戲內絕對座標、原始 epoch 毫秒時間戳（＝你的遊玩時段）、當時啟用的 MOD 清單、車輛物理參數。沒有帳號、Steam ID、IP 或伺服器名稱。公開 repo 的附件任何人拿到連結都能下載，請自行斟酌。
+        In-game absolute coordinates, raw epoch-millisecond timestamps (= when you played), the list of mods enabled at the time, vehicle physics. No account name, Steam ID, IP or server name. Attachments on a public repo are downloadable by anyone with the link — attach at your own discretion.
+
+        zip 超過 25 MB 時 / If the zip exceeds 25 MB：只附 `session-index.txt`、`latest.txt`、`manifest.txt` 與最後幾段 `session-NNN.log`（`session-index.txt` 尾端幾列指到的檔案）。Attach only `session-index.txt`, `latest.txt`, `manifest.txt` and the last few `session-NNN.log` files (the ones the last rows of `session-index.txt` point to).
+
+  - type: input
+    id: mod-version
+    attributes:
+      label: 本 MOD 版本 / AutoDrive version
+      description: Workshop 頁面或 `session-NNN.log` 第一行的 `"build"`。From the Workshop page or `"build"` on the first line of any `session-NNN.log`.
+      placeholder: 42.20.4-0.2.0
+    validations:
+      required: true
+
+  - type: input
+    id: minimap-version
+    attributes:
+      label: MiniMap 主 MOD 版本 / MiniMap version
+      description: 同一行 `"mods"` 欄裡的 `MinidoracatMiniMapFor42@…`。The `MinidoracatMiniMapFor42@…` entry in the `"mods"` field of the same line.
+      placeholder: 42.20.4-0.24.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: 遊戲模式 / Game mode
+      options:
+        - 單機 / Single player
+        - 多人：專用伺服器 / Multiplayer – dedicated server
+        - 多人：遊戲內主機 / Multiplayer – in-game host
+    validations:
+      required: true
+
+  - type: input
+    id: vehicle
+    attributes:
+      label: 車輛 / Vehicle
+      description: 車型名稱；若是 MOD 車請附 MOD 名。Vehicle name; for a mod vehicle include the mod name.
+      placeholder: Chevalier Cerise / '93 Ford F-350 (mod)
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 發生了什麼 / What happened
+      description: 症狀先講：走錯路、切進路邊、原地不動、紅字交還、跑不到速度……以及你預期它該怎麼做。Symptom first — wrong route, cut into the roadside, would not move, red "hand back" message, too slow… and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: where
+    attributes:
+      label: 發生地點 / Where
+      description: 地圖座標（畫面右下角的 x, y）或截圖；起點與目的地一起給更好。Map coordinates (x, y at the bottom-right of the screen) or a screenshot; start and destination together is best.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: reproducible
+    attributes:
+      label: 能否重現 / Reproducible
+      options:
+        - 每次都會 / Every time
+        - 偶爾 / Sometimes
+        - 只發生過一次 / Only once
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 重現步驟 / Steps to reproduce
+      placeholder: |
+        1. 在 ○○ 上車、目的地點在 ○○
+        2. 啟動自動駕駛，檔位 70
+        3. 到 ○○ 路口時……
+
+  - type: textarea
+    id: telemetry
+    attributes:
+      label: Telemetry 資料夾 zip / Telemetry folder zip
+      description: 把整個 `Telemetry` 資料夾的 zip 拖進這個欄位（GitHub 會自動上傳、產生連結）。Drag the zip of the whole `Telemetry` folder into this field (GitHub uploads it and inserts a link).
+      placeholder: 拖曳 zip 到這裡 / Drag the zip here
+    validations:
+      required: true
+
+  - type: textarea
+    id: console
+    attributes:
+      label: console.txt（選附 / optional）
+      description: "`%USERPROFILE%\\Zomboid\\console.txt`——有紅字錯誤時特別有用；同樣拖檔進來，不要貼路徑。Useful when there was an error message; drag the file in, do not paste the path."
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 確認 / Confirm
+      options:
+        - label: 我壓縮的是整個 `Telemetry` 資料夾，不是挑出來的單一檔案。I zipped the whole `Telemetry` folder, not selected files.
+          required: true
+        - label: 我知道紀錄含遊戲內座標、遊玩時間戳與 MOD 清單，且公開 repo 的附件任何人都能下載。I understand the logs contain in-game coordinates, play-time timestamps and my mod list, and that attachments on a public repo are downloadable by anyone.
+          required: true
+        - label: 我沒有貼上自己電腦的資料夾路徑。I did not paste my local folder path.
+          required: true
