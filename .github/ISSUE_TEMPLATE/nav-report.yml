@@ -8,11 +8,15 @@ body:
       value: |
         ## 回報前先做這五步 / Do these five steps first
 
+        ### 中文
+
         1. **開啟診斷紀錄**：ESC → MOD 選項（或 MiniMap 齒輪 → 「自動駕駛」分類）→ 勾選「匯出自動駕駛診斷紀錄」（預設關閉，從**下一段**自動駕駛開始生效）。
         2. **重現問題**：再開一次自動駕駛，開到出問題的地方，讓它停下／交還。
         3. **找到資料夾**：同一頁按「複製紀錄資料夾路徑」→ 開檔案總管 → 貼到網址列 → Enter。
         4. **整個資料夾壓縮**：對 `Telemetry` 資料夾右鍵 → 壓縮成 ZIP。**整個資料夾**，不要挑檔案——我們靠 `session-index.txt` 的時間戳＋各段紀錄才找得到出問題的那一段。
         5. **拖進下面的附件欄**。只附 zip，**不要貼路徑**（那串含你的電腦帳號名稱）。
+
+        ### English
 
         1. **Enable the diagnostic log**: ESC → Mod Options (or MiniMap gear → "AutoDrive") → tick "Export autodrive diagnostic log" (off by default; takes effect from the **next** AutoDrive session).
         2. **Reproduce**: start AutoDrive again and drive to where it goes wrong; let it stop / hand back.
