@@ -1552,6 +1552,54 @@ do
         segSurface = { "paved", "paved" }, segWidth = { 12, 12 },
     }, 120, 3, vp)
     checkEq(legacy.filletN, 0, "v2/v3 never trusts similarly named widths for fillet")
+
+    -- 容量退路的 band 證明語意（2026-09-02 玩家 telemetry s001-s010）：舊制輸出
+    -- 超限＝buildFilletPath 回 bandValid=false → Driver 每幀 band proof 零長 →
+    -- obb 警戒帽 18 常駐 7.4 km。契約：兩條退路（source 超限／輸出超限）都保持
+    -- filletBandValid＝true（點在 raw 中心線上、segSource 直對 raw 段），差別只在
+    -- filletReason（source 超限＝"capacity" 全 fallback；輸出超限＝nil、部分弧）。
+    local hugeRoute = { pts = {}, segSurface = {}, segWidth = {} }
+    local hugeN = MDADDynamics.FILLET_SOURCE_MAX + 1
+    for i = 1, hugeN do
+        hugeRoute.pts[i * 2 - 1] = i * 10
+        hugeRoute.pts[i * 2] = (i % 2 == 0) and 10 or 0
+        if i < hugeN then
+            hugeRoute.segSurface[i], hugeRoute.segWidth[i] = "paved", 12
+        end
+    end
+    local huge = F.begin(hugeRoute, 120, 4, vp)
+    while not F.stepBuild(huge, 4096) do end
+    checkEq(huge.filletN, 0, "source 超限：不建弧")
+    checkEq(huge.filletReason, "capacity", "source 超限：reason=capacity")
+    checkTrue(huge.filletBandValid, "source 超限：band 證明仍有效")
+    checkEq(huge.n, hugeN, "source 超限：保留原折線")
+    local allFallback = true
+    for i = 1, huge.n - 1 do
+        if huge.segKind[i] ~= MDADDynamics.SEG_FALLBACK then allFallback = false end
+    end
+    checkTrue(allFallback, "source 超限：全段 SEG_FALLBACK")
+
+    local zigRoute = { pts = { 0, 0 }, segSurface = {}, segWidth = {} }
+    for k = 1, 8 do
+        local x, y = zigRoute.pts[#zigRoute.pts - 1], zigRoute.pts[#zigRoute.pts]
+        if k % 2 == 1 then x = x + 40 else y = y + 40 end
+        zigRoute.pts[#zigRoute.pts + 1], zigRoute.pts[#zigRoute.pts + 2] = x, y
+    end
+    zigRoute.pts[#zigRoute.pts + 1] = zigRoute.pts[#zigRoute.pts - 1] + 40
+    zigRoute.pts[#zigRoute.pts + 1] = zigRoute.pts[#zigRoute.pts - 1]
+    for i = 1, #zigRoute.pts / 2 - 1 do
+        zigRoute.segSurface[i], zigRoute.segWidth[i] = "paved", 12
+    end
+    local savedOut = MDADDynamics.FILLET_OUTPUT_MAX
+    MDADDynamics.FILLET_OUTPUT_MAX = 200
+    local partial = F.begin(zigRoute, 120, 4, vp)
+    MDADDynamics.FILLET_OUTPUT_MAX = savedOut
+    while not F.stepBuild(partial, 4096) do end
+    checkTrue(partial.filletN >= 3, "輸出超限：前段仍有弧")
+    checkTrue(partial.filletFallbackN >= 3, "輸出超限：後段降 fallback")
+    checkNil(partial.filletReason, "輸出超限：不是 capacity 失敗")
+    checkTrue(partial.filletBandValid, "輸出超限：band 證明仍有效")
+    checkTrue(partial.n <= 200, "輸出超限：profile 點數不超過上限")
 end
 
 -- =====================================================================

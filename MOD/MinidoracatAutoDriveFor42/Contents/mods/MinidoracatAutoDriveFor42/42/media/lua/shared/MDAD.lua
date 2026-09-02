@@ -15,10 +15,24 @@ MDAD.TYPE_MANUAL = "MinidoracatAutoDrive.NavigationRepairManual"
 -- Researchablerecipes 寫的值；登入補學（server/MDAD_Server.lua）就靠這兩個常數。
 MDAD.RECIPE_GPS = "CraftGPSNavigator"
 MDAD.RECIPE_AUTO = "CraftAutopilotModule"
--- build 印記：載入時印進 console（不受 getDebug 管）——實機回報「行為沒變」時
--- 第一件事就是對這行，判定使用者跑的是不是新版（2026-08-28 三場撞樹回報
--- 無法從 log 判定 code 版本的教訓）。每次行為修正遞增尾碼。
-MDAD.BUILD = "m68-20260831a"
+-- build 印記：載入時印進 console（不受 getDebug 管），telemetry header 的 build 欄
+-- 也帶它——實機回報「行為沒變」時第一件事就是對這行（2026-08-28 三場撞樹回報
+-- 無法從 log 判定 code 版本的教訓）。值直接取 mod.info 的 modversion
+-- （`getModInfoByID`＝LuaManager.java:5368 → ChooseGameInfo.getModDetails 檔案快取、
+-- client／server 同源；`getModVersion`＝ChooseGameInfo.java:696；原版用例
+-- ISPauseModListUI.lua:22、ModInfoPanelParam.lua:23）。舊制手寫常數十三次 REV
+-- 都沒人 bump（m68-20260831a 掛到 0902m）——死印記比沒印記更誤導。
+-- 開發期細粒度版本另看 telemetry header 的 rev（MDAD.Drive.REV）。
+MDAD.BUILD = "unknown"
+do
+    local ok, info = pcall(function()
+        return type(getModInfoByID) == "function" and getModInfoByID(MDAD.MOD_ID) or nil
+    end)
+    if ok and info ~= nil then
+        local okV, v = pcall(function() return info:getModVersion() end)
+        if okV and type(v) == "string" and v ~= "" then MDAD.BUILD = v end
+    end
+end
 print("[MinidoracatAutoDrive] build " .. MDAD.BUILD)
 
 -- client → server 的安裝／卸載請求（server/MDAD_Server.lua 收）與失敗回報

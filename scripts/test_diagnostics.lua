@@ -1233,6 +1233,29 @@ MDADDiagnostics.event(0, "target", {
     why = "user", tg = 7, navVersion = 4, currentSurface = "paved",
     currentSegWidth = 6, cost = 123.5, avoidPenalty = 0,
 })
+-- route cutover 原始路線快照＋ready 的 fillet 結果（2026-09-02 玩家 telemetry 定罪缺口）
+local srcRoute = {
+    pts = { 7426.5, 8275, 7277, 8275, 7277, 8372 },
+    segWidth = { 6, 8 }, segSurface = { "paved", "unknown" },
+}
+MDADDiagnostics.event(0, "route", MDADDiagnostics.routeSource(srcRoute, {
+    phase = "cutover", why = "initial", tg = 7, rg = 9, len = 246.5, pts = 3,
+}))
+MDADDiagnostics.event(0, "route", {
+    phase = "ready", why = "initial", tg = 7, rg = 9, len = 240, pts = 40,
+    filletN = 1, filletFallbackN = 0, filletBandValid = true,
+})
+MDADDiagnostics.event(0, "route", {
+    phase = "ready", why = "target", tg = 8, rg = 10, len = 7400, pts = 62,
+    filletN = 0, filletFallbackN = 60, filletBandValid = true, filletReason = "capacity",
+})
+local noPts = MDADDiagnostics.routeSource({ len = 5 }, { phase = "cutover" })
+local bigRoute = { pts = {}, segWidth = {}, segSurface = {} }
+for i = 1, 600 do
+    bigRoute.pts[i * 2 - 1], bigRoute.pts[i * 2] = i, 0
+    if i < 600 then bigRoute.segWidth[i], bigRoute.segSurface[i] = 8, "paved" end
+end
+local bigPayload = MDADDiagnostics.routeSource(bigRoute, {})
 MDADDiagnostics.event(0, "unstick", {
     phase = "success", eid = 3, attempt = 2, x = 10, y = 20,
     s = 30, d = 3.1, duration = 850, speed = -0.5, rear = "clear",
@@ -1324,6 +1347,20 @@ check(string.find(physBody, '"currentSurface":"paved"', 1, true) ~= nil,
     "route event additive surface")
 check(string.find(physBody, '"avoidPenalty":0', 1, true) ~= nil,
     "route event additive numeric avoidPenalty zero")
+check(string.find(physBody,
+    '"src":"7426.5,8275;7277,8275;7277,8372","srcW":"6;8","srcS":"paved;unknown"',
+    1, true) ~= nil, "route cutover carries raw points, widths and surfaces")
+check(string.find(physBody, '"filletN":1,"filletFallbackN":0,"filletBandValid":true}',
+    1, true) ~= nil, "route ready carries fillet result; absent reason omitted")
+check(string.find(physBody,
+    '"filletN":0,"filletFallbackN":60,"filletBandValid":true,"filletReason":"capacity"',
+    1, true) ~= nil, "route ready names capacity fallback")
+checkEq(noPts.src, nil, "route without points adds no src field")
+checkEq(noPts.phase, "cutover", "routeSource returns the same payload table")
+checkEq(select(2, string.gsub(bigPayload.src, ";", "")), 511,
+    "oversize route snapshot truncates to 512 points")
+checkEq(select(2, string.gsub(bigPayload.srcW, ";", "")), 510,
+    "oversize route widths truncate with the points")
 check(string.find(physBody, '"tg":7', 1, true) ~= nil, "target generation recorded")
 check(string.find(physBody, '"rg":9', 1, true) ~= nil, "route generation recorded")
 check(string.find(physBody, '"eid":3', 1, true) ~= nil, "episode id recorded")
@@ -1345,6 +1382,57 @@ check(string.find(physBody,
 check(string.find(physBody,
     '"n":"unstick","phase":"success","x":10,"y":20,"eid":3,"attempt":2,"s":30,"d":3.1,"duration":850,"speed":-0.5,"rear":"clear"',
     1, true) ~= nil, "settle completion event records final speed in fixed order")
+
+--------------------------------------------------------------------------------
+scenario("header carries game version and activated mods; absent APIs omit the fields")
+-- 2026-09-02 玩家 log 復盤：車型 script 名推不出是哪個 MOD／哪一版，主 MOD 與
+-- 依賴庫版本只有 console.txt 才有——header 帶 game／mods 一次。
+resetFs()
+loadProd()
+nowMs = 9300000
+MDADDiagnostics.start(0, nil, profile)
+MDADDiagnostics.stop(0, "end")
+local bareHeader = files[sessionPath(1)] or ""
+checkEq(countNeedle(bareHeader, '"game":'), 0, "no getCore stub: game field omitted")
+checkEq(countNeedle(bareHeader, '"mods":'), 0, "no getActivatedMods stub: mods field omitted")
+check(string.find(bareHeader, '"build":"m57-test","rev":', 1, true) ~= nil,
+    "build/rev keep their schema v1 position")
+
+local function javaList(items)
+    return {
+        size = function() return #items end,
+        get = function(_, i) return items[i + 1] end,
+    }
+end
+function getCore() return { getVersionNumber = function() return "42.20.4" end } end
+function getActivatedMods() return javaList({ "MinidoracatUIFor42", "89volvo200", "MinidoracatAutoDriveFor42" }) end
+local modVersions = { MinidoracatUIFor42 = "42.20.4-1.3.0", MinidoracatAutoDriveFor42 = "42.20.4-0.2.1" }
+function getModInfoByID(id)
+    local v = modVersions[id]
+    if v == nil then return nil end
+    return { getModVersion = function() return v end }
+end
+resetFs()
+nowMs = 9301000
+MDADDiagnostics.start(0, nil, profile)
+MDADDiagnostics.stop(0, "end")
+local envHeader = files[sessionPath(1)] or ""
+check(string.find(envHeader, '"game":"42.20.4"', 1, true) ~= nil, "game version recorded")
+check(string.find(envHeader,
+    '"mods":"MinidoracatUIFor42@42.20.4-1.3.0;89volvo200@;MinidoracatAutoDriveFor42@42.20.4-0.2.1"',
+    1, true) ~= nil, "activated mods recorded in load order; unknown mod info keeps empty version")
+check(string.find(envHeader, '"rev":', 1, true) < string.find(envHeader, '"game":', 1, true)
+    and string.find(envHeader, '"mods":', 1, true) < string.find(envHeader, '"profile":', 1, true),
+    "env stamp sits between rev and profile")
+function getActivatedMods() error("boom") end
+resetFs()
+nowMs = 9302000
+checkEq(MDADDiagnostics.start(0, nil, profile), true, "throwing mod API never blocks session start")
+MDADDiagnostics.stop(0, "end")
+local throwHeader = files[sessionPath(1)] or ""
+check(string.find(throwHeader, '"game":"42.20.4"', 1, true) ~= nil, "game survives a throwing mods API")
+checkEq(countNeedle(throwHeader, '"mods":'), 0, "throwing mods API omits the field")
+getCore, getActivatedMods, getModInfoByID = nil, nil, nil
 
 closeScenario()
 print()

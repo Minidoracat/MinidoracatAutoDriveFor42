@@ -29,8 +29,12 @@ D.FILLET_MAX_RAD = DEG90
 D.FILLET_SEGMENT_SHARE = 0.45  -- two adjacent corners therefore consume <=90%
 D.ROAD_EDGE_MARGIN = 0.4
 D.FILLET_ANGLE_MAX_RAD = 2 * PI / 180
-D.FILLET_SOURCE_MAX = 64
-D.FILLET_OUTPUT_MAX = 512
+-- 容量（2026-09-02 玩家 telemetry：7.4 km 路線 62 個 source 點、離線重建 24 彎
+-- 需 824 點）：source 64→128、output 512→1024。nearestRawSeg 已改臂窗掃，
+-- 建構成本 O(output)；profile 每點 ~20 個 array 槽，1024 點約 2-3 MB Kahlua
+-- retained（單 session 一份）。超出仍不整條放棄——見 buildFilletPath 預算迴圈。
+D.FILLET_SOURCE_MAX = 128
+D.FILLET_OUTPUT_MAX = 1024
 D.FILLET_ARC_MAX = 64
 D.FILLET_FIT_ITERS = 4
 D.SEG_LINE = 0
@@ -700,7 +704,9 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
     -- 連續 10° 折點被當共線，導航線彎成三角圈）。相鄰兩真角共享直臂 L 時
     -- 各吃 0.45L 合計 ≤0.9L——防重疊不變式原樣保留。
     -- 弧不出路面仍由 bandA/bandB sagitta 與 filletFits 把關，安全語意不動。
-    local armIn, armOut = {}, {}
+    -- armFrom／armTo＝該角入臂起點／出臂終點的 source 索引（共線臂的兩端 bend）；
+    -- tangent ≤ 0.45×臂保證 tangent 點與弧點的最近 raw 段落在 [armFrom, armTo-1]。
+    local armIn, armOut, armFrom, armTo = {}, {}, {}, {}
     do
         local isBend = {}
         for i = 2, n - 1 do
@@ -711,21 +717,22 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
             isBend[i] = il <= EPS or ol <= EPS
                 or cornerTheta(ix, iy, ox, oy) > D.FILLET_ANGLE_MAX_RAD
         end
-        local acc = 0
+        local acc, from = 0, 1
         for i = 2, n - 1 do
             local dx = srcPts[i * 2 - 1] - srcPts[i * 2 - 3]
             local dy = srcPts[i * 2] - srcPts[i * 2 - 2]
             acc = acc + sqrt(dx * dx + dy * dy)
-            armIn[i] = acc
-            if isBend[i] then acc = 0 end
+            armIn[i], armFrom[i] = acc, from
+            if isBend[i] then acc, from = 0, i end
         end
+        local to = n
         acc = 0
         for i = n - 1, 2, -1 do
             local dx = srcPts[i * 2 + 1] - srcPts[i * 2 - 1]
             local dy = srcPts[i * 2 + 2] - srcPts[i * 2]
             acc = acc + sqrt(dx * dx + dy * dy)
-            armOut[i] = acc
-            if isBend[i] then acc = 0 end
+            armOut[i], armTo[i] = acc, to
+            if isBend[i] then acc, to = 0, i end
         end
     end
     local radii, signA, tanS, fallbackCorner = {}, {}, {}, {}
@@ -783,30 +790,39 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
             end
         end
     end
+    -- 輸出預算（2026-09-02 玩家 telemetry s001-s010 定罪：7.4 km／24 彎路線預測
+    -- 824 點 > 舊上限 512 → 整條 fillet 放棄＋bandValid=false → 每幀 band proof
+    -- 零長 → obb 警戒帽 18 km/h 常駐全程，直路也是）。超出預算不再整條放棄：
+    -- 從超出的那個彎起降為 fallback 折點（各佔 1 點，剩餘角與終點的 1 點先保留），
+    -- 前段弧照建、band 證明照常成立；後段折點由 curveV 折角限速與 sweep 管。
     local predicted = 2
     for i = 2, n - 1 do
+        local need = 1
         if radii[i] then
             local ix, iy, ox, oy = cornerDirs(
                 srcPts[i * 2 - 3], srcPts[i * 2 - 2],
                 srcPts[i * 2 - 1], srcPts[i * 2],
                 srcPts[i * 2 + 1], srcPts[i * 2 + 2])
             local theta = cornerTheta(ix, iy, ox, oy)
-            predicted = predicted + 1 + arcSteps(radii[i] * theta, theta)
-        else
-            predicted = predicted + 1
+            need = 1 + arcSteps(radii[i] * theta, theta)
+            if predicted + need + (n - 1 - i) > D.FILLET_OUTPUT_MAX then
+                radii[i], signA[i], tanS[i] = nil, nil, nil
+                fallbackCorner[i] = true
+                fallbackN = fallbackN + 1
+                need = 1
+            end
         end
-        if predicted > D.FILLET_OUTPUT_MAX then
-            return 0, 0, fallbackN, false, "capacity"
-        end
+        predicted = predicted + need
     end
 
     -- 臂長預算升級後 tangent 點可落在角的緊鄰段之外（共線臂上游），source
     -- 若仍寫死 i-1/i，band 驗證的膠囊查找會撲空（點距 i-1 段端點可達十餘米）
-    -- → 整條 proof 判 band fail。輸出點的 source 改記「實際最近的 raw 段」；
-    -- 冷路徑（route 重建一次），n≤64、輸出 ≤512，全窗掃可負擔。
-    local function nearestRawSeg(px, py)
-        local best, bestD = 1, 1 / 0
-        for si = 1, n - 1 do
+    -- → 整條 proof 判 band fail。輸出點的 source 改記「實際最近的 raw 段」，
+    -- 只掃該角的兩臂 [armFrom, armTo-1]：成本與路線總長無關，且折返／平行
+    -- 路段不會被全窗掃誤配成「更近的別段」。
+    local function nearestRawSeg(px, py, lo, hi)
+        local best, bestD = lo, 1 / 0
+        for si = lo, hi do
             local p = si * 2 - 1
             local d = D.distanceToSegmentSq(px, py,
                 srcPts[p], srcPts[p + 1], srcPts[p + 2], srcPts[p + 3])
@@ -849,7 +865,8 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
                 srcPts[i * 2 + 1], srcPts[i * 2 + 2])
             local theta, px, py, ccx, ccy = filletGeometry(
                 bx, by, ix, iy, ox, oy, radius, signA[i])
-            local ta, tb = nearestRawSeg(px, py)
+            local lo, hi = armFrom[i], armTo[i] - 1
+            local ta, tb = nearestRawSeg(px, py, lo, hi)
             count = appendPoint(outPts, outSurface, outWidth, outKind,
                 outSourceA, outSourceB, outRadius, count, px, py,
                 srcSurface[i - 1], srcWidth[i - 1],
@@ -864,7 +881,7 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
                 local a = a0 + signA[i] * theta * (j / steps)
                 local axp = ccx + cos(a) * radius
                 local ayp = ccy + sin(a) * radius
-                local aa, ab = nearestRawSeg(axp, ayp)
+                local aa, ab = nearestRawSeg(axp, ayp, lo, hi)
                 count = appendPoint(outPts, outSurface, outWidth, outKind,
                     outSourceA, outSourceB, outRadius, count,
                     axp, ayp, surface, width, D.SEG_ARC, aa, ab, radius)

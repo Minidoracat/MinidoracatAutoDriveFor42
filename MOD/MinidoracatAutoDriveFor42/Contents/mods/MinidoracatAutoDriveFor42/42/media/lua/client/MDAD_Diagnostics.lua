@@ -82,6 +82,11 @@ local EK = {
     "m", "need", "hn", "corner", -- blocked payload：margin/need/hardN/corner latch
     -- （2026-09-01：payload 鍵 "n" 與事件名稱欄 "n" 相撞——pairs 無序、誰蓋誰
     -- 不確定，blocked 事件多輪「消失」實為名稱欄被 need 值覆寫。禁用 "n"。）
+    -- route ready：fillet 建構結果（2026-09-02 玩家 telemetry 只能從每幀
+    -- verifyLineReason=band 反推「fillet 整條放棄」，離線重建才定罪——直接帶出）；
+    -- route cutover：原始路線快照 src／srcW／srcS（離線重跑 fillet／band 用）。
+    "filletN", "filletFallbackN", "filletBandValid", "filletReason",
+    "src", "srcW", "srcS",
 }
 
 local function logOnce(msg)
@@ -884,6 +889,39 @@ local function isCritical(mode, err)
     return false
 end
 
+-- 環境印記（session 一次；2026-09-02 玩家 log 復盤：車型 script 名推不出是哪個
+-- MOD／哪一版，主 MOD 與依賴庫版本也只有 console.txt 才有）：game＝
+-- `getCore():getVersionNumber()`（Core.java:4568；原版 getVersion 用例
+-- ISVersionWaterMark.lua:80）、mods＝"id@modversion;…"（`getActivatedMods`＝
+-- LuaManager.java:7438、`getModInfoByID`＝:5368、`getModVersion`＝
+-- ChooseGameInfo.java:696；原版走訪同款 ISPauseModListUI.lua:19-22）。
+-- 任一 API 缺席／拋錯就整欄省略，不因環境印記讓 session 起不來。
+local function envStamp()
+    local bits = ""
+    local okG, game = pcall(function()
+        return getCore():getVersionNumber()
+    end)
+    if okG and type(game) == "string" and game ~= "" then
+        bits = bits .. ',"game":' .. jstr(game)
+    end
+    local okM, mods = pcall(function()
+        local list = getActivatedMods()
+        local parts, n = {}, 0
+        for i = 0, list:size() - 1 do
+            local id = list:get(i)
+            local info = getModInfoByID(id)
+            local v = info and info:getModVersion() or ""
+            n = n + 1
+            parts[n] = tostring(id) .. "@" .. tostring(v)
+        end
+        return n > 0 and table.concat(parts, ";", 1, n) or nil
+    end)
+    if okM and type(mods) == "string" then
+        bits = bits .. ',"mods":' .. jstr(mods)
+    end
+    return bits
+end
+
 local function encodeHeader(slot, now, days, profile)
     local b = MDAD and MDAD.BUILD
     if type(b) ~= "string" then b = "" end
@@ -895,6 +933,7 @@ local function encodeHeader(slot, now, days, profile)
     if type(profile) == "table" then pjson = encodeProfile(profile) end
     return '{"v":1,"t":"h","slot":' .. slot .. ',"ts":' .. jnum(now)
         .. ',"ret":' .. days .. ',"build":' .. jstr(b) .. ',"rev":' .. jstr(rev)
+        .. envStamp()
         .. ',"profile":' .. pjson .. '}'
 end
 
@@ -1137,6 +1176,36 @@ local function encodeEvent(now, name, a)
         end
     end
     return line .. "}"
+end
+
+-- 原始路線快照（route cutover 一次性事件，離線重建 fillet／band 證明用）：
+-- 把 src＝"x,y;…" 點列、srcW＝"w;…" 段寬、srcS＝"surface;…" 段面填進 payload
+-- 後回傳同一張表（Driver 的 update 大函式 local／upvalue 槽緊，呼叫端零新 local）。
+-- 超過 ROUTE_SRC_MAX 只截前段（事件的 pts 欄仍是真總數，讀者可辨截斷）；
+-- route 沒有可用點列＝不填欄位。
+local ROUTE_SRC_MAX = 512
+function D.routeSource(route, payload)
+    if type(payload) ~= "table" then payload = {} end
+    if type(route) ~= "table" or type(route.pts) ~= "table" then return payload end
+    local pts = route.pts
+    local n = #pts / 2
+    if n < 2 or n % 1 ~= 0 then return payload end
+    if n > ROUTE_SRC_MAX then n = ROUTE_SRC_MAX end
+    local widths, surfaces = route.segWidth, route.segSurface
+    local sp, sw, ss = {}, {}, {}
+    for i = 1, n do
+        sp[i] = jnum(pts[i * 2 - 1]) .. "," .. jnum(pts[i * 2])
+        if i < n then
+            local w = type(widths) == "table" and widths[i] or nil
+            local sf = type(surfaces) == "table" and surfaces[i] or nil
+            sw[i] = finite(w) and tostring(w) or ""
+            ss[i] = type(sf) == "string" and sf or ""
+        end
+    end
+    payload.src = table.concat(sp, ";", 1, n)
+    payload.srcW = table.concat(sw, ";", 1, n - 1)
+    payload.srcS = table.concat(ss, ";", 1, n - 1)
+    return payload
 end
 
 local function readPointer()

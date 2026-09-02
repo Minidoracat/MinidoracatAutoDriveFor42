@@ -383,7 +383,10 @@ function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile)
         end
     end
     if n < 2 then
-        n, filletN = buildN, 0
+        -- 原始折線退路：點全在 raw 中心線上、segSource 直接對應 raw 段，band
+        -- 證明逐點真做仍成立（source 超限路徑本來就是 true；buildFilletPath 的
+        -- false 回傳是「弧沒建」不是「帶無效」，兩條退路統一）。
+        n, filletN, filletBandValid = buildN, 0, navVersion >= 4
         if filletAdaptive and sourceN > MDADDynamics.FILLET_SOURCE_MAX then
             filletReason, filletFallbackN = "capacity", buildN - 2
         end
@@ -417,6 +420,7 @@ function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile)
         filletAdaptive = filletAdaptive,
         filletN = filletN,
         filletFallbackN = filletFallbackN,
+        filletReason = filletReason,
         filletBandValid = filletBandValid == true,
         wheelbase = filletAdaptive and vehicleProfile.wheelbase or 0,
         delta0Safe = filletAdaptive and vehicleProfile.delta0Safe or 0,

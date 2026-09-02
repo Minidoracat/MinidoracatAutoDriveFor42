@@ -313,6 +313,72 @@ eq(hv, false, "oversize fillet falls back")
 eq(hr, "capacity", "oversize fillet reason is deterministic")
 check(fb3 >= 1 and n3 == 3, "U-turn/急折點低速 fallback")
 
+-- 輸出預算部分退化（2026-09-02 玩家 telemetry s001-s010：7.4 km 路線預測 824 點
+-- 超過舊上限 512 → 整條放棄＋bandValid=false → obb 警戒帽 18 常駐）。契約：
+-- 超出預算只把後段彎降 fallback，前段弧照建、bandValid 照 true、輸出 ≤ 上限。
+scenario("fillet output budget degrades tail corners only")
+do
+    -- 8 個 90° 階梯彎、band 12：每彎 2° 取樣 ≈46 點，總需 ≈370 點
+    local zig = { 0, 0 }
+    local zs, zw = {}, {}
+    for k = 1, 8 do
+        local x, y = zig[#zig - 1], zig[#zig]
+        if k % 2 == 1 then zig[#zig + 1], zig[#zig + 2] = x + 40, y
+        else zig[#zig + 1], zig[#zig + 2] = x, y + 40 end
+    end
+    zig[#zig + 1], zig[#zig + 2] = zig[#zig - 1] + 40, zig[#zig]
+    for i = 1, #zig / 2 - 1 do zs[i], zw[i] = 1, 12 end
+    local savedMax = D.FILLET_OUTPUT_MAX
+    local fullPts, fullKind = {}, {}
+    local fullN, fullFn, fullFb, fullValid, fullReason = D.buildFilletPath(
+        zig, zs, zw, 1, 3, fullPts, {}, {}, fullKind, {}, {}, {})
+    eq(fullValid, true, "預算充足：8 彎全 fillet 有效")
+    eq(fullFn, 8, "預算充足：8 個弧")
+    eq(fullFb, 0, "預算充足：零 fallback")
+    check(fullReason == nil, "預算充足：無 reason")
+    D.FILLET_OUTPUT_MAX = 200
+    local pp, pk, psa, psb = {}, {}, {}, {}
+    local pn, pfn, pfb, pvalid, preason = D.buildFilletPath(
+        zig, zs, zw, 1, 3, pp, {}, {}, pk, psa, psb, {})
+    D.FILLET_OUTPUT_MAX = savedMax
+    eq(pvalid, true, "預算不足：band 仍有效（不整條放棄）")
+    check(preason == nil, "預算不足：不是 capacity 失敗")
+    check(pn >= 2 and pn <= 200, "預算不足：輸出 2..上限（實得 " .. pn .. "）")
+    check(pfn >= 3, "預算不足：前段仍有弧（實得 " .. pfn .. "）")
+    check(pfb >= 3, "預算不足：後段降 fallback（實得 " .. pfb .. "）")
+    eq(pfn + pfb, 8, "預算不足：每個彎都被分類")
+    -- 弧集中在前段：第一個角是弧、最後一個角保留 source 折點
+    eq(pk[1], D.SEG_LINE, "起點段是直線")
+    local firstArc, lastArcEnd = nil, nil
+    for i = 1, pn - 1 do
+        if pk[i] == D.SEG_ARC then firstArc = firstArc or i; lastArcEnd = i end
+    end
+    check(firstArc ~= nil and firstArc < 60, "第一個彎是弧（實得 " .. tostring(firstArc) .. "）")
+    local lastCornerX, lastCornerY = zig[#zig - 3], zig[#zig - 2]
+    local keptLast = false
+    for i = 1, pn do
+        if pp[i * 2 - 1] == lastCornerX and pp[i * 2] == lastCornerY then keptLast = true end
+    end
+    check(keptLast, "最後一個彎保留 source 折點")
+    -- nearestRawSeg 臂窗：每個弧點的 source 段必須是該點真正最近的 raw 段
+    -- （segment i 的 metadata 屬於它的終點 i+1，appendPoint 慣例）
+    local windowOk = true
+    for i = 1, pn - 1 do
+        if pk[i] == D.SEG_ARC then
+            local px, py = pp[i * 2 + 1], pp[i * 2 + 2]
+            local sa = psa[i]
+            local dSa = D.distanceToSegmentSq(px, py,
+                zig[sa * 2 - 1], zig[sa * 2], zig[sa * 2 + 1], zig[sa * 2 + 2])
+            for si = 1, #zig / 2 - 1 do
+                local d = D.distanceToSegmentSq(px, py,
+                    zig[si * 2 - 1], zig[si * 2], zig[si * 2 + 1], zig[si * 2 + 2])
+                if d < dSa - 1e-9 then windowOk = false end
+            end
+        end
+    end
+    check(windowOk, "臂窗 nearestRawSeg 與全窗最近段一致")
+end
+
 scenario("hot scalar helpers do not retain per-call tables")
 collectgarbage("collect")
 local kb0 = collectgarbage("count")

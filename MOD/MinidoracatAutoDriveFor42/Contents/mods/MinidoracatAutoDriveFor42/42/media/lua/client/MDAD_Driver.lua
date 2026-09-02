@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0902l"
+Drive.REV = "0902m"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -1073,7 +1073,7 @@ local function startSession(playerObj, playerNum)
                 local pointN = type(route.pts) == "table" and #route.pts / 2 or 0
                 local routeLen = type(route.len) == "number"
                     and route.len * 0 == 0 and route.len or nil
-                diagEvent(sNew, playerNum, "route", {
+                diagEvent(sNew, playerNum, "route", MDADDiagnostics.routeSource(route, {
                     phase = "cutover", why = "initial", rg = sNew.routeGen,
                     tg = sNew.targetGen, len = routeLen, pts = pointN,
                     target = tostring(tx) .. "," .. tostring(ty),
@@ -1084,7 +1084,7 @@ local function startSession(playerObj, playerNum)
                         and route.cost * 0 == 0 and route.cost or nil,
                     avoidPenalty = type(route.avoidPenalty) == "number"
                         and route.avoidPenalty * 0 == 0 and route.avoidPenalty or nil,
-                })
+                }))
             end
         end
     end
@@ -5392,7 +5392,7 @@ local function onPlayerUpdate(player)
             s.routeReadyWhy = routeWhy
             local pointN = type(route.pts) == "table" and #route.pts / 2 or 0
             local routeLen = finite(route.len) and route.len or nil
-            diagEvent(s, playerNum, "route", {
+            diagEvent(s, playerNum, "route", MDADDiagnostics.routeSource(route, {
                 phase = "cutover", why = routeWhy, rg = s.routeGen,
                 tg = s.targetGen, len = routeLen, pts = pointN,
                 target = tostring(tx) .. "," .. tostring(ty),
@@ -5401,7 +5401,7 @@ local function onPlayerUpdate(player)
                 currentSegWidth = profile.segWidth[1] > 0 and profile.segWidth[1] or nil,
                 cost = finite(route.cost) and route.cost or nil,
                 avoidPenalty = finite(route.avoidPenalty) and route.avoidPenalty or nil,
-            })
+            }))
             if type(MDADFollower.resetState) == "function" then
                 MDADFollower.resetState(s.fstate)
             end
@@ -5536,6 +5536,13 @@ local function onPlayerUpdate(player)
                 cost = finite(s.route.cost) and s.route.cost or nil,
                 avoidPenalty = finite(s.route.avoidPenalty)
                     and s.route.avoidPenalty or nil,
+                -- fillet 建構結果（2026-09-02 玩家 telemetry 定罪缺口）：capacity
+                -- 退化只有這裡看得到，每幀 sample 的 filletN/filletFallbackN 分不出
+                -- 「沒彎」與「彎全退化」。
+                filletN = s.profile.filletN,
+                filletFallbackN = s.profile.filletFallbackN,
+                filletBandValid = s.profile.filletBandValid,
+                filletReason = s.profile.filletReason,
             })
         end
         s.mode = "follow"
