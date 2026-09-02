@@ -891,18 +891,22 @@ end
 
 -- 環境印記（session 一次；2026-09-02 玩家 log 復盤：車型 script 名推不出是哪個
 -- MOD／哪一版，主 MOD 與依賴庫版本也只有 console.txt 才有）：game＝
--- `getCore():getVersionNumber()`（Core.java:4568；原版 getVersion 用例
--- ISVersionWaterMark.lua:80）、mods＝"id@modversion;…"（`getActivatedMods`＝
--- LuaManager.java:7438、`getModInfoByID`＝:5368、`getModVersion`＝
--- ChooseGameInfo.java:696；原版走訪同款 ISPauseModListUI.lua:19-22）。
--- 任一 API 缺席／拋錯就整欄省略，不因環境印記讓 session 起不來。
+-- `getCore():getVersion()`（Core.java:2871-2873＝"42.20.4 <git rev>"；舊版用
+-- getVersionNumber 只有 "42.20"，少了修訂號；原版用例 ISVersionWaterMark.lua:80）、
+-- mode＝"mp"／"sp"（`isClient()`：MP 客戶端含遊戲內主機；回報表單不再要玩家自填）、
+-- mods＝"id@modversion;…"（`getActivatedMods`＝LuaManager.java:7438、
+-- `getModInfoByID`＝:5368、`getModVersion`＝ChooseGameInfo.java:696；原版走訪同款
+-- ISPauseModListUI.lua:19-22）。任一 API 缺席／拋錯就整欄省略，不因環境印記讓
+-- session 起不來。
 local function envStamp()
     local bits = ""
-    local okG, game = pcall(function()
-        return getCore():getVersionNumber()
-    end)
+    local okG, game = pcall(function() return getCore():getVersion() end)
     if okG and type(game) == "string" and game ~= "" then
         bits = bits .. ',"game":' .. jstr(game)
+    end
+    local okC, client = pcall(isClient)
+    if okC and type(client) == "boolean" then
+        bits = bits .. ',"mode":' .. jstr(client and "mp" or "sp")
     end
     local okM, mods = pcall(function()
         local list = getActivatedMods()

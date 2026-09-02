@@ -1394,6 +1394,7 @@ MDADDiagnostics.start(0, nil, profile)
 MDADDiagnostics.stop(0, "end")
 local bareHeader = files[sessionPath(1)] or ""
 checkEq(countNeedle(bareHeader, '"game":'), 0, "no getCore stub: game field omitted")
+checkEq(countNeedle(bareHeader, '"mode":'), 0, "no isClient stub: mode field omitted")
 checkEq(countNeedle(bareHeader, '"mods":'), 0, "no getActivatedMods stub: mods field omitted")
 check(string.find(bareHeader, '"build":"m57-test","rev":', 1, true) ~= nil,
     "build/rev keep their schema v1 position")
@@ -1404,7 +1405,9 @@ local function javaList(items)
         get = function(_, i) return items[i + 1] end,
     }
 end
-function getCore() return { getVersionNumber = function() return "42.20.4" end } end
+-- getVersion（Core.java:2871）＝"42.20.4 <git rev>"，修訂號在裡面；getVersionNumber 只有 "42.20"
+function getCore() return { getVersion = function() return "42.20.4 a1b2c3d" end } end
+function isClient() return true end
 function getActivatedMods() return javaList({ "MinidoracatUIFor42", "89volvo200", "MinidoracatAutoDriveFor42" }) end
 local modVersions = { MinidoracatUIFor42 = "42.20.4-1.3.0", MinidoracatAutoDriveFor42 = "42.20.4-0.2.1" }
 function getModInfoByID(id)
@@ -1417,7 +1420,8 @@ nowMs = 9301000
 MDADDiagnostics.start(0, nil, profile)
 MDADDiagnostics.stop(0, "end")
 local envHeader = files[sessionPath(1)] or ""
-check(string.find(envHeader, '"game":"42.20.4"', 1, true) ~= nil, "game version recorded")
+check(string.find(envHeader, '"game":"42.20.4 a1b2c3d"', 1, true) ~= nil, "full game version (with revision) recorded")
+check(string.find(envHeader, '"mode":"mp"', 1, true) ~= nil, "isClient()=true records mode mp")
 check(string.find(envHeader,
     '"mods":"MinidoracatUIFor42@42.20.4-1.3.0;89volvo200@;MinidoracatAutoDriveFor42@42.20.4-0.2.1"',
     1, true) ~= nil, "activated mods recorded in load order; unknown mod info keeps empty version")
@@ -1430,9 +1434,15 @@ nowMs = 9302000
 checkEq(MDADDiagnostics.start(0, nil, profile), true, "throwing mod API never blocks session start")
 MDADDiagnostics.stop(0, "end")
 local throwHeader = files[sessionPath(1)] or ""
-check(string.find(throwHeader, '"game":"42.20.4"', 1, true) ~= nil, "game survives a throwing mods API")
+check(string.find(throwHeader, '"game":"42.20.4 a1b2c3d"', 1, true) ~= nil, "game survives a throwing mods API")
+function isClient() return false end
+resetFs()
+nowMs = 9302500
+MDADDiagnostics.start(0, nil, profile)
+MDADDiagnostics.stop(0, "end")
+check(string.find(files[sessionPath(1)] or "", '"mode":"sp"', 1, true) ~= nil, "isClient()=false records mode sp")
 checkEq(countNeedle(throwHeader, '"mods":'), 0, "throwing mods API omits the field")
-getCore, getActivatedMods, getModInfoByID = nil, nil, nil
+getCore, getActivatedMods, getModInfoByID, isClient = nil, nil, nil, nil
 
 closeScenario()
 print()

@@ -24,48 +24,13 @@ body:
         4. **Zip the whole folder**: right-click the `Telemetry` folder → Compress to ZIP. The **whole folder**, not selected files — the timestamps in `session-index.txt` plus the per-session logs are what let us locate the failing drive.
         5. **Drag the zip into the attachment field below.** Attach the zip only; **do not paste the path** (it contains your computer account name).
 
+        版本、車輛、單機或多人**都已經在紀錄檔裡**（第一行的 `build`／`game`／`mode`／`mods`／`profile.scriptName`），不用另外填。
+        Versions, vehicle and SP/MP are **already in the log** (first line: `build` / `game` / `mode` / `mods` / `profile.scriptName`) — no need to type them.
+
         紀錄內容 / What the logs contain：遊戲內絕對座標、原始 epoch 毫秒時間戳（＝你的遊玩時段）、當時啟用的 MOD 清單、車輛物理參數。沒有帳號、Steam ID、IP 或伺服器名稱。公開 repo 的附件任何人拿到連結都能下載，請自行斟酌。
         In-game absolute coordinates, raw epoch-millisecond timestamps (= when you played), the list of mods enabled at the time, vehicle physics. No account name, Steam ID, IP or server name. Attachments on a public repo are downloadable by anyone with the link — attach at your own discretion.
 
         zip 超過 25 MB 時 / If the zip exceeds 25 MB：只附 `session-index.txt`、`latest.txt`、`manifest.txt` 與最後幾段 `session-NNN.log`（`session-index.txt` 尾端幾列指到的檔案）。Attach only `session-index.txt`, `latest.txt`, `manifest.txt` and the last few `session-NNN.log` files (the ones the last rows of `session-index.txt` point to).
-
-  - type: input
-    id: mod-version
-    attributes:
-      label: 本 MOD 版本 / AutoDrive version
-      description: Workshop 頁面或 `session-NNN.log` 第一行的 `"build"`。From the Workshop page or `"build"` on the first line of any `session-NNN.log`.
-      placeholder: 42.20.4-0.2.0
-    validations:
-      required: true
-
-  - type: input
-    id: minimap-version
-    attributes:
-      label: MiniMap 主 MOD 版本 / MiniMap version
-      description: 同一行 `"mods"` 欄裡的 `MinidoracatMiniMapFor42@…`。The `MinidoracatMiniMapFor42@…` entry in the `"mods"` field of the same line.
-      placeholder: 42.20.4-0.24.0
-    validations:
-      required: true
-
-  - type: dropdown
-    id: mode
-    attributes:
-      label: 遊戲模式 / Game mode
-      options:
-        - 單機 / Single player
-        - 多人：專用伺服器 / Multiplayer – dedicated server
-        - 多人：遊戲內主機 / Multiplayer – in-game host
-    validations:
-      required: true
-
-  - type: input
-    id: vehicle
-    attributes:
-      label: 車輛 / Vehicle
-      description: 車型名稱；若是 MOD 車請附 MOD 名。Vehicle name; for a mod vehicle include the mod name.
-      placeholder: Chevalier Cerise / '93 Ford F-350 (mod)
-    validations:
-      required: true
 
   - type: textarea
     id: what-happened
@@ -78,10 +43,8 @@ body:
   - type: textarea
     id: where
     attributes:
-      label: 發生地點 / Where
-      description: 地圖座標（畫面右下角的 x, y）或截圖；起點與目的地一起給更好。Map coordinates (x, y at the bottom-right of the screen) or a screenshot; start and destination together is best.
-    validations:
-      required: true
+      label: 發生地點（選填）/ Where (optional)
+      description: 座標已在紀錄裡；有截圖或想用文字描述（哪個路口、往哪個方向）再填。Coordinates are already in the log; add a screenshot or a description (which junction, which direction) if you like.
 
   - type: dropdown
     id: reproducible
