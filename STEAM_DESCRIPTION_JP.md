@@ -51,4 +51,8 @@
 [*] [url=https://github.com/Minidoracat/MinidoracatAutoDriveFor42/issues/new/choose]GitHub ナビ問題報告[/url]：道を間違える・詰まる・突然止まる場合は Issue を作成し、Telemetry 診断ログフォルダ全体を zip で添付してください（先に設定で「オートドライブ診断ログを書き出す」をオンに。設定の「ナビの問題を報告」ボタンでこのリンクをコピーできます）
 [/list]
 
+[h2]☕ 作者を応援[/h2]
+この MOD は今後もずっと無料です。気に入ったらコーヒーを一杯おごってください。支援はサーバーと MOD 開発に使います。ソースコードは GitHub で公開しています。
+[url=https://ko-fi.com/minidoracat][img]https://raw.githubusercontent.com/Minidoracat/workshop-resources/refs/heads/main/badges/badge_kofi.png[/img][/url] [url=https://github.com/Minidoracat/MinidoracatAutoDriveFor42][img]https://raw.githubusercontent.com/Minidoracat/workshop-resources/refs/heads/main/badges/badge_github.png[/img][/url]
+
 [b]#Minidoracat[/b]
