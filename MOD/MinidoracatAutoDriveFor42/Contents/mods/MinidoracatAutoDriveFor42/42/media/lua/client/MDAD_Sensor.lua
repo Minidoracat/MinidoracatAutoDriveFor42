@@ -163,11 +163,12 @@ MDADSensor.SURFACE_PAVED = SURFACE_PAVED
 -- 等用例）。在載入期直接取 upvalue 會綁死載入順序，也讓離線 harness 沒有插手空間；
 -- 改成第一輪掃描開始時綁一次，之後每輪只多一次 boolean 比較。
 local F_water, F_doorN, F_doorW, T_moveable
-local F_solidtrans, F_wallN, F_wallW, F_wallNW
+local F_solidtrans, F_wallN, F_wallW, F_wallNW, F_solidfloor
 local flagsBound = false
 
 local function bindFlags()
     F_water = IsoFlagType.water
+    F_solidfloor = IsoFlagType.solidfloor
     F_doorN = IsoFlagType.doorN
     F_doorW = IsoFlagType.doorW
     F_solidtrans = IsoFlagType.solidtrans
@@ -231,11 +232,44 @@ end
 -- 仍算 SOFT。其後才處理 HitByCar：沒有 collision/StopCar 的
 -- street_decoration／trashcontainers 小物可直接放行；實體郵筒、標誌等已在前兩關
 -- 收編，不可因 prefix 被穿透。
+-- 「這格是水」＝有水面 sprite **且沒有非水的實地板蓋在上面**。橋面格是三層疊的
+-- （水 blends_natural_02_x → 路面 blends_street → 橋板 industry_01_39），`getFloor()`
+-- 回**第一個**帶 solidfloor 的物件（IsoGridSquare.java:5025-5034）＝載入順序最底層
+-- 的水面 → 整排橋中線判成硬障礙、兩個方向都過不了橋（2026-09-04 使用者截圖，
+-- (2275,8794) 物件序：street／natural_02_3／industry_01_39，方格 FloorMaterial=Water）。
+-- 引擎自己的「水上有地板」也是看 sprite 逐一判（RecalcProperties
+-- IsoGridSquare.java:7662-7671 的 nonWaterSolidFloor）。回 (isWater, dryFloorObj)：
+-- dryFloorObj＝可通行的地板物件（路面對中統計用），nil＝沒有。
+local function waterUnderfoot(square)
+    local objs = square:getObjects()
+    if objs == nil then return false, nil end
+    local n = objs:size()
+    local water, dry = false, nil
+    for i = 1, n do
+        local obj = objs:get(i - 1)
+        local sp = obj:getSprite()
+        local props = sp ~= nil and sp:getProperties() or nil
+        if props ~= nil then
+            if props:has(F_water) then
+                water = true
+            elseif dry == nil and props:has(F_solidfloor) then
+                dry = obj
+            end
+        end
+    end
+    return water and dry == nil, dry
+end
+
 local function classifySprite(obj, name)
     local sprite = obj:getSprite()                     -- 用例 ISWorldObjectContextMenu.lua:1347
     if sprite == nil then return COST_NONE end
     local props = sprite:getProperties()               -- IsoSprite.java:240
     if props == nil then return COST_NONE end
+
+    -- 水面 sprite 帶 solidtrans（blends_natural_02_7：solidfloor＋solidtrans＋water，實機
+    -- 2026-09-04 (2274,8795)）→ shouldHaveCollision 為真 → 會被當成小型硬物。水的判定
+    -- 只在 waterUnderfoot（有沒有實地板蓋著）；這裡一律不算物件。
+    if props:has(F_water) then return COST_NONE end
 
     -- 籬笆家族＝細桿硬障礙：鐵絲網／木柵欄實體 0.1-0.3m 薄片，整格肥半徑
     -- （0.7）讓路緣籬笆排把「路線本身過彎」都判成擦撞（2026-08-29 回程路口：
@@ -428,8 +462,9 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
     -- sprite 旗標的聯集，跨河橋的橋面格若殘留水面 sprite 會被聯集誤判成硬障礙、
     -- 自駕永遠過不了橋。原版判「這格是水」的標準寫法就是地板檢查
     -- （ISWorldObjectContextMenu.lua:687-688 square:getFloor():hasProperty(water)）。
-    local floorObj = square:getFloor()                 -- 用例 ISWorldObjectContextMenu.lua:687
-    local hard = floorObj ~= nil and floorObj:hasProperty(F_water) == true -- 用例 :688
+    -- 舊制 getFloor():hasProperty(water)（用例 ISWorldObjectContextMenu.lua:687-688）在橋面
+    -- 三層疊格會拿到最底層的水面（見 waterUnderfoot）
+    local hard, floorObj = waterUnderfoot(square)
 
     -- 路面對中統計：地板名前綴 blends_street（floor 也是 IsoObject，
     -- getSpriteName 同 IsoObject.java:2235）。名→bool 快取；水面格不計。
@@ -985,8 +1020,7 @@ end
 -- 不碰 wHardN／wUnloaded 等掃描 working buffer，也不配置 table。
 -- 回 true,kind＝水／硬物；false＝淨空；nil,kind＝getter 無法提供分類，呼叫端 fail-closed。
 local function probeSquareHard(state, square)
-    local floorObj = square:getFloor()
-    if floorObj ~= nil and floorObj:hasProperty(F_water) == true then
+    if waterUnderfoot(square) then
         return true, "water"
     end
 

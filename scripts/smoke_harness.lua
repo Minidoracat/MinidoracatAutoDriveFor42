@@ -5083,7 +5083,19 @@ function drive.mkSquare(x, y)
     -- 假格預設無地板物件（回 nil）＝非水。要造水面就把 _floor 換成帶
     -- hasProperty 的假物件。
     sq.getFloor = function() return sq._floor or nil end
-    sq._objList = { size = function() return #objs end, get = function(_, i) return objs[i + 1] end }
+    -- 0905s：production 的水面判定改逐物件看 sprite 旗標（waterUnderfoot），地板也是
+    -- getObjects 的一員（IsoGridSquare.getFloor 就是從 objects 找）：假格把 _floor 排在
+    -- index 0 一起吐出；_floor 以 drive.floorObj 建（帶 getSprite/getProperties）。
+    sq._objList = {
+        size = function() return #objs + (sq._floor and 1 or 0) end,
+        get = function(_, i)
+            if sq._floor then
+                if i == 0 then return sq._floor end
+                return objs[i]
+            end
+            return objs[i + 1]
+        end,
+    }
     sq._mvList = { size = function() return #mv end, get = function(_, i) return mv[i + 1] end }
     -- 屍體容器（IsoDeadBody 住 staticMovingObjects，見 Sensor 的出處註解）
     sq._smvList = { size = function() return #smv end, get = function(_, i) return smv[i + 1] end }
@@ -5107,16 +5119,35 @@ function drive.fillWorld(x0, x1, y0, y1)
     end
 end
 
+-- 假地板物件：solidfloor 旗標＋（選）water 旗標；不帶碰撞。production 讀 getSprite()
+-- :getProperties():has(flag) 與 getSpriteName()。
+function drive.floorObj(name, water)
+    local props = { has = function(_, key)
+        if key == "solidfloor" then return true end
+        if key == "water" then return water == true end
+        if key == "solidtrans" then return water == true end -- 實機水面 sprite 帶 solidtrans
+        return false
+    end }
+    local sprite = {
+        shouldHaveCollision = function() return water == true end, -- solidtrans → 引擎回 true
+        getProperties = function() return props end,
+    }
+    return {
+        getSpriteName = function() return name end,
+        getSprite = function() return sprite end,
+        getProperties = function() return props end,
+        getType = function() return nil end,
+        hasProperty = function(_, key) return props:has(key) end,
+    }
+end
+
 -- 鋪路面：把矩形範圍的假格地板換成 blends_street 家族 sprite（路面對中統計
--- 認前綴；hasProperty 回 false＝非水）。production 讀 floorObj:getSpriteName()。
+-- 認前綴；非水）。production 讀 floorObj:getSpriteName()。
 function drive.putRoad(x0, x1, y0, y1)
     for x = x0, x1 do
         for y = y0, y1 do
             local sq = drive.world[x * 100000 + y] or drive.mkSquare(x, y)
-            sq._floor = {
-                getSpriteName = function() return "blends_street_01_16" end,
-                hasProperty = function() return false end,
-            }
+            sq._floor = drive.floorObj("blends_street_01_16", false)
         end
     end
 end
@@ -9442,7 +9473,7 @@ local function scenarioPhaseE()
         drive.putTree(20, 6, "vegetation_trees_01_5")
         drive.putCorpse(25, 0)
         drive.scanRound()
-        checkTrue(captured.sensor.hardN > 0,
+        checkTrue(MDAD.Drive.debugSession(0).sensor.hardN > 0,
             "planner search band sees the roadside hard point")
         checkTrue(captured.sensor.corpseN > 0,
             "sensor sees the opted-out corpse inside its slowdown band")
@@ -10026,10 +10057,7 @@ local function scenarioPhaseE()
     drive.fillWorld(-2, 170, -9, 9)
     for x = -2, 170 do
         for y = -9, 9 do
-            drive.world[x * 100000 + y]._floor = {
-                getSpriteName = function() return "blends_natural_01_20" end,
-                hasProperty = function() return false end,
-            }
+            drive.world[x * 100000 + y]._floor = drive.floorObj("blends_natural_01_20", false)
         end
     end
     drive.scanRound()
@@ -10725,7 +10753,7 @@ local function scenarioPhaseE()
         drive.putSolid(100, 0, "far_single_beyond_window")
         local blockedBefore = drive.voiceCount("blocked")
         drive.scanRound(true)
-        checkTrue(captured.sensor.hardN > 0, "(E) 110m 掃描帶看得到 100m 外的障礙")
+        checkTrue(MDAD.Drive.debugSession(0).sensor.hardN > 0, "(E) 110m 掃描帶看得到 100m 外的障礙")
         checkTrue(not captured.blocked and not captured.dodging,
             "(E) 出口在承諾窗外：延後（blocked=" .. tostring(captured.blocked)
             .. " dodging=" .. tostring(captured.dodging) .. "）")
@@ -11001,7 +11029,7 @@ local function scenarioPhaseE()
         checkTrue(captured.profile and captured.profile.laneRoomR ~= nil,
             "(C) v4 路線有 laneRoom 表")
         local seenL = nil
-        for i = 1, captured.sensor.hardN do
+        for i = 1, MDAD.Drive.debugSession(0).sensor.hardN do
             if captured.sensor.hardS[i] > 30 then seenL = captured.sensor.hardL[i] end
         end
         checkTrue(seenL ~= nil and seenL > 2.2 and seenL < 2.8,
@@ -11271,6 +11299,44 @@ local function scenarioKerbStay()
     drive.fillWorld(-2, 70, -7, 7)
 end
 scenarioKerbStay()
+
+-- =====================================================================
+-- 情境（bridge）：橋面三層疊格（水面 sprite 最底、路面地板蓋在上面）不是水
+-- =====================================================================
+local function scenarioBridge()
+scenario("橋面：水面 sprite 上有實地板＝可通行；純水面才是硬障礙")
+    -- 2026-09-04 使用者截圖：(2275,8794) 物件 street／blends_natural_02_3（water）／industry_01_39，
+    -- getFloor() 拿到載入最底層的水面 → 整排橋中線硬障礙、兩個方向都過不了橋。
+    drive.fillWorld(-2, 70, -7, 7)
+    drive.putRoad(-2, 70, -3, 3)
+    -- 橋中線一排（x=20，帶內全寬）：水面在 index 0、路面地板疊在後面（模擬載入順序）
+    for y = -7, 7 do
+        local sq = drive.world[20 * 100000 + y]
+        -- 實機 (2274,8795)：blends_natural_02_7（solidfloor＋solidtrans＋water）＋ industry_01_39
+        -- （橋板：solidfloor，無 water、無碰撞）——沒有 blends_street，路面統計不認它也無妨
+        sq._floor = drive.floorObj("blends_natural_02_7", true)
+        sq._objs[#sq._objs + 1] = drive.floorObj("industry_01_39", false)
+    end
+    checkTrue(armDrive(), "(bridge) 啟動")
+    driveReset(dveh)
+    drive.scanRound()
+    checkEq(MDAD.Drive.debugSession(0).sensor.hardN, 0, "(bridge) 水上有路面地板：零硬障礙（實得 " .. tostring(MDAD.Drive.debugSession(0).sensor.hardN) .. "）")
+    checkTrue(haloKey() ~= DKEY.BLOCKED, "(bridge) 不 blocked（實得 " .. tostring(haloKey()) .. "）")
+    -- 對照：同一排改成純水面（沒有地板蓋）＝硬障礙、blocked
+    for y = -7, 7 do
+        local sq = drive.world[20 * 100000 + y]
+        sq._objs = {}
+        sq._objList = nil
+        drive.mkSquare(20, y)
+        drive.world[20 * 100000 + y]._floor = drive.floorObj("blends_natural_02_3", true)
+    end
+    driveReset(dveh)
+    drive.scanRound()
+    checkTrue(MDAD.Drive.debugSession(0).sensor.hardN > 0, "(bridge) 純水面：硬障礙（實得 " .. tostring(MDAD.Drive.debugSession(0).sensor.hardN) .. "）")
+    MDAD.Drive.stop(0, nil)
+    drive.fillWorld(-2, 70, -7, 7)
+end
+scenarioBridge()
 
 -- =====================================================================
 -- 情境二十九：理由鍵不得缺翻譯（鍵是 runtime 真的吐出來的，不是抄原始碼）
