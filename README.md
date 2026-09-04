@@ -47,7 +47,7 @@ Project Zomboid Build 42 MOD。
 | | |
 |---|---|
 | ![Autodrive HUD with voice prompt tooltip](docs/screenshots/en/01-autodrive-hud-voice.png) | ![Wings HUD theme following a route through an intersection](docs/screenshots/en/02-hud-theme-wings-route.png) |
-| ![AutoDrive sandbox options](docs/screenshots/en/03-autodrive-sandbox-settings.png) | |
+| ![AutoDrive sandbox options](docs/screenshots/en/03-autodrive-sandbox-settings.png) | ![MiniMap settings, Autodrive category](docs/screenshots/en/04-minimap-autodrive-settings.png) |
 
 Steam Workshop 用 JPG（≤2MB）在 `docs/screenshots/steam/{zh,en}/`，編號與上表一致。
 
