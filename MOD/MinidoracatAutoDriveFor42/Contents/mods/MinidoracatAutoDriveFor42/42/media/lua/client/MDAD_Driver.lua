@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0905o"
+Drive.REV = "0905r"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -699,6 +699,7 @@ local function releaseDodge(s)
     s.stayLanePending = nil
     s.stayNextB = nil
     s.dodgeGuardHardN = nil -- 承諾鎖定的點雲基準（守護 lazy init）
+    s.dodgeMarginS = nil    -- commit／守護輪最緊點的弧長（過了就重掃一次放寬餘裕）
     s.dodgeGuardFailed = false -- 物理重驗已判死（持平輪不得以「信任承諾」推翻）
     s.guardHitS = nil -- 守護判死的命中點（guard-blocked 的煞停錨；X/Y 隨 S 一起失效）
     s.dodgeTier = nil -- 承諾來自哪一檔（telemetry dodge commit 事件）
@@ -2305,6 +2306,22 @@ local function footprintSnapshot(s, vehicle, playerNum, out, heading, vx, vy, la
         if s.episodeActive then
             s.episodeClearRounds = s.episodeClearRounds + 1
         end
+        -- 擦過就算過：contact 沒倒車、車身已整個越過命中點＝那個障礙在車後，
+        -- recovery ban（車前 9m 的虛擬障礙、r 0.6）不再有意義。留著＝下一次 replan
+        -- 把它當前方擋線點 → 進入段太短全候選 steep → blocked 停在空路上 → 後方正是
+        -- 剛擦過的桿 → 倒不了 → 15s StopStuck（2026-09-04 s025 st185,813-827，路口電線桿）。
+        if s.pushBanL ~= nil and s.banFromRecovery and s.episodeAttempts == 0
+                and finite(s.episodeHitS) and s.episodeHitS > 0
+                and s.lastSNow > s.episodeHitS + s.vehicleProfile.halfL + 1 then
+            s.pushBanL, s.pushBanS = nil, 0
+            s.banFromRecovery = false
+            diagEvent(s, playerNum, "progress", { phase = "ban-passed", eid = s.episodeId,
+                s = s.lastSNow, hitS = s.episodeHitS })
+            if getDebug() then
+                print(string.format("%spn=%d recovery ban dropped: passed hit point (rs=%.1f hitS=%.1f)",
+                    LOG, playerNum, s.lastSNow, s.episodeHitS))
+            end
+        end
     end
 
     if s.episodeActive and s.episodeClearRounds >= CLEAR_STREAK_N then
@@ -3838,7 +3855,7 @@ local function demotePlan(s, sen, planN, prefer, baseL, playerNum)
                 s, shapeQ, aq, bq, cq, dq, oq, baseL,
                 tier == 1 and "crawl" or "probe", nb)
             if okQ then
-                s.dodgeMargin = mgQ
+                s.dodgeMargin, s.dodgeMarginS = mgQ, nil
                 s.dodgeCrawl = true
                 s.dodgeTier = tier == 1 and "demote-crawl" or "demote-probe"
                 s.lastOvN = ovN
@@ -3942,14 +3959,22 @@ local function replan(s, vehicle, playerNum)
                 -- 新障礙、玩家蓋牆——世界真的變了）；數量持平＝量化相位抖動
                 -- ＝信任承諾。
                 local worldGrew = sen.hardN > s.dodgeGuardHardN + 2
+                -- 守護只掃車身後緣以前的線：車尾後方的點前進不會撞（倒車另有 rear probe），
+                -- 掃進去只會讓已經過掉的最緊點永遠壓著餘裕（0905q，見下方 pass 重掃）
+                local guardK = (s.lastSNow - s.vehicleProfile.halfL - fs.ovS0) / MDADFollower.OV_STEP + 1
+                guardK = guardK - guardK % 1
+                if guardK < 1 then guardK = 1 end
                 if sen.movingVeh or worldGrew then
                     s.dodgeGuardHardN = sen.hardN
-                    local hitS, hitPh, hitSk, hitX, hitY, pm
-                    guardOk, guardMargin, hitS, hitPh, hitSk, hitX, hitY = sweepLine(
+                    local hitS, hitPh, hitSk, hitX, hitY, pm, mi
+                    guardOk, guardMargin, hitS, hitPh, hitSk, hitX, hitY, mi = sweepLine(
                         s, fs.ovX, fs.ovY, fs.ovN, fs.ovS0, fs.ovEndS,
                         fs.offA, fs.offB, fs.offC, fs.offD,
-                        curOffL, "guard", s.dodgeNeed)
-                    if not guardOk then
+                        curOffL, "guard", s.dodgeNeed, guardK)
+                    if guardOk then
+                        s.dodgeMargin = guardMargin
+                        s.dodgeMarginS = mi and sen.hardS and sen.hardS[mi] or 1e9
+                    else
                         -- 帶餘裕守護失敗仍先做物理重驗：過＝續走。門檻同樣走
                         -- 餘裕預算 authority 的 physical 檔（階段 2 主體 4），
                         -- 不再自己寫 halfW-0.1。
@@ -3957,7 +3982,7 @@ local function replan(s, vehicle, playerNum)
                             s, fs.ovX, fs.ovY, fs.ovN, fs.ovS0, fs.ovEndS,
                             fs.offA, fs.offB, fs.offC, fs.offD,
                             curOffL, "guard-probe", MDADVehicleProfile.sweepBase(
-                                s.vehicleProfile.halfW, "physical"))
+                                s.vehicleProfile.halfW, "physical"), guardK)
                         if guardOk then guardMargin = s.dodgeMargin end
                     end
                     -- 判死的那一點就是煞停錨（2026-09-04 實機 st144580：guard 在 88m 外
@@ -3981,6 +4006,23 @@ local function replan(s, vehicle, playerNum)
                     -- 靜態且點雲持平：信任承諾，不重擲骰子——但物理重驗已判死的
                     -- 線維持死（釋放交給近停清承諾＋重規劃）
                     guardOk, guardMargin = not s.dodgeGuardFailed, s.dodgeMargin
+                    -- 0905q：commit 餘裕是整條線的最小值，過了那一點就該用剩餘線的餘裕定速
+                    -- （2026-09-04 s023 st184,096-115：margin 0.13 → 5 km/h 地板爬完整條 26m
+                    -- 直線，最緊點在前 6m）。最緊點未知（剛 commit）或已過（車尾過它 1m）
+                    -- 就從車身後緣起重掃一次；每過一個最緊點最多一次掃掠。
+                    if guardOk and (s.dodgeMarginS == nil
+                            or s.lastSNow > s.dodgeMarginS + s.vehicleProfile.halfL + 1) then
+                        local ok2, mg2, _, _, _, _, _, mi2 = sweepLine(
+                            s, fs.ovX, fs.ovY, fs.ovN, fs.ovS0, fs.ovEndS,
+                            fs.offA, fs.offB, fs.offC, fs.offD,
+                            curOffL, "guard-pass", s.dodgeNeed, guardK)
+                        if ok2 then
+                            s.dodgeMargin, guardMargin = mg2, mg2
+                            s.dodgeMarginS = mi2 and sen.hardS and sen.hardS[mi2] or 1e9
+                        else
+                            s.dodgeMarginS = 1e9 -- 帶餘裕掃不過（承諾本來就是物理檔）：不再重掃
+                        end
+                    end
                 end
             end
             if guardOk then
@@ -4308,7 +4350,7 @@ local function replan(s, vehicle, playerNum)
                 a, b, c, d, offL = pa, pb, pc, pd, po
                 committed = true
                 commitNb = nbUsed
-                s.dodgeMargin = mg
+                s.dodgeMargin, s.dodgeMarginS = mg, nil
                 s.dodgeStay = variant == "stay" or variant == "stay-look"
                 if nbUsed < s.sweepBase - 1e-6 or s.dodgeStay then s.dodgeCrawl = true end
                 s.dodgeTier = variant and (tier .. "-" .. variant) or tier
@@ -5090,7 +5132,9 @@ local function stepFollow(s, vehicle, playerNum, now)
         local heading = MDADFollower.headingFromForward(fx, fy)
         updateTraction(s, now, speedKmh, heading, s.lastHeadingError, s.lastLatDev)
         if s.dynamicsFault then postAction = "dynamics-fault" end
-        local steer, targetSpeed, remaining, done, headingError, lateralSq, latSigned = MDADFollower.control(
+        -- 貼縫承諾中改追承諾線切線（與 cross-track ×3 同一個適用範圍；機制見 Follower）
+        s.fstate.trackTangent = s.dodging == true and s.dodgeCrawl == true
+        local steer, targetSpeed, remaining, done, headingError, lateralSq, latSigned, lineLat = MDADFollower.control(
             s.profile, s.fstate, vx, vy,
             heading, speedKmh, mult * SECONDS_PER_MULT)
         local curveKappa, curveCap =
@@ -5125,6 +5169,10 @@ local function stepFollow(s, vehicle, playerNum, now)
         s.currentSegWidth = s.profile.segWidth[segI] or 0
         -- RETURN 期間期望線＝已承諾的 target lane；其餘走既有側偏剖面期望線。
         local expL = expectedLaneOf(s)
+        -- 繞行中期望線＝Follower 真正在追的 ov 線在投影點的橫向（停留線換道從 commit 點就
+        -- 開始，a..b smoothstep 算的期望線與線本身差 1m 以上＝cross-track 反向拉；理由見
+        -- Follower.control 的 lineLat）
+        if s.dodging and finite(lineLat) then expL = lineLat end
         if s.returnActive then expL = s.returnLaneTarget end
         local latDev = latSigned - expL
         s.diagExpL, s.diagLatDev = expL, latDev

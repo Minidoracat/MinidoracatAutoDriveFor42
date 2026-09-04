@@ -5452,6 +5452,41 @@ do
     checkTrue(st.dodgeSpeedCap >= 10 - 1e-6,
         "(tier) 守護 trust 輪淨距 0.2 → cap 抬到第二檔 10（實得 " .. tostring(st.dodgeSpeedCap) .. "）")
 end
+-- (pass) 過了 commit 時的最緊點，trust 輪重掃一次、餘裕改用剩餘線的（2026-09-04 s023
+--        st184,096-115：margin 0.13 → 5 km/h 地板爬完整條 26m 直線，最緊點只在前 6m）。
+--        縫在 x=20；車移到 x=20+halfL+2（車尾過縫 >1m），最緊點記在 s=20。
+do
+    local st = MDAD.Drive.debugSession(0)
+    checkTrue(st.dodging == true, "(pass) 前置：承諾仍在")
+    -- 線 c=22（過 c 且前方淨空即釋放），車只能停在 x=21；把縫拆掉模擬「最緊點已在車後」
+    -- （最緊點記在 s=16：車尾 18.8 > 16+1）。重掃看的是剩餘線＝淨空。
+    for wy = -6, -1 do drive.clearCell(20, wy) end
+    for wy = 2, 6 do drive.clearCell(20, wy) end
+    dveh._x = 21
+    driveReset(dveh)
+    drive.scanRound()
+    st.dodgeMargin, st.dodgeMarginS, st.dodgeGuardFailed = 0.05, 16, false
+    st.dodgeGuardHardN = st.sensor.hardN -- 持平＝trust 輪
+    driveReset(dveh)
+    drive.scanRound()
+    checkTrue(st.dodging == true, "(pass) 承諾仍在（實得 dodging=" .. tostring(st.dodging) .. "）")
+    checkTrue(st.dodgeMargin > 0.15,
+        "(pass) 過最緊點後 trust 輪重掃：餘裕改用剩餘線（實得 " .. tostring(st.dodgeMargin) .. "）")
+    checkTrue(st.dodgeSpeedCap >= 10 - 1e-6,
+        "(pass) 餘裕放寬後 cap 至少第二檔 10（實得 " .. tostring(st.dodgeSpeedCap) .. "）")
+    -- 最緊點還沒過（記在車前 5m）：不重掃、餘裕照舊（世界同樣淨空，差別只在位置閘）
+    st.dodgeMargin, st.dodgeMarginS = 0.05, dveh._x + 5
+    driveReset(dveh)
+    drive.scanRound()
+    checkTrue(st.dodgeMargin < 0.1,
+        "(pass) 最緊點在前方：不重掃（實得 " .. tostring(st.dodgeMargin) .. "）")
+    -- 還原縫（(pad) 家族用同一道牆）
+    for wy = -6, -1 do drive.putTree(20, wy, "vegetation_trees_01_5") end
+    for wy = 2, 6 do drive.putSolid(20, wy, "harness_demote_r" .. wy) end
+    dveh._x = 0
+    driveReset(dveh)
+    drive.scanRound()
+end
 checkTrue(MDAD.Drive.isActive(0), "降檔複審後 session 存活")
 -- (pad) 貼縫承諾執行中 contact 圈同源（2026-09-04 s063/s064「只差一點點」）：物理檔承諾中
 --       車身離牆 0.07m（<預設 0.15 圈）不得 contact 煞停；真重疊照停。牆 r=0.7 在 (20, 2..6)，
@@ -5468,6 +5503,9 @@ do
         "(pad) fixture：車身真淨距 ≈0.07（pad −0.1 讀數 " .. tostring(st.actualClearance) .. "）")
     checkTrue(st.currentBlocked ~= true and st.footprintBlocked ~= true,
         "(pad) 貼縫承諾中離牆 <0.15 不 contact（footprintBlocked=" .. tostring(st.footprintBlocked) .. "）")
+    -- 0905p：貼縫承諾中 Follower 改追承諾線切線（fstate.trackTangent；與 cross-track ×3 同範圍）
+    checkTrue(st.dodgeCrawl == true and st.fstate.trackTangent == true,
+        "(tan) dodgeCrawl 承諾中 fstate.trackTangent=true（實得 " .. tostring(st.fstate.trackTangent) .. "）")
     -- 0904r：pad 與物理掃掠同源（−0.1）——牆格心 r0.7 離車身 0.02（pad 0 會 contact）仍不停
     dveh._y = 0.98 -- 車身壓進格心圓 ~0.08（<0.1 名義重疊）：pad 0 會 contact、pad −0.1 不會
     driveReset(dveh)
@@ -5506,6 +5544,46 @@ do
     MDAD.Drive.stop(0, nil)
     checkTrue(armDrive(), "(pad2) 重臂")
 end
+-- (ban) 擦過就算過（2026-09-04 s025 st185,813：路口電線桿 contact 一瞬即過、沒倒車，recovery
+--       ban（車前 9m 虛擬障礙）留著 → 下一次 replan 全候選 steep → 空路上 blocked → 後方是桿
+--       倒不了 → StopStuck）：contact 後車身整個越過命中點且 episodeAttempts=0 → ban 清掉。
+do
+    local st = MDAD.Drive.debugSession(0)
+    dveh._x, dveh._y, dveh._speed = 18, 1.2, 5
+    driveReset(dveh)
+    drive.scanRound(true)
+    driveTick(dp, dveh)
+    checkTrue(st.footprintBlocked == true, "(ban) 前置：contact（實得 " .. tostring(st.footprintBlocked) .. "）")
+    checkTrue(st.pushBanL ~= nil and st.banFromRecovery == true,
+        "(ban) contact 當輪設下 recovery ban（pushBanL=" .. tostring(st.pushBanL) .. "）")
+    checkTrue(st.episodeAttempts == 0, "(ban) 前置：尚未倒車")
+    local hitS = st.episodeHitS
+    -- 車身越過命中點 halfL+1 以上、離牆 0.8（不再 contact）
+    dveh._x, dveh._y = hitS + st.vehicleProfile.halfL + 2, 0.8
+    driveReset(dveh)
+    drive.scanRound(true)
+    driveTick(dp, dveh)
+    checkTrue(st.pushBanL == nil and st.banFromRecovery == false,
+        "(ban) 沒倒車就越過命中點：ban 清掉（pushBanL=" .. tostring(st.pushBanL) .. "）")
+    -- 對照：命中點還在車身內（差 0.5m）不清（投影只准前進：換位重開 session）
+    dveh._x, dveh._y, dveh._speed = 0, 0, 20
+    MDAD.Drive.stop(0, nil)
+    checkTrue(armDrive(), "(ban) 對照重臂")
+    st = MDAD.Drive.debugSession(0)
+    dveh._x, dveh._y, dveh._speed = 18, 1.2, 5
+    driveReset(dveh)
+    drive.scanRound(true)
+    driveTick(dp, dveh)
+    checkTrue(st.pushBanL ~= nil, "(ban) 對照：再 contact 重設 ban")
+    dveh._x, dveh._y = hitS + st.vehicleProfile.halfL - 0.5, 0.8
+    driveReset(dveh)
+    drive.scanRound(true)
+    driveTick(dp, dveh)
+    checkTrue(st.pushBanL ~= nil, "(ban) 命中點還沒整個越過：ban 保留（pushBanL=" .. tostring(st.pushBanL) .. "）")
+    dveh._x, dveh._y, dveh._speed = 0, 0, 20
+    MDAD.Drive.stop(0, nil)
+    checkTrue(armDrive(), "(ban) 重臂")
+end
 -- (ex) 恢復額度用盡後的 CRAWL 計入停等預算（s058/s059：attempt-limit 每 2.5s 一次、0 km/h
 --      100 秒不交還）。predicate：直接把 episodeAttempts 設到上限、車不動，15s 後必須交還。
 do
@@ -5538,6 +5616,7 @@ do
     drive.scanRound()
     local st = MDAD.Drive.debugSession(0)
     checkTrue(st.dodging ~= true, "(al) 車頭偏 30°：貼縫不 commit（dodging=" .. tostring(st.dodging) .. "）")
+    checkTrue(st.fstate.trackTangent ~= true, "(tan) 未承諾時不追切線（一般跟線照前視點）")
     checkTrue(st.blocked ~= true, "(al) 延後不是 blocked")
     setHeading(dveh, 0.05)
     driveReset(dveh)
@@ -7369,6 +7448,11 @@ local function scenarioChain()
     local commitCap = st.dodgeSpeedCap
     stepTo(10, stayLane * 0.7)
     checkTrue(st.fstate.laneBias ~= stayLane, "(c9) 進入段中 laneBias 仍未切")
+    -- 0905q：期望線＝ov 線本身（停留線的換道從 commit 點就開始，不是 a..b）——cross-track
+    -- 跟線走，不再把車往 laneBias 拉（2026-09-04 s023 進縫前被拉離線 0.9m）
+    checkTrue(type(st.diagExpL) == "number" and st.diagExpL < st.fstate.laneBias - 0.2 and st.diagExpL > stayLane,
+        "(c9) 進入段中期望線已隨停留線離開 laneBias（expL=" .. tostring(st.diagExpL)
+        .. " bias=" .. tostring(st.fstate.laneBias) .. " stay=" .. tostring(stayLane) .. "）")
     stepTo(st.fstate.offB + 0.5, stayLane)
     checkEq(st.fstate.laneBias, stayLane, "(c9) 過 b：常駐 lane 換成 offL")
     -- (c9g) 守護輪不得把停留 cap 放飛（2026-09-04 s034：laneBias 已換成 offL → 守護 dl=0 →

@@ -1755,6 +1755,114 @@ do
         "前右角離路口內側圍籬角 ≥ 2m（實得 " .. string.format("%.2f", minCorner) .. "）")
 end
 
+scenario("貼縫切線追蹤（trackTangent）：誤差對承諾線切線而非前視點、閉環落後與出口切內較現制小")
+do
+    -- 2026-09-04 s006/s018/s021/s030：cap 5-10 的貼縫承諾，進入段 4-6m、側移 1.5-4m，
+    -- pure pursuit 的前視點（≥6m）比進入段長：車頭一超過「到前視點的弦角」PID 就喊轉回，
+    -- 與 cross-track 抵消，落後 0.25-1.3m 撞障礙。trackTangent＝誤差改對線在車前
+    -- TANGENT_PREVIEW_M 的切線（Stanley 型），只在 ov 線覆蓋範圍內生效。
+    local a, b, c, d, dl = 12, 18, 30, 36, -4
+    local st = F.newState()
+    checkTrue(exactOffset(st, a, b, c, d, dl), "承諾線建好")
+    -- (1) 開環：車在 a 前 1m、車頭沿路——前視點看到 6m 外的側偏，切線 1.5m 處只是入口斜率
+    local _, _, _, _, errPP = F.control(pLine, st, a - 1, 0, 0, 10, DT)
+    st.trackTangent = true
+    local _, _, _, _, errTan = F.control(pLine, st, a - 1, 0, 0, 10, DT)
+    -- 前視點：7.2m 外、側偏 −4 → atan(4/7.2)≈−0.51；切線：ov 段 [12,13] 與 [13,14] 按段內比例 0.5 混合
+    local function laneS(sx) local t = (sx - a) / (b - a); t = t * t * (3 - 2 * t); return dl * t end
+    local slope = 0.5 * (laneS(13) - laneS(12)) + 0.5 * (laneS(14) - laneS(13))
+    checkNear(errPP, -math.atan(4 / 7.2), 0.05, "現制：誤差＝到前視點的弦角（實得 " .. string.format("%.3f", errPP) .. "）")
+    checkNear(errTan, math.atan(slope), 1e-3,
+        "切線：誤差＝線在車前 1.5m 的切線角（混合相鄰段）（實得 " .. string.format("%.3f", errTan) .. "）")
+    -- 線外（ov 範圍前）不生效：與現制同值
+    st.trackTangent = false
+    local _, _, _, _, e0 = F.control(pLine, st, 2, 0, 0, 10, DT)
+    st.trackTangent = true
+    local _, _, _, _, e1 = F.control(pLine, st, 2, 0, 0, 10, DT)
+    checkNear(e1, e0, 1e-9, "ov 線範圍外照舊走前視點")
+    -- (2) 閉環：自行車＋一階 yaw 延遲、Driver 同式 cross-track ×3；量進入段峰值／到 b 的落後／出口前切內
+    local D = MDADDynamics
+    local KPS, KMAX, TAU = 0.16, 1 / 2.92, 0.35 -- s018 實測 steer 0.44 → κ≈0.07
+    local function laneAt(sx)
+        if sx <= a then return 0 elseif sx >= b then return dl end
+        local t = (sx - a) / (b - a); t = t * t * (3 - 2 * t); return dl * t
+    end
+    local function run(tangent)
+        local s2 = F.newState()
+        assert(exactOffset(s2, a, b, c, d, dl))
+        s2.trackTangent = tangent
+        local car = { x = 0, y = 0, h = 0, w = 0 }
+        local prevLat, peak, atB, exitIn = nil, 0, nil, 0
+        local steps = 0
+        while car.x < d and steps < 5000 do
+            steps = steps + 1
+            local steer = F.control(pLine, s2, car.x, car.y, car.h, 10, DT)
+            local latDev = car.y - laneAt(car.x)
+            local dLat = prevLat and (latDev - prevLat) / DT or nil
+            prevLat = latDev
+            local u = steer - D.crossTrackSteer(latDev, 10, dLat, D.CROSS_TRACK_DODGE_GAIN, D.CROSS_TRACK_DODGE_MAX)
+            if u > F.STEER_MAX then u = F.STEER_MAX elseif u < -F.STEER_MAX then u = -F.STEER_MAX end
+            local k = u * KPS
+            if k > KMAX then k = KMAX elseif k < -KMAX then k = -KMAX end
+            local v = 10 / KMH
+            car.w = car.w + (k * v - car.w) * (DT / TAU)
+            car.h = car.h + car.w * DT
+            car.x = car.x + math.cos(car.h) * v * DT
+            car.y = car.y + math.sin(car.h) * v * DT
+            local lag = math.abs(latDev)
+            if car.x >= a and car.x <= b and lag > peak then peak = lag end
+            if atB == nil and car.x >= b then atB = lag end
+            if car.x >= c - 3 and car.x <= c and latDev * dl < 0 and lag > exitIn then exitIn = lag end
+        end
+        return peak, atB or 99, exitIn
+    end
+    -- (3) 第 8 回傳 lineLat＝ov 線在投影點的橫向：停留式線（returnLane 模式，換道從 s0 就開始）
+    --     與 a..b smoothstep 的期望線不同——Driver 的 cross-track 要跟線本身
+    do
+        local s3 = F.newState()
+        local ox, oy = {}, {}
+        local n3, s03, why3, s13 = F.buildOffsetLine(pLine, 0, a, b, c, d, dl, 0, ox, oy, 0, dl, b)
+        checkEq(why3, "ok", "停留式線建好")
+        checkTrue(F.setOffset(s3, a, b, c, d, dl, ox, oy, n3, s03, s13), "停留式線 setOffset")
+        local _, _, _, _, _, _, _, ll = F.control(pLine, s3, 9, 0, 0, 10, DT)
+        local t2 = 9 / b; t2 = t2 * t2 * (3 - 2 * t2)
+        checkNear(ll, dl * t2, 0.05, "lineLat：s=9（a 之前）已隨 s0→b 的換道走到 " .. string.format("%.2f", dl * t2))
+        local _, _, _, _, _, _, _, ll2 = F.control(pLine, st, 9, 0, 0, 10, DT)
+        checkNear(ll2, 0, 1e-6, "一般繞行線：a 之前 lineLat＝bias 0")
+        local _, _, _, _, _, _, _, ll3 = F.control(pLine, st, c - 1, dl, 0, 10, DT)
+        checkNear(ll3, dl, 0.02, "一般繞行線：並行段 lineLat＝offL")
+        local s4 = F.newState()
+        local _, _, _, _, _, _, _, ll4 = F.control(pLine, s4, 9, 0, 0, 10, DT)
+        checkNil(ll4, "無承諾線：lineLat 為 nil")
+    end
+    -- (4) 路口內側偏的 ov 線在彎頂有折點：前視窗內路線轉角 >15° 交回前視點（誤差與不追切線同值）
+    do
+        local pC = buildRoute({ 0, 0, 30, 0, 30, 30, 30, 60 }, MAXV)
+        local sc = F.newState()
+        local ox, oy = {}, {}
+        local nC, s0C, whyC, s1C = F.buildOffsetLine(pC, 0, 10, 20, 40, 48, -3, 0, ox, oy)
+        checkEq(whyC, "ok", "轉角承諾線建好")
+        checkTrue(F.setOffset(sc, 10, 20, 40, 48, -3, ox, oy, nC, s0C, s1C), "轉角線 setOffset")
+        local _, _, _, _, ePP = F.control(pC, sc, 26, -1.5, 0, 10, DT)
+        sc.trackTangent = true
+        local _, _, _, _, eGate = F.control(pC, sc, 26, -1.5, 0, 10, DT)
+        checkNear(eGate, ePP, 1e-9, "彎前 4m（前視窗含 90° 折點）：不追切線，誤差＝前視點")
+        checkFalse(sc.tangentOn, "彎前 tangentOn=false")
+        local _, _, _, _, eStr = F.control(pC, sc, 12, -0.3, 0, 10, DT)
+        checkTrue(sc.tangentOn == true, "直段（彎在前視窗外）：追切線")
+    end
+    local pkA, bA, exA = run(false)
+    local pkT, bT, exT = run(true)
+    checkTrue(pkT < pkA * 0.75,
+        string.format("進入段峰值落後較現制少 25%%+（%.2f → %.2f）", pkA, pkT))
+    checkTrue(bT < bA * 0.75,
+        string.format("到 b 的落後較現制少 25%%+（%.2f → %.2f）", bA, bT))
+    checkTrue(exT < exA * 0.5 and exT < 0.25,
+        string.format("出口前切內（前視點提前看到回線）較現制少一半且 <0.25（%.2f → %.2f）", exA, exT))
+    checkTrue(pkT < 0.8 and bT < 0.6,
+        string.format("6m 塞 4m 側移／10 km/h：峰值 <0.8、到 b <0.6（%.2f／%.2f）", pkT, bT))
+end
+
 closeScenario()
 print()
 print("情境 " .. scenarios .. " 個、斷言 " .. assertions .. " 項")

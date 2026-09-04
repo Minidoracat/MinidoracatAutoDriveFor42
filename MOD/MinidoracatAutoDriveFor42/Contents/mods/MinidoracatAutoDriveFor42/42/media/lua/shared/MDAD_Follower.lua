@@ -125,6 +125,12 @@ local LOOKAHEAD_BASE = 6
 local LOOKAHEAD_PER_KMH = 0.12
 local LOOKAHEAD_MIN = 6
 local LOOKAHEAD_MAX = 18
+-- 貼縫切線追蹤的預視距（state.trackTangent）。離線閉環（自行車＋一階 yaw 延遲，scripts/
+-- exp_gap_tangent.lua）：1m 出口外甩大、3m 幾乎退回前視點的落後；1.5m 進入段峰值／到 b 的落後
+-- 較現制降 40-60%、出口前切內 0.3-0.8→≤0.2。plant 反應慢一倍（tau 0.7）時外甩 ≤0.6，
+-- 實機若見貼縫段左右擺就加大到 2。
+local TANGENT_PREVIEW_M = 1.5
+local TANGENT_MAX_TURN_RAD = 15 * PI / 180 -- 前視窗內路線轉角超過此值交回前視點
 local LOOKAHEAD_WALK_MAX = 64 -- 前視推進的段數硬上限（碎段路線不得變成 O(n) 迴圈）
 
 local SEARCH_BACK = 12        -- 投影搜尋窗口：往後 12 段
@@ -175,6 +181,7 @@ MDADFollower.ARRIVE_M = ARRIVE_M
 MDADFollower.MIN_SPEED_KMH = MIN_SPEED_KMH
 MDADFollower.BUDGET_MAX = BUDGET_MAX
 MDADFollower.OV_STEP = OV_STEP
+MDADFollower.TANGENT_PREVIEW_M = TANGENT_PREVIEW_M
 MDADFollower.LANE_MAX = LANE_MAX
 MDADFollower.SURFACE_UNKNOWN = 0
 MDADFollower.SURFACE_PAVED = 1
@@ -666,6 +673,20 @@ function MDADFollower.stepBuild(profile, budget)
 end
 
 -- 每幀控制。零配置：只讀 profile、只就地寫 state 的數值欄位。
+-- ov 折線在弧長 q 的段索引與段內比例（等距 OV_STEP，末段可短）；呼叫端保證
+-- q ∈ [ovS0, ovEndS]、ovN ≥ 2。模組層函式：control 每幀呼叫，不得配置 closure。
+local function ovIndexAt(ovS0, ovN, ovEndS, q)
+    local lastStart = ovS0 + (ovN - 2) * OV_STEP
+    if q >= lastStart then
+        local lastSpan = ovEndS - lastStart
+        if lastSpan > 0 then return ovN - 1, (q - lastStart) / lastSpan end
+        return ovN - 1, 1
+    end
+    local fi = (q - ovS0) / OV_STEP + 1
+    local i0 = fi - fi % 1
+    return i0, fi - i0
+end
+
 function MDADFollower.control(profile, state, x, y, heading, speed, dt)
     if type(state) == "table" then
         state.curveValid = false
@@ -824,20 +845,10 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
     -- RETURN borrows the caller's preallocated array; dodge uses state-owned storage.
     local ovN = state.ovN or 0
     local ovEndS = state.ovEndS
+    local ovX, ovY = state.ovX, state.ovY
     if ovN >= 2 and isFinite(ovEndS)
             and sEff >= state.ovS0 and sEff <= ovEndS then
-        local i0, ft
-        local lastStart = state.ovS0 + (ovN - 2) * OV_STEP
-        if sEff >= lastStart then
-            i0 = ovN - 1
-            local lastSpan = ovEndS - lastStart
-            if lastSpan > 0 then ft = (sEff - lastStart) / lastSpan else ft = 1 end
-        else
-            local fi = (sEff - state.ovS0) / OV_STEP + 1
-            i0 = fi - fi % 1
-            ft = fi - i0
-        end
-        local ovX, ovY = state.ovX, state.ovY
+        local i0, ft = ovIndexAt(state.ovS0, ovN, ovEndS, sEff)
         tx = ovX[i0] + (ovX[i0 + 1] - ovX[i0]) * ft
         ty = ovY[i0] + (ovY[i0 + 1] - ovY[i0]) * ft
         ovUsed = true
@@ -872,7 +883,51 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         local h = profile.segH[bestI]
         vx, vy = cos(h), sin(h)
     end
+    -- 貼縫承諾（state.trackTangent，Driver 在 dodgeCrawl 時設）：誤差改對「承諾線在車前
+    -- TANGENT_PREVIEW_M 處的切線」而非前視點。前視點 6-7m 比進入段（4-6m）還長，pure
+    -- pursuit 對目標點的弦只能給 dl/look 的橫向斜率、車頭一超過弦角就喊「轉回去」，與
+    -- cross-track 互相抵消＝進入段落後 0.25-1.3m 撞障礙（2026-09-04 s006/s018/s021/s030）。
+    -- 切線＋cross-track（Stanley 型）讓車照線本身的斜率走；離線閉環（scripts/exp_gap_tangent.lua）
+    -- 進入段峰值／到 b 落後降 40-60%、出口前切內 0.3-0.8→≤0.2。只在 ov 線覆蓋範圍內生效，其餘照舊。
+    -- 只在前視窗內路線本身近直（|Δ段向| ≤ TANGENT_MAX_TURN_RAD）才追切線：路口內側偏 3m 的
+    -- ov 線在彎頂有折點，切線一幀跳 30° → D 項抽 −3.6 → 15 km/h 甩尾撞路口電話亭
+    -- （2026-09-04 s022 st184,011.8）；彎中交回前視點（前視點本來就把折點平掉）。
+    local tangentOn = false
+    if ovUsed and state.trackTangent == true then
+        local dh = profile.segH[j] - profile.segH[bestI]
+        if dh > PI then dh = dh - 2 * PI elseif dh < -PI then dh = dh + 2 * PI end
+        if dh < 0 then dh = -dh end
+        local q = sNow + TANGENT_PREVIEW_M
+        if q < state.ovS0 then q = state.ovS0 end
+        if dh <= TANGENT_MAX_TURN_RAD and q <= ovEndS then
+            local i0, ft = ovIndexAt(state.ovS0, ovN, ovEndS, q)
+            local dx, dy = ovX[i0 + 1] - ovX[i0], ovY[i0 + 1] - ovY[i0]
+            if i0 + 2 <= ovN then
+                -- 與下一段切線按段內比例混合：折線切線逐段跳變會讓 PID 的 D 項每公尺抽一記
+                dx = dx * (1 - ft) + (ovX[i0 + 2] - ovX[i0 + 1]) * ft
+                dy = dy * (1 - ft) + (ovY[i0 + 2] - ovY[i0 + 1]) * ft
+            end
+            if dx * dx + dy * dy > 1e-8 then vx, vy = dx, dy; tangentOn = true end
+        end
+    end
     local err = atan2(fx * vy - fy * vx, fx * vx + fy * vy)
+    -- 切線↔前視點切換那一幀誤差定義不同：清 D 項歷史，不讓切換本身抽一記
+    if tangentOn ~= (state.tangentOn == true) then
+        state.tangentOn = tangentOn
+        state.errPrev = nil
+        state.dFilt = 0
+    end
+    -- ov 線在車投影點的橫向（對中心線、右正）：Driver 的 cross-track 期望線。停留線的
+    -- 換道從 commit 點就開始（returnLane 模式），Driver 舊制用 a..b smoothstep 算期望線
+    -- → 兩者相差 1m 以上，cross-track 把車往「線不在的地方」拉（2026-09-04 s023 t=24-29：
+    -- 進縫前被拉離線 0.9m、進縫後又追不上，貼 B 車）。
+    local lineLat = nil
+    if ovN >= 2 and isFinite(ovEndS) and sNow >= state.ovS0 and sNow <= ovEndS then
+        local i0, ft = ovIndexAt(state.ovS0, ovN, ovEndS, sNow)
+        local lx = ovX[i0] + (ovX[i0 + 1] - ovX[i0]) * ft
+        local ly = ovY[i0] + (ovY[i0 + 1] - ovY[i0]) * ft
+        lineLat = (lx - pjx) * -sin(hProj) + (ly - pjy) * cos(hProj)
+    end
 
     -- ---- 原地調頭遲滯 ----
     local aerr = err
@@ -1001,7 +1056,7 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         state.errPrev = err
     end
 
-    return steer, targetSpeed, remaining, reached, err, bestD, latSigned
+    return steer, targetSpeed, remaining, reached, err, bestD, latSigned, lineLat
 end
 
 -- 放掉 exact line 借用：setExactLine 會把 ovX/ovY 指向呼叫端的陣列，這裡指回
@@ -1042,6 +1097,8 @@ function MDADFollower.resetControl(state)
     state.curveKappa = 0
     state.curveCapKmh = 0
     state.offL = nil
+    state.trackTangent = false
+    state.tangentOn = false
     releaseExactLine(state)
     return state
 end
