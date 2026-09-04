@@ -35,6 +35,9 @@ module MinidoracatAutoDrive
             註解）。門檻由配方的 ResearchSkillLevel 決定（此處＝電工 3）。
         */
         Researchablerecipes = CraftGPSNavigator,
+        /* 物品欄 tooltip 的用法說明（Item.java:2546 讀取、InventoryItem.java:1231-1233 以 Translator.getText 顯示）：
+           Workshop 玩家回報「拿到模組不知道怎麼裝」 */
+        Tooltip = Tooltip_MinidoracatAutoDrive_GPS,
     }
 
     /*
@@ -54,6 +57,7 @@ module MinidoracatAutoDrive
             ResearchSkillLevel 3／6，電工 3 時只會學到 GPS 那張）。
         */
         Researchablerecipes = CraftGPSNavigator;CraftAutopilotModule,
+        Tooltip = Tooltip_MinidoracatAutoDrive_Auto,
     }
 
     /*

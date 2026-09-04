@@ -1,0 +1,4 @@
+{
+    "Tooltip_MinidoracatAutoDrive_GPS": "How to use: keep it in your inventory with a battery, open the world map and pick a destination to plan a route along the roads. Optional: stand next to a vehicle and right-click it to install the navigator (needs a screwdriver, a vehicle battery and Electrical 1).",
+    "Tooltip_MinidoracatAutoDrive_Auto": "How to use: stand next to a vehicle, right-click it and choose \"Install Autopilot Module\" (needs a screwdriver, a vehicle battery and Electrical 1). Then plan a route with a GPS Navigator, sit in the driver's seat and press \"Engage Autodrive\" on the panel above the dashboard."
+}
