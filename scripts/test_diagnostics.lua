@@ -265,7 +265,8 @@ end
 local INDEX_PATH = "MinidoracatAutoDrive/Telemetry/session-index.txt"
 local MANIFEST_PATH = "MinidoracatAutoDrive/Telemetry/manifest.txt"
 
--- 索引列 → { slot, startTs, endTs, bytes, reason, file } 的陣列（順序保留）
+-- 索引列 → { slot, startTs, endTs, bytes, reason, file, drive, part } 的陣列（順序保留）
+-- （0904d 起 8 欄：drive＝同趟 id、part＝第幾檔）
 local function indexRows()
     local rows = {}
     local content = files[INDEX_PATH]
@@ -273,12 +274,13 @@ local function indexRows()
     local lines = splitLines(content)
     local i = 1
     while i <= #lines do
-        local slot, st, en, bytes, reason, file = string.match(lines[i],
-            "^(%d+)\t([%-%d%.]+)\t([%-%d%.]+)\t([%-%d%.]+)\t([^\t]*)\t(.+)$")
+        local slot, st, en, bytes, reason, file, drive, part = string.match(lines[i],
+            "^(%d+)\t([%-%d%.]+)\t([%-%d%.]+)\t([%-%d%.]+)\t([^\t]*)\t([^\t]+)\t([%d%.]+)\t(%d+)$")
         if slot then
             rows[#rows + 1] = {
                 slot = tonumber(slot), startTs = tonumber(st), endTs = tonumber(en),
                 bytes = tonumber(bytes), reason = reason, file = file,
+                drive = tonumber(drive), part = tonumber(part),
                 raw = lines[i],
             }
         else
@@ -753,12 +755,42 @@ end
 local capBody = files[sessionPath(1)] or ""
 check(#capBody <= 2097152, "session file stays within 2MiB")
 local capLen = #capBody
+-- 2026-09-04 使用者裁定：寫滿自動接續下一槽（長路線 2MiB 只錄得到前兩分鐘）。
+-- 契約：① 第 1 檔封尾 reason=continued、大小不再變；② 第 2 檔 header 帶同一 drive、
+-- part=2、cont=第 1 檔名；③ 溢出的那一列落在第 2 檔（不丟）；④ sample 回 true（還在錄）；
+-- ⑤ index 兩列同 drive、part 1／2；⑥ stop 落在第 2 檔。
+check(string.find(capBody, '"r":"continued"', 1, true) ~= nil,
+    "full file ends with a continued footer")
+local body2 = files[sessionPath(2)] or ""
+check(string.find(body2, '"t":"h"', 1, true) ~= nil, "continuation opens a new slot with a header")
+check(string.find(body2, '"drive":70000', 1, true) ~= nil
+    and string.find(body2, '"part":2', 1, true) ~= nil
+    and string.find(body2, '"cont":"session-001.log"', 1, true) ~= nil,
+    "continuation header chains drive/part/cont")
+check(string.find(files[sessionPath(1)] or "", '"drive":70000,"part":1', 1, true) ~= nil,
+    "first file header carries drive/part 1")
+check(string.find(body2, big, 1, true) ~= nil, "the overflowing record lands in the continuation")
 nowMs = nowMs + 1000
 MDADDiagnostics.event(0, big)
 checkEq(MDADDiagnostics.sample(0, nowMs, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0,
-    "follow", 1, false, nil), false, "size cap reports inactive")
-checkEq(#(files[sessionPath(1)] or ""), capLen, "size cap stops further writes")
+    "follow", 1, false, nil), true, "recording continues after the size cap")
+checkEq(#(files[sessionPath(1)] or ""), capLen, "sealed first file no longer grows")
+check(#(files[sessionPath(2)] or "") > #body2, "continuation keeps appending")
+local r1, r2 = indexRow(1), indexRow(2)
+check(r1 ~= nil and r2 ~= nil, "index lists both parts")
+if r1 and r2 then
+    checkEq(r1.reason, "continued", "index marks part 1 as continued")
+    checkEq(r2.reason, "active", "index marks part 2 active")
+    checkEq(r1.drive, 70000, "part 1 drive id = first start")
+    checkEq(r2.drive, 70000, "part 2 shares the drive id")
+    checkEq(r1.part, 1, "part 1 numbered 1")
+    checkEq(r2.part, 2, "part 2 numbered 2")
+end
 MDADDiagnostics.stop(0, "end")
+check(string.find(files[sessionPath(2)] or "", '"r":"end"', 1, true) ~= nil,
+    "stop footer lands in the continuation")
+r2 = indexRow(2)
+checkEq(r2 and r2.reason, "end", "index closes part 2 with the stop reason")
 
 resetFs()
 loadProd()
@@ -1421,6 +1453,7 @@ local bareHeader = files[sessionPath(1)] or ""
 checkEq(countNeedle(bareHeader, '"game":'), 0, "no getCore stub: game field omitted")
 checkEq(countNeedle(bareHeader, '"mode":'), 0, "no isClient stub: mode field omitted")
 checkEq(countNeedle(bareHeader, '"mods":'), 0, "no getActivatedMods stub: mods field omitted")
+checkEq(countNeedle(bareHeader, '"opts":'), 0, "no option/sandbox getters: opts field omitted")
 check(string.find(bareHeader, '"build":"m57-test","rev":', 1, true) ~= nil,
     "build/rev keep their schema v1 position")
 
@@ -1453,6 +1486,20 @@ check(string.find(envHeader,
 check(string.find(envHeader, '"rev":', 1, true) < string.find(envHeader, '"game":', 1, true)
     and string.find(envHeader, '"mods":', 1, true) < string.find(envHeader, '"profile":', 1, true),
     "env stamp sits between rev and profile")
+-- opts（0904i）：自動改道／語音／沙盒三值；任一 getter 拋錯只省略該項，其餘照記
+MDAD.HUD.autoDetour = function() return false end
+MDAD.HUD.voiceEnabled = function() error("voice boom") end
+MDAD.sandbox = function(name)
+    return ({ ObstaclePolicy = 1, AutoDriveMaxSpeed = 70, RightLaneBias = 1.5 })[name]
+end
+resetFs()
+nowMs = 9301500
+MDADDiagnostics.start(0, nil, profile)
+MDADDiagnostics.stop(0, "end")
+local optsHeader = files[sessionPath(1)] or ""
+check(string.find(optsHeader, '"opts":"detour=false;policy=1;maxKmh=70;laneBias=1.5"', 1, true) ~= nil,
+    "opts records detour/sandbox values; throwing voice getter omits only itself")
+MDAD.HUD.autoDetour, MDAD.HUD.voiceEnabled, MDAD.sandbox = nil, nil, nil
 function getActivatedMods() error("boom") end
 resetFs()
 nowMs = 9302000

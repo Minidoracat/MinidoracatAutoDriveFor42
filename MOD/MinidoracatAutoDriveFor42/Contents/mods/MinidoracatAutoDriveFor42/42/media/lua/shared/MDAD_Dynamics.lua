@@ -161,21 +161,29 @@ local CROSS_TRACK_DAMP = 0.35  -- 橫向速度阻尼（2026-09-02 前臂化補�
                                -- P→PD：朝線收斂太快就提前回打）
 local CROSS_TRACK_SPEED_FLOOR_MS = 2.5
 local CROSS_TRACK_MAX_STEER = 0.77
-function D.crossTrackSteer(latDev, speedKmh, dLatPerSec)
+-- 貼縫承諾中的增益倍率／上限（2026-09-04 s003@0904m 定罪「右轉不夠多」：offL 2.00 承諾、
+-- 5 km/h 執行，latDev 從 −1.27 收到 −1.04 花 3 秒，steer 只用 0.1-0.2（力 2-14% 權威），
+-- 前角撞黑車 contact。低速下 v² 項為零、pure pursuit 對 1m 側偏只給 0.15rad 誤差，
+-- 位置環是唯一能救的項；一般跟線不動（s026 調過的 0.77 保留）。
+D.CROSS_TRACK_DODGE_GAIN = 3
+D.CROSS_TRACK_DODGE_MAX = 2.5
+function D.crossTrackSteer(latDev, speedKmh, dLatPerSec, gainScale, maxSteer)
     if not D.finite(latDev) or not D.finite(speedKmh) then return 0 end
+    if not D.finite(gainScale) or gainScale <= 0 then gainScale = 1 end
+    if not D.finite(maxSteer) or maxSteer <= 0 then maxSteer = CROSS_TRACK_MAX_STEER end
     local speedMs = speedKmh / 3.6
     if speedMs < 0 then speedMs = -speedMs end
     if speedMs < CROSS_TRACK_SPEED_FLOOR_MS then
         speedMs = CROSS_TRACK_SPEED_FLOOR_MS
     end
-    local correction = CROSS_TRACK_GAIN * latDev / speedMs
+    local correction = CROSS_TRACK_GAIN * gainScale * latDev / speedMs
     if D.finite(dLatPerSec) then
-        correction = correction + CROSS_TRACK_DAMP * dLatPerSec / speedMs
+        correction = correction + CROSS_TRACK_DAMP * gainScale * dLatPerSec / speedMs
     end
-    if correction > CROSS_TRACK_MAX_STEER then
-        correction = CROSS_TRACK_MAX_STEER
-    elseif correction < -CROSS_TRACK_MAX_STEER then
-        correction = -CROSS_TRACK_MAX_STEER
+    if correction > maxSteer then
+        correction = maxSteer
+    elseif correction < -maxSteer then
+        correction = -maxSteer
     end
     return correction
 end
@@ -192,9 +200,9 @@ local ASSIST_SPEED_MAX_KMH = 25
 -- 值域 (0,10]，1 是標定越野能力）。rough 情境一律保底 ×BASE（普通車草地也掉
 -- 牽引），效率更低的車取 1/eff，上限 ×MAX。讀不到（nil／非法）＝保底 BASE
 -- （rough 已由呼叫端確認為事實，fail-safe 方向仍是「不亂放大」）。
-D.ASSIST_OFFROAD_MAX = 5     -- 4→5（2026-09-02 二次上調：非道路推力更大）
-D.ASSIST_OFFROAD_BASE = 2.5  -- 2→2.5：rough 保底增幅（疊乘重車超線性 massScale
-                             -- 後，2600kg 重車草地滿載可達 ratio×mass×5×2）
+D.ASSIST_OFFROAD_MAX = 6     -- 4→5→6（2026-09-04 三次上調「非道路推力再稍微增加一點點」）
+D.ASSIST_OFFROAD_BASE = 3    -- 2→2.5→3：rough 保底增幅（疊乘重車超線性 massScale
+                             -- 後，2600kg 重車草地滿載可達 ratio×mass×6×2）
 function D.assistOffroadScale(offroadEff)
     local scale = D.ASSIST_OFFROAD_BASE
     if D.finite(offroadEff) and offroadEff > 0 then
@@ -303,6 +311,28 @@ D.DODGE_CAP_FLOOR_KMH = 15   -- 12→15（2026-09-02 s008 剖析：curve FLOOR �
 -- 不變式：powered command 必須是 0 或 ≥ MIN_EXEC。可視上限低於 MIN_EXEC
 -- 時歸 WAIT（該停就停），不准用 max() 抬高安全證明。
 D.MIN_EXEC_KMH = 8
+-- 硬煞門檻（2026-09-04 GitHub issue #1/#2 定罪）：forceBrake 是引擎的 1 秒閂鎖
+-- （BaseVehicle.setForceBrake 只寫時戳 :9899-9901；CarController.updateControls
+-- :973-977 在 dt<1000 內每幀強制 brake=true，control_Braking :519-528 煞車力 ×13
+-- 並掛 N，**無取消 API**），telemetry 每次觸發 minWheelSkid 掉到 0.06＝鎖輪。
+-- 舊門檻「實速 > cap + 0.5 km/h」低於致動器自身雜訊：regulator 命令整數化 0.5
+-- ＋bang-bang 供油漣漪 ~1＋進弧瞬間 cap 下降而實速沿 coast 包絡追蹤落後 ~0.7
+-- ≈ 2.2 km/h——彎道入口必觸發、鎖輪一秒失去側向抓地（issue #2 撞分隔島的可信
+-- 機制；0903c s005/s007/s010 超 0.6-0.8 即鎖輪實錄）。門檻以下走 applySpeed
+-- （regulator 目標 ≤ cap＝斷油滑行、檔位保留）。安全帳：curve 超 6% → 側向
+-- 加速 1.12×，latSafe 3.5 下 3.9 m/s²，遠低於 prior 5.3；visibility 65 km/h
+-- 超 4 km/h 多 ~5.6m 煞停距，落在 stoppingDistance 的 v·tau（0.5s ≈ 9m）＋
+-- halfL+2 緩衝內；blocked／contact／return／arrive 不經此門檻。
+D.HARD_BREACH_MIN_KMH = 3
+D.HARD_BREACH_RATIO = 0.06
+-- 回「超過此實速才 forceBrake」的門檻速（km/h）。非有限／負 cap 回 0＝
+-- 任何實速都算 breach（fail-closed；呼叫端另有 finite(cap) 前置檢查）。
+function D.hardBreachKmh(capKmh)
+    if not D.finite(capKmh) or capKmh < 0 then return 0 end
+    local margin = capKmh * D.HARD_BREACH_RATIO
+    if margin < D.HARD_BREACH_MIN_KMH then margin = D.HARD_BREACH_MIN_KMH end
+    return capKmh + margin
+end
 -- blocked 煞停判距（2026-09-01 s045/s051 兩輪遙測定罪）：route 繞遠／橫偏時
 -- 投影弧長虛高（s045 弧長差 1m、世界實距 18m，25m 外停死）；點雲成員資格
 -- 也不可用弧長——blockS 是「判 blocked 那輪快照」的弧長、hardS 是當前快照
@@ -585,6 +615,16 @@ function D.clearanceCapKmh(minClearance, errorReserve, tau, aLat, sinHeading)
     return 3.6 * u / sh
 end
 
+-- 貼縫承諾可執行地板（兩檔）：淨距 < midMargin → minKmh；≥ midMargin → midKmh。
+-- 純量分段、無狀態；非法輸入退回 minKmh（fail-safe＝慢檔）。
+function D.crawlFloorKmh(margin, minKmh, midKmh, midMargin)
+    if not D.finite(minKmh) or minKmh < 0 then minKmh = 0 end
+    if not D.finite(midKmh) or midKmh < minKmh then midKmh = minKmh end
+    if not D.finite(margin) or not D.finite(midMargin) then return minKmh end
+    if margin >= midMargin then return midKmh end
+    return minKmh
+end
+
 -- 繞行速度上限＝連續物理量的 min（2026-09-01 使用者裁定「確定可過＝全油門、
 -- 速度隨餘裕縮放」）：clearanceCap（縫餘裕連續）、spaceCap（過渡長連續，經
 -- profileCap 入口）、curveCap（曲率）、visibilityCap（可視）。舊 one-size
@@ -670,8 +710,29 @@ local function filletGeometry(bx, by, inX, inY, outX, outY, radius, turnSign)
     return theta, px, py, px + nx * radius, py + ny * radius
 end
 
-local function filletFits(ax, ay, bx, by, cx0, cy0, inX, inY, outX, outY,
-        radius, turnSign, bandA, bandB)
+-- 弧取樣點是否落在「臂鏈」（raw 段 lo..hi）任一段的膠囊內（帶寬逐段各自算＝
+-- 與 rawBandContains 的聯集語意一致）。
+local function armContains(srcPts, srcWidth, lo, hi, halfW, x, y, sagitta)
+    for k = lo, hi do
+        local band = srcWidth[k] * 0.5 - halfW - D.ROAD_EDGE_MARGIN
+        if band > 0 then
+            local p = k * 2 - 1
+            local d = sqrt(D.distanceToSegmentSq(x, y,
+                srcPts[p], srcPts[p + 1], srcPts[p + 2], srcPts[p + 3])) + sagitta
+            if d <= band then return true end
+        end
+    end
+    return false
+end
+
+-- 弧是否整段留在路面帶內。膠囊查的是**共線臂鏈** [inFrom, i-1]／[i, outTo-1]，
+-- 不是只查角的緊鄰兩段（2026-09-04 實機定罪：主 MOD 路線在 cell 邊界（256 格）
+-- 預切一點，Olin Road 兩個 27° 彎的頂點旁 1m 各多一個共線取樣點，緊鄰段只剩
+-- 1m → 弧超出緊鄰段端點即判出帶 → 二分縮到 R=15、彎速 26 km/h；同一彎按
+-- 8m 路寬本可 R≈97、65 km/h 直過）。臂長預算早已沿共線臂累積（armIn/armOut），
+-- 帶檢查不跟著累積＝預算白給。
+local function filletFits(srcPts, srcWidth, i, inFrom, outTo, bx, by,
+        inX, inY, outX, outY, radius, turnSign, halfW)
     local theta, px, py, cx, cy = filletGeometry(
         bx, by, inX, inY, outX, outY, radius, turnSign)
     local steps = arcSteps(radius * theta, theta)
@@ -682,15 +743,17 @@ local function filletFits(ax, ay, bx, by, cx0, cy0, inX, inY, outX, outY,
     for j = 0, steps do
         local a = a0 + turnSign * theta * (j / steps)
         local x, y = cx + cos(a) * radius, cy + sin(a) * radius
-        local da = sqrt(D.distanceToSegmentSq(x, y, ax, ay, bx, by)) + sagitta
-        local db = sqrt(D.distanceToSegmentSq(x, y, bx, by, cx0, cy0)) + sagitta
-        if da > bandA and db > bandB then return false end
+        if not armContains(srcPts, srcWidth, inFrom, i - 1, halfW, x, y, sagitta)
+                and not armContains(srcPts, srcWidth, i, outTo - 1, halfW, x, y, sagitta) then
+            return false
+        end
         if j < steps then
             a = a0 + turnSign * theta * ((j + 0.5) / steps)
             x, y = cx + cos(a) * radius, cy + sin(a) * radius
-            da = sqrt(D.distanceToSegmentSq(x, y, ax, ay, bx, by)) + sagitta
-            db = sqrt(D.distanceToSegmentSq(x, y, bx, by, cx0, cy0)) + sagitta
-            if da > bandA and db > bandB then return false end
+            if not armContains(srcPts, srcWidth, inFrom, i - 1, halfW, x, y, sagitta)
+                    and not armContains(srcPts, srcWidth, i, outTo - 1, halfW, x, y, sagitta) then
+                return false
+            end
         end
     end
     return true
@@ -781,17 +844,18 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
                         if bandUpper < upper then upper = bandUpper end
                     end
                     local sign = cross >= 0 and 1 or -1
+                    local inFrom, outTo = armFrom[i], armTo[i]
                     if bandA > 0 and bandB > 0 and upper >= rMin
-                            and filletFits(ax, ay, bx, by, cx, cy, ix, iy, ox, oy,
-                                rMin, sign, bandA, bandB) then
+                            and filletFits(srcPts, srcWidth, i, inFrom, outTo, bx, by,
+                                ix, iy, ox, oy, rMin, sign, halfW) then
                         radius = upper
-                        if not filletFits(ax, ay, bx, by, cx, cy, ix, iy, ox, oy,
-                                radius, sign, bandA, bandB) then
+                        if not filletFits(srcPts, srcWidth, i, inFrom, outTo, bx, by,
+                                ix, iy, ox, oy, radius, sign, halfW) then
                             local lo, hi = rMin, upper
                             for _ = 1, D.FILLET_FIT_ITERS do
                                 local mid = (lo + hi) * 0.5
-                                if filletFits(ax, ay, bx, by, cx, cy, ix, iy, ox, oy,
-                                        mid, sign, bandA, bandB) then lo = mid else hi = mid end
+                                if filletFits(srcPts, srcWidth, i, inFrom, outTo, bx, by,
+                                        ix, iy, ox, oy, mid, sign, halfW) then lo = mid else hi = mid end
                             end
                             radius = lo
                         end
@@ -838,6 +902,11 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
     -- → 整條 proof 判 band fail。輸出點的 source 改記「實際最近的 raw 段」，
     -- 只掃該角的兩臂 [armFrom, armTo-1]：成本與路線總長無關，且折返／平行
     -- 路段不會被全窗掃誤配成「更近的別段」。
+    -- 輸出段的 (sourceA, sourceB)＝「段起點最近的 raw 段、段終點最近的 raw 段」
+    -- （2026-09-04：弧半徑改沿共線臂鏈後貼滿 band，弧中點正落在兩臂帶交界，
+    -- 舊制 (best, best+1) 只記終點那側，起點側的驗證點差 3cm 出帶 → 每個彎
+    -- verifyLineReason=band）。chordCoveredByBand 的「前半在 A、後半在 B」正是
+    -- 這個語意。
     local function nearestRawSeg(px, py, lo, hi)
         local best, bestD = lo, 1 / 0
         for si = lo, hi do
@@ -846,9 +915,7 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
                 srcPts[p], srcPts[p + 1], srcPts[p + 2], srcPts[p + 3])
             if d < bestD then best, bestD = si, d end
         end
-        local sb = best + 1
-        if sb > n - 1 then sb = n - 1 end
-        return best, sb
+        return best
     end
     -- 同一個預算升級的另一半：tangent 跨過共線取樣點後，被跨過的點若照序輸出，
     -- 折線會「先到取樣點、再退回 tangent 點、才進弧」＝倒鉤（2026-09-02 s035
@@ -871,7 +938,7 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
         end
     end
     local covered = -1
-    local count = 0
+    local count, lastSrc = 0, 1
     count = appendPoint(outPts, outSurface, outWidth, outKind, outSourceA, outSourceB,
         outRadius, count, srcPts[1], srcPts[2], 0, 0, 0, 0, 0, 0)
     for i = 2, n - 1 do
@@ -884,12 +951,13 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
             local theta, px, py, ccx, ccy = filletGeometry(
                 bx, by, ix, iy, ox, oy, radius, signA[i])
             local lo, hi = armFrom[i], armTo[i] - 1
-            local ta, tb = nearestRawSeg(px, py, lo, hi)
+            local ta = nearestRawSeg(px, py, lo, hi)
             count = appendPoint(outPts, outSurface, outWidth, outKind,
                 outSourceA, outSourceB, outRadius, count, px, py,
                 srcSurface[i - 1], srcWidth[i - 1],
                 fallbackCorner[i - 1] and D.SEG_FALLBACK or D.SEG_LINE,
-                ta, tb, 0)
+                lastSrc, ta, 0)
+            lastSrc = ta
             local steps = arcSteps(radius * theta, theta)
             local a0 = atan2(py - ccy, px - ccx)
             local surface = conservativeSurface(srcSurface[i - 1], srcSurface[i])
@@ -899,10 +967,11 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
                 local a = a0 + signA[i] * theta * (j / steps)
                 local axp = ccx + cos(a) * radius
                 local ayp = ccy + sin(a) * radius
-                local aa, ab = nearestRawSeg(axp, ayp, lo, hi)
+                local aa = nearestRawSeg(axp, ayp, lo, hi)
                 count = appendPoint(outPts, outSurface, outWidth, outKind,
                     outSourceA, outSourceB, outRadius, count,
-                    axp, ayp, surface, width, D.SEG_ARC, aa, ab, radius)
+                    axp, ayp, surface, width, D.SEG_ARC, lastSrc, aa, radius)
+                lastSrc = aa
             end
             filletN = filletN + 1
             covered = cum[i] + tanS[i]
@@ -915,7 +984,8 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
                 count = appendPoint(outPts, outSurface, outWidth, outKind,
                     outSourceA, outSourceB, outRadius, count, bx, by,
                     srcSurface[i - 1], srcWidth[i - 1],
-                    fallback and D.SEG_FALLBACK or D.SEG_LINE, i - 1, i - 1, 0)
+                    fallback and D.SEG_FALLBACK or D.SEG_LINE, lastSrc, i - 1, 0)
+                lastSrc = i
             end
         end
     end
@@ -923,7 +993,7 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
         outSourceA, outSourceB, outRadius, count, srcPts[n * 2 - 1], srcPts[n * 2],
         srcSurface[n - 1], srcWidth[n - 1],
         fallbackCorner[n - 1] and D.SEG_FALLBACK or D.SEG_LINE,
-        n - 1, n - 1, 0)
+        lastSrc, n - 1, 0)
     if count > D.FILLET_OUTPUT_MAX then return 0, 0, fallbackN, false, "capacity" end
     return count, filletN, fallbackN, true, nil
 end

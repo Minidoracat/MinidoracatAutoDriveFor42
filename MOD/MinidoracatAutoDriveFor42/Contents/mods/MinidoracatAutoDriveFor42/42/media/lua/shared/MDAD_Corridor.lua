@@ -67,6 +67,8 @@
 --       合法 hardN==0 回 false 與八個 0/false；壞 snapshot 回 true、hitIndex=0，
 --       讓呼叫端能 fail-closed 又不把資料破損誤記成真實障礙。
 --     **零 table 配置且唯讀**：不建陣列、不改任何輸入，只回多個純量。
+--     車尾後方且在車寬帶內（u<0、|v|<halfW）的點不參與——這是「前進 contact」閘，
+--     前進本身就是脫離方向；倒車安全由 Driver 的 rear probe 另管。
 --
 -- ---------------------------------------------------------------------------
 -- plan() 演算法（四步；為什麼是這四步）
@@ -187,8 +189,14 @@ end
 -- 目前車身的 oriented rectangle 對 Sensor 點 disk。位置一律用世界座標
 -- hardX／hardY，整組缺失或有洞直接 fail-closed。此函式是 plan() 之外的安全
 -- OR-gate，不能拿感知快照覆寫 planner baseline。
+-- pad（選填）：安全圈；nil＝FOOTPRINT_PAD。物理檔承諾（車身 −0.1 掃過的貼縫）執行中由
+-- 呼叫端傳承諾同源的負 pad——否則「規劃說 10cm 名義重疊沒事、contact 說要 15cm 淨空」
+-- 兩套標準打架，貼縫永遠在半路被 contact 煞停（2026-09-04 s063/s064 只差一點點）。
 function MDADCorridor.currentFootprintHit(hardS, hardL, hardX, hardY, hardR, hardN,
-        bodyX, bodyY, vehicleH, halfW, halfL, expectedLane)
+        bodyX, bodyY, vehicleH, halfW, halfL, expectedLane, pad)
+    -- 負 pad 允許到 −r（逐點夾 r+pad ≥ 0）：OBB 內部距離已夾 0，r+pad 一旦為負會讓
+    -- 「點在車身裡」判成淨空（fail-open）；夾到 0 仍能抓車身內的點。
+    if type(pad) ~= "number" or pad * 0 ~= 0 then pad = FOOTPRINT_PAD end
     if type(hardS) ~= "table" or type(hardL) ~= "table" or type(hardR) ~= "table"
         or type(hardX) ~= "table" or type(hardY) ~= "table"
         or type(hardN) ~= "number" or hardN * 0 ~= 0
@@ -232,20 +240,28 @@ function MDADCorridor.currentFootprintHit(hardS, hardL, hardX, hardY, hardR, har
         local au, av = u, v
         if au < 0 then au = -au end
         if av < 0 then av = -av end
-        local du, dv = au - halfL, av - halfW
-        if du < 0 then du = 0 end
-        if dv < 0 then dv = 0 end
-        local actual = sqrt(du * du + dv * dv) - (r + FOOTPRINT_PAD)
-        local planned = hl - expectedLane
-        if planned < 0 then planned = -planned end
-        planned = planned - (halfW + r + FOOTPRINT_PAD)
-        if actual * 0 ~= 0 or planned * 0 ~= 0 then
-            return footprintFailClosed()
-        end
+        -- 車尾後方、落在車寬帶內的點（u<0 且 |v|<halfW）對前進不構成 contact：倒車退到
+        -- 貼著後車才 settle（2026-09-04 s021 t=44：rear-blocked 命中點 u≈−2），這種點會讓
+        -- contact HOLD→倒車又 rear-blocked→HOLD，9 秒後 StopStuck；前進本身就是脫離方向。
+        -- 車側後半（|v|≥halfW）的點照算——轉向時車尾外甩會掃到。倒車安全由 rear probe 另管。
+        if not (u < 0 and av < halfW) then
+            local du, dv = au - halfL, av - halfW
+            if du < 0 then du = 0 end
+            if dv < 0 then dv = 0 end
+            local rp = r + pad
+            if rp < 0 then rp = 0 end
+            local actual = sqrt(du * du + dv * dv) - rp
+            local planned = hl - expectedLane
+            if planned < 0 then planned = -planned end
+            planned = planned - (halfW + rp)
+            if actual * 0 ~= 0 or planned * 0 ~= 0 then
+                return footprintFailClosed()
+            end
 
-        if bestI == 0 or actual < bestClear then
-            bestClear, bestPlanned = actual, planned
-            bestI, bestS, bestL, bestX, bestY = i, hs, hl, hx, hy
+            if bestI == 0 or actual < bestClear then
+                bestClear, bestPlanned = actual, planned
+                bestI, bestS, bestL, bestX, bestY = i, hs, hl, hx, hy
+            end
         end
     end
 

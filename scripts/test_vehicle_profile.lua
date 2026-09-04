@@ -972,13 +972,31 @@ do
     local aw, bw, lw, fsw = P.priors(p, p.mass, MDADFollower.SURFACE_PAVED, true, false, true)
     local au, bu, lu, fsu = P.priors(p, p.mass, MDADFollower.SURFACE_UNKNOWN, false, false, true)
     local ao = P.priors(p, p.mass, MDADFollower.SURFACE_PAVED, false, true, true)
-    -- aBrake 基準 8、aLat 基準 9（2026-09-02 二次激進化；天氣／胎況仍只降不升）
-    check(ad <= 2.5 and bd <= 8 and ld <= 9.0, "dry paved never exceeds base priors")
+    -- aBrake 基準 8、aLat 基準 9（2026-09-02 二次激進化；天氣／胎況仍只降不升），
+    -- 但 2026-09-04（issue #1 定罪 F）起 priors 直接夾 runtime 天花板 *_CEIL——
+    -- 天花板以上的縮放在 runtime 本來就看不到（Driver.tightenLimit 同值夾），
+    -- 夾在源頭才不會讓 cutover 後 dynamics*Cap≠safe* 觸發無意義重建。
+    check(ad <= P.ACCEL_CEIL and bd <= P.BRAKE_CEIL and ld <= P.LAT_CEIL,
+        "dry paved never exceeds runtime ceilings")
+    checkNear(bd, P.BRAKE_CEIL, 1e-12, "dry paved good tires saturate brake ceiling (8→6)")
+    checkNear(ld, P.LAT_CEIL, 1e-12, "dry paved good tires saturate lateral ceiling (9→3.5)")
     checkNear(fsd, 1, 1e-12, "dry paved surface factor")
     checkNear(fsw, 0.7, 1e-12, "wet paved surface factor")
     checkNear(fsu, 0.7, 1e-12, "unknown surface uses offroad factor")
-    check(bw < bd and lw < ld, "rain tightens brake and lateral priors")
-    check(bu < bd and lu < ld, "unknown surface tightens brake and lateral priors")
+    check(bw < bd, "rain tightens brake prior below the ceiling")
+    check(bu < bd, "unknown surface tightens brake prior below the ceiling")
+    checkNear(lw, P.LAT_CEIL, 1e-12, "wet paved lateral 6.3 still saturates the ceiling")
+    checkNear(lu, P.LAT_CEIL, 1e-12, "unknown surface lateral 6.3 still saturates the ceiling")
+    -- 低抓地（缺胎 fTire=0.35＋雨）才真的低於天花板：9×0.7×0.35＝2.2 < 3.5
+    do
+        local was = p.isAnyTireMissing
+        p.isAnyTireMissing = true
+        local _, bl, ll = P.priors(p, p.mass, MDADFollower.SURFACE_PAVED, true, false, true)
+        p.isAnyTireMissing = was
+        checkNear(ll, 9 * 0.7 * 0.35, 1e-9, "missing tire + rain lateral prior scales below ceiling")
+        checkNear(bl, 8 * 0.7 * 0.35, 1e-9, "missing tire + rain brake prior scales below ceiling")
+        check(ll < ld and bl < bd, "low-grip regime tightens both priors")
+    end
     check(ao < ad, "physical offroad tightens drive prior only")
     checkNear(ftd, 1, 1e-12, "known complete tires retain factor one")
     checkNear(coast, 0.6, 1e-12, "coast prior stays fixed at 0.6")

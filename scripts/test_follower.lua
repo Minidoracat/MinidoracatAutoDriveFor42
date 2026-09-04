@@ -1647,8 +1647,10 @@ do
     local sag = r * (1 - c)
     checkTrue(p.laneRoomR[arcI] < 0.5 and p.laneRoomR[arcI] >= 0,
         "右轉弧段內側餘裕＝圓角吃剩（實得 " .. tostring(p.laneRoomR[arcI]) .. "）")
-    checkNear(sag + p.laneRoomR[arcI] * c, bandIn, 1e-6,
-        "弧心線矢高＋內側偏置·cos(θ/2) 恰等於寬臂 band")
+    -- 2026-09-04：再扣弦矢高（≤1m 弦 L²/8r）＋1cm——弧貼滿 band 時弦中點才不出帶
+    local chordSag = MDADDynamics.FILLET_SAMPLE_MAX_M ^ 2 / (8 * r) + 0.01
+    checkNear(sag + chordSag + p.laneRoomR[arcI] * c, bandIn, 1e-6,
+        "弧心線矢高＋弦矢高＋內側偏置·cos(θ/2) 恰等於寬臂 band")
     checkNear(p.laneRoomL[arcI], bandOut, 1e-9, "右轉弧段外側餘裕＝兩臂較窄帶")
     checkNear(F.laneBiasAt(p, 1.5, 1), 1.5, 1e-9, "w=6 直段 +1.5 不夾")
     checkNear(F.laneBiasAt(p, 1.5, lastLine), bandOut, 1e-9, "w=5 直段 +1.5 夾到 1.2")

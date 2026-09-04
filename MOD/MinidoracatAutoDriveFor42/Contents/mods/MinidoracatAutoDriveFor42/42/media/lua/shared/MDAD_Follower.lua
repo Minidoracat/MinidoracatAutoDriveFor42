@@ -255,7 +255,12 @@ local function buildLaneRoom(p)
             local c = cos(theta * 0.5)
             local inside = 0
             if c > 1e-6 then
-                inside = (wide - r * (1 - c)) / c
+                -- 弧半徑貼滿 band 時（2026-09-04 起共線臂鏈可讓 r 逼近 band/(1-c)），
+                -- 弧心線中點正落在帶緣；profile 是弦折線，弦中點比弧再往圓心凹一個
+                -- 弦矢高（≤1m 弦：L²/8r）——不扣掉，proof 的弦檢查在每個彎都差幾毫米出帶。
+                local chordSag = MDADDynamics.FILLET_SAMPLE_MAX_M
+                chordSag = chordSag * chordSag / (8 * r) + 0.01
+                inside = (wide - r * (1 - c) - chordSag) / c
                 if inside < 0 then inside = 0 end
             end
             local rr, ll = inside, narrow
@@ -280,6 +285,21 @@ local function clampLane(p, j, lane)
     local l = p.laneRoomL[j]
     if lane < -l then return -l end
     return lane
+end
+
+-- 弧長 sAt 落在哪一段（二分；profile 未 ready／非有限＝1）。冷路徑用（Driver 的
+-- 貼縫死路判定逐點查 laneRoom）；熱路徑的投影游標另走 control 的增量搜尋。
+function MDADFollower.segIndexAt(profile, sAt)
+    if type(profile) ~= "table" or profile.ready ~= true or not isFinite(sAt) then return 1 end
+    local ss, n = profile.s, profile.n
+    if type(ss) ~= "table" or not isFinite(n) or n < 2 then return 1 end
+    local lo, hi = 1, n - 1
+    while lo < hi do
+        local sum = lo + hi
+        local mid = (sum - sum % 2) / 2
+        if ss[mid + 1] <= sAt then lo = mid + 1 else hi = mid end
+    end
+    return lo
 end
 
 -- 段 segI 上常駐 laneBias 實際能落到的值（Driver 期望線／遙測 el 與 control 同一

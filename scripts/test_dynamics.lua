@@ -81,6 +81,20 @@ near(D.approachCapKmh(20, 0 / 0, 0.5, 4.2), D.approachCapKmh(20, 0, 0.5, 4.2), 1
 local back = D.stoppingDistance(ap20 / 3.6, 0.5, 4.2, 0) - 2
 check(back >= 20 - 1e-6 and back <= 20 + 5,
     "approach 正根代回：從 cap 煞到停的距離 ≥ 到縫口距離（出口速 >0 故略長）")
+-- hardBreachKmh（2026-09-04 issue #2）：forceBrake 是引擎 1 秒 ×13 鎖輪閂鎖，
+-- 門檻必須高於致動器雜訊（整數化 0.5＋bang-bang ~1＋進弧追蹤落後 ~0.7）。
+-- 契約：cap + max(3, 6%·cap)、對 cap 單調、非有限／負 cap 回 0（fail-closed）。
+near(D.hardBreachKmh(26.19), 29.19, 1e-9, "低速 cap：地板 3 km/h（26.19→29.19）")
+near(D.hardBreachKmh(50), 53, 1e-9, "50 km/h：6%＝3＝地板臨界")
+near(D.hardBreachKmh(70), 74.2, 1e-9, "70 km/h：6% 比例檔（4.2）")
+check(D.hardBreachKmh(64.3) > 65.1, "s005 實錄：65.1 vs cap 64.3 不再觸發鎖輪")
+check(D.hardBreachKmh(64.3) < 69, "超 4.7 km/h 仍會 forceBrake（安全帳：v·tau 緩衝內）")
+check(D.hardBreachKmh(19.28) > 19.91, "s007 實錄：19.91 vs cap 19.28 不再觸發鎖輪")
+check(D.hardBreachKmh(40) < D.hardBreachKmh(60) and D.hardBreachKmh(60) < D.hardBreachKmh(80),
+    "門檻對 cap 單調遞增")
+near(D.hardBreachKmh(0), 3, 1e-12, "cap 0＝門檻 3（不是 0：hold 狀態另有 hardClampReason 路徑）")
+near(D.hardBreachKmh(0 / 0), 0, 1e-12, "NaN cap＝門檻 0（fail-closed：任何實速都 breach）")
+near(D.hardBreachKmh(-1), 0, 1e-12, "負 cap＝門檻 0（fail-closed）")
 near(D.steeringSpeedCapKmh(0.1, 2.5, 0.5, 0.5, 120), 120, 1e-12,
     "constant steering clamp accepts feasible required angle")
 near(D.steeringSpeedCapKmh(1, 2.5, 0.5, 0.5, 120), 0, 1e-12,
@@ -89,6 +103,20 @@ near(D.crossTrackSteer(2, 15), 0.3696, 1e-12,
     "15km/h 右偏 2m 產生正向修正量")
 near(D.crossTrackSteer(-2, 15), -0.3696, 1e-12,
     "cross-track 修正左右鏡像")
+-- 貼縫承諾位置環（2026-09-04 s003「右轉不夠多」）：5 km/h、latDev −1.04 → 一般 −0.32，
+-- 貼縫倍率 3 → −0.96；上限 2.5 由大偏差夾住；預設參數行為逐位元不變。
+near(D.crossTrackSteer(-1.04, 5), -0.77 * 1.04 / 2.5, 1e-12, "一般跟線 5 km/h latDev −1.04 → −0.32")
+near(D.crossTrackSteer(-1.04, 5, nil, D.CROSS_TRACK_DODGE_GAIN, D.CROSS_TRACK_DODGE_MAX),
+    -0.77 * 3 * 1.04 / 2.5, 1e-12, "貼縫承諾倍率 3 → −0.96")
+near(D.crossTrackSteer(-5, 5, nil, D.CROSS_TRACK_DODGE_GAIN, D.CROSS_TRACK_DODGE_MAX),
+    -2.5, 1e-12, "貼縫承諾上限 2.5")
+near(D.crossTrackSteer(-5, 5), -0.77, 1e-12, "一般上限仍 0.77")
+-- 貼縫兩檔地板（2026-09-04「只用 5 km 太慢」）：淨距 <0.15 → 5、≥0.15 → 10；非法輸入慢檔。
+near(D.crawlFloorKmh(0.05, 5, 10, 0.15), 5, 1e-12, "淨距 0.05 → 5")
+near(D.crawlFloorKmh(0.16, 5, 10, 0.15), 10, 1e-12, "淨距 0.16 → 10")
+near(D.crawlFloorKmh(0.15, 5, 10, 0.15), 10, 1e-12, "淨距＝門檻 → 10")
+near(D.crawlFloorKmh(nil, 5, 10, 0.15), 5, 1e-12, "淨距缺席 → 慢檔")
+near(D.crawlFloorKmh(0.5, 5, 3, 0.15), 5, 1e-12, "mid<min 夾回 min")
 local highSpeedCross = D.crossTrackSteer(1.9, 70)
 check(highSpeedCross > 0 and highSpeedCross < 0.08,
     "70km/h 的 cross-track 修正保持小幅")
@@ -111,9 +139,9 @@ near(D.longitudinalAssistRatio(0 / 0, 15), 0, 1e-12,
 -- 1/eff 對它們＝零增幅）；效率更低的車取 1/eff；上限 ASSIST_OFFROAD_MAX。
 near(D.assistOffroadScale(1), D.ASSIST_OFFROAD_BASE, 1e-12,
     "標定車（eff 1）也吃保底增幅（草地掉牽引是普遍事實）")
-near(D.assistOffroadScale(0.5), D.ASSIST_OFFROAD_BASE, 1e-12, "效率 0.5 的 1/eff=2 低於保底 2.5＝吃保底")
-near(D.assistOffroadScale(0.2), D.ASSIST_OFFROAD_MAX, 1e-12,
-    "效率 0.2 的補償被上限夾住，不無限放大")
+near(D.assistOffroadScale(0.5), D.ASSIST_OFFROAD_BASE, 1e-12, "效率 0.5 的 1/eff=2 低於保底 3＝吃保底")
+near(D.assistOffroadScale(0.1), D.ASSIST_OFFROAD_MAX, 1e-12,
+    "效率 0.1 的補償被上限夾住，不無限放大")
 near(D.assistOffroadScale(2), D.ASSIST_OFFROAD_BASE, 1e-12,
     "效率優於標定仍吃保底（rough 已是事實）")
 near(D.assistOffroadScale(nil), D.ASSIST_OFFROAD_BASE, 1e-12,
@@ -377,23 +405,37 @@ do
         if pp[i * 2 - 1] == lastCornerX and pp[i * 2] == lastCornerY then keptLast = true end
     end
     check(keptLast, "最後一個彎保留 source 折點")
-    -- nearestRawSeg 臂窗：每個弧點的 source 段必須是該點真正最近的 raw 段
-    -- （segment i 的 metadata 屬於它的終點 i+1，appendPoint 慣例）
-    local windowOk = true
+    -- nearestRawSeg 臂窗：弧段的 (sourceA, sourceB)＝(起點最近 raw 段, 終點最近 raw 段)，
+    -- 各自必須是該端點真正最近的 raw 段（2026-09-04 起兩端分記：弧貼滿 band 時
+    -- 弧中點落在兩臂帶交界，只記終點側會把起點側驗證點判出帶）
+    local windowOk, pairOk = true, true
+    local function nearestAll(px, py)
+        local best, bestD = 1, 1 / 0
+        for si = 1, #zig / 2 - 1 do
+            local d = D.distanceToSegmentSq(px, py,
+                zig[si * 2 - 1], zig[si * 2], zig[si * 2 + 1], zig[si * 2 + 2])
+            if d < bestD then best, bestD = si, d end
+        end
+        return best, bestD
+    end
     for i = 1, pn - 1 do
         if pk[i] == D.SEG_ARC then
-            local px, py = pp[i * 2 + 1], pp[i * 2 + 2]
+            local ex, ey = pp[i * 2 + 1], pp[i * 2 + 2]
+            local sb = psb[i]
+            local _, dBest = nearestAll(ex, ey)
+            local dSb = D.distanceToSegmentSq(ex, ey,
+                zig[sb * 2 - 1], zig[sb * 2], zig[sb * 2 + 1], zig[sb * 2 + 2])
+            if dSb > dBest + 1e-9 then windowOk = false end
+            local sx, sy = pp[i * 2 - 1], pp[i * 2]
             local sa = psa[i]
-            local dSa = D.distanceToSegmentSq(px, py,
+            local _, dBestA = nearestAll(sx, sy)
+            local dSa = D.distanceToSegmentSq(sx, sy,
                 zig[sa * 2 - 1], zig[sa * 2], zig[sa * 2 + 1], zig[sa * 2 + 2])
-            for si = 1, #zig / 2 - 1 do
-                local d = D.distanceToSegmentSq(px, py,
-                    zig[si * 2 - 1], zig[si * 2], zig[si * 2 + 1], zig[si * 2 + 2])
-                if d < dSa - 1e-9 then windowOk = false end
-            end
+            if dSa > dBestA + 1e-9 then pairOk = false end
         end
     end
-    check(windowOk, "臂窗 nearestRawSeg 與全窗最近段一致")
+    check(windowOk, "臂窗 nearestRawSeg：sourceB 與終點全窗最近段一致")
+    check(pairOk, "臂窗 nearestRawSeg：sourceA 與起點全窗最近段一致")
 end
 
 scenario("hot scalar helpers do not retain per-call tables")
@@ -476,6 +518,31 @@ do
         .. string.format("%.1f", worstTurn) .. "°）")
     check(not saw8, "tangent 跨距內的共線點 (8,0) 被吞掉")
     check(saw4, "跨距外的共線點 (4,0) 保留")
+end
+-- 帶檢查沿共線臂鏈（2026-09-04 實機定罪：主 MOD 在 cell 邊界預切的共線點落在彎
+-- 頂點旁 1m，舊 filletFits 只查緊鄰兩段的膠囊 → 弧一過 1m 端點即「出帶」→ 二分
+-- 縮到 R=15、27° 公路彎 26 km/h）。契約：頂點兩側各多一個共線點，半徑與無該點
+-- 時相同；離線點（>2°）仍是真折點、不得被當共線臂（安全語意保留）。
+do
+    local function maxR(pts)
+        local n = #pts / 2
+        local ss, ww = {}, {}
+        for i = 1, n - 1 do ss[i], ww[i] = 1, 8 end
+        local oR = {}
+        local count, fN, fbN = D.buildFilletPath(pts, ss, ww, 0.85, 2.9, {}, {}, {}, {}, {}, {}, oR)
+        local r = 0
+        for i = 1, count do if oR[i] and oR[i] > r then r = oR[i] end end
+        return r, fN, fbN
+    end
+    local bend = {6100,5725, 6226.5,5662.5, 6289.5,5631, 6531,5631}
+    local rRaw = maxR(bend)
+    check(rRaw > 90, "27° 公路彎（8m 路）圓角 R>90（實得 " .. string.format("%.1f", rRaw) .. "）")
+    local rCut = maxR({6100,5725, 6226.5,5662.5, 6288.6,5631.45, 6289.5,5631, 6290.5,5631, 6531,5631})
+    near(rCut, rRaw, 1e-6, "頂點兩側各 1m 的共線切點不縮半徑（cell 邊界預切）")
+    local rCut8 = maxR({6100,5725, 6226.5,5662.5, 6289.5,5631, 6297.5,5631, 6531,5631})
+    near(rCut8, rRaw, 1e-6, "彎後 8m 共線點不縮半徑")
+    local _, fOff, fbOff = maxR({6100,5725, 6226.5,5662.5, 6289.5,5631, 6291.5,5631.3, 6531,5631})
+    check(fOff == 0 and fbOff >= 1, "彎後 2m 的離線點（8.5°）是真折點：不建弧、保留折點爬行")
 end
 
 scenario("classifyIntent：優先序與八輪衝突的 characterization 矩陣（重構階段 1）")

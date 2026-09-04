@@ -106,6 +106,17 @@ local PROBE_EXTRA, PROBE_LO, PROBE_HI = 1, 3, 7
 -- on. A density ratio below 1 means "weaker than reference", so it only lowers.
 local ENG_REF_DENSITY, BRAKE_REF_DENSITY = 4000 / 1200, 80 / 1200
 local TIRE_SCALE_LO = 0.35     -- worst tire-grip fraction; also the missing-tire floor
+-- Runtime 包絡天花板（2026-09-04 issue #1 定罪 F）：Driver.tightenLimit 一直用
+-- 2.5／6／3.5／0.6 夾線上 safe*，但 priors 回的 aBrake（8·fS·fT 可到 6.4）、
+-- aLat（9·fS·fT＝5.28）高於天花板 → cutover 後 dynamics*Cap＝prior、safe*＝天花板，
+-- 差值遠超 material 門檻＝每次 cutover 一秒後必有一次無意義的全剖面重建；
+-- 也讓「aLat 8.0→9.0 激進化」在 runtime 從未生效（curveCap 一直是 3.5 基準）。
+-- 天花板收成單一來源：priors 直接夾、Driver 同值夾——行為保持（今天一秒後就是
+-- 這些值），要更快過彎改這裡的 LAT_CEIL，那是獨立的調校決策。
+MDADVehicleProfile.ACCEL_CEIL = 2.5
+MDADVehicleProfile.BRAKE_CEIL = 6
+MDADVehicleProfile.LAT_CEIL = 3.5
+MDADVehicleProfile.COAST_CEIL = 0.6
 
 local function isFinite(n)
     return type(n) == "number" and n * 0 == 0
@@ -566,9 +577,14 @@ function MDADVehicleProfile.priors(profile, runtimeMass, surfaceId, raining,
         local rho = densityScale(profile.brakingForce, mass, BRAKE_REF_DENSITY)
         if rho < brakeScale then brakeScale = rho end
     end
-    return aDrive, 8 * fSurface * fTire * brakeScale,
-        9.0 * fSurface * fTire, fSurface, fTire, 0.6
-        -- aLat 基準 8.0→9.0（2026-09-02 二次激進化「過彎再快」，與 Follower 同輪）
+    -- 天花板夾在這裡（單一來源，見 *_CEIL 註解）：aDrive ≤ 2.5 天然成立；
+    -- aBrake 晴天好胎 6.4、aLat 5.28 都會被夾——與 Driver 線上 tightenLimit 同值。
+    local aBrake = 8 * fSurface * fTire * brakeScale
+    if aBrake > MDADVehicleProfile.BRAKE_CEIL then aBrake = MDADVehicleProfile.BRAKE_CEIL end
+    local aLat = 9.0 * fSurface * fTire -- 基準 8.0→9.0（2026-09-02 二次激進化）
+    if aLat > MDADVehicleProfile.LAT_CEIL then aLat = MDADVehicleProfile.LAT_CEIL end
+    if aDrive > MDADVehicleProfile.ACCEL_CEIL then aDrive = MDADVehicleProfile.ACCEL_CEIL end
+    return aDrive, aBrake, aLat, fSurface, fTire, MDADVehicleProfile.COAST_CEIL
 end
 
 -- Exact approved EWMA scalar update. The caller owns traction-key resets and

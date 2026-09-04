@@ -24,10 +24,14 @@
 --   manifest.txt      機器復原狀態，定長 64 列 4 欄（slot/started/bytes/ended）
 --   latest.txt        最新 session 檔名指標（複製最新檔用）
 --   session-index.txt 人可讀的段落索引，只列 occupied 槽、最多 64 列，欄位
---                     slot／startTs／endTs／bytes／reason／file；raw epoch ms、
---                     不含時區。start committed 寫 active、正常停止／寫滿／回主
---                     選單／錯誤更新 endTs+bytes+reason，retention 清除即消失。
+--                     slot／startTs／endTs／bytes／reason／file／drive／part；
+--                     raw epoch ms、不含時區。start committed 寫 active、正常停止／
+--                     寫滿／回主選單／錯誤更新 endTs+bytes+reason，retention 清除即消失。
 --                     index 寫失敗只 print 一行，已 durable 的 session data 不受影響。
+--                     drive＝同一段自駕的 id（第一檔的 startTs）、part＝第幾檔
+--                     （2026-09-04 使用者裁定：單檔 2MiB 滿了自動接續下一槽，分析前
+--                     從 index 就看得出哪些檔是同一趟）；接續前一檔的 reason＝continued，
+--                     檔頭 header 另帶 drive／part／cont（前一檔名）。
 
 if MDADDiagnostics then return end
 
@@ -87,6 +91,15 @@ local EK = {
     -- route cutover：原始路線快照 src／srcW／srcS（離線重跑 fillet／band 用）。
     "filletN", "filletFallbackN", "filletBandValid", "filletReason",
     "src", "srcW", "srcS",
+    -- dyn（2026-09-04 issue #1）：dirty 來源與基準／線上值、重建耗時——舊 telemetry
+    -- 只能從 confidence 歸零反推重建次數（下限），修後要能直接數。
+    "cap", "safe", "ms",
+    -- dodge commit／defer／guard（2026-09-04 使用者裁定「玩家給的 telemetry 就要足夠，
+    -- 不得依賴 console」）：console 的 commit 行 cap 分解、延後理由、守護判死點
+    -- 全數帶進事件；每幀 sample 已有 dodge*Cap／capReason／physicalOffroad／zombieN。
+    "a", "b", "c", "offL", "curve", "clear", "vis", "space", "design",
+    "crawl", "tight", "tier", "rs", "span", "hitS", "hitX", "hitY", "clearance", "shape",
+    "blocker",
 }
 
 local function logOnce(msg)
@@ -297,11 +310,17 @@ local function truncateSlot(i)
     return writeText(slotRel(i), "")
 end
 
+local function clearMeta(i)
+    local m = meta[i]
+    m.started, m.bytes, m.ended, m.reason = 0, 0, 0, ""
+    m.drive, m.part = 0, 0
+end
+
 local function ensureMeta()
     if meta[1] then return end
     local i = 1
     while i <= SLOT_N do
-        meta[i] = { started = 0, bytes = 0, ended = 0, reason = "" }
+        meta[i] = { started = 0, bytes = 0, ended = 0, reason = "", drive = 0, part = 0 }
         i = i + 1
     end
 end
@@ -327,20 +346,30 @@ local function readIndexRows()
         local lineN = 0
         while line ~= nil and lineN < SLOT_N do
             lineN = lineN + 1
-            local slot, started, ended, bytes, reason, file = string.match(line,
-                "^(%d+)\t([%-%d%.]+)\t([%-%d%.]+)\t([%-%d%.]+)\t([^\t]*)\t([^\t]+)$")
+            -- 8 欄（drive／part，0904d 起）優先；舊 6 欄照收（drive＝startTs、part＝1）
+            local slot, started, ended, bytes, reason, file, drive, part = string.match(line,
+                "^(%d+)\t([%-%d%.]+)\t([%-%d%.]+)\t([%-%d%.]+)\t([^\t]*)\t([^\t]+)\t([%d%.]+)\t(%d+)$")
+            if not slot then
+                slot, started, ended, bytes, reason, file = string.match(line,
+                    "^(%d+)\t([%-%d%.]+)\t([%-%d%.]+)\t([%-%d%.]+)\t([^\t]*)\t([^\t]+)$")
+            end
             slot = tonumber(slot)
             started = tonumber(started)
             ended = tonumber(ended)
             bytes = tonumber(bytes)
+            drive = tonumber(drive)
+            part = tonumber(part)
             if slot and slot >= 1 and slot <= SLOT_N and not acc[slot]
                     and finite(started) and started > 0
                     and finite(ended) and (ended == 0 or ended >= started)
                     and finite(bytes) and bytes >= 0 and bytes <= SLOT_MAX
                     and file == slotFile(slot)
                     and type(reason) == "string" and reason ~= "" then
+                if not finite(drive) or drive <= 0 then drive = started end
+                if not finite(part) or part < 1 then part = 1 end
                 acc[slot] = {
                     started = started, ended = ended, bytes = bytes, reason = reason,
+                    drive = drive, part = part,
                 }
             end
             line = reader:readLine()
@@ -371,10 +400,7 @@ local function recoverMeta()
     end
     local i = 1
     while i <= SLOT_N do
-        meta[i].started = 0
-        meta[i].bytes = 0
-        meta[i].ended = 0
-        meta[i].reason = ""
+        clearMeta(i)
         i = i + 1
     end
     local idxRows = readIndexRows()
@@ -420,6 +446,7 @@ local function recoverMeta()
             meta[i].bytes = active.fileBytes or 0
             meta[i].ended = 0
             meta[i].reason = "active"
+            meta[i].drive, meta[i].part = active.drive or 0, active.part or 0
         else
             if manifestValid then
                 if meta[i].started > 0 then
@@ -453,8 +480,10 @@ local function recoverMeta()
                 else
                     meta[i].reason = row.reason
                 end
+                meta[i].drive, meta[i].part = row.drive, row.part
             else
                 meta[i].reason = ""
+                meta[i].drive, meta[i].part = 0, 0
             end
         end
         i = i + 1
@@ -510,8 +539,13 @@ local function dumpIndex()
         local st = m.started or 0
         if st > 0 then
             n = n + 1
+            local drive = m.drive or 0
+            if drive <= 0 then drive = st end
+            local part = m.part or 0
+            if part < 1 then part = 1 end
             parts[n] = i .. "\t" .. st .. "\t" .. (m.ended or 0) .. "\t"
                 .. (m.bytes or 0) .. "\t" .. safeReason(m.reason) .. "\t" .. slotFile(i)
+                .. "\t" .. drive .. "\t" .. part
         end
         i = i + 1
     end
@@ -558,10 +592,7 @@ local function cleanupExpired(now, retainMs)
             local st = meta[i].started or 0
             if st > 0 and (now < st or (now - st) >= retainMs) then
                 if truncateSlot(i) then
-                    meta[i].started = 0
-                    meta[i].bytes = 0
-                    meta[i].ended = 0
-                    meta[i].reason = ""
+                    clearMeta(i)
                 else
                     logOnce("diagnostics expired-slot truncate failed")
                 end
@@ -581,10 +612,7 @@ local function allocSlot(now, retainMs)
             if st <= 0 then return i end
             if now < st or (now - st) >= retainMs then
                 if truncateSlot(i) then
-                    meta[i].started = 0
-                    meta[i].bytes = 0
-                    meta[i].ended = 0
-                    meta[i].reason = ""
+                    clearMeta(i)
                     return i
                 end
                 logOnce("diagnostics expired-slot truncate failed")
@@ -612,10 +640,7 @@ local function allocSlot(now, retainMs)
         if oldest == nil then break end
         tried[oldest] = true
         if truncateSlot(oldest) then
-            meta[oldest].started = 0
-            meta[oldest].bytes = 0
-            meta[oldest].ended = 0
-            meta[oldest].reason = ""
+            clearMeta(oldest)
             return oldest
         end
         logOnce("diagnostics oldest-slot truncate failed")
@@ -690,9 +715,25 @@ local function checkpoint(s, now)
     return true
 end
 
+local openPart -- 定義在 D.start 前（前向宣告：stopFull 接續檔用）
+
+-- 單檔寫滿：封尾後**接續下一槽**（2026-09-04 使用者裁定：長路線 2MiB 只錄得到前
+-- 兩分鐘，「越開越慢」在檔尾才發生的全錄不到）。接續成功＝前一檔 index reason
+-- "continued"、新檔 header 帶 drive／part／cont；接續失敗（無槽／IO）才維持舊語意
+-- "size"＋「紀錄已滿」halo。老 session 的 x 記錄照寫（檔案本身確實是滿了）。
+-- openPart 必須在老 writer seal 之前配槽：allocSlot 的 live 判定看 sessions，老 session
+-- 仍在 sessions 裡＝老槽不會被當「非 live 最舊槽」回收。
 local function stopFull(s, now, reason)
     s.active = false
-    local line = '{"t":"x","ts":' .. jnum(now) .. ',"r":' .. jstr(reason or "size") .. '}'
+    local pn = s.pn
+    local cont = nil
+    if reason == "size" and pn ~= nil and not s.ioFailed and s.committed then
+        cont = openPart(pn, now, s.days or retentionDays(),
+            s.retainMs or retentionDays() * DAY_MS, s.profile,
+            s.drive or s.started, (s.part or 1) + 1, slotFile(s.slot))
+    end
+    local endReason = cont and "continued" or (reason or "size")
+    local line = '{"t":"x","ts":' .. jnum(now) .. ',"r":' .. jstr(endReason) .. '}'
     if s.writer and s.fileBytes + #line + 1 <= SLOT_MAX then
         s.bufN = s.bufN + 1
         s.buf[s.bufN] = line
@@ -704,14 +745,20 @@ local function stopFull(s, now, reason)
         s.ioFailed = true
         s.failedAt = s.failedAt or now
         logOnce("diagnostics durability check failed")
-        halo(s.pn, false, "UI_MinidoracatAutoDrive_TelemetryWriteFailed",
+        halo(pn, false, "UI_MinidoracatAutoDrive_TelemetryWriteFailed",
             "diagnostic logging stopped")
     end
     s.buf = nil
-    commitEnd(s, now, reason or "size")
-    if s.pn ~= nil then sessions[s.pn] = nil end
+    commitEnd(s, now, endReason)
+    if cont then
+        if sessions[pn] ~= cont then sessions[pn] = cont end
+        print(LOG .. "diagnostics log continued: " .. slotFile(s.slot)
+            .. " -> " .. slotFile(cont.slot) .. " (part " .. tostring(cont.part) .. ")")
+        return
+    end
+    if pn ~= nil and sessions[pn] == s then sessions[pn] = nil end
     if durable then
-        halo(s.pn, false, "UI_MinidoracatAutoDrive_TelemetryFileFull",
+        halo(pn, false, "UI_MinidoracatAutoDrive_TelemetryFileFull",
             "diagnostic log reached 2 MiB")
     end
 end
@@ -723,6 +770,9 @@ local function enqueue(s, line, now)
         if not flush(s, now) then return end
         if s.fileBytes + n + 1 > SLOT_MAX then
             stopFull(s, now, "size")
+            -- 接續成功：溢出的這一列寫進新檔（不丟）
+            local ns = s.pn ~= nil and sessions[s.pn]
+            if ns and ns ~= s and ns.active then enqueue(ns, line, now) end
             return
         end
     end
@@ -924,10 +974,31 @@ local function envStamp()
     if okM and type(mods) == "string" then
         bits = bits .. ',"mods":' .. jstr(mods)
     end
+    -- opts（0904i）：影響行駛決策的玩家選項與沙盒值。2026-09-04 s036-s043 復盤只能從
+    -- 「零筆 detour 事件」反推自動改道是關的——header 不記，事件缺席分不出「關著」
+    -- 與「沒走到」。每項各自 pcall，缺席就省略該項。
+    local hud = MDAD and MDAD.HUD
+    local sandbox = MDAD and MDAD.sandbox
+    local parts, n = {}, 0
+    local function put(k, fn, arg)
+        if type(fn) ~= "function" then return end
+        local ok, v = pcall(fn, arg)
+        if ok and v ~= nil then n = n + 1; parts[n] = k .. "=" .. tostring(v) end
+    end
+    if type(hud) == "table" then
+        put("detour", hud.autoDetour)
+        put("voice", hud.voiceEnabled)
+    end
+    put("policy", sandbox, "ObstaclePolicy")
+    put("maxKmh", sandbox, "AutoDriveMaxSpeed")
+    put("laneBias", sandbox, "RightLaneBias")
+    if n > 0 then
+        bits = bits .. ',"opts":' .. jstr(table.concat(parts, ";", 1, n))
+    end
     return bits
 end
 
-local function encodeHeader(slot, now, days, profile)
+local function encodeHeader(slot, now, days, profile, drive, part, contFile)
     local b = MDAD and MDAD.BUILD
     if type(b) ~= "string" then b = "" end
     -- rev＝開發版本戳（MDAD.Drive.REV；2026-09-02 使用者裁定：兩次「實測跑到
@@ -936,8 +1007,15 @@ local function encodeHeader(slot, now, days, profile)
     if type(rev) ~= "string" then rev = "" end
     local pjson = "null"
     if type(profile) == "table" then pjson = encodeProfile(profile) end
+    -- drive／part／cont（0904d 接續檔）：同一趟自駕跨檔時 drive 相同、part 遞增、
+    -- cont＝前一檔名；第一檔 cont 缺席。parseHeader 只認 slot／ts，欄位純 additive。
+    local chain = ',"drive":' .. jnum(drive or now) .. ',"part":' .. jnum(part or 1)
+    if type(contFile) == "string" and contFile ~= "" then
+        chain = chain .. ',"cont":' .. jstr(contFile)
+    end
     return '{"v":1,"t":"h","slot":' .. slot .. ',"ts":' .. jnum(now)
         .. ',"ret":' .. days .. ',"build":' .. jstr(b) .. ',"rev":' .. jstr(rev)
+        .. chain
         .. envStamp()
         .. ',"profile":' .. pjson .. '}'
 end
@@ -1073,6 +1151,13 @@ local function encodePhys(phys)
     addNum("visCap", "visCap")
     addStr("holdReason", "holdReason")
     addStr("intent", "intent")
+    -- 2026-09-04 issue #1/#2 復盤缺口：hard-brake 裁決者／本幀是否 forceBrake／幀時
+    addStr("hardBrakeReason", "hbr")
+    addBool("forceBrakeThis", "fbt")
+    addNum("frameMs", "fdt")
+    -- 0904j 鏈式停留：lc＝常駐 lane 暫時＝停留 offL；dodgeTier 帶 -stay／-nudge／-physical
+    addBool("laneChained", "lc")
+    addStr("dodgeTier", "tier")
     return bits
 end
 
@@ -1237,13 +1322,10 @@ local function latestExists(name)
     return type(line) == "string" and line ~= ""
 end
 
-function D.start(pn, vehicle, profile)
-    if sessions[pn] then D.stop(pn, "restart") end
-    if not telemetryOn() then return false end
-    local now = nowMs()
-    local days = retentionDays()
-    local retainMs = days * DAY_MS
-    recoverMeta()
+-- 開一檔（D.start 的第 1 檔與 stopFull 的接續檔共用）：配槽、寫 header、durable
+-- checkpoint、manifest／latest／index。回 session 或 nil；失敗路徑自行 halo／log。
+-- drive／part／contFile＝同一趟自駕的串鏈資訊（第 1 檔 drive=now、part=1、cont=nil）。
+openPart = function(pn, now, days, retainMs, profile, drive, part, contFile)
     cleanupExpired(now, retainMs)
     local slot = allocSlot(now, retainMs)
     if not slot then
@@ -1251,7 +1333,7 @@ function D.start(pn, vehicle, profile)
         halo(pn, false, "UI_MinidoracatAutoDrive_TelemetrySlotsFull", "telemetry slots full")
         dumpManifest()
         commitIndex()
-        return false
+        return nil
     end
     local path = slotRel(slot)
     local writer = openWriter(path, false)
@@ -1262,7 +1344,7 @@ function D.start(pn, vehicle, profile)
         -- cleanupExpired／allocSlot 可能已經清掉過期槽：index 必須跟著那個清除，
         -- 否則索引會留著已經被截空的檔案列。
         commitIndex()
-        return false
+        return nil
     end
     local s = {
         active = true,
@@ -1285,31 +1367,37 @@ function D.start(pn, vehicle, profile)
         committed = false,
         ioFailed = false,
         failedAt = nil,
+        -- 接續用：同 profile／days 再開下一檔，drive 不變、part+1
+        profile = profile,
+        days = days,
+        retainMs = retainMs,
+        drive = drive,
+        part = part,
     }
     sessions[pn] = s
     local startOk, ready = pcall(function()
-        enqueue(s, encodeHeader(slot, now, days, profile), now)
+        enqueue(s, encodeHeader(slot, now, days, profile, drive, part, contFile), now)
         return checkpoint(s, now)
     end)
     if not startOk then failIo(s, "diagnostics encoding failed") end
     if not startOk or ready ~= true or not s.active then
         truncateSlot(slot)
         commitIndex()
-        return false
+        return nil
     end
     meta[slot].started = now
     meta[slot].bytes = s.fileBytes
     meta[slot].ended = 0
+    meta[slot].drive, meta[slot].part = drive, part
     -- committed 的 session 在 index 裡就是 active：endTs 0＝還在寫。下一輪遊戲
     -- 看到「active 但沒有 live session」就會被 recoverMeta 判成 interrupted。
     meta[slot].reason = "active"
     if not dumpManifest() then
-        meta[slot].started, meta[slot].bytes, meta[slot].ended = 0, 0, 0
-        meta[slot].reason = ""
+        clearMeta(slot)
         failIo(s, "diagnostics manifest write failed")
         truncateSlot(slot)
         commitIndex()
-        return false
+        return nil
     end
     s.committed = true
     lastName = slotFile(slot)
@@ -1318,7 +1406,16 @@ function D.start(pn, vehicle, profile)
     end
     -- index 失敗只記一行：header／manifest 都已 durable，session data 照跑。
     commitIndex()
-    return true
+    return s
+end
+
+function D.start(pn, vehicle, profile)
+    if sessions[pn] then D.stop(pn, "restart") end
+    if not telemetryOn() then return false end
+    local now = nowMs()
+    local days = retentionDays()
+    recoverMeta()
+    return openPart(pn, now, days, days * DAY_MS, profile, now, 1, nil) ~= nil
 end
 
 -- 純查詢：這一幀 sample() 會不會真的 enqueue，第二回值＝這一幀採用的 10Hz
@@ -1368,7 +1465,9 @@ function D.sample(pn, now, x, y, heading, speed, target, remaining, lat, err,
         targetGen, routeGen, episodeId, progressState, attempt, ban,
         unstickDistance, rearStatus, reverseForce, remainingMs,
         actualClearance, plannedClearance, footprintBlocked, footHitX, footHitY), now)
-    return s.active == true
+    -- 寫滿接續後 sessions[pn] 已換成新檔：回新檔的存活，不是這個被封的 s
+    local cur = sessions[pn]
+    return cur ~= nil and cur.active == true
 end
 
 function D.event(pn, name, a)
@@ -1410,8 +1509,12 @@ function D.stop(pn, reason)
             failIo(s, "diagnostics durability check failed")
         end
     end
-    -- enqueue 可能因 size 直接走 stopFull；failIo 也已自行 error 收尾。
-    if sessions[pn] ~= s then return end
+    -- enqueue 可能因 size 直接走 stopFull（接續檔已開＝再對它 stop 一次，讓最後
+    -- 一筆 x 記錄落在接續檔）；failIo 也已自行 error 收尾。
+    if sessions[pn] ~= s then
+        if sessions[pn] and sessions[pn].active then D.stop(pn, reason) end
+        return
+    end
     commitEnd(s, now, reason or "stop")
     s.active = false
     s.writer = nil

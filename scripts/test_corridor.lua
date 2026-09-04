@@ -618,6 +618,33 @@ do
     checkNear(nearPlanned, -1.65, EPS, "expected lane 貼點時 planned clearance 為負")
     checkEq(nearPoseOnly, false, "planned lane 也受威脅 → 非 poseOnly")
 
+    -- pad 參數（2026-09-04 s063/s064 貼縫承諾中 contact 與物理檔同源）：點在 v=0.9+0.1、
+    -- r=0（樹幹）→ dv=0.1：預設 pad 0.15 命中、pad 0（貼縫承諾）不命中；負 pad 夾 0，車身內
+    -- 的點仍命中。
+    local padHit = C.currentFootprintHit({ 0 }, { 0.9 }, { 100 }, { 200.9 }, { 0 }, 1,
+        bodyX, bodyY, 0, halfW, halfL, 2.5)
+    checkTrue(padHit, "預設 pad 0.15：離車身 0.1 命中")
+    local padClear = C.currentFootprintHit({ 0 }, { 0.9 }, { 100 }, { 200.9 }, { 0 }, 1,
+        bodyX, bodyY, 0, halfW, halfL, 2.5, 0)
+    checkEq(padClear, false, "pad 0（貼縫承諾）：離車身 0.1 不命中")
+    local padOverlap = C.currentFootprintHit({ 0 }, { 0.6 }, { 100 }, { 200.6 }, { 0 }, 1,
+        bodyX, bodyY, 0, halfW, halfL, 2.5, -0.1)
+    checkTrue(padOverlap, "負 pad：r+pad 夾 0，點在車身內仍命中（不 fail-open）")
+    -- 負 pad 對 r=0.15 輪廓點：離車身 0.03（<0.05=r+pad）命中、0.08 不命中
+    checkTrue(C.currentFootprintHit({ 0 }, { 0.83 }, { 100 }, { 200.83 }, { 0.15 }, 1,
+        bodyX, bodyY, 0, halfW, halfL, 2.5, -0.1), "pad −0.1、r 0.15：離車身 0.03 命中")
+    checkEq(C.currentFootprintHit({ 0 }, { 0.88 }, { 100 }, { 200.88 }, { 0.15 }, 1,
+        bodyX, bodyY, 0, halfW, halfL, 2.5, -0.1), false, "pad −0.1、r 0.15：離車身 0.08 不命中")
+
+    -- 車尾後方帶內的點不算 contact（2026-09-04 s021 倒車貼後車後 9 秒 HOLD）：u=−3.0、v=0.2
+    -- （距車尾 0.1）→ 不命中；同 u 但 v=0.9（車側後半外 0.1）→ 仍命中（車尾外甩）。
+    checkEq(C.currentFootprintHit({ 0 }, { 0.2 }, { bodyX - 3.0 }, { bodyY + 0.2 }, { 0 }, 1,
+        bodyX, bodyY, 0, halfW, halfL, 2.5), false, "車尾後方帶內 u=−3.0：前進不算 contact")
+    checkTrue(C.currentFootprintHit({ 0 }, { 0.9 }, { bodyX - 3.0 }, { bodyY + 0.9 }, { 0 }, 1,
+        bodyX, bodyY, 0, halfW, halfL, 2.5), "車尾後方但在車側帶外 v=0.9：仍 contact")
+    checkTrue(C.currentFootprintHit({ 0 }, { 0.2 }, { bodyX + 3.0 }, { bodyY + 0.2 }, { 0 }, 1,
+        bodyX, bodyY, 0, halfW, halfL, 2.5), "車頭前方帶內 u=+3.0：contact")
+
     -- 同一顆障礙移到 v=1.8：du=0.2、dv=1.0，圓角淨距
     -- sqrt(0.2²+1.0²)-0.85 > 0，不應只因落在 OBB 的 AABB 就誤擋。
     local clear, clearActual, _, clearIndex =
