@@ -337,6 +337,11 @@ def check_content(cfg):
     notes = read_text(changelog)
     if not notes.strip() or version not in notes.splitlines()[0]:
         die(4, f"更新說明為空或第一行不含 mod.info 版本 {version}；先執行 gen_steam_changelog.py {version}")
+    # 整檔就是本版的更新說明（gen_steam_changelog.py 覆寫不累加）；手動在檔頭疊新版
+    # 會讓舊版節在 Workshop 更新紀錄重複出現（MiniMap 0.26.2／0.26.3 實踩）
+    heads = [l for l in notes.splitlines() if l.startswith("[h1]")]
+    if len(heads) != 1:
+        die(4, f"更新說明含 {len(heads)} 個 [h1]（{' | '.join(heads)}）；只留本版一節，舊版節刪掉或重跑 gen_steam_changelog.py")
     gate = subprocess.run([sys.executable, "-B", os.path.join(REPO, "scripts", "verify_mod.py")],
                           cwd=REPO, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if gate.returncode != 0:
