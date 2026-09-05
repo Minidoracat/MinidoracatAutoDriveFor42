@@ -5,7 +5,7 @@
     uv run --no-project python -B scripts/publish_workshop.py --mode all --yes  # AI／自動化
     uv run --no-project python -B scripts/publish_workshop.py --mode description --dry-run
 
-mode：content（MOD 內容＋更新說明）／preview（GIF 封面）／description（英繁簡日簡介）／all。
+mode：content（MOD 內容＋更新說明）／preview（GIF 封面）／description（英繁簡日簡介）／screenshots（詳情頁介面預覽圖，英先中後）／all。
 流程：登入檢查 → 前置檢查 → 顯示計畫 → 確認 → 提交 → 線上驗證。
 非互動（stdin 非 tty 或給了 --mode）未登入時直接以 exit 3 結束，不等待輸入。
 
@@ -28,7 +28,10 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STEAM_API_DLL = os.environ.get("PUBLISH_STEAM_API_DLL",
                                r"D:\SteamLibrary\steamapps\common\ProjectZomboid\steam_api64.dll")
 LANG_NAMES = {"english": "英文", "tchinese": "繁中", "schinese": "簡中", "japanese": "日文"}
-MODES = ("content", "preview", "description", "all")
+MODES = ("content", "preview", "description", "screenshots", "all")
+SCREENSHOT_DIR = os.path.join("docs", "screenshots", "steam")
+SCREENSHOT_LANGS = ("en", "zh")  # Workshop 詳情頁預覽圖順序：英文在前、中文在後
+SCREENSHOT_MAX_BYTES = 280_000  # AddItemPreviewFile 實測 274KB 成功、314KB 回 EResult 25（LimitExceeded）；網頁上傳的 2MB 上限不適用
 SUBMIT_RESULT_CALLBACK = 3404  # k_iSteamUGCCallbacks(3400) + 4 = SubmitItemUpdateResult_t
 UPDATE_STATUS = {1: "準備設定", 2: "準備內容", 3: "上傳內容", 4: "上傳封面", 5: "提交變更"}  # 0 = Invalid（已結束）
 INVALID_HANDLE = (0, 2**64 - 1)  # k_UGCUpdateHandleInvalid / k_UGCQueryHandleInvalid 是 UINT64_MAX
@@ -139,6 +142,20 @@ class Steam:
         d.SteamAPI_ISteamUGC_GetQueryUGCResult.restype = ctypes.c_bool
         d.SteamAPI_ISteamUGC_ReleaseQueryUGCRequest.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
         d.SteamAPI_ISteamUGC_ReleaseQueryUGCRequest.restype = ctypes.c_bool
+        d.SteamAPI_ISteamUGC_SetReturnAdditionalPreviews.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.c_bool]
+        d.SteamAPI_ISteamUGC_SetReturnAdditionalPreviews.restype = ctypes.c_bool
+        d.SteamAPI_ISteamUGC_GetQueryUGCNumAdditionalPreviews.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint32]
+        d.SteamAPI_ISteamUGC_GetQueryUGCNumAdditionalPreviews.restype = ctypes.c_uint32
+        d.SteamAPI_ISteamUGC_GetQueryUGCAdditionalPreview.argtypes = [
+            ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint32, ctypes.c_uint32,
+            ctypes.c_char_p, ctypes.c_uint32, ctypes.c_char_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_int)]
+        d.SteamAPI_ISteamUGC_GetQueryUGCAdditionalPreview.restype = ctypes.c_bool
+        d.SteamAPI_ISteamUGC_AddItemPreviewFile.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.c_char_p, ctypes.c_int]
+        d.SteamAPI_ISteamUGC_AddItemPreviewFile.restype = ctypes.c_bool
+        d.SteamAPI_ISteamUGC_UpdateItemPreviewFile.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint32, ctypes.c_char_p]
+        d.SteamAPI_ISteamUGC_UpdateItemPreviewFile.restype = ctypes.c_bool
+        d.SteamAPI_ISteamUGC_RemoveItemPreview.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint32]
+        d.SteamAPI_ISteamUGC_RemoveItemPreview.restype = ctypes.c_bool
         d.SteamAPI_ManualDispatch_Init()
         msg = ctypes.create_string_buffer(1024)
         rc = d.SteamAPI_InitFlat(msg)
@@ -179,8 +196,12 @@ class Steam:
             time.sleep(0.5)
         raise RuntimeError("等待 Steam 回應超時")
 
-    def submit(self, app_id, file_id, language, title=None, description=None, content=None, preview=None, changenote=""):
-        """一次 ISteamUGC 更新（一個語言槽）。回傳 EResult；1 = OK。"""
+    def submit(self, app_id, file_id, language, title=None, description=None, content=None, preview=None, changenote="",
+               screenshots=None):
+        """一次 ISteamUGC 更新（一個語言槽）。回傳 EResult；1 = OK。
+
+        screenshots：附加預覽圖操作清單，元素為 ("add", path) / ("update", index, path) / ("remove", index)。
+        """
         d = self.dll
         handle = d.SteamAPI_ISteamUGC_StartItemUpdate(self.ugc, app_id, int(file_id))
         if handle in INVALID_HANDLE:
@@ -195,6 +216,15 @@ class Steam:
             raise RuntimeError("SetItemContent 拒絕")
         if preview and not d.SteamAPI_ISteamUGC_SetItemPreview(self.ugc, handle, preview.encode("utf-8")):
             raise RuntimeError("SetItemPreview 拒絕")
+        for op in screenshots or ():
+            if op[0] == "add":
+                ok = d.SteamAPI_ISteamUGC_AddItemPreviewFile(self.ugc, handle, op[1].encode("utf-8"), 0)  # k_EItemPreviewType_Image
+            elif op[0] == "update":
+                ok = d.SteamAPI_ISteamUGC_UpdateItemPreviewFile(self.ugc, handle, op[1], op[2].encode("utf-8"))
+            else:
+                ok = d.SteamAPI_ISteamUGC_RemoveItemPreview(self.ugc, handle, op[1])
+            if not ok:
+                raise RuntimeError(f"預覽圖操作被拒絕：{op}")
         call = d.SteamAPI_ISteamUGC_SubmitItemUpdate(self.ugc, handle, changenote.encode("utf-8"))
         if call == 0:
             raise RuntimeError("SubmitItemUpdate 回傳無效呼叫（k_uAPICallInvalid）")
@@ -237,6 +267,32 @@ class Steam:
             title = details.raw[24:153].split(b"\0", 1)[0].decode("utf-8", "replace")
             description = details.raw[153:8153].split(b"\0", 1)[0].decode("utf-8", "replace")
             return title, description
+        finally:
+            d.SteamAPI_ISteamUGC_ReleaseQueryUGCRequest(self.ugc, handle)
+
+
+    def query_screenshots(self, file_id):
+        """回傳 Steam 上附加預覽圖（只算靜態圖片）的 [(index, 原始檔名)]，依 Steam 顯示順序。"""
+        d = self.dll
+        ids = (ctypes.c_uint64 * 1)(int(file_id))
+        handle = d.SteamAPI_ISteamUGC_CreateQueryUGCDetailsRequest(self.ugc, ids, 1)
+        if handle in INVALID_HANDLE:
+            raise RuntimeError("CreateQueryUGCDetailsRequest 失敗")
+        try:
+            d.SteamAPI_ISteamUGC_SetReturnAdditionalPreviews(self.ugc, handle, True)
+            d.SteamAPI_ISteamUGC_SetAllowCachedResponse(self.ugc, handle, 0)
+            raw = self._wait(d.SteamAPI_ISteamUGC_SendQueryUGCRequest(self.ugc, handle), 3401, 280)
+            eresult = int.from_bytes(raw[8:12], "little", signed=True)
+            if eresult != 1:
+                raise RuntimeError(f"查詢失敗 EResult={eresult}")
+            found = []
+            for i in range(d.SteamAPI_ISteamUGC_GetQueryUGCNumAdditionalPreviews(self.ugc, handle, 0)):
+                url, name, kind = ctypes.create_string_buffer(1024), ctypes.create_string_buffer(260), ctypes.c_int(-1)
+                if not d.SteamAPI_ISteamUGC_GetQueryUGCAdditionalPreview(self.ugc, handle, 0, i, url, 1024, name, 260, ctypes.byref(kind)):
+                    raise RuntimeError(f"GetQueryUGCAdditionalPreview({i}) 失敗")
+                if kind.value == 0:  # k_EItemPreviewType_Image；YouTube／Sketchfab 不動
+                    found.append((i, name.value.decode("utf-8", "replace")))
+            return found
         finally:
             d.SteamAPI_ISteamUGC_ReleaseQueryUGCRequest(self.ugc, handle)
 
@@ -336,6 +392,37 @@ def check_titles(cfg):
     return titles
 
 
+def check_screenshots():
+    """本機 docs/screenshots/steam/{en,zh}/*.jpg 依語系再檔名排序；回傳 [絕對路徑]。"""
+    shots = []
+    for lang in SCREENSHOT_LANGS:
+        folder = repo_path(os.path.join(SCREENSHOT_DIR, lang))
+        shots += [os.path.join(folder, n) for n in sorted(os.listdir(folder)) if n.lower().endswith(".jpg")] if os.path.isdir(folder) else []
+    if not shots:
+        die(4, f"{SCREENSHOT_DIR} 下沒有任何 JPG")
+    names = [os.path.basename(p) for p in shots]
+    if len(set(names)) != len(names):
+        die(4, "預覽圖檔名跨語系重複（Steam 只記裸檔名，無法區分）：" + "、".join(sorted({n for n in names if names.count(n) > 1})))
+    for path in shots:
+        if os.path.getsize(path) > SCREENSHOT_MAX_BYTES:
+            die(4, f"{os.path.relpath(path, REPO)} 超過 {SCREENSHOT_MAX_BYTES:,} bytes（Steamworks AddItemPreviewFile 會回 LimitExceeded）")
+    print(f"[OK] 預覽圖 {len(shots)} 張：" + "、".join(names))
+    return shots
+
+
+def screenshot_ops(remote, local, force=False):
+    """把 Steam 現況（[(index, 檔名)]）差分到本機順序（[路徑]）：同位置換檔、尾端追加、多餘移除（先高後低）。
+    Steam 只記檔名，換了內容但檔名沒變要用 force 全部重傳。"""
+    ops = []
+    for k, path in enumerate(local):
+        if k < len(remote):
+            if force or remote[k][1] != os.path.basename(path):
+                ops.append(("update", remote[k][0], path))
+        else:
+            ops.append(("add", path))
+    ops += [("remove", idx) for idx, _ in reversed(remote[len(local):])]
+    return ops
+
 # ---- 線上驗證 ----
 def http_get(url, headers=None):
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", **(headers or {})})
@@ -350,7 +437,7 @@ def file_details(file_id):
         return json.load(resp)["response"]["publishedfiledetails"][0]
 
 
-def verify(steam, cfg, want, texts, titles, started):
+def verify(steam, cfg, want, texts, titles, started, shots=()):
     """提交後對 Steam 回查：內容／封面看 Web API，簡介逐語言以 ISteamUGC 查詢比對。回傳問題清單。"""
     problems = []
     if "content" in want or "preview" in want:
@@ -371,6 +458,13 @@ def verify(steam, cfg, want, texts, titles, started):
                 print("[OK] 線上封面為 GIF")
             else:
                 problems.append(f"線上封面不是 GIF（Content-Type {ctype}）")
+    if "screenshots" in want:
+        remote = [n for _, n in steam.query_screenshots(cfg["published_file_id"])]
+        local = [os.path.basename(p) for p in shots]
+        if remote != local:
+            problems.append(f"線上預覽圖順序與本機不一致：Steam {remote}／本機 {local}")
+        else:
+            print(f"[OK] 線上預覽圖 {len(remote)} 張，順序與本機一致")
     for lang in dict.fromkeys([*titles, *texts]):
         remote_title, remote = steam.query_description(cfg["published_file_id"], lang)
         if lang in titles:
@@ -391,8 +485,8 @@ def verify(steam, cfg, want, texts, titles, started):
 
 # ---- 主流程 ----
 def choose_mode():
-    print("\n要上傳什麼？\n  [1] 只更新 MOD 內容（含更新說明）\n  [2] 只更新 GIF 封面\n  [3] 只更新簡介（英／繁／簡／日）\n  [4] 全部更新\n  [0] 離開")
-    picks = {"1": "content", "2": "preview", "3": "description", "4": "all"}
+    print("\n要上傳什麼？\n  [1] 只更新 MOD 內容（含更新說明）\n  [2] 只更新 GIF 封面\n  [3] 只更新簡介（英／繁／簡／日）\n  [4] 只同步介面預覽圖（英先中後）\n  [5] 全部更新\n  [0] 離開")
+    picks = {"1": "content", "2": "preview", "3": "description", "4": "screenshots", "5": "all"}
     while True:
         answer = ask("選擇：")
         if answer == "0":
@@ -405,6 +499,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--mode", choices=MODES, help="不給則顯示互動選單")
     parser.add_argument("--yes", action="store_true", help="不再詢問確認（AI／自動化必填）")
+    parser.add_argument("--force", action="store_true", help="screenshots：檔名相同也重傳（內容有改時用）")
     parser.add_argument("--dry-run", action="store_true", help="只做登入與前置檢查、顯示計畫，不提交")
     parser.add_argument("--config", default=os.path.join(REPO, "scripts", "workshop_publish.json"))
     args = parser.parse_args()
@@ -412,16 +507,20 @@ def main():
     cfg = load_config(args.config)
 
     if not interactive and args.mode is None:
-        die(2, "非互動環境請指定 --mode content|preview|description|all")
+        die(2, "非互動環境請指定 --mode content|preview|description|screenshots|all")
     steam = connect(interactive, cfg)
     try:
         mode = args.mode or choose_mode()
-        want = {"content", "preview", "description"} if mode == "all" else {mode}
+        want = {"content", "preview", "description", "screenshots"} if mode == "all" else {mode}
         if mode == "all" and not cfg["preview_gif"]:
             print("[SKIP] 未設定 GIF 封面（preview_gif 為 null），本次不更新封面")
             want.discard("preview")
+        if mode == "all" and not os.path.isdir(repo_path(SCREENSHOT_DIR)):
+            print(f"[SKIP] 沒有 {SCREENSHOT_DIR}/，本次不同步預覽圖")
+            want.discard("screenshots")
         content = notes = gif = None
         texts, titles = {}, {}
+        shots, shot_ops = [], []
         if "content" in want:
             content, notes, _ = check_content(cfg)
         if "preview" in want:
@@ -429,6 +528,9 @@ def main():
         if "description" in want:
             texts = check_descriptions(cfg)
             titles = check_titles(cfg)
+        if "screenshots" in want:
+            shots = check_screenshots()
+            shot_ops = screenshot_ops(steam.query_screenshots(cfg["published_file_id"]), shots, args.force)
         print(f"\n計畫：Workshop {cfg['published_file_id']}（app {cfg['app_id']}）")
         if content:
             print(f"  內容：{content}\n  更新說明：{notes.splitlines()[0]}")
@@ -439,6 +541,10 @@ def main():
                 print(f"  簡介 {LANG_NAMES[lang]}：{rel}")
         for lang, title in titles.items():
             print(f"  標題 {LANG_NAMES[lang]}：{title}")
+        for op in shot_ops:
+            print("  預覽圖 " + {"add": "追加", "update": "替換 #{}", "remove": "移除 #{}"}[op[0]].format(op[1]) + (f"：{os.path.basename(op[-1])}" if op[0] != "remove" else ""))
+        if "screenshots" in want and not shot_ops:
+            print("  預覽圖：Steam 已與本機一致，不重傳")
         if args.dry_run:
             print("\n[DRY-RUN] 未提交任何更新")
             return
@@ -453,6 +559,8 @@ def main():
         order = ["english"] + [l for l in dict.fromkeys([*texts, *titles]) if l != "english"]
         if "description" not in want:
             order = ["english"]
+        if want == {"screenshots"}:
+            order = []  # 預覽圖操作獨立提交（見下）
         done = []
         for lang in order:
             desc = texts.get(lang) if "description" in want else None
@@ -473,11 +581,17 @@ def main():
             included = [x for x, on in (("內容", first and content), ("封面", first and gif), ("標題", title is not None), ("簡介", desc is not None)) if on]
             done.append(f"{LANG_NAMES[lang]}槽：{'／'.join(included)}")
             print(f"[OK] 已提交（{done[-1]}）")
+        # 預覽圖一次提交只能帶一張（多張同批實測 EResult 25），逐張獨立提交；remove 已排在最後且先高後低
+        for k, op in enumerate(shot_ops):
+            rc = steam.submit(cfg["app_id"], cfg["published_file_id"], "english", screenshots=[op])
+            if rc != 1:
+                die(5, f"預覽圖操作 {op} 失敗（EResult={rc}）；先前 {k} 個操作已生效，重跑可續傳")
+            print(f"[OK] 預覽圖 {op[0]} 完成（{k + 1}/{len(shot_ops)}）")
 
         print("\n線上驗證…")
         time.sleep(5)  # 給 Steam 生成縮圖
         try:
-            problems = verify(steam, cfg, want, texts, titles, started)
+            problems = verify(steam, cfg, want, texts, titles, started, shots)
         except Exception as err:  # 提交已成功；回查本身失敗要講清楚，不能像沒上傳
             problems = [f"提交已成功，但回查 Steam 時失敗：{err!r}。請到作品頁人工確認"]
     finally:
