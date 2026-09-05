@@ -10,7 +10,6 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 $PZ_PATH = if ($env:PZ_PATH) { $env:PZ_PATH } else { "D:\SteamLibrary\steamapps\common\ProjectZomboid" }
 $SERVER_NAME = "servertest"
 $SERVER_MEMORY = "3072m"
-$SERVER_READY_TIMEOUT = 120      # 秒；等 server-console.txt 出現啟動完成字樣
 $ZomboidDir = Join-Path $env:USERPROFILE "Zomboid"
 $ServerIniDir = Join-Path $ZomboidDir "Server"
 
@@ -74,43 +73,9 @@ function Start-PZServer {
     return $false
 }
 
-function Wait-PZServerReady {
-    # 以 server-console.txt 的啟動完成字樣為準，不用固定秒數。
-    $log = Join-Path $ZomboidDir "server-console.txt"
-    $startLen = if (Test-Path $log) { (Get-Item $log).Length } else { 0 }
-    $started = Get-Date
-    $deadline = $started.AddSeconds($SERVER_READY_TIMEOUT)
-    Write-Host "[等待] 等待伺服器啟動完成（最多 $SERVER_READY_TIMEOUT 秒）..." -ForegroundColor DarkGray
-    while ((Get-Date) -lt $deadline) {
-        Start-Sleep -Seconds 2
-        # 開跑 10 秒後若 java 程序已不在，視為啟動失敗
-        if (((Get-Date) - $started).TotalSeconds -gt 10 -and (Get-PZServerProcesses -Name $SERVER_NAME).Count -eq 0) {
-            Write-Host "[等待] 伺服器程序已結束（啟動失敗？請看伺服器視窗／server-console.txt）。" -ForegroundColor Red
-            return $false
-        }
-        if (Test-Path $log) {
-            $fs = [IO.File]::Open($log, 'Open', 'Read', 'ReadWrite')
-            try {
-                if ($fs.Length -gt $startLen) {
-                    $fs.Position = $startLen
-                    $sr = New-Object IO.StreamReader($fs, [Text.Encoding]::UTF8)
-                    $tail = $sr.ReadToEnd()
-                    if ($tail -match '\*\*\* SERVER STARTED') {
-                        Write-Host "[等待] 伺服器已就緒。" -ForegroundColor Green
-                        return $true
-                    }
-                }
-            } finally { $fs.Dispose() }
-        }
-    }
-    Write-Host "[等待] 逾時未偵測到啟動完成字樣，仍繼續開客戶端。" -ForegroundColor Yellow
-    return $true
-}
-
 function Start-ServerAndClients {
     param([int]$Clients)
-    $already = Start-PZServer
-    if (-not $already) { [void](Wait-PZServerReady) }
+    [void](Start-PZServer)
     for ($i = 1; $i -le $Clients; $i++) {
         if ($i -gt 1) { Start-Sleep -Seconds 3 }
         Write-Host "[自動] 啟動第 $i 個客戶端 (Debug)..." -ForegroundColor Cyan
@@ -172,7 +137,7 @@ while ($true) {
     Write-Host "  [2] 啟動客戶端 (Debug 模式)"
     Write-Host ""
     Write-Host "  [3] 啟動專用伺服器"
-    Write-Host "  [4] 一鍵：伺服器 + Debug 客戶端（等伺服器就緒再開）"
+    Write-Host "  [4] 一鍵：伺服器 + Debug 客戶端"
     Write-Host "  [5] 一鍵：伺服器 + 2 個 Debug 客戶端"
     Write-Host "  [6] 兩個 Debug 客戶端（Host 模式：第一個 HOST、第二個 JOIN 127.0.0.1）"
     Write-Host ""
