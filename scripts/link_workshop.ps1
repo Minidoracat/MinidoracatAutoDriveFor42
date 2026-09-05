@@ -1,31 +1,49 @@
-# MinidoracatAutoDriveFor42 Workshop 符號連結管理
+﻿# Minidoracat PZ MOD 家族 — Workshop 符號連結管理（統一版，正本：D:/github/pz-family-docs/scripts/）
 # 用途：將開發目錄連結到 Zomboid Workshop 和 mods 目錄，方便本地測試和 Workshop 上傳
+# 零設定：自動從 MOD/*/Contents/mods/*/42/mod.info 讀取 id 與 require=
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ============================================
-# 設定區 - MOD 識別
-# ============================================
-$MOD_FOLDER = "MinidoracatAutoDriveFor42"          # MOD/<資料夾名>，也是 Workshop 連結名
-$MOD_ID     = "MinidoracatAutoDriveFor42"              # mod.info 的 id，也是 mods 連結名（通常 = $MOD_FOLDER）
-$REQUIRED_MOD_IDS = @("MinidoracatUIFor42", "MinidoracatMiniMapFor42")  # 依賴順序同 mod.info；寫入 Mods= 時排在 addon 前
-
-# ============================================
 # 路徑偵測（支援 bat 啟動器和直接執行兩種模式）
 # ============================================
 if ($env:PROJECT_ROOT) {
-    # 從 bat 啟動器呼叫，使用傳入的專案根目錄
     $ProjectRoot = $env:PROJECT_ROOT.TrimEnd('\\')
 } elseif ($PSScriptRoot) {
-    # 直接執行 ps1，使用腳本所在目錄推算
     $ProjectRoot = Split-Path -Parent $PSScriptRoot
 } else {
-    # Fallback：使用目前工作目錄
     $ProjectRoot = (Get-Location).Path
 }
-$ModSource = Join-Path $ProjectRoot "MOD\$MOD_FOLDER"
-$ModContent = Join-Path $ModSource "Contents\mods\$MOD_FOLDER"
+
+# ============================================
+# MOD 識別：自動偵測（唯一的 mod.info）
+# ============================================
+$modInfos = @(Get-ChildItem (Join-Path $ProjectRoot "MOD") -Recurse -Filter "mod.info" -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -match '\\Contents\\mods\\[^\\]+\\42\\mod\.info$' })
+if ($modInfos.Count -ne 1) {
+    Write-Host ""
+    Write-Host "[錯誤] 期望恰好一個 MOD/<f>/Contents/mods/<f>/42/mod.info，找到 $($modInfos.Count) 個" -ForegroundColor Red
+    Write-Host "  搜尋根：$ProjectRoot\MOD" -ForegroundColor Red
+    Read-Host "按 Enter 結束"
+    exit 1
+}
+$ModContent = Split-Path -Parent $modInfos[0].DirectoryName          # …\Contents\mods\<f>
+$ModSource  = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $ModContent))   # …\MOD\<f>
+$MOD_FOLDER = Split-Path -Leaf $ModSource
+$modKv = @{}
+foreach ($line in Get-Content $modInfos[0].FullName -Encoding UTF8) {
+    if ($line -match '^\s*([A-Za-z_]+)\s*=(.*)$') { if (-not $modKv.ContainsKey($Matches[1])) { $modKv[$Matches[1]] = $Matches[2].Trim() } }
+}
+$MOD_ID = $modKv['id']
+if (-not $MOD_ID) { Write-Host "[錯誤] mod.info 缺 id=" -ForegroundColor Red; Read-Host "按 Enter 結束"; exit 1 }
+# require= 逗號分隔（ChooseGameInfo.java 只 split(",")）；寫入 Mods= 時依賴排在前面
+$REQUIRED_MOD_IDS = @()
+if ($modKv['require']) { $REQUIRED_MOD_IDS = @($modKv['require'] -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+# 家族依賴（可在本機 Zomboid\mods 掛載）vs 第三方依賴（Steam 訂閱，僅提醒）
+$FamilyDeps = @($REQUIRED_MOD_IDS | Where-Object { $_ -like 'Minidoracat*' -or $_ -like 'Cat*For42' })
+# 翻譯包永遠墊底（後載入者覆蓋先載入者）：只重排既有條目、不新增
+$TranslationModsLast = @('CatModLangFor42', 'CatLangFor42')
 
 # Workshop 符號連結（用於上傳；連結名 = 資料夾名）
 $WorkshopDir = Join-Path $env:UserProfile "Zomboid\Workshop"
@@ -252,6 +270,9 @@ function Update-ServerIniMods {
         $updated = @($current | Where-Object { $ServerModIds -notcontains $_.TrimStart('\') })
         foreach ($id in $ServerModIds) { $updated += "$prefix$id" }
     }
+    # 翻譯包墊底：CatModLangFor42 倒數第二、CatLangFor42 最後（只重排既有條目）
+    $tail = @($TranslationModsLast | ForEach-Object { $t = $_; $updated | Where-Object { $_.TrimStart('\\') -ieq $t } | Select-Object -First 1 })
+    if ($tail.Count -gt 0) { $updated = @($updated | Where-Object { $TranslationModsLast -notcontains $_.TrimStart('\\') }) + $tail }
 
     if (($updated -join ';') -eq ($current -join ';')) {
         Write-Host "  [伺服器] $(Split-Path -Leaf $IniPath) 的 Mods= 無需變更" -ForegroundColor DarkGray
@@ -261,7 +282,7 @@ function Update-ServerIniMods {
     $newLine = "Mods=" + ($updated -join ';')
     if ($idx -ge 0) { $lines[$idx] = $newLine } else { $lines += $newLine }
 
-    # 伺服器啟動/關閉時會整檔回寫 ini（AGENTS.md），執行中寫入必被覆蓋——同名伺服器在跑就拒絕；
+    # ini 回寫（反編譯結論，見 pz-family-docs/production-server.md）：關機不回寫，但執行期任何選項變更會整檔覆蓋——同名伺服器在跑就拒絕；
     # 偵測失敗一律取消寫入（fail-closed），不能在「不知道伺服器是否在跑」時動 ini
     $serverName = [IO.Path]::GetFileNameWithoutExtension($IniPath)
     try {
@@ -275,7 +296,7 @@ function Update-ServerIniMods {
         return
     }
     if ($running.Count -gt 0) {
-        Write-Host "  [伺服器] $serverName 伺服器正在執行，關閉時會整檔回寫覆蓋——請先停止伺服器再寫入" -ForegroundColor Red
+        Write-Host "  [伺服器] $serverName 伺服器正在執行，執行期選項變更會整檔覆蓋——請先停止伺服器再寫入" -ForegroundColor Red
         return
     }
 
@@ -339,7 +360,9 @@ function Mount-Workshop {
     Write-Host ""
     # 依賴可見性：Mods= 會連依賴 id 一起寫入，依賴未掛載（Zomboid\mods 下不可見）就寫進去，
     # -nosteam 開服必報缺 mod——所以「全部完成」與 ini 寫入都必須把依賴納入判斷
-    $missingDeps = @($REQUIRED_MOD_IDS | Where-Object { -not (Test-Path (Join-Path $ModsDir $_)) })
+    $missingDeps = @($FamilyDeps | Where-Object { -not (Test-Path (Join-Path $ModsDir $_)) })
+    $thirdParty = @($REQUIRED_MOD_IDS | Where-Object { $FamilyDeps -notcontains $_ })
+    if ($thirdParty.Count -gt 0) { Write-Host "[提示] 第三方依賴（$($thirdParty -join '、')）請確認已在 Steam 訂閱；-nosteam 伺服器需其位於 Zomboid\mods" -ForegroundColor DarkGray }
     if ((Test-IsSymlink $WorkshopLink) -and (Test-IsSymlink $ModsLink) -and $missingDeps.Count -eq 0) {
         Write-Host "[全部完成] 現在可以在 PZ 遊戲中測試此 MOD。" -ForegroundColor Green
     } elseif ($missingDeps.Count -gt 0) {
