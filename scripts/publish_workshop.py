@@ -55,6 +55,7 @@ def load_config(path):
                 "preview_gif", "changelog", "descriptions"):
         if key not in cfg:
             die(4, f"設定檔缺少 {key}：{path}")
+    cfg.setdefault("titles", {})  # 選用：{語言: 標題}，與簡介同批逐槽提交
     if not cfg["published_file_id"]:
         die(4, "此 MOD 尚未首發（published_file_id 為 null）：先用遊戲內 Workshop 上傳器建立作品取得 ID，填入設定檔後再用本工具更新")
     return cfg
@@ -108,7 +109,7 @@ class Steam:
         d.SteamAPI_ISteamUser_GetSteamID.restype = ctypes.c_uint64
         d.SteamAPI_ISteamUGC_StartItemUpdate.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint64]
         d.SteamAPI_ISteamUGC_StartItemUpdate.restype = ctypes.c_uint64
-        for name in ("SetItemUpdateLanguage", "SetItemDescription", "SetItemContent", "SetItemPreview"):
+        for name in ("SetItemUpdateLanguage", "SetItemTitle", "SetItemDescription", "SetItemContent", "SetItemPreview"):
             fn = getattr(d, "SteamAPI_ISteamUGC_" + name)
             fn.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.c_char_p]
             fn.restype = ctypes.c_bool
@@ -178,7 +179,7 @@ class Steam:
             time.sleep(0.5)
         raise RuntimeError("等待 Steam 回應超時")
 
-    def submit(self, app_id, file_id, language, description=None, content=None, preview=None, changenote=""):
+    def submit(self, app_id, file_id, language, title=None, description=None, content=None, preview=None, changenote=""):
         """一次 ISteamUGC 更新（一個語言槽）。回傳 EResult；1 = OK。"""
         d = self.dll
         handle = d.SteamAPI_ISteamUGC_StartItemUpdate(self.ugc, app_id, int(file_id))
@@ -186,6 +187,8 @@ class Steam:
             raise RuntimeError("StartItemUpdate 失敗")
         if not d.SteamAPI_ISteamUGC_SetItemUpdateLanguage(self.ugc, handle, language.encode()):
             raise RuntimeError(f"SetItemUpdateLanguage 拒絕 {language}")
+        if title is not None and not d.SteamAPI_ISteamUGC_SetItemTitle(self.ugc, handle, title.encode("utf-8")):
+            raise RuntimeError("SetItemTitle 拒絕（超過 128 bytes？）")
         if description is not None and not d.SteamAPI_ISteamUGC_SetItemDescription(self.ugc, handle, description.encode("utf-8")):
             raise RuntimeError("SetItemDescription 拒絕（超過長度上限？）")
         if content and not d.SteamAPI_ISteamUGC_SetItemContent(self.ugc, handle, content.encode("utf-8")):
@@ -319,6 +322,20 @@ def check_descriptions(cfg):
     return texts
 
 
+def check_titles(cfg):
+    titles = {}
+    for lang, title in cfg["titles"].items():
+        if lang not in LANG_NAMES:
+            die(4, f"titles 有不支援的語言代碼 {lang}（可用：{', '.join(LANG_NAMES)}）")
+        title = title.strip()
+        if not title or len(title.encode("utf-8")) > 128:
+            die(4, f"{LANG_NAMES[lang]}標題為空或超過 128 bytes：{title!r}")
+        titles[lang] = title
+    if titles:
+        print(f"[OK] 標題 {len(titles)} 語：" + "、".join(LANG_NAMES[l] for l in titles))
+    return titles
+
+
 # ---- 線上驗證 ----
 def http_get(url, headers=None):
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", **(headers or {})})
@@ -333,7 +350,7 @@ def file_details(file_id):
         return json.load(resp)["response"]["publishedfiledetails"][0]
 
 
-def verify(steam, cfg, want, texts, started):
+def verify(steam, cfg, want, texts, titles, started):
     """提交後對 Steam 回查：內容／封面看 Web API，簡介逐語言以 ISteamUGC 查詢比對。回傳問題清單。"""
     problems = []
     if "content" in want or "preview" in want:
@@ -354,8 +371,16 @@ def verify(steam, cfg, want, texts, started):
                 print("[OK] 線上封面為 GIF")
             else:
                 problems.append(f"線上封面不是 GIF（Content-Type {ctype}）")
-    for lang, local in texts.items():
-        _, remote = steam.query_description(cfg["published_file_id"], lang)
+    for lang in dict.fromkeys([*titles, *texts]):
+        remote_title, remote = steam.query_description(cfg["published_file_id"], lang)
+        if lang in titles:
+            if remote_title.strip() != titles[lang]:
+                problems.append(f"{LANG_NAMES[lang]}標題與本機不一致：Steam「{remote_title}」／本機「{titles[lang]}」")
+            else:
+                print(f"[OK] {LANG_NAMES[lang]}標題與本機一致")
+        if lang not in texts:
+            continue
+        local = texts[lang]
         if remote.strip() != local.strip():
             i = next((k for k, (a, b) in enumerate(zip(remote, local)) if a != b), min(len(remote), len(local)))
             problems.append(f"{LANG_NAMES[lang]}簡介與本機不一致，位置 {i}：Steam「{remote[i:i+40]}」／本機「{local[i:i+40]}」")
@@ -396,13 +421,14 @@ def main():
             print("[SKIP] 未設定 GIF 封面（preview_gif 為 null），本次不更新封面")
             want.discard("preview")
         content = notes = gif = None
-        texts = {}
+        texts, titles = {}, {}
         if "content" in want:
             content, notes, _ = check_content(cfg)
         if "preview" in want:
             gif = check_preview(cfg)
         if "description" in want:
             texts = check_descriptions(cfg)
+            titles = check_titles(cfg)
         print(f"\n計畫：Workshop {cfg['published_file_id']}（app {cfg['app_id']}）")
         if content:
             print(f"  內容：{content}\n  更新說明：{notes.splitlines()[0]}")
@@ -411,6 +437,8 @@ def main():
         for lang, rel in cfg["descriptions"].items():
             if lang in texts:
                 print(f"  簡介 {LANG_NAMES[lang]}：{rel}")
+        for lang, title in titles.items():
+            print(f"  標題 {LANG_NAMES[lang]}：{title}")
         if args.dry_run:
             print("\n[DRY-RUN] 未提交任何更新")
             return
@@ -421,16 +449,18 @@ def main():
                 die(2, "使用者取消")
 
         started = int(time.time())
-        # 英文那次一併帶內容／封面／更新說明；其餘語言只寫簡介
-        order = ["english"] + [l for l in texts if l != "english"]
+        # 英文那次一併帶內容／封面／更新說明；其餘語言只寫標題／簡介
+        order = ["english"] + [l for l in dict.fromkeys([*texts, *titles]) if l != "english"]
         if "description" not in want:
             order = ["english"]
         done = []
         for lang in order:
             desc = texts.get(lang) if "description" in want else None
+            title = titles.get(lang) if "description" in want else None
             first = lang == "english"
             try:
                 rc = steam.submit(cfg["app_id"], cfg["published_file_id"], lang,
+                                  title=title,
                                   description=desc,
                                   content=content if first else None,
                                   preview=gif if first else None,
@@ -440,14 +470,14 @@ def main():
             if rc != 1:
                 already = f"；先前已成功：{'、'.join(done)}" if done else ""
                 die(5, f"{LANG_NAMES[lang]}槽提交失敗（{rc if isinstance(rc, str) else 'EResult=' + str(rc)}）{already}")
-            included = [x for x, on in (("內容", first and content), ("封面", first and gif), ("簡介", desc is not None)) if on]
+            included = [x for x, on in (("內容", first and content), ("封面", first and gif), ("標題", title is not None), ("簡介", desc is not None)) if on]
             done.append(f"{LANG_NAMES[lang]}槽：{'／'.join(included)}")
             print(f"[OK] 已提交（{done[-1]}）")
 
         print("\n線上驗證…")
         time.sleep(5)  # 給 Steam 生成縮圖
         try:
-            problems = verify(steam, cfg, want, texts, started)
+            problems = verify(steam, cfg, want, texts, titles, started)
         except Exception as err:  # 提交已成功；回查本身失敗要講清楚，不能像沒上傳
             problems = [f"提交已成功，但回查 Steam 時失敗：{err!r}。請到作品頁人工確認"]
     finally:
