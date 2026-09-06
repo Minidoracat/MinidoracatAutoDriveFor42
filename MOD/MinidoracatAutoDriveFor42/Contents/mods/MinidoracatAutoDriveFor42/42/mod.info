@@ -4,5 +4,5 @@ description=[B42]道具驅動的車輛導航與自動駕駛：GPS 導航儀規�
 poster=poster.png
 require=MinidoracatUIFor42,MinidoracatMiniMapFor42
 incompatible=Navigator
-modversion=42.20.4-0.4.1
+modversion=42.20.4-0.5.0
 versionMin=42.20.4
