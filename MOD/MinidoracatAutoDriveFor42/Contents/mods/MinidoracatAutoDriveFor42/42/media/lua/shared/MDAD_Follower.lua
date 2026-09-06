@@ -177,6 +177,7 @@ local BUDGET_MAX = 4096       -- 每次 stepBuild 的硬上限（呼叫端給多
 local BUDGET_DEFAULT = 64
 
 MDADFollower.STEER_MAX = STEER_MAX
+MDADFollower.ROTATE_EXIT_RAD = ROTATE_EXIT  -- Driver 以此收尾一次調頭（resetState 清 rotating 不算結束）
 MDADFollower.ARRIVE_M = ARRIVE_M
 MDADFollower.MIN_SPEED_KMH = MIN_SPEED_KMH
 MDADFollower.BUDGET_MAX = BUDGET_MAX

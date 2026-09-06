@@ -988,6 +988,8 @@ local function envStamp()
     if type(hud) == "table" then
         put("detour", hud.autoDetour)
         put("voice", hud.voiceEnabled)
+        put("resume", hud.manualResumeMs)  -- 0＝介入即關閉；>0＝放手後 N ms 恢復（0906a）
+        put("uturn", hud.uturnMode)        -- gentle／fast（0906b；每次調頭開始讀，途中改要看 uturn 事件）
     end
     put("policy", sandbox, "ObstaclePolicy")
     put("maxKmh", sandbox, "AutoDriveMaxSpeed")

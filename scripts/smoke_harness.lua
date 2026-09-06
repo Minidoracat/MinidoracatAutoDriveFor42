@@ -139,6 +139,8 @@ local drive = {
     free = {},                -- 已回收、可再發的向量（引擎的池也會重複發同一顆）
     mult = 1.6,               -- getGameTime():getMultiplier()；1.6＝30fps 基準
     keys = {},                -- isKeyDown（Left／Right／Forward／Backward／Brake）
+    resumeMs = 2000,          -- MDAD.HUD.manualResumeMs 樁：0＝介入即關閉（production 預設）
+    uturnMode = nil,          -- MDAD.HUD.uturnMode 樁：nil＝缺席＝溫和（production 預設）；"fast"＝快速
     -- getTexture：完整 media 路徑刻意查不到，逼 production 走無路徑的退路
     textures = { ["Item_AutopilotModule"] = "tex:AutopilotModule" },
     texCalls = {},            -- getTexture 的查詢序列（證明先試完整路徑、且只查一次）
@@ -4348,8 +4350,10 @@ checkTrue(capDiff <= drive.f70 * 0.02,
 -- =====================================================================
 -- 情境二十一：玩家讓位與恢復
 -- =====================================================================
-scenario("玩家讓位：當幀零施力＋關 regulator，連續 10 個乾淨幀才恢復跟線")
+scenario("玩家讓位：預設介入即關閉；選了自動恢復才待命，放手連續 N 秒才恢復跟線，換路線不繞過等待")
 
+-- 2026-09-06 使用者裁定：手動介入後預設「不自動恢復」（回饋「不知道放開會變回自動駕駛、
+-- 突然回頭被嚇到」）。HUD 缺 manualResumeMs getter＝預設＝介入即結束 session。
 MDAD.Drive.stop(0, nil)
 dveh._x, dveh._y, dveh._speed, dveh._steering = 0, 0, 20, 0
 setHeading(dveh, 0.3)
@@ -4359,6 +4363,43 @@ driveReset(dveh)
 driveTick(dp, dveh)
 driveTick(dp, dveh)
 checkEq(dveh._imp.total, 1, "正常跟線會施力（讓位斷言才有對照）")
+checkEq(MDAD.HUD, nil, "此處 HUD 尚未掛載＝getter 缺席＝預設策略")
+dveh._steering = 0.02
+driveReset(dveh)
+clearList(halos)
+driveTick(dp, dveh)
+checkFalse(MDAD.Drive.isActive(0), "預設不自動恢復：一碰方向盤就結束 session")
+checkEq(dveh._imp.total, 0, "介入當幀不施力")
+checkEq(drive.calls.regulatorOff, 1, "介入即關閉時把 regulator 關掉")
+checkEq(drive.calls.forceBrake, 0, "介入即關閉不搶煞車")
+checkEq(#halos, 1, "介入即關閉提示一次")
+checkEq(haloKey(), noteReason("UI_MinidoracatAutoDrive_ManualStop"), "介入即關閉提示 ManualStop")
+checkEq(halos[1] and halos[1].kind, "good", "介入即關閉是綠字（玩家自己接手不是錯誤）")
+checkEq(drive.lastVoice(), "manual", "介入即關閉開口 manual（不是 stop）")
+
+-- 選項明確回 0 也一樣（缺席與「不自動恢復」同義）
+drive.resumeMs = 0
+MDAD.HUD = { manualResumeMs = function() return drive.resumeMs end }
+dveh._steering = 0
+drive.nav.route = newRoute(40, 0, 0, 4, 0)
+checkTrue(MDAD.Drive.start(dp), "選項回 0：重新啟動")
+driveTick(dp, dveh)
+driveTick(dp, dveh)
+dveh._steering = 0.02
+driveReset(dveh)
+driveTick(dp, dveh)
+checkFalse(MDAD.Drive.isActive(0), "選項回 0：介入即關閉")
+
+-- 選「放手 2 秒後恢復」：待命，下面是原本的讓位／恢復契約
+drive.resumeMs = 2000
+dveh._steering = 0
+drive.nav.route = newRoute(40, 0, 0, 4, 0)
+checkTrue(MDAD.Drive.start(dp), "選 2 秒：重新啟動")
+driveReset(dveh)
+driveTick(dp, dveh)
+driveTick(dp, dveh)
+checkEq(dveh._imp.total, 1, "選 2 秒：正常跟線會施力")
+clearList(drive.voiceLog)
 
 -- getCurrentSteering 的門檻是 0.01：手把的類比轉向會有微小殘值，不能一碰就讓位
 dveh._steering = 0.005
@@ -4379,6 +4420,8 @@ checkEq(#halos, 1, "讓位提示一次")
 checkEq(haloKey(), DKEY.MANUAL, "讓位提示 ManualOverride")
 checkEq(halos[1] and halos[1].kind, "good", "讓位是綠字（不是錯誤）")
 checkTrue(MDAD.Drive.isActive(0), "讓位不結束 session（待命中）")
+checkEq(drive.voiceCount("yield"), 1, "讓位開口 yield（教學句）")
+checkEq(select(6, MDAD.Drive.hudState(0)), nil, "按著方向盤：HUD 不倒數（第 6 值 nil）")
 
 driveReset(dveh)
 driveTick(dp, dveh)
@@ -4396,9 +4439,11 @@ for _ = 1, 9 do driveTick(dp, dveh) end
 checkEq(dveh._imp.total, 0, "放手後時間未滿：觀察期不施力（幀數再多也一樣）")
 checkEq(drive.calls.setRegulatorSpeed, 0, "觀察期不控速")
 checkEq(drive.pool.alloc, 0, "觀察期不取向量池")
+checkEq(select(6, MDAD.Drive.hudState(0)), 2, "放手當下 HUD 倒數 2 秒")
 nowMs = nowMs + 1999
 driveTick(dp, dveh)
 checkEq(dveh._imp.total, 0, "1999ms：還差 1ms，不恢復")
+checkEq(select(6, MDAD.Drive.hudState(0)), 1, "剩 1ms：倒數顯示 1（向上取整、最少 1）")
 nowMs = nowMs + 1
 driveReset(dveh)
 driveTick(dp, dveh)
@@ -4406,6 +4451,8 @@ checkEq(dveh._imp.total, 1, "滿 2 秒無輸入：恢復跟線並施力")
 checkEq(drive.calls.setRegulatorSpeed, 1, "恢復後重新控速")
 checkEq(haloKey(), DKEY.RESUME, "恢復時頭上提示 Resume")
 checkEq(halos[1] and halos[1].kind, "good", "恢復是綠字")
+checkEq(select(6, MDAD.Drive.hudState(0)), nil, "恢復後 HUD 不再倒數")
+checkEq(drive.voiceCount("resume"), 0, "讓位不到 5 秒就恢復：不念 resume（微調不吵）")
 
 -- 油門／煞車沒有等價的類比觀測（isGasPedalPressed 在 regulator 供油時恆真），
 -- 所以改看鍵位；五個綁定名都必須讓位
@@ -4423,6 +4470,59 @@ end
 driveReset(dveh)
 driveTick(dp, dveh)
 checkEq(dveh._imp.total, 1, "五個鍵都放開並等滿恢復緩衝後回到跟線")
+
+-- 讓位語音每 session 一次；恢復語音只在讓位持續 ≥ TUNE.YIELD_VOICE_MS（5 秒）才念——
+-- 勾了自動恢復的老玩家輕推方向盤微調，每 2 秒念一句「我接手了」會吵。
+checkEq(drive.voiceCount("yield"), 1, "七次讓位只念一次 yield")
+checkEq(drive.voiceCount("resume"), 0, "短暫讓位恢復都不念 resume")
+dveh._steering = 0.02
+driveReset(dveh)
+driveTick(dp, dveh)
+nowMs = nowMs + 4000
+driveTick(dp, dveh)              -- 按著 4 秒
+dveh._steering = 0
+driveTick(dp, dveh)              -- 記乾淨時戳
+nowMs = nowMs + 2000
+driveReset(dveh)
+driveTick(dp, dveh)
+checkEq(dveh._imp.total, 1, "按 4 秒＋放手 2 秒：恢復跟線")
+checkEq(drive.voiceCount("resume"), 1, "讓位累計 6 秒 ≥5 秒：恢復念 resume")
+checkEq(drive.voiceCount("yield"), 1, "第二次以後的讓位不再念 yield")
+
+-- 讓位中主 MOD 換路線（玩家掉頭最常觸發偏航重算）：cutover 不得覆寫 yield——舊制
+-- 覆寫成 build、下一幀 build→follow＝0 秒接管、無 Resume 提示（2026-09-06 回饋
+-- 「放開會變回自動駕駛、突然回頭」的一條路徑）。恢復幀對未 build 的新剖面先走 build。
+dveh._steering = 0.02
+driveReset(dveh)
+driveTick(dp, dveh)                        -- 讓位
+dveh._steering = 0
+driveTick(dp, dveh)                        -- 記乾淨時戳（觀察期）
+drive.nav.route = newRoute(40, 0, 0, 4, 0) -- 新 identity＝主 MOD 重算
+nowMs = nowMs + 300                        -- 越過 ROUTE_REFRESH_MS
+driveReset(dveh)
+clearList(halos)
+driveTick(dp, dveh)                        -- cutover 幀
+driveTick(dp, dveh)
+checkEq((MDAD.Drive.hudState(0)), "yield", "觀察期換路線：仍是 yield（cutover 不覆寫）")
+checkEq(dveh._imp.total, 0, "觀察期換路線：不施力、不接管")
+checkEq(#halos, 0, "觀察期換路線：沒有提示（尚未恢復）")
+nowMs = nowMs + 1700                       -- 放手累計 2 秒
+driveReset(dveh)
+driveTick(dp, dveh)                        -- 恢復幀
+checkEq(haloKey(), DKEY.RESUME, "換路線後滿 2 秒才恢復並提示 Resume")
+checkEq(dveh._imp.total, 0, "恢復幀：新剖面先 build，不施力")
+checkEq((MDAD.Drive.hudState(0)), "build", "恢復幀 mode build（新剖面尚未 ready）")
+-- 40 點剖面在 BUILD_BUDGET=128 下要幾幀（fillet 建弧的 ops 不只點數）；build 完才跟線
+drive.resumeBuildFrames = 0
+while (MDAD.Drive.hudState(0)) == "build" and drive.resumeBuildFrames < 8 do
+    drive.resumeBuildFrames = drive.resumeBuildFrames + 1
+    driveTick(dp, dveh)
+end
+checkEq((MDAD.Drive.hudState(0)), "follow",
+    "build 完成：回到 follow（" .. drive.resumeBuildFrames .. " 幀）")
+driveReset(dveh)
+driveTick(dp, dveh)
+checkEq(dveh._imp.total, 1, "恢復後跟線施力")
 
 -- =====================================================================
 -- 情境二十二：超速主動煞車與抵達停車
@@ -4476,23 +4576,55 @@ checkTrue(MDAD.Drive.isActive(0), "橫向偏離終點：session 繼續（不是 
 -- 因此保持既有 pure follower 主動煞停後跟線，而不是誤進 RETURN HOLD。
 checkEq(drive.calls.setRegulatorSpeed, 1, "alignment brake may follow an already-issued coast command")
 checkEq(drive.calls.regulatorOn, 1, "alignment handling remains best-effort after regulator update")
--- 對照組（2026-09-01 激進化 ARC_MAX 25）：真正的反向（err ≈156° > ROTATE_ENTER）
--- ＝調頭姿態——速度 20 ≤ 大弧帶 25，**帶速直接甩調頭**（使用者授權甩尾）；
--- 超過 25 才主動煞停（甩出防線的最後一道仍在）。
+-- 對照組：真正的反向（err ≈156° > ROTATE_ENTER）＝調頭姿態。
+-- 2026-09-06「調頭方式」（使用者裁定預設溫和）：新一次調頭先煞到該檔 entry（溫和 5）以下
+-- 才放行；放行後只剩常駐上限 arc（溫和 13）——大弧爬行 12 不重啟入場煞停（s060 振盪防線）。
+-- 選項在調頭開始讀一次，途中改檔同一次調頭不變；快速檔 entry＝arc＝25＝09-01 激進化行為。
 setHeading(dveh, 1.66)
 driveReset(dveh)
 driveTick(dp, dveh)
+checkTrue(drive.calls.forceBrake > 0, "溫和（預設）：反向 156°＋速度 20 > entry 5：入場先煞停")
+checkEq(dveh._imp.total, 0, "溫和入場煞停幀不施轉向")
+checkTrue(MDAD.Drive.isActive(0), "入場煞停不放棄 session")
+dveh._speed = 4
+driveReset(dveh)
+driveTick(dp, dveh)
+checkEq(drive.calls.forceBrake, 0, "降到 4 ≤ entry 5：放行、不煞")
+checkTrue(dveh._imp.total >= 1, "放行幀施轉向力")
+dveh._speed = 12   -- 探測擋住走大弧的爬行速（此 fixture 無 Sensor：spin 5 以上即大弧）
+driveReset(dveh)
+driveTick(dp, dveh)
+checkEq(drive.calls.forceBrake, 0, "放行後大弧 12 > entry 5 但 ≤ arc 13：不重啟入場煞停（s060）")
+checkTrue(dveh._imp.total >= 1, "大弧幀施轉向力")
+dveh._speed = 14
+driveReset(dveh)
+driveTick(dp, dveh)
+checkTrue(drive.calls.forceBrake > 0, "14 > arc 13：常駐上限仍煞停")
+MDAD.HUD.uturnMode = function() return "fast" end
+dveh._speed = 20
+driveReset(dveh)
+driveTick(dp, dveh)
+checkTrue(drive.calls.forceBrake > 0, "同一次調頭途中改快速：仍用溫和參數（20 > arc 13 煞停）")
+-- 結束這次調頭：收尾看的是對前視點的誤差 < 100°——側偏 20m 時 heading 0.3 對前視點仍
+-- ≈101°（見上方假抵達守衛註解）；把車頭指向前視點（約 -73°）即收尾，不能回 y=0（會抵達）
+setHeading(dveh, -1.3)
+driveReset(dveh)
+driveTick(dp, dveh)
+setHeading(dveh, 1.66)  -- 下一次調頭：快速檔生效
+driveReset(dveh)
+driveTick(dp, dveh)
 checkEq(drive.calls.forceBrake, 0,
-    "反向 156°＋速度 20 ≤ ARC_MAX 25：帶速甩調頭、不煞停（激進化裁定）")
+    "快速：反向 156°＋速度 20 ≤ ARC 25：帶速甩調頭、不煞停（09-01 激進化裁定保留）")
 checkTrue(dveh._imp.total >= 1, "帶速調頭幀施轉向力")
 checkTrue(MDAD.Drive.isActive(0), "帶速調頭不放棄 session")
 dveh._speed = 30
 driveReset(dveh)
 driveTick(dp, dveh)
 checkTrue(drive.calls.forceBrake > 0,
-    "反向 156°＋速度 30 > ARC_MAX 25：仍主動煞停（甩出防線在）")
+    "快速：反向 156°＋速度 30 > ARC 25：仍主動煞停（甩出防線在）")
 checkEq(dveh._imp.total, 0, "超帶煞停幀不施轉向")
 checkTrue(MDAD.Drive.isActive(0), "煞停不放棄 session")
+MDAD.HUD.uturnMode = nil
 dveh._speed = 20
 setHeading(dveh, 0.3)
 driveReset(dveh)
@@ -4549,7 +4681,10 @@ driveTick(dp, dveh)
 checkFalse(MDAD.Drive.isActive(0), "煞停途中玩家踩煞車：立刻交還控制權")
 checkEq(drive.calls.forceBrake, 0, "交還後不再送煞車")
 checkEq(drive.calls.regulatorOff, 1, "交還時把 regulator 關掉（不留定速給下一個上車的人）")
-checkEq(#halos, 0, "玩家自己接手不彈紅字")
+checkEq(#halos, 1, "玩家自己接手：一則綠字提示（不是紅字）")
+checkEq(haloKey(), noteReason("UI_MinidoracatAutoDrive_ManualStop"), "煞停途中接手提示 ManualStop")
+checkEq(halos[1] and halos[1].kind, "good", "煞停途中接手是綠字")
+checkEq(drive.lastVoice(), "manual", "煞停途中接手開口 manual")
 drive.keys.Brake = false
 
 -- =====================================================================
@@ -6536,6 +6671,8 @@ drive.renderPlayerNum = 0
 MDAD.HUD = {
     trajectoryVisible = function() return drive.trajectoryVisible end,
     trajectoryWidth = function() return drive.trajectoryWidth end,
+    manualResumeMs = function() return drive.resumeMs end,
+    uturnMode = function() return drive.uturnMode end,
 }
 drive.renderPlayer = { getPlayerNum = function() return drive.renderPlayerNum or 0 end }
 function getPlayer() return drive.renderPlayer end
@@ -6754,6 +6891,12 @@ do
     checkTrue(i1 ~= 0 and dveh._imp.z ~= 0 and i1 * dveh._imp.z < 0,
         "車周淨空：耦力調頭＝衝量幀間反向（實得 " .. tostring(i1) .. " / "
         .. tostring(dveh._imp.z) .. "）")
+    -- 溫和檔（預設）探測淨空＝原地轉：目標壓到 crawl 4（< spin 5，不會加速到 Follower 的 12
+    -- 又切回大弧）；快速檔 crawl 12＝Follower 值。首輪 sensor 未 warm 目標本來就 0，
+    -- 先跑一輪掃描讓 Follower 的 12 成為基準，斷言才有鑑別力（拿掉夾限＝12）。
+    drive.scanRound()
+    driveTick(dp, dveh)
+    checkEq(dveh._regSpeed, 4, "溫和檔車周淨空原地轉：定速目標＝crawl 4（不是 Follower 的 12）")
     drive.putSolid(12, 0, "harness_rot_wall") -- 格心 (12.5,0.5) 距車 2.5m：半徑 3 內
     nowMs = nowMs + 600                       -- 跨過 500ms 探測節流
     driveTick(dp, dveh)                       -- 重探：不淨空

@@ -118,5 +118,50 @@
     "voice": "d1a1a920956c40c0bac4ef6a92c92a20",
     "temperature": 0.7,
     "top_p": 0.7
+  },
+  {
+    "id": "yield_zh",
+    "text": "[gentle, calm] 交给你啦，放手之后我会再接手哦。"
+  },
+  {
+    "id": "resume_zh",
+    "text": "[bright, cheerful] 好，我重新接手了，继续出发！"
+  },
+  {
+    "id": "manual_zh",
+    "text": "[gentle, warm] 好的，你来开吧，自动驾驶关闭啦。"
+  },
+  {
+    "id": "yield_en",
+    "text": "[gentle, calm] You've got the wheel. Let go and I'll take over again."
+  },
+  {
+    "id": "resume_en",
+    "text": "[bright, cheerful] Okay, I've got it again. Let's keep going!"
+  },
+  {
+    "id": "manual_en",
+    "text": "[gentle, warm] Okay, you drive. Autopilot is off."
+  },
+  {
+    "id": "yield_ja",
+    "text": "[gentle, calm] 運転を代わるね。手を離したら、また私が引き継ぐよ。",
+    "voice": "d1a1a920956c40c0bac4ef6a92c92a20",
+    "temperature": 0.7,
+    "top_p": 0.7
+  },
+  {
+    "id": "resume_ja",
+    "text": "[bright, cheerful] はい、また私が運転するね。続けて出発！",
+    "voice": "d1a1a920956c40c0bac4ef6a92c92a20",
+    "temperature": 0.7,
+    "top_p": 0.7
+  },
+  {
+    "id": "manual_ja",
+    "text": "[gentle, warm] はい、運転をお任せします。自動運転を終了するね。",
+    "voice": "d1a1a920956c40c0bac4ef6a92c92a20",
+    "temperature": 0.7,
+    "top_p": 0.7
   }
 ]

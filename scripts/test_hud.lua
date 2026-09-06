@@ -50,6 +50,7 @@ local texts = {
     UI_MinidoracatAutoDrive_GearInsane = "MAX",
     UI_MinidoracatAutoDrive_HUDStatusArrive = "ARRIVE",
     UI_MinidoracatAutoDrive_HUDStatusYield = "YIELD",
+    UI_MinidoracatAutoDrive_HUDStatusYieldResume = "RESUME IN %1 S",
     UI_MinidoracatAutoDrive_HUDStatusUnstick = "UNSTICK",
     UI_MinidoracatAutoDrive_HUDStatusBlocked = "BLOCKED",
     UI_MinidoracatAutoDrive_HUDStatusDodging = "DODGE",
@@ -395,7 +396,7 @@ function MDAD.isAutoInstalled(v) return v._module == true end
 MDAD.Drive = {}
 function MDAD.Drive.hudState()
     if not state.active then return nil end
-    return state.token, state.gear, state.cap, state.zombie, state.corpse
+    return state.token, state.gear, state.cap, state.zombie, state.corpse, state.resumeIn
 end
 function MDAD.Drive.hudStartReason() return state.startReason end
 function MDAD.Drive.slowdownInfo() return 2, 48, 3, 25, 15, 10, 20 end
@@ -853,6 +854,17 @@ click(panel.collapseButton)
 panel:refresh(nowMs)
 check(panel.detourButton.visible, "expanding restores the reroute pill while still blocked")
 state.token = "follow"
+-- 讓位狀態（2026-09-06）：按著＝「手動操作中」；放手後 hudState 第 6 值＝幾秒後恢復 → 倒數文案
+state.token = "yield"
+panel:refresh(nowMs)
+checkEq(panel._statusText, "YIELD", "yield without countdown shows the manual-control label")
+state.resumeIn = 2
+panel:refresh(nowMs)
+checkEq(panel._statusText, "RESUME IN 2 S", "yield countdown formats the seconds into the status text")
+state.resumeIn = nil
+state.token = "follow"
+panel:refresh(nowMs)
+checkEq(panel._statusText, "FOLLOW", "countdown value is ignored outside yield")
 state.active, state.startReason = false, "UI_MinidoracatAutoDrive_EngineOff"
 panel:refresh(nowMs)
 
@@ -869,7 +881,7 @@ check(type(registeredMiniMapSection) == "table"
     and registeredMiniMapSection.lane == nil
     and registeredMiniMapSection.actions == nil
     and #registeredMiniMapSection.ticks == 4
-    and #registeredMiniMapSection.combos == 3,
+    and #registeredMiniMapSection.combos == 5,
     "v1 MiniMap spec registers ticks/combos without actions or host layout fields")
 check(registeredMiniMapSection.ticks[2].label == "UI_MinidoracatAutoDrive_VoiceEnabled"
     and registeredMiniMapSection.ticks[2].get() == true,
@@ -933,6 +945,52 @@ local voiceLangSaves = optionSaveCalls
 check(not MDAD.HUD.setVoiceLanguageIndex(5) and not MDAD.HUD.setVoiceLanguageIndex(0)
     and MDAD.HUD.voiceLanguage() == "ja" and optionSaveCalls == voiceLangSaves,
     "out-of-range voice language index rejected without saving")
+-- 手動介入後 combo（2026-09-06 使用者裁定預設「不自動恢復」）：index 1＝0ms（介入即關閉），
+-- 2..5＝2/3/5/10 秒；Driver 讀 manualResumeMs、MiniMap 與 ESC 共用同一 option
+local manualResumeCombo = registeredMiniMapSection.combos[4]
+check(manualResumeCombo.label == "UI_MinidoracatAutoDrive_ManualResume"
+    and #manualResumeCombo.items == 5
+    and manualResumeCombo.items[1] == "UI_MinidoracatAutoDrive_ManualResumeOff"
+    and manualResumeCombo.items[5] == "UI_MinidoracatAutoDrive_ManualResume10"
+    and manualResumeCombo.default == 1,
+    "manual-resume combo lists off + 2/3/5/10 s with off as default")
+check(MDAD.HUD.manualResumeMs() == 0 and MDAD.HUD.manualResumeIndex() == 1
+    and options:getOption("ManualResume"):getValue() == 1,
+    "manual resume defaults to 0 ms = intervention switches autodrive off")
+manualResumeCombo.set(2)
+check(MDAD.HUD.manualResumeMs() == 2000
+    and options:getOption("ManualResume"):getValue() == 2,
+    "MiniMap manual-resume combo writes the shared option and maps index 2 to 2000 ms")
+manualResumeCombo.set(5)
+checkEq(MDAD.HUD.manualResumeMs(), 10000, "index 5 maps to 10000 ms")
+local manualResumeSaves = optionSaveCalls
+check(not MDAD.HUD.setManualResumeIndex(6) and not MDAD.HUD.setManualResumeIndex(0)
+    and MDAD.HUD.manualResumeMs() == 10000 and optionSaveCalls == manualResumeSaves,
+    "out-of-range manual-resume index rejected without saving")
+manualResumeCombo.set(1)
+checkEq(MDAD.HUD.manualResumeMs(), 0, "back to off = 0 ms")
+-- 調頭方式 combo（2026-09-06 使用者裁定預設「溫和」）：index 1＝gentle、2＝fast；Driver 每次
+-- 調頭開始讀 uturnMode；MiniMap 與 ESC 共用同一 option
+local uturnCombo = registeredMiniMapSection.combos[5]
+check(uturnCombo.label == "UI_MinidoracatAutoDrive_UTurnMode"
+    and #uturnCombo.items == 2
+    and uturnCombo.items[1] == "UI_MinidoracatAutoDrive_UTurnGentle"
+    and uturnCombo.items[2] == "UI_MinidoracatAutoDrive_UTurnFast"
+    and uturnCombo.default == 1,
+    "U-turn combo lists gentle + fast with gentle as default")
+check(MDAD.HUD.uturnMode() == "gentle" and MDAD.HUD.uturnIndex() == 1
+    and options:getOption("UTurnMode"):getValue() == 1,
+    "U-turn style defaults to gentle")
+uturnCombo.set(2)
+check(MDAD.HUD.uturnMode() == "fast" and options:getOption("UTurnMode"):getValue() == 2,
+    "MiniMap U-turn combo writes the shared option and maps index 2 to fast")
+local uturnSaves = optionSaveCalls
+check(not MDAD.HUD.setUTurnIndex(3) and not MDAD.HUD.setUTurnIndex(0)
+    and MDAD.HUD.uturnMode() == "fast" and optionSaveCalls == uturnSaves,
+    "out-of-range U-turn index rejected without saving")
+options:getOption("UTurnMode"):setValue(9)
+checkEq(MDAD.HUD.uturnMode(), "gentle", "corrupt U-turn option reads back as gentle")
+uturnCombo.set(1)
 options:getOption("VoiceLanguage"):setValue(9)
 checkEq(MDAD.HUD.voiceLanguage(), "auto", "corrupt voice language option reads back as follow")
 voiceLangCombo.set(1)
@@ -983,7 +1041,7 @@ checkEq(miniMapRegisterCalls, 2, "API v2 upgrade re-registers settings once")
 check(registeredMiniMapSection.actions ~= nil
     and #registeredMiniMapSection.actions == 3
     and #registeredMiniMapSection.ticks == 4
-    and #registeredMiniMapSection.combos == 3,
+    and #registeredMiniMapSection.combos == 5,
     "v2 MiniMap spec keeps ticks/combos and adds three actions")
 local latestAction = registeredMiniMapSection.actions[1]
 local folderAction = registeredMiniMapSection.actions[2]

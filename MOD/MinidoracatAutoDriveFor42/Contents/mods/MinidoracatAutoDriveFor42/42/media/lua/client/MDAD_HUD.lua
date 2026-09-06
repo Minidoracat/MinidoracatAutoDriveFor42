@@ -61,6 +61,23 @@ local LAYOUT_COMPACT = 2
 local OPTION_ID = "MinidoracatAutoDrive"
 local TRAJECTORY_WIDTH_DEFAULT = 2
 local RETENTION_DAYS = { 1, 3, 7, 14, 30 }
+-- 手動介入後（2026-09-06 使用者裁定預設「不自動恢復」）：combo index → 放手後恢復
+-- 自駕的等待 ms，0＝介入即關閉。Driver 每次讓位讀 HUD.manualResumeMs。
+local MANUAL_RESUME_MS = { 0, 2000, 3000, 5000, 10000 }
+local MANUAL_RESUME_KEYS = {
+    "UI_MinidoracatAutoDrive_ManualResumeOff",
+    "UI_MinidoracatAutoDrive_ManualResume2",
+    "UI_MinidoracatAutoDrive_ManualResume3",
+    "UI_MinidoracatAutoDrive_ManualResume5",
+    "UI_MinidoracatAutoDrive_ManualResume10",
+}
+-- 調頭方式（2026-09-06 使用者裁定預設「溫和」）：combo index → Driver TUNE.UTURN 的檔名；
+-- Driver 每次調頭開始讀 HUD.uturnMode（下次調頭生效）。
+local UTURN_MODES = { "gentle", "fast" }
+local UTURN_KEYS = {
+    "UI_MinidoracatAutoDrive_UTurnGentle",
+    "UI_MinidoracatAutoDrive_UTurnFast",
+}
 local COLLAPSED_MD_KEY = "MDADHudCollapsed"
 -- 側掛主題的兩片側翼各自收合，各自存一格（只留左翼常駐是合法組合）。
 local WING_L_MD_KEY = "MDADHudWingL"
@@ -100,6 +117,7 @@ local REASON_KEYS = {
 local STATUS_WIDTH_KEYS = {
     "UI_MinidoracatAutoDrive_HUDStatusArrive",
     "UI_MinidoracatAutoDrive_HUDStatusYield",
+    "UI_MinidoracatAutoDrive_HUDStatusYieldResume",
     "UI_MinidoracatAutoDrive_HUDStatusUnstick",
     "UI_MinidoracatAutoDrive_HUDStatusBlocked",
     "UI_MinidoracatAutoDrive_HUDStatusDodging",
@@ -280,6 +298,38 @@ end
 
 local function setAutoDetour(value)
     return setClientOption("AutoDetour", value == true)
+end
+
+-- 手動介入後（2026-09-06）：index 1＝不自動恢復（預設），2..＝放手後 N 秒恢復。
+local function manualResumeIndex()
+    return optionIndex("ManualResume", 1, #MANUAL_RESUME_MS)
+end
+
+local function manualResumeMs()
+    return MANUAL_RESUME_MS[manualResumeIndex()] or 0
+end
+
+local function setManualResumeIndex(value)
+    if type(value) ~= "number" or value ~= value then return false end
+    value = math.floor(value)
+    if value < 1 or value > #MANUAL_RESUME_MS then return false end
+    return setClientOption("ManualResume", value)
+end
+
+-- 調頭方式（2026-09-06）：index 1＝溫和（預設）、2＝快速。
+local function uturnIndex()
+    return optionIndex("UTurnMode", 1, #UTURN_MODES)
+end
+
+local function uturnMode()
+    return UTURN_MODES[uturnIndex()] or "gentle"
+end
+
+local function setUTurnIndex(value)
+    if type(value) ~= "number" or value ~= value then return false end
+    value = math.floor(value)
+    if value < 1 or value > #UTURN_MODES then return false end
+    return setClientOption("UTurnMode", value)
 end
 
 -- 語音語言（2026-09-02）：combo index 1＝跟隨遊戲語言，2..＝MDAD.Voice.PACKS 順序的
@@ -1278,7 +1328,7 @@ function MDADHUDPanel:refresh(now)
     self:setHudVisible(true)
     self:reposition()
 
-    local token, gear, cap, zombieOn, corpseOn = Drive.hudState(self.playerNum)
+    local token, gear, cap, zombieOn, corpseOn, resumeIn = Drive.hudState(self.playerNum)
     local reason = nil
     self._active = token ~= nil
     -- 政策三態（藥丸鎖不鎖）與 session 無關，兩種狀態都要讀。啟用中「此刻要不要
@@ -1289,7 +1339,12 @@ function MDADHUDPanel:refresh(now)
     policyCorpseOn, self._corpsePolicy = effectivePolicy(
         "CorpseSlowdown", self.playerNum, "corpse")
     if self._active then
-        self._statusText = getText(STATUS_KEYS[token] or STATUS_KEYS.follow)
+        -- 讓位中已放手＝倒數（2026-09-06 回饋「不知道放開會變回自動駕駛」）；按著＝「手動操作中」。
+        if token == "yield" and resumeIn then
+            self._statusText = getText("UI_MinidoracatAutoDrive_HUDStatusYieldResume", resumeIn)
+        else
+            self._statusText = getText(STATUS_KEYS[token] or STATUS_KEYS.follow)
+        end
     else
         reason = Drive.hudStartReason(self.playerNum)
         self._statusText = getText(REASON_KEYS[reason]
@@ -1700,6 +1755,16 @@ if PZAPI and PZAPI.ModOptions then
     end
     modOptions:addTickBox("AutoDetour", "UI_MinidoracatAutoDrive_AutoDetour", false,
         "UI_MinidoracatAutoDrive_AutoDetour_tooltip")
+    local manualResumeOption = modOptions:addComboBox("ManualResume",
+        "UI_MinidoracatAutoDrive_ManualResume", "UI_MinidoracatAutoDrive_ManualResume_tooltip")
+    for i = 1, #MANUAL_RESUME_KEYS do
+        manualResumeOption:addItem(MANUAL_RESUME_KEYS[i], i == 1)
+    end
+    local uturnOption = modOptions:addComboBox("UTurnMode",
+        "UI_MinidoracatAutoDrive_UTurnMode", "UI_MinidoracatAutoDrive_UTurnMode_tooltip")
+    for i = 1, #UTURN_KEYS do
+        uturnOption:addItem(UTURN_KEYS[i], i == 1)
+    end
     -- 回報導航問題：按鈕複製 GitHub 表單網址（PZAPI addButton＝ModOptions.lua:230；
     -- MainOptions.lua:2978-2980 以 setOnClick(onclick, args) 接線，onclick(target, button)）。
     -- ESC 選項是本機主玩家的，固定 playerNum 0。
@@ -1779,6 +1844,12 @@ HUD.voiceLanguageIndex = voiceLanguageIndex
 HUD.setVoiceLanguageIndex = setVoiceLanguageIndex
 HUD.autoDetour = autoDetour
 HUD.setAutoDetour = setAutoDetour
+HUD.manualResumeMs = manualResumeMs
+HUD.manualResumeIndex = manualResumeIndex
+HUD.setManualResumeIndex = setManualResumeIndex
+HUD.uturnMode = uturnMode
+HUD.uturnIndex = uturnIndex
+HUD.setUTurnIndex = setUTurnIndex
 MDAD.HUD = HUD
 
 -- MiniMap 齒輪視窗的 addon section：值與 ESC MOD Options 共用同一 option 物件，
@@ -1835,6 +1906,16 @@ local function registerMiniMapSettings()
                     return optionIndex("TelemetryRetentionDays", 3, 5)
                 end,
                 set = setTelemetryRetentionIndex },
+            { label = "UI_MinidoracatAutoDrive_ManualResume",
+                tooltip = "UI_MinidoracatAutoDrive_ManualResume_tooltip",
+                items = MANUAL_RESUME_KEYS,
+                default = 1,
+                get = manualResumeIndex, set = setManualResumeIndex },
+            { label = "UI_MinidoracatAutoDrive_UTurnMode",
+                tooltip = "UI_MinidoracatAutoDrive_UTurnMode_tooltip",
+                items = UTURN_KEYS,
+                default = 1,
+                get = uturnIndex, set = setUTurnIndex },
         },
     }
     if api.settingsApiVersion >= 2 then

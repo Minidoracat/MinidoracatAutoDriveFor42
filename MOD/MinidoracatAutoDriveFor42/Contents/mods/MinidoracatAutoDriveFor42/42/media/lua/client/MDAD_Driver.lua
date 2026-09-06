@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0905t"
+Drive.REV = "0906b"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -85,20 +85,29 @@ local BUILD_BUDGET = 128       -- 每幀限速剖面建構點數上限（啟動�
 -- BUILD_BUDGET（車靜止或剛 HOLD，攤幀只影響起步延遲）。
 TUNE.REBUILD_BUDGET = 1024
 local MAX_SESSIONS = 4         -- 分割畫面本機玩家槽上限（getSpecificPlayer 0-3）
-local YIELD_RESUME_MS = 2000   -- 讓位後連續無輸入這麼久才恢復自駕（恢復時另有頭上提示）
--- 大誤差（>90°，調頭類）的速度閘：超過此速**主動煞停**（不只鬆油滑行），
--- 近停後才開始原地旋轉。帶動量旋轉＝漂移——實機兩代教訓：53 km/h 吃飽和側推
--- 整台車甩飛（2026-08-28 yield 恢復）；舊值 20 允許 12-20 km/h 帶動量開轉，
--- 原地轉＋動量把車甩出 22m 草地（st 88,113 遙測 lat 10→22.6）。
-TUNE.ROTATE_SPIN_MAX_KMH = 15  -- 2026-09-01 使用者授權激進化：帶動量原地
-                               -- 甩＝甩尾調頭合法（舊 5＝近停才轉；22m 甩出
-                               -- 教訓由使用者明示接受風險）
-TUNE.ROTATE_ARC_MAX_KMH = 25   -- 大弧前進轉的動量上限（激進化 13→25：帶速
-                               -- 切進大弧，超過才煞停）
--- 調頭力矩縮放：耦力模式的力量乘這個值。跟線橫推的量級是為了對抗高速輪胎自回正
--- 標定的，原地調頭阻力小得多，全額力矩＝原地快速旋轉（實機回報「快速循轉」），
--- 收到 0.4 讓調頭變成緩慢平穩的迴轉。過慢調大、仍太快調小。
-local ROTATE_FORCE_SCALE = 0.65 -- 激進化 0.4→0.65：調頭轉速加快（甩尾可接受）
+-- 讓位後恢復自駕的等待時間改由 ESC／MiniMap「手動介入後」選項決定（HUD.manualResumeMs；
+-- 0＝介入即關閉，2026-09-06 使用者裁定預設不自動恢復）。恢復語音只在讓位持續夠久
+-- 才播——老玩家勾了自動恢復後輕推方向盤微調，每 2 秒念一句「我接手了」會吵。
+TUNE.YIELD_VOICE_MS = 5000
+-- 調頭方式（2026-09-06 使用者裁定預設「溫和」；codex 交叉審：「被嚇到」對應**帶多少速度
+-- 開始轉**，其次才是轉多快——力矩倍率只管原地旋轉，管不到 15-25 km/h 帶速大弧）。
+-- 玩家在 ESC／MiniMap 選行為檔，Driver 管成套參數，不開單一物理旋鈕（配出互相打架的門檻）。
+-- 每次調頭開始時讀一次（HUD.uturnMode；缺席＝溫和），同一次調頭參數不變＝下次調頭生效。
+--   entry：新一次調頭的入場放行速度——超過先煞停不轉，降到以下才放行；**一次性**，放行後
+--          不再因超過它重啟煞停（2026-09-01 s060：把入場門檻當常駐上限＝「煞停→探測→大弧
+--          12→又煞停」振盪）。快速檔 entry＝arc＝現行行為逐位元不變。
+--   spin ：原地耦力旋轉的速度上限；超過走大弧前進轉。舊值 20 曾把車甩出 22m 草地
+--          （st 88,113 遙測 lat 10→22.6），15＝09-01 使用者授權「甩尾調頭合法」。
+--   force：耦力力矩縮放（只影響原地旋轉）。跟線橫推量級是為對抗高速輪胎自回正標定的，
+--          原地調頭阻力小得多，全額＝實機「快速循轉」；0.4＝緩慢平穩迴轉、0.65＝激進化。
+--   arc  ：常駐煞停上限（大弧帶）；超過主動 forceBrake（53 km/h 吃飽和側推整台車甩飛，
+--          2026-08-28 yield 恢復）。
+--   crawl：車周探測淨空（可原地轉）時的速度目標；溫和檔要壓在 spin 之下，否則煞到 5 又朝
+--          Follower 的 12 加速、切回大弧。大弧仍用 Follower 的 12（也是終點脫困地板，不動）。
+TUNE.UTURN = {
+    gentle = { name = "gentle", entry = 5,  spin = 5,  force = 0.4,  arc = 13, crawl = 4 },
+    fast   = { name = "fast",   entry = 25, spin = 15, force = 0.65, arc = 25, crawl = 12 },
+}
 local STEER_INPUT_EPS = 0.01   -- getCurrentSteering 視為「玩家在轉」的門檻
 local STEER_DEADZONE = 0.1     -- follower steer（±5）的死區：低於此值不施力（免無謂抖動）
 
@@ -856,7 +865,15 @@ function Drive.hudState(playerNum)
     else key = "follow" end
     local cap = s.maxSpeed
     if s.gearCap and s.gearCap > 0 and s.gearCap < cap then cap = s.gearCap end
-    return key, Drive.getGear(playerNum), cap, s.zombieSlow, s.corpseSlow
+    -- 第 6 值：讓位中已放手時「幾秒後恢復」（向上取整、最少 1），按著或非讓位＝nil。
+    -- HUD 狀態列以此顯示倒數（2026-09-06 回饋「不知道放開會變回自動駕駛」）。
+    local resumeIn = nil
+    if key == "yield" and s.cleanSinceMs > 0 then
+        local left = s.cleanSinceMs + s.yieldResumeMs - getTimestampMs() + 999
+        resumeIn = (left - left % 1000) / 1000
+        if resumeIn < 1 then resumeIn = 1 end
+    end
+    return key, Drive.getGear(playerNum), cap, s.zombieSlow, s.corpseSlow, resumeIn
 end
 
 local function reportAutoUsage(playerObj, vehicle, active, args, navArgs)
@@ -898,6 +915,28 @@ local function diagEnabled()
     return ok and en == true
 end
 
+-- 手動介入後恢復自駕的等待（ms）；0＝介入即關閉 session。值來自 ESC／MiniMap
+-- 「手動介入後」下拉（HUD.manualResumeMs），HUD 缺席／getter 拋錯一律 0——預設就是
+-- 「不自動恢復」，缺席時退到預設而不是退到舊制 2 秒。
+local function manualResumeMs()
+    local hud = MDAD.HUD
+    if type(hud) ~= "table" or type(hud.manualResumeMs) ~= "function" then return 0 end
+    local ok, ms = pcall(hud.manualResumeMs)
+    if ok and type(ms) == "number" and ms > 0 then return ms end
+    return 0
+end
+
+-- 調頭方式（TUNE.UTURN 的一檔）；來自 ESC／MiniMap「調頭方式」下拉（HUD.uturnMode 回
+-- "gentle"／"fast"），HUD 缺席／非法值一律溫和（預設）。每次調頭開始讀一次。
+local function uturnProfile()
+    local hud = MDAD.HUD
+    if type(hud) == "table" and type(hud.uturnMode) == "function" then
+        local ok, mode = pcall(hud.uturnMode)
+        if ok and TUNE.UTURN[mode] then return TUNE.UTURN[mode] end
+    end
+    return TUNE.UTURN.gentle
+end
+
 local diagFail
 
 -- Driver 一律送具名 payload。
@@ -931,7 +970,7 @@ end
 -- 換車），這時候突然硬煞比放手更危險。到達停車的煞車是 arrive 分支自己做的。
 -- regulator 是我們開的就由我們關：即使玩家已經不在車上（下車／換車），仍然關掉，
 -- 否則那台車會留著一個沒人設過的定速，下一個上車的人莫名其妙就被拉速度。
-function Drive.stop(playerNum, reasonKey)
+function Drive.stop(playerNum, reasonKey, voiceEvent)
     local s = sessions[playerNum]
     if not s then return false end
     diagStop(s, playerNum, reasonKey or "manual")
@@ -954,9 +993,10 @@ function Drive.stop(playerNum, reasonKey)
             end
         end
     end
-    -- 停等預算耗盡的紅字交還說「無法通過，請手動駕駛」；其餘（玩家關閉、讓位、
-    -- 引擎熄火…）一律「已關閉，請接管方向盤」。
-    voice(reasonKey == KEY_STUCK and "handback" or "stop", playerNum)
+    -- 停等預算耗盡的紅字交還說「無法通過，請手動駕駛」；玩家自己接手（voiceEvent＝
+    -- "manual"）說「你來開吧，自駕關閉」；其餘（玩家關閉、引擎熄火…）一律
+    -- 「已關閉，請接管方向盤」。
+    voice(voiceEvent or (reasonKey == KEY_STUCK and "handback" or "stop"), playerNum)
     return true
 end
 
@@ -1148,6 +1188,9 @@ local function startSession(playerObj, playerNum)
         navUsageArgs = { active = true },
         nextDebugMs = 0,
         cleanSinceMs = 0,
+        yieldResumeMs = 0,   -- 進入 yield 那幀讀的選項值（介入當下的策略，之後改選項不追溯）
+        yieldSinceMs = 0,    -- 進入 yield 的時刻；恢復語音只在讓位 ≥ TUNE.YIELD_VOICE_MS 才播
+        yieldVoiced = false, -- 讓位語音每 session 一次（教學句），頭上文字仍每次讓位提示
         parity = 1,
         yieldNotified = false,
         progressState = "disarmed",
@@ -1188,6 +1231,8 @@ local function startSession(playerObj, playerNum)
         corpseSlow = true,  -- 同上，地面屍體
         rotProbeMs = 0,     -- 下一次允許車周探測的時戳（0＝第一次調頭幀就探）
         rotProbeClear = false, -- 上次探測結果：車周淨空可原地旋轉
+        uturn = nil,        -- 進行中的這一次調頭的參數檔（TUNE.UTURN.*）；nil＝沒在調頭
+        uturnArmed = false, -- 入場減速已放行（速度降到 entry 以下過一次）
         returnActive = false,
         returnUnsafe = false,
         returnHold = false,
@@ -1471,7 +1516,7 @@ local function applySteering(
     s.parity = -parity
     local impulse = BaseVehicle.allocVector3f()
     if coupled then
-        local rf = force * ROTATE_FORCE_SCALE
+        local rf = force * (s.uturn and s.uturn.force or TUNE.UTURN.gentle.force)
         s.lastCoupled = true
         force = rf
         impulse:set(parity * rf * px, 0, parity * rf * py)
@@ -6263,32 +6308,62 @@ local function stepFollow(s, vehicle, playerNum, now)
             vehicle:setRegulator(false)
             commandForceBrake(s, vehicle, now)
         else
+            -- 調頭生命週期（TUNE.UTURN；2026-09-06）：以航向誤差收尾（< ROTATE_EXIT），
+            -- 不是 fstate.rotating——cutover／yield 的 resetState 會清 rotating，同一次
+            -- 調頭不得因此重讀選項或重新入場煞停。參數檔在調頭開始讀一次。
+            local rotating = s.fstate.rotating == true
+            -- aerr 只剩前推輔助與調頭收尾在用（調頭判定已改讀 fstate.rotating）
+            local aerr = headingError or 0
+            if aerr < 0 then aerr = -aerr end
+            if s.uturn and aerr < MDADFollower.ROTATE_EXIT_RAD then
+                s.uturn, s.uturnArmed = nil, false
+            end
+            if rotating and not s.uturn then
+                s.uturn, s.uturnArmed = uturnProfile(), false
+                diagEvent(s, playerNum, "uturn", {
+                    phase = "enter", why = s.uturn.name, speed = speedKmh,
+                })
+            end
+            -- 車周探測淨空（可原地轉）時目標壓到該檔 crawl：溫和檔 4 < spin 5，不會煞到 5
+            -- 又朝 Follower 的 12 加速、切回大弧；快速檔 12＝Follower 值、等於不夾。
+            if rotating and s.uturn and s.rotProbeClear
+                    and targetSpeed > s.uturn.crawl then
+                targetSpeed = s.uturn.crawl
+            end
             regOn = applySpeed(s, vehicle, targetSpeed)
             if not reached then
-                local rotating = s.fstate.rotating == true
-                -- aerr 只剩前推輔助在用（調頭判定已改讀 fstate.rotating）
-                local aerr = headingError or 0
-                if aerr < 0 then aerr = -aerr end
                 local av = speedKmh
                 if av < 0 then av = -av end
-                if rotating and av > TUNE.ROTATE_ARC_MAX_KMH then
-                    -- 調頭需求但動量超過大弧爬行帶：主動煞停，這幀不施轉向。
-                    -- 2026-09-01 s060：舊閘用 SPIN_MAX(5) 當上限，大弧爬行 12
+                local ut = s.uturn
+                local brakeCap = nil
+                if rotating then
+                    -- 入場減速（一次性）：新一次調頭先煞到 entry 以下才放行；放行後只剩
+                    -- 常駐上限 arc，大弧爬行 12 不再觸發（s060 振盪的修法保留）。
+                    if not s.uturnArmed and av <= ut.entry then
+                        s.uturnArmed = true
+                        diagEvent(s, playerNum, "uturn", {
+                            phase = "go", why = ut.name, speed = speedKmh,
+                        })
+                    end
+                    brakeCap = s.uturnArmed and ut.arc or ut.entry
+                end
+                if rotating and av > brakeCap then
+                    -- 調頭需求但動量超過本階段上限：主動煞停，這幀不施轉向。
+                    -- 2026-09-01 s060：舊閘用 SPIN_MAX(5) 當常駐上限，大弧爬行 12
                     -- 一加速就被煞回 5——「>5 煞停 → ≤5 才探測 → 探測擋 →
-                    -- 大弧 12 → 又煞停」振盪，大弧路徑從未真正跑起來。上限改
-                    -- 爬行帶 13；原地耦力自身仍要求近停（coupled 條件）。
+                    -- 大弧 12 → 又煞停」振盪，大弧路徑從未真正跑起來。常駐上限是
+                    -- arc（爬行帶之上）；原地耦力自身仍要求近停（coupled 條件）。
                     vehicle:setRegulator(false)
                     commandForceBrake(s, vehicle, now)
                     regOn = false
-                elseif not rotating or av <= TUNE.ROTATE_ARC_MAX_KMH then
+                else
                     -- 誤差 > 90° 走耦力模式（coupled=true）：力矩恆定、側向中心力
                     -- 幀間抵消＝原地旋轉不橫滑（實機：橫推調頭會滑出路外撞東西）。
                     -- **原地旋轉前先探車周**（500ms 節流）：走廊沿路線掃，路線反向
                     -- 要調頭時車後方／側面全是走廊盲區——貼牆貼樹貼車旋轉＝車身
                     -- 掃掠直接撞。周邊不淨空（或未載入）就退回橫推大弧：爬行 12
                     -- 前進轉，空間不夠自然由卡死→脫困鏈接手。
-                    local coupled = rotating
-                        and av <= TUNE.ROTATE_SPIN_MAX_KMH
+                    local coupled = rotating and av <= ut.spin
                     if coupled and s.sensor then
                         if now >= s.rotProbeMs then
                             s.rotProbeMs = now + TUNE.ROTATE_PROBE_MS
@@ -6574,7 +6649,8 @@ local function onPlayerUpdate(player)
         -- 煞停途中玩家自己接手就立刻交還（已送出的 forceBrake 最多殘留 1 秒後自行失效，
         -- CarController.java:973-979）——不然玩家會覺得車子在跟他搶煞車
         if manualInput(vehicle) then
-            Drive.stop(playerNum, nil)
+            haloGood(player, "UI_MinidoracatAutoDrive_ManualStop")
+            Drive.stop(playerNum, nil, "manual")
             return
         end
         vehicle:setRegulator(false)
@@ -6771,6 +6847,11 @@ local function onPlayerUpdate(player)
                         d = s.unstickDistance, rear = "target-change",
                     })
                 end
+            elseif oldMode == "yield" then
+                -- 讓位中換路線（玩家掉頭最常觸發偏航重算）：保留 yield。舊制在這裡覆寫成
+                -- build，下一幀 build→follow 就跳過放手等待與「恢復控制」提示＝0 秒接管
+                -- （2026-09-06 回饋「放開會變回自動駕駛、突然回頭」的一條路徑）。新 profile
+                -- 由恢復幀依 ready 決定先走 build。
             elseif resumePhase ~= nil or not preservingRecovery then
                 s.mode = "build"
             end
@@ -6966,9 +7047,20 @@ local function onPlayerUpdate(player)
 
     -- 讓位：玩家一碰方向盤／油門／煞車就交還控制權，關掉 regulator（等同原版踩煞車
     -- 或倒車時的處理，CarController.java:461-463），並且**本幀不施力**。
+    -- 「手動介入後」選項（2026-09-06 使用者裁定預設不自動恢復）：0＝介入即關閉 session、
+    -- 放手不會自己接手（回饋「不知道放開會變回自動駕駛、突然回頭被嚇到」）；>0＝待命，
+    -- 放手連續這麼久才恢復。值在進入 yield 那幀讀一次，之後改選項不追溯。
     if manualInput(vehicle) then
         if s.mode ~= "yield" then
+            local resumeMs = manualResumeMs()
+            if resumeMs <= 0 then
+                haloGood(player, "UI_MinidoracatAutoDrive_ManualStop")
+                Drive.stop(playerNum, nil, "manual")
+                return
+            end
             s.mode = "yield"
+            s.yieldResumeMs = resumeMs
+            s.yieldSinceMs = now
             -- 玩家接手＝舊診斷作廢（舊制由 mode 被覆寫成 "yield" 自然丟掉
             -- recover 閂鎖；旗標化後必須顯式丟，否則恢復後立刻倒車）。
             s.recoverWhy, s.recoverPulse = nil, false
@@ -6978,6 +7070,10 @@ local function onPlayerUpdate(player)
                 s.yieldNotified = true
                 haloGood(player, "UI_MinidoracatAutoDrive_ManualOverride")
             end
+            if not s.yieldVoiced then
+                s.yieldVoiced = true
+                voice("yield", playerNum)
+            end
         end
         s.cleanSinceMs = 0
         return
@@ -6985,15 +7081,14 @@ local function onPlayerUpdate(player)
     if s.mode == "yield" then
         -- 恢復用「連續乾淨時間」而非幀數：舊制 10 幀（~0.17 秒）等於手一離開鍵盤
         -- 就立刻接管，玩家把車頭調到反向時會瞬間吃到飽和調頭側推、整台車甩出去
-        -- （2026-08-28 實機回報「剛放手就誇張瞬間調頭」）。改 2 秒緩衝＋恢復提示，
-        -- 玩家看得到「它要接手了」。
+        -- （2026-08-28 實機回報「剛放手就誇張瞬間調頭」）。放手後緩衝＋恢復提示，
+        -- HUD 狀態列同步倒數，玩家看得到「它要接手了」。
         if s.cleanSinceMs == 0 then
             s.cleanSinceMs = now
             return
         end
-        if now - s.cleanSinceMs < YIELD_RESUME_MS then return end
+        if now - s.cleanSinceMs < s.yieldResumeMs then return end
         s.cleanSinceMs = 0
-        s.mode = "follow"
         s.yieldNotified = false -- 下次讓位再提示一次（讓位↔恢復是成對事件）
         -- 清控制歷史（保留投影游標）：yield 期間玩家可能大幅改變車頭朝向，
         -- 舊的 PID 積分／微分歷史對新姿態是雜訊
@@ -7004,7 +7099,16 @@ local function onPlayerUpdate(player)
         Drive.invalidateCommandState(s, vehicle:getCurrentSpeedKmHour(), "TRACK")
         s.progressState = "disarmed"
         s.progressSince = 0
+        s.resumeProgressPhase, s.resumeProgressUntil = nil, 0
         haloGood(player, "UI_MinidoracatAutoDrive_Resume")
+        if now - s.yieldSinceMs >= TUNE.YIELD_VOICE_MS then voice("resume", playerNum) end
+        -- 讓位期間換過路線（cutover 保留 yield）：新 profile 還沒 build 完就先走 build
+        -- 幀，否則 stepFollow 會拿到 ready=false 的剖面；已 ready 的當幀直接跟線。
+        if s.profile.ready ~= true then
+            s.mode = "build"
+            return
+        end
+        s.mode = "follow"
     end
 
     -- Reverse recovery and its settle phase bypass normal follow control. Manual input

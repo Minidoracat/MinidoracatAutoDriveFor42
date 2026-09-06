@@ -30,4 +30,15 @@ module Base
 	sound MDAD_Voice_arrive_ja    { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_arrive_ja.wav, } }
 	sound MDAD_Voice_detour_ja    { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_detour_ja.wav, } }
 	sound MDAD_Voice_nodetour_ja  { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_nodetour_ja.wav, } }
+
+	/* 手動介入（2026-09-06）：讓位待命／恢復接手／介入即關閉 */
+	sound MDAD_Voice_yield_zh     { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_yield_zh.wav, } }
+	sound MDAD_Voice_resume_zh    { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_resume_zh.wav, } }
+	sound MDAD_Voice_manual_zh    { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_manual_zh.wav, } }
+	sound MDAD_Voice_yield_en     { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_yield_en.wav, } }
+	sound MDAD_Voice_resume_en    { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_resume_en.wav, } }
+	sound MDAD_Voice_manual_en    { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_manual_en.wav, } }
+	sound MDAD_Voice_yield_ja     { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_yield_ja.wav, } }
+	sound MDAD_Voice_resume_ja    { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_resume_ja.wav, } }
+	sound MDAD_Voice_manual_ja    { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_manual_ja.wav, } }
 }

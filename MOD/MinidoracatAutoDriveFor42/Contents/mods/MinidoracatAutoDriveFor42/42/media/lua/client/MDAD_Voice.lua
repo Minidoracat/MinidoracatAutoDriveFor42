@@ -1,6 +1,7 @@
 -- MDAD_Voice.lua
 -- 自動駕駛語音提示（2026-09-02 使用者裁定）：啟動／關閉／受阻煞停／倒車脫困／
--- 無法通過交還／到站六個事件各一句，依遊戲語言選國語（CH／CN）、日語（JP）或英語，ESC「語音語言」可改指定語音包。
+-- 無法通過交還／到站／改道／無路可繞，加上手動介入三句（讓位待命／恢復接手／介入即關閉，
+-- 2026-09-06），依遊戲語言選國語（CH／CN）、日語（JP）或英語，ESC「語音語言」可改指定語音包。
 -- 聲音檔與 sound script：42/media/sound/MinidoracatAutoDrive、scripts/sounds_autodrive.txt
 -- （產生器與文本：repo scripts/voice_lines.json＋fish-audio-tts skill）。
 --
@@ -24,6 +25,7 @@ local EVENTS = {
     start = true, stop = true, blocked = true,
     unstick = true, handback = true, arrive = true,
     detour = true, nodetour = true,
+    yield = true, resume = true, manual = true,
 }
 local SOUND_PREFIX = "MDAD_Voice_"
 local lastRef = {}       -- playerNum → emitter ref（long）
