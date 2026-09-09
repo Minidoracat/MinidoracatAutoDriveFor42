@@ -1143,7 +1143,7 @@ SANDBOX_SPEC = {                            # key: (type, default, min, max)
     "GPSFuelPercent":      ("integer", "100", "0", "500"),
     "AutoDriveFuelPercent": ("integer", "100", "0", "500"),
     "InstallSkillGate":     ("boolean", "true", None, None),
-    "AutoDriveMaxSpeed":    ("integer", "70", "5", "120"),
+    "AutoDriveMaxSpeed":    ("integer", "120", "5", "120"),
     "ZombieAreaSlowdown":   ("enum", "2", None, None),
     "CorpseSlowdown":       ("enum", "2", None, None),
     "ObstaclePolicy":       ("enum", "1", None, None),

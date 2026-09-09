@@ -52,6 +52,27 @@ check(not D.chordCoveredByBand(lPts, lWidths, 1, 2, 1, 6, 0, 10, 4),
     "endpoint-only L-union false positive is rejected by midpoint continuity")
 check(D.chordCoveredByBand(lPts, lWidths, 1, 2, 1, 9.6, 0, 10, 0.4),
     "corner-overlap chord shares a convex capsule on each half")
+-- 帶邊浮點（2026-09-06 session-055，w=4 直路 26 秒 verifyLineReason=band → obb 18）：
+-- clampLane 夾到 band 邊的 profile 點，對 raw 段的距離與 erode 是同一個數的兩條浮點
+-- 路徑；下面這組幾何 d²−e² ≈ +5e-14，沒有 1mm 容忍 `<=` 就整段翻車。
+do
+    local w, halfW, h = 4, 0.6, math.rad(7)
+    local erode = w * 0.5 - halfW - D.ROAD_EDGE_MARGIN
+    local x0, y0, len = 100.25, 200.75, 23.5
+    local x1, y1 = x0 + math.cos(h) * len, y0 + math.sin(h) * len
+    local pts, widths = { x0, y0, x1, y1 }, { w }
+    local bx, by = x0 + (x1 - x0) * 0.37, y0 + (y1 - y0) * 0.37
+    local segH = math.atan(y1 - y0, x1 - x0)
+    local px, py = bx - math.sin(segH) * erode, by + math.cos(segH) * erode
+    check(D.distanceToSegmentSq(px, py, x0, y0, x1, y1) > erode * erode,
+        "fixture：帶邊點的浮點距離平方確實 > erode²（容忍拿掉即紅）")
+    check(D.rawBandContains(pts, widths, 1, halfW, px, py), "lane==erode 的帶邊點在帶內（1mm 容忍）")
+    check(not D.rawBandContains(pts, widths, 1, halfW,
+        bx - math.sin(segH) * (erode + 0.002), by + math.cos(segH) * (erode + 0.002)),
+        "帶邊外 2mm 不在帶內：容忍不是放寬")
+    check(not D.rawBandContains(pts, { 2 * (halfW + D.ROAD_EDGE_MARGIN) }, 1, halfW, bx, by),
+        "erode==0 的路（寬＝2(halfW+邊界)）連中線點都不算帶內：容忍不得無中生有")
+end
 
 scenario("steering／curve／visibility caps")
 local k0 = D.steeringKappa(2.5, 0.7, 0.25, 120, 0)
@@ -205,7 +226,7 @@ end
 -- corridor 改走 90%（上限 80）比例檔——固定 15 會覆蓋連續 visibilityCap
 --（2026-09-01 三模型對抗審 P0；植入違規驗證：改回 15 清單本表即紅）。
 for i = 1, #reasons do
-    local cap, why = D.ungatedCapKmh(120, reasons[i], 90)
+    local cap, why = D.ungatedCapKmh(120, reasons[i], 90, false)
     check(type(cap) == "number" and cap >= 0 and cap < 120,
         "gate false bit " .. i .. " produces a real strict cap")
     if i == 1 or i == 5 or i == 12 then
@@ -218,14 +239,22 @@ for i = 1, #reasons do
     end
     eq(why, reasons[i], "ungated reason remains named #" .. i)
 end
-local visCap = D.ungatedCapKmh(85, "visibility", 0)
+local visCap = D.ungatedCapKmh(85, "visibility", 0, true)
 near(visCap, 76.5, 1e-9,
     "visibility gate failure is proportional (85×0.9), never the old 15 floor")
-local staleCap = D.ungatedCapKmh(60, "stale", 0)
+local staleCap = D.ungatedCapKmh(60, "stale", 0, true)
 near(staleCap, 54, 1e-9, "stale gate failure is proportional (90%)")
-local zeroCap, zeroReason = D.ungatedCapKmh(0, "align", 0)
+local zeroCap, zeroReason = D.ungatedCapKmh(0, "align", 0, true)
 eq(zeroCap, 0, "zero full target is a legal arrived cap")
 eq(zeroReason, "align", "zero full target does not become dynamics-invalid")
+near(D.ungatedCapKmh(12, "align", 12, true), 12, 1e-9,
+    "已套姿態爬行帽，不為了gate未開再打成10.8")
+near(D.ungatedCapKmh(12, "state", 12, true), 12, 1e-9,
+    "已有自己的狀態速度帽，低速不再被比例折扣壓低")
+near(D.ungatedCapKmh(5, "state", 5, true), 5, 1e-9,
+    "低於爬行值的有效原帽保留，不反向抬高")
+near(D.ungatedCapKmh(12, "state", 12, false), 10.8, 1e-9,
+    "舒適風格沿用原比例策略")
 
 scenario("jerk invariant and named hard bypass")
 local v, a = 0, 0
@@ -277,6 +306,63 @@ local badCap, _, badReason = D.dodgeSpeedCapKmh(
     60, 60, 0 / 0, 60, 60, D.DODGE_STATIC)
 eq(badCap, 0, "invalid dodge scalar fail-stops")
 eq(badReason, "dynamics-invalid", "invalid dodge scalar is named")
+
+scenario("polylineKappaMax 尾段：已駛過的量化尖角不再限速（0906g）")
+do
+    -- 承諾線折線的量化尖角讓「整條線」的 κ 假爆——production 註解記的
+    -- `dodge cap zero: curve=0.0` 就是這個：1m 腿的 90° 折角 → curveCap 0 →
+    -- 世界掃掠已證可過的縫被整條否決。車尾都開過那個折角了，還拿它定速
+    -- ＝用一段已經走完的幾何 artifact 把剩下的路封死。
+    -- 折線：p2=(1,0) 是 90° 尖角；p5=(1,21) 是前方出口的緩彎；其餘共線。
+    local kx = { 0, 1, 1, 1,  1,  6, 11 }
+    local ky = { 0, 0, 1, 11, 21, 26, 31 }
+    local kn = 7
+    local function cap(k) return D.curveSpeedCapKmh(k, 3.5, 2.5, 0.7, 0.25, 120) end
+    local kFull = D.polylineKappaMax(kx, ky, kn)
+    local kTail = D.polylineKappaMax(kx, ky, kn, 3)
+    eq(cap(kFull), 0, "整線 κ 讓 curveCap 歸零（量化尖角假爆的定罪值）")
+    eq(D.polylineKappaMax(kx, ky, kn, 1), kFull, "省略 startIndex 逐位元等同 =1")
+    check(cap(kTail) > 20, "尖角已駛過後 curveCap 由「否決」變成可行速度")
+    -- off-by-one 護欄：startIndex 是「第一個保留點」，它自己的折角需要已被丟掉
+    -- 的前一點才算得出來 → 從 =2 起 p2 的尖角就該消失。迴圈下界少減一格即紅。
+    eq(D.polylineKappaMax(kx, ky, kn, 2), kTail,
+        "startIndex=2 即丟掉第一個保留點自身的折角")
+    -- 尾段不是「只看直線」的免死金牌：還沒走到的出口彎必須留在帽裡，
+    -- 一路開過它之後 κ 才准降到剩餘直線的 0。
+    check(D.polylineKappaMax(kx, ky, kn, 5) < kTail,
+        "前方出口彎仍被計算，直到也駛過才降")
+    -- 區間內的小數是真缺陷面：截斷若發生在界限檢查之後，2.5 會落到 2、
+    -- 放掉 p2 的尖角 → curveCap 從 0 被抬成 20+，垃圾輸入換到速度。
+    eq(D.polylineKappaMax(kx, ky, kn, 2.5), kFull,
+        "區間內小數 startIndex 退整線，不抬速度帽")
+    local relaxed
+    for _, bad in ipairs({ 0, -3, kn + 1, kn + 4, 0 / 0, math.huge, "3", true }) do
+        if D.polylineKappaMax(kx, ky, kn, bad) ~= kFull then relaxed = bad end
+    end
+    eq(relaxed, nil, "界外／非數值 startIndex 一律退整線")
+    -- 承諾線陣列是 session 的，量測只能讀（0906d ⑩d 釘的 commit 線 identity）
+    local kxCopy, kyCopy = {}, {}
+    for i = 1, kn do kxCopy[i], kyCopy[i] = kx[i], ky[i] end
+    D.polylineKappaMax(kx, ky, kn, 3)
+    D.polylineKappaMax(kx, ky, kn, 0 / 0)
+    local intact = #kx == kn and #ky == kn
+    for i = 1, kn do
+        if kx[i] ~= kxCopy[i] or ky[i] ~= kyCopy[i] then intact = false end
+    end
+    check(intact, "polylineKappaMax 不修改傳入的承諾線陣列")
+    -- 0906i：上界 last（含）——Driver 只量兩段過渡 [a,b]／[c,d]，保持段的路線彎由
+    -- profile 曲率表管（session-055：彎道旁一根桿子的 tight 繞行把整條 20-50m 線壓 15）。
+    eq(D.polylineKappaMax(kx, ky, kn, 1, 4), kFull, "窗含 p2 尖角＝整線值（last 含頂點）")
+    eq(D.polylineKappaMax(kx, ky, kn, 3, 4), 0, "窗 [3,4] 全共線：p5 出口彎在 last 之後不計")
+    eq(D.polylineKappaMax(kx, ky, kn, 3, 5), kTail, "last=5 剛好含 p5 出口彎＝尾段值")
+    eq(D.polylineKappaMax(kx, ky, kn, 1, 1), 0, "first==last：沒有可量的頂點＝0")
+    local relaxedLast
+    for _, bad in ipairs({ 2, 0, -1, kn + 1, 4.5, 0 / 0, math.huge, "5", true }) do
+        if D.polylineKappaMax(kx, ky, kn, 3, bad) ~= kTail then relaxedLast = bad end
+    end
+    eq(relaxedLast, nil, "last < first／界外／小數／非數值一律退回量到線尾")
+    eq(D.polylineKappaMax(kx, ky, kn, 3, kn), kTail, "last=n 視同 n−1（末點沒有折角）")
+end
 
 scenario("C1 fillet／band union／metadata／fallback")
 local src = { 0, 0, 30, 0, 30, 30 }
@@ -650,7 +736,86 @@ check(wdA ~= nil and wdA > 18 and wdA < 19, "第二回傳＝世界距 18.x")
 local _, wdB = D.blockedNear(40.5, 39.5, 10, 10668, 9711, nil, nil)
 check(wdB == nil, "退弧長時第二回傳 nil")
 
-
+scenario("perceptionEffective：玩家可調視距在固定每幀預算下的有效範圍（0909b）")
+do
+    -- 契約（下面每個期望值的唯一來源，手算不讀 production 推導）：可選 48/80/120/160/200、
+    -- 預設120、硬上限240、有效地板24、名目輪時目標375ms。Sensor每輪傳
+    -- near=2（車前 2m 起掃）與 stepsPerFrame=SCAN_BUDGET/LAT_N=56/14=4，
+    -- 所以「預算內的請求距離」＝2＋4×375/frameMs，與請求值取小。
+    -- 每幀的世界查詢額度是固定的（56 格）：低幀率縮的是距離，不是加重單幀負擔。
+    local N, F = 2, 4
+    local frames = { 6, 8, 10, 12, 16, 20, 25, 33, 50, 100, 250 }
+    local badOption = 0
+    for i = 1, #D.PERCEPTION_DISTANCES do
+        local m = D.PERCEPTION_DISTANCES[i]
+        if m < D.PERCEPTION_MIN_EFFECTIVE_M or m > D.PERCEPTION_HARD_MAX_M then
+            badOption = badOption + 1
+        end
+        if i > 1 and m <= D.PERCEPTION_DISTANCES[i - 1] then badOption = badOption + 1 end
+    end
+    eq(badOption, 0, "每個檔位都落在 [地板, 硬上限] 內且嚴格遞增（不給執行不出的設定）")
+    -- 幀長 → 有效範圍
+    near(D.perceptionEffective(120, 8, F, N), 120, 1e-12,
+        "125fps：120m請求全額給，不無故縮短")
+    near(D.perceptionEffective(120, 20, F, N), 77, 1e-12,
+        "50fps：同一請求縮到77m")
+    near(D.perceptionEffective(120, 100, F, N), 24, 1e-12,
+        "10fps：預算不足時保留24m最低範圍")
+    near(D.perceptionEffective(120, 250, F, N), 24, 1e-12, "4fps：仍是地板 24，不歸零")
+    near(D.perceptionEffective(200, 6, F, N), 200, 1e-12,
+        "高幀率把 200m 檔完整交付（不被 110m 那種隱含天花板寫死）")
+    local prev, mono = nil, true
+    for i = 1, #frames do
+        local e = D.perceptionEffective(200, frames[i], F, N)
+        if prev ~= nil and e > prev then mono = false end
+        prev = e
+    end
+    check(mono, "有效範圍對幀長單調不增（幀變長只會看得更近）")
+    -- 請求端的夾限與 fail-safe
+    near(D.perceptionEffective(999, nil, nil, N), 240, 1e-12, "超上限請求夾到 240")
+    near(D.perceptionEffective(241, 4, F, N), 240, 1e-12, "241 也夾 240（快幀不放行超限）")
+    near(D.perceptionEffective(0 / 0, 8, F, N), 120, 1e-12,
+        "NaN 請求退預設 120（不是 0、也不是 240）")
+    near(D.perceptionEffective(1 / 0, 8, F, N), 120, 1e-12,
+        "Inf 請求退預設 120（非有限一律退設定值，不當成「要看最遠」）")
+    near(D.perceptionEffective(10, nil, nil, N), 24, 1e-12, "低於地板的請求抬到 24")
+    near(D.perceptionEffective(-5, nil, nil, N), 24, 1e-12, "負請求抬到 24")
+    near(D.perceptionEffective(120, nil, F, N), 120, 1e-12,
+        "還沒有幀率樣本（session 首輪）不預先縮")
+    near(D.perceptionEffective(120, 0, F, N), 120, 1e-12,
+        "frameMs 0 不縮（每幀 56 格的硬額度另有把關）")
+    near(D.perceptionEffective(120, -16, F, N), 120, 1e-12, "負幀長不縮")
+    near(D.perceptionEffective(120, 20, 0, N), 120, 1e-12, "stepsPerFrame 0 不縮")
+    near(D.perceptionEffective(120, 20, 0 / 0, N), 120, 1e-12, "stepsPerFrame NaN 不縮")
+    local reqs = { 24, 48, 80, 120, 160, 200, 240, 999 }
+    local violations = 0
+    for i = 1, #reqs do
+        local ceil = reqs[i] < 240 and reqs[i] or 240
+        for j = 1, #frames do
+            local e = D.perceptionEffective(reqs[i], frames[j], F, N)
+            if not (e >= 24 and e <= ceil) then violations = violations + 1 end
+        end
+    end
+    eq(violations, 0, "任何（請求, 幀長）組合都落在 [24, min(請求, 240)]")
+    -- 可調視距的意義在速度：可視帽是同一條二次式（tau 0.5、a 3、halfL 2.2）
+    local v48 = D.visibilityCapKmh(D.PERCEPTION_DISTANCES[1], 0.5, 3, 2.2)
+    local v200 = D.visibilityCapKmh(D.PERCEPTION_DISTANCES[5], 0.5, 3, 2.2)
+    local v240 = D.visibilityCapKmh(D.PERCEPTION_HARD_MAX_M, 0.5, 3, 2.2)
+    check(v48 > 50 and v48 < 56,
+        "48m 檔的可視帽 ~53 km/h（選短距＝自願慢；實得 " .. tostring(v48) .. "）")
+    check(v200 > 115 and v200 < 120,
+        "200m 檔把可視帽抬到 ~118（110m 只有 85）；滿 120 仍要靠 EXT／240（實得 "
+        .. tostring(v200) .. "）")
+    check(v240 >= 120, "硬上限 240m 才涵蓋 120km/h 的煞停視界（實得 " .. tostring(v240) .. "）")
+    local visMono = true
+    for i = 2, #D.PERCEPTION_DISTANCES do
+        if D.visibilityCapKmh(D.PERCEPTION_DISTANCES[i], 0.5, 3, 2.2)
+                <= D.visibilityCapKmh(D.PERCEPTION_DISTANCES[i - 1], 0.5, 3, 2.2) then
+            visMono = false
+        end
+    end
+    check(visMono, "五個檔位的可視帽嚴格遞增（設定調高必須換得到速度）")
+end
 
 print("  " .. (assertions - base) .. " 項斷言")
 print()

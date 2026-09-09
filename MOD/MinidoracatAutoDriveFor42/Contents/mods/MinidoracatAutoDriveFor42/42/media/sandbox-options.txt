@@ -34,7 +34,7 @@ option MinidoracatAutoDrive.InstallSkillGate
 {type = boolean, default = true, page = MinidoracatAutoDrive, translation = MinidoracatAutoDriveInstallSkillGate,}
 
 option MinidoracatAutoDrive.AutoDriveMaxSpeed
-{type = integer, min = 5, max = 120, default = 70, page = MinidoracatAutoDrive, translation = MinidoracatAutoDriveAutoDriveMaxSpeed,}
+{type = integer, min = 5, max = 120, default = 120, page = MinidoracatAutoDrive, translation = MinidoracatAutoDriveAutoDriveMaxSpeed,}
 
 option MinidoracatAutoDrive.ZombieAreaSlowdown
 {type = enum, numValues = 3, default = 2, page = MinidoracatAutoDrive, translation = MinidoracatAutoDriveZombieAreaSlowdown, valueTranslation = MinidoracatAutoDriveZombieAreaSlowdown,}

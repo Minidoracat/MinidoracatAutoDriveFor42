@@ -12,10 +12,25 @@ local PI = math.pi
 local DEG20 = 20 * PI / 180
 local EPS = 1e-9
 
-D.JERK_MAX = 2                 -- m/s^3, provisional until telemetry calibration
+D.JERK_MAX = 4                 -- m/s^3；2→4（2026-09-07 session-012 t=22-24：coast 剖面 2.9 m/s² 的斜坡輸入
+                               -- 下 jerk 積分穩態落後 a²/(2j)＝1.5 m/s，命令比剖面高 4 km/h 進弧＝a_lat 超 20%）
 D.LATERAL_JERK_MAX = 2         -- m/s^3, same conservative provisional bound
 D.SNAPSHOT_FRESH_MS = 750
 D.ALIGN_HOLD_MS = 250
+-- Client sensing preference shared by HUD and Driver; range extensions have a separate hard cap.
+D.PERCEPTION_DISTANCES = { 48, 80, 120, 160, 200 }
+D.PERCEPTION_DEFAULT_INDEX = 3
+D.PERCEPTION_DEFAULT_M = D.PERCEPTION_DISTANCES[D.PERCEPTION_DEFAULT_INDEX]
+D.PERCEPTION_HARD_MAX_M = 240
+D.PERCEPTION_MIN_EFFECTIVE_M = 24
+D.PERCEPTION_EXT_M = 32
+-- 穩定幀率下的輪時目標：近端資料要留給下一輪，兩輪合計不超過新鮮度預算。
+-- EWMA、極低FPS與引擎長幀不是硬期限保證，仍由既有新鮮度／可視速度閘把關。
+D.PERCEPTION_ROUND_MS = D.SNAPSHOT_FRESH_MS * 0.5
+D.PERCEPTION_STOP_MARGIN_M = 5 -- 反函式停距之外留一輪反應／加速餘裕，避免小基礎值自限加速
+D.SOFT_LOOKAHEAD_M = 40
+D.SOFT_LOOKAHEAD_S = 3
+
 -- 2026-09-01 telemetry s062（capReason align 137 筆、S 彎壓到 4 km/h 蠕動）：
 -- 彎中 heading error 12-15° 是前視點幾何常態，5° 閾值把正常過彎姿態當
 -- 「未對齊」二次懲罰（剖面已為彎減速）。15° 起罰、22° 破遲滯（維持 ~1.5×
@@ -54,6 +69,27 @@ function D.finite(n)
     return type(n) == "number" and n * 0 == 0
 end
 
+-- 軟避讓採集與選縫共用同一個窗；遠處屍堆不能擠掉近端64點額度。
+function D.softLookahead(speedKmh)
+    if not D.finite(speedKmh) then return D.SOFT_LOOKAHEAD_M end
+    return math.min(D.PERCEPTION_HARD_MAX_M,
+        math.max(D.SOFT_LOOKAHEAD_M, math.abs(speedKmh) / 3.6 * D.SOFT_LOOKAHEAD_S))
+end
+
+-- A fixed per-frame query budget must not grow when FPS drops. Shorten the effective
+-- range instead; the requested preference and geometric extensions remain unchanged.
+function D.perceptionEffective(requested, frameMs, stepsPerFrame, near)
+    if not D.finite(requested) then requested = D.PERCEPTION_DEFAULT_M end
+    if requested > D.PERCEPTION_HARD_MAX_M then requested = D.PERCEPTION_HARD_MAX_M end
+    if requested < D.PERCEPTION_MIN_EFFECTIVE_M then requested = D.PERCEPTION_MIN_EFFECTIVE_M end
+    if D.finite(frameMs) and frameMs > 0 and D.finite(stepsPerFrame) and stepsPerFrame > 0 then
+        local affordable = near + stepsPerFrame * D.PERCEPTION_ROUND_MS / frameMs
+        if affordable < D.PERCEPTION_MIN_EFFECTIVE_M then affordable = D.PERCEPTION_MIN_EFFECTIVE_M end
+        if affordable < requested then requested = affordable end
+    end
+    return requested
+end
+
 function D.distanceToSegmentSq(px, py, ax, ay, bx, by)
     local ex, ey = bx - ax, by - ay
     local den = ex * ex + ey * ey
@@ -71,9 +107,12 @@ function D.rawBandContains(rawPts, rawWidths, src, halfW, x, y)
             or not D.finite(x) or not D.finite(y) then return false end
     local width = rawWidths[src]
     if not D.finite(width) then return false end
-    local erode = width * 0.5 - halfW - D.ROAD_EDGE_MARGIN
+    -- 帶邊 1mm 容忍：clampLane 把 lane 夾到 band 邊時，profile 點對 raw 段的距離與
+    -- erode 是同一個數的兩條浮點路徑，`<=` 會依捨入方向整段路失敗（2026-09-06
+    -- session-055：w=4／w=5 直路 26 秒 verifyLineReason=band → obb 18）。
+    local erode = width * 0.5 - halfW - D.ROAD_EDGE_MARGIN + 1e-3
     local p = src * 2 - 1
-    return erode > 0 and D.finite(rawPts[p]) and D.finite(rawPts[p + 3])
+    return erode > 1e-3 and D.finite(rawPts[p]) and D.finite(rawPts[p + 3])
         and D.distanceToSegmentSq(x, y,
             rawPts[p], rawPts[p + 1], rawPts[p + 2], rawPts[p + 3])
             <= erode * erode
@@ -167,6 +206,12 @@ local CROSS_TRACK_MAX_STEER = 0.77
 -- 位置環是唯一能救的項；一般跟線不動（s026 調過的 0.77 保留）。
 D.CROSS_TRACK_DODGE_GAIN = 3
 D.CROSS_TRACK_DODGE_MAX = 2.5
+-- 弧段（v4 圓角）的增益倍率／上限（2026-09-07 session-058 定罪：R≈12 左彎 12-26 km/h
+-- pure pursuit 對弧上前視點的弦角一路切內 lat +1.1→−1.7 撞路燈；Follower 弧段改追切線後
+-- 姿態由切線管、位置只剩 cross-track，0.77/v 在 20 km/h 只有 0.14/m。離線閉環
+-- temp/exp_arc_tracking.lua：切線＋×2 切內 1.0-1.8 → 0.3-0.75m；×3 增益在弧上會擺）。
+D.CROSS_TRACK_ARC_GAIN = 2
+D.CROSS_TRACK_ARC_MAX = 1.5
 function D.crossTrackSteer(latDev, speedKmh, dLatPerSec, gainScale, maxSteer)
     if not D.finite(latDev) or not D.finite(speedKmh) then return 0 end
     if not D.finite(gainScale) or gainScale <= 0 then gainScale = 1 end
@@ -418,13 +463,12 @@ end
 -- 算好的連續 visibilityCapKmh（快照年齡已由 tau 膨脹反映在該 cap 裡），Sport
 -- 70＋潮濕/重車下 brakeLoaded 幾乎永久失敗＝空直路被鎖死。visibility 的真正
 -- 防線是連續煞停證明與 breach forceBrake，不是這裡的固定地板。
--- 2026-09-02 整體提速裁定：警戒帽 15→18、比例 0.85→0.9、上限 70→80；三個
--- 分支的「cap ≥ fullTarget 退比例」統一用同一個 UNGATED_RATIO（舊制近場／
--- align 分支殘留 0.85 是裝訂遺漏，不是刻意保守）。
+-- MAX保留既有低速／姿態帽，不再為了「嚴格更低」重複折扣成10.8或4.5。
+-- 舒適風格原策略不變；一般證明缺口仍走90%／80上限，未知近場仍限18。
 local UNGATED_RATIO = 0.9
 local UNGATED_NEAR_CAP_KMH = 18
 local UNGATED_MAX_KMH = 80
-function D.ungatedCapKmh(fullTarget, reason, alignmentCap)
+function D.ungatedCapKmh(fullTarget, reason, alignmentCap, brisk)
     if not D.finite(fullTarget) or fullTarget < 0 or type(reason) ~= "string" then
         return 0, "dynamics-invalid"
     end
@@ -436,10 +480,11 @@ function D.ungatedCapKmh(fullTarget, reason, alignmentCap)
         cap = alignmentCap
     else
         cap = fullTarget * UNGATED_RATIO
+        if brisk and cap < 12 then cap = fullTarget < 12 and fullTarget or 12 end
         if cap > UNGATED_MAX_KMH then cap = UNGATED_MAX_KMH end
     end
     if cap < 0 then cap = 0 end
-    if cap >= fullTarget then cap = fullTarget * UNGATED_RATIO end
+    if cap >= fullTarget then cap = brisk and fullTarget or fullTarget * UNGATED_RATIO end
     return cap, reason
 end
 
@@ -577,19 +622,23 @@ function D.shiftSpaceSpeedCapKmh(deltaL, available, aLat, wheelbase,
     return cap
 end
 
-function D.polylineKappaMax(xs, ys, n)
+-- first＝第一個保留點（其自身折角已在車下，不計）；last＝最後要量的頂點（含）。
+-- 省略／非法值保守取整線。
+function D.polylineKappaMax(xs, ys, n, first, last)
     if type(xs) ~= "table" or type(ys) ~= "table" or not D.finite(n) then return 0 end
     n = n - n % 1
     if n < 3 then return 0 end
+    if not D.finite(first) or first < 1 or first > n or first % 1 ~= 0 then first = 1 end
+    if not D.finite(last) or last < first or last > n or last % 1 ~= 0 then last = n end
+    if last > n - 1 then last = n - 1 end
     local best = 0
-    for i = 2, n - 1 do
+    for i = first + 1, last do
         local k = D.circumcircleKappa(
             xs[i - 1], ys[i - 1], xs[i], ys[i], xs[i + 1], ys[i + 1])
         if k > best then best = k end
     end
     return best
 end
--- 世界掃掠的有效碰撞半徑：整格障礙（r>=0.5）的圓形近似比 1x1 方格角落
 -- 多出量化肥邊，規劃 pad 夠厚才補償；扣除後永不低於物理 pad 包絡。
 function D.sweepRadius(r, pointPad, physPad, comp)
     local rr = r + pointPad

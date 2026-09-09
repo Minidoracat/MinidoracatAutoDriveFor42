@@ -138,6 +138,12 @@ local function worstClearance(sArr, lArr, n, sLo, sHi, l)
     return worst
 end
 
+-- 第 13 參 minS（規劃群的弧長下界）的呼叫殼：其餘選填參數一律走預設語意，
+-- 讓「有沒有下界」成為兩次呼叫之間唯一的差異
+local function planMinS(sArr, lArr, n, minS)
+    return C.plan(sArr, lArr, n, NEED, CORR, 0, nil, nil, nil, nil, nil, nil, minS)
+end
+
 -- =====================================================================
 -- 情境一：沒有障礙擋住中心線 → clear（含「全在走廊邊緣」）
 -- =====================================================================
@@ -742,6 +748,177 @@ do
     end
     _G.type = realType
     checkEq(typeCalls, 0, "unchecked hard-pair helper performs no repeated type validation")
+end
+
+-- =====================================================================
+scenario("殭屍軟縫 softZombieLane：無殭屍回常駐、縫寬夠才偏、無縫回 nil、連續項、窗外不算、快照有洞整批不信")
+do
+    local lo, hi = {}, {}
+    local function z(sl, base, prev, delta, lam)
+        local S, L = {}, {}
+        for i, p in ipairs(sl) do S[i], L[i] = p[1], p[2] end
+        return C.softZombieLane(S, L, #sl, 0, 30, 0.9, base, prev, base - delta, base + delta, lam, lo, hi)
+    end
+    -- R＝halfW 0.9＋ZOMBIE_R 0.35＋MARGIN 0.30＝1.55；自由段夠寬時離殭屍區間邊再多留 PREFER 0.5
+    -- （2026-09-07 實機：貼著 R 過＝0.3m 淨距，殭屍一撲就中，玩家看不出有閃）；段不夠寬退回貼 R
+    local P = C.ZOMBIE_PREFER
+    checkNear(C.ZOMBIE_R + C.ZOMBIE_MARGIN, 0.65, 1e-12, "殭屍佔位半徑常數＝0.35＋0.30")
+    checkNear(P, 0.5, 1e-12, "PREFER＝0.5")
+    checkNear(z({}, 0.5, 0.5, 2, 1), 0.5, 1e-12, "窗內無殭屍：回常駐 lane")
+    checkNear(z({ { 40, 0 } }, 0, 0, 2, 1), 0, 1e-12, "殭屍在窗外（s=40 > 30）：回常駐 lane")
+    checkEq(z({ { 10, 0 } }, 0, 0, 1.5, 1), nil, "中線殭屍、可行帶 ±1.5 < R 1.55：無縫回 nil")
+    checkNear(z({ { 10, 0 } }, 0, 0, 2, 1), 1.55, 1e-9, "中線殭屍、可行帶 ±2：右段 [1.55,2] 寬 0.45 留不下 PREFER → 貼區間邊緣 1.55，同 cost 取右")
+    checkNear(z({ { 10, 0.5 } }, 0, 0, 2, 1), -1.05 - P, 1e-9, "殭屍偏右 0.5：往左，左段 [−2,−1.05] 留得下 → −1.05−PREFER")
+    checkNear(z({ { 10, -2.5 }, { 12, 2.5 } }, 0, 0, 2, 1), 0, 1e-9, "兩側殭屍中間有縫：常駐 lane 本身可行＝不動")
+    checkNear(z({ { 10, -1 } }, 0, 1, 2, 1), 0.55 + P, 1e-9,
+        "連續項：prev=1 時無約束極小 0.5 落在區間內，投影到 0.55＋PREFER")
+    checkEq(z({ { 10, -2 }, { 10, 0 }, { 10, 2 } }, 0, 0, 2, 1), nil, "三隻橫排蓋滿可行帶：nil")
+    checkEq(C.softZombieLane({ 1 }, {}, 1, 0, 30, 0.9, 0, 0, -2, 2, 1, lo, hi), nil, "快照缺項：整批不信回 nil")
+    checkEq(z({ { 10, 0 } }, 0, 0, 0, 1), nil, "可行帶零寬且被殭屍區間蓋住：nil")
+    checkNear(C.softZombieLane({ 10 }, { 0 }, 1, 0, 30, 0.9, 0, 0, 1, -1, 1, lo, hi), 0, 1e-12, "aLo > aHi：回常駐")
+    -- 實機 2026-09-06「完全沒閃」：殭屍正壓在常駐 lane（base 1.0）上，帶 ±1.5 → nil；帶 ±3 → 兩側等距取右
+    checkEq(z({ { 10, 1.0 } }, 1.0, 1.0, 1.5, 1), nil, "帶寬 ±1.5 < R：正壓車道的殭屍無縫（舊 bug 的形狀）")
+    checkNear(z({ { 10, 1.0 } }, 1.0, 1.0, 3.0, 1), 2.55 + P, 1e-9, "帶寬 ±3：正壓車道的殭屍兩側等距（1.55＋PREFER），同 cost 取右 3.05")
+    -- 7m 路的真實帶（laneRoom ±2.2 → [−2.0, 2.2]）：右側出帶，只剩左側 −0.55−PREFER
+    checkNear(C.softZombieLane({ 10 }, { 1.0 }, 1, 0, 30, 0.9, 1.0, 1.0, -2.0, 2.2, 1, lo, hi), -0.55 - P, 1e-9,
+        "非對稱帶 [−2, 2.2]：右側出帶，往左 −0.55−PREFER（2.05 側移）")
+    -- 帶邊不留 PREFER：左段 [−2, −1.05]，u0 落在段外時夾到 −1.55（離帶邊 −2 只有 0.45 也可）
+    checkNear(C.softZombieLane({ 10 }, { 0.5 }, 1, 0, 30, 0.9, -1.9, -1.9, -2, 2, 1, lo, hi), -1.9, 1e-9,
+        "帶邊不留 PREFER：常駐 −1.9 在左段內直接取用")
+    -- 零配置：呼叫期間不建 table
+    local S, L = { 10, 12, 14 }, { -1.5, 0.2, 1.8 }
+    local before = collectgarbage("count")
+    collectgarbage("stop")
+    for _ = 1, 200 do C.softZombieLane(S, L, 3, 0, 30, 0.9, 0, 0, -2, 2, 1, lo, hi) end
+    local after = collectgarbage("count")
+    collectgarbage("restart")
+    checkTrue(after - before < 8, "200 次呼叫記憶體成長 < 8KB（零 table 配置；實得 " .. string.format("%.1f", after - before) .. "）")
+end
+
+-- =====================================================================
+-- 情境十四：minS（第 13 參）＝規劃群的弧長下界
+-- =====================================================================
+scenario("minS：車後點不當群錨、前方照擋、群擴張不把裁掉的後方點接回、nil 保持全點語意")
+do
+    -- 呼叫端傳 minS = rs − halfL（車尾的弧長）：只有車尾之後的點有資格當**前向**
+    -- 規劃群的錨。車後的點不刪、不改語意，交給 contact／倒車另管（見情境十五）。
+    -- (a) 同一點集：車後整寬牆（s=6 橫跨 ±3）＋ 前方單一擋線障礙（s=40, l=1.5）
+    local sA = { 6, 6, 6, 6, 6, 40 }
+    local lA = { -3.0, -1.5, 0, 1.5, 3.0, 1.5 }
+    local mNil, aNil, bNil = planMinS(sA, lA, 6, nil)
+    checkEq(mNil, "blocked", "無 minS：車後整寬牆當群錨，眼前這條路被判死")
+    checkNear(aNil, 6, EPS, "無 minS 的煞停群起點就是車後那道牆")
+    checkNear(bNil, 6, EPS, "blocked 的第二回傳同為群起點")
+    local mA, aA, bA, cA, dA, offA = planMinS(sA, lA, 6, 20)
+    checkEq(mA, "dodge", "有 minS：車後牆不當群錨，前方 40m 那顆才是群")
+    checkNear(aA, 32, EPS, "群錨 40 − ENTRY 8 ＝ 32")
+    checkNear(bA, 38, EPS, "b ＝ 40 − GAP 2")
+    checkNear(cA, 42, EPS, "c ＝ 40 + GAP 2")
+    checkNear(dA, 48, EPS, "d ＝ 40 + EXIT 8")
+    checkMono(aA, bA, cA, dA, "裁掉車後牆後的剖面")
+    checkNear(offA, -1.5, EPS, "側偏只由前方那顆決定（反側第一條 comfort lane）")
+    checkTrue(aA >= 20, "側移進入段不再落在車尾之後（那種剖面執行不出來）")
+    checkTrue(worstClearance(sA, lA, 6, aA, dA, offA) >= CLR - EPS,
+        "選出的 lane 對剖面窗內每個點仍保有膨脹淨空")
+
+    -- (b) 前方障礙照擋：同一道整寬牆搬到前方，minS 不得把已知障礙降級成 clear
+    local sB = { 6, 6, 6, 6, 6, 40, 40, 40, 40, 40 }
+    local lB = { -3.0, -1.5, 0, 1.5, 3.0, -3.0, -1.5, 0, 1.5, 3.0 }
+    local mB, aB, _, _, dB = planMinS(sB, lB, 10, 20)
+    checkEq(mB, "blocked", "前方整寬牆照擋（裁的是車後，不是「看不到的就當淨空」）")
+    checkNear(aB, 40, EPS, "煞停群回報前方那道牆")
+    checkNear(dB, 40, EPS, "群尾同為前方牆，不摻車後那道的 s")
+
+    -- (c) 群擴張不得把裁掉的後方點接回：車後擋線點鏈 8→13→18 與前方 22 每段間距
+    -- 都 ≤ GROUP_GAP 6，沒有下界時一輪就串成 [8,22]（群裡含車後點 ⇒ 沒縫）
+    local sC = { 8, 13, 18, 22 }
+    local lC = { 0, 0, 0, 1.5 }
+    local mC0, aC0, _, cC0 = planMinS(sC, lC, 4, nil)
+    checkEq(mC0, "blocked", "無 minS：鏈式擴張把三個車後點與前方障礙串成一群")
+    checkNear(aC0, 8, EPS, "串成的群從 8 起")
+    checkNear(cC0, 22, EPS, "串成的群到 22")
+    local mC, aC, bC, cC, dC, offC = planMinS(sC, lC, 4, 18.01)
+    checkEq(mC, "dodge", "minS 18.01：三個車後點全裁 ⇒ 群只剩 22 那顆")
+    checkNear(aC, 14, EPS, "群錨仍是 22（擴張沒把 4m 外的 18 接回來）⇒ a = 14")
+    checkNear(dC, 30, EPS, "d ＝ 22 + EXIT 8")
+    checkNear(offC, -1.5, EPS, "側偏由 22 那顆決定")
+    checkMono(aC, bC, cC, dC, "裁掉後方鏈後的剖面")
+    -- 下界是閉區間：s == minS 的點仍算前向；一旦算進來群就長回 18 ⇒ 沒縫。
+    -- 這條同時證明上面的裁切不是空轉（那三點真的能改變結果）
+    local mIn, aIn = planMinS(sC, lC, 4, 18)
+    checkEq(mIn, "blocked", "minS 18：s == minS 算前向（>=），群長到 18 ⇒ 沒縫")
+    checkNear(aIn, 18, EPS, "含 18 的群從 18 起")
+    -- 前向鏈照串：下界之後的 25、30 間距 5 ≤ 6 ⇒ 同一群、保持段跨兩顆
+    local sD, lD = { 10, 25, 30 }, { 0, 1.5, 1.5 }
+    local mD, aD, bD, cD, dD = planMinS(sD, lD, 3, 20)
+    checkEq(mD, "dodge", "車後點裁掉後，前向兩顆仍合成一群")
+    checkNear(aD, 17, EPS, "a ＝ 25 − 8")
+    checkNear(dD, 38, EPS, "d ＝ 30 + 8")
+    checkTrue(cD - bD >= 30 - 25, "保持段跨越群裡的兩顆障礙")
+
+    -- (d) nil ＝ 原全點語意：省略第 13 參／明寫 nil／傳一個比所有點都小的下界，三者同義
+    local m1, a1, b1, c1, d1, o1 = C.plan(sC, lC, 4, NEED, CORR)
+    local m2, a2, b2, c2, d2, o2 = planMinS(sC, lC, 4, nil)
+    local m3, a3, b3, c3, d3, o3 = planMinS(sC, lC, 4, -1e6)
+    checkTrue(m1 == m2 and a1 == a2 and b1 == b2 and c1 == c2 and d1 == d2 and o1 == o2,
+        "省略第 13 參 ＝ 明寫 nil")
+    checkTrue(m1 == m3 and a1 == a3 and b1 == b3 and c1 == c3 and d1 == d3 and o1 == o3,
+        "全點都在下界之上 ＝ 不裁（與 nil 同語意）")
+    -- 壞下界一律 fail-safe：不能把「下界壞掉」變成「當作沒有下界」而規劃到車後
+    checkEq(planMinS(sA, lA, 6, 0 / 0), "blocked", "minS NaN → blocked")
+    checkEq(planMinS(sA, lA, 6, 1 / 0), "blocked", "minS Inf → blocked")
+    checkEq(planMinS(sA, lA, 6, "20"), "blocked", "minS 非數字 → blocked")
+
+    -- (e) 裁的是「群錨／群聚合」，不是點雲：群窗（sObs0 − OBS_HALF）內的車後點仍
+    -- 參與候選 lane 的淨空判定。清得過群、卻剛好刮到後輪旁那顆的 lane 不是能走的
+    -- lane——這個方向必須保守，不能為了「一致」把候選搜尋也一起裁掉
+    local sE, lE = { 24.5, 25 }, { -1.5, 1.5 }
+    checkEq(planMinS(sE, lE, 2, 25), "blocked",
+        "群窗內的車後點（24.5 ≥ 25−0.7）照樣夾死候選 ⇒ 沒縫")
+    local sF = { 24.0, 25 }
+    local mF, aF, _, _, _, oF = planMinS(sF, lE, 2, 25)
+    checkEq(mF, "dodge", "同一顆點退到群窗外（24.0 < 24.3）就不再參與 ⇒ 有縫")
+    checkNear(aF, 17, EPS, "群仍只有 25 那顆（a ＝ 25 − 8）")
+    checkNear(oF, -1.5, EPS, "側偏由 25 那顆決定")
+end
+
+-- =====================================================================
+-- 情境十五：規劃裁切與接觸判定分權 — minS 不是「刪點」
+-- =====================================================================
+scenario("minS 只裁規劃群：同一份點雲的車後側點仍由 currentFootprintHit 命中")
+do
+    -- 車身中心 (100,200)、heading 0（+X）、halfW 0.9、halfL 2.4 ⇒ 車尾在 minS = 20。
+    -- 點 1 貼在車尾外側 0.1m（u=−2.5、v=1.0：|v| ≥ halfW＝車側後半，不吃車尾帶內豁免），
+    -- 弧長 17.5 < minS ⇒ 規劃裁掉；點 2 是前方 40m 的擋線障礙。
+    local bodyX, bodyY, halfW, halfL = 100, 200, 0.9, 2.4
+    local sArr, lArr = { 17.5, 40 }, { 1.0, 1.5 }
+    local xArr, yArr, rArr = { 97.5, 140 }, { 201.0, 201.5 }, { 0.7, 0.7 }
+    -- 規劃端：沒有下界時，貼車尾那顆點自己當群錨，側移進入段落在車後
+    local mNil, aNil, _, _, _, oNil = planMinS(sArr, lArr, 2, nil)
+    checkEq(mNil, "dodge", "無 minS：貼車尾那顆點自己生出一段側移")
+    checkNear(aNil, 9.5, EPS, "無 minS 的進入段從 9.5 起（車尾在 20）")
+    checkTrue(aNil < 20, "無 minS 的剖面起點在車尾之後＝執行不出來")
+    checkNear(oNil, -1.25, EPS, "無 minS 時側偏被那顆車後點牽著走")
+    local mMin, aMin, _, _, dMin, oMin = planMinS(sArr, lArr, 2, 20)
+    checkEq(mMin, "dodge", "有 minS：規劃只看前方那顆")
+    checkNear(aMin, 32, EPS, "剖面改由 40m 的障礙定義（a ＝ 32）")
+    checkNear(dMin, 48, EPS, "d ＝ 48")
+    checkNear(oMin, -1.5, EPS, "側偏由前方障礙決定")
+    -- 接觸端：同一份陣列、同一個 hardN。規劃裁切不得變成「假淨空」——minS 不刪點，
+    -- Sensor 也不刪點，車尾那顆實體點照命中，否則貼著障礙也能宣稱過得去
+    local blocked, actual, planned, hitI, hitS, hitL, hitX, hitY, poseOnly =
+        C.currentFootprintHit(sArr, lArr, xArr, yArr, rArr, 2,
+            bodyX, bodyY, 0, halfW, halfL, oMin)
+    checkTrue(blocked, "同點雲：貼車尾外側 0.1m 的實體點仍是 contact")
+    checkEq(hitI, 1, "命中的正是規劃裁掉的那一顆")
+    checkNear(actual, math.sqrt(0.02) - 0.85, EPS,
+        "rectangle-vs-disk 淨空（du=dv=0.1、r+pad=0.85）")
+    checkNear(hitS, 17.5, EPS, "回傳命中點 hardS（< minS）")
+    checkNear(hitL, 1.0, EPS, "回傳命中點 hardL")
+    checkNear(hitX, 97.5, EPS, "world 權威 hardX")
+    checkNear(hitY, 201.0, EPS, "world 權威 hardY")
+    checkNear(planned, 0.75, EPS, "同一顆點對繞行 lane −1.5 尚有 0.75 淨空")
+    checkTrue(poseOnly, "規劃線淨空、當前姿態命中 ⇒ poseOnly（歸因是姿態不是路線）")
 end
 
 -- =====================================================================

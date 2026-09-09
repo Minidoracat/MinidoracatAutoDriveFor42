@@ -20,6 +20,7 @@
 
 require "MDAD"
 require "MDAD_Driver"
+require "MDAD_Dynamics"
 require "MDAD_Voice"
 require "ISUI/ISPanel"
 require "ISUI/ISButton"
@@ -78,6 +79,15 @@ local UTURN_KEYS = {
     "UI_MinidoracatAutoDrive_UTurnGentle",
     "UI_MinidoracatAutoDrive_UTurnFast",
 }
+local PERCEPTION_DISTANCES = MDADDynamics.PERCEPTION_DISTANCES
+local PERCEPTION_DEFAULT = MDADDynamics.PERCEPTION_DEFAULT_INDEX
+local PERCEPTION_KEYS = {
+    "UI_MinidoracatAutoDrive_Perception48",
+    "UI_MinidoracatAutoDrive_Perception80",
+    "UI_MinidoracatAutoDrive_Perception120",
+    "UI_MinidoracatAutoDrive_Perception160",
+    "UI_MinidoracatAutoDrive_Perception200",
+}
 local COLLAPSED_MD_KEY = "MDADHudCollapsed"
 -- 側掛主題的兩片側翼各自收合，各自存一格（只留左翼常駐是合法組合）。
 local WING_L_MD_KEY = "MDADHudWingL"
@@ -91,7 +101,7 @@ local GEAR_TOOLTIPS = {
     "UI_MinidoracatAutoDrive_GearChill",
     "UI_MinidoracatAutoDrive_GearStandard",
     "UI_MinidoracatAutoDrive_GearSport",
-    "UI_MinidoracatAutoDrive_GearInsane",
+    "UI_MinidoracatAutoDrive_GearInsane_tooltip",
 }
 
 local STATUS_KEYS = {
@@ -212,6 +222,19 @@ local function clampPercent(v, multiplier)
     return math.floor(v + 0.5)
 end
 
+-- 計時只在 refresh 格式化；超過欄寬上限明示 100h+，不捏造截短後的時間。
+local function clockText(seconds)
+    if type(seconds) ~= "number" or seconds * 0 ~= 0 or seconds < 0 then return nil end
+    seconds = math.floor(seconds)
+    if seconds > 359999 then return "100h+" end
+    local hours = math.floor(seconds / 3600)
+    if hours > 0 then
+        return string.format("%d:%02d:%02d", hours,
+            math.floor(seconds / 60) % 60, seconds % 60)
+    end
+    return string.format("%02d:%02d", math.floor(seconds / 60), seconds % 60)
+end
+
 local function optionIndex(id, default, maximum)
     if not modOptions then return default end
     local option = modOptions:getOption(id)
@@ -298,6 +321,37 @@ end
 
 local function setAutoDetour(value)
     return setClientOption("AutoDetour", value == true)
+end
+
+-- 閃避殭屍（2026-09-06 殭屍軟縫）：預設開；Driver 每輪掃描完成讀 HUD.zombieDodge。
+local function zombieDodge()
+    return optionBool("ZombieDodge", true)
+end
+
+local function setZombieDodge(value)
+    return setClientOption("ZombieDodge", value == true)
+end
+
+local function perceptionIndex()
+    local index = optionIndex("PerceptionDistance", PERCEPTION_DEFAULT, #PERCEPTION_DISTANCES)
+    return MDADDynamics.finite(index) and index or PERCEPTION_DEFAULT
+end
+
+local function perceptionDistance()
+    return PERCEPTION_DISTANCES[perceptionIndex()]
+end
+
+local function setPerceptionIndex(value)
+    if not MDADDynamics.finite(value) or value ~= math.floor(value)
+            or value < 1 or value > #PERCEPTION_DISTANCES then return false end
+    return setClientOption("PerceptionDistance", value)
+end
+
+local function setPerceptionDistance(value)
+    for i = 1, #PERCEPTION_DISTANCES do
+        if PERCEPTION_DISTANCES[i] == value then return setPerceptionIndex(i) end
+    end
+    return false
 end
 
 -- 手動介入後（2026-09-06）：index 1＝不自動恢復（預設），2..＝放手後 N 秒恢復。
@@ -668,13 +722,18 @@ function MDADHUDPanel:new(playerNum)
     o._capText = "--"
     o._energyText = ""
     o._statusText = ""
+    o._clockText = "--:--"
     o._unitText = ""
     o._capLabel = ""
+    o._timeLabel = ""
     o._gearLabel = ""
     o._unitX = 0
     o._capLabelY = 0
     o._capValueX = 0
     o._capValueY = 0
+    o._timeLabelY = 0
+    o._timeValueX = 0
+    o._timeValueY = 0
     o._headerH = 0
     o._blockX = nil
     o._dividerY = nil
@@ -780,7 +839,7 @@ local function measure(self, scale)
     m.ctrlH = maximum(m.fontH + 6, scaled(22, scale))
     local statusW = 0
     for i = 1, #STATUS_WIDTH_KEYS do
-        statusW = maximum(statusW, textWidth(UIFont.Small, getText(STATUS_WIDTH_KEYS[i])))
+        statusW = maximum(statusW, textWidth(UIFont.Small, getText(STATUS_WIDTH_KEYS[i], 10)))
     end
     m.statusTextW = statusW
     m.blockedW = textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDStatusBlocked"))
@@ -801,6 +860,11 @@ local function measure(self, scale)
         maximum(textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDCorpse") .. " " .. forcedText),
             textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDAuto") .. " " .. forcedText))) + 14)
     m.energyW = textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDEnergy", 100, 100))
+    -- 行車時間欄（0908d）：欄名固定、數值另存一格，兩者分開量測。數值一律以
+    -- "00:00:00" 保留最寬字串：跨過一小時、位數變動或 100h+ 都不推動任何幾何，
+    -- 秒數每 250ms 變一次也只是重畫同一格。
+    m.clockW = textWidth(UIFont.Small, "00:00:00")
+    m.timeLabelW = textWidth(UIFont.Small, self._timeLabel)
     -- 控制鈕寬：三顆同寬、取最長標題（樣式／隱藏／展開／語音 開／語音 關）
     local voiceLabel = getText("UI_MinidoracatAutoDrive_HUDVoice")
     m.ctrlW = maximum(scaled(44, scale), maximum(
@@ -833,9 +897,11 @@ function MDADHUDPanel:layoutWings(scale)
     local detourW, speedValueW = m.detourW, m.speedValueW
     local speedW = speedValueW + 3 + m.unitW
     local capLabelW = m.capLabelW
-    local capW = capLabelW + gap + m.capValueW
+    -- 巡航上限／行車時間兩欄同款（欄名上、數值下）：欄寬取兩者較寬者。
+    local capW = maximum(capLabelW, m.capValueW)
     local actionW, gearW, gearLabelW, policyW, energyW = m.actionW, m.gearW, m.gearLabelW, m.policyW, m.energyW
     local ctrlW, valueW, sliderW, controlsOn, policyN = m.ctrlW, m.valueW, m.sliderW, m.controlsOn, m.policyN
+    local timeW, clockW = maximum(m.timeLabelW, m.clockW), m.clockW
 
     local dashW, dashH, dashX = self:dashboardGeometry()
     local wingH = maximum(scaled(56, scale), dashH - DASH_VISIBLE_TOP_INSET)
@@ -843,12 +909,12 @@ function MDADHUDPanel:layoutWings(scale)
 
     -- 展開／收合各自的寬度；空間不夠時先摺右翼再摺左翼（版面層強制，不動玩家的 modData）
     local leftOpenW = pad * 2 + maximum(16 + statusW + gap + speedW,
-        capW + gap * 2 + ctrlW + gap + actionW)
+        capW + gap + timeW + gap + ctrlW + gap + actionW)
     local rightOpenW = pad * 2 + maximum(
         gearLabelW + gearW * 4 + gap * 3,
         maximum(policyW * policyN + gap * policyN + energyW,
             (controlsOn and (ctrlW * 3 + gap * 3 + sliderW) or ctrlW)))
-    local leftFoldW = pad * 2 + 16 + speedValueW + gap + ctrlW
+    local leftFoldW = pad * 2 + 16 + speedValueW + gap + clockW + gap + ctrlW
     local rightFoldW = pad * 2 + textWidth(UIFont.Small, "MAX") + gap + ctrlW
     local foldL, foldR = self._wingL == true, self._wingR == true
     local function totalW()
@@ -882,13 +948,16 @@ function MDADHUDPanel:layoutWings(scale)
     self._detourAllowed = not foldL
     self.detourButton:setVisible(self._detourAllowed and self._blocked == true)
 
-    -- 左翼：上列狀態＋現速，下列巡航＋主鈕（收合＝狀態燈＋現速＋chevron）
+    -- 左翼：上列狀態＋現速，下列巡航上限／行車時間兩欄＋主鈕（摺起＝狀態燈＋現速＋裸時間＋chevron）
     if foldL then
         self._dotX, self._dotY = pad, math.floor((wingH - 8) / 2)
         self._speedX = pad + 16
         self._speedY = math.floor((wingH - mediumH) / 2)
         self._statusX, self._textY = pad + 16, math.floor((wingH - fontH) / 2)
         self._capX, self._capValueX = nil, nil
+        -- 摺起的左翼＝徽章：省掉欄名只留裸時間（同收合徽章）。
+        self._timeX = nil
+        self._timeValueX, self._timeValueY = pad + 16 + speedValueW + gap, self._textY
         setButtonRect(self.wingButton, leftW - pad - ctrlW,
             math.floor((wingH - ctrlH) / 2), ctrlW, ctrlH)
     else
@@ -902,9 +971,11 @@ function MDADHUDPanel:layoutWings(scale)
         self._speedX = leftW - pad - speedW
         self._speedY = topY + math.floor((rowH - mediumH) / 2)
         self._capX = pad
-        self._capLabelY = bottomY + math.floor((rowH - fontH) / 2)
-        self._capValueX = pad + capLabelW + gap
-        self._capValueY = self._capLabelY
+        self._capLabelY = bottomY + math.floor((rowH - fontH * 2) / 2)
+        self._capValueX, self._capValueY = pad, self._capLabelY + fontH
+        self._timeX = pad + capW + gap
+        self._timeLabelY = self._capLabelY
+        self._timeValueX, self._timeValueY = self._timeX, self._capValueY
         self._detourY = topY + math.floor((rowH - ctrlH) / 2)
         setButtonRect(self.actionButton, leftW - pad - actionW, bottomY, actionW, rowH)
         -- 左翼 chevron：下列巡航值與主鈕之間（改道鈕在上列狀態字後，兩者不撞）
@@ -993,8 +1064,9 @@ function MDADHUDPanel:applyLayout()
     local scale = optionScale()
     self._unitText = getText("UI_MinidoracatAutoDrive_HUDSpeedUnit")
     self._capLabel = getText("UI_MinidoracatAutoDrive_HUDCruiseCap")
+    self._timeLabel = getText("UI_MinidoracatAutoDrive_HUDDriveTime")
     self._gearLabel = getText("UI_MinidoracatAutoDrive_HUDGear")
-    -- 側掛的量測與擺位自成一套（無精簡單行／收合徽章分支），共用上面三個標籤字串。
+    -- 側掛的量測與擺位自成一套（無精簡單行／收合徽章分支），共用上面四個標籤字串。
     if self._style == STYLE_WINGS then return self:layoutWings(scale) end
     local m = measure(self, scale)
     local fontH, mediumH, pad, gap, buttonH = m.fontH, m.mediumH, m.pad, m.gap, m.ctrlH
@@ -1005,12 +1077,20 @@ function MDADHUDPanel:applyLayout()
         16 + m.blockedW + gap + detourW + gap + pad)
     local speedValueW = m.speedValueW
     local speedW = maximum(scaled(62, scale), speedValueW + 3 + m.unitW + gap)
-    local capLabelW = m.capLabelW
-    local capW = maximum(scaled(48, scale), capLabelW + gap + m.capValueW + gap)
+    local capLabelW, timeLabelW = m.capLabelW, m.timeLabelW
+    -- 巡航上限／行車時間兩欄同款，兩種欄寬都含右側間距：
+    --   完整展開＝欄名上／數值下，欄寬取兩者較寬者；精簡單行＝欄名與數值同列相加。
+    local capW = maximum(scaled(48, scale), maximum(capLabelW, m.capValueW) + gap)
+    local capRowW = maximum(scaled(48, scale), capLabelW + gap + m.capValueW + gap)
     local actionW, gearW, gearLabelW, policyW = m.actionW, m.gearW, m.gearLabelW, m.policyW
     local energyW = m.energyW + gap
     local cycleW = maximum(scaled(44, scale), textWidth(UIFont.Small, "MAX") + 14)
     local ctrlW, valueW, sliderW, controlsOn, policyN = m.ctrlW, m.valueW, m.sliderW, m.controlsOn, m.policyN
+    -- 極窄分割畫面連狀態文字都省掉時，精簡單行的行車時間欄一併歸零，
+    -- 保留巡航上限與必要操作控制。
+    local timeW = maximum(timeLabelW, m.clockW) + gap
+    local timeRowW = timeLabelW + gap + m.clockW + gap
+    local clockW = m.clockW
     local trioW = controlsOn and (ctrlW * 3 + gap * 2) or (ctrlW + gap)
     local maxW = m.maxW
     if maxW < 64 then maxW = 64 end
@@ -1028,7 +1108,7 @@ function MDADHUDPanel:applyLayout()
     end
     local bottomContentW = pad * 2 + gearLabelW + gearW * 4 + gap * (4 + policyN)
         + policyW * policyN + energyW
-    local topContentW = pad * 2 + statusW + speedW + capW + gap + actionW
+    local topContentW = pad * 2 + statusW + speedW + capW + timeW + gap + actionW
     if style == STYLE_GLASS then
         topContentW = topContentW + trioW + gap
         bottomContentW = bottomContentW + sliderW + gap
@@ -1036,14 +1116,15 @@ function MDADHUDPanel:applyLayout()
         topContentW = topContentW + blockW + gap * 2
         bottomContentW = bottomContentW + blockW + gap * 2
     else
-        -- 家族：標題條＝狀態＋現速＋控制三顆＋拉桿；本體第 1 列只有巡航＋主鈕
-        topContentW = pad * 2 + statusW + speedW + gap + trioW + gap + sliderW
+        -- 家族：標題條＝狀態＋現速＋控制三顆＋拉桿；本體第 1 列＝巡航＋行車時間＋主鈕
+        topContentW = maximum(pad * 2 + statusW + speedW + gap + trioW + gap + sliderW,
+            pad * 2 + capW + timeW + gap + actionW)
     end
     local fullContentW = maximum(topContentW, bottomContentW)
     local fullW = maximum(fullBase, fullContentW)
-    local compactPolicyContentW = pad * 2 + statusW + speedW + capW + cycleW
+    local compactPolicyContentW = pad * 2 + statusW + speedW + capRowW + timeRowW + cycleW
         + (policyW + gap) * policyN + trioW + actionW + gap * 2
-    local compactEssentialContentW = pad * 2 + statusW + speedW + capW + cycleW
+    local compactEssentialContentW = pad * 2 + statusW + speedW + capRowW + timeRowW + cycleW
         + trioW + actionW + gap * 2
 
     local effectiveLayout = self._layout
@@ -1058,10 +1139,11 @@ function MDADHUDPanel:applyLayout()
         compactW = maximum(compactBase, compactEssentialContentW)
     end
     if effectiveLayout == LAYOUT_COMPACT and compactW > maxW then
-        -- 極窄分割畫面：保留狀態燈，省掉狀態文字；其餘控制仍可操作。
+        -- 極窄分割畫面：保留狀態燈，省掉狀態文字與行車時間；其餘控制仍可操作。
         showStatusText = false
         statusW = scaled(24, scale)
-        compactEssentialContentW = pad * 2 + statusW + speedW + capW + cycleW
+        timeRowW = 0
+        compactEssentialContentW = pad * 2 + statusW + speedW + capRowW + cycleW
             + trioW + actionW + gap * 2
         compactW = maximum(compactBase, compactEssentialContentW)
     end
@@ -1076,7 +1158,8 @@ function MDADHUDPanel:applyLayout()
     local panelH
     local ctrlH = buttonH
     if self._collapsed then
-        panelW = maximum(scaled(68, scale), pad + 16 + speedValueW + gap + ctrlW + pad)
+        panelW = maximum(scaled(68, scale),
+            pad + 16 + speedValueW + gap + clockW + gap + ctrlW + pad)
         if panelW > maxW then panelW = maxW end
         panelH = maximum(scaled(34, scale), maximum(fontH, ctrlH) + pad * 2)
         self:setControlsVisible(false, false, false, false, false)
@@ -1084,6 +1167,9 @@ function MDADHUDPanel:applyLayout()
         self._dotY = math.floor((panelH - 8) / 2)
         self._speedX = pad + 16
         self._speedY = math.floor((panelH - mediumH) / 2)
+        self._timeX = nil
+        self._timeValueX = pad + 16 + speedValueW + gap
+        self._timeValueY = math.floor((panelH - fontH) / 2)
         setButtonRect(self.collapseButton, panelW - pad - ctrlW,
             math.floor((panelH - ctrlH) / 2), ctrlW, ctrlH)
     elseif effectiveLayout == LAYOUT_COMPACT then
@@ -1091,7 +1177,7 @@ function MDADHUDPanel:applyLayout()
         panelH = maximum(scaled(44, scale), buttonH + pad * 2)
         self:setControlsVisible(false, true, showPolicies, true, false)
         local y = math.floor((panelH - buttonH) / 2)
-        local x = pad + statusW + speedW + capW
+        local x = pad + statusW + speedW + capRowW + timeRowW
         setButtonRect(self.cycleButton, x, y, cycleW, buttonH)
         x = x + cycleW + gap
         if showPolicies then
@@ -1116,6 +1202,14 @@ function MDADHUDPanel:applyLayout()
         self._capLabelY = self._textY
         self._capValueX = self._capX + capLabelW + gap
         self._capValueY = self._textY
+        -- 精簡單行：兩欄都是同列基線的「欄名＋數值」；極窄退化整欄消失，不留殘座標。
+        if showStatusText then
+            self._timeX, self._timeLabelY = self._capX + capRowW, self._textY
+            self._timeValueX = self._timeX + timeLabelW + gap
+            self._timeValueY = self._textY
+        else
+            self._timeX, self._timeValueX = nil, nil
+        end
         self._detourY = math.floor((panelH - ctrlH) / 2)
     else
         panelW = fullW
@@ -1140,7 +1234,7 @@ function MDADHUDPanel:applyLayout()
             setButtonRect(self.voiceButton, blockX, bottomY, ctrlW, ctrlH)
             setButtonRect(self.volumeSlider, col2, bottomY, cell, ctrlH)
         elseif style == STYLE_GLASS then
-            local trioX = pad + statusW + speedW + capW + gap
+            local trioX = pad + statusW + speedW + capW + timeW + gap
             self:placeControlTrio(trioX, topY + math.floor((topH - ctrlH) / 2),
                 ctrlW, ctrlH, gap, controlsOn)
             setButtonRect(self.volumeSlider, panelW - pad - sliderW, bottomY, sliderW, ctrlH)
@@ -1170,9 +1264,6 @@ function MDADHUDPanel:applyLayout()
             self._speedX = pad + statusW
             self._speedY = math.floor((headerH - mediumH) / 2)
             self._capX = pad
-            self._capLabelY = topY + math.floor((topH - fontH) / 2)
-            self._capValueX = pad + capLabelW + gap
-            self._capValueY = self._capLabelY
             self._detourY = math.floor((headerH - ctrlH) / 2)
         else
             self._dotX = pad
@@ -1182,13 +1273,15 @@ function MDADHUDPanel:applyLayout()
             self._speedX = pad + statusW
             self._speedY = topY + math.floor((topH - mediumH) / 2)
             self._capX = pad + statusW + speedW
-            self._capLabelY = topY
-            self._capValueX = self._capX
-            self._capValueY = topY + fontH
             self._detourY = topY + math.floor((topH - ctrlH) / 2)
         end
         self._labelX = pad
         self._bottomTextY = bottomY + math.floor((buttonH - fontH) / 2)
+        -- 巡航上限／行車時間：四主題同款，欄名在上、數值在下貼齊欄左緣，兩欄並排。
+        -- topH 的地板本來就是 fontH*2+2（見上），兩行不會把面板撐高、也不壓到按鈕列。
+        self._capLabelY, self._capValueX, self._capValueY = topY, self._capX, topY + fontH
+        self._timeX = self._capX + capW
+        self._timeLabelY, self._timeValueX, self._timeValueY = topY, self._timeX, topY + fontH
         local energyRight = rightEdge
         if style == STYLE_GLASS then energyRight = panelW - pad - sliderW - gap end
         self._energyX = energyRight - energyW
@@ -1328,7 +1421,8 @@ function MDADHUDPanel:refresh(now)
     self:setHudVisible(true)
     self:reposition()
 
-    local token, gear, cap, zombieOn, corpseOn, resumeIn = Drive.hudState(self.playerNum)
+    local token, gear, cap, zombieOn, corpseOn, resumeIn, elapsed =
+        Drive.hudState(self.playerNum)
     local reason = nil
     self._active = token ~= nil
     -- 政策三態（藥丸鎖不鎖）與 session 無關，兩種狀態都要讀。啟用中「此刻要不要
@@ -1366,6 +1460,9 @@ function MDADHUDPanel:refresh(now)
     local battery = clampPercent(vehicle:getBatteryCharge(), 100)
     local fuel = clampPercent(vehicle:getRemainingFuelPercentage(), 1)
     self._energyText = getText("UI_MinidoracatAutoDrive_HUDEnergy", battery, fuel)
+    -- 只格式化數值；欄名是版面層的固定標籤，停用後照樣是「行車時間」、值停在最後一趟。
+    -- 無紀錄與無效值共用缺值顯示。
+    self._clockText = clockText(elapsed) or "--:--"
     self._blocked = token == "blocked"
     self:placeDetourButton()
     self._voiceOn = voiceEnabled()
@@ -1384,10 +1481,12 @@ function MDADHUDPanel:updateButtons()
             i == self._gear and selectedText or C.text, true)
     end
     self.cycleButton:setTitle(GEAR_SHORT[self._gear] or "--")
+    self.cycleButton.tooltip = self.gearButtons[self._gear].tooltip
     styleButton(self.cycleButton, selectedBg, selectedText, true)
 
     local nearM, aheadM, bandM, zombieCap1, zombieCap4, zombieCap8, corpseCap =
         Drive.slowdownInfo(self.playerNum)
+    aheadM = string.format("%d", math.floor(aheadM))
     local playerChoiceZombie = self._zombiePolicy == MDAD.POLICY_PLAYER
     local playerChoiceCorpse = self._corpsePolicy == MDAD.POLICY_PLAYER
     local zombieTip = getText(self._zombieOn
@@ -1512,12 +1611,15 @@ function MDADHUDPanel:drawMetalFrame(x, y, w, h)
         C.shadow.a, C.shadow.r, C.shadow.g, C.shadow.b)
 end
 
--- 側掛的文字：左翼（狀態燈／狀態字／現速／巡航）與右翼（檔位標籤／電油）各自
--- 依自己的收合狀態畫；摺起來的那一片只剩徽章字。
+-- 側掛的文字：左翼（狀態燈／狀態字／現速／巡航上限／行車時間）與右翼（檔位標籤／電油）
+-- 各自依自己的收合狀態畫；摺起來的那一片只剩徽章字。
 function MDADHUDPanel:renderWings()
     dot(self, self._dotX, self._dotY, 8, self._statusColor)
     self:drawText(self._speedText, self._speedX, self._speedY,
         C.text.r, C.text.g, C.text.b, C.text.a, UIFont.Medium)
+    -- 行車時間：數值兩態都畫（摺起的左翼徽章就是裸時間），欄名只在展開態。
+    self:drawText(self._clockText, self._timeValueX, self._timeValueY,
+        C.muted.r, C.muted.g, C.muted.b, C.muted.a, UIFont.Small)
     if not self._wingLFolded then
         self:drawText(self._statusText, self._statusX, self._textY,
             C.text.r, C.text.g, C.text.b, C.text.a, UIFont.Small)
@@ -1527,6 +1629,8 @@ function MDADHUDPanel:renderWings()
             C.muted.r, C.muted.g, C.muted.b, C.muted.a, UIFont.Small)
         self:drawText(self._capText, self._capValueX, self._capValueY,
             C.amber.r, C.amber.g, C.amber.b, C.amber.a, UIFont.Small)
+        self:drawText(self._timeLabel, self._timeX, self._timeLabelY,
+            C.muted.r, C.muted.g, C.muted.b, C.muted.a, UIFont.Small)
         if self._wingLDividerY then
             self:drawRect(4, self._wingLDividerY, (self._wingLeftW or 8) - 8, 1,
                 C.faint.a, C.faint.r, C.faint.g, C.faint.b)
@@ -1566,11 +1670,18 @@ function MDADHUDPanel:prerender()
     if self._collapsed then
         self:drawText(self._speedText, self._speedX, self._speedY,
             C.text.r, C.text.g, C.text.b, C.text.a, UIFont.Medium)
+        self:drawText(self._clockText, self._timeValueX, self._timeValueY,
+            C.muted.r, C.muted.g, C.muted.b, C.muted.a, UIFont.Small)
         return
     end
+    -- 行車時間與狀態文字同進退：極窄分割畫面兩者都省，只留狀態燈與控制。
     if self._showStatusText then
         self:drawText(self._statusText, self._statusX, self._textY,
             C.text.r, C.text.g, C.text.b, C.text.a, UIFont.Small)
+        self:drawText(self._timeLabel, self._timeX, self._timeLabelY,
+            C.muted.r, C.muted.g, C.muted.b, C.muted.a, UIFont.Small)
+        self:drawText(self._clockText, self._timeValueX, self._timeValueY,
+            C.muted.r, C.muted.g, C.muted.b, C.muted.a, UIFont.Small)
     end
     self:drawText(self._speedText, self._speedX, self._speedY,
         C.text.r, C.text.g, C.text.b, C.text.a, UIFont.Medium)
@@ -1755,6 +1866,13 @@ if PZAPI and PZAPI.ModOptions then
     end
     modOptions:addTickBox("AutoDetour", "UI_MinidoracatAutoDrive_AutoDetour", false,
         "UI_MinidoracatAutoDrive_AutoDetour_tooltip")
+    modOptions:addTickBox("ZombieDodge", "UI_MinidoracatAutoDrive_ZombieDodge", true,
+        "UI_MinidoracatAutoDrive_ZombieDodge_tooltip")
+    local perceptionOption = modOptions:addComboBox("PerceptionDistance",
+        "UI_MinidoracatAutoDrive_PerceptionDistance", "UI_MinidoracatAutoDrive_PerceptionDistance_tooltip")
+    for i = 1, #PERCEPTION_KEYS do
+        perceptionOption:addItem(PERCEPTION_KEYS[i], i == PERCEPTION_DEFAULT)
+    end
     local manualResumeOption = modOptions:addComboBox("ManualResume",
         "UI_MinidoracatAutoDrive_ManualResume", "UI_MinidoracatAutoDrive_ManualResume_tooltip")
     for i = 1, #MANUAL_RESUME_KEYS do
@@ -1844,6 +1962,10 @@ HUD.voiceLanguageIndex = voiceLanguageIndex
 HUD.setVoiceLanguageIndex = setVoiceLanguageIndex
 HUD.autoDetour = autoDetour
 HUD.setAutoDetour = setAutoDetour
+HUD.zombieDodge = zombieDodge
+HUD.setZombieDodge = setZombieDodge
+HUD.perceptionDistance = perceptionDistance
+HUD.setPerceptionDistance = setPerceptionDistance
 HUD.manualResumeMs = manualResumeMs
 HUD.manualResumeIndex = manualResumeIndex
 HUD.setManualResumeIndex = setManualResumeIndex
@@ -1873,6 +1995,9 @@ local function registerMiniMapSettings()
             { label = "UI_MinidoracatAutoDrive_AutoDetour",
                 tooltip = "UI_MinidoracatAutoDrive_AutoDetour_tooltip",
                 get = autoDetour, set = setAutoDetour },
+            { label = "UI_MinidoracatAutoDrive_ZombieDodge",
+                tooltip = "UI_MinidoracatAutoDrive_ZombieDodge_tooltip",
+                get = zombieDodge, set = setZombieDodge },
             { label = "UI_MinidoracatAutoDrive_ExportTelemetry",
                 tooltip = "UI_MinidoracatAutoDrive_ExportTelemetry_tooltip",
                 get = telemetryEnabled, set = setTelemetryEnabled },
@@ -1916,6 +2041,11 @@ local function registerMiniMapSettings()
                 items = UTURN_KEYS,
                 default = 1,
                 get = uturnIndex, set = setUTurnIndex },
+            { label = "UI_MinidoracatAutoDrive_PerceptionDistance",
+                tooltip = "UI_MinidoracatAutoDrive_PerceptionDistance_tooltip",
+                items = PERCEPTION_KEYS,
+                default = PERCEPTION_DEFAULT,
+                get = perceptionIndex, set = setPerceptionIndex },
         },
     }
     if api.settingsApiVersion >= 2 then

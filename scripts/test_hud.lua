@@ -63,9 +63,10 @@ local texts = {
     UI_MinidoracatAutoDrive_HUDStatusNoNav = "NO NAV",
     UI_MinidoracatAutoDrive_HUDStatusNotReady = "NOT READY",
     UI_MinidoracatAutoDrive_HUDSpeedUnit = "km/h",
-    UI_MinidoracatAutoDrive_HUDCruiseCap = "CRUISE",
+    UI_MinidoracatAutoDrive_HUDCruiseCap = "CRUISE LIMIT",
     UI_MinidoracatAutoDrive_HUDGear = "MODE",
     UI_MinidoracatAutoDrive_HUDEnergy = "BAT %1%% FUEL %2%%",
+    UI_MinidoracatAutoDrive_HUDDriveTime = "DRIVE TIME",
     UI_MinidoracatAutoDrive_HUDZombie = "Z",
     UI_MinidoracatAutoDrive_HUDCorpse = "C",
     UI_MinidoracatAutoDrive_HUDOn = "ON",
@@ -395,8 +396,13 @@ function MDAD.policy3(name) return policies[name] or MDAD.POLICY_PLAYER end
 function MDAD.isAutoInstalled(v) return v._module == true end
 MDAD.Drive = {}
 function MDAD.Drive.hudState()
-    if not state.active then return nil end
-    return state.token, state.gear, state.cap, state.zombie, state.corpse, state.resumeIn
+    -- 0908c 契約：第 7 值＝本趟／末趟現實秒數（nil＝尚無紀錄）。停用態前 6 值維持
+    -- nil（inactive），第 7 值仍回報凍結的末趟秒數。
+    if not state.active then
+        return nil, nil, nil, nil, nil, nil, state.elapsed
+    end
+    return state.token, state.gear, state.cap, state.zombie, state.corpse,
+        state.resumeIn, state.elapsed
 end
 function MDAD.Drive.hudStartReason() return state.startReason end
 function MDAD.Drive.slowdownInfo() return 2, 48, 3, 25, 15, 10, 20 end
@@ -451,6 +457,7 @@ local function loadHUD()
     dofile(source)
     require = realRequire
 end
+dofile("MOD/MinidoracatAutoDriveFor42/Contents/mods/MinidoracatAutoDriveFor42/42/media/lua/shared/MDAD_Dynamics.lua")
 loadHUD()
 
 check(type(MDAD.HUD) == "table", "HUD facade published")
@@ -476,6 +483,24 @@ checkEq(panel.zombieButton.tooltip,
 checkEq(panel.corpseButton.tooltip,
     "C DETECT 2-48 BAND 3\nC CAP 20\nC NON-OBSTACLE\nTOGGLE",
     "corpse tooltip states range, one-body cap, non-obstacle behavior, and player scope")
+do
+    local originalInfo = MDAD.Drive.slowdownInfo
+    local ahead = 63.999999999
+    MDAD.Drive.slowdownInfo = function() return 2, ahead, 3, 25, 15, 10, 20 end
+    panel:refresh(nowMs)
+    checkEq(panel.zombieButton.tooltip:match("DETECT (%S+)"), "2-63",
+        "zombie range uses whole metres without overstating completed coverage")
+    checkEq(panel.corpseButton.tooltip:match("DETECT (%S+)"), "2-63",
+        "corpse range does not expose fractional scan arithmetic")
+    ahead = 64.25
+    panel:refresh(nowMs)
+    checkEq(panel.zombieButton.tooltip:match("DETECT (%S+)"), "2-64",
+        "zombie range still follows updated effective sensing distance")
+    checkEq(panel.corpseButton.tooltip:match("DETECT (%S+)"), "2-64",
+        "corpse range refreshes at the same metre boundary")
+    MDAD.Drive.slowdownInfo = originalInfo
+    panel:refresh(nowMs)
+end
 check(panel.isCollapsed == nil, "does not use engine-reserved isCollapsed field")
 -- 2026-09-02 使用者裁定：四個控制（樣式／隱藏／語音／音量）都在 HUD 本體，
 -- 不再掛原版儀表板；金屬主題＝右側 2×2 方塊（樣式／隱藏 ↑，語音／音量 ↓）＋直分隔線。
@@ -587,6 +612,24 @@ check(panel.actionButton.x + panel.actionButton.width <= panel._wingLeftW
 checkAutoPill("wings")
 check(panel.autoButton.x >= panel._wingRightX and panel.autoButton.visible,
     "wings theme: auto-reroute pill lives on the right wing")
+-- 行車時間（0908d）：左翼展開時與巡航同款——欄名一列、數值一列，兩欄並排。
+do
+    state.elapsed = 45296
+    panel:refresh(nowMs)
+    local capRight = math.max(
+        panel._capX + textManager:MeasureStringX(UIFont.Small, panel._capLabel),
+        panel._capValueX + textManager:MeasureStringX(UIFont.Small, panel._capText))
+    local timeRight = math.max(
+        panel._timeX + textManager:MeasureStringX(UIFont.Small, panel._timeLabel),
+        panel._timeValueX + textManager:MeasureStringX(UIFont.Small, panel._clockText))
+    check(panel._timeLabelY == panel._capLabelY and panel._timeValueY == panel._capValueY
+        and panel._capValueY == panel._capLabelY + textManager:getFontHeight(UIFont.Small)
+        and panel._capValueX == panel._capX and panel._timeValueX == panel._timeX
+        and panel._timeX >= capRight and timeRight + 4 <= panel.wingButton.x,
+        "wings theme: both columns stack the name over the value on the same two rows, clear of the chevron")
+    state.elapsed = nil
+    panel:refresh(nowMs)
+end
 local openLeftW, openRightW = panel._wingLeftW, panel._wingRightW
 click(panel.collapseButton)
 check(panel._wingR == true and panel._wingL == false
@@ -601,6 +644,13 @@ check(panel._wingL == true and player._md.MDADHudWingL == true
     and panel._wingLeftW < openLeftW and not panel.actionButton.visible
     and panel.wingButton.visible and panel.collapseButton.visible,
     "both wings folded leaves two badges with their own expand chevrons")
+do
+    local clockW = textManager:MeasureStringX(UIFont.Small, "00:00:00")
+    check(panel._timeX == nil
+        and panel._timeValueX >= panel._speedX + textManager:MeasureStringX(UIFont.Medium, "120")
+        and panel._timeValueX + clockW + 4 <= panel.wingButton.x,
+        "wings theme: the folded left badge drops the column name and keeps the bare clock")
+end
 click(panel.wingButton)
 click(panel.collapseButton)
 check(panel._wingL == false and panel._wingR == false
@@ -651,9 +701,11 @@ nowMs = nowMs + 100
 panel:update()
 check(panel.visible, "dashboard UIManager restore immediately recovers HUD")
 
-check(panel._capLabelY < panel._capValueY
-    and panel._capValueY + 14 <= panel._dividerY,
-    "full layout stacks cruise label/value inside top row")
+check(panel._capLabelY < panel._capValueY and panel._capValueX == panel._capX
+    and panel._timeLabelY == panel._capLabelY and panel._timeValueY == panel._capValueY
+    and panel._timeValueX == panel._timeX and panel._timeX > panel._capX
+    and panel._capValueY + textManager:getFontHeight(UIFont.Small) <= panel._dividerY,
+    "full layout stacks name over value for both cruise and drive time inside the top row")
 local speedReads = getters.speed
 nowMs = nowMs + 100
 panel:update()
@@ -768,13 +820,23 @@ checkEq(panel._capText, "30", "inactive HUD recomputes cap via Drive.effectiveCa
 
 click(panel.collapseButton)
 checkEq(player._md.MDADHudCollapsed, true, "collapsed state persists in player modData")
-check(panel.width < 200 and panel.actionButton.visible == false
+check(panel.actionButton.visible == false
     and not panel.themeButton.visible and not panel.voiceButton.visible
     and not panel.volumeSlider.visible,
     "collapsed mode is badge only: style/voice/volume hidden")
 check(panel.collapseButton.visible and panel.collapseButton.title == "SHOW"
     and panel.collapseButton.x + panel.collapseButton.width <= panel.width,
     "collapsed badge keeps the expand control on itself")
+-- 收合徽章：狀態燈＋現速＋純數字時間＋展開鈕；欄名省掉，時間欄仍以 "00:00:00"
+-- 保留寬度，所以跨過一小時也不會推到 chevron 上。
+do
+    local clockW = textManager:MeasureStringX(UIFont.Small, "00:00:00")
+    check(panel._timeX == nil
+        and panel._timeValueX >= panel._speedX + textManager:MeasureStringX(UIFont.Medium, "120")
+        and panel._timeValueX + clockW + 4 <= panel.collapseButton.x
+        and panel._clockText == "--:--",
+        "collapsed badge drops the column name and keeps the bare clock before the expand chevron")
+end
 click(panel.collapseButton)
 checkEq(player._md.MDADHudCollapsed, false, "expand persists")
 checkEq(panel.collapseButton.title, "HIDE", "expanded control shows the hide label")
@@ -868,6 +930,80 @@ checkEq(panel._statusText, "FOLLOW", "countdown value is ignored outside yield")
 state.active, state.startReason = false, "UI_MinidoracatAutoDrive_EngineOff"
 panel:refresh(nowMs)
 
+-- 行車時間（0908d，hudState 第 7 值）：格式進位、停用凍結、缺值退路，欄名固定不隨狀態改字，
+-- 以及「每 250ms 換一次字串不得動到版面」這條硬契約。
+do
+    state.active, state.startReason, state.token = true, nil, "follow"
+    local driveTimeLabel = panel._timeLabel
+    state.elapsed = nil
+    panel:refresh(nowMs)
+    checkEq(panel._clockText, "--:--", "no drive on record shows the placeholder instead of a zero clock")
+    state.elapsed = 0
+    panel:refresh(nowMs)
+    checkEq(panel._clockText, "00:00", "a fresh start reads zero, not the previous drive")
+    state.elapsed = 605
+    panel:refresh(nowMs)
+    checkEq(panel._clockText, "10:05", "under an hour stays MM:SS with padded seconds")
+    state.elapsed = 3599
+    panel:refresh(nowMs)
+    checkEq(panel._clockText, "59:59", "the last second under an hour is still MM:SS")
+    local underHourWidth, underHourValueX = panel.width, panel._timeValueX
+    state.elapsed = 3600
+    panel:refresh(nowMs)
+    checkEq(panel._clockText, "1:00:00", "crossing one hour switches to H:MM:SS")
+    state.elapsed = 45296
+    panel:refresh(nowMs)
+    checkEq(panel._clockText, "12:34:56", "hours are unpadded, minutes and seconds padded")
+    check(panel.width == underHourWidth and panel._timeValueX == underHourValueX,
+        "the clock never relayouts: MM:SS and H:MM:SS share one reserved column")
+    -- 位置：接在巡航欄之後、與巡航欄同兩列，且整欄停在主鈕與金屬控制方塊之前
+    local capRight = math.max(
+        panel._capX + textManager:MeasureStringX(UIFont.Small, panel._capLabel),
+        panel._capValueX + textManager:MeasureStringX(UIFont.Small, panel._capText))
+    local timeRight = math.max(
+        panel._timeX + textManager:MeasureStringX(UIFont.Small, panel._timeLabel),
+        panel._timeValueX + textManager:MeasureStringX(UIFont.Small, panel._clockText))
+    check(panel._timeX >= capRight and panel._timeLabelY == panel._capLabelY
+        and panel._timeValueY == panel._capValueY
+        and timeRight <= panel.actionButton.x and timeRight <= panel._blockX,
+        "full metal: the drive-time column mirrors the cruise column and clears the action button")
+    state.active, state.startReason = false, "UI_MinidoracatAutoDrive_EngineOff"
+    panel:refresh(nowMs)
+    check(panel._statusText == "ENGINE OFF" and panel._clockText == "12:34:56"
+        and panel._timeLabel == driveTimeLabel,
+        "stopping freezes the last drive time under the very same column name")
+    state.elapsed = 0
+    panel:refresh(nowMs)
+    checkEq(panel._clockText, "00:00", "a completed zero-second drive is still a record")
+    state.elapsed = 359999
+    panel:refresh(nowMs)
+    checkEq(panel._clockText, "99:59:59", "the last second before the ceiling is still a real duration")
+    state.elapsed = 360000
+    panel:refresh(nowMs)
+    checkEq(panel._clockText, "100h+", "long drives use an explicit overflow marker, not a false duration")
+    state.elapsed = math.huge
+    panel:refresh(nowMs)
+    checkEq(panel._clockText, "--:--", "non-finite elapsed time is refused, not rendered")
+    state.elapsed = nil
+    panel:refresh(nowMs)
+    checkEq(panel._clockText, "--:--", "an inactive HUD with nothing on record shows the placeholder")
+    state.elapsed = -1
+    panel:refresh(nowMs)
+    checkEq(panel._clockText, "--:--", "a negative elapsed value is refused, not rendered")
+    state.active, state.startReason, state.token = true, nil, "follow"
+    state.elapsed = 900
+    panel:refresh(nowMs)
+    checkEq(panel._clockText, "15:00", "restoring the full contract resumes the live clock")
+    -- prerender 只畫快取：數值在 refresh 算好、欄名在 layout 算好，畫面路徑不得再 getText／量測
+    local textsBefore, measuresBefore = getTextCalls, measureCalls
+    panel:prerender()
+    check(getTextCalls == textsBefore and measureCalls == measuresBefore,
+        "prerender draws the cached column name and clock without translating or measuring")
+    state.active, state.startReason = false, "UI_MinidoracatAutoDrive_EngineOff"
+    state.elapsed = nil
+    panel:refresh(nowMs)
+end
+
 -- 記下切換前的完整版可見性，讓下面那條斷言驗的是「換過去」而不只是「換過來」。
 local fullLayoutShowedGears = panel.gearButtons[1].visible and not panel.cycleButton.visible
 
@@ -879,9 +1015,7 @@ check(options:getOption("ShowTrajectory"):getValue() == true
 check(type(registeredMiniMapSection) == "table"
     and registeredMiniMapOwner == "MinidoracatAutoDriveFor42"
     and registeredMiniMapSection.lane == nil
-    and registeredMiniMapSection.actions == nil
-    and #registeredMiniMapSection.ticks == 4
-    and #registeredMiniMapSection.combos == 5,
+    and registeredMiniMapSection.actions == nil,
     "v1 MiniMap spec registers ticks/combos without actions or host layout fields")
 check(registeredMiniMapSection.ticks[2].label == "UI_MinidoracatAutoDrive_VoiceEnabled"
     and registeredMiniMapSection.ticks[2].get() == true,
@@ -920,7 +1054,17 @@ check(not MDAD.HUD.setTelemetryRetentionDays(2)
     and MDAD.HUD.telemetryRetentionDays() == 14
     and optionSaveCalls == invalidRetentionSaves,
     "invalid retention days rejected without saving")
+-- 閃避殭屍 tick（0906c；預設開）坐在改道與診斷之間
+check(registeredMiniMapSection.ticks[4].label == "UI_MinidoracatAutoDrive_ZombieDodge"
+    and registeredMiniMapSection.ticks[4].get() == true
+    and MDAD.HUD.zombieDodge() == true,
+    "zombie-dodge tick defaults on and sits between auto-detour and telemetry")
 registeredMiniMapSection.ticks[4].set(false)
+check(MDAD.HUD.zombieDodge() == false
+    and options:getOption("ZombieDodge"):getValue() == false,
+    "MiniMap zombie-dodge tick writes the shared ZombieDodge option")
+registeredMiniMapSection.ticks[4].set(true)
+registeredMiniMapSection.ticks[5].set(false)
 check(not MDAD.HUD.telemetryEnabled()
     and options:getOption("ExportTelemetry"):getValue() == false,
     "MiniMap telemetry tick writes the same AutoDrive ModOptions value")
@@ -991,6 +1135,21 @@ check(not MDAD.HUD.setUTurnIndex(3) and not MDAD.HUD.setUTurnIndex(0)
 options:getOption("UTurnMode"):setValue(9)
 checkEq(MDAD.HUD.uturnMode(), "gentle", "corrupt U-turn option reads back as gentle")
 uturnCombo.set(1)
+do
+    local perception = registeredMiniMapSection.combos[6]
+    checkEq(MDAD.HUD.perceptionDistance(), 120, "new sensing default is 120 metres")
+    perception.set(1)
+    checkEq(MDAD.HUD.perceptionDistance(), 48, "MiniMap can select the lower sensing distance")
+    check(MDAD.HUD.setPerceptionDistance(200) and perception.get() == 5,
+        "distance setter and MiniMap use the same persisted option")
+    local saves = optionSaveCalls
+    check(not MDAD.HUD.setPerceptionDistance(121) and not perception.set(0)
+        and not perception.set(0 / 0) and optionSaveCalls == saves
+        and MDAD.HUD.perceptionDistance() == 200, "invalid distances/indices do not overwrite preferences")
+    options:getOption("PerceptionDistance"):setValue(0 / 0)
+    checkEq(MDAD.HUD.perceptionDistance(), 120, "corrupt sensing setting returns the documented default")
+    perception.set(3)
+end
 options:getOption("VoiceLanguage"):setValue(9)
 checkEq(MDAD.HUD.voiceLanguage(), "auto", "corrupt voice language option reads back as follow")
 voiceLangCombo.set(1)
@@ -1038,11 +1197,8 @@ MDADDiagnostics = {
 MinidoracatMiniMapAPI.settingsApiVersion = 2
 fire(Events.OnGameBoot)
 checkEq(miniMapRegisterCalls, 2, "API v2 upgrade re-registers settings once")
-check(registeredMiniMapSection.actions ~= nil
-    and #registeredMiniMapSection.actions == 3
-    and #registeredMiniMapSection.ticks == 4
-    and #registeredMiniMapSection.combos == 5,
-    "v2 MiniMap spec keeps ticks/combos and adds three actions")
+check(registeredMiniMapSection.actions ~= nil,
+    "v2 MiniMap spec exposes actions")
 local latestAction = registeredMiniMapSection.actions[1]
 local folderAction = registeredMiniMapSection.actions[2]
 local reportAction = registeredMiniMapSection.actions[3]
@@ -1096,6 +1252,21 @@ local capRight = panel._capValueX
     + textManager:MeasureStringX(UIFont.Small, panel._capText)
 check(capRight + 3 <= panel.cycleButton.x,
     "compact cruise value ends before cycle button")
+-- 精簡單行：行車時間也是同列基線的「欄名＋數值」，整欄插在巡航值與檔位鈕之間
+do
+    state.elapsed = 45296
+    panel:refresh(nowMs)
+    local timeRight = panel._timeValueX
+        + textManager:MeasureStringX(UIFont.Small, panel._clockText)
+    check(panel._timeX >= capRight
+        and panel._timeLabelY == panel._capLabelY and panel._timeValueY == panel._capValueY
+        and panel._timeValueX > panel._timeX
+            + textManager:MeasureStringX(UIFont.Small, panel._timeLabel)
+        and timeRight + 3 <= panel.cycleButton.x,
+        "compact layout keeps the drive-time name and clock inline on the cruise baseline")
+    state.elapsed = nil
+    panel:refresh(nowMs)
+end
 click(panel.collapseButton)
 check(panel.collapseButton.title == "SHOW"
     and panel.y + panel.height == dashboards[0].y + 7,
@@ -1175,6 +1346,9 @@ for slot = 0, 1 do
             + textManager:MeasureStringX(UIFont.Small, candidate._statusText)
         check(statusRight <= candidate._speedX,
             "split slot " .. slot .. " long status ends before speed column")
+    else
+        check(candidate._timeX == nil and candidate._timeValueX == nil,
+            "split slot " .. slot .. " ultra-narrow degradation drops the whole drive-time column")
     end
     check(candidate.collapseButton.parent == candidate
         and candidate.collapseButton.x + candidate.collapseButton.width <= candidate.width

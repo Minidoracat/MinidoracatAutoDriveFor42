@@ -979,15 +979,17 @@ do
     check(ad <= P.ACCEL_CEIL and bd <= P.BRAKE_CEIL and ld <= P.LAT_CEIL,
         "dry paved never exceeds runtime ceilings")
     checkNear(bd, P.BRAKE_CEIL, 1e-12, "dry paved good tires saturate brake ceiling (8→6)")
-    checkNear(ld, P.LAT_CEIL, 1e-12, "dry paved good tires saturate lateral ceiling (9→3.5)")
+    checkNear(ld, P.LAT_CEIL, 1e-12, "dry paved good tires saturate lateral ceiling (9→7)")
     checkNear(fsd, 1, 1e-12, "dry paved surface factor")
     checkNear(fsw, 0.7, 1e-12, "wet paved surface factor")
     checkNear(fsu, 0.7, 1e-12, "unknown surface uses offroad factor")
     check(bw < bd, "rain tightens brake prior below the ceiling")
     check(bu < bd, "unknown surface tightens brake prior below the ceiling")
-    checkNear(lw, P.LAT_CEIL, 1e-12, "wet paved lateral 6.3 still saturates the ceiling")
-    checkNear(lu, P.LAT_CEIL, 1e-12, "unknown surface lateral 6.3 still saturates the ceiling")
-    -- 低抓地（缺胎 fTire=0.35＋雨）才真的低於天花板：9×0.7×0.35＝2.2 < 3.5
+    -- LAT_CEIL 7（0907c）：雨天／未知路面 9×0.7＝6.3 從此真的低於晴天（舊天花板把兩者夾成同值）
+    checkNear(lw, 6.3, 1e-9, "wet paved lateral 9×0.7=6.3 now sits below the ceiling")
+    checkNear(lu, 6.3, 1e-9, "unknown surface lateral 6.3 now sits below the ceiling")
+    check(lw < ld, "wet lateral is strictly below dry lateral")
+    -- 低抓地（缺胎 fTire=0.35＋雨）：9×0.7×0.35＝2.2
     do
         local was = p.isAnyTireMissing
         p.isAnyTireMissing = true
@@ -999,7 +1001,22 @@ do
     end
     check(ao < ad, "physical offroad tightens drive prior only")
     checkNear(ftd, 1, 1e-12, "known complete tires retain factor one")
-    checkNear(coast, 0.6, 1e-12, "coast prior stays fixed at 0.6")
+    -- 0907e：coast prior＝質量制動預算（NoControl 對 Bullet 下 brakingForce 15＝常數力／質量；
+    -- RaceCar58 1041 kg 實測 3.65，COAST_BRAKE_N 取 ×0.8）夾 [0.6, CEIL 3.0]、乘路面係數
+    checkNear(coast, P.COAST_BRAKE_N / p.mass, 1e-9, "coast prior＝COAST_BRAKE_N／質量（晴天鋪面）")
+    checkNear(P.COAST_CEIL, 3.0, 1e-12, "COAST_CEIL＝3.0（brisk STYLES.coast 同值）")
+    do
+        local _, _, _, _, _, cw = P.priors(p, p.mass, MDADFollower.SURFACE_PAVED, true, false, true)
+        checkNear(cw, P.COAST_BRAKE_N / p.mass * 0.7, 1e-9, "雨天 coast prior 乘路面係數 0.7")
+        local _, _, _, _, _, ch = P.priors(p, 4000, MDADFollower.SURFACE_PAVED, false, false, true)
+        checkNear(ch, P.COAST_BRAKE_N / 4000, 1e-9, "4000 kg：0.76 仍在地板 0.6 之上")
+        local _, _, _, _, _, cl = P.priors(p, 800, MDADFollower.SURFACE_PAVED, false, false, true)
+        checkNear(cl, P.COAST_CEIL, 1e-9, "800 kg：3.8 被 CEIL 3.0 夾住")
+        local _, _, _, _, _, clw = P.priors(p, 800, MDADFollower.SURFACE_PAVED, true, false, true)
+        checkNear(clw, P.COAST_CEIL * 0.7, 1e-9, "800 kg 雨天：先夾 CEIL 再乘 0.7＝2.1（不是 3.8×0.7 再夾）")
+        local _, _, _, _, _, cf = P.priors(p, 4000, MDADFollower.SURFACE_GRAVEL, true, false, true)
+        checkNear(cf, 0.6, 1e-9, "4000 kg 雨天碎石：0.3 抬到地板 0.6")
+    end
     p.rollInfluence, p.centerOfMassY = 0, 3
     local ar, br, lr = P.priors(p, p.mass, MDADFollower.SURFACE_PAVED, false, false, true)
     checkNear(ar, ad, 1e-12, "rollInfluence/COMY do not enter drive prior")
@@ -1081,6 +1098,34 @@ do
     check(sqrtCalls <= 8, "sqrt count bounded by four surfaces, not 400 segments")
     checkEq(follower.segAccel[1], follower.segAccel[5],
         "same surface reuses identical cached prior")
+end
+
+scenario("configureFollower：行車風格天花板只壓不抬（0906c）")
+do
+    local p = P.build(makeVehicle(PICKUP))
+    local function follower(style)
+        local f = { n = 5, segSurface = {}, segAccel = {}, segBrake = {}, segCoast = {}, segLat = {} }
+        for i = 1, 4 do f.segSurface[i] = MDADFollower.SURFACE_PAVED end
+        if style then f.styleLat, f.styleBrake, f.styleCoast = style.lat, style.brake, style.coast end
+        return f
+    end
+    local fb = follower(nil)
+    checkTrue(P.configureFollower(fb, p, p.mass, false), "無風格欄位：照舊")
+    local aLatPrior, aBrakePrior, aCoastPrior = fb.segLat[1], fb.segBrake[1], fb.segCoast[1]
+    checkNear(aLatPrior, P.LAT_CEIL, 1e-9, "晴天好胎 priors 的 aLat＝LAT_CEIL 7")
+    local fc = follower({ lat = 2.5, brake = 3.0, coast = 0.45 })
+    checkTrue(P.configureFollower(fc, p, p.mass, false), "comfort follower 仍 adaptive")
+    checkNear(fc.segLat[1], 2.5, 1e-9, "comfort：aLat 被風格夾到 2.5")
+    checkNear(fc.segBrake[1], 3.0, 1e-9, "comfort：aBrake 被風格夾到 3.0")
+    checkNear(fc.segCoast[1], 0.45, 1e-9, "comfort：coast 被風格夾到 0.45")
+    local fw = follower({ lat = 9.0, brake = 8.0, coast = 3.0 })
+    checkTrue(P.configureFollower(fw, p, p.mass, false), "brisk follower 仍 adaptive")
+    checkNear(fw.segLat[1], aLatPrior, 1e-9, "brisk 風格（9.0）不抬 priors：仍是 3.5")
+    checkNear(fw.segBrake[1], aBrakePrior, 1e-9, "brisk 風格（8.0）不抬 priors 的 aBrake")
+    checkNear(fw.segCoast[1], aCoastPrior, 1e-9, "brisk 風格 coast 3.0＝priors 值（質量預算 " .. aCoastPrior .. "）")
+    local fx = follower({ lat = 9.0, brake = 8.0, coast = 2.0 })
+    checkTrue(P.configureFollower(fx, p, p.mass, false), "coast 2.0 風格仍 adaptive")
+    checkNear(fx.segCoast[1], 2.0, 1e-9, "風格 coast 2.0 低於 priors 質量預算時夾到 2.0（風格只能壓低）")
 end
 
 scenario("clearanceBudget：餘裕預算單一 authority（階段 2 主體 4）")

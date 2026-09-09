@@ -371,8 +371,10 @@ do
     checkTrue(pCorner.v[4] * KMH < MAXV * 0.5, "直角彎確實遠慢於 maxSpeed")
     checkTrue(pCorner.v[3] > pCorner.v[4], "彎前一點比彎頂快（反向制動生效）")
     checkNear(pCorner.v[3],
-        math.sqrt(pCorner.v[4] * pCorner.v[4] + 2 * 0.6 * 8), 1e-9,
-        "彎前使用 coast envelope，不動用 active brake")
+        math.sqrt(pCorner.v[4] * pCorner.v[4] + 2 * F.STYLES.brisk.coast * 8), 1e-9,
+        "彎前使用 coast envelope（brisk coast " .. F.STYLES.brisk.coast .. "），不動用 active brake")
+    checkNear(F.STYLES.brisk.coast, 3.0, 1e-12,
+        "brisk coast 天花板 3.0（0907e：真值由 VehicleProfile 質量制動預算取 min）")
     -- 彎後不再有前向加速包絡（2026-09-01 拆除 forward pass）：v[5] 直接由
     -- 「距終點 16m 的制動包絡」決定，出彎即可全力——加速能力交還引擎。
     checkNear(pCorner.v[5], math.sqrt(2 * 8 * 16), 1e-9,
@@ -418,18 +420,28 @@ do
     -- kappa=Δθ/ds 被長段稀釋，曲率公式對急彎算出高速「限速」——2026-08-28 實機
     -- 61.5 km/h 過路口直接甩出路面。角度本身另設上限，點距再大也稀釋不掉。
     local pWide90 = buildRoute({ 0, 0, 30, 0, 60, 0, 60, 30, 60, 60 }, MAXV)
-    -- LAT 9.0＋TURN_HARD 55° 下：曲率裁決 sqrt(9·30/(π/2))≈13.8 m/s≈49.7 km/h，
-    -- 低於角度上限 50 → 曲率值勝出（激進化後角度上限只防更大點距的稀釋）
-    checkNear(pWide90.v[3] * KMH, 49.7424, 1e-3,
-        "大點距 90° 折點：LAT 9 曲率裁決 ≈49.7（角度上限 50 為後盾）")
-    -- 25° 折點：新 SOFT 門檻恰為 25°——t=(25-25)/25=0，不壓（street 常見小折
-    -- 全速通過；2026-09-01 街機化 SOFT 20→25、HARD 40→50）
+    -- 0907f 折點幾何限速（F350 fallback 頂點 50 km/h 撞路口牆定罪）：無圓角頂點由 pure pursuit
+    -- 以前視弦切過，R(v)=(6+0.432v)/(2 sin(θ/2))，v²=aLat·R(v) 正根；rMin（v3 路線預設 3.0）圓為下限。
+    -- 舊契約「曲率裁決 49.7／角度上限 50」是圓角之前的角度式常數，90° 折點 50 km/h 沒有車做得到。
+    local function vertexGeomMs(aLat, deg, rMin)
+        local inv2s = 1 / (2 * math.sin(math.rad(deg) * 0.5))
+        local b = aLat * 0.12 * 3.6 * inv2s
+        local c = aLat * 6 * inv2s
+        local v = (b + math.sqrt(b * b + 4 * c)) * 0.5
+        local rm = math.sqrt(aLat * (rMin or 3.0))
+        return v > rm and v or rm
+    end
+    checkNear(pWide90.v[3], vertexGeomMs(9.0, 90), 1e-9,
+        "大點距 90° 折點：LAT 9 前視弦幾何 ≈27.7 km/h（角度上限 50／曲率稀釋值都不再作數）")
+    checkTrue(pWide90.v[3] * KMH < 30, "90° 折點不再放行 49.7")
+    -- 25° 折點：SOFT 門檻恰為 25°——角度式不壓；幾何式 R(v)=30.5m 在 LAT 9 下 59.5 ≈ 全速（60）
     local a25 = 25 * math.pi / 180
     local x3, y3 = 60 + 30 * math.cos(a25), 30 * math.sin(a25)
     local x4, y4 = x3 + 30 * math.cos(a25), y3 + 30 * math.sin(a25)
     local p25 = buildRoute({ 0, 0, 30, 0, 60, 0, x3, y3, x4, y4 }, MAXV)
-    checkNear(p25.v[3], MAXV / KMH, 1e-9,
-        "25° 折點＝新 SOFT 門檻：不壓速全速過")
+    checkNear(p25.v[3], vertexGeomMs(9.0, 25), 1e-9,
+        "25° 折點＝幾何式 59.5（比全速 60 只低 0.5，SOFT 角度門檻不壓）")
+    checkTrue(p25.v[3] * KMH > 59, "25° 折點接近全速")
     -- 小折角（< 20°）不受角度 hard cap；仍使用三點 circumcircle 曲率。
     -- 路線尾巴多留 32m，避免終點反向制動鏈蓋過曲率值。
     local a10 = 10 * math.pi / 180
@@ -500,6 +512,7 @@ do
 
     -- 投影窗口：每幀最多往前 12 段，瞬移不會一次跳到底（自我交叉路線的保護）
     local stJump = F.newState()
+    F.control(pLine, stJump, 0, 0, 0, 0, DT) -- 首次全線定位後，熱幀仍受局部窗口限制。
     local _, _, remJump = F.control(pLine, stJump, 180, 0, 0, 0, DT)
     checkEq(stJump.idx, 13, "投影窗口只往前 12 段（idx 1 → 13）")
     checkNear(remJump, 70, 1e-9, "剩餘距離跟著窗口上限（下一幀再往前收斂）")
@@ -1323,7 +1336,7 @@ do
     checkNear(ry[tailN], 1, 1e-9, "RETURN tail stays on target lane")
     local longProfile = buildRoute(straight(60, 5), MAXV)
     local tooLong, _, tooLongReason =
-        F.buildReturnLine(longProfile, 0, 200, 50, 0, rx, ry)
+        F.buildReturnLine(longProfile, 0, F.OV_MAX + 1, 50, 0, rx, ry)
     checkEq(tooLong, 0,
         "RETURN required samples beyond fixed capacity fail unsafe instead of truncating")
     checkEq(tooLongReason, "capacity", "capacity overflow has deterministic reason")
@@ -1363,6 +1376,115 @@ end
 -- =====================================================================
 -- Phase F：v4 adaptive C1 fillet、road-band、metadata 與 proof line
 -- =====================================================================
+scenario("0907f：adaptive fallback 頂點（≤90°）前視目標同髮夾鉗到切點才放行")
+do
+    -- session-020 t=13-16：F350 倒車復位後 12-16 km/h 仍在折點前 6-8m 朝另一臂切內撞住。
+    -- 4m 路 90° 折點、rMin 4.32：切點距 rMin·tan(45°)＝4.32m；折點前 8m 目標＝頂點（誤差 0），
+    -- 折點前 3m 放行到另一臂（誤差 >30°）。RaceCar 同路口圓角成功＝弧段，不走這條。
+    local vp = { valid = true, geometryValid = true, halfW = 0.9, halfL = 2.9, rMin = 4.32,
+        wheelbase = 3.79, delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 100 }
+    local route = { pts = { 0, 0, 60, 0, 60, 60, 60, 120 }, segSurface = { "paved", "paved", "paved" },
+        segWidth = { 4, 4, 4 } }
+    local p = F.begin(route, 70, 4, vp)
+    while not F.stepBuild(p, 4096) do end
+    checkEq(p.filletFallbackN, 1, "F350 4m 路 90°：fallback 頂點")
+    local function segAt(sq)
+        local qi = 1
+        while qi < p.n - 1 and p.s[qi + 1] < sq do qi = qi + 1 end
+        return qi
+    end
+    -- 40 km/h 前視 10.8m：折點前 8m 的目標本來會落到另一臂（無鉗制＝誤差 >0）
+    local st = F.newState()
+    st.idx = segAt(52)
+    local _, _, _, _, e8 = F.control(p, st, 52, 0, 0, 40, DT)
+    checkNear(e8, 0, 1e-9, "折點前 8m（前視 10.8m 越過折點）：目標鉗在頂點、誤差 0")
+    st = F.newState()
+    st.idx = segAt(57)
+    local _, _, _, _, e3 = F.control(p, st, 57, 0, 0, 12, DT)
+    checkTrue(math.abs(e3) > math.rad(30), string.format("折點前 3m（< 切點距 4.32）：放行到另一臂，誤差 %.0f°", math.deg(math.abs(e3))))
+    -- 放行那幀＝誤差定義切換（Codex lane 2026-09-07 真 Follower 重現：lookScale 1.5、12 km/h 跨 4.32m
+    -- 切點，err 0→58° 一幀、dFilt 0→18、steer 0→5 飽和三幀）：同一份 state 連續走過切點，D 項要清。
+    p.lookScale = 1.5
+    st = F.newState()
+    local x, dtF = 60 - 4.6, 1 / 60
+    local steerRel, dFiltRel, seenHeld = nil, nil, false
+    for _ = 1, 8 do
+        local steer = F.control(p, st, x, 0, 0, 12, dtF)
+        if st.kinkHeld then seenHeld = true
+        elseif seenHeld and steerRel == nil then steerRel, dFiltRel = steer, st.dFilt end
+        x = x + 12 / 3.6 * dtF
+    end
+    checkTrue(seenHeld and steerRel ~= nil, "持續 state 從鉗制走到放行")
+    checkTrue(steerRel ~= nil and math.abs(steerRel) < 3,
+        string.format("放行那幀只剩 P 項（steer %.2f，舊制 D-kick 飽和 5）", steerRel or 0))
+    checkNear(dFiltRel or 99, 0, 1e-9, "放行那幀 dFilt 已清")
+    p.lookScale = 1
+    -- 相鄰兩個 fallback 角 A(60,0)→B(60,6)：A 放行那幀直接鉗 B（Codex lane 靜態推導：boolean 記法
+    -- held true→true 不清 D、steer 飽和 5）——記頂點弧長才分得出切換
+    local r2 = { pts = { 0, 0, 60, 0, 60, 6, 120, 6 }, segSurface = { "paved", "paved", "paved" },
+        segWidth = { 4, 4, 4 } }
+    local p2 = F.begin(r2, 70, 4, vp)
+    while not F.stepBuild(p2, 4096) do end
+    checkEq(p2.filletFallbackN, 2, "兩個 fallback 角")
+    p2.lookScale = 1.5
+    local st2 = F.newState()
+    local x2, steerAB, dAB = 55.65, nil, nil
+    for _ = 1, 3 do
+        local steer, _, _, _, errAB = F.control(p2, st2, x2, 0, 0, 12, 1 / 60)
+        if math.abs(errAB) > math.rad(40) and steerAB == nil then steerAB, dAB = steer, st2.dFilt end
+        x2 = x2 + 12 / 3.6 / 60
+    end
+    checkTrue(steerAB ~= nil and math.abs(steerAB) < 3,
+        string.format("A 放行同幀鉗到 B：仍清 D（steer %.2f）", steerAB or 0))
+    checkNear(dAB or 99, 0, 1e-9, "A→B 切換幀 dFilt 已清")
+end
+
+scenario("0907f：adaptive fallback 頂點（rMin 塞不進 band）速度＝sqrt(aLat·rMin)，不再吃角度帽 50")
+do
+    -- 2026-09-07 F350（halfW 0.9、rMin 4.32）在 4m 路 90° 折點：圓角塞不進 band → fallback 頂點
+    -- 舊制只吃 TURN_HARD_MS 50 → 50.8 km/h 直衝路口牆（session-020 t=7）。RaceCar 同路口圓角成功走弧段。
+    local f350 = { valid = true, geometryValid = true, halfW = 0.9, halfL = 2.9, rMin = 4.32,
+        wheelbase = 3.79, delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 100 }
+    local race = { valid = true, geometryValid = true, halfW = 0.66, halfL = 1.62, rMin = 2.26,
+        wheelbase = 1.98, delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 120 }
+    local function build(vp, w)
+        local route = { pts = { 0, 0, 60, 0, 60, 60, 60, 120 }, segSurface = { "paved", "paved", "paved" },
+            segWidth = { w, w, w } }
+        local p = F.begin(route, 70, 4, vp)
+        while not F.stepBuild(p, 4096) do end
+        local minV, minI = 99, 0
+        for i = 1, p.n - 1 do if p.curveV[i] < minV then minV, minI = p.curveV[i], i end end
+        return p, minV, minI
+    end
+    local pf, vf, vi = build(f350, 4)
+    checkEq(pf.filletFallbackN, 1, "F350 4m 路 90°：圓角塞不進 band → fallback 頂點")
+    checkEq(pf.segKind[vi], MDADDynamics.SEG_FALLBACK, "最低速在 fallback 頂點段")
+    checkNear(vf, math.sqrt(9.0 * 4.32), 1e-9, "fallback 頂點速度＝sqrt(LAT 9 × rMin 4.32)＝22.4 km/h（舊制 50）")
+    local pr, vr = build(race, 4)
+    checkEq(pr.filletN, 1, "RaceCar 同路口圓角成功")
+    checkTrue(vr > math.sqrt(9.0 * 2.26), "圓角成功時走弧段 κ（高於 sqrt(aLat·rMin)）")
+    local pw, vw = build(f350, 8)
+    checkEq(pw.filletN, 1, "8m 路：F350 圓角成功")
+    checkTrue(vw * KMH > 30, "8m 路弧段 R≈8.9 → 32 km/h，不受 fallback 規則影響")
+    -- capacity 退路（source > FILLET_SOURCE_MAX）整條標 FALLBACK 但幾何無事：30° 折點走 pure pursuit 式
+    -- （≈全速附近），不得吃 sqrt(aLat·rMin)；鉗制也不套
+    local many = {}
+    for i = 0, MDADDynamics.FILLET_SOURCE_MAX + 2 do many[#many + 1] = i * 4; many[#many + 1] = 0 end
+    local a30 = math.rad(30)
+    local lx, ly = many[#many - 1], many[#many]
+    many[#many + 1] = lx + 40 * math.cos(a30); many[#many + 1] = 40 * math.sin(a30)
+    many[#many + 1] = lx + 80 * math.cos(a30); many[#many + 1] = 80 * math.sin(a30)
+    local cnt = #many / 2
+    local rc = { pts = many, segSurface = {}, segWidth = {} }
+    for i = 1, cnt - 1 do rc.segSurface[i], rc.segWidth[i] = "paved", 8 end
+    local pc = F.begin(rc, 70, 4, f350)
+    while not F.stepBuild(pc, 4096) do end
+    checkEq(pc.filletReason, "capacity", "capacity 退路 fixture")
+    local vk = 99
+    for i = 1, pc.n - 1 do if pc.curveV[i] < vk then vk = pc.curveV[i] end end
+    checkTrue(vk > math.sqrt(9.0 * 4.32) + 1, string.format("capacity 退路的 30° 折點不吃 sqrt(aLat·rMin)（實得 %.1f km/h）", vk * KMH))
+end
+
 scenario("adaptive v4 fillet is C1/band-safe with aligned metadata and explicit fallback")
 do
     local vp = {
@@ -1425,6 +1547,57 @@ do
     local highArcCap = arcState.curveCapKmh
     checkTrue(arcState.curveHardActive and arcState.curveKappa > 0,
         "current SEG_ARC arms the hard curvature envelope")
+    -- 0906i：行駛線往彎內側偏 lt 時硬曲率帽＝κ/(1−lt·κ)（半徑 R−lt），外側不放寬。
+    -- 用繞行承諾線驗（保持段沿路平移 offL）：commit／守護的繞行 κ 從此只量兩段過渡，
+    -- 弧內側的保持段就靠這一道（review lane 抓到的反例）。違規證明：拿掉修正即紅。
+    do
+        local mx = (p.x[firstArc] + p.x[firstArc + 1]) * 0.5
+        local my = (p.y[firstArc] + p.y[firstArc + 1]) * 0.5
+        local hA = p.segH[firstArc]
+        local sArc = (p.s[firstArc] + p.s[firstArc + 1]) * 0.5
+        local a, b, c, d = sArc - 25, sArc - 18, sArc + 18, sArc + 25
+        local function kappaOnLine(offL, latSafe)
+            local ox, oy = {}, {}
+            local n, s0, reason, s1 = F.buildOffsetLine(p, a - 2, a, b, c, d, offL, 0, ox, oy)
+            checkEq(reason, "ok", "偏移 " .. offL .. " 的承諾線可建")
+            local st = F.newState()
+            st.idx = firstArc
+            F.setRuntimeLimits(st, 3, 6, latSafe or 3.5, 0.6)
+            checkTrue(F.setOffset(st, a, b, c, d, offL, ox, oy, n, s0, s1), "承諾線 setOffset")
+            local _, _, _, _, _, _, _, ll = F.control(p, st,
+                mx - math.sin(hA) * offL, my + math.cos(hA) * offL, hA, 10, DT)
+            checkTrue(st.curveHardActive, "偏移 " .. offL .. "：車在弧段（硬帽啟用）")
+            checkNear(ll, offL, 0.02, "偏移 " .. offL .. "：承諾線在投影點的橫向≈offL（實得 " .. tostring(ll) .. "）")
+            return st.curveKappa, st.idx, ll, st.curveCapKmh
+        end
+        local kIn, iIn, llIn, capIn = kappaOnLine(1.5)   -- 東→南＝右轉（y 向南的世界 dθ>0），內側＝+lane
+        local kOut, iOut = kappaOnLine(-1.5)
+        local kC = math.max(p.kappa[iOut] or 0, p.kappa[iOut + 1] or 0)
+        checkEq(iIn, iOut, "內外側投影到同一弧段")
+        checkNear(kOut, kC, 1e-12, "外側偏移：硬曲率帽維持中心線 κ（不放寬）")
+        checkNear(kIn, kC / (1 - llIn * kC), 1e-12,
+            "內側偏移 1.5：κ/(1−lt·κ)、lt＝承諾線實際橫向（R " .. string.format("%.2f", 1 / kC)
+            .. " → " .. string.format("%.2f", 1 / kIn) .. "）")
+        checkTrue(kIn > kOut, "內側帽比外側嚴")
+        -- 轉向可行性（curveSpeedCapKmh 的另一半，review lane）：硬帽＝min(橫向加速度帽, 轉向帽)，
+        -- 轉向帽以修正後 κ 算、地板 12。這台車 δV 0.25 對 κ 0.083 不綁（帽＝橫向）；把剖面的轉向
+        -- 參數改成 F350 級（δ0 .25／δV .05）＋橫向 30 讓轉向綁住，帽必須跟著轉向帽走。
+        local D = MDADDynamics
+        checkNear(capIn, 3.6 * math.sqrt(3.5 / kIn), 1e-9, "內側帽＝橫向加速度帽（轉向未綁）")
+        local d0, dv = p.delta0Safe, p.deltaVSafe
+        p.delta0Safe, p.deltaVSafe = 0.25, 0.05
+        local steerCap = D.steeringSpeedCapKmh(kIn, p.wheelbase, 0.25, 0.05, p.vehicleMaxSpeed)
+        checkTrue(steerCap > 12 and steerCap < 3.6 * math.sqrt(30 / kIn),
+            "fixture：轉向帽 " .. string.format("%.1f", steerCap) .. " 介於地板與橫向帽（latSafe 30）之間")
+        local _, _, _, capSteer = kappaOnLine(1.5, 30)
+        checkNear(capSteer, steerCap, 1e-9, "轉向綁住：硬帽＝steeringSpeedCapKmh(修正後 κ)")
+        local _, _, _, capOut = kappaOnLine(-1.5, 30)
+        checkTrue(capOut > steerCap + 1, "外側偏移（中心線 κ）轉向帽較寬鬆（實得 " .. string.format("%.1f", capOut) .. "）")
+        p.delta0Safe, p.deltaVSafe = 0.2, 0.05 -- δ0 < 需求角 0.205 → 轉向帽 0 → 地板 12，不煞停在弧裡
+        local _, _, _, capFloor = kappaOnLine(1.5, 30)
+        checkNear(capFloor, 12, 1e-9, "轉向轉不出來（帽 0）：壓到曲率地板 12，不否決")
+        p.delta0Safe, p.deltaVSafe = d0, dv
+    end
     local retainedSegLat = p.segLat[firstArc]
     F.setRuntimeLimits(arcState, 3, 6, 0.2, 0.6)
     F.control(p, arcState, (p.x[firstArc] + p.x[firstArc + 1]) * 0.5,
@@ -1432,6 +1605,10 @@ do
         p.segH[firstArc], 10, DT)
     checkTrue(arcState.curveCapKmh < highArcCap,
         "runtime safeLat drop tightens the active arc before profile rebuild")
+    -- 0907：即時弧帽與建表頂點帽同一下限 12（latSafe 0.2 對 κ 0.074 解析出 5.9 km/h；實機 T 字
+    -- 路口 9.1 爬 20m 就是這條沒地板）。違規證明：拿掉 MIN_SPEED 夾即紅
+    checkNear(arcState.curveCapKmh, 12, 1e-9,
+        "即時弧帽不低於曲率地板 12（實得 " .. tostring(arcState.curveCapKmh) .. "）")
     checkNear(p.segLat[firstArc], retainedSegLat, 1e-12,
         "immediate runtime tightening does not mutate the still-high profile")
     checkTrue(arcState.curveValid, "successful control explicitly publishes valid curve state")
@@ -1471,16 +1648,18 @@ do
         / math.sqrt((ix * ix + iy * iy) * (ax * ax + ay * ay))
     checkTrue(tangentCross < 0.08, "line-to-arc tangent is C1 at <=1m sampling")
 
-    local lx, ly = {}, {}
+    local lx, ly, lseg = {}, {}, {}
     local lineEnd = p.length
     if lineEnd > 50 then lineEnd = 50 end
-    local ln, ls0, lreason, lastIdx = F.buildLaneLine(p, 0, lineEnd, 1, lx, ly)
+    local ln, ls0, lreason, lastIdx = F.buildLaneLine(p, 0, lineEnd, 1, lx, ly, 1, lseg)
     checkTrue(ln >= 2 and ls0 == 0 and lreason == "ok", "preallocated lane proof line builds")
     checkTrue(lastIdx >= 1 and lastIdx < p.n, "proof line reports verified segment index")
+    -- 沿線取樣 ≤1m；段界的 lane 台階（clampLane 逐段夾）是既有設計（無 ramp），只扣掉它
     local spacingOk = true
     for i = 2, ln do
         local dx, dy = lx[i] - lx[i - 1], ly[i] - ly[i - 1]
-        if math.sqrt(dx * dx + dy * dy) > 1.01 then spacingOk = false end
+        local dl = F.laneBiasAt(p, 1, lseg[i]) - F.laneBiasAt(p, 1, lseg[i - 1])
+        if math.sqrt(dx * dx + dy * dy) > math.sqrt(1 + dl * dl) + 0.01 then spacingOk = false end
     end
     checkTrue(spacingOk, "lane proof line spacing <=1m")
 
@@ -1500,7 +1679,7 @@ do
 
     local capX, capY = {}, {}
     local capN, _, capReason = F.buildOffsetLine(
-        pLine, 0, 1, 10, 130, 150, 2, 0, capX, capY)
+        buildRoute(straight(100, 5), MAXV), 0, 1, 10, F.OV_MAX, F.OV_MAX + 20, 2, 0, capX, capY)
     checkEq(capN, 0, "long dodge line never truncates to OV_MAX")
     checkEq(capReason, "capacity", "long dodge capacity rejection is named")
 
@@ -1652,10 +1831,15 @@ do
     checkNear(sag + chordSag + p.laneRoomR[arcI] * c, bandIn, 1e-6,
         "弧心線矢高＋弦矢高＋內側偏置·cos(θ/2) 恰等於寬臂 band")
     checkNear(p.laneRoomL[arcI], bandOut, 1e-9, "右轉弧段外側餘裕＝兩臂較窄帶")
-    checkNear(F.laneBiasAt(p, 1.5, 1), 1.5, 1e-9, "w=6 直段 +1.5 不夾")
-    checkNear(F.laneBiasAt(p, 1.5, lastLine), bandOut, 1e-9, "w=5 直段 +1.5 夾到 1.2")
-    checkNear(F.laneBiasAt(p, 1.5, arcI), p.laneRoomR[arcI], 1e-9, "弧段 +1.5 夾到內側餘裕")
-    checkNear(F.laneBiasAt(p, -1.0, arcI), -1.0, 1e-9, "弧段外側 -1.0 不夾")
+    -- 2026-09-06 session-055：常駐 lane 落點＝room − LANE_BIAS_KEEP（夾 0）；laneRoom 表仍是物理餘裕
+    local keep = F.LANE_BIAS_KEEP
+    checkTrue(keep > 0.5 and keep < 1, "LANE_BIAS_KEEP 在 0.5..1（實得 " .. tostring(keep) .. "）")
+    checkNear(F.laneBiasAt(p, 1.5, 1), bandIn - keep, 1e-9, "w=6 直段 +1.5 夾到 1.7−keep")
+    checkNear(F.laneBiasAt(p, 0.5, 1), 0.5, 1e-9, "w=6 直段 +0.5 在 keep 內不夾")
+    checkNear(F.laneBiasAt(p, 1.5, lastLine), bandOut - keep, 1e-9, "w=5 直段 +1.5 夾到 1.2−keep")
+    checkNear(F.laneBiasAt(p, 1.5, arcI), 0, 1e-9,
+        "弧段 +1.5：內側餘裕 " .. tostring(p.laneRoomR[arcI]) .. " < keep → 夾到 0")
+    checkNear(F.laneBiasAt(p, -1.0, arcI), -(bandOut - keep), 1e-9, "弧段外側 -1.0 夾到 −(1.2−keep)")
     checkNear(F.laneBiasAt(p, 1.5, nil), 1.5, 1e-9, "無段索引回原值")
 
     -- 同一張表驅動前視點：laneBias 1.5，前視點落在弧上時偏置不得超過餘裕
@@ -1690,7 +1874,7 @@ do
     end
     checkNear(q.laneRoomR[arcJ], bandOut, 1e-9, "左轉弧段右（外側）餘裕＝較窄帶")
     checkTrue(q.laneRoomL[arcJ] < 0.5, "左轉弧段左（內側）餘裕＝圓角吃剩")
-    checkNear(F.laneBiasAt(q, 1.5, arcJ), bandOut, 1e-9, "左轉弧段 +1.5 夾到外側餘裕 1.2")
+    checkNear(F.laneBiasAt(q, 1.5, arcJ), bandOut - keep, 1e-9, "左轉弧段 +1.5 夾到外側餘裕 1.2−keep")
 
     -- v3（無路寬）路線不建表、不夾
     local v3 = F.begin({ pts = { 0, 60, 0, 0, 108, 1.78 } }, 85, 3, vp)
@@ -1787,7 +1971,8 @@ do
         if sx <= a then return 0 elseif sx >= b then return dl end
         local t = (sx - a) / (b - a); t = t * t * (3 - 2 * t); return dl * t
     end
-    local function run(tangent)
+    local function run(tangent, speed, gain)
+        speed, gain = speed or 10, gain or D.CROSS_TRACK_DODGE_GAIN
         local s2 = F.newState()
         assert(exactOffset(s2, a, b, c, d, dl))
         s2.trackTangent = tangent
@@ -1796,15 +1981,16 @@ do
         local steps = 0
         while car.x < d and steps < 5000 do
             steps = steps + 1
-            local steer = F.control(pLine, s2, car.x, car.y, car.h, 10, DT)
-            local latDev = car.y - laneAt(car.x)
+            local steer, _, _, _, _, _, _, lineLat = F.control(pLine, s2, car.x, car.y, car.h, speed, DT)
+            local latDev = car.y - (lineLat or laneAt(car.x))
             local dLat = prevLat and (latDev - prevLat) / DT or nil
             prevLat = latDev
-            local u = steer - D.crossTrackSteer(latDev, 10, dLat, D.CROSS_TRACK_DODGE_GAIN, D.CROSS_TRACK_DODGE_MAX)
+            local u = steer - D.crossTrackSteer(latDev, speed, dLat, gain,
+                gain == 1 and 0.77 or D.CROSS_TRACK_DODGE_MAX)
             if u > F.STEER_MAX then u = F.STEER_MAX elseif u < -F.STEER_MAX then u = -F.STEER_MAX end
             local k = u * KPS
             if k > KMAX then k = KMAX elseif k < -KMAX then k = -KMAX end
-            local v = 10 / KMH
+            local v = speed / KMH
             car.w = car.w + (k * v - car.w) * (DT / TAU)
             car.h = car.h + car.w * DT
             car.x = car.x + math.cos(car.h) * v * DT
@@ -1861,6 +2047,568 @@ do
         string.format("出口前切內（前視點提前看到回線）較現制少一半且 <0.25（%.2f → %.2f）", exA, exT))
     checkTrue(pkT < 0.8 and bT < 0.6,
         string.format("6m 塞 4m 側移／10 km/h：峰值 <0.8、到 b <0.6（%.2f／%.2f）", pkT, bT))
+    -- 長前視已超出線尾，但切線預視點仍在保持段：不能提前朝常駐線轉回。
+    local oldLook = pLine.lookScale
+    pLine.lookScale = 1.5
+    local tailState = F.newState()
+    assert(exactOffset(tailState, a, b, c, d, dl))
+    tailState.trackTangent = true
+    local _, _, _, _, tailErr = F.control(pLine, tailState, c - 3, dl, 0, 20, DT)
+    checkNear(tailErr, 0, 1e-9, "長前視超出線尾，車仍沿保持段切線直行")
+    -- 0909a 救護車旁：普通繞行沒開切線，長車在縫口落後1.46m；不靠加大位置環。
+    a, b, c, d, dl = 1, 14.55, 26.55, 32.55, -3.16
+    KPS, KMAX = 0.10, 1 / 4.3212
+    local _, normalB, normalExit = run(false, 20, 1)
+    local _, tangentB, tangentExit = run(true, 20, 1)
+    checkTrue(tangentB < 0.5 and tangentB < normalB * 0.6,
+        string.format("普通長車換道到縫口落後低於0.5m（%.2f→%.2f）", normalB, tangentB))
+    checkTrue(tangentExit < 0.2 and tangentExit < normalExit * 0.5,
+        string.format("普通長車不提前切回障礙側（%.2f→%.2f）", normalExit, tangentExit))
+    pLine.lookScale = oldLook
+end
+
+-- =====================================================================
+-- 情境二十四：行車風格（0906c）——省略＝brisk 逐位元不變；comfort 全線 ≤ brisk；
+-- 90° 彎頂＝sqrt(2.5/κ)、≥55° 折點帽 30 km/h、彎前 coast 0.45 包絡、計畫制動 3.0
+-- =====================================================================
+scenario("行車風格：brisk 省略等價、comfort 全線不快於 brisk、彎頂／折點／滑行／制動各自換檔")
+do
+    local function buildStyle(pts, style)
+        local p = F.begin(mkRoute(pts), MAXV, nil, nil, style)
+        while not p.ready do F.stepBuild(p, 4096) end
+        return p
+    end
+    local corner = { 0, 0, 8, 0, 16, 0, 24, 0, 24, 8, 24, 16, 24, 24 }
+    local pB0 = buildStyle(corner, nil)
+    local pB1 = buildStyle(corner, F.STYLES.brisk)
+    local pC = buildStyle(corner, F.STYLES.comfort)
+    local same = true
+    for i = 1, pB0.n do
+        if pB0.v[i] ~= pB1.v[i] or pB0.curveV[i] ~= pB1.curveV[i] then same = false end
+    end
+    checkTrue(same, "style 省略＝STYLES.brisk 逐位元相同")
+    checkEq(pB0.styleName, "brisk", "省略時 styleName=brisk")
+    checkEq(pC.styleName, "comfort", "comfort profile 記 styleName")
+    local notFaster = true
+    for i = 1, pC.n do
+        if pC.v[i] > pB1.v[i] + 1e-9 then notFaster = false end
+    end
+    checkTrue(notFaster, "comfort 每一點目標速度 ≤ brisk")
+    local k90 = 2 * 64 / (8 * 8 * math.sqrt(8 * 8 + 8 * 8))
+    -- comfort lat 2.5：三點外接圓 3.76 vs 幾何式 3.66（0907f）→ 幾何式勝出；brisk 9：7.71 > 7.135 外接圓仍勝
+    local inv2s90 = 1 / (2 * math.sin(math.rad(45)))
+    local bC, cC = 2.5 * 0.432 * inv2s90, 2.5 * 6 * inv2s90
+    checkNear(pC.v[4], (bC + math.sqrt(bC * bC + 4 * cC)) * 0.5, 1e-9, "comfort 直角彎頂＝前視弦幾何 3.66（低於 sqrt(2.5/κ) 3.76）")
+    checkNear(pB1.v[4], math.sqrt(9.0 / k90), 1e-9, "brisk 直角彎頂仍＝sqrt(9/κ)（幾何式 7.71 較高不綁）")
+    checkNear(pC.v[3], math.sqrt(pC.v[4] * pC.v[4] + 2 * 0.45 * 8), 1e-9,
+        "comfort 彎前用 0.45 滑行包絡（更早收油）")
+    checkNear(pC.v[6], math.sqrt(2 * 3.0 * 8), 1e-9, "comfort 終點前一點＝計畫制動 3.0 的包絡")
+    checkNear(pB1.v[6], math.sqrt(2 * 8 * 8), 1e-9, "brisk 終點前一點仍＝BRAKE 8")
+    checkTrue(maxDecelDemand(pC) <= 3.0 + 1e-6, "comfort 全線減速需求 ≤ 3.0 m/s²")
+    checkEq(pC.styleLat, 2.5, "profile 曝露 styleLat 供 configureFollower 當天花板")
+    checkEq(pC.styleBrake, 3.0, "profile 曝露 styleBrake")
+    checkEq(pC.styleCoast, 0.45, "profile 曝露 styleCoast")
+    -- 60° 折點（≥ comfort turnHard 50°、≥ brisk turnHard 55°）：兩檔各自的折點帽
+    local sharp = { 0, 0, 20, 0, 40, 0, 60, 0, 60 + 20 * math.cos(math.rad(60)), 20 * math.sin(math.rad(60)),
+        60 + 40 * math.cos(math.rad(60)), 40 * math.sin(math.rad(60)), 60 + 60 * math.cos(math.rad(60)), 60 * math.sin(math.rad(60)) }
+    local pSB = buildStyle(sharp, F.STYLES.brisk)
+    local pSC = buildStyle(sharp, F.STYLES.comfort)
+    checkTrue(pSB.curveV[4] * KMH <= 50 + 1e-9 and pSB.curveV[4] * KMH > 30 + 1e-9,
+        string.format("brisk 60° 折點：幾何式 34.4 在角度帽 50 之下（實得 %.1f）", pSB.curveV[4] * KMH))
+    checkTrue(pSC.curveV[4] * KMH <= 30 + 1e-9,
+        string.format("comfort 60° 折點帽 30 km/h（實得 %.1f）", pSC.curveV[4] * KMH))
+end
+
+-- =====================================================================
+-- 情境二十五：弧段切線追蹤（0907b）——v4 圓角上誤差對「剖面在車前 1.5m 的切線」、
+-- 直路遠離弧照舊前視點、弧前 1.5m 外不提前轉入；閉環切內（含 Driver 同式弧段 ×2 位置環）
+-- =====================================================================
+scenario("弧段切線追蹤＋自適應前饋：SEG_ARC 上 tangentOn、直路不動、弧前不提前轉入、閉環切內／切外")
+do
+    -- 2026-09-07 session-058 t=14.6-17.8：R≈12 左彎、12-26 km/h，pure pursuit 對弧上前視點的弦角
+    -- 一路切內 lat +1.1 → −1.7 撞路燈。離線閉環（temp/exp_arc_tracking.lua，plant 由 session-058
+    -- 反推 KPS 0.4／TAU 0.35）：0907a 切內 1.66m → 追切線 0.63 → 再加弧段 cross-track ×2 0.46。
+    local D = MDADDynamics
+    local R = 12
+    local w = 2 * (R * (1 - math.cos(math.pi / 4)) + 0.656 + 0.4) -- band 剛好塞 R
+    local route = { pts = { 0, -40, 0, 0, 40, 0 }, segSurface = { "paved", "paved" }, segWidth = { w, w } }
+    local vp = { valid = true, geometryValid = true, halfW = 0.656, rMin = 2.26, wheelbase = 1.985,
+        delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 120 }
+    local p = F.begin(route, 120, 4, vp)
+    while not p.ready do F.stepBuild(p, 4096) end
+    local arcI, arcE
+    for i = 1, p.n - 1 do if p.segKind[i] == D.SEG_ARC then arcI = arcI or i; arcE = i end end
+    checkTrue(arcI ~= nil, "有弧段")
+    checkTrue(p.filletRadius[arcI] > 10 and p.filletRadius[arcI] < 13,
+        string.format("圓角半徑 ≈ 12（實得 %.1f）", p.filletRadius[arcI]))
+    local function wrap(a)
+        while a > math.pi do a = a - 2 * math.pi end
+        while a < -math.pi do a = a + 2 * math.pi end
+        return a
+    end
+    local function segAt(sq)
+        local qi = 1
+        while qi < p.n - 1 and p.s[qi + 1] < sq do qi = qi + 1 end
+        return qi
+    end
+    -- (1) 弧中：車在弧段中點、車頭＝該段朝向；誤差＝車前 1.5m 那段的切線與車頭夾角
+    local mid = math.floor((arcI + arcE) / 2)
+    local st = F.newState()
+    st.idx = mid
+    local mx, my = (p.x[mid] + p.x[mid + 1]) * 0.5, (p.y[mid] + p.y[mid + 1]) * 0.5
+    local _, _, rem, _, eArc = F.control(p, st, mx, my, p.segH[mid], 20, DT)
+    checkTrue(st.tangentOn == true, "弧段上 tangentOn=true")
+    local sMid = p.length - rem
+    local qi = segAt(sMid + F.TANGENT_PREVIEW_M)
+    checkTrue(p.segKind[qi] == D.SEG_ARC, "預視點仍在弧上")
+    checkNear(eArc, wrap(p.segH[qi] - p.segH[mid]), 1e-6, "弧上誤差＝車前 1.5m 切線與車頭夾角")
+    checkTrue(eArc ~= 0, "切線角非零（弧上每段有轉角）")
+    -- (2) 直路遠離弧（前視窗 7.2m 碰不到弧）：tangentOn=false、誤差＝前視點（車頭略偏時非零）
+    local sFar = p.s[arcI] - 12
+    local st2 = F.newState()
+    st2.idx = segAt(sFar)
+    local _, _, _, _, eFar = F.control(p, st2, 0, -40 + sFar, math.pi / 2 + 0.05, 10, DT)
+    checkFalse(st2.tangentOn, "直路遠離弧：不追切線")
+    checkNear(eFar, -0.05, 1e-6, "直路：誤差＝前視點（車頭偏 0.05 → −0.05）")
+    -- (3) 弧前 5m（前視窗已伸進弧、車前 1.5m 仍是直路）：追切線且誤差＝0，不提前轉入；
+    --     舊制前視點在弧上 → 誤差 >0 ＝直路上就開始切內（s015／s058 同根）
+    local sNear = p.s[arcI] - 5
+    local st3 = F.newState()
+    st3.idx = segAt(sNear)
+    local _, _, _, _, eNear = F.control(p, st3, 0, -40 + sNear, math.pi / 2, 10, DT)
+    checkTrue(st3.tangentOn == true, "弧前 5m（前視段在弧上）：追切線")
+    checkNear(eNear, 0, 1e-9, "弧前 5m：誤差 0（車前 1.5m 仍是直路，不提前轉入）")
+    -- (4) 弧段前饋（0908a）：弧上 ffSteer 與轉向同號、直路 0、弧前 LEAD 秒外 0
+    do
+        local st4 = F.newState()
+        st4.idx = mid
+        F.control(p, st4, mx, my, p.segH[mid], 20, DT)
+        local dthArc = wrap(p.segH[mid + 1] - p.segH[mid])
+        checkTrue((st4.ffSteer or 0) * dthArc > 0, string.format("弧上前饋與轉向同號（ff %.2f、dθ %.3f）", st4.ffSteer or 0, dthArc))
+        checkTrue(math.abs(st4.ffSteer) > 0.05, "弧上前饋非零")
+        local weak = F.newState()
+        weak.idx, weak.yawGain = mid, 0.2
+        F.control(p, weak, mx, my, p.segH[mid], 30, DT)
+        checkTrue(math.abs(weak.ffSteer) <= 0.8 + 1e-9,
+            "低 yaw 反應不可把前饋放大成整車橫推")
+        local slow = F.newState()
+        slow.idx, slow.yawGain = mid, 3
+        F.control(p, slow, mx, my, p.segH[mid], 2, DT)
+        checkTrue(slow.ffSteer * dthArc >= 0,
+            "低速弧段的前饋不可因扣除切線項而反打")
+        checkNear(st2.ffSteer or 0, 0, 1e-9, "直路遠離弧：前饋 0")
+        local st5 = F.newState()
+        st5.idx = segAt(p.s[arcI] - 5)
+        F.control(p, st5, 0, -40 + p.s[arcI] - 5, math.pi / 2, 10, DT)
+        checkNear(st5.ffSteer or 0, 0, 1e-9, "弧前 5m、10 km/h（LEAD 0.35s＝1m）：前饋尚未爬升")
+        -- 弧前 2m、25 km/h（LEAD 2.4m 內）：已爬升且 κ 用弧真半徑（kap[firstArc] 是直臂＋第一 chord 的
+        -- 三點曲率，只有 1/R 的百分之一；Codex lane 2026-09-08 抓的）
+        local st6 = F.newState()
+        st6.idx = segAt(p.s[arcI] - 2)
+        F.control(p, st6, 0, -40 + p.s[arcI] - 2, math.pi / 2, 25, DT)
+        checkTrue(math.abs(st6.ffSteer or 0) > 0.03, string.format("弧前 2m、25 km/h：前饋已爬升（實得 %.3f）", st6.ffSteer or 0))
+        -- Codex lane 反例：近共線右彎出口（最後 chord 對出口切線殘差 −0.006 反號）——整條弧每個 chord 的前饋同號
+        local pts2 = { 0, 0, 40, 0, 40, 1, 40.1, 10, 40.2, 20, 40.3, 40 }
+        local r2 = { pts = pts2, segSurface = {}, segWidth = {} }
+        for i = 1, 5 do r2.segSurface[i], r2.segWidth[i] = "paved", 9.14 end
+        local p2 = F.begin(r2, 120, 4, vp)
+        while not p2.ready do F.stepBuild(p2, 4096) end
+        local sign, allSame, arcN = nil, true, 0
+        for i = 1, p2.n - 1 do
+            if p2.segKind[i] == D.SEG_ARC then
+                arcN = arcN + 1
+                local st7 = F.newState()
+                st7.idx = i
+                F.control(p2, st7, (p2.x[i] + p2.x[i + 1]) * 0.5, (p2.y[i] + p2.y[i + 1]) * 0.5, p2.segH[i], 20, DT)
+                local f = st7.ffSteer or 0
+                if sign == nil then sign = f > 0 and 1 or -1 end
+                if f * sign <= 0.01 then allSame = false end
+            end
+        end
+        checkTrue(arcN > 10 and allSame, "近共線出口右彎：弧上每個 chord（含最後一個）前饋同號")
+        -- Codex lane 反例二：入臂由 20 段 ≤2° 微彎組成（fillet 視為共線臂吞點，入弧前的線段殘留 1.4 rad 折角），
+        -- 第一個 chord 的 prev 轉角 −1.40 反號、next +0.035——「取量級較大者」會在第一個 chord 反打；
+        -- 方向權威＝同一弧內相鄰 chord（k−1 是弧用 prev，否則用 next）
+        local pts3 = {}
+        local segs = {}
+        for i = 0, 19 do segs[#segs + 1] = math.rad(i * 1.9) end
+        local bx, by = 40, 0
+        local back = {}
+        for i = 1, 20 do
+            bx = bx - math.cos(segs[i]); by = by - math.sin(segs[i])
+            back[#back + 1] = { bx, by }
+        end
+        bx = bx - 20 * math.cos(segs[20]); by = by - 20 * math.sin(segs[20])
+        pts3[#pts3 + 1] = bx; pts3[#pts3 + 1] = by
+        for i = 20, 1, -1 do pts3[#pts3 + 1] = back[i][1]; pts3[#pts3 + 1] = back[i][2] end
+        pts3[#pts3 + 1] = 40; pts3[#pts3 + 1] = 0
+        pts3[#pts3 + 1] = 40; pts3[#pts3 + 1] = 40
+        local r3 = { pts = pts3, segSurface = {}, segWidth = {} }
+        for i = 1, #pts3 / 2 - 1 do r3.segSurface[i], r3.segWidth[i] = "paved", w end
+        local p3 = F.begin(r3, 120, 4, vp)
+        while not p3.ready do F.stepBuild(p3, 4096) end
+        local sign3, same3, arcN3, firstArc3 = nil, true, 0, nil
+        for i = 1, p3.n - 1 do
+            if p3.segKind[i] == D.SEG_ARC then
+                arcN3 = arcN3 + 1
+                firstArc3 = firstArc3 or i
+                local st8 = F.newState()
+                st8.idx = i
+                F.control(p3, st8, (p3.x[i] + p3.x[i + 1]) * 0.5, (p3.y[i] + p3.y[i + 1]) * 0.5, p3.segH[i], 20, DT)
+                local f = st8.ffSteer or 0
+                if sign3 == nil then sign3 = f > 0 and 1 or -1 end
+                if f * sign3 <= 0.01 then same3 = false end
+            end
+        end
+        checkTrue(firstArc3 ~= nil and math.abs(wrap(p3.segH[firstArc3] - p3.segH[firstArc3 - 1])) > 0.5,
+            "微彎入臂：第一個 chord 的 prev 轉角是吞點殘留的大折角（fixture 前提）")
+        checkTrue(arcN3 > 10 and same3, "微彎入臂：弧上每個 chord（含第一個）前饋同號")
+    end
+    -- (5) 閉環：自行車＋一階 yaw 延遲、Driver 同式 cross-track（curveHardActive 時 ×CROSS_TRACK_ARC_GAIN）、
+    --     Driver 轉向死區 0.02 與 dLat 台階守門（Codex lane 2026-09-07：切線降低 steer 量級，死區這道非線性要進 plant）。
+    --     plant 增益 KPS（κ／單位 steer）由 2026-09-08 十三場 telemetry 反推：RaceCar／救護車 24 km/h 0.16-0.21、
+    --     F350 0.10-0.12（舊 0.4 是 session-058 低速反推，比實車高兩三倍——那個 plant 下切線預視的隱含前饋
+    --     就夠，實車上只有需求 yaw 率的 30-60%＝四台車同一個彎全撞外側）。
+    --     25 km/h 過 R≈12 左彎：K0.18（RaceCar）切內／切外都 <0.3；K0.10（F350）切外 <0.6（無前饋 1.57）。
+    local function closedLoop(KPS, ffOn)
+        local KMAX, TAU = 1 / 2.5, 0.35
+        local dt = 1 / 30
+        local kmh = 25
+        local sc = F.newState()
+        F.setLaneBias(sc, 1.0)
+        F.setRuntimeLimits(sc, 3, 6, 3.5, 1.2)
+        local car = { x = -1.0, y = -40, h = math.pi / 2, w = 0 }
+        local v = kmh / KMH
+        local prevLat, cutIn, cutOut = nil, 0, 0
+        local sExit = p.s[arcE + 1]
+        local steps = 0
+        while steps < 3000 do
+            steps = steps + 1
+            local steer, _, rem2, reached, _, _, latSigned = F.control(p, sc, car.x, car.y, car.h, kmh, dt)
+            if not ffOn then steer = steer - (sc.ffSteer or 0) end
+            local sNow = p.length - rem2
+            local latDev = latSigned - F.laneBiasAt(p, 1.0, sc.idx)
+            local dLat = prevLat and (latDev - prevLat) / dt or nil
+            prevLat = latDev
+            if dLat and (dLat > 5 or dLat < -5) then dLat = nil end -- Driver TUNE.CROSS_TRACK_DLAT_MAX（期望線台階不進 D 項）
+            local xg, xm = nil, nil
+            if sc.curveHardActive then xg, xm = D.CROSS_TRACK_ARC_GAIN, D.CROSS_TRACK_ARC_MAX end
+            local u = steer - D.crossTrackSteer(latDev, kmh, dLat, xg, xm)
+            if u > 5 then u = 5 elseif u < -5 then u = -5 end
+            if u < 0.02 and u > -0.02 then u = 0 end -- Driver STEER_DEADZONE：低於 0.02 不施力（0907e）
+            sc.appliedSteer = u -- Driver applySteering 回寫（yaw 增益估計的分母）
+            local k = u * KPS
+            if k > KMAX then k = KMAX elseif k < -KMAX then k = -KMAX end
+            car.w = car.w + (k * v - car.w) * (dt / TAU)
+            car.h = car.h + car.w * dt
+            car.x = car.x + math.cos(car.h) * v * dt
+            car.y = car.y + math.sin(car.h) * v * dt
+            if sNow >= p.s[arcI] - 2 and sNow <= sExit + 4 then
+                -- 這條彎的內側是負 lane（右正）：latDev 負＝切內；出弧後 4m 內也算（帶 yaw 率衝進直路）
+                if -latDev > cutIn then cutIn = -latDev end
+                if latDev > cutOut then cutOut = latDev end
+            end
+            if reached or sNow > p.length - 3 then break end
+        end
+        return cutIn, cutOut, sc.yawGain
+    end
+    local inR, outR, gainR = closedLoop(0.18, true)
+    checkTrue(inR < 0.3, string.format("K0.18 25 km/h 過 R≈12 弧：最大切內 <0.3m（實得 %.2f）", inR))
+    checkTrue(outR < 0.3, string.format("K0.18 弧段切外 <0.3m（實得 %.2f）", outR))
+    checkTrue(math.abs(gainR - 0.18 * 25 / KMH) < 0.35,
+        string.format("yaw 增益估計收斂到 plant（K·v＝%.2f，實得 %.2f）", 0.18 * 25 / KMH, gainR))
+    local inH, outH = closedLoop(0.10, true)
+    local _, outH0 = closedLoop(0.10, false)
+    checkTrue(outH < 0.6, string.format("K0.10（重車）弧段切外 <0.6m（實得 %.2f；無前饋 %.2f）", outH, outH0))
+    checkTrue(outH < outH0 * 0.5, string.format("前饋把重車切外至少砍半（%.2f → %.2f）", outH0, outH))
+    checkTrue(inH < 0.3, string.format("K0.10 切內 <0.3m（實得 %.2f）", inH))
+end
+
+-- =====================================================================
+-- 情境二十六：髮夾折點（0907c）——90°<θ<150° 非弧頂點前視目標鉗在折點、車距折點 < rMin·tan(θ/2)（理想圓角切點距）才放行；
+-- 閉環過 121° 折點不在折點前切內；餘裕表不動
+-- =====================================================================
+scenario("髮夾折點：前視目標不越過折點、閉環 121° 折點前不切內")
+do
+    -- 2026-09-07 session-060：4m 路東行 → 121° 右轉進 8m 路，路緣圍籬柱在折點前 4.5m／內側 2.5m；
+    -- 前視 4.5m 在折點前就朝另一臂轉＝內側切 1.6m 撞柱（lat −0.6 → +1.6）、倒車兩次 StopStuck。
+    local D = MDADDynamics
+    local ang = math.rad(121)
+    local ax, ay = 60, 0
+    local route = { pts = { 0, 0, ax, ay, ax + 30 * math.cos(ang), ay + 30 * math.sin(ang) },
+        segSurface = { "paved", "paved" }, segWidth = { 4, 8 } }
+    local vp = { valid = true, geometryValid = true, halfW = 0.656, rMin = 2.26, wheelbase = 1.985,
+        delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 120 }
+    local p = F.begin(route, 120, 4, vp)
+    while not p.ready do F.stepBuild(p, 4096) end
+    checkEq(p.filletFallbackN, 1, "121° 折點不做圓角＝fallback 保留頂點")
+    -- 折點頂點索引
+    local kink = nil
+    for i = 2, p.n - 1 do
+        local d = math.abs(p.segH[i] - p.segH[i - 1])
+        if d > math.pi then d = 2 * math.pi - d end
+        if d > math.rad(100) then kink = i end
+    end
+    checkTrue(kink ~= nil, "找到 121° 折點頂點")
+    local sK = p.s[kink]
+    checkNear(sK, 60, 1e-6, "折點弧長＝60")
+    -- (1) 餘裕表不動：折點鄰域的偏置不歸零（逐段表會把整條 60m 直臂的靠右吃掉；內側路緣物交給繞行）
+    local function segAt(sq)
+        local qi = 1
+        while qi < p.n - 1 and p.s[qi + 1] < sq do qi = qi + 1 end
+        return qi
+    end
+    checkTrue(p.laneRoomR[segAt(sK - 3)] > 0.9, "折點前 3m：4m 路餘裕照舊（實得 "
+        .. tostring(p.laneRoomR[segAt(sK - 3)]) .. "）")
+    -- (2) 折點前 5m、車頭沿臂：前視目標鉗在頂點 → 誤差 0（舊制目標已在另一臂＝誤差 >30°）
+    local st = F.newState()
+    st.idx = segAt(sK - 5)
+    local _, _, _, _, e5 = F.control(p, st, ax - 5, 0, 0, 12, DT)
+    checkNear(e5, 0, 1e-9, "折點前 5m：目標＝頂點、誤差 0")
+    -- (3) 折點前 3m（< 放行距 rMin·tan(60.5°)＝4.0m）：目標放行到另一臂 → 誤差 >20°；
+    --     折點前 0.5m → 誤差 >90°
+    local st2 = F.newState()
+    st2.idx = segAt(sK - 3)
+    local _, _, _, _, e3 = F.control(p, st2, ax - 3, 0, 0, 12, DT)
+    checkTrue(math.abs(e3) > math.rad(20), string.format("折點前 3m（切點距 4.0m 內）：目標已在另一臂、誤差 %.0f° > 20°", math.deg(math.abs(e3))))
+    local st3 = F.newState()
+    st3.idx = segAt(sK - 0.5)
+    local _, _, _, _, e05 = F.control(p, st3, ax - 0.5, 0, 0, 12, DT)
+    checkTrue(math.abs(e05) > math.rad(90), string.format("折點前 0.5m：誤差 %.0f° > 90°", math.deg(math.abs(e05))))
+    -- (4) 閉環：自行車＋一階 yaw 延遲（plant 最小半徑 2.5）、12 km/h 定速、Driver 死區；
+    --     折點前最後 6m 的內側偏離 <1.0m（舊制 4.5m 前視切 1.8m）、出彎臂外甩 <2.0m（鉗到 1m 會甩 4m）、
+    --     離折點前 4.5m／內側 2.5m 的路緣柱（r 0.7）淨距 >0.8（舊制 0.2＝撞）、過折點後 15m 回 leg 2 ±1m
+    local KPS, KMAX, TAU = 0.4, 1 / 2.5, 0.35
+    local dt = 1 / 30
+    local kmh = 12
+    local sc = F.newState()
+    local car = { x = ax - 20, y = 0, h = 0, w = 0 }
+    local v = kmh / KMH
+    local cutPre, steps, done, endLat = 0, 0, false, nil
+    local swingOut, postClr = 0, 99
+    local ux, uy = math.cos(ang), math.sin(ang)
+    while steps < 4000 do
+        steps = steps + 1
+        local steer, _, rem, reached = F.control(p, sc, car.x, car.y, car.h, kmh, dt)
+        if steer > 5 then steer = 5 elseif steer < -5 then steer = -5 end
+        if steer < 0.02 and steer > -0.02 then steer = 0 end -- Driver STEER_DEADZONE（0907e）
+        local k = steer * KPS
+        if k > KMAX then k = KMAX elseif k < -KMAX then k = -KMAX end
+        car.w = car.w + (k * v - car.w) * (dt / TAU)
+        car.h = car.h + car.w * dt
+        car.x = car.x + math.cos(car.h) * v * dt
+        car.y = car.y + math.sin(car.h) * v * dt
+        local sNow = p.length - rem
+        local dPost = math.sqrt((car.x - (ax - 4.5)) ^ 2 + (car.y - 2.5) ^ 2) - 0.7 - 0.656
+        if dPost < postClr then postClr = dPost end
+        if sNow < sK and car.x >= ax - 6 and car.x <= ax then
+            -- 左彎（+121°）內側＝+y
+            if car.y > cutPre then cutPre = car.y end
+        end
+        if sNow >= sK then
+            -- 對 leg 2 的橫向：leg 2 起點 (ax,ay)、方向 (ux,uy)，右法向 = (uy, -ux)＝左彎外側
+            local rx, ry = car.x - ax, car.y - ay
+            local latOut = rx * uy - ry * ux
+            if latOut > swingOut then swingOut = latOut end
+            if sNow >= sK + 15 then
+                endLat = latOut
+                done = true
+                break
+            end
+        end
+    end
+    checkTrue(done, "閉環在 4000 幀內走過折點 15m（實得 done=" .. tostring(done) .. "）")
+    checkTrue(cutPre < 1.0, string.format("折點前 6m 內側偏離 <1.0m（實得 %.2f）", cutPre))
+    checkTrue(swingOut < 2.0, string.format("出彎臂外甩 <2.0m（實得 %.2f）", swingOut))
+    checkTrue(postClr > 0.8, string.format("離折點前路緣柱淨距 >0.8m（實得 %.2f）", postClr))
+    checkTrue(endLat ~= nil and math.abs(endLat) < 1.0,
+        string.format("過折點 15m 已回 leg 2 中線 ±1m（實得 %s）", tostring(endLat)))
+end
+
+-- =====================================================================
+-- 情境二十七：lane 落點沿弧長連續（0907c）——弧內側餘裕 0 與直段 1.0 之間 12m smoothstep，
+-- proof 線（buildLaneLine）無折點；不傳 sAt 仍是逐段台階（舊語意）
+-- =====================================================================
+scenario("lane 落點連續：弧前 12m 收到 0、弧後放回、proof 線無折點、逐段語意不變")
+do
+    -- 2026-09-07 session-064 t=33-36：R 9.5 彎（curveCap 24.9）出弧前 laneCurveEnvelope 24.9→…→0、
+    -- mef=curve-coast、車煞到 8 km/h——proof 線在弧邊界 1m 內橫跳 1m（bias 1 → 弧內側 0）＝折點 κ→∞。
+    local D = MDADDynamics
+    local R = 12
+    local w = 2 * (R * (1 - math.cos(math.pi / 4)) + 0.656 + 0.4)
+    local route = { pts = { 0, -40, 0, 0, 40, 0 }, segSurface = { "paved", "paved" }, segWidth = { w, w } }
+    local vp = { valid = true, geometryValid = true, halfW = 0.656, rMin = 2.26, wheelbase = 1.985,
+        delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 120 }
+    local p = F.begin(route, 120, 4, vp)
+    while not p.ready do F.stepBuild(p, 4096) end
+    local arcI, arcE
+    for i = 1, p.n - 1 do if p.segKind[i] == D.SEG_ARC then arcI = arcI or i; arcE = i end end
+    local sA, sE = p.s[arcI], p.s[arcE + 1]
+    -- 這條左彎（−40→0→+40，y-down 世界）內側＝負 lane：用內側 bias 才吃到餘裕 0
+    local inside = (p.laneRoomL[arcI] < p.laneRoomR[arcI]) and -1 or 1
+    local bias = inside * 1.0
+    checkTrue(math.abs(F.laneBiasAt(p, bias, arcI + 2, sA + 2)) < 1e-9, "弧內側落點 0")
+    checkNear(F.laneBiasAt(p, bias, 1, sA - 20), bias, 1e-9, "弧前 20m 落點＝bias")
+    checkNear(F.laneBiasAt(p, bias, F.segIndexAt(p, sA - 6), sA - 6), bias * 0.5, 0.02, "弧前 6m（ramp 中點）＝bias/2")
+    checkTrue(math.abs(F.laneBiasAt(p, bias, F.segIndexAt(p, sA - 0.5), sA - 0.5)) < 0.02, "弧前 0.5m 已收到 ≈0")
+    checkNear(F.laneBiasAt(p, bias, F.segIndexAt(p, sE + 6), sE + 6), bias * 0.5, 0.02, "弧後 6m 放回 bias/2")
+    -- 連續：每 0.5m 落點變化 ≤ 0.12（1m/12m smoothstep 峰值斜率 0.125）
+    local maxStep, prev = 0, nil
+    for sq = sA - 20, sE + 20, 0.5 do
+        local v = F.laneBiasAt(p, bias, F.segIndexAt(p, sq), sq)
+        if prev then local d = math.abs(v - prev); if d > maxStep then maxStep = d end end
+        prev = v
+    end
+    checkTrue(maxStep < 0.08, string.format("落點每 0.5m 變化 <0.08（實得 %.3f）", maxStep))
+    -- Codex lane 反例：階梯餘裕 1.6/1.1/0.6（bias 1、keep 0.6 → 夾值 1.0/0.5/0），s=20 段界兩側
+    -- 必須同值（第一版「min 各段以本段值為基底的 ramp」在這裡 0.5 → 0.25 跳變）；全線每 0.25m 變化有界
+    do
+        local fake = { ready = true, n = 4, s = { 0, 20, 26, 50 }, segKind = { 0, 0, 0 },
+            laneRoomR = { 1.6, 1.1, 0.6 }, laneRoomL = { 1.6, 1.1, 0.6 } }
+        local lm = F.laneBiasAt(fake, 1, 1, 20 - 1e-6)
+        local lp = F.laneBiasAt(fake, 1, 2, 20 + 1e-6)
+        checkNear(lp, lm, 1e-4, string.format("階梯餘裕段界 s=20 兩側同值（%.4f / %.4f）", lm, lp))
+        local lm2 = F.laneBiasAt(fake, 1, 2, 26 - 1e-6)
+        local lp2 = F.laneBiasAt(fake, 1, 3, 26 + 1e-6)
+        checkNear(lp2, lm2, 1e-4, string.format("階梯餘裕段界 s=26 兩側同值（%.4f / %.4f）", lm2, lp2))
+        checkNear(F.laneBiasAt(fake, 1, 1, 2), 1, 1e-9, "遠離段界＝本段夾值 1.0")
+        checkNear(F.laneBiasAt(fake, 1, 3, 40), 0, 1e-9, "餘裕 0 的段＝0")
+        local mx, pv = 0, nil
+        for sq = 0, 50, 0.25 do
+            local vv = F.laneBiasAt(fake, 1, F.segIndexAt(fake, sq), sq)
+            if pv then local dd = math.abs(vv - pv); if dd > mx then mx = dd end end
+            pv = vv
+        end
+        checkTrue(mx < 0.05, string.format("階梯餘裕全線每 0.25m 變化 <0.05（實得 %.3f）", mx))
+    end
+    -- Codex lane 反例 2：0.25m 碎段（36 點直路、最後一段餘裕縮小）——逐段走訪會在 12m 窗內被上限截斷，
+    -- 較緊的 run 隨車位「突然進窗」＝段界跳變；改逐 run 走訪後全線連續
+    do
+        local pts, ws = {}, {}
+        for i = 1, 36 do pts[#pts + 1] = (i - 1) * 0.25; pts[#pts + 1] = 0 end
+        for i = 1, 35 do ws[i] = 5.2 end -- band 5.2/2−0.656−0.4 = 1.544 → 夾 0.944（bias 1、keep 0.6 → 0.944）
+        ws[35] = 3.2                      -- 最後一段 band 0.544 → 夾 0（keep 吃光）
+        local surf = {}
+        for i = 1, 35 do surf[i] = "paved" end
+        local pf = F.begin({ pts = pts, segSurface = surf, segWidth = ws }, 120, 4, vp)
+        while not pf.ready do F.stepBuild(pf, 4096) end
+        checkTrue(pf.laneRunEnd ~= nil and pf.laneRunEnd[1] == 34 and pf.laneRunStart[35] == 35,
+            "碎段 run 端點表：前 34 段同一 run、最後一段自己一 run")
+        local mx2, pv2 = 0, nil
+        for sq = 0, 8.75, 0.05 do
+            local vv = F.laneBiasAt(pf, 1, F.segIndexAt(pf, sq), sq)
+            if pv2 then local dd = math.abs(vv - pv2); if dd > mx2 then mx2 = dd end end
+            pv2 = vv
+        end
+        checkTrue(mx2 < 0.02, string.format("0.25m 碎段全線每 0.05m 變化 <0.02（實得 %.4f）", mx2))
+        checkTrue(math.abs(F.laneBiasAt(pf, 1, 35, 8.6)) < 1e-9, "碎段末段夾 0")
+    end
+    -- 不傳 sAt＝逐段台階（舊語意；Driver 逐段用途仍靠它）
+    local stepOld = math.abs(F.laneBiasAt(p, bias, arcI - 1) - F.laneBiasAt(p, bias, arcI))
+    checkTrue(stepOld > 0.9, string.format("不傳 sAt：弧邊界仍是 %.2f 的台階（舊語意）", stepOld))
+    -- proof 線：buildLaneLine 逐點折角最大 < 8°（舊制弧邊界 1m 橫跳 1m ≈ 45°）
+    local lx, ly = {}, {}
+    local cnt, s0 = F.buildLaneLine(p, sA - 20, sE + 20, bias, lx, ly, 1)
+    checkTrue(cnt > 40, "proof 線建好（點數 " .. tostring(cnt) .. "）")
+    local maxTurn = 0
+    for k = 2, cnt - 1 do
+        local a1 = math.atan(ly[k] - ly[k - 1], lx[k] - lx[k - 1])
+        local a2 = math.atan(ly[k + 1] - ly[k], lx[k + 1] - lx[k])
+        local d = math.abs(a2 - a1)
+        if d > math.pi then d = 2 * math.pi - d end
+        if d > maxTurn then maxTurn = d end
+    end
+    checkTrue(maxTurn < math.rad(8), string.format("proof 線逐點折角 <8°（實得 %.1f°）", math.deg(maxTurn)))
+end
+
+scenario("急折點出彎：先收正姿態與橫偏，再解除爬行帽")
+do
+    local vp = { valid = true, geometryValid = true, halfW = 0.9, rMin = 4.32,
+        wheelbase = 3.79, delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 120 }
+    for _, dir in ipairs({ 1, -1 }) do
+        local p = F.begin({ pts = { 0, 0, 60, 0, 60, dir * 80 },
+            segSurface = { "paved", "paved" }, segWidth = { 4, 4 } }, 70, 4, vp)
+        p.lookScale = 1.5
+        while not p.ready do F.stepBuild(p, 4096) end
+        local st = F.newState()
+        F.setRuntimeLimits(st, 2.5, 6, 7, 2.25)
+        F.control(p, st, 56, 0, 0, 28, DT)
+        local _, atExit = F.control(p, st, 60.3, dir * 2,
+            dir * (math.pi / 2 - 0.3), 28, DT)
+        checkTrue(atExit <= 12, "前視點已近對準但車身仍偏 17°：不能恢復巡航")
+        local straight = F.newState()
+        F.setRuntimeLimits(straight, 2.5, 6, 7, 2.25)
+        local _, noPoseCap = F.control(p, straight, 60.3, dir * 2, dir * math.pi / 2, 28, DT)
+        checkNear(st.profileSpeedKmh, noPoseCap, 1e-9,
+            "幾何設計包絡與同位置收正後一致，不吃當下姿態的12帽")
+        local _, offLane = F.control(p, st, 61.2, dir * 3, dir * math.pi / 2, 12, DT)
+        checkTrue(offLane <= 12, "姿態已正但仍有1.2m橫偏：維持出彎保護")
+        local _, settling = F.control(p, st, 60.8, dir * 6,
+            dir * (math.pi / 2 - math.rad(10)), 12, DT)
+        checkTrue(settling > 12, "出彎只剩10°與0.8m修正：交回連續姿態限速，不再固定爬行")
+        local _, aligned = F.control(p, st, 60, dir * 8, dir * math.pi / 2, 12, DT)
+        checkTrue(aligned > 12, "同一次出彎回到行駛線：解除爬行，正常加速")
+        local comfort = F.begin({ pts = {0, 0, 60, 0, 60, dir * 80},
+            segSurface = {"paved", "paved"}, segWidth = {4, 4} }, 70, 4, vp, F.STYLES.comfort)
+        while not comfort.ready do F.stepBuild(comfort, 4096) end
+        local cs = F.newState()
+        F.setRuntimeLimits(cs, 2.5, 6, 7, 2.25)
+        F.control(comfort, cs, 56, 0, 0, 28, DT)
+        local _, comfortExit = F.control(comfort, cs, 60.8, dir * 6,
+            dir * (math.pi / 2 - math.rad(10)), 12, DT)
+        checkTrue(comfortExit <= 12, "舒適風格仍等到原來的收正門檻")
+
+        local exact = F.newState()
+        F.setRuntimeLimits(exact, 2.5, 6, 7, 2.25)
+        F.control(p, exact, 56, 0, 0, 28, DT)
+        local lx, ly = {}, {}
+        for i = 1, 60 do lx[i], ly[i] = 60.6, dir * (i - 1) end
+        assert(F.setExactLine(exact, lx, ly, 60, 60, 119))
+        F.control(p, exact, 60.6, dir * 10, dir * math.pi / 2, 12, DT)
+        F.clearOffset(exact)
+        local _, afterExact = F.control(p, exact, 60.6, dir * 10, dir * math.pi / 2, 12, DT)
+        checkTrue(afterExact > 12,
+            "承諾線接手並越過急折點後：回到跟線不再受舊出彎帽限制")
+
+        local pending = F.newState()
+        local px, py = {}, {}
+        local pn, p0, why, p1 = F.buildOffsetLine(p, 56, 100, 108, 120, 132, -1.25,
+            0, px, py, nil, nil, nil, 0.8)
+        assert(pn > 0, why)
+        assert(F.setOffset(pending, 100, 108, 120, 132, -1.25, px, py, pn, p0, p1))
+        F.setRuntimeLimits(pending, 2.5, 6, 7, 2.25)
+        F.control(p, pending, 56, 0.8, 0, 28, DT)
+        local _, preA = F.control(p, pending, 60 - dir * 1.6, dir * 3,
+            dir * (math.pi / 2 - 0.3), 28, DT)
+        checkTrue(preA <= 12, "遠處繞行尚未進入a：不能取消近處急折點的出彎收正")
+        local _, entered = F.control(p, pending, 60 - dir * 1.6, dir * 41,
+            dir * math.pi / 2, 12, DT)
+        checkTrue(entered > 12, "真正進入繞行段後：交給承諾線，不復活原始折點帽")
+        F.resetState(pending)
+        assert(F.setOffset(pending, 100, 108, 120, 132, -1.25, px, py, pn, p0, p1))
+        F.control(p, pending, 56, 0.8, 0, 28, DT)
+        local _, lineAligned = F.control(p, pending, 60 - dir * 0.8, dir * 10,
+            dir * math.pi / 2, 12, DT)
+        checkTrue(lineAligned > 12, "pre-a已收正到真正承諾線：不強迫回另一條常駐線才放行")
+    end
+end
+
+scenario("快取長路線：首次從實際車位定位，不從首段追趕游標")
+do
+    local p = buildRoute(straight(400, 4), 60)
+    local st = F.newState()
+    local _, _, remaining, arrived, err = F.control(p, st, 1200, 4, 0, 20, DT)
+    checkNear(remaining, 396, 1e-9, "第一次控制就使用車位對應的剩餘路長")
+    checkTrue(not arrived and math.abs(err) < math.pi / 2, "向前路線不得被誤判成掉頭")
+    local loop = {}
+    for i = 0, 40 do loop[#loop + 1], loop[#loop + 2] = i * 4, 0 end
+    loop[#loop + 1], loop[#loop + 2] = 160, 3
+    for i = 39, 0, -1 do loop[#loop + 1], loop[#loop + 2] = i * 4, 3 end
+    p = buildRoute(loop, 60)
+    st = F.newState()
+    local _, _, remainLoop, _, errLoop = F.control(p, st, 20, 1.6, 0, 20, DT)
+    checkTrue(st.idx < 13 and remainLoop > 200 and math.abs(errLoop) < math.pi / 2,
+        "首段仍合理近：右側車道不得因後方反向臂近0.2m就跳過整個迴圈")
 end
 
 closeScenario()

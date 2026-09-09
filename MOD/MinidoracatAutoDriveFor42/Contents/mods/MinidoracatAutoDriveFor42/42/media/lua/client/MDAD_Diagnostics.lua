@@ -98,7 +98,7 @@ local EK = {
     -- 不得依賴 console」）：console 的 commit 行 cap 分解、延後理由、守護判死點
     -- 全數帶進事件；每幀 sample 已有 dodge*Cap／capReason／physicalOffroad／zombieN。
     "a", "b", "c", "offL", "curve", "clear", "vis", "space", "design",
-    "crawl", "tight", "tier", "rs", "span", "hitS", "hitX", "hitY", "clearance", "shape",
+    "crawl", "tight", "tier", "rs", "span", "hitS", "hitX", "hitY", "hitPhase", "clearance", "shape",
     "blocker",
 }
 
@@ -912,6 +912,18 @@ local function encodeSensor(s, sensor)
     if finite(sensor.roadC) then
         bits = bits .. ',"roadC":' .. tostring(sensor.roadC)
     end
+    if finite(sensor.zombieNearS) then
+        bits = bits .. ',"zombieNearS":' .. tostring(sensor.zombieNearS)
+    end
+    if finite(sensor.corpseNearS) then
+        bits = bits .. ',"corpseNearS":' .. tostring(sensor.corpseNearS)
+    end
+    if finite(sensor.softNearS) then
+        bits = bits .. ',"softNearS":' .. tostring(sensor.softNearS)
+    end
+    if finite(sensor.softEndS) then
+        bits = bits .. ',"softEndS":' .. tostring(sensor.softEndS)
+    end
     if type(sensor.rain) == "boolean" then
         bits = bits .. ',"rain":' .. (sensor.rain and "true" or "false")
     end
@@ -924,6 +936,10 @@ local function encodeSensor(s, sensor)
     if finite(sensor.completedBandBias) then
         bits = bits .. ',"completedBandBias":' .. tostring(sensor.completedBandBias)
     end
+    if finite(sensor.requestedAheadM) then bits = bits .. ',"requestedAheadM":' .. tostring(sensor.requestedAheadM) end
+    if finite(sensor.affordableAheadM) then bits = bits .. ',"affordableAheadM":' .. tostring(sensor.affordableAheadM) end
+    if finite(sensor.effectiveAheadM) then bits = bits .. ',"effectiveAheadM":' .. tostring(sensor.effectiveAheadM) end
+    if finite(sensor.frameEwmaMs) then bits = bits .. ',"frameEwmaMs":' .. tostring(sensor.frameEwmaMs) end
     return bits .. near .. "}"
 end
 
@@ -949,7 +965,7 @@ end
 -- `getModInfoByID`＝:5368、`getModVersion`＝ChooseGameInfo.java:696；原版走訪同款
 -- ISPauseModListUI.lua:19-22）。任一 API 缺席／拋錯就整欄省略，不因環境印記讓
 -- session 起不來。
-local function envStamp()
+local function envStamp(playerNum)
     local bits = ""
     local okG, game = pcall(function() return getCore():getVersion() end)
     if okG and type(game) == "string" and game ~= "" then
@@ -990,6 +1006,13 @@ local function envStamp()
         put("voice", hud.voiceEnabled)
         put("resume", hud.manualResumeMs)  -- 0＝介入即關閉；>0＝放手後 N ms 恢復（0906a）
         put("uturn", hud.uturnMode)        -- gentle／fast（0906b；每次調頭開始讀，途中改要看 uturn 事件）
+        put("zdodge", hud.zombieDodge)     -- 殭屍軟縫開關（0906c；每輪掃描完成讀）
+        put("perception", hud.perceptionDistance)
+    end
+    local driver = MDAD and MDAD.Drive
+    if type(driver) == "table" then
+        put("style", driver.getStyle, playerNum)
+        put("gear", driver.getGear, playerNum)
     end
     put("policy", sandbox, "ObstaclePolicy")
     put("maxKmh", sandbox, "AutoDriveMaxSpeed")
@@ -1000,7 +1023,7 @@ local function envStamp()
     return bits
 end
 
-local function encodeHeader(slot, now, days, profile, drive, part, contFile)
+local function encodeHeader(slot, now, days, profile, drive, part, contFile, playerNum)
     local b = MDAD and MDAD.BUILD
     if type(b) ~= "string" then b = "" end
     -- rev＝開發版本戳（MDAD.Drive.REV；2026-09-02 使用者裁定：兩次「實測跑到
@@ -1018,7 +1041,7 @@ local function encodeHeader(slot, now, days, profile, drive, part, contFile)
     return '{"v":1,"t":"h","slot":' .. slot .. ',"ts":' .. jnum(now)
         .. ',"ret":' .. days .. ',"build":' .. jstr(b) .. ',"rev":' .. jstr(rev)
         .. chain
-        .. envStamp()
+        .. envStamp(playerNum)
         .. ',"profile":' .. pjson .. '}'
 end
 
@@ -1112,11 +1135,18 @@ local function encodePhys(phys)
     addStr("gateReason", "gateReason")
     addNum("cmdV", "cmdV")
     addNum("cmdA", "cmdA")
+    addNum("followerTarget", "ftg") -- 0907e：剖面原始目標／cap 後 desired（tgt 只是 jerk 後的命令）
+    addNum("desiredTarget", "des")
     addNum("assistForce", "af")
     addStr("jerkBypass", "jerkBypass")
     addNum("curveKappa", "curveKappa")
     addBool("curveValid", "curveValid")
     addBool("curveHardActive", "curveHardActive")
+    addNum("ffSteer", "sff")
+    addNum("yawGain", "yg")
+    addNum("appliedSteer", "ast")
+    addNum("routeHeadingError", "att")
+    addNum("kinkExitS", "kxs")
     addNum("curveCap", "curveCap")
     addNum("visibilityCap", "visibilityCap")
     addNum("curveVerifiedUntilS", "curveVerifiedUntilS")
@@ -1128,11 +1158,20 @@ local function encodePhys(phys)
     addNum("dodgeClearanceCap", "dodgeClearanceCap")
     addNum("dodgeVisibilityCap", "dodgeVisibilityCap")
     addNum("dodgeSpaceCap", "dodgeSpaceCap")
+    addBool("dodgeEntryPassed", "dodgeEntryPassed")
     addNum("dodgeDesignSpeed", "dodgeDesignSpeed")
     addNum("dodgeBaseCap", "dodgeBaseCap")
     addNum("dodgeApproachCap", "dodgeApproachCap")
+    addNum("zombieLaneCap", "zombieLaneCap")
     addBool("dodgeCapPending", "dodgeCapPending")
     addNum("dodgeSpeedCap", "dodgeSpeedCap")
+    addNum("dodgeHoldCap", "dhc") -- 0907c：保持段帽（entry 已過、未到 c）
+    addNum("dodgeNextStopS", "dodgeNextStopS")
+    addNum("dodgeNextCap", "dodgeNextCap")
+    addNum("dodgeEnvN", "dodgeEnvN")
+    addNum("dodgeNextX", "dodgeNextX")
+    addNum("dodgeNextY", "dodgeNextY")
+    addNum("dodgeNextR", "dodgeNextR")
     addNum("dodgeClass", "dodgeClass")
     addStr("verifyLineReason", "verifyLineReason")
     addNum("proofKappa", "proofKappa")
@@ -1147,6 +1186,7 @@ local function encodePhys(phys)
     addBool("invalid", "invalid")
     -- 本幀速度裁決者與 gate 狀態（2026-09-01 使用者指示補齊離線可判數據）
     addStr("capReason", "capReason")
+    addStr("minExecFrom", "mef") -- 0907b：cap=min-exec 時被抬前的理由（只在該幀送）
     addStr("sensorCapReason", "sensorCapReason")
     addStr("gateReasonNow", "gateReasonNow")
     addBool("fullGateNow", "fullGateNow")
@@ -1156,6 +1196,8 @@ local function encodePhys(phys)
     -- 2026-09-04 issue #1/#2 復盤缺口：hard-brake 裁決者／本幀是否 forceBrake／幀時
     addStr("hardBrakeReason", "hbr")
     addBool("forceBrakeThis", "fbt")
+    addNum("forceBrakeLeft", "fbl") -- 0907f：閂鎖剩餘 ms／最後觸發原因（fbt 只記當幀會漏採）
+    addStr("forceBrakeWhy", "fbw")
     addNum("frameMs", "fdt")
     -- 0904j 鏈式停留：lc＝常駐 lane 暫時＝停留 offL；dodgeTier 帶 -stay／-nudge／-physical
     addBool("laneChained", "lc")
@@ -1378,7 +1420,7 @@ openPart = function(pn, now, days, retainMs, profile, drive, part, contFile)
     }
     sessions[pn] = s
     local startOk, ready = pcall(function()
-        enqueue(s, encodeHeader(slot, now, days, profile, drive, part, contFile), now)
+        enqueue(s, encodeHeader(slot, now, days, profile, drive, part, contFile, pn), now)
         return checkpoint(s, now)
     end)
     if not startOk then failIo(s, "diagnostics encoding failed") end

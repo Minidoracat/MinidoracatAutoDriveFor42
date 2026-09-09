@@ -1,6 +1,6 @@
 -- MDAD_Sensor.lua — M4 走廊掃描（client：整個自駕唯一會讀「世界格」的地方）
 --
--- 分層：本檔只回答「路線前方 48 公尺（高速組態 110 公尺）的走廊裡，哪些位置是硬障礙」，不做任何決策。
+-- 分層：只回答可載入、可在時間預算內完成的前方走廊；請求距離與實際完成範圍分開。
 -- 縫隙規劃是 shared/MDAD_Corridor.lua 的事（純數學、離線可測），把方向盤轉下去是
 -- client/MDAD_Driver.lua 的事。感知／規劃／執行三層各自只有一種相依：
 --   Sensor → PZ 世界（本檔）｜Corridor → 無｜Driver → Follower + Corridor + 本檔的結果欄位。
@@ -35,8 +35,10 @@
 --     state.hardS[i]   第 i 個硬障礙的**路線絕對弧長**（公尺），i ∈ [1, hardN]
 --     state.hardL[i]   第 i 個硬障礙的橫向偏移（公尺；數學 CCW 法向為正＝PZ 世界的行進方向右側）
 --     state.softN      軟障礙格數（可推開的家具／路邊雜物：撞得過但該減速）
---     state.zombieN    走廊內殭屍數
---     state.corpseN    走廊內地面屍體數（壓得過：只供速度檔，不參與縫隙規劃）
+--     state.zombieN    走廊內殭屍數（±SLOW_BAND_HALF 減速帶；速度檔用）
+--     state.zomN       混合軟目標（s,l）筆數（±4.5 帶），座標語意同 hardS／hardL
+--                      zomIsCorpse[i]：屍體端點 true／殭屍 false；zomOverflow 超過 ZOM_MAX 時軟縫棄權
+--     state.corpseN    走廊內地面屍體數；另以長軸兩端點併入 zomS/zomL，同一次軟避讓
 --     state.movingVeh  走廊內有**行進中**的別台車（跟車情境，不是靜態障礙）
 --     state.unloaded   走廊內有未載入 chunk（規劃要保守：不是淨空，是不知道）
 --     state.sig        整數簽章：障礙布局有變才會變（呼叫端拿它省掉重複規劃）
@@ -66,6 +68,7 @@ MDADSensor = MDADSensor or {}
 -- 熱路徑庫函式在載入期取 local upvalue（Kahlua 的庫函式是 JavaFunction，
 -- 寫 math.sin 等於多一次 table 查詢）。與 shared/MDAD_Follower.lua 同一條守則。
 -- 取整一律用 `n - n % 1`（純 Lua floor，負座標也正確），不呼叫 math.floor。
+if not MDADDynamics then require "MDAD_Dynamics" end
 local sin, cos, abs, sqrt = math.sin, math.cos, math.abs, math.sqrt
 local find = string.find
 
@@ -75,14 +78,9 @@ local find = string.find
 
 local SCAN_INTERVAL_MS = 250   -- 兩輪掃描的間隔（自輪次「開始」起算）
 local SCAN_NEAR = 2            -- 掃描起點：車前 2 公尺（車身本體不算障礙）
-local SCAN_AHEAD = 48          -- 掃描終點：車前 48 公尺（85km/h 約 2 秒反應＋更早定側減少繞行震盪）
+local SCAN_AHEAD = MDADDynamics.PERCEPTION_DEFAULT_M
 local SCAN_STEP = 1            -- 沿路線的取樣步長（公尺，＝一格）
-local SCAN_BUDGET = 56         -- 每幀最多實際查詢幾格世界格（±6.5×48m 帶 ~658 格/輪 → ~12 幀）
-local HARD_MAX = 1472          -- 硬障礙緩衝上限：高速帶 aheadM=100 時掃描帶
-                               -- 數學上限 14×98=1372 個唯一格（2026-09-01 外部
-                               -- 審查抓漏：舊值 768 按 48m 帶設計，高速密集障礙
-                               -- 區前段塞滿後**遠段 hard 靜默丟失**）。1472＝
-                               -- 上限＋100 防呆；帶寬再改必須同步重算。
+local SCAN_BUDGET = 56         -- 每幀世界查詢額度固定；低幀率縮有效範圍，不加重單幀負擔
 local VISITED_ROUNDS = 64      -- 每幾輪重建一次 visited 表
 local SPRITE_CACHE_MAX = 4096  -- sprite 成本快取條目上限
 
@@ -98,6 +96,7 @@ local SPRITE_CACHE_MAX = 4096  -- sprite 成本快取條目上限
 -- 同一格、白掃一次。
 local LAT = { -6.5, -5.5, -4.5, -3.5, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5 }
 local LAT_N = 14
+local HARD_MAX = LAT_N * (MDADDynamics.PERCEPTION_HARD_MAX_M - SCAN_NEAR) + 100
 local CORRIDOR_HALF = 7
 
 -- 世界格去重的鍵：wx * 100000 + wy。PZ 的地圖座標是非負且遠小於 100000
@@ -147,8 +146,13 @@ local ROAD_MIN_N = 24          -- 一輪至少這麼多路面格才給樣本（�
 local ROAD_MAX_SPAN = 9        -- 路面格心最大橫跨（＝10m 實際寬）；更寬視為歧義
 local ROAD_EDGE_GAP = 0.25     -- 兩緣不得落最外圈取樣；LAT 間距 1m，0<gap<1 行為等價
 local ROAD_CACHE_MAX = 256     -- 地板名 → 是否路面 的快取上限（防模組地圖無上限）
+-- 殭屍位置點雲（2026-09-06 殭屍軟縫）：帶內 ±ZOM_BAND_HALF 的殭屍各記一筆 (s,l)，
+-- 以**目前掃描步的局部框**線性化（同 pushVehicleOutline）；只供 Corridor.softZombieLane
+-- 出橫向目標，不進 hard／sig／sweep。上限 ZOM_MAX：超過即 zomOverflow（＝殭屍群，
+-- 軟縫棄權、交給既有數量減速檔）。zombieN（±SLOW_BAND_HALF 計數）語意不變。
+local ZOM_BAND_HALF = 4.5
+local ZOM_MAX = 64
 
-MDADSensor.SCAN_AHEAD = SCAN_AHEAD
 MDADSensor.SCAN_NEAR = SCAN_NEAR
 MDADSensor.CORRIDOR_HALF = CORRIDOR_HALF
 MDADSensor.SLOW_BAND_HALF = SLOW_BAND_HALF
@@ -455,6 +459,8 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
         if state.wUnloadedS == nil or state.curS < state.wUnloadedS then
             state.wUnloadedS = state.curS -- 最近未載入格弧長（動態煞停距判定用）
         end
+        -- 中央帶未知就結束本輪；外側缺格只保留未知旗標，不截掉前方已載入的中央帶。
+        if inBand and state.curS < state.endS then state.endS = state.curS end
         return false
     end
 
@@ -577,26 +583,73 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
     end
 
     -- 動態物件（殭屍）：就算靜態已判 hard，殭屍數仍是規劃端要看的獨立訊號。
-    local movs = square:getMovingObjects()             -- IsoGridSquare.java:9605（回 ArrayList<IsoMovingObject>）
-    local nMov = movs:size()                           -- 迭代慣例 DebugContextMenu.lua:535-537
-    for i = 1, nMov do
-        if inBand and instanceof(movs:get(i - 1), "IsoZombie") then -- 用例 DebugContextMenu.lua:537
-            state.wZombieN = state.wZombieN + 1
+    -- 帶內 ±ZOM_BAND_HALF 另記每隻的 (s,l)（殭屍軟縫）：以殭屍實際座標對目前掃描步的
+    -- 局部框線性化（cx/cy 路線點、nx/ny 法向、前向＝(ny,−nx)）。多數格 size()==0，
+    -- 常態成本只多一次跨界；帶外格連 instanceof 都不叫。
+    local zomBand = rel >= -ZOM_BAND_HALF and rel <= ZOM_BAND_HALF
+    if zomBand then
+        local movs = square:getMovingObjects()         -- IsoGridSquare.java:9605（回 ArrayList<IsoMovingObject>）
+        local nMov = movs:size()                       -- 迭代慣例 DebugContextMenu.lua:535-537
+        for i = 1, nMov do
+            local mo = movs:get(i - 1)
+            if instanceof(mo, "IsoZombie") then        -- 用例 DebugContextMenu.lua:537
+                if inBand then
+                    state.wZombieN = state.wZombieN + 1
+                    -- 最近一隻的弧長（0907b 殭屍檔縱向 envelope：對它煞到檔位速，不是整帶平帽）
+                    if state.wZombieNearS == nil or state.curS < state.wZombieNearS then
+                        state.wZombieNearS = state.curS
+                    end
+                end
+                if state.curS <= state.wSoftEndS then
+                    local zn = state.wZomN
+                    if zn >= ZOM_MAX then
+                        state.wZomOverflow = true
+                    else
+                        local dx, dy = mo:getX() - state.cx, mo:getY() - state.cy
+                        local nx, ny = state.nx, state.ny
+                        zn = zn + 1
+                        state.wZomN = zn
+                        state.wZomS[zn] = state.curS + (dx * ny - dy * nx)
+                        state.wZomL[zn] = dx * nx + dy * ny
+                        state.wZomIsCorpse[zn] = false -- 重用槽也要覆寫，不能留上一輪屍體標記。
+                    end
+                end
+            end
         end
     end
 
-    -- 地面屍體（IsoDeadBody）：引擎放在 staticMovingObjects，**不在** movingObjects
-    -- 也不在 getObjects（入列 IsoDeadBody.java:279、容器宣告 IsoGridSquare.java:316；
-    -- Lua 讀取用例 ISWorldObjectContextMenu.lua:307）。獨立訊號：屍體壓得過，
-    -- 不進 hard/soft、不參與縫隙規劃與簽章，只供速度檔（CorpseSlowdown）。
-    -- 屍體會被拖走／焚燒／腐爛消失，不做快取，每輪照掃；多數格 size()==0，
-    -- 每格常態成本只多一次跨界呼叫。
-    if inBand then
+    -- 屍體與殭屍共用軟縫，不進 hard，也不污染 zombieN／殭屍推撞。
+    -- BaseVehicle.testCollisionWithCorpse(:5220-5247) 以 getAngle() 的中心±0.65m 長軸測輪胎；
+    -- 兩端的橫向佔位區間相接，不能只收中心點而漏掉橫躺的頭／腳。
+    if zomBand then
         local smovs = square:getStaticMovingObjects()
         local nSmov = smovs:size()
         for i = 1, nSmov do
-            if instanceof(smovs:get(i - 1), "IsoDeadBody") then
-                state.wCorpseN = state.wCorpseN + 1
+            local body = smovs:get(i - 1)
+            if instanceof(body, "IsoDeadBody") then
+                if inBand then
+                    state.wCorpseN = state.wCorpseN + 1
+                    if state.wCorpseNearS == nil or state.curS < state.wCorpseNearS then
+                        state.wCorpseNearS = state.curS
+                    end
+                end
+                if state.curS <= state.wSoftEndS then
+                    local zn = state.wZomN
+                    if zn + 2 > ZOM_MAX then
+                        state.wZomOverflow = true
+                    else
+                        local dx, dy = body:getX() - state.cx, body:getY() - state.cy
+                        local angle = body:getAngle()
+                        local ax, ay = cos(angle) * 0.65, sin(angle) * 0.65
+                        local nx, ny = state.nx, state.ny
+                        local zs, zl = state.curS + dx * ny - dy * nx, dx * nx + dy * ny
+                        local ds, dl = ax * ny - ay * nx, ax * nx + ay * ny
+                        state.wZomS[zn + 1], state.wZomL[zn + 1] = zs - ds, zl - dl
+                        state.wZomS[zn + 2], state.wZomL[zn + 2] = zs + ds, zl + dl
+                        state.wZomIsCorpse[zn + 1], state.wZomIsCorpse[zn + 2] = true, true
+                        state.wZomN = zn + 2
+                    end
+                end
             end
         end
     end
@@ -604,6 +657,9 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
     -- softN 以「格」為單位計數（與 hardN 同一個尺度），一格裡兩張沙發不算兩次。
     if soft and not hard and inBand then
         state.wSoftN = state.wSoftN + 1
+        if state.wSoftNearS == nil or state.curS < state.wSoftNearS then
+            state.wSoftNearS = state.curS
+        end
     end
     return hard, hardR
 end
@@ -660,9 +716,14 @@ local function beginRound(state, p, sNow, vehicle, now, len, cell)
     state.wActualSurfaceId = SURFACE_UNKNOWN
 
     state.wHardN = 0
+    state.wHardOverflow = false
     state.wZombieN = 0
+    state.wZombieNearS = nil
+    state.wZomN = 0
+    state.wZomOverflow = false
     state.wCorpseN = 0
     state.wSoftN = 0
+    state.wCorpseNearS, state.wSoftNearS = nil, nil
     state.wMovingVeh = false
     state.wVehAheadS = nil
     state.wVehN = 0
@@ -677,8 +738,14 @@ local function beginRound(state, p, sNow, vehicle, now, len, cell)
 
     local s0 = sNow + SCAN_NEAR
     if s0 < 0 then s0 = 0 end
-    local ahead = state.aheadM
-    if type(ahead) ~= "number" or ahead ~= ahead or ahead < SCAN_AHEAD then ahead = SCAN_AHEAD end
+    local softAhead = state.softAheadM
+    if not MDADDynamics.finite(softAhead) then softAhead = MDADDynamics.SOFT_LOOKAHEAD_M end
+    state.wSoftEndS = sNow + math.min(MDADDynamics.PERCEPTION_HARD_MAX_M,
+        math.max(MDADDynamics.SOFT_LOOKAHEAD_M, softAhead))
+    local ahead = MDADDynamics.perceptionEffective(
+        state.aheadM, state.frameEwmaMs, SCAN_BUDGET / LAT_N, SCAN_NEAR)
+    state.requestedAheadM = state.aheadM
+    state.affordableAheadM = ahead
     local s1 = sNow + ahead
     if s1 > len then s1 = len end
     state.wScanS = s0
@@ -738,9 +805,19 @@ local function finishRound(state, now)
     state.wHardR = tr
 
     state.hardN = state.wHardN
+    state.hardOverflow = state.wHardOverflow == true
     state.zombieN = state.wZombieN
+    state.zombieNearS = state.wZombieNearS
+    local tzs, tzl = state.zomS, state.zomL
+    state.zomS, state.zomL = state.wZomS, state.wZomL
+    state.wZomS, state.wZomL = tzs, tzl
+    state.zomIsCorpse, state.wZomIsCorpse = state.wZomIsCorpse, state.zomIsCorpse
+    state.zomN = state.wZomN
+    state.zomOverflow = state.wZomOverflow
     state.corpseN = state.wCorpseN
     state.softN = state.wSoftN
+    state.corpseNearS, state.softNearS = state.wCorpseNearS, state.wSoftNearS
+    state.softEndS = state.wSoftEndS
     state.movingVeh = state.wMovingVeh
     state.vehAheadS = state.wVehAheadS
     state.vehN = state.wVehN
@@ -772,6 +849,7 @@ local function finishRound(state, now)
     state.roadN = state.wRoadN
     state.scanS = state.wScanS
     state.scanEndS = state.endS
+    state.effectiveAheadM = state.endS - state.wScanS + SCAN_NEAR
     state.stamp = now
     state.ready = true
     state.scanning = false
@@ -815,9 +893,14 @@ function MDADSensor.newState()
         z = 0,
         wHardS = {}, wHardL = {}, wHardX = {}, wHardY = {}, wHardR = {},
         wHardN = 0,
+        wHardOverflow = false,
         wZombieN = 0,
+        wZombieNearS = nil, -- 帶內最近殭屍弧長（本輪 working；nil＝無）
+        wZomS = {}, wZomL = {}, wZomN = 0, wZomOverflow = false, -- 混合軟避讓點；殭屍一點／屍體兩點
+        wZomIsCorpse = {},
         wCorpseN = 0,
         wSoftN = 0,
+        wCorpseNearS = nil, wSoftNearS = nil, wSoftEndS = 0,
         wMovingVeh = false,
         wVehAheadS = nil,  -- 最近「行進中」前車弧長（本輪 working）
         wUnloaded = false,
@@ -839,13 +922,20 @@ function MDADSensor.newState()
         -- 已完成的結果（呼叫端只讀這一組）
         hardS = {}, hardL = {}, hardX = {}, hardY = {}, hardR = {}, -- hardX/Y＝世界座標（掃掠複驗）；hardR＝逐點半徑（樹幹 0）
         hardN = 0,
+        hardOverflow = false,
         zombieN = 0,
+        zombieNearS = nil,  -- 帶內最近殭屍弧長（殭屍檔縱向 envelope；nil＝無）
+        zomS = {}, zomL = {}, zomN = 0, zomOverflow = false, -- 完成輪軟避讓點雲；歷史欄名沿用 zom
+        zomIsCorpse = {},
         corpseN = 0,
         softN = 0,
+        corpseNearS = nil, softNearS = nil, softEndS = 0, softAheadM = nil,
         movingVeh = false,
         vehAheadS = nil,    -- 最近「行進中」前車弧長（跟車分級煞停用；nil＝無）
         unloaded = false,
         sig = 0,
+        frameMs = 0, frameEwmaMs = 0,
+        requestedAheadM = SCAN_AHEAD, affordableAheadM = 0, effectiveAheadM = 0,
         roadC = nil,        -- 路面帶中心相對 nav 線的橫向偏移（nil＝本輪無樣本）
         roadLo = nil,       -- 路面帶左緣／右緣（相對 nav 線；Corridor 縫隙帶內優先用）
         roadHi = nil,
@@ -885,9 +975,14 @@ function MDADSensor.reset(state)
     state.segIdx = 1
     state.baseIdx = 1
     state.wHardN = 0
+    state.wHardOverflow = false
     state.wZombieN = 0
+    state.wZombieNearS = nil
+    state.wZomN = 0
+    state.wZomOverflow = false
     state.wCorpseN = 0
     state.wSoftN = 0
+    state.wCorpseNearS, state.wSoftNearS, state.wSoftEndS = nil, nil, 0
     state.wMovingVeh = false
     state.wVehAheadS = nil
     state.wUnloaded = false
@@ -906,9 +1001,14 @@ function MDADSensor.reset(state)
     for k in pairs(state.vehOutlineGen) do state.vehOutlineGen[k] = 0 end
 
     state.hardN = 0
+    state.hardOverflow = false
     state.zombieN = 0
+    state.zombieNearS = nil
+    state.zomN = 0
+    state.zomOverflow = false
     state.corpseN = 0
     state.softN = 0
+    state.corpseNearS, state.softNearS, state.softEndS = nil, nil, 0
     state.movingVeh = false
     state.vehAheadS = nil
     state.unloaded = false
@@ -926,6 +1026,7 @@ function MDADSensor.reset(state)
     state.actualSurfaceId = SURFACE_UNKNOWN
     state.roundStartedAt = 0
     state.completedBandBias = 0
+    state.affordableAheadM, state.effectiveAheadM = 0, 0
 end
 
 -- working buffer 推一個硬點（含簽章累加；l4＝l*4 的整數版；r＝該點半徑——
@@ -937,6 +1038,13 @@ function MDADSensor.step(state, profile, sNow, vehicle, now, cell)
     if type(profile) ~= "table" then return false end
     if vehicle == nil or cell == nil then return false end
     if type(sNow) ~= "number" or type(now) ~= "number" then return false end
+    local frame = state.frameMs
+    if type(frame) == "number" and frame * 0 == 0 and frame > 0 then
+        if frame > 250 then frame = 250 end
+        local avg = state.frameEwmaMs or 0
+        if avg <= 0 then avg = frame else avg = avg + (frame - avg) * frame / (1000 + frame) end
+        state.frameEwmaMs = avg
+    end
 
     -- 換路線：舊結果的 hardS 是對舊幾何的弧長，套到新路線上是徹底錯的座標——
     -- 不能只作廢進行中的那一輪，已完成的快照也必須一起失效，否則呼叫端會拿舊障礙

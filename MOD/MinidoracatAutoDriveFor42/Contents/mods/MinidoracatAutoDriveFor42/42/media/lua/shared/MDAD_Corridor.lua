@@ -115,8 +115,8 @@
 --   進退區間裡的**不擋線**障礙，不參與 offL 的可行性——它們在側移過程中理論上
 --   可能被擦到。真正擋線的那些不受影響（GROUP_GAP ＝ 6 > GAP ＝ 2，早被拉進群）。
 --   把窗口開到 [a, d] 會讓遠處的路肩障礙否決掉眼前這條真的過得去的縫。
--- * plan() 不知道車現在在哪（沒有 sNow）：s 一律當「路線絕對弧長」，只餵前方點
---   是呼叫端的責任。a 夾在 >= 0（路線起點）只是防呆，不是「車後方」的語意。
+-- * 完整停車輪廓可含掃描起點後方的點；呼叫端用 minS 限定規劃群的起點。
+--   原始世界點不刪，車身接觸與候選掃掠仍須看完整輪廓。
 --
 -- 效能守則（Kahlua）：庫函式都是 JavaFunction，每次呼叫都跨 Lua↔Java 邊界。
 -- 因此 type／math.floor 在載入期取成 local upvalue；絕對值一律用 `if v < 0 then
@@ -317,9 +317,19 @@ end
 -- 壞值／反向邊界視為無帶資訊，直接走單遍全域；不讓壞資料把所有候選排除。
 -- 2026-08-28 實機：右樹排曾把縫逼到左外 3.5m，帶內優先修正車繞上草地。
 -- refineComfort=false 時停在 first-safe lane；driver 的 world-sweep ban 重試必用此模式。
+-- baseAt（第 12 參，選填）＝逐點行駛基準線平行陣列（第 i 點的實際落點 lane）：常駐 laneBias
+-- 在弧內側與弧前後 12m 會被路面餘裕收緊（Follower clampLane 沿弧長連續），一個常數 baseL
+-- 表達不了「行駛線在這一點到底在哪」——障礙擋不擋線要用它所在 s 的落點判（0907d Codex lane
+-- 反例：raw bias 2、弧前 6m 實際 1.0，l=0 的硬物對 2 不擋、對 1.0 擋，舊制 clear 直接撞）。
+-- 缺項退 baseL。縫隙搜尋（candidate lane）仍是常數 lane——側偏承諾線本身由掃掠驗。
+-- minS（第 13 參，選填）＝規劃群的弧長下界；省略不裁。只篩群錨／群聚合，不改原始點雲。
 function MDADCorridor.plan(hardS, hardL, hardN, needHalf, corridorHalf, preferL, hardR, baseL,
-        roadLo, roadHi, refineComfort)
+        roadLo, roadHi, refineComfort, baseAt, minS)
+    if minS ~= nil and (type(minS) ~= "number" or minS * 0 ~= 0) then
+        return "blocked", 0, 0, 0, 0, 0
+    end
     if type(hardR) ~= "table" then hardR = nil end
+    if type(baseAt) ~= "table" then baseAt = nil end
     if type(baseL) ~= "number" or baseL * 0 ~= 0 then baseL = 0 end
     if not isFinitePos(needHalf) then needHalf = NEED_HALF_DEFAULT end
     if not isFinitePos(corridorHalf) then corridorHalf = CORRIDOR_HALF_DEFAULT end
@@ -356,11 +366,13 @@ function MDADCorridor.plan(hardS, hardL, hardN, needHalf, corridorHalf, preferL,
     -- 為中心——障礙擋不擋「車實際要走的那條線」才是要不要繞的判準
     local sObs0 = nil
     for i = 1, n do
-        local l = hardL[i] - baseL
+        local bl = baseAt and baseAt[i] or baseL
+        if type(bl) ~= "number" or bl * 0 ~= 0 then bl = baseL end
+        local l = hardL[i] - bl
         if l < 0 then l = -l end
         local r = hardR and hardR[i] or OBS_HALF
         if type(r) ~= "number" or r ~= r or r < 0 then r = OBS_HALF end
-        if l < r + needHalf then
+        if l < r + needHalf and (minS == nil or hardS[i] >= minS) then
             local s = hardS[i]
             if sObs0 == nil or s < sObs0 then sObs0 = s end
         end
@@ -374,11 +386,13 @@ function MDADCorridor.plan(hardS, hardL, hardN, needHalf, corridorHalf, preferL,
         grown = false
         -- 邊界即時生效（不在輪首快照）：s 遞增的輸入（感知層的自然輸出）一輪就收
         for i = 1, n do
-            local l = hardL[i] - baseL
+            local bl = baseAt and baseAt[i] or baseL
+            if type(bl) ~= "number" or bl * 0 ~= 0 then bl = baseL end
+            local l = hardL[i] - bl
             if l < 0 then l = -l end
             local r = hardR and hardR[i] or OBS_HALF
             if type(r) ~= "number" or r ~= r or r < 0 then r = OBS_HALF end
-            if l < r + needHalf then
+            if l < r + needHalf and (minS == nil or hardS[i] >= minS) then
                 local s = hardS[i]
                 if s >= sObs0 - GROUP_GAP and s <= sObs1 + GROUP_GAP then
                     if s < sObs0 then
@@ -488,4 +502,99 @@ function MDADCorridor.plan(hardS, hardL, hardN, needHalf, corridorHalf, preferL,
     local d = sObs1 + EXIT
     if d < c + MIN_SEG then d = c + MIN_SEG end
     return "dodge", a, b, c, d, offL
+end
+
+-- ---------------------------------------------------------------------------
+-- 殭屍軟縫（2026-09-06；競品 Derpy 的 optimize_z 把殭屍當「軟縫」拉軌跡，
+-- map_nav.lua:7675-7734；我們只出一個橫向目標，不動 commit／掃掠體系）
+-- ---------------------------------------------------------------------------
+-- MDADCorridor.softZombieLane(zomS, zomL, zomN, sFrom, sTo, halfW, base, prev, aLo, aHi, lambda, tmpLo, tmpHi)
+--     zomS/zomL ＝ 殭屍 (s,l) 平行陣列（Sensor 完成輪快照，唯讀）；zomN 有效筆數。
+--     sFrom..sTo ＝ 看哪一段弧長的殭屍（車身前緣到前視窗）。
+--     halfW      ＝ 車半寬；每隻殭屍佔 [l−R, l+R]，R＝halfW＋ZOMBIE_R＋ZOMBIE_MARGIN。
+--     base       ＝ 常駐 lane；prev＝上一輪已採納的 lane（時間連續項）。
+--     aLo..aHi   ＝ 可行帶（呼叫端＝常駐 lane ±DELTA 與路面餘裕的交集）。**帶寬必須容得下
+--                  一個 R 以上的側移**——2026-09-06 實機「完全沒閃」定罪：帶只給 ±1.5、R 1.55，
+--                  殭屍正壓在車道上時任何帶內 lane 都在它的區間裡＝永遠 nil。
+--     lambda     ＝ 連續項權重：cost(u)＝(u−base)²＋lambda·(u−prev)²。
+--     回 u（可行帶內離殭屍區間最近的最佳 lane）；窗內無殭屍回 base；可行帶全被
+--     殭屍區間蓋住回 nil（＝無縫：呼叫端維持原 lane，殭屍是可撞的，交給減速檔）。
+--     零 table 配置：區間以插入排序就地排在呼叫端提供的暫存陣列 tmpLo/tmpHi 裡
+--     （呼叫端預配置、容量 ≥ zomN）。不驗硬障礙——採納前由呼叫端以 plan() 驗該 lane。
+local ZOMBIE_R = 0.35        -- 殭屍實體半徑（IsoZombie 碰撞圓 ~0.3）
+local ZOMBIE_MARGIN = 0.30   -- 殭屍會動＋快照年齡的餘裕
+-- 自由段夠寬時，離殭屍區間邊再多留這麼多（2026-09-07 實機：貼著 R 過＝0.3m 淨距，殭屍一撲
+-- 就中，玩家看不出有閃）；段不夠寬退回貼 R（窄路的最小閃避不犧牲）。帶邊（aLo/aHi）不留。
+local ZOMBIE_PREFER = 0.50
+MDADCorridor.ZOMBIE_R = ZOMBIE_R
+MDADCorridor.ZOMBIE_MARGIN = ZOMBIE_MARGIN
+MDADCorridor.ZOMBIE_PREFER = ZOMBIE_PREFER
+
+function MDADCorridor.softZombieLane(zomS, zomL, zomN, sFrom, sTo, halfW, base, prev,
+        aLo, aHi, lambda, tmpLo, tmpHi)
+    if type(zomS) ~= "table" or type(zomL) ~= "table" or type(tmpLo) ~= "table"
+            or type(tmpHi) ~= "table" then return nil end
+    if type(zomN) ~= "number" or zomN * 0 ~= 0 or zomN < 0 then return nil end
+    if type(base) ~= "number" or base * 0 ~= 0 then base = 0 end
+    if type(prev) ~= "number" or prev * 0 ~= 0 then prev = base end
+    if type(aLo) ~= "number" or aLo * 0 ~= 0 or type(aHi) ~= "number" or aHi * 0 ~= 0
+            or aLo > aHi then return base end
+    if type(lambda) ~= "number" or lambda * 0 ~= 0 or lambda < 0 then lambda = 0 end
+    if not isFinitePos(halfW) then halfW = 0.9 end
+    local R = halfW + ZOMBIE_R + ZOMBIE_MARGIN
+    -- ① 收窗內殭屍區間（插入排序，n ≤ 64）
+    local n = 0
+    for i = 1, zomN do
+        local s, l = zomS[i], zomL[i]
+        if type(s) ~= "number" or s * 0 ~= 0 or type(l) ~= "number" or l * 0 ~= 0 then
+            return nil -- 快照有洞：整批不信
+        end
+        if s >= sFrom and s <= sTo then
+            local lo, hi = l - R, l + R
+            local k = n
+            while k >= 1 and tmpLo[k] > lo do
+                tmpLo[k + 1], tmpHi[k + 1] = tmpLo[k], tmpHi[k]
+                k = k - 1
+            end
+            tmpLo[k + 1], tmpHi[k + 1] = lo, hi
+            n = n + 1
+        end
+    end
+    if n == 0 then return base end
+    -- ② 可行帶 [aLo, aHi] 扣掉區間聯集，逐段取 cost 最小點：無約束極小值
+    --    u0＝(base＋lambda·prev)/(1＋lambda) 投影到每個自由段
+    local u0 = (base + lambda * prev) / (1 + lambda)
+    local bestU, bestCost = nil, 0
+    local cursor = aLo
+    local i = 1
+    while true do
+        -- 下一個區間起點之前的自由段 [cursor, gapEnd]
+        local gapEnd = aHi
+        local lo, hi
+        if i <= n then
+            lo, hi = tmpLo[i], tmpHi[i]
+            if lo < gapEnd then gapEnd = lo end
+        end
+        if gapEnd >= cursor then
+            -- 段的哪一邊是殭屍區間邊（不是帶邊）就多留 PREFER；留不下退回整段（貼 R）
+            local plo, phi = cursor, gapEnd
+            if cursor > aLo then plo = plo + ZOMBIE_PREFER end
+            if gapEnd < aHi then phi = phi - ZOMBIE_PREFER end
+            if plo > phi then plo, phi = cursor, gapEnd end
+            local u = u0
+            if u < plo then u = plo elseif u > phi then u = phi end
+            local du, dp = u - base, u - prev
+            local cost = du * du + lambda * dp * dp
+            -- 同 cost 取右側（靠右行駛慣例：正號＝右）
+            if bestU == nil or cost < bestCost - 1e-9
+                    or (cost <= bestCost + 1e-9 and u > bestU) then
+                bestU, bestCost = u, cost
+            end
+        end
+        if i > n then break end
+        if hi > cursor then cursor = hi end
+        i = i + 1
+        if cursor > aHi then break end
+    end
+    return bestU
 end

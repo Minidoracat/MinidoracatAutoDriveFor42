@@ -115,8 +115,25 @@ local TIRE_SCALE_LO = 0.35     -- worst tire-grip fraction; also the missing-tir
 -- 這些值），要更快過彎改這裡的 LAT_CEIL，那是獨立的調校決策。
 MDADVehicleProfile.ACCEL_CEIL = 2.5
 MDADVehicleProfile.BRAKE_CEIL = 6
-MDADVehicleProfile.LAT_CEIL = 3.5
-MDADVehicleProfile.COAST_CEIL = 0.6
+-- LAT 3.5→5→7（2026-09-07 使用者裁定「積極模式就是應該要比較快」，5 實測「遠遠不夠、沒有甩尾感」：
+-- R 12 路口 23.7→28→33 km/h、R 30 37→44→52）。7 ≈ 好胎 priors 9·fS·fT（fTire 0.8 → 7.2）＝天花板從此
+-- 幾乎不綁、車輛模型（胎況／雨天 0.7 → 5.0／越野）才是上界；舒適風格另有 styleLat 2.5 不受影響；
+-- 學習器仍只降不升（yaw 學習實測從不觸發，別把它當保護）。再上去要看 telemetry `sk`（minWheelSkid）。
+-- 0907f 曾擬 7→6＋wheelbase 縮放（弧段 a_lat ≥7.5 樣本「1.5 秒內掉到 40%」30-100%），Codex lane
+-- 逐段核對：23 段弧內停住全部 `ib=true`＝curve breach forceBrake 鎖輪（cap+3 門檻≈a_lat 8.9），統計被
+-- 煞車政策本身混淆；F350 024 t=22-24 整段 sk<0.3 仍 23 km/h 穩過（低 sk≠stall）。天花板維持 7，
+-- 改拿掉彎道 breach forceBrake（Driver）；再看 telemetry。
+MDADVehicleProfile.LAT_CEIL = 7
+-- COAST 0.6→1.2→質量制動預算（2026-09-07）：「滑行」其實是 regulator 目標低於實速時 CarController
+-- 走 control_NoControl 對 Bullet 下 brakingForce 15（CarController.java:480-510；引擎轉速 >1000）
+-- ＝四輪各一個每步 15 的煞車衝量上限，減速度 ≈ 常數力／質量，與車速無關：RaceCar58 1041 kg
+-- 實測 −3.65 m/s²（八場 session 58 個 0.8s 窗 IQR 0.03）、Van 1118 kg −4.46（含更大滾阻）。
+-- prior＝COAST_BRAKE_N／質量（取 RaceCar 實測 ×0.8 的保守常數；重車自然低：2500 kg → 1.2、
+-- 3500 kg → 0.87）夾 [0.6, CEIL]，再乘路面係數（爛路／雨天輪胎先鎖）。學習器 tightenLimit
+-- 仍只往下修；舒適檔 segCoast 0.45 取 min 不受影響。舊 1.2 常數對輕車＝彎前 100m 就收油、
+-- 直路永遠在滑行（使用者 2026-09-07「直線速度偏低」）。
+MDADVehicleProfile.COAST_CEIL = 3.0
+MDADVehicleProfile.COAST_BRAKE_N = 3040 -- 3800 N（1041 kg × 3.65）× 0.8
 
 local function isFinite(n)
     return type(n) == "number" and n * 0 == 0
@@ -584,7 +601,11 @@ function MDADVehicleProfile.priors(profile, runtimeMass, surfaceId, raining,
     local aLat = 9.0 * fSurface * fTire -- 基準 8.0→9.0（2026-09-02 二次激進化）
     if aLat > MDADVehicleProfile.LAT_CEIL then aLat = MDADVehicleProfile.LAT_CEIL end
     if aDrive > MDADVehicleProfile.ACCEL_CEIL then aDrive = MDADVehicleProfile.ACCEL_CEIL end
-    return aDrive, aBrake, aLat, fSurface, fTire, MDADVehicleProfile.COAST_CEIL
+    local aCoast = MDADVehicleProfile.COAST_BRAKE_N / mass
+    if aCoast > MDADVehicleProfile.COAST_CEIL then aCoast = MDADVehicleProfile.COAST_CEIL end
+    aCoast = aCoast * fSurface -- 天花板先夾再乘路面（輕車雨天 3.0×0.7，不是 3.8×0.7 再夾）
+    if aCoast < 0.6 then aCoast = 0.6 end
+    return aDrive, aBrake, aLat, fSurface, fTire, aCoast
 end
 
 -- Exact approved EWMA scalar update. The caller owns traction-key resets and
@@ -665,6 +686,12 @@ function MDADVehicleProfile.configureFollower(follower, profile, runtimeMass, ra
             end
             aDrive, aBrake, aLat, aCoast = a0, b0, l0, c0
         end
+        -- 行車風格天花板（Follower.STYLES；舒適檔 lat 2.5／brake 3.0／coast 0.45）：priors 只能
+        -- 把剖面壓得更保守，不得把 begin() 依風格填好的預算抬回車輛能力
+        local sl, sb, sc = follower.styleLat, follower.styleBrake, follower.styleCoast
+        if isFinite(sl) and aLat > sl then aLat = sl end
+        if isFinite(sb) and aBrake > sb then aBrake = sb end
+        if isFinite(sc) and aCoast > sc then aCoast = sc end
         follower.segAccel[i], follower.segBrake[i], follower.segLat[i],
             follower.segCoast[i] = aDrive, aBrake, aLat, aCoast
         i = i + 1
