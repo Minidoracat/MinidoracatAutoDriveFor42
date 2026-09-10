@@ -105,6 +105,12 @@ local function stillPlaying(playerNum)
     return ok and playing == true
 end
 
+-- 同一次播放的狀態：nil＝已被別句取代；false＝播完或無法再查詢。
+function Voice.isPlaying(playerNum, ref)
+    if lastRef[playerNum] ~= ref then return nil end
+    return stillPlaying(playerNum)
+end
+
 local function stopPrevious(playerNum)
     if stillPlaying(playerNum) then
         local emitter = lastEmitter[playerNum]
@@ -121,8 +127,9 @@ local function repeatSuppressed(event, playerNum, now)
     return finite(at) and now - at < Voice.REPEAT_COOLDOWN_MS
 end
 
--- 回 true＝真的送出播放。event 未知／關閉／音量 0／無玩家或 emitter 都回 false。
-function Voice.play(event, playerNum)
+-- 回 true, ref＝真的送出播放；第一回傳維持原契約。其餘情況回 false。
+-- force 只供正式交還／抵達通知跳過試聽冷卻；不繞過語音開關或音量。
+function Voice.play(event, playerNum, force)
     if not EVENTS[event] then return false end
     if not voiceEnabled() then return false end
     local volume = voiceVolume()
@@ -135,7 +142,7 @@ function Voice.play(event, playerNum)
         return false
     end
     local now = getTimestampMs()
-    if repeatSuppressed(event, playerNum, now) then return false end
+    if not force and repeatSuppressed(event, playerNum, now) then return false end
     stopPrevious(playerNum)
     local name = Voice.soundName(event)
     local okPlay, ref = pcall(function() return emitter:playSoundImpl(name, nil) end)
@@ -154,7 +161,7 @@ function Voice.play(event, playerNum)
     if getDebug() then
         print("[" .. MDAD.MOD_ID .. "] voice " .. name .. " vol=" .. tostring(volume))
     end
-    return true
+    return true, ref
 end
 
 MDAD.Voice = Voice

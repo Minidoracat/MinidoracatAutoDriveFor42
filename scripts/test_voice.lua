@@ -96,16 +96,27 @@ checkEq(#V.PACKS, 3, "三個語音包 zh/en/ja")
 check(V.PACKS[1] == "zh" and V.PACKS[2] == "en" and V.PACKS[3] == "ja", "PACKS 順序＝下拉順序")
 checkEq(V.soundName("start"), "MDAD_Voice_start_zh", "sound 名 = 前綴＋事件＋語言")
 
--- 正常播放：playSoundImpl＋setVolume
-checkEq(V.play("start", 0), true, "已註冊語音播放成功")
-checkEq(emitterLog[1], "play:MDAD_Voice_start_zh", "走 playSoundImpl（本機）")
-checkEq(emitterLog[2], "vol:101:0.70", "音量 70 → 0.7 套在同一 ref")
+-- 正常播放：保留 boolean 契約，第二回傳值可追蹤同一句直到自然播完。
+do
+    local ok, startRef = V.play("start", 0)
+    checkEq(ok, true, "已註冊語音播放成功")
+    checkEq(startRef, nextRef, "成功播放回傳 emitter 的同一句 ref")
+    checkEq(emitterLog[1], "play:MDAD_Voice_start_zh", "走 playSoundImpl（本機）")
+    checkEq(emitterLog[2], "vol:101:0.70", "音量 70 → 0.7 套在同一 ref")
+    checkEq(V.isPlaying(0, startRef), true, "送出後同一句仍在播放")
 
--- 新句蓋舊句
-checkEq(V.play("arrive", 0), true, "第二句播放")
-checkEq(emitterLog[3], "stop:101", "舊句還在播就先停")
-checkEq(emitterLog[4], "play:MDAD_Voice_arrive_zh", "再播新句")
-playing[102] = nil -- 舊句自然播完
+    -- 新句蓋舊句：取代不等於自然結束，不能拿新句的結束當舊句完成。
+    local arriveRef
+    ok, arriveRef = V.play("arrive", 0)
+    checkEq(ok, true, "第二句播放")
+    checkEq(emitterLog[3], "stop:101", "舊句還在播就先停")
+    checkEq(emitterLog[4], "play:MDAD_Voice_arrive_zh", "再播新句")
+    checkEq(V.isPlaying(0, startRef), nil, "舊句被取代回 nil，不冒充自然結束")
+    checkEq(V.isPlaying(0, arriveRef), true, "新句可用自己的 ref 追蹤播放")
+    playing[arriveRef] = nil
+    checkEq(V.isPlaying(0, arriveRef), false, "同一句自然播完回 false")
+    checkEq(V.isPlaying(0, startRef), nil, "新句結束後舊 ref 仍是被取代")
+end
 local before = #emitterLog
 V.play("start", 0)
 check(emitterLog[before + 1] == "play:MDAD_Voice_start_zh", "舊句已結束就不呼叫 stopSound")
@@ -124,6 +135,10 @@ playing[nextRef] = nil
 clock = clock + V.REPEAT_COOLDOWN_MS - 1
 checkEq(V.play("start", 0), false, "冷卻差 1ms → 仍不念")
 checkEq(V.play("arrive", 0), true, "冷卻內換事件 → 照播")
+-- 終局通知不得被先前試聽的同句／冷卻吞掉；普通呼叫仍保留上面的重播門檻。
+checkEq(V.play("arrive", 0, true), true, "正式抵達通知重新播放，覆蓋尚未播完的試聽")
+playing[nextRef] = nil
+checkEq(V.play("arrive", 0, true), true, "試聽剛播完仍在冷卻，正式抵達通知照播")
 settle()
 
 -- 未註冊 sound：回 false、只警告一次、不拋
@@ -155,6 +170,19 @@ V.play("start", 0)
 check(emitterLog[#emitterLog] == "vol:" .. nextRef .. ":0.70", "HUD 缺席退預設 0.7／開啟")
 MDAD.HUD = { voiceEnabled = function() return hud.enabled end, voiceVolume = function() return hud.volume end,
     voiceLanguage = function() return hud.language end }
+
+-- 播放狀態查詢失敗不可炸掉等待語音的 Driver。
+do
+    settle()
+    local ok, ref = V.play("arrive", 0)
+    checkEq(ok, true, "查詢故障情境先成功送出語音")
+    local originalIsPlaying = emitter.isPlaying
+    emitter.isPlaying = function() error("fmod query failed") end
+    local queried, status = pcall(V.isPlaying, 0, ref)
+    emitter.isPlaying = originalIsPlaying
+    checkEq(queried, true, "emitter 狀態查詢拋錯不外洩到 caller")
+    checkEq(status, false, "emitter 狀態查詢失敗回 false")
+end
 
 -- 邊界：未知事件、無玩家、emitter 拋錯
 checkEq(V.play("dance", 0), false, "未知事件 false")

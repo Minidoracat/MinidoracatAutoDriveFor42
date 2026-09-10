@@ -6,6 +6,14 @@
 [h2]✨ What is this[/h2]
 Item-driven vehicle navigation and autodrive: plan routes with a GPS Navigator, then let the Autopilot Module drive along the road network
 
+[h2]Mod map support: read before use[/h2]
+[b]Subscribing to a map mod does not guarantee navigation or autodrive support for every road.[/b]
+[list]
+[*] Added or changed roads need [b]streets.xml[/b], supplied and maintained by the map author or a compatibility patch author in the game's current official street-data format. Roads must match the actual terrain and connect within and beyond the map.
+[*] A playable map, a map image, or the presence of streets.xml does not prove the road data is complete. This mod does not generate roads from images or automatically repair missing, misplaced or disconnected road data.
+[*] If only one map has routing problems, update MiniMap and AutoDrive and check the road data with its author. You can also report it to us with the map link and diagnostic logs so we can distinguish map-data problems from navigation bugs.
+[/list]
+
 [h2]🚀 Quick start[/h2]
 [olist]
 [*] Get a [b]GPS Navigator[/b] and an [b]Autopilot Module[/b] (loot, or craft with Electrical 3 / 6)
@@ -26,13 +34,13 @@ Item-driven vehicle navigation and autodrive: plan routes with a GPS Navigator, 
 [*] [b]Keep right and dodge obstacles[/b]: drives on the right by default, naturally separates oncoming traffic, finds passable gaps around parked vehicles and returns to its lane
 [*] [b]Blocked-road recovery and rerouting[/b]: tries another gap and reverses out when stuck; on a fully blocked road it waits and the HUD shows a Reroute button that asks navigation for an alternative route around the blockage (or enable "Reroute automatically when blocked" in the options); only when no route exists does it hand control back with a notice
 [*] [b]Voice prompts[/b]: one line each for start, stop, blocked ahead, reversing out, handing back, arrival, reroute found / not found and manual takeover / resume - audible to you only; follows the game language (Chinese / English / Japanese) or a chosen voice pack, with an on/off toggle and volume slider on the HUD
+[*] [b]Single-player auto-pause[/b]: separate on-by-default options for failed recovery and arrival after stopping, in ESC MOD Options / MiniMap. Autodrive stops, then the full voice prompt plays before pausing; muted or unavailable voice pauses immediately. Taking over or restarting cancels a pending pause. Excludes temporary blockages, manual stops, multiplayer/Host and split-screen. Unpausing leaves autodrive off; the world still runs while the voice plays
 [*] [b]Slowdown and soft avoidance[/b]: speed adapts to bends, traffic and unloaded areas. Zombies and corpses share one safe-gap search; without a gap, keep the route and slowdown settings.
 [*] [b]Base sensing distance[/b]: 48 / 80 / 120 (default) / 160 / 200 m. Speed, obstacles and corners can request extensions; the effective range is limited by the performance budget and loaded world.
 [*] [b]Future trajectory[/b]: translucent blue for the normal route and yellow for committed dodges; toggle it and choose line width in MOD Options or the new MiniMap AutoDrive category
 [*] [b]Item availability[/b]: both devices can be crafted or found in world loot, with separate crafting and spawn toggles for GPS and autodrive
 [*] [b]Power and fuel costs[/b]: GPS and autodrive each have independent 0–500% power and extra-fuel settings that stack; at 100%, active GPS navigation adds 5% fuel use and autodrive adds 25%
-[*] [b]Map mod support out of the box[/b]: the road network comes from the game's official street data, so subscribed map mods just work
-[*] [b]Three ways to learn the recipes[/b]: read the dedicated Electronic Navigation Repair Manual; reverse-engineer without consuming the device—a GPS teaches its recipe at Electricity 3, while an Autopilot Module teaches the GPS recipe at 3 and its own at 6; or auto-learn at Electricity 6/8. Crafting still requires Electricity 3/6. The manual appears only in electronic, computer-book, library, and magazine containers whose loot has not yet generated; existing containers are not backfilled
+[*] [b]Learn recipes three ways[/b]: read the Electronic Navigation Repair Manual; research a GPS at Electrical 3, or an Autopilot Module for GPS at 3 and itself at 6 (no item consumed); or auto-learn at 6/8. Crafting requires 3/6. Manuals spawn in unlooted electronic, computer-book, library and magazine containers, never backfilling existing loot
 [/list]
 
 [h2]⚠️ Requirements[/h2]

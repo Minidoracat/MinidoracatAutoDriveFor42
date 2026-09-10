@@ -892,6 +892,22 @@ panel:refresh(nowMs)
 slider:onMouseWheel(-1)
 checkEq(#voiceCalls, voiceCallsMuted, "volume preview stays silent while voice is off")
 voiceOption:setValue(true)
+do
+    local oldPending, oldVolume = MDAD.Drive.isPausePending, MDAD.HUD.voiceVolume()
+    MDAD.Drive.isPausePending = function() return true end
+    panel:refresh(nowMs)
+    local count = #voiceCalls
+    panel:onVolume(35, true)
+    checkEq(#voiceCalls, count, "待暫停通知未播完：調音量不以試聽蓋掉通知")
+    click(panel.voiceButton)
+    click(panel.voiceButton)
+    checkEq(#voiceCalls, count, "待暫停通知未播完：重開語音不以試聽蓋掉通知")
+    MDAD.Drive.isPausePending = function() return false end
+    count = #voiceCalls
+    panel:onVolume(oldVolume, true)
+    checkEq(#voiceCalls, count + 1, "沒有待暫停通知時保留原本音量試聽")
+    MDAD.Drive.isPausePending = oldPending
+end
 -- 改道鈕（2026-09-02 車陣策略）：只在「煞停等待」出現、接在狀態字後、點了走 Drive.requestDetour
 check(not panel.detourButton.visible, "detour button hidden while inactive")
 state.active, state.startReason = true, nil
@@ -1068,6 +1084,49 @@ registeredMiniMapSection.ticks[5].set(false)
 check(not MDAD.HUD.telemetryEnabled()
     and options:getOption("ExportTelemetry"):getValue() == false,
     "MiniMap telemetry tick writes the same AutoDrive ModOptions value")
+do
+    local stuckTick, arrivalTick
+    for _, tick in ipairs(registeredMiniMapSection.ticks) do
+        if tick.label == "UI_MinidoracatAutoDrive_PauseOnStuck" then stuckTick = tick end
+        if tick.label == "UI_MinidoracatAutoDrive_PauseOnArrival" then arrivalTick = tick end
+    end
+    check(stuckTick and stuckTick.get() == true and MDAD.HUD.pauseOnStuck() == true
+        and options:getOption("PauseOnStuck"):getValue() == true,
+        "受困暫停在 MiniMap、ESC 與 Driver getter 預設開啟")
+    check(arrivalTick and arrivalTick.get() == true and MDAD.HUD.pauseOnArrival() == true
+        and options:getOption("PauseOnArrival"):getValue() == true,
+        "抵達暫停在 MiniMap、ESC 與 Driver getter 預設開啟")
+    stuckTick.set(false)
+    check(stuckTick.get() == false and options:getOption("PauseOnStuck"):getValue() == false
+        and MDAD.HUD.pauseOnStuck() == false,
+        "MiniMap 關閉受困暫停同步反映到 ESC 與 Driver getter")
+    check(arrivalTick.get() == true and options:getOption("PauseOnArrival"):getValue() == true
+        and MDAD.HUD.pauseOnArrival() == true,
+        "關閉受困暫停不更動抵達暫停")
+    stuckTick.set(true)
+    arrivalTick.set(false)
+    check(arrivalTick.get() == false and options:getOption("PauseOnArrival"):getValue() == false
+        and MDAD.HUD.pauseOnArrival() == false,
+        "MiniMap 關閉抵達暫停同步反映到 ESC 與 Driver getter")
+    check(stuckTick.get() == true and options:getOption("PauseOnStuck"):getValue() == true
+        and MDAD.HUD.pauseOnStuck() == true,
+        "關閉抵達暫停不更動已開啟的受困暫停")
+    stuckTick.set(false)
+    options:getOption("PauseOnStuck"):setValue(true)
+    options:apply()
+    check(stuckTick.get() == true and MDAD.HUD.pauseOnStuck() == true,
+        "ESC 開啟受困暫停同步反映到 MiniMap 與 Driver getter")
+    check(arrivalTick.get() == false and options:getOption("PauseOnArrival"):getValue() == false
+        and MDAD.HUD.pauseOnArrival() == false,
+        "ESC 開啟受困暫停不更動抵達暫停")
+    options:getOption("PauseOnArrival"):setValue(true)
+    options:apply()
+    check(arrivalTick.get() == true and MDAD.HUD.pauseOnArrival() == true,
+        "ESC 開啟抵達暫停同步反映到 MiniMap 與 Driver getter")
+    check(stuckTick.get() == true and options:getOption("PauseOnStuck"):getValue() == true
+        and MDAD.HUD.pauseOnStuck() == true,
+        "ESC 開啟抵達暫停不更動受困暫停")
+end
 registeredMiniMapSection.combos[3].set(5)
 check(MDAD.HUD.telemetryRetentionDays() == 30
     and options:getOption("TelemetryRetentionDays"):getValue() == 5,

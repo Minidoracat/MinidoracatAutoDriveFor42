@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0909d"
+Drive.REV = "0911b"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -89,6 +89,7 @@ local MAX_SESSIONS = 4         -- 分割畫面本機玩家槽上限（getSpecifi
 -- 0＝介入即關閉，2026-09-06 使用者裁定預設不自動恢復）。恢復語音只在讓位持續夠久
 -- 才播——老玩家勾了自動恢復後輕推方向盤微調，每 2 秒念一句「我接手了」會吵。
 TUNE.YIELD_VOICE_MS = 5000
+TUNE.PAUSE_VOICE_TIMEOUT_MS = 10000 -- 最長交還語音 6.3s；播放狀態失效時不永久等待
 -- 調頭方式（2026-09-06 使用者裁定預設「溫和」；codex 交叉審：「被嚇到」對應**帶多少速度
 -- 開始轉**，其次才是轉多快——力矩倍率只管原地旋轉，管不到 15-25 km/h 帶速大弧）。
 -- 玩家在 ESC／MiniMap 選行為檔，Driver 管成套參數，不開單一物理旋鈕（配出互相打架的門檻）。
@@ -544,13 +545,6 @@ local function haloGood(playerObj, key)
     HaloTextHelper.addGoodText(playerObj, getText(key))
 end
 
--- 語音提示（MDAD_Voice.lua）：缺席／拋錯都不得影響控制——pcall 包住、回值不看
--- （harness 以拋錯樁鎖住此契約）。事件：start／stop／blocked／unstick／handback／
--- arrive／detour／nodetour，觸發點與 halo 同址。
-local function voice(event, playerNum)
-    local v = MDAD.Voice
-    if v then pcall(v.play, event, playerNum) end
-end
 
 local function maxSpeedKmh()
     local v = MDAD.sandbox("AutoDriveMaxSpeed", 120)
@@ -691,6 +685,61 @@ local sessionCount = 0
 
 function Drive.isActive(playerNum)
     return sessions[playerNum] ~= nil
+end
+
+-- 語音通知只在受困交還／抵達收尾時可要求暫停；只在等語音時掛事件。
+-- FMODSoundEmitter.isPlaying(ref) 含尚未開始播放的 toStart（:600-614），不能用固定延遲截句。
+local cancelPendingPause
+local function voice(event, playerNum, pauseOption)
+    if cancelPendingPause then cancelPendingPause() end
+    local v = MDAD.Voice
+    local ok, played, ref
+    if v then ok, played, ref = pcall(v.play, event, playerNum, pauseOption ~= nil) end
+    if not pauseOption then return end
+    local playerObj = getSpecificPlayer(playerNum)
+    local vehicle = playerObj and playerObj:getVehicle()
+    local function allowed()
+        if isClient() or isServer() or getNumActivePlayers() ~= 1 or isGamePaused()
+                or sessions[playerNum] or not playerObj or not vehicle
+                or getSpecificPlayer(playerNum) ~= playerObj or playerObj:isDead()
+                or playerObj:getVehicle() ~= vehicle or manualInput(vehicle) then return false end
+        local on, hud = true, MDAD.HUD
+        if type(hud) == "table" and type(hud[pauseOption]) == "function" then
+            local readOk, value = pcall(hud[pauseOption])
+            if readOk then on = value == true end
+        end
+        return on
+    end
+    if not allowed() then return end
+    -- 語音關閉／缺席／失敗，或無法追蹤播放狀態時直接暫停，不留下無限等待。
+    if not (ok and played == true and ref and type(v.isPlaying) == "function") then
+        setGameSpeed(0)
+        return
+    end
+    local deadline, nextCheck = getTimestampMs() + TUNE.PAUSE_VOICE_TIMEOUT_MS, 0
+    local poll
+    local function cancel()
+        Events.OnTickEvenPaused.Remove(poll)
+        cancelPendingPause = nil
+    end
+    poll = function()
+        -- 自行暫停／接手／改選項不應在稍後又被舊通知暫停。
+        if not allowed() then cancel(); return end
+        local now = getTimestampMs()
+        if now < nextCheck then return end
+        nextCheck = now + 100
+        local statusOk, playing = pcall(v.isPlaying, playerNum, ref)
+        if statusOk and playing == nil then cancel(); return end -- 新句取代了原通知
+        if statusOk and playing == true and now < deadline then return end
+        cancel()
+        setGameSpeed(0)
+    end
+    cancelPendingPause = cancel
+    Events.OnTickEvenPaused.Add(poll)
+end
+
+function Drive.isPausePending()
+    return cancelPendingPause ~= nil
 end
 
 -- Derived read-only control state. `mode` and the orthogonal safety flags remain
@@ -1096,7 +1145,8 @@ function Drive.stop(playerNum, reasonKey, voiceEvent)
     -- 停等預算耗盡的紅字交還說「無法通過，請手動駕駛」；玩家自己接手（voiceEvent＝
     -- "manual"）說「你來開吧，自駕關閉」；其餘（玩家關閉、引擎熄火…）一律
     -- 「已關閉，請接管方向盤」。
-    voice(voiceEvent or (reasonKey == KEY_STUCK and "handback" or "stop"), playerNum)
+    voice(voiceEvent or (reasonKey == KEY_STUCK and "handback" or "stop"), playerNum,
+        reasonKey == KEY_STUCK and "pauseOnStuck" or nil)
     return true
 end
 
@@ -7917,7 +7967,7 @@ local function onPlayerUpdate(player)
             diagStop(s, playerNum, "arrive")
             clearSession(playerNum)
             haloGood(player, "UI_MinidoracatAutoDrive_Arrived")
-            voice("arrive", playerNum)
+            voice("arrive", playerNum, "pauseOnArrival")
         else
             if not commandForceBrake(s, vehicle, now, "arrive") then
                 Drive.stop(playerNum, KEY_UNSUPPORTED)
@@ -8401,6 +8451,7 @@ Events.OnPlayerUpdate.Add(onPlayerUpdate)
 -- 回主選單時 OnPlayerUpdate 已不可靠；主動收掉 drive state 與 telemetry writer。
 -- Diagnostics 也有自己的同事件保險，兩邊 stop 都是冪等。
 local function onMainMenuEnter()
+    if cancelPendingPause then cancelPendingPause() end
     for playerNum = 0, 3 do
         local s = sessions[playerNum]
         if s then

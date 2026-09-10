@@ -370,6 +370,22 @@ local function setManualResumeIndex(value)
     return setClientOption("ManualResume", value)
 end
 
+local function pauseOnStuck()
+    return optionBool("PauseOnStuck", true)
+end
+
+local function setPauseOnStuck(value)
+    return setClientOption("PauseOnStuck", value == true)
+end
+
+local function pauseOnArrival()
+    return optionBool("PauseOnArrival", true)
+end
+
+local function setPauseOnArrival(value)
+    return setClientOption("PauseOnArrival", value == true)
+end
+
 -- 調頭方式（2026-09-06）：index 1＝溫和（預設）、2＝快速。
 local function uturnIndex()
     return optionIndex("UTurnMode", 1, #UTURN_MODES)
@@ -443,6 +459,9 @@ end
 
 -- 語音模組是獨立檔（MDAD_Voice.lua）；缺席／拋錯都不得影響 HUD。
 local function playVoice(event, playerNum)
+    local drive = MDAD.Drive
+    if type(drive) == "table" and type(drive.isPausePending) == "function"
+            and drive.isPausePending() then return end
     local voice = MDAD.Voice
     if voice then pcall(voice.play, event, playerNum) end
 end
@@ -1878,6 +1897,10 @@ if PZAPI and PZAPI.ModOptions then
     for i = 1, #MANUAL_RESUME_KEYS do
         manualResumeOption:addItem(MANUAL_RESUME_KEYS[i], i == 1)
     end
+    modOptions:addTickBox("PauseOnStuck", "UI_MinidoracatAutoDrive_PauseOnStuck", true,
+        "UI_MinidoracatAutoDrive_PauseOnStuck_tooltip")
+    modOptions:addTickBox("PauseOnArrival", "UI_MinidoracatAutoDrive_PauseOnArrival", true,
+        "UI_MinidoracatAutoDrive_PauseOnArrival_tooltip")
     local uturnOption = modOptions:addComboBox("UTurnMode",
         "UI_MinidoracatAutoDrive_UTurnMode", "UI_MinidoracatAutoDrive_UTurnMode_tooltip")
     for i = 1, #UTURN_KEYS do
@@ -1969,6 +1992,8 @@ HUD.setPerceptionDistance = setPerceptionDistance
 HUD.manualResumeMs = manualResumeMs
 HUD.manualResumeIndex = manualResumeIndex
 HUD.setManualResumeIndex = setManualResumeIndex
+HUD.pauseOnStuck = pauseOnStuck
+HUD.pauseOnArrival = pauseOnArrival
 HUD.uturnMode = uturnMode
 HUD.uturnIndex = uturnIndex
 HUD.setUTurnIndex = setUTurnIndex
@@ -2001,6 +2026,12 @@ local function registerMiniMapSettings()
             { label = "UI_MinidoracatAutoDrive_ExportTelemetry",
                 tooltip = "UI_MinidoracatAutoDrive_ExportTelemetry_tooltip",
                 get = telemetryEnabled, set = setTelemetryEnabled },
+            { label = "UI_MinidoracatAutoDrive_PauseOnStuck",
+                tooltip = "UI_MinidoracatAutoDrive_PauseOnStuck_tooltip",
+                default = true, get = pauseOnStuck, set = setPauseOnStuck },
+            { label = "UI_MinidoracatAutoDrive_PauseOnArrival",
+                tooltip = "UI_MinidoracatAutoDrive_PauseOnArrival_tooltip",
+                default = true, get = pauseOnArrival, set = setPauseOnArrival },
         },
         combos = {
             { label = "UI_MinidoracatAutoDrive_TrajectoryWidth",

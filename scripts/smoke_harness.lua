@@ -431,6 +431,14 @@ UIManager = {
     end,
 }
 
+function isGamePaused() return drive.paused end
+function setGameSpeed(speed)
+    drive.pauseCalls = (drive.pauseCalls or 0) + 1
+    drive.pauseHadSession = MDAD.Drive.isActive(0)
+    drive.pauseHadRegulator = drive.pauseVehicle and drive.pauseVehicle._regulator
+    drive.paused = speed == 0
+end
+
 -- isKeyDown(bindingName)：driver 讀的就是 CarController.java:938-942 那幾個綁定名
 function isKeyDown(name) return drive.keys[name] == true end
 
@@ -8481,6 +8489,9 @@ end
 --     0908a 階梯縮帶起後牆要貼在車尾 0.8m（x=7；1.5m 最短帶也命中）才是「一寸不退」；
 --     車尾後 4m 的牆（舊 x=4）現在會退 1.5m——見 (c4b)。
 do
+    local oldClient, oldServer = clientFlag, serverFlag
+    clientFlag, serverFlag = false, false
+    drive.pauseCalls, drive.pauseVehicle = 0, dveh
     checkTrue(armDrive(), "(c) 啟動")
     for _, y in ipairs({ -5, -4, -2, -1, 0, 1, 2, 4, 5 }) do
         drive.putSolid(20, y, "harness_wall_" .. y)
@@ -8502,6 +8513,7 @@ do
     checkTrue(MDAD.Drive.isActive(0), "(c) 停等 6 秒：session 活著（不 unstick 不放棄）")
     checkTrue(haloKey() ~= DKEY.UNSTICK and haloKey() ~= DKEY.STUCK,
         "(c) 停等 6 秒：無倒車／放棄提示（實得 " .. tostring(haloKey()) .. "）")
+    checkFalse(isGamePaused(), "(pause) 暫時堵路仍允許脫困，不提早暫停")
     nowMs = nowMs + 15000 -- 累計 21 秒 > WAIT_TIMEOUT 15 秒
     -- 0904i 診斷提示：診斷開著時 StopStuck 不附提示（本場開、(c3) 關、(d) 驗不重複）
     MDAD.HUD.telemetryEnabled = function() return true end
@@ -8511,6 +8523,17 @@ do
     checkEq(drive.infoHaloIndex(), nil, "(c) 診斷已開：StopStuck 不附診斷提示")
     MDAD.HUD.telemetryEnabled = nil
     checkEq(drive.lastVoice(), "handback", "(c) 超時交還開口 handback，不是 stop")
+    checkTrue(isGamePaused(), "(pause) 單人脫困失敗預設暫停")
+    checkEq(drive.pauseCalls, 1, "(pause) 最終交還只暫停一次")
+    checkFalse(drive.pauseHadSession, "(pause) 暫停前已清除自駕 session")
+    checkFalse(drive.pauseHadRegulator, "(pause) 暫停前已關閉定速")
+    drive.paused = false -- 玩家解除暫停，不應復活已結束的自駕
+    nowMs = nowMs + 3000
+    driveTick(dp, dveh)
+    checkFalse(MDAD.Drive.isActive(0), "(pause) 解除暫停後仍須手動重啟自駕")
+    checkFalse(dveh._regulator, "(pause) 解除暫停後不自動供油")
+    clientFlag, serverFlag = oldClient, oldServer
+    drive.pauseVehicle = nil
     for _, y in ipairs({ -5, -4, -2, -1, 0, 1, 2, 4, 5 }) do drive.clearCell(20, y) end
     for _, y in ipairs({ -1, 0, 1 }) do drive.clearCell(7, y) end
 end
@@ -13661,6 +13684,276 @@ local function scenarioDriveClock()
     MDAD.Drive.stop(0, nil)
 end
 scenarioDriveClock()
+
+function drive.scenarioPauseBoundaries()
+    scenario("受困／抵達暫停：獨立選項、停妥與語音順序、取消等待及單人界線")
+    local oldClient, oldServer, oldPlayers = clientFlag, serverFlag, activePlayers
+    local oldGetter, oldVoice, oldLoaded = getSpecificPlayer, MDAD.Voice, loaded.MDAD_Voice
+    local oldResume, oldPaused, oldPauseVehicle = drive.resumeMs, drive.paused, drive.pauseVehicle
+    local oldPauseCalls, oldHadSession, oldHadRegulator =
+        drive.pauseCalls, drive.pauseHadSession, drive.pauseHadRegulator
+    local oldTicks = eventHandlers.OnTickEvenPaused
+    local oldNav, oldKeys = drive.nav, drive.keys
+    local oldUses = dveh._part._item._uses
+    local saved = {
+        { object = MDAD.HUD, keys = { "pauseOnStuck", "pauseOnArrival", "voiceEnabled", "voiceVolume", "voiceLanguage" } },
+        { object = dp },
+        { object = dveh },
+    }
+    for _, entry in ipairs(saved) do
+        entry.values = {}
+        if entry.keys then
+            for _, key in ipairs(entry.keys) do entry.values[key] = entry.object[key] end
+        else
+            for key, value in pairs(entry.object) do entry.values[key] = value end
+        end
+    end
+    drive.nav, drive.keys, eventHandlers.OnTickEvenPaused = {}, {}, {}
+    for key, value in pairs(oldNav) do drive.nav[key] = value end
+    for i, fn in ipairs(oldTicks or {}) do eventHandlers.OnTickEvenPaused[i] = fn end
+    local tickBaseline = #(oldTicks or {})
+    local currentPlayer = dp
+    getSpecificPlayer = function(pn) if pn == 0 then return currentPlayer end end
+    local options = {}
+    MDAD.HUD.pauseOnStuck = function() return options.stuck end
+    MDAD.HUD.pauseOnArrival = function() return options.arrive end
+    MDAD.HUD.voiceEnabled = function() return options.enabled end
+    MDAD.HUD.voiceVolume = function() return options.volume end
+    MDAD.HUD.voiceLanguage = function() return "en" end
+    local emitter = { nextRef = 0, sounds = {} }
+    function emitter:playSoundImpl(name)
+        self.nextRef = self.nextRef + 1
+        self.sounds[self.nextRef] = {
+            name = name, state = "queued",
+            hadSession = MDAD.Drive.isActive(0), hadRegulator = dveh._regulator,
+        }
+        return self.nextRef
+    end
+    function emitter:isPlaying(ref)
+        if self.queryError then error("emitter query unavailable") end
+        local sound = self.sounds[ref]
+        return sound ~= nil and (sound.state == "queued" or sound.state == "playing")
+    end
+    function emitter:stopSound(ref)
+        if self.sounds[ref] then self.sounds[ref].state = nil end
+    end
+    function emitter:setVolume(ref, volume) self.sounds[ref].volume = volume end
+    dp.getEmitter = function() return emitter end
+    MDAD.Voice, loaded.MDAD_Voice = nil, nil
+    require "MDAD_Voice"
+    local realVoice = MDAD.Voice
+    local function tick(ms)
+        nowMs = nowMs + ms
+        fire("OnTickEvenPaused")
+    end
+    local function begin()
+        clientFlag, serverFlag, activePlayers = false, false, 1
+        currentPlayer, MDAD.Voice = dp, realVoice
+        options.stuck, options.arrive, options.enabled, options.volume = true, true, true, 70
+        emitter.sounds, emitter.queryError = {}, false
+        drive.keys.Forward, drive.resumeMs, drive.paused = nil, oldResume, false
+        nowMs = nowMs + 9000 -- 跨過同句冷卻，不把上一案例的拒播誤認成即時 fallback。
+        checkTrue(armDrive(), "(pause) 啟動獨立 session")
+        drive.pauseCalls, drive.pauseVehicle = 0, dveh
+    end
+    local function notify(event)
+        if event == "handback" then
+            MDAD.Drive.stop(0, DKEY.STUCK)
+        else
+            MDAD.Drive.debugSession(0).mode = "arrive"
+            dveh._speed, dveh._stopped = 0, true
+            driveTick(dp, dveh)
+        end
+    end
+    local function finishSound()
+        emitter:stopSound(emitter.nextRef)
+        tick(150)
+    end
+
+    -- Voice 關閉時仍必須尊重兩個獨立選項；MP／server／分割畫面都不能暫停世界。
+    for _, event in ipairs({ "handback", "arrive" }) do
+        for _, case in ipairs({
+            { label = "純單人兩項開啟", own = true, other = true, pause = true },
+            { label = "只關閉本事件", own = false, other = true, pause = false },
+            { label = "只開啟本事件", own = true, other = false, pause = true },
+            { label = "MP／Host", own = true, other = true, client = true, pause = false },
+            { label = "伺服器", own = true, other = true, server = true, pause = false },
+            { label = "本機分割畫面", own = true, other = true, players = 2, pause = false },
+        }) do
+            begin()
+            options.enabled = false
+            if event == "handback" then options.stuck, options.arrive = case.own, case.other
+            else options.stuck, options.arrive = case.other, case.own end
+            clientFlag, serverFlag, activePlayers = case.client == true, case.server == true, case.players or 1
+            notify(event)
+            local label = "(pause) " .. event .. "／" .. case.label
+            checkEq(isGamePaused(), case.pause, label .. "：無語音時直接遵守暫停選項")
+            checkEq(drive.pauseCalls, case.pause and 1 or 0, label .. "：只作必要的原生暫停")
+            checkFalse(MDAD.Drive.isActive(0) or dveh._regulator, label .. "：先交還控制權")
+            tick(11000)
+            checkEq(drive.pauseCalls, case.pause and 1 or 0, label .. "：沒有延後補暫停")
+        end
+    end
+
+    for _, event in ipairs({ "handback", "arrive" }) do
+        begin()
+        local label = "(voice-pause) " .. event
+        if event == "arrive" then
+            MDAD.Drive.debugSession(0).mode = "arrive"
+            dveh._speed, dveh._stopped = 5, false
+            local before = emitter.nextRef
+            driveTick(dp, dveh)
+            checkTrue(MDAD.Drive.isActive(0), label .. "：尚未停妥必須保留收尾 session")
+            checkFalse(isGamePaused(), label .. "：煞停途中不暫停")
+            checkEq(emitter.nextRef, before, label .. "：煞停途中不先播到站語音")
+            checkTrue(haloKey() ~= DKEY.ARRIVED, label .. "：煞停途中不先顯示到站")
+            dveh._speed = 0 -- 速度數字為零仍不等於原生 isStopped。
+            driveTick(dp, dveh)
+            checkTrue(MDAD.Drive.isActive(0), label .. "：速度零但 isStopped=false 仍等待停妥")
+        end
+        dveh._regulator = true -- 證明收尾真的關閉定速，不能靠 fixture 原本就是 false。
+        notify(event)
+        local sound = emitter.sounds[emitter.nextRef]
+        checkEq(sound.name, realVoice.soundName(event), label .. "：真 Voice 已把對應通知排入 emitter")
+        checkFalse(sound.hadSession or sound.hadRegulator, label .. "：送語音前已交還 session 與定速")
+        checkFalse(MDAD.Drive.isActive(0) or dveh._regulator, label .. "：等候語音期間不持有車輛")
+        checkTrue(MDAD.Drive.isPausePending(), label .. "：HUD 可辨識通知仍持有待暫停狀態")
+        tick(150)
+        checkFalse(isGamePaused(), label .. "：native ref 還在排隊時不暫停")
+        sound.state = "playing"
+        tick(6500)
+        checkFalse(isGamePaused(), label .. "：已開始播放但尚未播完仍不暫停")
+        sound.state = nil
+        tick(150)
+        checkTrue(isGamePaused(), label .. "：同一句完整播完才暫停")
+        checkEq(drive.pauseCalls, 1, label .. "：完成只暫停一次")
+        checkFalse(drive.pauseHadSession or drive.pauseHadRegulator, label .. "：暫停不復活控制權")
+        checkEq(#eventHandlers.OnTickEvenPaused, tickBaseline, label .. "：完成後卸除等待事件")
+        checkFalse(MDAD.Drive.isPausePending(), label .. "：播完後 HUD 恢復一般試聽")
+        drive.paused = false
+        tick(11000)
+        driveTick(dp, dveh)
+        checkFalse(isGamePaused() or MDAD.Drive.isActive(0) or dveh._regulator,
+            label .. "：玩家恢復後沒有 late pause，也不自動重啟或供油")
+        checkEq(drive.pauseCalls, 1, label .. "：後續 tick 不重寫恢復速度")
+    end
+
+    for _, previewPlaying in ipairs({ true, false }) do
+        begin()
+        checkTrue(realVoice.play("arrive", 0), "(preview) 行駛中調音量試聽到站句")
+        local previewRef = emitter.nextRef
+        if not previewPlaying then emitter:stopSound(previewRef) end
+        notify("arrive")
+        check(emitter.nextRef ~= previewRef, "(preview) 正式抵達另播完整通知，不借用試聽或被冷卻擋住")
+        tick(150)
+        checkFalse(isGamePaused(), "(preview) 正式通知尚未播完，不因試聽而立即暫停")
+        finishSound()
+        checkTrue(isGamePaused(), "(preview) 正式通知完整播完才暫停")
+    end
+
+    for _, event in ipairs({ "handback", "arrive" }) do
+        begin()
+        drive.paused = true
+        notify(event)
+        finishSound()
+        checkTrue(isGamePaused(), "(pause) " .. event .. "：已暫停就維持，不自動播放世界")
+        checkEq(drive.pauseCalls, 0, "(pause) " .. event .. "：不重寫原版暫停前的恢復速度")
+    end
+    MDAD.Drive.stop(0, DKEY.STUCK)
+    checkEq(drive.pauseCalls, 0, "(pause) 重複 stop 不再有副作用")
+
+    -- 取消必須是永久撤銷：先觸發一次取消檢查，再恢復環境、跨過 10 秒，不能晚到暫停。
+    for _, kind in ipairs({
+        "restart", "steering", "keyboard", "menu", "dead", "player", "exit",
+        "option", "client", "server", "split", "paused", "replaced",
+    }) do
+        begin()
+        notify("arrive")
+        tick(150)
+        checkFalse(isGamePaused(), "(cancel) " .. kind .. "：先確實進入語音等待")
+        if kind == "restart" then checkTrue(MDAD.Drive.start(dp), "(cancel) 玩家主動重啟")
+        elseif kind == "steering" then dveh._steering = 0.02
+        elseif kind == "keyboard" then drive.keys.Forward = true
+        elseif kind == "menu" then fire("OnMainMenuEnter")
+        elseif kind == "dead" then dp._dead = true
+        elseif kind == "player" then currentPlayer = pc1
+        elseif kind == "exit" then dp._vehicle = nil
+        elseif kind == "option" then options.arrive = false
+        elseif kind == "client" then clientFlag = true
+        elseif kind == "server" then serverFlag = true
+        elseif kind == "split" then activePlayers = 2
+        elseif kind == "paused" then drive.paused = true
+        elseif kind == "replaced" then
+            checkTrue(realVoice.play("blocked", 0), "(cancel) 外部新句取代到站通知")
+        end
+        tick(150)
+        checkEq(drive.pauseCalls, 0, "(cancel) " .. kind .. "：取消時不改寫世界速度")
+        checkEq(#eventHandlers.OnTickEvenPaused, tickBaseline, "(cancel) " .. kind .. "：卸除等待事件")
+        currentPlayer, dp._dead, dp._vehicle = dp, false, dveh
+        dveh._steering, drive.keys.Forward = 0, nil
+        options.arrive, clientFlag, serverFlag, activePlayers, drive.paused = true, false, false, 1, false
+        finishSound()
+        tick(11000)
+        checkFalse(isGamePaused(), "(cancel) " .. kind .. "：環境恢復／新句播完也不補暫停")
+        if kind == "restart" then
+            checkTrue(MDAD.Drive.isActive(0), "(cancel) 舊通知不會關閉新行程")
+        else
+            checkFalse(MDAD.Drive.isActive(0), "(cancel) " .. kind .. "：不復活舊行程")
+        end
+    end
+
+    begin()
+    notify("handback")
+    tick(9900)
+    checkFalse(isGamePaused(), "(timeout) 壞 emitter 未滿十秒仍等待")
+    tick(200)
+    checkTrue(isGamePaused(), "(timeout) emitter 永遠說排隊中：十秒保險結束等待")
+    checkEq(drive.pauseCalls, 1, "(timeout) 保險只暫停一次")
+    checkEq(#eventHandlers.OnTickEvenPaused, tickBaseline, "(timeout) 保險也卸除事件")
+
+    begin()
+    notify("arrive")
+    emitter.queryError = true
+    tick(150)
+    checkTrue(isGamePaused(), "(fallback) 真 Voice 的 native 查詢拋錯按播放失敗暫停")
+    begin()
+    MDAD.Voice = nil
+    notify("arrive")
+    checkTrue(isGamePaused(), "(fallback) Voice 模組缺席也立即暫停")
+
+    begin()
+    MDAD.Drive.stop(0, nil)
+    checkFalse(isGamePaused(), "(pause) 玩家手動關閉不暫停")
+    begin()
+    drive.resumeMs, dveh._steering = 0, 0.02
+    driveTick(dp, dveh)
+    check(not MDAD.Drive.isActive(0) and not isGamePaused(), "(pause) 玩家直接接手不暫停")
+    begin()
+    drive.resumeMs, dveh._steering = 2000, 0.02
+    driveTick(dp, dveh)
+    check(MDAD.Drive.hudState(0) == "yield" and not isGamePaused(), "(pause) 暫時讓位不暫停")
+    begin()
+    dveh._engine = false
+    driveTick(dp, dveh)
+    check(not MDAD.Drive.isActive(0) and not isGamePaused(), "(pause) 熄火停用不暫停")
+
+    MDAD.Drive.stop(0, nil)
+    for _, entry in ipairs(saved) do
+        if entry.keys then
+            for _, key in ipairs(entry.keys) do entry.object[key] = entry.values[key] end
+        else
+            for key in pairs(entry.object) do entry.object[key] = nil end
+            for key, value in pairs(entry.values) do entry.object[key] = value end
+        end
+    end
+    dveh._part._item._uses = oldUses
+    MDAD.Voice, loaded.MDAD_Voice, getSpecificPlayer = oldVoice, oldLoaded, oldGetter
+    eventHandlers.OnTickEvenPaused, drive.nav, drive.keys = oldTicks, oldNav, oldKeys
+    clientFlag, serverFlag, activePlayers = oldClient, oldServer, oldPlayers
+    drive.resumeMs, drive.paused, drive.pauseVehicle = oldResume, oldPaused, oldPauseVehicle
+    drive.pauseCalls, drive.pauseHadSession, drive.pauseHadRegulator = oldPauseCalls, oldHadSession, oldHadRegulator
+end
+drive.scenarioPauseBoundaries()
 
 -- 053/055：前一承諾走完時，下一台車的點雲早已被守護讀過，布局不變仍須重新規劃。
 function drive.scenarioReleasedNextCar()
