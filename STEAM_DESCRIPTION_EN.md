@@ -9,9 +9,9 @@ Item-driven vehicle navigation and autodrive: plan routes with a GPS Navigator, 
 [h2]Mod map support: read before use[/h2]
 [b]Subscribing to a map mod does not guarantee navigation or autodrive support for every road.[/b]
 [list]
-[*] Added or changed roads need [b]streets.xml[/b], supplied and maintained by the map author or a compatibility patch author in the game's current official street-data format. Roads must match the actual terrain and connect within and beyond the map.
-[*] A playable map, a map image, or the presence of streets.xml does not prove the road data is complete. This mod does not generate roads from images or automatically repair missing, misplaced or disconnected road data.
-[*] If only one map has routing problems, update MiniMap and AutoDrive and check the road data with its author. You can also report it to us with the map link and diagnostic logs so we can distinguish map-data problems from navigation bugs.
+[*] Added or changed roads need [b]streets.xml[/b], maintained by the map or compatibility-patch author in the current official format, matching the terrain and connecting roads within and beyond the map.
+[*] Playability, map images or an existing streets.xml do not prove complete road data. This mod cannot generate roads from images or auto-fix missing, misplaced or disconnected roads.
+[*] For map-specific failures, update both mods and check with the map author. Use the road-report link below with the map link, screenshots and text coordinates; no logs needed.
 [/list]
 
 [h2]🚀 Quick start[/h2]
@@ -67,11 +67,12 @@ Item-driven vehicle navigation and autodrive: plan routes with a GPS Navigator, 
 [h2]💬 Feedback[/h2]
 [list]
 [*] [url=https://discord.gg/Gur2V67]Discord community[/url]
-[*] [url=https://github.com/Minidoracat/MinidoracatAutoDriveFor42/issues/new/choose]GitHub navigation report[/url]: wrong route, stuck or unexpected stop - open an issue and attach the whole Telemetry log folder as a zip (enable "Export autodrive diagnostic log" in the options first; the "Report a navigation problem" button in the options copies this link for you)
+[*] [url=https://github.com/Minidoracat/MinidoracatMiniMapFor42/issues/new?template=road-data.yml]Road / route data[/url]: misplaced routes, gaps or detours. Attach [b]a route screenshot showing coordinates + the coordinates as text[/b], and describe the problem. Endpoints, direction and map/version help. [b]No Telemetry required.[/b]
+[*] [url=https://github.com/Minidoracat/MinidoracatAutoDriveFor42/issues/new/choose]Vehicle control[/url]: a correct route but the car veers off, gets stuck or slows unexpectedly. Enable diagnostic export; attach the whole Telemetry ZIP. The options' report button copies this link.
 [/list]
 
 [h2]☕ Support the author[/h2]
-The mod is free and always will be. If you enjoy it, consider buying me a coffee - tips go straight into servers and mod development. Source code is public on GitHub.
+Always free; source on GitHub. Tips fund servers and mod development.
 [url=https://ko-fi.com/minidoracat][img]https://raw.githubusercontent.com/Minidoracat/workshop-resources/refs/heads/main/badges/badge_kofi.png[/img][/url] [url=https://github.com/Minidoracat/MinidoracatAutoDriveFor42][img]https://raw.githubusercontent.com/Minidoracat/workshop-resources/refs/heads/main/badges/badge_github.png[/img][/url]
 
 [b]#Minidoracat[/b]

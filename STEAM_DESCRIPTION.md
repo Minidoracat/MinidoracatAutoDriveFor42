@@ -11,7 +11,7 @@
 [list]
 [*] 新增或修改的道路，需由地圖作者或相容性補丁作者提供、維護符合目前遊戲官方街道格式的 [b]streets.xml[/b]。資料須對應實際路面，並正確連接地圖內外的道路。
 [*] 地圖能正常遊玩、顯示地圖圖片，或只是有 streets.xml，都不代表道路資料完整。本 MOD 不會從圖片自動產生道路，也不會自動補齊缺路或修正錯位、斷連的道路資料。
-[*] 若只有特定地圖無法導航，請先更新 MiniMap 與 AutoDrive，並向地圖作者確認道路資料；也歡迎附上地圖連結與診斷紀錄向我們回報，方便區分地圖資料與導航程式問題。
+[*] 若只有特定地圖無法導航，請先更新 MiniMap 與 AutoDrive，並向地圖作者確認道路資料；依下方道路回報入口附地圖連結、導航截圖與文字座標即可，不必診斷紀錄。
 [/list]
 
 [h2]🚀 快速上手[/h2]
@@ -67,7 +67,8 @@
 [h2]💬 意見回饋與交流[/h2]
 [list]
 [*] [url=https://discord.gg/Gur2V67]Discord 社群[/url]
-[*] [url=https://github.com/Minidoracat/MinidoracatAutoDriveFor42/issues/new/choose]GitHub 導航問題回報[/url]：走錯路、卡住、無故停下請開 Issue，並把整個 Telemetry 診斷紀錄資料夾壓縮附上（設定裡先開「匯出自動駕駛診斷紀錄」；設定裡的「回報導航問題」按鈕會直接複製這個網址）
+[*] [url=https://github.com/Minidoracat/MinidoracatMiniMapFor42/issues/new?template=road-data.yml]道路／導航線回報[/url]：線畫到路外、缺路或繞遠，請附[b]包含導航線與座標的截圖＋文字座標[/b]，簡述哪裡不對；可補起終點、方向、地圖 MOD／版本。[b]不需 Telemetry。[/b]
+[*] [url=https://github.com/Minidoracat/MinidoracatAutoDriveFor42/issues/new/choose]自動駕駛控制回報[/url]：路線正常但車偏離、卡住或異常減速，先開「匯出自動駕駛診斷紀錄」，再附整個 Telemetry 資料夾 ZIP。設定的「回報導航問題」可複製入口。
 [/list]
 
 [h2]☕ 支持作者[/h2]
