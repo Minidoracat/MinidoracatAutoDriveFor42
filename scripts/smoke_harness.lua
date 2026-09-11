@@ -11166,12 +11166,7 @@ local function scenarioPhaseE()
             "unloaded cell inside stopping horizon keeps gate closed")
         checkTrue(drive.calls.maxRegSpeed < 40,
             "near unloaded cell applies a real visibility cap")
-        -- 2026-09-04（Olin Road 空直路 57 km/h 四次煞到 12：chunk streaming 在 cell 邊界
-        -- 卡住、已載入前緣縮到 17-30m，舒適煞車反推的可視上限崩到 31 → breach →
-        -- forceBrake）：未載入前緣不是障礙，煞停證明改用緊急煞車能力
-        -- （minBrake×UNLOADED_BRAKE_GAIN、上限 UNLOADED_BRAKE_MAX）；掃描帶尾端仍用舒適煞車。
-        -- 契約：本幀 visibilityCap＝visibilityCapKmh(前緣距, tau, 緊急煞車, halfL)，且嚴格高於
-        -- 舒適煞車版（tau 取下限 0.5 仍成立＝與時鐘無關的下界）。
+        -- 巡航與緊急紅線共用真實可視前緣，但不能共用速度值：先收油，再在真停距不足時硬煞。
         do
             local sen = captured.sensor
             -- 中央帶未知會把 endS 截到該格（Sensor：inBand 且 curS < endS 就截短），
@@ -11185,16 +11180,14 @@ local function scenarioPhaseE()
             if captured.horizonStamp == sen.stamp and captured.horizonMinBrake < b then
                 b = captured.horizonMinBrake
             end
-            local bg = math.min(b * 2.5, 12) -- ＝TUNE.UNLOADED_BRAKE_GAIN／UNLOADED_BRAKE_MAX
+            local bg = math.min(b * 2.5, 12)
             local halfL = captured.vehicleProfile.halfL
             checkNear(captured.visibilityCap,
+                MDADDynamics.visibilityCapKmh(dist, tau, b, halfL), 1e-6,
+                "unknown frontier uses the same cruise-brake domain as loaded coverage")
+            checkNear(captured.visibilityHardKmh,
                 MDADDynamics.visibilityCapKmh(dist, tau, bg, halfL), 1e-6,
-                "unloaded edge visibility cap uses emergency brake (gain-capped) identity")
-            checkTrue(captured.visibilityCap
-                    > MDADDynamics.visibilityCapKmh(dist, 0.5, b, halfL) + 1,
-                "unloaded edge visibility cap strictly above the comfort-brake proof（cap="
-                .. tostring(captured.visibilityCap) .. " comfort@0.5="
-                .. tostring(MDADDynamics.visibilityCapKmh(dist, 0.5, b, halfL)) .. "）")
+                "emergency visibility bound preserves the existing brake prior")
         end
         drive.putRoad(15, 15, 0, 0)
         drive.scanRound()
@@ -12108,9 +12101,6 @@ local function scenarioPhaseE()
     captured.accelTime, captured.coastTime, captured.brakeTime = 0, 0, 0
     nowMs = nowMs + 100
     driveTick(dp, hotVeh)
-    checkTrue(captured.brakeTime > 0
-            and captured.accelTime == 0 and captured.coastTime == 0,
-        "forceBrake effective window classifies brake and excludes accel/coast")
     captured.accelTime, captured.coastTime, captured.brakeTime = 0, 0, 0
     captured.ewmaSuppressUntil = captured.forceBrakeUntil
     captured.kinPrevMs, captured.kinPrevV, captured.kinPrevH =
@@ -14669,6 +14659,163 @@ function drive.scenarioPerceptionRange()
         oldWorld, oldGeo, oldSandbox, oldVeh, oldGet
 end
 drive.scenarioPerceptionRange()
+
+function drive.scenarioVisibilityBraking()
+    scenario("可視制動：空路輪間波動不鎖輪，真未知前緣仍可停車")
+    local oldWorld, oldGeo, oldSandbox, oldVeh, oldGet =
+        drive.world, drive.vehGeo, SandboxVars, dveh, getSpecificPlayer
+    local oldApi, oldGear = MinidoracatMiniMapAPI.navApiVersion, MDAD.Drive.getGear(0)
+    local oldPerception, oldZ = MDAD.HUD.perceptionDistance, MDAD.HUD.zombieDodge
+    local oldRoute, oldTx, oldTy, oldState =
+        drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
+    local wasMs = drive.frameMs(20)
+    MDAD.Drive.stop(0, nil)
+    getSpecificPlayer = function(n) if n == 0 then return dp end end
+    MinidoracatMiniMapAPI.navApiVersion = 5
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
+        AutoDriveMaxSpeed = 120, RightLaneBias = 0 })
+    MDAD.Drive.setGear(0, 4)
+    MDAD.HUD.zombieDodge = function() return false end
+    dveh = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }),
+        engineRunning = true, mass = 1330, speed = 20, maxSpeed = 85,
+        bodyW = 1.62, bodyL = 3.62, comX = 0, comZ = 0.12, profileFull = true,
+        enginePower = 4100, brakingForce = 112, wheelFriction = 1.5, tireFriction = 1.5 })
+    local st
+    local function arm(perception)
+        MDAD.Drive.stop(0, nil)
+        drive.fillWorld(-12, 900, -9, 9)
+        drive.putRoad(-12, 900, -8, 8)
+        MDAD.HUD.perceptionDistance = function() return perception end
+        dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = 0, 0, 20, 0, false
+        dveh._engine, dveh._driver = true, dp
+        dp._vehicle, dp._dead, dp._local = dveh, false, true
+        setHeading(dveh, 0)
+        drive.nav.route = { pts = { 0, 0, 1000, 0 }, segSurface = { "paved" }, segWidth = { 16 } }
+        drive.nav.tx, drive.nav.ty, drive.nav.state = 1000, 0, "ok"
+        drive.frameMs(20)
+        checkTrue(MDAD.Drive.start(dp), "(visibility) 空直路啟動")
+        for _ = 1, 40 do driveTick(dp, dveh) end
+        st = MDAD.Drive.debugSession(0)
+        checkTrue(st.sensor.ready and st.sensor.hardN == 0 and not st.sensor.unloaded,
+            "(visibility) 真Sensor已完成空路快照")
+        driveReset(dveh)
+    end
+    -- 縱向模型只驗控制時序：讀真regulator命令，硬煞按一秒閂鎖，不假裝車瞬間跟上目標。
+    -- 低幀階段仍保留56格/幀預算；這不是Bullet或FPS效能驗證。
+    local function advance(dt)
+        local v = dveh._speed / 3.6
+        local acc = -2.3
+        if nowMs < st.forceBrakeUntil then
+            acc = -13
+        elseif dveh._regulator and dveh._speed < (dveh._regSpeed or 0) then
+            acc = 2.5
+        end
+        local nv = math.max(0, v + acc * dt)
+        dveh._x = dveh._x + (v + nv) * 0.5 * dt
+        dveh._speed = nv * 3.6
+        drive.mult = dt * 48
+        nowMs = nowMs + dt * 1000
+        driveTick(dp, dveh)
+    end
+    for case, distance in ipairs({ 48, 80, 80 }) do
+        arm(distance)
+        local label = distance .. (case == 3 and "m 固定50ms" or "m 漸變幀時")
+        local elapsed, minSpeed, maxSpeed = 0, math.huge, 0
+        while elapsed < 36 and MDAD.Drive.isActive(0) do
+            local dt = case == 3 and 0.05
+                or 0.02 + 0.03 * math.max(0, 1 - math.abs(elapsed - 20) / 10)
+            advance(dt)
+            elapsed = elapsed + dt
+            maxSpeed = math.max(maxSpeed, dveh._speed)
+            if elapsed > 10 then minSpeed = math.min(minSpeed, dveh._speed) end
+        end
+        checkTrue(MDAD.Drive.isActive(0), "(visibility) 空路保持自駕 " .. distance)
+        checkEq(drive.calls.forceBrake, 0,
+            "(visibility) 輪間更新與正常幀時變化不觸發一秒硬煞 " .. label)
+        checkTrue(maxSpeed > 40 and minSpeed > 20,
+            "(visibility) 真命令驅動前進，不以全程龜速或煞停換假綠 " .. label
+            .. "（峰值 " .. maxSpeed .. "、最低 " .. minSpeed .. "）")
+    end
+    arm(80)
+    -- 同一份已驗證前綴，載入旗標解除只能增加證據，不能降低命令。
+    local realStep = MDADSensor.step
+    MDADSensor.step = function() return false end
+    st.sensor.scanEndS, st.sensor.unloadedS = st.lastSNow + 40, st.lastSNow + 40
+    st.sensor.unloaded, st.sensor.stamp = true, nowMs
+    driveTick(dp, dveh)
+    local before = st.cmdV
+    st.sensor.unloaded = false
+    driveTick(dp, dveh)
+    checkTrue(st.cmdV + 1e-9 >= before,
+        "(visibility) 同距離載入完成不產生限速斷層")
+    -- 不再有新快照，車仍須在已掃前緣內停下；不能把平滑誤寫成略過未知。
+    st.sensor.scanEndS, st.sensor.unloadedS = st.lastSNow + 15, st.lastSNow + 15
+    st.sensor.unloaded, st.sensor.stamp = true, nowMs
+    dveh._speed = 60
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkTrue(drive.calls.forceBrake > 0,
+        "(visibility) 60km/h僅剩15m仍立即緊急煞車")
+    local frontier = st.sensor.scanEndS
+    for _ = 1, 100 do advance(0.02) end
+    checkTrue(dveh._speed < 1 and dveh._x + st.vehicleProfile.halfL < frontier,
+        "(visibility) 前緣不再更新時，真命令在未知區前停穩")
+
+    local function learnBrake(deceleration, startSpeed, episodes)
+        MDADSensor.step = realStep
+        arm(120)
+        MDADSensor.step = function() return false end
+        st.sensor.scanEndS = 900
+        local prior = st.priorBrake
+        for _ = 1, episodes do
+            dveh._speed = startSpeed
+            st.kinPrevMs, st.kinPrevV = nowMs, startSpeed / 3.6
+            st.forceBrakeUntil, st.ewmaSuppressUntil = nowMs + 1000, 0
+            for frame = 1, 50 do
+                -- 前100ms無反應，其後固定真減速度；停妥尾段仍在引擎煞車閂鎖內。
+                local v = frame <= 5 and startSpeed
+                    or math.max(0, startSpeed - deceleration * 3.6 * (frame - 5) * 0.02)
+                dveh._speed, dveh._x = v, dveh._x + v / 3.6 * 0.02
+                nowMs, drive.mult = nowMs + 20, 0.96
+                st.sensor.stamp = nowMs
+                driveTick(dp, dveh)
+            end
+        end
+        checkTrue(MDAD.Drive.isActive(0), "(brake-observation) 觀測未破壞行程")
+        return st.safeBrake / prior, st.brakeTime
+    end
+    local strong, observed = learnBrake(13, 36, 8)
+    checkTrue(observed > 1, "(brake-observation) 強煞車仍有真觀測，不是停用學習")
+    checkTrue(strong > 0.95,
+        "(brake-observation) 起始延遲與停車尾段不把13m/s²學成弱煞車（比例 " .. strong .. "）")
+    learnBrake(13, 36, 40)
+    checkNear(st.brakeConfidence, 1, 1e-9, "(brake-observation) 真強煞車累積到完整信心")
+    checkTrue(st.visibilityHardKmh > st.visibilityCap + 1,
+        "(brake-observation) 強煞車信心收斂後仍保留兩個制動界限")
+    local weak = learnBrake(1, 50, 8)
+    checkTrue(weak < 0.85, "(brake-observation) 真弱煞車仍收緊能力（比例 " .. weak .. "）")
+    local failed = learnBrake(0, 50, 8)
+    checkTrue(failed < 0.8, "(brake-observation) 車仍高速卻毫無減速，不得拒收零觀測")
+    st.brakeLower, st.brakeConfidence, st.brakeTime = 1, 1, 20
+    nowMs = nowMs + 20
+    st.sensor.stamp = nowMs
+    driveTick(dp, dveh)
+    checkNear(st.visibilityHardKmh, st.visibilityCap, 1e-9,
+        "(brake-observation) 已證實的弱煞車不能在緊急界限再乘2.5")
+    local parked, parkedTime = learnBrake(0, 0.5, 1)
+    checkNear(parked, 1, 1e-9, "(brake-observation) 已近停的閂鎖尾段不降低煞車能力")
+    checkEq(parkedTime, 0, "(brake-observation) 已近停的尾段不累積學習信心")
+    MDADSensor.step = realStep
+    MDAD.Drive.stop(0, nil)
+    drive.frameMs(wasMs)
+    MDAD.HUD.perceptionDistance, MDAD.HUD.zombieDodge = oldPerception, oldZ
+    MDAD.Drive.setGear(0, oldGear)
+    MinidoracatMiniMapAPI.navApiVersion = oldApi
+    drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
+    drive.world, drive.vehGeo, SandboxVars, dveh, getSpecificPlayer =
+        oldWorld, oldGeo, oldSandbox, oldVeh, oldGet
+end
+drive.scenarioVisibilityBraking()
 
 local function scenarioReasonKeys()
 scenario("理由鍵覆蓋：每個分支都跑到，且四語 UI.json 都有對應翻譯")

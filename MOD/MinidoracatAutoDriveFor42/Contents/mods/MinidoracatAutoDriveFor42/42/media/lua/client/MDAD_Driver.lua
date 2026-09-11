@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0911b"
+Drive.REV = "0911c"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -66,6 +66,7 @@ local obbDistanceSq
 -- 每幀都讀的常數（SECONDS_PER_MULT／MULT_*／PROGRESS_*）維持獨立 local，省掉熱路徑
 -- 的 table 查詢。載入後只讀不寫（慣例；scripts/verify_mod.py 的 Kahlua 閘門守槽數）。
 local TUNE = {}
+TUNE.BRAKE_SAMPLE_MS = 200 -- 以短窗淨減速觀測，避開逐幀速度量化與致動延遲。
 
 local ROUTE_REFRESH_MS = 250   -- 導航目標／路線刷新節流（毫秒）
 local USAGE_HEARTBEAT_MS = 5000 -- server registry TTL=15s；start/stop 另有即時封包
@@ -200,11 +201,10 @@ TUNE.ZOMBIE_APPROACH_LEAD_M = 8 -- 檔位速要在最近殭屍車頭前這麼遠
                                 -- 殭屍朝車走 1-2 m/s、掃描 4Hz 一輪最多再近 0.5m）
 TUNE.MOVING_VEH_CAP = 20       -- 走廊內有行進中的別台車（跟車，不繞行）
 TUNE.UNLOADED_CAP = 15         -- 走廊內有未載入 chunk（不知道前面有什麼，先慢）
--- 未載入前緣的煞停證明用緊急煞車能力（stepFollow 的 visBrake 註解）：safeBrake×2.5、
--- 上限 12 m/s²（forceBrake ×13 鎖輪實測 ≥11）。57 km/h 下前緣 17m 仍不 breach、
--- 10m 才 breach（舊制 30m 就煞）。
-TUNE.UNLOADED_BRAKE_GAIN = 2.5
-TUNE.UNLOADED_BRAKE_MAX = 12
+-- 可視巡航用一般制動域；緊急紅線沿用forceBrake的既有先驗，不再依unloaded旗標切換。
+-- 實測的煞車下界另以信心收緊，不能把已學到的弱煞車能力再乘2.5。
+TUNE.EMERGENCY_BRAKE_GAIN = 2.5
+TUNE.EMERGENCY_BRAKE_MAX = 12
 local POLICY_DODGE = 1         -- 沙盒 ObstaclePolicy enum：1=繞行 2=停車
 
 TUNE.BLOCK_STOP_DIST = 10      -- 距障礙群這麼近才煞停等待；更遠先滑行接近
@@ -773,6 +773,7 @@ function Drive.invalidateCommandState(s, actualSpeedKmh, controlState)
     local v = actualSpeedKmh
     if not MDADDynamics.finite(v) then v = 0 elseif v < 0 then v = -v end
     s.cmdV, s.cmdA, s.cmdInitialized = v / 3.6, 0, true
+    s.brakeSampleMs = 0 -- 未完成的煞車觀測不跨讓位、恢復或重建。
     s.fullGate, s.gateReason, s.alignSince = false, "state", 0
     -- 2026-09-01（telemetry s055：verifyLineReason=state 542 筆、obb 418 筆）：
     -- proof（verifyBand/Sweep/verifiedUntilS）是**感知快照的產物**，自有
@@ -1267,6 +1268,7 @@ local function startSession(playerObj, playerNum)
         proofKappa = 0,
         proofCurveCap = 0,
         visibilityCap = 0,
+        visibilityHardKmh = 0,
         curveVerifiedUntilS = 0,
         verifyBand = false,
         verifySweep = false,
@@ -1324,6 +1326,7 @@ local function startSession(playerObj, playerNum)
         coastConfidence = 0, coastLower = 0,
         brakeMean = 0, brakeDev = 0, brakeTime = 0,
         brakeConfidence = 0, brakeLower = 0,
+        brakeSampleMs = 0, brakeSampleV = 0,
         yawMean = 0, yawDev = 0, yawTime = 0,
         yawConfidence = 0, yawLower = 0,
         forceBrakeThis = false, lastAssistForce = 0,
@@ -2301,16 +2304,30 @@ local function updateTraction(s, now, speedKmh, heading, headingError, latDev)
     if not finite(ld) then ld = 9 elseif ld < 0 then ld = -ld end
     if ae > 0.087266462599716 or ld > 0.75 then stable = false end
     if s.sensor and (not s.sensor.ready or s.sensor.unloaded) then stable = false end
+    local sampleBrake = stable and brakeWindow and speedKmh >= 8
+    if not sampleBrake then s.brakeSampleMs = 0 end
 
     if stable then
         local dv = (v - s.kinPrevV) / dt
         if brakeWindow or s.forceBrakePrev then
-            local obs = -dv
-            if obs < 0 then obs = 0 end
-            if s.brakeTime == 0 then s.brakeMean = obs end
-            s.brakeMean, s.brakeDev, s.brakeTime,
-                s.brakeConfidence, s.brakeLower = MDADVehicleProfile.updateEWMA(
-                    s.brakeMean, s.brakeDev, s.brakeTime, obs, dt)
+            if sampleBrake then
+                if s.brakeSampleMs == 0 then
+                    -- 指令後首幀只開窗，不把尚未作用的單幀差分當成能力。
+                    s.brakeSampleMs, s.brakeSampleV = now, v
+                elseif now - s.brakeSampleMs >= TUNE.BRAKE_SAMPLE_MS then
+                    local sampleDt = (now - s.brakeSampleMs) / 1000
+                    local obs = (s.brakeSampleV - v) / sampleDt
+                    -- 只保留緊急先驗以內的能力，排除高峰對dev的膨脹；
+                    -- 弱煞車與高速零減速仍是有效觀測，不加能力地板。
+                    obs = math.max(0, math.min(obs,
+                        aBrake * TUNE.EMERGENCY_BRAKE_GAIN, TUNE.EMERGENCY_BRAKE_MAX))
+                    if s.brakeTime == 0 then s.brakeMean = obs end
+                    s.brakeMean, s.brakeDev, s.brakeTime,
+                        s.brakeConfidence, s.brakeLower = MDADVehicleProfile.updateEWMA(
+                            s.brakeMean, s.brakeDev, s.brakeTime, obs, sampleDt)
+                    s.brakeSampleMs, s.brakeSampleV = now, v
+                end
+            end
         elseif s.regulatorPrev and s.targetPrev > s.kinPrevV * 3.6 + 1 then
             local obs = dv
             if obs < 0 then obs = 0 end
@@ -2539,6 +2556,7 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     phys.yawGain, phys.appliedSteer = s.fstate.yawGain, s.fstate.appliedSteer
     phys.routeHeadingError, phys.kinkExitS = s.lastRouteErr, s.fstate.kinkExitS
     phys.visibilityCap = s.visibilityCap
+    phys.visibilityHardKmh = s.visibilityHardKmh
     phys.curveVerifiedUntilS = s.curveVerifiedUntilS
     phys.filletN = s.profile.filletN
     phys.filletFallbackN = s.profile.filletFallbackN
@@ -6863,6 +6881,7 @@ local function stepFollow(s, vehicle, playerNum, now)
         local corridorClear, obbClear = false, false
         local tau, stopEnd = 0.5, s.lastSNow
         local visibilityCap = s.sensor and 0 or 15
+        s.visibilityHardKmh = visibilityCap -- 尚未有快照時不得沿用上一幀的高門檻。
         if s.sensor and s.sensor.ready and finite(s.sensor.stamp) then
             sensorReady = true
             local age = now - s.sensor.stamp
@@ -6896,21 +6915,15 @@ local function stepFollow(s, vehicle, playerNum, now)
                     and s.safeCoast < s.horizonMinCoast then
                 s.horizonMinCoast = s.safeCoast
             end
-            -- 未載入前緣的煞停證明用**緊急煞車能力**，不用舒適煞車（2026-09-04
-            -- 實機定罪：Olin Road 空直路 57 km/h 四次煞到 12 以下，全是 chunk
-            -- streaming 在 cell 邊界卡 1-2 秒、已載入前緣相對車縮到 17-30m →
-            -- 可視上限以 safeBrake 4.6 反推崩到 31 → breach → forceBrake 一秒）。
-            -- 未載入 ≠ 障礙：那裡的物件連 Bullet 都還沒有，載入瞬間才由掃描／sweep
-            -- ／contact 接手；真出現障礙時我們的反應本來就是 forceBrake（×13 鎖輪，
-            -- 實測 ≥11 m/s²），證明應按這個能力算。掃描帶尾端（真的看不到）與
-            -- 障礙截斷仍用舒適煞車。
-            local visBrake = minBrakeVisible
-            if s.sensor.unloaded and finite(s.sensor.unloadedS)
-                    and s.sensor.unloadedS <= s.sensor.scanEndS then
-                visBrake = minBrakeVisible * TUNE.UNLOADED_BRAKE_GAIN
-                if visBrake > TUNE.UNLOADED_BRAKE_MAX then visBrake = TUNE.UNLOADED_BRAKE_MAX end
-            end
+            -- 同一可視前綴分兩個速度帳：巡航先收油，緊急停距不足才動用一秒硬煞。
+            -- 兩式保留同一距離與快照年齡；loaded/unloaded只決定前綴在哪，不換制動域。
             visibilityCap = MDADDynamics.visibilityCapKmh(
+                visibleEnd - s.lastSNow, tau, minBrakeVisible, s.vehicleProfile.halfL)
+            local visBrake = math.min(minBrakeVisible * TUNE.EMERGENCY_BRAKE_GAIN,
+                TUNE.EMERGENCY_BRAKE_MAX)
+            visBrake = tightenLimit(visBrake, s.brakeLower, s.brakeConfidence,
+                TUNE.EMERGENCY_BRAKE_MAX)
+            s.visibilityHardKmh = MDADDynamics.visibilityCapKmh(
                 visibleEnd - s.lastSNow, tau, visBrake, s.vehicleProfile.halfL)
             -- 終點不是障礙（2026-09-01 s058 定罪）：可視帶已含路線終點且終點前
             -- 無 unloaded 截斷時，把近終點 visibilityCap 地板到爬行檔（squeeze
@@ -6961,6 +6974,10 @@ local function stepFollow(s, vehicle, playerNum, now)
             s.invalid, s.stateError, s.dynamicsFault = true, "visibility", true
         end
         s.visibilityCap = visibilityCap
+        -- 繼承調頭／終點的合法爬行地板；壞值退一般界限，不留下失效的高紅線。
+        if not finite(s.visibilityHardKmh) or s.visibilityHardKmh < visibilityCap then
+            s.visibilityHardKmh = visibilityCap
+        end
         if targetSpeed > visibilityCap then
             targetSpeed, s.lastCapReason = visibilityCap, "visibility"
         end
@@ -7498,18 +7515,18 @@ local function stepFollow(s, vehicle, playerNum, now)
         local curveBreached = hardCurveActive and finite(hardCurveCap)
             and hardCurveCap >= 0
             and actualSpeed > hardCurveCap * TUNE.CURVE_BREACH_RATIO
-        local visibilityBreached = sensorReady and finite(s.visibilityCap)
-            and actualSpeed > MDADDynamics.hardBreachKmh(s.visibilityCap)
+        local visibilityBreached = sensorReady and finite(s.visibilityHardKmh)
+            and actualSpeed > MDADDynamics.hardBreachKmh(s.visibilityHardKmh)
         if curveBreached then hardBrakeReason = "curve" end
         if visibilityBreached
-                and (not curveBreached or s.visibilityCap <= hardCurveCap) then
+                and (not curveBreached or s.visibilityHardKmh <= hardCurveCap) then
             hardBrakeReason = "visibility"
         end
         -- 延後承諾仍有已知障礙：接近式使用煞車能力，就必須有對應煞車，不能只斷油。
         if not s.dodging and finite(s.dodgeDeferCap) and s.dodgeDeferCap >= 0
                 and actualSpeed > MDADDynamics.hardBreachKmh(s.dodgeDeferCap)
                 and (not curveBreached or s.dodgeDeferCap <= hardCurveCap)
-                and (not visibilityBreached or s.dodgeDeferCap <= s.visibilityCap) then
+                and (not visibilityBreached or s.dodgeDeferCap <= s.visibilityHardKmh) then
             hardBrakeReason = "dodge-defer"
         end
         if s.progressState == "gear-reset" or s.recoverPulse then
