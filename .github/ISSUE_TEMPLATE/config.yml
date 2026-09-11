@@ -1,8 +1,5 @@
 blank_issues_enabled: false
 contact_links:
-  - name: 道路／導航線問題 / Road or route data problem
-    url: https://github.com/Minidoracat/MinidoracatMiniMapFor42/issues/new?template=road-data.yml
-    about: 導航線錯位、斷路或繞遠：附含座標的導航截圖及文字座標，不需 Telemetry。Misplaced routes, gaps or detours — screenshots with coordinates and coordinates as text; no telemetry required.
   - name: 一般問題／建議 / General questions & suggestions
     url: https://steamcommunity.com/sharedfiles/filedetails/?id=3792675881
     about: 操作詢問或功能建議請到 Workshop 頁面留言。For usage questions or feature suggestions, comment on the Workshop page.

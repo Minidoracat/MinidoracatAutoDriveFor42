@@ -67,7 +67,7 @@ Item-driven vehicle navigation and autodrive: plan routes with a GPS Navigator, 
 [h2]💬 Feedback[/h2]
 [list]
 [*] [url=https://discord.gg/Gur2V67]Discord community[/url]
-[*] [url=https://github.com/Minidoracat/MinidoracatMiniMapFor42/issues/new?template=road-data.yml]Road / route data[/url]: misplaced routes, gaps or detours. Attach [b]a route screenshot showing coordinates + the coordinates as text[/b], and describe the problem. Endpoints, direction and map/version help. [b]No Telemetry required.[/b]
+[*] [url=https://github.com/Minidoracat/MinidoracatAutoDriveFor42/issues/new?template=road-data.yml]Road / route data[/url]: misplaced routes, gaps or detours. Attach [b]a route screenshot showing coordinates + the coordinates as text[/b], and describe the problem. Endpoints, direction and map/version help. [b]No Telemetry required.[/b]
 [*] [url=https://github.com/Minidoracat/MinidoracatAutoDriveFor42/issues/new/choose]Vehicle control[/url]: a correct route but the car veers off, gets stuck or slows unexpectedly. Enable diagnostic export; attach the whole Telemetry ZIP. The options' report button copies this link.
 [/list]
 

@@ -1,0 +1,63 @@
+name: 道路／導航線問題 / Road or route data problem
+description: 錯位、斷路、繞遠或折返；請附導航截圖與文字座標，不需 Telemetry。Misplaced roads, gaps or detours; route screenshots and text coordinates required, no telemetry.
+title: "[Road] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        請先更新 MiniMap。導航線偏離道路、穿過建築／草地、路口繞遠或道路不連通，都可用這份表單。
+        **至少提供包含導航路徑與座標的截圖，以及可複製的文字座標。單純道路資料問題不需要 Telemetry。**
+        不確定原因也可以先回報；請用一句話說明你覺得哪裡不對。
+
+        Update MiniMap first. Use this form for misplaced routes, paths through buildings/grass, disconnected roads or unnecessary detours.
+        **Attach screenshots showing the route and coordinates, and paste the coordinates as text. Telemetry is not required for road-data reports.**
+        If unsure, report what looks wrong. If the route is correct but the vehicle cannot follow it, use the [AutoDrive behavior report](https://github.com/Minidoracat/MinidoracatAutoDriveFor42/issues/new?template=nav-report.yml).
+
+        這是公開回報：可遮蔽聊天、玩家名稱等無關資訊，但請保留道路、導航線與座標。不要貼電腦資料夾路徑、IP 或私人伺服器設定。
+        Reports are public. Hide unrelated chat/player names, but keep the road, route and coordinates visible. Do not share local folder paths, IP addresses or private server settings.
+
+  - type: upload
+    id: screenshots
+    attributes:
+      label: 導航路徑截圖（需含座標）/ Route screenshots with coordinates
+      description: 放大問題路段，保留周邊道路及整段異常導航線；不要只拍設定視窗。可另附實際路面截圖。Show the affected route, nearby roads and readable coordinates, not only the options window. An in-world road screenshot also helps.
+    validations:
+      required: true
+      accept: ".png,.jpg,.jpeg,.webp,.gif"
+
+  - type: textarea
+    id: coordinates
+    attributes:
+      label: 問題位置座標（請貼文字）/ Problem coordinates as text
+      description: 在地圖上的問題點按右鍵，選「複製此處座標」，再貼到這裡；每個地點一行，不要只留在圖片中。工具列複製的是玩家目前位置，不一定是問題點。Right-click the affected map point, choose Copy coordinates, and paste one location per line. The toolbar copies the player's current position, which may not be the problem location.
+      placeholder: "例如 / Example: 10884, 10054, 0"
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 哪裡不對、預期怎麼走 / What looks wrong and the expected route
+      description: 一句話即可，例如應直行卻繞遠，或導航線切進草地。One sentence is enough, such as taking a detour instead of going straight, or cutting across grass.
+    validations:
+      required: true
+
+  - type: textarea
+    id: journey
+    attributes:
+      label: 起點、目的地與方向（建議補充）/ Start, destination and direction (recommended)
+      description: 若方便，貼上起點與目的地座標，說明從哪邊往哪邊；這能幫助重算同一條路線。If available, paste both endpoint coordinates and the direction of travel so we can recalculate the same route.
+      placeholder: |
+        起點 / Start:
+        目的地 / Destination:
+        行駛方向 / Direction:
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: 地圖與版本（建議補充）/ Map and versions (recommended)
+      description: 原版地圖或 MOD 地圖名稱／Workshop 連結、PZ 與 MiniMap 版本、單人或多人；有使用 AutoDrive 再附其版本。不確定的項目可寫不知道。Vanilla or map-mod name/link, PZ/MiniMap versions and singleplayer/multiplayer; add the AutoDrive version if used. Unknown values are fine.
+      placeholder: |
+        地圖／連結 / Map or link:
+        PZ / MiniMap / AutoDrive versions:
+        單人或多人 / Singleplayer or multiplayer:

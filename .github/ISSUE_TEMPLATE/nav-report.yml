@@ -6,8 +6,8 @@ body:
   - type: markdown
     attributes:
       value: |
-        **導航線本身畫錯、道路斷接或繞遠？** 請改用 [MiniMap 道路／導航線回報](https://github.com/Minidoracat/MinidoracatMiniMapFor42/issues/new?template=road-data.yml)：附上包含導航線與座標的截圖，再貼文字座標；不需要 Telemetry。
-        **Is the route itself misplaced, disconnected or taking an unnecessary detour?** Use the [MiniMap road/route report](https://github.com/Minidoracat/MinidoracatMiniMapFor42/issues/new?template=road-data.yml): attach route screenshots with coordinates and paste the coordinates as text. No telemetry required.
+        **導航線本身畫錯、道路斷接或繞遠？** 請改用 [道路／導航線回報](https://github.com/Minidoracat/MinidoracatAutoDriveFor42/issues/new?template=road-data.yml)：附上包含導航線與座標的截圖，再貼文字座標；不需要 Telemetry。
+        **Is the route itself misplaced, disconnected or taking an unnecessary detour?** Use the [road/route report](https://github.com/Minidoracat/MinidoracatAutoDriveFor42/issues/new?template=road-data.yml): attach route screenshots with coordinates and paste the coordinates as text. No telemetry required.
 
         這份表單用於「路線正常，但車輛沒有正確沿線行駛」等控制異常。
         This form is for vehicle-control problems, such as failing to follow an otherwise correct route.

@@ -67,7 +67,7 @@
 [h2]💬 フィードバック[/h2]
 [list]
 [*] [url=https://discord.gg/Gur2V67]Discordコミュニティ[/url]
-[*] [url=https://github.com/Minidoracat/MinidoracatMiniMapFor42/issues/new?template=road-data.yml]道路・経路の報告[/url]：ずれ・欠落・遠回りは[b]経路と座標の画像＋座標テキスト[/b]、症状を一言。起終点・方向・マップ／版も推奨。[b]Telemetry不要。[/b]
+[*] [url=https://github.com/Minidoracat/MinidoracatAutoDriveFor42/issues/new?template=road-data.yml]道路・経路の報告[/url]：ずれ・欠落・遠回りは[b]経路と座標の画像＋座標テキスト[/b]、症状を一言。起終点・方向・マップ／版も推奨。[b]Telemetry不要。[/b]
 [*] [url=https://github.com/Minidoracat/MinidoracatAutoDriveFor42/issues/new/choose]車両制御の報告[/url]：正しい経路から逸脱・詰まり・異常減速は診断出力をオンにし、Telemetry全体をZIPで添付。設定の報告ボタンでリンクをコピー。
 [/list]
 

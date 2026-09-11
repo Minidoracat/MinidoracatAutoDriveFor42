@@ -67,7 +67,7 @@
 [h2]💬 意見回饋與交流[/h2]
 [list]
 [*] [url=https://discord.gg/Gur2V67]Discord 社群[/url]
-[*] [url=https://github.com/Minidoracat/MinidoracatMiniMapFor42/issues/new?template=road-data.yml]道路／導航線回報[/url]：線畫到路外、缺路或繞遠，請附[b]包含導航線與座標的截圖＋文字座標[/b]，簡述哪裡不對；可補起終點、方向、地圖 MOD／版本。[b]不需 Telemetry。[/b]
+[*] [url=https://github.com/Minidoracat/MinidoracatAutoDriveFor42/issues/new?template=road-data.yml]道路／導航線回報[/url]：線畫到路外、缺路或繞遠，請附[b]包含導航線與座標的截圖＋文字座標[/b]，簡述哪裡不對；可補起終點、方向、地圖 MOD／版本。[b]不需 Telemetry。[/b]
 [*] [url=https://github.com/Minidoracat/MinidoracatAutoDriveFor42/issues/new/choose]自動駕駛控制回報[/url]：路線正常但車偏離、卡住或異常減速，先開「匯出自動駕駛診斷紀錄」，再附整個 Telemetry 資料夾 ZIP。設定的「回報導航問題」可複製入口。
 [/list]
 
