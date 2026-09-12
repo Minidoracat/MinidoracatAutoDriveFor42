@@ -126,9 +126,21 @@ local NAV_USAGE_FIRST_RETRY_MS = 1100
 local navUsageTick = NAV_USAGE_CHECK_TICKS - 1
 local navUsageState = {}
 
+-- v6 有行程時以 getNavLeg 判活動段：只有 navigating／approach 才有座標＝主 MOD 真的
+-- 在替玩家算路線／畫指引，才計耗電。draft／waiting／paused 只是存著一份站點清單
+-- （自駕準備中的那一段本身已經是 navigating，照樣計），completed 也不算。
+-- 舊版沿用 getNavTarget。兩條路都只讀本機 API，不改 server 權威協議：payload 仍只有
+-- active，server 依 actor 重驗來源。
 local function localNavActive(playerNum)
     local api = MinidoracatMiniMapAPI
-    if type(api) ~= "table" or type(api.getNavTarget) ~= "function" then return false end
+    if type(api) ~= "table" then return false end
+    if type(api.navApiVersion) == "number" and api.navApiVersion >= 6
+            and type(api.getNavLeg) == "function" then
+        local _, _, x, y = api.getNavLeg(playerNum)
+        return type(x) == "number" and x * 0 == 0
+            and type(y) == "number" and y * 0 == 0
+    end
+    if type(api.getNavTarget) ~= "function" then return false end
     local tx, ty = api.getNavTarget(playerNum)
     return type(tx) == "number" and tx * 0 == 0
         and type(ty) == "number" and ty * 0 == 0

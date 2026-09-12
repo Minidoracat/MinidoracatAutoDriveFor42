@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0911c"
+Drive.REV = "0912b"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -70,7 +70,7 @@ TUNE.BRAKE_SAMPLE_MS = 200 -- 以短窗淨減速觀測，避開逐幀速度量�
 
 local ROUTE_REFRESH_MS = 250   -- 導航目標／路線刷新節流（毫秒）
 local USAGE_HEARTBEAT_MS = 5000 -- server registry TTL=15s；start/stop 另有即時封包
-local USAGE_FIRST_RETRY_MS = 1100 -- 初始封包被 server 1s flood gate 吃掉時快速自癒
+TUNE.USAGE_FIRST_RETRY_MS = 1100 -- 初始封包被 server 1s flood gate 吃掉時快速自癒
 -- 目標消失時的「抵達接管」半徑（世界格，平方比較）：主 MOD 在玩家距目標
 -- NAV_ARRIVE_DIST（5 格）內會**自動清除**導航目標（小地圖的「走到旗子就收旗」，
 -- MinidoracatMiniMap.lua navCheckArrival，每幀跑）；自駕的到達判定（follower
@@ -78,14 +78,14 @@ local USAGE_FIRST_RETRY_MS = 1100 -- 初始封包被 server 1s flood gate 吃掉
 -- 250ms 路線刷新讀到「沒目標」就誤報紅字「路線遺失」（2026-08-28 實機：到站
 -- 閃紅字，玩家分不清是到達還是 bug）。半徑 12＝5（主 MOD 清除圈）＋250ms 內
 -- 最高速位移（40km/h≈2.8 格）＋路線終點對目標的投影偏差餘裕。
-local ARRIVE_CLEAR_SQ = 12 * 12
+TUNE.ARRIVE_CLEAR_SQ = 12 * 12
 local BUILD_BUDGET = 128       -- 每幀限速剖面建構點數上限（啟動／換路線：車靜止或已 HOLD）
 -- 行駛中 dynamics 重建的每幀預算（2026-09-04 issue #1 定罪 E）：重建期間不控速、
 -- 不轉向、Sensor 也停；399 點剖面 ≈2000 ops，128/幀＝16 幀，玩家機器 9-12 fps 時
 -- 是 1.6 秒空白。1024/幀＝典型路線 1-2 幀、1024 點上限 ≤5 幀。啟動／換路線仍用
 -- BUILD_BUDGET（車靜止或剛 HOLD，攤幀只影響起步延遲）。
 TUNE.REBUILD_BUDGET = 1024
-local MAX_SESSIONS = 4         -- 分割畫面本機玩家槽上限（getSpecificPlayer 0-3）
+TUNE.MAX_SESSIONS = 4          -- 分割畫面本機玩家槽上限（getSpecificPlayer 0-3）
 -- 讓位後恢復自駕的等待時間改由 ESC／MiniMap「手動介入後」選項決定（HUD.manualResumeMs；
 -- 0＝介入即關閉，2026-09-06 使用者裁定預設不自動恢復）。恢復語音只在讓位持續夠久
 -- 才播——老玩家勾了自動恢復後輕推方向盤微調，每 2 秒念一句「我接手了」會吵。
@@ -232,7 +232,7 @@ local REAR_TRAVEL_M = 4
 -- 2m、再試 MIN+KEEP；帶長−KEEP＝本次退距，100ms 重探帶長＝剩餘退距＋KEEP。
 TUNE.REAR_TRAVEL_SHORT_M = 2
 TUNE.REAR_KEEP_M = 0.5
-local EPISODE_REARM_SQ = 100
+TUNE.EPISODE_REARM_SQ = 100
 TUNE.SCAN_WARM_CAP = 15        -- 感知空窗（首輪掃描未完成）的爬行上限（與
                                -- UNLOADED_CAP 同級：語意都是「前方未知」）
 -- 堵死改道（requestDetour）已於 2026-09-01 移除（使用者裁定）：telemetry s030/s033
@@ -575,8 +575,8 @@ local function fetchRoute(api, playerNum)
     local tx, ty = api.getNavTarget(playerNum)
     if not tx then return nil end
     local route, state = api.requestRoute(playerNum, tx, ty)
-    if not route or state ~= "ok" then return nil, tx, ty end
-    return route, tx, ty
+    if not route or state ~= "ok" then return nil, tx, ty, state end
+    return route, tx, ty, state
 end
 
 -- 路線起點太遠（`route.snapDist`＝玩家到路線最近點的投影距離＝出發前必須越野走完的
@@ -595,6 +595,218 @@ end
 -- 其 snapDist 在任何版本都是建圖當下到首點的距離＝可信，不經此閘。
 local function cachedSnapTrusted(api)
     return api ~= nil and type(api.navApiVersion) == "number" and api.navApiVersion >= 5
+end
+
+-- v6 多停靠點行程（docs/addon-api.md §6）。整組介面缺一不可；版本不足或少一個函式
+-- 就整段降級走舊的單站路徑——沒有 claim 就沒有到站回報，Driver 不得自己模擬行程狀態。
+-- 常數、翻譯鍵與冷路徑小函式全掛在這張表上：主 chunk 的 local 槽已經貼著 Kahlua 的
+-- 190 上限（scripts/verify_mod.py 1b），每多一個 local 都是載入期編譯失敗的風險。
+local TRIP = {}
+-- 行程待辦計數（熱路徑守門用，必須是 local）＝準備意圖＋欠 MiniMap 的交還。
+-- 兩者皆 0 且無 session 時，OnPlayerUpdate 仍是兩次整數比較就 return。
+local prepCount = 0
+-- 備路線／剖面的等待上限：逾時自行取消，不讓玩家對著沒反應的按鈕重複點。
+TRIP.PREP_MS = 15000
+-- 到站回報被拒（例如 MiniMap 還沒認定停妥）之後的有界重試視窗：期間維持 arrive、
+-- 維持停妥、不清 session，也不假報抵達。
+TRIP.REPORT_MS = 3000
+-- 交還被拒之後的有界重試視窗：不能把仍有效的 claim 丟掉變成 orphan。
+TRIP.RELEASE_MS = 5000
+TRIP.BUSY = "UI_MinidoracatAutoDrive_TripBusy"
+TRIP.STATE = "UI_MinidoracatAutoDrive_TripState"
+TRIP.STALE = "UI_MinidoracatAutoDrive_TripStale"
+TRIP.NOT_STOPPED = "UI_MinidoracatAutoDrive_TripNotStopped"
+-- 道路終點：**不是**抵達。不可播成功語音，也不可宣稱到了最終目的地。
+TRIP.ROAD_END = "UI_MinidoracatAutoDrive_TripRoadEnd"
+TRIP.LOST = "UI_MinidoracatAutoDrive_TripLost"
+-- v7 多站行程的四個提示鍵（HUD lane 供應）：中途續開／停靠等候／插入優先目標／
+-- 整份行程完成。續開與優先只在**真的 commitSession**（車已在我們手上）時出現，
+-- 停靠與完成只在真的停在站上時出現——這四個鍵都不是「大概到了」的猜測。
+TRIP.CONTINUE = "UI_MinidoracatAutoDrive_ContinueTarget"
+TRIP.STOPOVER = "UI_MinidoracatAutoDrive_StopoverReached"
+TRIP.PRIORITY = "UI_MinidoracatAutoDrive_PriorityTarget"
+TRIP.COMPLETED = "UI_MinidoracatAutoDrive_TripCompleted"
+-- 主 MOD 的被動到站半徑（§6.3 的 5 格，平方比較）：v7 Core 在**沒有 claim**時，
+-- 玩家停在這個半徑內就自己把站收掉。準備期間只用它判斷「不值得為不足 5m 的路線
+-- 做剖面」，絕不用它自己宣告到站。
+TRIP.ARRIVE_SQ = 25
+-- start／claim／report／release 的失敗原因（§6.4 的原因集合）→ 玩家看得懂的翻譯鍵。
+TRIP.REASON = {
+    badargs = TRIP.STATE,
+    noplayer = KEY_NOT_DRIVER,
+    noitinerary = TRIP.STATE,
+    state = TRIP.STATE,
+    stale = TRIP.STALE,
+    busy = TRIP.BUSY,
+    notdriver = KEY_NOT_DRIVER,
+    notstopped = TRIP.NOT_STOPPED,
+    noroad = "UI_MinidoracatAutoDrive_TripNoRoad",
+    failed = "UI_MinidoracatAutoDrive_TripFailed",
+}
+-- release 的 reason 只是 UI 原因、**不代表到了**；§6.4 只收這五個值，未列出的停止
+-- 原因一律 unavailable，玩家主動關閉（reasonKey 為 nil）是 manual。
+TRIP.RELEASE = {
+    [KEY_LOST] = "noroad", [KEY_ROUTE] = "noroad", [KEY_ROUTE_FAR] = "noroad",
+    [KEY_STUCK] = "failed", [KEY_UNSUPPORTED] = "failed",
+}
+-- playerNum → 開始／備路意圖（token=nil 時尚未 acquire；claim 前對車零控制輸出）
+TRIP.preps = {}
+-- playerNum → 欠 MiniMap 的交還（release 被暫時拒絕；有界重試，不丟 claim）
+TRIP.owed = {}
+
+-- blocked 的第三回傳是既有 nav gate 的 reasonKey（§6.4）；其餘照表。未知原因退
+-- TripState，絕不當成成功。
+function TRIP.key(reason, gateKey)
+    if reason == "blocked" then
+        if type(gateKey) == "string" and gateKey ~= "" then return gateKey end
+        return "UI_MinidoracatAutoDrive_NeedGPS"
+    end
+    return TRIP.REASON[reason] or TRIP.STATE
+end
+
+-- 行程介面守衛（§2 分欄位分級的作法，同 cachedSnapTrusted）：navApi() 之上再要求
+-- navApiVersion >= 6 與六個函式全在。每次用前重查——主 MOD 可能根本沒裝或版本太舊。
+function TRIP.api()
+    local api = navApi()
+    if not api or api.navApiVersion < 6 then return nil end
+    if type(api.getNavLeg) ~= "function" or type(api.getNavItinerary) ~= "function"
+            or type(api.startNavItinerary) ~= "function"
+            or type(api.claimNavLeg) ~= "function"
+            or type(api.reportNavArrival) ~= "function"
+            or type(api.releaseNavLeg) ~= "function" then
+        return nil
+    end
+    return api
+end
+
+-- v7 介面能力（便宜、無配置）：版本與新函式都在。這只說「介面在」。
+function TRIP.v7(api)
+    return api.navApiVersion >= 7 and type(api.setNavContinuation) == "function"
+end
+
+-- v7 行程快照（自動接續與被動到站採用的唯一資料來源）。真正決定行為的是資料面：
+-- 只有 schemaVersion 2 的行程才有 autoContinue／activation 可讀；任一條不成立就回
+-- nil＝照 v6 逐點手動——「讀不到」永遠不等於「可以自動」。
+-- activation 只在快照裡（getNavLeg 仍是原本六個回傳）。已經讀過的快照可以傳進來，
+-- 省一次 copyTrip。
+function TRIP.snapshot(api, playerNum, trip)
+    if not TRIP.v7(api) then return nil end
+    if trip == nil then trip = api.getNavItinerary(playerNum) end
+    if type(trip) ~= "table" or trip.schemaVersion ~= 2
+            or type(trip.autoContinue) ~= "boolean" then
+        return nil
+    end
+    return trip
+end
+
+-- 每個 Core API 回來先驗意圖與人車；只收自己的舊 prep，不碰回呼新建的意圖。
+function TRIP.keepPrep(playerNum, prep)
+    if TRIP.preps[playerNum] ~= prep then return false end
+    local playerObj = prep.playerObj
+    if getSpecificPlayer(playerNum) ~= playerObj or not playerObj:isLocalPlayer()
+            or playerObj:isDead() or playerObj:getVehicle() ~= prep.vehicle
+            or not prep.vehicle:isDriver(playerObj) then
+        TRIP.cancel(playerNum, prep)
+        return false
+    end
+    return true
+end
+
+-- 這個站在快照裡真的已經 arrived 嗎？被動到站採用的唯一證據：仍 pending、被 skip、
+-- 或整個被移除都是 false（任何 token 變動都不足以證明「上一站到了」）。
+function TRIP.arrived(trip, stopId)
+    local stops = trip and trip.stops
+    if type(stops) ~= "table" or stopId == nil then return false end
+    for i = 1, #stops do
+        if stops[i].id == stopId then return stops[i].status == "arrived" end
+    end
+    return false
+end
+
+-- 交還接管：呼叫端必須**先**停掉自己的控制輸出，這裡只解除記憶體 claim。
+-- release 不要求設備／gate 仍可用，也不代表到站（§6.4）。
+-- 回 true＝成功解除或已核對 token 撤銷；介面暫時缺席不代表解除。
+-- false＝MiniMap 暫時拒絕，已排進有界重試，呼叫端不得當成已經交還。
+function TRIP.release(playerNum, token, reason)
+    local api = TRIP.api()
+    local ok, why = false, "api"
+    if api then
+        ok, why = api.releaseNavLeg(playerNum, MDAD.MOD_ID, token, reason)
+        if (ok == true and (why == "released" or why == "duplicate"))
+            or api.getNavLeg(playerNum) ~= token then return true end
+    end
+    if not TRIP.owed[playerNum] then
+        local now = getTimestampMs()
+        TRIP.owed[playerNum] = { token = token, reason = reason,
+            nextMs = now + ROUTE_REFRESH_MS, deadlineMs = now + TRIP.RELEASE_MS }
+        prepCount = prepCount + 1
+    end
+    if getDebug() then
+        print(LOG .. "trip release deferred pn=" .. playerNum .. " why=" .. tostring(why))
+    end
+    return false
+end
+
+-- 交還寫入重試有界；超時後保留收據，直到明確確認上游撤銷。
+function TRIP.stepOwed(playerNum, now)
+    local owed = TRIP.owed[playerNum]
+    if not owed or now < owed.nextMs then return end
+    owed.nextMs = now + ROUTE_REFRESH_MS
+    local api = TRIP.api()
+    if not api then return end
+    local done = api.getNavLeg(playerNum) ~= owed.token
+    if not done and now < owed.deadlineMs then
+        local ok, why = api.releaseNavLeg(playerNum, MDAD.MOD_ID, owed.token, owed.reason)
+        done = (ok == true and (why == "released" or why == "duplicate"))
+            or api.getNavLeg(playerNum) ~= owed.token
+    end
+    -- 寫入重試有界；尚未解除時保留收據與啟動阻擋，等待玩家停止導航或上游撤銷。
+    if not done then return end
+    TRIP.owed[playerNum] = nil
+    prepCount = prepCount - 1
+end
+
+-- 到站回報（§6.3 唯一出口：已進 arrive 且 vehicle:isStopped()）。必須在清 session
+-- **之前**呼叫，且此時控制輸出已停（regulator 關、不再送指令）。
+-- 回 (結果, consumed, disposition, revision)：結果＝"arrived"／"road_end"／
+-- "duplicate"／翻譯鍵；consumed=false＝claim 仍在我們手上，呼叫端要在有界時間內
+-- 重試，不得把它丟掉。
+-- disposition／revision 只有 v7 Core 的成功回報會給（continue／stopover／
+-- completed／road_end 與 commit 後的 revision）；v6 Core 回 nil，呼叫端因此維持
+-- 逐點手動——多出來的欄位是能力宣告，不是預設值。duplicate 不帶處置：重送不是
+-- 一次新的到站，不得據以續發下一段。
+function TRIP.report(playerNum, token)
+    local api = TRIP.api()
+    if not api then return KEY_API, false end
+    local ok, result, detail, revision = api.reportNavArrival(playerNum, MDAD.MOD_ID, token)
+    if ok == true then
+        if result == "arrived" or result == "road_end" then
+            return result, true, detail, revision
+        end
+        if result == "duplicate" then return result, true end
+        -- 未知回傳不能證明已消耗 claim；以目前 token 驗證，不假報成功。
+        return TRIP.LOST, api.getNavLeg(playerNum) ~= token
+    end
+    if result == "stale" and api.getNavLeg(playerNum) ~= token then return TRIP.STALE, true end
+    return TRIP.key(result, detail), false
+end
+
+-- 移除準備意圖（安靜；紅字由呼叫端決定）。回 true＝真的有一份意圖被收掉。
+function TRIP.drop(playerNum)
+    if not TRIP.preps[playerNum] then return false end
+    TRIP.preps[playerNum] = nil
+    prepCount = prepCount - 1
+    return true
+end
+
+-- 同 TRIP.drop，但只在它仍是**同一份**意圖時才收：每次跨 API 呼叫回來（claim／
+-- 路線查詢／快照）都可能已經被同步回呼停掉或換成新的一份，這時候 drop 會誤殺別人。
+-- 回 true＝這份意圖是我們收掉的；false＝已經不是它了，呼叫端不得再出紅字。
+function TRIP.cancel(playerNum, prep)
+    if TRIP.preps[playerNum] ~= prep then return false end
+    TRIP.preps[playerNum] = nil
+    prepCount = prepCount - 1
+    return true
 end
 
 -- 路線是否穿過避讓圈（任一段到圓心距 ≤ r）；冷路徑 O(n)，只在 cutover 用。
@@ -649,6 +861,9 @@ end
 -- HUD 停用態的唯讀原因：沿用啟動守門，context="draw" 讓 GPS 背包掃描吃
 -- MDAD.navGate 的 1 秒快取；route 走主 MOD 的 requestRoute cache，只在
 -- route/state 已真正可用時顯示「可以啟動」，不建立 follower profile。
+-- v6：draft／paused／waiting 的目前站還沒啟用，getNavTarget 本來就回 notarget
+-- （§6.6），不能因此誤報「沒有路線」——那三個狀態只要資格夠就是「可以開始行程」。
+-- 純查詢：不 start、不 claim、不啟用任何目標。
 function Drive.hudStartReason(playerNum)
     local playerObj = getSpecificPlayer(playerNum)
     if not playerObj then return KEY_NOT_DRIVER end
@@ -656,6 +871,14 @@ function Drive.hudStartReason(playerNum)
     if reason then return reason end
     local api = navApi()
     if not api then return KEY_API end
+    local trip = TRIP.api()
+    if trip then
+        local _, _, _, _, phase = trip.getNavLeg(playerNum)
+        if phase == "draft" or phase == "paused" or phase == "waiting" then return nil end
+        if phase == "approach" then return TRIP.ROAD_END end
+        if phase == "completed" then return TRIP.STATE end
+        -- navigating（與沒有行程的舊路徑）：照舊要求路線真的可用
+    end
     local route = fetchRoute(api, playerNum)
     if not route then return KEY_ROUTE end
     return nil
@@ -683,8 +906,10 @@ local sessions = {}
 local lastDriveSeconds = {}
 local sessionCount = 0
 
+-- 開始／準備意圖也算「自駕已啟動」：HUD 的停止鈕
+-- 與 radial 必須收得掉它，否則玩家只能對著沒反應的鈕等逾時。
 function Drive.isActive(playerNum)
-    return sessions[playerNum] ~= nil
+    return sessions[playerNum] ~= nil or TRIP.preps[playerNum] ~= nil
 end
 
 -- 語音通知只在受困交還／抵達收尾時可要求暫停；只在等語音時掛事件。
@@ -991,15 +1216,28 @@ end
 
 -- HUD 唯讀狀態（M5.5b 面板的資料面）。回**多值純量**、不洩漏 session table
 -- （session 是可變內部狀態，交出參考＝UI 能繞過所有入口改駕駛行為）：
---   statusKey, gearId, effectiveCapKmh, zombieSlowOn, corpseSlowOn, resumeIn, elapsedSeconds
--- statusKey ∈ arrive/yield/unstick/blocked/dodging/build/follow；nil＝無 session。
+--   statusKey, gearId, effectiveCapKmh, zombieSlowOn, corpseSlowOn, resumeIn, elapsedSeconds, arrivalReason
+-- statusKey ∈ arrive/yield/unstick/blocked/dodging/build/follow；nil＝無 session 且無準備意圖。
+-- arrivalReason 是到站回報拒絕原因的翻譯鍵，沒有拒絕原因則為 nil。
 -- 顯示優先序：arrive > yield > recovery（unstick/recover/settle）>
 -- current/planned blocked > dodging > build > follow。
 -- effectiveCap＝min(session 啟動時沙盒上限, 當前檔位)。AutoDriveMaxSpeed 要重開
 -- session 才重建 profile；HUD 不得先讀新沙盒值而顯示車子尚未套用的上限。
 function Drive.hudState(playerNum)
     local s = sessions[playerNum]
-    if not s then return nil, nil, nil, nil, nil, nil, lastDriveSeconds[playerNum] end
+    if not s then
+        local prep = TRIP.preps[playerNum]
+        -- 準備 v6 路線／剖面：HUD 顯示 build（與剖面分幀建構同一個狀態），可取消；
+        -- 這段期間對車輛零控制輸出。
+        if prep then
+            return "build", Drive.getGear(playerNum),
+                Drive.effectiveCap(playerNum, prep.vehicle),
+                Drive.getSlowPref(playerNum, "zombie"),
+                Drive.getSlowPref(playerNum, "corpse"), nil,
+                math.max(0, math.floor((getTimestampMs() - prep.startedMs) / 1000))
+        end
+        return nil, nil, nil, nil, nil, nil, lastDriveSeconds[playerNum]
+    end
     local key
     if s.mode == "arrive" then key = "arrive"
     elseif s.mode == "yield" then key = "yield"
@@ -1021,7 +1259,7 @@ function Drive.hudState(playerNum)
         if resumeIn < 1 then resumeIn = 1 end
     end
     return key, Drive.getGear(playerNum), cap, s.zombieSlow, s.corpseSlow, resumeIn,
-        math.max(0, math.floor((getTimestampMs() - s.startedMs) / 1000))
+        math.max(0, math.floor((getTimestampMs() - s.startedMs) / 1000)), s.legReportWhy
 end
 
 local function reportAutoUsage(playerObj, vehicle, active, args, navArgs)
@@ -1122,10 +1360,29 @@ end
 -- 否則那台車會留著一個沒人設過的定速，下一個上車的人莫名其妙就被拉速度。
 function Drive.stop(playerNum, reasonKey, voiceEvent)
     local s = sessions[playerNum]
-    if not s then return false end
+    if not s then
+        -- 準備中（尚未 claim、尚未碰車）：收掉意圖就結束，沒有 claim 要還。
+        if not TRIP.drop(playerNum) then return false end
+        if reasonKey then
+            local playerObj = getSpecificPlayer(playerNum)
+            if playerObj then haloBad(playerObj, reasonKey) end
+        end
+        if getDebug() then
+            print(LOG .. "trip prep cancel pn=" .. playerNum
+                .. " reason=" .. tostring(reasonKey))
+        end
+        return true
+    end
     diagStop(s, playerNum, reasonKey or "manual")
     clearSession(playerNum)
     if s.vehicle then s.vehicle:setRegulator(false) end
+    -- 控制輸出已停（regulator 關、本幀起不再送指令）之後才交還接管。這**不是**到站
+    -- 回報：一般 Drive.stop 只交還控制，站點仍是 pending（§6.1／§6.4）。
+    if s.legToken then
+        TRIP.release(playerNum, s.legToken, reasonKey == nil and "manual"
+            or TRIP.RELEASE[reasonKey] or "unavailable")
+        s.legToken = nil
+    end
     -- 實機回報「按了關閉、感覺沒關」時這行就是分水嶺：印出來＝session 真的收掉、
     -- regulator 也關了，車還在動就是慣性（Stop 刻意不硬煞）；沒印出來才是真的沒關。
     if getDebug() then
@@ -1151,10 +1408,53 @@ function Drive.stop(playerNum, reasonKey, voiceEvent)
     return true
 end
 
+-- 把建好的 session 正式接上：**第一次碰玩家的車就在這裡**（先把 regulator 關掉一次；
+-- 剖面要分幀建，這段期間 stepFollow 不會跑，玩家上車前自己設的定速就會原封不動繼續
+-- 拉著車跑）。舊單站路徑由 startSession 直接呼叫；v6 行程路徑等剖面建完、claim 成功
+-- 之後才呼叫，因此 claim 成功前對車零控制輸出。
+local function commitSession(playerObj, playerNum, s)
+    local vehicle = s.vehicle
+    vehicle:setRegulator(false)
+    sessions[playerNum] = s
+    -- 設定值在下一輪beginRound套用；不改route identity或正在執行的承諾。
+    if s.sensor then s.sensor.aheadM = Drive.perceptionDistance() end
+    sessionCount = sessionCount + 1
+    refreshPolicies(s, vehicle, playerNum)
+    reportAutoUsage(playerObj, vehicle, true, s.usageArgs, s.navUsageArgs)
+    if not diagEnabled() then return end
+    local dok, active = pcall(MDADDiagnostics.start, playerNum, vehicle, s.vehicleProfile)
+    s.diag = dok and active == true
+    if not dok then pcall(MDADDiagnostics.stop, playerNum, "error") end
+    if not s.diag then return end
+    local route, profile = s.route, s.profile
+    diagEvent(s, playerNum, "start")
+    diagEvent(s, playerNum, "target", {
+        phase = "set", x = s.lastTx, y = s.lastTy, why = "user", tg = s.targetGen,
+    })
+    local pointN = type(route.pts) == "table" and #route.pts / 2 or 0
+    local routeLen = type(route.len) == "number"
+        and route.len * 0 == 0 and route.len or nil
+    diagEvent(s, playerNum, "route", MDADDiagnostics.routeSource(route, {
+        phase = "cutover", why = "initial", rg = s.routeGen,
+        tg = s.targetGen, len = routeLen, pts = pointN,
+        target = tostring(s.lastTx) .. "," .. tostring(s.lastTy),
+        navVersion = s.navVersion,
+        currentSurface = MDADFollower.surfaceName(profile.segSurface[1]),
+        currentSegWidth = profile.segWidth[1] > 0 and profile.segWidth[1] or nil,
+        cost = type(route.cost) == "number"
+            and route.cost * 0 == 0 and route.cost or nil,
+        avoidPenalty = type(route.avoidPenalty) == "number"
+            and route.avoidPenalty * 0 == 0 and route.avoidPenalty or nil,
+    }))
+end
+
 -- 啟動的所有閘門，成功時就地把 session 寫進表裡。回 nil＝開起來了，否則回失敗的
 -- 翻譯鍵；紅字與診斷統一由 Drive.start 收尾（七八條 early return 各印各的會讓
 -- 診斷散得到處都是，而且每條都得記得包 getDebug()）。
-local function startSession(playerObj, playerNum)
+-- stage（選填）＝v6 行程的準備意圖：帶著它就只「建好、寄放」，不碰車也不接上
+-- （stage.session），由準備流程把剖面建到 ready、claim 成功之後才 commitSession。
+-- 沒有 stage＝舊的單站自駕，建完就地接上，逐位元同以前。
+local function startSession(playerObj, playerNum, stage)
     -- 理論上 require 已經保證載入；真的缺了就是本 MOD 自己的檔案樹壞掉，
     -- 印一行診斷（同 MDAD_Client 的 registerNavGate 失敗慣例）再優雅退場，
     -- 不要讓 radial 回呼丟出 nil index 錯誤。這行不受 getDebug() 管：它是安裝壞掉，
@@ -1238,13 +1538,8 @@ local function startSession(playerObj, playerNum)
     if laneBias < 0 then laneBias = 0 end
     if laneBias > 2 then laneBias = 2 end
     MDADFollower.setLaneBias(fstate, laneBias)
-    -- 所有閘門都過了才動玩家的車：先把 regulator 關掉一次。剖面要分幀建（長路線
-    -- 七八幀），這段期間 stepFollow 根本不會跑，玩家上車前自己設的定速（或上一位
-    -- 駕駛留下的）就會原封不動繼續拉著車跑——啟動自駕的下一秒車子照舊速衝出去。
-    -- 失敗的啟動一律走上面的 early return，不會碰到這行，玩家的定速保持原狀。
-    vehicle:setRegulator(false)
     local startedAt = getTimestampMs()
-    sessions[playerNum] = {
+    local sNew = {
         startedMs = startedAt, -- 含停等／讓位；換路線與重建不重設，清 session 時凍結末趟秒數
         vehicle = vehicle,
         route = route,
@@ -1283,6 +1578,15 @@ local function startSession(playerObj, playerNum)
         mode = "build",  -- build → follow → unstick → settle ⇄ yield → arrive
                          -- （gear-reset／recover 已於階段 2 主體 5 移入 progressState）
         navVersion = api.navApiVersion,
+        -- v6 活動段的 claim token（nil＝舊單站自駕）：由準備流程在 claim 成功、
+        -- commitSession 之前寫入。每次控制輸出前以 getNavLeg 核對，到站回報與交還都認它。
+        legToken = nil,
+        -- 本段的站 id（v7 自動接續要驗「Core 現在等在的就是我剛回報的那一站」；
+        -- nil＝v6 Core 或舊單站自駕，沒有自動接續）。
+        legStopId = nil,
+        legReportMs = 0,    -- 下一次到站回報的最早時間（被拒時的有界重試間隔）
+        legReportUntil = 0, -- 到站回報的放棄時限（0＝尚未開始回報）
+        legReportWhy = nil, -- 已經對玩家顯示過的回報拒絕原因（同一個原因不重複洗紅字）
         adaptive = adaptive,
         runtimeMass = runtimeMass,
         nextMassMs = startedAt + MASS_REFRESH_MS,
@@ -1348,7 +1652,7 @@ local function startSession(playerObj, playerNum)
         lastHardBrakeReason = nil,  -- 本幀 hard-brake 裁決者（telemetry hbr；nil＝無）
         frameMs = 0,                -- 引擎回報的本幀時長（telemetry fdt；正常遊戲速度＝真幀時）
         nextRouteMs = startedAt + ROUTE_REFRESH_MS,
-        nextUsageMs = startedAt + USAGE_FIRST_RETRY_MS,
+        nextUsageMs = startedAt + TUNE.USAGE_FIRST_RETRY_MS,
         usageArgs = { vehicleId = vehicle:getId(), active = true },
         navUsageArgs = { active = true },
         nextDebugMs = 0,
@@ -1523,71 +1827,293 @@ local function startSession(playerObj, playerNum)
         planMode = "init",
         lastCoupled = false,
     }
-    -- 設定值在下一輪beginRound套用；不改route identity或正在執行的承諾。
-    if sessions[playerNum].sensor then
-        sessions[playerNum].sensor.aheadM = Drive.perceptionDistance()
+    if stage then
+        -- 準備中：先寄放，claim 成功才接上（第一次碰車在 commitSession）
+        stage.session = sNew
+        return nil
     end
-    sessionCount = sessionCount + 1
-    refreshPolicies(sessions[playerNum], vehicle, playerNum)
-    reportAutoUsage(playerObj, vehicle, true,
-        sessions[playerNum].usageArgs, sessions[playerNum].navUsageArgs)
-    do
-        local sNew = sessions[playerNum]
-        if diagEnabled() then
-            local dok, active = pcall(MDADDiagnostics.start,
-                playerNum, vehicle, sNew.vehicleProfile)
-            sNew.diag = dok and active == true
-            if not dok then pcall(MDADDiagnostics.stop, playerNum, "error") end
-            if sNew.diag then
-                diagEvent(sNew, playerNum, "start")
-                diagEvent(sNew, playerNum, "target", {
-                    phase = "set", x = tx, y = ty, why = "user", tg = sNew.targetGen,
-                })
-                local pointN = type(route.pts) == "table" and #route.pts / 2 or 0
-                local routeLen = type(route.len) == "number"
-                    and route.len * 0 == 0 and route.len or nil
-                diagEvent(sNew, playerNum, "route", MDADDiagnostics.routeSource(route, {
-                    phase = "cutover", why = "initial", rg = sNew.routeGen,
-                    tg = sNew.targetGen, len = routeLen, pts = pointN,
-                    target = tostring(tx) .. "," .. tostring(ty),
-                    navVersion = sNew.navVersion,
-                    currentSurface = MDADFollower.surfaceName(profile.segSurface[1]),
-                    currentSegWidth = profile.segWidth[1] > 0 and profile.segWidth[1] or nil,
-                    cost = type(route.cost) == "number"
-                        and route.cost * 0 == 0 and route.cost or nil,
-                    avoidPenalty = type(route.avoidPenalty) == "number"
-                        and route.avoidPenalty * 0 == 0 and route.avoidPenalty or nil,
-                }))
-            end
-        end
-    end
+    commitSession(playerObj, playerNum, sNew)
     return nil
+end
+
+-- 啟動回饋（radial 與準備完成兩處共用；準備完成時玩家早就按過鈕，回饋要在真的
+-- 開起來的那一刻才出現）。event＝這一段怎麼來的："leg_next"（接續下一站，自動
+-- 或從停靠點明確續開）、"priority"（插入的優先目標）、其餘＝"start"。三者都只在
+-- **真的 commitSession 之後**呼叫：車不在我們手上就沒有「出發」可以宣告。
+function TRIP.announce(playerObj, playerNum, event)
+    if event == "leg_next" then
+        haloGood(playerObj, TRIP.CONTINUE)
+    elseif event == "priority" then
+        haloGood(playerObj, TRIP.PRIORITY)
+    else
+        event = "start"
+        haloGood(playerObj, "UI_MinidoracatAutoDrive_Start")
+    end
+    voice(event, playerNum)
+    if getDebug() then
+        print(LOG .. "start pn=" .. playerNum .. " ok maxSpeed="
+            .. sessions[playerNum].maxSpeed .. " rev=" .. tostring(Drive.REV))
+    end
+end
+
+-- v7 近於 5m 時讓 Core 完成本站，再用 adopt 採用其接續結果；不自行宣告到站。
+-- v6 沒有被動續行採用協定，保留原備路流程。
+function TRIP.atStop(api, vehicle, x, y)
+    if not TRIP.v7(api) or type(x) ~= "number" or type(y) ~= "number" then return false end
+    local dx, dy = vehicle:getX() - x, vehicle:getY() - y
+    return dx * dx + dy * dy <= TRIP.ARRIVE_SQ
+end
+
+-- 準備期間的被動到站採用。Core 在**沒有 claim**時會自己收掉停在 5m 內的站並啟用
+-- 下一段（activation=continue）——token 於是換了，但那不是「玩家改了行程」，而是
+-- 本站真的到了。只有 prep 綁的那一站在快照裡確實 arrived 才處理，其餘任何 token
+-- 變動都回 false 讓呼叫端照原路取消（不假播到站、不自己重新起步）。
+-- 回 true＝這一幀已經處理完（轉到下一段，或收掉意圖並給了正確的停靠／完成提示）。
+function TRIP.adopt(playerNum, prep, api, trip, now)
+    local snap = TRIP.snapshot(api, playerNum, trip)
+    if not snap or not TRIP.arrived(snap, prep.stopId) then return false end
+    if TRIP.preps[playerNum] ~= prep then return true end
+    local token, stopId, _, _, phase, revision = api.getNavLeg(playerNum)
+    if TRIP.preps[playerNum] ~= prep then return true end
+    local playerObj = getSpecificPlayer(playerNum)
+    if playerObj ~= prep.playerObj or playerObj:isDead()
+            or playerObj:getVehicle() ~= prep.vehicle then
+        TRIP.cancel(playerNum, prep)
+        return true
+    end
+    -- 快照資格不能與另一版的 token 拼在一起，終態提示也須仍屬同一版。
+    if phase ~= snap.phase or revision ~= snap.revision then return false end
+    if snap.phase == "navigating" and snap.activation == "continue"
+            and snap.autoContinue == true then
+        if type(token) ~= "string" or stopId ~= snap.currentStopId then return false end
+        -- 沿用同一份意圖：丟掉舊剖面重建（route identity 也跟著重來），限期以新的
+        -- 一段重新起算，對車的控制輸出仍然是零。
+        prep.token, prep.stopId, prep.session = token, stopId, nil
+        prep.nextMs, prep.deadlineMs = 0, now + TRIP.PREP_MS
+        prep.event, prep.auto = "leg_next", true
+        if getDebug() then
+            print(LOG .. "trip prep adopt pn=" .. playerNum .. " stop=" .. tostring(stopId))
+        end
+        return true
+    end
+    -- 到了、但 Core 沒有（也不該）續發：停下來等玩家。停靠與完成都是事實，可以照
+    -- 既有的抵達暫停設定；其他 phase／activation 不屬於這條路。
+    if snap.phase ~= "waiting" and snap.phase ~= "completed" then return false end
+    if not TRIP.cancel(playerNum, prep) then return true end
+    if snap.phase == "completed" then
+        haloGood(playerObj, "UI_MinidoracatAutoDrive_Arrived")
+        haloGood(playerObj, TRIP.COMPLETED)
+        voice("arrive", playerNum, "pauseOnArrival")
+    else
+        haloGood(playerObj, TRIP.STOPOVER)
+        voice("stopover", playerNum, "pauseOnArrival")
+    end
+    return true
+end
+
+-- 準備意圖的一輪：acquire 段 → 查路線（250ms 節流）→ 分幀建剖面 → READY/claim。
+-- 寄放的 session 未接上，只有 claim 成功並重驗後才 commitSession、開始碰車。
+-- 每一幀都重驗玩家物件、車輛、設備 gate 與 token：撤銷、下車、換車、玩家自己操作
+-- 或車子開始移動都立刻收手。路線沒好就繼續等，逾時才放棄——不是每次 idle 就假報
+-- 遺失，也不要求玩家重複點擊。整段對車輛零控制輸出。
+-- 回失敗的翻譯鍵；nil＝仍在準備或已經開起來了。
+function TRIP.stepPrep(playerNum, now)
+    local prep = TRIP.preps[playerNum]
+    if not prep or not TRIP.keepPrep(playerNum, prep) then return nil end
+    if now >= prep.deadlineMs then
+        TRIP.cancel(playerNum, prep)
+        return "UI_MinidoracatAutoDrive_TripTimeout"
+    end
+    local playerObj, vehicle = prep.playerObj, prep.vehicle
+    if manualInput(vehicle) or not vehicle:isStopped() then
+        TRIP.cancel(playerNum, prep)
+        return nil
+    end
+    local reason = driveGate(playerObj, vehicle, playerNum, "draw")
+    if not TRIP.keepPrep(playerNum, prep) then return nil end
+    if reason then TRIP.cancel(playerNum, prep); return reason end
+    local api = TRIP.api()
+    if not api then TRIP.cancel(playerNum, prep); return KEY_API end
+    local legToken, stopId, stopX, stopY, phase, revision = api.getNavLeg(playerNum)
+    if not TRIP.keepPrep(playerNum, prep) then return nil end
+
+    if not prep.token then
+        -- 自動授權來自本段 report 的提交版本；版本沒變就仍是同一站、同一模式。
+        if prep.auto and (phase ~= "waiting" or revision ~= prep.revision) then
+            TRIP.cancel(playerNum, prep)
+            return nil
+        end
+        if phase == "approach" then TRIP.cancel(playerNum, prep); return TRIP.ROAD_END end
+        if phase == "navigating" then
+            if not legToken then TRIP.cancel(playerNum, prep); return TRIP.STATE end
+            local snapshot = TRIP.snapshot(api, playerNum)
+            if not TRIP.keepPrep(playerNum, prep) then return nil end
+            if snapshot then
+                if snapshot.revision ~= revision then
+                    TRIP.cancel(playerNum, prep)
+                    return TRIP.STALE
+                end
+                if snapshot.activation == "priority" then prep.event = "priority"
+                elseif snapshot.activation == "continue" then prep.event = "leg_next" end
+            end
+        elseif phase == "draft" or phase == "paused" or phase == "waiting" then
+            if phase == "waiting" then prep.event = "leg_next" end
+            local token, why, detail = api.startNavItinerary(playerNum, revision)
+            if not TRIP.keepPrep(playerNum, prep) then return nil end
+            if not token then TRIP.cancel(playerNum, prep); return TRIP.key(why, detail) end
+            legToken, stopId, stopX, stopY, phase, revision = api.getNavLeg(playerNum)
+            if not TRIP.keepPrep(playerNum, prep) then return nil end
+            if legToken ~= token or phase ~= "navigating" then
+                TRIP.cancel(playerNum, prep)
+                return TRIP.STALE
+            end
+        else
+            TRIP.cancel(playerNum, prep)
+            return phase == nil and KEY_ROUTE or TRIP.STATE
+        end
+        prep.token, prep.stopId = legToken, stopId
+        -- claim 前的模式授權只在版本變動時讀快照；首次 acquire 亦需驗 start wrapper。
+        prep.revision = nil
+    elseif legToken ~= prep.token then
+        local trip = api.getNavItinerary(playerNum)
+        if not TRIP.keepPrep(playerNum, prep) then return nil end
+        if trip and TRIP.adopt(playerNum, prep, api, trip, now) then return nil end
+        if not TRIP.cancel(playerNum, prep) then return nil end
+        return trip and trip.phase == "paused" and TRIP.REASON[trip.reason] or TRIP.STALE
+    end
+
+    if revision ~= prep.revision then
+        if prep.auto then
+            local snapshot = TRIP.snapshot(api, playerNum)
+            if not TRIP.keepPrep(playerNum, prep) then return nil end
+            if not snapshot or not snapshot.autoContinue then
+                TRIP.cancel(playerNum, prep)
+                return nil
+            end
+            if snapshot.revision ~= revision then return nil end
+        end
+        prep.revision = revision
+    end
+    if prep.session then
+        if not MDADFollower.stepBuild(prep.session.profile, BUILD_BUDGET) then return nil end
+        local route, _, _, state = fetchRoute(api, playerNum)
+        if not TRIP.keepPrep(playerNum, prep) then return nil end
+        if state == "noroad" or state == "failed" then
+            if TRIP.atStop(api, vehicle, stopX, stopY) then return nil end
+            TRIP.cancel(playerNum, prep)
+            return TRIP.key(state)
+        end
+        if route ~= prep.session.route then
+            prep.session, prep.nextMs = nil, now
+            return nil
+        end
+        -- READY 查路亦可觸發回呼；新版本留到下一輪重新授權，不拿舊檢查 claim。
+        local readyToken, _, _, _, readyPhase, readyRevision = api.getNavLeg(playerNum)
+        if not TRIP.keepPrep(playerNum, prep) then return nil end
+        if readyToken ~= prep.token or readyPhase ~= "navigating"
+                or readyRevision ~= prep.revision then return nil end
+        local claimed, why, detail = api.claimNavLeg(playerNum, MDAD.MOD_ID, prep.token)
+        if not claimed then
+            if not TRIP.keepPrep(playerNum, prep) then return nil end
+            TRIP.cancel(playerNum, prep)
+            return TRIP.key(why, detail)
+        end
+        if not TRIP.keepPrep(playerNum, prep) then
+            TRIP.release(playerNum, claimed, "cancelled")
+            return nil
+        end
+        -- claim 本身也換版本；auto 每段再讀一次模式，防 wrapper 在 claim 後關閉。
+        local snapshot
+        if prep.auto then snapshot = TRIP.snapshot(api, playerNum) end
+        if not TRIP.keepPrep(playerNum, prep) then
+            TRIP.release(playerNum, claimed, "cancelled")
+            return nil
+        end
+        local currentToken, currentStop, _, _, currentPhase, currentRevision = api.getNavLeg(playerNum)
+        if not TRIP.keepPrep(playerNum, prep) or currentToken ~= claimed
+                or currentStop ~= prep.stopId or currentPhase ~= "navigating"
+                or (prep.auto and (not snapshot or not snapshot.autoContinue
+                    or snapshot.revision ~= currentRevision))
+                or manualInput(vehicle) or not vehicle:isStopped() then
+            TRIP.release(playerNum, claimed, "cancelled")
+            TRIP.cancel(playerNum, prep)
+            return nil
+        end
+        prep.session.legToken, prep.session.legStopId = claimed, prep.stopId
+        TRIP.cancel(playerNum, prep)
+        commitSession(playerObj, playerNum, prep.session)
+        TRIP.announce(playerObj, playerNum, prep.event)
+        return nil
+    end
+    if now < prep.nextMs then return nil end
+    prep.nextMs = now + ROUTE_REFRESH_MS
+    if TRIP.atStop(api, vehicle, stopX, stopY) then return nil end
+    local route, _, _, state = fetchRoute(api, playerNum)
+    if not TRIP.keepPrep(playerNum, prep) then return nil end
+    if state == "noroad" or state == "failed" then
+        TRIP.cancel(playerNum, prep)
+        return TRIP.key(state)
+    end
+    if not route then return nil end
+    reason = startSession(playerObj, playerNum, prep)
+    if not TRIP.keepPrep(playerNum, prep) then return nil end
+    if reason then TRIP.cancel(playerNum, prep); return reason end
+    return nil
+end
+
+-- 玩家明確開始／恢復的入口；先建立可取消的 prep，Core acquire 全在 stepPrep。
+-- 自動接續僅由 report 的 arrived/continue 分支移交，不透過可外呼的 auto 參數。
+function Drive.continueItinerary(playerNum)
+    if sessions[playerNum] or TRIP.preps[playerNum] then return true end
+    if TRIP.owed[playerNum] then return false, TRIP.LOST end
+    local playerObj = getSpecificPlayer(playerNum)
+    if not playerObj or not playerObj:isLocalPlayer() then return false, KEY_NOT_DRIVER end
+    if sessionCount >= TUNE.MAX_SESSIONS then return false, TRIP.STATE end
+    if not TRIP.api() then return false, KEY_API end
+    local vehicle = playerObj:getVehicle()
+    local reason = driveGate(playerObj, vehicle, playerNum, nil)
+    if reason then return false, reason end
+    if not vehicle:isStopped() then return false, TRIP.NOT_STOPPED end
+    local now = getTimestampMs()
+    TRIP.preps[playerNum] = { playerObj = playerObj, vehicle = vehicle, event = "start",
+        auto = false, startedMs = now, nextMs = 0, deadlineMs = now + TRIP.PREP_MS }
+    prepCount = prepCount + 1
+    if cancelPendingPause then cancelPendingPause() end
+    reason = TRIP.stepPrep(playerNum, now)
+    if reason then return false, reason end
+    return true
 end
 
 function Drive.start(playerObj)
     if not playerObj or not playerObj:isLocalPlayer() then return false end
     local playerNum = playerObj:getPlayerNum()
-    if sessions[playerNum] then return true end
-    if sessionCount >= MAX_SESSIONS then return false end
+    if sessions[playerNum] or TRIP.preps[playerNum] then return true end
+    if sessionCount >= TUNE.MAX_SESSIONS then return false end
+    -- 具備行程 API 就由同一個可取消 acquire 分類；radial 不在外層偷做首查。
+    if TRIP.api() then
+        local ok, why = Drive.continueItinerary(playerNum)
+        if not ok then
+            haloBad(playerObj, why)
+            if getDebug() then
+                print(LOG .. "start pn=" .. playerNum .. " trip blocked=" .. tostring(why))
+            end
+        end
+        return ok
+    end
     local reason = startSession(playerObj, playerNum)
     if reason then
         haloBad(playerObj, reason)
         if getDebug() then print(LOG .. "start pn=" .. playerNum .. " blocked=" .. reason) end
         return false
     end
-    haloGood(playerObj, "UI_MinidoracatAutoDrive_Start")
-    voice("start", playerNum)
-    if getDebug() then
-        print(LOG .. "start pn=" .. playerNum .. " ok maxSpeed="
-            .. sessions[playerNum].maxSpeed .. " rev=" .. tostring(Drive.REV))
-    end
+    TRIP.announce(playerObj, playerNum)
     return true
 end
 
 function Drive.toggle(playerObj)
     if not playerObj then return end
     local playerNum = playerObj:getPlayerNum()
-    if sessions[playerNum] then
+    if Drive.isActive(playerNum) then
         Drive.stop(playerNum, nil)
         haloGood(playerObj, "UI_MinidoracatAutoDrive_Stop")
         if getDebug() then print(LOG .. "toggle pn=" .. playerNum .. " off") end
@@ -2850,7 +3376,7 @@ local function footprintSnapshot(s, vehicle, playerNum, out, heading, vx, vy, la
                 ax, ay = s.episodeStartX, s.episodeStartY
             end
             local dx, dy = vx - ax, vy - ay
-            rearmed = dx * dx + dy * dy >= EPISODE_REARM_SQ
+            rearmed = dx * dx + dy * dy >= TUNE.EPISODE_REARM_SQ
         end
         if rearmed then
             diagEvent(s, playerNum, "progress", {
@@ -7936,11 +8462,22 @@ end
 -- 原版用例 Steps.lua:1922、DebugDemoTime.lua:308）。伺服器端 isLocalPlayer 恆 false
 -- （IsoPlayer.java:6493），遠端玩家也擋在這裡——自駕只在駕駛自己的 client 跑。
 local function onPlayerUpdate(player)
-    if sessionCount == 0 then return end
+    if sessionCount == 0 and prepCount == 0 then return end
     if not player or not player:isLocalPlayer() then return end
     local playerNum = player:getPlayerNum()
     local s = sessions[playerNum]
-    if not s then return end
+    if not s then
+        -- 沒有 session 但有行程待辦：續辦準備（每幀推進剖面、250ms 查一次路線；對車
+        -- 零控制輸出），以及欠 MiniMap 的交還重試。準備失敗才出紅字，等路線期間安靜
+        -- （HUD 顯示 build）。
+        if prepCount > 0 then
+            local pending = getTimestampMs()
+            TRIP.stepOwed(playerNum, pending)
+            pending = TRIP.stepPrep(playerNum, pending)
+            if pending then haloBad(player, pending) end
+        end
+        return
+    end
 
     if player:isDead() then
         Drive.stop(playerNum, nil)
@@ -7952,6 +8489,18 @@ local function onPlayerUpdate(player)
     if vehicle ~= s.vehicle or not vehicle:isDriver(player) then
         Drive.stop(playerNum, nil)
         return
+    end
+
+    -- v6：**任何**控制輸出之前先核對 claim token，包含 arrive 的煞停收尾——玩家按了
+    -- 「停止導航」之後不該還有人跟他搶煞車（§6.4「失效即交還控制」）。
+    if s.legToken then
+        local trip = TRIP.api()
+        if not trip or trip.getNavLeg(playerNum) ~= s.legToken then
+            -- 只有讀到不同 token 才確認已撤銷；介面缺席仍須保存待交還紀錄。
+            if trip then s.legToken = nil end
+            Drive.stop(playerNum, trip and TRIP.LOST or KEY_API)
+            return
+        end
     end
 
     local now = getTimestampMs()
@@ -7981,10 +8530,75 @@ local function onPlayerUpdate(player)
         end
         vehicle:setRegulator(false)
         if vehicle:isStopped() then
+            -- v6／v7 到站：回報必須在清 session **之前**完成，且此刻控制輸出已停
+            -- （regulator 已關、本幀不再送 forceBrake）。舊單站自駕沒有 claim，
+            -- outcome 直接是 arrived、disposition 為 nil，行為逐位元同以前。
+            local outcome, disposition, reportedRev = "arrived", nil, nil
+            if s.legToken then
+                if s.legReportUntil == 0 then s.legReportUntil = now + TRIP.REPORT_MS end
+                -- 重試間隔內：維持 arrive、維持停妥，不清 session 也不假報抵達。
+                if now < s.legReportMs then return end
+                s.legReportMs = now + ROUTE_REFRESH_MS
+                local why, consumed, disp, rev = TRIP.report(playerNum, s.legToken)
+                -- 舊回報不能收掉回呼新建的意圖，也不能替它排停靠語音／暫停。
+                if sessions[playerNum] ~= s then return end
+                if consumed then
+                    s.legToken = nil
+                    outcome, disposition, reportedRev = why, disp, rev
+                elseif now < s.legReportUntil then
+                    -- 被拒但 claim 仍是我們的：明示原因（同一個原因只說一次）後重試。
+                    if s.legReportWhy ~= why then
+                        s.legReportWhy = why
+                        haloBad(player, why)
+                    end
+                    return
+                else
+                    -- 有界重試用完：控制早已停，交還 claim 再收尾（交還被拒會自己排重試）。
+                    TRIP.release(playerNum, s.legToken, "failed")
+                    if sessions[playerNum] ~= s then return end
+                    s.legToken = nil
+                    outcome = why
+                end
+            end
+            local nextPrep
+            if outcome == "arrived" and disposition == "continue" and not TRIP.owed[playerNum] then
+                nextPrep = { playerObj = player, vehicle = s.vehicle, auto = true,
+                    event = "leg_next", revision = reportedRev, startedMs = now, nextMs = 0,
+                    deadlineMs = now + TRIP.PREP_MS }
+            end
             diagStop(s, playerNum, "arrive")
             clearSession(playerNum)
-            haloGood(player, "UI_MinidoracatAutoDrive_Arrived")
-            voice("arrive", playerNum, "pauseOnArrival")
+            if outcome == "arrived" then
+                if nextPrep then
+                    -- report 的版本授權在 acquire 重驗；第一個 Core API 之前已有可取消意圖。
+                    TRIP.preps[playerNum] = nextPrep
+                    prepCount = prepCount + 1
+                    if cancelPendingPause then cancelPendingPause() end
+                    local why = TRIP.stepPrep(playerNum, now)
+                    if why then haloBad(player, why) end
+                elseif disposition == "continue" then
+                    haloBad(player, TRIP.LOST)
+                elseif disposition == "stopover" then
+                    -- 停靠點／逐點等候：停在這裡等玩家，可依既有的抵達暫停設定。
+                    haloGood(player, TRIP.STOPOVER)
+                    voice("stopover", playerNum, "pauseOnArrival")
+                elseif disposition == "completed" then
+                    haloGood(player, "UI_MinidoracatAutoDrive_Arrived")
+                    haloGood(player, TRIP.COMPLETED)
+                    voice("arrive", playerNum, "pauseOnArrival")
+                else
+                    -- v6 Core（沒有 disposition）與舊單站自駕：逐位元同以前。
+                    haloGood(player, "UI_MinidoracatAutoDrive_Arrived")
+                    voice("arrive", playerNum, "pauseOnArrival")
+                end
+            elseif outcome == "road_end" then
+                -- 道路終點：本站仍是 pending，交給玩家徒步前往。不冒稱抵達、
+                -- 不播成功語音、不自動開下一段。白字＝資訊不是失敗。
+                HaloTextHelper.addText(player, getText(TRIP.ROAD_END))
+            elseif outcome ~= "duplicate" then
+                -- 回報沒有成立：原因給玩家看，站點不動、不自動出發。
+                haloBad(player, outcome)
+            end
         else
             if not commandForceBrake(s, vehicle, now, "arrive") then
                 Drive.stop(playerNum, KEY_UNSUPPORTED)
@@ -8011,11 +8625,18 @@ local function onPlayerUpdate(player)
         refreshPolicies(s, vehicle, playerNum)
         local route, tx, ty = fetchRoute(api, playerNum)
         if not route then
+            if s.legToken then
+                -- 有 claim 時 MiniMap 不會因距離清目標、也不會替我們完成站（§6.3），
+                -- 所以這裡的「目標不見了」只代表本段不再有效——絕不能沿用 v5 的
+                -- 「目標消失＝抵達」收旗啟發把它當成到站。
+                Drive.stop(playerNum, tx == nil and TRIP.LOST or KEY_LOST)
+                return
+            end
             local arrived = false
             if tx == nil and s.lastTx then
                 local ddx = s.lastTx - vehicle:getX()
                 local ddy = s.lastTy - vehicle:getY()
-                arrived = ddx * ddx + ddy * ddy <= ARRIVE_CLEAR_SQ
+                arrived = ddx * ddx + ddy * ddy <= TUNE.ARRIVE_CLEAR_SQ
                 s.targetGen = s.targetGen + 1
                 diagEvent(s, playerNum, "target", {
                     phase = "clear", oldX = s.lastTx, oldY = s.lastTy,
@@ -8469,6 +9090,15 @@ Events.OnPlayerUpdate.Add(onPlayerUpdate)
 -- Diagnostics 也有自己的同事件保險，兩邊 stop 都是冪等。
 local function onMainMenuEnter()
     if cancelPendingPause then cancelPendingPause() end
+    -- 準備意圖也一起收：角色／世界切換由 MiniMap 的生命週期清理撤銷 claim
+    -- （此時 release 只會回 stale），這裡只丟掉本機意圖，不碰新角色。
+    for playerNum = 0, 3 do
+        TRIP.drop(playerNum)
+        if TRIP.owed[playerNum] then
+            TRIP.owed[playerNum] = nil
+            prepCount = prepCount - 1
+        end
+    end
     for playerNum = 0, 3 do
         local s = sessions[playerNum]
         if s then

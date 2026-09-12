@@ -121,6 +121,28 @@ local REASON_KEYS = {
     UI_MinidoracatAutoDrive_RouteNotReady = "UI_MinidoracatAutoDrive_HUDStatusNoRoute",
     UI_MinidoracatAutoDrive_NeedGPS = "UI_MinidoracatAutoDrive_HUDStatusNoGPS",
     UI_MinidoracatAutoDrive_NavApiMissing = "UI_MinidoracatAutoDrive_HUDStatusNoNav",
+    -- 多停靠點行程（addon-api §6）：Driver 的行程回傳鍵，短標籤只有 HUD 讀。
+    UI_MinidoracatAutoDrive_TripBusy = "UI_MinidoracatAutoDrive_HUDStatusTripBusy",
+    UI_MinidoracatAutoDrive_TripState = "UI_MinidoracatAutoDrive_HUDStatusTripState",
+    UI_MinidoracatAutoDrive_TripStale = "UI_MinidoracatAutoDrive_HUDStatusTripStale",
+    UI_MinidoracatAutoDrive_TripNotStopped = "UI_MinidoracatAutoDrive_HUDStatusTripNotStopped",
+    UI_MinidoracatAutoDrive_TripRoadEnd = "UI_MinidoracatAutoDrive_HUDStatusTripRoadEnd",
+    UI_MinidoracatAutoDrive_TripLost = "UI_MinidoracatAutoDrive_HUDStatusTripLost",
+    -- 自動步行到點但 gate(set) 不允許：行程留在 waiting，原因壓過階段字。
+    UI_MinidoracatAutoDrive_TripUnavailable = "UI_MinidoracatAutoDrive_HUDStatusTripUnavailable",
+    -- 接續模式切換被 MiniMap 拒絕（expectedRevision 過期）時的短標籤。
+    UI_MinidoracatAutoDrive_HUDContFailed = "UI_MinidoracatAutoDrive_HUDStatusContFailed",
+    -- 這一站沒有可用路線／行程操作失敗：沿用既有的路線與行程短標籤。
+    UI_MinidoracatAutoDrive_TripNoRoad = "UI_MinidoracatAutoDrive_HUDStatusNoRoute",
+    UI_MinidoracatAutoDrive_TripFailed = "UI_MinidoracatAutoDrive_HUDStatusTripState",
+}
+
+-- 快照 trip.reason（Core 固定 enum）→ 完整原因句。manual／cancelled 是正常停止，
+-- 刻意沒有對應：那兩種只顯示階段文案，不當成錯誤。
+local TRIP_REASON_KEYS = {
+    unavailable = "UI_MinidoracatAutoDrive_TripUnavailable",
+    noroad = "UI_MinidoracatAutoDrive_TripNoRoad",
+    failed = "UI_MinidoracatAutoDrive_TripFailed",
 }
 
 -- 面板寬度取「最長狀態字串」；量測鍵表固定不變，留在載入期讓 applyLayout 不重建 table。
@@ -139,7 +161,47 @@ local STATUS_WIDTH_KEYS = {
     "UI_MinidoracatAutoDrive_HUDStatusNoGPS",
     "UI_MinidoracatAutoDrive_HUDStatusNoNav",
     "UI_MinidoracatAutoDrive_HUDStatusNotReady",
+    "UI_MinidoracatAutoDrive_HUDStatusTripBusy",
+    "UI_MinidoracatAutoDrive_HUDStatusTripState",
+    "UI_MinidoracatAutoDrive_HUDStatusTripStale",
+    "UI_MinidoracatAutoDrive_HUDStatusTripNotStopped",
+    "UI_MinidoracatAutoDrive_HUDStatusTripRoadEnd",
+    "UI_MinidoracatAutoDrive_HUDStatusTripLost",
+    "UI_MinidoracatAutoDrive_HUDStatusTripWaiting",
+    "UI_MinidoracatAutoDrive_HUDStatusTripDone",
+    "UI_MinidoracatAutoDrive_HUDStatusContFailed",
+    "UI_MinidoracatAutoDrive_HUDStatusTripSkipped",
+    "UI_MinidoracatAutoDrive_HUDStatusTripUnavailable",
 }
+
+-- 多停靠點行程（addon-api §6）：MiniMap navApiVersion >= 6 才存在。HUD 只讀公開的
+-- getNavLeg／getNavItinerary，行程唯一寫入者是 MiniMap，自駕接續一律走
+-- Drive.continueItinerary（玩家明確按鈕才啟動）；缺 API 時保留單站控制。
+local TRIP_ACTION_KEYS = {
+    draft = "UI_MinidoracatAutoDrive_HUDTripStart",
+    paused = "UI_MinidoracatAutoDrive_HUDTripResume",
+    waiting = "UI_MinidoracatAutoDrive_HUDTripContinue",
+    -- approach 依契約不得自駕接管：只換文案與說明，不給啟動出口。
+    approach = "UI_MinidoracatAutoDrive_HUDTripManual",
+}
+local TRIP_PHASE_KEYS = {
+    draft = "UI_MinidoracatAutoDrive_HUDTripPhaseDraft",
+    navigating = "UI_MinidoracatAutoDrive_HUDTripPhaseNavigating",
+    approach = "UI_MinidoracatAutoDrive_HUDTripPhaseApproach",
+    waiting = "UI_MinidoracatAutoDrive_HUDTripPhaseWaiting",
+    paused = "UI_MinidoracatAutoDrive_HUDTripPhasePaused",
+    completed = "UI_MinidoracatAutoDrive_HUDTripPhaseCompleted",
+}
+-- 主鈕被拒的原因必須看得到，但不能永久蓋掉行駛安全狀態：顯示 5 秒後退回 hudStartReason。
+local TRIP_NOTICE_MS = 5000
+local TRIP_ROAD_END_KEY = "UI_MinidoracatAutoDrive_TripRoadEnd"
+-- 接續模式（navApiVersion 7／快照 schemaVersion 2）：值只有一份，住在 MiniMap 的
+-- 目前行程裡（trip.autoContinue）。HUD 讀快照、寫一律走 API.setNavContinuation
+-- （expectedRevision 過期就被拒），不另存 ModOptions 副本、不發車也不煞車。
+-- 缺 v7／缺 setter／快照沒有這一欄＝整顆控制不出現（不得假亮）。
+local NAV_CONT_VERSION = 7
+local CONT_AUTO_KEY = "UI_MinidoracatAutoDrive_HUDContAuto"
+local CONT_STEP_KEY = "UI_MinidoracatAutoDrive_HUDContStep"
 
 local THEME_KEYS = {
     "UI_MinidoracatAutoDrive_HUDThemeMetal",
@@ -499,6 +561,39 @@ local function visibleVehicle(playerObj)
     return vehicle
 end
 
+-- 行程 API 守衛：每次用前重查（addon-api §2；主 MOD 與 addon 各自更新，版本一律用 >=）。
+-- 只取讀取面——HUD 不寫行程，也不自造 legToken。
+local function tripApi()
+    local api = MinidoracatMiniMapAPI
+    if type(api) ~= "table" then return nil end
+    local version = api.navApiVersion
+    if type(version) ~= "number" or version * 0 ~= 0 or version < 6 or version % 1 ~= 0 then return nil end
+    if type(api.getNavLeg) ~= "function" or type(api.getNavItinerary) ~= "function" then
+        return nil
+    end
+    return api
+end
+
+-- 接續模式控制（addon-api §6，navApiVersion 7）：讀取面之外還要 setter 才算有。
+local function continuationApi()
+    local api = tripApi()
+    if not api or api.navApiVersion < NAV_CONT_VERSION then return nil end
+    if type(api.setNavContinuation) ~= "function" then return nil end
+    return api
+end
+
+-- 站名：label 優先，沒有就退座標；兩者都沒有回 nil（呼叫端再退 N/M）。
+local function stopName(stop)
+    if type(stop) ~= "table" then return nil end
+    local label = stop.label
+    if type(label) == "string" and label ~= "" then return label end
+    if type(stop.x) == "number" and type(stop.y) == "number" then
+        return getText("UI_MinidoracatAutoDrive_HUDTripAt",
+            math.floor(stop.x), math.floor(stop.y))
+    end
+    return nil
+end
+
 -- ESC 不會改 ISUIHandler.allUIVisible；權威狀態是 in-game MainScreen root。
 -- ToggleEscapeMenu 先 setVisible、再 deferred removeFromUIManager
 -- （MainScreen.lua:1728-1777），isReallyVisible 因此開關即刻收斂。
@@ -607,13 +702,41 @@ local function applyPolicyButton(button, labelKey, glyph, on, playerChoice, tool
     styleButton(button, on and C.start or C.button, on and C.green or C.muted, playerChoice)
 end
 
-local function makeButton(parent, title, callback)
-    local button = ISButton:new(0, 0, 10, 10, title, parent, callback)
+local function makeButton(parent, title, callback, class)
+    local button = (class or ISButton):new(0, 0, 10, 10, title, parent, callback)
     button:initialise()
     button.font = UIFont.Small
     styleButton(button, C.button, C.text, true)
     parent:addChild(button)
     return button
+end
+
+-- 接續模式藥丸：MUI 沒有 route-chain 圖形，調色盤／chevron／改道三個圖示各有語意不挪用。
+-- 「三節點串一線」的 glyph 以既有 drawRect 畫（每幀只有純量運算，零 table／closure 配置），
+-- 值一律再配短字（自動／逐點）——狀態不能只靠顏色。底色／邊框／hover／命中仍由原版
+-- ISButton 負責（prerender＝ISButton.lua:111-140、render＝:196-240）。
+MDADHUDChainButton = ISButton:derive("MDADHUDChainButton")
+
+function MDADHUDChainButton:render()
+    ISButton.render(self)
+    local color = self.textColor
+    local node = self.nodePx or 3
+    local gap = self.nodeGap or 4
+    local x = self.glyphX or 6
+    local top = math.floor((self.height - node) / 2)
+    local lineY = top + math.floor(node / 2)
+    for i = 1, 3 do
+        if i > 1 then
+            self:drawRect(x - gap, lineY, gap, 1, color.a, color.r, color.g, color.b)
+        end
+        self:drawRect(x, top, node, node, color.a, color.r, color.g, color.b)
+        x = x + node + gap
+    end
+    local value = self.valueText
+    if value then
+        self:drawText(value, self.valueX or x, self.valueY or 0,
+            color.r, color.g, color.b, color.a, UIFont.Small)
+    end
 end
 
 -- =====================================================================
@@ -747,6 +870,7 @@ function MDADHUDPanel:new(playerNum)
     o._timeLabel = ""
     o._gearLabel = ""
     o._unitX = 0
+    o._unitY = 0
     o._capLabelY = 0
     o._capValueX = 0
     o._capValueY = 0
@@ -763,6 +887,33 @@ function MDADHUDPanel:new(playerNum)
     o._corpsePolicy = MDAD.POLICY_PLAYER
     o._reason = nil
     o._voiceOn = true
+    -- 行程狀態：_hasTrip 只在有無之間變動時重算版面；其餘字串只在 phase／revision／
+    -- 目前站變更時重建，prerender 一律只畫快取。
+    o._hasTrip = false
+    o._tripPhase = nil
+    o._tripRevision = nil
+    o._tripStopId = nil
+    o._tripCounter = nil
+    o._tripFull = nil
+    o._tripTip = nil
+    o._tripText = nil
+    o._tripTextX = 0
+    o._tripTextY = 0
+    o._tripDrawY = nil
+    o._tripMaxW = 0
+    o._tripColor = C.amber
+    o._tripAction = false
+    o._tripActionKey = nil
+    o._tripNoticeKey = nil
+    o._tripNoticeMs = 0
+    -- 接續模式：_contAvail 與 _hasTrip 同樣只在「有無」變動時重算版面。
+    o._contAvail = false
+    o._tripAutoContinue = nil
+    o._tripSnapRevision = nil
+    o._tripRemaining = 0
+    o._tripStatusKey = nil
+    o._tripReasonKey = nil
+    o._prep = false
     return o
 end
 
@@ -780,6 +931,9 @@ function MDADHUDPanel:createChildren()
     -- 自動改道藥丸（2026-09-02 使用者：ESC 選項也要出現在 HUD 上）：與減速藥丸同列同款，
     -- 讀寫同一個 ModOptions 選項（ESC／MiniMap 設定三處同源）；無 ModOptions＝不顯示。
     self.autoButton = makeButton(self, "", MDADHUDPanel.onAutoDetour)
+    -- 接續模式藥丸（v7）：點一下開原版選單挑自動／逐點，寫入只在玩家挑了才發生。
+    self.contButton = makeButton(self, "", MDADHUDPanel.onContinuation, MDADHUDChainButton)
+    self.contButton:setVisible(false)
     self.actionButton = makeButton(self, getText("UI_MinidoracatAutoDrive_Start"), MDADHUDPanel.onAction)
     self.themeButton = makeButton(self, getText("UI_MinidoracatAutoDrive_HUDStyleButton"), MDADHUDPanel.onTheme)
     self.collapseButton = makeButton(self, getText("UI_MinidoracatAutoDrive_HUDHideButton"), MDADHUDPanel.onCollapse)
@@ -834,6 +988,8 @@ function MDADHUDPanel:setControlsVisible(gearsOn, cycleOn, policiesOn, actionOn,
     self.zombieButton:setVisible(policiesOn)
     self.corpseButton:setVisible(policiesOn)
     self.autoButton:setVisible(policiesOn and modOptions ~= nil)
+    -- 接續模式藥丸與策略藥丸同列同進退；沒有 v7 setter／沒有行程時整顆不存在。
+    self.contButton:setVisible(policiesOn and self._contAvail == true)
     self.actionButton:setVisible(actionOn)
     -- 樣式／語音只在展開態；隱藏鈕永遠在（收合徽章上它就是「展開」）。
     self.themeButton:setVisible(not self._collapsed and modOptions ~= nil)
@@ -845,7 +1001,7 @@ function MDADHUDPanel:setControlsVisible(gearsOn, cycleOn, policiesOn, actionOn,
     self.detourButton:setVisible(self._detourAllowed and self._blocked == true)
 end
 
--- 兩套版面（上掛三主題 applyLayout／側掛 layoutWings）共用的量測：字高、間距、
+-- 兩套版面（上掛 layoutStacked／側掛 layoutWings）共用的量測：字高、間距、
 -- 控制鈕高、各鈕最小寬、狀態字最長寬。只在 layout 跑（冷路徑），回一張表；
 -- 各版面自己再加邊距／地板。圖示可用時控制鈕與策略藥丸都收成方鈕（寬＝高）。
 local function measure(self, scale)
@@ -870,7 +1026,31 @@ local function measure(self, scale)
     m.capValueW = textWidth(UIFont.Small, "120")
     m.actionW = maximum(scaled(58, scale), maximum(
         textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_Start")),
-        textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_Stop"))) + 16)
+        maximum(textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_Stop")),
+            textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDCancelPrep")))) + 16)
+    -- 行程計數欄固定以 "16/16" 保留寬度（addon-api §6.2 首版上限 16 站），站數變動不推幾何。
+    -- 行程模式的四個主鈕文案（開始行程／繼續行程／繼續自駕／手動前往）也不得被裁；
+    -- 沒有行程時不量這四個行程動作。
+    m.tripCounterW = textWidth(UIFont.Small, "16/16")
+    -- 長句先退成目標名稱；約十二個全形字的預算跟隨遊戲字型。
+    m.tripLineW = maximum(scaled(220, scale), m.fontH * 12)
+    if self._hasTrip then
+        for _, key in pairs(TRIP_ACTION_KEYS) do
+            m.actionW = maximum(m.actionW, textWidth(UIFont.Small, getText(key)) + 16)
+        end
+    end
+    -- 接續藥丸：glyph（三節點）＋短字，寬度自成一格——圖示模式把策略藥丸收成方鈕，
+    -- 但這顆一定要帶字，不能跟著收成正方形。沒有 v7 setter 時寬度為 0（完全不佔位）。
+    m.nodePx = maximum(2, scaled(3, scale))
+    m.nodeGap = maximum(2, scaled(4, scale))
+    m.contGlyphW = m.nodePx * 3 + m.nodeGap * 2
+    m.contW = 0
+    if self._contAvail then
+        m.contW = 6 + m.contGlyphW + m.nodeGap + maximum(
+            textWidth(UIFont.Small, getText(CONT_AUTO_KEY)),
+            textWidth(UIFont.Small, getText(CONT_STEP_KEY))) + 6
+    end
+    m.contGap = m.contW > 0 and (m.contW + m.gap) or 0
     m.gearW = maximum(scaled(34, scale), textWidth(UIFont.Small, "MAX") + 12)
     m.gearLabelW = textWidth(UIFont.Small, self._gearLabel) + m.gap
     local forcedText = getText("UI_MinidoracatAutoDrive_HUDForcedOff")
@@ -909,10 +1089,13 @@ end
 -- （moveWithMouse=false → onMouseDown 回 isWantMouseEvents()＝false），未命中子元件
 -- 的點擊回 FALSE（UIElement.java:1123、1132），UIManager 繼續往下派送
 -- （UIManager.java:672-683 只在 consumed 才停），所以原版儀表板的 btn_partSpeed 照樣可點。
-function MDADHUDPanel:layoutWings(scale)
-    local m = measure(self, scale)
+function MDADHUDPanel:layoutWings(scale, m)
     local fontH, mediumH, pad, gap, ctrlH = m.fontH, m.mediumH, m.pad, m.gap, m.ctrlH
     local statusW = maximum(m.statusTextW, m.blockedW + gap + m.detourW)
+    -- 有行程時狀態欄多留一格計數（側翼是單行版面，行程接在狀態字後面）。
+    if self._hasTrip then
+        statusW = maximum(statusW + m.tripCounterW + gap, 16 + m.tripLineW + gap)
+    end
     local detourW, speedValueW = m.detourW, m.speedValueW
     local speedW = speedValueW + 3 + m.unitW
     local capLabelW = m.capLabelW
@@ -931,10 +1114,21 @@ function MDADHUDPanel:layoutWings(scale)
         capW + gap + timeW + gap + ctrlW + gap + actionW)
     local rightOpenW = pad * 2 + maximum(
         gearLabelW + gearW * 4 + gap * 3,
-        maximum(policyW * policyN + gap * policyN + energyW,
+        maximum(policyW * policyN + gap * policyN + m.contGap + energyW,
             (controlsOn and (ctrlW * 3 + gap * 3 + sliderW) or ctrlW)))
     local leftFoldW = pad * 2 + 16 + speedValueW + gap + clockW + gap + ctrlW
     local rightFoldW = pad * 2 + textWidth(UIFont.Small, "MAX") + gap + ctrlW
+    -- 側翼的高度是硬約束（與可見儀表板同高），寬度也先被儀表板本體吃掉一大塊。
+    -- 右翼三列排不進 wingH 就會把檔位列推到負 Y、底列掉出面板下緣（2026-09-12 以
+    -- 中文 4x 字高實測：wingH=103、檔位 y=-19、底列 77+44>103）；左翼被寬度逼著
+    -- 摺起則等於整個 HUD 沒有主鈕可按。兩者任一成立就退回上掛金屬版面——那邊的
+    -- 精簡單行階梯本來就會逐階讓出次要欄位，主鈕與收合入口一定留著。
+    local wingRows = controlsOn and 3 or 2
+    if ctrlH * wingRows + gap * (wingRows - 1) > wingH
+            or leftOpenW + dashW + rightFoldW > maxW then
+        self._style = STYLE_METAL
+        return self:layoutStacked(scale, m)
+    end
     local foldL, foldR = self._wingL == true, self._wingR == true
     local function totalW()
         return (foldL and leftFoldW or leftOpenW) + dashW + (foldR and rightFoldW or rightOpenW)
@@ -953,11 +1147,15 @@ function MDADHUDPanel:layoutWings(scale)
     self._headerH = 0
     self._blockX = nil
     self._dividerY = nil
+    -- 側翼兩列都只有一行字高，行程一律走「狀態字之後」的單行版。
+    self._tripDrawY = nil
+    self._tripColor = C.amber
     for i = 1, 4 do self.gearButtons[i]:setVisible(not foldR) end
     self.cycleButton:setVisible(false)
     self.zombieButton:setVisible(not foldR)
     self.corpseButton:setVisible(not foldR)
     self.autoButton:setVisible(not foldR and controlsOn)
+    self.contButton:setVisible(not foldR and self._contAvail == true)
     self.actionButton:setVisible(not foldL)
     self.themeButton:setVisible(not foldR and controlsOn)
     self.voiceButton:setVisible(not foldR and controlsOn)
@@ -1026,6 +1224,10 @@ function MDADHUDPanel:layoutWings(scale)
         setButtonRect(self.zombieButton, rightX + pad, row2, policyW, rowH)
         setButtonRect(self.corpseButton, rightX + pad + policyW + gap, row2, policyW, rowH)
         setButtonRect(self.autoButton, rightX + pad + (policyW + gap) * 2, row2, policyW, rowH)
+        if m.contW > 0 then
+            self:placeContButton(rightX + pad + (policyW + gap) * (controlsOn and 3 or 2),
+                row2, m.contW, rowH, m)
+        end
         self._energyX = rightX + rightW - pad - energyW
         self._energyY = row2 + math.floor((rowH - fontH) / 2)
         local row3 = row2 + rowH + gap
@@ -1072,11 +1274,6 @@ function MDADHUDPanel:dashboardGeometry()
     return w, h, x, y
 end
 
--- 三種主題只差「四個控制放哪」與底色：
---   金屬＝右側 2×2 方塊（樣式／隱藏 ↑，語音／音量 ↓）＋直分隔線；
---   玻璃＝第 1 列巡航後一排三顆，音量拉桿在第 2 列右端；
---   家族＝頂部標題條（狀態＋現速 ｜ 三顆＋拉桿），本體兩列（巡航＋主鈕／檔位列）。
--- 精簡單行與收合徽章三主題共用；精簡單行不放拉桿（音量走 ESC 選項）。
 function MDADHUDPanel:applyLayout()
     self._style = optionIndex("HUDTheme", STYLE_METAL, STYLE_COUNT)
     self._layout = optionIndex("HUDLayout", LAYOUT_FULL, 2)
@@ -1085,15 +1282,31 @@ function MDADHUDPanel:applyLayout()
     self._capLabel = getText("UI_MinidoracatAutoDrive_HUDCruiseCap")
     self._timeLabel = getText("UI_MinidoracatAutoDrive_HUDDriveTime")
     self._gearLabel = getText("UI_MinidoracatAutoDrive_HUDGear")
-    -- 側掛的量測與擺位自成一套（無精簡單行／收合徽章分支），共用上面四個標籤字串。
-    if self._style == STYLE_WINGS then return self:layoutWings(scale) end
     local m = measure(self, scale)
+    -- 側掛的量測與擺位自成一套（無精簡單行／收合徽章分支），共用上面四個標籤字串；
+    -- 儀表板讓出的框放不下側翼時，它自己退回下面這套上掛版面。
+    if self._style == STYLE_WINGS then return self:layoutWings(scale, m) end
+    return self:layoutStacked(scale, m)
+end
+
+-- 上掛三主題只差「四個控制放哪」與底色：
+--   金屬＝右側 2×2 方塊（樣式／隱藏 ↑，語音／音量 ↓）＋直分隔線；
+--   玻璃＝第 1 列巡航後一排三顆，音量拉桿在第 2 列右端；
+--   家族＝頂部標題條（狀態＋現速 ｜ 三顆＋拉桿），本體兩列（巡航＋主鈕／檔位列）。
+-- 精簡單行與收合徽章三主題共用；精簡單行不放拉桿（音量走 ESC 選項）。
+-- 側掛放不下時也退到這裡（_style 當場降級成金屬，背景／定位／繪製全部一致）。
+function MDADHUDPanel:layoutStacked(scale, m)
     local fontH, mediumH, pad, gap, buttonH = m.fontH, m.mediumH, m.pad, m.gap, m.ctrlH
     local topH = maximum(mediumH + 4, maximum(buttonH, fontH * 2 + 2))
     -- 狀態欄要容得下「煞停等待 ＋ 改道鈕」（英文 Holding + Reroute 比中文寬）
     local detourW = m.detourW
     local statusW = maximum(maximum(scaled(126, scale), m.statusTextW + pad * 3),
         16 + m.blockedW + gap + detourW + gap + pad)
+    -- 有行程時狀態欄整欄加寬一格計數：完整展開放在狀態字下面一行（topH 本來就有
+    -- fontH*2+2 的地板，不撐高面板），精簡單行／家族標題條放在狀態字後面。
+    if self._hasTrip then
+        statusW = maximum(statusW + m.tripCounterW + gap, 16 + m.tripLineW + gap)
+    end
     local speedValueW = m.speedValueW
     local speedW = maximum(scaled(62, scale), speedValueW + 3 + m.unitW + gap)
     local capLabelW, timeLabelW = m.capLabelW, m.timeLabelW
@@ -1126,7 +1339,7 @@ function MDADHUDPanel:applyLayout()
         blockW = ctrlW + gap + maximum(ctrlW, sliderW)
     end
     local bottomContentW = pad * 2 + gearLabelW + gearW * 4 + gap * (4 + policyN)
-        + policyW * policyN + energyW
+        + policyW * policyN + m.contGap + energyW
     local topContentW = pad * 2 + statusW + speedW + capW + timeW + gap + actionW
     if style == STYLE_GLASS then
         topContentW = topContentW + trioW + gap
@@ -1141,37 +1354,63 @@ function MDADHUDPanel:applyLayout()
     end
     local fullContentW = maximum(topContentW, bottomContentW)
     local fullW = maximum(fullBase, fullContentW)
-    local compactPolicyContentW = pad * 2 + statusW + speedW + capRowW + timeRowW + cycleW
-        + (policyW + gap) * policyN + trioW + actionW + gap * 2
-    local compactEssentialContentW = pad * 2 + statusW + speedW + capRowW + timeRowW + cycleW
-        + trioW + actionW + gap * 2
+    -- 精簡單行的欄位由次要往主要逐階讓位；每一階只把該欄歸零，其餘算式不變。
+    -- 主鈕（開始／停止／取消）與收合入口永不讓位：極窄時它們是唯一保證還在的操作。
+    -- 讓掉的東西都另有入口——檔位與接續模式在行程頁、樣式與語音在 ESC 選項、
+    -- 現速原版儀表板本來就有——所以寧可讓欄位消失，也不把控制推出面板。
+    local showPolicies, showStatusText, showCap, showTrio, showSpeed, showCycle =
+        true, true, true, true, true, true
+    local function compactContentW()
+        return pad * 2 + statusW
+            + (showSpeed and speedW or 0)
+            + (showCap and capRowW or 0)
+            + timeRowW
+            + (showCycle and cycleW or 0)
+            + (showPolicies and ((policyW + gap) * policyN + m.contGap) or 0)
+            + (showTrio and trioW or (ctrlW + gap))
+            + actionW + gap * 2
+    end
 
     local effectiveLayout = self._layout
-    local showPolicies = true
-    local showStatusText = true
     if effectiveLayout == LAYOUT_FULL and fullW > maxW then
         effectiveLayout = LAYOUT_COMPACT
     end
-    local compactW = maximum(compactBase, compactPolicyContentW)
-    if effectiveLayout == LAYOUT_COMPACT and compactW > maxW then
-        showPolicies = false
-        compactW = maximum(compactBase, compactEssentialContentW)
+    local compactW = compactBase
+    -- 每次退讓後重量一次；還是塞不下才走下一階。
+    local function tooWide()
+        compactW = maximum(compactBase, compactContentW())
+        return effectiveLayout == LAYOUT_COMPACT and compactW > maxW
     end
-    if effectiveLayout == LAYOUT_COMPACT and compactW > maxW then
-        -- 極窄分割畫面：保留狀態燈，省掉狀態文字與行車時間；其餘控制仍可操作。
+    if tooWide() then showPolicies = false end
+    if tooWide() then
+        -- 極窄分割畫面：保留狀態燈，省掉狀態文字與行車時間欄。
         showStatusText = false
         statusW = scaled(24, scale)
         timeRowW = 0
-        compactEssentialContentW = pad * 2 + statusW + speedW + capRowW + cycleW
-            + trioW + actionW + gap * 2
-        compactW = maximum(compactBase, compactEssentialContentW)
     end
-    if compactW > maxW then compactW = maxW end
+    if tooWide() then showCap = false end
+    if tooWide() then showTrio = false end
+    if tooWide() then showSpeed = false end
+    if tooWide() then showCycle = false end
+    if tooWide() then
+        -- 最後防線：字型×viewport 極端到連「狀態燈＋主鈕＋收合」都排不下時，
+        -- 主鈕吃掉剩下的寬度（標題由原版 ISButton 自己處理），寧可窄也不出面板。
+        compactW = maxW
+        local room = compactW - pad * 2 - statusW
+            - (showTrio and trioW or (ctrlW + gap)) - gap * 2
+        if actionW > room then actionW = room > ctrlW and room or ctrlW end
+    end
     self._effectiveLayout = effectiveLayout
     self._showStatusText = showStatusText
     self._headerH = 0
     self._blockX = nil
     self._dividerY = nil
+    -- 行程行的預設：無第二行（單行版）；欄寬以最終 statusW 為準（極窄退化時 statusW
+    -- 只剩狀態燈，_showStatusText=false 會讓行程行整條讓位給操作控制）。
+    self._tripDrawY = nil
+    self._tripMaxW = statusW - 16 - gap
+    self._tripColor = style == STYLE_FAMILY and C.familyAccent or C.amber
+    self._unitY = nil
 
     local panelW
     local panelH
@@ -1194,11 +1433,18 @@ function MDADHUDPanel:applyLayout()
     elseif effectiveLayout == LAYOUT_COMPACT then
         panelW = compactW
         panelH = maximum(scaled(44, scale), buttonH + pad * 2)
-        self:setControlsVisible(false, true, showPolicies, true, false)
+        self:setControlsVisible(false, showCycle, showPolicies, true, false)
+        if not showTrio then
+            self.themeButton:setVisible(false)
+            self.voiceButton:setVisible(false)
+        end
         local y = math.floor((panelH - buttonH) / 2)
-        local x = pad + statusW + speedW + capRowW + timeRowW
-        setButtonRect(self.cycleButton, x, y, cycleW, buttonH)
-        x = x + cycleW + gap
+        local x = pad + statusW + (showSpeed and speedW or 0)
+            + (showCap and capRowW or 0) + timeRowW
+        if showCycle then
+            setButtonRect(self.cycleButton, x, y, cycleW, buttonH)
+            x = x + cycleW + gap
+        end
         if showPolicies then
             setButtonRect(self.zombieButton, x, y, policyW, buttonH)
             x = x + policyW + gap
@@ -1208,20 +1454,35 @@ function MDADHUDPanel:applyLayout()
                 setButtonRect(self.autoButton, x, y, policyW, buttonH)
                 x = x + policyW + gap
             end
+            if m.contW > 0 then
+                self:placeContButton(x, y, m.contW, buttonH, m)
+                x = x + m.contW + gap
+            end
         end
-        self:placeControlTrio(x, y, ctrlW, ctrlH, gap, controlsOn)
+        self:placeControlTrio(x, y, ctrlW, ctrlH, gap, controlsOn and showTrio)
         setButtonRect(self.actionButton, panelW - pad - actionW, y, actionW, buttonH)
         self._dotX = pad
         self._dotY = math.floor((panelH - 8) / 2)
         self._statusX = pad + 16
         self._textY = math.floor((panelH - fontH) / 2)
-        self._speedX = pad + statusW
-        self._speedY = math.floor((panelH - mediumH) / 2)
-        self._capX = pad + statusW + speedW
-        self._capLabelY = self._textY
-        self._capValueX = self._capX + capLabelW + gap
-        self._capValueY = self._textY
+        if showSpeed then
+            self._speedX = pad + statusW
+            self._speedY = math.floor((panelH - mediumH) / 2)
+        else
+            self._speedX = nil
+        end
+        -- 讓掉的欄位不留殘座標：prerender 直接以 _speedX／_capX 是否存在決定畫不畫。
+        if showCap then
+            self._capX = pad + statusW + (showSpeed and speedW or 0)
+            self._capLabelY = self._textY
+            self._capValueX = self._capX + capLabelW + gap
+            self._capValueY = self._textY
+        else
+            self._capX, self._capValueX = nil, nil
+        end
         -- 精簡單行：兩欄都是同列基線的「欄名＋數值」；極窄退化整欄消失，不留殘座標。
+        -- 行車時間欄以巡航欄為錨：退讓階梯先讓掉狀態文字＋行車時間、再讓巡航，
+        -- 所以走到這裡時 _capX 一定還在（順序反過來就會拿 nil 去算 x）。
         if showStatusText then
             self._timeX, self._timeLabelY = self._capX + capRowW, self._textY
             self._timeValueX = self._timeX + timeLabelW + gap
@@ -1274,6 +1535,10 @@ function MDADHUDPanel:applyLayout()
         setButtonRect(self.corpseButton, x, bottomY, policyW, buttonH)
         x = x + policyW + gap
         setButtonRect(self.autoButton, x, bottomY, policyW, buttonH)
+        if m.controlsOn then x = x + policyW + gap end
+        if m.contW > 0 then
+            self:placeContButton(x, bottomY, m.contW, buttonH, m)
+        end
         if style == STYLE_FAMILY then
             local headerTextY = math.floor((headerH - fontH) / 2)
             self._dotX = pad
@@ -1288,9 +1553,17 @@ function MDADHUDPanel:applyLayout()
             self._dotX = pad
             self._dotY = topY + math.floor((topH - 8) / 2)
             self._statusX = pad + 16
-            self._textY = topY + math.floor((topH - fontH) / 2)
+            if self._hasTrip then
+                -- 兩行：安全狀態在上、行程在下，與巡航／行車時間兩欄同基線。
+                self._textY = topY
+                self._tripDrawY = topY + fontH
+            else
+                self._textY = topY + math.floor((topH - fontH) / 2)
+            end
             self._speedX = pad + statusW
             self._speedY = topY + math.floor((topH - mediumH) / 2)
+            -- km/h 單位跟的是現速的小字基線，不是狀態字：兩行狀態欄不得把單位拉到上排。
+            self._unitY = topY + math.floor((topH - fontH) / 2)
             self._capX = pad + statusW + speedW
             self._detourY = topY + math.floor((topH - ctrlH) / 2)
         end
@@ -1306,6 +1579,8 @@ function MDADHUDPanel:applyLayout()
         self._energyX = energyRight - energyW
         self._dividerY = bottomY - gap - 1
     end
+    -- 其餘版面狀態列只有一行，單位與狀態字同基線（原行為）。
+    if not self._unitY then self._unitY = self._textY end
 
     -- 改道鈕幾何：x 隨狀態字寬在 refresh 決定；寬高與控制鈕同檔。
     self._detourW = detourW
@@ -1320,7 +1595,9 @@ function MDADHUDPanel:applyLayout()
             or "UI_MinidoracatAutoDrive_HUDHideButton"), scale)
     -- option/resolution apply 會先於下一次 250ms refresh；同步重算單位 x，
     -- 避免切 layout 後一幀仍沿用舊 speedX。
-    self._unitX = self._speedX + textWidth(UIFont.Medium, self._speedText) + 3
+    if self._speedX then
+        self._unitX = self._speedX + textWidth(UIFont.Medium, self._speedText) + 3
+    end
     self:setWidth(panelW)
     self:setHeight(panelH)
     self:reposition()
@@ -1337,6 +1614,214 @@ function MDADHUDPanel:placeDetourButton()
         end
     end
     self.detourButton:setVisible(show)
+end
+
+-- 行程快照：只在 phase／revision／目前站 ID 變了才要 table（addon-api §6.4 明說快照是
+-- 低頻讀取）。要顯示的字串在這裡一次建好，之後每輪 refresh 與每幀 prerender 都只用快取。
+function MDADHUDPanel:readItinerary(api, phase)
+    self._tripCounter, self._tripFull, self._tripShort, self._tripTip = nil, nil, nil, nil
+    self._tripAutoContinue, self._tripSnapRevision = nil, nil
+    self._tripRemaining, self._tripStatusKey, self._tripReasonKey = 0, nil, nil
+    if not (api and phase) then return end
+    local trip = api.getNavItinerary(self.playerNum)
+    if type(trip) ~= "table" then return end
+    -- 快照 schemaVersion 2：整趟的接續模式＋每站的強制停靠旗標。舊快照沒有
+    -- autoContinue＝讀不到布林，接續控制整顆不顯示（見 refreshTrip）。
+    if type(trip.autoContinue) == "boolean" then self._tripAutoContinue = trip.autoContinue end
+    if type(trip.revision) == "number" then self._tripSnapRevision = trip.revision end
+    -- 快照的 trip.reason 是 Core 的固定 enum（manual／cancelled／unavailable／noroad／
+    -- failed），不是翻譯鍵。manual／cancelled 是正常停止，不報錯——交給階段文案；
+    -- 其餘是「上一次接續被擋下」的紀錄，必須壓過階段字，否則畫面會說「已停靠、可以
+    -- 繼續」而玩家按了不動（契約 passiveArrival：gate 不允許就留 waiting，不假出發）。
+    local snapReason = trip.reason
+    if type(snapReason) == "string" then
+        self._tripReasonKey = TRIP_REASON_KEYS[snapReason]
+    end
+    local stops = trip.stops
+    local total = trip.count
+    if type(total) ~= "number" then total = type(stops) == "table" and #stops or 0 end
+    if total <= 0 then return end
+    -- waiting 顯示剛完成的目前站，與「本站已完成」提示一致；按下繼續才切到後站。
+    local index = nil
+    if phase == "completed" then
+        index = total
+    elseif type(stops) == "table" then
+        local currentId = trip.currentStopId
+        local wantCurrent = currentId ~= nil
+        for i = 1, total do
+            local stop = stops[i]
+            if type(stop) == "table" then
+                if wantCurrent then
+                    if stop.id == currentId then
+                        index = i
+                        break
+                    end
+                elseif stop.status == "pending" then
+                    index = i
+                    break
+                end
+            end
+        end
+    end
+    if not index then return end
+    local stop = type(stops) == "table" and stops[index] or nil
+    -- 後續待辦站數（不含目前站）與「接著要去的那一站」分開算：waiting 的
+    -- 「已停靠 A、接著去 B」兩個名字不能互換。
+    local nextName, nextPause, remaining = nil, false, 0
+    if type(stops) == "table" then
+        for i = index + 1, total do
+            local later = stops[i]
+            if type(later) == "table" and later.status == "pending" then
+                remaining = remaining + 1
+                if not nextName then
+                    nextName = stopName(later)
+                    nextPause = later.pause == true
+                end
+            end
+        end
+    end
+    self._tripRemaining = remaining
+    local counter = tostring(index) .. "/" .. tostring(total)
+    self._tripCounter = counter
+    local label = stopName(stop) or counter
+    self._tripShort = phase == "waiting" and nextName
+        and getText("UI_MinidoracatAutoDrive_HUDTripTargets", label, nextName) or label
+    local message
+    if phase == "completed" then
+        message = getText("UI_MinidoracatAutoDrive_HUDTripPhaseCompleted")
+        self._tripStatusKey = "UI_MinidoracatAutoDrive_HUDStatusTripDone"
+    elseif phase == "waiting" then
+        -- 人工略過與真正停靠分開；續行 gate 被擋時，本站仍已抵達。
+        if type(stop) == "table" and stop.status == "skipped" then
+            self._tripStatusKey = "UI_MinidoracatAutoDrive_HUDStatusTripSkipped"
+            message = nextName
+                and getText("UI_MinidoracatAutoDrive_HUDTripSkipped", label, nextName)
+                or getText("UI_MinidoracatAutoDrive_HUDTripSkippedEnd", label)
+        else
+            self._tripStatusKey = "UI_MinidoracatAutoDrive_HUDStatusTripWaiting"
+            message = nextName
+                and getText("UI_MinidoracatAutoDrive_HUDTripStopover", label, nextName)
+                or getText("UI_MinidoracatAutoDrive_HUDTripStopoverEnd", label)
+        end
+    elseif phase == "approach" then
+        message = getText("UI_MinidoracatAutoDrive_HUDTripWalkTo", label)
+    elseif phase == "navigating" then
+        message = remaining > 0
+            and getText("UI_MinidoracatAutoDrive_HUDTripDriving", label, remaining)
+            or getText("UI_MinidoracatAutoDrive_HUDTripDrivingLast", label)
+    else
+        -- draft／paused：還沒上路
+        message = getText("UI_MinidoracatAutoDrive_HUDTripPrep", label)
+    end
+    -- 自動接續下「這一點仍然強制等你」必須看得到：模式是自動，停靠旗標優先。
+    if self._tripAutoContinue == true and phase ~= "completed" then
+        local hold = false
+        if phase == "waiting" then
+            hold = nextPause
+        elseif type(stop) == "table" then
+            hold = stop.pause == true
+        end
+        if hold then
+            message = message .. " " .. getText("UI_MinidoracatAutoDrive_HUDTripHold")
+            self._tripShort = self._tripShort .. " " .. getText("UI_MinidoracatAutoDrive_HUDTripHoldShort")
+        end
+    end
+    self._tripFull = message
+    self._tripTip = getText("UI_MinidoracatAutoDrive_HUDTripTip", index, total, label)
+        .. "\n" .. message
+        .. "\n" .. getText(TRIP_PHASE_KEYS[phase] or TRIP_PHASE_KEYS.navigating)
+end
+
+-- 每輪（250ms）只呼叫零配置的 getNavLeg；有行程時它一定回 phase／revision，
+-- 無行程／舊主 MOD／壞槽位都回 nil，收起行程資訊並保留單站控制。
+function MDADHUDPanel:refreshTrip()
+    local api = tripApi()
+    local phase, revision, stopId = nil, nil, nil
+    if api then
+        local _, sid, _, _, legPhase, legRev = api.getNavLeg(self.playerNum)
+        phase, revision, stopId = legPhase, legRev, sid
+    end
+    if phase ~= self._tripPhase or revision ~= self._tripRevision
+            or stopId ~= self._tripStopId then
+        self._tripPhase, self._tripRevision, self._tripStopId = phase, revision, stopId
+        self:readItinerary(api, phase)
+    end
+    local hasTrip = phase ~= nil
+    -- 接續控制存在的三個條件：v7、setter、快照真的給了 autoContinue 布林。
+    local contAvail = hasTrip and continuationApi() ~= nil
+        and type(self._tripAutoContinue) == "boolean"
+    if hasTrip ~= self._hasTrip or contAvail ~= self._contAvail then
+        -- 兩者都會改主鈕文案寬、狀態欄寬與藥丸列寬：只在出現／消失時重算版面（冷路徑）。
+        self._hasTrip, self._contAvail = hasTrip, contAvail
+        self:applyLayout()
+    end
+end
+
+-- 主鈕被 Driver 拒絕時的短期原因；過期就交還給 hudStartReason，不永久蓋掉安全狀態。
+function MDADHUDPanel:tripNotice(now)
+    local key = self._tripNoticeKey
+    if not key then return nil end
+    if now >= self._tripNoticeMs then
+        self._tripNoticeKey = nil
+        return nil
+    end
+    return key
+end
+
+function MDADHUDPanel:setTripNotice(key, now)
+    self._tripNoticeKey = type(key) == "string" and key or nil
+    self._tripNoticeMs = now + TRIP_NOTICE_MS
+end
+
+-- 狀態下的行程文字先顯示完整句，再退成目標名稱，極窄時才用 N/M。
+-- 完整內容永遠保留在主鈕 tooltip，不裁斷字串。
+function MDADHUDPanel:placeTripText()
+    self._tripText = nil
+    local full = self._tripFull
+    if not full or self._collapsed or not self._showStatusText then return end
+    local x, avail
+    if self._tripDrawY then
+        x, avail = self._statusX, self._tripMaxW
+        self._tripTextY = self._tripDrawY
+        if self.detourButton:isVisible() then
+            avail = math.min(avail, self.detourButton.x - self._detourGap - x)
+        end
+    else
+        x = self._statusX + textWidth(UIFont.Small, self._statusText) + self._detourGap
+        if self.detourButton:isVisible() then
+            x = self.detourButton.x + self.detourButton.width + self._detourGap
+        end
+        avail = self._speedX - self._detourGap - x
+        self._tripTextY = self._textY
+    end
+    if avail <= 0 then return end
+    local text = full
+    if textWidth(UIFont.Small, text) > avail then
+        text = self._tripShort
+        if not text or textWidth(UIFont.Small, text) > avail then
+            text = self._tripCounter
+            if not text or textWidth(UIFont.Small, text) > avail then return end
+        end
+    end
+    self._tripText, self._tripTextX = text, x
+end
+
+function MDADHUDPanel:drawTripText()
+    local text = self._tripText
+    if not text then return end
+    local color = self._tripColor
+    self:drawText(text, self._tripTextX, self._tripTextY,
+        color.r, color.g, color.b, color.a, UIFont.Small)
+end
+
+-- 接續藥丸的內部幾何（glyph 與短字各自的 x／y）只在版面層算一次；render 只讀欄位。
+function MDADHUDPanel:placeContButton(x, y, w, h, m)
+    local button = self.contButton
+    setButtonRect(button, x, y, w, h)
+    button.nodePx, button.nodeGap = m.nodePx, m.nodeGap
+    button.glyphX = 6
+    button.valueX = 6 + m.contGlyphW + m.nodeGap
+    button.valueY = math.floor((h - m.fontH) / 2)
 end
 
 -- 一排三顆（樣式／隱藏／語音）；PZAPI 缺席時只剩隱藏鈕（樣式與語音都靠 option）。
@@ -1440,10 +1925,11 @@ function MDADHUDPanel:refresh(now)
     self:setHudVisible(true)
     self:reposition()
 
-    local token, gear, cap, zombieOn, corpseOn, resumeIn, elapsed =
+    local token, gear, cap, zombieOn, corpseOn, resumeIn, elapsed, reason =
         Drive.hudState(self.playerNum)
-    local reason = nil
     self._active = token ~= nil
+    -- 行程狀態每輪讀一次（零配置 getNavLeg）；快照與版面只在真的變了才動。
+    self:refreshTrip()
     -- 政策三態（藥丸鎖不鎖）與 session 無關，兩種狀態都要讀。啟用中「此刻要不要
     -- 減速」以 hudState 的 session 快取為準，停用態才顯示政策×偏好的合成值。
     local policyZombieOn, policyCorpseOn
@@ -1453,15 +1939,22 @@ function MDADHUDPanel:refresh(now)
         "CorpseSlowdown", self.playerNum, "corpse")
     if self._active then
         -- 讓位中已放手＝倒數（2026-09-06 回饋「不知道放開會變回自動駕駛」）；按著＝「手動操作中」。
-        if token == "yield" and resumeIn then
+        if reason then
+            self._statusText = getText(REASON_KEYS[reason] or "UI_MinidoracatAutoDrive_HUDStatusNotReady")
+        elseif token == "yield" and resumeIn then
             self._statusText = getText("UI_MinidoracatAutoDrive_HUDStatusYieldResume", resumeIn)
         else
             self._statusText = getText(STATUS_KEYS[token] or STATUS_KEYS.follow)
         end
     else
-        reason = Drive.hudStartReason(self.playerNum)
+        -- 玩家剛按下主鈕被拒的原因優先顯示（有時效），過了就回到常態啟動守門；
+        -- 快照自己帶的原因（例如 gate 不允許而留在 waiting）再接在後面。階段字
+        -- （已停靠／已略過／行程完成）只有在完全沒有原因時才出場，不會蓋掉任何守門。
+        reason = self:tripNotice(now) or Drive.hudStartReason(self.playerNum)
+            or self._tripReasonKey
         self._statusText = getText(REASON_KEYS[reason]
             or (reason and "UI_MinidoracatAutoDrive_HUDStatusNotReady"
+                or self._tripStatusKey
                 or "UI_MinidoracatAutoDrive_HUDStatusReady"))
         gear = Drive.getGear(self.playerNum)
         cap = Drive.effectiveCap(self.playerNum, vehicle)
@@ -1474,7 +1967,10 @@ function MDADHUDPanel:refresh(now)
     self._corpseOn = corpseOn == true
     self._statusColor = statusColor(token, reason)
     self._speedText = tostring(roundPositive(vehicle:getCurrentSpeedKmHour()))
-    self._unitX = self._speedX + textWidth(UIFont.Medium, self._speedText) + 3
+    -- 極窄精簡單行會把現速欄整欄讓給主鈕；沒有座標就沒有單位要對齊。
+    if self._speedX then
+        self._unitX = self._speedX + textWidth(UIFont.Medium, self._speedText) + 3
+    end
     self._capText = cap and tostring(roundPositive(cap)) or "--"
     local battery = clampPercent(vehicle:getBatteryCharge(), 100)
     local fuel = clampPercent(vehicle:getRemainingFuelPercentage(), 1)
@@ -1483,7 +1979,10 @@ function MDADHUDPanel:refresh(now)
     -- 無紀錄與無效值共用缺值顯示。
     self._clockText = clockText(elapsed) or "--:--"
     self._blocked = token == "blocked"
+    -- 準備期（備路線／剖面）語意是「取消」而不是「停止行駛」。
+    self._prep = token == "build"
     self:placeDetourButton()
+    self:placeTripText()
     self._voiceOn = voiceEnabled()
     if not self.volumeSlider.dragging then
         self.volumeSlider.value = voiceVolume()
@@ -1533,12 +2032,69 @@ function MDADHUDPanel:updateButtons()
         getText("UI_MinidoracatAutoDrive_HUDAutoTip") .. "\n"
             .. getText("UI_MinidoracatAutoDrive_HUDPolicyToggle"),
         optionScale())
+    -- 接續模式藥丸：值＝目前行程的 autoContinue。沒有 v7 setter／沒有行程時整顆不顯示，
+    -- 這裡也不留上一份值（避免收合又展開時閃到舊字）。
+    if self._contAvail then
+        local auto = self._tripAutoContinue == true
+        self.contButton.valueText = getText(auto and CONT_AUTO_KEY or CONT_STEP_KEY)
+        self.contButton.tooltip = getText("UI_MinidoracatAutoDrive_HUDContTip")
+        local notice = self:tripNotice(getTimestampMs())
+        if notice == "UI_MinidoracatAutoDrive_HUDContFailed" then
+            self.contButton.tooltip = getText(notice) .. "\n" .. self.contButton.tooltip
+        end
+        styleButton(self.contButton, auto and C.start or C.button,
+            auto and C.green or C.blue, true)
+    else
+        self.contButton.valueText = nil
+    end
 
-    self.actionButton:setTitle(getText(self._active
-        and "UI_MinidoracatAutoDrive_Stop" or "UI_MinidoracatAutoDrive_Start"))
-    self.actionButton.tooltip = self._reason and getText(self._reason) or nil
-    styleButton(self.actionButton, self._active and C.danger or C.start,
-        self._active and C.red or C.green, true)
+    -- 主鈕：停用態且有行程時換成行程動作（開始行程／繼續行程／繼續自駕）；approach 依契約
+    -- 沒有自駕出口，只顯示「手動前往」並在按下時報原因。啟用中是停止自駕，準備期
+    -- 語意改成取消。舊 Driver（無 continueItinerary）或無行程一律維持原本的啟動／停止。
+    local tripKey = nil
+    if not self._active and self._tripPhase and type(Drive.continueItinerary) == "function" then
+        tripKey = TRIP_ACTION_KEYS[self._tripPhase]
+        -- 沒有待辦站的 waiting 不得假裝可以出發：退回單站的啟動／停止資格。
+        if tripKey and self._tripPhase == "waiting" and self._tripRemaining <= 0 then
+            tripKey = nil
+        end
+    end
+    self._tripActionKey = tripKey
+    self._tripAction = tripKey ~= nil and self._tripPhase ~= "approach"
+    local fullAction = getText(tripKey or (self._active
+        and (self._prep and "UI_MinidoracatAutoDrive_HUDCancelPrep"
+            or "UI_MinidoracatAutoDrive_Stop")
+        or "UI_MinidoracatAutoDrive_Start"))
+    local actionTitle = fullAction
+    if textWidth(UIFont.Small, fullAction) > self.actionButton.width - 12 then
+        local shortKey = "UI_MinidoracatAutoDrive_HUDActionStart"
+        if self._active then
+            shortKey = self._prep and "UI_MinidoracatAutoDrive_HUDActionCancel"
+                or "UI_MinidoracatAutoDrive_HUDActionStop"
+        elseif tripKey and self._tripPhase == "approach" then
+            shortKey = "UI_MinidoracatAutoDrive_HUDActionWalk"
+        elseif tripKey and self._tripPhase ~= "draft" then
+            shortKey = "UI_MinidoracatAutoDrive_HUDActionContinue"
+        end
+        actionTitle = getText(shortKey)
+    end
+    self.actionButton:setTitle(actionTitle)
+    -- tooltip＝完整可讀的行程提示（第 N/M 站、站名、階段）＋當下的拒絕／停用原因。
+    local actionTip = self._tripTip
+    local reasonText = self._reason and getText(self._reason) or nil
+    if actionTip and reasonText then actionTip = actionTip .. "\n" .. reasonText end
+    actionTip = actionTip or reasonText
+    if actionTitle ~= fullAction then
+        actionTip = fullAction .. (actionTip and "\n" .. actionTip or "")
+    end
+    self.actionButton.tooltip = actionTip
+    local actionBg, actionText = C.start, C.green
+    if self._active then
+        actionBg, actionText = C.danger, C.red
+    elseif tripKey and not self._tripAction then
+        actionBg, actionText = C.button, C.muted
+    end
+    styleButton(self.actionButton, actionBg, actionText, true)
     -- 側掛：兩顆 chevron 各自報自己那片的方向（左翼／右翼），其餘主題沿用整面板文案。
     local wings = self._style == STYLE_WINGS
     self.collapseButton.tooltip = getText((wings and self._wingR or self._collapsed)
@@ -1642,6 +2198,7 @@ function MDADHUDPanel:renderWings()
     if not self._wingLFolded then
         self:drawText(self._statusText, self._statusX, self._textY,
             C.text.r, C.text.g, C.text.b, C.text.a, UIFont.Small)
+        self:drawTripText()
         self:drawText(self._unitText, self._unitX, self._speedY,
             C.muted.r, C.muted.g, C.muted.b, C.muted.a, UIFont.Small)
         self:drawText(self._capLabel, self._capX, self._capLabelY,
@@ -1701,16 +2258,22 @@ function MDADHUDPanel:prerender()
             C.muted.r, C.muted.g, C.muted.b, C.muted.a, UIFont.Small)
         self:drawText(self._clockText, self._timeValueX, self._timeValueY,
             C.muted.r, C.muted.g, C.muted.b, C.muted.a, UIFont.Small)
+        self:drawTripText()
     end
-    self:drawText(self._speedText, self._speedX, self._speedY,
-        C.text.r, C.text.g, C.text.b, C.text.a, UIFont.Medium)
-    self:drawText(self._unitText, self._unitX, self._textY,
-        C.muted.r, C.muted.g, C.muted.b, C.muted.a, UIFont.Small)
-    self:drawText(self._capLabel, self._capX, self._capLabelY,
-        C.muted.r, C.muted.g, C.muted.b, C.muted.a, UIFont.Small)
-    local capColor = self._style == STYLE_FAMILY and C.familyAccent or C.amber
-    self:drawText(self._capText, self._capValueX, self._capValueY,
-        capColor.r, capColor.g, capColor.b, capColor.a, UIFont.Small)
+    -- 讓位掉的欄位沒有座標，一律不畫（極窄精簡單行：現速／巡航讓給主鈕）。
+    if self._speedX then
+        self:drawText(self._speedText, self._speedX, self._speedY,
+            C.text.r, C.text.g, C.text.b, C.text.a, UIFont.Medium)
+        self:drawText(self._unitText, self._unitX, self._unitY,
+            C.muted.r, C.muted.g, C.muted.b, C.muted.a, UIFont.Small)
+    end
+    if self._capX then
+        self:drawText(self._capLabel, self._capX, self._capLabelY,
+            C.muted.r, C.muted.g, C.muted.b, C.muted.a, UIFont.Small)
+        local capColor = self._style == STYLE_FAMILY and C.familyAccent or C.amber
+        self:drawText(self._capText, self._capValueX, self._capValueY,
+            capColor.r, capColor.g, capColor.b, capColor.a, UIFont.Small)
+    end
     if self._effectiveLayout == LAYOUT_FULL then
         self:drawRect(4, self._dividerY, self.width - 8, 1,
             C.faint.a, C.faint.r, C.faint.g, C.faint.b)
@@ -1754,11 +2317,71 @@ function MDADHUDPanel:onAutoDetour()
     self:refresh(getTimestampMs())
 end
 
-function MDADHUDPanel:onAction()
-    local playerObj = getSpecificPlayer(self.playerNum)
-    if playerObj then Drive.toggle(playerObj) end
+-- 接續模式：點一下開原版右鍵選單挑兩個模式之一（ISContextMenu.get 用例
+-- ISMiniMap.lua:284-287；option.onSelect(target, param1…)＝ISContextMenu.lua:70）。
+-- 切換只改 MiniMap 目前行程的那一份設定，不發車、不煞車、不換目標。
+function MDADHUDPanel:onContinuation()
+    if not self._contAvail then return end
+    if not (ISContextMenu and type(ISContextMenu.get) == "function") then return end
+    local button = self.contButton
+    local menu = ISContextMenu.get(self.playerNum,
+        self:getAbsoluteX() + button.x,
+        self:getAbsoluteY() + button.y + button.height)
+    if not menu then return end
+    local revision = self._tripSnapRevision or self._tripRevision
+    local auto = menu:addOption(getText("UI_MinidoracatAutoDrive_HUDContMenuAuto"),
+        self, MDADHUDPanel.onContinuationPick, true, revision)
+    local step = menu:addOption(getText("UI_MinidoracatAutoDrive_HUDContMenuStep"),
+        self, MDADHUDPanel.onContinuationPick, false, revision)
+    -- 目前那一項不可再選（同搜尋視窗 more 選單的 notAvailable 慣例：ISContextMenu.lua:66
+    -- 擋下點擊、:441-443 以停用色畫）。Tutorial 模式的 addOption 可能回 nil（:874-878），
+    -- 所以兩邊各自判斷，不用 and/or 串接。
+    if self._tripAutoContinue == true then
+        if auto then auto.notAvailable = true end
+    elseif step then
+        step.notAvailable = true
+    end
+end
+
+function MDADHUDPanel:onContinuationPick(enabled, expectedRevision)
+    local api = continuationApi()
+    if not api then return end
+    local now = getTimestampMs()
+    -- 使用開選單當下的 revision，不借用之後刷新過的快照。
+    -- 被拒的 reason 是 API 的 enum（不是翻譯鍵），玩家要看的是一句能行動的話，
+    -- 所以一律顯示同一句「沒有改成功，請再試一次」，不靜默也不假裝改掉了。
+    local ok = api.setNavContinuation(self.playerNum, expectedRevision, enabled == true)
+    if ok then
+        self._tripNoticeKey = nil
+        -- 成功後重讀權威值；同值 no-op 不一定會換 revision。
+        self._tripRevision = nil
+    else
+        self:setTripNotice("UI_MinidoracatAutoDrive_HUDContFailed", now)
+    end
     self._forceRefresh = true
-    self:refresh(getTimestampMs())
+    self:refresh(now)
+end
+
+function MDADHUDPanel:onAction()
+    local now = getTimestampMs()
+    if self._tripAction then
+        -- 行程接續只在玩家明確按下時發生：Driver 自己 start→備路線／剖面→claim→控制。
+        -- 失敗一律有原因（Driver 的 reasonKey），顯示在狀態列與主鈕 tooltip，不靜默。
+        local ok, why = Drive.continueItinerary(self.playerNum)
+        if ok then
+            self._tripNoticeKey = nil
+        else
+            self:setTripNotice(why or "UI_MinidoracatAutoDrive_TripState", now)
+        end
+    elseif self._tripActionKey then
+        -- approach（道路終點到不了站點）：契約禁止自駕再次接管，按下只回報原因。
+        self:setTripNotice(TRIP_ROAD_END_KEY, now)
+    else
+        local playerObj = getSpecificPlayer(self.playerNum)
+        if playerObj then Drive.toggle(playerObj) end
+    end
+    self._forceRefresh = true
+    self:refresh(now)
 end
 
 -- 側掛時 collapseButton＝右翼 chevron，wingButton＝左翼；其餘主題只有整面板收合。
@@ -1773,7 +2396,7 @@ end
 
 function MDADHUDPanel:onTheme()
     if not modOptions then return end
-    local nextStyle = self._style + 1
+    local nextStyle = optionIndex("HUDTheme", STYLE_METAL, STYLE_COUNT) + 1
     if nextStyle > STYLE_COUNT then nextStyle = 1 end
     setClientOption("HUDTheme", nextStyle)
     self._forceRefresh = true

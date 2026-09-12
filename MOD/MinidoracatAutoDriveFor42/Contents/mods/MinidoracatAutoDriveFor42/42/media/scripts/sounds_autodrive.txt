@@ -41,4 +41,15 @@ module Base
 	sound MDAD_Voice_yield_ja     { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_yield_ja.wav, } }
 	sound MDAD_Voice_resume_ja    { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_resume_ja.wav, } }
 	sound MDAD_Voice_manual_ja    { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_manual_ja.wav, } }
+
+	/* 多站行程（2026-09-12）：續開下一段／到停靠點等待／插入優先目標 */
+	sound MDAD_Voice_leg_next_zh  { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_leg_next_zh.wav, } }
+	sound MDAD_Voice_stopover_zh  { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_stopover_zh.wav, } }
+	sound MDAD_Voice_priority_zh  { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_priority_zh.wav, } }
+	sound MDAD_Voice_leg_next_en  { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_leg_next_en.wav, } }
+	sound MDAD_Voice_stopover_en  { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_stopover_en.wav, } }
+	sound MDAD_Voice_priority_en  { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_priority_en.wav, } }
+	sound MDAD_Voice_leg_next_ja  { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_leg_next_ja.wav, } }
+	sound MDAD_Voice_stopover_ja  { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_stopover_ja.wav, } }
+	sound MDAD_Voice_priority_ja  { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_priority_ja.wav, } }
 }

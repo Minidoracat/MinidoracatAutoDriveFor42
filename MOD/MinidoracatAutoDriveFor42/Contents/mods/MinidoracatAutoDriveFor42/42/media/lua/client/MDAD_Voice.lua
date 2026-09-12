@@ -26,6 +26,8 @@ local EVENTS = {
     unstick = true, handback = true, arrive = true,
     detour = true, nodetour = true,
     yield = true, resume = true, manual = true,
+    -- 多站行程（2026-09-12）：續開下一段／到停靠點等待／插入優先目標
+    leg_next = true, stopover = true, priority = true,
 }
 local SOUND_PREFIX = "MDAD_Voice_"
 local lastRef = {}       -- playerNum → emitter ref（long）

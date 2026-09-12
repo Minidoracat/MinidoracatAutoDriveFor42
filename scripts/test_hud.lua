@@ -98,6 +98,62 @@ local texts = {
     UI_MinidoracatAutoDrive_HUDThemeFamily = "FAMILY",
     UI_MinidoracatAutoDrive_EngineOff = "ENGINE REASON",
     UI_MinidoracatAutoDrive_TelemetryNoFile = "NO LOG",
+    -- 多停靠點行程（addon-api §6）：Driver 回傳的原因鍵、HUD 短標籤與行程文案
+    UI_MinidoracatAutoDrive_TripBusy = "ANOTHER CONTROLLER HAS THIS LEG",
+    UI_MinidoracatAutoDrive_TripState = "TRIP STATE CANNOT DRIVE",
+    UI_MinidoracatAutoDrive_TripStale = "TRIP CHANGED, START AGAIN",
+    UI_MinidoracatAutoDrive_TripNotStopped = "STOP THE CAR FIRST",
+    UI_MinidoracatAutoDrive_TripRoadEnd = "ROAD ENDS, WALK THE REST",
+    UI_MinidoracatAutoDrive_TripLost = "TRIP CONTROL ENDED",
+    UI_MinidoracatAutoDrive_HUDStatusTripBusy = "TAKEN OVER",
+    UI_MinidoracatAutoDrive_HUDStatusTripState = "TRIP NOT READY",
+    UI_MinidoracatAutoDrive_HUDStatusTripStale = "TRIP CHANGED",
+    UI_MinidoracatAutoDrive_HUDStatusTripNotStopped = "STOP FIRST",
+    UI_MinidoracatAutoDrive_HUDStatusTripRoadEnd = "ROAD END",
+    UI_MinidoracatAutoDrive_HUDStatusTripLost = "CONTROL RETURNED",
+    UI_MinidoracatAutoDrive_HUDTripStart = "TRIP START",
+    UI_MinidoracatAutoDrive_HUDTripResume = "TRIP RESUME",
+    UI_MinidoracatAutoDrive_HUDTripManual = "WALK THERE",
+    UI_MinidoracatAutoDrive_HUDTripAt = "PT %1, %2",
+    UI_MinidoracatAutoDrive_HUDTripTip = "TRIP %1 OF %2: %3",
+    UI_MinidoracatAutoDrive_HUDTripPhaseDraft = "PHASE DRAFT",
+    UI_MinidoracatAutoDrive_HUDTripPhaseNavigating = "PHASE NAV",
+    UI_MinidoracatAutoDrive_HUDTripPhaseApproach = "PHASE APPROACH",
+    UI_MinidoracatAutoDrive_HUDTripPhaseWaiting = "PHASE WAITING",
+    UI_MinidoracatAutoDrive_HUDTripPhasePaused = "PHASE PAUSED",
+    UI_MinidoracatAutoDrive_HUDTripPhaseCompleted = "TRIP DONE",
+    -- 接續模式（v7 快照 schemaVersion 2）：藥丸短字、選單兩項、拒絕原因與階段字
+    UI_MinidoracatAutoDrive_HUDTripContinue = "TRIP CONTINUE",
+    UI_MinidoracatAutoDrive_HUDCancelPrep = "CANCEL PREP",
+    UI_MinidoracatAutoDrive_HUDActionStart = "Start",
+    UI_MinidoracatAutoDrive_HUDActionStop = "Stop",
+    UI_MinidoracatAutoDrive_HUDActionContinue = "Continue",
+    UI_MinidoracatAutoDrive_HUDActionCancel = "Cancel",
+    UI_MinidoracatAutoDrive_HUDActionWalk = "Walk",
+    UI_MinidoracatAutoDrive_HUDContAuto = "CONT AUTO",
+    UI_MinidoracatAutoDrive_HUDContStep = "CONT STEP",
+    UI_MinidoracatAutoDrive_HUDContMenuAuto = "MENU AUTO",
+    UI_MinidoracatAutoDrive_HUDContMenuStep = "MENU STEP",
+    UI_MinidoracatAutoDrive_HUDContTip = "CONT TIP",
+    UI_MinidoracatAutoDrive_HUDContFailed = "CONT FAILED SENTENCE",
+    UI_MinidoracatAutoDrive_HUDStatusContFailed = "MODE UNCHANGED",
+    UI_MinidoracatAutoDrive_HUDStatusTripWaiting = "STOPPED OVER",
+    UI_MinidoracatAutoDrive_HUDStatusTripDone = "TRIP COMPLETE",
+    UI_MinidoracatAutoDrive_HUDTripDriving = "DRIVE TO %1 THEN %2",
+    UI_MinidoracatAutoDrive_HUDTripDrivingLast = "DRIVE TO %1 LAST",
+    UI_MinidoracatAutoDrive_HUDTripPrep = "PREP %1",
+    UI_MinidoracatAutoDrive_HUDTripTargets = "%1 -> %2",
+    UI_MinidoracatAutoDrive_HUDTripHoldShort = "(WAIT)",
+    UI_MinidoracatAutoDrive_HUDTripWalkTo = "WALK TO %1",
+    UI_MinidoracatAutoDrive_HUDTripStopover = "AT %1 NEXT %2",
+    UI_MinidoracatAutoDrive_HUDTripStopoverEnd = "AT %1 DONE",
+    UI_MinidoracatAutoDrive_HUDTripHold = "(HOLD)",
+    UI_MinidoracatAutoDrive_HUDStatusTripSkipped = "STOP SKIPPED",
+    UI_MinidoracatAutoDrive_HUDStatusTripUnavailable = "CONTINUATION BLOCKED",
+    UI_MinidoracatAutoDrive_TripUnavailable = "CANNOT CONTINUE SENTENCE",
+    UI_MinidoracatAutoDrive_TripNoRoad = "NO ROUTE SENTENCE",
+    UI_MinidoracatAutoDrive_HUDTripSkipped = "SKIPPED %1 NEXT %2",
+    UI_MinidoracatAutoDrive_HUDTripSkippedEnd = "SKIPPED %1 DONE",
 }
 
 local getTextCalls = 0
@@ -191,6 +247,8 @@ function ISButton:setY(value) self.y = value end
 function ISButton:setWidth(value) self.width = value end
 function ISButton:setHeight(value) self.height = value end
 function ISButton:setVisible(value) self.visible = value == true end
+-- ISUIElement:isVisible（ISUIElement.lua）——ISButton 繼承同一個讀取面
+function ISButton:isVisible() return self.visible end
 -- ISButton.lua:179-190：image／forceImageSize；render 以 textureColor 染色（:222-226）
 function ISButton:setImage(image) self.image = image end
 function ISButton:forceImageSize(w, h) self.forcedWidthImage, self.forcedHeightImage = w, h end
@@ -234,10 +292,54 @@ function ISButton:getParent() return self.parent end
 function ISButton:detachFromParent()
     if self.parent then self.parent:removeChild(self) end
 end
+-- ISBaseObject:derive 的等價（ISButton = ISPanel:derive，ISButton.lua:3）：接續模式
+-- 藥丸是 ISButton 的子類，底色／命中沿用原版，glyph 與短字自己畫。
+function ISButton:derive(name)
+    local class = { Type = name }
+    class.__index = class
+    setmetatable(class, { __index = self })
+    return class
+end
+-- ISButton:prerender 畫底色／邊框（ISButton.lua:111-140）、render 畫圖與標題（:196-240）
+function ISButton:prerender() self.prerenders = (self.prerenders or 0) + 1 end
+function ISButton:render() self.renders = (self.renders or 0) + 1 end
+function ISButton:drawRect(x, y, w, h, a, r, g, b)
+    self.rects = self.rects or {}
+    self.rects[#self.rects + 1] = { x = x, y = y, w = w, h = h, a = a, r = r, g = g, b = b }
+end
+function ISButton:drawText(text, x, y)
+    self.texts = self.texts or {}
+    self.texts[#self.texts + 1] = { text = text, x = x, y = y }
+end
 
 -- 原版 ISButton:onMouseUp 走 self.onclick(self.target, self, ...)（ISButton.lua:47-48）。
 local function click(button)
     button.onclick(button.target, button)
+end
+
+-- 原版右鍵選單樁：get 取玩家單例並清空（ISContextMenu.lua:1166-1196）；點擊走
+-- option.onSelect(option.target, option.param1…)（:66-70），notAvailable 會被擋下（:66）。
+ISContextMenu = {}
+ISContextMenu.get = function(player, x, y)
+    local menu = { player = player, x = x, y = y, options = {} }
+    function menu:addOption(name, target, onSelect, param1, param2)
+        local option = { name = name, target = target, onSelect = onSelect, param1 = param1, param2 = param2 }
+        self.options[#self.options + 1] = option
+        return option
+    end
+    function menu:pick(name)
+        for i = 1, #self.options do
+            local option = self.options[i]
+            if option.name == name then
+                if option.notAvailable then return false end
+                option.onSelect(option.target, option.param1, option.param2)
+                return true
+            end
+        end
+        return false
+    end
+    ISContextMenu.lastMenu = menu
+    return menu
 end
 
 local optionSets = {}
@@ -402,7 +504,7 @@ function MDAD.Drive.hudState()
         return nil, nil, nil, nil, nil, nil, state.elapsed
     end
     return state.token, state.gear, state.cap, state.zombie, state.corpse,
-        state.resumeIn, state.elapsed
+        state.resumeIn, state.elapsed, state.legReportWhy
 end
 function MDAD.Drive.hudStartReason() return state.startReason end
 function MDAD.Drive.slowdownInfo() return 2, 48, 3, 25, 15, 10, 20 end
@@ -1394,7 +1496,7 @@ for slot = 0, 1 do
                 "split slot " .. slot .. " control " .. i .. " stays inside panel")
         end
     end
-    if candidate._effectiveLayout == 2 then
+    if candidate._effectiveLayout == 2 and candidate._capValueX then
         local capRight2 = candidate._capValueX
             + textManager:MeasureStringX(UIFont.Small, candidate._capText)
         check(capRight2 + 3 <= candidate.cycleButton.x,
@@ -1423,6 +1525,605 @@ checkEq(#preSplitDashboard0.children, 0,
     "existing P0 controls leave the dashboard rebuilt by OnCreatePlayer")
 viewportWidth = 1920
 activePlayers = 1
+
+-- 多停靠點行程（addon-api §6）：HUD 只讀公開的 getNavLeg／getNavItinerary，
+-- 接續一律走 Drive.continueItinerary。這段守的是狀態切換、revision 節流、
+-- 舊主 MOD 降級與「四主題／精簡／窄 viewport 都不能裁掉操作」。
+do
+    local trip = {
+        phase = nil,
+        revision = 7,
+        stopId = nil,
+        legCalls = 0,
+        snapshotCalls = 0,
+        continueCalls = 0,
+        continueOk = true,
+        continueReason = nil,
+        data = {
+            schemaVersion = 1,
+            count = 3,
+            currentStopId = nil,
+            stops = {
+                { id = 1, x = 100, y = 200, label = "HOME", status = "arrived" },
+                { id = 2, x = 300, y = 400, label = "GAS STATION", status = "pending" },
+                { id = 3, x = 500, y = 600, status = "pending" },
+            },
+        },
+    }
+    -- 契約回傳形狀：(legToken, stopId, x, y, phase, revision)；無行程 (nil, "noitinerary")。
+    MinidoracatMiniMapAPI.getNavLeg = function()
+        trip.legCalls = trip.legCalls + 1
+        if not trip.phase then return nil, "noitinerary" end
+        return trip.legToken, trip.stopId, 300, 400, trip.phase, trip.revision
+    end
+    MinidoracatMiniMapAPI.getNavItinerary = function()
+        trip.snapshotCalls = trip.snapshotCalls + 1
+        if not trip.phase then return nil, "noitinerary" end
+        trip.data.revision = trip.revision
+        trip.data.phase = trip.phase
+        return trip.data
+    end
+    MDAD.Drive.continueItinerary = function()
+        trip.continueCalls = trip.continueCalls + 1
+        if trip.continueOk then return true end
+        return false, trip.continueReason
+    end
+
+    texts.UI_MinidoracatAutoDrive_HUDStatusNoNav = "NO NAV"
+    options:getOption("HUDTheme"):setValue(1)
+    options:getOption("HUDLayout"):setValue(1)
+    options:getOption("HUDScale"):setValue(2)
+    options:apply()
+    state.active, state.token, state.startReason = false, "follow", nil
+
+    -- 舊主 MOD：版本不足或函式缺席都必須整段降級成原本的單站 HUD。
+    trip.phase = "draft"
+    MinidoracatMiniMapAPI.navApiVersion = 5
+    panel:refresh(nowMs)
+    check(panel._hasTrip == false and panel._tripText == nil
+        and panel.actionButton.title == "START",
+        "navApiVersion 5 keeps the single-stop HUD; no trip line, no trip action")
+    MinidoracatMiniMapAPI.navApiVersion = 6
+    local liveLeg = MinidoracatMiniMapAPI.getNavLeg
+    MinidoracatMiniMapAPI.getNavLeg = nil
+    panel:refresh(nowMs)
+    check(panel._hasTrip == false and panel.actionButton.title == "START",
+        "v6 version field without the trip functions still degrades to the single-stop HUD")
+    MinidoracatMiniMapAPI.getNavLeg = liveLeg
+
+    -- draft：目前站是第一個 pending（已完成前綴保留），主鈕變成「開始行程」。
+    panel:refresh(nowMs)
+    check(panel._hasTrip, "v6 itinerary switches the HUD into trip mode")
+    checkEq(panel.actionButton.title, "TRIP START", "draft offers the start-trip action")
+    check(panel._tripText and panel._tripText:find("GAS STATION", 1, true)
+        and panel._tripText ~= panel._tripCounter,
+        "the trip line names the stop being headed to instead of only its N/M counter")
+    checkEq(panel._tripCounter, "2/3", "the counter stays available as the secondary short form")
+    check(panel.actionButton.tooltip and panel.actionButton.tooltip:find("GAS STATION", 1, true),
+        "the full readable trip hint reaches the main button tooltip")
+    check(panel._tripDrawY == panel._textY + textManager:getFontHeight(UIFont.Small)
+        and panel._tripTextY == panel._tripDrawY and panel._tripTextX == panel._statusX
+        and panel._tripDrawY + textManager:getFontHeight(UIFont.Small) <= panel._dividerY,
+        "full layout stacks the trip line under the status line without touching the button row")
+    check(panel._unitY > panel._textY,
+        "the km/h unit stays on the speed baseline when the status column becomes two lines")
+    check(panel._tripTextX + textManager:MeasureStringX(UIFont.Small, panel._tripText)
+        <= panel._statusX + panel._tripMaxW,
+        "trip line stays inside its own column")
+
+    -- 行駛中：安全狀態與改道鈕優先，主鈕回到停止自駕且不經過行程入口。
+    state.active, state.token = true, "blocked"
+    panel:refresh(nowMs)
+    checkEq(panel._statusText, "HOLDING", "trip mode never hides the driving safety status")
+    check(panel.detourButton.visible, "reroute pill is still reachable in trip mode")
+    if panel._tripText then
+        check(panel._tripTextX + textManager:MeasureStringX(UIFont.Small, panel._tripText)
+            <= panel.detourButton.x - panel._detourGap,
+            "the trip second line stays clear of the reroute button")
+    end
+    state.token = "arrive"
+    panel:refresh(nowMs)
+    local acceptedArrivalStatus = panel._statusText
+    state.legReportWhy = "UI_MinidoracatAutoDrive_TripBusy"
+    panel:refresh(nowMs)
+    check(panel._statusText ~= acceptedArrivalStatus
+        and panel.actionButton.tooltip:find(getText("UI_MinidoracatAutoDrive_TripBusy"), 1, true),
+        "a rejected arrival stays visible with its cause instead of claiming arrival")
+    state.legReportWhy = nil
+    panel:refresh(nowMs)
+    checkEq(panel._statusText, acceptedArrivalStatus, "a resolved arrival clears the old failure")
+    state.token = "blocked"
+    panel:refresh(nowMs)
+    checkEq(panel.actionButton.title, "STOP", "an active session keeps the disengage action")
+    local activeCalls = trip.continueCalls
+    click(panel.actionButton)
+    check(trip.continueCalls == activeCalls and state.active == false,
+        "stopping autodrive never routes through the trip continuation entry")
+    state.token = "follow"
+
+    -- waiting：主鈕＝前往下一站，且真的呼叫 Driver 的有副作用入口。
+    trip.phase = "waiting"
+    trip.data.currentStopId = 1
+    trip.revision = trip.revision + 1
+    panel:refresh(nowMs)
+    local reachedAt = panel.actionButton.tooltip:find("HOME", 1, true)
+    local nextAt = panel.actionButton.tooltip:find("GAS STATION", 1, true)
+    check(reachedAt and nextAt and reachedAt < nextAt,
+        "waiting names the stop just reached before the one it will head to next")
+    checkEq(panel.actionButton.title, "TRIP CONTINUE",
+        "waiting labels the main button as an explicit autodrive continuation")
+    local waitingCalls = trip.continueCalls
+    click(panel.actionButton)
+    checkEq(trip.continueCalls, waitingCalls + 1,
+        "the next-stop button calls Drive.continueItinerary once")
+
+    -- 被拒：狀態列看得到原因、完整句在 tooltip，且原因會過期回到常態啟動守門。
+    trip.continueOk, trip.continueReason = false, "UI_MinidoracatAutoDrive_TripNotStopped"
+    click(panel.actionButton)
+    checkEq(panel._statusText, "STOP FIRST",
+        "a rejected trip start shows the driver's reason instead of doing nothing")
+    check(panel.actionButton.tooltip
+        and panel.actionButton.tooltip:find("STOP THE CAR FIRST", 1, true),
+        "the full rejection sentence reaches the main button tooltip")
+    nowMs = nowMs + 6000
+    panel:refresh(nowMs)
+    checkEq(panel._statusText, "STOPPED OVER",
+        "the rejection notice expires back to the phase wording, not to the single-stop 'ready'")
+    trip.continueOk, trip.continueReason = true, nil
+
+    -- 無名稱的站退座標；快照只在 phase／revision／目前站變更時重取。
+    trip.data.stops[2].status = "arrived"
+    trip.phase, trip.stopId, trip.legToken = "navigating", 3, "leg3"
+    trip.data.currentStopId = 3
+    trip.revision = trip.revision + 1
+    panel:refresh(nowMs)
+    check(panel._tripText and panel._tripText:find("500", 1, true)
+        and panel._tripText:find("LAST", 1, true),
+        "a stop without a label falls back to its coordinates and reports it is the last one")
+    local snapshots = trip.snapshotCalls
+    local legReads = trip.legCalls
+    panel:refresh(nowMs)
+    panel:refresh(nowMs)
+    check(trip.snapshotCalls == snapshots and trip.legCalls == legReads + 2,
+        "unchanged revision reuses the cached snapshot; only the zero-alloc leg getter runs")
+    trip.revision = trip.revision + 1
+    panel:refresh(nowMs)
+    checkEq(trip.snapshotCalls, snapshots + 1, "a revision bump refetches the snapshot exactly once")
+
+    -- prerender 仍是純快取繪製（行程行不得引入 getText／量測），三段文字各自的基線也要對：
+    -- 狀態在上、行程在下、km/h 仍貼著現速，不會被兩行狀態欄拉走。
+    local renderTexts, renderMeasures = getTextCalls, measureCalls
+    local painted = {}
+    panel.drawText = function(_, text, x, y) painted[#painted + 1] = { text = text, y = y } end
+    panel:prerender()
+    panel.drawText = nil
+    local function paintedY(text)
+        for i = 1, #painted do
+            if painted[i].text == text then return painted[i].y end
+        end
+        return nil
+    end
+    check(getTextCalls == renderTexts and measureCalls == renderMeasures and #painted > 0,
+        "trip mode prerender draws from cache only: no translation lookup, no measurement")
+    check(paintedY(panel._statusText) == panel._textY
+        and paintedY(panel._tripText) == panel._tripDrawY
+        and paintedY(panel._unitText) == panel._unitY
+        and panel._unitY ~= panel._textY,
+        "status, trip line and the km/h unit each paint on their own baseline")
+
+    -- approach：契約禁止自駕再次接管，主鈕顯示手動前往，按下只回報原因。
+    trip.phase = "approach"
+    trip.revision = trip.revision + 1
+    panel:refresh(nowMs)
+    checkEq(panel.actionButton.title, "WALK THERE", "approach offers no autodrive action")
+    checkEq(panel._statusText, "READY", "approach without a driver reason keeps the normal status")
+    local approachCalls = trip.continueCalls
+    click(panel.actionButton)
+    check(trip.continueCalls == approachCalls and panel._statusText == "ROAD END",
+        "the manual-walk button reports why instead of starting autodrive or doing nothing")
+
+    -- paused／completed 的主鈕語意
+    trip.phase = "paused"
+    trip.revision = trip.revision + 1
+    panel:refresh(nowMs)
+    checkEq(panel.actionButton.title, "TRIP RESUME", "paused offers the resume action")
+    trip.phase = "completed"
+    trip.data.stops[3].status = "arrived"
+    trip.data.currentStopId = nil
+    trip.revision = trip.revision + 1
+    panel:refresh(nowMs)
+    check(panel.actionButton.title == "START" and panel._tripText == "TRIP DONE",
+        "a completed trip stops offering trip actions and reports the trip as finished")
+    trip.phase = "waiting"
+    trip.data.stops[3].status = "pending"
+    trip.data.currentStopId = 2
+    trip.revision = trip.revision + 1
+
+    -- 四主題＋精簡單行＋窄分割 viewport：行程行可以退讓，操作控制不能被裁掉。
+    for _, layoutMode in ipairs({ 1, 2 }) do
+        options:getOption("HUDLayout"):setValue(layoutMode)
+        for theme = 1, 4 do
+            options:getOption("HUDTheme"):setValue(theme)
+            options:apply()
+            panel:refresh(nowMs)
+            local label = "layout " .. layoutMode .. " theme " .. theme
+            check(panel.actionButton.visible and panel.actionButton.x >= 0
+                and panel.actionButton.x + panel.actionButton.width <= panel.width,
+                label .. ": trip action stays reachable inside the panel")
+            check(panel.actionButton.title == "TRIP CONTINUE",
+                label .. ": trip action keeps its waiting-phase meaning")
+            if panel._tripText then
+                local right = panel._tripTextX
+                    + textManager:MeasureStringX(UIFont.Small, panel._tripText)
+                local limit = panel._tripDrawY and (panel._statusX + panel._tripMaxW)
+                    or panel._speedX
+                check(right <= limit, label .. ": trip line never overruns the next column")
+            end
+        end
+    end
+    options:getOption("HUDTheme"):setValue(1)
+    options:getOption("HUDLayout"):setValue(1)
+    options:getOption("HUDScale"):setValue(3)
+    viewportWidth = 640
+    fire(Events.OnResolutionChange)
+    panel:refresh(nowMs)
+    check(panel.width <= viewportWidth - 16 and panel.actionButton.visible
+        and panel.actionButton.x >= 0
+        and panel.actionButton.x + panel.actionButton.width <= panel.width,
+        "narrow split viewport keeps the trip action inside the panel")
+    if panel._tripText then
+        check(panel._tripTextX
+            + textManager:MeasureStringX(UIFont.Small, panel._tripText) <= panel._speedX,
+            "narrow split viewport trip line still ends before the speed column")
+    end
+    viewportWidth = 1920
+    options:getOption("HUDScale"):setValue(2)
+
+    -- 收合徽章只剩狀態燈／現速／時間；行程行讓位，展開後回來。
+    panel:setCollapsed(true)
+    panel:refresh(nowMs)
+    check(panel._tripText == nil, "collapsed badge drops the trip line")
+    panel:setCollapsed(false)
+    panel:refresh(nowMs)
+    check(panel._tripText ~= nil, "expanding restores the trip line")
+
+    -- 行程消失（清空／換角色）：面板必須回到原本的單站 HUD。
+    trip.phase = nil
+    panel:refresh(nowMs)
+    check(panel._hasTrip == false and panel._tripText == nil
+        and panel.actionButton.title == "START",
+        "losing the itinerary returns the HUD to the single-stop layout")
+
+    MinidoracatMiniMapAPI.navApiVersion = nil
+    MinidoracatMiniMapAPI.getNavLeg = nil
+    MinidoracatMiniMapAPI.getNavItinerary = nil
+    MDAD.Drive.continueItinerary = nil
+    options:apply()
+    panel:refresh(nowMs)
+end
+
+-- 接續模式（navApiVersion 7／快照 schemaVersion 2）：HUD 只讀 trip.autoContinue，
+-- 寫入只有「玩家從原版選單挑了」這一條路，走 API.setNavContinuation(pn, revision, bool)。
+-- 這段守的是：不自己寫、不自己發車；expectedRevision 被拒有原因；模式與停靠旗標的
+-- 顯示優先序；v6／缺 setter／舊快照都不得出現假亮的新控制；四主題與精簡單行下
+-- 新藥丸不覆蓋任何既有控制；waiting 的「已停靠 A／接著去 B」兩個名字不互換。
+do
+    local trip = {
+        phase = "navigating", revision = 20, stopId = 2, autoContinue = true,
+        legCalls = 0, snapshotCalls = 0, setCalls = 0,
+        setOk = true, setReason = nil, continueCalls = 0,
+    }
+    trip.data = {
+        schemaVersion = 2,
+        count = 3,
+        currentStopId = 2,
+        autoContinue = true,
+        stops = {
+            { id = 1, x = 100, y = 200, label = "HOME", status = "arrived" },
+            { id = 2, x = 300, y = 400, label = "GAS STATION", status = "pending" },
+            -- 第三站被玩家標成「一定停等」：自動接續下仍然要看得出來
+            { id = 3, x = 500, y = 600, label = "CABIN", status = "pending", pause = true },
+        },
+    }
+    MinidoracatMiniMapAPI.navApiVersion = 7
+    MinidoracatMiniMapAPI.getNavLeg = function()
+        trip.legCalls = trip.legCalls + 1
+        if not trip.phase then return nil, "noitinerary" end
+        return "leg", trip.stopId, 300, 400, trip.phase, trip.revision
+    end
+    MinidoracatMiniMapAPI.getNavItinerary = function()
+        trip.snapshotCalls = trip.snapshotCalls + 1
+        if not trip.phase then return nil, "noitinerary" end
+        trip.data.revision = trip.revision
+        trip.data.autoContinue = trip.autoContinue
+        return trip.data
+    end
+    -- 契約：setNavContinuation(pn, expectedRevision, enabled) → true, "ok" 或 false, reason[, detail]
+    MinidoracatMiniMapAPI.setNavContinuation = function(pn, expected, enabled)
+        trip.setCalls = trip.setCalls + 1
+        if pn ~= 0 or expected ~= trip.revision then return false, "stale" end
+        if not trip.setOk then return false, trip.setReason, "detail" end
+        trip.revision = trip.revision + 1
+        trip.autoContinue = enabled == true
+        return true, "ok"
+    end
+    MDAD.Drive.continueItinerary = function()
+        trip.continueCalls = trip.continueCalls + 1
+        return true
+    end
+    state.active, state.token, state.startReason, state.legReportWhy = false, "follow", nil, nil
+    nowMs = nowMs + 6000
+    options:getOption("HUDTheme"):setValue(1)
+    options:getOption("HUDLayout"):setValue(1)
+    options:getOption("HUDScale"):setValue(2)
+    options:apply()
+    panel:refresh(nowMs)
+
+    -- 只是顯示：讀快照不寫設定、也不碰自駕
+    check(panel.contButton.visible and panel.contButton.valueText == "CONT AUTO",
+        "a v7 snapshot shows the continuation pill carrying the trip's own value")
+    checkEq(trip.setCalls, 0, "reading the trip never writes the continuation setting")
+    checkEq(trip.continueCalls, 0, "showing the continuation control never starts autodrive")
+    check(panel._tripFull and panel._tripFull:find("GAS STATION", 1, true)
+        and panel._tripFull:find("(HOLD)", 1, true) == nil,
+        "an ordinary auto-continued target is not marked as a forced wait")
+
+    -- 目前目標本身被標成停等：模式是自動，但旗標優先顯示
+    trip.data.currentStopId, trip.stopId = 3, 3
+    trip.data.stops[2].status = "arrived"
+    trip.revision = trip.revision + 1
+    panel:refresh(nowMs)
+    check(panel._tripFull and panel._tripFull:find("CABIN", 1, true)
+        and panel._tripFull:find("(HOLD)", 1, true),
+        "auto mode still shows that this particular stop waits for you")
+
+    -- waiting：兩個站名不互換，主鈕是明確的「繼續自駕」，狀態字講階段
+    trip.phase = "waiting"
+    trip.data.currentStopId, trip.stopId = 2, 2
+    trip.data.stops[3].status = "pending"
+    trip.revision = trip.revision + 1
+    panel:refresh(nowMs)
+    local atPos = panel._tripFull and panel._tripFull:find("GAS STATION", 1, true)
+    local nextPos = panel._tripFull and panel._tripFull:find("CABIN", 1, true)
+    check(atPos and nextPos and atPos < nextPos,
+        "waiting reports the stop already reached first, then the one it will head to")
+    check(panel._tripFull:find("(HOLD)", 1, true),
+        "the forced wait of the next stop is visible while auto mode is on")
+    checkEq(panel.actionButton.title, "TRIP CONTINUE",
+        "waiting offers an explicit autodrive continuation")
+    checkEq(panel._statusText, "STOPPED OVER",
+        "waiting states the phase instead of the single-stop 'ready to engage'")
+
+    -- 選單：兩項、目前值不可再選、挑了才寫一次，且帶畫面上那份快照的 revision
+    local setsBefore, continuesBefore = trip.setCalls, trip.continueCalls
+    click(panel.contButton)
+    local menu = ISContextMenu.lastMenu
+    check(menu and #menu.options == 2 and menu.player == 0,
+        "the pill opens the vanilla context menu for this player with exactly the two modes")
+    check(menu.options[1].notAvailable == true and menu.options[2].notAvailable ~= true,
+        "the mode already in force cannot be re-picked; the other one can")
+    checkEq(trip.setCalls, setsBefore, "opening the menu writes nothing by itself")
+    check(menu:pick("MENU STEP"), "the stop-by-stop option is selectable")
+    checkEq(trip.continueCalls, continuesBefore,
+        "switching the continuation mode never starts autodrive or claims a leg")
+    checkEq(state.active, false, "switching the mode never toggles the single-stop session either")
+    checkEq(panel.contButton.valueText, "CONT STEP", "the pill immediately shows the stored new value")
+    check(panel._tripFull and panel._tripFull:find("(HOLD)", 1, true) == nil,
+        "stop-by-stop mode drops the per-stop wait marker: every stop waits anyway")
+    checkEq(panel.contButton.tooltip, "CONT TIP",
+        "the pill explains itself in a tooltip instead of relying on its colour")
+
+    -- 繪製只讀快取；圖形與字的位置由實際 draw capture 驗收，不綁 draw-call 數量。
+    local glyphTexts, glyphMeasures = getTextCalls, measureCalls
+    panel.contButton:render()
+    check(getTextCalls == glyphTexts and measureCalls == glyphMeasures,
+        "painting the pill performs no translation lookup and no text measurement")
+
+    -- expectedRevision 過期：被拒要有一句能行動的原因，值不得假裝改掉。
+    -- 契約：API 回傳的 reason 是 enum（stale／…），不是翻譯鍵，HUD 不做鍵探測。
+    click(panel.contButton)
+    local staleMenu = ISContextMenu.lastMenu
+    trip.revision = trip.revision + 1
+    panel:refresh(nowMs)
+    check(staleMenu:pick("MENU AUTO"), "the old menu can still receive the delayed click")
+    checkEq(panel._statusText, "MODE UNCHANGED",
+        "a stale-revision rejection is reported on the HUD instead of failing silently")
+    check(panel.actionButton.tooltip
+        and panel.actionButton.tooltip:find("CONT FAILED SENTENCE", 1, true),
+        "the full rejection sentence reaches the main button tooltip")
+    checkEq(panel.contButton.valueText, "CONT STEP",
+        "a rejected switch keeps showing the value that is really stored")
+    trip.setOk, trip.setReason = false, "nonav"
+    click(panel.contButton)
+    ISContextMenu.lastMenu:pick("MENU AUTO")
+    checkEq(panel._statusText, "MODE UNCHANGED",
+        "any other rejection enum is reported the same actionable way, never as a raw token")
+    -- 行駛安全狀態不能被通知蓋掉，但切換失敗仍須有完整文字出口。
+    for _, token in ipairs({ "follow", "build", "blocked" }) do
+        state.active, state.token = true, token
+        trip.phase, trip.revision = "navigating", trip.revision + 1
+        panel:refresh(nowMs)
+        local status, mode = panel._statusText, trip.autoContinue
+        click(panel.contButton)
+        ISContextMenu.lastMenu:pick(mode and "MENU STEP" or "MENU AUTO")
+        check(panel._statusText == status and trip.autoContinue == mode,
+            token .. ": rejected mode changes preserve driving status and the saved mode")
+        check(panel.contButton.tooltip:find("CONT FAILED SENTENCE", 1, true),
+            token .. ": the mode control exposes its full failure while driving")
+    end
+    state.active, state.token = false, "follow"
+    trip.phase, trip.revision = "waiting", trip.revision + 1
+    trip.setOk, trip.setReason = true, nil
+    nowMs = nowMs + 6000
+    panel:refresh(nowMs)
+
+    -- 快照自己帶的 trip.reason（Core enum）：被擋下的接續要壓過階段字，
+    -- 但 manual／cancelled 是正常停止，不能講成錯誤。
+    trip.data.reason = "unavailable"
+    trip.revision = trip.revision + 1
+    panel:refresh(nowMs)
+    checkEq(panel._statusText, "CONTINUATION BLOCKED",
+        "a gate-blocked continuation outranks the stopover phase wording")
+    check(panel.actionButton.tooltip
+        and panel.actionButton.tooltip:find("CANNOT CONTINUE SENTENCE", 1, true),
+        "the blocked-continuation sentence reaches the main button tooltip")
+    checkEq(panel.actionButton.title, "TRIP CONTINUE",
+        "a blocked continuation still lets the player retry explicitly")
+    trip.data.reason = "manual"
+    trip.revision = trip.revision + 1
+    panel:refresh(nowMs)
+    checkEq(panel._statusText, "STOPPED OVER",
+        "a normal manual stop keeps the phase wording instead of an error")
+    trip.data.reason = "noroad"
+    trip.revision = trip.revision + 1
+    panel:refresh(nowMs)
+    checkEq(panel._statusText, "NO ROUTE",
+        "no-route reuses the existing route failure label instead of a new invented one")
+    trip.data.reason = nil
+    trip.revision = trip.revision + 1
+    panel:refresh(nowMs)
+
+    -- 目前站是被略過而不是已停靠：顯示要誠實
+    trip.data.stops[2].status = "skipped"
+    trip.revision = trip.revision + 1
+    panel:refresh(nowMs)
+    check(panel._tripFull and panel._tripFull:find("SKIPPED GAS STATION", 1, true)
+        and panel._tripFull:find("CABIN", 1, true),
+        "a skipped current stop is reported as skipped, not as a stop that was reached")
+    checkEq(panel._statusText, "STOP SKIPPED", "the phase label says skipped too")
+    trip.data.stops[2].status = "arrived"
+    trip.revision = trip.revision + 1
+    panel:refresh(nowMs)
+
+    -- HUD 永遠不因 phase 變化播聲音（完成／停靠的語音只由 Driver 事件發）
+    local voiceBefore = #voiceCalls
+    for _, phaseName in ipairs({ "navigating", "waiting", "completed", "paused", "approach" }) do
+        trip.phase = phaseName
+        trip.revision = trip.revision + 1
+        panel:refresh(nowMs)
+    end
+    checkEq(#voiceCalls, voiceBefore,
+        "no trip phase transition, completion included, ever plays a voice line from the HUD")
+    trip.phase = "waiting"
+    trip.revision = trip.revision + 1
+    panel:refresh(nowMs)
+
+    -- Driver 的錯誤與車控危險提示永遠壓過行程字
+    state.active, state.token = true, "blocked"
+    state.legReportWhy = "UI_MinidoracatAutoDrive_TripLost"
+    panel:refresh(nowMs)
+    checkEq(panel._statusText, "CONTROL RETURNED",
+        "a driver failure still outranks every trip phase wording")
+    state.legReportWhy = nil
+    panel:refresh(nowMs)
+    checkEq(panel._statusText, "HOLDING",
+        "braking and waiting keeps priority over the trip message")
+    state.token = "build"
+    panel:refresh(nowMs)
+    checkEq(panel.actionButton.title, "CANCEL PREP",
+        "the preparation phase reads as a cancel, not as stopping a moving car")
+    state.active, state.token = false, "follow"
+
+    -- 沒有待辦站的 waiting：不得假裝可以出發
+    trip.data.stops[3].status = "arrived"
+    trip.data.currentStopId, trip.stopId = 3, 3
+    trip.revision = trip.revision + 1
+    panel:refresh(nowMs)
+    check(panel.actionButton.title == "START" and panel._tripFull == "AT CABIN DONE",
+        "a waiting stop with nothing left pending falls back to the single-stop action")
+    local idleContinues = trip.continueCalls
+    click(panel.actionButton)
+    checkEq(trip.continueCalls, idleContinues,
+        "that fallback never routes through the trip continuation entry")
+    state.active = false
+    trip.data.stops[3].status = "pending"
+    trip.data.currentStopId, trip.stopId = 2, 2
+    trip.phase = "waiting"
+    trip.revision = trip.revision + 1
+    panel:refresh(nowMs)
+
+    -- 降級：v6、缺 setter、舊快照都不得出現一顆假亮的新控制
+    MinidoracatMiniMapAPI.navApiVersion = 6
+    panel:refresh(nowMs)
+    check(panel._hasTrip and not panel.contButton.visible
+        and panel.contButton.valueText == nil,
+        "v6 keeps the trip HUD but offers no continuation control at all")
+    local v6Sets = trip.setCalls
+    panel:onContinuation()
+    checkEq(trip.setCalls, v6Sets, "the continuation entry is inert without the v7 setter")
+    MinidoracatMiniMapAPI.navApiVersion = 7
+    local liveSetter = MinidoracatMiniMapAPI.setNavContinuation
+    MinidoracatMiniMapAPI.setNavContinuation = nil
+    panel:refresh(nowMs)
+    check(not panel.contButton.visible,
+        "a v7 version field without the setter still shows no continuation control")
+    MinidoracatMiniMapAPI.setNavContinuation = liveSetter
+    trip.autoContinue = nil
+    trip.revision = trip.revision + 1
+    panel:refresh(nowMs)
+    check(not panel.contButton.visible,
+        "a snapshot that carries no autoContinue value shows no continuation control")
+    trip.autoContinue = true
+    trip.revision = trip.revision + 1
+    panel:refresh(nowMs)
+    check(panel.contButton.visible and panel.contButton.valueText == "CONT AUTO",
+        "the control returns once the schema really carries the value")
+
+    -- 四主題＋精簡單行：新藥丸永遠在面板內，且不覆蓋任何既有控制
+    local function noOverlap(a, b, label)
+        check(not (a.visible and b.visible
+                and a.x < b.x + b.width and b.x < a.x + a.width
+                and a.y < b.y + b.height and b.y < a.y + a.height), label)
+    end
+    for _, layoutMode in ipairs({ 1, 2 }) do
+        options:getOption("HUDLayout"):setValue(layoutMode)
+        for theme = 1, 4 do
+            options:getOption("HUDTheme"):setValue(theme)
+            options:apply()
+            panel:refresh(nowMs)
+            local label = "layout " .. layoutMode .. " theme " .. theme
+            check(panel.contButton.visible, label .. ": continuation pill stays reachable")
+            check(panel.contButton.x >= 0
+                and panel.contButton.x + panel.contButton.width <= panel.width
+                and panel.contButton.y >= 0
+                and panel.contButton.y + panel.contButton.height <= panel.height,
+                label .. ": continuation pill stays inside the panel")
+            check(panel.contButton.valueText ~= nil,
+                label .. ": continuation pill always carries its short word, not colour alone")
+            noOverlap(panel.contButton, panel.corpseButton, label .. ": clear of the corpse pill")
+            noOverlap(panel.contButton, panel.autoButton, label .. ": clear of the auto-reroute pill")
+            noOverlap(panel.contButton, panel.actionButton, label .. ": clear of the main button")
+            noOverlap(panel.contButton, panel.volumeSlider, label .. ": clear of the volume slider")
+            noOverlap(panel.contButton, panel.themeButton, label .. ": clear of the style button")
+            noOverlap(panel.contButton, panel.collapseButton, label .. ": clear of the hide button")
+            noOverlap(panel.contButton, panel.voiceButton, label .. ": clear of the voice button")
+            noOverlap(panel.contButton, panel.gearButtons[4], label .. ": clear of the gear row")
+        end
+    end
+    options:getOption("HUDTheme"):setValue(1)
+    options:getOption("HUDLayout"):setValue(1)
+    options:apply()
+    panel:setCollapsed(true)
+    panel:refresh(nowMs)
+    check(not panel.contButton.visible, "the collapsed badge drops the continuation pill too")
+    panel:setCollapsed(false)
+    panel:refresh(nowMs)
+
+    -- 行程消失：控制與值都要收乾淨
+    trip.phase = nil
+    panel:refresh(nowMs)
+    check(not panel.contButton.visible and panel.contButton.valueText == nil
+        and panel.actionButton.title == "START",
+        "losing the itinerary removes the continuation control and its value")
+
+    MinidoracatMiniMapAPI.navApiVersion = nil
+    MinidoracatMiniMapAPI.getNavLeg = nil
+    MinidoracatMiniMapAPI.getNavItinerary = nil
+    MinidoracatMiniMapAPI.setNavContinuation = nil
+    MDAD.Drive.continueItinerary = nil
+    options:apply()
+    panel:refresh(nowMs)
+end
 
 vehicle._module = false
 sandbox.NeedItemForAutoDrive = true
@@ -1530,11 +2231,192 @@ optionSets.MinidoracatAutoDrive:getOption("HUDTheme"):setValue(1)
 local seen = 0
 for i = 1, #iconLoads do if iconLoads[i]:find("hud_palette.png", 1, true) then seen = seen + 1 end end
 checkEq(seen, 1, "each icon is looked up once and cached for the chunk lifetime")
+
+-- 真 PZ 字型與原版 ISButton 的離線 draw capture 所對應的幾何回歸：
+-- 真字高 1x＝Small 19／Medium 29、4x＝Small 38／Medium 45，量寬以「一個 CJK 佔一格
+-- 字高、半形佔半格」估。捕捉到的三類問題都守在這裡：320 寬時樣式／語音／收合／檔位
+-- 掉出面板、巡航欄的字壓到主鈕、4x 側掛把檔位列推到負 Y 且底列超出儀表板高度。
+-- 圖示模式（方鈕）與離線繪製同條件；本測試量寬仍是下列估算模型。
+do
+    local realMeasure, realHeight = textManager.MeasureStringX, textManager.getFontHeight
+    local themeOption = optionSets.MinidoracatAutoDrive:getOption("HUDTheme")
+    MinidoracatMiniMapAPI.navApiVersion = 7
+    MinidoracatMiniMapAPI.getNavLeg = function() return nil, nil, nil, nil, "waiting", 1 end
+    MinidoracatMiniMapAPI.getNavItinerary = function()
+        return { revision = 1, count = 2, currentStopId = 1, autoContinue = true, stops = {
+            { id = 1, label = "HOME", status = "arrived", pause = false },
+            { id = 2, label = "CABIN", status = "pending", pause = false },
+        } }
+    end
+    MinidoracatMiniMapAPI.setNavContinuation = function() return true, "ok" end
+    iconPanel:setWing("left", false)
+    iconPanel:setWing("right", false)
+
+    local function useFontProfile(smallH, mediumH)
+        textManager.getFontHeight = function(_, font)
+            return font == UIFont.Medium and mediumH or smallH
+        end
+        textManager.MeasureStringX = function(_, font, text)
+            local h = font == UIFont.Medium and mediumH or smallH
+            local half, width, i = math.floor(h / 2), 0, 1
+            while i <= #text do
+                local byte = text:byte(i)
+                if byte >= 0xF0 then width, i = width + h, i + 4
+                elseif byte >= 0xE0 then width, i = width + h, i + 3
+                elseif byte >= 0xC0 then width, i = width + h, i + 2
+                else width, i = width + half, i + 1 end
+            end
+            return width
+        end
+    end
+    -- 「可見的子元件有幾個掉出面板」：一格斷言涵蓋全部控制，出事時看數字就知道規模。
+    local function outside(p)
+        local n = 0
+        for i = 1, #p.children do
+            local child = p.children[i]
+            if child.visible and (child.x < 0 or child.y < 0
+                    or child.x + child.width > p.width
+                    or child.y + child.height > p.height) then
+                n = n + 1
+            end
+        end
+        return n
+    end
+
+    for _, profile in ipairs({ { name = "1x", small = 19, medium = 29 },
+                               { name = "4x", small = 38, medium = 45 } }) do
+        useFontProfile(profile.small, profile.medium)
+        for _, width in ipairs({ 320, 640, 1920 }) do
+            viewportWidth = width
+            for theme = 1, 4 do
+                themeOption:setValue(theme)
+                iconPanel:applyLayout()
+                iconPanel:refresh(nowMs)
+                local label = "CH " .. profile.name .. " " .. width .. "px theme " .. theme
+                checkEq(outside(iconPanel), 0,
+                    label .. ": every visible control stays inside the panel")
+                check(iconPanel.actionButton.visible and iconPanel.collapseButton.visible,
+                    label .. ": the main action and the fold entry never degrade away")
+                if iconPanel._capX then
+                    local capRight = math.max(
+                        iconPanel._capX
+                            + textManager:MeasureStringX(UIFont.Small, iconPanel._capLabel),
+                        iconPanel._capValueX
+                            + textManager:MeasureStringX(UIFont.Small, iconPanel._capText))
+                    check(capRight <= iconPanel.actionButton.x,
+                        label .. ": cruise text never reaches the main button")
+                else
+                    check(iconPanel._capValueX == nil,
+                        label .. ": a yielded cruise column leaves no stale coordinate")
+                end
+                if iconPanel._speedX == nil then
+                    check(iconPanel._effectiveLayout == 2 and not iconPanel._showStatusText,
+                        label .. ": only the ultra-narrow single row may drop the speed column")
+                end
+            end
+        end
+    end
+
+    -- 一般解析度不得無故退化：1x／1920 四個主題都照選的走，仍是完整展開版面。
+    useFontProfile(19, 29)
+    viewportWidth = 1920
+    for theme = 1, 4 do
+        themeOption:setValue(theme)
+        iconPanel:applyLayout()
+        checkEq(iconPanel._style, theme,
+            "CH 1x 1920px keeps the chosen theme " .. theme)
+        checkEq(iconPanel._effectiveLayout, 1,
+            "CH 1x 1920px theme " .. theme .. " stays on the full layout")
+    end
+    themeOption:setValue(4)
+    iconPanel:applyLayout()
+    check(iconPanel.height <= dashboards[0].height - 7
+        and iconPanel.actionButton.visible and iconPanel.gearButtons[1].visible,
+        "CH 1x wings still fit the visible dashboard band with both wings open")
+
+    -- 4x 的側翼三列（44×3＋間距）放不進 103px 的可見儀表板：退回上掛，不得出現
+    -- 負 Y 的檔位列，也不得把底列壓進儀表板。
+    useFontProfile(38, 45)
+    themeOption:setValue(4)
+    iconPanel:applyLayout()
+    checkEq(iconPanel._style, 1,
+        "CH 4x wings hand over to the top-mounted layout when the dashboard band is too short")
+    check(iconPanel.gearButtons[1].y >= 0
+        and iconPanel.volumeSlider.y + iconPanel.volumeSlider.height <= iconPanel.height
+        and iconPanel.y + iconPanel.height == dashboards[0].y + 7,
+        "CH 4x wings fallback docks above the dashboard instead of overflowing it")
+    click(iconPanel.themeButton)
+    checkEq(themeOption:getValue(), 1, "fallback keeps the saved Wings-to-Metal cycle")
+    useFontProfile(19, 29)
+    iconPanel:applyLayout()
+    checkEq(iconPanel._style, 1, "restoring font size keeps the user's saved Metal selection")
+
+    -- 英文完整主鈕比窄版剩餘空間長；原版 ISButton 不會自動裁切標題。
+    local oldContinue, oldCancel = texts.UI_MinidoracatAutoDrive_HUDTripContinue,
+        texts.UI_MinidoracatAutoDrive_HUDCancelPrep
+    local oldEntry = MDAD.Drive.continueItinerary
+    local oldActive, oldToken = state.active, state.token
+    MDAD.Drive.continueItinerary = function() return true end
+    texts.UI_MinidoracatAutoDrive_HUDTripContinue = "Continue autodrive"
+    texts.UI_MinidoracatAutoDrive_HUDCancelPrep = "Cancel preparation"
+    useFontProfile(38, 45)
+    viewportWidth = 320
+    for _, mode in ipairs({ "idle", "build" }) do
+        state.active, state.token = mode == "build", mode
+        iconPanel:applyLayout(); iconPanel:refresh(nowMs)
+        local full = mode == "build" and "Cancel preparation" or "Continue autodrive"
+        check(textManager:MeasureStringX(UIFont.Small, iconPanel.actionButton.title)
+                <= iconPanel.actionButton.width - 12,
+            mode .. ": a long action title must fit rather than overflow a valid rectangle")
+        check(iconPanel.actionButton.tooltip and iconPanel.actionButton.tooltip:find(full, 1, true),
+            mode .. ": shortened action retains its full meaning in the tooltip")
+    end
+    texts.UI_MinidoracatAutoDrive_HUDTripContinue = oldContinue
+    texts.UI_MinidoracatAutoDrive_HUDCancelPrep = oldCancel
+    MDAD.Drive.continueItinerary = oldEntry
+    state.active, state.token = oldActive, oldToken
+
+    textManager.MeasureStringX, textManager.getFontHeight = realMeasure, realHeight
+    viewportWidth = 1920
+    themeOption:setValue(1)
+    MinidoracatMiniMapAPI.navApiVersion = nil
+    MinidoracatMiniMapAPI.getNavLeg = nil
+    MinidoracatMiniMapAPI.getNavItinerary = nil
+    MinidoracatMiniMapAPI.setNavContinuation = nil
+    iconPanel:applyLayout()
+    iconPanel:refresh(nowMs)
+end
 iconPanel:removeFromUIManager()
 getTexture = nil
 MDAD.HUD = nil
 loadHUD()
 MDAD.HUD = liveHUD
+
+-- 缺 ModOptions 仍有兩顆策略鈕與 v7 模式控制；不能為隱藏的改道鈕留假空位。
+do
+    local savedOptions, savedAPI = PZAPI, MinidoracatMiniMapAPI
+    PZAPI, MDAD.HUD = nil, nil
+    MinidoracatMiniMapAPI = {
+        navApiVersion = 7,
+        getNavLeg = function() return nil, nil, nil, nil, "waiting", 1 end,
+        getNavItinerary = function()
+            return { revision = 1, count = 2, currentStopId = 1, autoContinue = true, stops = {
+                { id = 1, label = "HOME", status = "arrived", pause = false },
+                { id = 2, label = "CABIN", status = "pending", pause = false },
+            } }
+        end,
+        setNavContinuation = function() return true, "ok" end,
+    }
+    loadHUD()
+    local noOptions = MDAD.HUD.Panel:new(0)
+    noOptions:initialise(); noOptions:instantiate(); noOptions:refresh(nowMs)
+    check(noOptions.contButton.visible and not noOptions.autoButton.visible,
+        "without ModOptions the trip mode remains available but auto-detour stays hidden")
+    check(noOptions.contButton.x + noOptions.contButton.width <= noOptions._energyX,
+        "without ModOptions the trip mode stays clear of the battery and fuel text")
+    noOptions:removeFromUIManager()
+    PZAPI, MinidoracatMiniMapAPI, MDAD.HUD = savedOptions, savedAPI, liveHUD
+end
 
 print("HUD assertions " .. assertions .. ", failures " .. failures)
 if failures > 0 then os.exit(1) end

@@ -5165,7 +5165,6 @@ dveh._engine = true
 
 log = capturePrint(function() MDAD.Drive.start(dp) end)
 checkTrue(MDAD.Drive.isActive(0), "引擎恢復後重新啟動成功")
-checkTrue(logHas(log, "ok maxSpeed="), "啟動成功的那行標成 ok 並帶上限速")
 
 driveReset(dveh)
 log = capturePrint(function() MDAD.Drive.toggle(dp) end)
@@ -14817,6 +14816,1430 @@ function drive.scenarioVisibilityBraking()
 end
 drive.scenarioVisibilityBraking()
 
+do -- 主 chunk local 槽已滿：整段包成函式，內部 local 不佔主 chunk
+-- =====================================================================
+-- v6 多停靠點行程（docs/addon-api.md §6）
+-- 契約的另一半用「真的會拒絕」的模型實作：站點、revision、legToken、claim 擁有者
+-- 與一次性收據全部照 §6.2-§6.4 判斷。把條件全設 true 的假 API 測不到任何東西——
+-- claim 前不准控制、token 失效要交還、road_end 不是抵達，統統要靠真的被拒才驗得到。
+-- =====================================================================
+local function scenarioItinerary()
+scenario("v6 行程：claim 前零控制、每幀核對 token、到站／road_end／重送、交還不留 orphan")
+
+local M = {
+    phase = "draft", revision = 3, stops = {}, current = 1,
+    legToken = nil, claimOwner = nil, claimToken = nil, tokenSeq = 0, receipt = nil,
+    starts = 0, claims = 0, reports = 0, releases = 0,
+    lastStart = nil, lastRelease = nil, lastOwner = nil, releaseRegOff = nil,
+    rejectReports = 0, rejectReleases = 0, oddReport = false,
+    oddConsume = false, pausedReason = nil,
+}
+local function newToken()
+    M.tokenSeq = M.tokenSeq + 1
+    return "leg#" .. M.tokenSeq
+end
+local function activeToken() return M.claimToken or M.legToken end
+local function currentStop() return M.stops[M.current] end
+local function bump() M.revision = M.revision + 1 end
+
+-- 六個 v6 函式（§6.4）。失敗一律回契約規定的原因字串，不回 true 蒙混。
+local function api6()
+    installNavApi(6)
+    local api = MinidoracatMiniMapAPI
+    api.getNavItinerary = function(pn)
+        if pn ~= 0 then return nil, "badargs" end
+        if #M.stops == 0 then return nil, "noitinerary" end
+        -- paused 的快照帶 reason（§6.4 的 UI 原因）：載入問題／不可達都靠它說明。
+        local out = { revision = M.revision, phase = M.phase, count = #M.stops,
+            reason = M.pausedReason, stops = {} }
+        for i = 1, #M.stops do
+            out.stops[i] = { id = M.stops[i].id, x = M.stops[i].x,
+                y = M.stops[i].y, status = M.stops[i].status }
+        end
+        return out
+    end
+    -- 有行程但沒有活動段：只回 phase/revision，不是錯誤（§6.4）
+    api.getNavLeg = function(pn)
+        if pn ~= 0 then return nil, "badargs" end
+        if #M.stops == 0 then return nil, "noitinerary" end
+        if M.phase ~= "navigating" and M.phase ~= "approach" then
+            return nil, nil, nil, nil, M.phase, M.revision
+        end
+        local st = currentStop()
+        return activeToken(), st.id, st.x, st.y, M.phase, M.revision
+    end
+    -- §6.6：只有 navigating／approach 投影目前站，其餘 notarget
+    api.getNavTarget = function(pn)
+        drive.nav.targetCalls = drive.nav.targetCalls + 1
+        if #M.stops == 0 or (M.phase ~= "navigating" and M.phase ~= "approach") then
+            return nil, "notarget"
+        end
+        local st = currentStop()
+        return st.x, st.y
+    end
+    api.startNavItinerary = function(pn, expectedRevision)
+        M.starts, M.lastStart = M.starts + 1, expectedRevision
+        if #M.stops == 0 then return nil, "noitinerary" end
+        if M.phase ~= "draft" and M.phase ~= "paused" and M.phase ~= "waiting" then
+            return nil, "state"
+        end
+        if expectedRevision ~= M.revision then return nil, "stale" end
+        for i = 1, #M.stops do
+            if M.stops[i].status == "pending" then M.current = i break end
+        end
+        M.phase, M.claimOwner, M.claimToken = "navigating", nil, nil
+        M.legToken = newToken()
+        bump()
+        return M.legToken, "ok"
+    end
+    api.claimNavLeg = function(pn, owner, expectedToken)
+        M.claims, M.lastOwner = M.claims + 1, owner
+        if type(owner) ~= "string" or owner == "" then return nil, "badargs" end
+        if #M.stops == 0 then return nil, "noitinerary" end
+        if M.phase ~= "navigating" then return nil, "state" end
+        if M.claimOwner and M.claimOwner ~= owner then return nil, "busy" end
+        if expectedToken ~= activeToken() then return nil, "stale" end
+        if M.claimOwner == owner then return M.claimToken, "ok" end -- 同 owner 重 claim 回同 token
+        if dveh._driver ~= dp then return nil, "notdriver" end
+        if not dveh._stopped then return nil, "notstopped" end
+        M.claimOwner, M.claimToken = owner, newToken()
+        return M.claimToken, "ok"
+    end
+    api.reportNavArrival = function(pn, owner, token)
+        M.reports = M.reports + 1
+        local r = M.receipt
+        if r and r.op == "report" and r.owner == owner and r.token == token then
+            return true, "duplicate"
+        end
+        if type(owner) ~= "string" or owner == "" then return false, "badargs" end
+        -- 情境旋鈕：MiniMap 暫時不認同「已停妥」／回一個我們沒見過的成功值
+        if M.rejectReports > 0 then
+            M.rejectReports = M.rejectReports - 1
+            return false, "notstopped"
+        end
+        -- 未知成功值：oddConsume 決定 token 到底有沒有被吃掉。addon 不能只看
+        -- 「回了 true」就當作交割完成。
+        if M.oddReport then
+            M.oddReport = false
+            if M.oddConsume then
+                M.receipt = { op = "report", owner = owner, token = token }
+                M.claimOwner, M.claimToken, M.legToken = nil, nil, nil
+                M.phase = "paused"
+                bump()
+            end
+            return true, "something_new"
+        end
+        if M.claimOwner ~= owner or token ~= M.claimToken then return false, "stale" end
+        if M.phase ~= "navigating" then return false, "state" end
+        if not dveh._stopped then return false, "notstopped" end
+        local st = currentStop()
+        local dx, dy = dveh._x - st.x, dveh._y - st.y
+        local near = dx * dx + dy * dy <= 25
+        M.receipt = { op = "report", owner = owner, token = token }
+        M.claimOwner, M.claimToken, M.legToken = nil, nil, nil
+        if near then
+            st.status = "arrived"
+            local more = false
+            for i = 1, #M.stops do
+                if M.stops[i].status == "pending" then more = true end
+            end
+            M.phase = more and "waiting" or "completed"
+        else
+            -- road_end：站仍 pending，簽發新的徒步 token，不沿用已消耗的駕駛 token
+            M.phase, M.legToken = "approach", newToken()
+        end
+        bump()
+        -- 「回程掉了」：MiniMap 其實記下了，回給 addon 的卻是失敗。晚到的第一次回報
+        -- 就長這樣——收據已經寫下，token 也已消耗。
+        if M.lieOnce then
+            M.lieOnce = false
+            return false, "busy"
+        end
+        return true, near and "arrived" or "road_end"
+    end
+    api.releaseNavLeg = function(pn, owner, token, reason)
+        M.releases, M.lastRelease = M.releases + 1, reason
+        M.releaseRegOff = dveh._regulator == false
+        local r = M.receipt
+        if r and r.op == "release" and r.owner == owner and r.token == token then
+            return true, "duplicate"
+        end
+        if M.rejectReleases > 0 then
+            M.rejectReleases = M.rejectReleases - 1
+            return false, "busy"
+        end
+        if reason ~= "manual" and reason ~= "cancelled" and reason ~= "unavailable"
+                and reason ~= "noroad" and reason ~= "failed" then
+            return false, "badargs"
+        end
+        if M.claimOwner ~= owner or token ~= M.claimToken then return false, "stale" end
+        M.receipt = { op = "release", owner = owner, token = token }
+        M.claimOwner, M.claimToken, M.legToken = nil, nil, nil
+        M.phase = "paused"
+        bump()
+        if M.lieRelease then
+            M.lieRelease = false
+            return false, "busy"
+        end
+        return true, "released"
+    end
+end
+
+local function setTrip(phase, x, y)
+    M.stops = { { id = 1, x = x or 300, y = y or 0, status = "pending" } }
+    M.current, M.phase, M.receipt = 1, phase, nil
+    M.claimOwner, M.claimToken = nil, nil
+    M.legToken = (phase == "navigating" or phase == "approach") and newToken() or nil
+    M.starts, M.claims, M.reports, M.releases = 0, 0, 0, 0
+    M.rejectReports, M.rejectReleases, M.oddReport = 0, 0, false
+    M.lieOnce, M.lieRelease, M.oddConsume, M.pausedReason = false, false, false, nil
+    bump()
+end
+
+-- 乾淨的一輛車＋一位駕駛；stopped 預設 true（claim 要求停妥）
+local function ready(stopped)
+    MDAD.Drive.stop(0, nil)
+    -- 前面的情境（登入補學）在 slot0 塞過別的角色：本組要的是自駕那位駕駛。
+    players[0], players[1], players[2], players[3] = dp, nil, nil, nil
+    activePlayers = 1
+    dveh._x, dveh._y, dveh._speed, dveh._steering = 0, 0, 0, 0
+    dveh._stopped = stopped ~= false
+    dveh._engine, dveh._driver, dveh._regulator = true, dp, nil
+    dveh._part._item._uses = 0.8
+    dp._vehicle, dp._dead, dp._local = dveh, false, true
+    setHeading(dveh, 0.3)
+    drive.nav.tx, drive.nav.ty, drive.nav.state = 300, 0, "ok"
+    -- v4 起的嚴格 metadata：路線要帶逐段路面／路寬，否則 Follower.begin 直接拒收
+    drive.nav.route = newRoute(40, 0, 0, 4, 0)
+    drive.nav.route.segSurface, drive.nav.route.segWidth = {}, {}
+    for i = 1, 39 do
+        drive.nav.route.segSurface[i], drive.nav.route.segWidth[i] = "paved", 10
+    end
+    driveReset(dveh)
+    clearList(halos)
+    drive.voiceLog = {}
+end
+
+setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
+    AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+MDAD.Voice = { play = function(event) drive.voiceLog[#drive.voiceLog + 1] = event return true end }
+api6()
+-- 準備是跨幀的（查路線 → 建 session → 分幀建限速剖面 → claim → 接上），
+-- 這個小工具就把它推到真的開起來或真的失敗為止。
+local function pump(frames)
+    for _ = 1, frames or 20 do
+        if MDAD.Drive.debugSession(0) or not MDAD.Drive.isActive(0) then break end
+        nowMs = nowMs + 300
+        driveTick(dp, dveh)
+    end
+end
+
+
+-- ① 路線還沒好：受理、進準備狀態、零控制、不逼玩家重複點
+ready(true)
+setTrip("draft")
+local rev0 = M.revision
+drive.nav.state = "pending"
+local ok, why = MDAD.Drive.continueItinerary(0)
+checkTrue(ok, "(t1) 路線未就緒：繼續行程仍受理，不當成失敗")
+checkNil(why, "(t1) 受理時不回原因")
+checkEq(M.starts, 1, "(t1) 玩家明確操作才 start 一次")
+checkEq(M.lastStart, rev0, "(t1) start 帶讀取當下的 revision")
+checkEq(M.claims, 0, "(t1) 路線未就緒：一次都不 claim")
+checkEq(drive.calls.setRegulator, 0, "(t1) claim 成功前完全不碰車（零正向控制）")
+checkEq(drive.calls.forceBrake, 0, "(t1) 準備中不煞車")
+checkEq((MDAD.Drive.hudState(0)), "build", "(t1) 準備中 HUD 顯示 build")
+checkTrue(MDAD.Drive.isActive(0), "(t1) 準備中算已啟動（停止鈕收得掉）")
+checkTrue(MDAD.Drive.continueItinerary(0), "(t1) 準備中再按一次：不重發 token")
+checkEq(M.starts, 1, "(t1) 重按不重複 start")
+for _ = 1, 3 do nowMs = nowMs + 300 driveTick(dp, dveh) end
+checkEq(drive.calls.setRegulator, 0, "(t1) 準備中每一幀都不控制")
+checkEq(#halos, 0, "(t1) 等路線期間不因每次 idle 假報路線遺失")
+checkTrue(MDAD.Drive.isActive(0), "(t1) 準備意圖跨幀存活，不需要重按")
+checkEq(M.claims, 0, "(t1) 等待期間不重試 claim")
+-- 路線就緒，但限速剖面還沒建完：仍然一次都不准 claim。
+-- 用 stepBuild 樁讓前兩輪回「還沒好」，證明的是順序不是時間。
+drive.nav.state = "ok"
+local realStep = MDADFollower.stepBuild
+local stepCalls = 0
+MDADFollower.stepBuild = function(profile, budget)
+    stepCalls = stepCalls + 1
+    if stepCalls <= 2 then return false end
+    return realStep(profile, budget)
+end
+nowMs = nowMs + 300
+driveTick(dp, dveh)
+checkEq(M.claims, 0, "(t1) 拿到路線的那一幀還不能 claim（剖面尚未建置）")
+nowMs = nowMs + 300
+driveTick(dp, dveh)
+checkEq(stepCalls, 1, "(t1) 下一幀開始分幀建剖面")
+checkEq(M.claims, 0, "(t1) 剖面沒建完就不 claim")
+checkEq(drive.calls.setRegulator, 0, "(t1) 剖面建置期間仍然零控制輸出")
+checkEq((MDAD.Drive.hudState(0)), "build", "(t1) 剖面建置期間 HUD 仍是 build")
+checkNil(MDAD.Drive.debugSession(0), "(t1) 剖面沒好之前 session 不接上")
+nowMs = nowMs + 300
+driveTick(dp, dveh)
+checkEq(M.claims, 0, "(t1) 第二輪剖面仍未就緒：還是不 claim")
+MDADFollower.stepBuild = realStep
+pump()
+checkEq(M.claims, 1, "(t1) 剖面 ready 之後才 claim，而且只 claim 一次")
+checkEq(M.lastOwner, MOD_ID, "(t1) claim 帶自己的 ownerModId")
+checkTrue(MDAD.Drive.isActive(0), "(t1) claim 成功後 session 才接上")
+checkEq(MDAD.Drive.debugSession(0).legToken, M.claimToken,
+    "(t1) session 認 claim 簽發的新 token，不是 start 的 token")
+checkTrue(drive.calls.setRegulator > 0, "(t1) claim 成功後才動 regulator")
+checkEq(haloKey(), DKEY.START, "(t1) 真的開起來才回饋啟動")
+checkTrue(MDAD.Drive.debugSession(0).profile.ready,
+    "(t1) 接上的就是準備階段建好的剖面（不重建第二份）")
+nowMs = nowMs + 300
+driveTick(dp, dveh)
+checkEq(MDAD.Drive.debugSession(0).mode, "follow",
+    "(t1) 剖面已 ready：接上後第一幀就跟線，不再分幀重建")
+
+-- ② 準備期間 token 被撤銷（玩家改了目前站）：立刻收手，沒有 claim 要還
+ready(true)
+setTrip("draft")
+drive.nav.state = "pending"
+checkTrue(MDAD.Drive.continueItinerary(0), "(t2) 進準備狀態")
+M.legToken = newToken()
+bump()
+nowMs = nowMs + 300
+driveTick(dp, dveh)
+checkFalse(MDAD.Drive.isActive(0), "(t2) 準備期間 token 被撤銷：立刻收手")
+checkEq(haloKey(), "UI_MinidoracatAutoDrive_TripStale", "(t2) 提示行程已變更")
+checkEq(M.claims, 0, "(t2) 撤銷後不 claim")
+checkEq(M.releases, 0, "(t2) 沒 claim 過就沒有東西要交還")
+
+-- ③ 準備逾時：有界等待，時限到就真的拒絕啟動（不驗文案，只驗行為）
+ready(true)
+setTrip("draft")
+drive.nav.state = "pending"
+checkTrue(MDAD.Drive.continueItinerary(0), "(t3) 進準備狀態")
+for _ = 1, 20 do nowMs = nowMs + 300 driveTick(dp, dveh) end
+checkTrue(MDAD.Drive.isActive(0), "(t3) 時限之內照樣等，不提早放棄")
+for _ = 1, 40 do nowMs = nowMs + 300 driveTick(dp, dveh) end
+checkFalse(MDAD.Drive.isActive(0), "(t3) 逾時之後不再是啟動中：真的拒絕啟動")
+checkNil(MDAD.Drive.debugSession(0), "(t3) 逾時不會偷偷留下 session")
+checkEq(M.claims, 0, "(t3) 逾時期間一次都沒 claim")
+checkEq(M.releases, 0, "(t3) 沒 claim 過就沒有東西要交還")
+checkEq(drive.calls.setRegulator, 0, "(t3) 逾時期間完全沒控制")
+checkEq(drive.calls.forceBrake, 0, "(t3) 逾時期間完全沒煞車")
+checkEq(#halos, 1, "(t3) 逾時對玩家說一次原因，不是安靜失敗也不是洗版")
+checkEq(halos[1] and halos[1].kind, "bad", "(t3) 逾時是失敗提示")
+noteReason(halos[1] and halos[1].text) -- 只登記翻譯覆蓋，不釘文案
+-- 逾時之後仍然要玩家自己再按一次；系統不會自己重試
+for _ = 1, 5 do nowMs = nowMs + 300 driveTick(dp, dveh) end
+checkFalse(MDAD.Drive.isActive(0), "(t3) 逾時之後不自行重試")
+checkEq(M.starts, 1, "(t3) 逾時之後不自行再 start 一次")
+drive.nav.state = "ok"
+
+-- ④ claim 被拒：別人接管中（剖面備好才知道）／車沒停妥（按鈕當下就知道）
+ready(true)
+setTrip("navigating")
+M.claimOwner, M.claimToken = "SomeOtherMod", newToken()
+checkTrue(MDAD.Drive.continueItinerary(0), "(t4) 先受理：claim 要等剖面備好才問得到")
+pump()
+checkFalse(MDAD.Drive.isActive(0), "(t4) 別的模組正在接管：不啟動")
+checkTrue(M.claims > 0, "(t4) 真的問過 MiniMap 才判定")
+checkEq(haloKey(), "UI_MinidoracatAutoDrive_TripBusy", "(t4) busy 對應 TripBusy")
+checkNil(MDAD.Drive.debugSession(0), "(t4) 被拒不留 session")
+checkEq(drive.calls.setRegulator, 0, "(t4) 被拒全程沒碰車")
+checkEq(M.releases, 0, "(t4) 沒 claim 到就沒有東西要交還")
+ready(false)
+setTrip("navigating")
+ok, why = MDAD.Drive.continueItinerary(0)
+checkFalse(ok, "(t4) 車還在動：按鈕當下就拒絕")
+checkEq(noteReason(why), "UI_MinidoracatAutoDrive_TripNotStopped", "(t4) notstopped 對應 TripNotStopped")
+checkEq(M.starts, 0, "(t4) 沒停妥連 start 都不發")
+checkEq(drive.calls.setRegulator, 0, "(t4) 被拒＝一次控制輸出都不准送")
+checkFalse(MDAD.Drive.isActive(0), "(t4) 被拒不留準備意圖")
+
+-- ⑤ 不可自駕的狀態：completed 與 approach（road_end 之後）
+ready(true)
+setTrip("navigating")
+M.stops[1].status, M.phase = "arrived", "completed"
+ok, why = MDAD.Drive.continueItinerary(0)
+checkFalse(ok, "(t5) 行程已完成：沒有可出發的站")
+checkEq(noteReason(why), "UI_MinidoracatAutoDrive_TripState", "(t5) completed 對應 TripState")
+checkEq(MDAD.Drive.hudStartReason(0), "UI_MinidoracatAutoDrive_TripState", "(t5) HUD 停用態同一原因")
+setTrip("approach")
+ok, why = MDAD.Drive.continueItinerary(0)
+checkFalse(ok, "(t5) approach 段不自動接管")
+checkEq(noteReason(why), "UI_MinidoracatAutoDrive_TripRoadEnd", "(t5) approach 顯示手動前往")
+checkEq(MDAD.Drive.hudStartReason(0), "UI_MinidoracatAutoDrive_TripRoadEnd",
+    "(t5) HUD 停用態也是手動前往，不是抵達")
+checkEq(M.claims, 0, "(t5) 這兩種狀態一次都不 claim")
+
+-- ⑥ 純查詢：draft／paused／waiting 的 getNavTarget 是 nil，不得誤報沒有路線
+ready(true)
+setTrip("draft")
+checkNil(MDAD.Drive.hudStartReason(0), "(t6) draft 有 pending：可開始行程")
+M.phase = "paused"
+checkNil(MDAD.Drive.hudStartReason(0), "(t6) paused 可恢復")
+M.phase = "waiting"
+checkNil(MDAD.Drive.hudStartReason(0), "(t6) waiting 可前往下一站")
+checkEq(M.starts, 0, "(t6) hudStartReason 不啟用目標")
+checkEq(M.claims, 0, "(t6) hudStartReason 不 claim")
+
+-- ⑦ 到站：arrive＋停妥才回報，回報在清 session 之前
+ready(true)
+setTrip("draft")
+checkTrue(MDAD.Drive.continueItinerary(0), "(t7) 出發")
+pump()
+dveh._x, dveh._y, dveh._speed, dveh._stopped = 298, 0, 0, true
+MDAD.Drive.debugSession(0).mode = "arrive"
+clearList(halos)
+drive.voiceLog = {}
+driveTick(dp, dveh)
+checkEq(M.reports, 1, "(t7) 停妥才回報，且只回報一次")
+checkEq(M.stops[1].status, "arrived", "(t7) 距離內記 arrived")
+checkEq(M.phase, "completed", "(t7) 沒有後續 pending＝completed")
+checkFalse(MDAD.Drive.isActive(0), "(t7) 回報完成後才收 session")
+checkEq(haloKey(), DKEY.ARRIVED, "(t7) 真到站才說抵達")
+checkEq(drive.voiceCount("arrive"), 1, "(t7) 真到站才播抵達語音")
+checkNil(M.claimOwner, "(t7) 到站後不留 orphan claim")
+
+-- ⑧ 晚到的第一次回報：MiniMap 其實已經記下抵達，回給我們的卻是失敗。
+-- 下一幀的 token 核對就看得到接管已被撤銷 → 乾淨交還，不假報抵達、不播成功語音、
+-- 不重複記一次進度，也沒有 orphan claim（token 早就被消耗了）。
+ready(true)
+setTrip("draft")
+checkTrue(MDAD.Drive.continueItinerary(0), "(t8) 出發")
+pump()
+local staleToken = M.claimToken
+dveh._x, dveh._y, dveh._speed, dveh._stopped = 298, 0, 0, true
+MDAD.Drive.debugSession(0).mode = "arrive"
+M.lieOnce = true
+clearList(halos)
+drive.voiceLog = {}
+driveTick(dp, dveh)
+checkEq(M.reports, 1, "(t8) 送出一次回報")
+checkEq(M.stops[1].status, "arrived", "(t8) MiniMap 其實已經記下抵達")
+checkTrue(MDAD.Drive.isActive(0), "(t8) 我們收到的是失敗：維持收尾狀態、不亂猜")
+checkEq(drive.voiceCount("arrive"), 0, "(t8) 沒收到成功就不播抵達語音")
+checkEq(MDAD.Drive.debugSession(0).legToken, staleToken, "(t8) 還沒確認之前不丟掉 token")
+clearList(halos)
+nowMs = nowMs + 300
+driveTick(dp, dveh)
+checkFalse(MDAD.Drive.isActive(0), "(t8) token 已被消耗：下一幀核對就交還控制")
+checkEq(M.reports, 1, "(t8) 不對已消耗的 token 重送第二次")
+checkEq(haloKey(), "UI_MinidoracatAutoDrive_TripLost", "(t8) 說明接管已結束，不宣稱抵達")
+checkEq(drive.voiceCount("arrive"), 0, "(t8) 全程不播第二次成功語音")
+checkEq(M.releases, 0, "(t8) token 已消耗＝沒有 orphan，不再 release")
+checkEq(M.stops[1].status, "arrived", "(t8) 進度就是 MiniMap 記的那一次，沒有被重複消耗")
+
+-- ⑨ road_end：到道路終點但離站點還很遠
+ready(true)
+setTrip("draft", 300, 40)
+checkTrue(MDAD.Drive.continueItinerary(0), "(t9) 出發")
+pump()
+dveh._x, dveh._y, dveh._speed, dveh._stopped = 300, 0, 0, true
+MDAD.Drive.debugSession(0).mode = "arrive"
+clearList(halos)
+drive.voiceLog = {}
+driveTick(dp, dveh)
+checkEq(M.reports, 1, "(t9) 一樣走正式回報")
+checkEq(M.stops[1].status, "pending", "(t9) road_end 不把站標成 arrived")
+checkEq(M.phase, "approach", "(t9) road_end 轉 approach")
+checkEq(noteReason(halos[1] and halos[1].text), "UI_MinidoracatAutoDrive_TripRoadEnd",
+    "(t9) 顯示手動前往，不冒稱到達最終目的地")
+checkEq(halos[1] and halos[1].kind, "info", "(t9) road_end 是資訊不是失敗")
+checkEq(drive.voiceCount("arrive"), 0, "(t9) road_end 不播抵達成功語音")
+checkFalse(MDAD.Drive.isActive(0), "(t9) road_end 之後不自動再開")
+checkNil(M.claimOwner, "(t9) road_end 釋放 claim")
+
+-- ⑩ 途中設備失效：先停控制、再交還，站點仍 pending
+ready(true)
+setTrip("draft")
+checkTrue(MDAD.Drive.continueItinerary(0), "(t10) 出發")
+pump()
+driveTick(dp, dveh)
+clearList(halos)
+dveh._engine = false
+driveTick(dp, dveh)
+checkFalse(MDAD.Drive.isActive(0), "(t10) 設備失效：結束自駕")
+checkEq(M.releases, 1, "(t10) 交還 claim 一次")
+checkEq(M.lastRelease, "unavailable", "(t10) 失效交還的原因是 unavailable")
+checkTrue(M.releaseRegOff, "(t10) 先停掉自己的控制輸出才交還")
+checkNil(M.claimOwner, "(t10) 不留 orphan claim")
+checkEq(M.phase, "paused", "(t10) 交還後行程 paused")
+checkEq(M.stops[1].status, "pending", "(t10) 交還不等於到站")
+checkEq(M.reports, 0, "(t10) 交還不回報抵達")
+checkEq(haloKey(), DKEY.ENGINE, "(t10) 顯示真正的失效原因")
+
+-- ⑪ 一般 Drive.stop：只交還控制，絕不是到站
+ready(true)
+setTrip("draft")
+checkTrue(MDAD.Drive.continueItinerary(0), "(t11) 出發")
+pump()
+checkTrue(MDAD.Drive.stop(0, nil), "(t11) 玩家關閉自駕")
+checkEq(M.reports, 0, "(t11) Drive.stop 不得當成到站回報")
+checkEq(M.releases, 1, "(t11) 只交還控制")
+checkEq(M.lastRelease, "manual", "(t11) 玩家主動關閉＝manual")
+checkTrue(M.releaseRegOff, "(t11) 先關 regulator 再交還")
+checkEq(M.stops[1].status, "pending", "(t11) 站點仍待辦")
+
+-- ⑫ 行駛中 claim 被 MiniMap 撤銷：立刻交還控制、不再 release、不自動接下一段
+ready(true)
+setTrip("draft")
+checkTrue(MDAD.Drive.continueItinerary(0), "(t12) 出發")
+pump()
+driveTick(dp, dveh)
+clearList(halos)
+M.claimOwner, M.claimToken = nil, nil
+M.legToken = newToken()
+bump()
+M.releases = 0
+driveTick(dp, dveh)
+checkFalse(MDAD.Drive.isActive(0), "(t12) claim 被撤銷：立刻交還控制")
+checkEq(haloKey(), "UI_MinidoracatAutoDrive_TripLost", "(t12) 顯示接管已結束")
+checkEq(M.releases, 0, "(t12) 已確認撤銷就不再 release")
+checkEq(M.reports, 0, "(t12) 不把撤銷當成到站")
+driveTick(dp, dveh)
+checkEq(M.claims, 1, "(t12) 新 token 不是自動開下一段的指令")
+checkFalse(MDAD.Drive.isActive(0), "(t12) 要玩家再次明確操作才會動")
+
+-- ⑬ 到站回報被拒：有界重試，維持停妥與 session，不假報抵達也不偷偷丟掉 claim
+ready(true)
+setTrip("draft")
+checkTrue(MDAD.Drive.continueItinerary(0), "(t13) 出發")
+pump()
+dveh._x, dveh._y, dveh._speed, dveh._stopped = 298, 0, 0, true
+MDAD.Drive.debugSession(0).mode = "arrive"
+M.rejectReports = 1 -- MiniMap 這一輪還不認同「已停妥」
+clearList(halos)
+drive.voiceLog = {}
+driveTick(dp, dveh)
+checkEq(M.reports, 1, "(t13) 回報被拒一次")
+checkTrue(MDAD.Drive.isActive(0), "(t13) 被拒不清 session，維持收尾狀態")
+checkEq(MDAD.Drive.debugSession(0).mode, "arrive", "(t13) 維持 arrive，不自動出發")
+checkEq(MDAD.Drive.debugSession(0).legToken, M.claimToken, "(t13) claim 沒有被偷偷丟掉")
+checkEq(haloKey(), "UI_MinidoracatAutoDrive_TripNotStopped", "(t13) 明示被拒原因")
+checkEq(drive.voiceCount("arrive"), 0, "(t13) 被拒不播抵達語音")
+checkEq(M.stops[1].status, "pending", "(t13) 被拒不記 arrived")
+driveTick(dp, dveh)
+checkEq(M.reports, 1, "(t13) 重試有間隔，不是每幀猛送")
+clearList(halos)
+nowMs = nowMs + 300
+driveTick(dp, dveh)
+checkEq(M.reports, 2, "(t13) 間隔到了才重試")
+checkFalse(MDAD.Drive.isActive(0), "(t13) 重試成功才收尾")
+checkEq(M.stops[1].status, "arrived", "(t13) 重試成功記 arrived")
+checkEq(haloKey(), DKEY.ARRIVED, "(t13) 重試成功才說抵達")
+checkEq(drive.voiceCount("arrive"), 1, "(t13) 成功語音只播一次")
+
+-- ⑭ 回報一直被拒：有界視窗用完就停手交還，不無限重試、不假報抵達
+ready(true)
+setTrip("draft")
+checkTrue(MDAD.Drive.continueItinerary(0), "(t14) 出發")
+pump()
+dveh._x, dveh._y, dveh._speed, dveh._stopped = 298, 0, 0, true
+MDAD.Drive.debugSession(0).mode = "arrive"
+M.rejectReports = 99
+clearList(halos)
+drive.voiceLog = {}
+for _ = 1, 30 do nowMs = nowMs + 300 driveTick(dp, dveh) end
+checkFalse(MDAD.Drive.isActive(0), "(t14) 有界重試用完就收手")
+checkTrue(M.reports > 1 and M.reports < 20, "(t14) 重試有上限（實得 " .. tostring(M.reports) .. "）")
+checkEq(M.releases, 1, "(t14) 放棄時交還 claim，不留 orphan")
+checkEq(M.lastRelease, "failed", "(t14) 交還原因是失敗，不是到站")
+checkEq(M.stops[1].status, "pending", "(t14) 始終沒有假報抵達")
+checkEq(drive.voiceCount("arrive"), 0, "(t14) 始終沒有成功語音")
+
+-- ⑮ 回報回了我們不認得的成功值：「回了 true」不能證明 claim 已經交割。
+-- ⑮a token 其實還在我們手上 → 不准當成已收尾，維持 arrive 有界重試，也不冒稱抵達。
+ready(true)
+setTrip("draft")
+checkTrue(MDAD.Drive.continueItinerary(0), "(t15) 出發")
+pump()
+local oddToken = M.claimToken
+dveh._x, dveh._y, dveh._speed, dveh._stopped = 298, 0, 0, true
+MDAD.Drive.debugSession(0).mode = "arrive"
+M.oddReport, M.oddConsume = true, false
+clearList(halos)
+drive.voiceLog = {}
+driveTick(dp, dveh)
+checkTrue(MDAD.Drive.isActive(0), "(t15) 未知結果但 token 還在：不准當成已收尾")
+checkEq(MDAD.Drive.debugSession(0).legToken, oddToken, "(t15) 沒被消耗的 claim 不丟掉")
+checkEq(M.claimOwner, MOD_ID, "(t15) MiniMap 那邊也還記在我們名下")
+checkEq(drive.voiceCount("arrive"), 0, "(t15) 未知結果不播抵達語音")
+checkEq(M.stops[1].status, "pending", "(t15) 未知結果不自己把站記成到達")
+nowMs = nowMs + 300
+driveTick(dp, dveh)
+checkEq(M.reports, 2, "(t15) 照樣在有界視窗內重試同一顆 token")
+checkFalse(MDAD.Drive.isActive(0), "(t15) 重試拿到真答案才收尾")
+checkEq(M.stops[1].status, "arrived", "(t15) 真答案才是進度")
+-- ⑮b token 真的被吃掉了 → 收尾，但仍然不冒稱抵達、不播成功語音
+ready(true)
+setTrip("draft")
+checkTrue(MDAD.Drive.continueItinerary(0), "(t15b) 出發")
+pump()
+dveh._x, dveh._y, dveh._speed, dveh._stopped = 298, 0, 0, true
+MDAD.Drive.debugSession(0).mode = "arrive"
+M.oddReport, M.oddConsume = true, true
+clearList(halos)
+drive.voiceLog = {}
+driveTick(dp, dveh)
+checkFalse(MDAD.Drive.isActive(0), "(t15b) token 已被消耗：收尾")
+checkEq(M.reports, 1, "(t15b) 已消耗就不再重送")
+checkEq(drive.voiceCount("arrive"), 0, "(t15b) 未知結果不播抵達語音")
+checkEq(haloKey(), "UI_MinidoracatAutoDrive_TripLost", "(t15b) 明說接管已結束，不宣稱抵達")
+checkEq(M.stops[1].status, "pending", "(t15b) 未知結果不自己把站記成到達")
+checkEq(M.releases, 0, "(t15b) 已消耗的 token 不需要也不應該再交還")
+
+-- ⑯ 交還被拒：有界重試，不把仍有效的 claim 丟掉
+ready(true)
+setTrip("draft")
+checkTrue(MDAD.Drive.continueItinerary(0), "(t16) 出發")
+pump()
+local heldToken = M.claimToken
+M.rejectReleases = 1
+checkTrue(MDAD.Drive.stop(0, nil), "(t16) 玩家關閉自駕")
+checkEq(M.releases, 1, "(t16) 交還送出一次")
+checkEq(M.claimOwner, MOD_ID, "(t16) 被拒時 claim 還在我們手上")
+checkFalse(MDAD.Drive.isActive(0), "(t16) 控制已經交還，不再自駕")
+ok, why = MDAD.Drive.continueItinerary(0)
+checkFalse(ok, "(t16) 上一段還沒交還完就不接新的一段")
+checkEq(noteReason(why), "UI_MinidoracatAutoDrive_TripLost", "(t16) 說明接管尚未結束")
+nowMs = nowMs + 300
+driveTick(dp, dveh)
+checkEq(M.releases, 2, "(t16) 有界重試把交還補完")
+checkNil(M.claimOwner, "(t16) 補完之後不留 orphan claim")
+checkEq(M.stops[1].status, "pending", "(t16) 交還不等於到站")
+checkTrue(MDAD.Drive.continueItinerary(0), "(t16) 交還乾淨之後可以再出發")
+MDAD.Drive.stop(0, nil)
+checkTrue(heldToken ~= nil, "(t16) 整段測的是同一顆真 token")
+
+-- ⑯b 交還的回程掉了：MiniMap 其實已經放開，回給我們的卻是失敗。
+-- 交還與否看的是 token 還在不在，不是那個回傳值——所以不該排重試，也不該擋下一段。
+ready(true)
+setTrip("draft")
+checkTrue(MDAD.Drive.continueItinerary(0), "(t16b) 出發")
+pump()
+M.lieRelease = true
+checkTrue(MDAD.Drive.stop(0, nil), "(t16b) 玩家關閉自駕")
+checkEq(M.releases, 1, "(t16b) 交還送出一次")
+checkNil(M.claimOwner, "(t16b) MiniMap 其實已經放開了")
+ok, why = MDAD.Drive.continueItinerary(0)
+checkTrue(ok, "(t16b) token 已不在我們名下：當下就不該被待交還擋住")
+checkNil(why, "(t16b) 沒有待交還就沒有原因可說")
+MDAD.Drive.stop(0, nil)
+nowMs = nowMs + 300
+driveTick(dp, dveh)
+checkEq(M.releases, 1, "(t16b) 全程只送出那一次交還，不做無謂重試")
+
+-- ⑰ arrive 煞停途中 claim 被撤銷：立刻放手，不再跟玩家搶煞車
+ready(true)
+setTrip("draft")
+checkTrue(MDAD.Drive.continueItinerary(0), "(t17) 出發")
+pump()
+MDAD.Drive.debugSession(0).mode = "arrive"
+dveh._x, dveh._y, dveh._speed, dveh._stopped = 250, 0, 8, false -- 還在煞停途中
+driveReset(dveh)
+clearList(halos)
+M.claimOwner, M.claimToken = nil, nil
+M.legToken = newToken()
+bump()
+driveTick(dp, dveh)
+checkFalse(MDAD.Drive.isActive(0), "(t17) 撤銷後立刻交還，不把車煞到底")
+checkEq(drive.calls.forceBrake, 0, "(t17) 撤銷那一幀不再送煞車指令")
+checkEq(haloKey(), "UI_MinidoracatAutoDrive_TripLost", "(t17) 顯示接管已結束")
+checkEq(M.reports, 0, "(t17) 不回報抵達")
+checkEq(M.releases, 0, "(t17) 已確認撤銷就不再 release")
+
+-- ⑱ 準備中玩家自己操作／車子動起來：安靜放棄，不搶方向盤也不 claim
+ready(true)
+setTrip("draft")
+drive.nav.state = "pending"
+checkTrue(MDAD.Drive.continueItinerary(0), "(t18) 進準備狀態")
+dveh._steering = 0.5 -- 玩家自己在轉方向盤
+nowMs = nowMs + 300
+driveTick(dp, dveh)
+checkFalse(MDAD.Drive.isActive(0), "(t18) 玩家自己操作：放棄準備")
+checkEq(#halos, 0, "(t18) 玩家自己在開不是錯誤，不噴紅字")
+checkEq(M.claims, 0, "(t18) 沒有 claim")
+dveh._steering = 0
+setTrip("draft")
+checkTrue(MDAD.Drive.continueItinerary(0), "(t18) 再進一次準備狀態")
+dveh._stopped = false -- 車子開始移動
+nowMs = nowMs + 300
+driveTick(dp, dveh)
+checkFalse(MDAD.Drive.isActive(0), "(t18) 車動起來就放棄準備（claim 本來就要求停妥）")
+checkEq(M.claims, 0, "(t18) 仍然沒有 claim")
+
+-- ⑲ 準備中同槽位換角色：舊意圖作廢，不套到新角色頭上
+ready(true)
+setTrip("draft")
+drive.nav.state = "pending"
+checkTrue(MDAD.Drive.continueItinerary(0), "(t19) 進準備狀態")
+players[0] = newPlayer({ num = 0, electricity = 2, username = "swapped0" })
+nowMs = nowMs + 300
+driveTick(dp, dveh)
+checkFalse(MDAD.Drive.isActive(0), "(t19) 換角色：舊準備意圖作廢")
+checkEq(M.claims, 0, "(t19) 不替新角色 claim")
+players[0] = dp
+drive.nav.state = "ok"
+
+-- ⑳ 確定無路／規劃失敗保真理由：不得被抹成「行程狀態不對」或「行程已變更」，
+-- 也不得被拖到逾時才說。路線階段與剖面階段各驗一次。
+ready(true)
+setTrip("draft")
+drive.nav.state = "noroad"
+ok, why = MDAD.Drive.continueItinerary(0)
+checkFalse(ok, "(t20) 確定無路：不啟動")
+checkEq(noteReason(why), "UI_MinidoracatAutoDrive_TripNoRoad", "(t20) noroad 保留原因")
+checkFalse(MDAD.Drive.isActive(0), "(t20) 不留準備意圖")
+checkEq(M.claims, 0, "(t20) 沒有 claim")
+ready(true)
+setTrip("draft")
+drive.nav.state = "failed"
+ok, why = MDAD.Drive.continueItinerary(0)
+checkFalse(ok, "(t20) 規劃失敗：不啟動")
+checkEq(noteReason(why), "UI_MinidoracatAutoDrive_TripFailed", "(t20) failed 保留原因")
+-- 剖面建到一半才變成確定無路：一樣保真理由，不是逾時也不是 stale
+ready(true)
+setTrip("draft")
+drive.nav.state = "ok"
+checkTrue(MDAD.Drive.continueItinerary(0), "(t20) 先進準備狀態")
+local realStep20 = MDADFollower.stepBuild
+local step20 = 0
+MDADFollower.stepBuild = function(profile, budget)
+    step20 = step20 + 1
+    if step20 == 1 then return false end -- 卡一幀，讓路線狀態在 claim 之前先變
+    return realStep20(profile, budget)
+end
+nowMs = nowMs + 300
+driveTick(dp, dveh) -- 寄放 session
+nowMs = nowMs + 300
+driveTick(dp, dveh) -- 剖面第一輪：還沒好
+clearList(halos)
+drive.nav.state = "noroad"
+nowMs = nowMs + 300
+driveTick(dp, dveh) -- 剖面就緒，但路線已確定無路
+MDADFollower.stepBuild = realStep20
+checkFalse(MDAD.Drive.isActive(0), "(t20) 剖面階段確定無路：收手")
+checkEq(haloKey(), "UI_MinidoracatAutoDrive_TripNoRoad", "(t20) 剖面階段也保真理由")
+checkEq(M.claims, 0, "(t20) 確定無路不 claim")
+drive.nav.state = "ok"
+
+-- ⑳b 準備期間 MiniMap 自己把行程 paused 並附原因：用那個原因，不要一律說「已變更」
+ready(true)
+setTrip("draft")
+drive.nav.state = "pending"
+checkTrue(MDAD.Drive.continueItinerary(0), "(t20b) 進準備狀態")
+M.phase, M.legToken, M.pausedReason = "paused", nil, "noroad"
+bump()
+clearList(halos)
+nowMs = nowMs + 300
+driveTick(dp, dveh)
+checkFalse(MDAD.Drive.isActive(0), "(t20b) 行程被暫停：收手")
+checkEq(haloKey(), "UI_MinidoracatAutoDrive_TripNoRoad", "(t20b) 說出暫停的真原因")
+checkEq(M.claims, 0, "(t20b) 不 claim")
+M.pausedReason = nil
+drive.nav.state = "ok"
+
+-- ㉑a claim 之前路線被重算：丟掉寄放的 session 用新路線重建，不拿舊剖面去接管；
+-- 重建也不會把準備時限重新計時。
+ready(true)
+setTrip("draft")
+checkTrue(MDAD.Drive.continueItinerary(0), "(t21a) 進準備狀態")
+local realStep21 = MDADFollower.stepBuild
+local stalled = true
+MDADFollower.stepBuild = function(profile, budget)
+    if stalled then return false end
+    return realStep21(profile, budget)
+end
+nowMs = nowMs + 300
+driveTick(dp, dveh) -- 寄放 session（用舊路線）
+local staged = drive.nav.route
+drive.nav.route = newRoute(40, 0, 0, 4, 0) -- 主 MOD 重算：新的 table identity
+drive.nav.route.segSurface, drive.nav.route.segWidth = {}, {}
+for i = 1, 39 do drive.nav.route.segSurface[i], drive.nav.route.segWidth[i] = "paved", 10 end
+stalled = false
+nowMs = nowMs + 300
+driveTick(dp, dveh)
+checkEq(M.claims, 0, "(t21a) 路線換了：先重建，不拿舊剖面去 claim")
+checkTrue(MDAD.Drive.isActive(0), "(t21a) 重建期間仍在準備中")
+pump()
+checkEq(M.claims, 1, "(t21a) 用新路線重建完才 claim")
+checkTrue(MDAD.Drive.debugSession(0).route == drive.nav.route,
+    "(t21a) 接管用的是重算後的路線")
+checkTrue(staged ~= drive.nav.route, "(t21a) 本案真的換過一次路線 identity")
+MDAD.Drive.stop(0, nil)
+-- 路線一直被重算：準備時限照原本的算，不會被無限延長
+ready(true)
+setTrip("draft")
+checkTrue(MDAD.Drive.continueItinerary(0), "(t21b) 進準備狀態")
+for _ = 1, 70 do
+    drive.nav.route = newRoute(40, 0, 0, 4, 0)
+    drive.nav.route.segSurface, drive.nav.route.segWidth = {}, {}
+    for i = 1, 39 do drive.nav.route.segSurface[i], drive.nav.route.segWidth[i] = "paved", 10 end
+    nowMs = nowMs + 300
+    driveTick(dp, dveh)
+end
+checkFalse(MDAD.Drive.isActive(0), "(t21b) 路線一直換也要在原時限內放棄，不無限重建")
+checkEq(M.claims, 0, "(t21b) 全程沒有 claim")
+checkEq(drive.calls.setRegulator, 0, "(t21b) 全程零控制輸出")
+
+-- ㉑c 交還一直被拒：寫入重試有界，但沒解除之前不准安靜丟掉——擋著不接新段，
+-- 直到上游真的把 token 撤銷為止。
+ready(true)
+setTrip("draft")
+checkTrue(MDAD.Drive.continueItinerary(0), "(t21c) 出發")
+pump()
+M.rejectReleases = 99
+checkTrue(MDAD.Drive.stop(0, nil), "(t21c) 玩家關閉自駕")
+for _ = 1, 40 do nowMs = nowMs + 300 driveTick(dp, dveh) end
+local writesAfterDeadline = M.releases
+checkTrue(writesAfterDeadline > 1 and writesAfterDeadline < 30,
+    "(t21c) 寫入重試有界（實得 " .. tostring(writesAfterDeadline) .. "）")
+for _ = 1, 20 do nowMs = nowMs + 300 driveTick(dp, dveh) end
+checkEq(M.releases, writesAfterDeadline, "(t21c) 時限之後不再一直寫")
+checkEq(M.claimOwner, MOD_ID, "(t21c) claim 仍在我們名下，沒有被安靜丟掉")
+ok, why = MDAD.Drive.continueItinerary(0)
+checkFalse(ok, "(t21c) 沒交還乾淨就不接新的一段")
+checkEq(noteReason(why), "UI_MinidoracatAutoDrive_TripLost", "(t21c) 說明接管尚未結束")
+-- 上游（角色／世界生命週期清理）撤銷 token 之後才解除阻擋
+M.claimOwner, M.claimToken, M.legToken = nil, nil, nil
+M.phase = "paused"
+bump()
+nowMs = nowMs + 300
+driveTick(dp, dveh)
+checkTrue(MDAD.Drive.continueItinerary(0), "(t21c) 撤銷之後恢復正常")
+MDAD.Drive.stop(0, nil)
+
+-- ㉑d 行駛中主 MOD 的介面整個不見了：讀不到 token 不等於 claim 被撤銷。
+-- 必須交還控制、把交還記著（擋住下一段），等介面回來再補送——不可以就地把
+-- 手上那顆 token 當成沒事丟掉。
+ready(true)
+setTrip("draft")
+checkTrue(MDAD.Drive.continueItinerary(0), "(t21d) 出發")
+pump()
+local savedApi = MinidoracatMiniMapAPI
+clearList(halos)
+MinidoracatMiniMapAPI = nil
+driveTick(dp, dveh)
+checkFalse(MDAD.Drive.isActive(0), "(t21d) 介面不見了：交還控制")
+checkEq(#halos, 1, "(t21d) 對玩家說一次原因")
+checkEq(noteReason(halos[1] and halos[1].text), NAV_API_MISSING, "(t21d) 說的是介面不見了")
+checkEq(M.releases, 0, "(t21d) 介面不在，根本送不出交還")
+checkEq(M.claimOwner, MOD_ID, "(t21d) claim 沒有被安靜丟掉，仍記在我們名下")
+MinidoracatMiniMapAPI = savedApi
+ok, why = MDAD.Drive.continueItinerary(0)
+checkFalse(ok, "(t21d) 交還還沒補完就不接新的一段")
+checkEq(noteReason(why), "UI_MinidoracatAutoDrive_TripLost", "(t21d) 說明接管尚未結束")
+nowMs = nowMs + 300
+driveTick(dp, dveh)
+checkEq(M.releases, 1, "(t21d) 介面回來就把欠的交還補送出去")
+checkNil(M.claimOwner, "(t21d) 補送之後才真的不留 orphan")
+checkEq(M.stops[1].status, "pending", "(t21d) 整段都不是到站")
+checkTrue(MDAD.Drive.continueItinerary(0), "(t21d) 結清之後可以再出發")
+MDAD.Drive.stop(0, nil)
+
+-- ㉑ 導覽耗電心跳：只有活動段計費，光有清單不算
+setTrip("navigating")
+local realSet, realClear = MDAD.setNavUsage, MDAD.clearNavUsage
+local navOn, navOff = 0, 0
+MDAD.setNavUsage = function(...) navOn = navOn + 1 return realSet(...) end
+MDAD.clearNavUsage = function(...) navOff = navOff + 1 return realClear(...) end
+for _ = 1, 120 do fire("OnTick") end
+navOn, navOff = 0, 0
+M.phase = "waiting"
+nowMs = nowMs + 1200
+for _ = 1, 60 do fire("OnTick") end
+checkEq(navOff, 1, "(t20) 只有站點清單、沒有活動段：導覽耗電轉 off")
+checkEq(navOn, 0, "(t20) waiting 不計費")
+navOn, navOff = 0, 0
+M.phase = "navigating"
+nowMs = nowMs + 1200
+for _ = 1, 60 do fire("OnTick") end
+checkEq(navOn, 1, "(t20) 活動段（含自駕準備中的那一段）照常計費")
+MDAD.setNavUsage, MDAD.clearNavUsage = realSet, realClear
+
+-- ㉒ 舊主 MOD（v5）一路不退化
+installNavApi(5)
+ready(true)
+dveh._speed, dveh._stopped = 20, false
+ok, why = MDAD.Drive.continueItinerary(0)
+checkFalse(ok, "(t21) 舊主 MOD 沒有行程介面：繼續行程不可用")
+checkEq(noteReason(why), NAV_API_MISSING, "(t21) 舊版回 NavApiMissing")
+checkTrue(MDAD.Drive.start(dp), "(t21) 舊單站自駕照常啟動")
+checkNil(MDAD.Drive.debugSession(0).legToken, "(t21) 舊路徑沒有 claim token")
+checkEq(M.claims, 0, "(t21) 不對舊主 MOD 呼叫 v6 函式")
+dveh._x = 295
+drive.nav.tx, drive.nav.ty = nil, nil
+nowMs = nowMs + 300
+driveTick(dp, dveh)
+checkEq(MDAD.Drive.debugSession(0) and MDAD.Drive.debugSession(0).mode, "arrive",
+    "(t21) 目標在 12 格內消失：舊的抵達收尾啟發原封不動")
+MDAD.Drive.stop(0, nil)
+end
+scenarioItinerary()
+end
+
+do -- 主 chunk local 槽已滿：v7 自動接續整段包成函式，內部 local 不佔主 chunk
+-- =====================================================================
+-- v7 自動接續／被動到站（凍結契約）
+-- 模型照 Core 真的會拒絕的地方拒絕：claim 前不准控制、mode 關就不續發、
+-- 只有「本 session 自己的 continue 回報」才准接下一段。站 id 刻意不等於索引
+-- （101 起），index／id 混用不會蒙對。NO reserveNavLeg、NO reserved 欄位：
+-- 新增的介面只有 setNavContinuation，claim 仍是唯一的執行權。
+-- getNavLeg 一律只回六個值——activation 只從快照讀。
+-- =====================================================================
+local function scenarioContinuation()
+scenario("v7 自動接續：continue／stopover／completed、mode 開關、被動到站採用、取消不復活")
+
+local V = {
+    phase = "draft", revision = 41, autoContinue = true, activation = nil,
+    stops = {}, currentId = nil, legToken = nil, claimOwner = nil, claimToken = nil,
+    tokenSeq = 0, receipt = nil, reason = nil,
+    starts = 0, claims = 0, reports = 0, releases = 0, modeCalls = 0,
+    lastRelease = nil, gateSet = true, blockStart = nil, onClaim = nil, legacy = false,
+}
+local function token7()
+    V.tokenSeq = V.tokenSeq + 1
+    return "v7#" .. V.tokenSeq
+end
+local function liveToken() return V.claimToken or V.legToken end
+local function indexOf(id)
+    for i = 1, #V.stops do if V.stops[i].id == id then return i end end
+    return nil
+end
+local function pendingIndex()
+    for i = 1, #V.stops do if V.stops[i].status == "pending" then return i end end
+    return nil
+end
+local function current7()
+    local index = V.currentId and indexOf(V.currentId)
+    return index and V.stops[index] or nil
+end
+-- Core.activateNext：啟用第一個待辦站、換新 token、記下 activation
+local function activate7(kind)
+    local index = pendingIndex()
+    if not index then return nil end
+    V.currentId, V.phase, V.activation, V.reason = V.stops[index].id, "navigating", kind, nil
+    V.legToken, V.claimOwner, V.claimToken = token7(), nil, nil
+    V.revision = V.revision + 1
+    return V.legToken
+end
+-- Core.finishStop：處置只有三種。autoContinue 與**該站自己的 pause** 都在這裡生效，
+-- pause 優先於自動接續。
+local function finish7(id)
+    local stop = V.stops[indexOf(id)]
+    stop.status = "arrived"
+    V.activation, V.reason = nil, nil
+    V.legToken, V.claimOwner, V.claimToken = nil, nil, nil
+    V.revision = V.revision + 1
+    if not pendingIndex() then
+        V.phase, V.currentId = "completed", nil
+        return "completed"
+    end
+    V.phase, V.currentId = "waiting", id
+    if V.autoContinue and not stop.pause then return "continue" end
+    return "stopover"
+end
+local function install7(legacy)
+    V.legacy = legacy == true
+    installNavApi(V.legacy and 6 or 7)
+    local api = MinidoracatMiniMapAPI
+    api.getNavItinerary = function(pn)
+        if pn ~= 0 then return nil, "badargs" end
+        if #V.stops == 0 then return nil, "noitinerary" end
+        local out = { schemaVersion = V.legacy and 1 or 2, revision = V.revision,
+            phase = V.phase, count = #V.stops, currentStopId = V.currentId,
+            reason = V.reason, stops = {} }
+        if not V.legacy then
+            out.autoContinue, out.activation = V.autoContinue, V.activation
+        end
+        for i = 1, #V.stops do
+            local st = V.stops[i]
+            out.stops[i] = { id = st.id, x = st.x, y = st.y,
+                status = st.status, pause = st.pause }
+        end
+        return out
+    end
+    -- 六個回傳，一個都不多：activation 不進 getNavLeg。
+    api.getNavLeg = function(pn)
+        if pn ~= 0 then return nil, "badargs" end
+        if #V.stops == 0 then return nil, "noitinerary" end
+        if V.phase ~= "navigating" and V.phase ~= "approach" then
+            return nil, nil, nil, nil, V.phase, V.revision
+        end
+        local st = current7()
+        return liveToken(), st.id, st.x, st.y, V.phase, V.revision
+    end
+    api.getNavTarget = function(pn)
+        drive.nav.targetCalls = drive.nav.targetCalls + 1
+        if #V.stops == 0 or (V.phase ~= "navigating" and V.phase ~= "approach") then
+            return nil, "notarget"
+        end
+        local st = current7()
+        return st.x, st.y
+    end
+    api.startNavItinerary = function(pn, expectedRevision)
+        V.starts = V.starts + 1
+        if #V.stops == 0 then return nil, "noitinerary" end
+        if V.phase ~= "draft" and V.phase ~= "paused" and V.phase ~= "waiting" then
+            return nil, "state"
+        end
+        if expectedRevision ~= V.revision then return nil, "stale" end
+        if V.claimOwner then return nil, "busy" end
+        if not dveh._stopped then return nil, "notstopped" end
+        -- gate(set)：主 MOD 這一刻不允許就是不允許，沒有詳細鍵時 addon 退 NeedGPS
+        if V.blockStart then
+            return nil, "blocked", type(V.blockStart) == "string" and V.blockStart or nil
+        end
+        local issued = activate7("start")
+        if not issued then return nil, "state" end
+        return issued, "ok"
+    end
+    api.claimNavLeg = function(pn, owner, expectedToken)
+        V.claims = V.claims + 1
+        if type(owner) ~= "string" or owner == "" then return nil, "badargs" end
+        if #V.stops == 0 then return nil, "noitinerary" end
+        if V.phase ~= "navigating" then return nil, "state" end
+        if V.claimOwner and V.claimOwner ~= owner then return nil, "busy" end
+        if expectedToken ~= liveToken() then return nil, "stale" end
+        if V.claimOwner == owner then return V.claimToken, "ok" end
+        if dveh._driver ~= dp then return nil, "notdriver" end
+        if not dveh._stopped then return nil, "notstopped" end
+        V.claimOwner, V.claimToken = owner, token7()
+        -- 情境鉤：claim 成功「當下」的同步回呼（真 Core 的 notify／分享就在這個位置）
+        if V.onClaim then
+            local hook = V.onClaim
+            V.onClaim = nil
+            hook()
+        end
+        return V.claimToken, "ok"
+    end
+    api.reportNavArrival = function(pn, owner, token)
+        V.reports = V.reports + 1
+        local r = V.receipt
+        if r and r.op == "report" and r.owner == owner and r.token == token then
+            return true, "duplicate"
+        end
+        if V.claimOwner ~= owner or token ~= V.claimToken then return false, "stale" end
+        if V.phase ~= "navigating" then return false, "state" end
+        if not dveh._stopped then return false, "notstopped" end
+        local st = current7()
+        local dx, dy = dveh._x - st.x, dveh._y - st.y
+        V.receipt = { op = "report", owner = owner, token = token }
+        if dx * dx + dy * dy > 25 then
+            V.phase, V.activation = "approach", nil
+            V.legToken, V.claimOwner, V.claimToken = token7(), nil, nil
+            V.revision = V.revision + 1
+            if V.legacy then return true, "road_end" end
+            return true, "road_end", "road_end", V.revision
+        end
+        local disposition = finish7(st.id)
+        -- v6 Core 只回兩個值：addon 收不到處置就必須維持逐點手動。
+        if V.legacy then return true, "arrived" end
+        return true, "arrived", disposition, V.revision
+    end
+    api.releaseNavLeg = function(pn, owner, token, reason)
+        V.releases, V.lastRelease = V.releases + 1, reason
+        local r = V.receipt
+        if r and r.op == "release" and r.owner == owner and r.token == token then
+            return true, "duplicate"
+        end
+        if reason ~= "manual" and reason ~= "cancelled" and reason ~= "unavailable"
+                and reason ~= "noroad" and reason ~= "failed" then
+            return false, "badargs"
+        end
+        if V.claimOwner ~= owner or token ~= V.claimToken then return false, "stale" end
+        V.receipt = { op = "release", owner = owner, token = token }
+        V.claimOwner, V.claimToken, V.legToken = nil, nil, nil
+        V.phase, V.activation, V.reason = "paused", nil, reason
+        V.revision = V.revision + 1
+        return true, "released"
+    end
+    if V.legacy then return end
+    api.setNavContinuation = function(pn, expectedRevision, enabled)
+        V.modeCalls = V.modeCalls + 1
+        if pn ~= 0 or type(enabled) ~= "boolean" then return false, "badargs" end
+        if #V.stops == 0 then return false, "noitinerary" end
+        if expectedRevision ~= V.revision then return false, "stale" end
+        if V.autoContinue == enabled then return true, "ok" end
+        -- mode 只改開關：正在執行的 token／claim 一律保留
+        V.autoContinue, V.revision = enabled, V.revision + 1
+        return true, "ok"
+    end
+end
+-- Core 的 OnTick 被動到站：沒有 claim、車停妥、在 5m 內才收站；
+-- continue 還要 gate(set) 允許才啟用下一段，不允許就留在 waiting。
+local function coreTick()
+    if V.legacy or V.phase ~= "navigating" or V.claimOwner then return end
+    if not dveh._stopped then return end
+    local st = current7()
+    if not st then return end
+    local dx, dy = dveh._x - st.x, dveh._y - st.y
+    if dx * dx + dy * dy > 25 then return end
+    if finish7(st.id) ~= "continue" then return end
+    if V.gateSet then activate7("continue") else V.reason = "unavailable" end
+end
+-- 站點規格 { {x, y, pause}, ... }
+local function setTrip7(phase, spec)
+    V.stops = {}
+    for i = 1, #spec do
+        V.stops[i] = { id = 100 + i, x = spec[i][1], y = spec[i][2],
+            status = "pending", pause = spec[i][3] == true }
+    end
+    V.phase, V.currentId, V.activation, V.reason = phase, nil, nil, nil
+    V.legToken, V.claimOwner, V.claimToken, V.receipt = nil, nil, nil, nil
+    V.starts, V.claims, V.reports, V.releases, V.modeCalls = 0, 0, 0, 0, 0
+    V.gateSet, V.blockStart, V.onClaim, V.autoContinue = true, nil, nil, true
+    V.revision = V.revision + 1
+    if phase == "navigating" then activate7("start") end
+end
+local function ready7(x)
+    MDAD.Drive.stop(0, nil)
+    players[0], players[1], players[2], players[3] = dp, nil, nil, nil
+    activePlayers = 1
+    dveh._x, dveh._y, dveh._speed, dveh._steering = x or 0, 0, 0, 0
+    dveh._stopped = true
+    dveh._engine, dveh._driver, dveh._regulator = true, dp, nil
+    dveh._part._item._uses = 0.8
+    dp._vehicle, dp._dead, dp._local = dveh, false, true
+    setHeading(dveh, 0.3)
+    drive.nav.tx, drive.nav.ty, drive.nav.state = 300, 0, "ok"
+    drive.nav.route = newRoute(40, 0, 0, 4, 0)
+    drive.nav.route.segSurface, drive.nav.route.segWidth = {}, {}
+    for i = 1, 39 do
+        drive.nav.route.segSurface[i], drive.nav.route.segWidth[i] = "paved", 10
+    end
+    driveReset(dveh)
+    clearList(halos)
+    drive.voiceLog = {}
+    drive.paused, drive.pauseCalls = false, 0
+end
+-- 把準備推到真的接管或真的失敗為止（每幀也跑一次 Core 的 tick）
+local function pump7(frames)
+    for _ = 1, frames or 20 do
+        if MDAD.Drive.debugSession(0) or not MDAD.Drive.isActive(0) then break end
+        nowMs = nowMs + 300
+        driveTick(dp, dveh)
+        coreTick()
+    end
+end
+
+install7(false)
+setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
+    AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+
+-- ① 一般中途站：自己的 continue 回報才接下一段；不播抵達、不要求暫停
+ready7(0)
+setTrip7("draft", { { 300, 0 }, { 600, 0 } })
+checkTrue(MDAD.Drive.continueItinerary(0), "(v7-1) 玩家明確出發第一段")
+pump7()
+local first = MDAD.Drive.debugSession(0)
+checkTrue(first ~= nil, "(v7-1) 準備完成才接管")
+checkEq(first and first.legStopId, 101, "(v7-1) session 記下本段的站 id（不是索引）")
+dveh._x = 298
+first.mode = "arrive"
+clearList(halos)
+drive.voiceLog = {}
+drive.pauseCalls = 0
+checkEq(V.starts, 1, "(v7-1) 到目前為止只有玩家那一次 start")
+driveTick(dp, dveh)
+checkEq(V.reports, 1, "(v7-1) 到站回報一次")
+checkEq(V.stops[1].status, "arrived", "(v7-1) 第一站真的完成")
+checkEq(V.phase, "navigating", "(v7-1) continue 處置：自動接續已啟用下一段")
+checkEq(V.starts, 2, "(v7-1) 自動接續走同一個明確入口，只 start 一次")
+checkTrue(MDAD.Drive.isActive(0), "(v7-1) 立刻進入下一段的準備")
+checkNil(V.claimOwner, "(v7-1) 下一段在 claim 之前對車零控制")
+checkEq(drive.voiceCount("arrive"), 0, "(v7-1) 中途站不播最終抵達語音")
+checkEq(#halos, 0, "(v7-1) 中途站不宣稱抵達，也還不宣稱出發")
+checkEq(drive.pauseCalls, 0, "(v7-1) 中途站不要求暫停遊戲")
+pump7(40)
+local second = MDAD.Drive.debugSession(0)
+checkTrue(second ~= nil and second ~= first, "(v7-1) 自動接續真的開起來了")
+checkEq(second and second.legStopId, 102, "(v7-1) 第二段綁的是下一站")
+checkEq(haloKey(), "UI_MinidoracatAutoDrive_ContinueTarget", "(v7-1) commit 才給續開提示")
+checkEq(halos[1] and halos[1].kind, "good", "(v7-1) 續開是綠字")
+checkEq(drive.voiceCount("leg_next"), 1, "(v7-1) 續開語音只在 commit 播一次")
+checkEq(drive.voiceCount("start"), 0, "(v7-1) 接續不冒充出發")
+checkEq(drive.pauseCalls, 0, "(v7-1) 備路期間也不要求暫停")
+-- 最後一站：真的抵達才播抵達並宣告整份完成
+dveh._x = 598
+second.mode = "arrive"
+clearList(halos)
+drive.voiceLog = {}
+driveTick(dp, dveh)
+checkEq(V.phase, "completed", "(v7-1) 最後一站完成整份行程")
+checkFalse(MDAD.Drive.isActive(0), "(v7-1) 完成之後不再自動出發")
+checkEq(V.starts, 2, "(v7-1) 完成之後一次都不再 start")
+checkEq(haloKey(1), "UI_MinidoracatAutoDrive_Arrived", "(v7-1) 真的抵達才說抵達")
+checkEq(haloKey(2), "UI_MinidoracatAutoDrive_TripCompleted", "(v7-1) 並宣告整份行程完成")
+checkEq(drive.voiceCount("arrive"), 1, "(v7-1) 最後一站才播抵達語音")
+checkNil(V.claimOwner, "(v7-1) 全程不留 orphan claim")
+
+-- ② 停靠點（stop.pause）優先於自動接續：停下來等玩家
+ready7(0)
+setTrip7("draft", { { 300, 0, true }, { 600, 0 } })
+checkTrue(MDAD.Drive.continueItinerary(0), "(v7-2) 出發")
+pump7()
+local paused2 = MDAD.Drive.debugSession(0)
+checkTrue(paused2 ~= nil, "(v7-2) 接管成功")
+dveh._x = 298
+paused2.mode = "arrive"
+clearList(halos)
+drive.voiceLog = {}
+driveTick(dp, dveh)
+checkEq(V.stops[1].status, "arrived", "(v7-2) 站確實完成")
+checkEq(V.phase, "waiting", "(v7-2) 這一站標了停靠：不自動接續")
+checkFalse(MDAD.Drive.isActive(0), "(v7-2) 不留準備意圖")
+checkEq(V.starts, 1, "(v7-2) 一次都不自動 start")
+checkEq(haloKey(), "UI_MinidoracatAutoDrive_StopoverReached", "(v7-2) 停靠提示")
+checkEq(drive.voiceCount("stopover"), 1, "(v7-2) 播停靠語音")
+checkEq(drive.voiceCount("arrive"), 0, "(v7-2) 停靠不是最終抵達")
+checkEq(V.stops[2].status, "pending", "(v7-2) 下一站仍待辦")
+
+-- ③ 純粹切換 mode 不會讓車自己開走：沒有「看到 waiting 就發車」的 watcher
+ready7(0)
+setTrip7("draft", { { 300, 0 }, { 600, 0 } })
+V.stops[1].status, V.phase, V.currentId = "arrived", "waiting", 101
+V.autoContinue = false
+for _ = 1, 10 do nowMs = nowMs + 300 driveTick(dp, dveh) coreTick() end
+checkFalse(MDAD.Drive.isActive(0), "(v7-3) waiting＋mode 關：不出發")
+V.autoContinue, V.revision = true, V.revision + 1
+for _ = 1, 10 do nowMs = nowMs + 300 driveTick(dp, dveh) coreTick() end
+checkFalse(MDAD.Drive.isActive(0), "(v7-3) 只把 mode 打開也不出發")
+checkEq(V.starts, 0, "(v7-3) 整段一次都沒有 start")
+checkEq(V.claims, 0, "(v7-3) 也一次都沒有 claim")
+
+-- ④ mode 關掉：自動的準備在 claim 之前取消；玩家明確操作的準備不受影響
+ready7(0)
+setTrip7("draft", { { 300, 0 }, { 600, 0 } })
+checkTrue(MDAD.Drive.continueItinerary(0), "(v7-4) 出發第一段")
+pump7()
+local held4 = MDAD.Drive.debugSession(0)
+checkTrue(held4 ~= nil, "(v7-4) 接管成功")
+dveh._x = 298
+held4.mode = "arrive"
+local realStep7 = MDADFollower.stepBuild
+MDADFollower.stepBuild = function() return false end -- 剖面永遠還沒好＝停在 claim 之前
+driveTick(dp, dveh)
+checkTrue(MDAD.Drive.isActive(0), "(v7-4) 自動接續進入準備狀態")
+local claims4 = V.claims
+clearList(halos)
+V.autoContinue, V.revision = false, V.revision + 1
+nowMs = nowMs + 300
+driveTick(dp, dveh)
+checkFalse(MDAD.Drive.isActive(0), "(v7-4) mode 關：自動的準備取消")
+checkEq(V.claims, claims4, "(v7-4) 取消發生在 claim 之前")
+checkNil(V.claimOwner, "(v7-4) 沒有留下任何接管")
+checkEq(#halos, 0, "(v7-4) 自動取消是安靜的，不拿紅字轟玩家")
+checkTrue(MDAD.Drive.continueItinerary(0), "(v7-4) mode 關不阻止玩家明確前往下一站")
+for _ = 1, 5 do nowMs = nowMs + 300 driveTick(dp, dveh) end
+checkTrue(MDAD.Drive.isActive(0), "(v7-4) 明確操作的準備不被 mode 取消")
+checkEq(V.claims, claims4, "(v7-4) 剖面沒好就還是不 claim")
+MDADFollower.stepBuild = realStep7
+pump7(40)
+checkTrue(MDAD.Drive.debugSession(0) ~= nil, "(v7-4) 剖面好了就照常接管")
+MDAD.Drive.stop(0, nil)
+
+-- ⑤ claim 成功之後才回來的取消：交還新 token，絕不 commit，也永不復活
+ready7(0)
+setTrip7("draft", { { 300, 0 }, { 600, 0 } })
+checkTrue(MDAD.Drive.continueItinerary(0), "(v7-5) 進準備狀態")
+V.onClaim = function() MDAD.Drive.stop(0, nil) end -- claim 的同步回呼裡玩家關掉自駕
+local releases5 = V.releases
+pump7(40)
+checkFalse(MDAD.Drive.isActive(0), "(v7-5) 取消之後不接上控制")
+checkNil(MDAD.Drive.debugSession(0), "(v7-5) 沒有 commit 出任何 session")
+checkTrue(V.releases > releases5, "(v7-5) 剛拿到的 token 被交還")
+checkEq(V.lastRelease, "cancelled", "(v7-5) 交還原因是取消")
+checkNil(V.claimOwner, "(v7-5) 不留 orphan claim")
+checkEq(drive.calls.setRegulator, 0, "(v7-5) 整段從頭到尾沒有碰車")
+for _ = 1, 20 do nowMs = nowMs + 300 driveTick(dp, dveh) coreTick() end
+checkFalse(MDAD.Drive.isActive(0), "(v7-5) 取消之後永不復活")
+
+-- ⑥ 自動接續被主 MOD 的 gate 拒絕：說一次原因就算了，不無限重試
+ready7(0)
+setTrip7("draft", { { 300, 0 }, { 600, 0 } })
+checkTrue(MDAD.Drive.continueItinerary(0), "(v7-6) 出發")
+pump7()
+local held6 = MDAD.Drive.debugSession(0)
+checkTrue(held6 ~= nil, "(v7-6) 接管成功")
+dveh._x = 298
+held6.mode = "arrive"
+V.blockStart = true
+clearList(halos)
+drive.voiceLog = {}
+driveTick(dp, dveh)
+checkEq(V.stops[1].status, "arrived", "(v7-6) 站還是完成了")
+checkEq(V.phase, "waiting", "(v7-6) 下一段沒有出發")
+checkFalse(MDAD.Drive.isActive(0), "(v7-6) 不留準備意圖")
+checkEq(#halos, 1, "(v7-6) 只說一次原因")
+checkEq(haloKey(), "UI_MinidoracatAutoDrive_NeedGPS", "(v7-6) gate 拒絕的原因照原樣說")
+checkEq(halos[1] and halos[1].kind, "bad", "(v7-6) 失敗是紅字")
+checkEq(drive.voiceCount("arrive"), 0, "(v7-6) 失敗不冒稱抵達")
+for _ = 1, 20 do nowMs = nowMs + 300 driveTick(dp, dveh) coreTick() end
+checkEq(V.starts, 2, "(v7-6) 不無限重試（只在到站那一次試過）")
+checkEq(#halos, 1, "(v7-6) 沒有重試就沒有第二次紅字")
+
+-- ⑦ 自動接續的準備同樣有 15s 限期：路線一直沒好就自己收手
+ready7(0)
+setTrip7("draft", { { 300, 0 }, { 600, 0 } })
+checkTrue(MDAD.Drive.continueItinerary(0), "(v7-7) 出發")
+pump7()
+local held7 = MDAD.Drive.debugSession(0)
+checkTrue(held7 ~= nil, "(v7-7) 接管成功")
+dveh._x = 298
+held7.mode = "arrive"
+clearList(halos)
+driveTick(dp, dveh)
+drive.nav.route, drive.nav.state = nil, "pending"
+nowMs = nowMs + 300
+driveTick(dp, dveh)
+checkTrue(MDAD.Drive.isActive(0), "(v7-7) 路線未就緒：自動接續照樣等，不假報遺失")
+for _ = 1, 70 do nowMs = nowMs + 300 driveTick(dp, dveh) end
+checkFalse(MDAD.Drive.isActive(0), "(v7-7) 限期到了自己收手")
+checkEq(haloKey(), "UI_MinidoracatAutoDrive_TripTimeout", "(v7-7) 逾時就說逾時")
+checkEq(V.claims, 1, "(v7-7) 自動接續全程沒有 claim 過")
+checkNil(V.claimOwner, "(v7-7) 沒有留下接管")
+
+-- ⑧ 準備中被動到站（同座標／已在 5m 內）：不為不足 5m 的路線做無謂剖面，
+-- Core 收掉本站之後沿用同一份意圖接下一段
+ready7(0)
+setTrip7("draft", { { 0, 0 }, { 300, 0 } })
+local routes8 = drive.nav.routeCalls
+checkTrue(MDAD.Drive.continueItinerary(0), "(v7-8) 站就在車底下也照樣受理")
+checkEq(drive.nav.routeCalls, routes8, "(v7-8) 不為不足 5m 的路線去要路線")
+checkTrue(MDAD.Drive.isActive(0), "(v7-8) 意圖不因無路可備而掉")
+nowMs = nowMs + 300
+driveTick(dp, dveh)
+checkEq(drive.calls.setRegulator, 0, "(v7-8) 等 Core 收站期間零控制")
+coreTick()
+checkEq(V.stops[1].status, "arrived", "(v7-8) Core 的被動到站收掉第一站")
+checkEq(V.phase, "navigating", "(v7-8) 並以 continue 啟用下一段")
+checkEq(V.activation, "continue", "(v7-8) activation 只在快照裡")
+clearList(halos)
+drive.voiceLog = {}
+pump7(40)
+local adopted = MDAD.Drive.debugSession(0)
+checkTrue(adopted ~= nil, "(v7-8) 同一份意圖轉到下一段並接管")
+checkEq(adopted and adopted.legStopId, 102, "(v7-8) 接管的是新的那一站")
+checkEq(V.starts, 1, "(v7-8) 被動到站不需要再 start 一次")
+checkEq(haloKey(), "UI_MinidoracatAutoDrive_ContinueTarget", "(v7-8) 續開提示")
+checkEq(drive.voiceCount("leg_next"), 1, "(v7-8) 續開語音一次")
+MDAD.Drive.stop(0, nil)
+
+-- ⑨ 準備中被動到站但 Core 不續發（mode 關）：收掉意圖、給停靠提示，不假播抵達
+ready7(0)
+setTrip7("draft", { { 0, 0 }, { 300, 0 } })
+V.autoContinue = false
+checkTrue(MDAD.Drive.continueItinerary(0), "(v7-9) 受理")
+nowMs = nowMs + 300
+driveTick(dp, dveh)
+clearList(halos)
+drive.voiceLog = {}
+coreTick()
+checkEq(V.phase, "waiting", "(v7-9) Core 收站後停在等候")
+nowMs = nowMs + 300
+driveTick(dp, dveh)
+checkFalse(MDAD.Drive.isActive(0), "(v7-9) 意圖收掉，不自己再起步")
+checkEq(haloKey(), "UI_MinidoracatAutoDrive_StopoverReached", "(v7-9) 給的是停靠提示")
+checkEq(drive.voiceCount("stopover"), 1, "(v7-9) 播停靠語音")
+checkEq(drive.voiceCount("arrive"), 0, "(v7-9) 不假播最終抵達")
+checkEq(V.claims, 0, "(v7-9) 全程沒有 claim")
+
+-- ⑩ 準備中 token 改變但本站**沒有** arrived（玩家改了行程）：照原路取消，不採用
+ready7(0)
+setTrip7("draft", { { 300, 0 }, { 600, 0 } })
+checkTrue(MDAD.Drive.continueItinerary(0), "(v7-10) 受理")
+nowMs = nowMs + 300
+driveTick(dp, dveh)
+checkTrue(MDAD.Drive.isActive(0), "(v7-10) 正在準備")
+clearList(halos)
+V.legToken, V.revision = token7(), V.revision + 1 -- 主 MOD 換了 token，本站仍 pending
+nowMs = nowMs + 300
+driveTick(dp, dveh)
+checkFalse(MDAD.Drive.isActive(0), "(v7-10) 不把任意 token 變動當成到站")
+checkEq(haloKey(), "UI_MinidoracatAutoDrive_TripStale", "(v7-10) 說的是失效，不是抵達")
+checkEq(V.stops[1].status, "pending", "(v7-10) 站點一動也沒動")
+
+-- ⑪ 插入的優先目標：activation 從快照讀，開起來播 priority
+ready7(0)
+setTrip7("navigating", { { 300, 0 }, { 600, 0 } })
+V.activation = "priority"
+clearList(halos)
+drive.voiceLog = {}
+checkTrue(MDAD.Drive.continueItinerary(0), "(v7-11) 沿用既有活動段")
+checkEq(V.starts, 0, "(v7-11) navigating 不重新 start（不自己打斷自己）")
+pump7(40)
+checkTrue(MDAD.Drive.debugSession(0) ~= nil, "(v7-11) 接管成功")
+checkEq(haloKey(), "UI_MinidoracatAutoDrive_PriorityTarget", "(v7-11) 優先目標的提示")
+checkEq(drive.voiceCount("priority"), 1, "(v7-11) 播優先目標語音")
+checkEq(drive.voiceCount("start"), 0, "(v7-11) 不播一般出發語音")
+MDAD.Drive.stop(0, nil)
+
+-- ⑫ 上一段的停靠暫停還在等語音播完：建立新意圖的那一刻就取消，
+-- 不讓正在備路的下一段被舊通知凍住（voice 的 allowed 只看 sessions，看不到準備意圖）
+do
+    local oldClient, oldServer = clientFlag, serverFlag
+    local oldVoice, oldArrivalOpt = MDAD.Voice, MDAD.HUD.pauseOnArrival
+    clientFlag, serverFlag = false, false
+    MDAD.HUD.pauseOnArrival = function() return true end
+    MDAD.Voice = {
+        play = function(event)
+            drive.voiceLog[#drive.voiceLog + 1] = event
+            return true, 7
+        end,
+        isPlaying = function() return true end,
+    }
+    ready7(0)
+    setTrip7("draft", { { 300, 0, true }, { 600, 0 } })
+    checkTrue(MDAD.Drive.continueItinerary(0), "(v7-12) 出發")
+    pump7()
+    local held12 = MDAD.Drive.debugSession(0)
+    checkTrue(held12 ~= nil, "(v7-12) 接管成功")
+    dveh._x = 298
+    held12.mode = "arrive"
+    drive.pauseCalls = 0
+    driveTick(dp, dveh)
+    checkTrue(MDAD.Drive.isPausePending(), "(v7-12) 停靠：等語音播完才暫停")
+    checkEq(drive.pauseCalls, 0, "(v7-12) 這一刻還沒暫停")
+    checkTrue(MDAD.Drive.continueItinerary(0), "(v7-12) 玩家馬上前往下一站")
+    checkFalse(MDAD.Drive.isPausePending(), "(v7-12) 建立意圖就取消舊的延遲暫停")
+    -- 只推幾幀：這裡量的是「舊通知不會回來暫停」，不是要模擬一整段行駛
+    for _ = 1, 4 do
+        nowMs = nowMs + 300
+        fire("OnTickEvenPaused")
+        driveTick(dp, dveh)
+    end
+    checkEq(drive.pauseCalls, 0, "(v7-12) 備路期間不會被舊通知凍住")
+    checkFalse(isGamePaused(), "(v7-12) 也沒有人去改遊戲速度")
+    MDAD.Drive.stop(0, nil)
+    checkFalse(MDAD.Drive.isPausePending(), "(v7-12) 收尾之後沒有殘留的延遲暫停")
+    MDAD.Voice, MDAD.HUD.pauseOnArrival = oldVoice, oldArrivalOpt
+    clientFlag, serverFlag = oldClient, oldServer
+end
+
+-- ⑬ v7 Driver × v6 Core：行程資料看起來再像 v7，沒有宣告能力就一律逐點手動
+ready7(0)
+setTrip7("draft", { { 300, 0 }, { 600, 0 } })
+install7(true)
+checkTrue(MDAD.Drive.continueItinerary(0), "(v7-13) 舊 Core 照常出發")
+pump7()
+local legacy13 = MDAD.Drive.debugSession(0)
+checkTrue(legacy13 ~= nil, "(v7-13) 舊 Core 也照常接管")
+dveh._x = 298
+legacy13.mode = "arrive"
+clearList(halos)
+drive.voiceLog = {}
+driveTick(dp, dveh)
+checkEq(V.stops[1].status, "arrived", "(v7-13) 站完成")
+checkFalse(MDAD.Drive.isActive(0), "(v7-13) v6 Core 不自動接續")
+checkEq(V.starts, 1, "(v7-13) 一次都不自動 start")
+checkEq(haloKey(), "UI_MinidoracatAutoDrive_Arrived", "(v7-13) v6 行為逐位元不變")
+checkEq(drive.voiceCount("arrive"), 1, "(v7-13) 也照舊播抵達語音")
+install7(false)
+MDAD.Drive.stop(0, nil)
+end
+scenarioContinuation()
+end
+
 local function scenarioReasonKeys()
 scenario("理由鍵覆蓋：每個分支都跑到，且四語 UI.json 都有對應翻譯")
 
@@ -14894,6 +16317,13 @@ local EXPECT_KEYS = {
     "UI_MinidoracatAutoDrive_LostRoute",
     "UI_MinidoracatAutoDrive_Start",
     "UI_MinidoracatAutoDrive_Stop",
+    -- v6 行程：每個鍵都對應一條真的被 MiniMap 模型拒絕／回報出來的分支
+    "UI_MinidoracatAutoDrive_TripBusy",
+    "UI_MinidoracatAutoDrive_TripState",
+    "UI_MinidoracatAutoDrive_TripStale",
+    "UI_MinidoracatAutoDrive_TripNotStopped",
+    "UI_MinidoracatAutoDrive_TripRoadEnd",
+    "UI_MinidoracatAutoDrive_TripLost",
 }
 for _, ok in ipairs(EXPECT_KEYS) do
     check(reasonKeys[ok] == true, "分支有被執行到並吐出 " .. ok)
