@@ -1,38 +1,22 @@
--- ISAutoDriveDeviceAction.lua
--- 單一 generic TimedAction：kind＝nav|auto、install＝bool。
---
--- **本檔只負責工時、動畫與朝向，不做任何世界狀態突變——刻意不定義 complete()。**
---
--- 為什麼：B42 MP 的伺服器端跑的不是這個 Lua 物件，而是 NetTimedAction 鏡像，
--- 而鏡像是用 client 送來的 new() 參數逐一反序列化重建的——送出端依 new() 的參數名
--- 打包每個欄位（NetTimedAction.set，NetTimedAction.java:36-55），伺服器端 parse 再照樣
--- 呼叫 <Type>.new(...)（NetTimedAction.java:142-170）。也就是 character／vehicle／item
--- 全部由 client 指定。而鏡像的 perform() 唯一做的事就是呼叫 Lua 端的 complete()
--- （NetTimedAction.java:132-139）。把突變寫在 complete() 等於讓 client 自行宣告
--- 「誰、對哪台車、用哪件物品」。
---
--- 不定義 complete() 還會讓引擎連鏡像都不建：LuaTimedActionNew 建構時發現 metatable 沒有
--- complete 就設 useCustomRemoteTimedActionSync=true（LuaTimedActionNew.java:76-78），
--- 於是 start() 的 `GameClient.client && !useCustomRemoteTimedActionSync` 分支不成立，
--- 不會 createNetTimedAction（:128-132）——整條 client 可控的伺服器端執行路徑消失。
---
--- 代價與補償：沒有鏡像就沒有伺服器端的工時／拒絕仲裁，作弊 client 可以把 getDuration
--- 縮到 1 並連發。因此突變端（MDAD.applyDeviceChange）全部重新驗證，且 server handler
--- 另有 per-player 節流（server/MDAD_Server.lua）；最差結果只是「裝得比設計快」，
--- 不會產生物品或改到不該改的車。
---
--- 突變改走：perform() → sendClientCommand → server OnClientCommand → MDAD.applyDeviceChange。
--- Lua perform 在 client 與 SP 都會跑（LuaTimedActionNew.java:151-158），而鏡像不跑 perform，
--- 所以 MP 不會重複執行；SP（isClient()＝false）直接呼叫同一份 shared apply。
+-- GPS／自駕正式零件的權威拆裝動作。
+-- 原版 install/uninstall constructor 先執行（包含其他 MOD 的攔截），只把成功回傳的
+-- 我方零件 instance 換成此類別；右鍵與維修面板因此走同一條路。
+-- 此類別只繼承 ISBaseTimedAction，不定義 complete：NetTimedAction 的參數可由 client
+-- 指定，不能拿鏡像 character 當權威。perform 仍送 OnClientCommand，由連線 actor 重驗。
+-- Kahlua rawget 會沿 metatable 找值，不能派生原版動作後僅寫 complete=nil：
+-- 那樣仍繼承原版 complete，會再次打開遠端動作突變路徑。
 
 require "TimedActions/ISBaseTimedAction"
+require "Vehicles/TimedActions/ISInstallVehiclePart"
+require "Vehicles/TimedActions/ISUninstallVehiclePart"
 require "MDAD"
 
 ISAutoDriveDeviceAction = ISBaseTimedAction:derive("ISAutoDriveDeviceAction")
+-- 原版 derive 只設父類的 __index；此類不呼叫自己的 new，須明確設定實例查找入口。
+ISAutoDriveDeviceAction.__index = ISAutoDriveDeviceAction
 
 local WORK_TIME = 150
 
--- clampDelta／giveItem 已移進 shared MDAD（突變段的一部分，只能在 server／SP 執行）
 
 function ISAutoDriveDeviceAction:isValid()
     if not self.character or not self.vehicle then return false end
@@ -133,9 +117,15 @@ function ISAutoDriveDeviceAction:getDuration()
     return WORK_TIME
 end
 
-function ISAutoDriveDeviceAction:new(character, vehicle, kind, install, item)
-    local o = ISBaseTimedAction.new(self, character)
-    o.vehicle = vehicle
+local function deviceAction(action, character, part, kind, install, item)
+    if not action or action.ignoreAction then return action end
+    setmetatable(action, ISAutoDriveDeviceAction)
+    local o = action
+    o.complete = nil
+    o.Type = ISAutoDriveDeviceAction.Type
+    o.character = character
+    o.vehicle = part:getVehicle()
+    o.part = part
     o.kind = kind
     o.install = install
     o.item = item
@@ -154,4 +144,21 @@ function ISAutoDriveDeviceAction:new(character, vehicle, kind, install, item)
         end
     end
     return o
+end
+
+-- 保留原版具名參數：NetTimedAction.set 會讀 new 的參數名序列化其他零件的動作。
+local installNew = ISInstallVehiclePart.new
+function ISInstallVehiclePart:new(character, part, item, maxTimeInit)
+    local action = installNew(self, character, part, item, maxTimeInit)
+    local kind = MDAD.deviceKind(part)
+    if not kind then return action end
+    return deviceAction(action, character, part, kind, true, item)
+end
+
+local uninstallNew = ISUninstallVehiclePart.new
+function ISUninstallVehiclePart:new(character, part, workTime)
+    local action = uninstallNew(self, character, part, workTime)
+    local kind = MDAD.deviceKind(part)
+    if not kind then return action end
+    return deviceAction(action, character, part, kind, false, nil)
 end

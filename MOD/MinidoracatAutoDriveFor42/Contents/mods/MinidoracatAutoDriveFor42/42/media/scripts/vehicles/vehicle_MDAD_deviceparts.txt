@@ -1,0 +1,107 @@
+/*
+    唯一零件定義：template 不會進入可生成車輛清單。
+    MDAD_DeviceParts 在啟動時複製兩槽；area 依每個車型的實際工作區改寫。
+    specificItem=false 保留物品 fullType，無 model、不改車身外觀。
+    skills 供維修面板提示，test 回調另外驗電工門檻；空槽 create 不生成物品。
+    EngineDoor 不存在時原版選單略過開蓋，不要求特定車型。
+*/
+module Base
+{
+    template vehicle MDADDeviceParts
+    {
+        part MDADGPS
+        {
+            area = Engine,
+            mechanicArea = Engine,
+            itemType = MinidoracatAutoDrive.GPSNavigator,
+            specificItem = false,
+            category = MDAD,
+            durability = 2,
+            table install
+            {
+                items
+                {
+                    1
+                    {
+                        tags = base:screwdriver,
+                        count = 1,
+                        keep = true,
+                        equip = primary,
+                    }
+                }
+                skills = Electricity:1,
+                time = 100,
+                test = MDAD_DeviceParts.InstallTest,
+                door = EngineDoor,
+            }
+            table uninstall
+            {
+                items
+                {
+                    1
+                    {
+                        tags = base:screwdriver,
+                        count = 1,
+                        keep = true,
+                        equip = primary,
+                    }
+                }
+                skills = Electricity:1,
+                time = 100,
+                test = MDAD_DeviceParts.UninstallTest,
+            }
+            lua
+            {
+                create = MDAD_DeviceParts.onPartCreate,
+                init = MDAD_DeviceParts.onPartInit,
+            }
+        }
+        part MDADAutopilot
+        {
+            area = Engine,
+            mechanicArea = Engine,
+            itemType = MinidoracatAutoDrive.AutopilotModule,
+            specificItem = false,
+            category = MDAD,
+            durability = 2,
+            table install
+            {
+                items
+                {
+                    1
+                    {
+                        tags = base:screwdriver,
+                        count = 1,
+                        keep = true,
+                        equip = primary,
+                    }
+                }
+                skills = Electricity:1,
+                time = 100,
+                test = MDAD_DeviceParts.InstallTest,
+                door = EngineDoor,
+            }
+            table uninstall
+            {
+                items
+                {
+                    1
+                    {
+                        tags = base:screwdriver,
+                        count = 1,
+                        keep = true,
+                        equip = primary,
+                    }
+                }
+                skills = Electricity:1,
+                time = 100,
+                test = MDAD_DeviceParts.UninstallTest,
+            }
+            lua
+            {
+                create = MDAD_DeviceParts.onPartCreate,
+                init = MDAD_DeviceParts.onPartInit,
+            }
+        }
+    }
+}

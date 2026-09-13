@@ -196,23 +196,14 @@ Events.OnTick.Add(onNavUsageTick)
 
 
 local function queueDeviceAction(playerObj, vehicle, kind, install, item)
-    if playerObj:getVehicle() == vehicle then
-        ISVehicleMenu.onExit(playerObj)
+    local part = MDAD.getDevicePart(vehicle, kind)
+    if not part then return end
+    -- 右鍵與維修面板共用原版入口，保留其他 MOD 對零件動作的攔截。
+    if install then
+        ISVehiclePartMenu.onInstallPart(playerObj, part, item)
+    else
+        ISVehiclePartMenu.onUninstallPart(playerObj, part)
     end
-    if item then
-        ISVehiclePartMenu.toPlayerInventory(playerObj, item)
-    end
-    local part = MDAD.getBatteryPart(vehicle)
-    local area = part and part:getArea()
-    if area then
-        -- ISPathFindAction.lua:172
-        ISTimedActionQueue.add(ISPathFindAction:pathToVehicleArea(playerObj, vehicle, area))
-    end
-    local screwdriver = MDAD.findScrewdriver(playerObj)
-    if screwdriver then
-        ISWorldObjectContextMenu.equip(playerObj, playerObj:getPrimaryHandItem(), screwdriver, true, false)
-    end
-    ISTimedActionQueue.add(ISAutoDriveDeviceAction:new(playerObj, vehicle, kind, install, item))
 end
 
 local function addDeviceOption(context, playerObj, vehicle, kind, install, item, labelKey)

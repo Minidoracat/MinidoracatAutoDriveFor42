@@ -152,33 +152,66 @@ function MDAD.getBatteryPart(vehicle)
     return vehicle:getBattery()
 end
 
-function MDAD.getState(vehicle)
-    local part = MDAD.getBatteryPart(vehicle)
-    local md = part and part:getModData()
-    local st = md and md.MDAD
-    if type(st) ~= "table" then return nil end
-    return st
+-- 裝置槽＝真正的 VehiclePart（由 shared/MDAD_DeviceParts.lua 在 OnGameBoot
+-- 用原版 copyPartsFrom 注入每個有電瓶＋有合法 area 的車輛腳本）。
+-- 舊制把 nav/auto/navDelta 記在電瓶 part 的 modData，讀者一律改讀這兩個槽裡的
+-- **實物**；舊資料只剩 MDAD.migrateDeviceParts 會去碰。
+MDAD.PART_NAV = "MDADGPS"
+MDAD.PART_AUTO = "MDADAutopilot"
+
+-- kind → 該槽應有的 item full type（安裝時比對、遷移時生成）
+function MDAD.deviceItemType(kind)
+    if kind == "nav" then return MDAD.TYPE_GPS end
+    if kind == "auto" then return MDAD.TYPE_AUTO end
+    return nil
 end
 
-function MDAD.ensureState(part)
-    local md = part:getModData()
-    local st = md.MDAD
-    if type(st) ~= "table" then
-        st = { v = 1 }
-        md.MDAD = st
+-- BaseVehicle.getPartById(String)＝VehicleParts.java:113-115 的委派（原版 Lua 用例
+-- Vehicles.lua:906）。腳本沒被注入（無電瓶／無合法 area／part 數量爆表）就回 nil。
+function MDAD.getDevicePart(vehicle, kind)
+    if not vehicle then return nil end
+    local id
+    if kind == "nav" then
+        id = MDAD.PART_NAV
+    elseif kind == "auto" then
+        id = MDAD.PART_AUTO
+    else
+        return nil
     end
-    st.v = 1
-    return st
+    local part = vehicle:getPartById(id)
+    if MDAD.deviceKind(part) == kind then return part end
+    return nil
+end
+
+-- VehiclePart.getId＝VehiclePart.java:119
+function MDAD.deviceKind(part)
+    if not part then return nil end
+    local id = part:getId()
+    if id ~= MDAD.PART_NAV and id ~= MDAD.PART_AUTO then return nil end
+    -- 同名衝突已被注入器拒絕；讀者／動作也不能接管對方零件。
+    if part:getLuaFunction("init") ~= "MDAD_DeviceParts.onPartInit" then return nil end
+    if id == MDAD.PART_NAV then return "nav" end
+    if id == MDAD.PART_AUTO then return "auto" end
+    return nil
+end
+
+-- 「裝了」＝槽存在、槽裡有 item，且 fullType 正確。
+-- fullType 必須查：原版維修面板在 specificItem=false 的情況下可以塞別的型號，
+-- 而 MDAD 的耗電與駕駛邏輯只認自己的兩個 full type。
+local function deviceInstalled(vehicle, kind)
+    local part = MDAD.getDevicePart(vehicle, kind)
+    if not part then return false end
+    local item = part:getInventoryItem()
+    if not item then return false end
+    return item:getFullType() == MDAD.deviceItemType(kind)
 end
 
 function MDAD.isNavInstalled(vehicle)
-    local st = MDAD.getState(vehicle)
-    return st ~= nil and st.nav == true
+    return deviceInstalled(vehicle, "nav")
 end
 
 function MDAD.isAutoInstalled(vehicle)
-    local st = MDAD.getState(vehicle)
-    return st ~= nil and st.auto == true
+    return deviceInstalled(vehicle, "auto")
 end
 
 -- getBatteryCharge：VehicleParts.java:152-156，無電瓶 item 或非 drainable＝0
@@ -403,7 +436,7 @@ function MDAD.findAutopilot(player)
 end
 
 -- 拆裝可及性（安裝／卸載唯一判準；server 端亦用同一份）。
--- 站在車外、同層、通得過保險屋權限，且**站在電瓶艙 area 內**才算可及——
+-- 站在車外、同層、通得過保險屋權限，且**站在裝置槽 area 內**才算可及——
 -- 不再退回 DistToSquared 距離：距離平方 <16 等於整輛車周圍約 4 格全放行，
 -- 隔著牆／從屋內對街上的車動手都會通過，MP 下就是隔牆偷裝。
 -- 出處：
@@ -417,6 +450,9 @@ end
 --     全程沒有距離 fallback——本函式照抄這個判準；
 --   IsoGridSquare.canReachTo＝IsoGridSquare.java:841（只認同格／相鄰格，且查窗／門／牆阻隔；
 --     原版 Lua 用例 ISInventoryPage.lua:1679、ISGrabCorpseAction.lua:6）。
+-- area 取自**裝置槽**（注入端讓兩個槽共用同一個 area，client 的
+-- pathToVehicleArea 與維修面板也走同一個），槽不存在才退回電瓶 part——
+-- 那條退路只為了讓「腳本沒被注入／遷移失敗」的車還能給出可診斷的既有行為。
 function MDAD.canReachVehicle(player, vehicle)
     if not player or not vehicle then return false end
     -- 坐在車上拿不到電瓶艙，且車內座標對 area 判定沒有意義；一律要求先下車
@@ -429,13 +465,15 @@ function MDAD.canReachVehicle(player, vehicle)
     if not vsq or not psq then return false end
     if not SafeHouse.isSafehouseAllowInteract(vsq, player) then return false end
     if math.floor(player:getZ()) ~= math.floor(vehicle:getZ()) then return false end
-    local part = MDAD.getBatteryPart(vehicle)
+    local part = MDAD.getDevicePart(vehicle, "nav")
+        or MDAD.getDevicePart(vehicle, "auto")
+        or MDAD.getBatteryPart(vehicle)
     local area = part and part:getArea()
     if area then
         -- 有 area 就以 area 為唯一判準（client 端會先 pathToVehicleArea 走進去）
         return vehicle:isInArea(area, player) == true
     end
-    -- script 未定義電瓶艙 area（腳踏車／拖車等）：退回相鄰格＋阻隔檢查
+    -- script 未定義該 area（腳踏車／拖車等）：退回相鄰格＋阻隔檢查
     return psq:canReachTo(vsq) == true
 end
 
@@ -443,18 +481,18 @@ end
 function MDAD.deviceBlockReason(player, vehicle, kind, install)
     if not player or not vehicle then return "UI_MinidoracatAutoDrive_InstallFailed" end
     if kind ~= "nav" and kind ~= "auto" then return "UI_MinidoracatAutoDrive_InstallFailed" end
-    local part = MDAD.getBatteryPart(vehicle)
-    if not part then return "UI_MinidoracatAutoDrive_NoBattery" end
+    -- 電瓶仍是先決條件：裝置吃車電，沒有電瓶 part 的載具（腳踏車／拖車）不支援
+    if not MDAD.getBatteryPart(vehicle) then return "UI_MinidoracatAutoDrive_NoBattery" end
+    -- 槽不存在＝這台車的腳本沒被注入（無合法 area／part 數量超過網路上限）。
+    -- 不另開翻譯鍵：對玩家而言就是「裝不上去」。
+    if not MDAD.getDevicePart(vehicle, kind) then return "UI_MinidoracatAutoDrive_InstallFailed" end
     if not MDAD.findScrewdriver(player) then return "UI_MinidoracatAutoDrive_NoScrewdriver" end
     if not MDAD.hasInstallSkill(player) then return "UI_MinidoracatAutoDrive_NeedElectricity1" end
-    local installed
-    if kind == "nav" then
-        installed = MDAD.isNavInstalled(vehicle)
-    else
-        installed = MDAD.isAutoInstalled(vehicle)
-    end
+    local installed = deviceInstalled(vehicle, kind)
     -- 兩條失敗規則：裝了又要裝／沒裝卻要卸
-    if install and installed then return "UI_MinidoracatAutoDrive_AlreadyInstalled" end
+    if install and MDAD.getDevicePart(vehicle, kind):getInventoryItem() ~= nil then
+        return "UI_MinidoracatAutoDrive_AlreadyInstalled"
+    end
     if not install and not installed then return "UI_MinidoracatAutoDrive_InstallFailed" end
     return nil
 end
@@ -487,12 +525,15 @@ end
 -- （actor 取連線身分）；SP 由 TimedAction:perform 直接呼叫。
 -- 只收純量 {kind, install, itemId}＋server 自己解析出來的 player／vehicle：
 -- 不接受 client 傳來的 actor、userdata、partId、navDelta 或 state。
--- itemId 只有 install＝true 才需要（卸載的物品由 instanceItem 生成，沒有來源 id，
+-- itemId 只有 install＝true 才需要（卸載還的是槽裡那顆**實物**，沒有來源 id，
 -- 呼叫端可省略），且必須是有限整數才准進 getItemWithIDRecursiv。
--- 驗證順序（任一關失敗即整批放棄，物品與 modData 一律不動）：
---   ① schema ② actor ③ 載具／零件 ④ 可及性／保險屋 ⑤ 工具／技能 ⑥ 狀態轉移 ⑦ 物品
--- 最後才進入突變段（prepare-then-mutate）：卸載先把要還的物品做出來，成功了才清狀態，
--- 否則「狀態清了、物品沒生出來」＝裝置憑空消失。
+-- 驗證順序（任一關失敗即整批放棄，物品與零件一律不動）：
+--   ① schema ② actor ③ 載具／電瓶 ④ 可及性／保險屋 ⑤ 工具／技能／槽／狀態轉移 ⑥ 物品
+-- 突變本身是「把同一顆 item 在背包與 VehiclePart 之間搬移」：
+--   安裝＝從容器移除後 part:setInventoryItem(item)
+--   卸載＝part:setInventoryItem(nil) 後把**同一顆**還給玩家
+-- 不再 instanceItem 複製：GPS 電量、耐久、其他 mod 寫在 item modData 上的資料
+-- 全部隨實物走，也不會有「複製出一顆、原件還在」的增殖風險。
 -- 回傳 (true) 或 (false, 翻譯鍵)。
 function MDAD.applyDeviceChange(player, vehicle, kind, install, itemId)
     -- client 端沒有權威，且 sendRemoveItemFromContainer 走 SyncItemDelete 需 EditItem
@@ -510,23 +551,23 @@ function MDAD.applyDeviceChange(player, vehicle, kind, install, itemId)
     if not player or player:isDead() then return false, MDAD.FAIL_GENERIC end
     if player:getVehicle() ~= nil then return false, MDAD.FAIL_TOO_FAR end
 
-    -- ③ 載具／零件
+    -- ③ 載具／電瓶
     if not vehicle then return false, MDAD.FAIL_GENERIC end
-    local part = MDAD.getBatteryPart(vehicle)
-    if not part then return false, MDAD.FAIL_NO_BATTERY end
+    if not MDAD.getBatteryPart(vehicle) then return false, MDAD.FAIL_NO_BATTERY end
 
-    -- ④ 可及性（含保險屋權限、同層、電瓶艙 area）
+    -- ④ 可及性（含保險屋權限、同層、裝置槽 area）
     if not MDAD.canReachVehicle(player, vehicle) then return false, MDAD.FAIL_TOO_FAR end
 
-    -- ⑤⑥ 工具／技能／狀態轉移：與選單置灰共用同一份規則，避免兩套判準漂移
+    -- ⑤ 工具／技能／槽存在／狀態轉移：與選單置灰共用同一份規則，避免兩套判準漂移
     local reason = MDAD.deviceBlockReason(player, vehicle, kind, install)
     if reason then return false, reason end
 
-    local want = MDAD.TYPE_GPS
-    if kind == "auto" then want = MDAD.TYPE_AUTO end
+    -- blockReason 已驗過槽存在
+    local part = MDAD.getDevicePart(vehicle, kind)
+    local want = MDAD.deviceItemType(kind)
 
     if install then
-        -- ⑦ 物品：只從**操作者自己的**背包樹依 ID 重解析
+        -- ⑥ 物品：只從**操作者自己的**背包樹依 ID 重解析
         -- （ItemContainer.getItemWithIDRecursiv＝ItemContainer.java:3065，會遞迴進袋子），
         -- 所以車上零件容器、地板、他人背包裡的同型物品都拿不到；
         -- fullType 必須對上 kind；移除時用 item:getContainer()（InventoryItem.java:3837）
@@ -537,9 +578,6 @@ function MDAD.applyDeviceChange(player, vehicle, kind, install, itemId)
         if item:getFullType() ~= want then return false, MDAD.FAIL_GENERIC end
         local container = item:getContainer()
         if not container then return false, MDAD.FAIL_GENERIC end
-        -- navDelta 一律 server 從實物讀取並 clamp，不採任何 client 值
-        local delta = 0
-        if kind == "nav" then delta = clampDelta(item:getCurrentUsesFloat()) end
 
         -- 以下不再有失敗點
         item:setJobDelta(0)
@@ -547,31 +585,116 @@ function MDAD.applyDeviceChange(player, vehicle, kind, install, itemId)
         container:DoRemoveItem(item)
         if isServer() then sendRemoveItemFromContainer(container, item) end
 
-        local st = MDAD.ensureState(part)
-        if kind == "nav" then
-            st.nav = true
-            st.navDelta = delta
-        else
-            st.auto = true
-        end
-        vehicle:transmitPartModData(part)
+        -- VehiclePart.setInventoryItem＝VehiclePart.java:163-165（內部會跑
+        -- doInventoryItemStats：condition／容量／質量同步，Lua 端不必自己補）
+        part:setInventoryItem(item)
+        -- BaseVehicle.transmitPartItem＝BaseVehicle.java:8145（MP 廣播整顆 item）
+        vehicle:transmitPartItem(part)
         return true
     end
 
-    -- 卸載：instanceItem 可能回 nil（script 缺失／改名），先做出來再動狀態
-    local item = instanceItem(want)
+    -- 卸載：blockReason 已驗過「裝了」＝槽裡有正確 fullType 的實物
+    local item = part:getInventoryItem()
     if not item then return false, MDAD.FAIL_GENERIC end
-    local st = MDAD.ensureState(part)
-    if kind == "nav" then
-        item:setUsedDelta(clampDelta(st.navDelta))
-        st.nav = false
-        st.navDelta = nil
-    else
-        st.auto = false
-    end
-    vehicle:transmitPartModData(part)
+    -- 遷移印記只在「槽裡這顆是遷移生出來的」期間有意義，回到玩家手上就清掉
+    local imd = item:getModData()
+    if imd then imd.MDADMigrated = nil end
+    part:setInventoryItem(nil)
+    vehicle:transmitPartItem(part)
     giveItem(player, item)
     return true
+end
+
+-- server／SP 逐槽把 Battery.modData.MDAD 舊旗標轉成實物。
+-- 回讀實物成功或確認同型遷移印記後，才清該槽旗標；失敗保留未完成部分。
+-- 回傳 (done, events)：全部完成／原本乾淨為 true；events 為 nil 或診斷字串陣列。
+function MDAD.migrateDeviceParts(vehicle)
+    if isClient() or not vehicle then return true, nil end
+    local bat = MDAD.getBatteryPart(vehicle)
+    if not bat then return true, nil end
+    local md = bat:getModData()
+    local st = md and md.MDAD
+    if type(st) ~= "table" then return true, nil end
+
+    local events = {}
+    local done = true
+    local dirty = false
+
+    for _, kind in ipairs({ "nav", "auto" }) do
+        if st[kind] == true then
+            local part = MDAD.getDevicePart(vehicle, kind)
+            if not part then
+                -- 這台車的腳本沒被注入：不是失敗，是還沒有槽可以放
+                done = false
+                if not st.noSlotLogged then
+                    st.noSlotLogged = true
+                    dirty = true
+                    events[#events + 1] = "deferred no-slot kind=" .. kind
+                end
+            else
+                local existing = part:getInventoryItem()
+                if existing ~= nil then
+                    local emd = existing:getModData()
+                    if existing:getFullType() == MDAD.deviceItemType(kind)
+                        and emd and emd.MDADMigrated == true then
+                        -- 上一輪裝好了、但清旗標前中斷：收尾即可
+                        st[kind] = nil
+                        if kind == "nav" then st.navDelta = nil end
+                        dirty = true
+                        events[#events + 1] = "resumed kind=" .. kind
+                            .. " item=" .. tostring(existing:getID())
+                    else
+                        -- 實物與舊旗標同時存在且不是我們裝的：不複製、不覆寫、不清資料
+                        done = false
+                        if st[kind .. "Conflict"] ~= true then
+                            st[kind .. "Conflict"] = true
+                            dirty = true
+                            events[#events + 1] = "conflict kind=" .. kind
+                                .. " existing=" .. tostring(existing:getFullType())
+                        end
+                    end
+                else
+                    local item = instanceItem(MDAD.deviceItemType(kind))
+                    if not item then
+                        done = false
+                        events[#events + 1] = "failed instanceItem kind=" .. kind
+                    else
+                        local oldDelta
+                        if kind == "nav" then
+                            oldDelta = clampDelta(st.navDelta)
+                            item:setUsedDelta(oldDelta)
+                        end
+                        item:getModData().MDADMigrated = true
+                        part:setInventoryItem(item)
+                        vehicle:transmitPartItem(part)
+                        -- 回讀驗證：確定槽裡真的是這顆，才准動舊資料
+                        if part:getInventoryItem() == item then
+                            st[kind] = nil
+                            if kind == "nav" then st.navDelta = nil end
+                            dirty = true
+                            events[#events + 1] = "migrated kind=" .. kind
+                                .. " item=" .. tostring(item:getID())
+                                .. (kind == "nav" and (" oldUses=" .. tostring(oldDelta)
+                                    .. " uses=" .. tostring(item:getCurrentUsesFloat())) or "")
+                        else
+                            done = false
+                            events[#events + 1] = "failed verify kind=" .. kind
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if done and st.nav == nil and st.auto == nil
+        and st.navConflict ~= true and st.autoConflict ~= true then
+        -- 舊表整個是我們的，清乾淨；電瓶 modData 的其他 key 一律不動
+        md.MDAD = nil
+        dirty = true
+    end
+    if dirty then vehicle:transmitPartModData(bat) end
+    if #events == 0 then return done, nil end
+    return done, events
 end
 
 -- 閘門：NeedItemForNav false 放行；否則 charged 隨身 GPS 或 已裝 nav＋活車電。

@@ -21,6 +21,8 @@
 if isClient() then return end
 
 require "MDAD"
+-- 伺服器也要攔原版動作建構，避免遠端鏡像對我方零件重新取得原版 complete。
+require "TimedActions/ISAutoDriveDeviceAction"
 
 -- per-player 節流：偽造封包每次都會觸發一輪背包重解析＋可及性檢查，而 OnClientCommand
 -- 是在伺服器主執行緒同步跑的。合法操作有 150 tick 工時，間隔遠大於此，不會誤傷。

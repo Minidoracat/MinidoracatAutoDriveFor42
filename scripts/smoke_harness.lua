@@ -81,6 +81,7 @@ local nowMs = 5000000
 local clientFlag = false
 local serverFlag = true
 local instanceItemEnabled = true
+-- 主 chunk 的 local 槽已滿（Lua 上限 200）：這個旗標刻意用全域，預設 nil
 
 function getTimestampMs() return nowMs end
 function isClient() return clientFlag end
@@ -105,6 +106,9 @@ local stats = {
     setUsedDelta = 0,        -- 寫入電量的次數（雙扣／重複寫的唯一證據）
     transmitUsedDelta = 0,   -- 車電同步（VehicleUtils.compareFloats 門檻）
     transmitModData = 0,     -- part modData 同步
+    transmitPartItem = 0,    -- part 實物槽同步（BaseVehicle.transmitPartItem）
+    setPartItem = 0,         -- VehiclePart.setInventoryItem（裝上／拔下實物）
+    partById = 0,            -- VehicleParts.getPartById（裝置槽查詢）
     sendItemStats = 0,       -- 隨身物品同步
     setFuel = 0,             -- GasTank content 寫入（vanilla＋extra 分開可觀測）
     gasUpdates = 0,          -- vanilla GasTank updater 呼叫次數
@@ -189,7 +193,8 @@ drive.tripPlayer = setmetatable({}, {
 local sentClient = {}    -- sendClientCommand（client → server）
 local sentServer = {}    -- sendServerCommand（server → client）
 local halos = {}         -- HaloTextHelper.addBadText／addGoodText（kind 分紅綠字）
-local uiCalls = { exit = {}, toInventory = {}, equip = {}, queue = {} }
+local uiCalls = { exit = {}, toInventory = {}, equip = {}, queue = {},
+    install = {}, uninstall = {} }
 
 local function clearList(t)
     for i = #t, 1, -1 do t[i] = nil end
@@ -251,6 +256,77 @@ function recipeWorld.sm:checkAutoLearn(_)
     recipeWorld.globalScans = recipeWorld.globalScans + 1
 end
 
+-- ── 車輛腳本（VehicleScript）的最小替身，給裝置槽注入用 ──────────────────────
+-- 全部掛在 recipeWorld 上：主 chunk 的 local 槽已滿（Lua 上限 200）。
+-- 出處：ScriptManager.getAllVehicleScripts／getVehicleTemplate（ScriptManager.java）；
+--   VehicleScript.getPartById／getPartCount／getAreaById／getAreaCount／getArea／
+--   copyPartsFrom（VehicleScript.java:1271）／Load（:909-915 的 LoadPart：以 id 找到
+--   既有 part，只覆寫 body 帶到的鍵）。
+recipeWorld.scripts = {}          -- getAllVehicleScripts 的內容
+recipeWorld.templates = {}        -- getVehicleTemplate 的內容
+recipeWorld.templateLookups = {}
+
+function recipeWorld.newScript(name, partIds, areaIds)
+    local s = { _name = name, _parts = {}, _order = {}, _areas = areaIds or {},
+        loads = 0, copies = {}, loadFail = false }
+    for _, id in ipairs(partIds or {}) do
+        s._parts[id] = { id = id }
+        s._order[#s._order + 1] = id
+    end
+    function s:getFullName() return self._name end
+    function s:getPartById(id) return self._parts[id] end
+    function s:getPartCount() return #self._order end
+    function s:getAreaCount() return #self._areas end
+    function s:getArea(index)
+        local id = self._areas[index + 1]
+        if id == nil then return nil end
+        return { getId = function() return id end }
+    end
+    function s:getAreaById(id)
+        for i = 1, #self._areas do
+            if self._areas[i] == id then return self:getArea(i - 1) end
+        end
+        return nil
+    end
+    -- ScriptManager 的 template 物件：getScript() 才是 VehicleScript
+    function s:getScript() return self end
+    -- 照真的解析 `part <ID> { area = <ID>, ... }`。area 值不是識別字就當成
+    -- ScriptParser 吃壞掉（丟錯）——注入端的識別字限制才有東西可證。
+    function s:Load(_, body)
+        self.loads = self.loads + 1
+        if self.loadFail then error("script load failed") end
+        for partId, areaId in string.gmatch(body, "part%s+([%w_]+)%s*{%s*area%s*=%s*([^,]+),") do
+            if string.find(areaId, "^%a[%w_]*$") == nil then
+                error("bad area token: " .. tostring(areaId))
+            end
+            local p = self._parts[partId]
+            if p then p.area = areaId end
+        end
+    end
+    -- copyPartsFrom 是**當下**複製：donor 的 area 這一刻是什麼就複製什麼，
+    -- 所以「先改 donor 的 area、再複製」與「先複製、後改」結果完全不同。
+    function s:copyPartsFrom(donor, partId)
+        local src = donor:getPartById(partId)
+        self.copies[#self.copies + 1] = { id = partId, area = src and src.area }
+        if src == nil then return end
+        if self._parts[partId] == nil then self._order[#self._order + 1] = partId end
+        self._parts[partId] = { id = partId, area = src.area }
+    end
+    return s
+end
+
+function recipeWorld.sm:getAllVehicleScripts()
+    local list = { _v = recipeWorld.scripts }
+    function list:size() return #self._v end
+    function list:get(index) return self._v[index + 1] end
+    return list
+end
+
+function recipeWorld.sm:getVehicleTemplate(name)
+    recipeWorld.templateLookups[#recipeWorld.templateLookups + 1] = name
+    return recipeWorld.templates[name]
+end
+
 function getScriptManager() return recipeWorld.sm end
 
 function sendSyncPlayerFields(player, flags)
@@ -266,9 +342,14 @@ local function resetStats()
     clearList(uiCalls.toInventory)
     clearList(uiCalls.equip)
     clearList(uiCalls.queue)
+    clearList(uiCalls.install)
+    clearList(uiCalls.uninstall)
     clearList(recipeWorld.lookups)
+    clearList(recipeWorld.templateLookups)
     clearList(recipeWorld.learns)
     clearList(recipeWorld.syncs)
+    -- vanillaAction 在本檔後段才建（全域），resetStats 只會在那之後被呼叫
+    clearList(vanillaAction.calls)
 end
 
 function sendItemStats(_) stats.sendItemStats = stats.sendItemStats + 1 end
@@ -334,9 +415,18 @@ ISVehicleMenu = {
     onExit = function(playerObj) uiCalls.exit[#uiCalls.exit + 1] = playerObj end,
 }
 
+-- 原版維修面板的兩支入口。右鍵選單改成直接呼叫它們（不再自己排 pathfind／
+-- 裝備工具／下車／排動作），這樣其他 MOD 對零件動作的攔截才留得住。
+-- 出處：ISVehiclePartMenu.onInstallPart／onUninstallPart（ISVehiclePartMenu.lua）。
 ISVehiclePartMenu = {
     toPlayerInventory = function(playerObj, item)
         uiCalls.toInventory[#uiCalls.toInventory + 1] = { player = playerObj, item = item }
+    end,
+    onInstallPart = function(playerObj, part, item)
+        uiCalls.install[#uiCalls.install + 1] = { player = playerObj, part = part, item = item }
+    end,
+    onUninstallPart = function(playerObj, part)
+        uiCalls.uninstall[#uiCalls.uninstall + 1] = { player = playerObj, part = part }
     end,
 }
 
@@ -522,6 +612,60 @@ function ISBaseTimedAction:setActionAnim(anim) self.actionAnim = anim end
 function ISBaseTimedAction:stop() self.stopped = true end
 function ISBaseTimedAction:perform() self.performed = true end
 
+-- 原版拆裝動作的替身。production 不再自己開 constructor：它包住這兩支同名 .new，
+-- 先讓上游把 instance 建好，再**原地**把 metatable 換成 ISAutoDriveDeviceAction。
+-- 所以這裡每顆 instance 都蓋一個唯一記號（_vanillaTag）——測試靠它證明拿回來的
+-- 是上游那一顆，不是重新 new 出來的副本（副本會掉掉原版塞的欄位與 net 鏡像語意）。
+-- 兩個拒絕 sentinel 照原版的兩種表現：reject＝上游回 nil（例如 item 不合法），
+-- ignore＝回一顆 ignoreAction 的 instance。兩者都必須原樣穿透。
+-- 欄位照原版 new 抄：ISInstallVehiclePart.lua:132-143、ISUninstallVehiclePart.lua:109-121。
+vanillaAction = { tag = 0, calls = {}, reject = false, ignore = false }
+
+-- 主 chunk 的 local 槽已滿（Lua 上限 200）：輔助一律掛在 vanillaAction 上
+function vanillaAction.build(cls, character, part)
+    if vanillaAction.reject then return nil end
+    local o = ISBaseTimedAction.new(cls, character)
+    vanillaAction.tag = vanillaAction.tag + 1
+    o._vanillaTag = vanillaAction.tag
+    o.part = part
+    if part ~= nil then o.vehicle = part:getVehicle() end
+    if vanillaAction.ignore then o.ignoreAction = true end
+    return o
+end
+
+ISInstallVehiclePart = ISBaseTimedAction:derive("ISInstallVehiclePart")
+
+function ISInstallVehiclePart:new(character, part, item, maxTimeInit)
+    local o = vanillaAction.build(self, character, part)
+    if o ~= nil then
+        o.item = item
+        o.maxTimeInit = maxTimeInit
+        o.maxTime = maxTimeInit
+        o.jobType = getText("Tooltip_Vehicle_Installing", item:getDisplayName())
+    end
+    vanillaAction.calls[#vanillaAction.calls + 1] =
+        { op = "install", character = character, part = part, item = item,
+          time = maxTimeInit, result = o }
+    return o
+end
+
+ISUninstallVehiclePart = ISBaseTimedAction:derive("ISUninstallVehiclePart")
+
+function ISUninstallVehiclePart:new(character, part, workTime)
+    local o = vanillaAction.build(self, character, part)
+    if o ~= nil then
+        if part ~= nil and part:getInventoryItem() ~= nil then
+            o.jobType = getText("Tooltip_Vehicle_Uninstalling",
+                part:getInventoryItem():getDisplayName())
+        end
+        o.workTime = workTime
+        o.maxTime = workTime
+    end
+    vanillaAction.calls[#vanillaAction.calls + 1] =
+        { op = "uninstall", character = character, part = part, time = workTime, result = o }
+    return o
+end
+
 -- 事件註冊表：MDAD_Distributions 掛 OnPostDistributionMerge、MDAD_Server 掛
 -- OnClientCommand、MDAD_Client 掛 OnGameStart／OnCreatePlayer／
 -- OnFillWorldObjectContextMenu／OnServerCommand，全靠 fire() 觸發
@@ -606,6 +750,9 @@ local function newItem(fullType, opts)
         _broken = opts.broken == true,
         _tags = opts.tags or {},
         _container = nil,
+        -- InventoryItem.getModData＝InventoryItem.java 的 KahluaTable：裝置搬進零件槽
+        -- 後**同一顆實物**要連 modData 一起留著（複製一顆新的就會掉這張表）
+        _md = {},
         jobDelta = nil,
         jobType = nil,
     }
@@ -616,6 +763,9 @@ local function newItem(fullType, opts)
     function it:isBroken() return self._broken end
     function it:hasTag(tag) return self._tags[tag] == true end
     function it:getContainer() return self._container end
+    function it:getModData() return self._md end
+    -- 原版拆裝動作的 jobType 會帶物品顯示名（ISInstallVehiclePart.lua:141）
+    function it:getDisplayName() return self._fullType end
     function it:setJobDelta(v) self.jobDelta = v end
     function it:setJobType(v) self.jobType = v end
 
@@ -635,8 +785,12 @@ end
 local GPS_T = "MinidoracatAutoDrive.GPSNavigator"
 local AUTO_T = "MinidoracatAutoDrive.AutopilotModule"
 
+-- instanceItemFail＝只讓某一個 full type 生成失敗。遷移是一輛車兩顆裝置，
+-- 「前一半成功、後一半失敗」是真的會發生（items 腳本部分缺失），也是最容易
+-- 寫出「重試時重複生成」漏洞的地方，所以要能單獨關掉一種。
 function instanceItem(fullType)
     if not instanceItemEnabled then return nil end
+    if instanceItemFail == fullType then return nil end
     stats.instanceItem = stats.instanceItem + 1
     if fullType == GPS_T then
         -- base:drainable，新品滿電；production 會 setUsedDelta 覆寫
@@ -830,6 +984,48 @@ local function newBatteryPart(battery, area)
     function part:getModData() return self._md end
     function part:getInventoryItem() return self._item end
     function part:getArea() return self._area end
+    function part:getVehicle() return self._vehicle end
+    -- 每個真 VehiclePart 都有 id（VehiclePart.java:119）。deviceKind 會對**任何**
+    -- 傳進來的 part 呼叫它：少了這支，「拿電瓶槽走原版動作」那條路會直接炸。
+    function part:getId() return "Battery" end
+    return part
+end
+
+-- 裝置槽只存實物，不另建旗標或電量鏡像。
+-- initFn：nil＝本 MOD 回調；false＝無回調；字串＝外部回調。
+-- 同名槽以 init 回調辨識所有權，避免讀寫其他 MOD 的零件。
+-- 主 chunk 接近 200 local 上限，factory 使用全域以免多占一槽。
+function newDevicePart(id, area, initFn)
+    -- _cond 起始 -1＝引擎的「還沒定過條件」（VehicleParts.createParts 看到 -1
+    -- 才會 setRandomCondition，那會讓空安裝座顯示成一個壞掉的零件）
+    local part = { _md = {}, _item = nil, _id = id, _vehicle = nil, _area = area, _cond = -1 }
+    if initFn == nil then
+        part._luaInit = "MDAD_DeviceParts.onPartInit"
+    elseif initFn ~= false then
+        part._luaInit = initFn
+    end
+    -- VehiclePart.getLuaFunction(name)＝script 的 lua block 查詢
+    function part:getLuaFunction(name)
+        if name == "init" then return self._luaInit end
+        return nil
+    end
+    function part:getModData() return self._md end
+    function part:getId() return self._id end
+    function part:getArea() return self._area end
+    function part:getVehicle() return self._vehicle end
+    function part:getInventoryItem() return self._item end
+    -- VehiclePart.getCondition／setCondition＝VehiclePart.java:866-873
+    function part:getCondition() return self._cond end
+    function part:setCondition(v)
+        if v > 100 then v = 100 elseif v < 0 then v = 0 end
+        self._cond = v
+    end
+    -- 引擎不會幫忙改 item 的容器歸屬：搬進槽前要由呼叫端 DoRemoveItem，
+    -- 搬出槽後要由呼叫端 AddItem。這裡照樣只存，才抓得到漏掉那一步的實作。
+    function part:setInventoryItem(item)
+        stats.setPartItem = stats.setPartItem + 1
+        self._item = item
+    end
     return part
 end
 
@@ -837,6 +1033,7 @@ local function newGasPart(amount, capacity)
     local part = { _amount = amount or 0, _capacity = capacity or 1, _gas = true,
         _item = newItem("Base.PetrolCanEmpty") }
     function part:getInventoryItem() return self._item end
+    function part:getId() return "GasTank" end
     function part:getContainerContentAmount() return self._amount end
     function part:getContainerCapacity() return self._capacity end
     function part:setContainerContentAmount(value)
@@ -857,6 +1054,11 @@ function getVehicleById(id)
 end
 
 -- opts: battery、noBattery、area、inArea、z、engineRunning，
+--       noDeviceSlots＝script 沒有注入 MDADGPS／MDADAutopilot 兩個槽
+--       （舊版車輛 script／腳踏車／拖車），navItem／autoItem＝開場就插在槽裡的實物，
+--       navArea／autoArea＝兩個裝置槽各自的 script area（canReachVehicle 的新主判準），
+--       navInit／autoInit＝該槽 script 的 lua init 函式名（false＝沒有、字串＝別人的），
+--         用來造出「同名但不是本 MOD 的」零件槽，
 --       以下為 M3 自駕：x／y（世界座標）、fwdX／fwdY（車頭前向）、speed（km/h，
 --       有號）、mass、steering（getCurrentSteering）、stopped、driver（isDriver 認的人）
 local function newVehicle(opts)
@@ -883,6 +1085,10 @@ local function newVehicle(opts)
         _regSpeed = nil,
         -- 每幀施力的帳：frame＝本幀次數、max＝觀測窗內單幀最高、total＝總次數
         _imp = { frame = 0, max = 0, total = 0, useAfterRelease = 0 },
+        -- 注入式裝置槽。整車只有這兩個槽認得裝置，查不到＝這輛車不支援
+        -- （VehicleParts.getPartById 回 nil）。id 刻意寫死字面值：Core 若改常數，
+        -- 存檔相容性就斷了，這裡必須紅。
+        _devices = {},
     }
     local ext = newVec3():set(opts.bodyW or 1.8, 1, opts.bodyL or 4.4)
     local com = newVec3():set(opts.comX or 0, opts.comY or 0.5, opts.comZ or 0)
@@ -920,10 +1126,26 @@ local function newVehicle(opts)
         function script:getRollInfluence() return opts.rollInfluence or 0.7 end
     end
     v._script, v._com = script, com
+    if v._part then v._part._vehicle = v end
     nextVehicleId = nextVehicleId + 1
     vehiclesById[v._id] = v
+    if not opts.noDeviceSlots then
+        -- 注入端讓兩個槽共用電瓶艙的 area（MDAD_DeviceParts 的 copyPartsFrom），
+        -- 所以 opts.area 就是槽的 area；navArea／autoArea 只給刻意分歧的情境用。
+        -- navInit／autoInit＝false 或別人的函式名時，這個槽就是「同名但不是我們的」。
+        v._devices.MDADGPS = newDevicePart("MDADGPS", opts.navArea or opts.area, opts.navInit)
+        v._devices.MDADAutopilot = newDevicePart("MDADAutopilot", opts.autoArea or opts.area,
+            opts.autoInit)
+        v._devices.MDADGPS._vehicle = v
+        v._devices.MDADAutopilot._vehicle = v
+        v._devices.MDADGPS._item = opts.navItem
+        v._devices.MDADAutopilot._item = opts.autoItem
+    end
 
     function v:getId() return self._id end
+    -- BaseVehicle.getSqlId＝BaseVehicle.java:455（存檔列 id，遷移 audit log 用）。
+    -- 刻意與 getId 不同值：兩者混用在實機 log 上完全看不出來，這裡要看得出來。
+    function v:getSqlId() return self._id + 1000 end
     function v:getMaxSpeed() return self._maxSpeed end
     function v:getScript() return self._script end
     function v:getSquare() return self._square end
@@ -936,6 +1158,8 @@ local function newVehicle(opts)
     end
     function v:isEngineRunning() return self._engine end
     function v:getZ() return self._z end
+    -- BaseVehicle.getScriptName（遷移／稽核日誌拿它標出是哪一款車）
+    function v:getScriptName() return self._script:getFullName() end
     -- BaseVehicle.isInArea(areaId, chr)＝BaseVehicle.java:8225
     function v:isInArea(area, chr)
         stats.isInArea = stats.isInArea + 1
@@ -947,6 +1171,12 @@ local function newVehicle(opts)
     function v:transmitPartModData(part)
         stats.transmitModData = stats.transmitModData + 1
         if part and part._gas then stats.transmitFuel = stats.transmitFuel + 1 end
+    end
+    -- BaseVehicle.transmitPartItem＝BaseVehicle.java:8145（updateFlags |= 128：
+    -- 槽裡的實物換人了才發這支；modData 同步是另一支 |= 16）
+    function v:transmitPartItem(part)
+        stats.transmitPartItem = stats.transmitPartItem + 1
+        self._lastItemSync = part
     end
 
     -- isDriver(chr) ⇔ getSeat(chr)==0（BaseVehicle.java:1853-1864）
@@ -1027,7 +1257,7 @@ local function newVehicle(opts)
     -- setForceBrake 寫 clientControls.forceBrake，效期 1 秒（CarController.java:973-979）
     function v:setForceBrake() drive.calls.forceBrake = drive.calls.forceBrake + 1 end
     if opts.profileFull then
-        local tirePart = {
+        v._tirePart = {
             getInventoryItem = function()
                 drive.calls.getInventoryItem = drive.calls.getInventoryItem + 1
                 return {}
@@ -1050,13 +1280,17 @@ local function newVehicle(opts)
             drive.calls.isAnyTireMissing = drive.calls.isAnyTireMissing + 1
             return opts.tireMissing == true
         end
-        function v:getPartById(id)
+    end
+    -- VehicleParts.getPartById（VehicleParts.java:113-115）：裝置槽與輪胎同一支
+    -- 查詢。裝置槽的計數走 stats（每個情境自己 resetStats），輪胎枚舉維持
+    -- drive.calls——自駕熱路徑的「每幀不重查輪胎」斷言量的是後者的增量。
+    function v:getPartById(id)
+        if type(id) == "string" and string.sub(id, 1, 4) == "Tire" then
             drive.calls.getPartById = drive.calls.getPartById + 1
-            if type(id) == "string" and string.sub(id, 1, 4) == "Tire" then
-                return tirePart
-            end
-            return nil
+            return self._tirePart
         end
+        stats.partById = stats.partById + 1
+        return self._devices[id]
     end
     -- Phase A 診斷 getter：只應在 s.diag 真時被呼叫。
     function v:isDoingOffroad()
@@ -1098,7 +1332,13 @@ VehicleUtils = {
         return round(a, precision) ~= round(b, precision)
     end,
 }
-Vehicles = { Update = {} }
+-- Vehicles.InstallTest.Default／UninstallTest.Default＝原版的可安裝判定
+-- （Vehicles.lua:911／946，注意原版已把 perk 檢查註解掉）。MDAD 的 part 回調
+-- 必須「先問原版、再加自己的技能閘門」，所以這裡要能獨立操控原版的答案。
+Vehicles = { Update = {},
+    InstallTest = { Default = function() return vanillaAction.installTest ~= false end },
+    UninstallTest = { Default = function() return vanillaAction.uninstallTest ~= false end },
+}
 function Vehicles.Update.GasTank(vehicle, part, elapsedMinutes)
     stats.gasUpdates = stats.gasUpdates + 1
     local old = part:getContainerContentAmount()
@@ -1120,6 +1360,9 @@ local loaded = {
     ["luautils"] = true,
     -- MDAD_Driver require 原版的 radial 選單檔；上面的假 ISVehicleMenu 頂替
     ["Vehicles/ISUI/ISVehicleMenu"] = true,
+    -- production 的 TimedAction 包裝 require 原版拆裝動作；上面的替身頂替
+    ["Vehicles/TimedActions/ISInstallVehiclePart"] = true,
+    ["Vehicles/TimedActions/ISUninstallVehiclePart"] = true,
 }
 
 -- loadfile 對「檔案不存在」和「語法錯誤」都回 nil，直接吞掉會把 production 的語法錯
@@ -1147,6 +1390,9 @@ end
 
 require "MDAD"
 require "MDAD_Recipe"
+-- MDAD_DeviceParts 在載入期只註冊 OnGameBoot（注入要等 ScriptManager.Load 之後），
+-- 所以這裡載入不會動到任何腳本；注入由情境自己 fire。
+require "MDAD_DeviceParts"
 require "TimedActions/ISAutoDriveDeviceAction"
 require "MDAD_Distributions"
 -- MDAD_Server 開頭是 `if isClient() then return end`：要在 clientFlag=false 時載入
@@ -1571,16 +1817,49 @@ local bag = pBag:getInventory():AddSubContainer()
 bag:AddItem(newItem(GPS_T, { uses = 0.4, useDelta = 0.006 }))
 checkTrue(gate(6), "GPS 放在背包裡的袋子也算帶著（走遞迴搜尋 API）")
 
--- 車上已裝 nav＋車電有電：O(1) 短路，不進背包也不進快取
+-- 車上已裝 nav＋車電有電：O(1) 短路，不進背包也不進快取。
+-- 「已裝」＝ MDADGPS 槽裡真的有一顆 GPSNavigator，不是電瓶 modData 上的旗標。
 local vehBat = newItem("Base.CarBattery", { uses = 0.5 })
 local navVeh = newVehicle({ battery = vehBat })
-local navSt = MDAD.ensureState(navVeh:getBattery())
-navSt.nav = true
+local navSlot = navVeh._devices.MDADGPS
+navSlot._item = newItem(GPS_T, { uses = 0.2, useDelta = 0.006 })
 local pInCar = newPlayer({ num = 3 })
 pInCar._vehicle = navVeh
 players[3] = pInCar
 
-checkTrue(MDAD.isNavInstalled(navVeh), "isNavInstalled 讀得到 part modData 狀態")
+checkEq(MDAD.PART_NAV, "MDADGPS", "nav 裝置槽 id 是存檔相容常數（不得改名）")
+checkEq(MDAD.PART_AUTO, "MDADAutopilot", "auto 裝置槽 id 是存檔相容常數（不得改名）")
+checkEq(MDAD.getDevicePart(navVeh, "nav"), navSlot, "getDevicePart 依 kind 取到對應的槽")
+checkEq(MDAD.getDevicePart(navVeh, "auto"), navVeh._devices.MDADAutopilot, "auto 取到另一個槽")
+checkNil(MDAD.getDevicePart(navVeh, "turbo"), "未知 kind：沒有槽")
+checkNil(MDAD.getDevicePart(nil, "nav"), "無車輛：沒有槽")
+checkNil(MDAD.getDevicePart(newVehicle({ noDeviceSlots = true }), "nav"),
+    "script 沒注入槽的車：getDevicePart 回 nil")
+checkEq(MDAD.deviceKind(navSlot), "nav", "deviceKind 由槽反查 kind")
+checkEq(MDAD.deviceKind(navVeh._devices.MDADAutopilot), "auto", "deviceKind 認得 auto 槽")
+checkNil(MDAD.deviceKind(navVeh:getBattery()), "電瓶 part 不是裝置槽")
+checkNil(MDAD.deviceKind(nil), "nil part：deviceKind 為 nil")
+
+-- 同名但不是本 MOD 的零件槽（別的 MOD 或手改腳本佔了 MDADGPS 這個 id）：
+-- 所有權靠 script 的 lua init 回調認，不是靠 id。認錯的後果是 MDAD 直接讀寫
+-- 對方的零件——安裝會覆寫對方的物品、卸載會把對方的物品送給玩家、遷移會動到
+-- 對方的存檔資料。
+do -- 主 chunk 的 local 槽已滿：臨時車輛包在區塊裡
+    local vForeign = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }),
+        navInit = false, autoInit = "SomeOtherMod.onPartInit" })
+    checkNil(MDAD.deviceKind(vForeign._devices.MDADGPS), "同名但沒有 lua init：不是我們的槽")
+    checkNil(MDAD.deviceKind(vForeign._devices.MDADAutopilot), "同名但 init 指向別人：不是我們的槽")
+    checkNil(MDAD.getDevicePart(vForeign, "nav"), "getDevicePart 不認同名的外來槽")
+    checkNil(MDAD.getDevicePart(vForeign, "auto"), "auto 同理")
+    -- 對方的槽裡就算剛好放著一顆 GPS，也不算「本車裝了 GPS」
+    vForeign._devices.MDADGPS._item = newItem(GPS_T, { uses = 0.9, useDelta = 0.006 })
+    vForeign._devices.MDADAutopilot._item = newItem(AUTO_T)
+    checkFalse(MDAD.isNavInstalled(vForeign), "外來槽裡的 GPS 不算本 MOD 已安裝")
+    checkFalse(MDAD.isAutoInstalled(vForeign), "外來槽裡的自駕模組同理")
+    checkFalse(MDAD.hasVehicleNavPower(vForeign), "外來槽不提供車載導航電力")
+end
+
+checkTrue(MDAD.isNavInstalled(navVeh), "isNavInstalled 讀得到槽裡的實物")
 checkFalse(MDAD.isAutoInstalled(navVeh), "只裝 nav 時 isAutoInstalled 為 false")
 checkTrue(MDAD.isBatteryLive(navVeh), "車電有電：isBatteryLive")
 checkFalse(MDAD.isBatteryLive(newVehicle({ noBattery = true })), "無電瓶 part：isBatteryLive 為 false")
@@ -1602,23 +1881,34 @@ checkEq(reason, NEED_GPS, "車電耗盡的理由鍵")
 checkEq(stats.scanTypeEval, 1, "車電耗盡才回退掃背包")
 
 vehBat._uses = 1.0
-navSt.nav = false
+navSlot._item = nil
 resetStats()
 ok, reason = gate(3)
 checkFalse(ok, "只有車電、沒裝 nav：不放行")
 checkEq(reason, NEED_GPS, "未安裝時的理由鍵")
 checkEq(stats.scanTypeEval, 1, "沒裝 nav 就得回退掃背包")
 
-navSt.nav = true
+navSlot._item = newItem(GPS_T, { uses = 0, useDelta = 0.006 })
+checkTrue(MDAD.isNavInstalled(navVeh), "槽裡的 GPS 沒電仍然是「已安裝」（電量不是安裝判準）")
 navVeh._part._item = nil
 checkFalse(gate(3), "已裝 nav 但電瓶槽空了：不放行")
 navVeh._part._item = newItem("Base.Plank")
 checkFalse(gate(3), "電瓶槽塞非 drainable 物品：不放行（不呼叫不存在的方法）")
 
+-- 槽裡塞錯東西（外掛／舊版注入衝突）：fullType 不對就不算裝了
+navSlot._item = newItem("Base.Plank")
+checkFalse(MDAD.isNavInstalled(navVeh), "槽裡是別的物品：不算已安裝（只認 fullType）")
+navSlot._item = newItem(AUTO_T)
+checkFalse(MDAD.isNavInstalled(navVeh), "nav 槽裡塞自駕模組：不算 nav 已安裝")
+navVeh._devices.MDADAutopilot._item = newItem(GPS_T, { uses = 1, useDelta = 0.006 })
+checkFalse(MDAD.isAutoInstalled(navVeh), "auto 槽裡塞 GPS：不算 auto 已安裝")
+navSlot._item = nil
+navVeh._devices.MDADAutopilot._item = nil
+
 -- =====================================================================
 -- 情境四：deviceBlockReason ＋ 隨身道具查詢
 -- =====================================================================
-scenario("安裝阻擋原因：無電瓶／無工具／技能不足／已安裝，與隨身道具查詢")
+scenario("安裝阻擋原因：無電瓶／無裝置槽／無工具／技能不足／已安裝，與隨身道具查詢")
 
 setSandbox({ InstallSkillGate = true })
 local pOk = newPlayer({ num = 4, electricity = 1 })
@@ -1643,6 +1933,22 @@ checkEq(blockReason(pOk, bike, "nav", false), NO_BATTERY, "無電瓶時卸載也
 checkNil(MDAD.getBatteryPart(bike), "getBatteryPart 對無電瓶車輛回 nil")
 checkNil(MDAD.getBatteryPart(nil), "getBatteryPart 對 nil 車輛回 nil")
 
+-- 車有電瓶、但 script 沒注入裝置槽（舊版 script／注入失敗／不支援的車型）：
+-- 擋在自己的關卡，不得混進「沒有電瓶」——玩家看到的說明會完全誤導。
+do -- 主 chunk 的 local 槽已滿：臨時車輛包在區塊裡
+    local noSlot = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.6 }),
+        noDeviceSlots = true })
+    checkEq(blockReason(pOk, noSlot, "nav", true), FAILED, "沒有 nav 裝置槽：安裝被擋")
+    checkEq(blockReason(pOk, noSlot, "auto", true), FAILED, "沒有 auto 裝置槽：安裝被擋")
+    checkEq(blockReason(pOk, noSlot, "nav", false), FAILED, "沒有裝置槽時卸載也擋在同一關")
+    -- 同名但不是我們的槽：等同「沒有槽」，不得被當成可安裝
+    local foreign = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.6 }),
+        navInit = false, autoInit = "SomeOtherMod.onPartInit" })
+    checkEq(blockReason(pOk, foreign, "nav", true), FAILED, "同名外來槽：安裝被擋")
+    checkEq(blockReason(pOk, foreign, "auto", true), FAILED, "同名外來槽（auto）：安裝被擋")
+    checkEq(blockReason(pOk, foreign, "nav", false), FAILED, "同名外來槽：卸載也被擋")
+end
+
 local pNoTool = newPlayer({ electricity = 1 })
 checkEq(blockReason(pNoTool, vOk, "nav", true), NO_TOOL, "沒螺絲刀")
 local pBadTool = newPlayer({ electricity = 1 })
@@ -1665,17 +1971,18 @@ checkFalse(MDAD.hasInstallSkill(nil), "無玩家：hasInstallSkill 為 false")
 local pNothing = newPlayer({ electricity = 0 })
 checkEq(blockReason(pNothing, vOk, "nav", true), NO_TOOL, "沒工具又沒技能：先報缺工具")
 
-local stOk = MDAD.ensureState(vOk:getBattery())
-stOk.nav = true
+-- 「已安裝」的唯一來源是槽裡的實物
+local stOk = vOk._devices.MDADGPS
+stOk._item = newItem(GPS_T, { uses = 0.4, useDelta = 0.006 })
 checkEq(blockReason(pOk, vOk, "nav", true), ALREADY, "已裝 nav 不能再裝")
 checkNil(blockReason(pOk, vOk, "nav", false), "已裝 nav 可以卸")
-checkNil(blockReason(pOk, vOk, "auto", true), "nav 已裝不影響 auto 安裝（狀態欄位沒接錯）")
+checkNil(blockReason(pOk, vOk, "auto", true), "nav 已裝不影響 auto 安裝（兩個槽沒接錯）")
 checkEq(blockReason(pOk, vOk, "auto", false), FAILED, "auto 沒裝不能卸")
-stOk.auto = true
+vOk._devices.MDADAutopilot._item = newItem(AUTO_T)
 checkEq(blockReason(pOk, vOk, "auto", true), ALREADY, "已裝 auto 不能再裝")
 checkNil(blockReason(pOk, vOk, "auto", false), "已裝 auto 可以卸")
-stOk.nav = nil
-stOk.auto = nil
+stOk._item = nil
+vOk._devices.MDADAutopilot._item = nil
 checkEq(blockReason(pOk, vOk, "nav", false), FAILED, "都沒裝時卸載被擋")
 
 -- 隨身道具查詢（client context menu 靠這兩支決定要不要出現安裝選項）
@@ -1701,7 +2008,7 @@ checkEq(stats.scanType, 2, "findPortableGPS／findAutopilot 各只掃一次背�
 -- 約 4 格全放行，隔牆偷裝在 MP 下是真的漏洞。這裡逐條釘住新判準，並在收尾
 -- 用 distCalls 證明距離 API 全程沒被碰。
 -- =====================================================================
-scenario("canReachVehicle：坐車一律拒絕、保險屋、同層、有 area 只認 isInArea、無 area 認相鄰格")
+scenario("canReachVehicle：坐車一律拒絕、保險屋、同層、area 取裝置槽優先、無 area 認相鄰格")
 
 safehouseAllow = true
 local pR = newPlayer({ num = 8 })
@@ -1777,6 +2084,32 @@ checkEq(stats.canReachTo, 0, "不在 area 內也不退回相鄰格")
 vA._inArea = 1
 checkFalse(MDAD.canReachVehicle(pA, vA), "isInArea 回非 true 值一律拒絕")
 vA._inArea = true
+
+-- area 的來源是**零件**的順序：nav 槽 → auto 槽 → 電瓶 part，取到哪個 part 就讀
+-- 它的 area。注入端讓兩個槽共用電瓶艙的 area，所以實機上三者一致；電瓶那條只是
+-- 「腳本沒被注入」時的退路。這裡把三者刻意設成不同字串，才看得出真的取了哪一個。
+do -- 主 chunk 的 local 槽已滿：臨時車輛包在區塊裡
+    local vPrec = newVehicle({ battery = newItem("Base.CarBattery", { uses = 1 }), area = "engine",
+        navArea = "gps_bay", autoArea = "auto_bay" })
+    vPrec._inArea = true
+    pA._square._canReach = false
+    resetStats()
+    checkTrue(MDAD.canReachVehicle(pA, vPrec), "裝置槽有 area：可及")
+    checkEq(vPrec._areaArg, "gps_bay", "有 nav 槽就用 nav 槽的 area（電瓶艙不參與）")
+    checkEq(stats.canReachTo, 0, "有 area 就不退相鄰格")
+    vPrec._devices.MDADGPS = nil            -- 只注入了 auto 槽
+    checkTrue(MDAD.canReachVehicle(pA, vPrec), "只有 auto 槽：仍可及")
+    checkEq(vPrec._areaArg, "auto_bay", "沒有 nav 槽才退到 auto 槽")
+    vPrec._devices.MDADAutopilot = nil      -- 兩個槽都沒注入（舊腳本）
+    checkTrue(MDAD.canReachVehicle(pA, vPrec), "兩個槽都沒注入：退回電瓶艙")
+    checkEq(vPrec._areaArg, "engine", "最後才退回電瓶 part 的 area")
+    vPrec._part._area = nil
+    resetStats()
+    checkFalse(MDAD.canReachVehicle(pA, vPrec), "連電瓶艙都沒 area：退回相鄰格判定（此處刻意不相鄰）")
+    checkEq(stats.isInArea, 0, "沒有任何 area 時不呼叫 isInArea")
+    checkEq(stats.canReachTo, 1, "沒有任何 area 才走 canReachTo")
+    pA._square._canReach = true
+end
 
 -- 沒有電瓶 part（腳踏車／拖車）：拿不到 area，退回相鄰格判定
 local vBike = newVehicle({ noBattery = true })
@@ -2027,8 +2360,10 @@ do
     c.driver._vehicle = c.vehicle
     c.driver._modData.MinidoracatMiniMapTX = 100
     c.driver._modData.MinidoracatMiniMapTY = 200
-    c.state = MDAD.ensureState(c.vehicle:getBattery())
-    c.state.nav, c.state.auto = true, true
+    -- 車載裝置＝兩個槽裡各插一顆實物（本情境量的是耗電／油耗，裝置只要「在」）
+    c.navSlot = c.vehicle._devices.MDADGPS
+    c.navSlot._item = newItem(GPS_T, { uses = 0.7, useDelta = 0.006 })
+    c.vehicle._devices.MDADAutopilot._item = newItem(AUTO_T)
 
     nowMs = nowMs + 1001
     resetStats()
@@ -2135,7 +2470,7 @@ do
     Vehicles.Update.GasTank(c.vehicle, c.gas, 1)
     checkNear(c.gas._amount, 0.895, EPS, "只有車載 GPS 時原生 0.10L 再加 5%")
 
-    c.state.nav = false
+    c.navSlot._item = nil
     checkTrue(MDAD.setAutoUsage(c.driver, c.vehicle), "沒有車載 GPS 仍可獨立啟用自駕 registry")
     c.gas = newGasPart(1.0, 1.0)
     Vehicles.Update.GasTank(c.vehicle, c.gas, 1)
@@ -2154,7 +2489,7 @@ do
     checkNear(c.gas._amount, 0.87, EPS,
         "隨身 GPS＋自駕同時運作仍相加為 +30%")
     c.driver:getInventory():DoRemoveItem(c.driverPortable)
-    c.state.nav = true
+    c.navSlot._item = newItem(GPS_T, { uses = 0.7, useDelta = 0.006 })
 
     setSandbox({
         NeedItemForAutoDrive = true,
@@ -2175,7 +2510,7 @@ do
         GPSPowerPercent = 100, AutoDrivePowerPercent = 100,
         GPSFuelPercent = 100, AutoDriveFuelPercent = 100,
     })
-    c.state.nav = true
+    c.navSlot._item = c.navSlot._item or newItem(GPS_T, { uses = 0.7, useDelta = 0.006 })
     c.battery._uses = 0.5
     checkTrue(MDAD.setAutoUsage(c.driver, c.vehicle), "power collector 前續期 registry")
     c.passenger._modData.MinidoracatMiniMapTX = 300
@@ -2242,7 +2577,7 @@ end
 -- 以 MP 專用伺服器的旗標組合（isClient=false、isServer=true）直接驅動突變段，
 -- 這正是 OnClientCommand 會呼叫到的同一份程式碼；派送層另有情境十二～十四。
 -- =====================================================================
-scenario("apply 安裝：nav 保存 delta＋從實際容器移除＋同步；auto 只動 auto 欄位")
+scenario("apply 安裝：同一顆實物搬進零件槽＋從實際容器移除＋槽同步；兩個槽互不干涉")
 
 setSandbox({ InstallSkillGate = true })
 clientFlag, serverFlag = false, true
@@ -2269,7 +2604,7 @@ local function apply(owner, vehicle, kind, install, item)
     return okA, reasonA
 end
 
--- 失敗路徑通用斷言：不丟物、不寫狀態、不同步、不生成道具
+-- 失敗路徑通用斷言：不丟物、不動槽、不同步、不生成道具
 local function noSideEffect(label, expected, owner, vehicle, kind, install, item)
     resetStats()
     local okA, reasonA = apply(owner, vehicle, kind, install, item)
@@ -2282,45 +2617,50 @@ local function noSideEffect(label, expected, owner, vehicle, kind, install, item
         checkEq(owner.removedFromHands, 0, label .. "：沒有從手上移除")
     end
     checkEq(stats.sendRemoveItem, 0, label .. "：沒有發移除同步")
-    checkEq(stats.transmitModData, 0, label .. "：沒有同步 part modData")
+    checkEq(stats.setPartItem, 0, label .. "：沒有動過零件槽")
+    checkEq(stats.transmitPartItem, 0, label .. "：沒有同步零件槽")
     checkEq(stats.instanceItem, 0, label .. "：沒有生成道具")
     if vehicle then
-        checkFalse(MDAD.isNavInstalled(vehicle), label .. "：nav 狀態未被寫入")
-        checkFalse(MDAD.isAutoInstalled(vehicle), label .. "：auto 狀態未被寫入")
+        checkFalse(MDAD.isNavInstalled(vehicle), label .. "：nav 槽仍是空的")
+        checkFalse(MDAD.isAutoInstalled(vehicle), label .. "：auto 槽仍是空的")
     end
 end
 
--- 安裝 nav：happy path
+-- 安裝 nav：happy path。裝置狀態沒有第二份副本——槽裡那顆就是玩家剛剛交出去的實物。
 ch = mkPlayer()
 veh = mkVehicle()
 it = newItem(GPS_T, { uses = 0.42, useDelta = 0.006 })
+it:getModData().MDADSerial = "SN-42"
 ch:getInventory():AddItem(it)
 resetStats()
 checkTrue(apply(ch, veh, "nav", true, it), "安裝 nav：apply 回 true")
-st = MDAD.getState(veh)
-checkTrue(st ~= nil, "安裝後 part modData 有 MDAD 狀態表")
-checkEq(st.v, 1, "狀態版本欄位寫成 1")
-checkTrue(st.nav, "st.nav = true")
-checkNear(st.navDelta, 0.42, EPS, "navDelta 由 server 從實物讀取（不採 client 值）")
-checkNil(st.auto, "安裝 nav 不碰 st.auto")
+checkEq(veh._devices.MDADGPS:getInventoryItem(), it, "槽裡就是玩家那顆 GPS（不是複製品）")
+checkNear(it._uses, 0.42, EPS, "電量跟著實物走，沒有被重算")
+checkEq(stats.setUsedDelta, 0, "安裝不寫電量（電量已經在實物上）")
+checkEq(it:getModData().MDADSerial, "SN-42", "實物的 modData 原封不動")
+checkEq(stats.setPartItem, 1, "只呼叫一次 setInventoryItem")
+checkEq(stats.transmitPartItem, 1, "槽的實物換人：發一次 transmitPartItem")
+checkEq(veh._lastItemSync, veh._devices.MDADGPS, "同步的是被動到的那個槽")
+checkEq(stats.transmitModData, 0, "裝置狀態不在 modData：不發 modData 同步")
 checkFalse(ch:getInventory():contains(it), "物品已從背包移除")
+checkNil(it:getContainer(), "物品的容器歸屬已清掉（否則背包與槽各有一份＝複製）")
 checkEq(ch.removedFromHands, 1, "先從手上卸下再移除")
 checkEq(it.jobDelta, 0, "移除前把 jobDelta 歸零（避免殘留進度條）")
 checkEq(stats.itemById, 1, "只依 id 重解析一次物品")
 checkEq(stats.sendRemoveItem, 1, "MP server 發了一次移除同步")
-checkEq(stats.transmitModData, 1, "同步了一次 part modData")
 checkEq(stats.addWorldItem, 0, "安裝不會掉東西在地上")
 checkTrue(MDAD.isNavInstalled(veh), "isNavInstalled 反映安裝結果")
 checkFalse(MDAD.isAutoInstalled(veh), "只裝 nav 時 auto 仍為未安裝")
 checkTrue(MDAD.hasVehicleNavPower(veh), "裝好後車電有電：hasVehicleNavPower")
 
--- 重播同一個請求：被 deviceBlockReason 擋下，且不得再改狀態
+-- 重播同一個請求：被 deviceBlockReason 擋下，且不得再動槽
 resetStats()
 local okR, reasonR = apply(ch, veh, "nav", true, it)
 checkFalse(okR, "同一請求重播：回 false")
 checkEq(reasonR, ALREADY, "重播理由鍵是已安裝")
-checkNear(st.navDelta, 0.42, EPS, "重播不覆寫 navDelta")
-checkEq(stats.transmitModData, 0, "重播不再同步")
+checkEq(veh._devices.MDADGPS:getInventoryItem(), it, "重播不換掉槽裡的實物")
+checkEq(stats.setPartItem, 0, "重播不再動槽")
+checkEq(stats.transmitPartItem, 0, "重播不再同步")
 checkEq(stats.sendRemoveItem, 0, "重播不再發移除")
 
 -- 物品放在背包裡的袋子：要從**實際容器**移除，不是預設主背包
@@ -2332,27 +2672,63 @@ resetStats()
 checkTrue(apply(ch, veh, "nav", true, it), "物品在背包裡的袋子：仍解析得到並安裝")
 checkFalse(pouch:contains(it), "從袋子（實際容器）移除，不是從主背包移除")
 checkEq(stats.sendRemoveItem, 1, "移除同步發一次")
-checkTrue(MDAD.isNavInstalled(veh), "袋子裡的物品照樣完成安裝")
+checkEq(veh._devices.MDADGPS:getInventoryItem(), it, "袋子裡的那顆實物進到槽裡")
 
--- 電量 clamp 邊界
-ch = mkPlayer(); veh = mkVehicle()
-it = newItem(GPS_T, { uses = 1.5, useDelta = 0.006 })
-ch:getInventory():AddItem(it)
-checkTrue(apply(ch, veh, "nav", true, it), "電量 1.5 仍可安裝")
-checkEq(MDAD.getState(veh).navDelta, 1, "navDelta 上限截到 1")
-
-ch = mkPlayer(); veh = mkVehicle()
-it = newItem(GPS_T, { uses = -0.5, useDelta = 0.006 })
-ch:getInventory():AddItem(it)
-checkTrue(apply(ch, veh, "nav", true, it), "電量負值仍可安裝")
-checkEq(MDAD.getState(veh).navDelta, 0, "navDelta 下限截到 0")
+-- 電量邊界：實物存储沒有 clamp 這回事，production 一律不得改寫電量。
+-- uses 取不到值（非 drainable／腳本改型）的那顆是關鍵反例：舊制會 clamp 成 0 寫回去。
+for _, charge in ipairs({ 1.5, -0.5 }) do
+    ch = mkPlayer(); veh = mkVehicle()
+    it = newItem(GPS_T, { uses = charge, useDelta = 0.006 })
+    ch:getInventory():AddItem(it)
+    resetStats()
+    checkTrue(apply(ch, veh, "nav", true, it), "電量 " .. charge .. " 仍可安裝")
+    checkEq(stats.setUsedDelta, 0, "電量 " .. charge .. "：不改寫實物電量")
+    checkNear(veh._devices.MDADGPS:getInventoryItem()._uses, charge, EPS,
+        "電量 " .. charge .. " 原值留在實物上")
+end
 
 ch = mkPlayer(); veh = mkVehicle()
 it = newItem(GPS_T, { uses = 0.5, useDelta = 0.006 })
 ch:getInventory():AddItem(it)
 it._uses = nil   -- getCurrentUsesFloat 存在但回傳非數字
+resetStats()
 checkTrue(apply(ch, veh, "nav", true, it), "電量非數字仍可安裝")
-checkEq(MDAD.getState(veh).navDelta, 0, "非數字電量退回 0（不會把 nil 寫進 modData）")
+checkEq(stats.setUsedDelta, 0, "電量非數字：不回頭寫 0（不得再抄一份 delta）")
+checkEq(veh._devices.MDADGPS:getInventoryItem(), it, "槽裡仍是同一顆實物")
+
+-- 槽裡已經有**任何**東西就不准覆寫。原版維修面板在 specificItem=false 下可以把
+-- 別的物品塞進同一個槽；若安裝只檢查「MDAD 認得的那顆在不在」，這裡就會把別人
+-- 的物品直接蓋掉（無聲刪除玩家的東西），所以判準是 getInventoryItem() ~= nil。
+for _, squatter in ipairs({ "Base.Plank", AUTO_T, GPS_T }) do
+    ch = mkPlayer(); veh = mkVehicle()
+    it = newItem(GPS_T, { uses = 0.5, useDelta = 0.006 })
+    ch:getInventory():AddItem(it)
+    got = newItem(squatter, { uses = 0.1, useDelta = 0.006 })
+    veh._devices.MDADGPS._item = got
+    resetStats()
+    checkFalse(apply(ch, veh, "nav", true, it), "nav 槽已被 " .. squatter .. " 佔住：不准安裝")
+    checkEq(blockReason(ch, veh, "nav", true), ALREADY, "被佔住時的理由鍵是已安裝")
+    checkEq(veh._devices.MDADGPS:getInventoryItem(), got, "不覆寫槽裡原有的物品")
+    checkEq(stats.setPartItem, 0, "被佔住時不動槽")
+    checkTrue(ch:getInventory():contains(it), "被佔住時玩家的裝置留在背包")
+end
+
+-- 同名但不是本 MOD 的槽：整台車視為沒有裝置槽，玩家的裝置與對方的零件都不准動
+do
+    ch = mkPlayer()
+    it = newItem(GPS_T, { uses = 0.5, useDelta = 0.006 })
+    ch:getInventory():AddItem(it)
+    local foreign = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }),
+        navInit = "SomeOtherMod.onPartInit" })
+    local squatItem = newItem("Base.Plank")
+    foreign._devices.MDADGPS._item = squatItem
+    noSideEffect("同名外來槽", FAILED, ch, foreign, "nav", true, it)
+    checkEq(foreign._devices.MDADGPS:getInventoryItem(), squatItem, "外來槽裡的物品完全沒被動")
+    resetStats()
+    checkFalse(apply(ch, foreign, "nav", false, nil), "外來槽也不准被卸")
+    checkEq(foreign._devices.MDADGPS:getInventoryItem(), squatItem, "卸載請求也不動外來槽")
+    checkEq(stats.setPartItem, 0, "外來槽全程沒被 setInventoryItem")
+end
 
 -- 安裝 auto：happy path。AutopilotModule 是 base:normal，
 -- production 若對它呼叫 getCurrentUsesFloat/setUsedDelta，假物件沒有這些方法會直接炸
@@ -2362,24 +2738,24 @@ it = newItem(AUTO_T)
 ch:getInventory():AddItem(it)
 resetStats()
 checkTrue(apply(ch, veh, "auto", true, it), "安裝 auto：apply 回 true")
-st = MDAD.getState(veh)
-checkTrue(st.auto, "st.auto = true")
-checkNil(st.nav, "安裝 auto 不碰 st.nav")
-checkNil(st.navDelta, "安裝 auto 不寫 navDelta")
+checkEq(veh._devices.MDADAutopilot:getInventoryItem(), it, "自駕模組進到 auto 槽")
+checkNil(veh._devices.MDADGPS:getInventoryItem(), "安裝 auto 不碰 nav 槽")
 checkFalse(ch:getInventory():contains(it), "自駕模組已從背包移除")
 checkEq(stats.setUsedDelta, 0, "auto 路徑完全不碰電量 API")
-checkEq(stats.transmitModData, 1, "auto 安裝同步一次")
+checkEq(stats.setPartItem, 1, "auto 安裝只動一個槽")
+checkEq(stats.transmitPartItem, 1, "auto 安裝同步一次")
 checkTrue(MDAD.isAutoInstalled(veh), "isAutoInstalled 反映安裝結果")
 checkFalse(MDAD.isNavInstalled(veh), "裝 auto 不會誤報 nav 已裝")
 
 -- nav 與 auto 可同時存在，彼此不覆寫
 it = newItem(GPS_T, { uses = 0.9, useDelta = 0.006 })
 ch:getInventory():AddItem(it)
+got = veh._devices.MDADAutopilot:getInventoryItem()
+resetStats()
 checkTrue(apply(ch, veh, "nav", true, it), "auto 已裝時仍可裝 nav")
-st = MDAD.getState(veh)
-checkTrue(st.auto, "裝 nav 後 auto 狀態保留")
-checkTrue(st.nav, "nav 狀態寫入")
-checkNear(st.navDelta, 0.9, EPS, "navDelta 正確")
+checkEq(veh._devices.MDADAutopilot:getInventoryItem(), got, "裝 nav 後 auto 槽裡的實物沒被換掉")
+checkEq(veh._devices.MDADGPS:getInventoryItem(), it, "nav 槽收到新的 GPS")
+checkEq(stats.setPartItem, 1, "一次安裝只動一個槽")
 
 -- =====================================================================
 -- 情境九：apply 的七道驗證關卡，任一關不過都不動世界
@@ -2429,6 +2805,14 @@ it = newItem(GPS_T, { uses = 0.5, useDelta = 0.006 })
 ch:getInventory():AddItem(it)
 noSideEffect("車輛沒有電瓶 part", NO_BATTERY, ch, vBikeApply, "nav", true, it)
 
+-- 有電瓶但 script 沒注入裝置槽：擋在自己的關卡，世界一樣不動
+ch = mkPlayer()
+it = newItem(GPS_T, { uses = 0.5, useDelta = 0.006 })
+ch:getInventory():AddItem(it)
+noSideEffect("車輛沒有裝置槽", FAILED, ch,
+    newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }), noDeviceSlots = true }),
+    "nav", true, it)
+
 -- ④ 可及性（含保險屋、area）——每一種不可及都必須是 TooFar，不能靜默通過
 ch = mkPlayer(); veh = mkVehicle()
 it = newItem(GPS_T, { uses = 0.5, useDelta = 0.006 })
@@ -2446,11 +2830,12 @@ safehouseAllow = false
 noSideEffect("保險屋不允許互動", TOO_FAR, ch, veh, "nav", true, it)
 safehouseAllow = true
 
-local vAreaApply = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }), area = "engine" })
+local vAreaApply = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }),
+    area = "engine", navArea = "engine" })
 noSideEffect("有 area 卻不在 area 內", TOO_FAR, ch, vAreaApply, "nav", true, it)
 vAreaApply._inArea = true
 resetStats()
-checkTrue(apply(ch, vAreaApply, "nav", true, it), "走進電瓶艙 area 後可以安裝")
+checkTrue(apply(ch, vAreaApply, "nav", true, it), "走進裝置艙 area 後可以安裝")
 
 -- ⑤⑥ 工具／技能／狀態轉移
 ch = newPlayer({ num = 5, electricity = 2 })   -- 無螺絲刀
@@ -2481,8 +2866,8 @@ resetStats()
 okS, reasonS = apply(ch, veh, "nav", true, it)
 checkFalse(okS, "物品不在操作者背包樹內：回 false")
 checkEq(reasonS, FAILED, "找不到物品的理由鍵")
-checkEq(stats.transmitModData, 0, "找不到物品：不同步狀態")
-checkFalse(MDAD.isNavInstalled(veh), "找不到物品：狀態未寫入")
+checkEq(stats.transmitPartItem, 0, "找不到物品：不同步槽")
+checkFalse(MDAD.isNavInstalled(veh), "找不到物品：槽仍是空的")
 
 -- 在背包清單裡但 getContainer() 為 nil（序列化走鐘）：不能拿它當已解析容器用
 ch = mkPlayer(); veh = mkVehicle()
@@ -2493,7 +2878,7 @@ okS, reasonS = apply(ch, veh, "nav", true, it)
 checkFalse(okS, "物品沒有容器：回 false")
 checkEq(reasonS, FAILED, "沒有容器的理由鍵")
 checkEq(stats.sendRemoveItem, 0, "沒有容器：不發移除同步")
-checkFalse(MDAD.isNavInstalled(veh), "沒有容器：狀態未寫入")
+checkFalse(MDAD.isNavInstalled(veh), "沒有容器：槽仍是空的")
 
 -- itemId 非有限整數：不得進 Java 的 getItemWithIDRecursiv
 ch = mkPlayer(); veh = mkVehicle()
@@ -2522,43 +2907,48 @@ okS, reasonS = apply(ch, veh, "nav", true, it)
 checkFalse(okS, "MP client 呼叫 apply：回 false")
 checkEq(reasonS, FAILED, "MP client 的理由鍵")
 checkTrue(ch:getInventory():contains(it), "MP client：物品不動")
-checkEq(stats.transmitModData, 0, "MP client：不同步")
-checkFalse(MDAD.isNavInstalled(veh), "MP client：不寫狀態")
+checkEq(stats.transmitPartItem, 0, "MP client：不同步")
+checkFalse(MDAD.isNavInstalled(veh), "MP client：不動槽")
 clientFlag = false
 
 -- =====================================================================
 -- 情境十：apply 卸載
 -- =====================================================================
-scenario("apply 卸載：還原物品與 delta、重播不複製道具、生成失敗不吃裝置")
+scenario("apply 卸載：同一顆實物還回背包（電量／modData 天生跟著）、重播不複製、不可及不動槽")
 
-local function mkInstalled(kind, navDelta)
+-- 「已安裝」＝槽裡插著一顆實物。回傳那顆實物，情境才能斷言 identity。
+local function mkInstalled(kind, charge)
     local c = mkPlayer()
     local v = mkVehicle()
-    local s = MDAD.ensureState(v:getBattery())
+    local item
     if kind == "nav" then
-        s.nav = true
-        s.navDelta = navDelta
+        item = newItem(GPS_T, { uses = charge, useDelta = 0.006 })
+        v._devices.MDADGPS._item = item
     else
-        s.auto = true
+        item = newItem(AUTO_T)
+        v._devices.MDADAutopilot._item = item
     end
-    return c, v, s
+    return c, v, item
 end
 
-ch, veh, st = mkInstalled("nav", 0.37)
+ch, veh, it = mkInstalled("nav", 0.37)
+it:getModData().MDADSerial = "SN-37"
 resetStats()
 checkTrue(apply(ch, veh, "nav", false, nil), "卸載 nav：apply 回 true")
-checkFalse(st.nav, "st.nav 設為 false（不是留 true）")
-checkNil(st.navDelta, "st.navDelta 清掉（不留舊電量給下一顆）")
-checkEq(st.v, 1, "狀態版本欄位保持 1")
-checkEq(stats.instanceItem, 1, "生成一顆 GPS")
+checkNil(veh._devices.MDADGPS:getInventoryItem(), "槽被清空（setInventoryItem(nil)）")
+checkEq(stats.setPartItem, 1, "只呼叫一次 setInventoryItem")
+checkEq(stats.transmitPartItem, 1, "槽清空後發一次 transmitPartItem")
+checkEq(stats.transmitModData, 0, "裝置狀態不在 modData：卸載不發 modData 同步")
+checkEq(stats.instanceItem, 0, "不生成新道具（還的是槽裡那一顆）")
+checkEq(stats.setUsedDelta, 0, "不改寫電量（電量本來就在實物上）")
 checkEq(stats.itemById, 0, "卸載不需要 itemId：不呼叫 getItemWithIDRecursiv")
-checkEq(stats.transmitModData, 1, "同步一次 part modData")
 checkEq(stats.sendAddItem, 1, "背包有空間：走 AddItem＋同步")
 checkEq(stats.addWorldItem, 0, "背包有空間：不掉地上")
 got = ch:getInventory():getFirstTypeRecurse(GPS_T)
-checkTrue(got ~= nil, "GPS 回到背包")
-checkEq(got:getFullType(), GPS_T, "還原的是 GPS 型別")
-checkNear(got._uses, 0.37, EPS, "安裝時保存的電量原封不動還回來")
+checkEq(got, it, "拿回來的是同一顆實物（不是新生成的複製品）")
+checkNear(got._uses, 0.37, EPS, "電量原封不動")
+checkEq(got:getModData().MDADSerial, "SN-37", "實物的 modData 一路跟著")
+checkEq(got:getContainer(), ch:getInventory(), "物品的容器歸屬回到玩家背包")
 checkFalse(MDAD.isNavInstalled(veh), "卸載後 isNavInstalled 為 false")
 checkFalse(MDAD.hasVehicleNavPower(veh), "卸載後 hasVehicleNavPower 為 false")
 
@@ -2566,143 +2956,644 @@ resetStats()
 local okU, reasonU = apply(ch, veh, "nav", false, nil)
 checkFalse(okU, "重播卸載請求：回 false")
 checkEq(reasonU, FAILED, "重播卸載的理由鍵（沒裝卻要卸）")
-checkEq(stats.instanceItem, 0, "重複卸載不再生成道具（道具複製漏洞的反面斷言）")
+checkEq(stats.setPartItem, 0, "重複卸載不再動槽")
+checkEq(stats.instanceItem, 0, "重複卸載不生成道具（道具複製漏洞的反面斷言）")
 checkEq(stats.sendAddItem, 0, "重複卸載不發加入同步")
-checkEq(stats.transmitModData, 0, "重複卸載不再同步")
+checkEq(stats.transmitPartItem, 0, "重複卸載不再同步")
 
--- navDelta 缺失／超界（舊存檔或被外部改壞）
-ch, veh, st = mkInstalled("nav", nil)
-checkTrue(apply(ch, veh, "nav", false, nil), "navDelta 為 nil 仍可卸")
-checkEq(ch:getInventory():getFirstTypeRecurse(GPS_T)._uses, 0, "navDelta 為 nil 時還原成 0 電")
-
-ch, veh, st = mkInstalled("nav", 5)
-checkTrue(apply(ch, veh, "nav", false, nil), "navDelta 超上界仍可卸")
-checkEq(ch:getInventory():getFirstTypeRecurse(GPS_T)._uses, 1, "navDelta 5 截到 1（不給滿溢電量）")
-
-ch, veh, st = mkInstalled("nav", -2)
-checkTrue(apply(ch, veh, "nav", false, nil), "navDelta 負值仍可卸")
-checkEq(ch:getInventory():getFirstTypeRecurse(GPS_T)._uses, 0, "navDelta -2 截到 0")
-
-ch, veh, st = mkInstalled("nav", "0.5")
-checkTrue(apply(ch, veh, "nav", false, nil), "navDelta 非數字仍可卸")
-checkEq(ch:getInventory():getFirstTypeRecurse(GPS_T)._uses, 0, "navDelta 非數字退回 0")
+-- 空電／滿電／爆表電量都只是實物的屬性，卸載一律原值奉還（舊制在這裡會 clamp）
+for _, charge in ipairs({ 0, 1, 5 }) do
+    ch, veh, it = mkInstalled("nav", charge)
+    resetStats()
+    checkTrue(apply(ch, veh, "nav", false, nil), "電量 " .. charge .. " 的裝置可卸")
+    checkEq(ch:getInventory():getFirstTypeRecurse(GPS_T), it, "電量 " .. charge .. "：同一顆")
+    checkNear(it._uses, charge, EPS, "電量 " .. charge .. " 原值奉還")
+    checkEq(stats.setUsedDelta, 0, "電量 " .. charge .. "：卸載不寫電量")
+end
 
 -- 背包滿：掉在腳下
-ch, veh, st = mkInstalled("nav", 0.5)
+ch, veh, it = mkInstalled("nav", 0.5)
 ch:getInventory()._roomFor = false
 resetStats()
 checkTrue(apply(ch, veh, "nav", false, nil), "背包滿仍可卸")
 checkEq(stats.addWorldItem, 1, "背包滿：掉在腳下的格子")
 checkEq(stats.sendAddItem, 0, "背包滿：不發加入容器同步")
 checkNil(ch:getInventory():getFirstTypeRecurse(GPS_T), "背包滿：物品不在背包裡")
-checkEq(ch._square._dropped:getFullType(), GPS_T, "掉在地上的是 GPS")
+checkEq(ch._square._dropped, it, "掉在地上的就是槽裡那顆")
 checkNear(ch._square._dropped._uses, 0.5, EPS, "掉在地上的 GPS 也保有電量")
-checkFalse(st.nav, "背包滿也照樣完成卸除")
+checkNil(veh._devices.MDADGPS:getInventoryItem(), "背包滿也照樣完成卸除")
 
 -- 沒有站立格：可及性就先擋掉了，走不到丟物分支——裝置必須原封不動留在車上
-ch, veh, st = mkInstalled("nav", 0.5)
+ch, veh, it = mkInstalled("nav", 0.5)
 ch:getInventory()._roomFor = false
 ch._square = nil
 resetStats()
 okU, reasonU = apply(ch, veh, "nav", false, nil)
 checkFalse(okU, "沒有站立格：卸載被可及性擋下")
 checkEq(reasonU, TOO_FAR, "沒有站立格的理由鍵")
-checkEq(stats.instanceItem, 0, "被擋下就不生成道具")
+checkEq(stats.setPartItem, 0, "被擋下就不動槽")
 checkEq(stats.addWorldItem, 0, "被擋下不會掉地上")
-checkTrue(st.nav, "被擋下時狀態保留（裝置不會憑空消失）")
+checkEq(veh._devices.MDADGPS:getInventoryItem(), it, "被擋下時實物留在槽裡（裝置不會憑空消失）")
 
 -- 卸載 auto
-ch, veh, st = mkInstalled("auto")
+ch, veh, it = mkInstalled("auto")
 resetStats()
 checkTrue(apply(ch, veh, "auto", false, nil), "卸載 auto：apply 回 true")
-checkFalse(st.auto, "st.auto 設為 false")
-checkNil(st.nav, "卸載 auto 不碰 st.nav")
-checkNil(st.navDelta, "卸載 auto 不寫 navDelta")
+checkNil(veh._devices.MDADAutopilot:getInventoryItem(), "auto 槽清空")
+checkNil(veh._devices.MDADGPS:getInventoryItem(), "卸載 auto 不碰 nav 槽")
 checkEq(stats.setUsedDelta, 0, "auto 卸載完全不碰電量 API（AutopilotModule 非 drainable）")
-checkEq(stats.instanceItem, 1, "生成一顆自駕模組")
-checkEq(stats.transmitModData, 1, "同步一次")
-got = ch:getInventory():getFirstTypeRecurse(AUTO_T)
-checkTrue(got ~= nil, "自駕模組回到背包")
+checkEq(stats.instanceItem, 0, "auto 卸載也不生成道具")
+checkEq(stats.transmitPartItem, 1, "同步一次")
+checkEq(ch:getInventory():getFirstTypeRecurse(AUTO_T), it, "同一顆自駕模組回到背包")
 checkFalse(MDAD.isAutoInstalled(veh), "卸載後 isAutoInstalled 為 false")
 
--- instanceItem 回 nil（items 腳本沒載入／型別改名）：不能吃掉玩家的裝置
-instanceItemEnabled = false
-ch, veh, st = mkInstalled("nav", 0.6)
+-- 槽裡塞著別的東西（外掛／衝突注入）：不是本 MOD 的裝置就不准當成裝置卸下來，
+-- 否則任何塞進槽的物品都能被 MDAD 的選單變出來
+ch = mkPlayer(); veh = mkVehicle()
+veh._devices.MDADGPS._item = newItem("Base.Plank")
 resetStats()
-checkFalse(apply(ch, veh, "nav", false, nil), "生成 GPS 失敗：回 false")
-checkTrue(st.nav, "生成失敗時 nav 狀態保留（裝置不能憑空消失）")
-checkNear(st.navDelta, 0.6, EPS, "生成失敗時 navDelta 保留")
-checkEq(stats.transmitModData, 0, "生成失敗不同步")
-checkNil(ch:getInventory():getFirstTypeRecurse(GPS_T), "生成失敗背包不會多東西")
+okU, reasonU = apply(ch, veh, "nav", false, nil)
+checkFalse(okU, "nav 槽裡是別的物品：不能當 GPS 卸下")
+checkEq(reasonU, FAILED, "型別不符的理由鍵")
+checkEq(stats.setPartItem, 0, "型別不符不動槽")
+checkNil(ch:getInventory():getFirstTypeRecurse("Base.Plank"), "型別不符不把別人的物品送給玩家")
 
-ch, veh, st = mkInstalled("auto")
-resetStats()
-checkFalse(apply(ch, veh, "auto", false, nil), "生成自駕模組失敗：回 false")
-checkTrue(st.auto, "生成失敗時 auto 狀態保留")
-checkEq(stats.transmitModData, 0, "生成失敗不同步")
-instanceItemEnabled = true
-
--- 未安裝就卸載／不可及：不得生成道具
+-- 未安裝就卸載／不可及：一律不動槽
 ch = mkPlayer(); veh = mkVehicle()
 resetStats()
 checkFalse(apply(ch, veh, "nav", false, nil), "沒裝 nav 不能卸")
 checkFalse(apply(ch, veh, "auto", false, nil), "沒裝 auto 不能卸")
+checkEq(stats.setPartItem, 0, "沒裝就卸不會動槽")
 checkEq(stats.instanceItem, 0, "沒裝就卸不會生成道具（另一條道具複製路徑）")
 
-ch, veh, st = mkInstalled("nav", 0.5)
+ch, veh, it = mkInstalled("nav", 0.5)
 ch._square._canReach = false
 resetStats()
 checkFalse(apply(ch, veh, "nav", false, nil), "站太遠不能卸")
-checkTrue(st.nav, "站太遠時狀態不動")
-checkEq(stats.instanceItem, 0, "站太遠不生成道具")
+checkEq(veh._devices.MDADGPS:getInventoryItem(), it, "站太遠時槽不動")
+checkEq(stats.setPartItem, 0, "站太遠不動槽")
 
--- 完整往返：裝進去的電量原值取回
+-- 完整往返：交出去的那一顆，原樣回到手上
 ch = mkPlayer(); veh = mkVehicle()
 it = newItem(GPS_T, { uses = 0.73, useDelta = 0.006 })
+it:getModData().MDADTrip = 7
 ch:getInventory():AddItem(it)
+resetStats()
 checkTrue(apply(ch, veh, "nav", true, it), "往返：安裝成功")
 checkTrue(apply(ch, veh, "nav", false, nil), "往返：卸載成功")
 got = ch:getInventory():getFirstTypeRecurse(GPS_T)
-checkTrue(got ~= nil and got ~= it, "往返後拿到的是新生成的實例（不是舊物件）")
+checkEq(got, it, "往返後拿回同一個實例（identity 不得變）")
 checkNear(got._uses, 0.73, EPS, "往返後電量完全一致（0.73 進、0.73 出）")
-checkNil(MDAD.getState(veh).navDelta, "往返結束後 navDelta 清空")
+checkEq(got:getModData().MDADTrip, 7, "往返後 modData 完全一致")
+checkEq(stats.instanceItem, 0, "整趟往返完全不需要 instanceItem")
+checkEq(stats.setUsedDelta, 0, "整趟往返完全不寫電量")
+
+-- =====================================================================
+-- 情境十b：舊存檔遷移（MDAD.migrateDeviceParts）
+--
+-- 舊版把「裝了什麼」寫在電瓶 part 的 modData.MDAD 旗標上（nav／auto／navDelta），
+-- 新版只認零件槽裡的實物。遷移是一次性、server／SP 專屬、可重入的：每一種裝置
+-- 各自「生成實物 → 插進槽 → 清掉自己的舊旗標」，失敗的那一半留著旗標等下次。
+-- 這裡的每一條都對應一個會讓玩家掉裝置或多出裝置的實際漏洞。
+-- =====================================================================
+scenario("舊存檔遷移：逐種原子遷移、電量搬到實物、可重入不重複生成、衝突不覆寫、client 不遷")
+
+clientFlag, serverFlag = false, true
+
+do -- 主 chunk 的 local 槽已滿（Lua 上限 200）：本情境的建構輔助包在區塊裡
+-- 造一輛帶舊旗標的車。extra＝電瓶 modData 上與本 MOD 無關的鍵（別的 MOD 寫的）
+local function mkLegacy(flags, extra)
+    local v = mkVehicle()
+    local md = v:getBattery():getModData()
+    md.MDAD = flags
+    if extra ~= nil then md.OtherModKey = extra end
+    return v
+end
+
+-- 全新車（沒有舊旗標）：什麼都不做，且回報「已經沒有東西要遷」
+veh = mkVehicle()
+resetStats()
+checkTrue(MDAD.migrateDeviceParts(veh), "沒有舊資料：回 true（已完成）")
+checkEq(stats.instanceItem, 0, "沒有舊資料不生成任何道具")
+checkEq(stats.setPartItem, 0, "沒有舊資料不動槽")
+checkEq(stats.transmitModData, 0, "沒有舊資料不發同步")
+checkNil(veh:getBattery():getModData().MDAD, "沒有舊資料時不會反而建出一張空表")
+
+-- nav＋auto 都裝著的舊車：兩顆實物生出來、電量搬進 GPS、舊旗標整段清掉
+veh = mkLegacy({ v = 1, nav = true, auto = true, navDelta = 0.37 }, "keep-me")
+resetStats()
+checkTrue(MDAD.migrateDeviceParts(veh), "nav＋auto 舊旗標：遷移完成回 true")
+got = veh._devices.MDADGPS:getInventoryItem()
+checkTrue(got ~= nil, "nav 槽生出一顆實物")
+checkEq(got:getFullType(), GPS_T, "nav 槽裡是 GPSNavigator")
+checkNear(got._uses, 0.37, EPS, "navDelta 搬成實物電量（不是 instanceItem 的滿電預設）")
+checkEq(veh._devices.MDADAutopilot:getInventoryItem():getFullType(), AUTO_T,
+    "auto 槽裡是 AutopilotModule")
+checkEq(stats.instanceItem, 2, "剛好生成兩顆（不多不少）")
+checkEq(stats.setPartItem, 2, "兩個槽各插一次")
+checkEq(stats.transmitPartItem, 2, "兩個槽各同步一次")
+checkTrue(stats.transmitModData >= 1, "清掉電瓶 modData 後要同步一次")
+checkNil(veh:getBattery():getModData().MDAD, "舊旗標整張表清掉")
+checkEq(veh:getBattery():getModData().OtherModKey, "keep-me", "別的 MOD 寫在電瓶上的鍵不准動")
+checkTrue(MDAD.isNavInstalled(veh), "遷移後 isNavInstalled 為 true")
+checkTrue(MDAD.isAutoInstalled(veh), "遷移後 isAutoInstalled 為 true")
+
+-- 重入：第二次呼叫（part init 每次載入都會打、OnInitWorld 也會再跑）必須完全 no-op
+resetStats()
+checkTrue(MDAD.migrateDeviceParts(veh), "第二次呼叫仍回 true")
+checkEq(stats.instanceItem, 0, "重入不再生成（否則每次載入都多一顆裝置）")
+checkEq(stats.setPartItem, 0, "重入不動槽")
+checkEq(stats.transmitModData, 0, "重入不發同步")
+checkEq(veh._devices.MDADGPS:getInventoryItem(), got, "重入不換掉已經在槽裡的實物")
+
+-- 0 電的 GPS：照樣要生出來。跳過＝玩家的裝置人間蒸發（0 是合法電量，不是「沒有」）
+veh = mkLegacy({ v = 1, nav = true, navDelta = 0 })
+resetStats()
+checkTrue(MDAD.migrateDeviceParts(veh), "navDelta 為 0 也要遷")
+checkEq(stats.instanceItem, 1, "0 電也生成一顆")
+checkNear(veh._devices.MDADGPS:getInventoryItem()._uses, 0, EPS, "0 電原值搬過去")
+checkNil(veh._devices.MDADAutopilot:getInventoryItem(), "只有 nav 旗標：不憑空生出自駕模組")
+
+-- navDelta 缺失／非數字／超界（舊存檔被改壞）：夾回 0..1，但裝置不能不見
+for _, bad in ipairs({ "0.5", 5, -2 }) do
+    veh = mkLegacy({ v = 1, nav = true, navDelta = bad })
+    checkTrue(MDAD.migrateDeviceParts(veh), "navDelta 為 " .. tostring(bad) .. " 仍要遷")
+    got = veh._devices.MDADGPS:getInventoryItem()
+    checkTrue(got ~= nil, "navDelta 為 " .. tostring(bad) .. "：裝置照樣生出來")
+    checkTrue(got._uses >= 0 and got._uses <= 1,
+        "navDelta 為 " .. tostring(bad) .. "：電量夾回 0..1（實得 " .. tostring(got._uses) .. "）")
+end
+veh = mkLegacy({ v = 1, nav = true })
+checkTrue(MDAD.migrateDeviceParts(veh), "navDelta 缺失仍要遷")
+checkNear(veh._devices.MDADGPS:getInventoryItem()._uses, 0, EPS, "navDelta 缺失退回 0 電")
+
+-- 旗標為 false／不是 true 的雜值：那不是「裝著」，不得生成
+veh = mkLegacy({ v = 1, nav = false, auto = 1, navDelta = 0.5 })
+resetStats()
+checkTrue(MDAD.migrateDeviceParts(veh), "旗標不是 true：沒有東西要遷")
+checkEq(stats.instanceItem, 0, "旗標為 false／雜值不生成裝置")
+checkNil(veh._devices.MDADGPS:getInventoryItem(), "nav=false：槽保持空的")
+checkNil(veh._devices.MDADAutopilot:getInventoryItem(), "auto=1 不算 true：槽保持空的")
+
+-- 壞掉的舊資料（modData.MDAD 不是 table）：當成沒有舊資料，不炸
+veh = mkLegacy("壞掉的舊字串")
+resetStats()
+checkTrue(MDAD.migrateDeviceParts(veh), "modData.MDAD 不是 table：視為無舊資料")
+checkEq(stats.instanceItem, 0, "壞掉的舊資料不生成裝置")
+
+-- 上一輪「裝好了、但清旗標前中斷」（伺服器在兩步之間關機）：槽裡是遷移生出來的
+-- 那顆（fullType 正確＋MDADMigrated 印記），收尾只清旗標，不再生一顆。
+veh = mkLegacy({ v = 1, nav = true, navDelta = 0.9 })
+it = newItem(GPS_T, { uses = 0.2, useDelta = 0.006 })
+it:getModData().MDADMigrated = true
+veh._devices.MDADGPS._item = it
+resetStats()
+checkTrue(MDAD.migrateDeviceParts(veh), "上一輪裝好未清旗標：收尾並回 true")
+checkEq(stats.instanceItem, 0, "不再生成（否則每次載入都變出一顆免費 GPS）")
+checkEq(veh._devices.MDADGPS:getInventoryItem(), it, "槽裡的實物不被換掉")
+checkNear(it._uses, 0.2, EPS, "槽裡實物的電量不被舊 navDelta 覆寫")
+checkNil(veh:getBattery():getModData().MDAD, "殘留旗標清掉")
+
+-- 槽裡是**玩家自己裝的**同型裝置（沒有遷移印記）＋舊旗標還在：那是兩顆裝置的
+-- 帳對不上，不能假設哪一顆是真的 → 衝突，原封不動等人處理。
+veh = mkLegacy({ v = 1, nav = true, navDelta = 0.9 })
+it = newItem(GPS_T, { uses = 0.2, useDelta = 0.006 })
+veh._devices.MDADGPS._item = it
+resetStats()
+checkFalse(MDAD.migrateDeviceParts(veh), "同型但沒有遷移印記：回 false（衝突）")
+checkEq(stats.instanceItem, 0, "衝突不生成裝置")
+checkEq(veh._devices.MDADGPS:getInventoryItem(), it, "衝突不覆寫玩家的裝置")
+checkNear(it._uses, 0.2, EPS, "衝突不改寫玩家裝置的電量")
+st = veh:getBattery():getModData().MDAD
+checkTrue(st.nav, "衝突時 nav 旗標保留（等人處理完再遷）")
+checkNear(st.navDelta, 0.9, EPS, "衝突時舊電量欄位也保留")
+
+-- 槽裡是別的東西（第三方 MOD 也注入同一個 id／存檔錯亂）：同樣是衝突
+veh = mkLegacy({ v = 1, nav = true, navDelta = 0.6 })
+it = newItem("Base.Plank")
+veh._devices.MDADGPS._item = it
+resetStats()
+checkFalse(MDAD.migrateDeviceParts(veh), "槽被別的物品佔住：回 false（衝突）")
+checkEq(stats.instanceItem, 0, "衝突不生成裝置")
+checkEq(veh._devices.MDADGPS:getInventoryItem(), it, "衝突不覆寫別人的物品")
+checkEq(type(veh:getBattery():getModData().MDAD), "table", "衝突時舊資料原封不動")
+checkTrue(veh:getBattery():getModData().MDAD.nav, "衝突時 nav 旗標保留")
+-- 衝突狀態可重入：第二次呼叫仍回 false，且不得把舊資料愈改愈爛
+resetStats()
+checkFalse(MDAD.migrateDeviceParts(veh), "衝突重入：仍回 false")
+checkEq(stats.instanceItem, 0, "衝突重入不生成裝置")
+checkTrue(veh:getBattery():getModData().MDAD.nav, "衝突重入仍保留旗標")
+
+-- 同名但不是本 MOD 的槽：遷移看不到槽（＝延後），絕不能把裝置塞進別人的零件，
+-- 也不能因為「id 看起來對」就把舊資料清掉——那會讓玩家的裝置直接消失。
+veh = mkLegacy({ v = 1, nav = true, auto = true, navDelta = 0.8 })
+veh._devices.MDADGPS = newDevicePart("MDADGPS", nil, "SomeOtherMod.onPartInit")
+veh._devices.MDADAutopilot = newDevicePart("MDADAutopilot", nil, false)
+veh._devices.MDADGPS._vehicle = veh
+veh._devices.MDADAutopilot._vehicle = veh
+resetStats()
+checkFalse(MDAD.migrateDeviceParts(veh), "同名外來槽：回 false（延後）")
+checkEq(stats.instanceItem, 0, "外來槽不生成裝置")
+checkEq(stats.setPartItem, 0, "外來槽不被 setInventoryItem")
+checkNil(veh._devices.MDADGPS:getInventoryItem(), "不把裝置塞進別人的零件")
+st = veh:getBattery():getModData().MDAD
+checkTrue(st.nav, "外來槽時 nav 旗標保留")
+checkTrue(st.auto, "外來槽時 auto 旗標保留")
+checkNear(st.navDelta, 0.8, EPS, "外來槽時舊電量欄位保留")
+
+-- 只遷一半就失敗（items 腳本部分缺失）：已完成的那一半必須把自己的旗標清掉，
+-- 否則重試會再生一顆＝憑空複製裝置；沒完成的那一半必須留著旗標等重試。
+veh = mkLegacy({ v = 1, nav = true, auto = true, navDelta = 0.44 })
+instanceItemFail = AUTO_T
+resetStats()
+checkFalse(MDAD.migrateDeviceParts(veh), "一半失敗：回 false（沒遷完）")
+got = veh._devices.MDADGPS:getInventoryItem()
+checkTrue(got ~= nil, "成功的那一半已經插進槽")
+checkNear(got._uses, 0.44, EPS, "成功那一半的電量正確")
+checkNil(veh._devices.MDADAutopilot:getInventoryItem(), "失敗的那一半槽仍是空的")
+st = veh:getBattery():getModData().MDAD
+checkEq(type(st), "table", "沒遷完：舊資料表保留")
+checkFalse(st.nav == true, "已遷好的 nav 旗標必須清掉（否則重試會再生一顆）")
+checkNil(st.navDelta, "nav 的舊電量欄位跟著清掉")
+checkTrue(st.auto, "沒遷好的 auto 旗標保留")
+
+instanceItemFail = nil
+resetStats()
+checkTrue(MDAD.migrateDeviceParts(veh), "重試：把剩下那一半遷完")
+checkEq(stats.instanceItem, 1, "重試只生成一顆（nav 不得重複生成）")
+checkEq(veh._devices.MDADGPS:getInventoryItem(), got, "重試不動已經遷好的 nav 槽")
+checkEq(veh._devices.MDADAutopilot:getInventoryItem():getFullType(), AUTO_T, "auto 這次遷好了")
+checkNil(veh:getBattery():getModData().MDAD, "全部遷完才清掉整張表")
+
+-- 沒有裝置槽（script 注入還沒跑／不支援的車型）：不能把舊資料丟掉，等下次
+veh = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }), noDeviceSlots = true })
+veh:getBattery():getModData().MDAD = { v = 1, nav = true, navDelta = 0.3 }
+resetStats()
+checkFalse(MDAD.migrateDeviceParts(veh), "沒有裝置槽：回 false（延後）")
+checkEq(stats.instanceItem, 0, "沒有槽不生成裝置")
+checkTrue(veh:getBattery():getModData().MDAD.nav, "沒有槽時舊資料原封不動")
+
+-- client 沒有權威：一律不碰（遷移會改物品與 modData，client 做就是製造分歧）。
+-- 回 true＝「這一端沒有事情要做」，不是「遷完了」——client 永遠不該重試。
+clientFlag = true
+veh = mkLegacy({ v = 1, nav = true, auto = true, navDelta = 0.5 })
+resetStats()
+checkTrue(MDAD.migrateDeviceParts(veh), "MP client：不遷移，但不要求重試（回 true）")
+checkEq(stats.instanceItem, 0, "MP client：不生成裝置")
+checkEq(stats.setPartItem, 0, "MP client：不動槽")
+checkEq(stats.transmitModData, 0, "MP client：不發同步")
+checkTrue(veh:getBattery():getModData().MDAD.nav, "MP client：舊資料原封不動")
+clientFlag = false
+
+-- 邊界：沒有車／沒有電瓶 part（腳踏車、拖車）都不得炸，也都沒有東西要遷
+resetStats()
+checkTrue(MDAD.migrateDeviceParts(nil), "無車輛：沒有東西要遷，回 true")
+checkTrue(MDAD.migrateDeviceParts(newVehicle({ noBattery = true })),
+    "無電瓶 part：沒有舊資料可遷，回 true")
+checkEq(stats.instanceItem, 0, "邊界情況不生成裝置")
+
+-- 第二回傳值＝audit 事件陣列（呼叫端負責印）。乾淨的車一筆都不得產生，
+-- 真的遷了才有；這是實機事後追查「誰的裝置被搬過」的唯一線索。
+veh = mkVehicle()
+checkNil(select(2, MDAD.migrateDeviceParts(veh)), "乾淨的車不產生任何 audit 事件")
+veh = mkLegacy({ v = 1, nav = true, auto = true, navDelta = 0.25 })
+got = select(2, MDAD.migrateDeviceParts(veh))
+checkEq(type(got), "table", "真的遷了就回事件陣列")
+checkEq(#got, 2, "兩種裝置各一筆事件")
+end
+
+-- =====================================================================
+-- 情境十c：裝置槽注入（MDAD_DeviceParts）與原版零件回調
+--
+-- 注入是「整個功能存在與否」的前提：沒有槽就沒有裝置。判準是 capability
+-- （有電瓶 part＋有合法 area），不是車型白名單，所以任何 MOD 車只要符合條件
+-- 就自動支援。每一條斷言都對應一個會讓實機整批車輛壞掉的實際失誤。
+-- =====================================================================
+scenario("裝置槽注入：template 缺失即中止、capability 判準、逐車各自的 area、同名不覆寫、byte index 上限、重跑不重複、script identity 而非名稱")
+
+do -- 主 chunk 的 local 槽已滿（Lua 上限 200）：整段包在區塊裡
+local NAV_ID, AUTO_ID = MDAD.PART_NAV, MDAD.PART_AUTO
+
+local function setScripts(list)
+    recipeWorld.scripts = list
+end
+
+local function boot()
+    resetStats()
+    return capturePrint(function() fire("OnGameBoot") end)
+end
+
+local function hasSlots(script)
+    return script:getPartById(NAV_ID) ~= nil and script:getPartById(AUTO_ID) ~= nil
+end
+
+-- (1) template 缺失／不完整：一台車都不准動。半套注入（只有 nav 槽）比完全不注入
+--     更糟：玩家裝得上 GPS、裝不上自駕，而且存檔裡從此有一個半套的車。
+local carA = recipeWorld.newScript("Base.CarA", { "Engine", "Battery" }, { "Engine" })
+recipeWorld.templates["Base.MDADDeviceParts"] = nil
+setScripts({ carA })
+local log = boot()
+checkTrue(logHas(log, "ABORT"), "template 缺失：印出 ABORT")
+checkFalse(hasSlots(carA), "template 缺失：一台車都不注入")
+checkEq(recipeWorld.templateLookups[1], "Base.MDADDeviceParts",
+    "只查本 MOD 自己的 template（不去掃全部車型）")
+checkEq(#recipeWorld.templateLookups, 1, "template 只查一次")
+
+recipeWorld.templates["Base.MDADDeviceParts"] =
+    recipeWorld.newScript("Base.MDADDeviceParts", { NAV_ID }, {})   -- 只有一半
+log = boot()
+checkTrue(logHas(log, "ABORT"), "template 只有一個 part：也是 ABORT")
+checkFalse(hasSlots(carA), "template 不完整：不做半套注入")
+
+-- 正式的 donor template
+local tmpl = recipeWorld.newScript("Base.MDADDeviceParts", { NAV_ID, AUTO_ID }, {})
+recipeWorld.templates["Base.MDADDeviceParts"] = tmpl
+
+-- (2) capability 判準＋逐車各自的 area。carB 沒有 Engine area，只有 Hood：
+--     donor 必須在**每一次複製前**改成該車自己的 area。少了這一步，carB 的槽會
+--     帶著 carA 的 Engine area——玩家走到一個這台車不存在的位置，永遠裝不上。
+local carB = recipeWorld.newScript("Base.CarB", { "Battery" }, { "Hood" })
+local bike = recipeWorld.newScript("Base.Bike", { "Frame" }, { "Engine" })       -- 無電瓶
+local noArea = recipeWorld.newScript("Base.NoArea", { "Battery" }, { "2bad", "has space" })
+setScripts({ carA, carB, bike, noArea })
+log = boot()
+checkTrue(hasSlots(carA), "有電瓶＋有 area：注入兩個槽")
+checkTrue(hasSlots(carB), "另一台也注入")
+checkEq(carA:getPartById(NAV_ID).area, "Engine", "carA 的槽拿 carA 自己的 Engine area")
+checkEq(carA:getPartById(AUTO_ID).area, "Engine", "carA 的 auto 槽同一個 area")
+checkEq(carB:getPartById(NAV_ID).area, "Hood", "carB 的槽拿 carB 自己的 area（先改 donor 再複製）")
+checkEq(carB:getPartById(AUTO_ID).area, "Hood", "carB 的 auto 槽同一個 area")
+checkFalse(hasSlots(bike), "沒有電瓶 part：不注入（裝置吃車電）")
+checkFalse(hasSlots(noArea), "沒有合法 area id：不注入（沒有站位判準）")
+checkEq(#noArea.copies, 0, "不合法的 area 連 copyPartsFrom 都不呼叫")
+
+-- (3) 同名衝突：別人先佔了這個 id 就整台不支援，絕不覆寫對方的定義
+local squat = recipeWorld.newScript("Base.Squat", { "Battery", NAV_ID }, { "Engine" })
+squat:getPartById(NAV_ID).foreign = true
+setScripts({ squat })
+log = boot()
+checkTrue(logHas(log, "CONFLICT"), "同名 part：印出 CONFLICT")
+checkTrue(squat:getPartById(NAV_ID).foreign, "不覆寫對方的 part 定義")
+checkNil(squat:getPartById(AUTO_ID), "衝突時連另一個槽也不加（整台不支援）")
+checkEq(#squat.copies, 0, "衝突時完全不呼叫 copyPartsFrom")
+
+-- (4) byte part index 上限：VehiclePartItem 的同步把 index 當 byte 讀，超過 127
+--     會被讀成負數 → 車上零件同步直接斷掉。128 剛好可以，129 不行。
+local function manyParts(n)
+    local ids = { "Battery" }
+    for i = 1, n - 1 do ids[#ids + 1] = "Filler" .. i end
+    return recipeWorld.newScript("Base.Many" .. n, ids, { "Engine" })
+end
+local fits, overflows = manyParts(126), manyParts(127)
+setScripts({ fits, overflows })
+log = boot()
+checkTrue(hasSlots(fits), "126＋2＝128：剛好在上限內，照樣注入")
+checkFalse(hasSlots(overflows), "127＋2＝129：超過 byte index 上限，跳過")
+checkTrue(logHas(log, "SKIP"), "超過上限要留下可診斷的 SKIP 訊息")
+
+-- (5) donor 改寫失敗：不能把「還沒有正確 area」的半成品複製進真車
+tmpl.loadFail = true
+local lateCar = recipeWorld.newScript("Base.LateCar", { "Battery" }, { "Engine" })
+setScripts({ lateCar })
+log = boot()
+checkFalse(hasSlots(lateCar), "donor area 改寫失敗：這台車不注入")
+checkEq(#lateCar.copies, 0, "改寫失敗時不呼叫 copyPartsFrom（不留半成品）")
+checkTrue(logHas(log, "area"), "改寫失敗要留下可診斷訊息")
+tmpl.loadFail = false
+log = boot()
+checkTrue(hasSlots(lateCar), "donor 恢復正常後下一次開機補上")
+
+-- (6) 重跑不重複：OnGameBoot 在同一個 process 可能再觸發（重載存檔）。
+--     重複 copyPartsFrom 不會多出 part（同 id 覆寫），但會把 donor 的 area
+--     重新算一次；真正要證明的是「不再動這台車」。
+local before = #carA.copies
+setScripts({ carA })
+boot()
+checkEq(#carA.copies, before, "已注入過的腳本：第二次開機完全不再複製")
+checkTrue(hasSlots(carA), "重跑後槽仍在")
+
+-- (7) 記帳用的是 script 物件本身，不是 fullName。同名不同物件（同一款車被兩個
+--     MOD 各自定義／template 與實車同名）如果用名字記帳，第二台會被當成「已處理」
+--     而永遠拿不到槽——實機表現是「有些車能裝、有些不能」，極難查。
+local dupe1 = recipeWorld.newScript("Base.Same", { "Battery" }, { "Engine" })
+local dupe2 = recipeWorld.newScript("Base.Same", { "Battery" }, { "Engine" })
+setScripts({ dupe1, dupe2 })
+boot()
+checkTrue(hasSlots(dupe1), "同名腳本第一個：注入")
+checkTrue(hasSlots(dupe2), "同名腳本第二個：也要注入（記帳靠物件不是名字）")
+
+-- (8) part create 回調：只定條件，永不生物品。不定義它，原版會 setRandomCondition，
+--     空安裝座會顯示成一個壞掉的零件；生物品則是白送玩家一整套裝置。
+do
+    local slot = newDevicePart(NAV_ID)
+    checkEq(slot:getCondition(), -1, "新槽的條件是「還沒定過」")
+    MDAD_DeviceParts.onPartCreate(nil, slot)
+    checkEq(slot:getCondition(), 100, "create 回調把條件定成 100（不留隨機破損）")
+    checkNil(slot:getInventoryItem(), "create 回調絕不生物品（槽出廠是空的）")
+    checkTrue(pcall(MDAD_DeviceParts.onPartCreate, nil, nil), "part 為 nil 時不炸")
+end
+
+-- (9) part init 回調：server／SP 才做事，只由 nav 那次觸發（遷移是整台車的動作），
+--     並且要留下可追查的稽核日誌。
+do
+    clientFlag, serverFlag = false, true
+    local v = mkVehicle()
+    v:getBattery():getModData().MDAD = { v = 1, nav = true, auto = true, navDelta = 0.5 }
+    -- auto 那次呼叫什麼都不做：否則整段遷移與日誌會跑兩遍
+    resetStats()
+    log = capturePrint(function()
+        MDAD_DeviceParts.onPartInit(v, v._devices.MDADAutopilot)
+    end)
+    checkEq(#log, 0, "auto 槽的 init 不輸出任何日誌")
+    checkEq(stats.instanceItem, 0, "auto 槽的 init 不做遷移")
+    checkTrue(v:getBattery():getModData().MDAD.nav, "auto 槽的 init 不動舊資料")
+
+    -- client 一律早退：遷移會改物品與 modData，client 做就是製造分歧
+    clientFlag = true
+    resetStats()
+    log = capturePrint(function()
+        MDAD_DeviceParts.onPartInit(v, v._devices.MDADGPS)
+    end)
+    checkEq(#log, 0, "client：init 不輸出日誌")
+    checkEq(stats.instanceItem, 0, "client：init 不遷移")
+    checkTrue(v:getBattery():getModData().MDAD.nav, "client：舊資料原封不動")
+    clientFlag = false
+
+    -- server／SP：真的遷移，日誌帶得出「哪一款車、哪一列存檔、哪一顆物品」
+    resetStats()
+    log = capturePrint(function()
+        MDAD_DeviceParts.onPartInit(v, v._devices.MDADGPS)
+    end)
+    checkEq(stats.instanceItem, 2, "server：nav 那次把整台車兩個裝置都遷好")
+    checkNil(v:getBattery():getModData().MDAD, "server：遷完清掉舊資料")
+    checkTrue(logHas(log, "migrated"), "日誌記下真的遷移了")
+    checkTrue(logHas(log, tostring(v:getSqlId())),
+        "日誌帶 sqlId（實機事後只能靠它定位是哪一台車）")
+    checkTrue(logHas(log, "audit"), "遷完接著印稽核")
+    -- 稽核掃兩個槽。AutopilotModule 不是 drainable（假物件刻意沒有
+    -- getCurrentUsesFloat）：稽核若對 auto 也讀電量，這裡會直接炸。
+    checkTrue(logHas(log, AUTO_ID), "稽核也涵蓋 auto 槽")
+
+    -- 已經乾淨、且槽是空的車：一個字都不該印（每台車每次載入都會跑這支）
+    local clean = mkVehicle()
+    resetStats()
+    log = capturePrint(function()
+        MDAD_DeviceParts.onPartInit(clean, clean._devices.MDADGPS)
+    end)
+    checkEq(#log, 0, "空車不噴日誌（否則每次載入都洗掉整個 console）")
+
+    -- 同名外來槽：deviceKind 不認它，init 一律不做事
+    resetStats()
+    log = capturePrint(function()
+        MDAD_DeviceParts.onPartInit(v, newDevicePart(NAV_ID, nil, "SomeOtherMod.onPartInit"))
+    end)
+    checkEq(#log, 0, "同名外來槽觸發的 init：什麼都不做")
+    checkEq(stats.instanceItem, 0, "同名外來槽的 init 不遷移")
+    checkTrue(pcall(MDAD_DeviceParts.onPartInit, nil, nil), "vehicle／part 為 nil 時不炸")
+end
+
+-- (10) 原版維修面板的 test 回調：只能在原版判準上**加嚴**，不得繞過。
+--      繞過原版＝連工具、職業、鑰匙、既有狀態全部不查；比原版鬆＝右鍵裝不上、
+--      面板裝得上，兩條路的規則漂移。
+do
+    setSandbox({ InstallSkillGate = true })
+    local skilled, unskilled = mkPlayer(2), mkPlayer(0)
+    local v = mkVehicle()
+    local slot = v._devices.MDADGPS
+    vanillaAction.installTest = true
+    checkTrue(MDAD_DeviceParts.InstallTest(v, slot, skilled), "原版放行＋技能達標：可安裝")
+    checkFalse(MDAD_DeviceParts.InstallTest(v, slot, unskilled), "原版放行但技能不足：擋下")
+    vanillaAction.installTest = false
+    checkFalse(MDAD_DeviceParts.InstallTest(v, slot, skilled), "原版拒絕：技能再高也不放行")
+    vanillaAction.installTest = true
+
+    vanillaAction.uninstallTest = true
+    checkTrue(MDAD_DeviceParts.UninstallTest(v, slot, skilled), "卸載：原版放行＋技能達標")
+    checkFalse(MDAD_DeviceParts.UninstallTest(v, slot, unskilled), "卸載：技能不足擋下")
+    vanillaAction.uninstallTest = false
+    checkFalse(MDAD_DeviceParts.UninstallTest(v, slot, skilled), "卸載：原版拒絕就拒絕")
+    vanillaAction.uninstallTest = true
+
+    -- 原版函式不存在（版本差異／被別的 MOD 拆掉）：fail closed，不得當成放行
+    local savedInstall = Vehicles.InstallTest
+    Vehicles.InstallTest = nil
+    checkFalse(MDAD_DeviceParts.InstallTest(v, slot, skilled), "原版 Default 缺席：fail closed")
+    Vehicles.InstallTest = savedInstall
+
+    -- 關掉技能閘門時回到「原版說什麼就是什麼」
+    setSandbox({ InstallSkillGate = false })
+    checkTrue(MDAD_DeviceParts.InstallTest(v, slot, unskilled), "關閘門：0 級也放行")
+    setSandbox({ InstallSkillGate = true })
+end
+
+setScripts({})
+end
 
 -- =====================================================================
 -- 情境十一：TimedAction 只管工時／動畫，**刻意沒有 complete()**
 -- =====================================================================
-scenario("TimedAction 生命週期：不得有 complete、new 欄位契約、jobType、duration、isValid、start/stop")
+scenario("TimedAction 生命週期：包住原版 constructor（同一顆 instance）、拒絕 sentinel 穿透、不得有 complete、jobType、duration、isValid、start/stop")
 
+-- 動作不再有自己的 constructor：入口是**原版**的拆裝動作，production 只把
+-- 「零件槽屬於 MDAD」的那顆 instance 原地換成自己的 class（Main 的接線決定）。
+-- 這裡一律走原版簽章建動作，和實機（右鍵選單／維修面板）同一條路。
+-- 主 chunk 的 local 槽已接近 Lua 的 200 上限：建構輔助掛在 vanillaAction 上，
+-- 觀測用的臨時值一律沿用既有的 act／got。
 local act
+function vanillaAction.mk(character, vehicle, kind, install, item)
+    local part = MDAD.getDevicePart(vehicle, kind)
+    if install then
+        return ISInstallVehiclePart:new(character, part, item, 150)
+    end
+    return ISUninstallVehiclePart:new(character, part, 150)
+end
+
 ch = mkPlayer(); veh = mkVehicle()
 it = newItem(GPS_T, { uses = 0.5, useDelta = 0.006 })
 ch:getInventory():AddItem(it)
-act = ISAutoDriveDeviceAction:new(ch, veh, "nav", true, it)
+resetStats()
+act = vanillaAction.mk(ch, veh, "nav", true, it)
 
--- 這一條是整份安全重構的樑柱：只要 metatable 上出現 complete，引擎就會建
--- NetTimedAction 鏡像，client 送來的 character／vehicle／item 會被伺服器照單全收。
+-- 樑柱一：拿回來的必須是原版 .new 建的**那一顆**。重建一顆副本會掉掉原版塞的
+-- 欄位（maxTimeInit／net 鏡像語意），而且未來原版加欄位時靜默失效。
+checkEq(#vanillaAction.calls, 1, "只呼叫一次原版 constructor")
+checkEq(vanillaAction.calls[1].op, "install", "安裝走原版 ISInstallVehiclePart")
+checkEq(vanillaAction.calls[1].part, veh._devices.MDADGPS, "原版 constructor 收到的是 nav 裝置槽")
+checkEq(act, vanillaAction.calls[1].result, "回傳的是原版建的同一顆 instance（不是副本）")
+checkEq(getmetatable(act), ISAutoDriveDeviceAction, "MDAD 的槽：instance 被換成 MDAD 動作")
+checkEq(act.Type, "ISAutoDriveDeviceAction", "Type 跟著換（排程與診斷看的是這個）")
+
+-- 樑柱二：只要 metatable 上出現 complete，引擎就會建 NetTimedAction 鏡像，
+-- client 送來的 character／vehicle／item 會被伺服器照單全收。
 checkNil(ISAutoDriveDeviceAction.complete, "類別上不得定義 complete（否則引擎會建 NetTimedAction 鏡像）")
 checkNil(act.complete, "實例沿 metatable 也查不到 complete")
 
--- NetTimedAction.set 依 new() 參數名打包欄位，欄位名改掉 MP 就靜默失效
-checkEq(act.character, ch, "new 存 character")
-checkEq(act.vehicle, veh, "new 存 vehicle（欄位名必須是 vehicle）")
-checkEq(act.kind, "nav", "new 存 kind")
-checkEq(act.install, true, "new 存 install")
-checkEq(act.item, it, "new 存 item")
-checkEq(act.maxTime, 150, "maxTime 取 WORK_TIME")
+-- perform 讀的欄位：原版給 character／vehicle／part／item，MDAD 補 kind／install
+checkEq(act.character, ch, "instance 帶 character")
+checkEq(act.vehicle, veh, "instance 帶 vehicle（原版由 part:getVehicle() 填）")
+checkEq(act.part, veh._devices.MDADGPS, "instance 帶零件槽")
+checkEq(act.kind, "nav", "kind 由槽反查（deviceKind）")
+checkEq(act.install, true, "install 由入口決定")
+checkEq(act.item, it, "instance 帶 item")
 checkEq(act:getDuration(), 150, "非 instant 玩家 duration 為 150")
 checkEq(noteReason(act.jobType), "UI_MinidoracatAutoDrive_InstallGPS", "安裝 nav 的 jobType")
-checkEq(noteReason(ISAutoDriveDeviceAction:new(ch, veh, "auto", true, it).jobType),
+checkEq(noteReason(vanillaAction.mk(ch, veh, "auto", true, newItem(AUTO_T)).jobType),
     "UI_MinidoracatAutoDrive_InstallAuto", "安裝 auto 的 jobType")
-checkEq(noteReason(ISAutoDriveDeviceAction:new(ch, veh, "nav", false, nil).jobType),
-    "UI_MinidoracatAutoDrive_UninstallGPS", "卸載 nav 的 jobType")
-checkEq(noteReason(ISAutoDriveDeviceAction:new(ch, veh, "auto", false, nil).jobType),
+
+-- 卸載入口：原版 ISUninstallVehiclePart，槽裡要有實物才是合法請求
+veh._devices.MDADGPS._item = newItem(GPS_T, { uses = 0.4, useDelta = 0.006 })
+veh._devices.MDADAutopilot._item = newItem(AUTO_T)
+resetStats()
+got = vanillaAction.mk(ch, veh, "nav", false, nil)
+checkEq(vanillaAction.calls[1].op, "uninstall", "卸載走原版 ISUninstallVehiclePart")
+checkEq(got, vanillaAction.calls[1].result, "卸載也是原版那一顆 instance")
+checkEq(getmetatable(got), ISAutoDriveDeviceAction, "卸載 instance 同樣被換成 MDAD 動作")
+checkEq(got.install, false, "卸載時 install 為 false")
+checkNil(got.item, "卸載入口不帶來源物品")
+checkEq(noteReason(got.jobType), "UI_MinidoracatAutoDrive_UninstallGPS", "卸載 nav 的 jobType")
+checkEq(noteReason(vanillaAction.mk(ch, veh, "auto", false, nil).jobType),
     "UI_MinidoracatAutoDrive_UninstallAuto", "卸載 auto 的 jobType")
-checkEq(ISAutoDriveDeviceAction:new(ch, veh, "nav", false, nil).install, false, "卸載時 install 為 false")
+veh._devices.MDADGPS._item = nil
+veh._devices.MDADAutopilot._item = nil
 
 ch._instant = true
-checkEq(ISAutoDriveDeviceAction:new(ch, veh, "nav", true, it).maxTime, 1, "instant 玩家 maxTime 為 1")
+checkEq(vanillaAction.mk(ch, veh, "nav", true, it):getDuration(), 1, "instant 玩家 duration 為 1")
 ch._instant = false
+
+-- 不是 MDAD 的槽：原版動作原封不動（維修面板拆電瓶、換輪胎都走這條）
+resetStats()
+got = ISInstallVehiclePart:new(ch, veh:getBattery(), newItem("Base.CarBattery", { uses = 1 }), 100)
+checkEq(getmetatable(got), ISInstallVehiclePart, "別的零件槽：不得被換成 MDAD 動作")
+checkNil(got.kind, "別的零件槽：不塞 MDAD 欄位")
+got = ISInstallVehiclePart:new(ch, nil, it, 100)
+checkEq(getmetatable(got), ISInstallVehiclePart, "part 為 nil：原版動作原樣回去（不得在包裝裡爆掉）")
+got = ISUninstallVehiclePart:new(ch, nil, 100)
+checkEq(getmetatable(got), ISUninstallVehiclePart, "卸載 part 為 nil：同樣原樣回去")
+
+-- 同名但不是本 MOD 的槽：原版動作必須原樣回去（Type、metatable 全不動）。
+-- 接管它等於把對方零件的拆裝改由 MDAD 的 perform 執行——會去動對方的存檔資料。
+do
+    local foreignPart = newDevicePart("MDADGPS", nil, "SomeOtherMod.onPartInit")
+    foreignPart._vehicle = veh
+    got = ISInstallVehiclePart:new(ch, foreignPart, it, 100)
+    checkEq(getmetatable(got), ISInstallVehiclePart, "同名外來槽：不得被換成 MDAD 動作")
+    checkEq(got.Type, "ISInstallVehiclePart", "同名外來槽：Type 維持原版")
+    checkNil(got.kind, "同名外來槽：不塞 MDAD 欄位")
+    got = ISUninstallVehiclePart:new(ch, foreignPart, 100)
+    checkEq(getmetatable(got), ISUninstallVehiclePart, "同名外來槽的卸載也維持原版")
+    checkEq(got.Type, "ISUninstallVehiclePart", "同名外來槽卸載：Type 維持原版")
+end
+
+-- 拒絕 sentinel：上游回 nil／回 ignoreAction 的兩種表現都必須原樣穿透
+vanillaAction.reject = true
+checkNil(vanillaAction.mk(ch, veh, "nav", true, it), "上游 constructor 回 nil：包裝也回 nil")
+checkNil(vanillaAction.mk(ch, veh, "nav", false, nil), "卸載上游回 nil：包裝也回 nil")
+vanillaAction.reject = false
+vanillaAction.ignore = true
+got = vanillaAction.mk(ch, veh, "nav", true, it)
+checkTrue(got.ignoreAction, "上游標了 ignoreAction：欄位保留")
+checkEq(getmetatable(got), ISInstallVehiclePart, "ignoreAction 的 instance 不得被接手")
+vanillaAction.ignore = false
 
 -- isValid
 checkTrue(act:isValid(), "備齊條件時 isValid 為 true")
@@ -2751,21 +3642,17 @@ checkEq(it.jobDelta, 0, "update 把 jobDelta 同步到物品")
 checkFalse(act:waitToStart(), "轉身完成後 waitToStart 為 false")
 checkTrue(ch.faced > 1, "waitToStart 也會面向車輛")
 
--- getState／ensureState 的狀態表契約
+-- 舊的鏡像狀態表已整段拿掉：留著任何一支就等於留著第二份真相來源
+checkNil(MDAD.getState, "MDAD.getState 已移除（狀態只在零件槽裡）")
+checkNil(MDAD.ensureState, "MDAD.ensureState 已移除")
 veh = mkVehicle()
-checkNil(MDAD.getState(veh), "全新車輛沒有狀態表")
-st = MDAD.ensureState(veh:getBattery())
-checkEq(st.v, 1, "ensureState 寫入版本 1")
-checkEq(MDAD.ensureState(veh:getBattery()), st, "ensureState 是 idempotent（不會換新表）")
-checkEq(MDAD.getState(veh), st, "getState 讀到同一張表")
-veh:getBattery():getModData().MDAD = "壞掉的舊資料"
-checkNil(MDAD.getState(veh), "modData.MDAD 不是 table 時視為無狀態（不炸）")
-checkFalse(MDAD.isNavInstalled(veh), "壞掉的狀態不會誤判為已安裝")
-st = MDAD.ensureState(veh:getBattery())
-checkEq(type(st), "table", "ensureState 把壞掉的資料換成新表")
-checkEq(st.v, 1, "換新表後版本仍是 1")
-checkNil(MDAD.getState(newVehicle({ noBattery = true })), "無電瓶車輛：getState 為 nil")
-checkNil(MDAD.getState(nil), "無車輛：getState 為 nil")
+it = newItem(GPS_T, { uses = 0.5, useDelta = 0.006 })
+ch = mkPlayer()
+ch:getInventory():AddItem(it)
+checkTrue(apply(ch, veh, "nav", true, it), "裝一次給下面的 modData 斷言用")
+checkNil(veh:getBattery():getModData().MDAD, "安裝完全不碰電瓶 modData")
+checkTrue(apply(ch, veh, "nav", false, nil), "再卸一次")
+checkNil(veh:getBattery():getModData().MDAD, "卸載也不碰電瓶 modData")
 
 -- =====================================================================
 -- 情境十二：SP 派送（isClient=false、isServer=false）
@@ -2779,14 +3666,14 @@ safehouseAllow = true
 ch = mkPlayer(); veh = mkVehicle()
 it = newItem(GPS_T, { uses = 0.42, useDelta = 0.006 })
 ch:getInventory():AddItem(it)
-act = ISAutoDriveDeviceAction:new(ch, veh, "nav", true, it)
+act = vanillaAction.mk(ch, veh, "nav", true, it)
 resetStats()
 act:perform()
 checkEq(#sentClient, 0, "SP：不發 sendClientCommand")
 checkTrue(MDAD.isNavInstalled(veh), "SP：perform 就完成安裝")
-checkNear(MDAD.getState(veh).navDelta, 0.42, EPS, "SP：navDelta 由 apply 從實物讀取")
+checkEq(veh._devices.MDADGPS:getInventoryItem(), it, "SP：perform 把實物搬進槽")
 checkFalse(ch:getInventory():contains(it), "SP：物品已移除")
-checkEq(stats.transmitModData, 1, "SP：perform 只呼叫一次 apply（同步剛好一次）")
+checkEq(stats.transmitPartItem, 1, "SP：perform 只呼叫一次 apply（槽同步剛好一次）")
 checkEq(stats.sendRemoveItem, 0, "SP：isServer 為 false，不廣播移除")
 checkEq(#halos, 0, "SP：成功不提示")
 checkEq(it.jobDelta, 0, "perform 收尾把 jobDelta 歸零")
@@ -2795,24 +3682,25 @@ checkTrue(act.performed, "SP：仍呼叫父類 perform")
 -- 同一個 action 再 perform 一次（queue 被灌爆時真的會）：失敗且以 halo 回報
 resetStats()
 act:perform()
-checkEq(stats.transmitModData, 0, "SP：重播不再突變")
+checkEq(stats.transmitPartItem, 0, "SP：重播不再突變")
 checkEq(#halos, 1, "SP：失敗回報一則 halo")
 checkEq(noteReason(halos[1] and halos[1].text), ALREADY, "SP：halo 帶的是 production 的理由鍵")
 checkEq(halos[1] and halos[1].player, ch, "SP：halo 掛在操作者身上")
 
 -- 卸載也走同一條
-ch, veh, st = mkInstalled("nav", 0.5)
-act = ISAutoDriveDeviceAction:new(ch, veh, "nav", false, nil)
+ch, veh, it = mkInstalled("nav", 0.5)
+act = vanillaAction.mk(ch, veh, "nav", false, nil)
 resetStats()
 act:perform()
-checkFalse(st.nav, "SP：perform 完成卸載")
-checkEq(stats.instanceItem, 1, "SP：卸載生成一顆 GPS")
+checkNil(veh._devices.MDADGPS:getInventoryItem(), "SP：perform 完成卸載")
+checkEq(ch:getInventory():getFirstTypeRecurse(GPS_T), it, "SP：卸下來的是槽裡那一顆")
+checkEq(stats.instanceItem, 0, "SP：卸載不生成道具")
 checkEq(#sentClient, 0, "SP：卸載也不發封包")
 
 -- 專用伺服器（isClient=false、isServer=true）不畫 UI：失敗不得呼叫 HaloTextHelper
 serverFlag = true
 ch = mkPlayer(); veh = mkVehicle()
-act = ISAutoDriveDeviceAction:new(ch, veh, "nav", false, nil)   -- 沒裝卻要卸，必失敗
+act = vanillaAction.mk(ch, veh, "nav", false, nil)   -- 沒裝卻要卸，必失敗
 resetStats()
 act:perform()
 checkEq(#halos, 0, "專用伺服器：失敗也不畫 halo")
@@ -2823,13 +3711,13 @@ serverFlag = false
 ch = mkPlayer(); veh = mkVehicle()
 it = newItem(GPS_T, { uses = 0.5, useDelta = 0.006 })
 ch:getInventory():AddItem(it)
-act = ISAutoDriveDeviceAction:new(ch, veh, "nav", true, it)
+act = vanillaAction.mk(ch, veh, "nav", true, it)
 act.vehicle = nil
 resetStats()
 act.performed = false
 act:perform()
 checkTrue(act.performed, "vehicle 為 nil：仍呼叫父類 perform")
-checkEq(stats.transmitModData, 0, "vehicle 為 nil：不突變")
+checkEq(stats.transmitPartItem, 0, "vehicle 為 nil：不突變")
 checkEq(#sentClient, 0, "vehicle 為 nil：不發封包")
 checkTrue(ch:getInventory():contains(it), "vehicle 為 nil：物品仍在背包")
 
@@ -2844,7 +3732,7 @@ clientFlag, serverFlag = true, false
 ch = mkPlayer(); veh = mkVehicle()
 it = newItem(GPS_T, { uses = 0.42, useDelta = 0.006 })
 ch:getInventory():AddItem(it)
-act = ISAutoDriveDeviceAction:new(ch, veh, "nav", true, it)
+act = vanillaAction.mk(ch, veh, "nav", true, it)
 resetStats()
 act:perform()
 
@@ -2871,9 +3759,9 @@ checkNil(margs.navDelta, "payload 不帶 navDelta")
 checkNil(margs.state, "payload 不帶 state")
 checkNil(margs.partId, "payload 不帶 partId")
 
-checkFalse(MDAD.isNavInstalled(veh), "MP client：本地不寫狀態")
+checkFalse(MDAD.isNavInstalled(veh), "MP client：本地不動槽")
 checkTrue(ch:getInventory():contains(it), "MP client：物品沒被本地移除")
-checkEq(stats.transmitModData, 0, "MP client：不同步 part modData")
+checkEq(stats.transmitPartItem, 0, "MP client：不同步零件槽")
 checkEq(stats.sendRemoveItem, 0, "MP client：不發移除同步")
 checkEq(stats.itemById, 0, "MP client：不做任何權威解析")
 checkEq(#halos, 0, "MP client：不本地提示（等伺服器回報）")
@@ -2881,7 +3769,7 @@ checkEq(it.jobDelta, 0, "MP client：perform 仍把 jobDelta 收乾淨")
 checkTrue(act.performed, "MP client：仍呼叫父類 perform")
 
 -- 卸載：沒有來源物品，itemId 送 -1（server 端 install=false 不會用到）
-act = ISAutoDriveDeviceAction:new(ch, veh, "nav", false, nil)
+act = vanillaAction.mk(ch, veh, "nav", false, nil)
 resetStats()
 act:perform()
 checkEq(#sentClient, 1, "MP client 卸載：也發一次")
@@ -2889,7 +3777,7 @@ checkEq(sentClient[1] and sentClient[1].args.install, false, "卸載 payload 的
 checkEq(sentClient[1] and sentClient[1].args.itemId, -1, "卸載沒有來源物品：itemId 送 -1")
 
 -- install 一律正規化成 boolean（欄位被外部改成雜值時不得原樣送出）
-act = ISAutoDriveDeviceAction:new(ch, veh, "nav", true, it)
+act = vanillaAction.mk(ch, veh, "nav", true, it)
 act.install = 1
 resetStats()
 act:perform()
@@ -2955,7 +3843,7 @@ fireDevice(pOwner, { vehicleId = vTarget:getId(), kind = "nav", install = true, 
 checkEq(stats.getVehicleById, 1, "server 用 vehicleId 重查載具")
 checkEq(stats.itemById, 1, "server 用 itemId 在操作者背包樹重解析物品")
 checkTrue(MDAD.isNavInstalled(vTarget), "OnClientCommand 走完整條鏈完成安裝")
-checkNear(MDAD.getState(vTarget).navDelta, 0.6, EPS, "navDelta 由 server 讀實物")
+checkEq(vTarget._devices.MDADGPS:getInventoryItem(), it, "server 把事件玩家那顆實物搬進槽")
 checkFalse(pOwner:getInventory():contains(it), "物品從操作者背包移除")
 checkEq(stats.sendRemoveItem, 1, "MP server 廣播移除")
 checkEq(#sentServer, 0, "成功不回報失敗")
@@ -2968,7 +3856,7 @@ checkEq(sentServer[1] and sentServer[1].module, MOD_ID, "失敗回報帶 MOD_ID"
 checkEq(sentServer[1] and sentServer[1].player, pOwner, "失敗回報送回事件玩家的連線")
 checkEq(noteReason(sentServer[1] and sentServer[1].args.reason), ALREADY, "重播理由鍵是已安裝")
 checkEq(sentServer[1] and sentServer[1].args.to, "owner", "回報帶 to（分割畫面要靠它定位）")
-checkEq(stats.transmitModData, 0, "重播不再同步")
+checkEq(stats.transmitPartItem, 0, "重播不再同步")
 checkEq(stats.instanceItem, 0, "重播不生成道具")
 
 -- H1：payload 宣稱的 actor 完全不算數，一律以事件玩家判定
@@ -3005,7 +3893,7 @@ fireDevice(pIntruder, {
     vehicleId = veh:getId(), kind = "nav", install = true, itemId = it:getID(), actor = pOwner,
 })
 checkTrue(MDAD.isNavInstalled(veh), "事件玩家用自己的 GPS：安裝成立")
-checkNear(MDAD.getState(veh).navDelta, 0.25, EPS, "navDelta 取事件玩家實物的電量")
+checkEq(veh._devices.MDADGPS:getInventoryItem(), it, "槽裡是事件玩家自己那顆實物")
 checkFalse(pIntruder:getInventory():contains(it), "消耗的是事件玩家自己的物品")
 checkEq(#sentServer, 0, "成功不回報")
 
@@ -3018,8 +3906,10 @@ fireDevice(pIntruder, {
     vehicle = st, partId = 3, navDelta = 1.0, state = { nav = true, auto = true },
 })
 checkTrue(MDAD.isAutoInstalled(veh), "只認 vehicleId 指到的車")
-checkNil(MDAD.getState(st), "payload 夾帶的誘餌車完全沒被碰")
-checkNear(MDAD.getState(veh).navDelta, 0.25, EPS, "payload 的 navDelta 不被採用（維持實物讀到的值）")
+checkNil(st._devices.MDADGPS:getInventoryItem(), "payload 夾帶的誘餌車 nav 槽沒被碰")
+checkNil(st._devices.MDADAutopilot:getInventoryItem(), "誘餌車 auto 槽也沒被碰")
+checkNear(veh._devices.MDADGPS:getInventoryItem()._uses, 0.25, EPS,
+    "payload 的 navDelta／state 全不採用：nav 槽裡還是那顆 0.25 電的實物")
 
 -- vehicleId 查不到：靜默早退，連失敗都不回（避免變成 id 探測 oracle）
 fireDevice(pOwner, { vehicleId = 999999, kind = "nav", install = true, itemId = 1 })
@@ -3313,46 +4203,56 @@ checkEq(opt.args[2], "nav", "選項帶 kind=nav")
 checkEq(opt.args[3], true, "選項帶 install=true")
 checkEq(opt.args[4], it, "選項帶背包裡的那顆 GPS")
 
+-- 選項被點下去：一律交給**原版**維修面板的入口，不自己排 pathfind／裝備工具／
+-- 下車／排動作。自己排等於繞過其他 MOD 對零件動作的攔截，也得自己維護一份
+-- 與原版漂移的前置流程。
 resetStats()
 invoke(opt)
-checkEq(#uiCalls.exit, 0, "沒坐在這輛車上：不呼叫 onExit")
-checkEq(#uiCalls.toInventory, 1, "安裝前先把物品收進玩家背包")
-checkEq(at(uiCalls.toInventory, 1).item, it, "收的是選中的那顆 GPS")
-checkEq(#uiCalls.equip, 1, "自動裝備螺絲刀")
-checkEq(at(uiCalls.equip, 1).player, ch, "裝備的對象是操作者")
-checkTrue(at(uiCalls.equip, 1).item ~= nil and at(uiCalls.equip, 1).item:hasTag("SCREWDRIVER"),
-    "裝備的是螺絲刀")
-checkEq(#uiCalls.queue, 1, "沒有 area 時只排一個動作")
-act = at(uiCalls.queue, 1)
-checkEq(act.Type, "ISAutoDriveDeviceAction", "排進去的是 ISAutoDriveDeviceAction")
-checkEq(act.character, ch, "動作的 character 是操作者")
-checkEq(act.vehicle, veh, "動作的 vehicle 是目標車")
-checkEq(act.kind, "nav", "動作的 kind")
-checkEq(act.install, true, "動作的 install")
-checkEq(act.item, it, "動作的 item")
+checkEq(#uiCalls.install, 1, "點下安裝：呼叫一次原版 onInstallPart")
+checkEq(at(uiCalls.install, 1).player, ch, "onInstallPart 帶操作者")
+checkEq(at(uiCalls.install, 1).part, veh._devices.MDADGPS, "onInstallPart 帶 nav 裝置槽")
+checkEq(at(uiCalls.install, 1).item, it, "onInstallPart 帶選中的那顆 GPS")
+checkEq(#uiCalls.uninstall, 0, "安裝不呼叫卸載入口")
+checkEq(#uiCalls.queue, 0, "不自己排動作（原版入口自己會排）")
+checkEq(#uiCalls.exit, 0, "不自己呼叫 onExit")
+checkEq(#uiCalls.toInventory, 0, "不自己把物品收進背包")
+checkEq(#uiCalls.equip, 0, "不自己裝備螺絲刀")
 
--- 有電瓶艙 area：先排走過去的 pathfind，再排安裝
-veh = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }), area = "engine", inArea = true })
+-- 目標車輛換成有裝置艙 area 的：入口不變，仍然只呼叫原版那一支
+veh = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }), area = "engine",
+    inArea = true })
 ch._near = veh
 ctx = newContext()
 fire("OnFillWorldObjectContextMenu", 0, ctx, {}, false)
 resetStats()
 invoke(ctx.options[1])
-checkEq(#uiCalls.queue, 2, "有 area：先排 pathToVehicleArea 再排安裝")
-checkEq(at(uiCalls.queue, 1)._kind, "pathToVehicleArea", "第一個是走到電瓶艙的 pathfind")
-checkEq(at(uiCalls.queue, 1).area, "engine", "pathfind 帶 part 的 area")
-checkEq(at(uiCalls.queue, 1).vehicle, veh, "pathfind 帶目標車")
-checkEq(at(uiCalls.queue, 2).Type, "ISAutoDriveDeviceAction", "第二個才是安裝動作")
+checkEq(#uiCalls.install, 1, "有 area 也只呼叫原版 onInstallPart")
+checkEq(at(uiCalls.install, 1).part, veh._devices.MDADGPS, "帶的是這台車的 nav 槽")
+checkEq(#uiCalls.queue, 0, "pathfind 由原版入口決定，不在這裡排")
 
--- 坐在目標車上：先下車
+-- 坐在目標車上：下車與否也是原版入口的事
 ch._vehicle = veh
 ctx = newContext()
 fire("OnFillWorldObjectContextMenu", 0, ctx, {}, false)
 resetStats()
 invoke(ctx.options[1])
-checkEq(#uiCalls.exit, 1, "坐在目標車上：先呼叫 onExit 下車")
-checkEq(at(uiCalls.exit, 1), ch, "下車的是操作者")
+checkEq(#uiCalls.install, 1, "坐在車上：照樣交給原版入口")
+checkEq(#uiCalls.exit, 0, "下車由原版入口處理，不在這裡插手")
 ch._vehicle = nil
+
+-- 槽不存在（腳本沒注入）：沒有 part 可交，什麼都不呼叫（不得拿 nil 去打原版）
+do
+    local vNoSlot = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }),
+        noDeviceSlots = true })
+    ch._near = vNoSlot
+    ctx = newContext()
+    fire("OnFillWorldObjectContextMenu", 0, ctx, {}, false)
+    resetStats()
+    invoke(ctx.options[1])
+    checkEq(#uiCalls.install, 0, "沒有裝置槽：不呼叫原版入口（也不得帶 nil part）")
+    checkEq(#uiCalls.uninstall, 0, "沒有裝置槽：卸載入口也不呼叫")
+    ch._near = veh
+end
 
 -- 被 deviceBlockReason 擋下的選項要置灰＋掛 tooltip（slot1 沒有螺絲刀）
 pc1:getInventory():AddItem(newItem(GPS_T, { uses = 0.5, useDelta = 0.006 }))
@@ -3365,9 +4265,8 @@ checkEq(noteReason(ctx.options[1].toolTip and ctx.options[1].toolTip.description
     "tooltip 說明缺工具")
 
 -- 已安裝：改出卸載選項，且不帶 item
-st = MDAD.ensureState(veh:getBattery())
-st.nav = true
-st.auto = true
+veh._devices.MDADGPS._item = newItem(GPS_T, { uses = 0.5, useDelta = 0.006 })
+veh._devices.MDADAutopilot._item = newItem(AUTO_T)
 ctx = newContext()
 fire("OnFillWorldObjectContextMenu", 0, ctx, {}, false)
 checkEq(#ctx.options, 2, "nav 與 auto 都已安裝：兩個卸載選項")
@@ -3381,15 +4280,16 @@ checkEq(ctx.options[2].args[3], false, "卸載 auto 的 install=false")
 
 resetStats()
 invoke(ctx.options[1])
+checkEq(#uiCalls.uninstall, 1, "點下卸載：呼叫一次原版 onUninstallPart")
+checkEq(at(uiCalls.uninstall, 1).player, ch, "onUninstallPart 帶操作者")
+checkEq(at(uiCalls.uninstall, 1).part, veh._devices.MDADGPS, "onUninstallPart 帶 nav 裝置槽")
+checkEq(#uiCalls.install, 0, "卸載不呼叫安裝入口")
 checkEq(#uiCalls.toInventory, 0, "卸載沒有來源物品：不呼叫 toPlayerInventory")
-act = at(uiCalls.queue, #uiCalls.queue)
-checkEq(act.kind, "nav", "排進去的卸載動作 kind=nav")
-checkEq(act.install, false, "排進去的卸載動作 install=false")
-checkNil(act.item, "排進去的卸載動作沒有 item")
+checkEq(#uiCalls.queue, 0, "卸載也不自己排動作")
 
 -- 目標車輛的取得順序
-st.nav = nil
-st.auto = nil
+veh._devices.MDADGPS._item = nil
+veh._devices.MDADAutopilot._item = nil
 JoypadState.players[1] = {}
 pickedVehicle = mkVehicle()
 ctx = newContext()
@@ -3736,8 +4636,9 @@ driveReset(dveh)
 checkTrue(MDAD.Drive.start(dp), "沙盒關掉模組需求時不裝模組也能開")
 MDAD.Drive.stop(0, nil)
 setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = true, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
-st = MDAD.ensureState(dveh:getBattery())
-st.auto = true
+-- 自駕模組＝ auto 槽裡真的插著一顆；nav 同理。st 沿用既有 local 存 nav 槽。
+st = dveh._devices.MDADGPS
+dveh._devices.MDADAutopilot._item = newItem(AUTO_T)
 
 -- 導航道具閘門（M2 既有的 MDAD.navGate，自駕沿用同一顆）
 setSandbox({ NeedItemForNav = true, NeedItemForAutoDrive = true, AutoDriveMaxSpeed = 40 })
@@ -3745,11 +4646,11 @@ driveReset(dveh)
 checkFalse(MDAD.Drive.start(dp), "需要 GPS 但身上沒有：不啟動")
 checkEq(haloKey(), NEED_GPS, "缺 GPS 提示 NeedGPS")
 
-st.nav = true
+st._item = newItem(GPS_T, { uses = 0.6, useDelta = 0.006 })
 driveReset(dveh)
 checkTrue(MDAD.Drive.start(dp), "車上已裝 nav 且車電有電：不必再帶隨身 GPS")
 MDAD.Drive.stop(0, nil)
-st.nav = nil
+st._item = nil
 setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = true, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
 
 -- 導航目標與路線
@@ -4790,11 +5691,11 @@ checkFalse(MDAD.Drive.isActive(0), "行進中電瓶沒電：結束自駕")
 checkEq(haloKey(), DKEY.ENGINE, "電瓶死掉沿用 EngineOff")
 
 checkTrue(armDrive(), "模組情境重新啟動")
-st.auto = nil
+dveh._devices.MDADAutopilot._item = nil
 driveTick(dp, dveh)
 checkFalse(MDAD.Drive.isActive(0), "自駕模組被拆掉：結束自駕")
 checkEq(haloKey(), DKEY.NEED_MODULE, "缺模組提示 NeedModule")
-st.auto = true
+dveh._devices.MDADAutopilot._item = newItem(AUTO_T)
 
 -- 導航道具閘門在行進中失效。driveGate 每幀用 context="draw"，隨身搜尋有 1 秒快取，
 -- 所以要跨過 TTL 才會重掃背包——這正是「每幀不掃背包」的效能設計。
