@@ -101,8 +101,8 @@ HUD 會區分已停靠、已略過、下一目標與行程完成，完整內容�
 English: open a GitHub issue with the "Navigation problem report" form and attach the whole `Telemetry` folder as a zip — the form lists the steps.
 
 ## 開發
-- `link_workshop.bat`：把 repo 掛載到 `Zomboid\Workshop\` 與 `Zomboid\mods\`（符號連結，repo 改動即時生效）
-- `PZ_Test.bat`：啟動測試（客戶端 / 專用伺服器 / 多客戶端組合）
+- `link_workshop.bat`：手動同步、狀態檢查與歸檔卸載（實體副本，不使用目錄連結）
+- `PZ_Test.bat`：啟動前自動同步 MOD 與家族依賴；Steam／no-Steam／Debug／多開皆保留。資料邊界見 `../pz-family-docs/tools.md`
 - 診斷紀錄（需先在選項開啟）：本機 `Lua/MinidoracatAutoDrive/Telemetry`，每段自駕一個 `session-NNN.log`；管理檔為 `manifest.txt`、`latest.txt`、`session-index.txt`。後者固定最多 64 列，以 raw epoch ms 對應每段檔案；MiniMap v2 可複製最新檔或資料夾絕對路徑
 
 ## 版本

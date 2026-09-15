@@ -1,5 +1,7 @@
-﻿# Minidoracat PZ MOD 家族 — Workshop 符號連結管理（統一版，正本：D:/github/pz-family-docs/scripts/）
-# 用途：將開發目錄連結到 Zomboid Workshop 和 mods 目錄，方便本地測試和 Workshop 上傳
+﻿# Minidoracat PZ MOD 家族 — 開發同步管理（統一版，正本：D:/github/pz-family-docs/scripts/）
+# 用途：把開發目錄「實體複製」到 Zomboid\Workshop 與 Zomboid\mods，方便本地測試和 Workshop 上傳
+# PZ 對目錄連結的搜尋基準與遍歷路徑不一致，會誤記 MOD 來源；實體副本避免此缺陷。
+# 同步與歸檔由 scripts/sync_mod.ps1 負責。
 # 零設定：自動從 MOD/*/Contents/mods/*/42/mod.info 讀取 id 與 require=
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -40,21 +42,21 @@ if (-not $MOD_ID) { Write-Host "[錯誤] mod.info 缺 id=" -ForegroundColor Red;
 # require= 逗號分隔（ChooseGameInfo.java 只 split(",")）；寫入 Mods= 時依賴排在前面
 $REQUIRED_MOD_IDS = @()
 if ($modKv['require']) { $REQUIRED_MOD_IDS = @($modKv['require'] -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
-# 家族依賴（可在本機 Zomboid\mods 掛載）vs 第三方依賴（Steam 訂閱，僅提醒）
+# 家族依賴（同步引擎會從兄弟 repo 一併複製）vs 第三方依賴（Steam 訂閱，僅提醒、不複製）
 $FamilyDeps = @($REQUIRED_MOD_IDS | Where-Object { $_ -like 'Minidoracat*' -or $_ -like 'Cat*For42' })
 # 翻譯包永遠墊底（後載入者覆蓋先載入者）：只重排既有條目、不新增
 $TranslationModsLast = @('CatModLangFor42', 'CatLangFor42')
 
-# Workshop 符號連結（用於上傳；連結名 = 資料夾名）
-$WorkshopDir = Join-Path $env:UserProfile "Zomboid\Workshop"
-$WorkshopLink = Join-Path $WorkshopDir $MOD_FOLDER
-
-# Mods 符號連結（用於遊戲載入，PZ 優先從此處讀取；連結名 = mod id）
-$ModsDir = Join-Path $env:UserProfile "Zomboid\mods"
-$ModsLink = Join-Path $ModsDir $MOD_ID
+# Zomboid 快取根（同步目的地與伺服器設定都由此推導）
+$ZomboidDir = Join-Path $env:UserProfile "Zomboid"
+# Workshop 副本（上傳暫存，也會優先被 Steam 模式掃描；目錄名 = 資料夾名）
+$WorkshopDest = Join-Path (Join-Path $ZomboidDir "Workshop") $MOD_FOLDER
+# mods 副本（no-Steam 測試也可讀取；目錄名 = mod id）
+$ModsDir = Join-Path $ZomboidDir "mods"
+$ModsDest = Join-Path $ModsDir $MOD_ID
 
 # 非 Steam 伺服器設定檔（-nosteam 伺服器不掃 Workshop，需把 mod id 寫進 ini 的 Mods=）
-$ServerIniDir = Join-Path $env:UserProfile "Zomboid\Server"
+$ServerIniDir = Join-Path $ZomboidDir "Server"
 $ServerModIds = @($REQUIRED_MOD_IDS) + $MOD_ID   # 寫入 Mods= 的 id（依賴在前）
 $ServerModIdsOwn = @($MOD_ID)                    # 移除時只動本 repo 擁有的 id
 
@@ -68,23 +70,63 @@ if (-not (Test-Path (Join-Path $ModContent "42\mod.info"))) {
     Read-Host "按 Enter 結束"
     exit 1
 }
+# 註：AI 工具狀態目錄（.omc/.claude/.gitnexus）不再就地刪除——同步引擎複製時直接排除，
+#     來源保持原狀（開發中的 hook 狀態不該被掛載腳本清掉）。
 
-# 清理誤入 MOD 內容樹的 AI 工具狀態目錄（hook 會就地寫入；
-# git 已忽略，但 Workshop 上傳是整包目錄，出貨包內必須不存在）
-foreach ($junk in @(".omc", ".claude", ".gitnexus")) {
-    Get-ChildItem -Path $ModSource -Recurse -Force -Directory -Filter $junk -ErrorAction SilentlyContinue |
-        Remove-Item -Recurse -Force -Confirm:$false
+# ============================================
+# 同步引擎（sync_mod.ps1）：bat 以 ScriptBlock 執行時沒有 $PSScriptRoot，
+# 所以先找專案 scripts/，再退回腳本自身同目錄。缺引擎＝fail-closed，絕不「沒同步照樣繼續」。
+# ============================================
+$enginePaths = @(Join-Path $ProjectRoot "scripts\sync_mod.ps1")
+if ($PSScriptRoot) { $enginePaths += (Join-Path $PSScriptRoot "sync_mod.ps1") }
+$SyncEngine = @($enginePaths | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1)[0]
+if (-not $SyncEngine) {
+    Write-Host ""
+    Write-Host "[錯誤] 找不到同步引擎 sync_mod.ps1，已中止（不會建立任何連結或副本）" -ForegroundColor Red
+    foreach ($p in $enginePaths) { Write-Host "  找過：$p" -ForegroundColor DarkGray }
+    Write-Host "  請從 D:/github/pz-family-docs/scripts 同步腳本到本 repo 的 scripts/。" -ForegroundColor Yellow
+    Read-Host "按 Enter 結束"
+    exit 1
+}
+. $SyncEngine
+foreach ($fn in @('Invoke-PZModSync', 'Remove-PZModSync')) {
+    if (-not (Get-Command $fn -CommandType Function -ErrorAction SilentlyContinue)) {
+        Write-Host ""
+        Write-Host "[錯誤] $SyncEngine 未提供 $fn，引擎版本不符，已中止" -ForegroundColor Red
+        Read-Host "按 Enter 結束"
+        exit 1
+    }
 }
 
 # ============================================
 # 功能函式
 # ============================================
 
+# 只接受引擎契約的單一布林成功值，避免雜訊輸出被 PowerShell 當作成功。
+function Test-SyncResult {
+    param($Result)
+    return ($Result -is [bool] -and $Result)
+}
+
+# 唯讀：用於狀態顯示時辨識舊符號連結（本腳本不再建立任何連結）
 function Test-IsSymlink {
     param([string]$Path)
     if (-not (Test-Path $Path)) { return $false }
     $item = Get-Item $Path -Force -ErrorAction SilentlyContinue
     return ($null -ne $item.LinkType)
+}
+
+function Show-DestState {
+    param([string]$Label, [string]$Path)
+    Write-Host "  [$Label] " -NoNewline
+    if (-not (Test-Path $Path)) {
+        Write-Host "未同步" -ForegroundColor DarkGray
+    } elseif (Test-IsSymlink $Path) {
+        $target = (Get-Item $Path -Force).Target
+        Write-Host "舊符號連結 -> $target（下次同步會先歸檔再改成實體副本）" -ForegroundColor Yellow
+    } else {
+        Write-Host "實體副本" -ForegroundColor Green
+    }
 }
 
 function Show-Status {
@@ -107,86 +149,18 @@ function Show-Status {
     }
 
     Write-Host ""
-    Write-Host "=== 連結狀態 ===" -ForegroundColor Cyan
+    Write-Host "=== 同步狀態 ===" -ForegroundColor Cyan
+    Show-DestState -Label "Workshop" -Path $WorkshopDest
+    Show-DestState -Label "mods    " -Path $ModsDest
 
-    # Workshop 連結
-    Write-Host "  [Workshop] " -NoNewline
-    if (-not (Test-Path $WorkshopLink)) {
-        Write-Host "未掛載" -ForegroundColor DarkGray
-    } elseif (Test-IsSymlink $WorkshopLink) {
-        $target = (Get-Item $WorkshopLink -Force).Target
-        Write-Host "已掛載 -> $target" -ForegroundColor Green
+    # 內容一致性（含家族依賴）交給引擎唯讀檢查：CheckOnly 不寫入任何東西
+    Write-Host ""
+    if (Test-SyncResult (Invoke-PZModSync -ProjectRoot $ProjectRoot -ZomboidDir $ZomboidDir -CheckOnly)) {
+        Write-Host "[已同步] 副本與來源一致，可直接開遊戲測試。" -ForegroundColor Green
     } else {
-        Write-Host "實體資料夾（非符號連結）" -ForegroundColor Yellow
-    }
-
-    # Mods 連結
-    Write-Host "  [Mods]     " -NoNewline
-    if (-not (Test-Path $ModsLink)) {
-        Write-Host "未掛載" -ForegroundColor DarkGray
-    } elseif (Test-IsSymlink $ModsLink) {
-        $target = (Get-Item $ModsLink -Force).Target
-        Write-Host "已掛載 -> $target" -ForegroundColor Green
-    } else {
-        Write-Host "實體資料夾（Steam 快取？）" -ForegroundColor Yellow
+        Write-Host "[需同步] 副本與來源不一致或尚未建立——請執行選單 [1]。" -ForegroundColor Yellow
     }
     Write-Host ""
-}
-
-function New-SymlinkSafe {
-    param([string]$LinkPath, [string]$Target, [string]$Label)
-
-    if (Test-Path $LinkPath) {
-        if (Test-IsSymlink $LinkPath) {
-            $existing = (Get-Item $LinkPath -Force).Target
-            Write-Host "  [$Label] 已掛載 -> $existing" -ForegroundColor Green
-            return
-        }
-        # 實體資料夾（可能是 Steam 快取）—— 以時間戳備份改名，絕不刪除既有資料或舊備份
-        $bakPath = "$LinkPath.bak-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-        try {
-            Rename-Item $LinkPath $bakPath -Force -ErrorAction Stop
-        } catch {
-            Write-Host "  [$Label] 無法備份既有資料夾，中止此連結: $($_.Exception.Message)" -ForegroundColor Red
-            return
-        }
-        Write-Host "  [$Label] 已將舊資料夾備份為 $(Split-Path -Leaf $bakPath)" -ForegroundColor Yellow
-    }
-
-    # 確保父目錄存在
-    $parentDir = Split-Path -Parent $LinkPath
-    if (-not (Test-Path $parentDir)) {
-        New-Item -ItemType Directory -Path $parentDir -Force | Out-Null
-    }
-
-    # 嘗試建立符號連結
-    try {
-        New-Item -ItemType SymbolicLink -Path $LinkPath -Target $Target -ErrorAction Stop | Out-Null
-        Write-Host "  [$Label] 建立成功" -ForegroundColor Green
-        Write-Host "           $LinkPath" -ForegroundColor DarkGray
-        Write-Host "           -> $Target" -ForegroundColor DarkGray
-        return $true
-    } catch {
-        return $false
-    }
-}
-
-function New-SymlinkElevated {
-    param([string]$LinkPath, [string]$Target, [string]$Label)
-    try {
-        Start-Process powershell.exe -Verb RunAs -Wait -ArgumentList @(
-            "-NoProfile",
-            "-ExecutionPolicy", "Bypass",
-            "-Command",
-            "New-Item -ItemType SymbolicLink -Path '$LinkPath' -Target '$Target' -ErrorAction Stop | Out-Null"
-        )
-        if (Test-IsSymlink $LinkPath) {
-            Write-Host "  [$Label] 建立成功（UAC）" -ForegroundColor Green
-            return $true
-        }
-    } catch {}
-    Write-Host "  [$Label] 建立失敗" -ForegroundColor Red
-    return $false
 }
 
 # ============================================
@@ -205,8 +179,8 @@ function Select-ServerIni {
     for ($i = 0; $i -lt $inis.Count; $i++) {
         Write-Host "  [$($i + 1)] $($inis[$i].Name)" -NoNewline
         if ($inis[$i].Name -eq "servertest.ini") {
-            # PZ_Test.ps1 的 $SERVER_NAME 固定 servertest，本機測試都走這份
-            Write-Host "   <- PZ_Test.bat 主要測試伺服器" -ForegroundColor Green -NoNewline
+            # 尚無專案偏好時的預設；啟動器之後會記住使用者選擇。
+            Write-Host "   <- PZ_Test.bat 首次預設" -ForegroundColor Green -NoNewline
         }
         Write-Host ""
     }
@@ -335,98 +309,50 @@ function Invoke-ServerIniPrompt {
     }
 }
 
-function Mount-Workshop {
+# ============================================
+# 同步 / 卸載（實作全在 sync_mod.ps1）
+# ============================================
+
+function Sync-Workshop {
     Write-Host ""
-    Write-Host "正在建立符號連結..." -ForegroundColor Cyan
+    Write-Host "正在同步實體副本（Workshop + mods，含家族依賴）..." -ForegroundColor Cyan
     Write-Host ""
 
-    # 嘗試不需提權建立兩個連結
-    $ws = New-SymlinkSafe -LinkPath $WorkshopLink -Target $ModSource -Label "Workshop"
-    $md = New-SymlinkSafe -LinkPath $ModsLink -Target $ModContent -Label "Mods"
+    $ok = Test-SyncResult (Invoke-PZModSync -ProjectRoot $ProjectRoot -ZomboidDir $ZomboidDir)
 
-    # 如果任一個失敗，嘗試 UAC 提權
-    $needElevate = @()
-    if ($ws -eq $false) { $needElevate += @{ Link=$WorkshopLink; Target=$ModSource; Label="Workshop" } }
-    if ($md -eq $false) { $needElevate += @{ Link=$ModsLink; Target=$ModContent; Label="Mods" } }
-
-    if ($needElevate.Count -gt 0) {
+    Write-Host ""
+    if (-not $ok) {
+        # 失敗不得假成功：不寫 ini、不提示可以開遊戲
+        Write-Host "[未完成] 同步失敗，請依上方訊息處理（遊戲或伺服器執行中請先關閉後重試）。" -ForegroundColor Red
+        Write-Host "[提示] 同步未成功，略過伺服器 ini 寫入詢問" -ForegroundColor Yellow
         Write-Host ""
-        Write-Host "[提示] 需要管理員權限，正在請求提升..." -ForegroundColor Yellow
-        foreach ($item in $needElevate) {
-            New-SymlinkElevated -LinkPath $item.Link -Target $item.Target -Label $item.Label
-        }
+        return
     }
 
-    Write-Host ""
-    # 依賴可見性：Mods= 會連依賴 id 一起寫入，依賴未掛載（Zomboid\mods 下不可見）就寫進去，
-    # -nosteam 開服必報缺 mod——所以「全部完成」與 ini 寫入都必須把依賴納入判斷
-    $missingDeps = @($FamilyDeps | Where-Object { -not (Test-Path (Join-Path $ModsDir $_)) })
     $thirdParty = @($REQUIRED_MOD_IDS | Where-Object { $FamilyDeps -notcontains $_ })
-    if ($thirdParty.Count -gt 0) { Write-Host "[提示] 第三方依賴（$($thirdParty -join '、')）請確認已在 Steam 訂閱；-nosteam 伺服器需其位於 Zomboid\mods" -ForegroundColor DarkGray }
-    if ((Test-IsSymlink $WorkshopLink) -and (Test-IsSymlink $ModsLink) -and $missingDeps.Count -eq 0) {
-        Write-Host "[全部完成] 現在可以在 PZ 遊戲中測試此 MOD。" -ForegroundColor Green
-    } elseif ($missingDeps.Count -gt 0) {
-        Write-Host "[部分完成] 依賴未掛載（$($missingDeps -join '、')）——請先到主 MOD repo 跑 link_workshop.bat。" -ForegroundColor Yellow
-    } else {
-        Write-Host "[部分完成] 請檢查上方狀態。" -ForegroundColor Yellow
-        Write-Host "替代方案：啟用 Windows 開發人員模式後即可免管理員建立連結：" -ForegroundColor Yellow
-        Write-Host "  設定 -> 系統 -> 開發人員專用 -> 開發人員模式" -ForegroundColor Yellow
+    if ($thirdParty.Count -gt 0) {
+        Write-Host "[提示] 第三方依賴（$($thirdParty -join '、')）不會被複製，請確認已在 Steam 訂閱；-nosteam 伺服器需其位於 Zomboid\mods" -ForegroundColor DarkGray
     }
-
+    Write-Host "[全部完成] 現在可以在 PZ 遊戲中測試此 MOD。" -ForegroundColor Green
     Write-Host ""
-    if ((Test-IsSymlink $ModsLink) -and $missingDeps.Count -eq 0) {
-        Invoke-ServerIniPrompt
-    } elseif ($missingDeps.Count -gt 0) {
-        Write-Host "[提示] 依賴未掛載，略過伺服器 ini 寫入" -ForegroundColor Yellow
-    } else {
-        Write-Host "[提示] Mods 連結未建立，略過伺服器設定檔寫入詢問" -ForegroundColor Yellow
-    }
+    Invoke-ServerIniPrompt
     Write-Host ""
 }
 
-function Remove-SymlinkSafe {
-    param([string]$LinkPath, [string]$Label)
+function Unsync-Workshop {
+    Write-Host ""
+    Write-Host "正在歸檔受管副本（只動本 repo 的 Workshop/mods 副本，依賴保留）..." -ForegroundColor Cyan
+    Write-Host ""
 
-    if (-not (Test-Path $LinkPath)) {
-        Write-Host "  [$Label] 不存在，跳過" -ForegroundColor DarkGray
+    $ok = Test-SyncResult (Remove-PZModSync -ProjectRoot $ProjectRoot -ZomboidDir $ZomboidDir)
+
+    Write-Host ""
+    if (-not $ok) {
+        Write-Host "[未完成] 卸載未完成，請檢查上方歸檔結果；略過伺服器 ini 移除詢問。" -ForegroundColor Red
+        Write-Host ""
         return
     }
-
-    if (-not (Test-IsSymlink $LinkPath)) {
-        Write-Host "  [$Label] 是實體資料夾，跳過（請手動處理）" -ForegroundColor Yellow
-        return
-    }
-
-    try {
-        (Get-Item $LinkPath -Force).Delete()
-        Write-Host "  [$Label] 已移除" -ForegroundColor Green
-    } catch {
-        Write-Host "  [$Label] 需要提權移除..." -ForegroundColor Yellow
-        try {
-            Start-Process powershell.exe -Verb RunAs -Wait -ArgumentList @(
-                "-NoProfile",
-                "-ExecutionPolicy", "Bypass",
-                "-Command",
-                "(Get-Item '$LinkPath' -Force).Delete()"
-            )
-            if (-not (Test-Path $LinkPath)) {
-                Write-Host "  [$Label] 已移除（UAC）" -ForegroundColor Green
-            } else {
-                Write-Host "  [$Label] 移除失敗" -ForegroundColor Red
-            }
-        } catch {
-            Write-Host "  [$Label] 移除失敗: $($_.Exception.Message)" -ForegroundColor Red
-        }
-    }
-}
-
-function Dismount-Workshop {
-    Write-Host ""
-    Write-Host "正在移除符號連結..." -ForegroundColor Cyan
-    Write-Host ""
-    Remove-SymlinkSafe -LinkPath $WorkshopLink -Label "Workshop"
-    Remove-SymlinkSafe -LinkPath $ModsLink -Label "Mods"
-
+    Write-Host "[完成] 受管副本已歸檔。" -ForegroundColor Green
     Write-Host ""
     Invoke-ServerIniPrompt -Remove
     Write-Host ""
@@ -435,28 +361,28 @@ function Dismount-Workshop {
 # ============================================
 # 主選單
 # ============================================
-$Host.UI.RawUI.WindowTitle = "$MOD_FOLDER Workshop 連結管理"
+$Host.UI.RawUI.WindowTitle = "$MOD_FOLDER 開發同步管理"
 
 while ($true) {
     Clear-Host
     Write-Host "============================================" -ForegroundColor Cyan
-    Write-Host "  $MOD_FOLDER 符號連結管理" -ForegroundColor Cyan
+    Write-Host "  $MOD_FOLDER 開發同步管理" -ForegroundColor Cyan
     Write-Host "============================================" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "  Workshop: $WorkshopLink"
-    Write-Host "  Mods:     $ModsLink"
+    Write-Host "  Workshop: $WorkshopDest"
+    Write-Host "  mods:     $ModsDest"
     Write-Host ""
-    Write-Host "  [1] 掛載 - 建立符號連結（Workshop + Mods）"
-    Write-Host "  [2] 卸載 - 移除符號連結（Workshop + Mods）"
-    Write-Host "  [3] 查看目前狀態"
+    Write-Host "  [1] 同步 - 複製到 Workshop + mods（實體副本，含家族依賴）"
+    Write-Host "  [2] 卸載 - 歸檔本 repo 的受管副本（依賴保留）"
+    Write-Host "  [3] 查看目前狀態（唯讀檢查）"
     Write-Host ""
     Write-Host "  [Q] 離開"
     Write-Host ""
     $choice = Read-Host "請選擇"
 
     switch ($choice.ToUpper()) {
-        "1" { Mount-Workshop; Read-Host "按 Enter 繼續" }
-        "2" { Dismount-Workshop; Read-Host "按 Enter 繼續" }
+        "1" { Sync-Workshop; Read-Host "按 Enter 繼續" }
+        "2" { Unsync-Workshop; Read-Host "按 Enter 繼續" }
         "3" { Show-Status; Read-Host "按 Enter 繼續" }
         "Q" { Write-Host ""; Write-Host "再見！"; exit 0 }
     }
