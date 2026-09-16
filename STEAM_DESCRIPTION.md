@@ -72,6 +72,7 @@ GPS 導航儀規劃道路路線，自駕模組沿路自動行駛，到達目的�
 [/list]
 
 [h2]☕ 支持作者[/h2]
+覺得有幫助的話，請在這頁按個 👍 讚、到 GitHub 給個 ⭐ 星星，讓更多玩家找得到它。
 MOD 永遠免費。喜歡的話可以請我喝杯咖啡，贊助會用在伺服器與 MOD 開發上；原始碼公開在 GitHub。
 [url=https://ko-fi.com/minidoracat][img]https://raw.githubusercontent.com/Minidoracat/workshop-resources/refs/heads/main/badges/badge_kofi.png[/img][/url] [url=https://github.com/Minidoracat/MinidoracatAutoDriveFor42][img]https://raw.githubusercontent.com/Minidoracat/workshop-resources/refs/heads/main/badges/badge_github.png[/img][/url]
 
