@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0924b"
+Drive.REV = "0924c"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -205,6 +205,8 @@ TUNE.UNLOADED_CAP = 15         -- 走廊內有未載入 chunk（不知道前面�
 -- 實測的煞車下界另以信心收緊，不能把已學到的弱煞車能力再乘2.5。
 TUNE.EMERGENCY_BRAKE_GAIN = 2.5
 TUNE.EMERGENCY_BRAKE_MAX = 12
+-- 可視巡航帳的煞車倍率：介於舒適 prior 與緊急界限之間（見 visibilityCap 計算處）。
+TUNE.CRUISE_VIS_BRAKE_GAIN = 1.5
 local POLICY_DODGE = 1         -- 沙盒 ObstaclePolicy enum：1=繞行 2=停車
 
 TUNE.BLOCK_STOP_DIST = 10      -- 距障礙群這麼近才煞停等待；更遠先滑行接近
@@ -7457,12 +7459,19 @@ local function stepFollow(s, vehicle, playerNum, now)
             end
             -- 同一可視前綴分兩個速度帳：巡航先收油，緊急停距不足才動用一秒硬煞。
             -- 兩式保留同一距離與快照年齡；loaded/unloaded只決定前綴在哪，不換制動域。
-            visibilityCap = MDADDynamics.visibilityCapKmh(
-                visibleEnd - s.lastSNow, tau, minBrakeVisible, s.vehicleProfile.halfL)
+            -- 巡航帳用煞車 prior × CRUISE_VIS_BRAKE_GAIN（仍不超過緊急界限）：可視前緣真出現障礙
+            -- 時由 blocked／visibilityHard 的一秒硬煞接手，巡航不必只按舒適煞車自限（0924b 正式服
+            -- 60 趟：visibility 綁速 38%、MAX 檔 47.5%，120 選項實際約 60-85 km/h）。
             local visBrake = math.min(minBrakeVisible * TUNE.EMERGENCY_BRAKE_GAIN,
                 TUNE.EMERGENCY_BRAKE_MAX)
             visBrake = tightenLimit(visBrake, s.brakeLower, s.brakeConfidence,
                 TUNE.EMERGENCY_BRAKE_MAX)
+            -- 上限留在緊急界限的 3/4：兩帳分家才不會回到 0911c 的鋸齒硬煞（巡航帽貼著硬煞紅線）。
+            local cruiseBrake = minBrakeVisible * TUNE.CRUISE_VIS_BRAKE_GAIN
+            if cruiseBrake > visBrake * 0.75 then cruiseBrake = visBrake * 0.75 end
+            if cruiseBrake < minBrakeVisible then cruiseBrake = minBrakeVisible end
+            visibilityCap = MDADDynamics.visibilityCapKmh(
+                visibleEnd - s.lastSNow, tau, cruiseBrake, s.vehicleProfile.halfL)
             s.visibilityHardKmh = MDADDynamics.visibilityCapKmh(
                 visibleEnd - s.lastSNow, tau, visBrake, s.vehicleProfile.halfL)
             -- 終點不是障礙（2026-09-01 s058 定罪）：可視帶已含路線終點且終點前
@@ -7487,11 +7496,15 @@ local function stepFollow(s, vehicle, playerNum, now)
                 local crawl = MDADDynamics.DODGE_SQUEEZE_CAP
                 if visibilityCap < crawl then visibilityCap = crawl end
             end
+            -- 煞停視界按「實際准開的速度」算（fullTarget 已被 visibilityCap 夾過），同巡航煞車帳；
+            -- 舊制拿未夾的 fullTarget＋舒適煞車算，可視一綁速 brakeLoaded 就恆假 → gate
+            -- visibility → ungated 0.9×／80 上限疊在 visibility 上（0924b：MAX 檔被壓在 80 以下）。
+            local stopKmh = fullTarget < visibilityCap and fullTarget or visibilityCap
             stopEnd = s.lastSNow + MDADDynamics.stoppingDistance(
-                fullTarget / 3.6, tau, minBrakeVisible, s.vehicleProfile.halfL)
+                stopKmh / 3.6, tau, cruiseBrake, s.vehicleProfile.halfL)
             if stopEnd > s.profile.length then stopEnd = s.profile.length end
             brakeLoaded = finite(minBrakeVisible) and minBrakeVisible > 0
-                and visibleEnd >= stopEnd
+                and visibleEnd + 1e-6 >= stopEnd -- 可視帽本身就解到等號，留浮點容忍
             -- hardN spans the planner's full +/-7m search band, not the driven lane.
             -- verifySweep owns hard-obstacle safety; the sensor cap stack above owns
             -- moving vehicles, zombies, corpses and soft objects.
@@ -8072,9 +8085,18 @@ local function stepFollow(s, vehicle, playerNum, now)
         if s.progressState == "gear-reset" or s.recoverPulse then
             hardBrakeReason = nil
         end
-        if s.followHold or s.currentBlocked
+        -- RETURN hold 只是「回線這一輪沒驗過」：前方障礙另由 contact／blocked／visibility 管。
+        -- 已知幾何擋住回線（probe／sweep／band…）時，回線檔速度內斷油（NoControl brake 15，約
+        -- 3.6 m/s²）停得住，不必一秒鎖輪（0924b 正式服 8 段急煞有 4 段是剛啟動、14-22 km/h 的
+        -- 回線待命硬煞）。近場未知（unloaded／快照被重置）仍硬煞；其他硬煞理由不受影響。
+        local returnHoldCoast = s.returnHold and actualSpeed <= TUNE.RETURN_CAP
+            and s.lastHoldReason ~= nil and s.lastHoldReason ~= "unloaded"
+            and sensorReady and fresh
+            and not (s.followHold or s.currentBlocked
+                or (s.recoverWhy ~= nil and not s.recoverPulse) or blockedStop or reached)
+        if (s.followHold or s.currentBlocked
                 or (s.recoverWhy ~= nil and not s.recoverPulse)
-                or s.returnHold or blockedStop or reached then
+                or s.returnHold or blockedStop or reached) and not returnHoldCoast then
             hardBrakeReason = hardClampReason
         end
         s.lastHardBrakeReason = hardBrakeReason -- telemetry hbr（本幀裁決者；nil＝無）
@@ -8150,7 +8172,7 @@ local function stepFollow(s, vehicle, playerNum, now)
             targetSpeed = 0
         elseif s.returnHold then
             vehicle:setRegulator(false)
-            commandForceBrake(s, vehicle, now, "return-hold")
+            if not returnHoldCoast then commandForceBrake(s, vehicle, now, "return-hold") end
             targetSpeed = 0
         -- RETURN outranks a planned block whose Frenet anchor is no longer meaningful.
         elseif blockedStop then

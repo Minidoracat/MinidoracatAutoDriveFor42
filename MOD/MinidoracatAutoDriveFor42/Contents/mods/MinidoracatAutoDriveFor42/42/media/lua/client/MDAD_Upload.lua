@@ -356,8 +356,9 @@ function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
     if fbNow and not u.prevFbOn then
         local why = type(fbw) == "string" and fbw or "?"
         u.fb[why] = (u.fb[why] or 0) + 1
-        -- 預期中的煞車（到站、脫困流程）不算事故
-        if why ~= "arrive" and string.sub(why, 1, 7) ~= "unstick" and why ~= "contact" then
+        -- 預期中的煞車（到站、脫困流程）與幾乎靜止時的煞車不算事故
+        if why ~= "arrive" and string.sub(why, 1, 7) ~= "unstick" and why ~= "contact"
+                and spd >= 3 then
             trigger(u, now, "brake")
         end
     end

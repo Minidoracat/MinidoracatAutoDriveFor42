@@ -12081,9 +12081,10 @@ local function scenarioPhaseE()
                 b = captured.horizonMinBrake
             end
             local bg = math.min(b * 2.5, 12)
+            local bc = math.max(b, math.min(b * 1.5, bg * 0.75)) -- 巡航帳（0924c）：舒適與緊急之間
             local halfL = captured.vehicleProfile.halfL
             checkNear(captured.visibilityCap,
-                MDADDynamics.visibilityCapKmh(dist, tau, b, halfL), 1e-6,
+                MDADDynamics.visibilityCapKmh(dist, tau, bc, halfL), 1e-6,
                 "unknown frontier uses the same cruise-brake domain as loaded coverage")
             checkNear(captured.visibilityHardKmh,
                 MDADDynamics.visibilityCapKmh(dist, tau, bg, halfL), 1e-6,
@@ -13498,6 +13499,23 @@ local function scenarioPhaseE()
         checkTrue(captured.returnHold and captured.lastHoldReason == "probe",
             "側方硬障礙讓回線 probe 打槍＝hold（理由 probe，實得 "
             .. tostring(captured.lastHoldReason) .. "）")
+        -- (hold-coast) 0924b 正式服 8 段急煞有 4 段是啟動後 14-22 km/h 的回線待命一秒鎖輪：
+        --   回線檔速度內只斷油，高於回線檔仍硬煞。違規證明：拿掉 returnHoldCoast 即紅。
+        do
+            local keep = hotVeh._speed
+            hotVeh._speed = 18
+            driveReset(hotVeh)
+            driveTick(dp, hotVeh)
+            checkTrue(captured.returnHold and captured.currentBlocked ~= true,
+                "(hold-coast) 仍在回線待命（前方未擋）")
+            checkEq(drive.calls.forceBrake, 0, "(hold-coast) 18 km/h 回線待命只斷油、不鎖輪")
+            hotVeh._speed = 40
+            driveReset(hotVeh)
+            driveTick(dp, hotVeh)
+            checkTrue(drive.calls.forceBrake > 0, "(hold-coast) 40 km/h 回線待命仍硬煞")
+            hotVeh._speed = keep
+            driveReset(hotVeh)
+        end
         -- 靜止 hold 累計超過 RETURN_STALL_MS（每輪 300ms）→ 釋放交 pure pursuit
         local released, relWhy = false, nil
         local origEv = MDADDiagnostics.event
@@ -15675,6 +15693,10 @@ function drive.scenarioVisibilityBraking()
         checkTrue(maxSpeed > 40 and minSpeed > 20,
             "(visibility) 真命令驅動前進，不以全程龜速或煞停換假綠 " .. label
             .. "（峰值 " .. maxSpeed .. "、最低 " .. minSpeed .. "）")
+        -- 0924c：巡航可視帳用舒適與緊急之間的煞車、煞停視界按准開速度算——空路要真的貼到
+        -- 車輛極速 85（舊制 64／77／46：可視帳只用舒適煞車，且 gate visibility 疊 ungated 上限）。
+        checkTrue(dveh._speed >= (case == 3 and 50 or 80),
+            "(visibility) 空路巡航貼近上限 " .. label .. "（末速 " .. dveh._speed .. "）")
     end
     arm(80)
     -- 同一份已驗證前綴，載入旗標解除只能增加證據，不能降低命令。

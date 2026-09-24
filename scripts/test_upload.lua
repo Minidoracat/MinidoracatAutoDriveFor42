@@ -295,6 +295,22 @@ local stuckRow = indexRows("C")[before + 1] or ""
 checkEq(field(stuckRow, 7), "stuck", "kind stuck")
 checkEq(field(stuckRow, 8), "1", "priority 1")
 
+scenario("near-standstill brake is not an incident")
+before = #indexRows("C")
+start()
+-- 0924b 正式服：回線待命在 0-1 km/h 觸發的一秒煞車也被收成急煞片段
+drive(1000, { speed = 0.5, phys = { forceBrakeLeft = 900, forceBrakeWhy = "return" } })
+drive(1000, { speed = 0.5 })
+D.stop(0, "button")
+pump(60000)
+checkEq(#indexRows("C"), before, "standstill return brake: no clip")
+start()
+drive(1000, { speed = 20, phys = { forceBrakeLeft = 900, forceBrakeWhy = "return" } })
+drive(1000)
+D.stop(0, "button")
+pump(60000)
+checkEq(#indexRows("C"), before + 1, "moving return brake: clip")
+
 scenario("per-drive cap and same-kind cooldown")
 nowMs = nowMs + 3600000
 before = #indexRows("C")
