@@ -29,7 +29,7 @@ D.PERCEPTION_EXT_M = 32
 D.PERCEPTION_ROUND_MS = D.SNAPSHOT_FRESH_MS * 0.5
 D.PERCEPTION_STOP_MARGIN_M = 5 -- 反函式停距之外留一輪反應／加速餘裕，避免小基礎值自限加速
 D.SOFT_LOOKAHEAD_M = 40
-D.SOFT_LOOKAHEAD_S = 3
+D.SOFT_LOOKAHEAD_S = 4.5 -- 0925d 3→4.5：70 km/h 看 87m，交錯／成群殭屍在還來得及整段偏開時就看全
 
 -- 2026-09-01 telemetry s062（capReason align 137 筆、S 彎壓到 4 km/h 蠕動）：
 -- 彎中 heading error 12-15° 是前視點幾何常態，5° 閾值把正常過彎姿態當

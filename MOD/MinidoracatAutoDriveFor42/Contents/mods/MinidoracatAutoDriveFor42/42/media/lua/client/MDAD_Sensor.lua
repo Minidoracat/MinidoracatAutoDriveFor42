@@ -100,6 +100,16 @@ local SPRITE_CACHE_MAX = 4096  -- sprite 成本快取條目上限
 -- 同一格、白掃一次。
 local LAT = { -6.5, -5.5, -4.5, -3.5, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5 }
 local LAT_N = 14
+-- 斜向／彎道步：1m×1m 取樣格一旋轉就會漏格（旋轉的單位點陣與世界格密度相同，有的格兩點、有的零點），
+-- 漏哪格隨每輪起點相位變——E2E zombie-sp turn（0925）彎心殭屍每隔一兩輪就「消失」，軟縫在閃／不閃間
+-- 來回跳。軸對齊步維持原取樣；非對齊步改 0.5m 橫向×0.5m 步長：點陣覆蓋半徑 0.35 < 格內切圓 0.5，
+-- 任何旋轉都保證每格至少一點。多出的點絕大多數被 visited 去重擋掉（不扣預算），只有原本漏掉的格
+-- 才真的查世界。
+local LAT_FINE = {}
+for i = 1, 27 do LAT_FINE[i] = -6.5 + (i - 1) * 0.5 end
+local LAT_FINE_N = 27
+local FINE_STEP = 0.5
+local ALIGN_EPS = 1e-3 -- 法向分量小於此值＝軸對齊
 local HARD_MAX = LAT_N * (MDADDynamics.PERCEPTION_HARD_MAX_M - SCAN_NEAR) + 100
 local CORRIDOR_HALF = 7
 
@@ -155,6 +165,7 @@ local ROAD_CACHE_MAX = 256     -- 地板名 → 是否路面 的快取上限（�
 -- 出橫向目標，不進 hard／sig／sweep。上限 ZOM_MAX：超過即 zomOverflow（＝殭屍群，
 -- 軟縫棄權、交給既有數量減速檔）。zombieN（±SLOW_BAND_HALF 計數）語意不變。
 local ZOM_BAND_HALF = 4.5
+local ZOM_VL_MAX = 6 -- 殭屍橫向速度上限（m/s；撲擊／位置跳動不當真實走速）
 local ZOM_MAX = 64
 
 MDADSensor.SCAN_NEAR = SCAN_NEAR
@@ -677,13 +688,27 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
                     if zn >= ZOM_MAX then
                         state.wZomOverflow = true
                     else
-                        local dx, dy = mo:getX() - state.cx, mo:getY() - state.cy
+                        local wx, wy = mo:getX(), mo:getY()
+                        local dx, dy = wx - state.cx, wy - state.cy
                         local nx, ny = state.nx, state.ny
                         zn = zn + 1
                         state.wZomN = zn
                         state.wZomS[zn] = state.curS + (dx * ny - dy * nx)
                         state.wZomL[zn] = dx * nx + dy * ny
                         state.wZomIsCorpse[zn] = false -- 重用槽也要覆寫，不能留上一輪屍體標記。
+                        -- 橫向速度（右為正）：同一隻殭屍（物件為鍵）兩輪位置差／時差；首次看到＝0。
+                        -- 殭屍會朝車走過來，Driver 用它預測交會時的位置（walk 情境 E2E：路邊殭屍走進車道）。
+                        local vl = 0
+                        local px = state.zomPrevX[mo]
+                        if px ~= nil then
+                            local dt = (state.nowMs - state.zomPrevT[mo]) / 1000
+                            if dt > 0.05 and dt < 2 then
+                                vl = ((wx - px) * nx + (wy - state.zomPrevY[mo]) * ny) / dt
+                                if vl > ZOM_VL_MAX then vl = ZOM_VL_MAX elseif vl < -ZOM_VL_MAX then vl = -ZOM_VL_MAX end
+                            end
+                        end
+                        state.wZomVl[zn] = vl
+                        state.wZomCurX[mo], state.wZomCurY[mo], state.wZomCurT[mo] = wx, wy, state.nowMs
                     end
                 end
             end
@@ -719,6 +744,7 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
                         state.wZomS[zn + 1], state.wZomL[zn + 1] = zs - ds, zl - dl
                         state.wZomS[zn + 2], state.wZomL[zn + 2] = zs + ds, zl + dl
                         state.wZomIsCorpse[zn + 1], state.wZomIsCorpse[zn + 2] = true, true
+                        state.wZomVl[zn + 1], state.wZomVl[zn + 2] = 0, 0
                         state.wZomN = zn + 2
                     end
                 end
@@ -828,6 +854,7 @@ local function beginRound(state, p, sNow, vehicle, now, len, cell)
     -- 這同時處理了 s0 > s1（車已在路線末端）的情況：第一次換步就結束本輪。
     state.curS = s0 - SCAN_STEP
     state.curL = LAT_N + 1
+    state.latN, state.fineStep = LAT_N, false
 
     state.segIdx = seekSeg(p, state.baseIdx, s0)
     state.baseIdx = state.segIdx
@@ -886,6 +913,12 @@ local function finishRound(state, now)
     state.zomS, state.zomL = state.wZomS, state.wZomL
     state.wZomS, state.wZomL = tzs, tzl
     state.zomIsCorpse, state.wZomIsCorpse = state.wZomIsCorpse, state.zomIsCorpse
+    state.zomVl, state.wZomVl = state.wZomVl, state.zomVl
+    -- 位置記錄：本輪看到的變成「上一輪」，舊的上一輪清空重用（只含本輪收錄的殭屍，≤ZOM_MAX 筆）
+    local px, py, pt = state.zomPrevX, state.zomPrevY, state.zomPrevT
+    state.zomPrevX, state.zomPrevY, state.zomPrevT = state.wZomCurX, state.wZomCurY, state.wZomCurT
+    for k in pairs(px) do px[k], py[k], pt[k] = nil, nil, nil end
+    state.wZomCurX, state.wZomCurY, state.wZomCurT = px, py, pt
     state.zomN = state.wZomN
     state.zomOverflow = state.wZomOverflow
     state.corpseN = state.wCorpseN
@@ -970,6 +1003,7 @@ function MDADSensor.newState()
         curS = 0,
         endS = 0,
         curL = LAT_N + 1,
+        latN = LAT_N, fineStep = false, -- 目前這一步的橫向取樣數／是否細取樣（非軸對齊步）
         segIdx = 1,
         baseIdx = 1,
         cx = 0, cy = 0,
@@ -982,6 +1016,9 @@ function MDADSensor.newState()
         wZombieNearS = nil, -- 帶內最近殭屍弧長（本輪 working；nil＝無）
         wZomS = {}, wZomL = {}, wZomN = 0, wZomOverflow = false, -- 混合軟避讓點；殭屍一點／屍體兩點
         wZomIsCorpse = {},
+        wZomVl = {}, -- 殭屍橫向速度（右為正 m/s；屍體 0）
+        wZomCurX = {}, wZomCurY = {}, wZomCurT = {}, -- 本輪殭屍位置（物件為鍵）
+        zomPrevX = {}, zomPrevY = {}, zomPrevT = {}, -- 上一輪殭屍位置（算橫向速度）
         wCorpseN = 0,
         wSoftN = 0,
         wCorpseNearS = nil, wSoftNearS = nil, wSoftEndS = 0,
@@ -1014,6 +1051,7 @@ function MDADSensor.newState()
         zombieNearS = nil,  -- 帶內最近殭屍弧長（殭屍檔縱向 envelope；nil＝無）
         zomS = {}, zomL = {}, zomN = 0, zomOverflow = false, -- 完成輪軟避讓點雲；歷史欄名沿用 zom
         zomIsCorpse = {},
+        zomVl = {},
         corpseN = 0,
         softN = 0,
         corpseNearS = nil, softNearS = nil, softEndS = 0, softAheadM = nil,
@@ -1062,6 +1100,7 @@ function MDADSensor.reset(state)
     state.curS = 0
     state.endS = 0
     state.curL = LAT_N + 1
+    state.latN, state.fineStep = LAT_N, false
     state.segIdx = 1
     state.baseIdx = 1
     state.wHardN = 0
@@ -1097,6 +1136,8 @@ function MDADSensor.reset(state)
     state.zombieN = 0
     state.zombieNearS = nil
     state.zomN = 0
+    for k in pairs(state.zomPrevX) do state.zomPrevX[k], state.zomPrevY[k], state.zomPrevT[k] = nil, nil, nil end
+    for k in pairs(state.wZomCurX) do state.wZomCurX[k], state.wZomCurY[k], state.wZomCurT[k] = nil, nil, nil end
     state.zomOverflow = false
     state.corpseN = 0
     state.softN = 0
@@ -1167,15 +1208,19 @@ function MDADSensor.step(state, profile, sNow, vehicle, now, cell)
 
     while budget > 0 do
         local li = state.curL
-        if li > LAT_N then
+        if li > state.latN then
             -- 換到下一步：算一次中心點與法向（一次 sin + 一次 cos，攤在 10 格上）
-            local s = state.curS + SCAN_STEP
+            local s = state.curS + (state.fineStep and FINE_STEP or SCAN_STEP)
             if s > state.endS then
                 finishRound(state, now)
                 return true
             end
             state.curS = s
             centerAt(state, profile, s)
+            local nx, ny = state.nx, state.ny
+            local fine = (nx > ALIGN_EPS or nx < -ALIGN_EPS) and (ny > ALIGN_EPS or ny < -ALIGN_EPS)
+            state.fineStep = fine
+            state.latN = fine and LAT_FINE_N or LAT_N
             li = 1
         end
 
@@ -1184,7 +1229,7 @@ function MDADSensor.step(state, profile, sNow, vehicle, now, cell)
         -- 行駛線永遠停在路緣（2026-08-28 視覺化實證：藍點列壓在路緣、路面帶
         -- 綠點只有半邊）。bandBias 於輪首鎖定（beginRound），l 仍是「相對
         -- nav 線」的座標——下游 hardL／roadC／縫隙規劃語意全部不變。
-        local l = LAT[li] + state.bandBias
+        local l = (state.fineStep and LAT_FINE[li] or LAT[li]) + state.bandBias
         local wx = state.cx + l * state.nx
         local wy = state.cy + l * state.ny
         -- 取整：Kahlua 的 % 是截斷式（KahluaThread.java:1060-1066 用 (int)(v1/v2)），

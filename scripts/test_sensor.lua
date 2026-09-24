@@ -659,6 +659,39 @@ local function scenarioTraffic()
 end
 
 -- =====================================================================
+-- 情境九：斜向路線每輪都看得到每隻殭屍（0925 E2E zombie-sp turn：彎心殭屍每隔一兩輪消失，
+-- 軟縫在閃／不閃間來回跳）。1m×1m 取樣點陣一旋轉就會漏格，漏哪格隨起點相位變；非軸對齊步
+-- 改 0.5m 細取樣後，任何相位都要一隻不漏。違規證明：細取樣關掉（恆用 1m）即紅。
+-- =====================================================================
+local function scenarioDiagonalCoverage()
+    scenario("斜向 45° 路線：各起點相位下帶內殭屍每輪都收得到")
+    local h = math.pi / 4
+    local c, sn = math.cos(h), math.sin(h)
+    local keep = { x = PROFILE.x, y = PROFILE.y, segH = PROFILE.segH }
+    PROFILE.x = { X0, X0 + ROUTE_LEN * c }
+    PROFILE.y = { Y0, Y0 + ROUTE_LEN * sn }
+    PROFILE.segH = { h, h }
+    local N, missedRounds = 0, 0
+    for _, phase in ipairs({ 0, 0.13, 0.29, 0.41, 0.57, 0.73, 0.88 }) do
+        resetWorld()
+        local st = newSensor(120, 4, phase)
+        N = 0
+        for i = 1, 24 do
+            -- 固定的偽隨機 (s, l)：s 6..36、l −4..4（右側為正，法向 (−sin h, cos h)）
+            local sAt = 6 + (i * 7.31) % 30
+            local lAt = -4 + (i * 3.17) % 8
+            putZombie(X0 + sAt * c - lAt * sn, Y0 + sAt * sn + lAt * c)
+            N = N + 1
+        end
+        runRound(st)
+        if st.zomN ~= N then missedRounds = missedRounds + 1 end
+    end
+    checkEq(missedRounds, 0, "七個起點相位都收到全部 24 隻（漏收的輪數）")
+    PROFILE.x, PROFILE.y, PROFILE.segH = keep.x, keep.y, keep.segH
+    resetWorld()
+end
+
+-- =====================================================================
 scenarioCorpseAxis()
 scenarioCorpseBands()
 scenarioFullRange()
@@ -667,6 +700,7 @@ scenarioUnloadedFrontier()
 scenarioMidRoundRequest()
 scenarioDistantCorpses()
 scenarioTraffic()
+scenarioDiagonalCoverage()
 
 closeScenario()
 print()

@@ -530,8 +530,10 @@ MDADCorridor.ZOMBIE_R = ZOMBIE_R
 MDADCorridor.ZOMBIE_MARGIN = ZOMBIE_MARGIN
 MDADCorridor.ZOMBIE_PREFER = ZOMBIE_PREFER
 
+-- prefer（選填）＝離殭屍區間邊多留的距離，預設 ZOMBIE_PREFER；逐群換邊要貼緣時傳 0。
 function MDADCorridor.softZombieLane(zomS, zomL, zomN, sFrom, sTo, halfW, base, prev,
-        aLo, aHi, lambda, tmpLo, tmpHi)
+        aLo, aHi, lambda, tmpLo, tmpHi, prefer)
+    if type(prefer) ~= "number" or prefer * 0 ~= 0 or prefer < 0 then prefer = ZOMBIE_PREFER end
     if type(zomS) ~= "table" or type(zomL) ~= "table" or type(tmpLo) ~= "table"
             or type(tmpHi) ~= "table" then return nil end
     if type(zomN) ~= "number" or zomN * 0 ~= 0 or zomN < 0 then return nil end
@@ -578,8 +580,8 @@ function MDADCorridor.softZombieLane(zomS, zomL, zomN, sFrom, sTo, halfW, base, 
         if gapEnd >= cursor then
             -- 段的哪一邊是殭屍區間邊（不是帶邊）就多留 PREFER；留不下退回整段（貼 R）
             local plo, phi = cursor, gapEnd
-            if cursor > aLo then plo = plo + ZOMBIE_PREFER end
-            if gapEnd < aHi then phi = phi - ZOMBIE_PREFER end
+            if cursor > aLo then plo = plo + prefer end
+            if gapEnd < aHi then phi = phi - prefer end
             if plo > phi then plo, phi = cursor, gapEnd end
             local u = u0
             if u < plo then u = plo elseif u > phi then u = phi end
