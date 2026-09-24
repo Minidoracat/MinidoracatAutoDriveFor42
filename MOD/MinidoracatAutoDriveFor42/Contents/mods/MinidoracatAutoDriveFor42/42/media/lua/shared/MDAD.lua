@@ -39,6 +39,9 @@ MDAD.CMD_NAV_USAGE = "NavUsage"
 -- client 登入／分割畫面新 slot 上線時請伺服器替**該 actor** 重掃本 MOD 的兩個配方
 -- （AutoLearnAny 只在升等瞬間與 SP 開局被檢查，MP 既有角色永遠補不上）。payload 空。
 MDAD.CMD_RECIPE_RESCAN = "RecipeRescan"
+-- client → server 診斷上傳（client/MDAD_Upload.lua 送、server/MDAD_UploadServer.lua 收；
+-- 伺服器沙盒 DiagnosticsUpload 關著一律丟棄）。
+MDAD.CMD_DIAG_UPLOAD = "DiagUpload"
 
 MDAD.FAIL_GENERIC = "UI_MinidoracatAutoDrive_InstallFailed"
 MDAD.FAIL_NO_BATTERY = "UI_MinidoracatAutoDrive_NoBattery"

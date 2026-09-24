@@ -41,5 +41,9 @@
     "Sandbox_MinidoracatAutoDriveRightLaneBias": "靠右行驶偏移（米）",
     "Sandbox_MinidoracatAutoDriveRightLaneBias_tooltip": "自动驾驶沿路线行驶时向右偏移的距离，模拟靠右行驶的驾驶习惯，会车时双方自然错开。\n1.0（默认）＝偏到右车道；0＝关闭，沿路线中央行驶。\n道路狭窄或常擦撞路边时可调小。\n管理员按「应用」后立即生效（重新启动自驾后套用）。",
     "Sandbox_MinidoracatAutoDriveDebugOverlay": "调试可视化（开发者）",
-    "Sandbox_MinidoracatAutoDriveDebugOverlay_tooltip": "额外显示自动驾驶感知诊断：红圈＝硬障碍，橙圈＝最近的行驶中车辆，绿点＝路面带边界。普通玩家的半透明蓝／黄轨迹线请到 MOD Options 或小地图「自动驾驶」分类开关；本选项仅控制诊断标记。会小幅增加客户端绘制负担，平时建议关闭。管理员按「应用」后立即生效。"
+    "Sandbox_MinidoracatAutoDriveDebugOverlay_tooltip": "额外显示自动驾驶感知诊断：红圈＝硬障碍，橙圈＝最近的行驶中车辆，绿点＝路面带边界。普通玩家的半透明蓝／黄轨迹线请到 MOD Options 或小地图「自动驾驶」分类开关；本选项仅控制诊断标记。会小幅增加客户端绘制负担，平时建议关闭。管理员按「应用」后立即生效。",
+    "Sandbox_MinidoracatAutoDriveDiagnosticsUpload": "在本服务器收集自动驾驶诊断",
+    "Sandbox_MinidoracatAutoDriveDiagnosticsUpload_tooltip": "开启后，玩家的游戏会在内存保留最近几秒的自驾数据，只有出状况时（卡住、碰撞、紧急刹车、出问题后接手）才把前后片段发送到服务器，另外每趟附一份简短摘要。\n不会写入玩家硬盘。文件存放在服务器的 Zomboid/Lua/MinidoracatAutoDrive/Uploads/，每位玩家一个文件夹，index.txt 列出所有片段。\n玩家可在 MOD 选项选择不参与。默认关闭。\n管理员按下 Apply 后生效（下一次启动自驾起）。",
+    "Sandbox_MinidoracatAutoDriveDiagnosticsUploadMaxMB": "诊断数据容量上限（MB）",
+    "Sandbox_MinidoracatAutoDriveDiagnosticsUploadMaxMB_tooltip": "服务器存放诊断片段可使用的总磁盘空间。满了会先清掉全服务器最旧的片段；每位玩家最多保留 32 段。\n行程摘要另外固定使用 8 MB 轮流覆盖。\n请依服务器磁盘剩余空间设置。"
 }

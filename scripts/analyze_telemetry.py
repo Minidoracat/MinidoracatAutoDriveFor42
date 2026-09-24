@@ -13,7 +13,9 @@ import json, os, sys, collections, statistics as S
 d = os.path.expandvars(r"%USERPROFILE%\Zomboid\Lua\MinidoracatAutoDrive\Telemetry")
 def load(n):
     rows, evs, hdr = [], [], None
-    for line in open(f"{d}/session-{n}.log", encoding="utf-8"):
+    # 伺服器上傳片段（Uploads/<玩家>/clip-NN.log）直接給路徑；同一套 JSONL，多一行 "t":"clip"。
+    path = n if os.path.exists(n) else f"{d}/session-{n}.log"
+    for line in open(path, encoding="utf-8"):
         try: o = json.loads(line)
         except Exception: continue
         t = o.get("t")

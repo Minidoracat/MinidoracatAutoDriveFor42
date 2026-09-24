@@ -60,6 +60,9 @@ local DAY_MS = 86400000
 local CRITICAL_ERR_RAD = 1.5707963267949
 
 local sessions = {}
+-- 伺服器上傳 sink（client/MDAD_Upload.lua）：與本機檔案 session 互相獨立，共用同一份
+-- 編碼。兩者都在時取樣閘門跟本機 session 走，同一字串交給兩邊。
+local uploads = {}
 local meta = {}
 local ioLogged = {}
 local lastName = nil
@@ -138,6 +141,7 @@ local function jstr(s)
     end)
     return '"' .. s .. '"'
 end
+D.jstr = jstr
 
 -- index 是 TSV：reason 進去前必須沒有 tab/換行，否則整列欄位錯位、外部工具讀爆。
 -- reason 的真實來源含翻譯鍵（Drive.stop 傳 UI_MinidoracatAutoDrive_Stuck 這類），
@@ -1454,13 +1458,44 @@ openPart = function(pn, now, days, retainMs, profile, drive, part, contFile)
     return s
 end
 
+local function uploadWanted()
+    local up = MDADUpload
+    if type(up) ~= "table" or type(up.enabled) ~= "function" then return false end
+    local ok, v = pcall(up.enabled)
+    return ok and v == true
+end
+
 function D.start(pn, vehicle, profile)
-    if sessions[pn] then D.stop(pn, "restart") end
-    if not telemetryOn() then return false end
+    if sessions[pn] or uploads[pn] then D.stop(pn, "restart") end
     local now = nowMs()
-    local days = retentionDays()
-    recoverMeta()
-    return openPart(pn, now, days, days * DAY_MS, profile, now, 1, nil) ~= nil
+    local fileOk = false
+    if telemetryOn() then
+        local days = retentionDays()
+        recoverMeta()
+        fileOk = openPart(pn, now, days, days * DAY_MS, profile, now, 1, nil) ~= nil
+    end
+    if uploadWanted() then
+        -- slot 0／ret 0＝上傳片段的檔頭（不對應本機槽）
+        local okH, header = pcall(encodeHeader, 0, now, 0, profile, now, 1, nil, pn)
+        if okH then
+            local okB, u = pcall(MDADUpload.begin, pn, now, header, profile)
+            if okB and type(u) == "table" then uploads[pn] = u end
+        end
+    end
+    return fileOk or uploads[pn] ~= nil
+end
+
+-- 上傳 sink 出錯只收掉上傳，不連帶終止本機紀錄或駕駛。
+local function dropUpload(pn)
+    uploads[pn] = nil
+    logOnce("diagnostics upload sink failed")
+end
+
+-- 取樣閘門的持有者：本機 session 優先，否則上傳 sink。
+local function gateOwner(pn)
+    local s = sessions[pn]
+    if s and s.active then return s end
+    return uploads[pn]
 end
 
 -- 純查詢：這一幀 sample() 會不會真的 enqueue，第二回值＝這一幀採用的 10Hz
@@ -1481,7 +1516,7 @@ end
 
 function D.shouldSample(pn, now, mode, err, critical)
     -- 對外只回單一布林：多回值會漏進呼叫端的參數列。
-    local want = sampleWouldEnqueue(sessions[pn], now, mode, err, critical)
+    local want = sampleWouldEnqueue(gateOwner(pn), now, mode, err, critical)
     return want
 end
 
@@ -1494,32 +1529,42 @@ function D.sample(pn, now, x, y, heading, speed, target, remaining, lat, err,
         unstickDistance, rearStatus, reverseForce, remainingMs,
         actualClearance, plannedClearance, footprintBlocked, footHitX, footHitY)
     local s = sessions[pn]
-    if not s or not s.active then return false end
+    local u = uploads[pn]
+    local g = gateOwner(pn)
+    if not g or not g.active then return false end
     -- now 非有限、或還在 gate 內：不 enqueue，但 session 照樣算活著。
-    local want, crit = sampleWouldEnqueue(s, now, mode, err, critical)
+    local want, crit = sampleWouldEnqueue(g, now, mode, err, critical)
     if not want then return true end
-    s.lastNow = now
-    s.lastSample = now
+    g.lastNow = now
+    g.lastSample = now
     -- 記進 log 的是**這一幀真正採用的** 10Hz 判定（呼叫端旗標 or 誤差/模式推導），
     -- 不是呼叫端傳進來的原值：分析要對得上取樣密度。
-    enqueue(s, encodeSample(s, now, x, y, heading, speed, target, remaining, lat, err,
+    local line = encodeSample(g, now, x, y, heading, speed, target, remaining, lat, err,
         steer, force, mode, gear, regulator, sensor, crit,
         planMode, routeS, blockS, dodgeMargin, dodgeNeed, roadBias,
         blockHitX, blockHitY, followerIdx,
         blocked, dodging, offroad, corner, coupled, phys,
         targetGen, routeGen, episodeId, progressState, attempt, ban,
         unstickDistance, rearStatus, reverseForce, remainingMs,
-        actualClearance, plannedClearance, footprintBlocked, footHitX, footHitY), now)
+        actualClearance, plannedClearance, footprintBlocked, footHitX, footHitY)
+    if s and s.active then enqueue(s, line, now) end
+    if u and not pcall(MDADUpload.sample, u, line, now, x, y, speed, target, mode,
+            remaining, lat, blocked, footprintBlocked, phys) then
+        dropUpload(pn)
+    end
     -- 寫滿接續後 sessions[pn] 已換成新檔：回新檔的存活，不是這個被封的 s
     local cur = sessions[pn]
-    return cur ~= nil and cur.active == true
+    return (cur ~= nil and cur.active == true) or uploads[pn] ~= nil
 end
 
 function D.event(pn, name, a)
     local s = sessions[pn]
-    if not s or not s.active then return end
+    local u = uploads[pn]
+    if not (s and s.active) and not u then return end
     local now = nowMs()
-    enqueue(s, encodeEvent(now, name, a), now)
+    local line = encodeEvent(now, name, a)
+    if s and s.active then enqueue(s, line, now) end
+    if u and not pcall(MDADUpload.event, u, line, now, name, a) then dropUpload(pn) end
 end
 
 -- Non-I/O diagnostics faults share one visible terminal path: preserve the
@@ -1538,6 +1583,11 @@ function D.fail(pn, detail)
 end
 
 function D.stop(pn, reason)
+    local u = uploads[pn]
+    if u then
+        uploads[pn] = nil
+        pcall(MDADUpload.finish, u, nowMs(), reason)
+    end
     local s = sessions[pn]
     if not s then return end
     local now = nowMs()
@@ -1626,7 +1676,7 @@ end
 
 local function onMainMenuEnter()
     for pn = 0, 3 do
-        if sessions[pn] then pcall(D.stop, pn, "menu") end
+        if sessions[pn] or uploads[pn] then pcall(D.stop, pn, "menu") end
     end
 end
 if Events and Events.OnMainMenuEnter and Events.OnMainMenuEnter.Add then

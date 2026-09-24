@@ -225,5 +225,8 @@
     "UI_MinidoracatAutoDrive_HUDTripTargets": "%1 > %2",
     "UI_MinidoracatAutoDrive_HUDTripHoldShort": "·待機",
     "UI_MinidoracatAutoDrive_HUDTripSkipped": "%1 をスキップ、次は %2",
-    "UI_MinidoracatAutoDrive_HUDTripSkippedEnd": "%1 をスキップ、行程完了"
+    "UI_MinidoracatAutoDrive_HUDTripSkippedEnd": "%1 をスキップ、行程完了",
+    "UI_MinidoracatAutoDrive_ShareDiagnostics": "自動運転の改善に協力（このサーバーと診断を共有）",
+    "UI_MinidoracatAutoDrive_ShareDiagnostics_tooltip": "診断収集を有効にしたサーバーでのみ動作します。自動運転中に問題が起きると、短い走行データ（位置、速度、障害物、判断の過程）と走行ごとの概要をサーバーへ送り、作者が原因を見つけて修正できるようにします。\nディスクには書き込まず、シングルプレイでは何もしません。既定で有効。無効にすると参加しません。",
+    "UI_MinidoracatAutoDrive_UploadNotice": "このサーバーは自動運転の改善のため診断を収集しています。ご協力ありがとうございます！（MOD オプションで無効にできます）"
 }

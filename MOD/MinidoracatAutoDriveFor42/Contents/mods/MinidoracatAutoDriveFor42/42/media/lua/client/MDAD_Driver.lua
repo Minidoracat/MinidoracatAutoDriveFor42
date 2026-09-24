@@ -1290,10 +1290,16 @@ local function clearSession(playerNum)
     if type(MDADOverlay) == "table" then MDADOverlay.clear(playerNum) end
 end
 
--- opt-in telemetry：HUD 缺席／關閉時零 I/O。熱路徑只在 opt-in session 進
+-- opt-in telemetry：本機紀錄或伺服器上傳都沒開時零 I/O。熱路徑只在 opt-in session 進
 -- protected boundary；shouldSample／collection／sample 任一錯誤只終止診斷，
 -- 絕不打斷駕駛。start／event／stop 同樣隔離。
+-- 伺服器上傳（MDAD_Upload）開著時也算「有在紀錄」：卡住交還不再提示玩家去開本機紀錄。
 local function diagEnabled()
+    local up = MDADUpload
+    if type(up) == "table" and type(up.enabled) == "function" then
+        local okU, on = pcall(up.enabled)
+        if okU and on == true then return true end
+    end
     local hud = MDAD.HUD
     if type(hud) ~= "table" or type(hud.telemetryEnabled) ~= "function" then
         return false
@@ -1358,7 +1364,9 @@ end
 -- 換車），這時候突然硬煞比放手更危險。到達停車的煞車是 arrive 分支自己做的。
 -- regulator 是我們開的就由我們關：即使玩家已經不在車上（下車／換車），仍然關掉，
 -- 否則那台車會留著一個沒人設過的定速，下一個上車的人莫名其妙就被拉速度。
-function Drive.stop(playerNum, reasonKey, voiceEvent)
+-- diagWhy 只影響診斷紀錄的結束原因（button／exit／dead；手動接手由 voiceEvent
+-- "manual" 推導為 takeover），不改玩家看到的訊息或行程回報。
+function Drive.stop(playerNum, reasonKey, voiceEvent, diagWhy)
     local s = sessions[playerNum]
     if not s then
         -- 準備中（尚未 claim、尚未碰車）：收掉意圖就結束，沒有 claim 要還。
@@ -1373,7 +1381,8 @@ function Drive.stop(playerNum, reasonKey, voiceEvent)
         end
         return true
     end
-    diagStop(s, playerNum, reasonKey or "manual")
+    diagStop(s, playerNum, reasonKey or diagWhy
+        or (voiceEvent == "manual" and "takeover") or "manual")
     clearSession(playerNum)
     if s.vehicle then s.vehicle:setRegulator(false) end
     -- 控制輸出已停（regulator 關、本幀起不再送指令）之後才交還接管。這**不是**到站
@@ -2114,7 +2123,7 @@ function Drive.toggle(playerObj)
     if not playerObj then return end
     local playerNum = playerObj:getPlayerNum()
     if Drive.isActive(playerNum) then
-        Drive.stop(playerNum, nil)
+        Drive.stop(playerNum, nil, nil, "button")
         haloGood(playerObj, "UI_MinidoracatAutoDrive_Stop")
         if getDebug() then print(LOG .. "toggle pn=" .. playerNum .. " off") end
         return
@@ -8480,14 +8489,14 @@ local function onPlayerUpdate(player)
     end
 
     if player:isDead() then
-        Drive.stop(playerNum, nil)
+        Drive.stop(playerNum, nil, nil, "dead")
         return
     end
 
     -- 非原車／不再是駕駛／已下車：靜默結束（不是錯誤，不用紅字轟人）
     local vehicle = player:getVehicle()
     if vehicle ~= s.vehicle or not vehicle:isDriver(player) then
-        Drive.stop(playerNum, nil)
+        Drive.stop(playerNum, nil, nil, "exit")
         return
     end
 
@@ -9022,6 +9031,7 @@ local function onPlayerUpdate(player)
             s.mode = "yield"
             s.yieldResumeMs = resumeMs
             s.yieldSinceMs = now
+            diagEvent(s, playerNum, "takeover", { phase = "yield" })
             -- 玩家接手＝舊診斷作廢（舊制由 mode 被覆寫成 "yield" 自然丟掉
             -- recover 閂鎖；旗標化後必須顯式丟，否則恢復後立刻倒車）。
             s.recoverWhy, s.recoverPulse = nil, false

@@ -225,5 +225,8 @@
     "UI_MinidoracatAutoDrive_HUDTripTargets": "%1 > %2",
     "UI_MinidoracatAutoDrive_HUDTripHoldShort": "·wait",
     "UI_MinidoracatAutoDrive_HUDTripSkipped": "Skipped %1, next %2",
-    "UI_MinidoracatAutoDrive_HUDTripSkippedEnd": "Skipped %1, trip complete"
+    "UI_MinidoracatAutoDrive_HUDTripSkippedEnd": "Skipped %1, trip complete",
+    "UI_MinidoracatAutoDrive_ShareDiagnostics": "Help improve auto-drive (share diagnostics with this server)",
+    "UI_MinidoracatAutoDrive_ShareDiagnostics_tooltip": "Only on servers that enabled diagnostics collection. When something goes wrong while auto-driving, a short clip of driving data (position, speed, obstacles, decisions) and a small summary of each drive are sent to the server so the author can find and fix the problem.\nNothing is written to your disk and there is no effect in single-player. On by default; turn off to opt out.",
+    "UI_MinidoracatAutoDrive_UploadNotice": "This server collects auto-drive diagnostics to help improve it. Thank you! (You can opt out in MOD options.)"
 }

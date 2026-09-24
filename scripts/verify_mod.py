@@ -1149,6 +1149,8 @@ SANDBOX_SPEC = {                            # key: (type, default, min, max)
     "ObstaclePolicy":       ("enum", "1", None, None),
     "RightLaneBias":        ("double", "1.0", "0.0", "2.0"),
     "DebugOverlay":         ("boolean", "false", None, None),
+    "DiagnosticsUpload":    ("boolean", "false", None, None),
+    "DiagnosticsUploadMaxMB": ("integer", "2048", "128", "16384"),
 }
 for m in MEDIA_DIRS:
     sb = os.path.join(m, "sandbox-options.txt")

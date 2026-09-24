@@ -354,6 +354,16 @@ local function setTelemetryEnabled(value)
     return setClientOption("ExportTelemetry", value == true)
 end
 
+-- 分享診斷給伺服器（2026-09-24）：只在伺服器沙盒 DiagnosticsUpload 開啟時有作用；
+-- 預設參與，玩家可退出。MDAD_Upload.enabled 每次自駕啟動讀一次。
+local function shareDiagnostics()
+    return optionBool("ShareDiagnostics", true)
+end
+
+local function setShareDiagnostics(value)
+    return setClientOption("ShareDiagnostics", value == true)
+end
+
 local function setTelemetryRetentionDays(value)
     if type(value) ~= "number" or value ~= value then return false end
     value = math.floor(value)
@@ -2539,6 +2549,8 @@ if PZAPI and PZAPI.ModOptions then
     end
     modOptions:addTickBox("ExportTelemetry", "UI_MinidoracatAutoDrive_ExportTelemetry", false,
         "UI_MinidoracatAutoDrive_ExportTelemetry_tooltip")
+    modOptions:addTickBox("ShareDiagnostics", "UI_MinidoracatAutoDrive_ShareDiagnostics", true,
+        "UI_MinidoracatAutoDrive_ShareDiagnostics_tooltip")
     local telemetryRetention = modOptions:addComboBox("TelemetryRetentionDays",
         "UI_MinidoracatAutoDrive_TelemetryRetentionDays")
     telemetryRetention:addItem("UI_MinidoracatAutoDrive_TelemetryRetention1", false)
@@ -2599,6 +2611,8 @@ HUD.telemetryEnabled = telemetryEnabled
 HUD.telemetryRetentionDays = telemetryRetentionDays
 HUD.setTelemetryEnabled = setTelemetryEnabled
 HUD.setTelemetryRetentionDays = setTelemetryRetentionDays
+HUD.shareDiagnostics = shareDiagnostics
+HUD.setShareDiagnostics = setShareDiagnostics
 HUD.voiceEnabled = voiceEnabled
 HUD.voiceVolume = voiceVolume
 HUD.setVoiceEnabled = setVoiceEnabled
@@ -2649,6 +2663,9 @@ local function registerMiniMapSettings()
             { label = "UI_MinidoracatAutoDrive_ExportTelemetry",
                 tooltip = "UI_MinidoracatAutoDrive_ExportTelemetry_tooltip",
                 get = telemetryEnabled, set = setTelemetryEnabled },
+            { label = "UI_MinidoracatAutoDrive_ShareDiagnostics",
+                tooltip = "UI_MinidoracatAutoDrive_ShareDiagnostics_tooltip",
+                default = true, get = shareDiagnostics, set = setShareDiagnostics },
             { label = "UI_MinidoracatAutoDrive_PauseOnStuck",
                 tooltip = "UI_MinidoracatAutoDrive_PauseOnStuck_tooltip",
                 default = true, get = pauseOnStuck, set = setPauseOnStuck },

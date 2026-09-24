@@ -41,5 +41,9 @@
     "Sandbox_MinidoracatAutoDriveRightLaneBias": "右側通行オフセット（メートル）",
     "Sandbox_MinidoracatAutoDriveRightLaneBias_tooltip": "自動運転がルートの右側にどれだけ寄って走るかの距離です。右側通行の運転習慣を再現し、対向車と自然にすれ違えます。\n1.0（初期値）＝右車線寄り。0＝無効（ルートの中央を走行）。\n道が狭い、路肩をこすりやすい場合は小さくしてください。\n管理者が「適用」を押すと反映されます（自動運転の再開始時に適用）。",
     "Sandbox_MinidoracatAutoDriveDebugOverlay": "デバッグ表示（開発者向け）",
-    "Sandbox_MinidoracatAutoDriveDebugOverlay_tooltip": "自動運転のセンサー診断を追加表示します——赤円＝障害物、橙円＝最も近い走行中の車両、緑点＝路面帯の境界。通常の半透明な青／黄の走行ラインは MOD Options またはミニマップの「オートドライブ」区分で切り替えます。本項目は診断マーカーだけを制御します。クライアント描画負荷が少し増えるため、通常はオフ推奨です。管理者が「適用」を押すと即時反映されます。"
+    "Sandbox_MinidoracatAutoDriveDebugOverlay_tooltip": "自動運転のセンサー診断を追加表示します——赤円＝障害物、橙円＝最も近い走行中の車両、緑点＝路面帯の境界。通常の半透明な青／黄の走行ラインは MOD Options またはミニマップの「オートドライブ」区分で切り替えます。本項目は診断マーカーだけを制御します。クライアント描画負荷が少し増えるため、通常はオフ推奨です。管理者が「適用」を押すと即時反映されます。",
+    "Sandbox_MinidoracatAutoDriveDiagnosticsUpload": "このサーバーで自動運転の診断を収集",
+    "Sandbox_MinidoracatAutoDriveDiagnosticsUpload_tooltip": "有効にすると、プレイヤーのゲームは直近数秒の自動運転データをメモリに保持し、問題が起きたとき（立ち往生、接触、緊急ブレーキ、問題発生後の手動介入）だけ前後の記録をサーバーへ送ります。走行ごとの短い概要も送ります。\nプレイヤーのディスクには書き込みません。ファイルはサーバーの Zomboid/Lua/MinidoracatAutoDrive/Uploads/ にプレイヤーごとのフォルダで保存され、index.txt に一覧があります。\nプレイヤーは MOD オプションで参加を拒否できます。既定は無効。\n管理者が Apply を押すと有効になります（次の自動運転開始から）。",
+    "Sandbox_MinidoracatAutoDriveDiagnosticsUploadMaxMB": "診断データの容量上限（MB）",
+    "Sandbox_MinidoracatAutoDriveDiagnosticsUploadMaxMB_tooltip": "サーバーが診断記録に使える合計ディスク容量です。上限に達すると、サーバー全体で最も古い記録から消去します。プレイヤーごとの保存は最大 32 件です。\n走行概要は別に固定 8 MB を順番に上書きします。\nサーバーのディスク空き容量に合わせて設定してください。"
 }

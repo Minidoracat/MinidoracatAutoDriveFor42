@@ -136,6 +136,14 @@ HANDLERS[MDAD.CMD_DEVICE] = onDevice
 HANDLERS[MDAD.CMD_USAGE] = onUsage
 HANDLERS[MDAD.CMD_NAV_USAGE] = onNavUsage
 HANDLERS[MDAD.CMD_RECIPE_RESCAN] = onRecipeRescan
+-- 診斷上傳：實作在 MDAD_UploadServer.lua（同為 server 檔，載入晚於本檔，執行期才取用）。
+-- 客戶端節奏 ≥500ms／塊，上面的 250ms 節流不會誤傷。
+HANDLERS[MDAD.CMD_DIAG_UPLOAD] = function(player, args)
+    local up = MDADUploadServer
+    if type(up) ~= "table" or type(up.receive) ~= "function" then return end
+    local ok, err = pcall(up.receive, player, args)
+    if not ok then print("[MinidoracatAutoDrive] diagnostics upload failed: " .. tostring(err)) end
+end
 
 -- OnClientCommand 簽名（module, command, player, args）＝ClientCommands.lua:1249-1260
 local function onClientCommand(module, command, player, args)

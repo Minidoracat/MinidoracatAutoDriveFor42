@@ -225,5 +225,8 @@
     "UI_MinidoracatAutoDrive_HUDTripTargets": "%1 > %2",
     "UI_MinidoracatAutoDrive_HUDTripHoldShort": "·停等",
     "UI_MinidoracatAutoDrive_HUDTripSkipped": "已略過 %1，接著去 %2",
-    "UI_MinidoracatAutoDrive_HUDTripSkippedEnd": "已略過 %1，行程完成"
+    "UI_MinidoracatAutoDrive_HUDTripSkippedEnd": "已略過 %1，行程完成",
+    "UI_MinidoracatAutoDrive_ShareDiagnostics": "協助改善自駕（與本伺服器分享診斷）",
+    "UI_MinidoracatAutoDrive_ShareDiagnostics_tooltip": "只在有開啟診斷收集的伺服器生效。自駕出狀況時，會把一小段駕駛資料（位置、速度、障礙物、判斷過程）與每趟的簡短摘要送到伺服器，讓作者找出問題並修正。\n不會寫入你的硬碟，單人遊戲沒有作用。預設開啟，關閉即不參與。",
+    "UI_MinidoracatAutoDrive_UploadNotice": "本伺服器正在收集自動駕駛診斷，幫助改善自駕，感謝你的協助！（可在 MOD 選項關閉）"
 }

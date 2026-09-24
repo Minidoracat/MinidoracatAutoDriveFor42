@@ -50,3 +50,9 @@ option MinidoracatAutoDrive.RightLaneBias
 
 option MinidoracatAutoDrive.DebugOverlay
 {type = boolean, default = false, page = MinidoracatAutoDrive, translation = MinidoracatAutoDriveDebugOverlay,}
+
+option MinidoracatAutoDrive.DiagnosticsUpload
+{type = boolean, default = false, page = MinidoracatAutoDrive, translation = MinidoracatAutoDriveDiagnosticsUpload,}
+
+option MinidoracatAutoDrive.DiagnosticsUploadMaxMB
+{type = integer, min = 128, max = 16384, default = 2048, page = MinidoracatAutoDrive, translation = MinidoracatAutoDriveDiagnosticsUploadMaxMB,}
