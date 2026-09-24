@@ -16062,6 +16062,21 @@ function drive.scenarioTraffic()
         "(park-late) 過 c 仍照承諾線回線，不提前交 RETURN（late=" .. tostring(st.trafficLate) .. "）")
     drive.clearVehicleGeom(on._cells)
     drive.clearVehicleGeom(parked._cells)
+    -- (park-own) 同樣來不及鬆油門停在停點前，但車身還在自己半邊（剛開始切出）：放棄繞行在自己
+    --   這邊停下，不照承諾線爬進對向車道（E2E k-suv-park／k-f350-park）
+    arm(8)
+    parked = car(40, 2, 0)
+    parked._stopped = true
+    for _ = 1, 3 do drive.scanRound() end
+    checkTrue(st.dodging, "(park-own) 承諾繞行")
+    dveh._x, dveh._y = st.fstate.offB - 6, 2
+    drive.scanRound()
+    on = car(st.fstate.offB + 30, -1.5, math.pi)
+    traffic(on, -3, 2)
+    checkFalse(st.dodging or st.trafficLate, "(park-own) 車身還在自己半邊：放棄繞行，不硬做")
+    drive.clearVehicleGeom(on._cells)
+    drive.clearVehicleGeom(parked._cells)
+    dveh._y = 0
     dveh._x = 0
     MDAD.HUD.perceptionDistance = oldPd
 

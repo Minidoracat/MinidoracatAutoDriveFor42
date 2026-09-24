@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0924k"
+Drive.REV = "0924l"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -3031,8 +3031,12 @@ function Drive.trafficScan(s, now, speedKmh)
     local fs = s.fstate
     if s.trfOnYield and s.dodging and not s.dodgeStay and not s.returnActive and not s.laneChained
             and finite(fs.offA) and onQ >= fs.offA then
+        -- 或車身還沒越過路面中線（剛開始切出、繞行帽常把過渡段壓在 10 km/h：這時做完＝在對向車道
+        -- 爬好幾秒，E2E k-suv-park／k-f350-park）：在自己半邊停下，就算硬煞也不會滑進對向車道。
+        local lat = finite(s.lastLatSigned) and s.lastLatSigned or laneBiasOf(s)
         if not s.trafficLate and finite(fs.offB) and finite(fs.offL)
-                and Drive.trafficStopCap(s, fs.offB, fs.offL) >= speedKmh - TUNE.DODGE_SPEED_TOL then
+                and (lat - vp.halfW >= (s.roadBias or 0)
+                    or Drive.trafficStopCap(s, fs.offB, fs.offL) >= speedKmh - TUNE.DODGE_SPEED_TOL) then
             diagEvent(s, s.playerNum, "traffic", { phase = "abort", why = "dodge", d = onGap,
                 speed = onV * 3.6, offL = fs.offL, b = fs.offB, rs = rs })
             releaseDodge(s)
