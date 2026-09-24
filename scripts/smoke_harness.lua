@@ -15722,6 +15722,32 @@ function drive.scenarioVisibilityBraking()
     for _ = 1, 100 do advance(0.02) end
     checkTrue(dveh._speed < 1 and dveh._x + st.vehicleProfile.halfL < frontier,
         "(visibility) 前緣不再更新時，真命令在未知區前停穩")
+    -- (terminal-hard) 0924e E2E：MAX 檔滑行到站，實速落後剖面 3-4 km/h，終點前 7m、18 km/h 撞上
+    --   硬煞紅線一秒鎖輪。前緣＝路線終點時終點不是障礙，硬煞帳不扣障礙緩衝。違規證明：拿掉即紅。
+    do
+        MDADSensor.step = realStep
+        arm(80)
+        MDADSensor.step = function() return false end
+        local len = st.profile.length
+        dveh._x, dveh._speed = len - 7, 20
+        MDAD.Drive.clearLaneProof(st) -- 瞬移到終點前：舊 proof 已在車後（真實行駛會逐輪重建）
+        st.sensor.scanEndS, st.sensor.unloadedS = len, len
+        st.sensor.unloaded, st.sensor.stamp = false, nowMs
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        checkTrue(st.visibilityHardKmh > 20 * 1.2,
+            "(terminal-hard) 終點前 7m 的硬煞紅線不把終點當障礙（實得 " .. st.visibilityHardKmh .. "）")
+        checkEq(drive.calls.forceBrake, 0, "(terminal-hard) 20 km/h 滑向終點不鎖輪")
+        -- 對照：同距離但前緣是未知區（非終點）仍硬煞
+        dveh._x = len - 14
+        MDAD.Drive.clearLaneProof(st)
+        st.sensor.scanEndS, st.sensor.unloadedS = len - 7, len - 7
+        st.sensor.unloaded, st.sensor.stamp = true, nowMs
+        dveh._speed = 40
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        checkTrue(drive.calls.forceBrake > 0, "(terminal-hard) 未知前緣仍緊急煞車")
+    end
 
     local function learnBrake(deceleration, startSpeed, episodes)
         MDADSensor.step = realStep

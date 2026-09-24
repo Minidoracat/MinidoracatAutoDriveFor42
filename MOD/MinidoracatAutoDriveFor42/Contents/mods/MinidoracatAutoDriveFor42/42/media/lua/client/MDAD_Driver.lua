@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0924d"
+Drive.REV = "0924e"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -7472,8 +7472,15 @@ local function stepFollow(s, vehicle, playerNum, now)
             if cruiseBrake < minBrakeVisible then cruiseBrake = minBrakeVisible end
             visibilityCap = MDADDynamics.visibilityCapKmh(
                 visibleEnd - s.lastSNow, tau, cruiseBrake, s.vehicleProfile.halfL)
+            -- 硬煞帳的前緣若就是路線終點（可視已含終點、無未載入截斷），終點不是障礙：不扣
+            -- halfL+2 的障礙緩衝（0924d E2E：MAX 檔 90 km/h 滑行到站，實速落後剖面 3-4 km/h，
+            -- 終點前 7m 以 18 km/h 撞上硬煞紅線 14.8 一秒鎖輪；到站本身由剖面與 arrive 管）。
+            local hardAhead = visibleEnd - s.lastSNow
+            if visibleEnd >= s.profile.length - 0.5 then
+                hardAhead = hardAhead + s.vehicleProfile.halfL + 2
+            end
             s.visibilityHardKmh = MDADDynamics.visibilityCapKmh(
-                visibleEnd - s.lastSNow, tau, visBrake, s.vehicleProfile.halfL)
+                hardAhead, tau, visBrake, s.vehicleProfile.halfL)
             -- 終點不是障礙（2026-09-01 s058 定罪）：可視帶已含路線終點且終點前
             -- 無 unloaded 截斷時，把近終點 visibilityCap 地板到爬行檔（squeeze
             -- 同檔 12）。不地板的話 ARRIVE_M(5)~8m 環帶被壓到 3-5 km/h，而引擎
