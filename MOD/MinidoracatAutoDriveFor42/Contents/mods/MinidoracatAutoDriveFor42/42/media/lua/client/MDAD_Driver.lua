@@ -1521,7 +1521,20 @@ local function startSession(playerObj, playerNum, stage)
             and vehicleProfile.brakingForce <= 0 then
         return KEY_UNSUPPORTED
     end
-    local profile = MDADFollower.begin(route, maxSpeed, api.navApiVersion, vehicleProfile,
+    -- 拖掛車（MDAD_Trailer）：量不到掛車幾何就拒絕；量得到＝質量併入、彎道預算打折、
+    -- 轉角換成外拉大彎的車頭路線（Follower 只看到改寫後的線；cutover 仍以原 route identity 比對）。
+    local tow = nil
+    if type(MDADTrailer) == "table" then
+        tow = MDADTrailer.attach(vehicle)
+        if tow == false then return MDADTrailer.KEY_UNSUPPORTED end
+    end
+    if tow then
+        vehicleProfile.towMass = tow.mass
+        vehicleProfile.towLatScale = MDADTrailer.LAT_SCALE
+    end
+    local profile = MDADFollower.begin(
+        tow and MDADTrailer.shape(route, tow, vehicleProfile.halfW, vehicleProfile.halfL * 2) or route,
+        maxSpeed, api.navApiVersion, vehicleProfile,
         MDADFollower.STYLES[Drive.getStyle(playerNum)])
     if not profile then return KEY_ROUTE end
     local runtimeMass = vehicleProfile.mass
@@ -1564,6 +1577,7 @@ local function startSession(playerObj, playerNum, stage)
     if type(laneBias) ~= "number" or laneBias ~= laneBias then laneBias = 1.0 end
     if laneBias < 0 then laneBias = 0 end
     if laneBias > 2 then laneBias = 2 end
+    if tow then laneBias = 0 end -- 外拉路線已算好車頭位置，常駐靠右會把它再推一次
     MDADFollower.setLaneBias(fstate, laneBias)
     local startedAt = getTimestampMs()
     local sNew = {
@@ -1817,6 +1831,9 @@ local function startSession(playerObj, playerNum, stage)
         sandBias = laneBias,
         roadBias = 0,
         vehicleProfile = vehicleProfile,
+        tow = tow,          -- 拖掛車幾何（MDAD_Trailer.attach）；nil＝沒拖
+        towNextMs = 0,      -- 行駛防線節流
+        towCap = nil,       -- 防線給的速度上限（km/h）；nil＝不限
         bodyReach = vehicleProfile.halfL + vehicleProfile.halfW
             + math.abs(vehicleProfile.centerOfMassX) + math.abs(vehicleProfile.centerOfMassZ),
         -- Recovery episode 全為 scalar；route identity 改變只改映射，不清 attempts/ban。
@@ -1854,6 +1871,7 @@ local function startSession(playerObj, playerNum, stage)
         planMode = "init",
         lastCoupled = false,
     }
+    if tow and sNew.sensor then sNew.sensor.selfTrailer = tow.trailer end -- 感測不把自己的掛車當障礙
     if stage then
         -- 準備中：先寄放，claim 成功才接上（第一次碰車在 commitSession）
         stage.session = sNew
@@ -3249,8 +3267,15 @@ local function rearProbe(s, vehicle, out, fx, fy, vx, vy, travelM)
             or type(MDADSensor.probeRear) ~= "function" then
         return "unloaded", vx, vy, "geometry", "body center or rear probe unavailable"
     end
+    local halfW, halfL = s.vehicleProfile.halfW, s.vehicleProfile.halfL
+    if s.tow then
+        -- 拖車倒車：先撞到的是掛車尾，探測框改成掛車車身沿掛車航向往後
+        local tx, ty, tfx, tfy, thw, thl = MDADTrailer.body(s.tow)
+        if tx == nil then return "unloaded", vx, vy, "geometry", "trailer body unavailable" end
+        bx, by, fx, fy, halfW, halfL = tx, ty, tfx, tfy, thw, thl
+    end
     return MDADSensor.probeRear(s.sensor, vehicle, getCell(), bx, by, fx, fy, -fy, fx,
-        s.vehicleProfile.halfW, s.vehicleProfile.halfL, travelM or REAR_TRAVEL_M)
+        halfW, halfL, travelM or REAR_TRAVEL_M)
 end
 
 
@@ -6701,6 +6726,12 @@ local function stepUnstick(s, vehicle, playerNum, now)
     end
 
     local wantSq = UNSTICK_DIST_SQ
+    -- 拖車倒車：掛車折角超過上限＝再倒就折死，當成「倒夠了」走 settle
+    local towPhi = nil
+    if s.tow then
+        towPhi = MDADTrailer.state(vehicle, s.tow)
+        if towPhi == nil or math.abs(towPhi) > MDADTrailer.REVERSE_HITCH_MAX then dist2 = 1e9 end
+    end
     if s.unstickExtraM and s.unstickExtraM > 0 then
         local w = 3 + s.unstickExtraM
         wantSq = w * w
@@ -6817,6 +6848,11 @@ local function stepUnstick(s, vehicle, playerNum, now)
         vehicle:addImpulse(impulse, fwd)
         BaseVehicle.releaseVector3f(impulse)
         s.reverseForce = force
+        if towPhi then
+            -- 倒車時掛車不穩定（折角自己變大）：牽引車往掛車方向轉把折角拉回 0（MDADTrailer.reverseSteer）
+            applySteering(s, vehicle, fwd, fx, fy, MDADTrailer.reverseSteer(towPhi),
+                speedKmh, mult, false, 0)
+        end
     end
     BaseVehicle.releaseVector3f(fwd)
     sampleRecovery(s, vehicle, playerNum, now, vx, vy, speedKmh, fx, fy, heading)
@@ -8208,6 +8244,25 @@ local function stepFollow(s, vehicle, playerNum, now)
             if s.uturn and aerr < MDADFollower.ROTATE_EXIT_RAD then
                 s.uturn, s.uturnArmed = nil, false
             end
+            if s.tow then
+                -- 拖掛車（MDAD_Trailer）：原地耦力調頭會把掛車甩斷（E2E semi-hairpin-mp），一律交還；
+                -- 掛車脫落／前方不可過轉角停妥也交還；折角、傾斜、接近不可過轉角時壓速。
+                if rotating then
+                    vehicle:setRegulator(false)
+                    Drive.stop(playerNum, MDADTrailer.KEY_ROTATE)
+                    return
+                end
+                local towCap, towWhy = MDADTrailer.guard(s, vehicle, now, speedKmh)
+                if towWhy then
+                    vehicle:setRegulator(false)
+                    Drive.stop(playerNum, towWhy == "lost" and MDADTrailer.KEY_LOST or MDADTrailer.KEY_CORNER)
+                    return
+                end
+                if towCap and targetSpeed > towCap then
+                    targetSpeed = towCap
+                    s.lastCapReason = "tow"
+                end
+            end
             if rotating and not s.uturn then
                 s.uturn, s.uturnArmed = uturnProfile(), false
                 diagEvent(s, playerNum, "uturn", {
@@ -8793,7 +8848,9 @@ local function onPlayerUpdate(player)
         end
         if route ~= s.route or versionChanged then
             local profile = MDADFollower.begin(
-                route, s.maxSpeed, api.navApiVersion, s.vehicleProfile,
+                s.tow and MDADTrailer.shape(route, s.tow, s.vehicleProfile.halfW,
+                    s.vehicleProfile.halfL * 2) or route,
+                s.maxSpeed, api.navApiVersion, s.vehicleProfile,
                 MDADFollower.STYLES[Drive.getStyle(playerNum)])
             if not profile then
                 Drive.stop(playerNum, KEY_LOST)
@@ -9000,6 +9057,13 @@ local function onPlayerUpdate(player)
     end
 
     -- （detour 塊已移除；理由見 DETOUR 註解＝telemetry s030/s033）
+
+    -- 掛車脫開：每個模式都查（E2E semi-corner-mp：掛車斷開時車正在等待，guard 不跑，自駕停在原地不交還）
+    if s.tow and MDADTrailer.lost(vehicle, s.tow) then
+        vehicle:setRegulator(false)
+        Drive.stop(playerNum, MDADTrailer.KEY_LOST)
+        return
+    end
 
     -- 限速剖面分幀建構：ready 之前不控速也不施力。
     if s.mode == "build" then

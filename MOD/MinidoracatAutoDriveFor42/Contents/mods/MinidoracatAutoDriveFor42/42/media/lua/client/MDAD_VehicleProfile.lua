@@ -556,6 +556,8 @@ function MDADVehicleProfile.priors(profile, runtimeMass, surfaceId, raining,
     local mass = runtimeMass
     if not inClosed(mass, MASS_LO, MASS_HI) then mass = profile.mass end
     if not inClosed(mass, MASS_LO, MASS_HI) then mass = SAFE_MASS end
+    -- 拖掛車（MDAD_Trailer.attach 寫入）：加減速與滑行都是整組質量在動
+    if isFinite(profile.towMass) and profile.towMass > 0 then mass = mass + profile.towMass end
     adaptive = adaptive == true and profile.valid == true
         and profile.geometryValid == true
 
@@ -600,6 +602,7 @@ function MDADVehicleProfile.priors(profile, runtimeMass, surfaceId, raining,
     if aBrake > MDADVehicleProfile.BRAKE_CEIL then aBrake = MDADVehicleProfile.BRAKE_CEIL end
     local aLat = 9.0 * fSurface * fTire -- 基準 8.0→9.0（2026-09-02 二次激進化）
     if aLat > MDADVehicleProfile.LAT_CEIL then aLat = MDADVehicleProfile.LAT_CEIL end
+    if isFinite(profile.towLatScale) and profile.towLatScale > 0 then aLat = aLat * profile.towLatScale end
     if aDrive > MDADVehicleProfile.ACCEL_CEIL then aDrive = MDADVehicleProfile.ACCEL_CEIL end
     local aCoast = MDADVehicleProfile.COAST_BRAKE_N / mass
     if aCoast > MDADVehicleProfile.COAST_CEIL then aCoast = MDADVehicleProfile.COAST_CEIL end

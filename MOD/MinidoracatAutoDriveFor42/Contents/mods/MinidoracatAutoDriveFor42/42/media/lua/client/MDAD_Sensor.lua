@@ -529,7 +529,7 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
     -- 車（假動也吃 vehAheadS 分級煞停，兩態都安全、不再有「消失」態）。
     -- 車體蓋到的每一格都命中 → hard 點天然連片，不需要舊的單點錨膨脹。
     local cv = square:getVehicleContainer()
-    if cv ~= nil and cv ~= vehicle then
+    if cv ~= nil and cv ~= vehicle and cv ~= state.selfTrailer then
         -- 排除自己：SCAN_NEAR 只讓過車頭前 2 公尺，長車／拖車仍會佔到取樣格
         state.wVehN = state.wVehN + 1
         -- 跨輪位置比對（2026-08-29 路口實測定讞）：MP 半更新的靜止車 isStopped
@@ -1253,7 +1253,7 @@ local function probeDirectional(state, vehicle, cell, bodyX, bodyY,
                 if hard then return "hard", hitX, hitY, kind end
 
                 local cv = square:getVehicleContainer()
-                if cv ~= nil and cv ~= vehicle then
+                if cv ~= nil and cv ~= vehicle and cv ~= state.selfTrailer then
                     return "vehicle", hitX, hitY, "vehicle"
                 end
             end
@@ -1269,7 +1269,7 @@ local function probeDirectional(state, vehicle, cell, bodyX, bodyY,
     if it == nil then return "unloaded", rectX, rectY, "vehiclePool" end
     while it:hasNext() do
         local other = it:next()
-        if other ~= nil and other ~= vehicle then
+        if other ~= nil and other ~= vehicle and other ~= state.selfTrailer then
             for gx = gx0, gx1 do
                 for gy = gy0, gy1 do
                     if orientedRectHitsSquare(rectX, rectY, fx, fy, nx, ny,
@@ -1316,7 +1316,7 @@ function MDADSensor.probeAround(state, vehicle, cell, radius)
             local it = set:iterator()
             while it:hasNext() do
                 local v = it:next()
-                if v ~= nil and v ~= vehicle then
+                if v ~= nil and v ~= vehicle and v ~= state.selfTrailer then
                     local dvx = v:getX() - cx
                     local dvy = v:getY() - cy
                     if dvx * dvx + dvy * dvy <= vr2 then return true end
@@ -1339,12 +1339,12 @@ function MDADSensor.probeAround(state, vehicle, cell, radius)
                 local nMov = movs:size()
                 for i = 1, nMov do
                     local mv = movs:get(i - 1)
-                    if instanceof(mv, "BaseVehicle") and mv ~= vehicle then return true end
+                    if instanceof(mv, "BaseVehicle") and mv ~= vehicle and mv ~= state.selfTrailer then return true end
                 end
                 -- 格級幾何查詢（同 scanCell 的理由）：全域列舉／movingObjects
                 -- 都可能漏掉 streaming 波動車，貼著看不見的車原地旋轉＝掃到
                 local cv = square:getVehicleContainer()
-                if cv ~= nil and cv ~= vehicle then return true end
+                if cv ~= nil and cv ~= vehicle and cv ~= state.selfTrailer then return true end
             end
         end
     end
