@@ -20,6 +20,7 @@ T.INTRUSION_MAX = 1.0      -- 掛車內輪壓出路面的容許量（轉角外�
 T.HITCH_MAX = 60 * math.pi / 180      -- 規劃期車頭—掛車最大折角
 T.STEP = 0.5               -- 運動學步長（公尺）
 T.RAMP_MIN, T.RAMP_MAX = 8, 16        -- 外靠過渡段長
+T.EXIT_HOLD = 8                       -- 轉出外偏保持段長（掛車軸跟進窄路）
 T.GUARD_MS = 100
 T.HITCH_SLOW = 45 * math.pi / 180     -- 行駛中折角超過＝降到爬行
 T.TILT_SLOW = 0.94                    -- 掛車 upVectorDot 低於（≈20°）＝降到爬行
@@ -157,31 +158,30 @@ local function simulate(c, xs, ys, n, g)
 end
 T._simulate = simulate
 
--- 產生候選車頭路線：進入段外靠 a（正＝往轉彎外側），圓角半徑 R，轉出段置中。
--- 回點數與切入／切出資訊；scratch 陣列重用（冷路徑，但一條路線可能試上百組）。
+-- 產生候選車頭路線：進入段外靠 a、轉出段外偏 b（兩者正＝往轉彎外側），圓角半徑 R。
+-- 轉出後保持 b 一段再 smoothstep 回中線（大貨車司機轉進窄路後先貼外側、掛車進來再回正）。
+-- scratch 陣列重用（冷路徑，但一條路線可能試上百組）。
 local XS, YS = {}, {}
-local function candidate(c, a, R, ramp, approach, exitLen)
-    -- 外側法向：轉彎方向的反側。turnSign>0＝左轉（數學 CCW，但 y 向南所以畫面上是右轉；只用相對關係）
+local function candidate(c, a, b, R, ramp, approach, exitLen)
     local s = c.turnSign
     local oxIn, oyIn = c.nIn[1] * (-s) * a, c.nIn[2] * (-s) * a
-    -- 圓心：進入外靠線與轉出中心線各往彎內偏 R 的交點
+    local oxOut, oyOut = c.nOut[1] * (-s) * b, c.nOut[2] * (-s) * b
+    -- 圓心：進入外靠線與轉出外偏線各往彎內偏 R 的交點
     local c1x = c.nx + oxIn + c.nIn[1] * s * R
     local c1y = c.ny + oyIn + c.nIn[2] * s * R
-    local c2x = c.nx + c.nOut[1] * s * R
-    local c2y = c.ny + c.nOut[2] * s * R
+    local c2x = c.nx + oxOut + c.nOut[1] * s * R
+    local c2y = c.ny + oyOut + c.nOut[2] * s * R
     local den = c.dIn[1] * c.dOut[2] - c.dIn[2] * c.dOut[1]
     if abs(den) < 1e-6 then return 0 end
     local t = ((c2x - c1x) * c.dOut[2] - (c2y - c1y) * c.dOut[1]) / den
     local cx, cy = c1x + c.dIn[1] * t, c1y + c.dIn[2] * t
     local tax, tay = cx - c.nIn[1] * s * R, cy - c.nIn[2] * s * R     -- 切入點（外靠線上）
-    local tbx, tby = cx - c.nOut[1] * s * R, cy - c.nOut[2] * s * R   -- 切出點（轉出中心線上）
-    -- 切入點相對節點沿進入方向的位置（負＝節點前）；切出點沿轉出方向
+    local tbx, tby = cx - c.nOut[1] * s * R, cy - c.nOut[2] * s * R   -- 切出點（轉出外偏線上）
     local sIn = (tax - c.nx) * c.dIn[1] + (tay - c.ny) * c.dIn[2]
     local sOut = (tbx - c.nx) * c.dOut[1] + (tby - c.ny) * c.dOut[2]
     if sIn > c.wOut * 0.5 + 2 or sOut < -c.wIn * 0.5 - 2 then return 0 end
     local n = 0
     local step = T.STEP
-    -- 進入：節點前 approach 起，ramp 段 smoothstep 外靠 0→a，之後保持 a 到切入點
     local s0 = sIn - approach
     local rampEnd = s0 + ramp
     local sCur = s0
@@ -205,10 +205,19 @@ local function candidate(c, a, R, ramp, approach, exitLen)
         n = n + 1
         XS[n], YS[n] = cx + R * cos(ang), cy + R * sin(ang)
     end
+    -- 轉出：保持 b 直到掛車也進來（hold），再 ramp 回中線；exitLen 截斷
+    local hold = b ~= 0 and T.EXIT_HOLD or 0
     local e = step
     while e <= exitLen do
+        local off = b
+        if e > hold then
+            local u = (e - hold) / ramp
+            if u >= 1 then off = 0 else off = b * (1 - u * u * (3 - 2 * u)) end
+        end
+        local dOff = off - b
         n = n + 1
-        XS[n], YS[n] = tbx + c.dOut[1] * e, tby + c.dOut[2] * e
+        XS[n] = tbx + c.dOut[1] * e + c.nOut[1] * (-s) * dOff
+        YS[n] = tby + c.dOut[2] * e + c.nOut[2] * (-s) * dOff
         e = e + step
     end
     return n, sIn, sOut
@@ -216,23 +225,36 @@ end
 
 T._candidate = function(...) return candidate(...), XS, YS end
 
--- 轉角規劃：回 {a, R, ramp, sIn, sOut} 或 nil（不可過）。
--- g：{L2, rear, hw, front, thw}；c：轉角幾何（見 cornerOf）。
+-- 轉角規劃：回 {a, b, R, ramp, sIn, sOut, approach, exitLen} 或 nil（不可過）。外靠／外偏都用到
+-- 路面邊緣（後軸在路面、半寬＋0.3m 餘裕）；先找總偏移最小的走法。
 function T.planCorner(c, g)
     local maxA = c.wIn * 0.5 - g.thw - 0.3
     if maxA < 0 then maxA = 0 end
+    local maxB = c.wOut * 0.5 - g.thw - 0.3
+    if maxB < 0 then maxB = 0 end
     local approach = g.L2 + g.rear + T.RAMP_MAX + 4
-    local exitLen = g.rear + g.L2
-    local a = 0
-    while a <= maxA + 1e-9 do
-        local ramp = a > 0 and T.RAMP_MAX or T.RAMP_MIN
-        for R = 4, 24, 2 do
-            local n, sIn, sOut = candidate(c, a, R, ramp, approach, exitLen)
-            if n > 3 and simulate(c, XS, YS, n, g) then
-                return { a = a, R = R, ramp = ramp, sIn = sIn, sOut = sOut, approach = approach }
+    local exitLen = g.rear + g.L2 + T.RAMP_MAX
+    local total = 0
+    while total <= maxA + maxB + 1e-9 do
+        local a = total < maxA and total or maxA
+        while a >= 0 do
+            local bAbs = total - a
+            for sign = 1, -1, -2 do
+              local b = bAbs * sign
+              if bAbs <= maxB + 1e-9 and not (sign < 0 and bAbs == 0) then
+                local ramp = (a > 0 or b ~= 0) and T.RAMP_MAX or T.RAMP_MIN
+                for R = 4, 24, 2 do
+                    local n, sIn, sOut = candidate(c, a, b, R, ramp, approach, exitLen)
+                    if n > 3 and simulate(c, XS, YS, n, g) then
+                        return { a = a, b = b, R = R, ramp = ramp, sIn = sIn, sOut = sOut,
+                            approach = approach, exitLen = exitLen }
+                    end
+                end
+              end
             end
+            a = a - 0.5
         end
-        a = a + 0.5
+        total = total + 0.5
     end
     return nil
 end
@@ -258,7 +280,7 @@ function T.cornerOf(px, py, nx, ny, qx, qy, wIn, wOut)
     c.ax, c.ay = nx - dix * (li + 40), ny - diy * (li + 40)
     c.nx1, c.ny1 = nx + dix * wOut * 0.5, ny + diy * wOut * 0.5
     c.nx0, c.ny0 = nx - dox * wIn * 0.5, ny - doy * wIn * 0.5
-    c.bx, c.by = nx + dox * lo, ny + doy * lo
+    c.bx, c.by = nx + dox * (lo + 40), ny + doy * (lo + 40) -- 轉出後同理：下一個轉角另算
     return c
 end
 
@@ -294,12 +316,18 @@ function T.shape(route, tow, tractorHalfW, tractorFront)
         if plan then
             -- 車頭路線寫進 route：外靠段寬度縮成「以偏移線為中心的虛擬路寬」，
             -- 讓 Follower 的路寬證明對偏移線仍保守成立。
-            local n = candidate(c, plan.a, plan.R, plan.ramp, plan.approach, 0)
+            -- 轉出段只能畫到下一個路線點之前（從切出點算起）：畫過頭再接下一點＝路線往回折，
+            -- Follower 判成要原地調頭（E2E semi-hairpin-mp：轉過 143° 後在支路上被 TrailerRotate 交還）
+            local exitRoom = c.lenOut - 1 - (plan.sOut > 0 and plan.sOut or 0)
+            if exitRoom < 0 then exitRoom = 0 end
+            local n = candidate(c, plan.a, plan.b, plan.R, plan.ramp, plan.approach,
+                plan.b ~= 0 and math.min(plan.exitLen, exitRoom) or 0)
             -- 只取節點前後各自實際段長內的點，不越過前一個／下一個路線點
             for k = 1, n do
                 local x, y = XS[k], YS[k]
                 local along = (x - nx) * c.dIn[1] + (y - ny) * c.dIn[2]
-                if along > -c.lenIn * 0.9 then
+                local ahead = (x - nx) * c.dOut[1] + (y - ny) * c.dOut[2]
+                if along > -c.lenIn * 0.9 and ahead < c.lenOut - 1 then
                     local minW = 2 * g.thw + 0.4
                     local vw = minW
                     if along < plan.sIn then

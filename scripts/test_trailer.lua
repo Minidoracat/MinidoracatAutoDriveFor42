@@ -46,6 +46,25 @@ check(#ns.towBlocked == 2 and ns.towBlocked[1] == 0 and ns.towBlocked[2] == 0, "
 local d = T.nearestBlocked(ns, 0, -20)
 check(d and math.abs(d - 20) < 1e-6, "nearestBlocked 回世界距離")
 
+-- ②b Fallas 143°（KY-60 17m→支路 7m，Workshop 回報翻車點）：外靠＋轉出偏移後可過
+local fal = T.cornerOf(5150, 11129.5, 5244.6, 11176.8, 5230, 11147.5, 17, 7)
+local fp = T.planCorner(fal, G)
+check(fp ~= nil and fp.a > 0, "Fallas 143° 用外拉大彎可過: " .. tostring(fp and (fp.a .. "/" .. fp.b)))
+
+-- ②c 改寫後的路線不得往回折（轉出偏移段畫過下一點＝Follower 判成原地調頭）
+local falRoute = { pts = { 5150, 11129.5, 5244.6, 11176.8, 5230, 11147.5, 5217.5, 11122.5 },
+    segWidth = { 17, 7, 7 }, segSurface = { "paved", "paved", "paved" } }
+local fs = T.shape(falRoute, tow, G.thw, G.front)
+local maxTurn = 0
+for k = 3, #fs.pts - 3, 2 do
+    local ax, ay = fs.pts[k] - fs.pts[k - 2], fs.pts[k + 1] - fs.pts[k - 1]
+    local bx, by = fs.pts[k + 2] - fs.pts[k], fs.pts[k + 3] - fs.pts[k + 1]
+    local turn = math.abs(math.atan2(ax * by - ay * bx, ax * bx + ay * by))
+    if turn > maxTurn then maxTurn = turn end
+end
+check(#fs.towBlocked == 0 and maxTurn < math.pi / 2,
+    string.format("Fallas 改寫線無折返（最大相鄰折角 %.0f°）", math.deg(maxTurn)))
+
 -- ③ 小折角不動
 local gentle = { pts = { -60, 0, 0, 0, 60, 10 }, segWidth = { 8, 8 }, segSurface = { "paved", "paved" } }
 local gs = T.shape(gentle, tow, G.thw, G.front)
