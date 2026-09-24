@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0924j"
+Drive.REV = "0924k"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -214,6 +214,7 @@ TUNE.TRAFFIC_PASS_MIN_KMH = 15    -- 淨距只有最少值時的錯車速度；�
 TUNE.TRAFFIC_PASS_FREE_M = 1.0
 TUNE.TRAFFIC_YIELD_BUFFER_M = 3   -- 讓車：在預計交會點前這麼遠停下
 TUNE.ONCOMING_DESIGN_KMH = 25     -- 借對向車道繞行的過渡段設計速（見 shapeProfile）
+TUNE.TRAFFIC_WAIT_NOTICE_MS = 5000 -- 「等對向車」提示去重窗
 TUNE.FOLLOW_STOP_M = 5            -- 跟車：車頭到前車車尾小於此值＝停等
 TUNE.FOLLOW_MIN_M = 6             -- 跟車距離＝MIN＋前車速度×TIME
 TUNE.FOLLOW_TIME_S = 1.0
@@ -1053,6 +1054,7 @@ local function releaseDodge(s)
     -- 守護看過布局不代表常駐線已規劃；持有權釋放後，靜態的下一台車也要重問。
     if s.dodging then s.planSig = -1 end
     s.dodging = false
+    s.trafficLate = false -- 會車「來不及放棄」只屬於這次承諾
     s.dodgeHandoffHold = false
     s.dodgeNotified = false
     s.dodgeCrawl = false
@@ -3021,25 +3023,24 @@ function Drive.trafficScan(s, now, speedKmh)
     -- 障礙前等對向車過去再繞。
     -- 交會點在繞行起點 a 之前＝衝突跟繞行無關（對方壓的是常駐線）：照常讓車，不放棄繞行，
     -- 否則同輪 replan 會把同一條線重新承諾、下一輪再放棄，每輪震盪。
-    -- 放棄只在「鬆油門就停得住在障礙前」時做：來不及就得硬煞，一秒鎖輪會沿車頭方向滑進對方
-    -- 車道（E2E park400：50 km/h 離障礙 10m 放棄 → 鎖輪滑到對向車道 1.1m 被撞）。來不及時照承諾線
-    -- 做完、不為這台讓車停在半路（速度照繞行帽；對方若是自駕會讓車）。
+    -- 放棄只在「鬆油門就停得住在讓車停點前」時做——停點與 replan 的 defer why=traffic 同一條式子
+    -- （Drive.trafficStopCap：b 前留爬行側移跑道、反應 0.5s、safeCoast）；來不及就得硬煞，一秒鎖輪
+    -- 會沿車頭方向滑進對方車道（E2E park400）。來不及＝late：照承諾線做完、不為這台讓車停在半路
+    -- （速度照繞行帽；對方若是自駕會讓車）。late 綁在這次承諾上（trafficLate，releaseDodge 才清）：
+    -- 單輪判讀閃掉不得清掉它，否則減速後停止距離縮回可放棄範圍又放棄＝半路停等被撞（fix9-park400）。
     local fs = s.fstate
     if s.trfOnYield and s.dodging and not s.dodgeStay and not s.returnActive and not s.laneChained
             and finite(fs.offA) and onQ >= fs.offA then
-        local coast = finite(s.safeCoast) and s.safeCoast > 0.5 and s.safeCoast or 0.5
-        -- 已判過「來不及」就維持到底：照繞行帽減速後停止距離會縮回可放棄範圍，這時放棄＝車已壓在
-        -- 對向車道中段又往回拉（E2E fix9-park400：late → 減速 → abort → 半路停等被撞）
-        if s.trafficPlan ~= "late" and finite(fs.offB)
-                and rs + halfL + vSelf * vSelf / (2 * coast) <= fs.offB then
+        if not s.trafficLate and finite(fs.offB) and finite(fs.offL)
+                and Drive.trafficStopCap(s, fs.offB, fs.offL) >= speedKmh - TUNE.DODGE_SPEED_TOL then
             diagEvent(s, s.playerNum, "traffic", { phase = "abort", why = "dodge", d = onGap,
                 speed = onV * 3.6, offL = fs.offL, b = fs.offB, rs = rs })
             releaseDodge(s)
             MDADFollower.clearOffset(fs) -- 車還在過渡段：目標線直接回常駐線，追線把車拉回右側
             return Drive.trafficScan(s, now, speedKmh)
         end
-        if s.trafficPlan ~= "late" then
-            s.trafficPlan = "late"
+        if not s.trafficLate then
+            s.trafficLate = true
             diagEvent(s, s.playerNum, "traffic", { phase = "commit", why = "late", d = onGap,
                 speed = onV * 3.6, offL = fs.offL, b = fs.offB, rs = rs })
         end
@@ -3067,6 +3068,18 @@ function Drive.trafficScan(s, now, speedKmh)
             LOG, s.playerNum or 0, onGap, onV * 3.6, need, want, lo, hi, M - short, why,
             s.trfLeadGap and string.format("%.1f", s.trfLeadGap) or "-"))
     end
+end
+
+-- 讓車停點的接近帽：停在 b 前留爬行側移跑道（b − √(6·dl／κ_crawl)，同 shapeProfile 的陡坡量）、
+-- 反應 0.5s、減速度用鬆油門（safeCoast）。放棄判斷與 defer why=traffic 共用這一條，兩邊不得分岔。
+function Drive.trafficStopCap(s, b, offL)
+    local vp = s.vehicleProfile
+    local k = MDADDynamics.steeringKappa(
+        vp.wheelbase, vp.delta0Safe, vp.deltaVSafe, vp.maxSpeed, MDADDynamics.DODGE_SQUEEZE_CAP)
+    local dl = math.abs(offL - laneBiasOf(s))
+    local run = (k > 0 and dl > 0) and math.sqrt(6 * dl / k) or 0
+    local coast = finite(s.safeCoast) and s.safeCoast > 0.5 and s.safeCoast or 0.5
+    return MDADDynamics.approachCapKmh(b - run - s.lastSNow - vp.halfL, 0, 0.5, coast)
 end
 
 -- 會車提示：同一次會車（trafficNoticeKey 在對方交會完後清空）只往上升級一次——錯車→讓車會再提示，
@@ -4885,7 +4898,8 @@ local function shapeProfile(s, profile, a, b, c, d, offL, baseL, crawlDesign)
     -- 巡航設計的過渡長 50m，實際常被淨距帽壓到 10 km/h，在對向車道裡爬好幾秒（E2E park400／
     -- SUV park：對向車出現時已壓線、退不回也快不起來＝被撞）。短過渡＝到障礙前才切出去、
     -- 過了立刻切回，對向車出現時多半還在自己車道、可以停下讓車。
-    if finite(s.laneRatio) and s.laneRatio > 0 and offL - s.vehicleProfile.halfW < 0
+    -- 越過「路面中線」（導航線可偏離路中心 roadBias，不是 l=0）
+    if finite(s.laneRatio) and s.laneRatio > 0 and offL - s.vehicleProfile.halfW < (s.roadBias or 0)
             and intended > TUNE.ONCOMING_DESIGN_KMH then
         intended = TUNE.ONCOMING_DESIGN_KMH
     end
@@ -5502,6 +5516,7 @@ function Drive.handoffReady(s)
     p.lastSNow, p.lastLatSigned, p.fstate = s.lastSNow, s.lastLatSigned, s.fstate
     p.vehicleProfile, p.gearCap, p.safeLat = s.vehicleProfile, s.gearCap, s.safeLat
     p.laneChained, p.stayHoldEndS = s.laneChained, s.stayHoldEndS
+    p.laneRatio, p.roadBias = s.laneRatio, s.roadBias -- 預覽要跟真承諾同一個短設計判定
     p.sensor, p.bodyReach, p.steepDeficitM = s.sensor, s.bodyReach, -1
     local _, _, _, endS, ok = shapeProfile(p, s.profile, a, b, c, d, offL, base)
     return not ok or (not p.dodgeWindowShort
@@ -6114,7 +6129,7 @@ local function replan(s, vehicle, playerNum)
         -- 對向車逼近中硬做完的繞行（trafficPlan＝late）不提前釋放：回線段是承諾時掃過的線，
         -- 提前交給 RETURN 會以當下偏移為基準停等＝停在對方車道上（E2E park400）。
         local exitReady = type(fs.offC) == "number" and s.lastSNow >= fs.offC
-            and s.trafficPlan ~= "late"
+            and not s.trafficLate
             and nearestLineBlocker(s, sen, s.lastSNow) == nil
         -- 026/030：後載入的下一台擋住 p4，但第一群已通過；等 nextCap<8／停穩才交接
         -- 會錯過尚有跑道的行駛窗口。失敗必須真在 p4，不能由 hardS>c 猜（車頭會前伸）。
@@ -6832,22 +6847,16 @@ local function replan(s, vehicle, playerNum)
         -- 過渡起點 a——長過渡段的 a 可能已在車後，停在 a 前＝原地停住、連回右側的橫移都做不了；
         -- 也不是 b——貼著停車停下，對向車過了之後側移沒有跑道，只能倒車（E2E park 變體兩輪）。
         -- 減速度用鬆油門（safeCoast）：定速提早收油、不靠一秒鎖輪的硬煞（鎖輪時轉向無效）。
-        local vp = s.vehicleProfile
-        local k = MDADDynamics.steeringKappa(
-            vp.wheelbase, vp.delta0Safe, vp.deltaVSafe, vp.maxSpeed, MDADDynamics.DODGE_SQUEEZE_CAP)
-        local dl = math.abs(offL - laneBiasOf(s))
-        local run = (k > 0 and dl > 0) and math.sqrt(6 * dl / k) or 0
-        local coast = finite(s.safeCoast) and s.safeCoast > 0.5 and s.safeCoast or 0.5
-        s.dodgeDeferCap = MDADDynamics.approachCapKmh(
-            b - run - s.lastSNow - vp.halfL, 0, 0.5, coast)
+        s.dodgeDeferCap = Drive.trafficStopCap(s, b, offL)
         diagEvent(s, playerNum, "dodge", { phase = "defer", why = "traffic",
             offL = offL, a = a, b = b, d = d, rs = s.lastSNow, cap = s.dodgeDeferCap })
-        -- 停在障礙前等對向車：提示一次（承諾繞行時重臂）
-        if not s.trafficWaitNoticed then
-            s.trafficWaitNoticed = true
+        -- 停在障礙前等對向車：提示一次（連續等待 5 秒內不重複；換一次等待會再提示）
+        local nowW = getTimestampMs()
+        if nowW - (s.trafficWaitMs or -1e9) > TUNE.TRAFFIC_WAIT_NOTICE_MS then
             local playerObj = getSpecificPlayer(playerNum)
             if playerObj then haloGood(playerObj, KEY_TRAFFIC.wait) end
         end
+        s.trafficWaitMs = nowW
         if getDebug() then
             print(string.format("%spn=%d dodge defer (traffic): offL=%.2f a-rs=%.1f cap=%.1f",
                 LOG, playerNum, offL, a - s.lastSNow, s.dodgeDeferCap))
@@ -6927,7 +6936,7 @@ local function replan(s, vehicle, playerNum)
                 sen.scanBias = offL
                 s.laneChained = true
             end
-            s.trafficWaitNoticed = false
+            s.trafficLate = false
             -- 玩家可見的減速要有理由：繞行開始提示一次（持續繞行時 sig 每輪微變、
             -- replan 反覆進來，靠 dodgeNotified 防轟；clear/blocked 時重臂）
             if not s.dodgeNotified then

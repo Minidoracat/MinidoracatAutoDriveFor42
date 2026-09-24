@@ -16049,11 +16049,17 @@ function drive.scenarioTraffic()
     dveh._speed = 5 -- 照繞行帽減速後停止距離縮回可放棄範圍：已判 late 就不得再放棄
     traffic(on, -3, 1)
     checkTrue(st.dodging, "(park-late) 減速後仍維持承諾，不半路放棄")
+    -- 單輪沒看到對向車（速度算不出來／漏掃）不得清掉 late：否則下一輪又判讓車就半路放棄
+    local vs0 = st.sensor.trfVs[1]
+    st.sensor.trfVs[1] = false
+    MDAD.Drive.trafficScan(st, getTimestampMs(), 5)
+    st.sensor.trfVs[1] = vs0
+    checkTrue(st.trafficLate, "(park-late) 單輪判讀閃掉：late 仍綁在這次承諾上")
     dveh._speed = 30
     dveh._x = st.fstate.offC + 1
     traffic(on, -3, 1)
-    checkTrue(st.dodging and st.trafficPlan == "late",
-        "(park-late) 過 c 仍照承諾線回線，不提前交 RETURN（plan=" .. tostring(st.trafficPlan) .. "）")
+    checkTrue(st.dodging and st.trafficLate,
+        "(park-late) 過 c 仍照承諾線回線，不提前交 RETURN（late=" .. tostring(st.trafficLate) .. "）")
     drive.clearVehicleGeom(on._cells)
     drive.clearVehicleGeom(parked._cells)
     dveh._x = 0

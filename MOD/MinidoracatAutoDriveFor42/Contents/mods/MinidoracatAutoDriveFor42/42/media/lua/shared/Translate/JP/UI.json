@@ -29,7 +29,7 @@
     "UI_MinidoracatAutoDrive_Resume": "オートドライブが運転を再開します。",
     "UI_MinidoracatAutoDrive_Dodge": "前方に障害物を検知。減速して回避します。",
     "UI_MinidoracatAutoDrive_TrafficYield": "対向車あり。停止して先に通します。",
-    "UI_MinidoracatAutoDrive_TrafficPass": "対向車あり。右に寄ってすれ違います。",
+    "UI_MinidoracatAutoDrive_TrafficPass": "対向車あり。寄せてすれ違います。",
     "UI_MinidoracatAutoDrive_TrafficWait": "対向車あり。障害物の手前で通過を待ってから回避します。",
     "UI_MinidoracatAutoDrive_GearSlice": "運転モード切替：%1",
     "UI_MinidoracatAutoDrive_GearChill": "のんびり（30 km/h）",

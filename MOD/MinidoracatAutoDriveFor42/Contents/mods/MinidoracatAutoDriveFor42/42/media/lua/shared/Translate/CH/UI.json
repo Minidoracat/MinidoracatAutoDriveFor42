@@ -29,7 +29,7 @@
     "UI_MinidoracatAutoDrive_Resume": "自動駕駛恢復控制。",
     "UI_MinidoracatAutoDrive_Dodge": "偵測到前方障礙，減速繞行中。",
     "UI_MinidoracatAutoDrive_TrafficYield": "對向有來車，停下讓它先過。",
-    "UI_MinidoracatAutoDrive_TrafficPass": "對向有來車，靠右錯車。",
+    "UI_MinidoracatAutoDrive_TrafficPass": "對向有來車，錯開通過。",
     "UI_MinidoracatAutoDrive_TrafficWait": "對向有來車，在障礙物後等它通過再繞行。",
     "UI_MinidoracatAutoDrive_GearSlice": "切換檔位：%1",
     "UI_MinidoracatAutoDrive_GearChill": "輕鬆（30 公里）",

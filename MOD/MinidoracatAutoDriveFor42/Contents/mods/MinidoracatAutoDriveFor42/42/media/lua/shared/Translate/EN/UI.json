@@ -29,7 +29,7 @@
     "UI_MinidoracatAutoDrive_Resume": "Autodrive resuming control.",
     "UI_MinidoracatAutoDrive_Dodge": "Obstacle ahead. Slowing down to swerve around.",
     "UI_MinidoracatAutoDrive_TrafficYield": "Oncoming vehicle. Stopping to let it pass.",
-    "UI_MinidoracatAutoDrive_TrafficPass": "Oncoming vehicle. Keeping right to pass.",
+    "UI_MinidoracatAutoDrive_TrafficPass": "Oncoming vehicle. Moving over to pass.",
     "UI_MinidoracatAutoDrive_TrafficWait": "Oncoming vehicle. Waiting behind the obstacle until it passes.",
     "UI_MinidoracatAutoDrive_GearSlice": "Drive mode: %1",
     "UI_MinidoracatAutoDrive_GearChill": "Chill (30 km/h)",
