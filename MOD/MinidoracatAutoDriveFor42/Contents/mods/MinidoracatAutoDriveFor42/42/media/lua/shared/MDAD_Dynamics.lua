@@ -464,10 +464,11 @@ end
 -- 70＋潮濕/重車下 brakeLoaded 幾乎永久失敗＝空直路被鎖死。visibility 的真正
 -- 防線是連續煞停證明與 breach forceBrake，不是這裡的固定地板。
 -- MAX保留既有低速／姿態帽，不再為了「嚴格更低」重複折扣成10.8或4.5。
--- 舒適風格原策略不變；一般證明缺口仍走90%／80上限，未知近場仍限18。
+-- 舒適風格原策略不變；一般證明缺口仍走90%，未知近場仍限18。
+-- 0924c 起不再有固定 80 上限：速度本身的安全由連續 visibility／curve／繞行帽負責，
+-- 固定天花板只會讓 MAX 檔在證明短暫缺口時掉到 80（正式服 MAX 檔被壓在 80 以下的來源之一）。
 local UNGATED_RATIO = 0.9
 local UNGATED_NEAR_CAP_KMH = 18
-local UNGATED_MAX_KMH = 80
 function D.ungatedCapKmh(fullTarget, reason, alignmentCap, brisk)
     if not D.finite(fullTarget) or fullTarget < 0 or type(reason) ~= "string" then
         return 0, "dynamics-invalid"
@@ -481,7 +482,6 @@ function D.ungatedCapKmh(fullTarget, reason, alignmentCap, brisk)
     else
         cap = fullTarget * UNGATED_RATIO
         if brisk and cap < 12 then cap = fullTarget < 12 and fullTarget or 12 end
-        if cap > UNGATED_MAX_KMH then cap = UNGATED_MAX_KMH end
     end
     if cap < 0 then cap = 0 end
     if cap >= fullTarget then cap = brisk and fullTarget or fullTarget * UNGATED_RATIO end

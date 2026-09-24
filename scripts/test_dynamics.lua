@@ -223,8 +223,8 @@ for i = 1, #all do
     eq(why, reasons[i], "第 " .. i .. " 具名理由")
 end
 -- 15 地板只留近場未知三位：sensor(1)/obb(5)/sweep(12)。stale/visibility/
--- corridor 改走 90%（上限 80）比例檔——固定 15 會覆蓋連續 visibilityCap
---（2026-09-01 三模型對抗審 P0；植入違規驗證：改回 15 清單本表即紅）。
+-- corridor 走 90% 比例檔——固定 15 會覆蓋連續 visibilityCap
+--（2026-09-01 三模型對抗審 P0）。0924c 起沒有固定 80 天花板（MAX 檔 120 → 108）。
 for i = 1, #reasons do
     local cap, why = D.ungatedCapKmh(120, reasons[i], 90, false)
     check(type(cap) == "number" and cap >= 0 and cap < 120,
@@ -235,7 +235,7 @@ for i = 1, #reasons do
         near(cap, 90, 1e-9, "align bit follows the supplied alignment cap")
     else
         check(cap > 15, "proportional gate bit stays above 15 #" .. i)
-        check(cap <= 80, "proportional gate bit respects 80 ceiling #" .. i)
+        near(cap, 108, 1e-9, "proportional gate bit is 90%, no fixed 80 ceiling #" .. i)
     end
     eq(why, reasons[i], "ungated reason remains named #" .. i)
 end
