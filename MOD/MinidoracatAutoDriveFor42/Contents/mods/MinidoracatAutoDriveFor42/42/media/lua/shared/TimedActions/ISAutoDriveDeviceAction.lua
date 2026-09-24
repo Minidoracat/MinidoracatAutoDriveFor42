@@ -104,7 +104,9 @@ function ISAutoDriveDeviceAction:perform()
         -- isServer() 守衛：專用伺服器不畫 UI（正常情況這條分支只在 SP 走到）。
         -- HaloTextHelper.addBadText 在 shared TimedAction 內的原版用例：ISReadABook.lua:7
         if not ok and reason and not isServer() then
-            HaloTextHelper.addBadText(self.character, getText(reason))
+            local text = getText(reason)
+            HaloTextHelper.addBadText(self.character, text)
+            if MDADDiagnostics and MDADDiagnostics.toast then MDADDiagnostics.toast(text, "bad") end
         end
     end
     ISBaseTimedAction.perform(self)

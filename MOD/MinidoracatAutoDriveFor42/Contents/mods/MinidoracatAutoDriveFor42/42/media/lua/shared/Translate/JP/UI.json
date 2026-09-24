@@ -111,7 +111,7 @@
     "UI_MinidoracatAutoDrive_VoiceLang_zh": "Chinese",
     "UI_MinidoracatAutoDrive_VoiceLang_en": "English",
     "UI_MinidoracatAutoDrive_VoiceLang_ja": "Japanese",
-    "UI_MinidoracatAutoDrive_RouteTooFar": "ルートの起点が車から遠すぎます（オフロードでの接続が必要）。先にその道路まで移動するか、目的地を今いる道路上に置いてください。",
+    "UI_MinidoracatAutoDrive_RouteTooFar": "道路から離れすぎています（20m以上）。自動運転は道路に沿ってのみ走行します。先に手動で道路に出てから開始してください。すでに道路上にいる場合は、目的地をその道路の近くに設定してください。",
     "UI_MinidoracatAutoDrive_Detour": "迂回ルートが見つかりました。迂回します",
     "UI_MinidoracatAutoDrive_NoDetour": "使える迂回ルートがありません",
     "UI_MinidoracatAutoDrive_HUDDetourButton": "迂回",

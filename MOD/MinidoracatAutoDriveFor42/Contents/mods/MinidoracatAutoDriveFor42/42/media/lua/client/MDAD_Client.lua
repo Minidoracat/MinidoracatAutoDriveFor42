@@ -38,7 +38,9 @@ local function warnNavGateMissing(playerNum)
     local playerObj = getSpecificPlayer(playerNum)
     if not playerObj then return end
     navWarned[playerNum] = true
-    HaloTextHelper.addBadText(playerObj, getText("UI_MinidoracatAutoDrive_NavApiMissing"))
+    local text = getText("UI_MinidoracatAutoDrive_NavApiMissing")
+    HaloTextHelper.addBadText(playerObj, text)
+    if MDADDiagnostics and MDADDiagnostics.toast then MDADDiagnostics.toast(text, "bad") end
 end
 
 -- 登入補學。引擎只在兩個時機檢查 AutoLearnAny：升等瞬間
@@ -278,5 +280,7 @@ Events.OnServerCommand.Add(function(module, command, args)
     if type(args) ~= "table" or type(args.reason) ~= "string" then return end
     local playerObj = findLocalPlayer(args.to)
     if not playerObj then return end
-    HaloTextHelper.addBadText(playerObj, getText(args.reason))
+    local text = getText(args.reason)
+    HaloTextHelper.addBadText(playerObj, text)
+    if MDADDiagnostics and MDADDiagnostics.toast then MDADDiagnostics.toast(text, "bad") end
 end)

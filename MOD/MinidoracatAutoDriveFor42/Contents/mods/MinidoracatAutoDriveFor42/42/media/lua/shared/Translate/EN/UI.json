@@ -111,7 +111,7 @@
     "UI_MinidoracatAutoDrive_VoiceLang_zh": "Chinese",
     "UI_MinidoracatAutoDrive_VoiceLang_en": "English",
     "UI_MinidoracatAutoDrive_VoiceLang_ja": "Japanese",
-    "UI_MinidoracatAutoDrive_RouteTooFar": "The route starts too far from the vehicle (off-road approach needed). Drive onto that road first, or put the destination on the road you are on.",
+    "UI_MinidoracatAutoDrive_RouteTooFar": "Too far from the road (over 20 m). Autodrive only follows roads — drive onto a road first, then start. If you're already on a road, set the destination near that road.",
     "UI_MinidoracatAutoDrive_Detour": "Alternative route found, rerouting",
     "UI_MinidoracatAutoDrive_NoDetour": "No usable alternative route",
     "UI_MinidoracatAutoDrive_HUDDetourButton": "Reroute",

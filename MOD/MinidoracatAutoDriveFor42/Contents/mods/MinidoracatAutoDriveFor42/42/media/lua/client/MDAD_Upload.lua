@@ -115,6 +115,7 @@ local function notice(pn)
     elseif type(HaloTextHelper.addGoodText) == "function" then
         pcall(HaloTextHelper.addGoodText, player, text)
     end
+    if MDADDiagnostics and MDADDiagnostics.toast then MDADDiagnostics.toast(text, "info") end
 end
 
 function U.begin(pn, now, header, profile)

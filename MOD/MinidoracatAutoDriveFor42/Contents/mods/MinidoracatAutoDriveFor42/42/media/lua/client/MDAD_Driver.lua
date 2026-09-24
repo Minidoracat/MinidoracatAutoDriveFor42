@@ -539,12 +539,17 @@ TUNE.DEBUG_MS = 1000           -- 跟線診斷的最小間隔（毫秒）
 TUNE.DEG_PER_RAD = 180 / 3.14159265358979
 
 -- HaloTextHelper.addBadText／addGoodText 用例：ISVehiclePartMenu.lua:252、ISReadABook.lua:95
+-- 每則頭上提示同步右上 Toast（MDADDiagnostics.toast；診斷模組缺席即只有 Halo）。
 local function haloBad(playerObj, key)
-    HaloTextHelper.addBadText(playerObj, getText(key))
+    local text = getText(key)
+    HaloTextHelper.addBadText(playerObj, text)
+    if MDADDiagnostics and MDADDiagnostics.toast then MDADDiagnostics.toast(text, "bad") end
 end
 
 local function haloGood(playerObj, key)
-    HaloTextHelper.addGoodText(playerObj, getText(key))
+    local text = getText(key)
+    HaloTextHelper.addGoodText(playerObj, text)
+    if MDADDiagnostics and MDADDiagnostics.toast then MDADDiagnostics.toast(text, "good") end
 end
 
 
@@ -1416,7 +1421,9 @@ function Drive.stop(playerNum, reasonKey, voiceEvent, diagWhy)
             if reasonKey == KEY_STUCK and not telemetryHinted[playerNum] and not diagEnabled() then
                 telemetryHinted[playerNum] = true
                 -- addText(player, text)＝白字（HaloTextHelper.java:147-149；原版 forageClient.lua:73）
-                HaloTextHelper.addText(playerObj, getText(KEY_TELEMETRY_HINT))
+                local hint = getText(KEY_TELEMETRY_HINT)
+                HaloTextHelper.addText(playerObj, hint)
+                if MDADDiagnostics and MDADDiagnostics.toast then MDADDiagnostics.toast(hint, "info") end
             end
         end
     end
@@ -8637,7 +8644,9 @@ local function onPlayerUpdate(player)
             elseif outcome == "road_end" then
                 -- 道路終點：本站仍是 pending，交給玩家徒步前往。不冒稱抵達、
                 -- 不播成功語音、不自動開下一段。白字＝資訊不是失敗。
-                HaloTextHelper.addText(player, getText(TRIP.ROAD_END))
+                local roadEnd = getText(TRIP.ROAD_END)
+                HaloTextHelper.addText(player, roadEnd)
+                if MDADDiagnostics and MDADDiagnostics.toast then MDADDiagnostics.toast(roadEnd, "info") end
             elseif outcome ~= "duplicate" then
                 -- 回報沒有成立：原因給玩家看，站點不動、不自動出發。
                 haloBad(player, outcome)

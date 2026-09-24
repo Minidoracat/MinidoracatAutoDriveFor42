@@ -111,7 +111,7 @@
     "UI_MinidoracatAutoDrive_VoiceLang_zh": "Chinese",
     "UI_MinidoracatAutoDrive_VoiceLang_en": "English",
     "UI_MinidoracatAutoDrive_VoiceLang_ja": "Japanese",
-    "UI_MinidoracatAutoDrive_RouteTooFar": "路線起點離車太遠（要越野接線）。請先開到那條路上，或把目的地點在你所在的道路上。",
+    "UI_MinidoracatAutoDrive_RouteTooFar": "車輛離道路太遠（超過 20 公尺）。自動駕駛只會沿著道路行駛，請先手動開上道路再啟動；若已在路上，請把目的地設在你所在的這條路附近。",
     "UI_MinidoracatAutoDrive_Detour": "找到替代路線，改道中",
     "UI_MinidoracatAutoDrive_NoDetour": "找不到可行的替代路線",
     "UI_MinidoracatAutoDrive_HUDDetourButton": "改道",

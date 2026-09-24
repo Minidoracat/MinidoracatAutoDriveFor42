@@ -199,6 +199,8 @@ local function halo(pn, good, key, fallback)
     elseif HaloTextHelper and HaloTextHelper.addBadText then
         pcall(HaloTextHelper.addBadText, player, text)
     end
+    -- good 只出現在複製成功的 Toast 退路（Toast 已試過），不再重試以免 pending 重複
+    if not good then D.toast(text, "bad") end
 end
 
 -- 家族 UI 框架的共享 Toast（MinidoracatUI/Widgets/Toast，NoticeBoard NBToast 同款）：
@@ -221,6 +223,29 @@ local function frameworkToast()
         return ui.Toast
     end
     return nil
+end
+
+-- 所有頭上提示同步出一則右上 Toast（2026-09-24 使用者裁定：Halo 太快消失、車內常被遮）。
+-- 停留時間隨字數：2.5 秒＋每字 80ms，夾 3–12 秒（Kahlua string.len＝UTF-16 字數）。
+-- Halo 照舊由呼叫端出，這裡失敗（無框架／佇列滿）就只有 Halo，不另補。
+local TOAST_COLORS = {
+    bad = { border = { r = 0.85, g = 0.3, b = 0.25, a = 1 } },
+    good = { border = { r = 0.35, g = 0.8, b = 0.4, a = 1 } },
+}
+function D.toastHoldMs(text)
+    return math.max(3000, math.min(12000, 2500 + 80 * string.len(text)))
+end
+function D.toast(text, kind)
+    if type(text) ~= "string" or text == "" then return end
+    local fw = frameworkToast()
+    if not fw then return end
+    pcall(fw.show, {
+        title = localized("UI_MinidoracatAutoDrive_Options", "AutoDrive"),
+        message = text,
+        colors = TOAST_COLORS[kind],
+        holdMs = D.toastHoldMs(text),
+        maxLines = 4,
+    })
 end
 
 -- 複製成功的唯一回饋出口（最新檔與資料夾共用）。Toast.show 回 nil 可能是 pending

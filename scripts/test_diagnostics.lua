@@ -1127,6 +1127,24 @@ check(MDADDiagnostics.copyReportLink(0) == true, "report link without Toast stil
 checkEq(halos[1] and halos[1].kind, "good", "report link falls back to a good Halo")
 check(halos[1] and halos[1].text == "UI_MinidoracatAutoDrive_ReportLinkCopied",
     "report fallback Halo resolves the report-link key")
+
+-- 頭上提示同步 Toast：停留隨字數、夾 3–12 秒；失敗提示＝紅框；good 退路不重打 Toast。
+MinidoracatUI.v1.CAPABILITIES.toast = true
+toasts, halos = {}, {}
+clipFail = true
+check(MDADDiagnostics.copyReportLink(0) == false, "copy failure still reports false")
+clipFail = false
+checkEq(#halos, 1, "copy failure keeps its Halo")
+checkEq(#toasts, 1, "copy failure also raises one Toast")
+checkEq(toasts[1] and toasts[1].colors and toasts[1].colors.border.r, 0.85, "failure Toast uses the red border")
+checkEq(toasts[1] and toasts[1].maxLines, 4, "failure Toast wraps instead of truncating")
+checkEq(MDADDiagnostics.toastHoldMs("hi"), 3000, "short text holds the 3 s floor")
+checkEq(MDADDiagnostics.toastHoldMs(string.rep("x", 50)), 6500, "hold grows 80 ms per character")
+checkEq(MDADDiagnostics.toastHoldMs(string.rep("x", 500)), 12000, "long text caps at 12 s")
+MinidoracatUI.v1.Toast.show = function(opts) toasts[#toasts + 1] = opts return nil end
+toasts, halos = {}, {}
+check(MDADDiagnostics.copyReportLink(0) == true, "pending Toast copy still succeeds")
+checkEq(#toasts, 1, "a pending Toast is not re-queued by the good Halo fallback")
 MinidoracatUI = nil
 
 --------------------------------------------------------------------------------
