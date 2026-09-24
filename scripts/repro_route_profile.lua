@@ -7,14 +7,18 @@
         讀 telemetry route cutover 事件的 src／srcW／srcS（0902m 起匯出）——
         與玩家實機完全同一條路線（含正式服主 MOD 的 road patch）。
     lua scripts/repro_route_profile.lua <sx> <sy> <tx> <ty> [dump]
-        用本機 vanilla streets.xml＋主 MOD NavCore 找路（無 road patch、點數可能
-        與正式服不同，只供舊 telemetry 或估算）。
+        用本機 vanilla streets.xml＋主 MOD NavCore 找路，建圖流程對齊遊戲內：略過鐵路、
+        套主 MOD RoadPatch（指紋不符才退 raw 並提示）、帶 winnerOf 走 300 格覆蓋預切
+        （winnerOf=nil 會漏掉切點吸附，0915 Elder Road 就是離線正確、遊戲內斜穿草地）。
 
 車輛參數預設取 telemetry header 的 profile（session 模式），座標模式用 Volvo 244。
 本檔在 42/media 之外，可用標準函式庫。
 ]]
 
-local NAV = "D:/github/MinidoracatMiniMapFor42/MOD/MinidoracatMiniMapFor42/Contents/mods/MinidoracatMiniMapFor42/42/media/lua/client/MinidoracatMiniMap_NavRoute.lua"
+local MINIMAP = "D:/github/MinidoracatMiniMapFor42/MOD/MinidoracatMiniMapFor42/Contents/mods/MinidoracatMiniMapFor42/42/media/lua"
+local NAV = MINIMAP .. "/client/MinidoracatMiniMap_NavRoute.lua"
+local PATCHES = MINIMAP .. "/shared/MinidoracatMiniMapRoadPatches.lua"
+local OFFICIAL = "Muldraugh, KY"
 local XML = "D:/SteamLibrary/steamapps/common/ProjectZomboid/media/maps/Muldraugh, KY/streets.xml"
 local MEDIA = "MOD/MinidoracatAutoDriveFor42/Contents/mods/MinidoracatAutoDriveFor42/42/media/lua"
 local ROOTS = { "", "../" }
@@ -85,7 +89,8 @@ local function routeFromSession(path)
     return route, vp or VOLVO
 end
 
--- 座標模式：vanilla streets.xml → 主 MOD NavCore
+-- 座標模式：vanilla streets.xml → 主 MOD NavCore，抽取／補丁／gate 與遊戲內同序
+-- （XML 順序即遊戲內抽取順序，吸附競爭的同 d2 決勝才一致）。
 local function routeFromNav(sx, sy, tx, ty)
     local f = assert(io.open(NAV, "rb"))
     local source = f:read("*a"):gsub("\r\n", "\n")
@@ -96,19 +101,26 @@ local function routeFromNav(sx, sy, tx, ty)
     local xml = xf:read("*a")
     xf:close()
     local streets = {}
-    for attrs, body in xml:gmatch('<street([^>]*)>(.-)</street>') do
+    -- `<street%s`：不能寫 `<street(...)>`，否則先吃到根節點 `<streets version=...>`，
+    -- 第一條街的名稱／路寬變 nil（舊版就這樣，補丁指紋因此對不上）
+    for attrs, body in xml:gmatch('<street%s([^>]*)>(.-)</street>') do
         local pts = {}
         for x, y in body:gmatch('<point x="([%d%.%-]+)" y="([%d%.%-]+)"') do
             pts[#pts + 1], pts[#pts + 2] = tonumber(x), tonumber(y)
         end
-        if #pts >= 4 then
+        local name = attrs:match('name="([^"]*)"')
+        -- 遊戲內抽取器略過鐵路（主 MOD beginExtract）；不略過會把鐵路吸附進路網
+        if #pts >= 4 and not NavCore.isRailroadStreet(name, pts[1], pts[2]) then
             streets[#streets + 1] = {
-                name = attrs:match('name="([^"]*)"'),
+                name = name, src = OFFICIAL,
                 width = tonumber(attrs:match('width="([%d%.]+)"')), pts = pts,
             }
         end
     end
-    local b = NavCore.newBuild(streets, nil)
+    dofile(PATCHES)
+    local ok, state = NavCore.applyRoadPatches(streets, MinidoracatMiniMapRoadPatches, OFFICIAL)
+    print("road patch: " .. tostring(state) .. (ok and "" or "（本機 streets.xml 與補丁指紋不符＝PZ 版本不同，改用 raw 路網）"))
+    local b = NavCore.newBuild(streets, function(_, _, src) return src end)
     while not NavCore.step(b, 100000) do end
     -- 車上權重 12（主 MOD ensureRoute 對車上玩家的值）；環境變數 MDAD_APPROACH_WEIGHT 可改
     local weight = tonumber(os.getenv("MDAD_APPROACH_WEIGHT")) or 12

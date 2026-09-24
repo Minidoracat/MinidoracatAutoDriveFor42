@@ -121,6 +121,7 @@ local MAX_SPEED_CAP_KMH = 160 -- maxSpeed 的上界（防呆，不是遊戲設�
 local MIN_SPEED_MS = MIN_SPEED_KMH * MS_PER_KMH
 local ARRIVE_M = 5            -- 抵達判定半徑（公尺）：沿線剩餘距離與終點直線距離共用
 local ARRIVE_M_SQ = ARRIVE_M * ARRIVE_M
+local COAST_STOP_M = ARRIVE_M - 1 -- 終點滑行包絡的停點：到站圈內 1m（理由見 stepBuild）
 
 local LOOKAHEAD_BASE = 6
 local LOOKAHEAD_PER_KMH = 0.12
@@ -226,6 +227,7 @@ local BUDGET_DEFAULT = 64
 MDADFollower.STEER_MAX = STEER_MAX
 MDADFollower.ROTATE_EXIT_RAD = ROTATE_EXIT  -- Driver 以此收尾一次調頭（resetState 清 rotating 不算結束）
 MDADFollower.ARRIVE_M = ARRIVE_M
+MDADFollower.COAST_STOP_M = COAST_STOP_M
 MDADFollower.MIN_SPEED_KMH = MIN_SPEED_KMH
 MDADFollower.BUDGET_MAX = BUDGET_MAX
 MDADFollower.OV_MAX = OV_MAX
@@ -762,7 +764,16 @@ function MDADFollower.stepBuild(profile, budget)
         if phase == "geometry" then
             if i > n then
                 profile.length = profile.s[n]
-                coastV[n] = profile.curveV[n] or profile.maxSpeedMs
+                -- 路線終點是停車點，滑行包絡也要收到 0（0924a）：舊制只有制動包絡收到 0，
+                -- 但 Driver 只能斷油滑行、沒有比例煞車，終點前唯一的減速手段變成可視上限
+                -- 越線的一秒鎖輪 forceBrake——本機＋玩家 47 趟抵達有 29 趟在終點前 7–36m、
+                -- 18–64 km/h 被鎖輪（0915 消防車 13m／36.5 km/h，sk 0.07）。停點不能在終點：
+                -- 輕車在 6m 仍越過緊急可視紅線（離線三車型模擬 +4.7 km/h）；也不能正好在到站圈
+                -- 邊界：繞行爬行等不吃最低執行速度的意圖會把目標收到 0，車蹭到 5.0m 才勉強算到站
+                -- （0924a PZ 實測 F350 最後 2m 花 4 秒、0.1 km/h）。圈內 1m：邊界處仍有正速度，
+                -- 離線三車型距紅線 2.7–5.0 km/h。
+                profile.coastStopS = profile.length - COAST_STOP_M
+                coastV[n] = 0
                 buildLaneRoom(profile)
                 profile.phase, profile.cursor = "coast", n - 1
             else
@@ -775,8 +786,11 @@ function MDADFollower.stepBuild(profile, budget)
                 profile.phase, profile.cursor = "brake", n - 1
             else
                 local coast = profile.segCoast[i] or 0.6
-                local lim = sqrt(coastV[i + 1] * coastV[i + 1]
-                    + 2 * coast * segLen[i])
+                local reach = profile.s[i + 1]
+                if reach > profile.coastStopS then reach = profile.coastStopS end
+                reach = reach - profile.s[i]
+                if reach < 0 then reach = 0 end
+                local lim = sqrt(coastV[i + 1] * coastV[i + 1] + 2 * coast * reach)
                 local curve = profile.curveV[i] or profile.maxSpeedMs
                 coastV[i] = curve < lim and curve or lim
                 profile.cursor, ops = i - 1, ops + 1
@@ -1234,7 +1248,14 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         end
         local coastNext = profile.coastV[bestI + 1] or profile.maxSpeedMs
         local brakeNext = profile.brakeV[bestI + 1] or 0
-        local coastLim = sqrt(coastNext * coastNext + 2 * coast * remainI)
+        -- 滑行包絡的停點在終點前 COAST_STOP_M（與建表同一個 coastStopS），段內也要量到那裡
+        local coastReach = remainI
+        local stopS = profile.coastStopS
+        if stopS and s[bestI + 1] > stopS then
+            coastReach = stopS - sNow
+            if coastReach < 0 then coastReach = 0 end
+        end
+        local coastLim = sqrt(coastNext * coastNext + 2 * coast * coastReach)
         local stopLim = sqrt(brakeNext * brakeNext + 2 * brake * remainI)
         targetSpeed = coastLim
         if stopLim < targetSpeed then targetSpeed = stopLim end
