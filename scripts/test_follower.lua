@@ -2125,6 +2125,25 @@ do
         string.format("brisk 60° 折點：幾何式 34.4 在角度帽 50 之下（實得 %.1f）", pSB.curveV[4] * KMH))
     checkTrue(pSC.curveV[4] * KMH <= 30 + 1e-9,
         string.format("comfort 60° 折點帽 30 km/h（實得 %.1f）", pSC.curveV[4] * KMH))
+    -- 終點停車包絡（2026-09-24 使用者「到終點前不要過早減速」）：configureFollower 把車輛真實
+    -- 斷油能力填進 segStopCoast（不套風格天花板）。從終點倒推、還沒被彎道接手的段用它，
+    -- 彎前收油仍是風格的 0.45；control 段內插值用同一個 coastRate。
+    for i = 1, pC.n - 1 do pC.segStopCoast[i] = 2.5 end
+    F.invalidateDynamics(pC)
+    while not pC.ready do F.stepBuild(pC, 4096) end
+    checkNear(pC.v[6], math.sqrt(2 * 2.5 * (8 - F.COAST_STOP_M)), 1e-9,
+        "comfort 終點前 8m＝車輛斷油 2.5 包絡（不再用舒適 0.45 提早 170m 收油）")
+    checkNear(pC.v[3], math.sqrt(pC.v[4] * pC.v[4] + 2 * 0.45 * 8), 1e-9,
+        "彎前收油仍是風格 0.45（終點用的減速度不外溢到彎道）")
+    do
+        local st = F.newState()
+        -- 車在終點前 5m（最後一段中點外）：段內插值與建表同一個減速度
+        local sq = pC.length - 5
+        local x, y = pointAt(pC, sq)
+        local _, target = F.control(pC, st, x, y, math.rad(90), 20, 1 / 60)
+        checkNear(target, math.sqrt(2 * 2.5 * (5 - F.COAST_STOP_M)) * KMH, 0.5,
+            "control 終點前 5m 目標＝同一條 2.5 包絡（實得 " .. string.format("%.2f", target) .. " km/h）")
+    end
 end
 
 -- =====================================================================

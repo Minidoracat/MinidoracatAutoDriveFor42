@@ -689,10 +689,14 @@ function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile, style)
     end
 
     if type(style) ~= "table" or not isFinite(style.lat) then style = MDADFollower.STYLES.brisk end
-    local segAccel, segBrake, segCoast, segLat = {}, {}, {}, {}
+    -- segStopCoast：終點停車包絡用的斷油減速度（VehicleProfile.configureFollower 填車輛物理值，
+    -- 不套風格天花板）。2026-09-24 使用者「到終點前不要過早減速」：舒適檔 coast 0.45 讓 45 km/h
+    -- 的車在終點前 170m 就開始收油；終點只是停車，不是彎道，照車輛真實斷油能力收即可。
+    local segAccel, segBrake, segCoast, segLat, segStopCoast = {}, {}, {}, {}, {}
     for i = 1, n - 1 do
         segAccel[i], segBrake[i], segCoast[i], segLat[i] =
             ACCEL_NOMINAL, style.brake, style.coast, style.lat
+        segStopCoast[i] = style.coast
     end
     local rangeBlockCount = ((n - 2) - (n - 2) % RANGE_BLOCK) / RANGE_BLOCK + 1
     local rangeBase = 1
@@ -731,6 +735,9 @@ function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile, style)
         segBrake = segBrake,
         segLat = segLat,
         segCoast = segCoast,
+        segStopCoast = segStopCoast,
+        coastRate = {}, -- 建表時每段實際用的滑行減速度（終點段＝segStopCoast，其餘＝segCoast）；control 段內插值同源
+        coastFromEnd = false,
         kappa = {},
         curveV = {},
         coastV = {},
@@ -774,6 +781,7 @@ function MDADFollower.stepBuild(profile, budget)
                 -- 離線三車型距紅線 2.7–5.0 km/h。
                 profile.coastStopS = profile.length - COAST_STOP_M
                 coastV[n] = 0
+                profile.coastFromEnd = true -- 從終點倒推、還沒被彎道帽接手的段用停車減速度
                 buildLaneRoom(profile)
                 profile.phase, profile.cursor = "coast", n - 1
             else
@@ -786,13 +794,20 @@ function MDADFollower.stepBuild(profile, budget)
                 profile.phase, profile.cursor = "brake", n - 1
             else
                 local coast = profile.segCoast[i] or 0.6
+                if profile.coastFromEnd and profile.segStopCoast then coast = profile.segStopCoast[i] or coast end
                 local reach = profile.s[i + 1]
                 if reach > profile.coastStopS then reach = profile.coastStopS end
                 reach = reach - profile.s[i]
                 if reach < 0 then reach = 0 end
                 local lim = sqrt(coastV[i + 1] * coastV[i + 1] + 2 * coast * reach)
                 local curve = profile.curveV[i] or profile.maxSpeedMs
-                coastV[i] = curve < lim and curve or lim
+                if profile.coastRate then profile.coastRate[i] = coast end
+                if curve < lim then
+                    coastV[i] = curve
+                    profile.coastFromEnd = false -- 彎道／速限接手：再往前是一般（風格）收油包絡
+                else
+                    coastV[i] = lim
+                end
                 profile.cursor, ops = i - 1, ops + 1
             end
         elseif phase == "brake" then
@@ -1237,7 +1252,7 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         local lenI = segLen[bestI]
         local remainI = lenI * (1 - bestT)
         local brake = profile.segBrake[bestI] or BRAKE
-        local coast = profile.segCoast[bestI] or 0.6
+        local coast = profile.coastRate and profile.coastRate[bestI] or profile.segCoast[bestI] or 0.6
         local runtimeBrake, runtimeCoast =
             state.brakeSafe, state.coastSafe
         if isFinite(runtimeBrake) and runtimeBrake >= 0 and runtimeBrake < brake then
@@ -1870,6 +1885,7 @@ function MDADFollower.capSegmentLimits(profile, accel, brake, lat, coast)
         if profile.segBrake[i] > brake then profile.segBrake[i] = brake end
         if profile.segLat[i] > lat then profile.segLat[i] = lat end
         if profile.segCoast[i] > coast then profile.segCoast[i] = coast end
+        if profile.segStopCoast and profile.segStopCoast[i] > coast then profile.segStopCoast[i] = coast end
     end
     return true
 end

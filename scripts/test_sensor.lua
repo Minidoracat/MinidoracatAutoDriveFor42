@@ -564,6 +564,101 @@ local function scenarioDistantCorpses()
 end
 
 -- =====================================================================
+-- 情境八：行進中車輛（會車／跟車）
+--
+-- 2026-09-24 雙客戶端 E2E：舊制只記「帶內有行進車＋最近弧長」，分不出對向車在自己車道
+-- （該照速通過）還是壓到我方車道（該靠右錯開）。契約：每台行進車一筆，(s,l) 區間＝真 OBB
+-- 四角在路線局部框的外包；沿路線速度＝兩輪位移／時差（對向負、同向正、首輪 false）；
+-- 兩輪沒動（<0.3m）＝靜止＝硬障礙，不進 trf。
+-- =====================================================================
+local function scenarioTraffic()
+    scenario("行進中車輛：OBB (s,l) 區間、沿路線速度正負、首輪無速度、靜止車不進 trf")
+    resetWorld()
+    -- 最小池向量（Sensor 只用 allocVector3f／releaseVector3f 與 x()/y()）
+    BaseVehicle = {
+        allocVector3f = function()
+            local v = { _x = 0, _y = 0 }
+            function v:set(x, y) self._x, self._y = x, y return self end
+            function v:x() return self._x end
+            function v:y() return self._y end
+            return v
+        end,
+        releaseVector3f = function() end,
+    }
+    local vehSq = {}
+    local function newCar(id, cx, cy, heading)
+        local W, L = 1.8, 4.6
+        local car = { _class = "BaseVehicle", _x = cx, _y = cy, _h = heading }
+        local ext = { x = function() return W end, z = function() return L end }
+        local com = { x = function() return 0 end, z = function() return 0 end }
+        local script = { getExtents = function() return ext end,
+            getCenterOfMassOffset = function() return com end }
+        function car:getId() return id end
+        function car:getX() return self._x end
+        function car:getY() return self._y end
+        function car:isStopped() return false end
+        function car:getScript() return script end
+        function car:getWorldPos(lx, _, lz, out)
+            local fx, fy = math.cos(self._h), math.sin(self._h)
+            return out:set(self._x + fx * lz - fy * lx, self._y + fy * lz + fx * lx)
+        end
+        return car
+    end
+    -- 車身蓋到的格登記 getVehicleContainer（粗判：格心落在 OBB 外擴半格內）
+    local function place(car)
+        for k, v in pairs(vehSq) do
+            if v == car then W.sq[k]._veh, vehSq[k] = nil, nil end
+        end
+        for gx = math.floor(car._x - 4), math.floor(car._x + 4) do
+            for gy = math.floor(car._y - 3), math.floor(car._y + 3) do
+                local dx, dy = gx + 0.5 - car._x, gy + 0.5 - car._y
+                local fx, fy = math.cos(car._h), math.sin(car._h)
+                if math.abs(dx * fx + dy * fy) <= 2.8 and math.abs(-dx * fy + dy * fx) <= 1.4 then
+                    local sq = squareAt(gx + 0.5, gy + 0.5)
+                    sq._veh = car
+                    function sq:getVehicleContainer() return self._veh end
+                    vehSq[key(gx, gy)] = car
+                end
+            end
+        end
+    end
+    -- 對向車（朝 −X）在右車道外側 l=−2、s=30；同向車（朝 +X）在 l=+2、s=20；靜止車 l=0、s=45
+    local on = newCar(1, X0 + 30, Y0 - 2, math.pi)
+    local lead = newCar(2, X0 + 20, Y0 + 2, 0)
+    local parked = newCar(3, X0 + 45, Y0, 0)
+    place(on); place(lead); place(parked)
+    local st = newSensor(80, 4, 0)
+    checkTrue(runRound(st), "第一輪完成")
+    checkEq(st.trfN, 3, "三台首次看到都先當行進中（還沒有位移可判靜止）")
+    local function entry(sMid)
+        for i = 1, st.trfN do
+            if math.abs((st.trfS0[i] + st.trfS1[i]) * 0.5 - sMid) < 1 then return i end
+        end
+    end
+    local i = entry(30)
+    checkTrue(i ~= nil and st.trfVs[i] == false, "首輪沒有速度（false，不是 0）")
+    if i then
+        checkNear(st.trfS0[i], 30 - 2.3, 1e-6, "對向車 s 區間＝車心 ± 半車長")
+        checkNear(st.trfS1[i], 30 + 2.3, 1e-6, "對向車 s 區間上界")
+        checkNear(st.trfL0[i], -2.9, 1e-6, "對向車 l 區間＝車心 ± 半車寬")
+        checkNear(st.trfL1[i], -1.1, 1e-6, "對向車 l 區間上界")
+    end
+    -- 下一輪：對向車往 −X 走 3m、同向車往 +X 走 2m、停著的不動
+    on._x, lead._x = on._x - 3, lead._x + 2
+    place(on); place(lead)
+    checkTrue(runRound(st), "第二輪完成")
+    checkEq(st.trfN, 2, "靜止車（兩輪位移 <0.3m）改走硬障礙，不再是 trf")
+    local io, il = entry(27), entry(22)
+    checkTrue(io ~= nil and st.trfVs[io] < -5 and st.trfVs[io] > -20,
+        "對向車沿路線速度為負（實得 " .. show(io and st.trfVs[io]) .. "）")
+    checkTrue(io ~= nil and math.abs(st.trfVl[io]) < 1e-6, "對向車沒有橫向速度")
+    checkTrue(il ~= nil and st.trfVs[il] > 3 and st.trfVs[il] < 15,
+        "同向車沿路線速度為正（實得 " .. show(il and st.trfVs[il]) .. "）")
+    checkTrue(st.hardN > 0, "靜止車進入硬障礙點雲")
+    BaseVehicle = nil
+end
+
+-- =====================================================================
 scenarioCorpseAxis()
 scenarioCorpseBands()
 scenarioFullRange()
@@ -571,6 +666,7 @@ scenarioFrameAdaptation()
 scenarioUnloadedFrontier()
 scenarioMidRoundRequest()
 scenarioDistantCorpses()
+scenarioTraffic()
 
 closeScenario()
 print()

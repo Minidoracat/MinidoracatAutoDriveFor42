@@ -1104,7 +1104,8 @@ scenario("configureFollower：行車風格天花板只壓不抬（0906c）")
 do
     local p = P.build(makeVehicle(PICKUP))
     local function follower(style)
-        local f = { n = 5, segSurface = {}, segAccel = {}, segBrake = {}, segCoast = {}, segLat = {} }
+        local f = { n = 5, segSurface = {}, segAccel = {}, segBrake = {}, segCoast = {}, segLat = {},
+            segStopCoast = {} }
         for i = 1, 4 do f.segSurface[i] = MDADFollower.SURFACE_PAVED end
         if style then f.styleLat, f.styleBrake, f.styleCoast = style.lat, style.brake, style.coast end
         return f
@@ -1118,6 +1119,8 @@ do
     checkNear(fc.segLat[1], 2.5, 1e-9, "comfort：aLat 被風格夾到 2.5")
     checkNear(fc.segBrake[1], 3.0, 1e-9, "comfort：aBrake 被風格夾到 3.0")
     checkNear(fc.segCoast[1], 0.45, 1e-9, "comfort：coast 被風格夾到 0.45")
+    checkNear(fc.segStopCoast[1], aCoastPrior, 1e-9,
+        "comfort：終點停車用的 segStopCoast 不套風格，仍是車輛斷油能力（到終點前不提早收油）")
     local fw = follower({ lat = 9.0, brake = 8.0, coast = 3.0 })
     checkTrue(P.configureFollower(fw, p, p.mass, false), "brisk follower 仍 adaptive")
     checkNear(fw.segLat[1], aLatPrior, 1e-9, "brisk 風格（9.0）不抬 priors：仍是 3.5")

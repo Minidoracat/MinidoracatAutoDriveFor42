@@ -40,6 +40,10 @@
 --                      zomIsCorpse[i]：屍體端點 true／殭屍 false；zomOverflow 超過 ZOM_MAX 時軟縫棄權
 --     state.corpseN    走廊內地面屍體數；另以長軸兩端點併入 zomS/zomL，同一次軟避讓
 --     state.movingVeh  走廊內有**行進中**的別台車（跟車情境，不是靜態障礙）
+--     state.trfN       行進中車輛（會車／跟車）筆數，上限 TRF_MAX；逐車一筆：
+--                      trfS0/trfS1 車身弧長區間、trfL0/trfL1 橫向區間（同 hardS／hardL 座標）、
+--                      trfVs/trfVl 沿路線前向／右向速度（m/s；false＝首次看到、還沒有位移可算）、
+--                      trfT 命中當下的時戳（呼叫端依年齡外推）；trfOverflow 超過上限
 --     state.unloaded   走廊內有未載入 chunk（規劃要保守：不是淨空，是不知道）
 --     state.sig        整數簽章：障礙布局有變才會變（呼叫端拿它省掉重複規劃）
 --     state.scanS      本輪掃描起點弧長；state.scanEndS 終點弧長
@@ -443,6 +447,65 @@ local function pushVehicleOutline(state, cv)
     return pushed > 0
 end
 
+-- 行進中車輛（會車／跟車）：每台每輪一筆，記車身 OBB 在目前掃描步局部框的 (s,l) 區間與
+-- 沿路線速度。四角同 pushVehicleOutline（getWorldPos，VehiclePoly.java:52-88）；取不到幾何
+-- 退回「車心 ± 一般轎車半寬 0.9／半長 2.3、與路線同向」的保守框。vs/vl＝nil＝首輪沒位移可算。
+local TRF_MAX = 8
+local TRF_FALLBACK_HALF_W, TRF_FALLBACK_HALF_L = 0.9, 2.3
+local function pushTraffic(state, cv, vs, vl)
+    local n = state.wTrfN
+    if n >= TRF_MAX then
+        state.wTrfOverflow = true
+        return
+    end
+    local cx0, cy0, nx, ny = state.cx, state.cy, state.nx, state.ny
+    local curS = state.curS
+    local s0, s1, l0, l1
+    local okG, halfW, halfL, comX, comZ = pcall(function()
+        local script = cv:getScript()
+        local ext, com = script:getExtents(), script:getCenterOfMassOffset()
+        return ext:x() * 0.5, ext:z() * 0.5, com:x(), com:z()
+    end)
+    local out = okG and type(halfW) == "number" and halfW * 0 == 0 and halfW > 0.3 and halfW <= 3
+        and type(halfL) == "number" and halfL * 0 == 0 and halfL > 0.5 and halfL <= 8
+        and type(comX) == "number" and comX * 0 == 0 and type(comZ) == "number" and comZ * 0 == 0
+        and type(BaseVehicle) == "table" and type(BaseVehicle.allocVector3f) == "function"
+        and BaseVehicle.allocVector3f() or nil
+    if out ~= nil then
+        local ok = pcall(function()
+            for k = 1, 4 do
+                local sx = (k == 1 or k == 4) and -1 or 1
+                local sz = k <= 2 and 1 or -1
+                cv:getWorldPos(comX + sx * halfW, 0, comZ + sz * halfL, out)
+                local dx, dy = out:x() - cx0, out:y() - cy0
+                local s = curS + dx * ny - dy * nx
+                local l = dx * nx + dy * ny
+                if s0 == nil or s < s0 then s0 = s end
+                if s1 == nil or s > s1 then s1 = s end
+                if l0 == nil or l < l0 then l0 = l end
+                if l1 == nil or l > l1 then l1 = l end
+            end
+        end)
+        BaseVehicle.releaseVector3f(out)
+        if not ok or s0 == nil or s0 * 0 ~= 0 or s1 * 0 ~= 0 or l0 * 0 ~= 0 or l1 * 0 ~= 0 then
+            s0 = nil
+        end
+    end
+    if s0 == nil then
+        local dx, dy = cv:getX() - cx0, cv:getY() - cy0
+        local s = curS + dx * ny - dy * nx
+        local l = dx * nx + dy * ny
+        s0, s1 = s - TRF_FALLBACK_HALF_L, s + TRF_FALLBACK_HALF_L
+        l0, l1 = l - TRF_FALLBACK_HALF_W, l + TRF_FALLBACK_HALF_W
+    end
+    n = n + 1
+    state.wTrfN = n
+    state.wTrfS0[n], state.wTrfS1[n] = s0, s1
+    state.wTrfL0[n], state.wTrfL1[n] = l0, l1
+    state.wTrfVs[n], state.wTrfVl[n] = vs or false, vl or false -- false＝未知（陣列不留洞）
+    state.wTrfT[n] = state.nowMs
+end
+
 -- 回 boolean：這一格是不是硬障礙。軟障礙／殭屍／屍體／行進中車輛／未載入 chunk
 -- 直接就地累加到 state 的 working 欄位（回傳只有一個值才不用配置）。
 -- l＝本取樣點的橫向偏移（相對 nav 線）：**減速計數**（殭屍/屍體/軟障礙/跟車）
@@ -550,15 +613,24 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
             still = state.vehStill[vid] == true
         else
             local vwx, vwy = cv:getX(), cv:getY()
+            local vs, vl = nil, nil
             if pg == state.gen - 1 then
                 local pdx = vwx - state.vehPosX[vid]
                 local pdy = vwy - state.vehPosY[vid]
                 still = pdx * pdx + pdy * pdy < 0.09
+                -- 沿路線速度：兩輪首次命中之間的位移／時間，投影到本步前向 (ny,−nx)／右向 (nx,ny)
+                local dt = (state.nowMs - (state.vehPosT[vid] or 0)) / 1000
+                if dt > 0.05 and dt < 2 then
+                    vs = (pdx * state.ny - pdy * state.nx) / dt
+                    vl = (pdx * state.nx + pdy * state.ny) / dt
+                end
             end
             state.vehPosX[vid] = vwx
             state.vehPosY[vid] = vwy
+            state.vehPosT[vid] = state.nowMs
             state.vehPosGen[vid] = state.gen
             state.vehStill[vid] = still
+            if not still and not cv:isStopped() then pushTraffic(state, cv, vs, vl) end
         end
         if still or cv:isStopped() then                -- BaseVehicle.java:4259-4260
             -- 停著的車＝實體障礙，要繞。幾何走精確輪廓（每台每輪一次）；輪廓取不到
@@ -727,6 +799,8 @@ local function beginRound(state, p, sNow, vehicle, now, len, cell)
     state.wMovingVeh = false
     state.wVehAheadS = nil
     state.wVehN = 0
+    state.wTrfN = 0
+    state.wTrfOverflow = false
     state.wUnloaded = false
     state.wUnloadedS = nil
     state.wSumS = 0
@@ -820,6 +894,16 @@ local function finishRound(state, now)
     state.softEndS = state.wSoftEndS
     state.movingVeh = state.wMovingVeh
     state.vehAheadS = state.wVehAheadS
+    -- 行進中車輛：同 hard 的雙緩衝，整組交換參考
+    state.trfS0, state.wTrfS0 = state.wTrfS0, state.trfS0
+    state.trfS1, state.wTrfS1 = state.wTrfS1, state.trfS1
+    state.trfL0, state.wTrfL0 = state.wTrfL0, state.trfL0
+    state.trfL1, state.wTrfL1 = state.wTrfL1, state.trfL1
+    state.trfVs, state.wTrfVs = state.wTrfVs, state.trfVs
+    state.trfVl, state.wTrfVl = state.wTrfVl, state.trfVl
+    state.trfT, state.wTrfT = state.wTrfT, state.trfT
+    state.trfN = state.wTrfN
+    state.trfOverflow = state.wTrfOverflow == true
     state.vehN = state.wVehN
     state.unloaded = state.wUnloaded
     state.unloadedS = state.wUnloadedS
@@ -903,6 +987,9 @@ function MDADSensor.newState()
         wCorpseNearS = nil, wSoftNearS = nil, wSoftEndS = 0,
         wMovingVeh = false,
         wVehAheadS = nil,  -- 最近「行進中」前車弧長（本輪 working）
+        wTrfN = 0, wTrfOverflow = false, -- 行進中車輛（working；每台一筆，見 pushTraffic）
+        wTrfS0 = {}, wTrfS1 = {}, wTrfL0 = {}, wTrfL1 = {}, wTrfVs = {}, wTrfVl = {}, wTrfT = {},
+        nowMs = 0,          -- 本幀時戳（step 寫入；scanCell 算車速用）
         wUnloaded = false,
         wSumS = 0,
         wSumL = 0,
@@ -932,6 +1019,8 @@ function MDADSensor.newState()
         corpseNearS = nil, softNearS = nil, softEndS = 0, softAheadM = nil,
         movingVeh = false,
         vehAheadS = nil,    -- 最近「行進中」前車弧長（跟車分級煞停用；nil＝無）
+        trfN = 0, trfOverflow = false, -- 行進中車輛完成輪快照（會車／跟車；見檔頭介面契約）
+        trfS0 = {}, trfS1 = {}, trfL0 = {}, trfL1 = {}, trfVs = {}, trfVl = {}, trfT = {},
         unloaded = false,
         sig = 0,
         frameMs = 0, frameEwmaMs = 0,
@@ -946,6 +1035,7 @@ function MDADSensor.newState()
         -- 跨輪車輛位置快照（vehicleId 鍵、gen 過期標記——假動判定用；常駐
         -- 不清，鍵數＝見過的車輛數量級，值全為數字）
         vehPosX = {}, vehPosY = {}, vehPosGen = {}, vehStill = {},
+        vehPosT = {},       -- vehicleId → 最後一次首輪命中的時戳（車速＝兩輪位移／時差）
         vehOutlineGen = {}, -- vehicleId → gen：本輪已推過該車輪廓（格級命中只計數不再推點）
         aheadM = SCAN_AHEAD, -- 掃描帶前伸長（高速檔由 driver 拉長：120km/h 需 ~110m 才煞得住）
         scanS = 0,
@@ -998,6 +1088,8 @@ function MDADSensor.reset(state)
     state.wRoundStartedAt = 0
     state.vehN = 0
     state.wVehN = 0
+    state.wTrfN, state.wTrfOverflow = 0, false
+    state.trfN, state.trfOverflow = 0, false
     for k in pairs(state.vehOutlineGen) do state.vehOutlineGen[k] = 0 end
 
     state.hardN = 0
@@ -1063,6 +1155,7 @@ function MDADSensor.step(state, profile, sNow, vehicle, now, cell)
     if type(len) ~= "number" or len <= 0 then return false end
     if profile.n < 2 then return false end
 
+    state.nowMs = now
     if not state.scanning then
         if now < state.nextMs then return false end   -- ① 節流的 O(1) 早退
         beginRound(state, profile, sNow, vehicle, now, len, cell)
