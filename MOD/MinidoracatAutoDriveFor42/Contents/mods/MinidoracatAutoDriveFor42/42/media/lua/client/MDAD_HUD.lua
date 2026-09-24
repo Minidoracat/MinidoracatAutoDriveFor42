@@ -1095,10 +1095,16 @@ end
 -- 側掛（2026-09-02 使用者裁定，設計稿 docs/design/hud-mockup-D1-wings-metal.png）：
 -- 兩片與可見儀表板同高同材質的側翼貼在儀表板左右緣，儀表板上方的路面完全不遮。
 -- 左右各有自己的 chevron、各自存 modData——「只留左翼常駐」是合法組合。
--- 面板是一整片橫跨儀表板的透明元件（中段不畫任何東西）：ISPanel 不吃滑鼠
--- （moveWithMouse=false → onMouseDown 回 isWantMouseEvents()＝false），未命中子元件
--- 的點擊回 FALSE（UIElement.java:1123、1132），UIManager 繼續往下派送
--- （UIManager.java:672-683 只在 consumed 才停），所以原版儀表板的 btn_partSpeed 照樣可點。
+-- 面板是一整片橫跨儀表板的透明元件（中段不畫任何東西）。按下：ISPanel 在
+-- moveWithMouse=false 時回 isWantMouseEvents()＝false，未命中子元件回 FALSE
+-- （UIElement.java:1123、1132）。放開：ISPanel:onMouseUp 回 nil 時 Java 以
+-- consumeMouseEvents（預設 true）吞掉（UIElement.java:1331-1341），而原版鑰匙／車燈等
+-- ISImage 在 onMouseUp 才觸發（ISImage.lua:31-35）——讀檔時人在車上，HUD 會排到儀表板
+-- 上層（onGameStart 重建晚於原版 setVehicle），側掛就蓋死整排圖示。故下方 onMouseUp 回 false。
+function MDADHUDPanel:onMouseUp()
+    return false
+end
+
 function MDADHUDPanel:layoutWings(scale, m)
     local fontH, mediumH, pad, gap, ctrlH = m.fontH, m.mediumH, m.pad, m.gap, m.ctrlH
     local statusW = maximum(m.statusTextW, m.blockedW + gap + m.detourW)
