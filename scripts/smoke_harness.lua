@@ -14213,6 +14213,46 @@ local function scenarioNarrowLaneProof()
             "(z-curve) 彎前右側提案會被夾回殭屍處：改走真正可用的左縫")
         drive.clearCell(cx, -1)
     end
+    -- (yield-proof) 0924a 正式服兩趟：讓位中 Sensor 不跑，proof 停在讓位前那輪；玩家開過證明線尾，
+    --   恢復首幀 currentS > laneCurveEnd → lane-envelope → UnsupportedVehicle 交還。
+    --   違規證明：拿掉讓位恢復處的 Drive.clearLaneProof 即紅。
+    do
+        MDAD.Drive.stop(0, nil)
+        local route = newRoute(40, 0, 0, 4 * math.cos(h), 4 * math.sin(h))
+        route.segSurface, route.segWidth = {}, {}
+        for i = 1, 39 do route.segSurface[i], route.segWidth[i] = "paved", 5 end
+        route.len, route.cost, route.avoidPenalty, route.approachSurface = 156, 156, 0, "unknown"
+        dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = 0, 0, 20, 0, false
+        setHeading(dveh, h)
+        drive.nav.state, drive.nav.route = "ok", route
+        checkTrue(MDAD.Drive.start(dp), "(yield-proof) 啟動")
+        for _ = 1, 2 do driveTick(dp, dveh) end
+        local st = MDAD.Drive.debugSession(0)
+        local lane = MDADFollower.laneBiasAt(st.profile, 1.5, 1)
+        dveh._x = 8 * math.cos(h) - math.sin(h) * lane
+        dveh._y = 8 * math.sin(h) + math.cos(h) * lane
+        driveTick(dp, dveh)
+        drive.scanRound()
+        checkTrue(st.laneCurveStamp == st.sensor.stamp and st.laneCurveEnd > st.lastSNow,
+            "(yield-proof) 讓位前 proof 有效、線尾在車前（end " .. tostring(st.laneCurveEnd) .. "）")
+        local oldHud = MDAD.HUD
+        MDAD.HUD = { manualResumeMs = function() return 2000 end }
+        dveh._steering = 0.02
+        driveTick(dp, dveh)
+        checkEq(st.mode, "yield", "(yield-proof) 轉方向盤＝讓位")
+        local s2 = st.laneCurveEnd + 10 -- 玩家自己開過證明線尾
+        dveh._x = s2 * math.cos(h) - math.sin(h) * lane
+        dveh._y = s2 * math.sin(h) + math.cos(h) * lane
+        driveTick(dp, dveh)
+        dveh._steering = 0
+        driveTick(dp, dveh)
+        nowMs = nowMs + 2001
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        checkTrue(MDAD.Drive.isActive(0), "(yield-proof) 恢復首幀不交還 UnsupportedVehicle")
+        checkTrue(st.stateError ~= "lane-envelope", "(yield-proof) 恢復不記 lane-envelope")
+        MDAD.HUD = oldHud
+    end
     MDAD.Drive.stop(0, nil)
     dveh = oldVeh
     oldVeh._driver, dp._vehicle = dp, oldVeh

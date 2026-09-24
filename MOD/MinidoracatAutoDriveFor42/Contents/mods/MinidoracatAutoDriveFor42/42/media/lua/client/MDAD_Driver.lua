@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0924a"
+Drive.REV = "0924b"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -991,6 +991,15 @@ end
 
 function Drive.controlState(playerNum)
     return controlStateOf(sessions[playerNum])
+end
+
+-- 車道 proof（掃描輪產物）作廢：下一輪完成快照重建前 lane envelope 不參與裁決。
+function Drive.clearLaneProof(s)
+    s.verifyLineN = 0
+    s.laneCurveEnvelope, s.laneCurveStamp,
+        s.laneCurveS0, s.laneCurveEnd,
+        s.envelopeBuildLat, s.envelopeBuildCoast,
+        s.laneEnvelopeScale = 0, -1, 0, 0, -1, -1, 1
 end
 
 function Drive.invalidateCommandState(s, actualSpeedKmh, controlState)
@@ -7047,11 +7056,7 @@ local function stepFollow(s, vehicle, playerNum, now)
                     nb = zombieLaneOf(s, nb, now, playerNum, speedKmh) -- 殭屍軟縫（TUNE.ZOMBIE_LANE_*）
                 end
                 MDADFollower.setLaneBias(s.fstate, nb)
-                s.verifyLineN = 0
-                s.laneCurveEnvelope, s.laneCurveStamp,
-                    s.laneCurveS0, s.laneCurveEnd,
-                    s.envelopeBuildLat, s.envelopeBuildCoast,
-                    s.laneEnvelopeScale = 0, -1, 0, 0, -1, -1, 1
+                Drive.clearLaneProof(s)
                 -- RETURN 活躍時掃描帶錨在「現位置↔目標 lane」的中點，不得跟著 fstate
                 -- 的 laneBias 走（2026-09-02 session-006 定罪：commit 把 laneBias 設成
                 -- 目標 1.5 → 下一輪帶心 +1.5，回線起點 −4 落在帶外 → 守護判 band/
@@ -8915,11 +8920,7 @@ local function onPlayerUpdate(player)
             s.profile, s.vehicleProfile, s.runtimeMass, s.rain)
         s.horizonStamp = -1
         s.horizonMinBrake, s.horizonMinLat, s.horizonMinCoast = 0, 0, 0
-        s.verifyLineN = 0
-        s.laneCurveEnvelope, s.laneCurveStamp,
-            s.laneCurveS0, s.laneCurveEnd,
-            s.envelopeBuildLat, s.envelopeBuildCoast,
-            s.laneEnvelopeScale = 0, -1, 0, 0, -1, -1, 1
+        Drive.clearLaneProof(s)
         if material then
             MDADFollower.capSegmentLimits(
                 s.profile, s.safeAccel, s.safeBrake, s.safeLat, s.safeCoast)
@@ -9067,6 +9068,9 @@ local function onPlayerUpdate(player)
             MDADFollower.resetControl(s.fstate)
         end
         invalidateReturnControl(s)
+        -- 讓位期間 Sensor 不跑，proof 停在讓位前那輪快照；玩家可能已開過證明線尾（0924a
+        -- 正式服兩趟：恢復首幀 currentS > laneCurveEnd → lane-envelope → UnsupportedVehicle）。
+        Drive.clearLaneProof(s)
         Drive.invalidateCommandState(s, vehicle:getCurrentSpeedKmHour(), "TRACK")
         s.progressState = "disarmed"
         s.progressSince = 0
