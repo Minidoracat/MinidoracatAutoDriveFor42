@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0925l"
+Drive.REV = "0925m"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -8302,7 +8302,12 @@ local function stepFollow(s, vehicle, playerNum, now)
         local progressHealthy = s.progressState ~= "suspect"
             and s.progressState ~= "recover"
             and s.progressState ~= "gear-reset"
-        local pathVerified = s.curveVerifiedUntilS >= stopEnd
+        -- 證明線在未載入前緣前一格（OV_STEP）就截斷（buildSnapshotProof loadedEnd），可視帽卻解到前緣
+        -- 等號：可視帽一綁速，stopEnd 恰落在前緣、證明差 1–2m 永遠蓋不到 → nearUnknown → 18 km/h
+        -- （2026-09-25 MAX 檔快車＋拖車 E2E：72m 載入前緣、可視帽 110 時全程 18；玩家回報「沒東西卻
+        -- 一直 18」）。前緣後方本來就由可視帽管，證明只需蓋到前緣前的取樣格。
+        local pathVerified = s.curveVerifiedUntilS
+            + (s.verifyLineReason == "unloaded" and 2 * MDADFollower.OV_STEP or 0) >= stopEnd
         -- 三個 proof bit 用 verifyLineReason 消歧（2026-09-01 三模型對抗審）：
         -- buildSnapshotProof 是 min-of-failures，band 層先截斷會讓 verifySweep
         -- 連坐 false——bit 全交給 gate 會把「證明品質不足」搶成 "sweep" 15。

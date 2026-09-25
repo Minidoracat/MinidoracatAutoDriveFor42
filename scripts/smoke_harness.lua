@@ -12224,12 +12224,33 @@ local function scenarioPhaseE()
         drive.putRoad(45, 45, 0, 0)
         drive.scanRound()
 
+        -- (frontier) 0925m：未載入前緣剛好讓可視帽綁速（帽介於 18 與 40 之間）時，照可視帽開，
+        --   不因證明截在前緣前 1m 而落到近場未知 18。違規證明：拿掉前緣容忍即紅。
+        for fx = 12, 17 do
+            drive.world[fx * 100000 + 0] = nil
+            drive.scanRound()
+            armFullGateFrame()
+            driveTick(dp, hotVeh)
+            local vc = captured.visibilityCap
+            if vc > 22 and vc < 38 then
+                checkTrue(drive.calls.maxRegSpeed > 20 and drive.calls.maxRegSpeed <= math.floor(vc + 0.5) + 1e-9,
+                    "(frontier) 可視帽 " .. string.format("%.1f", vc) .. " 綁速時照帽開，不落到 18（reg "
+                    .. tostring(drive.calls.maxRegSpeed) .. "、gate " .. tostring(captured.gateReason) .. "）")
+                drive.frontierChecked = true
+            end
+            drive.putRoad(fx, fx, 0, 0)
+            drive.scanRound()
+            if drive.frontierChecked then break end
+        end
+        checkTrue(drive.frontierChecked == true, "(frontier) 找到可視帽綁速的前緣位置")
         drive.world[15 * 100000 + 0] = nil
         drive.scanRound()
         armFullGateFrame()
         driveTick(dp, hotVeh)
-        checkFalse(captured.fullGate,
-            "unloaded cell inside stopping horizon keeps gate closed")
+        -- 0925m：可視帽已按未載入前緣限速，證明蓋到前緣前一格即算驗證（舊制差 1m 永遠蓋不到
+        -- → 近場未知 18）。速度仍由可視帽綁住，不因 gate 開而超過前緣煞停距離。
+        checkTrue(drive.calls.maxRegSpeed <= math.floor(captured.visibilityCap + 0.5) + 1e-9,
+            "unloaded cell inside stopping horizon: regulator stays under the frontier visibility cap")
         checkTrue(drive.calls.maxRegSpeed < 40,
             "near unloaded cell applies a real visibility cap")
         -- 巡航與緊急紅線共用真實可視前緣，但不能共用速度值：先收油，再在真停距不足時硬煞。
