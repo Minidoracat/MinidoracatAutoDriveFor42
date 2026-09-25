@@ -60,6 +60,8 @@
     "UI_MinidoracatAutoDrive_HUDScale125": "Large (1.25x)",
     "UI_MinidoracatAutoDrive_HUDStatusReady": "Ready to engage",
     "UI_MinidoracatAutoDrive_HUDStatusFollow": "Autodrive active",
+    "UI_MinidoracatAutoDrive_HUDStatusLowFps": "Low FPS: slower",
+    "UI_MinidoracatAutoDrive_LowFpsNotice": "Low frame rate has cut look-ahead to %1 m, so auto-drive is slowing down to stay safe. Lower “Base sensing distance” in the options or reduce graphics settings.",
     "UI_MinidoracatAutoDrive_HUDStatusBuild": "Preparing route",
     "UI_MinidoracatAutoDrive_HUDStatusDodging": "Avoiding obstacle",
     "UI_MinidoracatAutoDrive_HUDStatusBlocked": "Braking and waiting",

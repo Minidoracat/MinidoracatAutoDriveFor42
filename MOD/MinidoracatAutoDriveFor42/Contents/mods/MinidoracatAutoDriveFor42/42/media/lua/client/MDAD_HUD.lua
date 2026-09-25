@@ -111,6 +111,7 @@ local STATUS_KEYS = {
     blocked = "UI_MinidoracatAutoDrive_HUDStatusBlocked",
     dodging = "UI_MinidoracatAutoDrive_HUDStatusDodging",
     build = "UI_MinidoracatAutoDrive_HUDStatusBuild",
+    lowfps = "UI_MinidoracatAutoDrive_HUDStatusLowFps",
     follow = "UI_MinidoracatAutoDrive_HUDStatusFollow",
 }
 
@@ -155,6 +156,7 @@ local STATUS_WIDTH_KEYS = {
     "UI_MinidoracatAutoDrive_HUDStatusDodging",
     "UI_MinidoracatAutoDrive_HUDStatusBuild",
     "UI_MinidoracatAutoDrive_HUDStatusFollow",
+    "UI_MinidoracatAutoDrive_HUDStatusLowFps",
     "UI_MinidoracatAutoDrive_HUDStatusReady",
     "UI_MinidoracatAutoDrive_HUDStatusEngineOff",
     "UI_MinidoracatAutoDrive_HUDStatusNoRoute",
@@ -628,7 +630,7 @@ local function statusColor(token, reason)
     if reason then return C.red end
     if token == nil then return C.blue end
     if token == "blocked" then return C.red end
-    if token == "dodging" or token == "unstick" then return C.amber end
+    if token == "dodging" or token == "unstick" or token == "lowfps" then return C.amber end
     if token == "yield" or token == "build" then return C.blue end
     return C.green
 end

@@ -60,6 +60,8 @@
     "UI_MinidoracatAutoDrive_HUDScale125": "大（1.25 倍）",
     "UI_MinidoracatAutoDrive_HUDStatusReady": "可以啟動",
     "UI_MinidoracatAutoDrive_HUDStatusFollow": "自動駕駛中",
+    "UI_MinidoracatAutoDrive_HUDStatusLowFps": "卡頓降速",
+    "UI_MinidoracatAutoDrive_LowFpsNotice": "畫面卡頓使前方感知距離縮短到 %1 公尺，自駕會放慢以保持安全。可在選項調低「基礎感知距離」或降低畫質。",
     "UI_MinidoracatAutoDrive_HUDStatusBuild": "準備路線",
     "UI_MinidoracatAutoDrive_HUDStatusDodging": "正在繞行",
     "UI_MinidoracatAutoDrive_HUDStatusBlocked": "煞停等待",

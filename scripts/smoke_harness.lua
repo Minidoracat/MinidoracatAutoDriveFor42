@@ -7619,6 +7619,59 @@ function drive.scenarioZombiePlan()
 end
 drive.scenarioZombiePlan()
 
+-- ⑤lf 低幀率降速提示（0925）：可視上限壓速、平均幀時 ≥30ms，且視距是被幀率截短，
+--   持續 2s 才讓 HUD 狀態變「卡頓降速」（lowfps）、恢復 3s 才消失；同趟累計 10s 跳一次通知。
+--   反例：幀率低但速度沒被可視上限壓（沙盒上限 20）不顯示。違規證明：ON 遲滯歸零＝首輪即顯示紅；
+--   拿掉「只通知一次」＝通知次數 >1 紅。
+function drive.scenarioLowFpsNotice()
+    scenario("低幀率降速：HUD 狀態遲滯顯示、每趟只通知一次、沒被壓速不顯示")
+    local function count(key)
+        local n = 0
+        for _, h in ipairs(halos) do if noteReason(h.text) == key then n = n + 1 end end
+        return n
+    end
+    local function run(maxKmh)
+        setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
+            AutoDriveMaxSpeed = maxKmh, RightLaneBias = 0 })
+        drive.fillWorld(-10, 170, -9, 9)
+        assert(armDrive())
+        setHeading(dveh, 0)
+        MDAD.Drive.setGear(0, 4)
+        dveh._speed = maxKmh
+        return MDAD.Drive.debugSession(0)
+    end
+    local s = run(120)
+    local was = drive.frameMs(80)
+    drive.scanRound()
+    drive.frameMs(80)
+    local firstKey = MDAD.Drive.hudState(0)
+    for _ = 1, 8 do drive.scanRound(); drive.frameMs(80) end
+    local onKey = MDAD.Drive.hudState(0)
+    checkTrue(firstKey ~= "lowfps" and onKey == "lowfps",
+        "(lf) 可視上限被幀率壓住：遲滯後 HUD 顯示 lowfps（首輪 " .. tostring(firstKey) .. "、之後 " .. tostring(onKey) .. "）")
+    for _ = 1, 40 do drive.scanRound(); drive.frameMs(80) end
+    checkEq(count("UI_MinidoracatAutoDrive_LowFpsNotice"), 1, "(lf) 同一趟累計超過 10 秒只通知一次")
+    drive.frameMs(10)
+    for _ = 1, 16 do drive.scanRound(); drive.frameMs(10) end
+    checkTrue(MDAD.Drive.hudState(0) ~= "lowfps", "(lf) 幀率恢復後狀態消失")
+    -- 門檻 predicate 級：同樣視距被幀率截短、可視上限在壓速，40 FPS（25ms）不算、25 FPS（40ms）算
+    for _, c in ipairs({ { 25, false }, { 40, true } }) do
+        local fake = { mode = "follow", playerNum = 0, lastSNow = 0, sensor = {
+            affordableAheadM = 62, requestedAheadM = 240, effectiveAheadM = 62, frameEwmaMs = c[1] } }
+        for t = 0, 3000, 100 do MDAD.Drive.updateLowFps(fake, 1000 + t, true) end
+        checkEq(fake.lowFps == true, c[2], "(lf) 幀時 " .. c[1] .. "ms 可視上限壓速 3 秒：低幀率＝" .. tostring(c[2]))
+    end
+    s = run(20)
+    for _ = 1, 12 do drive.scanRound(); drive.frameMs(80) end
+    checkTrue(MDAD.Drive.hudState(0) ~= "lowfps" and not s.lowFps,
+        "(lf) 幀率低但沒被可視上限壓速（上限 20）：不顯示")
+    drive.frameMs(was)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    MDAD.Drive.setGear(0, 3)
+    assert(armDrive())
+end
+drive.scenarioLowFpsNotice()
+
 function drive.scenarioAvoidSlowPrefs()
     local world, geo, sandbox, avoid = drive.world, drive.vehGeo, SandboxVars, MDAD.HUD.zombieDodge
     local oldZ, oldC = MDAD.Drive.getSlowPref(0, "zombie"), MDAD.Drive.getSlowPref(0, "corpse")
@@ -12863,10 +12916,11 @@ local function scenarioPhaseE()
             and captured.fstate.ovY == captured.returnY,
         "Follower and long-vehicle OBB sweep share the identical preallocated arrays")
     local exactSpan = (captured.fstate.ovN - 1) * MDADFollower.OV_STEP
-    local requiredTail = 18 * captured.profile.lookScale
+    -- 0925：線尾＝回線上限速度下的前視＋車身（舊制固定最高速前視 18m，低幀率看不到那麼遠）
+    local requiredTail = MDADFollower.lookaheadM(MDAD.Drive.debugTune().RETURN_CAP, captured.profile.lookScale)
         + captured.vehicleProfile.halfL
     checkTrue(exactSpan >= captured.returnEndS - captured.returnStartS + requiredTail,
-        "RETURN exact line retains max-lookahead plus body tail")
+        "RETURN exact line retains RETURN-speed lookahead plus body tail")
     local nominalHalfL = captured.vehicleProfile.halfL
     captured.vehicleProfile.halfL = 20
     drive.scanRound(true)
@@ -12987,15 +13041,15 @@ local function scenarioPhaseE()
         "fresh midpoint band sees the old-band-exterior obstacle")
     drive.clearCell(5, 7)
     drive.scanRound(true)
-    checkTrue(captured.returnUnsafe and not captured.returnHold,
-        "fresh midpoint band can authorize current-lane crawl after obstacle clears")
-    checkTrue(captured.returnCrawlExact and captured.fstate.exactLine,
-        "delta7 crawl follows its guarded exact parallel line")
+    -- 0925：線尾縮到回線速度所需後，同一個 fresh midpoint band 已容得下整條斜線——
+    -- 直接承諾完整回線（舊制只容得下當前 lane 的爬行線）。
+    checkTrue(not captured.returnHold and captured.fstate.exactLine,
+        "fresh midpoint band authorizes the exact RETURN line after obstacle clears")
     driveReset(hotVeh)
     driveTick(dp, hotVeh)
     checkTrue(drive.calls.maxRegSpeed > 0
-            and drive.calls.maxRegSpeed <= TUNE_RETURN_UNSAFE_CAP_TEST,
-        "delta7 streaming crawl ramps smoothly within the unsafe-return crawl cap")
+            and drive.calls.maxRegSpeed <= MDAD.Drive.debugTune().RETURN_CAP,
+        "delta7 RETURN line stays within the RETURN cap")
     -- 0909b：sensor.aheadM 每輪由 Drive.updatePerception 依玩家感知距離重寫，fixture
     -- 直接寫 80 已經無效。要讓整條斜線落進掃描帶就明確把幀時降到 10ms
     -- （有效視距＝請求值 120m），兩輪之後還原。
@@ -13011,6 +13065,48 @@ local function scenarioPhaseE()
         "full exact line is stable on the following round（無 commit↔hold 震盪）")
     drive.frameMs(drive.savedFrameMs)
     MDAD.Drive.stop(0, nil)
+    -- (lowfps-return) 0925：低幀率（幀時 50ms＝有效視距約 32m）線外 4m 起步。舊制 RETURN 線尾
+    --   固定最高速前視 18m，整條要看到 ~36m＝永遠 unloaded、整趟 14 km/h 爬行（E2E e-road）；
+    --   線尾改回線速度所需後幾輪內就承諾完整回線。違規證明：線尾改回 18×lookScale 即紅。
+    --   (lowfps-release) 視距再短（幀時 80ms＝24m 地板）連新線尾也放不下：unloaded 爬行
+    --   RETURN_UNLOADED_MS 後交還一般追線。違規證明：期限拉到 10 分鐘即紅。
+    for _, c in ipairs({ { 50, "commit" }, { 80, "release" } }) do
+        drive.nav.route = v4Route("paved", 10)
+        hotVeh._x, hotVeh._y, hotVeh._speed = 0, 4, 14
+        drive.fillWorld(-10, 170, -20, 20)
+        drive.putRoad(-10, 170, -20, 20)
+        driveReset(hotVeh)
+        checkTrue(MDAD.Drive.start(dp), "low-fps RETURN fixture starts (" .. c[2] .. ")")
+        local lfWas = drive.frameMs(c[1])
+        for _ = 1, 4 do driveTick(dp, hotVeh) end
+        local committed, released, sawUnloaded = false, false, false
+        for _ = 1, 24 do
+            drive.scanRound(true)
+            drive.frameMs(c[1])
+            if captured.lastHoldReason == "unloaded" then sawUnloaded = true end
+            if captured.returnActive and captured.fstate.exactLine
+                    and not captured.returnCrawlExact and not captured.returnHold then
+                committed = true
+            end
+            if sawUnloaded and not captured.returnActive and captured.planMode == "return-stall" then
+                released = true
+                break
+            end
+            if c[2] == "commit" and committed then break end
+        end
+        if c[2] == "commit" then
+            checkTrue(committed and captured.sensor.effectiveAheadM < 36,
+                "(lowfps-return) 視距 " .. string.format("%.1f", captured.sensor.effectiveAheadM)
+                .. "m 仍承諾完整回線，不整趟 unloaded 爬行")
+        else
+            checkTrue(sawUnloaded and released,
+                "(lowfps-release) 視距 " .. string.format("%.1f", captured.sensor.effectiveAheadM)
+                .. "m 放不下回線：unloaded 爬行到期交還一般追線（unloaded "
+                .. tostring(sawUnloaded) .. "、released " .. tostring(released) .. "）")
+        end
+        drive.frameMs(lfWas)
+        MDAD.Drive.stop(0, nil)
+    end
     setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
         AutoDriveMaxSpeed = 40, ObstaclePolicy = 1, RightLaneBias = 0 })
     local longRoute = newRoute(400, 0, 0, 4, 0)

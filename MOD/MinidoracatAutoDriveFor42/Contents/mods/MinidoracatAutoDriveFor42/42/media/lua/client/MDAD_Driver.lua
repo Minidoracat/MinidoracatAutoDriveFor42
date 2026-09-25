@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0925i"
+Drive.REV = "0925j"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -331,6 +331,11 @@ TUNE.RETURN_ENTER_MAX_RAD = 30 * math.pi / 180
 -- 前進；釋放後冷卻期內不重入，避免「進→hold→釋放→又進」原地循環。
 TUNE.RETURN_STALL_MS = 2000
 TUNE.RETURN_STALL_BLOCK_MS = 6000
+TUNE.RETURN_UNLOADED_MS = 4000 -- 回線視距不足（unloaded）持續爬行這麼久就交還一般追線
+TUNE.LOWFPS_FRAME_MS = 30      -- 平均幀時超過這個（約 33 FPS 以下）才算「低幀率」；60 FPS 的視距縮短不提示
+TUNE.LOWFPS_ON_MS = 2000       -- 低幀率降速狀態：持續這麼久才顯示
+TUNE.LOWFPS_OFF_MS = 3000      -- 恢復這麼久才消失
+TUNE.LOWFPS_NOTICE_MS = 10000  -- 同一趟累計這麼久才跳一次通知
 -- 未圓角的原始折點（fallback 角）±此距內不進 RETURN（2026-09-02 s046 Bank Road→
 -- Garnettsville T 字左轉：窄路 band 1.2m 放不下 rMin 圓角，pure pursuit 本來就要切
 -- 過折點，「對折線的橫向偏差」在折點兩側是幾何必然，不是甩出；舊制在彎中進
@@ -1249,7 +1254,7 @@ end
 -- HUD 唯讀狀態（M5.5b 面板的資料面）。回**多值純量**、不洩漏 session table
 -- （session 是可變內部狀態，交出參考＝UI 能繞過所有入口改駕駛行為）：
 --   statusKey, gearId, effectiveCapKmh, zombieSlowOn, corpseSlowOn, resumeIn, elapsedSeconds, arrivalReason
--- statusKey ∈ arrive/yield/unstick/blocked/dodging/build/follow；nil＝無 session 且無準備意圖。
+-- statusKey ∈ arrive/yield/unstick/blocked/dodging/build/lowfps/follow；nil＝無 session 且無準備意圖。
 -- arrivalReason 是到站回報拒絕原因的翻譯鍵，沒有拒絕原因則為 nil。
 -- 顯示優先序：arrive > yield > recovery（unstick/recover/settle）>
 -- current/planned blocked > dodging > build > follow。
@@ -1279,6 +1284,7 @@ function Drive.hudState(playerNum)
     elseif s.currentBlocked or s.blocked then key = "blocked"
     elseif s.dodging then key = "dodging"
     elseif s.mode == "build" then key = "build"
+    elseif s.lowFps then key = "lowfps" -- 幀率壓低可視距離而降速（Drive.updateLowFps）
     else key = "follow" end
     local cap = s.maxSpeed
     if s.gearCap and s.gearCap > 0 and s.gearCap < cap then cap = s.gearCap end
@@ -1771,6 +1777,7 @@ local function startSession(playerObj, playerNum, stage)
         returnLaneStart = 0, returnLaneTarget = 0,
         returnReason = nil, returnClearRounds = 0,
         returnHoldSince = 0,   -- hold 起算（sensor 快照時戳；0＝未在 hold）
+        returnUnloadedSince = 0, -- 因 unloaded hold／爬行起算（0＝否）
         returnBlockUntil = 0,  -- stall 釋放後的 RETURN 重入冷卻截止
         returnX = {}, returnY = {},
         clearStreak = 0,    -- 連續 clear 輪數（堵住解除遲滯）
@@ -3240,6 +3247,39 @@ function Drive.trafficNotice(s, key)
     s.trafficNoticeKey = key
     local playerObj = getSpecificPlayer(s.playerNum)
     if playerObj then haloGood(playerObj, key) end
+end
+
+-- 低幀率降速提示：可視上限正在壓速、平均幀時超過 LOWFPS_FRAME_MS，而且視距真的是被幀率截短
+-- （可負擔 < 請求；不是地圖未載入或路線到頭）。遲滯 ON 2s／OFF 3s 才切 s.lowFps（HUD 狀態「卡頓降速」）；
+-- 同一趟累計 NOTICE_MS 後跳一次右上角通知。切換各記一筆 lowfps 事件。
+function Drive.updateLowFps(s, now, bound)
+    local sen = type(s.sensor) == "table" and s.sensor or nil -- sensor 缺席時 session 存 false
+    -- 只算正常行駛（停等／脫困時可視帽綁住與幀率無關）
+    local raw = bound and s.mode == "follow" and not s.blocked and not s.currentBlocked
+        and sen ~= nil and finite(sen.affordableAheadM) and finite(sen.requestedAheadM)
+        and finite(sen.effectiveAheadM) and finite(sen.frameEwmaMs)
+        and sen.frameEwmaMs >= TUNE.LOWFPS_FRAME_MS
+        and sen.affordableAheadM < sen.requestedAheadM - 1
+        and sen.effectiveAheadM >= sen.affordableAheadM - 1
+    raw = raw == true
+    if raw ~= s.lowFpsRaw then s.lowFpsRaw, s.lowFpsSince = raw, now end
+    local tick = s.lowFpsTick or now
+    s.lowFpsTick = now
+    if (s.lowFps == true) ~= raw
+            and now - (s.lowFpsSince or now) >= (raw and TUNE.LOWFPS_ON_MS or TUNE.LOWFPS_OFF_MS) then
+        s.lowFps = raw
+        diagEvent(s, s.playerNum, "lowfps", { phase = raw and "on" or "off",
+            d = sen and sen.effectiveAheadM, s = s.lastSNow })
+    end
+    if not s.lowFps then return end
+    s.lowFpsMs = (s.lowFpsMs or 0) + now - tick
+    if s.lowFpsNoticed or s.lowFpsMs < TUNE.LOWFPS_NOTICE_MS then return end
+    s.lowFpsNoticed = true
+    local playerObj = getSpecificPlayer(s.playerNum)
+    if not playerObj then return end
+    local text = getText("UI_MinidoracatAutoDrive_LowFpsNotice", string.format("%d", math.floor(sen.effectiveAheadM)))
+    HaloTextHelper.addGoodText(playerObj, text)
+    if MDADDiagnostics and MDADDiagnostics.toast then MDADDiagnostics.toast(text, "good") end
 end
 
 -- 為對向車側移：以速率上限平滑追 trfOnWant；對方離開掃描帶後保持到 trafficHoldUntil
@@ -4833,23 +4873,35 @@ local function updateReturnSnapshot(s, vehicle, playerNum, latSigned)
     -- 推一下車讓框脫離圍籬才動）。hold 只是「這條回線現在走不了」，不是「不准動」：
     -- 靜止超過 RETURN_STALL_MS 就把 RETURN 交還 pure pursuit（laneBias＝target，
     -- 一般 contact／sweep／dodge／可視體系照管），冷卻期內不重入。
+    -- 未載入爬行期限：回線因視距不足（unloaded）一直 hold／crawl-exact 爬行，也在
+    -- RETURN_UNLOADED_MS 後交還（同 stall 語意；0925 e-road 整趟 14 km/h）。
+    if s.lastHoldReason == "unloaded" and (s.returnHold or s.returnCrawlExact) then
+        if s.returnUnloadedSince == 0 then s.returnUnloadedSince = sen.stamp end
+    else
+        s.returnUnloadedSince = 0
+    end
+    local stalled = false
     if s.returnHold then
         if s.returnHoldSince == 0 then s.returnHoldSince = sen.stamp end
         local sp = vehicle:getCurrentSpeedKmHour()
-        if finite(sp) and sp > -1 and sp < 1
-                and sen.stamp - s.returnHoldSince >= TUNE.RETURN_STALL_MS then
-            endReturn(s)
-            s.returnBlockUntil = sen.stamp + TUNE.RETURN_STALL_BLOCK_MS
-            MDADFollower.clearOffset(s.fstate)
-            MDADFollower.setLaneBias(s.fstate, s.returnLaneTarget)
-            s.sensor.scanBias = s.returnLaneTarget
-            s.planMode = "return-stall"
-            diagEvent(s, playerNum, "return", { phase = "release", why = "stall",
-                l = latSigned, s = s.lastSNow })
-            return
-        end
+        stalled = finite(sp) and sp > -1 and sp < 1
+            and sen.stamp - s.returnHoldSince >= TUNE.RETURN_STALL_MS
     else
         s.returnHoldSince = 0
+    end
+    local unloadedLong = s.returnUnloadedSince > 0
+        and sen.stamp - s.returnUnloadedSince >= TUNE.RETURN_UNLOADED_MS
+    if stalled or unloadedLong then
+        endReturn(s)
+        s.returnUnloadedSince = 0
+        s.returnBlockUntil = sen.stamp + TUNE.RETURN_STALL_BLOCK_MS
+        MDADFollower.clearOffset(s.fstate)
+        MDADFollower.setLaneBias(s.fstate, s.returnLaneTarget)
+        s.sensor.scanBias = s.returnLaneTarget
+        s.planMode = "return-stall"
+        diagEvent(s, playerNum, "return", { phase = "release", why = stalled and "stall" or "unloaded",
+            l = latSigned, s = s.lastSNow })
+        return
     end
     local returnPad = s.sweepBase - s.vehicleProfile.halfW
     if returnPad < SWEEP_PHYS_PAD then returnPad = SWEEP_PHYS_PAD end
@@ -4925,7 +4977,11 @@ local function updateReturnSnapshot(s, vehicle, playerNum, latSigned)
     if not finite(lookScale) or lookScale <= 0 then lookScale = 1 end
     local pad = returnPad
     s.sensor.scanBias = returnScanBias(s, laneStart)
-    local tail = 18 * lookScale + s.vehicleProfile.halfL + pad
+    -- 線尾＝回線上限速度（RETURN_CAP）下的純追跡前視＋車身，或同速的煞停距離，取大者。
+    -- 舊制固定 18m 前視（最高速的值）：整條要看到 40–50m，低幀率可負擔視距只有 25–35m →
+    -- 永遠 unloaded、整趟 14 km/h 爬行（0925 E2E e-road，fe 45–65ms）。
+    local tail = math.max(MDADFollower.lookaheadM(TUNE.RETURN_CAP, lookScale) + s.vehicleProfile.halfL,
+        MDADDynamics.stoppingDistance(TUNE.RETURN_CAP / 3.6, 0.5, s.safeBrake, s.vehicleProfile.halfL)) + pad
     local coverageEnd = s1 + tail
     local tailSteps = (coverageEnd - s0) / MDADFollower.OV_STEP
     local wholeTail = tailSteps - tailSteps % 1
@@ -8200,6 +8256,7 @@ local function stepFollow(s, vehicle, playerNum, now)
         if not finite(s.visibilityHardKmh) or s.visibilityHardKmh < visibilityCap then
             s.visibilityHardKmh = visibilityCap
         end
+        Drive.updateLowFps(s, now, targetSpeed > visibilityCap + 0.5)
         if targetSpeed > visibilityCap then
             targetSpeed, s.lastCapReason = visibilityCap, "visibility"
         end

@@ -383,6 +383,16 @@ end
 -- 否則 keep 會把停留線從 room 邊再往內拉 0.6，(kerb) 那道縫就被自己吃掉。
 local LANE_BIAS_KEEP = 0.6
 MDADFollower.LANE_BIAS_KEEP = LANE_BIAS_KEEP
+
+-- 純追跡前視距（公尺）：control 與 Driver 的 RETURN 線尾長度共用同一條式子。
+function MDADFollower.lookaheadM(speedKmh, lookScale)
+    if speedKmh < 0 then speedKmh = -speedKmh end
+    local look = (LOOKAHEAD_BASE + speedKmh * LOOKAHEAD_PER_KMH) * lookScale
+    if look < LOOKAHEAD_MIN * lookScale then look = LOOKAHEAD_MIN * lookScale end
+    if look > LOOKAHEAD_MAX * lookScale then look = LOOKAHEAD_MAX * lookScale end
+    return look
+end
+
 local function clampLaneRaw(p, j, lane, keep)
     local roomR = p.laneRoomR
     local r = roomR[j] - keep
@@ -1006,10 +1016,7 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
     if aspeed < 0 then aspeed = -aspeed end
     local lookScale = profile.lookScale
     if not isFinite(lookScale) or lookScale <= 0 then lookScale = 1 end
-    local look = (LOOKAHEAD_BASE + aspeed * LOOKAHEAD_PER_KMH) * lookScale
-    local lookMin, lookMax = LOOKAHEAD_MIN * lookScale, LOOKAHEAD_MAX * lookScale
-    if look < lookMin then look = lookMin end
-    if look > lookMax then look = lookMax end
+    local look = MDADFollower.lookaheadM(aspeed, lookScale)
     -- 急彎前視收縮（2026-09-02 s017 定罪切內、s021 定罪震盪的平衡點）：
     -- pure pursuit 轉向增益 ∝ 1/前視²——縮到 3m 治了切內（latDev max 2.86）
     -- 但增益放大近 7 倍→過彎蛇行（err 翻轉 0.6 次/s、43 次）。改縮到
