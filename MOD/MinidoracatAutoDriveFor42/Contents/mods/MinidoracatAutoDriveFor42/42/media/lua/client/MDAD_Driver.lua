@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0925m"
+Drive.REV = "0925n"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -1249,6 +1249,16 @@ function Drive.slowdownInfo(playerNum)
     if type(sensorAhead) == "number" and sensorAhead > 0 then ahead = sensorAhead end
     return nearM, ahead, bandM,
         TUNE.ZOMBIE_CAP_1, TUNE.ZOMBIE_CAP_4, TUNE.ZOMBIE_CAP_8, TUNE.CORPSE_CAP
+end
+
+-- HUD 降速說明（巡航上限／降速狀態的滑鼠提示）：只回純量，250ms refresh 讀。
+-- 回 vehicleMax, sandboxMax, gearCap, target, capReason, curveCap, visibilityCap；無 session 回 nil。
+function Drive.speedInfo(playerNum)
+    local s = sessions[playerNum]
+    if not s then return nil end
+    local vmax = s.vehicle and s.vehicle.getMaxSpeed and s.vehicle:getMaxSpeed() or nil
+    local gear = s.gearCap and s.gearCap > 0 and s.gearCap or nil
+    return vmax, s.maxSpeed, gear, s.desiredTarget, s.lastCapReason, s.curveCap, s.visibilityCap
 end
 
 -- HUD 唯讀狀態（M5.5b 面板的資料面）。回**多值純量**、不洩漏 session table
