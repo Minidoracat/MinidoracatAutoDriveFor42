@@ -1943,6 +1943,10 @@ function MDADHUDPanel:refresh(now)
     self._forceRefresh = false
     local playerObj = getSpecificPlayer(self.playerNum)
     local vehicle = visibleVehicle(playerObj)
+    -- 沒有自駕 session（停止／手動接手後）但仍在導航：地面照畫導航路線（MDADOverlay.updatePassive）
+    local passive = type(MDADOverlay) == "table" and type(MDADOverlay.updatePassive) == "function"
+        and not Drive.isActive(self.playerNum)
+    if passive then MDADOverlay.updatePassive(self.playerNum, playerObj, vehicle) end
     if not vehicle then
         self.vehicle = nil
         self:setHudVisible(false)

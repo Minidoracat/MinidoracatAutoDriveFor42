@@ -9167,6 +9167,47 @@ function getWorldMarkers()
 end
 require "MDAD_Overlay"
 checkEq(type(MDADOverlay), "table", "production client/MDAD_Overlay.lua 真的載入了")
+-- (passive) 停止／手動接手後仍在導航：沿導航路線畫前方 52m（HUD 250ms 呼叫 updatePassive）。
+--   路線 (0,0)→(30,0)→(30,40)，車在 (10,3)：線從投影點 (10,0) 起、過折點、止於 (30,32)。
+--   不在駕駛座／關閉軌跡／沒目標＝不畫。違規證明：拿掉投影（從 pts[1] 起）或長度截斷即紅。
+function drive.scenarioPassiveTrail()
+    local savedApi = MinidoracatMiniMapAPI
+    local target = true
+    MinidoracatMiniMapAPI = {
+        getNavTarget = function() if target then return 30, 40 end end,
+        requestRoute = function() return { pts = { 0, 0, 30, 0, 30, 40 } }, "ok" end,
+    }
+    local driver = true
+    local car = { getX = function() return 10 end, getY = function() return 3 end,
+        getZ = function() return 0 end, isDriver = function() return driver end }
+    local function lines()
+        clearList(drive.worldLines)
+        drive.renderPlayerNum = 0
+        fire("OnPostRender")
+        return drive.worldLines
+    end
+    MDADOverlay.updatePassive(0, {}, car)
+    local ls = lines()
+    local len, joined = 0, true
+    for i = 1, #ls do
+        len = len + math.sqrt((ls[i].x2 - ls[i].x) ^ 2 + (ls[i].y2 - ls[i].y) ^ 2)
+        if i > 1 and (ls[i].x ~= ls[i - 1].x2 or ls[i].y ~= ls[i - 1].y2) then joined = false end
+    end
+    checkTrue(#ls == 2 and ls[1].x == 10 and ls[1].y == 0 and ls[1].x2 == 30 and ls[1].y2 == 0
+            and math.abs(ls[2].y2 - 32) < 1e-9 and joined and math.abs(len - 52) < 1e-9,
+        "(passive) 導航線從車的投影點起、沿路過折點、長 52m（段數 " .. #ls .. "、長 " .. len .. "）")
+    driver = false
+    MDADOverlay.updatePassive(0, {}, car)
+    checkEq(#lines(), 0, "(passive) 不在駕駛座不畫")
+    driver, drive.trajectoryVisible = true, false
+    MDADOverlay.updatePassive(0, {}, car)
+    checkEq(#lines(), 0, "(passive) 關閉軌跡顯示不畫")
+    drive.trajectoryVisible, target = true, false
+    MDADOverlay.updatePassive(0, {}, car)
+    checkEq(#lines(), 0, "(passive) 沒有導航目標不畫")
+    MinidoracatMiniMapAPI = savedApi
+end
+drive.scenarioPassiveTrail()
 checkEq(#(eventHandlers.OnPostRender or {}), drive.overlayRenderBefore + 1,
     "Overlay 只註冊一個 OnPostRender 世界線 renderer")
 checkTrue(type(MDADFollower.OV_STEP) == "number" and MDADFollower.OV_STEP > 0,

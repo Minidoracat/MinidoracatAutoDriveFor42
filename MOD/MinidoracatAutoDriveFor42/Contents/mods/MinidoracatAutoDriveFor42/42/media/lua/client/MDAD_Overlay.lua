@@ -1,6 +1,7 @@
 -- MDAD_Overlay.lua — 自駕世界軌跡＋debug 感知標記。
 --
--- 一般玩家：自駕 session 活著時，以半透明連續世界線畫未來 52m 實走軌跡；
+-- 一般玩家：自駕 session 活著時，以半透明連續世界線畫未來 52m 實走軌跡；session 結束
+-- 但仍在導航（停止／手動接手後）改畫導航路線前方 52m（updatePassive）；
 -- 藍＝正常 follower 線，黃＝已 commit 的 dodge 進入／保持／收回線。停止、
 -- 失效或換 route 立即清快取；沒有 session 就不提交任何 renderIsoLine。
 --
@@ -238,6 +239,60 @@ local function trajectoryOptions()
     end
     if type(width) ~= "number" or width ~= width or width < 1 or width > 3 then width = 2 end
     return visible, width - width % 1
+end
+
+-- 沒有自駕 session 時（按下停止／手動接手之後）：仍在導航就沿導航路線畫同一條藍線，
+-- 讓玩家照著自己開。由 HUD 250ms refresh 呼叫（Driver 的 OnPlayerUpdate 在無 session 時
+-- 必須零成本）；route 取主 MOD requestRoute 的共用快取（小地圖同一條），車位投影到折線、
+-- 往前 TRAIL_AHEAD。不在駕駛座、沒目標、沒路線或關閉軌跡顯示＝清空。
+function MDADOverlay.updatePassive(playerNum, player, vehicle)
+    local slot = slotOf(playerNum)
+    if not slot then return end
+    trailN[slot] = 0
+    local api = MinidoracatMiniMapAPI
+    if vehicle == nil or player == nil or not vehicle:isDriver(player) or type(api) ~= "table"
+            or type(api.getNavTarget) ~= "function" or type(api.requestRoute) ~= "function" then return end
+    local showTrajectory, width = trajectoryOptions()
+    if not showTrajectory then return end
+    local tx, ty = api.getNavTarget(playerNum)
+    if not tx then return end
+    local ok, route, state = pcall(api.requestRoute, playerNum, tx, ty)
+    if not ok or state ~= "ok" or type(route) ~= "table" or type(route.pts) ~= "table" then return end
+    local pts = route.pts
+    local np = #pts / 2
+    if np < 2 then return end
+    local px, py = vehicle:getX(), vehicle:getY()
+    local best, bi, bt = nil, 1, 0
+    for i = 1, np - 1 do
+        local ax, ay, bx, by = pts[i * 2 - 1], pts[i * 2], pts[i * 2 + 1], pts[i * 2 + 2]
+        local ex, ey = bx - ax, by - ay
+        local den = ex * ex + ey * ey
+        local t = den > 0 and ((px - ax) * ex + (py - ay) * ey) / den or 0
+        if t < 0 then t = 0 elseif t > 1 then t = 1 end
+        local dx, dy = ax + ex * t - px, ay + ey * t - py
+        local d = dx * dx + dy * dy
+        if best == nil or d < best then best, bi, bt = d, i, t end
+    end
+    local xs, ys, ds = trailX[slot], trailY[slot], trailDodge[slot]
+    local ax, ay = pts[bi * 2 - 1], pts[bi * 2]
+    local cx, cy = ax + (pts[bi * 2 + 1] - ax) * bt, ay + (pts[bi * 2 + 2] - ay) * bt
+    local n, left = 1, TRAIL_AHEAD
+    xs[1], ys[1], ds[1] = cx, cy, false
+    for i = bi + 1, np do
+        local nx, ny = pts[i * 2 - 1], pts[i * 2]
+        local dx, dy = nx - cx, ny - cy
+        local len = math.sqrt(dx * dx + dy * dy)
+        n = n + 1
+        if len >= left then
+            local k = len > 0 and left / len or 0
+            xs[n], ys[n], ds[n] = cx + dx * k, cy + dy * k, false
+            break
+        end
+        xs[n], ys[n], ds[n] = nx, ny, false
+        left, cx, cy = left - len, nx, ny
+    end
+    local z = vehicle:getZ()
+    trailZ[slot], trailWidth[slot], trailN[slot] = z - z % 1, width, n
 end
 
 -- 每輪掃描完成更新軌跡快取；debugOn 只控制額外 markers，不控制一般線。

@@ -112,11 +112,13 @@ do
         assert(api.getNavTarget(0) == 200, "explicit next uses station B")
         MDAD.Drive.stop(0)
         it = api.getNavItinerary(0)
-        assert(it.phase == "paused" and it.stops[2].status == "pending", "stop releases real claim without arrival")
-        assert(not it.claimed and api.getNavLeg(0) == nil, "no orphan claim")
+        -- 手動停止只交還駕駛：導航仍 navigating、同一站、目標照舊（路線與小地圖不消失），
+        -- 舊 claim 作廢、換一枚未接管的新段 token。
+        assert(it.phase == "navigating" and it.stops[2].status == "pending", "stop releases real claim without arrival")
+        assert(not it.claimed and api.getNavLeg(0) ~= token and api.getNavLeg(0) ~= session.legToken
+            and api.getNavTarget(0) == 200, "no orphan claim and navigation stays on")
         -- 失敗通知不能在 EvenPaused 搶先把「已到站」改成 paused。
         dveh._x = 197
-        assert(api.startNavItinerary(0, it.revision))
         local failureRevision = api.getNavItinerary(0).revision
         engine.state = "failed"
         for _ = 1, 20 do fire("OnTickEvenPaused") end
