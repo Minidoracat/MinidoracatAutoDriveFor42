@@ -68,8 +68,10 @@ local texts = {
     UI_MinidoracatAutoDrive_HUDStatusSlow_other = "Safety: slower",
     UI_MinidoracatAutoDrive_HUDStatusSlow_plan = "Easing off",
     UI_MinidoracatAutoDrive_HUDSpeedTip = "%1|%2|%3|%4|%5|%6|%7|%8",
+    UI_MinidoracatAutoDrive_HUDSpeed = "SPEED",
     UI_MinidoracatAutoDrive_SlowWhy_curve = "CURVE",
     UI_MinidoracatAutoDrive_SlowWhy_none = "NONE",
+    UI_MinidoracatAutoDrive_SlowWhy_idle = "IDLE",
     UI_MinidoracatAutoDrive_HUDStatusReady = "READY",
     UI_MinidoracatAutoDrive_HUDStatusEngineOff = "ENGINE OFF",
     UI_MinidoracatAutoDrive_HUDStatusNoRoute = "NO ROUTE",
@@ -230,6 +232,10 @@ function ISPanel:getHeight() return self.height end
 function ISPanel:getAbsoluteX() return self.x end
 function ISPanel:getAbsoluteY() return self.y end
 function ISPanel:getXScroll() return 0 end
+function ISPanel:getX() return self.x end
+function ISPanel:getY() return self.y end
+function ISPanel:onMouseUp() self.moving = false end
+function ISPanel:onMouseUpOutside() self.moving = false end
 function ISPanel:getYScroll() return 0 end
 function ISPanel:setCapture(value) self.captured = value == true end
 function ISPanel:getMouseX() return self.mouseX or 0 end
@@ -261,6 +267,8 @@ function ISButton:setY(value) self.y = value end
 function ISButton:setWidth(value) self.width = value end
 function ISButton:setHeight(value) self.height = value end
 function ISButton:setVisible(value) self.visible = value == true end
+function ISButton:drawRectBorder() end
+function ISButton:drawTextureScaled() end
 -- ISUIElement:isVisible（ISUIElement.lua）——ISButton 繼承同一個讀取面
 function ISButton:isVisible() return self.visible end
 -- ISButton.lua:179-190：image／forceImageSize；render 以 textureColor 染色（:222-226）
@@ -660,6 +668,10 @@ local function checkAutoPill(label)
     check(a.visible == c.visible and a.y == c.y and a.height == c.height and a.width == c.width
         and a.x == c.x + c.width + 4 and a.x + a.width <= panel.width,
         label .. ": auto-reroute pill follows the corpse pill on the same row")
+    local sp = panel.speedButton
+    check(sp.visible == a.visible and sp.y == a.y and sp.height == a.height and sp.width == a.width
+        and sp.x == a.x + a.width + 4 and sp.x + sp.width <= panel.width,
+        label .. ": speed-details button follows the auto-reroute pill on the same row")
 end
 checkAutoPill("metal")
 check(panel.autoButton.title == "AUTO OFF" and panel.autoButton.enable == true
@@ -1098,11 +1110,14 @@ do
     -- 固定顯示：點巡航上限切換、存 modData；減速項（壓在巡航以下）與有餘裕項顏色不同；
     -- 收合或再點一下就不畫。
     panel:refresh(t0 + 4200)
-    click(panel.capTip)
+    click(panel.speedButton)
     panel:refresh(t0 + 4500)
     local rows = panel._pinRows
-    check(panel._speedPin and player._md.MDADHudSpeedPin == true and rows ~= nil and #rows == 8,
-        "clicking the cruise limit pins the speed details and remembers it")
+    check(panel._speedPin and optionSets.MinidoracatAutoDrive:getOption("SpeedDetails"):getValue() == true
+        and rows ~= nil and #rows == 8,
+        "the gauge button turns on the speed details option")
+    check(panel.speedButton.textColor and panel.speedButton.textColor.g > panel.speedButton.textColor.r,
+        "speed-details button shows its on state in green like the other toggles")
     check(rows and rows[5][2] == "25" and rows[5][3] == rows[8][3] and rows[5][3] ~= rows[1][3],
         "a limit below the cruise limit is drawn as a slowdown, unlike headroom")
     info[6], info[4] = 200, 120
@@ -1122,16 +1137,37 @@ do
     check(pinDraws == 8, "pinned details draw every row (" .. pinDraws .. ")")
     click(panel.collapseButton)
     panel:refresh(t0 + 5000)
-    check(not box.visible, "collapsed HUD hides the pinned details")
+    check(box.visible, "the details window is separate: collapsing the HUD keeps it")
     click(panel.collapseButton)
     panel:refresh(t0 + 5200)
-    check(box.visible, "expanding again brings the pinned details back")
     panel:setHudVisible(false)
     check(not box.visible, "hiding the HUD hides the pinned details")
     panel:setHudVisible(true)
+    -- 拖曳放開記住螢幕位置；之後 refresh 不再拉回停靠點，且夾回畫面內
+    box.moving = true
+    box:setX(40); box:setY(30)
+    box:onMouseUpOutside(0, 0)
+    panel:refresh(t0 + 5300)
+    check(box.x == 40 and box.y == 30 and player._md.MDADHudSpeedBoxX == 40,
+        "dragging the details window remembers its position")
+    local realCore = getCore
+    getCore = function() return { getScreenWidth = function() return 100 end,
+        getScreenHeight = function() return 400 end } end
+    panel:refresh(t0 + 5350)
+    check(box.x == math.max(0, 100 - box.width) and box.y == 30, "remembered position is clamped back on screen")
+    getCore = realCore
+    -- 停止自駕時也看得到上限組成（目標／主因顯示未在自駕）
+    state.active = false
+    info[4], info[5], info[6], info[7] = nil, nil, nil, nil
+    panel:refresh(t0 + 5400)
+    rows = panel._pinRows
+    check(panel.capTip.visible and box.visible and rows and rows[1][2] == "120" and rows[7][2] == "--"
+        and rows[8][2] == "IDLE", "details stay available while auto-drive is stopped")
+    state.active = true
     click(panel.capTip)
     panel:refresh(t0 + 5500)
-    check(not panel._speedPin and player._md.MDADHudSpeedPin == false and not box.visible,
+    check(not panel._speedPin and optionSets.MinidoracatAutoDrive:getOption("SpeedDetails"):getValue() == false
+        and not box.visible,
         "second click unpins the speed details")
     MDAD.Drive.speedInfo = nil
     state.cap = 50
@@ -2185,6 +2221,7 @@ do
             panel:refresh(nowMs)
             local label = "layout " .. layoutMode .. " theme " .. theme
             check(panel.contButton.visible, label .. ": continuation pill stays reachable")
+            if panel.autoButton.visible then checkAutoPill(label) end
             check(panel.contButton.x >= 0
                 and panel.contButton.x + panel.contButton.width <= panel.width
                 and panel.contButton.y >= 0

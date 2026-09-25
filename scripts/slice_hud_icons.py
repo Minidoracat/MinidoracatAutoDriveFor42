@@ -21,7 +21,7 @@ COLS, ROWS = 4, 3
 # 表上 12 格的順序（temp/codex-hud-icons-prompt.md）；None＝備用格不出貨
 NAMES = ["chevron_left", "chevron_right", "chevron_up", "chevron_down",
          "palette", "speaker_on", "speaker_off", "detour",
-         "zombie", "skull", None, None]
+         "zombie", "skull", None, "gauge"]
 GLYPH_FILL = 0.82  # 圖示佔 32 格的比例（留 3px 呼吸邊，按鈕 16px 顯示時不糊邊）
 
 

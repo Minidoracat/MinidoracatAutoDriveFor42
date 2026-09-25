@@ -89,7 +89,7 @@ local PERCEPTION_KEYS = {
     "UI_MinidoracatAutoDrive_Perception200",
 }
 local COLLAPSED_MD_KEY = "MDADHudCollapsed"
-local SPEED_PIN_MD_KEY = "MDADHudSpeedPin"
+local SPEED_BOX_X_MD_KEY, SPEED_BOX_Y_MD_KEY = "MDADHudSpeedBoxX", "MDADHudSpeedBoxY"
 -- 側掛主題的兩片側翼各自收合，各自存一格（只留左翼常駐是合法組合）。
 local WING_L_MD_KEY = "MDADHudWingL"
 local WING_R_MD_KEY = "MDADHudWingR"
@@ -468,6 +468,15 @@ local function pauseOnArrival()
     return optionBool("PauseOnArrival", true)
 end
 
+-- 速度明細框（0925n）：HUD 巡航上限點一下＝切這個選項；ESC／MiniMap 設定也能開。
+local function speedDetails()
+    return optionBool("SpeedDetails", false)
+end
+
+local function setSpeedDetails(value)
+    return setClientOption("SpeedDetails", value == true)
+end
+
 local function setPauseOnArrival(value)
     return setClientOption("PauseOnArrival", value == true)
 end
@@ -762,16 +771,8 @@ local SLOW_RATIO, SLOW_ON_MS, SLOW_OFF_MS = 0.7, 2000, 1000
 function MDADHUDTipZone:prerender() self:updateTooltip() end
 function MDADHUDTipZone:render() end
 
--- 巡航上限區塊＝速度明細開關：滑過有淡底提示可按，固定顯示時底下一條琥珀線。
+-- 巡航上限區塊：滑過看降速明細、點一下也能切速度明細（主開關是策略列的車速錶鈕）。透明不畫。
 MDADHUDCapZone = MDADHUDTipZone:derive("MDADHUDCapZone")
-function MDADHUDCapZone:render()
-    if self.mouseOver then
-        self:drawRect(0, 0, self.width, self.height, 0.10, 1, 1, 1)
-    end
-    if self.pinned then
-        self:drawRect(0, self.height - 2, self.width, 2, C.amber.a, C.amber.r, C.amber.g, C.amber.b)
-    end
-end
 
 function MDADHUDChainButton:render()
     ISButton.render(self)
@@ -987,6 +988,7 @@ function MDADHUDPanel:createChildren()
     -- 自動改道藥丸（2026-09-02 使用者：ESC 選項也要出現在 HUD 上）：與減速藥丸同列同款，
     -- 讀寫同一個 ModOptions 選項（ESC／MiniMap 設定三處同源）；無 ModOptions＝不顯示。
     self.autoButton = makeButton(self, "", MDADHUDPanel.onAutoDetour)
+    self.speedButton = makeButton(self, "", MDADHUDPanel.onSpeedPin)
     -- 接續模式藥丸（v7）：點一下開原版選單挑自動／逐點，寫入只在玩家挑了才發生。
     self.contButton = makeButton(self, "", MDADHUDPanel.onContinuation, MDADHUDChainButton)
     self.contButton:setVisible(false)
@@ -1017,7 +1019,6 @@ function MDADHUDPanel:loadCollapsed(playerObj)
     self._collapsed = md and md[COLLAPSED_MD_KEY] == true or false
     self._wingL = md and md[WING_L_MD_KEY] == true or false
     self._wingR = md and md[WING_R_MD_KEY] == true or false
-    self._speedPin = md and md[SPEED_PIN_MD_KEY] == true or false
     self._collapseLoaded = true
     self:applyLayout()
 end
@@ -1050,6 +1051,7 @@ function MDADHUDPanel:setControlsVisible(gearsOn, cycleOn, policiesOn, actionOn,
     self.zombieButton:setVisible(policiesOn)
     self.corpseButton:setVisible(policiesOn)
     self.autoButton:setVisible(policiesOn and modOptions ~= nil)
+    self.speedButton:setVisible(policiesOn and modOptions ~= nil)
     -- 接續模式藥丸與策略藥丸同列同進退；沒有 v7 setter／沒有行程時整顆不存在。
     self.contButton:setVisible(policiesOn and self._contAvail == true)
     self.actionButton:setVisible(actionOn)
@@ -1123,7 +1125,8 @@ local function measure(self, scale)
     m.policyW = maximum(scaled(70, scale), maximum(
         textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDZombie") .. " " .. forcedText),
         maximum(textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDCorpse") .. " " .. forcedText),
-            textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDAuto") .. " " .. forcedText))) + 14)
+            maximum(textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDAuto") .. " " .. forcedText),
+                textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDSpeed") .. " " .. forcedText)))) + 14)
     m.energyW = textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDEnergy", 100, 100))
     -- 行車時間欄（0908d）：欄名固定、數值另存一格，兩者分開量測。數值一律以
     -- "00:00:00" 保留最寬字串：跨過一小時、位數變動或 100h+ 都不推動任何幾何，
@@ -1142,7 +1145,7 @@ local function measure(self, scale)
     m.valueW = textWidth(UIFont.Small, "100") + 4
     m.sliderW = maximum(scaled(84, scale), SLIDER_KNOB * 3 + m.valueW)
     m.controlsOn = modOptions ~= nil
-    m.policyN = m.controlsOn and 3 or 2 -- 殭屍／屍體＋自動改道（無 ModOptions 時不顯示）
+    m.policyN = m.controlsOn and 4 or 2 -- 殭屍／屍體＋自動改道／速度明細（無 ModOptions 時不顯示）
     local screenW = getPlayerScreenWidth(self.playerNum)
     m.maxW = type(screenW) == "number" and screenW - 16 or 1904
     return m
@@ -1227,6 +1230,7 @@ function MDADHUDPanel:layoutWings(scale, m)
     self.zombieButton:setVisible(not foldR)
     self.corpseButton:setVisible(not foldR)
     self.autoButton:setVisible(not foldR and controlsOn)
+    self.speedButton:setVisible(not foldR and controlsOn)
     self.contButton:setVisible(not foldR and self._contAvail == true)
     self.actionButton:setVisible(not foldL)
     self.themeButton:setVisible(not foldR and controlsOn)
@@ -1299,8 +1303,9 @@ function MDADHUDPanel:layoutWings(scale, m)
         setButtonRect(self.zombieButton, rightX + pad, row2, policyW, rowH)
         setButtonRect(self.corpseButton, rightX + pad + policyW + gap, row2, policyW, rowH)
         setButtonRect(self.autoButton, rightX + pad + (policyW + gap) * 2, row2, policyW, rowH)
+        setButtonRect(self.speedButton, rightX + pad + (policyW + gap) * 3, row2, policyW, rowH)
         if m.contW > 0 then
-            self:placeContButton(rightX + pad + (policyW + gap) * (controlsOn and 3 or 2),
+            self:placeContButton(rightX + pad + (policyW + gap) * (controlsOn and 4 or 2),
                 row2, m.contW, rowH, m)
         end
         self._energyX = rightX + rightW - pad - energyW
@@ -1528,6 +1533,8 @@ function MDADHUDPanel:layoutStacked(scale, m)
             if controlsOn then
                 setButtonRect(self.autoButton, x, y, policyW, buttonH)
                 x = x + policyW + gap
+                setButtonRect(self.speedButton, x, y, policyW, buttonH)
+                x = x + policyW + gap
             end
             if m.contW > 0 then
                 self:placeContButton(x, y, m.contW, buttonH, m)
@@ -1611,6 +1618,8 @@ function MDADHUDPanel:layoutStacked(scale, m)
         x = x + policyW + gap
         setButtonRect(self.autoButton, x, bottomY, policyW, buttonH)
         if m.controlsOn then x = x + policyW + gap end
+        setButtonRect(self.speedButton, x, bottomY, policyW, buttonH)
+        if m.controlsOn then x = x + policyW + gap end
         if m.contW > 0 then
             self:placeContButton(x, bottomY, m.contW, buttonH, m)
         end
@@ -1683,26 +1692,30 @@ end
 function MDADHUDPanel:refreshSpeedTip(token, cruise, now)
     self._speedTip = nil
     local vmax, sandMax, gearCap, target, reason, curveCap, visCap
-    if token ~= nil and type(Drive.speedInfo) == "function" then
-        vmax, sandMax, gearCap, target, reason, curveCap, visCap = Drive.speedInfo(self.playerNum)
+    if type(Drive.speedInfo) == "function" then
+        vmax, sandMax, gearCap, target, reason, curveCap, visCap = Drive.speedInfo(self.playerNum, self.vehicle)
     end
+    self._speedPin = speedDetails()
     self._pinRows = nil
     local category = nil
-    if type(target) == "number" then
-        category = reason and (SLOW_CATEGORY[reason] or "other") or nil
-        -- 沒有任何限速在綁、目標仍低於巡航：Follower 剖面在前方彎道／終點提前收油
-        if not category and type(cruise) == "number" and target < cruise - 2 then category = "plan" end
-        -- 目標已貼著巡航上限：殘留的限速代碼沒在壓速度，不列為主因
-        if type(cruise) == "number" and target >= cruise * 0.95 then category = nil end
+    if type(sandMax) == "number" then
+        local driving = type(target) == "number"
+        if driving then
+            category = reason and (SLOW_CATEGORY[reason] or "other") or nil
+            -- 沒有任何限速在綁、目標仍低於巡航：Follower 剖面在前方彎道／終點提前收油
+            if not category and type(cruise) == "number" and target < cruise - 2 then category = "plan" end
+            -- 目標已貼著巡航上限：殘留的限速代碼沒在壓速度，不列為主因
+            if type(cruise) == "number" and target >= cruise * 0.95 then category = nil end
+        end
         local function n(v) return type(v) == "number" and v >= 0 and string.format("%d", math.floor(v + 0.5)) or "--" end
         local why = getText(category and ("UI_MinidoracatAutoDrive_SlowWhy_" .. category)
-            or "UI_MinidoracatAutoDrive_SlowWhy_none")
+            or (driving and "UI_MinidoracatAutoDrive_SlowWhy_none" or "UI_MinidoracatAutoDrive_SlowWhy_idle"))
         self._speedTip = getText("UI_MinidoracatAutoDrive_HUDSpeedTip", n(vmax), n(sandMax), n(gearCap), n(cruise),
-            n(target), why, n(curveCap), n(visCap)) .. "\n" .. getText(self._speedPin
-                and "UI_MinidoracatAutoDrive_HUDSpeedPinOff" or "UI_MinidoracatAutoDrive_HUDSpeedPinOn")
+            n(target), why, n(curveCap), n(visCap)) .. "\n" .. getText("UI_MinidoracatAutoDrive_HUDSpeedPinOn")
         if self._speedPin then self:buildPinRows(n, vmax, sandMax, gearCap, cruise, target, why, category, curveCap, visCap) end
     end
     local slowed = token == "follow" and category ~= nil and type(cruise) == "number" and cruise > 0
+        and type(target) == "number"
         and target < cruise * SLOW_RATIO
     if slowed then
         self._slowClear = nil
@@ -1743,8 +1756,10 @@ function MDADHUDPanel:buildPinRows(n, vmax, sandMax, gearCap, cruise, target, wh
         { "UI_MinidoracatAutoDrive_HUDCruiseCap", n(cruise), C.text, true },
         { "UI_MinidoracatAutoDrive_HUDSpeedRowCurve", n(curveCap), limit(curveCap) },
         { "UI_MinidoracatAutoDrive_HUDSpeedRowVis", n(visCap), limit(visCap) },
-        { "UI_MinidoracatAutoDrive_HUDSpeedRowTarget", n(target), target < cr * 0.95 and C.amber or C.green, true },
-        { "UI_MinidoracatAutoDrive_HUDSpeedRowWhy", why, category and C.slowText or C.green },
+        { "UI_MinidoracatAutoDrive_HUDSpeedRowTarget", n(target), type(target) ~= "number" and C.muted
+            or target < cr * 0.95 and C.amber or C.green, true },
+        { "UI_MinidoracatAutoDrive_HUDSpeedRowWhy", why, category and C.slowText
+            or type(target) == "number" and C.green or C.muted },
     }
     local labelW, valueW = 0, 0
     for i = 1, #rows do
@@ -1759,7 +1774,7 @@ function MDADHUDPanel:buildPinRows(n, vmax, sandMax, gearCap, cruise, target, wh
     self._pinRows, self._pinLineH, self._pinValueW = rows, lineH, valueW
     self._pinW = maximum(labelW + valueW + 30, textWidth(UIFont.Small, self._pinLegend) + pad * 2)
     self._pinH = lineH * (#rows + 1) + pad * 2 + 6
-    -- 對齊巡航上限欄，夾在面板寬內；畫在面板上緣外
+    -- 預設停靠：對齊巡航上限欄、夾在面板寬內、貼面板上緣外（拖曳過就改用記住的位置）
     local anchor = (self._capX or 0) + textWidth(UIFont.Small, self._capLabel or "") / 2
     self._pinX = math.max(0, math.min(self.width - self._pinW, math.floor(anchor - self._pinW / 2)))
     self._pinY = -self._pinH - 4
@@ -1767,15 +1782,24 @@ end
 
 -- 明細框是獨立的頂層元素：畫在 HUD 面板範圍外的東西實機不會出現（離線假 UI 照畫＝假綠，
 -- 0925 實機截圖抓到）。位置／可見性只在 refresh 更新，prerender 只畫快取列。
+-- 可拖曳（原版 ISPanel moveWithMouse，ISPanel.lua:25-95）；放開時記住位置。
 MDADHUDPinBox = ISPanel:derive("MDADHUDPinBox")
 function MDADHUDPinBox:prerender() self.owner:drawSpeedPin(self) end
 function MDADHUDPinBox:render() end
-function MDADHUDPinBox:onMouseUp() return false end -- 不吞放開（同 MDADHUDPanel:onMouseUp）
+function MDADHUDPinBox:onMouseUp(x, y)
+    local moved = self.moving
+    ISPanel.onMouseUp(self, x, y)
+    if moved then self.owner:saveSpeedBox(self:getX(), self:getY()) end
+end
+function MDADHUDPinBox:onMouseUpOutside(x, y)
+    local moved = self.moving
+    ISPanel.onMouseUpOutside(self, x, y)
+    if moved then self.owner:saveSpeedBox(self:getX(), self:getY()) end
+end
 
--- capOn＝巡航上限區此刻可見。原版 ISUIElement:setVisible 只寫 Java 端，Lua 沒有 .visible 欄位
--- （離線假 UI 有＝假綠，0925 實機明細框從未出現）：由呼叫端直接傳入。
-function MDADHUDPanel:placeSpeedPin(capOn)
-    local show = capOn and self._pinRows ~= nil and self._speedPin and self:isVisible()
+-- 選項開著、HUD 顯示中（駕駛座、非 ESC）就顯示，自駕停著也看得到；收合不影響（獨立視窗）。
+function MDADHUDPanel:placeSpeedPin()
+    local show = self._pinRows ~= nil and self._speedPin and self:isVisible()
     local box = self.pinBox
     if not show then
         if box then box:setVisible(false) end
@@ -1784,12 +1808,27 @@ function MDADHUDPanel:placeSpeedPin(capOn)
     if not box then
         box = MDADHUDPinBox:new(0, 0, 10, 10)
         box.owner = self
+        box.moveWithMouse = true
         box:initialise()
         box:addToUIManager()
         self.pinBox = box
     end
-    box:setX(self:getAbsoluteX() + self._pinX)
-    box:setY(self:getAbsoluteY() + self._pinY)
+    if not box.moving then
+        local playerObj = getSpecificPlayer(self.playerNum)
+        local md = playerObj and playerObj:getModData()
+        local sx, sy = md and md[SPEED_BOX_X_MD_KEY], md and md[SPEED_BOX_Y_MD_KEY]
+        if type(sx) == "number" and type(sy) == "number" then
+            -- 記住的位置夾回畫面內（換解析度／分割畫面後不跑出去）
+            local core = getCore and getCore()
+            local sw = core and core:getScreenWidth() or sx + self._pinW
+            local sh = core and core:getScreenHeight() or sy + self._pinH
+            box:setX(math.max(0, math.min(sw - self._pinW, sx)))
+            box:setY(math.max(0, math.min(sh - self._pinH, sy)))
+        else
+            box:setX(self:getAbsoluteX() + self._pinX)
+            box:setY(self:getAbsoluteY() + self._pinY)
+        end
+    end
     box:setWidth(self._pinW)
     box:setHeight(self._pinH)
     box:setVisible(true)
@@ -1851,10 +1890,9 @@ function MDADHUDPanel:placeDetourButton()
         local y1 = math.max(self._capLabelY, self._capValueY) + (self._fontH or 16)
         setButtonRect(self.capTip, x0, y0, x1 - x0, y1 - y0)
         self.capTip.tooltip = self._speedTip
-        self.capTip.pinned = self._speedPin
     end
     self.capTip:setVisible(capTip)
-    self:placeSpeedPin(capTip)
+    self:placeSpeedPin()
 end
 
 -- 行程快照：只在 phase／revision／目前站 ID 變了才要 table（addon-api §6.4 明說快照是
@@ -2289,6 +2327,8 @@ function MDADHUDPanel:updateButtons()
         getText("UI_MinidoracatAutoDrive_HUDAutoTip") .. "\n"
             .. getText("UI_MinidoracatAutoDrive_HUDPolicyToggle"),
         optionScale())
+    applyPolicyButton(self.speedButton, "UI_MinidoracatAutoDrive_HUDSpeed", "gauge",
+        speedDetails(), true, getText("UI_MinidoracatAutoDrive_SpeedDetails_tooltip"), optionScale())
     -- 接續模式藥丸：值＝目前行程的 autoContinue。沒有 v7 setter／沒有行程時整顆不顯示，
     -- 這裡也不留上一份值（避免收合又展開時閃到舊字）。
     if self._contAvail then
@@ -2643,11 +2683,15 @@ end
 
 -- 側掛時 collapseButton＝右翼 chevron，wingButton＝左翼；其餘主題只有整面板收合。
 function MDADHUDPanel:onSpeedPin()
-    self._speedPin = not self._speedPin
+    setSpeedDetails(not speedDetails())
+    self._forceRefresh = true
+end
+
+-- 拖曳放開後記住明細框的螢幕位置（每名角色各自一組，同側翼收合存法）
+function MDADHUDPanel:saveSpeedBox(x, y)
     local playerObj = getSpecificPlayer(self.playerNum)
     local md = playerObj and playerObj:getModData()
-    if md then md[SPEED_PIN_MD_KEY] = self._speedPin end
-    self._forceRefresh = true
+    if md then md[SPEED_BOX_X_MD_KEY], md[SPEED_BOX_Y_MD_KEY] = x, y end
 end
 
 function MDADHUDPanel:onCollapse()
@@ -2786,6 +2830,8 @@ if PZAPI and PZAPI.ModOptions then
     for i = 1, #MANUAL_RESUME_KEYS do
         manualResumeOption:addItem(MANUAL_RESUME_KEYS[i], i == 1)
     end
+    modOptions:addTickBox("SpeedDetails", "UI_MinidoracatAutoDrive_SpeedDetails", false,
+        "UI_MinidoracatAutoDrive_SpeedDetails_tooltip")
     modOptions:addTickBox("PauseOnStuck", "UI_MinidoracatAutoDrive_PauseOnStuck", true,
         "UI_MinidoracatAutoDrive_PauseOnStuck_tooltip")
     modOptions:addTickBox("PauseOnArrival", "UI_MinidoracatAutoDrive_PauseOnArrival", true,
@@ -2928,6 +2974,9 @@ local function registerMiniMapSettings()
             { label = "UI_MinidoracatAutoDrive_PauseOnArrival",
                 tooltip = "UI_MinidoracatAutoDrive_PauseOnArrival_tooltip",
                 default = true, get = pauseOnArrival, set = setPauseOnArrival },
+            { label = "UI_MinidoracatAutoDrive_SpeedDetails",
+                tooltip = "UI_MinidoracatAutoDrive_SpeedDetails_tooltip",
+                get = speedDetails, set = setSpeedDetails },
         },
         combos = {
             { label = "UI_MinidoracatAutoDrive_TrajectoryWidth",

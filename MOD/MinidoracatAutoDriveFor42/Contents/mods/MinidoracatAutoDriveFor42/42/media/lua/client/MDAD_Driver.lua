@@ -1252,10 +1252,15 @@ function Drive.slowdownInfo(playerNum)
 end
 
 -- HUD 降速說明（巡航上限／降速狀態的滑鼠提示）：只回純量，250ms refresh 讀。
--- 回 vehicleMax, sandboxMax, gearCap, target, capReason, curveCap, visibilityCap；無 session 回 nil。
-function Drive.speedInfo(playerNum)
+-- 回 vehicleMax, sandboxMax, gearCap, target, capReason, curveCap, visibilityCap；
+-- 未在自駕時只回前三項（上限組成），後四項 nil。
+function Drive.speedInfo(playerNum, vehicle)
     local s = sessions[playerNum]
-    if not s then return nil end
+    if not s then
+        local vm = vehicle and vehicle.getMaxSpeed and vehicle:getMaxSpeed() or nil
+        local gear = GEAR_CAPS[Drive.getGear(playerNum)]
+        return vm, maxSpeedKmh(), gear and gear > 0 and gear or nil
+    end
     local vmax = s.vehicle and s.vehicle.getMaxSpeed and s.vehicle:getMaxSpeed() or nil
     local gear = s.gearCap and s.gearCap > 0 and s.gearCap or nil
     return vmax, s.maxSpeed, gear, s.desiredTarget, s.lastCapReason, s.curveCap, s.visibilityCap

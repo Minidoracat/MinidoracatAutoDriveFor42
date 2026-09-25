@@ -17869,6 +17869,13 @@ end
 end
 scenarioReasonKeys()
 
+-- 速度明細（0925n）：沒有 session 時仍回上限組成（HUD 停止自駕也要能看明細），目標等四項為 nil
+;(function()
+    local vm, sand, _, target = MDAD.Drive.speedInfo(3, { getMaxSpeed = function() return 90 end })
+    check(vm == 90 and type(sand) == "number" and sand > 0 and target == nil,
+        "(speed-info idle) 未自駕時仍回車輛極速與沙盒上限")
+end)()
+
 -- =====================================================================
 -- 總結
 -- =====================================================================
