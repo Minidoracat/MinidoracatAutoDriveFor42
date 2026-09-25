@@ -1722,7 +1722,8 @@ function MDADHUDPanel:refreshSpeedTip(token, cruise, now)
     self._speedTip = nil
     local vmax, sandMax, gearCap, target, reason, curveCap, visCap
     if type(Drive.speedInfo) == "function" then
-        vmax, sandMax, gearCap, target, reason, curveCap, visCap = Drive.speedInfo(self.playerNum, self.vehicle)
+        vmax, sandMax, gearCap, target, reason, curveCap, visCap, factorCap, factorReason =
+            Drive.speedInfo(self.playerNum, self.vehicle)
     end
     self._speedPin = speedDetails()
     self._pinRows = nil
@@ -1757,7 +1758,7 @@ function MDADHUDPanel:refreshSpeedTip(token, cruise, now)
         self._speedTip = getText("UI_MinidoracatAutoDrive_HUDSpeedTip", vehText, n(sandMax), n(gearCap), n(cruise),
             n(target), why, n(curveCap), n(visCap), serverText) .. "\n" .. getText("UI_MinidoracatAutoDrive_HUDSpeedPinOn")
         if self._speedPin then self:buildPinRows(n, vmax, sandMax, gearCap, cruise, target, why, category, curveCap, visCap,
-            vehText, realV, serverL, serverText) end
+            vehText, realV, serverL, serverText, factorCap, factorReason) end
     end
     local slowed = token == "follow" and category ~= nil and type(cruise) == "number" and cruise > 0
         and type(target) == "number"
@@ -1785,7 +1786,7 @@ end
 -- 壓在巡航以下＝紅（正在減速）；目標到巡航＝綠、被壓低＝琥珀。顏色之外，末列圖例與
 -- 「主因」一列用文字說明，不靠顏色單獨表意。只在 250ms refresh 建表與量寬。
 function MDADHUDPanel:buildPinRows(n, vmax, sandMax, gearCap, cruise, target, why, category, curveCap, visCap,
-        vehText, realV, serverL, serverText)
+        vehText, realV, serverL, serverText, factorCap, factorReason)
     local cr = type(cruise) == "number" and cruise or 0
     local function limit(v)
         if type(v) ~= "number" or v < 0 then return C.muted end
@@ -1800,10 +1801,17 @@ function MDADHUDPanel:buildPinRows(n, vmax, sandMax, gearCap, cruise, target, wh
         { "UI_MinidoracatAutoDrive_HUDSpeedRowServer", serverText,
             serverL and realV ~= vmax and C.amber or C.green },
         { "UI_MinidoracatAutoDrive_HUDSpeedRowSandbox", n(sandMax), capOf(sandMax) },
-        { "UI_MinidoracatAutoDrive_HUDSpeedRowGear", n(gearCap), capOf(gearCap) },
+        { "UI_MinidoracatAutoDrive_HUDSpeedRowGear", gearCap and n(gearCap)
+            or getText("UI_MinidoracatAutoDrive_HUDSpeedGearMax"), gearCap and capOf(gearCap) or C.green },
         { "UI_MinidoracatAutoDrive_HUDCruiseCap", n(cruise), C.text, true },
         { "UI_MinidoracatAutoDrive_HUDSpeedRowCurve", n(curveCap), limit(curveCap) },
         { "UI_MinidoracatAutoDrive_HUDSpeedRowVis", n(visCap), limit(visCap) },
+        -- 障礙／殭屍／屍體／來車／拖車等因素的限速值＋類別（沒有＝無）
+        { "UI_MinidoracatAutoDrive_HUDSpeedRowFactor", type(factorCap) == "number" and factorCap >= 0
+            and getText("UI_MinidoracatAutoDrive_HUDSpeedFactorValue", n(factorCap),
+                getText("UI_MinidoracatAutoDrive_HUDStatusSlow_" .. (SLOW_CATEGORY[factorReason] or "other")))
+            or getText("UI_MinidoracatAutoDrive_HUDSpeedServerNone"),
+            type(factorCap) == "number" and factorCap >= 0 and limit(factorCap) or C.green },
         { "UI_MinidoracatAutoDrive_HUDSpeedRowTarget", n(target), type(target) ~= "number" and C.muted
             or target < cr * 0.95 and C.amber or C.green, true },
         { "UI_MinidoracatAutoDrive_HUDSpeedRowWhy", why, category and C.slowText
@@ -1900,7 +1908,7 @@ function MDADHUDPanel:drawSpeedPin(target)
         target:drawText(r[1], x + 14, ty, labelColor.r, labelColor.g, labelColor.b, labelColor.a, UIFont.Small)
         target:drawTextRight(r[2], valueRight, ty, c.r, c.g, c.b, c.a, UIFont.Small)
         ty = ty + lineH
-        if i == 4 or i == 7 then
+        if i == 4 or i == 8 then
             target:drawRect(x + 6, ty + 1, w - 12, 1, C.faint.a, C.faint.r, C.faint.g, C.faint.b)
             ty = ty + 3
         end

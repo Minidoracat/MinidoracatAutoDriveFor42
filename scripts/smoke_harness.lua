@@ -5495,6 +5495,11 @@ do
     checkNear(profile.curveV[2], briskCorner, 1e-9,
         "(style) 切回 MAX 恢復積極彎頂速度")
     checkTrue(MDAD.Drive.isActive(0), "(style) 切檔不停止本趟自駕")
+    -- 速度明細：MAX 檔沒有檔位上限（由車輛極速決定），一般檔位回該檔上限
+    checkNil(select(3, MDAD.Drive.speedInfo(0, dveh)), "(speed-info) MAX 檔不回檔位上限")
+    MDAD.Drive.setGear(0, 3)
+    for _ = 1, 2 do driveTick(dp, dveh) end
+    checkEq(select(3, MDAD.Drive.speedInfo(0, dveh)), 70, "(speed-info) 70 檔回檔位上限 70")
     MDAD.Drive.stop(0, nil)
     MDAD.Drive.setGear(0, oldGear)
 end

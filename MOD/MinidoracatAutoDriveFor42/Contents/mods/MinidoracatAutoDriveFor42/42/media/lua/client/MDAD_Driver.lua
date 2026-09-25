@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0925n"
+Drive.REV = "0925o"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -1263,8 +1263,10 @@ function Drive.serverSpeedLimit()
 end
 
 -- HUD 降速說明（巡航上限／降速狀態的滑鼠提示）：只回純量，250ms refresh 讀。
--- 回 vehicleMax, sandboxMax, gearCap, target, capReason, curveCap, visibilityCap；
--- 未在自駕時只回前三項（上限組成），後四項 nil。
+-- 回 vehicleMax, sandboxMax, gearCap, target, capReason, curveCap, visibilityCap, factorCap, factorReason；
+-- gearCap 只在一般檔位（30/50/70）有值，MAX 檔沒有檔位上限（由車輛極速決定）回 nil。
+-- factorCap/Reason＝本幀障礙／殭屍／屍體／來車／拖車等因素疊出的最低限速（沒有則 nil）。
+-- 未在自駕時只回前三項（上限組成），其餘 nil。
 function Drive.speedInfo(playerNum, vehicle)
     local s = sessions[playerNum]
     if not s then
@@ -1273,8 +1275,10 @@ function Drive.speedInfo(playerNum, vehicle)
         return vm, maxSpeedKmh(), gear and gear > 0 and gear or nil
     end
     local vmax = s.vehicle and s.vehicle.getMaxSpeed and s.vehicle:getMaxSpeed() or nil
-    local gear = s.gearCap and s.gearCap > 0 and s.gearCap or nil
-    return vmax, s.maxSpeed, gear, s.desiredTarget, s.lastCapReason, s.curveCap, s.visibilityCap
+    local g = GEAR_CAPS[Drive.getGear(playerNum)]
+    local gear = g and g > 0 and s.gearCap and s.gearCap > 0 and s.gearCap or nil
+    return vmax, s.maxSpeed, gear, s.desiredTarget, s.lastCapReason, s.curveCap, s.visibilityCap,
+        s.lastSensorCap, s.lastSensorReason
 end
 
 -- HUD 唯讀狀態（M5.5b 面板的資料面）。回**多值純量**、不洩漏 session table

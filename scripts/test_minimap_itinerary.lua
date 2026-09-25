@@ -537,6 +537,26 @@ do
         pump()
         assert(not MDAD.Drive.isActive(0) and not api.getNavItinerary(0).claimed
             and api.getNavTarget(0) == 100, "模式切換只規劃，不啟動自駕")
+        -- 單一目標自駕中換目標（0925o）：真 Core 保留 claim／token，Driver 走換目標接線，不停下
+        resetTrip(false)
+        MDAD.Drive.stop(0)
+        assert(core.navSetTarget(0, 100, 0, "A"))
+        MDAD.Drive.start(dp)
+        for _ = 1, 60 do
+            pump()
+            local ss = MDAD.Drive.debugSession(0)
+            if ss and ss.legToken and ss.mode == "follow" then break end
+        end
+        local ss = assert(MDAD.Drive.debugSession(0), "single-target drive started")
+        local heldToken = assert(ss.legToken, "single-target drive claimed its leg")
+        dveh._stopped, dveh._speed = false, 20
+        local okSet, whySet = core.navSetTarget(0, 60, 0, "B")
+        assert(okSet, "changing target while auto-driving a single target is allowed: " .. tostring(whySet))
+        for _ = 1, 6 do pump() end
+        assert(MDAD.Drive.isActive(0) and MDAD.Drive.debugSession(0).legToken == heldToken
+            and api.getNavTarget(0) == 60 and api.getNavItinerary(0).claimed,
+            "auto-drive keeps driving the same claimed leg toward the new target")
+        dveh._stopped, dveh._speed = true, 0
         resetTrip(false)
         print("test_minimap_itinerary: PASS (real itinerary, graph, preview, driver, manual stops, automatic continuation and real-voice arrival pause)")
     end)()
