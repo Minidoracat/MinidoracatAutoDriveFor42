@@ -148,7 +148,7 @@
     "UI_MinidoracatAutoDrive_ZombieDodge": "闪避僵尸与尸体",
     "UI_MinidoracatAutoDrive_ZombieDodge_tooltip": "默认开启。尽量从僵尸与地面尸体旁的安全空隙通过，避免直接碾过；两者一起选路，不会为了躲开其中一个而转向另一个。会先看好前方一整段再决定往哪边躲，不会躲过一只又切回去撞下一只；侧移速度随车速加快，硬障碍物与道路边界仍须通过检查。僵尸／尸体各自的减速策略关闭时保持车速躲避，来不及完全躲开就在原本那一侧尽量偏、直接撞过去；开启时才允许放慢配合。关闭后不进行此类横向闪避。",
     "UI_MinidoracatAutoDrive_PerceptionDistance": "基础感知距离",
-    "UI_MinidoracatAutoDrive_PerceptionDistance_tooltip": "默认 120 米，这是基础请求值，不保证实际能看这么远。速度、障碍物与弯道可请求额外延伸，但共用同一份性能预算，也不能超过游戏已加载的范围。HUD 减速按钮的说明显示实际距离；超过加载范围的设置可能没有区别。下一轮生效，不重置路线。出现卡顿时请调低。",
+    "UI_MinidoracatAutoDrive_PerceptionDistance_tooltip": "自动驾驶每一轮往前检查多远：障碍物、停在路上的车、僵尸与尸体、弯道都在这个范围内判断。看得越远，越早发现前方状况，高速时也能保持较高车速；看得越近，每帧工作量越少。\n默认 120 米。这是想看的距离，不是保证：画面卡顿时实际距离会缩短（HUD 会显示「卡顿降速」并放慢），也不会超过游戏已加载的地图范围。高速、障碍与弯道会自动多看一点。\n卡顿时请调低；电脑性能足够、常开高速时可调高。下一轮检查就生效，不会重置路线。",
     "UI_MinidoracatAutoDrive_Perception48": "48 米",
     "UI_MinidoracatAutoDrive_Perception80": "80 米",
     "UI_MinidoracatAutoDrive_Perception120": "120 米（默认）",
