@@ -7567,10 +7567,11 @@ do
     drive.putSolid(24, -3, "harness_corpse_lane_other")
     zRound()
     st = MDAD.Drive.debugSession(0)
-    checkTrue(st.sensor.corpseN > 0 and st.zombieLane == nil
-            and math.abs(st.fstate.laneBias) < 0.06,
-        "(zc-wall) 兩側硬物封住屍體縫：不得為閃避屍體越過硬物（lane="
-        .. tostring(st.fstate.laneBias) .. "）")
+    -- 0925p：無縫時可取最不壞 lane（least），但只能在兩道硬物之間的連通帶內
+    checkTrue(st.sensor.corpseN > 0 and st.zombieWhy ~= "gap"
+            and math.abs(st.fstate.laneBias) + st.needHalf + MDADCorridor.OBS_HALF <= 2.5 + 1e-6,
+        "(zc-wall) 兩側硬物封住屍體縫：只在硬物之間的帶內偏（lane="
+        .. tostring(st.fstate.laneBias) .. " why " .. tostring(st.zombieWhy) .. "）")
     drive.clearCell(24, 2)
     drive.clearCell(24, -3)
     drive.clearCell(18, -1)
@@ -7681,6 +7682,18 @@ function drive.scenarioZombiePlan()
     checkTrue(s.zombieWhy ~= "clear" and s.zombieLane ~= nil,
         "(zp-blind) 盲區內的殭屍仍算威脅：不當淨空釋放（why " .. tostring(s.zombieWhy) .. "）")
     drive.clearCell(4, 0)
+    -- (zp-pass) 換邊途中剛好經過常駐 lane 不是「已回線」：殭屍在常駐線左側（目標在右），lane 從左邊
+    --   −0.47 往右走、這一步落在常駐 0 附近時不得釋放（0925 零散殭屍 E2E：途經常駐被釋放、laneBias
+    --   跳回常駐正對殭屍）。違規證明：settle 條件拿掉 want 檢查即紅。
+    s = arm(0)
+    put(20.5, -0.6)
+    drive.scanRound(true)
+    s.zombieLane, s.zombieLaneMs = -0.47, s.zombieLaneMs - 50 -- 左側出發、這一步約前進 0.49（落在常駐 0 附近）
+    MDADFollower.setLaneBias(s.fstate, -0.47)
+    drive.scanRound(true)
+    checkTrue(s.zombieLane ~= nil and s.fstate.laneBias > 0,
+        "(zp-pass) 途經常駐 lane 不釋放、繼續往右（lane " .. tostring(s.fstate.laneBias) .. "）")
+    drive.clearCell(20, -1)
     MDAD.Drive.setSlowPref(0, "zombie", false)
     MDAD.Drive.setSlowPref(0, "zombie", oldZ)
     MDAD.Drive.setSlowPref(0, "corpse", oldC)

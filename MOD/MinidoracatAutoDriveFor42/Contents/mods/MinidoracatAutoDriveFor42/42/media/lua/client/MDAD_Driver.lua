@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0925p"
+Drive.REV = "0925q"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -384,7 +384,8 @@ TUNE.ZOMBIE_LANE_RATE_MAX = 6.0     -- 速率上限（m/s；0925d 2.5→3.5；09
 TUNE.ZOMBIE_PREFER_SLOW_KMH = 40
 TUNE.ZOMBIE_PREFER_FAST_KMH = 110
 TUNE.ZOMBIE_PREFER_EXTRA_M = 0.7
-TUNE.ZOMBIE_CROSS_S = 1.5          -- 到最近威脅不足此秒數時，選縫先限車身這一側（不橫越牠的現位）
+TUNE.ZOMBIE_CROSS_S = 2.5          -- 到最近威脅不足此秒數時，選縫先限車身這一側（不橫越牠的現位；0925 零散殭屍
+                                   -- E2E 1.5：70 km/h 距 37m〔1.9s〕從左側翻到右側穿過 l 3.1 那隻）
 TUNE.ZOMBIE_SWITCH_LAG_S = 0.5      -- 群與群之間換邊：先止住上一段側移再反向的落後（秒）
 TUNE.ZOMBIE_PREDICT_S = 2.5         -- 殭屍橫向位置外推的最長秒數（朝車走的殭屍）
 TUNE.ZOMBIE_CLUSTER_M = 1.0         -- 最近一群＝最近威脅點起「一個車長＋此值」內的軟避讓點
@@ -3082,7 +3083,11 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
     local nxt = cur + step
     local away = nxt - resident
     if away < 0 then away = -away end
-    if away <= TUNE.ZOMBIE_LANE_SETTLE_M then
+    -- 只在目標本身回到常駐 lane 時才釋放：從左側換到右側途中剛好經過常駐 lane 不算（0925 零散殭屍
+    -- E2E：0.26→4.41 途經 3.0 被當成「已回線」釋放，laneBias 一幀跳回 3.0 正對殭屍，撞 l 3.6）
+    local wantAway = want - resident
+    if away <= TUNE.ZOMBIE_LANE_SETTLE_M
+            and wantAway <= TUNE.ZOMBIE_LANE_SETTLE_M and wantAway >= -TUNE.ZOMBIE_LANE_SETTLE_M then
         if s.zombieLane ~= nil then
             s.zombieLane = nil
             s.zombiePlanWhy = nil
