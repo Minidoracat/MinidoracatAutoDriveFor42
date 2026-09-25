@@ -729,6 +729,12 @@ end
 -- ISButton 負責（prerender＝ISButton.lua:111-140、render＝:196-240）。
 MDADHUDChainButton = ISButton:derive("MDADHUDChainButton")
 
+-- 狀態字的滑鼠提示區：不畫任何東西，只保留原版 prerender 裡的 updateTooltip（ISButton.lua:176、
+-- 316-345）讓滑過時顯示 tooltip。只在「卡頓降速」時可見（placeDetourButton）。
+MDADHUDTipZone = ISButton:derive("MDADHUDTipZone")
+function MDADHUDTipZone:prerender() self:updateTooltip() end
+function MDADHUDTipZone:render() end
+
 function MDADHUDChainButton:render()
     ISButton.render(self)
     local color = self.textColor
@@ -956,6 +962,8 @@ function MDADHUDPanel:createChildren()
     -- 改道鈕：只在「煞停等待」出現，接在狀態字後（statusW 已為最長狀態字保留寬度）。
     self.detourButton = makeButton(self, getText("UI_MinidoracatAutoDrive_HUDDetourButton"), MDADHUDPanel.onDetour)
     self.detourButton:setVisible(false)
+    self.statusTip = makeButton(self, "", function() end, MDADHUDTipZone)
+    self.statusTip:setVisible(false)
     self.volumeSlider = MDADHUDSlider:new(self)
     self.volumeSlider:initialise()
     self:addChild(self.volumeSlider)
@@ -1011,6 +1019,7 @@ function MDADHUDPanel:setControlsVisible(gearsOn, cycleOn, policiesOn, actionOn,
     self.volumeSlider:setVisible(sliderOn and modOptions ~= nil)
     self._detourAllowed = not self._collapsed and self._showStatusText
     self.detourButton:setVisible(self._detourAllowed and self._blocked == true)
+    self.statusTip:setVisible(false) -- 版面變了；下一輪 refresh 依新位置重放
 end
 
 -- 兩套版面（上掛 layoutStacked／側掛 layoutWings）共用的量測：字高、間距、
@@ -1020,6 +1029,7 @@ local function measure(self, scale)
     local tm = getTextManager()
     local m = {}
     m.fontH = tm:getFontHeight(UIFont.Small)
+    self._fontH = m.fontH
     m.mediumH = tm:getFontHeight(UIFont.Medium)
     m.pad = maximum(6, scaled(8, scale))
     m.gap = maximum(3, scaled(4, scale))
@@ -1182,6 +1192,7 @@ function MDADHUDPanel:layoutWings(scale, m)
     self.wingButton:setVisible(true)
     self._detourAllowed = not foldL
     self.detourButton:setVisible(self._detourAllowed and self._blocked == true)
+    self.statusTip:setVisible(false) -- 版面變了；下一輪 refresh 依新位置重放
 
     -- 左翼：上列狀態＋現速，下列巡航上限／行車時間兩欄＋主鈕（摺起＝狀態燈＋現速＋裸時間＋chevron）
     if foldL then
@@ -1632,6 +1643,14 @@ function MDADHUDPanel:placeDetourButton()
         end
     end
     self.detourButton:setVisible(show)
+    -- 「卡頓降速」滑過看原因：即時幀時／FPS／實際與設定感知距離＋固定門檻
+    local tip = self._detourAllowed == true and self._lowFpsTip ~= nil
+    if tip then
+        setButtonRect(self.statusTip, self._statusX, self._textY,
+            textWidth(UIFont.Small, self._statusText), self._fontH or 16)
+        self.statusTip.tooltip = self._lowFpsTip
+    end
+    self.statusTip:setVisible(tip)
 end
 
 -- 行程快照：只在 phase／revision／目前站 ID 變了才要 table（addon-api §6.4 明說快照是
@@ -1997,6 +2016,16 @@ function MDADHUDPanel:refresh(now)
     -- 無紀錄與無效值共用缺值顯示。
     self._clockText = clockText(elapsed) or "--:--"
     self._blocked = token == "blocked"
+    self._lowFpsTip = nil
+    if token == "lowfps" and type(Drive.lowFpsInfo) == "function" then
+        local fe, eff, req, limit = Drive.lowFpsInfo(self.playerNum)
+        if fe then
+            self._lowFpsTip = getText("UI_MinidoracatAutoDrive_HUDLowFpsTip",
+                string.format("%d", math.floor(fe + 0.5)), string.format("%d", math.floor(1000 / fe + 0.5)),
+                string.format("%d", math.floor(eff)), string.format("%d", math.floor(req)),
+                string.format("%d", limit), string.format("%d", math.floor(1000 / limit)))
+        end
+    end
     -- 準備期（備路線／剖面）語意是「取消」而不是「停止行駛」。
     self._prep = token == "build"
     self:placeDetourButton()

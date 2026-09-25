@@ -62,6 +62,7 @@
     "UI_MinidoracatAutoDrive_HUDStatusFollow": "自動駕駛中",
     "UI_MinidoracatAutoDrive_HUDStatusLowFps": "卡頓降速",
     "UI_MinidoracatAutoDrive_LowFpsNotice": "畫面卡頓使前方感知距離縮短到 %1 公尺，自駕會放慢以保持安全。可在選項調低「基礎感知距離」或降低畫質。",
+    "UI_MinidoracatAutoDrive_HUDLowFpsTip": "目前平均每幀 %1 ms（約 %2 FPS），前方感知距離只剩 %3 公尺（設定 %4 公尺），自駕因此放慢以保持安全。\n每幀超過 %5 ms（約 %6 FPS 以下）且感知距離因此受限時顯示。\n改善：在選項調低「基礎感知距離」或降低畫質。",
     "UI_MinidoracatAutoDrive_HUDStatusBuild": "準備路線",
     "UI_MinidoracatAutoDrive_HUDStatusDodging": "正在繞行",
     "UI_MinidoracatAutoDrive_HUDStatusBlocked": "煞停等待",

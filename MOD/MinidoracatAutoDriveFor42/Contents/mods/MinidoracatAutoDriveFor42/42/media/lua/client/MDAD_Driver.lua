@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0925j"
+Drive.REV = "0925k"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -3247,6 +3247,14 @@ function Drive.trafficNotice(s, key)
     s.trafficNoticeKey = key
     local playerObj = getSpecificPlayer(s.playerNum)
     if playerObj then haloGood(playerObj, key) end
+end
+
+-- HUD「卡頓降速」tooltip 的數值：平均幀時、實際／設定感知距離、門檻幀時；無 session 回 nil。
+function Drive.lowFpsInfo(playerNum)
+    local s = sessions[playerNum]
+    local sen = s and type(s.sensor) == "table" and s.sensor or nil
+    if not sen or not finite(sen.frameEwmaMs) or sen.frameEwmaMs <= 0 then return nil end
+    return sen.frameEwmaMs, sen.effectiveAheadM or 0, sen.requestedAheadM or 0, TUNE.LOWFPS_FRAME_MS
 end
 
 -- 低幀率降速提示：可視上限正在壓速、平均幀時超過 LOWFPS_FRAME_MS，而且視距真的是被幀率截短

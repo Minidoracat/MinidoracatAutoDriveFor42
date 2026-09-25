@@ -62,6 +62,7 @@
     "UI_MinidoracatAutoDrive_HUDStatusFollow": "自動運転中",
     "UI_MinidoracatAutoDrive_HUDStatusLowFps": "低FPSで減速",
     "UI_MinidoracatAutoDrive_LowFpsNotice": "フレームレート低下で前方の感知距離が %1 m に縮んだため、安全のため自動運転が減速しています。オプションの「基本検知距離」を下げるか、画質を下げてください。",
+    "UI_MinidoracatAutoDrive_HUDLowFpsTip": "現在の平均フレーム時間 %1 ms（約 %2 FPS）、前方の感知距離は %3 m（設定 %4 m）まで縮んでいるため、安全のため減速しています。\n1 フレームが %5 ms を超え（約 %6 FPS 未満）、感知距離が制限されているときに表示します。\n改善：オプションの「基本検知距離」を下げるか、画質を下げてください。",
     "UI_MinidoracatAutoDrive_HUDStatusBuild": "ルート準備中",
     "UI_MinidoracatAutoDrive_HUDStatusDodging": "障害物を回避中",
     "UI_MinidoracatAutoDrive_HUDStatusBlocked": "停止して待機中",

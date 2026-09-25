@@ -62,6 +62,7 @@
     "UI_MinidoracatAutoDrive_HUDStatusFollow": "Autodrive active",
     "UI_MinidoracatAutoDrive_HUDStatusLowFps": "Low FPS: slower",
     "UI_MinidoracatAutoDrive_LowFpsNotice": "Low frame rate has cut look-ahead to %1 m, so auto-drive is slowing down to stay safe. Lower “Base sensing distance” in the options or reduce graphics settings.",
+    "UI_MinidoracatAutoDrive_HUDLowFpsTip": "Average frame time %1 ms (about %2 FPS); look-ahead is down to %3 m (set to %4 m), so auto-drive slows down to stay safe.\nShown when frames take over %5 ms (below about %6 FPS) and that limits look-ahead.\nFix: lower “Base sensing distance” in the options or reduce graphics settings.",
     "UI_MinidoracatAutoDrive_HUDStatusBuild": "Preparing route",
     "UI_MinidoracatAutoDrive_HUDStatusDodging": "Avoiding obstacle",
     "UI_MinidoracatAutoDrive_HUDStatusBlocked": "Braking and waiting",

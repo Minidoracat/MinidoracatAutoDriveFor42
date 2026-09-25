@@ -1034,6 +1034,27 @@ click(panel.collapseButton)
 panel:refresh(nowMs)
 check(panel.detourButton.visible, "expanding restores the reroute pill while still blocked")
 state.token = "follow"
+-- 卡頓降速（0925）：滑過狀態字看原因。只在 lowfps 出現、蓋在狀態字上、不畫東西，
+-- tooltip 帶即時幀時／FPS／實際與設定視距＋門檻；收合時不出現。
+MDAD.Drive.lowFpsInfo = function() return 60, 27.4, 120, 30 end
+texts.UI_MinidoracatAutoDrive_HUDLowFpsTip = "%1|%2|%3|%4|%5|%6"
+panel:refresh(nowMs)
+check(not panel.statusTip.visible, "status tip hidden while following")
+state.token = "lowfps"
+panel:refresh(nowMs)
+check(panel.statusTip.visible and panel.statusTip.x == panel._statusX
+    and panel.statusTip.width == #panel._statusText * 7
+    and panel.statusTip.tooltip == "60|17|27|120|30|33",
+    "low-fps status shows a hover tip over the status text with live numbers and the threshold")
+click(panel.collapseButton)
+panel:refresh(nowMs)
+check(not panel.statusTip.visible, "collapsed badge never shows the low-fps tip")
+click(panel.collapseButton)
+panel:refresh(nowMs)
+check(panel.statusTip.visible, "expanding restores the low-fps tip")
+state.token = "follow"
+panel:refresh(nowMs)
+check(not panel.statusTip.visible, "low-fps tip disappears when the status clears")
 -- 讓位狀態（2026-09-06）：按著＝「手動操作中」；放手後 hudState 第 6 值＝幾秒後恢復 → 倒數文案
 state.token = "yield"
 panel:refresh(nowMs)
