@@ -148,7 +148,7 @@
     "UI_MinidoracatAutoDrive_ZombieDodge": "閃避殭屍與屍體",
     "UI_MinidoracatAutoDrive_ZombieDodge_tooltip": "預設開啟。盡量從殭屍與地面屍體旁的安全空隙通過，避免直接輾過；兩者一起選路，不會為了閃其中一個而切向另一個。會先看好前方一整段再決定往哪邊閃，不會閃過一隻又切回去撞下一隻；側移速度隨車速加快，硬障礙與道路邊界仍需通過檢查。殭屍／屍體各自的減速策略關閉時維持車速閃避，來不及完整閃開就在原本那一側盡量偏、直接撞過去；開啟時才允許放慢配合。關閉後不做此類橫向閃避。",
     "UI_MinidoracatAutoDrive_PerceptionDistance": "基礎感知距離",
-    "UI_MinidoracatAutoDrive_PerceptionDistance_tooltip": "自駕每一輪往前檢查多遠：障礙物、停在路上的車、殭屍與屍體、彎道都在這個範圍內判斷。看得越遠，越早發現前方狀況，高速時也能維持較高車速；看得越近，每幀工作量越少。\n預設 120 公尺。這是想看的距離，不是保證：畫面卡頓時實際距離會縮短（HUD 會顯示「卡頓降速」並放慢），也不會超過遊戲已載入的地圖範圍。高速、障礙與彎道會自動多看一點。\n卡頓時請調低；電腦效能足夠、常開高速時可調高。下一輪檢查就生效，不會重設路線。",
+    "UI_MinidoracatAutoDrive_PerceptionDistance_tooltip": "自駕每一輪往前檢查多遠：障礙物、停在路上的車、\n殭屍與屍體、彎道都在這個範圍內判斷。\n看得越遠越早發現狀況，高速時也能維持車速；\n看得越近，每幀工作量越少。\n\n預設 120 公尺。這是想看的距離，不是保證：\n畫面卡頓時實際距離會縮短（HUD 顯示「卡頓降速」並放慢），\n也不會超過遊戲已載入的地圖範圍。\n\n卡頓時請調低；電腦效能足夠、常開高速時可調高。\n下一輪檢查就生效，不會重設路線。",
     "UI_MinidoracatAutoDrive_Perception48": "48 公尺",
     "UI_MinidoracatAutoDrive_Perception80": "80 公尺",
     "UI_MinidoracatAutoDrive_Perception120": "120 公尺（預設）",
