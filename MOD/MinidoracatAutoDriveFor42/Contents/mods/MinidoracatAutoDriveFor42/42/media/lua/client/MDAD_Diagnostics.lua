@@ -1167,6 +1167,7 @@ local function encodePhys(phys)
     addNum("followerTarget", "ftg") -- 0907e：剖面原始目標／cap 後 desired（tgt 只是 jerk 後的命令）
     addNum("desiredTarget", "des")
     addNum("assistForce", "af")
+    addNum("brakeAssistForce", "baf")
     addStr("jerkBypass", "jerkBypass")
     addNum("curveKappa", "curveKappa")
     addBool("curveValid", "curveValid")

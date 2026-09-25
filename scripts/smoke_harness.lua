@@ -6800,6 +6800,42 @@ function drive.scenarioDeferOwner()
 end
 drive.scenarioDeferOwner()
 
+-- (brake-assist) 0925r 硬煞外力輔助：只在已知障礙前、照一般硬煞停不住（v²/2d > NEED）且 40 km/h 以上時，
+--   對質心加車頭反向中心力（零力矩），60 km/h 起滿載 0.4×mass×10×(mult/0.8)。可視距離／彎道／恢復等
+--   一般煞車理由沒有障礙距離＝不加。違規證明：NEED 改 0＝(brake-assist) 「停得住不加」紅；門檻 999＝施力紅。
+function drive.scenarioBrakeAssist()
+    assert(armDrive())
+    setHeading(dveh, 0)
+    local st = MDAD.Drive.debugSession(0)
+    local function hit(speed, dist)
+        driveReset(dveh)
+        dveh._imp.frame, dveh._imp.x, dveh._imp.z, dveh._imp.torqueY = 0, 0, 0, 0
+        dveh._speed = speed
+        st.brakeImpulseThis = false
+        MDAD.Drive.brakeAssist(st, dveh, dist)
+        return dveh._imp
+    end
+    local imp = hit(80, 20) -- 22.2 m/s、20m：需 12.3 m/s²
+    local fx, fz = dveh._fwdX, dveh._fwdY
+    local mass = st.runtimeMass or 1200
+    local mult = math.max(0.1, getGameTime():getMultiplier())
+    local want = MDAD.Drive.debugTune().BRAKE_ASSIST_RATIO * mass * 10 * (mult / 0.8)
+    checkTrue(imp.frame == 1 and imp.x * fx + imp.z * fz < 0 and math.abs(imp.torqueY) < 1e-9
+            and math.abs(math.sqrt(imp.x * imp.x + imp.z * imp.z) - want) < want * 1e-6,
+        "(brake-assist) 80 km/h、障礙 20m：車頭反向、零力矩、滿載量級（" .. tostring(imp.x) .. "）")
+    imp = hit(80, 60) -- 需 4.1 m/s²：一般硬煞停得住
+    checkEq(imp.frame, 0, "(brake-assist) 一般硬煞停得住（80 km/h、60m）：不加外力")
+    imp = hit(30, 2)
+    checkEq(imp.frame, 0, "(brake-assist) 40 km/h 以下不施外力")
+    imp = hit(80, nil)
+    checkEq(imp.frame, 0, "(brake-assist) 沒有障礙距離（可視／彎道等一般煞車）：不加外力")
+    checkEq(MDAD.Drive.emergencyBrakeDist(st, "visibility", false), nil, "(brake-assist) 可視距離煞車不算緊急")
+    checkEq(MDAD.Drive.emergencyBrakeDist(st, "curve", false), nil, "(brake-assist) 彎道煞車不算緊急")
+    MDAD.Drive.stop(0, nil)
+    assert(armDrive())
+end
+drive.scenarioBrakeAssist()
+
 function drive.scenarioCommitSpeed()
     local world = drive.world
     drive.world = {}

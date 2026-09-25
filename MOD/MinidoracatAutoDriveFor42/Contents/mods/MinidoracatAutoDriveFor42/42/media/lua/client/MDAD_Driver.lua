@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0925q"
+Drive.REV = "0925r"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -366,6 +366,14 @@ TUNE.ZOMBIE_PUSH_EXIT_KMH = 9      -- 退出遲滯：推到高於此才收（s03
 TUNE.ZOMBIE_PUSH_TARGET_MIN = 10
 TUNE.ZOMBIE_PUSH_DELAY_MS = 800
 TUNE.ZOMBIE_PUSH_SCALE = 2.0       -- 1.5→2.0（2026-09-04 使用者「可以再增加一點點」）
+-- 硬煞外力輔助（0925r 使用者裁定「一定速度之上加外力剎車」）：forceBrake 閂鎖期間實速高於 MIN 時，
+-- 對質心加一道沿車頭反向的中心力（零力矩，不影響轉向）。比例與前推 assist 同尺度（ratio×mass×
+-- IMPULSE_SCALE），MIN→FULL 之間線性爬到 RATIO。E2E meet park MAX：多人連線停車只在約 55m 內可見，
+-- 賽車硬煞實測約 7 m/s²，95 km/h 停不住。
+TUNE.BRAKE_ASSIST_MIN_KMH = 40
+TUNE.BRAKE_ASSIST_FULL_KMH = 60
+TUNE.BRAKE_ASSIST_RATIO = 0.4
+TUNE.BRAKE_ASSIST_NEED = 6.0 -- 需要的減速度（m/s²）超過一般硬煞可靠能力才算緊急
 -- 殭屍軟縫（2026-09-06；競品 Derpy `optimize_z` 把殭屍當軟縫拉軌跡，我們只出一個橫向目標）：
 -- 每輪掃描完成、持有權 free（無 dodge／RETURN／停留／調頭）時，用 Sensor 的殭屍 (s,l) 點雲
 -- 在常駐 lane ±DELTA 的可行帶找離殭屍區間最近的 lane（Corridor.softZombieLane），時間平滑
@@ -2311,6 +2319,7 @@ local function applySteering(
     -- Follower 的 yaw 增益估計要拿「真的施出去」的 steer（含 cross-track 與夾限；耦力調頭
     -- 是力偶不是側推，不進估計）——0908a 弧段自適應前饋
     s.fstate.appliedSteer = (not coupled) and steer or nil
+    if s.brakeImpulseThis then return 0, 0 end -- 本幀已施硬煞外力（單槽 addImpulse）
     if type(assistForce) ~= "number" or assistForce * 0 ~= 0
             or assistForce < 0 then assistForce = 0 end
     if coupled then assistForce = 0 end
@@ -2409,6 +2418,51 @@ local function longitudinalAssistForce(s, speedKmh, targetSpeed, mult, rough, zo
     if massScale > 2 then massScale = 2 end
     if massScale < 1 then massScale = 1 end
     return ratio * mass * massScale * IMPULSE_SCALE * (mult / MULT_NORM)
+end
+
+-- 硬煞外力輔助（TUNE.BRAKE_ASSIST_*）：只在已知障礙前（dist＝到障礙起點的淨距）照一般硬煞
+-- 減速度停不住時才施（need＝v²／2d 超過 NEED）；可視距離／彎道／回線等一般煞車不加，避免平常突然重煞。
+-- 每幀最多一次 addImpulse，本幀已施則 applySteering 不再施力。
+function Drive.brakeAssist(s, vehicle, dist)
+    if s.brakeImpulseThis or not MDADDynamics.finite(dist) then return end
+    local v = vehicle:getCurrentSpeedKmHour()
+    if not MDADDynamics.finite(v) or v <= TUNE.BRAKE_ASSIST_MIN_KMH then return end
+    local vm = v / 3.6
+    if dist < 0.5 then dist = 0.5 end
+    if vm * vm / (2 * dist) <= TUNE.BRAKE_ASSIST_NEED then return end
+    local k = (v - TUNE.BRAKE_ASSIST_MIN_KMH) / (TUNE.BRAKE_ASSIST_FULL_KMH - TUNE.BRAKE_ASSIST_MIN_KMH)
+    if k > 1 then k = 1 end
+    local mass = s.runtimeMass
+    if not MDADDynamics.finite(mass) or mass < 1 then mass = MASS_FALLBACK end
+    local mult = getGameTime():getMultiplier()
+    if mult < MULT_MIN then mult = MULT_MIN elseif mult > MULT_MAX then mult = MULT_MAX end
+    local rel = BaseVehicle.allocVector3f()
+    vehicle:getForwardVector(rel)
+    local fx, fy = rel:x(), rel:z()
+    local len = sqrt(fx * fx + fy * fy)
+    if MDADDynamics.finite(len) and len > 1e-3 then
+        local f = TUNE.BRAKE_ASSIST_RATIO * k * mass * IMPULSE_SCALE * (mult / MULT_NORM) / len
+        local imp = BaseVehicle.allocVector3f()
+        imp:set(-f * fx, 0, -f * fy)
+        rel:set(0, 0, 0)
+        vehicle:addImpulse(imp, rel)
+        BaseVehicle.releaseVector3f(imp)
+        s.brakeImpulseThis, s.brakeAssistForce = true, f * len
+    end
+    BaseVehicle.releaseVector3f(rel)
+end
+
+-- 緊急外力煞車的障礙距離：只有「等待繞行的障礙群」與「已判定堵住的障礙」有確定距離；
+-- 其他煞車理由回 nil（不加外力）
+function Drive.emergencyBrakeDist(s, reason, blockedStop)
+    local halfL = s.vehicleProfile and s.vehicleProfile.halfL or 2
+    if reason == "dodge-defer" and MDADDynamics.finite(s.dodgeDeferS) then
+        return s.dodgeDeferS - s.lastSNow - halfL
+    end
+    if blockedStop and MDADDynamics.finite(s.blockS) and s.blockS > 0 then
+        return s.blockS - s.lastSNow - halfL
+    end
+    return nil
 end
 
 local function commandForceBrake(s, vehicle, now, why)
@@ -3961,6 +4015,7 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     -- 量不到玩家 fps——只能從取樣間隔反推。三個純量補上。
     phys.hardBrakeReason = s.lastHardBrakeReason
     phys.forceBrakeThis = s.forceBrakeThis
+    phys.brakeAssistForce = s.brakeAssistForce
     phys.frameMs = s.frameMs
     return phys
 end
@@ -6472,6 +6527,7 @@ end
 
 local function replan(s, vehicle, playerNum)
     s.dodgeDeferCap = s.dodgeHandoffHold and 0 or -1
+    s.dodgeDeferS = nil
     s.steepDeficitM = -1
     local sen = s.sensor
     if not sen.ready then return end
@@ -6873,6 +6929,7 @@ local function replan(s, vehicle, playerNum)
             s.planSig = -1 -- 點雲 sig 不變也要每輪重判（車一前進就進窗）
             s.dodgeDeferCap = MDADDynamics.approachCapKmh(
                 b - s.lastSNow - s.vehicleProfile.halfL, 0, 0.5, s.safeBrake)
+            s.dodgeDeferS = b
             diagEvent(s, playerNum, "dodge", { phase = "defer", why = "window",
                 b = b, c = c, rs = s.lastSNow, span = TUNE.DODGE_OV_SPAN, cap = s.dodgeDeferCap })
             if getDebug() then
@@ -6900,6 +6957,7 @@ local function replan(s, vehicle, playerNum)
                 s.planSig = -1
                 s.dodgeDeferCap = MDADDynamics.approachCapKmh(
                     b - s.lastSNow - s.vehicleProfile.halfL, 0, 0.5, s.safeBrake)
+                s.dodgeDeferS = b
                 diagEvent(s, playerNum, "dodge", { phase = "defer", why = why,
                     b = b, c = c, d = dS, rs = s.lastSNow, span = TUNE.DODGE_OV_SPAN,
                     s = sen.unloadedS, cap = s.dodgeDeferCap })
@@ -7224,6 +7282,7 @@ local function replan(s, vehicle, playerNum)
         -- 也不是 b——貼著停車停下，對向車過了之後側移沒有跑道，只能倒車（E2E park 變體兩輪）。
         -- 減速度用鬆油門（safeCoast）：定速提早收油、不靠一秒鎖輪的硬煞（鎖輪時轉向無效）。
         s.dodgeDeferCap = Drive.trafficStopCap(s, b, offL)
+        s.dodgeDeferS = b
         diagEvent(s, playerNum, "dodge", { phase = "defer", why = "traffic",
             offL = offL, a = a, b = b, d = d, rs = s.lastSNow, cap = s.dodgeDeferCap })
         -- 停在障礙前等對向車：提示一次（連續等待 5 秒內不重複；換一次等待會再提示）
@@ -7259,6 +7318,7 @@ local function replan(s, vehicle, playerNum)
                 mode = "clear"
                 s.planSig = -1
                 s.dodgeDeferCap = MDADDynamics.approachCapKmh(dist, capK, 0.5, decel)
+                s.dodgeDeferS = b
                 diagEvent(s, playerNum, "dodge", { phase = "defer", why = "speed",
                     offL = offL, rs = s.lastSNow, cap = capK, spd = v, b = b })
                 if getDebug() then
@@ -7427,6 +7487,7 @@ local function replan(s, vehicle, playerNum)
         else decel = decel * TUNE.APPROACH_BRAKE_FRAC end
         local dist = (finite(a) and a or s.stayHoldEndS) - s.lastSNow - s.vehicleProfile.halfL
         s.dodgeDeferCap = MDADDynamics.approachCapKmh(dist, 0, 0.5, decel)
+        s.dodgeDeferS = s.lastSNow + s.vehicleProfile.halfL + dist
         if getDebug() then
             print(string.format("%spn=%d stay-hold: chain candidates failed before c (rs=%.1f c=%.1f)",
                 LOG, playerNum, s.lastSNow, s.stayHoldEndS))
@@ -7746,6 +7807,7 @@ local function stepFollow(s, vehicle, playerNum, now)
     s.diagLatDev = nil
     s.forceBrakeThis = false
     s.lastAssistForce = 0
+    s.brakeImpulseThis, s.brakeAssistForce = false, 0
 
     -- 池向量：一顆當 forward／relPos 共用，一顆在 applySteering 內當 impulse。
     -- 這段中間沒有 early return，release 一定會執行。
@@ -9059,6 +9121,7 @@ local function stepFollow(s, vehicle, playerNum, now)
         if hardBrakeReason ~= nil then
             vehicle:setRegulator(false)
             commandForceBrake(s, vehicle, now, hardBrakeReason)
+            Drive.brakeAssist(s, vehicle, Drive.emergencyBrakeDist(s, hardBrakeReason, blockedStop))
             if hardCapV <= 0 then targetSpeed = 0 end
         elseif s.dynamicsFault then
             vehicle:setRegulator(false)
@@ -9081,6 +9144,7 @@ local function stepFollow(s, vehicle, playerNum, now)
             -- 卡死偵測會接手升級成倒車脫困→紅字停車，整條鏈自然收斂。
             vehicle:setRegulator(false)
             commandForceBrake(s, vehicle, now, "blocked")
+            Drive.brakeAssist(s, vehicle, Drive.emergencyBrakeDist(s, "blocked", true))
             targetSpeed = 0
             s.lastCapReason = "blocked"
         else
