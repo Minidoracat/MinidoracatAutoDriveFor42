@@ -1739,9 +1739,25 @@ function MDADHUDPanel:refreshSpeedTip(token, cruise, now)
         local function n(v) return type(v) == "number" and v >= 0 and string.format("%d", math.floor(v + 0.5)) or "--" end
         local why = getText(category and ("UI_MinidoracatAutoDrive_SlowWhy_" .. category)
             or (driving and "UI_MinidoracatAutoDrive_SlowWhy_none" or "UI_MinidoracatAutoDrive_SlowWhy_idle"))
-        self._speedTip = getText("UI_MinidoracatAutoDrive_HUDSpeedTip", n(vmax), n(sandMax), n(gearCap), n(cruise),
-            n(target), why, n(curveCap), n(visCap)) .. "\n" .. getText("UI_MinidoracatAutoDrive_HUDSpeedPinOn")
-        if self._speedPin then self:buildPinRows(n, vmax, sandMax, gearCap, cruise, target, why, category, curveCap, visCap) end
+        -- 伺服器速限下的真實可達速度：引擎推力在「放大後車速」超過極速起遞減、極速+20 歸零；
+        -- 取放大後＝極速+15 反解（本機實測極速 70／速限 70 停在 58–59）。二分只在 refresh 跑。
+        local serverL = type(Drive.serverSpeedLimit) == "function" and Drive.serverSpeedLimit() or nil
+        local realV = vmax
+        if serverL and type(vmax) == "number" and vmax > 0 then
+            local k, goal, lo, hi = 120 / serverL - 1, vmax + 15, 0, vmax + 15
+            for _ = 1, 20 do
+                local mid = (lo + hi) / 2
+                if mid * (1 + k * (mid / serverL) ^ 2) < goal then lo = mid else hi = mid end
+            end
+            realV = math.min(vmax, lo)
+        end
+        local vehText = n(vmax)
+        if realV ~= vmax then vehText = getText("UI_MinidoracatAutoDrive_HUDSpeedVehicleReal", n(vmax), n(realV)) end
+        local serverText = serverL and n(serverL) or getText("UI_MinidoracatAutoDrive_HUDSpeedServerNone")
+        self._speedTip = getText("UI_MinidoracatAutoDrive_HUDSpeedTip", vehText, n(sandMax), n(gearCap), n(cruise),
+            n(target), why, n(curveCap), n(visCap), serverText) .. "\n" .. getText("UI_MinidoracatAutoDrive_HUDSpeedPinOn")
+        if self._speedPin then self:buildPinRows(n, vmax, sandMax, gearCap, cruise, target, why, category, curveCap, visCap,
+            vehText, realV, serverL, serverText) end
     end
     local slowed = token == "follow" and category ~= nil and type(cruise) == "number" and cruise > 0
         and type(target) == "number"
@@ -1768,7 +1784,8 @@ end
 -- 固定顯示的速度明細：左欄名、右數值。上限類數值高於巡航＝綠（有餘裕），
 -- 壓在巡航以下＝紅（正在減速）；目標到巡航＝綠、被壓低＝琥珀。顏色之外，末列圖例與
 -- 「主因」一列用文字說明，不靠顏色單獨表意。只在 250ms refresh 建表與量寬。
-function MDADHUDPanel:buildPinRows(n, vmax, sandMax, gearCap, cruise, target, why, category, curveCap, visCap)
+function MDADHUDPanel:buildPinRows(n, vmax, sandMax, gearCap, cruise, target, why, category, curveCap, visCap,
+        vehText, realV, serverL, serverText)
     local cr = type(cruise) == "number" and cruise or 0
     local function limit(v)
         if type(v) ~= "number" or v < 0 then return C.muted end
@@ -1779,7 +1796,9 @@ function MDADHUDPanel:buildPinRows(n, vmax, sandMax, gearCap, cruise, target, wh
         return v <= cr + 0.5 and C.amber or C.green
     end
     local rows = {
-        { "UI_MinidoracatAutoDrive_HUDSpeedRowVehicle", n(vmax), capOf(vmax) },
+        { "UI_MinidoracatAutoDrive_HUDSpeedRowVehicle", vehText, capOf(realV) },
+        { "UI_MinidoracatAutoDrive_HUDSpeedRowServer", serverText,
+            serverL and realV ~= vmax and C.amber or C.green },
         { "UI_MinidoracatAutoDrive_HUDSpeedRowSandbox", n(sandMax), capOf(sandMax) },
         { "UI_MinidoracatAutoDrive_HUDSpeedRowGear", n(gearCap), capOf(gearCap) },
         { "UI_MinidoracatAutoDrive_HUDCruiseCap", n(cruise), C.text, true },
@@ -1881,7 +1900,7 @@ function MDADHUDPanel:drawSpeedPin(target)
         target:drawText(r[1], x + 14, ty, labelColor.r, labelColor.g, labelColor.b, labelColor.a, UIFont.Small)
         target:drawTextRight(r[2], valueRight, ty, c.r, c.g, c.b, c.a, UIFont.Small)
         ty = ty + lineH
-        if i == 3 or i == 6 then
+        if i == 4 or i == 7 then
             target:drawRect(x + 6, ty + 1, w - 12, 1, C.faint.a, C.faint.r, C.faint.g, C.faint.b)
             ty = ty + 3
         end

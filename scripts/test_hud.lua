@@ -68,6 +68,8 @@ local texts = {
     UI_MinidoracatAutoDrive_HUDStatusSlow_other = "Safety: slower",
     UI_MinidoracatAutoDrive_HUDStatusSlow_plan = "Easing off",
     UI_MinidoracatAutoDrive_HUDSpeedTip = "%1|%2|%3|%4|%5|%6|%7|%8",
+    UI_MinidoracatAutoDrive_HUDSpeedVehicleReal = "%1~%2",
+    UI_MinidoracatAutoDrive_HUDSpeedServerNone = "NOLIMIT",
     UI_MinidoracatAutoDrive_HUDSpeed = "SPEED",
     UI_MinidoracatAutoDrive_SlowWhy_curve = "CURVE",
     UI_MinidoracatAutoDrive_SlowWhy_none = "NONE",
@@ -1124,17 +1126,28 @@ do
     panel:refresh(t0 + 4500)
     local rows = panel._pinRows
     check(panel._speedPin and optionSets.MinidoracatAutoDrive:getOption("SpeedDetails"):getValue() == true
-        and rows ~= nil and #rows == 8,
+        and rows ~= nil and #rows == 9,
         "the gauge button turns on the speed details option")
     check(panel.speedButton.textColor and panel.speedButton.textColor.g > panel.speedButton.textColor.r,
         "speed-details button shows its on state in green like the other toggles")
-    check(rows and rows[5][2] == "25" and rows[5][3] == rows[8][3] and rows[5][3] ~= rows[1][3],
+    check(rows and rows[6][2] == "25" and rows[6][3] == rows[9][3] and rows[6][3] ~= rows[1][3],
         "a limit below the cruise limit is drawn as a slowdown, unlike headroom")
+    -- 伺服器速限 70：極速 70 的車實際只到 ~58（引擎以放大後車速對照極速），車輛列顯示換算值
+    MDAD.Drive.serverSpeedLimit = function() return 70 end
+    info[1] = 70
+    panel:refresh(t0 + 4600)
+    rows = panel._pinRows
+    local real = tonumber(tostring(rows[1][2]):match("~(%d+)"))
+    check(rows[2][2] == "70" and real and real >= 55 and real <= 61 and rows[1][3] == rows[2][3],
+        "server speed limit row shows and the vehicle top speed is converted to what is reachable ("
+            .. tostring(rows[1][2]) .. ")")
+    MDAD.Drive.serverSpeedLimit = nil
+    info[1] = 120
     info[6], info[4] = 200, 120
     panel:refresh(t0 + 4800)
     rows = panel._pinRows
-    check(rows and rows[5][3] ~= rows[6][3] and rows[5][3] == rows[7][3] and rows[7][2] == "120"
-        and rows[8][2] == "NONE" and rows[8][3] == rows[7][3],
+    check(rows and rows[6][3] ~= rows[7][3] and rows[6][3] == rows[8][3] and rows[8][2] == "120"
+        and rows[9][2] == "NONE" and rows[9][3] == rows[8][3],
         "a limit with headroom and a target at the cruise limit share the headroom color")
     -- 明細框是獨立頂層元素（畫在 HUD 範圍外實機不顯示）：可見性跟 HUD／收合／再點一下走
     local box = panel.pinBox
@@ -1144,7 +1157,7 @@ do
         "pinned details are a separate box docked above the HUD")
     box.drawTextRight = function() pinDraws = pinDraws + 1 end
     box:prerender()
-    check(pinDraws == 8, "pinned details draw every row (" .. pinDraws .. ")")
+    check(pinDraws == 9, "pinned details draw every row (" .. pinDraws .. ")")
     click(panel.collapseButton)
     panel:refresh(t0 + 5000)
     check(box.visible, "the details window is separate: collapsing the HUD keeps it")
@@ -1171,8 +1184,8 @@ do
     info[4], info[5], info[6], info[7] = nil, nil, nil, nil
     panel:refresh(t0 + 5400)
     rows = panel._pinRows
-    check(panel.capTip.visible and box.visible and rows and rows[1][2] == "120" and rows[7][2] == "--"
-        and rows[8][2] == "IDLE", "details stay available while auto-drive is stopped")
+    check(panel.capTip.visible and box.visible and rows and rows[1][2] == "120" and rows[8][2] == "--"
+        and rows[9][2] == "IDLE", "details stay available while auto-drive is stopped")
     state.active = true
     click(panel.capTip)
     panel:refresh(t0 + 5500)

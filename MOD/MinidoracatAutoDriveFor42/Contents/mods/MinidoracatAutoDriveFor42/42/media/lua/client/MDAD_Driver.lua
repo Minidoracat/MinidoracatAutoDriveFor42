@@ -1251,6 +1251,17 @@ function Drive.slowdownInfo(playerNum)
         TUNE.ZOMBIE_CAP_1, TUNE.ZOMBIE_CAP_4, TUNE.ZOMBIE_CAP_8, TUNE.CORPSE_CAP
 end
 
+-- 伺服器速限（ServerOptions SpeedLimit）：MP 且 <120 時回 km/h，否則 nil（無放大效果）。
+-- 引擎以 v×lerp(1, fake, (v/L)²) 對照車輛極速（CarController.java:138-145、655-665），
+-- 故有速限時真實可達速度低於車輛極速；HUD 速度明細據此換算。
+function Drive.serverSpeedLimit()
+    local fn = BaseVehicle and BaseVehicle.getFakeSpeedModifier
+    if type(fn) ~= "function" then return nil end
+    local ok, fake = pcall(fn)
+    if not ok or not MDADDynamics.finite(fake) or fake <= 1 then return nil end
+    return 120 / fake
+end
+
 -- HUD 降速說明（巡航上限／降速狀態的滑鼠提示）：只回純量，250ms refresh 讀。
 -- 回 vehicleMax, sandboxMax, gearCap, target, capReason, curveCap, visibilityCap；
 -- 未在自駕時只回前三項（上限組成），後四項 nil。
