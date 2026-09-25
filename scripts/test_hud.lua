@@ -1093,6 +1093,16 @@ do
     check(panel.capTip.visible and tostring(panel.capTip.tooltip):sub(1, 30) == "120|120|--|120|18|CURVE|25|104",
         "cruise-limit hover shows the speed breakdown (" .. tostring(panel.capTip.tooltip) .. ")")
     check(panel._statusText == "FOLLOW", "slow status waits before replacing the normal status")
+    -- 巡航上限畫成立體按鈕：欄名／數值由按鈕畫，面板不重畫（否則按鈕底色蓋住面板的字）
+    local capDraws, chipDraws = 0, 0
+    panel.drawText = function(_, text) if text == panel._capText then capDraws = capDraws + 1 end end
+    panel:prerender()
+    panel.drawText = nil
+    panel.capTip.drawText = function() chipDraws = chipDraws + 1 end
+    panel.capTip:render()
+    panel.capTip.drawText = nil
+    check(capDraws == 0 and chipDraws == 2 and panel.capTip.valueText == panel._capText,
+        "cruise-limit button draws its own label and value (" .. capDraws .. "/" .. chipDraws .. ")")
     panel:refresh(t0 + 2100)
     check(panel._statusText == "CORNER" and panel.statusTip.visible
         and panel.statusTip.tooltip == panel.capTip.tooltip,

@@ -771,8 +771,34 @@ local SLOW_RATIO, SLOW_ON_MS, SLOW_OFF_MS = 0.7, 2000, 1000
 function MDADHUDTipZone:prerender() self:updateTooltip() end
 function MDADHUDTipZone:render() end
 
--- 巡航上限區塊：滑過看降速明細、點一下也能切速度明細（主開關是策略列的車速錶鈕）。透明不畫。
+-- 巡航上限＝立體按鈕（滑過看降速明細、點一下切速度明細）：凸起的斜面（上左亮、下右暗），
+-- 滑過提亮，明細開著時改凹下＋琥珀頂線。欄名與數值由按鈕自己畫（子元件畫在面板 prerender
+-- 之上，底色會蓋住面板畫的字）；字串／座標／顏色都由 refresh 寫進欄位，這裡只讀。
 MDADHUDCapZone = MDADHUDTipZone:derive("MDADHUDCapZone")
+local CAP_FACE = { r = 0.27, g = 0.27, b = 0.26, a = 0.95 }
+local CAP_FACE_HOVER = { r = 0.34, g = 0.34, b = 0.32, a = 0.97 }
+local CAP_FACE_DOWN = { r = 0.10, g = 0.10, b = 0.10, a = 0.95 }
+local CAP_LIGHT = { r = 0.55, g = 0.55, b = 0.52, a = 0.9 }
+function MDADHUDCapZone:render()
+    local w, h, on = self.width, self.height, self.pinned
+    local face = on and CAP_FACE_DOWN or self.mouseOver and CAP_FACE_HOVER or CAP_FACE
+    local hi, lo = on and C.shadow or CAP_LIGHT, on and CAP_LIGHT or C.shadow
+    self:drawRect(1, 1, w - 2, h - 2, face.a, face.r, face.g, face.b)
+    self:drawRect(1, 0, w - 2, 1, hi.a, hi.r, hi.g, hi.b)          -- 上緣
+    self:drawRect(0, 1, 1, h - 2, hi.a, hi.r, hi.g, hi.b)          -- 左緣
+    self:drawRect(1, h - 1, w - 2, 1, lo.a, lo.r, lo.g, lo.b)      -- 下緣
+    self:drawRect(w - 1, 1, 1, h - 2, lo.a, lo.r, lo.g, lo.b)      -- 右緣
+    if not on then self:drawRect(2, h - 2, w - 4, 1, 0.35, 0, 0, 0) end -- 凸起的落影
+    if on then
+        local a = self.valueColor
+        self:drawRect(2, 1, w - 4, 1, a.a, a.r, a.g, a.b)
+    end
+    local dy = on and 1 or 0 -- 按下去字也跟著沉 1px
+    local lc = (on or self.mouseOver) and C.text or C.muted
+    self:drawText(self.labelText, self.labelX, self.labelY + dy, lc.r, lc.g, lc.b, lc.a, UIFont.Small)
+    local vc = self.valueColor
+    self:drawText(self.valueText, self.valueX, self.valueY + dy, vc.r, vc.g, vc.b, vc.a, UIFont.Small)
+end
 
 function MDADHUDChainButton:render()
     ISButton.render(self)
@@ -1006,6 +1032,7 @@ function MDADHUDPanel:createChildren()
     self.statusTip:setVisible(false)
     self.capTip = makeButton(self, "", MDADHUDPanel.onSpeedPin, MDADHUDCapZone)
     self.capTip:setVisible(false)
+    self._capChip = false
     if self.pinBox then self.pinBox:setVisible(false) end
     self.volumeSlider = MDADHUDSlider:new(self)
     self.volumeSlider:initialise()
@@ -1065,6 +1092,7 @@ function MDADHUDPanel:setControlsVisible(gearsOn, cycleOn, policiesOn, actionOn,
     self.detourButton:setVisible(self._detourAllowed and self._blocked == true)
     self.statusTip:setVisible(false) -- 版面變了；下一輪 refresh 依新位置重放
     self.capTip:setVisible(false)
+    self._capChip = false
     if self.pinBox then self.pinBox:setVisible(false) end
 end
 
@@ -1090,7 +1118,7 @@ local function measure(self, scale)
         textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDDetourButton")) + 12)
     m.speedValueW = textWidth(UIFont.Medium, "120")
     m.unitW = textWidth(UIFont.Small, self._unitText)
-    m.capLabelW = textWidth(UIFont.Small, self._capLabel)
+    m.capLabelW = textWidth(UIFont.Small, self._capLabel) + 6 -- 立體按鈕左右各 3px 內距
     m.capValueW = textWidth(UIFont.Small, "120")
     m.actionW = maximum(scaled(58, scale), maximum(
         textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_Start")),
@@ -1242,6 +1270,7 @@ function MDADHUDPanel:layoutWings(scale, m)
     self.detourButton:setVisible(self._detourAllowed and self._blocked == true)
     self.statusTip:setVisible(false) -- 版面變了；下一輪 refresh 依新位置重放
     self.capTip:setVisible(false)
+    self._capChip = false
     if self.pinBox then self.pinBox:setVisible(false) end
 
     -- 左翼：上列狀態＋現速，下列巡航上限／行車時間兩欄＋主鈕（摺起＝狀態燈＋現速＋裸時間＋chevron）
@@ -1888,10 +1917,18 @@ function MDADHUDPanel:placeDetourButton()
             self._capValueX + textWidth(UIFont.Small, self._capText))
         local y0 = math.min(self._capLabelY, self._capValueY)
         local y1 = math.max(self._capLabelY, self._capValueY) + (self._fontH or 16)
-        setButtonRect(self.capTip, x0, y0, x1 - x0, y1 - y0)
-        self.capTip.tooltip = self._speedTip
+        local padX, padY = 3, 1 -- capLabelW 已多留 CAP_PAD，右側不會壓到下一欄
+        local chip = self.capTip
+        chip.labelText, chip.valueText = self._capLabel, self._capText
+        chip.labelX, chip.labelY = self._capX - x0 + padX, self._capLabelY - y0 + padY
+        chip.valueX, chip.valueY = self._capValueX - x0 + padX, self._capValueY - y0 + padY
+        chip.valueColor = self._style == STYLE_FAMILY and C.familyAccent or C.amber
+        chip.pinned = self._speedPin
+        setButtonRect(chip, x0 - padX, y0 - padY, x1 - x0 + padX * 2, y1 - y0 + padY * 2)
+        chip.tooltip = self._speedTip
     end
     self.capTip:setVisible(capTip)
+    self._capChip = capTip -- 按鈕自己畫欄名／數值，面板略過
     self:placeSpeedPin()
 end
 
@@ -2498,10 +2535,12 @@ function MDADHUDPanel:renderWings()
         self:drawTripText()
         self:drawText(self._unitText, self._unitX, self._speedY,
             C.muted.r, C.muted.g, C.muted.b, C.muted.a, UIFont.Small)
-        self:drawText(self._capLabel, self._capX, self._capLabelY,
-            C.muted.r, C.muted.g, C.muted.b, C.muted.a, UIFont.Small)
-        self:drawText(self._capText, self._capValueX, self._capValueY,
-            C.amber.r, C.amber.g, C.amber.b, C.amber.a, UIFont.Small)
+        if not self._capChip then
+            self:drawText(self._capLabel, self._capX, self._capLabelY,
+                C.muted.r, C.muted.g, C.muted.b, C.muted.a, UIFont.Small)
+            self:drawText(self._capText, self._capValueX, self._capValueY,
+                C.amber.r, C.amber.g, C.amber.b, C.amber.a, UIFont.Small)
+        end
         self:drawText(self._timeLabel, self._timeX, self._timeLabelY,
             C.muted.r, C.muted.g, C.muted.b, C.muted.a, UIFont.Small)
         if self._wingLDividerY then
@@ -2564,7 +2603,7 @@ function MDADHUDPanel:prerender()
         self:drawText(self._unitText, self._unitX, self._unitY,
             C.muted.r, C.muted.g, C.muted.b, C.muted.a, UIFont.Small)
     end
-    if self._capX then
+    if self._capX and not self._capChip then
         self:drawText(self._capLabel, self._capX, self._capLabelY,
             C.muted.r, C.muted.g, C.muted.b, C.muted.a, UIFont.Small)
         local capColor = self._style == STYLE_FAMILY and C.familyAccent or C.amber
