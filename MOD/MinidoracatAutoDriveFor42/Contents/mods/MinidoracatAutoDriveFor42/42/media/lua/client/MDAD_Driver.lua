@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0925o"
+Drive.REV = "0925p"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -377,8 +377,14 @@ TUNE.ZOMBIE_LANE_DELTA = 6.0      -- 離常駐 lane 的最大側移（m；防呆
 TUNE.ZOMBIE_LANE_LAMBDA = 1.0     -- 連續項權重：cost＝(u−base)²＋λ(u−prev)²
 TUNE.ZOMBIE_LANE_TAU_MS = 300     -- 目標平滑時間常數（0925d 600→300：尾段收斂太慢，交錯殭屍換邊來不及）
 TUNE.ZOMBIE_LANE_RATE_MPS = 1.0   -- lane 變化速率上限（10 m/s 下對前視點只多 6°；瞬跳 1m 會觸發 align 減速）
-TUNE.ZOMBIE_LANE_RATE_PER_MPS = 0.15 -- 速率＝車速×此值（車頭約偏 8.5°；0925d 0.1→0.15）；下限 RATE_MPS
-TUNE.ZOMBIE_LANE_RATE_MAX = 3.5     -- 速率上限（m/s；0925d 2.5→3.5）
+TUNE.ZOMBIE_LANE_RATE_PER_MPS = 0.25 -- 速率＝車速×此值（0925d 0.1→0.15；0925p 0.25：路夠寬時大幅快速閃避是允許的）；下限 RATE_MPS
+TUNE.ZOMBIE_LANE_RATE_MAX = 6.0     -- 速率上限（m/s；0925d 2.5→3.5；0925p 6：MAX 檔 110 km/h 車身只橫移 1.4 m/s，擦邊 d 0.02）
+-- 高速多留的餘裕（0925p E2E road MAX：11 次撞擊 9 次是 d≤0.04 的擦邊）：PREFER 從 SLOW_KMH 起線性加到
+-- FAST_KMH 再多 EXTRA 公尺；段不夠寬仍退回貼 R（softZombieLane 既有行為）。
+TUNE.ZOMBIE_PREFER_SLOW_KMH = 40
+TUNE.ZOMBIE_PREFER_FAST_KMH = 110
+TUNE.ZOMBIE_PREFER_EXTRA_M = 0.7
+TUNE.ZOMBIE_CROSS_S = 1.5          -- 到最近威脅不足此秒數時，選縫先限車身這一側（不橫越牠的現位）
 TUNE.ZOMBIE_SWITCH_LAG_S = 0.5      -- 群與群之間換邊：先止住上一段側移再反向的落後（秒）
 TUNE.ZOMBIE_PREDICT_S = 2.5         -- 殭屍橫向位置外推的最長秒數（朝車走的殭屍）
 TUNE.ZOMBIE_CLUSTER_M = 1.0         -- 最近一群＝最近威脅點起「一個車長＋此值」內的軟避讓點
@@ -2611,6 +2617,60 @@ function Drive.softReach(dist, vms, speedKmh, lag)
     return Drive.softLaneRate(speedKmh) * t
 end
 
+-- 離殭屍區間邊多留的距離（softZombieLane 的 prefer）：低速 PREFER、高速多 EXTRA（車身追線誤差
+-- 與殭屍撲擊隨車速放大；段不夠寬時 softZombieLane 自行退回貼 R）。
+function Drive.softPrefer(speedKmh)
+    local t = 0
+    if finite(speedKmh) then
+        t = (speedKmh - TUNE.ZOMBIE_PREFER_SLOW_KMH) / (TUNE.ZOMBIE_PREFER_FAST_KMH - TUNE.ZOMBIE_PREFER_SLOW_KMH)
+        if t < 0 then t = 0 elseif t > 1 then t = 1 end
+    end
+    return MDADCorridor.ZOMBIE_PREFER + TUNE.ZOMBIE_PREFER_EXTRA_M * t
+end
+
+-- u 到 [sFrom, sEnd] 內最近軟避讓點的橫向距離
+function Drive.softClearAt(pS, pL, predN, sFrom, sEnd, u)
+    local dmin = 1e9
+    for i = 1, predN do
+        local zs = pS[i]
+        if zs >= sFrom and zs <= sEnd then
+            local d = math.abs(pL[i] - u)
+            if d < dmin then dmin = d end
+        end
+    end
+    return dmin
+end
+
+-- 無縫時的最不壞 lane（0925p E2E road MAX：路肩也有殭屍、整條帶無縫時舊制停在原 lane，
+-- 車貼路緣 1.5 秒連撞兩隻）：候選＝帶兩端＋相鄰殭屍的中點，取離最近殭屍最遠者；同分取離 cur 近者。
+-- 零配置，O(n²)（n＝最近一群的點數）。
+function Drive.softBest(pS, pL, predN, sFrom, sEnd, lo, hi, cur)
+    local bestU, bestD = lo, Drive.softClearAt(pS, pL, predN, sFrom, sEnd, lo)
+    for k = 0, predN do
+        local u
+        if k == 0 then
+            u = hi
+        else
+            local zs = pS[k]
+            if zs >= sFrom and zs <= sEnd then
+                local nb = nil -- 右側最近鄰
+                for j = 1, predN do
+                    local zj = pS[j]
+                    if zj >= sFrom and zj <= sEnd and pL[j] > pL[k] and (nb == nil or pL[j] < nb) then nb = pL[j] end
+                end
+                if nb ~= nil then u = (pL[k] + nb) * 0.5 end
+            end
+        end
+        if u ~= nil and u >= lo and u <= hi then
+            local d = Drive.softClearAt(pS, pL, predN, sFrom, sEnd, u)
+            if d > bestD + 1e-6 or (d > bestD - 1e-6 and math.abs(u - cur) < math.abs(bestU - cur)) then
+                bestU, bestD = u, d
+            end
+        end
+    end
+    return bestU
+end
+
 -- 軟縫選 lane：在 [sFrom, sEnd] 內找離殭屍區間最近的 lane，並以逐點實際落點（laneBiasAt）複驗；
 -- 彎內混合把提案夾回殭屍佔位時只再問另一側。回 (lane 或 nil, why＝gap／nogap／curve)。
 -- prefer（選填）傳給 softZombieLane：離殭屍區間邊多留多少（nil＝預設 PREFER）。
@@ -2669,7 +2729,7 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
     end
     if not on or sen.zomOverflow or s.fstate.rotating or finite(s.stayLanePending)
             or type(MDADCorridor) ~= "table" or type(MDADCorridor.softZombieLane) ~= "function" then
-        s.zombieAvoidUntilS = nil
+        s.zombieAvoidUntilS, s.zomBlindN = nil, 0
         s.zombiePlanWhy, s.zombieWhy = nil, nil
         if cur ~= nil then
             s.zombieLane = nil
@@ -2697,6 +2757,7 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
     local aLo, aHi, why = 0, 0, "none"
     local latNow = finite(s.lastLatSigned) and s.lastLatSigned or cur
     local R = s.vehicleProfile.halfW + MDADCorridor.ZOMBIE_R + MDADCorridor.ZOMBIE_MARGIN
+    local prefer = Drive.softPrefer(speedKmh)
     local threatS, threatL, shiftS, nextCap = nil, nil, nil, nil
     local hasZombie, hasCorpse, slowN = false, false, 0
     local slowLo, slowHi = 0, 0
@@ -2705,13 +2766,24 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
     local vms = speedKmh and speedKmh / 3.6 or 0
     if vms < 3 then vms = 3 end
     local predN, pS, pL = 0, s.zomPredS, s.zomPredL
-    for i = 1, sen.zomN do
-        local zs, zl = sen.zomS[i], sen.zomL[i]
+    -- 盲區記憶（0925p E2E road MAX：殭屍進到車前 2m 內 Sensor 不再收〔SCAN_NEAR〕，當輪「清空」
+    -- 釋放軟縫、lane 拉回常駐線正好撞上 l 3.1 那隻）：上一輪記下即將進盲區的點，車尾過去前照樣進選縫。
+    local near0 = rs + MDADSensor.SCAN_NEAR
+    local blindN = s.zomBlindGen == s.routeGen and s.zomBlindN or 0
+    local bS, bL, bC = s.zomBlindS, s.zomBlindL, s.zomBlindC
+    for i = 1, sen.zomN + blindN do
+        local zs, zl, corpse, vl
+        if i <= sen.zomN then
+            zs, zl, corpse = sen.zomS[i], sen.zomL[i], sen.zomIsCorpse[i] == true
+            vl = sen.zomVl and sen.zomVl[i]
+        else
+            local j = i - sen.zomN
+            zs, zl, corpse = bS[j], bL[j], bC[j]
+            if zs >= near0 then zs = nil end -- Sensor 又看得到：以快照為準
+        end
         if finite(zs) and finite(zl) and zs >= sFrom and zs <= sTo then
-            local corpse = sen.zomIsCorpse[i] == true
             if corpse then hasCorpse = true else hasZombie = true end
             local zlp = zl
-            local vl = sen.zomVl and sen.zomVl[i]
             if not corpse and finite(vl) and (vl > 0.2 or vl < -0.2) then
                 local t = (zs - rs - s.vehicleProfile.halfL) / vms
                 if t < 0 then t = 0 elseif t > TUNE.ZOMBIE_PREDICT_S then t = TUNE.ZOMBIE_PREDICT_S end
@@ -2745,6 +2817,30 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
             end
         end
     end
+    -- 下一輪的盲區記憶：舊記憶中車尾還沒過、仍在盲區的點＋本輪快照裡下一輪會進盲區的點
+    -- （車前 NEAR..NEAR＋max(3m, 0.6s 行程)）。上限 16，就地壓縮、零配置。
+    if bS == nil then
+        bS, bL, bC = {}, {}, {}
+        s.zomBlindS, s.zomBlindL, s.zomBlindC = bS, bL, bC
+    end
+    local nb = 0
+    local tail = rs - s.vehicleProfile.halfL
+    for j = 1, blindN do
+        local zs = bS[j]
+        if zs >= tail and zs < near0 and nb < 16 then
+            nb = nb + 1
+            bS[nb], bL[nb], bC[nb] = zs, bL[j], bC[j]
+        end
+    end
+    local reach = near0 + math.max(3, vms * 0.6)
+    for i = 1, sen.zomN do
+        local zs, zl = sen.zomS[i], sen.zomL[i]
+        if finite(zs) and finite(zl) and zs >= near0 and zs < reach and nb < 16 then
+            nb = nb + 1
+            bS[nb], bL[nb], bC[nb] = zs, zl, sen.zomIsCorpse[i] == true
+        end
+    end
+    s.zomBlindN, s.zomBlindGen = nb, s.routeGen
     if s.zombieAvoidRouteGen == s.routeGen and finite(s.zombieAvoidUntilS)
             and finite(s.zombieAvoidS) and finite(s.zombieAvoidLane)
             and rs < s.zombieAvoidUntilS and s.zombieAvoidS < rs + MDADSensor.SCAN_NEAR then
@@ -2818,28 +2914,53 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
             -- （E2E stagger 在 35m 處從右改左，連撞兩隻）。
             local halfL2 = 2 * s.vehicleProfile.halfL
             local bLo, bHi = aLo, aHi
-            if not ((hasZombie and s.zombieSlow) or (hasCorpse and s.corpseSlow)) then
-                -- 從 laneBias（cur）量：它照速率移動、車身隨後跟上（落後已扣在 LEAD_S）。從車身量會在
-                -- lane 已經走了一半時把原計畫判成搆不到而改選別縫（E2E crowd −2.17 → −0.75 再撞）。
-                local r1 = Drive.softReach(threatS - rs - s.vehicleProfile.halfL, vms, speedKmh)
-                if cur - r1 > bLo then bLo = cur - r1 end
-                if cur + r1 < bHi then bHi = cur + r1 end
-            end
+            local slowOk = (hasZombie and s.zombieSlow) or (hasCorpse and s.corpseSlow)
+            -- 從 laneBias（cur）量：它照速率移動、車身隨後跟上（落後已扣在 LEAD_S）。從車身量會在
+            -- lane 已經走了一半時把原計畫判成搆不到而改選別縫（E2E crowd −2.17 → −0.75 再撞）。
+            -- 0925p：減速開啟時也先在搆得到的帶內選——舊制直接用整條帶、靠減速換時間，實機
+            -- slow=1 每輪在左右兩側之間跳 3m 以上（on70 65 輪 17 次），車身停在中間撞上；
+            -- 搆得到的帶內沒有縫才放寬到整條帶並用縱向配合帽買時間。
+            local r1 = Drive.softReach(threatS - rs - s.vehicleProfile.halfL, vms, speedKmh)
+            if cur - r1 > bLo then bLo = cur - r1 end
+            if cur + r1 < bHi then bHi = cur + r1 end
             local sEnd = threatS + halfL2 + TUNE.ZOMBIE_CLUSTER_M
             if sEnd > sTo then sEnd = sTo end
             local u = nil
             why = "nogap"
-            if bLo <= bHi then
-                u, why = Drive.softPick(s, pS, pL, predN, sFrom, sEnd, halfW, resident, cur, bLo, bHi, R)
+            -- 近威脅（到牠不足 CROSS_S 秒）不橫越牠的現位：每條帶都先只在車身這一側選（E2E p2-on：
+            -- 85 km/h、距 20m 時 lane 從 2.87 翻到 0.48 穿過 l 1.2-1.4 的兩隻）；這一側沒縫才看整條帶。
+            -- 帶依序＝搆得到的帶、（減速開啟時）整條帶。
+            local near = (threatS - rs - s.vehicleProfile.halfL) / vms < TUNE.ZOMBIE_CROSS_S
+            for pass = 1, 2 do
+                if pass == 2 then
+                    if u ~= nil or not slowOk then break end
+                    bLo, bHi = aLo, aHi
+                end
+                if near and bLo <= bHi then
+                    local lo, hi = bLo, bHi
+                    if latNow >= threatL then lo = math.max(bLo, threatL) else hi = math.min(bHi, threatL) end
+                    if lo <= hi then
+                        u, why = Drive.softPick(s, pS, pL, predN, sFrom, sEnd, halfW, resident, cur, lo, hi, R, prefer)
+                    end
+                end
+                if u == nil and bLo <= bHi then
+                    u, why = Drive.softPick(s, pS, pL, predN, sFrom, sEnd, halfW, resident, cur, bLo, bHi, R, prefer)
+                end
             end
             if u == nil and (bLo > aLo or bHi < aHi) then
                 -- 完整閃開來不及：留在車身這一側盡量偏（擦邊比正撞好），但不越過牠換到對側
                 local lo, hi = aLo, aHi
                 if latNow >= threatL then lo = math.max(aLo, threatL) else hi = math.min(aHi, threatL) end
                 if lo <= hi then
-                    local ub = Drive.softPick(s, pS, pL, predN, sFrom, sEnd, halfW, resident, cur, lo, hi, R)
+                    local ub = Drive.softPick(s, pS, pL, predN, sFrom, sEnd, halfW, resident, cur, lo, hi, R, prefer)
                     if ub ~= nil then want, why = ub, "gap" end
                 end
+            end
+            if u == nil and why ~= "gap" and bLo <= bHi then
+                -- 仍無縫：搆得到的帶內取離最近一群最遠的 lane（盡量擦邊不正撞）；不算「已處理」，
+                -- 減速開啟時數量減速檔照套
+                local ul = Drive.softBest(pS, pL, predN, sFrom, sEnd, bLo, bHi, cur)
+                if math.abs(ul - cur) > TUNE.ZOMBIE_LANE_SETTLE_M then want, why = ul, "least" end
             end
             if u ~= nil then
                 want = u
@@ -2853,7 +2974,7 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
                     if sEnd2 > sTo then sEnd2 = sTo end
                     -- 下一群的理想 lane（含 PREFER 餘裕）換得過去才算相容；只看「縫邊碰得到」會貼著
                     -- 下一隻過（E2E stagger 擦到第三隻 d=0.04）
-                    local vp = Drive.softPick(s, pS, pL, predN, nextS, sEnd2, halfW, want, want, aLo, aHi, R)
+                    local vp = Drive.softPick(s, pS, pL, predN, nextS, sEnd2, halfW, want, want, aLo, aHi, R, prefer)
                     if vp ~= nil and math.abs(vp - want) <= r12 then break end
                     -- ① 這一群貼緣、選最靠近下一群縫的一側（prefer 0：多留的 PREFER 正是換邊來不及的那一截），
                     --    換邊量在 r12 內就採用（E2E stagger：3.85 過第一隻、再偏 0.2m 過第二排）
@@ -2862,7 +2983,7 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
                         math.max(bLo, v - r12), math.min(bHi, v + r12), R, 0)
                     if u3 ~= nil then want = u3; break end
                     -- ② 一條 lane 同時閃過兩群（不換邊最順；E2E crowd 一整群往同一邊閃掉）
-                    local u2 = Drive.softPick(s, pS, pL, predN, sFrom, sEnd2, halfW, resident, cur, bLo, bHi, R)
+                    local u2 = Drive.softPick(s, pS, pL, predN, sFrom, sEnd2, halfW, resident, cur, bLo, bHi, R, prefer)
                     if u2 == nil then
                         if s.zombieSlow then nextCap = Drive.softLaneCapKmh(math.max(0, room), need) end
                         -- ③ 都不行：這一群照樣貼向下一群的縫，縮短換邊量（下一群盡量閃、閃不過就撞）
@@ -7122,7 +7243,14 @@ local function replan(s, vehicle, playerNum)
             if not finite(decel) or decel <= 0 then decel = 2 end
             local vm, cm = v / 3.6, capK / 3.6
             local dist = b - s.lastSNow - s.vehicleProfile.halfL
-            if dist >= TUNE.DODGE_SPEED_DEFER_MIN_M and dist < (vm * vm - cm * cm) / (2 * decel) then
+            -- 0925p：連緊急煞停都停不住（硬煞當幀生效，留 0.3s 反應＋硬煞界限，同可視上限的緊急帳）時延後＝保證以
+            -- 高速撞上障礙（E2E meet park、RaceCar MAX：B 過後 A 63 km/h 距停車 13m 仍延後、52 km/h
+            -- 撞上）；掃掠驗過的線照承諾，帽由既有接近帽／硬煞邊做邊壓。對向車仍由上方
+            -- trafficBlocksDodge 先擋。
+            local aE = tightenLimit(math.min(decel * TUNE.EMERGENCY_BRAKE_GAIN, TUNE.EMERGENCY_BRAKE_MAX),
+                s.brakeLower, s.brakeConfidence, TUNE.EMERGENCY_BRAKE_MAX)
+            if dist >= TUNE.DODGE_SPEED_DEFER_MIN_M and dist < (vm * vm - cm * cm) / (2 * decel)
+                    and (aE <= 0 or dist >= vm * 0.3 + vm * vm / (2 * aE)) then
                 mode = "clear"
                 s.planSig = -1
                 s.dodgeDeferCap = MDADDynamics.approachCapKmh(dist, capK, 0.5, decel)
@@ -9065,7 +9193,9 @@ local function stepFollow(s, vehicle, playerNum, now)
                         local xg, xm = nil, nil
                         if s.dodging and s.dodgeCrawl then
                             xg, xm = MDADDynamics.CROSS_TRACK_DODGE_GAIN, MDADDynamics.CROSS_TRACK_DODGE_MAX
-                        elseif s.curveHardActive then
+                        elseif s.curveHardActive or s.zombieLane ~= nil then
+                            -- 殭屍軟縫側移中同樣 ×2（0925p E2E road MAX：110 km/h 車身只橫移 1.4 m/s）。
+                            -- 隨車速再放大（至 ×5）實測更差（兩輪 15／18 撞）
                             xg, xm = MDADDynamics.CROSS_TRACK_ARC_GAIN, MDADDynamics.CROSS_TRACK_ARC_MAX
                         end
                         steer = (steer or 0)

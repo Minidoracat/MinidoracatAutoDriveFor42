@@ -6807,17 +6807,29 @@ function drive.scenarioCommitSpeed()
     drive.putRoad(-10, 170, -20, 20)
     assert(armDrive())
     setHeading(dveh, 0)
-    dveh._speed = 70
-    drive.putSolid(20, 0, "cruise_commit_speed")
+    -- 煞得停、但到縫前減不到 cap：延後並先減速（30m 外、55 km/h）
+    dveh._speed = 55
+    drive.putSolid(30, 0, "cruise_commit_speed")
     drive.scanRound(true)
     local st = MDAD.Drive.debugSession(0)
     assert(not st.dodgeCrawl)
     checkTrue(not st.dodging and st.dodgeDeferCap >= 0 and st.dodgeDeferCap < 70,
-        "(commit-speed) 巡航分類的低速線也要先減速，不能以70km/h承諾25km/h近縫")
+        "(commit-speed) 巡航分類的低速線也要先減速，不能以55km/h承諾25km/h縫")
     dveh._speed = 20
     drive.scanRound(true)
     checkTrue(st.dodging and st.dodgeDeferCap < 0,
         "(commit-speed) 減到可執行速度後，原候選正常承諾")
+    MDAD.Drive.stop(0, nil)
+    -- 0925p：連緊急煞車都停不住（20m 外、70 km/h）＝延後只會撞上，掃掠驗過的線當輪承諾
+    drive.clearCell(30, 0)
+    assert(armDrive())
+    setHeading(dveh, 0)
+    dveh._speed = 70
+    drive.putSolid(20, 0, "cruise_commit_late")
+    drive.scanRound(true)
+    st = MDAD.Drive.debugSession(0)
+    checkTrue(st.dodging and st.dodgeDeferCap < 0,
+        "(commit-late) 緊急煞停也停不住：不延後、當輪承諾驗過的繞行線")
     MDAD.Drive.stop(0, nil)
     drive.world = world
     assert(armDrive())
@@ -7372,8 +7384,8 @@ do
     checkTrue(st.sensor.zomN == 1, "(z1) Sensor 記到 1 隻殭屍 (s,l)（實得 " .. tostring(st.sensor.zomN) .. "）")
     checkTrue(st.sensor.zomL[1] < 0 and st.sensor.zomL[1] > -1, "(z1) 殭屍橫向 −0.5 左右（實得 " .. tostring(st.sensor.zomL[1]) .. "）")
     local lane1 = st.fstate.laneBias
-    checkTrue(st.zombieLane ~= nil and lane1 > 0.2 and lane1 <= 1.0 * 0.3 + 1e-6,
-        "(z1) 首輪往右偏、且不超過速率上限 1.0 m/s×0.3 s＝0.3（實得 " .. tostring(lane1) .. "）")
+    checkTrue(st.zombieLane ~= nil and lane1 > 0.2 and lane1 <= MDAD.Drive.softLaneRate(20) * 0.3 + 1e-6,
+        "(z1) 首輪往右偏、且不超過速率上限（車速×0.25）×0.3 s（實得 " .. tostring(lane1) .. "）")
     -- (z5) 縱向配合：殭屍 18m 前、側移 1.55m；速率隨車速（0925d 0.15×v、下限 1 m/s）＋LEAD 0.3 s
     --      → 帽遠高於車速 20（值依速率常數而變，只驗「有帽、不綁」）
     checkTrue(type(st.zombieLaneCap) == "number" and st.zombieLaneCap > 20,
@@ -7384,10 +7396,10 @@ do
         zRound()
         st = MDAD.Drive.debugSession(0)
         local lb = st.fstate.laneBias
-        if lb - prev > 1.0 * 0.3 + 1e-6 then rateOk = false end
+        if lb - prev > MDAD.Drive.softLaneRate(20) * 0.3 + 1e-6 then rateOk = false end
         prev = lb
     end
-    checkTrue(rateOk, "(z1) 之後每輪（300ms）變化 ≤ 0.3m")
+    checkTrue(rateOk, "(z1) 之後每輪（300ms）變化 ≤ 速率上限×0.3 s")
     checkTrue(math.abs(prev - (1.05 + P)) < 0.05, "(z1) 收斂到縫邊 1.05＋PREFER（實得 " .. tostring(prev) .. "）")
     checkTrue(st.zombieLaneCap < 0, "(z5) 側移到位：縱向配合帽解除（實得 " .. tostring(st.zombieLaneCap) .. "）")
     -- (z1b) 實機 2026-09-06「完全沒閃」：殭屍**正壓在車道上**（l=0＝常駐 lane）。
@@ -7397,11 +7409,17 @@ do
     for _ = 1, 8 do zRound() end
     drive.putMoving(18, 0, { _class = "IsoZombie",
         getX = function() return 18.5 end, getY = function() return 0.0 end }) -- l=0 正壓車道
+    -- (z5c) 驗「帽低於其他帽就綁住定速」的接線：0925p 速率 0.25×v 後 18m 已來得及，
+    -- 這一輪暫用舊速率常數讓帽落在 env 40 之下
+    local tn = MDAD.Drive.debugTune()
+    local rp, rm = tn.ZOMBIE_LANE_RATE_PER_MPS, tn.ZOMBIE_LANE_RATE_MAX
+    tn.ZOMBIE_LANE_RATE_PER_MPS, tn.ZOMBIE_LANE_RATE_MAX = 0.15, 3.5
     zRound()
     st = MDAD.Drive.debugSession(0)
     -- (z5c) 側移 2.05m、殭屍 18m：帽低於其他帽（env 40）→ 本幀綁住定速
     driveReset(dveh)
     driveTick(dp, dveh)
+    tn.ZOMBIE_LANE_RATE_PER_MPS, tn.ZOMBIE_LANE_RATE_MAX = rp, rm
     checkTrue(type(st.zombieLaneCap) == "number" and st.zombieLaneCap >= 12 and st.zombieLaneCap < 40
             and drive.calls.maxRegSpeed <= st.zombieLaneCap + 0.5 and st.lastCapReason == "zombie-lane",
         "(z5c) 縱向配合帽綁住定速（帽 " .. tostring(st.zombieLaneCap) .. " reg " .. tostring(drive.calls.maxRegSpeed)
@@ -7439,8 +7457,11 @@ do
     drive.putSolid(24, -3, "harness_zlane_other_side")
     zRound()
     st = MDAD.Drive.debugSession(0)
-    checkTrue(st.zombieLane == nil and math.abs(st.fstate.laneBias) < 0.06,
-        "(z3-wall) 兩側硬物封住殭屍縫：不得為閃避越過硬物")
+    -- 0925p：無縫時取最不壞 lane（"least"），但只能在兩道硬物之間的連通帶內（不越過硬物）
+    checkTrue(st.zombieWhy ~= "gap"
+            and math.abs(st.fstate.laneBias) + st.needHalf + MDADCorridor.OBS_HALF <= 2.5 + 1e-6,
+        "(z3-wall) 兩側硬物封住殭屍縫：只在硬物之間的帶內偏（實得 " .. tostring(st.fstate.laneBias)
+        .. " why " .. tostring(st.zombieWhy) .. "）")
     drive.clearCell(24, -3)
     zRound()
     st = MDAD.Drive.debugSession(0)
@@ -7617,6 +7638,50 @@ function drive.scenarioZombiePlan()
         "(zp-return) 閃避 lane 領先車身 " .. string.format("%.2f", maxAway)
         .. "m 仍由軟縫持有、RETURN 不接手（returnActive " .. tostring(returned) .. "）")
     drive.clearCell(40, 0)
+    -- (zp-prefer) 0925p 高速多留餘裕：低速 PREFER、110 km/h 起多 EXTRA，中間單調
+    checkNear(MDAD.Drive.softPrefer(20), MDADCorridor.ZOMBIE_PREFER, 1e-9, "(zp-prefer) 低速＝PREFER")
+    checkTrue(MDAD.Drive.softPrefer(75) > MDAD.Drive.softPrefer(40)
+            and MDAD.Drive.softPrefer(110) > MDAD.Drive.softPrefer(75)
+            and math.abs(MDAD.Drive.softPrefer(130) - MDAD.Drive.softPrefer(110)) < 1e-9,
+        "(zp-prefer) 40→110 km/h 單調加大、之後封頂")
+    -- (zp-least) 殭屍蓋滿硬物之間的帶＝無縫：不得停在原 lane 正撞，取帶內離最近殭屍最遠的
+    --   lane（why least，不算已處理＝減速開啟時數量減速檔照套）。違規證明：拿掉 softBest 分支即紅。
+    -- 兩側硬物把帶收窄到約 ±1.7，殭屍 −1／0.5 的佔位（±R）蓋滿整條帶
+    drive.putSolid(15, 3, "zp_least_r"); drive.putSolid(15, -4, "zp_least_l")
+    s = arm(0)
+    put(15.5, -1); put(15.5, 0.5) -- 最遠點在右帶緣（離 0.5 約 1.1），不是中點
+    drive.scanRound(true)
+    checkTrue(s.zombieWhy == "least" and math.abs(s.fstate.laneBias) > 0.1,
+        "(zp-least) 無縫時往最不壞的 lane 偏（why " .. tostring(s.zombieWhy) .. "、lane "
+        .. tostring(s.fstate.laneBias) .. "）")
+    drive.clearCell(15, -1); drive.clearCell(15, 0); drive.clearCell(15, 3); drive.clearCell(15, -4)
+    -- (zp-cross) 減速開啟（整條帶可選）時的近威脅：常駐 0 的成本偏好左縫，但殭屍 1.5 秒內就到、
+    --   車身在牠右側＝先在右側選（E2E p2-on 85 km/h 距 20m 翻邊穿過兩隻）。違規證明：拿掉近威脅
+    --   限側即紅。
+    MDAD.Drive.setSlowPref(0, "zombie", true)
+    s = arm(0.9)
+    put(7.5, 0.4)
+    drive.scanRound(true)
+    checkTrue(s.zombieWhy == "gap" and type(s.zombieAvoidLane) == "number"
+            and s.zombieAvoidLane >= 0.4 + R - 1e-6,
+        "(zp-cross) 減速開啟也不橫越近處殭屍：選車身右側（實得 " .. tostring(s.zombieAvoidLane)
+        .. "、why " .. tostring(s.zombieWhy) .. "）")
+    drive.clearCell(7, 0)
+    -- (zp-blind) 盲區記憶：殭屍進到車前 2m 內（Sensor 不再收），即使不是保持中的那隻，也不得
+    --   當作淨空把 lane 拉回常駐線（E2E p3-off：釋放後拉回 3.0 撞上 l 3.1）。違規證明：不帶盲區點即紅。
+    s = arm(0)
+    put(4.5, 0.01)
+    drive.scanRound(true)
+    checkTrue(s.zombieLane ~= nil and s.zomBlindN >= 1,
+        "(zp-blind) 將進盲區的殭屍記進盲區記憶（blindN " .. tostring(s.zomBlindN) .. "）")
+    driveReset(dveh)
+    dveh._x = dveh._x + 3.2 -- 殭屍落到車前 2m 內
+    s.zombieAvoidUntilS = nil -- 排除「保持中那隻」的既有路徑
+    drive.scanRound(true)
+    checkTrue(s.zombieWhy ~= "clear" and s.zombieLane ~= nil,
+        "(zp-blind) 盲區內的殭屍仍算威脅：不當淨空釋放（why " .. tostring(s.zombieWhy) .. "）")
+    drive.clearCell(4, 0)
+    MDAD.Drive.setSlowPref(0, "zombie", false)
     MDAD.Drive.setSlowPref(0, "zombie", oldZ)
     MDAD.Drive.setSlowPref(0, "corpse", oldC)
     setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
@@ -7844,7 +7909,7 @@ function drive.scenarioAvoidSlowPrefs()
     -- (avoid-lag) 配合帽的授權看它自己的來源：切換無關類型（開或關）不得順手把另一類
     --     已經成立的合法減速解除一輪。這裡帽屬屍體（世界裡只有屍體），動的是殭屍偏好。
     s, base = arm(true, true)
-    putAt("corpse", 20, 0)
+    putAt("corpse", 14, 0) -- 0925p 速率 0.25×v：20m 外已側移得完、帽不綁
     for _ = 1, 3 do roll(0) end
     checkTrue(s.zombieLaneCap > 0 and s.desiredTarget < base,
         "(avoid-lag) 屍體減速開著：屍體那條合法配合減速成立（des "
@@ -13714,7 +13779,7 @@ local function scenarioPhaseE()
         drive.putRoad(54, 54, 0, 0)
         drive.scanRound(true)
         checkTrue(captured.dodging, "(F) 載入後同一輪 commit")
-        drive.clearCell(50, 0)
+        drive.clearCell(44, 0)
         MDAD.Drive.stop(0, nil)
         drive.frameMs(wasMs)
     end
@@ -15634,20 +15699,13 @@ function drive.scenarioThreeCarHandoff()
     checkTrue(thirdSeen and minCommand > 0 and not contact and not braked,
         "(handoff) 每個控制tick均無接觸／倒車／零命令／強制煞車，第二到第三台連續通過")
 
+    -- 0925p：80 km/h 距第二群縫口 8m，連緊急煞車都停不住＝延後只會撞上；改採納新候選線
+    -- （掃掠驗過、Follower 持有新線），不得沿被候選覆寫的舊線前進
     arm()
     place(61, 80)
     round()
-    checkTrue(not st.dodging and st.cmdV == 0 and drive.calls.forceBrake > 0,
-        "(handoff-speed) 新線來不及減速：不得沿被候選覆寫的舊線前進")
-    for _ = 1, 3 do
-        round()
-        checkTrue(st.cmdV == 0 and drive.calls.maxRegSpeed == 0,
-            "(handoff-speed) 持續延後跨輪仍停止，不恢復20km/h接近")
-    end
-    dveh._speed = 10
-    round()
-    checkTrue(st.dodging and st.cmdV > 0,
-        "(handoff-speed) 實速降低後正常採納，不需改布局或重新啟動")
+    checkTrue(st.dodging and st.fstate.offB > firstB + 10 and st.dodgeDeferCap < 0,
+        "(handoff-speed) 停不住的交接：當輪採納新線，不沿舊線、不延後")
 
     arm()
     for y = -10, 10 do drive.putSolid(74, y, "handoff_wall") end
