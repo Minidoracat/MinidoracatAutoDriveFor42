@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0925k"
+Drive.REV = "0925l"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -1554,8 +1554,10 @@ local function startSession(playerObj, playerNum, stage)
         vehicleProfile.towMass = tow.mass
         vehicleProfile.towLatScale = MDADTrailer.LAT_SCALE
     end
+    -- 拖車時剖面建在改寫過的路線上（外拉轉角）；剖面的 segSource 索引指向這條，證明帶也要用它
+    local profileRoute = tow and MDADTrailer.shape(route, tow, vehicleProfile.halfW, vehicleProfile.halfL * 2) or route
     local profile = MDADFollower.begin(
-        tow and MDADTrailer.shape(route, tow, vehicleProfile.halfW, vehicleProfile.halfL * 2) or route,
+        profileRoute,
         maxSpeed, api.navApiVersion, vehicleProfile,
         MDADFollower.STYLES[Drive.getStyle(playerNum)])
     if not profile then return KEY_ROUTE end
@@ -1608,6 +1610,7 @@ local function startSession(playerObj, playerNum, stage)
         startedMs = startedAt, -- 含停等／讓位；換路線與重建不重設，清 session 時凍結末趟秒數
         vehicle = vehicle,
         route = route,
+        profileRoute = profileRoute, -- 剖面實際建構的路線（拖車＝改寫版）；證明帶的來源
         profile = profile,
         fstate = fstate,
         playerNum = playerNum,
@@ -4464,7 +4467,10 @@ local function buildSnapshotProof(s, segI, proofEnd)
     end
 
     local verifiedEnd, failReason = proofEnd, nil
-    local rawPts, rawWidths = s.route.pts, s.route.segWidth
+    -- segSourceA/B 是剖面來源路線的索引：拖車時剖面建在改寫路線（點數不同），拿原始路線對＝
+    -- 轉角後全線錯位、每幀 band → obb 18 km/h（2026-09-25 玩家拖露營車「過彎後一直 18」）。
+    local src = s.profileRoute or s.route
+    local rawPts, rawWidths = src.pts, src.segWidth
     local sourceValid = s.navVersion >= 4
         and prof.filletBandValid == true
         and type(rawPts) == "table" and type(rawWidths) == "table"
@@ -9523,9 +9529,10 @@ local function onPlayerUpdate(player)
             route = s.route
         end
         if route ~= s.route or versionChanged then
+            local profileRoute = s.tow and MDADTrailer.shape(route, s.tow, s.vehicleProfile.halfW,
+                s.vehicleProfile.halfL * 2) or route
             local profile = MDADFollower.begin(
-                s.tow and MDADTrailer.shape(route, s.tow, s.vehicleProfile.halfW,
-                    s.vehicleProfile.halfL * 2) or route,
+                profileRoute,
                 s.maxSpeed, api.navApiVersion, s.vehicleProfile,
                 MDADFollower.STYLES[Drive.getStyle(playerNum)])
             if not profile then
@@ -9561,6 +9568,7 @@ local function onPlayerUpdate(player)
                 resumePhase = "verify"
             end
             s.route = route
+            s.profileRoute = profileRoute
             s.profile = profile
             s.rejectedRoute = nil
             s.navVersion = api.navApiVersion
