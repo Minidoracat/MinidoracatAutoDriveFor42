@@ -523,6 +523,9 @@ end
 function MDAD.policy3(name) return policies[name] or MDAD.POLICY_PLAYER end
 function MDAD.isAutoInstalled(v) return v._module == true end
 MDAD.Drive = {}
+-- 同 MDAD_Driver.lua haloGood／haloBad：翻譯後經 HaloTextHelper（Toast 另有測試）
+function MDAD.Drive.haloGood(p, key) HaloTextHelper.addGoodText(p, getText(key)) end
+function MDAD.Drive.haloBad(p, key) HaloTextHelper.addBadText(p, getText(key)) end
 function MDAD.Drive.hudState()
     -- 0908c 契約：第 7 值＝本趟／末趟現實秒數（nil＝尚無紀錄）。停用態前 6 值維持
     -- nil（inactive），第 7 值仍回報凍結的末趟秒數。
@@ -2297,6 +2300,209 @@ do
     panel:refresh(nowMs)
 end
 
+-- 回家鈕（MiniMap navApiVersion 8：getNavHome／goNavHome）：能力守衛分級（v7、缺任一函式、
+-- 非數字版本都不出現）；家座標只在 250ms refresh 讀、prerender 不碰；五種回傳各自的提示；
+-- HUD 絕不發車（不 toggle、不 continueItinerary）；四主題×兩版面都貼主鈕左側、不覆蓋其他控制。
+do
+    texts.UI_MinidoracatMiniMap_GoHome = "GO HOME"
+    texts.UI_MinidoracatMiniMap_BtnGoHome = "HOME TIP"
+    texts.UI_MinidoracatMiniMap_HomeNotSet = "NO HOME SET SENTENCE"
+    texts.UI_MinidoracatMiniMap_AlreadyHome = "ALREADY HOME SENTENCE"
+    texts.UI_MinidoracatAutoDrive_HUDHomeReady = "HOME READY PRESS START"
+    texts.UI_MinidoracatAutoDrive_HUDHomeDriving = "DRIVING HOME"
+    texts.UI_MinidoracatAutoDrive_HUDHomeBusy = "STOP AUTODRIVE FIRST"
+    texts.UI_MinidoracatAutoDrive_HUDHomeFailed = "HOME FAILED"
+    texts.UI_MinidoracatAutoDrive_NeedGPS = "NEED GPS SENTENCE"
+    local halos = {}
+    HaloTextHelper = {
+        addGoodText = function(p, text) halos[#halos + 1] = { p = p, good = true, text = text } end,
+        addBadText = function(p, text) halos[#halos + 1] = { p = p, good = false, text = text } end,
+    }
+    local home = { x = 1000, y = 2000, label = "MY BASE", getCalls = 0, goCalls = 0 }
+    local api = MinidoracatMiniMapAPI
+    -- 契約：getNavHome(pn) → (x, y, label) 或 (nil, reason)；goNavHome(pn) → (ok, reason, detailKey)
+    api.getNavHome = function(pn)
+        home.getCalls = home.getCalls + 1
+        if pn ~= 0 then return nil, "badargs" end
+        if not home.x then return nil, "nohome" end
+        return home.x, home.y, home.label
+    end
+    api.goNavHome = function(pn)
+        home.goCalls, home.lastPn = home.goCalls + 1, pn
+        return home.ok, home.reason, home.detail
+    end
+    local toggles, continues = 0, 0
+    local liveToggle = MDAD.Drive.toggle
+    MDAD.Drive.toggle = function() toggles = toggles + 1; state.active = not state.active end
+    MDAD.Drive.continueItinerary = function() continues = continues + 1; return true end
+    state.active, state.token, state.startReason, state.legReportWhy = false, "follow", nil, nil
+    options:getOption("HUDTheme"):setValue(1)
+    options:getOption("HUDLayout"):setValue(1)
+    options:apply()
+
+    -- 能力守衛：v7 Core／v8 缺任一函式／字串版本都不得出現，也不得去探 getNavHome
+    api.navApiVersion = 7
+    panel:refresh(nowMs)
+    check(not panel.homeButton.visible, "a v7 core shows no home button")
+    checkEq(home.getCalls, 0, "a v7 core is never probed for a home")
+    api.navApiVersion = 8
+    local liveGo, liveGet = api.goNavHome, api.getNavHome
+    api.goNavHome = nil
+    panel:refresh(nowMs)
+    check(not panel.homeButton.visible, "a v8 version field without goNavHome shows no home button")
+    api.goNavHome, api.getNavHome = liveGo, nil
+    panel:refresh(nowMs)
+    check(not panel.homeButton.visible, "a v8 version field without getNavHome shows no home button")
+    api.getNavHome, api.navApiVersion = liveGet, "8"
+    panel:refresh(nowMs)
+    check(not panel.homeButton.visible, "a non-numeric version field shows no home button")
+    checkEq(home.getCalls, 0, "no degraded core is ever asked for a home")
+    local goBefore = home.goCalls
+    panel:onHome()
+    checkEq(home.goCalls, goBefore, "the home entry is inert without the v8 API")
+
+    api.navApiVersion = 8
+    panel:refresh(nowMs)
+    local hb, ab = panel.homeButton, panel.actionButton
+    check(hb.visible and hb.enable, "a v8 core shows an enabled home button")
+    checkEq(hb.title, "GO HOME", "without the framework house icon the button falls back to translated text")
+    checkEq(hb.tooltip, "HOME TIP\nMY BASE", "the tooltip explains the action and names the saved home")
+    check(hb.x + hb.width + 4 == ab.x and hb.y >= ab.y and hb.y + hb.height <= ab.y + ab.height,
+        "the home button sits right next to the main action on the same row")
+    local setTextR = hb.textColor.r
+
+    -- 節流：250ms 內的 UI tick 與每幀 prerender 都不跨界讀家
+    local reads = home.getCalls
+    nowMs = nowMs + 100
+    panel:update()
+    panel:prerender()
+    checkEq(home.getCalls, reads, "home is not re-read inside the 250ms window or while painting")
+    nowMs = nowMs + 200
+    panel:update()
+    checkEq(home.getCalls, reads + 1, "home is re-read once per 250ms refresh")
+    local tipTexts = getTextCalls
+    panel:refresh(nowMs)
+    local perRefresh = getTextCalls - tipTexts
+    home.label = "MY BASE 2"
+    tipTexts = getTextCalls
+    panel:refresh(nowMs)
+    checkEq(hb.tooltip, "HOME TIP\nMY BASE 2", "a renamed home refreshes the tooltip")
+    check(getTextCalls - tipTexts > perRefresh, "the tooltip is rebuilt only when the home changed")
+
+    -- 未設家：照樣可按，外觀較暗；按下說明怎麼設
+    home.x = nil
+    panel:refresh(nowMs)
+    check(hb.visible and hb.enable, "without a home the button stays clickable")
+    check(hb.textColor.r < setTextR, "without a home the button reads dimmer than with one")
+    checkEq(hb.tooltip, "HOME TIP\nNO HOME SET SENTENCE", "the tooltip says how to set a home")
+    home.x = 1000
+
+    local function press(ok, reason, detail)
+        home.ok, home.reason, home.detail = ok, reason, detail
+        local n = #halos
+        click(hb)
+        return halos[n + 1], #halos - n
+    end
+    -- ok＋停著：只提示可以出發，絕不發車
+    local halo, n = press(true, "ok")
+    checkEq(home.lastPn, 0, "the button passes its own player number")
+    check(n == 1 and halo.good and halo.text == "HOME READY PRESS START" and halo.p == player,
+        "ok while parked tells the player they can engage autodrive to leave")
+    check(toggles == 0 and continues == 0 and state.active == false,
+        "going home never starts autodrive by itself")
+    -- ok＋自駕中：Driver 自然改往家，HUD 只確認、不 toggle
+    state.active, state.token = true, "follow"
+    panel:refresh(nowMs)
+    halo, n = press(true, "ok")
+    check(n == 1 and halo.good and halo.text == "DRIVING HOME",
+        "ok while driving confirms the drive now heads home")
+    check(toggles == 0 and continues == 0 and state.active == true,
+        "going home while driving neither stops nor restarts autodrive")
+    state.active = false
+    panel:refresh(nowMs)
+    -- prompted：MiniMap 已開確認窗，HUD 不重複提示
+    _, n = press(true, "prompted")
+    checkEq(n, 0, "prompted adds no HUD notice on top of the MiniMap confirmation")
+    -- 失敗：每個 enum 都是完整句，不外露 enum
+    local failures = {
+        { "nohome", nil, "NO HOME SET SENTENCE" },
+        { "athome", nil, "ALREADY HOME SENTENCE" },
+        { "busy", nil, "STOP AUTODRIVE FIRST" },
+        { "notstopped", nil, "STOP THE CAR FIRST" },
+        { "blocked", "UI_MinidoracatAutoDrive_NeedGPS", "NEED GPS SENTENCE" },
+        { "blocked", nil, "HOME FAILED" },
+        { "failed", nil, "HOME FAILED" },
+        { "stale", nil, "HOME FAILED" },
+    }
+    for _, case in ipairs(failures) do
+        halo, n = press(false, case[1], case[2])
+        check(n == 1 and halo.good == false and halo.text == case[3],
+            case[1] .. (case[2] and "+detail" or "") .. ": reported as " .. case[3])
+    end
+    check(toggles == 0 and continues == 0 and state.active == false,
+        "no refusal path touches the autodrive session either")
+
+    -- 版面：四主題×兩版面都貼主鈕左側、在面板內、不蓋任何既有控制；收合／摺左翼時隱藏
+    local function overlap(a, b)
+        return a.visible and b.visible and a.x < b.x + b.width and b.x < a.x + a.width
+            and a.y < b.y + b.height and b.y < a.y + a.height
+    end
+    for _, layoutMode in ipairs({ 1, 2 }) do
+        options:getOption("HUDLayout"):setValue(layoutMode)
+        for theme = 1, 4 do
+            options:getOption("HUDTheme"):setValue(theme)
+            options:apply()
+            panel:refresh(nowMs)
+            local label = "layout " .. layoutMode .. " theme " .. theme
+            check(hb.visible and hb.x >= 0 and hb.y >= 0 and hb.x + hb.width <= panel.width
+                and hb.y + hb.height <= panel.height, label .. ": home button visible inside the panel")
+            check(hb.x + hb.width <= ab.x and ab.x - (hb.x + hb.width) <= 8
+                and hb.y < ab.y + ab.height and ab.y < hb.y + hb.height,
+                label .. ": home button sits beside the main action")
+            for _, other in ipairs({ "actionButton", "collapseButton", "wingButton", "themeButton",
+                    "voiceButton", "volumeSlider", "cycleButton", "zombieButton", "corpseButton",
+                    "autoButton", "speedButton", "contButton", "detourButton" }) do
+                check(not overlap(hb, panel[other]), label .. ": home button clear of " .. other)
+            end
+            for i = 1, 4 do
+                check(not overlap(hb, panel.gearButtons[i]), label .. ": home button clear of gear " .. i)
+            end
+            -- 側掛左翼下列：行車時間欄的字不得碰到左移後的 chevron（字不是子元件，
+            -- 上面的控制重疊檢查看不到它）
+            if panel._style == 4 and panel._timeX then
+                local timeRight = panel._timeX + math.max(
+                    textManager:MeasureStringX(UIFont.Small, panel._timeLabel),
+                    textManager:MeasureStringX(UIFont.Small, panel._clockText))
+                check(timeRight <= panel.wingButton.x,
+                    label .. ": the drive-time column stays clear of the shifted left-wing chevron")
+            end
+        end
+    end
+    options:getOption("HUDLayout"):setValue(1)
+    options:getOption("HUDTheme"):setValue(4)
+    options:apply()
+    panel:setWing("left", true)
+    check(not hb.visible, "a folded left wing hides the home button with the main action")
+    panel:setWing("left", false)
+    options:getOption("HUDTheme"):setValue(1)
+    options:apply()
+    panel:setCollapsed(true)
+    panel:refresh(nowMs)
+    check(not hb.visible, "the collapsed badge hides the home button")
+    panel:setCollapsed(false)
+    panel:refresh(nowMs)
+
+    -- 降回 v7：按鈕收掉、主鈕回到原位
+    api.navApiVersion = nil
+    panel:refresh(nowMs)
+    check(not hb.visible, "losing the v8 API removes the home button again")
+    api.getNavHome, api.goNavHome = nil, nil
+    MDAD.Drive.toggle = liveToggle
+    MDAD.Drive.continueItinerary = nil
+    HaloTextHelper = nil
+    panel:refresh(nowMs)
+end
+
 vehicle._module = false
 sandbox.NeedItemForAutoDrive = true
 panel:refresh(nowMs)
@@ -2412,7 +2618,14 @@ checkEq(seen, 1, "each icon is looked up once and cached for the chunk lifetime"
 do
     local realMeasure, realHeight = textManager.MeasureStringX, textManager.getFontHeight
     local themeOption = optionSets.MinidoracatAutoDrive:getOption("HUDTheme")
-    MinidoracatMiniMapAPI.navApiVersion = 7
+    -- v8 回家鈕一起進幾何回歸；框架 house 圖示在時收成方鈕（UIFor42 rev 4 art icon）。
+    MinidoracatUI = { v1 = { API_MAJOR = 1, API_REVISION = 6, Icons = { get = function(name)
+        if name == "house" then return { path = "mui_art_house.png" } end
+        return nil
+    end } } }
+    MinidoracatMiniMapAPI.navApiVersion = 8
+    MinidoracatMiniMapAPI.getNavHome = function() return 10, 20, "HOME" end
+    MinidoracatMiniMapAPI.goNavHome = function() return true, "ok" end
     MinidoracatMiniMapAPI.getNavLeg = function() return nil, nil, nil, nil, "waiting", 1 end
     MinidoracatMiniMapAPI.getNavItinerary = function()
         return { revision = 1, count = 2, currentStopId = 1, autoContinue = true, stops = {
@@ -2423,6 +2636,12 @@ do
     MinidoracatMiniMapAPI.setNavContinuation = function() return true, "ok" end
     iconPanel:setWing("left", false)
     iconPanel:setWing("right", false)
+    iconPanel:refresh(nowMs)
+    check(iconPanel.homeButton.visible and iconPanel.homeButton.image
+        and iconPanel.homeButton.image.path == "mui_art_house.png"
+        and iconPanel.homeButton.title == ""
+        and iconPanel.homeButton.width == iconPanel.homeButton.height,
+        "framework house icon present: the home button becomes a square glyph button")
 
     local function useFontProfile(smallH, mediumH)
         textManager.getFontHeight = function(_, font)
@@ -2469,13 +2688,23 @@ do
                     label .. ": every visible control stays inside the panel")
                 check(iconPanel.actionButton.visible and iconPanel.collapseButton.visible,
                     label .. ": the main action and the fold entry never degrade away")
+                local hb = iconPanel.homeButton
+                if hb.visible then
+                    for i = 1, #iconPanel.children do
+                        local other = iconPanel.children[i]
+                        check(other == hb or not (other.visible
+                                and hb.x < other.x + other.width and other.x < hb.x + hb.width
+                                and hb.y < other.y + other.height and other.y < hb.y + hb.height),
+                            label .. ": the home button overlaps no other visible control")
+                    end
+                end
                 if iconPanel._capX then
                     local capRight = math.max(
                         iconPanel._capX
                             + textManager:MeasureStringX(UIFont.Small, iconPanel._capLabel),
                         iconPanel._capValueX
                             + textManager:MeasureStringX(UIFont.Small, iconPanel._capText))
-                    check(capRight <= iconPanel.actionButton.x,
+                    check(capRight <= (hb.visible and hb.x or iconPanel.actionButton.x),
                         label .. ": cruise text never reaches the main button")
                 else
                     check(iconPanel._capValueX == nil,
@@ -2507,14 +2736,16 @@ do
         "CH 1x wings still fit the visible dashboard band with both wings open")
 
     -- 4x 的側翼三列（44×3＋間距）放不進 103px 的可見儀表板：退回上掛，不得出現
-    -- 負 Y 的檔位列，也不得把底列壓進儀表板。
+    -- 負 Y 的檔位列，也不得把底列壓進儀表板。多了回家鈕後 4x 金屬完整版超過 1904，
+    -- 會再退一階成精簡單行（拉桿隱藏）；只驗看得到的控制。
     useFontProfile(38, 45)
     themeOption:setValue(4)
     iconPanel:applyLayout()
     checkEq(iconPanel._style, 1,
         "CH 4x wings hand over to the top-mounted layout when the dashboard band is too short")
     check(iconPanel.gearButtons[1].y >= 0
-        and iconPanel.volumeSlider.y + iconPanel.volumeSlider.height <= iconPanel.height
+        and (not iconPanel.volumeSlider.visible
+            or iconPanel.volumeSlider.y + iconPanel.volumeSlider.height <= iconPanel.height)
         and iconPanel.y + iconPanel.height == dashboards[0].y + 7,
         "CH 4x wings fallback docks above the dashboard instead of overflowing it")
     click(iconPanel.themeButton)
@@ -2555,6 +2786,9 @@ do
     MinidoracatMiniMapAPI.getNavLeg = nil
     MinidoracatMiniMapAPI.getNavItinerary = nil
     MinidoracatMiniMapAPI.setNavContinuation = nil
+    MinidoracatMiniMapAPI.getNavHome = nil
+    MinidoracatMiniMapAPI.goNavHome = nil
+    MinidoracatUI = nil
     iconPanel:applyLayout()
     iconPanel:refresh(nowMs)
 end

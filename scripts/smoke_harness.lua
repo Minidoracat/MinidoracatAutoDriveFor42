@@ -1406,6 +1406,9 @@ local clientLoadLog = capturePrint(function() require "MDAD_Client" end)
 -- （MDAD、MDAD_Follower、MDAD_VehicleProfile、MDAD_Diagnostics、原版
 -- ISVehicleMenu）沒有斷。載入期會註冊 OnPlayerUpdate 並把
 -- ISVehicleMenu.showRadialMenu 包起來；沒有 session 時前者是零成本的。
+-- 真的 MDAD_Trailer（拖車側推情境要走 production 的 guard／lost）。假車沒有 getVehicleTowing＝
+-- attach 回 nil＝沒在拖，其餘情境行為不變。
+require "MDAD_Trailer"
 require "MDAD_Driver"
 
 -- =====================================================================
@@ -5268,6 +5271,39 @@ if capDiff < 0 then capDiff = -capDiff end
 checkTrue(capDiff <= drive.f70 * 0.02,
     "速度增益封頂：量級不再隨速度成長（100＝" .. tostring(drive.f70)
     .. "、200＝" .. tostring(drive.f200) .. "；±2% 內為控制歷史量測差）")
+
+-- 拖掛車低速側推（2026-09-26 Workshop「草地起步劇烈晃動、掛車脫開」，E2E trailer-grass-mp）：
+-- 側推的 MASS_BASE 項與車速無關，靜止也把車頭整台橫推、掛車不動＝折角 0.4 秒甩到 61°。
+-- 拖車時側推隨車速線性放大到 TOW_STEER_FULL_KMH（15）才全額；沒拖車的行為不變。
+do
+    local trailer = {
+        getForwardVector = function(_, out) return out:set(dveh._fwdX, 0, dveh._fwdY) end,
+        getUpVectorDot = function() return 1 end,
+    }
+    local function steerMag(speed, towed)
+        MDAD.Drive.stop(0, nil)
+        dveh._x, dveh._y, dveh._speed = 0, 0, speed
+        setHeading(dveh, 0.52)
+        drive.nav.route = newRoute(40, 0, 0, 4, 0)
+        checkTrue(MDAD.Drive.start(dp), "拖車側推情境啟動（" .. speed .. " km/h）")
+        if towed then MDAD.Drive.debugSession(0).tow = { trailer = trailer } end
+        driveReset(dveh)
+        driveTick(dp, dveh) -- 第一幀可能還在 build（建剖面、不施力）
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        checkTrue(MDAD.Drive.isActive(0), "拖車側推情境仍在自駕（" .. speed .. " km/h）")
+        return dveh._imp.total > 0 and impulseMag(dveh) or 0
+    end
+    local free0, tow0 = steerMag(0, false), steerMag(0, true)
+    checkTrue(free0 > 0, "沒拖車：靜止照樣側推（前提，實得 " .. tostring(free0) .. "）")
+    checkEq(tow0, 0, "拖車：靜止不側推（實得 " .. tostring(tow0) .. "）")
+    local free75, tow75 = steerMag(7.5, false), steerMag(7.5, true)
+    checkNear(tow75, free75 * 0.5, free75 * 1e-6,
+        "拖車 7.5 km/h：側推為全額的一半（" .. tostring(tow75) .. " / " .. tostring(free75) .. "）")
+    local free20, tow20 = steerMag(20, false), steerMag(20, true)
+    checkNear(tow20, free20, free20 * 1e-6, "拖車 20 km/h：側推全額")
+    MDAD.Drive.stop(0, nil)
+end
 
 -- =====================================================================
 -- 情境二十一：玩家讓位與恢復
@@ -11151,6 +11187,42 @@ do
     nowMs = nowMs + 4001
     driveTick(dp, dveh)
     checkFalse(MDAD.Drive.isActive(0), "(d2b) settle deadline fail-stop")
+    dveh._trans = 2
+end
+
+-- (d2t) 倒車時限到時已退出 UNSTICK_MIN_M＝倒夠了進 settle 重掃，不交還（同 rear-blocked 規則）；
+-- 一寸未退（<1m）照舊 StopStuck。2026-09-26 E2E trailer-grass-mp：拖著掛車在草地 4 秒只退 2.2m 就交還。
+do
+    local function reverseFor(label, backM)
+        drive.fillWorld(-10, 70, -7, 7)
+        checkTrue(armDrive(), label .. " 啟動")
+        setHeading(dveh, 0)
+        driveTick(dp, dveh)
+        dveh._trans = 1
+        drive.putSolid(2, 0, "harness_unstick_timeout")
+        drive.scanRound(true)
+        dveh._speed = 0
+        nowMs = nowMs + 2501
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        checkEq(haloKey(), DKEY.UNSTICK, label .. " 已進倒車脫困")
+        dveh._x, dveh._speed = -backM, -3
+        nowMs = nowMs + 16
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        checkEq(MDAD.Drive.debugSession(0).mode, "unstick", label .. " 退 " .. backM .. "m 仍在倒車（未達標準退距）")
+        nowMs = nowMs + 4001
+        driveReset(dveh)
+        driveTick(dp, dveh)
+    end
+    reverseFor("(d2t) 退 1.5m", 1.5)
+    checkTrue(MDAD.Drive.isActive(0), "(d2t) 時限到、已退 1.5m：不交還")
+    checkEq(MDAD.Drive.debugSession(0).mode, "settle", "(d2t) 時限到、已退 1.5m：進 settle 重掃")
+    MDAD.Drive.stop(0, nil)
+    drive.clearCell(2, 0)
+    reverseFor("(d2t) 退 0.5m", 0.5)
+    checkFalse(MDAD.Drive.isActive(0), "(d2t) 時限到、只退 0.5m：照舊交還")
+    drive.clearCell(2, 0)
     dveh._trans = 2
 end
 

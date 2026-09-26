@@ -215,6 +215,17 @@ local TRIP_ROAD_END_KEY = "UI_MinidoracatAutoDrive_TripRoadEnd"
 local NAV_CONT_VERSION = 7
 local CONT_AUTO_KEY = "UI_MinidoracatAutoDrive_HUDContAuto"
 local CONT_STEP_KEY = "UI_MinidoracatAutoDrive_HUDContStep"
+-- 回家（navApiVersion 8，additive）：getNavHome 純讀取、goNavHome 把行程換成單站「家」並
+-- 開始導航，兩者都不發車、也不顯示 MiniMap 訊息，提示由 HUD 自己給。缺版本／缺函式＝整顆
+-- 不出現。拒絕 enum → 完整句（MiniMap 是必裝依賴，家相關句沿用它的四語鍵）；blocked 另帶
+-- nav gate reasonKey（翻譯鍵），同主鈕 tooltip 的 getText(reason) 慣例；其餘一律 generic。
+local NAV_HOME_VERSION = 8
+local HOME_REASON_KEYS = {
+    nohome = "UI_MinidoracatMiniMap_HomeNotSet",
+    athome = "UI_MinidoracatMiniMap_AlreadyHome",
+    busy = "UI_MinidoracatAutoDrive_HUDHomeBusy",
+    notstopped = "UI_MinidoracatAutoDrive_TripNotStopped",
+}
 
 local THEME_KEYS = {
     "UI_MinidoracatAutoDrive_HUDThemeMetal",
@@ -615,6 +626,16 @@ local function continuationApi()
     return api
 end
 
+-- 回家（navApiVersion 8）：版本與兩個函式都在才算有，每次用前重查（同上兩個守衛）。
+local function homeApi()
+    local api = MinidoracatMiniMapAPI
+    if type(api) ~= "table" then return nil end
+    local version = api.navApiVersion
+    if type(version) ~= "number" or version * 0 ~= 0 or version < NAV_HOME_VERSION then return nil end
+    if type(api.goNavHome) ~= "function" or type(api.getNavHome) ~= "function" then return nil end
+    return api
+end
+
 -- 站名：label 優先，沒有就退座標；兩者都沒有回 nil（呼叫端再退 N/M）。
 local function stopName(stop)
     if type(stop) ~= "table" then return nil end
@@ -689,10 +710,25 @@ end
 local ICON_PATH = "media/ui/MinidoracatAutoDrive/hud_"
 local ICON_PX = 16
 local iconCache = {}
+-- 框架共用圖示（UIFor42 rev 4 起的 art icon）：回家鈕用 house，與 MiniMap 地圖上的家同一張。
+-- 框架缺席／舊版／缺圖一律回 nil，setGlyph 退回文字標題。
+local function frameworkIcon(name)
+    local ui = MinidoracatUI and MinidoracatUI.v1
+    if not (ui and ui.API_MAJOR == 1 and type(ui.API_REVISION) == "number" and ui.API_REVISION >= 4
+            and type(ui.Icons) == "table" and type(ui.Icons.get) == "function") then
+        return nil
+    end
+    return ui.Icons.get(name)
+end
 local function icon(name)
     local cached = iconCache[name]
     if cached == nil then
-        local ok, tex = pcall(getTexture, ICON_PATH .. name .. ".png")
+        local ok, tex
+        if name == "house" then
+            ok, tex = pcall(frameworkIcon, name)
+        else
+            ok, tex = pcall(getTexture, ICON_PATH .. name .. ".png")
+        end
         cached = ok and tex or false
         iconCache[name] = cached
     end
@@ -996,6 +1032,10 @@ function MDADHUDPanel:new(playerNum)
     o._tripRemaining = 0
     o._tripStatusKey = nil
     o._tripReasonKey = nil
+    -- 回家鈕：_homeAvail 只在「有無」變動時重算版面；有沒有家與 tooltip 在 250ms refresh 更新。
+    o._homeAvail = false
+    o._homeSet = false
+    o._homeLabel = nil
     o._prep = false
     return o
 end
@@ -1019,6 +1059,9 @@ function MDADHUDPanel:createChildren()
     self.contButton = makeButton(self, "", MDADHUDPanel.onContinuation, MDADHUDChainButton)
     self.contButton:setVisible(false)
     self.actionButton = makeButton(self, getText("UI_MinidoracatAutoDrive_Start"), MDADHUDPanel.onAction)
+    -- 回家鈕（navApiVersion 8）：主鈕左側同列；缺 API 時不顯示也不佔位。
+    self.homeButton = makeButton(self, getText("UI_MinidoracatMiniMap_GoHome"), MDADHUDPanel.onHome)
+    self.homeButton:setVisible(false)
     self.themeButton = makeButton(self, getText("UI_MinidoracatAutoDrive_HUDStyleButton"), MDADHUDPanel.onTheme)
     self.collapseButton = makeButton(self, getText("UI_MinidoracatAutoDrive_HUDHideButton"), MDADHUDPanel.onCollapse)
     -- 側掛主題的左翼 chevron；其餘主題只有一顆（collapseButton＝右翼／整面板）。
@@ -1082,6 +1125,7 @@ function MDADHUDPanel:setControlsVisible(gearsOn, cycleOn, policiesOn, actionOn,
     -- 接續模式藥丸與策略藥丸同列同進退；沒有 v7 setter／沒有行程時整顆不存在。
     self.contButton:setVisible(policiesOn and self._contAvail == true)
     self.actionButton:setVisible(actionOn)
+    self.homeButton:setVisible(actionOn and self._homeAvail == true)
     -- 樣式／語音只在展開態；隱藏鈕永遠在（收合徽章上它就是「展開」）。
     self.themeButton:setVisible(not self._collapsed and modOptions ~= nil)
     self.voiceButton:setVisible(not self._collapsed and modOptions ~= nil)
@@ -1147,6 +1191,13 @@ local function measure(self, scale)
             textWidth(UIFont.Small, getText(CONT_STEP_KEY))) + 6
     end
     m.contGap = m.contW > 0 and (m.contW + m.gap) or 0
+    -- 回家鈕：有 house 圖示＝方鈕，沒有＝文字寬；沒有 v8 API 時寬度為 0（完全不佔位）。
+    m.homeW = 0
+    if self._homeAvail then
+        m.homeW = icon("house") and m.ctrlH or maximum(scaled(44, scale),
+            textWidth(UIFont.Small, getText("UI_MinidoracatMiniMap_GoHome")) + 12)
+    end
+    m.homeGap = m.homeW > 0 and (m.homeW + m.gap) or 0
     m.gearW = maximum(scaled(34, scale), textWidth(UIFont.Small, "MAX") + 12)
     m.gearLabelW = textWidth(UIFont.Small, self._gearLabel) + m.gap
     local forcedText = getText("UI_MinidoracatAutoDrive_HUDForcedOff")
@@ -1214,7 +1265,7 @@ function MDADHUDPanel:layoutWings(scale, m)
 
     -- 展開／收合各自的寬度；空間不夠時先摺右翼再摺左翼（版面層強制，不動玩家的 modData）
     local leftOpenW = pad * 2 + maximum(16 + statusW + gap + speedW,
-        capW + gap + timeW + gap + ctrlW + gap + actionW)
+        capW + gap + timeW + gap + ctrlW + gap + m.homeGap + actionW)
     local rightOpenW = pad * 2 + maximum(
         gearLabelW + gearW * 4 + gap * 3,
         maximum(policyW * policyN + gap * policyN + m.contGap + energyW,
@@ -1261,6 +1312,7 @@ function MDADHUDPanel:layoutWings(scale, m)
     self.speedButton:setVisible(not foldR and controlsOn)
     self.contButton:setVisible(not foldR and self._contAvail == true)
     self.actionButton:setVisible(not foldL)
+    self.homeButton:setVisible(not foldL and self._homeAvail == true)
     self.themeButton:setVisible(not foldR and controlsOn)
     self.voiceButton:setVisible(not foldR and controlsOn)
     self.volumeSlider:setVisible(not foldR and controlsOn)
@@ -1303,8 +1355,13 @@ function MDADHUDPanel:layoutWings(scale, m)
         self._timeValueX, self._timeValueY = self._timeX, self._capValueY
         self._detourY = topY + math.floor((rowH - ctrlH) / 2)
         setButtonRect(self.actionButton, leftW - pad - actionW, bottomY, actionW, rowH)
+        -- 回家鈕貼主鈕左側（同列、控制鈕高置中）；左翼 chevron 再往左讓出同一格。
+        local homeX = leftW - pad - actionW - m.homeGap
+        if m.homeW > 0 then
+            setButtonRect(self.homeButton, homeX, bottomY + math.floor((rowH - ctrlH) / 2), m.homeW, ctrlH)
+        end
         -- 左翼 chevron：下列巡航值與主鈕之間（改道鈕在上列狀態字後，兩者不撞）
-        setButtonRect(self.wingButton, leftW - pad - actionW - gap - ctrlW,
+        setButtonRect(self.wingButton, homeX - gap - ctrlW,
             bottomY + math.floor((rowH - ctrlH) / 2), ctrlW, ctrlH)
         self._wingLDividerY = topY + rowH + math.floor(gap / 2)
     end
@@ -1449,7 +1506,8 @@ function MDADHUDPanel:layoutStacked(scale, m)
     end
     local bottomContentW = pad * 2 + gearLabelW + gearW * 4 + gap * (4 + policyN)
         + policyW * policyN + m.contGap + energyW
-    local topContentW = pad * 2 + statusW + speedW + capW + timeW + gap + actionW
+    -- 回家鈕（有 v8 API 才有寬度）永遠貼在主鈕左側，所以跟主鈕一起算進主鈕那一列。
+    local topContentW = pad * 2 + statusW + speedW + capW + timeW + gap + m.homeGap + actionW
     if style == STYLE_GLASS then
         topContentW = topContentW + trioW + gap
         bottomContentW = bottomContentW + sliderW + gap
@@ -1459,16 +1517,17 @@ function MDADHUDPanel:layoutStacked(scale, m)
     else
         -- 家族：標題條＝狀態＋現速＋控制三顆＋拉桿；本體第 1 列＝巡航＋行車時間＋主鈕
         topContentW = maximum(pad * 2 + statusW + speedW + gap + trioW + gap + sliderW,
-            pad * 2 + capW + timeW + gap + actionW)
+            pad * 2 + capW + timeW + gap + m.homeGap + actionW)
     end
     local fullContentW = maximum(topContentW, bottomContentW)
     local fullW = maximum(fullBase, fullContentW)
     -- 精簡單行的欄位由次要往主要逐階讓位；每一階只把該欄歸零，其餘算式不變。
     -- 主鈕（開始／停止／取消）與收合入口永不讓位：極窄時它們是唯一保證還在的操作。
     -- 讓掉的東西都另有入口——檔位與接續模式在行程頁、樣式與語音在 ESC 選項、
-    -- 現速原版儀表板本來就有——所以寧可讓欄位消失，也不把控制推出面板。
-    local showPolicies, showStatusText, showCap, showTrio, showSpeed, showCycle =
-        true, true, true, true, true, true
+    -- 回家在 MiniMap 底部按鈕列與地圖右鍵、現速原版儀表板本來就有——所以寧可讓欄位消失，
+    -- 也不把控制推出面板。
+    local showPolicies, showStatusText, showCap, showTrio, showSpeed, showCycle, showHome =
+        true, true, true, true, true, true, true
     local function compactContentW()
         return pad * 2 + statusW
             + (showSpeed and speedW or 0)
@@ -1477,6 +1536,7 @@ function MDADHUDPanel:layoutStacked(scale, m)
             + (showCycle and cycleW or 0)
             + (showPolicies and ((policyW + gap) * policyN + m.contGap) or 0)
             + (showTrio and trioW or (ctrlW + gap))
+            + (showHome and m.homeGap or 0)
             + actionW + gap * 2
     end
 
@@ -1501,6 +1561,7 @@ function MDADHUDPanel:layoutStacked(scale, m)
     if tooWide() then showTrio = false end
     if tooWide() then showSpeed = false end
     if tooWide() then showCycle = false end
+    if tooWide() then showHome = false end
     if tooWide() then
         -- 最後防線：字型×viewport 極端到連「狀態燈＋主鈕＋收合」都排不下時，
         -- 主鈕吃掉剩下的寬度（標題由原版 ISButton 自己處理），寧可窄也不出面板。
@@ -1543,6 +1604,7 @@ function MDADHUDPanel:layoutStacked(scale, m)
         panelW = compactW
         panelH = maximum(scaled(44, scale), buttonH + pad * 2)
         self:setControlsVisible(false, showCycle, showPolicies, true, false)
+        if not showHome then self.homeButton:setVisible(false) end
         if not showTrio then
             self.themeButton:setVisible(false)
             self.voiceButton:setVisible(false)
@@ -1572,6 +1634,9 @@ function MDADHUDPanel:layoutStacked(scale, m)
         end
         self:placeControlTrio(x, y, ctrlW, ctrlH, gap, controlsOn and showTrio)
         setButtonRect(self.actionButton, panelW - pad - actionW, y, actionW, buttonH)
+        if showHome and m.homeW > 0 then
+            setButtonRect(self.homeButton, panelW - pad - actionW - m.homeGap, y, m.homeW, buttonH)
+        end
         self._dotX = pad
         self._dotY = math.floor((panelH - 8) / 2)
         self._statusX = pad + 16
@@ -1636,6 +1701,10 @@ function MDADHUDPanel:layoutStacked(scale, m)
                 ctrlW, ctrlH, gap, controlsOn)
         end
         setButtonRect(self.actionButton, rightEdge - actionW, topY, actionW, topH)
+        if m.homeW > 0 then
+            setButtonRect(self.homeButton, rightEdge - actionW - m.homeGap,
+                topY + math.floor((topH - ctrlH) / 2), m.homeW, ctrlH)
+        end
         local x = pad + gearLabelW
         for i = 1, 4 do
             setButtonRect(self.gearButtons[i], x, bottomY, gearW, buttonH)
@@ -2100,6 +2169,26 @@ function MDADHUDPanel:refreshTrip()
     end
 end
 
+-- 回家鈕：能力有無只在變動時重算版面（冷路徑）；家座標每輪（250ms）讀一次純讀取的
+-- getNavHome，prerender 不碰。tooltip 只在「有沒有家／名稱」變了才重建。
+function MDADHUDPanel:refreshHome()
+    local api = homeApi()
+    if (api ~= nil) ~= self._homeAvail then
+        self._homeAvail = api ~= nil
+        self._homeLabel = nil
+        self.homeButton.tooltip = nil
+        self:applyLayout()
+    end
+    if not api then return end
+    local x, _, label = api.getNavHome(self.playerNum)
+    self._homeSet = type(x) == "number"
+    label = self._homeSet and (type(label) == "string" and label or "") or nil
+    if self.homeButton.tooltip and label == self._homeLabel then return end
+    self._homeLabel = label
+    self.homeButton.tooltip = getText("UI_MinidoracatMiniMap_BtnGoHome") .. "\n"
+        .. (label or getText("UI_MinidoracatMiniMap_HomeNotSet"))
+end
+
 -- 主鈕被 Driver 拒絕時的短期原因；過期就交還給 hudStartReason，不永久蓋掉安全狀態。
 function MDADHUDPanel:tripNotice(now)
     local key = self._tripNoticeKey
@@ -2278,6 +2367,7 @@ function MDADHUDPanel:refresh(now)
     self._active = token ~= nil
     -- 行程狀態每輪讀一次（零配置 getNavLeg）；快照與版面只在真的變了才動。
     self:refreshTrip()
+    self:refreshHome()
     -- 政策三態（藥丸鎖不鎖）與 session 無關，兩種狀態都要讀。啟用中「此刻要不要
     -- 減速」以 hudState 的 session 快取為準，停用態才顯示政策×偏好的合成值。
     local policyZombieOn, policyCorpseOn
@@ -2469,6 +2559,11 @@ function MDADHUDPanel:updateButtons()
             and "UI_MinidoracatAutoDrive_HUDWingLShow"
             or "UI_MinidoracatAutoDrive_HUDWingLHide")
         styleButton(self.wingButton, C.button, C.muted, true)
+    end
+    if self._homeAvail then
+        -- 未設家照樣可按（按下說明怎麼設），只以較暗的字／圖示表示尚未設定。
+        setGlyph(self.homeButton, "house", getText("UI_MinidoracatMiniMap_GoHome"), optionScale())
+        styleButton(self.homeButton, C.button, self._homeSet and C.text or C.muted, true)
     end
     self.detourButton.tooltip = getText("UI_MinidoracatAutoDrive_HUDDetourTip")
     setGlyph(self.detourButton, "detour", getText("UI_MinidoracatAutoDrive_HUDDetourButton"), optionScale())
@@ -2745,6 +2840,33 @@ function MDADHUDPanel:onAction()
     end
     self._forceRefresh = true
     self:refresh(now)
+end
+
+-- 回家：一鍵把行程換成家（要不要確認由 MiniMap 決定）。HUD 絕不發車——自駕中的單站行程
+-- 由 Driver 沿用同一 claim 自然改往新座標；停著時只提示玩家可以按主鈕出發。
+function MDADHUDPanel:onHome()
+    local api = homeApi()
+    if not api then return end
+    local pn = self.playerNum
+    local ok, reason, detailKey = api.goNavHome(pn)
+    local playerObj = getSpecificPlayer(pn)
+    if not playerObj then return end
+    -- 提示同 Driver（頭上字＋右上 Toast）；自駕中狀態列留給行駛安全狀態，不借主鈕拒絕通知。
+    -- prompted：MiniMap 已開確認窗，結果之後反映在行程狀態，這裡不重複提示。
+    if ok then
+        if reason ~= "prompted" then
+            Drive.haloGood(playerObj, Drive.hudState(pn) ~= nil
+                and "UI_MinidoracatAutoDrive_HUDHomeDriving" or "UI_MinidoracatAutoDrive_HUDHomeReady")
+        end
+    else
+        local key = HOME_REASON_KEYS[reason]
+        if not key and reason == "blocked" and type(detailKey) == "string" and detailKey ~= "" then
+            key = detailKey
+        end
+        Drive.haloBad(playerObj, key or "UI_MinidoracatAutoDrive_HUDHomeFailed")
+    end
+    self._forceRefresh = true
+    self:refresh(getTimestampMs())
 end
 
 -- 側掛時 collapseButton＝右翼 chevron，wingButton＝左翼；其餘主題只有整面板收合。

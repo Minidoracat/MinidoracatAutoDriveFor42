@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0925r"
+Drive.REV = "0926a"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -110,6 +110,12 @@ TUNE.UTURN = {
     gentle = { name = "gentle", entry = 5,  spin = 5,  force = 0.4,  arc = 13, crawl = 4 },
     fast   = { name = "fast",   entry = 25, spin = 15, force = 0.65, arc = 25, crawl = 12 },
 }
+-- 拖掛車的側推限制（2026-09-26 Workshop 回報「草地起步劇烈晃動、掛車脫開」，E2E trailer-grass-mp）：
+-- 側推的 MASS_BASE 項與車速無關，低速照樣整台橫推——真車低速轉不動掛點，這裡卻把車頭橫甩、
+-- 掛車原地不動（遙測首幀 spd 0、f −46k，折角 0→61° 只花 0.4 秒）。拖車時側推按車速線性放大到
+-- TOW_STEER_FULL_KMH 才全額（只在 3 km/h 以上放行仍會在放行瞬間甩 60°）。前推輔助不動：
+-- 關掉它牽引車在草地拉不動掛車，4.5 秒後進倒車脫困（E2E 同情境實測）。
+TUNE.TOW_STEER_FULL_KMH = 15
 local STEER_INPUT_EPS = 0.01   -- getCurrentSteering 視為「玩家在轉」的門檻
 local STEER_DEADZONE = 0.02    -- follower steer（±5）的死區：低於此值不施力（免無謂抖動）。
                                -- 0.1→0.02（2026-09-07 session-006 t=2.6-3.8 定罪：殭屍在車側 0.3m、
@@ -596,7 +602,7 @@ local function haloGood(playerObj, key)
     HaloTextHelper.addGoodText(playerObj, text)
     if MDADDiagnostics and MDADDiagnostics.toast then MDADDiagnostics.toast(text, "good") end
 end
-
+Drive.haloBad, Drive.haloGood = haloBad, haloGood -- HUD 回家鈕共用同一組提示
 
 local function maxSpeedKmh()
     local v = MDAD.sandbox("AutoDriveMaxSpeed", 120)
@@ -2315,6 +2321,10 @@ end
 local function applySteering(
         s, vehicle, fwd, fx, fy, steer, speedKmh, mult, coupled, assistForce)
     if steer > 5 then steer = 5 elseif steer < -5 then steer = -5 end
+    if s.tow and not coupled then
+        local tv = speedKmh < 0 and -speedKmh or speedKmh
+        if tv < TUNE.TOW_STEER_FULL_KMH then steer = steer * tv / TUNE.TOW_STEER_FULL_KMH end
+    end
     if steer < STEER_DEADZONE and steer > -STEER_DEADZONE then steer = 0 end
     -- Follower 的 yaw 增益估計要拿「真的施出去」的 steer（含 cross-track 與夾限；耦力調頭
     -- 是力偶不是側推，不進估計）——0908a 弧段自適應前饋
@@ -7653,7 +7663,9 @@ local function stepUnstick(s, vehicle, playerNum, now)
     if s.unstickTravelM > 0 and s.unstickTravelM * s.unstickTravelM < wantSq then
         wantSq = s.unstickTravelM * s.unstickTravelM
     end
-    if dist2 >= wantSq then
+    -- 時限到但已退出 UNSTICK_MIN_M：同「倒到後方出現障礙」一樣當倒夠了進 settle 重掃
+    -- （2026-09-26 E2E trailer-grass-mp：拖著掛車在草地倒車 4 秒只退 2.2m，舊制直接交還）
+    if dist2 >= wantSq or (now >= s.unstickUntil and s.unstickDistance >= TUNE.UNSTICK_MIN_M) then
         s.mode = "settle"
         s.progressState = "settle"
         s.settleUntil = now + SETTLE_MS
