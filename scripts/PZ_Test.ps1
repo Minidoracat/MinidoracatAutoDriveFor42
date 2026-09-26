@@ -110,7 +110,12 @@ function Get-PZServerProcesses {
     if (@($processes | Where-Object { [string]::IsNullOrWhiteSpace($_.CommandLine) }).Count -gt 0) {
         throw '無法讀取 Java 程序命令列，不能確認是否已有測試伺服器。'
     }
-    @($processes | Where-Object { $_.CommandLine -match 'zombie\.network\.GameServer' -and $_.CommandLine -match $pattern })
+    # 隔離 E2E 輪次（-cachedir= 指向別的使用者目錄）可能用同一個 -servername，但它是另一台伺服器，不能當成「已在執行」沿用；
+    # -cachedir= 指向 $ZomboidDir 本身仍是這台，解析不了就無法確認（sync_mod.ps1 已由 Invoke-PZLaunch 載入）
+    @($processes | Where-Object { $_.CommandLine -match 'zombie\.network\.GameServer' -and $_.CommandLine -match $pattern } | Where-Object {
+        $kind = Get-PZSyncProfileKind $_.CommandLine $ZomboidDir
+        if ($kind -eq 'unknown') { throw "無法確認 PID $($_.ProcessId) 的 -cachedir= 使用者目錄，不能確認是否已有測試伺服器。" }
+        $kind -eq 'managed' })
 }
 
 function Start-PZServer {
@@ -183,11 +188,26 @@ function Start-ServerAndClients {
 
 
 function Stop-AllPZ {
+    # 只停用 $ZomboidDir 的 PZ：-cachedir= 指向別的目錄是隔離 E2E 輪次（pz_e2e.py），由它自己 stop；
+    # 讀不到命令列（含 java／javaw）、-cachedir= 解析不了或可能是別名的不猜、不殺，回 $false 讓使用者自行處理
+    . (Join-Path $ProjectRoot 'scripts\sync_mod.ps1')
     $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop |
         Where-Object { $_.Name -in @('ProjectZomboid64.exe', 'ProjectZomboid32.exe') -or
-            ($_.Name -in @('java.exe', 'javaw.exe') -and $_.CommandLine -match 'zombie\.(network\.GameServer|gameStates\.MainScreenState)') })
-    foreach ($process in $processes) { Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop }
-    Write-Host "[停止] 已停止 $($processes.Count) 個 PZ 程序。" -ForegroundColor Yellow
+            ($_.Name -in @('java.exe', 'javaw.exe') -and ([string]::IsNullOrWhiteSpace($_.CommandLine) -or
+                $_.CommandLine -match 'zombie\.(network\.GameServer|gameStates\.MainScreenState)')) })
+    $stopped = 0
+    $unknown = @()
+    foreach ($process in $processes) {
+        $kind = Get-PZSyncProfileKind $process.CommandLine $ZomboidDir
+        if ($kind -eq 'managed') { Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop; $stopped++ }
+        elseif ($kind -eq 'unknown') { $unknown += $process.ProcessId }
+    }
+    Write-Host "[停止] 已停止 $stopped 個 PZ 程序（隔離 E2E 輪次不受影響）。" -ForegroundColor Yellow
+    if ($unknown.Count -gt 0) {
+        Write-Host "[停止] PID $($unknown -join ', ') 無法確認使用者目錄（命令列讀不到、-cachedir= 解析不了或可能是別名），未停止；請自行確認後關閉。" -ForegroundColor Red
+        return $false
+    }
+    return $true
 }
 
 function Open-Logs {
@@ -229,7 +249,7 @@ function Invoke-PZLauncherAction {
         'server' { return (Start-PZServer -NoSteam:$NoSteam) }
         'combo' { return (Start-ServerAndClients -Clients $Clients -NoSteam:$NoSteam -Debug:$DebugClient) }
         'sync' { return (Sync-PZBeforeLaunch) }
-        'stop' { Stop-AllPZ; return $true }
+        'stop' { return (Stop-AllPZ) }
         'cntrans' { Write-Host '[啟動] 此專案沒有漢化對照模式。' -ForegroundColor Red; return $false }
     }
 }

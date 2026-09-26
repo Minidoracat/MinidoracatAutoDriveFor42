@@ -642,7 +642,38 @@ function Invoke-PZSyncApply {
 # ------------------------------------------------------------
 # 遊戲程序閘門（fail-closed：查不到＝當作在跑）
 # ------------------------------------------------------------
+# 程序實際用哪個使用者目錄（照 MainScreenState.java:157-158／GameServer.java:417-418／ZomboidFileSystem.setCacheDir：
+# 每個 startsWith("-cachedir=") 的參數都覆寫、trim、/ 換 \，相對路徑依程序工作目錄解析）。
+# 'managed'＝沒帶 -cachedir= 或解析後就是 $ZomboidDir；'other'＝確定是別的目錄（隔離 E2E 輪次）；
+# 'unknown'＝命令列讀不到、相對路徑、解析失敗或可能是別名——呼叫端一律 fail-closed（算忙碌、不沿用、不殺）。
+function Get-PZSyncProfileKind {
+    param([string]$CommandLine, [string]$ZomboidDir)
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) { return 'unknown' }
+    $dir = $null
+    # Windows 命令列切參數：相連的非空白字元與引號段落屬同一參數（"-cachedir=a b"、-cachedir="a b" 都認）
+    foreach ($m in [regex]::Matches($CommandLine, '(?:[^\s"]+|"[^"]*"?)+')) {
+        $arg = $m.Value.Replace('"', '')
+        if ($arg.StartsWith('-cachedir=', [StringComparison]::Ordinal)) { $dir = $arg.Substring(10).Trim().Replace('/', '\') }
+    }
+    if ($null -eq $dir) { return 'managed' }
+    if ($dir -notmatch '^(?:[A-Za-z]:\\|\\\\[^\\])') { return 'unknown' }
+    try {
+        $a = Resolve-PZSyncFullPath $dir
+        $b = Resolve-PZSyncFullPath $ZomboidDir
+        if (-not $a -or -not $b) { return 'unknown' }
+        if ($a -ieq $b) { return 'managed' }
+        # 字串不同仍可能是同一目錄的別名（subst／網路磁碟、\\?\ 裝置路徑）。同一目錄從任何別名讀到的建立時間都相同，
+        # 所以只有兩邊都存在且建立時間不同，才確定是別的目錄；其餘無法確認
+        # ponytail: 不同目錄剛好建立時間相同時會判 unknown（算忙碌、不殺），擋住並行輪次；實際遇到再升級成
+        # Windows handle／file identity（volume serial＋file index）比對
+        if ([IO.Directory]::Exists($a) -and [IO.Directory]::Exists($b) -and
+            [IO.Directory]::GetCreationTimeUtc($a) -ne [IO.Directory]::GetCreationTimeUtc($b)) { return 'other' }
+    } catch { }
+    return 'unknown'
+}
+
 function Test-PZSyncGameBusy {
+    param([string]$ZomboidDir)
     $clients = @('ProjectZomboid64.exe', 'ProjectZomboid32.exe')
     $javas = @('java.exe', 'javaw.exe')
     # 一次查完四個名稱（原本一個名稱一次 CIM 查詢）；查不到＝當作在跑
@@ -652,6 +683,9 @@ function Test-PZSyncGameBusy {
         Write-PZSyncWarn "無法查詢遊戲程序（$($_.Exception.Message)），fail-closed 視為遊戲執行中"
         return $true
     }
+    # -cachedir= 確定指向別的使用者目錄＝隔離 E2E 輪次（pz_e2e.py），不讀這裡的 mods，不算忙碌；
+    # 指向 $ZomboidDir 本身或解析不了的照樣算（讀不到命令列的 java 在下面 fail-closed）
+    $procs = @(@($procs) | Where-Object { (Get-PZSyncProfileKind $_.CommandLine $ZomboidDir) -ne 'other' })
     $running = @(@($procs) | Where-Object { $clients -icontains $_.Name })
     if ($running.Count -gt 0) {
         Write-PZSyncWarn "$(@($running | ForEach-Object { $_.Name } | Select-Object -Unique) -join '／') 正在執行（PID $(@($running | ForEach-Object { $_.ProcessId }) -join ', ')）"
@@ -930,7 +964,7 @@ function Invoke-PZModSync {
             return $false
         }
         if (-not $CheckOnly -and -not [IO.Directory]::Exists($stateDir)) {
-            if (Test-PZSyncGameBusy) { Write-PZSyncFail '遊戲執行中，尚未建立同步副本；請先正常關閉。'; return $false }
+            if (Test-PZSyncGameBusy $zomboid) { Write-PZSyncFail '遊戲執行中，尚未建立同步副本；請先正常關閉。'; return $false }
             [void][IO.Directory]::CreateDirectory($stateDir)
         }
 
@@ -1035,7 +1069,7 @@ function Invoke-PZModSync {
         }
 
         # ---- 4. 需要寫入 -> 遊戲程序閘門（已一致的情況上面就回 true 了）----
-        if (Test-PZSyncGameBusy) {
+        if (Test-PZSyncGameBusy $zomboid) {
             Write-PZSyncFail "遊戲／伺服器執行中且副本與來源不一致：請先關閉再同步（本次未做任何寫入）"
             return $false
         }
@@ -1046,7 +1080,7 @@ function Invoke-PZModSync {
             # 沒有變更的 pair 不寫入，也不必重查程序閘門或重新分類目的地
             if ($p.Action -eq 'ready' -and (Test-PZSyncPlanEmpty $p.Plan)) { $unchanged++; continue }
 
-            if (Test-PZSyncGameBusy) { Write-PZSyncFail '同步期間偵測到遊戲啟動，已停止更新。'; return $false }
+            if (Test-PZSyncGameBusy $zomboid) { Write-PZSyncFail '同步期間偵測到遊戲啟動，已停止更新。'; return $false }
             Assert-PZSyncPhysicalPath (Split-Path -Parent $p.Dest)
             $actionNow = Get-PZSyncDestAction -Dest $p.Dest -Source $p.Source -Owner $ownership[(Get-PZSyncOwnerKey $p.Dest)]
             if ($actionNow -ne $p.Action) { throw "同步期間目的地狀態改變：$($p.Dest)" }
@@ -1147,7 +1181,7 @@ function Remove-PZModSync {
             return $true
         }
 
-        if ($existing.Count -gt 0 -and (Test-PZSyncGameBusy)) {
+        if ($existing.Count -gt 0 -and (Test-PZSyncGameBusy $zomboid)) {
             Write-PZSyncFail "遊戲／伺服器執行中，拒絕變更副本：請先關閉再移除"
             return $false
         }
