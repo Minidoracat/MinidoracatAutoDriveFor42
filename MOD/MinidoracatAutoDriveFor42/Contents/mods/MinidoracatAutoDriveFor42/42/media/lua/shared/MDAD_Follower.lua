@@ -416,8 +416,12 @@ end
 -- 永遠 ≤ 本段夾值＝不出自己的餘裕。不傳 sAt＝舊逐段語意。
 -- 12m：1m 換道的 smoothstep 峰值 κ≈6·dl/L²（8m＝0.094→aLat 5 下 26 km/h，會比弧本身（κ 0.07→30）
 -- 還緊；12m＝0.042→39、16m＝0.023→53）。ramp 只在 proof 線與前視目標上；車實際走的是 pure pursuit 攤平版。
+-- 混合長隨橫移量放大（0928c）：常駐靠右是路寬／4 的倍數（0924f），8m 路＝2m，出入每個彎／窄段都是 2m 的
+-- ramp；固定 12m 時峰值 κ≈0.083（aLat 7 下 33 km/h），車在彎後加速時追不上 ramp、落後 1m 以上＝
+-- alignment 帽把 45 壓到 20–26、lane 曲率帽再壓一次（E2E rc1 十五趟 25 次）。每個因子的混合長＝
+-- 12m×max(1, dl)（dl＝本 bias 與該 run 夾值之差），峰值 κ＝0.042／dl：1m 以內與舊值相同。
 local LANE_BLEND_M = 12
-local LANE_BLEND_WALK_MAX = 32 -- 以 run 計（同餘裕的連續段＝一個 run；12m 內超過 32 個不同餘裕的 run 才截斷）
+local LANE_BLEND_WALK_MAX = 32 -- 以 run 計（同餘裕的連續段＝一個 run；混合窗內超過 32 個不同餘裕的 run 才截斷）
 local function clampLane(p, j, lane, keep, sAt)
     if p.laneRoomR == nil then return lane end
     if keep == nil then keep = LANE_BIAS_KEEP end
@@ -428,23 +432,25 @@ local function clampLane(p, j, lane, keep, sAt)
     local aLane = lane < 0 and -lane or lane
     local aOwn = v < 0 and -v or v
     local gain = 1
+    local reach = LANE_BLEND_M * (aLane > 1 and aLane or 1) -- 最大混合長（ak≥0＝dl≤aLane）
     -- 因子以「同值 run」為單位（連續弧段全是 0＝一個 run，只算最近那一段的距離）：逐段各乘一次
     -- 會把 12 段 0 的弧乘成 0.5^12（第一版 ramp 中點只剩 0.02）。走訪逐 run 跳（buildLaneRoom 的
-    -- 端點表；無表＝逐段），走訪上限也以 run 計——逐段計數在 0.25m 碎段會在 12m 內截斷，因子隨
+    -- 端點表；無表＝逐段），走訪上限也以 run 計——逐段計數在 0.25m 碎段會在混合窗內截斷，因子隨
     -- 車位突然出現＝段界跳變。同餘裕不同 run 若夾值相同仍只乘一次（runAk）。
     local k, walked, runAk = (runEnd and runEnd[j] or j) + 1, 0, aOwn
     while k <= n - 1 and walked < LANE_BLEND_WALK_MAX do
         local d = ss[k] - sAt
-        if d >= LANE_BLEND_M then break end
+        if d >= reach then break end
         local vk = clampLaneRaw(p, k, lane, keep)
         local ak = vk < 0 and -vk or vk
         if ak ~= runAk then
             runAk = ak
             if ak < aLane then
-                local t = d / LANE_BLEND_M
-                if t < 0 then t = 0 end
+                local dl = aLane - ak
+                local t = d / (LANE_BLEND_M * (dl > 1 and dl or 1))
+                if t < 0 then t = 0 elseif t > 1 then t = 1 end
                 t = t * t * (3 - 2 * t)
-                gain = gain * (ak + (aLane - ak) * t) / aLane
+                gain = gain * (ak + dl * t) / aLane
             end
         end
         k = (runEnd and runEnd[k] or k) + 1
@@ -453,16 +459,17 @@ local function clampLane(p, j, lane, keep, sAt)
     k, walked, runAk = (runStart and runStart[j] or j) - 1, 0, aOwn
     while k >= 1 and walked < LANE_BLEND_WALK_MAX do
         local d = sAt - ss[k + 1]
-        if d >= LANE_BLEND_M then break end
+        if d >= reach then break end
         local vk = clampLaneRaw(p, k, lane, keep)
         local ak = vk < 0 and -vk or vk
         if ak ~= runAk then
             runAk = ak
             if ak < aLane then
-                local t = d / LANE_BLEND_M
-                if t < 0 then t = 0 end
+                local dl = aLane - ak
+                local t = d / (LANE_BLEND_M * (dl > 1 and dl or 1))
+                if t < 0 then t = 0 elseif t > 1 then t = 1 end
                 t = t * t * (3 - 2 * t)
-                gain = gain * (ak + (aLane - ak) * t) / aLane
+                gain = gain * (ak + dl * t) / aLane
             end
         end
         k = (runStart and runStart[k] or k) - 1

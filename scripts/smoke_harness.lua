@@ -17272,6 +17272,12 @@ function drive.scenario0928()
     dveh._speed = capNow + 12
     ticks(1, 20)
     checkEq(st.lastHardBrakeReason, "blocked-approach", "(blk-app) 遠超包絡：一秒鎖輪")
+    -- 停止線前的低速段（≤20+10）不鎖輪（E2E rc2 0021：24 km/h 在停止線前先停死再爬一次）：交給 blockedStop
+    dveh._x, dveh._speed = 39, 24
+    st.forceBrakeUntil = 0
+    ticks(1, 20)
+    checkTrue(st.lastHardBrakeReason ~= "blocked-approach",
+        "(blk-app) 停止線前 24 km/h：不為接近包絡鎖輪（hbr=" .. tostring(st.lastHardBrakeReason) .. " cap=" .. tostring(st.blockedApproachCap) .. "）")
     -- (anchor-base) 0928b E2E rc1 0008：錨用 Corridor.plan 同一組逐點基準（s.hardBase）。
     --   近點 l=-0.9：原始 laneBias 0.84 下不擋線、彎道連續落點 0 下擋線；遠點 60m 在原始 lane 上。
     --   舊制挑遠點（blockedNear 永遠不近、車撞近點）。違規證明：hb 恆 nil＝錨落遠點紅。
@@ -17335,6 +17341,76 @@ function drive.scenario0928()
     dveh, SandboxVars = oldVeh, oldSandbox
 end
 drive.scenario0928()
+
+-- 0928c：常駐線 ramp 的追線落後不算對不準（Drive.laneRampDev）。真 Follower 剖面（R12 左彎、弧內側餘裕 0）、
+--   靠內側 bias 2：弧後期望線從 0 ramp 回 2，36 km/h 時車身落在 0.6 秒前與現在的期望線之間＝偏差 0；
+--   落在區間外只算到區間的距離；繞行中不套。違規證明：laneRampDev 原樣回傳＝(ramp) 偏差 >0 紅。
+function drive.scenario0928c()
+    scenario("0928c：常駐線 ramp 落後不觸發對線帽")
+    local F = MDADFollower
+    local R = 12
+    local w = 2 * (R * (1 - math.cos(math.pi / 4)) + 0.656 + 0.4)
+    local route = { pts = { 0, -40, 0, 0, 40, 0 }, segSurface = { "paved", "paved" }, segWidth = { w, w } }
+    local vp = { valid = true, geometryValid = true, halfW = 0.656, rMin = 2.26, wheelbase = 1.985,
+        delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 120 }
+    local p = F.begin(route, 120, 4, vp)
+    while not p.ready do F.stepBuild(p, 4096) end
+    local arcI, arcE
+    for i = 1, p.n - 1 do if p.segKind[i] == MDADDynamics.SEG_ARC then arcI = arcI or i; arcE = i end end
+    local sE = p.s[arcE + 1]
+    local inside = (p.laneRoomL[arcI] < p.laneRoomR[arcI]) and -1 or 1
+    local bias = inside * 2.0
+    local sNow = sE + 10
+    local el = F.laneBiasAt(p, bias, F.segIndexAt(p, sNow), sNow)
+    local ep = F.laneBiasAt(p, bias, F.segIndexAt(p, sNow - 6), sNow - 6)
+    checkTrue(math.abs(el - ep) > 0.3, "(ramp) 前置：弧後 10m 期望線仍在 ramp（" .. tostring(ep) .. "→" .. tostring(el) .. "）")
+    local s = { profile = p, fstate = { laneBias = bias }, lastSNow = sNow, diagExpL = el,
+        lastLatSigned = (el + ep) / 2, dodging = false, returnActive = false }
+    local raw = math.abs(s.lastLatSigned - el)
+    checkNear(MDAD.Drive.laneRampDev(s, raw, 36), 0, 1e-9,
+        "(ramp) 36 km/h 車身落在 0.6 秒前與現在的期望線之間：偏差 0（原 " .. string.format("%.2f", raw) .. "）")
+    s.lastLatSigned = ep - inside * 0.5
+    checkNear(MDAD.Drive.laneRampDev(s, math.abs(s.lastLatSigned - el), 36), 0.5, 1e-6,
+        "(ramp) 落在區間外：只算到區間的距離")
+    s.lastLatSigned, s.dodging = (el + ep) / 2, true
+    checkNear(MDAD.Drive.laneRampDev(s, raw, 36), raw, 1e-9, "(ramp) 繞行中不套")
+
+    -- (hitch) 0928c E2E rc1 0007：遊戲卡住 3.6 秒（引擎單幀物理夾 83ms、車只前進 0.5m）不是停滯。
+    --   違規證明：progressPauseMs 不認卡頓＝suspect 紅。
+    local oldVeh = dveh
+    local wasMs = drive.frameMs(30)
+    drive.fillWorld(-10, 90, -7, 7)
+    checkTrue(armDrive(), "(hitch) 啟動")
+    setHeading(dveh, 0)
+    local st = MDAD.Drive.debugSession(0)
+    drive.scanRound(true)
+    dveh._speed = 40
+    for _ = 1, 8 do
+        nowMs = nowMs + 30
+        dveh._x = dveh._x + 0.33
+        driveReset(dveh)
+        driveTick(dp, dveh)
+    end
+    checkEq(st.progressState, "watch", "(hitch) 前置：正常行駛在看門")
+    drive.mult = 4.0 -- fpsMultiplier 上限 5 ×0.8＝單幀 83ms
+    nowMs = nowMs + 3600
+    dveh._x = dveh._x + 0.5
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkEq(st.progressState, "watch", "(hitch) 卡頓 3.6 秒只動 0.5m：不判 suspect（實得 " .. tostring(st.progressState) .. "）")
+    drive.frameMs(30)
+    -- (stale) 恢復需求沒經 dispatch 就被撤銷（episode 重臂清掉 recoverWhy）：suspect 不得留著
+    st.progressState, st.recoverWhy = "suspect", nil
+    nowMs = nowMs + 30
+    dveh._x = dveh._x + 0.33
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkEq(st.progressState, "watch", "(stale) 沒有待辦恢復的 suspect：重新看門（實得 " .. tostring(st.progressState) .. "）")
+    MDAD.Drive.stop(0, nil)
+    drive.frameMs(wasMs)
+    dveh = oldVeh
+end
+drive.scenario0928c()
 
 do -- 主 chunk local 槽已滿：整段包成函式，內部 local 不佔主 chunk
 -- =====================================================================

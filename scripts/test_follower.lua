@@ -2453,6 +2453,23 @@ do
         prev = v
     end
     checkTrue(maxStep < 0.08, string.format("落點每 0.5m 變化 <0.08（實得 %.3f）", maxStep))
+    -- (dl2) 0928c：混合長＝12m×max(1, dl)——常駐靠右 8m 路＝2m，固定 12m 的 ramp 峰值 κ≈0.083、彎後加速追不上
+    --   （E2E rc1 十五趟 25 次 alignment 帽）。2m 的 ramp 全長 24m、中點在弧前 12m；逐 0.5m 變化 ≤ 1.5·dl/L·0.5。
+    --   違規證明：混合長固定 12m＝弧前 12m 已回到 bias 紅。
+    do
+        local bias2 = inside * 2.0
+        checkTrue(math.abs(F.laneBiasAt(p, bias2, arcI + 2, sA + 2)) < 1e-9, "(dl2) 弧內側落點 0")
+        checkNear(F.laneBiasAt(p, bias2, F.segIndexAt(p, sA - 12), sA - 12), bias2 * 0.5, 0.03,
+            "(dl2) 2m 橫移：弧前 12m＝24m ramp 中點＝bias/2")
+        checkNear(F.laneBiasAt(p, bias2, 1, sA - 30), bias2, 1e-9, "(dl2) 弧前 30m 落點＝bias")
+        local mx, pv = 0, nil
+        for sq = sA - 30, sE + 30, 0.5 do
+            local vv = F.laneBiasAt(p, bias2, F.segIndexAt(p, sq), sq)
+            if pv then local dd = math.abs(vv - pv); if dd > mx then mx = dd end end
+            pv = vv
+        end
+        checkTrue(mx < 0.07, string.format("(dl2) 2m ramp 每 0.5m 變化 <0.07（實得 %.3f）", mx))
+    end
     -- Codex lane 反例：階梯餘裕 1.6/1.1/0.6（bias 1、keep 0.6 → 夾值 1.0/0.5/0），s=20 段界兩側
     -- 必須同值（第一版「min 各段以本段值為基底的 ramp」在這裡 0.5 → 0.25 跳變）；全線每 0.25m 變化有界
     do

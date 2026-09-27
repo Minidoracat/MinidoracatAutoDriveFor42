@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0928b"
+Drive.REV = "0928c"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -293,10 +293,14 @@ TUNE.RETURN_COAST_PAD = 0.15
 -- RETURN 釋放：到位兩輪＋車頭對路線在這個角度內（見 updateReturnSnapshot 的 clear 判定）
 TUNE.RETURN_CLEAR_HEAD_RAD = 6 * math.pi / 180
 TUNE.RETURN_CLEAR_FORCE_ROUNDS = 6
+TUNE.LANE_LAG_S = 0.6 -- 常駐線 ramp 的追線落後容忍（Drive.laneRampDev）：車身落在這麼久以前的期望線與現在之間不算偏
+TUNE.PROGRESS_HITCH_MS = 500 -- 兩個跟線幀之間的牆鐘間隔超過這麼多＝遊戲卡頓（Drive.progressPauseMs 不算停滯）
+TUNE.PROGRESS_HITCH_FRAME_MS = 80 -- 同時引擎幀時已頂到 fpsMultiplier 上限（1× 速度 83ms）才算卡頓
 local POLICY_DODGE = 1         -- 沙盒 ObstaclePolicy enum：1=繞行 2=停車
 
 TUNE.BLOCK_STOP_DIST = 10      -- 距障礙群這麼近才煞停等待；更遠先滑行接近
 TUNE.BLOCK_APPROACH_KMH = 20   -- blocked 接近段的速度上限（掃描逼近後縫隙判定更準）
+TUNE.BLOCK_APPROACH_HARD_MARGIN = 10 -- blocked 接近包絡的一秒鎖輪只在實速超過 BLOCK_APPROACH_KMH＋此值時（停止線前低速段交給 blockedStop）
 TUNE.WAIT_TIMEOUT_MS = 15000   -- 停等總上限：紅字請玩家接手（2026-09-01 20s→15s）
 TUNE.BLOCK_RETRY_MS = 5000     -- blocked 停等此時長仍無縫→主動倒退重掃換視角找路
 TUNE.BLOCK_STEEP_RETRY_MS = 500 -- 全滅含大側移 steep（跑道不夠＝靜態幾何）：停穩即倒車，不等 5 秒
@@ -2839,6 +2843,26 @@ function Drive.softAlignDev(s, absDev)
     return d < absDev and d or absDev
 end
 
+-- lane ramp 落後（0928c）：常駐線在彎／窄段前後沿弧長 ramp（Follower clampLane），車追 ramp 本來就落後
+-- 約 LANE_LAG_S 秒——車身落在「LAG 秒前那一點的期望線」與「現在的期望線」之間＝還在跟上，不是對不準
+-- （E2E rc1 十五趟 25 次：彎後加速時期望線 0→2m、車落後 1.1m，alignment 帽把 45 壓到 20–26）。
+-- 繞行／RETURN 各有自己的線，不套。回傳到該區間的距離（不大於原偏差）。
+function Drive.laneRampDev(s, absDev, speedKmh)
+    if s.dodging or s.returnActive then return absDev end
+    local p, lat, el = s.profile, s.lastLatSigned, s.diagExpL
+    if type(p) ~= "table" or p.laneRoomR == nil or not finite(lat) or not finite(el) then return absDev end
+    local back = (finite(speedKmh) and speedKmh > 0 and speedKmh / 3.6 or 0) * TUNE.LANE_LAG_S
+    if back < 1 then return absDev end
+    local sb = s.lastSNow - back
+    if sb < 0 then sb = 0 end
+    local ep = MDADFollower.laneBiasAt(p, laneBiasOf(s), MDADFollower.segIndexAt(p, sb), sb)
+    if not finite(ep) then return absDev end
+    local lo, hi = ep, el
+    if lo > hi then lo, hi = el, ep end
+    local d = lat < lo and lo - lat or (lat > hi and lat - hi or 0)
+    return d < absDev and d or absDev
+end
+
 -- 縱向配合帽：最高能用多快的車速在到殭屍前（room 公尺）做完 dl 側移＋留 LEAD 秒。速率隨車速變，
 -- 可行集合是 [0, vmax] 的區間，二分求 vmax（冷路徑：每輪一次、24 次迭代）。下限 MIN_KMH（殭屍可撞）。
 function Drive.softLaneCapKmh(room, dl)
@@ -3917,6 +3941,15 @@ end
 function Drive.progressPauseMs(s, vehicle, now, speedKmh)
     local last = s.progressPauseAt
     s.progressPauseAt = now
+    -- 遊戲卡頓：上一個跟線幀也在看門、兩幀之間牆鐘卻隔了 > PROGRESS_HITCH_MS，而且引擎這幀的
+    -- 時間係數已經頂到上限（FPSTracking.java:39-42 fpsMultiplier 夾 5＝1× 速度下單幀物理最多 83ms）——
+    -- 物理只前進了一小步，車幾乎沒動（0928c E2E rc1 0007：47 km/h 卡住 3.6 秒只前進 1.4m → 誤判
+    -- suspect、在 47 km/h 下令空檔脈衝）。整段不算停滯。
+    if finite(last) and last == s.prevStepMs and now - last > TUNE.PROGRESS_HITCH_MS
+            and finite(s.frameMs) and s.frameMs >= TUNE.PROGRESS_HITCH_FRAME_MS then
+        s.progressBrakedSince = 0
+        return now - last
+    end
     local gap = not finite(last) or now - last > 250 or now < last
     -- 中斷過（離開 watch／讓位／停等）＝新一次煞停，寬限重新起算（review：沿用舊起點會讓
     -- 「煞停→解除→再煞停」的新寬限立即過期）
@@ -8368,6 +8401,7 @@ local function stepUnstick(s, vehicle, playerNum, now)
 end
 
 local function stepFollow(s, vehicle, playerNum, now)
+    s.prevStepMs, s.stepWallMs = s.stepWallMs, now -- 上一個跟線幀的牆鐘（Drive.progressPauseMs 判卡頓）
     local speedKmh = vehicle:getCurrentSpeedKmHour() -- 可負（倒車）＝BaseVehicle.java:4268
     if not finite(speedKmh) then
         vehicle:setRegulator(false)
@@ -8499,7 +8533,7 @@ local function stepFollow(s, vehicle, playerNum, now)
         -- 軟縫側移中，車身落在常駐線與閃避 lane 之間是「還在跟上」不是偏離：RETURN 進入與對線帽
         -- 共用同一個偏差（E2E crowd 0925h：lane 0.8s 內從 3.0 移到 −0.54、車身落後 2.8m →
         -- RETURN 接手、放掉閃避並把車速壓到 46，直接撞上下一隻）。
-        absDev = Drive.softAlignDev(s, absDev)
+        absDev = Drive.laneRampDev(s, Drive.softAlignDev(s, absDev), speedKmh)
         -- 兩道護欄（2026-09-01 telemetry 定案）：>RETURN_MAX_DEV 交 pure pursuit
         -- （s030 帶蓋不住）；車頭正在調頭時 RETURN 不得劫持——s032：target
         -- 反向後 lat=8.95 進 RETURN，rotate 永遠沒機會跑，unsafe hold 卡 0 到
@@ -9089,7 +9123,7 @@ local function stepFollow(s, vehicle, playerNum, now)
         end
         local absHeading = headingError or 0
         if absHeading < 0 then absHeading = -absHeading end
-        absDev = Drive.softAlignDev(s, absDev)
+        absDev = Drive.laneRampDev(s, Drive.softAlignDev(s, absDev), speedKmh)
         local alignedNow = absDev <= latTol and absHeading <= MDADDynamics.ALIGN_HEADING_RAD
         if alignedNow then
             if s.alignSince == 0 then s.alignSince = now end
@@ -9437,7 +9471,11 @@ local function stepFollow(s, vehicle, playerNum, now)
                 s.progressSince = 0
             elseif skipProgressCompare then
                 -- Same coordinate frame as the next comparison; arming itself is not progress.
-            elseif s.progressState == "disarmed" then
+            elseif s.progressState == "disarmed"
+                    -- 恢復需求沒經 dispatch 就被撤銷（episode 前進 10m 重臂／讓位清掉 recoverWhy）：suspect／recover
+                    -- 不能留著——full gate 的 progress 條件會一直關（0928c E2E rc1 0007：卡頓誤判 suspect、車照開
+                    -- 47 km/h，10m 後重臂清掉需求，suspect 掛了 57 秒）。從現在重新看門。
+                    or s.progressState == "suspect" or s.progressState == "recover" then
                 s.progressState = "watch"
                 s.progressSince = now
                 s.progressX, s.progressY = vx, vy
@@ -9659,9 +9697,12 @@ local function stepFollow(s, vehicle, playerNum, now)
                 and (not visibilityBreached or s.dodgeDeferCap <= s.visibilityHardKmh) then
             hardBrakeReason = "dodge-defer"
         end
-        -- blocked 接近包絡（Drive.blockedApproachCap）：減速輔助追不上、超過硬煞門檻才一秒鎖輪
+        -- blocked 接近包絡（Drive.blockedApproachCap）：減速輔助追不上、超過硬煞門檻才一秒鎖輪。停止線前
+        -- 的低速段（≤ BLOCK_APPROACH_KMH＋BLOCK_APPROACH_HARD_MARGIN）不鎖輪：停止線的 blockedStop 本來就從
+        -- 這個速度煞停（E2E rc2 0021：24 km/h 在停止線前 1.5m 先鎖輪停死、再爬到停止線又停一次）。
         if finite(s.blockedApproachCap)
                 and actualSpeed > MDADDynamics.hardBreachKmh(s.blockedApproachCap)
+                and actualSpeed > TUNE.BLOCK_APPROACH_KMH + TUNE.BLOCK_APPROACH_HARD_MARGIN
                 and (not curveBreached or s.blockedApproachCap <= hardCurveCap)
                 and (not visibilityBreached or s.blockedApproachCap <= s.visibilityHardKmh) then
             hardBrakeReason = "blocked-approach"
