@@ -2743,6 +2743,21 @@ do
     F.resetControl(st)
     local _, _, remBack = F.control(p, st, 10, 5, math.pi, 20, 0.1)
     checkNear(p.length - remBack, 115, 0.5, "讓位恢復後 resetControl 重新錨定：定位到玩家開到的另一臂")
+    -- 2026-09-27 E2E replay（SemiBox 北行 Quiet St→Toadhop 路口）：18° 小折角＋3.1m 短段，車帶 1.8m 側偏越過段尾時，
+    -- 投影夾在短段終點、車沿下一段已前進約 1m——可達上界卻只從夾住的 projS 起算（2×每幀位移＋0.5），
+    -- 下一段候選永遠「太遠」，投影釘死、側偏越長越大，最後誤進 ROTATE。車已越過本段終點時，
+    -- 上界要加上車沿下一段方向的前進量。違規證明：拿掉段尾延伸即 s 釘在短段終點。
+    p = buildRoute({ 7888.72, 11400, 7888.96, 11381.95, 7888, 11379, 7888, 11300 }, 70)
+    st = F.newState()
+    local s0, sEnd = nil, nil
+    for k = 0, 240 do
+        local yy = 11384 - k * 0.05
+        local xx = 7890.4 - k * 0.004
+        local _, _, rem = F.control(p, st, xx, yy, -math.pi / 2, 18, 0.01)
+        if k == 0 then s0 = p.length - rem end
+        sEnd = p.length - rem
+    end
+    checkTrue(sEnd - s0 > 10, string.format("側偏越過短段段尾：投影繼續前進（前進 %.2f m，車走 12 m）", sEnd - s0))
 end
 
 closeScenario()

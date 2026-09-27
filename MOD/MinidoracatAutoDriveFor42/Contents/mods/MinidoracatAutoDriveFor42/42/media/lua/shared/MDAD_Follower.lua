@@ -956,6 +956,18 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
     if state.projS ~= nil and state.projX ~= nil and state.projY ~= nil then
         local dx, dy = x - state.projX, y - state.projY
         maxS = state.projS + 2 * sqrt(dx * dx + dy * dy) + 0.5
+        -- 投影夾在本段終點、車已越過段尾（小折角短段＋側偏最常見）時，真實進度＝段尾弧長＋車沿
+        -- 下一段方向的前進量；只從夾住的 projS 起算，下一段候選永遠「太遠」，投影釘死、側偏越長越大
+        -- 直到誤進 ROTATE（2026-09-27 E2E replay：SemiBox 過 18°／3.1m 短段，1.8m 側偏）。車還沒到段尾
+        -- （髮夾入彎臂的正式服案）不延伸，前跳防護照舊。
+        if idx < n - 1 then
+            local ex, ey = px[idx + 1], py[idx + 1]
+            local rx, ry = x - ex, y - ey
+            if rx * (ex - px[idx]) + ry * (ey - py[idx]) > 0 then
+                local along = (rx * (px[idx + 2] - ex) + ry * (py[idx + 2] - ey)) / segLen[idx + 1]
+                if along > 0 and s[idx + 1] + along + 0.5 > maxS then maxS = s[idx + 1] + along + 0.5 end
+            end
+        end
         local reachI = MDADFollower.segIndexAt(profile, maxS)
         if reachI > hi then hi = reachI end -- 高速碎弧可一次跨多段，不能卡在固定 +12 段
     end

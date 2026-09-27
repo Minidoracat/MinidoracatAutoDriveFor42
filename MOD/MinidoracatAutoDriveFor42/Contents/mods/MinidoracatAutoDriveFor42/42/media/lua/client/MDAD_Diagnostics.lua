@@ -93,7 +93,7 @@ local EK = {
     -- verifyLineReason=band 反推「fillet 整條放棄」，離線重建才定罪——直接帶出）；
     -- route cutover：原始路線快照 src／srcW／srcS（離線重跑 fillet／band 用）。
     "filletN", "filletFallbackN", "filletBandValid", "filletReason",
-    "src", "srcW", "srcS",
+    "src", "srcW", "srcS", "approach",
     -- dyn（2026-09-04 issue #1）：dirty 來源與基準／線上值、重建耗時——舊 telemetry
     -- 只能從 confidence 歸零反推重建次數（下限），修後要能直接數。
     "cap", "safe", "ms",

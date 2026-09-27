@@ -514,6 +514,10 @@ TUNE.UNSTICK_EXTRA_ALIGN_RAD = math.pi / 4
 -- 衝到 31 km/h、再花 2.5 秒煞 11m；後方探測帶只有 4m、每 100ms 探一次，這個速度煞不住。10 km/h
 -- 煞停約 0.6m＋探測間隔 0.3m，仍在探測帶內；4 秒時限內仍可退約 9m（時限到且已退 1m 照常進 settle）。
 TUNE.UNSTICK_REVERSE_KMH = 10
+-- 越野接線（Drive.approachRoute）：車投影在路線起點之前超過這個距離才接；接線段的宣告寬度（路外沒有
+-- streets 寬度，取一般單線道寬：常駐靠右在接線上幾乎收成 0，車從自己的位置出發）
+TUNE.APPROACH_BEHIND_M = 1.5
+TUNE.APPROACH_WIDTH_M = 4
 -- 進入段陡坡拒收（2026-09-04 s051：stay 鏈把常駐 lane 拖到 −2.25 後，下一候選 +2.00＝
 -- 4.25m 側移塞進 2.8m 進入段；運動學最小 8.8m（sqrt(6·dl/κ_crawl)），比例 3.1 → 承諾
 -- 線掃掠過但車追不上、clearanceCap 被 sinHeading=1 壓到 2.3 km/h 爬 4 秒被 RETURN 殺）。
@@ -1640,7 +1644,12 @@ local function startSession(playerObj, playerNum, stage)
         vehicleProfile.towLatScale = MDADTrailer.LAT_SCALE
     end
     -- 拖車時剖面建在改寫過的路線上（外拉轉角）；剖面的 segSource 索引指向這條，證明帶也要用它
-    local profileRoute = tow and MDADTrailer.shape(route, tow, vehicleProfile.halfW, vehicleProfile.halfL * 2) or route
+    local profileRoute, approachM = route, 0
+    if tow then
+        profileRoute = MDADTrailer.shape(route, tow, vehicleProfile.halfW, vehicleProfile.halfL * 2)
+    else
+        profileRoute, approachM = Drive.approachRoute(route, vehicle:getX(), vehicle:getY())
+    end
     local profile = MDADFollower.begin(
         profileRoute,
         maxSpeed, api.navApiVersion, vehicleProfile,
@@ -1696,6 +1705,7 @@ local function startSession(playerObj, playerNum, stage)
         vehicle = vehicle,
         route = route,
         profileRoute = profileRoute, -- 剖面實際建構的路線（拖車＝改寫版）；證明帶的來源
+        approachM = approachM, -- 剖面前接的越野接線長（Drive.approachRoute；0＝沒接）
         profile = profile,
         fstate = fstate,
         playerNum = playerNum,
@@ -2668,6 +2678,45 @@ end
 -- NaN／非數值收口（與 MDAD_Diagnostics 的 finite 同語意；不用 math.huge）
 local function finite(n)
     return type(n) == "number" and n * 0 == 0
+end
+
+-- 路外起步的越野接線（2026-09-27 E2E startpush-sp loc=c25＝正式服原位置）：主 MOD 路線只含路網
+-- （NavRoute.lua:1530「len／cost 不含兩端 approach」），起點是路網上離車最近的點。車停在路外、
+-- 而且路網在車「前面」才開始（死路端點／路的起點：車投影到第一段的縱向座標 < −APPROACH_BEHIND_M）
+-- 時，剖面從 s=0 起算、車實際在起點之前的那幾公尺被夾掉——路線起點旁有硬物就排不出入口
+-- （steep／sweep），倒車又垂直於路線、換不到跑道，三次後受困交還。把「車位→路線起點」這段地圖上
+-- 本來就畫著的越野接線接在剖面前面：Sensor 沿它掃、corridor 沿它排、世界掃掠照驗，車從 s=0 的
+-- 自己位置出發。這不是 0908e 禁止的「虛構前置道路」（那是沿路線反方向往車後憑空延伸、可能穿牆）：
+-- 接線起點就是車本身、終點是路網，中間是車本來就得開過去的地面，否決權照舊在世界掃掠。
+-- 車在路旁（投影落在第一段內）不接——那是 RETURN 的平滑併入；拖車不接（外拉轉角另有改寫）。
+-- 只在起步接：行駛中主 MOD 重算的路線起點就是車的投影點；中途 cutover 仍用原路線（不改既有語意）。
+-- 回傳 (剖面用路線, 接線長)；不接時原樣回傳同一個 table（cutover 仍以原 route identity 比對）。
+function Drive.approachRoute(route, vx, vy)
+    local pts = route.pts
+    if type(pts) ~= "table" or #pts < 4 or not finite(vx) or not finite(vy) then return route, 0 end
+    local x1, y1 = pts[1], pts[2]
+    local ux, uy = pts[3] - x1, pts[4] - y1
+    local sl = sqrt(ux * ux + uy * uy)
+    if not finite(sl) or sl < 1e-6 then return route, 0 end
+    ux, uy = ux / sl, uy / sl
+    local rx, ry = vx - x1, vy - y1
+    if rx * ux + ry * uy > -TUNE.APPROACH_BEHIND_M then return route, 0 end
+    local out = {}
+    for k, v in pairs(route) do out[k] = v end
+    local np = { vx, vy }
+    for i = 1, #pts do np[i + 2] = pts[i] end
+    out.pts = np
+    if type(route.segSurface) == "table" and type(route.segWidth) == "table" then
+        -- 接線沿用第一段的宣告路面：宣告成 dirt 會讓起步那段的 traction key 與進路後不同、
+        -- 多一次剖面重建；實際路外由 physicalOffroad（去抖）接手
+        local ss, sw = { route.segSurface[1] }, { TUNE.APPROACH_WIDTH_M }
+        for i = 1, #route.segSurface do ss[i + 1] = route.segSurface[i] end
+        for i = 1, #route.segWidth do sw[i + 1] = route.segWidth[i] end
+        out.segSurface, out.segWidth = ss, sw
+    end
+    local gap = sqrt(rx * rx + ry * ry)
+    if finite(route.len) then out.len = route.len + gap end
+    return out, gap
 end
 
 -- 可見終點弧長：掃描終點與未載入格的近者。繞行 cap、全速證明與可視距離 cap
@@ -10065,6 +10114,7 @@ local function onPlayerUpdate(player)
             end
             s.route = route
             s.profileRoute = profileRoute
+            s.approachM = 0 -- 越野接線只在起步接（見 Drive.approachRoute）
             s.profile = profile
             s.rejectedRoute = nil
             s.navVersion = api.navApiVersion
@@ -10279,6 +10329,7 @@ local function onPlayerUpdate(player)
                 filletFallbackN = s.profile.filletFallbackN,
                 filletBandValid = s.profile.filletBandValid,
                 filletReason = s.profile.filletReason,
+                approach = s.approachM > 0 and s.approachM or nil, -- 越野接線長（Drive.approachRoute）
             })
         end
         s.mode = "follow"

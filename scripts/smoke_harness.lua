@@ -16941,6 +16941,73 @@ function drive.scenarioTraffic()
 end
 drive.scenarioTraffic()
 
+-- 路外起步的越野接線（2026-09-27 E2E startpush-sp loc=c25＝正式服原位置）：路網在車前才開始（死路端點），
+-- 車停在路外、車頭垂直朝路，路線起點 2.5m 處硬物擋住中線。舊制剖面從路線起點 s=0 起算、車在起點之前
+-- 的 3m 被夾掉，入口跑道只剩 2.5m＋起始 lane 在路外 5.5m → steep／sweep 全滅 → blocked，倒車又垂直於路線
+-- 換不到跑道。現制把「車位→路線起點」接在剖面前面（Drive.approachRoute）。
+--   (apr)      車在起點之前：剖面第一點＝車位、接線長 ≈ 6.3、不 blocked
+--   (apr-side) 車在路旁（投影落在第一段內）：不接，維持 RETURN 併入
+-- 違規證明：approachRoute 一律回原路線＝(apr) blocked 紅。
+function drive.scenarioApproach()
+    scenario("路外起步：路網在車前才開始時把越野接線接在剖面前面，路線起點旁有硬物也排得出入口")
+    local oldSandbox, oldVeh, oldGet = SandboxVars, dveh, getSpecificPlayer
+    local oldApi = MinidoracatMiniMapAPI.navApiVersion
+    local oldRoute, oldTx, oldTy, oldState = drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
+    local wasMs = drive.frameMs(20)
+    MDAD.Drive.stop(0, nil)
+    getSpecificPlayer = function(n) if n == 0 then return dp end end
+    MinidoracatMiniMapAPI.navApiVersion = 5
+    dveh = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }),
+        engineRunning = true, mass = 1600, speed = 0, maxSpeed = 100,
+        bodyW = 1.6, bodyL = 4.2, comX = 0, comZ = 0, profileFull = true,
+        enginePower = 3000, brakingForce = 100, wheelFriction = 1.5, tireFriction = 1.5 })
+    local function arm(x, y, heading)
+        MDAD.Drive.stop(0, nil)
+        drive.fillWorld(-12, 90, -12, 12)
+        drive.putRoad(0, 90, -3, 2)
+        setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
+            AutoDriveMaxSpeed = 60, RightLaneBias = 0 })
+        dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = x, y, 0, 0, true
+        dveh._engine, dveh._driver = true, dp
+        dp._vehicle, dp._dead, dp._local = dveh, false, true
+        setHeading(dveh, heading)
+        -- 路網從 (0,0) 往東：第一點就是死路端點（主 MOD 的起點＝路網上離車最近點）
+        drive.nav.route = { pts = { 0, 0, 80, 0 }, segSurface = { "gravel" }, segWidth = { 5 },
+            len = 80, cost = 80, avoidPenalty = 0 }
+        drive.nav.tx, drive.nav.ty, drive.nav.state = 80, 0, "ok"
+        return MDAD.Drive.start(dp)
+    end
+    -- 車在路線起點西 3m、北 5.5m，車頭朝南（垂直朝路），起點後 2.5m 中線一格硬物
+    checkTrue(arm(-3, -5.5, math.pi / 2), "(apr) 路外起步啟動")
+    drive.putSolid(2, 0, "approach_start_obstacle")
+    for _ = 1, 30 do driveTick(dp, dveh) end
+    for _ = 1, 3 do drive.scanRound(true) end
+    local st = MDAD.Drive.debugSession(0)
+    checkTrue(st ~= nil and st.approachM > 6 and st.approachM < 6.6,
+        "(apr) 接上越野接線（長 " .. tostring(st and st.approachM) .. "）")
+    checkTrue(st ~= nil and math.abs(st.profile.x[1] + 3) < 1e-6 and math.abs(st.profile.y[1] + 5.5) < 1e-6,
+        "(apr) 剖面第一點就是車位")
+    checkTrue(st ~= nil and st.route.pts[1] == 0 and #st.route.pts == 4,
+        "(apr) 原路線 identity 不動（cutover 仍比對原 table）")
+    checkTrue(st ~= nil and not st.blocked,
+        "(apr) 路線起點旁有硬物：排得出入口、不 blocked（blocked=" .. tostring(st and st.blocked)
+        .. " mode=" .. tostring(st and st.mode) .. " pm=" .. tostring(st and st.planMode) .. "）")
+    drive.clearCell(2, 0)
+    -- 車在路旁（投影落在第一段內）：不接越野線（RETURN 的平滑併入）
+    checkTrue(arm(20, -5.5, 0), "(apr-side) 路旁起步啟動")
+    for _ = 1, 4 do driveTick(dp, dveh) end
+    st = MDAD.Drive.debugSession(0)
+    checkTrue(st ~= nil and st.approachM == 0 and st.profile.x[1] == 0,
+        "(apr-side) 車在路旁：不接越野線（approachM=" .. tostring(st and st.approachM) .. "）")
+
+    MDAD.Drive.stop(0, nil)
+    drive.frameMs(wasMs)
+    MinidoracatMiniMapAPI.navApiVersion = oldApi
+    drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
+    SandboxVars, dveh, getSpecificPlayer = oldSandbox, oldVeh, oldGet
+end
+drive.scenarioApproach()
+
 do -- 主 chunk local 槽已滿：整段包成函式，內部 local 不佔主 chunk
 -- =====================================================================
 -- v6 多停靠點行程（docs/addon-api.md §6）
