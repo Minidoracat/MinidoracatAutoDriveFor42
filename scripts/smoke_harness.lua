@@ -17086,6 +17086,28 @@ function drive.scenarioApproach()
     for _ = 1, 4 do driveTick(dp, dveh) end
     st = MDAD.Drive.debugSession(0)
     checkTrue(st ~= nil and st.approachM == 0, "(apr-near) 12m 內交給 RETURN：不接（approachM=" .. tostring(st and st.approachM) .. "）")
+    -- (apr-rev) 0928g E2E startpush c25（起手偏 36°）：起步接了越野線，倒車又退到接線起點之後——
+    --   舊剖面從舊車位起算，退出來的距離夾在 s=0、進入段一寸也沒多（三次倒車 entry 恆 1.0 → 受困）。
+    --   倒車收手後從現在的車位重接越野線。違規證明：拿掉 settle 成功處的旗標＝剖面仍從舊車位起算、紅。
+    checkTrue(arm(-3, -5.5, math.pi / 2), "(apr-rev) 路外起步啟動")
+    for _ = 1, 30 do driveTick(dp, dveh) end
+    st = MDAD.Drive.debugSession(0)
+    checkTrue(st ~= nil and st.approachM > 6 and st.approachM < 6.6, "(apr-rev) 起步接線 ≈6.3")
+    -- 倒車退了 6.5m：車停在接線起點北方，settle 收手
+    dveh._x, dveh._y, dveh._speed, dveh._stopped = -3, -12, 0, true
+    st.mode, st.progressState = "settle", "settle"
+    st.settleUntil = 1e15
+    st.unstickX, st.unstickY = -3, -5.5
+    for _ = 1, 4 do driveTick(dp, dveh) end
+    st = MDAD.Drive.debugSession(0)
+    local gapRev = math.sqrt(3 * 3 + 12 * 12)
+    checkTrue(st ~= nil and math.abs(st.approachM - gapRev) < 1e-6,
+        "(apr-rev) 倒車後從現在的車位重接（approachM=" .. tostring(st and st.approachM)
+        .. " 期望 " .. tostring(gapRev) .. "）")
+    checkTrue(st ~= nil and math.abs(st.profile.x[1] + 3) < 1e-6 and math.abs(st.profile.y[1] + 12) < 1e-6,
+        "(apr-rev) 新剖面第一點＝倒車後的車位")
+    checkTrue(st ~= nil and st.route.pts[1] == 0 and #st.route.pts == 4 and not st.reapproach,
+        "(apr-rev) 原路線 identity 不動、旗標已消費")
 
     MDAD.Drive.stop(0, nil)
     drive.frameMs(wasMs)

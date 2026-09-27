@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0928f"
+Drive.REV = "0928g"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -8371,6 +8371,17 @@ local function stepUnstick(s, vehicle, playerNum, now)
         if s.sensor and type(MDADSensor) == "table"
                 and type(MDADSensor.reset) == "function" then MDADSensor.reset(s.sensor) end
         s.mode = s.profile.ready == true and "follow" or "build"
+        -- 起步接了越野線、倒車又退到接線起點之後：舊剖面從舊車位起算，退出來的距離全被夾在 s=0，
+        -- 進入段一寸也沒多（E2E startpush c25 起手偏 36°：三次倒車 entry 恆 1.0 → 受困交還）。
+        -- 下一次取路從現在的車位重接（同一條 cutover；路網起點在車後的一般情況由主 MOD 近線重算處理）。
+        if s.approachM > 0 and not s.tow then
+            local _, am = Drive.approachRoute(s.route, vx, vy)
+            if am > 0 then
+                s.reapproach = true
+                s.pendingRouteWhy = "approach"
+                s.nextRouteMs = now
+            end
+        end
         return
     end
 
@@ -10558,9 +10569,15 @@ local function onPlayerUpdate(player)
         if route ~= s.route and s.rejectedRoute ~= nil and route == s.rejectedRoute then
             route = s.route
         end
-        if route ~= s.route or versionChanged then
-            local profileRoute = s.tow and MDADTrailer.shape(route, s.tow, s.vehicleProfile.halfW,
-                s.vehicleProfile.halfL * 2) or route
+        if route ~= s.route or versionChanged or s.reapproach then
+            local profileRoute, approachM = route, 0
+            if s.tow then
+                profileRoute = MDADTrailer.shape(route, s.tow, s.vehicleProfile.halfW,
+                    s.vehicleProfile.halfL * 2)
+            elseif s.reapproach then
+                profileRoute, approachM = Drive.approachRoute(route, vehicle:getX(), vehicle:getY())
+            end
+            s.reapproach = nil
             local profile = MDADFollower.begin(
                 profileRoute,
                 s.maxSpeed, api.navApiVersion, s.vehicleProfile,
@@ -10599,7 +10616,7 @@ local function onPlayerUpdate(player)
             end
             s.route = route
             s.profileRoute = profileRoute
-            s.approachM = 0 -- 越野接線只在起步接（見 Drive.approachRoute）
+            s.approachM = approachM -- 越野接線只在起步與倒車退到接線起點後接（見 Drive.approachRoute）
             s.profile = profile
             s.rejectedRoute = nil
             s.navVersion = api.navApiVersion
