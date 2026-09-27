@@ -17131,6 +17131,115 @@ function drive.scenarioApproach()
 end
 drive.scenarioApproach()
 
+-- (xk) 0928i rc6 0070 路口 jog：保持段延過 −75° 大折點後，2.8m 外又一個 19° 小折點落在 c 後 2m 內
+--   → 出口轉場塞不進 → 全部候選 exit-room → 倒車三次交還。緊接的小折點一併在偏移上通過；
+--   大折點（外側偏移繞急彎）照舊拒收。違規證明：拿掉小折點迴圈＝(xk) exit-room 紅。
+function drive.scenarioExitKink()
+    scenario("繞行出口：保持段延過大折點後緊接小折點，出口轉場放到小折點之後")
+    local oldSandbox, oldVeh, oldGet = SandboxVars, dveh, getSpecificPlayer
+    local oldApi = MinidoracatMiniMapAPI.navApiVersion
+    local oldRoute, oldTx, oldTy, oldState = drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
+    local wasMs = drive.frameMs(20)
+    MDAD.Drive.stop(0, nil)
+    getSpecificPlayer = function(n) if n == 0 then return dp end end
+    MinidoracatMiniMapAPI.navApiVersion = 5
+    dveh = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }),
+        engineRunning = true, mass = 1600, speed = 0, maxSpeed = 100,
+        bodyW = 1.6, bodyL = 4.2, comX = 0, comZ = 0, profileFull = true,
+        enginePower = 3000, brakingForce = 100, wheelFriction = 1.5, tireFriction = 1.5 })
+    local function arm(turn2)
+        MDAD.Drive.stop(0, nil)
+        drive.fillWorld(-12, 80, -50, 12)
+        setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
+            AutoDriveMaxSpeed = 60, RightLaneBias = 0 })
+        dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = 0, 0, 0, 0, true
+        dveh._engine, dveh._driver = true, dp
+        dp._vehicle, dp._dead, dp._local = dveh, false, true
+        setHeading(dveh, 0)
+        -- 東行 40m → 左折 75°（窄路＝保留折點）走 2.8m → 右折 turn2 → 直行
+        local h1 = -75 * math.pi / 180
+        local x2, y2 = 40 + 2.8 * math.cos(h1), 2.8 * math.sin(h1)
+        local h2 = h1 + turn2 * math.pi / 180
+        drive.nav.route = { pts = { 0, 0, 40, 0, x2, y2, x2 + 40 * math.cos(h2), y2 + 40 * math.sin(h2) },
+            segSurface = { "paved", "paved", "paved" }, segWidth = { 4, 4, 4 },
+            len = 82.8, cost = 82.8, avoidPenalty = 0 }
+        drive.nav.tx, drive.nav.ty, drive.nav.state = drive.nav.route.pts[7], drive.nav.route.pts[8], "ok"
+        local ok = MDAD.Drive.start(dp)
+        for _ = 1, 10 do driveTick(dp, dveh) end
+        return ok
+    end
+    checkTrue(arm(19), "(xk) 大折點後 2.8m 接 19° 小折點：啟動")
+    local st = MDAD.Drive.debugSession(0)
+    checkTrue(st ~= nil and st.profile ~= nil and st.profile.ready == true, "(xk) 剖面建好")
+    -- 群在大折點前結束（c=39.5），走廊給的出口很短（d=43）：上面的既有規則把保持段延到大折點後 1m
+    local ok, _, _, rc, rd, why = MDAD.Drive.debugShape(0, 20, 30, 39.5, 43, -1)
+    checkTrue(ok == true and rc ~= nil and rc > 42.8 and rd > rc,
+        "(xk) 小折點一併在偏移上通過、出口放到它之後（ok=" .. tostring(ok) .. " c=" .. tostring(rc)
+        .. " d=" .. tostring(rd) .. " why=" .. tostring(why) .. "）")
+    -- 門檻以上的折點照舊拒收（外側偏移繞急彎＝車追不上、切內）：門檻暫時壓到 19° 以下
+    local tune = MDAD.Drive.debugTune()
+    local oldKink = tune.EXIT_HOLD_KINK_RAD
+    tune.EXIT_HOLD_KINK_RAD = 0.3
+    ok, _, _, rc, rd, why = MDAD.Drive.debugShape(0, 20, 30, 39.5, 43, -1)
+    tune.EXIT_HOLD_KINK_RAD = oldKink
+    checkTrue(ok == false and why == "exit-room",
+        "(xk-big) 超過門檻的緊接折點照舊拒收（ok=" .. tostring(ok) .. " why=" .. tostring(why) .. "）")
+    MDAD.Drive.stop(0, nil)
+    drive.frameMs(wasMs)
+    MinidoracatMiniMapAPI.navApiVersion = oldApi
+    drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
+    SandboxVars, dveh, getSpecificPlayer = oldSandbox, oldVeh, oldGet
+end
+drive.scenarioExitKink()
+
+-- (ps) 0928i rc8 0086／0089：群已貼到車前（進入段不到 1m），舒適需求要的側移全因 steep 拒收，但車就這樣
+--   直走在物理檔也過得去（兩側各 0.1m）。舊制 blocked 一秒鎖輪；現制沿車的實際橫向直走、物理檔承諾。
+--   違規證明：拿掉直走候選＝(ps) blocked 紅。
+function drive.scenarioStraightProbe()
+    scenario("貼在車前的窄縫：側移塞不進時沿現在的橫向直走（物理檔），不 blocked 鎖輪")
+    local oldSandbox, oldVeh, oldGet = SandboxVars, dveh, getSpecificPlayer
+    local oldApi = MinidoracatMiniMapAPI.navApiVersion
+    local oldRoute, oldTx, oldTy, oldState = drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
+    local wasMs = drive.frameMs(20)
+    MDAD.Drive.stop(0, nil)
+    getSpecificPlayer = function(n) if n == 0 then return dp end end
+    MinidoracatMiniMapAPI.navApiVersion = 5
+    dveh = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }),
+        engineRunning = true, mass = 1600, speed = 0, maxSpeed = 100,
+        bodyW = 1.2, bodyL = 4.2, comX = 0, comZ = 0, profileFull = true,
+        enginePower = 3000, brakingForce = 100, wheelFriction = 1.5, tireFriction = 1.5 })
+    drive.fillWorld(-12, 90, -12, 12)
+    drive.putRoad(0, 90, -6, 6)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
+        AutoDriveMaxSpeed = 60, RightLaneBias = 0 })
+    dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = 0, 0, 0, 0, true
+    dveh._engine, dveh._driver = true, dp
+    dp._vehicle, dp._dead, dp._local = dveh, false, true
+    setHeading(dveh, 0)
+    drive.nav.route = { pts = { 0, 0, 80, 0 }, segSurface = { "paved" }, segWidth = { 12 },
+        len = 80, cost = 80, avoidPenalty = 0 }
+    drive.nav.tx, drive.nav.ty, drive.nav.state = 80, 0, "ok"
+    checkTrue(MDAD.Drive.start(dp), "(ps) 啟動")
+    for _ = 1, 6 do driveTick(dp, dveh) end
+    -- 車頭前 2m 兩側各一格硬物（l=±1.5）：車道兩側物理各剩 0.1m，舒適縫要側移 3m 以上
+    drive.putSolid(4, 1, "ps_right")
+    drive.putSolid(4, -2, "ps_left")
+    for _ = 1, 3 do drive.scanRound(true) end
+    local st = MDAD.Drive.debugSession(0)
+    checkTrue(st ~= nil and not st.blocked and st.dodging == true
+            and type(st.dodgeTier) == "string" and st.dodgeTier:find("probe%-straight") ~= nil,
+        "(ps) 沿現在的橫向直走、物理檔承諾（blocked=" .. tostring(st and st.blocked) .. " tier="
+        .. tostring(st and st.dodgeTier) .. " offL=" .. tostring(st and st.fstate and st.fstate.offL) .. "）")
+    drive.clearCell(4, 1)
+    drive.clearCell(4, -2)
+    MDAD.Drive.stop(0, nil)
+    drive.frameMs(wasMs)
+    MinidoracatMiniMapAPI.navApiVersion = oldApi
+    drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
+    SandboxVars, dveh, getSpecificPlayer = oldSandbox, oldVeh, oldGet
+end
+drive.scenarioStraightProbe()
+
 -- 0928a 正式服 0.13.1 片段修正（各段違規證明寫在段首）：
 --   (aw)          前方區域未載入的引擎煞車：不判卡死、不倒車、HUD 顯示等待、等滿上限才以專屬理由交還。
 --                 違規證明：progressPauseMs 不看 areaWaitActive＝8 秒內 suspect 紅；areaWait 恆 false＝HUD／理由紅。

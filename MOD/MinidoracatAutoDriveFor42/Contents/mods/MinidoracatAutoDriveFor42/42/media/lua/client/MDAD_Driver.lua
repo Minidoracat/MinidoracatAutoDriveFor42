@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0928h"
+Drive.REV = "0928i"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -250,6 +250,9 @@ TUNE.ONCOMING_INTRUDE_M = 0.5     -- 路寬未知時：車身左緣壓過路面�
 TUNE.ONCOMING_PASS_M = 2.4        -- 對向車道被吃掉後剩不到這麼寬（一台車＋餘裕）＝借對向車道
 TUNE.EXIT_EXTEND_MIN_M = 4        -- 承諾後出口加長：至少長這麼多才重建（Drive.extendDodgeExit）
 TUNE.EXIT_EXTEND_RETRY_M = 5      -- 加長掃不過：車再前進這麼多才重試
+-- 出口轉場塞不進緊接的小折點前（c 後 2m 內）時，偏移照樣通過這個折點、出口放到它之後（shapeProfile）。
+-- 大折點（外側偏移繞急彎＝車追不上、切內）照舊拒收。
+TUNE.EXIT_HOLD_KINK_RAD = 0.6
 TUNE.TRAFFIC_WAIT_NOTICE_MS = 5000 -- 「等對向車」提示去重窗
 TUNE.FOLLOW_STOP_M = 5            -- 跟車：車頭到前車車尾小於此值＝停等
 TUNE.FOLLOW_MIN_M = 6             -- 跟車距離＝MIN＋前車速度×TIME
@@ -2657,7 +2660,7 @@ local function routeTurnWithin(profile, s0, s1)
 end
 
 -- 路線在 [s0, s1] 內單一折點的峰值位置（最大單段轉角的弧長；< 0.15 rad 視為
--- 無折點回 nil）。過渡段提早完成用；事件驅動冷路徑。
+-- 無折點回 nil）與該折角（rad）。過渡段提早完成用；事件驅動冷路徑。
 local function turnPeakS(profile, s0, s1)
     local n = profile.n
     local ss, hh = profile.s, profile.segH
@@ -2676,7 +2679,7 @@ local function turnPeakS(profile, s0, s1)
             end
         end
     end
-    return bestS
+    return bestS, best
 end
 
 -- 由弧長取路線上的世界點與法向（事件驅動輔助，線性走段；不在每幀熱路徑）
@@ -6025,8 +6028,16 @@ local function shapeProfile(s, profile, a, b, c, d, offL, baseL, crawlDesign)
         local room = b - (entryPeak + 0.5)
         if room < entryAvail then entryAvail = room end
     end
-    local exitPeak = turnPeakS(
+    local exitPeak, exitTurn = turnPeakS(
         profile, c, s.lastSNow + TUNE.DODGE_OV_SPAN + 6)
+    -- 0928i（rc6 0070 路口 jog：保持段已由上面延過 −75° 折點，2.8m 後又一個 19° 小折點落在 c 後 2m 內
+    -- → 出口轉場塞不進 → 全部候選 exit-room → 倒車三次交還）：緊接的小折點一併在偏移上通過。
+    for _ = 1, 3 do
+        if not (exitPeak and exitPeak > c and exitPeak - 2 - c <= 0
+                and exitTurn <= TUNE.EXIT_HOLD_KINK_RAD) then break end
+        c = exitPeak + 1
+        exitPeak, exitTurn = turnPeakS(profile, c, s.lastSNow + TUNE.DODGE_OV_SPAN + 6)
+    end
     if exitPeak and exitPeak > c then
         local room = exitPeak - 2 - c
         if room < exitAvail then exitAvail = room end
@@ -7139,6 +7150,15 @@ function Drive.debugSweepFallbacks(playerNum, a, b, c, d, offL, tag)
     return true, ro, variant, mg, ra, rb, rc, rd
 end
 
+-- 測試鉤（harness 鎖出口轉場遇緊接小折點的 shapeProfile predicate）：對當前 session 的剖面跑一次
+-- shapeProfile，回 ok, a, b, c, d, reason。production 無呼叫者。
+function Drive.debugShape(playerNum, a, b, c, d, offL)
+    local s = sessions[playerNum]
+    if not s or not s.profile then return nil end
+    local ra, rb, rc, rd, ok = shapeProfile(s, s.profile, a, b, c, d, offL, laneBiasOf(s), false)
+    return ok, ra, rb, rc, rd, s.dodgeShapeReason
+end
+
 -- blocked 座標錨解析（plan／guard 共用；Kahlua 190-local 閘門逼出的抽取）：
 -- 把「世界距車最近」的合格點寫進 s.blockHitX/Y（blockedNear 判距權威——
 -- 弧長跨快照不可比、取 s 最小會挑到橫向邊緣點判距虛遠，兩案都實測定罪）。
@@ -7880,6 +7900,23 @@ local function replan(s, vehicle, playerNum)
                                     .. " physical probe commit: squeeze-through at offL="
                                     .. string.format("%.2f", offL))
                             end
+                        end
+                    end
+                    -- 0928i（rc8 0086：RETURN 剛收完，路緣 l=3.05 的兩點已在車身旁；0089：交接釋放當輪）：
+                    -- 群貼在車旁／車前、舒適需求的候選全因 steep 拒收，舊制 blocked 一秒鎖輪從 20–29 km/h
+                    -- 煞到 0，下一輪物件已在車後又照常走。車就沿現在的橫向直走（dl=0，不需要進入段），
+                    -- 物理檔世界掃掠過了就當貼縫承諾；過不了才是真 blocked。
+                    if not committed then
+                        local shapeWhy = s.dodgeShapeReason
+                        if adoptIf("probe-straight", sweepWithFallbacks(
+                                s, planN, a, b, c, d, startLaneOf(s, baseL), baseL, "probe-straight",
+                                physBase, physBase, true)) then
+                            if getDebug() then
+                                print(string.format("%spn=%d physical straight commit at offL=%.2f",
+                                    LOG, playerNum, offL))
+                            end
+                        else
+                            s.dodgeShapeReason = shapeWhy -- blocked 事件沿用候選鏈的拒收理由（steep 等）
                         end
                     end
                 end
