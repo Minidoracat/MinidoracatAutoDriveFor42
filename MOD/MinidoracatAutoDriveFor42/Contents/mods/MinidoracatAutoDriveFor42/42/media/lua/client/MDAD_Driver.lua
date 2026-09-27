@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0928e"
+Drive.REV = "0928f"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -248,6 +248,8 @@ TUNE.TRAFFIC_YIELD_BUFFER_M = 3   -- 讓車：在預計交會點前這麼遠停�
 TUNE.ONCOMING_DESIGN_KMH = 25     -- 借對向車道繞行的過渡段設計速（見 shapeProfile）
 TUNE.ONCOMING_INTRUDE_M = 0.5     -- 路寬未知時：車身左緣壓過路面中線超過這麼多才算借對向車道
 TUNE.ONCOMING_PASS_M = 2.4        -- 對向車道被吃掉後剩不到這麼寬（一台車＋餘裕）＝借對向車道
+TUNE.EXIT_EXTEND_MIN_M = 4        -- 承諾後出口加長：至少長這麼多才重建（Drive.extendDodgeExit）
+TUNE.EXIT_EXTEND_RETRY_M = 5      -- 加長掃不過：車再前進這麼多才重試
 TUNE.TRAFFIC_WAIT_NOTICE_MS = 5000 -- 「等對向車」提示去重窗
 TUNE.FOLLOW_STOP_M = 5            -- 跟車：車頭到前車車尾小於此值＝停等
 TUNE.FOLLOW_MIN_M = 6             -- 跟車距離＝MIN＋前車速度×TIME
@@ -1995,6 +1997,7 @@ local function startSession(playerObj, playerNum, stage)
         lastOvEndS = 0,
         tmpOvEndS = 0,
         tmpOvX = {}, tmpOvY = {}, -- setOffset 直接採用工作表；舊承諾未釋放前不可寫入新候選
+        tmpOv2X = {}, tmpOv2Y = {}, -- 出口加長的第二張工作表（掃過才與 tmpOv 交換）
         lastOvN = 0,        -- 最後成功候選的折線點數（setOffset 交表用）
         lastOvS0 = 0,
         blockHitX = nil,    -- sweep 真命中世界座標（detour 避讓圈直接用，不經弧長轉換）
@@ -6085,6 +6088,7 @@ local function shapeProfile(s, profile, a, b, c, d, offL, baseL, crawlDesign)
     s.dodgeSpaceBaseCap = s.dodgeSpaceCap
     s.dodgeSpaceLat, s.dodgeShapeDl = aLat, dl
     s.dodgeEntryLength, s.dodgeExitLength = entryLen, exitLen
+    s.dodgeExitWant = required
     a, d = b - entryLen, c + exitLen
     return a, b, c, d, true
 end
@@ -6108,6 +6112,80 @@ local function dodgeSpaceCapOf(s, protected, entryPassed)
         end
     end
     return base
+end
+
+-- 承諾後出口加長（0928f；E2E rc2–rc4：40–70m 外就看到障礙、出口被當下的可視範圍截到 2–6m，
+-- 空間帽 0 → 整段繞行最後降到 10 km/h；10/89 筆承諾是這型）。車還沒到出口時，可視範圍跟著車前進；
+-- 前緣容得下更長的出口就用同一組 a/b/c/offL、同一個起始 lane 重建整條線（進入段與保持段
+-- 取樣同一條曲線），世界掃掠過了才換（第二張工作表，成功才交換；失敗舊線原封不動）。
+-- 停留（沒有出口）、脫困 episode、降級的線不做。同一位置失敗後前進 EXIT_EXTEND_RETRY_M 再試。
+function Drive.extendDodgeExit(s, sen, playerNum)
+    local fs = s.fstate
+    if not s.dodging or s.dodgeStay or s.episodeActive or s.returnActive or s.dodgeGuardFailed
+            or finite(s.dodgeDemoteS) or not finite(s.dodgeExitWant) or not finite(s.dodgeStartL)
+            or not finite(s.dodgeBaseL) or not finite(fs.offA) or not finite(fs.offC)
+            or not finite(fs.offD) or not finite(fs.offL) or type(s.tmpOv2X) ~= "table" then
+        return false
+    end
+    local rs, c, prof = s.lastSNow, fs.offC, s.profile
+    if rs > c - 2 or fs.offD >= prof.length - 1 then return false end
+    if finite(s.dodgeExtendFailS) and rs < s.dodgeExtendFailS + TUNE.EXIT_EXTEND_RETRY_M then return false end
+    local have = fs.offD - c
+    local room = s.dodgeExitWant
+    if have >= room - TUNE.EXIT_EXTEND_MIN_M then return false end
+    local peak = turnPeakS(prof, c, rs + TUNE.DODGE_OV_SPAN + 6)
+    if peak and peak > c and peak - 2 - c < room then room = peak - 2 - c end
+    if rs + TUNE.DODGE_OV_SPAN - c < room then room = rs + TUNE.DODGE_OV_SPAN - c end
+    local cov = visibleEndS(sen, rs) - 1 - s.bodyReach - c
+    if cov < room then room = cov end
+    if room < have + TUNE.EXIT_EXTEND_MIN_M then return false end
+    local d2 = c + room
+    local coverEnd = math.min(d2 + 1, prof.length)
+    local n, s0, reason, covered = MDADFollower.buildOffsetLine(prof, rs, fs.offA, fs.offB, c, d2,
+        fs.offL, s.dodgeBaseL, s.tmpOv2X, s.tmpOv2Y, nil, nil, nil, s.dodgeStartL)
+    local ok, margin, mi = false, 0, nil
+    if n >= 2 and reason == "ok" and covered >= coverEnd - 1e-6 then
+        local okS, mS, _, _, _, _, _, miS = sweepLine(s, s.tmpOv2X, s.tmpOv2Y, n, s0, covered,
+            fs.offA, fs.offB, c, d2, fs.offL, "extend", s.dodgeNeed, 1, true, true)
+        ok, margin, mi = okS, mS, miS
+    end
+    if not ok or not MDADFollower.setOffset(fs, fs.offA, fs.offB, c, d2, fs.offL,
+            s.tmpOv2X, s.tmpOv2Y, n, s0, covered, coverEnd) then
+        s.dodgeExtendFailS = rs
+        return false
+    end
+    s.tmpOvX, s.tmpOv2X = s.tmpOv2X, s.tmpOvX
+    s.tmpOvY, s.tmpOv2Y = s.tmpOv2Y, s.tmpOvY
+    s.lastOvN, s.lastOvS0, s.lastOvEndS, s.tmpOvEndS = n, s0, covered, covered
+    s.dodgeMargin, s.dodgeMarginS = margin, mi and sen.hardS and sen.hardS[mi] or 1e9
+    s.dodgeGuardHardN = sen.hardN
+    -- 出口側移量與空間帽照承諾時的算法重算（新出口段的連續落點、較長的過渡）
+    local exitDl = math.abs(fs.offL - s.dodgeBaseL)
+    local seg = MDADFollower.segIndexAt(prof, c)
+    local sx = c
+    while true do
+        while seg < prof.n - 1 and prof.s[seg + 1] < sx do seg = seg + 1 end
+        local dlx = math.abs(fs.offL - MDADFollower.laneBiasAt(prof, s.dodgeBaseL, seg, sx))
+        if dlx > exitDl then exitDl = dlx end
+        if sx >= d2 then break end
+        sx = math.min(sx + MDADFollower.OV_STEP, d2)
+    end
+    s.dodgeExitDl, s.dodgeExitLength = exitDl, room
+    s.dodgeCommittedLength = math.min(s.dodgeEntryLength or room, room)
+    local vp = s.vehicleProfile
+    local function spaceCap(len)
+        return MDADDynamics.shiftSpaceSpeedCapKmh(s.dodgeShapeDl, len, s.dodgeSpaceLat, vp.wheelbase,
+            vp.delta0Safe, vp.deltaVSafe, vp.maxSpeed, MDADDynamics.LATERAL_JERK_MAX)
+    end
+    if finite(s.dodgeShapeDl) and finite(s.dodgeSpaceLat) and finite(s.dodgeEntryLength) then
+        s.dodgeSpaceBaseCap = math.min(spaceCap(s.dodgeEntryLength), spaceCap(room))
+    end
+    diagEvent(s, playerNum, "dodge", { phase = "extend", c = c, d = d2, len = room, m = margin, rs = rs })
+    if getDebug() then
+        print(string.format("%spn=%d dodge exit extended: c=%.1f d %.1f -> %.1f (exit %.1f -> %.1f) m=%.2f rs=%.1f",
+            LOG, playerNum, c, c + have, d2, have, room, margin, rs))
+    end
+    return true
 end
 
 -- 繞行線的曲率只量「車前尚未走完的過渡段」：[a,b]、[c,d] 是線與路線不同的地方；
@@ -7412,6 +7490,7 @@ local function replan(s, vehicle, playerNum)
                     end
                 end
             end
+            if guardOk and Drive.extendDodgeExit(s, sen, playerNum) then guardMargin = s.dodgeMargin end
             if guardOk then
                 local minBrake, minLat = MDADFollower.minDynamics(
                     s.profile, fs.offA, fs.offD, s.fstate.idx)
@@ -8005,6 +8084,9 @@ local function replan(s, vehicle, playerNum)
             s.dodgeBaseCap = s.dodgeSpeedCap
             s.dodgeCapPending = false
             s.dodgeNeed = commitNb or s.sweepBase -- 承諾檔淨距（守護輪同契約）
+            -- 出口加長（Drive.extendDodgeExit）重建同一條線要用的起始 lane 與回線 lane
+            s.dodgeBaseL, s.dodgeExtendFailS = laneBiasOf(s), nil
+            s.dodgeStartL = startLaneOf(s, s.dodgeBaseL)
             -- RETURN hold 讓位給 dodge 不能只讓剖面（2026-09-03 s017：起步就 hold(probe)
             -- → 「return line blocked: dodge takes over」→ 原地 15s 紅字）：
             -- controlStateOf 的 returnHold=HOLD 仍壓 intent WAIT，而 updateReturnSnapshot

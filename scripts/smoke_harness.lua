@@ -17584,6 +17584,53 @@ function drive.scenario0928d()
         drive.clearCell(50, 0)
         drive.fillWorld(-2, 70, -7, 7)
     end
+
+    -- (exit-extend) 0928e：遠處就看到的障礙，出口被當下的可視範圍截短（空間帽 0 → 整段繞行最後降到 10）。
+    --   車前進、前緣跟著前進後，同一組 a/b/c/offL 重建更長的出口並重掃；停留（沒有出口）不做。
+    --   違規證明：extendDodgeExit 一律回 false＝出口不變紅。
+    do
+        local oldPer, oldGear = MDAD.HUD.perceptionDistance, MDAD.Drive.getGear(0)
+        setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 120,
+            RightLaneBias = 0 })
+        MDAD.Drive.setGear(0, 4)
+        MDAD.HUD.perceptionDistance = function() return 48 end
+        local wasE = drive.frameMs(10)
+        drive.fillWorld(-10, 200, -8, 8)
+        drive.putVehicleGeom(34, 0, 0, 1.8, 4.4, true)
+        checkTrue(armDrive(), "(exit-extend) 啟動")
+        setHeading(dveh, 0)
+        dveh._speed = 30
+        local ste = MDAD.Drive.debugSession(0)
+        local realExt, ext = MDAD.Drive.extendDodgeExit, nil
+        MDAD.Drive.extendDodgeExit = function(st, sen, pn)
+            local d0, e0, cap0 = st.fstate.offD, st.dodgeExitLength, st.dodgeSpeedCap
+            local a0, b0, c0, l0 = st.fstate.offA, st.fstate.offB, st.fstate.offC, st.fstate.offL
+            local ok = realExt(st, sen, pn)
+            if ok and ext == nil then
+                ext = { d0 = d0, e0 = e0, cap0 = cap0, a0 = a0, b0 = b0, c0 = c0, l0 = l0 }
+            end
+            return ok
+        end
+        for _ = 1, 3 do drive.frameMs(10); drive.scanRound(true) end
+        MDAD.Drive.extendDodgeExit = realExt
+        local fse = ste.fstate
+        checkTrue(ext ~= nil and ext.e0 < ste.dodgeExitWant - 10,
+            "(exit-extend) 承諾時出口被可視範圍截短、之後加長（出口 " .. tostring(ext and ext.e0)
+            .. "m、要 " .. tostring(ste.dodgeExitWant) .. "m）")
+        checkTrue(ext ~= nil and ste.dodging == true and fse.offD > ext.d0 + 4
+                and fse.offD + 1 + ste.bodyReach <= ste.sensor.scanEndS + 1e-6,
+            "(exit-extend) 出口加長、線尾仍在可視範圍內（d " .. tostring(ext and ext.d0) .. " → " .. tostring(fse.offD) .. "）")
+        checkTrue(ext ~= nil and fse.offA == ext.a0 and fse.offB == ext.b0 and fse.offC == ext.c0 and fse.offL == ext.l0,
+            "(exit-extend) 進入段、保持段、偏移量不變")
+        checkTrue(ext ~= nil and ste.dodgeSpeedCap > ext.cap0 + 5 and (ste.dodgeClrN or 0) >= 2,
+            "(exit-extend) 出口變長後繞行帽跟著放寬、逐點淨距表跟著新線（cap " .. tostring(ext and ext.cap0) .. " → "
+            .. tostring(ste.dodgeSpeedCap) .. "）")
+        MDAD.Drive.stop(0, nil)
+        drive.frameMs(wasE)
+        MDAD.HUD.perceptionDistance = oldPer
+        MDAD.Drive.setGear(0, oldGear)
+        drive.fillWorld(-2, 70, -7, 7)
+    end
     SandboxVars = oldSand
 end
 drive.scenario0928d()
