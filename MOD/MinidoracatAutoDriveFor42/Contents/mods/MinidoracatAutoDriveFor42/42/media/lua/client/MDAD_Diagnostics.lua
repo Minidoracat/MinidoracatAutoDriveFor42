@@ -1235,6 +1235,12 @@ local function encodePhys(phys)
     addNum("forceBrakeLeft", "fbl") -- 0907f：閂鎖剩餘 ms／最後觸發原因（fbt 只記當幀會漏採）
     addStr("forceBrakeWhy", "fbw")
     addNum("frameMs", "fdt")
+    -- 0928a：前方區域未載入等待（引擎煞車）／車身 yaw 率與 ESC 收掉比例／起步近物限速與前半車身淨距
+    addBool("areaWait", "awt")
+    addNum("yawRate", "yr")
+    addNum("escScale", "esc")
+    addBool("startGuard", "sg")
+    addNum("frontClearance", "fcl")
     -- 0904j 鏈式停留：lc＝常駐 lane 暫時＝停留 offL；dodgeTier 帶 -stay／-nudge／-physical
     addBool("laneChained", "lc")
     addStr("dodgeTier", "tier")

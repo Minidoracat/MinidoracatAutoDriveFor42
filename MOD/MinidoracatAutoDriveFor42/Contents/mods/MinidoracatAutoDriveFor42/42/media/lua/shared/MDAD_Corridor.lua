@@ -192,6 +192,7 @@ end
 -- pad（選填）：安全圈；nil＝FOOTPRINT_PAD。物理檔承諾（車身 −0.1 掃過的貼縫）執行中由
 -- 呼叫端傳承諾同源的負 pad——否則「規劃說 10cm 名義重疊沒事、contact 說要 15cm 淨空」
 -- 兩套標準打架，貼縫永遠在半路被 contact 煞停（2026-09-04 s063/s064 只差一點點）。
+-- 第 10 回傳（0928a）：前半車身（u ≥ 0）最近點的淨距，沒有這種點＝nil；Driver 起步近物限速用。
 function MDADCorridor.currentFootprintHit(hardS, hardL, hardX, hardY, hardR, hardN,
         bodyX, bodyY, vehicleH, halfW, halfL, expectedLane, pad)
     -- 負 pad 允許到 −r（逐點夾 r+pad ≥ 0）：OBB 內部距離已夾 0，r+pad 一旦為負會讓
@@ -220,6 +221,7 @@ function MDADCorridor.currentFootprintHit(hardS, hardL, hardX, hardY, hardR, har
 
     local bestClear, bestPlanned = 0, 0
     local bestI, bestS, bestL, bestX, bestY = 0, 0, 0, 0, 0
+    local bestFront = nil
     for i = 1, hardN do
         local hs, hl, r = hardS[i], hardL[i], hardR[i]
         if type(hs) ~= "number" or hs * 0 ~= 0
@@ -262,13 +264,14 @@ function MDADCorridor.currentFootprintHit(hardS, hardL, hardX, hardY, hardR, har
                 bestClear, bestPlanned = actual, planned
                 bestI, bestS, bestL, bestX, bestY = i, hs, hl, hx, hy
             end
+            if u >= 0 and (bestFront == nil or actual < bestFront) then bestFront = actual end
         end
     end
 
-    if bestI == 0 then return false, 0, 0, 0, 0, 0, 0, 0, false end
+    if bestI == 0 then return false, 0, 0, 0, 0, 0, 0, 0, false, nil end
     local blocked = bestClear <= 0
     return blocked, bestClear, bestPlanned, bestI, bestS, bestL, bestX, bestY,
-        blocked and bestPlanned > 0
+        blocked and bestPlanned > 0, bestFront
 end
 
 -- 候選 lane l 是否與 [sLo, sHi] 內每個硬障礙都保持「該點半徑＋needHalf」的

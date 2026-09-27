@@ -56,6 +56,8 @@ local STOP_KIND = {
     UI_MinidoracatAutoDrive_TrailerLost = "trailer",
     UI_MinidoracatAutoDrive_TrailerRotate = "trailer",
     UI_MinidoracatAutoDrive_TrailerCorner = "trailer",
+    -- 前方區域一直沒載入（0928a；Driver TUNE.AREA_WAIT_MAX_MS）
+    UI_MinidoracatAutoDrive_AreaLoadStop = "stuck",
 }
 
 local outbox = {}      -- pn → { msgs..., n }
@@ -136,6 +138,9 @@ function U.begin(pn, now, header, profile)
         dist = 0, maxLat = 0, stallMs = 0,
         fb = {}, contact = 0, evc = {}, modeMs = {}, capMs = {},
         fdt = { 0, 0, 0, 0, 0, 0, 0 }, inc = {}, incN = 0,
+        -- 0928a：越野接線長、前方區域未載入等待（次數／毫秒）、自轉次數（|yaw|>3 rad/s 上升緣，
+        -- <1.5 重新武裝）、有未載入前緣的毫秒
+        apr = nil, awN = 0, awMs = 0, prevAw = false, spin = 0, spinArmed = true, unlMs = 0,
         rev = MDAD and MDAD.Drive and MDAD.Drive.REV or "",
         build = MDAD and MDAD.BUILD or "",
         veh = type(profile) == "table" and profile.scriptName or "",
@@ -341,6 +346,23 @@ function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
     local fbl, fbw, capReason, fdt
     if type(phys) == "table" then
         fbl, fbw, capReason, fdt = phys.forceBrakeLeft, phys.forceBrakeWhy, phys.capReason, phys.frameMs
+        if phys.areaWait == true then
+            if not u.prevAw then u.awN = u.awN + 1 end
+            u.awMs = u.awMs + dt
+            u.prevAw = true
+        else
+            u.prevAw = false
+        end
+        local yr = phys.yawRate
+        if finite(yr) then
+            if yr < 0 then yr = -yr end
+            if yr > 3 then
+                if u.spinArmed then u.spin, u.spinArmed = u.spin + 1, false end
+            elseif yr < 1.5 then
+                u.spinArmed = true
+            end
+        end
+        if finite(phys.unloadedS) then u.unlMs = u.unlMs + dt end
     end
     if type(capReason) == "string" then u.capMs[capReason] = (u.capMs[capReason] or 0) + dt end
     if finite(fdt) then
@@ -392,6 +414,9 @@ function U.event(u, line, now, name, a)
         u.routeLine, u.routeTs = line, now
     end
     local phase = type(a) == "table" and a.phase or nil
+    if name == "route" and phase == "ready" and u.apr == nil and finite(a.approach) then
+        u.apr = a.approach -- 起步越野接線長（Driver 只在起步的 ready 帶）
+    end
     if name == "unstick" and phase == "start" then
         trigger(u, now, "unstick")
     elseif name == "blocked" or name == "unstick" or name == "progress" then
@@ -434,6 +459,9 @@ local function summaryText(u, now, reason, withMaps)
         .. ',"contact":' .. u.contact .. ',"fb":' .. mapJson(u.fb)
         .. ',"fdt":[' .. table.concat(u.fdt, ",") .. ']'
         .. ',"inc":[' .. table.concat(inc, ",", 1, n) .. ']'
+        .. (u.apr and (',"apr":' .. jnum(math.floor(u.apr * 10 + 0.5) / 10)) or "")
+        .. ',"aw":' .. u.awN .. ',"awMs":' .. jnum(u.awMs)
+        .. ',"spin":' .. u.spin .. ',"unlMs":' .. jnum(u.unlMs)
     if withMaps then
         text = text .. ',"ev":' .. mapJson(u.evc) .. ',"mode":' .. mapJson(u.modeMs)
             .. ',"cap":' .. mapJson(u.capMs)

@@ -299,9 +299,21 @@ function T.shape(route, tow, tractorHalfW, tractorFront)
     local g = { L2 = tow.L2, rear = tow.hitchToRear, hw = tow.halfW,
         front = tractorFront or 4, thw = tractorHalfW or 1.2 }
     local out, ow, os, blocked = {}, {}, {}, {}
-    local function push(x, y, w, surf)
+    -- fold＝true（轉角規劃出來的點）：新點讓上一段反向（>90°；規劃點 0.5m 一點、圓弧 R≥4，正常每點
+    -- 只轉幾度）就撤掉上一點再比。相鄰轉角段很短時，前一個轉角的轉出點已畫進本段、本轉角的外靠點又從
+    -- 段中起算＝線往回折（0.13.1 正式服 StepVan＋掛車：90° 左轉接 13m 後 28° 彎，改寫線在 (10853,9976)
+    -- 折返 176°，車頭到那裡 Follower 判原地調頭→TrailerRotate 交還）。原始路線節點（不可過的轉角）不做。
+    local function push(x, y, w, surf, fold)
         local k = #out
         if k >= 2 and out[k - 1] == x and out[k] == y then return end
+        while fold and k >= 4 do
+            local ux, uy = out[k - 1] - out[k - 3], out[k] - out[k - 2]
+            local vx, vy = x - out[k - 1], y - out[k]
+            if ux * vx + uy * vy > 0 then break end
+            out[k], out[k - 1] = nil, nil
+            ow[#ow], os[#os] = nil, nil
+            k = k - 2
+        end
         if k >= 2 then ow[#ow + 1], os[#os + 1] = w, surf end
         out[k + 1], out[k + 2] = x, y
     end
@@ -336,7 +348,7 @@ function T.shape(route, tow, tractorHalfW, tractorFront)
                         if vw < minW then vw = minW end
                     end
                     if vw < 1 then vw = 1 end
-                    push(x, y, vw, ss[i - 1])
+                    push(x, y, vw, ss[i - 1], true)
                 end
             end
         else

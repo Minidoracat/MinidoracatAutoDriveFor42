@@ -16961,7 +16961,7 @@ function drive.scenarioApproach()
         engineRunning = true, mass = 1600, speed = 0, maxSpeed = 100,
         bodyW = 1.6, bodyL = 4.2, comX = 0, comZ = 0, profileFull = true,
         enginePower = 3000, brakingForce = 100, wheelFriction = 1.5, tireFriction = 1.5 })
-    local function arm(x, y, heading)
+    local function arm(x, y, heading, route)
         MDAD.Drive.stop(0, nil)
         drive.fillWorld(-12, 90, -12, 12)
         drive.putRoad(0, 90, -3, 2)
@@ -16972,7 +16972,7 @@ function drive.scenarioApproach()
         dp._vehicle, dp._dead, dp._local = dveh, false, true
         setHeading(dveh, heading)
         -- 路網從 (0,0) 往東：第一點就是死路端點（主 MOD 的起點＝路網上離車最近點）
-        drive.nav.route = { pts = { 0, 0, 80, 0 }, segSurface = { "gravel" }, segWidth = { 5 },
+        drive.nav.route = route or { pts = { 0, 0, 80, 0 }, segSurface = { "gravel" }, segWidth = { 5 },
             len = 80, cost = 80, avoidPenalty = 0 }
         drive.nav.tx, drive.nav.ty, drive.nav.state = 80, 0, "ok"
         return MDAD.Drive.start(dp)
@@ -16999,6 +16999,22 @@ function drive.scenarioApproach()
     st = MDAD.Drive.debugSession(0)
     checkTrue(st ~= nil and st.approachM == 0 and st.profile.x[1] == 0,
         "(apr-side) 車在路旁：不接越野線（approachM=" .. tostring(st and st.approachM) .. "）")
+    -- (apr-mid) 0928a：開著導航走了一段才按自駕，主 MOD 回快取同一條線、起點早在車後（正式服 10 趟接出
+    --   164／7136m 回頭接線）。車離第三段只有 1m，只是剛好也在第一段反向延長線上、10m 內。
+    --   違規證明：拿掉「整條路線最近點」檢查即紅（舊制接出 10.3m）。
+    checkTrue(arm(-5, -9, math.pi, { pts = { 0, 0, 40, 0, 40, -10, -20, -10 },
+        segSurface = { "gravel", "gravel", "gravel" }, segWidth = { 5, 5, 5 },
+        len = 110, cost = 110, avoidPenalty = 0 }), "(apr-mid) 車在路線中段旁啟動")
+    for _ = 1, 4 do driveTick(dp, dveh) end
+    st = MDAD.Drive.debugSession(0)
+    checkTrue(st ~= nil and st.approachM == 0 and st.profile.x[1] == 0,
+        "(apr-mid) 車離後段只有 1m：不從車位接回起點（approachM=" .. tostring(st and st.approachM) .. "）")
+    -- (apr-far) 起點在車後 25m（> SNAP_MAX_M）：不接越野線。違規證明：拿掉距離上限即紅（舊制接出 25m）。
+    checkTrue(arm(-25, 0, 0), "(apr-far) 起點前 25m 啟動")
+    for _ = 1, 4 do driveTick(dp, dveh) end
+    st = MDAD.Drive.debugSession(0)
+    checkTrue(st ~= nil and st.approachM == 0,
+        "(apr-far) 超過 20m 不接越野線（approachM=" .. tostring(st and st.approachM) .. "）")
 
     MDAD.Drive.stop(0, nil)
     drive.frameMs(wasMs)
@@ -17007,6 +17023,222 @@ function drive.scenarioApproach()
     SandboxVars, dveh, getSpecificPlayer = oldSandbox, oldVeh, oldGet
 end
 drive.scenarioApproach()
+
+-- 0928a 正式服 0.13.1 片段修正（各段違規證明寫在段首）：
+--   (aw)          前方區域未載入的引擎煞車：不判卡死、不倒車、HUD 顯示等待、等滿上限才以專屬理由交還。
+--                 違規證明：progressPauseMs 不看 areaWaitActive＝8 秒內 suspect 紅；areaWait 恆 false＝HUD／理由紅。
+--   (ret-rot)     RETURN 待命中被甩成調頭姿態：調頭接手即結束 RETURN。違規證明：拿掉 stepFollow 的呼叫即紅。
+--   (esc)         車身 yaw 率限制：自轉同向 steer 收掉、反向不限、一般過彎與高幀率子步不誤判。
+--                 違規證明：yawGovern 原樣回 steer＝(esc)／(esc-wire) 紅；ESC_WINDOW_MS 改 0＝(esc-fps) 紅。
+--   (sg)          起步近物限速：前半車身旁有硬物且還沒貼上車道時照淨距限速，對正 1 秒後解除。
+--                 違規證明：startGuardApply 原樣回 target＝紅。
+--   (dassist)     繞行超速的中線減速輔助放大到 DODGE_ASSIST_MAX。違規證明：拿掉繞行分支＝0 紅。
+--   (proof-stale) 證明線被越過＝丟掉等重建，不當車輛不支援交還。違規證明：退回 fault＝session 結束紅。
+--   (far)         離線 >20m 持續 4 秒才以 RouteTooFar 交還；回到路線附近計時歸零。
+--                 違規證明：routeFarWatch 恆 false＝不交還紅。
+function drive.scenario0928()
+    scenario("0928a：區域載入等待／RETURN 讓調頭／yaw 率限制／起步近物／繞行補減速／證明過期／離線過遠")
+    local oldVeh, oldSandbox = dveh, SandboxVars
+    local wasMs = drive.frameMs(20)
+    local Dr, T = MDAD.Drive, MDAD.Drive.debugTune()
+    MDAD.Drive.stop(0, nil)
+    dveh = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }),
+        engineRunning = true, mass = 1200, speed = 20, maxSpeed = 90,
+        bodyW = 2.0, bodyL = 5.2, comX = 0, comZ = 0, profileFull = true,
+        enginePower = 3000, brakingForce = 100, wheelFriction = 1.5, tireFriction = 1.5 })
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40,
+        ObstaclePolicy = 1, RightLaneBias = 0 })
+    local function ticks(n, ms)
+        for _ = 1, n do
+            nowMs = nowMs + ms
+            driveReset(dveh)
+            driveTick(dp, dveh)
+        end
+    end
+
+    -- (aw) 前方區域未載入
+    drive.fillWorld(-10, 70, -7, 7)
+    checkTrue(armDrive(), "(aw) 啟動")
+    setHeading(dveh, 0)
+    driveTick(dp, dveh)
+    local st = Dr.debugSession(0)
+    dveh.isInvalidChunkAhead = function(self) return self._invalidAhead == true end
+    dveh._invalidAhead, dveh._braking, dveh._speed = true, true, 0
+    local bad = false
+    for _ = 1, 80 do
+        ticks(1, 100)
+        local ps = st.progressState
+        if (ps ~= "watch" and ps ~= "disarmed") or st.mode == "unstick" then bad = true end
+    end
+    checkFalse(bad, "(aw) 前方區域未載入 8 秒：不判卡死、不倒車")
+    checkTrue(Dr.isActive(0), "(aw) 等待中仍在自駕")
+    checkEq(Dr.hudState(0), "areawait", "(aw) HUD 顯示等待區域載入")
+    dveh._invalidAhead, dveh._braking = false, false
+    ticks(1, 100)
+    checkFalse(st.areaWaitActive, "(aw) 區域載入後解除等待")
+    dveh._invalidAhead, dveh._braking = true, true
+    clearList(halos)
+    local waited = 0
+    while waited <= T.AREA_WAIT_MAX_MS + 500 and Dr.isActive(0) do
+        ticks(1, 100)
+        waited = waited + 100
+    end
+    checkFalse(Dr.isActive(0), "(aw) 連續等滿上限才交還")
+    checkTrue(waited >= T.AREA_WAIT_MAX_MS, "(aw) 不提早交還（等了 " .. waited .. "ms）")
+    checkEq(haloKey(), "UI_MinidoracatAutoDrive_AreaLoadStop", "(aw) 交還理由＝前方區域未載入")
+    dveh.isInvalidChunkAhead, dveh._invalidAhead, dveh._braking = nil, nil, false
+
+    -- (ret-rot) RETURN 待命中被甩成調頭姿態
+    MDAD.Drive.stop(0, nil)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40,
+        ObstaclePolicy = 1, RightLaneBias = 1.5 })
+    drive.fillWorld(-10, 170, -15, 15)
+    dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = 0, -4, 10, 0, false
+    dveh._engine, dveh._driver = true, dp
+    dp._vehicle, dp._dead, dp._local = dveh, false, true
+    setHeading(dveh, 0)
+    drive.nav.tx, drive.nav.ty, drive.nav.state = 300, 0, "ok"
+    drive.nav.route = newRoute(40, 0, 0, 4, 0)
+    driveReset(dveh)
+    checkTrue(Dr.start(dp), "(ret-rot) 線外 4m 啟動")
+    for _ = 1, 4 do driveTick(dp, dveh) end
+    drive.scanRound(true)
+    drive.scanRound(true)
+    st = Dr.debugSession(0)
+    checkTrue(st ~= nil and st.returnActive == true, "(ret-rot) 前置：RETURN 中")
+    st.returnHold = true
+    setHeading(dveh, math.pi)
+    dveh._speed = 0
+    ticks(1, 20)
+    checkTrue(st.fstate.rotating == true, "(ret-rot) 前置：Follower 判調頭")
+    checkFalse(st.returnActive, "(ret-rot) 調頭接手即結束 RETURN")
+    checkEq(st.planMode, "return-rotate", "(ret-rot) 釋放理由記 rotate")
+    MDAD.Drive.stop(0, nil)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40,
+        ObstaclePolicy = 1, RightLaneBias = 0 })
+
+    -- (esc) 車身 yaw 率限制
+    local es = { vehicleProfile = { rMin = 2.2 }, safeLat = 4.2 }
+    local t, h = 1000, 0
+    Dr.yawGovern(es, 3.9, h, 18, t)
+    t, h = t + 30, h + 6.4 * 0.03
+    local g = Dr.yawGovern(es, 3.9, h, 18, t)
+    checkTrue(g < 3.9 * 0.2 and es.escScale < 0.2,
+        "(esc) 18 km/h 自轉 6.4 rad/s：同向 steer 收掉（實得 " .. tostring(g) .. "）")
+    t, h = t + 30, h + 6.4 * 0.03
+    checkEq(Dr.yawGovern(es, -2, h, 18, t), -2, "(esc) 反向（修正自轉）steer 不受限")
+    local en = { vehicleProfile = { rMin = 2.2 }, safeLat = 4.2 }
+    t, h = 5000, 0
+    Dr.yawGovern(en, 1, h, 18, t)
+    t, h = t + 30, h + (5 / 12) * 0.03
+    checkEq(Dr.yawGovern(en, 1, h, 18, t), 1, "(esc) R 12m 一般過彎的 yaw 率不收")
+    local hf = { vehicleProfile = { rMin = 2.2 }, safeLat = 4.2 }
+    t, h = 9000, 0
+    local minOut = 1
+    for _ = 1, 40 do
+        t = t + 4
+        if t % 10 < 4 then h = h + 0.8 * 0.01 end
+        local out = Dr.yawGovern(hf, 1, h, 18, t)
+        if out < minOut then minOut = out end
+    end
+    checkEq(minOut, 1, "(esc-fps) 250 FPS、heading 每 10ms 子步才變：0.8 rad/s 一般修正不誤判")
+    -- wiring：車頭 57° 偏右（追線要往右轉）又以 3.3 rad/s 往右自轉＝同向 steer 被收
+    drive.fillWorld(-10, 70, -7, 7)
+    checkTrue(armDrive(), "(esc-wire) 啟動")
+    st = Dr.debugSession(0)
+    local hw = 1.0
+    setHeading(dveh, hw)
+    ticks(1, 30)
+    local minScale = 1
+    for _ = 1, 4 do
+        hw = hw - 0.1
+        setHeading(dveh, hw)
+        ticks(1, 30)
+        if st.escScale < minScale then minScale = st.escScale end
+    end
+    checkTrue(minScale < 1, "(esc-wire) stepFollow 經 yaw 率限制才施側推（最小比例 " .. tostring(minScale) .. "）")
+
+    -- (sg) 起步近物限速
+    MDAD.Drive.stop(0, nil)
+    drive.fillWorld(-10, 70, -7, 7)
+    drive.putSolid(5, 2, "start_guard_pole")
+    checkTrue(armDrive(), "(sg) 啟動（車頭斜 17°、右前 3m 有桿）")
+    st = Dr.debugSession(0)
+    drive.scanRound(true)
+    local capHit = false
+    for _ = 1, 3 do
+        ticks(1, 20)
+        if st.lastCapReason == "start-near"
+                or (st.lastCapReason == "min-exec" and st.minExecFrom == "start-near") then capHit = true end
+    end
+    checkTrue(st.startGuard == true, "(sg) 未貼上車道：起步近物限速仍武裝")
+    checkTrue(capHit, "(sg) 前半車身旁有桿：照淨距限速（capReason=" .. tostring(st.lastCapReason)
+        .. " from=" .. tostring(st.minExecFrom) .. " fc=" .. tostring(st.frontClearance)
+        .. " coast=" .. tostring(st.safeCoast) .. "）")
+    drive.clearCell(5, 2)
+    dveh._x, dveh._y = 0, 0
+    setHeading(dveh, 0)
+    ticks(15, 100)
+    checkFalse(st.startGuard, "(sg) 對正並貼上車道 1 秒：解除")
+
+    -- (dassist) 繞行超速的中線減速輔助
+    local da = { tow = false, sensor = { ready = true }, visibilityCap = 80, dodging = true,
+        dodgeApproachCap = 18.24, runtimeMass = 1457 }
+    local f = Dr.visAssistForce(da, 63.5, 0.8)
+    checkTrue(f > 0 and math.abs(da.visAssistDecel - T.DODGE_ASSIST_MAX) < 1e-9,
+        "(dassist) 63 km/h 承諾 cap 18 的繞行：補到 DODGE_ASSIST_MAX（實得 " .. tostring(da.visAssistDecel) .. "）")
+    da.dodging = false
+    Dr.visAssistForce(da, 63.5, 0.8)
+    checkEq(da.visAssistDecel, 0, "(dassist) 沒在繞行：可視帽 80 以下不補")
+    da.dodging, da.dodgeApproachCap = true, 70
+    Dr.visAssistForce(da, 63.5, 0.8)
+    checkEq(da.visAssistDecel, 0, "(dassist) 繞行帽高於實速：不補")
+
+    -- (proof-stale) 證明線被越過
+    MDAD.Drive.stop(0, nil)
+    drive.fillWorld(-10, 70, -7, 7)
+    checkTrue(armDrive(), "(proof-stale) 啟動")
+    setHeading(dveh, 0)
+    st = Dr.debugSession(0)
+    local built = false
+    for _ = 1, 4 do
+        drive.scanRound(true)
+        if st.laneCurveStamp == st.sensor.stamp and st.verifyLineN >= 2 then built = true; break end
+    end
+    checkTrue(built, "(proof-stale) 前置：有新鮮證明線")
+    st.laneCurveEnd = st.lastSNow - 1
+    ticks(1, 20)
+    checkTrue(Dr.isActive(0), "(proof-stale) 證明過期：不當車輛不支援交還")
+    checkNil(st.stateError, "(proof-stale) 沒有 stateError")
+    checkEq(st.laneCurveStamp, -1, "(proof-stale) 丟掉證明等下一輪重建")
+
+    -- (far) 離線過遠
+    MDAD.Drive.stop(0, nil)
+    drive.fillWorld(-10, 70, -7, 7)
+    checkTrue(armDrive(), "(far) 啟動")
+    setHeading(dveh, 0)
+    dveh._y = 25
+    ticks(30, 100)
+    checkTrue(Dr.isActive(0), "(far) 3 秒內等主 MOD 重算，不交還")
+    dveh._y = 0
+    ticks(3, 100)
+    checkEq(Dr.debugSession(0).routeFarSince, 0, "(far) 回到路線附近：計時歸零")
+    dveh._y = 25
+    clearList(halos)
+    local far = 0
+    while far < 6000 and Dr.isActive(0) do
+        ticks(1, 100)
+        far = far + 100
+    end
+    checkFalse(Dr.isActive(0), "(far) 持續離線超過 4 秒：交還")
+    checkTrue(far >= T.ROUTE_FAR_MS, "(far) 不提早交還（" .. far .. "ms）")
+    checkEq(haloKey(), "UI_MinidoracatAutoDrive_RouteTooFar", "(far) 交還理由＝離道路太遠")
+
+    MDAD.Drive.stop(0, nil)
+    drive.frameMs(wasMs)
+    dveh, SandboxVars = oldVeh, oldSandbox
+end
+drive.scenario0928()
 
 do -- 主 chunk local 槽已滿：整段包成函式，內部 local 不佔主 chunk
 -- =====================================================================

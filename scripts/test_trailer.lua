@@ -65,6 +65,26 @@ end
 check(#fs.towBlocked == 0 and maxTurn < math.pi / 2,
     string.format("Fallas 改寫線無折返（最大相鄰折角 %.0f°）", math.deg(maxTurn)))
 
+-- ②d 相鄰轉角段很短（0.13.1 正式服 StepVan＋掛車 clip-31：90° 左轉接 13m 後 28° 彎）：前一個轉角的轉出點
+-- 已畫進本段、下一個轉角的外靠點又從段中起算，舊版在 (10853,9976) 折返 176°＝Follower 判原地調頭交還。
+-- 違規證明：拿掉 push 的 fold 撤點＝紅。
+local shortPts = { 10857, 10055, 10857, 10016.5, 10857, 9976, 10844, 9976, 10831, 9969, 10825, 9963,
+    10819, 9944, 10819, 9900 }
+local shortRoute = { pts = shortPts, segWidth = { 4, 4, 8, 8, 8, 8, 8 },
+    segSurface = { "paved", "paved", "paved", "paved", "paved", "paved", "paved" } }
+local smallTow = { L2 = 3.2, hitchToRear = 4.2, halfW = 0.9 }
+local ss2 = T.shape(shortRoute, smallTow, 1.1, 6)
+local maxShort, atX, atY = 0, 0, 0
+for k = 3, #ss2.pts - 3, 2 do
+    local ax, ay = ss2.pts[k] - ss2.pts[k - 2], ss2.pts[k + 1] - ss2.pts[k - 1]
+    local bx, by = ss2.pts[k + 2] - ss2.pts[k], ss2.pts[k + 3] - ss2.pts[k + 1]
+    local turn = math.abs(math.atan2(ax * by - ay * bx, ax * bx + ay * by))
+    if turn > maxShort then maxShort, atX, atY = turn, ss2.pts[k], ss2.pts[k + 1] end
+end
+check(maxShort <= math.pi / 2 + 1e-6, string.format("短段相鄰轉角改寫線無折返（最大相鄰折角 %.0f° 在 %.1f,%.1f）",
+    math.deg(maxShort), atX, atY))
+check(#ss2.segWidth == #ss2.pts / 2 - 1 and #ss2.segSurface == #ss2.segWidth, "撤點後段屬性數量仍對齊點數")
+
 -- ③ 小折角不動
 local gentle = { pts = { -60, 0, 0, 0, 60, 10 }, segWidth = { 8, 8 }, segSurface = { "paved", "paved" } }
 local gs = T.shape(gentle, tow, G.thw, G.front)

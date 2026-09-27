@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0927a"
+Drive.REV = "0928a"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -121,6 +121,25 @@ TUNE.TOW_STEER_FULL_KMH = 15
 -- contact）。低於 STEER_FULL_KMH 側推按車速縮、靜止＝零；耦力原地調頭（coupled）不受影響。
 -- 取 4：貼縫爬行 5 km/h 與調頭大弧 12 仍是全額，只有近乎靜止時才收。
 TUNE.STEER_FULL_KMH = 4
+-- 車身 yaw 率限制（0928a，ESC 式；0.13.1 正式服片段 >3 rad/s 自轉 24 次，0.13.0 只有 2 次）：側推是施在
+-- 車頭的外力、不受前輪轉角限制，目標點突然跳到 90° 外（Z 字短 jog 放行下一臂、窄出口繞行線、大弧調頭）
+-- 時 steer 飽和，0.2 秒內自轉 6–9 rad/s（summer/clip-06 SmallCar 18 km/h、Thragg/clip-04 GTR 大弧調頭、
+-- kenzo_L/clip-08 窄出口繞行）。量到的 yaw 率（≥ESC_WINDOW_MS 視窗：高幀率時物理 0.01s 子步讓單幀
+-- heading 差分 0／倍數交錯）超過「運動學 v/rMin 與抓地 safeLat/v 的較小者 ×MARGIN＋FLOOR」時，同向
+-- steer 依超出量線性收掉（兩倍上限歸零）；反向（修正自轉）不受限。耦力原地調頭不經此限。
+TUNE.ESC_MARGIN = 1.3
+TUNE.ESC_FLOOR_RADS = 0.3
+TUNE.ESC_WINDOW_MS = 30
+-- 起步近物限速（0928a；0.13.1 起步 15 秒內接觸 13 趟，0.13.0 為 4）：起步時車常不在規劃車道上（路邊
+-- 斜停、離線數公尺），規劃器以車道判斷的淨空與車身實際掃過的不同——前半車身旁的桿、欄杆只剩 0.2–3m
+-- 時車已加到 16–28 km/h（seems/clip-14、C86/clip-06、Annilex/clip-05）。起步到「貼上車道並對正」持續
+-- START_GUARD_HOLD_MS（或駛離起點 START_GUARD_MAX_M）之前，前半車身最近硬物淨距以滑行減速度套接近
+-- 包絡；接觸閘與 MIN_EXEC 照舊。倒車脫困開始時重新武裝（又是從障礙旁起步）。
+TUNE.START_GUARD_LAT_M = 0.5
+TUNE.START_GUARD_ALIGN_RAD = 10 * math.pi / 180
+TUNE.START_GUARD_HOLD_MS = 1000
+TUNE.START_GUARD_MAX_M = 40
+TUNE.START_GUARD_MARGIN_M = 0.3
 local STEER_INPUT_EPS = 0.01   -- getCurrentSteering 視為「玩家在轉」的門檻
 local STEER_DEADZONE = 0.02    -- follower steer（±5）的死區：低於此值不施力（免無謂抖動）。
                                -- 0.1→0.02（2026-09-07 session-006 t=2.6-3.8 定罪：殭屍在車側 0.3m、
@@ -251,9 +270,21 @@ TUNE.VIS_ASSIST_MIN_KMH = 25    -- 巡航減速輔助：低於此速滑行就夠
 TUNE.VIS_ASSIST_TOL_KMH = 1     -- 實速超過巡航帽這麼多才開始補
 TUNE.VIS_ASSIST_GAIN = 1.0      -- 每超 1 km/h 補 1 m/s²
 TUNE.VIS_ASSIST_MAX = 4.0       -- 補的減速度上限（m/s²），疊在滑行之上
+-- 繞行超速的減速輔助上限（0928a；HOHOHO/clip-01：63 km/h 時已在縫口前 1m、只能承諾 cap 18 的線，
+-- 繞行帽只夾 regulator＝滑行 3 m/s²，到縫仍 56 km/h、追線落後 1m 擦撞）。同一條中線外力、不鎖輪、
+-- 轉向照常；只在實速超過繞行套用帽時放大到這個上限。
+TUNE.DODGE_ASSIST_MAX = 7.0
 -- 進度監督：受控煞停（自己的一秒硬煞閂鎖／引擎原生未載入 chunk 煞車）期間不算「不動」，
 -- 但連續煞停超過這麼久仍當卡死（見 Drive.progressPauseMs）。
 TUNE.PROGRESS_BRAKE_GRACE_MS = 4000
+-- 前方區域未載入的原生煞車（0928a）：前方 1–2 個 chunk 未載入時 CarController 直接煞車（isInvalidChunkAhead，
+-- CarController.java:208-216；BaseVehicle.java:3667-3723 看 ClientServerMap／PassengerMap），MP 伺服器忙時串流
+-- 跟不上，45–65 km/h 一秒煞到 0（貓貓/clip-09、salomon/clip-13）。這不是卡住：不進停滯監督、不倒車（引擎照樣
+-- 煞住倒車，salomon 倒 4 秒只動 0.18m），HUD 顯示等待載入；連續等這麼久才交還。
+TUNE.AREA_WAIT_MAX_MS = 30000
+-- 離線過遠（0928a；FuFu/clip-01：讓位期間玩家開到路線外 98m，恢復時仍追舊路線）：車離路線超過 SNAP_MAX_M
+-- 持續這麼久（主 MOD 偏航重算冷卻 3s 之後）仍沒有新路線接上，以 RouteTooFar 交還，不越野追線。
+TUNE.ROUTE_FAR_MS = 4000
 -- RETURN 待命滑行核對的車身寬帶餘裕（同 Corridor FOOTPRINT_PAD＝原生 polyPlusRadius 0.15，
 -- BaseVehicle.java:4146；見 Drive.returnCoastClear）
 TUNE.RETURN_COAST_PAD = 0.15
@@ -618,6 +649,8 @@ local KEY_TRAFFIC = { -- 會車提示（一張表：主 chunk local 槽已在上
     pass = "UI_MinidoracatAutoDrive_TrafficPass",
     wait = "UI_MinidoracatAutoDrive_TrafficWait",
 }
+-- 前方區域遲遲未載入的交還理由（TUNE.AREA_WAIT_MAX_MS；掛在 Drive 表：主 chunk local 槽已滿）
+Drive.KEY_AREA_STOP = "UI_MinidoracatAutoDrive_AreaLoadStop"
 
 -- 診斷輸出（只在 getDebug() 為真時存在）。實機回報「按了關閉但車還在跑」時，唯一能
 -- 分辨「session 沒關」與「只是慣性滑行」的證據就是這幾行；跟線那行必須節流，每幀
@@ -743,7 +776,7 @@ TRIP.REASON = {
 -- 原因一律 unavailable，玩家主動關閉（reasonKey 為 nil）是 manual。
 TRIP.RELEASE = {
     [KEY_LOST] = "noroad", [KEY_ROUTE] = "noroad", [KEY_ROUTE_FAR] = "noroad",
-    [KEY_STUCK] = "failed", [KEY_UNSUPPORTED] = "failed",
+    [KEY_STUCK] = "failed", [KEY_UNSUPPORTED] = "failed", [Drive.KEY_AREA_STOP] = "failed",
 }
 -- playerNum → 開始／備路意圖（token=nil 時尚未 acquire；claim 前對車零控制輸出）
 TRIP.preps = {}
@@ -1371,6 +1404,7 @@ function Drive.hudState(playerNum)
             or s.recoverWhy ~= nil then
         key = "unstick"
     elseif s.currentBlocked or s.blocked then key = "blocked"
+    elseif s.areaWaitActive then key = "areawait" -- 前方區域未載入、引擎煞住等待（Drive.areaWait）
     elseif s.dodging then key = "dodging"
     elseif s.mode == "build" then key = "build"
     elseif s.lowFps then key = "lowfps" -- 幀率壓低可視距離而降速（Drive.updateLowFps）
@@ -1833,6 +1867,11 @@ local function startSession(playerObj, playerNum, stage)
         progressState = "disarmed",
         progressSince = 0,
         progressBrakedSince = 0, -- 停滯監督中連續受控煞停的起點（Drive.progressPauseMs）
+        areaWaitActive = false, areaWaitSince = 0, -- 前方區域未載入等待（Drive.areaWait）
+        escScale = 1, -- 車身 yaw 率限制（Drive.yawGovern；escH／escT／yawRate 首個視窗後才有）
+        startGuard = true, startGuardOkMs = 0, -- 起步近物限速（Drive.startGuardApply）
+        startGuardX = vehicle:getX(), startGuardY = vehicle:getY(),
+        routeFarSince = 0, -- 離線過遠計時（Drive.routeFarWatch）
         progressX = 0, progressY = 0, progressS = 0, progressH = 0,
         progressUntil = 0,
         resumeProgressPhase = nil,
@@ -2690,6 +2729,9 @@ end
 -- 接線起點就是車本身、終點是路網，中間是車本來就得開過去的地面，否決權照舊在世界掃掠。
 -- 車在路旁（投影落在第一段內）不接——那是 RETURN 的平滑併入；拖車不接（外拉轉角另有改寫）。
 -- 只在起步接：行駛中主 MOD 重算的路線起點就是車的投影點；中途 cutover 仍用原路線（不改既有語意）。
+-- 只接「整條路線離車最近的就是起點」且 ≤ SNAP_MAX_M（0928a）：主 MOD 同目標、偏航 ≤12 格一律回快取
+-- 同一條線（NavRoute.lua ensureRoute），玩家開著導航走了一段再按自駕時，起點早在車後——0.13.1 正式服
+-- 10 趟接出 164／7136m 的「回頭接線」（車離某段只有 0.4-6m），車被拉回起點重開一遍。
 -- 回傳 (剖面用路線, 接線長)；不接時原樣回傳同一個 table（cutover 仍以原 route identity 比對）。
 function Drive.approachRoute(route, vx, vy)
     local pts = route.pts
@@ -2701,6 +2743,21 @@ function Drive.approachRoute(route, vx, vy)
     ux, uy = ux / sl, uy / sl
     local rx, ry = vx - x1, vy - y1
     if rx * ux + ry * uy > -TUNE.APPROACH_BEHIND_M then return route, 0 end
+    local gap2 = rx * rx + ry * ry
+    if gap2 > TUNE.SNAP_MAX_M * TUNE.SNAP_MAX_M then return route, 0 end
+    for i = 3, #pts - 3, 2 do
+        local ax, ay = pts[i], pts[i + 1]
+        local bx, by = pts[i + 2] - ax, pts[i + 3] - ay
+        local qx, qy = vx - ax, vy - ay
+        local l2 = bx * bx + by * by
+        local t = 0
+        if l2 > 1e-12 then
+            t = (qx * bx + qy * by) / l2
+            if t < 0 then t = 0 elseif t > 1 then t = 1 end
+        end
+        qx, qy = qx - t * bx, qy - t * by
+        if qx * qx + qy * qy < gap2 then return route, 0 end
+    end
     local out = {}
     for k, v in pairs(route) do out[k] = v end
     local np = { vx, vy }
@@ -2714,7 +2771,7 @@ function Drive.approachRoute(route, vx, vy)
         for i = 1, #route.segWidth do sw[i + 1] = route.segWidth[i] end
         out.segSurface, out.segWidth = ss, sw
     end
-    local gap = sqrt(rx * rx + ry * ry)
+    local gap = sqrt(gap2)
     if finite(route.len) then out.len = route.len + gap end
     return out, gap
 end
@@ -3823,6 +3880,11 @@ function Drive.progressPauseMs(s, vehicle, now, speedKmh)
     -- 中斷過（離開 watch／讓位／停等）＝新一次煞停，寬限重新起算（review：沿用舊起點會讓
     -- 「煞停→解除→再煞停」的新寬限立即過期）
     if gap then s.progressBrakedSince = 0 end
+    -- 前方區域未載入（Drive.areaWait）：引擎自己煞住車，整段暫停、不吃 GRACE（有自己的 AREA_WAIT_MAX_MS）
+    if s.areaWaitActive then
+        if gap then return 0 end
+        return now - last
+    end
     local braked = now < s.forceBrakeUntil
         or (speedKmh < 3 and speedKmh > -3 and vehicle:isBraking() == true)
     if not braked then
@@ -3851,14 +3913,131 @@ function Drive.visAssistForce(s, speedKmh, mult)
             or not finite(speedKmh) or speedKmh < TUNE.VIS_ASSIST_MIN_KMH then
         return 0
     end
-    local over = speedKmh - s.visibilityCap - TUNE.VIS_ASSIST_TOL_KMH
+    -- 已承諾繞行且實速超過本幀套用的繞行帽（接近包絡／保持段／下一群停止包絡）：同一條中線外力，
+    -- 上限放到 DODGE_ASSIST_MAX（HOHOHO/clip-01：縫口前 1m 以 63 km/h 承諾 cap 18，只靠滑行到縫仍 56）
+    local cap, amax = s.visibilityCap, TUNE.VIS_ASSIST_MAX
+    if s.dodging and finite(s.dodgeApproachCap) and s.dodgeApproachCap >= 0 and s.dodgeApproachCap < cap then
+        cap, amax = s.dodgeApproachCap, TUNE.DODGE_ASSIST_MAX
+    end
+    local over = speedKmh - cap - TUNE.VIS_ASSIST_TOL_KMH
     if over <= 0 then return 0 end
     local a = over * TUNE.VIS_ASSIST_GAIN
-    if a > TUNE.VIS_ASSIST_MAX then a = TUNE.VIS_ASSIST_MAX end
+    if a > amax then a = amax end
     local mass = s.runtimeMass
     if not finite(mass) or mass < 1 then mass = MASS_FALLBACK end
     s.visAssistDecel = a
     return a * mass * (mult / MULT_NORM) / (0.01 * 48 / MULT_NORM)
+end
+
+-- 前方區域未載入的等待（TUNE.AREA_WAIT_MAX_MS）：只在要前進（GO／CRAWL 且目標 > 0）時問引擎。
+-- s.areaWaitActive 供進度監督暫停、停等預算排除、HUD；回 true＝已連續等滿上限且車停著（呼叫端交還）。
+function Drive.areaWait(s, vehicle, now, targetSpeed, speedKmh)
+    local active = false
+    if targetSpeed > 0 and (s.intentShadow == "GO" or s.intentShadow == "CRAWL") then
+        local ok, inv = pcall(jget, vehicle, "isInvalidChunkAhead")
+        active = ok and inv == true
+    end
+    if not active then
+        if s.areaWaitSince > 0 then
+            diagEvent(s, s.playerNum, "area", { phase = "end", ms = now - s.areaWaitSince })
+            s.areaWaitSince = 0
+        end
+        s.areaWaitActive = false
+        return false
+    end
+    if s.areaWaitSince == 0 then
+        s.areaWaitSince = now
+        diagEvent(s, s.playerNum, "area", { phase = "start", speed = speedKmh, s = s.lastSNow })
+    end
+    s.areaWaitActive = true
+    return now - s.areaWaitSince >= TUNE.AREA_WAIT_MAX_MS and speedKmh < 1 and speedKmh > -1
+end
+
+-- 車身 yaw 率限制（TUNE.ESC_*）：回收掉同向部分後的 steer；s.yawRate／s.escScale 進遙測。
+function Drive.yawGovern(s, steer, heading, speedKmh, now)
+    local refT = s.escT
+    if not finite(refT) or now < refT or now - refT > 250 then
+        s.escH, s.escT, s.yawRate = heading, now, nil
+    elseif now - refT >= TUNE.ESC_WINDOW_MS then
+        local d = heading - s.escH
+        if d > math.pi then d = d - 2 * math.pi elseif d < -math.pi then d = d + 2 * math.pi end
+        s.yawRate = d * 1000 / (now - refT)
+        s.escH, s.escT = heading, now
+    end
+    s.escScale = 1
+    local r = s.yawRate
+    if steer == 0 or not finite(r) or steer * r <= 0 then return steer end
+    local v = (speedKmh < 0 and -speedKmh or speedKmh) / 3.6
+    local rMin = s.vehicleProfile.rMin
+    if not finite(rMin) or rMin < 0.5 then rMin = 5 end
+    local allow = v / rMin
+    local lat = s.safeLat
+    if finite(lat) and lat > 0 and v > 0.1 and lat / v < allow then allow = lat / v end
+    allow = allow * TUNE.ESC_MARGIN + TUNE.ESC_FLOOR_RADS
+    local ar = r < 0 and -r or r
+    if ar <= allow then return steer end
+    local k = 2 - ar / allow
+    if k < 0 then k = 0 end
+    s.escScale = k
+    return steer * k
+end
+
+-- 起步近物限速（TUNE.START_GUARD_*）：回套用後的目標速度。前半車身淨距是掃描輪快照的值，
+-- 逐幀扣掉之後開過的直線距離（保守：當成正朝它開）。
+function Drive.startGuardApply(s, targetSpeed, now, vx, vy, latSigned)
+    if not s.startGuard then return targetSpeed end
+    local dx, dy = vx - s.startGuardX, vy - s.startGuardY
+    local maxM = TUNE.START_GUARD_MAX_M
+    if dx * dx + dy * dy >= maxM * maxM then
+        s.startGuard = false
+        return targetSpeed
+    end
+    local err = s.lastRouteErr
+    local dev = finite(latSigned) and (latSigned - expectedLaneOf(s)) or 99
+    if dev < 0 then dev = -dev end
+    if finite(err) and err <= TUNE.START_GUARD_ALIGN_RAD and dev <= TUNE.START_GUARD_LAT_M then
+        if s.startGuardOkMs == 0 then
+            s.startGuardOkMs = now
+        elseif now - s.startGuardOkMs >= TUNE.START_GUARD_HOLD_MS then
+            s.startGuard = false
+            return targetSpeed
+        end
+    else
+        s.startGuardOkMs = 0
+    end
+    local fc = s.frontClearance
+    if not finite(fc) or not finite(s.frontClearX) then return targetSpeed end
+    local mx, my = vx - s.frontClearX, vy - s.frontClearY
+    fc = fc - sqrt(mx * mx + my * my)
+    local coast = s.safeCoast
+    if not finite(coast) or coast < 0.5 then coast = 0.5 end
+    local cap = MDADDynamics.approachCapKmh(fc - TUNE.START_GUARD_MARGIN_M, 0, 0.5, coast)
+    if cap < targetSpeed then
+        s.lastCapReason = "start-near"
+        return cap
+    end
+    return targetSpeed
+end
+
+function Drive.armStartGuard(s, vx, vy)
+    s.startGuard, s.startGuardOkMs = true, 0
+    s.startGuardX, s.startGuardY = vx, vy
+end
+
+-- 離線過遠（TUNE.ROUTE_FAR_MS）：回 true＝持續過遠，呼叫端以 RouteTooFar 交還。第一次超過就
+-- 讓下一幀重新向主 MOD 取路（主 MOD 偏航超過 12 格會自己重算）。
+function Drive.routeFarWatch(s, now)
+    local lat = s.lastLatSigned
+    if not finite(lat) or (lat < TUNE.SNAP_MAX_M and lat > -TUNE.SNAP_MAX_M) then
+        s.routeFarSince = 0
+        return false
+    end
+    if s.routeFarSince == 0 then
+        s.routeFarSince = now
+        s.nextRouteMs = 0
+        return false
+    end
+    return now - s.routeFarSince >= TUNE.ROUTE_FAR_MS
 end
 
 -- Traction-keyed online observation. Every field lives in the session table;
@@ -4246,6 +4425,12 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     phys.forceBrakeThis = s.forceBrakeThis
     phys.brakeAssistForce = s.brakeAssistForce
     phys.frameMs = s.frameMs
+    -- 0928a：前方區域未載入等待／車身 yaw 率與限制比例／起步近物限速與前半車身淨距
+    if s.areaWaitActive then phys.areaWait = true end
+    phys.yawRate = s.yawRate
+    if finite(s.escScale) and s.escScale < 1 then phys.escScale = s.escScale end
+    if s.startGuard then phys.startGuard = true end
+    phys.frontClearance = s.frontClearance
     return phys
 end
 
@@ -4440,7 +4625,7 @@ local function footprintSnapshot(s, vehicle, playerNum, out, heading, vx, vy, la
 
     remapEpisodeBan(s)
 
-    local blocked, actual, planned, hitI, hitS, hitL, hitX, hitY, poseOnly
+    local blocked, actual, planned, hitI, hitS, hitL, hitX, hitY, poseOnly, front
     local bx, by = bodyCenter(s, vehicle, out)
     local idx = s.fstate.idx or 1
     local routeH = s.profile.segH[idx]
@@ -4467,7 +4652,7 @@ local function footprintSnapshot(s, vehicle, playerNum, out, heading, vx, vy, la
                 and (pad == nil or pad > SWEEP_PHYS_PAD) then
             pad = SWEEP_PHYS_PAD
         end
-        blocked, actual, planned, hitI, hitS, hitL, hitX, hitY, poseOnly =
+        blocked, actual, planned, hitI, hitS, hitL, hitX, hitY, poseOnly, front =
             MDADCorridor.currentFootprintHit(
                 sen.hardS, sen.hardL, sen.hardX, sen.hardY, sen.hardR, sen.hardN,
                 bx, by, heading, s.vehicleProfile.halfW, s.vehicleProfile.halfL,
@@ -4478,6 +4663,8 @@ local function footprintSnapshot(s, vehicle, playerNum, out, heading, vx, vy, la
             false, 99, 99, 0, 0, 0, 0, 0, false
     end
     s.actualClearance, s.plannedClearance = actual, planned
+    -- 前半車身最近硬物淨距＋量測時的車位（起步近物限速逐幀扣掉之後開過的距離；Drive.startGuardApply）
+    s.frontClearance, s.frontClearX, s.frontClearY = front, vx, vy
     s.footprintBlocked = blocked == true
     s.footprintPoseOnly = poseOnly == true
     if hitI and hitI > 0 then
@@ -4648,6 +4835,7 @@ local function startRecoveryAttempt(s, vehicle, playerNum, now, vx, vy, softFail
     -- 再吃掉（2026-09-04 st174,596-616：退 3／7／11m 三次，entry 恆 5.6＝c 到縫口，唯一的
     -- +2.0 縫 ratio 1.7 永遠拒 → StopStuck）。從退後的位置重規劃，A 由掃掠把關。
     s.stayHoldEndS = nil
+    Drive.armStartGuard(s, vx, vy) -- 倒完又是從障礙旁起步（TUNE.START_GUARD_*）
     -- 短帶＝本次退距上限（帶長−KEEP）；標準帶維持 UNSTICK_DIST（含 extra 的加長由 100ms
     -- 重探沿途把關，與舊制相同）。
     s.unstickTravelM = travel < REAR_TRAVEL_M and (travel - TUNE.REAR_KEEP_M) or 0
@@ -5538,6 +5726,22 @@ local function updateReturnSnapshot(s, vehicle, playerNum, latSigned)
     else
         holdUnsafeReturn(s, vehicle, laneStart, safe and "line" or "sweep")
     end
+end
+
+-- 調頭接手＝RETURN 結束（0928a；summer/clip-05：起步偏頭 123°、RETURN 進入後回線驗不過 hold，車在
+-- hold 中被甩到 159° → Follower rotating 成立。updateReturnSnapshot 在 rotate 持有時早退、stall 釋放
+-- 永遠跑不到，stepFollow 的 returnHold 煞停分支又排在調頭分支之前＝煞停不轉，14.5 秒後 StopStuck）。
+-- 同 dodge takeover：laneBias＝目標、帶心同步、冷卻 RETURN_STALL_BLOCK_MS；調頭完成後偏差仍大自然重進。
+function Drive.returnYieldRotate(s, playerNum, now)
+    if not s.returnActive or s.fstate.rotating ~= true then return end
+    endReturn(s)
+    s.returnUnloadedSince = 0
+    s.returnBlockUntil = now + TUNE.RETURN_STALL_BLOCK_MS
+    MDADFollower.clearOffset(s.fstate)
+    MDADFollower.setLaneBias(s.fstate, s.returnLaneTarget)
+    if s.sensor then s.sensor.scanBias = s.returnLaneTarget end
+    s.planMode = "return-rotate"
+    diagEvent(s, playerNum, "return", { phase = "release", why = "rotate", s = s.lastSNow })
 end
 
 -- 過渡段提早完成（理由見 CURVE_LEAD 常數註解）：剖面 a..d 內有折點且過渡
@@ -8270,6 +8474,8 @@ local function stepFollow(s, vehicle, playerNum, now)
                 s = s.lastSNow, l = latSigned, d = available,
             })
         end
+        -- 調頭接手＝RETURN 結束（見 Drive.returnYieldRotate；hold 中被甩成調頭姿態的互鎖）
+        if s.returnActive and s.fstate.rotating == true then Drive.returnYieldRotate(s, playerNum, now) end
 
         -- ---- M4 感知（sensor 缺席＝退回 M3 純跟線）----
         -- 排在 applySpeed 之前：速度檔位要 min 進本幀的 targetSpeed 才有效。
@@ -8625,11 +8831,16 @@ local function stepFollow(s, vehicle, playerNum, now)
         if laneEnvelopeValid then
             local currentS, lineS0, lineEnd =
                 s.lastSNow, s.laneCurveS0, s.laneCurveEnd
-            if not (finite(currentS) and finite(lineS0) and finite(lineEnd))
-                    or currentS > lineEnd + 1e-6 or lineEnd <= lineS0 then
+            if not (finite(currentS) and finite(lineS0) and finite(lineEnd)) then
                 laneEnvelopeValid, fullValid = false, false
                 s.invalid, s.stateError, s.dynamicsFault =
                     true, "lane-envelope", true
+            elseif currentS > lineEnd + 1e-6 or lineEnd <= lineS0 or s.verifyLineN < 2 then
+                -- 證明線已被越過或退化成一格（投影跳段／讓位後離線／未載入前緣貼臉）＝快照過期，不是
+                -- 內部錯誤：丟掉證明、這幀走未證明上限，下一輪掃描重建（0928a FuFu/clip-01：讓位恢復時
+                -- 離線 98m，下一幀判 lane-envelope 當成車輛不支援交還）。
+                laneEnvelopeValid = false
+                Drive.clearLaneProof(s)
             else
                 local offset = (currentS - lineS0) / MDADFollower.OV_STEP
                 if offset < 0 then offset = 0 end
@@ -8872,6 +9083,11 @@ local function stepFollow(s, vehicle, playerNum, now)
             end
         end
 
+        -- 起步近物限速（TUNE.START_GUARD_*；調頭／回線／繞行各有自己的淨距體系，不疊）
+        if s.startGuard and s.fstate.rotating ~= true and not s.returnActive and not s.dodging then
+            targetSpeed = Drive.startGuardApply(s, targetSpeed, now, vx, vy, latSigned)
+        end
+
         -- Final target is known before the supervisor. Planned blocked/followHold at target
         -- zero are legal waits; current-body contact remains a recovery demand.
         -- RETURN outranks planned blocked; current-body contact still outranks RETURN.
@@ -8951,6 +9167,10 @@ local function stepFollow(s, vehicle, playerNum, now)
         if s.returnCapacityFault and s.returnHold and avProgress < 1 then
             postAction = "return-fault"
         end
+        -- 前方區域未載入的引擎煞車（TUNE.AREA_WAIT_MAX_MS）：等待不是卡住；等滿上限才交還
+        if Drive.areaWait(s, vehicle, now, targetSpeed, speedKmh) and postAction == nil then
+            postAction = "area"
+        end
         -- legalWait 已由意圖接管（階段 2 主體 3）：intent == "WAIT" 就是合法停等，
         -- 不再用 targetSpeed<=0 當代理、也不再逐旗標各自為政。
         -- 停等預算（2026-09-01 階段 2 主體 1）：舊制 waitSince 每次「有一點動」
@@ -8987,7 +9207,7 @@ local function stepFollow(s, vehicle, playerNum, now)
         -- 由 waitProgressed 的航向收斂（rotating 分支）歸零，原地空轉才累計。
         if s.intentShadow == "WAIT" or s.intentShadow == "RECOVER"
                 or (s.intentShadow == "ROTATE" and avProgress < 1)
-                or (s.episodeActive and avProgress < 1
+                or (s.episodeActive and avProgress < 1 and not s.areaWaitActive
                     and (s.intentShadow == "CRAWL" or s.intentShadow == "STOP")) then
             if s.waitTickMs == 0 then
                 s.waitTickMs = now
@@ -9632,6 +9852,8 @@ local function stepFollow(s, vehicle, playerNum, now)
                     if assistForce == 0 and not coupled then
                         assistForce = -Drive.visAssistForce(s, speedKmh, mult)
                     end
+                    -- 車身 yaw 率限制（TUNE.ESC_*；耦力原地調頭不經此限）
+                    if not coupled then steer = Drive.yawGovern(s, steer or 0, heading, speedKmh, now) end
                     force, s.lastAssistForce = applySteering(
                         s, vehicle, fwd, fx, fy, steer or 0,
                         speedKmh, mult, coupled, assistForce)
@@ -9729,6 +9951,11 @@ local function stepFollow(s, vehicle, playerNum, now)
     -- 停等總預算耗盡是最高優先的終局（紅字交還玩家），蓋過任何恢復需求。
     if postAction == "wait" then
         Drive.stop(playerNum, KEY_STUCK)
+        return
+    end
+    -- 前方區域一直沒載入（TUNE.AREA_WAIT_MAX_MS）：專屬理由交還，玩家知道不是路被堵
+    if postAction == "area" then
+        Drive.stop(playerNum, Drive.KEY_AREA_STOP)
         return
     end
     -- RECOVER 單一 dispatch（階段 2 主體 2）：五個需求方只設 s.recoverWhy＋原因，
@@ -10408,6 +10635,7 @@ local function onPlayerUpdate(player)
         s.progressState = "disarmed"
         s.progressSince = 0
         s.resumeProgressPhase, s.resumeProgressUntil = nil, 0
+        s.routeFarSince = 0 -- 讓位前的離線計時不帶過來（Drive.routeFarWatch）
         haloGood(player, "UI_MinidoracatAutoDrive_Resume")
         if now - s.yieldSinceMs >= TUNE.YIELD_VOICE_MS then voice("resume", playerNum) end
         -- 讓位期間換過路線（cutover 保留 yield）：新 profile 還沒 build 完就先走 build
@@ -10427,6 +10655,11 @@ local function onPlayerUpdate(player)
         return
     end
 
+    -- 離線過遠（TUNE.ROUTE_FAR_MS）：主 MOD 沒接上新路線就交還，不越野追線
+    if Drive.routeFarWatch(s, now) then
+        Drive.stop(playerNum, KEY_ROUTE_FAR)
+        return
+    end
     -- now 是這一幀早先取的 getTimestampMs()（路線節流共用）：遙測節流不再多打一次
     stepFollow(s, vehicle, playerNum, now)
 end

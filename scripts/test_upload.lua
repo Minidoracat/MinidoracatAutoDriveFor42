@@ -334,6 +334,39 @@ D.stop(0, "arrive")
 pump(120000)
 checkEq(#indexRows("C"), before + 1, "repeat contacts inside 60s cooldown: one clip")
 
+-- 0928a 摘要補欄位：起步越野接線長、前方區域未載入等待（次數／毫秒）、自轉次數（|yaw|>3 上升緣、<1.5 才
+-- 重新武裝）、有未載入前緣的毫秒。違規證明：拿掉 spinArmed 重新武裝＝同一次自轉被數兩次（spin 3）紅。
+scenario("0928a summary: approach, area wait, spins, unloaded front")
+nowMs = nowMs + 3600000
+start()
+D.event(0, "route", { phase = "ready", approach = 12.34 })
+local function ph(extra)
+    local t = { capReason = "profile", frameMs = 16 }
+    for k, v in pairs(extra) do t[k] = v end
+    return { phys = t }
+end
+drive(1000, ph({ areaWait = true }))
+drive(600)
+drive(400, ph({ areaWait = true }))
+drive(400, ph({ yawRate = 4 }))
+drive(400, ph({ yawRate = 2 }))    -- 仍 >1.5：同一次自轉
+drive(400, ph({ yawRate = -5 }))   -- 還沒重新武裝：不算新的一次
+drive(400, ph({ yawRate = 0.5 }))  -- 重新武裝
+drive(400, ph({ yawRate = -3.5 })) -- 第二次
+drive(1000, ph({ unloadedS = 40 }))
+D.stop(0, "arrive")
+pump(5000)
+local sumAll = files[ROOT .. "summary-1.log"] or ""
+local lastSum = nil
+for line in string.gmatch(sumAll, "[^\n]+") do lastSum = line end
+lastSum = lastSum or ""
+check(string.find(lastSum, '"apr":12.3', 1, true) ~= nil, "summary keeps approach length")
+-- 第一筆取樣沒有前一筆可差分（dt 0）：第一段 5 筆只記 800ms，第二段 400ms
+check(string.find(lastSum, '"aw":2,"awMs":1200', 1, true) ~= nil,
+    "area wait: two episodes, 1200ms (got " .. tostring(string.match(lastSum, '"aw":[^,]*,"awMs":[^,]*')) .. ")")
+check(string.find(lastSum, '"spin":2,', 1, true) ~= nil, "spins counted on rising edge with re-arm")
+check(string.find(lastSum, '"unlMs":1000', 1, true) ~= nil, "unloaded-front time accumulated")
+
 scenario("server: sandbox off, bad chunks, out-of-order sequence")
 local rejected = 0
 local function rx(args) if not S.receive(player0, args) then rejected = rejected + 1 end end
