@@ -7149,9 +7149,21 @@ do
         "(sp3) 本輪套接近帽（dodgeDeferCap=" .. tostring(st.dodgeDeferCap) .. "）")
     driveReset(dveh)
     driveTick(dp, dveh)
-    checkTrue(drive.calls.forceBrake > 0 and drive.calls.maxRegSpeed == 0
-            and st.lastHardBrakeReason == "dodge-defer",
-        "(sp3) 已超過待承諾煞停包絡：實際煞車而非只把定速寫低")
+    -- 0928h：接近帽由不鎖輪的減速輔助去追（中線反向外力），連緊急煞車都停不到群起點才一秒鎖輪
+    --   （rc6 0068：38 km/h 越過 cap+3 就鎖輪煞到 0，下一輪就承諾了 15 km/h 的繞行）。
+    --   違規證明：Drive.deferHardKmh 原樣回接近帽＝鎖輪、下一條紅；輔助不看待承諾帽＝下一條紅。
+    checkTrue(drive.calls.forceBrake == 0 and st.lastHardBrakeReason == nil
+            and st.visAssistDecel > 0 and dveh._imp.x < 0
+            and drive.calls.maxRegSpeed <= st.dodgeDeferCap + 1,
+        "(sp3) 已超過待承諾煞停包絡：不鎖輪的減速輔助實際減速，定速也寫到接近帽以下（fb="
+        .. tostring(drive.calls.forceBrake) .. " hbr=" .. tostring(st.lastHardBrakeReason)
+        .. " vad=" .. tostring(st.visAssistDecel) .. " imp=" .. tostring(dveh._imp.x) .. "）")
+    dveh._speed = 90
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkTrue(drive.calls.forceBrake > 0 and st.lastHardBrakeReason == "dodge-defer",
+        "(sp3-hard) 90 km/h 連緊急煞車都停不到群起點：一秒鎖輪（hbr="
+        .. tostring(st.lastHardBrakeReason) .. "）")
     dveh._speed = 4
     driveReset(dveh)
     drive.scanRound()
@@ -14088,10 +14100,12 @@ local function scenarioPhaseE()
         drive.scanRound(true)
         driveReset(hotVeh)
         driveTick(dp, hotVeh)
+        -- 0928h：緊急煞車仍停得到群起點＝不鎖輪的減速輔助實際減速（見 (sp3)）
         checkTrue(not captured.blocked and not captured.dodging
-                and drive.calls.forceBrake > 0 and drive.calls.maxRegSpeed == 0
-                and captured.lastHardBrakeReason == "dodge-defer",
-            "(F) 車前硬物已知、出口尚未載入：40km/h接近時提前煞車，不等到接觸")
+                and drive.calls.forceBrake == 0 and captured.visAssistDecel > 0 and hotVeh._imp.x < 0
+                and drive.calls.maxRegSpeed <= captured.dodgeDeferCap + 1,
+            "(F) 車前硬物已知、出口尚未載入：40km/h接近時提前減速（輔助），不等到接觸（vad="
+            .. tostring(captured.visAssistDecel) .. " fb=" .. tostring(drive.calls.forceBrake) .. "）")
         captured.dodgeDeferCap, hotVeh._speed = 0, 0
         driveReset(hotVeh)
         driveTick(dp, hotVeh)

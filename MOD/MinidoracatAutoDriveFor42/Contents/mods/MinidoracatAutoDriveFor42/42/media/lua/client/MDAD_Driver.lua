@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0928g"
+Drive.REV = "0928h"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -3892,6 +3892,27 @@ local function tightenLimit(prior, lower, confidence, hi)
     return v
 end
 
+-- 待承諾接近帽的鎖輪門檻（0928h；rc6 0068：coverage 延後的接近帽每輪才重算一次、以 safeBrake
+-- 反推，斷油滑行跟不上，越過 cap+3 就一秒鎖輪——38 km/h 直接煞到 0，下一輪就承諾了 15 km/h 的
+-- 繞行）。接近帽本身照舊（regulator 目標＋Drive.visAssistForce 的不鎖輪減速輔助去追它）；
+-- 鎖輪只在連緊急煞車（0.3s 反應＋緊急界限，同 0925p 速度延後的緊急帳）都快停不到群起點時才用。
+-- 拖掛（輔助不施力）、群起點未知、感知未就緒、低於輔助啟用速度：退回接近帽本身（舊制）。
+function Drive.deferHardKmh(s, actualSpeed)
+    local soft = s.dodgeDeferCap
+    if s.tow or not finite(s.dodgeDeferS) or not (s.sensor and s.sensor.ready)
+            or not finite(actualSpeed) or actualSpeed < TUNE.VIS_ASSIST_MIN_KMH then
+        return soft
+    end
+    local decel = s.safeBrake
+    if not finite(decel) or decel <= 0 then return soft end
+    local aE = tightenLimit(math.min(decel * TUNE.EMERGENCY_BRAKE_GAIN, TUNE.EMERGENCY_BRAKE_MAX),
+        s.brakeLower, s.brakeConfidence, TUNE.EMERGENCY_BRAKE_MAX)
+    local hard = MDADDynamics.approachCapKmh(
+        s.dodgeDeferS - s.lastSNow - s.vehicleProfile.halfL, 0, 0.3, aE)
+    if not finite(hard) or hard < soft then return soft end
+    return hard
+end
+
 -- 可視上限兩帳（2026-09-27 正式服 222 段 visibility 一秒鎖輪定罪，四種機制都不是真障礙：
 -- 低幀率掃描輪逾期 77、區塊串流前緣停住 95、可負擔視距回縮 33、遊戲卡頓凍住 15）：
 -- ① 反應時間固定 VIS_TAU：車逼近前緣已由真實車位反映，快照年齡不再二次疊進反應時間。
@@ -4014,6 +4035,10 @@ function Drive.visAssistForce(s, speedKmh, mult)
     -- blocked 接近包絡（Drive.blockedApproachCap）：同一條中線外力、同一上限
     if finite(s.blockedApproachCap) and s.blockedApproachCap < cap then
         cap, amax = s.blockedApproachCap, TUNE.DODGE_ASSIST_MAX
+    end
+    -- 待承諾接近帽（dodge-defer）：同一條中線外力、同一上限；鎖輪門檻見 Drive.deferHardKmh
+    if not s.dodging and finite(s.dodgeDeferCap) and s.dodgeDeferCap >= 0 and s.dodgeDeferCap < cap then
+        cap, amax = s.dodgeDeferCap, TUNE.DODGE_ASSIST_MAX
     end
     local over = speedKmh - cap - TUNE.VIS_ASSIST_TOL_KMH
     if over <= 0 then return 0 end
@@ -9818,9 +9843,10 @@ local function stepFollow(s, vehicle, playerNum, now)
                 and (not curveBreached or s.visibilityHardKmh <= hardCurveCap) then
             hardBrakeReason = "visibility"
         end
-        -- 延後承諾仍有已知障礙：接近式使用煞車能力，就必須有對應煞車，不能只斷油。
+        -- 延後承諾仍有已知障礙：接近帽以 safeBrake 反推，必須有對應煞車、不能只斷油——先由
+        -- Drive.visAssistForce 不鎖輪地追接近帽，連緊急煞車都快停不到群起點才一秒鎖輪（Drive.deferHardKmh）。
         if not s.dodging and finite(s.dodgeDeferCap) and s.dodgeDeferCap >= 0
-                and actualSpeed > MDADDynamics.hardBreachKmh(s.dodgeDeferCap)
+                and actualSpeed > MDADDynamics.hardBreachKmh(Drive.deferHardKmh(s, actualSpeed))
                 and (not curveBreached or s.dodgeDeferCap <= hardCurveCap)
                 and (not visibilityBreached or s.dodgeDeferCap <= s.visibilityHardKmh) then
             hardBrakeReason = "dodge-defer"
