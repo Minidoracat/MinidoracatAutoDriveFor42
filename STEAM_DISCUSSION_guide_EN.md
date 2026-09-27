@@ -22,6 +22,22 @@ Settings: ESC → MOD Options or MiniMap gear → AutoDrive; server rules are sa
 [*] [b]Learn recipes three ways[/b]: read one Electronic Navigation Repair Manual (teaches both; found only in unlooted electronic, computer-book, library and magazine containers); research without consuming the item (GPS at Electrical 3 for itself; Autopilot at 3 for the GPS, at 6 for itself); or auto-learn (GPS at 6, Autopilot at 8; multiplayer grants them on login). Crafting needs Electrical 3 / 6.
 [/list]
 
+[h3]Where to find them: loot and crafting parts[/h3]
+[list]
+[*] [b]GPS Navigator[/b]: military electronics storage, electronics stores, engineer tool lockers, warehouse electronics crates
+[*] [b]Autopilot Module[/b] (rarer): military electronics storage, the radio factory, electronics store computer sections
+[*] [b]Repair manual[/b]: military electronics storage, electronics stores, bookstore/library computer shelves, magazine racks
+[/list]
+If the server disables loot spawns, crafting is the only way. Parts (plus a screwdriver):
+[list]
+[*] [b]GPS[/b]: Scrap Electronics ×4, Radio Receiver ×1, Electrical Wire ×1
+[*] [b]Autopilot[/b]: GPS Navigator ×1, Scrap Electronics ×6, Scanner Module ×1, Amplifier ×1, Electrical Wire ×2
+[*] [b]Scrap Electronics / Wire[/b]: dismantle electronics (radios, TVs, walkie-talkies…); wire is also common in tool containers
+[*] [b]Radio Receiver[/b]: dismantle radios, walkie-talkies, manpack or ham radios (higher Electrical = better odds), or loot military electronics storage, the radio factory, engineer lockers, cyber cafés, school labs
+[*] [b]Amplifier[/b]: always from dismantling a Speaker; sometimes from radios, walkie-talkies and TVs
+[*] [b]Scanner Module[/b]: [b]cannot be dismantled from anything — loot only[/b]; best in military electronics storage and the radio factory, then engineer lockers, cyber cafés, school labs; very rarely from foraging junk
+[/list]
+
 [h3]Trips[/h3]
 [list]
 [*] [b]Multi-target trips[/b]: open from the MiniMap magnifier or [b];[/b]. From search or map right-click: append, insert or go there first. Up to 16 targets; reorder and preview.

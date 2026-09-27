@@ -15,7 +15,7 @@ Keep every Minidoracat MiniMap series mod up to date and restart the game after 
 
 [h2]🚀 Quick start[/h2]
 [olist]
-[*] Get a [b]GPS Navigator[/b] and an [b]Autopilot Module[/b] (loot them, or craft with Electrical 3 / 6)
+[*] Get a [b]GPS Navigator[/b] and an [b]Autopilot Module[/b] (loot or craft with Electrical 3 / 6 — where to find them and their parts: see the full guide below)
 [*] Standing beside the vehicle, install them via [b]right-click or Vehicle Mechanics[/b] (screwdriver, vehicle battery and Electrical 1 required). The GPS also works from your inventory with a battery
 [*] Open the world map and pick a destination to plan a route
 [*] Sit in the driver's seat and press [b]Engage Autodrive[/b] on the panel above the dashboard. Touch the steering or throttle at any time to take over
