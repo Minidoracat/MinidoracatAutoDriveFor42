@@ -209,11 +209,14 @@ local function trigger(u, now, kind)
     cap = { kind = kind, pri = pri, t0 = now, x = u.lastX, y = u.lastY,
         lines = {}, n = 0, chars = 0, full = false }
     -- ring 由舊到新：找第一筆 ≥ t0-PRE_MS
+    -- Kahlua 的 % 是截斷式（KahluaThread.java:1060-1066）：ring 繞回後 idx 為負，(idx+k-1)%N 會得負數
+    -- 索引、讀到 nil——舊制 PZ 內只收到繞回點之後的樣本（事前窗平均少一半；標準 Lua 的測試照綠）。
+    -- 先加 N 讓被除數恆非負（idx ≥ -N）。
     local from = now - PRE_MS
     local idx = u.ringHead - u.ringN
     local k = 1
     while k <= u.ringN do
-        local j = (idx + k - 1) % RING_N + 1
+        local j = (idx + k - 1 + RING_N) % RING_N + 1
         local ts = u.ringTs[j]
         if ts and ts >= from then
             local line = u.ring[j]
@@ -282,7 +285,7 @@ local function finishClip(u, now)
     local evBytes = 0
     local k = u.evN
     while k >= 1 do
-        local j = (u.evHead - u.evN + k - 1) % EVLOG_N + 1
+        local j = (u.evHead - u.evN + k - 1 + EVLOG_N) % EVLOG_N + 1 -- 同上：負索引＝nil 比較直接拋錯、整段上傳被丟
         if u.evTs[j] < cap.wStart then
             local len = #u.ev[j] + 1
             if evBytes + len > budget then startK = k + 1; break end
@@ -292,7 +295,7 @@ local function finishClip(u, now)
     end
     k = startK
     while k <= u.evN do
-        local j = (u.evHead - u.evN + k - 1) % EVLOG_N + 1
+        local j = (u.evHead - u.evN + k - 1 + EVLOG_N) % EVLOG_N + 1
         if u.evTs[j] < cap.wStart and u.ev[j] ~= u.routeLine then
             n = n + 1; parts[n] = u.ev[j]
         end

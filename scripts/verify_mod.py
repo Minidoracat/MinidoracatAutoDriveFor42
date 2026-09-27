@@ -25,6 +25,8 @@
                            （語法合法、標準 Lua 有這些函式），只能靜態掃描
   6. table.sort 禁用      — Kahlua 的 sort 是遞迴 quicksort（coroutine 堆疊上限 3000），
                            已排序輸入退化 O(n) 深度、數百筆即溢位；一律用迭代 merge sort
+ 5c. Kahlua 截斷式 %      — OP_MOD 向 0 截斷，負被除數得負餘數；ring 繞回索引在 PZ 內變 nil。
+                           含減法的括號被除數要補 +N 或行尾註記 kahlua-mod-ok（標準 Lua 測試攔不住）
   7. MOD/ 樹雜物          — .omc/.claude/.gitnexus 目錄與 .gitkeep 檔；Workshop 整包上傳不看 .gitignore
  7b. mod.info 多值語法     — require/incompatible/load order 只接受逗號且 key 緊貼 =
   8. 佔位符殘留            — {{TOKEN}} 漏替換
@@ -759,6 +761,42 @@ fail("Kahlua 禁用全域（next/assert/xpcall）", hits_forbidden) if hits_forb
     else ok("Kahlua 禁用全域（next/assert/xpcall）")
 fail("無 table.sort（用迭代 sortSafe，見 AGENTS.md）", hits_sort) if hits_sort \
     else ok("無 table.sort")
+
+# ---- 5c. Kahlua 截斷式 % ----
+# KahluaThread.primitiveMath 的 OP_MOD 用 (int)(v1/v2) 向 0 截斷（KahluaThread.java:1060-1066）：
+# 被除數為負時結果也是負的，標準 Lua（floor）才恆非負。ring 繞回後的索引 (head - n + k - 1) % N
+# 在 PZ 內會得負數索引＝nil（0928b 實例：上傳的事前窗少一半、事件環繞回後 nil 比較直接拋錯），
+# 跑在標準 Lua 的測試永遠綠。掃「(含減法的括號) % 名稱」：括號內沒有「+ 名稱」補償、行尾也沒有
+# `kahlua-mod-ok: <為何非負>` 註記就 FAIL。
+def _kmod_groups(code):
+    for mm in re.finditer(r"\)\s*%\s*([A-Za-z_][\w.]*|\d+)", code):
+        depth, i = 0, mm.start()
+        while i >= 0:
+            if code[i] == ")":
+                depth += 1
+            elif code[i] == "(":
+                depth -= 1
+                if depth == 0:
+                    break
+            i -= 1
+        if i >= 0:
+            yield code[i + 1:mm.start()], mm.group(1)
+
+
+hits_kmod = []
+for f in LUA_FILES:
+    rel = os.path.relpath(f, REPO)
+    with open(f, encoding="utf-8") as fh:
+        for lineno, line in enumerate(fh, 1):
+            if "kahlua-mod-ok" in line:
+                continue
+            code = re.sub(r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'', '""', line.split("--", 1)[0])
+            for inner, mod in _kmod_groups(code):
+                if re.search(r"[\w)\]]\s*-\s*[\w(]", inner) \
+                        and not re.search(r"\+\s*" + re.escape(mod) + r"\b", inner):
+                    hits_kmod.append(f"{rel}:{lineno} ({inner.strip()}) % {mod}")
+fail("Kahlua 截斷式 %（含減法的被除數要補 +N 或註記 kahlua-mod-ok）", hits_kmod) if hits_kmod \
+    else ok("Kahlua 截斷式 %")
 
 # ---- 7. MOD/ 樹雜物 ----
 # .gitkeep 也算雜物：引擎會把 MOD 樹內任何檔案列舉成 mod 資源（console 出現

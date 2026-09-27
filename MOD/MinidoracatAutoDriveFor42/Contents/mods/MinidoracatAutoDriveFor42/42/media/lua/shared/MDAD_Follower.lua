@@ -700,7 +700,7 @@ function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile, style)
             ACCEL_NOMINAL, style.brake, style.coast, style.lat
         segStopCoast[i] = style.coast
     end
-    local rangeBlockCount = ((n - 2) - (n - 2) % RANGE_BLOCK) / RANGE_BLOCK + 1
+    local rangeBlockCount = ((n - 2) - (n - 2) % RANGE_BLOCK) / RANGE_BLOCK + 1 -- kahlua-mod-ok: n >= 2
     local rangeBase = 1
     while rangeBase < rangeBlockCount do rangeBase = rangeBase * 2 end
 
@@ -1833,7 +1833,7 @@ end
 -- allocation-free and independent of total tiny-segment count.
 local function rangeQuery(profile, first, last)
     local brake, lat, coast = RANGE_INF, RANGE_INF, RANGE_INF
-    while first <= last and (first - 1) % RANGE_BLOCK ~= 0 do
+    while first <= last and (first - 1) % RANGE_BLOCK ~= 0 do -- kahlua-mod-ok: first >= 1
         local b, l, c = profile.segBrake[first],
             profile.segLat[first], profile.segCoast[first]
         if b < brake then brake = b end

@@ -7116,6 +7116,12 @@ do
     local st = MDAD.Drive.debugSession(0)
     checkTrue(st.dodging ~= true, "(al) 車頭偏 30°：貼縫不 commit（dodging=" .. tostring(st.dodging) .. "）")
     checkTrue(st.blocked ~= true, "(al) 延後不是 blocked")
+    -- (al-cap) 0928b E2E rc1 0008：延後期間照縫口降速（接近帽＝Drive.alignDeferCap），出口速不低於
+    --   MIN_EXEC（停下就擺不正）。違規證明：延後不設接近帽＝紅。
+    checkTrue(MDADDynamics.finite(st.dodgeDeferCap) and st.dodgeDeferCap >= MDADDynamics.MIN_EXEC_KMH,
+        "(al-cap) 對正延後有縫口接近帽且不低於 MIN_EXEC（cap=" .. tostring(st.dodgeDeferCap) .. "）")
+    checkNear(MDAD.Drive.alignDeferCap({ safeBrake = 4, lastSNow = 18, vehicleProfile = { halfL = 2 } }, 20, 5),
+        MDADDynamics.MIN_EXEC_KMH, 1e-9, "(al-cap) 已到縫口：承諾帽 5 也只壓到 MIN_EXEC（停下就擺不正）")
     setHeading(dveh, 0.05)
     driveReset(dveh)
     drive.scanRound()
@@ -15224,6 +15230,25 @@ scenario("調頭＋blocked：遠處不倒車、近處才退、額度用盡不空
         "(u4) 額度用盡後 20 幀不再逐幀 attempt-limit（事件增量實得 " .. tostring(evs.n - n0) .. "）")
     checkTrue(MDAD.Drive.isActive(0), "(u4) 額度用盡仍在停等預算內（15s 保險另計）")
     clearWorld(4)
+    -- (rot-stall) 0928b E2E replay：車頭朝路線反方向、車頭前 2m 有牆（走廊沿路線往車尾方向掃、看不到），
+    --   車周探測被擋＝走大弧前進，但車根本動不了。連續 ROTATE_STALL_MS 不動＝倒車創造空間。
+    --   違規證明：Drive.rotateStall 恆 false＝原地乾等到停等預算紅。
+    MDAD.Drive.stop(0, nil)
+    for _, y in ipairs({ -1, 0, 1, 2 }) do drive.putSolid(-3, y, "rot_front_" .. y) end
+    st = reversedStart("(rot-stall)")
+    checkTrue(st.fstate.rotating == true and st.rotProbeClear == false,
+        "(rot-stall) 前置：調頭姿態、車周探測被擋（rotProbeClear=" .. tostring(st.rotProbeClear) .. "）")
+    checkEq(st.mode, "follow", "(rot-stall) 剛開始不倒車")
+    nowMs = nowMs + 1500
+    driveTick(dp, dveh)
+    checkEq(st.mode, "follow", "(rot-stall) 1.5 秒內不倒車")
+    nowMs = nowMs + 1500
+    driveTick(dp, dveh)
+    driveTick(dp, dveh)
+    checkEq(st.mode, "unstick", "(rot-stall) 走大弧卻 3 秒不動：倒車創造空間（mode 實得 " .. tostring(st.mode) .. "）")
+    checkEq((evs["progress:recover"] or {}).why, "rotate-stall", "(rot-stall) 恢復理由 rotate-stall")
+    for _, y in ipairs({ -1, 0, 1, 2 }) do drive.clearCell(-3, y) end
+    MDAD.Drive.stop(0, nil)
     MDAD.Drive.stop(0, nil)
     MDAD.HUD.telemetryEnabled = savedTelemetry
     MDADDiagnostics.start, MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.stop =
@@ -17015,6 +17040,24 @@ function drive.scenarioApproach()
     st = MDAD.Drive.debugSession(0)
     checkTrue(st ~= nil and st.approachM == 0,
         "(apr-far) 超過 20m 不接越野線（approachM=" .. tostring(st and st.approachM) .. "）")
+    -- (apr-perp) 0928b E2E replay Annilex：車在路線中段旁 15m 草地（超過 RETURN_MAX_DEV 12、未超過 SNAP_MAX_M 20）：
+    --   把「車位→最近點」接成剖面開頭、最近點之前捨去，感知／繞行才看得到中間的障礙。
+    --   違規證明：拿掉 far 分支＝不接（approachM 0）紅。
+    checkTrue(arm(40, -15, math.pi / 2), "(apr-perp) 路線中段旁 15m 啟動")
+    for _ = 1, 4 do driveTick(dp, dveh) end
+    st = MDAD.Drive.debugSession(0)
+    checkTrue(st ~= nil and math.abs(st.approachM - 15) < 1e-6,
+        "(apr-perp) 接上車位→最近點的接線（approachM=" .. tostring(st and st.approachM) .. "）")
+    checkTrue(st ~= nil and st.profileRoute.pts[1] == 40 and st.profileRoute.pts[2] == -15
+        and st.profileRoute.pts[3] == 40 and st.profileRoute.pts[4] == 0 and st.profileRoute.pts[5] == 80,
+        "(apr-perp) 剖面＝車位→(40,0)→(80,0)，最近點之前捨去")
+    checkTrue(st ~= nil and #st.profileRoute.segWidth == #st.profileRoute.pts / 2 - 1,
+        "(apr-perp) 段屬性數量對齊點數")
+    -- (apr-near) 同樣在中段旁但只 8m（RETURN 管得到）：不接
+    checkTrue(arm(40, -8, math.pi / 2), "(apr-near) 路線中段旁 8m 啟動")
+    for _ = 1, 4 do driveTick(dp, dveh) end
+    st = MDAD.Drive.debugSession(0)
+    checkTrue(st ~= nil and st.approachM == 0, "(apr-near) 12m 內交給 RETURN：不接（approachM=" .. tostring(st and st.approachM) .. "）")
 
     MDAD.Drive.stop(0, nil)
     drive.frameMs(wasMs)
@@ -17193,6 +17236,59 @@ function drive.scenario0928()
     da.dodging, da.dodgeApproachCap = true, 70
     Dr.visAssistForce(da, 63.5, 0.8)
     checkEq(da.visAssistDecel, 0, "(dassist) 繞行帽高於實速：不補")
+
+    -- (blk-app) 0928b E2E rc1 0005：重車 70 km/h 在 68m 外判 blocked，舊制只把目標壓 20 滑行、
+    --   到停止線仍 34 km/h、撞前車。現制：以規劃煞車能力反推「停止線降到 20」的包絡，
+    --   略超＝中線減速輔助、超過硬煞門檻＝一秒鎖輪。違規證明：包絡恆 nil／輔助不認包絡／不硬煞各紅。
+    local bq = { blockS = 100, lastSNow = 30, blockHitX = 100, blockHitY = 0, safeBrake = 4.6,
+        cornerLatch = false }
+    local bcap = Dr.blockedApproachCap(bq, 30, 0)
+    checkNear(bcap, MDADDynamics.approachCapKmh(70 - T.BLOCK_STOP_DIST, T.BLOCK_APPROACH_KMH, 0.5,
+        4.6 * T.APPROACH_BRAKE_FRAC), 1e-9, "(blk-app) 包絡＝在停止線降到 BLOCK_APPROACH_KMH（規劃煞車）")
+    local ba = { tow = false, sensor = { ready = true }, visibilityCap = 90, dodging = false,
+        blockedApproachCap = bcap, runtimeMass = 3000 }
+    Dr.visAssistForce(ba, bcap + 4, 0.8)
+    checkTrue(ba.visAssistDecel > 0, "(blk-app) 超過包絡：中線減速輔助（實得 " .. tostring(ba.visAssistDecel) .. "）")
+    ba.blockedApproachCap = nil
+    Dr.visAssistForce(ba, bcap + 4, 0.8)
+    checkEq(ba.visAssistDecel, 0, "(blk-app) 沒有 blocked 包絡：可視帽以下不補")
+    MDAD.Drive.stop(0, nil)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 90,
+        ObstaclePolicy = 1, RightLaneBias = 0 })
+    drive.fillWorld(-10, 90, -9, 9)
+    for y = -9, 9 do drive.putSolid(50, y, "blk_app_wall_" .. y) end
+    checkTrue(armDrive(), "(blk-app) 啟動（前方 50m 整排牆）")
+    setHeading(dveh, 0)
+    st = Dr.debugSession(0)
+    for _ = 1, 3 do drive.scanRound(true) end
+    checkTrue(st.blocked == true, "(blk-app) 前置：判 blocked")
+    local capNow = Dr.blockedApproachCap(st, dveh._x, dveh._y)
+    dveh._speed = capNow + 1.5
+    st.forceBrakeUntil = 0
+    ticks(1, 20)
+    checkTrue(MDADDynamics.finite(st.blockedApproachCap) and st.visAssistDecel > 0 and st.lastHardBrakeReason == nil,
+        "(blk-app) 略超包絡：減速輔助、不鎖輪（cap=" .. tostring(st.blockedApproachCap) .. " vad="
+        .. tostring(st.visAssistDecel) .. " hbr=" .. tostring(st.lastHardBrakeReason) .. "）")
+    dveh._speed = capNow + 12
+    ticks(1, 20)
+    checkEq(st.lastHardBrakeReason, "blocked-approach", "(blk-app) 遠超包絡：一秒鎖輪")
+    -- (anchor-base) 0928b E2E rc1 0008：錨用 Corridor.plan 同一組逐點基準（s.hardBase）。
+    --   近點 l=-0.9：原始 laneBias 0.84 下不擋線、彎道連續落點 0 下擋線；遠點 60m 在原始 lane 上。
+    --   舊制挑遠點（blockedNear 永遠不近、車撞近點）。違規證明：hb 恆 nil＝錨落遠點紅。
+    local asen = { hardN = 3, hardS = { 5, 20, 60 }, hardL = { -0.5, -0.9, 0.84 }, hardR = { 0.35, 0.35, 0.35 },
+        hardX = { -5, 12, 50 }, hardY = { 0.5, -0.9, 0.84 }, stamp = 77 }
+    local as = { needHalf = 1.1, hardBase = { 0, 0, 0.84 }, hardBaseStamp = 77, fstate = { laneBias = 0.84 } }
+    local aveh = { getX = function() return 10 end, getY = function() return 0 end }
+    local abs = Dr.debugResolveBlockAnchor(as, asen, aveh, true, 8)
+    checkTrue(as.blockHitX == 12 and abs == 20,
+        "(anchor-base) 擋線用彎道連續落點：錨＝車前近點（x=" .. tostring(as.blockHitX) .. " s=" .. tostring(abs) .. "）")
+    as.hardBaseStamp, as.blockHitX = 76, nil
+    Dr.debugResolveBlockAnchor(as, asen, aveh, true, 8)
+    checkEq(as.blockHitX, 50, "(anchor-base) 逐點基準不是本快照的：退回原始 laneBias")
+    for y = -9, 9 do drive.clearCell(50, y) end
+    MDAD.Drive.stop(0, nil)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40,
+        ObstaclePolicy = 1, RightLaneBias = 0 })
 
     -- (proof-stale) 證明線被越過
     MDAD.Drive.stop(0, nil)
