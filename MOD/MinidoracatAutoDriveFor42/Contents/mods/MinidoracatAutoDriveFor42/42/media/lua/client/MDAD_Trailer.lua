@@ -426,6 +426,7 @@ function T.guard(s, vehicle, now, speedKmh)
     s.towNextMs = now + T.GUARD_MS
     local cap = nil
     local phi, up = T.state(vehicle, tow)
+    s.towPhi, s.towUp = phi, up -- telemetry tph／tup：脫掛前的折角與傾斜（TrailerLost 定罪用）
     if phi and (abs(phi) > T.HITCH_SLOW or (finite(up) and up < T.TILT_SLOW)) then cap = T.CRAWL_KMH end
     local shaped = T.shape(s.route, tow)
     local vx, vy = vehicle:getX(), vehicle:getY()

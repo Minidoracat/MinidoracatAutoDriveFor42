@@ -439,9 +439,9 @@ for i = 1, oversize do
 end
 local hn, _, _, hv, hr = D.buildFilletPath(
     hugePts, hugeSurface, hugeWidth, 1, 3, {}, {}, {}, {}, {}, {}, {})
-eq(hn, 0, "oversize source never enters synchronous fillet expansion")
-eq(hv, false, "oversize fillet falls back")
-eq(hr, "capacity", "oversize fillet reason is deterministic")
+eq(hn, oversize, "source 超限仍保留完整路線")
+eq(hv, true, "source 超限的原始尾段仍有 band 證明")
+eq(hr, "capacity", "source 超限明確匯出容量降階")
 check(fb3 >= 1 and n3 == 3, "U-turn/急折點低速 fallback")
 
 -- 輸出預算部分退化（2026-09-02 玩家 telemetry s001-s010：7.4 km 路線預測 824 點
@@ -815,6 +815,63 @@ do
         end
     end
     check(visMono, "五個檔位的可視帽嚴格遞增（設定調高必須換得到速度）")
+end
+
+scenario("visibilityHoldCapKmh：前緣停滯保持帽（2026-09-27 正式服 visibility 一秒鎖輪）")
+do
+    local tau, aH, halfL = 0.5, 11.5, 2.4
+    -- 手算的數值積分：從 v0 開始前緣不動、只滑行 hold 秒，結束時「實速 ≤ 硬煞帳」（硬煞帳即
+    -- 上面已驗過可逆的 visibilityCapKmh）。hold 帽必須是滿足這件事的最大 v0。
+    local function survives(v0kmh, ahead, coast, hold)
+        local v, d, t, dt = v0kmh / 3.6, ahead, 0, 0.001
+        while t < hold and v > 0 do
+            local nv = math.max(0, v - coast * dt)
+            d = d - (v + nv) * 0.5 * dt
+            v, t = nv, t + dt
+        end
+        if v <= 0 then return d >= halfL + 2 - 1e-3 end
+        return v * 3.6 <= D.visibilityCapKmh(d, tau, aH, halfL) + 0.05
+    end
+    local cases = { { 70, 3.0, 1.5 }, { 50, 3.0, 1.5 }, { 35, 2.5, 0.6 }, { 90, 4.0, 1.2 }, { 24, 0, 0.8 } }
+    for _, c in ipairs(cases) do
+        local ahead, coast, hold = c[1], c[2], c[3]
+        local cap = D.visibilityHoldCapKmh(ahead, tau, aH, halfL, coast, hold)
+        check(cap > 0 and cap < D.visibilityCapKmh(ahead, tau, aH, halfL),
+            string.format("前緣 %dm、滑行 %.1f、保持 %.1fs：帽低於硬煞帳且可開（%.2f）", ahead, coast, hold, cap))
+        check(survives(cap, ahead, coast, hold),
+            string.format("以帽速開、前緣停住 %.1fs 後仍不越過硬煞帳（%dm）", hold, ahead))
+        check(not survives(cap + 1.5, ahead, coast, hold),
+            string.format("帽＋1.5 km/h 就會越線＝帽是最大值不是隨便保守（%dm）", ahead))
+    end
+    near(D.visibilityHoldCapKmh(60, tau, aH, halfL, 3, 0), D.visibilityCapKmh(60, tau, aH, halfL), 1e-9,
+        "保持 0 秒退化成硬煞帳")
+    local mono, coastMono = true, true
+    local prev, prevC
+    for i = 0, 20 do
+        local v = D.visibilityHoldCapKmh(60, tau, aH, halfL, 3, i * 0.1)
+        if prev and v > prev + 1e-6 then mono = false end
+        prev = v
+        local vc = D.visibilityHoldCapKmh(60, tau, aH, halfL, i * 0.25, 1.2)
+        if prevC and vc < prevC - 1e-6 then coastMono = false end
+        prevC = vc
+    end
+    check(mono, "保持越久帽越低（單調）")
+    check(coastMono, "滑行能力越強帽越高（單調）")
+    eq(D.visibilityHoldCapKmh(0 / 0, tau, aH, halfL, 3, 1), 0, "NaN 前緣距離回 0（fail-closed）")
+    eq(D.visibilityHoldCapKmh(60, tau, 0, halfL, 3, 1), 0, "無煞車能力回 0")
+
+    -- perceptionEffective 的回縮下限（Sensor 每輪傳上一輪可負擔值減回縮上限）
+    local F, N = 56 / 14, 2
+    local e, a = D.perceptionEffective(200, 60, F, N)
+    near(a, 27, 1e-9, "60ms 幀的可負擔視距 27m（2＋4×375/60）")
+    near(e, 27, 1e-9, "請求 200 時實際視距＝可負擔")
+    e, a = D.perceptionEffective(200, 60, F, N, 73)
+    near(a, 73, 1e-9, "上一輪 77m 減回縮上限 4m：本輪可負擔不低於 73m")
+    near(e, 73, 1e-9, "實際視距跟著下限")
+    e = D.perceptionEffective(48, 60, F, N, 73)
+    near(e, 48, 1e-9, "下限高於請求時仍只給請求（下限不放寬請求）")
+    e = D.perceptionEffective(200, 8, F, N, 30)
+    near(e, 189.5, 1e-9, "可負擔本來就高於下限時不受影響（2＋4×375/8＝189.5）")
 end
 
 print("  " .. (assertions - base) .. " 項斷言")

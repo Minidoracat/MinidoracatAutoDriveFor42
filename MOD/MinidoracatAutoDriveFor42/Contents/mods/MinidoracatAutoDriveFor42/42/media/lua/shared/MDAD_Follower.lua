@@ -63,8 +63,8 @@
 -- ---------------------------------------------------------------------------
 -- 控制律（為什麼是這些式子）
 -- ---------------------------------------------------------------------------
--- * 幾何：折線＋累積弧長 s。投影只在 [idx-SEARCH_BACK, idx+SEARCH_FWD] 的窗口內找，
---   全域最近點搜尋在自我交叉的路線（回頭路、繞圈）上會把進度瞬移到另一段。
+-- * 幾何：折線＋累積弧長 s。投影以局部段窗搜尋，再由前幀位置／實際位移限制前向交接；
+--   高速碎段依可達弧長擴窗。全域最近點只供首次補定位，避免回頭路／繞圈瞬移到另一臂。
 -- * 前視（pure pursuit）：lookahead ＝ lookScale*(6 + |speed|*0.12)，夾在
 --   [6*lookScale,18*lookScale]；非 adaptive profile 的 lookScale=1。急彎再
 --   min(look, 0.75/κ)、下限 4.5m（2026-09-02：治切內又不放大增益到蛇行）。
@@ -85,8 +85,8 @@
 --   直接飽和轉向＋爬行速度，並凍結積分項。
 --
 -- 效能守則（Kahlua）：庫函式都是 JavaFunction，每次呼叫都跨 Lua↔Java 邊界。
--- 因此全部庫函式在載入期取成 local upvalue；夾限一律用純 Lua 比較，不呼叫
--- math.max/min；control() 每幀只剩 cos/sin/atan2 三次跨界，sqrt 全在建表期。
+-- 因此全部庫函式在載入期取成 local upvalue；夾限一律用純 Lua 比較。
+-- math 函式只做純量運算；路線幾何留在建表期，control 的位移與曲率運算零 table 配置。
 
 if not MDADDynamics then require "MDAD_Dynamics" end
 
@@ -558,9 +558,8 @@ local function geometryStep(p, i)
             if not isFinite(rMin) or rMin < 0 then rMin = 0 end
             local geom = sqrt(aLat * rMin)
             local segKind = p.segKind
-            -- 只認「角度合格卻建不出弧」的 fallback；整條因 capacity 退回原始折線（filletReason）
-            -- 時每段都標 FALLBACK 但幾何無事，走 pure pursuit 式即可
-            local fallback = p.filletAdaptive and p.filletReason == nil
+            -- 0927 正式服 capacity 路線仍有真折點；容量未建弧不等於幾何可高速通行。
+            local fallback = p.filletAdaptive
                 and (segKind[m - 1] == MDADDynamics.SEG_FALLBACK
                     or segKind[m] == MDADDynamics.SEG_FALLBACK)
             if not fallback then
@@ -638,10 +637,8 @@ function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile, style)
 
     -- Canonicalize consecutive duplicate points before any fillet math. The
     -- original route remains untouched and source-map entries retain raw segments.
-    local buildPts, buildSurface, buildWidth = pts, sourceSurface, sourceWidth
-    local rawSourceMap
-    if sourceN <= MDADDynamics.FILLET_SOURCE_MAX then
-        buildPts, buildSurface, buildWidth, rawSourceMap = {}, {}, {}, {}
+    local buildPts, buildSurface, buildWidth, rawSourceMap = {}, {}, {}, {}
+    do
         buildPts[1], buildPts[2] = pts[1], pts[2]
         local cn, lastX, lastY = 1, pts[1], pts[2]
         for i = 1, sourceN - 1 do
@@ -668,30 +665,25 @@ function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile, style)
         and isFinite(vehicleProfile.wheelbase) and vehicleProfile.wheelbase > 0
         and isFinite(vehicleProfile.delta0Safe) and isFinite(vehicleProfile.deltaVSafe)
         and isFinite(vehicleProfile.maxSpeed) and vehicleProfile.maxSpeed > 0
-    if filletAdaptive and sourceN <= MDADDynamics.FILLET_SOURCE_MAX then
+    if filletAdaptive then
         n, filletN, filletFallbackN, filletBandValid, filletReason =
             MDADDynamics.buildFilletPath(
                 buildPts, buildSurface, buildWidth, vehicleProfile.halfW, vehicleProfile.rMin,
                 pathPts, segSurface, segWidth, segKind, segSourceA, segSourceB, filletRadius)
     end
-    if n >= 2 and rawSourceMap then
+    if n >= 2 then
         for i = 1, n - 1 do
             segSourceA[i] = rawSourceMap[segSourceA[i]] or segSourceA[i]
             segSourceB[i] = rawSourceMap[segSourceB[i]] or segSourceB[i]
         end
     end
     if n < 2 then
-        -- 原始折線退路：點全在 raw 中心線上、segSource 直接對應 raw 段，band
-        -- 證明逐點真做仍成立（source 超限路徑本來就是 true；buildFilletPath 的
-        -- false 回傳是「弧沒建」不是「帶無效」，兩條退路統一）。
+        -- 未啟用 adaptive fillet 時保留原折線；source-map 直對 raw 段，band 語意不變。
         n, filletN, filletBandValid = buildN, 0, navVersion >= 4
-        if filletAdaptive and sourceN > MDADDynamics.FILLET_SOURCE_MAX then
-            filletReason, filletFallbackN = "capacity", buildN - 2
-        end
         for i = 1, #buildPts do pathPts[i] = buildPts[i] end
         for i = 1, buildN - 1 do
             segSurface[i], segWidth[i] = buildSurface[i], buildWidth[i]
-            segSourceA[i] = rawSourceMap and rawSourceMap[i] or i
+            segSourceA[i] = rawSourceMap[i] or i
             segSourceB[i], filletRadius[i] = segSourceA[i], 0
             segKind[i] = filletReason and MDADDynamics.SEG_FALLBACK
                 or MDADDynamics.SEG_LINE
@@ -957,6 +949,17 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
     local hi = idx + SEARCH_FWD
     if hi > n - 1 then hi = n - 1 end
 
+    -- 0927 正式服髮夾：側偏 2m 使反向臂較近，舊投影一幀跳 8.9m 並誤進 ROTATE。
+    -- 候選弧長必須能由上幀車位走到：2×實際位移容納弧／弦差，0.5m 容納頂點交接。
+    -- 限的是候選段＋投影點，不只 remaining；初次定位沒有歷史，維持原全域補定位。
+    local maxS = profile.length
+    if state.projS ~= nil and state.projX ~= nil and state.projY ~= nil then
+        local dx, dy = x - state.projX, y - state.projY
+        maxS = state.projS + 2 * sqrt(dx * dx + dy * dy) + 0.5
+        local reachI = MDADFollower.segIndexAt(profile, maxS)
+        if reachI > hi then hi = reachI end -- 高速碎弧可一次跨多段，不能卡在固定 +12 段
+    end
+
     -- 窗口一定至少含一段（lo <= idx <= hi，因為 idx 已夾在 [1, n-1]），所以直接用 lo
     -- 段當基準、從 lo+1 比起，不必在迴圈裡每次都測一遍「有沒有基準」。
     local bestI = lo
@@ -964,7 +967,22 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
     for i = lo + 1, hi do
         local t, d2 = projectT(x, y, px[i], py[i], px[i + 1], py[i + 1], segLen[i])
         if d2 < bestD then
-            bestI, bestT, bestD = i, t, d2
+            local reachable = i <= idx or s[i] + segLen[i] * t <= maxS
+            -- 真正轉彎會以有限半徑略過 raw 頂點，兩臂投影因此有不可避免的弧長差。
+            -- 只在既有 rMin·tan(θ/2) 切點區內、且車頭已朝出臂的前半平面時交接相鄰臂。
+            -- 位移方向會被靜止時 1cm 抖動騙過；車頭尚朝入臂的側偏車仍不能跳到反向臂。
+            if not reachable and i == idx + 1 then
+                local turn = wrapPi(profile.segH[i] - profile.segH[idx])
+                if turn < 0 then turn = -turn end
+                local join = profile.rMin * tan(turn * 0.5)
+                if join < HAIRPIN_APEX_MIN then join = HAIRPIN_APEX_MIN
+                elseif join > HAIRPIN_APEX_MAX then join = HAIRPIN_APEX_MAX end
+                local dx, dy = x - px[i], y - py[i]
+                reachable = dx * dx + dy * dy <= join * join
+                    and cos(heading) * (px[i + 1] - px[i])
+                        + sin(heading) * (py[i + 1] - py[i]) > 0
+            end
+            if reachable then bestI, bestT, bestD = i, t, d2 end
         end
     end
     -- 先保留能接上的原路段，避免右側合法lane較靠近平行反向臂時突然跳臂。
@@ -1004,10 +1022,11 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
     local latSigned = (x - pjx) * -sin(hProj) + (y - pjy) * cos(hProj)
 
     local sNow = s[bestI] + segLen[bestI] * bestT
+    state.projS, state.projX, state.projY = sNow, x, y
     local remaining = profile.length - sNow
     if remaining < 0 then remaining = 0 end
     -- 假抵達防護：remaining 只證明「投影點到終點的弧長很短」，不證明車在終點附近。
-    -- 平方比較，不開根號（sqrt 全留在建表期）。
+    -- 終點距離用平方比較，避免多做一次開根號。
     local exX, exY = px[n] - x, py[n] - y
     local reached = remaining <= ARRIVE_M and (exX * exX + exY * exY) <= ARRIVE_M_SQ
 
@@ -1045,7 +1064,7 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         local k2 = kap[bestI + 1] or 0
         if k2 > kMax then kMax = k2 end
     end
-    local adaptiveW = profile.filletAdaptive == true and profile.filletReason == nil -- capacity 退路整條標 FALLBACK，不鉗
+    local adaptiveW = profile.filletAdaptive == true -- capacity 退化折點也必須鉗到切點
     while j < n - 1 and s[j + 1] < sTarget and walked < LOOKAHEAD_WALK_MAX do
         if segKindW[j] ~= MDADDynamics.SEG_ARC and segKindW[j + 1] ~= MDADDynamics.SEG_ARC then
             local dth = wrapPi(profile.segH[j + 1] - profile.segH[j])
@@ -1531,8 +1550,12 @@ end
 -- 游標 idx**。給「路線沒換、控制脈絡斷了」的情境用——倒車脫困成功就是典型：
 -- 車還在同一條路線的同一段附近，保留游標就不必重做全線定位，也不會跳到自交路線的
 -- 另一個分支。脫困的小幅倒退仍由局部窗口與REWIND_MAX自行收斂。
+-- 投影可達歷史（projS/projX/projY）也清：它假設「上一幀 control 之後車只走了這段位移」，
+-- 倒車脫困／讓位期間 control 沒跑，玩家可能沿折返路線開到隔 5m 的另一臂，舊歷史會把
+-- 真實新段判成不可達、永遠黏在舊段（2026-09-27 review）。清掉後回到局部窗口定位。
 function MDADFollower.resetControl(state)
     if type(state) ~= "table" then return state end
+    state.projS, state.projX, state.projY = nil, nil, nil
     state.iTerm = 0
     state.dFilt = 0
     state.kinkHeld = nil -- 鉗制中的頂點弧長（nil＝未鉗）；切換／放行幀清 D

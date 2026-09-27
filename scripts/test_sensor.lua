@@ -477,6 +477,29 @@ local function scenarioFrameAdaptation()
     checkNear(st.effectiveAheadM, 200, 1e-9, "幀率回來就看得回完整請求")
 end
 
+-- 幀時突然變長：可負擔視距每輪最多回縮 4m（2026-09-27 正式服 33 段 eff-regress：一輪縮 9–33m，
+-- 前緣瞬間拉近、硬煞帳跟著崩）。仍守每幀額度，最後收斂到新的可負擔值。
+local function scenarioAffordableShrink()
+    scenario("可負擔視距回縮限速：幀時跳高時每輪最多縮 4m、每幀額度不變、最後收斂")
+    resetWorld()
+    local st = newSensor(200, 20, 0)
+    checkTrue(runRound(st), "50fps 完成一輪")
+    checkNear(st.effectiveAheadM, 77, 1e-9, "起點 77m")
+    R.frameMs = 60
+    st.frameEwmaMs = 60 -- 幀時 EWMA 一口氣跳到 60ms（可負擔 27m）
+    local prev, maxDrop, peak = st.effectiveAheadM, 0, 0
+    for _ = 1, 20 do
+        checkTrue(runRound(st), "慢幀照樣完成輪")
+        local drop = prev - st.effectiveAheadM
+        if drop > maxDrop then maxDrop = drop end
+        if R.peakScan > peak then peak = R.peakScan end
+        prev = st.effectiveAheadM
+    end
+    checkTrue(maxDrop <= 4 + 1e-9, "每輪最多縮 4m（實得 " .. maxDrop .. "）")
+    checkNear(st.effectiveAheadM, 27, 1e-9, "最後收斂到新的可負擔 27m")
+    checkTrue(peak <= BUDGET, "回縮期間每幀額度不變（實得 " .. peak .. "）")
+end
+
 -- =====================================================================
 -- 情境五：未載入前緣
 --
@@ -696,6 +719,7 @@ scenarioCorpseAxis()
 scenarioCorpseBands()
 scenarioFullRange()
 scenarioFrameAdaptation()
+scenarioAffordableShrink()
 scenarioUnloadedFrontier()
 scenarioMidRoundRequest()
 scenarioDistantCorpses()

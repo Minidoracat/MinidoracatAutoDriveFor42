@@ -85,6 +85,9 @@ local SCAN_NEAR = 2            -- 掃描起點：車前 2 公尺（車身本體�
 local SCAN_AHEAD = MDADDynamics.PERCEPTION_DEFAULT_M
 local SCAN_STEP = 1            -- 沿路線的取樣步長（公尺，＝一格）
 local SCAN_BUDGET = 56         -- 每幀世界查詢額度固定；低幀率縮有效範圍，不加重單幀負擔
+-- 可負擔視距每輪最多回縮這麼多（公尺）：幀時 EWMA 突然變長時前緣不一口氣拉近（2026-09-27
+-- 正式服 33 段 eff-regress：一輪縮 9–33m 直接把硬煞帳壓破）。多掃的幾格只讓輪時略長。
+local AFFORD_SHRINK_MAX = 4
 local VISITED_ROUNDS = 64      -- 每幾輪重建一次 visited 表
 local SPRITE_CACHE_MAX = 4096  -- sprite 成本快取條目上限
 
@@ -842,8 +845,10 @@ local function beginRound(state, p, sNow, vehicle, now, len, cell)
     if not MDADDynamics.finite(softAhead) then softAhead = MDADDynamics.SOFT_LOOKAHEAD_M end
     state.wSoftEndS = sNow + math.min(MDADDynamics.PERCEPTION_HARD_MAX_M,
         math.max(MDADDynamics.SOFT_LOOKAHEAD_M, softAhead))
-    local ahead = MDADDynamics.perceptionEffective(
-        state.aheadM, state.frameEwmaMs, SCAN_BUDGET / LAT_N, SCAN_NEAR)
+    local ahead, affordable = MDADDynamics.perceptionEffective(
+        state.aheadM, state.frameEwmaMs, SCAN_BUDGET / LAT_N, SCAN_NEAR,
+        state.lastAffordableM and state.lastAffordableM - AFFORD_SHRINK_MAX or nil)
+    state.lastAffordableM = affordable
     state.requestedAheadM = state.aheadM
     state.affordableAheadM = ahead
     local s1 = sNow + ahead

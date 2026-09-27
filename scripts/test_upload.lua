@@ -294,6 +294,17 @@ checkEq(#indexRows("C"), before + 1, "arrive brake is not an incident; stuck is"
 local stuckRow = indexRows("C")[before + 1] or ""
 checkEq(field(stuckRow, 7), "stuck", "kind stuck")
 checkEq(field(stuckRow, 8), "1", "priority 1")
+-- 2026-09-27：拖掛終局（脫開／需要調頭／轉角過不去）也要留片段，否則 TrailerLost 無從定罪
+nowMs = nowMs + 3600000 -- 跨過每小時上限
+before = #indexRows("C")
+start()
+drive(3000)
+D.stop(0, "UI_MinidoracatAutoDrive_TrailerLost")
+pump(60000)
+checkEq(#indexRows("C"), before + 1, "trailer lost handback: clip")
+local trailerRow = indexRows("C")[before + 1] or ""
+checkEq(field(trailerRow, 7), "trailer", "kind trailer")
+checkEq(field(trailerRow, 8), "2", "trailer priority 2")
 
 scenario("near-standstill brake is not an incident")
 before = #indexRows("C")

@@ -29,7 +29,7 @@ local HOUR_BUDGET = 12000000
 local STALE_MS = 300000
 local MB = 1048576
 local KINDS = { stuck = true, fault = true, contact = true, takeover = true,
-    unstick = true, route = true, brake = true }
+    unstick = true, route = true, brake = true, trailer = true }
 S.SLOTS, S.CHUNK_MAX, S.CLIP_MAX = SLOTS, CHUNK_MAX, CLIP_MAX
 
 local loaded = false

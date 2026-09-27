@@ -1180,6 +1180,11 @@ local function encodePhys(phys)
     addNum("curveCap", "curveCap")
     addNum("visibilityCap", "visibilityCap")
     addNum("visibilityHardKmh", "vhk")
+    addNum("visHold", "vho")          -- 巡航帳假設的前緣停滯保持剩餘秒數
+    addNum("visRoundS", "vrs")        -- 掃描輪時 EWMA（秒）
+    addNum("visAssistDecel", "vad")   -- 巡航減速輔助補的減速度（m/s²）
+    addNum("towPhi", "tph")           -- 拖掛折角（rad）
+    addNum("towUp", "tup")            -- 拖掛 upVectorDot（<0.8 原版拆掛）
     addNum("curveVerifiedUntilS", "curveVerifiedUntilS")
     addNum("filletN", "filletN")
     addNum("filletFallbackN", "filletFallbackN")

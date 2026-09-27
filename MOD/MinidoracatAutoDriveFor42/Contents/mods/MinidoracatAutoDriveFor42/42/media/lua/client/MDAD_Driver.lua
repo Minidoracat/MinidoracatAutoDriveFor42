@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0926a"
+Drive.REV = "0927a"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -116,6 +116,11 @@ TUNE.UTURN = {
 -- TOW_STEER_FULL_KMH 才全額（只在 3 km/h 以上放行仍會在放行瞬間甩 60°）。前推輔助不動：
 -- 關掉它牽引車在草地拉不動掛車，4.5 秒後進倒車脫困（E2E 同情境實測）。
 TUNE.TOW_STEER_FULL_KMH = 15
+-- 一般車同理（2026-09-27 正式服 14 段：起步 target 0／感知未就緒、ROTATE 探測否決原地轉後，
+-- 非耦力 MASS_BASE 項把靜止車首幀推 5–30 萬，0.1 秒側滑 13–30 km/h → rotate／RETURN 硬煞或
+-- contact）。低於 STEER_FULL_KMH 側推按車速縮、靜止＝零；耦力原地調頭（coupled）不受影響。
+-- 取 4：貼縫爬行 5 km/h 與調頭大弧 12 仍是全額，只有近乎靜止時才收。
+TUNE.STEER_FULL_KMH = 4
 local STEER_INPUT_EPS = 0.01   -- getCurrentSteering 視為「玩家在轉」的門檻
 local STEER_DEADZONE = 0.02    -- follower steer（±5）的死區：低於此值不施力（免無謂抖動）。
                                -- 0.1→0.02（2026-09-07 session-006 t=2.6-3.8 定罪：殭屍在車側 0.3m、
@@ -233,6 +238,28 @@ TUNE.EMERGENCY_BRAKE_GAIN = 2.5
 TUNE.EMERGENCY_BRAKE_MAX = 12
 -- 可視巡航帳的煞車倍率：介於舒適 prior 與緊急界限之間（見 visibilityCap 計算處）。
 TUNE.CRUISE_VIS_BRAKE_GAIN = 1.5
+-- 可視兩帳的時間模型（2026-09-27；計算與定罪理由見 Drive.visibilityCaps）：
+TUNE.VIS_TAU = 0.5              -- 固定反應時間（秒）；不再加快照年齡
+TUNE.VIS_ROUND_ALPHA = 0.3      -- 掃描輪時（快照完成間隔）EWMA
+TUNE.VIS_ROUND_MAX_S = 1.5      -- 單次間隔上限（卡頓一次不把輪時估計推爆）
+TUNE.VIS_FRONT_ADVANCE_M = 1.0  -- 可視前緣前進超過這麼多才算「前緣有動」，重設停滯計時
+TUNE.VIS_HOLD_MULT = 1.25       -- 巡航帳假設前緣停住：輪時×MULT＋ADD 秒
+TUNE.VIS_HOLD_ADD_S = 0.15
+TUNE.VIS_UNLOADED_HOLD_S = 1.5  -- 前緣是未載入區塊時至少假設停這麼久（正式服串流停滯 p97）
+TUNE.VIS_HOLD_MIN_S = 0.3       -- 停滯逾時後仍保留的最短保持（巡航帳留一點滑行餘裕）
+TUNE.VIS_ASSIST_MIN_KMH = 25    -- 巡航減速輔助：低於此速滑行就夠
+TUNE.VIS_ASSIST_TOL_KMH = 1     -- 實速超過巡航帽這麼多才開始補
+TUNE.VIS_ASSIST_GAIN = 1.0      -- 每超 1 km/h 補 1 m/s²
+TUNE.VIS_ASSIST_MAX = 4.0       -- 補的減速度上限（m/s²），疊在滑行之上
+-- 進度監督：受控煞停（自己的一秒硬煞閂鎖／引擎原生未載入 chunk 煞車）期間不算「不動」，
+-- 但連續煞停超過這麼久仍當卡死（見 Drive.progressPauseMs）。
+TUNE.PROGRESS_BRAKE_GRACE_MS = 4000
+-- RETURN 待命滑行核對的車身寬帶餘裕（同 Corridor FOOTPRINT_PAD＝原生 polyPlusRadius 0.15，
+-- BaseVehicle.java:4146；見 Drive.returnCoastClear）
+TUNE.RETURN_COAST_PAD = 0.15
+-- RETURN 釋放：到位兩輪＋車頭對路線在這個角度內（見 updateReturnSnapshot 的 clear 判定）
+TUNE.RETURN_CLEAR_HEAD_RAD = 6 * math.pi / 180
+TUNE.RETURN_CLEAR_FORCE_ROUNDS = 6
 local POLICY_DODGE = 1         -- 沙盒 ObstaclePolicy enum：1=繞行 2=停車
 
 TUNE.BLOCK_STOP_DIST = 10      -- 距障礙群這麼近才煞停等待；更遠先滑行接近
@@ -480,6 +507,13 @@ TUNE.STAY_SETTLED_M = 0.35
 TUNE.STAY_LOOK_STEPS = 4 -- 停留 lane 前瞻最多試幾次掃掠（每次 ~25ms Kahlua）
 TUNE.DODGE_INPLACE_M = 0.6 -- 候選 lane 離車實際橫向 ≤ 此值＝視為已在該 lane，進入段可為零（群已在車旁）
 TUNE.UNSTICK_STEEP_MAX_M = 8 -- steep 差額最多讓倒車多退幾公尺（4s 時限＋後方探測仍把關）
+-- 車頭對路線超過這個角度就不加長倒車（見 Drive.unstickExtraM：斜著倒只會橫移出路外）
+TUNE.UNSTICK_EXTRA_ALIGN_RAD = math.pi / 4
+-- 倒車脫困的車速上限（km/h）：超過就不再施倒車衝量、讓車滑回上限以下。舊制每幀固定衝量、沒有速度
+-- 上限，退得越遠越快——正式服 44 段有倒車的片段 7 段超過 15 km/h（最高 21），E2E startpush-sp 退 11m
+-- 衝到 31 km/h、再花 2.5 秒煞 11m；後方探測帶只有 4m、每 100ms 探一次，這個速度煞不住。10 km/h
+-- 煞停約 0.6m＋探測間隔 0.3m，仍在探測帶內；4 秒時限內仍可退約 9m（時限到且已退 1m 照常進 settle）。
+TUNE.UNSTICK_REVERSE_KMH = 10
 -- 進入段陡坡拒收（2026-09-04 s051：stay 鏈把常駐 lane 拖到 −2.25 後，下一候選 +2.00＝
 -- 4.25m 側移塞進 2.8m 進入段；運動學最小 8.8m（sqrt(6·dl/κ_crawl)），比例 3.1 → 承諾
 -- 線掃掠過但車追不上、clearanceCap 被 sinHeading=1 壓到 2.3 km/h 爬 4 秒被 RETURN 殺）。
@@ -1065,7 +1099,7 @@ function Drive.invalidateCommandState(s, actualSpeedKmh, controlState)
     local v = actualSpeedKmh
     if not MDADDynamics.finite(v) then v = 0 elseif v < 0 then v = -v end
     s.cmdV, s.cmdA, s.cmdInitialized = v / 3.6, 0, true
-    s.brakeSampleMs = 0 -- 未完成的煞車觀測不跨讓位、恢復或重建。
+    s.brakeSampleMs, s.coastSampleMs = 0, 0 -- 未完成的煞車／滑行觀測不跨讓位、恢復或重建。
     s.fullGate, s.gateReason, s.alignSince = false, "state", 0
     -- 2026-09-01（telemetry s055：verifyLineReason=state 542 筆、obb 418 筆）：
     -- proof（verifyBand/Sweep/verifiedUntilS）是**感知快照的產物**，自有
@@ -1682,6 +1716,11 @@ local function startSession(playerObj, playerNum, stage)
         proofCurveCap = 0,
         visibilityCap = 0,
         visibilityHardKmh = 0,
+        visStamp = 0,                                        -- 上一個快照完成時戳（輪時 EWMA 用）
+        visRoundS = MDADDynamics.PERCEPTION_ROUND_MS / 1000, -- 掃描輪時 EWMA（秒）
+        visFrontSince = 0,                                   -- 可視前緣上次前進的時刻（visFrontRef＝當時前緣）
+        visAssistPrev = 0,
+        visAssistDecel = 0,                                  -- 本幀巡航減速輔助補的減速度（m/s²）
         curveVerifiedUntilS = 0,
         verifyBand = false,
         verifySweep = false,
@@ -1748,7 +1787,7 @@ local function startSession(playerObj, playerNum, stage)
         coastConfidence = 0, coastLower = 0,
         brakeMean = 0, brakeDev = 0, brakeTime = 0,
         brakeConfidence = 0, brakeLower = 0,
-        brakeSampleMs = 0, brakeSampleV = 0,
+        brakeSampleMs = 0, brakeSampleV = 0, coastSampleMs = 0, coastSampleV = 0,
         yawMean = 0, yawDev = 0, yawTime = 0,
         yawConfidence = 0, yawLower = 0,
         forceBrakeThis = false, lastAssistForce = 0,
@@ -1783,6 +1822,7 @@ local function startSession(playerObj, playerNum, stage)
         yieldNotified = false,
         progressState = "disarmed",
         progressSince = 0,
+        progressBrakedSince = 0, -- 停滯監督中連續受控煞停的起點（Drive.progressPauseMs）
         progressX = 0, progressY = 0, progressS = 0, progressH = 0,
         progressUntil = 0,
         resumeProgressPhase = nil,
@@ -2321,17 +2361,19 @@ end
 local function applySteering(
         s, vehicle, fwd, fx, fy, steer, speedKmh, mult, coupled, assistForce)
     if steer > 5 then steer = 5 elseif steer < -5 then steer = -5 end
-    if s.tow and not coupled then
+    if not coupled then
+        -- 非耦力側推隨車速（TUNE.STEER_FULL_KMH／TOW_STEER_FULL_KMH）：靜止不橫推
+        local full = s.tow and TUNE.TOW_STEER_FULL_KMH or TUNE.STEER_FULL_KMH
         local tv = speedKmh < 0 and -speedKmh or speedKmh
-        if tv < TUNE.TOW_STEER_FULL_KMH then steer = steer * tv / TUNE.TOW_STEER_FULL_KMH end
+        if tv < full then steer = steer * tv / full end
     end
     if steer < STEER_DEADZONE and steer > -STEER_DEADZONE then steer = 0 end
     -- Follower 的 yaw 增益估計要拿「真的施出去」的 steer（含 cross-track 與夾限；耦力調頭
     -- 是力偶不是側推，不進估計）——0908a 弧段自適應前饋
     s.fstate.appliedSteer = (not coupled) and steer or nil
     if s.brakeImpulseThis then return 0, 0 end -- 本幀已施硬煞外力（單槽 addImpulse）
-    if type(assistForce) ~= "number" or assistForce * 0 ~= 0
-            or assistForce < 0 then assistForce = 0 end
+    -- assistForce 可為負＝沿車身中線的減速分量（Drive.visAssistForce）；中線分量與前臂平行，不產生 yaw。
+    if type(assistForce) ~= "number" or assistForce * 0 ~= 0 then assistForce = 0 end
     if coupled then assistForce = 0 end
     if steer == 0 and assistForce == 0 then return 0, 0 end
 
@@ -2371,7 +2413,7 @@ local function applySteering(
         -- 等效前輪轉向。assist 前向分量與臂平行＝零 yaw（性質不變）。
         impulse:set(-force * px + assistForce * fx, 0,
             -force * py + assistForce * fy)
-        if assistForce > 0 then
+        if assistForce ~= 0 then
             -- Forward impulse at the center when steering is idle; otherwise
             -- ride the front centerline so lateral force retains yaw
             -- without assist yaw.
@@ -3661,6 +3703,115 @@ local function tightenLimit(prior, lower, confidence, hi)
     return v
 end
 
+-- 可視上限兩帳（2026-09-27 正式服 222 段 visibility 一秒鎖輪定罪，四種機制都不是真障礙：
+-- 低幀率掃描輪逾期 77、區塊串流前緣停住 95、可負擔視距回縮 33、遊戲卡頓凍住 15）：
+-- ① 反應時間固定 VIS_TAU：車逼近前緣已由真實車位反映，快照年齡不再二次疊進反應時間。
+--    舊制 tau＝年齡＋0.25，硬煞帳每秒掉 2v 的距離當量——輪時逾期 0.4 秒就越線；遊戲卡住
+--    1.5 秒（世界沒前進、牆鐘有）後第一幀也直接越線。停住不動的掃描仍安全：前緣距離隨車位
+--    縮短，縮到緊急停距才硬煞，車照樣停在已知淨空範圍內。
+-- ② 巡航帳再加「前緣停滯保持」：假設可視前緣從上次前進起再停 T 秒（輪時 EWMA×MULT＋ADD；
+--    前緣是未載入區塊時至少 VIS_UNLOADED_HOLD_S），期間只能滑行，停滯結束時仍不越過硬煞帳
+--   （MDADDynamics.visibilityHoldCapKmh）。串流前緣在 80 km/h 停 1.5 秒＝逼近 33m，舊巡航帳
+--    只按當下距離算、滑行（約 3 m/s²）跟不上它每秒 7 m/s² 的下降。
+-- 回 (巡航帽 km/h, 巡航煞車帳 m/s²)；硬煞帳寫 s.visibilityHardKmh。
+function Drive.visibilityCaps(s, now, visibleEnd, minBrakeVisible)
+    local sen, halfL = s.sensor, s.vehicleProfile.halfL
+    local visBrake = math.min(minBrakeVisible * TUNE.EMERGENCY_BRAKE_GAIN, TUNE.EMERGENCY_BRAKE_MAX)
+    visBrake = tightenLimit(visBrake, s.brakeLower, s.brakeConfidence, TUNE.EMERGENCY_BRAKE_MAX)
+    -- 上限留在緊急界限的 3/4：兩帳分家才不會回到 0911c 的鋸齒硬煞（巡航帽貼著硬煞紅線）。
+    local cruiseBrake = minBrakeVisible * TUNE.CRUISE_VIS_BRAKE_GAIN
+    if cruiseBrake > visBrake * 0.75 then cruiseBrake = visBrake * 0.75 end
+    if cruiseBrake < minBrakeVisible then cruiseBrake = minBrakeVisible end
+    local ahead = visibleEnd - s.lastSNow
+    local cap = MDADDynamics.visibilityCapKmh(ahead, TUNE.VIS_TAU, cruiseBrake, halfL)
+    local st = sen.stamp
+    if st ~= s.visStamp then
+        if finite(s.visStamp) and s.visStamp > 0 and st > s.visStamp then
+            local dt = (st - s.visStamp) / 1000
+            if dt > TUNE.VIS_ROUND_MAX_S then dt = TUNE.VIS_ROUND_MAX_S end
+            s.visRoundS = s.visRoundS + (dt - s.visRoundS) * TUNE.VIS_ROUND_ALPHA
+        end
+        s.visStamp = st
+    end
+    -- 前緣前進才重設停滯起點；回縮不算前進（停滯照算）
+    if not finite(s.visFrontRef) or visibleEnd > s.visFrontRef + TUNE.VIS_FRONT_ADVANCE_M then
+        s.visFrontRef, s.visFrontSince = visibleEnd, now
+    elseif visibleEnd < s.visFrontRef then
+        s.visFrontRef = visibleEnd
+    end
+    local hold = s.visRoundS * TUNE.VIS_HOLD_MULT + TUNE.VIS_HOLD_ADD_S
+    if sen.unloaded and finite(sen.unloadedS) and sen.unloadedS <= sen.scanEndS + 0.5
+            and hold < TUNE.VIS_UNLOADED_HOLD_S then
+        hold = TUNE.VIS_UNLOADED_HOLD_S
+    end
+    hold = hold - (now - s.visFrontSince) / 1000
+    if hold < TUNE.VIS_HOLD_MIN_S then hold = TUNE.VIS_HOLD_MIN_S end
+    s.visHold = hold
+    local coast = s.horizonStamp == st and s.horizonMinCoast or s.safeCoast
+    if not finite(coast) or coast < 0 then coast = 0 end
+    local holdCap = MDADDynamics.visibilityHoldCapKmh(ahead, TUNE.VIS_TAU, visBrake, halfL, coast, hold)
+    if holdCap < cap then cap = holdCap end
+    -- 硬煞帳的前緣若就是路線終點（可視已含終點、無未載入截斷），終點不是障礙：不扣
+    -- halfL+2 的障礙緩衝（0924d E2E：MAX 檔 90 km/h 滑行到站，實速落後剖面 3-4 km/h，
+    -- 終點前 7m 以 18 km/h 撞上硬煞紅線 14.8 一秒鎖輪；到站本身由剖面與 arrive 管）。
+    local hardAhead = ahead
+    if visibleEnd >= s.profile.length - 0.5 then hardAhead = hardAhead + halfL + 2 end
+    s.visibilityHardKmh = MDADDynamics.visibilityCapKmh(hardAhead, TUNE.VIS_TAU, visBrake, halfL)
+    return cap, cruiseBrake
+end
+
+-- 進度監督的停滯計時暫停（2026-09-27 正式服 5 段，含 0926a）：自己的一秒硬煞閂鎖中、或引擎
+-- 原生煞車壓著的低速幀，車根本沒有前進致動，不算「不動」（CarController.java:208-215：前方
+-- 1–2 個 chunk 未載入時 isInvalidChunkAhead 直接煞車，優先於 regulator 供油 :240-254；這種煞車
+-- fbl=0 但 isBraking 真）。舊制照算 2.5 秒就 suspect 倒車：visibility／串流煞停後前方其實淨空
+-- 卻倒車、剛起步又被舊停滯窗判 recover。回本幀要往後推 progressSince 的毫秒數（＝暫停）；
+-- 連續煞停超過 PROGRESS_BRAKE_GRACE_MS 就不再暫停，免得永遠不載入的前緣讓車乾等。
+-- 接觸（currentBlocked）與 VERIFY 窗不經這裡，照舊計時。
+function Drive.progressPauseMs(s, vehicle, now, speedKmh)
+    local last = s.progressPauseAt
+    s.progressPauseAt = now
+    local gap = not finite(last) or now - last > 250 or now < last
+    -- 中斷過（離開 watch／讓位／停等）＝新一次煞停，寬限重新起算（review：沿用舊起點會讓
+    -- 「煞停→解除→再煞停」的新寬限立即過期）
+    if gap then s.progressBrakedSince = 0 end
+    local braked = now < s.forceBrakeUntil
+        or (speedKmh < 3 and speedKmh > -3 and vehicle:isBraking() == true)
+    if not braked then
+        s.progressBrakedSince = 0
+        return 0
+    end
+    if s.progressBrakedSince == 0 then s.progressBrakedSince = now end
+    if now - s.progressBrakedSince >= TUNE.PROGRESS_BRAKE_GRACE_MS then return 0 end
+    if gap then return 0 end
+    return now - last
+end
+
+-- 巡航減速輔助（2026-09-27）：巡航帳假設能以 cruiseBrake 減速，但 regulator 斷油只有滑行
+--（NoControl brake 15，約 2.5–4.5 m/s²）；可視距離縮得比滑行快時，舊制只能等越過硬煞紅線
+-- 一秒鎖輪。實速超過巡航帽 TOL 以上就沿車身中線加反向外力補足，比例於超速量、上限
+-- VIS_ASSIST_MAX；不鎖輪、轉向照常（與側推共用同一個 impulse 槽，中線分量不產生 yaw）。
+-- 拖掛不加（牽引車減速、掛車往前推會折）；低於 MIN_KMH 滑行就夠；感知未就緒時舊制只滑行，不加。
+-- 外力→減速度：BaseVehicle.update 每幀 applyCentralForce 一次（BaseVehicle.java:3307-3314），
+-- WorldSimulation.updatePhysic 以固定 0.01s 子步 stepSimulation、每步後清力（WorldSimulation.java:
+-- 80-100）→ 每幀 Δv＝F/m×0.01；F 乘 mult/MULT_NORM（mult＝48×幀秒）→ 每秒減速度
+-- ＝F/(m·mult/MULT_NORM)×0.01×(48/MULT_NORM)，與幀率無關。
+-- 回要施的外力大小（≥0）；s.visAssistDecel 記本幀補的減速度（telemetry vad）。
+function Drive.visAssistForce(s, speedKmh, mult)
+    s.visAssistDecel = 0
+    if s.tow or not (s.sensor and s.sensor.ready) or not finite(s.visibilityCap)
+            or not finite(speedKmh) or speedKmh < TUNE.VIS_ASSIST_MIN_KMH then
+        return 0
+    end
+    local over = speedKmh - s.visibilityCap - TUNE.VIS_ASSIST_TOL_KMH
+    if over <= 0 then return 0 end
+    local a = over * TUNE.VIS_ASSIST_GAIN
+    if a > TUNE.VIS_ASSIST_MAX then a = TUNE.VIS_ASSIST_MAX end
+    local mass = s.runtimeMass
+    if not finite(mass) or mass < 1 then mass = MASS_FALLBACK end
+    s.visAssistDecel = a
+    return a * mass * (mult / MULT_NORM) / (0.01 * 48 / MULT_NORM)
+end
+
 -- Traction-keyed online observation. Every field lives in the session table;
 -- stable frames only mutate scalars and call no Java getter.
 local function updateTraction(s, now, speedKmh, heading, headingError, latDev)
@@ -3731,6 +3882,7 @@ local function updateTraction(s, now, speedKmh, heading, headingError, latDev)
     local sampleBrake = stable and brakeWindow and speedKmh >= 8
     if not sampleBrake then s.brakeSampleMs = 0 end
 
+    local coastQual = false
     if stable then
         local dv = (v - s.kinPrevV) / dt
         if brakeWindow or s.forceBrakePrev then
@@ -3760,7 +3912,8 @@ local function updateTraction(s, now, speedKmh, heading, headingError, latDev)
                 s.accelConfidence, s.accelLower = MDADVehicleProfile.updateEWMA(
                     s.accelMean, s.accelDev, s.accelTime, obs, dt)
         elseif (not s.regulatorPrev
-                or s.kinPrevV * 3.6 >= s.targetPrev + 1) and v >= 2.2 then
+                or s.kinPrevV * 3.6 >= s.targetPrev + 1) and v >= 2.2
+                and not (s.visAssistPrev > 0) then
             -- coast 資格＝「確定斷油」（2026-09-04 issue #1 定罪 D）：舊條件
             -- `targetPrev <= 實速+1` 把定速巡航（實速在目標 ±1 內）也當滑行學，
             -- 但引擎是 bang-bang（CarController.java:240-245：speedLimited <
@@ -3771,12 +3924,26 @@ local function updateTraction(s, now, speedKmh, heading, headingError, latDev)
             -- 斷油，條件仍成立。目標 ±1 的曖昧帶不學（accel 分支同樣 +1 對稱）。
             -- 低速門檻（2026-09-01 telemetry 001 死亡螺旋定罪）：低速滑行阻力∝v²、
             -- 量測值天然趨 0——那是物理下限不是車輛能力，≥8 km/h（2.2 m/s）才學。
-            local obs = -dv
-            if obs < 0 then obs = 0 end
-            if s.coastTime == 0 then s.coastMean = obs end
-            s.coastMean, s.coastDev, s.coastTime,
-                s.coastConfidence, s.coastLower = MDADVehicleProfile.updateEWMA(
-                    s.coastMean, s.coastDev, s.coastTime, obs, dt)
+            -- 逐幀差分在高幀率下是 0／大值雙峰（物理固定 0.01s 子步，WorldSimulation.java:80-100；
+            -- 250 FPS 時多數幀沒有子步、dv=0）——均值對、離散卻≈均值，lower＝均值−k·dev 一路收到
+            -- 0，safeCoast 歸零＝剖面目標 0、min-exec 8 km/h 爬完全程（2026-09-27 E2E vis-sp：
+            -- fdt 3-4ms、cl 7.9→0，68 秒起 8 km/h 爬 170 秒）。同煞車觀測（0911c）改用
+            -- BRAKE_SAMPLE_MS 短窗淨減速；窗內出現加速＝那段其實在供油，整窗作廢不當 0 學。
+            -- 巡航減速輔助（visAssistDecel）施力的幀不算滑行：它的減速不是車的能力。
+            coastQual = true
+            if s.coastSampleMs == 0 then
+                s.coastSampleMs, s.coastSampleV = now, v
+            elseif now - s.coastSampleMs >= TUNE.BRAKE_SAMPLE_MS then
+                local sampleDt = (now - s.coastSampleMs) / 1000
+                local obs = (s.coastSampleV - v) / sampleDt
+                if obs >= 0 then
+                    if s.coastTime == 0 then s.coastMean = obs end
+                    s.coastMean, s.coastDev, s.coastTime,
+                        s.coastConfidence, s.coastLower = MDADVehicleProfile.updateEWMA(
+                            s.coastMean, s.coastDev, s.coastTime, obs, sampleDt)
+                end
+                s.coastSampleMs, s.coastSampleV = now, v
+            end
         end
         local steer = s.steerPrev
         if not brakeWindow and not s.forceBrakePrev and finite(steer)
@@ -3793,6 +3960,7 @@ local function updateTraction(s, now, speedKmh, heading, headingError, latDev)
                     s.yawMean, s.yawDev, s.yawTime, obs, dt)
         end
     end
+    if not coastQual then s.coastSampleMs = 0 end
     s.kinPrevMs, s.kinPrevV, s.kinPrevH = now, v, heading
 
     local safeAccel = tightenLimit(aDrive, s.accelLower, s.accelConfidence,
@@ -3981,6 +4149,8 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     phys.routeHeadingError, phys.kinkExitS = s.lastRouteErr, s.fstate.kinkExitS
     phys.visibilityCap = s.visibilityCap
     phys.visibilityHardKmh = s.visibilityHardKmh
+    phys.visHold, phys.visRoundS, phys.visAssistDecel = s.visHold, s.visRoundS, s.visAssistDecel
+    if s.tow then phys.towPhi, phys.towUp = s.towPhi, s.towUp end
     phys.curveVerifiedUntilS = s.curveVerifiedUntilS
     phys.filletN = s.profile.filletN
     phys.filletFallbackN = s.profile.filletFallbackN
@@ -4110,6 +4280,34 @@ local function bodyCenter(s, vehicle, out)
     return x, y
 end
 
+-- RETURN 待命只斷油前，核對滑行停得住（2026-09-27 正式服 M998 片段：RETURN hold 後 target 0
+-- 只斷油，17 km/h 滑到 footprint 重疊才硬煞，撞上正前方硬物）。沿車頭方向、車身寬帶內找快照
+-- 裡最近的硬點：滑行停止距離（反應 0.3s＋v²/2·safeCoast＋0.5）放得下才准只斷油，放不下走
+-- 既有硬煞。側邊擋住回線但正前方淨空的，仍只滑行（不多一次一秒鎖輪）。out 會被 bodyCenter
+-- 覆寫；fx/fy 是已正規化的車頭方向。冷路徑：只在 RETURN hold 滑行條件都成立時呼叫。
+function Drive.returnCoastClear(s, vehicle, out, fx, fy, speedKmh)
+    local sen = s.sensor
+    if type(sen) ~= "table" or not sen.ready then return false end
+    local bx, by = bodyCenter(s, vehicle, out)
+    if bx == nil or not finite(fx) or not finite(fy) then return false end
+    local vp = s.vehicleProfile
+    local v = (speedKmh < 0 and -speedKmh or speedKmh) / 3.6
+    local coast = finite(s.safeCoast) and s.safeCoast > 0.5 and s.safeCoast or 0.5
+    local need = v * 0.3 + v * v / (2 * coast) + 0.5
+    local hx, hy, hr = sen.hardX, sen.hardY, sen.hardR
+    for i = 1, sen.hardN do
+        local dx, dy = hx[i] - bx, hy[i] - by
+        local u = dx * fx + dy * fy
+        if u > 0 then
+            local r = hr[i] or 0
+            local w = dy * fx - dx * fy
+            if w < 0 then w = -w end
+            if w < vp.halfW + r + TUNE.RETURN_COAST_PAD and u - vp.halfL - r < need then return false end
+        end
+    end
+    return true
+end
+
 
 -- 後方 swept-strip 探測的共用包裝（recovery 起手與 unstick 每 100ms 重查共用）：
 -- bodyCenter 取不到、或 Sensor 缺席，都回 unloaded 而非 clear——呼叫端一律以
@@ -4212,6 +4410,14 @@ local function footprintSnapshot(s, vehicle, playerNum, out, heading, vx, vy, la
         if s.dodging and finite(s.dodgeNeed) and s.dodgeNeed < s.sweepBase - 1e-6 then
             pad = s.dodgeNeed - s.vehicleProfile.halfW
         end
+        -- 承諾線的 pre-a 段（a 之前＝路線本身）掃掠只以 SWEEP_PHYS_PAD 驗物理必撞（sweepLine
+        -- pointPad）；執行 contact 若仍用預設 0.15，完美跟到已接受的線也會被判接觸（2026-09-27
+        -- 正式服 SemiBox：pre-a sweep +0.029 淨空、contact −0.071 命中，真 Corridor 重現）。
+        -- 車還在 a 之前時兩邊同一個數。
+        if s.dodging and finite(s.fstate.offA) and s.lastSNow < s.fstate.offA
+                and (pad == nil or pad > SWEEP_PHYS_PAD) then
+            pad = SWEEP_PHYS_PAD
+        end
         blocked, actual, planned, hitI, hitS, hitL, hitX, hitY, poseOnly =
             MDADCorridor.currentFootprintHit(
                 sen.hardS, sen.hardL, sen.hardX, sen.hardY, sen.hardR, sen.hardN,
@@ -4294,6 +4500,24 @@ local function footprintSnapshot(s, vehicle, playerNum, out, heading, vx, vy, la
     end
 end
 
+-- 本次倒車要比標準 3m 多退多少（公尺）。兩個來源：
+-- ① 貼縫 contact（episodeReason contact 且承諾中）＝進入段太短：第 N 次多退 N×UNSTICK_DODGE_EXTRA_M；
+-- ② 全滅含 steep 拒收＝跑道不夠：一次退到夠（見 shapeProfile 的 steepDeficitM；只在 blocked 停等到期的
+--    倒車生效，contact／進度倒車不吃）。
+-- 兩者都是「沿路線退出進入段跑道」；車身對路線斜著時，倒 d 公尺只換到 d·cos(誤差) 的跑道、其餘全是
+-- 往路外橫移（2026-09-27 E2E startpush-sp＝正式服 c25 同位置：StepVan 垂直停在碎石路旁 5m，steep 把
+-- 倒車加到 11m，實際沿線 s 一直是 0、車退到離路 27m 觸發 RouteTooFar）。車頭對路線超過
+-- UNSTICK_EXTRA_ALIGN_RAD 就不加長，維持標準倒車。
+function Drive.unstickExtraM(s)
+    local extra = 0
+    if s.episodeReason == "contact" and s.dodging and s.dodgeCrawl then
+        extra = TUNE.UNSTICK_DODGE_EXTRA_M * s.episodeAttempts
+    end
+    if s.blocked and finite(s.blockSteepM) and s.blockSteepM > extra then extra = s.blockSteepM end
+    if extra > 0 and finite(s.lastRouteErr) and s.lastRouteErr > TUNE.UNSTICK_EXTRA_ALIGN_RAD then extra = 0 end
+    return extra
+end
+
 -- Called only after stepFollow released its hot-path vector. Rear unknown is fail-closed;
 -- an attempt is consumed only after a clear 4m swept-strip check.
 local function startRecoveryAttempt(s, vehicle, playerNum, now, vx, vy, softFail)
@@ -4370,16 +4594,7 @@ local function startRecoveryAttempt(s, vehicle, playerNum, now, vx, vy, softFail
     end
 
     s.episodeAttempts = s.episodeAttempts + 1
-    -- 貼縫 contact（episodeReason contact 且承諾中）＝進入段太短：第 N 次多退 N×EXTRA
-    s.unstickExtraM = 0
-    if s.episodeReason == "contact" and s.dodging and s.dodgeCrawl then
-        s.unstickExtraM = TUNE.UNSTICK_DODGE_EXTRA_M * s.episodeAttempts
-    end
-    -- 全滅含 steep 拒收＝跑道不夠：一次退到夠（理由見 shapeProfile 的 steepDeficitM；只在
-    -- blocked 停等到期的倒車生效，contact／進度倒車不吃）
-    if s.blocked and finite(s.blockSteepM) and s.blockSteepM > s.unstickExtraM then
-        s.unstickExtraM = s.blockSteepM
-    end
+    s.unstickExtraM = Drive.unstickExtraM(s)
     -- 倒車＝把跑道退出來；停留段終點的進入段地板（stayHoldEndS）此後只會把退出來的跑道
     -- 再吃掉（2026-09-04 st174,596-616：退 3／7／11m 三次，entry 恆 5.6＝c 到縫口，唯一的
     -- +2.0 縫 ratio 1.7 永遠拒 → StopStuck）。從退後的位置重規劃，A 由掃掠把關。
@@ -5156,7 +5371,15 @@ local function updateReturnSnapshot(s, vehicle, playerNum, latSigned)
         endReturn(s)
         return
     end
-    if s.returnClearRounds >= 2 then
+    -- 位置剛進完成帶、車頭還斜著（仍在橫向滑動）就釋放＝下一刻巡航提速帶著橫移衝出目標線
+    -- （2026-09-27 正式服 SemiBox：RETURN clear 時 err −0.18、lat 仍 1.1→1.5，提速後再進 RETURN
+    -- 並接觸）。兩輪到位＋車頭對路線 ≤ RETURN_CLEAR_HEAD_RAD 才釋放；車頭一直收不正時到位
+    -- RETURN_CLEAR_FORCE_ROUNDS 輪也釋放，不讓 RETURN 帽長期壓速。
+    local rerr = s.lastRouteErr
+    local headOk = not finite(rerr)
+        or (rerr < TUNE.RETURN_CLEAR_HEAD_RAD and rerr > -TUNE.RETURN_CLEAR_HEAD_RAD)
+    if (s.returnClearRounds >= 2 and headOk)
+            or s.returnClearRounds >= TUNE.RETURN_CLEAR_FORCE_ROUNDS then
         endReturn(s)
         MDADFollower.clearOffset(s.fstate)
         MDADFollower.setLaneBias(s.fstate, s.returnLaneTarget)
@@ -6535,6 +6758,25 @@ local function guardDemote(s, sen, pm, mi, cOver, cHit, playerNum)
     return margin
 end
 
+-- 繞行延後（exit／coverage／unloaded）：這一輪不承諾，先按已知群起點 b 保留煞停距離（接近帽
+-- 指向已知障礙，不是未載入前緣），點雲 sig 不變也要每輪重判。replan 兩個出口共用（主候選 exit
+-- 立即延後；coverage／unloaded 在候選鏈全滅後才延後）。
+function Drive.deferDodge(s, playerNum, why, b, c, dS)
+    local sen = s.sensor
+    s.planSig = -1
+    s.dodgeDeferCap = MDADDynamics.approachCapKmh(
+        b - s.lastSNow - s.vehicleProfile.halfL, 0, 0.5, s.safeBrake)
+    s.dodgeDeferS = b
+    diagEvent(s, playerNum, "dodge", { phase = "defer", why = why,
+        b = b, c = c, d = dS, rs = s.lastSNow, span = TUNE.DODGE_OV_SPAN,
+        s = sen.unloadedS, cap = s.dodgeDeferCap })
+    if getDebug() then
+        print(string.format(
+            "%spn=%d dodge defer (%s): c=%.1f d=%.1f rs=%.1f unloadedS=%s",
+            LOG, playerNum, why, c, dS or -1, s.lastSNow, tostring(sen.unloadedS)))
+    end
+end
+
 local function replan(s, vehicle, playerNum)
     s.dodgeDeferCap = s.dodgeHandoffHold and 0 or -1
     s.dodgeDeferS = nil
@@ -6570,7 +6812,10 @@ local function replan(s, vehicle, playerNum)
         -- laneBias 平滑收斂。
         -- 對向車逼近中硬做完的繞行（trafficPlan＝late）不提前釋放：回線段是承諾時掃過的線，
         -- 提前交給 RETURN 會以當下偏移為基準停等＝停在對方車道上（E2E park400）。
-        local exitReady = type(fs.offC) == "number" and s.lastSNow >= fs.offC
+        -- 車頭一過 c 就放＝車身還在舊群旁邊就把已掃過的回線段丟掉，改由 RETURN／pure pursuit
+        -- 從偏移位置斜切回常駐線，切進剛繞過的障礙（2026-09-27 正式服 K5：offL 3.75、過 c 0.27m
+        -- 即釋放，期望線 3.75→−0.5 一跳、st −1.23 直接 contact）。整車越過 c（bodyReach）才提前放。
+        local exitReady = type(fs.offC) == "number" and s.lastSNow >= fs.offC + s.bodyReach
             and not s.trafficLate
             and nearestLineBlocker(s, sen, s.lastSNow) == nil
         -- 026/030：後載入的下一台擋住 p4，但第一群已通過；等 nextCap<8／停穩才交接
@@ -6935,18 +7180,8 @@ local function replan(s, vehicle, playerNum)
         -- 下一輪車前進 5m 就能 commit）。延後不是淨空：先按已知群起點保留煞停距離，
         -- 不能只靠更遠的未載入前緣限速；進窗那一輪再規劃。
         if mode == "dodge" and c + 1 > s.lastSNow + TUNE.DODGE_OV_SPAN then
-            mode = "clear"
-            s.planSig = -1 -- 點雲 sig 不變也要每輪重判（車一前進就進窗）
-            s.dodgeDeferCap = MDADDynamics.approachCapKmh(
-                b - s.lastSNow - s.vehicleProfile.halfL, 0, 0.5, s.safeBrake)
-            s.dodgeDeferS = b
-            diagEvent(s, playerNum, "dodge", { phase = "defer", why = "window",
-                b = b, c = c, rs = s.lastSNow, span = TUNE.DODGE_OV_SPAN, cap = s.dodgeDeferCap })
-            if getDebug() then
-                print(string.format(
-                    "%spn=%d dodge exit beyond commit window: defer (c=%.1f rs=%.1f span=%d)",
-                    LOG, playerNum, c, s.lastSNow, TUNE.DODGE_OV_SPAN))
-            end
+            mode = "clear" -- 車一前進就進窗：deferDodge 讓點雲 sig 不變也每輪重判
+            Drive.deferDodge(s, playerNum, "window", b, c, nil)
         end
         -- 同族兩刀（2026-09-04 st146014／st144580／st146015）：先用主候選的幾何做一次
         -- shape 預算（冷路徑、每輪一次，候選鏈會再算一次同值）——
@@ -6954,33 +7189,30 @@ local function replan(s, vehicle, playerNum)
         -- ② 承諾線覆蓋到未載入區（d+1 > unloadedS）→ 延後：兩次 guard 在下一輪
         --    cell 載入後立刻判死（黑車輪廓 commit 時根本不在點雲裡）。
         --    尚未有可用承諾線，接近帽必須指向已知障礙，不是未載入前緣。
+        -- 未覆蓋（coverage／unloaded）只代表「主候選」的完整退出段伸出可視前綴；候選鏈裡的停留
+        -- ／微調／降檔可能退出較短、整條都在已掃範圍內，而每條候選的 sweepLine 本來就驗
+        -- candidateCovered（2026-09-27 正式服 8 段：主候選一超窗就延後＋硬煞，0.2–0.6 秒後另一條
+        -- 短候選 commit——等於先白煞一次）。所以只把延後理由記下、照跑候選鏈，全滅才延後；
+        -- exit（出口被承諾窗截短）維持原本立即延後。
+        s.planDeferWhy = nil
         if mode == "dodge" then
             local _, _, _, dS, okS0 = shapeProfile(s, s.profile, a, b, c, d, offL, baseL)
             local why = nil
             if okS0 and s.dodgeWindowShort then
                 why = "exit"
             elseif okS0 and not Drive.candidateCovered(s, dS + 1) then
-                why = sen.unloaded and "unloaded" or "coverage"
+                s.planDeferWhy, s.planDeferD = sen.unloaded and "unloaded" or "coverage", dS
+                s.planDeferB, s.planDeferC = b, c
             end
             if why then
+                Drive.deferDodge(s, playerNum, why, b, c, dS)
                 mode = "clear"
-                s.planSig = -1
-                s.dodgeDeferCap = MDADDynamics.approachCapKmh(
-                    b - s.lastSNow - s.vehicleProfile.halfL, 0, 0.5, s.safeBrake)
-                s.dodgeDeferS = b
-                diagEvent(s, playerNum, "dodge", { phase = "defer", why = why,
-                    b = b, c = c, d = dS, rs = s.lastSNow, span = TUNE.DODGE_OV_SPAN,
-                    s = sen.unloadedS, cap = s.dodgeDeferCap })
-                if getDebug() then
-                    print(string.format(
-                        "%spn=%d dodge defer (%s): c=%.1f d=%.1f rs=%.1f unloadedS=%s",
-                        LOG, playerNum, why, c, dS, s.lastSNow, tostring(sen.unloadedS)))
-                end
             end
         end
         if mode == "dodge"
                 and MDAD.sandbox("ObstaclePolicy", POLICY_DODGE) ~= POLICY_DODGE then
             mode = "blocked"
+            s.planDeferWhy = nil -- 停車政策不跑候選鏈：已知擋線即停等，與已覆蓋的情形一致
         end
         -- 世界空間掃掠複驗：最後防線（弧座標失真、量化、膨脹近似全部在此收口）。
         -- 被否決的縫**當一顆虛擬障礙塞進快照尾格重試一次**：路口折角處弧座標
@@ -7147,6 +7379,10 @@ local function replan(s, vehicle, playerNum)
                         print(string.format("%spn=%d sweep enumerate: offL=%.2f ok%s",
                             LOG, playerNum, offL, s.dodgeCrawl and " (crawl)" or ""))
                     end
+                elseif s.planDeferWhy then
+                    -- 主候選未覆蓋、鏈裡也沒有覆蓋得到的替代線：回到原本的延後（先按已知群起點煞停）
+                    Drive.deferDodge(s, playerNum, s.planDeferWhy, s.planDeferB, s.planDeferC, s.planDeferD)
+                    mode = "clear"
                 else
                     mode = "blocked"
                     s.dodgeBlockReason = (corner or not nonCornerFail) and "corner" or "sweep"
@@ -7768,11 +8004,14 @@ local function stepUnstick(s, vehicle, playerNum, now)
 
     if flen2 > 1e-6 then
         local force = UNSTICK_PUSH * MASS_BASE * mass * IMPULSE_SCALE * (mult / MULT_NORM)
-        local impulse = BaseVehicle.allocVector3f()
-        impulse:set(-force * fx, 0, -force * fy)
-        fwd:set(0, 0, 0)
-        vehicle:addImpulse(impulse, fwd)
-        BaseVehicle.releaseVector3f(impulse)
+        if speedKmh < -TUNE.UNSTICK_REVERSE_KMH then force = 0 end -- 倒車限速（理由見 TUNE）
+        if force > 0 then
+            local impulse = BaseVehicle.allocVector3f()
+            impulse:set(-force * fx, 0, -force * fy)
+            fwd:set(0, 0, 0)
+            vehicle:addImpulse(impulse, fwd)
+            BaseVehicle.releaseVector3f(impulse)
+        end
         s.reverseForce = force
         if towPhi then
             -- 倒車時掛車不穩定（折角自己變大）：牽引車往掛車方向轉把折角拉回 0（MDADTrailer.reverseSteer）
@@ -7820,6 +8059,8 @@ local function stepFollow(s, vehicle, playerNum, now)
     s.forceBrakeThis = false
     s.lastAssistForce = 0
     s.brakeImpulseThis, s.brakeAssistForce = false, 0
+    -- 上一幀施的巡航減速輔助留給 updateTraction：本幀的 dv 是那一幀的物理結果（滑行學習要排除它）
+    s.visAssistPrev, s.visAssistDecel = s.visAssistDecel, 0
 
     -- 池向量：一顆當 forward／relPos 共用，一顆在 applySteering 內當 impulse。
     -- 這段中間沒有 early return，release 一定會執行。
@@ -7847,7 +8088,10 @@ local function stepFollow(s, vehicle, playerNum, now)
         updateTraction(s, now, speedKmh, heading, s.lastHeadingError, s.lastLatDev)
         if s.dynamicsFault then postAction = "dynamics-fault" end
         -- 所有已掃掠繞行線都追切線；只有貼縫仍加倍位置環，普通繞行不放大增益。
+        -- 已掃掠的 RETURN 回線同理（2026-09-27 正式服 Mini：8m 內橫移 2m 的回線，長前視點越過
+        -- 大半進入段，姿態早早追平、位置落後擦到旁物）；crawl-exact 是沿現偏移的平行線，一併無妨。
         s.fstate.trackTangent = s.dodging == true
+            or (s.returnActive == true and not s.returnHold)
         local steer, targetSpeed, remaining, done, headingError, lateralSq, latSigned, lineLat = MDADFollower.control(
             s.profile, s.fstate, vx, vy,
             heading, speedKmh, mult * SECONDS_PER_MULT)
@@ -8390,15 +8634,13 @@ local function stepFollow(s, vehicle, playerNum, now)
 
         local sensorReady, fresh, brakeLoaded = false, false, false
         local corridorClear, obbClear = false, false
-        local tau, stopEnd = 0.5, s.lastSNow
+        local stopEnd = s.lastSNow
         local visibilityCap = s.sensor and 0 or 15
         s.visibilityHardKmh = visibilityCap -- 尚未有快照時不得沿用上一幀的高門檻。
         if s.sensor and s.sensor.ready and finite(s.sensor.stamp) then
             sensorReady = true
             local age = now - s.sensor.stamp
             fresh = age >= 0 and age <= MDADDynamics.SNAPSHOT_FRESH_MS
-            tau = age / 1000 + 0.25
-            if tau < 0.5 then tau = 0.5 end
             local visibleEnd = visibleEndS(s.sensor, s.lastSNow)
             -- horizon 戳記不匹配（route/regime 剛換、快照未及重算 minima）時
             -- 用 safeBrake（真煞車能力 prior，只緊不鬆）而非 0——歸 0 會讓
@@ -8426,30 +8668,10 @@ local function stepFollow(s, vehicle, playerNum, now)
                     and s.safeCoast < s.horizonMinCoast then
                 s.horizonMinCoast = s.safeCoast
             end
-            -- 同一可視前綴分兩個速度帳：巡航先收油，緊急停距不足才動用一秒硬煞。
-            -- 兩式保留同一距離與快照年齡；loaded/unloaded只決定前綴在哪，不換制動域。
-            -- 巡航帳用煞車 prior × CRUISE_VIS_BRAKE_GAIN（仍不超過緊急界限）：可視前緣真出現障礙
-            -- 時由 blocked／visibilityHard 的一秒硬煞接手，巡航不必只按舒適煞車自限（0924b 正式服
-            -- 60 趟：visibility 綁速 38%、MAX 檔 47.5%，120 選項實際約 60-85 km/h）。
-            local visBrake = math.min(minBrakeVisible * TUNE.EMERGENCY_BRAKE_GAIN,
-                TUNE.EMERGENCY_BRAKE_MAX)
-            visBrake = tightenLimit(visBrake, s.brakeLower, s.brakeConfidence,
-                TUNE.EMERGENCY_BRAKE_MAX)
-            -- 上限留在緊急界限的 3/4：兩帳分家才不會回到 0911c 的鋸齒硬煞（巡航帽貼著硬煞紅線）。
-            local cruiseBrake = minBrakeVisible * TUNE.CRUISE_VIS_BRAKE_GAIN
-            if cruiseBrake > visBrake * 0.75 then cruiseBrake = visBrake * 0.75 end
-            if cruiseBrake < minBrakeVisible then cruiseBrake = minBrakeVisible end
-            visibilityCap = MDADDynamics.visibilityCapKmh(
-                visibleEnd - s.lastSNow, tau, cruiseBrake, s.vehicleProfile.halfL)
-            -- 硬煞帳的前緣若就是路線終點（可視已含終點、無未載入截斷），終點不是障礙：不扣
-            -- halfL+2 的障礙緩衝（0924d E2E：MAX 檔 90 km/h 滑行到站，實速落後剖面 3-4 km/h，
-            -- 終點前 7m 以 18 km/h 撞上硬煞紅線 14.8 一秒鎖輪；到站本身由剖面與 arrive 管）。
-            local hardAhead = visibleEnd - s.lastSNow
-            if visibleEnd >= s.profile.length - 0.5 then
-                hardAhead = hardAhead + s.vehicleProfile.halfL + 2
-            end
-            s.visibilityHardKmh = MDADDynamics.visibilityCapKmh(
-                hardAhead, tau, visBrake, s.vehicleProfile.halfL)
+            -- 同一可視前綴分兩個速度帳：巡航先收油（必要時中線外力補減速），緊急停距不足才
+            -- 動用一秒硬煞。時間模型與定罪理由見 Drive.visibilityCaps。
+            local cruiseBrake
+            visibilityCap, cruiseBrake = Drive.visibilityCaps(s, now, visibleEnd, minBrakeVisible)
             -- 終點不是障礙（2026-09-01 s058 定罪）：可視帶已含路線終點且終點前
             -- 無 unloaded 截斷時，把近終點 visibilityCap 地板到爬行檔（squeeze
             -- 同檔 12）。不地板的話 ARRIVE_M(5)~8m 環帶被壓到 3-5 km/h，而引擎
@@ -8477,7 +8699,7 @@ local function stepFollow(s, vehicle, playerNum, now)
             -- visibility → ungated 0.9×／80 上限疊在 visibility 上（0924b：MAX 檔被壓在 80 以下）。
             local stopKmh = fullTarget < visibilityCap and fullTarget or visibilityCap
             stopEnd = s.lastSNow + MDADDynamics.stoppingDistance(
-                stopKmh / 3.6, tau, cruiseBrake, s.vehicleProfile.halfL)
+                stopKmh / 3.6, TUNE.VIS_TAU, cruiseBrake, s.vehicleProfile.halfL)
             if stopEnd > s.profile.length then stopEnd = s.profile.length end
             brakeLoaded = finite(minBrakeVisible) and minBrakeVisible > 0
                 and visibleEnd + 1e-6 >= stopEnd -- 可視帽本身就解到等號，留浮點容忍
@@ -8497,6 +8719,8 @@ local function stepFollow(s, vehicle, playerNum, now)
             obbClear = ((not s.adaptive or s.verifySweep
                     or s.curveVerifiedUntilS >= stopEnd)
                 or s.dodging or s.returnActive) and not s.currentBlocked
+        else
+            s.visFrontRef = nil -- 快照重置（cutover／regime）後前緣停滯計時從新快照重來
         end
         if not finite(visibilityCap) or visibilityCap < 0 then
             visibilityCap = 0
@@ -8861,6 +9085,9 @@ local function stepFollow(s, vehicle, playerNum, now)
                 s.progressX, s.progressY = vx, vy
                 s.progressS, s.progressH = s.lastSNow, heading
             elseif s.progressState == "watch" or s.progressState == "verify" then
+                if s.progressState == "watch" and not s.currentBlocked then
+                    s.progressSince = s.progressSince + Drive.progressPauseMs(s, vehicle, now, speedKmh)
+                end
                 local pdx, pdy = vx - s.progressX, vy - s.progressY
                 local wd2 = pdx * pdx + pdy * pdy
                 local ds = s.lastSNow - s.progressS
@@ -9021,6 +9248,20 @@ local function stepFollow(s, vehicle, playerNum, now)
                 okHard = false
             end
         end
+        -- 剖面的彎前滑行包絡本身就是按滑行減速度排好的減速計畫；再把它送進 jerk 積分會多一層
+        -- a²/(2j) 的穩態落後（2026-09-27 正式服兩段：彎前五秒命令一路比剖面高 4–5 km/h，到低速
+        -- 急彎入口碰到 1.5×彎帽一秒鎖輪、整台停住）。命令上界直接吃純物理剖面（profileSpeedKmh，
+        -- 不含起步／出彎收正等姿態帽），不新增任何硬煞理由；不低於 MIN_EXEC，免得到站爬行帶被夾死。
+        do
+            local pe = s.fstate.profileSpeedKmh
+            if finite(pe) and pe >= 0 then
+                if pe < MDADDynamics.MIN_EXEC_KMH then pe = MDADDynamics.MIN_EXEC_KMH end
+                local okPe
+                hardCapV, hardClampReason, okPe = MDADDynamics.lowerHardCap(
+                    hardCapV, hardClampReason, pe / 3.6, "curve-coast")
+                if not okPe then okHard = false end
+            end
+        end
         if not okHard then
             s.invalid, s.stateError, s.dynamicsFault =
                 true, "hard-cap", true
@@ -9068,6 +9309,7 @@ local function stepFollow(s, vehicle, playerNum, now)
             and sensorReady and fresh
             and not (s.followHold or s.currentBlocked
                 or (s.recoverWhy ~= nil and not s.recoverPulse) or blockedStop or reached)
+            and Drive.returnCoastClear(s, vehicle, fwd, fx, fy, actualSpeed)
         if (s.followHold or s.currentBlocked
                 or (s.recoverWhy ~= nil and not s.recoverPulse)
                 or s.returnHold or blockedStop or reached) and not returnHoldCoast then
@@ -9272,7 +9514,11 @@ local function stepFollow(s, vehicle, playerNum, now)
                         -- 弧段 ×2（2026-09-07 session-058：R≈12 彎切內 1.7m 撞路燈；切線追蹤把
                         -- 姿態環交給切線後，位置只剩 cross-track 管，0.77/v 在 20 km/h 只有 0.14/m）
                         local xg, xm = nil, nil
-                        if s.dodging and s.dodgeCrawl then
+                        -- 遠處爬行承諾的 pre-a 還沒接手近處 fallback 折點時（Follower 的 kinkExitS 在），
+                        -- Follower 正朝出彎臂轉，lineLat 卻仍是來向臂上的值——×3 位置環把它拉回來向臂，
+                        -- 兩項抵消成 st≈0 直撞外側（2026-09-27 正式服 SemiBox 片段，oracle 逐樣本重播定罪）。
+                        -- 出彎窗退回一般增益；承諾線真正接手後 Follower 本來就清 kinkExitS。
+                        if s.dodging and s.dodgeCrawl and s.fstate.kinkExitS == nil then
                             xg, xm = MDADDynamics.CROSS_TRACK_DODGE_GAIN, MDADDynamics.CROSS_TRACK_DODGE_MAX
                         elseif s.curveHardActive or s.zombieLane ~= nil then
                             -- 殭屍軟縫側移中同樣 ×2（0925p E2E road MAX：110 km/h 車身只橫移 1.4 m/s）。
@@ -9332,6 +9578,10 @@ local function stepFollow(s, vehicle, playerNum, now)
                             speed = speedKmh, target = targetSpeed, hn = s.sensor.zombieN })
                     elseif not zombiePush then
                         s.zombiePushNotified = false
+                    end
+                    -- 巡航減速輔助：實速超過可視巡航帽時沿中線反向補減速（見 Drive.visAssistForce）
+                    if assistForce == 0 and not coupled then
+                        assistForce = -Drive.visAssistForce(s, speedKmh, mult)
                     end
                     force, s.lastAssistForce = applySteering(
                         s, vehicle, fwd, fx, fy, steer or 0,

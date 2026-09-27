@@ -45,13 +45,17 @@ local INC_MAX = 8
 U.PRE_MS, U.CHUNK, U.CLIP_MAX = PRE_MS, CHUNK, CLIP_MAX
 
 -- 片段優先級：數字越小越重要（伺服器每人 32 段滿了先覆蓋數字大的）。
-local PRI = { stuck = 1, fault = 1, contact = 2, takeover = 3, unstick = 3, route = 3, brake = 4 }
+local PRI = { stuck = 1, fault = 1, contact = 2, trailer = 2, takeover = 3, unstick = 3, route = 3, brake = 4 }
 U.PRI = PRI
 local STOP_KIND = {
     UI_MinidoracatAutoDrive_StopStuck = "stuck",
     UI_MinidoracatAutoDrive_UnsupportedVehicle = "fault",
     UI_MinidoracatAutoDrive_LostRoute = "route",
     UI_MinidoracatAutoDrive_RouteTooFar = "route",
+    -- 拖掛終局（2026-09-27：43 趟拖掛停止沒有一段片段，TrailerLost 無從定罪）
+    UI_MinidoracatAutoDrive_TrailerLost = "trailer",
+    UI_MinidoracatAutoDrive_TrailerRotate = "trailer",
+    UI_MinidoracatAutoDrive_TrailerCorner = "trailer",
 }
 
 local outbox = {}      -- pn → { msgs..., n }

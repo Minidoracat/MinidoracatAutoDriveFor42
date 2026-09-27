@@ -47,10 +47,9 @@ D.FILLET_MAX_RAD = 100 * PI / 180
 D.FILLET_SEGMENT_SHARE = 0.45  -- two adjacent corners therefore consume <=90%
 D.ROAD_EDGE_MARGIN = 0.4
 D.FILLET_ANGLE_MAX_RAD = 2 * PI / 180
--- 容量（2026-09-02 玩家 telemetry：7.4 km 路線 62 個 source 點、離線重建 24 彎
--- 需 824 點）：source 64→128、output 512→1024。nearestRawSeg 已改臂窗掃，
--- 建構成本 O(output)；profile 每點 ~20 個 array 槽，1024 點約 2-3 MB Kahlua
--- retained（單 session 一份）。超出仍不整條放棄——見 buildFilletPath 預算迴圈。
+-- 容量：近處最多前 128 個 source 點參與圓角展開，這一窗最多輸出 1024 點。
+-- 0927 正式服長路線定罪：超過 source 上限不能整條放棄圓角；原始尾段逐點保留，
+-- 角度合格者標 fallback。尾段每點只加一點、不裁遠端；建構仍 O(輸出)。
 D.FILLET_SOURCE_MAX = 128
 D.FILLET_OUTPUT_MAX = 1024
 D.FILLET_ARC_MAX = 64
@@ -78,16 +77,25 @@ end
 
 -- A fixed per-frame query budget must not grow when FPS drops. Shorten the effective
 -- range instead; the requested preference and geometric extensions remain unchanged.
-function D.perceptionEffective(requested, frameMs, stepsPerFrame, near)
+-- affordableFloor（可選）＝本輪可負擔視距的下限：Sensor 以上一輪可負擔值減每輪回縮上限餵入，
+-- 幀時 EWMA 突然變長時前緣不一口氣縮回（2026-09-27 正式服 33 段 eff-regress：可負擔視距一輪
+-- 縮 9–33m＝前緣瞬間拉近，硬煞帳跟著崩）；代價只是那幾輪多掃幾格、輪時略長。
+-- 回 (實際視距, 本輪可負擔視距)。
+function D.perceptionEffective(requested, frameMs, stepsPerFrame, near, affordableFloor)
     if not D.finite(requested) then requested = D.PERCEPTION_DEFAULT_M end
     if requested > D.PERCEPTION_HARD_MAX_M then requested = D.PERCEPTION_HARD_MAX_M end
     if requested < D.PERCEPTION_MIN_EFFECTIVE_M then requested = D.PERCEPTION_MIN_EFFECTIVE_M end
+    local affordable = D.PERCEPTION_HARD_MAX_M
     if D.finite(frameMs) and frameMs > 0 and D.finite(stepsPerFrame) and stepsPerFrame > 0 then
-        local affordable = near + stepsPerFrame * D.PERCEPTION_ROUND_MS / frameMs
+        affordable = near + stepsPerFrame * D.PERCEPTION_ROUND_MS / frameMs
         if affordable < D.PERCEPTION_MIN_EFFECTIVE_M then affordable = D.PERCEPTION_MIN_EFFECTIVE_M end
+        if D.finite(affordableFloor) and affordable < affordableFloor then
+            affordable = affordableFloor
+            if affordable > D.PERCEPTION_HARD_MAX_M then affordable = D.PERCEPTION_HARD_MAX_M end
+        end
         if affordable < requested then requested = affordable end
     end
-    return requested
+    return requested, affordable
 end
 
 function D.distanceToSegmentSq(px, py, ax, ay, bx, by)
@@ -303,6 +311,31 @@ function D.visibilityCapKmh(visibleAhead, tau, aBrake, halfL)
     if not D.finite(halfL) or halfL < 0 then halfL = 0 end
     -- 與 approachCapKmh 同一條式（出口速 0）；房間 ≤ 0 那邊回 exit＝0
     return D.approachCapKmh(visibleAhead - halfL - 2, 0, tau, aBrake)
+end
+
+-- 前緣停滯保持帽（2026-09-27 正式服 visibility 硬煞定罪；Driver 的 Drive.visibilityCaps 用在巡航帳）：
+-- 回最大 v（km/h）：若可視前緣從現在起停住 hold 秒、期間只能以 coast 滑行，停滯結束時實速
+-- 仍不超過硬煞帳 visibilityCapKmh(ahead − v·hold + coast·hold²/2, tau, aHard, halfL)；
+-- 滑行途中就停住則只要求停點不越過前緣緩衝。hold≤0 退化成硬煞帳本身。
+-- 可行性對 v 單調（v 越小停滯後剩的距離越多、速度越低），二分 14 次（誤差 < 上限/16384）。
+function D.visibilityHoldCapKmh(visibleAhead, tau, aHard, halfL, coast, hold)
+    local hi = D.visibilityCapKmh(visibleAhead, tau, aHard, halfL) / 3.6
+    if not D.finite(hold) or hold <= 0 or hi <= 0 then return hi * 3.6 end
+    if not D.finite(coast) or coast < 0 then coast = 0 end
+    if not D.finite(halfL) or halfL < 0 then halfL = 0 end
+    local lo = 0
+    for _ = 1, 14 do
+        local v = (lo + hi) * 0.5
+        local ok
+        if coast > 0 and v <= coast * hold then
+            ok = visibleAhead - v * v / (2 * coast) >= halfL + 2
+        else
+            local dT = visibleAhead - v * hold + coast * hold * hold * 0.5
+            ok = v - coast * hold <= D.visibilityCapKmh(dT, tau, aHard, halfL) / 3.6
+        end
+        if ok then lo = v else hi = v end
+    end
+    return lo * 3.6
 end
 
 -- 接近某個限速區的最高進入速（2026-09-02 s064 定罪：舊制「進入 slowZone 就整段
@@ -820,9 +853,16 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
             or type(outRadius) ~= "table" or not D.finite(halfW) or halfW <= 0
             or not D.finite(rMin) or rMin <= 0 then return 0, 0, 0, false end
     local n = #srcPts / 2
-    if n < 2 or n % 1 ~= 0 or n > D.FILLET_SOURCE_MAX
+    if n < 2 or n % 1 ~= 0
             or #srcSurface ~= n - 1 or #srcWidth ~= n - 1 then
         return 0, 0, 0, false, "capacity"
+    end
+    local fitN, outputMax = n, D.FILLET_OUTPUT_MAX
+    local reason
+    if n > D.FILLET_SOURCE_MAX then
+        fitN = D.FILLET_SOURCE_MAX
+        outputMax = outputMax + n - D.FILLET_SOURCE_MAX
+        reason = "capacity"
     end
     -- 臂長預算（2026-09-01 定罪「過彎太慢／減速太早」）：tangent 消耗上限
     -- 舊版按**相鄰取樣段長**×SHARE——12m 直臂被 4m 取樣切碎後 90° 角只分到
@@ -836,10 +876,11 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
     -- 弧不出路面仍由 bandA/bandB sagitta 與 filletFits 把關，安全語意不動。
     -- armFrom／armTo＝該角入臂起點／出臂終點的 source 索引（共線臂的兩端 bend）；
     -- tangent ≤ 0.45×臂保證 tangent 點與弧點的最近 raw 段落在 [armFrom, armTo-1]。
+    -- 近處建構窗同時限制臂鏈，不能讓每個弧取樣點反覆掃描數千點的共線尾段。
     local armIn, armOut, armFrom, armTo = {}, {}, {}, {}
     do
         local isBend = {}
-        for i = 2, n - 1 do
+        for i = 2, fitN - 1 do
             local ix, iy, ox, oy, il, ol = cornerDirs(
                 srcPts[i * 2 - 3], srcPts[i * 2 - 2],
                 srcPts[i * 2 - 1], srcPts[i * 2],
@@ -848,16 +889,16 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
                 or cornerTheta(ix, iy, ox, oy) > D.FILLET_ANGLE_MAX_RAD
         end
         local acc, from = 0, 1
-        for i = 2, n - 1 do
+        for i = 2, fitN - 1 do
             local dx = srcPts[i * 2 - 1] - srcPts[i * 2 - 3]
             local dy = srcPts[i * 2] - srcPts[i * 2 - 2]
             acc = acc + sqrt(dx * dx + dy * dy)
             armIn[i], armFrom[i] = acc, from
             if isBend[i] then acc, from = 0, i end
         end
-        local to = n
+        local to = fitN
         acc = 0
-        for i = n - 1, 2, -1 do
+        for i = fitN - 1, 2, -1 do
             local dx = srcPts[i * 2 + 1] - srcPts[i * 2 - 1]
             local dy = srcPts[i * 2 + 2] - srcPts[i * 2]
             acc = acc + sqrt(dx * dx + dy * dy)
@@ -877,7 +918,7 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
             if theta >= D.FILLET_MIN_RAD then
                 local cross = ix * oy - iy * ox
                 local radius
-                if theta <= D.FILLET_MAX_RAD and cross * cross > EPS then
+                if i < fitN and theta <= D.FILLET_MAX_RAD and cross * cross > EPS then
                     local bandA = srcWidth[i - 1] * 0.5 - halfW - D.ROAD_EDGE_MARGIN
                     local bandB = srcWidth[i] * 0.5 - halfW - D.ROAD_EDGE_MARGIN
                     local maxT = armIn[i] * D.FILLET_SEGMENT_SHARE
@@ -936,7 +977,7 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
                 srcPts[i * 2 + 1], srcPts[i * 2 + 2])
             local theta = cornerTheta(ix, iy, ox, oy)
             need = 1 + arcSteps(radii[i] * theta, theta)
-            if predicted + need + (n - 1 - i) > D.FILLET_OUTPUT_MAX then
+            if predicted + need + (n - 1 - i) > outputMax then
                 radii[i], signA[i], tanS[i] = nil, nil, nil
                 fallbackCorner[i] = true
                 fallbackN = fallbackN + 1
@@ -1043,6 +1084,5 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
         srcSurface[n - 1], srcWidth[n - 1],
         fallbackCorner[n - 1] and D.SEG_FALLBACK or D.SEG_LINE,
         lastSrc, n - 1, 0)
-    if count > D.FILLET_OUTPUT_MAX then return 0, 0, fallbackN, false, "capacity" end
-    return count, filletN, fallbackN, true, nil
+    return count, filletN, fallbackN, true, reason
 end

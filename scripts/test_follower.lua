@@ -462,7 +462,7 @@ end
 -- =====================================================================
 -- 情境四：control — 直線零轉向、左右偏差正負對稱、投影窗口與防倒退
 -- =====================================================================
-scenario("control：直線零轉向、左右偏差對稱、投影窗口 +12 段、單幀最多倒退 1 段")
+scenario("control：直線零轉向、左右偏差對稱、單幀最多倒退 1 段")
 do
     local st = F.newState()
     checkEq(st.idx, 1, "newState 的初始段")
@@ -512,15 +512,6 @@ do
     checkTrue(tJunk == tJunk and rJunk == rJunk and eJunk == eJunk,
         "壞掉的 state 不會讓回傳值變成 NaN")
     checkEq(junk.idx, 10, "壞掉的 idx 被就地修正")
-
-    -- 投影窗口：每幀最多往前 12 段，瞬移不會一次跳到底（自我交叉路線的保護）
-    local stJump = F.newState()
-    F.control(pLine, stJump, 0, 0, 0, 0, DT) -- 首次全線定位後，熱幀仍受局部窗口限制。
-    local _, _, remJump = F.control(pLine, stJump, 180, 0, 0, 0, DT)
-    checkEq(stJump.idx, 13, "投影窗口只往前 12 段（idx 1 → 13）")
-    checkNear(remJump, 70, 1e-9, "剩餘距離跟著窗口上限（下一幀再往前收斂）")
-    local _, _, remJump2 = F.control(pLine, stJump, 180, 0, 0, 0, DT)
-    checkNear(remJump2, 20, 1e-9, "第二幀收斂到 x=180")
 
     -- 防倒退：單幀最多退 1 段
     local stBack = F.newState()
@@ -1474,23 +1465,6 @@ do
     local pw, vw = build(f350, 8)
     checkEq(pw.filletN, 1, "8m 路：F350 圓角成功")
     checkTrue(vw * KMH > 30, "8m 路弧段 R≈8.9 → 32 km/h，不受 fallback 規則影響")
-    -- capacity 退路（source > FILLET_SOURCE_MAX）整條標 FALLBACK 但幾何無事：30° 折點走 pure pursuit 式
-    -- （≈全速附近），不得吃 sqrt(aLat·rMin)；鉗制也不套
-    local many = {}
-    for i = 0, MDADDynamics.FILLET_SOURCE_MAX + 2 do many[#many + 1] = i * 4; many[#many + 1] = 0 end
-    local a30 = math.rad(30)
-    local lx, ly = many[#many - 1], many[#many]
-    many[#many + 1] = lx + 40 * math.cos(a30); many[#many + 1] = 40 * math.sin(a30)
-    many[#many + 1] = lx + 80 * math.cos(a30); many[#many + 1] = 80 * math.sin(a30)
-    local cnt = #many / 2
-    local rc = { pts = many, segSurface = {}, segWidth = {} }
-    for i = 1, cnt - 1 do rc.segSurface[i], rc.segWidth[i] = "paved", 8 end
-    local pc = F.begin(rc, 70, 4, f350)
-    while not F.stepBuild(pc, 4096) do end
-    checkEq(pc.filletReason, "capacity", "capacity 退路 fixture")
-    local vk = 99
-    for i = 1, pc.n - 1 do if pc.curveV[i] < vk then vk = pc.curveV[i] end end
-    checkTrue(vk > math.sqrt(9.0 * 4.32) + 1, string.format("capacity 退路的 30° 折點不吃 sqrt(aLat·rMin)（實得 %.1f km/h）", vk * KMH))
 end
 
 scenario("adaptive v4 fillet is C1/band-safe with aligned metadata and explicit fallback")
@@ -1741,11 +1715,7 @@ do
     }, 120, 3, vp)
     checkEq(legacy.filletN, 0, "v2/v3 never trusts similarly named widths for fillet")
 
-    -- 容量退路的 band 證明語意（2026-09-02 玩家 telemetry s001-s010）：舊制輸出
-    -- 超限＝buildFilletPath 回 bandValid=false → Driver 每幀 band proof 零長 →
-    -- obb 警戒帽 18 常駐 7.4 km。契約：兩條退路（source 超限／輸出超限）都保持
-    -- filletBandValid＝true（點在 raw 中心線上、segSource 直對 raw 段），差別只在
-    -- filletReason（source 超限＝"capacity" 全 fallback；輸出超限＝nil、部分弧）。
+    -- 容量退化保留近處弧與遠端目標；整條 band 證明仍成立。
     local hugeRoute = { pts = {}, segSurface = {}, segWidth = {} }
     local hugeN = MDADDynamics.FILLET_SOURCE_MAX + 1
     for i = 1, hugeN do
@@ -1757,15 +1727,11 @@ do
     end
     local huge = F.begin(hugeRoute, 120, 4, vp)
     while not F.stepBuild(huge, 4096) do end
-    checkEq(huge.filletN, 0, "source 超限：不建弧")
+    checkTrue(huge.filletN > 0, "source 超限：近處仍建可行圓角")
     checkEq(huge.filletReason, "capacity", "source 超限：reason=capacity")
     checkTrue(huge.filletBandValid, "source 超限：band 證明仍有效")
-    checkEq(huge.n, hugeN, "source 超限：保留原折線")
-    local allFallback = true
-    for i = 1, huge.n - 1 do
-        if huge.segKind[i] ~= MDADDynamics.SEG_FALLBACK then allFallback = false end
-    end
-    checkTrue(allFallback, "source 超限：全段 SEG_FALLBACK")
+    checkTrue(huge.filletFallbackN > 0, "source 超限：預算外折點保守退化")
+    checkEq(huge.x[huge.n], hugeRoute.pts[#hugeRoute.pts - 1], "source 超限：遠端目標未截斷")
 
     local zigRoute = { pts = { 0, 0 }, segSurface = {}, segWidth = {} }
     for k = 1, 8 do
@@ -2636,6 +2602,147 @@ do
     local _, _, remainLoop, _, errLoop = F.control(p, st, 20, 1.6, 0, 20, DT)
     checkTrue(st.idx < 13 and remainLoop > 200 and math.abs(errLoop) < math.pi / 2,
         "首段仍合理近：右側車道不得因後方反向臂近0.2m就跳過整個迴圈")
+end
+
+scenario("CONTACT_CAPACITY_KINK：257 點保留近處弧、容量尾段與窄路折點維持保守")
+do
+    local vp = { valid = true, geometryValid = true, halfW = 0.9, rMin = 4.32,
+        wheelbase = 3.79, delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 100 }
+    local function build(w)
+        local r = { pts = { 0, 0, 60, 0, 60, 60 }, segSurface = {}, segWidth = {} }
+        for i = 4, 255 do r.pts[#r.pts + 1], r.pts[#r.pts + 2] = 60, (i - 2) * 60 end
+        r.pts[#r.pts + 1], r.pts[#r.pts + 2] = 120, 253 * 60
+        r.pts[#r.pts + 1], r.pts[#r.pts + 2] = 180, 253 * 60
+        for i = 1, 256 do r.segSurface[i], r.segWidth[i] = "paved", w end
+        local p = F.begin(r, 70, 4, vp)
+        while not F.stepBuild(p, 4096) do end
+        return p, r
+    end
+    local p, r = build(8)
+    checkTrue(p.filletN >= 1 and p.segKind[2] == MDADDynamics.SEG_ARC, "257 點近處 90° 彎仍建 ARC")
+    checkTrue(p.filletBandValid, "容量降階不破壞 band 證明")
+    checkEq(p.x[p.n], 180, "容量降階保留完整遠端 x")
+    checkEq(p.y[p.n], 253 * 60, "容量降階保留完整遠端 y")
+    local tail = p.n - 2
+    checkNear(p.curveV[tail], math.sqrt(9 * vp.rMin), 1e-9, "capacity 尾端直角仍吃 sqrt(aLat*rMin)")
+    local st = F.newState()
+    st.idx = tail - 1
+    local _, _, _, _, err = F.control(p, st, 60, 253 * 60 - 6, math.pi / 2, 12, DT)
+    checkTrue(math.abs(err) < 0.01 and st.kinkHeld ~= nil, "capacity 尾端切點前仍鉗制前視，不切內")
+    local bandOK = true
+    for i = 1, p.n - 1 do
+        local a, b = p.segSourceA[i], p.segSourceB[i]
+        for _, v in ipairs({ i, i + 1 }) do
+            local da = MDADDynamics.distanceToSegmentSq(p.x[v], p.y[v],
+                r.pts[2*a-1], r.pts[2*a], r.pts[2*a+1], r.pts[2*a+2])
+            local db = MDADDynamics.distanceToSegmentSq(p.x[v], p.y[v],
+                r.pts[2*b-1], r.pts[2*b], r.pts[2*b+1], r.pts[2*b+2])
+            if math.min(da, db) > (4 - vp.halfW - MDADDynamics.ROAD_EDGE_MARGIN)^2 + 1e-8 then bandOK = false end
+        end
+    end
+    checkTrue(bandOK, "source-map 仍覆蓋每段兩端，不借錯另一條臂")
+    local narrow = build(3)
+    checkEq(narrow.filletN, 0, "3m 路長車不能因容量修正假裝可建弧")
+    checkNear(narrow.curveV[2], math.sqrt(9 * vp.rMin), 1e-9, "3m 路長車近處仍是低速 fallback")
+    r = { pts = { 0, 0, 60, 0 }, segSurface = {}, segWidth = {} }
+    for i = 3, 257 do r.pts[#r.pts + 1], r.pts[#r.pts + 2] = 60 + (i - 2) * 60, (i - 2) * 60 end
+    for i = 1, 256 do r.segSurface[i], r.segWidth[i] = "paved", 3 end
+    narrow = F.begin(r, 70, 4, vp)
+    while not F.stepBuild(narrow, 4096) do end
+    checkEq(narrow.filletN, 0, "257 點 3m 路的 45° 彎長車仍無可行圓角")
+    checkNear(narrow.curveV[2], math.sqrt(9 * vp.rMin), 1e-9, "45° 長車 fallback 不放寬成高速")
+end
+
+scenario("HAIRPIN_PROJECTION_FORWARD_JUMP：投影交接須可達，短段高速／真正反向目標不受阻")
+do
+    local p = buildRoute({ 2014.25, 14735.25, 2004.75, 14744.75, 2002, 14700, 2002, 14600 }, 70)
+    local st = F.newState()
+    F.setLaneBias(st, 2.01)
+    local rows = {
+        { 2006.8359375, 14739.8203125, 2.356728365698421, 12.88 },
+        { 2006.59375, 14740.078125, 2.309739500056473, 11.95 },
+        { 2006.4140625, 14740.34375, 2.160421211100277, 11.36 },
+    }
+    local prev, continuous, correctArm, noRotate = nil, true, true, true
+    for _, r in ipairs(rows) do
+        local _, _, rem = F.control(p, st, r[1], r[2], r[3], r[4], 0.1)
+        local s = p.length - rem
+        if prev and s - prev > 1 then continuous = false end
+        if st.idx ~= 1 then correctArm = false end
+        if st.rotating then noRotate = false end
+        prev = s
+    end
+    checkTrue(continuous, "正式服三幀：不再一幀前跳 8.9m")
+    checkTrue(correctArm, "正式服三幀：切線仍是進彎臂，不只鉗 remaining")
+    checkTrue(noRotate, "正式服三幀：不得誤進 ROTATE")
+    -- 長車的切點區可包到兩臂較近處；車頭仍朝頂點、不朝出臂，不算真正交接。
+    p.rMin = 6
+    local largeTurn = F.newState()
+    for _, r in ipairs(rows) do F.control(p, largeTurn, r[1], r[2], r[3], r[4], 0.1) end
+    checkEq(largeTurn.idx, 1, "在大 rMin 交接區內但車頭仍朝入臂：仍不可跳臂")
+    p.rMin = 3
+    -- 靜止／低速的 1cm 出臂方向抖動不是轉彎完成；方向閘必須認車頭，不認這次位移。
+    F.control(p, largeTurn, rows[3][1] + math.cos(p.segH[2]) * 0.01,
+        rows[3][2] + math.sin(p.segH[2]) * 0.01, rows[3][3], 0, 0.1)
+    checkEq(largeTurn.idx, 1, "頂點附近沿出臂抖動 1cm 不能跳臂")
+    checkFalse(largeTurn.rotating, "頂點附近 1cm 抖動不能觸發 ROTATE")
+    for i = 1, 18 do
+        F.control(p, st, 2006.4140625 + (2004.75 - 2006.4140625) * i / 18,
+            14740.34375 + (14744.75 - 14740.34375) * i / 18, 2.2, 10, 0.1)
+    end
+    F.control(p, st, 2004.72, 14744.25, -1.63, 10, 0.1)
+    checkEq(st.idx, 2, "真正到達頂點後可交接出彎臂")
+    p = buildRoute(straight(2001, 0.1), 100)
+    st = F.newState()
+    F.control(p, st, 0, 0, 0, 90, 0.1)
+    local _, _, rem = F.control(p, st, 5, 0, 0, 90, 0.2)
+    checkNear(p.length - rem, 5, 1e-9, "高速一幀走 50 個短段不被段數窗卡住")
+    local arc = {}
+    for i = 0, 1000 do
+        local a = i * 0.0025
+        arc[#arc + 1], arc[#arc + 2] = 40 * math.sin(a), 40 * (1 - math.cos(a))
+    end
+    p = buildRoute(arc, 100)
+    st = F.newState()
+    F.control(p, st, 0, 0, 0, 90, 0.1)
+    _, _, rem = F.control(p, st, p.x[51], p.y[51], 0.125, 90, 0.2)
+    checkNear(p.length - rem, p.s[51], 1e-9, "正常圓弧高速跨 50 個短段仍精確定位")
+    p = buildRoute({ 0, 0, -100, 0 }, 70)
+    F.resetState(st)
+    F.control(p, st, 0, 0, 0, 10, 0.1)
+    checkTrue(st.rotating, "換成真正反向目標仍可調頭")
+    -- 真正的急髮夾會繞過 raw 頂點；不能把可達性做成「必須壓過頂點」而永遠卡入臂。
+    for _, degrees in ipairs({ 140, 170 }) do
+        local a = math.rad(degrees)
+        p = F.begin({ pts = { 0, 0, 60, 0, 60 + 30 * math.cos(a), 30 * math.sin(a) },
+            segSurface = { "paved", "paved" }, segWidth = { 4, 8 } }, 120, 4,
+            { valid = true, geometryValid = true, halfW = 0.656, rMin = 2.26, wheelbase = 1.985,
+                delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 120 })
+        while not F.stepBuild(p, 4096) do end
+        st = F.newState()
+        local x, y, h, yaw, passed = 40, 0, 0, 0, false
+        for _ = 1, 4000 do
+            local steer, _, remaining = F.control(p, st, x, y, h, 12, 1 / 30)
+            if p.length - remaining >= 75 then passed = true; break end
+            local k = math.max(-0.4, math.min(0.4, steer * 0.4))
+            yaw = yaw + (k * 12 / KMH - yaw) / 30 / 0.35
+            h = h + yaw / 30
+            x, y = x + math.cos(h) * 12 / KMH / 30, y + math.sin(h) * 12 / KMH / 30
+        end
+        checkTrue(passed, degrees .. "° 真髮夾閉環：可交接到出彎臂並前進 15m")
+    end
+    -- 讓位／倒車脫困期間 control 沒跑：玩家沿折返路線開到隔 5m 的另一臂，恢復時 resetControl
+    -- 必須清掉可達歷史，否則真實新段被判不可達、黏在舊段（2026-09-27 review）。
+    -- 違規證明：resetControl 不清 projS 即紅。
+    p = buildRoute({ 0, 0, 60, 0, 60, 5, 0, 5 }, 70)
+    st = F.newState()
+    F.control(p, st, 10, 0, 0, 20, 0.1)
+    local _, _, remStay = F.control(p, st, 10, 5, math.pi, 20, 0.1)
+    checkTrue(p.length - remStay < 20, "同一幀跳到隔 5m 的另一臂：可達上界仍擋住（s="
+        .. string.format("%.1f", p.length - remStay) .. "）")
+    F.resetControl(st)
+    local _, _, remBack = F.control(p, st, 10, 5, math.pi, 20, 0.1)
+    checkNear(p.length - remBack, 115, 0.5, "讓位恢復後 resetControl 重新錨定：定位到玩家開到的另一臂")
 end
 
 closeScenario()
