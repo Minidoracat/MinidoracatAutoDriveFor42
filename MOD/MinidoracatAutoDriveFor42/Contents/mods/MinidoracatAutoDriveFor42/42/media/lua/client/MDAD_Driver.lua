@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0928c"
+Drive.REV = "0928d"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -246,6 +246,8 @@ TUNE.TRAFFIC_PASS_MIN_KMH = 15    -- 淨距只有最少值時的錯車速度；�
 TUNE.TRAFFIC_PASS_FREE_M = 1.0
 TUNE.TRAFFIC_YIELD_BUFFER_M = 3   -- 讓車：在預計交會點前這麼遠停下
 TUNE.ONCOMING_DESIGN_KMH = 25     -- 借對向車道繞行的過渡段設計速（見 shapeProfile）
+TUNE.ONCOMING_INTRUDE_M = 0.5     -- 路寬未知時：車身左緣壓過路面中線超過這麼多才算借對向車道
+TUNE.ONCOMING_PASS_M = 2.4        -- 對向車道被吃掉後剩不到這麼寬（一台車＋餘裕）＝借對向車道
 TUNE.TRAFFIC_WAIT_NOTICE_MS = 5000 -- 「等對向車」提示去重窗
 TUNE.FOLLOW_STOP_M = 5            -- 跟車：車頭到前車車尾小於此值＝停等
 TUNE.FOLLOW_MIN_M = 6             -- 跟車距離＝MIN＋前車速度×TIME
@@ -3664,6 +3666,19 @@ function Drive.trafficStopCap(s, b, offL)
     return MDADDynamics.approachCapKmh(b - run - s.lastSNow - vp.halfL, 0, 0.5, coast)
 end
 
+-- 借對向車道判定（shapeProfile 的短設計，TUNE.ONCOMING_DESIGN_KMH）：只在 MP——單機沒有別的駕駛、不會有對向
+-- 來車；且繞行線讓對向車道剩下的寬度不夠一台車錯車（半路寬 − 壓過中線量 < ONCOMING_PASS_M）。路寬未知時
+-- 壓過中線 ONCOMING_INTRUDE_M 即算。0928d E2E rc2：窄路上 0.25–0.75m 的小側偏也被當借道，設計 25 → 過渡段
+-- 只剩兩個車長、清距帽 9–18，86m 外就規劃好的繞行也讓車從 34–60 掉到 10–18。
+function Drive.borrowsOncoming(s, offL)
+    if not isClient() or not finite(s.laneRatio) or s.laneRatio <= 0 then return false end
+    local intrude = (s.roadBias or 0) - (offL - s.vehicleProfile.halfW)
+    if not finite(intrude) or intrude <= 0 then return false end
+    local w = s.currentSegWidth
+    if finite(w) and w > 0 then return w * 0.5 - intrude < TUNE.ONCOMING_PASS_M end
+    return intrude > TUNE.ONCOMING_INTRUDE_M
+end
+
 -- 對正延後的接近帽（0928b E2E rc1 0008：126° 折點一出彎，貼縫繞行因車頭還斜 >20° 延後，
 -- 舊制延後只設 mode=clear、沒有接近帽，車以 12-16 km/h 直接開到縫口的桿）：以完整煞車能力
 -- 在縫口 b 前降到承諾帽（同 speed 延後）；出口速不低於 MIN_EXEC——停下來 pure pursuit 就擺不正
@@ -5925,9 +5940,8 @@ local function shapeProfile(s, profile, a, b, c, d, offL, baseL, crawlDesign)
     -- 巡航設計的過渡長 50m，實際常被淨距帽壓到 10 km/h，在對向車道裡爬好幾秒（E2E park400／
     -- SUV park：對向車出現時已壓線、退不回也快不起來＝被撞）。短過渡＝到障礙前才切出去、
     -- 過了立刻切回，對向車出現時多半還在自己車道、可以停下讓車。
-    -- 越過「路面中線」（導航線可偏離路中心 roadBias，不是 l=0）
-    if finite(s.laneRatio) and s.laneRatio > 0 and offL - s.vehicleProfile.halfW < (s.roadBias or 0)
-            and intended > TUNE.ONCOMING_DESIGN_KMH then
+    -- 越過「路面中線」（導航線可偏離路中心 roadBias，不是 l=0）；判定見 Drive.borrowsOncoming。
+    if Drive.borrowsOncoming(s, offL) and intended > TUNE.ONCOMING_DESIGN_KMH then
         intended = TUNE.ONCOMING_DESIGN_KMH
     end
     if crawlDesign or intended < crawl then intended = crawl end
@@ -6712,25 +6726,39 @@ end
 
 -- 停留線掃掠（TUNE.STAY_TAIL_M 註解）：rs→b 從 baseL 換到 offL、之後平行到 c＋車身，
 -- 不回線。線用 buildOffsetLine 的 returnLane 覆寫模式建（RETURN 同款），覆蓋只到
--- dStay＝c＋halfL＋pad＋tail。回 ok, margin, ovN, ovS0；線留在 tmpOv 供 commit。
-local function sweepStay(s, a, b, c, offL, baseL, tag, needBase)
+-- dStay＝c＋halfL＋pad＋tail。回 ok, margin, ovN, ovS0, dStay, c；線留在 tmpOv 供 commit。
+-- truncate：群長過可視距離（整排護欄、長車陣）——車開到群前、前緣跟著前進也驗不到停留線尾——
+-- 時，保持段只到可視前緣容得下的地方。0928d E2E rc3 0030：F350 右側 80m 長的圍欄一路延伸到
+-- 未載入區，主候選與停留線都驗不到出口，每輪延後、在群前停死到交還。收短的停留走完後常駐 lane
+-- 已是 offL（鏈式），下一輪從停留 lane 規劃；常駐線仍被擋就不解鏈，等群尾看得到再回來。
+-- 靠近就驗得到的群不收短：延後、到了再規劃完整繞行（停留是爬行檔，比有回線段的繞行慢）。
+local function sweepStay(s, a, b, c, offL, baseL, tag, needBase, truncate)
     local prof, rs = s.profile, s.lastSNow
     local halfW, halfL, pad = sweepGeom(s, needBase)
-    local dStay = c + halfL + pad + TUNE.STAY_TAIL_M
+    local tail = halfL + pad + TUNE.STAY_TAIL_M
+    if truncate then
+        local vis = visibleEndS(s.sensor, rs)
+        if c + tail + s.bodyReach > vis + (b - halfL - rs) then
+            local cMax = vis - s.bodyReach - tail - 0.5
+            if cMax < c then c = cMax end
+            if c < b + halfL then return false, 99, 0, 0, c + tail, c end
+        end
+    end
+    local dStay = c + tail
     if dStay > prof.length then dStay = prof.length end
-    if dStay <= c + 0.5 or b <= rs + 0.5 then return false, 99, 0, 0, dStay end
+    if dStay <= c + 0.5 or b <= rs + 0.5 then return false, 99, 0, 0, dStay, c end
     -- 停留線目標＝offL 是掃掠驗過的絕對 lane：targetKeep 0 只夾物理餘裕（留 keep 會把線從
     -- room 邊再拉 0.6，(kerb) 那道縫就被自己吃掉）
     local ovN, ovS0, reason, lastCovered = MDADFollower.buildOffsetLine(
         prof, rs, a, b, c, dStay - 1, offL, baseL, s.tmpOvX, s.tmpOvY,
         startLaneOf(s, baseL), offL, b, nil, 0)
     if ovN < 2 or reason ~= "ok" or lastCovered < dStay - 1e-6 then
-        return false, 99, ovN, ovS0, dStay
+        return false, 99, ovN, ovS0, dStay, c
     end
     s.tmpOvEndS = lastCovered
     local ok, margin = sweepLine(s, s.tmpOvX, s.tmpOvY, ovN, ovS0, lastCovered,
         a, b, c, dStay, offL, tag, needBase, nil, true)
-    return ok, margin, ovN, ovS0, dStay
+    return ok, margin, ovN, ovS0, dStay, c
 end
 
 -- 停留門檻：lane 在路面餘裕內（laneBiasAt 不夾＝之後常駐得住）＋ corridor 從該 lane
@@ -6953,8 +6981,9 @@ local function sweepWithFallbacks(s, planN, a, b, c, d, offL, baseL, tag, nb, ph
                     s.stayNextB = b2
                 end
             end
-            local ok4, mg4, ovN4, ovS04, dStay = sweepStay(s, sa, sb, sc, offL, baseL, tag .. "-stay", used)
-            if ok4 then return true, sa, sb, sc, dStay, offL, mg4, ovN4, ovS04, used, "stay" end
+            local ok4, mg4, ovN4, ovS04, dStay, cStay = sweepStay(
+                s, sa, sb, sc, offL, baseL, tag .. "-stay", used, true)
+            if ok4 then return true, sa, sb, cStay, dStay, offL, mg4, ovN4, ovS04, used, "stay" end
             s.stayNextB = nil
         elseif getDebug() then
             print(string.format("%sstay refused[%s] offL=%.2f why=%s", LOG, tostring(tag), offL, tostring(why)))

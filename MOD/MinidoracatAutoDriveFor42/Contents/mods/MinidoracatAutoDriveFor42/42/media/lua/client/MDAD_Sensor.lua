@@ -322,11 +322,27 @@ local function classifySprite(obj, name)
     -- 對側路緣不回中（2026-08-28 實機）。needHalf 的 0.5 margin 仍保護樹幹。
     if instanceof(obj, "IsoTree") then return COST_HARD_THIN end
 
+    -- 車輛的靜態碰撞形狀由 IsoChunk.calcPhysics 決定（IsoChunk.java:1984-2126），不只看碰撞旗標：
+    -- 室外路燈 lighting_outdoor_* 在地面層一律是一根柱（:1995-2014）——原版 81 個路燈 sprite 有 76
+    -- 個不帶任何碰撞旗標，Sensor 整排看不到。0928d E2E rc3 0027：路燈立在轉角，車以 17 km/h 撞上、
+    -- 三次倒車都撞回同一根。帶 PhysicsShape 的路燈照 PhysicsShape 走（:2094-2111）。
+    if find(name, "lighting_outdoor_", 1, true) and not props:has("PhysicsShape")
+            and not (props:has("MoveType") and props:get("MoveType") == "WallObject") then
+        return COST_HARD_THIN
+    end
+
     if props:has(F_doorN) then return COST_NONE end
     if props:has(F_doorW) then return COST_NONE end
     -- 原版通常會把 StopCar/Hoppable 合成 collision；顯式 guard 保護未合成或 MOD tile，
     -- 也避免緊接著的 isMoveAbleObject 分支把真正會停車的物件降成 SOFT。
     if props:has("StopCar") then return COST_HARD end
+    -- PhysicsShape 屬性直接給碰撞形狀（原版 50 個 sprite 都是 Tree；其中 3 個掛在桿上的招牌／
+    -- 運動設施沒有 StopCar 也沒有碰撞旗標）
+    if props:has("PhysicsShape") then
+        local shape = props:get("PhysicsShape")
+        if shape == "Tree" then return COST_HARD_THIN end
+        if shape ~= "Floor" then return COST_HARD end
+    end
     if obj:getType() == T_moveable then return COST_SOFT end
     if props:has("HitByCar") then                      -- PropertyContainer.java:187（has(String) 過載）
         if find(name, "street_decoration", 1, true) == 1 then return COST_NONE end

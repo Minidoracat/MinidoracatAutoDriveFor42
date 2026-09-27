@@ -16238,8 +16238,12 @@ function drive.scenarioPerceptionRange()
     checkFalse(st.sensor.unloaded, "(cov) 走廊整段已載入：拒收不得歸因未載入")
     checkTrue(st.sensor.scanEndS < 60,
         "(cov) 請求 48m 的完成快照只掃到 " .. tostring(st.sensor.scanEndS) .. "m")
-    checkEq(MDAD.Drive.debugSweepFallbacks(0, 1, 8, 60, 80, 2, "cov"), false,
-        "(cov) hold 段 60m 起就沒掃到：未掃 ≠ 淨空，不得承諾")
+    -- 0928d：群長過可視距離時停留保持段收到已掃範圍內（鏈式停留）——收短的停留可以承諾，
+    --   原線（回線段在掃描帶外）不行
+    local okNear, _, varNear, _, _, _, _, dNear = MDAD.Drive.debugSweepFallbacks(0, 1, 8, 60, 80, 2, "cov")
+    checkTrue(okNear ~= true or (varNear == "stay" and dNear + st.bodyReach <= st.sensor.scanEndS + 1e-6),
+        "(cov) hold 段 60m 起就沒掃到：未掃 ≠ 淨空，只准收短到已掃範圍的停留（ok=" .. tostring(okNear)
+        .. " variant=" .. tostring(varNear) .. " d=" .. tostring(dNear) .. "）")
     checkEq(st.dodgeBuildReason, "coverage",
         "(cov) 拒收理由是沒掃到而不是未載入（實得 " .. tostring(st.dodgeBuildReason) .. "）")
     MDAD.HUD.perceptionDistance = function() return 200 end
@@ -16697,6 +16701,8 @@ drive.scenarioVisibilityTiming()
 --   (lead)     同向前車照它的速度跟，不再是舊的 20 平帽。
 function drive.scenarioTraffic()
     scenario("會車／跟車：對向照車道錯開、佔中線靠右閃、讓不開才停等、前車照速跟")
+    local oldClient = clientFlag
+    clientFlag = true -- 對向來車只存在於 MP（0928c：借對向車道短設計只在 MP 套）
     local oldWorld, oldGeo, oldSandbox, oldVeh, oldGet =
         drive.world, drive.vehGeo, SandboxVars, dveh, getSpecificPlayer
     local oldApi, oldGear, oldZ = MinidoracatMiniMapAPI.navApiVersion, MDAD.Drive.getGear(0), MDAD.HUD.zombieDodge
@@ -16959,10 +16965,31 @@ function drive.scenarioTraffic()
     drive.frameMs(wasMs)
     MDAD.HUD.zombieDodge = oldZ
     MDAD.Drive.setGear(0, oldGear)
+    -- (park-sp) 0928c：單機沒有別的駕駛＝不會有對向來車，借對向車道也照剖面速設計（不套 25 的短過渡）。
+    --   違規證明：拿掉 isClient 條件＝設計速 25 紅。
+    clientFlag = false
+    arm(8)
+    local parkedSp = car(40, 2, 0)
+    parkedSp._stopped = true
+    traffic(parkedSp, 0, 2)
+    -- 剖面速設計的過渡段較長，要車往前開到整條線都在已掃範圍內才承諾（假車不會自己動）
+    for _ = 1, 8 do
+        if st.dodging then break end
+        dveh._x = dveh._x + 3
+        drive.scanRound()
+        driveReset(dveh)
+        driveTick(dp, dveh)
+    end
+    checkTrue(st.dodging, "(park-sp) 單機借對向車道繞停車")
+    checkTrue(st.dodgeDesignSpeed > MDAD.Drive.debugTune().ONCOMING_DESIGN_KMH,
+        "(park-sp) 單機不套對向短設計（實得 " .. tostring(st.dodgeDesignSpeed) .. "）")
+    drive.clearVehicleGeom(parkedSp._cells)
+    MDAD.Drive.stop(0, nil)
     MinidoracatMiniMapAPI.navApiVersion = oldApi
     drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
     drive.world, drive.vehGeo, SandboxVars, dveh, getSpecificPlayer =
         oldWorld, oldGeo, oldSandbox, oldVeh, oldGet
+    clientFlag = oldClient
 end
 drive.scenarioTraffic()
 
@@ -17375,6 +17402,25 @@ function drive.scenario0928c()
     s.lastLatSigned, s.dodging = (el + ep) / 2, true
     checkNear(MDAD.Drive.laneRampDev(s, raw, 36), raw, 1e-9, "(ramp) 繞行中不套")
 
+    -- (oncoming) 0928d：借對向車道短設計只在 MP、且對向車道剩不到一台車寬（8m 路：側偏 0.5＝剩 3.6m 不算、
+    --   −1.0＝剩 2.1m 算）；路寬未知時壓線 >0.5m 才算；單機一律不算。違規證明：拿掉 isClient＝SP 案紅。
+    local oc = { laneRatio = 1, roadBias = 0, vehicleProfile = { halfW = 0.9 }, currentSegWidth = 8 }
+    local oldClient = clientFlag
+    clientFlag = true
+    checkFalse(MDAD.Drive.borrowsOncoming(oc, 0.5), "(oncoming) MP 8m 路側偏到 0.5：對向還剩 3.6m，不算借道")
+    checkTrue(MDAD.Drive.borrowsOncoming(oc, -1.0), "(oncoming) MP 8m 路側偏到 −1：對向只剩 2.1m，算借道")
+    oc.currentSegWidth = 5
+    checkTrue(MDAD.Drive.borrowsOncoming(oc, 0.5), "(oncoming) MP 5m 窄路壓線 0.4m：對向只剩 2.1m，算借道")
+    oc.currentSegWidth = 10
+    checkFalse(MDAD.Drive.borrowsOncoming(oc, -0.5), "(oncoming) MP 10m 寬路壓線 1.4m：對向還剩 3.6m，不算")
+    oc.currentSegWidth = nil
+    checkFalse(MDAD.Drive.borrowsOncoming(oc, 0.5), "(oncoming) 路寬未知：壓線 0.4m 不算")
+    checkTrue(MDAD.Drive.borrowsOncoming(oc, 0), "(oncoming) 路寬未知：壓線 0.9m 算")
+    clientFlag = false
+    oc.currentSegWidth = 8
+    checkFalse(MDAD.Drive.borrowsOncoming(oc, -1.0), "(oncoming) 單機沒有對向來車：不算借道")
+    clientFlag = oldClient
+
     -- (hitch) 0928c E2E rc1 0007：遊戲卡住 3.6 秒（引擎單幀物理夾 83ms、車只前進 0.5m）不是停滯。
     --   違規證明：progressPauseMs 不認卡頓＝suspect 紅。
     local oldVeh = dveh
@@ -17411,6 +17457,101 @@ function drive.scenario0928c()
     dveh = oldVeh
 end
 drive.scenario0928c()
+
+-- (long-row) 0928d E2E rc3 0030：F350 右側 80m 長的圍欄一路延伸到未載入區——主候選的回線段與
+--   停留線的車身前伸都驗不到，舊制每輪延後（dodge-defer），在群前停死到 15 秒交還。現制停留
+--   的保持段收到可視前緣容得下的地方（鏈式停留）；走完後常駐線仍被擋就不解鏈，群尾看得到、
+--   常駐線淨空才解鏈。違規證明：sweepStay 不收短＝不 commit 紅。
+function drive.scenario0928d()
+    scenario("0928d：長群伸出可視前緣＝收短的停留（鏈式）")
+    local oldSand = SandboxVars
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40,
+        RightLaneBias = 0 })
+    local wasMs = drive.frameMs(10)
+    drive.fillWorld(-10, 160, -8, 8)
+    for x = 30, 53 do drive.putSolid(x, 0, "long_row_" .. x) end
+    drive.world[54 * 100000 + 0] = nil -- 前緣：群一路延伸到未載入格
+    checkTrue(armDrive(), "(long-row) 啟動")
+    setHeading(dveh, 0)
+    dveh._speed = 20
+    local st = MDAD.Drive.debugSession(0)
+    drive.frameMs(10)
+    drive.scanRound()
+    drive.frameMs(10)
+    drive.scanRound()
+    checkTrue(st.sensor.unloaded and st.sensor.unloadedS < 56,
+        "(long-row) 前置：54m 處未載入（unloadedS=" .. tostring(st.sensor.unloadedS) .. "）")
+    -- 遠處：靠近後前緣跟著前進就驗得到完整繞行＝照舊延後，不收短（停留是爬行檔）
+    checkTrue(st.dodging ~= true and st.blocked ~= true,
+        "(long-row) 群還遠：延後、不收短（dodging=" .. tostring(st.dodging) .. " tier=" .. tostring(st.dodgeTier) .. "）")
+    -- 開到群前（fixture 的前緣固定在 54m＝車到了也驗不到）：收短的停留
+    dveh._x = 20
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    drive.frameMs(10)
+    drive.scanRound()
+    checkTrue(st.dodging == true and st.dodgeStay == true and st.laneChained == true,
+        "(long-row) 群尾伸出前緣：收短的停留承諾（dodging=" .. tostring(st.dodging)
+        .. " stay=" .. tostring(st.dodgeStay) .. " tier=" .. tostring(st.dodgeTier) .. "）")
+    local fs = st.fstate
+    checkTrue(type(fs.offD) == "number" and fs.offD + st.bodyReach <= st.sensor.unloadedS + 1e-6
+            and fs.offC < 53,
+        "(long-row) 停留線整條在已載入範圍內、保持段收在群尾之前（c=" .. tostring(fs.offC)
+        .. " d=" .. tostring(fs.offD) .. "）")
+    local stayLane = fs.offL
+    dveh._x, dveh._y = (fs.offC or 40) + 0.5, stayLane or 0
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    drive.frameMs(10)
+    drive.scanRound()
+    checkTrue(st.dodgeStay ~= true and st.laneChained == true and math.abs(fs.laneBias - stayLane) < 1e-6,
+        "(long-row) 保持段走完：常駐線仍被擋＝鏈不解、沿停留 lane 續行（chained=" .. tostring(st.laneChained)
+        .. " bias=" .. tostring(fs.laneBias) .. "）")
+    drive.mkSquare(54, 0)
+    dveh._x = 60
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    for _ = 1, 3 do drive.frameMs(10); drive.scanRound() end
+    checkTrue(st.laneChained == false,
+        "(long-row) 群尾已過、常駐線淨空：解鏈（chained=" .. tostring(st.laneChained) .. "）")
+    MDAD.Drive.stop(0, nil)
+    for x = 30, 53 do drive.clearCell(x, 0) end
+    drive.frameMs(wasMs)
+    drive.fillWorld(-2, 70, -7, 7)
+
+    -- (lamp) 0928d E2E rc3 0027：車輛靜態碰撞形狀由 IsoChunk.calcPhysics 決定——室外路燈
+    --   lighting_outdoor_* 不帶任何碰撞旗標也是一根柱；PhysicsShape 屬性直接給形狀。牆上的燈
+    --   （MoveType=WallObject）與 PhysicsShape=Floor 不算。違規證明：拿掉路燈／PhysicsShape 規則即紅。
+    local function propObj(x, y, name, vals)
+        local props = {
+            has = function(_, key) return vals[key] ~= nil end,
+            get = function(_, key) return vals[key] end,
+        }
+        local sprite = { shouldHaveCollision = function() return false end,
+            getProperties = function() return props end }
+        local sq = drive.world[x * 100000 + y] or drive.mkSquare(x, y)
+        sq._objs[#sq._objs + 1] = { getSpriteName = function() return name end,
+            getSprite = function() return sprite end, getProperties = function() return props end,
+            getType = function() return nil end }
+    end
+    local function hardAt(name, vals)
+        drive.fillWorld(-10, 90, -8, 8)
+        propObj(30, 0, name, vals)
+        checkTrue(armDrive(), "(lamp) " .. name .. " 啟動")
+        drive.scanRound()
+        local n = MDAD.Drive.debugSession(0).sensor.hardN
+        MDAD.Drive.stop(0, nil)
+        return n
+    end
+    checkTrue(hardAt("lighting_outdoor_01_1", {}) > 0, "(lamp) 不帶碰撞旗標的室外路燈是硬障礙")
+    checkEq(hardAt("lighting_outdoor_01_77", { MoveType = "WallObject" }), 0, "(lamp) 牆上的燈不算")
+    checkTrue(hardAt("signs_one-off_09_72", { PhysicsShape = "Tree" }) > 0,
+        "(lamp) PhysicsShape=Tree 的招牌桿是硬障礙")
+    checkEq(hardAt("harness_phys_floor", { PhysicsShape = "Floor" }), 0, "(lamp) PhysicsShape=Floor 不算")
+    drive.fillWorld(-2, 70, -7, 7)
+    SandboxVars = oldSand
+end
+drive.scenario0928d()
 
 do -- 主 chunk local 槽已滿：整段包成函式，內部 local 不佔主 chunk
 -- =====================================================================
