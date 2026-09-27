@@ -3,72 +3,51 @@
 
 [hr][/hr]
 
-[h2]✨ 這是什麼[/h2]
-GPS 導航儀規劃道路路線，自駕模組沿路自動行駛，到達目的地停車。
+用 GPS 導航儀規劃道路路線，自動駕駛模組就會沿路開過去、到達目的地停車。
 
-[h2]MOD 地圖支援：請先閱讀[/h2]
-[b]訂閱地圖 MOD，不代表該地圖的所有道路都能導航或自動駕駛。[/b]
-[list]
-[*] 新增或修改的道路，需由地圖作者或相容性補丁作者提供、維護符合目前遊戲官方街道格式的 [b]streets.xml[/b]。資料須對應實際路面，並正確連接地圖內外的道路。
-[*] 地圖能正常遊玩、顯示地圖圖片，或只是有 streets.xml，都不代表道路資料完整。本 MOD 不會從圖片自動產生道路，也不會自動補齊缺路或修正錯位、斷連的道路資料。
-[*] 若只有特定地圖無法導航，請先更新 MiniMap 與 AutoDrive，並向地圖作者確認道路資料；依下方道路回報入口附地圖連結、導航截圖與文字座標即可，不必診斷紀錄。
-[/list]
-
-[h2]🚀 快速上手[/h2]
-[olist]
-[*] 取得 [b]GPS 導航儀[/b] 與 [b]自動駕駛模組[/b]（搜刮，或電工 3／6 級合成）
-[*] 站在車旁，從[b]對車右鍵或車輛維修面板[/b]安裝裝置（需要螺絲起子、車用電瓶與電工 1 級）。GPS 也可不安裝，放在背包裝上電池使用
-[*] 打開世界地圖點選目的地，規劃路線
-[*] 坐上駕駛座，按儀表板上方面板的 [b]啟動自動駕駛[/b]。隨時碰方向或油門即可接手
-[/olist]
-
-[h2]🧰 主要功能[/h2]
-[list]
-[*] [b]車載裝置[/b]：GPS 與自駕模組在支援車輛上各有正式零件位置，卸下保留電量與附加資料
-[*] [b]多目標行程[/b]：最多16點，可加尾、插入、優先、排序／預覽。新行程停妥後自動接續；停靠／逐點等你按「繼續自駕」。未到目標不算抵達、不跳站
-[*] [b]駕駛HUD[/b]：狀態、目前／下一目標、車速、巡航上限、檔位、減速、電油量；可啟停、切換共用自動／逐點模式與語音，並一鍵回家（小地圖設定的家）。金屬／玻璃／家族／側翼四主題，支援精簡與收合
-[*] [b]行車時間[/b]：按現實時間計算本趟自駕，包含停等與脫困；結束後保留上次時間，下一次成功啟動才歸零。只保留於目前遊戲執行期間，不寫入存檔
-[*] [b]速度檔位與 MAX 積極模式[/b]：30／50／70 km/h 採舒適駕駛；MAX 過彎與繞行較快、彎前較晚收油，巡航上限依車輛極速與沙盒設定。直接按 HUD 檔位切換，不需另找風格選項；車況與碰撞安全判定不變
-[*] [b]隨時接手[/b]：操作方向、油門或煞車預設立即關閉自駕；行程保留，停妥後可繼續。「手動介入後」可選2／3／5／10秒自動恢復，待命期間HUD會倒數提示
-[*] [b]調頭方式[/b]：出發方向相反時，預設「溫和」先減速再慢慢迴轉；可選「快速」。修改目前停靠點前需先停止自駕並停車
-[*] [b]靠右與障礙繞行[/b]：預設靠右行駛，會車自然錯開；前方有停放車輛或障礙時自動找可通行縫隙，繞過後回到原車道
-[*] [b]堵死自救與改道[/b]：卡住時會換繞行縫、倒車脫困；道路完全堵死時停等，HUD 出現「改道」鈕可向導航要一條繞開堵點的替代路線（也可在選項開啟「堵死時自動改道」）；仍無路才交還操控並提示
-[*] [b]語音提示[/b]：中／英／日駕駛事件、接續下一點、停靠與優先目標提示，只有自己聽到；行程最後完成才播抵達。跟隨遊戲語言或指定語音包，HUD 可開關／調音量
-[*] [b]單人自動暫停[/b]：脫困失敗與停靠／最後完成可各自設定（預設開），停妥並播完語音才暫停；普通接續點、手動停止、多人與分割畫面不暫停，解除後不自動發車
-[*] [b]風險減速與軟避讓[/b]：依彎道、車流與未載入區域調整速度；殭屍與屍體一起尋找安全空隙，無縫時維持原路線與減速設定
-[*] [b]基礎感知距離[/b]：48／80／120（預設）／160／200 公尺。車速、障礙與彎道可要求延伸；實際範圍受效能預算與遊戲載入範圍限制
-[*] [b]未來軌跡[/b]：正常路徑以半透明藍線顯示，已承諾的障礙繞行段改為黃線；可在 MOD Options 或新版 MiniMap 的「自動駕駛」分類開關並調整粗細
-[*] [b]道具取得[/b]：電子技能可合成兩種設備，也能從世界搜刮取得；GPS／自駕各自有獨立合成與生成開關
-[*] [b]三種配方學習方式[/b]：閱讀專屬電子導航維修手冊；研究不消耗成品——GPS 可在電工 3 級研究自身配方，自駕模組可在電工 3 級研究 GPS、電工 6 級再研究自駕配方；或在電工 6／8 級自動學會。實際製作仍需電工 3／6 級。手冊只會出現在尚未生成戰利品的電子、電腦書籍、圖書館與雜誌容器，既有容器不會回填
-[*] [b]電油成本[/b]：GPS／自駕的耗電與額外油耗各自可調 0–500%，同時使用會相加；100% 時導航中的 GPS 額外耗油 5%、自駕 25%
-[*] [b]伺服器診斷收集[/b]：服主可在沙盒開啟（預設關）。自駕出狀況時把前後一段駕駛資料與每趟摘要送到伺服器，協助作者改善自駕；只暫存於記憶體、不寫入玩家硬碟，玩家可在 MOD 選項退出
-[/list]
-
-[h2]⚠️ 前置需求[/h2]
+[h2]📦 需要安裝[/h2]
 [list]
 [*] 必裝主 MOD：[url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763913359]Minidoracat MiniMap for B42[/url]
 [*] 必裝 UI 框架：[url=https://steamcommunity.com/sharedfiles/filedetails/?id=3789836701]Minidoracat UI Library for B42[/url]
-[*] 不相容：Navigator（兩者都會使用車輛儀表上方區域）
+[*] 不相容：Navigator（兩者都用車輛儀表上方區域）
+[/list]
+系列 MOD 請都更新到最新版，更新後重新啟動遊戲。
+
+[h2]🚀 快速上手[/h2]
+[olist]
+[*] 取得 [b]GPS 導航儀[/b]與[b]自動駕駛模組[/b]（搜刮或以電工 3／6 級合成）
+[*] 站在車旁，[b]對車右鍵或從車輛維修面板[/b]安裝（需螺絲起子、車用電瓶、電工 1 級）。GPS 也能裝上電池放背包用
+[*] 打開世界地圖點選目的地規劃路線
+[*] 坐上駕駛座，按儀表板上方的[b]啟動自動駕駛[/b]。隨時碰方向盤或油門就能接手
+[/olist]
+
+[h2]✨ 主要功能[/h2]
+[list]
+[*] [b]車載裝置[/b]：GPS 與自駕模組是真正的車輛零件，可搜刮、合成，也能讀手冊或研究學配方
+[*] [b]多目標行程[/b]：最多 16 個目標，可插入、優先、排序；停靠點等你按「繼續自駕」，HUD 可一鍵回家
+[*] [b]駕駛 HUD 與語音[/b]：狀態、車速、檔位、電油量、行車時間一目了然；四種主題與中英日語音提示
+[*] [b]速度檔位[/b]：30／50／70 km/h 舒適駕駛，MAX 過彎與繞行更積極
+[*] [b]隨時接手[/b]：碰方向盤、油門或煞車就交還操控，行程保留；可設定放手後自動恢復
+[*] [b]聰明行車[/b]：靠右、繞過停放車輛與障礙、閃避殭屍與屍體，遇彎道與車流減速
+[*] [b]堵死自救與改道[/b]：卡住會倒車脫困，路堵死時可向導航要替代路線
+[*] [b]伺服器可調[/b]：耗電、油耗、合成、搜刮與診斷收集皆可在沙盒設定
+[/list]
+🗺️ 地圖 MOD 能否導航與自駕，取決於地圖作者是否提供正確的道路資料。
+📖 [b]每項功能的詳細說明、設定與常見問題：[/b][url=https://steamcommunity.com/workshop/filedetails/discussion/3792675881/569297034317714529/]AutoDrive 完整說明：功能、道路需求與已知問題[/url]
+
+[h2]🔗 Minidoracat 小地圖系列[/h2]
+[list]
+[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763913359]MiniMap for B42[/url]（主 MOD，必裝）——圖片化世界地圖與小地圖、搜尋、導航
+[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763914102]MOD Maps[/url]——地圖 MOD 的地圖圖片與路名翻譯
+[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3792675881]AutoDrive[/url]——GPS 導航與自動駕駛
+[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3768276209]Zones[/url]——伺服器自訂區域
+[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3765182411]MOD Compatibility[/url]——狗、馬等第三方動物圖標
 [/list]
 
-[h2]🔗 MOD 系列[/h2]
+[h2]💬 回報與交流[/h2]
 [list]
-[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3768276209]Minidoracat MiniMap Zones[/url]
-[/list]
-
-[h2]📋 MOD 資訊[/h2]
-[list]
-[*] [b]Mod ID:[/b] MinidoracatAutoDriveFor42
-[*] [b]Workshop ID:[/b] 3792675881
-[*] [b]支援版本:[/b] Build 42.20.4+
-[*] [b]單人 / 多人:[/b] 皆支援
-[/list]
-
-[h2]💬 意見回饋與交流[/h2]
-[list]
-[*] [url=https://discord.gg/Gur2V67]Discord 社群[/url]
-[*] [url=https://github.com/Minidoracat/MinidoracatAutoDriveFor42/issues/new?template=road-data.yml]道路／導航線回報[/url]：線畫到路外、缺路或繞遠，請附[b]包含導航線與座標的截圖＋文字座標[/b]，簡述哪裡不對；可補起終點、方向、地圖 MOD／版本。[b]不需 Telemetry。[/b]
-[*] [url=https://github.com/Minidoracat/MinidoracatAutoDriveFor42/issues/new/choose]自動駕駛控制回報[/url]：路線正常但車偏離、卡住或異常減速，先開「匯出自動駕駛診斷紀錄」，再附整個 Telemetry 資料夾 ZIP。設定的「回報導航問題」可複製入口。
+[*] GitHub Issues：https://github.com/Minidoracat/MinidoracatAutoDriveFor42/issues
+[*] Discord：https://discord.gg/Gur2V67
 [/list]
 
 [h2]☕ 支持作者[/h2]
@@ -77,3 +56,6 @@ MOD 永遠免費。喜歡的話可以請我喝杯咖啡，贊助會用在伺服�
 [url=https://ko-fi.com/minidoracat][img]https://raw.githubusercontent.com/Minidoracat/workshop-resources/refs/heads/main/badges/badge_kofi.png[/img][/url] [url=https://github.com/Minidoracat/MinidoracatAutoDriveFor42][img]https://raw.githubusercontent.com/Minidoracat/workshop-resources/refs/heads/main/badges/badge_github.png[/img][/url]
 
 [b]#Minidoracat[/b]
+
+Workshop ID: 3792675881
+Mod ID: MinidoracatAutoDriveFor42

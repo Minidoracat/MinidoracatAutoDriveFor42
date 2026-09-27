@@ -6,72 +6,51 @@ description=[h3]By Minidoracat[/h3]
 description=
 description=[hr][/hr]
 description=
-description=[h2]✨ What is this[/h2]
-description=GPS plans road routes; the Autopilot Module drives them and stops on arrival.
+description=Plan a road route with the GPS Navigator and the Autopilot Module drives it for you, stopping on arrival.
 description=
-description=[h2]Mod map support: read before use[/h2]
-description=[b]Subscribing to a map mod does not guarantee navigation or autodrive support for every road.[/b]
-description=[list]
-description=[*] Added or changed roads need [b]streets.xml[/b], maintained by the map or compatibility-patch author in the current official format, matching the terrain and connecting roads within and beyond the map.
-description=[*] Playability, map images or an existing streets.xml do not prove complete road data. This mod cannot generate roads from images or auto-fix missing, misplaced or disconnected roads.
-description=[*] For map-specific failures, update both mods and check with the map author. Use the road-report link below with the map link, screenshots and text coordinates; no logs needed.
-description=[/list]
-description=
-description=[h2]🚀 Quick start[/h2]
-description=[olist]
-description=[*] Get a [b]GPS Navigator[/b] and an [b]Autopilot Module[/b] (loot, or craft with Electrical 3 / 6)
-description=[*] Beside the vehicle, install via [b]right-click or Vehicle Mechanics[/b] (screwdriver, vehicle battery and Electrical 1 required). GPS also works from your inventory with a battery
-description=[*] Open the world map and pick a destination to plan a route
-description=[*] Sit in the driver's seat and press [b]Engage Autodrive[/b] on the panel above the dashboard. Touch the controls at any time to take over
-description=[/olist]
-description=
-description=[h2]🧰 Features[/h2]
-description=[list]
-description=[*] [b]Vehicle devices[/b]: GPS and Autopilot occupy real parts on supported vehicles. Removal keeps charge and item data
-description=[*] [b]Multi-target trips[/b]: up to 16 targets; append, insert, prioritize, reorder/preview. New trips auto-continue after stopping; stopovers/step mode wait for Continue driving. Road ends short of the target never count as arrival or skip it
-description=[*] [b]Driver HUD[/b]: status, current/next target, speed, cruise cap, gear, slowdown, power/fuel; driving, shared Auto/Step mode, voice and one-click Go home (home set in MiniMap). Metal/glass/family/side-wing themes; compact/collapsed layouts
-description=[*] [b]Drive timer[/b]: real elapsed time, including waits and recovery. Keeps the last trip after stopping; only a successful new start resets it. Kept in memory for the current game run, not written to the save
-description=[*] [b]Speed gears and brisk MAX mode[/b]: 30 / 50 / 70 km/h use comfort driving. MAX takes corners and clear obstacle gaps faster, with later lift-off; cruise speed remains limited by the vehicle and sandbox settings. Switch directly on the HUD, with no separate style option. Vehicle-condition and collision safety checks still apply
-description=[*] [b]Take over anytime[/b]: steering, throttle or braking switches autodrive off by default; the trip is kept and can resume after stopping. "After manual input" offers 2 / 3 / 5 / 10 s automatic resume with a HUD countdown
-description=[*] [b]U-turn style[/b]: when departing in the opposite direction, "Gentle" slows before turning; "Fast" is optional. Stop autodrive and the vehicle before changing the current stop
-description=[*] [b]Keep right and dodge obstacles[/b]: drives on the right by default, naturally separates oncoming traffic, finds passable gaps around parked vehicles and returns to its lane
-description=[*] [b]Blocked-road recovery and rerouting[/b]: tries another gap and reverses out when stuck; on a fully blocked road it waits and the HUD shows a Reroute button that asks navigation for an alternative route around the blockage (or enable "Reroute automatically when blocked" in the options); only when no route exists does it hand control back with a notice
-description=[*] [b]Voice prompts[/b]: private Chinese/English/Japanese prompts for driving events, next target, stopover and priority; final arrival only at trip completion. Follow game language or pick a pack; HUD volume and on/off controls
-description=[*] [b]Solo auto-pause[/b]: separate settings for failed recovery and stopovers/final arrival (on by default); pauses after stopping and the voice line. Ordinary targets, manual stops, multiplayer and split-screen never pause; unpausing never restarts driving
-description=[*] [b]Slowdown and soft avoidance[/b]: speed adapts to bends, traffic and unloaded areas. Zombies and corpses share one safe-gap search; without a gap, keep the route and slowdown settings.
-description=[*] [b]Base sensing distance[/b]: 48 / 80 / 120 (default) / 160 / 200 m. Speed, obstacles and corners can request extensions; the effective range is limited by the performance budget and loaded world.
-description=[*] [b]Future trajectory[/b]: translucent blue for the normal route and yellow for committed dodges; toggle it and choose line width in MOD Options or the new MiniMap AutoDrive category
-description=[*] [b]Item availability[/b]: both devices can be crafted or found in world loot, with separate crafting and spawn toggles for GPS and autodrive
-description=[*] [b]Power and fuel costs[/b]: GPS and autodrive each have independent 0–500% power and extra-fuel settings that stack; at 100%, active GPS navigation adds 5% fuel use and autodrive adds 25%
-description=[*] [b]Server diagnostics[/b]: server owners can enable it in sandbox (off by default). When something goes wrong, a short clip of driving data and a per-drive summary are sent to the server to help improve autodrive; kept in memory only, never written to players' disks. Players can opt out in MOD Options
-description=[*] [b]Learn recipes three ways[/b]: read the Electronic Navigation Repair Manual; research a GPS at Electrical 3, or an Autopilot Module for GPS at 3 and itself at 6 (no item consumed); or auto-learn at 6/8. Crafting requires 3/6. Manuals spawn in unlooted electronic, computer-book, library and magazine containers, never backfilling existing loot
-description=[/list]
-description=
-description=[h2]⚠️ Requirements[/h2]
+description=[h2]📦 Requirements[/h2]
 description=[list]
 description=[*] Requires the base mod: [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763913359]Minidoracat MiniMap for B42[/url]
 description=[*] Requires the UI framework: [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3789836701]Minidoracat UI Library for B42[/url]
 description=[*] Incompatible with Navigator (both use the area above the vehicle dashboard)
 description=[/list]
+description=Keep every Minidoracat MiniMap series mod up to date and restart the game after updating.
 description=
-description=[h2]🔗 Mod Series[/h2]
+description=[h2]🚀 Quick start[/h2]
+description=[olist]
+description=[*] Get a [b]GPS Navigator[/b] and an [b]Autopilot Module[/b] (loot them, or craft with Electrical 3 / 6)
+description=[*] Standing beside the vehicle, install them via [b]right-click or Vehicle Mechanics[/b] (screwdriver, vehicle battery and Electrical 1 required). The GPS also works from your inventory with a battery
+description=[*] Open the world map and pick a destination to plan a route
+description=[*] Sit in the driver's seat and press [b]Engage Autodrive[/b] on the panel above the dashboard. Touch the steering or throttle at any time to take over
+description=[/olist]
+description=
+description=[h2]✨ Features[/h2]
 description=[list]
-description=[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3768276209]Minidoracat MiniMap Zones[/url]
+description=[*] [b]Vehicle devices[/b]: GPS and Autopilot are real vehicle parts; loot or craft them, and learn the recipes from a dedicated manual, research and more
+description=[*] [b]Multi-target trips[/b]: up to 16 targets; insert, prioritize and reorder, with stopovers that wait for Continue autodrive. One-click Go home on the HUD
+description=[*] [b]Driver HUD and voice[/b]: status, targets, speed, gear, power/fuel and drive timer at a glance; four themes and Chinese/English/Japanese voice prompts
+description=[*] [b]Speed gears[/b]: 30 / 50 / 70 km/h for comfortable driving; MAX takes corners and dodges more briskly
+description=[*] [b]Take over anytime[/b]: steering, throttle or braking hands control back and keeps the trip; optional automatic resume after you let go
+description=[*] [b]Smart driving[/b]: keeps right, steers around parked vehicles and obstacles, avoids zombies and corpses, and slows for bends and traffic
+description=[*] [b]Blocked-road recovery and rerouting[/b]: reverses out when stuck; on a fully blocked road it can ask navigation for an alternative route
+description=[*] [b]Server tuning[/b]: power, fuel, crafting and loot are sandbox options; server owners can opt in to diagnostics that help improve autodrive
+description=[/list]
+description=🗺️ Whether a map mod supports navigation and autodrive depends on its author providing correct road data.
+description=📖 [b]Full details, settings and FAQ for every feature:[/b] [url=https://steamcommunity.com/workshop/filedetails/discussion/3792675881/586187095760051144/]AutoDrive Guide: Features, Road Requirements & Known Issues[/url]
+description=
+description=[h2]🔗 Minidoracat MiniMap series[/h2]
+description=[list]
+description=[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763913359]MiniMap for B42[/url] (main mod, required) — image-based world map and minimap, search, navigation
+description=[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763914102]MOD Maps[/url] — map images and street-name translations for map mods
+description=[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3792675881]AutoDrive[/url] — GPS navigation and autonomous driving
+description=[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3768276209]Zones[/url] — custom server zones
+description=[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3765182411]MOD Compatibility[/url] — icons for third-party animals such as dogs and horses
 description=[/list]
 description=
-description=[h2]📋 Mod Info[/h2]
+description=[h2]💬 Feedback & community[/h2]
 description=[list]
-description=[*] [b]Mod ID:[/b] MinidoracatAutoDriveFor42
-description=[*] [b]Workshop ID:[/b] 3792675881
-description=[*] [b]Supported version:[/b] Build 42.20.4+
-description=[*] [b]Singleplayer / Multiplayer:[/b] both supported
-description=[/list]
-description=
-description=[h2]💬 Feedback[/h2]
-description=[list]
-description=[*] [url=https://discord.gg/Gur2V67]Discord community[/url]
-description=[*] [url=https://github.com/Minidoracat/MinidoracatAutoDriveFor42/issues/new?template=road-data.yml]Road / route data[/url]: misplaced routes, gaps or detours. Attach [b]a route screenshot showing coordinates + the coordinates as text[/b], and describe the problem. Endpoints, direction and map/version help. [b]No Telemetry required.[/b]
-description=[*] [url=https://github.com/Minidoracat/MinidoracatAutoDriveFor42/issues/new/choose]Vehicle control[/url]: a correct route but the car veers off, gets stuck or slows unexpectedly. Enable diagnostic export; attach the whole Telemetry ZIP. The options' report button copies this link.
+description=[*] GitHub Issues: https://github.com/Minidoracat/MinidoracatAutoDriveFor42/issues
+description=[*] Discord: https://discord.gg/Gur2V67
 description=[/list]
 description=
 description=[h2]☕ Support the author[/h2]
@@ -80,5 +59,8 @@ description=Always free; source on GitHub. Tips fund servers and mod development
 description=[url=https://ko-fi.com/minidoracat][img]https://raw.githubusercontent.com/Minidoracat/workshop-resources/refs/heads/main/badges/badge_kofi.png[/img][/url] [url=https://github.com/Minidoracat/MinidoracatAutoDriveFor42][img]https://raw.githubusercontent.com/Minidoracat/workshop-resources/refs/heads/main/badges/badge_github.png[/img][/url]
 description=
 description=[b]#Minidoracat[/b]
+description=
+description=Workshop ID: 3792675881
+description=Mod ID: MinidoracatAutoDriveFor42
 tags=Build 42;Interface;Multiplayer;Vehicles
 visibility=public
