@@ -6699,6 +6699,7 @@ do
         "(pass) 餘裕放寬後 cap 至少第二檔 10（實得 " .. tostring(st.dodgeSpeedCap) .. "）")
     -- 最緊點還沒過（記在車前 5m）：不重掃、餘裕照舊（世界同樣淨空，差別只在位置閘）
     st.dodgeMargin, st.dodgeMarginS = 0.05, dveh._x + 5
+    st.dodgeClrRetryS0 = st.fstate.ovS0 -- 0928d 補表額度已用：本段只驗位置閘
     driveReset(dveh)
     drive.scanRound()
     checkTrue(st.dodgeMargin < 0.1,
@@ -17549,6 +17550,40 @@ function drive.scenario0928d()
         "(lamp) PhysicsShape=Tree 的招牌桿是硬障礙")
     checkEq(hardAt("harness_phys_floor", { PhysicsShape = "Floor" }), 0, "(lamp) PhysicsShape=Floor 不算")
     drive.fillWorld(-2, 70, -7, 7)
+
+    -- (clr-retry) 0928d E2E rc3 0039：承諾後第一次 guard-pass 時線尾剛好掉出可視範圍（有效感知距離抖動），
+    --   逐點淨距表沒收、之後持平輪又不再掃——53m 進入段全程用整線 5 km/h 帽。線再看全時同一條線補掃一次。
+    --   違規證明：拿掉補掃＝表一直缺。
+    do
+        drive.fillWorld(-10, 90, -8, 8)
+        drive.putSolid(50, 0, "clr_retry_obstacle")
+        drive.world[62 * 100000 + 0] = nil
+        checkTrue(armDrive(), "(clr-retry) 啟動")
+        setHeading(dveh, 0)
+        dveh._speed = 10
+        drive.frameMs(10)
+        drive.scanRound(true)
+        drive.frameMs(10)
+        drive.scanRound(true)
+        local stc = MDAD.Drive.debugSession(0)
+        checkTrue(stc.dodging == true, "(clr-retry) 前置：已承諾繞行（dodging=" .. tostring(stc.dodging) .. "）")
+        -- 前緣縮回：首個 guard-pass 掃不到線尾
+        stc.dodgeMarginS, stc.dodgeClrN, stc.dodgeEnvN = nil, 0, 0
+        drive.world[57 * 100000 + 0] = nil
+        drive.frameMs(10)
+        drive.scanRound(true)
+        checkTrue(stc.dodging == true and (stc.dodgeClrN or 0) == 0,
+            "(clr-retry) 前置：線尾不在可視範圍內時不收表（clrN=" .. tostring(stc.dodgeClrN) .. "）")
+        drive.mkSquare(57, 0)
+        drive.frameMs(10)
+        drive.scanRound(true)
+        checkTrue(stc.dodging == true and (stc.dodgeClrN or 0) >= 2 and (stc.dodgeEnvN or 0) >= 2,
+            "(clr-retry) 線再看全：同一條線補掃、收回逐點淨距表（clrN=" .. tostring(stc.dodgeClrN)
+            .. " envN=" .. tostring(stc.dodgeEnvN) .. "）")
+        MDAD.Drive.stop(0, nil)
+        drive.clearCell(50, 0)
+        drive.fillWorld(-2, 70, -7, 7)
+    end
     SandboxVars = oldSand
 end
 drive.scenario0928d()

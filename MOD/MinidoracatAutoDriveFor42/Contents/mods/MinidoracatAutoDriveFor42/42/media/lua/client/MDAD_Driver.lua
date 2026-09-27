@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0928d"
+Drive.REV = "0928e"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -7369,7 +7369,13 @@ local function replan(s, vehicle, playerNum)
                     -- （2026-09-04 s023 st184,096-115：margin 0.13 → 5 km/h 地板爬完整條 26m
                     -- 直線，最緊點在前 6m）。最緊點未知（剛 commit）或已過（車尾過它 1m）
                     -- 就從車身後緣起重掃一次；每過一個最緊點最多一次掃掠。
-                    if guardOk and (s.dodgeMarginS == nil
+                    -- 逐點淨距表缺席（承諾後第一次 guard-pass 時線尾還在可視範圍外＝不收表）、現在線已看全：
+                    -- 同一條線補掃一次（0928d E2E rc3 0039：53m 進入段、最緊點在盡頭，表一直沒建，全程 5 km/h
+                    -- 爬 38 秒）。每條承諾線（ovS0）最多補一次，補掃掃不過就照舊信任承諾。
+                    local wantTable = s.dodgeMarginS ~= nil and (s.dodgeClrN or 0) == 0
+                        and s.dodgeClrRetryS0 ~= fs.ovS0 and Drive.candidateCovered(s, fs.ovEndS)
+                    if wantTable then s.dodgeClrRetryS0 = fs.ovS0 end
+                    if guardOk and (s.dodgeMarginS == nil or wantTable
                             or s.lastSNow > s.dodgeMarginS + s.vehicleProfile.halfL + 1) then
                         local ok2, mg2, _, _, _, _, _, mi2 = sweepLine(
                             s, fs.ovX, fs.ovY, fs.ovN, fs.ovS0, fs.ovEndS,
