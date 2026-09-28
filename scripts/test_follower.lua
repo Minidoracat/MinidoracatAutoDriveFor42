@@ -1175,10 +1175,10 @@ do
     for i = 1, 10 do pts[#pts + 1] = 40; pts[#pts + 1] = i * 4 end
     local pL = buildRoute(pts)
     local ox, oy = {}, {}
-    -- 剖面跨折點（折點 s=40）：a=30 b=36 c=44 d=50、offL=4.25——舊「逐段
-    -- 法向」在折點的 offset 點跳 2·4.25·sin(45°)≈6m；混合後任兩相鄰取樣點
-    -- （1m 步）距離必須 < 2m（連續）
-    local n, s0 = F.buildOffsetLine(pL, 25, 30, 36, 44, 50, 4.25, 0, ox, oy)
+    -- 剖面跨折點（折點 s=40）：a=30 b=36 c=44 d=50、offL=−4.25（彎外側）——舊「逐段
+    -- 法向」在折點的 offset 點跳 2·4.25·sin(45°)≈6m；混合後彎外側每 1m 路線被拉長成
+    -- 1＋lane·κ≈2.6m（法向在 ±OV_BLEND 內轉 90°），相鄰取樣點仍必須 < 3m（連續）
+    local n, s0 = F.buildOffsetLine(pL, 25, 30, 36, 44, 50, -4.25, 0, ox, oy)
     checkTrue(n >= 20, "折線點數合理（實得 " .. tostring(n) .. "）")
     checkEq(s0, 25, "s0＝呼叫端指定的掃掠起點")
     local maxStep = 0
@@ -1188,8 +1188,43 @@ do
         local dd = math.sqrt(dx * dx + dy * dy)
         if dd > maxStep then maxStep = dd end
     end
-    checkTrue(maxStep < 2.0,
-        "折點處相鄰取樣點無跳變（最大步距 " .. string.format("%.2f", maxStep) .. " < 2）")
+    checkTrue(maxStep < 3.0,
+        "折點處相鄰取樣點無跳變（最大步距 " .. string.format("%.2f", maxStep) .. " < 3）")
+    -- 0929d 彎內側：法向在折點 ±OV_BLEND 內轉 90°，內側 lane 超過混合半徑時線在彎心原地來回
+    -- （E2E rc23 0016 同型：線步長只剩幾公分、相鄰轉角 150°+，繞行中誤進原地調頭）→ 不建。
+    -- 1.25m 內側照建，且逐步都往前（線位移投影到路線方向 > 0）。
+    local nFold, _, whyFold = F.buildOffsetLine(pL, 25, 30, 36, 44, 50, 4.25, 0, ox, oy)
+    checkEq(whyFold, "fold", "彎內側 4.25m（超過折點混合半徑）：回 fold")
+    checkEq(nFold, 0, "fold 不輸出點")
+    checkEq(select(3, F.buildOffsetLine(pL, 25, 30, 36, 44, 50, 2.0, 0, ox, oy)), "fold",
+        "彎內側 2m：前進比例 <0.25 同樣不建")
+    local nIn, s0In, whyIn = F.buildOffsetLine(pL, 25, 30, 36, 44, 50, 1.25, 0, ox, oy)
+    checkEq(whyIn, "ok", "彎內側 1.25m 照建")
+    local minAdv = 9
+    for k = 2, nIn do
+        local sk = s0In + (k - 1)
+        local tx, ty = 1, 0
+        if sk > 40 then tx, ty = 0, 1 end
+        local adv = (ox[k] - ox[k - 1]) * tx + (oy[k] - oy[k - 1]) * ty
+        if adv < minAdv then minAdv = adv end
+    end
+    checkTrue(minAdv > 0, "內側 1.25m 的線逐步前進（最小前進 " .. string.format("%.2f", minAdv) .. "）")
+    -- 圓角弧同理（rc23 0016 路線 (7003,8154) 的 12m 路口 jog，兩個 R≈5.4 圓角；承諾參數照 telemetry
+    -- 平移）：繞行 −5.25 在第二個彎內側＝摺疊；−3 照建（第二彎前進比例 ≈0.44）。
+    local jog = { pts = { 7003, 8000, 7003, 8154, 6991, 8154, 6991, 8260 }, segWidth = { 8, 8, 6 },
+        segSurface = { "paved", "paved", "paved" } }
+    local vp = { valid = true, geometryValid = true, halfW = 0.82, halfL = 2.3, rMin = 3.03,
+        wheelbase = 2.6, delta0Safe = 0.7, deltaVSafe = 0.24, maxSpeed = 90 }
+    local pJ = F.begin(jog, 90, 8, vp, "brisk")
+    while not pJ.ready do F.stepBuild(pJ, 4096) end
+    checkEq(pJ.filletN, 2, "jog 兩個彎都建了圓角")
+    local function jogWhy(off)
+        return select(3, F.buildOffsetLine(pJ, 128, 129, 152.1, 172.3, 178.5, off, 1.76, ox, oy,
+            nil, nil, nil, 0.88))
+    end
+    checkEq(jogWhy(-5.25), "fold", "0016 承諾線（−5.25，第二彎內側）：回 fold")
+    checkEq(jogWhy(-3), "ok", "同一縫改 −3：照建")
+    checkEq(jogWhy(5.25), "fold", "+5.25 在第一彎內側：同樣摺疊")
     -- 直路等價：無折點時折線點＝路線點＋法向×lane（與舊求值一致）
     local pS = buildRoute({ 0, 0, 40, 0, 80, 0 })
     local n2 = F.buildOffsetLine(pS, 5, 10, 16, 24, 30, -1.75, 0.3, ox, oy)

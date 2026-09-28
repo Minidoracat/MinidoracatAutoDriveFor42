@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0929c"
+Drive.REV = "0929d"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -6014,8 +6014,8 @@ local function updateReturnSnapshot(s, vehicle, playerNum, latSigned)
     local lineN, lineS0, buildReason, lineS1 = MDADFollower.buildReturnLine(
         s.profile, s0, s1, laneStart, laneTarget, s.returnX, s.returnY, tail)
     coverageEnd = lineS1
-    if buildReason == "capacity" then
-        holdUnsafeReturn(s, vehicle, laneStart, "capacity")
+    if buildReason ~= "ok" then -- capacity／fold（線在彎內側摺疊，Follower.OV_MIN_ADVANCE）
+        holdUnsafeReturn(s, vehicle, laneStart, buildReason)
         return
     end
     if not returnLineBandCovers(

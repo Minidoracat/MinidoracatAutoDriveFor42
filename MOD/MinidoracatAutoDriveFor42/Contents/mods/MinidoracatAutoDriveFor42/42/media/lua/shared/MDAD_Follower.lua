@@ -214,6 +214,14 @@ local OV_MAX = MDADDynamics.PERCEPTION_HARD_MAX_M + 16 -- 額外容納車身前�
 local LANE_MAX = MDADDynamics.PERCEPTION_HARD_MAX_M + 2 -- 1m證明線；剖面弧段同為1m取樣
 -- Driver 以 OV_STEP 反推掃掠弧長，兩者必須同源。
 local OV_BLEND = 2.0          -- 折點法向混合半徑：距段端這麼近時與鄰段做角度插值
+-- 偏移線在彎內側的前進量下限（0929d）：線上一點＝路線點＋lane·n̂(h)，彎內側每走 1m 路線，線只前進
+-- 1−lane·κ（κ＝法向的轉動率；圓角弧＝1/R，未圓角折點＝OV_BLEND 內的混合轉速）。lane 超過轉彎半徑時
+-- 這個比例 ≤0，線在彎心附近原地來回（E2E rc23 0016：12m 路口 jog 的 R5.4 圓角，繞行 offL −5.25 在內側，
+-- 1m 取樣的線步長只剩 0.08m、相鄰轉角 150–165°），切線／前視點指向車後 → 繞行中誤進原地調頭，
+-- 車頭轉進路邊停的車。全部 1558 筆繞行承諾離線重建：比例 ≤0 有 19 筆、(0,0.25) 6 筆，承諾後接觸各
+-- 3、2 筆（另 3 筆原地調頭）；[0.25,0.6) 的 44 筆零接觸。control 的弧段硬帽同樣把 1−lane·κ 夾在 0.25。
+-- 低於此比例的線整條不建（回 "fold"），候選鏈改試別的 lane。
+local OV_MIN_ADVANCE = 0.25
 local RANGE_INF = 1e30        -- segment-tree padding; finite for Kahlua portability
 local RANGE_BLOCK = 32        -- bounded edge scan; block tree handles the interior
 
@@ -1975,6 +1983,7 @@ function MDADFollower.buildOffsetLine(profile, s0, a, b, c, d, l, bias, outX, ou
     if count > OV_MAX then return 0, 0, "capacity", 0 end
     if count < 2 then return 0, 0, "invalid", 0 end
     local j = 1
+    local pbx, pby = 0, 0
     for k = 1, count do
         local sk = s0 + (k - 1) * OV_STEP
         if k == count then sk = requiredEnd end
@@ -2025,6 +2034,17 @@ function MDADFollower.buildOffsetLine(profile, s0, a, b, c, d, l, bias, outX, ou
         end
         outX[k] = bx - sin(h) * lane
         outY[k] = by + cos(h) * lane
+        -- 摺疊檢查（OV_MIN_ADVANCE）：線的位移投影到路線弦方向，除以路線弦長²＝前進比例；橫向換道
+        -- 的位移與弦正交不計入。最後一格可能只有幾公分，太短的弦不量。
+        if k > 1 then
+            local ex, ey = bx - pbx, by - pby
+            local e2 = ex * ex + ey * ey
+            if e2 > 1e-4 and (outX[k] - outX[k - 1]) * ex + (outY[k] - outY[k - 1]) * ey
+                    < OV_MIN_ADVANCE * e2 then
+                return 0, 0, "fold", 0
+            end
+        end
+        pbx, pby = bx, by
     end
     return count, s0, "ok", requiredEnd
 end
