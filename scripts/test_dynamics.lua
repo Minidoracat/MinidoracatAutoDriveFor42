@@ -194,6 +194,13 @@ near(D.longitudinalAssistRatio(0, 15, 99), 0.2 * D.ASSIST_OFFROAD_MAX, 1e-12,
 near(D.longitudinalAssistRatio(0, 15, 0.1), 0.2, 1e-12,
     "scale<1 一律當 1（補償只會加不會減）")
 near(D.longitudinalAssistRatio(0, 15, 0 / 0), 0.2, 1e-12, "非法 scale 退 1")
+-- 0928m：路外（呼叫端傳 speedMaxKmh）25 以上照補；不傳＝路面 25 上限不變；非法值退 25。
+--   違規證明：函式忽略第 4 參＝第一行紅。
+near(D.longitudinalAssistRatio(40, 60, 3, 120), 0.2 * 3, 1e-12, "路外 40 km/h 差 20：照補（上限放寬到 120）")
+near(D.longitudinalAssistRatio(40, 60, 3), 0, 1e-12, "不傳上限：路面 25 以上不補")
+near(D.longitudinalAssistRatio(40, 60, 3, 0 / 0), 0, 1e-12, "非法上限退 25")
+near(D.longitudinalAssistRatio(119.5, 125, 3, 120), 0.2 * 3 * (125 - 119.5 - 1) / 5, 1e-12, "上限內照比例")
+near(D.longitudinalAssistRatio(120, 130, 3, 120), 0, 1e-12, "達上限不補")
 near(D.longitudinalAssistRatio(-1, 15, 2), 0, 1e-12,
     "倒退中即使在越野也不施加向前推力")
 near(D.longitudinalAssistRatio(25, 70, 2), 0, 1e-12,

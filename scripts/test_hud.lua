@@ -681,18 +681,18 @@ local function checkAutoPill(label)
         label .. ": speed-details button follows the auto-reroute pill on the same row")
 end
 checkAutoPill("metal")
-check(panel.autoButton.title == "AUTO OFF" and panel.autoButton.enable == true
+check(panel.autoButton.title == "AUTO ON" and panel.autoButton.enable == true
     and panel.autoButton.tooltip == "AUTO TIP\nTOGGLE",
-    "auto-reroute pill reflects the option default (off) and explains itself")
+    "auto-reroute pill reflects the option default (on since 0928m) and explains itself")
 click(panel.autoButton)
-check(MDAD.HUD.autoDetour() == true
-    and optionSets.MinidoracatAutoDrive:getOption("AutoDetour"):getValue() == true
-    and panel.autoButton.title == "AUTO ON",
+check(MDAD.HUD.autoDetour() == false
+    and optionSets.MinidoracatAutoDrive:getOption("AutoDetour"):getValue() == false
+    and panel.autoButton.title == "AUTO OFF",
     "clicking the auto-reroute pill writes the shared AutoDetour option and relabels")
 checkEq(optionSaveCalls, 1, "auto-reroute pill persists ModOptions immediately")
 click(panel.autoButton)
-check(MDAD.HUD.autoDetour() == false and panel.autoButton.title == "AUTO OFF",
-    "second click turns auto-reroute back off")
+check(MDAD.HUD.autoDetour() == true and panel.autoButton.title == "AUTO ON",
+    "second click turns auto-reroute back on")
 optionSaveCalls = 0
 
 click(panel.themeButton)
@@ -1318,14 +1318,14 @@ check(MDAD.HUD.voiceEnabled() == false
     "MiniMap voice tick writes the shared VoiceEnabled option")
 registeredMiniMapSection.ticks[2].set(true)
 check(registeredMiniMapSection.ticks[3].label == "UI_MinidoracatAutoDrive_AutoDetour"
-    and registeredMiniMapSection.ticks[3].get() == false
-    and MDAD.HUD.autoDetour() == false,
-    "auto-detour tick defaults off and sits before telemetry")
-registeredMiniMapSection.ticks[3].set(true)
-check(MDAD.HUD.autoDetour() == true
-    and options:getOption("AutoDetour"):getValue() == true,
-    "MiniMap auto-detour tick writes the shared AutoDetour option")
+    and registeredMiniMapSection.ticks[3].get() == true
+    and MDAD.HUD.autoDetour() == true,
+    "auto-detour tick defaults on (0928m) and sits before telemetry")
 registeredMiniMapSection.ticks[3].set(false)
+check(MDAD.HUD.autoDetour() == false
+    and options:getOption("AutoDetour"):getValue() == false,
+    "MiniMap auto-detour tick writes the shared AutoDetour option")
+registeredMiniMapSection.ticks[3].set(true)
 check(options:getOption("ExportTelemetry"):getValue() == false
     and options:getOption("TelemetryRetentionDays"):getValue() == 3
     and MDAD.HUD.telemetryEnabled() == false

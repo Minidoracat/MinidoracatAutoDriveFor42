@@ -124,6 +124,7 @@ local KEY_MUL = 100000
 local COST_NONE, COST_SOFT, COST_HARD = 0, 1, 2
 local COST_HARD_THIN = 3       -- 細桿硬障礙（樹幹）：擋不擋線用 0 半徑判（樹幹 ~0.3 格）
 local COST_HARD_SMALL = 4      -- 單格小物（solidtrans 非牆：郵筒/垃圾桶/路牌）：半格箱
+local COST_DOOR = 5            -- 門／柵門 sprite（doorN／doorW）：開關狀態在格級屬性，由 closedDoor(square) 判
 local SLOW_BAND_HALF = 3       -- 減速計數帶半寬（±3＝路面帶；hard 仍收全走廊 ±6.5）
 local OBS_HALF_R = 0.7         -- 整格箱型硬障礙的半徑（＝Corridor 的 OBS_HALF；樹幹用 0）
 local OBS_SMALL_R = 0.30       -- 小物半徑（2026-09-01 telemetry s016：blocked 縫
@@ -186,6 +187,7 @@ MDADSensor.SURFACE_PAVED = SURFACE_PAVED
 -- 改成第一輪掃描開始時綁一次，之後每輪只多一次 boolean 比較。
 local F_water, F_doorN, F_doorW, T_moveable
 local F_solidtrans, F_wallN, F_wallW, F_wallNW, F_solidfloor
+local F_doorWallN, F_doorWallW, F_open
 local flagsBound = false
 
 local function bindFlags()
@@ -197,6 +199,9 @@ local function bindFlags()
     F_wallN = IsoFlagType.WallN
     F_wallW = IsoFlagType.WallW
     F_wallNW = IsoFlagType.WallNW
+    F_doorWallN = IsoFlagType.DoorWallN
+    F_doorWallW = IsoFlagType.DoorWallW
+    F_open = IsoFlagType.open
     T_moveable = IsoObjectType.isMoveAbleObject   -- 枚舉序 28（SpriteDetails/IsoObjectType.java:36）
     flagsBound = true
 end
@@ -331,8 +336,8 @@ local function classifySprite(obj, name)
         return COST_HARD_THIN
     end
 
-    if props:has(F_doorN) then return COST_NONE end
-    if props:has(F_doorW) then return COST_NONE end
+    if props:has(F_doorN) then return COST_DOOR end
+    if props:has(F_doorW) then return COST_DOOR end
     -- 原版通常會把 StopCar/Hoppable 合成 collision；顯式 guard 保護未合成或 MOD tile，
     -- 也避免緊接著的 isMoveAbleObject 分支把真正會停車的物件降成 SOFT。
     if props:has("StopCar") then return COST_HARD end
@@ -355,6 +360,17 @@ end
 --------------------------------------------------------------------------------
 -- 單格掃描
 --------------------------------------------------------------------------------
+
+-- 關著的門／柵門＝車輛碰撞牆（IsoChunk.calcPhysics:2068-2088：格級屬性 DoorWallW＋doorW 或 DoorWallN＋doorN，
+-- 且沒有 open → WallW／WallN 物理形狀）。開關會換 sprite（IsoDoor／IsoThumpable 在 closedSprite／openSprite
+-- 間切換，IsoDoor.java:1604-1607），但門框／門洞 sprite 本身也帶 doorN／doorW，所以只看 sprite 會把關著的門
+-- 當開口——0928m E2E rc13 0190：車頂著關著的鐵絲網柵門 0 km/h、每輪掃描淨空、倒車 100 次到逾時。
+-- 門類 sprite 快取成 COST_DOOR，碰到才讀一次格級屬性；整格保守擋住（同牆 COST_HARD）。
+local function closedDoor(square)
+    local sp = square:getProperties()                  -- 格級聚合屬性（IsoGridSquare.getProperties）
+    if sp == nil or sp:has(F_open) then return false end
+    return (sp:has(F_doorW) and sp:has(F_doorWallW)) or (sp:has(F_doorN) and sp:has(F_doorWallN))
+end
 
 -- name→cost 查快取；miss 時 classifySprite 並在上限內收錄。上限保護：模組化地圖
 -- 的 sprite 名稱數量沒有上限，滿了就**停收新條目**（本格照樣用剛算出的 cost，
@@ -599,6 +615,9 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
             local name = obj:getSpriteName()           -- IsoObject.java:2235
             if name ~= nil then
                 local cost = spriteCostOf(state, obj, name)
+                if cost == COST_DOOR then
+                    if closedDoor(square) then cost = COST_HARD else cost = COST_NONE end
+                end
                 if cost == COST_HARD or cost == COST_HARD_THIN
                         or cost == COST_HARD_SMALL then
                     hard = true
@@ -1303,7 +1322,8 @@ local function probeSquareHard(state, square)
         local name = obj:getSpriteName()
         if name ~= nil then
             local cost = spriteCostOf(state, obj, name)
-            if cost == COST_HARD or cost == COST_HARD_SMALL then return true, "hard" end
+            if cost == COST_HARD or cost == COST_HARD_SMALL
+                    or (cost == COST_DOOR and closedDoor(square)) then return true, "hard" end
             if cost == COST_HARD_THIN then return true, "hardThin" end
         end
     end

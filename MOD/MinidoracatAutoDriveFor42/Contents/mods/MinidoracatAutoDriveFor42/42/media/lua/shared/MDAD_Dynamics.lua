@@ -268,10 +268,14 @@ function D.assistOffroadScale(offroadEff)
 end
 -- offroadScale 由呼叫端以 assistOffroadScale 導出；on-road 傳 nil／1 即原行為。
 -- 上限一併放大（否則補償只是把已經飽和的比例再乘一次，等於沒補）。
-function D.longitudinalAssistRatio(speedKmh, targetKmh, offroadScale)
+-- speedMaxKmh（選填，0928m）：推力的車速上限，預設 ASSIST_SPEED_MAX_KMH（路面上引擎本來推得動）；
+-- 真的在路外時呼叫端放寬——引擎推力在路外乘「檔位遞減×0.6×越野效率」（CarController.java:310-319），
+-- 高檔位損失更多，25 以上不補就是「一出路面就掉速」。
+function D.longitudinalAssistRatio(speedKmh, targetKmh, offroadScale, speedMaxKmh)
+    if not (D.finite(speedMaxKmh) and speedMaxKmh > 0) then speedMaxKmh = ASSIST_SPEED_MAX_KMH end
     if not D.finite(speedKmh) or not D.finite(targetKmh)
             or speedKmh < 0 or targetKmh <= speedKmh + ASSIST_GAP_MIN_KMH
-            or speedKmh >= ASSIST_SPEED_MAX_KMH then return 0 end
+            or speedKmh >= speedMaxKmh then return 0 end
     local ratio = (targetKmh - speedKmh - ASSIST_GAP_MIN_KMH)
         / (ASSIST_GAP_FULL_KMH - ASSIST_GAP_MIN_KMH)
     if ratio > 1 then ratio = 1 end

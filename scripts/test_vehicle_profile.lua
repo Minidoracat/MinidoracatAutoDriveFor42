@@ -979,23 +979,23 @@ do
     check(ad <= P.ACCEL_CEIL and bd <= P.BRAKE_CEIL and ld <= P.LAT_CEIL,
         "dry paved never exceeds runtime ceilings")
     checkNear(bd, P.BRAKE_CEIL, 1e-12, "dry paved good tires saturate brake ceiling (8→6)")
-    checkNear(ld, P.LAT_CEIL, 1e-12, "dry paved good tires saturate lateral ceiling (9→7)")
+    checkNear(ld, P.LAT_CEIL, 1e-12, "dry paved good tires saturate lateral ceiling (10→8)")
     checkNear(fsd, 1, 1e-12, "dry paved surface factor")
     checkNear(fsw, 0.7, 1e-12, "wet paved surface factor")
     checkNear(fsu, 0.7, 1e-12, "unknown surface uses offroad factor")
     check(bw < bd, "rain tightens brake prior below the ceiling")
     check(bu < bd, "unknown surface tightens brake prior below the ceiling")
-    -- LAT_CEIL 7（0907c）：雨天／未知路面 9×0.7＝6.3 從此真的低於晴天（舊天花板把兩者夾成同值）
-    checkNear(lw, 6.3, 1e-9, "wet paved lateral 9×0.7=6.3 now sits below the ceiling")
-    checkNear(lu, 6.3, 1e-9, "unknown surface lateral 6.3 now sits below the ceiling")
+    -- LAT_CEIL 8／基準 10（0928m）：雨天／未知路面 10×0.7＝7.0 仍低於晴天（天花板不把兩者夾成同值）
+    checkNear(lw, 7.0, 1e-9, "wet paved lateral 10×0.7=7.0 sits below the ceiling")
+    checkNear(lu, 7.0, 1e-9, "unknown surface lateral 7.0 sits below the ceiling")
     check(lw < ld, "wet lateral is strictly below dry lateral")
-    -- 低抓地（缺胎 fTire=0.35＋雨）：9×0.7×0.35＝2.2
+    -- 低抓地（缺胎 fTire=0.35＋雨）：10×0.7×0.35＝2.45
     do
         local was = p.isAnyTireMissing
         p.isAnyTireMissing = true
         local _, bl, ll = P.priors(p, p.mass, MDADFollower.SURFACE_PAVED, true, false, true)
         p.isAnyTireMissing = was
-        checkNear(ll, 9 * 0.7 * 0.35, 1e-9, "missing tire + rain lateral prior scales below ceiling")
+        checkNear(ll, 10 * 0.7 * 0.35, 1e-9, "missing tire + rain lateral prior scales below ceiling")
         checkNear(bl, 8 * 0.7 * 0.35, 1e-9, "missing tire + rain brake prior scales below ceiling")
         check(ll < ld and bl < bd, "low-grip regime tightens both priors")
     end
@@ -1113,7 +1113,7 @@ do
     local fb = follower(nil)
     checkTrue(P.configureFollower(fb, p, p.mass, false), "無風格欄位：照舊")
     local aLatPrior, aBrakePrior, aCoastPrior = fb.segLat[1], fb.segBrake[1], fb.segCoast[1]
-    checkNear(aLatPrior, P.LAT_CEIL, 1e-9, "晴天好胎 priors 的 aLat＝LAT_CEIL 7")
+    checkNear(aLatPrior, P.LAT_CEIL, 1e-9, "晴天好胎 priors 的 aLat＝LAT_CEIL 8")
     local fc = follower({ lat = 2.5, brake = 3.0, coast = 0.45 })
     checkTrue(P.configureFollower(fc, p, p.mass, false), "comfort follower 仍 adaptive")
     checkNear(fc.segLat[1], 2.5, 1e-9, "comfort：aLat 被風格夾到 2.5")
@@ -1129,6 +1129,19 @@ do
     local fx = follower({ lat = 9.0, brake = 8.0, coast = 2.0 })
     checkTrue(P.configureFollower(fx, p, p.mass, false), "coast 2.0 風格仍 adaptive")
     checkNear(fx.segCoast[1], 2.0, 1e-9, "風格 coast 2.0 低於 priors 質量預算時夾到 2.0（風格只能壓低）")
+    -- 0928m：拖車（towMass）時 coastAssist 歸零——Driver 不對拖車施中線減速力，剖面不能假設它。
+    --   違規證明：拿掉 configureFollower 的歸零＝紅。
+    local ft = follower({ lat = 9.0, brake = 8.0, coast = 3.0 })
+    ft.coastAssist = 2.5
+    local wasTow = p.towMass
+    p.towMass = 900
+    checkTrue(P.configureFollower(ft, p, p.mass, false), "拖車 follower 仍 adaptive")
+    p.towMass = wasTow
+    checkEq(ft.coastAssist, 0, "拖車：彎前中線減速輔助歸零")
+    local fn = follower({ lat = 9.0, brake = 8.0, coast = 3.0 })
+    fn.coastAssist = 2.5
+    checkTrue(P.configureFollower(fn, p, p.mass, false), "沒拖車 follower 仍 adaptive")
+    checkEq(fn.coastAssist, 2.5, "沒拖車：保留風格的輔助量")
 end
 
 scenario("clearanceBudget：餘裕預算單一 authority（階段 2 主體 4）")

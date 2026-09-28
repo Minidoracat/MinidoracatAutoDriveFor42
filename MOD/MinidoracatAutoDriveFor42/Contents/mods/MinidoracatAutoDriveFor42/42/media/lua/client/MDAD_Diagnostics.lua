@@ -1174,6 +1174,7 @@ local function encodePhys(phys)
     addBool("curveHardActive", "curveHardActive")
     addNum("ffSteer", "sff")
     addNum("yawGain", "yg")
+    addNum("yawGainHi", "ygh")        -- 0928m：高速弧段學到的 yaw 增益（前饋補足用）
     addNum("appliedSteer", "ast")
     addNum("routeHeadingError", "att")
     addNum("kinkExitS", "kxs")

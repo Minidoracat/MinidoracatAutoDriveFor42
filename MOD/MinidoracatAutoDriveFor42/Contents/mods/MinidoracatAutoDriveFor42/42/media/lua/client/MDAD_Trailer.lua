@@ -15,7 +15,8 @@ T.KEY_ROTATE = "UI_MinidoracatAutoDrive_TrailerRotate"
 T.KEY_LOST = "UI_MinidoracatAutoDrive_TrailerLost"
 T.KEY_TURN = "UI_MinidoracatAutoDrive_TrailerTurn" -- 需要調頭時改走不用調頭的繞行（Driver.towTurnaround）
 
-T.LAT_SCALE = 0.6          -- 拖車時彎道側向加速度預算乘數（牽引車單體預算對掛車太快：E2E 23 km/h 進 143° 斷開）
+T.LAT_SCALE = 0.525        -- 拖車時彎道側向加速度預算乘數（牽引車單體預算對掛車太快：E2E 23 km/h 進 143° 斷開）；
+                           -- 0928m 單車天花板 7→8，這裡 0.6→0.525 讓拖車實際預算維持 4.2
 T.TURN_MIN_RAD = 25 * math.pi / 180   -- 小於此折角不需要外拉
 T.INTRUSION_MAX = 1.0      -- 掛車內輪壓出路面的容許量（轉角外的草地；桿／號誌由感測另管）
 T.HITCH_MAX = 60 * math.pi / 180      -- 規劃期車頭—掛車最大折角

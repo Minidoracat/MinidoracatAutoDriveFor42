@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0928l"
+Drive.REV = "0928m"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -279,6 +279,10 @@ TUNE.VIS_ASSIST_MIN_KMH = 25    -- 巡航減速輔助：低於此速滑行就夠
 TUNE.VIS_ASSIST_TOL_KMH = 1     -- 實速超過巡航帽這麼多才開始補
 TUNE.VIS_ASSIST_GAIN = 1.0      -- 每超 1 km/h 補 1 m/s²
 TUNE.VIS_ASSIST_MAX = 4.0       -- 補的減速度上限（m/s²），疊在滑行之上
+-- 彎前晚收油（Follower.STYLES.coastAssist，0928m）：剖面收油包絡已算進這份輔助，實速超過剖面就照
+-- 超速量補（增益比可視帳高一倍，均衡時只超剖面約 2 km/h），上限 CURVE_ASSIST_MAX。
+TUNE.CURVE_ASSIST_GAIN = 2.0
+TUNE.CURVE_ASSIST_MAX = 4.0
 -- 繞行超速的減速輔助上限（0928a；HOHOHO/clip-01：63 km/h 時已在縫口前 1m、只能承諾 cap 18 的線，
 -- 繞行帽只夾 regulator＝滑行 3 m/s²，到縫仍 56 km/h、追線落後 1m 擦撞）。同一條中線外力、不鎖輪、
 -- 轉向照常；只在實速超過繞行套用帽時放大到這個上限。
@@ -322,6 +326,15 @@ TUNE.DETOUR_AVOID_R = 40       -- 以堵點為圓心的軟封鎖半徑（主 MOD
 TUNE.DETOUR_LEN_RATIO = 1.5    -- 替代路線長 ≤ 剩餘 × ratio + slack 才接受
 TUNE.DETOUR_LEN_SLACK = 200
 TUNE.AUTO_DETOUR_MS = 10000    -- 自動改道：停等累計此時長才要替代路線（或倒車重掃過一次又再堵＝BLOCK_RETRY_MS 即問）
+-- 交還前的最後一次改道（0928m 使用者裁定「遇大量障礙可改道」；Drive.stuckDetour）：每 session 最多 MAX 次，
+-- 同一處（NEAR_M 內）不重問；錨點離車超過 ANCHOR_M 或在車後就改以路線切線往前推
+TUNE.STUCK_DETOUR_MAX = 2
+TUNE.STUCK_DETOUR_NEAR_M = 30
+TUNE.STUCK_DETOUR_ANCHOR_M = 30
+-- 交還前的替代路線可以繞多遠：剩餘×RATIO＋SLACK（使用者 2026-09-28「完全被堵住的橋，應該增加繞路距離」）——
+-- 另一條就是交還，繞 10 km 也比停在路上好；比拖車調頭（×3＋2000）寬
+TUNE.STUCK_DETOUR_LEN_RATIO = 4
+TUNE.STUCK_DETOUR_LEN_SLACK = 10000
 -- 拖車需要調頭時的繞行（Drive.towTurnaround）：避讓圈放車尾正後方、近緣離車心 GAP，往回走的路都得穿圈；
 -- 繞一圈本來就長，長度上限放寬到剩餘×RATIO+SLACK；新路線沿起點走 LOOK 公尺的點要在車頭前半平面。
 TUNE.TOW_TURN_AVOID_R = 12
@@ -442,6 +455,9 @@ TUNE.ASSIST_MASS_MIN = 1300
 TUNE.ASSIST_MAX_ERR_RAD = 20 * math.pi / 180
 TUNE.ASSIST_TIRE_REF = 1.4   -- 輪胎抓地基準（廂型車 wheelFriction 1.4）；低於此值越野推力乘 REF/實際
 TUNE.ASSIST_BOOST_KMH = 10   -- 越野推力遞增：實速低於此、目標高於此才累積
+-- 真的在路外（physicalOffroad）時前推輔助的車速上限（0928m 使用者裁定「路外減速的因素用輔助推力補回」）：
+-- 路面上仍是 Dynamics 的 25（引擎推得動），路外引擎推力乘 ≤0.6×越野效率、高檔位更低，一路補到目標
+TUNE.ASSIST_OFFROAD_SPEED_MAX_KMH = 120
 TUNE.ASSIST_BOOST_MAX = 3    -- 遞增倍率上限
 TUNE.ASSIST_BOOST_RATE = 1.0 -- 每秒 +1.0 倍（2 秒到 3×）；退回用 2 倍速率
 TUNE.ASSIST_TIRE_MAX = 1.6   -- 輪胎因子上限
@@ -2375,10 +2391,11 @@ end
 -- （requestDetourRoute）；成功＝主 MOD 快取已換線，這裡只記 sticky 避讓圈、
 -- 把 nextRouteMs 歸零讓下一幀 fetchRoute 立刻 cutover（why="detour"）。
 -- 回 (true) 或 (false, 原因)；原因供 HUD tooltip／console。
-function Drive.requestDetour(playerNum)
+-- stuck＝交還前的最後一次改道（Drive.stuckDetour）：不要求 blocked、錨點要在車前附近、放寬繞遠上限。
+function Drive.requestDetour(playerNum, stuck)
     local s = sessions[playerNum]
     if not s then return false, "inactive" end
-    if not s.blocked and not s.currentBlocked then return false, "not-blocked" end
+    if not stuck and not s.blocked and not s.currentBlocked then return false, "not-blocked" end
     local api = navApi()
     if not api then return false, "api" end
     local playerObj = getSpecificPlayer(playerNum)
@@ -2387,6 +2404,15 @@ function Drive.requestDetour(playerNum)
     local vx, vy = s.vehicle:getX(), s.vehicle:getY()
     local hx, hy = s.blockHitX, s.blockHitY
     if not fin(hx) or not fin(hy) then hx, hy = vx, vy end
+    if stuck then
+        -- 堵點錨可能是舊 episode 的（遠處／車後）：交還前改道只認車前附近的，否則沿路線切線往前推
+        local h = s.profile and s.profile.segH[s.fstate.idx or 1] or nil
+        local ex, ey = hx - vx, hy - vy
+        if ex * ex + ey * ey > TUNE.STUCK_DETOUR_ANCHOR_M * TUNE.STUCK_DETOUR_ANCHOR_M
+                or (fin(h) and ex * cos(h) + ey * sin(h) < 0) then
+            hx, hy = vx, vy
+        end
+    end
     -- 避讓圈圓心＝堵點沿「車→堵點」方向再推 R（2026-09-02 s064 定罪：舊制以堵點
     -- 為圓心、R=40，車在圈內 9-13m → 任何從本路出發的替代線第一段就穿圈
     -- （avoidPenalty>0）→ 全部拒收 "through"，只剩起點在別條路的線又被 "far" 拒
@@ -2404,7 +2430,8 @@ function Drive.requestDetour(playerNum)
         ay = hy + dy / dn * TUNE.DETOUR_AVOID_R
     end
     local remaining = s.profile and (s.profile.length - s.lastSNow) or nil
-    local route, why, rejected = requestDetourRoute(api, playerNum, s.lastTx, s.lastTy, ax, ay, remaining)
+    local route, why, rejected = requestDetourRoute(api, playerNum, s.lastTx, s.lastTy, ax, ay, remaining, nil,
+        stuck and fin(remaining) and remaining * TUNE.STUCK_DETOUR_LEN_RATIO + TUNE.STUCK_DETOUR_LEN_SLACK or nil)
     if getDebug() then
         print(LOG .. "detour pn=" .. playerNum .. " avoid=(" .. tostring(ax) .. "," .. tostring(ay)
             .. ") -> " .. (route and ("ok len=" .. tostring(route.len)) or ("rejected " .. tostring(why))))
@@ -2418,7 +2445,7 @@ function Drive.requestDetour(playerNum)
         voice("nodetour", playerNum)
         return false, why
     end
-    s.avoidX, s.avoidY, s.avoidR, s.avoidTow = ax, ay, nil, nil
+    s.avoidX, s.avoidY, s.avoidR, s.avoidTow, s.avoidLong = ax, ay, nil, nil, stuck == true
     s.pendingDetour = true
     s.pendingRouteWhy = "detour"
     s.nextRouteMs = 0
@@ -2599,7 +2626,8 @@ local function longitudinalAssistForce(s, speedKmh, targetSpeed, mult, rough, zo
     end
     if zombiePush and scale < TUNE.ZOMBIE_PUSH_SCALE then scale = TUNE.ZOMBIE_PUSH_SCALE end
     local ratio = MDADDynamics.longitudinalAssistRatio(
-        speedKmh, targetSpeed, scale)
+        speedKmh, targetSpeed, scale,
+        s.physicalOffroad == true and TUNE.ASSIST_OFFROAD_SPEED_MAX_KMH or nil)
     if ratio <= 0 then return 0 end
     -- 超線性質量縮放（2026-09-02 使用者裁定「越重的車推力要更大」）：
     -- F=ratio×mass 只保證同加速度增益，但引擎推力非質量等比（固定馬力、
@@ -2611,8 +2639,8 @@ local function longitudinalAssistForce(s, speedKmh, targetSpeed, mult, rough, zo
     return ratio * mass * massScale * IMPULSE_SCALE * (mult / MULT_NORM)
 end
 
--- 硬煞外力輔助（TUNE.BRAKE_ASSIST_*）：只在已知障礙前（dist＝到障礙起點的淨距）照一般硬煞
--- 減速度停不住時才施（need＝v²／2d 超過 NEED）；可視距離／彎道／回線等一般煞車不加，避免平常突然重煞。
+-- 硬煞外力輔助（TUNE.BRAKE_ASSIST_*）：只在距離確定的緊急煞車（障礙前、可視前緣前，見 emergencyBrakeDist）
+-- 照一般硬煞停不住時才施（need＝v²／2d 超過 NEED）；彎道／回線等一般煞車不加，避免平常突然重煞。
 -- 每幀最多一次 addImpulse，本幀已施則 applySteering 不再施力。
 function Drive.brakeAssist(s, vehicle, dist)
     if s.brakeImpulseThis or not MDADDynamics.finite(dist) then return end
@@ -2643,8 +2671,11 @@ function Drive.brakeAssist(s, vehicle, dist)
     BaseVehicle.releaseVector3f(rel)
 end
 
--- 緊急外力煞車的障礙距離：只有「等待繞行的障礙群」與「已判定堵住的障礙」有確定距離；
--- 其他煞車理由回 nil（不加外力）
+-- 緊急外力煞車的障礙距離：「等待繞行的障礙群」「已判定堵住的障礙」與「看得到的最遠處」有確定距離；
+-- 彎道等其他煞車理由回 nil（不加外力）。可視距離的硬煞只在連緊急煞車都停不到前緣時才觸發
+--（0911c／0927 分帳），那時就是「真的煞不住」——2026-09-28 使用者裁定不限速、煞不住用輔助力協助，
+-- 同一條車頭反向中心力照樣只在 v²/2d 超過 BRAKE_ASSIST_NEED 時施。距離＝硬煞帳的前緣扣 halfL＋2
+--（MDADDynamics.visibilityCapKmh 同一個緩衝）。
 function Drive.emergencyBrakeDist(s, reason, blockedStop)
     local halfL = s.vehicleProfile and s.vehicleProfile.halfL or 2
     if reason == "dodge-defer" and MDADDynamics.finite(s.dodgeDeferS) then
@@ -2652,6 +2683,9 @@ function Drive.emergencyBrakeDist(s, reason, blockedStop)
     end
     if (blockedStop or reason == "blocked-approach") and MDADDynamics.finite(s.blockS) and s.blockS > 0 then
         return s.blockS - s.lastSNow - halfL
+    end
+    if reason == "visibility" and MDADDynamics.finite(s.visHardAhead) then
+        return s.visHardAhead - halfL - 2
     end
     return nil
 end
@@ -4073,6 +4107,7 @@ function Drive.visibilityCaps(s, now, visibleEnd, minBrakeVisible)
     local hardAhead = ahead
     if visibleEnd >= s.profile.length - 0.5 then hardAhead = hardAhead + halfL + 2 end
     s.visibilityHardKmh = MDADDynamics.visibilityCapKmh(hardAhead, TUNE.VIS_TAU, visBrake, halfL)
+    s.visHardAhead = hardAhead -- 可視硬煞觸發時的輔助煞車距離（Drive.emergencyBrakeDist）
     return cap, cruiseBrake
 end
 
@@ -4134,21 +4169,26 @@ function Drive.visAssistForce(s, speedKmh, mult)
     end
     -- 已承諾繞行且實速超過本幀套用的繞行帽（接近包絡／保持段／下一群停止包絡）：同一條中線外力，
     -- 上限放到 DODGE_ASSIST_MAX（HOHOHO/clip-01：縫口前 1m 以 63 km/h 承諾 cap 18，只靠滑行到縫仍 56）
-    local cap, amax = s.visibilityCap, TUNE.VIS_ASSIST_MAX
+    local cap, amax, gain = s.visibilityCap, TUNE.VIS_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN
+    -- 彎前晚收油：剖面（fstate.profileSpeedKmh）已假設這份輔助（Follower.STYLES.coastAssist）
+    local pv = s.fstate and s.fstate.profileSpeedKmh
+    if s.profile and (s.profile.coastAssist or 0) > 0 and finite(pv) and pv < cap then
+        cap, amax, gain = pv, TUNE.CURVE_ASSIST_MAX, TUNE.CURVE_ASSIST_GAIN
+    end
     if s.dodging and finite(s.dodgeApproachCap) and s.dodgeApproachCap >= 0 and s.dodgeApproachCap < cap then
-        cap, amax = s.dodgeApproachCap, TUNE.DODGE_ASSIST_MAX
+        cap, amax, gain = s.dodgeApproachCap, TUNE.DODGE_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN
     end
     -- blocked 接近包絡（Drive.blockedApproachCap）：同一條中線外力、同一上限
     if finite(s.blockedApproachCap) and s.blockedApproachCap < cap then
-        cap, amax = s.blockedApproachCap, TUNE.DODGE_ASSIST_MAX
+        cap, amax, gain = s.blockedApproachCap, TUNE.DODGE_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN
     end
     -- 待承諾接近帽（dodge-defer）：同一條中線外力、同一上限；鎖輪門檻見 Drive.deferHardKmh
     if not s.dodging and finite(s.dodgeDeferCap) and s.dodgeDeferCap >= 0 and s.dodgeDeferCap < cap then
-        cap, amax = s.dodgeDeferCap, TUNE.DODGE_ASSIST_MAX
+        cap, amax, gain = s.dodgeDeferCap, TUNE.DODGE_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN
     end
     local over = speedKmh - cap - TUNE.VIS_ASSIST_TOL_KMH
     if over <= 0 then return 0 end
-    local a = over * TUNE.VIS_ASSIST_GAIN
+    local a = over * gain
     if a > amax then a = amax end
     local mass = s.runtimeMass
     if not finite(mass) or mass < 1 then mass = MASS_FALLBACK end
@@ -4631,6 +4671,7 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     phys.curveHardActive = s.curveHardActive
     phys.ffSteer = s.fstate.ffSteer
     phys.yawGain, phys.appliedSteer = s.fstate.yawGain, s.fstate.appliedSteer
+    phys.yawGainHi = s.fstate.yawGainHi
     phys.routeHeadingError, phys.kinkExitS = s.lastRouteErr, s.fstate.kinkExitS
     phys.visibilityCap = s.visibilityCap
     phys.visibilityHardKmh = s.visibilityHardKmh
@@ -5012,6 +5053,30 @@ function Drive.unstickExtraM(s)
     return extra
 end
 
+-- 交還前的最後一次改道（0928m 使用者裁定「遇大量障礙可改道」）：舊觸發只在「blocked 停等 WAIT」成立，
+-- 實際堵死多半先走倒車鏈、額度用完才在停等預算／倒車逾時交還——E2E rc13 12 個固定堵點案開著自動改道
+-- 仍 0 次改道。交還前若選項開著、本 session 額度未滿、不在上次問過的地方，就先要一條避開前方的替代
+-- 路線（繞遠上限放寬到拖車調頭同一套）；拿到＝重置停等預算繼續開，拿不到＝照常交還。
+function Drive.stuckDetour(s, playerNum)
+    if not (type(MDAD.HUD) == "table" and type(MDAD.HUD.autoDetour) == "function"
+            and MDAD.HUD.autoDetour() == true) then return false end
+    if (s.stuckDetourN or 0) >= TUNE.STUCK_DETOUR_MAX then return false end
+    local vx, vy = s.vehicle:getX(), s.vehicle:getY()
+    local px, py = s.stuckDetourX, s.stuckDetourY
+    if finite(px) and finite(py) and (vx - px) * (vx - px) + (vy - py) * (vy - py)
+            < TUNE.STUCK_DETOUR_NEAR_M * TUNE.STUCK_DETOUR_NEAR_M then return false end
+    s.stuckDetourN = (s.stuckDetourN or 0) + 1
+    s.stuckDetourX, s.stuckDetourY = vx, vy
+    local ok, why = Drive.requestDetour(playerNum, true)
+    diagEvent(s, playerNum, "detour", { phase = "stuck", why = ok and "ok" or tostring(why), x = vx, y = vy,
+        attempt = s.stuckDetourN })
+    if not ok then return false end
+    s.mode, s.recoverWhy = "follow", nil
+    s.progressState, s.progressSince = "disarmed", 0
+    s.waitAccumMs, s.episodeAttempts, s.blockRetryDone, s.detourTried = 0, 0, false, true
+    return true
+end
+
 -- Called only after stepFollow released its hot-path vector. Rear unknown is fail-closed;
 -- an attempt is consumed only after a clear 4m swept-strip check.
 local function startRecoveryAttempt(s, vehicle, playerNum, now, vx, vy, softFail)
@@ -5030,6 +5095,7 @@ local function startRecoveryAttempt(s, vehicle, playerNum, now, vx, vy, softFail
             s.progressSince = 0
             return
         end
+        if Drive.stuckDetour(s, playerNum) then return end
         Drive.stop(playerNum, KEY_STUCK)
         return
     end
@@ -5083,6 +5149,7 @@ local function startRecoveryAttempt(s, vehicle, playerNum, now, vx, vy, softFail
             s.progressSince = 0
             return
         end
+        if Drive.stuckDetour(s, playerNum) then return end
         Drive.stop(playerNum, KEY_STUCK)
         return
     end
@@ -7311,6 +7378,7 @@ local function resolveBlockAnchor(s, sen, vehicle, lineOnly, minS, maxS, laneL)
     return bs
 end
 Drive.debugResolveBlockAnchor = resolveBlockAnchor -- 測試鉤：錨與 Corridor.plan 的擋線基準是否同一組
+Drive.debugAssistForce = longitudinalAssistForce -- 測試鉤：路外前推的車速上限（0928m）
 
 -- 初判 blocked 的降檔複審（replan 抽出；190-local 閘門＋可獨立閱讀）：
 -- squeeze plan＋sweep → physical plan＋sweep，第一個世界掃掠過的縫即 commit
@@ -8507,6 +8575,7 @@ local function stepUnstick(s, vehicle, playerNum, now)
                 x = vx, y = vy, s = s.lastSNow, d = s.unstickDistance,
                 duration = now - s.unstickStartedAt, rear = "settle-speed",
             })
+            if Drive.stuckDetour(s, playerNum) then return end
             Drive.stop(playerNum, KEY_STUCK)
             return
         end
@@ -8519,6 +8588,7 @@ local function stepUnstick(s, vehicle, playerNum, now)
                 duration = now - s.unstickStartedAt, rear = "settle-timeout",
             })
             sampleRecovery(s, vehicle, playerNum, now, vx, vy, speedKmh)
+            if Drive.stuckDetour(s, playerNum) then return end
             Drive.stop(playerNum, KEY_STUCK)
             return
         end
@@ -8603,6 +8673,7 @@ local function stepUnstick(s, vehicle, playerNum, now)
             duration = now - s.unstickStartedAt, rear = s.rearStatus,
         })
         sampleRecovery(s, vehicle, playerNum, now, vx, vy, speedKmh)
+        if Drive.stuckDetour(s, playerNum) then return end
         Drive.stop(playerNum, KEY_STUCK)
         return
     end
@@ -10418,6 +10489,7 @@ local function stepFollow(s, vehicle, playerNum, now)
     end
     -- 停等總預算耗盡是最高優先的終局（紅字交還玩家），蓋過任何恢復需求。
     if postAction == "wait" then
+        if Drive.stuckDetour(s, playerNum) then return end
         Drive.stop(playerNum, KEY_STUCK)
         return
     end
@@ -10702,8 +10774,17 @@ local function onPlayerUpdate(player)
             s.resumeProgressUntil = 0
             s.pendingRouteWhy = "target"
             s.avoidX, s.avoidY, s.avoidR, s.avoidTow, s.pendingDetour = nil, nil, nil, nil, false
+            s.avoidLong, s.stuckDetourN, s.stuckDetourX, s.stuckDetourY = nil, 0, nil, nil -- 新目標＝新的改道額度
             s.towTurnTries, s.uturnLoopX, s.uturnLoopY = 0, nil, nil -- 新目標＝新的一趟
             s.rejectedRoute = nil
+        end
+        -- 被本 MOD 拒收的替代線（far／long／through）仍躺在主 MOD 快取裡（requestDetour
+        -- 成功即覆寫），下一次取路會原樣拿回同一個 table——不得當成一般 cutover 收下
+        -- （2026-09-02 s064：拒收 far 之後同一幀就以 "deviation" 名義跟著它開進樹林；
+        -- 主 MOD 冷卻後重算會換新 identity，屆時照常 cutover）。**必須在距離閘之前**：拒收的
+        -- far 線走到距離閘＝RouteTooFar 交還（0928m E2E rc15 0095：改道被拒 far，15 幀後交還）。
+        if route ~= s.route and s.rejectedRoute ~= nil and route == s.rejectedRoute then
+            route = s.route
         end
         -- 距離閘是新路線的接收條件（含同目標偏航重算），不重新驗收同一顆快取。
         -- 換反向目標時，合法路線起點後的煞停過衝可能超過20m；旋轉與感知仍各自把關。
@@ -10755,22 +10836,17 @@ local function onPlayerUpdate(player)
                 and routeCrossesAvoid(route, s.avoidX, s.avoidY, s.avoidR or TUNE.DETOUR_AVOID_R) then
             local remaining = s.profile and (s.profile.length - s.lastSNow) or nil
             local detour, _, rejected = requestDetourRoute(api, playerNum, tx, ty, s.avoidX, s.avoidY,
-                remaining, s.avoidR, s.avoidTow and finite(remaining)
+                remaining, s.avoidR, s.avoidLong and finite(remaining)
+                    and remaining * TUNE.STUCK_DETOUR_LEN_RATIO + TUNE.STUCK_DETOUR_LEN_SLACK
+                    or s.avoidTow and finite(remaining)
                     and remaining * TUNE.TOW_TURN_LEN_RATIO + TUNE.TOW_TURN_LEN_SLACK or nil)
             if detour then
                 route = detour
                 s.pendingRouteWhy = s.avoidTow and "towturn" or "detour"
             else
-                s.avoidX, s.avoidY, s.avoidR, s.avoidTow = nil, nil, nil, nil
+                s.avoidX, s.avoidY, s.avoidR, s.avoidTow, s.avoidLong = nil, nil, nil, nil, nil
                 if rejected ~= nil then s.rejectedRoute = rejected end
             end
-        end
-        -- 被本 MOD 拒收的替代線（far／long／through）仍躺在主 MOD 快取裡（requestDetour
-        -- 成功即覆寫），下一次取路會原樣拿回同一個 table——不得當成一般 cutover 收下
-        -- （2026-09-02 s064：拒收 far 之後同一幀就以 "deviation" 名義跟著它開進樹林；
-        -- 主 MOD 冷卻後重算會換新 identity，屆時照常 cutover）。
-        if route ~= s.route and s.rejectedRoute ~= nil and route == s.rejectedRoute then
-            route = s.route
         end
         if route ~= s.route or versionChanged or s.reapproach then
             local profileRoute, approachM = Drive.profileRouteOf(route, s.tow, s.vehicleProfile,
@@ -10839,7 +10915,10 @@ local function onPlayerUpdate(player)
                 -- build，下一幀 build→follow 就跳過放手等待與「恢復控制」提示＝0 秒接管
                 -- （2026-09-06 回饋「放開會變回自動駕駛、突然回頭」的一條路徑）。新 profile
                 -- 由恢復幀依 ready 決定先走 build。
-            elseif resumePhase ~= nil or not preservingRecovery then
+            elseif resumePhase ~= nil or not preservingRecovery or oldMode == "follow" then
+                -- 「保留恢復」只保留倒車／settle 本身；跟線模式等倒車開始（recoverWhy 待命）時換線，照樣
+                -- 先 build——stepFollow 拿到 ready=false 的剖面＝curve-state 故障交還（0928m E2E rc15
+                -- 0094／0118：改道 cutover 同幀 UnsupportedVehicle）。recoverWhy 保留，建好後照常倒車。
                 s.mode = "build"
             end
             s.routeReadyEventPending = true

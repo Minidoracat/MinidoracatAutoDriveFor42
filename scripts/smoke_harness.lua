@@ -6203,6 +6203,7 @@ checkEq(type(MDADSensor), "table", "production client/MDAD_Sensor.lua 真的載�
 -- 感知的假世界。Sensor 的 PZ 入口全走參數（cell、vehicle）與延後綁定
 -- （IsoFlagType/IsoObjectType/instanceof 首輪掃描才讀），這裡塞替身即可。
 IsoFlagType = { water = "water", solidfloor = "solidfloor", doorN = "doorN", doorW = "doorW",
+    DoorWallN = "DoorWallN", DoorWallW = "DoorWallW", open = "open",
     solidtrans = "solidtrans" } -- solidtrans：(C2) 小物 r 0.3 分類用（putSolid 的 props 一律回 false，不受影響）
 IsoObjectType = { isMoveAbleObject = 28 }
 function instanceof(obj, cls) return type(obj) == "table" and rawget(obj, "_class") == cls end
@@ -6256,6 +6257,9 @@ function drive.mkSquare(x, y)
     -- 屍體容器（IsoDeadBody 住 staticMovingObjects，見 Sensor 的出處註解）
     sq._smvList = { size = function() return #smv end, get = function(_, i) return smv[i + 1] end }
     sq.getObjects = function() return sq._objList end
+    -- 格級聚合屬性（production 只在門類 sprite 才讀：closedDoor）；drive.putGate 寫 sq._flags
+    sq._flags = {}
+    sq.getProperties = function() return { has = function(_, key) return sq._flags[key] == true end } end
     -- 格級幾何查詢（IsoGridSquare.getVehicleContainer 的假版）：production 的
     -- 車輛感知唯一入口。單格佔位＝點車（等同舊 movingObjects 錨語意）。
     sq.getVehicleContainer = function() return drive.vehGeo[x * 100000 + y] end
@@ -6445,6 +6449,28 @@ function drive.putTree(x, y, name)
     sq._objs[#sq._objs + 1] = {
         _class = "IsoTree",
         getSpriteName = function() return name end,
+        getSprite = function() return sprite end,
+        getProperties = function() return props end,
+        getType = function() return nil end,
+    }
+end
+
+-- 門／柵門（0928m）：門 sprite 帶 doorN／doorW；格級屬性另有 DoorWallN／W，開著多一個 open（引擎 calcPhysics
+-- 只在沒有 open 時給車輛碰撞牆）。sprite 名隨開關不同（IsoDoor closedSprite／openSprite）。
+function drive.putGate(x, y, north, open)
+    local door = north and "doorN" or "doorW"
+    local props = { has = function(_, key) return key == door end }
+    local sprite = {
+        shouldHaveCollision = function() return false end,
+        getProperties = function() return props end,
+    }
+    local sq = drive.world[x * 100000 + y] or drive.mkSquare(x, y)
+    sq._flags[door] = true
+    sq._flags[north and "DoorWallN" or "DoorWallW"] = true
+    sq._flags.open = open == true or nil
+    sq._objs[#sq._objs + 1] = {
+        _class = "IsoDoor",
+        getSpriteName = function() return open and "harness_gate_open" or "harness_gate_closed" end,
         getSprite = function() return sprite end,
         getProperties = function() return props end,
         getType = function() return nil end,
@@ -6923,8 +6949,36 @@ function drive.scenarioBrakeAssist()
     checkEq(imp.frame, 0, "(brake-assist) 40 km/h 以下不施外力")
     imp = hit(80, nil)
     checkEq(imp.frame, 0, "(brake-assist) 沒有障礙距離（可視／彎道等一般煞車）：不加外力")
-    checkEq(MDAD.Drive.emergencyBrakeDist(st, "visibility", false), nil, "(brake-assist) 可視距離煞車不算緊急")
+    -- 0928m 使用者裁定「煞不住就用輔助力」：可視硬煞（連緊急煞車都停不到前緣才觸發）照同一條件加外力，
+    --   距離＝硬煞帳前緣扣 halfL＋2。違規證明：visibility 分支拿掉＝這兩行紅。
+    st.visHardAhead = nil
+    checkEq(MDAD.Drive.emergencyBrakeDist(st, "visibility", false), nil, "(brake-assist) 還沒有可視帳：不加")
+    st.visHardAhead = 30
+    local halfLv = st.vehicleProfile.halfL
+    checkNear(MDAD.Drive.emergencyBrakeDist(st, "visibility", false), 30 - halfLv - 2, 1e-9,
+        "(brake-assist) 可視硬煞：距離＝前緣扣 halfL＋2")
+    imp = hit(90, MDAD.Drive.emergencyBrakeDist(st, "visibility", false)) -- 25 m/s、約 26m：需 12 m/s²
+    checkEq(imp.frame, 1, "(brake-assist) 可視前緣前真的煞不住：加外力")
+    st.visHardAhead = nil
     checkEq(MDAD.Drive.emergencyBrakeDist(st, "curve", false), nil, "(brake-assist) 彎道煞車不算緊急")
+    -- (curve-assist) 0928m brisk 彎前晚收油：剖面（profileSpeedKmh）已假設中線減速輔助，實速超過就照
+    --   超速量×CURVE_ASSIST_GAIN 補、上限 CURVE_ASSIST_MAX；舒適檔／拖車（coastAssist 0）不補。
+    --   違規證明：拿掉 visAssistForce 的剖面分支＝第一行紅。
+    local oldCap, oldPv, oldAssist, oldReady = st.visibilityCap, st.fstate.profileSpeedKmh,
+        st.profile.coastAssist, st.sensor and st.sensor.ready
+    st.visibilityCap, st.fstate.profileSpeedKmh, st.profile.coastAssist = 90, 40, 2.5
+    if st.sensor then st.sensor.ready = true end
+    local tune = MDAD.Drive.debugTune()
+    MDAD.Drive.visAssistForce(st, 42.5, 1)
+    checkNear(st.visAssistDecel, (42.5 - 40 - tune.VIS_ASSIST_TOL_KMH) * tune.CURVE_ASSIST_GAIN, 1e-9,
+        "(curve-assist) 超剖面 2.5 km/h：照超速量×增益補（" .. tostring(st.visAssistDecel) .. "）")
+    MDAD.Drive.visAssistForce(st, 60, 1)
+    checkNear(st.visAssistDecel, tune.CURVE_ASSIST_MAX, 1e-9, "(curve-assist) 上限 CURVE_ASSIST_MAX")
+    st.profile.coastAssist = 0
+    MDAD.Drive.visAssistForce(st, 60, 1)
+    checkEq(st.visAssistDecel, 0, "(curve-assist) 剖面沒假設輔助（舒適／拖車）：不補")
+    st.visibilityCap, st.fstate.profileSpeedKmh, st.profile.coastAssist = oldCap, oldPv, oldAssist
+    if st.sensor then st.sensor.ready = oldReady end
     MDAD.Drive.stop(0, nil)
     assert(armDrive())
 end
@@ -13253,6 +13307,14 @@ local function scenarioPhaseE()
         "短暫回鋪面 300ms：key 不翻、不觸發剖面重建（key=" .. tostring(captured.tractionKey)
         .. " dirty=" .. tostring(captured.dynamicsDirty) .. "）")
     captured.physicalOffroad = true
+    -- (offroad-fast) 0928m：真的在路外時前推輔助 25 km/h 以上照補（引擎推力路外乘 ≤0.6×越野效率）；
+    --   路面上（含繞行／回線的 rough）維持 25 上限。違規證明：Driver 不傳路外上限＝第一行紅。
+    checkTrue(MDAD.Drive.debugAssistForce(captured, 40, 60, 0.8, true, false) > 0,
+        "(offroad-fast) 路外 40 km/h、目標 60：仍有前推輔助")
+    captured.physicalOffroad = false
+    checkEq(MDAD.Drive.debugAssistForce(captured, 40, 60, 0.8, true, false), 0,
+        "(offroad-fast) 路面繞行 40 km/h：維持 25 上限、不推")
+    captured.physicalOffroad = true
     checkTrue(captured.safeAccel <= captured.priorAccel
             and captured.safeBrake <= captured.priorBrake
             and captured.safeLat <= captured.priorLat,
@@ -15158,6 +15220,35 @@ scenario("橋面：水面 sprite 上有實地板＝可通行；純水面才是�
     drive.fillWorld(-2, 70, -7, 7)
 end
 scenarioBridge()
+-- =====================================================================
+-- 情境（gate）0928m：關著的門／柵門是車輛碰撞牆（IsoChunk.calcPhysics：DoorWall＋door 且沒有 open）
+-- E2E rc13 0190：車頂著關著的鐵絲網柵門 0 km/h、每輪掃描淨空（門類 sprite 一律當開口）。
+-- 違規證明：closedDoor 一律回 false＝(gate) 關著這行紅。
+-- =====================================================================
+function drive.scenarioGate()
+scenario("關著的柵門＝硬障礙、停下；開著的柵門照常通過")
+    drive.fillWorld(-2, 70, -7, 7)
+    drive.putRoad(-2, 70, -3, 3)
+    for y = -7, 7 do drive.putGate(20, y, false, false) end
+    checkTrue(armDrive(), "(gate) 啟動")
+    driveReset(dveh)
+    drive.scanRound()
+    local hn = MDAD.Drive.debugSession(0).sensor.hardN
+    checkTrue(hn > 0, "(gate) 關著：柵門整排是硬障礙（hardN=" .. tostring(hn) .. "）")
+    checkEq(haloKey(), DKEY.BLOCKED, "(gate) 關著而且整排擋住：停下 blocked")
+    MDAD.Drive.stop(0, nil)
+    drive.fillWorld(-2, 70, -7, 7)
+    drive.putRoad(-2, 70, -3, 3)
+    for y = -7, 7 do drive.putGate(20, y, false, true) end
+    checkTrue(armDrive(), "(gate) 開著 啟動")
+    driveReset(dveh)
+    drive.scanRound()
+    checkEq(MDAD.Drive.debugSession(0).sensor.hardN, 0, "(gate) 開著：不是障礙")
+    checkTrue(haloKey() ~= DKEY.BLOCKED, "(gate) 開著：不 blocked")
+    MDAD.Drive.stop(0, nil)
+    drive.fillWorld(-2, 70, -7, 7)
+end
+drive.scenarioGate()
 
 -- =====================================================================
 -- 0908a：調頭＋blocked（s030）、短帶倒車（s026）
@@ -15991,7 +16082,8 @@ function drive.scenarioDualPinch(switchStyle)
         return drive.calls.maxRegSpeed
     end
     if not switchStyle then
-        checkTrue(sample(early - 10) > 9, "(dual) 空曠接近段仍可提速，不退化為全線5")
+        -- 0928m brisk 彎前晚收油：剖面速度較高、承諾線入口可從車位附近開始（a≈1），接近段取承諾線內
+        checkTrue(sample(math.max(early - 10, fs.ovS0)) > 9, "(dual) 空曠接近段仍可提速，不退化為全線5")
     end
     local sh = math.min(1, 1.2 * st.dodgeShapeDl / st.dodgeEntryLength)
     local earlyCap = math.max(5, MDADDynamics.clearanceCapKmh(0.14, 0, 0.3, st.dodgeEnvLat, sh))
@@ -17509,6 +17601,120 @@ function drive.scenarioTowTurn()
     SandboxVars, dveh, getSpecificPlayer = oldSandbox, oldVeh, oldGet
 end
 drive.scenarioTowTurn()
+-- 0928m 交還前的最後一次改道（Drive.stuckDetour；使用者裁定「遇大量障礙可改道」）：E2E rc13 12 個固定堵點
+-- 開著自動改道仍 0 次改道——舊觸發只在 blocked 停等 WAIT，實際堵死多在倒車額度用完後的停等預算／倒車
+-- 逾時交還。違規證明：拿掉停等預算出口的 stuckDetour＝(sd1) 紅；拿掉 NEAR_M 判定＝(sd2) 紅。
+function drive.scenarioStuckDetour()
+    scenario("交還前先要一條替代路線：拿到就繼續開、同處不重問、選項關著照舊交還")
+    local oldSandbox, oldGet = SandboxVars, getSpecificPlayer
+    local oldApi = MinidoracatMiniMapAPI.navApiVersion
+    local oldRoute, oldTx, oldTy, oldState = drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
+    local oldDetour, oldReq, oldAuto = drive.nav.detour, MinidoracatMiniMapAPI.requestDetour, MDAD.HUD.autoDetour
+    local wasMs = drive.frameMs(20)
+    MDAD.Drive.stop(0, nil)
+    getSpecificPlayer = function(n) if n == 0 then return dp end end
+    MinidoracatMiniMapAPI.navApiVersion = 5
+    MinidoracatMiniMapAPI.requestDetour = function(...)
+        local r, state = oldReq(...)
+        if r then drive.nav.route = r end
+        return r, state
+    end
+    local function arm(auto)
+        MDAD.Drive.stop(0, nil)
+        MDAD.HUD.autoDetour = function() return auto end
+        drive.fillWorld(-90, 120, -12, 12)
+        drive.putRoad(-90, 120, -3, 3)
+        setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 60, RightLaneBias = 0 })
+        dveh._x, dveh._y = 0, 0
+        setHeading(dveh, 0)
+        dveh._speed, dveh._steering, dveh._stopped = 0, 0, true
+        dveh._engine, dveh._driver = true, dp
+        dp._vehicle, dp._dead, dp._local = dveh, false, true
+        drive.nav.route = { pts = { 0, 0, 100, 0 }, segSurface = { "paved" }, segWidth = { 8 }, len = 100, cost = 100,
+            avoidPenalty = 0 }
+        drive.nav.tx, drive.nav.ty, drive.nav.state = 100, 0, "ok"
+        drive.nav.detourCalls, drive.nav.lastDetour = 0, nil
+        -- 繞一大圈（2 km）：一般改道上限（剩餘 100×1.5＋200＝350）會拒收 long，交還前改道要收
+        drive.nav.detour = { pts = { 0, 0, 0, 40, 100, 40, 100, 0 }, segSurface = { "paved", "paved", "paved" },
+            segWidth = { 8, 8, 8 }, len = 2000, cost = 2000, avoidPenalty = 0 }
+        local ok = MDAD.Drive.start(dp)
+        for _ = 1, 4 do driveTick(dp, dveh) end
+        return ok
+    end
+    -- (sd1) 停等預算用完：先要替代路線，拿到就不交還、預算歸零
+    checkTrue(arm(true), "(sd1) 啟動")
+    local st = MDAD.Drive.debugSession(0)
+    st.waitAccumMs = 20000
+    driveTick(dp, dveh)
+    checkTrue(MDAD.Drive.isActive(0) and drive.nav.detourCalls == 1 and st.waitAccumMs < 1000,
+        "(sd1) 停等預算用完：要了替代路線（2 km 繞行也收）、session 繼續（calls=" .. tostring(drive.nav.detourCalls)
+        .. " wait=" .. tostring(st.waitAccumMs) .. "）")
+    -- (sd2) 同一處再用完：不重問，照常交還
+    st = MDAD.Drive.debugSession(0)
+    if st then
+        st.waitAccumMs = 20000
+        driveTick(dp, dveh)
+    end
+    checkTrue(not MDAD.Drive.isActive(0) and drive.nav.detourCalls == 1,
+        "(sd2) 同一處第二次用完：不重問、交還（calls=" .. tostring(drive.nav.detourCalls) .. "）")
+    -- (sd3) 選項關著：照舊交還、不問
+    checkTrue(arm(false), "(sd3) 啟動")
+    st = MDAD.Drive.debugSession(0)
+    st.waitAccumMs = 20000
+    driveTick(dp, dveh)
+    checkTrue(not MDAD.Drive.isActive(0) and drive.nav.detourCalls == 0, "(sd3) 自動改道關著：直接交還、不問")
+    -- (sd4) 找不到替代路線：問一次後交還
+    checkTrue(arm(true), "(sd4) 啟動")
+    drive.nav.detour = nil
+    st = MDAD.Drive.debugSession(0)
+    st.waitAccumMs = 20000
+    driveTick(dp, dveh)
+    checkTrue(not MDAD.Drive.isActive(0) and drive.nav.detourCalls == 1, "(sd4) 沒有替代路線：問一次後交還")
+    -- (sd5) 替代線被拒收 far、但主 MOD 已把它寫進快取：下一次取路不得拿它觸發 RouteTooFar 交還
+    --   （E2E rc15 0095）。違規證明：拒收略過搬回距離閘之後＝紅。
+    checkTrue(arm(true), "(sd5) 啟動")
+    drive.nav.detour = { pts = { 60, 30, 100, 30, 100, 0 }, segSurface = { "paved", "paved" }, segWidth = { 8, 8 },
+        len = 200, cost = 200, avoidPenalty = 0, snapDist = 35 }
+    local okD, whyD = MDAD.Drive.requestDetour(0, true)
+    checkTrue(okD == false and whyD == "far" and drive.nav.route == drive.nav.detour,
+        "(sd5) far 被拒收、快取已被覆寫（why=" .. tostring(whyD) .. "）")
+    for _ = 1, 20 do
+        nowMs = nowMs + 100
+        driveTick(dp, dveh)
+    end
+    checkTrue(MDAD.Drive.isActive(0), "(sd5) 拒收的 far 線留在快取：不因它 RouteTooFar 交還")
+    -- (sd6) 跟線中倒車待命（recoverWhy）時換線：先 build，不拿未建好的剖面跟線（E2E rc15 0094／0118 同幀
+    --   UnsupportedVehicle）。違規證明：cutover 對 follow 不改 build＝紅。
+    checkTrue(arm(true), "(sd6) 啟動")
+    st = MDAD.Drive.debugSession(0)
+    st.recoverWhy = "blocked-retry"
+    drive.nav.route = { pts = { 0, 0, 50, 0, 100, 0 }, segSurface = { "paved", "paved" }, segWidth = { 8, 8 },
+        len = 100, cost = 100.5, avoidPenalty = 0 }
+    -- 實機是邊煞車邊等倒車（13 km/h，capReason recover）時換線：車還在動，stepFollow 每幀跑 control
+    dveh._speed, dveh._stopped = 13, false
+    local realControl, unready = MDADFollower.control, 0
+    MDADFollower.control = function(p, ...)
+        if p.ready ~= true then unready = unready + 1 end
+        return realControl(p, ...)
+    end
+    for _ = 1, 6 do
+        nowMs = nowMs + 100
+        driveTick(dp, dveh)
+    end
+    MDADFollower.control = realControl
+    dveh._speed, dveh._stopped = 0, true
+    checkTrue(MDAD.Drive.isActive(0) and st.route == drive.nav.route and unready == 0,
+        "(sd6) 倒車待命中換線：換上新線、不拿未建好的剖面跟線（unready=" .. unready .. " mode="
+        .. tostring(st.mode) .. "）")
+    MDAD.Drive.stop(0, nil)
+    MDAD.HUD.autoDetour, MinidoracatMiniMapAPI.requestDetour = oldAuto, oldReq
+    drive.nav.detour = oldDetour
+    drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
+    MinidoracatMiniMapAPI.navApiVersion = oldApi
+    SandboxVars, getSpecificPlayer = oldSandbox, oldGet
+    drive.frameMs(wasMs)
+end
+drive.scenarioStuckDetour()
 
 -- 0928a 正式服 0.13.1 片段修正（各段違規證明寫在段首）：
 --   (aw)          前方區域未載入的引擎煞車：不判卡死、不倒車、HUD 顯示等待、等滿上限才以專屬理由交還。

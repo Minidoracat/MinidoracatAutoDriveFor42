@@ -370,9 +370,30 @@ do
     checkTrue(pCorner.v[4] * KMH > F.MIN_SPEED_KMH, "直角彎沒有撞到 12 km/h 下限（約 18.6）")
     checkTrue(pCorner.v[4] * KMH < MAXV * 0.5, "直角彎確實遠慢於 maxSpeed")
     checkTrue(pCorner.v[3] > pCorner.v[4], "彎前一點比彎頂快（反向制動生效）")
+    -- 0928m：brisk 彎前收油包絡＝滑行＋中線減速輔助（STYLES.coastAssist，Driver 以 visAssistForce 補）；
+    --   終點停車包絡不加（上方終點前 10／20／50m 三行照舊）。違規證明：build 不加 assist＝這行紅。
     checkNear(pCorner.v[3],
-        math.sqrt(pCorner.v[4] * pCorner.v[4] + 2 * F.STYLES.brisk.coast * 8), 1e-9,
-        "彎前使用 coast envelope（brisk coast " .. F.STYLES.brisk.coast .. "），不動用 active brake")
+        math.sqrt(pCorner.v[4] * pCorner.v[4] + 2 * (F.STYLES.brisk.coast + F.STYLES.brisk.coastAssist) * 8), 1e-9,
+        "彎前收油包絡＝brisk 滑行 " .. F.STYLES.brisk.coast .. "＋輔助 " .. F.STYLES.brisk.coastAssist .. "，不動用 active brake")
+    checkNear(pCorner.coastAssistAt[3], F.STYLES.brisk.coastAssist, 1e-12, "彎前段記下輔助量（control 夾限要加回）")
+    -- 拖車（configureFollower 歸零）與舒適檔：不加輔助
+    local pNoAssist = F.begin(mkRoute({ 0, 0, 8, 0, 16, 0, 24, 0, 24, 8, 24, 16, 24, 24, 24, 32, 24, 40, 24, 48 }), MAXV)
+    pNoAssist.coastAssist = 0
+    while not pNoAssist.ready do F.stepBuild(pNoAssist, 4096) end
+    checkNear(pNoAssist.v[3],
+        math.sqrt(pNoAssist.v[4] * pNoAssist.v[4] + 2 * F.STYLES.brisk.coast * 8), 1e-9,
+        "輔助歸零（拖車）：彎前回到純滑行包絡")
+    checkEq(F.STYLES.comfort.coastAssist, 0, "舒適檔不加輔助")
+    -- control：線上學到的純斷油夾限要加回該段輔助（否則輔助被夾掉）。車停在彎前第 2 段中點。
+    local stA = F.newState()
+    F.setRuntimeLimits(stA, 3, 6, 7, 0.6)
+    local _, tgtA = F.control(pCorner, stA, 12, 0, 0, 20, DT)
+    local stB = F.newState()
+    F.setRuntimeLimits(stB, 3, 6, 7, 0.6)
+    pCorner.coastAssistAt[2] = 0
+    local _, tgtB = F.control(pCorner, stB, 12, 0, 0, 20, DT)
+    pCorner.coastAssistAt[2] = F.STYLES.brisk.coastAssist
+    checkTrue(tgtA > tgtB + 1, string.format("線上滑行 0.6 夾限加回輔助：目標 %.1f > 不加 %.1f km/h", tgtA, tgtB))
     checkNear(F.STYLES.brisk.coast, 3.0, 1e-12,
         "brisk coast 天花板 3.0（0907e：真值由 VehicleProfile 質量制動預算取 min）")
     -- 彎後不再有前向加速包絡（2026-09-01 拆除 forward pass）：v[5] 直接由
@@ -2849,6 +2870,123 @@ do
         .. string.format("%.1f", sRaw) .. " rotated=" .. tostring(rotRaw) .. "）")
     checkFalse(rotClean, "清過的路線：開過反折點不判原地調頭")
     checkTrue(sClean > 100, string.format("清過的路線：投影跟著車前進到反折點後 12m 以上（s=%.1f，車開到反折點後 15m）", sClean))
+end
+
+scenario("0928m：高速弧段前饋補足——弧上學高速增益後 FRAC 補到 0.9，緩彎外漂減半、增益被低估的車不切內、低速不變")
+do
+    -- 正式服 rc12 0200 KST 72 km/h R≈65 外漂 0.34→0.96、弧後殘差 1.8m 帶進反向彎；rc10 0135 StepVan 左彎外漂
+    -- 0.66m 直路不修、右彎擦物。Plant：yaw 率一階追 YG·steer（遊戲側推的 yaw 增益與車速近似無關：0135 0.55-0.68、
+    -- 0200 ≈1.0），τ 0.35；Driver 同式 cross-track（弧段 ×ARC）。違規證明：拿掉補足（FRAC 恆 0.7）＝兩個高速案紅。
+    local D = MDADDynamics
+    local VP = { valid = true, geometryValid = true, halfW = 0.81, rMin = 2.75, wheelbase = 2.41,
+        delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 120, lookScale = 1.336 }
+    local function sim(route, bias, car, kmh, tmax, observe, plantGain, seed)
+        local dt = 1 / 30
+        local p = F.begin(route, 120, 4, VP)
+        while not p.ready do F.stepBuild(p, 4096) end
+        local st = F.newState()
+        F.setLaneBias(st, bias)
+        F.setRuntimeLimits(st, 3, 6, 7, 1.2)
+        st.yawGain = seed and seed.yg or 0.6
+        if seed and seed.hi then st.yawGainHi, st.hiLearnT = seed.hi, 1 end
+        local prevLat, t = nil, 0
+        while t < tmax do
+            local steer, _, rem, reached, _, _, latSigned = F.control(p, st, car.x, car.y, car.h, kmh, dt)
+            local sNow = p.length - rem
+            local latDev = latSigned - F.laneBiasAt(p, bias, st.idx, sNow)
+            local dLat = prevLat and (latDev - prevLat) / dt or nil
+            if dLat and (dLat > 5 or dLat < -5) then dLat = nil end
+            prevLat = latDev
+            local xg, xm = nil, nil
+            if st.curveHardActive then xg, xm = D.CROSS_TRACK_ARC_GAIN, D.CROSS_TRACK_ARC_MAX end
+            local u = steer - D.crossTrackSteer(latDev, kmh, dLat, xg, xm)
+            if u > 5 then u = 5 elseif u < -5 then u = -5 end
+            if u < 0.02 and u > -0.02 then u = 0 end
+            st.appliedSteer = u
+            local v = kmh / 3.6
+            local wT = (plantGain or 0.6) * u
+            local wMax = v / VP.rMin
+            if wT > wMax then wT = wMax elseif wT < -wMax then wT = -wMax end
+            car.w = car.w + (wT - car.w) * (dt / 0.35)
+            car.h = car.h + car.w * dt
+            car.x = car.x + math.cos(car.h) * v * dt
+            car.y = car.y + math.sin(car.h) * v * dt
+            observe(sNow, latDev)
+            if reached or sNow > p.length - 3 then break end
+            t = t + dt
+        end
+    end
+    -- S 彎：直 120 → 左折 35°（圓角 R）→ 直 gap → 右折回 → 直，路寬讓帶子放得下 R
+    local function sCurve(kmh, R, gap, plantGain, seed, stateOut)
+        local ang = math.rad(35)
+        local w = 2 * (R * (1 - math.cos(ang / 2)) + VP.halfW + 0.45)
+        if w < 7 then w = 7 end
+        local tl = R * math.tan(ang / 2)
+        local seg = gap + 2 * tl
+        local x2, y2 = 120 + seg * math.cos(-ang), seg * math.sin(-ang)
+        local route = { pts = { 0, 0, 120, 0, x2, y2, x2 + 120, y2 }, segSurface = { "paved", "paved", "paved" },
+            segWidth = { w, w, w } }
+        local out, cut = 0, 0
+        sim(route, 0.5, { x = 30, y = 0.5, h = 0, w = 0 }, kmh, 40, function(sNow, latDev)
+            if sNow > 110 and sNow < 120 + tl + 5 then -- 左彎外側＝右＝+
+                if latDev > out then out = latDev end
+                if -latDev > cut then cut = -latDev end
+            end
+            if sNow > 120 + seg - tl - 5 and sNow < 120 + seg + tl + 5 then
+                if -latDev > out then out = -latDev end
+                if latDev > cut then cut = latDev end
+            end
+        end, plantGain, seed)
+        return out, cut
+    end
+    -- (a) 高速增益已學到（=plant 0.6）：補足到 0.9。違規證明：補足拿掉＝兩行紅。
+    local o72 = sCurve(72, 65, 20, 0.6, { yg = 0.6, hi = 0.6 })
+    local o45 = sCurve(45, 30, 10, 0.6, { yg = 0.6, hi = 0.6 })
+    checkTrue(o72 < 0.95, string.format("72 km/h R65：弧段外漂 %.2fm < 0.95（FRAC 0.7 時 1.24）", o72))
+    checkTrue(o45 < 0.65, string.format("45 km/h R30：弧段外漂 %.2fm < 0.65（FRAC 0.7 時 0.98）", o45))
+    -- (b) 高速增益被低估的車（E2E rc13 RaceCar34：低速估 0.75、79 km/h 實 ≈1.15）：沒學到前照舊 0.7，
+    --   第一個弧上學到後才補足——拿低速增益直接補足（舊 ramp）＝切內 1.2m 級。違規證明：補足改用低速增益＝紅。
+    local _, cutFast = sCurve(79, 81, 20, 1.15, { yg = 0.75 })
+    checkTrue(cutFast < 0.6, string.format("79 km/h R81 增益被低估：切內 %.2fm < 0.6", cutFast))
+    -- (c) 學到的高速增益接近 plant（弧上 yaw／steer 各自 EWMA 相除）
+    do
+        local ang = math.rad(35)
+        local R2 = 81
+        local tl = R2 * math.tan(ang / 2)
+        local x2, y2 = 120 + (20 + 2 * tl) * math.cos(-ang), (20 + 2 * tl) * math.sin(-ang)
+        local w2 = 2 * (R2 * (1 - math.cos(ang / 2)) + VP.halfW + 0.45)
+        local dt, st = 1 / 30, F.newState()
+        local p2 = F.begin({ pts = { 0, 0, 120, 0, x2, y2, x2 + 120, y2 }, segSurface = { "paved", "paved", "paved" },
+            segWidth = { w2, w2, w2 } }, 120, 4, VP)
+        while not p2.ready do F.stepBuild(p2, 4096) end
+        F.setLaneBias(st, 0.5)
+        F.setRuntimeLimits(st, 3, 6, 7, 1.2)
+        st.yawGain = 0.75
+        local car = { x = 30, y = 0.5, h = 0, w = 0 }
+        for _ = 1, 30 * 12 do
+            local u = F.control(p2, st, car.x, car.y, car.h, 79, dt)
+            st.appliedSteer = u
+            local v = 79 / 3.6
+            car.w = car.w + (1.15 * u - car.w) * (dt / 0.35)
+            car.h = car.h + car.w * dt
+            car.x, car.y = car.x + math.cos(car.h) * v * dt, car.y + math.sin(car.h) * v * dt
+        end
+        checkTrue(st.yawGainHi and st.yawGainHi > 0.95 and st.yawGainHi < 1.35 and (st.hiLearnT or 0) >= 0.5,
+            string.format("高速弧段學到的增益 %.2f 接近 plant 1.15（學 %.1fs）", st.yawGainHi or -1, st.hiLearnT or 0))
+    end
+    -- 低速 R≈11 左 90°：30 km/h 以下 FRAC 不變（切內／外漂與舊值同）
+    local R = 11
+    local w = 2 * (R * (1 - math.cos(math.pi / 4)) + VP.halfW + 0.4)
+    local cutIn, cutOut = 0, 0
+    sim({ pts = { 0, -40, 0, 0, 40, 0 }, segSurface = { "paved", "paved" }, segWidth = { w, w } }, 1.0,
+        { x = -1, y = -40, h = math.pi / 2, w = 0 }, 25, 25, function(sNow, latDev)
+            if sNow > 30 and sNow < 55 then
+                if -latDev > cutIn then cutIn = -latDev end
+                if latDev > cutOut then cutOut = latDev end
+            end
+        end)
+    checkTrue(cutIn < 0.3 and cutOut < 0.5,
+        string.format("25 km/h R11：與舊 FRAC 相同（切內 %.2f、外漂 %.2f；舊值 0.19／0.39）", cutIn, cutOut))
 end
 
 closeScenario()

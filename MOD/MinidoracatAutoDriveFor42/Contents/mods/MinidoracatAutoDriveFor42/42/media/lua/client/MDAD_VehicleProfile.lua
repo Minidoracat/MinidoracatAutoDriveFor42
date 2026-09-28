@@ -123,7 +123,10 @@ MDADVehicleProfile.BRAKE_CEIL = 6
 -- 逐段核對：23 段弧內停住全部 `ib=true`＝curve breach forceBrake 鎖輪（cap+3 門檻≈a_lat 8.9），統計被
 -- 煞車政策本身混淆；F350 024 t=22-24 整段 sk<0.3 仍 23 km/h 穩過（低 sk≠stall）。天花板維持 7，
 -- 改拿掉彎道 breach forceBrake（Driver）；再看 telemetry。
-MDADVehicleProfile.LAT_CEIL = 7
+-- 7→8（0928m 使用者裁定「流暢的過彎包括不過度減速的甩尾」）：基準 9→10（好胎 fTire 0.8 → 8.0），R 12 路口
+-- 33→35 km/h、R 30 52→56；彎前另加中線減速輔助（Follower.STYLES.coastAssist）晚收油。拖車 LAT_SCALE 同步
+-- 0.6→0.525，拖車實際預算維持 4.2 不變。再往上要看 telemetry `sk`（minWheelSkid）與弧上 `ld`。
+MDADVehicleProfile.LAT_CEIL = 8
 -- COAST 0.6→1.2→質量制動預算（2026-09-07）：「滑行」其實是 regulator 目標低於實速時 CarController
 -- 走 control_NoControl 對 Bullet 下 brakingForce 15（CarController.java:480-510；引擎轉速 >1000）
 -- ＝四輪各一個每步 15 的煞車衝量上限，減速度 ≈ 常數力／質量，與車速無關：RaceCar58 1041 kg
@@ -600,7 +603,7 @@ function MDADVehicleProfile.priors(profile, runtimeMass, surfaceId, raining,
     -- aBrake 晴天好胎 6.4、aLat 5.28 都會被夾——與 Driver 線上 tightenLimit 同值。
     local aBrake = 8 * fSurface * fTire * brakeScale
     if aBrake > MDADVehicleProfile.BRAKE_CEIL then aBrake = MDADVehicleProfile.BRAKE_CEIL end
-    local aLat = 9.0 * fSurface * fTire -- 基準 8.0→9.0（2026-09-02 二次激進化）
+    local aLat = 10.0 * fSurface * fTire -- 基準 8.0→9.0（2026-09-02 二次激進化）→10.0（0928m，見 LAT_CEIL）
     if aLat > MDADVehicleProfile.LAT_CEIL then aLat = MDADVehicleProfile.LAT_CEIL end
     if isFinite(profile.towLatScale) and profile.towLatScale > 0 then aLat = aLat * profile.towLatScale end
     if aDrive > MDADVehicleProfile.ACCEL_CEIL then aDrive = MDADVehicleProfile.ACCEL_CEIL end
@@ -653,6 +656,8 @@ function MDADVehicleProfile.configureFollower(follower, profile, runtimeMass, ra
     local adaptive = profile.valid == true and profile.geometryValid == true
     follower.adaptive = adaptive
     follower.lookScale = adaptive and profile.lookScale or 1
+    -- 拖車不加彎前中線減速輔助（Follower.STYLES.coastAssist）：Driver 不對拖車施中線力，計畫不能假設它
+    if isFinite(profile.towMass) and profile.towMass > 0 then follower.coastAssist = 0 end
     local have0, have1, have2, have3 = false, false, false, false
     local a0, b0, l0, c0, a1, b1, l1, c1, a2, b2, l2, c2, a3, b3, l3, c3
     local i = 1

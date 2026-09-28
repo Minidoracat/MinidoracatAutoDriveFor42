@@ -414,7 +414,7 @@ end
 
 -- 自動改道（2026-09-02）：預設關；HUD「改道」鈕不受此影響，永遠可手動按。
 local function autoDetour()
-    return optionBool("AutoDetour", false)
+    return optionBool("AutoDetour", true) -- 0928m 起預設開（使用者裁定「遇大量障礙可改道」）
 end
 
 local function setAutoDetour(value)
@@ -3005,7 +3005,7 @@ if PZAPI and PZAPI.ModOptions then
     for i = 1, #VOICE_LANG_KEYS do
         voiceLanguageOption:addItem(VOICE_LANG_KEYS[i], i == 1)
     end
-    modOptions:addTickBox("AutoDetour", "UI_MinidoracatAutoDrive_AutoDetour", false,
+    modOptions:addTickBox("AutoDetour", "UI_MinidoracatAutoDrive_AutoDetour", true,
         "UI_MinidoracatAutoDrive_AutoDetour_tooltip")
     modOptions:addTickBox("ZombieDodge", "UI_MinidoracatAutoDrive_ZombieDodge", true,
         "UI_MinidoracatAutoDrive_ZombieDodge_tooltip")

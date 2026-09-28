@@ -147,6 +147,16 @@ local TANGENT_MAX_TURN_RAD = 15 * PI / 180 -- 前視窗內路線轉角超過此�
 -- 離線閉環（test_follower 情境 25 的 plant，KPS 0.05-0.3）：K0.10 外漂 1.57→0.44、K0.15
 -- 0.67→0.23、K0.20 0.25→0.05（切內 0.10）；FRAC 0.8 在 K0.2 切內 0.21、1.0 在 K0.15 就 0.37。
 local CURVE_FF_FRAC = 0.7
+-- 高速前饋補足（0928m；rc10 0135 StepVan 25-43 km/h 左彎外漂 0.66m、rc12 0200 KST 72 km/h R≈65 外漂 0.34→0.96、
+-- rc11 0177 F350 61 km/h 同型）：FRAC 0.7 的缺口由位置環（~1/v）補，高速時補不回來。但**不能拿低速學到的
+-- yawGain 直接補足**：側推的 yaw 增益隨車速與車型變，E2E rc13 RaceCar34 79 km/h R81 實測約 1.15、估計 0.75，
+-- 前饋照 1.0 補足＝多轉 50%、弧前就切內 1.2m、對線帽把 79 壓到 47。高速增益另外在弧上學（上幀前饋
+-- ≥ FF_HI.minFF、實速 ≥ FF_HI.learnKmh；ESC 限幅讓 steer 逐幀跳動，yaw 與 steer 各自 EWMA 後相除，不用逐幀
+-- 比值）；累計學滿 FF_HI.learnS 才在 fromKmh→fullKmh 之間改用高速增益、FRAC 補到 FF_HI.frac，之前照舊（0.7／低速增益）。
+-- 離線閉環（test_follower 情境 35，plant 增益正確時）：72 km/h R65 外漂 1.24→0.8 級、45 km/h R30 0.98→0.5 級。
+-- 一張表（control 的 upvalue 已貼 60 上限）：fromKmh→fullKmh 補足區間、frac＝補足到的 FRAC、
+-- learnKmh／minFF＝高速增益的學習條件（實速／上幀前饋量）、learnS＝學滿才補足
+local FF_HI = { fromKmh = 30, fullKmh = 55, frac = 0.9, learnKmh = 40, minFF = 0.1, learnS = 0.5 }
 local CURVE_FF_LEAD_S = 0.35
 local CURVE_FF_MAX = 0.8 -- 小增益長車不能用倒數把前饋放大成整車橫推；回饋仍保留完整權威。
 local YAW_GAIN_INIT = 0.8
@@ -241,10 +251,14 @@ MDADFollower.OV_MAX = OV_MAX
 -- CarController NoControl 對 Bullet 下 brakingForce 15，減速度≈常數力／質量，RaceCar58 1041 kg 實測
 -- 3.65 m/s²，2500 kg 約 1.2）。Driver 以 capSegmentLimits 把 priors 值取 min 進 segCoast，runtime
 -- safeCoast 再由學習器只降不升；舊常數 1.2 對輕車＝彎前 100m 收油、直路永遠在滑行。
+-- coastAssist（0928m；使用者裁定「流暢過彎包括不過度減速」）：彎前收油包絡加上 Driver 的中線減速輔助
+-- （Drive.visAssistForce 追 fstate.profileSpeedKmh，上限 CURVE_ASSIST_MAX）——斷油只有 1.2–3.6 m/s²，
+-- 舊包絡從彎前很遠就開始滑；加 2.5 後晚收油、到彎前再補煞。終點停車包絡不加（到站圈的停點另有取捨）；
+-- 拖車由 Driver 歸零（掛車往前推會折，Driver 也不對拖車施中線力）。舒適檔不加。
 MDADFollower.STYLES = {
-    brisk = { name = "brisk", lat = LAT_ACCEL, brake = BRAKE, coast = 3.0,
+    brisk = { name = "brisk", lat = LAT_ACCEL, brake = BRAKE, coast = 3.0, coastAssist = 2.5,
         turnSoft = TURN_SOFT_RAD, turnHard = TURN_HARD_RAD, turnHardMs = TURN_HARD_MS },
-    comfort = { name = "comfort", lat = 2.5, brake = 3.0, coast = 0.45,
+    comfort = { name = "comfort", lat = 2.5, brake = 3.0, coast = 0.45, coastAssist = 0,
         turnSoft = 25 * PI / 180, turnHard = 50 * PI / 180, turnHardMs = 30 / 3.6 },
 }
 
@@ -253,6 +267,7 @@ function MDADFollower.setStyle(profile, style)
     profile.styleName = style.name
     profile.styleLat, profile.styleBrake, profile.styleCoast =
         style.lat, style.brake, style.coast
+    profile.coastAssist = style.coastAssist or 0
     profile.turnSoft, profile.turnHard, profile.turnHardMs =
         style.turnSoft, style.turnHard, style.turnHardMs
     return profile
@@ -810,7 +825,8 @@ function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile, style)
         segLat = segLat,
         segCoast = segCoast,
         segStopCoast = segStopCoast,
-        coastRate = {}, -- 建表時每段實際用的滑行減速度（終點段＝segStopCoast，其餘＝segCoast）；control 段內插值同源
+        coastRate = {}, -- 建表時每段實際用的滑行減速度（終點段＝segStopCoast，其餘＝segCoast＋coastAssist）；control 段內插值同源
+        coastAssistAt = {}, -- 每段收油包絡含的中線減速輔助（終點段 0）；control 的線上滑行夾限要同樣加回
         coastFromEnd = false,
         kappa = {},
         curveV = {},
@@ -868,7 +884,14 @@ function MDADFollower.stepBuild(profile, budget)
                 profile.phase, profile.cursor = "brake", n - 1
             else
                 local coast = profile.segCoast[i] or 0.6
-                if profile.coastFromEnd and profile.segStopCoast then coast = profile.segStopCoast[i] or coast end
+                local assist = 0
+                if profile.coastFromEnd and profile.segStopCoast then
+                    coast = profile.segStopCoast[i] or coast
+                else
+                    assist = profile.coastAssist or 0 -- 彎前收油加中線減速輔助（STYLES.coastAssist）
+                    coast = coast + assist
+                end
+                if profile.coastAssistAt then profile.coastAssistAt[i] = assist end
                 local reach = profile.s[i + 1]
                 if reach > profile.coastStopS then reach = profile.coastStopS end
                 reach = reach - profile.s[i]
@@ -1368,8 +1391,10 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         if isFinite(runtimeBrake) and runtimeBrake >= 0 and runtimeBrake < brake then
             brake = runtimeBrake
         end
-        if isFinite(runtimeCoast) and runtimeCoast >= 0 and runtimeCoast < coast then
-            coast = runtimeCoast
+        if isFinite(runtimeCoast) and runtimeCoast >= 0 then
+            -- 線上學到的是純斷油；建表有加中線減速輔助的段，夾限同樣加回（不然輔助形同虛設）
+            runtimeCoast = runtimeCoast + (profile.coastAssistAt and profile.coastAssistAt[bestI] or 0)
+            if runtimeCoast < coast then coast = runtimeCoast end
         end
         local coastNext = profile.coastV[bestI + 1] or profile.maxSpeedMs
         local brakeNext = profile.brakeV[bestI + 1] or 0
@@ -1540,6 +1565,28 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
                 yawGain = yawGain + (obs - yawGain) * alpha
             end
         end
+        -- 高速弧段增益（常數註解見 FF_HI）：轉向方向正規化後 yaw 與 steer 各自 EWMA
+        local pff = state.ffSteer
+        if isFinite(ph) and dt > 1e-4 and dt < 0.5 and aspeed >= FF_HI.learnKmh and isFinite(pff)
+                and (pff >= FF_HI.minFF or pff <= -FF_HI.minFF) then
+            local ap = state.appliedSteer
+            if not isFinite(ap) then ap = state.steerOut end
+            if isFinite(ap) then
+                local sg = pff > 0 and 1 or -1
+                local alpha = dt / YAW_GAIN_TAU_S
+                if alpha > 1 then alpha = 1 end
+                local yf, sf = state.hiYawF or 0, state.hiSteerF or 0
+                yf = yf + (sg * wrapPi(heading - ph) / dt - yf) * alpha
+                sf = sf + (sg * ap - sf) * alpha
+                state.hiYawF, state.hiSteerF = yf, sf
+                state.hiLearnT = (state.hiLearnT or 0) + dt
+                if sf >= FF_HI.minFF and yf > 0 then
+                    local g = yf / sf
+                    if g < YAW_GAIN_LO then g = YAW_GAIN_LO elseif g > YAW_GAIN_HI then g = YAW_GAIN_HI end
+                    state.yawGainHi = g
+                end
+            end
+        end
         state.prevHeading = heading
         state.yawGain = yawGain
         -- ---- 弧段前饋 ----
@@ -1591,7 +1638,16 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
                         dth = wrapPi(profile.segH[k + 1] - profile.segH[k])
                     end
                     if dth < 0 then kk = -kk end
-                    ff = CURVE_FF_FRAC * v * kk / yawGain
+                    -- 高速：學到高速增益後才補足（FF_HI）
+                    local frac, g = CURVE_FF_FRAC, yawGain
+                    local gHi = state.yawGainHi
+                    if aspeed > FF_HI.fromKmh and isFinite(gHi) and (state.hiLearnT or 0) >= FF_HI.learnS then
+                        local t = (aspeed - FF_HI.fromKmh) / (FF_HI.fullKmh - FF_HI.fromKmh)
+                        if t > 1 then t = 1 end
+                        frac = CURVE_FF_FRAC + (FF_HI.frac - CURVE_FF_FRAC) * t
+                        g = yawGain + (gHi - yawGain) * t
+                    end
+                    ff = frac * v * kk / g
                     if tangentOn then ff = ff - KP * kk * TANGENT_PREVIEW_M end
                     if ff * kk < 0 then ff = 0 end
                     ff = ff * ramp
