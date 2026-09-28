@@ -2989,6 +2989,58 @@ do
         string.format("25 km/h R11：與舊 FRAC 相同（切內 %.2f、外漂 %.2f；舊值 0.19／0.39）", cutIn, cutOut))
 end
 
+scenario("0928n：路口 1m 橫移（左右各 90° 的 Z 字）收成中點；真轉角與夠長的橫移不動；清過後照直線開、不原地調頭")
+do
+    -- E2E rc16 0015（5th St 東行）：…→(12157,1655)→(12300,1655)→(12300,1655.5)→(12300,1656)→(12393,1656)→…
+    -- 兩段長路之間夾 1m 的南北短段，剖面當兩個直角：車 14-17 km/h 開過頭、判原地調頭、繞圈 4 次交還。
+    local jogPts = { 12157, 1589, 12157, 1655, 12300, 1655, 12300, 1655.5, 12300, 1656, 12393, 1656, 12506, 1656 }
+    local jog = { pts = jogPts, segWidth = { 10, 10, 6, 6, 10, 10 },
+        segSurface = { "paved", "paved", "gravel", "gravel", "paved", "paved" } }
+    local c = F.despikeRoute(jog)
+    checkTrue(c ~= jog and (c.despiked or 0) == 2, "Z 字橫移收成一點（刪 " .. tostring(c.despiked) .. " 點）")
+    checkEq(#c.pts, #jogPts - 4, "點數少兩個")
+    checkEq(#c.segWidth, #c.pts / 2 - 1, "段寬數量對齊")
+    checkEq(#c.segSurface, #c.segWidth, "路面數量對齊")
+    checkNear(c.pts[5], 12300, 1e-9, "中點 x")
+    checkNear(c.pts[6], 1655.5, 1e-9, "中點 y＝橫移中間")
+    checkEq(c.segSurface[2], "paved", "進入段屬性不變")
+    checkEq(c.segSurface[3], "paved", "離開段屬性取原離開段（不是短段的 gravel）")
+    local maxT = 0
+    for k = 5, #c.pts - 3, 2 do
+        local ax, ay = c.pts[k] - c.pts[k - 2], c.pts[k + 1] - c.pts[k - 1]
+        local bx, by = c.pts[k + 2] - c.pts[k], c.pts[k + 3] - c.pts[k + 1]
+        local t = math.abs(math.atan(ax * by - ay * bx, ax * bx + ay * by))
+        if t > maxT then maxT = t end
+    end
+    checkTrue(maxT < math.rad(2), string.format("橫移之後沒有直角（最大折角 %.2f°）", math.deg(maxT)))
+    -- 真轉角：進出方向差 90°、中間短段也不收（北行接一小段再東行）
+    local corner = { pts = { 0, 0, 0, 40, 0.5, 40.5, 1, 41, 40, 41 }, segWidth = { 8, 8, 8, 8 },
+        segSurface = { "paved", "paved", "paved", "paved" } }
+    checkTrue(F.despikeRoute(corner) == corner, "真轉角（進出方向差 90°）不動")
+    -- 夠長的橫移（3m）是真的錯位路口，不收
+    local wide = { pts = { 0, 0, 40, 0, 40, 3, 80, 3 }, segWidth = { 8, 8, 8 }, segSurface = { "paved", "paved", "paved" } }
+    checkTrue(F.despikeRoute(wide) == wide, "3m 橫移不收")
+    -- 共線的短段（只是多一個點）不是橫移
+    local colinear = { pts = { 0, 0, 40, 0, 40.5, 0, 41, 0, 80, 0 }, segWidth = { 8, 8, 8, 8 },
+        segSurface = { "paved", "paved", "paved", "paved" } }
+    checkTrue(F.despikeRoute(colinear) == colinear, "共線短段不動")
+    -- 閉環：14-17 km/h 沿清過的線開過橫移點，不進原地調頭
+    local p = F.begin(c, 60, 4)
+    while not p.ready do F.stepBuild(p, 4096) end
+    local st = F.newState()
+    F.setRuntimeLimits(st, 3, 6, 7, 1.2)
+    local car = { x = 12250, y = 1655, h = 0 }
+    local rot, dt = false, 1 / 30
+    for _ = 1, 30 * 20 do
+        local steer = F.control(p, st, car.x, car.y, car.h, 15, dt)
+        if st.rotating then rot = true end
+        car.h = car.h + (steer or 0) * 0.12 * dt
+        local v = 15 / 3.6
+        car.x, car.y = car.x + math.cos(car.h) * v * dt, car.y + math.sin(car.h) * v * dt
+    end
+    checkTrue(not rot and car.x > 12300 + 20, string.format("開過橫移點不原地調頭（x=%.1f）", car.x))
+end
+
 closeScenario()
 print()
 print("情境 " .. scenarios .. " 個、斷言 " .. assertions .. " 項")

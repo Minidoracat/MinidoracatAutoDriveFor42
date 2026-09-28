@@ -607,8 +607,12 @@ end
 -- 車開過頭後前視點落到車後＝原地調頭，掉頭回來又跨不過＝兩名玩家同點繞圈調頭 16～204 次）。
 -- 頂點折返超過 150° 且相鄰一臂短於 SPIKE_M＝開不出來的資料殘點：刪頂點、兩段合併（段屬性取
 -- 較長那臂）。兩臂都長的真調頭不動。拖車改寫線撤點後殘留的折返（0.13.1 fold 前的路口 jog）同樣清掉。
+-- 微錯位（0928n E2E rc16 0015，(12300,1655)→(12300,1656)）：兩段長路之間夾一段 <SPIKE_M 的橫移（左 90°＋右 90°
+-- 的 Z 字），進出方向幾乎平行（<JOG_TURN），剖面把它當兩個真直角＝車開過頭、判原地調頭、繞圈 4 次交還。
+-- 整段短橫移收成一個中點（橫移攤在兩臂上，車照直線開）；真轉角（進出方向差大）與夠長的橫移不動。
 -- 無變更回原表（Trailer.shape 以 identity 快取）；有變更回淺拷貝，despiked＝刪除點數。冷路徑。
 MDADFollower.SPIKE_M = 2
+local JOG_TURN_COS2 = 0.75 -- cos²30°：進出方向夾角 <30° 才算橫移；短段本身要偏離進入方向 >30°
 function MDADFollower.despikeRoute(route)
     local pts = type(route) == "table" and route.pts or nil
     if type(pts) ~= "table" or #pts < 6 or #pts % 2 ~= 0 then return route end
@@ -625,10 +629,38 @@ function MDADFollower.despikeRoute(route)
         local dot = ux * vx + uy * vy
         return dot < 0 and dot * dot > 0.75 * lu * lv, lu, lv -- 0.75＝cos²150°
     end
+    -- 從頂點 i 起的短橫移：i..j 之間每段都短、合計 <SPIKE_M，進入段 (i-1→i) 與離開段 (j→j+1) 都長、方向
+    -- 幾乎平行，短段偏離進入方向。回 j（不成立回 nil）。
+    local function jogAt(p, np, i)
+        if i < 2 or i >= np then return nil end
+        local ax, ay = p[i * 2 - 1] - p[i * 2 - 3], p[i * 2] - p[i * 2 - 2]
+        local la = ax * ax + ay * ay
+        if la < lim2 then return nil end
+        local run, j = 0, i
+        while j < np do
+            local dx, dy = p[j * 2 + 1] - p[j * 2 - 1], p[j * 2 + 2] - p[j * 2]
+            local l = sqrt(dx * dx + dy * dy)
+            if l * l >= lim2 then break end
+            run = run + l
+            if run * run >= lim2 then return nil end
+            j = j + 1
+        end
+        if j == i or j >= np then return nil end
+        local bx, by = p[j * 2 + 1] - p[j * 2 - 1], p[j * 2 + 2] - p[j * 2]
+        local lb = bx * bx + by * by
+        local ab = ax * bx + ay * by
+        if ab <= 0 or ab * ab < JOG_TURN_COS2 * la * lb then return nil end
+        local rx, ry = p[j * 2 - 1] - p[i * 2 - 1], p[j * 2] - p[i * 2]
+        local lr = rx * rx + ry * ry
+        if lr < 1e-12 then return nil end
+        local ar = ax * rx + ay * ry
+        if ar > 0 and ar * ar >= JOG_TURN_COS2 * la * lr then return nil end
+        return j
+    end
     local n = #pts / 2
     local found = false
     for i = 2, n - 1 do
-        if spikeAt(pts, i) then found = true break end
+        if spikeAt(pts, i) or jogAt(pts, n, i) then found = true break end
     end
     if not found then return route end
     local sw, ss = route.segWidth, route.segSurface
@@ -658,6 +690,31 @@ function MDADFollower.despikeRoute(route)
             np = np - 1
             removed = removed + 1
         end
+    end
+    -- 第二趟：短橫移收成中點（段屬性：進入段保留原值、離開段取原離開段）
+    local i = 2
+    while i < np do
+        local j = jogAt(P, np, i)
+        if j then
+            local mx, my = (P[i * 2 - 1] + P[j * 2 - 1]) * 0.5, (P[i * 2] + P[j * 2]) * 0.5
+            local drop = j - i
+            P[i * 2 - 1], P[i * 2] = mx, my
+            for k = i + 1, np - drop do
+                P[k * 2 - 1], P[k * 2] = P[(k + drop) * 2 - 1], P[(k + drop) * 2]
+            end
+            for k = np - drop + 1, np do P[k * 2 - 1], P[k * 2] = nil, nil end
+            for k = i, np - drop - 1 do
+                if W then W[k] = W[k + drop] end
+                if S then S[k] = S[k + drop] end
+            end
+            for k = np - drop, np - 1 do
+                if W then W[k] = nil end
+                if S then S[k] = nil end
+            end
+            np = np - drop
+            removed = removed + drop
+        end
+        i = i + 1
     end
     local out = {}
     for k, v in pairs(route) do out[k] = v end
