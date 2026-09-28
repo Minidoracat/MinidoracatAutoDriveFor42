@@ -17333,9 +17333,10 @@ end
 drive.scenarioStraightProbe()
 
 -- (xkeep) 0928j rc8 0086：offL −2.5、常駐 +1.5（差 4m），整車過 c 即提前釋放 → 偏離超過 RETURN 門檻
---   → RETURN 25 km/h 爬回；承諾線出口本來就帶著 60 的帽回常駐線。車離常駐線超過 RETURN 門檻、
---   套用中的繞行帽 ≥ RETURN_CAP 時沿承諾線走完出口；低帽（爬行）照舊提前放。
---   違規證明：exitKeepsDodge 恆回 false＝(xkeep) 提前釋放紅。
+--   → RETURN 25 km/h 爬回；承諾線出口本來就帶著 60 的帽回常駐線。車離常駐線超過 RETURN 門檻時
+--   沿承諾線走完出口。0929e 起低帽（爬行）也一樣：RETURN 斜切回線常被剛繞過的那群打回 hold（rc28 0009
+--   hold → stall → 頂上硬物）。違規證明：exitKeepsDodge 恆回 false＝(xkeep) 提前釋放紅；
+--   把帽條件加回（帽 < RETURN_CAP 回 false）＝(xkeep) 帽 10 紅。
 function drive.scenarioExitKeep()
     scenario("繞行出口：離常駐線太遠且承諾線不慢時沿承諾線走完，不交 RETURN 慢爬")
     local oldSandbox, oldVeh, oldGet = SandboxVars, dveh, getSpecificPlayer
@@ -17368,7 +17369,7 @@ function drive.scenarioExitKeep()
     st.lastLatSigned, st.dodgeApproachCap = -2.5, 60
     checkTrue(MDAD.Drive.exitKeepsDodge(st) == true, "(xkeep) 離常駐線 4m、帽 60：沿承諾線走完出口")
     st.dodgeApproachCap = 10
-    checkTrue(MDAD.Drive.exitKeepsDodge(st) == false, "(xkeep) 帽 10（爬行）：照舊提前放")
+    checkTrue(MDAD.Drive.exitKeepsDodge(st) == true, "(xkeep) 帽 10（爬行）同樣沿承諾線走完出口")
     st.lastLatSigned, st.dodgeApproachCap = 0.5, 60
     checkTrue(MDAD.Drive.exitKeepsDodge(st) == false, "(xkeep) 離常駐線 1m：照舊提前放")
     -- 整合：右側整排硬物（l +0.5..+5.5，x 40–49）逼車繞到左邊
@@ -17383,15 +17384,10 @@ function drive.scenarioExitKeep()
         for x = 40, 49 do for y = 0, 5 do drive.clearCell(x, y) end end
         dveh._x, dveh._y, dveh._speed = fs.offC + st.bodyReach + 1, fs.offL, 40
         for _ = 1, 2 do driveTick(dp, dveh) end
-        -- 這條出口套用中的帽約 25（整線帽）：把 RETURN_CAP 暫壓到 20，驗接線本身（帽高於 RETURN 才沿線）
-        local tune = MDAD.Drive.debugTune()
-        local oldRc = tune.RETURN_CAP
-        tune.RETURN_CAP = 20
         st.planSig = -1
         drive.scanRound(true)
-        tune.RETURN_CAP = oldRc
         checkTrue(st.dodging == true and not st.returnActive,
-            "(xkeep) 整車過 c、離常駐線 4m、帽高於 RETURN：不提前釋放（dodging=" .. tostring(st.dodging)
+            "(xkeep) 整車過 c、離常駐線 4m：不提前釋放（dodging=" .. tostring(st.dodging)
             .. " ret=" .. tostring(st.returnActive) .. " rs=" .. tostring(st.lastSNow)
             .. " c=" .. tostring(fs.offC) .. "）")
     end

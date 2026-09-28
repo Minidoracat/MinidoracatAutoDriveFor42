@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0929d"
+Drive.REV = "0929e"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -6854,11 +6854,14 @@ end
 
 -- 出口提前釋放會不會讓 RETURN 立刻接手（0928j；rc8 0086：offL −2.5、常駐 1.5，整車過 c 即放 →
 -- 偏離 3.8m 進 RETURN，25 km/h 爬回 2.5 秒；承諾線出口 45m、那時套用中的繞行帽已是 60）：
--- 車離常駐線超過 RETURN 進入門檻、而且承諾線出口不比 RETURN 慢（套用中的繞行帽 ≥ RETURN_CAP）
--- 就沿承諾線把出口走完；貼縫爬行等低帽照舊提前放（RETURN 25 比爬行快）。
+-- 車離常駐線超過 RETURN 進入門檻就沿承諾線把出口走完。
+-- 0929e 起低帽（貼縫爬行）也一樣：舊制讓爬行檔照舊提前放、以為 RETURN 25 比較快，但 RETURN 的線
+-- 從車現在的偏移斜切回常駐線，常被剛繞過的那群打回（全部 E2E＋正式服：爬行繞行後 RETURN 進入
+-- 190 次，hold 60 次、其中 stall 11 次、接觸 5 次；rc28 0009：hold(sweep) → 靜止釋放交 pure
+-- pursuit → 6 km/h 頂上剛繞過的硬物）。承諾線出口是掃掠驗過的線，慢一點走完它。
 function Drive.exitKeepsDodge(s)
-    local lat, cap = s.lastLatSigned, s.dodgeApproachCap
-    if not finite(lat) or not finite(cap) or cap < TUNE.RETURN_CAP then return false end
+    local lat = s.lastLatSigned
+    if not finite(lat) then return false end
     local resident = MDADFollower.laneBiasAt(s.profile, laneBiasOf(s), s.fstate.idx, s.lastSNow)
     local available = 2
     if finite(s.currentSegWidth) and s.currentSegWidth > 0 then
