@@ -13941,10 +13941,11 @@ local function scenarioPhaseE()
     --     0909b 起遠處 entry（p2）的判死改成可以提早交出舊線重選（見 (B2)），所以本案的
     --     硬物必須真的落在**保持段**（p3）。掃掠回報的 phase 是失敗**車身取樣點**的弧長，
     --     車頭前伸會讓貼在 offB 後緣的硬物先被 p2 的取樣點命中——因此這裡把障礙群補成
-    --     4 格長（保持段 ≈8m），硬物放保持段尾端，並用前置斷言鎖住深度。
+    --     5 格長（0929f 起硬點 (s,l) 取格心，保持段比取樣點版短半格），硬物放保持段尾端，
+    --     並用前置斷言鎖住深度。
     do
         MDAD.Drive.stop(0, nil)
-        for x = 47, 49 do drive.putSolid(x, 0, "guard_group_" .. x) end -- 與既有 (46,0) 併成一群
+        for x = 47, 50 do drive.putSolid(x, 0, "guard_group_" .. x) end -- 與既有 (46,0) 併成一群
         hotVeh._x, hotVeh._y, hotVeh._speed = 0, 0, 0
         setHeading(hotVeh, 0)
         driveReset(hotVeh)
@@ -13988,7 +13989,7 @@ local function scenarioPhaseE()
             "(B) guard-blocked 錨的世界點是線上硬物，不是側停車（hit=("
             .. tostring(captured.blockHitX) .. "," .. tostring(captured.blockHitY) .. ")）")
         for _, c in ipairs(cells) do drive.clearCell(c[1], c[2]) end
-        for x = 47, 49 do drive.clearCell(x, 0) end
+        for x = 47, 50 do drive.clearCell(x, 0) end
         MDAD.Drive.stop(0, nil)
     end
     -- (B2) 0909b：判死落在**遠處 entry**（p2）時不得再沿著已經判死的線一路爬到障礙前

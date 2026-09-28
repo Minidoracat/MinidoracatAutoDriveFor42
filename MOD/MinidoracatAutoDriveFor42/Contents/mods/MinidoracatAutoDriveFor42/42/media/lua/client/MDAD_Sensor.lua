@@ -1285,11 +1285,16 @@ function MDADSensor.step(state, profile, sNow, vehicle, now, cell)
             local hard, hr = scanCell(state, vehicle, cell, wx, wy, l)
             if hard then
                 -- 世界座標記格心（掃掠複驗用真實幾何，不受弧座標折點失真影響）；
-                -- 半徑由 scanCell 分級：樹幹/籬笆 0、小物 0.35、整格箱 0.7
-                local pr = hr
-                local l4 = l * 4
+                -- 半徑由 scanCell 分級：樹幹/籬笆 0、小物 0.35、整格箱 0.7。
+                -- (s,l) 也取格心在本步局部框的線性化，不取命中的取樣點：取樣點可落在格子任一邊，
+                -- 與格心差到 ±0.5m。0929f 正式服／E2E p051：路旁樹格心在 l 3.0，取樣點記成 3.5，
+                -- 規劃以為常駐線 2.0 旁留 0.5m、不繞；世界掃掠與接觸防線用格心，照樣判撞，車爬進樹。
+                local dx, dy = wx + 0.5 - state.cx, wy + 0.5 - state.cy
+                local nx, ny = state.nx, state.ny
+                local hl = dx * nx + dy * ny
+                local l4 = hl * 4
                 l4 = l4 - l4 % 1
-                pushHard(state, state.curS, l, l4, wx + 0.5, wy + 0.5, pr)
+                pushHard(state, state.curS + dx * ny - dy * nx, hl, l4, wx + 0.5, wy + 0.5, hr)
             end
             -- 只有真的查了世界格才扣預算；被去重擋掉的取樣點是純 Lua 的一次表查詢，
             -- 一輪最多 210 次，讓它們在同一幀裡跑完比多拖一幀便宜。
