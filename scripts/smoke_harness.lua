@@ -17311,6 +17311,24 @@ function drive.scenarioExitKeep()
 end
 drive.scenarioExitKeep()
 
+-- (dvis) 0928k rc9 0104／0109：路線終點前 4–9m 的繞行，可視帽把終點當未知前緣扣 halfL＋2 → 0，
+--   車停在終點前、帶著偏移進不了到站圈。可視帶已含終點、剩 ≤ ARRIVE_M+3 時地板到爬行（同一般跟線）。
+--   違規證明：拿掉地板＝終點前 4m 的帽回 0、(dvis) 紅。
+function drive.scenarioDodgeTerminalVis()
+    scenario("繞行可視帽：路線終點已在可視帶內、剩 ≤ ARRIVE_M+3 時不把終點當障礙")
+    local s = { lastSNow = 96, vehicleProfile = { halfL = 2.1 }, profile = { length = 100 } }
+    local capEnd = MDAD.Drive.dodgeVisibilityCap(s, { scanEndS = 100, unloaded = false }, 4.6)
+    checkTrue(capEnd >= MDADDynamics.DODGE_SQUEEZE_CAP,
+        "(dvis) 終點前 4m、可視到終點：地板到爬行（cap=" .. tostring(capEnd) .. "）")
+    local capUnknown = MDAD.Drive.dodgeVisibilityCap(s, { scanEndS = 99, unloaded = false }, 4.6)
+    checkTrue(capUnknown < 1, "(dvis) 前緣不是終點（未知）：照舊壓到 0（cap=" .. tostring(capUnknown) .. "）")
+    s.lastSNow = 70
+    local capFar = MDAD.Drive.dodgeVisibilityCap(s, { scanEndS = 100, unloaded = false }, 4.6)
+    checkNear(capFar, MDADDynamics.visibilityCapKmh(30, 0.5, 4.6, 2.1), 1e-9,
+        "(dvis) 離終點 30m：照一般可視帽")
+end
+drive.scenarioDodgeTerminalVis()
+
 -- 0928a 正式服 0.13.1 片段修正（各段違規證明寫在段首）：
 --   (aw)          前方區域未載入的引擎煞車：不判卡死、不倒車、HUD 顯示等待、等滿上限才以專屬理由交還。
 --                 違規證明：progressPauseMs 不看 areaWaitActive＝8 秒內 suspect 紅；areaWait 恆 false＝HUD／理由紅。

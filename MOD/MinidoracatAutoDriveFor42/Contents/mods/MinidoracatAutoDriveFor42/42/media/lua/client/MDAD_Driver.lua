@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0928j"
+Drive.REV = "0928k"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -2828,6 +2828,20 @@ local function visibleEndS(sen, fallbackS)
         if sen.unloadedS < endS then endS = sen.unloadedS end
     end
     return endS
+end
+
+-- 繞行線的可視帽（commit／guard 共用）：同一般跟線的「終點不是障礙」地板（0928k；rc9 0104／0109：
+-- 路線終點前 4–9m 的繞行，可視帽把終點當未知前緣扣 halfL＋2 → 0，車停在終點前、帶著偏移永遠
+-- 進不了到站圈，倒車三次交還）。可視帶已含路線終點、剩 ≤ ARRIVE_M+3 時地板到爬行檔。
+function Drive.dodgeVisibilityCap(s, sen, minBrake)
+    local visEnd = visibleEndS(sen, s.lastSNow)
+    local cap = MDADDynamics.visibilityCapKmh(visEnd - s.lastSNow, 0.5, minBrake, s.vehicleProfile.halfL)
+    local prof = s.profile
+    if prof and visEnd >= prof.length - 0.5 and prof.length - s.lastSNow <= MDADFollower.ARRIVE_M + 3
+            and cap < MDADDynamics.DODGE_SQUEEZE_CAP then
+        cap = MDADDynamics.DODGE_SQUEEZE_CAP
+    end
+    return cap
 end
 
 -- 軟縫側移速率（m/s）：固定 1 m/s 在 60 km/h 要 3 秒、50m 才偏完 2m，常被縱向配合帽壓到十幾 km/h
@@ -7563,9 +7577,7 @@ local function replan(s, vehicle, playerNum)
                 local passed = s.dodgeEntryPassed == true or dodgeEntryPassed(s, getTimestampMs())
                 local kappa = dodgeLineKappa(s.profile, fs.ovX, fs.ovY, fs.ovN, fs.ovS0,
                     s.lastSNow - s.vehicleProfile.halfL, fs.offA, fs.offB, fs.offC, fs.offD)
-                local visibilityCap = MDADDynamics.visibilityCapKmh(
-                    visibleEndS(sen, s.lastSNow) - s.lastSNow,
-                    0.5, minBrake, s.vehicleProfile.halfL)
+                local visibilityCap = Drive.dodgeVisibilityCap(s, sen, minBrake)
                 s.dodgeClass = Drive.movingWithin(s, fs.ovEndS)
                     and MDADDynamics.DODGE_VEHICLE or MDADDynamics.DODGE_STATIC
                 local oldPassed = s.dodgeEntryPassed
@@ -7995,9 +8007,7 @@ local function replan(s, vehicle, playerNum)
                     and s.safeLat < minLat then minLat = s.safeLat end
             local kappa = dodgeLineKappa(s.profile, s.tmpOvX, s.tmpOvY, s.lastOvN or 0, s.lastOvS0,
                 s.lastSNow - vp.halfL, a, b, c, d)
-            local visible = visibleEndS(sen, s.lastSNow) - s.lastSNow
-            local visibilityCap = MDADDynamics.visibilityCapKmh(
-                visible, 0.5, minBrake, vp.halfL)
+            local visibilityCap = Drive.dodgeVisibilityCap(s, sen, minBrake)
             local dl = offL - startLaneOf(s, baseL)
             if dl < 0 then dl = -dl end
             s.dodgeCommitDl = dl
