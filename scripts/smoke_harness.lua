@@ -17240,6 +17240,77 @@ function drive.scenarioStraightProbe()
 end
 drive.scenarioStraightProbe()
 
+-- (xkeep) 0928j rc8 0086：offL −2.5、常駐 +1.5（差 4m），整車過 c 即提前釋放 → 偏離超過 RETURN 門檻
+--   → RETURN 25 km/h 爬回；承諾線出口本來就帶著 60 的帽回常駐線。車離常駐線超過 RETURN 門檻、
+--   套用中的繞行帽 ≥ RETURN_CAP 時沿承諾線走完出口；低帽（爬行）照舊提前放。
+--   違規證明：exitKeepsDodge 恆回 false＝(xkeep) 提前釋放紅。
+function drive.scenarioExitKeep()
+    scenario("繞行出口：離常駐線太遠且承諾線不慢時沿承諾線走完，不交 RETURN 慢爬")
+    local oldSandbox, oldVeh, oldGet = SandboxVars, dveh, getSpecificPlayer
+    local oldApi = MinidoracatMiniMapAPI.navApiVersion
+    local oldRoute, oldTx, oldTy, oldState = drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
+    local wasMs = drive.frameMs(20)
+    MDAD.Drive.stop(0, nil)
+    getSpecificPlayer = function(n) if n == 0 then return dp end end
+    MinidoracatMiniMapAPI.navApiVersion = 5
+    dveh = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }),
+        engineRunning = true, mass = 1600, speed = 0, maxSpeed = 100,
+        bodyW = 1.6, bodyL = 4.2, comX = 0, comZ = 0, profileFull = true,
+        enginePower = 3000, brakingForce = 100, wheelFriction = 1.5, tireFriction = 1.5 })
+    drive.fillWorld(-12, 130, -12, 12)
+    drive.putRoad(0, 130, -6, 6)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
+        AutoDriveMaxSpeed = 60, RightLaneBias = 0.5 }) -- 12m 路 ×0.5＝常駐 +1.5
+    dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = 0, 1.5, 0, 0, true
+    dveh._engine, dveh._driver = true, dp
+    dp._vehicle, dp._dead, dp._local = dveh, false, true
+    setHeading(dveh, 0)
+    drive.nav.route = { pts = { 0, 0, 120, 0 }, segSurface = { "paved" }, segWidth = { 12 },
+        len = 120, cost = 120, avoidPenalty = 0 }
+    drive.nav.tx, drive.nav.ty, drive.nav.state = 120, 0, "ok"
+    checkTrue(MDAD.Drive.start(dp), "(xkeep) 啟動")
+    for _ = 1, 6 do driveTick(dp, dveh) end
+    drive.scanRound(true)
+    local st = MDAD.Drive.debugSession(0)
+    -- predicate：常駐 +1.5、車在 −2.5（差 4m > 門檻 3）：帽 60 沿線、帽 10 照舊放；車在 +0.5 照舊放
+    st.lastLatSigned, st.dodgeApproachCap = -2.5, 60
+    checkTrue(MDAD.Drive.exitKeepsDodge(st) == true, "(xkeep) 離常駐線 4m、帽 60：沿承諾線走完出口")
+    st.dodgeApproachCap = 10
+    checkTrue(MDAD.Drive.exitKeepsDodge(st) == false, "(xkeep) 帽 10（爬行）：照舊提前放")
+    st.lastLatSigned, st.dodgeApproachCap = 0.5, 60
+    checkTrue(MDAD.Drive.exitKeepsDodge(st) == false, "(xkeep) 離常駐線 1m：照舊提前放")
+    -- 整合：右側整排硬物（l +0.5..+5.5，x 40–49）逼車繞到左邊
+    for x = 40, 49 do for y = 0, 5 do drive.putSolid(x, y, "xkeep_" .. x .. "_" .. y) end end
+    for _ = 1, 3 do drive.scanRound(true) end
+    st = MDAD.Drive.debugSession(0)
+    local fs = st.fstate
+    checkTrue(st.dodging == true and type(fs.offL) == "number" and fs.offL < -1.5,
+        "(xkeep) 承諾左繞（offL=" .. tostring(fs.offL) .. "）")
+    if st.dodging and type(fs.offC) == "number" then
+        -- 車擺到出口起點之後（整車過 c）、仍在承諾線上；清掉硬物（前方淨空）
+        for x = 40, 49 do for y = 0, 5 do drive.clearCell(x, y) end end
+        dveh._x, dveh._y, dveh._speed = fs.offC + st.bodyReach + 1, fs.offL, 40
+        for _ = 1, 2 do driveTick(dp, dveh) end
+        -- 這條出口套用中的帽約 25（整線帽）：把 RETURN_CAP 暫壓到 20，驗接線本身（帽高於 RETURN 才沿線）
+        local tune = MDAD.Drive.debugTune()
+        local oldRc = tune.RETURN_CAP
+        tune.RETURN_CAP = 20
+        st.planSig = -1
+        drive.scanRound(true)
+        tune.RETURN_CAP = oldRc
+        checkTrue(st.dodging == true and not st.returnActive,
+            "(xkeep) 整車過 c、離常駐線 4m、帽高於 RETURN：不提前釋放（dodging=" .. tostring(st.dodging)
+            .. " ret=" .. tostring(st.returnActive) .. " rs=" .. tostring(st.lastSNow)
+            .. " c=" .. tostring(fs.offC) .. "）")
+    end
+    MDAD.Drive.stop(0, nil)
+    drive.frameMs(wasMs)
+    MinidoracatMiniMapAPI.navApiVersion = oldApi
+    drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
+    SandboxVars, dveh, getSpecificPlayer = oldSandbox, oldVeh, oldGet
+end
+drive.scenarioExitKeep()
+
 -- 0928a 正式服 0.13.1 片段修正（各段違規證明寫在段首）：
 --   (aw)          前方區域未載入的引擎煞車：不判卡死、不倒車、HUD 顯示等待、等滿上限才以專屬理由交還。
 --                 違規證明：progressPauseMs 不看 areaWaitActive＝8 秒內 suspect 紅；areaWait 恆 false＝HUD／理由紅。

@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0928i"
+Drive.REV = "0928j"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -6679,6 +6679,22 @@ function Drive.handoffReady(s)
         and Drive.candidateCovered(s, endS + 1))
 end
 
+-- 出口提前釋放會不會讓 RETURN 立刻接手（0928j；rc8 0086：offL −2.5、常駐 1.5，整車過 c 即放 →
+-- 偏離 3.8m 進 RETURN，25 km/h 爬回 2.5 秒；承諾線出口 45m、那時套用中的繞行帽已是 60）：
+-- 車離常駐線超過 RETURN 進入門檻、而且承諾線出口不比 RETURN 慢（套用中的繞行帽 ≥ RETURN_CAP）
+-- 就沿承諾線把出口走完；貼縫爬行等低帽照舊提前放（RETURN 25 比爬行快）。
+function Drive.exitKeepsDodge(s)
+    local lat, cap = s.lastLatSigned, s.dodgeApproachCap
+    if not finite(lat) or not finite(cap) or cap < TUNE.RETURN_CAP then return false end
+    local resident = MDADFollower.laneBiasAt(s.profile, laneBiasOf(s), s.fstate.idx, s.lastSNow)
+    local available = 2
+    if finite(s.currentSegWidth) and s.currentSegWidth > 0 then
+        available = s.currentSegWidth * 0.5 - s.vehicleProfile.halfW - MDADDynamics.ROAD_EDGE_MARGIN
+    end
+    if available < 2 then available = 2 elseif available > 3 then available = 3 end
+    return math.abs(lat - resident) > available
+end
+
 -- 前方（弧長 ≥ minS）最近的擋線點索引；nil＝淨空。O(hardN)、零配置；冷路徑用。
 -- 兩個消費者：exit 提前釋放（只問有沒有）、貼縫檔死路判定（2026-09-02 使用者裁定
 -- 「複雜的障礙人工處理」：繞行出口 d+1 之後仍有擋線點＝多重障礙＝不鑽，要點位）。
@@ -7340,6 +7356,7 @@ local function replan(s, vehicle, playerNum)
         local exitReady = type(fs.offC) == "number" and s.lastSNow >= fs.offC + s.bodyReach
             and not s.trafficLate
             and nearestLineBlocker(s, sen, s.lastSNow) == nil
+            and not Drive.exitKeepsDodge(s)
         -- 026/030：後載入的下一台擋住 p4，但第一群已通過；等 nextCap<8／停穩才交接
         -- 會錯過尚有跑道的行駛窗口。失敗必須真在 p4，不能由 hardS>c 猜（車頭會前伸）。
         if not exitReady and finite(fs.offC) and finite(fs.offD) and finite(fs.ovEndS)
