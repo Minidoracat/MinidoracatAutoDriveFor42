@@ -136,6 +136,7 @@ local TANGENT_MAX_TURN_RAD = 15 * PI / 180 -- 前視窗內路線轉角超過此�
 -- 常駐車道斜率（見 control 的弧段切線）取在車前 LEAD 秒：yaw 滯後 τ 0.25–0.35 s（E2E 遙測辨識），斜率照
 -- 當下量＝車頭晚 τ 才跟上車道 ramp，ramp 結束時多衝出去。0928o 離線重播 11 個真彎×3 plant：0.2 s 讓 max|偏差|
 -- 幾乎每彎下降（外漂總和 16.1→12.9、切內 7.2→8.9，最大外漂 1.88→1.68）；0.3 s 起切內回升、換邊而不是變好。
+-- 0929a 前饋加上車道 ramp 曲率後重測仍以 0.2 最好（重播切內總和 0 s：10.9、0.2 s：10.2、0.35 s：12.0，外漂持平）。
 local TANGENT_SLOPE_LEAD_S = 0.2
 -- 弧段前饋（2026-09-08 s041/s045/s025/s034：同一個 R≈11 左彎四台車全撞外側路緣——切線
 -- 追蹤把姿態誤差壓到 0.2 rad、cross-track 對 1m 外漂只給 0.18，純回饋要靠誤差累積才出力，
@@ -150,7 +151,10 @@ local TANGENT_SLOPE_LEAD_S = 0.2
 -- 延遲 τ≈0.35：進弧那刻 yaw 率才從 0 起步＝前 3m 必外漂）。
 -- 離線閉環（test_follower 情境 25 的 plant，KPS 0.05-0.3）：K0.10 外漂 1.57→0.44、K0.15
 -- 0.67→0.23、K0.20 0.25→0.05（切內 0.10）；FRAC 0.8 在 K0.2 切內 0.21、1.0 在 K0.15 就 0.37。
-local CURVE_FF_FRAC = 0.7
+-- 0929a 提為 0.75：前饋改照實際行駛線曲率（R∓l、車道 ramp 的 l''，見 arcFeedForward）後外側車道少給、內側多給，
+-- 0.7 的七成缺口在外側車道低速彎反而外漂更多（情境 35 的 25 km/h R11 外側車道 0.39→0.63）；0.75 對 0928p：
+-- 11 個真彎重播（三種 plant）外漂總和 12.9→8.1、切內 8.9→10.2，合成六彎 G0.85 切內 0.25→0.21、外漂 0.61→0.41。
+local CURVE_FF_FRAC = 0.75
 -- 高速前饋補足（0928m；rc10 0135 StepVan 25-43 km/h 左彎外漂 0.66m、rc12 0200 KST 72 km/h R≈65 外漂 0.34→0.96、
 -- rc11 0177 F350 61 km/h 同型）：FRAC 0.7 的缺口由位置環（~1/v）補，高速時補不回來。但**不能拿低速學到的
 -- yawGain 直接補足**：側推的 yaw 增益隨車速與車型變，E2E rc13 RaceCar34 79 km/h R81 實測約 1.15、估計 0.75，
@@ -611,11 +615,19 @@ end
 -- 車開過頭後前視點落到車後＝原地調頭，掉頭回來又跨不過＝兩名玩家同點繞圈調頭 16～204 次）。
 -- 頂點折返超過 150° 且相鄰一臂短於 SPIKE_M＝開不出來的資料殘點：刪頂點、兩段合併（段屬性取
 -- 較長那臂）。兩臂都長的真調頭不動。拖車改寫線撤點後殘留的折返（0.13.1 fold 前的路口 jog）同樣清掉。
--- 微錯位（0928n E2E rc16 0015，(12300,1655)→(12300,1656)）：兩段長路之間夾一段 <SPIKE_M 的橫移（左 90°＋右 90°
+-- 微錯位（0928n E2E rc16 0015，(12300,1655)→(12300,1656)）：兩段長路之間夾一段短橫移（左 90°＋右 90°
 -- 的 Z 字），進出方向幾乎平行（<JOG_TURN），剖面把它當兩個真直角＝車開過頭、判原地調頭、繞圈 4 次交還。
--- 整段短橫移收成一個中點（橫移攤在兩臂上，車照直線開）；真轉角（進出方向差大）與夠長的橫移不動。
+-- 整段短橫移收成一個中點（橫移攤在兩臂上，車照直線開）；真轉角（進出方向差大）與太寬的橫移不動。
+-- 橫移上限（0929b）：42.21 Flaherty Road 改線後路線在 (8106,11204.5)→(8104,11204.5) 多出 2.0m 的 Z 字
+-- （接點經 15m 寬的橫街），舊門檻「合計 <2m」差一點收不到＝E2E rc23 2004 在該點投影卡住、原地調頭 4 次交還；
+-- (2501,14011) 的 3.25m 錯位（8m→6m 路）投影在兩臂間來回跳 3.6m、繞行中擦撞（rc22 0023）。短段與合計放到
+-- JOG_MAX_M，橫移量另以路寬把關：中點線離兩臂中心 lat/2，兩臂較窄者要容得下（lat ≤ 寬 − JOG_CLEAR_M，
+-- 半寬 0.9 的車留 0.3）；兩臂至少 JOG_ARM_RATIO×lat 長（中點線對臂的折角 ≤ 7°）。無路寬資料照舊 <SPIKE_M。
 -- 無變更回原表（Trailer.shape 以 identity 快取）；有變更回淺拷貝，despiked＝刪除點數。冷路徑。
 MDADFollower.SPIKE_M = 2
+MDADFollower.JOG_MAX_M = 4
+local JOG_CLEAR_M = 2.4
+local JOG_ARM_RATIO = 4
 local JOG_TURN_COS2 = 0.75 -- cos²30°：進出方向夾角 <30° 才算橫移；短段本身要偏離進入方向 >30°
 function MDADFollower.despikeRoute(route)
     local pts = type(route) == "table" and route.pts or nil
@@ -633,9 +645,10 @@ function MDADFollower.despikeRoute(route)
         local dot = ux * vx + uy * vy
         return dot < 0 and dot * dot > 0.75 * lu * lv, lu, lv -- 0.75＝cos²150°
     end
-    -- 從頂點 i 起的短橫移：i..j 之間每段都短、合計 <SPIKE_M，進入段 (i-1→i) 與離開段 (j→j+1) 都長、方向
-    -- 幾乎平行，短段偏離進入方向。回 j（不成立回 nil）。
-    local function jogAt(p, np, i)
+    -- 從頂點 i 起的短橫移：i..j 之間每段都短、合計 <JOG_MAX_M，進入段 (i-1→i) 與離開段 (j→j+1) 都長、方向
+    -- 幾乎平行，短段偏離進入方向，橫移量在兩臂路寬內（w＝段寬表，可為 nil）。回 j（不成立回 nil）。
+    local jogLim2 = MDADFollower.JOG_MAX_M * MDADFollower.JOG_MAX_M
+    local function jogAt(p, np, i, w)
         if i < 2 or i >= np then return nil end
         local ax, ay = p[i * 2 - 1] - p[i * 2 - 3], p[i * 2] - p[i * 2 - 2]
         local la = ax * ax + ay * ay
@@ -644,9 +657,9 @@ function MDADFollower.despikeRoute(route)
         while j < np do
             local dx, dy = p[j * 2 + 1] - p[j * 2 - 1], p[j * 2 + 2] - p[j * 2]
             local l = sqrt(dx * dx + dy * dy)
-            if l * l >= lim2 then break end
+            if l * l >= jogLim2 then break end
             run = run + l
-            if run * run >= lim2 then return nil end
+            if run * run >= jogLim2 then return nil end
             j = j + 1
         end
         if j == i or j >= np then return nil end
@@ -659,17 +672,27 @@ function MDADFollower.despikeRoute(route)
         if lr < 1e-12 then return nil end
         local ar = ax * rx + ay * ry
         if ar > 0 and ar * ar >= JOG_TURN_COS2 * la * lr then return nil end
+        local lat = (ax * ry - ay * rx) / sqrt(la)
+        if lat < 0 then lat = -lat end
+        local armMin = JOG_ARM_RATIO * lat
+        if la < armMin * armMin or lb < armMin * armMin then return nil end
+        local wIn, wOut = w and w[i - 1], w and w[j]
+        if isFinite(wIn) and isFinite(wOut) then
+            if lat > (wIn < wOut and wIn or wOut) - JOG_CLEAR_M then return nil end
+        elseif run * run >= lim2 then
+            return nil
+        end
         return j
     end
     local n = #pts / 2
-    local found = false
-    for i = 2, n - 1 do
-        if spikeAt(pts, i) or jogAt(pts, n, i) then found = true break end
-    end
-    if not found then return route end
     local sw, ss = route.segWidth, route.segSurface
     if type(sw) ~= "table" then sw = nil end
     if type(ss) ~= "table" then ss = nil end
+    local found = false
+    for i = 2, n - 1 do
+        if spikeAt(pts, i) or jogAt(pts, n, i, sw) then found = true break end
+    end
+    if not found then return route end
     local P, W, S = {}, sw and {} or nil, ss and {} or nil
     local np, removed = 0, 0
     for i = 1, n do
@@ -698,7 +721,7 @@ function MDADFollower.despikeRoute(route)
     -- 第二趟：短橫移收成中點（段屬性：進入段保留原值、離開段取原離開段）
     local i = 2
     while i < np do
-        local j = jogAt(P, np, i)
+        local j = jogAt(P, np, i, W)
         if j then
             local mx, my = (P[i * 2 - 1] + P[j * 2 - 1]) * 0.5, (P[i * 2] + P[j * 2]) * 0.5
             local drop = j - i
@@ -1063,6 +1086,108 @@ local function ovIndexAt(ovS0, ovN, ovEndS, q)
     return i0, fi - i0
 end
 
+-- 弧段前饋：回傳要加進 steer 的量（0＝不加）。arcK＝前視窗內第一個弧段（control 的 onArc 同源）。
+-- 弧的起點 k：進弧前 LEAD 秒線性爬升、出弧前同一個 LEAD 收尾（0908a 試收尾只差 0.02-0.05m，當時弦角預轉
+-- 還在、切內另有來源，0928o 拿掉預轉後收尾才顯出效果）。切線預視本身在弧上就有 KP·κ·PREVIEW 的隱含前饋
+-- （誤差＝車前 1.5m 切線與車頭夾角＝κ·1.5），顯式前饋扣掉它，否則兩份相加＝120% 切內（離線閉環 KPS 0.1
+-- 實得 in 0.70）。
+-- 曲率取車實際要走的線（0929a）：追車道線切線時（state.laneTangent），中心弧 1/R 換成偏移 l 後的 1/(R∓l)，
+-- 彎前後車道收窄／放回的 clampLane ramp 本身也有曲率 l''（smoothstep 峰值 6·dl/L²，與 R20 弧同量級）。
+-- 只給 1/R 時，窄路內側車道彎中被推著照中心弧轉＝留在內側（車道已往中線收）、出彎車道放回時又少轉＝外漂
+-- （離線 6m 路 45 km/h 35°、慢 plant G 0.7／τ 0.35：0.86m→0.56；重播數字見 CURVE_FF_FRAC）；外側車道走 R+l，
+-- 照 1/R 前饋＝轉過頭切內。l'' 以 LANE_FF_STEP_M 中心差分取在 lead 點；車道斜率切線同樣含隱含前饋
+-- KP·l''·(1.5·PREVIEW + v·SLOPE_LEAD)（斜率取在 q+v·SLOPE_LEAD 起 1.5m 的中點），一併扣掉。
+-- 追承諾線（ov）切線時那條線自己的側移已在切線裡，不另算車道項。
+local LANE_FF_STEP_M = 2
+local function arcFeedForward(profile, state, arcK, bestI, sNow, aspeed, tangentOn, yawGain)
+    local kap = profile.kappa
+    if not kap or arcK == nil or aspeed <= 0.5 then return 0 end
+    local s, n, segKindW, segH = profile.s, profile.n, profile.segKind, profile.segH
+    local v = aspeed * MS_PER_KMH
+    local lead = v * CURVE_FF_LEAD_S
+    local ramp = 1
+    if arcK > bestI then
+        local dist = s[arcK] - sNow
+        if dist > 0 then ramp = lead > 0 and (1 - dist / lead) or 0 end
+    end
+    local k = arcK
+    -- 弧的真曲率＝1/圓角半徑（kap[k] 是三點曲率：弧的第一個 chord 與前面的直臂
+    -- 算出來只有 1/R 的百分之一，Codex lane 2026-09-08 抓的；即時弧帽同樣避開它）
+    local kk = 0
+    local fr = profile.filletRadius
+    local r = fr and fr[k]
+    if isFinite(r) and r > 0 then
+        kk = 1 / r
+    else
+        kk = kap[k] or 0
+        local k2 = kap[k + 1] or 0
+        if k2 > kk then kk = k2 end
+    end
+    -- 轉向方向＝同一弧內相鄰 chord 的轉角（弧內 chord 間永遠同號）：k−1 也是弧
+    -- 就用 prev，否則（第一個 chord）用 next。只看 next 會在最後一個 chord 吃到
+    -- 出口切線殘差反號（近共線出口 −0.006 vs chord 間 0.035）；看「量級較大者」
+    -- 會在第一個 chord 吃到入臂（微彎被視為共線臂吞點）的反號差——Codex lane
+    -- 2026-09-08 兩個反例。
+    local dth = 0
+    if k >= 2 and segKindW[k - 1] == MDADDynamics.SEG_ARC then
+        dth = wrapPi(segH[k] - segH[k - 1])
+    elseif k + 1 <= n - 1 then
+        dth = wrapPi(segH[k + 1] - segH[k])
+    end
+    if dth < 0 then kk = -kk end
+    -- 出弧前同一個 LEAD 收尾（進弧有 lead 爬升、出弧原本一刀歸零）：車在弧上且同向弧段在 lead 內
+    -- 結束 → 前饋線性收到 0，yaw 率在出口前就降下來。一刀歸零時 yaw 滯後讓車頭出口後多轉
+    -- 0.1 rad、切進彎內 0.5m（0928o 離線閉環 G 1.0／τ 0.25；E2E rc16–rc18 出彎後 2 秒內切內
+    -- p90 0.7–0.8m）。反向相鄰弧（S 彎）以轉向變號當收尾點。
+    if ramp > 0 and k == bestI and lead > 0 then
+        local e = k
+        while e < n - 1 and segKindW[e + 1] == MDADDynamics.SEG_ARC and s[e + 1] < sNow + lead do
+            local dn = wrapPi(segH[e + 1] - segH[e])
+            if dn * dth < 0 and (dn > 1e-3 or dn < -1e-3) then break end
+            e = e + 1
+        end
+        local endS = s[e + 1]
+        if endS < sNow + lead then ramp = ramp * (endS - sNow) / lead end
+    end
+    -- 高速：學到高速增益後才補足（FF_HI）
+    local frac, g = CURVE_FF_FRAC, yawGain
+    local gHi = state.yawGainHi
+    if aspeed > FF_HI.fromKmh and isFinite(gHi) and (state.hiLearnT or 0) >= FF_HI.learnS then
+        local t = (aspeed - FF_HI.fromKmh) / (FF_HI.fullKmh - FF_HI.fromKmh)
+        if t > 1 then t = 1 end
+        frac = CURVE_FF_FRAC + (FF_HI.frac - CURVE_FF_FRAC) * t
+        g = yawGain + (gHi - yawGain) * t
+    end
+    local arcScale, ffLane = 1, 0
+    local rb = state.laneBias
+    if state.laneTangent == true and isFinite(rb) and rb ~= 0 then
+        local h, sL, i = LANE_FF_STEP_M, sNow + lead, bestI
+        while i < n - 1 and s[i + 1] < sL - h do i = i + 1 end
+        local l0 = clampLane(profile, i, rb, nil, sL - h)
+        while i < n - 1 and s[i + 1] < sL do i = i + 1 end
+        local l1 = clampLane(profile, i, rb, nil, sL)
+        while i < n - 1 and s[i + 1] < sL + h do i = i + 1 end
+        local lk = (clampLane(profile, i, rb, nil, sL + h) - 2 * l1 + l0) / (h * h)
+        local den = 1 - l1 * kk -- lane>0 在 CCW 法向側：CCW 彎（kk>0）內側＝半徑 R−l
+        if den < 0.5 then den = 0.5 end
+        arcScale = 1 / den
+        ffLane = frac * v * lk / g - KP * lk * (1.5 * TANGENT_PREVIEW_M + v * TANGENT_SLOPE_LEAD_S)
+        if ffLane * lk < 0 then ffLane = 0 end
+        if ffLane > CURVE_FF_MAX then ffLane = CURVE_FF_MAX
+        elseif ffLane < -CURVE_FF_MAX then ffLane = -CURVE_FF_MAX end
+    end
+    local ff = 0
+    if ramp > 0 then
+        ff = frac * v * kk * arcScale / g
+        if tangentOn then ff = ff - KP * kk * TANGENT_PREVIEW_M end
+        if ff * kk < 0 then ff = 0 end
+        ff = ff * ramp
+        if ff > CURVE_FF_MAX then ff = CURVE_FF_MAX
+        elseif ff < -CURVE_FF_MAX then ff = -CURVE_FF_MAX end
+    end
+    return ff + ffLane
+end
+
 function MDADFollower.control(profile, state, x, y, heading, speed, dt)
     if type(state) == "table" then
         state.curveValid = false
@@ -1368,6 +1493,7 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         end
     end
     local tangentOn = false
+    state.laneTangent = false -- 切線取自剖面＋車道斜率（弧段前饋的車道項只在這時算）
     local onArc = profile.filletAdaptive == true and arcK ~= nil
     if (state.trackTangent == true or onArc)
             and (kinkS == nil or sNow + TANGENT_PREVIEW_M < kinkS - OV_BLEND) then
@@ -1413,6 +1539,7 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
             end
             vx, vy = cos(hq), sin(hq)
             tangentOn = true
+            state.laneTangent = true
         end
     end
     local err = atan2(fx * vy - fy * vx, fx * vx + fy * vy)
@@ -1678,79 +1805,12 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         end
         state.prevHeading = heading
         state.yawGain = yawGain
-        -- ---- 弧段前饋 ----
-        -- 弧的起點 k：進弧前 LEAD 秒線性爬升、出弧前同一個 LEAD 收尾（見下；0908a 試收尾只差 0.02-0.05m，當時
-        -- 弦角預轉還在、切內另有來源，0928o 拿掉預轉後收尾才顯出效果）。
-        -- 切線預視本身在弧上就有 KP·κ·PREVIEW 的隱含前饋（誤差＝車前 1.5m 切線與車頭夾角＝
-        -- κ·1.5），顯式前饋扣掉它，否則兩份相加＝120% 切內（離線閉環 KPS 0.1 實得 in 0.70）。
-        local ff = 0
-        if kap and aspeed > 0.5 then
-            local k, dist = arcK or -1, 0 -- 窗內第一個弧段（見 onArc）
-            if arcK ~= nil and arcK > bestI then dist = s[arcK] - sNow end
-            if k >= 1 then
-                local v = aspeed * MS_PER_KMH
-                local lead = v * CURVE_FF_LEAD_S
-                local ramp = 1
-                if dist > 0 then ramp = lead > 0 and (1 - dist / lead) or 0 end
-                if ramp > 0 then
-                    -- 弧的真曲率＝1/圓角半徑（kap[k] 是三點曲率：弧的第一個 chord 與前面的直臂
-                    -- 算出來只有 1/R 的百分之一，Codex lane 2026-09-08 抓的；即時弧帽同樣避開它）
-                    local kk = 0
-                    local fr = profile.filletRadius
-                    local r = fr and fr[k]
-                    if isFinite(r) and r > 0 then
-                        kk = 1 / r
-                    else
-                        kk = kap[k] or 0
-                        local k2 = kap[k + 1] or 0
-                        if k2 > kk then kk = k2 end
-                    end
-                    -- 轉向方向＝同一弧內相鄰 chord 的轉角（弧內 chord 間永遠同號）：k−1 也是弧
-                    -- 就用 prev，否則（第一個 chord）用 next。只看 next 會在最後一個 chord 吃到
-                    -- 出口切線殘差反號（近共線出口 −0.006 vs chord 間 0.035）；看「量級較大者」
-                    -- 會在第一個 chord 吃到入臂（微彎被視為共線臂吞點）的反號差——Codex lane
-                    -- 2026-09-08 兩個反例。
-                    local dth = 0
-                    if k >= 2 and segKindW[k - 1] == MDADDynamics.SEG_ARC then
-                        dth = wrapPi(profile.segH[k] - profile.segH[k - 1])
-                    elseif k + 1 <= n - 1 then
-                        dth = wrapPi(profile.segH[k + 1] - profile.segH[k])
-                    end
-                    if dth < 0 then kk = -kk end
-                    -- 出弧前同一個 LEAD 收尾（進弧有 lead 爬升、出弧原本一刀歸零）：車在弧上且同向弧段在 lead 內
-                    -- 結束 → 前饋線性收到 0，yaw 率在出口前就降下來。一刀歸零時 yaw 滯後讓車頭出口後多轉
-                    -- 0.1 rad、切進彎內 0.5m（0928o 離線閉環 G 1.0／τ 0.25；E2E rc16–rc18 出彎後 2 秒內切內
-                    -- p90 0.7–0.8m）。反向相鄰弧（S 彎）以轉向變號當收尾點。
-                    if k == bestI and lead > 0 then
-                        local e = k
-                        while e < n - 1 and segKindW[e + 1] == MDADDynamics.SEG_ARC and s[e + 1] < sNow + lead do
-                            local dn = wrapPi(profile.segH[e + 1] - profile.segH[e])
-                            if dn * dth < 0 and (dn > 1e-3 or dn < -1e-3) then break end
-                            e = e + 1
-                        end
-                        local endS = s[e + 1]
-                        if endS < sNow + lead then ramp = ramp * (endS - sNow) / lead end
-                    end
-                    -- 高速：學到高速增益後才補足（FF_HI）
-                    local frac, g = CURVE_FF_FRAC, yawGain
-                    local gHi = state.yawGainHi
-                    if aspeed > FF_HI.fromKmh and isFinite(gHi) and (state.hiLearnT or 0) >= FF_HI.learnS then
-                        local t = (aspeed - FF_HI.fromKmh) / (FF_HI.fullKmh - FF_HI.fromKmh)
-                        if t > 1 then t = 1 end
-                        frac = CURVE_FF_FRAC + (FF_HI.frac - CURVE_FF_FRAC) * t
-                        g = yawGain + (gHi - yawGain) * t
-                    end
-                    ff = frac * v * kk / g
-                    if tangentOn then ff = ff - KP * kk * TANGENT_PREVIEW_M end
-                    if ff * kk < 0 then ff = 0 end
-                    ff = ff * ramp
-                    if ff > CURVE_FF_MAX then ff = CURVE_FF_MAX
-                    elseif ff < -CURVE_FF_MAX then ff = -CURVE_FF_MAX end
-                    steer = steer + ff
-                    if steer > STEER_MAX then steer = STEER_MAX
-                    elseif steer < -STEER_MAX then steer = -STEER_MAX end
-                end
-            end
+        -- ---- 弧段前饋（arcFeedForward）----
+        local ff = arcFeedForward(profile, state, arcK, bestI, sNow, aspeed, tangentOn, yawGain)
+        if ff ~= 0 then
+            steer = steer + ff
+            if steer > STEER_MAX then steer = STEER_MAX
+            elseif steer < -STEER_MAX then steer = -STEER_MAX end
         end
         state.ffSteer = ff
         state.steerOut = steer

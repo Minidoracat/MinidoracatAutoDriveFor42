@@ -3004,7 +3004,8 @@ do
             string.format("弧上側滑 8 幀（ESC 收掉 steer、yaw 1.05 rad/s）：高速增益不動 %.2f → %.2f",
                 g0 or -1, st3.yawGainHi or -1))
     end
-    -- 低速 R≈11 左 90°：30 km/h 以下 FRAC 不變（切內／外漂與舊值同）
+    -- 低速 R≈11 90°（車道 1.0 在彎外側）：30 km/h 以下不走高速補足。0929a 前饋改照 R+l 時 FRAC 0.7 外漂 0.63
+    -- 超界，FRAC 提到 0.75 後回到界內（見 CURVE_FF_FRAC 註解）。
     local R = 11
     local w = 2 * (R * (1 - math.cos(math.pi / 4)) + VP.halfW + 0.4)
     local cutIn, cutOut = 0, 0
@@ -3016,7 +3017,7 @@ do
             end
         end)
     checkTrue(cutIn < 0.3 and cutOut < 0.5,
-        string.format("25 km/h R11：與舊 FRAC 相同（切內 %.2f、外漂 %.2f；舊值 0.19／0.39）", cutIn, cutOut))
+        string.format("25 km/h R11 外側車道：切內 %.2f < 0.3、外漂 %.2f < 0.5（0928p 0.19／0.39）", cutIn, cutOut))
 end
 
 scenario("0928n：路口 1m 橫移（左右各 90° 的 Z 字）收成中點；真轉角與夠長的橫移不動；清過後照直線開、不原地調頭")
@@ -3047,9 +3048,23 @@ do
     local corner = { pts = { 0, 0, 0, 40, 0.5, 40.5, 1, 41, 40, 41 }, segWidth = { 8, 8, 8, 8 },
         segSurface = { "paved", "paved", "paved", "paved" } }
     checkTrue(F.despikeRoute(corner) == corner, "真轉角（進出方向差 90°）不動")
-    -- 夠長的橫移（3m）是真的錯位路口，不收
+    -- 0929a 放寬：橫移上限看兩臂路寬（lat ≤ 寬 − 2.4）與 JOG_MAX_M（4m），兩臂至少 4×lat 長。
+    -- 42.21 Flaherty Road：(8106,11275)→(8106,11204.5)→(8104,11204.5)→(8104,11139.5)，中間 2.0m 經 15m 寬橫街
+    -- ＝舊門檻「合計 <2m」剛好收不到，E2E rc23 2004 在該點投影卡住、原地調頭 4 次交還。違規證明：上限退回 2m＝紅。
+    local fl = { pts = { 8106, 11275, 8106, 11204.5, 8104, 11204.5, 8104, 11139.5, 8100, 11118 },
+        segWidth = { 8, 15, 8, 8 }, segSurface = { "paved", "paved", "paved", "paved" } }
+    local flc = F.despikeRoute(fl)
+    checkTrue(flc ~= fl and flc.despiked == 1 and math.abs(flc.pts[3] - 8105) < 1e-9,
+        "Flaherty 2m 橫移（兩臂 8m、接點經 15m 橫街）收成中點 x=8105")
+    checkEq(flc.segWidth[2], 8, "中點之後的段取原離開段路寬（不是橫街的 15m）")
     local wide = { pts = { 0, 0, 40, 0, 40, 3, 80, 3 }, segWidth = { 8, 8, 8 }, segSurface = { "paved", "paved", "paved" } }
-    checkTrue(F.despikeRoute(wide) == wide, "3m 橫移不收")
+    checkTrue(F.despikeRoute(wide) ~= wide, "8m 路上 3m 橫移收（中點離兩臂中心 1.5m，路寬容得下）")
+    local narrow = { pts = { 0, 0, 40, 0, 40, 3, 80, 3 }, segWidth = { 4, 4, 4 }, segSurface = { "paved", "paved", "paved" } }
+    checkTrue(F.despikeRoute(narrow) == narrow, "4m 路上 3m 橫移不收（路寬容不下中點線）")
+    local big = { pts = { 0, 0, 40, 0, 40, 5, 80, 5 }, segWidth = { 12, 12, 12 }, segSurface = { "paved", "paved", "paved" } }
+    checkTrue(F.despikeRoute(big) == big, "5m 橫移不收（超過 JOG_MAX_M）")
+    local shortArm = { pts = { 0, 0, 6, 0, 6, 2, 12, 2 }, segWidth = { 8, 8, 8 }, segSurface = { "paved", "paved", "paved" } }
+    checkTrue(F.despikeRoute(shortArm) == shortArm, "臂只有 6m 的 2m 橫移不收（臂要 ≥ 4×橫移）")
     -- 共線的短段（只是多一個點）不是橫移
     local colinear = { pts = { 0, 0, 40, 0, 40.5, 0, 41, 0, 80, 0 }, segWidth = { 8, 8, 8, 8 },
         segSurface = { "paved", "paved", "paved", "paved" } }
@@ -3069,6 +3084,21 @@ do
         car.x, car.y = car.x + math.cos(car.h) * v * dt, car.y + math.sin(car.h) * v * dt
     end
     checkTrue(not rot and car.x > 12300 + 20, string.format("開過橫移點不原地調頭（x=%.1f）", car.x))
+    -- 閉環：25 km/h 沿清過的 Flaherty 線南行開過橫移點，不進原地調頭
+    local pf = F.begin(flc, 60, 4)
+    while not pf.ready do F.stepBuild(pf, 4096) end
+    local sf = F.newState()
+    F.setRuntimeLimits(sf, 3, 6, 7, 1.2)
+    local cf = { x = 8106, y = 11265, h = -math.pi / 2 }
+    local rotF = false
+    for _ = 1, 30 * 14 do
+        local steer = F.control(pf, sf, cf.x, cf.y, cf.h, 25, dt)
+        if sf.rotating then rotF = true end
+        cf.h = cf.h + (steer or 0) * 0.12 * dt
+        local v = 25 / 3.6
+        cf.x, cf.y = cf.x + math.cos(cf.h) * v * dt, cf.y + math.sin(cf.h) * v * dt
+    end
+    checkTrue(not rotF and cf.y < 11175, string.format("Flaherty 橫移點 25 km/h 開過去不原地調頭（y=%.1f）", cf.y))
 end
 
 scenario("0928o：弧長短於前視的彎——窗內有弧就追切線（不用弦角提前轉入）、切線含常駐車道斜率、前饋出弧前收尾")
@@ -3167,12 +3197,29 @@ do
         if strong.entryIn > entryInner then entryInner = strong.entryIn end
     end
     checkTrue(entryInner < 0.2, string.format("② 7m 窄路內側車道右彎：進弧時切內 %.2fm < 0.2（不轉斜率 0.17–0.35）", entryInner))
-    -- ②′ 同一收窄配慢 plant（G 0.7／τ 0.35）：斜率取在車前 0.2 s，ramp 收尾不再多衝向外（當下斜率 0.88）
-    local slow = run(40, 35, 10, 1, 2.0, 0.7, 0.35, 7)
-    checkTrue(slow.outMax < 0.8, string.format("②′ 慢 plant 窄路內側車道：車道收窄收尾外漂 %.2fm < 0.8（當下斜率 0.88）",
-        slow.outMax))
+    -- ②′ 斜率取在車前 0.2 s（yaw 滯後）：6m 路 50 km/h 30° 內側車道，車道 ramp 不讓車多轉進彎內（當下斜率 0.35）。
+    --   0928p 時這條鎖的是 7m 路慢 plant 的出彎外漂；0929a 前饋加車道 ramp 曲率後外漂已由前饋處理，差別改在切內。
+    local lag = run(50, 30, 12, 1, 1.5, 1.0, 0.25, 6)
+    checkTrue(lag.inMax < 0.3, string.format("②′ 6m 路內側車道 50 km/h：車道 ramp 段切內 %.2fm < 0.3（當下斜率 0.35）",
+        lag.inMax))
     checkTrue(endRatio < 0.35, string.format("③ 前饋出弧前收尾：弧尾 0.8m 內 ≤ 弧中 35%%（實得 %.0f%%）", endRatio * 100))
     checkTrue(postStrong < 0.25, string.format("③ 反應快的 plant（G 1.0／τ 0.25）出弧後切內 %.2fm < 0.25（舊制 0.54）", postStrong))
+
+    scenario("0929a：弧段前饋照實際行駛線的曲率——車道偏移讓弧半徑變 R∓l、彎前後車道收窄的 ramp 也有曲率")
+    -- 只給中心線 1/R 時（0928p）：6m 路內側車道（右轉靠右）彎前車道往中線收、出彎放回，ramp 的 l'' 峰值
+    -- 6·dl/L² 與 R20 弧同量級；前饋照中心弧轉＝彎中留在內側、出彎車道放回時少轉＝外漂，慢 plant
+    -- （G 0.7／τ 0.35）45 km/h 35° 出彎外漂 0.78m（FRAC 0.75）。外側車道（左轉靠右）走的是 R+l 的弧，照 1/R
+    -- 前饋＝轉過頭切內 0.34m。違規證明：車道 ramp 曲率不進前饋＝①紅；弧曲率不換成 R∓l＝②紅（情境 37 也紅）。
+    local laneOut = 0
+    for _, c in ipairs({ { 45, 35, 10 }, { 50, 30, 12 } }) do
+        local r = run(c[1], c[2], c[3], 1, 1.5, 0.7, 0.35, 6)
+        if r.outMax > laneOut then laneOut = r.outMax end
+    end
+    checkTrue(laneOut < 0.68, string.format(
+        "① 6m 路內側車道、慢 plant：車道 ramp 曲率進前饋後出彎外漂 %.2fm < 0.68（只給 1/R 0.78）", laneOut))
+    local outer = run(50, 30, 12, -1, 1.5, 1.0, 0.25, 6)
+    checkTrue(outer.inMax < 0.26, string.format(
+        "② 6m 路外側車道（左轉靠右）：前饋照 R+l 後切內 %.2fm < 0.26（照 1/R 0.34）", outer.inMax))
 end
 
 closeScenario()
