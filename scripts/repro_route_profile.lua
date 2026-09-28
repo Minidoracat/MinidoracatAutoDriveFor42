@@ -124,8 +124,11 @@ local function routeFromNav(sx, sy, tx, ty)
     while not NavCore.step(b, 100000) do end
     -- 車上權重 12（主 MOD ensureRoute 對車上玩家的值）；環境變數 MDAD_APPROACH_WEIGHT 可改
     local weight = tonumber(os.getenv("MDAD_APPROACH_WEIGHT")) or 12
-    local route, err = NavCore.findRoute(b.graph, sx, sy, tx, ty, nil, nil, nil, weight)
+    -- MDAD_AVOID="ax,ay,r"：同 requestDetour 的避讓圈（拖車繞開調頭／堵車改道離線重現）
+    local ax, ay, ar = (os.getenv("MDAD_AVOID") or ""):match("([%d%.%-]+),([%d%.%-]+),([%d%.]+)")
+    local route, err = NavCore.findRoute(b.graph, sx, sy, tx, ty, tonumber(ax), tonumber(ay), tonumber(ar), weight)
     assert(route, "route NIL: " .. tostring(err))
+    if ax then print("avoid (" .. ax .. "," .. ay .. ") r=" .. ar .. " avoidPenalty=" .. tostring(route.avoidPenalty)) end
     return route, VOLVO
 end
 

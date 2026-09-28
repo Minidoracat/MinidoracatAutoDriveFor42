@@ -17329,6 +17329,187 @@ function drive.scenarioDodgeTerminalVis()
 end
 drive.scenarioDodgeTerminalVis()
 
+-- 0928l 正式服 salomon 兩則回報（6289,11203 拖一般車交還；5188,11151 一直原地旋轉）：
+--   (tt)  拖車要調頭：先要一條不用調頭的繞行（避讓圈在車尾正後方），等 cutover 期間停住，沒有才交還。
+--         違規證明：towTurnaround 一律回 false＝(tt1) 交還紅；routeLeavesForward 恆 true＝(tt3) 收下倒車線紅；
+--         避讓圈往車頭前放（fx 反號）＝(tt1) 圈心位置紅。
+--   (ul)  同一處 30m 內第 4 次進入調頭＝受困交還（五趟繞圈 16～204 次、繞到手動接手）。
+--         違規證明：拿掉 uturnLoop 計數＝(ul) 仍在自駕紅；範圍判定拿掉＝(ul-far) 紅。
+--   (ds)  地圖資料微反折（0.7m 倒退段）在建剖面前清掉：開過去不原地調頭。
+--         違規證明：despikeRoute 直接回原表＝(ds) 投影釘死、進調頭紅。
+--   (dg)  Trailer.guard 讀剖面實際建構的路線，反折點不當不可過轉角（SemiTruck 在同點 TrailerCorner）。
+--         違規證明：guard 改回 T.shape(s.route)＝(dg) 限速紅。
+function drive.scenarioTowTurn()
+    scenario("拖車要調頭改走不用調頭的繞行、同處反覆調頭受困交還、地圖微反折建剖面前清掉")
+    local oldSandbox, oldVeh, oldGet = SandboxVars, dveh, getSpecificPlayer
+    local oldApi = MinidoracatMiniMapAPI.navApiVersion
+    local oldRoute, oldTx, oldTy, oldState = drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
+    local oldDetour, oldReq = drive.nav.detour, MinidoracatMiniMapAPI.requestDetour
+    local wasMs = drive.frameMs(20)
+    MDAD.Drive.stop(0, nil)
+    getSpecificPlayer = function(n) if n == 0 then return dp end end
+    MinidoracatMiniMapAPI.navApiVersion = 5
+    -- 主 MOD 的 requestDetour 一算出就覆寫該玩家的路線快取（addon-api 3.10）：下一次 requestRoute 回的就是它
+    MinidoracatMiniMapAPI.requestDetour = function(...)
+        local r, state = oldReq(...)
+        if r then drive.nav.route = r end
+        return r, state
+    end
+    dveh = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }),
+        engineRunning = true, mass = 1600, speed = 0, maxSpeed = 100,
+        bodyW = 1.6, bodyL = 4.2, comX = 0, comZ = 0, profileFull = true,
+        enginePower = 3000, brakingForce = 100, wheelFriction = 1.5, tireFriction = 1.5 })
+    local trailer = {
+        getForwardVector = function(_, out) return out:set(dveh._fwdX, 0, dveh._fwdY) end,
+        getUpVectorDot = function() return 1 end,
+    }
+    local function arm(route, tx, ty, bias)
+        MDAD.Drive.stop(0, nil)
+        drive.fillWorld(-90, 90, -12, 12)
+        drive.putRoad(-90, 90, -3, 3)
+        setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
+            AutoDriveMaxSpeed = 60, RightLaneBias = bias or 0 })
+        dveh._speed, dveh._steering, dveh._stopped = 0, 0, true
+        dveh._engine, dveh._driver = true, dp
+        dp._vehicle, dp._dead, dp._local = dveh, false, true
+        drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = route, tx, ty, "ok"
+        drive.nav.detourCalls, drive.nav.lastDetour = 0, nil
+        clearList(halos)
+        return MDAD.Drive.start(dp)
+    end
+    local function behind()
+        return { pts = { 0, 0, -80, 0 }, segSurface = { "paved" }, segWidth = { 8 },
+            len = 80, cost = 80, avoidPenalty = 0 }
+    end
+    local function haloOf(key, kind)
+        for i = 1, #halos do
+            if halos[i].kind == kind and noteReason(halos[i].text) == key then return true end
+        end
+        return false
+    end
+    local function tickUntil(pred, n)
+        for _ = 1, n do
+            if pred() then return true end
+            driveTick(dp, dveh)
+        end
+        return pred()
+    end
+    local towGeo = { trailer = trailer, L2 = 3, hitchToRear = 5, halfW = 0.9 }
+
+    -- (tt1) 目標在車後、拖著車：向主 MOD 要繞行，圈心在車尾正後方 13m、半徑 12
+    dveh._x, dveh._y = 0, 0
+    setHeading(dveh, 0)
+    local fwd = { pts = { 0, 0, 60, 0, 60, 40 }, segSurface = { "paved", "paved" }, segWidth = { 8, 8 },
+        len = 100, cost = 100, avoidPenalty = 0 }
+    drive.nav.detour = fwd
+    checkTrue(arm(behind(), -80, 0), "(tt1) 拖車、目標在車後啟動")
+    local st = MDAD.Drive.debugSession(0)
+    st.tow = towGeo
+    tickUntil(function() return drive.nav.detourCalls > 0 or not MDAD.Drive.isActive(0) end, 60)
+    checkEq(drive.nav.detourCalls, 1, "(tt1) 要了一次繞行")
+    local ld = drive.nav.lastDetour or {}
+    checkEq(ld.r, 12, "(tt1) 避讓半徑 12")
+    checkTrue(ld.ax ~= nil and math.abs(ld.ax + 13) < 1e-6 and math.abs(ld.ay) < 1e-6,
+        "(tt1) 圈心在車尾正後方 13m（ax=" .. tostring(ld.ax) .. " ay=" .. tostring(ld.ay) .. "）")
+    checkTrue(MDAD.Drive.isActive(0), "(tt1) 拿到不用調頭的路線：不交還")
+    checkTrue(haloOf("UI_MinidoracatAutoDrive_TrailerTurn", "good"), "(tt1) 綠字告知改走繞行")
+    tickUntil(function() return st.route == fwd end, 10)
+    for _ = 1, 3 do driveTick(dp, dveh) end
+    checkTrue(st.route == fwd and st.routeReadyWhy == "towturn",
+        "(tt1) cutover 到繞行線（why=" .. tostring(st.routeReadyWhy) .. "）")
+    checkTrue(MDAD.Drive.isActive(0) and not st.fstate.rotating and drive.nav.detourCalls == 1,
+        "(tt1) 新路線朝車頭方向：不再調頭、不再要繞行（calls=" .. tostring(drive.nav.detourCalls) .. "）")
+    checkTrue(st.avoidTow == true and st.avoidR == 12, "(tt1) sticky 避讓記住拖車圈")
+
+    -- (tt2) 沒有替代路：照舊交還 TrailerRotate
+    drive.nav.detour = nil
+    checkTrue(arm(behind(), -80, 0), "(tt2) 拖車、沒有替代路啟動")
+    MDAD.Drive.debugSession(0).tow = towGeo
+    tickUntil(function() return not MDAD.Drive.isActive(0) end, 60)
+    checkFalse(MDAD.Drive.isActive(0), "(tt2) 沒有不用調頭的路：交還")
+    checkTrue(haloOf("UI_MinidoracatAutoDrive_TrailerRotate", "bad"), "(tt2) 紅字 TrailerRotate")
+
+    -- (tt3) 主 MOD 給的線還是往車後出發：不收（收了等於原地調頭）
+    drive.nav.detour = { pts = { 0, 0, -60, 0, -60, 40 }, segSurface = { "paved", "paved" },
+        segWidth = { 8, 8 }, len = 100, cost = 100, avoidPenalty = 0 }
+    checkTrue(arm(behind(), -80, 0), "(tt3) 拖車、替代路仍往後啟動")
+    MDAD.Drive.debugSession(0).tow = towGeo
+    tickUntil(function() return not MDAD.Drive.isActive(0) end, 60)
+    checkEq(drive.nav.detourCalls, 1, "(tt3) 問過一次")
+    checkFalse(MDAD.Drive.isActive(0), "(tt3) 往後出發的線不收：交還")
+    drive.nav.detour = nil
+
+    -- (ul) 沒拖車、目標在車後：同一處第 4 次進入調頭＝受困交還
+    checkTrue(arm(behind(), -80, 0), "(ul) 目標在車後啟動")
+    st = MDAD.Drive.debugSession(0)
+    tickUntil(function() return st.uturn ~= nil or not MDAD.Drive.isActive(0) end, 60)
+    checkTrue(st.uturn ~= nil, "(ul) 進入調頭")
+    for _ = 2, 3 do
+        st.uturn = nil
+        driveTick(dp, dveh)
+    end
+    checkTrue(MDAD.Drive.isActive(0) and st.uturnLoopN == 3, "(ul) 第 3 次仍在自駕（N=" .. tostring(st.uturnLoopN) .. "）")
+    st.uturn = nil
+    driveTick(dp, dveh)
+    checkFalse(MDAD.Drive.isActive(0), "(ul) 30m 內第 4 次進入調頭：受困交還")
+    checkTrue(haloOf("UI_MinidoracatAutoDrive_StopStuck", "bad"), "(ul) 紅字 StopStuck")
+    -- (ul-far) 每次都在 30m 外：不是繞圈，不交還
+    dveh._x = 0
+    checkTrue(arm(behind(), -80, 0), "(ul-far) 目標在車後啟動")
+    st = MDAD.Drive.debugSession(0)
+    tickUntil(function() return st.uturn ~= nil end, 60)
+    for _ = 2, 4 do
+        dveh._x = dveh._x + 40
+        st.uturn = nil
+        driveTick(dp, dveh)
+    end
+    checkTrue(MDAD.Drive.isActive(0) and st.uturnLoopN == 1,
+        "(ul-far) 每次調頭相隔 40m：計數重來、不交還（N=" .. tostring(st.uturnLoopN) .. "）")
+    dveh._x = 0
+
+    -- (ds) 路線中段 0.7m 倒退段（161° 兩次折返）：建剖面前清掉，靠右開過去不原地調頭
+    local spiky = { pts = { 0, 0, 30, 0, 29.4, -0.2, 80, 0 }, segSurface = { "paved", "paved", "paved" },
+        segWidth = { 8, 8, 8 }, len = 80, cost = 80, avoidPenalty = 0 }
+    dveh._x, dveh._y = 0, 1.5
+    setHeading(dveh, 0)
+    checkTrue(arm(spiky, 80, 0, 0.75), "(ds) 反折路線啟動")
+    st = MDAD.Drive.debugSession(0)
+    checkTrue(st.profileRoute ~= nil and st.profileRoute.despiked == 1 and #st.profileRoute.pts == 6,
+        "(ds) 剖面路線清掉 1 點（despiked=" .. tostring(st.profileRoute and st.profileRoute.despiked) .. "）")
+    checkTrue(st.route == spiky and #st.route.pts == 8, "(ds) 原 route identity 不動")
+    local rotated = false
+    for k = 1, 90 do
+        dveh._x, dveh._y, dveh._speed, dveh._stopped = k * 0.5, 1.5, 12, false
+        driveTick(dp, dveh)
+        if st.fstate.rotating or st.uturn ~= nil then rotated = true end
+    end
+    checkFalse(rotated, "(ds) 開過反折點不進調頭")
+    checkTrue(MDAD.Drive.isActive(0) and st.lastSNow > 40,
+        "(ds) 投影跟著前進（s=" .. tostring(st.lastSNow) .. "）")
+
+    -- (dg) guard 讀清過的剖面路線；原始路線直接改寫會把反折點列不可過轉角
+    -- 半聯結車幾何（test_trailer 的 W900＋貨櫃）：反折點當 161° 轉角必然轉不過
+    local semi = { trailer = trailer, L2 = 9.5, hitchToRear = 12, halfW = 1.27 }
+    local fakeS = { tow = semi, route = spiky, towNextMs = 0, safeCoast = 1,
+        profileRoute = MDAD.Drive.profileRouteOf(spiky, semi, { halfW = 1.19, halfL = 3.55 }, 0, 0, false) }
+    dveh._x, dveh._y = 0, 0
+    setHeading(dveh, 0)
+    local cap, why = MDADTrailer.guard(fakeS, dveh, 1e12, 20)
+    checkTrue(why == nil and cap == nil,
+        "(dg) 反折點不當不可過轉角（cap=" .. tostring(cap) .. " why=" .. tostring(why) .. "）")
+    local raw = MDADTrailer.shape(spiky, semi, 1.19, 7.1)
+    checkTrue(#raw.towBlocked > 0, "(dg) 對照：原始路線直接改寫會列不可過轉角")
+
+    MDAD.Drive.stop(0, nil)
+    drive.frameMs(wasMs)
+    MinidoracatMiniMapAPI.requestDetour = oldReq
+    MinidoracatMiniMapAPI.navApiVersion = oldApi
+    drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
+    drive.nav.detour = oldDetour
+    SandboxVars, dveh, getSpecificPlayer = oldSandbox, oldVeh, oldGet
+end
+drive.scenarioTowTurn()
+
 -- 0928a 正式服 0.13.1 片段修正（各段違規證明寫在段首）：
 --   (aw)          前方區域未載入的引擎煞車：不判卡死、不倒車、HUD 顯示等待、等滿上限才以專屬理由交還。
 --                 違規證明：progressPauseMs 不看 areaWaitActive＝8 秒內 suspect 紅；areaWait 恆 false＝HUD／理由紅。

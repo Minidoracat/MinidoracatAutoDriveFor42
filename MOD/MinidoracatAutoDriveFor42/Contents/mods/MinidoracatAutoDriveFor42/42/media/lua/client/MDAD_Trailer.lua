@@ -13,6 +13,7 @@ T.KEY_UNSUPPORTED = "UI_MinidoracatAutoDrive_TrailerUnsupported"
 T.KEY_CORNER = "UI_MinidoracatAutoDrive_TrailerCorner"
 T.KEY_ROTATE = "UI_MinidoracatAutoDrive_TrailerRotate"
 T.KEY_LOST = "UI_MinidoracatAutoDrive_TrailerLost"
+T.KEY_TURN = "UI_MinidoracatAutoDrive_TrailerTurn" -- 需要調頭時改走不用調頭的繞行（Driver.towTurnaround）
 
 T.LAT_SCALE = 0.6          -- 拖車時彎道側向加速度預算乘數（牽引車單體預算對掛車太快：E2E 23 km/h 進 143° 斷開）
 T.TURN_MIN_RAD = 25 * math.pi / 180   -- 小於此折角不需要外拉
@@ -440,7 +441,9 @@ function T.guard(s, vehicle, now, speedKmh)
     local phi, up = T.state(vehicle, tow)
     s.towPhi, s.towUp = phi, up -- telemetry tph／tup：脫掛前的折角與傾斜（TrailerLost 定罪用）
     if phi and (abs(phi) > T.HITCH_SLOW or (finite(up) and up < T.TILT_SLOW)) then cap = T.CRAWL_KMH end
-    local shaped = T.shape(s.route, tow)
+    -- 剖面實際建構的那條（Driver.profileRouteOf：清過微反折再改寫）；拿原始路線重算會把資料殘點
+    -- 當成不可過轉角（2026-09-28 正式服 SemiTruck 在 (5180,11145) 反折點前停下交還）
+    local shaped = s.profileRoute or T.shape(s.route, tow)
     local vx, vy = vehicle:getX(), vehicle:getY()
     local d, bx, by = T.nearestBlocked(shaped, vx, vy)
     if d then

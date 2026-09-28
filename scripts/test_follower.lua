@@ -2777,6 +2777,80 @@ do
     checkTrue(sEnd - s0 > 10, string.format("側偏越過短段段尾：投影繼續前進（前進 %.2f m，車走 12 m）", sEnd - s0))
 end
 
+scenario("0928l：地圖資料微反折（接點錯位 0.7m）刪頂點；真調頭不動；清過後投影跨得過去、不原地調頭")
+do
+    -- 2026-09-28 正式服 salomon clip-19（東行）：…→(5161.5,11135.5)→(5180.5,11145.5)→(5180,11145)→(5231.5,11170.5)→…
+    -- 中間那段 0.7m 往回走（兩次 ~161° 折返）。0927 的投影可達防護不跨車頭背向的相鄰段＝投影釘死在
+    -- 反折點、車開過頭前視點落到車後＝原地調頭；調回來又跨不過＝繞圈 16～204 次（五趟、兩名玩家）。
+    local spikePts = { 5104.14, 11102.27, 5161.5, 11135.5, 5180.5, 11145.5, 5180, 11145, 5231.5, 11170.5, 5253.5, 11181.5 }
+    local spiky = { pts = spikePts, segWidth = { 8, 8, 5, 8, 8 },
+        segSurface = { "paved", "paved", "unknown", "paved", "paved" } }
+    local clean = F.despikeRoute(spiky)
+    checkTrue(clean ~= spiky, "有反折點：回淺拷貝，不改原 route")
+    checkEq(clean.despiked, 1, "刪掉 1 個頂點（第二個折返在刪完後已不是反折）")
+    checkEq(#clean.pts, #spikePts - 2, "點數少一個")
+    checkEq(#clean.segWidth, #clean.pts / 2 - 1, "段寬數量對齊點數")
+    checkEq(#clean.segSurface, #clean.segWidth, "路面數量對齊段數")
+    checkEq(#spiky.pts, 12, "原 route 不動（cutover 仍比對原 identity）")
+    local function maxTurnOf(pts)
+        local m = 0
+        for k = 3, #pts - 3, 2 do
+            local ax, ay = pts[k] - pts[k - 2], pts[k + 1] - pts[k - 1]
+            local bx, by = pts[k + 2] - pts[k], pts[k + 3] - pts[k + 1]
+            local t = math.abs(math.atan(ax * by - ay * bx, ax * bx + ay * by))
+            if t > m then m = t end
+        end
+        return m
+    end
+    checkTrue(maxTurnOf(clean.pts) < math.rad(20),
+        string.format("清完沒有折返（最大相鄰折角 %.1f°）", math.deg(maxTurnOf(clean.pts))))
+    checkEq(clean.segSurface[2], "paved", "合併段的屬性取較長那臂（19m 的 paved，不是 0.7m 的 unknown）")
+
+    -- 沒有反折：回原表（Trailer.shape 以 identity 快取）
+    local plain = { pts = { 0, 0, 40, 0, 40, 40 }, segWidth = { 8, 8 }, segSurface = { "paved", "paved" } }
+    checkTrue(F.despikeRoute(plain) == plain, "沒有反折點：回原表")
+    -- 真調頭（兩臂都長，死路盡頭折返）不動
+    local uturn = { pts = { 0, 0, 40, 0, 0, 4 }, segWidth = { 8, 8 }, segSurface = { "paved", "paved" } }
+    checkTrue(F.despikeRoute(uturn) == uturn, "兩臂都長的真調頭不動")
+    -- 連續鋸齒（0.13.1 拖車改寫線在路口 jog 的撤點殘留：退 1.1m、進 0.5m）：一次清乾淨
+    local zig = { pts = { 0, 0, 10, 0, 9, 0.05, 9.5, 0.1, 9.1, 0.15, 25, 0.3 },
+        segWidth = { 8, 8, 8, 8, 8 }, segSurface = { "paved", "paved", "paved", "paved", "paved" } }
+    local zc = F.despikeRoute(zig)
+    checkTrue((zc.despiked or 0) >= 2 and maxTurnOf(zc.pts) < math.rad(150),
+        string.format("連續鋸齒清到沒有反折（刪 %d 點、最大折角 %.0f°）", zc.despiked or 0,
+            math.deg(maxTurnOf(zc.pts))))
+    -- 無 segWidth／segSurface（nav v2/v3）也能清
+    local bare = F.despikeRoute({ pts = spikePts })
+    checkTrue(bare.despiked == 1 and bare.segWidth == nil, "沒有段屬性的路線照樣清點")
+
+    -- 閉環：車沿 ENE 路線以 12 km/h、靠右 1.5m 開過反折點。原路線＝投影釘死在反折點、ROTATE；清過＝投影一路前進。
+    -- 違規證明：despikeRoute 直接回原表＝第二組也釘死紅。
+    local function drivePast(route)
+        local p = F.begin(route, 70, 4, nil)
+        while not p.ready do F.stepBuild(p, 4096) end
+        local st = F.newState()
+        local hx, hy = 5231.5 - 5161.5, 11170.5 - 11135.5
+        local hl = math.sqrt(hx * hx + hy * hy)
+        hx, hy = hx / hl, hy / hl
+        local h = math.atan(hy, hx)
+        local rotated, sEnd = false, 0
+        for k = 0, 500 do
+            local d = k * 0.05 -- 25m：反折點前 5m 起開到後 20m；靠右 1.5m（實機常駐靠右，貼中線反而會在頂點平手跨過去）
+            local x, y = 5171.6 + hx * d - hy * 1.5, 11140.8 + hy * d + hx * 1.5
+            local _, _, rem = F.control(p, st, x, y, h, 12, 0.05)
+            if st.rotating then rotated = true end
+            sEnd = p.length - rem
+        end
+        return rotated, sEnd
+    end
+    local rotRaw, sRaw = drivePast(spiky)
+    local rotClean, sClean = drivePast(clean)
+    checkTrue(rotRaw and sRaw < 88.5, "原路線（證明缺陷存在）：投影釘在反折點 s≈87.8、開過頭就判原地調頭（s="
+        .. string.format("%.1f", sRaw) .. " rotated=" .. tostring(rotRaw) .. "）")
+    checkFalse(rotClean, "清過的路線：開過反折點不判原地調頭")
+    checkTrue(sClean > 100, string.format("清過的路線：投影跟著車前進到反折點後 12m 以上（s=%.1f，車開到反折點後 15m）", sClean))
+end
+
 closeScenario()
 print()
 print("情境 " .. scenarios .. " 個、斷言 " .. assertions .. " 項")

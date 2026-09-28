@@ -587,7 +587,72 @@ local function geometryStep(p, i)
     end
 end
 
--- 驗 route 並配置 profile。**唯一**會建 table 的入口。
+-- 地圖資料接點的微反折（2026-09-28 正式服 (5180,11145)：兩條道路折線端點錯位 0.7m、接續順序倒置，
+-- 路線成了「前進→倒退 0.7m→前進」；0927 起投影不跨到車頭背向的相鄰段，投影釘死在反折點，
+-- 車開過頭後前視點落到車後＝原地調頭，掉頭回來又跨不過＝兩名玩家同點繞圈調頭 16～204 次）。
+-- 頂點折返超過 150° 且相鄰一臂短於 SPIKE_M＝開不出來的資料殘點：刪頂點、兩段合併（段屬性取
+-- 較長那臂）。兩臂都長的真調頭不動。拖車改寫線撤點後殘留的折返（0.13.1 fold 前的路口 jog）同樣清掉。
+-- 無變更回原表（Trailer.shape 以 identity 快取）；有變更回淺拷貝，despiked＝刪除點數。冷路徑。
+MDADFollower.SPIKE_M = 2
+function MDADFollower.despikeRoute(route)
+    local pts = type(route) == "table" and route.pts or nil
+    if type(pts) ~= "table" or #pts < 6 or #pts % 2 ~= 0 then return route end
+    for k = 1, #pts do
+        if not isFinite(pts[k]) then return route end
+    end
+    local lim2 = MDADFollower.SPIKE_M * MDADFollower.SPIKE_M
+    -- 頂點 i（前後各一點）是不是微反折；另回兩臂長平方供合併取屬性
+    local function spikeAt(p, i)
+        local ux, uy = p[i * 2 - 1] - p[i * 2 - 3], p[i * 2] - p[i * 2 - 2]
+        local vx, vy = p[i * 2 + 1] - p[i * 2 - 1], p[i * 2 + 2] - p[i * 2]
+        local lu, lv = ux * ux + uy * uy, vx * vx + vy * vy
+        if lu < 1e-12 or lv < 1e-12 or (lu >= lim2 and lv >= lim2) then return false, lu, lv end
+        local dot = ux * vx + uy * vy
+        return dot < 0 and dot * dot > 0.75 * lu * lv, lu, lv -- 0.75＝cos²150°
+    end
+    local n = #pts / 2
+    local found = false
+    for i = 2, n - 1 do
+        if spikeAt(pts, i) then found = true break end
+    end
+    if not found then return route end
+    local sw, ss = route.segWidth, route.segSurface
+    if type(sw) ~= "table" then sw = nil end
+    if type(ss) ~= "table" then ss = nil end
+    local P, W, S = {}, sw and {} or nil, ss and {} or nil
+    local np, removed = 0, 0
+    for i = 1, n do
+        np = np + 1
+        P[np * 2 - 1], P[np * 2] = pts[i * 2 - 1], pts[i * 2]
+        if np >= 2 then
+            if W then W[np - 1] = sw[i - 1] end
+            if S then S[np - 1] = ss[i - 1] end
+        end
+        -- 新點進來後回頭看上一個頂點；刪掉後新的上一個頂點可能又成反折（連續鋸齒）
+        while np >= 3 do
+            local spike, lu, lv = spikeAt(P, np - 1)
+            if not spike then break end
+            if lv > lu then
+                if W then W[np - 2] = W[np - 1] end
+                if S then S[np - 2] = S[np - 1] end
+            end
+            P[np * 2 - 3], P[np * 2 - 2] = P[np * 2 - 1], P[np * 2]
+            P[np * 2 - 1], P[np * 2] = nil, nil
+            if W then W[np - 1] = nil end
+            if S then S[np - 1] = nil end
+            np = np - 1
+            removed = removed + 1
+        end
+    end
+    local out = {}
+    for k, v in pairs(route) do out[k] = v end
+    out.pts, out.despiked = P, removed
+    if W then out.segWidth = W end
+    if S then out.segSurface = S end
+    return out
+end
+
+-- 驗 route 並配置 profile。除冷路徑的 despikeRoute 外，**唯一**會建 table 的入口。
 -- 拒絕條件（一律回 nil, "badroute"，呼叫端不必分辨細節，只需要「這條路不能跟」）：
 --   route／route.pts 不是 table、pts 長度非偶數、點數 < 2、任一座標非有限數、
 --   所有點重合（路徑長 0，投影／曲率／前視全部沒有意義）。
