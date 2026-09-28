@@ -6922,7 +6922,8 @@ drive.scenarioDeferOwner()
 
 -- (brake-assist) 0925r 硬煞外力輔助：只在已知障礙前、照一般硬煞停不住（v²/2d > NEED）且 40 km/h 以上時，
 --   對質心加車頭反向中心力（零力矩），60 km/h 起滿載 0.4×mass×10×(mult/0.8)。可視距離／彎道／恢復等
---   一般煞車理由沒有障礙距離＝不加。違規證明：NEED 改 0＝(brake-assist) 「停得住不加」紅；門檻 999＝施力紅。
+--   一般煞車理由沒有障礙距離＝不加。違規證明：NEED 改 0＝(brake-assist) 「停得住不加」紅；門檻 999＝施力紅；
+--   NEED 退回 6＝「55 km/h、障礙 25m」紅（0929g：弱煞車的車鎖輪只有 4.0–4.3 m/s²）。
 function drive.scenarioBrakeAssist()
     assert(armDrive())
     setHeading(dveh, 0)
@@ -6945,6 +6946,8 @@ function drive.scenarioBrakeAssist()
         "(brake-assist) 80 km/h、障礙 20m：車頭反向、零力矩、滿載量級（" .. tostring(imp.x) .. "）")
     imp = hit(80, 60) -- 需 4.1 m/s²：一般硬煞停得住
     checkEq(imp.frame, 0, "(brake-assist) 一般硬煞停得住（80 km/h、60m）：不加外力")
+    imp = hit(55, 25) -- 15.3 m/s、25m：需 4.7 m/s²——弱煞車的車鎖輪只有 4.0–4.3（0929g p092）
+    checkEq(imp.frame, 1, "(brake-assist) 55 km/h、障礙 25m（需 4.7）：超過鎖輪可靠能力 4.5，加外力")
     imp = hit(30, 2)
     checkEq(imp.frame, 0, "(brake-assist) 40 km/h 以下不施外力")
     imp = hit(80, nil)
@@ -13941,11 +13944,10 @@ local function scenarioPhaseE()
     --     0909b 起遠處 entry（p2）的判死改成可以提早交出舊線重選（見 (B2)），所以本案的
     --     硬物必須真的落在**保持段**（p3）。掃掠回報的 phase 是失敗**車身取樣點**的弧長，
     --     車頭前伸會讓貼在 offB 後緣的硬物先被 p2 的取樣點命中——因此這裡把障礙群補成
-    --     5 格長（0929f 起硬點 (s,l) 取格心，保持段比取樣點版短半格），硬物放保持段尾端，
-    --     並用前置斷言鎖住深度。
+    --     4 格長（保持段 ≈8m），硬物放保持段尾端，並用前置斷言鎖住深度。
     do
         MDAD.Drive.stop(0, nil)
-        for x = 47, 50 do drive.putSolid(x, 0, "guard_group_" .. x) end -- 與既有 (46,0) 併成一群
+        for x = 47, 49 do drive.putSolid(x, 0, "guard_group_" .. x) end -- 與既有 (46,0) 併成一群
         hotVeh._x, hotVeh._y, hotVeh._speed = 0, 0, 0
         setHeading(hotVeh, 0)
         driveReset(hotVeh)
@@ -13989,7 +13991,7 @@ local function scenarioPhaseE()
             "(B) guard-blocked 錨的世界點是線上硬物，不是側停車（hit=("
             .. tostring(captured.blockHitX) .. "," .. tostring(captured.blockHitY) .. ")）")
         for _, c in ipairs(cells) do drive.clearCell(c[1], c[2]) end
-        for x = 47, 50 do drive.clearCell(x, 0) end
+        for x = 47, 49 do drive.clearCell(x, 0) end
         MDAD.Drive.stop(0, nil)
     end
     -- (B2) 0909b：判死落在**遠處 entry**（p2）時不得再沿著已經判死的線一路爬到障礙前

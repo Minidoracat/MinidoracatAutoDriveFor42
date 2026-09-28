@@ -1286,15 +1286,14 @@ function MDADSensor.step(state, profile, sNow, vehicle, now, cell)
             if hard then
                 -- 世界座標記格心（掃掠複驗用真實幾何，不受弧座標折點失真影響）；
                 -- 半徑由 scanCell 分級：樹幹/籬笆 0、小物 0.35、整格箱 0.7。
-                -- (s,l) 也取格心在本步局部框的線性化，不取命中的取樣點：取樣點可落在格子任一邊，
-                -- 與格心差到 ±0.5m。0929f 正式服／E2E p051：路旁樹格心在 l 3.0，取樣點記成 3.5，
-                -- 規劃以為常駐線 2.0 旁留 0.5m、不繞；世界掃掠與接觸防線用格心，照樣判撞，車爬進樹。
-                local dx, dy = wx + 0.5 - state.cx, wy + 0.5 - state.cy
-                local nx, ny = state.nx, state.ny
-                local hl = dx * nx + dy * ny
-                local l4 = hl * 4
+                -- (s,l) 刻意記命中的取樣點，與格心差到 ±0.5m：規劃的擋線／縫隙用它，世界掃掠用格心。
+                -- 0929f 試過改成格心（規劃與掃掠一致），同一組 E2E 路線的繞行承諾淨距中位數 0.95→0.58、
+                -- 各批合計的繞行中接觸 4/305→3/39：取樣點誤差只會讓規劃高估，或讓掃掠打回改試下一條 lane，等於一份
+                -- 隱含的橫向餘裕，蓋住了彎道追線落後。要改成格心，得同時補一份明確的追線餘裕並重驗。
+                local pr = hr
+                local l4 = l * 4
                 l4 = l4 - l4 % 1
-                pushHard(state, state.curS + dx * ny - dy * nx, hl, l4, wx + 0.5, wy + 0.5, hr)
+                pushHard(state, state.curS, l, l4, wx + 0.5, wy + 0.5, pr)
             end
             -- 只有真的查了世界格才扣預算；被去重擋掉的取樣點是純 Lua 的一次表查詢，
             -- 一輪最多 210 次，讓它們在同一幀裡跑完比多拖一幀便宜。

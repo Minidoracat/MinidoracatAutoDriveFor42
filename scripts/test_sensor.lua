@@ -19,9 +19,8 @@ MDADSensor 走廊掃描的離線測試：載入**真正的** production Lua，�
     client/MDAD_Sensor.lua
 
 假 PZ 面只補 MDADSensor.step 真的會碰的那幾個：cell:getGridSquare、square 的五個
-getter、instanceof、IsoFlagType／IsoObjectType（延後綁定用）。假格子預設沒有 IsoObject；
-只有情境十放了最小的樹／箱物件（驗硬點座標，不驗 sprite 分類），其餘「屍體不進 hard」
-的斷言不被別的來源污染。
+getter、instanceof、IsoFlagType／IsoObjectType（延後綁定用）。假格子裡**沒有任何
+IsoObject**——sprite 分類不在本檔範圍，也讓「屍體不進 hard」的斷言不被別的來源污染。
 
 假路線是沿世界 +X 的直線（heading 0 → 法向 +Y），起點格心 (1000.5, 2000.5)：
 橫向 14 條取樣（格心 ±0.5 … ±6.5）落在 14 個相異的 y 格、每個縱向步落在相異的 x 格，
@@ -716,73 +715,6 @@ local function scenarioDiagonalCoverage()
 end
 
 -- =====================================================================
--- 情境十：硬點的 (s,l) 是格心在本步局部框的線性化，不是命中它的取樣點（0929f 正式服／E2E p051：
--- 路旁樹格心在 l 3.0，舊制記成取樣點的 3.5——規劃以為常駐線 2.0 旁留 0.5m 不繞，世界掃掠與
--- 接觸防線卻用格心，車照樣爬進樹）。直路取樣點落在格子邊線上，正負兩側的誤差方向相反；
--- 斜路線性化在直線上是精確投影。違規證明：改回取樣點 (s,l) 即紅。
--- =====================================================================
-local function putObj(wx, wy, cls, coll)
-    local props = { has = function() return false end }
-    local spr = { getProperties = function() return props end,
-        shouldHaveCollision = function() return coll end }
-    squareAt(wx, wy)._objs:add({ _class = cls, getSprite = function() return spr end,
-        getSpriteName = function() return cls .. "_sprite" end, getType = function() return nil end })
-end
-
-local function findHard(st, wx, wy)
-    for i = 1, st.hardN do
-        if math.abs(st.hardX[i] - wx) < EPS and math.abs(st.hardY[i] - wy) < EPS then return i end
-    end
-end
-
-local function scenarioHardCellCenter()
-    scenario("硬點 (s,l)＝格心線性化：直路兩側、斜路都與世界座標一致")
-    resetWorld()
-    local st = newSensor(120, 4, 0)
-    putObj(1020.5, 2003.5, "IsoTree", false) -- 格心 l=+3.0；命中取樣點 l=+2.5（近側邊線）
-    putObj(1030.5, 1997.5, "IsoTree", false) -- 格心 l=-3.0；命中取樣點 l=-3.5（遠側邊線）
-    putObj(1040.5, 2001.5, "Box", true)      -- 整格箱 r 0.7
-    runRound(st)
-    local want = { { 1020.5, 2003.5, 20, 3, 0 }, { 1030.5, 1997.5, 30, -3, 0 }, { 1040.5, 2001.5, 40, 1, 0.7 } }
-    for _, w in ipairs(want) do
-        local i = findHard(st, w[1], w[2])
-        checkTrue(i ~= nil, string.format("(%.1f,%.1f) 進點雲", w[1], w[2]))
-        if i then
-            checkNear(st.hardS[i], w[3], EPS, string.format("(%.1f,%.1f) s＝格心弧長", w[1], w[2]))
-            checkNear(st.hardL[i], w[4], EPS, string.format("(%.1f,%.1f) l＝格心橫向", w[1], w[2]))
-            checkNear(st.hardR[i], w[5], EPS, string.format("(%.1f,%.1f) 半徑分級不變", w[1], w[2]))
-        end
-    end
-
-    local h = math.atan(0.5)
-    local c, sn = math.cos(h), math.sin(h)
-    local keep = { x = PROFILE.x, y = PROFILE.y, segH = PROFILE.segH }
-    PROFILE.x = { X0, X0 + ROUTE_LEN * c }
-    PROFILE.y = { Y0, Y0 + ROUTE_LEN * sn }
-    PROFILE.segH = { h, h }
-    resetWorld()
-    st = newSensor(120, 4, 0)
-    local cells = { { 1020, 2013 }, { 1025, 2010 }, { 1031, 2019 } }
-    for _, g in ipairs(cells) do putObj(g[1] + 0.5, g[2] + 0.5, "IsoTree", false) end
-    runRound(st)
-    local worst = 0
-    for _, g in ipairs(cells) do
-        local i = findHard(st, g[1] + 0.5, g[2] + 0.5)
-        checkTrue(i ~= nil, string.format("斜路 (%d,%d) 進點雲", g[1], g[2]))
-        if i then
-            local dx, dy = g[1] + 0.5 - X0, g[2] + 0.5 - Y0
-            local ds = math.abs(st.hardS[i] - (dx * c + dy * sn))
-            local dl = math.abs(st.hardL[i] - (-dx * sn + dy * c))
-            if ds > worst then worst = ds end
-            if dl > worst then worst = dl end
-        end
-    end
-    checkTrue(worst < 1e-6, "斜路：(s,l) 等於格心對路線的精確投影（最大差 " .. show(worst) .. "）")
-    PROFILE.x, PROFILE.y, PROFILE.segH = keep.x, keep.y, keep.segH
-    resetWorld()
-end
-
--- =====================================================================
 scenarioCorpseAxis()
 scenarioCorpseBands()
 scenarioFullRange()
@@ -793,7 +725,6 @@ scenarioMidRoundRequest()
 scenarioDistantCorpses()
 scenarioTraffic()
 scenarioDiagonalCoverage()
-scenarioHardCellCenter()
 
 closeScenario()
 print()

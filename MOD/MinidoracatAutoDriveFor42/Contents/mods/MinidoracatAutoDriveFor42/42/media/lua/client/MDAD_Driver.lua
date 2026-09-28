@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0929f"
+Drive.REV = "0929g"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -478,7 +478,10 @@ TUNE.ZOMBIE_PUSH_SCALE = 2.0       -- 1.5→2.0（2026-09-04 使用者「可以�
 TUNE.BRAKE_ASSIST_MIN_KMH = 40
 TUNE.BRAKE_ASSIST_FULL_KMH = 60
 TUNE.BRAKE_ASSIST_RATIO = 0.4
-TUNE.BRAKE_ASSIST_NEED = 6.0 -- 需要的減速度（m/s²）超過一般硬煞可靠能力才算緊急
+TUNE.BRAKE_ASSIST_NEED = 4.5 -- 需要的減速度（m/s²）超過一般硬煞可靠能力才算緊急。0929g：E2E 67 次持續鎖輪
+                              -- （起煞後 0.3–0.9s、≥20 km/h、未碰撞）實測 p10 4.35、p25 5.2、中位 7.9；
+                              -- 煞車力小、輪胎沒鎖死的車（多半是貨車）中位只有 5.2。舊值 6 讓 PickUpTruck
+                              -- 55 km/h、障礙 25m（需 4.6）只靠鎖輪（實得 4.0–4.3），18 km/h 撞上停著的車。
 -- 殭屍軟縫（2026-09-06；競品 Derpy `optimize_z` 把殭屍當軟縫拉軌跡，我們只出一個橫向目標）：
 -- 每輪掃描完成、持有權 free（無 dodge／RETURN／停留／調頭）時，用 Sensor 的殭屍 (s,l) 點雲
 -- 在常駐 lane ±DELTA 的可行帶找離殭屍區間最近的 lane（Corridor.softZombieLane），時間平滑
