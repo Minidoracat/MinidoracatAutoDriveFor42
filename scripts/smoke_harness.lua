@@ -17841,14 +17841,16 @@ function drive.scenario0928()
     local hw = 1.0
     setHeading(dveh, hw)
     ticks(1, 30)
-    local minScale = 1
+    local minScale, flagged = 1, false
     for _ = 1, 4 do
         hw = hw - 0.1
         setHeading(dveh, hw)
         ticks(1, 30)
         if st.escScale < minScale then minScale = st.escScale end
+        if st.escScale < 1 and st.fstate.escLimited == true then flagged = true end
     end
     checkTrue(minScale < 1, "(esc-wire) stepFollow 經 yaw 率限制才施側推（最小比例 " .. tostring(minScale) .. "）")
+    checkTrue(flagged, "(esc-wire) 被收掉的幀告知 Follower（fstate.escLimited）：側滑幀不進高速增益學習")
 
     -- (sg) 起步近物限速
     MDAD.Drive.stop(0, nil)

@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0928n"
+Drive.REV = "0928p"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -2537,6 +2537,7 @@ local function applySteering(
     -- Follower 的 yaw 增益估計要拿「真的施出去」的 steer（含 cross-track 與夾限；耦力調頭
     -- 是力偶不是側推，不進估計）——0908a 弧段自適應前饋
     s.fstate.appliedSteer = (not coupled) and steer or nil
+    s.fstate.escLimited = not coupled and s.escScale < 1 -- 側滑幀不進高速增益學習（Follower FF_HI）
     if s.brakeImpulseThis then return 0, 0 end -- 本幀已施硬煞外力（單槽 addImpulse）
     -- assistForce 可為負＝沿車身中線的減速分量（Drive.visAssistForce）；中線分量與前臂平行，不產生 yaw。
     if type(assistForce) ~= "number" or assistForce * 0 ~= 0 then assistForce = 0 end

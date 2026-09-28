@@ -2973,6 +2973,36 @@ do
         end
         checkTrue(st.yawGainHi and st.yawGainHi > 0.95 and st.yawGainHi < 1.35 and (st.hiLearnT or 0) >= 0.5,
             string.format("高速弧段學到的增益 %.2f 接近 plant 1.15（學 %.1fs）", st.yawGainHi or -1, st.hiLearnT or 0))
+        -- 側滑（Driver ESC 收掉 steer、yaw 超過物理上限）的幀不進高速學習：0928o E2E rc20 1017 58 km/h 側滑
+        -- 一幀 1.06→3.00、之後前饋縮到門檻下再也學不回來。違規證明：拿掉 escLimited 門檻＝紅。
+        local st3, car3 = F.newState(), { x = 30, y = 0.5, h = 0, w = 0 }
+        F.setLaneBias(st3, 0.5)
+        F.setRuntimeLimits(st3, 3, 6, 7, 1.2)
+        st3.yawGain = 0.75
+        local g0, slid = nil, 0
+        for _ = 1, 30 * 12 do
+            local u = F.control(p2, st3, car3.x, car3.y, car3.h, 79, dt)
+            local v = 79 / 3.6
+            local slide = g0 ~= nil and slid < 8
+            if not slide and g0 == nil and (st3.hiLearnT or 0) >= 0.8 and (st3.ffSteer or 0) >= 0.1 then
+                g0, slide = st3.yawGainHi, true
+            end
+            if slide then
+                slid = slid + 1
+                st3.appliedSteer, st3.escLimited = 0, true
+                car3.w = 1.05
+            else
+                st3.appliedSteer, st3.escLimited = u, false
+                car3.w = car3.w + (1.15 * u - car3.w) * (dt / 0.35)
+            end
+            car3.h = car3.h + car3.w * dt
+            car3.x, car3.y = car3.x + math.cos(car3.h) * v * dt, car3.y + math.sin(car3.h) * v * dt
+            if slid == 8 then break end
+        end
+        F.control(p2, st3, car3.x, car3.y, car3.h, 79, dt)
+        checkTrue(g0 ~= nil and slid == 8 and math.abs((st3.yawGainHi or 0) - g0) < 0.05,
+            string.format("弧上側滑 8 幀（ESC 收掉 steer、yaw 1.05 rad/s）：高速增益不動 %.2f → %.2f",
+                g0 or -1, st3.yawGainHi or -1))
     end
     -- 低速 R≈11 左 90°：30 km/h 以下 FRAC 不變（切內／外漂與舊值同）
     local R = 11
@@ -3039,6 +3069,110 @@ do
         car.x, car.y = car.x + math.cos(car.h) * v * dt, car.y + math.sin(car.h) * v * dt
     end
     checkTrue(not rot and car.x > 12300 + 20, string.format("開過橫移點不原地調頭（x=%.1f）", car.x))
+end
+
+scenario("0928o：弧長短於前視的彎——窗內有弧就追切線（不用弦角提前轉入）、切線含常駐車道斜率、前饋出弧前收尾")
+do
+    -- E2E rc16–rc18（0928n）中速彎 25–55 km/h 切內 0.7–1.8m。三個來源（真 Follower＋離線 yaw 滯後 plant 逐一分離）：
+    -- ① 弧長（30° 彎 ~11m）短於前視（15–17m）時前視點越過整段弧，車所在段與前視點所在段都不是弧 → 切線追蹤
+    --    關閉、pure pursuit 弦角朝彎後的點提前轉入（rc18 2005 51 km/h：弧前 2m err 0.14–0.22、steer 0.8–1.2，
+    --    切內 1.57m、對線帽壓到 23；rc16 0118 切內 1.5m 後 blocked 急停）。
+    -- ② 切線只取中心線方向：彎前常駐車道收窄（期望線 2.21→1.57）時車頭不動，只剩 0.77/v 的 cross-track。
+    -- ③ 前饋進弧有 lead 爬升、出弧一刀歸零：yaw 滯後讓車頭出口後多轉 0.1 rad、切進彎內 0.5m。
+    -- 圓角半徑由彎後 10–12m 的下一個頂點限制（真實路網折線常見），弧長 8.7–10.6m < 前視。
+    -- plant：yaw 率一階追 G·u；0928o telemetry 擬合 G 0.5–1.1、τ 0.25–0.48（中位 0.85／0.33）。
+    local D = MDADDynamics
+    local VP = { valid = true, geometryValid = true, halfW = 0.81, rMin = 2.75, wheelbase = 2.41,
+        delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 120, lookScale = 1.336 }
+    local function run(kmh, angDeg, arm, turn, bias, G, TAU, width)
+        width = width or 10
+        local a1 = math.rad(angDeg) * turn
+        local a2 = a1 + math.rad(6) * turn
+        local x1, y1 = 120 + arm * math.cos(a1), arm * math.sin(a1)
+        local x2, y2 = x1 + 90 * math.cos(a2), y1 + 90 * math.sin(a2)
+        local p = F.begin({ pts = { 0, 0, 120, 0, x1, y1, x2, y2 }, segSurface = { "paved", "paved", "paved" },
+            segWidth = { width, width, width } }, 120, 4, VP)
+        while not p.ready do F.stepBuild(p, 4096) end
+        local a0, a9
+        for i = 1, p.n - 1 do
+            if p.segKind[i] == D.SEG_ARC then
+                a0 = a0 or p.s[i]
+                if a9 == nil or p.s[i] <= a9 + 0.01 then a9 = p.s[i + 1] end
+            end
+        end
+        local st = F.newState()
+        F.setLaneBias(st, bias)
+        F.setRuntimeLimits(st, 3, 6, 7, 3.0)
+        st.yawGain = G
+        local look = F.lookaheadM(kmh, VP.lookScale)
+        local car = { x = 40, y = F.laneBiasAt(p, bias, 1, 40), h = 0, w = 0 }
+        local dt, t, prevLat = 1 / 30, 0, nil
+        local r = { pp = 0, inMax = 0, outMax = 0, entryIn = 0, postIn = 0, ffMid = 0, ffEnd = 0 }
+        while t < 30 do
+            local steer, _, rem, _, _, _, latSigned = F.control(p, st, car.x, car.y, car.h, kmh, dt)
+            local sNow = p.length - rem
+            -- ① 弧在車與前視點之間（前視點已越過弧尾、車還沒進弧）的每一幀都必須追切線
+            if sNow > a9 - look + 0.5 and sNow < a0 - 0.1 and st.tangentOn ~= true then r.pp = r.pp + 1 end
+            local latDev = latSigned - F.laneBiasAt(p, bias, st.idx, sNow)
+            local dLat = prevLat and (latDev - prevLat) / dt or nil
+            if dLat and (dLat > 5 or dLat < -5) then dLat = nil end
+            prevLat = latDev
+            local xg, xm
+            if st.curveHardActive then xg, xm = D.CROSS_TRACK_ARC_GAIN, D.CROSS_TRACK_ARC_MAX end
+            local u = steer - D.crossTrackSteer(latDev, kmh, dLat, xg, xm)
+            if u > 5 then u = 5 elseif u < -5 then u = -5 end
+            if u < 0.02 and u > -0.02 then u = 0 end
+            st.appliedSteer = u
+            local v = kmh / 3.6
+            local wT = G * u
+            local wMax = v / VP.rMin
+            if wT > wMax then wT = wMax elseif wT < -wMax then wT = -wMax end
+            car.w = car.w + (wT - car.w) * (dt / TAU)
+            car.h = car.h + car.w * dt
+            car.x = car.x + math.cos(car.h) * v * dt
+            car.y = car.y + math.sin(car.h) * v * dt
+            local inward = turn * latDev -- 右轉（turn>0）的彎內＝l 正向
+            if sNow > a0 - 25 and sNow < a9 + 12 then
+                if inward > r.inMax then r.inMax = inward end
+                if -inward > r.outMax then r.outMax = -inward end
+            end
+            if sNow > a0 - 15 and sNow <= a0 and inward > r.entryIn then r.entryIn = inward end
+            if sNow > a9 and sNow < a9 + 12 and inward > r.postIn then r.postIn = inward end
+            local af = math.abs(st.ffSteer or 0)
+            if sNow > (a0 + a9) * 0.5 - 1 and sNow < (a0 + a9) * 0.5 + 1 and af > r.ffMid then r.ffMid = af end
+            if sNow > a9 - 0.8 and sNow < a9 and af > r.ffEnd then r.ffEnd = af end
+            if sNow > a9 + 15 then break end
+            t = t + dt
+        end
+        return r
+    end
+    local cases = { { 50, 30, 12, 1, 0 }, { 50, 30, 12, -1, 0 }, { 45, 28, 12, 1, 1.5 }, { 45, 28, 12, -1, 1.5 },
+        { 40, 35, 10, 1, 2 }, { 40, 35, 10, -1, 2 } }
+    local ppMax, inTyp, outTyp, postStrong, entryInner, endRatio = 0, 0, 0, 0, 0, 0
+    for _, c in ipairs(cases) do
+        local typ = run(c[1], c[2], c[3], c[4], c[5], 0.85, 0.33)
+        local strong = run(c[1], c[2], c[3], c[4], c[5], 1.0, 0.25)
+        if typ.pp > ppMax then ppMax = typ.pp end
+        if typ.inMax > inTyp then inTyp = typ.inMax end
+        if typ.outMax > outTyp then outTyp = typ.outMax end
+        if strong.postIn > postStrong then postStrong = strong.postIn end
+        if typ.ffMid > 0 and typ.ffEnd / typ.ffMid > endRatio then endRatio = typ.ffEnd / typ.ffMid end
+    end
+    checkEq(ppMax, 0, "① 弧在車與前視點之間：每一幀都追切線（舊制 2–5 幀弦角提前轉入）")
+    checkTrue(inTyp < 0.3, string.format("典型 plant（G 0.85／τ 0.33）六種彎：切內 %.2fm < 0.3（舊制 0.73）", inTyp))
+    checkTrue(outTyp < 0.7, string.format("典型 plant 外漂 %.2fm < 0.7（舊制 0.33；切線追常駐車道後外漂略增）", outTyp))
+    -- ② 7m 窄路內側車道：彎前常駐車道 1.5→1.0（bias 2.0：1.7→0.9）收窄，車頭要跟著轉（舊制 0.17–0.35）
+    for _, c in ipairs({ { 35, 45, 10, 1.5 }, { 40, 35, 10, 2.0 }, { 45, 30, 12, 1.5 } }) do
+        local strong = run(c[1], c[2], c[3], 1, c[4], 1.0, 0.25, 7)
+        if strong.entryIn > entryInner then entryInner = strong.entryIn end
+    end
+    checkTrue(entryInner < 0.2, string.format("② 7m 窄路內側車道右彎：進弧時切內 %.2fm < 0.2（不轉斜率 0.17–0.35）", entryInner))
+    -- ②′ 同一收窄配慢 plant（G 0.7／τ 0.35）：斜率取在車前 0.2 s，ramp 收尾不再多衝向外（當下斜率 0.88）
+    local slow = run(40, 35, 10, 1, 2.0, 0.7, 0.35, 7)
+    checkTrue(slow.outMax < 0.8, string.format("②′ 慢 plant 窄路內側車道：車道收窄收尾外漂 %.2fm < 0.8（當下斜率 0.88）",
+        slow.outMax))
+    checkTrue(endRatio < 0.35, string.format("③ 前饋出弧前收尾：弧尾 0.8m 內 ≤ 弧中 35%%（實得 %.0f%%）", endRatio * 100))
+    checkTrue(postStrong < 0.25, string.format("③ 反應快的 plant（G 1.0／τ 0.25）出弧後切內 %.2fm < 0.25（舊制 0.54）", postStrong))
 end
 
 closeScenario()
