@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0929b"
+Drive.REV = "0929c"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -4730,6 +4730,8 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     if finite(s.escScale) and s.escScale < 1 then phys.escScale = s.escScale end
     if s.startGuard then phys.startGuard = true end
     phys.frontClearance = s.frontClearance
+    -- 0929c：HUD「卡頓降速」狀態（Drive.updateLowFps 遲滯後的結果；事件只記切換，片段的事前事件會被預算裁掉）
+    if s.lowFps then phys.lowFps = true end
     return phys
 end
 

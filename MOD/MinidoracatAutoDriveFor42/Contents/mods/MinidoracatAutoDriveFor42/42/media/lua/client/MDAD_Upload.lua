@@ -141,6 +141,8 @@ function U.begin(pn, now, header, profile)
         -- 0928a：越野接線長、前方區域未載入等待（次數／毫秒）、自轉次數（|yaw|>3 rad/s 上升緣，
         -- <1.5 重新武裝）、有未載入前緣的毫秒
         apr = nil, awN = 0, awMs = 0, prevAw = false, spin = 0, spinArmed = true, unlMs = 0,
+        -- 0929c：卡頓降速（Driver 遲滯後的 HUD 狀態）進入次數／毫秒
+        lfN = 0, lfMs = 0, prevLf = false,
         rev = MDAD and MDAD.Drive and MDAD.Drive.REV or "",
         build = MDAD and MDAD.BUILD or "",
         veh = type(profile) == "table" and profile.scriptName or "",
@@ -366,6 +368,12 @@ function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
             end
         end
         if finite(phys.unloadedS) then u.unlMs = u.unlMs + dt end
+        local lf = phys.lowFps == true
+        if lf then
+            if not u.prevLf then u.lfN = u.lfN + 1 end
+            u.lfMs = u.lfMs + dt
+        end
+        u.prevLf = lf
     end
     if type(capReason) == "string" then u.capMs[capReason] = (u.capMs[capReason] or 0) + dt end
     if finite(fdt) then
@@ -465,6 +473,7 @@ local function summaryText(u, now, reason, withMaps)
         .. (u.apr and (',"apr":' .. jnum(math.floor(u.apr * 10 + 0.5) / 10)) or "")
         .. ',"aw":' .. u.awN .. ',"awMs":' .. jnum(u.awMs)
         .. ',"spin":' .. u.spin .. ',"unlMs":' .. jnum(u.unlMs)
+        .. ',"lf":' .. u.lfN .. ',"lfMs":' .. jnum(u.lfMs)
     if withMaps then
         text = text .. ',"ev":' .. mapJson(u.evc) .. ',"mode":' .. mapJson(u.modeMs)
             .. ',"cap":' .. mapJson(u.capMs)

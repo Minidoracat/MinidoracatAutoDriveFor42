@@ -367,6 +367,23 @@ check(string.find(lastSum, '"aw":2,"awMs":1200', 1, true) ~= nil,
 check(string.find(lastSum, '"spin":2,', 1, true) ~= nil, "spins counted on rising edge with re-arm")
 check(string.find(lastSum, '"unlMs":1000', 1, true) ~= nil, "unloaded-front time accumulated")
 
+-- 0929c 摘要：卡頓降速（Driver.updateLowFps 遲滯後的狀態，經 phys.lowFps 帶進每筆取樣）的進入次數與毫秒。
+-- 正式服 0.13.1 的 805 趟有 149 趟出現過卡頓降速，舊摘要只有 on／off 事件合計次數，量不到被幀率壓速多久。
+-- 違規證明：拿掉上升緣判斷＝每筆都算一次（lf 5）紅。
+scenario("0929c summary: low-FPS slowdown episodes and time")
+nowMs = nowMs + 3600000
+start()
+drive(600)
+drive(600, ph({ lowFps = true }))
+drive(400)
+drive(400, ph({ lowFps = true }))
+D.stop(0, "arrive")
+pump(5000)
+sumAll = files[ROOT .. "summary-1.log"] or ""
+for line in string.gmatch(sumAll, "[^\n]+") do lastSum = line end
+check(string.find(lastSum, '"lf":2,"lfMs":1000', 1, true) ~= nil,
+    "low-FPS slowdown: two episodes, 1000ms (got " .. tostring(string.match(lastSum, '"lf":[^,]*,"lfMs":[^,]*')) .. ")")
+
 scenario("server: sandbox off, bad chunks, out-of-order sequence")
 local rejected = 0
 local function rx(args) if not S.receive(player0, args) then rejected = rejected + 1 end end

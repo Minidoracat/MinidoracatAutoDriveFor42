@@ -1242,6 +1242,7 @@ local function encodePhys(phys)
     addNum("escScale", "esc")
     addBool("startGuard", "sg")
     addNum("frontClearance", "fcl")
+    addBool("lowFps", "lfs") -- 0929c：卡頓降速狀態（只在為真時寫）
     -- 0904j 鏈式停留：lc＝常駐 lane 暫時＝停留 offL；dodgeTier 帶 -stay／-nudge／-physical
     addBool("laneChained", "lc")
     addStr("dodgeTier", "tier")
