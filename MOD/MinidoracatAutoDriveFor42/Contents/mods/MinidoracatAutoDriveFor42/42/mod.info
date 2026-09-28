@@ -5,4 +5,4 @@ poster=poster.png
 require=MinidoracatUIFor42,MinidoracatMiniMapFor42
 incompatible=Navigator
 modversion=42.20.4-0.13.1
-versionMin=42.20.4
+versionMin=42.21.0
