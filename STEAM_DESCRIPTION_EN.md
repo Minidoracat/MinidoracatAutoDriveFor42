@@ -15,19 +15,19 @@ Keep every Minidoracat MiniMap series mod up to date and restart the game after 
 
 [h2]🚀 Quick start[/h2]
 [olist]
-[*] Get a [b]GPS Navigator[/b] and an [b]Autopilot Module[/b] (loot or craft with Electrical 3 / 6 — where to find them and their parts: see the full guide below)
-[*] Standing beside the vehicle, install them via [b]right-click or Vehicle Mechanics[/b] (screwdriver, vehicle battery and Electrical 1 required). The GPS also works from your inventory with a battery
+[*] Get a [b]GPS Navigator[/b] and an [b]Autopilot Module[/b]; see the full guide for loot spots and parts
+[*] Standing beside the vehicle, install them via [b]right-click or Vehicle Mechanics[/b]
 [*] Open the world map and pick a destination to plan a route
-[*] Sit in the driver's seat and press [b]Engage Autodrive[/b] on the panel above the dashboard. Touch the steering or throttle at any time to take over
+[*] Sit in the driver's seat and press [b]Engage Autodrive[/b] on the panel above the dashboard
 [/olist]
 
 [h2]✨ Features[/h2]
 [list]
-[*] [b]Vehicle devices[/b]: GPS and Autopilot are real vehicle parts; loot or craft them, and learn the recipes from a dedicated manual, research and more
-[*] [b]Multi-target trips[/b]: up to 16 targets; insert, prioritize and reorder, with stopovers that wait for Continue autodrive. One-click Go home on the HUD
-[*] [b]Driver HUD and voice[/b]: status, targets, speed, gear, power/fuel and drive timer at a glance; four themes and Chinese/English/Japanese voice prompts
-[*] [b]Speed gears[/b]: 30 / 50 / 70 km/h for comfortable driving; MAX takes corners and dodges more briskly
-[*] [b]Take over anytime[/b]: steering, throttle or braking hands control back and keeps the trip; optional automatic resume after you let go
+[*] [b]Vehicle devices[/b]: GPS and Autopilot are real vehicle parts; loot, craft or learn the recipes
+[*] [b]Multi-target trips[/b]: up to 16 targets, with stopovers that wait for Continue autodrive
+[*] [b]Driver HUD and voice[/b]: status, speed and power/fuel at a glance, plus Chinese/English/Japanese voice prompts
+[*] [b]Speed gears[/b]: regular gears drive comfortably; MAX takes corners and dodges more briskly
+[*] [b]Take over anytime[/b]: steering, throttle or braking hands control back and keeps the trip
 [*] [b]Smart driving[/b]: keeps right, steers around parked vehicles and obstacles, avoids zombies and corpses, and slows for bends and traffic
 [*] [b]Blocked-road recovery and rerouting[/b]: reverses out when stuck; on a fully blocked road it can ask navigation for an alternative route
 [*] [b]Server tuning[/b]: power, fuel, crafting and loot are sandbox options; server owners can opt in to diagnostics that help improve autodrive
@@ -43,6 +43,7 @@ Keep every Minidoracat MiniMap series mod up to date and restart the game after 
 [*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3768276209]Zones[/url] — custom server zones
 [*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3765182411]MOD Compatibility[/url] — icons for third-party animals such as dogs and horses
 [/list]
+More mods: [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3809297109]Minidoracat Mods for B42 collection[/url]
 
 [h2]💬 Feedback & community[/h2]
 [list]
