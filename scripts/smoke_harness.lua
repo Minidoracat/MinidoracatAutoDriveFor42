@@ -10571,11 +10571,12 @@ local function scenarioChain()
     st = release()
     -- 0927：整車越過 c（bodyReach 3.1）才提前釋放回線段，48 還不行、52 才放
     checkTrue(st.dodging == true, "(c9) 車頭剛過 c：仍持有已掃過的回線段")
+    -- 0929h：車還在出口段、離停留 lane 超過 EXIT_KEEP_DEV 就沿承諾線走完才放，解鏈跟著延到出口走完
     release = capture()
-    stepTo(52, laneAt(52))
+    for _, x in ipairs({ 52, 56, 64 }) do stepTo(x, laneAt(x)) end
     st = release()
-    checkTrue(st.laneChained == false, "(c9) A 過了、兩線都淨空：解鏈")
-    for _, x in ipairs({ 56, 64 }) do stepTo(x, laneAt(x)) end
+    checkTrue(st.laneChained == false, "(c9) A 過了、承諾線出口走完、兩線都淨空：解鏈（d2="
+        .. tostring(d2) .. "）")
     stepTo(72, stayLane)
     release = capture()
     stepTo(80, stayLane * 0.5)
@@ -17339,7 +17340,7 @@ drive.scenarioStraightProbe()
 --   → RETURN 25 km/h 爬回；承諾線出口本來就帶著 60 的帽回常駐線。車離常駐線超過 RETURN 門檻時
 --   沿承諾線走完出口。0929e 起低帽（爬行）也一樣：RETURN 斜切回線常被剛繞過的那群打回 hold（rc28 0009
 --   hold → stall → 頂上硬物）。違規證明：exitKeepsDodge 恆回 false＝(xkeep) 提前釋放紅；
---   把帽條件加回（帽 < RETURN_CAP 回 false）＝(xkeep) 帽 10 紅。
+--   把帽條件加回（帽 < RETURN_CAP 回 false）＝(xkeep) 帽 10 紅；門檻退回 RETURN 的 2–3m＝(xkeep) 1m 紅。
 function drive.scenarioExitKeep()
     scenario("繞行出口：離常駐線太遠且承諾線不慢時沿承諾線走完，不交 RETURN 慢爬")
     local oldSandbox, oldVeh, oldGet = SandboxVars, dveh, getSpecificPlayer
@@ -17374,7 +17375,10 @@ function drive.scenarioExitKeep()
     st.dodgeApproachCap = 10
     checkTrue(MDAD.Drive.exitKeepsDodge(st) == true, "(xkeep) 帽 10（爬行）同樣沿承諾線走完出口")
     st.lastLatSigned, st.dodgeApproachCap = 0.5, 60
-    checkTrue(MDAD.Drive.exitKeepsDodge(st) == false, "(xkeep) 離常駐線 1m：照舊提前放")
+    checkTrue(MDAD.Drive.exitKeepsDodge(st) == true,
+        "(xkeep) 離常駐線 1m：也沿承諾線走完（0929h rc33 0004：1.7m 就放手，斜切頂上出口旁的物件）")
+    st.lastLatSigned = 1.2
+    checkTrue(MDAD.Drive.exitKeepsDodge(st) == false, "(xkeep) 離常駐線 0.3m：照舊提前放")
     -- 整合：右側整排硬物（l +0.5..+5.5，x 40–49）逼車繞到左邊
     for x = 40, 49 do for y = 0, 5 do drive.putSolid(x, y, "xkeep_" .. x .. "_" .. y) end end
     for _ = 1, 3 do drive.scanRound(true) end
