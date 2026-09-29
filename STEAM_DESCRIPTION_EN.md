@@ -25,7 +25,7 @@ Keep every Minidoracat MiniMap series mod up to date and restart the game after 
 [list]
 [*] [b]Vehicle devices[/b]: GPS and Autopilot are real vehicle parts; loot, craft or learn the recipes
 [*] [b]Multi-target trips[/b]: up to 16 targets, with stopovers that wait for Continue autodrive
-[*] [b]Driver HUD and voice[/b]: status, speed and power/fuel at a glance, plus Chinese/English/Japanese voice prompts
+[*] [b]Driver HUD and voice[/b]: status, speed and power/fuel at a glance, plus Chinese/English/Japanese voice prompts in two voices
 [*] [b]Speed gears[/b]: regular gears drive comfortably; MAX takes corners and dodges more briskly
 [*] [b]Take over anytime[/b]: steering, throttle or braking hands control back and keeps the trip
 [*] [b]Smart driving[/b]: keeps right, steers around parked vehicles and obstacles, avoids zombies and corpses, and slows for bends and traffic
