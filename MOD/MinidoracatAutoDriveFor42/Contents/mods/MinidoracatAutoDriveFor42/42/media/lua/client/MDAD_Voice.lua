@@ -2,8 +2,9 @@
 -- 自動駕駛語音提示（2026-09-02 使用者裁定）：啟動／關閉／受阻煞停／倒車脫困／
 -- 無法通過交還／到站／改道／無路可繞，加上手動介入三句（讓位待命／恢復接手／介入即關閉，
 -- 2026-09-06），依遊戲語言選國語（CH／CN）、日語（JP）或英語，ESC「語音語言」可改指定語音包。
+-- 2026-09-29 起全部改成女朋友撒嬌口吻，分 Stacy／Yui 兩種聲音（ESC「語音聲音」，預設 Stacy）。
 -- 聲音檔與 sound script：42/media/sound/MinidoracatAutoDrive、scripts/sounds_autodrive.txt
--- （產生器與文本：repo scripts/voice_lines.json＋fish-audio-tts skill）。
+-- （產生器與文本：repo scripts/voice_lines.json＋elevenlabs-tts skill）。
 --
 -- 播放走玩家 emitter 的本機路徑：`getEmitter():playSoundImpl(name, nil)`
 -- （FMODSoundEmitter.java:484-492；原版用例 ISAddItemInRecipe.lua:44）——與
@@ -58,6 +59,12 @@ local LOCALE_PACK = { CH = "zh", CN = "zh", JP = "ja" }  -- 其餘語系 → en
 local PACK_SET = {}
 for i = 1, #Voice.PACKS do PACK_SET[Voice.PACKS[i]] = true end
 
+-- 聲音（2026-09-29）：ElevenLabs Voice Library 的 Stacy（甜美）與 Yui（台灣腔、溫柔）。
+-- 順序＝「語音聲音」下拉順序，index 1（Stacy）為預設；HUD.voiceActor 回聲音名。
+Voice.ACTORS = { "stacy", "yui" }
+local ACTOR_SET = {}
+for i = 1, #Voice.ACTORS do ACTOR_SET[Voice.ACTORS[i]] = true end
+
 -- 跟隨遊戲語言：`Translator.getLanguage():name()`（原版 ISLcdBar.lua:14）
 function Voice.autoLanguage()
     local ok, name = pcall(function() return Translator.getLanguage():name() end)
@@ -82,6 +89,13 @@ function Voice.language()
     return Voice.autoLanguage()
 end
 
+-- 非法值退回預設聲音，永不讓播放端拿到沒有音檔的聲音名。
+function Voice.actor()
+    local value = hudOpt("voiceActor")
+    if type(value) == "string" and ACTOR_SET[value] then return value end
+    return Voice.ACTORS[1]
+end
+
 local function voiceEnabled()
     local value = hudOpt("voiceEnabled")
     if type(value) == "boolean" then return value end
@@ -97,7 +111,7 @@ local function voiceVolume()
 end
 
 function Voice.soundName(event)
-    return SOUND_PREFIX .. event .. "_" .. Voice.language()
+    return SOUND_PREFIX .. event .. "_" .. Voice.language() .. "_" .. Voice.actor()
 end
 
 local function stillPlaying(playerNum)

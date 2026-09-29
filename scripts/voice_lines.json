@@ -1,249 +1,212 @@
 [
   {
     "id": "start_zh",
-    "text": "[excited, delighted, energetic] 自动驾驶启动啦！交给我吧，出发！",
-    "voice": "7f93e9374aba440482d349d3254dd6fe"
+    "language": "zh",
+    "text": "[excited, sweet] 出发咯～今天就让我来载你吧！"
   },
   {
     "id": "stop_zh",
-    "text": "[gentle, warm] 自动驾驶关闭了，方向盘交还给你哦。",
-    "voice": "7f93e9374aba440482d349d3254dd6fe"
+    "language": "zh",
+    "text": "[sweet, clingy] 自动驾驶关掉啦，换你握方向盘哦～"
   },
   {
     "id": "blocked_zh",
-    "text": "[alarmed, urgent] 哎呀，前方有障碍！先刹停等一下。",
-    "voice": "7f93e9374aba440482d349d3254dd6fe"
+    "language": "zh",
+    "text": "[pouty, whiny] 哎呀～前面挡住了，等我一下下嘛～"
   },
   {
     "id": "unstick_zh",
-    "text": "[determined, playful] 卡住了？没关系，我倒车绕一下，稍等！",
-    "voice": "7f93e9374aba440482d349d3254dd6fe"
+    "language": "zh",
+    "text": "[playful, sweet] 卡住了呢……别急嘛，我倒一下车就好～"
   },
   {
     "id": "handback_zh",
-    "text": "[apologetic, sad] 对不起，我实在过不去了，请你手动驾驶吧。",
-    "voice": "7f93e9374aba440482d349d3254dd6fe"
+    "language": "zh",
+    "text": "[whiny, pleading] 呜……人家真的过不去了，换你来好不好嘛～"
   },
   {
     "id": "arrive_zh",
-    "text": "[overjoyed, cheerful] 到啦到啦！目的地到了，辛苦你啦！",
-    "voice": "7f93e9374aba440482d349d3254dd6fe"
+    "language": "zh",
+    "text": "[coquettish, giggling] 到啦～今天辛苦你了，要不要夸夸我呀？"
   },
   {
     "id": "detour_zh",
-    "text": "[reassuring, upbeat] 前面堵住了，不过我找到新路线了，改道走！",
-    "voice": "7f93e9374aba440482d349d3254dd6fe"
+    "language": "zh",
+    "text": "[cheerful, sweet] 前面堵住了，不过我找到别的路啦，跟我走嘛～"
   },
   {
     "id": "nodetour_zh",
-    "text": "[disappointed, apologetic] 唉，没有别的路可以绕了，请你接手处理。",
-    "voice": "7f93e9374aba440482d349d3254dd6fe"
-  },
-  {
-    "id": "start_en",
-    "text": "[excited, delighted, energetic] Autopilot on! Leave it to me, here we go!",
-    "voice": "7f93e9374aba440482d349d3254dd6fe"
-  },
-  {
-    "id": "stop_en",
-    "text": "[gentle, warm] Autopilot is off. The wheel is all yours.",
-    "voice": "7f93e9374aba440482d349d3254dd6fe"
-  },
-  {
-    "id": "blocked_en",
-    "text": "[alarmed, urgent] Whoa, obstacle ahead! Holding here for a moment.",
-    "voice": "7f93e9374aba440482d349d3254dd6fe"
-  },
-  {
-    "id": "unstick_en",
-    "text": "[determined, playful] Stuck? No problem, backing up, one second!",
-    "voice": "7f93e9374aba440482d349d3254dd6fe"
-  },
-  {
-    "id": "handback_en",
-    "text": "[apologetic, sad] I'm sorry, I really can't get through. Please take over.",
-    "voice": "7f93e9374aba440482d349d3254dd6fe"
-  },
-  {
-    "id": "arrive_en",
-    "text": "[overjoyed, cheerful] We made it! We're here, great job!",
-    "voice": "7f93e9374aba440482d349d3254dd6fe"
-  },
-  {
-    "id": "detour_en",
-    "text": "[reassuring, upbeat] The road is blocked, but I found another way. Rerouting!",
-    "voice": "7f93e9374aba440482d349d3254dd6fe"
-  },
-  {
-    "id": "nodetour_en",
-    "text": "[disappointed, apologetic] No other way around. Please take the wheel.",
-    "voice": "7f93e9374aba440482d349d3254dd6fe"
-  },
-  {
-    "id": "start_ja",
-    "text": "[excited, delighted, energetic] 自動運転スタート！任せてね、出発！",
-    "voice": "d1a1a920956c40c0bac4ef6a92c92a20",
-    "temperature": 0.7,
-    "top_p": 0.7
-  },
-  {
-    "id": "stop_ja",
-    "text": "[gentle, warm] 自動運転を終了しました。ハンドルはお返ししますね。",
-    "voice": "d1a1a920956c40c0bac4ef6a92c92a20",
-    "temperature": 0.7,
-    "top_p": 0.7
-  },
-  {
-    "id": "blocked_ja",
-    "text": "[alarmed, urgent] わっ、前に障害物！いったん停車して待ちます。",
-    "voice": "d1a1a920956c40c0bac4ef6a92c92a20",
-    "temperature": 0.7,
-    "top_p": 0.7
-  },
-  {
-    "id": "unstick_ja",
-    "text": "[determined, playful] はまっちゃった？大丈夫、後退して抜けるね。少々お待ちを！",
-    "voice": "d1a1a920956c40c0bac4ef6a92c92a20",
-    "temperature": 0.7,
-    "top_p": 0.7
-  },
-  {
-    "id": "handback_ja",
-    "text": "[apologetic, sad] ごめんなさい、どうしても通れません。手動で運転してください。",
-    "voice": "d1a1a920956c40c0bac4ef6a92c92a20",
-    "temperature": 0.7,
-    "top_p": 0.7
-  },
-  {
-    "id": "arrive_ja",
-    "text": "[overjoyed, cheerful] 着いた着いた！目的地に到着です、お疲れさま！",
-    "voice": "d1a1a920956c40c0bac4ef6a92c92a20",
-    "temperature": 0.7,
-    "top_p": 0.7
-  },
-  {
-    "id": "detour_ja",
-    "text": "[reassuring, upbeat] 前が塞がってるけど、別のルートを見つけたよ。迂回します！",
-    "voice": "d1a1a920956c40c0bac4ef6a92c92a20",
-    "temperature": 0.7,
-    "top_p": 0.7
-  },
-  {
-    "id": "nodetour_ja",
-    "text": "[disappointed, apologetic] うーん、他に回れる道がありません。運転を代わってください。",
-    "voice": "d1a1a920956c40c0bac4ef6a92c92a20",
-    "temperature": 0.7,
-    "top_p": 0.7
+    "language": "zh",
+    "text": "[pouty, disappointed] 唔……找不到别的路了，这次要靠你啦～"
   },
   {
     "id": "yield_zh",
-    "text": "[gentle, calm] 交给你啦，放手之后我会再接手哦。",
-    "voice": "7f93e9374aba440482d349d3254dd6fe"
+    "language": "zh",
+    "text": "[sweet, gentle] 好嘛，先交给你，你放手我再接回来哦～"
   },
   {
     "id": "resume_zh",
-    "text": "[bright, cheerful] 好，我重新接手了，继续出发！",
-    "voice": "7f93e9374aba440482d349d3254dd6fe"
+    "language": "zh",
+    "text": "[happy, sweet] 嘿嘿，换我来啦，我们继续出发吧～"
   },
   {
     "id": "manual_zh",
-    "text": "[gentle, warm] 好的，你来开吧，自动驾驶关闭啦。",
-    "voice": "7f93e9374aba440482d349d3254dd6fe"
-  },
-  {
-    "id": "yield_en",
-    "text": "[gentle, calm] You've got the wheel. Let go and I'll take over again.",
-    "voice": "7f93e9374aba440482d349d3254dd6fe"
-  },
-  {
-    "id": "resume_en",
-    "text": "[bright, cheerful] Okay, I've got it again. Let's keep going!",
-    "voice": "7f93e9374aba440482d349d3254dd6fe"
-  },
-  {
-    "id": "manual_en",
-    "text": "[gentle, warm] Okay, you drive. Autopilot is off.",
-    "voice": "7f93e9374aba440482d349d3254dd6fe"
-  },
-  {
-    "id": "yield_ja",
-    "text": "[gentle, calm] 運転を代わるね。手を離したら、また私が引き継ぐよ。",
-    "voice": "d1a1a920956c40c0bac4ef6a92c92a20",
-    "temperature": 0.7,
-    "top_p": 0.7
-  },
-  {
-    "id": "resume_ja",
-    "text": "[bright, cheerful] はい、また私が運転するね。続けて出発！",
-    "voice": "d1a1a920956c40c0bac4ef6a92c92a20",
-    "temperature": 0.7,
-    "top_p": 0.7
-  },
-  {
-    "id": "manual_ja",
-    "text": "[gentle, warm] はい、運転をお任せします。自動運転を終了するね。",
-    "voice": "d1a1a920956c40c0bac4ef6a92c92a20",
-    "temperature": 0.7,
-    "top_p": 0.7
+    "language": "zh",
+    "text": "[pouty, sweet] 哼，要自己开呀？好嘛，自动驾驶关掉咯～"
   },
   {
     "id": "leg_next_zh",
-    "text": "[excited, delighted, energetic] 好耶，下一站！继续出发喽！",
-    "voice": "7f93e9374aba440482d349d3254dd6fe",
-    "backend": "drama-3-preview"
+    "language": "zh",
+    "text": "[excited, sweet] 好耶～下一站，我们继续出发吧！"
   },
   {
     "id": "stopover_zh",
-    "text": "[overjoyed, cheerful] 到啦到啦！准备好再出发哦！",
-    "voice": "7f93e9374aba440482d349d3254dd6fe",
-    "backend": "drama-3-preview"
+    "language": "zh",
+    "text": "[coquettish, cheerful] 到啦到啦～休息一下，准备好再出发哦～"
   },
   {
     "id": "priority_zh",
-    "text": "[reassuring, upbeat] 好呀！先去这里，再接原行程！",
-    "voice": "7f93e9374aba440482d349d3254dd6fe",
-    "backend": "drama-3-preview"
+    "language": "zh",
+    "text": "[playful, sweet] 好呀～先陪你去这里，再回原本的行程哦～"
+  },
+  {
+    "id": "start_en",
+    "language": "en",
+    "text": "[excited, sweet] Here we go! Let me drive you today!"
+  },
+  {
+    "id": "stop_en",
+    "language": "en",
+    "text": "[sweet, clingy] Autopilot's off. The wheel's all yours, okay?"
+  },
+  {
+    "id": "blocked_en",
+    "language": "en",
+    "text": "[pouty, whiny] Aww, something's in the way! Wait for me a sec, okay?"
+  },
+  {
+    "id": "unstick_en",
+    "language": "en",
+    "text": "[playful, sweet] Oops, we're stuck... Don't worry, I'll just back up a little."
+  },
+  {
+    "id": "handback_en",
+    "language": "en",
+    "text": "[whiny, pleading] Mmh... I really can't get through. Can you take over? Pretty please?"
+  },
+  {
+    "id": "arrive_en",
+    "language": "en",
+    "text": "[coquettish, giggling] We're here! Thanks for today. Don't I get a little praise?"
+  },
+  {
+    "id": "detour_en",
+    "language": "en",
+    "text": "[cheerful, sweet] It's blocked up ahead, but I found another way. Follow me!"
+  },
+  {
+    "id": "nodetour_en",
+    "language": "en",
+    "text": "[pouty, disappointed] Hmm... there's no other way around. I'm counting on you this time."
+  },
+  {
+    "id": "yield_en",
+    "language": "en",
+    "text": "[sweet, gentle] Okay, it's all yours. Let go when you're done, and I'll take it back!"
+  },
+  {
+    "id": "resume_en",
+    "language": "en",
+    "text": "[happy, sweet] Hehe, my turn! Let's keep going!"
+  },
+  {
+    "id": "manual_en",
+    "language": "en",
+    "text": "[pouty, sweet] Hmph, you wanna drive yourself? Fine... autopilot off!"
   },
   {
     "id": "leg_next_en",
-    "text": "[excited, delighted, energetic] All right, next stop! Let's go!",
-    "voice": "7f93e9374aba440482d349d3254dd6fe",
-    "backend": "drama-3-preview"
+    "language": "en",
+    "text": "[excited, sweet] Yay, next stop! Let's keep going!"
   },
   {
     "id": "stopover_en",
-    "text": "[overjoyed, cheerful] We made it! Take a break, I'll wait!",
-    "voice": "7f93e9374aba440482d349d3254dd6fe",
-    "backend": "drama-3-preview"
+    "language": "en",
+    "text": "[coquettish, cheerful] We're here, we're here! Take a little break, then we'll head out again!"
   },
   {
     "id": "priority_en",
-    "text": "[reassuring, upbeat] You got it! Here first, then back to our trip!",
-    "voice": "7f93e9374aba440482d349d3254dd6fe",
-    "backend": "drama-3-preview"
+    "language": "en",
+    "text": "[playful, sweet] Sure! Let's stop here first, then back to the plan!"
+  },
+  {
+    "id": "start_ja",
+    "language": "ja",
+    "text": "[excited, sweet] しゅっぱーつ！今日はわたしが連れてってあげるね！"
+  },
+  {
+    "id": "stop_ja",
+    "language": "ja",
+    "text": "[sweet, clingy] 自動運転、オフにしたよ～。ハンドル、お願いね？"
+  },
+  {
+    "id": "blocked_ja",
+    "language": "ja",
+    "text": "[pouty, whiny] もう～、前がふさがってる～。ちょっと待っててね？"
+  },
+  {
+    "id": "unstick_ja",
+    "language": "ja",
+    "text": "[playful, sweet] あれ、ハマっちゃった……？大丈夫、ちょっとバックするね～"
+  },
+  {
+    "id": "handback_ja",
+    "language": "ja",
+    "text": "[whiny, pleading] うぅ……もう通れないよぉ。代わってくれる？"
+  },
+  {
+    "id": "arrive_ja",
+    "language": "ja",
+    "text": "[coquettish, giggling] 着いたよ～！今日もお疲れさま。ほめてほめて？"
+  },
+  {
+    "id": "detour_ja",
+    "language": "ja",
+    "text": "[cheerful, sweet] 前が混んでるけど、別の道見つけたよ！ついてきて～"
+  },
+  {
+    "id": "nodetour_ja",
+    "language": "ja",
+    "text": "[pouty, disappointed] うーん……他の道がないや。今回はお願いしていい？"
+  },
+  {
+    "id": "yield_ja",
+    "language": "ja",
+    "text": "[sweet, gentle] はーい、まかせるね。手を離したら、またわたしが運転するよ～"
+  },
+  {
+    "id": "resume_ja",
+    "language": "ja",
+    "text": "[happy, sweet] えへへ、わたしの番だね！続けて出発しよっ！"
+  },
+  {
+    "id": "manual_ja",
+    "language": "ja",
+    "text": "[pouty, sweet] むぅ、自分で運転したいの？しょうがないなぁ、自動運転オフにするね～"
   },
   {
     "id": "leg_next_ja",
-    "text": "[excited, delighted, energetic] よーし、次の目的地へ！出発！",
-    "voice": "d1a1a920956c40c0bac4ef6a92c92a20",
-    "backend": "drama-3-preview",
-    "temperature": 0.7,
-    "top_p": 0.7
+    "language": "ja",
+    "text": "[excited, sweet] やったぁ、次の目的地！また出発しよ～！"
   },
   {
     "id": "stopover_ja",
-    "text": "[overjoyed, cheerful] 着いたよ！準備ができたら、また出発しようね！",
-    "voice": "d1a1a920956c40c0bac4ef6a92c92a20",
-    "backend": "drama-3-preview",
-    "temperature": 0.7,
-    "top_p": 0.7
+    "language": "ja",
+    "text": "[coquettish, cheerful] 着いた着いた～！ひと休みしたら、また出発ね？"
   },
   {
     "id": "priority_ja",
-    "text": "[reassuring, upbeat] 了解！まずはここへ、そのあと元のルートに戻るよ！",
-    "voice": "d1a1a920956c40c0bac4ef6a92c92a20",
-    "backend": "drama-3-preview",
-    "temperature": 0.7,
-    "top_p": 0.7
+    "language": "ja",
+    "text": "[playful, sweet] いいよ～！先にここに寄って、それから元の予定に戻ろうね！"
   }
 ]

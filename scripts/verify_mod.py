@@ -1596,11 +1596,13 @@ else:
 fail("0902 結構契約", c0902) if c0902 else ok(
     "0902 結構契約（六參 cap／持有權仲裁唯一／coverEnd／擋線單一定義／測試常數對齊）")
 
-# ---- 33. 語音資產契約（2026-09-02）----
-# Voice.EVENTS × Voice.PACKS 每一格都要有 sound script 條目＋wav 檔＋語言下拉的翻譯鍵；
-# 缺一格＝實機那句靜默（play 只警告一次），離線 test_voice 用假 registered 表抓不到。
+# ---- 33. 語音資產契約（2026-09-02；2026-09-29 加聲音維度）----
+# Voice.EVENTS × Voice.PACKS × Voice.ACTORS 每一格都要有 sound script 條目＋wav 檔，
+# 語言／聲音下拉都要有翻譯鍵；缺一格＝實機那句靜默（play 只警告一次），離線
+# test_voice 用假 registered 表抓不到。
 voice_errs = []
 voice_src, sound_txt = "", ""
+events, packs, actors = [], [], []
 MEDIA = MEDIA_DIRS[0]
 for f in LUA_FILES:
     if os.path.basename(f) == "MDAD_Voice.lua":
@@ -1616,31 +1618,34 @@ if not voice_src or not sound_txt:
 else:
     ev_m = re.search(r"local EVENTS = \{(.*?)\}", voice_src, re.S)
     pk_m = re.search(r"Voice\.PACKS = \{(.*?)\}", voice_src, re.S)
+    ac_m = re.search(r"Voice\.ACTORS = \{(.*?)\}", voice_src, re.S)
     events = re.findall(r"(\w+)\s*=\s*true", ev_m.group(1)) if ev_m else []
     packs = re.findall(r'"(\w+)"', pk_m.group(1)) if pk_m else []
-    if not events or not packs:
-        voice_errs.append("抽不到 Voice.EVENTS／Voice.PACKS")
-    sound_dir = os.path.join(MEDIA, "sound", "MinidoracatAutoDrive")
+    actors = re.findall(r'"(\w+)"', ac_m.group(1)) if ac_m else []
+    if not events or not packs or not actors:
+        voice_errs.append("抽不到 Voice.EVENTS／Voice.PACKS／Voice.ACTORS")
     for ev in events:
         for pk in packs:
-            name = f"MDAD_Voice_{ev}_{pk}"
-            m = re.search(r"sound\s+" + re.escape(name) + r"\s*\{.*?file\s*=\s*([^\s,]+)", sound_txt, re.S)
-            if not m:
-                voice_errs.append(f"sounds_autodrive.txt 缺 {name}")
-                continue
-            rel = m.group(1)
-            if not os.path.exists(os.path.join(MEDIA, *rel.split("/")[1:])):
-                voice_errs.append(f"{name} 指到不存在的檔 {rel}")
-    for pk in packs:
-        key = f"UI_MinidoracatAutoDrive_VoiceLang_{pk}"
-        for lang in ("EN", "CH", "CN", "JP"):
-            ui = os.path.join(MEDIA, "lua", "shared", "Translate", lang, "UI.json")
-            if os.path.exists(ui):
-                with open(ui, encoding="utf-8") as fh:
-                    if key not in fh.read():
-                        voice_errs.append(f"Translate/{lang}/UI.json 缺 {key}")
+            for ac in actors:
+                name = f"MDAD_Voice_{ev}_{pk}_{ac}"
+                m = re.search(r"sound\s+" + re.escape(name) + r"\s*\{.*?file\s*=\s*([^\s,]+)", sound_txt, re.S)
+                if not m:
+                    voice_errs.append(f"sounds_autodrive.txt 缺 {name}")
+                    continue
+                rel = m.group(1)
+                if not os.path.exists(os.path.join(MEDIA, *rel.split("/")[1:])):
+                    voice_errs.append(f"{name} 指到不存在的檔 {rel}")
+    keys = [f"UI_MinidoracatAutoDrive_VoiceLang_{pk}" for pk in packs] + \
+        [f"UI_MinidoracatAutoDrive_VoiceActor_{ac}" for ac in actors]
+    for lang in ("EN", "CH", "CN", "JP"):
+        ui = os.path.join(MEDIA, "lua", "shared", "Translate", lang, "UI.json")
+        if os.path.exists(ui):
+            with open(ui, encoding="utf-8") as fh:
+                ui_txt = fh.read()
+            voice_errs += [f"Translate/{lang}/UI.json 缺 {k}" for k in keys if k not in ui_txt]
 fail("語音資產契約", voice_errs) if voice_errs else ok(
-    f"語音資產契約（{len(events) if voice_src else 0} 事件 × {len(packs) if voice_src else 0} 語音包＝sound script／wav／翻譯鍵齊全）")
+    f"語音資產契約（{len(events)} 事件 × {len(packs)} 語言 × {len(actors)} 聲音"
+    "＝sound script／wav／翻譯鍵齊全）")
 
 # ---- 總結 ----
 print()

@@ -417,7 +417,7 @@ function PZAPI.ModOptions:save() optionSaveCalls = optionSaveCalls + 1 end
 -- MDAD_Voice 樁：只記錄呼叫，HUD 的語音回饋契約（開啟時試播 start、拉桿放開試播 arrive）靠它驗
 local voiceCalls = {}
 MDAD_VOICE_STUB = { play = function(event, pn) voiceCalls[#voiceCalls + 1] = event .. "@" .. tostring(pn); return true end,
-    PACKS = { "zh", "en", "ja" } }
+    PACKS = { "zh", "en", "ja" }, ACTORS = { "stacy", "yui" } }
 
 local nowMs = 1000
 function getTimestampMs() return nowMs end
@@ -1403,7 +1403,7 @@ do
         and MDAD.HUD.pauseOnStuck() == true,
         "ESC 開啟抵達暫停不更動受困暫停")
 end
-registeredMiniMapSection.combos[3].set(5)
+registeredMiniMapSection.combos[4].set(5)
 check(MDAD.HUD.telemetryRetentionDays() == 30
     and options:getOption("TelemetryRetentionDays"):getValue() == 5,
     "MiniMap retention combo writes shared option as days")
@@ -1424,9 +1424,29 @@ local voiceLangSaves = optionSaveCalls
 check(not MDAD.HUD.setVoiceLanguageIndex(5) and not MDAD.HUD.setVoiceLanguageIndex(0)
     and MDAD.HUD.voiceLanguage() == "ja" and optionSaveCalls == voiceLangSaves,
     "out-of-range voice language index rejected without saving")
+-- 語音聲音 combo（2026-09-29）：index＝Voice.ACTORS 順序，1＝stacy 為預設；MiniMap 與 ESC 共用
+local voiceActorCombo = registeredMiniMapSection.combos[3]
+check(voiceActorCombo.label == "UI_MinidoracatAutoDrive_VoiceActor"
+    and #voiceActorCombo.items == 2
+    and voiceActorCombo.items[1] == "UI_MinidoracatAutoDrive_VoiceActor_stacy"
+    and voiceActorCombo.items[2] == "UI_MinidoracatAutoDrive_VoiceActor_yui"
+    and voiceActorCombo.default == 1,
+    "voice actor combo lists Voice.ACTORS with stacy as default")
+checkEq(MDAD.HUD.voiceActor(), "stacy", "voice actor defaults to stacy")
+voiceActorCombo.set(2)
+check(MDAD.HUD.voiceActor() == "yui"
+    and options:getOption("VoiceActor"):getValue() == 2,
+    "MiniMap voice actor combo writes the shared option and maps index to actor")
+local voiceActorSaves = optionSaveCalls
+check(not MDAD.HUD.setVoiceActorIndex(3) and not MDAD.HUD.setVoiceActorIndex(0)
+    and MDAD.HUD.voiceActor() == "yui" and optionSaveCalls == voiceActorSaves,
+    "out-of-range voice actor index rejected without saving")
+options:getOption("VoiceActor"):setValue(9)
+checkEq(MDAD.HUD.voiceActor(), "stacy", "corrupt voice actor option reads back as stacy")
+voiceActorCombo.set(1)
 -- 手動介入後 combo（2026-09-06 使用者裁定預設「不自動恢復」）：index 1＝0ms（介入即關閉），
 -- 2..5＝2/3/5/10 秒；Driver 讀 manualResumeMs、MiniMap 與 ESC 共用同一 option
-local manualResumeCombo = registeredMiniMapSection.combos[4]
+local manualResumeCombo = registeredMiniMapSection.combos[5]
 check(manualResumeCombo.label == "UI_MinidoracatAutoDrive_ManualResume"
     and #manualResumeCombo.items == 5
     and manualResumeCombo.items[1] == "UI_MinidoracatAutoDrive_ManualResumeOff"
@@ -1450,7 +1470,7 @@ manualResumeCombo.set(1)
 checkEq(MDAD.HUD.manualResumeMs(), 0, "back to off = 0 ms")
 -- 調頭方式 combo（2026-09-06 使用者裁定預設「溫和」）：index 1＝gentle、2＝fast；Driver 每次
 -- 調頭開始讀 uturnMode；MiniMap 與 ESC 共用同一 option
-local uturnCombo = registeredMiniMapSection.combos[5]
+local uturnCombo = registeredMiniMapSection.combos[6]
 check(uturnCombo.label == "UI_MinidoracatAutoDrive_UTurnMode"
     and #uturnCombo.items == 2
     and uturnCombo.items[1] == "UI_MinidoracatAutoDrive_UTurnGentle"
@@ -1471,7 +1491,7 @@ options:getOption("UTurnMode"):setValue(9)
 checkEq(MDAD.HUD.uturnMode(), "gentle", "corrupt U-turn option reads back as gentle")
 uturnCombo.set(1)
 do
-    local perception = registeredMiniMapSection.combos[6]
+    local perception = registeredMiniMapSection.combos[7]
     checkEq(MDAD.HUD.perceptionDistance(), 120, "new sensing default is 120 metres")
     perception.set(1)
     checkEq(MDAD.HUD.perceptionDistance(), 48, "MiniMap can select the lower sensing distance")

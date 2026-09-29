@@ -1,55 +1,93 @@
 module Base
 {
-	/* 語音提示（Fish Audio「小喵助手」聲音；文本與生成器見 scripts/voice_lines.json、
-	   fish-audio-tts skill）。鍵解析：GameSoundScript.java:29-39（category/is3D/master），
-	   clip 鍵 :57-77（file/volume）。is3D=false＝非空間音、master=Primary＝跟主音量；
-	   實際播放音量由 Lua 端 emitter:setVolume(ref, v) 依 HUD 拉桿再乘。
-	   WAV 44.1kHz 16-bit mono，與 Starlit Library 的 category=UI wav 用法同款。 */
-	sound MDAD_Voice_start_zh    { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_start_zh.wav, } }
-	sound MDAD_Voice_stop_zh     { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_stop_zh.wav, } }
-	sound MDAD_Voice_blocked_zh  { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_blocked_zh.wav, } }
-	sound MDAD_Voice_unstick_zh  { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_unstick_zh.wav, } }
-	sound MDAD_Voice_handback_zh { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_handback_zh.wav, } }
-	sound MDAD_Voice_arrive_zh   { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_arrive_zh.wav, } }
-	sound MDAD_Voice_start_en    { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_start_en.wav, } }
-	sound MDAD_Voice_stop_en     { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_stop_en.wav, } }
-	sound MDAD_Voice_blocked_en  { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_blocked_en.wav, } }
-	sound MDAD_Voice_unstick_en  { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_unstick_en.wav, } }
-	sound MDAD_Voice_handback_en { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_handback_en.wav, } }
-	sound MDAD_Voice_arrive_en   { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_arrive_en.wav, } }
-	sound MDAD_Voice_detour_zh      { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_detour_zh.wav, } }
-	sound MDAD_Voice_detour_en      { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_detour_en.wav, } }
-	sound MDAD_Voice_nodetour_zh    { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_nodetour_zh.wav, } }
-	sound MDAD_Voice_nodetour_en    { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_nodetour_en.wav, } }
-
-	sound MDAD_Voice_start_ja     { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_start_ja.wav, } }
-	sound MDAD_Voice_stop_ja      { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_stop_ja.wav, } }
-	sound MDAD_Voice_blocked_ja   { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_blocked_ja.wav, } }
-	sound MDAD_Voice_unstick_ja   { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_unstick_ja.wav, } }
-	sound MDAD_Voice_handback_ja  { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_handback_ja.wav, } }
-	sound MDAD_Voice_arrive_ja    { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_arrive_ja.wav, } }
-	sound MDAD_Voice_detour_ja    { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_detour_ja.wav, } }
-	sound MDAD_Voice_nodetour_ja  { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_nodetour_ja.wav, } }
-
-	/* 手動介入（2026-09-06）：讓位待命／恢復接手／介入即關閉 */
-	sound MDAD_Voice_yield_zh     { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_yield_zh.wav, } }
-	sound MDAD_Voice_resume_zh    { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_resume_zh.wav, } }
-	sound MDAD_Voice_manual_zh    { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_manual_zh.wav, } }
-	sound MDAD_Voice_yield_en     { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_yield_en.wav, } }
-	sound MDAD_Voice_resume_en    { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_resume_en.wav, } }
-	sound MDAD_Voice_manual_en    { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_manual_en.wav, } }
-	sound MDAD_Voice_yield_ja     { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_yield_ja.wav, } }
-	sound MDAD_Voice_resume_ja    { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_resume_ja.wav, } }
-	sound MDAD_Voice_manual_ja    { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_manual_ja.wav, } }
-
-	/* 多站行程（2026-09-12）：續開下一段／到停靠點等待／插入優先目標 */
-	sound MDAD_Voice_leg_next_zh  { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_leg_next_zh.wav, } }
-	sound MDAD_Voice_stopover_zh  { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_stopover_zh.wav, } }
-	sound MDAD_Voice_priority_zh  { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_priority_zh.wav, } }
-	sound MDAD_Voice_leg_next_en  { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_leg_next_en.wav, } }
-	sound MDAD_Voice_stopover_en  { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_stopover_en.wav, } }
-	sound MDAD_Voice_priority_en  { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_priority_en.wav, } }
-	sound MDAD_Voice_leg_next_ja  { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_leg_next_ja.wav, } }
-	sound MDAD_Voice_stopover_ja  { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_stopover_ja.wav, } }
-	sound MDAD_Voice_priority_ja  { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_priority_ja.wav, } }
+	/* 語音提示（2026-09-29：女朋友撒嬌口吻；ElevenLabs Eleven v4 的 Yui／Stacy 兩種聲音，
+	   文本與生成器見 scripts/voice_lines.json、elevenlabs-tts skill）。
+	   名稱 MDAD_Voice_<事件>_<語言>_<聲音>，MDAD_Voice.lua soundName 組字。
+	   鍵解析：GameSoundScript.java:29-39（category/is3D/master），clip 鍵 :57-77（file/volume）。
+	   is3D=false＝非空間音、master=Primary＝跟主音量；實際播放音量由 Lua 端
+	   emitter:setVolume(ref, v) 依 HUD 拉桿再乘。WAV 44.1kHz 16-bit mono。 */
+	sound MDAD_Voice_start_zh_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_start_zh_yui.wav, } }
+	sound MDAD_Voice_stop_zh_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_stop_zh_yui.wav, } }
+	sound MDAD_Voice_blocked_zh_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_blocked_zh_yui.wav, } }
+	sound MDAD_Voice_unstick_zh_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_unstick_zh_yui.wav, } }
+	sound MDAD_Voice_handback_zh_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_handback_zh_yui.wav, } }
+	sound MDAD_Voice_arrive_zh_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_arrive_zh_yui.wav, } }
+	sound MDAD_Voice_detour_zh_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_detour_zh_yui.wav, } }
+	sound MDAD_Voice_nodetour_zh_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_nodetour_zh_yui.wav, } }
+	sound MDAD_Voice_yield_zh_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_yield_zh_yui.wav, } }
+	sound MDAD_Voice_resume_zh_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_resume_zh_yui.wav, } }
+	sound MDAD_Voice_manual_zh_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_manual_zh_yui.wav, } }
+	sound MDAD_Voice_leg_next_zh_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_leg_next_zh_yui.wav, } }
+	sound MDAD_Voice_stopover_zh_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_stopover_zh_yui.wav, } }
+	sound MDAD_Voice_priority_zh_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_priority_zh_yui.wav, } }
+	sound MDAD_Voice_start_en_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_start_en_yui.wav, } }
+	sound MDAD_Voice_stop_en_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_stop_en_yui.wav, } }
+	sound MDAD_Voice_blocked_en_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_blocked_en_yui.wav, } }
+	sound MDAD_Voice_unstick_en_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_unstick_en_yui.wav, } }
+	sound MDAD_Voice_handback_en_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_handback_en_yui.wav, } }
+	sound MDAD_Voice_arrive_en_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_arrive_en_yui.wav, } }
+	sound MDAD_Voice_detour_en_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_detour_en_yui.wav, } }
+	sound MDAD_Voice_nodetour_en_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_nodetour_en_yui.wav, } }
+	sound MDAD_Voice_yield_en_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_yield_en_yui.wav, } }
+	sound MDAD_Voice_resume_en_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_resume_en_yui.wav, } }
+	sound MDAD_Voice_manual_en_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_manual_en_yui.wav, } }
+	sound MDAD_Voice_leg_next_en_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_leg_next_en_yui.wav, } }
+	sound MDAD_Voice_stopover_en_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_stopover_en_yui.wav, } }
+	sound MDAD_Voice_priority_en_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_priority_en_yui.wav, } }
+	sound MDAD_Voice_start_ja_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_start_ja_yui.wav, } }
+	sound MDAD_Voice_stop_ja_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_stop_ja_yui.wav, } }
+	sound MDAD_Voice_blocked_ja_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_blocked_ja_yui.wav, } }
+	sound MDAD_Voice_unstick_ja_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_unstick_ja_yui.wav, } }
+	sound MDAD_Voice_handback_ja_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_handback_ja_yui.wav, } }
+	sound MDAD_Voice_arrive_ja_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_arrive_ja_yui.wav, } }
+	sound MDAD_Voice_detour_ja_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_detour_ja_yui.wav, } }
+	sound MDAD_Voice_nodetour_ja_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_nodetour_ja_yui.wav, } }
+	sound MDAD_Voice_yield_ja_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_yield_ja_yui.wav, } }
+	sound MDAD_Voice_resume_ja_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_resume_ja_yui.wav, } }
+	sound MDAD_Voice_manual_ja_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_manual_ja_yui.wav, } }
+	sound MDAD_Voice_leg_next_ja_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_leg_next_ja_yui.wav, } }
+	sound MDAD_Voice_stopover_ja_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_stopover_ja_yui.wav, } }
+	sound MDAD_Voice_priority_ja_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_priority_ja_yui.wav, } }
+	sound MDAD_Voice_start_zh_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_start_zh_stacy.wav, } }
+	sound MDAD_Voice_stop_zh_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_stop_zh_stacy.wav, } }
+	sound MDAD_Voice_blocked_zh_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_blocked_zh_stacy.wav, } }
+	sound MDAD_Voice_unstick_zh_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_unstick_zh_stacy.wav, } }
+	sound MDAD_Voice_handback_zh_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_handback_zh_stacy.wav, } }
+	sound MDAD_Voice_arrive_zh_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_arrive_zh_stacy.wav, } }
+	sound MDAD_Voice_detour_zh_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_detour_zh_stacy.wav, } }
+	sound MDAD_Voice_nodetour_zh_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_nodetour_zh_stacy.wav, } }
+	sound MDAD_Voice_yield_zh_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_yield_zh_stacy.wav, } }
+	sound MDAD_Voice_resume_zh_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_resume_zh_stacy.wav, } }
+	sound MDAD_Voice_manual_zh_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_manual_zh_stacy.wav, } }
+	sound MDAD_Voice_leg_next_zh_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_leg_next_zh_stacy.wav, } }
+	sound MDAD_Voice_stopover_zh_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_stopover_zh_stacy.wav, } }
+	sound MDAD_Voice_priority_zh_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_priority_zh_stacy.wav, } }
+	sound MDAD_Voice_start_en_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_start_en_stacy.wav, } }
+	sound MDAD_Voice_stop_en_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_stop_en_stacy.wav, } }
+	sound MDAD_Voice_blocked_en_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_blocked_en_stacy.wav, } }
+	sound MDAD_Voice_unstick_en_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_unstick_en_stacy.wav, } }
+	sound MDAD_Voice_handback_en_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_handback_en_stacy.wav, } }
+	sound MDAD_Voice_arrive_en_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_arrive_en_stacy.wav, } }
+	sound MDAD_Voice_detour_en_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_detour_en_stacy.wav, } }
+	sound MDAD_Voice_nodetour_en_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_nodetour_en_stacy.wav, } }
+	sound MDAD_Voice_yield_en_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_yield_en_stacy.wav, } }
+	sound MDAD_Voice_resume_en_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_resume_en_stacy.wav, } }
+	sound MDAD_Voice_manual_en_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_manual_en_stacy.wav, } }
+	sound MDAD_Voice_leg_next_en_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_leg_next_en_stacy.wav, } }
+	sound MDAD_Voice_stopover_en_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_stopover_en_stacy.wav, } }
+	sound MDAD_Voice_priority_en_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_priority_en_stacy.wav, } }
+	sound MDAD_Voice_start_ja_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_start_ja_stacy.wav, } }
+	sound MDAD_Voice_stop_ja_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_stop_ja_stacy.wav, } }
+	sound MDAD_Voice_blocked_ja_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_blocked_ja_stacy.wav, } }
+	sound MDAD_Voice_unstick_ja_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_unstick_ja_stacy.wav, } }
+	sound MDAD_Voice_handback_ja_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_handback_ja_stacy.wav, } }
+	sound MDAD_Voice_arrive_ja_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_arrive_ja_stacy.wav, } }
+	sound MDAD_Voice_detour_ja_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_detour_ja_stacy.wav, } }
+	sound MDAD_Voice_nodetour_ja_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_nodetour_ja_stacy.wav, } }
+	sound MDAD_Voice_yield_ja_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_yield_ja_stacy.wav, } }
+	sound MDAD_Voice_resume_ja_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_resume_ja_stacy.wav, } }
+	sound MDAD_Voice_manual_ja_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_manual_ja_stacy.wav, } }
+	sound MDAD_Voice_leg_next_ja_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_leg_next_ja_stacy.wav, } }
+	sound MDAD_Voice_stopover_ja_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_stopover_ja_stacy.wav, } }
+	sound MDAD_Voice_priority_ja_stacy { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_priority_ja_stacy.wav, } }
 }

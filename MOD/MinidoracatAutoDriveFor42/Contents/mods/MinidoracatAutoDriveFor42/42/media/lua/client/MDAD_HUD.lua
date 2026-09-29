@@ -534,6 +534,31 @@ local function setVoiceLanguageIndex(value)
     return setClientOption("VoiceLanguage", value)
 end
 
+-- 語音聲音（2026-09-29）：combo index＝MDAD.Voice.ACTORS 順序（Stacy／Yui），1 為預設。
+-- 主 chunk 已貼 190 local 上限：不開 chunk 層 local，存取函式直接掛 HUD。
+function HUD.voiceActorKeys()
+    local keys = {}
+    for i, actor in ipairs(MDAD.Voice.ACTORS) do
+        keys[i] = "UI_MinidoracatAutoDrive_VoiceActor_" .. actor
+    end
+    return keys
+end
+
+function HUD.voiceActorIndex()
+    return optionIndex("VoiceActor", 1, #MDAD.Voice.ACTORS)
+end
+
+function HUD.voiceActor()
+    return MDAD.Voice.ACTORS[HUD.voiceActorIndex()]
+end
+
+function HUD.setVoiceActorIndex(value)
+    if type(value) ~= "number" or value ~= value then return false end
+    value = math.floor(value)
+    if value < 1 or value > #MDAD.Voice.ACTORS then return false end
+    return setClientOption("VoiceActor", value)
+end
+
 -- 0..100 整數；slider option 缺席／壞值退預設。
 local function voiceVolume()
     if not modOptions then return VOICE_VOLUME_DEFAULT end
@@ -3005,6 +3030,11 @@ if PZAPI and PZAPI.ModOptions then
     for i = 1, #VOICE_LANG_KEYS do
         voiceLanguageOption:addItem(VOICE_LANG_KEYS[i], i == 1)
     end
+    local voiceActorOption = modOptions:addComboBox("VoiceActor",
+        "UI_MinidoracatAutoDrive_VoiceActor", "UI_MinidoracatAutoDrive_VoiceActor_tooltip")
+    for i, key in ipairs(HUD.voiceActorKeys()) do
+        voiceActorOption:addItem(key, i == 1)
+    end
     modOptions:addTickBox("AutoDetour", "UI_MinidoracatAutoDrive_AutoDetour", true,
         "UI_MinidoracatAutoDrive_AutoDetour_tooltip")
     modOptions:addTickBox("ZombieDodge", "UI_MinidoracatAutoDrive_ZombieDodge", true,
@@ -3182,6 +3212,11 @@ local function registerMiniMapSettings()
                 items = VOICE_LANG_KEYS,
                 default = 1,
                 get = voiceLanguageIndex, set = setVoiceLanguageIndex },
+            { label = "UI_MinidoracatAutoDrive_VoiceActor",
+                tooltip = "UI_MinidoracatAutoDrive_VoiceActor_tooltip",
+                items = HUD.voiceActorKeys(),
+                default = 1,
+                get = HUD.voiceActorIndex, set = HUD.setVoiceActorIndex },
             { label = "UI_MinidoracatAutoDrive_TelemetryRetentionDays",
                 tooltip = "UI_MinidoracatAutoDrive_TelemetryRetentionDays_tooltip",
                 items = {
