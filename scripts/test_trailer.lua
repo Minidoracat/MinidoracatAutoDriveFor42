@@ -111,5 +111,47 @@ for i = 1, 100 do xs[i], ys[i] = -59 + i * 0.5, 0 end
 local ok, hitch, outM = T._simulate(cs, xs, ys, 100, G)
 check(ok and hitch < 1e-6 and outM == 0, "直線：折角 0、不出路面")
 
+-- ⑥ attach（0929p 候選線掛車掃掠用的幾何）：掛點在牽引車座標、車身中心在「軸→掛點」座標、axisSign。
+--    被倒著拖的車 forward 朝後：軸向要照量到的軸→掛點，不能照 forward（0929p 審查）。
+local function V(x, y, z)
+    return { _x = x, _y = y, _z = z,
+        x = function(v) return v._x end, y = function(v) return v._y end, z = function(v) return v._z end,
+        set = function(v, a, b, cc) v._x, v._y, v._z = a, b, cc; return v end }
+end
+Vector3f = { new = function() return V(0, 0, 0) end }
+local function fakeTrailer(cx, fwdX, wheelZ)
+    return {
+        getScript = function() return {
+            getExtents = function() return V(2.5, 1, 12) end,
+            getCenterOfMassOffset = function() return V(0, 0, 0) end,
+            getWheelCount = function() return 2 end,
+            getWheel = function() return { getOffset = function() return V(0, 0, wheelZ) end } end,
+        } end,
+        getWorldPos = function(_, _, _, lz, out) return out:set(cx + fwdX * lz, 0, 0) end,
+        getForwardVector = function(_, out) return out:set(fwdX, 0, 0) end,
+        getMass = function() return 1500 end,
+    }
+end
+local function fakeTractor(trl, hx)
+    return {
+        getVehicleTowing = function() return trl end,
+        getTowAttachmentSelf = function() return "trailer" end,
+        getTowingWorldPos = function(_, _, out) return out:set(hx, 0, 0) end,
+        getForwardVector = function(_, out) return out:set(1, 0, 0) end,
+        getX = function() return 0 end, getY = function() return 0 end,
+    }
+end
+local function near(a, b) return type(a) == "number" and math.abs(a - b) < 1e-9 end
+-- 正常掛車：車身中心 x=−8、長 12、軸在中心後 4（x=−12），掛點 x=−2（牽引車後 2m）
+local gN = T.attach(fakeTractor(fakeTrailer(-8, 1, -4), -2))
+check(type(gN) == "table" and near(gN.hitchZ, -2) and near(gN.hitchX, 0) and near(gN.boxBack, 6)
+    and near(gN.boxSide, 0) and gN.axisSign == 1 and near(gN.trailLen, 14),
+    "attach 正常掛車：掛點在車後 2m、車身中心在掛點後 6m、軸向同 forward、車位到掛車尾 14m")
+-- 被倒著拖：forward 朝 −x，軸（輪子 local z=+2）仍在掛點後方 x=−10
+local gR = T.attach(fakeTractor(fakeTrailer(-8, -1, 2), -5))
+check(type(gR) == "table" and gR.axisSign == -1 and near(gR.L2, 5) and near(gR.boxBack, 3)
+    and near(gR.trailLen, 8),
+    "attach 被倒著拖（forward 朝後）：axisSign −1、車身中心仍在掛點後 3m（照軸→掛點，不照 forward）")
+
 print(string.format("test_trailer: %d 項斷言、%d 項失敗", asserts, fails))
 if fails > 0 then os.exit(1) end

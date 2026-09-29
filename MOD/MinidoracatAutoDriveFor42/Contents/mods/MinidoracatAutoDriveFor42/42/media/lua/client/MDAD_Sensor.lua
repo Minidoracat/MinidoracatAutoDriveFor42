@@ -116,6 +116,24 @@ local FINE_STEP = 0.5
 local ALIGN_EPS = 1e-3 -- 法向分量小於此值＝軸對齊
 local HARD_MAX = LAT_N * (MDADDynamics.PERCEPTION_HARD_MAX_M - SCAN_NEAR) + 100
 local CORRIDOR_HALF = 7
+-- 寬帶（0929p，使用者裁定「允許繞到道路之外的地方繞路」）：14m 大路整條擋死時一般帶全在路面內、無縫可找。
+-- Driver 只在判堵停下（與照寬帶承諾的繞行期間）經 state.wideReq 要求，輪首鎖定（state.wideRound）；
+-- 每幀查詢額度不變，perceptionEffective 以橫向條數分攤＝同一輪時前視自動縮短，請求再夾 WIDE_AHEAD_M
+-- （28 條×58m ≈ 1624 格，遠低於 HARD_MAX）。完成的快照帶 corridorHalf／wideDone，Driver 的 Corridor 規劃讀它。
+local LAT_W = {}
+for i = 1, 28 do LAT_W[i] = -13.5 + (i - 1) end
+local LAT_W_N = 28
+local LAT_W_FINE = {}
+for i = 1, 55 do LAT_W_FINE[i] = -13.5 + (i - 1) * 0.5 end
+local LAT_W_FINE_N = 55
+local CORRIDOR_HALF_W = 14
+local WIDE_AHEAD_M = 60
+-- 停著判堵的寬帶（Driver 要求 "stop"）：固定看 WIDE_STOP_AHEAD_M、輪時放寬 WIDE_STOP_ROUND_K 倍（每幀額度不變，
+-- 只是這一輪多花幾幀）。車停著，多等 1 秒換得完整的繞行線：拖車的保持段要延長一個掛車長，停點又離群
+-- trailLen+L2/2，60 FPS 的一般寬帶只看得到 ~47m（E2E 0929u：群在 27m，線尾要 ~75m 才驗得完，候選全數
+-- coverage／出口被截短太陡而掛車內切）。起步後回到一般寬帶；已承諾的線守護輪不要求覆蓋（線尾看不到只是慢）。
+local WIDE_STOP_AHEAD_M = 100
+local WIDE_STOP_ROUND_K = 3
 
 -- 世界格去重的鍵：wx * 100000 + wy。PZ 的地圖座標是非負且遠小於 100000
 -- （最大官方地圖 ~15000 格），所以這個線性組合在有效範圍內是單射，
@@ -127,6 +145,12 @@ local COST_HARD_THIN = 3       -- 細桿硬障礙：無碰撞旗標的籬笆 spr
 local COST_TREE = 4            -- 樹幹形狀（樹、室外路燈柱、PhysicsShape=Tree）：見 TRUNK_*
 local COST_DOOR = 5            -- 門／柵門 sprite（doorN／doorW）：開關狀態在格級屬性，由 closedDoor(square) 判
 local COST_WALL_N, COST_WALL_W, COST_WALL_NW = 6, 7, 8 -- 帶 collideN／collideW 的籬笆：格邊薄牆，見 WALL_*
+-- 樹叢（0929t）：引擎 IsoObject.isBush＝f_bushes_1 tileset 或 Bush 屬性（IsoObject.java:6583-6585）。不擋車，但
+-- checkCollisionWithPlant（BaseVehicle.java:3074-3116）對碰到的每叢每幀施 −0.025×動量（≥10 km/h 正面 0.1）的
+-- 衝量（applyImpulseFromHitPlant :5556-5565），不乘 dt：幀越高越黏。E2E semi-long-mp（W900＋貨櫃，230 FPS）路外繞進
+-- 樹叢地 1 km/h 動不了、倒車也退不出 → StopStuck。一般帶照舊忽略（路邊樹叢），寬帶（路外繞行）當 0.3 圓避開。
+local COST_BUSH = 9
+local BUSH_R = 0.3             -- 引擎測植物碰撞的半徑（testCollisionWithObject(object, 0.3F)）
 local SLOW_BAND_HALF = 3       -- 減速計數帶半寬（±3＝路面帶；hard 仍收全走廊 ±6.5）
 -- 硬障礙的點雲幾何對齊引擎的車輛靜態碰撞形狀（0929j；IsoChunk.calcPhysics:1987-2129 決定形狀，尺寸在
 -- libPZBullet64：createSolid 半尺寸 (0.5,1,0.5) 置於格心、createTreeBody 半尺寸 (0.1,1,0.1) 置於格 +0.6/+0.6、
@@ -139,7 +163,7 @@ local TRUNK_OFF = 0.6          -- 樹幹中心＝格 +0.6/+0.6
 local TRUNK_R = 0.15           -- 0.2m 見方樹幹的外接圓（半對角 0.141）
 local WALL_R = 0.26            -- 格邊薄牆（1×0.1）以兩顆圓覆蓋：中心在 1/4、3/4 處，半徑＝√(0.25²＋0.05²)
 -- scanCell 回的形狀碼：BOX 單獨；其餘以 2/4/8/16 相加並存（Kahlua 無位元運算，解碼用 % 取位）
-local SHAPE_BOX, SHAPE_WALL_N, SHAPE_WALL_W, SHAPE_TRUNK, SHAPE_THIN = 1, 2, 4, 8, 16
+local SHAPE_BOX, SHAPE_WALL_N, SHAPE_WALL_W, SHAPE_TRUNK, SHAPE_THIN, SHAPE_BUSH = 1, 2, 4, 8, 16, 32
 -- 車輛精確輪廓（2026-09-02 車陣實爆：格級佔位把 1.8m 寬的車體膨脹成 3 格＋0.7
 -- 圓＝4.4m，兩台車之間 2.8m 的真縫被吃到 0.2m，plan 永遠 blocked）。發現
 -- 車輛仍靠 getVehicleContainer 的格級幾何查詢（可靠），幾何改用該車的 OBB：四角
@@ -183,6 +207,7 @@ local ZOM_MAX = 64
 
 MDADSensor.SCAN_NEAR = SCAN_NEAR
 MDADSensor.CORRIDOR_HALF = CORRIDOR_HALF
+MDADSensor.CORRIDOR_HALF_W = CORRIDOR_HALF_W
 MDADSensor.SLOW_BAND_HALF = SLOW_BAND_HALF
 
 MDADSensor.SURFACE_UNKNOWN = SURFACE_UNKNOWN
@@ -353,6 +378,8 @@ local function classifySprite(obj, name)
         if shape == "Tree" then return COST_TREE end
         if shape ~= "Floor" then return COST_HARD end
     end
+    -- 樹叢（見 COST_BUSH）：同 IsoObject.isBush 的判定（tileset f_bushes_1＝sprite 名 f_bushes_1_N）
+    if find(name, "f_bushes_1_", 1, true) == 1 or props:has("Bush") then return COST_BUSH end
     if obj:getType() == T_moveable then return COST_SOFT end
     if props:has("HitByCar") then                      -- PropertyContainer.java:187（has(String) 過載）
         if find(name, "street_decoration", 1, true) == 1 then return COST_NONE end
@@ -444,7 +471,8 @@ local function pushShape(state, l, wx, wy, shape)
     if shape % 16 >= SHAPE_TRUNK then
         pushHard(state, state.curS, l, l4, wx + TRUNK_OFF, wy + TRUNK_OFF, TRUNK_R)
     end
-    if shape >= SHAPE_THIN then pushHard(state, state.curS, l, l4, wx + 0.5, wy + 0.5, 0) end
+    if shape % 32 >= SHAPE_THIN then pushHard(state, state.curS, l, l4, wx + 0.5, wy + 0.5, 0) end
+    if shape >= SHAPE_BUSH then pushHard(state, state.curS, l, l4, wx + 0.5, wy + 0.5, BUSH_R) end
 end
 
 local function dist(ax, ay, bx, by)
@@ -650,7 +678,7 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
     local soft = false
     -- 形狀旗標（pushShape 依此推點）：box＝整格方塊（水面、HARD、關門、車輛格級佔位），其餘可以並存
     -- （同格的籬笆與樹）。box 蓋過一切，看到就停。
-    local box, wallN, wallW, trunk, thin = hard, false, false, false, false
+    local box, wallN, wallW, trunk, thin, bush = hard, false, false, false, false, false
 
     if not hard then
         local objs = square:getObjects()               -- IsoGridSquare.java:9635（回 PZArrayList）
@@ -672,10 +700,11 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
                 elseif cost == COST_TREE then trunk = true
                 elseif cost == COST_HARD_THIN then thin = true
                 elseif cost == COST_SOFT then soft = true
+                elseif cost == COST_BUSH then bush = state.wideRound == true -- 只有路外繞行避開（見 COST_BUSH）
                 end
             end
         end
-        hard = box or wallN or wallW or trunk or thin
+        hard = box or wallN or wallW or trunk or thin or bush
     end
 
     -- 車輛：**格子幾何查詢**——引擎通用碰撞真相在 Lua 曝露面的最佳代理。
@@ -846,7 +875,7 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
     end
     if box then return hard, SHAPE_BOX end
     return hard, (wallN and SHAPE_WALL_N or 0) + (wallW and SHAPE_WALL_W or 0)
-        + (trunk and SHAPE_TRUNK or 0) + (thin and SHAPE_THIN or 0)
+        + (trunk and SHAPE_TRUNK or 0) + (thin and SHAPE_THIN or 0) + (bush and SHAPE_BUSH or 0)
 end
 
 --------------------------------------------------------------------------------
@@ -929,8 +958,20 @@ local function beginRound(state, p, sNow, vehicle, now, len, cell)
     if not MDADDynamics.finite(softAhead) then softAhead = MDADDynamics.SOFT_LOOKAHEAD_M end
     state.wSoftEndS = sNow + math.min(MDADDynamics.PERCEPTION_HARD_MAX_M,
         math.max(MDADDynamics.SOFT_LOOKAHEAD_M, softAhead))
+    -- 寬帶於輪首鎖定（見 LAT_W）；兩種帶的可負擔前視不互相當回縮地板（換帶那輪重算）
+    local wide = state.wideReq == true or state.wideReq == "stop"
+    local long = state.wideReq == "stop"
+    if wide ~= state.wideRound or long ~= state.wideLong then state.lastAffordableM = nil end
+    state.wideRound, state.wideLong = wide, long
+    local latN = wide and LAT_W_N or LAT_N
+    state.latArr, state.latArrN = wide and LAT_W or LAT, latN
+    state.latFine, state.latFineN = wide and LAT_W_FINE or LAT_FINE, wide and LAT_W_FINE_N or LAT_FINE_N
+    local req = state.aheadM
+    if long then req = WIDE_STOP_AHEAD_M
+    elseif wide and MDADDynamics.finite(req) and req > WIDE_AHEAD_M then req = WIDE_AHEAD_M end
     local ahead, affordable = MDADDynamics.perceptionEffective(
-        state.aheadM, state.frameEwmaMs, MDADDynamics.scanBudget(state.frameEwmaMs) / LAT_N, SCAN_NEAR,
+        req, state.frameEwmaMs, MDADDynamics.scanBudget(state.frameEwmaMs) / latN * (long and WIDE_STOP_ROUND_K or 1),
+        SCAN_NEAR,
         state.lastAffordableM and state.lastAffordableM - AFFORD_SHRINK_MAX or nil)
     state.lastAffordableM = affordable
     state.requestedAheadM = state.aheadM
@@ -942,8 +983,8 @@ local function beginRound(state, p, sNow, vehicle, now, len, cell)
     -- 起點退一步、橫向游標設成越界，讓主迴圈的第一次「換步」正好落在 s0；
     -- 這同時處理了 s0 > s1（車已在路線末端）的情況：第一次換步就結束本輪。
     state.curS = s0 - SCAN_STEP
-    state.curL = LAT_N + 1
-    state.latN, state.fineStep = LAT_N, false
+    state.curL = latN + 1
+    state.latN, state.fineStep = latN, false
 
     state.segIdx = seekSeg(p, state.baseIdx, s0)
     state.baseIdx = state.segIdx
@@ -1033,15 +1074,20 @@ local function finishRound(state, now)
     state.actualSurfaceId = state.wActualSurfaceId
     state.roundStartedAt = state.wRoundStartedAt
     state.completedBandBias = state.bandBias
+    state.corridorHalf = state.wideRound and CORRIDOR_HALF_W or CORRIDOR_HALF -- 本快照實際掃到的橫向半寬
+    state.wideDone = state.wideRound == true
     -- 簽章：障礙的「數量 + 縱向分布 + 橫向分布」三者任一有變就會變。純整數運算，
     -- 呼叫端只拿它做 ~= 比較（不是雜湊安全性），碰撞的代價只是少重規劃一次。
-    state.sig = state.wHardN * 7919 + state.wSumS * 31 + state.wSumL
+    -- 寬帶輪另加一項：一般帶已整條擋死、兩側空地沒有新硬點時點雲簽章不變，不加這項 replan 就不會用寬帶重規劃
+    -- （0929p 審查：牆全在 ±6.5 內即重現，車一直 blocked 到脫困流程重設簽章）。
+    state.sig = state.wHardN * 7919 + state.wSumS * 31 + state.wSumL + (state.wideRound and 104729 or 0)
     -- 樣本不足、橫跨 >10m、或鋪面碰到掃描帶端點＝無路面／停車場／路口歧義。
     -- 端點截斷時觀測 span 只是寬度下界，不能拿「看見 10m」證明整體只有 10m。
     -- 歧義時 roadC 與 road band 一起撤銷，退回 nav 線，不硬掰。
     local roadSpan = state.wRoadHi - state.wRoadLo
-    local roadEdgesVisible = state.wRoadLo > state.bandBias + LAT[1] + ROAD_EDGE_GAP
-        and state.wRoadHi < state.bandBias + LAT[LAT_N] - ROAD_EDGE_GAP
+    local latArr, latArrN = state.latArr or LAT, state.latArrN or LAT_N
+    local roadEdgesVisible = state.wRoadLo > state.bandBias + latArr[1] + ROAD_EDGE_GAP
+        and state.wRoadHi < state.bandBias + latArr[latArrN] - ROAD_EDGE_GAP
     if state.wRoadN >= ROAD_MIN_N and roadSpan <= ROAD_MAX_SPAN and roadEdgesVisible then
         state.roadC = state.wRoadSumL / state.wRoadN
         -- 帶邊界：格心 ± 半格（格心 l=-4.5 的路面格實際覆蓋 [-5,-4]）
@@ -1093,6 +1139,9 @@ function MDADSensor.newState()
         endS = 0,
         curL = LAT_N + 1,
         latN = LAT_N, fineStep = false, -- 目前這一步的橫向取樣數／是否細取樣（非軸對齊步）
+        -- 本輪的橫向取樣組（一般帶或寬帶，beginRound 鎖定）＋Driver 的寬帶要求與完成快照的帶寬
+        latArr = LAT, latArrN = LAT_N, latFine = LAT_FINE, latFineN = LAT_FINE_N,
+        wideReq = false, wideRound = false, wideLong = false, wideDone = false, corridorHalf = CORRIDOR_HALF,
         segIdx = 1,
         baseIdx = 1,
         cx = 0, cy = 0,
@@ -1190,6 +1239,8 @@ function MDADSensor.reset(state)
     state.endS = 0
     state.curL = LAT_N + 1
     state.latN, state.fineStep = LAT_N, false
+    state.latArr, state.latArrN, state.latFine, state.latFineN = LAT, LAT_N, LAT_FINE, LAT_FINE_N
+    state.wideRound, state.wideLong, state.wideDone, state.corridorHalf = false, false, false, CORRIDOR_HALF
     state.segIdx = 1
     state.baseIdx = 1
     state.wHardN = 0
@@ -1294,6 +1345,7 @@ function MDADSensor.step(state, profile, sNow, vehicle, now, cell)
     local visited = state.visited
     local gen = state.gen
     local budget = MDADDynamics.scanBudget(state.frameEwmaMs)
+    local latArr, latFine = state.latArr, state.latFine
 
     while budget > 0 do
         local li = state.curL
@@ -1309,7 +1361,7 @@ function MDADSensor.step(state, profile, sNow, vehicle, now, cell)
             local nx, ny = state.nx, state.ny
             local fine = (nx > ALIGN_EPS or nx < -ALIGN_EPS) and (ny > ALIGN_EPS or ny < -ALIGN_EPS)
             state.fineStep = fine
-            state.latN = fine and LAT_FINE_N or LAT_N
+            state.latN = fine and state.latFineN or state.latArrN
             li = 1
         end
 
@@ -1318,7 +1370,7 @@ function MDADSensor.step(state, profile, sNow, vehicle, now, cell)
         -- 行駛線永遠停在路緣（2026-08-28 視覺化實證：藍點列壓在路緣、路面帶
         -- 綠點只有半邊）。bandBias 於輪首鎖定（beginRound），l 仍是「相對
         -- nav 線」的座標——下游 hardL／roadC／縫隙規劃語意全部不變。
-        local l = (state.fineStep and LAT_FINE[li] or LAT[li]) + state.bandBias
+        local l = (state.fineStep and latFine[li] or latArr[li]) + state.bandBias
         local wx = state.cx + l * state.nx
         local wy = state.cy + l * state.ny
         -- 取整：Kahlua 的 % 是截斷式（KahluaThread.java:1060-1066 用 (int)(v1/v2)），

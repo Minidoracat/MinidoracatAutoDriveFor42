@@ -65,6 +65,28 @@ function T.attach(vehicle)
         local axle = trailer:getWorldPos(com:x(), 0, zSum / math.max(n, 1), Vector3f.new())
         local front = trailer:getWorldPos(com:x(), 0, com:z() + ext:z() * 0.5, Vector3f.new())
         local rear = trailer:getWorldPos(com:x(), 0, com:z() - ext:z() * 0.5, Vector3f.new())
+        -- 候選線掛車掃掠用（0929p，Driver sweepLine）：掛點在牽引車座標（車位＋前向／右向）裡的位置、
+        -- 掛車車身中心在掛車軸座標裡的位置。掛車軸向＝量到的「軸→掛點」單位向量 v0，不是掛車 forward：
+        -- 被倒著拖的車 forward 朝後（0929p 審查），拿 forward 當軸向會把軸放到掛點前面、軌跡變成推車。
+        -- axisSign＝v0 與掛車 forward 同向（1）或反向（−1），sweep 起算時用實車 forward×axisSign 當軸向。
+        -- 右向同 Driver 的 COM 慣例 (fy, −fx)。
+        local vf = vehicle:getForwardVector(Vector3f.new())
+        local vfx, vfy = vf:x(), vf:z()
+        local vl = sqrt(vfx * vfx + vfy * vfy)
+        local tf = trailer:getForwardVector(Vector3f.new())
+        local tfx, tfy = tf:x(), tf:z()
+        local center = trailer:getWorldPos(com:x(), 0, com:z(), Vector3f.new())
+        local dx, dy = h:x() - vehicle:getX(), h:y() - vehicle:getY()
+        local cx, cy = center:x() - h:x(), center:y() - h:y()
+        local ux, uy = h:x() - axle:x(), h:y() - axle:y()
+        local ul = sqrt(ux * ux + uy * uy)
+        local hitchZ, hitchX, boxBack, boxSide, axisSign
+        if vl > 1e-6 and ul > 1e-6 then
+            vfx, vfy, ux, uy = vfx / vl, vfy / vl, ux / ul, uy / ul
+            hitchZ, hitchX = dx * vfx + dy * vfy, dx * vfy - dy * vfx
+            boxBack, boxSide = -(cx * ux + cy * uy), cx * uy - cy * ux
+            axisSign = (ux * tfx + uy * tfy) >= 0 and 1 or -1
+        end
         return {
             trailer = trailer,
             L2 = dist(h:x(), h:y(), axle:x(), axle:y()),
@@ -75,6 +97,7 @@ function T.attach(vehicle)
             comX = com:x(), comZ = com:z(),
             mass = trailer:getMass(),
             wheels = n,
+            hitchZ = hitchZ, hitchX = hitchX, boxBack = boxBack, boxSide = boxSide, axisSign = axisSign,
         }
     end)
     if not ok2 or type(geo) ~= "table" then return false end
@@ -83,6 +106,16 @@ function T.attach(vehicle)
             and finite(geo.hitchToRear) and geo.hitchToRear >= geo.L2 * 0.5
             and finite(geo.mass) and geo.mass > 0 and geo.wheels > 0) then
         return false
+    end
+    -- 車位到掛車尾（直線時）：繞行保持段要多撐的長度（Driver shapeProfile）。量不到掛點偏移時不延長、
+    -- sweepLine 也不驗掛車（退回舊制只驗牽引車），不因此拒絕啟動。
+    if finite(geo.hitchZ) and finite(geo.hitchX) and finite(geo.boxBack) and finite(geo.boxSide)
+            and (geo.axisSign == 1 or geo.axisSign == -1) then
+        local back = -geo.hitchZ
+        if back < 0 then back = 0 end
+        geo.trailLen = back + geo.hitchToRear
+    else
+        geo.hitchZ, geo.hitchX, geo.boxBack, geo.boxSide, geo.axisSign = nil, nil, nil, nil, nil
     end
     return geo
 end

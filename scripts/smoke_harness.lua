@@ -9924,6 +9924,7 @@ do
     dveh._speed = 0
     driveReset(dveh)
     driveTick(dp, dveh)
+    drive.scanRound(true) -- 停在停點：寬帶判堵一輪（倒車要等這次嘗試的寬帶重判）
     nowMs = nowMs + 6000
     driveTick(dp, dveh)
     checkEq(MDAD.Drive.hudState(0), "unstick", "(c4) 5s 後 rear 淨空倒車（實得 " .. tostring(MDAD.Drive.hudState(0)) .. "）")
@@ -10092,6 +10093,7 @@ local function scenarioDetour()
     dveh._speed = 0
     driveReset(dveh)
     driveTick(dp, dveh)
+    drive.scanRound(true) -- 寬帶判堵一輪
     nav.detourCalls = 0
     MDAD.HUD.autoDetour = function() return true end
     nowMs = nowMs + 6000
@@ -10123,6 +10125,7 @@ local function scenarioDetour()
     dveh._speed = 0
     driveReset(dveh)
     driveTick(dp, dveh)
+    drive.scanRound(true) -- 寬帶判堵一輪
     nav.detourCalls = 0
     MDAD.HUD.autoDetour = function() return true end
     nowMs = nowMs + 5500
@@ -11047,6 +11050,7 @@ do
     dveh._speed = 0
     driveReset(dveh)
     driveTick(dp, dveh) -- 預算起算
+    drive.scanRound(true) -- 停在停點：寬帶判堵一輪（倒車要等這次嘗試的寬帶重判）
     nowMs = nowMs + 200 -- 再一幀確保停等狀態穩定（監督若會臂起，此刻已臂）
     driveReset(dveh)
     driveTick(dp, dveh)
@@ -15414,6 +15418,7 @@ scenario("調頭＋blocked：遠處不倒車、近處才退、額度用盡不空
     dveh._speed = 0
     driveReset(dveh)
     driveTick(dp, dveh)
+    drive.scanRound(true) -- 寬帶判堵一輪
     nowMs = nowMs + 6000
     driveTick(dp, dveh)
     st = MDAD.Drive.debugSession(0)
@@ -18566,8 +18571,9 @@ drive.scenario0929j()
 --     違規證明：visAssistForce 加回拖車排除＝第一條紅；不分攤（towDecel 空轉）＝質量比那條紅；
 --     掛車力改沿 forward＝倒拖那條紅。
 --   (tow-defer) 待承諾接近的鎖輪門檻拖車也用緊急帳（有輔助可追）。違規證明：deferHardKmh 加回拖車排除＝紅。
---   (tow-brake) 硬煞外力輔助（Drive.brakeAssist）也分攤：掛車分到同一減速度（2.4k m/s²）。違規證明：拿掉
---     brakeAssist 裡的 towDecel＝紅。
+--   (tow-nolock) 0929p 使用者裁定：拖車 ≥10 km/h 的硬煞不鎖輪（鎖輪時掛車從後面推，整組只 2.0 m/s²），改兩節
+--     各自 7 m/s² 的中線外力、照常轉向；低速、非拖車、dynamics-fault 照舊鎖輪。違規證明：towNolock 門檻改成
+--     永遠鎖輪＝前兩條紅；拿掉掛車分攤＝質量比那條紅；拿掉 visAssistDecel 標記＝滑行排除那條紅。
 function drive.scenario0929o()
     scenario("0929o：拖車不鎖輪減速依質量分攤到掛車")
     local Dr = MDAD.Drive
@@ -18604,20 +18610,423 @@ function drive.scenario0929o()
     local hard = Dr.deferHardKmh(d, 50)
     checkTrue(hard > d.dodgeDeferCap,
         "(tow-defer) 拖車待承諾接近：鎖輪門檻用緊急帳（" .. tostring(hard) .. " > 接近帽 10），不是一超過就鎖輪")
-    local tractor = {
-        getCurrentSpeedKmHour = function() return 60 end,
-        getForwardVector = function(_, out) return out:set(0, 0, 1) end,
-        addImpulse = function(_, imp) hit.bx, hit.bz = imp:x(), imp:z() end,
+    -- (tow-nolock)
+    local imp = {}
+    local veh = {
+        addImpulse = function(_, i, r) imp.x, imp.z = i:x(), i:z() end,
+        setForceBrake = function() imp.locked = true end,
     }
-    local b = { tow = { trailer = trailer(0, 16, 0, 1), mass = 1500 }, runtimeMass = 3000 }
+    local function towSess(towed)
+        return { tow = towed and { trailer = trailer(0, 13.9, 0, 1), mass = 1500 } or nil, runtimeMass = 3000,
+            fstate = {}, vehicleProfile = {}, escScale = 1, parity = 1, forceBrakeUntil = 0 }
+    end
+    local fwdV = BaseVehicle.allocVector3f()
+    local t = towSess(true)
     hit.n, hit.x, hit.z = 0, nil, nil
-    Dr.brakeAssist(b, tractor, 10)
-    checkTrue(b.brakeImpulseThis == true and (hit.bz or 0) < 0, "(tow-brake) 硬煞外力輔助照樣施給牽引車")
-    checkNear(math.abs(hit.z or 0) / math.max(math.abs(hit.bz or 0), 1e-9), 1500 / 3000, 1e-9,
-        "(tow-brake) 掛車分到的力／牽引車的力＝質量比（兩節同減速度，掛點不推）")
-    checkNear(b.towAssistDecel, 2.4, 1e-9, "(tow-brake) 記下施給掛車的減速度（60 km/h 滿載＝2.4 m/s²）")
+    local tf = Dr.hardBrake(t, veh, 1000, "visibility", 50, 0.8, 0, 0, fwdV, 0, 1)
+    checkTrue(tf ~= nil and not imp.locked and t.forceBrakeUntil == 0, "(tow-nolock) 拖車 50 km/h 硬煞：不鎖輪")
+    checkTrue((imp.z or 0) < 0 and math.abs(imp.x or 1) < 1e-9, "(tow-nolock) 牽引車施車頭反向的中線外力")
+    checkNear(math.abs(hit.z or 0) / math.max(math.abs(imp.z or 0), 1e-9), 1500 / 3000, 1e-9,
+        "(tow-nolock) 掛車分到同一減速度（外力比＝質量比，掛點不推）")
+    checkTrue(t.towAssistDecel == 7 and t.towBrakeWhy == "visibility", "(tow-nolock) telemetry tda 7／tbw visibility")
+    checkEq(t.visAssistDecel, 7, "(tow-nolock) 記成輔助減速度：下一幀滑行學習不收（外力不是車的能力）")
+    imp.x, imp.z = nil, nil
+    Dr.hardBrake(towSess(true), veh, 1000, "blocked", 50, 0.8, 1, 0, fwdV, 0, 1)
+    checkTrue(math.abs(imp.x or 0) > 0, "(tow-nolock) 不鎖輪時照常轉向（同一 impulse 帶側推）")
+    for _, c in ipairs({ { true, 5, "blocked", "低於 10 km/h 停住" }, { false, 50, "visibility", "非拖車" },
+            { true, 50, "dynamics-fault", "dynamics-fault" },
+            { true, -50, "blocked", "倒退中（外力沿車頭反向會加速倒退）" } }) do
+        local u = towSess(c[1])
+        imp.locked, hit.n = nil, 0
+        Dr.hardBrake(u, veh, 1000, c[3], c[2], 0.8, 0, 0, fwdV, 0, 1)
+        checkTrue(imp.locked == true and u.forceBrakeUntil > 0 and hit.n == 0,
+            "(tow-nolock) " .. c[4] .. "：照舊一秒鎖輪、掛車不施")
+    end
+    BaseVehicle.releaseVector3f(fwdV)
 end
 drive.scenario0929o()
+
+-- 0929p（使用者裁定「允許繞到道路之外的地方繞路」；E2E semi-long-mp block：三台車連路肩擋死 14m 大路）：
+--   (wide) 一般帶（±7）判堵；停下判堵的寬帶（±14、看 100m、輪時放寬）重掃，Corridor 讀快照的帶寬、候選到路外，
+--     承諾的寬帶繞行走完前維持寬帶（起步後回到一般寬帶的 60m）。違規證明：Sensor 不鎖寬帶／wideScanWanted 恆 false
+--     ／Corridor 讀固定 CORRIDOR_HALF／停下判堵不放長＝各自紅。
+--   (tow-sweep) 拖車候選線驗掛車軌跡：同一條線牽引車過得去、掛車內切撞到 → 拒收。違規證明：拿掉掛車掃掠＝紅。
+--   (tow-hold) 拖車保持段延長 trailLen（牽引車照原 c 回線時掛車還在障礙旁）。違規證明：拿掉延長＝紅。
+function drive.scenario0929p()
+    scenario("0929p：整條擋死寬帶重掃從路外繞過、拖車驗掛車軌跡")
+    local oldSand = SandboxVars
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40,
+        RightLaneBias = 0 })
+    local wasMs = drive.frameMs(10)
+    -- (wide)
+    -- 牆整條落在一般帶內（l −5.5..6.5）：兩側空地沒有新硬點，寬帶輪的點雲簽章要靠寬帶旗標才會變（0929p 審查）
+    drive.fillWorld(-10, 160, -16, 16)
+    for x = 40, 42 do for y = -6, 6 do drive.putSolid(x, y, "wide_wall") end end
+    checkTrue(armDrive(), "(wide) 啟動")
+    setHeading(dveh, 0)
+    local st = MDAD.Drive.debugSession(0)
+    -- 起步就判堵、群還在 25m 外：一般帶先開近重判，不武裝寬帶（E2E arrive 0929p：起步寬帶→路外繞→偏離重算 600m）
+    dveh._x, dveh._y, dveh._speed = 15, 0, 0
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    for _ = 1, 2 do drive.frameMs(10); drive.scanRound(true) end
+    checkTrue(st.blocked == true and st.dodging ~= true and st.sensor.corridorHalf == 7
+            and st.wideArmed ~= true and st.sensor.wideDone ~= true,
+        "(wide) 起步判堵但群在 25m 外：不武裝寬帶、維持一般帶（armed=" .. tostring(st.wideArmed)
+        .. " half=" .. tostring(st.sensor.corridorHalf) .. "）")
+    -- 開到停點（車心離牆 9m ≤ BLOCK_STOP_DIST）停住：這一幀就武裝，下一輪寬帶
+    dveh._x = 31
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkTrue(st.blocked == true and st.wideArmed == true,
+        "(wide) 一般帶（±7）整條擋死、開到停點＝武裝寬帶（blocked=" .. tostring(st.blocked) .. "）")
+    drive.frameMs(10)
+    drive.scanRound(true)
+    checkTrue(st.sensor.wideDone == true and st.sensor.corridorHalf == 14
+            and (st.sensor.effectiveAheadM or 0) >= 99,
+        "(wide) 停下判堵的寬帶：±14、看 100m（拖車繞行的出口要驗得完）（half=" .. tostring(st.sensor.corridorHalf)
+        .. " eff=" .. tostring(st.sensor.effectiveAheadM) .. "）")
+    checkTrue(st.dodging == true and st.dodgeWide == true and (st.fstate.offL or 0) < -7,
+        "(wide) 從路外繞過：承諾寬帶繞行（offL=" .. tostring(st.fstate.offL) .. "）")
+    drive.frameMs(10)
+    drive.scanRound(true)
+    checkTrue(st.sensor.wideDone == true and MDAD.Drive.wideScanWanted(st, 30) == true
+            and (st.sensor.effectiveAheadM or 99) <= 60,
+        "(wide) 寬帶繞行走完前維持寬帶（守護輪才看得到承諾線兩側；車速高也一樣），起步後回到一般寬帶 60m（eff="
+        .. tostring(st.sensor.effectiveAheadM) .. "）")
+    MDAD.Drive.stop(0, nil)
+    for x = 40, 42 do for y = -6, 6 do drive.clearCell(x, y) end end
+    checkTrue(not MDAD.Drive.wideScanWanted({ blocked = true, wideArmed = true, wideArmedS = 5, lastSNow = 5 }, 30)
+            and MDAD.Drive.wideScanWanted({ blocked = true, wideArmed = true, wideArmedS = 5, lastSNow = 5 }, 2)
+            and not MDAD.Drive.wideScanWanted({ blocked = true, lastSNow = 5 }, 2),
+        "(wide) 判堵但還在跑＝一般帶（前視留給煞車）；開到停點幾乎停住才寬帶")
+    -- 倒車成功會清 blocked（blocked-retry 的倒車不開 episode）：退回武裝點之後武裝不解除，下一次判堵（還停著）直接
+    -- 寬帶重判退出來的跑道；開過武裝點（堵點已解、照常往前）才解除
+    local ep = { blocked = false, wideArmed = true, wideArmedS = 50, lastSNow = 45 }
+    local wantEp = MDAD.Drive.wideScanWanted(ep, 0)
+    local keptEp = ep.wideArmed
+    ep.blocked = true
+    local wantEp2 = MDAD.Drive.wideScanWanted(ep, 0)
+    local passed = { blocked = false, wideArmed = true, wideArmedS = 50, lastSNow = 52 }
+    MDAD.Drive.wideScanWanted(passed, 0)
+    checkTrue(wantEp == false and keptEp == true and wantEp2 == "stop" and passed.wideArmed == false,
+        "(wide) 倒車退回武裝點後（blocked 暫清）武裝保留、再判堵即寬帶；開過武裝點才解除")
+    -- 倒車退出停止線外：已在停止線武裝的堵點停著等寬帶重判，不再用接近包絡開回停止線
+    local far = { blockS = 100, lastSNow = 0, blockHitX = 100, blockHitY = 0, wideArmed = true, wideArmedS = 5 }
+    local holdBack = MDAD.Drive.blockedAtStop(far, 0, 0)
+    far.lastSNow = 7
+    local holdPast = MDAD.Drive.blockedAtStop(far, 7, 0)
+    far.wideArmed, far.lastSNow = false, 0
+    local holdNone = MDAD.Drive.blockedAtStop(far, 0, 0)
+    checkTrue(holdBack == true and holdPast == false and holdNone == false,
+        "(wide) 倒車退到停止線外：武裝點之後停著寬帶重判（不開回停止線）；開過武裝點或沒武裝照舊接近")
+    -- (wide-anchor) 武裝只綁當時的堵點：判堵錨換到 6m 外（原障礙移走、改判遠處另一群）＝解除武裝照常接近；
+    --   同一群錨小幅變動照舊停著（0929v 審查）。違規證明：不比錨＝錨換到 30m 外仍停在第一道停止線前。
+    local an = { blockS = 100, lastSNow = 0, blockHitX = 10, blockHitY = 0, wideArmed = true, wideArmedS = 5,
+        wideArmedX = 9, wideArmedY = 1.5 }
+    local anSame = MDAD.Drive.blockedAtStop(an, 0, 0)
+    an.blockHitX = 40
+    local anMoved = MDAD.Drive.blockedAtStop(an, 0, 0)
+    checkTrue(anSame == true and anMoved == false and an.wideArmed == false,
+        "(wide-anchor) 同一群停著；判堵錨換到 30m 外另一群＝解除武裝、照常接近（same=" .. tostring(anSame)
+        .. " moved=" .. tostring(anMoved) .. " armed=" .. tostring(an.wideArmed) .. "）")
+    -- (corner-wide) 一般帶判成 corner 鎖住（原地重試沒新資訊）：寬帶是新資訊，第一輪寬帶照跑候選鏈（0929v 審查：
+    --   否則彎道旁堵住時寬帶掃完卻從不規劃路外縫）。違規證明：latch 對寬帶也早退＝不承諾路外繞行。
+    drive.fillWorld(-10, 160, -16, 16)
+    for x = 40, 42 do for y = -6, 6 do drive.putSolid(x, y, "corner_wide_wall") end end
+    armDrive()
+    setHeading(dveh, 0)
+    local cw = MDAD.Drive.debugSession(0)
+    dveh._x, dveh._y, dveh._speed = 31, 0, 0
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    drive.frameMs(10)
+    drive.scanRound(true) -- 一般帶判堵、停點武裝
+    cw.cornerLatch, cw.cornerS, cw.cornerLatchWide = true, cw.lastSNow, false
+    drive.frameMs(10)
+    drive.scanRound(true) -- 寬帶
+    checkTrue(cw.sensor.wideDone == true and cw.dodging == true and cw.dodgeWide == true,
+        "(corner-wide) 一般帶 corner 鎖住後第一輪寬帶照規劃、從路外繞過（wide=" .. tostring(cw.sensor.wideDone)
+        .. " dodging=" .. tostring(cw.dodging) .. " plan=" .. tostring(cw.planMode) .. "）")
+    MDAD.Drive.stop(0, nil)
+    for x = 40, 42 do for y = -6, 6 do drive.clearCell(x, y) end end
+    -- (tow-sweep)／(tow-hold)：假掛車幾何（掛點在車位後 2m、軸距 8m、車身 12m）
+    local trl = { getForwardVector = function(_, out) return out:set(1, 0, 0) end }
+    local geo = { trailer = trl, L2 = 8, hitchZ = -2, hitchX = 0, boxBack = 5, boxSide = 0, halfW = 1.25,
+        halfL = 6, trailLen = 13, mass = 1500 }
+    local function towRound(ox)
+        drive.fillWorld(-10, 160, -16, 16)
+        drive.putSolid(ox, 0, "tow_sweep_obs")
+        armDrive()
+        setHeading(dveh, 0)
+        local t = MDAD.Drive.debugSession(0)
+        dveh._x, dveh._y, dveh._speed = 20, 0, 0
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        drive.frameMs(10)
+        drive.scanRound(true)
+        return t
+    end
+    local t = towRound(30)
+    local ok0 = MDAD.Drive.debugSweepCandidate(0, 24, 28, 40, 46, 3)
+    t.tow = geo -- 掃完才掛（假掛車沒有 Java 介面，不能讓它跑行駛防線）
+    -- 一般帶只驗牽引車（0929p E2E：一般帶也驗掛車＝路邊小物前全判不過，三個拖車回歸 StopStuck）
+    local okN = MDAD.Drive.debugSweepCandidate(0, 24, 28, 40, 46, 3)
+    t.sensor.wideDone, t.sensor.corridorHalf = true, 14 -- 寬帶快照：開始驗掛車
+    local ok1, ph1, hx1, hy1 = MDAD.Drive.debugSweepCandidate(0, 24, 28, 40, 46, 3)
+    -- 被倒著拖的車（forward 朝後、attach 量到 axisSign −1）：軸向要照真實「軸→掛點」，結果同正常掛車
+    t.tow = { trailer = { getForwardVector = function(_, out) return out:set(-1, 0, 0) end },
+        L2 = 8, hitchZ = -2, hitchX = 0, boxBack = 5, boxSide = 0, halfW = 1.25, halfL = 6, trailLen = 13,
+        mass = 1500, axisSign = -1 }
+    local ok2, ph2, hx2, hy2 = MDAD.Drive.debugSweepCandidate(0, 24, 28, 40, 46, 3)
+    t.tow = nil
+    t.sensor.wideDone, t.sensor.corridorHalf = false, 7
+    checkTrue(ok2 == ok1 and ph2 == ph1 and hx2 == hx1 and hy2 == hy1,
+        "(tow-sweep) 被倒著拖（forward 朝後）：軸向照實際掛點方向＝同一判定（ok=" .. tostring(ok2)
+        .. " phase=" .. tostring(ph2) .. "）")
+    checkTrue(ok0 == true and ok1 == false and ph1 == 3 and hx1 == 30.5 and hy1 == 0.5,
+        "(tow-sweep) 寬帶：牽引車在 +3 過得去、掛車內切撞到原車道上的障礙＝拒收（tractor=" .. tostring(ok0)
+        .. " trailer=" .. tostring(ok1) .. " phase=" .. tostring(ph1) .. "）")
+    checkTrue(okN == true, "(tow-sweep) 一般帶只驗牽引車（候選不知道掛車落後，驗了只會卡在路邊小物前）")
+    MDAD.Drive.stop(0, nil)
+    drive.clearCell(30, 0)
+    t = towRound(36)
+    local okShape, _, _, c0, d0 = MDAD.Drive.debugShape(0, 24, 28, 40, 46, 3)
+    t.tow = geo
+    local _, _, _, cN = MDAD.Drive.debugShape(0, 24, 28, 40, 46, 3)
+    t.sensor.wideDone, t.sensor.corridorHalf = true, 14
+    local okShapeTow, _, _, c1, d1 = MDAD.Drive.debugShape(0, 24, 28, 40, 46, 3)
+    local okShort, phShort = MDAD.Drive.debugSweepCandidate(0, 24, 28, 40, 46, 3)
+    local okLong = MDAD.Drive.debugSweepCandidate(0, 24, 28, 40 + 13, 46 + 13, 3)
+    t.tow = nil
+    t.sensor.wideDone, t.sensor.corridorHalf = false, 7
+    checkTrue(cN == c0, "(tow-hold) 一般帶不延長保持段（c " .. tostring(c0) .. "／" .. tostring(cN) .. "）")
+    checkTrue(okShape and okShapeTow and math.abs((c1 or 0) - (c0 or 0) - 13) < 1e-9
+            and math.abs((d1 or 0) - (d0 or 0) - 13) < 1e-9,
+        "(tow-hold) 拖車保持段與出口一起延後 trailLen（c " .. tostring(c0) .. "→" .. tostring(c1) .. "）")
+    checkTrue(okShort == false and phShort == 4 and okLong == true,
+        "(tow-hold) 照原 c 回線＝掛車在出口內切撞到；保持到掛車也過了才回線＝通過")
+    MDAD.Drive.stop(0, nil)
+    drive.clearCell(36, 0)
+    -- (tow-stop) 判堵停止線加掛車跑道（base＋trailLen＋L2/2）：停在線上就寬帶繞過，不必倒車
+    local big = { trailer = { getForwardVector = function(_, out) return out:set(dveh._fwdX, 0, dveh._fwdY) end,
+            getUpVectorDot = function() return 1 end },
+        L2 = 9.5, hitchToRear = 12, halfW = 1.27, halfL = 6.5, hitchZ = -2.5, hitchX = 0, boxBack = 6,
+        boxSide = 0, trailLen = 14.5, mass = 1400, axisSign = 1 }
+    drive.fillWorld(-10, 160, -18, 18)
+    for x = 60, 61 do for y = -8, 8 do drive.putSolid(x, y, "tow_block") end end
+    armDrive()
+    setHeading(dveh, 0)
+    local ts = MDAD.Drive.debugSession(0)
+    ts.tow = big
+    local stopD = MDAD.Drive.blockStopDist(ts)
+    checkNear(stopD, 10 + 14.5 + 4.75, 1e-9, "(tow-stop) 拖車停止線＝10＋trailLen＋L2/2")
+    dveh._x, dveh._y, dveh._speed = 60 - (stopD - 1), 0, 0
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    drive.frameMs(10)
+    drive.scanRound(true)
+    driveTick(dp, dveh)
+    checkTrue(ts.blocked == true and ts.wideArmed == true,
+        "(tow-stop) 車心離群 " .. string.format("%.1f", stopD - 1) .. "m（一般車還在滑行接近）＝拖車已到停止線、武裝寬帶")
+    drive.frameMs(10)
+    drive.scanRound(true)
+    checkTrue(ts.dodging == true and ts.dodgeWide == true and (ts.fstate.offL or 0) < -7,
+        "(tow-stop) 停在拖車線上寬帶一次繞過（offL=" .. tostring(ts.fstate.offL) .. "）")
+    -- (tow-back) 拖車改道線要從車頭方向出發：先往車後再轉進支路＝拒收（非拖車照收）
+    local oldGet = getSpecificPlayer
+    getSpecificPlayer = function(n) if n == 0 then return dp end end
+    local cx = dveh._x
+    local function detourReply(pts)
+        drive.nav.detour = { pts = pts, segSurface = { "paved", "paved" }, segWidth = { 8, 8 },
+            len = 30, cost = 30, avoidPenalty = 0 }
+        return drive.nav.detour
+    end
+    detourReply({ cx, 0, cx - 4, 0, cx - 4, 20 })
+    local okBack, whyBack = MDAD.Drive.requestDetour(0, true)
+    detourReply({ cx, 0, cx + 10, 0, cx + 10, 20 })
+    local okFwd = MDAD.Drive.requestDetour(0, true)
+    ts.tow = nil
+    ts.pendingDetour, ts.pendingRouteWhy = nil, nil
+    detourReply({ cx, 0, cx - 4, 0, cx - 4, 20 })
+    local okCar = MDAD.Drive.requestDetour(0, true)
+    checkTrue(okBack == false and whyBack == "back" and okFwd == true and okCar == true,
+        "(tow-back) 拖車：往車後再轉的改道線拒收、往前的照收；非拖車同一條照收（back=" .. tostring(okBack)
+        .. "/" .. tostring(whyBack) .. " fwd=" .. tostring(okFwd) .. " car=" .. tostring(okCar) .. "）")
+    -- (tow-back2) 先退 3m 再斜向前（8m 點已在車前）仍拒收：Follower 會先投影在往後那段判調頭；起點略在車後、
+    --   第一段本身朝前（車投影就在這段上）照收（0929v 審查）。違規證明：拿掉第一段方向檢查＝紅。
+    checkTrue(MDAD.Drive.routeLeavesForward({ pts = { 0, 0, -3, 0, 10, 6 } }, 0, 0, 1, 0) == false
+            and MDAD.Drive.routeLeavesForward({ pts = { -2, 0, 10, 8 } }, 0, 0, 1, 0) == true,
+        "(tow-back2) 先退 3m 再斜向前拒收；起點略在車後、第一段朝前照收")
+    drive.nav.detour = nil
+    getSpecificPlayer = oldGet
+    MDAD.Drive.stop(0, nil)
+    for x = 60, 61 do for y = -8, 8 do drive.clearCell(x, y) end end
+    -- (bush) 樹叢：一般帶忽略（路邊樹叢不擋車），寬帶（路外繞行）當 0.3 圓避開——引擎每幀對碰到的樹叢施
+    --   −0.025×動量（不乘 dt），E2E 路外繞進樹叢地 1 km/h 動不了。違規證明：寬帶也忽略／一般帶也收＝各自紅。
+    do
+        local bprops = { has = function(_, key) return key == "Bush" end, get = function() return nil end }
+        local bsprite = { shouldHaveCollision = function() return false end, getProperties = function() return bprops end }
+        -- 路邊樹叢（l≈±3.5，一般帶也掃得到）與路外樹叢（l≈±10.5，寬帶才掃得到），牆整條擋死 ±6：開到停止線武裝後下一輪寬帶
+        drive.fillWorld(-10, 90, -16, 16)
+        for x = 40, 42 do for y = -6, 6 do drive.putSolid(x, y, "bush_wall") end end
+        for _, c in ipairs({ { 35, 3 }, { 45, 10 } }) do
+            local sq = drive.world[c[1] * 100000 + c[2]] or drive.mkSquare(c[1], c[2])
+            sq._objs[#sq._objs + 1] = { getSpriteName = function() return "harness_bush" end,
+                getSprite = function() return bsprite end, getProperties = function() return bprops end,
+                getType = function() return nil end }
+        end
+        armDrive()
+        setHeading(dveh, 0)
+        local bs = MDAD.Drive.debugSession(0)
+        local function bushR(x, y)
+            for i = 1, bs.sensor.hardN do
+                if math.abs(bs.sensor.hardX[i] - x) < 0.01 and math.abs(bs.sensor.hardY[i] - y) < 0.01 then
+                    return bs.sensor.hardR[i]
+                end
+            end
+            return nil
+        end
+        dveh._x, dveh._y, dveh._speed = 15, 0, 0 -- 群在 25m 外：判堵但還沒到停止線＝一般帶
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        for _ = 1, 2 do drive.frameMs(10); drive.scanRound(true) end
+        local rNormal, halfNormal = bushR(35.5, 3.5), bs.sensor.corridorHalf
+        dveh._x = 31 -- 開到停止線：武裝，下一輪寬帶
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        drive.frameMs(10)
+        drive.scanRound(true)
+        local rWideIn, rWideOut = bushR(35.5, 3.5), bushR(45.5, 10.5)
+        checkTrue(halfNormal == 7 and rNormal == nil and bs.sensor.wideDone == true and rWideIn == 0.3
+                and rWideOut == 0.3,
+            "(bush) 一般帶不收路邊樹叢（" .. tostring(rNormal) .. "）、寬帶收成格心 0.3 圓（路邊 " .. tostring(rWideIn)
+            .. "／路外 " .. tostring(rWideOut) .. "）")
+        MDAD.Drive.stop(0, nil)
+    end
+    -- (wide-gate) 寬帶武裝後的倒車／自動改道：下一次都要等這次嘗試的寬帶重判（E2E 0929u：倒車一結束、等待額度
+    --   早已累滿，一般帶一判堵就再倒，三次倒車中間一輪寬帶都沒跑就交還）。自動改道開著時，倒車重判仍堵才改道。
+    --   違規證明：拿掉倒車的閘／改道的閘＝一般帶判堵那一刻就再倒／就改道。
+    for _, detourOn in ipairs({ false, true }) do
+        drive.fillWorld(-10, 160, -16, 16)
+        for x = 40, 42 do for y = -16, 16 do drive.putSolid(x, y, "gate_wall") end end
+        if type(MDAD.HUD) ~= "table" then MDAD.HUD = {} end
+        local oldAuto = MDAD.HUD.autoDetour
+        MDAD.HUD.autoDetour = function() return detourOn end
+        drive.nav.detourCalls = 0
+        armDrive()
+        setHeading(dveh, 0)
+        local gs = MDAD.Drive.debugSession(0)
+        dveh._x, dveh._y, dveh._speed = 31, 0, 0
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        for _ = 1, 2 do drive.frameMs(10); drive.scanRound(true) end -- 一般帶判堵、停點武裝 → 寬帶判堵
+        local judged0 = gs.wideArmed == true and gs.wideJudged == 0 and gs.sensor.wideDone == true
+        nowMs = nowMs + 5100
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        local rev1 = gs.mode == "unstick" and gs.episodeAttempts == 1
+        dveh._x, dveh._speed = 26.9, -13
+        nowMs = nowMs + 16
+        driveReset(dveh)
+        driveTick(dp, dveh) -- 退夠 → settle
+        dveh._speed = 0
+        nowMs = nowMs + 16
+        driveTick(dp, dveh) -- settle 完成：快照重置、blocked 暫清
+        drive.frameMs(10)
+        drive.scanRound(true) -- 退後第一輪（一般帶）又判堵
+        local normalAgain = gs.blocked == true and gs.sensor.wideDone ~= true and gs.wideArmed == true
+        nowMs = nowMs + 6000
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        local held = gs.mode ~= "unstick" and gs.episodeAttempts == 1 and (drive.nav.detourCalls or 0) == 0
+        drive.frameMs(10)
+        drive.scanRound(true) -- 寬帶重判仍整條擋死：判過才准再倒／改道
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        local next2 = detourOn and (drive.nav.detourCalls or 0) == 1
+            or (not detourOn and gs.mode == "unstick" and gs.episodeAttempts == 2)
+        checkTrue(judged0 and rev1 and normalAgain and held and next2,
+            "(wide-gate) 倒車後等寬帶重判才" .. (detourOn and "改道" or "再倒") .. "（judged0=" .. tostring(judged0)
+            .. " rev1=" .. tostring(rev1) .. " normal=" .. tostring(normalAgain) .. " held=" .. tostring(held)
+            .. " next=" .. tostring(next2) .. "）")
+        MDAD.HUD.autoDetour = oldAuto
+        MDAD.Drive.stop(0, nil)
+        for x = 40, 42 do for y = -16, 16 do drive.clearCell(x, y) end end
+    end
+    -- (wide-defer) 停點的寬帶判堵：候選伸出已載入區（覆蓋不足）照判堵走倒車重判，不延後——延後的接近帽會讓車往群
+    --   前爬、吃掉進入段，清掉判堵又解除武裝，一般帶／寬帶來回判、永遠不倒車。違規證明：照舊延後＝紅。
+    do
+        drive.fillWorld(-10, 44, -16, 16) -- x≥45 未載入：路外那條線的出口與收短的停留都驗不完
+        for x = 40, 42 do for y = -6, 6 do drive.putSolid(x, y, "defer_wall") end end
+        armDrive()
+        setHeading(dveh, 0)
+        local ds = MDAD.Drive.debugSession(0)
+        dveh._x, dveh._y, dveh._speed = 31, 0, 0
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        for _ = 1, 3 do drive.frameMs(10); drive.scanRound(true) end
+        checkTrue(ds.sensor.wideDone == true and ds.blocked == true and ds.wideArmed == true and ds.dodging ~= true
+                and (ds.dodgeDeferCap or -1) < 0,
+            "(wide-defer) 停點寬帶判堵、候選伸出已載入區：判堵（倒車重判），不延後往群前爬（wide="
+            .. tostring(ds.sensor.wideDone) .. " blocked=" .. tostring(ds.blocked) .. " armed=" .. tostring(ds.wideArmed)
+            .. " deferCap=" .. tostring(ds.dodgeDeferCap) .. "）")
+        MDAD.Drive.stop(0, nil)
+        for x = 40, 42 do for y = -6, 6 do drive.clearCell(x, y) end end
+    end
+    -- (stay-armed／stay-tow) 停點寬帶判堵時停留線照「現在看得到的」收短（車不會再往前開近，前緣不跟著前進）；
+    --   拖車的保持段已延長到掛車過群，收短不得截到掛車還在群旁。合成點雲：rel 10..24 整條擋死 ±6，前緣 H=30／38。
+    --   違規證明：停點也算可開近的距離＝一般車收不短而判堵；拖車下限退回 b+halfL＝收成掛車還在群旁的停留。
+    do
+        drive.fillWorld(-10, 200, -20, 20)
+        armDrive()
+        setHeading(dveh, 0)
+        local ss = MDAD.Drive.debugSession(0)
+        dveh._x, dveh._y, dveh._speed = 40, 0, 0
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        for _ = 1, 2 do drive.frameMs(10); drive.scanRound(true) end
+        local sen, rs = ss.sensor, ss.lastSNow
+        local n = 0
+        for dsx = 10, 24 do for l = -6, 6 do
+            n = n + 1
+            sen.hardS[n], sen.hardL[n], sen.hardR[n], sen.hardB[n] = rs + dsx, l, 0.7, 0.5
+            sen.hardX[n], sen.hardY[n] = dveh._x + dsx, l
+        end end
+        sen.hardN, sen.wideDone, sen.corridorHalf, sen.unloaded = n, true, 14, false
+        local function tryAt(H)
+            sen.scanEndS = rs + H
+            local _, a, b, c, d, offL = MDADCorridor.plan(sen.hardS, sen.hardL, n, ss.needHalf, 14, 0, sen.hardR, 0,
+                nil, nil, true, nil, rs - ss.vehicleProfile.halfL)
+            local ok, _, variant, _, _, _, rc = MDAD.Drive.debugSweepFallbacks(0, a, b, c, d, offL, "stay-trunc")
+            return ok, variant, rc and (rc - rs), c and (c - rs)
+        end
+        ss.wideArmed = true
+        local okA, varA, rcA, cA = tryAt(30)
+        ss.wideArmed = false
+        local okN = tryAt(30)
+        checkTrue(okA == true and varA == "stay" and rcA < cA and okN ~= true,
+            "(stay-armed) 停點寬帶：停留線收短到看得到的地方（stay c=" .. tostring(rcA) .. " < 群出口 "
+            .. tostring(cA) .. "）；非停點仍等開近（ok=" .. tostring(okN) .. "）")
+        local trl = { getForwardVector = function(_, out) return out:set(dveh._fwdX, 0, dveh._fwdY) end,
+            getUpVectorDot = function() return 1 end }
+        ss.tow = { trailer = trl, L2 = 3, hitchToRear = 3.5, halfW = 1.0, halfL = 2.0, hitchZ = -2.0,
+            hitchX = 0, boxBack = 1.0, boxSide = 0, trailLen = 5, mass = 800, axisSign = 1 }
+        local okT30 = tryAt(30)
+        local okT38, _, rcT38, cT38 = tryAt(38)
+        ss.wideArmed = true
+        local okTA = tryAt(30)
+        checkTrue(okT30 ~= true and okTA ~= true and okT38 == true and rcT38 >= cT38 + 5 - 1e-6,
+            "(stay-tow) 拖車停留不收到掛車還在群旁：前緣 30 不承諾（" .. tostring(okT30) .. "／停點 " .. tostring(okTA)
+            .. "）、前緣 38 保持段到群出口＋掛車長（c=" .. tostring(rcT38) .. "）")
+        ss.tow, ss.wideArmed = nil, false
+        MDAD.Drive.stop(0, nil)
+    end
+    drive.frameMs(wasMs)
+    drive.fillWorld(-2, 70, -7, 7)
+    SandboxVars = oldSand
+end
+drive.scenario0929p()
 
 do -- 主 chunk local 槽已滿：整段包成函式，內部 local 不佔主 chunk
 -- =====================================================================

@@ -103,6 +103,8 @@ local EK = {
     "a", "b", "c", "offL", "curve", "clear", "vis", "space", "design",
     "crawl", "tight", "tier", "rs", "span", "hitS", "hitX", "hitY", "hitPhase", "clearance", "shape",
     "blocker",
+    -- tow attach（0929p）：掛車幾何（寬帶繞行掃掠、判堵停止線的輸入）
+    "L2", "trailLen", "halfW", "mass", "hitchZ", "boxBack", "axisSign",
 }
 
 local function logOnce(msg)
@@ -1187,6 +1189,7 @@ local function encodePhys(phys)
     addNum("towPhi", "tph")           -- 拖掛折角（rad）
     addNum("towUp", "tup")            -- 拖掛 upVectorDot（<0.8 原版拆掛）
     addNum("towDecel", "tda")         -- 施給掛車的減速度（m/s²；0929o 拖車減速分攤）
+    addStr("towBrake", "tbw")          -- 拖車不鎖輪硬煞的理由（0929p Drive.hardBrake；空＝本幀沒走）
     addNum("curveVerifiedUntilS", "curveVerifiedUntilS")
     addNum("filletN", "filletN")
     addNum("filletFallbackN", "filletFallbackN")
