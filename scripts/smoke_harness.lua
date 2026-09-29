@@ -10571,12 +10571,21 @@ local function scenarioChain()
     st = release()
     -- 0927：整車越過 c（bodyReach 3.1）才提前釋放回線段，48 還不行、52 才放
     checkTrue(st.dodging == true, "(c9) 車頭剛過 c：仍持有已掃過的回線段")
-    -- 0929h：車還在出口段、離停留 lane 超過 EXIT_KEEP_DEV 就沿承諾線走完才放，解鏈跟著延到出口走完
     release = capture()
-    for _, x in ipairs({ 52, 56, 64 }) do stepTo(x, laneAt(x)) end
+    stepTo(52, laneAt(52))
     st = release()
-    checkTrue(st.laneChained == false, "(c9) A 過了、承諾線出口走完、兩線都淨空：解鏈（d2="
-        .. tostring(d2) .. "）")
+    local dbgMin, dbgK0 = 9, nil
+    if st.fstate.ovS0 and (st.dodgeClrN or 0) > 0 then
+        dbgK0 = math.floor((st.lastSNow - st.vehicleProfile.halfL - st.fstate.ovS0) / MDADFollower.OV_STEP) + 1
+        for k = math.max(dbgK0, st.dodgeClrK0 or 1), st.dodgeClrN do
+            if (st.dodgeClr[k] or 9) < dbgMin then dbgMin = st.dodgeClr[k] end
+        end
+    end
+    checkTrue(st.laneChained == false, "(c9) A 過了、兩線都淨空：解鏈（dodging=" .. tostring(st.dodging)
+        .. " clrN=" .. tostring(st.dodgeClrN) .. " ovN=" .. tostring(st.fstate.ovN)
+        .. " s0ok=" .. tostring(st.dodgeClrS0 == st.fstate.ovS0) .. " s1ok=" .. tostring(st.dodgeClrS1 == st.fstate.ovEndS)
+        .. " k0=" .. tostring(dbgK0) .. " min=" .. tostring(dbgMin) .. " lat=" .. tostring(st.lastLatSigned) .. "）")
+    for _, x in ipairs({ 56, 64 }) do stepTo(x, laneAt(x)) end
     stepTo(72, stayLane)
     release = capture()
     stepTo(80, stayLane * 0.5)
@@ -17340,7 +17349,8 @@ drive.scenarioStraightProbe()
 --   → RETURN 25 km/h 爬回；承諾線出口本來就帶著 60 的帽回常駐線。車離常駐線超過 RETURN 門檻時
 --   沿承諾線走完出口。0929e 起低帽（爬行）也一樣：RETURN 斜切回線常被剛繞過的那群打回 hold（rc28 0009
 --   hold → stall → 頂上硬物）。違規證明：exitKeepsDodge 恆回 false＝(xkeep) 提前釋放紅；
---   把帽條件加回（帽 < RETURN_CAP 回 false）＝(xkeep) 帽 10 紅；門檻退回 RETURN 的 2–3m＝(xkeep) 1m 紅。
+--   把帽條件加回（帽 < RETURN_CAP 回 false）＝(xkeep) 帽 10 紅；不看出口窄點（照舊只看 RETURN 門檻）＝
+--   (xkeep)「出口前方還有窄點」紅；離 0.5m 以上一律走完＝「出口淨空」「沒有證據」與 (c9) 紅。
 function drive.scenarioExitKeep()
     scenario("繞行出口：離常駐線太遠且承諾線不慢時沿承諾線走完，不交 RETURN 慢爬")
     local oldSandbox, oldVeh, oldGet = SandboxVars, dveh, getSpecificPlayer
@@ -17375,8 +17385,22 @@ function drive.scenarioExitKeep()
     st.dodgeApproachCap = 10
     checkTrue(MDAD.Drive.exitKeepsDodge(st) == true, "(xkeep) 帽 10（爬行）同樣沿承諾線走完出口")
     st.lastLatSigned, st.dodgeApproachCap = 0.5, 60
-    checkTrue(MDAD.Drive.exitKeepsDodge(st) == true,
-        "(xkeep) 離常駐線 1m：也沿承諾線走完（0929h rc33 0004：1.7m 就放手，斜切頂上出口旁的物件）")
+    checkTrue(MDAD.Drive.exitKeepsDodge(st) == false, "(xkeep) 離常駐線 1m、沒有出口淨距證據：照舊提前放")
+    do -- 0929h：guard 收過這條線的逐點淨距——出口還有窄點＝走完；全段淨空＝照舊放（rc34 0030 彎上出口）
+        local fs0 = st.fstate
+        local keep = { fs0.ovN, fs0.ovS0, fs0.ovEndS, st.dodgeClrN, st.dodgeClrK0, st.dodgeClrS0, st.dodgeClrS1, st.dodgeClr }
+        fs0.ovN, fs0.ovS0, fs0.ovEndS = 40, st.lastSNow - 20, st.lastSNow + 19
+        st.dodgeClrN, st.dodgeClrK0, st.dodgeClrS0, st.dodgeClrS1 = 40, 1, fs0.ovS0, fs0.ovEndS
+        st.dodgeClr = {}
+        for k = 1, 40 do st.dodgeClr[k] = 9 end
+        st.dodgeClr[5] = 0.1 -- 車身後方的窄點不算
+        checkTrue(MDAD.Drive.exitKeepsDodge(st) == false, "(xkeep) 離常駐線 1m、出口淨空（窄點已在車後）：照舊提前放")
+        st.dodgeClr[30] = 0.3
+        checkTrue(MDAD.Drive.exitKeepsDodge(st) == true,
+            "(xkeep) 離常駐線 1m、出口前方還有窄點：沿承諾線走完（0929h rc33 0004：1.7m 就放手，斜切頂上出口旁的物件）")
+        fs0.ovN, fs0.ovS0, fs0.ovEndS, st.dodgeClrN, st.dodgeClrK0, st.dodgeClrS0, st.dodgeClrS1, st.dodgeClr =
+            keep[1], keep[2], keep[3], keep[4], keep[5], keep[6], keep[7], keep[8]
+    end
     st.lastLatSigned = 1.2
     checkTrue(MDAD.Drive.exitKeepsDodge(st) == false, "(xkeep) 離常駐線 0.3m：照舊提前放")
     -- 整合：右側整排硬物（l +0.5..+5.5，x 40–49）逼車繞到左邊

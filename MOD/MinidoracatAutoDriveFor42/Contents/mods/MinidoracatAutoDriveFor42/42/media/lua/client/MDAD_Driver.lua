@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0929h"
+Drive.REV = "0929i"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -475,7 +475,8 @@ TUNE.ZOMBIE_PUSH_SCALE = 2.0       -- 1.5→2.0（2026-09-04 使用者「可以�
 -- 對質心加一道沿車頭反向的中心力（零力矩，不影響轉向）。比例與前推 assist 同尺度（ratio×mass×
 -- IMPULSE_SCALE），MIN→FULL 之間線性爬到 RATIO。E2E meet park MAX：多人連線停車只在約 55m 內可見，
 -- 賽車硬煞實測約 7 m/s²，95 km/h 停不住。
-TUNE.EXIT_KEEP_DEV = 0.5 -- 繞行出口：車離常駐線超過此值就沿承諾線走完，不提前放（Drive.exitKeepsDodge）
+TUNE.EXIT_KEEP_DEV = 0.5 -- 繞行出口：車離常駐線超過此值、且出口還有窄點就沿承諾線走完（Drive.exitKeepsDodge）
+TUNE.EXIT_KEEP_CLEAR = 0.5 -- 出口窄點：guard 收集的逐點淨距（已扣 pad）低於此值
 TUNE.BRAKE_ASSIST_MIN_KMH = 40
 TUNE.BRAKE_ASSIST_FULL_KMH = 60
 TUNE.BRAKE_ASSIST_RATIO = 0.4
@@ -6863,15 +6864,33 @@ end
 -- 從車現在的偏移斜切回常駐線，常被剛繞過的那群打回（全部 E2E＋正式服：爬行繞行後 RETURN 進入
 -- 190 次，hold 60 次、其中 stall 11 次、接觸 5 次；rc28 0009：hold(sweep) → 靜止釋放交 pure
 -- pursuit → 6 km/h 頂上剛繞過的硬物）。承諾線出口是掃掠驗過的線，慢一點走完它。
--- 0929h 起不再以 RETURN 門檻（2–3m）為界：離常駐線超過 EXIT_KEEP_DEV 就沿承諾線走完。rc33 0004：
--- offL 4.25 的出口段，守護輪已因出口旁的物件把帽壓到爬行 5，車頭一過 c＋bodyReach、離常駐線 1.7m
--- （低於門檻 2）即放手，常駐線前方淨空、對線帽 40 → 車從 19 加速到 23.5，pure pursuit 從 3.9 斜切回
--- 2.0 的路徑比承諾線慢收，正好頂上那個物件。承諾線出口是掃掠驗過的線，出口段自己有逐段帽（0909b）。
+-- 0929h 起離常駐線不到 RETURN 門檻（2–3m）時，只要還超過 EXIT_KEEP_DEV、且承諾線在車身以後還有窄點
+-- （guard 收集的逐點淨距 < EXIT_KEEP_CLEAR）也沿線走完；表不在或對不上這條線＝沒有證據，照舊放。
+-- rc33 0004：offL 4.25 的出口段，守護輪已因出口旁的物件把帽壓到爬行 5，車離常駐線 1.7m 即放手，對線帽
+-- 40 讓車從 19 加速到 23.5，pure pursuit 從 3.9 斜切回 2.0 比承諾線慢收，頂上那個物件。出口淨空就照舊
+-- 放：rc34 0030 出口段疊在 R≈6 的彎上，承諾線的前饋只算中心弧，留著反而切進彎內。
 function Drive.exitKeepsDodge(s)
     local lat = s.lastLatSigned
     if not finite(lat) then return false end
     local resident = MDADFollower.laneBiasAt(s.profile, laneBiasOf(s), s.fstate.idx, s.lastSNow)
-    return math.abs(lat - resident) > TUNE.EXIT_KEEP_DEV
+    local dev = math.abs(lat - resident)
+    local available = 2
+    if finite(s.currentSegWidth) and s.currentSegWidth > 0 then
+        available = s.currentSegWidth * 0.5 - s.vehicleProfile.halfW - MDADDynamics.ROAD_EDGE_MARGIN
+    end
+    if available < 2 then available = 2 elseif available > 3 then available = 3 end
+    if dev > available then return true end
+    if dev <= TUNE.EXIT_KEEP_DEV then return false end
+    local fs, n = s.fstate, s.dodgeClrN or 0
+    if n < 2 or n ~= fs.ovN or s.dodgeClrS0 ~= fs.ovS0 or s.dodgeClrS1 ~= fs.ovEndS
+            or not finite(fs.ovS0) then return false end
+    local k0 = ovIndexFloor(fs.ovS0, MDADFollower.OV_STEP, s.lastSNow - s.vehicleProfile.halfL)
+    if k0 < s.dodgeClrK0 then k0 = s.dodgeClrK0 end
+    for k = k0, n do
+        local m = s.dodgeClr[k]
+        if not finite(m) or m < TUNE.EXIT_KEEP_CLEAR then return true end
+    end
+    return false
 end
 
 -- 前方（弧長 ≥ minS）最近的擋線點索引；nil＝淨空。O(hardN)、零配置；冷路徑用。
