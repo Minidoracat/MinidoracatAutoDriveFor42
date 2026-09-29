@@ -656,8 +656,6 @@ function MDADVehicleProfile.configureFollower(follower, profile, runtimeMass, ra
     local adaptive = profile.valid == true and profile.geometryValid == true
     follower.adaptive = adaptive
     follower.lookScale = adaptive and profile.lookScale or 1
-    -- 拖車不加彎前中線減速輔助（Follower.STYLES.coastAssist）：Driver 不對拖車施中線力，計畫不能假設它
-    if isFinite(profile.towMass) and profile.towMass > 0 then follower.coastAssist = 0 end
     local have0, have1, have2, have3 = false, false, false, false
     local a0, b0, l0, c0, a1, b1, l1, c1, a2, b2, l2, c2, a3, b3, l3, c3
     local i = 1

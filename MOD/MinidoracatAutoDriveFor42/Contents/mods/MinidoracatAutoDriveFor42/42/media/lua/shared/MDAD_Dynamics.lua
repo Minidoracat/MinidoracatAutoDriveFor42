@@ -28,6 +28,14 @@ D.PERCEPTION_EXT_M = 32
 -- EWMA、極低FPS與引擎長幀不是硬期限保證，仍由既有新鮮度／可視速度閘把關。
 D.PERCEPTION_ROUND_MS = D.SNAPSHOT_FRESH_MS * 0.5
 D.PERCEPTION_STOP_MARGIN_M = 5 -- 反函式停距之外留一輪反應／加速餘裕，避免小基礎值自限加速
+-- 每幀世界查詢額度（0929o）：基準 56 格；平均幀時超過 60 FPS 的 16.7ms 就按比例放大，最多 3 倍。
+-- 舊制固定 56 格：低幀率每秒掃得少，可負擔視距跟著縮（30 FPS 47m、20 FPS 32m），車只能慢開，而且感知
+-- 占每幀時間的比例反而隨幀率下降變小。放大後感知占幀時的比例固定在 60 FPS 的水準（實測單格約 6µs、
+-- 56 格約 0.35ms＝16.7ms 的 2%），20–60 FPS 都看得到 60 FPS 的 92m，超過 3 倍對應的 50ms 才縮。
+-- 放大會讓幀時再長一點（正回饋），但回授比例就是這 2%，收斂在 +2% 左右，不會越掃越卡。
+D.SCAN_BUDGET_BASE = 56
+D.SCAN_BUDGET_REF_FRAME_MS = 1000 / 60
+D.SCAN_BUDGET_SCALE_MAX = 3
 D.SOFT_LOOKAHEAD_M = 40
 D.SOFT_LOOKAHEAD_S = 4.5 -- 0925d 3→4.5：70 km/h 看 87m，交錯／成群殭屍在還來得及整段偏開時就看全
 
@@ -75,8 +83,19 @@ function D.softLookahead(speedKmh)
         math.max(D.SOFT_LOOKAHEAD_M, math.abs(speedKmh) / 3.6 * D.SOFT_LOOKAHEAD_S))
 end
 
--- A fixed per-frame query budget must not grow when FPS drops. Shorten the effective
--- range instead; the requested preference and geometric extensions remain unchanged.
+-- 本幀世界查詢額度（整數）：幀時 ≤16.7ms 為 SCAN_BUDGET_BASE；更慢就按幀時比例放大、最多 SCALE_MAX 倍。
+-- 非有限或非正幀時（session 首輪還沒有樣本）回基準額度。
+function D.scanBudget(frameMs)
+    local k = 1
+    if D.finite(frameMs) and frameMs > D.SCAN_BUDGET_REF_FRAME_MS then
+        k = frameMs / D.SCAN_BUDGET_REF_FRAME_MS
+        if k > D.SCAN_BUDGET_SCALE_MAX then k = D.SCAN_BUDGET_SCALE_MAX end
+    end
+    return math.floor(D.SCAN_BUDGET_BASE * k + 1e-9)
+end
+
+-- 每輪只掃得到「名目輪時內 stepsPerFrame 能走完的距離」，超過就縮實際視距；請求（玩家偏好與幾何
+-- 延伸）不改。stepsPerFrame 由 Sensor 以 scanBudget(幀時)／橫向條數傳入。
 -- affordableFloor（可選）＝本輪可負擔視距的下限：Sensor 以上一輪可負擔值減每輪回縮上限餵入，
 -- 幀時 EWMA 突然變長時前緣不一口氣縮回（2026-09-27 正式服 33 段 eff-regress：可負擔視距一輪
 -- 縮 9–33m＝前緣瞬間拉近，硬煞帳跟著崩）；代價只是那幾輪多掃幾格、輪時略長。

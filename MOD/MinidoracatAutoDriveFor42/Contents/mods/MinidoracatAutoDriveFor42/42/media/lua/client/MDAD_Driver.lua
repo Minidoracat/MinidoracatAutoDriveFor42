@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0929n"
+Drive.REV = "0929o"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -457,7 +457,9 @@ TUNE.RETURN_ENTER_MAX_RAD = 30 * math.pi / 180
 TUNE.RETURN_STALL_MS = 2000
 TUNE.RETURN_STALL_BLOCK_MS = 6000
 TUNE.RETURN_UNLOADED_MS = 4000 -- 回線視距不足（unloaded）持續爬行這麼久就交還一般追線
-TUNE.LOWFPS_FRAME_MS = 30      -- 平均幀時超過這個（約 33 FPS 以下）才算「低幀率」；60 FPS 的視距縮短不提示
+-- 平均幀時超過這個才算「低幀率」：掃描額度放大到上限（MDADDynamics.scanBudget，0929o）的點＝50ms、20 FPS。
+-- 更快的幀率額度會放大到看得到 60 FPS 的距離，視距縮短不是幀率造成的，不提示。
+TUNE.LOWFPS_FRAME_MS = MDADDynamics.SCAN_BUDGET_REF_FRAME_MS * MDADDynamics.SCAN_BUDGET_SCALE_MAX
 TUNE.LOWFPS_ON_MS = 2000       -- 低幀率降速狀態：持續這麼久才顯示
 TUNE.LOWFPS_OFF_MS = 3000      -- 恢復這麼久才消失
 TUNE.LOWFPS_NOTICE_MS = 10000  -- 同一趟累計這麼久才跳一次通知
@@ -1834,6 +1836,7 @@ local function startSession(playerObj, playerNum, stage)
         visFrontSince = 0,                                   -- 可視前緣上次前進的時刻（visFrontRef＝當時前緣）
         visAssistPrev = 0,
         visAssistDecel = 0,                                  -- 本幀巡航減速輔助補的減速度（m/s²）
+        towAssistDecel = 0,                                  -- 本幀施給掛車的減速度（Drive.towDecel）
         curveVerifiedUntilS = 0,
         verifyBand = false,
         verifySweep = false,
@@ -2697,6 +2700,11 @@ function Drive.brakeAssist(s, vehicle, dist)
         vehicle:addImpulse(imp, rel)
         BaseVehicle.releaseVector3f(imp)
         s.brakeImpulseThis, s.brakeAssistForce = true, f * len
+        -- 拖掛（0929o）：同一減速度（0.4k×10×0.01×48/0.8＝2.4k m/s²）依掛車質量分攤；只推牽引車＝
+        -- 鎖輪時掛車從後面推得更用力（E2E semi-long-mp：鎖輪中整組只減 2.0 m/s²）
+        if s.tow then
+            Drive.towDecel(s, TUNE.BRAKE_ASSIST_RATIO * k * IMPULSE_SCALE * 0.01 * 48 / MULT_NORM, mult)
+        end
     end
     BaseVehicle.releaseVector3f(rel)
 end
@@ -4114,10 +4122,10 @@ end
 -- 反推，斷油滑行跟不上，越過 cap+3 就一秒鎖輪——38 km/h 直接煞到 0，下一輪就承諾了 15 km/h 的
 -- 繞行）。接近帽本身照舊（regulator 目標＋Drive.visAssistForce 的不鎖輪減速輔助去追它）；
 -- 鎖輪只在連緊急煞車（0.3s 反應＋緊急界限，同 0925p 速度延後的緊急帳）都快停不到群起點時才用。
--- 拖掛（輔助不施力）、群起點未知、感知未就緒、低於輔助啟用速度：退回接近帽本身（舊制）。
+-- 群起點未知、感知未就緒、低於輔助啟用速度：退回接近帽本身（舊制）。拖掛同樣有輔助（0929o 起分攤到掛車）。
 function Drive.deferHardKmh(s, actualSpeed)
     local soft = s.dodgeDeferCap
-    if s.tow or not finite(s.dodgeDeferS) or not (s.sensor and s.sensor.ready)
+    if not finite(s.dodgeDeferS) or not (s.sensor and s.sensor.ready)
             or not finite(actualSpeed) or actualSpeed < TUNE.VIS_ASSIST_MIN_KMH then
         return soft
     end
@@ -4233,7 +4241,11 @@ end
 --（NoControl brake 15，約 2.5–4.5 m/s²）；可視距離縮得比滑行快時，舊制只能等越過硬煞紅線
 -- 一秒鎖輪。實速超過巡航帽 TOL 以上就沿車身中線加反向外力補足，比例於超速量、上限
 -- VIS_ASSIST_MAX；不鎖輪、轉向照常（與側推共用同一個 impulse 槽，中線分量不產生 yaw）。
--- 拖掛不加（牽引車減速、掛車往前推會折）；低於 MIN_KMH 滑行就夠；感知未就緒時舊制只滑行，不加。
+-- 拖掛也加（0929o）：同一減速度依掛車質量另外施給掛車（Drive.towDecel）。掛車自己不煞車
+--（CarController.updateTrailer:383-393：Trailer 煞車力 0、被拖的車 10），只減牽引車＝掛車從後面推、
+-- 折角放大；兩節同減速度，掛點就不推。舊制拖車一律不加，重車只能滑行＝彎前很早收油，可視距離一縮
+-- 就只剩一秒鎖輪（正式服 0.13.1 拖車 visibility 鎖輪 4.2 次/h，單車 0.62）。
+-- 低於 MIN_KMH 滑行就夠；感知未就緒時舊制只滑行，不加。
 -- 外力→減速度：BaseVehicle.update 每幀 applyCentralForce 一次（BaseVehicle.java:3307-3314），
 -- WorldSimulation.updatePhysic 以固定 0.01s 子步 stepSimulation、每步後清力（WorldSimulation.java:
 -- 80-100）→ 每幀 Δv＝F/m×0.01；F 乘 mult/MULT_NORM（mult＝48×幀秒）→ 每秒減速度
@@ -4241,7 +4253,7 @@ end
 -- 回要施的外力大小（≥0）；s.visAssistDecel 記本幀補的減速度（telemetry vad）。
 function Drive.visAssistForce(s, speedKmh, mult)
     s.visAssistDecel = 0
-    if s.tow or not (s.sensor and s.sensor.ready) or not finite(s.visibilityCap)
+    if not (s.sensor and s.sensor.ready) or not finite(s.visibilityCap)
             or not finite(speedKmh) or speedKmh < TUNE.VIS_ASSIST_MIN_KMH then
         return 0
     end
@@ -4272,6 +4284,32 @@ function Drive.visAssistForce(s, speedKmh, mult)
     if not finite(mass) or mass < 1 then mass = MASS_FALLBACK end
     s.visAssistDecel = a
     return a * mass * (mult / MULT_NORM) / (0.01 * 48 / MULT_NORM)
+end
+
+-- 掛車分攤（見 Drive.visAssistForce）：沿掛車自己的速度反向施 a×掛車質量的中線外力（relPos 0，不產生
+-- yaw）。用速度而不是 forward：被倒著拖的車 forward 朝後。換算與牽引車同一條（每幀 Δv＝F/m×0.01）。
+-- 掛車上只有這一處施力（BaseVehicle.addImpulse:681-692 同幀第二次較大的衝量會把整槽作廢）。
+-- s.towAssistDecel 記本幀真的施給掛車的減速度（telemetry tda；0＝沒施）。
+function Drive.towDecel(s, a, mult)
+    s.towAssistDecel = 0
+    local tow = s.tow
+    local mass = tow and tow.mass
+    if not (tow and tow.trailer) or not finite(a) or a <= 0 or not finite(mass) or mass <= 0 then return end
+    local tr = tow.trailer
+    local vel = BaseVehicle.allocVector3f()
+    tr:getLinearVelocity(vel)
+    local vx, vz = vel:x(), vel:z()
+    local len = finite(vx) and finite(vz) and sqrt(vx * vx + vz * vz) or 0
+    if len > 0.5 then
+        local f = a * mass * (mult / MULT_NORM) / (0.01 * 48 / MULT_NORM) / len
+        local imp = BaseVehicle.allocVector3f()
+        imp:set(-f * vx, 0, -f * vz)
+        vel:set(0, 0, 0)
+        tr:addImpulse(imp, vel)
+        BaseVehicle.releaseVector3f(imp)
+        s.towAssistDecel = a
+    end
+    BaseVehicle.releaseVector3f(vel)
 end
 
 -- blocked 接近包絡（0928b；E2E rc1 0005 StepVan：70 km/h 在 68m 外判 blocked，舊制只把目標壓到
@@ -4777,7 +4815,7 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     phys.visibilityCap = s.visibilityCap
     phys.visibilityHardKmh = s.visibilityHardKmh
     phys.visHold, phys.visRoundS, phys.visAssistDecel = s.visHold, s.visRoundS, s.visAssistDecel
-    if s.tow then phys.towPhi, phys.towUp = s.towPhi, s.towUp end
+    if s.tow then phys.towPhi, phys.towUp, phys.towDecel = s.towPhi, s.towUp, s.towAssistDecel end
     phys.curveVerifiedUntilS = s.curveVerifiedUntilS
     phys.filletN = s.profile.filletN
     phys.filletFallbackN = s.profile.filletFallbackN
@@ -9010,7 +9048,7 @@ local function stepFollow(s, vehicle, playerNum, now)
     s.lastAssistForce = 0
     s.brakeImpulseThis, s.brakeAssistForce = false, 0
     -- 上一幀施的巡航減速輔助留給 updateTraction：本幀的 dv 是那一幀的物理結果（滑行學習要排除它）
-    s.visAssistPrev, s.visAssistDecel = s.visAssistDecel, 0
+    s.visAssistPrev, s.visAssistDecel, s.towAssistDecel = s.visAssistDecel, 0, 0
 
     -- 池向量：一顆當 forward／relPos 共用，一顆在 applySteering 內當 impulse。
     -- 這段中間沒有 early return，release 一定會執行。
@@ -10591,6 +10629,7 @@ local function stepFollow(s, vehicle, playerNum, now)
                     -- 巡航減速輔助：實速超過可視巡航帽時沿中線反向補減速（見 Drive.visAssistForce）
                     if assistForce == 0 and not coupled then
                         assistForce = -Drive.visAssistForce(s, speedKmh, mult)
+                        if s.tow and s.visAssistDecel > 0 then Drive.towDecel(s, s.visAssistDecel, mult) end
                     end
                     -- 回授依轉向增益正規化（TUNE.FB_NORM_*）後，車身 yaw 率限制（TUNE.ESC_*）；耦力原地調頭兩者都不經
                     if not coupled then

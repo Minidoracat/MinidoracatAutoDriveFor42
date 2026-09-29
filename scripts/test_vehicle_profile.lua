@@ -1129,19 +1129,6 @@ do
     local fx = follower({ lat = 9.0, brake = 8.0, coast = 2.0 })
     checkTrue(P.configureFollower(fx, p, p.mass, false), "coast 2.0 風格仍 adaptive")
     checkNear(fx.segCoast[1], 2.0, 1e-9, "風格 coast 2.0 低於 priors 質量預算時夾到 2.0（風格只能壓低）")
-    -- 0928m：拖車（towMass）時 coastAssist 歸零——Driver 不對拖車施中線減速力，剖面不能假設它。
-    --   違規證明：拿掉 configureFollower 的歸零＝紅。
-    local ft = follower({ lat = 9.0, brake = 8.0, coast = 3.0 })
-    ft.coastAssist = 2.5
-    local wasTow = p.towMass
-    p.towMass = 900
-    checkTrue(P.configureFollower(ft, p, p.mass, false), "拖車 follower 仍 adaptive")
-    p.towMass = wasTow
-    checkEq(ft.coastAssist, 0, "拖車：彎前中線減速輔助歸零")
-    local fn = follower({ lat = 9.0, brake = 8.0, coast = 3.0 })
-    fn.coastAssist = 2.5
-    checkTrue(P.configureFollower(fn, p, p.mass, false), "沒拖車 follower 仍 adaptive")
-    checkEq(fn.coastAssist, 2.5, "沒拖車：保留風格的輔助量")
 end
 
 scenario("clearanceBudget：餘裕預算單一 authority（階段 2 主體 4）")

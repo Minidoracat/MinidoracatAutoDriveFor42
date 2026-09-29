@@ -743,13 +743,12 @@ check(wdA ~= nil and wdA > 18 and wdA < 19, "第二回傳＝世界距 18.x")
 local _, wdB = D.blockedNear(40.5, 39.5, 10, 10668, 9711, nil, nil)
 check(wdB == nil, "退弧長時第二回傳 nil")
 
-scenario("perceptionEffective：玩家可調視距在固定每幀預算下的有效範圍（0909b）")
+scenario("perceptionEffective：玩家可調視距在給定每幀預算下的有效範圍（0909b）")
 do
     -- 契約（下面每個期望值的唯一來源，手算不讀 production 推導）：可選 48/80/120/160/200、
-    -- 預設120、硬上限240、有效地板24、名目輪時目標375ms。Sensor每輪傳
-    -- near=2（車前 2m 起掃）與 stepsPerFrame=SCAN_BUDGET/LAT_N=56/14=4，
-    -- 所以「預算內的請求距離」＝2＋4×375/frameMs，與請求值取小。
-    -- 每幀的世界查詢額度是固定的（56 格）：低幀率縮的是距離，不是加重單幀負擔。
+    -- 預設120、硬上限240、有效地板24、名目輪時目標375ms。本情境固定 near=2（車前 2m 起掃）與
+    -- stepsPerFrame=4（60 FPS 以上的 56 格／14 條），所以「預算內的請求距離」＝2＋4×375/frameMs，與請求值取小。
+    -- Sensor 實際傳入的額度自 0929o 起隨幀時放大（見下方 scanBudget 情境），這裡只驗換算與夾限。
     local N, F = 2, 4
     local frames = { 6, 8, 10, 12, 16, 20, 25, 33, 50, 100, 250 }
     local badOption = 0
@@ -822,6 +821,33 @@ do
         end
     end
     check(visMono, "五個檔位的可視帽嚴格遞增（設定調高必須換得到速度）")
+end
+
+scenario("scanBudget：每幀查詢額度隨幀時放大到 3 倍，20–60 FPS 看得一樣遠（0929o）")
+do
+    -- 契約（手算）：幀時 ≤1000/60 ms 為 56 格；更慢乘 幀時÷(1000/60)，最多 3 倍、取整。
+    -- 舊制固定 56 格：30 FPS 只看 47m、20 FPS 32m，車就只能慢開；感知占幀時的比例反而隨幀率下降變小。
+    eq(D.scanBudget(nil), 56, "還沒有幀時樣本：基準 56")
+    eq(D.scanBudget(0), 56, "幀時 0：基準 56")
+    eq(D.scanBudget(-5), 56, "負幀時：基準 56")
+    eq(D.scanBudget(0 / 0), 56, "NaN 幀時：基準 56")
+    eq(D.scanBudget(4), 56, "250 FPS：不縮到 56 以下")
+    eq(D.scanBudget(1000 / 60), 56, "60 FPS：56")
+    eq(D.scanBudget(1000 / 30), 112, "30 FPS：2 倍 112")
+    eq(D.scanBudget(50), 168, "20 FPS：到上限 3 倍 168")
+    eq(D.scanBudget(250), 168, "4 FPS（EWMA 上限）：仍是 168，不無上限放大")
+    local N = 2
+    local function eff(frame) return (D.perceptionEffective(200, frame, D.scanBudget(frame) / 14, N)) end
+    near(eff(1000 / 60), 92, 1e-9, "60 FPS 可負擔 92m")
+    near(eff(1000 / 30), 92, 1e-9, "30 FPS 同樣 92m（舊制 47m）")
+    near(eff(50), 92, 1e-9, "20 FPS 同樣 92m（舊制 32m）")
+    near(eff(100), 47, 1e-9, "10 FPS 額度到上限後才縮（47m）")
+    local band = true
+    for _, f in ipairs({ 1000 / 60, 20, 25, 30, 1000 / 30, 40, 45, 50 }) do
+        local e = eff(f)
+        if e < 91 or e > 92 + 1e-9 then band = false end
+    end
+    check(band, "20–60 FPS 的可負擔視距都在 60 FPS 的 91–92m（取整只差不到 1m），不會超過 60 FPS")
 end
 
 scenario("visibilityHoldCapKmh：前緣停滯保持帽（2026-09-27 正式服 visibility 一秒鎖輪）")

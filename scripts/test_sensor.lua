@@ -11,8 +11,9 @@ MDADSensor 走廊掃描的離線測試：載入**真正的** production Lua，�
   64 點上限、未載入截短）正是本檔的責任
 - 感知距離是玩家可調偏好：請求、幀率能力、硬上限三者互相夾限。任何一條寫反都會
   安靜地變成「宣稱淨空但其實沒掃到那裡」——這是唯一會直接撞車的錯誤類別
-- 每幀查詢額度是固定的（低幀率縮**範圍**、不加重單幀負擔）。額度寫成隨幀率放大，
-  離線看起來一樣綠，實機是低幀率時愈掃愈卡的正回饋
+- 每幀查詢額度隨平均幀時放大（0929o）：60 FPS 以上 56 格；更慢按幀時比例放大、最多 3 倍（168 格），
+  感知占每幀時間的比例固定在 60 FPS 的水準，20–60 FPS 都掃得到 60 FPS 的距離，更慢才縮**範圍**。
+  3 倍上限是正回饋的保險：寫成不設上限，極卡的幀會把單幀負擔一路推高
 
 本檔載入的 production（真檔，無任何 source-text 斷言）：
     shared/MDAD_Dynamics.lua
@@ -30,7 +31,7 @@ IsoObject**——sprite 分類不在本檔範圍，也讓「屍體不進 hard」
 - 只驗公開可觀察輸出（state 的完成輪欄位、世界查詢次數），不斷言 production 的
   原始碼字串，也不讀 w 前綴的 working 欄位
 - 期望值全部由測試按檔頭契約手算（±0.65 長軸、±3 減速帶、±4.5 軟縫帶、64 點上限、
-  每幀 56 格、硬上限 240、下限 24、名目輪時 375ms），刻意不重用 production 常數推導
+  每幀 56 格（>16.7ms 按比例、最多 3 倍）、硬上限 240、下限 24、名目輪時 375ms），刻意不重用 production 常數推導
 - sprite 分類、車輛精確輪廓、probeNear／probeRear／probeAround 冷路徑不在本檔
   （各自另有 smoke_harness 情境）
 - 這是標準 Lua 不是 Kahlua：本檔在 42/media 之外，可自由用標準函式庫
@@ -286,7 +287,17 @@ end
 
 local EPS = 1e-6
 local LAT_ROWS = 14      -- 走廊 ±6.5 的格心取樣條數（契約：±7 走廊、1m 步距）
-local BUDGET = 56        -- 每幀世界查詢額度（契約：固定，不隨幀率放大）
+local BUDGET = 56        -- 60 FPS 以上的每幀世界查詢額度（契約）
+-- 本幀額度（契約手算）：幀時 ≤ 1000/60 ms 為 56；更慢乘 幀時÷(1000/60)，最多 3 倍，取整
+local function budgetFor(frameMs)
+    local k = frameMs / (1000 / 60)
+    if k < 1 then k = 1 elseif k > 3 then k = 3 end
+    return math.floor(56 * k + 1e-9)
+end
+-- 可負擔視距（契約手算）：2 ＋ (額度 ÷ 14) × 375 ÷ 幀時
+local function affordableFor(frameMs)
+    return 2 + budgetFor(frameMs) / 14 * 375 / frameMs
+end
 
 -- =====================================================================
 -- 情境一：屍體長軸兩端（純屍體，不摻殭屍）
@@ -440,30 +451,38 @@ end
 -- =====================================================================
 -- 情境四：幀率適應
 --
--- 契約：每幀額度固定，低幀率縮**有效範圍**。請求（玩家偏好）不因此改小，
--- 幀率回來就要看得回去。下限 24m：再怎麼卡也不能縮成 0 而回報「前方淨空」。
--- 名目輪時目標375ms、每幀56/14＝4步；低FPS的24m保底不等於輪時保證。
+-- 契約：每幀額度隨平均幀時放大、最多 3 倍（感知占幀時的比例固定），20–60 FPS 都掃得到 60 FPS
+-- 的距離；更慢才縮**有效範圍**。請求（玩家偏好）不因此改小，幀率回來就要看得回去。下限 24m：
+-- 再怎麼卡也不能縮成 0 而回報「前方淨空」。名目輪時目標 375ms；低 FPS 的 24m 保底不等於輪時保證。
 -- =====================================================================
 local function scenarioFrameAdaptation()
-    scenario("幀率適應：慢幀縮有效視界、不縮請求、每幀額度不變；卡頓仍保底 24m")
+    scenario("幀率適應：20–60 FPS 額度放大看得一樣遠、更慢才縮視界、不縮請求、額度有上限；卡頓仍保底 24m")
 
-    -- 20ms/幀（50fps）：2 + 4×375/20 = 77m
+    -- 20ms/幀（50fps）：額度 floor(56×1.2)＝67 → 2 + 67/14×375/20 ≈ 91.7m（60 FPS 是 92m）
     resetWorld()
     local st = newSensor(200, 20, 0)
     checkTrue(runRound(st), "50fps 完成一輪")
-    checkNear(st.effectiveAheadM, 77, 1e-9, "50fps 有效範圍77m")
-    checkEq(R.cells, LAT_ROWS * 76, "有效範圍內整帶掃滿")
+    checkNear(st.effectiveAheadM, affordableFor(20), 1e-9, "50fps 有效範圍≈60 FPS 的 92m（實得 " .. st.effectiveAheadM .. "）")
+    checkEq(R.cells, LAT_ROWS * (math.floor(affordableFor(20)) - 1), "有效範圍內整帶掃滿")
 
-    -- 100ms/幀（10fps）：預算不足，被下限拉回24m
+    -- 30fps（1000/30ms）：額度放大 2 倍＝112 格 → 2 + 8×375/(1000/30) = 92m，與 60 FPS 同距離
+    resetWorld()
+    st = newSensor(200, 1000 / 30, 0)
+    checkTrue(runRound(st), "30fps 完成一輪")
+    checkNear(st.effectiveAheadM, 92, 1e-9, "30fps 有效範圍 92m（舊制固定 56 格只有 47m）")
+    checkTrue(R.peakScan > BUDGET and R.peakScan <= budgetFor(1000 / 30),
+        "30fps 每幀額度放大到 112 格（實得 " .. R.peakScan .. "）")
+
+    -- 100ms/幀（10fps）：額度到上限 168 格 → 2 + 12×375/100 = 47m
     resetWorld()
     st = newSensor(200, 100, 0)
     checkTrue(runRound(st), "10fps 完成一輪")
-    checkNear(st.effectiveAheadM, 24, 1e-9, "10fps 落到下限 24m")
+    checkNear(st.effectiveAheadM, 47, 1e-9, "10fps 額度到上限後才縮到 47m")
     checkNear(st.requestedAheadM, 200, 1e-9, "請求仍是 200")
-    checkEq(R.cells, LAT_ROWS * 23, "24m 帶整帶掃滿")
-    checkTrue(R.peakScan <= BUDGET, "極慢幀仍不加重單幀負擔（實得 " .. R.peakScan .. "）")
+    checkEq(R.cells, LAT_ROWS * 46, "47m 帶整帶掃滿")
+    checkTrue(R.peakScan <= 3 * BUDGET, "極慢幀單幀額度不超過 3 倍上限（實得 " .. R.peakScan .. "）")
 
-    -- 5 秒的卡頓幀（EWMA 上限 250ms）：仍是 24m，不是 0、不是負值
+    -- 5 秒的卡頓幀（EWMA 上限 250ms）：2 + 12×375/250 = 20 → 仍是 24m，不是 0、不是負值
     resetWorld()
     st = newSensor(200, 5000, 0)
     checkTrue(runRound(st), "卡頓幀完成一輪")
@@ -478,15 +497,15 @@ local function scenarioFrameAdaptation()
 end
 
 -- 幀時突然變長：可負擔視距每輪最多回縮 4m（2026-09-27 正式服 33 段 eff-regress：一輪縮 9–33m，
--- 前緣瞬間拉近、硬煞帳跟著崩）。仍守每幀額度，最後收斂到新的可負擔值。
+-- 前緣瞬間拉近、硬煞帳跟著崩）。仍守每幀額度上限，最後收斂到新的可負擔值。
 local function scenarioAffordableShrink()
-    scenario("可負擔視距回縮限速：幀時跳高時每輪最多縮 4m、每幀額度不變、最後收斂")
+    scenario("可負擔視距回縮限速：幀時跳高時每輪最多縮 4m、每幀額度不超過上限、最後收斂")
     resetWorld()
     local st = newSensor(200, 20, 0)
     checkTrue(runRound(st), "50fps 完成一輪")
-    checkNear(st.effectiveAheadM, 77, 1e-9, "起點 77m")
+    checkNear(st.effectiveAheadM, affordableFor(20), 1e-9, "起點 ≈91.7m")
     R.frameMs = 60
-    st.frameEwmaMs = 60 -- 幀時 EWMA 一口氣跳到 60ms（可負擔 27m）
+    st.frameEwmaMs = 60 -- 幀時 EWMA 一口氣跳到 60ms（額度 168 格、可負擔 77m）
     local prev, maxDrop, peak = st.effectiveAheadM, 0, 0
     for _ = 1, 20 do
         checkTrue(runRound(st), "慢幀照樣完成輪")
@@ -496,8 +515,8 @@ local function scenarioAffordableShrink()
         prev = st.effectiveAheadM
     end
     checkTrue(maxDrop <= 4 + 1e-9, "每輪最多縮 4m（實得 " .. maxDrop .. "）")
-    checkNear(st.effectiveAheadM, 27, 1e-9, "最後收斂到新的可負擔 27m")
-    checkTrue(peak <= BUDGET, "回縮期間每幀額度不變（實得 " .. peak .. "）")
+    checkNear(st.effectiveAheadM, 77, 1e-9, "最後收斂到新的可負擔 77m")
+    checkTrue(peak <= budgetFor(60), "回縮期間每幀額度不超過上限（實得 " .. peak .. "）")
 end
 
 -- =====================================================================

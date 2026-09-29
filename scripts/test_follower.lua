@@ -376,13 +376,13 @@ do
         math.sqrt(pCorner.v[4] * pCorner.v[4] + 2 * (F.STYLES.brisk.coast + F.STYLES.brisk.coastAssist) * 8), 1e-9,
         "彎前收油包絡＝brisk 滑行 " .. F.STYLES.brisk.coast .. "＋輔助 " .. F.STYLES.brisk.coastAssist .. "，不動用 active brake")
     checkNear(pCorner.coastAssistAt[3], F.STYLES.brisk.coastAssist, 1e-12, "彎前段記下輔助量（control 夾限要加回）")
-    -- 拖車（configureFollower 歸零）與舒適檔：不加輔助
+    -- 輔助量 0（舒適檔）：不加輔助，彎前回到純滑行包絡
     local pNoAssist = F.begin(mkRoute({ 0, 0, 8, 0, 16, 0, 24, 0, 24, 8, 24, 16, 24, 24, 24, 32, 24, 40, 24, 48 }), MAXV)
     pNoAssist.coastAssist = 0
     while not pNoAssist.ready do F.stepBuild(pNoAssist, 4096) end
     checkNear(pNoAssist.v[3],
         math.sqrt(pNoAssist.v[4] * pNoAssist.v[4] + 2 * F.STYLES.brisk.coast * 8), 1e-9,
-        "輔助歸零（拖車）：彎前回到純滑行包絡")
+        "輔助量 0：彎前回到純滑行包絡")
     checkEq(F.STYLES.comfort.coastAssist, 0, "舒適檔不加輔助")
     -- control：線上學到的純斷油夾限要加回該段輔助（否則輔助被夾掉）。車停在彎前第 2 段中點。
     local stA = F.newState()

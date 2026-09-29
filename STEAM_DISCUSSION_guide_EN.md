@@ -88,6 +88,7 @@ AutoDrive follows MiniMap's navigation network; map images provide no routes. Ad
 [h2]❓ FAQ[/h2]
 [list]
 [*] [b]Does stopping autodrive brake?[/b] No — it only hands back the wheel.
+[*] [b]Why is it slow or uneven?[/b] Click CRUISE LIMIT on the HUD to open Speed info; "Main reason" shows what is holding speed down. Common causes: 30/50/70 corner and ease off gently (use MAX for speed); it only drives as fast as it can stop within road it has already checked, so at very low FPS it checks less and the HUD shows "Low FPS: slower" (raise FPS); towing corners slower; turn off the HUD Zombies / Corpses buttons to stop slowing for them (it drives through if it can't dodge).
 [*] [b]Refuses to start?[/b] Sit in the driver's seat with the Autopilot installed and a route planned (charged GPS if required). Vehicles lacking reliable body-size data refuse with a notice.
 [*] [b]One map mod fails?[/b] Update all series mods and restart, then check road data with the map author.
 [*] [b]Not resumed after loading?[/b] By design, re-entering a save never resumes autodrive.

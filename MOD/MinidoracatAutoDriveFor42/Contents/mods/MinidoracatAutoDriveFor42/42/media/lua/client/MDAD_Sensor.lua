@@ -56,8 +56,9 @@
 -- 效能守則（step 每幀跑，且每一格都是跨 Lua↔Java 邊界的呼叫）
 -- ---------------------------------------------------------------------------
 -- ① 節流：沒有進行中的掃描時，一次數字比較就 return（SCAN_INTERVAL_MS 250ms 一輪）。
--- ② 分幀：一輪 47 個縱向樣本 × 14 條橫向 ＝ 658 格，每幀最多 56 格，
---    12 幀（60fps 下 200ms）跑完，仍小於 250ms 的輪距，不會前後輪重疊。
+-- ② 分幀：每幀最多 MDADDynamics.scanBudget(平均幀時) 格（60 FPS 以上 56 格，更慢按幀時放大、最多 3 倍，
+--    感知占幀時的比例固定）。可負擔視距按「名目 375ms 內掃得完」算；一輪跑完才開下一輪（最早在上一輪
+--    開始後 250ms），不會重疊。
 -- ③ 零配置：step 內不建 table、不建 closure、不做字串串接。橫向偏移表與成本常數
 --    都是載入期的 upvalue；硬障礙緩衝區重複使用（第一輪把陣列撐到定容後就不再成長）。
 -- ④ 世界格去重：同一輪內相鄰步的橫向取樣會落在同一格（1 公尺步長 × 1 公尺格），
@@ -84,7 +85,7 @@ local SCAN_INTERVAL_MS = 250   -- 兩輪掃描的間隔（自輪次「開始」�
 local SCAN_NEAR = 2            -- 掃描起點：車前 2 公尺（車身本體不算障礙）
 local SCAN_AHEAD = MDADDynamics.PERCEPTION_DEFAULT_M
 local SCAN_STEP = 1            -- 沿路線的取樣步長（公尺，＝一格）
-local SCAN_BUDGET = 56         -- 每幀世界查詢額度固定；低幀率縮有效範圍，不加重單幀負擔
+-- 每幀世界查詢額度：MDADDynamics.scanBudget(state.frameEwmaMs)（0929o 起隨幀時放大，見該處）
 -- 可負擔視距每輪最多回縮這麼多（公尺）：幀時 EWMA 突然變長時前緣不一口氣拉近（2026-09-27
 -- 正式服 33 段 eff-regress：一輪縮 9–33m 直接把硬煞帳壓破）。多掃的幾格只讓輪時略長。
 local AFFORD_SHRINK_MAX = 4
@@ -98,7 +99,7 @@ local SPRITE_CACHE_MAX = 4096  -- sprite 成本快取條目上限
 -- 0.5m），但**兩台並排**（實佔 l∈[-2,3]、膨脹後 [-4.1,5.1]）就整帶堵死——
 -- 2026-08-28 實機：路口兩台並排車，左右明明有空間（在走廊外）卻 blocked 停死。
 -- ±7 走廊（可行帶 ±5.6）讓並排車側邊的縫進得了候選集；代價是每輪掃描
--- 14×47=658 格（舊 ±5/36m 為 350 格），SCAN_BUDGET 32→56，仍是 12 幀。
+-- 14×47=658 格（舊 ±5/36m 為 350 格），每幀基準額度 32→56，仍是 12 幀。
 -- 取樣點放在格心（±0.5 … ±6.5）而不是格界，避免 floor 之後兩條相鄰橫向落到
 -- 同一格、白掃一次。
 local LAT = { -6.5, -5.5, -4.5, -3.5, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5 }
@@ -929,7 +930,7 @@ local function beginRound(state, p, sNow, vehicle, now, len, cell)
     state.wSoftEndS = sNow + math.min(MDADDynamics.PERCEPTION_HARD_MAX_M,
         math.max(MDADDynamics.SOFT_LOOKAHEAD_M, softAhead))
     local ahead, affordable = MDADDynamics.perceptionEffective(
-        state.aheadM, state.frameEwmaMs, SCAN_BUDGET / LAT_N, SCAN_NEAR,
+        state.aheadM, state.frameEwmaMs, MDADDynamics.scanBudget(state.frameEwmaMs) / LAT_N, SCAN_NEAR,
         state.lastAffordableM and state.lastAffordableM - AFFORD_SHRINK_MAX or nil)
     state.lastAffordableM = affordable
     state.requestedAheadM = state.aheadM
@@ -1292,7 +1293,7 @@ function MDADSensor.step(state, profile, sNow, vehicle, now, cell)
 
     local visited = state.visited
     local gen = state.gen
-    local budget = SCAN_BUDGET
+    local budget = MDADDynamics.scanBudget(state.frameEwmaMs)
 
     while budget > 0 do
         local li = state.curL

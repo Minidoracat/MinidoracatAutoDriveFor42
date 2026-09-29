@@ -1186,6 +1186,7 @@ local function encodePhys(phys)
     addNum("visAssistDecel", "vad")   -- 巡航減速輔助補的減速度（m/s²）
     addNum("towPhi", "tph")           -- 拖掛折角（rad）
     addNum("towUp", "tup")            -- 拖掛 upVectorDot（<0.8 原版拆掛）
+    addNum("towDecel", "tda")         -- 施給掛車的減速度（m/s²；0929o 拖車減速分攤）
     addNum("curveVerifiedUntilS", "curveVerifiedUntilS")
     addNum("filletN", "filletN")
     addNum("filletFallbackN", "filletFallbackN")

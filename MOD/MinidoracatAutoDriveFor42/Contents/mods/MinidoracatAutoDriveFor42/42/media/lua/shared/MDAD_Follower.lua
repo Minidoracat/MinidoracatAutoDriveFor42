@@ -274,7 +274,7 @@ MDADFollower.OV_MAX = OV_MAX
 -- coastAssist（0928m；使用者裁定「流暢過彎包括不過度減速」）：彎前收油包絡加上 Driver 的中線減速輔助
 -- （Drive.visAssistForce 追 fstate.profileSpeedKmh，上限 CURVE_ASSIST_MAX）——斷油只有 1.2–3.6 m/s²，
 -- 舊包絡從彎前很遠就開始滑；加 2.5 後晚收油、到彎前再補煞。終點停車包絡不加（到站圈的停點另有取捨）；
--- 拖車由 Driver 歸零（掛車往前推會折，Driver 也不對拖車施中線力）。舒適檔不加。
+-- 拖車同樣加（0929o；Driver 把同一減速度依質量也施給掛車，Drive.towDecel）。舒適檔不加。
 MDADFollower.STYLES = {
     brisk = { name = "brisk", lat = LAT_ACCEL, brake = BRAKE, coast = 3.0, coastAssist = 2.5,
         turnSoft = TURN_SOFT_RAD, turnHard = TURN_HARD_RAD, turnHardMs = TURN_HARD_MS },

@@ -6546,9 +6546,9 @@ function drive.scanRound(freezeProgress)
     end
 end
 
--- 感知距離可調（0909b）：有效視距＝SCAN_NEAR＋(SCAN_BUDGET/LAT_N)×PERCEPTION_ROUND_MS/幀時，
--- 預設 drive.mult 1.6（30 FPS＝幀時 33ms）只給 ~50m。明確要求 80-120m 的個別情境要在自己的
--- 區塊裡把幀時降下來再還原——全檔改幀率會讓 design envelope 之類的既有情境炸掉。
+-- 感知距離可調（0909b）：有效視距＝SCAN_NEAR＋(額度/LAT_N)×PERCEPTION_ROUND_MS/幀時，額度自 0929o 起
+-- 隨幀時放大（MDADDynamics.scanBudget，最多 3 倍）：預設 drive.mult 1.6（30 FPS＝幀時 33ms）已有 60 FPS 的
+-- 92m，要重現「幀率造成的短視距」得用 50ms 以上。個別情境在自己的區塊裡改幀時再還原。
 -- frameEwmaMs 從 33ms 收斂到 10ms 要上百個樣本（每樣本只走 frame/(1000+frame)），所以連
 -- EWMA 一起直接寫成目標幀時；區塊內新開的 session 其 EWMA 是 0、首個樣本就等於幀時，
 -- 不需要暖機。回傳原本的幀時（ms）供區塊結束時還原。
@@ -6975,7 +6975,7 @@ function drive.scenarioBrakeAssist()
     st.visHardAhead = nil
     checkEq(MDAD.Drive.emergencyBrakeDist(st, "curve", false), nil, "(brake-assist) 彎道煞車不算緊急")
     -- (curve-assist) 0928m brisk 彎前晚收油：剖面（profileSpeedKmh）已假設中線減速輔助，實速超過就照
-    --   超速量×CURVE_ASSIST_GAIN 補、上限 CURVE_ASSIST_MAX；舒適檔／拖車（coastAssist 0）不補。
+    --   超速量×CURVE_ASSIST_GAIN 補、上限 CURVE_ASSIST_MAX；舒適檔（coastAssist 0）不補。
     --   違規證明：拿掉 visAssistForce 的剖面分支＝第一行紅。
     local oldCap, oldPv, oldAssist, oldReady = st.visibilityCap, st.fstate.profileSpeedKmh,
         st.profile.coastAssist, st.sensor and st.sensor.ready
@@ -6989,7 +6989,7 @@ function drive.scenarioBrakeAssist()
     checkNear(st.visAssistDecel, tune.CURVE_ASSIST_MAX, 1e-9, "(curve-assist) 上限 CURVE_ASSIST_MAX")
     st.profile.coastAssist = 0
     MDAD.Drive.visAssistForce(st, 60, 1)
-    checkEq(st.visAssistDecel, 0, "(curve-assist) 剖面沒假設輔助（舒適／拖車）：不補")
+    checkEq(st.visAssistDecel, 0, "(curve-assist) 剖面沒假設輔助（舒適檔）：不補")
     st.visibilityCap, st.fstate.profileSpeedKmh, st.profile.coastAssist = oldCap, oldPv, oldAssist
     if st.sensor then st.sensor.ready = oldReady end
     MDAD.Drive.stop(0, nil)
@@ -7002,18 +7002,23 @@ function drive.scenarioCommitSpeed()
     drive.world = {}
     drive.fillWorld(-10, 170, -20, 20)
     drive.putRoad(-10, 170, -20, 20)
+    -- 煞得停、但到縫前減不到 cap：延後並先減速（30m 外、55 km/h）。0929o 起 30 FPS 的掃描額度放大到
+    -- 60 FPS 的 92m，縫出口不再被視距截短、線不再是低速線；session 以 20 FPS 以下（100ms：可負擔 47m）
+    -- 起算（首輪就是這個幀時，沒有上一輪的可負擔視距要慢慢回縮），重現「出口被截短、線只有 25 km/h」。
+    local was = drive.frameMs(100)
     assert(armDrive())
     setHeading(dveh, 0)
-    -- 煞得停、但到縫前減不到 cap：延後並先減速（30m 外、55 km/h）
     dveh._speed = 55
     drive.putSolid(30, 0, "cruise_commit_speed")
     drive.scanRound(true)
+    drive.frameMs(100)
     local st = MDAD.Drive.debugSession(0)
     assert(not st.dodgeCrawl)
     checkTrue(not st.dodging and st.dodgeDeferCap >= 0 and st.dodgeDeferCap < 70,
         "(commit-speed) 巡航分類的低速線也要先減速，不能以55km/h承諾25km/h縫")
     dveh._speed = 20
     drive.scanRound(true)
+    drive.frameMs(was)
     checkTrue(st.dodging and st.dodgeDeferCap < 0,
         "(commit-speed) 減到可執行速度後，原候選正常承諾")
     MDAD.Drive.stop(0, nil)
@@ -7917,10 +7922,10 @@ function drive.scenarioZombiePlan()
 end
 drive.scenarioZombiePlan()
 
--- ⑤lf 低幀率降速提示（0925）：可視上限壓速、平均幀時 ≥30ms，且視距是被幀率截短，
---   持續 2s 才讓 HUD 狀態變「卡頓降速」（lowfps）、恢復 3s 才消失；同趟累計 10s 跳一次通知。
---   反例：幀率低但速度沒被可視上限壓（沙盒上限 20）不顯示。違規證明：ON 遲滯歸零＝首輪即顯示紅；
---   拿掉「只通知一次」＝通知次數 >1 紅。
+-- ⑤lf 低幀率降速提示（0925；0929o 門檻改為掃描額度放大到上限的 50ms）：可視上限壓速、平均幀時 ≥50ms，
+--   且視距是被幀率截短，持續 2s 才讓 HUD 狀態變「卡頓降速」（lowfps）、恢復 3s 才消失；同趟累計 10s 跳一次
+--   通知。session 從 150ms（可負擔 32m）起算。反例：幀率低但速度沒被可視上限壓（沙盒上限 20）不顯示。
+--   違規證明：ON 遲滯歸零＝首輪即顯示紅；拿掉「只通知一次」＝通知次數 >1 紅。
 function drive.scenarioLowFpsNotice()
     scenario("低幀率降速：HUD 狀態遲滯顯示、每趟只通知一次、沒被壓速不顯示")
     local function count(key)
@@ -7938,29 +7943,31 @@ function drive.scenarioLowFpsNotice()
         dveh._speed = maxKmh
         return MDAD.Drive.debugSession(0)
     end
+    local was = drive.frameMs(150)
     local s = run(120)
-    local was = drive.frameMs(80)
+    drive.frameMs(150)
     drive.scanRound()
-    drive.frameMs(80)
+    drive.frameMs(150)
     local firstKey = MDAD.Drive.hudState(0)
-    for _ = 1, 8 do drive.scanRound(); drive.frameMs(80) end
+    for _ = 1, 8 do drive.scanRound(); drive.frameMs(150) end
     local onKey = MDAD.Drive.hudState(0)
     checkTrue(firstKey ~= "lowfps" and onKey == "lowfps",
         "(lf) 可視上限被幀率壓住：遲滯後 HUD 顯示 lowfps（首輪 " .. tostring(firstKey) .. "、之後 " .. tostring(onKey) .. "）")
-    for _ = 1, 40 do drive.scanRound(); drive.frameMs(80) end
+    for _ = 1, 40 do drive.scanRound(); drive.frameMs(150) end
     checkEq(count("UI_MinidoracatAutoDrive_LowFpsNotice"), 1, "(lf) 同一趟累計超過 10 秒只通知一次")
     drive.frameMs(10)
     for _ = 1, 16 do drive.scanRound(); drive.frameMs(10) end
     checkTrue(MDAD.Drive.hudState(0) ~= "lowfps", "(lf) 幀率恢復後狀態消失")
-    -- 門檻 predicate 級：同樣視距被幀率截短、可視上限在壓速，40 FPS（25ms）不算、25 FPS（40ms）算
-    for _, c in ipairs({ { 25, false }, { 40, true } }) do
+    -- 門檻 predicate 級：同樣視距被幀率截短、可視上限在壓速，25 FPS（40ms：額度已放大到看得到 60 FPS 的
+    -- 距離，不是幀率造成的）不算、17 FPS（60ms：額度已到上限）算
+    for _, c in ipairs({ { 40, false }, { 60, true } }) do
         local fake = { mode = "follow", playerNum = 0, lastSNow = 0, sensor = {
             affordableAheadM = 62, requestedAheadM = 240, effectiveAheadM = 62, frameEwmaMs = c[1] } }
         for t = 0, 3000, 100 do MDAD.Drive.updateLowFps(fake, 1000 + t, true) end
         checkEq(fake.lowFps == true, c[2], "(lf) 幀時 " .. c[1] .. "ms 可視上限壓速 3 秒：低幀率＝" .. tostring(c[2]))
     end
     s = run(20)
-    for _ = 1, 12 do drive.scanRound(); drive.frameMs(80) end
+    for _ = 1, 12 do drive.scanRound(); drive.frameMs(150) end
     checkTrue(MDAD.Drive.hudState(0) ~= "lowfps" and not s.lowFps,
         "(lf) 幀率低但沒被可視上限壓速（上限 20）：不顯示")
     drive.frameMs(was)
@@ -11997,7 +12004,12 @@ local function scenarioTelemetry()
     drive.telemOn = false
     checkTrue(armDrive(), "telemetry off 仍可啟動")
     driveReset(dveh)
+    -- isDoingOffroad 另有一條非診斷路徑：每個完成的感知輪讀一次當路面輔證（Driver 的 surface state）。
+    -- 0929o 起 30 FPS 的掃描額度放大，這個短世界（只載入到 x≈70）8 幀內就可能完成一輪，所以期望值＝完成輪數。
+    local offSt = MDAD.Drive.debugSession(0)
+    local offRounds0 = offSt and offSt.sensor and offSt.sensor.rounds or 0
     for _ = 1, 8 do driveTick(dp, dveh) end
+    local offRounds = (offSt and offSt.sensor and offSt.sensor.rounds or 0) - offRounds0
     checkEq(dveh._imp.max, 1, "off：每幀最多一次 addImpulse")
     MDAD.Drive.stop(0, nil)
     checkEq(drive.diag.start, 0, "off：零 start")
@@ -12005,7 +12017,7 @@ local function scenarioTelemetry()
     checkEq(drive.diag.sample, 0, "off：零 sample")
     checkEq(drive.diag.event, 0, "off：零 event")
     checkEq(drive.diag.stop, 0, "off：零 stop")
-    checkEq(drive.calls.isDoingOffroad, 0, "off：零 isDoingOffroad")
+    checkEq(drive.calls.isDoingOffroad, offRounds, "off：isDoingOffroad 只剩完成輪的路面輔證（完成 " .. offRounds .. " 輪）")
     checkEq(drive.calls.isBraking, 0, "off：零 isBraking")
     checkEq(drive.calls.getMinWheelSkid, 0, "off：零 getMinWheelSkid")
     checkEq(drive.calls.getEngineSpeed, 0, "off：零 getEngineSpeed")
@@ -12073,12 +12085,16 @@ local function scenarioTelemetry()
 
     driveReset(dveh)
     drive.diag.sample = 0
+    local onSt = MDAD.Drive.debugSession(0)
+    local onRounds0 = onSt and onSt.sensor and onSt.sensor.rounds or 0
     for _ = 1, 5 do
         dveh._x = dveh._x + 0.1852
         driveTick(dp, dveh)
     end
     check(drive.diag.sample > 0, "對齊窗有 sample")
-    checkEq(drive.calls.isDoingOffroad, drive.diag.sample, "isDoingOffroad 次數 = sample")
+    local onRounds = (onSt and onSt.sensor and onSt.sensor.rounds or 0) - onRounds0
+    checkEq(drive.calls.isDoingOffroad, drive.diag.sample + onRounds,
+        "isDoingOffroad 次數 = sample＋完成輪的路面輔證（" .. onRounds .. " 輪）")
     checkEq(drive.calls.getLinearVelocity, drive.diag.sample, "getLinearVelocity 次數 = sample")
 
     forceShould = false
@@ -13616,12 +13632,13 @@ local function scenarioPhaseE()
         "full exact line is stable on the following round（無 commit↔hold 震盪）")
     drive.frameMs(drive.savedFrameMs)
     MDAD.Drive.stop(0, nil)
-    -- (lowfps-return) 0925：低幀率（幀時 50ms＝有效視距約 32m）線外 4m 起步。舊制 RETURN 線尾
+    -- (lowfps-return) 0925：低幀率（有效視距約 32m）線外 4m 起步。舊制 RETURN 線尾
     --   固定最高速前視 18m，整條要看到 ~36m＝永遠 unloaded、整趟 14 km/h 爬行（E2E e-road）；
     --   線尾改回線速度所需後幾輪內就承諾完整回線。違規證明：線尾改回 18×lookScale 即紅。
-    --   (lowfps-release) 視距再短（幀時 80ms＝24m 地板）連新線尾也放不下：unloaded 爬行
+    --   (lowfps-release) 視距再短（24m 地板）連新線尾也放不下：unloaded 爬行
     --   RETURN_UNLOADED_MS 後交還一般追線。違規證明：期限拉到 10 分鐘即紅。
-    for _, c in ipairs({ { 50, "commit" }, { 80, "release" } }) do
+    --   0929o 起掃描額度隨幀時放大到 3 倍：32m 要 150ms、24m 地板要 ≥205ms（舊 50／80ms 現在都看得到 60 FPS 的 92m）。
+    for _, c in ipairs({ { 150, "commit" }, { 250, "release" } }) do
         drive.nav.route = v4Route("paved", 10)
         hotVeh._x, hotVeh._y, hotVeh._speed = 0, 4, 14
         drive.fillWorld(-10, 170, -20, 20)
@@ -18541,6 +18558,66 @@ function drive.scenario0929j()
     SandboxVars = oldSand
 end
 drive.scenario0929j()
+
+-- 0929o（Workshop 兩則回報：拖 40 呎貨櫃走走停停、開車燈更慢）：
+--   (tow-assist) 拖車也有不鎖輪減速：牽引車照舊（runtimeMass），掛車依自己的質量分到同一減速度，方向跟
+--     掛車自己的速度相反（被倒著拖的車 forward 朝後也一樣），施在質心；掛車幾乎不動時不施。舊制拖車一律
+--     不補，只剩滑行與一秒鎖輪（掛車自己不煞車，鎖牽引車＝掛車從後面推）。
+--     違規證明：visAssistForce 加回拖車排除＝第一條紅；不分攤（towDecel 空轉）＝質量比那條紅；
+--     掛車力改沿 forward＝倒拖那條紅。
+--   (tow-defer) 待承諾接近的鎖輪門檻拖車也用緊急帳（有輔助可追）。違規證明：deferHardKmh 加回拖車排除＝紅。
+--   (tow-brake) 硬煞外力輔助（Drive.brakeAssist）也分攤：掛車分到同一減速度（2.4k m/s²）。違規證明：拿掉
+--     brakeAssist 裡的 towDecel＝紅。
+function drive.scenario0929o()
+    scenario("0929o：拖車不鎖輪減速依質量分攤到掛車")
+    local Dr = MDAD.Drive
+    local hit = {}
+    local function trailer(vx, vz, fx, fz)
+        return {
+            getLinearVelocity = function(_, out) return out:set(vx, 0, vz) end,
+            getForwardVector = function(_, out) return out:set(fx, 0, fz) end,
+            addImpulse = function(_, imp, rel)
+                hit.n = (hit.n or 0) + 1
+                hit.x, hit.z, hit.rx, hit.rz = imp:x(), imp:z(), rel:x(), rel:z()
+            end,
+        }
+    end
+    local s = { sensor = { ready = true }, visibilityCap = 40, fstate = {}, profile = {}, runtimeMass = 3000,
+        tow = { trailer = trailer(0, 20, 0, 1), mass = 1500 } }
+    local f = Dr.visAssistForce(s, 50, 0.8)
+    checkTrue(f > 0 and s.visAssistDecel > 0,
+        "(tow-assist) 拖車超過可視帽：牽引車照樣補不鎖輪減速（" .. tostring(s.visAssistDecel) .. "）")
+    Dr.towDecel(s, s.visAssistDecel, 0.8)
+    local ft = math.sqrt((hit.x or 0) ^ 2 + (hit.z or 0) ^ 2)
+    checkNear(ft / math.max(f, 1e-9), 1500 / 3000, 1e-9, "(tow-assist) 掛車分到的力／牽引車的力＝質量比（兩節同減速度）")
+    checkTrue((hit.z or 0) < 0 and math.abs(hit.x or 1) < 1e-9 and hit.rx == 0 and hit.rz == 0,
+        "(tow-assist) 掛車外力朝它自己的速度反向、施在質心")
+    checkEq(s.towAssistDecel, s.visAssistDecel, "(tow-assist) 記下施給掛車的減速度（telemetry tda）")
+    s.tow.trailer, hit.n = trailer(0, 20, 0, -1), 0
+    Dr.towDecel(s, s.visAssistDecel, 0.8)
+    checkTrue(hit.n == 1 and hit.z < 0, "(tow-assist) 被倒著拖（forward 朝後）：仍朝速度反向，不會往前推")
+    s.tow.trailer, hit.n = trailer(0, 0.3, 0, 1), 0
+    Dr.towDecel(s, s.visAssistDecel, 0.8)
+    checkTrue(hit.n == 0 and s.towAssistDecel == 0, "(tow-assist) 掛車幾乎沒在動：不施")
+    local d = { tow = s.tow, dodgeDeferS = 60, dodgeDeferCap = 10, lastSNow = 0, safeBrake = 4,
+        sensor = { ready = true }, vehicleProfile = { halfL = 3 } }
+    local hard = Dr.deferHardKmh(d, 50)
+    checkTrue(hard > d.dodgeDeferCap,
+        "(tow-defer) 拖車待承諾接近：鎖輪門檻用緊急帳（" .. tostring(hard) .. " > 接近帽 10），不是一超過就鎖輪")
+    local tractor = {
+        getCurrentSpeedKmHour = function() return 60 end,
+        getForwardVector = function(_, out) return out:set(0, 0, 1) end,
+        addImpulse = function(_, imp) hit.bx, hit.bz = imp:x(), imp:z() end,
+    }
+    local b = { tow = { trailer = trailer(0, 16, 0, 1), mass = 1500 }, runtimeMass = 3000 }
+    hit.n, hit.x, hit.z = 0, nil, nil
+    Dr.brakeAssist(b, tractor, 10)
+    checkTrue(b.brakeImpulseThis == true and (hit.bz or 0) < 0, "(tow-brake) 硬煞外力輔助照樣施給牽引車")
+    checkNear(math.abs(hit.z or 0) / math.max(math.abs(hit.bz or 0), 1e-9), 1500 / 3000, 1e-9,
+        "(tow-brake) 掛車分到的力／牽引車的力＝質量比（兩節同減速度，掛點不推）")
+    checkNear(b.towAssistDecel, 2.4, 1e-9, "(tow-brake) 記下施給掛車的減速度（60 km/h 滿載＝2.4 m/s²）")
+end
+drive.scenario0929o()
 
 do -- 主 chunk local 槽已滿：整段包成函式，內部 local 不佔主 chunk
 -- =====================================================================
