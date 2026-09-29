@@ -122,15 +122,23 @@ local CORRIDOR_HALF = 7
 local KEY_MUL = 100000
 
 local COST_NONE, COST_SOFT, COST_HARD = 0, 1, 2
-local COST_HARD_THIN = 3       -- 細桿硬障礙（樹幹）：擋不擋線用 0 半徑判（樹幹 ~0.3 格）
-local COST_HARD_SMALL = 4      -- 單格小物（solidtrans 非牆：郵筒/垃圾桶/路牌）：半格箱
+local COST_HARD_THIN = 3       -- 細桿硬障礙：無碰撞旗標的籬笆 sprite，格心 0 半徑（引擎本身不給形狀，保守留著）
+local COST_TREE = 4            -- 樹幹形狀（樹、室外路燈柱、PhysicsShape=Tree）：見 TRUNK_*
 local COST_DOOR = 5            -- 門／柵門 sprite（doorN／doorW）：開關狀態在格級屬性，由 closedDoor(square) 判
+local COST_WALL_N, COST_WALL_W, COST_WALL_NW = 6, 7, 8 -- 帶 collideN／collideW 的籬笆：格邊薄牆，見 WALL_*
 local SLOW_BAND_HALF = 3       -- 減速計數帶半寬（±3＝路面帶；hard 仍收全走廊 ±6.5）
-local OBS_HALF_R = 0.7         -- 整格箱型硬障礙的半徑（＝Corridor 的 OBS_HALF；樹幹用 0）
-local OBS_SMALL_R = 0.30       -- 小物半徑（2026-09-01 telemetry s016：blocked 縫
-                               -- 差距 m=1.0 vs need=1.1——桿類/栓類 0.35 疊 need
-                               -- 差 5-10cm 打槍「明明有空間」的縫；0.30 仍蓋
-                               -- 桿柱實體，量化肥邊另由 SWEEP_QUANT_COMP 補）
+-- 硬障礙的點雲幾何對齊引擎的車輛靜態碰撞形狀（0929j；IsoChunk.calcPhysics:1987-2129 決定形狀，尺寸在
+-- libPZBullet64：createSolid 半尺寸 (0.5,1,0.5) 置於格心、createTreeBody 半尺寸 (0.1,1,0.1) 置於格 +0.6/+0.6、
+-- getWallNShape／getWallWShape 半厚 0.05 置於格的北緣／西緣）。舊制三處與引擎不符，玩家 KI5 Oshkosh 兩次事故
+-- 都在這裡：solidtrans 非牆小物當 0.30 圓，引擎卻是 solidtrans＝整格 Solid 方塊（session-012 車身停在方塊面
+-- 0–4cm、模型以為還有 0.2m）；樹幹放格心 0 半徑，真的樹幹偏東南 0.1、寬 0.2；籬笆放格心，真的在格邊（差 0.45）。
+local OBS_HALF_R = 0.7         -- 整格方塊（solid／solidtrans／樓梯／StopCar／關門）：外接圓半徑（＝Corridor 的 OBS_HALF），規劃用
+local BOX_HALF = 0.5           -- 同一方塊的真半邊長：掃掠與接觸以方塊算（圓在軸向多估 0.2，窄縫會被多判不可過）
+local TRUNK_OFF = 0.6          -- 樹幹中心＝格 +0.6/+0.6
+local TRUNK_R = 0.15           -- 0.2m 見方樹幹的外接圓（半對角 0.141）
+local WALL_R = 0.26            -- 格邊薄牆（1×0.1）以兩顆圓覆蓋：中心在 1/4、3/4 處，半徑＝√(0.25²＋0.05²)
+-- scanCell 回的形狀碼：BOX 單獨；其餘以 2/4/8/16 相加並存（Kahlua 無位元運算，解碼用 % 取位）
+local SHAPE_BOX, SHAPE_WALL_N, SHAPE_WALL_W, SHAPE_TRUNK, SHAPE_THIN = 1, 2, 4, 8, 16
 -- 車輛精確輪廓（2026-09-02 車陣實爆：格級佔位把 1.8m 寬的車體膨脹成 3 格＋0.7
 -- 圓＝4.4m，兩台車之間 2.8m 的真縫被吃到 0.2m，plan 永遠 blocked）。發現
 -- 車輛仍靠 getVehicleContainer 的格級幾何查詢（可靠），幾何改用該車的 OBB：四角
@@ -186,7 +194,7 @@ MDADSensor.SURFACE_PAVED = SURFACE_PAVED
 -- 等用例）。在載入期直接取 upvalue 會綁死載入順序，也讓離線 harness 沒有插手空間；
 -- 改成第一輪掃描開始時綁一次，之後每輪只多一次 boolean 比較。
 local F_water, F_doorN, F_doorW, T_moveable
-local F_solidtrans, F_wallN, F_wallW, F_wallNW, F_solidfloor
+local F_solid, F_solidtrans, F_collideN, F_collideW, F_solidfloor
 local F_doorWallN, F_doorWallW, F_open
 local flagsBound = false
 
@@ -195,10 +203,10 @@ local function bindFlags()
     F_solidfloor = IsoFlagType.solidfloor
     F_doorN = IsoFlagType.doorN
     F_doorW = IsoFlagType.doorW
+    F_solid = IsoFlagType.solid
     F_solidtrans = IsoFlagType.solidtrans
-    F_wallN = IsoFlagType.WallN
-    F_wallW = IsoFlagType.WallW
-    F_wallNW = IsoFlagType.WallNW
+    F_collideN = IsoFlagType.collideN
+    F_collideW = IsoFlagType.collideW
     F_doorWallN = IsoFlagType.DoorWallN
     F_doorWallW = IsoFlagType.DoorWallW
     F_open = IsoFlagType.open
@@ -245,14 +253,13 @@ end
 -- sprite 分類（只在快取 miss 時跑）
 --------------------------------------------------------------------------------
 
--- 回 (hard, thin)：hard＝這一格是不是硬障礙；thin＝硬障礙來源是細桿（樹幹）。
+-- 回 COST_*：硬障礙依引擎的車輛碰撞形狀分成整格方塊（HARD）、樹幹（TREE）、格邊薄牆（WALL_*）；
+-- THIN 只剩無碰撞旗標的籬笆 sprite（格心 0 半徑，保守留著）。
 --
--- 有碰撞的 sprite 一律 HARD：shouldHaveCollision 只看 solid / solidtrans / WallN /
--- WallNW / WallW / collideN / collideW（IsoSprite.java:2083-2093，**不含 solidfloor**）
--- ——地板 sprite 根本進不了這個分支，所以不需要（也不能有）solidfloor 豁免；
--- 水面的攔截在 scanCell 的「格級地板檢查」（getFloor），不在這裡。
--- v1 刻意不做方向性半格阻擋（北牆只擋北半格）：牆的朝向要配合車的行進方向才有意義，
--- 判錯的代價是直接撞牆，先整格保守擋住。
+-- 有碰撞的 sprite：shouldHaveCollision 只看 solid / solidtrans / WallN / WallNW / WallW / collideN /
+-- collideW（IsoSprite.java:2083-2093，**不含 solidfloor**）——地板 sprite 根本進不了這個分支，所以不需要
+-- （也不能有）solidfloor 豁免；水面的攔截在 scanCell 的「格級地板檢查」，不在這裡。
+-- 非籬笆的牆（WallN/W 等）刻意不做方向性薄牆：牆的朝向要配合車的行進方向才有意義，整格保守擋住。
 --
 -- 無碰撞的 sprite：門框（doorN/doorW）是開口，不能當障礙。`isMoveAbleObject`
 -- 是引擎由 StopCar 設的 vehicle collision type（**不是** tile 的 IsMoveAble 屬性），
@@ -298,34 +305,31 @@ local function classifySprite(obj, name)
     -- 只在 waterUnderfoot（有沒有實地板蓋著）；這裡一律不算物件。
     if props:has(F_water) then return COST_NONE end
 
-    -- 籬笆家族＝細桿硬障礙：鐵絲網／木柵欄實體 0.1-0.3m 薄片，整格肥半徑
-    -- （0.7）讓路緣籬笆排把「路線本身過彎」都判成擦撞（2026-08-29 回程路口：
-    -- bias 直行線離籬笆 1.33m 被 0.7+needBase 判死、原生導航天天照走）。
-    -- r=0 後 needHalf/needBase 的 margin 仍保護實體薄片。
-    if find(name, "fencing_", 1, true) == 1 then return COST_HARD_THIN end
-
-    if sprite:shouldHaveCollision() then               -- IsoSprite.java:2083-2093
-        -- 半徑分級（2026-09-01）：solidtrans 且非牆＝郵筒／垃圾桶／消防栓類
-        -- 單格 street furniture，實體碰撞箱半格級（solidtrans+StopCar 郵筒實例
-        -- newtiledefinitions.tiles.txt:226345-226439）——整格 0.7 會讓單物擋掉
-        -- 4m 寬帶（telemetry s042 dm=0.25 的幾何根源）。牆薄片（WallN/W/NW）
-        -- 與 solid 大箱（dumpster 等）維持整格保守半徑。
-        if props:has(F_solidtrans)
-                and not props:has(F_wallN) and not props:has(F_wallW)
-                and not props:has(F_wallNW) then
-            return COST_HARD_SMALL
-        end
-        return COST_HARD
+    -- 籬笆照引擎旗標給形狀（IsoChunk.calcPhysics:2058-2095）：solid／solidtrans＝整格方塊，collideN／collideW
+    -- ＝格的北緣／西緣 0.1m 薄牆（HoppableN／WallNTrans 等 tile 屬性載入時就轉成 collideN，IsoWorld.java:870-1017）。
+    -- 舊制一律格心 0 半徑：籬笆在近側格邊時模型晚 0.45m 看到、遠側時多擋 0.45m。沒有任何碰撞旗標的籬笆
+    -- sprite 引擎不給形狀，仍留格心 0 半徑（保守）。
+    if find(name, "fencing_", 1, true) == 1 then
+        if props:has(F_solid) or props:has(F_solidtrans) then return COST_HARD end
+        local n, w = props:has(F_collideN), props:has(F_collideW)
+        if n and w then return COST_WALL_NW end
+        if n then return COST_WALL_N end
+        if w then return COST_WALL_W end
+        return COST_HARD_THIN
     end
 
-    -- 樹＝**細桿**硬障礙：樹的 sprite 不帶碰撞 flag（shouldHaveCollision 看不到；
-    -- 車輛引擎對樹另有專屬碰撞），對上面的檢查完全隱形——實機 2026-08-28：
-    -- 自駕全油撞樹、脫困後原路再撞同一棵，三次鬼打牆。IsoTree 住 getObjects
-    -- （IsoTree.java:67 extends IsoObject）；instanceof 用例 ISDestroyCursor.lua:308；
-    -- instanceof 只在 sprite 快取 miss 時跑一次（同名 sprite 恆同類，快取安全）。
-    -- 半徑用 0（樹幹細）：整格肥半徑（0.7）曾把路緣樹排判成擋路、車長期貼
-    -- 對側路緣不回中（2026-08-28 實機）。needHalf 的 0.5 margin 仍保護樹幹。
-    if instanceof(obj, "IsoTree") then return COST_HARD_THIN end
+    -- 樹先判：引擎在有樹的格只給 Tree 形狀，solid 分支是 else-if（calcPhysics:2048-2064）——大樹（JUMBO／XL，
+    -- IsoTree 帶 solid＋StopCar）碰得到的只有樹幹。0929k E2E W 段：整排 JUMBO 樹被 solid 判成整格方塊，
+    -- 靠右與繞行都按 1m 方塊算。樹的 sprite 多半不帶碰撞 flag（shouldHaveCollision 看不到），另給
+    -- Tree 形狀——實機 2026-08-28：自駕全油撞樹、脫困後原路再撞同一棵。IsoTree 住 getObjects（IsoTree.java:67
+    -- extends IsoObject）；instanceof 用例 ISDestroyCursor.lua:308；只在 sprite 快取 miss 時跑一次（同名 sprite
+    -- 恆同類）。形狀是格 +0.6/+0.6 的 0.2m 見方樹幹（TRUNK_*）；整格肥半徑曾把路緣樹排判成擋路（2026-08-28）。
+    if instanceof(obj, "IsoTree") then return COST_TREE end
+
+    -- solidtrans 同 solid＝整格方塊（calcPhysics:2058-2063）。2026-09-01 曾把 solidtrans 非牆小物（郵筒／垃圾桶／
+    -- 消防栓）縮成 0.30 圓（「整格會讓單物擋掉 4m 寬帶」），但車撞上的是引擎的整格方塊：玩家 session-012 Oshkosh
+    -- 車身停在方塊面 0–4cm，模型以為還有 0.2m（0929j 使用者裁定改回整格）。
+    if sprite:shouldHaveCollision() then return COST_HARD end -- IsoSprite.java:2083-2093
 
     -- 車輛的靜態碰撞形狀由 IsoChunk.calcPhysics 決定（IsoChunk.java:1984-2126），不只看碰撞旗標：
     -- 室外路燈 lighting_outdoor_* 在地面層一律是一根柱（:1995-2014）——原版 81 個路燈 sprite 有 76
@@ -333,7 +337,7 @@ local function classifySprite(obj, name)
     -- 三次倒車都撞回同一根。帶 PhysicsShape 的路燈照 PhysicsShape 走（:2094-2111）。
     if find(name, "lighting_outdoor_", 1, true) and not props:has("PhysicsShape")
             and not (props:has("MoveType") and props:get("MoveType") == "WallObject") then
-        return COST_HARD_THIN
+        return COST_TREE
     end
 
     if props:has(F_doorN) then return COST_DOOR end
@@ -345,7 +349,7 @@ local function classifySprite(obj, name)
     -- 運動設施沒有 StopCar 也沒有碰撞旗標）
     if props:has("PhysicsShape") then
         local shape = props:get("PhysicsShape")
-        if shape == "Tree" then return COST_HARD_THIN end
+        if shape == "Tree" then return COST_TREE end
         if shape ~= "Floor" then return COST_HARD end
     end
     if obj:getType() == T_moveable then return COST_SOFT end
@@ -390,7 +394,8 @@ end
 
 -- 旗標 wHardOverflow 讓本輪快照可被判定不完整。Driver 另在快照尾端附加
 -- 最多 4 個虛擬 ban，不經 pushHard，也不占這個 sensor 上限。
-local function pushHard(state, s, l, l4, wx, wy, r)
+-- b（選填）＝整格方塊的半邊長（世界軸對齊；0／nil＝圓）：掃掠與接觸以方塊算距離，規劃仍用 r。
+local function pushHard(state, s, l, l4, wx, wy, r, b)
     local n = state.wHardN
     if n >= HARD_MAX then state.wHardOverflow = true return end
     n = n + 1
@@ -400,8 +405,45 @@ local function pushHard(state, s, l, l4, wx, wy, r)
     state.wHardX[n] = wx
     state.wHardY[n] = wy
     state.wHardR[n] = r
+    state.wHardB[n] = b or 0
     state.wSumS = state.wSumS + (s - s % 1)
     state.wSumL = state.wSumL + l4
+end
+
+-- 格邊薄牆的一顆覆蓋圓：(s,l) 以目前掃描步的局部框把世界點線性化（同 pushVehicleOutline）。薄牆在格緣，
+-- 取樣點最遠會離它 1m，不能沿用取樣點。
+local function pushEdge(state, px, py)
+    local dx, dy = px - state.cx, py - state.cy
+    local nx, ny = state.nx, state.ny
+    local l = dx * nx + dy * ny
+    local l4 = l * 4
+    pushHard(state, state.curS + dx * ny - dy * nx, l, l4 - l4 % 1, px, py, WALL_R)
+end
+
+-- 依 scanCell 的形狀碼推點（常數註解見 OBS_HALF_R／TRUNK_*／WALL_*）。世界座標＝引擎形狀的位置，
+-- 掃掠複驗用它。方塊與樹幹的 (s,l) 刻意記命中的取樣點（與格心差到 ±0.5m）：規劃的擋線／縫隙用它，
+-- 世界掃掠用形狀位置。0929f 試過改成格心（規劃與掃掠一致），同一組 E2E 路線的繞行承諾淨距中位數
+-- 0.95→0.58、繞行中接觸 4/305→3/39：取樣點誤差只會讓規劃高估，或讓掃掠打回改試下一條 lane，等於一份
+-- 隱含的橫向餘裕，蓋住了彎道追線落後。要改成格心，得同時補一份明確的追線餘裕並重驗。
+local function pushShape(state, l, wx, wy, shape)
+    local l4 = l * 4
+    l4 = l4 - l4 % 1
+    if shape == SHAPE_BOX then
+        pushHard(state, state.curS, l, l4, wx + 0.5, wy + 0.5, OBS_HALF_R, BOX_HALF)
+        return
+    end
+    if shape % 4 >= SHAPE_WALL_N then
+        pushEdge(state, wx + 0.25, wy + 0.05)
+        pushEdge(state, wx + 0.75, wy + 0.05)
+    end
+    if shape % 8 >= SHAPE_WALL_W then
+        pushEdge(state, wx + 0.05, wy + 0.25)
+        pushEdge(state, wx + 0.05, wy + 0.75)
+    end
+    if shape % 16 >= SHAPE_TRUNK then
+        pushHard(state, state.curS, l, l4, wx + TRUNK_OFF, wy + TRUNK_OFF, TRUNK_R)
+    end
+    if shape >= SHAPE_THIN then pushHard(state, state.curS, l, l4, wx + 0.5, wy + 0.5, 0) end
 end
 
 local function dist(ax, ay, bx, by)
@@ -605,7 +647,9 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
         end
     end
     local soft = false
-    local hardR = OBS_HALF_R -- 硬障礙半徑：樹幹/籬笆 0、小物 0.35、整格箱 0.7
+    -- 形狀旗標（pushShape 依此推點）：box＝整格方塊（水面、HARD、關門、車輛格級佔位），其餘可以並存
+    -- （同格的籬笆與樹）。box 蓋過一切，看到就停。
+    local box, wallN, wallW, trunk, thin = hard, false, false, false, false
 
     if not hard then
         local objs = square:getObjects()               -- IsoGridSquare.java:9635（回 PZArrayList）
@@ -618,17 +662,19 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
                 if cost == COST_DOOR then
                     if closedDoor(square) then cost = COST_HARD else cost = COST_NONE end
                 end
-                if cost == COST_HARD or cost == COST_HARD_THIN
-                        or cost == COST_HARD_SMALL then
-                    hard = true
-                    if cost == COST_HARD_THIN then hardR = 0
-                    elseif cost == COST_HARD_SMALL then hardR = OBS_SMALL_R end
+                if cost == COST_HARD then
+                    box = true
                     break
-                elseif cost == COST_SOFT then
-                    soft = true
+                elseif cost == COST_WALL_N then wallN = true
+                elseif cost == COST_WALL_W then wallW = true
+                elseif cost == COST_WALL_NW then wallN, wallW = true, true
+                elseif cost == COST_TREE then trunk = true
+                elseif cost == COST_HARD_THIN then thin = true
+                elseif cost == COST_SOFT then soft = true
                 end
             end
         end
+        hard = box or wallN or wallW or trunk or thin
     end
 
     -- 車輛：**格子幾何查詢**——引擎通用碰撞真相在 Lua 曝露面的最佳代理。
@@ -688,12 +734,12 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
             if og == state.gen then
                 -- 已推過輪廓：這格不再當障礙點
             elseif og == -state.gen then
-                hard = true                            -- 本輪輪廓失敗：格級佔位
+                hard, box = true, true                 -- 本輪輪廓失敗：格級佔位
             elseif pushVehicleOutline(state, cv) then
                 state.vehOutlineGen[vid] = state.gen
             else
                 state.vehOutlineGen[vid] = -state.gen
-                hard = true
+                hard, box = true, true
             end
         elseif inBand then                             -- 行進中＝跟車情境（帶內才減速）
             state.wMovingVeh = true
@@ -797,7 +843,9 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
             state.wSoftNearS = state.curS
         end
     end
-    return hard, hardR
+    if box then return hard, SHAPE_BOX end
+    return hard, (wallN and SHAPE_WALL_N or 0) + (wallW and SHAPE_WALL_W or 0)
+        + (trunk and SHAPE_TRUNK or 0) + (thin and SHAPE_THIN or 0)
 end
 
 --------------------------------------------------------------------------------
@@ -933,17 +981,17 @@ local function finishRound(state, now)
     -- 也保證呼叫端在掃描進行中讀到的永遠是上一輪的完整快照。
     local ts, tl = state.hardS, state.hardL
     local txw, tyw = state.hardX, state.hardY
-    local tr = state.hardR
+    local tr, tb = state.hardR, state.hardB
     state.hardS = state.wHardS
     state.hardL = state.wHardL
     state.hardX = state.wHardX
     state.hardY = state.wHardY
-    state.hardR = state.wHardR
+    state.hardR, state.hardB = state.wHardR, state.wHardB
     state.wHardS = ts
     state.wHardL = tl
     state.wHardX = txw
     state.wHardY = tyw
-    state.wHardR = tr
+    state.wHardR, state.wHardB = tr, tb
 
     state.hardN = state.wHardN
     state.hardOverflow = state.wHardOverflow == true
@@ -1049,7 +1097,7 @@ function MDADSensor.newState()
         cx = 0, cy = 0,
         nx = 0, ny = 1,
         z = 0,
-        wHardS = {}, wHardL = {}, wHardX = {}, wHardY = {}, wHardR = {},
+        wHardS = {}, wHardL = {}, wHardX = {}, wHardY = {}, wHardR = {}, wHardB = {},
         wHardN = 0,
         wHardOverflow = false,
         wZombieN = 0,
@@ -1084,7 +1132,7 @@ function MDADSensor.newState()
         wRoundStartedAt = 0,
 
         -- 已完成的結果（呼叫端只讀這一組）
-        hardS = {}, hardL = {}, hardX = {}, hardY = {}, hardR = {}, -- hardX/Y＝世界座標（掃掠複驗）；hardR＝逐點半徑（樹幹 0）
+        hardS = {}, hardL = {}, hardX = {}, hardY = {}, hardR = {}, hardB = {}, -- hardX/Y＝世界座標（掃掠複驗）；hardR／hardB＝逐點半徑／方塊半邊（見 pushShape）
         hardN = 0,
         hardOverflow = false,
         zombieN = 0,
@@ -1282,19 +1330,8 @@ function MDADSensor.step(state, profile, sNow, vehicle, now, cell)
         local key = wx * KEY_MUL + wy
         if visited[key] ~= gen then
             visited[key] = gen
-            local hard, hr = scanCell(state, vehicle, cell, wx, wy, l)
-            if hard then
-                -- 世界座標記格心（掃掠複驗用真實幾何，不受弧座標折點失真影響）；
-                -- 半徑由 scanCell 分級：樹幹/籬笆 0、小物 0.35、整格箱 0.7。
-                -- (s,l) 刻意記命中的取樣點，與格心差到 ±0.5m：規劃的擋線／縫隙用它，世界掃掠用格心。
-                -- 0929f 試過改成格心（規劃與掃掠一致），同一組 E2E 路線的繞行承諾淨距中位數 0.95→0.58、
-                -- 各批合計的繞行中接觸 4/305→3/39：取樣點誤差只會讓規劃高估，或讓掃掠打回改試下一條 lane，等於一份
-                -- 隱含的橫向餘裕，蓋住了彎道追線落後。要改成格心，得同時補一份明確的追線餘裕並重驗。
-                local pr = hr
-                local l4 = l * 4
-                l4 = l4 - l4 % 1
-                pushHard(state, state.curS, l, l4, wx + 0.5, wy + 0.5, pr)
-            end
+            local hard, shape = scanCell(state, vehicle, cell, wx, wy, l)
+            if hard then pushShape(state, l, wx, wy, shape) end -- 幾何與 (s,l) 取法見 pushShape
             -- 只有真的查了世界格才扣預算；被去重擋掉的取樣點是純 Lua 的一次表查詢，
             -- 一輪最多 210 次，讓它們在同一幀裡跑完比多拖一幀便宜。
             budget = budget - 1
@@ -1326,9 +1363,9 @@ local function probeSquareHard(state, square)
         local name = obj:getSpriteName()
         if name ~= nil then
             local cost = spriteCostOf(state, obj, name)
-            if cost == COST_HARD or cost == COST_HARD_SMALL
+            if cost == COST_HARD or cost == COST_WALL_N or cost == COST_WALL_W or cost == COST_WALL_NW
                     or (cost == COST_DOOR and closedDoor(square)) then return true, "hard" end
-            if cost == COST_HARD_THIN then return true, "hardThin" end
+            if cost == COST_HARD_THIN or cost == COST_TREE then return true, "hardThin" end
         end
     end
     return false, nil

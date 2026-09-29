@@ -922,6 +922,43 @@ do
 end
 
 -- =====================================================================
+scenario("current footprint：整格方塊（hardB）以方塊算淨距，不是外接圓")
+do
+    -- 0929j：solidtrans／solid 是引擎的整格方塊（半邊 0.5）。外接圓 0.7 在軸向多估 0.2，玩家 Oshkosh 與 E2E
+    -- 的窄縫都卡在這 0.2；方塊以它在車身兩軸的外框算（軸對齊時與引擎一致，斜向略保守）。
+    local bodyX, bodyY = 100, 200
+    local halfW, halfL = 0.9, 2.2
+    -- 方塊中心在車右側 v=1.7：面在 1.2，車身右緣 0.9 → 真淨距 0.3
+    local hit, actual = C.currentFootprintHit({ 0 }, { 1.7 }, { 100 }, { 201.7 }, { 0.7 }, 1,
+        bodyX, bodyY, 0, halfW, halfL, 0, 0, { 0.5 })
+    checkEq(hit, false, "軸對齊方塊：面距 0.3、pad 0 不命中")
+    checkNear(actual, 0.3, EPS, "軸對齊方塊：淨距＝方塊面到車身（圓會算成 0.1）")
+    local _, actualPad = C.currentFootprintHit({ 0 }, { 1.7 }, { 100 }, { 201.7 }, { 0.7 }, 1,
+        bodyX, bodyY, 0, halfW, halfL, 0, 0.15, { 0.5 })
+    checkNear(actualPad, 0.15, EPS, "正 pad 照圓的語意再扣（0.3−0.15）")
+    local _, circle = C.currentFootprintHit({ 0 }, { 1.7 }, { 100 }, { 201.7 }, { 0.7 }, 1,
+        bodyX, bodyY, 0, halfW, halfL, 0, 0)
+    checkNear(circle, 0.1, EPS, "沒有 hardB（舊呼叫端）照舊是外接圓")
+    -- 45° 車身：方塊外框在車身兩軸各 0.5·√2
+    local h45 = math.pi * 0.25
+    local c45 = math.sqrt(0.5)
+    local u, v = 0, 2.0
+    local x45, y45 = bodyX + u * c45 - v * c45, bodyY + u * c45 + v * c45
+    local _, diag = C.currentFootprintHit({ 0 }, { 2.0 }, { x45 }, { y45 }, { 0.7 }, 1,
+        bodyX, bodyY, h45, halfW, halfL, 0, 0, { 0.5 })
+    checkNear(diag, 2.0 - 0.9 - 0.5 * math.sqrt(2), EPS, "斜向：方塊外框（對角）不低估")
+    -- 負 pad：外框縮 |pad|，車身壓進方塊仍命中（不 fail-open）
+    local inside = C.currentFootprintHit({ 0 }, { 1.0 }, { 100 }, { 201.0 }, { 0.7 }, 1,
+        bodyX, bodyY, 0, halfW, halfL, 0, -0.1, { 0.5 })
+    checkTrue(inside, "負 pad：車身在方塊裡仍命中")
+    -- 方塊面在 0.85、車身右緣 0.9＝名義重疊 0.05；物理檔 pad −0.1 允許 0.1 的名義重疊 → 仍有 0.05
+    local nominalHit, nominal = C.currentFootprintHit({ 0 }, { 1.35 }, { 100 }, { 201.35 }, { 0.7 }, 1,
+        bodyX, bodyY, 0, halfW, halfL, 0, -0.1, { 0.5 })
+    checkEq(nominalHit, false, "負 pad −0.1：名義重疊 0.05 不命中（物理檔同源）")
+    checkNear(nominal, 0.05, EPS, "負 pad −0.1：名義重疊 0.05 還剩 0.05")
+end
+
+-- =====================================================================
 closeScenario()
 print()
 print("情境 " .. scenarios .. " 個、斷言 " .. assertions .. " 項")

@@ -193,8 +193,11 @@ end
 -- 呼叫端傳承諾同源的負 pad——否則「規劃說 10cm 名義重疊沒事、contact 說要 15cm 淨空」
 -- 兩套標準打架，貼縫永遠在半路被 contact 煞停（2026-09-04 s063/s064 只差一點點）。
 -- 第 10 回傳（0928a）：前半車身（u ≥ 0）最近點的淨距，沒有這種點＝nil；Driver 起步近物限速用。
+-- hardB（選填，0929j）：逐點的整格方塊半邊長（0／缺＝圓）。方塊以它在車身座標的外框算（軸對齊時與
+-- 引擎方塊完全一致，斜向時略保守），r 不用。pad ≥0 照圓的語意在外框外再扣；負 pad 改成把外框縮 |pad|
+-- （夾 ≥0），同圓的 r+pad≥0：不讓車身內的點判成淨空。
 function MDADCorridor.currentFootprintHit(hardS, hardL, hardX, hardY, hardR, hardN,
-        bodyX, bodyY, vehicleH, halfW, halfL, expectedLane, pad)
+        bodyX, bodyY, vehicleH, halfW, halfL, expectedLane, pad, hardB)
     -- 負 pad 允許到 −r（逐點夾 r+pad ≥ 0）：OBB 內部距離已夾 0，r+pad 一旦為負會讓
     -- 「點在車身裡」判成淨空（fail-open）；夾到 0 仍能抓車身內的點。
     if type(pad) ~= "number" or pad * 0 ~= 0 then pad = FOOTPRINT_PAD end
@@ -219,6 +222,7 @@ function MDADCorridor.currentFootprintHit(hardS, hardL, hardX, hardY, hardR, har
         return footprintFailClosed()
     end
 
+    local boxK = (cv < 0 and -cv or cv) + (sv < 0 and -sv or sv) -- 軸對齊方塊投影到車身兩軸的外框倍率
     local bestClear, bestPlanned = 0, 0
     local bestI, bestS, bestL, bestX, bestY = 0, 0, 0, 0, 0
     local bestFront = nil
@@ -247,12 +251,24 @@ function MDADCorridor.currentFootprintHit(hardS, hardL, hardX, hardY, hardR, har
         -- contact HOLD→倒車又 rear-blocked→HOLD，9 秒後 StopStuck；前進本身就是脫離方向。
         -- 車側後半（|v|≥halfW）的點照算——轉向時車尾外甩會掃到。倒車安全由 rear probe 另管。
         if not (u < 0 and av < halfW) then
-            local du, dv = au - halfL, av - halfW
-            if du < 0 then du = 0 end
-            if dv < 0 then dv = 0 end
             local rp = r + pad
             if rp < 0 then rp = 0 end
-            local actual = sqrt(du * du + dv * dv) - rp
+            local b = hardB and hardB[i] or 0
+            local du, dv, ra
+            if type(b) == "number" and b > 0 then
+                local ext = b * boxK
+                ra = pad
+                if pad < 0 then
+                    ext, ra = ext + pad, 0
+                    if ext < 0 then ext = 0 end
+                end
+                du, dv = au - halfL - ext, av - halfW - ext
+            else
+                du, dv, ra = au - halfL, av - halfW, rp
+            end
+            if du < 0 then du = 0 end
+            if dv < 0 then dv = 0 end
+            local actual = sqrt(du * du + dv * dv) - ra
             local planned = hl - expectedLane
             if planned < 0 then planned = -planned end
             planned = planned - (halfW + rp)

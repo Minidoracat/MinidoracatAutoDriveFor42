@@ -1243,6 +1243,8 @@ local function encodePhys(phys)
     addBool("startGuard", "sg")
     addNum("frontClearance", "fcl")
     addBool("lowFps", "lfs") -- 0929c：卡頓降速狀態（只在為真時寫）
+    addNum("fbNorm", "fbk")        -- 0929j：回授依轉向增益正規化的倍率（1＝未放大）
+    addBool("dodgeAlignHold", "dah") -- 0929j：繞行未對正、帽夾在目前車速（只在為真時寫）
     -- 0904j 鏈式停留：lc＝常駐 lane 暫時＝停留 offL；dodgeTier 帶 -stay／-nudge／-physical
     addBool("laneChained", "lc")
     addStr("dodgeTier", "tier")

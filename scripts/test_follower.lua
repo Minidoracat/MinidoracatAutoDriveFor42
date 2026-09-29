@@ -3257,6 +3257,42 @@ do
         "② 6m 路外側車道（左轉靠右）：前饋照 R+l 後切內 %.2fm < 0.26（照 1/R 0.34）", outer.inMax))
 end
 
+scenario("0929j：yaw 增益估計下限 0.08——低增益車學得到自己的增益，不被夾在舊下限 0.2")
+do
+    -- 玩家 session-012 KI5 Oshkosh：實測 yaw／steer 0.15–0.19，舊下限 0.2 把觀測夾住，估計卡在 0.2，Driver 的回授
+    -- 正規化（REF/yawGain）只放大 2.5 倍、弧段前饋也少給。Plant：yaw 率一階追 G·u（τ 0.35），G＝0.12；右轉 60°
+    -- 讓轉向持續超過學習門檻 0.3。違規證明：下限改回 0.2 即紅。
+    local VP = { valid = true, geometryValid = true, halfW = 1.24, rMin = 4.4, wheelbase = 4.3,
+        delta0Safe = 0.6, deltaVSafe = 0.2, maxSpeed = 90, lookScale = 1.3 }
+    local ang = -math.rad(60)
+    local route = { pts = { 0, 0, 60, 0, 60 + 60 * math.cos(ang), 60 * math.sin(ang) },
+        segSurface = { "paved", "paved" }, segWidth = { 10, 10 } }
+    local p = F.begin(route, 90, 4, VP)
+    while not p.ready do F.stepBuild(p, 4096) end
+    local st = F.newState()
+    F.setLaneBias(st, 0)
+    F.setRuntimeLimits(st, 3, 6, 7, 1.2)
+    local car = { x = 0, y = 0, h = 0, w = 0 }
+    local dt, kmh, G = 1 / 30, 20, 0.12
+    local learned = 0
+    for _ = 1, 30 * 20 do
+        local steer, _, rem, reached = F.control(p, st, car.x, car.y, car.h, kmh, dt)
+        local u = steer
+        if u > 5 then u = 5 elseif u < -5 then u = -5 end
+        st.appliedSteer = u
+        if u >= 0.3 or u <= -0.3 then learned = learned + 1 end
+        local v = kmh / 3.6
+        car.w = car.w + (G * u - car.w) * (dt / 0.35)
+        car.h = car.h + car.w * dt
+        car.x = car.x + math.cos(car.h) * v * dt
+        car.y = car.y + math.sin(car.h) * v * dt
+        if reached or rem < 3 then break end
+    end
+    checkTrue(learned > 30, "有足夠的學習幀（|steer| ≥ 0.3，實得 " .. learned .. "）")
+    checkTrue(st.yawGain > 0.08 and st.yawGain < 0.16, string.format(
+        "G 0.12 的車：估計收斂到自己的增益、低於舊下限 0.2（實得 %.3f）", st.yawGain))
+end
+
 closeScenario()
 print()
 print("情境 " .. scenarios .. " 個、斷言 " .. assertions .. " 項")

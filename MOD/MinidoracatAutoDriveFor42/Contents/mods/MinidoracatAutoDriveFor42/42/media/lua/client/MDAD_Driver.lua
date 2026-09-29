@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0929i"
+Drive.REV = "0929n"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -132,6 +132,23 @@ TUNE.STEER_FULL_KMH = 4
 TUNE.ESC_MARGIN = 1.3
 TUNE.ESC_FLOOR_RADS = 0.3
 TUNE.ESC_WINDOW_MS = 30
+-- 回授依轉向增益正規化（0929j；玩家 KI5 Oshkosh 消防車撞樹／撞路邊物 2 次）：PID 與 cross-track 的增益是在
+-- 一般車上調的（Follower 的 yawGain 估計 0.5–0.9），Oshkosh 真實增益只有 0.15–0.19、SemiTruckBox_mil 0.09–0.12，
+-- 同一個誤差轉出的 yaw 少兩到四倍：session-012 繞行承諾後 steer −0.3～−0.44、2.2 秒往右漂 1.35m 撞上；R84 彎
+-- 出彎外漂 0.7m 撞樹。回授部分（總 steer 扣掉弧段前饋）乘 k＝FB_NORM_REF／yawGain，夾 [1, FB_NORM_MAX]：
+-- 估計 ≥ REF 的車（語料一般車 0.47–0.99）不變；前饋本來就除以 yawGain，不再乘。還沒學到（INIT 0.8）＝不動。
+-- 過頭由 yawGovern（ESC）接手：正規化排在它之前，yaw 率超過物理上限照樣收。
+TUNE.FB_NORM_REF = 0.5
+TUNE.FB_NORM_MAX = 3
+-- 放大後的回授最多到 FB_NORM_CLAMP（原本就更大的照原值）：正規化是給小修正補力，不放大暫態尖峰——E2E 0929j
+-- Oshkosh 53 km/h 承諾繞行那一幀 D 項尖峰 2.2 ×3＝6.7，轉向打滿、車反而往外甩。
+TUNE.FB_NORM_CLAMP = 1.5
+-- 繞行承諾中未對正不加速（0929j；session-012 第二段繞行 commit 時車頭仍偏右 7–9°、偏線 0.2m，帽 28.6 讓車
+-- 從 12.6 加到 29 km/h，低增益車在兩秒內修不回來）：|偏線| > DODGE_ALIGN_DEV_M 或車頭對承諾線切線 >
+-- DODGE_ALIGN_RAD 時，繞行帽夾在「目前車速」（不減速、只是不加速），下限 DODGE_COMMIT_MIN_KMH 讓靜止時仍能起步。
+-- 與 Drive.dodgeEnvelopeCap 的逐點提速資格共用同一個定義（Drive.dodgeAligned）。
+TUNE.DODGE_ALIGN_DEV_M = 0.35
+TUNE.DODGE_ALIGN_COS = math.cos(5 * math.pi / 180)
 -- 起步近物限速（0928a；0.13.1 起步 15 秒內接觸 13 趟，0.13.0 為 4）：起步時車常不在規劃車道上（路邊
 -- 斜停、離線數公尺），規劃器以車道判斷的淨空與車身實際掃過的不同——前半車身旁的桿、欄杆只剩 0.2–3m
 -- 時車已加到 16–28 km/h（seems/clip-14、C86/clip-06、Annilex/clip-05）。起步到「貼上車道並對正」持續
@@ -259,6 +276,12 @@ TUNE.FOLLOW_MIN_M = 6             -- 跟車距離＝MIN＋前車速度×TIME
 TUNE.FOLLOW_TIME_S = 1.0
 TUNE.FOLLOW_LATERAL_M = 0.3       -- 前車車身離我方車身橫向這麼近以內才算擋在行駛線上
 TUNE.KEEP_RIGHT_FALLBACK_M = 1.0  -- 靠右行駛：路寬未知（v2/v3 路線）時，沙盒比例 1.0 換算的公尺數
+-- 靠右不貼路邊物（0929j；玩家 Camden County 15m 路、常駐 3.0，右側 l≈+5 一排路邊物離車身 0.76m；E2E 同路段 Oshkosh
+-- 23 km/h 擦上 → 倒車兩次 → StopStuck）：靠右是路寬的比例，不知道路緣擺了什麼。前方 KEEP_RIGHT_LOOK_M 內、車身
+-- 右緣外 KEEP_RIGHT_CLEAR_M 以內的硬物（形狀世界座標投影回路線，不用取樣點），把靠右目標往左收到留出這段
+-- 距離，不過中線（下限 0）。車身右緣內側的硬物是繞行的事，這裡不管。
+TUNE.KEEP_RIGHT_CLEAR_M = 0.6
+TUNE.KEEP_RIGHT_LOOK_M = 50
 TUNE.UNLOADED_CAP = 15         -- 走廊內有未載入 chunk（不知道前面有什麼，先慢）
 -- 可視巡航用一般制動域；緊急紅線沿用forceBrake的既有先驗，不再依unloaded旗標切換。
 -- 實測的煞車下界另以信心收緊，不能把已學到的弱煞車能力再乘2.5。
@@ -477,6 +500,7 @@ TUNE.ZOMBIE_PUSH_SCALE = 2.0       -- 1.5→2.0（2026-09-04 使用者「可以�
 -- 賽車硬煞實測約 7 m/s²，95 km/h 停不住。
 TUNE.EXIT_KEEP_DEV = 0.5 -- 繞行出口：車離常駐線超過此值、且出口還有窄點就沿承諾線走完（Drive.exitKeepsDodge）
 TUNE.EXIT_KEEP_CLEAR = 0.5 -- 出口窄點：guard 收集的逐點淨距（已扣 pad）低於此值
+TUNE.NEXT_HANDOFF_M = 0.3 -- 下一群滑行停點：離停點這麼近＝已經開到了（Drive.nextStopHandoff；帽趨近 0 時車會先停）
 TUNE.BRAKE_ASSIST_MIN_KMH = 40
 TUNE.BRAKE_ASSIST_FULL_KMH = 60
 TUNE.BRAKE_ASSIST_RATIO = 0.4
@@ -1231,7 +1255,7 @@ local function releaseDodge(s)
     s.dodgeNextStopS = nil
     s.dodgeNextX, s.dodgeNextY, s.dodgeNextR = nil, nil, nil
     s.dodgeNextCap = -1
-    s.dodgeApproachCap = 0
+    s.dodgeApproachCap, s.dodgeAlignHold = 0, false
     s.dodgeBaseCap = 0
     s.dodgeCapPending = false
     s.dodgeShiftLength = 0
@@ -3536,8 +3560,56 @@ function Drive.keepRightTarget(s)
         local sw = sen.roadHi - sen.roadLo
         if sw > 0 and (not finite(w) or sw < w) then w = sw end
     end
-    if not finite(w) or w <= 0 then return ratio * TUNE.KEEP_RIGHT_FALLBACK_M end
-    return ratio * w * 0.25
+    if not finite(w) or w <= 0 then return Drive.keepRightShy(s, ratio * TUNE.KEEP_RIGHT_FALLBACK_M) end
+    return Drive.keepRightShy(s, ratio * w * 0.25)
+end
+
+-- 靠右目標留路邊距（常數註解見 TUNE.KEEP_RIGHT_CLEAR_M）。實際行駛線＝靠右＋路面對中 roadBias，比較用它；
+-- 硬物以形狀世界座標投影回所在路線段（hardS 只拿來找段）。每輪完成掃描一次（冷路徑）。
+-- 以「目前」的靠右值（s.sandBias，EMA 還沒走到 target）判：已經壓進目前車身帶的硬物是繞行的事，這一輪不收
+-- （同一台停車的遠側輪廓點會被誤當路邊物，打亂停留／回線的基準）；在目前車身右緣外、但往 target 移過去會
+-- 靠到 CLEAR 以內的，都把 target 往左收——E2E 0929j：路寬 14 讓靠右一路往 3.5 走，路邊巨石在目前車身外，
+-- 等常駐線走過去才變成擋線點，53 km/h 在縫口前 3m 才承諾繞行。
+-- 車身位置用「這個弧長實際落點」：先夾 BIAS_MAX（常駐偏置上限），再經 laneBiasAt（窄處／彎內側被 laneRoom 夾）。
+-- 0929k E2E W 段靠右值 3.75、實際被 BIAS_MAX 夾到 3.0，用裸值判車身帶會把右緣外 0.2m 的路邊樹當成「壓進車身」
+-- 而不收，整排擦著過。
+function Drive.keepRightShy(s, target)
+    local sen, prof, vp = s.sensor, s.profile, s.vehicleProfile
+    if not finite(target) or target <= 0 or type(sen) ~= "table" or not sen.ready
+            or type(prof) ~= "table" or prof.ready ~= true or type(vp) ~= "table"
+            or not finite(vp.halfW) or not finite(s.lastSNow) then return target end
+    local rb = finite(s.roadBias) and s.roadBias or 0
+    local cur = finite(s.sandBias) and s.sandBias or target
+    local bm = TUNE.BIAS_MAX
+    local rawNow, rawReach = cur + rb, (target > cur and target or cur) + rb
+    if rawNow > bm then rawNow = bm elseif rawNow < -bm then rawNow = -bm end
+    if rawReach > bm then rawReach = bm elseif rawReach < -bm then rawReach = -bm end
+    local s0, s1 = s.lastSNow - (vp.halfL or 0), s.lastSNow + TUNE.KEEP_RIGHT_LOOK_M
+    local best = target
+    for i = 1, sen.hardN do
+        local hs = sen.hardS[i]
+        if finite(hs) and hs >= s0 and hs <= s1 then
+            local j = MDADFollower.segIndexAt(prof, hs)
+            local h, ds = prof.segH[j], hs - prof.s[j]
+            if finite(h) and finite(ds) then
+                local sh, ch = sin(h), cos(h)
+                local bh = sen.hardB and sen.hardB[i] or 0
+                local rad = (type(bh) == "number" and bh > 0) and bh * (math.abs(sh) + math.abs(ch))
+                    or (sen.hardR[i] or 0) -- 方塊取它在路線橫向的半寬
+                local l = (sen.hardX[i] - prof.x[j] - ds * ch) * -sh + (sen.hardY[i] - prof.y[j] - ds * sh) * ch
+                local face = l - rad
+                local edgeNow = MDADFollower.laneBiasAt(prof, rawNow, j, hs) + vp.halfW
+                if face < edgeNow and l + rad > edgeNow - 2 * vp.halfW then return target end
+                if face >= edgeNow and face < MDADFollower.laneBiasAt(prof, rawReach, j, hs)
+                        + vp.halfW + TUNE.KEEP_RIGHT_CLEAR_M then
+                    local want = face - TUNE.KEEP_RIGHT_CLEAR_M - vp.halfW - rb
+                    if want < best then best = want end
+                end
+            end
+        end
+    end
+    if best < 0 then best = 0 end
+    return best
 end
 
 -- 承諾線（繞行 smoothstep／RETURN 目標）在弧長 sq 的 lane：會車判斷在 lane 被持有時用它
@@ -4243,6 +4315,27 @@ function Drive.areaWait(s, vehicle, now, targetSpeed, speedKmh)
     return now - s.areaWaitSince >= TUNE.AREA_WAIT_MAX_MS and speedKmh < 1 and speedKmh > -1
 end
 
+-- 回授依轉向增益正規化（TUNE.FB_NORM_*）：弧段前饋（Follower ffSteer，已除以 yawGain）以外的部分乘 k。
+-- s.fbNorm 進遙測。耦力原地調頭不經此路（呼叫端判）。
+function Drive.normalizeSteer(s, steer)
+    local g = s.fstate.yawGain
+    local k = 1
+    if finite(g) and g > 0 then
+        k = TUNE.FB_NORM_REF / g
+        if k < 1 then k = 1 elseif k > TUNE.FB_NORM_MAX then k = TUNE.FB_NORM_MAX end
+    end
+    s.fbNorm = k
+    if k == 1 then return steer end
+    local ff = s.fstate.ffSteer
+    if not finite(ff) then ff = 0 end
+    local fb = steer - ff
+    local afb = fb < 0 and -fb or fb
+    local lim = afb > TUNE.FB_NORM_CLAMP and afb or TUNE.FB_NORM_CLAMP -- 原本就更大的照原值，不縮
+    local out = k * fb
+    if out > lim then out = lim elseif out < -lim then out = -lim end
+    return ff + out
+end
+
 -- 車身 yaw 率限制（TUNE.ESC_*）：回收掉同向部分後的 steer；s.yawRate／s.escScale 進遙測。
 function Drive.yawGovern(s, steer, heading, speedKmh, now)
     local refT = s.escT
@@ -4678,6 +4771,8 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     phys.ffSteer = s.fstate.ffSteer
     phys.yawGain, phys.appliedSteer = s.fstate.yawGain, s.fstate.appliedSteer
     phys.yawGainHi = s.fstate.yawGainHi
+    if finite(s.fbNorm) and s.fbNorm > 1 then phys.fbNorm = s.fbNorm end
+    if s.dodgeAlignHold == true then phys.dodgeAlignHold = true end
     phys.routeHeadingError, phys.kinkExitS = s.lastRouteErr, s.fstate.kinkExitS
     phys.visibilityCap = s.visibilityCap
     phys.visibilityHardKmh = s.visibilityHardKmh
@@ -4963,7 +5058,7 @@ local function footprintSnapshot(s, vehicle, playerNum, out, heading, vx, vy, la
             MDADCorridor.currentFootprintHit(
                 sen.hardS, sen.hardL, sen.hardX, sen.hardY, sen.hardR, sen.hardN,
                 bx, by, heading, s.vehicleProfile.halfW, s.vehicleProfile.halfL,
-                expectedLaneOf(s), pad)
+                expectedLaneOf(s), pad, sen.hardB)
     else
         -- Corridor 是選配；缺它不能做 OBB 判定，但仍須保留 M3 pure follower。
         blocked, actual, planned, hitI, hitS, hitL, hitX, hitY, poseOnly =
@@ -5351,7 +5446,7 @@ local function sweepLine(s, lx, ly, ln, lS0, lS1,
     end
     local hn = sen.hardN
     if hn == 0 then return true, 9 end
-    local hx, hy, hr = sen.hardX, sen.hardY, sen.hardR
+    local hx, hy, hr, hb = sen.hardX, sen.hardY, sen.hardR, sen.hardB
     if type(hx) ~= "table" or type(hy) ~= "table" or type(hr) ~= "table" then
         return false, 99, s.lastSNow, 1, s.lastSNow, 0, 0
     end
@@ -5394,16 +5489,25 @@ local function sweepLine(s, lx, ly, ln, lS0, lS1,
         local bodyY = wy + fy * comZ - fx * comX
         local extentX = math.abs(fx) * halfL + math.abs(fy) * halfW
         local extentY = math.abs(fy) * halfL + math.abs(fx) * halfW
+        -- 整格方塊（sen.hardB，0929j）：以方塊在車身兩軸的外框加寬車身 OBB，只留 pad 當半徑；軸對齊時與引擎
+        -- 方塊一致（圓近似在軸向多估 0.2），斜向略保守。圓點照舊 sweepRadius。
+        local boxK = math.abs(fx) + math.abs(fy)
         for i = 1, hn do
             local ox = hx[i]
-            local rr = MDADDynamics.sweepRadius(
-                hr[i], pointPad, SWEEP_PHYS_PAD, TUNE.SWEEP_QUANT_COMP)
+            local bh = hb and hb[i] or 0
+            local grow, rr = 0, nil
+            if type(bh) == "number" and bh > 0 then
+                grow, rr = bh * boxK, pointPad
+            else
+                rr = MDADDynamics.sweepRadius(
+                    hr[i], pointPad, SWEEP_PHYS_PAD, TUNE.SWEEP_QUANT_COMP)
+            end
             -- 世界AABB只排除不可能碰撞、也不可能改善最小淨距的點；不拿近似hardS裁世界。
-            local reach = math.abs(rr) + (clr and sampleMargin or (inCap and minMargin or 0)) + 1e-6
+            local reach = math.abs(rr) + grow * boxK + (clr and sampleMargin or (inCap and minMargin or 0)) + 1e-6
             if not (math.abs(ox - bodyX) > extentX + reach
                     or math.abs(hy[i] - bodyY) > extentY + reach) then
                 local d2 = obbDistanceSq(
-                    bodyX, bodyY, fx, fy, halfW, halfL, ox, hy[i])
+                    bodyX, bodyY, fx, fy, halfW + grow, halfL + grow, ox, hy[i])
                 if d2 == nil or d2 <= rr * rr then
                     local clearance = d2 and (sqrt(d2) - rr) or -99
                     local phase
@@ -6191,8 +6295,10 @@ local function shapeProfile(s, profile, a, b, c, d, offL, baseL, crawlDesign)
             a, b = s.lastSNow - 1, s.lastSNow
             minA = a
             dl = 0 -- 沒有側移可言：進入段長度／陡坡閘全部以 0 側移計
+            -- 唯一的過渡是回常駐線的出口：長度照出口側移的設計速度算（0929j E2E C 段：0.17m 的出口只拿到
+            -- 車長地板 7m、出口帽 22.6，55 km/h 被減速輔助以 7 m/s² 急煞）
             required = MDADDynamics.shiftLength(
-                0, intended / 3.6, aLat, kSteer, vp.halfL, MDADDynamics.LATERAL_JERK_MAX)
+                math.abs(offL - baseL), intended / 3.6, aLat, kSteer, vp.halfL, MDADDynamics.LATERAL_JERK_MAX)
             minimum = MDADDynamics.shiftLength(
                 0, 0, aLat, crawlK, vp.halfL, MDADDynamics.LATERAL_JERK_MAX)
         end
@@ -6228,6 +6334,7 @@ local function shapeProfile(s, profile, a, b, c, d, offL, baseL, crawlDesign)
         return a, b, c, d, false
     end
     if required < minimum then required = minimum end
+    local exitGeom = exitAvail -- 折點給的出口上限；下面的可視範圍截短會隨車前進放寬，折點不會
     -- 已掃範圍能容納完整低速回線就按真長度收尾；未掃與未載入同樣不是淨空。
     -- 看得到路線終點時沿抵達契約，不把目標本身當成未知障礙。
     if s.sensor and s.sensor.ready then
@@ -6273,7 +6380,21 @@ local function shapeProfile(s, profile, a, b, c, d, offL, baseL, crawlDesign)
     -- 內時 minimum 塞不進殘長 → dodge-cap 345 幀全放棄）。接受截斷回線：
     -- 帶側偏抵達由歐氏 ARRIVE_M(5) 圈涵蓋；空間短由 shiftSpaceSpeedCapKmh
     -- 自動轉成低速 cap，回線幾何仍由 sweepLine 世界複驗把關。
-    local exitLen = required > exitAvail and exitAvail or required
+    -- 出口用自己的側移量（0929j；玩家 session-012 KI5 Oshkosh：車在 −0.35 起步、offL 0.25＝進入 0.6m，
+    -- 出口卻要回到常駐 1.76＝1.5m；舊制兩段共用進入側移算的長度，可視範圍又把出口截到 1.03m——一公尺
+    -- 橫移 1.5m 的線，切線追蹤在出口前就把車頭甩 36°、車開到線右 0.8m，下一段繞行從歪掉的姿態起步撞上
+    -- 路邊物）。回線落點同 buildOffsetLine（laneBiasAt 沿弧長連續），取 c 處與常駐值較大者。出口長度只補到
+    -- 出口側移的低速最短過渡，不照巡航設計放長（長出口多掃的範圍會讓原本過得了的候選被打回、改走停留）。
+    local exitDl = math.abs(offL - baseL)
+    local laneC = MDADFollower.laneBiasAt(profile, baseL, MDADFollower.segIndexAt(profile, c), c)
+    if finite(laneC) and math.abs(offL - laneC) > exitDl then exitDl = math.abs(offL - laneC) end
+    local exitReq = required
+    if exitDl > dl then
+        local exitMin = MDADDynamics.shiftLength(
+            exitDl, 0, aLat, crawlK, vp.halfL, MDADDynamics.LATERAL_JERK_MAX)
+        if exitMin > exitReq then exitReq = exitMin end
+    end
+    local exitLen = exitReq > exitAvail and exitAvail or exitReq
     -- 承諾窗（rs+DODGE_OV_SPAN）截短出口（2026-09-04 st146014：群出口剛落在窗緣，
     -- exit 被截到 4.5m → sinHeading 0.73 → clearance 從 margin 0.95 崩到 7.4、space 0，
     -- 整段路口 8 km/h）：幾何要的比窗給的多、而且 entry 還吃得下「等窗前移那幾公尺」
@@ -6287,13 +6408,24 @@ local function shapeProfile(s, profile, a, b, c, d, offL, baseL, crawlDesign)
         exitLen = exitRoom
     end
     if exitLen < 1 then exitLen = 1 end
+    -- 出口陡坡（同進入段的運動學比例 SHIFT_MIN_RATIO）：被可視範圍／承諾窗截短成陡坡、而車再往前開就放得下
+    -- （折點給的長度夠）、進入段也等得起時延後承諾（replan 的 exit 延後）；等不起照舊承諾，不新增否決
+    -- （0909b R2：近距離短出口只要世界掃掠過就收）。
+    if exitDl > 0 and crawlK > 0 then
+        local exitKin = math.sqrt(6 * exitDl / crawlK)
+        local want = exitKin / TUNE.SHIFT_MIN_RATIO -- 不陡的最短出口；等到這麼長就好，不必等到巡航設計長
+        if exitLen * TUNE.SHIFT_MIN_RATIO < exitKin and want <= exitGeom
+                and b - (s.lastSNow + (want - exitLen)) - 1 >= entryLen then
+            s.dodgeWindowShort = true
+        end
+    end
     -- shape 只記固定基準；最終 physical/stay 分類在 fallback 後才知道。
     -- 風格的 jerk 放寬移到 commit／guard 共用收口，不可提前烘進貼縫候選。
     local entryCap = MDADDynamics.shiftSpaceSpeedCapKmh(
         dl, entryLen, aLat, vp.wheelbase, vp.delta0Safe, vp.deltaVSafe,
         vp.maxSpeed, MDADDynamics.LATERAL_JERK_MAX)
     local exitCap = MDADDynamics.shiftSpaceSpeedCapKmh(
-        dl, exitLen, aLat, vp.wheelbase, vp.delta0Safe, vp.deltaVSafe,
+        exitDl > dl and exitDl or dl, exitLen, aLat, vp.wheelbase, vp.delta0Safe, vp.deltaVSafe,
         vp.maxSpeed, MDADDynamics.LATERAL_JERK_MAX)
     s.dodgeSpaceCap = entryCap
     if exitCap < s.dodgeSpaceCap then s.dodgeSpaceCap = exitCap end
@@ -6302,7 +6434,7 @@ local function shapeProfile(s, profile, a, b, c, d, offL, baseL, crawlDesign)
     s.dodgeSpaceBaseCap = s.dodgeSpaceCap
     s.dodgeSpaceLat, s.dodgeShapeDl = aLat, dl
     s.dodgeEntryLength, s.dodgeExitLength = entryLen, exitLen
-    s.dodgeExitWant = required
+    s.dodgeExitWant = exitReq
     a, d = b - entryLen, c + exitLen
     return a, b, c, d, true
 end
@@ -6698,6 +6830,32 @@ local function updateDodgeCaps(s, margin, kappa, minLat, visibilityCap, commit, 
     return reason
 end
 
+-- 繞行承諾中車身是否對上承諾線（TUNE.DODGE_ALIGN_*）：|偏線| ≤ DEV（lastLatDev 在繞行中＝對承諾線的
+-- lineLat）且真車頭對 ov 線本格切線 ≤ 5°。缺資料＝未對正。逐點提速資格與未對正不加速共用這一份。
+function Drive.dodgeAligned(s)
+    local fs = s.fstate
+    if not finite(s.lastVehicleHeading) or not finite(s.lastLatDev)
+            or math.abs(s.lastLatDev) > TUNE.DODGE_ALIGN_DEV_M
+            or type(fs.ovX) ~= "table" or not finite(fs.ovS0) or not finite(fs.ovN) then return false end
+    local k = ovIndexFloor(fs.ovS0, MDADFollower.OV_STEP, s.lastSNow)
+    if k < 1 or k >= fs.ovN then return false end
+    local dx, dy = fs.ovX[k + 1] - fs.ovX[k], fs.ovY[k + 1] - fs.ovY[k]
+    local len = sqrt(dx * dx + dy * dy)
+    if not finite(len) or len <= 1e-6 then return false end
+    return cos(s.lastVehicleHeading) * dx + sin(s.lastVehicleHeading) * dy >= len * TUNE.DODGE_ALIGN_COS
+end
+
+-- 未對正不加速（TUNE.DODGE_ALIGN_*）：帽夾在目前車速（下限 DODGE_COMMIT_MIN_KMH），只擋加速、不另外減速。
+function Drive.dodgeAlignCap(s, applied, speedKmh)
+    s.dodgeAlignHold = false
+    if Drive.dodgeAligned(s) then return applied end
+    local hold = speedKmh
+    if not finite(hold) or hold < TUNE.DODGE_COMMIT_MIN_KMH then hold = TUNE.DODGE_COMMIT_MIN_KMH end
+    if hold >= applied then return applied end
+    s.dodgeAlignHold = true
+    return hold
+end
+
 -- Kahlua的stepFollow local槽接近上限，查表獨立；nil代表仍用原帽，絕非淨空。
 function Drive.dodgeEnvelopeCap(s, speedKmh, now)
     if s.episodeActive
@@ -6715,11 +6873,7 @@ function Drive.dodgeEnvelopeCap(s, speedKmh, now)
     local k = ovIndexFloor(fs.ovS0, MDADFollower.OV_STEP, s.lastSNow)
     if k < s.dodgeClrK0 or k >= s.dodgeEnvN then return nil end
     local allowed = s.dodgeEnv[k]
-    local dx, dy = fs.ovX[k + 1] - fs.ovX[k], fs.ovY[k + 1] - fs.ovY[k]
-    local len = sqrt(dx * dx + dy * dy)
-    local aligned = finite(s.lastVehicleHeading) and finite(s.lastLatDev)
-        and math.abs(s.lastLatDev) <= 0.35 and len > 1e-6
-        and cos(s.lastVehicleHeading) * dx + sin(s.lastVehicleHeading) * dy >= len * 0.996194698
+    local aligned = Drive.dodgeAligned(s)
     local look = math.max(math.abs(speedKmh), allowed) * 0.5 / 3.6
     -- 查當下車身與整個反應窗，不能跨過較早的短窄處只讀到後面的高帽。
     for j = k + 1, s.dodgeEnvN do
@@ -6911,6 +7065,25 @@ local function nearestLineBlocker(s, sen, minS)
         end
     end
     return bi
+end
+
+-- 停穩交接退路：承諾線被下一群的滑行停點（dodgeNextCap）停住時，釋放舊線交給同一輪重規劃。
+-- 平常要整車越過 c（c+bodyReach，理由見 exitReady 的 K5 註解）才放；但下一群的停點是圓盤距離
+-- （中心距−bodyReach−r），斜前方的物件會把車停在 c+bodyReach 之前，車永遠到不了門檻＝停等到受困交還
+-- （0929k E2E Oshkosh C 段：下一顆巨石在右前方 5.7m，車停在門檻前 0.13m，12 秒後交還）。車頭已過 c、
+-- 而且已經開到停點（dodgeNextDist ≤ NEXT_HANDOFF_M）就交接；停點之前的零帽（滑行能力為 0）照舊停等。
+function Drive.nextStopHandoff(s, speedKmh)
+    local fs = s.fstate
+    if not finite(fs.offC) or not finite(fs.offD) then return false end
+    local past = s.lastSNow >= fs.offC + s.bodyReach
+        or (s.lastSNow >= fs.offC and finite(s.dodgeNextDist) and s.dodgeNextDist <= TUNE.NEXT_HANDOFF_M)
+    if not past or not finite(s.dodgeNextCap) or s.dodgeNextCap < 0
+            or s.dodgeNextCap >= MDADDynamics.MIN_EXEC_KMH
+            or s.dodgeGuardFailed or s.currentBlocked or s.returnActive or fs.rotating
+            or s.recoverWhy ~= nil or not finite(speedKmh) or speedKmh >= 1 or speedKmh <= -1 then
+        return false
+    end
+    return nearestLineBlocker(s, s.sensor, fs.offD) ~= nil
 end
 
 -- 遠於承諾線的車流仍由跟車接近帽照管，不讓它把當前繞行／交接整體降級。
@@ -7471,8 +7644,9 @@ local function guardDemote(s, sen, pm, mi, cOver, cHit, playerNum)
     s.dodgeDemoteS, s.dodgeDemoteM = nil, nil
     if finite(cOver) and cHit and sen.hardR and finite(sen.hardR[cHit]) then
         local r = sen.hardR[cHit]
-        local comp = (r >= 0.5 and padC > padP + TUNE.SWEEP_QUANT_COMP)
-            and TUNE.SWEEP_QUANT_COMP or 0
+        local box = sen.hardB and type(sen.hardB[cHit]) == "number" and sen.hardB[cHit] > 0
+        local comp = (not box and r >= 0.5 and padC > padP + TUNE.SWEEP_QUANT_COMP)
+            and TUNE.SWEEP_QUANT_COMP or 0 -- 方塊掃掠不走量化補償（sweepLine）
         local atHit = -cOver + (padC - padP) - comp
         if atHit < 0 then atHit = 0 end
         -- 命中點多半在回線段 p4＝sweepLine 的 [a,c] 餘裕窗之外：後續 worldGrew／guard-pass 成功輪
@@ -7583,15 +7757,13 @@ local function replan(s, vehicle, playerNum)
                     rs = s.lastSNow, c = fs.offC })
             end
         end
-        -- 保留其他承諾型態既有的停穩交接退路。
-        if not exitReady and finite(fs.offC) and finite(fs.offD)
-                and s.lastSNow >= fs.offC + s.bodyReach
-                and finite(s.dodgeNextCap) and s.dodgeNextCap >= 0
-                and s.dodgeNextCap < MDADDynamics.MIN_EXEC_KMH
-                and not s.dodgeGuardFailed and not s.currentBlocked
-                and not s.returnActive and not fs.rotating and s.recoverWhy == nil
-                and math.abs(vehicle:getCurrentSpeedKmHour()) < 1 then
-            exitReady = nearestLineBlocker(s, sen, fs.offD) ~= nil
+        -- 保留其他承諾型態既有的停穩交接退路（條件見 Drive.nextStopHandoff）。
+        if not exitReady and Drive.nextStopHandoff(s, vehicle:getCurrentSpeedKmHour()) then
+            -- 車身可能還在舊群旁：交接後跨輪維持停止（dodgeHandoffHold），直到新線採納或真正淨空，
+            -- 不讓 RETURN／pure pursuit 在沒有新線時從偏移位置切回常駐線。
+            exitReady, handoff = true, true
+            diagEvent(s, playerNum, "dodge", { phase = "release", why = "next-stop",
+                rs = s.lastSNow, c = fs.offC, d = s.dodgeNextDist })
         end
         -- 停留承諾沒有回線段：保持段走完（>=c）就釋放，下一輪從停留 lane 規劃下一台
         if s.dodgeStay and finite(s.stayLanePending) and type(fs.offB) == "number"
@@ -9127,7 +9299,7 @@ local function stepFollow(s, vehicle, playerNum, now)
             -- 速度檔位：全部是疊在剖面上的 min，cap<0＝本幀沒有任何檔位介入
             local cap = -1
             local capReason = nil
-            s.dodgeNextCap = -1
+            s.dodgeNextCap, s.dodgeNextDist = -1, nil
             if not s.sensor.ready then
                 -- 首輪掃描還沒完成（剛啟動／換路線／脫困後重掃）＝「不知道前面有
                 -- 什麼」，與未載入同級保守：不加這條會在盲區全速衝 ~150ms，
@@ -9197,9 +9369,10 @@ local function stepFollow(s, vehicle, playerNum, now)
                         local coast = finite(s.safeCoast) and math.max(0, s.safeCoast) or 0
                         local capN = MDADDynamics.approachCapKmh(
                             nextDistance, 0, 0.5, coast)
-                        s.dodgeNextCap = capN
+                        s.dodgeNextCap, s.dodgeNextDist = capN, nextDistance
                         if capN < applied then applied = capN end
                     end
+                    applied = Drive.dodgeAlignCap(s, applied, speedKmh) -- 未對正不加速（TUNE.DODGE_ALIGN_*）
                     s.dodgeApproachCap = applied
                     if cap < 0 or applied < cap then
                         cap = applied
@@ -10419,8 +10592,10 @@ local function stepFollow(s, vehicle, playerNum, now)
                     if assistForce == 0 and not coupled then
                         assistForce = -Drive.visAssistForce(s, speedKmh, mult)
                     end
-                    -- 車身 yaw 率限制（TUNE.ESC_*；耦力原地調頭不經此限）
-                    if not coupled then steer = Drive.yawGovern(s, steer or 0, heading, speedKmh, now) end
+                    -- 回授依轉向增益正規化（TUNE.FB_NORM_*）後，車身 yaw 率限制（TUNE.ESC_*）；耦力原地調頭兩者都不經
+                    if not coupled then
+                        steer = Drive.yawGovern(s, Drive.normalizeSteer(s, steer or 0), heading, speedKmh, now)
+                    end
                     force, s.lastAssistForce = applySteering(
                         s, vehicle, fwd, fx, fy, steer or 0,
                         speedKmh, mult, coupled, assistForce)

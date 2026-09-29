@@ -145,7 +145,7 @@ local TANGENT_SLOPE_LEAD_S = 0.2
 -- 十三場 telemetry 的 yaw率/(steer·v) 中位數：RaceCar／救護車 24 km/h 0.16-0.21、F350 23 km/h
 -- 0.10-0.12、F350 39 km/h 0.03（隨車重、車長、速度差六倍，固定常數不可能對）；估計器＝
 -- 上幀施出的 steer（Driver 回寫 appliedSteer，含 cross-track 與夾限）對本幀 yaw 率的比值
--- EWMA（τ 0.5s、只在 |steer| ≥ 0.3、v ≥ 8 km/h 更新、夾 [0.2, 3]）。FRAC 0.7 給七成、剩下回饋
+-- EWMA（τ 0.5s、只在 |steer| ≥ 0.3、v ≥ 8 km/h 更新、夾 [0.08, 3]）。FRAC 0.7 給七成、剩下回饋
 -- 補；前饋偏大時切線／cross-track 反向抵銷。INIT 0.8 貼重車（F350 24 km/h 0.77；RaceCar 1.3
 -- 只多付 0.5s 收斂的 0.1-0.2m 切內）。進弧前 LEAD 秒線性爬升（一階 yaw
 -- 延遲 τ≈0.35：進弧那刻 yaw 率才從 0 起步＝前 3m 必外漂）。
@@ -171,7 +171,11 @@ local YAW_GAIN_INIT = 0.8
 local YAW_GAIN_TAU_S = 0.5
 local YAW_GAIN_MIN_STEER = 0.3
 local YAW_GAIN_MIN_KMH = 8
-local YAW_GAIN_LO, YAW_GAIN_HI = 0.2, 3.0
+-- 下限 0.08（0929j；原 0.2）：KI5 Oshkosh 消防車真實增益 0.15–0.19、SemiTruckBox_mil 0.09–0.12，舊下限讓估計
+-- 永遠停在 0.2 以上（玩家 session-012 撞物前整段 yg 0.20–0.21＝貼在下限），前饋與 Driver 的回授正規化
+-- （TUNE.FB_NORM_*）都以為這台車比實際好轉。一般車估計值在 0.47–0.99，觀測很少低於 0.2，語料重放改下限後
+-- 中位數變化 ≤0.01。
+local YAW_GAIN_LO, YAW_GAIN_HI = 0.08, 3.0
 local KINK_EXIT_ALIGN_RAD = 6 * PI / 180
 local KINK_EXIT_LANE_M = 0.5
 local LOOKAHEAD_WALK_MAX = 64 -- 前視推進的段數硬上限（碎段路線不得變成 O(n) 迴圈）
