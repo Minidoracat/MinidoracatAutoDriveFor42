@@ -61,7 +61,7 @@ If the server disables loot spawns, crafting is the only way. Parts (plus a scre
 [*] [b]Take over anytime[/b]: steering, throttle or brake stops autodrive by default; the trip is kept. "After manual input" can resume 2 / 3 / 5 / 10 s after letting go, with a HUD countdown.
 [*] [b]U-turn style[/b]: "Gentle" (default) slows before turning; "Fast" swings around with momentum.
 [*] [b]Keep right and dodge[/b]: keeps right so oncoming traffic separates (server-adjustable); passes parked vehicles or obstacles through a gap, then returns to its lane.
-[*] [b]Recovery and rerouting[/b]: when stuck, tries another gap or reverses after checking behind. On a fully blocked road it waits and the HUD offers [b]Reroute[/b] around the blockage (or enable "Reroute automatically when blocked"). Only with no route does it hand back control.
+[*] [b]Recovery and rerouting[/b]: when stuck, tries another gap or reverses after checking behind. On a fully blocked road it asks navigation for a route around the blockage automatically ("Reroute automatically when blocked", on by default); the HUD [b]Reroute[/b] button also works any time. Only with no route does it hand back control.
 [*] [b]Slowdown and soft avoidance[/b]: adapts to bends, traffic and unloaded areas. "Avoid zombies and corpses" (default on) finds one shared safe gap; without one it keeps the route and slowdown settings.
 [*] [b]Sensing distance[/b]: base 48 / 80 / 120 (default) / 160 / 200 m; extensions are capped by performance budget and loaded world. The HUD slowdown tooltip shows the real range.
 [*] [b]Future trajectory[/b]: blue for the route, yellow for committed dodges; toggle and pick Thin / Standard / Thick in MOD Options or MiniMap.
