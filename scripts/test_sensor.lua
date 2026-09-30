@@ -700,6 +700,91 @@ local function scenarioTraffic()
     BaseVehicle = nil
 end
 
+-- 2026-10-01 E2E 會車量測：位移估速要等第二輪（首見 62–71m、有速度已 53–68m），MP 遠端插值初期
+-- 還高估 50–180%。改用車自己的線速度：首輪就有、而且是真值；線速度≈0（剛進同步範圍）照舊退回位移估速。
+-- 違規證明：拿掉線速度＝首輪 false 紅；門檻改 0＝剛同步（0 速）也被當成已知 0 紅。
+local function scenarioTrafficVelocity()
+    scenario("行進中車輛：首輪就用車自己的線速度（對向負、同向正）；線速度≈0 仍當未知")
+    resetWorld()
+    BaseVehicle = {
+        allocVector3f = function()
+            local v = { _x = 0, _y = 0, _z = 0 }
+            function v:set(x, y) self._x, self._y = x, y return self end
+            function v:x() return self._x end
+            function v:y() return self._y end
+            function v:z() return self._z end
+            return v
+        end,
+        releaseVector3f = function() end,
+    }
+    local function newCar(id, cx, cy, heading, vx, vy)
+        local W, L = 1.8, 4.6
+        local car = { _x = cx, _y = cy, _h = heading, _vx = vx, _vy = vy }
+        local ext = { x = function() return W end, z = function() return L end }
+        local com = { x = function() return 0 end, z = function() return 0 end }
+        local script = { getExtents = function() return ext end,
+            getCenterOfMassOffset = function() return com end }
+        function car:getId() return id end
+        function car:getX() return self._x end
+        function car:getY() return self._y end
+        function car:isStopped() return self._stopped == true end
+        function car:getDriver() return self._driver end
+        function car:getScript() return script end
+        function car:getWorldPos(lx, _, lz, out)
+            local fx, fy = math.cos(self._h), math.sin(self._h)
+            return out:set(self._x + fx * lz - fy * lx, self._y + fy * lz + fx * lx)
+        end
+        -- Bullet 的 y 是上軸：世界平面速度在 x／z（同 Driver sampleVelocity）
+        function car:getLinearVelocity(out) out._x, out._y, out._z = self._vx, 0, self._vy end
+        return car
+    end
+    -- 14＝有人駕駛、剛進同步範圍（速度讀 0、isStopped）；15＝路邊停的車（沒人、isStopped）
+    local driven = newCar(14, X0 + 50, Y0, math.pi, 0, 0)
+    driven._stopped, driven._driver = true, {}
+    local parked = newCar(15, X0 + 60, Y0 + 3, 0, 0, 0)
+    parked._stopped = true
+    for _, car in ipairs({ newCar(11, X0 + 30, Y0 - 2, math.pi, -12, 0.5), newCar(12, X0 + 20, Y0 + 2, 0, 9, 0),
+            newCar(13, X0 + 40, Y0 + 2, math.pi, -0.3, 0), driven, parked }) do
+        for gx = math.floor(car._x - 3), math.floor(car._x + 3) do
+            for gy = math.floor(car._y - 1), math.floor(car._y + 1) do
+                local sq = squareAt(gx + 0.5, gy + 0.5)
+                sq._veh = car
+                function sq:getVehicleContainer() return self._veh end
+            end
+        end
+    end
+    local st = newSensor(80, 4, 0)
+    checkTrue(runRound(st), "第一輪完成")
+    local function entry(sMid)
+        for i = 1, st.trfN do
+            if math.abs((st.trfS0[i] + st.trfS1[i]) * 0.5 - sMid) < 1 then return i end
+        end
+    end
+    local io, il, iz = entry(30), entry(20), entry(40)
+    checkTrue(io ~= nil and st.trfVs[io] == -12, "對向車首輪就有沿路線速度（實得 " .. show(io and st.trfVs[io]) .. "）")
+    checkTrue(io ~= nil and st.trfVl[io] == 0.5, "對向車首輪就有橫向速度")
+    checkTrue(il ~= nil and st.trfVs[il] == 9, "同向車首輪就有沿路線速度（實得 " .. show(il and st.trfVs[il]) .. "）")
+    checkTrue(iz ~= nil and st.trfVs[iz] == false, "線速度≈0（剛進同步範圍）仍當未知，不當成停著的 0")
+    local id = entry(50)
+    checkTrue(id ~= nil and st.trfVs[id] == false,
+        "有人駕駛、速度還讀 0 的車：當行進中（速度未知），不當停在路中間的車去繞")
+    checkEq(entry(60), nil, "沒人駕駛的停車照舊是硬障礙，不進 trf")
+    local function hardNear(wx)
+        for i = 1, st.hardN do
+            if math.abs(st.hardX[i] - wx) < 3 then return true end
+        end
+        return false
+    end
+    checkFalse(hardNear(X0 + 50), "有人駕駛的車暖機窗內不進硬障礙點雲")
+    checkTrue(hardNear(X0 + 60), "路邊停車進硬障礙點雲")
+    -- 首見 1.5 秒後還是 0 速、沒動：真的停著（等紅燈），照舊當硬障礙
+    R.now = R.now + 2000
+    checkTrue(runRound(st), "暖機窗過後再掃一輪")
+    checkEq(entry(50), nil, "暖機窗過後仍沒動的有人駕駛車：不再當行進車")
+    checkTrue(hardNear(X0 + 50), "暖機窗過後仍沒動的有人駕駛車：進硬障礙點雲")
+    BaseVehicle = nil
+end
+
 -- =====================================================================
 -- 情境九：斜向路線每輪都看得到每隻殭屍（0925 E2E zombie-sp turn：彎心殭屍每隔一兩輪消失，
 -- 軟縫在閃／不閃間來回跳）。1m×1m 取樣點陣一旋轉就會漏格，漏哪格隨起點相位變；非軸對齊步
@@ -743,6 +828,7 @@ scenarioUnloadedFrontier()
 scenarioMidRoundRequest()
 scenarioDistantCorpses()
 scenarioTraffic()
+scenarioTrafficVelocity()
 scenarioDiagonalCoverage()
 
 closeScenario()

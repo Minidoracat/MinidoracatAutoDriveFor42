@@ -569,6 +569,32 @@ end
 -- 退回「車心 ± 一般轎車半寬 0.9／半長 2.3、與路線同向」的保守框。vs/vl＝nil＝首輪沒位移可算。
 local TRF_MAX = 8
 local TRF_FALLBACK_HALF_W, TRF_FALLBACK_HALF_L = 0.9, 2.3
+local VEL_KNOWN2 = 1 -- 線速度平方門檻（1 m/s）：低於它當「還沒同步／停著」，不採用
+local DRIVEN_UNSYNC_MS = 1500 -- 有人駕駛的車首見後這段時間內讀到 0 速＝遠端插值還沒就緒，不當停著的車
+
+-- 有人駕駛（或被有人駕駛的車拖著）：駕駛座是角色＝不是路邊停的車
+local function drivenVehicle(cv)
+    local ok, d = pcall(cv.getDriver, cv)
+    if ok and d ~= nil then return true end
+    local okT, t = pcall(cv.getVehicleTowedBy, cv)
+    if okT and t ~= nil then
+        local okD, td = pcall(t.getDriver, t)
+        return okD and td ~= nil
+    end
+    return false
+end
+
+-- 車輛的物理線速度（世界 x,z）；池向量同段歸還。取不到回 nil。
+local function vehVelocity(cv)
+    local cls = BaseVehicle
+    if cls == nil or type(cls.allocVector3f) ~= "function" then return nil end
+    local out = cls.allocVector3f()
+    local x, z
+    if pcall(cv.getLinearVelocity, cv, out) then x, z = out:x(), out:z() end
+    cls.releaseVector3f(out)
+    if type(x) ~= "number" or x * 0 ~= 0 or type(z) ~= "number" or z * 0 ~= 0 then return nil end
+    return x, z
+end
 local function pushTraffic(state, cv, vs, vl)
     local n = state.wTrfN
     if n >= TRF_MAX then
@@ -749,15 +775,36 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
                     vs = (pdx * state.ny - pdy * state.nx) / dt
                     vl = (pdx * state.nx + pdy * state.ny) / dt
                 end
+            else
+                state.vehFirstMs[vid] = state.nowMs -- 上一輪沒看到＝新的一次目擊
+            end
+            -- 車自己的線速度（世界 x,z＝世界 x,y，同 Driver sampleVelocity）優先於跨輪位移：MP 遠端車
+            -- 插值就緒後就是真值，首見那一輪就能分對向／同向，不必等第二輪；位移估速在遠端插值剛就緒時
+            -- 還會把追趕的位移算進去（2026-10-01 E2E 會車量測：真值 11 m/s 估成 31、29 估成 68）。
+            local wvx, wvz = vehVelocity(cv)
+            local synced = wvx ~= nil and wvx * wvx + wvz * wvz >= VEL_KNOWN2
+            if synced and not still then
+                vs = wvx * state.ny - wvz * state.nx
+                vl = wvx * state.nx + wvz * state.ny
+            end
+            -- 有人駕駛的車剛進同步範圍：遠端插值還沒就緒時速度讀 0、位置不動（VehicleManager.updateVehiclePos
+            -- 取不到插值即 setSpeedKmHour(0)），看起來就是停在路中間的車——E2E 窄路對撞（兩台 100 km/h）
+            -- 首見 69–75m 卻被當成停著的車去繞／掃掠打槍，要到 27–37m 才變成行進車。首見後 DRIVEN_UNSYNC_MS
+            -- 內速度仍≈0 的有人駕駛車當「行進中、速度未知」（Driver 在行駛線上就先當停著的前車減速，不繞）。
+            if not synced and (still or cv:isStopped()) and state.nowMs - (state.vehFirstMs[vid] or 0) < DRIVEN_UNSYNC_MS
+                    and drivenVehicle(cv) then
+                still, vs, vl = false, nil, nil
+            elseif cv:isStopped() then
+                still = true -- 本輪判定一次、同輪後續格沿用（isStopped 跨幀翻面會讓 sig 跳動）
             end
             state.vehPosX[vid] = vwx
             state.vehPosY[vid] = vwy
             state.vehPosT[vid] = state.nowMs
             state.vehPosGen[vid] = state.gen
             state.vehStill[vid] = still
-            if not still and not cv:isStopped() then pushTraffic(state, cv, vs, vl) end
+            if not still then pushTraffic(state, cv, vs, vl) end
         end
-        if still or cv:isStopped() then                -- BaseVehicle.java:4259-4260
+        if still then                                  -- 兩輪沒動或 isStopped（BaseVehicle.java:4303-4304）
             -- 停著的車＝實體障礙，要繞。幾何走精確輪廓（每台每輪一次）；輪廓取不到
             -- 才退回「這一格＝0.7 圓」的格級佔位。同一台車後續命中的格只計數。
             local og = state.vehOutlineGen[vid]
@@ -1212,6 +1259,7 @@ function MDADSensor.newState()
         -- 不清，鍵數＝見過的車輛數量級，值全為數字）
         vehPosX = {}, vehPosY = {}, vehPosGen = {}, vehStill = {},
         vehPosT = {},       -- vehicleId → 最後一次首輪命中的時戳（車速＝兩輪位移／時差）
+        vehFirstMs = {},    -- vehicleId → 這一次連續目擊的首見時戳（有人駕駛車的插值暖機窗）
         vehOutlineGen = {}, -- vehicleId → gen：本輪已推過該車輪廓（格級命中只計數不再推點）
         aheadM = SCAN_AHEAD, -- 掃描帶前伸長（高速檔由 driver 拉長：120km/h 需 ~110m 才煞得住）
         scanS = 0,

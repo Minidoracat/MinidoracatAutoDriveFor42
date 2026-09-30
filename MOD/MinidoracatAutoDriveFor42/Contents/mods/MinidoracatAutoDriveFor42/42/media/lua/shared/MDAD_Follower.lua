@@ -529,14 +529,15 @@ function MDADFollower.segIndexAt(profile, sAt)
 end
 
 -- 段 segI 上常駐 laneBias 實際能落到的值（Driver 期望線／遙測 el 與 control 同一
--- 張表）。profile 未 ready 或無表＝原值。
-function MDADFollower.laneBiasAt(profile, bias, segI, sAt)
+-- 張表）。profile 未 ready 或無表＝原值。keep＝離路緣保留（nil＝LANE_BIAS_KEEP）；會車時
+-- Driver 設 state.laneKeep＝0（貼到路緣錯車，1001b），control 與期望線必須傳同一個值。
+function MDADFollower.laneBiasAt(profile, bias, segI, sAt, keep)
     if type(profile) ~= "table" or profile.laneRoomR == nil
             or not isFinite(bias) or not isFinite(segI) then return bias end
     segI = segI - segI % 1
     if segI < 1 then segI = 1 elseif segI > profile.n - 1 then segI = profile.n - 1 end
     if not isFinite(sAt) then sAt = nil end
-    return clampLane(profile, segI, bias, nil, sAt)
+    return clampLane(profile, segI, bias, keep, sAt)
 end
 
 -- 建表期的單點運算：抄座標、算段長／段朝向／累積弧長，並在資料到齊時補算內點曲率。
@@ -1175,11 +1176,11 @@ local function arcFeedForward(profile, state, arcK, bestI, sNow, aspeed, tangent
     if state.laneTangent == true and isFinite(rb) and rb ~= 0 then
         local h, sL, i = LANE_FF_STEP_M, sNow + lead, bestI
         while i < n - 1 and s[i + 1] < sL - h do i = i + 1 end
-        local l0 = clampLane(profile, i, rb, nil, sL - h)
+        local l0 = clampLane(profile, i, rb, state.laneKeep, sL - h)
         while i < n - 1 and s[i + 1] < sL do i = i + 1 end
-        local l1 = clampLane(profile, i, rb, nil, sL)
+        local l1 = clampLane(profile, i, rb, state.laneKeep, sL)
         while i < n - 1 and s[i + 1] < sL + h do i = i + 1 end
-        local lk = (clampLane(profile, i, rb, nil, sL + h) - 2 * l1 + l0) / (h * h)
+        local lk = (clampLane(profile, i, rb, state.laneKeep, sL + h) - 2 * l1 + l0) / (h * h)
         local den = 1 - l1 * kk -- lane>0 在 CCW 法向側：CCW 彎（kk>0）內側＝半徑 R−l
         if den < 0.5 then den = 0.5 end
         arcScale = 1 / den
@@ -1431,7 +1432,7 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
     local bias = state.laneBias
     if not isFinite(bias) then bias = 0 end
     local sEff = s[j] + lj * tj
-    bias = clampLane(profile, j, bias, nil, sEff)
+    bias = clampLane(profile, j, bias, state.laneKeep, sEff)
     local lt = bias
     local offL = state.offL
     local ovUsed = false
@@ -1544,10 +1545,10 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
                 local q2 = q + aspeed * MS_PER_KMH * TANGENT_SLOPE_LEAD_S
                 local qi2 = qi
                 while qi2 < profile.n - 1 and s[qi2 + 1] < q2 do qi2 = qi2 + 1 end
-                local l1 = clampLane(profile, qi2, rb, nil, q2)
+                local l1 = clampLane(profile, qi2, rb, state.laneKeep, q2)
                 q2 = q2 + TANGENT_PREVIEW_M
                 while qi2 < profile.n - 1 and s[qi2 + 1] < q2 do qi2 = qi2 + 1 end
-                hq = hq + atan2(clampLane(profile, qi2, rb, nil, q2) - l1, TANGENT_PREVIEW_M)
+                hq = hq + atan2(clampLane(profile, qi2, rb, state.laneKeep, q2) - l1, TANGENT_PREVIEW_M)
             end
             vx, vy = cos(hq), sin(hq)
             tangentOn = true
@@ -1647,7 +1648,7 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
             -- 世界 dθ>0）內側＝右＝+lane。
             if actualKappa > 0 then
                 local latHere = lineLat
-                if latHere == nil then latHere = clampLane(profile, bestI, bias, nil, sNow) end
+                if latHere == nil then latHere = clampLane(profile, bestI, bias, state.laneKeep, sNow) end
                 local dth = 0
                 if bestI + 1 <= profile.n - 1 then
                     dth = wrapPi(profile.segH[bestI + 1] - profile.segH[bestI])
@@ -1711,7 +1712,7 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         local lane = lineLat
         if lane == nil then
             lane = clampLane(profile, bestI,
-                isFinite(state.laneBias) and state.laneBias or 0, nil, sNow)
+                isFinite(state.laneBias) and state.laneBias or 0, state.laneKeep, sNow)
         end
         if sNow >= state.kinkExitS
                 and math.abs(att) <= (brisk and MDADDynamics.ALIGN_HEADING_RAD or KINK_EXIT_ALIGN_RAD)
@@ -2054,7 +2055,8 @@ function MDADFollower.buildOffsetLine(profile, s0, a, b, c, d, l, bias, outX, ou
 end
 
 -- Completed-snapshot proof line for the actual lane-biased smoothed profile.
-function MDADFollower.buildLaneLine(profile, s0, s1, lane, outX, outY, startIdx, outSeg)
+-- keep＝同 control 的 state.laneKeep（nil＝LANE_BIAS_KEEP）：證明線必須是車真正在開的那條。
+function MDADFollower.buildLaneLine(profile, s0, s1, lane, outX, outY, startIdx, outSeg, keep)
     if type(profile) ~= "table" or profile.ready ~= true
             or not isFinite(s0) or not isFinite(s1) or s1 <= s0
             or not isFinite(lane) or type(outX) ~= "table" or type(outY) ~= "table" then
@@ -2099,7 +2101,7 @@ function MDADFollower.buildLaneLine(profile, s0, s1, lane, outX, outY, startIdx,
             if t < 0 then t = 0 elseif t > 1 then t = 1 end
         end
         local h = segH[j]
-        local laneJ = clampLane(profile, j, lane, nil, sk)
+        local laneJ = clampLane(profile, j, lane, keep, sk)
         outX[k] = px[j] + (px[j + 1] - px[j]) * t - sin(h) * laneJ
         if type(outSeg) == "table" then outSeg[k] = j end
         outY[k] = py[j] + (py[j + 1] - py[j]) * t + cos(h) * laneJ

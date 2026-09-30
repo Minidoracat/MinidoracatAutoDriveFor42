@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1001a"
+Drive.REV = "1001c"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -257,6 +257,7 @@ TUNE.TRAFFIC_MARGIN_M = 0.5       -- 錯車時兩車車身希望留的淨距
 TUNE.TRAFFIC_MARGIN_MIN_M = 0.25  -- 最少淨距；右邊連這個都留不出來＝停等讓車
 TUNE.TRAFFIC_HORIZON_S = 6        -- 預計 6 秒內會車（或 30m 內）才處理
 TUNE.TRAFFIC_LANE_RATE_MPS = 1.2  -- 為對向車側移的速率上限
+TUNE.TRAFFIC_EDGE_KEEP_M = 0.1    -- 為對向車側移時離路面餘裕邊的保留（平常 Follower.LANE_BIAS_KEEP 0.6；1001b）
 TUNE.TRAFFIC_LEAD_S = 0.6         -- 側移完成後到交會還要留的秒數（快照年齡＋對方擺動）
 TUNE.TRAFFIC_SHIFT_DONE_M = 0.1   -- 車位離錯車 lane 這麼近＝側移已完成（只剩淨距限速，不再為側移時間減速）
 TUNE.TRAFFIC_PASS_MIN_KMH = 15    -- 淨距只有最少值時的錯車速度；淨距 ≥ PASS_FREE_M 不限
@@ -2783,10 +2784,14 @@ end
 -- 已關 regulator）＋兩節各自 TOW_BRAKE_DECEL 的中線外力（掛車照 towDecel），並照常轉向（同一個 impulse 槽由
 -- applySteering 合成）。低速才鎖輪停住；dynamics-fault 仍鎖輪（外力換算用的質量／幀倍率本身不可信）。
 -- 走不鎖輪時回本幀側推（telemetry f），鎖輪回 nil（呼叫端照舊補 brakeAssist）。
+-- 會車／跟車停等（followHold，why＝moving）一般車同樣不鎖輪（1001a）：正式服 0.16.0 兩台 90 km/h 在 5m 路對撞，
+-- 讓車判定出來時已經太近，隨即一秒鎖輪——鎖輪中方向盤沒用，只能直直撞上。不鎖輪的中線外力＋斷油減速度相近
+-- （輕車 3.6＋7），而且還能照讓車線往右閃。接觸（currentBlocked）照舊鎖輪。
 -- （`finite` 在本檔較後面才定義，這裡用 MDADDynamics.finite。）
 function Drive.hardBrake(s, vehicle, now, why, speedKmh, mult, steer, heading, fwd, fx, fy)
     -- 只對「往前開」的車不鎖輪：外力沿車頭反向，倒退時施下去會加速倒退（0929p 審查）
-    if not s.tow or why == "dynamics-fault"
+    local nolock = s.tow or (why == "moving" and s.followHold and not s.currentBlocked)
+    if not nolock or why == "dynamics-fault"
             or not (MDADDynamics.finite(speedKmh) and speedKmh >= TUNE.TOW_NOLOCK_KMH) then
         commandForceBrake(s, vehicle, now, why)
         return nil
@@ -2914,7 +2919,7 @@ end
 -- 期望行駛線＝laneBias（過該段路面餘裕，與 follower 前視／線建同一張表）＋
 -- （繞行中）smoothstep 側偏。抽出只為遙測 el／ld 與甩出判定共用，語意逐位元不變。
 local function expectedLaneOf(s)
-    local expL = MDADFollower.laneBiasAt(s.profile, laneBiasOf(s), s.fstate.idx, s.lastSNow)
+    local expL = MDADFollower.laneBiasAt(s.profile, laneBiasOf(s), s.fstate.idx, s.lastSNow, s.fstate.laneKeep)
     local offL = s.fstate.offL
     if s.dodging and type(offL) == "number" then
         local oa, ob, oc, od = s.fstate.offA, s.fstate.offB, s.fstate.offC, s.fstate.offD
@@ -3840,8 +3845,8 @@ function Drive.trafficScan(s, now, speedKmh)
             if finite(roomR[i]) and roomR[i] < rR then rR = roomR[i] end
             if finite(roomL[i]) and roomL[i] < rL then rL = roomL[i] end
         end
-        hi = rR - MDADFollower.LANE_BIAS_KEEP
-        lo = MDADFollower.LANE_BIAS_KEEP - rL
+        hi = rR - TUNE.TRAFFIC_EDGE_KEEP_M -- 會車可貼到路緣（control 同步用 fstate.laneKeep，見 onPlayerUpdate）
+        lo = TUNE.TRAFFIC_EDGE_KEEP_M - rL
         if hi < 0 then hi = 0 end
         if lo > 0 then lo = 0 end
     elseif finite(sen.roadLo) and finite(sen.roadHi) then
@@ -4097,7 +4102,8 @@ function Drive.trafficCap(s, now, speedKmh)
             -- 這條帽——否則 LEAD 秒數會在交會前一刻把已閃開的車煞停（2026-09-24 E2E fix1b 實測）。
             c = 999
             local latNow = finite(s.lastLatSigned) and s.lastLatSigned or laneBiasOf(s)
-            local dl = math.abs(MDADFollower.laneBiasAt(s.profile, s.trfOnWant, s.fstate.idx, s.lastSNow) - latNow)
+            local dl = math.abs(MDADFollower.laneBiasAt(s.profile, s.trfOnWant, s.fstate.idx, s.lastSNow,
+                TUNE.TRAFFIC_EDGE_KEEP_M) - latNow)
             local shifting = s.trfOnShift and gap > 0 and dl > TUNE.TRAFFIC_SHIFT_DONE_M
             if shifting then
                 c = (gap / (dl / TUNE.TRAFFIC_LANE_RATE_MPS + TUNE.TRAFFIC_LEAD_S) - vO) * 3.6
@@ -5758,7 +5764,7 @@ local function buildSnapshotProof(s, segI, proofEnd)
     local lane = laneBiasOf(s)
     local lineN, lineS0, lineReason, lastIdx = MDADFollower.buildLaneLine(
         prof, s.lastSNow, proofEnd, lane,
-        verifyX, verifyY, segI, verifySeg)
+        verifyX, verifyY, segI, verifySeg, s.fstate.laneKeep)
     if lineReason ~= "ok" then
         s.verifyLineReason = lineReason
         return
@@ -7241,7 +7247,7 @@ end
 function Drive.exitKeepsDodge(s)
     local lat = s.lastLatSigned
     if not finite(lat) then return false end
-    local resident = MDADFollower.laneBiasAt(s.profile, laneBiasOf(s), s.fstate.idx, s.lastSNow)
+    local resident = MDADFollower.laneBiasAt(s.profile, laneBiasOf(s), s.fstate.idx, s.lastSNow, s.fstate.laneKeep)
     local dev = math.abs(lat - resident)
     local available = 2
     if finite(s.currentSegWidth) and s.currentSegWidth > 0 then
@@ -9509,6 +9515,10 @@ local function stepFollow(s, vehicle, playerNum, now)
                     nb = zombieLaneOf(s, nb, now, playerNum, speedKmh) -- 殭屍軟縫（TUNE.ZOMBIE_LANE_*）
                     nb = Drive.trafficLaneOf(s, nb, now, playerNum) -- 對向車靠右錯開（TUNE.TRAFFIC_*）
                 end
+                -- 會車側移期間可貼到路緣（離路緣保留 TRAFFIC_EDGE_KEEP_M，平常 LANE_BIAS_KEEP 0.6）：
+                -- 5m 路兩車各留 0.6 時中心只到 ±0.77，兩台轎車根本錯不開，只能讓車——而同步範圍只有
+                -- ~70m，兩台 100 km/h 對開 1.2 秒內停不下來（E2E 窄路對撞）。硬物照舊由 trafficScan 收窄。
+                s.fstate.laneKeep = s.trafficLane ~= nil and TUNE.TRAFFIC_EDGE_KEEP_M or nil
                 MDADFollower.setLaneBias(s.fstate, nb)
                 Drive.clearLaneProof(s)
                 -- RETURN 活躍時掃描帶錨在「現位置↔目標 lane」的中點，不得跟著 fstate

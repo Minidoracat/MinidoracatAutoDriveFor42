@@ -8386,10 +8386,14 @@ driveReset(dveh)
 driveTick(dp, dveh)
 -- 新語意（跨輪靜止判定）：貼近的「假行進」車兩輪即判 still → 直接當障礙。
 -- 世界掃掠通過才允許在寬縫以 24 繞行，否則煞停；兩者都不會全速跟撞。
+-- 1001a：跟車停等（followHold）在 10 km/h 以上改不鎖輪煞停（斷油＋中線外力、照常轉向），也算煞停。
 checkTrue(drive.calls.forceBrake > 0
+        or (MDAD.Drive.debugSession(0).followHold and (MDAD.Drive.debugSession(0).visAssistDecel or 0) > 0
+            and drive.calls.maxRegSpeed == 0)
         or (drive.calls.maxRegSpeed > 0 and drive.calls.maxRegSpeed <= 24),
-    "前車貼到 10m 內：煞停或掃掠通過後以繞行上限 24 通過（實得 forceBrake="
-    .. tostring(drive.calls.forceBrake) .. " maxReg=" .. tostring(drive.calls.maxRegSpeed) .. "）")
+    "前車貼到 10m 內：煞停（鎖輪或不鎖輪）或掃掠通過後以繞行上限 24 通過（實得 forceBrake="
+    .. tostring(drive.calls.forceBrake) .. " vad=" .. tostring(MDAD.Drive.debugSession(0).visAssistDecel)
+    .. " maxReg=" .. tostring(drive.calls.maxRegSpeed) .. "）")
 drive.clearVehicle(16, 0)
 drive.scanRound()
 checkTrue(armDrive(), "(6b) 近距段尾重臂") -- 殘留剖面不進 ⑦
@@ -17057,8 +17061,21 @@ function drive.scenarioTraffic()
     dveh._y = 0
     checkTrue(shownN("UI_MinidoracatAutoDrive_TrafficPass") >= 1, "(center) 為對向車偏離車道時跳錯車提示")
 
-    -- (yield) 7m 路：常駐已夾到餘裕邊（1.6），右邊讓不開 → 靠近時停等讓車
+    -- (edge) 1001b：7m 路對向車佔中線——會車時可貼到路緣（keep 0.1，平常 0.6）：右邊擠得出錯車淨距就
+    -- 錯車不讓車，control／期望線同步用 fstate.laneKeep。違規證明：trafficScan 帶寬退回 LANE_BIAS_KEEP 即紅。
     arm(7)
+    on = car(26, 0, math.pi)
+    traffic(on, -2, 2)
+    checkTrue(st.trfOnGap ~= nil and not st.trfOnYield,
+        "(edge) 7m 路佔中線的對向車：貼路緣錯得開，不讓車（want " .. tostring(st.trfOnWant) .. "）")
+    checkTrue(st.trfOnWant ~= nil and st.trfOnWant > MDADFollower.laneBiasAt(st.profile, 9, st.fstate.idx) + 0.3,
+        "(edge) 錯車 lane 超過平常的路緣保留")
+    drive.scanRound()
+    checkEq(st.fstate.laneKeep, MDAD.Drive.debugTune().TRAFFIC_EDGE_KEEP_M, "(edge) 側移期間 control 用會車的路緣保留")
+    drive.clearVehicleGeom(on._cells)
+
+    -- (yield) 6m 路：貼到路緣（1.6−0.1）也錯不開佔中線的對向車 → 靠近時停等讓車
+    arm(6)
     on = car(26, 0, math.pi)
     traffic(on, -2, 2)
     checkTrue(st.trfOnGap ~= nil and st.trfOnYield, "(yield) 右邊讓不開：判讓車")
@@ -17071,6 +17088,19 @@ function drive.scenarioTraffic()
     checkTrue(st.followHold, "(yield) 對方逼近後合法停等（WAIT），不是撞上去")
     -- 讓玩家知道為什麼停：讓車提示跳一次，多輪停等不重複
     checkEq(shownN("UI_MinidoracatAutoDrive_TrafficYield"), 1, "(yield) 讓車提示跳一次，停等期間不重複")
+    -- (yield-nolock) 1001a：讓車停等在 30 km/h 不鎖輪（鎖輪中方向盤沒用＝正式服 5m 路對撞直直撞上），改中線外力＋照常轉向；
+    -- 低速才鎖輪停住。違規證明：hardBrake 的 nolock 條件拿掉 followHold 分支即紅。
+    driveReset(dveh)
+    dveh._speed = 30
+    driveTick(dp, dveh)
+    checkTrue(st.followHold and drive.calls.forceBrake == 0 and (st.visAssistDecel or 0) > 0,
+        string.format("(yield-nolock) 30 km/h 讓車停等：不鎖輪、施減速外力（forceBrake %d、vad %s）",
+            drive.calls.forceBrake, tostring(st.visAssistDecel)))
+    driveReset(dveh)
+    dveh._speed = 5
+    driveTick(dp, dveh)
+    checkTrue(st.followHold and drive.calls.forceBrake >= 1,
+        "(yield-nolock) 5 km/h 讓車停等：鎖輪停住（forceBrake " .. drive.calls.forceBrake .. "）")
     drive.clearVehicleGeom(on._cells)
 
     -- (lead) 同向前車 30m 外以 ~10 m/s 前進：接近帽的出口速度＝前車速度，不是舊的 20 平帽

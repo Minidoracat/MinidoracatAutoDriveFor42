@@ -1871,6 +1871,36 @@ do
         "弧段 +1.5：內側餘裕 " .. tostring(p.laneRoomR[arcI]) .. " < keep → 夾到 0")
     checkNear(F.laneBiasAt(p, -1.0, arcI), -(bandOut - keep), 1e-9, "弧段外側 -1.0 夾到 −(1.2−keep)")
     checkNear(F.laneBiasAt(p, 1.5, nil), 1.5, 1e-9, "無段索引回原值")
+    -- 1001b 會車貼路緣：keep 可覆寫（Driver 在為對向車側移時設 state.laneKeep＝TRAFFIC_EDGE_KEEP_M），
+    -- 期望線（laneBiasAt）、control 前視點、證明線三者同一個值。違規證明：control 不讀 state.laneKeep 即紅。
+    checkNear(F.laneBiasAt(p, 1.5, lastLine, nil, 0.1), bandOut - 0.1, 1e-9, "w=5 直段 +1.5、keep 0.1＝1.2−0.1")
+    checkNear(F.laneBiasAt(p, 1.5, lastLine), bandOut - keep, 1e-9, "不傳 keep 仍是 LANE_BIAS_KEEP")
+    do
+        local sk = F.newState()
+        F.setLaneBias(sk, 1.5)
+        F.setRuntimeLimits(sk, 3, 6, 3.5, 0.6)
+        local sL = p.s[lastLine] + 0.5 * (p.s[lastLine + 1] - p.s[lastLine])
+        local hx = p.x[lastLine + 1] - p.x[lastLine]
+        local hy = p.y[lastLine + 1] - p.y[lastLine]
+        local hl = math.sqrt(hx * hx + hy * hy)
+        local fx, fy = hx / hl, hy / hl
+        local cx = p.x[lastLine] + fx * (sL - p.s[lastLine])
+        local cy = p.y[lastLine] + fy * (sL - p.s[lastLine])
+        local function errOf(state)
+            -- 車就在中心線上、朝路線方向：前視點橫向越靠右，對它的航向誤差越大（同一前視距）
+            state.idx = lastLine
+            local _, _, _, _, err = F.control(p, state, cx, cy, math.atan2(fy, fx), 20, 1 / 30)
+            return err
+        end
+        local e0 = errOf(sk)
+        local sk2 = F.newState()
+        F.setLaneBias(sk2, 1.5)
+        F.setRuntimeLimits(sk2, 3, 6, 3.5, 0.6)
+        sk2.laneKeep = 0.1
+        local e1 = errOf(sk2)
+        checkTrue(type(e0) == "number" and type(e1) == "number" and math.abs(e1) > math.abs(e0) + 0.03,
+            string.format("control 認 state.laneKeep：貼路緣的前視點更靠右（誤差 %s → %s）", tostring(e0), tostring(e1)))
+    end
 
     -- 同一張表驅動前視點：laneBias 1.5，前視點落在弧上時偏置不得超過餘裕
     local st = F.newState()
