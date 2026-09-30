@@ -14315,7 +14315,11 @@ local function scenarioPhaseE()
             hotVeh._speed = 40
             driveReset(hotVeh)
             driveTick(dp, hotVeh)
-            checkTrue(drive.calls.forceBrake > 0, "(hold-coast) 40 km/h 回線待命仍硬煞")
+            -- 1001d：高於 RETURN_NOLOCK_KMH 的回線待命硬煞改不鎖輪（斷油＋中線外力、照常轉向；正式服 FuFu
+            -- 52 km/h 鎖輪直直滑出去）。違規證明：RETURN_NOLOCK_KMH 改 999 即紅。
+            checkTrue(drive.calls.forceBrake == 0 and (captured.visAssistDecel or 0) > 0 and drive.calls.regulatorOn == 0,
+                "(hold-coast) 40 km/h 回線待命仍硬煞，但不鎖輪（forceBrake " .. drive.calls.forceBrake
+                .. "、vad " .. tostring(captured.visAssistDecel) .. "）")
             -- (hold-coast-front) 2026-09-27 正式服 M998：正前方硬物在滑行停止距離內，回線待命不能只
             --   斷油（17 km/h 滑到 footprint 重疊才硬煞）。predicate 直接問 Drive.returnCoastClear：
             --   正前方 2.5m 的硬點＝停不住；同距離但在車側（不在車身寬帶）＝照樣只滑行。
