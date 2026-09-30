@@ -4353,6 +4353,14 @@ drive.infoHaloIndex = function()
     for i = 1, #halos do if halos[i].kind == "info" then return i end end
     return nil
 end
+-- 1001e：不鎖輪硬煞只施「沿車頭反向」的中線減速力（沒有側推、沒有力矩）；本幀完全沒施力也算（鎖輪路徑）
+drive.pureBrake = function(v)
+    local imp = v._imp
+    if imp.total == 0 then return true end
+    local lat = imp.x * (-v._fwdY) + imp.z * v._fwdX
+    local lon = imp.x * v._fwdX + imp.z * v._fwdY
+    return imp.total == 1 and math.abs(lat) < 1e-6 and math.abs(imp.torqueY or 0) < 1e-6 and lon < 0
+end
 
 -- 車頭前向（世界 X,Y）。driver 自己會正規化，但給單位向量最貼近實機。
 local function setHeading(vehicle, rad)
@@ -5249,9 +5257,12 @@ checkTrue(dveh._imp.torqueY * drive.rotSnapTq > 0,
 dveh._speed = 30
 driveReset(dveh)
 driveTick(dp, dveh)
-checkEq(dveh._imp.total, 0,
+-- 1001e：25 km/h 以上的調頭前煞停改不鎖輪（正式服 susu 82 km/h 換目標要調頭，連續鎖輪 4.5 秒只減到 27 km/h）：
+-- 只有沿車頭反向的中線減速力、方向盤不轉。違規證明：hardBrake 拿掉 rotate 分支＝forceBrake 0 那條紅。
+checkTrue(drive.pureBrake(dveh),
     "誤差 160°、車速 30 km/h：速度閘煞停不施側推（yield 中調頭再放手不得瞬間甩車）")
-checkTrue(drive.calls.forceBrake > 0, "帶動量的調頭需求：主動煞停（不只滑行等速）")
+checkTrue(drive.calls.forceBrake == 0 and (MDAD.Drive.debugSession(0).visAssistDecel or 0) > 0,
+    "帶動量的調頭需求：主動煞停（30 km/h 不鎖輪減速，forceBrake " .. drive.calls.forceBrake .. "）")
 dveh._speed = 4
 driveReset(dveh)
 driveTick(dp, dveh)
@@ -5638,9 +5649,9 @@ checkTrue(MDAD.Drive.isActive(0), "帶速調頭不放棄 session")
 dveh._speed = 30
 driveReset(dveh)
 driveTick(dp, dveh)
-checkTrue(drive.calls.forceBrake > 0,
-    "快速：反向 156°＋速度 30 > ARC 25：仍主動煞停（甩出防線在）")
-checkEq(dveh._imp.total, 0, "超帶煞停幀不施轉向")
+checkTrue(drive.calls.forceBrake > 0 or (MDAD.Drive.debugSession(0).visAssistDecel or 0) > 0,
+    "快速：反向 156°＋速度 30 > ARC 25：仍主動煞停（甩出防線在；25 km/h 以上不鎖輪）")
+checkTrue(drive.pureBrake(dveh), "超帶煞停幀不施轉向（只有中線減速力）")
 checkTrue(MDAD.Drive.isActive(0), "煞停不放棄 session")
 MDAD.HUD.uturnMode = nil
 dveh._speed = 20
@@ -18095,8 +18106,15 @@ function drive.scenario0928()
         "(blk-app) 略超包絡：減速輔助、不鎖輪（cap=" .. tostring(st.blockedApproachCap) .. " vad="
         .. tostring(st.visAssistDecel) .. " hbr=" .. tostring(st.lastHardBrakeReason) .. "）")
     dveh._speed = capNow + 12
+    st.forceBrakeUntil = 0
     ticks(1, 20)
-    checkEq(st.lastHardBrakeReason, "blocked-approach", "(blk-app) 遠超包絡：一秒鎖輪")
+    checkEq(st.lastHardBrakeReason, "blocked-approach", "(blk-app) 遠超包絡：硬煞")
+    -- 1001e：25 km/h 以上改不鎖輪（正式服 0.16.0 GTR 50 km/h、MR2 64 km/h 在 22–56m 外判 blocked 就一秒鎖到 0，
+    --   下一輪就承諾了 18 km/h 的繞行）：斷油＋中線外力，停止線的 blockedStop 照舊鎖輪兜底。
+    --   違規證明：hardBrake 拿掉 blocked-approach＝這條紅。
+    checkTrue((st.forceBrakeUntil or 0) == 0 and math.abs((st.visAssistDecel or 0) - T.TOW_BRAKE_DECEL) < 1e-9,
+        "(blk-app) 遠超包絡、" .. string.format("%.0f", dveh._speed) .. " km/h：不鎖輪、中線外力（fbu="
+        .. tostring(st.forceBrakeUntil) .. " vad=" .. tostring(st.visAssistDecel) .. "）")
     -- 停止線前的低速段（≤20+10）不鎖輪（E2E rc2 0021：24 km/h 在停止線前先停死再爬一次）：交給 blockedStop
     dveh._x, dveh._speed = 39, 24
     st.forceBrakeUntil = 0

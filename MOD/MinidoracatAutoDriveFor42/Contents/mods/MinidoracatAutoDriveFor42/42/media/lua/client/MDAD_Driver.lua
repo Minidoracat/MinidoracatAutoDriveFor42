@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1001d"
+Drive.REV = "1001e"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -514,7 +514,7 @@ TUNE.BRAKE_ASSIST_NEED = 4.5 -- 需要的減速度（m/s²）超過一般硬煞�
 -- 拖車硬煞不鎖輪（0929p，使用者裁定；見 Drive.hardBrake）：這個速度以上改用兩節各自的中線外力
 TUNE.TOW_NOLOCK_KMH = 10
 TUNE.TOW_BRAKE_DECEL = 7.0 -- 兩節各自的外力減速度（m/s²，同 DODGE_ASSIST_MAX）；斷油的引擎煞車另外疊加
-TUNE.RETURN_NOLOCK_KMH = 25 -- 回線待命硬煞在這個速度以上改不鎖輪（1001d；低速照舊鎖輪停住）
+TUNE.RETURN_NOLOCK_KMH = 25 -- 回線待命／調頭前煞停／blocked 接近在這個速度以上改不鎖輪（1001d／1001e；低速照舊鎖輪）
 -- 堵住時放寬橫向掃描（0929p，使用者裁定「允許繞到道路之外」；見 Drive.wideScanWanted、MDADSensor 寬帶）
 TUNE.WIDE_SCAN_KMH = 5
 TUNE.WIDE_ARM_SAME_M = 6 -- 判堵錨離武裝時的錨超過這個距離＝換了一個堵點（Drive.blockedAtStop 解除武裝）
@@ -2790,12 +2790,17 @@ end
 -- （輕車 3.6＋7），而且還能照讓車線往右閃。接觸（currentBlocked）照舊鎖輪。
 -- 回線待命（return-hold）在 RETURN_NOLOCK_KMH 以上同樣不鎖輪（1001d）：正式服 FuFu 閃完殭屍離常駐線 2.9m、
 -- RETURN 一進就待命，52 km/h 一秒鎖輪直直滑出去；低速照舊鎖輪停住。
+-- 調頭前煞停（why＝rotate）與 blocked 接近包絡（why＝blocked-approach）同樣門檻（1001e）：正式服 susu 81.8 km/h
+-- 改目標到車後，一秒鎖輪連續 4.5 秒只從 82 減到 27；GTR 50 km/h、MR2 64 km/h 在 22–56m 外判 blocked 就一秒鎖到 0，
+-- 下一輪就承諾了 18 km/h 的繞行。停止線的 blocked（blockedStop）照舊鎖輪兜底。
+-- steer 傳 nil＝本幀只減速、不轉向（調頭要先煞到近停才轉，鎖輪時本來就不施轉向）。
 -- （`finite` 在本檔較後面才定義，這裡用 MDADDynamics.finite。）
 function Drive.hardBrake(s, vehicle, now, why, speedKmh, mult, steer, heading, fwd, fx, fy)
     -- 只對「往前開」的車不鎖輪：外力沿車頭反向，倒退時施下去會加速倒退（0929p 審查）
     local nolock = s.tow or (why == "moving" and s.followHold and not s.currentBlocked)
     local minKmh = TUNE.TOW_NOLOCK_KMH
-    if not nolock and (why == "return" or why == "return-hold") and s.returnHold and not s.currentBlocked then
+    if not nolock and not s.currentBlocked and (why == "rotate" or why == "blocked-approach"
+            or ((why == "return" or why == "return-hold") and s.returnHold)) then
         nolock, minKmh = true, TUNE.RETURN_NOLOCK_KMH
     end
     if not nolock or why == "dynamics-fault"
@@ -2811,8 +2816,9 @@ function Drive.hardBrake(s, vehicle, now, why, speedKmh, mult, steer, heading, f
     s.visAssistDecel = a
     s.towBrakeWhy = why or "?"
     Drive.towDecel(s, a, mult)
-    local force, assist = applySteering(s, vehicle, fwd, fx, fy,
-        Drive.yawGovern(s, Drive.normalizeSteer(s, steer or 0), heading, speedKmh, now),
+    local st = 0 -- steer nil＝不轉向（調頭前煞停）；照常轉向時才走回授正規化與 yaw 率限制
+    if steer ~= nil then st = Drive.yawGovern(s, Drive.normalizeSteer(s, steer), heading, speedKmh, now) end
+    local force, assist = applySteering(s, vehicle, fwd, fx, fy, st,
         speedKmh, mult, false, -a * mass * (mult / MULT_NORM) / (0.01 * 48 / MULT_NORM))
     s.lastAssistForce = assist
     return force
@@ -10795,8 +10801,9 @@ local function stepFollow(s, vehicle, playerNum, now)
                     -- 一加速就被煞回 5——「>5 煞停 → ≤5 才探測 → 探測擋 →
                     -- 大弧 12 → 又煞停」振盪，大弧路徑從未真正跑起來。常駐上限是
                     -- arc（爬行帶之上）；原地耦力自身仍要求近停（coupled 條件）。
+                    -- 25 km/h 以上不鎖輪（1001e，見 Drive.hardBrake；steer nil＝只減速）。
                     vehicle:setRegulator(false)
-                    commandForceBrake(s, vehicle, now, "rotate")
+                    Drive.hardBrake(s, vehicle, now, "rotate", speedKmh, mult, nil, heading, fwd, fx, fy)
                     regOn = false
                 else
                     -- 誤差 > 90° 走耦力模式（coupled=true）：力矩恆定、側向中心力
