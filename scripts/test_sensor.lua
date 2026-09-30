@@ -743,8 +743,10 @@ local function scenarioTrafficVelocity()
     driven._stopped, driven._driver = true, {}
     local parked = newCar(15, X0 + 60, Y0 + 3, 0, 0, 0)
     parked._stopped = true
+    -- 16＝剛同步那一幀線速度跳位（1001f：E2E 讀到 832 km/h＝231 m/s）
     for _, car in ipairs({ newCar(11, X0 + 30, Y0 - 2, math.pi, -12, 0.5), newCar(12, X0 + 20, Y0 + 2, 0, 9, 0),
-            newCar(13, X0 + 40, Y0 + 2, math.pi, -0.3, 0), driven, parked }) do
+            newCar(13, X0 + 40, Y0 + 2, math.pi, -0.3, 0), driven, parked,
+            newCar(16, X0 + 70, Y0 - 2, math.pi, -231, 0) }) do
         for gx = math.floor(car._x - 3), math.floor(car._x + 3) do
             for gy = math.floor(car._y - 1), math.floor(car._y + 1) do
                 local sq = squareAt(gx + 0.5, gy + 0.5)
@@ -765,6 +767,9 @@ local function scenarioTrafficVelocity()
     checkTrue(io ~= nil and st.trfVl[io] == 0.5, "對向車首輪就有橫向速度")
     checkTrue(il ~= nil and st.trfVs[il] == 9, "同向車首輪就有沿路線速度（實得 " .. show(il and st.trfVs[il]) .. "）")
     checkTrue(iz ~= nil and st.trfVs[iz] == false, "線速度≈0（剛進同步範圍）仍當未知，不當成停著的 0")
+    local ig = entry(70)
+    checkTrue(ig ~= nil and st.trfVs[ig] == false,
+        "線速度 231 m/s（剛同步那一幀的跳位）：當速度未知、照樣進 trf（實得 " .. show(ig and st.trfVs[ig]) .. "）")
     local id = entry(50)
     checkTrue(id ~= nil and st.trfVs[id] == false,
         "有人駕駛、速度還讀 0 的車：當行進中（速度未知），不當停在路中間的車去繞")

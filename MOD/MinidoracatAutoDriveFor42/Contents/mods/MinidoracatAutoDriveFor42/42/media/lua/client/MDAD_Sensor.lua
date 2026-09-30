@@ -570,6 +570,9 @@ end
 local TRF_MAX = 8
 local TRF_FALLBACK_HALF_W, TRF_FALLBACK_HALF_L = 0.9, 2.3
 local VEL_KNOWN2 = 1 -- 線速度平方門檻（1 m/s）：低於它當「還沒同步／停著」，不採用
+-- 速度上限平方（70 m/s＝252 km/h）：遠端車剛同步那一幀線速度／位移偶爾是跳位（1001f：E2E 讀到 832 km/h），
+-- 超過就當速度未知（首輪照樣進 trf、不當停著的車）
+local VEL_MAX2 = 4900
 local DRIVEN_UNSYNC_MS = 1500 -- 有人駕駛的車首見後這段時間內讀到 0 速＝遠端插值還沒就緒，不當停著的車
 
 -- 有人駕駛（或被有人駕駛的車拖著）：駕駛座是角色＝不是路邊停的車
@@ -771,7 +774,7 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
                 still = pdx * pdx + pdy * pdy < 0.09
                 -- 沿路線速度：兩輪首次命中之間的位移／時間，投影到本步前向 (ny,−nx)／右向 (nx,ny)
                 local dt = (state.nowMs - (state.vehPosT[vid] or 0)) / 1000
-                if dt > 0.05 and dt < 2 then
+                if dt > 0.05 and dt < 2 and pdx * pdx + pdy * pdy <= VEL_MAX2 * dt * dt then
                     vs = (pdx * state.ny - pdy * state.nx) / dt
                     vl = (pdx * state.nx + pdy * state.ny) / dt
                 end
@@ -783,6 +786,7 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
             -- 還會把追趕的位移算進去（2026-10-01 E2E 會車量測：真值 11 m/s 估成 31、29 估成 68）。
             local wvx, wvz = vehVelocity(cv)
             local synced = wvx ~= nil and wvx * wvx + wvz * wvz >= VEL_KNOWN2
+                and wvx * wvx + wvz * wvz <= VEL_MAX2
             if synced and not still then
                 vs = wvx * state.ny - wvz * state.nx
                 vl = wvx * state.nx + wvz * state.ny
