@@ -41,11 +41,17 @@ local SEND_IDLE_MS = 500
 local SEND_DRIVING_MS = 2000
 local DRIVING_KMH = 10
 local INC_MAX = 8
+-- 撞擊：相鄰兩筆取樣間減速度超過一秒鎖輪（×13 煞車力，實測 ≤12 m/s²）能給的，就是撞上東西
+-- （0.16.0 兩車對撞 61→1.6 km/h／0.21s＝79 m/s²、69→49／0.21s＝26 m/s²，片段只標成「煞車」）。
+local IMPACT_DECEL = 18
+local IMPACT_MIN_KMH = 5
+local IMPACT_REARM_MS = 2000
 
 U.PRE_MS, U.CHUNK, U.CLIP_MAX = PRE_MS, CHUNK, CLIP_MAX
 
 -- 片段優先級：數字越小越重要（伺服器每人 32 段滿了先覆蓋數字大的）。
-local PRI = { stuck = 1, fault = 1, contact = 2, trailer = 2, takeover = 3, unstick = 3, route = 3, brake = 4 }
+local PRI = { stuck = 1, fault = 1, contact = 2, impact = 2, trailer = 2, takeover = 3, unstick = 3, route = 3,
+    brake = 4 }
 U.PRI = PRI
 local STOP_KIND = {
     UI_MinidoracatAutoDrive_StopStuck = "stuck",
@@ -85,6 +91,12 @@ end
 local function jnum(n)
     if not finite(n) then return "0" end
     return tostring(n)
+end
+
+-- 四捨五入到 1/k；缺值寫 null（不寫 0：0 km/h、0 m 是真實值）
+local function jround(n, k)
+    if not finite(n) then return "null" end
+    return tostring(math.floor(n * k + 0.5) / k)
 end
 
 local function sandboxOn()
@@ -137,7 +149,10 @@ function U.begin(pn, now, header, profile)
         lastTs = nil, lastX = nil, lastY = nil, x0 = nil, y0 = nil, lastRem = nil,
         dist = 0, maxLat = 0, stallMs = 0,
         fb = {}, contact = 0, evc = {}, modeMs = {}, capMs = {},
-        fdt = { 0, 0, 0, 0, 0, 0, 0 }, inc = {}, incN = 0,
+        fdt = { 0, 0, 0, 0, 0, 0, 0 }, inc = {}, incN = 0, impact = 0, impactAt = nil,
+        -- 重跑用：目的地（最後一次 route 事件）與起步航向；片段檔頭用：最近一筆取樣的狀態
+        target = nil, h0 = nil,
+        sSpd = nil, sTgt = nil, sMode = nil, sLat = nil, sRem = nil, sCap = nil, sFbw = nil,
         -- 0928a：越野接線長、前方區域未載入等待（次數／毫秒）、自轉次數（|yaw|>3 rad/s 上升緣，
         -- <1.5 重新武裝）、有未載入前緣的毫秒
         apr = nil, awN = 0, awMs = 0, prevAw = false, spin = 0, spinArmed = true, unlMs = 0,
@@ -209,6 +224,7 @@ local function trigger(u, now, kind)
     if not hourlyOk(u.pn, now) then return end
     u.cooldown[kind] = now
     cap = { kind = kind, pri = pri, t0 = now, x = u.lastX, y = u.lastY,
+        spd = u.sSpd, tgt = u.sTgt, mode = u.sMode, lat = u.sLat, rem = u.sRem, cr = u.sCap, fbw = u.sFbw,
         lines = {}, n = 0, chars = 0, full = false }
     -- ring 由舊到新：找第一筆 ≥ t0-PRE_MS
     -- Kahlua 的 % 是截斷式（KahluaThread.java:1060-1066）：ring 繞回後 idx 為負，(idx+k-1)%N 會得負數
@@ -268,10 +284,18 @@ local function finishClip(u, now)
     local cap = u.cap
     if not cap then return end
     u.cap = nil
+    -- 出事當下的狀態放在第一行：片段被截斷（只收到前幾塊）時仍看得到當時車速與限速原因。
+    local at = ""
+    if finite(cap.spd) then
+        at = ',"at":{"spd":' .. jround(cap.spd, 10) .. ',"tgt":' .. jround(cap.tgt, 10)
+            .. ',"mode":' .. jstr(cap.mode or "") .. ',"lat":' .. jround(cap.lat, 100)
+            .. ',"rem":' .. jround(cap.rem, 1)
+            .. ',"cap":' .. jstr(cap.cr or "") .. ',"fbw":' .. jstr(cap.fbw or "") .. '}'
+    end
     local head = '{"t":"clip","v":1,"kind":' .. jstr(cap.kind) .. ',"pri":' .. cap.pri
         .. ',"trig":' .. jnum(cap.t0) .. ',"end":' .. jnum(now)
         .. ',"drive":' .. jnum(u.drive) .. ',"pre":' .. PRE_MS
-        .. ',"x":' .. jnum(cap.x) .. ',"y":' .. jnum(cap.y)
+        .. ',"x":' .. jnum(cap.x) .. ',"y":' .. jnum(cap.y) .. at
         .. ',"full":' .. (cap.full and "true" or "false") .. '}'
     local parts, n = { head }, 1
     local used = #head + 1
@@ -327,14 +351,20 @@ end
 
 -- 取樣：line 已由 MDAD_Diagnostics 編好（與本機紀錄同一字串，不重複編碼）。
 function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
-        blocked, footprintBlocked, phys)
+        blocked, footprintBlocked, phys, heading)
     push(u, line, now)
     if finite(x) and finite(y) then
         if not u.x0 then u.x0, u.y0 = x, y end
         u.lastX, u.lastY = x, y
     end
+    if not u.h0 and finite(heading) then u.h0 = heading end
     if finite(remaining) then u.lastRem = remaining end
     if finite(speed) then lastSpeed[u.pn] = speed < 0 and -speed or speed end
+    -- 片段檔頭的出事當下狀態（trigger 取這幾格；本幀觸發的就是本幀值）
+    u.sSpd, u.sTgt, u.sMode, u.sLat, u.sRem = speed, target, mode, lat, remaining
+    u.sCap = type(phys) == "table" and phys.capReason or nil
+    local fbl0 = type(phys) == "table" and phys.forceBrakeLeft or nil
+    u.sFbw = finite(fbl0) and fbl0 > 0 and phys.forceBrakeWhy or nil
     local dt = 0
     if u.lastTs and now > u.lastTs then
         dt = now - u.lastTs
@@ -407,6 +437,15 @@ function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
         trigger(u, now, "contact")
     end
     u.prevFb = fbHit
+    -- 撞擊（含鎖輪中撞上：鎖輪本身到不了 IMPACT_DECEL）；同一次撞擊的連續幾筆只算一次
+    local prevSpd = u.prevImpactSpd
+    if prevSpd and finite(speed) and dt >= 80 and prevSpd - spd >= IMPACT_MIN_KMH
+            and (prevSpd - spd) / 3.6 / (dt / 1000) >= IMPACT_DECEL
+            and not (u.impactAt and now >= u.impactAt and now - u.impactAt < IMPACT_REARM_MS) then
+        u.impact, u.impactAt = u.impact + 1, now
+        trigger(u, now, "impact")
+    end
+    u.prevImpactSpd = finite(speed) and spd or nil
     captureTick(u, now)
 end
 
@@ -427,6 +466,9 @@ function U.event(u, line, now, name, a)
     local phase = type(a) == "table" and a.phase or nil
     if name == "route" and phase == "ready" and u.apr == nil and finite(a.approach) then
         u.apr = a.approach -- 起步越野接線長（Driver 只在起步的 ready 帶）
+    end
+    if name == "route" and type(a) == "table" and type(a.target) == "string" then
+        u.target = a.target -- 最後一個目的地（行程換站時跟著換）
     end
     if name == "unstick" and phase == "start" then
         trigger(u, now, "unstick")
@@ -467,6 +509,8 @@ local function summaryText(u, now, reason, withMaps)
         .. ',"x0":' .. jnum(u.x0) .. ',"y0":' .. jnum(u.y0)
         .. ',"x1":' .. jnum(u.lastX) .. ',"y1":' .. jnum(u.lastY)
         .. ',"rem":' .. jnum(u.lastRem) .. ',"clips":' .. u.clips
+        .. (u.target and (',"target":' .. jstr(u.target)) or "")
+        .. ',"h0":' .. jround(u.h0, 100) .. ',"impact":' .. u.impact
         .. ',"contact":' .. u.contact .. ',"fb":' .. mapJson(u.fb)
         .. ',"fdt":[' .. table.concat(u.fdt, ",") .. ']'
         .. ',"inc":[' .. table.concat(inc, ",", 1, n) .. ']'

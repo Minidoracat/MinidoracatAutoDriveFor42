@@ -28,6 +28,7 @@ local sandbox = { DiagnosticsUpload = true, DiagnosticsUploadMaxMB = 2048 }
 local share = true
 local halos = {}
 local sent = {}           -- 每一塊的 { at, args }
+local netHold = nil       -- 非 nil：網路先扣住（情境自己決定何時、以什麼節奏送到伺服器）
 local serverUser = "玩家/One:?"
 
 function getTimestampMs() return nowMs end
@@ -64,7 +65,7 @@ function getFileReader(path)
     }
 end
 
-local player0 = { getUsername = function() return serverUser end }
+local player0 = { getUsername = function() return serverUser end, getOnlineID = function() return 0 end }
 function getSpecificPlayer(pn) if pn == 0 then return player0 end return nil end
 HaloTextHelper = {
     addText = function(_, t) halos[#halos + 1] = t end,
@@ -113,6 +114,7 @@ function sendClientCommand(player, module, command, args)
     checkEq(module, MDAD.MOD_ID, "module id")
     checkEq(command, MDAD.CMD_DIAG_UPLOAD, "command")
     sent[#sent + 1] = { at = nowMs, args = copy(args) }
+    if netHold then netHold[#netHold + 1] = copy(args); return end
     MDADUploadServer.receive(player0, copy(args))
 end
 
@@ -137,7 +139,7 @@ local function sample(opts)
     opts = opts or {}
     x = x + (opts.speed or 30) / 3.6 * 0.2
     local phys = opts.phys or { capReason = opts.cap or "profile", frameMs = 16 }
-    return D.sample(0, nowMs, x, 200, 0, opts.speed or 30, opts.target or 40, 500, opts.lat or 0.1,
+    return D.sample(0, nowMs, x, 200, opts.heading or 0, opts.speed or 30, opts.target or 40, 500, opts.lat or 0.1,
         0.02, 0.1, 0, opts.mode or "follow", 3, true, nil, false,
         "clear", 10, nil, nil, nil, 0, nil, nil, 5,
         opts.blocked == true, false, false, false, false, phys,
@@ -383,6 +385,79 @@ sumAll = files[ROOT .. "summary-1.log"] or ""
 for line in string.gmatch(sumAll, "[^\n]+") do lastSum = line end
 check(string.find(lastSum, '"lf":2,"lfMs":1000', 1, true) ~= nil,
     "low-FPS slowdown: two episodes, 1000ms (got " .. tostring(string.match(lastSum, '"lf":[^,]*,"lfMs":[^,]*')) .. ")")
+
+-- 2026-10-01：片段檔頭帶出事當下的狀態（被截斷時第一塊仍看得到車速）；摘要帶目的地與起步航向（重跑用）；
+-- 撞擊（減速度超過一秒鎖輪能給的）自成一類——0.16.0 兩車對撞只被記成「煞車」片段、摘要 contact 0。
+-- 違規證明：拿掉撞擊判定＝kind／impact 紅；拿掉檔頭 at＝車速紅；門檻降到 10＝鎖輪也算撞擊紅。
+scenario("1001a: impact clip, trigger-time state in the clip head, replay fields in the summary")
+nowMs = nowMs + 3600000
+before = #indexRows("C")
+start()
+D.event(0, "route", { phase = "ready", target = "8946.8,11645" })
+drive(3000, { speed = 60, heading = 1.25 })
+-- 一秒鎖輪 60→51.4 km/h／200ms＝12 m/s²：煞車，不是撞擊
+drive(200, { speed = 51.4, phys = { capReason = "arrive", frameMs = 16, forceBrakeLeft = 900, forceBrakeWhy = "arrive" } })
+drive(2400, { speed = 51.4 }) -- 隔過同一次撞擊的去重窗，鎖輪若被誤算會多一次
+drive(200, { speed = 10, cap = "moving" }) -- 撞上：51→10 km/h／200ms
+drive(200, { speed = 2 })
+drive(6000, { speed = 0 })
+D.stop(0, "arrive")
+pump(120000)
+checkEq(#indexRows("C"), before + 1, "impact makes a clip")
+local impactRow = indexRows("C")[before + 1] or ""
+checkEq(field(impactRow, 7), "impact", "kind impact")
+checkEq(field(impactRow, 8), "2", "impact is as important as contact")
+local impactClip = files[folderPath() .. "clip-" .. string.format("%02d", tonumber(field(impactRow, 5)) or 0) .. ".log"] or ""
+local head = string.match(impactClip, "^[^\n]*") or ""
+check(string.find(head, '"at":{"spd":10', 1, true) ~= nil, "clip head keeps the speed at the impact (" .. head .. ")")
+check(string.find(head, '"cap":"moving"', 1, true) ~= nil, "clip head keeps the cap reason at the impact")
+sumAll = files[ROOT .. "summary-1.log"] or ""
+for line in string.gmatch(sumAll, "[^\n]+") do lastSum = line end
+check(string.find(lastSum, '"impact":1', 1, true) ~= nil, "summary: one impact, the locked-wheel brake is not one")
+check(string.find(lastSum, '"target":"8946.8,11645"', 1, true) ~= nil, "summary keeps the destination")
+check(string.find(lastSum, '"h0":1.25', 1, true) ~= nil, "summary keeps the starting heading")
+
+-- 2026-10-01：正式服 225 段有 11 段只收到前幾塊（檔長是 10000 的整數倍、index 沒有這一列），其中 8 段同趟
+-- 摘要照樣收到＝客戶端送完了。網路重送／伺服器卡頓讓間隔 500ms 送出的塊同一刻到齊，舊的固定 250ms 節流
+-- 丟掉後一塊，伺服器依序號放棄整段。違規證明：MDAD_Server 的 UPLOAD_BURST 改 1（＝固定間隔）即紅。
+scenario("server throttle: chunks sent 500ms apart but delivered 8 at a time are all kept")
+nowMs = nowMs + 3600000
+client = false
+MDAD.CMD_DEVICE, MDAD.CMD_USAGE = "Device", "Usage"
+MDAD.CMD_NAV_USAGE, MDAD.CMD_RECIPE_RESCAN = "NavUsage", "RecipeRescan"
+function MDAD.isFiniteInt(n) return type(n) == "number" and n * 0 == 0 and n % 1 == 0 end
+loadFile("server/MDAD_Server.lua")
+client = true
+local onCmd = handlers.OnClientCommand[#handlers.OnClientCommand]
+netHold = {}
+before = #indexRows("C")
+start()
+drive(40000)
+drive(200, { contact = true })
+drive(6000)
+D.stop(0, "arrive")
+pump(120000)
+local held = netHold
+netHold = nil
+check(#held >= 6, "clip spans several chunks (" .. #held .. ")")
+local k = 1
+while k <= #held do
+    local b = 0
+    while b < 8 and k <= #held do
+        onCmd(MDAD.MOD_ID, MDAD.CMD_DIAG_UPLOAD, player0, held[k])
+        k, b = k + 1, b + 1
+    end
+    nowMs = nowMs + 4000
+end
+checkEq(#indexRows("C"), before + 1, "clip indexed although chunks arrived 8 at a time")
+local passed = 0
+local realReceive = MDADUploadServer.receive
+MDADUploadServer.receive = function() passed = passed + 1; return true end
+for _ = 1, 20 do
+    onCmd(MDAD.MOD_ID, MDAD.CMD_DIAG_UPLOAD, player0, { id = 1, q = 1, n = 1, k = "sum", data = "{}" })
+end
+MDADUploadServer.receive = realReceive
+check(passed < 20, "a flood is still throttled (" .. passed .. " of 20 passed)")
 
 scenario("server: sandbox off, bad chunks, out-of-order sequence")
 local rejected = 0

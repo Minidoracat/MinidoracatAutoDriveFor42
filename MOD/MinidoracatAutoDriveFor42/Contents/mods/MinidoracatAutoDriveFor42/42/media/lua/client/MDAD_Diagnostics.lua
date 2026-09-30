@@ -1594,7 +1594,7 @@ function D.sample(pn, now, x, y, heading, speed, target, remaining, lat, err,
         actualClearance, plannedClearance, footprintBlocked, footHitX, footHitY)
     if s and s.active then enqueue(s, line, now) end
     if u and not pcall(MDADUpload.sample, u, line, now, x, y, speed, target, mode,
-            remaining, lat, blocked, footprintBlocked, phys) then
+            remaining, lat, blocked, footprintBlocked, phys, heading) then
         dropUpload(pn)
     end
     -- 寫滿接續後 sessions[pn] 已換成新檔：回新檔的存活，不是這個被封的 s

@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "0929v"
+Drive.REV = "1001a"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -4300,7 +4300,7 @@ end
 --（CarController.updateTrailer:383-393：Trailer 煞車力 0、被拖的車 10），只減牽引車＝掛車從後面推、
 -- 折角放大；兩節同減速度，掛點就不推。舊制拖車一律不加，重車只能滑行＝彎前很早收油，可視距離一縮
 -- 就只剩一秒鎖輪（正式服 0.13.1 拖車 visibility 鎖輪 4.2 次/h，單車 0.62）。
--- 低於 MIN_KMH 滑行就夠；感知未就緒時舊制只滑行，不加。
+-- 低於 MIN_KMH 滑行就夠（剖面已把輔助算進收油包絡的段除外，見下）；感知未就緒時舊制只滑行，不加。
 -- 外力→減速度：BaseVehicle.update 每幀 applyCentralForce 一次（BaseVehicle.java:3307-3314），
 -- WorldSimulation.updatePhysic 以固定 0.01s 子步 stepSimulation、每步後清力（WorldSimulation.java:
 -- 80-100）→ 每幀 Δv＝F/m×0.01；F 乘 mult/MULT_NORM（mult＝48×幀秒）→ 每秒減速度
@@ -4308,29 +4308,36 @@ end
 -- 回要施的外力大小（≥0）；s.visAssistDecel 記本幀補的減速度（telemetry vad）。
 function Drive.visAssistForce(s, speedKmh, mult)
     s.visAssistDecel = 0
-    if not (s.sensor and s.sensor.ready) or not finite(s.visibilityCap)
-            or not finite(speedKmh) or speedKmh < TUNE.VIS_ASSIST_MIN_KMH then
+    if not (s.sensor and s.sensor.ready) or not finite(s.visibilityCap) or not finite(speedKmh) then
         return 0
     end
     -- 已承諾繞行且實速超過本幀套用的繞行帽（接近包絡／保持段／下一群停止包絡）：同一條中線外力，
     -- 上限放到 DODGE_ASSIST_MAX（HOHOHO/clip-01：縫口前 1m 以 63 km/h 承諾 cap 18，只靠滑行到縫仍 56）
     local cap, amax, gain = s.visibilityCap, TUNE.VIS_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN
+    local minKmh = TUNE.VIS_ASSIST_MIN_KMH
     -- 彎前晚收油：剖面（fstate.profileSpeedKmh）已假設這份輔助（Follower.STYLES.coastAssist）
     local pv = s.fstate and s.fstate.profileSpeedKmh
     if s.profile and (s.profile.coastAssist or 0) > 0 and finite(pv) and pv < cap then
         cap, amax, gain = pv, TUNE.CURVE_ASSIST_MAX, TUNE.CURVE_ASSIST_GAIN
+        -- 這段收油包絡建表時就算進輔助（coastAssistAt>0，終點停車段為 0）：25 km/h 以下照補。
+        -- 2026-10-01 正式服 0.14.0–0.16.0：MAX 急彎（彎帽 12）一秒鎖輪從每百公里 0.33 升到 1.2–1.8——
+        -- 剖面最後 3–4m 從 25 收到 12 要 5–6 m/s²，舊制 25 以下整個不補、只剩斷油 2–3.6，抵達 18.5–20 km/h
+        -- 剛好越過 1.5×彎帽（片段：超剖面時 25 以上 117/117 幀有補、25 以下 49/49 幀為 0）。
+        local at, idx = s.profile.coastAssistAt, s.fstate.idx
+        if at and idx and (at[idx] or 0) > 0 then minKmh = 0 end
     end
     if s.dodging and finite(s.dodgeApproachCap) and s.dodgeApproachCap >= 0 and s.dodgeApproachCap < cap then
-        cap, amax, gain = s.dodgeApproachCap, TUNE.DODGE_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN
+        cap, amax, gain, minKmh = s.dodgeApproachCap, TUNE.DODGE_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN, TUNE.VIS_ASSIST_MIN_KMH
     end
     -- blocked 接近包絡（Drive.blockedApproachCap）：同一條中線外力、同一上限
     if finite(s.blockedApproachCap) and s.blockedApproachCap < cap then
-        cap, amax, gain = s.blockedApproachCap, TUNE.DODGE_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN
+        cap, amax, gain, minKmh = s.blockedApproachCap, TUNE.DODGE_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN, TUNE.VIS_ASSIST_MIN_KMH
     end
     -- 待承諾接近帽（dodge-defer）：同一條中線外力、同一上限；鎖輪門檻見 Drive.deferHardKmh
     if not s.dodging and finite(s.dodgeDeferCap) and s.dodgeDeferCap >= 0 and s.dodgeDeferCap < cap then
-        cap, amax, gain = s.dodgeDeferCap, TUNE.DODGE_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN
+        cap, amax, gain, minKmh = s.dodgeDeferCap, TUNE.DODGE_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN, TUNE.VIS_ASSIST_MIN_KMH
     end
+    if speedKmh < minKmh then return 0 end
     local over = speedKmh - cap - TUNE.VIS_ASSIST_TOL_KMH
     if over <= 0 then return 0 end
     local a = over * gain
@@ -11683,10 +11690,24 @@ local function onPlayerUpdate(player)
         if type(MDADFollower.resetControl) == "function" then
             MDADFollower.resetControl(s.fstate)
         end
-        invalidateReturnControl(s)
         -- 讓位期間 Sensor 不跑，proof 停在讓位前那輪快照；玩家可能已開過證明線尾（0924a
         -- 正式服兩趟：恢復首幀 currentS > laneCurveEnd → lane-envelope → UnsupportedVehicle）。
         Drive.clearLaneProof(s)
+        -- 讓位期間停等計時、判堵與感知也都停在讓位前：玩家可能已把車開走。2026-10-01 正式服 0.16.0：
+        -- 渡鴉溪東入口判堵停住→玩家接手開走 57m→放手恢復，首個停等幀把讓位 17 秒一次補進停等預算
+        -- （waitTickMs 停在讓位前，只有倒車恢復鏈該這樣補計）＝超過 15 秒→0.4 秒內 StopStuck；同一幀又用
+        -- 讓位前的舊快照算可視硬煞，25 km/h 鎖輪。比照倒車成功：舊 episode／判堵／承諾作廢，感知從頭
+        -- 掃一輪（未 ready 時目標 0＝斷油滑行、可視硬煞不參與裁決，約一輪 375ms 後照常）。
+        clearEpisode(s)
+        MDADFollower.clearOffset(s.fstate)
+        releaseDodge(s)
+        s.blocked, s.blockedNotified = false, false
+        s.planSig, s.clearStreak = -1, 0
+        if s.sensor and type(MDADSensor) == "table" and type(MDADSensor.reset) == "function" then
+            MDADSensor.reset(s.sensor)
+        end
+        -- RETURN 的掃描帶錨在這裡重設（內含 Sensor reset 後寫 scanBias），須排在上面的感知重設之後
+        invalidateReturnControl(s)
         Drive.invalidateCommandState(s, vehicle:getCurrentSpeedKmHour(), "TRACK")
         s.progressState = "disarmed"
         s.progressSince = 0

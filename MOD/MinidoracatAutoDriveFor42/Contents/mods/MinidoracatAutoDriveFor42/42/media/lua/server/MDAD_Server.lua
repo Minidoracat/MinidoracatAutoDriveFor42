@@ -28,9 +28,11 @@ require "TimedActions/ISAutoDriveDeviceAction"
 -- 是在伺服器主執行緒同步跑的。合法操作有 150 tick 工時，間隔遠大於此，不會誤傷。
 local MIN_INTERVAL_MS = 250
 local USAGE_MIN_INTERVAL_MS = 1000 -- client 合法 cadence 5s；較長窗擋 heartbeat flood
+local UPLOAD_BURST = 8 -- 診斷上傳容許同一刻到齊的塊數（客戶端 500ms 一塊＝容許 4 秒的卡頓／重送；平均仍是每 MIN_INTERVAL_MS 一塊）
 local THROTTLE_ENTRY_TTL_MS = 60000
 local lastSweepMs = 0
 local lastAt = {}
+local uploadTokens = {} -- key → 上次放行後剩的額度（與 lastAt 同鍵、同生命週期）
 
 -- 失敗回報：伺服器不能畫 UI，回一則翻譯鍵給操作者，由 client 端 HaloTextHelper 顯示。
 -- 只回傳伺服器自己選定的常數鍵，不回傳任何 client 送來的字串。
@@ -137,7 +139,7 @@ HANDLERS[MDAD.CMD_USAGE] = onUsage
 HANDLERS[MDAD.CMD_NAV_USAGE] = onNavUsage
 HANDLERS[MDAD.CMD_RECIPE_RESCAN] = onRecipeRescan
 -- 診斷上傳：實作在 MDAD_UploadServer.lua（同為 server 檔，載入晚於本檔，執行期才取用）。
--- 客戶端節奏 ≥500ms／塊，上面的 250ms 節流不會誤傷。
+-- 客戶端節奏 ≥500ms／塊，但到達時刻會擠在一起，節流見 onClientCommand 的上傳漏桶。
 HANDLERS[MDAD.CMD_DIAG_UPLOAD] = function(player, args)
     local up = MDADUploadServer
     if type(up) ~= "table" or type(up.receive) ~= "function" then return end
@@ -161,6 +163,7 @@ local function onClientCommand(module, command, player, args)
         for oldKey, at in pairs(lastAt) do
             if type(at) ~= "number" or now < at or now - at >= THROTTLE_ENTRY_TTL_MS then
                 lastAt[oldKey] = nil
+                uploadTokens[oldKey] = nil
             end
         end
         lastSweepMs = now
@@ -171,6 +174,22 @@ local function onClientCommand(module, command, player, args)
     local bypass = usageCommand and type(args) == "table" and args.active == false
     if bypass then
         if handler(player, args) == true then lastAt[key] = nil end
+        return
+    end
+    -- 診斷上傳用漏桶而不是固定間隔（2026-10-01）：網路重送或伺服器卡頓會讓相隔 500ms 送出的塊同一刻到齊，
+    -- 固定 250ms 間隔丟掉後一塊→伺服器依序號放棄整段片段、只留半截檔（正式服 225 段有 9 段截斷，其中 8 段
+    -- 同趟摘要照樣收到＝客戶端確實送完）。容許 UPLOAD_BURST 塊突發、平均每 MIN_INTERVAL_MS 一塊；
+    -- 總量另有每人每小時預算（MDAD_UploadServer）。
+    if command == MDAD.CMD_DIAG_UPLOAD then
+        local last = lastAt[key]
+        local tokens = uploadTokens[key] or UPLOAD_BURST
+        if last and now > last then
+            tokens = tokens + (now - last) / MIN_INTERVAL_MS
+            if tokens > UPLOAD_BURST then tokens = UPLOAD_BURST end
+        end
+        if tokens < 1 then return end
+        uploadTokens[key], lastAt[key] = tokens - 1, now
+        handler(player, args)
         return
     end
     local last = lastAt[key]

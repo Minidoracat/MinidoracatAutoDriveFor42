@@ -6990,6 +6990,20 @@ function drive.scenarioBrakeAssist()
     st.profile.coastAssist = 0
     MDAD.Drive.visAssistForce(st, 60, 1)
     checkEq(st.visAssistDecel, 0, "(curve-assist) 剖面沒假設輔助（舒適檔）：不補")
+    -- (curve-assist-low) 2026-10-01 正式服 0.14.0–0.16.0：MAX 急彎（彎帽 12）一秒鎖輪升到每百公里 1.2–1.8——
+    --   剖面在 25 km/h 以下的收油包絡仍算進輔助，visAssistForce 卻在 25 以下整個不補，最後 3–4m 只剩斷油、
+    --   抵達 18.5–20 km/h 越過 1.5×彎帽。建表算進輔助的段（coastAssistAt>0）25 以下照補；終點停車段（0）
+    --   與繞行／堵車等其他帳維持舊下限。違規證明：拿掉剖面分支的下限放寬＝第一行紅。
+    local oldAt, oldIdx = st.profile.coastAssistAt, st.fstate.idx
+    st.profile.coastAssist, st.fstate.profileSpeedKmh = 2.5, 12
+    st.profile.coastAssistAt, st.fstate.idx = { 2.5, 0 }, 1
+    MDAD.Drive.visAssistForce(st, 14, 1)
+    checkNear(st.visAssistDecel, (14 - 12 - tune.VIS_ASSIST_TOL_KMH) * tune.CURVE_ASSIST_GAIN, 1e-9,
+        "(curve-assist-low) 彎前 14 km/h 超剖面 12：25 以下照補（" .. tostring(st.visAssistDecel) .. "）")
+    st.fstate.idx = 2
+    MDAD.Drive.visAssistForce(st, 14, 1)
+    checkEq(st.visAssistDecel, 0, "(curve-assist-low) 終點停車段（建表沒算輔助）：25 以下照舊不補")
+    st.profile.coastAssistAt, st.fstate.idx = oldAt, oldIdx
     st.visibilityCap, st.fstate.profileSpeedKmh, st.profile.coastAssist = oldCap, oldPv, oldAssist
     if st.sensor then st.sensor.ready = oldReady end
     MDAD.Drive.stop(0, nil)
@@ -15090,6 +15104,53 @@ local function scenarioNarrowLaneProof()
         driveTick(dp, dveh)
         checkTrue(MDAD.Drive.isActive(0), "(yield-proof) 恢復首幀不交還 UnsupportedVehicle")
         checkTrue(st.stateError ~= "lane-envelope", "(yield-proof) 恢復不記 lane-envelope")
+        MDAD.HUD = oldHud
+    end
+    -- (yield-wait) 2026-10-01 正式服 0.16.0：判堵停等中讓位，玩家接手 17 秒後放手；恢復首個停等幀把讓位時間
+    --   一次補進停等預算（waitTickMs 停在讓位前）＝超過 15 秒上限即 StopStuck，同一幀又拿讓位前的舊快照算
+    --   可視硬煞。恢復時舊 episode／判堵作廢、感知重掃。
+    --   違規證明：拿掉恢復處的 clearEpisode＝第一行紅；拿掉恢復處的 MDADSensor.reset＝第二行紅。
+    do
+        MDAD.Drive.stop(0, nil)
+        local route = newRoute(40, 0, 0, 4 * math.cos(h), 4 * math.sin(h))
+        route.segSurface, route.segWidth = {}, {}
+        for i = 1, 39 do route.segSurface[i], route.segWidth[i] = "paved", 5 end
+        route.len, route.cost, route.avoidPenalty, route.approachSurface = 156, 156, 0, "unknown"
+        dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = 0, 0, 20, 0, false
+        setHeading(dveh, h)
+        drive.nav.state, drive.nav.route = "ok", route
+        checkTrue(MDAD.Drive.start(dp), "(yield-wait) 啟動")
+        for _ = 1, 2 do driveTick(dp, dveh) end
+        local st = MDAD.Drive.debugSession(0)
+        local lane = MDADFollower.laneBiasAt(st.profile, 1.5, 1)
+        dveh._x = 8 * math.cos(h) - math.sin(h) * lane
+        dveh._y = 8 * math.sin(h) + math.cos(h) * lane
+        driveTick(dp, dveh)
+        drive.scanRound()
+        -- 讓位前：判堵停等已累計 4 秒、計時進行中；那一輪快照的前緣在 s=60（恢復時玩家已開到它附近）
+        st.blocked, st.waitAccumMs, st.waitTickMs = true, 4000, nowMs
+        st.waitAnchorS, st.waitAnchorLat, st.waitAnchorErr = st.lastSNow, 0, 0
+        st.sensor.scanEndS = 60
+        local oldHud = MDAD.HUD
+        MDAD.HUD = { manualResumeMs = function() return 2000 end }
+        dveh._steering = 0.02
+        driveTick(dp, dveh)
+        checkEq(st.mode, "yield", "(yield-wait) 轉方向盤＝讓位")
+        -- 玩家接手 17 秒：往前開 60m、停在常駐線外 2.6m（正式服：開走 57m、恢復時進 RETURN，停等進度只看橫向收斂）
+        nowMs = nowMs + 17000
+        dveh._x = 68 * math.cos(h) - math.sin(h) * (lane + 2.6)
+        dveh._y = 68 * math.sin(h) + math.cos(h) * (lane + 2.6)
+        driveTick(dp, dveh)
+        dveh._steering = 0
+        driveTick(dp, dveh)
+        nowMs = nowMs + 2001
+        driveReset(dveh)
+        dveh._speed = 25
+        driveTick(dp, dveh)
+        checkTrue(MDAD.Drive.isActive(0) and st.waitAccumMs < 1000,
+            "(yield-wait) 恢復首幀不把讓位時間算進停等（累計 " .. tostring(st.waitAccumMs) .. " ms）")
+        checkEq(drive.calls.forceBrake, 0,
+            "(yield-wait) 恢復首幀不拿讓位前的舊快照硬煞（why " .. tostring(st.forceBrakeWhy) .. "）")
         MDAD.HUD = oldHud
     end
     MDAD.Drive.stop(0, nil)
