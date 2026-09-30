@@ -417,7 +417,7 @@ function PZAPI.ModOptions:save() optionSaveCalls = optionSaveCalls + 1 end
 -- MDAD_Voice 樁：只記錄呼叫，HUD 的語音回饋契約（開啟時試播 start、拉桿放開試播 arrive）靠它驗
 local voiceCalls = {}
 MDAD_VOICE_STUB = { play = function(event, pn) voiceCalls[#voiceCalls + 1] = event .. "@" .. tostring(pn); return true end,
-    PACKS = { "zh", "en", "ja" }, ACTORS = { "stacy", "yui" } }
+    PACKS = { "zh", "en", "ja" }, ACTORS = { "stacy", "yui", "classic" } }
 
 local nowMs = 1000
 function getTimestampMs() return nowMs end
@@ -1427,9 +1427,10 @@ check(not MDAD.HUD.setVoiceLanguageIndex(5) and not MDAD.HUD.setVoiceLanguageInd
 -- 語音聲音 combo（2026-09-29）：index＝Voice.ACTORS 順序，1＝stacy 為預設；MiniMap 與 ESC 共用
 local voiceActorCombo = registeredMiniMapSection.combos[3]
 check(voiceActorCombo.label == "UI_MinidoracatAutoDrive_VoiceActor"
-    and #voiceActorCombo.items == 2
+    and #voiceActorCombo.items == 3
     and voiceActorCombo.items[1] == "UI_MinidoracatAutoDrive_VoiceActor_stacy"
     and voiceActorCombo.items[2] == "UI_MinidoracatAutoDrive_VoiceActor_yui"
+    and voiceActorCombo.items[3] == "UI_MinidoracatAutoDrive_VoiceActor_classic"
     and voiceActorCombo.default == 1,
     "voice actor combo lists Voice.ACTORS with stacy as default")
 checkEq(MDAD.HUD.voiceActor(), "stacy", "voice actor defaults to stacy")
@@ -1438,7 +1439,7 @@ check(MDAD.HUD.voiceActor() == "yui"
     and options:getOption("VoiceActor"):getValue() == 2,
     "MiniMap voice actor combo writes the shared option and maps index to actor")
 local voiceActorSaves = optionSaveCalls
-check(not MDAD.HUD.setVoiceActorIndex(3) and not MDAD.HUD.setVoiceActorIndex(0)
+check(not MDAD.HUD.setVoiceActorIndex(4) and not MDAD.HUD.setVoiceActorIndex(0)
     and MDAD.HUD.voiceActor() == "yui" and optionSaveCalls == voiceActorSaves,
     "out-of-range voice actor index rejected without saving")
 options:getOption("VoiceActor"):setValue(9)

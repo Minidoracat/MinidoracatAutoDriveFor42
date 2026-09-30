@@ -2,9 +2,11 @@
 -- 自動駕駛語音提示（2026-09-02 使用者裁定）：啟動／關閉／受阻煞停／倒車脫困／
 -- 無法通過交還／到站／改道／無路可繞，加上手動介入三句（讓位待命／恢復接手／介入即關閉，
 -- 2026-09-06），依遊戲語言選國語（CH／CN）、日語（JP）或英語，ESC「語音語言」可改指定語音包。
--- 2026-09-29 起全部改成女朋友撒嬌口吻，分 Stacy／Yui 兩種聲音（ESC「語音聲音」，預設 Stacy）。
+-- 2026-09-29 起全部改成女朋友撒嬌口吻，分 Stacy／Yui 兩種聲音（ESC「語音聲音」，預設 Stacy）；
+-- 2026-09-30 依玩家許願把舊版語音還原成第三種「經典」（classic）。
 -- 聲音檔與 sound script：42/media/sound/MinidoracatAutoDrive、scripts/sounds_autodrive.txt
--- （產生器與文本：repo scripts/voice_lines.json＋elevenlabs-tts skill）。
+-- （產生器與文本：repo scripts/voice_lines.json＋elevenlabs-tts skill；經典＝scripts/voice_lines_classic.json
+-- ＋fish-audio-tts skill）。
 --
 -- 播放走玩家 emitter 的本機路徑：`getEmitter():playSoundImpl(name, nil)`
 -- （FMODSoundEmitter.java:484-492；原版用例 ISAddItemInRecipe.lua:44）——與
@@ -59,9 +61,11 @@ local LOCALE_PACK = { CH = "zh", CN = "zh", JP = "ja" }  -- 其餘語系 → en
 local PACK_SET = {}
 for i = 1, #Voice.PACKS do PACK_SET[Voice.PACKS[i]] = true end
 
--- 聲音（2026-09-29）：ElevenLabs Voice Library 的 Stacy（甜美）與 Yui（台灣腔、溫柔）。
--- 順序＝「語音聲音」下拉順序，index 1（Stacy）為預設；HUD.voiceActor 回聲音名。
-Voice.ACTORS = { "stacy", "yui" }
+-- 聲音（2026-09-29）：ElevenLabs Voice Library 的 Stacy（甜美）與 Yui（台灣腔、溫柔）；
+-- classic＝0.15.0 以前的舊版 Fish Audio 語音（2026-09-30 還原，原檔 24e8ed3）。
+-- 順序＝「語音聲音」下拉順序，index 1（Stacy）為預設；HUD.voiceActor 回聲音名。新聲音一律接在尾端，
+-- 已存的選項 index 才不會換成別的聲音。
+Voice.ACTORS = { "stacy", "yui", "classic" }
 local ACTOR_SET = {}
 for i = 1, #Voice.ACTORS do ACTOR_SET[Voice.ACTORS[i]] = true end
 

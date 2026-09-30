@@ -534,7 +534,7 @@ local function setVoiceLanguageIndex(value)
     return setClientOption("VoiceLanguage", value)
 end
 
--- 語音聲音（2026-09-29）：combo index＝MDAD.Voice.ACTORS 順序（Stacy／Yui），1 為預設。
+-- 語音聲音（2026-09-29）：combo index＝MDAD.Voice.ACTORS 順序（Stacy／Yui／經典），1 為預設。
 -- 主 chunk 已貼 190 local 上限：不開 chunk 層 local，存取函式直接掛 HUD。
 function HUD.voiceActorKeys()
     local keys = {}

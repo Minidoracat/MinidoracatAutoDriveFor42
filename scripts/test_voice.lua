@@ -4,7 +4,7 @@
     lua scripts/test_voice.lua
 
 契約：
-- 語言：CH／CN → zh，其餘 → en；聲音：HUD.voiceActor（stacy／yui，非法退 stacy）；
+- 語言：CH／CN → zh，其餘 → en；聲音：HUD.voiceActor（stacy／yui／classic，非法退 stacy）；
   sound 名 MDAD_Voice_<event>_<lang>_<actor>
 - 開關／音量每次播放重讀 MDAD.HUD.voiceEnabled／voiceVolume（缺席退 on／0.7）
 - 播放走 emitter:playSoundImpl(name, nil)（本機、不送封包）＋ setVolume(ref, v)
@@ -98,7 +98,9 @@ checkEq(#V.PACKS, 3, "三個語音包 zh/en/ja")
 check(V.PACKS[1] == "zh" and V.PACKS[2] == "en" and V.PACKS[3] == "ja", "PACKS 順序＝下拉順序")
 checkEq(V.soundName("start"), "MDAD_Voice_start_zh_stacy", "sound 名 = 前綴＋事件＋語言＋聲音（預設 stacy）")
 -- 聲音：選項指定優先；缺席／非法值退回第一個（stacy）
-check(V.ACTORS[1] == "stacy" and V.ACTORS[2] == "yui" and #V.ACTORS == 2, "ACTORS 順序＝下拉順序")
+check(V.ACTORS[1] == "stacy" and V.ACTORS[2] == "yui" and V.ACTORS[3] == "classic" and #V.ACTORS == 3,
+    "ACTORS 順序＝下拉順序（新聲音接在尾端，已存的 index 不變）")
+hud.actor = "classic"; checkEq(V.soundName("start"), "MDAD_Voice_start_zh_classic", "選經典（舊版語音）")
 hud.actor = "yui"; checkEq(V.soundName("start"), "MDAD_Voice_start_zh_yui", "選 yui")
 hud.language = "ja"; checkEq(V.soundName("arrive"), "MDAD_Voice_arrive_ja_yui", "語言與聲音各自生效")
 hud.language = "auto"

@@ -25,11 +25,11 @@ Keep every Minidoracat MiniMap series mod up to date and restart the game after 
 [list]
 [*] [b]Vehicle devices[/b]: GPS and Autopilot are real vehicle parts; loot, craft or learn the recipes
 [*] [b]Multi-target trips[/b]: up to 16 targets, with stopovers that wait for Continue autodrive
-[*] [b]Driver HUD and voice[/b]: status, speed and power/fuel at a glance, plus Chinese/English/Japanese voice prompts in two voices
+[*] [b]Driver HUD and voice[/b]: status, speed and power/fuel at a glance, plus Chinese/English/Japanese voice prompts in three voices
 [*] [b]Speed gears[/b]: regular gears drive comfortably; MAX takes corners and dodges more briskly
 [*] [b]Take over anytime[/b]: steering, throttle or braking hands control back and keeps the trip
 [*] [b]Smart driving[/b]: keeps right, steers around parked vehicles and obstacles, avoids zombies and corpses, and slows for bends and traffic
-[*] [b]Blocked-road recovery and rerouting[/b]: reverses out when stuck; on a fully blocked road it can ask navigation for an alternative route
+[*] [b]Blocked-road recovery and rerouting[/b]: reverses out when stuck; on a fully blocked road it goes around off-road or asks navigation for an alternative route
 [*] [b]Server tuning[/b]: power, fuel, crafting and loot are sandbox options; server owners can opt in to diagnostics that help improve autodrive
 [/list]
 🗺️ Whether a map mod supports navigation and autodrive depends on its author providing correct road data.
