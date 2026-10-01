@@ -275,10 +275,14 @@ MDADFollower.OV_MAX = OV_MAX
 -- （Drive.visAssistForce 追 fstate.profileSpeedKmh，上限 CURVE_ASSIST_MAX）——斷油只有 1.2–3.6 m/s²，
 -- 舊包絡從彎前很遠就開始滑；加 2.5 後晚收油、到彎前再補煞。終點停車包絡不加（到站圈的停點另有取捨）；
 -- 拖車同樣加（0929o；Driver 把同一減速度依質量也施給掛車，Drive.towDecel）。舒適檔不加。
+-- 舒適檔放寬（1001h；使用者「每台車大多時候維持最高速或檔位最高速」；正式服 0.16.0 摘要：3 檔 4.6 小時
+-- 平均 40.5 km/h、curve-coast 佔 27%）：側向 2.5→4.0（R50 彎 40→51 km/h，仍是積極檔 8 的一半）、
+-- 彎前收油 0.45→3.0＝天花板（真值由 priors 的斷油能力給：鬆油門自然減速，不補中線煞車）。舊 0.45
+-- 讓 70 km/h 的車在 R50 彎前 140m 就開始收油、一路慢慢降。計畫制動與折點帽不動。
 MDADFollower.STYLES = {
     brisk = { name = "brisk", lat = LAT_ACCEL, brake = BRAKE, coast = 3.0, coastAssist = 2.5,
         turnSoft = TURN_SOFT_RAD, turnHard = TURN_HARD_RAD, turnHardMs = TURN_HARD_MS },
-    comfort = { name = "comfort", lat = 2.5, brake = 3.0, coast = 0.45, coastAssist = 0,
+    comfort = { name = "comfort", lat = 4.0, brake = 3.0, coast = 3.0, coastAssist = 0,
         turnSoft = 25 * PI / 180, turnHard = 50 * PI / 180, turnHardMs = 30 / 3.6 },
 }
 
@@ -1789,6 +1793,19 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
                 local alpha = dt / YAW_GAIN_TAU_S
                 if alpha > 1 then alpha = 1 end
                 yawGain = yawGain + (obs - yawGain) * alpha
+                -- 回授正規化用的增益（Driver Drive.normalizeSteer）：轉向方向正規化後 yaw 與 steer 各自 EWMA 再相除，
+                -- 同 FF_HI。上面的逐幀比值先夾 [LO,HI] 再平均，heading 逐幀噪聲讓夾限不對稱（下面只到 0.08、上面到 3），
+                -- 低增益車被往上拉 2–3 倍（1001h 車隊：SemiTruckBox 實測 0.16、估 0.33–0.40；SemiTruckBox_mil 0.11–0.16、
+                -- 估 0.44–0.53＝回授正規化完全沒作用）。前饋 FRAC 是照舊估計調的，前饋照舊用 yawGain。
+                local sg = ap > 0 and 1 or -1
+                local yf = state.fbYawF or yawGain * sg * ap
+                local sf = state.fbSteerF or sg * ap
+                yf = yf + (sg * wrapPi(heading - ph) / dt - yf) * alpha
+                sf = sf + (sg * ap - sf) * alpha
+                state.fbYawF, state.fbSteerF = yf, sf
+                local gfb = yf / sf
+                if gfb < YAW_GAIN_LO then gfb = YAW_GAIN_LO elseif gfb > YAW_GAIN_HI then gfb = YAW_GAIN_HI end
+                state.yawGainFb = gfb
             end
         end
         -- 高速弧段增益（常數註解見 FF_HI）：轉向方向正規化後 yaw 與 steer 各自 EWMA

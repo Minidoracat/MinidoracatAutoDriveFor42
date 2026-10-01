@@ -46,6 +46,7 @@ D.SOFT_LOOKAHEAD_S = 4.5 -- 0925d 3→4.5：70 km/h 看 87m，交錯／成群殭
 D.ALIGN_BREAK_RAD = 22 * PI / 180
 D.ALIGN_HEADING_RAD = 15 * PI / 180
 D.FILLET_SAMPLE_MAX_M = 1
+-- 不要降到 15°（1001h E2E：高速小弧變多，高速前饋增益被入出弧過渡灌高，R60 彎 80 km/h 外漂 1.2m 接觸）
 D.FILLET_MIN_RAD = DEG20
 -- 90°→100°（2026-09-02 s013 定罪：vanilla 折線量化讓路口折角 90.9°，舊上限
 -- 90° 整數判為「>90° 急折」→ 不建弧、保留折點爬行；F350（rMin 4.3）根本轉不出

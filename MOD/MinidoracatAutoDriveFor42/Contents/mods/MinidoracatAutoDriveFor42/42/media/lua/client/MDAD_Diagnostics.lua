@@ -1177,6 +1177,7 @@ local function encodePhys(phys)
     addNum("ffSteer", "sff")
     addNum("yawGain", "yg")
     addNum("yawGainHi", "ygh")        -- 0928m：高速弧段學到的 yaw 增益（前饋補足用）
+    addNum("yawGainFb", "ygf")        -- 1001h：回授正規化用的無偏 yaw 增益（yaw、steer 各自平均再相除）
     addNum("appliedSteer", "ast")
     addNum("routeHeadingError", "att")
     addNum("kinkExitS", "kxs")

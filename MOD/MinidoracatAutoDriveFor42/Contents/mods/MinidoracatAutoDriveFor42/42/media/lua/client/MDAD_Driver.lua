@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1001g"
+Drive.REV = "1001h"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -4470,9 +4470,13 @@ function Drive.areaWait(s, vehicle, now, targetSpeed, speedKmh)
 end
 
 -- 回授依轉向增益正規化（TUNE.FB_NORM_*）：弧段前饋（Follower ffSteer，已除以 yawGain）以外的部分乘 k。
--- s.fbNorm 進遙測。耦力原地調頭不經此路（呼叫端判）。
+-- 增益讀 Follower 的無偏估計 yawGainFb（1001h：舊制拿逐幀夾限後平均的 yawGain，低增益重車被估高 2–3 倍，
+-- 正規化形同沒作用）；還沒學到時退 yawGain。拖車照舊用 yawGain（半聯結的無偏估計 0.18–0.25＝回授放大 2–2.7 倍，
+-- 掛車的折角動態沒有離線模型可驗，維持 1001g 已通過拖掛 E2E 的行為）。s.fbNorm 進遙測。
+-- 耦力原地調頭不經此路（呼叫端判）。
 function Drive.normalizeSteer(s, steer)
-    local g = s.fstate.yawGain
+    local g = not s.tow and s.fstate.yawGainFb or nil
+    if not finite(g) then g = s.fstate.yawGain end
     local k = 1
     if finite(g) and g > 0 then
         k = TUNE.FB_NORM_REF / g
@@ -4922,7 +4926,7 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     phys.curveHardActive = s.curveHardActive
     phys.ffSteer = s.fstate.ffSteer
     phys.yawGain, phys.appliedSteer = s.fstate.yawGain, s.fstate.appliedSteer
-    phys.yawGainHi = s.fstate.yawGainHi
+    phys.yawGainHi, phys.yawGainFb = s.fstate.yawGainHi, s.fstate.yawGainFb
     if finite(s.fbNorm) and s.fbNorm > 1 then phys.fbNorm = s.fbNorm end
     if s.dodgeAlignHold == true then phys.dodgeAlignHold = true end
     phys.routeHeadingError, phys.kinkExitS = s.lastRouteErr, s.fstate.kinkExitS

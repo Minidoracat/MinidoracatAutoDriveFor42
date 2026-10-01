@@ -5547,25 +5547,27 @@ do
     local oldGear = MDAD.Drive.getGear(0)
     dveh._x, dveh._y, dveh._speed = 0, 0, 20
     setHeading(dveh, 0)
-    drive.nav.route = { pts = { 0, 0, 60, 0, 60, 60, 120, 60 }, len = 180 }
+    drive.nav.route = { pts = { 0, 0, 30, 0, 60, 0, 60, 60, 120, 60 }, len = 180 }
     MDAD.Drive.setGear(0, 4)
     checkTrue(MDAD.Drive.start(dp), "(style) MAX 啟動")
     for _ = 1, 8 do driveTick(dp, dveh) end
     local st = MDAD.Drive.debugSession(0)
     local profile, routeGen, points = st.profile, st.routeGen, st.profile.pts
-    local briskCorner = profile.curveV[2]
+    -- 這台假車的側向先驗 3.2 低於舒適檔天花板 4.0（彎頂由車本身決定，兩檔相同）；分得出兩檔的是
+    -- 彎前收油：積極檔多算中線減速輔助（coastAssist），舒適檔只靠斷油——彎前 30m 那點的目標較低。
+    local briskStart = profile.v[2]
     for _, gear in ipairs({ 3, 2, 1 }) do
         MDAD.Drive.setGear(0, gear)
         for _ = 1, 8 do driveTick(dp, dveh) end
-        checkTrue(profile.curveV[2] < briskCorner,
-            "(style) 非 MAX 檔彎頂速度低於 MAX")
+        checkTrue(profile.v[2] < briskStart - 0.5,
+            "(style) 非 MAX 檔彎前收油比 MAX 早（彎前 30m 目標較低）")
         checkTrue(st.profile == profile and st.profile.pts == points and st.routeGen == routeGen,
             "(style) 切檔保留路線與幾何 identity")
     end
     MDAD.Drive.setGear(0, 4)
     for _ = 1, 8 do driveTick(dp, dveh) end
-    checkNear(profile.curveV[2], briskCorner, 1e-9,
-        "(style) 切回 MAX 恢復積極彎頂速度")
+    checkNear(profile.v[2], briskStart, 1e-9,
+        "(style) 切回 MAX 恢復積極收油包絡")
     checkTrue(MDAD.Drive.isActive(0), "(style) 切檔不停止本趟自駕")
     -- 速度明細：MAX 檔沒有檔位上限（由車輛極速決定），一般檔位回該檔上限
     checkNil(select(3, MDAD.Drive.speedInfo(0, dveh)), "(speed-info) MAX 檔不回檔位上限")
@@ -18582,6 +18584,17 @@ function drive.scenario0929j()
     fake.fstate.ffSteer = 0.3
     fake.fstate.yawGain = nil
     checkNear(MDAD.Drive.normalizeSteer(fake, 1.0), 1.0, 1e-12, "(norm) 還沒學到增益＝不動")
+    -- (norm-fb) 1001h：無偏估計 yawGainFb 優先（舊 yawGain 被 heading 噪聲估高 2–3 倍，正規化形同沒作用）。
+    -- 違規證明：normalizeSteer 改回只讀 yawGain＝紅。
+    fake.fstate.yawGain, fake.fstate.yawGainFb, fake.fstate.ffSteer = 0.5, 0.15, 0
+    checkNear(MDAD.Drive.normalizeSteer(fake, 0.3), tune.FB_NORM_MAX * 0.3, 1e-9,
+        "(norm-fb) 舊估計 0.5、無偏估計 0.15：以 0.15 正規化（倍率夾在 FB_NORM_MAX）")
+    -- (norm-tow) 拖車照舊用 yawGain（掛車折角動態沒有離線模型，維持已通過拖掛 E2E 的行為）。
+    -- 違規證明：拖車也讀 yawGainFb＝紅（0.3→0.9）。
+    fake.tow = { halfW = 1.2 }
+    checkNear(MDAD.Drive.normalizeSteer(fake, 0.3), 0.3, 1e-9,
+        "(norm-tow) 拖車：舊估計 0.5 ≥ REF＝不放大（不讀無偏估計 0.15）")
+    fake.tow = nil
 
     -- (align) 繞行未對正不加速
     local ov = { fstate = { ovX = { 0, 1, 2, 3, 4, 5 }, ovY = { 0, 0, 0, 0, 0, 0 }, ovS0 = 0, ovN = 6 },

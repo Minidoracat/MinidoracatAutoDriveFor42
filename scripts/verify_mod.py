@@ -872,7 +872,8 @@ fail("mod.info 依賴／衝突語法", manifest_bad) if manifest_bad \
 tokens = []
 SELF = os.path.abspath(__file__)   # 本檔 docstring 有 {{TOKEN}} 範例字樣，排除自己
 for base, dirs, files in os.walk(REPO):
-    dirs[:] = [d for d in dirs if d not in (".git", ".omc", ".claude", ".gitnexus", "__pycache__")]
+    # temp/ 是 gitignored 的工作區（E2E 收集的 launcher.txt 可達十幾 GB，整檔讀進記憶體會 MemoryError）
+    dirs[:] = [d for d in dirs if d not in (".git", ".omc", ".claude", ".gitnexus", "__pycache__", "temp")]
     for name in files:
         p = os.path.join(base, name)
         if os.path.abspath(p) == SELF:

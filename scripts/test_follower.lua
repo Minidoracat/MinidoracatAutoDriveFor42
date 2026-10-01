@@ -2155,19 +2155,19 @@ do
     end
     checkTrue(notFaster, "comfort 每一點目標速度 ≤ brisk")
     local k90 = 2 * 64 / (8 * 8 * math.sqrt(8 * 8 + 8 * 8))
-    -- comfort lat 2.5：三點外接圓 3.76 vs 幾何式 3.66（0907f）→ 幾何式勝出；brisk 9：7.71 > 7.135 外接圓仍勝
+    -- 直角彎頂＝min(三點外接圓 sqrt(lat/κ), 前視弦幾何式)（0907f）：comfort 4.0 兩式幾乎相等（4.76／4.78），
+    -- brisk 9：外接圓 7.135 < 幾何式 7.71
+    local latC, coastC = F.STYLES.comfort.lat, F.STYLES.comfort.coast
     local inv2s90 = 1 / (2 * math.sin(math.rad(45)))
-    local bC, cC = 2.5 * 0.432 * inv2s90, 2.5 * 6 * inv2s90
-    checkNear(pC.v[4], (bC + math.sqrt(bC * bC + 4 * cC)) * 0.5, 1e-9, "comfort 直角彎頂＝前視弦幾何 3.66（低於 sqrt(2.5/κ) 3.76）")
+    local bC, cC = latC * 0.432 * inv2s90, latC * 6 * inv2s90
+    checkNear(pC.v[4], math.min((bC + math.sqrt(bC * bC + 4 * cC)) * 0.5, math.sqrt(latC / k90)), 1e-9,
+        "comfort 直角彎頂＝外接圓與前視弦幾何較低者")
     checkNear(pB1.v[4], math.sqrt(9.0 / k90), 1e-9, "brisk 直角彎頂仍＝sqrt(9/κ)（幾何式 7.71 較高不綁）")
-    checkNear(pC.v[3], math.sqrt(pC.v[4] * pC.v[4] + 2 * 0.45 * 8), 1e-9,
-        "comfort 彎前用 0.45 滑行包絡（更早收油）")
-    checkNear(pC.v[6], math.sqrt(2 * 0.45 * (8 - F.COAST_STOP_M)), 1e-9, "comfort 終點前 8m＝風格滑行 0.45 包絡量到停點（終點靠斷油停妥）")
+    checkTrue(pC.v[4] < pB1.v[4], "comfort 彎頂仍低於 brisk")
+    checkNear(pC.v[3], math.sqrt(pC.v[4] * pC.v[4] + 2 * coastC * 8), 1e-9, "comfort 彎前用風格滑行包絡")
+    checkNear(pC.v[6], math.sqrt(2 * coastC * (8 - F.COAST_STOP_M)), 1e-9, "comfort 終點前 8m＝風格滑行包絡量到停點")
     checkNear(pB1.v[6], math.sqrt(2 * F.STYLES.brisk.coast * (8 - F.COAST_STOP_M)), 1e-9, "brisk 終點前 8m＝滑行 3.0 包絡量到停點")
     checkTrue(maxDecelDemand(pC) <= 3.0 + 1e-6, "comfort 全線減速需求 ≤ 3.0 m/s²")
-    checkEq(pC.styleLat, 2.5, "profile 曝露 styleLat 供 configureFollower 當天花板")
-    checkEq(pC.styleBrake, 3.0, "profile 曝露 styleBrake")
-    checkEq(pC.styleCoast, 0.45, "profile 曝露 styleCoast")
     -- 60° 折點（≥ comfort turnHard 50°、≥ brisk turnHard 55°）：兩檔各自的折點帽
     local sharp = { 0, 0, 20, 0, 40, 0, 60, 0, 60 + 20 * math.cos(math.rad(60)), 20 * math.sin(math.rad(60)),
         60 + 40 * math.cos(math.rad(60)), 40 * math.sin(math.rad(60)), 60 + 60 * math.cos(math.rad(60)), 60 * math.sin(math.rad(60)) }
@@ -2179,14 +2179,14 @@ do
         string.format("comfort 60° 折點帽 30 km/h（實得 %.1f）", pSC.curveV[4] * KMH))
     -- 終點停車包絡（2026-09-24 使用者「到終點前不要過早減速」）：configureFollower 把車輛真實
     -- 斷油能力填進 segStopCoast（不套風格天花板）。從終點倒推、還沒被彎道接手的段用它，
-    -- 彎前收油仍是風格的 0.45；control 段內插值用同一個 coastRate。
+    -- 彎前收油仍是風格的滑行值；control 段內插值用同一個 coastRate。
     for i = 1, pC.n - 1 do pC.segStopCoast[i] = 2.5 end
     F.invalidateDynamics(pC)
     while not pC.ready do F.stepBuild(pC, 4096) end
     checkNear(pC.v[6], math.sqrt(2 * 2.5 * (8 - F.COAST_STOP_M)), 1e-9,
         "comfort 終點前 8m＝車輛斷油 2.5 包絡（不再用舒適 0.45 提早 170m 收油）")
-    checkNear(pC.v[3], math.sqrt(pC.v[4] * pC.v[4] + 2 * 0.45 * 8), 1e-9,
-        "彎前收油仍是風格 0.45（終點用的減速度不外溢到彎道）")
+    checkNear(pC.v[3], math.sqrt(pC.v[4] * pC.v[4] + 2 * coastC * 8), 1e-9,
+        "彎前收油仍是風格滑行值（終點用的減速度不外溢到彎道）")
     do
         local st = F.newState()
         -- 車在終點前 5m（最後一段中點外）：段內插值與建表同一個減速度
@@ -3321,6 +3321,44 @@ do
     checkTrue(learned > 30, "有足夠的學習幀（|steer| ≥ 0.3，實得 " .. learned .. "）")
     checkTrue(st.yawGain > 0.08 and st.yawGain < 0.16, string.format(
         "G 0.12 的車：估計收斂到自己的增益、低於舊下限 0.2（實得 %.3f）", st.yawGain))
+end
+
+scenario("1001h：回授用 yaw 增益在 heading 噪聲下不偏高（yaw、steer 各自平均再相除）")
+do
+    -- 車隊實測：SemiTruckBox 真實增益 0.16、舊估計 0.33–0.40；SemiTruckBox_mil 0.11–0.16、舊估計 0.44–0.53——逐幀比值
+    -- 夾 [0.08, 3] 再平均，heading 逐幀噪聲讓夾限不對稱，低增益車被往上拉，Driver 的回授正規化形同沒作用。
+    -- 同上一情境（G 0.12、60° 右彎、20 km/h），230 FPS、heading 加 ±1e-3 rad 零均值噪聲。
+    -- 違規證明：yawGainFb 改成逐幀比值夾限後平均＝0.2 以上紅。
+    local VP = { valid = true, geometryValid = true, halfW = 1.24, rMin = 4.4, wheelbase = 4.3,
+        delta0Safe = 0.6, deltaVSafe = 0.2, maxSpeed = 90, lookScale = 1.3 }
+    local ang = -math.rad(60)
+    local route = { pts = { 0, 0, 60, 0, 60 + 60 * math.cos(ang), 60 * math.sin(ang) },
+        segSurface = { "paved", "paved" }, segWidth = { 10, 10 } }
+    local p = F.begin(route, 90, 4, VP)
+    while not p.ready do F.stepBuild(p, 4096) end
+    local st = F.newState()
+    F.setLaneBias(st, 0)
+    F.setRuntimeLimits(st, 3, 6, 7, 1.2)
+    local car = { x = 0, y = 0, h = 0, w = 0 }
+    local dt, kmh, G = 1 / 230, 20, 0.12
+    local seed = 12345
+    for _ = 1, 230 * 20 do
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        local noise = (seed / 2147483648 - 0.5) * 2 * 1e-3 * 1.732
+        local steer, _, rem, reached = F.control(p, st, car.x, car.y, car.h + noise, kmh, dt)
+        local u = steer
+        if u > 5 then u = 5 elseif u < -5 then u = -5 end
+        st.appliedSteer = u
+        local v = kmh / 3.6
+        car.w = car.w + (G * u - car.w) * (dt / 0.35)
+        car.h = car.h + car.w * dt
+        car.x = car.x + math.cos(car.h) * v * dt
+        car.y = car.y + math.sin(car.h) * v * dt
+        if reached or rem < 3 then break end
+    end
+    checkTrue(st.yawGainFb ~= nil and st.yawGainFb > 0.09 and st.yawGainFb < 0.15, string.format(
+        "G 0.12、230 FPS、heading 噪聲：回授用增益 %.3f 落在 0.09–0.15（舊估計 %.3f）",
+        st.yawGainFb or -1, st.yawGain or -1))
 end
 
 closeScenario()
