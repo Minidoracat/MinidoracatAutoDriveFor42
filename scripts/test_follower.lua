@@ -3466,6 +3466,19 @@ do
             checkTrue(got < env - 3, string.format("放行點目標 %.1f 遠低於剖面在頂點達帽的 %.1f", got, env))
         end
     end
+    -- >90° 髮夾不套放行點帽（1002j：E2E hairpin-sp 放行 12 km/h 後誤進原地調頭；a18fdee 同情境不會）：
+    -- 髮夾前 6m 的目標與側向寬鬆對照組相同。違規證明：髮夾也套＝這行紅。
+    local hp = F.begin({ pts = { 0, 0, 60, 0, 60 + 40 * math.cos(math.rad(143)), 40 * math.sin(math.rad(143)) },
+        segSurface = { "paved", "paved" }, segWidth = { 8, 8 } }, 100, 4, vp)
+    while not F.stepBuild(hp, 4096) do end
+    local function hpAt(latSafe)
+        local st = F.newState()
+        st.idx = 1
+        F.setRuntimeLimits(st, 3, 6, latSafe, 1.0)
+        F.control(hp, st, 60 - 6 - 1, 0, 0, 40, DT)
+        return st.profileSpeedKmh
+    end
+    checkNear(hpAt(3.5), hpAt(30), 1e-9, "143° 髮夾：放行點前的目標不受放行點帽影響（照舊由頂點 MIN_SPEED 管）")
 end
 
 scenario("1002f：承諾線在急彎外側時切線預視與弧段前饋按線本身（1−l·κ）縮放，不照中心弧切進線內")

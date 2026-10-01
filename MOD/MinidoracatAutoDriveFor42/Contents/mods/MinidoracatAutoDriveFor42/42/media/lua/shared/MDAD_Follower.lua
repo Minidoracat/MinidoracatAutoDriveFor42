@@ -1250,10 +1250,11 @@ end
 -- 弧口 15.3，入弧 16.5–19.4）。沿滑行能影響的距離往前找弧，每段弧只看第一段（即時帽從那裡開始作用），
 -- 以同一個 coast 反推 sqrt(cap² + 2·coast·距離)。行駛線取承諾線（蓋得到該點時）否則常駐 lane 在該處的
 -- 落點（clampLane 連續版）。skipRun＝車已在弧上：同一段弧由當下帽管，從下一段弧起算。
--- 沒有弧的折點（adaptive 的 fallback 頂點、髮夾）車從放行點（頂點前 rMin·tan(θ/2)，與 control 的鉗點同一個數）
+-- 沒有弧的 ≤90° 折點（adaptive 的 fallback 頂點）車從放行點（頂點前 rMin·tan(θ/2)，與 control 的鉗點同一個數）
 -- 就開始以 rMin 轉，帽要在那裡達到（1002e：建表帽記在頂點＝放行時還快 5–6 m 的滑行量，E2E SemiTruckLite 90°
 -- 折點放行 34 對帽 23、側滑外甩 2.3m；十批 campaign 56 次放行 32 次 >20 km/h、50 次打滑）。帽＝sqrt(latSafe·rMin)
--- （geometryStep 同式，>90° 用 MIN_SPEED）。
+-- （geometryStep 同式）。>90° 髮夾不套（1002j）：放行點 12 km/h、前視跟著縮短，143° 髮夾外側車道放行後另一臂的
+-- 前視點跑到 135° 外＝誤進原地調頭（E2E hairpin-sp 兩輪皆 rotN 1；a18fdee 同情境 0），髮夾照舊由頂點 MIN_SPEED 管。
 -- 回新的目標（m/s）；最多走 ARC_LOOK_STEPS 段，零配置。
 local ARC_LOOK_STEPS = 48
 local function arcLookaheadMs(profile, state, from, sNow, target, coast, skipRun)
@@ -1300,17 +1301,13 @@ local function arcLookaheadMs(profile, state, from, sNow, target, coast, skipRun
             if j >= 2 and segKind[j - 1] ~= SEG_ARC then
                 local dth = wrapPi(segH[j] - segH[j - 1])
                 if dth < 0 then dth = -dth end
-                if (dth > HAIRPIN_RAD or (profile.filletAdaptive and dth >= MDADDynamics.FILLET_MIN_RAD
-                    and (segKind[j - 1] == SEG_FALLBACK or segKind[j] == SEG_FALLBACK)))
-                    and dth < HAIRPIN_MAX_RAD then
+                if profile.filletAdaptive and dth >= MDADDynamics.FILLET_MIN_RAD and dth <= HAIRPIN_RAD
+                    and (segKind[j - 1] == SEG_FALLBACK or segKind[j] == SEG_FALLBACK) then
                     local rel = rMin * tan(dth * 0.5)
                     if rel < HAIRPIN_APEX_MIN then rel = HAIRPIN_APEX_MIN
                     elseif rel > HAIRPIN_APEX_MAX then rel = HAIRPIN_APEX_MAX end
-                    local cap = MIN_SPEED_MS
-                    if dth <= HAIRPIN_RAD then
-                        cap = sqrt(look * rMin)
-                        if cap < MIN_SPEED_MS then cap = MIN_SPEED_MS end
-                    end
+                    local cap = sqrt(look * rMin)
+                    if cap < MIN_SPEED_MS then cap = MIN_SPEED_MS end
                     local d = dist - rel
                     if d < 0 then d = 0 end
                     local lim = sqrt(cap * cap + 2 * coast * d)
