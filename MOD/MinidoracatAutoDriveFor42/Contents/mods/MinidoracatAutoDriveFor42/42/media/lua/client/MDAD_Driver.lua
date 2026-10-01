@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1002e"
+Drive.REV = "1002h"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -1071,6 +1071,11 @@ local function requestDetourRoute(api, playerNum, tx, ty, ax, ay, remaining, r, 
     if type(api.requestDetour) ~= "function" then return nil, "api" end
     local route, state = api.requestDetour(playerNum, tx, ty, ax, ay, r or TUNE.DETOUR_AVOID_R)
     if not route or state ~= "ok" then return nil, state or "noroad" end
+    -- 空線（1002h E2E rc50 0017：目標 46m 外判堵、主 MOD 回 ok 但 len 0）收下＝下一幀 cutover 建不出剖面、
+    -- 直接 LostRoute 交還；當成沒有改道，照常走受困流程。
+    if not MDADDynamics.finite(route.len) or route.len <= 0.5 or type(route.pts) ~= "table" or #route.pts < 4 then
+        return nil, "empty", route
+    end
     if MDADDynamics.finite(route.avoidPenalty) and route.avoidPenalty > 0 then return nil, "through", route end
     if routeTooFar(route) then return nil, "far", route end
     if lenMax == nil and MDADDynamics.finite(remaining) then

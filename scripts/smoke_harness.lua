@@ -10272,10 +10272,14 @@ local function scenarioDetour()
     nav.detour = detourRoute(60, 0, 30)
     ok, why = MDAD.Drive.requestDetour(0)
     checkTrue(ok == false and why == "far", "(c5) 起點 30m 外的路線拒收")
+    -- 空線（1002h E2E rc50 0017：主 MOD 回 ok 但 len 0）收下＝下一幀建不出剖面、LostRoute 交還
+    nav.detour = detourRoute(0, 0, 1)
+    ok, why = MDAD.Drive.requestDetour(0)
+    checkTrue(ok == false and why == "empty", "(c5) len 0 的替代線拒收 empty（實得 " .. tostring(why) .. "）")
     nav.detour = detourRoute(5000, 0, 1)
     ok, why = MDAD.Drive.requestDetour(0)
     checkTrue(ok == false and why == "long", "(c5) 5km 替代線拒收（剩餘 ~150m）")
-    checkTrue(MDAD.Drive.isActive(0), "(c5) 三次拒收 session 仍活著")
+    checkTrue(MDAD.Drive.isActive(0), "(c5) 四次拒收 session 仍活著")
     -- 被拒收的替代線仍躺在主 MOD 快取（requestDetour 成功即覆寫）：下一次 250ms 取路
     -- 原樣拿回同一個 table，不得以 "deviation" 名義 cutover 跟著走（2026-09-02 s064：
     -- 拒收 far 的線同幀被收下→lat=63.5 開進樹林）。主 MOD 冷卻重算＝新 identity 才收。
