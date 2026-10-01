@@ -158,7 +158,7 @@
     "UI_MinidoracatAutoDrive_VoiceLang_en": "English",
     "UI_MinidoracatAutoDrive_VoiceLang_ja": "Japanese",
     "UI_MinidoracatAutoDrive_VoiceActor": "語音聲音",
-    "UI_MinidoracatAutoDrive_VoiceActor_tooltip": "語音提示用哪一個聲音，中文／英文／日文都有。Stacy 與 Yui 是女朋友撒嬌口吻；標「簡潔」的是同一個聲音的導航機口吻，句子短、只講重點；經典是改版前的舊語音（活潑小助手口吻）。",
+    "UI_MinidoracatAutoDrive_VoiceActor_tooltip": "語音提示用哪一個聲音，中文／英文／日文都有。Stacy 與 Yui 是女朋友撒嬌口吻；標「簡潔」的是同一個聲音的朋友口吻，句子短、只講重點；經典是改版前的舊語音（活潑小助手口吻）。",
     "UI_MinidoracatAutoDrive_VoiceActor_yui": "Yui（溫柔）",
     "UI_MinidoracatAutoDrive_VoiceActor_stacy": "Stacy（甜美）",
     "UI_MinidoracatAutoDrive_VoiceActor_classic": "經典（舊版語音）",

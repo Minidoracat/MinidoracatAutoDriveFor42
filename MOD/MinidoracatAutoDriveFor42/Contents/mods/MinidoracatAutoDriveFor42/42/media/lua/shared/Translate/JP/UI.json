@@ -158,7 +158,7 @@
     "UI_MinidoracatAutoDrive_VoiceLang_en": "English",
     "UI_MinidoracatAutoDrive_VoiceLang_ja": "Japanese",
     "UI_MinidoracatAutoDrive_VoiceActor": "音声の声",
-    "UI_MinidoracatAutoDrive_VoiceActor_tooltip": "音声案内に使う声。中国語・英語・日本語に対応しています。Stacy と Yui は甘えた彼女口調、「シンプル」は同じ声によるカーナビ風の短い案内、クラシックは以前のバージョンの元気なアシスタント音声です。",
+    "UI_MinidoracatAutoDrive_VoiceActor_tooltip": "音声案内に使う声。中国語・英語・日本語に対応しています。Stacy と Yui は甘えた彼女口調、「シンプル」は同じ声による友だち口調の短い案内、クラシックは以前のバージョンの元気なアシスタント音声です。",
     "UI_MinidoracatAutoDrive_VoiceActor_yui": "Yui（やさしい）",
     "UI_MinidoracatAutoDrive_VoiceActor_stacy": "Stacy（あまい）",
     "UI_MinidoracatAutoDrive_VoiceActor_classic": "クラシック（旧音声）",

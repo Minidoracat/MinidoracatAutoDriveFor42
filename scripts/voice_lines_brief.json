@@ -2,211 +2,211 @@
   {
     "id": "start_zh",
     "language": "zh",
-    "text": "[warmly] 自动驾驶已启动，出发吧。"
+    "text": "[cheerful] 出发啦，交给我吧！"
   },
   {
     "id": "stop_zh",
     "language": "zh",
-    "text": "[calm] 自动驾驶已关闭，请接手驾驶。"
+    "text": "[casual] 自动驾驶关了，换你开吧。"
   },
   {
     "id": "blocked_zh",
     "language": "zh",
-    "text": "[calm] 前方道路受阻，请稍候。"
+    "text": "[casual] 前面堵住了，等我一下。"
   },
   {
     "id": "unstick_zh",
     "language": "zh",
-    "text": "[reassuring] 车辆受困，正在倒车脱困。"
+    "text": "[reassuring] 卡住了，我倒一下车。"
   },
   {
     "id": "handback_zh",
     "language": "zh",
-    "text": "[calm] 前方无法通过，请接手驾驶。"
+    "text": "[casual] 这里过不去，换你来吧。"
   },
   {
     "id": "arrive_zh",
     "language": "zh",
-    "text": "[warmly] 已到达目的地，辛苦了。"
+    "text": "[cheerful] 到啦，辛苦了！"
   },
   {
     "id": "detour_zh",
     "language": "zh",
-    "text": "[calm] 前方道路受阻，已重新规划路线。"
+    "text": "[casual] 前面堵了，我换条路走。"
   },
   {
     "id": "nodetour_zh",
     "language": "zh",
-    "text": "[calm] 找不到其他路线，请接手驾驶。"
+    "text": "[casual] 找不到别的路，这次靠你啦。"
   },
   {
     "id": "yield_zh",
     "language": "zh",
-    "text": "[calm] 交给你驾驶，放手后自动恢复。"
+    "text": "[warmly] 好，你先开，放手我再接回来。"
   },
   {
     "id": "resume_zh",
     "language": "zh",
-    "text": "[warmly] 自动驾驶已恢复，继续前进。"
+    "text": "[cheerful] 换我来开，继续走吧！"
   },
   {
     "id": "manual_zh",
     "language": "zh",
-    "text": "[calm] 已切换手动驾驶，自动驾驶关闭。"
+    "text": "[casual] 好，你来开，自动驾驶关了。"
   },
   {
     "id": "leg_next_zh",
     "language": "zh",
-    "text": "[warmly] 继续前往下一站。"
+    "text": "[cheerful] 走，去下一站！"
   },
   {
     "id": "stopover_zh",
     "language": "zh",
-    "text": "[warmly] 已到达停靠点，准备好再出发。"
+    "text": "[warmly] 这一站到啦，准备好再出发。"
   },
   {
     "id": "priority_zh",
     "language": "zh",
-    "text": "[calm] 先前往优先目标，之后回到原行程。"
+    "text": "[casual] 先绕去这里，再回原来的行程。"
   },
   {
     "id": "start_en",
     "language": "en",
-    "text": "[warmly] Autodrive on. Let's go."
+    "text": "[cheerful] Alright, let's go. I've got this!"
   },
   {
     "id": "stop_en",
     "language": "en",
-    "text": "[calm] Autodrive off. Please take the wheel."
+    "text": "[casual] Autodrive's off. All yours."
   },
   {
     "id": "blocked_en",
     "language": "en",
-    "text": "[calm] Road blocked ahead. Please wait."
+    "text": "[casual] Road's blocked. Hang on a sec."
   },
   {
     "id": "unstick_en",
     "language": "en",
-    "text": "[reassuring] Vehicle stuck. Backing up to get free."
+    "text": "[reassuring] We're stuck. Backing up a bit."
   },
   {
     "id": "handback_en",
     "language": "en",
-    "text": "[calm] Can't get through. Please take over."
+    "text": "[casual] Can't get through here. Your turn."
   },
   {
     "id": "arrive_en",
     "language": "en",
-    "text": "[warmly] You've arrived at your destination."
+    "text": "[cheerful] We're here. Nice drive!"
   },
   {
     "id": "detour_en",
     "language": "en",
-    "text": "[calm] Road blocked ahead. Rerouting."
+    "text": "[casual] Road's blocked. Taking another way."
   },
   {
     "id": "nodetour_en",
     "language": "en",
-    "text": "[calm] No other route found. Please take over."
+    "text": "[casual] No other way around. Over to you."
   },
   {
     "id": "yield_en",
     "language": "en",
-    "text": "[calm] You have control. Autodrive resumes when you let go."
+    "text": "[warmly] Okay, you drive. Let go and I'll take it back."
   },
   {
     "id": "resume_en",
     "language": "en",
-    "text": "[warmly] Autodrive resumed."
+    "text": "[cheerful] My turn again. Let's keep going!"
   },
   {
     "id": "manual_en",
     "language": "en",
-    "text": "[calm] Manual control. Autodrive off."
+    "text": "[casual] Okay, you're driving. Autodrive's off."
   },
   {
     "id": "leg_next_en",
     "language": "en",
-    "text": "[warmly] Heading to the next stop."
+    "text": "[cheerful] On to the next stop!"
   },
   {
     "id": "stopover_en",
     "language": "en",
-    "text": "[warmly] Stop reached. Continue when you're ready."
+    "text": "[warmly] Made it to this stop. Head out when you're ready."
   },
   {
     "id": "priority_en",
     "language": "en",
-    "text": "[calm] Priority stop first, then back to your trip."
+    "text": "[casual] Quick stop here first, then back to the trip."
   },
   {
     "id": "start_ja",
     "language": "ja",
-    "text": "[warmly] 自動運転をスタートします。出発しましょう。"
+    "text": "[cheerful] よし、出発しよう。まかせて！"
   },
   {
     "id": "stop_ja",
     "language": "ja",
-    "text": "[calm] じどう運転をオフにしました。運転をお願いします。"
+    "text": "[casual] じどう運転、オフにしたよ。あとはよろしく。"
   },
   {
     "id": "blocked_ja",
     "language": "ja",
-    "text": "[calm] この先がふさがっています。しばらくお待ちください。"
+    "text": "[casual] 道がふさがってる。ちょっと待ってね。"
   },
   {
     "id": "unstick_ja",
     "language": "ja",
-    "text": "[reassuring] 動けなくなりました。バックしてぬけ出します。"
+    "text": "[reassuring] はまっちゃった。ちょっとバックするね。"
   },
   {
     "id": "handback_ja",
     "language": "ja",
-    "text": "[calm] この先は通れません。運転をお願いします。"
+    "text": "[casual] ここは通れないや。こうたいしてくれる？"
   },
   {
     "id": "arrive_ja",
     "language": "ja",
-    "text": "[warmly] もくてきちに着きました。おつかれさまでした。"
+    "text": "[cheerful] 着いたよ。おつかれさま！"
   },
   {
     "id": "detour_ja",
     "language": "ja",
-    "text": "[calm] この先がふさがっています。べつのルートに切りかえます。"
+    "text": "[casual] ふさがってるから、べつの道で行くね。"
   },
   {
     "id": "nodetour_ja",
     "language": "ja",
-    "text": "[calm] ほかのルートが見つかりません。運転をお願いします。"
+    "text": "[casual] ほかの道がないや。あとはお願いね。"
   },
   {
     "id": "yield_ja",
     "language": "ja",
-    "text": "[calm] 運転をおまかせします。手をはなすと、自動運転にもどります。"
+    "text": "[warmly] うん、運転どうぞ。手をはなしたら、またかわるね。"
   },
   {
     "id": "resume_ja",
     "language": "ja",
-    "text": "[warmly] 自動運転にもどりました。このまま進みます。"
+    "text": "[cheerful] じゃあ、またわたしが運転するね。行こう！"
   },
   {
     "id": "manual_ja",
     "language": "ja",
-    "text": "[calm] 運転をおかえしします。自動運転はオフです。"
+    "text": "[casual] りょうかい、運転どうぞ。じどう運転はオフにしたよ。"
   },
   {
     "id": "leg_next_ja",
     "language": "ja",
-    "text": "[warmly] 次の目的地へ向かいます。"
+    "text": "[cheerful] よし、次に行こう！"
   },
   {
     "id": "stopover_ja",
     "language": "ja",
-    "text": "[warmly] 着きました。じゅんびができたら、また出発しましょう。"
+    "text": "[warmly] 着いたよ。じゅんびできたら、また出発しよう。"
   },
   {
     "id": "priority_ja",
     "language": "ja",
-    "text": "[calm] さきにこちらへ向かい、そのあと元の予定にもどります。"
+    "text": "[casual] さきにこっちによって、そのあと元の予定にもどるね。"
   }
 ]
