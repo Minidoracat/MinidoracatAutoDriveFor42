@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1002c"
+Drive.REV = "1002d"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -313,7 +313,11 @@ TUNE.VIS_ASSIST_MAX = 4.0       -- 補的減速度上限（m/s²），疊在滑�
 -- 彎前晚收油（Follower.STYLES.coastAssist，0928m）：剖面收油包絡已算進這份輔助，實速超過剖面就照
 -- 超速量補（增益比可視帳高一倍，均衡時只超剖面約 2 km/h），上限 CURVE_ASSIST_MAX。
 TUNE.CURVE_ASSIST_GAIN = 2.0
-TUNE.CURVE_ASSIST_MAX = 4.0
+-- 1002d：4→5.5，剖面假設的輔助（Follower.STYLES.coastAssist）提到 3.5，前饋之外要留比例項的餘地。
+TUNE.CURVE_ASSIST_MAX = 5.5
+-- 包絡「在收」的門檻（km/h／次呼叫；Drive.visAssistForce 前饋閘）：沿收油包絡每幀至少掉 a·dt（240 FPS、
+-- 4 m/s² 仍有 0.06），弧內 latSafe EWMA 的漂移遠小於此。
+TUNE.ASSIST_FALL_KMH = 0.02
 -- 繞行超速的減速輔助上限（0928a；HOHOHO/clip-01：63 km/h 時已在縫口前 1m、只能承諾 cap 18 的線，
 -- 繞行帽只夾 regulator＝滑行 3 m/s²，到縫仍 56 km/h、追線落後 1m 擦撞）。同一條中線外力、不鎖輪、
 -- 轉向照常；只在實速超過繞行套用帽時放大到這個上限。
@@ -497,7 +501,9 @@ TUNE.ASSIST_TIRE_MAX = 1.6   -- 輪胎因子上限
 -- 加速輔助（1001i；使用者「每台車大多時候維持最高速或檔位最高速」「自動駕駛不是親自操作，不用考慮手感」；
 -- 見 Drive.accelAssistForce）：目標比實速高時沿車身中線補這麼多加速度（m/s²），疊在引擎上。E2E 自然加速度
 -- 40–80 km/h：一般轎車 2.0–2.5、廂型／貨車 1.3–1.8；正式服載貨重車（M998、Silverado）60–80 km/h 只有 1.3–1.4。
-TUNE.ACCEL_ASSIST_MPS2 = 2.0
+-- 1002d：2.0→3.0。E2E rc47（MAX、24 案）速度損失的最大一塊是出彎加速（curve-coast 且目標高於實速 3 km/h 以上，
+-- 佔全部損失 11.6%）；那段 85% 時間輔助已經在補、實得加速度中位數 4.1 m/s²＝引擎＋輔助一起，還是出彎慢。
+TUNE.ACCEL_ASSIST_MPS2 = 3.0
 TUNE.ACCEL_ASSIST_GAP_MIN = 1  -- 目標－實速（km/h）低於此不補（貼近目標不補＝不過衝）
 TUNE.ACCEL_ASSIST_GAP_FULL = 6 -- 差距到此全額（同前推輔助的斜坡）
 TUNE.ACCEL_ASSIST_LIMIT_MARGIN = 2 -- 伺服器速限（SpeedLimit<120）以下這麼多 km/h 就停補
@@ -4552,8 +4558,14 @@ function Drive.visAssistForce(s, speedKmh, mult)
     -- 上限放到 DODGE_ASSIST_MAX（HOHOHO/clip-01：縫口前 1m 以 63 km/h 承諾 cap 18，只靠滑行到縫仍 56）
     local cap, amax, gain = s.visibilityCap, TUNE.VIS_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN
     local minKmh, why, ff = TUNE.VIS_ASSIST_MIN_KMH, "vis", 0
-    -- 彎前晚收油：剖面（fstate.profileSpeedKmh）已假設這份輔助（Follower.STYLES.coastAssist）
+    -- 包絡在收（1002d）：剖面／車道包絡比上一次呼叫低 ASSIST_FALL_KMH 以上＝正在收向彎道。前饋只在這時補；
+    -- 巡航（剖面＝上限）與弧內（平坦）一超過一點就前饋＝regulator 每次越過就脈衝減速。
     local pv = s.fstate and s.fstate.profileSpeedKmh
+    local lce = s.laneCurveEnvelope
+    local pvFalling = finite(pv) and finite(s.assistPvLast) and pv < s.assistPvLast - TUNE.ASSIST_FALL_KMH
+    local lceFalling = finite(lce) and finite(s.assistLceLast) and lce < s.assistLceLast - TUNE.ASSIST_FALL_KMH
+    s.assistPvLast, s.assistLceLast = pv, lce
+    -- 彎前晚收油：剖面（fstate.profileSpeedKmh）已假設這份輔助（Follower.STYLES.coastAssist）
     if s.profile and (s.profile.coastAssist or 0) > 0 and finite(pv) and pv < cap then
         cap, amax, gain, why = pv, TUNE.CURVE_ASSIST_MAX, TUNE.CURVE_ASSIST_GAIN, "profile"
         -- 這段收油包絡建表時就算進輔助（coastAssistAt>0，終點停車段為 0）：25 km/h 以下照補。
@@ -4563,12 +4575,10 @@ function Drive.visAssistForce(s, speedKmh, mult)
         local at, idx = s.profile.coastAssistAt, s.fstate.idx
         if at and idx and (at[idx] or 0) > 0 then
             minKmh = 0
-            -- 前饋（1002c）：包絡在收（低於剖面上限）時，一超過剖面就先補建表假設的那一份，比例項只追殘差。
+            -- 前饋（1002c）：包絡在收時一超過剖面就先補建表假設的那一份，比例項只追殘差。
             -- 純比例要先落後 TOL＋輔助/增益（2.25 km/h）才補得到假設的量＝重車進彎前一路落後 2–4 km/h
-            -- （E2E SemiTruckLite R≈7：剖面收到 15.3 時實速 16.5–19.4）。巡航（剖面＝上限）不前饋，
-            -- 否則 regulator 每次越過剖面一點點就脈衝減速。
-            local pmax = s.profile.maxSpeedMs
-            if finite(pmax) and pv < pmax * 3.6 - 1 then ff = at[idx] end
+            -- （E2E SemiTruckLite R≈7：剖面收到 15.3 時實速 16.5–19.4）。
+            if pvFalling then ff = at[idx] end
         end
     end
     -- 車道包絡（1002a）：目標實際由證明線的 lane curve envelope 裁決（煞車×0.7 反推；靠右車道在右轉彎內側＝
@@ -4578,11 +4588,18 @@ function Drive.visAssistForce(s, speedKmh, mult)
     -- （直路 κ＝0）時不是彎道帳，不追。上限用繞行的 DODGE_ASSIST_MAX：lce 以煞車×0.7 反推（重車約 4.2 m/s²），
     -- 剖面的 coastAssist 只假設 2.5——重車斷油 0.6＋CURVE_ASSIST_MAX 4 剛好等於包絡、追不回入口的超速
     --（E2E SemiTruckLite 同一個 90° 折點：上限 4 時整段飽和 1.2 秒、到折點仍超 lce 3–8 km/h）。
-    local lce = s.laneCurveEnvelope
+    -- 前饋（1002d）：車道包絡以 s.laneEnvDecel 反推（煞車×0.7 與「斷油＋剖面輔助」取大，見 buildSnapshotProof），
+    -- 收的時候一超過就補「計畫減速度－斷油」，比例項只追殘差。
     local vmax = s.vehicleProfile and s.vehicleProfile.maxSpeed
     if s.laneCurveStamp == s.sensor.stamp and finite(lce) and lce >= 0 and lce < cap
             and (not finite(vmax) or lce < vmax - 1) then
         cap, amax, gain, minKmh, why = lce, TUNE.DODGE_ASSIST_MAX, TUNE.CURVE_ASSIST_GAIN, 0, "lane"
+        ff = 0
+        local plan = s.laneEnvDecel
+        if lceFalling and finite(plan) then
+            local coast = finite(s.safeCoast) and s.safeCoast > 0 and s.safeCoast or 0
+            if plan > coast then ff = plan - coast end
+        end
     end
     if s.dodging and finite(s.dodgeApproachCap) and s.dodgeApproachCap >= 0 and s.dodgeApproachCap < cap then
         cap, amax, gain, minKmh, why = s.dodgeApproachCap, TUNE.DODGE_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN,
@@ -4608,7 +4625,7 @@ function Drive.visAssistForce(s, speedKmh, mult)
     if speedKmh < minKmh then return 0 end
     local over = speedKmh - cap - TUNE.VIS_ASSIST_TOL_KMH
     local a
-    if why == "profile" and ff > 0 then
+    if (why == "profile" or why == "lane") and ff > 0 then
         if speedKmh <= cap then return 0 end
         a = ff + (over > 0 and over * gain or 0)
     else
@@ -6189,8 +6206,13 @@ local function buildSnapshotProof(s, segI, proofEnd)
         -- 彎要在 290m 外就鬆油＝「離彎還很遠速度卻很慢」。改 minBrake×0.7
         -- （保留三成執行餘裕給 bang-bang regulator 斷油＋剎車鏈），同樣的彎
         -- ~33m 前才開始減；超速真發生由 curve hard breach 紅線煞車兜底。
+        -- 1002d：與剖面同一本帳——斷油＋剖面假設的中線輔助（Follower.STYLES.coastAssist）取大。舊制只取煞車×0.7
+        -- 與純斷油的大者，剖面（輕車斷油 3＋輔助）收得比它晚＝車道包絡先綁、晚收油白給。實得靠 Drive.visAssistForce
+        -- 車道帳的前饋（計畫減速度－斷油）。
         local envDecel = minBrake * 0.7
-        if envDecel < minCoast then envDecel = minCoast end
+        local planned = minCoast + (s.profile and s.profile.coastAssist or 0)
+        if envDecel < planned then envDecel = planned end
+        s.laneEnvDecel = envDecel
         envelopeOk = refreshLaneCurveEnvelope(s, envDecel, minLat)
         if envelopeOk then
             s.laneCurveStamp = sen.stamp
@@ -10130,10 +10152,14 @@ local function stepFollow(s, vehicle, playerNum, now)
                 if buildLat > 0 and s.safeLat < buildLat then
                     scaleCandidate = sqrt(s.safeLat / buildLat)
                 end
-                -- buildCoast 現為煞車系合成減速度（minBrake×0.7，見 proof 端）：
-                -- runtime 比對基準同步用 safeBrake×0.7——EWMA 煞車掉了才縮
-                -- envelope；safeCoast 與此基準無關（滑行不再是減速剖面主體）。
+                -- buildCoast 現為煞車系合成減速度（minBrake×0.7 與斷油＋剖面輔助取大，見 proof 端）：
+                -- runtime 比對基準同一個式子——EWMA 煞車或斷油真的掉了才縮 envelope（1002d 起輔助進了
+                -- 基準，只比 safeBrake×0.7 會把輕車的包絡無故縮兩成）。
                 local runDecel = finite(s.safeBrake) and s.safeBrake * 0.7 or -1
+                if runDecel >= 0 then
+                    runDecel = math.max(runDecel, (finite(s.safeCoast) and s.safeCoast > 0 and s.safeCoast or 0)
+                        + (s.profile and s.profile.coastAssist or 0))
+                end
                 if buildCoast > 0 and runDecel >= 0 and runDecel < buildCoast then
                     local decelScale = sqrt(runDecel / buildCoast)
                     if decelScale < scaleCandidate then scaleCandidate = decelScale end

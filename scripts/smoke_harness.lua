@@ -7090,18 +7090,24 @@ function drive.scenarioBrakeAssist()
     checkNear(st.visAssistDecel, math.min(tune.CURVE_ASSIST_MAX,
             2.5 + (14 - 12 - tune.VIS_ASSIST_TOL_KMH) * tune.CURVE_ASSIST_GAIN), 1e-9,
         "(curve-assist-low) 彎前 14 km/h 超剖面 12：25 以下照補（" .. tostring(st.visAssistDecel) .. "）")
-    -- (curve-ff) 1002c：剖面在收（低於剖面上限）時一超過剖面就先補建表假設的輔助（前饋），比例項只追殘差
+    -- (curve-ff) 1002c：剖面在收時一超過剖面就先補建表假設的輔助（前饋），比例項只追殘差
     --   （純比例要先落後 TOL＋2.5/增益＝2.25 km/h；E2E SemiTruckLite 進 R≈7 彎一路落後 2–4 km/h）。
-    --   巡航（剖面＝上限）不前饋，否則 regulator 每越過剖面一點點就脈衝減速。
-    --   違規證明：拿掉前饋＝第一條紅；拿掉巡航條件＝第三條紅。
+    --   1002d：「在收」＝剖面比上一次呼叫低 ASSIST_FALL_KMH 以上；巡航（剖面＝上限）與弧內（平坦）不前饋，
+    --   否則 regulator 每越過剖面一點點就脈衝減速。
+    --   違規證明：拿掉前饋＝第一條紅；拿掉「在收」條件＝第二、四條紅。
+    st.assistPvLast = 13
     MDAD.Drive.visAssistForce(st, 12.5, 1)
     checkNear(st.visAssistDecel, 2.5, 1e-9,
-        "(curve-ff) 超剖面 0.5（容忍內）：前饋補建表假設的 2.5（" .. tostring(st.visAssistDecel) .. "）")
+        "(curve-ff) 剖面在收、超剖面 0.5（容忍內）：前饋補建表假設的 2.5（" .. tostring(st.visAssistDecel) .. "）")
+    st.assistPvLast = 12
+    MDAD.Drive.visAssistForce(st, 12.5, 1)
+    checkEq(st.visAssistDecel, 0, "(curve-ff) 剖面平坦（弧內）：超一點點不前饋（" .. tostring(st.visAssistDecel) .. "）")
+    st.assistPvLast = 13
     MDAD.Drive.visAssistForce(st, 11.9, 1)
     checkEq(st.visAssistDecel, 0, "(curve-ff) 低於剖面：不補")
     local pmaxK = st.profile.maxSpeedMs * 3.6
     local oldVisCap = st.visibilityCap
-    st.fstate.profileSpeedKmh, st.visibilityCap = pmaxK, pmaxK + 50
+    st.fstate.profileSpeedKmh, st.visibilityCap, st.assistPvLast = pmaxK, pmaxK + 50, pmaxK
     MDAD.Drive.visAssistForce(st, pmaxK + 0.5, 1)
     checkEq(st.visAssistDecel, 0, "(curve-ff) 巡航（剖面＝上限）：超一點點不前饋（" .. tostring(st.visAssistDecel) .. "）")
     st.visibilityCap, st.fstate.profileSpeedKmh = oldVisCap, 12
@@ -7115,12 +7121,23 @@ function drive.scenarioBrakeAssist()
     --   違規證明：拿掉 lane 分支＝第一條紅；拿掉 stamp 條件＝第二條紅；拿掉極速條件＝第三條紅。
     local oldLce, oldStamp = st.laneCurveEnvelope, st.laneCurveStamp
     st.fstate.profileSpeedKmh = 40
-    st.laneCurveEnvelope, st.laneCurveStamp = 30, st.sensor.stamp
+    st.laneCurveEnvelope, st.laneCurveStamp, st.assistLceLast = 30, st.sensor.stamp, nil
     MDAD.Drive.visAssistForce(st, 35, 1)
     checkTrue(math.abs(st.visAssistDecel - math.min((35 - 30 - tune.VIS_ASSIST_TOL_KMH) * tune.CURVE_ASSIST_GAIN,
             tune.DODGE_ASSIST_MAX)) < 1e-9 and st.visAssistWhy == "lane",
         "(curve-lane) 車道包絡 30 低於剖面 40：35 km/h 追車道包絡（vad=" .. tostring(st.visAssistDecel)
         .. " vaw=" .. tostring(st.visAssistWhy) .. "）")
+    -- (curve-lane-ff) 1002d：車道包絡在收時一超過就補「計畫減速度（laneEnvDecel）－斷油」；平坦不前饋。
+    --   違規證明：拿掉車道帳前饋＝第一條紅；拿掉「在收」條件＝第二條紅。
+    local oldEnvDecel, oldCoastL = st.laneEnvDecel, st.safeCoast
+    st.laneEnvDecel, st.safeCoast, st.assistLceLast = 6.5, 3.0, 31
+    MDAD.Drive.visAssistForce(st, 30.5, 1)
+    checkTrue(math.abs(st.visAssistDecel - 3.5) < 1e-9 and st.visAssistWhy == "lane",
+        "(curve-lane-ff) 車道包絡在收、超 0.5：補計畫 6.5－斷油 3.0（vad=" .. tostring(st.visAssistDecel) .. "）")
+    st.assistLceLast = 30
+    MDAD.Drive.visAssistForce(st, 30.5, 1)
+    checkEq(st.visAssistDecel, 0, "(curve-lane-ff) 車道包絡平坦：超一點點不前饋")
+    st.laneEnvDecel, st.safeCoast = oldEnvDecel, oldCoastL
     st.laneCurveStamp = st.sensor.stamp - 1
     MDAD.Drive.visAssistForce(st, 35, 1)
     checkEq(st.visAssistDecel, 0, "(curve-lane) 包絡過期（不是這一輪的證明線）：不追")
@@ -14963,6 +14980,15 @@ local function scenarioPhaseE()
         "same-snapshot effective lane cap monotonically drops toward the curve")
     checkEq(drive.calls.forceBrake, 0,
         "same-snapshot 20m approach never turns future curvature into hard brake")
+    -- (lane-decel) 1002d：車道包絡的計畫減速度與剖面同一本帳（煞車×0.7 與斷油＋剖面輔助取大）；runtime
+    --   縮放比對同一個式子——安全值沒變時不縮。違規證明：proof 端拿掉輔助＝第一條紅；runtime 只比
+    --   煞車×0.7＝第二條紅（輕車的包絡無故縮兩成）。
+    local planD = math.max(captured.horizonMinBrake * 0.7,
+        captured.horizonMinCoast + (captured.profile.coastAssist or 0))
+    checkNear(captured.laneEnvDecel, planD, 1e-9,
+        "(lane-decel) 車道包絡計畫減速度＝max(煞車×0.7, 斷油＋輔助)（實得 " .. tostring(captured.laneEnvDecel) .. "）")
+    checkNear(captured.laneEnvelopeScale, 1, 1e-12,
+        "(lane-decel) 安全值沒變：runtime 縮放不縮（實得 " .. tostring(captured.laneEnvelopeScale) .. "）")
     local cachedEnvelopeSlot = captured.verifyEnvelope[1]
     local buildLat, buildCoast =
         captured.envelopeBuildLat, captured.envelopeBuildCoast

@@ -280,10 +280,12 @@ MDADFollower.OV_MAX = OV_MAX
 -- 舊 0.45 讓 70 km/h 的車在 R50 彎前 140m 就開始收油、一路慢慢降。
 -- 1001i（使用者「自動駕駛不是親自操作，不用考慮手感」）：側向 4.0→6.0（R50 彎 51→62 km/h，積極檔 8＝72）、
 -- 彎前收油同樣加中線減速輔助 2.5（晚收油）。計畫制動與折點帽不動。
+-- 1002d：輔助 2.5→3.5。1002c 起 Driver 對收油段直接補足這一份（前饋），不再靠落後 2 km/h 才補得到，
+-- 計畫的減速度就是實得的減速度；E2E rc47 彎前收油＋彎內循線佔速度損失約 9%。
 MDADFollower.STYLES = {
-    brisk = { name = "brisk", lat = LAT_ACCEL, brake = BRAKE, coast = 3.0, coastAssist = 2.5,
+    brisk = { name = "brisk", lat = LAT_ACCEL, brake = BRAKE, coast = 3.0, coastAssist = 3.5,
         turnSoft = TURN_SOFT_RAD, turnHard = TURN_HARD_RAD, turnHardMs = TURN_HARD_MS },
-    comfort = { name = "comfort", lat = 6.0, brake = 3.0, coast = 3.0, coastAssist = 2.5,
+    comfort = { name = "comfort", lat = 6.0, brake = 3.0, coast = 3.0, coastAssist = 3.5,
         turnSoft = 25 * PI / 180, turnHard = 50 * PI / 180, turnHardMs = 30 / 3.6 },
 }
 
