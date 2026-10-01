@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1001j"
+Drive.REV = "1002b"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -505,6 +505,14 @@ TUNE.ACCEL_ASSIST_TOW_PHI = 10 * math.pi / 180 -- 拖車折角超過此值不補
 -- 車身離期望線超過此值（m）不補：側向還在收斂時加速＝速度變高、位置回授變弱，越線更多（E2E acc-1001j h1003：
 -- Silverado 出彎時離期望線 0.9m 開始補，1.2 秒 31→48 km/h、越過期望線 1m 撞路邊）。補的樣本裡只有 12% 超過 0.5m。
 TUNE.ACCEL_ASSIST_LAT_M = 0.5
+-- 車頭偏離路線超過此角也不補（1002a）：位置偏差還在 0.5m 內、但正以大角度斜穿期望線＝下一秒就越過去
+-- （正式服 0.17.0 Silence/clip-04：出 19° 折點車頭偏 9°、ld −0.43 時開始補，1.5 秒 24→44 km/h 越線 0.56m
+-- 擦路邊；E2E acc-1001j h1003 同型 11°）。補的樣本（正式服＋E2E 6031 筆）只有 3.6% 超過 8°。
+TUNE.ACCEL_ASSIST_HEAD_RAD = 8 * math.pi / 180
+-- 只在一般循線的限速下補（1002a）：剖面／彎道包絡、可視距離、檔位與感知上限。朝已知障礙接近（待承諾繞行、
+-- 判堵、殭屍、會車、對線…）不補——那些帽本身就是「前面要煞」（正式服 0.17.0 Aho/clip-21：待承諾繞行時補到
+-- 45 km/h，再從 39.5 一秒鎖輪煞到 0）。
+TUNE.ACCEL_ASSIST_REASONS = { ["curve-coast"] = true, visibility = true, gear = true, perception = true }
 -- 殭屍推撞（2026-09-04 使用者「被一群殭屍阻擋的時候可以增加推力脫困嗎」；s024
 -- st148381-148398：帶內 5-10 隻、regulator 全力、speed 1.5-2.5 卡 17 秒，van 1118kg
 -- 低於 ASSIST_MASS_MIN 拿不到 assist）：帶內有殭屍、實速低於 SPEED、目標高於
@@ -2811,15 +2819,21 @@ end
 -- 調頭前煞停（why＝rotate）與 blocked 接近包絡（why＝blocked-approach）同樣門檻（1001e）：正式服 susu 81.8 km/h
 -- 改目標到車後，一秒鎖輪連續 4.5 秒只從 82 減到 27；GTR 50 km/h、MR2 64 km/h 在 22–56m 外判 blocked 就一秒鎖到 0，
 -- 下一輪就承諾了 18 km/h 的繞行。停止線的 blocked（blockedStop）照舊鎖輪兜底。
+-- 彎道 ×1.5 災難超速（why＝curve，1002a）10 km/h 以上同樣不鎖輪：鎖輪＝同時失去縱向與側向抓地，正好在彎裡
+-- 最需要轉向的時候（正式服 0.16.0 curve 鎖輪 0.69 次/h；片段入弧 18–45 km/h 一鎖就 sk 0.02–0.05、整台停住才轉）。
+-- 中線外力＋斷油比鎖輪快一倍（1001e E2E）、照常轉向，超速一消失就交回 regulator 與彎前減速輔助。
+-- 待承諾接近的硬煞（why＝dodge-defer）同 blocked 接近門檻（正式服 0.17.0 Aho/clip-21：39.5 km/h 一秒鎖到 0）。
 -- steer 傳 nil＝本幀只減速、不轉向（調頭要先煞到近停才轉，鎖輪時本來就不施轉向）。
 -- （`finite` 在本檔較後面才定義，這裡用 MDADDynamics.finite。）
 function Drive.hardBrake(s, vehicle, now, why, speedKmh, mult, steer, heading, fwd, fx, fy)
     -- 只對「往前開」的車不鎖輪：外力沿車頭反向，倒退時施下去會加速倒退（0929p 審查）
     local nolock = s.tow or (why == "moving" and s.followHold and not s.currentBlocked)
     local minKmh = TUNE.TOW_NOLOCK_KMH
-    if not nolock and not s.currentBlocked and (why == "rotate" or why == "blocked-approach"
+    if not nolock and not s.currentBlocked and (why == "rotate" or why == "blocked-approach" or why == "dodge-defer"
             or ((why == "return" or why == "return-hold") and s.returnHold)) then
         nolock, minKmh = true, TUNE.RETURN_NOLOCK_KMH
+    elseif not nolock and not s.currentBlocked and why == "curve" then
+        nolock = true
     end
     if not nolock or why == "dynamics-fault"
             or not (MDADDynamics.finite(speedKmh) and speedKmh >= minKmh) then
@@ -2831,7 +2845,7 @@ function Drive.hardBrake(s, vehicle, now, why, speedKmh, mult, steer, heading, f
     local a = TUNE.TOW_BRAKE_DECEL
     -- 記成本幀的輔助減速度（telemetry vad）：下一幀 visAssistPrev>0，滑行學習不收這一幀（外力不是車的能力；
     -- 不記的話斷油＋外力的 ~8 m/s² 會被當滑行學進 safeCoast）。沒有鎖輪閂鎖，煞車學習本來就不收。
-    s.visAssistDecel = a
+    s.visAssistDecel, s.visAssistWhy = a, why
     s.towBrakeWhy = why or "?"
     Drive.towDecel(s, a, mult)
     local st = 0 -- steer nil＝不轉向（調頭前煞停）；照常轉向時才走回授正規化與 yaw 率限制
@@ -4468,20 +4482,20 @@ end
 -- WorldSimulation.updatePhysic 以固定 0.01s 子步 stepSimulation、每步後清力（WorldSimulation.java:
 -- 80-100）→ 每幀 Δv＝F/m×0.01；F 乘 mult/MULT_NORM（mult＝48×幀秒）→ 每秒減速度
 -- ＝F/(m·mult/MULT_NORM)×0.01×(48/MULT_NORM)，與幀率無關。
--- 回要施的外力大小（≥0）；s.visAssistDecel 記本幀補的減速度（telemetry vad）。
+-- 回要施的外力大小（≥0）；s.visAssistDecel 記本幀補的減速度（telemetry vad），s.visAssistWhy 記追的是哪一本帳（vaw）。
 function Drive.visAssistForce(s, speedKmh, mult)
-    s.visAssistDecel = 0
+    s.visAssistDecel, s.visAssistWhy = 0, nil
     if not (s.sensor and s.sensor.ready) or not finite(s.visibilityCap) or not finite(speedKmh) then
         return 0
     end
     -- 已承諾繞行且實速超過本幀套用的繞行帽（接近包絡／保持段／下一群停止包絡）：同一條中線外力，
     -- 上限放到 DODGE_ASSIST_MAX（HOHOHO/clip-01：縫口前 1m 以 63 km/h 承諾 cap 18，只靠滑行到縫仍 56）
     local cap, amax, gain = s.visibilityCap, TUNE.VIS_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN
-    local minKmh = TUNE.VIS_ASSIST_MIN_KMH
+    local minKmh, why = TUNE.VIS_ASSIST_MIN_KMH, "vis"
     -- 彎前晚收油：剖面（fstate.profileSpeedKmh）已假設這份輔助（Follower.STYLES.coastAssist）
     local pv = s.fstate and s.fstate.profileSpeedKmh
     if s.profile and (s.profile.coastAssist or 0) > 0 and finite(pv) and pv < cap then
-        cap, amax, gain = pv, TUNE.CURVE_ASSIST_MAX, TUNE.CURVE_ASSIST_GAIN
+        cap, amax, gain, why = pv, TUNE.CURVE_ASSIST_MAX, TUNE.CURVE_ASSIST_GAIN, "profile"
         -- 這段收油包絡建表時就算進輔助（coastAssistAt>0，終點停車段為 0）：25 km/h 以下照補。
         -- 2026-10-01 正式服 0.14.0–0.16.0：MAX 急彎（彎帽 12）一秒鎖輪從每百公里 0.33 升到 1.2–1.8——
         -- 剖面最後 3–4m 從 25 收到 12 要 5–6 m/s²，舊制 25 以下整個不補、只剩斷油 2–3.6，抵達 18.5–20 km/h
@@ -4489,16 +4503,39 @@ function Drive.visAssistForce(s, speedKmh, mult)
         local at, idx = s.profile.coastAssistAt, s.fstate.idx
         if at and idx and (at[idx] or 0) > 0 then minKmh = 0 end
     end
+    -- 車道包絡（1002a）：目標實際由證明線的 lane curve envelope 裁決（煞車×0.7 反推；靠右車道在右轉彎內側＝
+    -- 半徑更小），它常比剖面低 10–40 km/h，舊制輔助只追剖面＝目標寫著 30、車只靠滑行從 41 慢慢掉
+    -- （正式服 0.17.0 kkbug/clip-03：SemiTruckLite 以 38 km/h 衝進 26 km/h 的 90° 折點、側滑撞上；近四次抓回的
+    -- 216 個入弧有 59 個超過彎帽 1.15 倍，多數入弧前 lce 低於剖面 10 km/h 以上而 vad≈0）。lce 等於車輛極速
+    -- （直路 κ＝0）時不是彎道帳，不追。上限用繞行的 DODGE_ASSIST_MAX：lce 以煞車×0.7 反推（重車約 4.2 m/s²），
+    -- 剖面的 coastAssist 只假設 2.5——重車斷油 0.6＋CURVE_ASSIST_MAX 4 剛好等於包絡、追不回入口的超速
+    --（E2E SemiTruckLite 同一個 90° 折點：上限 4 時整段飽和 1.2 秒、到折點仍超 lce 3–8 km/h）。
+    local lce = s.laneCurveEnvelope
+    local vmax = s.vehicleProfile and s.vehicleProfile.maxSpeed
+    if s.laneCurveStamp == s.sensor.stamp and finite(lce) and lce >= 0 and lce < cap
+            and (not finite(vmax) or lce < vmax - 1) then
+        cap, amax, gain, minKmh, why = lce, TUNE.DODGE_ASSIST_MAX, TUNE.CURVE_ASSIST_GAIN, 0, "lane"
+    end
     if s.dodging and finite(s.dodgeApproachCap) and s.dodgeApproachCap >= 0 and s.dodgeApproachCap < cap then
-        cap, amax, gain, minKmh = s.dodgeApproachCap, TUNE.DODGE_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN, TUNE.VIS_ASSIST_MIN_KMH
+        cap, amax, gain, minKmh, why = s.dodgeApproachCap, TUNE.DODGE_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN,
+            TUNE.VIS_ASSIST_MIN_KMH, "dodge"
     end
     -- blocked 接近包絡（Drive.blockedApproachCap）：同一條中線外力、同一上限
     if finite(s.blockedApproachCap) and s.blockedApproachCap < cap then
-        cap, amax, gain, minKmh = s.blockedApproachCap, TUNE.DODGE_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN, TUNE.VIS_ASSIST_MIN_KMH
+        cap, amax, gain, minKmh, why = s.blockedApproachCap, TUNE.DODGE_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN,
+            TUNE.VIS_ASSIST_MIN_KMH, "blocked"
     end
     -- 待承諾接近帽（dodge-defer）：同一條中線外力、同一上限；鎖輪門檻見 Drive.deferHardKmh
     if not s.dodging and finite(s.dodgeDeferCap) and s.dodgeDeferCap >= 0 and s.dodgeDeferCap < cap then
-        cap, amax, gain, minKmh = s.dodgeDeferCap, TUNE.DODGE_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN, TUNE.VIS_ASSIST_MIN_KMH
+        cap, amax, gain, minKmh, why = s.dodgeDeferCap, TUNE.DODGE_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN,
+            TUNE.VIS_ASSIST_MIN_KMH, "defer"
+    end
+    -- 殭屍軟縫的縱向配合帽（zombieLaneCap，只對開了減速政策的類型算）：側移在到達前做不完就先降速（1002a）。
+    -- 帽只夾 regulator＝斷油滑行，正式服 0.13.1–0.17.0 片段 40 段帽低於實速 8 km/h 以上、39 段 vad 0
+    -- （0.17.0 Aho/clip-19：77 km/h 對帽 12 只滑到 70 就撞進殭屍群）。同一條中線外力、繞行的上限。
+    if not s.dodging and finite(s.zombieLaneCap) and s.zombieLaneCap >= 0 and s.zombieLaneCap < cap then
+        cap, amax, gain, minKmh, why = s.zombieLaneCap, TUNE.DODGE_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN,
+            TUNE.VIS_ASSIST_MIN_KMH, "zombie-lane"
     end
     if speedKmh < minKmh then return 0 end
     local over = speedKmh - cap - TUNE.VIS_ASSIST_TOL_KMH
@@ -4507,7 +4544,7 @@ function Drive.visAssistForce(s, speedKmh, mult)
     if a > amax then a = amax end
     local mass = s.runtimeMass
     if not finite(mass) or mass < 1 then mass = MASS_FALLBACK end
-    s.visAssistDecel = a
+    s.visAssistDecel, s.visAssistWhy = a, why
     return a * mass * (mult / MULT_NORM) / (0.01 * 48 / MULT_NORM)
 end
 
@@ -4519,7 +4556,8 @@ end
 -- 拖車：折角超過 TOW_PHI 不補；補的時候掛車由呼叫端依同一加速度分攤（Drive.towDecel 傳負值）。
 -- 只在全速閘門打開（路線證明、走廊、車身框都淨空，循線追蹤中）且不在起步近物保護時補：閘門關著的
 -- sweep／obb 限速、繞行、回線都表示附近有東西或位置還不確定（E2E acc-1001i h2005：證明線掃到障礙、
--- 限速 18 的起步多補 2 m/s²，1 秒內撞上 1.6m 外的東西）。車身離期望線超過 ACCEL_ASSIST_LAT_M 也不補
+-- 限速 18 的起步多補 2 m/s²，1 秒內撞上 1.6m 外的東西）。車身離期望線超過 ACCEL_ASSIST_LAT_M、車頭偏離路線
+-- 超過 ACCEL_ASSIST_HEAD_RAD、或本幀的限速理由不在 ACCEL_ASSIST_REASONS（朝已知障礙接近）也不補
 -- （s.lastLatDev 是本幀 stepFollow 稍早算的原始偏差，不含軟縫／車道 ramp 的寬容）。
 -- s.accelAssist 記本幀補的加速度（telemetry aca；0＝沒補）。
 function Drive.accelAssistForce(s, speedKmh, targetSpeed, mult)
@@ -4527,6 +4565,9 @@ function Drive.accelAssistForce(s, speedKmh, targetSpeed, mult)
     if not s.fullGate or s.startGuard then return 0 end
     local dev = s.lastLatDev
     if not finite(dev) or dev > TUNE.ACCEL_ASSIST_LAT_M or dev < -TUNE.ACCEL_ASSIST_LAT_M then return 0 end
+    if finite(s.lastRouteErr) and s.lastRouteErr > TUNE.ACCEL_ASSIST_HEAD_RAD then return 0 end
+    local why = s.lastCapReason
+    if why ~= nil and not TUNE.ACCEL_ASSIST_REASONS[why] then return 0 end
     if not finite(speedKmh) or not finite(targetSpeed) or speedKmh < 0 then return 0 end
     local ceil = targetSpeed
     local limit = Drive.serverSpeedLimit()
@@ -5075,6 +5116,7 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     end
     if finite(s.gearCap) and s.gearCap > 0 then phys.capGear = s.gearCap end
     if finite(s.perceptionCap) then phys.capPerception = s.perceptionCap end
+    if finite(s.maxSpeed) and s.maxSpeed > 0 then phys.capMax = s.maxSpeed end -- 沙盒上限（上傳摘要的有效上限用；不進取樣）
     if s.returnActive then
         phys.capOffroad = s.returnUnsafe and TUNE.RETURN_UNSAFE_CAP or TUNE.RETURN_CAP
         phys.capReturn = phys.capOffroad
@@ -5114,6 +5156,7 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     phys.visibilityCap = s.visibilityCap
     phys.visibilityHardKmh = s.visibilityHardKmh
     phys.visHold, phys.visRoundS, phys.visAssistDecel = s.visHold, s.visRoundS, s.visAssistDecel
+    if finite(s.visAssistDecel) and s.visAssistDecel > 0 then phys.visAssistWhy = s.visAssistWhy end
     if s.tow then
         phys.towPhi, phys.towUp, phys.towDecel, phys.towBrake = s.towPhi, s.towUp, s.towAssistDecel, s.towBrakeWhy
     end
@@ -9486,7 +9529,7 @@ local function stepFollow(s, vehicle, playerNum, now)
     s.brakeImpulseThis, s.brakeAssistForce = false, 0
     -- 上一幀施的巡航減速輔助留給 updateTraction：本幀的 dv 是那一幀的物理結果（滑行學習要排除它）
     s.visAssistPrev, s.visAssistDecel, s.towAssistDecel, s.accelAssist = s.visAssistDecel, 0, 0, 0
-    s.towBrakeWhy = nil
+    s.towBrakeWhy, s.visAssistWhy = nil, nil
 
     -- 池向量：一顆當 forward／relPos 共用，一顆在 applySteering 內當 impulse。
     -- 這段中間沒有 early return，release 一定會執行。
@@ -10762,7 +10805,8 @@ local function stepFollow(s, vehicle, playerNum, now)
         -- 都是它：入弧 cap+1-3 km/h → forceBrake ×13 鎖輪一秒（telemetry `ib=true tn=0`，hbr 那一幀被
         -- 5-10Hz 取樣漏掉）→ sk 0.03、26→0 km/h。regulator 目標＝cap 本來就是 brake 15 連續減速
         -- 3.65 m/s² 不鎖輪；彎中鎖輪＝同時失去縱向與側向抓地。只留 ×CURVE_BREACH_RATIO 的離譜超速
-        -- （剖面失效／cutover 瞬間）當災難兜底；visibility／blocked／contact 的 forceBrake 不動。
+        -- （剖面失效／cutover 瞬間）當災難兜底，1002a 起改不鎖輪的中線外力（Drive.hardBrake，照常轉向）；
+        -- visibility／blocked／contact 的 forceBrake 不動。
         local curveBreached = hardCurveActive and finite(hardCurveCap)
             and hardCurveCap >= 0
             and actualSpeed > hardCurveCap * TUNE.CURVE_BREACH_RATIO

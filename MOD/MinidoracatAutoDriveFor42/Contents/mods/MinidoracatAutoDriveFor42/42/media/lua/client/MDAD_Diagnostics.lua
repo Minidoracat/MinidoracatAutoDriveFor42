@@ -1189,6 +1189,7 @@ local function encodePhys(phys)
     addNum("visHold", "vho")          -- 巡航帳假設的前緣停滯保持剩餘秒數
     addNum("visRoundS", "vrs")        -- 掃描輪時 EWMA（秒）
     addNum("visAssistDecel", "vad")   -- 巡航減速輔助補的減速度（m/s²）
+    addStr("visAssistWhy", "vaw")     -- 1002a：減速輔助追的帳（vis／profile／lane／dodge／blocked／defer／zombie-lane；不鎖輪硬煞＝其理由）
     addNum("towPhi", "tph")           -- 拖掛折角（rad）
     addNum("towUp", "tup")            -- 拖掛 upVectorDot（<0.8 原版拆掛）
     addNum("towDecel", "tda")         -- 施給掛車的減速度（m/s²；0929o 拖車減速分攤）
@@ -1597,7 +1598,7 @@ function D.sample(pn, now, x, y, heading, speed, target, remaining, lat, err,
         actualClearance, plannedClearance, footprintBlocked, footHitX, footHitY)
     if s and s.active then enqueue(s, line, now) end
     if u and not pcall(MDADUpload.sample, u, line, now, x, y, speed, target, mode,
-            remaining, lat, blocked, footprintBlocked, phys, heading) then
+            remaining, lat, blocked, footprintBlocked, phys, heading, sensor) then
         dropUpload(pn)
     end
     -- 寫滿接續後 sessions[pn] 已換成新檔：回新檔的存活，不是這個被封的 s

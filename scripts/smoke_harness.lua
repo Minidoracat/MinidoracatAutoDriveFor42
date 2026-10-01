@@ -4943,10 +4943,28 @@ do
     dveh._speed = 20
     driveReset(dveh)
     driveTick(dp, dveh)
+    -- 1002a：彎道 ×1.5 災難超速 10 km/h 以上改不鎖輪（Drive.hardBrake）：中線減速外力與轉向同一個 impulse，
+    -- 不叫引擎一秒鎖輪（正式服 0.16.0 curve 鎖輪片段：一鎖就 sk 0.02–0.05、整台停住才轉）。
+    -- 違規證明：hardBrake 拿掉 why＝curve 分支＝這三條紅。
+    checkEq(drive.calls.forceBrake, 0,
+        "current SEG_ARC gross breach at 20 km/h brakes without locking the wheels")
+    checkEq(dveh._imp.total, 1,
+        "non-lock curve brake: one impulse carries the center-line decel and the steering")
+    do
+        local sbk = MDAD.Drive.debugSession(0)
+        checkTrue(sbk.lastHardBrakeReason == "curve"
+                and math.abs((sbk.visAssistDecel or 0) - MDAD.Drive.debugTune().TOW_BRAKE_DECEL) < 1e-9,
+            "hbr names the curve breach and the non-lock decel is TOW_BRAKE_DECEL (hbr="
+            .. tostring(sbk.lastHardBrakeReason) .. " vad=" .. tostring(sbk.visAssistDecel) .. ")")
+    end
+    -- 低於 TOW_NOLOCK_KMH 照舊一秒鎖輪停住（8 km/h 對彎帽 5）
+    dveh._speed = 8
+    driveReset(dveh)
+    driveTick(dp, dveh)
     checkEq(drive.calls.forceBrake, 1,
-        "current SEG_ARC actual breach hard-brakes")
+        "current SEG_ARC breach below 10 km/h still locks (forceBrake)")
     checkEq(dveh._imp.total, 0,
-        "hard curvature breach never emits a competing steering impulse")
+        "locked-wheel curve brake never emits a competing steering impulse")
 
     MDADFollower.control = function(_, state)
         state.curveValid = true
@@ -5254,6 +5272,24 @@ do
     checkEq(MDAD.Drive.accelAssistForce(acc, 40, 60, 0.8), 0, "(acc) 離期望線 −0.6m：不補")
     acc.lastLatDev = 0.45
     checkTrue(MDAD.Drive.accelAssistForce(acc, 40, 60, 0.8) > 0, "(acc) 離期望線 0.45m：照補")
+    -- (acc-head) 1002a 正式服 0.17.0 Silence/clip-04：出 19° 折點車頭偏 9°、ld −0.43（偏差門檻內）時開始補，
+    --   1.5 秒 24→44 km/h 越線 0.56m 擦路邊。違規證明：拿掉航向門檻＝第一條紅。
+    acc.lastRouteErr = 0.16
+    checkEq(MDAD.Drive.accelAssistForce(acc, 40, 60, 0.8), 0, "(acc-head) 車頭偏離路線 9°：不補")
+    acc.lastRouteErr = 0.1
+    checkTrue(MDAD.Drive.accelAssistForce(acc, 40, 60, 0.8) > 0, "(acc-head) 偏 5.7°：照補")
+    acc.lastRouteErr = nil
+    -- (acc-why) 1002a 朝已知障礙接近的帽不補（Aho/clip-21：待承諾繞行時補到 45 km/h，再從 39.5 一秒鎖輪）。
+    --   違規證明：拿掉理由白名單＝前一組紅；白名單漏 curve-coast＝後一組紅。
+    for _, r in ipairs({ "dodge-defer", "zombie", "zombie-lane", "moving", "dodge", "align", "corpse" }) do
+        acc.lastCapReason = r
+        checkEq(MDAD.Drive.accelAssistForce(acc, 40, 60, 0.8), 0, "(acc-why) 限速理由 " .. r .. "：不補")
+    end
+    for _, r in ipairs({ "curve-coast", "visibility", "gear" }) do
+        acc.lastCapReason = r
+        checkTrue(MDAD.Drive.accelAssistForce(acc, 40, 60, 0.8) > 0, "(acc-why) 限速理由 " .. r .. "：照補")
+    end
+    acc.lastCapReason = nil
 end
 dveh._mass = 1200
 
@@ -7057,6 +7093,42 @@ function drive.scenarioBrakeAssist()
     MDAD.Drive.visAssistForce(st, 14, 1)
     checkEq(st.visAssistDecel, 0, "(curve-assist-low) 終點停車段（建表沒算輔助）：25 以下照舊不補")
     st.profile.coastAssistAt, st.fstate.idx = oldAt, oldIdx
+    -- (curve-lane) 1002a：目標由車道包絡（證明線的 lane curve envelope）裁決、比剖面低時，輔助追車道包絡
+    --   （正式服 0.17.0 kkbug/clip-03：lce 26 vs 剖面 38、vad 0，38 km/h 衝進 26 km/h 的 90° 折點側滑撞上）。
+    --   包絡過期（stamp 不符）或等於車輛極速（直路 κ＝0）不追。
+    --   違規證明：拿掉 lane 分支＝第一條紅；拿掉 stamp 條件＝第二條紅；拿掉極速條件＝第三條紅。
+    local oldLce, oldStamp = st.laneCurveEnvelope, st.laneCurveStamp
+    st.fstate.profileSpeedKmh = 40
+    st.laneCurveEnvelope, st.laneCurveStamp = 30, st.sensor.stamp
+    MDAD.Drive.visAssistForce(st, 35, 1)
+    checkTrue(math.abs(st.visAssistDecel - math.min((35 - 30 - tune.VIS_ASSIST_TOL_KMH) * tune.CURVE_ASSIST_GAIN,
+            tune.DODGE_ASSIST_MAX)) < 1e-9 and st.visAssistWhy == "lane",
+        "(curve-lane) 車道包絡 30 低於剖面 40：35 km/h 追車道包絡（vad=" .. tostring(st.visAssistDecel)
+        .. " vaw=" .. tostring(st.visAssistWhy) .. "）")
+    st.laneCurveStamp = st.sensor.stamp - 1
+    MDAD.Drive.visAssistForce(st, 35, 1)
+    checkEq(st.visAssistDecel, 0, "(curve-lane) 包絡過期（不是這一輪的證明線）：不追")
+    local vmaxL = st.vehicleProfile.maxSpeed
+    st.laneCurveStamp, st.laneCurveEnvelope = st.sensor.stamp, vmaxL
+    st.visibilityCap, st.fstate.profileSpeedKmh = vmaxL + 50, vmaxL + 50
+    MDAD.Drive.visAssistForce(st, vmaxL + 3, 1)
+    checkEq(st.visAssistDecel, 0, "(curve-lane) 直路包絡＝車輛極速：不是彎道帳、不追")
+    st.laneCurveEnvelope, st.laneCurveStamp = oldLce, oldStamp
+    -- (zl-assist) 1002a：殭屍軟縫的縱向配合帽也用同一條中線外力追（正式服 40 段帽低於實速 8 以上、39 段 vad 0；
+    --   0.17.0 Aho/clip-19：77 km/h 對帽 12 只滑到 70 就撞進殭屍群）。繞行中不追（帽本來就不套）。
+    --   違規證明：拿掉 zombie-lane 分支＝第一條紅；拿掉 not dodging＝第二條紅。
+    st.visibilityCap, st.fstate.profileSpeedKmh = 120, 120
+    st.zombieLaneCap = 12
+    MDAD.Drive.visAssistForce(st, 77, 1)
+    checkTrue(math.abs(st.visAssistDecel - tune.DODGE_ASSIST_MAX) < 1e-9 and st.visAssistWhy == "zombie-lane",
+        "(zl-assist) 77 km/h 對軟縫帽 12：滿額不鎖輪減速（vad=" .. tostring(st.visAssistDecel)
+        .. " vaw=" .. tostring(st.visAssistWhy) .. "）")
+    local oldDodging, oldDac = st.dodging, st.dodgeApproachCap
+    st.dodging, st.dodgeApproachCap = true, -1 -- 繞行帽不參與比較，只看軟縫帽是否被繞行擋下
+    MDAD.Drive.visAssistForce(st, 77, 1)
+    checkTrue(st.visAssistWhy ~= "zombie-lane", "(zl-assist) 繞行中：軟縫帽不參與（vaw=" .. tostring(st.visAssistWhy) .. "）")
+    st.dodgeApproachCap = oldDac
+    st.dodging, st.zombieLaneCap = oldDodging, -1
     st.visibilityCap, st.fstate.profileSpeedKmh, st.profile.coastAssist = oldCap, oldPv, oldAssist
     if st.sensor then st.sensor.ready = oldReady end
     MDAD.Drive.stop(0, nil)
@@ -7300,9 +7372,14 @@ do
     dveh._speed = 90
     driveReset(dveh)
     driveTick(dp, dveh)
-    checkTrue(drive.calls.forceBrake > 0 and st.lastHardBrakeReason == "dodge-defer",
-        "(sp3-hard) 90 km/h 連緊急煞車都停不到群起點：一秒鎖輪（hbr="
-        .. tostring(st.lastHardBrakeReason) .. "）")
+    -- 1002a：待承諾接近的硬煞 25 km/h 以上改不鎖輪（同 blocked 接近；正式服 0.17.0 Aho/clip-21 39.5 km/h
+    -- 一秒鎖到 0）。違規證明：hardBrake 拿掉 dodge-defer＝紅。
+    checkTrue(drive.calls.forceBrake == 0 and st.lastHardBrakeReason == "dodge-defer"
+            and math.abs((st.visAssistDecel or 0) - MDAD.Drive.debugTune().TOW_BRAKE_DECEL) < 1e-9
+            and dveh._imp.x < 0,
+        "(sp3-hard) 90 km/h 連緊急煞車都停不到群起點：不鎖輪的中線外力硬煞（hbr="
+        .. tostring(st.lastHardBrakeReason) .. " fb=" .. tostring(drive.calls.forceBrake)
+        .. " vad=" .. tostring(st.visAssistDecel) .. "）")
     dveh._speed = 4
     driveReset(dveh)
     drive.scanRound()
@@ -14864,11 +14941,14 @@ local function scenarioPhaseE()
     hotVeh._speed = currentCurveCap * 1.5 + 1
     driveReset(hotVeh)
     driveTick(dp, hotVeh)
-    checkEq(drive.calls.forceBrake, 1,
-        "current arc gross overspeed (cap×1.5+1) still force-brakes")
+    -- 1002a：災難兜底改不鎖輪（中線外力＋照常轉向），telemetry hbr 照樣點名、fbt 不亮（沒有鎖輪閂鎖）
+    checkEq(drive.calls.forceBrake, 0,
+        "current arc gross overspeed (cap×1.5+1) brakes without locking the wheels")
     checkEq(captured.lastHardBrakeReason, "curve",
         "telemetry hbr names the curve breach")
-    checkTrue(captured.forceBrakeThis == true, "telemetry fbt marks the forceBrake frame")
+    checkTrue(captured.forceBrakeThis ~= true
+            and math.abs((captured.visAssistDecel or 0) - MDAD.Drive.debugTune().TOW_BRAKE_DECEL) < 1e-9,
+        "non-lock curve brake: fbt off, vad = TOW_BRAKE_DECEL (vad=" .. tostring(captured.visAssistDecel) .. ")")
     end
     MDAD.Drive.stop(0, nil)
     setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,

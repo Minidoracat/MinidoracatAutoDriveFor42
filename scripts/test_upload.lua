@@ -140,7 +140,7 @@ local function sample(opts)
     x = x + (opts.speed or 30) / 3.6 * 0.2
     local phys = opts.phys or { capReason = opts.cap or "profile", frameMs = 16 }
     return D.sample(0, nowMs, x, 200, opts.heading or 0, opts.speed or 30, opts.target or 40, 500, opts.lat or 0.1,
-        0.02, 0.1, 0, opts.mode or "follow", 3, true, nil, false,
+        0.02, 0.1, 0, opts.mode or "follow", 3, true, opts.sensor, false,
         "clear", 10, nil, nil, nil, 0, nil, nil, 5,
         opts.blocked == true, false, false, false, false, phys,
         1, 1, 0, "ok", 0, false, nil, nil, 0, 0, 2.0, 2.0, opts.contact == true, nil, nil)
@@ -529,6 +529,47 @@ local n0 = #sent
 pump(10000)
 checkEq(#sent, n0, "nothing sent after main menu")
 checkEq(U.pending(0), 0, "outbox empty")
+
+-- 1002a 摘要 KPI：舊摘要只有限速理由的時間，車在直路跑到車輛極速時也記成 curve-coast，量不到「多少時間在
+-- 最高速」與「慢在哪」。有效上限＝檔位／感知／沙盒／車輛極速／伺服器速限取小；≥0.9×有效上限算貼近上限，其餘依
+-- 限速理由記損失（km/h×秒）；入弧次數、入弧超過彎帽 1.15 倍、弧內離期望線 >0.5m；帶內有殭屍時的撞擊；輔助毫秒。
+-- 違規證明：有效上限漏取檔位（em 變 120、nm 0）＝nm／em 紅；損失不扣有效上限＝loss 紅；入弧不看上升緣（每筆都算）＝arc 紅。
+scenario("1002a summary KPI: time near the effective cap, loss by reason, corners, zombie impacts, assists")
+nowMs = nowMs + 3600000
+start()
+local function kp(extra)
+    local t = { capReason = "curve-coast", frameMs = 16, capGear = 60, capPerception = 120, capMax = 120 }
+    for k, v in pairs(extra or {}) do t[k] = v end
+    return t
+end
+drive(2000, { speed = 55, target = 60, phys = kp() })                         -- ≥54＝貼近上限
+drive(1000, { speed = 40, target = 40, phys = kp() })                         -- 損失 20×1s
+drive(400, { speed = 30, target = 25, phys = kp({ curveHardActive = true, curveCap = 25 }) }) -- 入弧 30>28.75
+drive(400, { speed = 28, target = 25, phys = kp({ curveHardActive = true, curveCap = 25, latDev = 0.7 }) })
+drive(400, { speed = 40, target = 60, phys = kp({ capReason = "visibility", accelAssist = 2 }) })
+drive(400, { speed = 40, target = 30, phys = kp({ visAssistDecel = 3 }) })
+drive(200, { speed = 40, phys = kp(), sensor = { zombieN = 3 } })
+drive(200, { speed = 20, phys = kp(), sensor = { zombieN = 3 } })       -- 40→20／200ms＝27.8 m/s²：撞擊
+drive(3000, { speed = 0, mode = "unstick", phys = kp() })
+D.stop(0, "arrive")
+pump(120000)
+sumAll = files[ROOT .. "summary-1.log"] or ""
+for line in string.gmatch(sumAll, "[^\n]+") do lastSum = line end
+local function num(key) return tonumber(string.match(lastSum, '"' .. key .. '":([%d%.%-]+)')) end
+checkEq(num("em"), 60, "effective cap is the gear cap (60), not the 120 sandbox/perception")
+check(num("nm") == 1800 or num("nm") == 2000, "near-cap time ≈ 2s of 55 km/h at cap 60 (got " .. tostring(num("nm")) .. ")")
+check(num("fm") >= 4600 and num("fm") <= 5000, "follow time counted, unstick excluded (got " .. tostring(num("fm")) .. ")")
+check(string.find(lastSum, '"loss":{', 1, true) ~= nil, "loss map present")
+local lossCurve = tonumber(string.match(lastSum, '"loss":{[^}]*"curve%-coast":(%d+)'))
+check(lossCurve ~= nil and lossCurve >= 50 and lossCurve <= 70,
+    "curve-coast loss ≈ 20 km/h×1s + arc/assist segments (got " .. tostring(lossCurve) .. ")")
+checkEq(num("arc"), 1, "one arc entry (rising edge only)")
+checkEq(num("arcOver"), 1, "arc entered at 30 > 1.15×25")
+checkEq(num("arcDev"), 1, "arc with |latDev| > 0.5")
+checkEq(num("impZ"), 1, "impact with zombies in the band")
+checkEq(num("aaMs"), 400, "accel assist time")
+checkEq(num("daMs"), 400, "decel assist time")
+check(#lastSum < U.CHUNK, "summary still fits one chunk (" .. #lastSum .. ")")
 
 print(string.format("情境 %d 個、斷言 %d 項、失敗 %d", scenarios, assertions, failures))
 if failures > 0 then os.exit(1) end

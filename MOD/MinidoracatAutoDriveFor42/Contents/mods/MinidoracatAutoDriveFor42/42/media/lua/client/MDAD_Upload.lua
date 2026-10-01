@@ -158,12 +158,25 @@ function U.begin(pn, now, header, profile)
         apr = nil, awN = 0, awMs = 0, prevAw = false, spin = 0, spinArmed = true, unlMs = 0,
         -- 0929c：卡頓降速（Driver 遲滯後的 HUD 狀態）進入次數／毫秒
         lfN = 0, lfMs = 0, prevLf = false,
+        -- 1002a 摘要 KPI（全部行程，不只出事的片段）：跟線毫秒、貼近有效上限（≥0.9）毫秒、有效上限×時間、
+        -- 低於上限時依限速理由分攤的損失（km/h×ms）；彎道入弧次數、入弧超過彎帽 1.15 倍、弧內偏離期望線
+        -- 超過 0.5m 的弧數；帶內有殭屍時的撞擊；加速／減速輔助作用毫秒。
+        fm = 0, nm = 0, emSum = 0, loss = {},
+        arcN = 0, arcOver = 0, arcDev = 0, prevArc = false, arcDevDone = false,
+        impZ = 0, aaMs = 0, daMs = 0,
+        vmax = type(profile) == "table" and profile.maxSpeed or nil,
+        svLim = nil,
         rev = MDAD and MDAD.Drive and MDAD.Drive.REV or "",
         build = MDAD and MDAD.BUILD or "",
         veh = type(profile) == "table" and profile.scriptName or "",
         mass = type(profile) == "table" and profile.mass or nil,
         opts = type(header) == "string" and string.match(header, '"opts":"([^"]*)"') or nil,
     }
+    local drv = MDAD and MDAD.Drive
+    if type(drv) == "table" and type(drv.serverSpeedLimit) == "function" then
+        local ok, lim = pcall(drv.serverSpeedLimit)
+        if ok and finite(lim) and lim > 0 then u.svLim = lim end
+    end
     notice(pn)
     return u
 end
@@ -349,9 +362,51 @@ local function captureTick(u, now)
     end
 end
 
+-- 1002a 摘要 KPI（欄位見 U.begin）：只算跟線中（mode follow）的取樣。有效上限＝檔位／感知／沙盒／車輛極速／
+-- 伺服器速限取小；「貼近上限」＝實速 ≥0.9×有效上限（引擎推力在極速附近遞減，多數車只到極速的九成多）。
+-- 舊摘要只有限速理由的時間：車在直路已經跑到車輛極速時也記成 curve-coast（車道包絡在直路＝車輛極速），
+-- 量不到「多少時間在最高速」與「慢在哪」。
+local function speedKpi(u, phys, spd, target, mode, dt, capReason)
+    if dt <= 0 or mode ~= "follow" or type(phys) ~= "table" then return end
+    local em = u.vmax
+    if not finite(em) or em <= 0 then em = nil end
+    local v = phys.capGear
+    if finite(v) and v > 0 and (em == nil or v < em) then em = v end
+    v = phys.capPerception
+    if finite(v) and v > 0 and (em == nil or v < em) then em = v end
+    v = phys.capMax
+    if finite(v) and v > 0 and (em == nil or v < em) then em = v end
+    v = u.svLim
+    if finite(v) and v > 0 and (em == nil or v < em) then em = v end
+    if em == nil then return end
+    u.fm = u.fm + dt
+    u.emSum = u.emSum + em * dt
+    if spd >= 0.9 * em then
+        u.nm = u.nm + dt
+    else
+        local r = capReason
+        if type(r) ~= "string" then r = (finite(target) and target >= 0.9 * em) and "accel" or "none" end
+        u.loss[r] = (u.loss[r] or 0) + (em - spd) * dt
+    end
+    -- 彎道：入弧（curveHardActive 上升緣）次數、入弧速超過彎帽 1.15 倍、弧內離期望線超過 0.5m 的弧數
+    local arc = phys.curveHardActive == true
+    if arc and not u.prevArc then
+        u.arcN, u.arcDevDone = u.arcN + 1, false
+        local cc = phys.curveCap
+        if finite(cc) and cc > 0 and spd > 1.15 * cc then u.arcOver = u.arcOver + 1 end
+    end
+    if arc and not u.arcDevDone then
+        local ld = phys.latDev
+        if finite(ld) and (ld > 0.5 or ld < -0.5) then u.arcDev, u.arcDevDone = u.arcDev + 1, true end
+    end
+    u.prevArc = arc
+    if finite(phys.accelAssist) and phys.accelAssist > 0 then u.aaMs = u.aaMs + dt end
+    if finite(phys.visAssistDecel) and phys.visAssistDecel > 0 then u.daMs = u.daMs + dt end
+end
+
 -- 取樣：line 已由 MDAD_Diagnostics 編好（與本機紀錄同一字串，不重複編碼）。
 function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
-        blocked, footprintBlocked, phys, heading)
+        blocked, footprintBlocked, phys, heading, sensor)
     push(u, line, now)
     if finite(x) and finite(y) then
         if not u.x0 then u.x0, u.y0 = x, y end
@@ -406,6 +461,7 @@ function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
         u.prevLf = lf
     end
     if type(capReason) == "string" then u.capMs[capReason] = (u.capMs[capReason] or 0) + dt end
+    speedKpi(u, phys, spd, target, mode, dt, capReason)
     if finite(fdt) then
         local b = fdt < 10 and 1 or fdt < 17 and 2 or fdt < 25 and 3 or fdt < 34 and 4
             or fdt < 50 and 5 or fdt < 100 and 6 or 7
@@ -443,6 +499,8 @@ function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
             and (prevSpd - spd) / 3.6 / (dt / 1000) >= IMPACT_DECEL
             and not (u.impactAt and now >= u.impactAt and now - u.impactAt < IMPACT_REARM_MS) then
         u.impact, u.impactAt = u.impact + 1, now
+        -- 帶內有殭屍時的撞擊（多半是撞進殭屍群；也可能是殭屍旁的別的東西）
+        if type(sensor) == "table" and finite(sensor.zombieN) and sensor.zombieN > 0 then u.impZ = u.impZ + 1 end
         trigger(u, now, "impact")
     end
     u.prevImpactSpd = finite(speed) and spd or nil
@@ -489,6 +547,16 @@ local function mapJson(t)
     return "{" .. table.concat(parts, ",", 1, n) .. "}"
 end
 
+-- 損失（km/h×ms）以 km/h×秒、四捨五入整數輸出
+local function lossJson(t)
+    local parts, n = {}, 0
+    for k, v in pairs(t) do
+        n = n + 1
+        parts[n] = jstr(k) .. ":" .. tostring(math.floor(v / 1000 + 0.5))
+    end
+    return "{" .. table.concat(parts, ",", 1, n) .. "}"
+end
+
 local function summaryText(u, now, reason, withMaps)
     local inc, n = {}, 0
     local i = 1
@@ -518,9 +586,14 @@ local function summaryText(u, now, reason, withMaps)
         .. ',"aw":' .. u.awN .. ',"awMs":' .. jnum(u.awMs)
         .. ',"spin":' .. u.spin .. ',"unlMs":' .. jnum(u.unlMs)
         .. ',"lf":' .. u.lfN .. ',"lfMs":' .. jnum(u.lfMs)
+        .. ',"vmax":' .. jround(u.vmax, 1)
+        .. ',"fm":' .. jnum(u.fm) .. ',"nm":' .. jnum(u.nm)
+        .. ',"em":' .. jround(u.fm > 0 and u.emSum / u.fm or nil, 10)
+        .. ',"arc":' .. u.arcN .. ',"arcOver":' .. u.arcOver .. ',"arcDev":' .. u.arcDev
+        .. ',"impZ":' .. u.impZ .. ',"aaMs":' .. jnum(u.aaMs) .. ',"daMs":' .. jnum(u.daMs)
     if withMaps then
         text = text .. ',"ev":' .. mapJson(u.evc) .. ',"mode":' .. mapJson(u.modeMs)
-            .. ',"cap":' .. mapJson(u.capMs)
+            .. ',"cap":' .. mapJson(u.capMs) .. ',"loss":' .. lossJson(u.loss)
     end
     return text .. "}"
 end
