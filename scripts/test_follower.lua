@@ -346,13 +346,13 @@ do
     checkNear(pLine.v[1] * KMH, MAXV, 1e-9, "直線起點吃滿 maxSpeed")
     checkNear(pLine.v[15] * KMH, MAXV, 1e-9, "距終點 60m 仍是 maxSpeed")
     checkNear(pLine.v[21], 0, 1e-12, "終點速度 0（必須停下）")
-    -- 終點用滑行包絡（0924a）：Driver 只能斷油滑行、沒有比例煞車，舊的 BRAKE=8 終點包絡只能靠
-    -- 可視上限越線的一秒鎖輪兌現（47 趟抵達 29 趟）。停點在到站圈內 1m（COAST_STOP_M）：
-    -- v = sqrt(2·COAST·(距終點 − COAST_STOP_M))，停點以內為 0；到站圈邊界仍有正速度。
-    local COAST, STOP = F.STYLES.brisk.coast, F.COAST_STOP_M
-    checkNear(pLine.v[20], math.sqrt(2 * COAST * (10 - STOP)), 1e-9, "終點前 10m＝滑行包絡量到停點，不是 BRAKE=8")
-    checkNear(pLine.v[19], math.sqrt(2 * COAST * (20 - STOP)), 1e-9, "終點前 20m 仍在滑行包絡內")
-    checkNear(pLine.v[16], math.sqrt(2 * COAST * (50 - STOP)), 1e-9, "終點前 50m 已開始收油")
+    -- 終點用滑行包絡（0924a）：舊的 BRAKE=8 終點包絡只能靠可視上限越線的一秒鎖輪兌現（47 趟抵達 29 趟）。
+    -- 停點在到站圈內 1m（COAST_STOP_M）：v = sqrt(2·COAST·(距終點 − COAST_STOP_M))，停點以內為 0。
+    -- 1002i 起終點同樣是「斷油＋中線減速輔助」（STYLES.coastAssist）：Driver 不鎖輪的輔助一路補到停。
+    local COAST, STOP = F.STYLES.brisk.coast + F.STYLES.brisk.coastAssist, F.COAST_STOP_M
+    checkNear(pLine.v[20], math.sqrt(2 * COAST * (10 - STOP)), 1e-9, "終點前 10m＝滑行＋輔助包絡量到停點，不是 BRAKE=8")
+    checkNear(pLine.v[19], math.sqrt(2 * COAST * (20 - STOP)), 1e-9, "終點前 20m 仍在滑行＋輔助包絡內")
+    checkNear(pLine.v[16] * KMH, MAXV, 1e-9, "終點前 50m 仍是 maxSpeed（滑行＋輔助約 25m 前才收油）")
     checkTrue(pLine.v[20] * KMH < MAXV, "第 20 點在收油段內")
     local over = 0
     for i = 1, pLine.n do
@@ -371,7 +371,7 @@ do
     checkTrue(pCorner.v[4] * KMH < MAXV * 0.5, "直角彎確實遠慢於 maxSpeed")
     checkTrue(pCorner.v[3] > pCorner.v[4], "彎前一點比彎頂快（反向制動生效）")
     -- 0928m：brisk 彎前收油包絡＝滑行＋中線減速輔助（STYLES.coastAssist，Driver 以 visAssistForce 補）；
-    --   終點停車包絡不加（上方終點前 10／20／50m 三行照舊）。違規證明：build 不加 assist＝這行紅。
+    --   1002i 起終點停車包絡同樣加（上方終點前 10／20m）。違規證明：build 不加 assist＝這行紅。
     checkNear(pCorner.v[3],
         math.sqrt(pCorner.v[4] * pCorner.v[4] + 2 * (F.STYLES.brisk.coast + F.STYLES.brisk.coastAssist) * 8), 1e-9,
         "彎前收油包絡＝brisk 滑行 " .. F.STYLES.brisk.coast .. "＋輔助 " .. F.STYLES.brisk.coastAssist .. "，不動用 active brake")
@@ -397,8 +397,8 @@ do
         "brisk coast 天花板 3.0（0907e：真值由 VehicleProfile 質量制動預算取 min）")
     -- 彎後不再有前向加速包絡（2026-09-01 拆除 forward pass）：v[5] 直接由
     -- 「距終點 40m 的滑行包絡」決定，出彎即可全力——加速能力交還引擎。
-    checkNear(pCorner.v[5], math.sqrt(2 * COAST * (40 - STOP)), 1e-9,
-        "彎後一點＝終點滑行包絡，不再被 ACCEL 壓住")
+    checkNear(pCorner.v[5], math.min(MAXV / KMH, math.sqrt(2 * COAST * (40 - STOP))), 1e-9,
+        "彎後一點＝終點滑行包絡（或 maxSpeed），不再被 ACCEL 壓住")
     checkTrue(pCorner.v[5] > math.sqrt(pCorner.v[4] * pCorner.v[4] + 2 * 2.5 * 8) + 1e-9,
         "彎後速度高於舊 ACCEL=2.5 包絡（前向天花板確實拆除；植入違規驗證）")
     checkTrue(maxDecelDemand(pCorner) <= 8 + 1e-6,
@@ -433,8 +433,8 @@ do
     local pTwo = buildRoute({ 0, 0, 30, 0 }, MAXV)
     checkNear(pTwo.length, 30, 1e-9, "兩點路線的長度")
     checkNear(pTwo.v[2], 0, 1e-12, "兩點路線的終點也要停")
-    -- sqrt(2·COAST·26)=12.5 m/s < maxV 16.67：起點就在終點滑行包絡內
-    checkNear(pTwo.v[1], math.sqrt(2 * COAST * (30 - STOP)), 1e-9, "兩點路線的起點速度由終點滑行包絡決定")
+    -- 起點離終點 30m：終點滑行＋輔助包絡與 maxSpeed 取低
+    checkNear(pTwo.v[1], math.min(MAXV / KMH, math.sqrt(2 * COAST * (30 - STOP))), 1e-9, "兩點路線的起點速度由終點包絡決定")
 
     -- 折點角度限速下限：路網 polyline 在交叉口的點距常常很大（20-30m），
     -- kappa=Δθ/ds 被長段稀釋，曲率公式對急彎算出高速「限速」——2026-08-28 實機
@@ -681,9 +681,9 @@ do
     driveTo(100, 40)
     local _, tsFar, remFar = driveTo(160, 40)
     checkNear(remFar, 40, 1e-9, "剩 40m")
-    -- 終點滑行包絡（0924a）：停點在到站圈內 1m，sqrt(2·COAST·36)=52.9 km/h < 沙盒 60——40m 外就開始收油
-    local COAST, STOP = F.STYLES.brisk.coast, F.COAST_STOP_M
-    checkNear(tsFar, math.sqrt(2 * COAST * (40 - STOP)) * KMH, 1e-9, "剩 40m 的目標速度＝終點滑行包絡（斷油滑行做得到的減速）")
+    -- 終點滑行＋輔助包絡（0924a／1002i）：停點在到站圈內 1m；剩 40m 時包絡高於沙盒 60＝還不收油
+    local COAST, STOP = F.STYLES.brisk.coast + F.STYLES.brisk.coastAssist, F.COAST_STOP_M
+    checkNear(tsFar, math.min(60, math.sqrt(2 * COAST * (40 - STOP)) * KMH), 1e-9, "剩 40m 的目標速度＝終點包絡與沙盒 60 取低")
     local _, tsNear, remNear = driveTo(194, 40)
     checkNear(remNear, 6, 1e-9, "剩 6m")
     checkNear(tsNear, math.sqrt(2 * COAST * (6 - STOP)) * KMH, 1e-9,
@@ -733,7 +733,7 @@ do
         checkTrue(tsMid > 60, "長段中點距終點 116m：巡航不減速（實得 " .. show(tsMid) .. "）")
         local _, ts50 = F.control(pLong, stLong, 183, 0, 0, 60, DT)
         checkNear(ts50, math.sqrt(2 * COAST * (50 - STOP)) * KMH, 1e-9,
-            "長段內距終點 50m：滑行包絡 sqrt(2·COAST·46)＝59.8，不是線性攤薄的 4.3")
+            "長段內距終點 50m：滑行＋輔助包絡 sqrt(2·COAST·46)，不是線性攤薄的 4.3")
         local _, tsEnd = F.control(pLong, stLong, 231, 0, 0, 20, DT)
         checkNear(tsEnd, 0, 1e-9, "長段內距終點 2m（已過停點）：目標 0")
     end
@@ -743,8 +743,8 @@ do
     local _, tsSide, remSide, reachedSide = F.control(pLine, st, 195, 20, 0, 10, DT)
     checkNear(remSide, 5, 1e-9, "橫向偏 20m：沿線剩餘距離照樣回報 5m（診斷／控速仍要用）")
     checkFalse(reachedSide, "橫向偏離終點 20m：沿線 remaining<=5 也不算抵達")
-    checkNear(tsSide, 12, 1e-9,
-        "橫向偏 20m：未抵達時末段脫困地板抬到爬行 12（航向減速不壓低）")
+    checkTrue(tsSide >= 12 - 1e-9,
+        "橫向偏 20m：未抵達時末段不低於脫困地板爬行 12（航向減速不壓低；實得 " .. show(tsSide) .. "）")
 
     -- 距終點正好 ARRIVE_M（3-4-5 直角三角形）：兩個條件都是 <=，邊界算抵達
     local _, _, remEdge, reachedEdge = F.control(pLine, st, 197, 4, 0, 10, DT)
@@ -2166,9 +2166,11 @@ do
     checkNear(pC.v[3], math.sqrt(pC.v[4] * pC.v[4] + 2 * coastC * 8), 1e-9, "comfort 彎前用風格滑行＋輔助包絡")
     checkTrue(pC.v[3] > math.sqrt(pC.v[4] * pC.v[4] + 2 * F.STYLES.comfort.coast * 8) + 0.1,
         "comfort 彎前晚收油：比純斷油滑行包絡快（1001i 起舒適檔也加中線減速輔助）")
-    checkNear(pC.v[6], math.sqrt(2 * F.STYLES.comfort.coast * (8 - F.COAST_STOP_M)), 1e-9,
-        "comfort 終點前 8m＝風格滑行包絡量到停點（終點不加輔助）")
-    checkNear(pB1.v[6], math.sqrt(2 * F.STYLES.brisk.coast * (8 - F.COAST_STOP_M)), 1e-9, "brisk 終點前 8m＝滑行 3.0 包絡量到停點")
+    checkNear(pC.v[6], math.min(math.sqrt(2 * coastC * (8 - F.COAST_STOP_M)),
+            math.sqrt(2 * F.STYLES.comfort.brake * 8)), 1e-9,
+        "comfort 終點前 8m＝滑行＋輔助包絡（1002i 終點也加輔助）與舒適計畫制動 3.0 取低")
+    checkNear(pB1.v[6], math.sqrt(2 * (F.STYLES.brisk.coast + F.STYLES.brisk.coastAssist) * (8 - F.COAST_STOP_M)), 1e-9,
+        "brisk 終點前 8m＝滑行 3.0＋輔助包絡量到停點")
     checkTrue(maxDecelDemand(pC) <= coastC + 1e-6, "comfort 全線減速需求 ≤ 滑行＋輔助")
     -- 60° 折點（≥ comfort turnHard 50°、≥ brisk turnHard 55°）：兩檔各自的折點帽
     local sharp = { 0, 0, 20, 0, 40, 0, 60, 0, 60 + 20 * math.cos(math.rad(60)), 20 * math.sin(math.rad(60)),
@@ -2185,8 +2187,8 @@ do
     for i = 1, pC.n - 1 do pC.segStopCoast[i] = 2.5 end
     F.invalidateDynamics(pC)
     while not pC.ready do F.stepBuild(pC, 4096) end
-    checkNear(pC.v[6], math.sqrt(2 * 2.5 * (8 - F.COAST_STOP_M)), 1e-9,
-        "comfort 終點前 8m＝車輛斷油 2.5 包絡（不再用舒適 0.45 提早 170m 收油）")
+    checkNear(pC.v[6], math.sqrt(2 * (2.5 + F.STYLES.comfort.coastAssist) * (8 - F.COAST_STOP_M)), 1e-9,
+        "comfort 終點前 8m＝車輛斷油 2.5＋輔助包絡（不再用舒適 0.45 提早 170m 收油）")
     checkNear(pC.v[3], math.sqrt(pC.v[4] * pC.v[4] + 2 * coastC * 8), 1e-9,
         "彎前收油仍是風格滑行＋輔助（終點用的減速度不外溢到彎道）")
     do
@@ -2195,8 +2197,8 @@ do
         local sq = pC.length - 5
         local x, y = pointAt(pC, sq)
         local _, target = F.control(pC, st, x, y, math.rad(90), 20, 1 / 60)
-        checkNear(target, math.sqrt(2 * 2.5 * (5 - F.COAST_STOP_M)) * KMH, 0.5,
-            "control 終點前 5m 目標＝同一條 2.5 包絡（實得 " .. string.format("%.2f", target) .. " km/h）")
+        checkNear(target, math.sqrt(2 * (2.5 + F.STYLES.comfort.coastAssist) * (5 - F.COAST_STOP_M)) * KMH, 0.5,
+            "control 終點前 5m 目標＝同一條 2.5＋輔助包絡（實得 " .. string.format("%.2f", target) .. " km/h）")
     end
 end
 

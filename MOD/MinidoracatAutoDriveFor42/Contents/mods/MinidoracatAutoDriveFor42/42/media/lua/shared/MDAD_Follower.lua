@@ -988,13 +988,14 @@ function MDADFollower.stepBuild(profile, budget)
                 profile.phase, profile.cursor = "brake", n - 1
             else
                 local coast = profile.segCoast[i] or 0.6
-                local assist = 0
+                -- 彎前與終點收油都加中線減速輔助（STYLES.coastAssist）。終點段（0924a）原本只用車輛真實斷油值：
+                -- 當時 Driver 沒有比例減速，計畫的減速度一定要做得到；1001a 起不鎖輪的中線減速輔助一路補到停，
+                -- 1002i 起終點同樣照「斷油＋輔助」收（rc49／rc50 跟線慢於上限的時間裡 38% 在終點前 120m 內）。
+                local assist = profile.coastAssist or 0
                 if profile.coastFromEnd and profile.segStopCoast then
                     coast = profile.segStopCoast[i] or coast
-                else
-                    assist = profile.coastAssist or 0 -- 彎前收油加中線減速輔助（STYLES.coastAssist）
-                    coast = coast + assist
                 end
+                coast = coast + assist
                 if profile.coastAssistAt then profile.coastAssistAt[i] = assist end
                 local reach = profile.s[i + 1]
                 if reach > profile.coastStopS then reach = profile.coastStopS end
