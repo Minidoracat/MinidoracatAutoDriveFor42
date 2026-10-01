@@ -3431,6 +3431,102 @@ do
     checkNear(ovIn, expectKmh(1.5, 3.5, env), 0.3, "承諾線內側 1.5：與常駐 1.5 的前看同值（±0.3）")
 end
 
+scenario("1002e：fallback 折點的帽在放行點（頂點前 rMin·tan(θ/2)）就達到，不是到頂點才達到")
+do
+    -- E2E SemiTruckLite 90° fallback 折點：剖面帽記在頂點，車在頂點前 5.9m 被放行開始轉時還有 34 km/h
+    -- （帽 23）→ 打滑外甩 2.3m。違規證明：拿掉前看的頂點分支＝放行點目標與寬鬆對照組相同（第一條紅）。
+    local vp = { valid = true, geometryValid = true, halfW = 0.9, halfL = 2.9, rMin = 4.32,
+        wheelbase = 3.79, delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 100 }
+    local route = { pts = { 0, 0, 60, 0, 60, 60, 60, 120 }, segSurface = { "paved", "paved", "paved" },
+        segWidth = { 4, 4, 4 } }
+    local p = F.begin(route, 100, 4, vp)
+    while not F.stepBuild(p, 4096) do end
+    checkEq(p.filletFallbackN, 1, "fixture：4m 路 90° 折點建不出弧（fallback 頂點）")
+    local rel = 4.32 * math.tan(math.pi / 4)
+    local function pvAt(sCar, latSafe)
+        local st = F.newState()
+        st.idx = 1
+        F.setRuntimeLimits(st, 3, 6, latSafe, 1.0)
+        F.control(p, st, sCar, 0, 0, 40, DT)
+        return st.profileSpeedKmh
+    end
+    local c = p.coastRate and p.coastRate[1] or p.segCoast[1] or 0.6
+    c = math.min(c, 1.0 + (p.coastAssistAt and p.coastAssistAt[1] or 0))
+    local cap = math.max(math.sqrt(3.5 * 4.32), 12 / 3.6)
+    for _, before in ipairs({ 0.2, 6, 12 }) do
+        local sCar = 60 - rel - before
+        local env = pvAt(sCar, 30) -- 側向寬鬆：頂點帽不綁＝剖面本身
+        local got = pvAt(sCar, 3.5)
+        local want = math.min(env, 3.6 * math.sqrt(cap * cap + 2 * c * before))
+        checkNear(got, want, 1e-6, string.format("放行點前 %.1fm：目標＝sqrt(帽²＋2·coast·到放行點)（%.2f，剖面 %.2f）",
+            before, got, env))
+        if before < 1 then
+            checkTrue(got < env - 3, string.format("放行點目標 %.1f 遠低於剖面在頂點達帽的 %.1f", got, env))
+        end
+    end
+end
+
+scenario("1002f：承諾線在急彎外側時切線預視與弧段前饋按線本身（1−l·κ）縮放，不照中心弧切進線內")
+do
+    -- E2E rc48 0017：R 3.35 弧外側 3.75 的貼縫繞行線，車以中心弧的 yaw 率（−0.9 rad/s）轉、落後線 1.5m 撞上。
+    -- 閉環：自行車＋一階 yaw 延遲、Driver 貼縫位置環（×CROSS_TRACK_DODGE_GAIN）、10 km/h。
+    -- 違規證明：預視與前饋不縮放（ovDen 恆 nil）＝弧上落後線（往弧內）超過門檻。
+    local D = MDADDynamics
+    local vp = { valid = true, geometryValid = true, halfW = 0.9, rMin = 3,
+        wheelbase = 2.9, delta0Safe = 0.7, deltaVSafe = 0.25, maxSpeed = 100 }
+    local route = { pts = { 0, 0, 40, 0, 40, 40 }, segSurface = { "paved", "paved" }, segWidth = { 4.6, 4.6 } }
+    local p = F.begin(route, 100, 4, vp)
+    while not F.stepBuild(p, 4096) do end
+    local ai, ae = nil, nil
+    for i = 1, p.n - 1 do
+        if p.segKind[i] == D.SEG_ARC then ai = ai or i; ae = i end
+    end
+    local R = ai and p.filletRadius and p.filletRadius[ai]
+    checkTrue(ai ~= nil and R ~= nil and R > 3 and R < 4, string.format("fixture：90° 左轉建出 R≈3.3 圓角（R %s）", tostring(R)))
+    local offL = -3.0 -- 左轉（往 +y、CCW）：lane>0 在 CCW 法向側＝內側；負＝外側
+    local function run(kps)
+        local st = F.newState()
+        F.setRuntimeLimits(st, 3, 6, 3.5, 1.2)
+        local ox, oy = {}, {}
+        local a, b, c, d = p.s[ai] - 16, p.s[ai] - 6, p.s[ae + 1] + 8, p.s[ae + 1] + 18
+        local n, s0, reason, s1 = F.buildOffsetLine(p, a - 2, a, b, c, d, offL, 0, ox, oy)
+        checkEq(reason, "ok", "外側承諾線可建")
+        checkTrue(F.setOffset(st, a, b, c, d, offL, ox, oy, n, s0, s1), "外側承諾線 setOffset")
+        st.trackTangent = true
+        local car = { x = p.s[ai] - 20, y = 0, h = 0, w = 0 }
+        local kmh, dt, KMAX, TAU = 10, 1 / 30, 1 / 2.5, 0.35
+        local v = kmh / KMH
+        local worst, prevLat = 0, nil
+        for _ = 1, 1200 do
+            local steer, _, rem, reached, _, _, latSigned, lineLat = F.control(p, st, car.x, car.y, car.h, kmh, dt)
+            local sNow = p.length - rem
+            local dev = lineLat and (latSigned - lineLat) or 0
+            local dLat = prevLat and (dev - prevLat) / dt or nil
+            prevLat = dev
+            if dLat and (dLat > 5 or dLat < -5) then dLat = nil end
+            local u = steer - D.crossTrackSteer(dev, kmh, dLat, D.CROSS_TRACK_DODGE_GAIN, D.CROSS_TRACK_DODGE_MAX)
+            if u > 5 then u = 5 elseif u < -5 then u = -5 end
+            if u < 0.02 and u > -0.02 then u = 0 end
+            st.appliedSteer = u
+            local k = u * kps
+            if k > KMAX then k = KMAX elseif k < -KMAX then k = -KMAX end
+            car.w = car.w + (k * v - car.w) * (dt / TAU)
+            car.h = car.h + car.w * dt
+            car.x = car.x + math.cos(car.h) * v * dt
+            car.y = car.y + math.sin(car.h) * v * dt
+            -- 往弧內（+lane）落後線＝切進線內：弧前 2m 到出弧後 4m
+            if lineLat and sNow >= p.s[ai] - 2 and sNow <= p.s[ae + 1] + 4 and dev > worst then worst = dev end
+            if reached or sNow > c then break end
+        end
+        return worst
+    end
+    for _, kps in ipairs({ 0.16, 0.10 }) do
+        local inside = run(kps)
+        checkTrue(inside < 0.6, string.format("K%.2f 10 km/h 過 R≈3.3 弧外側 3m 的承諾線：切進線內 <0.6m（實得 %.2f）",
+            kps, inside))
+    end
+end
+
 closeScenario()
 print()
 print("情境 " .. scenarios .. " 個、斷言 " .. assertions .. " 項")

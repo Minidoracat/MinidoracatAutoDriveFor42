@@ -1119,7 +1119,7 @@ end
 -- KP·l''·(1.5·PREVIEW + v·SLOPE_LEAD)（斜率取在 q+v·SLOPE_LEAD 起 1.5m 的中點），一併扣掉。
 -- 追承諾線（ov）切線時那條線自己的側移已在切線裡，不另算車道項。
 local LANE_FF_STEP_M = 2
-local function arcFeedForward(profile, state, arcK, bestI, sNow, aspeed, tangentOn, yawGain)
+local function arcFeedForward(profile, state, arcK, bestI, sNow, aspeed, tangentOn, yawGain, ovDen)
     local kap = profile.kappa
     if not kap or arcK == nil or aspeed <= 0.5 then return 0 end
     local s, n, segKindW, segH = profile.s, profile.n, profile.segKind, profile.segH
@@ -1202,6 +1202,8 @@ local function arcFeedForward(profile, state, arcK, bestI, sNow, aspeed, tangent
         if tangentOn then ff = ff - KP * kk * TANGENT_PREVIEW_M end
         if ff * kk < 0 then ff = 0 end
         ff = ff * ramp
+        -- 承諾線在弧外側（1002f）：線的曲率 κ/(1−l·κ)、預視角同比例縮小，前饋整份乘同一個比例
+        if ovDen ~= nil and not state.laneTangent then ff = ff / ovDen end
         if ff > CURVE_FF_MAX then ff = CURVE_FF_MAX
         elseif ff < -CURVE_FF_MAX then ff = -CURVE_FF_MAX end
     end
@@ -1247,6 +1249,10 @@ end
 -- 弧口 15.3，入弧 16.5–19.4）。沿滑行能影響的距離往前找弧，每段弧只看第一段（即時帽從那裡開始作用），
 -- 以同一個 coast 反推 sqrt(cap² + 2·coast·距離)。行駛線取承諾線（蓋得到該點時）否則常駐 lane 在該處的
 -- 落點（clampLane 連續版）。skipRun＝車已在弧上：同一段弧由當下帽管，從下一段弧起算。
+-- 沒有弧的折點（adaptive 的 fallback 頂點、髮夾）車從放行點（頂點前 rMin·tan(θ/2)，與 control 的鉗點同一個數）
+-- 就開始以 rMin 轉，帽要在那裡達到（1002e：建表帽記在頂點＝放行時還快 5–6 m 的滑行量，E2E SemiTruckLite 90°
+-- 折點放行 34 對帽 23、側滑外甩 2.3m；十批 campaign 56 次放行 32 次 >20 km/h、50 次打滑）。帽＝sqrt(latSafe·rMin)
+-- （geometryStep 同式，>90° 用 MIN_SPEED）。
 -- 回新的目標（m/s）；最多走 ARC_LOOK_STEPS 段，零配置。
 local ARC_LOOK_STEPS = 48
 local function arcLookaheadMs(profile, state, from, sNow, target, coast, skipRun)
@@ -1256,6 +1262,9 @@ local function arcLookaheadMs(profile, state, from, sNow, target, coast, skipRun
     local reach = (target * target - floor2) / (2 * coast)
     if not (reach > 0) then return target end
     local n, s, segKind, SEG_ARC = profile.n, profile.s, profile.segKind, MDADDynamics.SEG_ARC
+    local SEG_FALLBACK, segH = MDADDynamics.SEG_FALLBACK, profile.segH
+    local rMin = profile.rMin
+    if not isFinite(rMin) or rMin < 0 then rMin = 0 end
     local rawBias = state.laneBias
     if not isFinite(rawBias) then rawBias = 0 end
     local ovN, ovS0, ovEndS = state.ovN or 0, state.ovS0, state.ovEndS
@@ -1265,7 +1274,7 @@ local function arcLookaheadMs(profile, state, from, sNow, target, coast, skipRun
     end
     while j <= n - 1 and steps < ARC_LOOK_STEPS do
         local dist = s[j] - sNow
-        if dist > reach then break end
+        if dist - HAIRPIN_APEX_MAX > reach then break end
         if segKind[j] == SEG_ARC then
             local sj, lat = s[j], nil
             if ovN >= 2 and isFinite(ovS0) and isFinite(ovEndS) and sj >= ovS0 and sj <= ovEndS then
@@ -1287,6 +1296,29 @@ local function arcLookaheadMs(profile, state, from, sNow, target, coast, skipRun
             end
             while j <= n - 1 and segKind[j] == SEG_ARC and steps < ARC_LOOK_STEPS do j, steps = j + 1, steps + 1 end
         else
+            if j >= 2 and segKind[j - 1] ~= SEG_ARC then
+                local dth = wrapPi(segH[j] - segH[j - 1])
+                if dth < 0 then dth = -dth end
+                if (dth > HAIRPIN_RAD or (profile.filletAdaptive and dth >= MDADDynamics.FILLET_MIN_RAD
+                    and (segKind[j - 1] == SEG_FALLBACK or segKind[j] == SEG_FALLBACK)))
+                    and dth < HAIRPIN_MAX_RAD then
+                    local rel = rMin * tan(dth * 0.5)
+                    if rel < HAIRPIN_APEX_MIN then rel = HAIRPIN_APEX_MIN
+                    elseif rel > HAIRPIN_APEX_MAX then rel = HAIRPIN_APEX_MAX end
+                    local cap = MIN_SPEED_MS
+                    if dth <= HAIRPIN_RAD then
+                        cap = sqrt(look * rMin)
+                        if cap < MIN_SPEED_MS then cap = MIN_SPEED_MS end
+                    end
+                    local d = dist - rel
+                    if d < 0 then d = 0 end
+                    local lim = sqrt(cap * cap + 2 * coast * d)
+                    if lim < target then
+                        target = lim
+                        reach = (target * target - floor2) / (2 * coast)
+                    end
+                end
+            end
             j, steps = j + 1, steps + 1
         end
     end
@@ -1597,12 +1629,41 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
             q = q + 1
         end
     end
+    -- ov 線在車投影點的橫向（對中心線、右正）：Driver 的 cross-track 期望線。停留線的
+    -- 換道從 commit 點就開始（returnLane 模式），Driver 舊制用 a..b smoothstep 算期望線
+    -- → 兩者相差 1m 以上，cross-track 把車往「線不在的地方」拉（2026-09-04 s023 t=24-29：
+    -- 進縫前被拉離線 0.9m、進縫後又追不上，貼 B 車）。
+    local lineLat = nil
+    if ovN >= 2 and isFinite(ovEndS) and sNow >= state.ovS0 and sNow <= ovEndS then
+        local i0, ft = ovIndexAt(state.ovS0, ovN, ovEndS, sNow)
+        local lx = ovX[i0] + (ovX[i0 + 1] - ovX[i0]) * ft
+        local ly = ovY[i0] + (ovY[i0 + 1] - ovY[i0]) * ft
+        lineLat = (lx - pjx) * -sin(hProj) + (ly - pjy) * cos(hProj)
+    end
+    -- 承諾線在弧的外側（1002f）：ov 線每 1m 路線弧長實際長 1−l·κ（>1）倍，轉角卻與中心線相同——路線弧長
+    -- 1.5m 的切線預視＝線上預視角大 (1−l·κ) 倍、弧段前饋也照中心弧 1/R 給，車照中心弧的 yaw 率轉、切進線內
+    -- （E2E rc48 0017：R 3.35 弧外側 3.75 的貼縫繞行線，yaw −0.9 rad/s＝中心弧的值、落後線 1.5m 撞上）。
+    -- 預視改成線上 1.5m（路線弧長 1.5/(1−l·κ)），前饋乘 1/(1−l·κ)。內側（<1）照舊。
+    local ovDen = nil
+    if arcK ~= nil and lineLat ~= nil then
+        local r = profile.filletRadius and profile.filletRadius[arcK]
+        if isFinite(r) and r > 0 then
+            local dth = 0
+            if arcK >= 2 and segKindW[arcK - 1] == MDADDynamics.SEG_ARC then
+                dth = wrapPi(profile.segH[arcK] - profile.segH[arcK - 1])
+            elseif arcK + 1 <= profile.n - 1 then
+                dth = wrapPi(profile.segH[arcK + 1] - profile.segH[arcK])
+            end
+            local den = 1 - lineLat * (dth < 0 and -1 / r or 1 / r)
+            if den > 1 then ovDen = den end
+        end
+    end
     local tangentOn = false
     state.laneTangent = false -- 切線取自剖面＋車道斜率（弧段前饋的車道項只在這時算）
     local onArc = profile.filletAdaptive == true and arcK ~= nil
     if (state.trackTangent == true or onArc)
             and (kinkS == nil or sNow + TANGENT_PREVIEW_M < kinkS - OV_BLEND) then
-        local q = sNow + TANGENT_PREVIEW_M
+        local q = sNow + TANGENT_PREVIEW_M / (ovDen or 1)
         -- ov 線是否蓋住預視點：與 ovUsed（由長前視 sEff 決定）解耦——線尾最後 look 公尺
         -- sEff 已出線、q 仍在線上，弧段仍得追線的切線（出口過渡斜率），不可提前改讀中心線。
         -- 一般繞行也由 q 的覆蓋判斷，不能因長前視已出線而提前改回弦角；折角 >15° 仍退前視點。
@@ -1664,17 +1725,7 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         state.errPrev = nil
         state.dFilt = 0
     end
-    -- ov 線在車投影點的橫向（對中心線、右正）：Driver 的 cross-track 期望線。停留線的
-    -- 換道從 commit 點就開始（returnLane 模式），Driver 舊制用 a..b smoothstep 算期望線
-    -- → 兩者相差 1m 以上，cross-track 把車往「線不在的地方」拉（2026-09-04 s023 t=24-29：
-    -- 進縫前被拉離線 0.9m、進縫後又追不上，貼 B 車）。
-    local lineLat = nil
-    if ovN >= 2 and isFinite(ovEndS) and sNow >= state.ovS0 and sNow <= ovEndS then
-        local i0, ft = ovIndexAt(state.ovS0, ovN, ovEndS, sNow)
-        local lx = ovX[i0] + (ovX[i0 + 1] - ovX[i0]) * ft
-        local ly = ovY[i0] + (ovY[i0 + 1] - ovY[i0]) * ft
-        lineLat = (lx - pjx) * -sin(hProj) + (ly - pjy) * cos(hProj)
-    end
+
 
     -- ---- 原地調頭遲滯 ----
     local aerr = err
@@ -1894,7 +1945,8 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         state.prevHeading = heading
         state.yawGain = yawGain
         -- ---- 弧段前饋（arcFeedForward）----
-        local ff = arcFeedForward(profile, state, arcK, bestI, sNow, aspeed, tangentOn, yawGain)
+        local ff = arcFeedForward(profile, state, arcK, bestI, sNow, aspeed, tangentOn, yawGain,
+            tangentOn and ovDen or nil)
         if ff ~= 0 then
             steer = steer + ff
             if steer > STEER_MAX then steer = STEER_MAX
