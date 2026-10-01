@@ -62,10 +62,11 @@ local PACK_SET = {}
 for i = 1, #Voice.PACKS do PACK_SET[Voice.PACKS[i]] = true end
 
 -- 聲音（2026-09-29）：ElevenLabs Voice Library 的 Stacy（甜美）與 Yui（台灣腔、溫柔）；
--- classic＝0.15.0 以前的舊版 Fish Audio 語音（2026-09-30 還原，原檔 24e8ed3）。
+-- classic＝0.15.0 以前的舊版 Fish Audio 語音（2026-09-30 還原，原檔 24e8ed3）；
+-- stacy_brief／yui_brief＝同兩個聲音的簡潔導航口吻（2026-10-01，文本 scripts/voice_lines_brief.json）。
 -- 順序＝「語音聲音」下拉順序，index 1（Stacy）為預設；HUD.voiceActor 回聲音名。新聲音一律接在尾端，
 -- 已存的選項 index 才不會換成別的聲音。
-Voice.ACTORS = { "stacy", "yui", "classic" }
+Voice.ACTORS = { "stacy", "yui", "classic", "stacy_brief", "yui_brief" }
 local ACTOR_SET = {}
 for i = 1, #Voice.ACTORS do ACTOR_SET[Voice.ACTORS[i]] = true end
 

@@ -1,0 +1,212 @@
+[
+  {
+    "id": "start_zh",
+    "language": "zh",
+    "text": "[warmly] 自动驾驶已启动，出发吧。"
+  },
+  {
+    "id": "stop_zh",
+    "language": "zh",
+    "text": "[calm] 自动驾驶已关闭，请接手驾驶。"
+  },
+  {
+    "id": "blocked_zh",
+    "language": "zh",
+    "text": "[calm] 前方道路受阻，请稍候。"
+  },
+  {
+    "id": "unstick_zh",
+    "language": "zh",
+    "text": "[reassuring] 车辆受困，正在倒车脱困。"
+  },
+  {
+    "id": "handback_zh",
+    "language": "zh",
+    "text": "[calm] 前方无法通过，请接手驾驶。"
+  },
+  {
+    "id": "arrive_zh",
+    "language": "zh",
+    "text": "[warmly] 已到达目的地，辛苦了。"
+  },
+  {
+    "id": "detour_zh",
+    "language": "zh",
+    "text": "[calm] 前方道路受阻，已重新规划路线。"
+  },
+  {
+    "id": "nodetour_zh",
+    "language": "zh",
+    "text": "[calm] 找不到其他路线，请接手驾驶。"
+  },
+  {
+    "id": "yield_zh",
+    "language": "zh",
+    "text": "[calm] 交给你驾驶，放手后自动恢复。"
+  },
+  {
+    "id": "resume_zh",
+    "language": "zh",
+    "text": "[warmly] 自动驾驶已恢复，继续前进。"
+  },
+  {
+    "id": "manual_zh",
+    "language": "zh",
+    "text": "[calm] 已切换手动驾驶，自动驾驶关闭。"
+  },
+  {
+    "id": "leg_next_zh",
+    "language": "zh",
+    "text": "[warmly] 继续前往下一站。"
+  },
+  {
+    "id": "stopover_zh",
+    "language": "zh",
+    "text": "[warmly] 已到达停靠点，准备好再出发。"
+  },
+  {
+    "id": "priority_zh",
+    "language": "zh",
+    "text": "[calm] 先前往优先目标，之后回到原行程。"
+  },
+  {
+    "id": "start_en",
+    "language": "en",
+    "text": "[warmly] Autodrive on. Let's go."
+  },
+  {
+    "id": "stop_en",
+    "language": "en",
+    "text": "[calm] Autodrive off. Please take the wheel."
+  },
+  {
+    "id": "blocked_en",
+    "language": "en",
+    "text": "[calm] Road blocked ahead. Please wait."
+  },
+  {
+    "id": "unstick_en",
+    "language": "en",
+    "text": "[reassuring] Vehicle stuck. Backing up to get free."
+  },
+  {
+    "id": "handback_en",
+    "language": "en",
+    "text": "[calm] Can't get through. Please take over."
+  },
+  {
+    "id": "arrive_en",
+    "language": "en",
+    "text": "[warmly] You've arrived at your destination."
+  },
+  {
+    "id": "detour_en",
+    "language": "en",
+    "text": "[calm] Road blocked ahead. Rerouting."
+  },
+  {
+    "id": "nodetour_en",
+    "language": "en",
+    "text": "[calm] No other route found. Please take over."
+  },
+  {
+    "id": "yield_en",
+    "language": "en",
+    "text": "[calm] You have control. Autodrive resumes when you let go."
+  },
+  {
+    "id": "resume_en",
+    "language": "en",
+    "text": "[warmly] Autodrive resumed."
+  },
+  {
+    "id": "manual_en",
+    "language": "en",
+    "text": "[calm] Manual control. Autodrive off."
+  },
+  {
+    "id": "leg_next_en",
+    "language": "en",
+    "text": "[warmly] Heading to the next stop."
+  },
+  {
+    "id": "stopover_en",
+    "language": "en",
+    "text": "[warmly] Stop reached. Continue when you're ready."
+  },
+  {
+    "id": "priority_en",
+    "language": "en",
+    "text": "[calm] Priority stop first, then back to your trip."
+  },
+  {
+    "id": "start_ja",
+    "language": "ja",
+    "text": "[warmly] 自動運転をスタートします。出発しましょう。"
+  },
+  {
+    "id": "stop_ja",
+    "language": "ja",
+    "text": "[calm] じどう運転をオフにしました。運転をお願いします。"
+  },
+  {
+    "id": "blocked_ja",
+    "language": "ja",
+    "text": "[calm] この先がふさがっています。しばらくお待ちください。"
+  },
+  {
+    "id": "unstick_ja",
+    "language": "ja",
+    "text": "[reassuring] 動けなくなりました。バックしてぬけ出します。"
+  },
+  {
+    "id": "handback_ja",
+    "language": "ja",
+    "text": "[calm] この先は通れません。運転をお願いします。"
+  },
+  {
+    "id": "arrive_ja",
+    "language": "ja",
+    "text": "[warmly] もくてきちに着きました。おつかれさまでした。"
+  },
+  {
+    "id": "detour_ja",
+    "language": "ja",
+    "text": "[calm] この先がふさがっています。べつのルートに切りかえます。"
+  },
+  {
+    "id": "nodetour_ja",
+    "language": "ja",
+    "text": "[calm] ほかのルートが見つかりません。運転をお願いします。"
+  },
+  {
+    "id": "yield_ja",
+    "language": "ja",
+    "text": "[calm] 運転をおまかせします。手をはなすと、自動運転にもどります。"
+  },
+  {
+    "id": "resume_ja",
+    "language": "ja",
+    "text": "[warmly] 自動運転にもどりました。このまま進みます。"
+  },
+  {
+    "id": "manual_ja",
+    "language": "ja",
+    "text": "[calm] 運転をおかえしします。自動運転はオフです。"
+  },
+  {
+    "id": "leg_next_ja",
+    "language": "ja",
+    "text": "[warmly] 次の目的地へ向かいます。"
+  },
+  {
+    "id": "stopover_ja",
+    "language": "ja",
+    "text": "[warmly] 着きました。じゅんびができたら、また出発しましょう。"
+  },
+  {
+    "id": "priority_ja",
+    "language": "ja",
+    "text": "[calm] さきにこちらへ向かい、そのあと元の予定にもどります。"
+  }
+]

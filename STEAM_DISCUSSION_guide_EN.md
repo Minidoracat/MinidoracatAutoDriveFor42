@@ -51,7 +51,7 @@ If the server disables loot spawns, crafting is the only way. Parts (plus a scre
 [list]
 [*] [b]Driver HUD[/b]: status, targets, speed, cruise cap, gear, slowdown reason, power/fuel, with direct controls. Metal, glass, family and side-wing themes; compact and collapsed layouts.
 [*] [b]Drive timer[/b]: real time incl. waits and recovery; kept until the next successful start, not saved.
-[*] [b]Voice prompts[/b]: private Chinese/English/Japanese lines for driving events, next target, stopover and priority; arrival only at trip end. Pick Stacy (sweet, default) or Yui (gentle), both in a sweet girlfriend tone, or Classic (the original voice); follow game language or pick one; HUD toggle and volume.
+[*] [b]Voice prompts[/b]: private Chinese/English/Japanese lines for driving events, next target, stopover and priority; arrival only at trip end. Pick Stacy (sweet, default) or Yui (gentle) in a sweet girlfriend tone, the same two voices in a concise navigation style, or Classic (the original voice); follow game language or pick one; HUD toggle and volume.
 [*] [b]Solo auto-pause[/b]: separate options for failed recovery and stopovers/trip end (default on); pauses once stopped and the voice ends. Not for ordinary targets, multiplayer or split-screen; unpausing never restarts driving.
 [/list]
 
