@@ -3474,17 +3474,19 @@ do
     local D = MDADDynamics
     local vp = { valid = true, geometryValid = true, halfW = 0.9, rMin = 3,
         wheelbase = 2.9, delta0Safe = 0.7, deltaVSafe = 0.25, maxSpeed = 100 }
-    local route = { pts = { 0, 0, 40, 0, 40, 40 }, segSurface = { "paved", "paved" }, segWidth = { 4.6, 4.6 } }
-    local p = F.begin(route, 100, 4, vp)
-    while not F.stepBuild(p, 4096) do end
-    local ai, ae = nil, nil
-    for i = 1, p.n - 1 do
-        if p.segKind[i] == D.SEG_ARC then ai = ai or i; ae = i end
-    end
-    local R = ai and p.filletRadius and p.filletRadius[ai]
-    checkTrue(ai ~= nil and R ~= nil and R > 3 and R < 4, string.format("fixture：90° 左轉建出 R≈3.3 圓角（R %s）", tostring(R)))
-    local offL = -3.0 -- 左轉（往 +y、CCW）：lane>0 在 CCW 法向側＝內側；負＝外側
-    local function run(kps)
+    -- turn＝+1 左轉（往 +y、CCW：lane>0 在 CCW 法向側＝內側，外側用負 offL）；−1 右轉（鏡像，外側用正 offL）
+    local function run(turn, kps)
+        local route = { pts = { 0, 0, 40, 0, 40, 40 * turn }, segSurface = { "paved", "paved" }, segWidth = { 4.6, 4.6 } }
+        local p = F.begin(route, 100, 4, vp)
+        while not F.stepBuild(p, 4096) do end
+        local ai, ae = nil, nil
+        for i = 1, p.n - 1 do
+            if p.segKind[i] == D.SEG_ARC then ai = ai or i; ae = i end
+        end
+        local R = ai and p.filletRadius and p.filletRadius[ai]
+        checkTrue(ai ~= nil and R ~= nil and R > 3 and R < 4, string.format("fixture：90° 轉角建出 R≈3.3 圓角（R %s）", tostring(R)))
+        if not R then return 99 end
+        local offL = -3.0 * turn
         local st = F.newState()
         F.setRuntimeLimits(st, 3, 6, 3.5, 1.2)
         local ox, oy = {}, {}
@@ -3514,16 +3516,20 @@ do
             car.h = car.h + car.w * dt
             car.x = car.x + math.cos(car.h) * v * dt
             car.y = car.y + math.sin(car.h) * v * dt
-            -- 往弧內（+lane）落後線＝切進線內：弧前 2m 到出弧後 4m
-            if lineLat and sNow >= p.s[ai] - 2 and sNow <= p.s[ae + 1] + 4 and dev > worst then worst = dev end
+            -- 往弧內落後線＝切進線內（左轉 +lane、右轉 −lane）：弧前 2m 到出弧後 4m
+            if lineLat and sNow >= p.s[ai] - 2 and sNow <= p.s[ae + 1] + 4 and dev * turn > worst then
+                worst = dev * turn
+            end
             if reached or sNow > c then break end
         end
         return worst
     end
-    for _, kps in ipairs({ 0.16, 0.10 }) do
-        local inside = run(kps)
-        checkTrue(inside < 0.6, string.format("K%.2f 10 km/h 過 R≈3.3 弧外側 3m 的承諾線：切進線內 <0.6m（實得 %.2f）",
-            kps, inside))
+    for _, turn in ipairs({ 1, -1 }) do
+        for _, kps in ipairs({ 0.16, 0.10 }) do
+            local inside = run(turn, kps)
+            checkTrue(inside < 0.6, string.format("%s轉 K%.2f 10 km/h 過 R≈3.3 弧外側 3m 的承諾線：切進線內 <0.6m（實得 %.2f）",
+                turn > 0 and "左" or "右", kps, inside))
+        end
     end
 end
 
