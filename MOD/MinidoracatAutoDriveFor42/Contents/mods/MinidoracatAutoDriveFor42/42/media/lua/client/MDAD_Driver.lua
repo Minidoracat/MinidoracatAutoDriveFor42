@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1002b"
+Drive.REV = "1002c"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -3267,6 +3267,67 @@ function Drive.softNextConflict(s, pS, pL, predN, sAfter, sTo, lane, R)
     return nextS, need
 end
 
+-- 「閃避殭屍與屍體」選項（HUD getter；缺席＝開）
+function Drive.zombieDodgeOn()
+    local hud = MDAD.HUD
+    if type(hud) == "table" and type(hud.zombieDodge) == "function" then
+        local ok, v = pcall(hud.zombieDodge)
+        if ok then return v == true end
+    end
+    return true
+end
+
+-- 回線途中有殭屍（1002c）：RETURN 的線從車身橫移到目標 lane，沿途不閃殭屍（RETURN 持有車道時軟縫讓位、
+-- 連縱向配合帽都不算）。殭屍（不含屍體；現位到預測位的整段）落在「車身↔目標 lane」橫移帶 ±R 內、且在
+-- 軟縫視窗內＝衝突：RETURN 不進場／讓位，交軟縫從車身位置接手（E2E zombie turn：路邊停車逼出長繞行，
+-- 進彎前 RETURN 從 −0.1 回 3.5 的線穿過 l 1.9–2.8 的三隻，撞兩隻）。軟縫不作用的時候（選項關、點雲溢出、
+-- 調頭、停留待切）照舊 RETURN——讓位給不作用的軟縫＝車直接切回常駐線。
+function Drive.returnZombieConflict(s, latNow, target, speedKmh)
+    local sen = s.sensor
+    if not sen or not finite(sen.zomN) or sen.zomN <= 0 or not finite(latNow) or not finite(target) then return false end
+    if sen.zomOverflow or s.fstate.rotating or finite(s.stayLanePending) or not Drive.zombieDodgeOn() then
+        return false
+    end
+    local vp, rs = s.vehicleProfile, s.lastSNow
+    local sFrom, sTo = rs - vp.halfL, rs + MDADDynamics.softLookahead(speedKmh)
+    if finite(sen.softEndS) and sen.softEndS < sTo then sTo = sen.softEndS end
+    local R = vp.halfW + MDADCorridor.ZOMBIE_R + MDADCorridor.ZOMBIE_MARGIN
+    local lo, hi = math.min(latNow, target) - R, math.max(latNow, target) + R
+    local vms = finite(speedKmh) and speedKmh / 3.6 or 0
+    if vms < 3 then vms = 3 end
+    for i = 1, sen.zomN do
+        local zs, zl = sen.zomS[i], sen.zomL[i]
+        if finite(zs) and finite(zl) and zs >= sFrom and zs <= sTo and sen.zomIsCorpse[i] ~= true then
+            local zlp, vl = zl, sen.zomVl and sen.zomVl[i]
+            if finite(vl) and (vl > 0.2 or vl < -0.2) then
+                local t = (zs - rs - vp.halfL) / vms
+                if t < 0 then t = 0 elseif t > TUNE.ZOMBIE_PREDICT_S then t = TUNE.ZOMBIE_PREDICT_S end
+                zlp = zl + vl * t
+            end
+            if math.max(zl, zlp) > lo and math.min(zl, zlp) < hi then return true end
+        end
+    end
+    return false
+end
+
+-- RETURN 讓位給殭屍軟縫：laneBias 停在車身、記成軟縫的停放點（zombieLaneOf 從這裡起算，不一幀拉回常駐線）
+function Drive.parkForZombies(s, latSigned)
+    MDADFollower.clearOffset(s.fstate)
+    MDADFollower.setLaneBias(s.fstate, latSigned)
+    s.zombieLaneParked = latSigned
+    if s.sensor then s.sensor.scanBias = latSigned end
+    s.planMode = "return-zombie"
+end
+
+-- RETURN 進場前的讓位（stepFollow 進場條件最後一關）：回線帶上有殭屍就不進，停在車身交軟縫；回 true＝已讓位。
+-- 承諾繞行中照舊交 RETURN（偏離承諾線 RETURN_DODGE_DEV 以上＝真甩出，RETURN 進場會先放掉繞行）。
+function Drive.returnYieldZombies(s, playerNum, latSigned, speedKmh)
+    if s.dodging or not Drive.returnZombieConflict(s, latSigned, laneBiasOf(s), speedKmh) then return false end
+    Drive.parkForZombies(s, latSigned)
+    diagEvent(s, playerNum, "return", { phase = "yield", why = "zombie", l = latSigned, s = s.lastSNow })
+    return true
+end
+
 -- 殭屍／屍體共用軟縫（TUNE.ZOMBIE_LANE_*）：回本輪 laneBias。resident＝常駐 lane
 -- （sandBias＋roadBias）。只在持有權 free 時被呼叫（呼叫端已排除 dodge／RETURN／停留）；
 -- 這裡再排除調頭、停留待切、選項關、點雲溢出——任一成立即釋放回 resident。
@@ -3276,12 +3337,7 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
     local sen = s.sensor
     local cur = s.zombieLane
     s.zombieLaneCap = -1 -- 縱向配合帽每輪重算（見下）
-    local hud = MDAD.HUD
-    local on = true
-    if type(hud) == "table" and type(hud.zombieDodge) == "function" then
-        local ok, v = pcall(hud.zombieDodge)
-        if ok then on = v == true end
-    end
+    local on = Drive.zombieDodgeOn()
     if not on or sen.zomOverflow or s.fstate.rotating or finite(s.stayLanePending)
             or type(MDADCorridor) ~= "table" or type(MDADCorridor.softZombieLane) ~= "function" then
         s.zombieAvoidUntilS, s.zomBlindN = nil, 0
@@ -3362,9 +3418,13 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
             -- 到區間 [zlo, zhi]（現位到預測位的整段）的距離
             local gN = latNow < zlo and zlo - latNow or (latNow > zhi and latNow - zhi or 0)
             local gC = current < zlo and zlo - current or (current > zhi and current - zhi or 0)
-            local gH = home < zlo and zlo - home or (home > zhi and home - zhi or 0)
+            -- 常駐線、目前 lane、車身三者之間整段都算（1002c）：離任一端都超過 R、卻正好在 laneBias 回程路上的
+            -- 殭屍，舊制判 clear → lane 以軟縫速率掃回常駐線正好穿過牠（RETURN 讓位給軟縫後最常見：車在 −0.1、
+            -- 常駐 3.5、殭屍 1.9）。gT ≤ 到三端的距離，涵蓋舊的常駐線／車身／目前 lane 判定。
+            local tLo, tHi = math.min(home, current, latNow), math.max(home, current, latNow)
+            local gT = zhi < tLo and tLo - zhi or (zlo > tHi and zlo - tHi or 0)
             local crossing = gN < R or gC < R
-            if gH < R or crossing then
+            if gT < R then
                 if threatS == nil or zs < threatS then threatS, threatL = zs, zl end
             end
             if crossing and allowed and (shiftS == nil or zs < shiftS) then
@@ -4491,7 +4551,7 @@ function Drive.visAssistForce(s, speedKmh, mult)
     -- 已承諾繞行且實速超過本幀套用的繞行帽（接近包絡／保持段／下一群停止包絡）：同一條中線外力，
     -- 上限放到 DODGE_ASSIST_MAX（HOHOHO/clip-01：縫口前 1m 以 63 km/h 承諾 cap 18，只靠滑行到縫仍 56）
     local cap, amax, gain = s.visibilityCap, TUNE.VIS_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN
-    local minKmh, why = TUNE.VIS_ASSIST_MIN_KMH, "vis"
+    local minKmh, why, ff = TUNE.VIS_ASSIST_MIN_KMH, "vis", 0
     -- 彎前晚收油：剖面（fstate.profileSpeedKmh）已假設這份輔助（Follower.STYLES.coastAssist）
     local pv = s.fstate and s.fstate.profileSpeedKmh
     if s.profile and (s.profile.coastAssist or 0) > 0 and finite(pv) and pv < cap then
@@ -4501,7 +4561,15 @@ function Drive.visAssistForce(s, speedKmh, mult)
         -- 剖面最後 3–4m 從 25 收到 12 要 5–6 m/s²，舊制 25 以下整個不補、只剩斷油 2–3.6，抵達 18.5–20 km/h
         -- 剛好越過 1.5×彎帽（片段：超剖面時 25 以上 117/117 幀有補、25 以下 49/49 幀為 0）。
         local at, idx = s.profile.coastAssistAt, s.fstate.idx
-        if at and idx and (at[idx] or 0) > 0 then minKmh = 0 end
+        if at and idx and (at[idx] or 0) > 0 then
+            minKmh = 0
+            -- 前饋（1002c）：包絡在收（低於剖面上限）時，一超過剖面就先補建表假設的那一份，比例項只追殘差。
+            -- 純比例要先落後 TOL＋輔助/增益（2.25 km/h）才補得到假設的量＝重車進彎前一路落後 2–4 km/h
+            -- （E2E SemiTruckLite R≈7：剖面收到 15.3 時實速 16.5–19.4）。巡航（剖面＝上限）不前饋，
+            -- 否則 regulator 每次越過剖面一點點就脈衝減速。
+            local pmax = s.profile.maxSpeedMs
+            if finite(pmax) and pv < pmax * 3.6 - 1 then ff = at[idx] end
+        end
     end
     -- 車道包絡（1002a）：目標實際由證明線的 lane curve envelope 裁決（煞車×0.7 反推；靠右車道在右轉彎內側＝
     -- 半徑更小），它常比剖面低 10–40 km/h，舊制輔助只追剖面＝目標寫著 30、車只靠滑行從 41 慢慢掉
@@ -4539,8 +4607,14 @@ function Drive.visAssistForce(s, speedKmh, mult)
     end
     if speedKmh < minKmh then return 0 end
     local over = speedKmh - cap - TUNE.VIS_ASSIST_TOL_KMH
-    if over <= 0 then return 0 end
-    local a = over * gain
+    local a
+    if why == "profile" and ff > 0 then
+        if speedKmh <= cap then return 0 end
+        a = ff + (over > 0 and over * gain or 0)
+    else
+        if over <= 0 then return 0 end
+        a = over * gain
+    end
     if a > amax then a = amax end
     local mass = s.runtimeMass
     if not finite(mass) or mass < 1 then mass = MASS_FALLBACK end
@@ -6464,6 +6538,16 @@ local function updateReturnSnapshot(s, vehicle, playerNum, latSigned)
         s.planMode = "return-stall"
         diagEvent(s, playerNum, "return", { phase = "release", why = stalled and "stall" or "unloaded",
             l = latSigned, s = s.lastSNow })
+        return
+    end
+    -- 回線途中殭屍進到回線帶（1002c，Drive.returnZombieConflict）：結束 RETURN、停在車身交軟縫；冷卻期內
+    -- 不重入（軟縫移動中車身落在常駐線與軟縫 lane 之間本來就不觸發 RETURN，見 Drive.softAlignDev）。
+    if Drive.returnZombieConflict(s, latSigned, s.returnLaneTarget, vehicle:getCurrentSpeedKmHour()) then
+        endReturn(s)
+        s.returnUnloadedSince = 0
+        s.returnBlockUntil = sen.stamp + TUNE.RETURN_STALL_BLOCK_MS
+        Drive.parkForZombies(s, latSigned)
+        diagEvent(s, playerNum, "return", { phase = "release", why = "zombie", l = latSigned, s = s.lastSNow })
         return
     end
     local returnPad = s.sweepBase - s.vehicleProfile.halfW
@@ -9665,7 +9749,9 @@ local function stepFollow(s, vehicle, playerNum, now)
                 and returnAvailable(s)
                 -- 原始折點 ±RETURN_CORNER_M 內不進（放最後：只有前面全過才掃折線）
                 and turnPeakS(s.profile, s.lastSNow - TUNE.RETURN_CORNER_M,
-                    s.lastSNow + TUNE.RETURN_CORNER_M) == nil then
+                    s.lastSNow + TUNE.RETURN_CORNER_M) == nil
+                -- 回線帶上有殭屍（1002c）：不進 RETURN，讓位給軟縫從車身位置接手（Drive.returnYieldZombies）
+                and not Drive.returnYieldZombies(s, playerNum, latSigned, speedKmh) then
             -- pending＝unsafe crawl（≤RETURN_UNSAFE_CAP、沿當下 lane 直行），不是 hold：
             -- 舊制進入即 hold→WAIT→forceBrake，等下一輪快照 commit 再起步，每次進
             -- RETURN 都付一次「煞到 1 km/h」（s046 彎中 14.5→0.6 km/h）。回線走不走

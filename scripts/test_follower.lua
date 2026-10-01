@@ -3363,6 +3363,74 @@ do
         st.yawGainFb or -1, st.yawGain or -1))
 end
 
+scenario("1002c：前方弧段的即時帽提前以滑行包絡反推（內側偏移／runtime latSafe），不在弧口一步掉下來")
+do
+    -- E2E SemiTruckLite R≈7：建表包絡約 20、弧口即時帽 15.3 → 入弧 16.5–19.4（兩版皆有）。
+    -- 違規證明：拿掉前看＝弧前目標與「即時帽寬鬆」對照組相同（第一條紅）；前看不讀承諾線＝承諾線內側與
+    -- 常駐 0 相同（第五條紅）。常駐 lane 在弧口已被 laneRoom 夾回（圓角吃滿 band，內側餘裕≈0），內外側同值。
+    local vp = { valid = true, geometryValid = true, halfW = 1, rMin = 3,
+        wheelbase = 2.5, delta0Safe = 0.7, deltaVSafe = 0.25, maxSpeed = 120 }
+    local route = { pts = { 0, 0, 120, 0, 120, 60 }, segSurface = { "paved", "paved" }, segWidth = { 12, 12 } }
+    local p = F.begin(route, 120, 4, vp)
+    while not F.stepBuild(p, 4096) do end
+    local ai = nil
+    for i = 1, p.n - 1 do if p.segKind[i] == MDADDynamics.SEG_ARC then ai = i break end end
+    checkTrue(ai ~= nil and ai > 1 and p.s[ai] > 40, "fixture：長直路接 90° 右轉建出弧段")
+    local sCar = p.s[ai] - 20
+    local function pvAt(bias, latSafe, offL)
+        local st = F.newState()
+        st.idx = 1
+        F.setLaneBias(st, bias)
+        F.setRuntimeLimits(st, 3, 6, latSafe, 1.0)
+        local y = bias
+        if offL then
+            local ox, oy = {}, {}
+            local a, b, c, d = sCar - 12, sCar - 4, p.s[ai] + 15, p.s[ai] + 25
+            local n, s0, reason, s1 = F.buildOffsetLine(p, a - 2, a, b, c, d, offL, bias, ox, oy)
+            checkEq(reason, "ok", "承諾線 " .. offL .. " 可建")
+            checkTrue(F.setOffset(st, a, b, c, d, offL, ox, oy, n, s0, s1), "承諾線 setOffset")
+            y = offL
+        end
+        F.control(p, st, sCar, y, 0, 40, DT)
+        return st.profileSpeedKmh
+    end
+    -- 期望值：與 Follower 同一份即時帽公式（內側折算、轉向域、地板 12），coast 取該段剖面與 runtime 的較小者
+    local function expectKmh(lat, latSafe, envKmh)
+        local k = math.max(p.kappa[ai] or 0, p.kappa[ai + 1] or 0)
+        local dth = p.segH[ai + 1] - p.segH[ai]
+        if dth > math.pi then dth = dth - 2 * math.pi elseif dth < -math.pi then dth = dth + 2 * math.pi end
+        local inner = dth > 0 and lat or -lat
+        if inner > 0 then k = k / math.max(0.25, 1 - inner * k) end
+        local cap = math.sqrt(latSafe / k)
+        if p.filletAdaptive then
+            cap = math.min(cap, MDADDynamics.steeringSpeedCapKmh(k, p.wheelbase, p.delta0Safe, p.deltaVSafe,
+                p.vehicleMaxSpeed) / 3.6)
+        end
+        cap = math.max(cap, 12 / 3.6)
+        local c = p.coastRate and p.coastRate[1] or p.segCoast[1] or 0.6
+        c = math.min(c, 1.0 + (p.coastAssistAt and p.coastAssistAt[1] or 0))
+        return math.min(envKmh, 3.6 * math.sqrt(cap * cap + 2 * c * (p.s[ai] - sCar)))
+    end
+    local env = pvAt(1.5, 30) -- 即時帽寬鬆（latSafe 30 高於建表側向）：前看不綁，剖面包絡本身
+    local out = pvAt(-1.5, 3.5)
+    local inn = pvAt(1.5, 3.5)
+    checkTrue(out < env - 1, string.format("runtime latSafe 低於建表：弧前 20m 目標先降（%.1f < 包絡 %.1f）", out, env))
+    checkNear(out, expectKmh(-1.5, 3.5, env), 1e-6, "外側偏移：前看＝sqrt(即時帽²＋2·coast·距離)（中心線 κ）")
+    checkNear(inn, expectKmh(F.laneBiasAt(p, 1.5, ai, p.s[ai]), 3.5, env), 1e-6,
+        "常駐 1.5：前看用該處常駐 lane 落點（弧口被 laneRoom 夾回）折算半徑")
+    checkNear(F.laneBiasAt(p, 1.5, ai, p.s[ai]), 0, 1e-9, "fixture：圓角吃滿 band，弧口內側常駐 lane 夾回 0")
+    -- 即時帽與建表同側向時仍有半個弦長的台階：建表頂點帽記在弧的第二點（circumcircle κ 以 m−1,m,m+1 算），
+    -- 即時帽從弧口（第一點）就生效＝弧口目標一步掉約 4 km/h（E2E SemiTruckLite 20.2→15.3）。前看把它提前。
+    local segLat = p.segLat[ai] or 9
+    local same = pvAt(-1.5, segLat)
+    checkTrue(same < env - 0.5, string.format("runtime 側向＝建表 %.1f：弧口目標仍提前（%.2f < %.2f）", segLat, same, env))
+    checkNear(same, expectKmh(-1.5, segLat, env), 1e-6, "runtime 側向＝建表：前看＝sqrt(帽²＋2·coast·到弧口)")
+    local base0 = pvAt(0, 3.5)
+    local ovIn = pvAt(0, 3.5, 1.5)
+    checkTrue(ovIn < base0 - 0.3, string.format("承諾線蓋到弧口：前看讀承諾線的橫向（%.1f < 常駐 0 的 %.1f）", ovIn, base0))
+    checkNear(ovIn, expectKmh(1.5, 3.5, env), 0.3, "承諾線內側 1.5：與常駐 1.5 的前看同值（±0.3）")
+end
+
 closeScenario()
 print()
 print("情境 " .. scenarios .. " 個、斷言 " .. assertions .. " 項")

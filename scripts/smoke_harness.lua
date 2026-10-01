@@ -7087,8 +7087,24 @@ function drive.scenarioBrakeAssist()
     st.profile.coastAssist, st.fstate.profileSpeedKmh = 2.5, 12
     st.profile.coastAssistAt, st.fstate.idx = { 2.5, 0 }, 1
     MDAD.Drive.visAssistForce(st, 14, 1)
-    checkNear(st.visAssistDecel, (14 - 12 - tune.VIS_ASSIST_TOL_KMH) * tune.CURVE_ASSIST_GAIN, 1e-9,
+    checkNear(st.visAssistDecel, math.min(tune.CURVE_ASSIST_MAX,
+            2.5 + (14 - 12 - tune.VIS_ASSIST_TOL_KMH) * tune.CURVE_ASSIST_GAIN), 1e-9,
         "(curve-assist-low) 彎前 14 km/h 超剖面 12：25 以下照補（" .. tostring(st.visAssistDecel) .. "）")
+    -- (curve-ff) 1002c：剖面在收（低於剖面上限）時一超過剖面就先補建表假設的輔助（前饋），比例項只追殘差
+    --   （純比例要先落後 TOL＋2.5/增益＝2.25 km/h；E2E SemiTruckLite 進 R≈7 彎一路落後 2–4 km/h）。
+    --   巡航（剖面＝上限）不前饋，否則 regulator 每越過剖面一點點就脈衝減速。
+    --   違規證明：拿掉前饋＝第一條紅；拿掉巡航條件＝第三條紅。
+    MDAD.Drive.visAssistForce(st, 12.5, 1)
+    checkNear(st.visAssistDecel, 2.5, 1e-9,
+        "(curve-ff) 超剖面 0.5（容忍內）：前饋補建表假設的 2.5（" .. tostring(st.visAssistDecel) .. "）")
+    MDAD.Drive.visAssistForce(st, 11.9, 1)
+    checkEq(st.visAssistDecel, 0, "(curve-ff) 低於剖面：不補")
+    local pmaxK = st.profile.maxSpeedMs * 3.6
+    local oldVisCap = st.visibilityCap
+    st.fstate.profileSpeedKmh, st.visibilityCap = pmaxK, pmaxK + 50
+    MDAD.Drive.visAssistForce(st, pmaxK + 0.5, 1)
+    checkEq(st.visAssistDecel, 0, "(curve-ff) 巡航（剖面＝上限）：超一點點不前饋（" .. tostring(st.visAssistDecel) .. "）")
+    st.visibilityCap, st.fstate.profileSpeedKmh = oldVisCap, 12
     st.fstate.idx = 2
     MDAD.Drive.visAssistForce(st, 14, 1)
     checkEq(st.visAssistDecel, 0, "(curve-assist-low) 終點停車段（建表沒算輔助）：25 以下照舊不補")
@@ -8092,6 +8108,85 @@ function drive.scenarioZombiePlan()
     assert(armDrive())
 end
 drive.scenarioZombiePlan()
+
+-- (zr) 1002c 回線途中閃殭屍：RETURN 持有車道時軟縫讓位、連縱向帽都不算，回線斜穿殭屍（E2E zombie turn 首輪：
+--   路邊停車逼出長繞行，進彎前 RETURN 從 −0.1 回 3.5 的線穿過 l 1.9–2.8 的三隻，撞兩隻）。回線帶上有殭屍：
+--   不進 RETURN／RETURN 中讓位，軟縫從車身位置接手；常駐線與車身之間的殭屍也算軟縫的威脅（不掃回常駐線穿過牠）。
+--   違規證明：returnYieldZombies 恆 false＝(zr-enter) 紅；拿掉 updateReturnSnapshot 的讓位＝(zr-release) 紅；
+--   威脅帶改回只看常駐線／車身／目前 lane 三端＝(zr-hold) 紅；拿掉選項閘＝(zr-off) 紅。
+function drive.scenarioZombieReturn()
+    scenario("回線途中閃殭屍：RETURN 讓位給軟縫")
+    local oldDodge = MDAD.HUD.zombieDodge
+    MDAD.HUD.zombieDodge = function() return true end
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40,
+        RightLaneBias = 0, ZombieAreaSlowdown = false, CorpseSlowdown = false })
+    local function arm(y)
+        assert(armDrive())
+        setHeading(dveh, 0)
+        dveh._speed, dveh._y = 20, y
+        drive.scanRound(true)
+        drive.scanRound(true)
+        return MDAD.Drive.debugSession(0)
+    end
+    local s = arm(0)
+    local R = s.vehicleProfile.halfW + MDADCorridor.ZOMBIE_R + MDADCorridor.ZOMBIE_MARGIN
+    local zl, y0 = R + 0.15, 2 * R + 0.3 -- 殭屍離常駐線 0 與車身 y0 都比 R 遠，卻正好在回程路上
+    local zx = 8.5 -- 20 km/h 約 1 秒到（近威脅：不橫越牠換邊）
+    local function put(x)
+        drive.putMoving(math.floor(x), math.floor(zl), { _class = "IsoZombie",
+            getX = function() return x end, getY = function() return zl end })
+    end
+    put(zx)
+    drive.scanRound(true)
+    drive.scanRound(true)
+    checkTrue(s.zombieLane == nil and math.abs(s.fstate.laneBias) < 0.05 and (s.sensor.zomN or 0) == 1,
+        "(zr) 前置：殭屍離常駐線 R 以外，車在常駐線不閃（lane " .. tostring(s.fstate.laneBias) .. "）")
+    -- (zr-enter) 車被推到 y0：RETURN 進場前看到回線帶上的殭屍＝不進，停在車身交軟縫
+    dveh._y = y0
+    driveTick(dp, dveh)
+    checkTrue(not s.returnActive and math.abs(s.fstate.laneBias - y0) < 0.05 and s.zombieLaneParked ~= nil,
+        "(zr-enter) 回線帶上有殭屍：不進 RETURN、停在車身（returnActive " .. tostring(s.returnActive)
+        .. "、lane " .. tostring(s.fstate.laneBias) .. "）")
+    -- (zr-hold) 軟縫從車身接手：殭屍在常駐線與車身之間也是威脅，lane 留在車身那側、不掃回常駐線
+    local minLane, everReturn = 99, false
+    for _ = 1, 4 do
+        driveReset(dveh)
+        dveh._x = dveh._x + 0.8
+        drive.scanRound(true)
+        if s.returnActive then everReturn = true end
+        if s.fstate.laneBias < minLane then minLane = s.fstate.laneBias end
+    end
+    checkTrue(not everReturn and minLane >= zl + R - 0.05,
+        "(zr-hold) 車尾過殭屍前 lane 留在車身那側（最低 " .. string.format("%.2f", minLane) .. " ≥ "
+        .. string.format("%.2f", zl + R) .. "、RETURN " .. tostring(everReturn) .. "）")
+    drive.clearCell(math.floor(zx), math.floor(zl))
+    -- (zr-release) RETURN 進行中殭屍出現在回線帶：結束 RETURN、停在車身交軟縫（不是 stall 那樣交回目標線）
+    s = arm(y0)
+    for _ = 1, 4 do driveTick(dp, dveh) end
+    drive.scanRound(true)
+    checkTrue(s.returnActive == true, "(zr-release) 前置：線外 " .. string.format("%.1f", y0) .. "m 進 RETURN")
+    local rx = dveh._x + zx
+    put(rx)
+    drive.scanRound(true)
+    drive.scanRound(true)
+    checkTrue(not s.returnActive and math.abs(s.fstate.laneBias - y0) < 0.6,
+        "(zr-release) 回線帶出現殭屍：RETURN 讓位、lane 留在車身（returnActive " .. tostring(s.returnActive)
+        .. "、lane " .. tostring(s.fstate.laneBias) .. "）")
+    drive.clearCell(math.floor(rx), math.floor(zl))
+    -- (zr-off) 閃避選項關：軟縫不作用（讓位＝直接切回常駐線），照舊 RETURN
+    MDAD.HUD.zombieDodge = function() return false end
+    s = arm(0)
+    put(zx)
+    drive.scanRound(true)
+    dveh._y = y0
+    for _ = 1, 4 do driveTick(dp, dveh) end
+    checkTrue(s.returnActive == true, "(zr-off) 閃避選項關：照舊 RETURN（returnActive " .. tostring(s.returnActive) .. "）")
+    drive.clearCell(math.floor(zx), math.floor(zl))
+    MDAD.HUD.zombieDodge = oldDodge
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    assert(armDrive())
+end
+drive.scenarioZombieReturn()
 
 -- ⑤lf 低幀率降速提示（0925；0929o 門檻改為掃描額度放大到上限的 50ms）：可視上限壓速、平均幀時 ≥50ms，
 --   且視距是被幀率截短，持續 2s 才讓 HUD 狀態變「卡頓降速」（lowfps）、恢復 3s 才消失；同趟累計 10s 跳一次

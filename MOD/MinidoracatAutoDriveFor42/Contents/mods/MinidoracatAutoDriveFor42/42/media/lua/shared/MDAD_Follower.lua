@@ -1206,6 +1206,91 @@ local function arcFeedForward(profile, state, arcK, bestI, sNow, aspeed, tangent
     return ff + ffLane
 end
 
+-- 弧段即時帽（m/s）與折算後 κ：中心線 κ（j 與 j+1 取大）；行駛線往彎內側偏 latHere 時半徑＝R−lt
+-- （κ/(1−lt·κ)，承諾線在保持段沿路平移時尤其如此；外側偏移半徑變大，不放寬）。右轉（y 向南的世界
+-- dθ>0）內側＝右＝+lane。再取轉向域（adaptive：建表期只對中心線 κ 算過一次，內側折算後的 κ 這台車
+-- 在該速度轉不轉得出來）——轉不出來（0）依「解析公式只壓速不否決」壓到曲率地板 MIN_SPEED，與建表期
+-- 頂點帽同一下限（2026-09-07 實機 T 字路口：沒有地板時給 9.1 km/h 爬 20m）。κ≤0 或 runtimeLat 無效回 (nil, κ)。
+-- control 的當下弧段與前看（arcLookaheadMs）共用這一份。
+local function arcRuntimeCap(profile, j, latHere, runtimeLat)
+    local kappa = profile.kappa[j] or 0
+    local nextKappa = profile.kappa[j + 1] or 0
+    if nextKappa > kappa then kappa = nextKappa end
+    if kappa <= 0 then return nil, 0 end
+    local dth = 0
+    if j + 1 <= profile.n - 1 then
+        dth = wrapPi(profile.segH[j + 1] - profile.segH[j])
+    elseif j >= 2 then
+        dth = wrapPi(profile.segH[j] - profile.segH[j - 1])
+    end
+    local inner = dth > 0 and latHere or -latHere
+    if inner > 0 then
+        local den = 1 - inner * kappa
+        if den < 0.25 then den = 0.25 end
+        kappa = kappa / den
+    end
+    if not isFinite(runtimeLat) or runtimeLat < 0 then return nil, kappa end
+    local cap = sqrt(runtimeLat / kappa)
+    if profile.filletAdaptive then
+        local steer = MDADDynamics.steeringSpeedCapKmh(kappa, profile.wheelbase,
+            profile.delta0Safe, profile.deltaVSafe, profile.vehicleMaxSpeed) * MS_PER_KMH
+        if steer < cap then cap = steer end
+    end
+    if cap < MIN_SPEED_MS then cap = MIN_SPEED_MS end
+    return cap, kappa
+end
+
+-- 前看弧段即時帽（1002c）：剖面的滑行包絡用建表期的弧速（中心線 κ、建表當下的側向），即時帽另算內側
+-- 偏移與轉向域，常比包絡低——車到弧口才一步掉下來、減速輔助追不上（E2E SemiTruckLite R≈7：包絡約 20、
+-- 弧口 15.3，入弧 16.5–19.4）。沿滑行能影響的距離往前找弧，每段弧只看第一段（即時帽從那裡開始作用），
+-- 以同一個 coast 反推 sqrt(cap² + 2·coast·距離)。行駛線取承諾線（蓋得到該點時）否則常駐 lane 在該處的
+-- 落點（clampLane 連續版）。skipRun＝車已在弧上：同一段弧由當下帽管，從下一段弧起算。
+-- 回新的目標（m/s）；最多走 ARC_LOOK_STEPS 段，零配置。
+local ARC_LOOK_STEPS = 48
+local function arcLookaheadMs(profile, state, from, sNow, target, coast, skipRun)
+    local look = state.latSafe
+    if not isFinite(look) or look < 0 or not isFinite(coast) or coast <= 0 then return target end
+    local floor2 = MIN_SPEED_MS * MIN_SPEED_MS
+    local reach = (target * target - floor2) / (2 * coast)
+    if not (reach > 0) then return target end
+    local n, s, segKind, SEG_ARC = profile.n, profile.s, profile.segKind, MDADDynamics.SEG_ARC
+    local rawBias = state.laneBias
+    if not isFinite(rawBias) then rawBias = 0 end
+    local ovN, ovS0, ovEndS = state.ovN or 0, state.ovS0, state.ovEndS
+    local j, steps = from, 0
+    if skipRun then
+        while j <= n - 1 and segKind[j] == SEG_ARC and steps < ARC_LOOK_STEPS do j, steps = j + 1, steps + 1 end
+    end
+    while j <= n - 1 and steps < ARC_LOOK_STEPS do
+        local dist = s[j] - sNow
+        if dist > reach then break end
+        if segKind[j] == SEG_ARC then
+            local sj, lat = s[j], nil
+            if ovN >= 2 and isFinite(ovS0) and isFinite(ovEndS) and sj >= ovS0 and sj <= ovEndS then
+                local i0, ft = ovIndexAt(ovS0, ovN, ovEndS, sj)
+                local ovX, ovY, h = state.ovX, state.ovY, profile.segH[j]
+                lat = (ovX[i0] + (ovX[i0 + 1] - ovX[i0]) * ft - profile.x[j]) * -sin(h)
+                    + (ovY[i0] + (ovY[i0 + 1] - ovY[i0]) * ft - profile.y[j]) * cos(h)
+            else
+                lat = clampLane(profile, j, rawBias, state.laneKeep, sj)
+            end
+            local cap = arcRuntimeCap(profile, j, lat, look)
+            if cap ~= nil then
+                if dist < 0 then dist = 0 end
+                local lim = sqrt(cap * cap + 2 * coast * dist)
+                if lim < target then
+                    target = lim
+                    reach = (target * target - floor2) / (2 * coast)
+                end
+            end
+            while j <= n - 1 and segKind[j] == SEG_ARC and steps < ARC_LOOK_STEPS do j, steps = j + 1, steps + 1 end
+        else
+            j, steps = j + 1, steps + 1
+        end
+    end
+    return target
+end
+
 function MDADFollower.control(profile, state, x, y, heading, speed, dt)
     if type(state) == "table" then
         state.curveValid = false
@@ -1641,51 +1726,21 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         targetSpeed = coastLim
         if stopLim < targetSpeed then targetSpeed = stopLim end
         if targetSpeed > profile.maxSpeedMs then targetSpeed = profile.maxSpeedMs end
+        -- 當下弧段的即時帽（arcRuntimeCap：行駛線往彎內側的半徑折算、轉向域、MIN_SPEED 地板）
         local curveHardActive = profile.segKind[bestI] == MDADDynamics.SEG_ARC
-        local actualKappa = 0
+        local actualKappa, curveCap = 0, profile.maxSpeedMs
         if curveHardActive then
-            actualKappa = profile.kappa[bestI] or 0
-            local nextKappa = profile.kappa[bestI + 1] or 0
-            if nextKappa > actualKappa then actualKappa = nextKappa end
-            -- 行駛線不是中心線：往彎內側偏 lt 的線半徑＝R−lt（κ/(1−lt·κ)），承諾線在
-            -- 保持段沿路平移時尤其如此（0906i 起繞行 κ 只量兩段過渡，弧內側的保持段由
-            -- 這裡管）。外側偏移半徑變大，不放寬（中心線帽仍是下限）。右轉（y 向南的
-            -- 世界 dθ>0）內側＝右＝+lane。
-            if actualKappa > 0 then
-                local latHere = lineLat
-                if latHere == nil then latHere = clampLane(profile, bestI, bias, state.laneKeep, sNow) end
-                local dth = 0
-                if bestI + 1 <= profile.n - 1 then
-                    dth = wrapPi(profile.segH[bestI + 1] - profile.segH[bestI])
-                elseif bestI >= 2 then
-                    dth = wrapPi(profile.segH[bestI] - profile.segH[bestI - 1])
-                end
-                local inner = dth > 0 and latHere or -latHere
-                if inner > 0 then
-                    local den = 1 - inner * actualKappa
-                    if den < 0.25 then den = 0.25 end
-                    actualKappa = actualKappa / den
-                end
+            local latHere = lineLat
+            if latHere == nil then latHere = clampLane(profile, bestI, bias, state.laneKeep, sNow) end
+            local cap
+            cap, actualKappa = arcRuntimeCap(profile, bestI, latHere, state.latSafe)
+            if cap ~= nil then
+                curveCap = cap
+                if curveCap < targetSpeed then targetSpeed = curveCap end
             end
         end
-        local curveCap = profile.maxSpeedMs
-        local runtimeLat = state.latSafe
-        if isFinite(runtimeLat) and runtimeLat >= 0 and actualKappa > 0 then
-            curveCap = sqrt(runtimeLat / actualKappa)
-            -- curveSpeedCapKmh 的另一半：內側折算後的 κ 這台車在該速度轉不轉得出來
-            -- （建表期只對中心線 κ 算過一次）。轉不出來（0）依「解析公式只壓速不否決」
-            -- 壓到曲率地板，不煞停在弧裡。
-            if profile.filletAdaptive then
-                local steer = MDADDynamics.steeringSpeedCapKmh(actualKappa, profile.wheelbase,
-                    profile.delta0Safe, profile.deltaVSafe, profile.vehicleMaxSpeed) * MS_PER_KMH
-                if steer < curveCap then curveCap = steer end
-            end
-            -- 與建表期頂點帽同一下限（geometryStep 的 MIN_SPEED）：即時帽沒有地板時，
-            -- w=4 路 R≈3 的圓角＋內側偏移＋學到的 latSafe 會給 9 km/h（2026-09-07 實機
-            -- T 字路口 9.1 爬 20m）——剖面自己都允許 12，即時帽不得更低。
-            if curveCap < MIN_SPEED_MS then curveCap = MIN_SPEED_MS end
-            if curveCap < targetSpeed then targetSpeed = curveCap end
-        end
+        -- 前方弧段的即時帽改成滑行包絡提前減（arcLookaheadMs），不在弧口一步掉下來
+        targetSpeed = arcLookaheadMs(profile, state, bestI + 1, sNow, targetSpeed, coast, curveHardActive)
         state.curveHardActive = curveHardActive
         state.curveKappa = actualKappa
         state.curveCapKmh = curveCap * KMH_PER_MS
