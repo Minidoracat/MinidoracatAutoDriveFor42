@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1001f"
+Drive.REV = "1001g"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -10214,10 +10214,13 @@ local function stepFollow(s, vehicle, playerNum, now)
         -- ROTATE 也計（2026-09-08 s030：調頭＋blocked 額度用盡後 ROTATE 幀空轉 20 秒
         -- 不交還——只有 WAIT／RECOVER 計時，ROTATE 意圖永遠不進 15s 保險）；真的在轉
         -- 由 waitProgressed 的航向收斂（rotating 分支）歸零，原地空轉才累計。
+        -- 倒車額度用盡後的 GO 也計（1001g，E2E rc44 0007：繞行承諾中 min-exec 8 km/h、車卡在路肩 0 km/h，
+        -- attempt-limit softFail 每 3.5 秒回 follow 一次、5 分鐘不交還）；額度沒用完的 GO 是起步加速，不計。
         if s.intentShadow == "WAIT" or s.intentShadow == "RECOVER"
                 or (s.intentShadow == "ROTATE" and avProgress < 1)
                 or (s.episodeActive and avProgress < 1 and not s.areaWaitActive
-                    and (s.intentShadow == "CRAWL" or s.intentShadow == "STOP")) then
+                    and (s.intentShadow == "CRAWL" or s.intentShadow == "STOP"
+                        or (s.intentShadow == "GO" and s.episodeAttempts >= UNSTICK_MAX))) then
             if s.waitTickMs == 0 then
                 s.waitTickMs = now
                 if s.waitAccumMs == 0 then

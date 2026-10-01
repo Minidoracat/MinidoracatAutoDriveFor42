@@ -7310,6 +7310,29 @@ do
 end
 for wy = -6, -1 do drive.clearCell(20, wy) end
 for wy = 2, 6 do drive.clearCell(20, wy) end
+-- (ex-go) 1001g：額度用盡後的 GO 也計停等預算（E2E rc44 0007：VanAmbulance 繞行承諾中卡在路肩，intent GO、
+--   min-exec 8 km/h、車 0 km/h；attempt-limit 每 3.5 秒一次 softFail 回 follow，5 分鐘不交還）。
+--   違規證明：計時條件拿掉 GO＝這條紅（session 一直活著）。
+do
+    checkTrue(armDrive(), "(ex-go) 重臂（淨空路）")
+    setHeading(dveh, 0)
+    driveReset(dveh)
+    drive.scanRound()
+    local st = MDAD.Drive.debugSession(0)
+    st.episodeActive, st.episodeAttempts, st.episodeId = true, 3, 4
+    dveh._speed = 0
+    local seen = {}
+    for _ = 1, 10 do
+        nowMs = nowMs + 2500
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        local cur = MDAD.Drive.debugSession(0)
+        if not cur then break end
+        seen[#seen + 1] = tostring(cur.intentShadow)
+    end
+    checkTrue(not MDAD.Drive.isActive(0), "(ex-go) 額度用盡＋GO 不動 25s：交還（intent " .. table.concat(seen, ",") .. "）")
+    checkEq(haloKey(), DKEY.STUCK, "(ex-go) 交還理由 StopStuck（實得 " .. tostring(haloKey()) .. "）")
+end
 
 -- 對抗式 phase collision：把已烘好的第一個 baseline 點壓到一棵「弧座標不擋線」
 -- 的樹上。若碰撞判定被錯包進 a..c 的 inCap，這條會誤 commit。
