@@ -40,6 +40,8 @@
     "Sandbox_MinidoracatAutoDriveObstaclePolicy_option2": "停車",
     "Sandbox_MinidoracatAutoDriveRightLaneBias": "靠右行駛程度",
     "Sandbox_MinidoracatAutoDriveRightLaneBias_tooltip": "自動駕駛靠右行駛的程度，依所在道路寬度換算：1.0（預設）＝行駛在右側車道中央；0.5＝右車道內偏中線；2.0＝盡量貼右；0＝關閉，沿路線中央行駛。\n窄路會自動收回，不會開上路緣。對向來車壓到自己的車道時會再靠右錯開，右邊讓不開就減速停下，讓對方先過。\n管理員按「套用」後，重新啟動自動駕駛時生效。",
+    "Sandbox_MinidoracatAutoDriveTrafficRelay": "轉送遠方來車給自動駕駛",
+    "Sandbox_MinidoracatAutoDriveTrafficRelay_tooltip": "多人連線時，玩家只收得到大約 64–88 格內的其他車輛；兩台車高速對開，看到對方時只剩 1–2 秒就會碰面。開啟後，伺服器會另外把前方 300 格內有人駕駛、正在行駛的車輛告訴自動駕駛中的玩家，讓自動駕駛提早靠右或減速。最後的閃避仍以遊戲本身同步的車輛位置為準。\n每位自動駕駛中的玩家通常不到 2 KB/s，附近車多時最多約 5 KB/s；附近沒有車時不送。預設開啟。\n管理員按「套用」後立即生效。",
     "Sandbox_MinidoracatAutoDriveDebugOverlay": "除錯視覺化（開發者）",
     "Sandbox_MinidoracatAutoDriveDebugOverlay_tooltip": "額外顯示自動駕駛感知診斷：紅圈＝硬障礙、橙圈＝最近行進中車輛、綠點＝路面帶邊界。一般玩家的半透明藍／黃軌跡線請到 MOD Options 或小地圖「自動駕駛」分類開關；本選項只控制診斷標記。會小幅增加客戶端繪製負擔，平常建議關閉。管理員按「套用」後立即生效。",
     "Sandbox_MinidoracatAutoDriveDiagnosticsUpload": "在本伺服器收集自動駕駛診斷",

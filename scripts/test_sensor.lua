@@ -743,10 +743,15 @@ local function scenarioTrafficVelocity()
     driven._stopped, driven._driver = true, {}
     local parked = newCar(15, X0 + 60, Y0 + 3, 0, 0, 0)
     parked._stopped = true
+    -- 17＝別人拖著的掛車（1001i E2E 雙拖車會車）：遠端車的 getCurrentSpeedKmHour 只在駕駛是遠端玩家時回真值，
+    -- 掛車沒有駕駛＝恆讀 0＝isStopped 恆真（BaseVehicle.java:4303-4316），但線速度已同步。違規證明：isStopped
+    -- 不看線速度就把行進中的掛車當成停車（首見那輪就繞它、承諾線佔住車道，會車只能貼著過）即紅。
+    local trailer = newCar(17, X0 + 76, Y0 - 2, math.pi, -11, 0)
+    trailer._stopped = true
     -- 16＝剛同步那一幀線速度跳位（1001f：E2E 讀到 832 km/h＝231 m/s）
     for _, car in ipairs({ newCar(11, X0 + 30, Y0 - 2, math.pi, -12, 0.5), newCar(12, X0 + 20, Y0 + 2, 0, 9, 0),
             newCar(13, X0 + 40, Y0 + 2, math.pi, -0.3, 0), driven, parked,
-            newCar(16, X0 + 70, Y0 - 2, math.pi, -231, 0) }) do
+            newCar(16, X0 + 70, Y0 - 2, math.pi, -231, 0), trailer }) do
         for gx = math.floor(car._x - 3), math.floor(car._x + 3) do
             for gy = math.floor(car._y - 1), math.floor(car._y + 1) do
                 local sq = squareAt(gx + 0.5, gy + 0.5)
@@ -774,6 +779,9 @@ local function scenarioTrafficVelocity()
     checkTrue(id ~= nil and st.trfVs[id] == false,
         "有人駕駛、速度還讀 0 的車：當行進中（速度未知），不當停在路中間的車去繞")
     checkEq(entry(60), nil, "沒人駕駛的停車照舊是硬障礙，不進 trf")
+    local it = entry(76)
+    checkTrue(it ~= nil and st.trfVs[it] == -11,
+        "別人拖著的掛車（isStopped 恆真、線速度已同步）：當行進車（實得 " .. show(it and st.trfVs[it]) .. "）")
     local function hardNear(wx)
         for i = 1, st.hardN do
             if math.abs(st.hardX[i] - wx) < 3 then return true end
@@ -782,6 +790,7 @@ local function scenarioTrafficVelocity()
     end
     checkFalse(hardNear(X0 + 50), "有人駕駛的車暖機窗內不進硬障礙點雲")
     checkTrue(hardNear(X0 + 60), "路邊停車進硬障礙點雲")
+    checkFalse(hardNear(X0 + 76), "行進中的遠端掛車不進硬障礙點雲")
     -- 首見 1.5 秒後還是 0 速、沒動：真的停著（等紅燈），照舊當硬障礙
     R.now = R.now + 2000
     checkTrue(runRound(st), "暖機窗過後再掃一輪")

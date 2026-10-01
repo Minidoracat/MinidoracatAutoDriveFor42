@@ -383,7 +383,6 @@ do
     checkNear(pNoAssist.v[3],
         math.sqrt(pNoAssist.v[4] * pNoAssist.v[4] + 2 * F.STYLES.brisk.coast * 8), 1e-9,
         "輔助量 0：彎前回到純滑行包絡")
-    checkEq(F.STYLES.comfort.coastAssist, 0, "舒適檔不加輔助")
     -- control：線上學到的純斷油夾限要加回該段輔助（否則輔助被夾掉）。車停在彎前第 2 段中點。
     local stA = F.newState()
     F.setRuntimeLimits(stA, 3, 6, 7, 0.6)
@@ -2155,19 +2154,22 @@ do
     end
     checkTrue(notFaster, "comfort 每一點目標速度 ≤ brisk")
     local k90 = 2 * 64 / (8 * 8 * math.sqrt(8 * 8 + 8 * 8))
-    -- 直角彎頂＝min(三點外接圓 sqrt(lat/κ), 前視弦幾何式)（0907f）：comfort 4.0 兩式幾乎相等（4.76／4.78），
+    -- 直角彎頂＝min(三點外接圓 sqrt(lat/κ), 前視弦幾何式)（0907f）：comfort 6.0 外接圓 5.83 < 幾何式 6.04；
     -- brisk 9：外接圓 7.135 < 幾何式 7.71
-    local latC, coastC = F.STYLES.comfort.lat, F.STYLES.comfort.coast
+    local latC, coastC = F.STYLES.comfort.lat, F.STYLES.comfort.coast + F.STYLES.comfort.coastAssist
     local inv2s90 = 1 / (2 * math.sin(math.rad(45)))
     local bC, cC = latC * 0.432 * inv2s90, latC * 6 * inv2s90
     checkNear(pC.v[4], math.min((bC + math.sqrt(bC * bC + 4 * cC)) * 0.5, math.sqrt(latC / k90)), 1e-9,
         "comfort 直角彎頂＝外接圓與前視弦幾何較低者")
     checkNear(pB1.v[4], math.sqrt(9.0 / k90), 1e-9, "brisk 直角彎頂仍＝sqrt(9/κ)（幾何式 7.71 較高不綁）")
     checkTrue(pC.v[4] < pB1.v[4], "comfort 彎頂仍低於 brisk")
-    checkNear(pC.v[3], math.sqrt(pC.v[4] * pC.v[4] + 2 * coastC * 8), 1e-9, "comfort 彎前用風格滑行包絡")
-    checkNear(pC.v[6], math.sqrt(2 * coastC * (8 - F.COAST_STOP_M)), 1e-9, "comfort 終點前 8m＝風格滑行包絡量到停點")
+    checkNear(pC.v[3], math.sqrt(pC.v[4] * pC.v[4] + 2 * coastC * 8), 1e-9, "comfort 彎前用風格滑行＋輔助包絡")
+    checkTrue(pC.v[3] > math.sqrt(pC.v[4] * pC.v[4] + 2 * F.STYLES.comfort.coast * 8) + 0.1,
+        "comfort 彎前晚收油：比純斷油滑行包絡快（1001i 起舒適檔也加中線減速輔助）")
+    checkNear(pC.v[6], math.sqrt(2 * F.STYLES.comfort.coast * (8 - F.COAST_STOP_M)), 1e-9,
+        "comfort 終點前 8m＝風格滑行包絡量到停點（終點不加輔助）")
     checkNear(pB1.v[6], math.sqrt(2 * F.STYLES.brisk.coast * (8 - F.COAST_STOP_M)), 1e-9, "brisk 終點前 8m＝滑行 3.0 包絡量到停點")
-    checkTrue(maxDecelDemand(pC) <= 3.0 + 1e-6, "comfort 全線減速需求 ≤ 3.0 m/s²")
+    checkTrue(maxDecelDemand(pC) <= coastC + 1e-6, "comfort 全線減速需求 ≤ 滑行＋輔助")
     -- 60° 折點（≥ comfort turnHard 50°、≥ brisk turnHard 55°）：兩檔各自的折點帽
     local sharp = { 0, 0, 20, 0, 40, 0, 60, 0, 60 + 20 * math.cos(math.rad(60)), 20 * math.sin(math.rad(60)),
         60 + 40 * math.cos(math.rad(60)), 40 * math.sin(math.rad(60)), 60 + 60 * math.cos(math.rad(60)), 60 * math.sin(math.rad(60)) }
@@ -2186,7 +2188,7 @@ do
     checkNear(pC.v[6], math.sqrt(2 * 2.5 * (8 - F.COAST_STOP_M)), 1e-9,
         "comfort 終點前 8m＝車輛斷油 2.5 包絡（不再用舒適 0.45 提早 170m 收油）")
     checkNear(pC.v[3], math.sqrt(pC.v[4] * pC.v[4] + 2 * coastC * 8), 1e-9,
-        "彎前收油仍是風格滑行值（終點用的減速度不外溢到彎道）")
+        "彎前收油仍是風格滑行＋輔助（終點用的減速度不外溢到彎道）")
     do
         local st = F.newState()
         -- 車在終點前 5m（最後一段中點外）：段內插值與建表同一個減速度

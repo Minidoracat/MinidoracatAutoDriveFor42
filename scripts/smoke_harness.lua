@@ -5216,6 +5216,45 @@ checkNear(dveh._imp.rz, 0, 1e-12, "純前推 relPos.z 為零")
 checkEq(drive.bad.impulse, 0, "前推全程沒有第二次 impulse")
 checkEq(drive.pool.live, 0, "前推向量池幀末歸零")
 MDAD.Drive.stop(0, nil)
+
+-- (acc) 1001i 加速輔助：目標比實速高就沿車身中線補 ACCEL_ASSIST_MPS2（輕車也有；前推輔助只給重車低速）。
+-- 違規證明：ACCEL_ASSIST_MPS2＝0 即整合案（感知情境①後）紅；拿掉伺服器速限夾＝速限案紅；拿掉折角門檻＝拖車案紅；
+-- 拿掉全速閘門條件＝閘門案紅；拿掉偏差門檻＝偏差案紅（1001j E2E h1003：離期望線 0.9m 開始補、越線撞路邊）。
+do
+    local tune = MDAD.Drive.debugTune()
+    local acc = { runtimeMass = 1200, fullGate = true, lastLatDev = 0.1 }
+    local full = MDAD.Drive.accelAssistForce(acc, 40, 60, 0.8)
+    checkNear(acc.accelAssist, tune.ACCEL_ASSIST_MPS2, 1e-9, "(acc) 差 20 km/h：補滿")
+    checkNear(full, tune.ACCEL_ASSIST_MPS2 * 1200 / (0.01 * 48 / 0.8), 1e-6,
+        "(acc) 力＝加速度×質量（每幀 Δv＝F/m×0.01，與減速輔助同一條換算）")
+    checkEq(MDAD.Drive.accelAssistForce(acc, 59.5, 60, 0.8), 0, "(acc) 貼近目標不補（不過衝）")
+    MDAD.Drive.accelAssistForce(acc, 56.5, 60, 0.8)
+    checkNear(acc.accelAssist, tune.ACCEL_ASSIST_MPS2 * 0.5, 1e-9, "(acc) 差 3.5 km/h：淡入一半")
+    -- 伺服器速限 70（getFakeSpeedModifier＝120/70）：引擎到速限就斷油，輔助補到速限前 2 km/h 為止
+    local fakeWas = BaseVehicle.getFakeSpeedModifier
+    BaseVehicle.getFakeSpeedModifier = function() return 120 / 70 end
+    checkEq(MDAD.Drive.accelAssistForce(acc, 67.5, 100, 0.8), 0, "(acc) 伺服器速限 70：67.5 km/h 不補")
+    checkTrue(MDAD.Drive.accelAssistForce(acc, 50, 100, 0.8) > 0, "(acc) 伺服器速限 70：50 km/h 照補")
+    BaseVehicle.getFakeSpeedModifier = fakeWas
+    -- 拖車：折角超過門檻不補（掛車另由呼叫端分攤）
+    acc.tow, acc.towPhi = {}, 0.3
+    checkEq(MDAD.Drive.accelAssistForce(acc, 40, 60, 0.8), 0, "(acc) 拖車折角 17°：不補")
+    acc.towPhi = 0.05
+    checkTrue(MDAD.Drive.accelAssistForce(acc, 40, 60, 0.8) > 0, "(acc) 拖車折角 3°：照補")
+    acc.tow, acc.towPhi = nil, nil
+    -- 全速閘門關著（證明線掃到東西、繞行、回線）或起步近物保護中：不補（E2E acc-1001i h2005）
+    acc.fullGate = false
+    checkEq(MDAD.Drive.accelAssistForce(acc, 40, 60, 0.8), 0, "(acc) 全速閘門關著：不補")
+    acc.fullGate, acc.startGuard = true, true
+    checkEq(MDAD.Drive.accelAssistForce(acc, 40, 60, 0.8), 0, "(acc) 起步近物保護中：不補")
+    acc.startGuard = nil
+    acc.lastLatDev = 0.9
+    checkEq(MDAD.Drive.accelAssistForce(acc, 40, 60, 0.8), 0, "(acc) 離期望線 0.9m：不補")
+    acc.lastLatDev = -0.6
+    checkEq(MDAD.Drive.accelAssistForce(acc, 40, 60, 0.8), 0, "(acc) 離期望線 −0.6m：不補")
+    acc.lastLatDev = 0.45
+    checkTrue(MDAD.Drive.accelAssistForce(acc, 40, 60, 0.8) > 0, "(acc) 離期望線 0.45m：照補")
+end
 dveh._mass = 1200
 
 -- 力的量級：符號全對但推力小兩個數量級＝實機「按了自駕，車直直開過路口」；
@@ -5553,21 +5592,22 @@ do
     for _ = 1, 8 do driveTick(dp, dveh) end
     local st = MDAD.Drive.debugSession(0)
     local profile, routeGen, points = st.profile, st.routeGen, st.profile.pts
-    -- 這台假車的側向先驗 3.2 低於舒適檔天花板 4.0（彎頂由車本身決定，兩檔相同）；分得出兩檔的是
-    -- 彎前收油：積極檔多算中線減速輔助（coastAssist），舒適檔只靠斷油——彎前 30m 那點的目標較低。
+    -- 這台假車的側向先驗 3.2、制動先驗 2.6 都低於兩檔的天花板（1001i 起兩檔彎前收油也都加中線減速輔助），
+    -- 速度表分不出兩檔；兩檔參數的差別由 test_follower 的風格情境鎖。這裡鎖 Driver 的契約：MAX 對應積極、
+    -- 其餘對應舒適，切檔就地換風格、不換路線 identity。
     local briskStart = profile.v[2]
     for _, gear in ipairs({ 3, 2, 1 }) do
         MDAD.Drive.setGear(0, gear)
         for _ = 1, 8 do driveTick(dp, dveh) end
-        checkTrue(profile.v[2] < briskStart - 0.5,
-            "(style) 非 MAX 檔彎前收油比 MAX 早（彎前 30m 目標較低）")
+        checkEq(profile.styleName, "comfort", "(style) 非 MAX 檔用舒適風格")
         checkTrue(st.profile == profile and st.profile.pts == points and st.routeGen == routeGen,
             "(style) 切檔保留路線與幾何 identity")
     end
     MDAD.Drive.setGear(0, 4)
     for _ = 1, 8 do driveTick(dp, dveh) end
+    checkEq(profile.styleName, "brisk", "(style) 切回 MAX 用積極風格")
     checkNear(profile.v[2], briskStart, 1e-9,
-        "(style) 切回 MAX 恢復積極收油包絡")
+        "(style) 切回 MAX 速度表與起步時相同")
     checkTrue(MDAD.Drive.isActive(0), "(style) 切檔不停止本趟自駕")
     -- 速度明細：MAX 檔沒有檔位上限（由車輛極速決定），一般檔位回該檔上限
     checkNil(select(3, MDAD.Drive.speedInfo(0, dveh)), "(speed-info) MAX 檔不回檔位上限")
@@ -7818,6 +7858,9 @@ do
     checkTrue(st.zombieLane ~= nil and st.fstate.laneBias > 0.2,
         "(zc) 屍體照殭屍那條軟縫偏開（實得 " .. tostring(st.fstate.laneBias) .. "）")
     -- 屍體不產生殭屍推撞：1200kg < ASSIST_MASS_MIN，低速對高目標等再久也不得推
+    -- （加速輔助 1001i 另有 (acc) 案；這裡只看殭屍推撞，先關掉）
+    drive.accWas = MDAD.Drive.debugTune().ACCEL_ASSIST_MPS2
+    MDAD.Drive.debugTune().ACCEL_ASSIST_MPS2 = 0
     dveh._speed = 2
     for _ = 1, 4 do zRound() end -- 每輪推進 300ms，遠超 ZOMBIE_PUSH_DELAY_MS
     checkEq(st.lastAssistForce, 0,
@@ -7828,6 +7871,7 @@ do
     checkTrue(st.sensor.zombieN > 0 and st.lastAssistForce > 0,
         "(zc) 反例：換成真殭屍擋車 ≥800ms 才免質量門檻推（zombieN="
         .. tostring(st.sensor.zombieN) .. " force=" .. tostring(st.lastAssistForce) .. "）")
+    MDAD.Drive.debugTune().ACCEL_ASSIST_MPS2 = drive.accWas
     drive.clearCell(18, -1)
     -- (zc-wall) 兩側硬物封住＝屍體的軟縫同樣讓位給硬物（與 (z3-wall) 同一道守門）
     checkTrue(armDrive(), "(zc-wall) 屍體軟縫硬物否決情境啟動")
@@ -12890,6 +12934,9 @@ local function scenarioPhaseE()
         local fbWas, effWas = captured.forceBrakeUntil,
             captured.vehicleProfile.offroadEfficiency
         local offWas = hotVeh._offroad
+        -- 這一段只看前推／越野／殭屍推撞；加速輔助（1001i，目標比實速高就補）另有 (acc) 案，先關掉
+        local accWas = MDAD.Drive.debugTune().ACCEL_ASSIST_MPS2
+        MDAD.Drive.debugTune().ACCEL_ASSIST_MPS2 = 0
         captured.runtimeMass = 1600 -- 過 ASSIST_MASS_MIN（輕車本來推得動）
         captured.forceBrakeUntil = 0
         hotVeh._speed = 5
@@ -13064,6 +13111,7 @@ local function scenarioPhaseE()
         captured.vehicleProfile.offroadEfficiency = effWas
         captured.runtimeMass, hotVeh._speed = massWas, speedWas
         captured.forceBrakeUntil = fbWas
+        MDAD.Drive.debugTune().ACCEL_ASSIST_MPS2 = accWas
         setHeading(hotVeh, 0)
         driveReset(hotVeh)
     end
@@ -15015,12 +15063,18 @@ local function scenarioNarrowLaneProof()
         st.alignSince = nowMs - 1000
         st.progressState, st.progressSince = "watch", nowMs
         st.cmdV, st.cmdA, st.cmdInitialized = 40 / 3.6, 0, true
+        st.startGuard = false -- 已過起步近物保護（真的上路會在貼線對正 1 秒後解除）
         driveReset(dveh)
         driveTick(dp, dveh)
         checkEq(st.verifyLineReason, "ok", tag .. "空直路 proof 線不得 band（實得 "
             .. tostring(st.verifyLineReason) .. "）")
         checkEq(st.gateReason, "clear", tag .. "gate clear（實得 " .. tostring(st.gateReason) .. "）")
         checkTrue(st.fullGate == true, tag .. "fullGate 開")
+        -- (acc) 1001i 整合：閘門開、實速 20 對更高的目標——加速輔助補中線前推（這台 1200 kg 低於前推質量門檻，
+        -- 前推輔助只給重車低速）。違規證明：ACCEL_ASSIST_MPS2＝0 即紅。
+        checkTrue(st.accelAssist > 0 and dveh._imp.x * dveh._fwdX + dveh._imp.z * dveh._fwdY > 0,
+            tag .. "(acc) 閘門開直路加速：補中線前推（實得 a=" .. tostring(st.accelAssist)
+            .. " sg=" .. tostring(st.startGuard) .. "）")
     end
     -- (lane 0) 折點格的解析式 0（κ→∞ 假象）不得變成 fullGate 路徑的 target 0（2026-09-08 s048：
     --   調頭完成、對準的那幀 fullGate 開 → laneCurveEnvelope 0 → target 0、reason nil → min-exec
@@ -17262,6 +17316,41 @@ function drive.scenarioTraffic()
     dveh._y = 0
     dveh._x = 0
     MDAD.HUD.perceptionDistance = oldPd
+
+    -- (relay) 1001i 伺服器轉送（Drive.relayReceive／mergeRelay）：原生快照之外 150m 的對向車（佔中線、
+    --   72 km/h）接到本輪快照尾端，本輪就判衝突、往右錯開。違規證明：不呼叫 mergeRelay＝(relay) 紅；
+    --   拿掉原生去重＝(relay-dup) 紅；拿掉 TTL＝(relay-stale) 紅；拿掉離路線距離＝(relay-off) 紅。
+    arm(8)
+    drive.scanRound()
+    checkEq(st.trfOnGap, nil, "(relay) 沒有轉送：150m 外的對向車看不到")
+    MDAD.Drive.relayReceive({ n = 1, 9001, 150, 0, -20, 0, -1, 0, 0.9, 2.3 })
+    drive.scanRound()
+    checkTrue(st.relayN == 1 and st.trfOnGap ~= nil and st.trfOnGap > 90,
+        "(relay) 轉送的對向車本輪就判衝突（gap " .. tostring(st.trfOnGap) .. "、relayN " .. tostring(st.relayN) .. "）")
+    checkTrue(st.trfOnWant ~= nil and st.trfOnWant > 2.05,
+        "(relay) 往右錯開（實得 " .. tostring(st.trfOnWant) .. "）")
+    -- (relay-stale) 超過 RELAY_TTL_MS 沒再更新：不用
+    nowMs = nowMs + 2000
+    drive.scanRound()
+    checkEq(st.relayN, 0, "(relay-stale) 1.5 秒沒更新的轉送不用")
+    -- (relay-off) 離路線中心線 30m（平行道路）：不接
+    MDAD.Drive.relayReceive({ n = 1, 9002, 150, 30, -20, 0, -1, 0, 0.9, 2.3 })
+    drive.scanRound()
+    checkEq(st.relayN, 0, "(relay-off) 離路線 30m 的車不在這條路上")
+    -- (relay-own) 自己這台不接：轉送表是整個客戶端共用的，分割畫面時另一位本機玩家收到的轉送會帶到這台
+    MDAD.Drive.relayReceive({ n = 1, dveh:getId(), 150, 0, -20, 0, -1, 0, 0.9, 2.3 })
+    drive.scanRound()
+    checkEq(st.relayN, 0, "(relay-own) 自己的車不接")
+    -- (relay-dup) 原生快照已經有的同一台（同 id）不重複接：轉送後那一輪對方仍在動（兩輪沒動＝停著的硬障礙，不進 trf）
+    on = car(55, 0, math.pi)
+    traffic(on, -3, 1)
+    MDAD.Drive.relayReceive({ n = 1, on:getId(), on._x, on._y, -20, 0, -1, 0, 0.9, 2.3 })
+    move(on, -3)
+    drive.scanRound()
+    checkTrue((st.sensor.trfNativeN or 0) >= 1 and st.relayN == 0, "(relay-dup) 原生已看到的同一台不重複接（native "
+        .. tostring(st.sensor.trfNativeN) .. "、relayN " .. tostring(st.relayN) .. "）")
+    drive.clearVehicleGeom(on._cells)
+    MDAD.Drive.relay = {}
 
     MDAD.Drive.stop(0, nil)
     HaloTextHelper = oldHalo

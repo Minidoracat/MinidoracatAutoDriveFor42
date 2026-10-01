@@ -46,7 +46,7 @@
                            KeepOnDeplete（正式服 39 個空電 GPS 連坐全滅事故）。這類
                            漂移引擎一律靜默處理（icon 顯示問號、配方永遠湊不齊材料、
                            分佈表不生成物品），console 不一定留下訊息
- 13. 沙盒選項規格          —— 17 個選項的 type/min/max/default 對表；改壞 default
+ 13. 沙盒選項規格          —— 18 個選項的 type/min/max/default 對表；改壞 default
                            玩家端只是「行為不對」，沒有任何錯誤訊息可查
  14. 配方學習鏈          —— 兩個配方必須留在 module Base（無點短名只會在 Base 查表）、
                            NeedToBeLearn／SkillRequired／AutoLearnAny／ResearchSkillLevel
@@ -1187,6 +1187,7 @@ SANDBOX_SPEC = {                            # key: (type, default, min, max)
     "CorpseSlowdown":       ("enum", "2", None, None),
     "ObstaclePolicy":       ("enum", "1", None, None),
     "RightLaneBias":        ("double", "1.0", "0.0", "2.0"),
+    "TrafficRelay":         ("boolean", "true", None, None),
     "DebugOverlay":         ("boolean", "false", None, None),
     "DiagnosticsUpload":    ("boolean", "false", None, None),
     "DiagnosticsUploadMaxMB": ("integer", "2048", "128", "16384"),

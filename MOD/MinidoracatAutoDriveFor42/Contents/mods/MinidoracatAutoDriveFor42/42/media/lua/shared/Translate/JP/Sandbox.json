@@ -40,6 +40,8 @@
     "Sandbox_MinidoracatAutoDriveObstaclePolicy_option2": "停車",
     "Sandbox_MinidoracatAutoDriveRightLaneBias": "右側通行の度合い",
     "Sandbox_MinidoracatAutoDriveRightLaneBias_tooltip": "自動運転が右側に寄って走る度合いです。走行中の道路の幅から換算します。1.0（初期値）＝右車線の中央。0.5＝右車線内の中央線寄り。2.0＝できるだけ右端。0＝無効（ルートの中央を走行）。\n狭い道では自動的に控えめになり、路肩に乗り上げません。対向車が自分の車線にはみ出してきたときはさらに右へ寄ってすれ違い、右に余裕がなければ減速・停止して先に通します。\n管理者が「適用」を押した後、次に自動運転を開始したときに反映されます。",
+    "Sandbox_MinidoracatAutoDriveTrafficRelay": "遠くの車両を自動運転へ中継",
+    "Sandbox_MinidoracatAutoDriveTrafficRelay_tooltip": "マルチプレイでは、ほかの車両は約64〜88マス以内しか届きません。高速ですれ違う2台は、相手が見えてから1〜2秒で出会います。有効にすると、サーバーが前方300マス以内を走行中の運転者付き車両を自動運転中のプレイヤーへ追加で送り、自動運転が早めに右へ寄ったり減速したりできるようにします。最終的な回避は、ゲーム本来の同期位置で行います。\n自動運転中のプレイヤー1人あたり通常2 KB/s未満、周囲に車両が多いときは最大約5 KB/s。周囲に車両がなければ送信しません。初期値は有効。\n管理者が「適用」を押すとすぐに反映されます。",
     "Sandbox_MinidoracatAutoDriveDebugOverlay": "デバッグ表示（開発者向け）",
     "Sandbox_MinidoracatAutoDriveDebugOverlay_tooltip": "自動運転のセンサー診断を追加表示します——赤円＝障害物、橙円＝最も近い走行中の車両、緑点＝路面帯の境界。通常の半透明な青／黄の走行ラインは MOD Options またはミニマップの「オートドライブ」区分で切り替えます。本項目は診断マーカーだけを制御します。クライアント描画負荷が少し増えるため、通常はオフ推奨です。管理者が「適用」を押すと即時反映されます。",
     "Sandbox_MinidoracatAutoDriveDiagnosticsUpload": "このサーバーで自動運転の診断を収集",

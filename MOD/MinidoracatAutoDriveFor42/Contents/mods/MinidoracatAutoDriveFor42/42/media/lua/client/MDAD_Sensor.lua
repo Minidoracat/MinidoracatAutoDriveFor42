@@ -43,7 +43,8 @@
 --     state.trfN       行進中車輛（會車／跟車）筆數，上限 TRF_MAX；逐車一筆：
 --                      trfS0/trfS1 車身弧長區間、trfL0/trfL1 橫向區間（同 hardS／hardL 座標）、
 --                      trfVs/trfVl 沿路線前向／右向速度（m/s；false＝首次看到、還沒有位移可算）、
---                      trfT 命中當下的時戳（呼叫端依年齡外推）；trfOverflow 超過上限
+--                      trfT 命中當下的時戳（呼叫端依年齡外推）、trfId 車輛 id（Driver 合併伺服器轉送時去重）；
+--                      trfOverflow 超過上限。Driver 會在完成輪之後把伺服器轉送的遠方車接在尾端（Drive.mergeRelay）
 --     state.unloaded   走廊內有未載入 chunk（規劃要保守：不是淨空，是不知道）
 --     state.sig        整數簽章：障礙布局有變才會變（呼叫端拿它省掉重複規劃）
 --     state.scanS      本輪掃描起點弧長；state.scanEndS 終點弧長
@@ -650,6 +651,7 @@ local function pushTraffic(state, cv, vs, vl)
     state.wTrfL0[n], state.wTrfL1[n] = l0, l1
     state.wTrfVs[n], state.wTrfVl[n] = vs or false, vl or false -- false＝未知（陣列不留洞）
     state.wTrfT[n] = state.nowMs
+    state.wTrfId[n] = cv:getId()
 end
 
 -- 回 boolean：這一格是不是硬障礙。軟障礙／殭屍／屍體／行進中車輛／未載入 chunk
@@ -798,7 +800,10 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
             if not synced and (still or cv:isStopped()) and state.nowMs - (state.vehFirstMs[vid] or 0) < DRIVEN_UNSYNC_MS
                     and drivenVehicle(cv) then
                 still, vs, vl = false, nil, nil
-            elseif cv:isStopped() then
+            elseif cv:isStopped() and not synced then
+                -- 線速度已同步（≥1 m/s）的車不看 isStopped：遠端車的 getCurrentSpeedKmHour 只在駕駛是遠端玩家時
+                -- 回真值，別人拖著的掛車沒有駕駛＝恆讀 0＝isStopped 恆真（BaseVehicle.java:4303-4316）。1001i E2E
+                -- 雙拖車會車：首見那輪把對方掛車當停車、承諾繞行佔住車道，會車只能以 20 km/h 貼 0.25m 錯過。
                 still = true -- 本輪判定一次、同輪後續格沿用（isStopped 跨幀翻面會讓 sig 跳動）
             end
             state.vehPosX[vid] = vwx
@@ -1116,6 +1121,7 @@ local function finishRound(state, now)
     state.trfVs, state.wTrfVs = state.wTrfVs, state.trfVs
     state.trfVl, state.wTrfVl = state.wTrfVl, state.trfVl
     state.trfT, state.wTrfT = state.wTrfT, state.trfT
+    state.trfId, state.wTrfId = state.wTrfId, state.trfId
     state.trfN = state.wTrfN
     state.trfOverflow = state.wTrfOverflow == true
     state.vehN = state.wVehN
@@ -1214,7 +1220,7 @@ function MDADSensor.newState()
         wMovingVeh = false,
         wVehAheadS = nil,  -- 最近「行進中」前車弧長（本輪 working）
         wTrfN = 0, wTrfOverflow = false, -- 行進中車輛（working；每台一筆，見 pushTraffic）
-        wTrfS0 = {}, wTrfS1 = {}, wTrfL0 = {}, wTrfL1 = {}, wTrfVs = {}, wTrfVl = {}, wTrfT = {},
+        wTrfS0 = {}, wTrfS1 = {}, wTrfL0 = {}, wTrfL1 = {}, wTrfVs = {}, wTrfVl = {}, wTrfT = {}, wTrfId = {},
         nowMs = 0,          -- 本幀時戳（step 寫入；scanCell 算車速用）
         wUnloaded = false,
         wSumS = 0,
@@ -1247,7 +1253,7 @@ function MDADSensor.newState()
         movingVeh = false,
         vehAheadS = nil,    -- 最近「行進中」前車弧長（跟車分級煞停用；nil＝無）
         trfN = 0, trfOverflow = false, -- 行進中車輛完成輪快照（會車／跟車；見檔頭介面契約）
-        trfS0 = {}, trfS1 = {}, trfL0 = {}, trfL1 = {}, trfVs = {}, trfVl = {}, trfT = {},
+        trfS0 = {}, trfS1 = {}, trfL0 = {}, trfL1 = {}, trfVs = {}, trfVl = {}, trfT = {}, trfId = {},
         unloaded = false,
         sig = 0,
         frameMs = 0, frameEwmaMs = 0,

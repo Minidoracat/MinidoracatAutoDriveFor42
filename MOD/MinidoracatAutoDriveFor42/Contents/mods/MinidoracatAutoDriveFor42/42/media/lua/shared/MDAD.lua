@@ -42,6 +42,11 @@ MDAD.CMD_RECIPE_RESCAN = "RecipeRescan"
 -- client → server 診斷上傳（client/MDAD_Upload.lua 送、server/MDAD_UploadServer.lua 收；
 -- 伺服器沙盒 DiagnosticsUpload 關著一律丟棄）。
 MDAD.CMD_DIAG_UPLOAD = "DiagUpload"
+-- server → client 遠方行進車轉送（server/MDAD_TrafficRelay.lua 送、client Driver 的 Drive.relayReceive 收；
+-- 沙盒 TrafficRelay 關著不送）。payload 是扁平數字陣列，每台 MDAD.RELAY_FIELDS 個欄位：
+-- id, 車身中心 x, y, 速度 vx, vy, 前向 fx, fy, 半寬, 半長。
+MDAD.CMD_TRAFFIC = "Traffic"
+MDAD.RELAY_FIELDS = 9
 
 MDAD.FAIL_GENERIC = "UI_MinidoracatAutoDrive_InstallFailed"
 MDAD.FAIL_NO_BATTERY = "UI_MinidoracatAutoDrive_NoBattery"

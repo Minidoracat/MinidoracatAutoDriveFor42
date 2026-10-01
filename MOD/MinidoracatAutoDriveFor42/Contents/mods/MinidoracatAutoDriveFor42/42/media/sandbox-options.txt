@@ -48,6 +48,9 @@ option MinidoracatAutoDrive.ObstaclePolicy
 option MinidoracatAutoDrive.RightLaneBias
 {type = double, min = 0.0, max = 2.0, default = 1.0, page = MinidoracatAutoDrive, translation = MinidoracatAutoDriveRightLaneBias,}
 
+option MinidoracatAutoDrive.TrafficRelay
+{type = boolean, default = true, page = MinidoracatAutoDrive, translation = MinidoracatAutoDriveTrafficRelay,}
+
 option MinidoracatAutoDrive.DebugOverlay
 {type = boolean, default = false, page = MinidoracatAutoDrive, translation = MinidoracatAutoDriveDebugOverlay,}
 

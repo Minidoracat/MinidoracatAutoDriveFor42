@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1001h"
+Drive.REV = "1001j"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -272,6 +272,13 @@ TUNE.EXIT_EXTEND_RETRY_M = 5      -- 加長掃不過：車再前進這麼多才�
 -- 大折點（外側偏移繞急彎＝車追不上、切內）照舊拒收。
 TUNE.EXIT_HOLD_KINK_RAD = 0.6
 TUNE.TRAFFIC_WAIT_NOTICE_MS = 5000 -- 「等對向車」提示去重窗
+-- 伺服器轉送的遠方行進車（1001i；server/MDAD_TrafficRelay.lua、Drive.mergeRelay）：原生同步只到約 64–88 格，
+-- 轉送補到 300m 讓會車／跟車提早判讀；最後閃避仍以原生即時位置為準。
+TUNE.RELAY_TTL_MS = 1500         -- 收到後這麼久沒再更新就不用（伺服器每 250ms 送一次）
+TUNE.RELAY_LAG_MS = 250          -- 伺服器位置落後駕駛者客戶端的估計（網路＋轉送週期一半）；trafficScan 依年齡外推
+TUNE.RELAY_BACK_M = 30           -- 投影到路線：只找 [車位－此值, 車位＋RELAY_AHEAD_M] 的路段
+TUNE.RELAY_AHEAD_M = 320
+TUNE.RELAY_LAT_MAX_M = 20        -- 離路線中心線超過這麼遠＝不在這條路上（平行道路、路口外）
 TUNE.FOLLOW_STOP_M = 5            -- 跟車：車頭到前車車尾小於此值＝停等
 TUNE.FOLLOW_MIN_M = 6             -- 跟車距離＝MIN＋前車速度×TIME
 TUNE.FOLLOW_TIME_S = 1.0
@@ -487,6 +494,17 @@ TUNE.ASSIST_OFFROAD_SPEED_MAX_KMH = 120
 TUNE.ASSIST_BOOST_MAX = 3    -- 遞增倍率上限
 TUNE.ASSIST_BOOST_RATE = 1.0 -- 每秒 +1.0 倍（2 秒到 3×）；退回用 2 倍速率
 TUNE.ASSIST_TIRE_MAX = 1.6   -- 輪胎因子上限
+-- 加速輔助（1001i；使用者「每台車大多時候維持最高速或檔位最高速」「自動駕駛不是親自操作，不用考慮手感」；
+-- 見 Drive.accelAssistForce）：目標比實速高時沿車身中線補這麼多加速度（m/s²），疊在引擎上。E2E 自然加速度
+-- 40–80 km/h：一般轎車 2.0–2.5、廂型／貨車 1.3–1.8；正式服載貨重車（M998、Silverado）60–80 km/h 只有 1.3–1.4。
+TUNE.ACCEL_ASSIST_MPS2 = 2.0
+TUNE.ACCEL_ASSIST_GAP_MIN = 1  -- 目標－實速（km/h）低於此不補（貼近目標不補＝不過衝）
+TUNE.ACCEL_ASSIST_GAP_FULL = 6 -- 差距到此全額（同前推輔助的斜坡）
+TUNE.ACCEL_ASSIST_LIMIT_MARGIN = 2 -- 伺服器速限（SpeedLimit<120）以下這麼多 km/h 就停補
+TUNE.ACCEL_ASSIST_TOW_PHI = 10 * math.pi / 180 -- 拖車折角超過此值不補
+-- 車身離期望線超過此值（m）不補：側向還在收斂時加速＝速度變高、位置回授變弱，越線更多（E2E acc-1001j h1003：
+-- Silverado 出彎時離期望線 0.9m 開始補，1.2 秒 31→48 km/h、越過期望線 1m 撞路邊）。補的樣本裡只有 12% 超過 0.5m。
+TUNE.ACCEL_ASSIST_LAT_M = 0.5
 -- 殭屍推撞（2026-09-04 使用者「被一群殭屍阻擋的時候可以增加推力脫困嗎」；s024
 -- st148381-148398：帶內 5-10 隻、regulator 全力、speed 1.5-2.5 卡 17 秒，van 1118kg
 -- 低於 ASSIST_MASS_MIN 拿不到 assist）：帶內有殭屍、實速低於 SPEED、目標高於
@@ -3753,6 +3771,131 @@ function Drive.keepRightStartM(route)
     return w * 0.25
 end
 
+-- 伺服器轉送的遠方行進車（server/MDAD_TrafficRelay.lua，MDAD.CMD_TRAFFIC）：id → 最近一次的狀態。
+-- 收到就覆寫（表重用、不每次配置）；超過 RELAY_TTL_MS 沒更新的不用，10 秒沒更新的移除。
+Drive.relay = {}
+Drive.relayPruneMs = 0
+
+function Drive.relayReceive(args)
+    if type(args) ~= "table" then return end
+    local n = args.n
+    if not finite(n) or n < 1 then return end
+    local F = MDAD.RELAY_FIELDS
+    local now = getTimestampMs()
+    local relay = Drive.relay
+    for k = 0, n - 1 do
+        local b = k * F
+        local id = args[b + 1]
+        if finite(id) then
+            local e = relay[id]
+            if e == nil then
+                e = {}
+                relay[id] = e
+            end
+            e.x, e.y, e.vx, e.vy = args[b + 2], args[b + 3], args[b + 4], args[b + 5]
+            e.fx, e.fy, e.hw, e.hl = args[b + 6], args[b + 7], args[b + 8], args[b + 9]
+            e.t = now
+        end
+    end
+    if now < Drive.relayPruneMs then return end
+    Drive.relayPruneMs = now + 10000
+    local stale = nil
+    for id, e in pairs(relay) do
+        if now - e.t > 10000 then
+            stale = stale or {}
+            stale[#stale + 1] = id
+        end
+    end
+    if stale then
+        for k = 1, #stale do relay[stale[k]] = nil end
+    end
+end
+
+if Events and Events.OnServerCommand then
+    Events.OnServerCommand.Add(function(module, command, args)
+        if module == MDAD.MOD_ID and command == MDAD.CMD_TRAFFIC then Drive.relayReceive(args) end
+    end)
+end
+
+-- 伺服器轉送的遠方行進車接到本輪 trf 快照尾端（Sensor 已發布；下一次發布整組換掉，不留殘）。
+-- 原生已看到的同一台（trfId）不重複；本機已同步到的車改用本機即時位置（速度／朝向照用轉送的）。轉送表是整個
+-- 客戶端共用的：分割畫面時另一位本機玩家收到的轉送會帶到自己這台與自己的掛車，要排除。
+-- 投影到路線 [rs－RELAY_BACK_M, rs＋RELAY_AHEAD_M] 的最近段，離中心線超過 RELAY_LAT_MAX_M 的不在這條路上；
+-- trfT＝收到時刻－RELAY_LAG_MS（trafficScan 依年齡外推）。sen.trfNativeN 記原生筆數（事件分來源）。
+-- 每輪掃描完成呼叫一次（冷路徑）；轉送最多 8 台、每台走一次路段。
+function Drive.mergeRelay(s, now)
+    local sen, p = s.sensor, s.profile
+    sen.trfNativeN = sen.trfN or 0
+    s.relayN = 0
+    if type(p) ~= "table" or not p.ready or not finite(s.lastSNow) then return end
+    local any = false
+    for _ in pairs(Drive.relay) do
+        any = true
+        break
+    end
+    if not any then return end -- SP／沒收到轉送：一張空表，零成本
+    local own = s.vehicle and s.vehicle:getId()
+    local ownTrailer = s.tow and s.tow.trailer and s.tow.trailer:getId()
+    local px, py, ps = p.x, p.y, p.s
+    local i0 = MDADFollower.segIndexAt(p, s.lastSNow - TUNE.RELAY_BACK_M)
+    local i1 = MDADFollower.segIndexAt(p, s.lastSNow + TUNE.RELAY_AHEAD_M)
+    local latMax2 = TUNE.RELAY_LAT_MAX_M * TUNE.RELAY_LAT_MAX_M
+    local native = type(getVehicleById) == "function"
+    for id, e in pairs(Drive.relay) do
+        local dup = id == own or id == ownTrailer or now - e.t > TUNE.RELAY_TTL_MS
+            or not (finite(e.x) and finite(e.y) and finite(e.vx) and finite(e.vy) and finite(e.fx)
+                and finite(e.fy) and finite(e.hw) and finite(e.hl))
+        for k = 1, sen.trfNativeN do
+            if dup then break end
+            dup = sen.trfId[k] == id
+        end
+        if not dup then
+            local x, y, t = e.x, e.y, e.t - TUNE.RELAY_LAG_MS
+            local v = native and getVehicleById(id) or nil
+            if v ~= nil then x, y, t = v:getX(), v:getY(), now end
+            local best, bi, bu = nil, nil, nil
+            for i = i0, i1 do
+                local ax, ay = px[i], py[i]
+                local ex, ey = px[i + 1] - ax, py[i + 1] - ay
+                local l2 = ex * ex + ey * ey
+                if l2 > 1e-9 then
+                    local u = ((x - ax) * ex + (y - ay) * ey) / l2
+                    if u < 0 then u = 0 elseif u > 1 then u = 1 end
+                    local dx, dy = x - ax - u * ex, y - ay - u * ey
+                    local d2 = dx * dx + dy * dy
+                    if best == nil or d2 < best then best, bi, bu = d2, i, u end
+                end
+            end
+            if best ~= nil and best <= latMax2 then
+                local ax, ay = px[bi], py[bi]
+                local ex, ey = px[bi + 1] - ax, py[bi + 1] - ay
+                local len = sqrt(ex * ex + ey * ey)
+                local tx, ty = ex / len, ey / len
+                local qx, qy = ax + bu * ex, ay + bu * ey
+                local sq = ps[bi] + bu * len
+                local s0, s1, l0, l1
+                for k = 1, 4 do
+                    local sa = (k == 1 or k == 4) and e.hl or -e.hl
+                    local sb = k <= 2 and e.hw or -e.hw
+                    local dx = x + sa * e.fx - sb * e.fy - qx
+                    local dy = y + sa * e.fy + sb * e.fx - qy
+                    local cs, cl = sq + dx * tx + dy * ty, dy * tx - dx * ty
+                    if s0 == nil or cs < s0 then s0 = cs end
+                    if s1 == nil or cs > s1 then s1 = cs end
+                    if l0 == nil or cl < l0 then l0 = cl end
+                    if l1 == nil or cl > l1 then l1 = cl end
+                end
+                local k = sen.trfN + 1
+                sen.trfN = k
+                sen.trfS0[k], sen.trfS1[k], sen.trfL0[k], sen.trfL1[k] = s0, s1, l0, l1
+                sen.trfVs[k], sen.trfVl[k] = e.vx * tx + e.vy * ty, e.vy * tx - e.vx * ty
+                sen.trfT[k], sen.trfId[k] = t, id
+                s.relayN = s.relayN + 1
+            end
+        end
+    end
+end
+
 -- 會車／跟車判讀（每輪掃描完成呼叫一次；結果給 trafficLaneOf 與每幀的 trafficCap）。
 -- 對向：對方車身會壓到**常駐線**（不是目前已經閃開的線——否則閃開後判定消失、在交會前
 -- 就回線）才算衝突；預設靠右錯開，對方整台在我右側時才從左邊過。可用帶＝路面餘裕（同
@@ -3774,7 +3917,7 @@ function Drive.trafficScan(s, now, speedKmh)
     -- 繞行／RETURN／停留持有 lane 時不能再為對向車側移：衝突以承諾線在對方位置的 lane 判，
     -- 錯不開就只能讓車（trafficLaneOf 此時不會被呼叫）
     local owned = s.dodging or s.returnActive or s.laneChained
-    local need, side, onGap, onV, onEnd, onHome, onQ = nil, 1, nil, nil, nil, nil, nil
+    local need, side, onGap, onV, onEnd, onHome, onQ, onIdx = nil, 1, nil, nil, nil, nil, nil, nil
     for i = 1, n do
         local s0, s1, l0, l1 = sen.trfS0[i], sen.trfS1[i], sen.trfL0[i], sen.trfL1[i]
         local vs = sen.trfVs[i]
@@ -3813,7 +3956,7 @@ function Drive.trafficScan(s, now, speedKmh)
                         if need == nil or (sd > 0 and u > need) or (sd < 0 and u < need) then need = u end
                     end
                     if onGap == nil or gap < onGap then
-                        onGap, onV, onHome, onQ = gap, -vs, home, q
+                        onGap, onV, onHome, onQ, onIdx = gap, -vs, home, q, i
                     end
                     local e = gap + (s1 - s0) + 2 * halfL + 1
                     if onEnd == nil or e > onEnd then onEnd = e end
@@ -3941,7 +4084,8 @@ function Drive.trafficScan(s, now, speedKmh)
     if s.trafficPlan ~= why or not finite(s.trafficPlanL) or math.abs(s.trafficPlanL - want) >= 0.25 then
         s.trafficPlan, s.trafficPlanL = why, want
         diagEvent(s, s.playerNum, "traffic", { phase = "plan", why = why, d = onGap,
-            speed = onV * 3.6, offL = want, l = need, m = M - short, a = lo, b = hi, rs = rs })
+            speed = onV * 3.6, offL = want, l = need, m = M - short, a = lo, b = hi, rs = rs,
+            kind = onIdx > (sen.trfNativeN or n) and "relay" or "near" })
     end
     -- 讓玩家知道為什麼停下或偏離車道：讓車／靠邊錯車各提示一次（同一台對向車過去前不重複）
     if s.trfOnYield then
@@ -4367,15 +4511,50 @@ function Drive.visAssistForce(s, speedKmh, mult)
     return a * mass * (mult / MULT_NORM) / (0.01 * 48 / MULT_NORM)
 end
 
+-- 加速輔助（TUNE.ACCEL_ASSIST_*）：目標比實速高時沿車身中線補一段加速度——不經輪胎、不吃側向抓地、
+-- 不產生 yaw（與側推共用同一個 impulse 槽，中線分量與前臂平行）。目標已含彎道／可視／繞行／會車等全部
+-- 限速，這裡只讓車更快到達它；差距 GAP_MIN→GAP_FULL 線性淡入，貼近目標不補（不過衝）。
+-- MP 伺服器速限低於 120 時，引擎到速限就斷油（CarController.java:675、788）：補到速限前 LIMIT_MARGIN
+-- 為止，不替伺服器速限開後門（速限 ≥120 時 getFakeSpeedModifier＝1，沙盒上限 120 本來就不會超過）。
+-- 拖車：折角超過 TOW_PHI 不補；補的時候掛車由呼叫端依同一加速度分攤（Drive.towDecel 傳負值）。
+-- 只在全速閘門打開（路線證明、走廊、車身框都淨空，循線追蹤中）且不在起步近物保護時補：閘門關著的
+-- sweep／obb 限速、繞行、回線都表示附近有東西或位置還不確定（E2E acc-1001i h2005：證明線掃到障礙、
+-- 限速 18 的起步多補 2 m/s²，1 秒內撞上 1.6m 外的東西）。車身離期望線超過 ACCEL_ASSIST_LAT_M 也不補
+-- （s.lastLatDev 是本幀 stepFollow 稍早算的原始偏差，不含軟縫／車道 ramp 的寬容）。
+-- s.accelAssist 記本幀補的加速度（telemetry aca；0＝沒補）。
+function Drive.accelAssistForce(s, speedKmh, targetSpeed, mult)
+    s.accelAssist = 0
+    if not s.fullGate or s.startGuard then return 0 end
+    local dev = s.lastLatDev
+    if not finite(dev) or dev > TUNE.ACCEL_ASSIST_LAT_M or dev < -TUNE.ACCEL_ASSIST_LAT_M then return 0 end
+    if not finite(speedKmh) or not finite(targetSpeed) or speedKmh < 0 then return 0 end
+    local ceil = targetSpeed
+    local limit = Drive.serverSpeedLimit()
+    if limit and limit - TUNE.ACCEL_ASSIST_LIMIT_MARGIN < ceil then
+        ceil = limit - TUNE.ACCEL_ASSIST_LIMIT_MARGIN
+    end
+    local gap = ceil - speedKmh - TUNE.ACCEL_ASSIST_GAP_MIN
+    if gap <= 0 then return 0 end
+    if s.tow and not (finite(s.towPhi) and math.abs(s.towPhi) <= TUNE.ACCEL_ASSIST_TOW_PHI) then return 0 end
+    local k = gap / (TUNE.ACCEL_ASSIST_GAP_FULL - TUNE.ACCEL_ASSIST_GAP_MIN)
+    if k > 1 then k = 1 end
+    local a = TUNE.ACCEL_ASSIST_MPS2 * k
+    local mass = s.runtimeMass
+    if not finite(mass) or mass < 1 then mass = MASS_FALLBACK end
+    s.accelAssist = a
+    return a * mass * (mult / MULT_NORM) / (0.01 * 48 / MULT_NORM)
+end
+
 -- 掛車分攤（見 Drive.visAssistForce）：沿掛車自己的速度反向施 a×掛車質量的中線外力（relPos 0，不產生
 -- yaw）。用速度而不是 forward：被倒著拖的車 forward 朝後。換算與牽引車同一條（每幀 Δv＝F/m×0.01）。
+-- a 為負＝沿速度往前推（加速輔助的掛車分攤，Drive.accelAssistForce），掛鉤拉力不因輔助加大。
 -- 掛車上只有這一處施力（BaseVehicle.addImpulse:681-692 同幀第二次較大的衝量會把整槽作廢）。
--- s.towAssistDecel 記本幀真的施給掛車的減速度（telemetry tda；0＝沒施）。
+-- s.towAssistDecel 記本幀真的施給掛車的減速度（telemetry tda；0＝沒施，負＝往前推）。
 function Drive.towDecel(s, a, mult)
     s.towAssistDecel = 0
     local tow = s.tow
     local mass = tow and tow.mass
-    if not (tow and tow.trailer) or not finite(a) or a <= 0 or not finite(mass) or mass <= 0 then return end
+    if not (tow and tow.trailer) or not finite(a) or a == 0 or not finite(mass) or mass <= 0 then return end
     local tr = tow.trailer
     local vel = BaseVehicle.allocVector3f()
     tr:getLinearVelocity(vel)
@@ -4855,6 +5034,8 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     phys.tractionKey = s.tractionKey
     phys.runtimeMass = s.runtimeMass
     phys.assistForce = s.lastAssistForce
+    if finite(s.accelAssist) and s.accelAssist > 0 then phys.accelAssist = s.accelAssist end
+    if (s.relayN or 0) > 0 then phys.relayN = s.relayN end
     phys.priorAccel, phys.priorBrake, phys.priorLat =
         s.priorAccel, s.priorBrake, s.priorLat
     phys.priorCoast = s.priorCoast
@@ -9304,7 +9485,7 @@ local function stepFollow(s, vehicle, playerNum, now)
     s.lastAssistForce = 0
     s.brakeImpulseThis, s.brakeAssistForce = false, 0
     -- 上一幀施的巡航減速輔助留給 updateTraction：本幀的 dv 是那一幀的物理結果（滑行學習要排除它）
-    s.visAssistPrev, s.visAssistDecel, s.towAssistDecel = s.visAssistDecel, 0, 0
+    s.visAssistPrev, s.visAssistDecel, s.towAssistDecel, s.accelAssist = s.visAssistDecel, 0, 0, 0
     s.towBrakeWhy = nil
 
     -- 池向量：一顆當 forward／relPos 共用，一顆在 applySteering 內當 impulse。
@@ -9516,6 +9697,7 @@ local function stepFollow(s, vehicle, playerNum, now)
                 elseif nb < -TUNE.BIAS_MAX then nb = -TUNE.BIAS_MAX end
                 -- 枚舉的邊界判定跟著抖。承諾釋放後恢復跟隨。
                 s.residentBias = nb -- 常駐行駛線（鏈式停留解鏈判定用）
+                Drive.mergeRelay(s, now) -- 伺服器轉送的遠方行進車接到本輪快照尾端（MP）
                 Drive.trafficScan(s, now, speedKmh) -- 會車／跟車：本輪快照判讀（速度帽每幀在下方套）
                 if s.dodging or s.returnActive or s.laneChained then
                     nb = laneBiasOf(s)
@@ -10921,6 +11103,17 @@ local function stepFollow(s, vehicle, playerNum, now)
                             speed = speedKmh, target = targetSpeed, hn = s.sensor.zombieN })
                     elseif not zombiePush then
                         s.zombiePushNotified = false
+                    end
+                    -- 加速輔助（Drive.accelAssistForce）：條件同前推輔助、與它取大者（不疊加）；拖車由掛車分攤
+                    if regOn and not coupled and speedKmh >= 0 and now >= s.forceBrakeUntil
+                            and aerr <= assistErrMax then
+                        local acc = Drive.accelAssistForce(s, speedKmh, targetSpeed, mult)
+                        if acc > assistForce then
+                            assistForce = acc
+                            if s.tow then Drive.towDecel(s, -s.accelAssist, mult) end
+                        else
+                            s.accelAssist = 0
+                        end
                     end
                     -- 巡航減速輔助：實速超過可視巡航帽時沿中線反向補減速（見 Drive.visAssistForce）
                     if assistForce == 0 and not coupled then

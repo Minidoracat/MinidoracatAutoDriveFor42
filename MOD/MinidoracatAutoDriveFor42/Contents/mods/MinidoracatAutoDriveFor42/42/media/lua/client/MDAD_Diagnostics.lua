@@ -1169,6 +1169,8 @@ local function encodePhys(phys)
     addNum("followerTarget", "ftg") -- 0907e：剖面原始目標／cap 後 desired（tgt 只是 jerk 後的命令）
     addNum("desiredTarget", "des")
     addNum("assistForce", "af")
+    addNum("accelAssist", "aca")      -- 1001i：加速輔助補的加速度（m/s²；Drive.accelAssistForce）
+    addNum("relayN", "rly")           -- 1001i：本輪接到快照尾端的伺服器轉送遠方車台數（Drive.mergeRelay）
     addNum("brakeAssistForce", "baf")
     addStr("jerkBypass", "jerkBypass")
     addNum("curveKappa", "curveKappa")

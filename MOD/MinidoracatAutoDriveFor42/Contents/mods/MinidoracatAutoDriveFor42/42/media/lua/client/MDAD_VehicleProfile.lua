@@ -694,7 +694,7 @@ function MDADVehicleProfile.configureFollower(follower, profile, runtimeMass, ra
         end
         -- 終點停車包絡用車輛真實斷油能力（不套風格天花板；Follower.segStopCoast 註解）
         if type(follower.segStopCoast) == "table" then follower.segStopCoast[i] = aCoast end
-        -- 行車風格天花板（Follower.STYLES；舒適檔 lat 2.5／brake 3.0／coast 0.45）：priors 只能
+        -- 行車風格天花板（Follower.STYLES 的 lat／brake／coast）：priors 只能
         -- 把剖面壓得更保守，不得把 begin() 依風格填好的預算抬回車輛能力
         local sl, sb, sc = follower.styleLat, follower.styleBrake, follower.styleCoast
         if isFinite(sl) and aLat > sl then aLat = sl end

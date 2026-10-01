@@ -274,15 +274,16 @@ MDADFollower.OV_MAX = OV_MAX
 -- coastAssist（0928m；使用者裁定「流暢過彎包括不過度減速」）：彎前收油包絡加上 Driver 的中線減速輔助
 -- （Drive.visAssistForce 追 fstate.profileSpeedKmh，上限 CURVE_ASSIST_MAX）——斷油只有 1.2–3.6 m/s²，
 -- 舊包絡從彎前很遠就開始滑；加 2.5 後晚收油、到彎前再補煞。終點停車包絡不加（到站圈的停點另有取捨）；
--- 拖車同樣加（0929o；Driver 把同一減速度依質量也施給掛車，Drive.towDecel）。舒適檔不加。
+-- 拖車同樣加（0929o；Driver 把同一減速度依質量也施給掛車，Drive.towDecel）。
 -- 舒適檔放寬（1001h；使用者「每台車大多時候維持最高速或檔位最高速」；正式服 0.16.0 摘要：3 檔 4.6 小時
--- 平均 40.5 km/h、curve-coast 佔 27%）：側向 2.5→4.0（R50 彎 40→51 km/h，仍是積極檔 8 的一半）、
--- 彎前收油 0.45→3.0＝天花板（真值由 priors 的斷油能力給：鬆油門自然減速，不補中線煞車）。舊 0.45
--- 讓 70 km/h 的車在 R50 彎前 140m 就開始收油、一路慢慢降。計畫制動與折點帽不動。
+-- 平均 40.5 km/h、curve-coast 佔 27%）：側向 2.5→4.0、彎前收油 0.45→3.0＝天花板（真值由 priors 的斷油能力給）。
+-- 舊 0.45 讓 70 km/h 的車在 R50 彎前 140m 就開始收油、一路慢慢降。
+-- 1001i（使用者「自動駕駛不是親自操作，不用考慮手感」）：側向 4.0→6.0（R50 彎 51→62 km/h，積極檔 8＝72）、
+-- 彎前收油同樣加中線減速輔助 2.5（晚收油）。計畫制動與折點帽不動。
 MDADFollower.STYLES = {
     brisk = { name = "brisk", lat = LAT_ACCEL, brake = BRAKE, coast = 3.0, coastAssist = 2.5,
         turnSoft = TURN_SOFT_RAD, turnHard = TURN_HARD_RAD, turnHardMs = TURN_HARD_MS },
-    comfort = { name = "comfort", lat = 4.0, brake = 3.0, coast = 3.0, coastAssist = 0,
+    comfort = { name = "comfort", lat = 6.0, brake = 3.0, coast = 3.0, coastAssist = 2.5,
         turnSoft = 25 * PI / 180, turnHard = 50 * PI / 180, turnHardMs = 30 / 3.6 },
 }
 
