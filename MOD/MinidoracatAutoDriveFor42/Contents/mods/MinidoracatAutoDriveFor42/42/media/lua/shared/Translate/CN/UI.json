@@ -183,7 +183,7 @@
     "UI_MinidoracatAutoDrive_PauseOnStuck": "脱困失败后暂停（仅单人）",
     "UI_MinidoracatAutoDrive_PauseOnStuck_tooltip": "默认开启。仅限单人游戏且只有一位本地玩家；脱困失败并关闭自动驾驶后，先播完交还控制的语音再暂停。语音关闭或无法播放时直接暂停。等待期间手动驾驶或重新启动自动驾驶会取消本次暂停。此选项不处理暂时堵路或抵达；抵达另有独立选项。多人联机与分屏模式无效。",
     "UI_MinidoracatAutoDrive_PauseOnArrival": "停靠与行程结束时暂停（仅单人）",
-    "UI_MinidoracatAutoDrive_PauseOnArrival_tooltip": "默认开启。仅限单人游戏且只有一位本地玩家；遇到会等你的停靠点或行程结束时才暂停：车停稳、自动驾驶关闭，先播完抵达语音再暂停。会自动接续的普通点不暂停。语音关闭或无法播放时直接暂停。等待期间手动驾驶或重新启动自动驾驶会取消本次暂停。与脱困失败暂停各自独立；解除暂停后自动驾驶仍关闭。多人联机与分屏模式无效。",
+    "UI_MinidoracatAutoDrive_PauseOnArrival_tooltip": "默认开启。仅限单人游戏且只有一位本地玩家；遇到会等你的停靠点或行程结束时才暂停：车停稳、自动驾驶关闭，先播完抵达语音再暂停。会自动接续的普通点不暂停。目的地不在路上、开到道路尽头要步行前往时（HUD 显示“手动前往”）也会暂停，这时没有语音，直接暂停。语音关闭或无法播放时直接暂停。等待期间手动驾驶或重新启动自动驾驶会取消本次暂停。与脱困失败暂停各自独立；解除暂停后自动驾驶仍关闭。多人联机与分屏模式无效。",
     "UI_MinidoracatAutoDrive_ManualResume": "手动介入后",
     "UI_MinidoracatAutoDrive_ManualResume_tooltip": "自动驾驶中你一碰方向盘、油门或刹车，就会立刻把控制权交还给你。默认“不自动恢复”：介入即关闭自动驾驶，要再开需重新启动（导航目标保留）。选秒数则进入待命：放手连续这么久没再操作，就自动接手继续开（HUD 状态栏会倒计时，接手时有提示）。",
     "UI_MinidoracatAutoDrive_ManualResumeOff": "不自动恢复（介入即关闭）",

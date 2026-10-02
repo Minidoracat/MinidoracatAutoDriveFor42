@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1002v"
+Drive.REV = "1002w"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -1183,6 +1183,7 @@ end
 
 -- 語音通知只在受困交還／抵達收尾時可要求暫停；只在等語音時掛事件。
 -- FMODSoundEmitter.isPlaying(ref) 含尚未開始播放的 toStart（:600-614），不能用固定延遲截句。
+-- event 為 nil＝不播語音（Voice.play 不認得的事件回 false）、只照暫停選項處理（道路終點沒有語音，見到站收尾的 road_end）。
 local cancelPendingPause
 local function voice(event, playerNum, pauseOption)
     if cancelPendingPause then cancelPendingPause() end
@@ -11719,9 +11720,11 @@ local function onPlayerUpdate(player)
             elseif outcome == "road_end" then
                 -- 道路終點：本站仍是 pending，交給玩家徒步前往。不冒稱抵達、
                 -- 不播成功語音、不自動開下一段。白字＝資訊不是失敗。
+                -- 車已停妥、等玩家下車步行（HUD「手動前往」）：照抵達暫停設定直接暫停（Workshop nick）。
                 local roadEnd = getText(TRIP.ROAD_END)
                 HaloTextHelper.addText(player, roadEnd)
                 if MDADDiagnostics and MDADDiagnostics.toast then MDADDiagnostics.toast(roadEnd, "info") end
+                voice(nil, playerNum, "pauseOnArrival")
             elseif outcome ~= "duplicate" then
                 -- 回報沒有成立：原因給玩家看，站點不動、不自動出發。
                 haloBad(player, outcome)

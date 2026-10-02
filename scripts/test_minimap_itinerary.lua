@@ -497,6 +497,30 @@ do
             assert(drive.pauseCalls == 0 and not isGamePaused(),
                 away.label .. "：語音播完也不補暫停")
         end
+        -- 道路終點（真 Core 判 road_end：停妥處離站點超過 5m）：本站留著等玩家步行，
+        -- 沒有語音可等，勾了抵達暫停就直接暫停；MP 一樣不動世界速度（Workshop nick）。
+        for _, case in ipairs({ { label = "單人", pause = true }, { label = "MP／Host", client = true } }) do
+            resetTrip(false)
+            drive.paused, drive.pauseCalls = false, 0
+            local held = takeControl()
+            local before = emitter.nextRef
+            clientFlag = case.client == true
+            dveh._x, dveh._speed, dveh._stopped = 90, 0, true
+            held.mode = "arrive"
+            nowMs = nowMs + 300
+            driveTick(dp, dveh)
+            clientFlag = false
+            local trip = api.getNavItinerary(0)
+            assert(trip.phase == "approach" and trip.stops[1].status == "pending",
+                case.label .. "：真 Core 判道路終點，站點仍等玩家步行")
+            assert(not MDAD.Drive.isActive(0) and not dveh._regulator, case.label .. "：先交還控制")
+            assert(emitter.nextRef == before, case.label .. "：道路終點不播任何語音")
+            assert(isGamePaused() == (case.pause == true)
+                and drive.pauseCalls == (case.pause and 1 or 0),
+                case.label .. "：道路終點照抵達暫停設定（單人暫停一次、MP 不暫停）")
+            assert(not MDAD.Drive.isPausePending()
+                and #eventHandlers.OnTickEvenPaused == tickBaseline, case.label .. "：不掛等待事件")
+        end
         -- 反面：純 MiniMap（完全沒有自駕）的到站由 Core 自己收站，沒有人動世界速度
         resetTrip(false)
         assert(api.setNavContinuation(0, api.getNavItinerary(0).revision, false))

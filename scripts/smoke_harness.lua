@@ -20323,25 +20323,40 @@ checkEq(drive.voiceCount("arrive"), 0, "(t8) 全程不播第二次成功語音")
 checkEq(M.releases, 0, "(t8) token 已消耗＝沒有 orphan，不再 release")
 checkEq(M.stops[1].status, "arrived", "(t8) 進度就是 MiniMap 記的那一次，沒有被重複消耗")
 
--- ⑨ road_end：到道路終點但離站點還很遠
-ready(true)
-setTrip("draft", 300, 40)
-checkTrue(MDAD.Drive.continueItinerary(0), "(t9) 出發")
-pump()
-dveh._x, dveh._y, dveh._speed, dveh._stopped = 300, 0, 0, true
-MDAD.Drive.debugSession(0).mode = "arrive"
-clearList(halos)
-drive.voiceLog = {}
-driveTick(dp, dveh)
-checkEq(M.reports, 1, "(t9) 一樣走正式回報")
-checkEq(M.stops[1].status, "pending", "(t9) road_end 不把站標成 arrived")
-checkEq(M.phase, "approach", "(t9) road_end 轉 approach")
-checkEq(noteReason(halos[1] and halos[1].text), "UI_MinidoracatAutoDrive_TripRoadEnd",
-    "(t9) 顯示手動前往，不冒稱到達最終目的地")
-checkEq(halos[1] and halos[1].kind, "info", "(t9) road_end 是資訊不是失敗")
-checkEq(drive.voiceCount("arrive"), 0, "(t9) road_end 不播抵達成功語音")
-checkFalse(MDAD.Drive.isActive(0), "(t9) road_end 之後不自動再開")
-checkNil(M.claimOwner, "(t9) road_end 釋放 claim")
+-- ⑨ road_end：到道路終點但離站點還很遠。單人且勾了抵達暫停時，道路終點同樣暫停
+-- （沒有語音可等、直接暫停；Workshop nick）；沒勾就不暫停。
+do
+    local oldClient, oldServer, oldArrive = clientFlag, serverFlag, MDAD.HUD.pauseOnArrival
+    for _, arrivePause in ipairs({ true, false }) do
+        local tag = arrivePause and "(t9)" or "(t9b)"
+        ready(true)
+        setTrip("draft", 300, 40)
+        clientFlag, serverFlag = false, false
+        MDAD.HUD.pauseOnArrival = function() return arrivePause end
+        drive.paused, drive.pauseCalls = false, 0
+        checkTrue(MDAD.Drive.continueItinerary(0), tag .. " 出發")
+        pump()
+        dveh._x, dveh._y, dveh._speed, dveh._stopped = 300, 0, 0, true
+        MDAD.Drive.debugSession(0).mode = "arrive"
+        clearList(halos)
+        drive.voiceLog = {}
+        driveTick(dp, dveh)
+        checkEq(M.reports, 1, tag .. " 一樣走正式回報")
+        checkEq(M.stops[1].status, "pending", tag .. " road_end 不把站標成 arrived")
+        checkEq(M.phase, "approach", tag .. " road_end 轉 approach")
+        checkEq(noteReason(halos[1] and halos[1].text), "UI_MinidoracatAutoDrive_TripRoadEnd",
+            tag .. " 顯示手動前往，不冒稱到達最終目的地")
+        checkEq(halos[1] and halos[1].kind, "info", tag .. " road_end 是資訊不是失敗")
+        checkEq(#drive.voiceLog, 0, tag .. " road_end 不播任何語音（含抵達成功語音）")
+        checkFalse(MDAD.Drive.isActive(0), tag .. " road_end 之後不自動再開")
+        checkNil(M.claimOwner, tag .. " road_end 釋放 claim")
+        checkEq(isGamePaused(), arrivePause, tag .. " 道路終點照抵達暫停設定暫停")
+        checkEq(drive.pauseCalls, arrivePause and 1 or 0, tag .. " 只在勾選時呼叫一次原生暫停")
+        checkFalse(MDAD.Drive.isPausePending(), tag .. " 沒有語音可等，不留延遲暫停")
+    end
+    clientFlag, serverFlag, MDAD.HUD.pauseOnArrival = oldClient, oldServer, oldArrive
+    drive.paused, drive.pauseCalls = false, 0
+end
 
 -- ⑩ 途中設備失效：先停控制、再交還，站點仍 pending
 ready(true)
