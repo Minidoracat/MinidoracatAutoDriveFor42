@@ -288,6 +288,13 @@ MDADFollower.STYLES = {
     comfort = { name = "comfort", lat = 6.0, brake = 3.0, coast = 3.0, coastAssist = 3.5,
         turnSoft = 25 * PI / 180, turnHard = 50 * PI / 180, turnHardMs = 30 / 3.6 },
 }
+-- 終點停車的中線減速輔助（1002l；使用者「快到目的地的通過時間再縮短」）：終點段收油包絡用「車輛斷油＋這一份」，
+-- 兩檔共用，但合計不超過計畫制動×STOP_BRAKE_RATIO（＝Driver 巡航可視帳的煞車倍率 CRUISE_VIS_BRAKE_GAIN；Driver 的
+-- 緊急帳是計畫制動×2.5，終點包絡不得貼到它——E2E 舒適檔第一版合計 8.3 超過緊急帳 7.5，終點前 18m 一秒鎖輪）。
+-- 制動包絡（segBrake，只管終點煞停）不比它更早綁：舊制舒適檔計畫制動 3.0 讓 70 km/h 的車從終點前 63m 就開始減。
+-- 中線外力不經輪胎：積極檔輕車合計約 8.3–9、2500 kg 7.2；舒適檔 4.5。Driver 終點硬煞帳另以 VIS_TERMINAL_TAU 計。
+MDADFollower.STOP_ASSIST = 6.0
+MDADFollower.STOP_BRAKE_RATIO = 1.5
 
 -- 初始化與換檔共用；呼叫端隨後重填動力預算、重建速度表，保留承諾線與投影位置。
 function MDADFollower.setStyle(profile, style)
@@ -643,9 +650,12 @@ end
 -- (2501,14011) 的 3.25m 錯位（8m→6m 路）投影在兩臂間來回跳 3.6m、繞行中擦撞（rc22 0023）。短段與合計放到
 -- JOG_MAX_M，橫移量另以路寬把關：中點線離兩臂中心 lat/2，兩臂較窄者要容得下（lat ≤ 寬 − JOG_CLEAR_M，
 -- 半寬 0.9 的車留 0.3）；兩臂至少 JOG_ARM_RATIO×lat 長（中點線對臂的折角 ≤ 7°）。無路寬資料照舊 <SPIKE_M。
+-- JOG_MAX_M 是嚴格上界（l² ≥ 上界² 即當臂）：nav 座標在 0.5 格上，整 4.0m 的錯位（2nd St↔Oak St (12106→12110,6900)，
+-- 兩臂 8m）在上界 4 時剛好被排除＝E2E rc53 0002 兩個 90° fallback 頂點留著、投影釘在來向臂、繞行中原地調頭 4 次交還
+-- （1002m）。4.5＝收 ≤4.0、不收 4.5 以上；物理把關仍是路寬與臂長兩道閘。
 -- 無變更回原表（Trailer.shape 以 identity 快取）；有變更回淺拷貝，despiked＝刪除點數。冷路徑。
 MDADFollower.SPIKE_M = 2
-MDADFollower.JOG_MAX_M = 4
+MDADFollower.JOG_MAX_M = 4.5
 local JOG_CLEAR_M = 2.4
 local JOG_ARM_RATIO = 4
 local JOG_TURN_COS2 = 0.75 -- cos²30°：進出方向夾角 <30° 才算橫移；短段本身要偏離進入方向 >30°
@@ -988,12 +998,17 @@ function MDADFollower.stepBuild(profile, budget)
                 profile.phase, profile.cursor = "brake", n - 1
             else
                 local coast = profile.segCoast[i] or 0.6
-                -- 彎前與終點收油都加中線減速輔助（STYLES.coastAssist）。終點段（0924a）原本只用車輛真實斷油值：
+                -- 彎前與終點收油都加中線減速輔助。終點段（0924a）原本只用車輛真實斷油值：
                 -- 當時 Driver 沒有比例減速，計畫的減速度一定要做得到；1001a 起不鎖輪的中線減速輔助一路補到停，
-                -- 1002i 起終點同樣照「斷油＋輔助」收（rc49／rc50 跟線慢於上限的時間裡 38% 在終點前 120m 內）。
+                -- 1002i 起終點同樣照「斷油＋輔助」收（rc49／rc50 跟線慢於上限的時間裡 38% 在終點前 120m 內）；
+                -- 1002l 起終點段的輔助是 STOP_ASSIST（彎前仍是風格的 coastAssist），合計不超過計畫制動×STOP_BRAKE_RATIO。
                 local assist = profile.coastAssist or 0
                 if profile.coastFromEnd and profile.segStopCoast then
                     coast = profile.segStopCoast[i] or coast
+                    local stop = coast + MDADFollower.STOP_ASSIST
+                    local lim = (profile.segBrake[i] or BRAKE) * MDADFollower.STOP_BRAKE_RATIO
+                    if stop > lim then stop = lim end
+                    assist = stop > coast and stop - coast or 0
                 end
                 coast = coast + assist
                 if profile.coastAssistAt then profile.coastAssistAt[i] = assist end
@@ -1016,7 +1031,12 @@ function MDADFollower.stepBuild(profile, budget)
             if i < 1 then
                 profile.phase, profile.cursor = "merge", 1
             else
+                -- 制動包絡沒有彎道帽、只管終點煞停：不比同段收油包絡（斷油＋輔助）更早綁（1002l）。終點停車由
+                -- Driver 的中線外力執行、不經輪胎，學到的低鎖輪煞車不再限它（Driver 終點硬煞帳另吃學到的煞車）；
+                -- 煞車 0 仍是 fail-safe 全線停車。
                 local brake = profile.segBrake[i] or BRAKE
+                local rate = profile.coastRate and profile.coastRate[i]
+                if rate and brake > 0 and rate > brake then brake = rate end
                 local lim = sqrt(brakeV[i + 1] * brakeV[i + 1]
                     + 2 * brake * segLen[i])
                 if lim > profile.maxSpeedMs then lim = profile.maxSpeedMs end
@@ -1707,6 +1727,30 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         end
     end
     local err = atan2(fx * vy - fy * vx, fx * vx + fy * vy)
+    -- 承諾線（繞行／回線，state.trackTangent）在弧上：切線對「參考點的行進方向」而非車頭（1002n；E2E rc53 0005／0022：
+    -- vehicle:getX/Y 不是無側滑點，穩態彎上行進方向比車頭偏彎內 β≈0.7·ω/v＝0.07–0.16 rad；車頭對準切線＝速度向量
+    -- 多指彎內 β，車往線內漂到 cross-track 抵銷為止＝0.45m，超過貼縫餘裕 0.29–0.33 擦撞）。β＝最近 0.5m 位移的弦角
+    -- 減兩端車頭平均（定曲率下精確、直路≈0），每走一弦更新一次；跳格（>2m）不量、夾 ±0.3。只在前視窗有弧時扣：
+    -- 直路換道 β 隨 ω 換號，弦估計的滯後反而加大落後。一般跟線不扣（彎前收油與弧段前饋是在無側滑模型上調的）。
+    do
+        local sx, sy = state.slipX, state.slipY
+        if sx ~= nil and speed >= 3 then
+            local dx, dy = x - sx, y - sy
+            local d2 = dx * dx + dy * dy
+            if d2 >= 0.25 then
+                local b = 0
+                if d2 <= 4 then
+                    local sh = state.slipH
+                    b = wrapPi(atan2(dy, dx) - sh - wrapPi(heading - sh) * 0.5)
+                    if b > 0.3 then b = 0.3 elseif b < -0.3 then b = -0.3 end
+                end
+                state.slip, state.slipX, state.slipY, state.slipH = b, x, y, heading
+            end
+        else
+            state.slip, state.slipX, state.slipY, state.slipH = 0, x, y, heading
+        end
+        if state.trackTangent == true and tangentOn and arcK ~= nil then err = wrapPi(err - state.slip) end
+    end
     -- 切線↔前視點切換那一幀誤差定義不同：清 D 項歷史，不讓切換本身抽一記
     if tangentOn ~= (state.tangentOn == true) then
         state.tangentOn = tangentOn
@@ -1763,6 +1807,8 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
             runtimeCoast = runtimeCoast + (profile.coastAssistAt and profile.coastAssistAt[bestI] or 0)
             if runtimeCoast < coast then coast = runtimeCoast end
         end
+        -- 同建表（1002l）：制動包絡只管終點煞停，不比收油包絡（斷油＋輔助）更早綁；0 仍是 fail-safe
+        if brake > 0 and brake < coast then brake = coast end
         local coastNext = profile.coastV[bestI + 1] or profile.maxSpeedMs
         local brakeNext = profile.brakeV[bestI + 1] or 0
         -- 滑行包絡的停點在終點前 COAST_STOP_M（與建表同一個 coastStopS），段內也要量到那裡
@@ -2005,6 +2051,7 @@ function MDADFollower.resetControl(state)
     state.tangentOn = false
     state.ffSteer = 0
     state.prevHeading = nil -- yawGain 是車的性質，跨 cutover／脫困保留；只斷差分
+    state.slipX, state.slip = nil, 0 -- 側滑弦估計同樣斷差分（瞬移／脫困後重量）
     releaseExactLine(state)
     return state
 end

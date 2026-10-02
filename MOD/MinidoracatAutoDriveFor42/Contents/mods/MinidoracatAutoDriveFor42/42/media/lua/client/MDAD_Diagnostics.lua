@@ -1189,7 +1189,7 @@ local function encodePhys(phys)
     addNum("visHold", "vho")          -- 巡航帳假設的前緣停滯保持剩餘秒數
     addNum("visRoundS", "vrs")        -- 掃描輪時 EWMA（秒）
     addNum("visAssistDecel", "vad")   -- 巡航減速輔助補的減速度（m/s²）
-    addStr("visAssistWhy", "vaw")     -- 1002a：減速輔助追的帳（vis／profile／lane／dodge／blocked／defer／zombie-lane；不鎖輪硬煞＝其理由）
+    addStr("visAssistWhy", "vaw")     -- 1002a：減速輔助追的帳（vis／profile／lane／dodge／blocked／defer／zombie-lane／traffic；不鎖輪硬煞＝其理由）
     addNum("towPhi", "tph")           -- 拖掛折角（rad）
     addNum("towUp", "tup")            -- 拖掛 upVectorDot（<0.8 原版拆掛）
     addNum("towDecel", "tda")         -- 施給掛車的減速度（m/s²；0929o 拖車減速分攤）

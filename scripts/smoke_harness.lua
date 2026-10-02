@@ -5020,6 +5020,14 @@ do
             "爬行承諾位置環加倍（" .. string.format("%.3f", tqCrawl / tqLine) .. "）")
         checkNear(tqKink / tqLine, 1, 0.05,
             "fallback 出彎窗（kinkExitS）退回一般增益（實得 " .. string.format("%.3f", tqKink / tqLine) .. "）")
+        -- 1002p：回線精確線（returnActive、非 hold）位置環同弧段 ×CROSS_TRACK_ARC_GAIN（正式服 0.17.0 三段回線過衝 1.1m
+        -- 兩秒收不回）。違規證明：拿掉 returnActive 條件＝紅。
+        local keepA, keepH, keepT = stk.returnActive, stk.returnHold, stk.returnTarget
+        stk.returnActive, stk.returnHold, stk.returnTarget = true, false, 0
+        local tqRet = fakeLat(false)
+        stk.returnActive, stk.returnHold, stk.returnTarget = keepA, keepH, keepT
+        checkNear(tqRet / tqLine, MDADDynamics.CROSS_TRACK_ARC_GAIN, 0.05,
+            "回線精確線 cross-track 力矩＝直路 ×CROSS_TRACK_ARC_GAIN（實得 " .. string.format("%.3f", tqRet / tqLine) .. "）")
     end
 
     MDADFollower.control = function(_, state)
@@ -7113,8 +7121,40 @@ function drive.scenarioBrakeAssist()
     st.visibilityCap, st.fstate.profileSpeedKmh = oldVisCap, 12
     st.fstate.idx = 2
     MDAD.Drive.visAssistForce(st, 14, 1)
-    checkEq(st.visAssistDecel, 0, "(curve-assist-low) 終點停車段（建表沒算輔助）：25 以下照舊不補")
+    checkEq(st.visAssistDecel, 0, "(curve-assist-low) 沒算輔助的段：25 以下照舊不補")
+    -- (stop-assist) 1002l：終點段建表假設 Follower.STOP_ASSIST（6），上限跟著留 CURVE_ASSIST_HEADROOM＝8；
+    --   彎前段（3.5）仍是 5.5。違規證明：拿掉上限放寬＝第一條紅（只剩 5.5）。
+    local oldStampSA = st.laneCurveStamp
+    st.laneCurveStamp = -1
+    st.profile.coastAssistAt, st.fstate.idx = { MDADFollower.STOP_ASSIST }, 1
+    st.fstate.profileSpeedKmh, st.assistPvLast = 30, 31
+    MDAD.Drive.visAssistForce(st, 40, 1)
+    checkNear(st.visAssistDecel, MDADFollower.STOP_ASSIST + tune.CURVE_ASSIST_HEADROOM, 1e-9,
+        "(stop-assist) 終點段超剖面 10 km/h：前饋＋比例項，上限 STOP_ASSIST＋餘地（" .. tostring(st.visAssistDecel) .. "）")
+    st.assistPvLast = 31
+    MDAD.Drive.visAssistForce(st, 30.5, 1)
+    checkNear(st.visAssistDecel, MDADFollower.STOP_ASSIST, 1e-9,
+        "(stop-assist) 終點段在收、超剖面 0.5：前饋補終點假設的那一份（" .. tostring(st.visAssistDecel) .. "）")
+    st.laneCurveStamp, st.fstate.profileSpeedKmh = oldStampSA, 12
     st.profile.coastAssistAt, st.fstate.idx = oldAt, oldIdx
+    -- (traffic-assist) 1002q：會車／跟車帽只夾 regulator＝斷油滑行；超過帽照超速量補中線外力（上限 DODGE_ASSIST_MAX）
+    --   （正式服 0.17.0 pigpig/clip-02：前車 35m 才出現、帽 43→25、vad 0，只滑到 61）。違規證明：拿掉 traffic 帳＝紅。
+    do
+        local keep = { st.trafficCapKmh, st.laneCurveStamp, st.fstate.profileSpeedKmh, st.dodgeDeferCap,
+            st.zombieLaneCap, st.blockedApproachCap, st.dodging }
+        st.trafficCapKmh, st.laneCurveStamp, st.fstate.profileSpeedKmh = 30, -1, 90
+        st.dodgeDeferCap, st.zombieLaneCap, st.blockedApproachCap, st.dodging = -1, -1, nil, false
+        MDAD.Drive.visAssistForce(st, 36, 1)
+        checkTrue(st.visAssistWhy == "traffic"
+                and math.abs(st.visAssistDecel - (36 - 30 - tune.VIS_ASSIST_TOL_KMH) * tune.VIS_ASSIST_GAIN) < 1e-9,
+            "(traffic-assist) 超過會車帽 6 km/h：照超速量補中線減速（why=" .. tostring(st.visAssistWhy)
+            .. " vad=" .. tostring(st.visAssistDecel) .. "）")
+        MDAD.Drive.visAssistForce(st, 60, 1)
+        checkNear(st.visAssistDecel, tune.DODGE_ASSIST_MAX, 1e-9, "(traffic-assist) 上限 DODGE_ASSIST_MAX")
+        st.trafficCapKmh, st.laneCurveStamp, st.fstate.profileSpeedKmh, st.dodgeDeferCap,
+            st.zombieLaneCap, st.blockedApproachCap, st.dodging =
+            keep[1], keep[2], keep[3], keep[4], keep[5], keep[6], keep[7]
+    end
     -- (curve-lane) 1002a：目標由車道包絡（證明線的 lane curve envelope）裁決、比剖面低時，輔助追車道包絡
     --   （正式服 0.17.0 kkbug/clip-03：lce 26 vs 剖面 38、vad 0，38 km/h 衝進 26 km/h 的 90° 折點側滑撞上）。
     --   包絡過期（stamp 不符）或等於車輛極速（直路 κ＝0）不追。
@@ -16303,13 +16343,15 @@ function drive.scenarioSpeedWindows()
     checkEq(MDAD.Drive.dodgeEnvelopeCap(st, 10, nowMs), nil,
         "(pinch) 不完整點雲不能放行入口提速")
     st.sensor.hardOverflow = false
+    -- 1002o：有效範圍縮短不再撤銷逐點表——表裡每一點都是看得到時量的，未掃區由逐點帽裡的可視帽與全域可視帽管
+    -- （E2E rc52 0004：撤表後退回不含出口窄點的整線帽 64，表回來時窄點已在 10m 內，從 64 km/h 減到 27 擦上）。
     local savedEnd = st.sensor.scanEndS
     st.sensor.scanEndS = st.fstate.ovEndS - 1
-    checkEq(MDAD.Drive.dodgeEnvelopeCap(st, 10, nowMs), nil,
-        "(pinch) 有效範圍縮短也撤銷額外提速，不需出現未載入格才生效")
+    checkTrue(MDAD.Drive.dodgeEnvelopeCap(st, 10, nowMs) ~= nil,
+        "(pinch) 有效範圍縮短：同一條線的逐點速度表照用，不退回不含出口窄點的整線帽")
     st.sensor.scanEndS = savedEnd
     checkTrue(MDAD.Drive.dodgeEnvelopeCap(st, 10, nowMs) ~= nil,
-        "(pinch) 完整覆蓋恢復後速度證明才能再用")
+        "(pinch) 完整覆蓋時速度證明照用")
     local savedLat, savedCoast = st.safeLat, st.safeCoast
     st.safeLat = savedLat * 0.5
     checkEq(MDAD.Drive.dodgeEnvelopeCap(st, 10, nowMs), nil,
@@ -17019,6 +17061,29 @@ function drive.scenarioVisibilityBraking()
         driveReset(dveh)
         driveTick(dp, dveh)
         checkTrue(drive.calls.forceBrake > 0, "(terminal-hard) 未知前緣仍緊急煞車")
+    end
+    -- (terminal-cruise) 1002l：前緣＝路線終點時巡航帳＝硬煞帳，反應時間只算致動延遲（VIS_TERMINAL_TAU）、不扣
+    --   障礙緩衝、不套停滯保持；終點停車交給剖面的終點包絡（斷油＋Follower.STOP_ASSIST）。舊巡航帳在終點前
+    --   15–28m 就把目標壓在剖面下 5–7 km/h（E2E rc52 抵達 20 趟全被它綁過）。違規證明：拿掉終點分支＝三條全紅。
+    do
+        MDADSensor.step = realStep
+        arm(80)
+        MDADSensor.step = function() return false end
+        local len = st.profile.length
+        dveh._x, dveh._speed = len - 20, 45
+        MDAD.Drive.clearLaneProof(st)
+        st.sensor.scanEndS, st.sensor.unloadedS = len, len
+        st.sensor.unloaded, st.sensor.stamp = false, nowMs
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        local tune = MDAD.Drive.debugTune()
+        local visBrake = math.min(st.safeBrake * tune.EMERGENCY_BRAKE_GAIN, tune.EMERGENCY_BRAKE_MAX)
+        checkNear(st.visibilityCap, st.visibilityHardKmh, 1e-9,
+            "(terminal-cruise) 前緣＝終點：巡航帳＝硬煞帳（" .. tostring(st.visibilityCap) .. "）")
+        checkNear(st.visibilityHardKmh, MDADDynamics.approachCapKmh(len - st.lastSNow, 0, tune.VIS_TERMINAL_TAU, visBrake),
+            1e-6, "(terminal-cruise) 終點硬煞帳的反應時間只算致動延遲（" .. tostring(st.visibilityHardKmh) .. "）")
+        checkTrue(st.lastCapReason ~= "visibility",
+            "(terminal-cruise) 終點前 20m、45 km/h：目標由剖面終點包絡決定，不被可視帳先壓（" .. tostring(st.lastCapReason) .. "）")
     end
 
     local function learnBrake(deceleration, startSpeed, episodes)
@@ -18725,6 +18790,39 @@ function drive.scenario0928d()
         drive.fillWorld(-2, 70, -7, 7)
     end
 
+    -- (clr-keep) 1002o E2E rc52 0004：承諾後可視範圍縮回（線尾掉出），舊制 guard 掃描一開始就清表、又因未覆蓋不收＝
+    --   只剩不含出口窄點的整線帽 64，表回來時窄點已在 10m 內，帽一步 64→5、27 km/h 擦上。同一條線看全時量到的
+    --   逐點淨距照留、只重量看得到的那段，讀表也不再要求線尾可見（逐點帽含可視帽）。
+    --   違規證明：sweepLine 照舊清表＝第一條紅；讀表照舊要求線尾可見＝第二條紅。
+    do
+        drive.fillWorld(-10, 90, -8, 8)
+        drive.putSolid(50, 0, "clr_keep_obstacle")
+        checkTrue(armDrive(), "(clr-keep) 啟動")
+        setHeading(dveh, 0)
+        dveh._speed = 10
+        drive.frameMs(10)
+        drive.scanRound(true)
+        drive.frameMs(10)
+        drive.scanRound(true)
+        local stk = MDAD.Drive.debugSession(0)
+        checkTrue(stk.dodging == true and (stk.dodgeClrN or 0) >= 2,
+            "(clr-keep) 前置：已承諾繞行、線看全時收到逐點淨距表（clrN=" .. tostring(stk.dodgeClrN) .. "）")
+        local ovN = stk.fstate.ovN
+        stk.dodgeMarginS = nil -- 最緊點未知＝本輪 guard-pass 帶收表重掃（同 clr-retry；縮窗時才會走到清表那條路）
+        drive.world[57 * 100000 + 0] = nil
+        drive.frameMs(10)
+        drive.scanRound(true)
+        checkTrue(stk.dodging == true and stk.dodgeClrN == ovN and (stk.dodgeEnvN or 0) >= 2,
+            "(clr-keep) 線尾掉出可視範圍：同一條線的逐點淨距表照留（clrN=" .. tostring(stk.dodgeClrN)
+            .. " ovN=" .. tostring(ovN) .. " envN=" .. tostring(stk.dodgeEnvN) .. "）")
+        checkTrue(MDAD.Drive.dodgeEnvelopeCap(stk, 10, nowMs) ~= nil,
+            "(clr-keep) 縮窗時仍讀逐點速度表（不退回不含出口窄點的整線帽）")
+        drive.mkSquare(57, 0)
+        MDAD.Drive.stop(0, nil)
+        drive.clearCell(50, 0)
+        drive.fillWorld(-2, 70, -7, 7)
+    end
+
     -- (exit-extend) 0928e：遠處就看到的障礙，出口被當下的可視範圍截短（空間帽 0 → 整段繞行最後降到 10）。
     --   車前進、前緣跟著前進後，同一組 a/b/c/offL 重建更長的出口並重掃；停留（沒有出口）不做。
     --   違規證明：extendDodgeExit 一律回 false＝出口不變紅。
@@ -18741,8 +18839,17 @@ function drive.scenario0928d()
         setHeading(dveh, 0)
         dveh._speed = 30
         local ste = MDAD.Drive.debugSession(0)
-        local realExt, ext = MDAD.Drive.extendDodgeExit, nil
+        local realExt, ext, probed = MDAD.Drive.extendDodgeExit, nil, nil
         MDAD.Drive.extendDodgeExit = function(st, sen, pn)
+            -- (exit-keep) 1002r：加長掃不過時，現行承諾線的逐點淨距表要原封不動（表是同一個陣列）。
+            --   need 撐到 50＝這次加長必掃不過；之後還原、照常加長。違規證明：加長掃掠照舊收表即紅。
+            if probed == nil then
+                local kN, kS0, kNeed, kFail = st.dodgeClrN, st.dodgeClrS0, st.dodgeNeed, st.dodgeExtendFailS
+                st.dodgeClrN, st.dodgeClrS0, st.dodgeNeed, st.dodgeExtendFailS = 7, -1, 50, nil
+                realExt(st, sen, pn)
+                if st.dodgeExtendFailS ~= nil then probed = st.dodgeClrN end
+                st.dodgeClrN, st.dodgeClrS0, st.dodgeNeed, st.dodgeExtendFailS = kN, kS0, kNeed, kFail
+            end
             local d0, e0, cap0 = st.fstate.offD, st.dodgeExitLength, st.dodgeSpeedCap
             local a0, b0, c0, l0 = st.fstate.offA, st.fstate.offB, st.fstate.offC, st.fstate.offL
             local ok = realExt(st, sen, pn)
@@ -18751,7 +18858,8 @@ function drive.scenario0928d()
             end
             return ok
         end
-        for _ = 1, 3 do drive.frameMs(10); drive.scanRound(true) end
+        for _ = 1, 4 do drive.frameMs(10); drive.scanRound(true) end
+        checkTrue(probed == 7, "(exit-keep) 加長掃不過：現行線的逐點淨距表不動（N " .. tostring(probed) .. "）")
         MDAD.Drive.extendDodgeExit = realExt
         local fse = ste.fstate
         checkTrue(ext ~= nil and ext.e0 < ste.dodgeExitWant - 10,

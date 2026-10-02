@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1002k"
+Drive.REV = "1002r"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -306,6 +306,9 @@ TUNE.VIS_HOLD_MULT = 1.25       -- 巡航帳假設前緣停住：輪時×MULT＋
 TUNE.VIS_HOLD_ADD_S = 0.15
 TUNE.VIS_UNLOADED_HOLD_S = 1.5  -- 前緣是未載入區塊時至少假設停這麼久（正式服串流停滯 p97）
 TUNE.VIS_HOLD_MIN_S = 0.3       -- 停滯逾時後仍保留的最短保持（巡航帳留一點滑行餘裕）
+-- 可視前緣就是路線終點時（1002l）：終點是建表就知道的定點，不是會突然冒出來的未知前緣，硬煞帳只算致動延遲；
+-- 巡航帳不再另扣障礙緩衝與停滯保持（終點停車由剖面的 Follower.STOP_ASSIST 包絡負責，見 Drive.visibilityCaps）。
+TUNE.VIS_TERMINAL_TAU = 0.25
 TUNE.VIS_ASSIST_MIN_KMH = 25    -- 巡航減速輔助：低於此速滑行就夠
 TUNE.VIS_ASSIST_TOL_KMH = 1     -- 實速超過巡航帽這麼多才開始補
 TUNE.VIS_ASSIST_GAIN = 1.0      -- 每超 1 km/h 補 1 m/s²
@@ -315,6 +318,8 @@ TUNE.VIS_ASSIST_MAX = 4.0       -- 補的減速度上限（m/s²），疊在滑�
 TUNE.CURVE_ASSIST_GAIN = 2.0
 -- 1002d：4→5.5，剖面假設的輔助（Follower.STYLES.coastAssist）提到 3.5，前饋之外要留比例項的餘地。
 TUNE.CURVE_ASSIST_MAX = 5.5
+-- 剖面假設的輔助之上留給比例項的餘地（1002l：終點段假設 STOP_ASSIST 6，上限跟著到 8；彎前 3.5＋2＝原 5.5）。
+TUNE.CURVE_ASSIST_HEADROOM = 2.0
 -- 包絡「在收」的門檻（km/h／次呼叫；Drive.visAssistForce 前饋閘）：沿收油包絡每幀至少掉 a·dt（240 FPS、
 -- 4 m/s² 仍有 0.06），弧內 latSafe EWMA 的漂移遠小於此。
 TUNE.ASSIST_FALL_KMH = 0.02
@@ -1976,6 +1981,7 @@ local function startSession(playerObj, playerNum, stage)
         zombieLane = nil,       -- 殭屍軟縫採納中的 lane（nil＝無；TUNE.ZOMBIE_LANE_*）
         zombieLaneMs = 0,       -- 上一次軟縫平滑的時戳
         zombieLaneCap = -1,     -- 縱向配合帽（km/h；−1＝無）：側移在到達殭屍前完不成就先降速
+        trafficCapKmh = -1,     -- 會車／跟車帽（km/h；−1＝無）：Drive.visAssistForce 的 traffic 帳
         followerTarget = 0, desiredTarget = 0, -- telemetry ftg／des（剖面原始目標／cap 後 jerk 前）
         forceBrakeWhy = nil, -- telemetry fbw：最後一次 commandForceBrake 的裁決者
         zombieLaneParked = nil, -- 讓位釋放時停放的 lane（重新接手的平滑起點；nil＝無）
@@ -4503,9 +4509,17 @@ function Drive.visibilityCaps(s, now, visibleEnd, minBrakeVisible)
     -- 硬煞帳的前緣若就是路線終點（可視已含終點、無未載入截斷），終點不是障礙：不扣
     -- halfL+2 的障礙緩衝（0924d E2E：MAX 檔 90 km/h 滑行到站，實速落後剖面 3-4 km/h，
     -- 終點前 7m 以 18 km/h 撞上硬煞紅線 14.8 一秒鎖輪；到站本身由剖面與 arrive 管）。
+    -- 1002l：終點是建表就知道的定點，反應時間只算致動延遲（VIS_TERMINAL_TAU）；巡航帳＝硬煞帳，不再扣緩衝與
+    -- 停滯保持——終點停車由剖面的終點包絡（斷油＋Follower.STOP_ASSIST）負責。舊巡航帳在終點前 15–28m 就把
+    -- 目標壓在剖面下 5–7 km/h（E2E rc52：抵達的 20 趟最後一段全都被 visibility 綁過、16 趟以它為主）。
     local hardAhead = ahead
-    if visibleEnd >= s.profile.length - 0.5 then hardAhead = hardAhead + halfL + 2 end
-    s.visibilityHardKmh = MDADDynamics.visibilityCapKmh(hardAhead, TUNE.VIS_TAU, visBrake, halfL)
+    if visibleEnd >= s.profile.length - 0.5 then
+        hardAhead = hardAhead + halfL + 2
+        s.visibilityHardKmh = MDADDynamics.approachCapKmh(ahead, 0, TUNE.VIS_TERMINAL_TAU, visBrake)
+        cap, s.visHold = s.visibilityHardKmh, 0
+    else
+        s.visibilityHardKmh = MDADDynamics.visibilityCapKmh(hardAhead, TUNE.VIS_TAU, visBrake, halfL)
+    end
     s.visHardAhead = hardAhead -- 可視硬煞觸發時的輔助煞車距離（Drive.emergencyBrakeDist）
     return cap, cruiseBrake
 end
@@ -4583,7 +4597,7 @@ function Drive.visAssistForce(s, speedKmh, mult)
     -- 彎前晚收油：剖面（fstate.profileSpeedKmh）已假設這份輔助（Follower.STYLES.coastAssist）
     if s.profile and (s.profile.coastAssist or 0) > 0 and finite(pv) and pv < cap then
         cap, amax, gain, why = pv, TUNE.CURVE_ASSIST_MAX, TUNE.CURVE_ASSIST_GAIN, "profile"
-        -- 這段收油包絡建表時就算進輔助（coastAssistAt>0，終點停車段為 0）：25 km/h 以下照補。
+        -- 這段收油包絡建表時就算進輔助（coastAssistAt>0）：25 km/h 以下照補。
         -- 2026-10-01 正式服 0.14.0–0.16.0：MAX 急彎（彎帽 12）一秒鎖輪從每百公里 0.33 升到 1.2–1.8——
         -- 剖面最後 3–4m 從 25 收到 12 要 5–6 m/s²，舊制 25 以下整個不補、只剩斷油 2–3.6，抵達 18.5–20 km/h
         -- 剛好越過 1.5×彎帽（片段：超剖面時 25 以上 117/117 幀有補、25 以下 49/49 幀為 0）。
@@ -4594,6 +4608,8 @@ function Drive.visAssistForce(s, speedKmh, mult)
             -- 純比例要先落後 TOL＋輔助/增益（2.25 km/h）才補得到假設的量＝重車進彎前一路落後 2–4 km/h
             -- （E2E SemiTruckLite R≈7：剖面收到 15.3 時實速 16.5–19.4）。
             if pvFalling then ff = at[idx] end
+            -- 終點段假設的輔助（Follower.STOP_ASSIST）比彎前大：上限跟著留同樣的比例項餘地（1002l）
+            if at[idx] + TUNE.CURVE_ASSIST_HEADROOM > amax then amax = at[idx] + TUNE.CURVE_ASSIST_HEADROOM end
         end
     end
     -- 車道包絡（1002a）：目標實際由證明線的 lane curve envelope 裁決（煞車×0.7 反推；靠右車道在右轉彎內側＝
@@ -4636,6 +4652,12 @@ function Drive.visAssistForce(s, speedKmh, mult)
     if not s.dodging and finite(s.zombieLaneCap) and s.zombieLaneCap >= 0 and s.zombieLaneCap < cap then
         cap, amax, gain, minKmh, why = s.zombieLaneCap, TUNE.DODGE_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN,
             TUNE.VIS_ASSIST_MIN_KMH, "zombie-lane"
+    end
+    -- 會車／跟車帽（Drive.trafficCap；1002q）：同型，帽只夾 regulator＝斷油滑行。正式服 0.17.0 pigpig/clip-02：
+    -- 84 km/h 時前車約 35m 才出現、帽 43→25、vad 0，只滑到 61 就承諾繞行、20.6 km/h 擦上。同一條中線外力、繞行的上限。
+    if finite(s.trafficCapKmh) and s.trafficCapKmh >= 0 and s.trafficCapKmh < cap then
+        cap, amax, gain, minKmh, why = s.trafficCapKmh, TUNE.DODGE_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN,
+            TUNE.VIS_ASSIST_MIN_KMH, "traffic"
     end
     if speedKmh < minKmh then return 0 end
     local over = speedKmh - cap - TUNE.VIS_ASSIST_TOL_KMH
@@ -5938,10 +5960,16 @@ local function sweepLine(s, lx, ly, ln, lS0, lS1,
         a, b, c, d, offL, tag, needBase, startK, requireLoaded, collectClearance)
     local sen = s.sensor
     local clr = collectClearance and s.dodgeClr or nil
+    local clrKeepS = nil
     if clr then
+        local sameLine = s.dodgeClrN == ln and s.dodgeClrS0 == lS0 and s.dodgeClrS1 == lS1
         s.dodgeClrN, s.dodgeEnvN = 0, 0
-        -- 舊承諾仍可守護，但縮窗後的未掃尾段不能被收成新的高淨距速度證明。
-        if not Drive.candidateCovered(s, lS1) then clr = nil end
+        -- 縮窗後的未掃尾段不能被收成新的高淨距速度證明；同一條線之前看全時量到的逐點淨距照留，
+        -- 只重量還看得到的那一段（1002o；E2E rc52 0004：表被清空後只剩整線帽 64、不含出口窄點，
+        -- 表回來時窄點已在 10m 內，帽一步 64→11.6→5、從 64 km/h 減到 27 擦上）。
+        if not Drive.candidateCovered(s, lS1) then
+            if sameLine then clrKeepS = visibleEndS(sen, s.lastSNow) - s.bodyReach else clr = nil end
+        end
     end
     if not finite(ln) or ln < 2 or not finite(lS0) or not finite(lS1) then
         return false, 99, s.lastSNow, 1, s.lastSNow, 0, 0
@@ -6086,7 +6114,7 @@ local function sweepLine(s, lx, ly, ln, lS0, lS1,
                 end
             end
         end
-        if clr then clr[k] = sampleMargin end
+        if clr and (clrKeepS == nil or sk <= clrKeepS) then clr[k] = sampleMargin end
     end
     if clr then
         s.dodgeClrN, s.dodgeClrK0 = ln, startK
@@ -7072,8 +7100,11 @@ function Drive.extendDodgeExit(s, sen, playerNum)
         fs.offL, s.dodgeBaseL, s.tmpOv2X, s.tmpOv2Y, nil, nil, nil, s.dodgeStartL)
     local ok, margin, mi = false, 0, nil
     if n >= 2 and reason == "ok" and covered >= coverEnd - 1e-6 then
+        -- 不收表：表是現行承諾線的（同一個陣列），加長掃不過時舊線要原封不動。1002r 前這裡收表，
+        -- 每次加長失敗都把現行線的逐點淨距清掉，而補掃每條線只有一次（E2E rc55 0001：33m 進入段、
+        -- 出口 3.8m，下一群擋住加長、每 2m 試一次，表清空後整段吃整線帽 10 km/h 爬 80m）。
         local okS, mS, _, _, _, _, _, miS = sweepLine(s, s.tmpOv2X, s.tmpOv2Y, n, s0, covered,
-            fs.offA, fs.offB, c, d2, fs.offL, "extend", s.dodgeNeed, 1, true, true)
+            fs.offA, fs.offB, c, d2, fs.offL, "extend", s.dodgeNeed, 1, true, false)
         ok, margin, mi = okS, mS, miS
     end
     if not ok or not MDADFollower.setOffset(fs, fs.offA, fs.offB, c, d2, fs.offL,
@@ -7086,6 +7117,8 @@ function Drive.extendDodgeExit(s, sen, playerNum)
     s.lastOvN, s.lastOvS0, s.lastOvEndS, s.tmpOvEndS = n, s0, covered, covered
     s.dodgeMargin, s.dodgeMarginS = margin, mi and sen.hardS and sen.hardS[mi] or 1e9
     s.dodgeGuardHardN = sen.hardN
+    -- 新線從 rs 重建、點序位移，舊表對不上：清掉，下一個持平輪的補掃（新 ovS0）重收
+    s.dodgeClrN, s.dodgeEnvN = 0, 0
     -- 出口側移量與空間帽照承諾時的算法重算（新出口段的連續落點、較長的過渡）
     local exitDl = math.abs(fs.offL - s.dodgeBaseL)
     local seg = MDADFollower.segIndexAt(prof, c)
@@ -7438,6 +7471,8 @@ function Drive.dodgeAlignCap(s, applied, speedKmh)
 end
 
 -- Kahlua的stepFollow local槽接近上限，查表獨立；nil代表仍用原帽，絕非淨空。
+-- 不再要求線尾在可視範圍內（1002o）：表裡每一點都是看得到時量的（縮窗時 sweepLine 只重量看得到的那段、
+-- 其餘沿用同一條線舊值），逐點帽本身含 dodgeVisibilityCap（停在可視前緣前），未掃區的安全照舊由它管。
 function Drive.dodgeEnvelopeCap(s, speedKmh, now)
     if s.episodeActive
             or s.dodgeGuardFailed or s.blocked
@@ -7448,7 +7483,6 @@ function Drive.dodgeEnvelopeCap(s, speedKmh, now)
             or not finite(now) or not finite(s.sensor.stamp)
             or now < s.sensor.stamp or now - s.sensor.stamp > MDADDynamics.SNAPSHOT_FRESH_MS
             or not finite(s.fstate.offB)
-            or not Drive.candidateCovered(s, s.fstate.ovEndS)
             or (s.dodgeEnvN or 0) < 2 then return nil end
     local fs = s.fstate
     local k = ovIndexFloor(fs.ovS0, MDADFollower.OV_STEP, s.lastSNow)
@@ -10087,6 +10121,7 @@ local function stepFollow(s, vehicle, playerNum, now)
             s.followHold = false
             do
                 local tcap, treason, thold = Drive.trafficCap(s, now, speedKmh)
+                s.trafficCapKmh = tcap -- Drive.visAssistForce 的會車帳（−1＝無）
                 if thold then s.followHold = true end -- 合法停等（卡死豁免＋獨立超時）
                 if tcap >= 0 and (cap < 0 or tcap < cap) then
                     cap = tcap
@@ -11216,9 +11251,12 @@ local function stepFollow(s, vehicle, playerNum, now)
                         -- 出彎窗退回一般增益；承諾線真正接手後 Follower 本來就清 kinkExitS。
                         if s.dodging and s.dodgeCrawl and s.fstate.kinkExitS == nil then
                             xg, xm = MDADDynamics.CROSS_TRACK_DODGE_GAIN, MDADDynamics.CROSS_TRACK_DODGE_MAX
-                        elseif s.curveHardActive or s.zombieLane ~= nil then
+                        elseif s.curveHardActive or s.zombieLane ~= nil or (s.returnActive and not s.returnHold) then
                             -- 殭屍軟縫側移中同樣 ×2（0925p E2E road MAX：110 km/h 車身只橫移 1.4 m/s）。
                             -- 隨車速再放大（至 ×5）實測更差（兩輪 15／18 撞）
+                            -- 回線精確線同樣 ×2（1002p；正式服 0.17.0 三段：起步斜 0.37 rad 回線 25 km/h 衝過期望線
+                            -- 1.1m、切線追蹤把姿態誤差歸零後位置只剩 0.77/v＝2 秒收不回，回線用完判 hold 鎖輪撞路邊。
+                            -- 離線閉環 temp/exp_return_gain.lua：過衝 0.91→0.66m、線後偏 >0.3m 的時間 3.6→2.0 秒）
                             xg, xm = MDADDynamics.CROSS_TRACK_ARC_GAIN, MDADDynamics.CROSS_TRACK_ARC_MAX
                         end
                         steer = (steer or 0)
