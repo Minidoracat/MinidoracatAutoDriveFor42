@@ -16,7 +16,9 @@
 ]]
 
 local MINIMAP = "D:/github/MinidoracatMiniMapFor42/MOD/MinidoracatMiniMapFor42/Contents/mods/MinidoracatMiniMapFor42/42/media/lua"
-local NAV = MINIMAP .. "/client/MinidoracatMiniMap_NavRoute.lua"
+-- MDAD_NAV＝另一份 NavRoute.lua（例：`git show HEAD~1:… > old.lua` 比對主 MOD 建圖改動前後）
+local NAV = (os.getenv("MDAD_NAV") or "") ~= "" and os.getenv("MDAD_NAV")
+    or (MINIMAP .. "/client/MinidoracatMiniMap_NavRoute.lua")
 local PATCHES = MINIMAP .. "/shared/MinidoracatMiniMapRoadPatches.lua"
 local OFFICIAL = "Muldraugh, KY"
 local XML = "D:/SteamLibrary/steamapps/common/ProjectZomboid/media/maps/Muldraugh, KY/streets.xml"
