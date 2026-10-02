@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1002r"
+Drive.REV = "1002s"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -3832,6 +3832,10 @@ end
 -- 壓到繞行 lane ＝先別切出去（停在 a 前讓它過，下一輪再問）。真人開車繞停在路邊的車時也是
 -- 先讓對向車過。時間各留 1 秒；我方以不低於 2 m/s 估佔用時間（慢速時佔得久＝更保守）。
 -- 首次看到、還沒有速度的行進車若壓在繞行 lane 上（a 之後）也先等一輪——承諾後就只能讓車停在半路。
+-- 對向車（與還沒有速度、可能是對向的車）的橫向取「現在的位置」與「它自己的常駐線（我方常駐線對路面
+-- 中線的鏡像）」的聯集（1002s）：它正偏離自己的車道（繞它那側的東西）時，之後會回車道（E2E meet park
+-- 1002r：對向車繞屍體偏到路邊 3.5m，我方判它不壓繞行 lane 就借道，1 秒後它回車道、正面相撞）。只用在
+-- 承諾前：承諾後對向車往路邊讓是在讓我方，那時再假設它會回來就變成雙方互讓停死。
 function Drive.trafficBlocksDodge(s, a, d, offL, speedKmh)
     local sen = s.sensor
     local n = sen.trfN or 0
@@ -3844,21 +3848,28 @@ function Drive.trafficBlocksDodge(s, a, d, offL, speedKmh)
     local tD = (d - rs) / v
     local M = TUNE.TRAFFIC_MARGIN_M
     local now = getTimestampMs()
+    local home = (finite(s.roadBias) and s.roadBias or 0) - (finite(s.sandBias) and s.sandBias or 0)
     for i = 1, n do
         local vs = sen.trfVs[i]
-        if not finite(vs) and sen.trfS1[i] >= a
-                and sen.trfL0[i] < offL + halfW + M and sen.trfL1[i] > offL - halfW - M then
-            return true
+        local l0, l1 = sen.trfL0[i], sen.trfL1[i]
+        local known = finite(vs)
+        if not known or vs < -TUNE.TRAFFIC_ONCOMING_MPS then
+            local hw = (l1 - l0) * 0.5
+            if home - hw < l0 then l0 = home - hw end
+            if home + hw > l1 then l1 = home + hw end
         end
-        if finite(vs) and vs < -TUNE.TRAFFIC_ONCOMING_MPS
-                and sen.trfL0[i] < offL + halfW + M and sen.trfL1[i] > offL - halfW - M then
-            local age = (now - (sen.trfT[i] or now)) / 1000
-            if age < 0 then age = 0 elseif age > 1 then age = 1 end
-            local s0, s1 = sen.trfS0[i] + vs * age, sen.trfS1[i] + vs * age
-            if s1 >= a then
-                local t1 = s0 > d and (s0 - d) / -vs or 0
-                local t2 = (s1 - a) / -vs
-                if t1 < tD + 1 and t2 > tA - 1 then return true end
+        if l0 < offL + halfW + M and l1 > offL - halfW - M then
+            if not known then
+                if sen.trfS1[i] >= a then return true end
+            elseif vs < -TUNE.TRAFFIC_ONCOMING_MPS then
+                local age = (now - (sen.trfT[i] or now)) / 1000
+                if age < 0 then age = 0 elseif age > 1 then age = 1 end
+                local s0, s1 = sen.trfS0[i] + vs * age, sen.trfS1[i] + vs * age
+                if s1 >= a then
+                    local t1 = s0 > d and (s0 - d) / -vs or 0
+                    local t2 = (s1 - a) / -vs
+                    if t1 < tD + 1 and t2 > tA - 1 then return true end
+                end
             end
         end
     end

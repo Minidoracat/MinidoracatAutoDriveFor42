@@ -17500,6 +17500,21 @@ function drive.scenarioTraffic()
         .. tostring(st.sensor.trfL0[1]) .. " vl=" .. tostring(st.sensor.trfVl[1]) .. "）")
     drive.clearVehicleGeom(cross._cells)
 
+    -- (park-out) 1002s：對向車正偏在它自己的路邊（繞它那側的東西），之後會回它的車道：承諾借道前的會車
+    --   檢查取「現在的位置」與「它的常駐線」的聯集（E2E meet park 1002r 正面相撞）。違規證明：拿掉聯集即紅。
+    do
+        arm(8)
+        local parkedO = car(40, 2, 0)
+        parkedO._stopped = true
+        local onO = car(75, -4.4, math.pi)
+        traffic(onO, -3, 2)
+        checkTrue(st.sensor.trfN >= 1 and st.sensor.trfL1[1] < -2.9,
+            "(park-out) 對向車整台偏在它的路邊外側（l1=" .. tostring(st.sensor.trfL1[1]) .. "）")
+        checkFalse(st.dodging, "(park-out) 對向車偏在路邊：會回它的車道，照樣不切出去")
+        drive.clearVehicleGeom(onO._cells)
+        drive.clearVehicleGeom(parkedO._cells)
+        for k = #shown, 1, -1 do shown[k] = nil end -- (park) 下面數提示次數
+    end
     -- (park) 我方車道停一台車、要切到對向車道繞：對向來車會進繞行段＝先別切出去（defer
     --   why=traffic，停在繞行起點前讓它過）；對向車走了才承諾繞行。
     arm(8)
