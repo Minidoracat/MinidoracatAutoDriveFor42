@@ -162,10 +162,17 @@ local CURVE_FF_FRAC = 0.75
 -- ≥ FF_HI.minFF、實速 ≥ FF_HI.learnKmh；ESC 限幅讓 steer 逐幀跳動，yaw 與 steer 各自 EWMA 後相除，不用逐幀
 -- 比值）；累計學滿 FF_HI.learnS 才在 fromKmh→fullKmh 之間改用高速增益、FRAC 補到 FF_HI.frac，之前照舊（0.7／低速增益）。
 -- 離線閉環（test_follower 情境 35，plant 增益正確時）：72 km/h R65 外漂 1.24→0.8 級、45 km/h R30 0.98→0.5 級。
+-- 只在弧上穩態學、steer 補一階延遲（1002u）：yaw 落後 steer 約 τ，前饋收尾／爬升時 steer 先降、yaw 還在＝比值灌高
+-- （1001h E2E rc45arc 1006：連續小弧間前饋鋸齒，0.97→2.19，R60 彎前饋只剩四成外漂接觸）。學習改成①前饋整份
+-- （ramp 1 且車在弧上，見 arcFeedForward 的 state.ffFull）連續 settleS 以上，②steer 那邊用 settleS 一階低通後的值
+-- （yaw＝G·lag(u)，兩邊同步）。離線閉環（plant τ 0.25–0.5、G 0.6–1.0，同向／交錯小弧與大彎，70 km/h）學到的最大值
+-- 最多 +20%（τ 0.25 交錯 18°），舊學法同場景最多 +32%（τ 0.5）、實機 +125%；只做①最多 +24%、只做②最多 +77%（plant 比假設快）。
 -- 一張表（control 的 upvalue 已貼 60 上限）：fromKmh→fullKmh 補足區間、frac＝補足到的 FRAC、
--- learnKmh／minFF＝高速增益的學習條件（實速／上幀前饋量）、learnS＝學滿才補足
-local FF_HI = { fromKmh = 30, fullKmh = 55, frac = 0.9, learnKmh = 40, minFF = 0.1, learnS = 0.5 }
+-- learnKmh／minFF＝高速增益的學習條件（實速／上幀前饋量）、learnS＝學滿才補足、settleS＝假設的 yaw 延遲 τ
+-- （穩態門檻與 steer 低通共用；前饋進弧爬升的 CURVE_FF_LEAD_S 是同一個量）
 local CURVE_FF_LEAD_S = 0.35
+local FF_HI = { fromKmh = 30, fullKmh = 55, frac = 0.9, learnKmh = 40, minFF = 0.1, learnS = 0.5,
+    settleS = CURVE_FF_LEAD_S }
 local CURVE_FF_MAX = 0.8 -- 小增益長車不能用倒數把前饋放大成整車橫推；回饋仍保留完整權威。
 local YAW_GAIN_INIT = 0.8
 local YAW_GAIN_TAU_S = 0.5
@@ -209,8 +216,9 @@ local TURN_HARD_MS = 50 / 3.6        -- 急折點硬上限：50 km/h（激進化
 -- 變長，弦半徑也變大——用最短前視會把 25° 折點壓到 40）；下限車輛 rMin 的圓。lat 9：90° → 27.7 km/h、
 -- 60° → 34、25° → 59.5（≈全速）；10° 以下＝路網量化抖動不算折。adaptive 剖面的 fallback 頂點
 --（角度合格卻建不出弧＝路面容不下 rMin 的圓）只給 sqrt(aLat·rMin)：F350 → 20（lat 7）、RaceCar 14，
--- 切出路面由 contact／繞行兜底；MIN_SPEED 地板照舊。
-local TURN_GEOM_MIN_RAD = 10 * PI / 180
+-- 切出路面由 contact／繞行兜底；MIN_SPEED 地板照舊。1002u 起 adaptive 剖面的 10–20° 折點先試建小弧
+--（MDADDynamics.FILLET_SMALL_RAD 同一條線），建不出來的仍走這裡的弦式。
+local TURN_GEOM_MIN_RAD = MDADDynamics.FILLET_SMALL_RAD
 MDADFollower.TURN_GEOM_MIN_RAD = TURN_GEOM_MIN_RAD -- Driver 證明線小折點等效曲率的同一條界線（Drive.smallKinkKappa）
 local SEARCH_FWD = 12         -- 往前 12 段
 local REWIND_MAX = 1          -- 單幀最多允許倒退 1 段
@@ -1171,6 +1179,7 @@ end
 local LANE_FF_STEP_M = 2
 local function arcFeedForward(profile, state, arcK, bestI, sNow, aspeed, tangentOn, yawGain, ovDen)
     local kap = profile.kappa
+    state.ffFull = false
     if not kap or arcK == nil or aspeed <= 0.5 then return 0 end
     local s, n, segKindW, segH = profile.s, profile.n, profile.segKind, profile.segH
     local v = aspeed * MS_PER_KMH
@@ -1209,16 +1218,31 @@ local function arcFeedForward(profile, state, arcK, bestI, sNow, aspeed, tangent
     -- 結束 → 前饋線性收到 0，yaw 率在出口前就降下來。一刀歸零時 yaw 滯後讓車頭出口後多轉
     -- 0.1 rad、切進彎內 0.5m（0928o 離線閉環 G 1.0／τ 0.25；E2E rc16–rc18 出彎後 2 秒內切內
     -- p90 0.7–0.8m）。反向相鄰弧（S 彎）以轉向變號當收尾點。
+    -- 弧間短直段（1002u）：小折角連續建弧時相鄰弧各吃共用段 45%，中間留 10% 直段；直段短於 lead 時 yaw
+    -- 收不掉也建不回來（一階延遲），照收尾＝每個子弧之間一個前饋鋸齒（實機 rc45arc 1006 sff 在 −0.22／−0.06／
+    -- −0.13 間跳）。收尾越過短直段接下一個同向弧。直段上下一弧的爬升照舊（1−距離/lead）：試過直段上保持 1，
+    -- 直段接近 lead 長時多轉（離線同向 18°×6 每 20m、50 km/h 外漂 0.23→0.45），撤。
+    -- 離線閉環（同向小弧 12–25°、50／70 km/h、plant G 0.6–1.0／τ 0.25–0.5）外漂最大值多數減半（G0.6 70 km/h
+    -- 15°×8 每 15m：2.20→1.08）；直段接近 lead 的同向 18° 每 20m 略增（0.47→0.60），門檻減半反而重車更差，留 lead。
     if ramp > 0 and k == bestI and lead > 0 then
         local e = k
-        while e < n - 1 and segKindW[e + 1] == MDADDynamics.SEG_ARC and s[e + 1] < sNow + lead do
-            local dn = wrapPi(segH[e + 1] - segH[e])
-            if dn * dth < 0 and (dn > 1e-3 or dn < -1e-3) then break end
-            e = e + 1
+        while e < n - 1 and s[e + 1] < sNow + lead do
+            local nx = e + 1
+            if segKindW[nx] ~= MDADDynamics.SEG_ARC then
+                while nx < n - 1 and segKindW[nx] ~= MDADDynamics.SEG_ARC and s[nx + 1] - s[e + 1] < lead do
+                    nx = nx + 1
+                end
+                if segKindW[nx] ~= MDADDynamics.SEG_ARC or s[nx] - s[e + 1] >= lead then break end
+            end
+            local dn = wrapPi(segH[nx] - segH[nx - 1])
+            if (nx > e + 1 and dn * dth <= 0) or (dn * dth < 0 and (dn > 1e-3 or dn < -1e-3)) then break end
+            e = nx
         end
         local endS = s[e + 1]
         if endS < sNow + lead then ramp = ramp * (endS - sNow) / lead end
     end
+    -- 前饋整份在推（不在爬升／收尾）：高速增益只學這種幀（FF_HI）
+    state.ffFull = ramp >= 1 and k == bestI
     -- 高速：學到高速增益後才補足（FF_HI）
     local frac, g = CURVE_FF_FRAC, yawGain
     local gHi = state.yawGainHi
@@ -2058,7 +2082,7 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         steer = (err >= 0) and STEER_MAX or -STEER_MAX
         if targetSpeed > ROTATE_SPEED_KMH then targetSpeed = ROTATE_SPEED_KMH end
         state.errPrev = err
-        state.ffSteer = 0
+        state.ffSteer, state.ffSteadyT, state.hiSteerLag = 0, 0, nil
         state.prevHeading = nil -- 調頭飽和轉向不進增益估計
     else
         local ePrev = state.errPrev
@@ -2121,25 +2145,35 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         -- 上幀 steer 被 Driver 的 yaw 率限制（ESC）收掉的幀不學：那是側滑（yaw 超過物理上限）、steer 被砍到 0，
         -- yaw／steer 一路衝到上限 3（0928o E2E rc20 1017：58 km/h 側滑一幀 1.06→3.00）；高估後前饋縮到門檻下、
         -- 之後的弧再也學不回來，整趟 45–55 km/h 的彎只剩三分之一前饋、外漂 0.8m。低速學習隨時會重學，不必擋。
+        -- 1002u：只學前饋整份連續 settleS 以上的幀，steer 用 settleS 一階低通後的值（每幀都更新＝跟著真實施力歷史）。
         local pff = state.ffSteer
-        if isFinite(ph) and dt > 1e-4 and dt < 0.5 and aspeed >= FF_HI.learnKmh and isFinite(pff)
-                and (pff >= FF_HI.minFF or pff <= -FF_HI.minFF) and state.escLimited ~= true then
+        local ul = state.hiSteerLag
+        do
             local ap = state.appliedSteer
             if not isFinite(ap) then ap = state.steerOut end
-            if isFinite(ap) then
-                local sg = pff > 0 and 1 or -1
-                local alpha = dt / YAW_GAIN_TAU_S
-                if alpha > 1 then alpha = 1 end
-                local yf, sf = state.hiYawF or 0, state.hiSteerF or 0
-                yf = yf + (sg * wrapPi(heading - ph) / dt - yf) * alpha
-                sf = sf + (sg * ap - sf) * alpha
-                state.hiYawF, state.hiSteerF = yf, sf
-                state.hiLearnT = (state.hiLearnT or 0) + dt
-                if sf >= FF_HI.minFF and yf > 0 then
-                    local g = yf / sf
-                    if g < YAW_GAIN_LO then g = YAW_GAIN_LO elseif g > YAW_GAIN_HI then g = YAW_GAIN_HI end
-                    state.yawGainHi = g
-                end
+            if isFinite(ap) and dt > 1e-4 and dt < 0.5 then
+                if not isFinite(ul) then ul = ap end
+                local a = dt / FF_HI.settleS
+                if a > 1 then a = 1 end
+                ul = ul + (ap - ul) * a
+                state.hiSteerLag = ul
+            end
+        end
+        if isFinite(ph) and dt > 1e-4 and dt < 0.5 and aspeed >= FF_HI.learnKmh and isFinite(pff)
+                and (pff >= FF_HI.minFF or pff <= -FF_HI.minFF) and state.escLimited ~= true
+                and (state.ffSteadyT or 0) >= FF_HI.settleS and isFinite(ul) then
+            local sg = pff > 0 and 1 or -1
+            local alpha = dt / YAW_GAIN_TAU_S
+            if alpha > 1 then alpha = 1 end
+            local yf, sf = state.hiYawF or 0, state.hiSteerF or 0
+            yf = yf + (sg * wrapPi(heading - ph) / dt - yf) * alpha
+            sf = sf + (sg * ul - sf) * alpha
+            state.hiYawF, state.hiSteerF = yf, sf
+            state.hiLearnT = (state.hiLearnT or 0) + dt
+            if sf >= FF_HI.minFF and yf > 0 then
+                local g = yf / sf
+                if g < YAW_GAIN_LO then g = YAW_GAIN_LO elseif g > YAW_GAIN_HI then g = YAW_GAIN_HI end
+                state.yawGainHi = g
             end
         end
         state.prevHeading = heading
@@ -2153,6 +2187,7 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
             elseif steer < -STEER_MAX then steer = -STEER_MAX end
         end
         state.ffSteer = ff
+        state.ffSteadyT = state.ffFull and (state.ffSteadyT or 0) + dt or 0
         state.steerOut = steer
     end
 
@@ -2205,7 +2240,7 @@ function MDADFollower.resetControl(state)
     state.offL = nil
     state.trackTangent = false
     state.tangentOn = false
-    state.ffSteer = 0
+    state.ffSteer, state.ffSteadyT, state.hiSteerLag = 0, 0, nil -- 低通／穩態計時跟施力歷史一起斷
     state.prevHeading = nil -- yawGain 是車的性質，跨 cutover／脫困保留；只斷差分
     state.slipX, state.slip = nil, 0 -- 側滑弦估計同樣斷差分（瞬移／脫困後重量）
     releaseExactLine(state)

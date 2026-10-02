@@ -46,8 +46,17 @@ D.SOFT_LOOKAHEAD_S = 4.5 -- 0925d 3→4.5：70 km/h 看 87m，交錯／成群殭
 D.ALIGN_BREAK_RAD = 22 * PI / 180
 D.ALIGN_HEADING_RAD = 15 * PI / 180
 D.FILLET_SAMPLE_MAX_M = 1
--- 不要降到 15°（1001h E2E：高速小弧變多，高速前饋增益被入出弧過渡灌高，R60 彎 80 km/h 外漂 1.2m 接觸）
+-- 圓角門檻：≥ FILLET_MIN_RAD 建不出弧＝fallback 頂點（爬行）。FILLET_SMALL_RAD..FILLET_MIN_RAD 的小折角（1002u）也試建弧，
+-- 建不出來維持 LINE（不爬行，照舊由前視弦／外接圓限速）；以下＝路網量化抖動不算折（Follower TURN_GEOM_MIN_RAD 同一條線）。
+-- 舊制小折角只留頂點：證明線 1m 取樣的外接圓把 15° 量成 R≈4m，彎道每個 10–20° 折點都減到 20–40 km/h。
+-- 1001h 試過把門檻降到 15° 撤回（高速小弧變多，高速前饋增益被入出弧過渡灌高，R60 彎 80 km/h 外漂 1.2m 接觸）——
+-- 1002u 先修增益學習（Follower FF_HI：只在弧上穩態、steer 補一階 yaw 延遲）與弧間短直段的前饋鋸齒才放。
+-- 小折角的弧另限切角（弧中點離頂點 ≤ FILLET_SMALL_CUT_M）：切角越大，彎內側的常駐車道被 laneRoom 夾回越多，
+-- 夾限的 ramp（LANE_BLEND 12m）本身的曲率反而變成限速（離線 8m 路右轉內側：切角 1.0 → 53 km/h、0.6 → 64–71）；
+-- 外側則車心往中線移切角那麼多（8m 路靠右 2m：0.6 時車左緣離中線 0.5m）。
 D.FILLET_MIN_RAD = DEG20
+D.FILLET_SMALL_RAD = 10 * PI / 180
+D.FILLET_SMALL_CUT_M = 0.6
 -- 90°→100°（2026-09-02 s013 定罪：vanilla 折線量化讓路口折角 90.9°，舊上限
 -- 90° 整數判為「>90° 急折」→ 不建弧、保留折點爬行；F350（rMin 4.3）根本轉不出
 -- 折點，pure pursuit 切內 1m 撞進路口內側圍籬）。弧能不能建仍由 band／臂長閘門
@@ -868,6 +877,8 @@ end
 -- Builds an owned path copy. Eligible corners use tangent circular geometry, emitted
 -- as a driven polyline with <=1m chords and <=2° tangent error; infeasible/>90°
 -- corners retain the source vertex as SEG_FALLBACK. Adjacent 45% shares consume <=90%.
+-- Small corners (FILLET_SMALL_RAD..FILLET_MIN_RAD) also try an arc, cut-capped; if none
+-- fits they stay SEG_LINE (never fallback) and only use budget left after large corners.
 function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
         outPts, outSurface, outWidth, outKind, outSourceA, outSourceB, outRadius)
     if type(srcPts) ~= "table" or type(srcSurface) ~= "table" or type(srcWidth) ~= "table"
@@ -930,7 +941,7 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
             if isBend[i] then acc, to = 0, i end
         end
     end
-    local radii, signA, tanS, fallbackCorner = {}, {}, {}, {}
+    local radii, signA, tanS, fallbackCorner, thetaA = {}, {}, {}, {}, {}
     local filletN, fallbackN = 0, 0
     for i = 2, n - 1 do
         local ax, ay = srcPts[i * 2 - 3], srcPts[i * 2 - 2]
@@ -939,7 +950,8 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
         local ix, iy, ox, oy, il, ol = cornerDirs(ax, ay, bx, by, cx, cy)
         if il > EPS and ol > EPS then
             local theta = cornerTheta(ix, iy, ox, oy)
-            if theta >= D.FILLET_MIN_RAD then
+            local small = theta < D.FILLET_MIN_RAD
+            if theta >= D.FILLET_SMALL_RAD then
                 local cross = ix * oy - iy * ox
                 local radius
                 if i < fitN and theta <= D.FILLET_MAX_RAD and cross * cross > EPS then
@@ -957,6 +969,13 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
                         local bandUpper = maxBand / sagittaScale
                         if bandUpper < upper then upper = bandUpper end
                     end
+                    -- 小折角：弧中點離頂點 R·(1/cos(θ/2)−1) ≤ 切角上限（理由見 FILLET_SMALL_CUT_M）
+                    if small then
+                        local cutScale = 1 / cos(theta * 0.5) - 1
+                        if cutScale > EPS and D.FILLET_SMALL_CUT_M / cutScale < upper then
+                            upper = D.FILLET_SMALL_CUT_M / cutScale
+                        end
+                    end
                     local sign = cross >= 0 and 1 or -1
                     local inFrom, outTo = armFrom[i], armTo[i]
                     if bandA > 0 and bandB > 0 and upper >= rMin
@@ -973,13 +992,12 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
                             end
                             radius = lo
                         end
-                        radii[i], signA[i], tanS[i] = radius, sign, radius * tanHalf
+                        radii[i], signA[i], tanS[i], thetaA[i] = radius, sign, radius * tanHalf, theta
                     end
                 end
                 -- Angle-eligible corners that cannot host an arc keep the source
-                -- vertex; the explicit crawl fallback owns them.
-
-                if not radius then
+                -- vertex; the explicit crawl fallback owns them. Small corners stay LINE.
+                if not radius and not small then
                     fallbackN = fallbackN + 1
                     fallbackCorner[i] = true
                 end
@@ -991,15 +1009,13 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
     -- 零長 → obb 警戒帽 18 km/h 常駐全程，直路也是）。超出預算不再整條放棄：
     -- 從超出的那個彎起降為 fallback 折點（各佔 1 點，剩餘角與終點的 1 點先保留），
     -- 前段弧照建、band 證明照常成立；後段折點由 curveV 折角限速與 sweep 管。
+    -- 小折角的弧（1002u）排在大角之後：第一輪只算大角、小角先記 1 點；第二輪才用剩下的預算，
+    -- 塞不下的小角退回 LINE（不標 fallback）——小弧再多也不會把後面的大角擠成爬行折點。
     local predicted = 2
     for i = 2, n - 1 do
         local need = 1
-        if radii[i] then
-            local ix, iy, ox, oy = cornerDirs(
-                srcPts[i * 2 - 3], srcPts[i * 2 - 2],
-                srcPts[i * 2 - 1], srcPts[i * 2],
-                srcPts[i * 2 + 1], srcPts[i * 2 + 2])
-            local theta = cornerTheta(ix, iy, ox, oy)
+        local theta = thetaA[i]
+        if theta and theta >= D.FILLET_MIN_RAD then
             need = 1 + arcSteps(radii[i] * theta, theta)
             if predicted + need + (n - 1 - i) > outputMax then
                 radii[i], signA[i], tanS[i] = nil, nil, nil
@@ -1009,6 +1025,17 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
             end
         end
         predicted = predicted + need
+    end
+    for i = 2, n - 1 do
+        local theta = thetaA[i]
+        if theta and radii[i] and theta < D.FILLET_MIN_RAD then
+            local extra = arcSteps(radii[i] * theta, theta)
+            if predicted + extra > outputMax then
+                radii[i], signA[i], tanS[i] = nil, nil, nil
+            else
+                predicted = predicted + extra
+            end
+        end
     end
 
     -- 臂長預算升級後 tangent 點可落在角的緊鄰段之外（共線臂上游），source

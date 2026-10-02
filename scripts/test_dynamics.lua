@@ -531,6 +531,70 @@ do
     check(pairOk, "臂窗 nearestRawSeg：sourceA 與起點全窗最近段一致")
 end
 
+-- 1002u：10–20° 小折角也建弧（證明線不再把 15° 量成外接圓 R≈4m），但①切角（弧中點離頂點）≤ FILLET_SMALL_CUT_M，
+-- ②建不出來維持 LINE、不標 fallback（不爬行），③輸出預算先給大角、小弧只用剩下的。
+-- 違規證明：拿掉切角上限＝(1) 紅；小角建不出標 fallback＝(3) 紅；預算單趟照順序＝(4) 大角被擠成 fallback 紅。
+scenario("1002u 小折角圓角：切角上限、建不出維持 LINE、預算大角優先")
+do
+    local function corner(deg, w, arm)
+        local th = math.rad(deg)
+        local pts = { 0, 0, arm, 0, arm + arm * math.cos(th), arm * math.sin(th) }
+        local kind, rad = {}, {}
+        local n, fn, fb = D.buildFilletPath(pts, { 1, 1 }, { w, w }, 1, 3, {}, {}, {}, kind, {}, {}, rad)
+        local rMax, sawFallback = 0, false
+        for i = 1, n - 1 do
+            if kind[i] == D.SEG_ARC and rad[i] > rMax then rMax = rad[i] end
+            if kind[i] == D.SEG_FALLBACK then sawFallback = true end
+        end
+        return fn, fb, rMax, sawFallback
+    end
+    -- (1) 15°、臂 60m、路寬 10：臂長（205m）與帶寬（420m）都比切角上限（69.5m）寬鬆＝切角綁
+    local fn, fb, r = corner(15, 10, 60)
+    eq(fn, 1, "(1) 15° 建弧")
+    eq(fb, 0, "(1) 15° 不 fallback")
+    near(r * (1 / math.cos(math.rad(7.5)) - 1), D.FILLET_SMALL_CUT_M, 1e-6, "(1) 切角＝上限（R " .. r .. "）")
+    -- (2) 9°（< FILLET_SMALL_RAD）：照舊不建弧、不 fallback
+    fn, fb = corner(9, 10, 60)
+    check(fn == 0 and fb == 0, "(2) 9° 不建弧也不 fallback（fn " .. fn .. "、fb " .. fb .. "）")
+    -- (3) 帶寬 ≤ 0（路寬 2.6、halfW 1）：15° 建不出 → LINE、不 fallback；同路寬 25° 照舊 fallback
+    local sawFb
+    fn, fb, _, sawFb = corner(15, 2.6, 60)
+    check(fn == 0 and fb == 0 and not sawFb, "(3) 15° 建不出弧維持 LINE（fn " .. fn .. "、fb " .. fb .. "）")
+    fn, fb, _, sawFb = corner(25, 2.6, 60)
+    check(fn == 0 and fb == 1 and sawFb, "(3) 同路寬 25° 照舊 fallback")
+    -- (4) 40 個 ±15° 小角（每個約 20 點）後接 60° 大角，輸出上限壓到 200：大角拿到弧、小角多出的退回 LINE
+    local pts, ss, ww = { 0, 0 }, {}, {}
+    local h, x, y = 0, 0, 0
+    for k = 1, 41 do
+        x, y = x + 30 * math.cos(h), y + 30 * math.sin(h)
+        pts[#pts + 1], pts[#pts + 2] = x, y
+        h = h + math.rad(k <= 40 and (k % 2 == 1 and 15 or -15) or 60)
+    end
+    x, y = x + 30 * math.cos(h), y + 30 * math.sin(h)
+    pts[#pts + 1], pts[#pts + 2] = x, y
+    for i = 1, #pts / 2 - 1 do ss[i], ww[i] = 1, 10 end
+    local bigX, bigY = pts[#pts - 3], pts[#pts - 2]
+    local savedMax = D.FILLET_OUTPUT_MAX
+    D.FILLET_OUTPUT_MAX = 200
+    local op, ok = {}, {}
+    local on, ofn, ofb, ovalid = D.buildFilletPath(pts, ss, ww, 1, 3, op, {}, {}, ok, {}, {}, {})
+    D.FILLET_OUTPUT_MAX = savedMax
+    local bigArc, keptBig = false, false
+    for i = 1, on - 1 do
+        if ok[i] == D.SEG_ARC then
+            local d = (op[i * 2 - 1] - bigX) ^ 2 + (op[i * 2] - bigY) ^ 2
+            if d < 20 * 20 then bigArc = true end
+        end
+    end
+    for i = 1, on do
+        if op[i * 2 - 1] == bigX and op[i * 2] == bigY then keptBig = true end
+    end
+    check(ovalid == true and on <= 200, "(4) 輸出 ≤ 上限（" .. on .. "）")
+    eq(ofb, 0, "(4) 大角沒被小弧擠成 fallback")
+    check(bigArc and not keptBig, "(4) 60° 大角建成弧")
+    check(ofn >= 2 and ofn < 41, "(4) 小弧用剩下的預算、超出的退回 LINE（弧 " .. ofn .. "）")
+end
+
 scenario("hot scalar helpers do not retain per-call tables")
 collectgarbage("collect")
 local kb0 = collectgarbage("count")

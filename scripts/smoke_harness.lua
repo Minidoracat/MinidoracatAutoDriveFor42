@@ -14886,6 +14886,8 @@ local function scenarioPhaseE()
         -- entryLen=entryAvail 類回歸會直接跨回 s<24 被抓；harness 低速
         -- commit 的 required 較短，required 驅動的邊界細分另由
         -- shapeProfile 的 clamp 算式保證。
+        -- 1002u：10° 以上的小折點建成小弧（不再是頂點，轉場跨弧同一般弧段），頂點用 9.5°
+        -- （仍大於 turnPeakS 的 0.15 rad、小於 FILLET_SMALL_RAD）。
         local frameWas = drive.frameMs(8)
         local bendRoute = { pts = {}, segSurface = {}, segWidth = {},
             avoidPenalty = 0, approachSurface = "unknown" }
@@ -14893,7 +14895,7 @@ local function scenarioPhaseE()
             bendRoute.pts[#bendRoute.pts + 1] = i * 4
             bendRoute.pts[#bendRoute.pts + 1] = 0
         end
-        local bendA = math.rad(12)
+        local bendA = math.rad(9.5)
         for i = 1, 25 do
             bendRoute.pts[#bendRoute.pts + 1] = 24 + math.cos(bendA) * i * 4
             bendRoute.pts[#bendRoute.pts + 1] = math.sin(bendA) * i * 4
@@ -15470,8 +15472,9 @@ local function scenarioNarrowLaneProof()
         drive.clearCell(cx, -1)
     end
     -- (kink-small) 1002t：極小角度（< MDADFollower.TURN_GEOM_MIN_RAD＝10°）未圓角折點，證明線外接圓 κ 改用純追跡弦半徑
-    --   （Follower geometryStep 同一個弦），車道包絡不再在路網量化抖動前急煞；10–20° 照外接圓慢（E2E rc56b 0008：18.4°
-    --   折點 72 km/h 外漂 1.65m 擦撞）。違規證明：拿掉替換＝8° 紅；門檻放回 FILLET_MIN_RAD（20°）＝15° 紅。
+    --   （Follower geometryStep 同一個弦），車道包絡不再在路網量化抖動前急煞。違規證明：拿掉替換＝8° 紅。
+    --   1002u：10–20° 改建小弧（切角 ≤ FILLET_SMALL_CUT_M），證明線走弧＝κ≈1/R，不再照外接圓量成 R≈4m（舊制 15° 實得
+    --   κ≈0.2、車道包絡 20 km/h 級）。違規證明：FILLET_SMALL_RAD 拉回 20°（不建小弧）＝15° 紅。
     for _, deg in ipairs({ 8, 15 }) do
         MDAD.Drive.stop(0, nil)
         drive.fillWorld(-10, 160, -20, 60)
@@ -15481,7 +15484,7 @@ local function scenarioNarrowLaneProof()
             segSurface = { "paved", "paved" }, segWidth = { 9.14, 9.14 } }
         dveh._x, dveh._y, dveh._speed = 20, 1.5, 40
         setHeading(dveh, 0)
-        checkTrue(MDAD.Drive.start(dp), "(kink-small) " .. deg .. "° 未圓角折點路線啟動")
+        checkTrue(MDAD.Drive.start(dp), "(kink-small) " .. deg .. "° 小折點路線啟動")
         for _ = 1, 8 do driveTick(dp, dveh) end
         for _ = 1, 4 do drive.scanRound() end
         local st = MDAD.Drive.debugSession(0)
@@ -15489,8 +15492,6 @@ local function scenarioNarrowLaneProof()
         for i = 2, p.n - 1 do
             if math.abs(p.s[i] - 60) < 1.5 then v = i end
         end
-        checkTrue(v ~= nil and p.segKind[v - 1] == MDADDynamics.SEG_LINE and p.segKind[v] == MDADDynamics.SEG_LINE,
-            "(kink-small) " .. deg .. "° 頂點沒做圓角（LINE 段）")
         local kmax, envAt = 0, nil
         for k = 1, (st.verifyLineN or 0) do
             local sk = st.laneCurveS0 + (k - 1) * MDADFollower.OV_STEP
@@ -15501,15 +15502,59 @@ local function scenarioNarrowLaneProof()
             end
         end
         if deg < 10 then
+            checkTrue(v ~= nil and p.segKind[v - 1] == MDADDynamics.SEG_LINE and p.segKind[v] == MDADDynamics.SEG_LINE,
+                "(kink-small) 8° 頂點沒做圓角（LINE 段）")
             checkTrue(envAt ~= nil and kmax < 0.05,
                 "(kink-small) 8° 頂點附近 κ 用前視弦半徑（實得 " .. tostring(kmax) .. "；外接圓約 0.23）")
             checkTrue(v ~= nil and envAt ~= nil and envAt >= p.curveV[v] * 3.6 - 1,
                 "(kink-small) 8° 車道包絡不低於 Follower 頂點速（包絡 " .. tostring(envAt) .. "、頂點 "
                 .. tostring(v and p.curveV[v] * 3.6) .. "）")
         else
-            checkTrue(envAt ~= nil and kmax > 0.15,
-                "(kink-small) 15° 頂點照外接圓 κ（實得 " .. tostring(kmax) .. "；弦半徑約 0.02）")
+            -- 切角＝R·(1/cos(θ/2)−1)：上限 0.6m → R≈69.5m（臂長 60m 的 45%＝27m 對應 205m，切角先綁）
+            local arcN, rMax = 0, 0
+            for i = 1, p.n - 1 do
+                if p.segKind[i] == MDADDynamics.SEG_ARC then
+                    arcN = arcN + 1
+                    if p.filletRadius[i] > rMax then rMax = p.filletRadius[i] end
+                end
+            end
+            local cut = rMax * (1 / math.cos(th * 0.5) - 1)
+            checkTrue(arcN > 0 and cut <= MDADDynamics.FILLET_SMALL_CUT_M + 1e-6 and cut > MDADDynamics.FILLET_SMALL_CUT_M - 0.05,
+                "(kink-small) 15° 建小弧、切角貼上限（弧段 " .. arcN .. "、R " .. string.format("%.1f", rMax)
+                .. "、切角 " .. string.format("%.2f", cut) .. "m）")
+            checkTrue(envAt ~= nil and kmax < 0.03 and envAt > 60,
+                "(kink-small) 15° 證明線走弧：κ " .. tostring(kmax) .. " < 0.03、車道包絡 " .. tostring(envAt)
+                .. " > 60（舊制外接圓 κ≈0.2）")
         end
+    end
+    -- (kink-short) 1002u：10–20° 但建不出小弧（臂太短：15°＋17° 兩折點只隔 0.5m，切點要的 R≈1.6m 小於 rMin 1.85）＝留 LINE 頂點，
+    --   證明線照外接圓（E2E rc56b 0008：18.4° 未圓角頂點以前視弦放行、72 km/h 外漂 1.65m）。
+    --   違規證明：Drive.smallKinkKappa 門檻放回 FILLET_MIN_RAD（20°）＝紅。
+    do
+        MDAD.Drive.stop(0, nil)
+        drive.fillWorld(-10, 160, -20, 60)
+        drive.putRoad(-10, 160, -20, 60)
+        local a1, a2 = math.rad(15), math.rad(32)
+        local x1, y1 = 60 + 0.5 * math.cos(a1), 0.5 * math.sin(a1)
+        drive.nav.route = { pts = { 0, 0, 60, 0, x1, y1, x1 + 80 * math.cos(a2), y1 + 80 * math.sin(a2) },
+            segSurface = { "paved", "paved", "paved" }, segWidth = { 9.14, 9.14, 9.14 } }
+        dveh._x, dveh._y, dveh._speed = 20, 1.5, 40
+        setHeading(dveh, 0)
+        checkTrue(MDAD.Drive.start(dp), "(kink-short) 短臂雙小折點路線啟動")
+        for _ = 1, 8 do driveTick(dp, dveh) end
+        for _ = 1, 4 do drive.scanRound() end
+        local st = MDAD.Drive.debugSession(0)
+        local p, lineOnly = st.profile, true
+        for i = 1, p.n - 1 do
+            if p.s[i] > 50 and p.s[i] < 70 and p.segKind[i] ~= MDADDynamics.SEG_LINE then lineOnly = false end
+        end
+        local kmax = 0
+        for k = 1, (st.verifyLineN or 0) do
+            local sk = st.laneCurveS0 + (k - 1) * MDADFollower.OV_STEP
+            if math.abs(sk - 60.5) <= 2 and st.verifyKappa[k] > kmax then kmax = st.verifyKappa[k] end
+        end
+        checkTrue(lineOnly, "(kink-short) 臂太短：兩個小折點都留 LINE（不建弧、不標 fallback）")
+        checkTrue(kmax > 0.15, "(kink-short) 未圓角小折點照外接圓 κ（實得 " .. tostring(kmax) .. "）")
     end
     -- (yield-proof) 0924a 正式服兩趟：讓位中 Sensor 不跑，proof 停在讓位前那輪；玩家開過證明線尾，
     --   恢復首幀 currentS > laneCurveEnd → lane-envelope → UnsupportedVehicle 交還。
@@ -18019,6 +18064,8 @@ drive.scenarioApproach()
 -- (xk) 0928i rc6 0070 路口 jog：保持段延過 −75° 大折點後，2.8m 外又一個 19° 小折點落在 c 後 2m 內
 --   → 出口轉場塞不進 → 全部候選 exit-room → 倒車三次交還。緊接的小折點一併在偏移上通過；
 --   大折點（外側偏移繞急彎）照舊拒收。違規證明：拿掉小折點迴圈＝(xk) exit-room 紅。
+--   1002u：19° 起建成小弧（不再是頂點，出口轉場跨弧同一般弧段＝(xk-arc)）；原始頂點規則改用 9.5°
+--   （turnPeakS 的 0.15 rad 看得到、小於 FILLET_SMALL_RAD 不建弧）。
 function drive.scenarioExitKink()
     scenario("繞行出口：保持段延過大折點後緊接小折點，出口轉場放到小折點之後")
     local oldSandbox, oldVeh, oldGet = SandboxVars, dveh, getSpecificPlayer
@@ -18053,7 +18100,7 @@ function drive.scenarioExitKink()
         for _ = 1, 10 do driveTick(dp, dveh) end
         return ok
     end
-    checkTrue(arm(19), "(xk) 大折點後 2.8m 接 19° 小折點：啟動")
+    checkTrue(arm(9.5), "(xk) 大折點後 2.8m 接 9.5° 小折點：啟動")
     local st = MDAD.Drive.debugSession(0)
     checkTrue(st ~= nil and st.profile ~= nil and st.profile.ready == true, "(xk) 剖面建好")
     -- 群在大折點前結束（c=39.5），走廊給的出口很短（d=43）：上面的既有規則把保持段延到大折點後 1m
@@ -18061,14 +18108,28 @@ function drive.scenarioExitKink()
     checkTrue(ok == true and rc ~= nil and rc > 42.8 and rd > rc,
         "(xk) 小折點一併在偏移上通過、出口放到它之後（ok=" .. tostring(ok) .. " c=" .. tostring(rc)
         .. " d=" .. tostring(rd) .. " why=" .. tostring(why) .. "）")
-    -- 門檻以上的折點照舊拒收（外側偏移繞急彎＝車追不上、切內）：門檻暫時壓到 19° 以下
+    -- 門檻以上的折點照舊拒收（外側偏移繞急彎＝車追不上、切內）：門檻暫時壓到 9.5° 以下
     local tune = MDAD.Drive.debugTune()
     local oldKink = tune.EXIT_HOLD_KINK_RAD
-    tune.EXIT_HOLD_KINK_RAD = 0.3
+    tune.EXIT_HOLD_KINK_RAD = 0.16
     ok, _, _, rc, rd, why = MDAD.Drive.debugShape(0, 20, 30, 39.5, 43, -1)
     tune.EXIT_HOLD_KINK_RAD = oldKink
     checkTrue(ok == false and why == "exit-room",
         "(xk-big) 超過門檻的緊接折點照舊拒收（ok=" .. tostring(ok) .. " why=" .. tostring(why) .. "）")
+    -- 19°（原案角度）：建成小弧，出口照常放得下（門檻壓低也不拒——弧不是折點）
+    checkTrue(arm(19), "(xk-arc) 大折點後 2.8m 接 19° 小折點：啟動")
+    st = MDAD.Drive.debugSession(0)
+    local arcN = 0
+    for i = 1, st.profile.n - 1 do
+        if st.profile.s[i] > 40 and st.profile.s[i] < 46 and st.profile.segKind[i] == MDADDynamics.SEG_ARC then
+            arcN = arcN + 1
+        end
+    end
+    tune.EXIT_HOLD_KINK_RAD = 0.16
+    ok, _, _, rc, rd, why = MDAD.Drive.debugShape(0, 20, 30, 39.5, 43, -1)
+    tune.EXIT_HOLD_KINK_RAD = oldKink
+    checkTrue(arcN > 0 and ok == true,
+        "(xk-arc) 19° 建成小弧（弧段 " .. arcN .. "）、出口照常（ok=" .. tostring(ok) .. " why=" .. tostring(why) .. "）")
     MDAD.Drive.stop(0, nil)
     drive.frameMs(wasMs)
     MinidoracatMiniMapAPI.navApiVersion = oldApi

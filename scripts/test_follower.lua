@@ -3948,6 +3948,86 @@ do
     checkTrue(inside < 1.0, string.format("4m 路 90° F350 外側 3m：往彎內偏離承諾線 <1m（實得 %.2f）", inside))
 end
 
+scenario("1002u：連續小弧——弧間短直段前饋不鋸齒、高速增益只在弧上穩態學（steer 補一階延遲），不被入出弧過渡灌高")
+do
+    -- 1001h E2E rc45arc 1006：15° 門檻時連續小弧之間前饋收尾＋爬升（sff −0.22／−0.06／−0.13 跳），steer 先降、yaw 還在＝
+    -- 高速增益 0.97→2.19，R60 彎前饋只剩四成外漂接觸。Plant 同情境 35（yaw 一階追 G·u、Driver cross-track 弧段 ×ARC、死區）。
+    -- 違規證明：收尾不越過短直段＝(1) 鋸齒紅、(2) 學不到紅；舊學法（不看穩態、不補延遲）＝(2) 1.55 紅；只看穩態
+    -- 不補延遲＝(3) 0.73 紅；只補延遲不看穩態＝(4) 1.77 紅。
+    local D = MDADDynamics
+    local VP = { valid = true, geometryValid = true, halfW = 0.9, rMin = 4.3, wheelbase = 2.9,
+        delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 120, lookScale = 1.2 }
+    local function road(turns, spacing)
+        local pts, h, x, y = { 0, 0, 200, 0 }, 0, 200, 0
+        for _, t in ipairs(turns) do
+            h = h + math.rad(t)
+            x, y = x + spacing * math.cos(h), y + spacing * math.sin(h)
+            pts[#pts + 1], pts[#pts + 2] = x, y
+        end
+        x, y = x + 250 * math.cos(h), y + 250 * math.sin(h)
+        pts[#pts + 1], pts[#pts + 2] = x, y
+        local ss, ww = {}, {}
+        for k = 1, #pts / 2 - 1 do ss[k], ww[k] = "paved", 8 end
+        return { pts = pts, segSurface = ss, segWidth = ww }
+    end
+    -- 定速閉環：回 (學滿 0.5s 後的最大高速增益／G, 學習秒數, 弧段區內 |前饋| 最小／最大)
+    local function run(route, G, tau)
+        local dt = 1 / 60
+        local p = F.begin(route, 120, 4, VP)
+        while not p.ready do F.stepBuild(p, 4096) end
+        local a0, a1
+        for i = 1, p.n - 1 do
+            if p.segKind[i] == D.SEG_ARC then a0 = a0 or p.s[i]; a1 = p.s[i + 1] end
+        end
+        local st = F.newState()
+        F.setLaneBias(st, 2)
+        F.setRuntimeLimits(st, 3, 6, 7, 3)
+        st.yawGain = 0.8
+        local car = { x = 120, y = 2, h = 0, w = 0, v = 70 / 3.6 }
+        local prevLat, gMax, ffs = nil, 0, {}
+        for _ = 1, 60 * 120 do
+            local steer, _, rem, reached, _, _, latSigned = F.control(p, st, car.x, car.y, car.h, 70, dt)
+            local sNow = p.length - rem
+            local latDev = latSigned - F.laneBiasAt(p, 2, st.idx, sNow)
+            local dLat = prevLat and (latDev - prevLat) / dt or nil
+            if dLat and (dLat > 5 or dLat < -5) then dLat = nil end
+            prevLat = latDev
+            local xg, xm
+            if st.curveHardActive then xg, xm = D.CROSS_TRACK_ARC_GAIN, D.CROSS_TRACK_ARC_MAX end
+            local u = steer - D.crossTrackSteer(latDev, 70, dLat, xg, xm)
+            if u > 5 then u = 5 elseif u < -5 then u = -5 end
+            if u < 0.02 and u > -0.02 then u = 0 end
+            st.appliedSteer, st.escLimited = u, false
+            local wT = G * u
+            local wMax = car.v / VP.rMin
+            if wT > wMax then wT = wMax elseif wT < -wMax then wT = -wMax end
+            car.w = car.w + (wT - car.w) * (dt / tau)
+            car.h = car.h + car.w * dt
+            car.x, car.y = car.x + math.cos(car.h) * car.v * dt, car.y + math.sin(car.h) * car.v * dt
+            if a0 and sNow > a0 + 10 and sNow < a1 - 10 then ffs[#ffs + 1] = st.ffSteer or 0 end
+            if st.yawGainHi and (st.hiLearnT or 0) >= 0.5 and st.yawGainHi > gMax then gMax = st.yawGainHi end
+            if reached or sNow > p.length - 150 then break end
+        end
+        table.sort(ffs)
+        local med = ffs[(#ffs + (#ffs % 2)) / 2] or 0
+        return gMax / G, st.hiLearnT or 0, med > 0 and (ffs[1] or 0) / med or 0, (st.yawGainHi or 0) / G
+    end
+    local same = road({ 15, 15, 15, 15, 15, 15, 15, 15 }, 15)
+    local alt = road({ 18, -18, 18, -18, 18, -18 }, 20)
+    -- (1)(2) 同向 15°×8、每 15m（弧間直段約 1.5m，短於 70 km/h 的 lead 6.8m）
+    local g, learn, ffRatio = run(same, 1.0, 0.35)
+    checkTrue(ffRatio > 0.6, string.format("(1) 連續同向小弧：弧段區內前饋最小／中位 %.2f > 0.6（不在每個子弧間收尾再爬升）", ffRatio))
+    checkTrue(learn >= 0.5 and g > 0.85 and g < 1.15,
+        string.format("(2) 連續同向小弧學得到高速增益、不灌高：學 %.1fs、最大 %.2f×G", learn, g))
+    -- (3) 交錯 ±18°、每 20m（S 彎），G 0.6：steer 不補延遲＝穩態段 yaw 還在追、比值偏低
+    local gEnd
+    g, _, _, gEnd = run(alt, 0.6, 0.35)
+    checkTrue(gEnd > 0.9 and gEnd < 1.1, string.format("(3) 交錯小弧 G 0.6：學到 %.2f×G（不補延遲 0.73）", gEnd))
+    -- (4) 同一條、G 1.0、plant 比假設的 τ 快（0.25）：低通補過頭的入出弧幀由穩態門檻擋掉
+    g = run(alt, 1.0, 0.25)
+    checkTrue(g < 1.4, string.format("(4) τ 0.25 交錯小弧：高速增益最大 %.2f×G < 1.4（不看穩態 1.77）", g))
+end
+
 closeScenario()
 print()
 print("情境 " .. scenarios .. " 個、斷言 " .. assertions .. " 項")

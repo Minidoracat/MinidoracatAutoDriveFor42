@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1002t"
+Drive.REV = "1002u"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -6171,6 +6171,7 @@ end
 -- 這一段 Follower geometryStep 本來就不算折（不給幾何帽），證明線改用同一個前視弦半徑 look(v)/(2 sin(θ/2))。
 -- 10–20° 的未圓角頂點**不換**、照外接圓慢：E2E rc56b 0008（Silverado）以 72 km/h 過 18.4° 折點、出折點外漂 1.65m
 -- 擦撞（同案 rc55 照外接圓 28–43 km/h 通過）；正式服 0.17.0 clip-17 在 18.9° 折點前 42 km/h 也撞（AGENTS 1002b）。
+-- 1002u 起這類折點先試建小弧（MDADDynamics.FILLET_SMALL_*，弧上有前饋與切線追蹤），留在這裡的只剩建不出弧的。
 -- 取樣 sk 離頂點 1.5m 內、頂點兩側都是 LINE 段才換；弧段不動。回 nil＝不換。look 用 Follower 在該頂點的弧帽速。
 function Drive.smallKinkKappa(prof, si, sk)
     local kind, segH, ps = prof.segKind, prof.segH, prof.s
