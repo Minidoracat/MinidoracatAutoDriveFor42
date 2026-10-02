@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1002w"
+Drive.REV = "1002y"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -2229,10 +2229,12 @@ function TRIP.announce(playerObj, playerNum, event)
     end
 end
 
--- v7 近於 5m 時讓 Core 完成本站，再用 adopt 採用其接續結果；不自行宣告到站。
--- v6 沒有被動續行採用協定，保留原備路流程。
-function TRIP.atStop(api, vehicle, x, y)
+-- v7 車已到這一站時讓 Core 完成本站，再用 adopt 採用其接續結果；不自行宣告到站。
+-- v6 沒有被動續行採用協定，保留原備路流程。「到了沒」直接問 Core（isNavLegReached：與它
+-- 自己被動收站同一條規則，路面上的站點量路線終錨，1002y）；沒有這個函式的舊 Core 只量站點 5m。
+function TRIP.atStop(api, vehicle, x, y, playerNum)
     if not TRIP.v7(api) or type(x) ~= "number" or type(y) ~= "number" then return false end
+    if type(api.isNavLegReached) == "function" then return api.isNavLegReached(playerNum) == true end
     local dx, dy = vehicle:getX() - x, vehicle:getY() - y
     return dx * dx + dy * dy <= TRIP.ARRIVE_SQ
 end
@@ -2372,7 +2374,7 @@ function TRIP.stepPrep(playerNum, now)
         local route, _, _, state = fetchRoute(api, playerNum)
         if not TRIP.keepPrep(playerNum, prep) then return nil end
         if state == "noroad" or state == "failed" then
-            if TRIP.atStop(api, vehicle, stopX, stopY) then return nil end
+            if TRIP.atStop(api, vehicle, stopX, stopY, playerNum) then return nil end
             TRIP.cancel(playerNum, prep)
             return TRIP.key(state)
         end
@@ -2420,7 +2422,7 @@ function TRIP.stepPrep(playerNum, now)
     end
     if now < prep.nextMs then return nil end
     prep.nextMs = now + ROUTE_REFRESH_MS
-    if TRIP.atStop(api, vehicle, stopX, stopY) then return nil end
+    if TRIP.atStop(api, vehicle, stopX, stopY, playerNum) then return nil end
     local route, _, _, state = fetchRoute(api, playerNum)
     if not TRIP.keepPrep(playerNum, prep) then return nil end
     if state == "noroad" or state == "failed" then
@@ -2428,6 +2430,8 @@ function TRIP.stepPrep(playerNum, now)
         return TRIP.key(state)
     end
     if not route then return nil end
+    -- 取路之後 Core 才有這一站的終錨：再問一次，車已停在站旁就讓 Core 收站（零長度路線起不了段）
+    if TRIP.atStop(api, vehicle, stopX, stopY, playerNum) then return nil end
     reason = startSession(playerObj, playerNum, prep)
     if not TRIP.keepPrep(playerNum, prep) then return nil end
     if reason then TRIP.cancel(playerNum, prep); return reason end

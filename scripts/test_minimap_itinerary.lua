@@ -191,7 +191,7 @@ do
             startNavItinerary = api.startNavItinerary,
         }
         local buildStep = MDADFollower.stepBuild
-        local function resetTrip(hold)
+        local function resetTrip(hold, ax, ay, bx, by)
             for name, fn in pairs(originals) do api[name] = fn end
             core.navTargetChanged = nil
             MDADFollower.stepBuild = buildStep
@@ -207,8 +207,8 @@ do
             dveh._x, dveh._y, dveh._speed, dveh._stopped, dveh._driver = 0, 0, 0, true, dp
             driveReset(dveh)
             drive.paused = false
-            assert(core.navSetTarget(0, 100, 0, "A"))
-            assert(core.navEditItinerary(0, api.getNavItinerary(0).revision, "append", 200, 0, "B"))
+            assert(core.navSetTarget(0, ax or 100, ay or 0, "A"))
+            assert(core.navEditItinerary(0, api.getNavItinerary(0).revision, "append", bx or 200, by or 0, "B"))
             if hold then
                 local trip = api.getNavItinerary(0)
                 assert(core.navEditItinerary(0, trip.revision, "pause", trip.currentStopId, true))
@@ -520,6 +520,91 @@ do
                 case.label .. "：道路終點照抵達暫停設定（單人暫停一次、MP 不暫停）")
             assert(not MDAD.Drive.isPausePending()
                 and #eventHandlers.OnTickEvenPaused == tickBaseline, case.label .. "：不掛等待事件")
+        end
+        -- 1002y：站點在路面上但過了中線（寬 10 的 Trip Road；站點 y=3，車停在自己車道 y=-2.5）。
+        -- 車心離站點 6.5、離路線終錨 4.3：真 Core 判到站——中途站自動接續、不暫停；最後一站
+        -- 播抵達句、播完才暫停。舊判定只量站點，中途站就判道路終點、停下等玩家步行。
+        resetTrip(false, 100, 3, 200, 3)
+        drive.paused, drive.pauseCalls = false, 0
+        local lane = takeControl()
+        assert(api.getNavTarget(0) == 100, "1002y：先開往過了中線的中途站")
+        dveh._x, dveh._y, dveh._speed, dveh._stopped = 96.5, -2.5, 0, true
+        lane.mode = "arrive"
+        nowMs = nowMs + 300
+        driveTick(dp, dveh)
+        it = api.getNavItinerary(0)
+        assert(it.stops[1].status == "arrived", "1002y：車道上停妥＝到站，不是道路終點")
+        assert(it.phase == "navigating" and api.getNavTarget(0) == 200, "1002y：中途站照常接續下一站")
+        assert(MDAD.Drive.isActive(0) and not isGamePaused() and drive.pauseCalls == 0
+            and not MDAD.Drive.isPausePending(), "1002y：自動接續、不暫停")
+        for _ = 1, 100 do
+            local current = MDAD.Drive.debugSession(0)
+            if current and current.legToken then break end
+            pump()
+        end
+        lane = assert(MDAD.Drive.debugSession(0), "1002y：自動接續真的接管下一段")
+        assert(lane.legToken and lastSound().name == realVoice.soundName("leg_next"), "1002y：接續播接續句")
+        dveh._x, dveh._y, dveh._speed, dveh._stopped = 196.5, -2.5, 0, true
+        lane.mode = "arrive"
+        nowMs = nowMs + 300
+        driveTick(dp, dveh)
+        it = api.getNavItinerary(0)
+        assert(it.phase == "completed" and it.stops[2].status == "arrived", "1002y：最後一站同樣判到站")
+        local laneArrive = lastSound()
+        assert(laneArrive.name == realVoice.soundName("arrive") and MDAD.Drive.isPausePending()
+            and not isGamePaused(), "1002y：播抵達句、先等語音")
+        laneArrive.state = nil
+        voiceTick(150)
+        assert(isGamePaused() and drive.pauseCalls == 1, "1002y：抵達句播完才暫停")
+        -- 反面：站點在路外（終錨北方 9 格，超過半寬 5＋路緣 1），同一停車位置照舊是道路終點
+        resetTrip(false, 100, 9)
+        drive.paused, drive.pauseCalls = false, 0
+        local offRoad = takeControl()
+        local offRef = emitter.nextRef
+        dveh._x, dveh._y, dveh._speed, dveh._stopped = 96.5, -2.5, 0, true
+        offRoad.mode = "arrive"
+        nowMs = nowMs + 300
+        driveTick(dp, dveh)
+        it = api.getNavItinerary(0)
+        assert(it.phase == "approach" and it.stops[1].status == "pending", "1002y：路外站點仍是道路終點")
+        assert(emitter.nextRef == offRef and isGamePaused() and drive.pauseCalls == 1,
+            "1002y：道路終點不播語音、照設定暫停")
+        -- 玩家自己開（沒有自駕接管）：停在自己車道上，Core 用同一條規則收站
+        resetTrip(false, 100, 3)
+        assert(api.setNavContinuation(0, api.getNavItinerary(0).revision, false))
+        drive.paused, drive.pauseCalls = false, 0
+        dveh._x, dveh._y, dveh._stopped = 96.5, -2.5, true
+        for _ = 1, 40 do nowMs = nowMs + 300; fire("OnTickEvenPaused"); fire("OnTick") end
+        it = api.getNavItinerary(0)
+        assert(it.stops[1].status == "arrived" and it.phase == "waiting", "1002y：自己開到車道上停妥，Core 收站")
+        assert(not MDAD.Drive.isActive(0) and not isGamePaused() and drive.pauseCalls == 0,
+            "1002y：沒有自駕就不暫停")
+        -- 1002y 審查：下一站 B 與車投影到同一點（零長度路線，Follower 起不了段）。Driver 備路要問 Core
+        -- 到了沒（isNavLegReached），讓 Core 被動收 B、再採用它啟用的 C；只量站點 5m 會拿零長度路線
+        -- 起段失敗、取消接續，車停在 B 不再自己開往 C。
+        do
+            resetTrip(false, 100, 3, 100, 4)
+            assert(core.navEditItinerary(0, api.getNavItinerary(0).revision, "append", 200, 3, "C"))
+            drive.paused, drive.pauseCalls = false, 0
+            local first = takeControl()
+            dveh._x, dveh._y, dveh._speed, dveh._stopped = 100, -2.5, 0, true
+            first.mode = "arrive"
+            nowMs = nowMs + 300
+            driveTick(dp, dveh)
+            local trip = api.getNavItinerary(0)
+            assert(trip.stops[1].status == "arrived" and MDAD.Drive.isActive(0), "審查：A 到站、接續意圖還在")
+            local cStop = trip.stops[3].id
+            for _ = 1, 100 do
+                local current = MDAD.Drive.debugSession(0)
+                if current and current.legToken and current.legStopId == cStop then break end
+                pump()
+            end
+            trip = api.getNavItinerary(0)
+            local toC = MDAD.Drive.debugSession(0)
+            assert(trip.stops[2].status == "arrived", "審查：B 由 Core 被動收站")
+            assert(toC and toC.legToken and toC.legStopId == cStop and api.getNavTarget(0) == 200,
+                "審查：自動接續一路接到 C，沒有因零長度路線中斷")
+            assert(not isGamePaused() and drive.pauseCalls == 0, "審查：途經站不暫停")
         end
         -- 反面：純 MiniMap（完全沒有自駕）的到站由 Core 自己收站，沒有人動世界速度
         resetTrip(false)
