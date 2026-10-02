@@ -166,6 +166,7 @@
     "UI_MinidoracatAutoDrive_VoiceActor_yui_brief": "Yui（简洁）",
     "UI_MinidoracatAutoDrive_RouteTooFar": "车辆离道路太远（超过 20 米）。自动驾驶只会沿着道路行驶，请先手动开上道路再启动；若已在路上，请把目的地设在你所在的这条路附近。",
     "UI_MinidoracatAutoDrive_TrailerUnsupported": "无法测量挂车尺寸，拖着这台挂车时无法自动驾驶。",
+    "UI_MinidoracatAutoDrive_TrailerFront": "被拖的车连在车头前方，自动驾驶只能往前开、无法推着走。请改从车尾连接后再启动。",
     "UI_MinidoracatAutoDrive_TrailerCorner": "前方转角太急，拖着挂车转不过去，自动驾驶已停车交还。请手动处理或改走其他路线。",
     "UI_MinidoracatAutoDrive_TrailerRotate": "拖着挂车无法原地掉头，也找不到不用掉头的绕行路线，自动驾驶已交还。请手动掉头后再启动。",
     "UI_MinidoracatAutoDrive_TrailerTurn": "拖着挂车不能原地掉头，改走不用掉头的绕行路线。",

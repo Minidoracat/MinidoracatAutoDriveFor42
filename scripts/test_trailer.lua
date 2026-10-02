@@ -111,25 +111,31 @@ for i = 1, 100 do xs[i], ys[i] = -59 + i * 0.5, 0 end
 local ok, hitch, outM = T._simulate(cs, xs, ys, 100, G)
 check(ok and hitch < 1e-6 and outM == 0, "直線：折角 0、不出路面")
 
--- ⑥ attach（0929p 候選線掛車掃掠用的幾何）：掛點在牽引車座標、車身中心在「軸→掛點」座標、axisSign。
---    被倒著拖的車 forward 朝後：軸向要照量到的軸→掛點，不能照 forward（0929p 審查）。
+-- ⑥ attach（0929p 候選線掛車掃掠用的幾何；1002a 拖法通用化）：掛點在牽引車座標、車身中心在「軸→掛點」座標、
+--    axisSign。假車沿 x 軸：牽引車在 0、朝 +x；被拖車車心 cx、forward fwd（±1）、輪 local z、模型 offset z、自己的掛點 local z。
 local function V(x, y, z)
     return { _x = x, _y = y, _z = z,
         x = function(v) return v._x end, y = function(v) return v._y end, z = function(v) return v._z end,
         set = function(v, a, b, cc) v._x, v._y, v._z = a, b, cc; return v end }
 end
 Vector3f = { new = function() return V(0, 0, 0) end }
-local function fakeTrailer(cx, fwdX, wheelZ)
+BaseVehicle = { allocVector3f = function() return V(0, 0, 0) end, releaseVector3f = function() end }
+local function fakeTrailer(o)
     return {
         getScript = function() return {
-            getExtents = function() return V(2.5, 1, 12) end,
+            getExtents = function() return V(o.w or 2.5, 1, o.len) end,
             getCenterOfMassOffset = function() return V(0, 0, 0) end,
+            getModelOffset = function() return o.mz and V(0, 0, o.mz) or nil end,
             getWheelCount = function() return 2 end,
-            getWheel = function() return { getOffset = function() return V(0, 0, wheelZ) end } end,
+            getWheel = function() return { getOffset = function() return V(0, 0, o.wheelZ) end } end,
         } end,
-        getWorldPos = function(_, _, _, lz, out) return out:set(cx + fwdX * lz, 0, 0) end,
-        getForwardVector = function(_, out) return out:set(fwdX, 0, 0) end,
+        getWorldPos = function(_, _, _, lz, out) return out:set(o.cx + o.fwd * lz, 0, 0) end,
+        getForwardVector = function(_, out) return out:set(o.fwd, 0, 0) end,
         getMass = function() return 1500 end,
+        getScriptName = function() return o.name end,
+        getTowAttachmentSelf = function() return "self" end,
+        getTowingWorldPos = function(_, _, out) return out:set(o.cx + o.fwd * o.attZ, 0, 0) end,
+        getUpVectorDot = function() return 1 end,
     }
 end
 local function fakeTractor(trl, hx)
@@ -139,19 +145,48 @@ local function fakeTractor(trl, hx)
         getTowingWorldPos = function(_, _, out) return out:set(hx, 0, 0) end,
         getForwardVector = function(_, out) return out:set(1, 0, 0) end,
         getX = function() return 0 end, getY = function() return 0 end,
+        getScriptName = function() return "Base.PickUpTruck" end,
     }
 end
 local function near(a, b) return type(a) == "number" and math.abs(a - b) < 1e-9 end
--- 正常掛車：車身中心 x=−8、長 12、軸在中心後 4（x=−12），掛點 x=−2（牽引車後 2m）
-local gN = T.attach(fakeTractor(fakeTrailer(-8, 1, -4), -2))
-check(type(gN) == "table" and near(gN.hitchZ, -2) and near(gN.hitchX, 0) and near(gN.boxBack, 6)
-    and near(gN.boxSide, 0) and gN.axisSign == 1 and near(gN.trailLen, 14),
-    "attach 正常掛車：掛點在車後 2m、車身中心在掛點後 6m、軸向同 forward、車位到掛車尾 14m")
--- 被倒著拖：forward 朝 −x，軸（輪子 local z=+2）仍在掛點後方 x=−10
-local gR = T.attach(fakeTractor(fakeTrailer(-8, -1, 2), -5))
-check(type(gR) == "table" and gR.axisSign == -1 and near(gR.L2, 5) and near(gR.boxBack, 3)
-    and near(gR.trailLen, 8),
-    "attach 被倒著拖（forward 朝後）：axisSign −1、車身中心仍在掛點後 3m（照軸→掛點，不照 forward）")
+-- 掛車（腳本名含 Trailer＝剛性連結，不補繩長）：車身中心 x=−8、長 12、軸在中心後 4（x=−12），掛點 x=−2
+local gN = T.attach(fakeTractor(fakeTrailer({ name = "Base.Trailer", cx = -8, fwd = 1, len = 12, wheelZ = -4,
+    attZ = 6 }), -2))
+check(type(gN) == "table" and near(gN.hitchZ, -2) and near(gN.hitchX, 0) and near(gN.L2, 10)
+    and near(gN.boxBack, 6) and near(gN.boxSide, 0) and gN.axisSign == 1 and near(gN.trailLen, 14),
+    "attach 正常掛車：掛點在車後 2m、L2 10、車身中心在掛點後 6m、軸向同 forward、車位到掛車尾 14m")
+-- Autotsar KBAC（Workshop 3402493701，腳本×1.9）：輪 offset z +1.25 被模型 offset −1.25 抵銷＝軸在車心；
+-- 掛點（attachment 3.31＋模型 −1.25）在車心前 2.06。漏加模型 offset＝軸量到掛點旁、L2 0.81 拒絕啟動（玩家實例）。
+local gK = T.attach(fakeTractor(fakeTrailer({ name = "Base.TrailerKbac", cx = -4.06, fwd = 1, w = 1.2, len = 1.78,
+    wheelZ = 1.25, mz = -1.25, attZ = 2.06 }), -2))
+check(type(gK) == "table" and near(gK.L2, 2.06) and gK.axisSign == 1,
+    "attach 模型 offset：KBAC 的軸在車心、L2＝2.06（不是 0.81）")
+-- 一般車互拖、車尾對車尾（原版 TowMenu 先試 trailer↔trailer）：被拖車朝 −x 倒著走、車尾掛點在 x=−2.5，
+-- 繩子還鬆 0.5m（兩台都不是 Trailer＝繩索 1.5m）。掛車尾＝被拖車的車頭 x=−7.1。
+local gB = T.attach(fakeTractor(fakeTrailer({ name = "Base.SmallCar", cx = -4.8, fwd = -1, len = 4.6, wheelZ = 0,
+    attZ = -2.3 }), -2))
+check(type(gB) == "table" and gB.axisSign == -1 and near(gB.L2, 2.8 + 1.0) and near(gB.hitchToRear, 5.1 + 1.0)
+    and near(gB.boxBack, 2.8 + 1.0) and near(gB.trailLen, 2 + 5.1 + 1.0),
+    "attach 車尾對車尾：axisSign −1、尾端取被拖車車頭、軸向長度補上沒拉直的繩長 1.0")
+-- 一般車互拖、車尾對車頭：同樣補繩長
+local gF = T.attach(fakeTractor(fakeTrailer({ name = "Base.SmallCar", cx = -4.7, fwd = 1, len = 4.6, wheelZ = 0,
+    attZ = 2.3 }), -2))
+check(type(gF) == "table" and gF.axisSign == 1 and near(gF.L2, 2.7 + 1.1) and near(gF.hitchToRear, 5.0 + 1.1),
+    "attach 車尾對車頭（繩索）：L2 與尾端都補繩長 1.1")
+-- 掛在牽引車車頭前方（原版 trailerfront↔trailer）：自駕只會往前開＝推著那台車，拒絕並給專屬原因
+local gP = T.attach(fakeTractor(fakeTrailer({ name = "Base.SmallCar", cx = 5.3, fwd = 1, len = 4.6, wheelZ = 0,
+    attZ = -2.3 }), 2.5))
+check(gP == T.KEY_FRONT, "attach 掛在車頭前方：回 KEY_FRONT（got " .. tostring(gP) .. "）")
+check(T.attach(fakeTractor(fakeTrailer({ name = "Base.Trailer", cx = -8, fwd = 1, len = 12, wheelZ = -4, attZ = 6,
+    w = 0.4 }), -2)) == T.KEY_UNSUPPORTED, "attach 量到不合理的寬度：回 KEY_UNSUPPORTED")
+-- 折角／倒車探測照拖行軸：倒著拖的車直線時折角 0（照 forward 會量成 180° 而永遠爬行 5 km/h）
+local trB = fakeTrailer({ name = "Base.SmallCar", cx = -4.8, fwd = -1, len = 4.6, wheelZ = 0, attZ = -2.3 })
+local trac = fakeTractor(trB, -2)
+local phiB = T.state(trac, { trailer = trB, axisSign = -1 })
+check(near(phiB, 0), "state 倒著拖直線：折角 0（got " .. tostring(phiB) .. "）")
+local bx, by, bfx, bfy = T.body({ trailer = trB, axisSign = -1, comX = 0, comZ = 0, halfW = 0.9, halfL = 2.3 })
+check(near(bx, -4.8) and near(bfx, 1) and near(bfy, 0),
+    "body 倒著拖：拖行軸朝掛點（+x），倒車探測往 −x")
 
 print(string.format("test_trailer: %d 項斷言、%d 項失敗", asserts, fails))
 if fails > 0 then os.exit(1) end

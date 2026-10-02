@@ -166,6 +166,7 @@
     "UI_MinidoracatAutoDrive_VoiceActor_yui_brief": "Yui (concise)",
     "UI_MinidoracatAutoDrive_RouteTooFar": "Too far from the road (over 20 m). Autodrive only follows roads — drive onto a road first, then start. If you're already on a road, set the destination near that road.",
     "UI_MinidoracatAutoDrive_TrailerUnsupported": "Can't measure this trailer, so autodrive can't run while towing it.",
+    "UI_MinidoracatAutoDrive_TrailerFront": "The towed vehicle is hitched to the front. Autodrive only drives forward and can't push it — hitch it to the rear, then start again.",
     "UI_MinidoracatAutoDrive_TrailerCorner": "The corner ahead is too sharp to make with the trailer. Autodrive stopped and handed back control — drive it yourself or take another route.",
     "UI_MinidoracatAutoDrive_TrailerRotate": "Can't turn around in place while towing, and there is no route that avoids turning around. Autodrive handed back control — turn around yourself, then start it again.",
     "UI_MinidoracatAutoDrive_TrailerTurn": "Can't turn around in place while towing — taking a route that loops around instead.",

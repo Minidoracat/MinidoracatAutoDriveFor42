@@ -166,6 +166,7 @@
     "UI_MinidoracatAutoDrive_VoiceActor_yui_brief": "Yui（シンプル）",
     "UI_MinidoracatAutoDrive_RouteTooFar": "道路から離れすぎています（20m以上）。自動運転は道路に沿ってのみ走行します。先に手動で道路に出てから開始してください。すでに道路上にいる場合は、目的地をその道路の近くに設定してください。",
     "UI_MinidoracatAutoDrive_TrailerUnsupported": "トレーラーの寸法を取得できないため、牽引中は自動運転できません。",
+    "UI_MinidoracatAutoDrive_TrailerFront": "牽引する車両が前側に連結されています。自動運転は前進のみで押して走れません。後ろ側に連結し直してから開始してください。",
     "UI_MinidoracatAutoDrive_TrailerCorner": "前方のカーブが急すぎてトレーラーを引いたままでは曲がれません。自動運転は停車して操作を返しました。手動で運転するか別のルートを選んでください。",
     "UI_MinidoracatAutoDrive_TrailerRotate": "トレーラー牽引中はその場で転回できず、転回せずに済むルートも見つかりません。自動運転は操作を返しました。手動で向きを変えてから再開してください。",
     "UI_MinidoracatAutoDrive_TrailerTurn": "トレーラー牽引中はその場で転回できないため、転回せずに回り込むルートに切り替えます。",

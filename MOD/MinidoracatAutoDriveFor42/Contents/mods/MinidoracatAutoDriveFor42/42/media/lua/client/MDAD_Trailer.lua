@@ -10,6 +10,7 @@ MDADTrailer = MDADTrailer or {}
 local T = MDADTrailer
 
 T.KEY_UNSUPPORTED = "UI_MinidoracatAutoDrive_TrailerUnsupported"
+T.KEY_FRONT = "UI_MinidoracatAutoDrive_TrailerFront" -- 掛在牽引車車頭前方（推著走），自駕只能拖在車尾
 T.KEY_CORNER = "UI_MinidoracatAutoDrive_TrailerCorner"
 T.KEY_ROTATE = "UI_MinidoracatAutoDrive_TrailerRotate"
 T.KEY_LOST = "UI_MinidoracatAutoDrive_TrailerLost"
@@ -31,6 +32,7 @@ T.CORNER_STOP_M = 18                  -- 不可過轉角：停在距轉角這麼
 T.REVERSE_GAIN = 2.5                  -- 倒車折角回正增益（steer＝-gain×φ）
 T.REVERSE_HITCH_MAX = 30 * math.pi / 180 -- 倒車折角超過＝收手
 T.CACHE_MAX = 8
+T.ROPE_M = 1.5 -- 兩台都不是 Trailer 腳本＝繩索連結，最長 1.5m（BaseVehicle.addPointConstraint:10069-10070）
 
 local sqrt, abs, atan2, cos, sin, floor = math.sqrt, math.abs, math.atan2, math.cos, math.sin, math.floor
 
@@ -49,22 +51,40 @@ end
 T.wrap = wrap
 
 -- ---------------------------------------------------------------- 1. attach（冷路徑）
--- 回 nil＝沒在拖；false＝在拖但量不到可信幾何（呼叫端拒絕啟動）；table＝掛車幾何。
+-- 回 nil＝沒在拖；字串＝不能自駕的翻譯鍵（呼叫端拒絕啟動）；table＝掛車幾何。
+-- 原版拖法（ISVehicleMenu.lua TowMenu）不只「車尾→被拖車頭」：一般車互拖會先試車尾對車尾（被拖的車倒著走），
+-- 也能掛在牽引車車頭。三件事都照實際幾何量，不照掛點名稱：
+--   輪位＝輪子 offset＋模型 offset（Bullet 建輪就是這樣加：VehicleScript.java:586-588）。原版車模型 offset z 多為 0，
+--     MOD 掛車常不是（Autotsar KBAC −1.25：輪 +1.25 只是抵銷；W900 貨櫃 +1.27）——漏加會把軸量到掛點旁，KBAC 的
+--     L2 量成 0.81＜1 而拒絕啟動。
+--   掛車尾＝離掛點較遠的那端：倒著拖時是被拖車的車頭（舊制取車尾＝貼著掛點，車對車尾互拖一律拒絕）。
+--   掛點在牽引車車頭前方＝推著走：自駕只會往前開，那台車又被感測當成自己的掛車而看不見，一律拒絕。
+-- 繩索拖車（兩台都不是 Trailer）起步時繩子可能是鬆的，開起來會拉直到 ROPE_M：沿軸向補上還沒拉直的長度。
 function T.attach(vehicle)
     local ok, trailer = pcall(function() return vehicle:getVehicleTowing() end)
     if not ok or trailer == nil then return nil end
     local ok2, geo = pcall(function()
-        local attA = vehicle:getTowAttachmentSelf()
-        local h = vehicle:getTowingWorldPos(attA, Vector3f.new())
+        local h = vehicle:getTowingWorldPos(vehicle:getTowAttachmentSelf(), Vector3f.new())
         local sc = trailer:getScript()
         local ext = sc:getExtents()
         local com = sc:getCenterOfMassOffset()
+        local mo = sc:getModelOffset()
         local n = sc:getWheelCount()
         local zSum = 0
         for i = 0, n - 1 do zSum = zSum + sc:getWheel(i):getOffset():z() end
-        local axle = trailer:getWorldPos(com:x(), 0, zSum / math.max(n, 1), Vector3f.new())
+        local axleZ = zSum / math.max(n, 1) + (mo and mo:z() or 0)
+        local axle = trailer:getWorldPos(com:x(), 0, axleZ, Vector3f.new())
         local front = trailer:getWorldPos(com:x(), 0, com:z() + ext:z() * 0.5, Vector3f.new())
         local rear = trailer:getWorldPos(com:x(), 0, com:z() - ext:z() * 0.5, Vector3f.new())
+        local slack = 0
+        if not string.find(vehicle:getScriptName(), "Trailer", 1, true)
+                and not string.find(trailer:getScriptName(), "Trailer", 1, true) then
+            local hb = trailer:getTowingWorldPos(trailer:getTowAttachmentSelf(), Vector3f.new())
+            slack = T.ROPE_M - dist(h:x(), h:y(), hb:x(), hb:y())
+            if slack < 0 then slack = 0 end
+        end
+        local toRear = dist(h:x(), h:y(), rear:x(), rear:y())
+        local toFront = dist(h:x(), h:y(), front:x(), front:y())
         -- 候選線掛車掃掠用（0929p，Driver sweepLine）：掛點在牽引車座標（車位＋前向／右向）裡的位置、
         -- 掛車車身中心在掛車軸座標裡的位置。掛車軸向＝量到的「軸→掛點」單位向量 v0，不是掛車 forward：
         -- 被倒著拖的車 forward 朝後（0929p 審查），拿 forward 當軸向會把軸放到掛點前面、軌跡變成推車。
@@ -81,17 +101,20 @@ function T.attach(vehicle)
         local ux, uy = h:x() - axle:x(), h:y() - axle:y()
         local ul = sqrt(ux * ux + uy * uy)
         local hitchZ, hitchX, boxBack, boxSide, axisSign
-        if vl > 1e-6 and ul > 1e-6 then
-            vfx, vfy, ux, uy = vfx / vl, vfy / vl, ux / ul, uy / ul
+        if vl > 1e-6 then
+            vfx, vfy = vfx / vl, vfy / vl
             hitchZ, hitchX = dx * vfx + dy * vfy, dx * vfy - dy * vfx
-            boxBack, boxSide = -(cx * ux + cy * uy), cx * uy - cy * ux
+        end
+        if ul > 1e-6 then
+            ux, uy = ux / ul, uy / ul
+            boxBack, boxSide = -(cx * ux + cy * uy) + slack, cx * uy - cy * ux
             axisSign = (ux * tfx + uy * tfy) >= 0 and 1 or -1
         end
         return {
             trailer = trailer,
-            L2 = dist(h:x(), h:y(), axle:x(), axle:y()),
-            hitchToRear = dist(h:x(), h:y(), rear:x(), rear:y()),
-            hitchToFront = dist(h:x(), h:y(), front:x(), front:y()),
+            L2 = ul + slack,
+            -- 掛點到掛車尾（拖行方向的尾端＝離掛點遠的那端；倒著拖時是被拖車的車頭）
+            hitchToRear = (toRear > toFront and toRear or toFront) + slack,
             halfW = ext:x() * 0.5,
             halfL = ext:z() * 0.5,
             comX = com:x(), comZ = com:z(),
@@ -100,20 +123,33 @@ function T.attach(vehicle)
             hitchZ = hitchZ, hitchX = hitchX, boxBack = boxBack, boxSide = boxSide, axisSign = axisSign,
         }
     end)
-    if not ok2 or type(geo) ~= "table" then return false end
-    if not (finite(geo.L2) and geo.L2 >= 1 and geo.L2 <= 25
+    local why = nil
+    if not ok2 or type(geo) ~= "table" then
+        why = T.KEY_UNSUPPORTED
+    elseif finite(geo.hitchZ) and geo.hitchZ > 0 then
+        why = T.KEY_FRONT
+    elseif not (finite(geo.L2) and geo.L2 >= 1 and geo.L2 <= 25
             and finite(geo.halfW) and geo.halfW > 0.3 and geo.halfW < 3
             and finite(geo.hitchToRear) and geo.hitchToRear >= geo.L2 * 0.5
             and finite(geo.mass) and geo.mass > 0 and geo.wheels > 0) then
-        return false
+        why = T.KEY_UNSUPPORTED
+    end
+    if why then
+        -- 玩家回報「量不到掛車」時 console 唯一的線索：哪兩台、量到什麼
+        local g = type(geo) == "table" and geo or {}
+        local okN, names = pcall(function()
+            return tostring(vehicle:getScriptName()) .. " -> " .. tostring(trailer:getScriptName())
+        end)
+        print(string.format("[MinidoracatAutoDriveFor42] tow refused (%s): %s L2=%s tail=%s halfW=%s hitchZ=%s wheels=%s",
+            why, okN and names or "?", tostring(g.L2), tostring(g.hitchToRear), tostring(g.halfW),
+            tostring(g.hitchZ), tostring(g.wheels)))
+        return why
     end
     -- 車位到掛車尾（直線時）：繞行保持段要多撐的長度（Driver shapeProfile）。量不到掛點偏移時不延長、
     -- sweepLine 也不驗掛車（退回舊制只驗牽引車），不因此拒絕啟動。
     if finite(geo.hitchZ) and finite(geo.hitchX) and finite(geo.boxBack) and finite(geo.boxSide)
             and (geo.axisSign == 1 or geo.axisSign == -1) then
-        local back = -geo.hitchZ
-        if back < 0 then back = 0 end
-        geo.trailLen = back + geo.hitchToRear
+        geo.trailLen = -geo.hitchZ + geo.hitchToRear
     else
         geo.hitchZ, geo.hitchX, geo.boxBack, geo.boxSide, geo.axisSign = nil, nil, nil, nil, nil
     end
@@ -404,7 +440,8 @@ function T.shape(route, tow, tractorHalfW, tractorFront)
 end
 
 -- ---------------------------------------------------------------- 3. 行駛防線與倒車
--- 車頭—掛車折角（有號，rad，正＝牽引車航向比掛車大）與掛車 upVectorDot。
+-- 車頭—掛車折角（有號，rad，正＝牽引車航向比掛車大）與掛車 upVectorDot。掛車航向取拖行軸
+-- （forward×axisSign，朝掛點）：倒著拖的車 forward 朝後，直接拿 forward 會讓直線時折角量成 180°。
 function T.state(vehicle, tow)
     local ok, phi, up = pcall(function()
         local a = BaseVehicle.allocVector3f()
@@ -412,7 +449,7 @@ function T.state(vehicle, tow)
         vehicle:getForwardVector(a)
         tow.trailer:getForwardVector(b)
         local h1 = atan2(a:z(), a:x())
-        local h2 = atan2(b:z(), b:x())
+        local h2 = atan2(b:z(), b:x()) + (tow.axisSign == -1 and math.pi or 0)
         BaseVehicle.releaseVector3f(a)
         BaseVehicle.releaseVector3f(b)
         return wrap(h1 - h2), tow.trailer:getUpVectorDot()
@@ -430,7 +467,7 @@ function T.reverseSteer(phi)
     return s
 end
 
--- 掛車車身（倒車後方探測用）：中心、前向、半寬、半長。
+-- 掛車車身（倒車後方探測用）：中心、拖行軸（forward×axisSign，朝掛點；探測往它的反方向）、半寬、半長。
 function T.body(tow)
     local ok, x, y, fx, fy = pcall(function()
         local tr = tow.trailer
@@ -438,7 +475,8 @@ function T.body(tow)
         local f = BaseVehicle.allocVector3f()
         tr:getForwardVector(f)
         local l = sqrt(f:x() * f:x() + f:z() * f:z())
-        local ux, uy = f:x() / l, f:z() / l
+        local sg = tow.axisSign == -1 and -1 or 1
+        local ux, uy = sg * f:x() / l, sg * f:z() / l
         BaseVehicle.releaseVector3f(f)
         return c:x(), c:y(), ux, uy
     end)

@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1002u"
+Drive.REV = "1002v"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -1815,12 +1815,12 @@ local function startSession(playerObj, playerNum, stage)
             and vehicleProfile.brakingForce <= 0 then
         return KEY_UNSUPPORTED
     end
-    -- 拖掛車（MDAD_Trailer）：量不到掛車幾何就拒絕；量得到＝質量併入、彎道預算打折、
-    -- 轉角換成外拉大彎的車頭路線（Follower 只看到改寫後的線；cutover 仍以原 route identity 比對）。
+    -- 拖掛車（MDAD_Trailer）：量不到掛車幾何、或掛在車頭前方就拒絕（attach 回翻譯鍵）；量得到＝質量併入、
+    -- 彎道預算打折、轉角換成外拉大彎的車頭路線（Follower 只看到改寫後的線；cutover 仍以原 route identity 比對）。
     local tow = nil
     if type(MDADTrailer) == "table" then
         tow = MDADTrailer.attach(vehicle)
-        if tow == false then return MDADTrailer.KEY_UNSUPPORTED end
+        if type(tow) == "string" then return tow end
     end
     if tow then
         vehicleProfile.towMass = tow.mass

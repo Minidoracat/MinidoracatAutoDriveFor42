@@ -166,6 +166,7 @@
     "UI_MinidoracatAutoDrive_VoiceActor_yui_brief": "Yui（簡潔）",
     "UI_MinidoracatAutoDrive_RouteTooFar": "車輛離道路太遠（超過 20 公尺）。自動駕駛只會沿著道路行駛，請先手動開上道路再啟動；若已在路上，請把目的地設在你所在的這條路附近。",
     "UI_MinidoracatAutoDrive_TrailerUnsupported": "量不到掛車的尺寸，拖著這台掛車時無法自動駕駛。",
+    "UI_MinidoracatAutoDrive_TrailerFront": "被拖的車連在車頭前方，自動駕駛只能往前開、無法推著走。請改從車尾連結後再啟動。",
     "UI_MinidoracatAutoDrive_TrailerCorner": "前方轉角太急，拖著掛車轉不過去，自動駕駛已停車交還。請手動處理或改走其他路線。",
     "UI_MinidoracatAutoDrive_TrailerRotate": "拖著掛車無法原地調頭，也找不到不用調頭的繞行路線，自動駕駛已交還。請手動調頭後再啟動。",
     "UI_MinidoracatAutoDrive_TrailerTurn": "拖著掛車不能原地調頭，改走不用調頭的繞行路線。",
