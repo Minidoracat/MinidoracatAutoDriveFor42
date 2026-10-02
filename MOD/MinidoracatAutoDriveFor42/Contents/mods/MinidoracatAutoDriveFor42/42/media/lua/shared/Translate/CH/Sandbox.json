@@ -35,7 +35,7 @@
     "Sandbox_MinidoracatAutoDriveCorpseSlowdown_option2": "由玩家決定",
     "Sandbox_MinidoracatAutoDriveCorpseSlowdown_option3": "不因屍體減速",
     "Sandbox_MinidoracatAutoDriveObstaclePolicy": "遇到障礙物的處理方式",
-    "Sandbox_MinidoracatAutoDriveObstaclePolicy_tooltip": "自動駕駛偵測到前方路線被擋住時的行為。\n繞行（預設）＝在路面範圍內自動小幅偏移繞過去，繞不過才停車。\n停車＝一律減速停車，交還玩家處理，最保守。\n管理員按「套用」後立即生效。",
+    "Sandbox_MinidoracatAutoDriveObstaclePolicy_tooltip": "自動駕駛偵測到前方路線被擋住時的行為。\n繞行（預設）＝自動側移繞過去，必要時開上路肩或草地；整條路都堵死時，會先停下來確認道路兩側十多公尺內的空地，從路外繞過去（拖著掛車時也會確認掛車過得去）。真的繞不過才停車。\n停車＝一律減速停車，交還玩家處理，最保守。\n管理員按「套用」後立即生效。",
     "Sandbox_MinidoracatAutoDriveObstaclePolicy_option1": "繞行",
     "Sandbox_MinidoracatAutoDriveObstaclePolicy_option2": "停車",
     "Sandbox_MinidoracatAutoDriveRightLaneBias": "靠右行駛程度",

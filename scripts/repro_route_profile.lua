@@ -142,7 +142,10 @@ else
 end
 print(("route: len=%.1f pts=%d"):format(route.len, #route.pts / 2))
 
-local prof, perr = MDADFollower.begin(route, vp.maxSpeed, 4, vp)
+-- 與遊戲內同序：Driver Drive.profileRouteOf 先清反折／短橫移再建剖面（1002t 前本工具漏了這步）
+local despiked = MDADFollower.despikeRoute(route)
+if despiked ~= route then print(("despike: %d"):format(despiked.despiked or 0)) end
+local prof, perr = MDADFollower.begin(despiked, vp.maxSpeed, 4, vp)
 assert(prof, "begin failed: " .. tostring(perr))
 while not MDADFollower.stepBuild(prof, 100000) do end
 print(("profile: n=%d filletN=%d filletFallbackN=%d filletReason=%s filletBandValid=%s length=%.1f"):format(

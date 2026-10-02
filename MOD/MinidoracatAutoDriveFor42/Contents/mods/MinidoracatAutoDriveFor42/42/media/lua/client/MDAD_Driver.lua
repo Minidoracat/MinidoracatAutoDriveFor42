@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1002s"
+Drive.REV = "1002t"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -520,6 +520,10 @@ TUNE.ACCEL_ASSIST_LAT_M = 0.5
 -- （正式服 0.17.0 Silence/clip-04：出 19° 折點車頭偏 9°、ld −0.43 時開始補，1.5 秒 24→44 km/h 越線 0.56m
 -- 擦路邊；E2E acc-1001j h1003 同型 11°）。補的樣本（正式服＋E2E 6031 筆）只有 3.6% 超過 8°。
 TUNE.ACCEL_ASSIST_HEAD_RAD = 8 * math.pi / 180
+-- 偏差預測（1002t；正式服 0.17.0 clip-17：88 km/h 過 18.9° 未圓角折點，出折點時車還以 1.1–1.4 m/s 橫越期望線，
+-- 偏差 0.07／0.32 都在 0.5 內、車頭 6.6°／4.9° 也在 8° 內，加速輔助照補 40→51 km/h，外甩 0.52m 撞路邊物）：
+-- 偏差＋橫向收斂速度×LEAD_S 超過 ACCEL_ASSIST_LAT_M 也不補（0.5 秒後就會越過）。
+TUNE.ACCEL_ASSIST_LEAD_S = 0.5
 -- 只在一般循線的限速下補（1002a）：剖面／彎道包絡、可視距離、檔位與感知上限。朝已知障礙接近（待承諾繞行、
 -- 判堵、殭屍、會車、對線…）不補——那些帽本身就是「前面要煞」（正式服 0.17.0 Aho/clip-21：待承諾繞行時補到
 -- 45 km/h，再從 39.5 一秒鎖輪煞到 0）。
@@ -579,6 +583,7 @@ TUNE.ZOMBIE_SWITCH_LAG_S = 0.5      -- 群與群之間換邊：先止住上一�
 TUNE.ZOMBIE_PREDICT_S = 2.5         -- 殭屍橫向位置外推的最長秒數（朝車走的殭屍）
 TUNE.ZOMBIE_CLUSTER_M = 1.0         -- 最近一群＝最近威脅點起「一個車長＋此值」內的軟避讓點
 TUNE.ZOMBIE_LANE_SETTLE_M = 0.05  -- 回到常駐 lane 這麼近＝釋放
+TUNE.SOFT_HARD_JITTER_M = 0.5     -- 軟縫可行帶離硬物擋線帶緣多讓的量（hardL 取樣柱在格內跳動，見 zombieLaneOf；1002t）
 TUNE.ZOMBIE_LANE_LEAD_S = 0.3     -- 側移完成後還要留這麼多秒才到殭屍（車身追 laneBias 的落後；0925d 0.5→0.3）
 TUNE.ZOMBIE_LANE_MIN_KMH = 12     -- 縱向配合帽下限（殭屍可撞：壓到爬行仍過不去就撞，不停等）
 -- 越野旗標進 traction key 的去抖（FPS：s031 st149350-149356 彎道路緣一輪壓草一輪回鋪面，
@@ -3528,7 +3533,10 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
         end
         -- 硬物先縮小可搜尋帶，而非只否決已選中的那一側。保留與目前車身連通的區間，
         -- 因此終點另一側雖然淨空，也不能穿越夾在中間的硬物。
-        local origin = latNow
+        -- 帶緣再讓出 SOFT_HARD_JITTER_M（1002t）：hardL 記的是命中那條取樣柱的 l，同一格牆隨取樣相位在一格內
+        -- 跳動（正式服 0.17.0 clip-02：−2.97／−2.54／−2.02），貼著帶緣選的 lane（只留 0.057m）下一輪就落進牆的
+        -- 擋線帶 → 硬規劃從車旁判堵、52 km/h 鎖輪。讓出的量不蓋過車身現在的位置（帶不因此收成空）。
+        local origin, jit = latNow, TUNE.SOFT_HARD_JITTER_M
         for i = 1, sen.hardN do
             local hs = sen.hardS[i]
             if hs >= sFrom and hs <= sTo then
@@ -3536,9 +3544,13 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
                 if not finite(r) then r = MDADCorridor.OBS_HALF end
                 local lo, hi = sen.hardL[i] - s.needHalf - r, sen.hardL[i] + s.needHalf + r
                 if origin <= lo then
-                    if lo < aHi then aHi = lo end
+                    local e = lo - jit
+                    if e < origin then e = origin end
+                    if e < aHi then aHi = e end
                 elseif origin >= hi then
-                    if hi > aLo then aLo = hi end
+                    local e = hi + jit
+                    if e > origin then e = origin end
+                    if e > aLo then aLo = e end
                 else
                     aLo, aHi = 1, 0
                     break
@@ -3645,6 +3657,8 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
     -- **未夾**的常駐值（夾限由 Follower 在使用當下逐段做）。0906e 首次實機：彎內側該段餘裕 0.09
     -- 把無殭屍的 want 夾成 0.09，lane 從 1.5 被拉到 0.1 再拉回＝無殭屍也在擺、align 減速到 12 km/h。
     -- 回到常駐線也要驗整段側移，不能因為已經閃完就穿過側邊新出現的硬物。
+    -- 往遠離某個硬點的方向移不算穿越它（1002t；clip-02：lane 已在牆的擋線帶內，退出來的側移也判 hard、
+    -- 只好留在帶內 → 從車旁判堵鎖輪）：to 比 from 與車身都離它更遠就略過，往其他硬點的側移照驗。
     if math.abs(want - cur) > TUNE.ZOMBIE_LANE_SETTLE_M then
         for i = 1, sen.hardN do
             local hs = sen.hardS[i]
@@ -3652,11 +3666,13 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
                 local idx = MDADFollower.segIndexAt(s.profile, hs)
                 local from = MDADFollower.laneBiasAt(s.profile, cur, idx, hs)
                 local to = MDADFollower.laneBiasAt(s.profile, want, idx, hs)
+                local hl = sen.hardL[i]
+                local dt, df, dn = to - hl, from - hl, latNow - hl
+                local away = dt * df > 0 and dt * dn > 0 and math.abs(dt) > math.abs(df) and math.abs(dt) > math.abs(dn)
                 local lo, hi = math.min(latNow, from, to), math.max(latNow, from, to)
                 local r = sen.hardR and sen.hardR[i] or MDADCorridor.OBS_HALF
                 if not finite(r) then r = MDADCorridor.OBS_HALF end
-                if sen.hardL[i] + s.needHalf + r > lo
-                        and sen.hardL[i] - s.needHalf - r < hi then
+                if not away and hl + s.needHalf + r > lo and hl - s.needHalf - r < hi then
                     want, why = cur, "hard"
                     break
                 end
@@ -4526,7 +4542,16 @@ function Drive.visibilityCaps(s, now, visibleEnd, minBrakeVisible)
     local hardAhead = ahead
     if visibleEnd >= s.profile.length - 0.5 then
         hardAhead = hardAhead + halfL + 2
-        s.visibilityHardKmh = MDADDynamics.approachCapKmh(ahead, 0, TUNE.VIS_TERMINAL_TAU, visBrake)
+        -- 終點不是障礙、停車靠不經輪胎的中線外力：用車輛自己的緊急帳（safeBrake，不套風格的計畫制動），
+        -- 與 Follower 終點包絡的 segStopBrake 同源（1002t：舒適檔終點包絡抬到車輛能力，舊帳 3.0×2.5＝7.5
+        -- 會在終點前一路越線硬煞）
+        local termBrake = visBrake
+        if finite(s.safeBrake) and s.safeBrake > minBrakeVisible then
+            termBrake = tightenLimit(math.min(s.safeBrake * TUNE.EMERGENCY_BRAKE_GAIN, TUNE.EMERGENCY_BRAKE_MAX),
+                s.brakeLower, s.brakeConfidence, TUNE.EMERGENCY_BRAKE_MAX)
+            if termBrake < visBrake then termBrake = visBrake end
+        end
+        s.visibilityHardKmh = MDADDynamics.approachCapKmh(ahead, 0, TUNE.VIS_TERMINAL_TAU, termBrake)
         cap, s.visHold = s.visibilityHardKmh, 0
     else
         s.visibilityHardKmh = MDADDynamics.visibilityCapKmh(hardAhead, TUNE.VIS_TAU, visBrake, halfL)
@@ -4704,7 +4729,14 @@ function Drive.accelAssistForce(s, speedKmh, targetSpeed, mult)
     if not s.fullGate or s.startGuard then return 0 end
     local dev = s.lastLatDev
     if not finite(dev) or dev > TUNE.ACCEL_ASSIST_LAT_M or dev < -TUNE.ACCEL_ASSIST_LAT_M then return 0 end
+    if finite(s.crossDLat) then
+        local p = dev + s.crossDLat * TUNE.ACCEL_ASSIST_LEAD_S
+        if p > TUNE.ACCEL_ASSIST_LAT_M or p < -TUNE.ACCEL_ASSIST_LAT_M then return 0 end
+    end
     if finite(s.lastRouteErr) and s.lastRouteErr > TUNE.ACCEL_ASSIST_HEAD_RAD then return 0 end
+    -- 前視鉗在還沒放行的無弧折點上（fallback／髮夾，約剩 9–25m）：再幾公尺就要以 rMin 轉，補油只會讓車用更高的速度
+    -- 進放行點（1002t；正式服 0.17.0 clip-09：起步 4.3m 接 90° fallback，加速輔助補滿、放行時 14 km/h 滿舵打滑繞圈）
+    if s.fstate and s.fstate.kinkHeld ~= nil then return 0 end
     local why = s.lastCapReason
     if why ~= nil and not TUNE.ACCEL_ASSIST_REASONS[why] then return 0 end
     if not finite(speedKmh) or not finite(targetSpeed) or speedKmh < 0 then return 0 end
@@ -6134,6 +6166,31 @@ local function sweepLine(s, lx, ly, ln, lS0, lS1,
     -- 成功時第 8 值＝最小淨距的點索引（失敗 tuple 同位置是命中點索引）：拓寬用
     return true, minMargin, nil, nil, nil, nil, nil, minI
 end
+-- 極小角度未圓角頂點（< MDADFollower.TURN_GEOM_MIN_RAD＝10° 的 LINE 折點）在證明線 1m 取樣上的等效曲率（1002t）：
+-- 外接圓把 5° 的路網量化抖動量成 R≈11m（只剩約 35 km/h），1002b 起車道帳會用最多 7 m/s² 主動追它＝無故急煞。
+-- 這一段 Follower geometryStep 本來就不算折（不給幾何帽），證明線改用同一個前視弦半徑 look(v)/(2 sin(θ/2))。
+-- 10–20° 的未圓角頂點**不換**、照外接圓慢：E2E rc56b 0008（Silverado）以 72 km/h 過 18.4° 折點、出折點外漂 1.65m
+-- 擦撞（同案 rc55 照外接圓 28–43 km/h 通過）；正式服 0.17.0 clip-17 在 18.9° 折點前 42 km/h 也撞（AGENTS 1002b）。
+-- 取樣 sk 離頂點 1.5m 內、頂點兩側都是 LINE 段才換；弧段不動。回 nil＝不換。look 用 Follower 在該頂點的弧帽速。
+function Drive.smallKinkKappa(prof, si, sk)
+    local kind, segH, ps = prof.segKind, prof.segH, prof.s
+    if type(kind) ~= "table" or not finite(si) then return nil end
+    for v = si, si + 1 do
+        if v >= 2 and v <= prof.n - 1 and finite(ps[v]) and math.abs(sk - ps[v]) <= 1.5
+                and kind[v - 1] == MDADDynamics.SEG_LINE and kind[v] == MDADDynamics.SEG_LINE then
+            local th = segH[v] - segH[v - 1]
+            if th > math.pi then th = th - 2 * math.pi elseif th < -math.pi then th = th + 2 * math.pi end
+            if th < 0 then th = -th end
+            if th < MDADFollower.TURN_GEOM_MIN_RAD then
+                local cv = prof.curveV[v]
+                if not finite(cv) or cv <= 0 then cv = prof.maxSpeedMs end
+                return 2 * sin(th * 0.5) / MDADFollower.lookaheadM(cv * 3.6, prof.lookScale or 1)
+            end
+        end
+    end
+    return nil
+end
+
 -- Build one immutable proof object for loaded coverage, raw road-band, curvature
 -- and long-vehicle OBB sweep. Keep the longest verified prefix, bounded by the
 -- earliest failure; a farther failure cannot veto the current stopping horizon.
@@ -6244,6 +6301,10 @@ local function buildSnapshotProof(s, segI, proofEnd)
                     verifyX[k - 1], verifyY[k - 1],
                     verifyX[k], verifyY[k],
                     verifyX[k + 1], verifyY[k + 1])
+                if localKappa > 0 then
+                    local chord = Drive.smallKinkKappa(prof, verifySeg[k], lineS0 + (k - 1) * MDADFollower.OV_STEP)
+                    if chord ~= nil and chord < localKappa then localKappa = chord end
+                end
             end
             if localKappa > kappa then kappa = localKappa end
             s.verifyKappa[k] = localKappa
@@ -7635,8 +7696,11 @@ function Drive.handoffReady(s)
     p.sensor, p.bodyReach, p.steepDeficitM = s.sensor, s.bodyReach, -1
     p.tow = s.tow -- 拖車保持段延長（Drive.towHold）要跟真候選同一個幾何
     local _, _, _, endS, ok = shapeProfile(p, s.profile, a, b, c, d, offL, base)
-    return not ok or (not p.dodgeWindowShort
-        and Drive.candidateCovered(s, endS + 1))
+    -- 主候選連形都塑不出來（entry／steep：下一群就在車身旁、從真實橫向來不及切入）＝不交接（1002t）：
+    -- 舊線活著就沿舊線，判死的舊線有自己較遠的守護停止線；下一完成輪再問。舊制 `not ok` 也算可交接＝
+    -- 交出仍有效的舊線，正式鏈從常駐線把車旁那群當第一群、候選全滅，停止線落在車身處 34 km/h 鎖輪
+    -- （正式服 0.17.0 兩段片段同一處；交接晚幾公尺就是正常的行駛中交接）。
+    return ok and not p.dodgeWindowShort and Drive.candidateCovered(s, endS + 1)
 end
 
 -- 出口提前釋放會不會讓 RETURN 立刻接手（0928j；rc8 0086：offL −2.5、常駐 1.5，整車過 c 即放 →
@@ -7743,6 +7807,15 @@ function Drive.wideScanWanted(s, speedKmh)
     if not s.blocked then return false end
     local v = finite(speedKmh) and (speedKmh < 0 and -speedKmh or speedKmh) or 99
     return s.wideArmed == true and v < TUNE.WIDE_SCAN_KMH and "stop" or false
+end
+
+-- 寬帶路外繞行承諾中，同目標的偏航重算新線先不收（1002t）：路外繞行偏離最遠約 12m，貼著主 MOD 偏航重算門檻
+-- （12 格），收下＝releaseDodge 丟掉掃掠驗過的承諾線、新線起點吸在群旁重判（E2E rc43 0010：offL −12.5 承諾 7 秒
+-- 後 cutover deviation → 從群旁重判、接觸 6 次）。繞完（dodging 解除）下一次取路照常 cutover；換目標、改道請求、
+-- nav 版本變更照收；拖車維持現制（使用者 1002t 範圍：拖車以外的車輛）。
+function Drive.holdWideReroute(s, sameTarget, sameVersion)
+    return sameTarget and sameVersion and s.pendingRouteWhy == nil and not s.pendingDetour
+        and s.dodging == true and s.dodgeWide == true and type(s.tow) ~= "table"
 end
 
 -- 請求範圍只在輪首重算；同一群的許多點取最遠需求，不把每個點各加一次距離。
@@ -11232,6 +11305,7 @@ local function stepFollow(s, vehicle, playerNum, now)
                         end
                         if not s.rotProbeClear then coupled = false end
                     end
+                    s.crossDLat = nil -- 本幀橫向收斂速度（Drive.accelAssistForce 的預測偏差閘）；不算就不留舊值
                     if not coupled and targetSpeed > 0 and speedKmh >= 3
                             and finite(latDev) then
                         -- 橫向速度阻尼（前臂化補課）：latDev 差分近似橫向
@@ -11251,7 +11325,7 @@ local function stepFollow(s, vehicle, playerNum, now)
                                 dLat = nil
                             end
                         end
-                        s.prevCrossLat, s.prevCrossLatMs = latDev, now
+                        s.prevCrossLat, s.prevCrossLatMs, s.crossDLat = latDev, now, dLat
                         -- 貼縫承諾（dodgeCrawl）位置環加倍（理由見 D.CROSS_TRACK_DODGE_GAIN）；
                         -- 弧段 ×2（2026-09-07 session-058：R≈12 彎切內 1.7m 撞路燈；切線追蹤把
                         -- 姿態環交給切線後，位置只剩 cross-track 管，0.77/v 在 20 km/h 只有 0.14/m）
@@ -11735,6 +11809,9 @@ local function onPlayerUpdate(player)
         -- 主 MOD 冷卻後重算會換新 identity，屆時照常 cutover）。**必須在距離閘之前**：拒收的
         -- far 線走到距離閘＝RouteTooFar 交還（0928m E2E rc15 0095：改道被拒 far，15 幀後交還）。
         if route ~= s.route and s.rejectedRoute ~= nil and route == s.rejectedRoute then
+            route = s.route
+        end
+        if route ~= s.route and Drive.holdWideReroute(s, not targetChanged, api.navApiVersion == s.navVersion) then
             route = s.route
         end
         -- 距離閘是新路線的接收條件（含同目標偏航重算），不重新驗收同一顆快取。

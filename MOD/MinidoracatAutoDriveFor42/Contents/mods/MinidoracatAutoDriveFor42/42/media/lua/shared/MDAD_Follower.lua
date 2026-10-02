@@ -211,6 +211,7 @@ local TURN_HARD_MS = 50 / 3.6        -- 急折點硬上限：50 km/h（激進化
 --（角度合格卻建不出弧＝路面容不下 rMin 的圓）只給 sqrt(aLat·rMin)：F350 → 20（lat 7）、RaceCar 14，
 -- 切出路面由 contact／繞行兜底；MIN_SPEED 地板照舊。
 local TURN_GEOM_MIN_RAD = 10 * PI / 180
+MDADFollower.TURN_GEOM_MIN_RAD = TURN_GEOM_MIN_RAD -- Driver 證明線小折點等效曲率的同一條界線（Drive.smallKinkKappa）
 local SEARCH_FWD = 12         -- 往前 12 段
 local REWIND_MAX = 1          -- 單幀最多允許倒退 1 段
 local OV_STEP = 1.0           -- M6 世界 offset 折線的取樣步距（公尺）
@@ -289,10 +290,11 @@ MDADFollower.STYLES = {
         turnSoft = 25 * PI / 180, turnHard = 50 * PI / 180, turnHardMs = 30 / 3.6 },
 }
 -- 終點停車的中線減速輔助（1002l；使用者「快到目的地的通過時間再縮短」）：終點段收油包絡用「車輛斷油＋這一份」，
--- 兩檔共用，但合計不超過計畫制動×STOP_BRAKE_RATIO（＝Driver 巡航可視帳的煞車倍率 CRUISE_VIS_BRAKE_GAIN；Driver 的
--- 緊急帳是計畫制動×2.5，終點包絡不得貼到它——E2E 舒適檔第一版合計 8.3 超過緊急帳 7.5，終點前 18m 一秒鎖輪）。
--- 制動包絡（segBrake，只管終點煞停）不比它更早綁：舊制舒適檔計畫制動 3.0 讓 70 km/h 的車從終點前 63m 就開始減。
--- 中線外力不經輪胎：積極檔輕車合計約 8.3–9、2500 kg 7.2；舒適檔 4.5。Driver 終點硬煞帳另以 VIS_TERMINAL_TAU 計。
+-- 合計不超過車輛煞車能力×STOP_BRAKE_RATIO（segStopBrake：configureFollower 填車輛物理值、不套風格天花板，
+-- 學到的煞車照樣收緊）。1002t 起兩檔一樣（使用者：強力減速、緊急煞車都可以接受）；舊制用風格的計畫制動，
+-- 舒適檔只到 3.0×1.5＝4.5。Driver 終點硬煞帳同樣改用車輛緊急帳（Drive.visibilityCaps），終點包絡才不會貼到它
+-- （E2E 1002l 舒適檔第一版：合計 8.3 超過舒適計畫制動×2.5＝7.5 的硬煞帳，終點前 18m 一秒鎖輪）。
+-- 中線外力不經輪胎：輕車合計約 8.3–9、2500 kg 7.2。Driver 終點硬煞帳另以 VIS_TERMINAL_TAU 計。
 MDADFollower.STOP_ASSIST = 6.0
 MDADFollower.STOP_BRAKE_RATIO = 1.5
 
@@ -658,7 +660,12 @@ MDADFollower.SPIKE_M = 2
 MDADFollower.JOG_MAX_M = 4.5
 local JOG_CLEAR_M = 2.4
 local JOG_ARM_RATIO = 4
-local JOG_TURN_COS2 = 0.75 -- cos²30°：進出方向夾角 <30° 才算橫移；短段本身要偏離進入方向 >30°
+local JOG_TURN_COS2 = 0.75 -- cos²30°：進出方向夾角 <30° 才算橫移
+-- 短段本身偏離進入方向 >10° 才算橫移（1002t；舊制與進出同用 30°）：街道接點常有 1m 內 0.5m 的錯位
+-- （E2E 851 條路線有 54 處偏 10–30°，例 Salt River Road 西口 (12877.5,6900.5) 1.1m 偏 26.6°），兩個 ≥20° 折點
+-- 塞不下圓角＝fallback 頂點，整條 2km 路線最慢 17.9 km/h 就在這裡；收成中點後最慢 49.7（在真彎道上）。
+-- 共線（<10°）仍不動：沒有折點、不限速。
+local JOG_DEV_COS2 = 0.9698
 function MDADFollower.despikeRoute(route)
     local pts = type(route) == "table" and route.pts or nil
     if type(pts) ~= "table" or #pts < 6 or #pts % 2 ~= 0 then return route end
@@ -701,7 +708,7 @@ function MDADFollower.despikeRoute(route)
         local lr = rx * rx + ry * ry
         if lr < 1e-12 then return nil end
         local ar = ax * rx + ay * ry
-        if ar > 0 and ar * ar >= JOG_TURN_COS2 * la * lr then return nil end
+        if ar > 0 and ar * ar >= JOG_DEV_COS2 * la * lr then return nil end
         local lat = (ax * ry - ay * rx) / sqrt(la)
         if lat < 0 then lat = -lat end
         local armMin = JOG_ARM_RATIO * lat
@@ -712,7 +719,7 @@ function MDADFollower.despikeRoute(route)
         elseif run * run >= lim2 then
             return nil
         end
-        return j
+        return j, lat
     end
     local n = #pts / 2
     local sw, ss = route.segWidth, route.segSurface
@@ -748,31 +755,51 @@ function MDADFollower.despikeRoute(route)
             removed = removed + 1
         end
     end
-    -- 第二趟：短橫移收成中點（段屬性：進入段保留原值、離開段取原離開段）
-    local i = 2
-    while i < np do
-        local j = jogAt(P, np, i, W)
-        if j then
-            local mx, my = (P[i * 2 - 1] + P[j * 2 - 1]) * 0.5, (P[i * 2] + P[j * 2]) * 0.5
-            local drop = j - i
-            P[i * 2 - 1], P[i * 2] = mx, my
-            for k = i + 1, np - drop do
-                P[k * 2 - 1], P[k * 2] = P[(k + drop) * 2 - 1], P[(k + drop) * 2]
-            end
-            for k = np - drop + 1, np do P[k * 2 - 1], P[k * 2] = nil, nil end
-            for k = i, np - drop - 1 do
-                if W then W[k] = W[k + drop] end
-                if S then S[k] = S[k + drop] end
-            end
-            for k = np - drop, np - 1 do
-                if W then W[k] = nil end
-                if S then S[k] = nil end
-            end
-            np = np - drop
-            removed = removed + drop
+    -- 第二趟：短橫移收成中點（段屬性：進入段保留原值、離開段取原離開段）。中點兩側各在臂上 JOG_ARM_RATIO×lat 處
+    -- 加錨點，斜線只在錨點與中點之間（折角 ≤7°），這兩段的段寬扣掉 lat（1002t：斜線在中點離兩臂中心 lat/2，照原寬
+    -- 靠右＝車心貼到臂的路緣；8m 路 4m 錯位、靠右 2m 時車身出路緣約 0.9m）。扣過的寬度 ≥ JOG_CLEAR_M（jogAt 的
+    -- 路寬閘），斜線兩側各 (w−lat)/2 的帶仍在兩臂的真路面內；錨點外的臂照原線原寬，靠右照舊。
+    local Q, QW, QS, nq = {}, W and {} or nil, S and {} or nil, 0
+    local function push(x, y, w, s) -- w／s＝從上一點到這點那段的屬性
+        nq = nq + 1
+        Q[nq * 2 - 1], Q[nq * 2] = x, y
+        if nq >= 2 then
+            if QW then QW[nq - 1] = w end
+            if QS then QS[nq - 1] = s end
         end
-        i = i + 1
     end
+    push(P[1], P[2])
+    local narrowNext, narrowW = false, nil
+    local i = 2
+    while i <= np do
+        local j, lat = nil, nil
+        if i < np then j, lat = jogAt(P, np, i, W) end
+        if j then
+            local wIn, wOut = W and W[i - 1], W and W[j]
+            local sIn, sOut = S and S[i - 1], S and S[j]
+            local ix, iy, jx, jy = P[i * 2 - 1], P[i * 2], P[j * 2 - 1], P[j * 2]
+            local arm = JOG_ARM_RATIO * lat
+            local ax, ay = ix - P[i * 2 - 3], iy - P[i * 2 - 2]
+            local la = sqrt(ax * ax + ay * ay)
+            if la > arm + 0.5 then push(ix - ax / la * arm, iy - ay / la * arm, wIn, sIn) end
+            push((ix + jx) * 0.5, (iy + jy) * 0.5, wIn and wIn - lat, sIn)
+            local bx, by = P[j * 2 + 1] - jx, P[j * 2 + 2] - jy
+            local lb = sqrt(bx * bx + by * by)
+            if lb > arm + 0.5 then
+                push(jx + bx / lb * arm, jy + by / lb * arm, wOut and wOut - lat, sOut)
+            else
+                narrowNext, narrowW = true, wOut and wOut - lat -- 中點直連下一點：那段就是斜線
+            end
+            removed = removed + (j - i)
+            i = j + 1
+        else
+            local w = W and W[i - 1]
+            if narrowNext then w, narrowNext = narrowW, false end
+            push(P[i * 2 - 1], P[i * 2], w, S and S[i - 1])
+            i = i + 1
+        end
+    end
+    P, W, S = Q, QW, QS
     local out = {}
     for k, v in pairs(route) do out[k] = v end
     out.pts, out.despiked = P, removed
@@ -895,11 +922,11 @@ function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile, style)
     -- segStopCoast：終點停車包絡用的斷油減速度（VehicleProfile.configureFollower 填車輛物理值，
     -- 不套風格天花板）。2026-09-24 使用者「到終點前不要過早減速」：舒適檔 coast 0.45 讓 45 km/h
     -- 的車在終點前 170m 就開始收油；終點只是停車，不是彎道，照車輛真實斷油能力收即可。
-    local segAccel, segBrake, segCoast, segLat, segStopCoast = {}, {}, {}, {}, {}
+    local segAccel, segBrake, segCoast, segLat, segStopCoast, segStopBrake = {}, {}, {}, {}, {}, {}
     for i = 1, n - 1 do
         segAccel[i], segBrake[i], segCoast[i], segLat[i] =
             ACCEL_NOMINAL, style.brake, style.coast, style.lat
-        segStopCoast[i] = style.coast
+        segStopCoast[i], segStopBrake[i] = style.coast, BRAKE
     end
     local rangeBlockCount = ((n - 2) - (n - 2) % RANGE_BLOCK) / RANGE_BLOCK + 1 -- kahlua-mod-ok: n >= 2
     local rangeBase = 1
@@ -939,6 +966,7 @@ function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile, style)
         segLat = segLat,
         segCoast = segCoast,
         segStopCoast = segStopCoast,
+        segStopBrake = segStopBrake, -- 終點包絡上限用的車輛煞車能力（不套風格；configureFollower 填）
         coastRate = {}, -- 建表時每段實際用的滑行減速度（終點段＝segStopCoast，其餘＝segCoast＋coastAssist）；control 段內插值同源
         coastAssistAt = {}, -- 每段收油包絡含的中線減速輔助（終點段 0）；control 的線上滑行夾限要同樣加回
         coastFromEnd = false,
@@ -1006,7 +1034,8 @@ function MDADFollower.stepBuild(profile, budget)
                 if profile.coastFromEnd and profile.segStopCoast then
                     coast = profile.segStopCoast[i] or coast
                     local stop = coast + MDADFollower.STOP_ASSIST
-                    local lim = (profile.segBrake[i] or BRAKE) * MDADFollower.STOP_BRAKE_RATIO
+                    local lim = ((profile.segStopBrake and profile.segStopBrake[i]) or profile.segBrake[i] or BRAKE)
+                        * MDADFollower.STOP_BRAKE_RATIO
                     if stop > lim then stop = lim end
                     assist = stop > coast and stop - coast or 0
                 end
@@ -1265,16 +1294,132 @@ local function arcRuntimeCap(profile, j, latHere, runtimeLat)
     return cap, kappa
 end
 
+-- 非弧折點（段 ji→ji+1 的頂點）的放行距離 rel（rMin·tan(θ/2) 夾 HAIRPIN_APEX_MIN..MAX）與常駐車道的折角位移。
+-- 髮夾（>90°）車走的是兩臂各偏 b 的車道線；兩線交點（車道折點）在入彎臂上是頂點前 b·tan(θ/2)、出彎臂上是
+-- 頂點後同樣距離（143°、b 1.69 → ±5.05m）——中心線弧長這 2·b·tan(θ/2) 在車道上是同一點。鉗點／放行距離／
+-- 出彎前視／跨臂交接都量到車道折點，彎內側的車就和 b＝0 的車走同一套幾何。量中心線時（舊制）彎內側車在
+-- 車道折點前 0.95m 才放行、前視越過頂點又白拿 10m：33 km/h 放行 err 130–138° 誤進 ROTATE（E2E hairpin-sp
+-- 1002r 2/5）；放行壓到 12 km/h 則目標先落在車道折點前的出彎臂延長線（−13°、朝外），2m 內掃到 154°（1002j）。
+-- 只處理彎內側（shift<0）；外側車道折點在頂點後，放行時機照舊。承諾線／繞行剖面作用時不估（照舊）。
+-- ≤90° 只在跨臂交接（handover＝true）量車道折點：彎內側的車離中心線頂點永遠 ≥b·√2，舊交接圓（rel）
+-- 進不去＝投影釘在入彎臂、前視點不前進、車繞著它轉（正式服 0.17.0 clip-09：4.3m 首段接 90°、常駐 2.5）。
+-- ≤90° 的鉗點／放行仍量中心線（提前 b 會把大車窄路的內切加深 0.1–0.4m，未經 campaign 證實前不動）。
+-- 回 rel, shift（入彎臂、負＝提前）, cornerOut（出彎臂上車道折點離頂點的弧長）, bIn（入彎臂車道偏移）。
+local function kinkRelease(profile, state, ji, dth, handover)
+    local rel = profile.rMin * tan(dth * 0.5)
+    if rel < HAIRPIN_APEX_MIN then rel = HAIRPIN_APEX_MIN elseif rel > HAIRPIN_APEX_MAX then rel = HAIRPIN_APEX_MAX end
+    local b = state.laneBias
+    if dth < MDADDynamics.FILLET_MIN_RAD or (dth <= HAIRPIN_RAD and not handover)
+            or not isFinite(b) or b == 0 or (state.ovN or 0) >= 2 or state.offL ~= nil then
+        return rel, 0, 0
+    end
+    local sK, segH = profile.s[ji + 1], profile.segH
+    local bIn = clampLane(profile, ji, b, state.laneKeep, sK)
+    local bOut = clampLane(profile, ji + 1, b, state.laneKeep, sK)
+    local th = wrapPi(segH[ji + 1] - segH[ji])
+    local sn, cs = sin(th), cos(th)
+    local shift = (bIn * cs - bOut) / sn
+    if not (shift < 0) then return rel, 0, 0 end
+    return rel, shift, (bIn - bOut * cs) / sn, bIn
+end
+
+-- 跨臂交接（投影從入彎臂 idx 跳到出彎臂 idx+1）：車在交接圓內（半徑 rel）且車頭朝出臂的前半平面。
+-- 髮夾與 ≤90° 折點的彎內側都量到車道折點（kinkRelease handover＝true；鉗制／放行同一個基準）——中心線頂點
+-- 對彎內側的車永遠 ≥b·√2，交接圓進不去＝投影釘在入彎臂（正式服 0.17.0 clip-09）。獨立成函式是為了 control
+-- 的 local 槽數（Kahlua 190 上限）。
+local function kinkHandover(profile, state, idx, x, y, heading)
+    local px, py, i = profile.x, profile.y, idx + 1
+    local turn = wrapPi(profile.segH[i] - profile.segH[idx])
+    if turn < 0 then turn = -turn end
+    local join, shift, _, bIn = kinkRelease(profile, state, idx, turn, true)
+    local cx, cy = px[i], py[i]
+    if shift < 0 then
+        local h = profile.segH[idx]
+        cx = cx + cos(h) * shift - sin(h) * bIn
+        cy = cy + sin(h) * shift + cos(h) * bIn
+    end
+    local dx, dy = x - cx, y - cy
+    return dx * dx + dy * dy <= join * join
+        and cos(heading) * (px[i + 1] - px[i]) + sin(heading) * (py[i + 1] - py[i]) > 0
+end
+
+-- 承諾線在非弧折點（fallback／髮夾、折角 ≥ FILLET_MIN_RAD）的**外側**：buildOffsetLine 在頂點 ±OV_BLEND 內旋轉法向，
+-- 偏移 l 的線在這 2·OV_BLEND 的路線弧長裡實際繞一段半徑≈|l| 的外弧（143°、l −5.25 → 4m 弧長＝14.8m 線長）；車在
+-- 外弧上時投影卡在頂點（兩臂的垂足都是頂點），路線弧長 sNow 停住十幾公尺。舊制：放行後前視點量路線弧長、跳到
+-- 外弧繞完之後，且前視窗跨 143° 超過 TANGENT_MAX_TURN_RAD＝退回 pure pursuit，弦橫切頂點內側＝正好穿過被繞開的
+-- 障礙（E2E hairpin-sp hp-t4：放行當幀 err 0.12→1.20、切進線內 5m 撞停車）；lineLat 也照卡住的 sNow 量。
+-- 這段改以線本身為準：車在線上的投影與對線的帶號橫偏 dev（右正、同 latSigned）→ control 的 lineLat＝latSigned−dev、
+-- 切線追蹤不受 15° 閘與鉗點閘、預視沿線長量。回 切線預視點 q（路線弧長參數）, dev；窗外回 nil（其餘路徑逐位元不變）。
+local function ovOuterBend(profile, state, bestI, x, y, sNow, sTarget)
+    local ovN, ovS0, ovEndS = state.ovN or 0, state.ovS0, state.ovEndS
+    if ovN < 2 or not isFinite(ovEndS) or not isFinite(ovS0) or sNow < ovS0 or sNow >= ovEndS then return nil end
+    local s, segH, segKind, SEG_ARC = profile.s, profile.segH, profile.segKind, MDADDynamics.SEG_ARC
+    local ovX, ovY = state.ovX, state.ovY
+    -- 頂點落在 (sNow−OV_BLEND, sTarget+OV_BLEND)＝線的混合區碰到前視窗（車在外弧上、sNow 停在頂點也算）
+    local q, found = bestI > 1 and bestI - 1 or 1, false
+    while q < profile.n - 1 and s[q + 1] < sTarget + OV_BLEND do
+        local sV = s[q + 1]
+        if sV > sNow - OV_BLEND and sV - OV_BLEND >= ovS0 and sV + OV_BLEND <= ovEndS
+                and segKind[q] ~= SEG_ARC and segKind[q + 1] ~= SEG_ARC then
+            local dth = wrapPi(segH[q + 1] - segH[q])
+            if dth >= MDADDynamics.FILLET_MIN_RAD or dth <= -MDADDynamics.FILLET_MIN_RAD then
+                local i, ft = ovIndexAt(ovS0, ovN, ovEndS, sV)
+                local lat = (ovX[i] + (ovX[i + 1] - ovX[i]) * ft - profile.x[q + 1]) * -sin(segH[q])
+                    + (ovY[i] + (ovY[i + 1] - ovY[i]) * ft - profile.y[q + 1]) * cos(segH[q])
+                if lat * dth < 0 then found = true break end -- +l＝CCW 側；左轉（dth>0）的外側是 −l
+            end
+        end
+        q = q + 1
+    end
+    if not found then return nil end
+    -- 車在線上的投影：外弧整段在 [sV−OV_BLEND, sV+OV_BLEND]，車在弧上時 sNow＝sV，±(OV_BLEND+1) 蓋得住
+    local kLo = ovIndexAt(ovS0, ovN, ovEndS, sNow - OV_BLEND - 1 > ovS0 and sNow - OV_BLEND - 1 or ovS0)
+    local kHi = ovIndexAt(ovS0, ovN, ovEndS, sNow + OV_BLEND + 1 < ovEndS and sNow + OV_BLEND + 1 or ovEndS)
+    local bestD, kB, tB, dev = 1e30, kLo, 0, 0
+    for k = kLo, kHi do
+        local ax, ay = ovX[k], ovY[k]
+        local ex, ey = ovX[k + 1] - ax, ovY[k + 1] - ay
+        local L2 = ex * ex + ey * ey
+        if L2 > 1e-8 then
+            local rx, ry = x - ax, y - ay
+            local t = (rx * ex + ry * ey) / L2
+            if t < 0 then t = 0 elseif t > 1 then t = 1 end
+            local dx, dy = rx - ex * t, ry - ey * t
+            local d2 = dx * dx + dy * dy
+            if d2 < bestD then bestD, kB, tB, dev = d2, k, t, (ex * ry - ey * rx) / sqrt(L2) end
+        end
+    end
+    -- 切線預視點：從投影點沿線走 TANGENT_PREVIEW_M（線長，不是路線弧長）。control 的切線＝q 處相鄰段按段內比例
+    -- 混合＝q＋半格處的切線（弦向＝弦中點的切線）；平常半格＝0.5m 線長可忽略，混合區半格＝2m 以上＝提前轉入、
+    -- 切進外弧內側（離線閉環 1.9m → 0.7m），回傳前退半格對齊。
+    local sA = ovS0 + (kB - 1) * OV_STEP
+    local sPrev = sA + ((kB + 1 == ovN and ovEndS or sA + OV_STEP) - sA) * tB
+    local x0 = ovX[kB] + (ovX[kB + 1] - ovX[kB]) * tB
+    local y0 = ovY[kB] + (ovY[kB + 1] - ovY[kB]) * tB
+    local acc, i, q = 0, kB, ovEndS
+    while i < ovN do
+        i = i + 1
+        local si = i == ovN and ovEndS or ovS0 + (i - 1) * OV_STEP
+        local dx, dy = ovX[i] - x0, ovY[i] - y0
+        local L = sqrt(dx * dx + dy * dy)
+        if acc + L >= TANGENT_PREVIEW_M and L > 0 then
+            q = sPrev + (si - sPrev) * (TANGENT_PREVIEW_M - acc) / L
+            break
+        end
+        acc, sPrev, x0, y0 = acc + L, si, ovX[i], ovY[i]
+    end
+    return q - 0.5 * OV_STEP, dev
+end
+
 -- 前看弧段即時帽（1002c）：剖面的滑行包絡用建表期的弧速（中心線 κ、建表當下的側向），即時帽另算內側
 -- 偏移與轉向域，常比包絡低——車到弧口才一步掉下來、減速輔助追不上（E2E SemiTruckLite R≈7：包絡約 20、
 -- 弧口 15.3，入弧 16.5–19.4）。沿滑行能影響的距離往前找弧，每段弧只看第一段（即時帽從那裡開始作用），
 -- 以同一個 coast 反推 sqrt(cap² + 2·coast·距離)。行駛線取承諾線（蓋得到該點時）否則常駐 lane 在該處的
 -- 落點（clampLane 連續版）。skipRun＝車已在弧上：同一段弧由當下帽管，從下一段弧起算。
--- 沒有弧的 ≤90° 折點（adaptive 的 fallback 頂點）車從放行點（頂點前 rMin·tan(θ/2)，與 control 的鉗點同一個數）
--- 就開始以 rMin 轉，帽要在那裡達到（1002e：建表帽記在頂點＝放行時還快 5–6 m 的滑行量，E2E SemiTruckLite 90°
--- 折點放行 34 對帽 23、側滑外甩 2.3m；十批 campaign 56 次放行 32 次 >20 km/h、50 次打滑）。帽＝sqrt(latSafe·rMin)
--- （geometryStep 同式）。>90° 髮夾不套（1002j）：放行點 12 km/h、前視跟著縮短，143° 髮夾外側車道放行後另一臂的
--- 前視點跑到 135° 外＝誤進原地調頭（E2E hairpin-sp 兩輪皆 rotN 1；a18fdee 同情境 0），髮夾照舊由頂點 MIN_SPEED 管。
+-- 沒有弧的 fallback 頂點車從放行點（頂點前 rel−shift，與 control 的鉗點同一個數，kinkRelease）就開始以 rMin 轉，
+-- 帽要在那裡達到（1002e：建表帽記在頂點＝放行時還快 5–6 m 的滑行量，E2E SemiTruckLite 90° 折點放行 34 對帽 23、
+-- 側滑外甩 2.3m；十批 campaign 56 次放行 32 次 >20 km/h、50 次打滑）。≤90° 帽＝sqrt(latSafe·rMin)（geometryStep
+-- 同式），>90° 髮夾＝MIN_SPEED（geometryStep 的 dth>π/2 同類；1002j 一度拿掉，真因是放行點量中心線、見 kinkRelease）。
 -- 回新的目標（m/s）；最多走 ARC_LOOK_STEPS 段，零配置。
 local ARC_LOOK_STEPS = 48
 local function arcLookaheadMs(profile, state, from, sNow, target, coast, skipRun)
@@ -1296,7 +1441,8 @@ local function arcLookaheadMs(profile, state, from, sNow, target, coast, skipRun
     end
     while j <= n - 1 and steps < ARC_LOOK_STEPS do
         local dist = s[j] - sNow
-        if dist - HAIRPIN_APEX_MAX > reach then break end
+        -- 髮夾彎內側的放行點再提前 b·tan(θ/2)（θ<150° → ≤3.73·|b|，kinkRelease）
+        if dist - HAIRPIN_APEX_MAX - 3.8 * (rawBias < 0 and -rawBias or rawBias) > reach then break end
         if segKind[j] == SEG_ARC then
             local sj, lat = s[j], nil
             if ovN >= 2 and isFinite(ovS0) and isFinite(ovEndS) and sj >= ovS0 and sj <= ovEndS then
@@ -1321,14 +1467,12 @@ local function arcLookaheadMs(profile, state, from, sNow, target, coast, skipRun
             if j >= 2 and segKind[j - 1] ~= SEG_ARC then
                 local dth = wrapPi(segH[j] - segH[j - 1])
                 if dth < 0 then dth = -dth end
-                if profile.filletAdaptive and dth >= MDADDynamics.FILLET_MIN_RAD and dth <= HAIRPIN_RAD
+                if profile.filletAdaptive and dth >= MDADDynamics.FILLET_MIN_RAD and dth < HAIRPIN_MAX_RAD
                     and (segKind[j - 1] == SEG_FALLBACK or segKind[j] == SEG_FALLBACK) then
-                    local rel = rMin * tan(dth * 0.5)
-                    if rel < HAIRPIN_APEX_MIN then rel = HAIRPIN_APEX_MIN
-                    elseif rel > HAIRPIN_APEX_MAX then rel = HAIRPIN_APEX_MAX end
+                    local rel, shift = kinkRelease(profile, state, j - 1, dth)
                     local cap = sqrt(look * rMin)
-                    if cap < MIN_SPEED_MS then cap = MIN_SPEED_MS end
-                    local d = dist - rel
+                    if dth > HAIRPIN_RAD or cap < MIN_SPEED_MS then cap = MIN_SPEED_MS end
+                    local d = dist + shift - rel
                     if d < 0 then d = 0 end
                     local lim = sqrt(cap * cap + 2 * coast * d)
                     if lim < target then
@@ -1420,15 +1564,7 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
             -- 只在既有 rMin·tan(θ/2) 切點區內、且車頭已朝出臂的前半平面時交接相鄰臂。
             -- 位移方向會被靜止時 1cm 抖動騙過；車頭尚朝入臂的側偏車仍不能跳到反向臂。
             if not reachable and i == idx + 1 then
-                local turn = wrapPi(profile.segH[i] - profile.segH[idx])
-                if turn < 0 then turn = -turn end
-                local join = profile.rMin * tan(turn * 0.5)
-                if join < HAIRPIN_APEX_MIN then join = HAIRPIN_APEX_MIN
-                elseif join > HAIRPIN_APEX_MAX then join = HAIRPIN_APEX_MAX end
-                local dx, dy = x - px[i], y - py[i]
-                reachable = dx * dx + dy * dy <= join * join
-                    and cos(heading) * (px[i + 1] - px[i])
-                        + sin(heading) * (py[i + 1] - py[i]) > 0
+                reachable = kinkHandover(profile, state, idx, x, y, heading)
             end
             if reachable then bestI, bestT, bestD = i, t, d2 end
         end
@@ -1513,7 +1649,12 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         if k2 > kMax then kMax = k2 end
     end
     local adaptiveW = profile.filletAdaptive == true -- capacity 退化折點也必須鉗到切點
-    while j < n - 1 and s[j + 1] < sTarget and walked < LOOKAHEAD_WALK_MAX do
+    -- 髮夾彎內側（kinkRelease shift<0）以車道折點為基準：中心線弧長 [sV+shift, sV+cornerOut] 在車道上是同一點，
+    -- 鉗點、放行距離、出彎前視都量車道弧長（前視越過車道折點時加回 cornerOut−shift）。shift＝0 與舊制逐位元相同。
+    local laneCornerS, laneExtra = nil, 0
+    while j < n - 1 and walked < LOOKAHEAD_WALK_MAX do
+        local sV = s[j + 1]
+        local cornerS = sV
         if segKindW[j] ~= MDADDynamics.SEG_ARC and segKindW[j + 1] ~= MDADDynamics.SEG_ARC then
             local dth = wrapPi(profile.segH[j + 1] - profile.segH[j])
             if dth < 0 then dth = -dth end
@@ -1525,13 +1666,19 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
                 and (segKindW[j] == MDADDynamics.SEG_FALLBACK
                     or segKindW[j + 1] == MDADDynamics.SEG_FALLBACK)
             if (dth > HAIRPIN_RAD or fallbackW) and dth < HAIRPIN_MAX_RAD then
-                local rel = profile.rMin * tan(dth * 0.5)
-                if rel < HAIRPIN_APEX_MIN then rel = HAIRPIN_APEX_MIN
-                elseif rel > HAIRPIN_APEX_MAX then rel = HAIRPIN_APEX_MAX end
-                if s[j + 1] > sNow + rel then kinkS = s[j + 1]; break end
-                state.kinkExitS = s[j + 1]
+                local rel, shift, cornerOut = kinkRelease(profile, state, j, dth)
+                cornerS = sV + shift
+                if cornerS < sTarget then
+                    if cornerS > sNow + rel then kinkS = cornerS; break end
+                    state.kinkExitS = sV
+                    if shift < 0 then
+                        laneCornerS, laneExtra = cornerS, cornerOut - shift
+                        sTarget = sTarget + laneExtra
+                    end
+                end
             end
         end
+        if cornerS >= sTarget or sV >= sTarget then break end
         j = j + 1
         walked = walked + 1
         if kap then
@@ -1545,11 +1692,17 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
             look = rShrink
             if look < 4.5 then look = 4.5 end
             sTarget = sNow + look
+            if laneCornerS ~= nil and sTarget > laneCornerS then sTarget = sTarget + laneExtra end
             -- 往回退到與前進走法同一個不變式：s[j] < sTarget ≤ s[j+1]
             while j > bestI and s[j] >= sTarget do j = j - 1 end
         end
     end
-    if kinkS ~= nil and sTarget > kinkS then sTarget = kinkS end
+    if kinkS ~= nil and sTarget > kinkS then
+        sTarget = kinkS
+        while j > bestI and s[j] >= sTarget do j = j - 1 end
+    end
+    -- 承諾線在非弧折點外側（ovOuterBend）：沿線的切線預視點與車對線橫偏，給下面的 lineLat 與切線追蹤；窗外 nil、逐位元照舊
+    local ovQ, ovDev = ovOuterBend(profile, state, bestI, x, y, sNow, sTarget)
     local tj = 0
     local lj = segLen[j]
     if lj > 0 then
@@ -1658,6 +1811,9 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         local ly = ovY[i0] + (ovY[i0 + 1] - ovY[i0]) * ft
         lineLat = (lx - pjx) * -sin(hProj) + (ly - pjy) * cos(hProj)
     end
+    -- 外側折點窗內：投影卡在頂點時 lineLat 對中心線量不出線在哪；改成「車對線的帶號橫偏」，Driver 的
+    -- latSigned − lineLat 就是車到線的距離（cross-track 不用改）
+    if ovQ ~= nil then lineLat = latSigned - ovDev end
     -- 承諾線在弧的外側（1002f）：ov 線每 1m 路線弧長實際長 1−l·κ（>1）倍，轉角卻與中心線相同——路線弧長
     -- 1.5m 的切線預視＝線上預視角大 (1−l·κ) 倍、弧段前饋也照中心弧 1/R 給，車照中心弧的 yaw 率轉、切進線內
     -- （E2E rc48 0017：R 3.35 弧外側 3.75 的貼縫繞行線，yaw −0.9 rad/s＝中心弧的值、落後線 1.5m 撞上）。
@@ -1680,14 +1836,14 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
     state.laneTangent = false -- 切線取自剖面＋車道斜率（弧段前饋的車道項只在這時算）
     local onArc = profile.filletAdaptive == true and arcK ~= nil
     if (state.trackTangent == true or onArc)
-            and (kinkS == nil or sNow + TANGENT_PREVIEW_M < kinkS - OV_BLEND) then
-        local q = sNow + TANGENT_PREVIEW_M / (ovDen or 1)
+            and (kinkS == nil or ovQ ~= nil or sNow + TANGENT_PREVIEW_M < kinkS - OV_BLEND) then
+        local q = ovQ or sNow + TANGENT_PREVIEW_M / (ovDen or 1)
         -- ov 線是否蓋住預視點：與 ovUsed（由長前視 sEff 決定）解耦——線尾最後 look 公尺
         -- sEff 已出線、q 仍在線上，弧段仍得追線的切線（出口過渡斜率），不可提前改讀中心線。
         -- 一般繞行也由 q 的覆蓋判斷，不能因長前視已出線而提前改回弦角；折角 >15° 仍退前視點。
         if ovUsed and q < state.ovS0 then q = state.ovS0 end
         local ovCover = ovN >= 2 and isFinite(ovEndS) and q >= state.ovS0 and q <= ovEndS
-        local useOv = ovCover and onArc
+        local useOv = ovCover and (onArc or ovQ ~= nil)
         if ovCover and not useOv then
             local dh = wrapPi(profile.segH[j] - profile.segH[bestI])
             if dh < 0 then dh = -dh end
@@ -2407,6 +2563,7 @@ function MDADFollower.capSegmentLimits(profile, accel, brake, lat, coast)
         if profile.segLat[i] > lat then profile.segLat[i] = lat end
         if profile.segCoast[i] > coast then profile.segCoast[i] = coast end
         if profile.segStopCoast and profile.segStopCoast[i] > coast then profile.segStopCoast[i] = coast end
+        if profile.segStopBrake and profile.segStopBrake[i] > brake then profile.segStopBrake[i] = brake end
     end
     return true
 end

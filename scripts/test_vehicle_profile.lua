@@ -1105,7 +1105,7 @@ do
     local p = P.build(makeVehicle(PICKUP))
     local function follower(style)
         local f = { n = 5, segSurface = {}, segAccel = {}, segBrake = {}, segCoast = {}, segLat = {},
-            segStopCoast = {} }
+            segStopCoast = {}, segStopBrake = {} }
         for i = 1, 4 do f.segSurface[i] = MDADFollower.SURFACE_PAVED end
         if style then f.styleLat, f.styleBrake, f.styleCoast = style.lat, style.brake, style.coast end
         return f
@@ -1121,6 +1121,9 @@ do
     checkNear(fc.segCoast[1], 0.45, 1e-9, "comfort：coast 被風格夾到 0.45")
     checkNear(fc.segStopCoast[1], aCoastPrior, 1e-9,
         "comfort：終點停車用的 segStopCoast 不套風格，仍是車輛斷油能力（到終點前不提早收油）")
+    checkNear(fc.segStopBrake[1], aBrakePrior, 1e-9,
+        "comfort：終點包絡上限用的 segStopBrake 不套風格，仍是車輛煞車能力（1002t：舒適檔終點不再比最高檔慢）")
+    checkTrue(fc.segStopBrake[1] > 3.0 + 0.5, "comfort：車輛煞車能力明顯高於風格的 3.0（fixture 能分辨兩者）")
     local fw = follower({ lat = 9.0, brake = 8.0, coast = 3.0 })
     checkTrue(P.configureFollower(fw, p, p.mass, false), "brisk follower 仍 adaptive")
     checkNear(fw.segLat[1], aLatPrior, 1e-9, "brisk 風格（9.0）不抬 priors：仍是 3.5")

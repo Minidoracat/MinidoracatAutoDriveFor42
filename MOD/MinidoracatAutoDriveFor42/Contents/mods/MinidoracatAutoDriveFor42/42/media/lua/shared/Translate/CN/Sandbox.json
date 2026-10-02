@@ -35,7 +35,7 @@
     "Sandbox_MinidoracatAutoDriveCorpseSlowdown_option2": "由玩家决定",
     "Sandbox_MinidoracatAutoDriveCorpseSlowdown_option3": "不因尸体减速",
     "Sandbox_MinidoracatAutoDriveObstaclePolicy": "遇到障碍物的处理方式",
-    "Sandbox_MinidoracatAutoDriveObstaclePolicy_tooltip": "自动驾驶侦测到前方路线被挡住时的行为。\n绕行（默认）＝在路面范围内自动小幅偏移绕过去，绕不过才停车。\n停车＝一律减速停车，交还玩家处理，最保守。\n管理员按「应用」后立即生效。",
+    "Sandbox_MinidoracatAutoDriveObstaclePolicy_tooltip": "自动驾驶侦测到前方路线被挡住时的行为。\n绕行（默认）＝自动侧移绕过去，必要时开上路肩或草地；整条路都堵死时，会先停下来确认道路两侧十多米内的空地，从路外绕过去（拖着挂车时也会确认挂车过得去）。真的绕不过才停车。\n停车＝一律减速停车，交还玩家处理，最保守。\n管理员按「应用」后立即生效。",
     "Sandbox_MinidoracatAutoDriveObstaclePolicy_option1": "绕行",
     "Sandbox_MinidoracatAutoDriveObstaclePolicy_option2": "停车",
     "Sandbox_MinidoracatAutoDriveRightLaneBias": "靠右行驶程度",

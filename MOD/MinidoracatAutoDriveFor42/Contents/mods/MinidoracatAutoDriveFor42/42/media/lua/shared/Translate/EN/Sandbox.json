@@ -35,7 +35,7 @@
     "Sandbox_MinidoracatAutoDriveCorpseSlowdown_option2": "Player choice",
     "Sandbox_MinidoracatAutoDriveCorpseSlowdown_option3": "No corpse slowdown",
     "Sandbox_MinidoracatAutoDriveObstaclePolicy": "Obstacle handling",
-    "Sandbox_MinidoracatAutoDriveObstaclePolicy_tooltip": "What auto-drive does when the route ahead is blocked.\nDodge (default) means it swerves slightly within the road to get around, and only stops when there is no gap.\nStop means it always slows down and stops, handing control back to the player. Most conservative.\nTakes effect as soon as an admin clicks Apply.",
+    "Sandbox_MinidoracatAutoDriveObstaclePolicy_tooltip": "What auto-drive does when the route ahead is blocked.\nDodge (default) steers around the obstacle, onto the shoulder or grass if needed. If the whole road is blocked, it stops, checks open ground up to about 13 m on either side, and goes around off the road (when towing, it also checks that the trailer fits). It only stops for good when there is no way around.\nStop means it always slows down and stops, handing control back to the player. Most conservative.\nTakes effect as soon as an admin clicks Apply.",
     "Sandbox_MinidoracatAutoDriveObstaclePolicy_option1": "Dodge",
     "Sandbox_MinidoracatAutoDriveObstaclePolicy_option2": "Stop",
     "Sandbox_MinidoracatAutoDriveRightLaneBias": "Keep-right amount",
