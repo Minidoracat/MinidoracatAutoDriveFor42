@@ -10257,7 +10257,8 @@ local function scenarioDetour()
     local nav = drive.nav
     nav.detourCalls = 0
     local function detourRoute(len, penalty, snap)
-        local r = newRoute(10, 11, 0, -2, 0) -- 從車位往回的替代線
+        -- 繞開牆（x=20）的替代線：先往 +y 繞出去、終點與原路線同一個（1002k：requestDetourRoute 驗終點）
+        local r = { pts = { 11, 0, 11, 12, 156, 12, 156, 0 } }
         r.len, r.cost, r.avoidPenalty, r.snapDist = len, len, penalty, snap
         return r
     end
@@ -10276,10 +10277,14 @@ local function scenarioDetour()
     nav.detour = detourRoute(0, 0, 1)
     ok, why = MDAD.Drive.requestDetour(0)
     checkTrue(ok == false and why == "empty", "(c5) len 0 的替代線拒收 empty（實得 " .. tostring(why) .. "）")
+    -- 終點不是原路線的終點（1002k E2E rc53 0008：主 MOD 回 4.3m 短線、終點在車旁，收下後下一幀就判到站交還）
+    nav.detour = { pts = { 11, 0, 11, 2, 13, 4 }, len = 4.3, cost = 4.3, avoidPenalty = 0, snapDist = 1 }
+    ok, why = MDAD.Drive.requestDetour(0)
+    checkTrue(ok == false and why == "end", "(c5) 終點不在目標的替代線拒收 end（實得 " .. tostring(why) .. "）")
     nav.detour = detourRoute(5000, 0, 1)
     ok, why = MDAD.Drive.requestDetour(0)
     checkTrue(ok == false and why == "long", "(c5) 5km 替代線拒收（剩餘 ~150m）")
-    checkTrue(MDAD.Drive.isActive(0), "(c5) 四次拒收 session 仍活著")
+    checkTrue(MDAD.Drive.isActive(0), "(c5) 五次拒收 session 仍活著")
     -- 被拒收的替代線仍躺在主 MOD 快取（requestDetour 成功即覆寫）：下一次 250ms 取路
     -- 原樣拿回同一個 table，不得以 "deviation" 名義 cutover 跟著走（2026-09-02 s064：
     -- 拒收 far 的線同幀被收下→lat=63.5 開進樹林）。主 MOD 冷卻重算＝新 identity 才收。
@@ -17995,8 +18000,9 @@ function drive.scenarioTowTurn()
     -- (tt1) 目標在車後、拖著車：向主 MOD 要繞行，圈心在車尾正後方 13m、半徑 12
     dveh._x, dveh._y = 0, 0
     setHeading(dveh, 0)
-    local fwd = { pts = { 0, 0, 60, 0, 60, 40 }, segSurface = { "paved", "paved" }, segWidth = { 8, 8 },
-        len = 100, cost = 100, avoidPenalty = 0 }
+    -- 繞一圈回到同一個終點（1002k：requestDetourRoute 驗終點與原路線同一個）
+    local fwd = { pts = { 0, 0, 60, 0, 60, 40, -80, 0 }, segSurface = { "paved", "paved", "paved" },
+        segWidth = { 8, 8, 8 }, len = 100, cost = 100, avoidPenalty = 0 }
     drive.nav.detour = fwd
     checkTrue(arm(behind(), -80, 0), "(tt1) 拖車、目標在車後啟動")
     local st = MDAD.Drive.debugSession(0)
@@ -19281,7 +19287,9 @@ function drive.scenario0929p()
     getSpecificPlayer = function(n) if n == 0 then return dp end end
     local cx = dveh._x
     local function detourReply(pts)
-        drive.nav.detour = { pts = pts, segSurface = { "paved", "paved" }, segWidth = { 8, 8 },
+        local r = ts.route.pts -- 終點接回原路線的終點（1002k：requestDetourRoute 驗終點）
+        pts[#pts + 1], pts[#pts + 2] = r[#r - 1], r[#r]
+        drive.nav.detour = { pts = pts, segSurface = { "paved", "paved", "paved" }, segWidth = { 8, 8, 8 },
             len = 30, cost = 30, avoidPenalty = 0 }
         return drive.nav.detour
     end

@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1002j"
+Drive.REV = "1002k"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -1067,7 +1067,9 @@ end
 -- 起點太遠、長度 > lenMax（預設剩餘×ratio+slack）一律拒——這三條就是舊自動改道「拿回爛路線」的
 -- 全部型態。成功時主 MOD 已覆寫路線快取，下一次 requestRoute 回的就是替代線。
 -- r／lenMax 省略＝堵車改道（DETOUR_AVOID_R、DETOUR_LEN_*）；拖車繞開調頭另給（Drive.towTurnaround）。
-local function requestDetourRoute(api, playerNum, tx, ty, ax, ay, remaining, r, lenMax)
+-- refRoute＝目前的路線：替代線的終點要跟它同一個（DETOUR_END_M）。
+TUNE.DETOUR_END_M = 3 -- 冷路徑常數收 TUNE（chunk local 190 槽已滿）
+local function requestDetourRoute(api, playerNum, tx, ty, ax, ay, remaining, r, lenMax, refRoute)
     if type(api.requestDetour) ~= "function" then return nil, "api" end
     local route, state = api.requestDetour(playerNum, tx, ty, ax, ay, r or TUNE.DETOUR_AVOID_R)
     if not route or state ~= "ok" then return nil, state or "noroad" end
@@ -1075,6 +1077,14 @@ local function requestDetourRoute(api, playerNum, tx, ty, ax, ay, remaining, r, 
     -- 直接 LostRoute 交還；當成沒有改道，照常走受困流程。
     if not MDADDynamics.finite(route.len) or route.len <= 0.5 or type(route.pts) ~= "table" or #route.pts < 4 then
         return nil, "empty", route
+    end
+    -- 終點不是原本的終點（1002k E2E rc53 0008：目標 46m 外判堵、交還前改道，主 MOD 回 ok 的 4.3m 短線，終點就在車旁；
+    -- 收下後下一幀剩 4.3m＝判到站、清目標交還，車停在離目標 46m 處）。
+    local ref = refRoute and refRoute.pts
+    if type(ref) == "table" and #ref >= 4 then
+        local pts = route.pts
+        local ex, ey = pts[#pts - 1] - ref[#ref - 1], pts[#pts] - ref[#ref]
+        if ex * ex + ey * ey > TUNE.DETOUR_END_M * TUNE.DETOUR_END_M then return nil, "end", route end
     end
     if MDADDynamics.finite(route.avoidPenalty) and route.avoidPenalty > 0 then return nil, "through", route end
     if routeTooFar(route) then return nil, "far", route end
@@ -2521,7 +2531,7 @@ function Drive.requestDetour(playerNum, stuck)
     end
     local remaining = s.profile and (s.profile.length - s.lastSNow) or nil
     local route, why, rejected = requestDetourRoute(api, playerNum, s.lastTx, s.lastTy, ax, ay, remaining, nil,
-        stuck and fin(remaining) and remaining * TUNE.STUCK_DETOUR_LEN_RATIO + TUNE.STUCK_DETOUR_LEN_SLACK or nil)
+        stuck and fin(remaining) and remaining * TUNE.STUCK_DETOUR_LEN_RATIO + TUNE.STUCK_DETOUR_LEN_SLACK or nil, s.route)
     -- 拖車只收從車頭方向出發的線（0929p E2E semi-long-mp block：改道線先往車後 4m 再 90° 轉進支路，
     -- Follower 誤差 111° 未達調頭門檻、13 km/h 硬轉，掛車折 85° 脫開）；要調頭另走 Drive.towTurnaround。
     local vh = s.lastVehicleHeading
@@ -2595,7 +2605,7 @@ function Drive.towTurnaround(s, playerNum, vehicle, now, fx, fy)
     local remaining = s.profile and (s.profile.length - s.lastSNow) or nil
     local route, why, rejected = requestDetourRoute(api, playerNum, s.lastTx, s.lastTy, ax, ay,
         remaining, TUNE.TOW_TURN_AVOID_R,
-        fin(remaining) and remaining * TUNE.TOW_TURN_LEN_RATIO + TUNE.TOW_TURN_LEN_SLACK or nil)
+        fin(remaining) and remaining * TUNE.TOW_TURN_LEN_RATIO + TUNE.TOW_TURN_LEN_SLACK or nil, s.route)
     if route and not Drive.routeLeavesForward(route, vx, vy, fx, fy) then
         route, why, rejected = nil, "back", route
     end
@@ -11731,7 +11741,7 @@ local function onPlayerUpdate(player)
                 remaining, s.avoidR, s.avoidLong and finite(remaining)
                     and remaining * TUNE.STUCK_DETOUR_LEN_RATIO + TUNE.STUCK_DETOUR_LEN_SLACK
                     or s.avoidTow and finite(remaining)
-                    and remaining * TUNE.TOW_TURN_LEN_RATIO + TUNE.TOW_TURN_LEN_SLACK or nil)
+                    and remaining * TUNE.TOW_TURN_LEN_RATIO + TUNE.TOW_TURN_LEN_SLACK or nil, route)
             if detour then
                 route = detour
                 s.pendingRouteWhy = s.avoidTow and "towturn" or "detour"
