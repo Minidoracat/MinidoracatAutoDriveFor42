@@ -1649,6 +1649,114 @@ fail("語音資產契約", voice_errs) if voice_errs else ok(
     f"語音資產契約（{len(events)} 事件 × {len(packs)} 語言 × {len(actors)} 聲音"
     "＝sound script／wav／翻譯鍵齊全）")
 
+# ---- 翻譯字元：原版字型能顯示 ----
+# 原版字型沒有退回機制：字碼超過該字型的最大字碼畫成「?」，範圍內但沒有字形就畫成空白（寬 0）。
+# 依 TextManager 的規則找出各語言實際載入的 .fnt（EN/fonts.txt 疊上該語言的 fonts.txt；語言或字級資料夾
+# 沒有該檔就退回 EN），取六種 UI 字型與各字級的交集；MOD 自帶 media/fonts 時以 MOD 的為準。
+# CN 缺的漢字是原版字型本身的限制（原版簡中介面一樣缺），不計。出處與替代字見 pitfalls.md「原版字型缺很多常用符號」。
+PZ_PATH = os.environ.get("PZ_PATH", r"D:\SteamLibrary\steamapps\common\ProjectZomboid")
+GLYPH_UI_FONTS = ("Small", "Medium", "Large", "NewSmall", "NewMedium", "NewLarge")
+GLYPH_HINTS = {0x2192: "-> 、 > 或改寫", 0x2026: "...", 0x30FB: "·", 0x2022: "·", 0x2014: "改寫",
+               0x2013: "～ 或 -", 0x2248: "~ 或「約」", 0x201C: "「", 0x201D: "」", 0x2018: "『", 0x2019: "』"}
+_fnt_cache = {}
+
+
+def _fnt_chars(path):
+    if path not in _fnt_cache:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            ids = [int(x) for x in re.findall(r"^char id=(\d+)", fh.read(), re.M)]
+        _fnt_cache[path] = (frozenset(ids), max(ids) if ids else 0)
+    return _fnt_cache[path]
+
+
+def _font_file(roots, rel):
+    for r in roots:
+        p = os.path.join(r, rel)
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def font_glyphs(roots, lang):
+    """該語言所有 UI 字型、字級都畫得出的字集與最小的最大字碼；找不到字型回 None。"""
+    names = {}
+    for code in ("EN",) if lang == "EN" else ("EN", lang):
+        p = _font_file(roots, os.path.join(code, "fonts.txt"))
+        if p:
+            with open(p, encoding="utf-8", errors="replace") as fh:
+                for name, body in re.findall(r"font\s+(\w+)\s*\{([^}]*)\}", fh.read()):
+                    f = re.search(r"fnt\s*=\s*([^,\s]+)", body)
+                    if f:
+                        names[name] = f.group(1)
+    sets, tops = [], []
+    for ui in GLYPH_UI_FONTS:
+        fn = names.get(ui)
+        if not fn:
+            continue
+        for size in (None, "1x", "2x", "3x", "4x"):
+            cands = ([os.path.join(lang, size, fn)] if size else []) + [os.path.join(lang, fn)]
+            if lang != "EN":
+                cands += ([os.path.join("EN", size, fn)] if size else []) + [os.path.join("EN", fn)]
+            cands.append(fn)
+            path = next((p for p in (_font_file(roots, c) for c in cands) if p), None)
+            if path:
+                s, top = _fnt_chars(path)
+                sets.append(s)
+                tops.append(top)
+    return (frozenset.intersection(*sets), min(tops)) if sets else None
+
+
+def _cjk_ideograph(cp):
+    return 0x3400 <= cp <= 0x4DBF or 0x4E00 <= cp <= 0x9FFF or 0xF900 <= cp <= 0xFAFF or 0x20000 <= cp <= 0x3FFFF
+
+
+GLYPH_LABEL = "翻譯字元：原版字型能顯示"
+_vanilla_fonts = os.path.join(PZ_PATH, "media", "fonts")
+if not os.path.isdir(_vanilla_fonts):
+    skip(GLYPH_LABEL, f"找不到遊戲字型 {_vanilla_fonts}（設定 PZ_PATH）")
+else:
+    _roots = [os.path.join(m, "fonts") for m in MEDIA_DIRS if os.path.isdir(os.path.join(m, "fonts"))] + [_vanilla_fonts]
+    _glyph_problems, _cn_missing, _glyphs = [], set(), {}
+    for m in MEDIA_DIRS:
+        troot = os.path.join(m, "lua", "shared", "Translate")
+        if not os.path.isdir(troot):
+            continue
+        for lang in sorted(os.listdir(troot)):
+            ldir = os.path.join(troot, lang)
+            if not os.path.isdir(ldir):
+                continue
+            if lang not in _glyphs:
+                _glyphs[lang] = font_glyphs(_roots, lang)
+            if _glyphs[lang] is None:
+                _glyph_problems.append(f"{lang}：找不到這個語言的字型")
+                continue
+            have, top = _glyphs[lang]
+            for name in sorted(os.listdir(ldir)):
+                if not name.endswith(".json"):
+                    continue
+                try:
+                    with open(os.path.join(ldir, name), encoding="utf-8") as fh:
+                        data = json.load(fh)
+                except Exception:
+                    continue  # 解析失敗由翻譯 JSON 檢查回報
+                for key, val in data.items():
+                    if not isinstance(val, str):
+                        continue
+                    bad = []
+                    for ch in dict.fromkeys(val):
+                        cp = ord(ch)
+                        if cp < 32 or ch.isspace() or cp in have:
+                            continue
+                        if lang == "CN" and _cjk_ideograph(cp):
+                            _cn_missing.add(ch)
+                            continue
+                        hint = GLYPH_HINTS.get(cp)
+                        bad.append(f"{ch}（U+{cp:04X}）畫成{'?' if cp > top else '空白'}" + (f"，可改 {hint}" if hint else ""))
+                    if bad:
+                        _glyph_problems.append(f"{lang}/{name} {key}：" + "；".join(bad))
+    _label = GLYPH_LABEL + (f"（CN 另有 {len(_cn_missing)} 個漢字原版字型就缺，不計）" if _cn_missing else "")
+    fail(_label, _glyph_problems) if _glyph_problems else ok(_label)
+
 # ---- 總結 ----
 print()
 print(f"PASS {len(passed)} / FAIL {len(failed)} / SKIP {len(skipped)}")
