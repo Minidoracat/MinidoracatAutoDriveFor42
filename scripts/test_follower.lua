@@ -29,7 +29,7 @@ production 自己寫成 `math.atan2 or math.atan`，因此兩邊都不用打 shi
   造成）時，前視＋只准前進的投影會讓車在折點附近繞圈。M3 的契約是「跟線」，
   折返路線的脫困屬於後續里程碑
 - 座標一律當「1 tile ＝ 1 公尺」的平面，與 nav 回傳的 route.pts 同一空間
-- 這是標準 Lua 不是 Kahlua：next/assert/xpcall/table.sort 的誤用由 scripts/verify_mod.py
+- 這是標準 Lua 不是 Kahlua：next/xpcall/table.sort 的誤用由 scripts/verify_mod.py
   的靜態掃描負責（本檔在 42/media 之外，可自由用標準函式庫）
 ]]
 

@@ -24,7 +24,7 @@
   點集本身正不正確（sprite 分類、走廊投影）屬 client/MDAD_Sensor 的責任，不在此驗
 - 所有期望值都由測試自己按契約手算（planner 膨脹半徑、格點／群距，以及 footprint
   的 rectangle-vs-disk 與固定 0.15m），刻意不重用 production 常數推導
-- 這是標準 Lua 不是 Kahlua：next/assert/xpcall/table.sort 的誤用由 scripts/verify_mod.py
+- 這是標準 Lua 不是 Kahlua：next/xpcall/table.sort 的誤用由 scripts/verify_mod.py
   的靜態掃描負責（本檔在 42/media 之外，可自由用標準函式庫）
 ]]
 

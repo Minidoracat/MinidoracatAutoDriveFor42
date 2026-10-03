@@ -20,9 +20,10 @@
   2. BOM / CRLF          — 有 BOM 或 CRLF 的翻譯檔會被引擎「靜默忽略」
   3. 翻譯鍵集一致          — 缺鍵的語系會顯示原始 key
   4. 裸 % 檢查           — 42.20.1 起 formatted() 遇裸 % 崩潰；只允許 %1-%9 與 %%
-  5. Kahlua 禁用全域       — next/assert/xpcall 不存在（BaseLib 未註冊），呼叫→
+  5. Kahlua 禁用全域       — next/xpcall 不存在（BaseLib 未註冊），呼叫→
                            「Object tried to call nil」。luac 與標準 Lua 測試都攔不住
                            （語法合法、標準 Lua 有這些函式），只能靜態掃描
+                           assert 不在此列：遊戲根目錄 stdlib.lua 以 Lua 定義，Kahlua 可用
   6. table.sort 禁用      — Kahlua 的 sort 是遞迴 quicksort（coroutine 堆疊上限 3000），
                            已排序輸入退化 O(n) 深度、數百筆即溢位；一律用迭代 merge sort
  5c. Kahlua 截斷式 %      — OP_MOD 向 0 截斷，負被除數得負餘數；ring 繞回索引在 PZ 內變 nil。
@@ -745,7 +746,7 @@ for m in MEDIA_DIRS:
     fail(pct_label, sorted(set(badpct))) if badpct else ok(pct_label)
 
 # ---- 5+6. Kahlua 禁用全域 / table.sort ----
-FORBIDDEN = ("next", "assert", "xpcall")
+FORBIDDEN = ("next", "xpcall")
 hits_forbidden, hits_sort = [], []
 for f in LUA_FILES:
     rel = os.path.relpath(f, REPO)
@@ -757,8 +758,8 @@ for f in LUA_FILES:
                     hits_forbidden.append(f"{rel}:{lineno} 用了 {name}()")
             if re.search(r"(?<![\w_])table\.sort\s*\(", code):
                 hits_sort.append(f"{rel}:{lineno}")
-fail("Kahlua 禁用全域（next/assert/xpcall）", hits_forbidden) if hits_forbidden \
-    else ok("Kahlua 禁用全域（next/assert/xpcall）")
+fail("Kahlua 禁用全域（next/xpcall）", hits_forbidden) if hits_forbidden \
+    else ok("Kahlua 禁用全域（next/xpcall）")
 fail("無 table.sort（用迭代 sortSafe，見 AGENTS.md）", hits_sort) if hits_sort \
     else ok("無 table.sort")
 

@@ -44,7 +44,7 @@ M3 自駕核心（client/MDAD_Driver.lua）走的是**每幀熱路徑**，斷言
   開啟時跟線遙測每秒只有一行——每幀一行會洗爆 console 也吃 FPS
 
 限制（必須誠實面對）：這是標準 Lua，不是遊戲的 Kahlua。
-- 標準 Lua 有 next/assert/xpcall，Kahlua 沒有——本 harness **測不出**誤用，
+- 標準 Lua 有 next/xpcall，Kahlua 沒有——本 harness **測不出**誤用，
   那由 scripts/verify_mod.py 的靜態掃描負責（發版前兩者都要跑）。
   verify_mod.py 只掃 42/media 下的 lua，因此本檔可自由用標準函式庫
 - 假全域是「形狀對齊」而非引擎實作。已知刻意簡化：
