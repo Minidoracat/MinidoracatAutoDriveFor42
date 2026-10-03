@@ -44,8 +44,20 @@ local INC_MAX = 8
 -- 撞擊：相鄰兩筆取樣間減速度超過一秒鎖輪（×13 煞車力，實測 ≤12 m/s²）能給的，就是撞上東西
 -- （0.16.0 兩車對撞 61→1.6 km/h／0.21s＝79 m/s²、69→49／0.21s＝26 m/s²，片段只標成「煞車」）。
 local IMPACT_DECEL = 18
+-- 鎖輪中（本筆或前一筆 fbl>0）的門檻：一秒鎖輪之外，本 MOD 的中線減速輔助（Drive.visAssistForce，上限
+-- DODGE_ASSIST_MAX 7 m/s²）在閂鎖期間照施，合計量到 23 m/s²（1002y 正式服 kanazawa9988/clip-11：blocked 鎖輪
+-- ＋繞行輔助，停在障礙前 1.7m、沒碰到卻記成撞擊）。兩車對撞的 26／79 m/s² 仍在門檻之上。
+local IMPACT_DECEL_LOCKED = 25
 local IMPACT_MIN_KMH = 5
 local IMPACT_REARM_MS = 2000
+-- 相鄰兩筆的原始間隔超過這麼久＝中間沒取樣（讓位接手、遊戲暫停）：速度差不是同一段減速，不比。
+-- （1002y RubyDiamond/clip-29：讓位 5.7 秒、恢復時 0 km/h，dt 被夾成 1 秒算出 24.9 m/s²＝假撞擊）
+local IMPACT_GAP_MAX_MS = 1000
+-- impZ（帶內有殭屍的撞擊）：撞擊那筆或前一筆的帶內最近殭屍（Sensor zombieNearS，完成輪快照、最多舊一輪，
+-- 所以兩筆取近者）離車心 ≤ 半車長＋IMPACT_ZOMBIE_M 才算。zombieN 是整條感知帶的數量（1002y ImJustAtoms/
+-- clip-01：最近一隻在 25m 外也記成 impZ）。車心弧長取樣本字串的 rs（Driver 的 lastSNow）。
+local IMPACT_ZOMBIE_M = 4
+local IMPACT_HALF_L = 2.5 -- profile 沒有 halfL 時的半車長：取偏大（窗寬，寧可多記不漏記）
 
 U.PRE_MS, U.CHUNK, U.CLIP_MAX = PRE_MS, CHUNK, CLIP_MAX
 
@@ -163,7 +175,8 @@ function U.begin(pn, now, header, profile)
         -- 超過 0.5m 的弧數；帶內有殭屍時的撞擊；加速／減速輔助作用毫秒。
         fm = 0, nm = 0, emSum = 0, loss = {},
         arcN = 0, arcOver = 0, arcDev = 0, prevArc = false, arcDevDone = false,
-        impZ = 0, aaMs = 0, daMs = 0,
+        impZ = 0, aaMs = 0, daMs = 0, prevZd = nil,
+        halfL = type(profile) == "table" and finite(profile.halfL) and profile.halfL or IMPACT_HALF_L,
         vmax = type(profile) == "table" and profile.maxSpeed or nil,
         svLim = nil,
         rev = MDAD and MDAD.Drive and MDAD.Drive.REV or "",
@@ -420,10 +433,10 @@ function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
     u.sCap = type(phys) == "table" and phys.capReason or nil
     local fbl0 = type(phys) == "table" and phys.forceBrakeLeft or nil
     u.sFbw = finite(fbl0) and fbl0 > 0 and phys.forceBrakeWhy or nil
-    local dt = 0
+    local dt, gap = 0, 0
     if u.lastTs and now > u.lastTs then
-        dt = now - u.lastTs
-        if dt > 1000 then dt = 1000 end
+        gap = now - u.lastTs -- 原始間隔（撞擊判斷用）；dt 夾 1 秒，只供時間累計
+        dt = gap > 1000 and 1000 or gap
     end
     u.lastTs = now
     local spd = finite(speed) and (speed < 0 and -speed or speed) or 0
@@ -477,6 +490,7 @@ function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
     end
     if blocked == true or mode == "unstick" or mode == "recover" then u.lastAnomaly = now end
     local fbNow = finite(fbl) and fbl > 0
+    local fbWas = u.prevFbOn == true
     if fbNow and not u.prevFbOn then
         local why = type(fbw) == "string" and fbw or "?"
         u.fb[why] = (u.fb[why] or 0) + 1
@@ -493,17 +507,30 @@ function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
         trigger(u, now, "contact")
     end
     u.prevFb = fbHit
-    -- 撞擊（含鎖輪中撞上：鎖輪本身到不了 IMPACT_DECEL）；同一次撞擊的連續幾筆只算一次
+    -- 撞擊（含鎖輪中撞上）；同一次撞擊的連續幾筆只算一次。本筆或前一筆在鎖輪＝門檻 IMPACT_DECEL_LOCKED；
+    -- 原始間隔超過 IMPACT_GAP_MAX_MS（中間沒取樣）不比。
     local prevSpd = u.prevImpactSpd
-    if prevSpd and finite(speed) and dt >= 80 and prevSpd - spd >= IMPACT_MIN_KMH
-            and (prevSpd - spd) / 3.6 / (dt / 1000) >= IMPACT_DECEL
+    -- 帶內最近殭屍離車心的距離（絕對值；快照最多舊一輪，殭屍可能已在車心後）。只在帶內有殭屍時解析 rs。
+    local zd = nil
+    if type(sensor) == "table" and finite(sensor.zombieN) and sensor.zombieN > 0 and finite(sensor.zombieNearS) then
+        local rs = tonumber(string.match(line, '"rs":([%-%d%.eE%+]+)'))
+        if finite(rs) then
+            zd = sensor.zombieNearS - rs
+            if zd < 0 then zd = -zd end
+        end
+    end
+    local decel = (fbNow or fbWas) and IMPACT_DECEL_LOCKED or IMPACT_DECEL
+    if prevSpd and finite(speed) and gap >= 80 and gap <= IMPACT_GAP_MAX_MS and prevSpd - spd >= IMPACT_MIN_KMH
+            and (prevSpd - spd) / 3.6 / (gap / 1000) >= decel
             and not (u.impactAt and now >= u.impactAt and now - u.impactAt < IMPACT_REARM_MS) then
         u.impact, u.impactAt = u.impact + 1, now
-        -- 帶內有殭屍時的撞擊（多半是撞進殭屍群；也可能是殭屍旁的別的東西）
-        if type(sensor) == "table" and finite(sensor.zombieN) and sensor.zombieN > 0 then u.impZ = u.impZ + 1 end
+        -- 撞擊那筆或前一筆有殭屍在車身附近（多半是撞進殭屍群；也可能是殭屍旁的別的東西）
+        local zw, pz = u.halfL + IMPACT_ZOMBIE_M, u.prevZd
+        if (zd and zd <= zw) or (pz and pz <= zw) then u.impZ = u.impZ + 1 end
         trigger(u, now, "impact")
     end
     u.prevImpactSpd = finite(speed) and spd or nil
+    u.prevZd = zd
     captureTick(u, now)
 end
 

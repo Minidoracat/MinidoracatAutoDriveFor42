@@ -169,10 +169,11 @@ local CURVE_FF_FRAC = 0.75
 -- 最多 +20%（τ 0.25 交錯 18°），舊學法同場景最多 +32%（τ 0.5）、實機 +125%；只做①最多 +24%、只做②最多 +77%（plant 比假設快）。
 -- 一張表（control 的 upvalue 已貼 60 上限）：fromKmh→fullKmh 補足區間、frac＝補足到的 FRAC、
 -- learnKmh／minFF＝高速增益的學習條件（實速／上幀前饋量）、learnS＝學滿才補足、settleS＝假設的 yaw 延遲 τ
--- （穩態門檻與 steer 低通共用；前饋進弧爬升的 CURVE_FF_LEAD_S 是同一個量）
+-- （穩態門檻與 steer 低通共用；前饋進弧爬升的 CURVE_FF_LEAD_S 是同一個量）。fbOppose＝回授正規化增益（yawGainFb）
+-- 剔除的反相 yaw 率門檻（rad/s，見 control 的 yaw 增益估計段）；同表是為了不多占 control 的 upvalue。
 local CURVE_FF_LEAD_S = 0.35
 local FF_HI = { fromKmh = 30, fullKmh = 55, frac = 0.9, learnKmh = 40, minFF = 0.1, learnS = 0.5,
-    settleS = CURVE_FF_LEAD_S }
+    settleS = CURVE_FF_LEAD_S, fbOppose = 0.5 }
 local CURVE_FF_MAX = 0.8 -- 小增益長車不能用倒數把前饋放大成整車橫推；回饋仍保留完整權威。
 local YAW_GAIN_INIT = 0.8
 local YAW_GAIN_TAU_S = 0.5
@@ -1325,9 +1326,10 @@ end
 -- 車道折點前 0.95m 才放行、前視越過頂點又白拿 10m：33 km/h 放行 err 130–138° 誤進 ROTATE（E2E hairpin-sp
 -- 1002r 2/5）；放行壓到 12 km/h 則目標先落在車道折點前的出彎臂延長線（−13°、朝外），2m 內掃到 154°（1002j）。
 -- 只處理彎內側（shift<0）；外側車道折點在頂點後，放行時機照舊。承諾線／繞行剖面作用時不估（照舊）。
--- ≤90° 只在跨臂交接（handover＝true）量車道折點：彎內側的車離中心線頂點永遠 ≥b·√2，舊交接圓（rel）
--- 進不去＝投影釘在入彎臂、前視點不前進、車繞著它轉（正式服 0.17.0 clip-09：4.3m 首段接 90°、常駐 2.5）。
--- ≤90° 的鉗點／放行仍量中心線（提前 b 會把大車窄路的內切加深 0.1–0.4m，未經 campaign 證實前不動）。
+-- ≤90°（handover＝true 才估）用在跨臂交接與放行後的出彎前視：彎內側的車離中心線頂點永遠 ≥b·√2，舊交接圓（rel）
+-- 進不去＝投影釘在入彎臂、前視點不前進、車繞著它轉（正式服 0.17.0 clip-09：4.3m 首段接 90°、常駐 2.5）；前視
+-- 不補車道弧長＝目標落在車旁／車後誤進 ROTATE（正式服 1002y：2.94m 首段接 90°）。≤90° 的鉗點／放行仍量中心線
+-- （提前 b 會把大車窄路的內切加深 0.1–0.4m，未經 campaign 證實前不動）——呼叫端只取 shift 補前視。
 -- 回 rel, shift（入彎臂、負＝提前）, cornerOut（出彎臂上車道折點離頂點的弧長）, bIn（入彎臂車道偏移）。
 local function kinkRelease(profile, state, ji, dth, handover)
     local rel = profile.rMin * tan(dth * 0.5)
@@ -1350,11 +1352,18 @@ end
 -- 跨臂交接（投影從入彎臂 idx 跳到出彎臂 idx+1）：車在交接圓內（半徑 rel）且車頭朝出臂的前半平面。
 -- 髮夾與 ≤90° 折點的彎內側都量到車道折點（kinkRelease handover＝true；鉗制／放行同一個基準）——中心線頂點
 -- 對彎內側的車永遠 ≥b·√2，交接圓進不去＝投影釘在入彎臂（正式服 0.17.0 clip-09）。獨立成函式是為了 control
--- 的 local 槽數（Kahlua 190 上限）。
+-- 的 local 槽數（Kahlua 190 上限）。投影每幀都問（control 的段尾延伸），遠離頂點時先粗篩、不估車道折點：
+-- 圓半徑 ≤ HAIRPIN_APEX_MAX，圓心離頂點 ≤ |shift|＋|bIn| ≤ |b|·(1＋2/sinθ)（夾過的車道偏移不超過 |b|）。
 local function kinkHandover(profile, state, idx, x, y, heading)
     local px, py, i = profile.x, profile.y, idx + 1
     local turn = wrapPi(profile.segH[i] - profile.segH[idx])
     if turn < 0 then turn = -turn end
+    local sn, b = sin(turn), state.laneBias
+    if sn > 0.1 then
+        b = isFinite(b) and (b < 0 and -b or b) or 0
+        local reach, dx0, dy0 = HAIRPIN_APEX_MAX + b * (1 + 2 / sn), x - px[i], y - py[i]
+        if dx0 * dx0 + dy0 * dy0 > reach * reach then return false end
+    end
     local join, shift, _, bIn = kinkRelease(profile, state, idx, turn, true)
     local cx, cy = px[i], py[i]
     if shift < 0 then
@@ -1563,11 +1572,14 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         -- 投影夾在本段終點、車已越過段尾（小折角短段＋側偏最常見）時，真實進度＝段尾弧長＋車沿
         -- 下一段方向的前進量；只從夾住的 projS 起算，下一段候選永遠「太遠」，投影釘死、側偏越長越大
         -- 直到誤進 ROTATE（2026-09-27 E2E replay：SemiBox 過 18°／3.1m 短段，1.8m 側偏）。車還沒到段尾
-        -- （髮夾入彎臂的正式服案）不延伸，前跳防護照舊。
+        -- （髮夾入彎臂的正式服案）不延伸，前跳防護照舊。車在折點交接圓內、車頭朝出臂（kinkHandover）也照此
+        -- 延伸：彎內側車道上的車永遠到不了入彎臂段尾，頂點後又緊接短段時，只有 idx+1 能交接、它的端點卻比入彎臂
+        -- 遠，投影就釘在入彎臂（E2E 1004a replay：4m 首段接 90°＋兩段 0.5m，起步轉進去後 s 停在 1.5、誤進
+        -- ROTATE 三次交還）。
         if idx < n - 1 then
             local ex, ey = px[idx + 1], py[idx + 1]
             local rx, ry = x - ex, y - ey
-            if rx * (ex - px[idx]) + ry * (ey - py[idx]) > 0 then
+            if rx * (ex - px[idx]) + ry * (ey - py[idx]) > 0 or kinkHandover(profile, state, idx, x, y, heading) then
                 local along = (rx * (px[idx + 2] - ex) + ry * (py[idx + 2] - ey)) / segLen[idx + 1]
                 if along > 0 and s[idx + 1] + along + 0.5 > maxS then maxS = s[idx + 1] + along + 0.5 end
             end
@@ -1673,8 +1685,11 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         if k2 > kMax then kMax = k2 end
     end
     local adaptiveW = profile.filletAdaptive == true -- capacity 退化折點也必須鉗到切點
-    -- 髮夾彎內側（kinkRelease shift<0）以車道折點為基準：中心線弧長 [sV+shift, sV+cornerOut] 在車道上是同一點，
-    -- 鉗點、放行距離、出彎前視都量車道弧長（前視越過車道折點時加回 cornerOut−shift）。shift＝0 與舊制逐位元相同。
+    -- 彎內側（kinkRelease shift<0）以車道折點為基準：中心線弧長 [sV+shift, sV+cornerOut] 在車道上是同一點，
+    -- 前視越過車道折點時加回 cornerOut−shift。髮夾（>90°）的鉗點與放行距離也量車道弧長；≤90° 的鉗點／放行仍量
+    -- 中心線頂點（1002t 未經 campaign 不動），只有放行後的前視補車道弧長——不補時 90° 彎內側常駐 2.5 塌掉 5m，
+    -- 前視下限 4.5m 的目標落在車身旁／車後，err 一幀 −1.8→+2.9 誤進 ROTATE；2.94m 首段起步時車再開回首段又被
+    -- 鉗回身後頂點，四次調頭＝迴圈防護交還（正式服 1002y 起步片段）。shift＝0 與舊制逐位元相同。
     local laneCornerS, laneExtra = nil, 0
     while j < n - 1 and walked < LOOKAHEAD_WALK_MAX do
         local sV = s[j + 1]
@@ -1690,13 +1705,13 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
                 and (segKindW[j] == MDADDynamics.SEG_FALLBACK
                     or segKindW[j + 1] == MDADDynamics.SEG_FALLBACK)
             if (dth > HAIRPIN_RAD or fallbackW) and dth < HAIRPIN_MAX_RAD then
-                local rel, shift, cornerOut = kinkRelease(profile, state, j, dth)
-                cornerS = sV + shift
+                local rel, shift, cornerOut = kinkRelease(profile, state, j, dth, true)
+                cornerS = sV + (dth > HAIRPIN_RAD and shift or 0)
                 if cornerS < sTarget then
                     if cornerS > sNow + rel then kinkS = cornerS; break end
                     state.kinkExitS = sV
                     if shift < 0 then
-                        laneCornerS, laneExtra = cornerS, cornerOut - shift
+                        laneCornerS, laneExtra = sV + shift, cornerOut - shift
                         sTarget = sTarget + laneExtra
                     end
                 end
@@ -2130,15 +2145,21 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
                 -- 同 FF_HI。上面的逐幀比值先夾 [LO,HI] 再平均，heading 逐幀噪聲讓夾限不對稱（下面只到 0.08、上面到 3），
                 -- 低增益車被往上拉 2–3 倍（1001h 車隊：SemiTruckBox 實測 0.16、估 0.33–0.40；SemiTruckBox_mil 0.11–0.16、
                 -- 估 0.44–0.53＝回授正規化完全沒作用）。前饋 FRAC 是照舊估計調的，前饋照舊用 yawGain。
+                -- 撞擊／甩尾幀不學（正式服 1002y 片段）：yaw 與施加轉向反相時 yf 掉成負、gfb 夾到 0.08，Driver 回授被放大到
+                -- FB_NORM_MAX、轉向極限環（st ±1.5、yr ±6.6）又餵更多反相資料，學不回來。上幀 steer 被 ESC 收掉的幀同 FF_HI
+                -- 不學；反相只剔「明顯反向」（sg·yaw < −FF_HI.fbOppose），用 0 會把 heading 噪聲的負半邊整批丟掉、低增益重車
+                -- 被估高（情境「1001h」230 FPS 噪聲）。
                 local sg = ap > 0 and 1 or -1
-                local yf = state.fbYawF or yawGain * sg * ap
-                local sf = state.fbSteerF or sg * ap
-                yf = yf + (sg * wrapPi(heading - ph) / dt - yf) * alpha
-                sf = sf + (sg * ap - sf) * alpha
-                state.fbYawF, state.fbSteerF = yf, sf
-                local gfb = yf / sf
-                if gfb < YAW_GAIN_LO then gfb = YAW_GAIN_LO elseif gfb > YAW_GAIN_HI then gfb = YAW_GAIN_HI end
-                state.yawGainFb = gfb
+                if state.escLimited ~= true and sg * wrapPi(heading - ph) / dt > -FF_HI.fbOppose then
+                    local yf = state.fbYawF or yawGain * sg * ap
+                    local sf = state.fbSteerF or sg * ap
+                    yf = yf + (sg * wrapPi(heading - ph) / dt - yf) * alpha
+                    sf = sf + (sg * ap - sf) * alpha
+                    state.fbYawF, state.fbSteerF = yf, sf
+                    local gfb = yf / sf
+                    if gfb < YAW_GAIN_LO then gfb = YAW_GAIN_LO elseif gfb > YAW_GAIN_HI then gfb = YAW_GAIN_HI end
+                    state.yawGainFb = gfb
+                end
             end
         end
         -- 高速弧段增益（常數註解見 FF_HI）：轉向方向正規化後 yaw 與 steer 各自 EWMA

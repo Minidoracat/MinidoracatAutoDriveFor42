@@ -4506,6 +4506,18 @@ local function armDrive()
     return MDAD.Drive.isActive(0)
 end
 
+-- 車停住 totalMs：期間照常每 250ms 跑一幀（真遊戲停住時幀照樣在跑）；最後 250–500ms 只推 nowMs，那一幀留給
+-- 呼叫端 driveReset＋driveTick 做斷言（門檻跨越落在這一幀）。1004a 起「車速 >3 km/h、兩個跟線幀牆鐘隔
+-- >PROGRESS_HITCH_MS、引擎幀時遠小於間隔」＝客戶端凍住，不算停滯——帶車速一次跳 2.5 秒只跑一幀的舊寫法會被當成凍住。
+function drive.stallFrames(totalMs)
+    while totalMs > 500 do
+        nowMs = nowMs + 250
+        driveTick(dp, dveh)
+        totalMs = totalMs - 250
+    end
+    nowMs = nowMs + totalMs
+end
+
 -- 前面的情境把 nowMs 推進過，但 navGate 的 draw 快取（1 秒）可能還留著別的玩家
 -- 的結果；先跨過 TTL，讓 M3 從乾淨狀態開始。
 nowMs = nowMs + 5000
@@ -8175,6 +8187,16 @@ function drive.scenarioZombiePlan()
         "(zp-least) 無縫時往最不壞的 lane 偏（why " .. tostring(s.zombieWhy) .. "、lane "
         .. tostring(s.fstate.laneBias) .. "）")
     drive.clearCell(15, -1); drive.clearCell(15, 0); drive.clearCell(15, 3); drive.clearCell(15, -4)
+    -- (zp-least-near) 1004a 正式服 0.18.2 kanazawa clip-08：無縫、整條帶都搆得到時，least 從車身這一側翻到最近
+    --   那隻的另一側（0.6 秒後就到）。近威脅的 least 同樣只在車身這一側取。違規證明：least 不限側＝紅。
+    drive.putSolid(15, 3, "zp_leastn_r"); drive.putSolid(15, -4, "zp_leastn_l")
+    s = arm(0)
+    put(12.5, 0.3); put(13.5, -0.9) -- 最近那隻在車身（0）右邊 0.3；帶 ±1.1 的最遠點在右帶緣（越過牠），車身這側只有兩隻之間
+    drive.scanRound(true)
+    checkTrue(s.zombieWhy == "least" and s.fstate.laneBias < -0.05,
+        "(zp-least-near) 近威脅無縫：留在車身這一側取最不壞的 lane，不越過最近那隻（why "
+        .. tostring(s.zombieWhy) .. "、lane " .. tostring(s.fstate.laneBias) .. "）")
+    drive.clearCell(12, 0); drive.clearCell(13, -1); drive.clearCell(15, 3); drive.clearCell(15, -4)
     -- (zp-cross) 減速開啟（整條帶可選）時的近威脅：常駐 0 的成本偏好左縫，但殭屍 1.5 秒內就到、
     --   車身在牠右側＝先在右側選（E2E p2-on 85 km/h 距 20m 翻邊穿過兩隻）。違規證明：拿掉近威脅
     --   限側即紅。
@@ -8299,6 +8321,70 @@ function drive.scenarioZombieReturn()
     assert(armDrive())
 end
 drive.scenarioZombieReturn()
+
+-- (zfar) 1004a 玩家回報「繞道後一直走路邊草地，要到第一次轉彎或殭屍／屍體出現才回到路上」；正式服 0.18.2
+--   GGGMAMEER clip-22：殭屍走了、軟縫回常駐線的側移檢查看整個軟縫視窗（車速×4.5s，80 km/h＝100m），遠處
+--   常駐線旁一根硬物就判 hard，lane 停在偏移處 2 秒、再停 10 秒；車速降下來（彎道、殭屍／屍體減速）視窗縮到
+--   40m 才放行。現制只驗側移真的會掃過的那段（Drive.softShiftEndS，至少 SOFT_LOOKAHEAD_M）。
+--   (zfar-far)  80 km/h、lane 停在常駐線外 y0，側移路上 60m 外有樹（不擋常駐線、不擋 y0）：回到常駐線。
+--   (zfar-near) 同一棵樹在 15m（側移範圍內）：照舊 hard、留在 y0（1002t「側移不得穿過側邊硬物」）。
+--   違規證明：拿掉 sShift 上限＝(zfar-far) 紅；拿掉側移硬物檢查＝(zfar-near) 紅。
+function drive.scenarioZombieFarHard()
+    scenario("軟縫回常駐線：只驗側移掃過的那段，遠處硬物不把 lane 留在偏移處")
+    local oldDodge = MDAD.HUD.zombieDodge
+    MDAD.HUD.zombieDodge = function() return true end
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 120,
+        RightLaneBias = 0, ZombieAreaSlowdown = false, CorpseSlowdown = false })
+    local wasMs = drive.frameMs(10)
+    local function run(treeAhead)
+        drive.fillWorld(-10, 200, -8, 8)
+        assert(armDrive())
+        setHeading(dveh, 0)
+        dveh._speed, dveh._y = 80, 0
+        drive.scanRound(true)
+        drive.scanRound(true)
+        local s = MDAD.Drive.debugSession(0)
+        local tr = 0.15 -- 樹幹半徑（0929j：格 +0.6、r 0.15）
+        -- 樹在常駐線右側、離常駐線 0 比擋線帶遠（不觸發繞行）；(s,l) 記取樣柱，先掃兩輪量實際 l 再擺 y0
+        drive.putTree(math.floor(dveh._x + treeAhead), math.floor(s.needHalf + tr) + 1, "harness_zfar_tree")
+        drive.scanRound(true)
+        drive.scanRound(true)
+        local tl = nil
+        for i = 1, s.sensor.hardN do
+            if s.sensor.hardS[i] > s.lastSNow + treeAhead - 3 then tl = s.sensor.hardL[i] end
+        end
+        local y0 = (tl or 3) + s.needHalf + tr + 0.4 -- 樹在 0 與 y0 之間、兩邊都不擋
+        -- 前置：軟縫停在常駐線外 y0（RETURN 讓位停放／殭屍閃避後的狀態；怎麼來的不是本案主題）
+        s.zombieLane, s.zombieLaneParked, s.fstate.laneBias = y0, nil, y0
+        dveh._y = y0
+        local why, lane = nil, y0
+        for _ = 1, 10 do
+            drive.scanRound(true)
+            if s.zombieWhy == "hard" then why = "hard" end
+            lane = s.fstate.laneBias
+            dveh._y = lane
+        end
+        return s, y0, lane, why, tl
+    end
+    local s, y0, lane, why, tl = run(60)
+    checkTrue(type(tl) == "number" and math.abs(tl) >= s.needHalf + 0.15 and math.abs(y0 - tl) >= s.needHalf + 0.15
+            and tl > 0 and tl < y0,
+        "(zfar) 前置：樹在側移路上、不擋常駐線也不擋 y0（l " .. tostring(tl) .. "、y0 " .. tostring(y0) .. "）")
+    checkTrue(math.abs(lane) < 0.06 and s.zombieLane == nil and why == nil and not s.dodging,
+        "(zfar-far) 80 km/h、60m 外的樹不在側移段：lane 回常駐線（lane " .. tostring(lane) .. "、why "
+        .. tostring(why) .. "、dodging " .. tostring(s.dodging) .. "）")
+    s, y0, lane, why = run(15)
+    checkTrue(why == "hard" and math.abs(lane - y0) < 0.05,
+        "(zfar-near) 15m 的樹在側移段內：照舊 hard、lane 留在 y0（lane " .. tostring(lane) .. "、why "
+        .. tostring(why) .. "）")
+    MDAD.Drive.stop(0, nil)
+    MDAD.HUD.zombieDodge = oldDodge
+    drive.frameMs(wasMs)
+    drive.fillWorld(-2, 70, -7, 7)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    assert(armDrive())
+end
+drive.scenarioZombieFarHard()
 
 -- ⑤lf 低幀率降速提示（0925；0929o 門檻改為掃描額度放大到上限的 50ms）：可視上限壓速、平均幀時 ≥50ms，
 --   且視距是被幀率截短，持續 2s 才讓 HUD 狀態變「卡頓降速」（lowfps）、恢復 3s 才消失；同趟累計 10s 跳一次
@@ -11509,13 +11595,13 @@ do
     dveh._x = 8
     driveTick(dp, dveh) -- new-route verify 必須以既有 s>1 的同座標系重新 anchor
     dveh._speed, dveh._trans = 70, 3
+    drive.stallFrames(2501) -- 停住期間照常跑幀（一次跳 2.5 秒＝客戶端凍住，見 drive.stallFrames）
     local gearReads = 0
     local realTransmission = dveh.getTransmissionNumber
     dveh.getTransmissionNumber = function(self)
         gearReads = gearReads + 1
         return realTransmission(self)
     end
-    nowMs = nowMs + 2501
     driveReset(dveh)
     driveTick(dp, dveh)
     checkTrue(MDAD.Drive.isActive(0), "(d) suspect 後 session 活著")
@@ -13856,6 +13942,38 @@ local function scenarioPhaseE()
             AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
         hotVeh._speed = speedWas7
         drive.frameMs(frameWas7)
+    end
+    -- (ret-fast) 1004a 正式服 0.18.2 ImJustAtoms clip-02：62 km/h 承諾 11.7m 做 2.9m 的回線 → 轉向飽和、過衝 0.86m、
+    --   62.8 km/h 撞樹。實速超過 RETURN_CAP 時回線長至少要讓側向加速度不超過可用值：L ≥ v·√(6·Δ/aLat)
+    --   （與 MDADDynamics.shiftLength 的 lLat 同一個物理下限）；RETURN_CAP 以下照舊 max(4Δ, 8, 車長)。
+    --   違規證明：updateReturnSnapshot 不套 Drive.returnLineFloor＝(ret-fast) 紅。
+    do
+        local speedWas8, frameWas8 = hotVeh._speed, drive.frameMs(8)
+        setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
+            AutoDriveMaxSpeed = 120, ObstaclePolicy = 1, RightLaneBias = 1.5 })
+        hotVeh._x, hotVeh._y, hotVeh._speed = 0, -4, 62 -- 同 (ret-head) 的線外 4m（超過 RETURN 進場門檻）
+        setHeading(hotVeh, 0)
+        driveReset(hotVeh)
+        checkTrue(MDAD.Drive.start(dp), "(ret-fast) 線外 3m、62 km/h 啟動")
+        for _ = 1, 4 do driveTick(dp, hotVeh) end
+        local st = MDAD.Drive.debugSession(0)
+        for _ = 1, 3 do
+            if st.fstate.exactLine == true then break end
+            drive.scanRound(true)
+        end
+        local len = (st.returnEndS or 0) - (st.returnStartS or 0)
+        local aLat, delta = st.horizonMinLat, math.abs(-4 - (st.returnLaneTarget or 0))
+        local bound = type(aLat) == "number" and aLat > 0 and (62 / 3.6) * math.sqrt(6 * delta / aLat) or 1e9
+        checkTrue(st.returnActive == true and st.fstate.exactLine == true and len >= bound - 1e-6,
+            "(ret-fast) 62 km/h 回線長 ≥ v·√(6Δ/aLat)（len " .. string.format("%.1f", len) .. "、下限 "
+            .. string.format("%.1f", bound) .. "、exact " .. tostring(st.fstate.exactLine) .. "、ret "
+            .. tostring(st.returnActive) .. "、hold " .. tostring(st.lastHoldReason) .. "、pm " .. tostring(st.planMode)
+            .. "、scanEnd " .. tostring(st.sensor and st.sensor.scanEndS) .. "、rs " .. tostring(st.lastSNow) .. "）")
+        MDAD.Drive.stop(0, nil)
+        setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
+            AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+        hotVeh._speed = speedWas8
+        drive.frameMs(frameWas8)
     end
 
     MDAD.Drive.stop(0, nil)
@@ -18271,6 +18389,133 @@ function drive.scenarioExitKeep()
 end
 drive.scenarioExitKeep()
 
+-- (relg) 1004a 正式服 0.18.2 Sixya clip-11／MI clip-01（同一點、兩台車、同一事件序）：承諾期間 laneBias 凍結在
+--   commit 值、常駐線隨路面對中漂走；出口釋放後期望線一幀跳回常駐線，規劃只問常駐線判 clear，車身卻還在舊出口
+--   線上、車鼻前 1m 有物件 → 5→17 km/h 撞上。釋放時車離接下來要跟的線 > START_GUARD_LAT_M＝重新武裝起步近物
+--   限速（Drive.armReleaseGuard），以前半車身淨距限速到對正。
+--   (relg-pred) predicate：離常駐線 2.1m 武裝、0.3m 不武裝；鏈著時量鏈 lane。
+--   (relg) 整合：12m 路常駐 +1.5、左繞後在出口段離常駐線 2.1m（< RETURN 門檻）提前釋放，車鼻前 1.5m 有物件
+--   （不擋常駐線）：釋放後武裝、目標速度被前半車身淨距壓住。
+--   違規證明：releaseDodge 不呼叫 armReleaseGuard＝(relg) 紅；門檻改成恆武裝＝(relg-pred) 0.3m 案紅。
+function drive.scenarioReleaseGuard()
+    scenario("繞行釋放時車不在常駐線上：重新武裝起步近物限速")
+    local oldSandbox, oldVeh, oldGet = SandboxVars, dveh, getSpecificPlayer
+    local oldApi = MinidoracatMiniMapAPI.navApiVersion
+    local oldRoute, oldTx, oldTy, oldState = drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
+    local wasMs = drive.frameMs(20)
+    MDAD.Drive.stop(0, nil)
+    getSpecificPlayer = function(n) if n == 0 then return dp end end
+    MinidoracatMiniMapAPI.navApiVersion = 5
+    dveh = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }),
+        engineRunning = true, mass = 1600, speed = 0, maxSpeed = 100,
+        bodyW = 1.6, bodyL = 4.2, comX = 0, comZ = 0, profileFull = true,
+        enginePower = 3000, brakingForce = 100, wheelFriction = 1.5, tireFriction = 1.5 })
+    drive.fillWorld(-12, 130, -12, 12)
+    drive.putRoad(0, 130, -6, 6)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
+        AutoDriveMaxSpeed = 60, RightLaneBias = 0.5 }) -- 12m 路 ×0.5＝常駐 +1.5
+    dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = 0, 1.5, 0, 0, true
+    dveh._engine, dveh._driver = true, dp
+    dp._vehicle, dp._dead, dp._local = dveh, false, true
+    setHeading(dveh, 0)
+    drive.nav.route = { pts = { 0, 0, 120, 0 }, segSurface = { "paved" }, segWidth = { 12 },
+        len = 120, cost = 120, avoidPenalty = 0 }
+    drive.nav.tx, drive.nav.ty, drive.nav.state = 120, 0, "ok"
+    local function start()
+        MDAD.Drive.stop(0, nil)
+        dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = 0, 1.5, 0, 0, true
+        setHeading(dveh, 0)
+        checkTrue(MDAD.Drive.start(dp), "(relg) 啟動")
+        for _ = 1, 6 do driveTick(dp, dveh) end
+        drive.scanRound(true)
+        return MDAD.Drive.debugSession(0)
+    end
+    -- 右側整排硬物逼車左繞；車擺到整車過 c、仍離常駐線 2.1m（< RETURN 門檻 3、沒有出口窄點證據＝會提前釋放）
+    local function commitLeft()
+        local st = start()
+        for x = 40, 49 do for y = 0, 5 do drive.putSolid(x, y, "relg_" .. x .. "_" .. y) end end
+        for _ = 1, 3 do drive.scanRound(true) end
+        local fs = st.fstate
+        local ok = st.dodging == true and type(fs.offL) == "number" and fs.offL < -1.5 and type(fs.offC) == "number"
+        checkTrue(ok, "(relg) 前置：承諾左繞（offL=" .. tostring(fs.offL) .. "）")
+        for x = 40, 49 do for y = 0, 5 do drive.clearCell(x, y) end end
+        if not ok then return nil end
+        st.startGuard = false
+        local x0 = math.floor(fs.offC + st.bodyReach + 1)
+        dveh._x, dveh._y, dveh._speed, dveh._stopped = x0, -0.6, 20, false
+        for _ = 1, 2 do driveTick(dp, dveh) end
+        st.planSig = -1
+        return st, x0
+    end
+    local st = start()
+    -- predicate
+    local keep = { st.lastLatSigned, st.frontClearX, st.frontClearY, st.residentBias, st.startGuard, st.laneChained }
+    st.startGuard, st.residentBias, st.laneChained = false, 1.5, false
+    st.lastLatSigned, st.frontClearX, st.frontClearY = -0.6, 10, 0
+    MDAD.Drive.armReleaseGuard(st)
+    checkTrue(st.startGuard == true and st.startGuardX == 10, "(relg-pred) 離常駐線 2.1m：武裝（實得 " .. tostring(st.startGuard) .. "）")
+    st.startGuard, st.lastLatSigned = false, 1.2
+    MDAD.Drive.armReleaseGuard(st)
+    checkTrue(st.startGuard == false, "(relg-pred) 離常駐線 0.3m：不武裝")
+    st.laneChained, st.fstate.laneBias, st.lastLatSigned = true, -2.5, -2.4
+    MDAD.Drive.armReleaseGuard(st)
+    checkTrue(st.startGuard == false, "(relg-pred) 鏈著時量鏈 lane（車在鏈 lane 上）：不武裝")
+    st.lastLatSigned, st.frontClearX, st.frontClearY, st.residentBias, st.startGuard, st.laneChained =
+        keep[1], keep[2], keep[3], keep[4], keep[5], keep[6]
+    st.fstate.laneBias = keep[4] or st.fstate.laneBias
+    -- (relg) 整合：車鼻前約 1.5m、不擋常駐線 +1.5 的物件；釋放時 20 km/h
+    local x0
+    st, x0 = commitLeft()
+    if st then
+        drive.putSolid(x0 + 3, -1, "relg_nose")
+        drive.scanRound(true)
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        checkTrue(not st.dodging and not st.returnActive and st.startGuard == true,
+            "(relg) 釋放時離常駐線 2.1m：重新武裝起步近物限速（dodging=" .. tostring(st.dodging) .. " ret="
+            .. tostring(st.returnActive) .. " guard=" .. tostring(st.startGuard) .. "）")
+        -- 只擋加速、不減速：車鼻前 1.5m 有物件時目標停在釋放時的 20 km/h（不加速、也不被滑行包絡壓到爬行——
+        -- 高速釋放時那樣壓會在路邊任何東西旁邊急減速，E2E 1004a replay 45→12 km/h）
+        local capFrom = st.lastCapReason == "min-exec" and st.minExecFrom or st.lastCapReason
+        checkTrue(capFrom == "start-near" and math.abs(drive.calls.maxRegSpeed - 20) <= 1e-6,
+            "(relg) 車鼻前 1.5m 有物件：目標停在釋放時的車速 20、不加速也不壓到爬行（cap=" .. tostring(st.lastCapReason)
+            .. "(" .. tostring(st.minExecFrom) .. ") reg=" .. tostring(drive.calls.maxRegSpeed) .. " fc="
+            .. tostring(st.frontClearance) .. " floor=" .. tostring(st.startGuardFloorKmh) .. "）")
+        drive.clearCell(x0 + 3, -1)
+    end
+    -- (relg-tail) 1004a 正式服 0.18.2 Qoo clip-15：快照裡擋常駐線的點落在車尾與車心之間（Corridor.plan／判堵錨
+    --   都從 rs−halfL 收）。提前釋放的擋線檢查也從車尾起算＝不放手、沿承諾線走；舊制從車心找＝放手後同輪判堵、
+    --   錨在車身旁鎖輪。點由 Sensor.step 完成輪時注入（車身旁的點不在新掃描窗內，正式服是同輪車已開過去）。
+    --   違規證明：exitReady 改回從車心找＝(relg-tail) 紅。
+    st, x0 = commitLeft()
+    if st then
+        local realStep = MDADSensor.step
+        MDADSensor.step = function(sen, ...)
+            local done = realStep(sen, ...)
+            if done and sen.ready then
+                local n = sen.hardN + 1
+                local hs = st.lastSNow - 1
+                sen.hardS[n], sen.hardL[n], sen.hardN = hs, 1.5, n
+                if sen.hardR then sen.hardR[n] = 0.15 end
+                if sen.hardX then sen.hardX[n], sen.hardY[n] = hs, 1.5 end
+                sen.sig = sen.sig + 7
+            end
+            return done
+        end
+        drive.scanRound(true)
+        MDADSensor.step = realStep
+        checkTrue(st.dodging == true,
+            "(relg-tail) 車尾與車心之間有擋常駐線的點：不提前釋放（dodging=" .. tostring(st.dodging) .. " blocked="
+            .. tostring(st.blocked) .. "）")
+    end
+    MDAD.Drive.stop(0, nil)
+    drive.frameMs(wasMs)
+    MinidoracatMiniMapAPI.navApiVersion = oldApi
+    drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
+    SandboxVars, dveh, getSpecificPlayer = oldSandbox, oldVeh, oldGet
+end
+drive.scenarioReleaseGuard()
+
 -- (dvis) 0928k rc9 0104／0109：路線終點前 4–9m 的繞行，可視帽把終點當未知前緣扣 halfL＋2 → 0，
 --   車停在終點前、帶著偏移進不了到站圈。可視帶已含終點、剩 ≤ ARRIVE_M+3 時地板到爬行（同一般跟線）。
 --   違規證明：拿掉地板＝終點前 4m 的帽回 0、(dvis) 紅。
@@ -18944,6 +19189,23 @@ function drive.scenario0928c()
     driveReset(dveh)
     driveTick(dp, dveh)
     checkEq(st.progressState, "watch", "(hitch) 卡頓 3.6 秒只動 0.5m：不判 suspect（實得 " .. tostring(st.progressState) .. "）")
+    -- (freeze) 1004a 正式服 0.18.2 Qoo clip-16：整個客戶端凍住 5.8 秒、恢復首幀 fdt 只有 27ms（不是頂到上限的
+    --   83ms），物理一樣只前進一小步。違規證明：條件改回「幀時 ≥80ms」＝(freeze) 紅。
+    drive.frameMs(30)
+    for _ = 1, 4 do
+        nowMs = nowMs + 30
+        dveh._x = dveh._x + 0.33
+        driveReset(dveh)
+        driveTick(dp, dveh)
+    end
+    drive.frameMs(27)
+    nowMs = nowMs + 5800
+    -- 從進度錨點只動 0.5m（< 重臂門檻 1m）：凍住前那幾幀的位移不能湊滿重臂，否則測不到停滯判定
+    dveh._x = st.progressX + 0.5
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkEq(st.progressState, "watch", "(freeze) 客戶端凍住 5.8 秒、恢復首幀 27ms、只動 0.5m：不判 suspect（實得 "
+        .. tostring(st.progressState) .. "）")
     drive.frameMs(30)
     -- (stale) 恢復需求沒經 dispatch 就被撤銷（episode 重臂清掉 recoverWhy）：suspect 不得留著
     st.progressState, st.recoverWhy = "suspect", nil
@@ -19177,6 +19439,134 @@ function drive.scenario0928d()
 end
 drive.scenario0928d()
 
+-- (chain-far) 1004a 玩家回報「繞道後判定走路邊草地，要到第一次轉彎或殭屍／屍體出現才回到路上」：鏈式停留只在
+--   常駐線前方淨空才解鏈，看的是整個感知窗——遠處還有任何擋常駐線的東西，車就沿停留 lane（常在路外）一路開，
+--   直到減速把窗縮短。現制擋常駐線那群夠遠（回常駐線＋再側移出去兩段都塞得進，Drive.chainBlockerFar）就解鏈。
+--   fixture 同 (c9b)：B 在 +1.6、A 在 +1.3（只擋常駐線）→ 停留 −1.5；另放 C 在 x=140（常駐線上、很遠）。
+--   (chain-far) 過了 A 就解鏈（why=far），不等到 C；(c9b) 仍鎖「A 緊接在後＝續鏈」。
+--   違規證明：chainBlockerFar 恆 false＝(chain-far) 紅（實測舊制到 x=144 才解鏈）。
+function drive.scenarioChainFar()
+    scenario("鏈式停留：擋常駐線的下一群夠遠就解鏈回路上，不沿停留 lane 開到它")
+    local function stepTo(x, y)
+        dveh._x, dveh._y = x, y
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        drive.scanRound()
+    end
+    local oldSand = SandboxVars
+    drive.fillWorld(-10, 200, -8, 8)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    nowMs = nowMs + 5000
+    MDAD.Drive.stop(0, nil)
+    dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = 0, 0, 20, 0, false
+    dveh._engine, dveh._driver = true, dp
+    dp._vehicle, dp._dead, dp._local = dveh, false, true
+    setHeading(dveh, 0.3)
+    drive.nav.tx, drive.nav.ty, drive.nav.state = 190, 0, "ok"
+    drive.nav.route = newRoute(48, 0, 0, 4, 0)
+    checkTrue(MDAD.Drive.start(dp), "(chain-far) 啟動")
+    for _ = 1, 2 do driveTick(dp, dveh) end
+    local _, cB = drive.putVehicleGeom(20, 1.6, 0, 1.8, 4.4, true)
+    local _, cA = drive.putVehicleGeom(42, 1.3, 0, 1.8, 4.4, true)
+    local _, cC = drive.putVehicleGeom(140, 1.3, 0, 1.8, 4.4, true)
+    driveReset(dveh)
+    drive.scanRound()
+    local st = MDAD.Drive.debugSession(0)
+    local stayLane = st.fstate.offL
+    checkTrue(st.dodgeStay == true and st.laneChained == true and type(stayLane) == "number" and stayLane < -1,
+        "(chain-far) 前置：B 的停留承諾、鏈住（tier " .. tostring(st.dodgeTier) .. " offL " .. tostring(stayLane) .. "）")
+    local unchainAt, residentPm = nil, nil
+    if type(stayLane) == "number" then
+        stepTo(10, stayLane * 0.7)
+        stepTo(20, stayLane)
+        local x = 24
+        while x <= 136 and unchainAt == nil do
+            stepTo(x, stayLane)
+            if not st.laneChained then
+                unchainAt = x
+                -- 解鏈當下常駐線前方仍有擋線群（C）＝走的是 far，不是 clear
+                local sen, res = st.sensor, st.residentBias or 0
+                residentPm = MDADCorridor.plan(sen.hardS, sen.hardL, sen.hardN, st.needHalf,
+                    sen.corridorHalf or MDADSensor.CORRIDOR_HALF, res, sen.hardR, res, sen.roadLo, sen.roadHi,
+                    false, nil, st.lastSNow - st.vehicleProfile.halfL)
+            end
+            x = x + 4
+        end
+    end
+    checkTrue(unchainAt ~= nil and unchainAt <= 56,
+        "(chain-far) 過了 A、C 還在 80m 外：解鏈回常駐線（解鏈於 x=" .. tostring(unchainAt) .. "）")
+    checkEq(residentPm, "dodge", "(chain-far) 解鏈當下常駐線前方仍被 C 擋（＝夠遠才解鏈，不是淨空）")
+    drive.clearVehicleGeom(cA)
+    drive.clearVehicleGeom(cB)
+    drive.clearVehicleGeom(cC)
+    MDAD.Drive.stop(0, nil)
+    drive.fillWorld(-2, 70, -7, 7)
+    SandboxVars = oldSand
+end
+drive.scenarioChainFar()
+
+-- (chain-keep) 1004a 正式服 0.18.2 dandankk clip-30：6m 路停留 2.25 釋放後鏈上 lane 被常駐 keep 0.6 夾回 1.12，
+--   車被拉回障礙側、重錨兩次仍被夾 → blocked 停死交還（open-issues「鏈上 lane 被 clampLane 拉回障礙側」）。
+--   鏈上 lane 是掃掠驗過的絕對 lane：鏈著時 fstate.laneKeep＝0，期望線停在鏈 lane（只夾物理餘裕）。
+--   違規證明：laneKeep 不給鏈 0＝(chain-keep) 紅。
+function drive.scenarioChainKeep()
+    scenario("鏈上 lane 不被常駐 keep 夾回障礙側")
+    local oldSandbox, oldVeh, oldGet = SandboxVars, dveh, getSpecificPlayer
+    local oldApi = MinidoracatMiniMapAPI.navApiVersion
+    local oldRoute, oldTx, oldTy, oldState = drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
+    local wasMs = drive.frameMs(20)
+    MDAD.Drive.stop(0, nil)
+    getSpecificPlayer = function(n) if n == 0 then return dp end end
+    MinidoracatMiniMapAPI.navApiVersion = 5
+    dveh = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }),
+        engineRunning = true, mass = 1600, speed = 0, maxSpeed = 100,
+        bodyW = 1.6, bodyL = 4.2, comX = 0, comZ = 0, profileFull = true,
+        enginePower = 3000, brakingForce = 100, wheelFriction = 1.5, tireFriction = 1.5 })
+    drive.fillWorld(-12, 130, -8, 8)
+    drive.putRoad(0, 130, -3, 3)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
+        AutoDriveMaxSpeed = 60, RightLaneBias = 0.5 }) -- 6m 路 ×0.5＝常駐 +0.75
+    dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = 0, 0.75, 0, 0, true
+    dveh._engine, dveh._driver = true, dp
+    dp._vehicle, dp._dead, dp._local = dveh, false, true
+    setHeading(dveh, 0)
+    drive.nav.route = { pts = { 0, 0, 120, 0 }, segSurface = { "paved" }, segWidth = { 6 },
+        len = 120, cost = 120, avoidPenalty = 0 }
+    drive.nav.tx, drive.nav.ty, drive.nav.state = 120, 0, "ok"
+    checkTrue(MDAD.Drive.start(dp), "(chain-keep) 啟動")
+    for _ = 1, 6 do driveTick(dp, dveh) end
+    drive.scanRound(true)
+    local st = MDAD.Drive.debugSession(0)
+    local roomR = type(st.profile.laneRoomR) == "table" and st.profile.laneRoomR[1] or nil
+    checkTrue(type(roomR) == "number" and roomR > MDADFollower.LANE_BIAS_KEEP + 0.4,
+        "(chain-keep) 前置：6m 路有 laneRoom（room " .. tostring(roomR) .. "）")
+    if type(roomR) == "number" then
+        local L = roomR - 0.2 -- 在 room−keep 之外、物理餘裕之內
+        -- 常駐線左前方 14m 一格硬物：擋常駐線、不擋鏈 lane，且夠近＝鏈續留（Drive.chainBlockerFar 為假）
+        drive.putSolid(14, -1, "chain_keep_resident_block")
+        st.laneChained = true
+        MDADFollower.setLaneBias(st.fstate, L)
+        dveh._y, dveh._speed, dveh._stopped = L, 15, false
+        drive.scanRound(true)
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        checkTrue(st.laneChained == true and st.fstate.laneKeep == 0,
+            "(chain-keep) 鏈著：laneKeep＝0（chained=" .. tostring(st.laneChained) .. " keep="
+            .. tostring(st.fstate.laneKeep) .. "）")
+        checkTrue(type(st.diagExpL) == "number" and math.abs(st.diagExpL - L) < 0.05,
+            "(chain-keep) 期望線停在鏈 lane " .. string.format("%.2f", L) .. "，不被夾回 room−0.6（實得 "
+            .. tostring(st.diagExpL) .. "）")
+        drive.clearCell(14, -1)
+    end
+    MDAD.Drive.stop(0, nil)
+    drive.frameMs(wasMs)
+    MinidoracatMiniMapAPI.navApiVersion = oldApi
+    drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
+    SandboxVars, dveh, getSpecificPlayer = oldSandbox, oldVeh, oldGet
+    drive.fillWorld(-2, 70, -7, 7)
+end
+drive.scenarioChainKeep()
+
 -- 0929j 玩家 KI5 Oshkosh 消防車撞樹／撞路邊物（Telemetry (4).rar）：
 --   (shape) 點雲幾何對齊引擎的車輛碰撞形狀（IsoChunk.calcPhysics＋libPZBullet64）：樹幹格 +0.6、半徑 0.15；
 --           solidtrans 整格方塊（規劃 r 0.7、掃掠方塊半邊 0.5）；籬笆 collideN／collideW 在格的北緣／西緣；
@@ -19309,8 +19699,19 @@ function drive.scenario0929j()
     checkTrue(ov.dodgeAlignHold, "(align) 未對正 hold 進遙測")
     ov.lastVehicleHeading, ov.lastLatDev = 0, 0.5
     checkNear(MDAD.Drive.dodgeAlignCap(ov, 30, 12), 12, 1e-12, "(align) 偏線 0.5m：同樣不加速")
+    -- (align-latch) 1004a 正式服 0.18.2 kanazawa clip-10：未對正期間被外力減速（撞殭屍），舊制每幀夾「當下車速」
+    --   13.8→6 km/h 一路棘輪往下爬。夾的值閂在剛偏離時的車速，只跟著自己的帽往下。
+    --   違規證明：每幀改回夾當下車速＝(align-latch) 紅。
+    checkNear(MDAD.Drive.dodgeAlignCap(ov, 30, 8), 12, 1e-12, "(align-latch) 外力掉到 8：帽仍是偏離時的 12")
+    checkNear(MDAD.Drive.dodgeAlignCap(ov, 9, 8), 9, 1e-12, "(align-latch) 自己的帽壓到 9：照帽")
+    checkNear(MDAD.Drive.dodgeAlignCap(ov, 30, 8), 9, 1e-12, "(align-latch) 帽放開但仍未對正：不超過自己壓過的 9")
+    ov.lastLatDev = 0.1
+    checkNear(MDAD.Drive.dodgeAlignCap(ov, 30, 8), 30, 1e-12, "(align-latch) 對正：放開、閂鎖清掉")
+    checkTrue(ov.dodgeAlignHoldKmh == nil, "(align-latch) 對正後閂鎖清空")
+    ov.lastLatDev = 0.5
     checkNear(MDAD.Drive.dodgeAlignCap(ov, 30, 2), tune.DODGE_COMMIT_MIN_KMH, 1e-12,
         "(align) 靜止起步：夾在可執行下限")
+    ov.dodgeAlignHoldKmh = nil
     checkNear(MDAD.Drive.dodgeAlignCap(ov, 10, 12), 10, 1e-12, "(align) 已超帽：照原帽減速，不抬")
 
     -- (shy) 靠右留路邊距

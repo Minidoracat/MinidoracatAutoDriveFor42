@@ -548,8 +548,9 @@ drive(400, { speed = 30, target = 25, phys = kp({ curveHardActive = true, curveC
 drive(400, { speed = 28, target = 25, phys = kp({ curveHardActive = true, curveCap = 25, latDev = 0.7 }) })
 drive(400, { speed = 40, target = 60, phys = kp({ capReason = "visibility", accelAssist = 2 }) })
 drive(400, { speed = 40, target = 30, phys = kp({ visAssistDecel = 3 }) })
-drive(200, { speed = 40, phys = kp(), sensor = { zombieN = 3 } })
-drive(200, { speed = 20, phys = kp(), sensor = { zombieN = 3 } })       -- 40→20／200ms＝27.8 m/s²：撞擊
+-- 1004：impZ 改看最近一隻離車心（zombieNearS − rs ≤ halfL＋4），fixture 帶 zombieNearS（rs＝10，離 2m）
+drive(200, { speed = 40, phys = kp(), sensor = { zombieN = 3, zombieNearS = 12 } })
+drive(200, { speed = 20, phys = kp(), sensor = { zombieN = 3, zombieNearS = 12 } }) -- 40→20／200ms＝27.8 m/s²：撞擊
 drive(3000, { speed = 0, mode = "unstick", phys = kp() })
 D.stop(0, "arrive")
 pump(120000)
@@ -570,6 +571,73 @@ checkEq(num("impZ"), 1, "impact with zombies in the band")
 checkEq(num("aaMs"), 400, "accel assist time")
 checkEq(num("daMs"), 400, "decel assist time")
 check(#lastSum < U.CHUNK, "summary still fits one chunk (" .. #lastSum .. ")")
+
+-- 1004 撞擊誤報（正式服 1002y）：
+--  (a) 讓位接手期間不取樣，恢復時拿 5.7 秒前的 90 km/h 跟 0 比、dt 夾成 1 秒＝24.9 m/s²（RubyDiamond/clip-29）；
+--      間隔 1.2 秒、90→0 用原始間隔算是 20.8 m/s²：中間沒取樣就不比。
+--  (b) blocked 一秒鎖輪＋本 MOD 中線減速輔助量到 22.9 m/s²，沒碰到東西（kanazawa9988/clip-11）：本筆或前一筆
+--      鎖輪時門檻 25；(c) 沒鎖輪的 22 m/s² 仍是撞擊。
+--  (d) impZ 只算車身附近有殭屍的撞擊（ImJustAtoms/clip-01 最近一隻 25m 外也算）；殭屍快照最多舊一輪，撞擊那筆
+--      或前一筆近就算（RubyDiamond/clip-28 撞上那筆的新快照已換成 31m 外的下一隻）。
+-- 違規證明：拿掉間隔上限＝(a) 1.2s 紅；改回夾限 dt＝(a) 兩案紅；鎖輪門檻改回 18／拿掉本筆或前一筆的鎖輪判定＝(b) 紅；
+-- 門檻抬到 25＝(c) 紅；impZ 改回 zombieN>0／拿掉本筆或前一筆的距離＝(d) 紅。
+scenario("1004 impact false positives: sampling gap, locked wheels plus own assist, far zombies")
+local function impactDrive(label, steps)
+    nowMs = nowMs + 3600000
+    start()
+    local drive0 = nowMs
+    steps()
+    D.stop(0, "arrive")
+    pump(120000)
+    local found = nil
+    for k, content in pairs(files) do
+        if string.find(k, ROOT .. "summary-", 1, true) == 1 then
+            for line in string.gmatch(content, "[^\n]+") do
+                if string.find(line, '"drive":' .. string.format("%d", drive0) .. ",", 1, true) then found = line end
+            end
+        end
+    end
+    check(found ~= nil, label .. ": summary of this drive found")
+    found = found or ""
+    return tonumber(string.match(found, '"impact":(%d+)')), tonumber(string.match(found, '"impZ":(%d+)'))
+end
+local locked = { capReason = "blocked", frameMs = 16, forceBrakeLeft = 900, forceBrakeWhy = "blocked" }
+local imp = impactDrive("(a) gap", function()
+    drive(3000, { speed = 90 })
+    pump(1000)                 -- 1.2 秒沒取樣
+    drive(200, { speed = 0 })  -- 90→0 原始間隔 1.2s＝20.8 m/s²
+    drive(3000, { speed = 90 })
+    pump(5400)                 -- 讓位 5.6 秒
+    drive(200, { speed = 0 })  -- 夾限 dt 會算成 25 m/s²
+    drive(3000, { speed = 0 })
+end)
+checkEq(imp, 0, "(a) speed drop across a sampling gap is not an impact")
+imp = impactDrive("(b) locked", function()
+    drive(3000, { speed = 80 })
+    drive(200, { speed = 64.2, phys = locked }) -- 本筆鎖輪：80→64.2／200ms＝21.9 m/s²
+    drive(200, { speed = 48.4 })                -- 前一筆鎖輪：64.2→48.4＝21.9 m/s²
+    drive(3000, { speed = 48.4 })
+end)
+checkEq(imp, 0, "(b) 22 m/s² while the wheels are locked (this or previous sample) is not an impact")
+imp = impactDrive("(c) unlocked", function()
+    drive(3000, { speed = 80 })
+    drive(200, { speed = 64.2 })                -- 沒鎖輪 21.9 m/s²
+    drive(3000, { speed = 64.2 })
+end)
+checkEq(imp, 1, "(c) 22 m/s² without locked wheels is still an impact")
+local impZ
+imp, impZ = impactDrive("(d) zombie distance", function()
+    local far, near = { zombieN = 3, zombieNearS = 35 }, { zombieN = 3, zombieNearS = 12 } -- rs＝10：25m／2m
+    drive(3000, { speed = 60, sensor = far })
+    drive(200, { speed = 30, sensor = far })    -- 撞擊 1：前後兩筆都 25m 外＝不算
+    drive(3000, { speed = 60, sensor = near })
+    drive(200, { speed = 30, sensor = { zombieN = 3, zombieNearS = 41 } }) -- 撞擊 2：前一筆 2m、新快照 31m＝算
+    drive(3000, { speed = 60, sensor = far })
+    drive(200, { speed = 30, sensor = near })   -- 撞擊 3：本筆 2m＝算
+    drive(3000, { speed = 30 })
+end)
+checkEq(imp, 3, "(d) three impacts")
+checkEq(impZ, 2, "(d) impZ counts only impacts with a zombie within halfL+4 of the car (this or previous sample)")
 
 print(string.format("情境 %d 個、斷言 %d 項、失敗 %d", scenarios, assertions, failures))
 if failures > 0 then os.exit(1) end
