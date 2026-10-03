@@ -42,7 +42,7 @@ If the server disables loot spawns, crafting is the only way. Parts (plus a scre
 [list]
 [*] [b]Multi-target trips[/b]: open from the MiniMap magnifier or [b];[/b]. From search or map right-click: append, insert or go there first. Up to 16 targets; reorder and preview.
 [*] [b]Auto / Step[/b]: new trips default to Auto — ordinary targets continue after stopping; stopovers and Step wait for [b]Continue autodrive[/b]. HUD button and trip page share one setting; switching never starts, brakes or retargets.
-[*] [b]No skipping[/b]: a road ending short of the target is not arrival and never skips it; you are told to walk there (or skip it in MiniMap).
+[*] [b]No skipping[/b]: a road ending short of the target is not arrival and never skips it; you are told to walk there (or skip it in MiniMap). For a target on the road, stopping in the lane beside it counts as arrived.
 [*] [b]Editing[/b]: stop autodrive and the vehicle before changing the current stop or adding a priority target; editing later targets is fine mid-drive.
 [*] [b]Go home[/b]: swaps the trip for your MiniMap home — drives there on a single-target drive, only retargets while parked; stop first on multi-stop drives.
 [/list]
@@ -52,7 +52,7 @@ If the server disables loot spawns, crafting is the only way. Parts (plus a scre
 [*] [b]Driver HUD[/b]: status, targets, speed, cruise cap, gear, slowdown reason, power/fuel, with direct controls. Metal, glass, family and side-wing themes; compact and collapsed layouts.
 [*] [b]Drive timer[/b]: real time incl. waits and recovery; kept until the next successful start, not saved.
 [*] [b]Voice prompts[/b]: private Chinese/English/Japanese lines for driving events, next target, stopover and priority; arrival only at trip end. Pick Stacy (sweet, default) or Yui (gentle) in a sweet girlfriend tone, the same two voices with short, casual lines like a friend, or Classic (the original voice); follow game language or pick one; HUD toggle and volume.
-[*] [b]Solo auto-pause[/b]: separate options for failed recovery and stopovers/trip end (default on); pauses once stopped and the voice ends. Not for ordinary targets, multiplayer or split-screen; unpausing never restarts driving.
+[*] [b]Solo auto-pause[/b]: separate options for failed recovery and stopovers/trip end (default on); pauses once stopped and the voice ends. Reaching a road end that leaves you to walk also pauses under the stopover option (no voice). Not for ordinary targets, multiplayer or split-screen; unpausing never restarts driving.
 [/list]
 
 [h3]Driving behavior[/h3]
