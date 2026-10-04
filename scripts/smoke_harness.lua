@@ -20180,6 +20180,15 @@ function drive.scenario0928()
         checkTrue(Dr.preAClear(ps) >= 9, "(line-geom) pre-a 段沒有近物：preA ≥ 9（實得 " .. tostring(Dr.preAClear(ps)) .. "）")
         ps.fstate.offA = 0.5
         checkNil(Dr.preAClear(ps), "(line-geom) pre-a 段不足兩個取樣點：nil")
+        -- 命中時只量不留痕：blocked 事件 kind（sweepHitBody）與 replan 掃掠數（sweepCount）不被這次診斷掃描改寫。
+        -- 違規證明：拿掉 preAClear 的還原就紅。
+        ps.fstate.offA = 20
+        ps.sensor.hardN, ps.sensor.hardS[1], ps.sensor.hardX[1], ps.sensor.hardY[1] = 1, 10, 10, 0.4
+        ps.sweepHitBody, ps.sweepCount = "trailer", 7
+        local hitPreA = Dr.preAClear(ps)
+        checkTrue(type(hitPreA) == "number" and ps.sweepHitBody == "trailer" and ps.sweepCount == 7,
+            "(line-geom) preA 命中：回淨距、不改寫 sweepHitBody／sweepCount（實得 " .. tostring(hitPreA) .. "／"
+            .. tostring(ps.sweepHitBody) .. "／" .. tostring(ps.sweepCount) .. "）")
         -- (proof-env) 證明線掃掠命中（gate sweep）：平帽 18（只夾 regulator＝斷油）改成「車心開到命中的車身取樣點時降到
         --   同一個警戒帽」的接近包絡，超過包絡由中線外力 "proof" 帳補減速。違規證明：包絡改回平帽、visAssist 拿掉 proof 帳、
         --   gate 不接包絡各紅。

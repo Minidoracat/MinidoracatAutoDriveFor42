@@ -8900,8 +8900,11 @@ function Drive.preAClear(s)
     local k = math.floor((fs.offA - fs.ovS0) / step) + 1
     if k < 2 or k >= fs.ovN then return nil end
     local s1 = fs.ovS0 + (k - 1) * step
+    -- 只量不留痕：sweepLine 命中會寫 blocked 事件的 kind（sweepHitBody）、每次呼叫累加 replan 掃掠數（sweepCount）
+    local hitBody, nSweep = s.sweepHitBody, s.sweepCount
     local ok, m, _, _, _, _, _, hitI = sweepLine(s, fs.ovX, fs.ovY, k, fs.ovS0, s1, fs.ovS0, fs.ovS0, s1, s1,
         fs.offL, "pre-a", MDADVehicleProfile.sweepBase(s.vehicleProfile.halfW, "physical"), nil, false, false)
+    s.sweepHitBody, s.sweepCount = hitBody, nSweep
     if ok then return m + SWEEP_PHYS_PAD end
     if hitI ~= nil then return SWEEP_PHYS_PAD - m end -- 命中：sweepHit 回 −淨距
     return nil
