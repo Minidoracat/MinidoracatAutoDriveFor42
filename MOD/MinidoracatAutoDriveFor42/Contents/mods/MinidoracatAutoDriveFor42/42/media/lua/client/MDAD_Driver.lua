@@ -3628,11 +3628,21 @@ function Drive.softKindIn(kind, zOn, level)
     return zOn
 end
 
--- 快照裡有沒有參與選縫的動物／玩家（ZombieDodge 關著時軟縫仍要為牠們作用）
-function Drive.softOthersJoin(sen, level)
+-- 有沒有參與選縫的動物／玩家（ZombieDodge 關著時軟縫仍要為牠們作用）：本輪快照，或仍有效的盲區記憶
+-- （同一 routeGen、在車前 SCAN_NEAR 內 Sensor 不再收、車尾還沒過、政策仍選到）——進盲區的行人不得在下一輪
+-- 就被當成淨空、讓軟縫釋放回常駐線（車尾過了才回線，同殭屍的盲區保持）。
+function Drive.softOthersJoin(s, sen, level)
     for i = 1, sen.zomN do
         local k = sen.zomKind and sen.zomKind[i]
         if k ~= nil and k ~= "zombie" and k ~= "corpse" and Drive.softKindIn(k, false, level) then return true end
+    end
+    local bS, bK = s.zomBlindS, s.zomBlindK
+    if bS == nil or bK == nil or s.zomBlindGen ~= s.routeGen then return false end
+    local tail, near0 = s.lastSNow - s.vehicleProfile.halfL, s.lastSNow + MDADSensor.SCAN_NEAR
+    for j = 1, s.zomBlindN or 0 do
+        local k, zs = bK[j], bS[j]
+        if k ~= nil and k ~= "zombie" and k ~= "corpse" and Drive.softKindIn(k, false, level)
+                and finite(zs) and zs >= tail and zs < near0 then return true end
     end
     return false
 end
@@ -3714,7 +3724,8 @@ end
 function Drive.returnZombieConflict(s, latNow, target, speedKmh)
     local sen = s.sensor
     if not sen or not finite(sen.zomN) or sen.zomN <= 0 or not finite(latNow) or not finite(target) then return false end
-    if sen.zomOverflow or s.fstate.rotating or finite(s.stayLanePending) or not Drive.zombieDodgeOn() then
+    -- 選項只篩種類（Drive.softKindIn）：關「閃殭屍」不關掉對玩家／選到的動物的讓位
+    if sen.zomOverflow or s.fstate.rotating or finite(s.stayLanePending) then
         return false
     end
     local vp, rs = s.vehicleProfile, s.lastSNow
@@ -3724,12 +3735,12 @@ function Drive.returnZombieConflict(s, latNow, target, speedKmh)
     local lo, hi = math.min(latNow, target) - R, math.max(latNow, target) + R
     local vms = finite(speedKmh) and speedKmh / 3.6 or 0
     if vms < 3 then vms = 3 end
-    local aLvl = Drive.animalDodgeLevel()
+    local aLvl, zOn = Drive.animalDodgeLevel(), Drive.zombieDodgeOn()
     for i = 1, sen.zomN do
         local zs, zl = sen.zomS[i], sen.zomL[i]
-        -- 不參與選縫的動物（AnimalDodge 沒選到）不算：讓位給不閃牠的軟縫沒有意義
+        -- 不參與選縫的種類（閃殭屍關掉的殭屍、AnimalDodge 沒選到的動物）不算：讓位給不閃牠的軟縫沒有意義
         if finite(zs) and finite(zl) and zs >= sFrom and zs <= sTo and sen.zomIsCorpse[i] ~= true
-                and Drive.softKindIn(sen.zomKind and sen.zomKind[i], true, aLvl) then
+                and Drive.softKindIn(sen.zomKind and sen.zomKind[i], zOn, aLvl) then
             local zlp, vl = zl, sen.zomVl and sen.zomVl[i]
             if finite(vl) and (vl > 0.2 or vl < -0.2) then
                 local t = (zs - rs - vp.halfL) / vms
@@ -3773,7 +3784,7 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
     s.zombieLaneCap = -1 -- 縱向配合帽每輪重算（見下）
     s.zombieWant = nil
     local zOn, aLvl = Drive.zombieDodgeOn(), Drive.animalDodgeLevel()
-    local on = zOn or Drive.softOthersJoin(sen, aLvl)
+    local on = zOn or Drive.softOthersJoin(s, sen, aLvl)
     if not on or sen.zomOverflow or s.fstate.rotating or finite(s.stayLanePending)
             or type(MDADCorridor) ~= "table" or type(MDADCorridor.softZombieLane) ~= "function" then
         s.zombieAvoidUntilS, s.zomBlindN = nil, 0
@@ -4838,31 +4849,45 @@ function Drive.trafficCap(s, now, speedKmh)
     return cap, reason, hold
 end
 
--- 動物／其他玩家停等（1005 soft）：每個掃描輪在 laneBias 定案後跑。選定的行駛線（軟縫持有時＝本輪選定的
--- want，繞行承諾中＝承諾線，否則＝laneBias；keep 與 control 同值）在目標弧長處仍落在佔位 ±(R＋舒適餘裕)
--- 內＝軟縫清不開（或這類沒開閃避）：記最近一個給每幀的 Drive.softStopCap。動物照沙盒 AnimalSlowdown
--- 分級、玩家永遠算；殭屍／屍體不在這裡（照既有裁定：閃不過就撞）。調頭中不判。
+-- 動物／其他玩家停等（1005 soft）：每個掃描輪在 laneBias 由所有持有者（軟縫、會車、斜切保持、繞行）仲裁定案後跑，
+-- 看「車到目標那時候身在哪」：繞行承諾中＝承諾線；否則以仲裁後實際採用的 laneBias 判誰在主導——軟縫仍是最後輸出
+-- 才用它選定的 want、會車主導用會車目標（trfOnWant）、其他（斜切保持等）用 laneBias 本身；車身從現在的橫向位置
+-- 以該持有者的側移速率往終點走，扣車身落後 ZOMBIE_LANE_LEAD_S，算出到目標弧長時的橫向位置。落在佔位
+-- ±(R＋舒適餘裕) 內＝閃不開或側移來不及：記最近一個給每幀的 Drive.softStopCap。目標讀 Sensor 另存的停等目標
+-- （stopS…，不受殭屍點陣溢出影響）；停等目標本身也收不下（stopOverflow）時，收不下的那段起點之後證明不了淨空，
+-- 照停等處理。動物照沙盒 AnimalSlowdown 分級、玩家永遠算；殭屍／屍體不在這裡（照既有裁定：閃不過就撞）。調頭中不判。
 function Drive.softStopScan(s, speedKmh)
-    s.softStopS, s.softStopL, s.softStopKind = nil, nil, nil
+    s.softStopS, s.softStopL, s.softStopKind, s.softStopLane = nil, nil, nil, nil
     local sen = s.sensor
-    if not sen or not finite(sen.zomN) or sen.zomN <= 0 or s.fstate.rotating then return end
+    if not sen or s.fstate.rotating then return end
+    local n = finite(sen.stopN) and sen.stopN or 0
+    if n <= 0 and sen.stopOverflow ~= true then return end
     local vp, p, rs = s.vehicleProfile, s.profile, s.lastSNow
     local lvl = s.animalSlow or 2
     local R = vp.halfW + MDADCorridor.ZOMBIE_R + MDADCorridor.ZOMBIE_MARGIN
     local sTo = rs + MDADDynamics.softLookahead(speedKmh)
     if finite(sen.softEndS) and sen.softEndS < sTo then sTo = sen.softEndS end
-    local lane0 = (s.zombieLane ~= nil and finite(s.zombieWant)) and s.zombieWant or laneBiasOf(s)
+    local L = laneBiasOf(s)
+    local dest, rate = L, Drive.softLaneRate(speedKmh)
+    if s.zombieLane ~= nil and math.abs(L - s.zombieLane) < 1e-9 then
+        if finite(s.zombieWant) then dest = s.zombieWant end
+    elseif s.trafficLane ~= nil and math.abs(L - s.trafficLane) < 1e-9 then
+        if finite(s.trfOnWant) then dest = s.trfOnWant end
+        rate = TUNE.TRAFFIC_LANE_RATE_MPS
+    end
+    local latNow = finite(s.lastLatSigned) and s.lastLatSigned or L
     local vms = finite(speedKmh) and speedKmh / 3.6 or 0
     if vms < 3 then vms = 3 end
-    for i = 1, sen.zomN do
-        local kind = sen.zomKind and sen.zomKind[i]
-        local zs, zl = sen.zomS[i], sen.zomL[i]
-        if (kind == "player" or ((kind == "animal" or kind == "small") and Drive.softKindIn(kind, false, lvl)))
+    for i = 1, n do
+        local kind = sen.stopKind[i]
+        local zs, zl = sen.stopS[i], sen.stopL[i]
+        if (kind == "player" or Drive.softKindIn(kind, false, lvl))
                 and finite(zs) and finite(zl) and zs > rs and zs <= sTo
                 and (s.softStopS == nil or zs < s.softStopS) then
-            local zlp, vl = zl, sen.zomVl and sen.zomVl[i]
+            local zlp, vl = zl, sen.stopVl[i]
+            local tArr = (zs - rs - vp.halfL) / vms
             if finite(vl) and (vl > 0.2 or vl < -0.2) then
-                local t = (zs - rs - vp.halfL) / vms
+                local t = tArr
                 if t < 0 then t = 0 elseif t > TUNE.ZOMBIE_PREDICT_S then t = TUNE.ZOMBIE_PREDICT_S end
                 zlp = zl + vl * t
             end
@@ -4870,14 +4895,26 @@ function Drive.softStopScan(s, speedKmh)
             if s.dodging then
                 lane = Drive.plannedLaneAt(s, zs)
             else
-                lane = MDADFollower.laneBiasAt(p, lane0, MDADFollower.segIndexAt(p, zs), zs, s.fstate.laneKeep)
+                local idx = MDADFollower.segIndexAt(p, zs)
+                lane = MDADFollower.laneBiasAt(p, dest, idx, zs, s.fstate.laneKeep)
+                local reach = rate * (tArr - TUNE.ZOMBIE_LANE_LEAD_S)
+                if not finite(reach) or reach < 0 then reach = 0 end
+                local d = lane - latNow
+                if d > reach then lane = latNow + reach elseif d < -reach then lane = latNow - reach end
             end
             local Rk = R + Drive.softPad(kind)
             if math.max(zl, zlp) > lane - Rk and math.min(zl, zlp) < lane + Rk then
-                s.softStopS, s.softStopL = zs, zl
+                s.softStopS, s.softStopL, s.softStopLane = zs, zl, lane
                 s.softStopKind = kind == "player" and "player" or "animal"
             end
         end
+    end
+    local oS, oK = sen.stopOverS, sen.stopOverKind
+    if sen.stopOverflow == true and finite(oS) and oS > rs and oS <= sTo
+            and (oK == "player" or Drive.softKindIn(oK, false, lvl))
+            and (s.softStopS == nil or oS < s.softStopS) then
+        s.softStopS, s.softStopL, s.softStopLane = oS, nil, nil
+        s.softStopKind = oK == "player" and "player" or "animal"
     end
 end
 
@@ -4914,11 +4951,12 @@ function Drive.softStopCap(s, now, speedKmh, playerNum, capIn, whyIn)
     if hold then
         if not s.softHoldStarted then
             s.softHoldStarted = true
+            -- offL＝判停用的「到目標時車身橫向」（nil＝停等目標收不下的溢出段）
             diagEvent(s, playerNum, "soft", { phase = "start", why = reason, kind = kind,
-                s = zs - s.lastSNow, l = s.softStopL, rs = s.lastSNow, speed = speedKmh })
+                s = zs - s.lastSNow, l = s.softStopL, offL = s.softStopLane, rs = s.lastSNow, speed = speedKmh })
             if getDebug() then
-                print(string.format("%spn=%d soft stop start kind=%s ds=%.1f l=%.2f v=%.1f", LOG, playerNum,
-                    kind, zs - s.lastSNow, s.softStopL or 0, speedKmh or 0))
+                print(string.format("%spn=%d soft stop start kind=%s ds=%.1f l=%.2f at=%.2f v=%.1f", LOG, playerNum,
+                    kind, zs - s.lastSNow, s.softStopL or 0, s.softStopLane or 0, speedKmh or 0))
             end
         end
         -- 停住才計（還在煞停中不算等待）

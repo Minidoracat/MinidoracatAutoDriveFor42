@@ -8805,6 +8805,141 @@ function drive.scenarioSoftAnimals()
 end
 drive.scenarioSoftAnimals()
 
+-- (soft2) 1005 整合審查補刀：停等判讀要看仲裁後「到目標時車身在哪」、閃殭屍選項只篩種類、盲區保持對玩家也有效、
+--   殭屍點陣溢出不吃掉行人。
+--   (soft-f) 軟縫往左閃行人、會車把 laneBias 拉到右邊行人站的線上：判停看會車目標＝player-stop（反例：軟縫仍主導＝不停）
+--   (soft-g) 行人太近、側移來不及（目標 lane 清得開但到不了）：player-stop，不靠 12 km/h 下限擦過去
+--   (soft-h) 閃殭屍關閉時 RETURN 仍讓位給回線帶上的玩家／選到的大型動物
+--   (soft-i) 閃殭屍關閉、單一行人從前窗進到盲區、車尾未過：軟縫不釋放
+--   (soft-j) 64 點殭屍點陣溢出後再遇行人：軟縫棄權但停等仍看得到行人；停等目標也收不下時溢出段之後照停等
+function drive.scenarioSoftArbiter()
+    scenario("動物與玩家（整合補刀）：仲裁後判停、側移來不及停、選項只篩種類、盲區保持、點陣溢出")
+    local T = MDAD.Drive.debugTune()
+    local oldZ, oldA = MDAD.HUD.zombieDodge, MDAD.HUD.animalDodge
+    local zOn = true
+    MDAD.HUD.zombieDodge = function() return zOn end
+    MDAD.HUD.animalDodge = function() return 2 end
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40,
+        RightLaneBias = 0, ZombieAreaSlowdown = false, CorpseSlowdown = false, AnimalSlowdown = 2 })
+    local function arm()
+        drive.fillWorld(-10, 160, -9, 9)
+        assert(armDrive())
+        setHeading(dveh, 0)
+        dveh._speed, dveh._y = 20, 0
+        drive.scanRound(true)
+        drive.scanRound(true)
+        return MDAD.Drive.debugSession(0)
+    end
+    local function putPlayer(x, l)
+        drive.putMoving(math.floor(x), math.floor(l), { _class = "IsoPlayer",
+            getX = function() return x end, getY = function() return l end,
+            isDead = function() return false end, getVehicle = function() return nil end })
+    end
+    local function putCow(x, l)
+        drive.putMoving(math.floor(x), math.floor(l), { _class = "IsoAnimal", _isa = { IsoPlayer = true },
+            getX = function() return x end, getY = function() return l end,
+            isDead = function() return false end, getVehicle = function() return nil end,
+            isHeld = function() return false end,
+            getData = function() return { getWeight = function() return 500 end } end })
+    end
+
+    -- (soft-f)
+    local s = arm()
+    local R = s.vehicleProfile.halfW + MDADCorridor.ZOMBIE_R + MDADCorridor.ZOMBIE_MARGIN
+    putPlayer(30.5, 1.5)
+    drive.scanRound(true)
+    checkTrue(s.zombieLane ~= nil and type(s.zombieWant) == "number" and s.zombieWant < 0 and s.softStopKind == nil,
+        "(soft-f) 前置：軟縫往左閃行人、選定的線清得開＝不停（want " .. tostring(s.zombieWant) .. "）")
+    s.trafficLane, s.trfOnWant = 1.5, 1.5 -- 會車要求往右：trafficLaneOf 的 max 覆寫軟縫結果
+    MDADFollower.setLaneBias(s.fstate, 1.5)
+    MDAD.Drive.softStopScan(s, 20)
+    checkTrue(s.softStopKind == "player" and type(s.softStopLane) == "number" and math.abs(s.softStopLane - 1.5) < 0.05,
+        "(soft-f) 會車把線拉到行人站的右側：用仲裁後的線判停＝player-stop（at " .. tostring(s.softStopLane) .. "）")
+    s.trafficLane, s.trfOnWant = nil, nil
+    MDADFollower.setLaneBias(s.fstate, s.zombieLane)
+    MDAD.Drive.softStopScan(s, 20)
+    checkTrue(s.softStopKind == nil, "(soft-f) 反例：軟縫仍主導最後的線＝照它的 want 判、不停")
+    -- (soft-f2) 會車側移還在途中（laneBias 0.6）、目標 2.9 正是行人站的位置：判停看會車的終點，不看途中的 laneBias
+    s = arm()
+    putPlayer(30.5, 2.9)
+    drive.scanRound(true)
+    checkTrue(s.zombieLane == nil and s.softStopKind == nil, "(soft-f2) 前置：行人在常駐線外、不閃不停")
+    s.trafficLane, s.trfOnWant = 0.6, 2.9
+    MDADFollower.setLaneBias(s.fstate, 0.6)
+    MDAD.Drive.softStopScan(s, 20)
+    checkTrue(s.softStopKind == "player" and type(s.softStopLane) == "number" and s.softStopLane > 2.5,
+        "(soft-f2) 會車主導、還在側移：用會車終點判停＝player-stop（at " .. tostring(s.softStopLane) .. "）")
+    s.trafficLane, s.trfOnWant = nil, nil
+
+    -- (soft-g)
+    s = arm()
+    putPlayer(9.5, 0.2)
+    drive.scanRound(true)
+    checkTrue(s.softStopKind == "player" and s.lastSensorReason == "player-stop",
+        "(soft-g) 行人在近處、側移來不及：停等（want " .. tostring(s.zombieWant) .. "、why " .. tostring(s.zombieWhy)
+        .. "、at " .. tostring(s.softStopLane) .. "）")
+
+    -- (soft-h)
+    zOn = false
+    for _, kind in ipairs({ "player", "animal" }) do
+        s = arm()
+        local zl = R + T.SOFT_COMFORT_M + 0.15
+        local y0 = zl + R + 0.3
+        if kind == "player" then putPlayer(8.5, zl) else putCow(8.5, zl) end
+        drive.scanRound(true)
+        dveh._y = y0
+        driveTick(dp, dveh)
+        checkTrue(not s.returnActive and math.abs(s.fstate.laneBias - y0) < 0.05 and s.zombieLaneParked ~= nil,
+            "(soft-h) 閃殭屍關閉：回線帶上的" .. kind .. "仍讓 RETURN 讓位（returnActive " .. tostring(s.returnActive)
+            .. "、lane " .. tostring(s.fstate.laneBias) .. "）")
+    end
+
+    -- (soft-i)
+    s = arm()
+    putPlayer(4.5, 0.01)
+    drive.scanRound(true)
+    checkTrue(s.zombieLane ~= nil and (s.zomBlindN or 0) >= 1,
+        "(soft-i) 前置：閃殭屍關閉仍閃行人、記進盲區（blindN " .. tostring(s.zomBlindN) .. "）")
+    driveReset(dveh)
+    dveh._x = dveh._x + 3.2 -- 行人落到車前 SCAN_NEAR 內（快照不再有牠）
+    s.zombieAvoidUntilS = nil
+    drive.scanRound(true)
+    checkTrue(s.zombieLane ~= nil and s.zombieWhy ~= nil and s.zombieWhy ~= "clear",
+        "(soft-i) 行人在盲區、車尾未過：軟縫不釋放（why " .. tostring(s.zombieWhy) .. "）")
+    -- 車尾過了行人：盲區記憶不再算（下一輪才壓縮記憶，先直接問判定）
+    driveReset(dveh)
+    dveh._x = dveh._x + 5
+    driveTick(dp, dveh)
+    checkTrue(MDAD.Drive.softOthersJoin(s, s.sensor, 2) == false,
+        "(soft-i) 車尾過了行人：盲區記憶不再讓軟縫作用")
+    zOn = true
+
+    -- (soft-j)
+    s = arm()
+    for k = 1, 70 do drive.putMoving(10, -4, { _class = "IsoZombie", getX = function() return 10.5 + k * 0.001 end,
+        getY = function() return -3.6 end }) end
+    putPlayer(30.5, 0.1)
+    drive.scanRound(true)
+    checkTrue(s.sensor.zomOverflow == true and s.sensor.stopN == 1 and s.softStopKind == "player",
+        "(soft-j) 殭屍點陣溢出、軟縫棄權：停等仍看得到行人（overflow " .. tostring(s.sensor.zomOverflow) .. "、stopN "
+        .. tostring(s.sensor.stopN) .. "、kind " .. tostring(s.softStopKind) .. "）")
+    local sen = s.sensor
+    sen.stopN, sen.stopOverflow, sen.stopOverS, sen.stopOverKind = 0, true, s.lastSNow + 20, "player"
+    MDAD.Drive.softStopScan(s, 20)
+    checkTrue(s.softStopKind == "player" and math.abs((s.softStopS or 0) - (s.lastSNow + 20)) < 1e-6,
+        "(soft-j) 停等目標也收不下：收不下的那段起點之後證明不了淨空＝停等")
+    sen.stopOverKind = "small" -- AnimalSlowdown＝大型：收不下的只有小動物不停
+    MDAD.Drive.softStopScan(s, 20)
+    checkTrue(s.softStopKind == nil, "(soft-j) 收不下的只有沒選到的小動物：不停")
+
+    MDAD.Drive.stop(0, nil)
+    MDAD.HUD.zombieDodge, MDAD.HUD.animalDodge = oldZ, oldA
+    drive.fillWorld(-2, 70, -7, 7)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    assert(armDrive())
+end
+drive.scenarioSoftArbiter()
+
 -- ⑤lf 低幀率降速提示（0925；0929o 門檻改為掃描額度放大到上限的 50ms）：可視上限壓速、平均幀時 ≥50ms，
 --   且視距是被幀率截短，持續 2s 才讓 HUD 狀態變「卡頓降速」（lowfps）、恢復 3s 才消失；同趟累計 10s 跳一次
 --   通知。session 從 150ms（可負擔 32m）起算。反例：幀率低但速度沒被可視上限壓（沙盒上限 20）不顯示。

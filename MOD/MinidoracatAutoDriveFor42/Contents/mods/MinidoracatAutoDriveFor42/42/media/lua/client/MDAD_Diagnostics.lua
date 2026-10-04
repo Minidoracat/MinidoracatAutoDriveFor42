@@ -973,6 +973,11 @@ local function encodeSensor(s, sensor, force)
     if finite(sensor.animalNearS) then bits = bits .. ',"animalNearS":' .. tostring(sensor.animalNearS) end
     if finite(sensor.smallNearS) then bits = bits .. ',"smallNearS":' .. tostring(sensor.smallNearS) end
     if finite(sensor.playerNearS) then bits = bits .. ',"playerNearS":' .. tostring(sensor.playerNearS) end
+    -- 停等目標另存筆數與溢出（Sensor stopN／stopOverflow／stopOverS；有才寫）
+    if finite(sensor.stopN) and sensor.stopN > 0 then bits = bits .. ',"stopN":' .. tostring(sensor.stopN) end
+    if sensor.stopOverflow == true and finite(sensor.stopOverS) then
+        bits = bits .. ',"stopOverS":' .. tostring(sensor.stopOverS)
+    end
     if finite(sensor.softEndS) then
         bits = bits .. ',"softEndS":' .. tostring(sensor.softEndS)
     end

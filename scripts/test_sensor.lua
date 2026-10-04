@@ -939,6 +939,40 @@ local function scenarioAnimalsPlayers()
     MDADSensor.reset(st)
     checkEq(st.playerN, 0, "reset 清玩家數")
     checkNil(st.playerNearS, "reset 清玩家最近弧長")
+    checkEq(st.stopN, 0, "reset 清停等目標筆數")
+    -- 停等目標另存：殭屍佔滿 64 點陣（zomOverflow）後再遇到的玩家，仍留座標
+    resetWorld()
+    for k = 1, 70 do putZombie(X0 + 8.5 + k * 0.001, Y0 - 1.2) end
+    putPlayer(20.5, 0.3, {})
+    runRound(st)
+    checkTrue(st.zomOverflow == true, "殭屍佔滿軟避讓點陣")
+    checkEq(st.stopN, 1, "停等目標另存：溢出後的玩家仍收")
+    checkEq(st.stopKind[1], "player", "停等目標種類＝player")
+    checkNear(st.stopS[1], 20.5, 1e-6, "停等目標弧長")
+    checkNear(st.stopL[1], 0.3, 1e-6, "停等目標橫向")
+    checkFalse(st.stopOverflow, "停等目標沒溢出")
+    -- 停等目標上限：STOP_MAX 隻小動物後的大型動物與玩家收不下 → stopOverflow、第一個收不下的弧長、最重要的種類
+    resetWorld()
+    for k = 1, MDADSensor.STOP_MAX do putAnimal(9.5 + k * 0.001, 0.5, { kg = 3 }) end
+    putAnimal(20.5, -0.5, { kg = 300 })
+    putPlayer(25.5, 0.2, {})
+    runRound(st)
+    checkEq(st.stopN, MDADSensor.STOP_MAX, "停等目標收滿上限")
+    checkTrue(st.stopOverflow == true, "停等目標收不下＝stopOverflow")
+    checkNear(st.stopOverS, 20.5, 0.51, "stopOverS＝第一個收不下的弧長（取樣步）")
+    checkEq(st.stopOverKind, "player", "stopOverKind＝收不下的之中最重要的種類（玩家 > 大型 > 小型）")
+    -- 下一輪沒有目標：溢出旗標與筆數換手歸零（雙緩衝）
+    resetWorld()
+    runRound(st)
+    checkEq(st.stopN, 0, "下一輪沒有目標：stopN 歸零")
+    checkFalse(st.stopOverflow, "下一輪沒有目標：stopOverflow 歸 false")
+    checkNil(st.stopOverS, "下一輪沒有目標：stopOverS 歸 nil")
+    -- reset 清溢出
+    for k = 1, MDADSensor.STOP_MAX + 1 do putAnimal(9.5 + k * 0.001, 0.5, { kg = 300 }) end
+    runRound(st)
+    checkTrue(st.stopOverflow == true, "reset 前：停等目標溢出")
+    MDADSensor.reset(st)
+    checkTrue(st.stopOverflow == false and st.stopN == 0 and st.stopOverS == nil, "reset 清停等目標溢出")
     W.cell.getAnimals, W.cell.getObjectList = cellAnimals, nil
     resetWorld()
 end
