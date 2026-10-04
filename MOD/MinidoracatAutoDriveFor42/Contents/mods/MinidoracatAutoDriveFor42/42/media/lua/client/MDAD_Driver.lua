@@ -8256,13 +8256,17 @@ end
 -- 停穩交接退路：承諾線被下一群的滑行停點（dodgeNextCap）停住時，釋放舊線交給同一輪重規劃。
 -- 平常要整車越過 c（c+bodyReach，理由見 exitReady 的 K5 註解）才放；但下一群的停點是圓盤距離
 -- （中心距−bodyReach−r），斜前方的物件會把車停在 c+bodyReach 之前，車永遠到不了門檻＝停等到受困交還
--- （0929k E2E Oshkosh C 段：下一顆巨石在右前方 5.7m，車停在門檻前 0.13m，12 秒後交還）。車頭已過 c、
+-- （0929k E2E Oshkosh C 段：下一顆巨石在右前方 5.7m，車停在門檻前 0.13m，12 秒後交還）。進入段已走完（過 b）、
 -- 而且已經開到停點（dodgeNextDist ≤ NEXT_HANDOFF_M）就交接；停點之前的零帽（滑行能力為 0）照舊停等。
+-- 過 b 而非過 c（E2E m1004g dixie9050w：出口被截到 1.41m、下一台貼在 d 後，停點落在 c 前 1.5m＝車永遠到不了 c，
+-- 停等 15 秒交還）：交接後同一輪重規劃從車實際橫向把舊群尾＋下一台當一群（原地承諾），規劃不出就照判堵階梯；
+-- 交接 hold 維持零帽到新線採納，不會從偏移位置切回常駐線（K5）。
 function Drive.nextStopHandoff(s, speedKmh)
     local fs = s.fstate
-    if not finite(fs.offC) or not finite(fs.offD) then return false end
+    if not finite(fs.offB) or not finite(fs.offC) or not finite(fs.offD) then return false end
     local past = s.lastSNow >= fs.offC + s.bodyReach
-        or (s.lastSNow >= fs.offC and finite(s.dodgeNextDist) and s.dodgeNextDist <= TUNE.NEXT_HANDOFF_M)
+        or (s.lastSNow >= (s.dodgeStay and fs.offC or fs.offB) -- 停留照舊過 c（stayLanePending 過 b 才寫 laneBias）
+            and finite(s.dodgeNextDist) and s.dodgeNextDist <= TUNE.NEXT_HANDOFF_M)
     if not past or not finite(s.dodgeNextCap) or s.dodgeNextCap < 0
             or s.dodgeNextCap >= MDADDynamics.MIN_EXEC_KMH
             or s.dodgeGuardFailed or s.currentBlocked or s.returnActive or fs.rotating
@@ -8446,15 +8450,23 @@ end
 -- 寬帶停在停點（wideArmed）不會再往前開近：前緣不會跟著前進，照現在看得到的收短（0929v：拖車停點
 -- 離群 trailLen+L2/2，完整繞行的出口常伸出已載入區）。拖車的保持段已延長到掛車過群（towHold），
 -- 收短不得截到掛車還在群旁。
+-- 承諾窗（TUNE.DODGE_OV_SPAN）：停留線尾伸出窗時保持段收到窗內（開到群前窗就容得下的群，replan 已先延後、
+-- 不會走到這裡），窗外的群交給鏈式停留（走完不解鏈、續沿停留 lane）。
 local function sweepStay(s, a, b, c, offL, baseL, tag, needBase, truncate)
     local prof, rs = s.profile, s.lastSNow
     local halfW, halfL, pad = sweepGeom(s, needBase)
     local tail = halfL + pad + TUNE.STAY_TAIL_M
     if truncate then
         local vis = visibleEndS(s.sensor, rs)
-        if c + tail + s.bodyReach > vis + (s.wideArmed and 0 or (b - halfL - rs)) then
+        local ahead = s.wideArmed and 0 or (b - halfL - rs)
+        local cMax = nil
+        if c + tail + s.bodyReach > vis + ahead then cMax = vis - s.bodyReach - tail - 0.5 end
+        if c + tail > rs + TUNE.DODGE_OV_SPAN then
+            local w = rs + TUNE.DODGE_OV_SPAN - tail - 0.5
+            if cMax == nil or w < cMax then cMax = w end
+        end
+        if cMax ~= nil then
             local cMin = Drive.towHold(s) > 0 and c or (b + halfL)
-            local cMax = vis - s.bodyReach - tail - 0.5
             if cMax < cMin then return false, 99, 0, 0, cMax + tail, c end
             if cMax < c then c = cMax end
         end
@@ -8654,8 +8666,15 @@ local function sweepWithFallbacks(s, planN, a, b, c, d, offL, baseL, tag, nb, ph
         local okH, ha, hb, hc, hd, ho, mgH, ovNH, ovS0H, hnb, hv = homeStay(sa, sb, sc, offL, nb, tag)
         if okH then return true, ha, hb, hc, hd, ho, mgH, ovNH, ovS0H, hnb, hv end
     end
-    local ovN, ovS0, ok, mg, hitS, ph, hps, hx, hy, hi = sweepCandidate(
-        s, shapeOk, sa, sb, sc, sd, offL, baseL, tag, nb)
+    -- 群長過承諾窗（replan 的 window 理由）：完整繞行建不出窗外的保持段與出口，直接走下面的收短停留
+    -- （sweepStay 收到窗內）；照回線段打槍（p4）的同一條路，淨距給 99 不觸發物理複驗／微調。
+    local ovN, ovS0, ok, mg, hitS, ph, hps, hx, hy, hi
+    if shapeOk and sc + 1 > s.lastSNow + TUNE.DODGE_OV_SPAN then
+        ok, mg, hitS, ph, hps = false, 99, sb, 4, sc
+    else
+        ovN, ovS0, ok, mg, hitS, ph, hps, hx, hy, hi = sweepCandidate(
+            s, shapeOk, sa, sb, sc, sd, offL, baseL, tag, nb)
+    end
     if ok then
         local okC, ca, cb, cc, cd, co, cmg, covN, covS0, cnb, cv = chainAhead(
             s, planN, a, b, c, d, offL, baseL, nb, tag, crawlDesign, sa, sb, sc, sd)
@@ -9034,7 +9053,8 @@ local function replan(s, vehicle, playerNum)
             -- 車身可能還在舊群旁：交接後跨輪維持停止（dodgeHandoffHold），直到新線採納或真正淨空，
             -- 不讓 RETURN／pure pursuit 在沒有新線時從偏移位置切回常駐線。
             exitReady, handoff = true, true
-            diagEvent(s, playerNum, "dodge", { phase = "release", why = "next-stop",
+            diagEvent(s, playerNum, "dodge", { phase = "release",
+                why = s.lastSNow < fs.offC and "next-stop-hold" or "next-stop",
                 rs = s.lastSNow, c = fs.offC, d = s.dodgeNextDist })
         end
         -- 停留承諾沒有回線段：保持段走完（>=c）就釋放，下一輪從停留 lane 規劃下一台
@@ -9376,9 +9396,17 @@ local function replan(s, vehicle, playerNum)
         -- > OV_MAX → 全候選 `capacity` → 「blocked (all candidates)」語音＋halo；
         -- 下一輪車前進 5m 就能 commit）。延後不是淨空：先按已知群起點保留煞停距離，
         -- 不能只靠更遠的未載入前緣限速；進窗那一輪再規劃。
+        -- 群本身長過承諾窗（車開到群前、窗跟著前移也裝不下）時延後永遠解不開：照跑候選鏈，
+        -- sweepWithFallbacks 直接走收短停留（窗內那段承諾下來、窗外維持偏移＝鏈式停留），全滅才延後。
+        s.planDeferWhy = nil
         if mode == "dodge" and c + 1 + Drive.towHold(s) > s.lastSNow + TUNE.DODGE_OV_SPAN then
-            mode = "clear" -- 車一前進就進窗：deferDodge 讓點雲 sig 不變也每輪重判
-            Drive.deferDodge(s, playerNum, "window", b, c, nil)
+            if c + 1 + Drive.towHold(s) > TUNE.DODGE_OV_SPAN
+                    + math.max(s.lastSNow, s.wideArmed and s.lastSNow or b - s.vehicleProfile.halfL) then
+                s.planDeferWhy, s.planDeferB, s.planDeferC, s.planDeferD = "window", b, c, nil
+            else
+                mode = "clear" -- 車一前進就進窗：deferDodge 讓點雲 sig 不變也每輪重判
+                Drive.deferDodge(s, playerNum, "window", b, c, nil)
+            end
         end
         -- 同族兩刀（2026-09-04 st146014／st144580／st146015）：先用主候選的幾何做一次
         -- shape 預算（冷路徑、每輪一次，候選鏈會再算一次同值）——
@@ -9391,8 +9419,7 @@ local function replan(s, vehicle, playerNum)
         -- candidateCovered（2026-09-27 正式服 8 段：主候選一超窗就延後＋硬煞，0.2–0.6 秒後另一條
         -- 短候選 commit——等於先白煞一次）。所以只把延後理由記下、照跑候選鏈，全滅才延後；
         -- exit（出口被承諾窗截短）維持原本立即延後。
-        s.planDeferWhy = nil
-        if mode == "dodge" then
+        if mode == "dodge" and s.planDeferWhy == nil then
             local _, _, _, dS, okS0 = shapeProfile(s, s.profile, a, b, c, d, offL, baseL)
             local why = nil
             if okS0 and s.dodgeWindowShort then
@@ -9889,6 +9916,7 @@ local function replan(s, vehicle, playerNum)
                 crawl = s.dodgeCrawl == true, tight = s.dodgeTight == true,
                 tier = s.dodgeTier, need = s.dodgeNeed, rs = s.lastSNow,
                 len = s.dodgeCommittedLength,
+                why = s.planDeferWhy, -- 主候選本會延後（window／coverage／unloaded）、由候選鏈的替代線承諾
                 thin = s.thinRec and s.thinRec.on and s.thinRec.phys or nil }) -- 換縫找更寬時記下最窄那條的物理淨距
             if getDebug() then
                 -- cap 分解一行印清楚（2026-09-04 實機三段 8／15／14 km/h 繞行，console
