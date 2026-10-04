@@ -757,6 +757,8 @@ TUNE.UNSTICK_MIN_M = 1.0
 TUNE.SWEEP_LOG_MS = 1000
 -- replan 牆鐘遙測最多每 REPLAN_CLOCK_MS 量一次（前後各讀一次 getTimestampMs；毫秒時鐘只當現場分佈，歸因用 GameProfiler）
 TUNE.REPLAN_CLOCK_MS = 250
+-- sweepLine 整塊剔除的塊大小（連號硬點數；Drive.sweepScratch）：太小＝塊測試本身變貴，太大＝塊外框鬆、剔不掉
+TUNE.SWEEP_BLOCK_N = 8
 
 -- 速度域上限與世界感知距離分開：距離由偏好、速度與後續障礙／彎道需求決定。
 TUNE.PERCEPTION_CAP_KMH = 85
@@ -6860,7 +6862,11 @@ end
 -- sweepLine 的逐點常數（每次呼叫重填前 hardN 格、只長不縮，不每次配置）：兩種 pad 的掃掠半徑與整格方塊半邊。
 -- 內迴圈是 取樣×點數，原本每一對都做 type／sweepRadius／math.abs（Kahlua 裡都是函式呼叫）。不以快照為鍵快取：
 -- pad 隨 needBase 每次呼叫不同，離線 fixture 也會原地改點雲；重填是 O(點數)，相對 O(取樣×點數) 可忽略。
-Drive.sweepScratch = { rrPhys = {}, rrPad = {}, bh = {} }
+-- 索引塊（每 TUNE.SWEEP_BLOCK_N 個連號點一塊）：塊內點的世界外框、兩種 pad 的最大半徑、最大方塊半邊。Sensor 依掃描
+-- 順序收點，連號點在世界上相鄰；整塊都在剔除距離外就跳過整塊。跳過的點逐點剔除本來也會剔掉（外框＋塊內最大
+-- 半徑是逐點剔除距離的上界，餘裕取塊首當下的值、塊內只會變小），塊內仍照索引順序逐點驗——首次命中、minI、淨距表不變。
+Drive.sweepScratch = { rrPhys = {}, rrPad = {}, bh = {},
+    bx0 = {}, bx1 = {}, by0 = {}, by1 = {}, bPhys = {}, bPad = {}, bBh = {} }
 local function sweepLine(s, lx, ly, ln, lS0, lS1,
         a, b, c, d, offL, tag, needBase, startK, requireLoaded, collectClearance)
     local sen = s.sensor
@@ -6916,6 +6922,9 @@ local function sweepLine(s, lx, ly, ln, lS0, lS1,
     local sc = Drive.sweepScratch
     local rrPhysT, rrPadT, bhT = sc.rrPhys, sc.rrPad, sc.bh
     local comp = TUNE.SWEEP_QUANT_COMP
+    local bx0, bx1, by0, by1, bPhys, bPad, bBh = sc.bx0, sc.bx1, sc.by0, sc.by1, sc.bPhys, sc.bPad, sc.bBh
+    local BN = TUNE.SWEEP_BLOCK_N
+    local nBlk, inBlk = 0, BN
     for i = 1, hn do
         local bh = hb and hb[i] or 0
         if type(bh) == "number" and bh > 0 then
@@ -6925,6 +6934,19 @@ local function sweepLine(s, lx, ly, ln, lS0, lS1,
             rrPhysT[i] = MDADDynamics.sweepRadius(hr[i], SWEEP_PHYS_PAD, SWEEP_PHYS_PAD, comp)
             rrPadT[i] = MDADDynamics.sweepRadius(hr[i], pad, SWEEP_PHYS_PAD, comp)
         end
+        local x, y = hx[i], hy[i]
+        if inBlk == BN then
+            nBlk, inBlk = nBlk + 1, 0
+            bx0[nBlk], bx1[nBlk], by0[nBlk], by1[nBlk] = x, x, y, y
+            bPhys[nBlk], bPad[nBlk], bBh[nBlk] = rrPhysT[i], rrPadT[i], bhT[i]
+        else
+            if x < bx0[nBlk] then bx0[nBlk] = x elseif x > bx1[nBlk] then bx1[nBlk] = x end
+            if y < by0[nBlk] then by0[nBlk] = y elseif y > by1[nBlk] then by1[nBlk] = y end
+            if rrPhysT[i] > bPhys[nBlk] then bPhys[nBlk] = rrPhysT[i] end
+            if rrPadT[i] > bPad[nBlk] then bPad[nBlk] = rrPadT[i] end
+            if bhT[i] > bBh[nBlk] then bBh[nBlk] = bhT[i] end
+        end
+        inBlk = inBlk + 1
     end
     local ovStep = MDADFollower.OV_STEP
     local comX, comZ = s.vehicleProfile.centerOfMassX, s.vehicleProfile.centerOfMassZ
@@ -6987,54 +7009,74 @@ local function sweepLine(s, lx, ly, ln, lS0, lS1,
             tey = aty * tw.halfL + atx * tw.halfW
             tboxK = atx + aty
         end
-        for i = 1, hn do
-            local ox, oy = hx[i], hy[i]
-            local bh, rr = bhT[i], rrT[i]
-            local grow = bh * boxK -- 非方塊 bh＝0 → grow＝0
-            -- 世界AABB只排除不可能碰撞、也不可能改善最小淨距的點；不拿近似hardS裁世界。
-            local reach = rr + grow * boxK + (clr and sampleMargin or (inCap and minMargin or 0)) + 1e-6
-            local dx, dy = ox - bodyX, oy - bodyY
-            if dx < 0 then dx = -dx end
-            if dy < 0 then dy = -dy end
-            if not (dx > extentX + reach or dy > extentY + reach) then
-                local d2 = obbDistanceSq(
-                    bodyX, bodyY, fx, fy, halfW + grow, halfL + grow, ox, oy)
-                if d2 == nil or d2 <= rr * rr then
-                    return Drive.sweepHit(s, sen, tag, a, b, c, offL, sk, wx, wy, i, ox, oy,
-                        d2 and (sqrt(d2) - rr) or -99)
-                end
-                if inCap or clr then
-                    local probe = rr + (clr and sampleMargin or minMargin)
-                    if d2 < probe * probe then
-                        local clearance = sqrt(d2) - rr
-                        if clr and clearance < sampleMargin then sampleMargin = clearance end
-                        if inCap and clearance < minMargin then minMargin, minI = clearance, i end
-                    end
-                end
+        local bRR = sk < a and bPhys or bPad
+        local boxK2, tboxK2 = boxK * boxK, tboxK * tboxK
+        local i0 = 1
+        for blk = 1, nBlk do
+            local i1 = i0 + BN - 1
+            if i1 > hn then i1 = hn end
+            -- 整塊剔除（Drive.sweepScratch）：+0.001 吸收浮點捨入，只會少剔；NaN 車位比較皆假＝照逐點驗
+            local lim = bRR[blk] + (clr and sampleMargin or (inCap and minMargin or 0)) + 0.001
+            local tl = lim + bBh[blk] * boxK2
+            local far = bodyX - bx1[blk] > extentX + tl or bx0[blk] - bodyX > extentX + tl
+                or bodyY - by1[blk] > extentY + tl or by0[blk] - bodyY > extentY + tl
+            if far and tbx then
+                tl = lim + bBh[blk] * tboxK2
+                far = tbx - bx1[blk] > tex + tl or bx0[blk] - tbx > tex + tl
+                    or tby - by1[blk] > tey + tl or by0[blk] - tby > tey + tl
             end
-            if tbx then
-                local tgrow = bh * tboxK
-                local treach = rr + tgrow * tboxK
-                    + (clr and sampleMargin or (inCap and minMargin or 0)) + 1e-6
-                dx, dy = ox - tbx, oy - tby
-                if dx < 0 then dx = -dx end
-                if dy < 0 then dy = -dy end
-                if not (dx > tex + treach or dy > tey + treach) then
-                    local d2 = obbDistanceSq(tbx, tby, tdx, tdy, tw.halfW + tgrow, tw.halfL + tgrow, ox, oy)
-                    if d2 == nil or d2 <= rr * rr then
-                        return Drive.sweepHit(s, sen, tag, a, b, c, offL, sk, wx, wy, i, ox, oy,
-                            d2 and (sqrt(d2) - rr) or -99, "trailer")
+            if not far then
+                for i = i0, i1 do
+                    local ox, oy = hx[i], hy[i]
+                    local bh, rr = bhT[i], rrT[i]
+                    local grow = bh * boxK -- 非方塊 bh＝0 → grow＝0
+                    -- 世界AABB只排除不可能碰撞、也不可能改善最小淨距的點；不拿近似hardS裁世界。
+                    local reach = rr + grow * boxK + (clr and sampleMargin or (inCap and minMargin or 0)) + 1e-6
+                    local dx, dy = ox - bodyX, oy - bodyY
+                    if dx < 0 then dx = -dx end
+                    if dy < 0 then dy = -dy end
+                    if not (dx > extentX + reach or dy > extentY + reach) then
+                        local d2 = obbDistanceSq(
+                            bodyX, bodyY, fx, fy, halfW + grow, halfL + grow, ox, oy)
+                        if d2 == nil or d2 <= rr * rr then
+                            return Drive.sweepHit(s, sen, tag, a, b, c, offL, sk, wx, wy, i, ox, oy,
+                                d2 and (sqrt(d2) - rr) or -99)
+                        end
+                        if inCap or clr then
+                            local probe = rr + (clr and sampleMargin or minMargin)
+                            if d2 < probe * probe then
+                                local clearance = sqrt(d2) - rr
+                                if clr and clearance < sampleMargin then sampleMargin = clearance end
+                                if inCap and clearance < minMargin then minMargin, minI = clearance, i end
+                            end
+                        end
                     end
-                    if inCap or clr then
-                        local probe = rr + (clr and sampleMargin or minMargin)
-                        if d2 < probe * probe then
-                            local clearance = sqrt(d2) - rr
-                            if clr and clearance < sampleMargin then sampleMargin = clearance end
-                            if inCap and clearance < minMargin then minMargin, minI = clearance, i end
+                    if tbx then
+                        local tgrow = bh * tboxK
+                        local treach = rr + tgrow * tboxK
+                            + (clr and sampleMargin or (inCap and minMargin or 0)) + 1e-6
+                        dx, dy = ox - tbx, oy - tby
+                        if dx < 0 then dx = -dx end
+                        if dy < 0 then dy = -dy end
+                        if not (dx > tex + treach or dy > tey + treach) then
+                            local d2 = obbDistanceSq(tbx, tby, tdx, tdy, tw.halfW + tgrow, tw.halfL + tgrow, ox, oy)
+                            if d2 == nil or d2 <= rr * rr then
+                                return Drive.sweepHit(s, sen, tag, a, b, c, offL, sk, wx, wy, i, ox, oy,
+                                    d2 and (sqrt(d2) - rr) or -99, "trailer")
+                            end
+                            if inCap or clr then
+                                local probe = rr + (clr and sampleMargin or minMargin)
+                                if d2 < probe * probe then
+                                    local clearance = sqrt(d2) - rr
+                                    if clr and clearance < sampleMargin then sampleMargin = clearance end
+                                    if inCap and clearance < minMargin then minMargin, minI = clearance, i end
+                                end
+                            end
                         end
                     end
                 end
             end
+            i0 = i0 + BN
         end
         if clr and (clrKeepS == nil or sk <= clrKeepS) then clr[k] = sampleMargin end
     end
