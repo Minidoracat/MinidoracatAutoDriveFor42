@@ -6476,7 +6476,13 @@ IsoFlagType = { water = "water", solidfloor = "solidfloor", doorN = "doorN", doo
     solidtrans = "solidtrans", solid = "solid", collideN = "collideN", collideW = "collideW" }
     -- solidtrans：(C2) 用；solid／collideN／collideW：0929j 引擎形狀（putSolid 的 props 一律回 false，不受影響）
 IsoObjectType = { isMoveAbleObject = 28 }
-function instanceof(obj, cls) return type(obj) == "table" and rawget(obj, "_class") == cls end
+-- _isa：繼承鏈（IsoAnimal extends IsoPlayer，IsoAnimal.java:123）——真引擎 instanceof(animal, "IsoPlayer") 為真
+function instanceof(obj, cls)
+    if type(obj) ~= "table" then return false end
+    if rawget(obj, "_class") == cls then return true end
+    local isa = rawget(obj, "_isa")
+    return isa ~= nil and isa[cls] == true
+end
 drive.world = {}
 drive.cellVehicles = {}  -- 全域車輛清單（調頭探測 probeAround 走 Set:iterator() 迭代）
 drive.vehGeo = {}        -- 格級車輛佔位（production 走 square:getVehicleContainer() 幾何查詢）
@@ -8596,6 +8602,208 @@ function drive.scenarioZombieFarHard()
     assert(armDrive())
 end
 drive.scenarioZombieFarHard()
+
+-- (soft) 1005 動物與車外的其他玩家：併入殭屍軟縫選縫（大型動物與玩家多 SOFT_COMFORT_M），閃不開就以接近包絡
+--   停在前方等；動物等 ANIMAL_WAIT_MS 後以 ≤ANIMAL_CRAWL_KMH 爬過、玩家等到停等預算以專屬理由交還；殭屍軟縫在
+--   keep 版帶寬沒縫時改在物理 laneRoom 內貼路緣找（fstate.laneKeep＝0，釋放還原）。fixture 擺正壓車道。
+--   (soft-a) 大型動物有空間：閃開（佔位含舒適餘裕）、不停不減速
+--   (soft-b) 沒空間：接近包絡收速、停在前方等（WAIT）；到期前不動、到期後 CRAWL ≤4 km/h（不被 min-exec 抬）
+--   (soft-c) 小動物：AnimalDodge＝大型時不閃不停、＝所有時閃；AnimalSlowdown＝關閉時沒空間也不停
+--   (soft-d) 其他玩家擋路沒空間：停等、不倒車，停等預算 WAIT_TIMEOUT_MS 到期以 PlayerBlockStop 交還
+--   (soft-e) 殭屍正壓車道、keep 版帶無縫、只剩貼路緣有縫：選 keep 0 的 lane、laneKeep＝0 與 control 一致、釋放還原；
+--            keep 版有縫時不動 keep
+function drive.scenarioSoftAnimals()
+    scenario("動物與玩家：軟縫閃避、閃不開停等、動物爬過、玩家交還、殭屍貼路緣")
+    local T = MDAD.Drive.debugTune()
+    local oldZ, oldA = MDAD.HUD.zombieDodge, MDAD.HUD.animalDodge
+    local aLvl = 2
+    MDAD.HUD.zombieDodge = function() return true end
+    MDAD.HUD.animalDodge = function() return aLvl end
+    local function sandbox(slow)
+        setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40,
+            RightLaneBias = 0, ZombieAreaSlowdown = false, CorpseSlowdown = false, AnimalSlowdown = slow })
+    end
+    local function arm()
+        drive.fillWorld(-10, 160, -9, 9)
+        assert(armDrive())
+        setHeading(dveh, 0)
+        dveh._speed, dveh._y = 20, 0
+        drive.scanRound(true)
+        drive.scanRound(true)
+        return MDAD.Drive.debugSession(0)
+    end
+    local function putAnimal(x, l, kg)
+        drive.putMoving(math.floor(x), math.floor(l), { _class = "IsoAnimal", _isa = { IsoPlayer = true },
+            getX = function() return x end, getY = function() return l end,
+            isDead = function() return false end, getVehicle = function() return nil end,
+            isHeld = function() return false end,
+            getData = function() return { getWeight = function() return kg end } end })
+    end
+    local function putPlayer(x, l)
+        drive.putMoving(math.floor(x), math.floor(l), { _class = "IsoPlayer",
+            getX = function() return x end, getY = function() return l end,
+            isDead = function() return false end, getVehicle = function() return nil end })
+    end
+    local function walls(x) drive.putSolid(x, 3, "soft_wall_r"); drive.putSolid(x, -4, "soft_wall_l") end
+    -- 停在目標前：車頭到目標不足 SOFT_STOP_GAP_M，車停住
+    local function parkBefore(s, x)
+        dveh._x, dveh._speed = x - s.vehicleProfile.halfL - T.SOFT_STOP_GAP_M + 0.2, 0
+        driveReset(dveh)
+        drive.scanRound(true)
+        driveReset(dveh)
+        driveTick(dp, dveh)
+    end
+
+    -- (soft-a)
+    sandbox(2); aLvl = 2
+    local s = arm()
+    local R = s.vehicleProfile.halfW + MDADCorridor.ZOMBIE_R + MDADCorridor.ZOMBIE_MARGIN
+    local base = s.desiredTarget
+    putAnimal(30.5, 0.2, 300)
+    drive.scanRound(true)
+    checkTrue(s.zombieWhy == "gap" and s.zombieLane ~= nil and type(s.zombieWant) == "number"
+            and math.abs(s.zombieWant - 0.2) >= R + T.SOFT_COMFORT_M - 1e-6,
+        "(soft-a) 大型動物有空間：閃開且佔位含舒適餘裕（want " .. tostring(s.zombieWant) .. "、R " .. tostring(R) .. "）")
+    local held, slowed = false, false
+    for _ = 1, 4 do
+        driveReset(dveh)
+        dveh._x, dveh._y = dveh._x + 1.6667, s.fstate.laneBias
+        drive.scanRound(true)
+        if s.softHoldKind ~= nil or s.followHold or s.softStopKind ~= nil then held = true end
+        if s.desiredTarget < base - 1e-6 then slowed = true end
+    end
+    checkTrue(not held and not slowed,
+        "(soft-a) 閃得開：不停等、不減速（held " .. tostring(held) .. "、slowed " .. tostring(slowed) .. "）")
+
+    -- (soft-b)
+    s = arm()
+    walls(20)
+    putAnimal(20.5, 0.1, 300)
+    drive.scanRound(true)
+    checkTrue(s.softStopKind == "animal" and s.zombieWhy ~= "gap" and s.lastSensorReason == "animal-stop"
+            and s.softStopCapKmh >= 0 and s.softStopCapKmh < base,
+        "(soft-b) 沒空間：停等目標＝動物、接近包絡在收（why " .. tostring(s.zombieWhy) .. "、cap "
+        .. tostring(s.softStopCapKmh) .. "、reason " .. tostring(s.lastSensorReason) .. "）")
+    parkBefore(s, 20.5)
+    checkTrue(s.softHoldKind == "animal" and s.followHold == true and s.intentShadow == "WAIT"
+            and s.lastSensorReason == "animal-stop" and s.softStopCapKmh == 0,
+        "(soft-b) 停在動物前等（intent " .. tostring(s.intentShadow) .. "、reason " .. tostring(s.lastSensorReason) .. "）")
+    drive.stallFrames(T.ANIMAL_WAIT_MS - 1500)
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkTrue(not s.softCrawl and s.followHold == true and s.softHoldMs > 1000 and s.softHoldMs < T.ANIMAL_WAIT_MS,
+        "(soft-b) 等待未到期：仍停（holdMs " .. tostring(s.softHoldMs) .. "）")
+    drive.stallFrames(2500)
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkTrue(s.softCrawl == true and s.intentShadow == "CRAWL" and s.lastCapReason == "animal-crawl"
+            and s.softStopCapKmh > 0 and s.softStopCapKmh <= 4 and not s.followHold and MDAD.Drive.isActive(0),
+        "(soft-b) 等待到期：≤4 km/h 爬過（intent " .. tostring(s.intentShadow) .. "、reason "
+        .. tostring(s.lastCapReason) .. "、cap " .. tostring(s.softStopCapKmh) .. "）")
+    drive.clearCell(20, 0)
+    drive.scanRound(true)
+    checkTrue(s.softHoldKind == nil and not s.softCrawl and s.softHoldMs == 0,
+        "(soft-b) 動物離開：停等狀態清掉（kind " .. tostring(s.softHoldKind) .. "）")
+
+    -- (soft-c)
+    s = arm()
+    putAnimal(30.5, 0.2, 3)
+    drive.scanRound(true)
+    checkTrue(s.zombieLane == nil and s.zombieWhy == "clear" and s.softStopKind == nil,
+        "(soft-c) AnimalDodge＝大型：小動物不閃不停（why " .. tostring(s.zombieWhy) .. "）")
+    aLvl = 3
+    drive.scanRound(true)
+    checkTrue(s.zombieWhy == "gap" and s.zombieLane ~= nil,
+        "(soft-c) AnimalDodge＝所有：小動物也閃（why " .. tostring(s.zombieWhy) .. "）")
+    aLvl = 2
+    sandbox(1)
+    s = arm()
+    walls(20)
+    putAnimal(20.5, 0.1, 300)
+    parkBefore(s, 20.5)
+    checkTrue(s.softStopKind == nil and s.softHoldKind == nil and not s.followHold
+            and s.lastSensorReason ~= "animal-stop",
+        "(soft-c) AnimalSlowdown＝關閉：沒空間也不停（reason " .. tostring(s.lastSensorReason) .. "）")
+
+    -- (soft-d)
+    sandbox(2); aLvl = 1 -- 動物閃避關閉不影響玩家
+    MDAD.HUD.zombieDodge = function() return false end -- 殭屍閃避關閉也不影響玩家
+    s = arm()
+    putPlayer(30.5, 0.2)
+    drive.scanRound(true)
+    checkTrue(s.zombieWhy == "gap" and type(s.zombieWant) == "number"
+            and math.abs(s.zombieWant - 0.2) >= R + T.SOFT_COMFORT_M - 1e-6 and s.softStopKind == nil,
+        "(soft-d) 玩家有空間：永遠參與閃避（AnimalDodge／ZombieDodge 關也一樣）、含舒適餘裕、不停（want "
+        .. tostring(s.zombieWant) .. "）")
+    MDAD.HUD.zombieDodge = function() return true end
+    s = arm()
+    walls(20)
+    putPlayer(20.5, 0.1)
+    parkBefore(s, 20.5)
+    checkTrue(s.softHoldKind == "player" and s.followHold == true and s.lastSensorReason == "player-stop",
+        "(soft-d) 玩家擋路沒空間：停等（kind " .. tostring(s.softHoldKind) .. "、reason " .. tostring(s.lastSensorReason) .. "）")
+    clearList(halos)
+    local waited, unstuck, stopAt = 0, false, nil
+    while waited <= T.WAIT_TIMEOUT_MS + 3000 and MDAD.Drive.isActive(0) do
+        nowMs = nowMs + 250
+        driveTick(dp, dveh)
+        waited = waited + 250
+        if s.mode == "unstick" or s.recoverWhy ~= nil or s.softCrawl then unstuck = true end
+    end
+    if not MDAD.Drive.isActive(0) then stopAt = waited end
+    local playerKey = false
+    for _, h in ipairs(halos) do
+        if noteReason(h.text) == "UI_MinidoracatAutoDrive_PlayerBlockStop" then playerKey = true end
+    end
+    checkTrue(stopAt ~= nil and stopAt >= T.WAIT_TIMEOUT_MS - 1500 and playerKey and not unstuck,
+        "(soft-d) 停等預算到期以 PlayerBlockStop 交還、期間不倒車不爬（停在 " .. tostring(stopAt) .. "ms）")
+
+    -- (soft-e)
+    sandbox(2); aLvl = 2
+    local function roomed(room)
+        local st = arm()
+        local p = st.profile
+        p.laneRoomR, p.laneRoomL = {}, {}
+        for i = 1, p.n do p.laneRoomR[i], p.laneRoomL[i] = room, room end
+        return st
+    end
+    local room = 2.6
+    s = roomed(room)
+    local a = 2.05 - R -- 兩隻 ±a 的佔位聯集＝[−2.05, 2.05]：蓋滿 keep 版帶 ±(room−0.6)，貼路緣各剩一段
+    drive.putMoving(30, math.floor(a), { _class = "IsoZombie", getX = function() return 30.5 end, getY = function() return a end })
+    drive.putMoving(31, math.floor(-a), { _class = "IsoZombie", getX = function() return 30.6 end, getY = function() return -a end })
+    drive.scanRound(true)
+    local want = s.zombieWant
+    checkTrue(s.zombieWhy == "gap" and s.zombieKeep0 == true and type(want) == "number"
+            and math.abs(want) > room - MDADFollower.LANE_BIAS_KEEP + 1e-6 and math.abs(want) <= room + 1e-6,
+        "(soft-e) keep 版無縫：在物理 laneRoom 內貼路緣找到縫（why " .. tostring(s.zombieWhy) .. "、want "
+        .. tostring(want) .. "）")
+    local idx = s.fstate.idx
+    checkTrue(s.fstate.laneKeep == 0 and MDAD.Drive.laneKeepOf(s) == 0
+            and math.abs(MDADFollower.laneBiasAt(s.profile, want, idx, s.lastSNow, s.fstate.laneKeep) - want) < 1e-6,
+        "(soft-e) control／期望線同用 keep 0：want 不被夾回 keep 版帶（laneKeep " .. tostring(s.fstate.laneKeep) .. "）")
+    drive.clearCell(30, math.floor(a)); drive.clearCell(31, math.floor(-a))
+    for _ = 1, 20 do
+        if s.zombieLane == nil then break end
+        driveReset(dveh)
+        dveh._y = s.fstate.laneBias
+        drive.scanRound(true)
+    end
+    checkTrue(s.zombieLane == nil and s.zombieKeep0 == false and s.fstate.laneKeep == nil,
+        "(soft-e) 釋放後還原 keep（laneKeep " .. tostring(s.fstate.laneKeep) .. "）")
+    s = roomed(room)
+    drive.putMoving(30, 0, { _class = "IsoZombie", getX = function() return 30.5 end, getY = function() return 0.05 end })
+    drive.scanRound(true)
+    checkTrue(s.zombieWhy == "gap" and s.zombieKeep0 == false and s.fstate.laneKeep == nil,
+        "(soft-e) keep 版有縫：不改 keep（keep0 " .. tostring(s.zombieKeep0) .. "）")
+
+    MDAD.Drive.stop(0, nil)
+    MDAD.HUD.zombieDodge, MDAD.HUD.animalDodge = oldZ, oldA
+    drive.fillWorld(-2, 70, -7, 7)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    assert(armDrive())
+end
+drive.scenarioSoftAnimals()
 
 -- ⑤lf 低幀率降速提示（0925；0929o 門檻改為掃描額度放大到上限的 50ms）：可視上限壓速、平均幀時 ≥50ms，
 --   且視距是被幀率截短，持續 2s 才讓 HUD 狀態變「卡頓降速」（lowfps）、恢復 3s 才消失；同趟累計 10s 跳一次

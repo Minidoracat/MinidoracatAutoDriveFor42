@@ -62,6 +62,8 @@ local texts = {
     UI_MinidoracatAutoDrive_HUDStatusSlow_road = "Checking road",
     UI_MinidoracatAutoDrive_HUDStatusSlow_dodge = "Dodging: slower",
     UI_MinidoracatAutoDrive_HUDStatusSlow_zombie = "Zombies: slower",
+    UI_MinidoracatAutoDrive_HUDStatusSlow_animal = "Waiting: animal",
+    UI_MinidoracatAutoDrive_HUDStatusSlow_player = "Waiting: player",
     UI_MinidoracatAutoDrive_HUDStatusSlow_traffic = "Traffic: slower",
     UI_MinidoracatAutoDrive_HUDStatusSlow_return = "Rejoining lane",
     UI_MinidoracatAutoDrive_HUDStatusSlow_tow = "Trailer: slower",
@@ -1144,6 +1146,13 @@ do
     rows = panel._pinRows
     check(rows[8][2] == "25/" .. texts.UI_MinidoracatAutoDrive_HUDStatusSlow_zombie and rows[8][3] == rows[6][3],
         "obstacle/zombie factor shows its speed and category as a slowdown (" .. tostring(rows[8][2]) .. ")")
+    -- 動物／玩家擋路的 cap 理由碼各自歸類，不落到 other
+    for _, case in ipairs({ { "animal-stop", "animal" }, { "animal-crawl", "animal" }, { "player-stop", "player" } }) do
+        info[8], info[9] = 25, case[1]
+        panel:refresh(t0 + 4520)
+        checkEq(panel._pinRows[8][2], "25/" .. texts["UI_MinidoracatAutoDrive_HUDStatusSlow_" .. case[2]],
+            case[1] .. " factor is categorised as " .. case[2])
+    end
     info[8], info[9] = nil, nil
     -- 伺服器速限 70：極速 70 的車實際只到 ~58（引擎以放大後車速對照極速），車輛列顯示換算值
     MDAD.Drive.serverSpeedLimit = function() return 70 end
@@ -1505,6 +1514,30 @@ do
     options:getOption("PerceptionDistance"):setValue(0 / 0)
     checkEq(MDAD.HUD.perceptionDistance(), 120, "corrupt sensing setting returns the documented default")
     perception.set(3)
+end
+-- 閃避動物 combo：1＝關閉、2＝大型動物（預設）、3＝所有動物；ESC 與 MiniMap 共用同一 option
+do
+    local escAnimal = options:getOption("AnimalDodge")
+    check(escAnimal ~= nil and #escAnimal.items == 3 and escAnimal:getValue() == 2,
+        "ESC registers the AnimalDodge combo with three items and large animals as default")
+    local animal = registeredMiniMapSection.combos[8]
+    check(animal.label == "UI_MinidoracatAutoDrive_AnimalDodge"
+        and animal.items == MDAD.HUD.ANIMAL_DODGE_KEYS and #animal.items == 3
+        and animal.default == 2 and animal.get() == 2,
+        "MiniMap AnimalDodge combo defaults to large animals")
+    checkEq(MDAD.HUD.animalDodge(), 2, "animal dodge defaults to large animals")
+    check(MDAD.HUD.setAnimalDodge(3) and MDAD.HUD.animalDodge() == 3 and escAnimal:getValue() == 3,
+        "animal dodge setter writes the shared option")
+    local saves = optionSaveCalls
+    check(not MDAD.HUD.setAnimalDodge(0) and not MDAD.HUD.setAnimalDodge(4)
+        and not MDAD.HUD.setAnimalDodge(2.5) and not animal.set(0 / 0)
+        and optionSaveCalls == saves and MDAD.HUD.animalDodge() == 3,
+        "invalid animal dodge indices do not overwrite the preference")
+    escAnimal:setValue(9)
+    checkEq(MDAD.HUD.animalDodge(), 2, "corrupt animal dodge option reads back as large animals")
+    escAnimal:setValue(0 / 0)
+    checkEq(MDAD.HUD.animalDodge(), 2, "NaN animal dodge option reads back as large animals")
+    animal.set(2)
 end
 options:getOption("VoiceLanguage"):setValue(9)
 checkEq(MDAD.HUD.voiceLanguage(), "auto", "corrupt voice language option reads back as follow")

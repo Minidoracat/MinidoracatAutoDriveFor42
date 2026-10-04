@@ -77,6 +77,8 @@ local STOP_KIND = {
     UI_MinidoracatAutoDrive_TrailerCorner = "trailer",
     -- 前方區域一直沒載入（0928a；Driver TUNE.AREA_WAIT_MAX_MS）
     UI_MinidoracatAutoDrive_AreaLoadStop = "stuck",
+    -- 其他玩家擋路、停等預算用完（1005 soft；Driver Drive.KEY_PLAYER_STOP）
+    UI_MinidoracatAutoDrive_PlayerBlockStop = "stuck",
 }
 
 local outbox = {}      -- pn → { msgs..., n }

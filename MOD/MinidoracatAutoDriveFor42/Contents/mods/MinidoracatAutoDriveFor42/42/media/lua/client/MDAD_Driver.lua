@@ -626,6 +626,16 @@ TUNE.ZOMBIE_LANE_SETTLE_M = 0.05  -- 回到常駐 lane 這麼近＝釋放
 TUNE.SOFT_HARD_JITTER_M = 0.5     -- 軟縫可行帶離硬物擋線帶緣多讓的量（hardL 取樣柱在格內跳動，見 zombieLaneOf；1002t）
 TUNE.ZOMBIE_LANE_LEAD_S = 0.3     -- 側移完成後還要留這麼多秒才到殭屍（車身追 laneBias 的落後；0925d 0.5→0.3）
 TUNE.ZOMBIE_LANE_MIN_KMH = 12     -- 縱向配合帽下限（殭屍可撞：壓到爬行仍過不去就撞，不停等）
+-- 動物與車外的其他玩家（1005 soft）：併入同一次軟縫選縫（Sensor zomKind）。大型動物（ESC AnimalDodge 2/3）、
+-- 小型動物（AnimalDodge 3）、其他玩家（永遠）參與選縫；碰撞模型同殭屍（引擎車撞動物也是 0.3 圓，IsoAnimal.java:466-476）。
+TUNE.SOFT_COMFORT_M = 0.6          -- 大型動物與玩家另加的橫向舒適餘裕（佔位兩側各多這麼多；小型動物、殭屍、屍體不加）
+-- 停等：沙盒 AnimalSlowdown 選到的動物（1 關／2 大型／3 全部）與其他玩家（永遠）在選定的行駛線上、軟縫清不開時，
+-- 以接近包絡停在它前方 SOFT_STOP_GAP_M（Drive.softStopCap）。動物還在就等 ANIMAL_WAIT_MS，之後以 ANIMAL_CRAWL_KMH
+-- 爬過（引擎 <5 km/h 車損為 0，BaseVehicle.java:5699-5705）；玩家一律停等，WAIT_TIMEOUT_MS 停等預算到期以
+-- Drive.KEY_PLAYER_STOP 交還（不推人）。
+TUNE.SOFT_STOP_GAP_M = 3.0         -- 停在目標前（車頭到目標）的距離
+TUNE.ANIMAL_WAIT_MS = 6000         -- 動物擋線時停等多久才爬過（必須 < WAIT_TIMEOUT_MS，否則先被交還）
+TUNE.ANIMAL_CRAWL_KMH = 4          -- 等待到期後的爬行速度（≤4：引擎 <5 km/h 不算車損）
 -- 越野旗標進 traction key 的去抖（FPS：s031 st149350-149356 彎道路緣一輪壓草一輪回鋪面，
 -- physicalOffroad 每秒翻一次 → key 1↔33 每翻一次 `dyn rebuild` 8-16ms（292 點剖面）
 -- ×8 次／6 秒＝可見 hitch）。旗標持續同值 ≥ 這麼久才進 key／priors；raw 值仍供
@@ -826,6 +836,8 @@ local KEY_TRAFFIC = { -- 會車提示（一張表：主 chunk local 槽已在上
 }
 -- 前方區域遲遲未載入的交還理由（TUNE.AREA_WAIT_MAX_MS；掛在 Drive 表：主 chunk local 槽已滿）
 Drive.KEY_AREA_STOP = "UI_MinidoracatAutoDrive_AreaLoadStop"
+-- 其他玩家擋在行駛線上、停等預算 WAIT_TIMEOUT_MS 用完的交還理由（Drive.softStopCap；不推人、不改道）
+Drive.KEY_PLAYER_STOP = "UI_MinidoracatAutoDrive_PlayerBlockStop"
 
 -- 診斷輸出（只在 getDebug() 為真時存在）。實機回報「按了關閉但車還在跑」時，唯一能
 -- 分辨「session 沒關」與「只是慣性滑行」的證據就是這幾行；跟線那行必須節流，每幀
@@ -952,6 +964,7 @@ TRIP.REASON = {
 TRIP.RELEASE = {
     [KEY_LOST] = "noroad", [KEY_ROUTE] = "noroad", [KEY_ROUTE_FAR] = "noroad",
     [KEY_STUCK] = "failed", [KEY_UNSUPPORTED] = "failed", [Drive.KEY_AREA_STOP] = "failed",
+    [Drive.KEY_PLAYER_STOP] = "failed",
 }
 -- playerNum → 開始／備路意圖（token=nil 時尚未 acquire；claim 前對車零控制輸出）
 TRIP.preps = {}
@@ -1516,8 +1529,10 @@ local function refreshPolicies(s, vehicle, playerNum)
     s.pendingStyle = Drive.getStyle(playerNum)
     local zombieSlow = slowActive("ZombieAreaSlowdown", playerNum, PREF_ZOMBIE_MD)
     local corpseSlow = slowActive("CorpseSlowdown", playerNum, PREF_CORPSE_MD)
-    local changed = zombieSlow ~= s.zombieSlow or corpseSlow ~= s.corpseSlow
-    s.zombieSlow, s.corpseSlow = zombieSlow, corpseSlow
+    -- 沙盒 AnimalSlowdown（1005 soft）：1 不為動物停等／2 大型動物（預設）／3 所有動物
+    local animalSlow = MDAD.policy3("AnimalSlowdown", 2)
+    local changed = zombieSlow ~= s.zombieSlow or corpseSlow ~= s.corpseSlow or animalSlow ~= s.animalSlow
+    s.zombieSlow, s.corpseSlow, s.animalSlow = zombieSlow, corpseSlow, animalSlow
     if changed then
         s.zombieLaneCap = -1
         if s.sensor and s.sensor.ready and s.profile.ready and MDADDynamics.finite(s.lastLatSigned)
@@ -1528,6 +1543,7 @@ local function refreshPolicies(s, vehicle, playerNum)
             -- 權限變了，側移預算也要以同一完整快照重算；不能只撤掉最近一類的帽。
             local nb = zombieLaneOf(s, resident, now, playerNum, vehicle:getCurrentSpeedKmHour())
             if nb ~= s.fstate.laneBias then
+                s.fstate.laneKeep = Drive.laneKeepOf(s)
                 MDADFollower.setLaneBias(s.fstate, nb)
                 s.verifyLineN, s.laneCurveStamp = 0, -1
                 s.softLaneRecheck, s.planSig = true, -1
@@ -2108,6 +2124,7 @@ local function startSession(playerObj, playerNum, stage)
         zombieLaneMs = 0,       -- 上一次軟縫平滑的時戳
         zombieLaneCap = -1,     -- 縱向配合帽（km/h；−1＝無）：側移在到達殭屍前完不成就先降速
         trafficCapKmh = -1,     -- 會車／跟車帽（km/h；−1＝無）：Drive.visAssistForce 的 traffic 帳
+        softStopCapKmh = -1,    -- 動物／玩家停等接近帽（km/h；−1＝無）：Drive.visAssistForce 的 soft-stop 帳
         followerTarget = 0, desiredTarget = 0, -- telemetry ftg／des（剖面原始目標／cap 後 jerk 前）
         forceBrakeWhy = nil, -- telemetry fbw：最後一次 commandForceBrake 的裁決者
         zombieLaneParked = nil, -- 讓位釋放時停放的 lane（重新接手的平滑起點；nil＝無）
@@ -2182,6 +2199,13 @@ local function startSession(playerObj, playerNum, stage)
         gearCap = 0,        -- 檔位巡航上限快取（refreshPolicies 維護；>0 才生效）
         zombieSlow = true,  -- 政策×偏好合成快取：這位玩家要不要為殭屍減速
         corpseSlow = true,  -- 同上，地面屍體
+        animalSlow = 2,     -- 沙盒 AnimalSlowdown 快取（1 關／2 大型／3 全部）
+        softStopS = nil, softStopL = nil, softStopKind = nil, -- 本輪選定行駛線上閃不開的最近停等目標（Drive.softStopScan）
+        softHoldKind = nil, -- 停等中的目標種類（nil／"animal"／"player"；E2E 情境讀）
+        softHoldMs = 0,     -- 本次停等累計 ms（停住才計）
+        softHoldTick = 0, softHoldStarted = false,
+        softCrawl = false,  -- 動物等待到期後的爬行中
+        zombieKeep0 = false, -- 軟縫這次縫是貼路緣（keep 0）找到的（Drive.laneKeepOf）
         rotProbeMs = 0,     -- 下一次允許車周探測的時戳（0＝第一次調頭幀就探）
         rotProbeClear = false, -- 上次探測結果：車周淨空可原地旋轉
         uturn = nil,        -- 進行中的這一次調頭的參數檔（TUNE.UTURN.*）；nil＝沒在調頭
@@ -3121,7 +3145,8 @@ end
 -- （`finite` 在本檔較後面才定義，這裡用 MDADDynamics.finite。）
 function Drive.hardBrake(s, vehicle, now, why, speedKmh, mult, steer, heading, fwd, fx, fy)
     -- 只對「往前開」的車不鎖輪：外力沿車頭反向，倒退時施下去會加速倒退（0929p 審查）
-    local nolock = s.tow or (why == "moving" and s.followHold and not s.currentBlocked)
+    local nolock = s.tow or ((why == "moving" or why == "animal-stop" or why == "player-stop")
+        and s.followHold and not s.currentBlocked)
     local minKmh = TUNE.TOW_NOLOCK_KMH
     if not nolock and not s.currentBlocked and (why == "rotate" or why == "blocked-approach" or why == "dodge-defer"
             or ((why == "return" or why == "return-hold") and s.returnHold)) then
@@ -3543,7 +3568,8 @@ function Drive.softPick(s, pS, pL, predN, sFrom, sEnd, halfW, resident, cur, aLo
         for i = 1, predN do
             local zs = pS[i]
             if zs >= sFrom and zs <= sEnd then
-                local lane = MDADFollower.laneBiasAt(s.profile, u, MDADFollower.segIndexAt(s.profile, zs), zs)
+                -- s.softKeepTry：貼路緣重找（keep 0）時複驗也要用 control 會用的同一個 keep
+                local lane = MDADFollower.laneBiasAt(s.profile, u, MDADFollower.segIndexAt(s.profile, zs), zs, s.softKeepTry)
                 if math.abs(pL[i] - lane) < R - 1e-6 then clear = false; break end
             end
         end
@@ -3563,7 +3589,7 @@ function Drive.softNextConflict(s, pS, pL, predN, sAfter, sTo, lane, R)
     for i = 1, predN do
         local zs = pS[i]
         if zs > sAfter and zs <= sTo then
-            local l = MDADFollower.laneBiasAt(s.profile, lane, MDADFollower.segIndexAt(s.profile, zs), zs)
+            local l = MDADFollower.laneBiasAt(s.profile, lane, MDADFollower.segIndexAt(s.profile, zs), zs, s.softKeepTry)
             local dd = math.abs(pL[i] - l)
             if dd < R and (nextS == nil or zs < nextS) then nextS, need = zs, R - dd end
         end
@@ -3579,6 +3605,103 @@ function Drive.zombieDodgeOn()
         if ok then return v == true end
     end
     return true
+end
+
+-- 「閃避動物」選項（HUD getter；1 關／2 大型／3 全部；缺席或非法＝2）
+function Drive.animalDodgeLevel()
+    local hud = MDAD.HUD
+    if type(hud) == "table" and type(hud.animalDodge) == "function" then
+        local ok, v = pcall(hud.animalDodge)
+        if ok and (v == 1 or v == 2 or v == 3) then return v end
+    end
+    return 2
+end
+
+-- 軟避讓點（Sensor zomKind）在 level（1 關／2 大型／3 全部）下算不算數：選縫看 AnimalDodge、停等看
+-- 沙盒 AnimalSlowdown，同一套分級。其他玩家永遠算；殭屍／屍體（含沒有 zomKind 的舊快照）看 zOn。
+function Drive.softKindIn(kind, zOn, level)
+    if kind == "player" then return true end
+    if kind == "animal" then return level >= 2 end
+    if kind == "small" then return level >= 3 end
+    return zOn
+end
+
+-- 快照裡有沒有參與選縫的動物／玩家（ZombieDodge 關著時軟縫仍要為牠們作用）
+function Drive.softOthersJoin(sen, level)
+    for i = 1, sen.zomN do
+        local k = sen.zomKind and sen.zomKind[i]
+        if k ~= nil and k ~= "zombie" and k ~= "corpse" and Drive.softKindIn(k, false, level) then return true end
+    end
+    return false
+end
+
+-- 軟縫可行帶（zombieLaneOf 用；1005 由原本的內嵌段抽出，主函式 local 槽已滿）：回 (aLo, aHi, 路面餘裕表是否可用)。
+-- 可行帶＝Follower 對 laneBias 真的會照辦的帶（常駐 lane ±DELTA 只是防呆上限）：先問剖面的 laneRoom（adaptive
+-- 才有），沒有就用感測路面帶 roadLo/roadHi（扣車半寬）。帶寬必須容得下一個 R（halfW＋0.65）以上的側移，否則正壓
+-- 在車道上的殭屍永遠「無縫」。直接讀表再扣 keep（平常 LANE_BIAS_KEEP；貼路緣重找 0）：control／proof 線對任何
+-- laneBias 都用同一個 clampLane（keep＝fstate.laneKeep），帶給到物理餘裕的提案會被靜默夾回 room−keep＝「有閃」的
+-- log 但車沒動。
+-- 硬物先縮小可搜尋帶，而非只否決已選中的那一側。保留與目前車身連通的區間，因此終點另一側雖然淨空，也不能
+-- 穿越夾在中間的硬物。帶緣再讓出 SOFT_HARD_JITTER_M（1002t）：hardL 記的是命中那條取樣柱的 l，同一格牆隨取樣
+-- 相位在一格內跳動（正式服 0.17.0 clip-02：−2.97／−2.54／−2.02），貼著帶緣選的 lane（只留 0.057m）下一輪就落進
+-- 牆的擋線帶 → 硬規劃從車旁判堵、52 km/h 鎖輪。讓出的量不蓋過車身現在的位置（帶不因此收成空）。
+function Drive.softBand(s, sen, resident, latNow, sFrom, sTo, keep)
+    local aLo, aHi = resident - TUNE.ZOMBIE_LANE_DELTA, resident + TUNE.ZOMBIE_LANE_DELTA
+    local idx = s.fstate.idx
+    local roomR, roomL = s.profile.laneRoomR, s.profile.laneRoomL
+    local rr, rl = 99, -99
+    if type(roomR) == "table" and finite(idx) then
+        local i = idx - idx % 1
+        if finite(roomR[i]) then
+            rr, rl = roomR[i] - keep, keep - roomL[i]
+            if rr < 0 then rr = 0 end
+            if rl > 0 then rl = 0 end
+        end
+    end
+    if rr < 99 then
+        if rr < aHi then aHi = rr end
+        if rl > aLo then aLo = rl end
+    elseif finite(sen.roadLo) and finite(sen.roadHi) then
+        local halfW = s.vehicleProfile.halfW
+        local lo, hi = sen.roadLo + halfW, sen.roadHi - halfW
+        if lo > aLo then aLo = lo end
+        if hi < aHi then aHi = hi end
+    end
+    local origin, jit = latNow, TUNE.SOFT_HARD_JITTER_M
+    for i = 1, sen.hardN do
+        local hs = sen.hardS[i]
+        if hs >= sFrom and hs <= sTo then
+            local r = sen.hardR and sen.hardR[i] or MDADCorridor.OBS_HALF
+            if not finite(r) then r = MDADCorridor.OBS_HALF end
+            local lo, hi = sen.hardL[i] - s.needHalf - r, sen.hardL[i] + s.needHalf + r
+            if origin <= lo then
+                local e = lo - jit
+                if e < origin then e = origin end
+                if e < aHi then aHi = e end
+            elseif origin >= hi then
+                local e = hi + jit
+                if e > origin then e = origin end
+                if e > aLo then aLo = e end
+            else
+                return 1, 0, rr < 99
+            end
+        end
+    end
+    return aLo, aHi, rr < 99
+end
+
+-- 大型動物與玩家佔位兩側另加的舒適餘裕（TUNE.SOFT_COMFORT_M）；其他種類 0
+function Drive.softPad(kind)
+    if kind == "animal" or kind == "player" then return TUNE.SOFT_COMFORT_M end
+    return 0
+end
+
+-- 有效的離路緣保留（fstate.laneKeep 與規劃擋線基準同值）：軟縫找不到縫、改在物理 laneRoom 內貼路緣閃
+-- （s.zombieKeep0，只在軟縫持有中）或鏈式停留＝0；會車側移＝TRAFFIC_EDGE_KEEP_M；其餘 nil（LANE_BIAS_KEEP）。
+function Drive.laneKeepOf(s)
+    if (s.zombieKeep0 and s.zombieLane ~= nil) or s.laneChained then return 0 end
+    if s.trafficLane ~= nil then return TUNE.TRAFFIC_EDGE_KEEP_M end
+    return nil
 end
 
 -- 回線途中有殭屍（1002c）：RETURN 的線從車身橫移到目標 lane，沿途不閃殭屍（RETURN 持有車道時軟縫讓位、
@@ -3599,9 +3722,12 @@ function Drive.returnZombieConflict(s, latNow, target, speedKmh)
     local lo, hi = math.min(latNow, target) - R, math.max(latNow, target) + R
     local vms = finite(speedKmh) and speedKmh / 3.6 or 0
     if vms < 3 then vms = 3 end
+    local aLvl = Drive.animalDodgeLevel()
     for i = 1, sen.zomN do
         local zs, zl = sen.zomS[i], sen.zomL[i]
-        if finite(zs) and finite(zl) and zs >= sFrom and zs <= sTo and sen.zomIsCorpse[i] ~= true then
+        -- 不參與選縫的動物（AnimalDodge 沒選到）不算：讓位給不閃牠的軟縫沒有意義
+        if finite(zs) and finite(zl) and zs >= sFrom and zs <= sTo and sen.zomIsCorpse[i] ~= true
+                and Drive.softKindIn(sen.zomKind and sen.zomKind[i], true, aLvl) then
             local zlp, vl = zl, sen.zomVl and sen.zomVl[i]
             if finite(vl) and (vl > 0.2 or vl < -0.2) then
                 local t = (zs - rs - vp.halfL) / vms
@@ -3637,21 +3763,29 @@ end
 -- 這裡再排除調頭、停留待切、選項關、點雲溢出——任一成立即釋放回 resident。
 -- 先確認軟避讓點真的侵入車身／常駐線，再於硬物允許的連通車道區間內找縫。
 -- 殭屍與屍體同一次選縫；硬物仍驗整個視窗，不能為閃避而穿牆／停車。
+-- 動物與其他玩家（1005 soft）併入同一次選縫：zOn（ZombieDodge）只管殭屍／屍體，動物看 AnimalDodge 分級，
+-- 玩家永遠參與；大型動物與玩家佔位兩側多 SOFT_COMFORT_M。
 zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
     local sen = s.sensor
     local cur = s.zombieLane
     s.zombieLaneCap = -1 -- 縱向配合帽每輪重算（見下）
-    local on = Drive.zombieDodgeOn()
+    s.zombieWant = nil
+    local zOn, aLvl = Drive.zombieDodgeOn(), Drive.animalDodgeLevel()
+    local on = zOn or Drive.softOthersJoin(sen, aLvl)
     if not on or sen.zomOverflow or s.fstate.rotating or finite(s.stayLanePending)
             or type(MDADCorridor) ~= "table" or type(MDADCorridor.softZombieLane) ~= "function" then
         s.zombieAvoidUntilS, s.zomBlindN = nil, 0
         s.zombiePlanWhy, s.zombieWhy = nil, nil
+        s.zombieKeep0 = false
         if cur ~= nil then
             s.zombieLane = nil
             diagEvent(s, playerNum, "zombie", { phase = "release", why = on and "owner" or "off", l = cur })
         end
         return resident
     end
+    if cur == nil then s.zombieKeep0 = false end -- 貼路緣（keep 0）只跟著這一次軟縫持有
+    -- 貼路緣重找（keep 0）期間的複驗 keep；已在 keep 0 持有中就沿用（control 正用 keep 0）
+    s.softKeepTry = s.zombieKeep0 and 0 or nil
     -- 平滑起點：軟縫因讓位（dodge／RETURN／停留）而釋放時 laneBias 停在偏移處，重新接手若從
     -- resident 起算會一幀拉回＝台階（0906e harness (z3b) 抓到 0.77 → 0 瞬跳）；只在 laneBias 仍是
     -- 我們停放的值時從它起算，其他情況（換路線、解鏈交回）維持既有「首輪回常駐」契約。
@@ -3674,7 +3808,7 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
     local R = s.vehicleProfile.halfW + MDADCorridor.ZOMBIE_R + MDADCorridor.ZOMBIE_MARGIN
     local prefer = Drive.softPrefer(speedKmh)
     local threatS, threatL, shiftS, nextCap = nil, nil, nil, nil
-    local hasZombie, hasCorpse, slowN = false, false, 0
+    local hasAuth, hasUnauth, slowN = false, false, 0
     local slowLo, slowHi = 0, 0
     -- 預測交會位置：殭屍以 Sensor 量到的橫向速度朝車走，照「到牠那裡還要幾秒」外推（上限
     -- ZOMBIE_PREDICT_S）。現位、半途、預測位各一點進選縫（佔位＝整段移動範圍），威脅判定看整段。
@@ -3685,19 +3819,20 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
     -- 釋放軟縫、lane 拉回常駐線正好撞上 l 3.1 那隻）：上一輪記下即將進盲區的點，車尾過去前照樣進選縫。
     local near0 = rs + MDADSensor.SCAN_NEAR
     local blindN = s.zomBlindGen == s.routeGen and s.zomBlindN or 0
-    local bS, bL, bC = s.zomBlindS, s.zomBlindL, s.zomBlindC
+    local bS, bL, bC, bK = s.zomBlindS, s.zomBlindL, s.zomBlindC, s.zomBlindK
+    local sLvl = s.animalSlow or 2 -- 沙盒 AnimalSlowdown（refreshPolicies 快取）
     for i = 1, sen.zomN + blindN do
-        local zs, zl, corpse, vl
+        local zs, zl, corpse, vl, kind
         if i <= sen.zomN then
             zs, zl, corpse = sen.zomS[i], sen.zomL[i], sen.zomIsCorpse[i] == true
             vl = sen.zomVl and sen.zomVl[i]
+            kind = sen.zomKind and sen.zomKind[i]
         else
             local j = i - sen.zomN
-            zs, zl, corpse = bS[j], bL[j], bC[j]
+            zs, zl, corpse, kind = bS[j], bL[j], bC[j], bK[j]
             if zs >= near0 then zs = nil end -- Sensor 又看得到：以快照為準
         end
-        if finite(zs) and finite(zl) and zs >= sFrom and zs <= sTo then
-            if corpse then hasCorpse = true else hasZombie = true end
+        if finite(zs) and finite(zl) and zs >= sFrom and zs <= sTo and Drive.softKindIn(kind, zOn, aLvl) then
             local zlp = zl
             if not corpse and finite(vl) and (vl > 0.2 or vl < -0.2) then
                 local t = (zs - rs - s.vehicleProfile.halfL) / vms
@@ -3705,15 +3840,33 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
                 zlp = zl + vl * t
             end
             local zlo, zhi = math.min(zl, zlp), math.max(zl, zlp)
+            -- 舒適餘裕：佔位兩端外再各放一點（點距 pad < 2R，聯集仍連續），選縫／複驗／下一群都自動看到
+            local pad = Drive.softPad(kind)
+            local Rk = R + pad
             for k = 0, (zlp == zl) and 0 or 2 do
                 predN = predN + 1
                 pS[predN], pL[predN] = zs, zl + (zlp - zl) * k * 0.5
             end
-            local allowed = (corpse and s.corpseSlow) or (not corpse and s.zombieSlow)
-            if allowed and s.zombieSlow ~= s.corpseSlow then
+            if pad > 0 then
+                pS[predN + 1], pL[predN + 1] = zs, zlo - pad
+                pS[predN + 2], pL[predN + 2] = zs, zhi + pad
+                predN = predN + 2
+            end
+            -- 誰可以用減速換側移時間：殭屍／屍體照各自政策；動物照沙盒 AnimalSlowdown；玩家永遠可以
+            local allowed
+            if kind == "player" then allowed = true
+            elseif kind == "animal" or kind == "small" then allowed = Drive.softKindIn(kind, false, sLvl)
+            else allowed = (corpse and s.corpseSlow) or (not corpse and s.zombieSlow) end
+            if allowed then hasAuth = true else hasUnauth = true end
+            if allowed then
                 for k = 0, (zlp == zl) and 0 or 2 do
                     slowN = slowN + 1
                     s.zomSlowS[slowN], s.zomSlowL[slowN] = zs, zl + (zlp - zl) * k * 0.5
+                end
+                if pad > 0 then
+                    s.zomSlowS[slowN + 1], s.zomSlowL[slowN + 1] = zs, zlo - pad
+                    s.zomSlowS[slowN + 2], s.zomSlowL[slowN + 2] = zs, zhi + pad
+                    slowN = slowN + 2
                 end
             end
             local idx = MDADFollower.segIndexAt(s.profile, zs)
@@ -3727,8 +3880,8 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
             -- 常駐 3.5、殭屍 1.9）。gT ≤ 到三端的距離，涵蓋舊的常駐線／車身／目前 lane 判定。
             local tLo, tHi = math.min(home, current, latNow), math.max(home, current, latNow)
             local gT = zhi < tLo and tLo - zhi or (zlo > tHi and zlo - tHi or 0)
-            local crossing = gN < R or gC < R
-            if gT < R then
+            local crossing = gN < Rk or gC < Rk
+            if gT < Rk then
                 if threatS == nil or zs < threatS then threatS, threatL = zs, zl end
             end
             if crossing and allowed and (shiftS == nil or zs < shiftS) then
@@ -3739,8 +3892,8 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
     -- 下一輪的盲區記憶：舊記憶中車尾還沒過、仍在盲區的點＋本輪快照裡下一輪會進盲區的點
     -- （車前 NEAR..NEAR＋max(3m, 0.6s 行程)）。上限 16，就地壓縮、零配置。
     if bS == nil then
-        bS, bL, bC = {}, {}, {}
-        s.zomBlindS, s.zomBlindL, s.zomBlindC = bS, bL, bC
+        bS, bL, bC, bK = {}, {}, {}, {}
+        s.zomBlindS, s.zomBlindL, s.zomBlindC, s.zomBlindK = bS, bL, bC, bK
     end
     local nb = 0
     local tail = rs - s.vehicleProfile.halfL
@@ -3748,7 +3901,7 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
         local zs = bS[j]
         if zs >= tail and zs < near0 and nb < 16 then
             nb = nb + 1
-            bS[nb], bL[nb], bC[nb] = zs, bL[j], bC[j]
+            bS[nb], bL[nb], bC[nb], bK[nb] = zs, bL[j], bC[j], bK[j]
         end
     end
     local reach = near0 + math.max(3, vms * 0.6)
@@ -3756,7 +3909,7 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
         local zs, zl = sen.zomS[i], sen.zomL[i]
         if finite(zs) and finite(zl) and zs >= near0 and zs < reach and nb < 16 then
             nb = nb + 1
-            bS[nb], bL[nb], bC[nb] = zs, zl, sen.zomIsCorpse[i] == true
+            bS[nb], bL[nb], bC[nb], bK[nb] = zs, zl, sen.zomIsCorpse[i] == true, sen.zomKind and sen.zomKind[i]
         end
     end
     s.zomBlindN, s.zomBlindGen = nb, s.routeGen
@@ -3777,58 +3930,16 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
         end
     elseif threatS ~= nil then
         local halfW = s.vehicleProfile.halfW
-        -- 可行帶＝Follower 對 laneBias 真的會照辦的帶（常駐 lane ±DELTA 只是防呆上限）：先問
-        -- 剖面的 laneRoom（adaptive 才有），沒有就用感測路面帶 roadLo/roadHi（扣車半寬）。
-        -- 帶寬必須容得下一個 R（halfW＋0.65）以上的側移，否則正壓在車道上的殭屍永遠「無縫」。
-        aLo, aHi = resident - TUNE.ZOMBIE_LANE_DELTA, resident + TUNE.ZOMBIE_LANE_DELTA
-        local idx = s.fstate.idx
-        -- 直接讀表再扣 LANE_BIAS_KEEP：control／proof 線對任何 laneBias 都用同一個 clampLane，
-        -- 帶給到物理餘裕的提案會被靜默夾回 room−keep＝「有閃」的 log 但車沒動。
-        -- ponytail: 貼路緣閃殭屍要另開 fstate.laneKeep 讓 control／buildLaneLine／laneBiasAt 一起認
-        local roomR, roomL = s.profile.laneRoomR, s.profile.laneRoomL
-        local rr, rl = 99, -99
-        if type(roomR) == "table" and finite(idx) then
-            local i = idx - idx % 1
-            if finite(roomR[i]) then
-                rr, rl = roomR[i] - MDADFollower.LANE_BIAS_KEEP, MDADFollower.LANE_BIAS_KEEP - roomL[i]
-                if rr < 0 then rr = 0 end
-                if rl > 0 then rl = 0 end
-            end
-        end
-        if rr < 99 then
-            if rr < aHi then aHi = rr end
-            if rl > aLo then aLo = rl end
-        elseif finite(sen.roadLo) and finite(sen.roadHi) then
-            local lo, hi = sen.roadLo + halfW, sen.roadHi - halfW
-            if lo > aLo then aLo = lo end
-            if hi < aHi then aHi = hi end
-        end
-        -- 硬物先縮小可搜尋帶，而非只否決已選中的那一側。保留與目前車身連通的區間，
-        -- 因此終點另一側雖然淨空，也不能穿越夾在中間的硬物。
-        -- 帶緣再讓出 SOFT_HARD_JITTER_M（1002t）：hardL 記的是命中那條取樣柱的 l，同一格牆隨取樣相位在一格內
-        -- 跳動（正式服 0.17.0 clip-02：−2.97／−2.54／−2.02），貼著帶緣選的 lane（只留 0.057m）下一輪就落進牆的
-        -- 擋線帶 → 硬規劃從車旁判堵、52 km/h 鎖輪。讓出的量不蓋過車身現在的位置（帶不因此收成空）。
-        local origin, jit = latNow, TUNE.SOFT_HARD_JITTER_M
-        for i = 1, sen.hardN do
-            local hs = sen.hardS[i]
-            if hs >= sFrom and hs <= sTo then
-                local r = sen.hardR and sen.hardR[i] or MDADCorridor.OBS_HALF
-                if not finite(r) then r = MDADCorridor.OBS_HALF end
-                local lo, hi = sen.hardL[i] - s.needHalf - r, sen.hardL[i] + s.needHalf + r
-                if origin <= lo then
-                    local e = lo - jit
-                    if e < origin then e = origin end
-                    if e < aHi then aHi = e end
-                elseif origin >= hi then
-                    local e = hi + jit
-                    if e > origin then e = origin end
-                    if e > aLo then aLo = e end
-                else
-                    aLo, aHi = 1, 0
-                    break
-                end
-            end
-        end
+        -- 可行帶（路面餘裕、硬物收窄）見 Drive.softBand。兩次嘗試（1005 soft，舊 ponytail「貼路緣閃殭屍」）：
+        -- ①路面餘裕扣 LANE_BIAS_KEEP；②①找不到縫時改用 keep 0 在物理 laneRoom 內重找（貼路緣閃）。②找到縫才採用
+        -- 並設 s.zombieKeep0（Drive.laneKeepOf → fstate.laneKeep＝0：control／期望線／buildLaneLine／規劃擋線基準
+        -- 同值）；找不到照①的結果。迴圈本體沿用原縮排。
+        local w1, y1, n1, lo1, hi1, sl1, sh1
+        for keepTry = 1, 2 do
+        want, why, nextCap = cur, "none", nil
+        local roomKnown
+        aLo, aHi, roomKnown = Drive.softBand(s, sen, resident, latNow, sFrom, sTo,
+            keepTry == 1 and MDADFollower.LANE_BIAS_KEEP or 0)
         if aLo > aHi then
             why = "hard"
         else
@@ -3840,7 +3951,7 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
             -- （E2E stagger 在 35m 處從右改左，連撞兩隻）。
             local halfL2 = 2 * s.vehicleProfile.halfL
             local bLo, bHi = aLo, aHi
-            local slowOk = (hasZombie and s.zombieSlow) or (hasCorpse and s.corpseSlow)
+            local slowOk = hasAuth -- 視窗內有獲准用減速換時間的目標（殭屍／屍體照政策、動物照沙盒、玩家永遠）
             -- 從 laneBias（cur）量：它照速率移動、車身隨後跟上（落後已扣在 LEAD_S）。從車身量會在
             -- lane 已經走了一半時把原計畫判成搆不到而改選別縫（E2E crowd −2.17 → −0.75 再撞）。
             -- 0925p：減速開啟時也先在搆得到的帶內選——舊制直接用整條帶、靠減速換時間，實機
@@ -3928,6 +4039,19 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
                 end
             end
         end
+        if keepTry == 2 then
+            if why == "gap" then
+                s.zombieKeep0 = true
+            else
+                want, why, nextCap, aLo, aHi, slowLo, slowHi = w1, y1, n1, lo1, hi1, sl1, sh1
+            end
+        elseif why == "gap" or not roomKnown then
+            break
+        end
+        w1, y1, n1, lo1, hi1, sl1, sh1 = want, why, nextCap, aLo, aHi, slowLo, slowHi
+        s.softKeepTry = 0
+        end -- for keepTry
+        s.softKeepTry = s.zombieKeep0 and 0 or nil
     else
         s.zombieAvoidUntilS = nil
         want, why = resident, "clear"
@@ -3949,8 +4073,8 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
             local hs = sen.hardS[i]
             if hs >= sFrom and hs <= sTo and hs <= sShift then
                 local idx = MDADFollower.segIndexAt(s.profile, hs)
-                local from = MDADFollower.laneBiasAt(s.profile, cur, idx, hs)
-                local to = MDADFollower.laneBiasAt(s.profile, want, idx, hs)
+                local from = MDADFollower.laneBiasAt(s.profile, cur, idx, hs, s.fstate.laneKeep)
+                local to = MDADFollower.laneBiasAt(s.profile, want, idx, hs, s.zombieKeep0 and 0 or nil)
                 local hl = sen.hardL[i]
                 local dt, df, dn = to - hl, from - hl, latNow - hl
                 local away = dt * df > 0 and dt * dn > 0 and math.abs(dt) > math.abs(df) and math.abs(dt) > math.abs(dn)
@@ -3973,7 +4097,7 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
     end
     if why == "gap" and shiftS ~= nil then
         local slowWant = want
-        if (hasZombie and not s.zombieSlow) or (hasCorpse and not s.corpseSlow) then
+        if hasUnauth then
             -- 關閉類型仍參與避讓，但不能擴大另一類獲准減速的側移量。
             -- 要量授權區間的聯集；逐點最短出口會漏掉左右交錯的多個目標。
             slowWant = MDADCorridor.softZombieLane(s.zomSlowS, s.zomSlowL, slowN,
@@ -3990,6 +4114,7 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
     -- 下一群換邊來不及、又併不成一群：照原速到不了，縱向配合帽取較嚴者
     if nextCap ~= nil and (s.zombieLaneCap < 0 or nextCap < s.zombieLaneCap) then s.zombieLaneCap = nextCap end
     s.zombieWhy = why -- 每輪都寫（count 減速帽據此判斷軟縫是否已處理；zombiePlanWhy 只在診斷時更新）
+    s.zombieWant = want -- 本輪選定的目標 lane（停等判讀 Drive.softStopScan 看「選定的線還撞不撞」）
     if s.diag and (s.zombiePlanWhy ~= why or not finite(s.zombiePlanLane)
             or math.abs(s.zombiePlanLane - want) >= 0.25) then
         s.zombiePlanWhy, s.zombiePlanLane = why, want
@@ -4004,6 +4129,8 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
         if why == "hard" and finite(s.zombieHardS) then
             pts = string.format("hard(%.0f,%.1f)", s.zombieHardS - rs, s.zombieHardL) .. pts
         end
+        -- keep0＝這次縫是貼路緣重找（keep 0）找到的（fstate.laneKeep 跟著 0）
+        if s.zombieKeep0 then pts = "keep0" .. pts end
         diagEvent(s, playerNum, "zombie", { phase = "plan", why = why,
             l = cur, offL = want, s = threatS, rs = rs, a = aLo, b = aHi, hn = sen.zomN, detail = pts })
     end
@@ -4015,8 +4142,9 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
             if i > 3 then break end
             zs = zs .. string.format(" (%.0f,%.1f)", sen.zomS[i] - rs, sen.zomL[i])
         end
-        print(string.format("%spn=%d zombie lane: n=%d win=[%.0f,%.0f] band=[%.2f,%.2f] base=%.2f cur=%.2f want=%.2f why=%s vcap=%.0f zom=%s",
-            LOG, playerNum, sen.zomN, sFrom, sTo, aLo, aHi, resident, cur, want, why, s.zombieLaneCap, zs))
+        print(string.format("%spn=%d zombie lane: n=%d win=[%.0f,%.0f] band=[%.2f,%.2f] base=%.2f cur=%.2f want=%.2f why=%s vcap=%.0f keep0=%s zom=%s",
+            LOG, playerNum, sen.zomN, sFrom, sTo, aLo, aHi, resident, cur, want, why, s.zombieLaneCap,
+            tostring(s.zombieKeep0 == true), zs))
     end
     -- 首次呼叫 dt＝0（不得拿 zombieLaneMs=0 算出 1 s 的步長：0906e 實機首輪 1.5→2.41 一跳 0.9m
     -- → 航向誤差 17-20° → align 減速）；之後 dt＝輪距（≈0.25-0.3 s），上限 1 s
@@ -4037,6 +4165,7 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
             and wantAway <= TUNE.ZOMBIE_LANE_SETTLE_M and wantAway >= -TUNE.ZOMBIE_LANE_SETTLE_M then
         if s.zombieLane ~= nil then
             s.zombieLane = nil
+            s.zombieKeep0 = false
             s.zombiePlanWhy = nil
             diagEvent(s, playerNum, "zombie", { phase = "release", why = "settled", l = nxt })
         end
@@ -4707,6 +4836,115 @@ function Drive.trafficCap(s, now, speedKmh)
     return cap, reason, hold
 end
 
+-- 動物／其他玩家停等（1005 soft）：每個掃描輪在 laneBias 定案後跑。選定的行駛線（軟縫持有時＝本輪選定的
+-- want，繞行承諾中＝承諾線，否則＝laneBias；keep 與 control 同值）在目標弧長處仍落在佔位 ±(R＋舒適餘裕)
+-- 內＝軟縫清不開（或這類沒開閃避）：記最近一個給每幀的 Drive.softStopCap。動物照沙盒 AnimalSlowdown
+-- 分級、玩家永遠算；殭屍／屍體不在這裡（照既有裁定：閃不過就撞）。調頭中不判。
+function Drive.softStopScan(s, speedKmh)
+    s.softStopS, s.softStopL, s.softStopKind = nil, nil, nil
+    local sen = s.sensor
+    if not sen or not finite(sen.zomN) or sen.zomN <= 0 or s.fstate.rotating then return end
+    local vp, p, rs = s.vehicleProfile, s.profile, s.lastSNow
+    local lvl = s.animalSlow or 2
+    local R = vp.halfW + MDADCorridor.ZOMBIE_R + MDADCorridor.ZOMBIE_MARGIN
+    local sTo = rs + MDADDynamics.softLookahead(speedKmh)
+    if finite(sen.softEndS) and sen.softEndS < sTo then sTo = sen.softEndS end
+    local lane0 = (s.zombieLane ~= nil and finite(s.zombieWant)) and s.zombieWant or laneBiasOf(s)
+    local vms = finite(speedKmh) and speedKmh / 3.6 or 0
+    if vms < 3 then vms = 3 end
+    for i = 1, sen.zomN do
+        local kind = sen.zomKind and sen.zomKind[i]
+        local zs, zl = sen.zomS[i], sen.zomL[i]
+        if (kind == "player" or ((kind == "animal" or kind == "small") and Drive.softKindIn(kind, false, lvl)))
+                and finite(zs) and finite(zl) and zs > rs and zs <= sTo
+                and (s.softStopS == nil or zs < s.softStopS) then
+            local zlp, vl = zl, sen.zomVl and sen.zomVl[i]
+            if finite(vl) and (vl > 0.2 or vl < -0.2) then
+                local t = (zs - rs - vp.halfL) / vms
+                if t < 0 then t = 0 elseif t > TUNE.ZOMBIE_PREDICT_S then t = TUNE.ZOMBIE_PREDICT_S end
+                zlp = zl + vl * t
+            end
+            local lane
+            if s.dodging then
+                lane = Drive.plannedLaneAt(s, zs)
+            else
+                lane = MDADFollower.laneBiasAt(p, lane0, MDADFollower.segIndexAt(p, zs), zs, s.fstate.laneKeep)
+            end
+            local Rk = R + Drive.softPad(kind)
+            if math.max(zl, zlp) > lane - Rk and math.min(zl, zlp) < lane + Rk then
+                s.softStopS, s.softStopL = zs, zl
+                s.softStopKind = kind == "player" and "player" or "animal"
+            end
+        end
+    end
+end
+
+-- 每幀的動物／玩家停等帽：與呼叫端目前的 sensor cap（capIn／whyIn）取小後回 (cap, 理由)；合法停等時設
+-- s.followHold（stepFollow 主函式 local 槽已滿，合併在這裡做）。接近包絡停在目標前 SOFT_STOP_GAP_M
+-- （同 trafficCap 讓車的單調式；減速度＝safeBrake×APPROACH_BRAKE_FRAC，Drive.visAssistForce 有 soft-stop 帳）。
+-- 低於 MIN_EXEC 就停等（WAIT：計停等預算）。動物停住累計 ANIMAL_WAIT_MS 仍在＝以 ANIMAL_CRAWL_KMH 爬過（CRAWL）；
+-- 玩家一直停等，停等預算到期由 postAction wait 以 Drive.KEY_PLAYER_STOP 交還。目標離開行駛線＝立刻放行。
+-- 狀態給 E2E／遙測讀：s.softHoldKind（nil／"animal"／"player"）、s.softHoldMs、s.softCrawl。
+function Drive.softStopCap(s, now, speedKmh, playerNum, capIn, whyIn)
+    s.softStopCapKmh = -1
+    local zs, kind = s.softStopS, s.softStopKind
+    if s.softHoldKind ~= nil and s.softHoldKind ~= kind then
+        if s.softHoldStarted then
+            diagEvent(s, playerNum, "soft", { phase = "end", why = kind == nil and "clear" or "kind",
+                kind = s.softHoldKind, ms = s.softHoldMs, rs = s.lastSNow })
+            if getDebug() then
+                print(string.format("%spn=%d soft stop end kind=%s ms=%d rs=%.1f", LOG, playerNum,
+                    s.softHoldKind, s.softHoldMs, s.lastSNow))
+            end
+        end
+        s.softHoldKind, s.softHoldMs, s.softHoldTick, s.softHoldStarted, s.softCrawl = nil, 0, 0, false, false
+    end
+    if not finite(zs) or kind == nil then return capIn, whyIn end
+    s.softHoldKind = kind
+    local reason, cap, hold = kind == "player" and "player-stop" or "animal-stop", nil, false
+    if s.softCrawl then
+        cap, reason = TUNE.ANIMAL_CRAWL_KMH, "animal-crawl"
+    else
+        local brake = (finite(s.safeBrake) and s.safeBrake > 0) and s.safeBrake * TUNE.APPROACH_BRAKE_FRAC or 0.6
+        cap = MDADDynamics.approachCapKmh(zs - s.lastSNow - s.vehicleProfile.halfL - TUNE.SOFT_STOP_GAP_M, 0, 0.5, brake)
+        if cap < MDADDynamics.MIN_EXEC_KMH then cap, hold = 0, true end
+    end
+    if hold then
+        if not s.softHoldStarted then
+            s.softHoldStarted = true
+            diagEvent(s, playerNum, "soft", { phase = "start", why = reason, kind = kind,
+                s = zs - s.lastSNow, l = s.softStopL, rs = s.lastSNow, speed = speedKmh })
+            if getDebug() then
+                print(string.format("%spn=%d soft stop start kind=%s ds=%.1f l=%.2f v=%.1f", LOG, playerNum,
+                    kind, zs - s.lastSNow, s.softStopL or 0, speedKmh or 0))
+            end
+        end
+        -- 停住才計（還在煞停中不算等待）
+        if finite(speedKmh) and speedKmh < 1 and speedKmh > -1 then
+            if s.softHoldTick > 0 and now > s.softHoldTick then s.softHoldMs = s.softHoldMs + (now - s.softHoldTick) end
+            s.softHoldTick = now
+        else
+            s.softHoldTick = 0
+        end
+        if kind == "animal" and s.softHoldMs >= TUNE.ANIMAL_WAIT_MS then
+            s.softCrawl = true
+            cap, reason, hold = TUNE.ANIMAL_CRAWL_KMH, "animal-crawl", false
+            diagEvent(s, playerNum, "soft", { phase = "crawl", why = reason, kind = kind,
+                s = zs - s.lastSNow, l = s.softStopL, ms = s.softHoldMs, cap = cap })
+            if getDebug() then
+                print(string.format("%spn=%d soft stop crawl kind=%s ds=%.1f ms=%d cap=%d", LOG, playerNum,
+                    kind, zs - s.lastSNow, s.softHoldMs, cap))
+            end
+        end
+    else
+        s.softHoldTick = 0
+    end
+    s.softStopCapKmh = cap
+    if hold then s.followHold = true end
+    if capIn < 0 or cap < capIn then return cap, reason end
+    return capIn, whyIn
+end
+
 local function jindex(obj, name)
     return obj[name]
 end
@@ -4991,6 +5229,11 @@ function Drive.visAssistForce(s, speedKmh, mult)
     if finite(s.trafficCapKmh) and s.trafficCapKmh >= 0 and s.trafficCapKmh < cap then
         cap, amax, gain, minKmh, why = s.trafficCapKmh, TUNE.DODGE_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN,
             TUNE.VIS_ASSIST_MIN_KMH, "traffic"
+    end
+    -- 動物／玩家停等接近帽（Drive.softStopCap；1005 soft）：以 safeBrake 反推、要停在目標前，同一條中線外力、繞行的上限。
+    if finite(s.softStopCapKmh) and s.softStopCapKmh >= 0 and s.softStopCapKmh < cap then
+        cap, amax, gain, minKmh, why = s.softStopCapKmh, TUNE.DODGE_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN,
+            TUNE.VIS_ASSIST_MIN_KMH, "soft-stop"
     end
     if speedKmh < minKmh then return 0 end
     local over = speedKmh - cap - TUNE.VIS_ASSIST_TOL_KMH
@@ -5818,6 +6061,11 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     if finite(expL) then phys.expectedLane = expL end
     if finite(latDev) then phys.latDev = latDev end
     phys.residentBias, phys.zombieLane = s.residentBias, s.zombieLane
+    -- 1005 soft：軟縫貼路緣（keep 0）、動物／玩家停等狀態（有才寫）
+    phys.zombieKeep0 = (s.zombieKeep0 and s.zombieLane ~= nil) or nil
+    phys.softHoldKind = s.softHoldKind
+    phys.softHoldMs = s.softHoldKind ~= nil and s.softHoldMs or nil
+    phys.softCrawl = s.softCrawl or nil
     phys.navVersion = s.navVersion
     phys.currentSurfaceId = s.currentSurfaceId
     phys.currentSurface = MDADFollower.surfaceName(s.currentSurfaceId)
@@ -8313,7 +8561,7 @@ local function fillHardBase(s, sen, planN, baseL)
     end
     for i = 1, planN do
         local hs = sen.hardS[i]
-        tbl[i] = MDADFollower.laneBiasAt(prof, baseL, MDADFollower.segIndexAt(prof, hs), hs, s.laneChained and 0 or nil)
+        tbl[i] = MDADFollower.laneBiasAt(prof, baseL, MDADFollower.segIndexAt(prof, hs), hs, Drive.laneKeepOf(s) == 0 and 0 or nil)
     end
     return tbl
 end
@@ -8432,7 +8680,7 @@ local function nearestLineBlocker(s, sen, minS)
             -- 擋線基準用該點所在段**夾過彎內側餘裕**的 lane（2026-09-04 st146254：
             -- 路口右轉內側角落物群以裸 +1.5 判「出口後仍擋線」拒掉全部貼縫候選，
             -- 實際轉彎時 lane 已被 laneRoom 夾回中線、角落物不在行駛線上）
-            local bl = MDADFollower.laneBiasAt(prof, bl0, MDADFollower.segIndexAt(prof, hs), hs, s.laneChained and 0 or nil)
+            local bl = MDADFollower.laneBiasAt(prof, bl0, MDADFollower.segIndexAt(prof, hs), hs, Drive.laneKeepOf(s) == 0 and 0 or nil)
             if blocksLine(sen, i, bl, nh) then bi = i end
         end
     end
@@ -10839,9 +11087,11 @@ local function stepFollow(s, vehicle, playerNum, now)
                 -- 鏈上 lane 是停留承諾掃掠驗過的絕對 lane（承諾線本來就傳 keep 0）：常駐的 keep 0.6 會把它夾回障礙側，
                 -- 車被拉回去、重錨一再觸發（1004a 正式服 0.18.2 dandankk clip-30，6m 路停留 2.25 → 期望線 1.12 → 停死交還）。
                 -- 規劃端的擋線基準（fillHardBase／nearestLineBlocker）鏈著時同樣傳 keep 0。
-                s.fstate.laneKeep = (s.trafficLane ~= nil and TUNE.TRAFFIC_EDGE_KEEP_M) or (s.laneChained and 0) or nil
+                -- 軟縫貼路緣（s.zombieKeep0，1005 soft）同理 keep 0；會車同時設時取小（Drive.laneKeepOf）。
+                s.fstate.laneKeep = Drive.laneKeepOf(s)
                 MDADFollower.setLaneBias(s.fstate, nb)
                 Drive.clearLaneProof(s)
+                Drive.softStopScan(s, speedKmh) -- 動物／玩家停等：選定的行駛線上還有沒有閃不開的目標（每幀 Drive.softStopCap 用）
                 -- RETURN 活躍時掃描帶錨在「現位置↔目標 lane」的中點，不得跟著 fstate
                 -- 的 laneBias 走（2026-09-02 session-006 定罪：commit 把 laneBias 設成
                 -- 目標 1.5 → 下一輪帶心 +1.5，回線起點 −4 落在帶外 → 守護判 band/
@@ -11061,6 +11311,9 @@ local function stepFollow(s, vehicle, playerNum, now)
                     capReason = treason
                 end
             end
+            -- 動物／其他玩家擋在選定的行駛線上（Drive.softStopCap）：接近包絡停在前方、合法停等（followHold）；
+            -- 動物等待到期後爬過、玩家等到停等預算交還
+            cap, capReason = Drive.softStopCap(s, now, speedKmh, playerNum, cap, capReason)
             -- 軟障礙（可推家具／HitByCar 雜物）：輾得過但要先減速——不減速輾過的
             -- 體感就是「撞到東西」（2026-08-28 實機路口擦撞回報的嫌疑之一）
             local sn = s.sensor.softN
@@ -11471,7 +11724,7 @@ local function stepFollow(s, vehicle, playerNum, now)
                     and s.dodgeNextCap < MDADDynamics.MIN_EXEC_KMH)
                 or (finite(s.startNearCap) and s.startNearCap < MDADDynamics.MIN_EXEC_KMH),
             s.followHold == true, s.returnHold == true,
-            s.visibilityCap, s.dodgeCrawl == true
+            s.visibilityCap, s.dodgeCrawl == true or s.softCrawl == true
                 or (s.dodging and (s.dodgeEnvN or 0) >= 2
                     and finite(s.dodgeApproachCap) and s.dodgeApproachCap < MDADDynamics.MIN_EXEC_KMH),
             type(s.sensor) == "table" and s.sensor.stamp == 0,
@@ -11835,8 +12088,10 @@ local function stepFollow(s, vehicle, playerNum, now)
                 s.lastSensorCap / 3.6, s.lastSensorReason)
         end
         if s.followHold then
-            hardCapV, hardClampReason, okHard =
-                MDADDynamics.lowerHardCap(hardCapV, hardClampReason, 0, "moving")
+            -- 動物／玩家停等（Drive.softStopCap）保留自己的理由（fbw／HUD 看得出是在等誰）；不鎖輪規則同會車停等
+            hardCapV, hardClampReason, okHard = MDADDynamics.lowerHardCap(hardCapV, hardClampReason, 0,
+                (s.lastSensorReason == "animal-stop" or s.lastSensorReason == "player-stop") and s.lastSensorReason
+                    or "moving")
         end
         if s.dodging and s.dodgeClass == MDADDynamics.DODGE_VEHICLE then
             hardCapV, hardClampReason, okHard = MDADDynamics.lowerHardCap(
@@ -12373,6 +12628,17 @@ local function stepFollow(s, vehicle, playerNum, now)
     end
     -- 停等總預算耗盡是最高優先的終局（紅字交還玩家），蓋過任何恢復需求。
     if postAction == "wait" then
+        -- 其他玩家擋路：不推人、不改道，以專屬理由交還（1005 soft）
+        if s.softHoldKind == "player" then
+            diagEvent(s, playerNum, "soft", { phase = "handback", why = "player", kind = "player",
+                ms = s.softHoldMs, rs = s.lastSNow })
+            if getDebug() then
+                print(string.format("%spn=%d soft stop handback kind=player ms=%d wait=%d", LOG, playerNum,
+                    s.softHoldMs, s.waitAccumMs))
+            end
+            Drive.stop(playerNum, Drive.KEY_PLAYER_STOP, "handback")
+            return
+        end
         if Drive.stuckDetour(s, playerNum) then return end
         Drive.stop(playerNum, KEY_STUCK)
         return
@@ -12870,6 +13136,7 @@ local function onPlayerUpdate(player)
             s.targetPrev, s.steerPrev = 0, 0
             s.clearStreak = 0
             s.followHold = false
+            s.softStopS, s.softStopKind = nil, nil -- 舊路線弧長；新路線首輪掃完再判
             -- 同目標 route cutover **不清停等預算**（階段 2 主體 1：這正是舊制
             -- 40s+ 續命的其中一條逃逸路徑）；但下面 lastSNow 歸零＝換了弧長
             -- 座標系，錨點必須跟著換算到新座標系（0），否則進度判定失效。

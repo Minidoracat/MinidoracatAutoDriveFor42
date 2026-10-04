@@ -1186,6 +1186,7 @@ SANDBOX_SPEC = {                            # key: (type, default, min, max)
     "AutoDriveMaxSpeed":    ("integer", "120", "5", "120"),
     "ZombieAreaSlowdown":   ("enum", "2", None, None),
     "CorpseSlowdown":       ("enum", "2", None, None),
+    "AnimalSlowdown":       ("enum", "2", None, None),
     "ObstaclePolicy":       ("enum", "1", None, None),
     "RightLaneBias":        ("double", "1.0", "0.0", "2.0"),
     "TrafficRelay":         ("boolean", "true", None, None),

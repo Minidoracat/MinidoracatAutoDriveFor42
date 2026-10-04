@@ -40,7 +40,11 @@
 --     state.zombieN    走廊內殭屍數（±SLOW_BAND_HALF 減速帶；速度檔用）
 --     state.zomN       混合軟目標（s,l）筆數（±4.5 帶），座標語意同 hardS／hardL
 --                      zomIsCorpse[i]：屍體端點 true／殭屍 false；zomOverflow 超過 ZOM_MAX 時軟縫棄權
+--                      zomKind[i]：每個槽的種類字串 "zombie"／"corpse"／"animal"（大型動物）／"small"（小型動物）／
+--                      "player"（車外的其他玩家）；每個槽都要寫（含殭屍、屍體），重用槽不得留上一輪的種類
 --     state.corpseN    走廊內地面屍體數；另以長軸兩端點併入 zomS/zomL，同一次軟避讓
+--     state.animalN／smallN／playerN  走廊內（±SLOW_BAND_HALF）大型動物／小型動物／其他玩家數；
+--                      animalNearS／smallNearS／playerNearS 各類帶內最近弧長（同 zombieNearS；nil＝無）
 --     state.movingVeh  走廊內有**行進中**的別台車（跟車情境，不是靜態障礙）
 --     state.trfN       行進中車輛（會車／跟車）筆數，上限 TRF_MAX；逐車一筆：
 --                      trfS0/trfS1 車身弧長區間、trfL0/trfL1 橫向區間（同 hardS／hardL 座標）、
@@ -216,6 +220,32 @@ local ROAD_CACHE_MAX = 256     -- 地板名 → 是否路面 的快取上限（�
 local ZOM_BAND_HALF = 4.5
 local ZOM_VL_MAX = 6 -- 殭屍橫向速度上限（m/s；撲擊／位置跳動不當真實走速）
 local ZOM_MAX = 64
+-- 動物大小門檻（公斤，AnimalData.getWeight，AnimalData.java:1581）：原版定義（media/lua/shared/Definitions/animal/*）
+-- 小型成體上限：浣熊公 15、火雞公 12、雞 6、兔 7；大型成體下限：母羊 60、小牛 60、鹿 110、豬 115（實際體重再乘
+-- maxWeight 基因 0.5–0.8，AnimalData.getMinWeight/getMaxWeight:1765-1791）。門檻落在兩群之間；幼體（小鹿、
+-- 小豬、小羊）長到門檻以上就算大型。讀不到體重一律當大型。
+MDADSensor.ANIMAL_BIG_KG = 20
+
+-- 動態物件的軟避讓種類：IsoAnimal 繼承 IsoPlayer（IsoAnimal.java:123），要先判動物。
+-- 回 "animal"／"small"／"player"，或 nil（不收：死亡、被抱著、在車上——含自己這台的駕駛與乘客）。
+-- 不列舉 cell 的全域動物清單（IsoCell.getAnimals 每次掃整個 objectList 並新建 LinkedList，IsoCell.java:4578-4587），
+-- 只看掃描格的 getMovingObjects。用例：instanceof(animal, "IsoAnimal")、animal:isHeld()、animal:getVehicle()
+-- （原版 DebugContextMenu.lua:619、ISAnimalUI.lua:15）。
+function MDADSensor.softKindOf(mo)
+    if instanceof(mo, "IsoAnimal") then
+        if mo:isDead() or mo:getVehicle() ~= nil then return nil end
+        if mo.isHeld and mo:isHeld() then return nil end -- IsoAnimal.java:2884
+        local d = mo.getData and mo:getData()             -- IsoAnimal.java:1260
+        local w = d ~= nil and d.getWeight and d:getWeight()
+        if type(w) == "number" and w == w and w < MDADSensor.ANIMAL_BIG_KG then return "small" end
+        return "animal"
+    end
+    if instanceof(mo, "IsoPlayer") then
+        if mo:isDead() or mo:getVehicle() ~= nil then return nil end
+        return "player"
+    end
+    return nil
+end
 
 MDADSensor.SCAN_NEAR = SCAN_NEAR
 MDADSensor.CORRIDOR_HALF = CORRIDOR_HALF
@@ -760,8 +790,8 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
 
     -- 車輛：**格子幾何查詢**——引擎通用碰撞真相在 Lua 曝露面的最佳代理。
     -- getVehicleContainer() 掃 3×3 chunk 的 chunk.vehicles（物理位置驅動）
-    -- × isIntersectingSquare（車體多邊形 vs 格子，IsoGridSquare.java:10252-
-    -- 10273；用例 DebugContextMenu.lua:145）。舊三路全有盲區、2026-08-29 實
+    -- × isIntersectingSquare（車體多邊形 vs 格子，IsoGridSquare.java:9872-
+    -- 9893；用例 DebugContextMenu.lua:145）。舊三路全有盲區、2026-08-29 實
     -- 測全漏：cell:getVehicles() 集合波動（veh=2→1→0）、movingObjects 註冊
     -- 不可靠（連續 9 輪零偵測）、isStopped 假動（軍車判「行進中」不進 hard
     -- 一路推上去）。isStopped 降級為純語意開關：停＝硬障礙要繞；「動」＝跟
@@ -855,22 +885,46 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
         end
     end
 
-    -- 動態物件（殭屍）：就算靜態已判 hard，殭屍數仍是規劃端要看的獨立訊號。
-    -- 帶內 ±ZOM_BAND_HALF 另記每隻的 (s,l)（殭屍軟縫）：以殭屍實際座標對目前掃描步的
+    -- 動態物件（殭屍、動物、車外的其他玩家）：就算靜態已判 hard，數量仍是規劃端要看的獨立訊號。
+    -- 帶內 ±ZOM_BAND_HALF 另記每個的 (s,l)（軟縫）：以實際座標對目前掃描步的
     -- 局部框線性化（cx/cy 路線點、nx/ny 法向、前向＝(ny,−nx)）。多數格 size()==0，
-    -- 常態成本只多一次跨界；帶外格連 instanceof 都不叫。
+    -- 常態成本只多一次跨界；帶外格連 instanceof 都不叫。動物與玩家併入同一組點陣（共用 ZOM_MAX），
+    -- 以 zomKind 標種類，由 Driver 依選項決定誰參與選縫、誰要停等。
     local zomBand = rel >= -ZOM_BAND_HALF and rel <= ZOM_BAND_HALF
     if zomBand then
         local movs = square:getMovingObjects()         -- IsoGridSquare.java:9605（回 ArrayList<IsoMovingObject>）
         local nMov = movs:size()                       -- 迭代慣例 DebugContextMenu.lua:535-537
         for i = 1, nMov do
             local mo = movs:get(i - 1)
+            local kind = nil
             if instanceof(mo, "IsoZombie") then        -- 用例 DebugContextMenu.lua:537
+                kind = "zombie"
+            else
+                kind = MDADSensor.softKindOf(mo)
+            end
+            if kind ~= nil then
                 if inBand then
-                    state.wZombieN = state.wZombieN + 1
-                    -- 最近一隻的弧長（0907b 殭屍檔縱向 envelope：對它煞到檔位速，不是整帶平帽）
-                    if state.wZombieNearS == nil or state.curS < state.wZombieNearS then
-                        state.wZombieNearS = state.curS
+                    -- 各類最近一個的弧長（0907b 殭屍檔縱向 envelope：對它煞到檔位速，不是整帶平帽；動物／玩家停等同理）
+                    if kind == "zombie" then
+                        state.wZombieN = state.wZombieN + 1
+                        if state.wZombieNearS == nil or state.curS < state.wZombieNearS then
+                            state.wZombieNearS = state.curS
+                        end
+                    elseif kind == "animal" then
+                        state.wAnimalN = state.wAnimalN + 1
+                        if state.wAnimalNearS == nil or state.curS < state.wAnimalNearS then
+                            state.wAnimalNearS = state.curS
+                        end
+                    elseif kind == "small" then
+                        state.wSmallN = state.wSmallN + 1
+                        if state.wSmallNearS == nil or state.curS < state.wSmallNearS then
+                            state.wSmallNearS = state.curS
+                        end
+                    else
+                        state.wPlayerN = state.wPlayerN + 1
+                        if state.wPlayerNearS == nil or state.curS < state.wPlayerNearS then
+                            state.wPlayerNearS = state.curS
+                        end
                     end
                 end
                 if state.curS <= state.wSoftEndS then
@@ -886,8 +940,9 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
                         state.wZomS[zn] = state.curS + (dx * ny - dy * nx)
                         state.wZomL[zn] = dx * nx + dy * ny
                         state.wZomIsCorpse[zn] = false -- 重用槽也要覆寫，不能留上一輪屍體標記。
-                        -- 橫向速度（右為正）：同一隻殭屍（物件為鍵）兩輪位置差／時差；首次看到＝0。
-                        -- 殭屍會朝車走過來，Driver 用它預測交會時的位置（walk 情境 E2E：路邊殭屍走進車道）。
+                        state.wZomKind[zn] = kind
+                        -- 橫向速度（右為正）：同一個物件（物件為鍵）兩輪位置差／時差；首次看到＝0。
+                        -- 殭屍／行人會朝車走過來，Driver 用它預測交會時的位置（walk 情境 E2E：路邊殭屍走進車道）。
                         local vl = 0
                         local px = state.zomPrevX[mo]
                         if px ~= nil then
@@ -934,6 +989,7 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
                         state.wZomS[zn + 1], state.wZomL[zn + 1] = zs - ds, zl - dl
                         state.wZomS[zn + 2], state.wZomL[zn + 2] = zs + ds, zl + dl
                         state.wZomIsCorpse[zn + 1], state.wZomIsCorpse[zn + 2] = true, true
+                        state.wZomKind[zn + 1], state.wZomKind[zn + 2] = "corpse", "corpse"
                         state.wZomVl[zn + 1], state.wZomVl[zn + 2] = 0, 0
                         state.wZomN = zn + 2
                     end
@@ -1012,6 +1068,8 @@ local function beginRound(state, p, sNow, vehicle, now, len, cell)
     state.wZomN = 0
     state.wZomOverflow = false
     state.wCorpseN = 0
+    state.wAnimalN, state.wSmallN, state.wPlayerN = 0, 0, 0
+    state.wAnimalNearS, state.wSmallNearS, state.wPlayerNearS = nil, nil, nil
     state.wSoftN = 0
     state.wCorpseNearS, state.wSoftNearS = nil, nil
     state.wMovingVeh = false
@@ -1128,6 +1186,7 @@ local function finishRound(state, now)
     state.zomS, state.zomL = state.wZomS, state.wZomL
     state.wZomS, state.wZomL = tzs, tzl
     state.zomIsCorpse, state.wZomIsCorpse = state.wZomIsCorpse, state.zomIsCorpse
+    state.zomKind, state.wZomKind = state.wZomKind, state.zomKind
     state.zomVl, state.wZomVl = state.wZomVl, state.zomVl
     -- 位置記錄：本輪看到的變成「上一輪」，舊的上一輪清空重用（只含本輪收錄的殭屍，≤ZOM_MAX 筆）
     local px, py, pt = state.zomPrevX, state.zomPrevY, state.zomPrevT
@@ -1137,6 +1196,8 @@ local function finishRound(state, now)
     state.zomN = state.wZomN
     state.zomOverflow = state.wZomOverflow
     state.corpseN = state.wCorpseN
+    state.animalN, state.smallN, state.playerN = state.wAnimalN, state.wSmallN, state.wPlayerN
+    state.animalNearS, state.smallNearS, state.playerNearS = state.wAnimalNearS, state.wSmallNearS, state.wPlayerNearS
     state.softN = state.wSoftN
     state.corpseNearS, state.softNearS = state.wCorpseNearS, state.wSoftNearS
     state.softEndS = state.wSoftEndS
@@ -1249,10 +1310,13 @@ function MDADSensor.newState()
         wZombieNearS = nil, -- 帶內最近殭屍弧長（本輪 working；nil＝無）
         wZomS = {}, wZomL = {}, wZomN = 0, wZomOverflow = false, -- 混合軟避讓點；殭屍一點／屍體兩點
         wZomIsCorpse = {},
+        wZomKind = {}, -- 每槽種類（"zombie"／"corpse"／"animal"／"small"／"player"）
         wZomVl = {}, -- 殭屍橫向速度（右為正 m/s；屍體 0）
         wZomCurX = {}, wZomCurY = {}, wZomCurT = {}, -- 本輪殭屍位置（物件為鍵）
         zomPrevX = {}, zomPrevY = {}, zomPrevT = {}, -- 上一輪殭屍位置（算橫向速度）
         wCorpseN = 0,
+        wAnimalN = 0, wSmallN = 0, wPlayerN = 0,
+        wAnimalNearS = nil, wSmallNearS = nil, wPlayerNearS = nil,
         wSoftN = 0,
         wCorpseNearS = nil, wSoftNearS = nil, wSoftEndS = 0,
         wMovingVeh = false,
@@ -1285,8 +1349,11 @@ function MDADSensor.newState()
         zombieNearS = nil,  -- 帶內最近殭屍弧長（殭屍檔縱向 envelope；nil＝無）
         zomS = {}, zomL = {}, zomN = 0, zomOverflow = false, -- 完成輪軟避讓點雲；歷史欄名沿用 zom
         zomIsCorpse = {},
+        zomKind = {},
         zomVl = {},
         corpseN = 0,
+        animalN = 0, smallN = 0, playerN = 0,
+        animalNearS = nil, smallNearS = nil, playerNearS = nil, -- 各類帶內最近弧長（nil＝無）
         softN = 0,
         corpseNearS = nil, softNearS = nil, softEndS = 0, softAheadM = nil,
         movingVeh = false,
@@ -1348,6 +1415,8 @@ function MDADSensor.reset(state)
     state.wZomN = 0
     state.wZomOverflow = false
     state.wCorpseN = 0
+    state.wAnimalN, state.wSmallN, state.wPlayerN = 0, 0, 0
+    state.wAnimalNearS, state.wSmallNearS, state.wPlayerNearS = nil, nil, nil
     state.wSoftN = 0
     state.wCorpseNearS, state.wSoftNearS, state.wSoftEndS = nil, nil, 0
     state.wMovingVeh = false
@@ -1378,6 +1447,8 @@ function MDADSensor.reset(state)
     for k in pairs(state.wZomCurX) do state.wZomCurX[k], state.wZomCurY[k], state.wZomCurT[k] = nil, nil, nil end
     state.zomOverflow = false
     state.corpseN = 0
+    state.animalN, state.smallN, state.playerN = 0, 0, 0
+    state.animalNearS, state.smallNearS, state.playerNearS = nil, nil, nil
     state.softN = 0
     state.corpseNearS, state.softNearS, state.softEndS = nil, nil, 0
     state.movingVeh = false
@@ -1611,7 +1682,7 @@ local function probeDirectional(state, vehicle, cell, bodyX, bodyY,
 
     -- getGridSquare 用例 ISDestroyCursor.lua:278；nil 代表 candidate 所在 chunk
     -- 未載入，定向安全探測必須回 unloaded。getVehicleContainer 的格級幾何來源為
-    -- IsoGridSquare.java:10252-10273（內部即呼叫 isIntersectingSquare）。
+    -- IsoGridSquare.java:9872-9893（內部即呼叫 isIntersectingSquare）。
     for gx = gx0, gx1 do
         for gy = gy0, gy1 do
             if orientedRectHitsSquare(rectX, rectY, fx, fy, nx, ny,

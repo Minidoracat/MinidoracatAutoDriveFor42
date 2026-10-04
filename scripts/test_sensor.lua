@@ -63,7 +63,13 @@ end
 -- =====================================================================
 
 -- rawget＝仿真 Kahlua 的 instanceof 語意：Java 端 isInstance 不走 Lua 索引路徑
-function instanceof(obj, cls) return type(obj) == "table" and rawget(obj, "_class") == cls end
+-- _isa：繼承鏈（IsoAnimal extends IsoPlayer，IsoAnimal.java:123）——真引擎 instanceof(animal, "IsoPlayer") 為真
+function instanceof(obj, cls)
+    if type(obj) ~= "table" then return false end
+    if rawget(obj, "_class") == cls then return true end
+    local isa = rawget(obj, "_isa")
+    return isa ~= nil and isa[cls] == true
+end
 
 -- bindFlags 在第一輪掃描開始時讀這兩顆一次；值只被拿去當 props:has 的鍵比較
 IsoFlagType = {
@@ -833,6 +839,111 @@ local function scenarioDiagonalCoverage()
 end
 
 -- =====================================================================
+-- 動物與車外的其他玩家（1005 soft）：IsoAnimal 先於 IsoPlayer 判（繼承關係）、體重分大小、
+-- 死亡／被抱著／在車上不收、讀不到體重當大型；玩家排除死亡與在車上（含自己這台的駕駛）。
+-- 不得列舉 cell 的全域動物清單（getAnimals 每次掃整個 objectList 並新建 LinkedList）。
+-- =====================================================================
+local function scenarioAnimalsPlayers()
+    scenario("動物／玩家軟避讓：種類、大小門檻、排除條件、帶內計數與最近弧長、槽重用")
+    resetWorld()
+    local cellAnimals = W.cell.getAnimals
+    W.cell.getAnimals = function() error("不得列舉全域動物清單") end
+    W.cell.getObjectList = function() error("不得列舉全域物件清單") end
+    local function putAnimal(sAt, lAt, opt)
+        local wx, wy = X0 + sAt, Y0 + lAt
+        local a = { _class = "IsoAnimal", _isa = { IsoPlayer = true, IsoGameCharacter = true },
+            getX = function() return wx end, getY = function() return wy end,
+            isDead = function() return opt.dead == true end,
+            getVehicle = function() return opt.veh end,
+            isHeld = function() return opt.held == true end }
+        if opt.kg ~= nil then
+            a.getData = function() return { getWeight = function() return opt.kg end } end
+        end
+        squareAt(wx, wy)._mov:add(a)
+    end
+    local function putPlayer(sAt, lAt, opt)
+        local p = { _class = "IsoPlayer", _isa = { IsoGameCharacter = true }, x = X0 + sAt, y = Y0 + lAt }
+        function p:getX() return self.x end
+        function p:getY() return self.y end
+        function p:isDead() return opt.dead == true end
+        function p:getVehicle() return opt.veh end
+        squareAt(p.x, p.y)._mov:add(p)
+        return p
+    end
+    local big = MDADSensor.ANIMAL_BIG_KG
+    putAnimal(10.5, 0.4, { kg = big + 280 })           -- 牛／羊級：大型
+    putAnimal(14.5, -1.2, { kg = big - 17 })           -- 雞／兔級：小型
+    putAnimal(16.5, 1.6, { kg = big })                 -- 剛好門檻：大型（< 門檻才算小）
+    putAnimal(18.5, 0.2, { kg = 300, dead = true })    -- 死亡：不收（屍體另走 IsoDeadBody）
+    putAnimal(19.5, -0.4, { kg = 3, held = true })     -- 被抱著：不收
+    putAnimal(20.5, 0.6, { kg = 300, veh = {} })       -- 在車上（拖車）：不收
+    putAnimal(21.5, -2.4, {})                          -- 讀不到體重（無 getData）：當大型
+    local walker = putPlayer(22.5, 1.0, {})            -- 步行玩家：收
+    putPlayer(24.5, -1.0, { veh = {} })                -- 別台車上的玩家：不收
+    putPlayer(26.5, 0.0, { veh = VEH })                -- 自己這台的駕駛：不收
+    putPlayer(28.5, 0.5, { dead = true })              -- 死亡玩家：不收
+    putZombie(X0 + 30.5, Y0 + 0.3)
+    putCorpse(X0 + 32.5, Y0 - 0.5, 0)
+    local st = newSensor(60, 4, 0)
+    checkTrue(runRound(st), "完成一輪")
+    -- 大 2（10.5、16.5）＋無資料 1（21.5）、小 1、玩家 1、殭屍 1、屍體兩端 2
+    checkEq(st.zomN, 8, "軟避讓點數＝3 大型＋1 小型＋1 玩家＋1 殭屍＋屍體 2 端")
+    local kinds = {}
+    for i = 1, st.zomN do kinds[st.zomKind[i]] = (kinds[st.zomKind[i]] or 0) + 1 end
+    checkEq(kinds.animal, 3, "大型動物槽數（含讀不到體重）")
+    checkEq(kinds.small, 1, "小型動物槽數")
+    checkEq(kinds.player, 1, "步行玩家槽數（排除在車上／自己／死亡）")
+    checkEq(kinds.zombie, 1, "殭屍仍標 zombie（動物判斷不影響殭屍）")
+    checkEq(kinds.corpse, 2, "屍體兩端標 corpse")
+    for i = 1, st.zomN do
+        local k = st.zomKind[i]
+        if k == "corpse" then
+            checkTrue(st.zomIsCorpse[i] == true, "屍體槽 zomIsCorpse=true")
+        else
+            checkTrue(st.zomIsCorpse[i] == false, k .. " 槽 zomIsCorpse=false")
+        end
+        if math.abs(st.zomS[i] - 14.5) < 1e-6 then checkEq(k, "small", "s=14.5 的輕動物＝small") end
+        if math.abs(st.zomS[i] - 10.5) < 1e-6 then checkEq(k, "animal", "s=10.5 的重動物＝animal（不是 player）") end
+        if math.abs(st.zomS[i] - 22.5) < 1e-6 then checkEq(k, "player", "s=22.5＝player") end
+    end
+    -- 帶內（±3）計數與最近弧長：21.5／−2.4 也在帶內
+    checkEq(st.animalN, 3, "帶內大型動物數")
+    checkEq(st.smallN, 1, "帶內小型動物數")
+    checkEq(st.playerN, 1, "帶內玩家數")
+    checkEq(st.zombieN, 1, "zombieN 不含動物與玩家")
+    checkNear(st.animalNearS, 10.5, 0.51, "大型動物最近弧長（取樣步弧長）")
+    checkNear(st.smallNearS, 14.5, 0.51, "小型動物最近弧長")
+    checkNear(st.playerNearS, 22.5, 0.51, "玩家最近弧長")
+    -- 玩家走動：第二輪有橫向速度（同物件為鍵，與殭屍同一套）
+    walker.y = walker.y - 0.5
+    R.now = R.now + 500
+    runRound(st)
+    local vlP = nil
+    for i = 1, st.zomN do if st.zomKind[i] == "player" then vlP = st.zomVl[i] end end
+    checkTrue(vlP ~= nil and vlP < -0.2, "走動的玩家有橫向速度（往 −l 走）：" .. tostring(vlP))
+    -- 槽重用：只剩一隻殭屍時，第一槽種類必須被覆寫，各類計數歸零
+    resetWorld()
+    putZombie(X0 + 10.5, Y0 + 0.4)
+    runRound(st)
+    checkEq(st.zomN, 1, "只剩殭屍：一點")
+    checkEq(st.zomKind[1], "zombie", "重用槽的種類被覆寫成 zombie")
+    checkEq(st.animalN, 0, "動物計數歸零")
+    checkEq(st.playerN, 0, "玩家計數歸零")
+    checkNil(st.animalNearS, "動物最近弧長歸 nil")
+    checkNil(st.playerNearS, "玩家最近弧長歸 nil")
+    -- reset 也清
+    resetWorld()
+    putPlayer(12.5, 0.0, {})
+    runRound(st)
+    checkEq(st.playerN, 1, "reset 前：有玩家")
+    MDADSensor.reset(st)
+    checkEq(st.playerN, 0, "reset 清玩家數")
+    checkNil(st.playerNearS, "reset 清玩家最近弧長")
+    W.cell.getAnimals, W.cell.getObjectList = cellAnimals, nil
+    resetWorld()
+end
+
+-- =====================================================================
 scenarioCorpseAxis()
 scenarioCorpseBands()
 scenarioFullRange()
@@ -844,6 +955,7 @@ scenarioDistantCorpses()
 scenarioTraffic()
 scenarioTrafficVelocity()
 scenarioDiagonalCoverage()
+scenarioAnimalsPlayers()
 
 closeScenario()
 print()

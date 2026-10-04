@@ -164,6 +164,8 @@ local STATUS_WIDTH_KEYS = {
     "UI_MinidoracatAutoDrive_HUDStatusSlow_road",
     "UI_MinidoracatAutoDrive_HUDStatusSlow_dodge",
     "UI_MinidoracatAutoDrive_HUDStatusSlow_zombie",
+    "UI_MinidoracatAutoDrive_HUDStatusSlow_animal",
+    "UI_MinidoracatAutoDrive_HUDStatusSlow_player",
     "UI_MinidoracatAutoDrive_HUDStatusSlow_traffic",
     "UI_MinidoracatAutoDrive_HUDStatusSlow_return",
     "UI_MinidoracatAutoDrive_HUDStatusSlow_tow",
@@ -428,6 +430,25 @@ end
 
 local function setZombieDodge(value)
     return setClientOption("ZombieDodge", value == true)
+end
+
+-- 閃避動物：index 1＝關閉、2＝大型動物（預設）、3＝所有動物；Driver 每輪掃描完成讀 HUD.animalDodge。
+-- 主 chunk local 已貼上限：選項鍵與存取函式直接掛 HUD。
+HUD.ANIMAL_DODGE_KEYS = {
+    "UI_MinidoracatAutoDrive_AnimalDodgeOff",
+    "UI_MinidoracatAutoDrive_AnimalDodgeLarge",
+    "UI_MinidoracatAutoDrive_AnimalDodgeAll",
+}
+
+function HUD.animalDodge()
+    local index = optionIndex("AnimalDodge", 2, #HUD.ANIMAL_DODGE_KEYS)
+    return MDADDynamics.finite(index) and index or 2
+end
+
+function HUD.setAnimalDodge(value)
+    if not MDADDynamics.finite(value) or value ~= math.floor(value)
+            or value < 1 or value > #HUD.ANIMAL_DODGE_KEYS then return false end
+    return setClientOption("AnimalDodge", value)
 end
 
 local function perceptionIndex()
@@ -824,6 +845,7 @@ local SLOW_CATEGORY = {
     sensor = "road", warm = "road", state = "road", progress = "road",
     dodge = "dodge", ["dodge-defer"] = "dodge", blocked = "dodge", contact = "dodge", soft = "dodge",
     zombie = "zombie", ["zombie-lane"] = "zombie", corpse = "zombie",
+    ["animal-stop"] = "animal", ["animal-crawl"] = "animal", ["player-stop"] = "player",
     moving = "traffic", traffic = "traffic", ["traffic-yield"] = "traffic",
     ["return"] = "return", ["return-unsafe"] = "return", ["return-hold"] = "return",
     ["return-capacity"] = "return", recover = "return", ["gear-reset"] = "return",
@@ -3039,6 +3061,12 @@ if PZAPI and PZAPI.ModOptions then
         "UI_MinidoracatAutoDrive_AutoDetour_tooltip")
     modOptions:addTickBox("ZombieDodge", "UI_MinidoracatAutoDrive_ZombieDodge", true,
         "UI_MinidoracatAutoDrive_ZombieDodge_tooltip")
+    -- 主 chunk local 槽已滿（區塊 local 與 for 也佔槽）：經 getOption 取回同一個 combo 加項目。
+    modOptions:addComboBox("AnimalDodge",
+        "UI_MinidoracatAutoDrive_AnimalDodge", "UI_MinidoracatAutoDrive_AnimalDodge_tooltip")
+    modOptions:getOption("AnimalDodge"):addItem(HUD.ANIMAL_DODGE_KEYS[1], false)
+    modOptions:getOption("AnimalDodge"):addItem(HUD.ANIMAL_DODGE_KEYS[2], true)
+    modOptions:getOption("AnimalDodge"):addItem(HUD.ANIMAL_DODGE_KEYS[3], false)
     local perceptionOption = modOptions:addComboBox("PerceptionDistance",
         "UI_MinidoracatAutoDrive_PerceptionDistance", "UI_MinidoracatAutoDrive_PerceptionDistance_tooltip")
     for i = 1, #PERCEPTION_KEYS do
@@ -3246,6 +3274,11 @@ local function registerMiniMapSettings()
                 items = PERCEPTION_KEYS,
                 default = PERCEPTION_DEFAULT,
                 get = perceptionIndex, set = setPerceptionIndex },
+            { label = "UI_MinidoracatAutoDrive_AnimalDodge",
+                tooltip = "UI_MinidoracatAutoDrive_AnimalDodge_tooltip",
+                items = HUD.ANIMAL_DODGE_KEYS,
+                default = 2,
+                get = HUD.animalDodge, set = HUD.setAnimalDodge },
         },
     }
     if api.settingsApiVersion >= 2 then

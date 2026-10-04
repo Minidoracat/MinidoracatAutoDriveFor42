@@ -42,6 +42,9 @@ option MinidoracatAutoDrive.ZombieAreaSlowdown
 option MinidoracatAutoDrive.CorpseSlowdown
 {type = enum, numValues = 3, default = 2, page = MinidoracatAutoDrive, translation = MinidoracatAutoDriveCorpseSlowdown, valueTranslation = MinidoracatAutoDriveCorpseSlowdown,}
 
+option MinidoracatAutoDrive.AnimalSlowdown
+{type = enum, numValues = 3, default = 2, page = MinidoracatAutoDrive, translation = MinidoracatAutoDriveAnimalSlowdown, valueTranslation = MinidoracatAutoDriveAnimalSlowdown,}
+
 option MinidoracatAutoDrive.ObstaclePolicy
 {type = enum, numValues = 2, default = 1, page = MinidoracatAutoDrive, translation = MinidoracatAutoDriveObstaclePolicy, valueTranslation = MinidoracatAutoDriveObstaclePolicy,}
 
