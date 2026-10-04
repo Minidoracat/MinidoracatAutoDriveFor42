@@ -8169,14 +8169,20 @@ do
     --       （0906e；實機 hardN 70-90 時「整條掃描帶找一根桿子」的 plan 檢查讓目標 lane 永遠被否決）。
     --       之後 replan 以偏移後的 lane 為基準會對這根遠桿子規劃 dodge（同一個 predicate）＝正常接手，
     --       所以只鎖「殭屍先處理：兩輪內 lane 已離開常駐線」，不鎖最終值。
+    --       1005 起擋線判定用形狀位置（方塊 l 2.5、面在 2.0）：兩輪後 lane 0.83＋規劃半寬 1.2＝2.03 越過方塊面＝擋線，
+    --       replan 當輪就承諾繞行（舊制取樣點 l 2.92 判不擋、沒有承諾）。假車不會開過承諾線，收尾改重開 session
+    --       再驗回常駐線（承諾不可變，清掉世界不會讓它自己消失）。
     drive.putSolid(44, 2, "harness_zlane_far")
     zRound()
     zRound()
     st = MDAD.Drive.debugSession(0)
     checkTrue(st.fstate.laneBias > 0.5,
         "(z3b) 視窗外硬物不否決：兩輪內已偏 >0.5（實得 " .. tostring(st.fstate.laneBias) .. "）")
+    checkTrue(st.dodging == true,
+        "(z3b) 遠桿方塊面在偏移後 lane 的規劃半寬內：replan 承諾繞行接手（實得 " .. tostring(st.dodging) .. "）")
     drive.clearCell(44, 2)
     drive.clearCell(18, -1)
+    checkTrue(armDrive(), "(z3b) 重開 session（假車開不過承諾線）")
     for _ = 1, 16 do zRound() end
     st = MDAD.Drive.debugSession(0)
     checkTrue(st.zombieLane == nil and math.abs(st.fstate.laneBias) < 0.06 and not st.dodging,
@@ -13609,8 +13615,20 @@ local function scenarioPhaseE()
         driveTick(dp, hotVeh)
         checkFalse(captured.fullGate,
             "world-sweep failure inside stopping horizon keeps gate closed")
-        checkTrue(drive.calls.maxRegSpeed > 0 and drive.calls.maxRegSpeed <= 18,
-            "near world-sweep failure keeps the conservative 18km/h cap")
+        -- 1005：近場世界掃掠命中不再平壓 18（只夾 regulator＝斷油滑行，正式服 41–53 km/h 滑不到就撞上路口物件），改成
+        --   「車心開到命中的車身取樣點（proofHitS）時降到 18」的接近包絡（Drive.proofSweepCap），超過包絡由中線外力
+        --   proof 帳補減速。舊期望「regulator ≤ 18」改成「regulator ≤ 包絡、包絡＝approachCap(命中點, 18)」。
+        local penv = MDADDynamics.approachCapKmh(
+            (captured.proofHitS or 0) - captured.lastSNow, 18, 0.5,
+            captured.safeBrake * MDAD.Drive.debugTune().APPROACH_BRAKE_FRAC)
+        checkTrue(MDADDynamics.finite(captured.proofHitS) and MDADDynamics.finite(captured.proofSweepCap)
+                and math.abs(captured.proofSweepCap - penv) < 1e-6 and penv > 18,
+            "near world-sweep failure: approach envelope to the sweep hit, not a flat 18（hit="
+            .. tostring(captured.proofHitS) .. " rs=" .. tostring(captured.lastSNow) .. " cap="
+            .. tostring(captured.proofSweepCap) .. " env=" .. tostring(penv) .. "）")
+        checkTrue(drive.calls.maxRegSpeed > 0
+                and drive.calls.maxRegSpeed <= math.floor(captured.proofSweepCap + 0.5) + 1e-9,
+            "near world-sweep failure: regulator stays under the proof envelope")
         drive.clearCell(15, 0)
         MDADCorridor.plan = realCorridorPlan
         drive.scanRound()
@@ -19725,6 +19743,113 @@ function drive.scenario0928()
     Dr.debugResolveBlockAnchor(as, asen, aveh, true, 8)
     checkEq(as.blockHitX, 50, "(anchor-base) 逐點基準不是本快照的：退回原始 laneBias")
     for y = -9, 9 do drive.clearCell(50, y) end
+    -- (line-geom) 1005：擋線判定（Corridor.plan 步驟①②、blocksLine＝resolveBlockAnchor／nearestLineBlocker）用引擎形狀
+    --   位置（Sensor hardLc）＋掃掠同一套橫向半寬（hardW：方塊半邊×boxK、圓半徑），縫隙搜尋仍用取樣點 hardL／hardR。
+    --   幽靈（正式服 0.18.2 Ywy clip-19）：樹的取樣點 l 在快照間跳到 3.34、離 lane 2.0 只差 r+need 0.01＝舊制判擋線、
+    --   錨落在車前 12m；樹幹形狀在 4.2，lane 2.0＋1.2＋0.15＝3.35 碰不到＝不擋，錨留在真正擋線的 60m 那台。
+    --   漏判（GGGMAMEER clip-22／23）：端柱取樣 l 3.91＝舊制以 0.01 判淨空；方塊形狀在 3.44（面 2.94），lane 2.0 的
+    --   規劃半寬到 3.2＝擋線；同一條線的世界掃掠（sweepLine 的方塊式）也撞。
+    --   違規證明：Corridor 擋線退回 hardL／hardR、blocksLine 不傳 hardLc／hardW、Sensor 不寫形狀橫向、hardW 方塊用規劃
+    --   半徑、pre-a 淨距窗改成 [a,c] 或少加 pad 各紅。
+    function drive.scenarioLineGeom()
+        local need, halfW = 1.2, 0.9
+        local gs = { hardN = 2, hardS = { 12, 60 }, hardL = { 3.34, 2.0 }, hardLc = { 4.2, 2.0 }, hardW = { 0.15, 0.5 },
+            hardR = { 0.15, 0.7 }, hardX = { 12, 60 }, hardY = { 4.2, 2.0 }, stamp = 5 }
+        local gsess = { needHalf = need, fstate = { laneBias = 2.0 } }
+        local gveh = { getX = function() return 0 end, getY = function() return 2.0 end }
+        checkEq(Dr.debugResolveBlockAnchor(gsess, gs, gveh, true, 0), 60,
+            "(line-geom) 幽靈：樹幹形狀不擋 lane 2.0，停止錨不跳到車前 12m")
+        checkEq(gsess.blockHitX, 60, "(line-geom) 幽靈：錨的世界點是 60m 那台")
+        checkEq((MDADCorridor.plan(gs.hardS, gs.hardL, 1, need, 6.5, 2.0, gs.hardR, 2.0, nil, nil, true,
+            nil, nil, nil, gs.hardLc, gs.hardW)), "clear", "(line-geom) 幽靈：只有那棵樹時 Corridor.plan 判淨空")
+        checkEq((MDADCorridor.plan(gs.hardS, gs.hardL, 1, need, 6.5, 2.0, gs.hardR, 2.0, nil, nil, true)), "dodge",
+            "(line-geom) 對照：不給形狀位置＝照取樣點判（舊制）擋線")
+        local ms = { hardN = 1, hardS = { 30 }, hardL = { 3.91 }, hardLc = { 3.44 }, hardW = { 0.5 }, hardR = { 0.7 },
+            hardX = { 30 }, hardY = { 3.44 }, stamp = 6 }
+        local mm, ma = MDADCorridor.plan(ms.hardS, ms.hardL, 1, need, 6.5, 2.0, ms.hardR, 2.0, nil, nil, true,
+            nil, nil, nil, ms.hardLc, ms.hardW)
+        checkTrue(mm ~= "clear" and ma < 30, "(line-geom) 漏判：方塊形狀在 lane 2.0 的規劃半寬內＝擋線（"
+            .. tostring(mm) .. " a=" .. tostring(ma) .. "）")
+        checkEq((MDADCorridor.plan(ms.hardS, ms.hardL, 1, need, 6.5, 2.0, ms.hardR, 2.0, nil, nil, true)), "clear",
+            "(line-geom) 對照：取樣點 3.91 以 0.01 判淨空（舊制漏判）")
+        local msess = { needHalf = need, fstate = { laneBias = 2.0 } }
+        checkEq(Dr.debugResolveBlockAnchor(msess, ms, gveh, true, 0), 30, "(line-geom) 漏判：停止錨＝端柱")
+        local pad = MDADVehicleProfile.sweepBase(halfW, "cruise") - halfW
+        local d2 = MDADCorridor.orientedDistanceSqUnchecked(30, 2.0, 1, 0, halfW + 0.5, 2.2 + 0.5, 30, 3.44)
+        checkTrue(d2 <= pad * pad, "(line-geom) 漏判：同一條線的世界掃掠（巡航 base、方塊式）也撞（d="
+            .. string.format("%.3f", math.sqrt(d2)) .. " pad=" .. string.format("%.2f", pad) .. "）")
+        -- 同一套模型：沿 lane 2.0 的世界掃掠以 pad＝need−halfW 量，命中 ⇔ 擋線判定擋（方塊與圓各掃一段橫向位置）
+        local agree = true
+        for k = 0, 80 do
+            local lc = 2.0 + 1.0 + k * 0.0125
+            for _, w in ipairs({ 0.5, 0.15 }) do
+                local box = w == 0.5
+                local dd = MDADCorridor.orientedDistanceSqUnchecked(30, 2.0, 1, 0, halfW + (box and w or 0),
+                    2.2 + (box and w or 0), 30, lc)
+                local rr = box and (need - halfW) or (w + need - halfW)
+                local hit = dd <= rr * rr - 1e-9
+                local blk = MDADCorridor.blocksLine({ 9 }, { 0.7 }, { lc }, { w }, 1, 2.0, need)
+                if math.abs(math.sqrt(dd) - rr) > 1e-6 and hit ~= blk then agree = false end
+            end
+        end
+        checkTrue(agree, "(line-geom) 擋線判定 ⇔ 同一條線的世界掃掠命中（pad＝need−halfW，方塊／圓）")
+        checkTrue(MDADCorridor.blocksLine({ 3.0 }, { 0.6 }, { nil }, { nil }, 1, 2.0, need)
+                and not MDADCorridor.blocksLine({ 3.0 }, { 0.6 }, { 4.0 }, { 0.15 }, 1, 2.0, need),
+            "(line-geom) 沒有形狀位置的點（虛擬 ban）退回取樣點＋規劃半徑")
+        -- 真 Sensor：方塊（格 30,2）與樹（格 34,−3）的形狀橫向／掃掠半寬
+        drive.fillWorld(-10, 70, -7, 7)
+        drive.putSolid(30, 2, "line_geom_box")
+        drive.putTree(34, -3, "line_geom_tree")
+        checkTrue(armDrive(), "(line-geom) 真 Sensor 情境啟動")
+        setHeading(dveh, 0)
+        for _ = 1, 3 do drive.scanRound(true) end
+        local sen = Dr.debugSession(0).sensor
+        local boxOk, treeOk = false, false
+        for i = 1, sen.hardN do
+            if sen.hardX[i] == 30.5 and sen.hardY[i] == 2.5 then
+                boxOk = math.abs(sen.hardLc[i] - 2.5) < 1e-9 and math.abs(sen.hardW[i] - 0.5) < 1e-9
+            elseif math.abs(sen.hardX[i] - 34.6) < 1e-9 and math.abs(sen.hardY[i] + 2.4) < 1e-9 then
+                treeOk = math.abs(sen.hardLc[i] + 2.4) < 1e-9 and math.abs(sen.hardW[i] - 0.15) < 1e-9
+            end
+        end
+        checkTrue(boxOk, "(line-geom) Sensor 方塊：hardLc＝格心 2.5、hardW＝半邊 0.5（軸向路線）")
+        checkTrue(treeOk, "(line-geom) Sensor 樹：hardLc＝樹幹 −2.4、hardW＝樹幹半徑 0.15")
+        drive.clearCell(30, 2)
+        drive.clearCell(34, -3)
+        -- pre-a 淨距（dodge commit 事件 preA）：沿 +x 的承諾線、a=20；pre-a 段旁方塊面離車身 0.3、[a,c] 段另有更近的方塊
+        local lx, ly = {}, {}
+        for k = 1, 41 do lx[k], ly[k] = k - 1, 0 end
+        local ps = { fstate = { ovN = 41, ovS0 = 0, offA = 20, offL = 0, ovX = lx, ovY = ly },
+            sensor = { hardN = 2, hardS = { 10, 25 }, hardX = { 10, 25 }, hardY = { 1.7, 1.45 }, hardR = { 0.7, 0.7 },
+                hardB = { 0.5, 0.5 } },
+            vehicleProfile = { halfW = halfW, halfL = 2.2, centerOfMassX = 0, centerOfMassZ = 0 }, lastSNow = 0 }
+        checkNear(Dr.preAClear(ps), 0.3, 1e-6, "(line-geom) preA＝pre-a 段最小物理淨距（[a,c] 段更近的方塊不算）")
+        ps.sensor.hardN, ps.sensor.hardS[1], ps.sensor.hardX[1] = 1, 35, 35 -- 只剩出口段旁的方塊：離 pre-a 段車身 > 9m
+        checkTrue(Dr.preAClear(ps) >= 9, "(line-geom) pre-a 段沒有近物：preA ≥ 9（實得 " .. tostring(Dr.preAClear(ps)) .. "）")
+        ps.fstate.offA = 0.5
+        checkNil(Dr.preAClear(ps), "(line-geom) pre-a 段不足兩個取樣點：nil")
+        -- (proof-env) 證明線掃掠命中（gate sweep）：平帽 18（只夾 regulator＝斷油）改成「車心開到命中的車身取樣點時降到
+        --   同一個警戒帽」的接近包絡，超過包絡由中線外力 "proof" 帳補減速。違規證明：包絡改回平帽、visAssist 拿掉 proof 帳、
+        --   gate 不接包絡各紅。
+        local pe = { proofHitS = 60, lastSNow = 30, safeBrake = 4.6 }
+        local want = MDADDynamics.approachCapKmh(30, 18, 0.5, 4.6 * T.APPROACH_BRAKE_FRAC)
+        checkTrue(want > 30, "(proof-env) 前置：命中點 30m 外的包絡遠高於警戒帽（" .. tostring(want) .. "）")
+        checkNear(Dr.proofSweepCap(pe, 18, 90), want, 1e-9, "(proof-env) 包絡＝開到命中點降到警戒帽 18")
+        checkNear(pe.proofSweepCap, want, 1e-9, "(proof-env) 包絡記在 s.proofSweepCap（減速輔助的帳）")
+        checkNear(Dr.proofSweepCap(pe, 18, 30), 30, 1e-9, "(proof-env) 包絡不高於 fullTarget")
+        pe.lastSNow = 60
+        checkNear(Dr.proofSweepCap(pe, 18, 90), 18, 1e-9, "(proof-env) 到命中點＝警戒帽")
+        pe.proofHitS = nil
+        checkEq(Dr.proofSweepCap(pe, 18, 90), 18, "(proof-env) 命中點不明（未載入）：照舊平帽")
+        checkNil(pe.proofSweepCap, "(proof-env) 命中點不明：不留包絡帳")
+        local pa = { tow = false, sensor = { ready = true }, visibilityCap = 90, dodging = false, proofSweepCap = 30,
+            runtimeMass = 1500 }
+        Dr.visAssistForce(pa, 40, 0.8)
+        checkTrue(pa.visAssistDecel > 0 and pa.visAssistWhy == "proof",
+            "(proof-env) 超過包絡：中線減速輔助、帳名 proof（vad=" .. tostring(pa.visAssistDecel) .. " vaw="
+            .. tostring(pa.visAssistWhy) .. "）")
+    end
+    drive.scenarioLineGeom()
     MDAD.Drive.stop(0, nil)
     setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40,
         ObstaclePolicy = 1, RightLaneBias = 0 })

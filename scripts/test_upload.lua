@@ -660,6 +660,47 @@ end)
 checkEq(imp, 3, "(d) three impacts")
 checkEq(impZ, 2, "(d) impZ counts only impacts with a zombie within halfL+4 of the car (this or previous sample)")
 
+-- 1005：impact／contact 上升緣那一筆強制寫 near（快照 stamp 沒換也寫；正式服 0.18.2 ImJustAtoms clip-04 撞擊幀沒有點雲），
+-- near 每顆點帶引擎形狀的橫向 lc（擋線判定用）。違規證明：拿掉 force＝(contact)(impact) 紅；impact 不看上升緣＝
+-- (impact) 數到 2 紅；contact 不看上升緣＝(held) 紅；encodeNear 不寫 lc＝(lc) 紅。
+scenario("1005 near: forced on the impact/contact rising edge, carries the shape lateral lc")
+do
+    nowMs = nowMs + 3600000
+    start()
+    local lines, orig = {}, U.sample
+    U.sample = function(u, line, ...)
+        lines[#lines + 1] = line
+        return orig(u, line, ...)
+    end
+    local sen = { hardN = 1, hardS = { 20 }, hardL = { 3.91 }, hardLc = { 3.44 }, hardR = { 0.7 }, hardX = { 120 },
+        hardY = { 203.44 }, stamp = 7, scanS = 10 }
+    local function nearCount(from)
+        local n = 0
+        for i = from, #lines do
+            if string.find(lines[i], '"near":', 1, true) then n = n + 1 end
+        end
+        return n
+    end
+    drive(1000, { speed = 40, sensor = sen })
+    checkEq(nearCount(1), 1, "(stamp) same snapshot: near only on its first sample")
+    check(string.find(lines[1] or "", '"l":3.91,"lc":3.44', 1, true) ~= nil, "(lc) near carries the shape lateral lc")
+    local n0 = #lines
+    drive(200, { speed = 40, sensor = sen, contact = true })
+    checkEq(nearCount(n0 + 1), 1, "(contact) footprint rising edge writes near with an unchanged stamp")
+    n0 = #lines
+    drive(1000, { speed = 40, sensor = sen, contact = true })
+    checkEq(nearCount(n0 + 1), 0, "(held) contact held on: no repeat")
+    drive(1000, { speed = 40, sensor = sen })
+    n0 = #lines
+    drive(200, { speed = 20, sensor = sen }) -- 40→20／200ms＝27.8 m/s²：撞擊
+    drive(200, { speed = 5, sensor = sen })  -- 20→5＝20.8 m/s²：仍達門檻，不是上升緣
+    drive(1000, { speed = 5, sensor = sen })
+    checkEq(nearCount(n0 + 1), 1, "(impact) impact rising edge writes near once with an unchanged stamp")
+    U.sample = orig
+    D.stop(0, "arrive")
+    pump(120000)
+end
+
 -- 1004e 越野推力 KPI：推力夠不夠要看自己的紀錄。想加速＝目標−實速 ≥6、前進、沒強制煞車；相鄰兩筆都想加速且同地表才算一對。
 -- 違規證明：門檻改成 >6＝oaMs 600 紅；不看同地表＝paMs／oaMs 紅；不排除煞車＝paMs 紅；不擋原始間隔＝paMs 紅；
 -- 低加速看錯對＝olMs 紅；oMs 不濾跟線＝oMs 紅。

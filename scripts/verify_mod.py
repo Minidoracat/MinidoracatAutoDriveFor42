@@ -1583,6 +1583,14 @@ else:
         c0902.append("blocksLine 定義數 ≠ 1（擋線判定單一定義）")
     if re.search(r"dl2? < r2? \+ (s\.needHalf|nh)", drv_src.split("local function replan(")[-1]):
         c0902.append("replan 內出現手寫擋線判定——請走 blocksLine／nearestLineBlocker")
+    # 1005：擋線判定用引擎形狀位置——Driver 每個 Corridor.plan 呼叫都要傳 Sensor 的 hardLc／hardW（第 15／16 參），
+    # blocksLine 要委派 MDADCorridor.blocksLine（Corridor 步驟①②同一支），否則同一條線兩套橫向位置。
+    for call in re.finditer(r"MDADCorridor\.plan\((.*?)\)\n", drv_src, re.S):
+        if not re.search(r"sen\.hardLc,\s*sen\.hardW$", call.group(1).strip()):
+            c0902.append("Driver 的 MDADCorridor.plan 呼叫未以 sen.hardLc, sen.hardW 收尾（擋線判定沒用形狀位置）")
+            break
+    if "MDADCorridor.blocksLine(" not in drv_src:
+        c0902.append("blocksLine 未委派 MDADCorridor.blocksLine（擋線判定單一定義）")
     # ⑤ harness 測試常數與 production 對齊（TUNE 不 export，改靜態抽值比對）
     mt = re.search(r"TUNE\.RETURN_UNSAFE_CAP\s*=\s*([0-9.]+)", drv_src)
     harness_path = os.path.join(REPO, "scripts", "smoke_harness.lua")

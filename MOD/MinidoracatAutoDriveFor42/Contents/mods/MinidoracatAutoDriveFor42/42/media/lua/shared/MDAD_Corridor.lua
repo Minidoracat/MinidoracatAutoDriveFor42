@@ -317,6 +317,29 @@ local function laneFree(hardS, hardL, hardR, hardN, sLo, sHi, l, needHalf)
     return true
 end
 
+-- 擋線判定（單一定義；plan 步驟①②與 Driver 的 blocksLine 共用）：第 i 點擋不擋以 bl 為中心、半寬 needHalf 的行駛線。
+-- lineL／lineR（選填）＝Sensor 的 hardLc／hardW：引擎形狀位置的橫向偏移與掃掠模型的橫向半寬（方塊半邊×|cos|+|sin|、
+-- 圓半徑），＝sweepLine 以 pad＝needHalf−halfW 掃同一條線時的命中條件 |l−bl| < halfW＋半寬＋pad——「規劃說淨空」
+-- 與「世界掃掠說淨空」對同一條線一致（1005；正式服 0.18.2 Ywy clip-19：取樣點 l 在快照間 4.38→3.50→4.31，
+-- 樹被判成擋線 0.01m、停止錨跳到車前；GGGMAMEER clip-22／23：端柱取樣 l 4.5、形狀 4.03，以 0.01m 判淨空後撞上）。
+-- 該點沒有形狀位置（呼叫端附加的虛擬 ban、舊 fixture）退回取樣點 hardL＋規劃半徑 hardR。縫隙搜尋（laneFree）
+-- 刻意留在取樣點：那份 ±0.5 的隱含餘裕蓋住彎中追線落後（0929f 全面改格心的教訓）。
+-- ponytail: 掃掠對 r ≥ 0.5 的圓扣 SWEEP_QUANT_COMP（MDADDynamics.sweepRadius），這裡不扣；Sensor 目前沒有這種圓
+-- （方塊走 lineR 方塊式），出現時改成讓 lineR 帶同一個扣除。
+function MDADCorridor.blocksLine(hardL, hardR, lineL, lineR, i, bl, needHalf)
+    local l, r = lineL and lineL[i], nil
+    if type(l) == "number" and l * 0 == 0 then
+        r = lineR and lineR[i]
+    else
+        l = hardL[i]
+    end
+    if r == nil then r = hardR and hardR[i] or OBS_HALF end
+    if type(r) ~= "number" or r ~= r or r < 0 then r = OBS_HALF end
+    l = l - bl
+    if l < 0 then l = -l end
+    return l < r + needHalf
+end
+
 -- 規劃入口。零配置：只讀入來的兩條陣列，只回純量。
 -- preferL（選填）＝縫隙掃描的中心，「距 preferL 最近的可行 lane」優先（而不是
 -- 「距中線最近」）。呼叫端的兩種用法：
@@ -351,8 +374,10 @@ end
 -- ringFrom（第 14 參，選填）＝上一級寬帶的走廊半寬：只搜 |lane| > ringFrom−needHalf 的外圈（Driver 寬帶第二級，
 -- 1004c）。內圈第一級已用同一個點雲判過；不排除的話近處那幾條「走廊淨空、世界掃掠撞」的縫會先把候選額度用完、
 -- 輪不到外圈，額度放大又讓一次判堵在樹叢地卡到半秒。非有限正數＝不分圈。
+-- lineL／lineR（第 15／16 參，選填）＝擋線判定（步驟①②）用的形狀橫向位置與掃掠半寬，見 MDADCorridor.blocksLine；
+-- 省略＝照舊以 hardL／hardR 判。縫隙搜尋（步驟③）不受影響。
 function MDADCorridor.plan(hardS, hardL, hardN, needHalf, corridorHalf, preferL, hardR, baseL,
-        roadLo, roadHi, refineComfort, baseAt, minS, ringFrom)
+        roadLo, roadHi, refineComfort, baseAt, minS, ringFrom, lineL, lineR)
     if minS ~= nil and (type(minS) ~= "number" or minS * 0 ~= 0) then
         return "blocked", 0, 0, 0, 0, 0
     end
@@ -388,7 +413,8 @@ function MDADCorridor.plan(hardS, hardL, hardN, needHalf, corridorHalf, preferL,
 
     -- 逐點把「該點半徑＋車半寬」膨脹進障礙：之後所有判定都是「點可行性」。
     -- 統一肥半徑（OBS_HALF）曾把路緣樹排判成擋路（樹幹實際 ~0.3 格）。
-    -- 半徑判定 inline 展開（laneFree 同款）：plan 是零配置契約，不建 closure。
+    if type(lineL) ~= "table" then lineL = nil end
+    if type(lineR) ~= "table" then lineR = nil end
 
     -- ① 擋行駛線篩選 ＋ 取錨（擋線障礙中 s 最小者）：以 baseL（行駛基準線）
     -- 為中心——障礙擋不擋「車實際要走的那條線」才是要不要繞的判準
@@ -396,11 +422,8 @@ function MDADCorridor.plan(hardS, hardL, hardN, needHalf, corridorHalf, preferL,
     for i = 1, n do
         local bl = baseAt and baseAt[i] or baseL
         if type(bl) ~= "number" or bl * 0 ~= 0 then bl = baseL end
-        local l = hardL[i] - bl
-        if l < 0 then l = -l end
-        local r = hardR and hardR[i] or OBS_HALF
-        if type(r) ~= "number" or r ~= r or r < 0 then r = OBS_HALF end
-        if l < r + needHalf and (minS == nil or hardS[i] >= minS) then
+        if (minS == nil or hardS[i] >= minS)
+                and MDADCorridor.blocksLine(hardL, hardR, lineL, lineR, i, bl, needHalf) then
             local s = hardS[i]
             if sObs0 == nil or s < sObs0 then sObs0 = s end
         end
@@ -416,11 +439,8 @@ function MDADCorridor.plan(hardS, hardL, hardN, needHalf, corridorHalf, preferL,
         for i = 1, n do
             local bl = baseAt and baseAt[i] or baseL
             if type(bl) ~= "number" or bl * 0 ~= 0 then bl = baseL end
-            local l = hardL[i] - bl
-            if l < 0 then l = -l end
-            local r = hardR and hardR[i] or OBS_HALF
-            if type(r) ~= "number" or r ~= r or r < 0 then r = OBS_HALF end
-            if l < r + needHalf and (minS == nil or hardS[i] >= minS) then
+            if (minS == nil or hardS[i] >= minS)
+                    and MDADCorridor.blocksLine(hardL, hardR, lineL, lineR, i, bl, needHalf) then
                 local s = hardS[i]
                 if s >= sObs0 - GROUP_GAP and s <= sObs1 + GROUP_GAP then
                     if s < sObs0 then

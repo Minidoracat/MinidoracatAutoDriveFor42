@@ -104,6 +104,7 @@ local EK = {
     "a", "b", "c", "offL", "curve", "clear", "vis", "space", "design",
     "crawl", "tight", "tier", "rs", "span", "hitS", "hitX", "hitY", "hitPhase", "clearance", "shape",
     "blocker", "thin", -- thin（1004f）：dodge commit 時換縫找更寬記下的最窄候選物理淨距
+    "preA", -- preA（1005）：dodge commit 時承諾線 pre-a 段（起點→a）的最小物理淨距
     -- tow attach（0929p）：掛車幾何（寬帶繞行掃掠、判堵停止線的輸入）
     "L2", "trailLen", "halfW", "mass", "hitchZ", "boxBack", "axisSign",
     -- start（1005）：這趟用了同車型轉向增益種子時的快取鍵（MDADFollower.seedGains；沒有種子就不帶）
@@ -859,6 +860,7 @@ end
 -- 的兩個問題：「那顆點多大」與「它在地圖哪裡」——r 是膨脹半徑（Corridor 的縫隙
 -- 判定直接吃它），x/y 是世界座標（能疊回地圖看到底撞上什麼）。仍只輸出最近 8 顆，
 -- 不是整包快照：每幀 table 與整包點雲都不進 log。
+-- lc（1005）＝引擎形狀位置的橫向偏移（Sensor hardLc，擋線判定用它）；l 是命中的取樣點（縫隙搜尋用），兩者差到 ±0.5。
 local function encodeNear(sensor)
     local n = sensor.hardN
     local hs, hl = sensor.hardS, sensor.hardL
@@ -866,9 +868,10 @@ local function encodeNear(sensor)
         return ""
     end
     local scan = finite(sensor.scanS) and sensor.scanS or 0
-    local hr = sensor.hardR
+    local hr, hc = sensor.hardR, sensor.hardLc
     local hx, hy = sensor.hardX, sensor.hardY
     if type(hr) ~= "table" then hr = nil end
+    if type(hc) ~= "table" then hc = nil end
     if type(hx) ~= "table" or type(hy) ~= "table" then hx, hy = nil, nil end
     -- nk＝來源索引：r/x/y 在輸出時才查，插入排序的內圈只多搬一個純量
     local ns, nl, nd, nk = {}, {}, {}, {}
@@ -912,6 +915,8 @@ local function encodeNear(sensor)
     while i <= count do
         local src = nk[i]
         local piece = '{"s":' .. tostring(ns[i]) .. ',"l":' .. tostring(nl[i])
+        local lc = hc and hc[src]
+        if finite(lc) then piece = piece .. ',"lc":' .. tostring(lc) end
         local r = hr and hr[src]
         if finite(r) then piece = piece .. ',"r":' .. tostring(r) end
         local px = hx and hx[src]
@@ -926,10 +931,12 @@ local function encodeNear(sensor)
     return ',"near":[' .. table.concat(parts, ",", 1, count) .. ']'
 end
 
-local function encodeSensor(s, sensor)
+-- force（1005）＝impact／contact 上升緣那一筆：快照 stamp 沒換也寫 near（撞擊幀原本可能沒有點雲，
+-- 正式服 0.18.2 ImJustAtoms clip-04、Loni clip-08）。
+local function encodeSensor(s, sensor, force)
     local stamp = sensor.stamp
     local near = ""
-    if stamp ~= s.lastStamp then
+    if stamp ~= s.lastStamp or force then
         s.lastStamp = stamp
         near = encodeNear(sensor)
     end
@@ -1201,7 +1208,7 @@ local function encodePhys(phys)
     addNum("visHold", "vho")          -- 巡航帳假設的前緣停滯保持剩餘秒數
     addNum("visRoundS", "vrs")        -- 掃描輪時 EWMA（秒）
     addNum("visAssistDecel", "vad")   -- 巡航減速輔助補的減速度（m/s²）
-    addStr("visAssistWhy", "vaw")     -- 1002a：減速輔助追的帳（vis／profile／lane／dodge／blocked／defer／zombie-lane／traffic；不鎖輪硬煞＝其理由）
+    addStr("visAssistWhy", "vaw")     -- 1002a：減速輔助追的帳（vis／profile／lane／dodge／blocked／proof／defer／zombie-lane／traffic；不鎖輪硬煞＝其理由）
     addNum("towPhi", "tph")           -- 拖掛折角（rad）
     addNum("towUp", "tup")            -- 拖掛 upVectorDot（<0.8 原版拆掛）
     addNum("towDecel", "tda")         -- 施給掛車的減速度（m/s²；0929o 拖車減速分攤）
@@ -1231,6 +1238,7 @@ local function encodePhys(phys)
     addNum("dodgeNextR", "dodgeNextR")
     addNum("dodgeClass", "dodgeClass")
     addStr("verifyLineReason", "verifyLineReason")
+    addNum("proofHitS", "phs")        -- 1005：證明線掃掠命中的車身取樣弧長（gate sweep 接近包絡的終點；同 rs 座標）
     addNum("proofKappa", "proofKappa")
     addNum("proofCurveCap", "proofCurveCap")
     addNum("laneCurveEnvelope", "laneCurveEnvelope")
@@ -1275,6 +1283,21 @@ local function encodePhys(phys)
     return bits
 end
 
+-- impact／contact 上升緣（encodeSensor 的 force）：contact＝footprint 命中由假轉真；impact＝與上傳片段同一個
+-- 單筆門檻（MDADUpload.impactLike，前一筆→本筆的掉速與原始間隔）由假轉真。狀態記在取樣閘門擁有者 s。
+local function nearForced(s, now, speed, phys, footprintBlocked)
+    local fb = footprintBlocked == true
+    local fbl = type(phys) == "table" and phys.forceBrakeLeft or nil
+    local locked = finite(fbl) and fbl > 0
+    local spd = finite(speed) and (speed < 0 and -speed or speed) or nil
+    local U = MDADUpload
+    local imp = spd ~= nil and finite(s.nearTs) and type(U) == "table" and type(U.impactLike) == "function"
+        and U.impactLike(s.nearSpd, spd, now - s.nearTs, locked or s.nearLocked == true) or false
+    local force = (fb and s.nearFb ~= true) or (imp and s.nearImp ~= true)
+    s.nearFb, s.nearImp, s.nearSpd, s.nearTs, s.nearLocked = fb, imp, spd, now, locked
+    return force
+end
+
 local function encodeSample(s, now, x, y, heading, speed, target, remaining, lat, err,
         steer, force, mode, gear, regulator, sensor, critical,
         planMode, routeS, blockS, dodgeMargin, dodgeNeed, roadBias,
@@ -1291,7 +1314,7 @@ local function encodeSample(s, now, x, y, heading, speed, target, remaining, lat
     end
     local extra = ""
     if type(sensor) == "table" then
-        extra = ',"sen":' .. encodeSensor(s, sensor)
+        extra = ',"sen":' .. encodeSensor(s, sensor, nearForced(s, now, speed, phys, footprintBlocked))
     end
     extra = extra .. encodePhys(phys)
     local pmjson = "null"
