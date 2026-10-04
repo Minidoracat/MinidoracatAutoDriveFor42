@@ -8940,6 +8940,84 @@ function drive.scenarioSoftArbiter()
 end
 drive.scenarioSoftArbiter()
 
+-- (soft-k) 1005 E2E animal-sp cow（an-cow-1005b）：路緣硬物取樣柱在格內跳動，可行帶右緣每輪在「右縫剛好放得下」與
+--   「差 0.3m」之間換，舊制選縫每輪左右翻（want 5.04↔0.12），lane 停在牛前、43 km/h 擦過。重現：包一層
+--   Drive.softBand，右緣隔輪在 occ＋0.06／occ−0.29 之間換（occ＝牛的佔位右緣＝0.6＋R，跳動量在 SOFT_HARD_JITTER_M 內）。
+--   期望：同一頭牛整段都在同一側閃（Drive.softKeepSide）。反例：跳動超過 JITTER（右縫真的消失）照常換到左側。
+--   違規證明：拿掉 softKeepSide 呼叫＝(soft-k) 紅；拿掉帶緣容許量＝(soft-k) 紅。
+function drive.scenarioSoftSide()
+    scenario("軟縫換邊遲滯：帶緣取樣跳動不讓同一個威脅左右翻")
+    local Dr = MDAD.Drive
+    local T = Dr.debugTune()
+    local oldA, oldBand = MDAD.HUD.animalDodge, Dr.softBand
+    MDAD.HUD.animalDodge = function() return 2 end
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40,
+        RightLaneBias = 0, ZombieAreaSlowdown = false, CorpseSlowdown = false, AnimalSlowdown = 2 })
+    local cap = nil
+    Dr.softBand = function(...)
+        local lo, hi, known = oldBand(...)
+        if cap ~= nil and hi > cap then hi = cap end
+        return lo, hi, known
+    end
+    local function run(shrinkBy)
+        drive.fillWorld(-10, 160, -9, 9)
+        assert(armDrive())
+        setHeading(dveh, 0)
+        dveh._speed, dveh._y = 20, 0
+        cap = nil
+        drive.scanRound(true)
+        drive.scanRound(true)
+        local s = Dr.debugSession(0)
+        local R = s.vehicleProfile.halfW + MDADCorridor.ZOMBIE_R + MDADCorridor.ZOMBIE_MARGIN
+        local occ = T.SOFT_COMFORT_M + R
+        drive.putMoving(40, 0, { _class = "IsoAnimal", _isa = { IsoPlayer = true },
+            getX = function() return 40.5 end, getY = function() return 0 end,
+            isDead = function() return false end, getVehicle = function() return nil end,
+            isHeld = function() return false end,
+            getData = function() return { getWeight = function() return 500 end } end })
+        local sides, flips, prev = "", 0, nil
+        for k = 1, 8 do
+            cap = (k % 2 == 0) and occ - shrinkBy or occ + 0.06
+            driveReset(dveh)
+            dveh._x, dveh._y = dveh._x + 1.6667, s.fstate.laneBias
+            drive.scanRound(true)
+            local w = s.zombieWant
+            local side = (type(w) == "number" and w > 0.05) and 1 or ((type(w) == "number" and w < -0.05) and -1 or 0)
+            sides = sides .. (side > 0 and "R" or (side < 0 and "L" or "0"))
+            if prev ~= nil and side ~= prev then flips = flips + 1 end
+            prev = side
+        end
+        cap = nil
+        return sides, flips
+    end
+    local sides, flips = run(0.29)
+    checkTrue(flips == 0 and sides:sub(1, 1) == "R",
+        "(soft-k) 右緣在 JITTER 內跳動：同一頭牛整段都從右側閃，不左右翻（" .. sides .. "）")
+    -- 原本那一側被第二個目標擋住（玩家走進右縫）：不得硬留，換到左側
+    local s = Dr.debugSession(0)
+    local R = s.vehicleProfile.halfW + MDADCorridor.ZOMBIE_R + MDADCorridor.ZOMBIE_MARGIN
+    local rl = T.SOFT_COMFORT_M + R + 1.0
+    drive.putMoving(41, math.floor(rl), { _class = "IsoPlayer", getX = function() return 41.5 end,
+        getY = function() return rl end, isDead = function() return false end, getVehicle = function() return nil end })
+    cap = 99
+    driveReset(dveh)
+    dveh._y = s.fstate.laneBias
+    drive.scanRound(true)
+    cap = nil
+    checkTrue(type(s.zombieWant) == "number" and s.zombieWant < 0,
+        "(soft-k) 原本那一側被擋住：換到另一側（want " .. tostring(s.zombieWant) .. "）")
+    sides, flips = run(T.SOFT_HARD_JITTER_M + 0.3)
+    checkTrue(flips >= 1 and sides:find("L") ~= nil,
+        "(soft-k) 反例：右縫真的消失（超過 JITTER）照常換到左側（" .. sides .. "）")
+    Dr.softBand = oldBand
+    MDAD.Drive.stop(0, nil)
+    MDAD.HUD.animalDodge = oldA
+    drive.fillWorld(-2, 70, -7, 7)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    assert(armDrive())
+end
+drive.scenarioSoftSide()
+
 -- ⑤lf 低幀率降速提示（0925；0929o 門檻改為掃描額度放大到上限的 50ms）：可視上限壓速、平均幀時 ≥50ms，
 --   且視距是被幀率截短，持續 2s 才讓 HUD 狀態變「卡頓降速」（lowfps）、恢復 3s 才消失；同趟累計 10s 跳一次
 --   通知。session 從 150ms（可負擔 32m）起算。反例：幀率低但速度沒被可視上限壓（沙盒上限 20）不顯示。
