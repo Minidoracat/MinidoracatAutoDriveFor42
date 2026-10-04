@@ -2154,6 +2154,73 @@ do
         checkTrue(overMax < 0.45,
             string.format("陡進入段進保持段不甩出線外 0.45m 以上（預視線長 1.5 時 0.54；實得 %.2f）", overMax))
     end
+    -- (6) 陡進入段落在弧上（1004f；E2E e1004e dixie9050w 改道線：R≈17 弧上原地承諾 3.3m 側移塞 3.8m，落後 1.3m）：
+    --     弧上同樣投影到線本身、沿線預視。舊制（投影只在直路段）弧上取路線弧長同 s 點的切線，同 (5) 的正回授。
+    --     垂距對承諾線折線本身量。違規證明：lineQ 閘只放直路段（arcK == nil）＝紅。
+    do
+        local VPa = { valid = true, geometryValid = true, halfW = 0.81, rMin = 3.03, wheelbase = 2.66,
+            delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 120, lookScale = 1.0 }
+        local R, ang = 17, math.pi / 2
+        local w = 2 * (R * (1 - math.cos(ang / 2)) + VPa.halfW + 0.6)
+        local pA = F.begin({ pts = { 0, 0, 120, 0, 120, 150 }, segSurface = { "paved", "paved" }, segWidth = { w, w } },
+            120, 4, VPa)
+        while not pA.ready do F.stepBuild(pA, 4096) end
+        local arcA
+        for i = 1, pA.n - 1 do if pA.segKind[i] == D.SEG_ARC then arcA = arcA or pA.s[i] end end
+        checkTrue(arcA ~= nil, "弧上陡進入段：路線建出圓角")
+        local sa = arcA + 4
+        local sb = sa + 3.8
+        local ox, oy = {}, {}
+        local n6, s06, why6, s16 = F.buildOffsetLine(pA, 60, sa, sb, sb + 6, sb + 40, -3, 0.33, ox, oy,
+            nil, nil, nil, 0.33)
+        checkEq(why6, "ok", "弧上陡進入段承諾線建好")
+        local s6 = F.newState()
+        F.setLaneBias(s6, 0.33)
+        checkTrue(F.setOffset(s6, sa, sb, sb + 6, sb + 40, -3, ox, oy, n6, s06, s16), "弧上陡進入段 setOffset")
+        s6.trackTangent = true
+        local function devTo(x, y) -- 車對承諾線折線的帶號垂距（右正）
+            local best, dev = 1e30, 0
+            for k = 1, s6.ovN - 1 do
+                local ex, ey = s6.ovX[k + 1] - s6.ovX[k], s6.ovY[k + 1] - s6.ovY[k]
+                local L2 = ex * ex + ey * ey
+                if L2 > 1e-9 then
+                    local rx, ry = x - s6.ovX[k], y - s6.ovY[k]
+                    local t = (rx * ex + ry * ey) / L2
+                    if t < 0 then t = 0 elseif t > 1 then t = 1 end
+                    local dx, dy = rx - ex * t, ry - ey * t
+                    if dx * dx + dy * dy < best then best, dev = dx * dx + dy * dy, (ex * ry - ey * rx) / math.sqrt(L2) end
+                end
+            end
+            return dev
+        end
+        local car, prevLat, lagMax, overMax = { x = 60, y = 0.33, h = 0, w = 0 }, nil, -99, 0
+        local kMax = 1 / VPa.rMin
+        for _ = 1, 3000 do
+            local steer, _, rem, _, _, _, latS, lineLat = F.control(pA, s6, car.x, car.y, car.h, 10, DT)
+            local sNow = pA.length - rem
+            if sNow > sb + 6 then break end
+            local latDev = latS - lineLat
+            local dLat = prevLat and (latDev - prevLat) / DT or nil
+            prevLat = latDev
+            local u = steer - D.crossTrackSteer(latDev, 10, dLat, D.CROSS_TRACK_DODGE_GAIN, D.CROSS_TRACK_DODGE_MAX)
+            if u > F.STEER_MAX then u = F.STEER_MAX elseif u < -F.STEER_MAX then u = -F.STEER_MAX end
+            s6.appliedSteer = u
+            local k = u * 0.16
+            if k > kMax then k = kMax elseif k < -kMax then k = -kMax end
+            local v = 10 / KMH
+            car.w = car.w + (k * v - car.w) * (DT / 0.35)
+            car.h = car.h + car.w * DT
+            car.x = car.x + math.cos(car.h) * v * DT
+            car.y = car.y + math.sin(car.h) * v * DT
+            local lag = devTo(car.x, car.y) -- 起點在 +0.33、線往 −3 走：障礙側＝正
+            if sNow >= sb - 3 and sNow <= sb + 4 and lag > lagMax then lagMax = lag end
+            if sNow >= sb and -lag > overMax then overMax = -lag end
+        end
+        checkTrue(lagMax < 0.65,
+            string.format("弧上陡進入段尾端落在障礙側 <0.65m（只在直路段投影時 0.90；實得 %.2f）", lagMax))
+        checkTrue(overMax < 0.45,
+            string.format("弧上陡進入段進保持段不甩出線外 0.45m 以上（實得 %.2f）", overMax))
+    end
     -- 長前視已超出線尾，但切線預視點仍在保持段：不能提前朝常駐線轉回。
     local oldLook = pLine.lookScale
     pLine.lookScale = 1.5
@@ -4289,6 +4356,74 @@ do
     checkTrue(in90 < 0.9, string.format("(2) Loni 14m→8m 90°、33 km/h：切內 %.2fm < 0.9（不退讓 1.45）", in90))
     checkTrue(out25 < 0.85 and out90 < 0.85, string.format("(3) 出彎外漂 R25 %.2f／90° %.2f < 0.85（退讓不換成外甩）",
         out25, out90))
+end
+
+scenario("1004f：承諾線在弧上減速——cross-track 選 ×DODGE（D.crossTrackGains），欠轉前饋＋增益落後的外漂收得回（E2E f1004e dixie9050w）")
+do
+    -- E2E f1004e dixie9050w 改道線：巡航承諾的 pre-a 線在 R≈40 弧外側 0.2m，48→22 km/h 減速中外漂到 0.5m、前角擦到路邊物。
+    -- Plant：yaw 一階追 G·u（τ 0.35，夾 v/rMin），G＝0.065·v（CarNormal 實測 55 km/h 0.98、23 km/h 0.45）；Driver 管線照實
+    -- （cross-track 增益由 D.crossTrackGains 選、回授正規化、死區）。違規證明：承諾線在弧上不選 ×DODGE（只貼縫才選）＝紅
+    -- （舊制 ×ARC 0.30）。
+    local D = MDADDynamics
+    local VPc = { valid = true, geometryValid = true, halfW = 0.81, rMin = 3.03, wheelbase = 2.66,
+        delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 120, lookScale = 1.0 }
+    local R, ang = 40, math.pi / 3
+    local w = 2 * (R * (1 - math.cos(ang / 2)) + VPc.halfW + 0.6)
+    local p = F.begin({ pts = { 0, 0, 120, 0, 120 + 150 * math.cos(ang), 150 * math.sin(ang) },
+        segSurface = { "paved", "paved" }, segWidth = { w, w } }, 120, 4, VPc)
+    while not p.ready do F.stepBuild(p, 4096) end
+    local arcA, arcB
+    for i = 1, p.n - 1 do if p.segKind[i] == D.SEG_ARC then arcA = arcA or p.s[i]; arcB = p.s[i + 1] end end
+    checkTrue(arcA ~= nil, "R40 弧建出圓角")
+    local st = F.newState()
+    F.setLaneBias(st, -0.2)
+    F.setRuntimeLimits(st, 3, 6, 7, 1.2)
+    st.yawGain = 0.8
+    local a = arcB + 40 -- pre-a 沿車的橫向（startLane）＝整個弧都在 pre-a
+    local ox, oy = {}, {}
+    local n, s0, why, s1 = F.buildOffsetLine(p, 60, a, a + 10, a + 14, a + 30, -0.2, -0.2, ox, oy, nil, nil, nil, -0.2)
+    checkEq(why, "ok", "弧上 pre-a 承諾線建好")
+    checkTrue(F.setOffset(st, a, a + 10, a + 14, a + 30, -0.2, ox, oy, n, s0, s1), "弧上 pre-a setOffset")
+    st.trackTangent = true
+    local car = { x = 60, y = -0.2, h = 0, w = 0 }
+    local prev, out, inn, kmh, dt = nil, 0, 0, 48, 1 / 30
+    for _ = 1, 30 * 40 do
+        local steer, _, rem, _, _, _, latS, lineLat = F.control(p, st, car.x, car.y, car.h, kmh, dt)
+        local sNow = p.length - rem
+        if sNow > arcB + 25 then break end
+        local latDev = latS - lineLat
+        local dLat = prev and (latDev - prev) / dt or nil
+        if dLat and (dLat > 5 or dLat < -5) then dLat = nil end
+        prev = latDev
+        local xg, xm = D.crossTrackGains(true, false, st.curveHardActive, st.kinkExitS ~= nil, false)
+        local u = steer - D.crossTrackSteer(latDev, kmh, dLat, xg, xm)
+        local g = st.yawGainFb or st.yawGain -- Drive.normalizeSteer
+        local k = 0.5 / g
+        if k < 1 then k = 1 elseif k > 3 then k = 3 end
+        if k ~= 1 then
+            local ff = st.ffSteer or 0
+            local fb = u - ff
+            local lim = math.abs(fb) > 1.5 and math.abs(fb) or 1.5
+            local o = k * fb
+            if o > lim then o = lim elseif o < -lim then o = -lim end
+            u = ff + o
+        end
+        if u > F.STEER_MAX then u = F.STEER_MAX elseif u < -F.STEER_MAX then u = -F.STEER_MAX end
+        if u < 0.02 and u > -0.02 then u = 0 end
+        st.appliedSteer = u
+        local v = kmh / KMH
+        local wT = math.max(0.12, 0.065 * v) * u
+        if wT > v / VPc.rMin then wT = v / VPc.rMin elseif wT < -v / VPc.rMin then wT = -v / VPc.rMin end
+        car.w = car.w + (wT - car.w) * (dt / 0.35)
+        car.h = car.h + car.w * dt
+        car.x = car.x + math.cos(car.h) * v * dt
+        car.y = car.y + math.sin(car.h) * v * dt
+        if sNow >= arcA - 5 and kmh > 22 then kmh = math.max(22, kmh - 2.3 * KMH * dt) end
+        if sNow >= arcA and sNow <= arcB and -latDev > out then out = -latDev end -- 右轉外側＝−
+        if sNow >= arcA and sNow <= arcB + 10 and latDev > inn then inn = latDev end
+    end
+    checkTrue(out < 0.27, string.format("弧外側承諾線 48→22 km/h：外漂 %.2fm < 0.27（×ARC 時 0.30）", out))
+    checkTrue(inn < 0.15, string.format("同一段不換成切內：切內 %.2fm < 0.15", inn))
 end
 
 closeScenario()

@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1004e"
+Drive.REV = "1004f"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -635,6 +635,11 @@ TUNE.NUDGE_STEP_M = 0.25
 -- 餘裕 → contact → 倒車 → 同線再 commit ×3 → StopStuck；貼縫追線的落後實測 0.25-0.4，餘裕
 -- 低於這個量就該先試往寬處挪一格）
 TUNE.NUDGE_WIDEN_M = 0.35
+-- 換縫找更寬（1004f；E2E f1004e dixie9050w 改道線：爬行候選 +5.5 物理淨距 0.07 掃過就承諾，5 km/h 進縫落後 0.3 擦到
+-- 車角；倒車後同一處改承諾另一側 −5.5 淨距 0.39、cap 5→10 順利通過）：重試／爬行檔採納的候選物理淨距（margin＋
+-- sweep base−halfW）低於此值時先記下、ban 掉往下找，找到更寬的就換，找完沒有就用記下最寬的那條（Drive.thinNote）。
+-- 拓寬（NUDGE_WIDEN_M）只在同一個縫裡挪一格；這裡換縫。不否決通行：只有更寬的也掃過才換。
+TUNE.DODGE_THIN_M = 0.3
 -- 貼縫可執行下限（同 s057：commit cap 0.5／0.6／1.3／1.7 km/h＝淨距 0.05-0.08 的
 -- clearanceCap；CRAWL intent 沒有 MIN_EXEC 地板，車以 1 km/h 爬、進度看門狗 6 秒判卡
 -- → 倒車 → 再承諾同一條 0.5 km/h 的線 → 三次用盡 → attempt-limit 每 2.5 秒一次、CRAWL
@@ -1103,10 +1108,14 @@ end
 -- 全部型態。成功時主 MOD 已覆寫路線快取，下一次 requestRoute 回的就是替代線。
 -- r／lenMax 省略＝堵車改道（DETOUR_AVOID_R、DETOUR_LEN_*）；拖車繞開調頭另給（Drive.towTurnaround）。
 -- refRoute＝目前的路線：替代線的終點要跟它同一個（DETOUR_END_M）。
+-- more＝同一趟先前改道判死的避讓圈（Drive.avoidMore，扁平 { x, y, r, … }；nil＝沒有）：一併交給主 MOD（nav API v9
+-- requestDetour 第 7 參；v8 以下會忽略），回來的線穿任一圈＝拒收 "again"——只避新堵點時 A* 會原路繞回舊堵點
+-- （E2E e1004e dixie9050w：第二次交還前改道 1552m 原路回到第一處路障，detour 用完交還）。
 TUNE.DETOUR_END_M = 3 -- 冷路徑常數收 TUNE（chunk local 190 槽已滿）
-local function requestDetourRoute(api, playerNum, tx, ty, ax, ay, remaining, r, lenMax, refRoute)
+TUNE.DETOUR_HIST_MAX = 7 -- 記幾個先前的避讓圈（＋目前那圈＝主 MOD 一次最多 8 圈）
+local function requestDetourRoute(api, playerNum, tx, ty, ax, ay, remaining, r, lenMax, refRoute, more)
     if type(api.requestDetour) ~= "function" then return nil, "api" end
-    local route, state = api.requestDetour(playerNum, tx, ty, ax, ay, r or TUNE.DETOUR_AVOID_R)
+    local route, state = api.requestDetour(playerNum, tx, ty, ax, ay, r or TUNE.DETOUR_AVOID_R, more)
     if not route or state ~= "ok" then return nil, state or "noroad" end
     -- 空線（1002h E2E rc50 0017：目標 46m 外判堵、主 MOD 回 ok 但 len 0）收下＝下一幀 cutover 建不出剖面、
     -- 直接 LostRoute 交還；當成沒有改道，照常走受困流程。
@@ -1122,6 +1131,7 @@ local function requestDetourRoute(api, playerNum, tx, ty, ax, ay, remaining, r, 
         if ex * ex + ey * ey > TUNE.DETOUR_END_M * TUNE.DETOUR_END_M then return nil, "end", route end
     end
     if MDADDynamics.finite(route.avoidPenalty) and route.avoidPenalty > 0 then return nil, "through", route end
+    if Drive.crossesAnyAvoid(route, more) then return nil, "again", route end
     if routeTooFar(route) then return nil, "far", route end
     if lenMax == nil and MDADDynamics.finite(remaining) then
         lenMax = remaining * TUNE.DETOUR_LEN_RATIO + TUNE.DETOUR_LEN_SLACK
@@ -1130,6 +1140,54 @@ local function requestDetourRoute(api, playerNum, tx, ty, ax, ay, remaining, r, 
         return nil, "long", route
     end
     return route, nil
+end
+
+-- 同一趟（同目標）先前改道判死的避讓圈：s.avoidHist＝扁平 { x, y, r, … }，不含目前的 s.avoidX（拖車調頭圈不記）。
+-- Drive.avoidMore 組本次要附給主 MOD 的圈：歷史＋（withCurrent）目前那圈；跳過三種——圈住車位或目標的（車已在圈內、
+-- 目標在圈內＝任何路線都穿，避不了也驗不過）、圓心在本次主圈 (ax, ay) 圈內的（同一處堵點，主圈已經在避）。
+-- 沒有回 nil。冷路徑（改道當下、cutover 換線時），配置一張小表。
+function Drive.avoidMore(s, vx, vy, tx, ty, ax, ay, withCurrent)
+    local fin = MDADDynamics.finite
+    local h, out = s.avoidHist, nil
+    local n = h and #h or 0
+    for i = 1, n + 1, 3 do -- 最後一輪（i＝n＋1）是目前那圈
+        local x, y, r
+        if i <= n then
+            x, y, r = h[i], h[i + 1], h[i + 2]
+        elseif withCurrent and not s.avoidTow and fin(s.avoidX) and fin(s.avoidY) then
+            x, y, r = s.avoidX, s.avoidY, s.avoidR or TUNE.DETOUR_AVOID_R
+        end
+        if x ~= nil and fin(vx) and fin(vy) and fin(tx) and fin(ty) and fin(ax) and fin(ay)
+                and (vx - x) * (vx - x) + (vy - y) * (vy - y) > r * r
+                and (tx - x) * (tx - x) + (ty - y) * (ty - y) > r * r
+                and (ax - x) * (ax - x) + (ay - y) * (ay - y) > r * r then
+            if out == nil then out = {} end
+            out[#out + 1] = x
+            out[#out + 1] = y
+            out[#out + 1] = r
+        end
+    end
+    return out
+end
+
+-- 接受新的改道前呼叫：把目前的避讓圈（若有、不是拖車調頭圈）推進歷史，超過 TUNE.DETOUR_HIST_MAX 圈丟最舊的。
+function Drive.pushAvoidHist(s)
+    if s.avoidTow or not MDADDynamics.finite(s.avoidX) or not MDADDynamics.finite(s.avoidY) then return end
+    local h = s.avoidHist
+    if h == nil then h = {}; s.avoidHist = h end
+    h[#h + 1] = s.avoidX
+    h[#h + 1] = s.avoidY
+    h[#h + 1] = s.avoidR or TUNE.DETOUR_AVOID_R
+    while #h > TUNE.DETOUR_HIST_MAX * 3 do table.remove(h, 1) end
+end
+
+-- 路線穿過 more（Drive.avoidMore 的扁平圈表）任一圈？
+function Drive.crossesAnyAvoid(route, more)
+    if more == nil then return false end
+    for i = 1, #more - 2, 3 do
+        if routeCrossesAvoid(route, more[i], more[i + 1], more[i + 2]) then return true end
+    end
+    return false
 end
 
 -- 自駕先決條件（啟動與每幀共用同一份）。回 nil＝可以開／可以繼續，否則回翻譯鍵。
@@ -2129,6 +2187,7 @@ local function startSession(playerObj, playerNum, stage)
         blockRetryDone = false, -- 本次停等的主動倒退嘗試只做一次（soft fail 防洗版）
         detourTried = false,    -- 自動改道每個停等 episode 只試一次（清除同 blockRetryDone）
         avoidX = nil, avoidY = nil, -- 已接受的改道避讓圈（sticky：之後主 MOD 重算若穿回去再要一次）
+        avoidHist = nil, detourAvoidN = nil, -- 同一趟先前的避讓圈（Drive.pushAvoidHist）／本次附給主 MOD 的圈數
         pendingDetour = false,  -- requestDetour 已覆寫主 MOD 快取，等下一次 fetchRoute cutover
         -- RECOVER 單一進口（階段 2 主體 2）：why＝需求原因（nil＝無需求，
         -- 同時是舊 mode=="recover" 閂鎖的替代）；其餘三個是 suspect 探測留給
@@ -2550,12 +2609,13 @@ end
 function Drive.requestDetour(playerNum, stuck, src)
     local s = sessions[playerNum]
     if not s then return false, "inactive" end
+    s.detourAvoidN = nil -- 本次附給主 MOD 的舊避讓圈數（detourAttempt 寫；早退＝nil）
     local ok, why, len = Drive.detourAttempt(s, playerNum, stuck)
     local v = s.vehicle
     diagEvent(s, playerNum, "detour", { phase = stuck and "stuck" or (src or "manual"),
         why = ok and "ok" or tostring(why), x = v and v:getX() or nil, y = v and v:getY() or nil, s = s.lastSNow,
         hitX = s.blockHitX, hitY = s.blockHitY, ms = s.waitAccumMs, attempt = s.episodeAttempts,
-        lvl = s.wideArmed and Drive.wideLevelOf(s) or nil, len = len })
+        lvl = s.wideArmed and Drive.wideLevelOf(s) or nil, len = len, avoidN = s.detourAvoidN })
     return ok, why
 end
 
@@ -2595,8 +2655,12 @@ function Drive.detourAttempt(s, playerNum, stuck)
         ay = hy + dy / dn * TUNE.DETOUR_AVOID_R
     end
     local remaining = s.profile and (s.profile.length - s.lastSNow) or nil
+    -- 同一趟先前判死的堵點一併避開（Drive.avoidMore；requestDetourRoute 拒收穿舊圈的線 "again"）
+    local more = Drive.avoidMore(s, vx, vy, s.lastTx, s.lastTy, ax, ay, true)
+    s.detourAvoidN = more and #more / 3 or nil
     local route, why, rejected = requestDetourRoute(api, playerNum, s.lastTx, s.lastTy, ax, ay, remaining, nil,
-        stuck and fin(remaining) and remaining * TUNE.STUCK_DETOUR_LEN_RATIO + TUNE.STUCK_DETOUR_LEN_SLACK or nil, s.route)
+        stuck and fin(remaining) and remaining * TUNE.STUCK_DETOUR_LEN_RATIO + TUNE.STUCK_DETOUR_LEN_SLACK or nil, s.route,
+        more)
     -- 拖車只收從車頭方向出發的線（0929p E2E semi-long-mp block：改道線先往車後 4m 再 90° 轉進支路，
     -- Follower 誤差 111° 未達調頭門檻、13 km/h 硬轉，掛車折 85° 脫開）；要調頭另走 Drive.towTurnaround。
     local vh = s.lastVehicleHeading
@@ -2616,6 +2680,7 @@ function Drive.detourAttempt(s, playerNum, stuck)
         voice("nodetour", playerNum)
         return false, why
     end
+    Drive.pushAvoidHist(s) -- 目前的避讓圈進歷史（之後的改道照樣避開它）
     s.avoidX, s.avoidY, s.avoidR, s.avoidTow, s.avoidLong = ax, ay, nil, nil, stuck == true
     s.pendingDetour = true
     s.pendingRouteWhy = "detour"
@@ -2686,6 +2751,7 @@ function Drive.towTurnaround(s, playerNum, vehicle, now, fx, fy)
         s.rejectedRoute = rejected -- 主 MOD 快取已被覆寫成這條，交還前別讓 cutover 收下
         return false
     end
+    Drive.pushAvoidHist(s) -- 先前的堵車避讓圈不因調頭圈蓋掉而遺失（調頭圈本身不進歷史）
     s.avoidX, s.avoidY, s.avoidR, s.avoidTow = ax, ay, TUNE.TOW_TURN_AVOID_R, true
     s.pendingDetour, s.pendingRouteWhy, s.nextRouteMs = true, "towturn", 0
     s.towTurnUntil = now + TUNE.TOW_TURN_WAIT_MS
@@ -8729,6 +8795,28 @@ end
 Drive.debugResolveBlockAnchor = resolveBlockAnchor -- 測試鉤：錨與 Corridor.plan 的擋線基準是否同一組
 Drive.debugAssistForce = longitudinalAssistForce -- 測試鉤：路外前推的車速上限（0928m）
 
+-- 換縫找更寬（TUNE.DODGE_THIN_M）：重試／爬行檔剛採納的候選物理淨距 phys < 門檻時記下（只留目前最寬的那條：
+-- 未 shape 的 a..d／offL、當時的 planN、檔名、sweep base），回 true＝呼叫端別定案、ban 掉它往下找；夠寬回 false。
+-- s.thinRec 每輪候選鏈開頭清（on＝false），commit 事件的 thin 欄位＝記下那條的物理淨距。
+function Drive.thinNote(s, phys, tier, tierName, a, b, c, d, offL, planN, nb, crawl)
+    if phys >= TUNE.DODGE_THIN_M then return false end
+    local r = s.thinRec
+    if r == nil then r = {}; s.thinRec = r end
+    if not r.on or phys > r.phys then
+        r.on, r.phys, r.tier, r.tierName = true, phys, tier, tierName
+        r.a, r.b, r.c, r.d, r.offL, r.planN, r.nb, r.crawl = a, b, c, d, offL, planN, nb, crawl
+    end
+    return true
+end
+
+-- 找完沒有更寬的：以記下的原始輸入重跑一次 sweepWithFallbacks（同幀同點雲＝同一條線，順便把 tmpOv 與 shape 暫存
+-- 換回它——中間掃過的其他候選已覆寫）。adoptIf／sweep 由 replan 傳入（槽數閘）。沒有記錄回 false。
+function Drive.thinAdopt(s, adoptIf, sweep, baseL, physBase)
+    local r = s.thinRec
+    if r == nil or not r.on then return false end
+    return adoptIf(r.tier, sweep(s, r.planN, r.a, r.b, r.c, r.d, r.offL, baseL, r.tierName, r.nb, physBase, r.crawl))
+end
+
 -- 初判 blocked 的降檔複審（replan 抽出；190-local 閘門＋可獨立閱讀）：
 -- squeeze plan＋sweep → physical plan＋sweep，第一個世界掃掠過的縫即 commit
 -- 候選。回 ok, a, b, c, d, offL, sweepBase；ok=false 時不動任何 s 欄位。
@@ -9319,6 +9407,7 @@ local function replan(s, vehicle, playerNum)
             local nonCornerFail = false
             local firstHit, firstHitX, firstHitY = nil, nil, nil
             local committed = false
+            if s.thinRec then s.thinRec.on = false end -- 換縫找更寬的記錄每輪重來（Drive.thinNote）
             local function classify(ph, hps)
                 if ph == 1 then
                     corner = true -- baseline：所有 offL 共用的路線段撞＝立即 corner
@@ -9343,7 +9432,8 @@ local function replan(s, vehicle, playerNum)
                 s.dodgeMargin, s.dodgeMarginS = mg, nil
                 s.dodgeClrN, s.dodgeEnvN = 0, 0
                 s.dodgeStay = variant == "stay" or variant == "stay-look"
-                if nbUsed < s.sweepBase - 1e-6 or s.dodgeStay then s.dodgeCrawl = true end
+                -- 指派而非只設 true：換縫找更寬時同一輪可能先採納窄的（爬行）再換寬的（Drive.thinNote）
+                s.dodgeCrawl = nbUsed < s.sweepBase - 1e-6 or s.dodgeStay
                 s.dodgeTier = variant and (tier .. "-" .. variant) or tier
                 s.lastOvN, s.lastOvS0, s.lastOvEndS = ovN, ovS0, s.tmpOvEndS
             end
@@ -9379,14 +9469,19 @@ local function replan(s, vehicle, playerNum)
                             pa, pb, pc, pd, po = aq, bq, cq, dq, oq
                             if adoptIf("crawl", sweepWithFallbacks(
                                     s, planN, pa, pb, pc, pd, po, baseL, "crawl", nb, physBase, true)) then
-                                break
+                                if not Drive.thinNote(s, s.dodgeMargin + commitNb - s.vehicleProfile.halfW, "crawl",
+                                        "crawl", pa, pb, pc, pd, po, planN, nb, true) then
+                                    break
+                                end
+                                committed = false -- 太窄：下面的 ban 迴圈先 ban 它、往下找更寬的
+                            else
+                                local f = s.fbFail
+                                pa, pb, pc, pd = f.a, f.b, f.c, f.d
+                                if f.hitS ~= nil and (firstHit == nil or f.hitS < firstHit) then
+                                    firstHit, firstHitX, firstHitY = f.hitS, f.hx, f.hy
+                                end
+                                if classify(f.ph, f.hps) then break end
                             end
-                            local f = s.fbFail
-                            pa, pb, pc, pd = f.a, f.b, f.c, f.d
-                            if f.hitS ~= nil and (firstHit == nil or f.hitS < firstHit) then
-                                firstHit, firstHitX, firstHitY = f.hitS, f.hx, f.hy
-                            end
-                            if classify(f.ph, f.hps) then break end
                         end
                         local banN = planN
                         local aborted = false
@@ -9405,15 +9500,23 @@ local function replan(s, vehicle, playerNum)
                             pa, pb, pc, pd, po = ak, bk, ck, dk, ok2
                             if adoptIf(phase == 2 and "crawl-retry" or "retry", sweepWithFallbacks(
                                     s, banN, pa, pb, pc, pd, po, baseL, tierName, nb, physBase, phase == 2)) then
-                                break
+                                if not Drive.thinNote(s, s.dodgeMargin + commitNb - s.vehicleProfile.halfW,
+                                        phase == 2 and "crawl-retry" or "retry", tierName,
+                                        pa, pb, pc, pd, po, banN, nb, phase == 2) then
+                                    break
+                                end
+                                committed = false
+                            else
+                                local f = s.fbFail
+                                pa, pb, pc, pd = f.a, f.b, f.c, f.d
+                                if f.hitS ~= nil and (firstHit == nil or f.hitS < firstHit) then
+                                    firstHit, firstHitX, firstHitY = f.hitS, f.hx, f.hy
+                                end
+                                if classify(f.ph, f.hps) then aborted = true; break end
                             end
-                            local f = s.fbFail
-                            pa, pb, pc, pd = f.a, f.b, f.c, f.d
-                            if f.hitS ~= nil and (firstHit == nil or f.hitS < firstHit) then
-                                firstHit, firstHitX, firstHitY = f.hitS, f.hx, f.hy
-                            end
-                            if classify(f.ph, f.hps) then aborted = true; break end
                         end
+                        -- 找完沒有更寬的：採納記下最寬的那條（窄縫照過，09-01「物理可過就過」）
+                        if not committed then Drive.thinAdopt(s, adoptIf, sweepWithFallbacks, baseL, physBase) end
                         if committed or aborted then break end
                     end
                 end
@@ -9751,7 +9854,8 @@ local function replan(s, vehicle, playerNum)
                 space = s.dodgeSpaceCap, design = s.dodgeDesignSpeed,
                 crawl = s.dodgeCrawl == true, tight = s.dodgeTight == true,
                 tier = s.dodgeTier, need = s.dodgeNeed, rs = s.lastSNow,
-                len = s.dodgeCommittedLength })
+                len = s.dodgeCommittedLength,
+                thin = s.thinRec and s.thinRec.on and s.thinRec.phys or nil }) -- 換縫找更寬時記下最窄那條的物理淨距
             if getDebug() then
                 -- cap 分解一行印清楚（2026-09-04 實機三段 8／15／14 km/h 繞行，console
                 -- 只有「cap zero」才印分解，正值慢吞吞完全無從復盤）
@@ -11798,24 +11902,10 @@ local function stepFollow(s, vehicle, playerNum, now)
                             end
                         end
                         s.prevCrossLat, s.prevCrossLatMs, s.crossDLat = latDev, now, dLat
-                        -- 貼縫承諾（dodgeCrawl）位置環加倍（理由見 D.CROSS_TRACK_DODGE_GAIN）；
-                        -- 弧段 ×2（2026-09-07 session-058：R≈12 彎切內 1.7m 撞路燈；切線追蹤把
-                        -- 姿態環交給切線後，位置只剩 cross-track 管，0.77/v 在 20 km/h 只有 0.14/m）
-                        local xg, xm = nil, nil
-                        -- 遠處爬行承諾的 pre-a 還沒接手近處 fallback 折點時（Follower 的 kinkExitS 在），
-                        -- Follower 正朝出彎臂轉，lineLat 卻仍是來向臂上的值——×3 位置環把它拉回來向臂，
-                        -- 兩項抵消成 st≈0 直撞外側（2026-09-27 正式服 SemiBox 片段，oracle 逐樣本重播定罪）。
-                        -- 出彎窗退回一般增益；承諾線真正接手後 Follower 本來就清 kinkExitS。
-                        if s.dodging and s.dodgeCrawl and s.fstate.kinkExitS == nil then
-                            xg, xm = MDADDynamics.CROSS_TRACK_DODGE_GAIN, MDADDynamics.CROSS_TRACK_DODGE_MAX
-                        elseif s.curveHardActive or s.zombieLane ~= nil or (s.returnActive and not s.returnHold) then
-                            -- 殭屍軟縫側移中同樣 ×2（0925p E2E road MAX：110 km/h 車身只橫移 1.4 m/s）。
-                            -- 隨車速再放大（至 ×5）實測更差（兩輪 15／18 撞）
-                            -- 回線精確線同樣 ×2（1002p；正式服 0.17.0 三段：起步斜 0.37 rad 回線 25 km/h 衝過期望線
-                            -- 1.1m、切線追蹤把姿態誤差歸零後位置只剩 0.77/v＝2 秒收不回，回線用完判 hold 鎖輪撞路邊。
-                            -- 離線閉環 temp/exp_return_gain.lua：過衝 0.91→0.66m、線後偏 >0.3m 的時間 3.6→2.0 秒）
-                            xg, xm = MDADDynamics.CROSS_TRACK_ARC_GAIN, MDADDynamics.CROSS_TRACK_ARC_MAX
-                        end
+                        -- 增益倍率選擇（貼縫／承諾線在弧上 ×DODGE、弧段／殭屍軟縫側移／回線精確線 ×ARC）的理由見
+                        -- MDADDynamics.crossTrackGains（離線閉環 test_follower 用同一支）
+                        local xg, xm = MDADDynamics.crossTrackGains(s.dodging, s.dodgeCrawl, s.curveHardActive,
+                            s.fstate.kinkExitS ~= nil, s.zombieLane ~= nil or (s.returnActive and not s.returnHold))
                         steer = (steer or 0)
                             - MDADDynamics.crossTrackSteer(latDev, speedKmh, dLat, xg, xm)
                     else
@@ -12273,6 +12363,7 @@ local function onPlayerUpdate(player)
             s.resumeProgressUntil = 0
             s.pendingRouteWhy = "target"
             s.avoidX, s.avoidY, s.avoidR, s.avoidTow, s.pendingDetour = nil, nil, nil, nil, false
+            s.avoidHist = nil -- 新目標＝新的一趟，先前判死的堵點不再算
             s.avoidLong, s.stuckDetourN, s.stuckDetourX, s.stuckDetourY = nil, 0, nil, nil -- 新目標＝新的改道額度
             s.towTurnTries, s.uturnLoopX, s.uturnLoopY = 0, nil, nil -- 新目標＝新的一趟
             s.rejectedRoute = nil
@@ -12330,24 +12421,27 @@ local function onPlayerUpdate(player)
             end
             if same then s.route = route end
         end
-        -- sticky 避讓：主 MOD 之後因偏航／冷卻自行重算（不帶 avoid）若又穿回堵點，
-        -- 立刻以同一圈再要一次替代線，拿不到才照原線走（每次 cutover 最多一次）。
+        -- sticky 避讓：主 MOD 之後因偏航／冷卻自行重算（不帶 avoid）若又穿回堵點（目前這圈或同一趟先前判死的圈，
+        -- Drive.avoidMore），立刻以同一圈再要一次替代線、舊圈一併附上，拿不到才照原線走（每次 cutover 最多一次）。
         -- 圈的半徑與長度上限跟當初要的同一套（堵車改道／拖車繞開調頭，s.avoidR／s.avoidTow）。
         if route ~= s.route and not targetChanged and not s.pendingDetour
-                and finite(s.avoidX) and finite(s.avoidY)
-                and routeCrossesAvoid(route, s.avoidX, s.avoidY, s.avoidR or TUNE.DETOUR_AVOID_R) then
-            local remaining = s.profile and (s.profile.length - s.lastSNow) or nil
-            local detour, _, rejected = requestDetourRoute(api, playerNum, tx, ty, s.avoidX, s.avoidY,
-                remaining, s.avoidR, s.avoidLong and finite(remaining)
-                    and remaining * TUNE.STUCK_DETOUR_LEN_RATIO + TUNE.STUCK_DETOUR_LEN_SLACK
-                    or s.avoidTow and finite(remaining)
-                    and remaining * TUNE.TOW_TURN_LEN_RATIO + TUNE.TOW_TURN_LEN_SLACK or nil, route)
-            if detour then
-                route = detour
-                s.pendingRouteWhy = s.avoidTow and "towturn" or "detour"
-            else
-                s.avoidX, s.avoidY, s.avoidR, s.avoidTow, s.avoidLong = nil, nil, nil, nil, nil
-                if rejected ~= nil then s.rejectedRoute = rejected end
+                and finite(s.avoidX) and finite(s.avoidY) then
+            local more = Drive.avoidMore(s, vehicle:getX(), vehicle:getY(), tx, ty, s.avoidX, s.avoidY, false)
+            if routeCrossesAvoid(route, s.avoidX, s.avoidY, s.avoidR or TUNE.DETOUR_AVOID_R)
+                    or Drive.crossesAnyAvoid(route, more) then
+                local remaining = s.profile and (s.profile.length - s.lastSNow) or nil
+                local detour, _, rejected = requestDetourRoute(api, playerNum, tx, ty, s.avoidX, s.avoidY,
+                    remaining, s.avoidR, s.avoidLong and finite(remaining)
+                        and remaining * TUNE.STUCK_DETOUR_LEN_RATIO + TUNE.STUCK_DETOUR_LEN_SLACK
+                        or s.avoidTow and finite(remaining)
+                        and remaining * TUNE.TOW_TURN_LEN_RATIO + TUNE.TOW_TURN_LEN_SLACK or nil, route, more)
+                if detour then
+                    route = detour
+                    s.pendingRouteWhy = s.avoidTow and "towturn" or "detour"
+                else
+                    s.avoidX, s.avoidY, s.avoidR, s.avoidTow, s.avoidLong = nil, nil, nil, nil, nil
+                    if rejected ~= nil then s.rejectedRoute = rejected end
+                end
             end
         end
         if route ~= s.route or versionChanged or s.reapproach then

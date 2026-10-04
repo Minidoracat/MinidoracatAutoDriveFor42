@@ -1885,15 +1885,20 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
     -- 外側折點窗內：投影卡在頂點時 lineLat 對中心線量不出線在哪；改成「車對線的帶號橫偏」，Driver 的
     -- latSigned − lineLat 就是車到線的距離（cross-track 不用改）
     if ovQ ~= nil then lineLat = latSigned - ovDev end
-    -- 直路段追承諾線（1004e）：前視窗無弧、無鉗點、路線轉角 ≤ TANGENT_MAX_TURN_RAD 時，投影改到線本身的最近點、切線
-    -- 預視沿線長量（ovProject）。舊制用路線弧長同 s 的點：陡進入段（E2E dixie9160：13m 側移塞 11.5m、線斜 59°）車一落後，
-    -- 同 s 點就在線上更前面、切線已攤平，車提早回正、落後再放大（正回授），進入段尾端落後 1.2m 擦到群角；同 s 的橫距也比
-    -- 垂距大 1/cosθ。緩線上兩者幾乎相同。
+    -- 承諾線切線追蹤投影到線本身（1004e 直路段；1004f 弧段的進入／出口過渡）：前視窗無鉗點、直路段（無弧）另要路線轉角 ≤
+    -- TANGENT_MAX_TURN_RAD 時，投影改到線本身的最近點、切線預視沿線長量（ovProject）。舊制用路線弧長同 s 的點：陡進入段
+    -- （E2E dixie9160：13m 側移塞 11.5m、線斜 59°）車一落後，同 s 點就在線上更前面、切線已攤平，車提早回正、落後再放大
+    -- （正回授），進入段尾端落後 1.2m 擦到群角；同 s 的橫距也比垂距大 1/cosθ。弧上同理（E2E e1004e dixie9050w 改道線：
+    -- R≈17 弧上原地承諾 3.3m 側移塞 3.8m，落後 1.3m），只在繞行線（offL 在；RETURN 精確線與 clear 後 offA..offD 是舊值）的
+    -- [offA, offB)／(offC, offD) 過渡段改：弧上平行段（pre-a、保持段）舊制的同 s 點就是垂足，差別只剩預視長（內側線線長
+    -- 1.5·(1−lκ)＋半格 vs 2.0），側滑補償與弧段前饋是照舊制調的（test_follower「參考點側滑」弧內側線全程改投影時內漂
+    -- 0.30→0.35）。緩線上兩者幾乎相同。
     local lineQ = nil
-    if ovQ == nil and lineLat ~= nil and state.trackTangent == true and arcK == nil and kinkS == nil
-            and sNow < ovEndS then
+    if ovQ == nil and lineLat ~= nil and state.trackTangent == true and kinkS == nil and sNow < ovEndS then
         local dh = wrapPi(profile.segH[j] - profile.segH[bestI])
-        if dh <= TANGENT_MAX_TURN_RAD and dh >= -TANGENT_MAX_TURN_RAD then
+        if arcK == nil and dh <= TANGENT_MAX_TURN_RAD and dh >= -TANGENT_MAX_TURN_RAD
+                or arcK ~= nil and isFinite(state.offL)
+                and (sNow >= state.offA and sNow < state.offB or sNow > state.offC and sNow < state.offD) then
             local devL
             lineQ, devL = ovProject(state, x, y, sNow, TANGENT_LINE_PREVIEW_M)
             lineLat = latSigned - devL

@@ -237,16 +237,17 @@ local CROSS_TRACK_DAMP = 0.35  -- 橫向速度阻尼（2026-09-02 前臂化補�
                                -- P→PD：朝線收斂太快就提前回打）
 local CROSS_TRACK_SPEED_FLOOR_MS = 2.5
 local CROSS_TRACK_MAX_STEER = 0.77
--- 貼縫承諾中的增益倍率／上限（2026-09-04 s003@0904m 定罪「右轉不夠多」：offL 2.00 承諾、
--- 5 km/h 執行，latDev 從 −1.27 收到 −1.04 花 3 秒，steer 只用 0.1-0.2（力 2-14% 權威），
--- 前角撞黑車 contact。低速下 v² 項為零、pure pursuit 對 1m 側偏只給 0.15rad 誤差，
+-- 貼縫承諾中（1004f 起承諾線在弧上也用，選擇見 D.crossTrackGains）的增益倍率／上限（2026-09-04
+-- s003@0904m 定罪「右轉不夠多」：offL 2.00 承諾、5 km/h 執行，latDev 從 −1.27 收到 −1.04 花 3 秒，steer 只用
+-- 0.1-0.2（力 2-14% 權威），前角撞黑車 contact。低速下 v² 項為零、pure pursuit 對 1m 側偏只給 0.15rad 誤差，
 -- 位置環是唯一能救的項；一般跟線不動（s026 調過的 0.77 保留）。
 D.CROSS_TRACK_DODGE_GAIN = 3
 D.CROSS_TRACK_DODGE_MAX = 2.5
 -- 弧段（v4 圓角）的增益倍率／上限（2026-09-07 session-058 定罪：R≈12 左彎 12-26 km/h
 -- pure pursuit 對弧上前視點的弦角一路切內 lat +1.1→−1.7 撞路燈；Follower 弧段改追切線後
 -- 姿態由切線管、位置只剩 cross-track，0.77/v 在 20 km/h 只有 0.14/m。離線閉環
--- temp/exp_arc_tracking.lua：切線＋×2 切內 1.0-1.8 → 0.3-0.75m；×3 增益在弧上會擺）。
+-- temp/exp_arc_tracking.lua：切線＋×2 切內 1.0-1.8 → 0.3-0.75m；當時 ×3 在弧上會擺——死區 0.1、沒有弧段前饋的年代，
+-- 1004f 以現制重跑（scripts/exp_arc_commit.lua 三種 plant）×3 外漂與切內都更小、不擺，承諾線在弧上改用 ×DODGE）。
 D.CROSS_TRACK_ARC_GAIN = 2
 D.CROSS_TRACK_ARC_MAX = 1.5
 function D.crossTrackSteer(latDev, speedKmh, dLatPerSec, gainScale, maxSteer)
@@ -268,6 +269,26 @@ function D.crossTrackSteer(latDev, speedKmh, dLatPerSec, gainScale, maxSteer)
         correction = -maxSteer
     end
     return correction
+end
+
+-- cross-track 增益倍率／上限的選擇（Driver stepFollow 每幀；test_follower 的承諾線弧上閉環用同一支）。回 (gainScale,
+-- maxSteer)，nil＝基礎增益。
+-- ×DODGE：承諾繞行中且（貼縫 crawl 或車在弧上），但不在出彎收正窗（kinkExit）——遠處爬行承諾的 pre-a 還沒接手近處
+--   fallback 折點時 Follower 正朝出彎臂轉、lineLat 卻仍是來向臂上的值，×3 把它拉回來向臂、兩項抵消成 st≈0 直撞外側
+--   （2026-09-27 正式服 SemiBox 片段，oracle 逐樣本重播定罪）。承諾線在弧上（巡航檔也算，1004f）：弧段前饋照設計欠轉
+--   （Follower CURVE_FF_FRAC），穩態外漂全靠位置環收，×ARC 在減速中跟不上 yaw 增益的變化（E2E f1004e dixie9050w：R≈40
+--   弧外側 0.2m 的 pre-a 線、48→22 km/h 外漂到 0.5m 擦路邊物）。離線 scripts/exp_arc_commit.lua (B)：外漂 0.30→0.23
+--   （減速）、0.44→0.38（45 km/h）；前饋偏大的高增益 plant 切內 0.79→0.68、0.60→0.46；其餘切內增加 ≤0.06，不擺。
+-- ×ARC：車在弧上（理由見 CROSS_TRACK_ARC_GAIN），或 arcLike——殭屍軟縫側移中（0925p E2E road MAX：110 km/h 車身只
+--   橫移 1.4 m/s；隨車速再放大至 ×5 實測更差，兩輪 15／18 撞）、回線精確線非 hold（1002p；正式服 0.17.0 起步斜 0.37 rad
+--   回線 25 km/h 衝過期望線 1.1m，切線追蹤把姿態誤差歸零後位置只剩 0.77/v＝2 秒收不回；離線 temp/exp_return_gain.lua
+--   過衝 0.91→0.66m、線後偏 >0.3m 的時間 3.6→2.0 秒）。
+function D.crossTrackGains(dodging, crawl, curveHard, kinkExit, arcLike)
+    if dodging and (crawl or curveHard) and not kinkExit then
+        return D.CROSS_TRACK_DODGE_GAIN, D.CROSS_TRACK_DODGE_MAX
+    end
+    if curveHard or arcLike then return D.CROSS_TRACK_ARC_GAIN, D.CROSS_TRACK_ARC_MAX end
+    return nil, nil
 end
 
 local ASSIST_MAX_RATIO = 0.2   -- 0.15→0.2（2026-09-02 使用者裁定「推力要增加」）

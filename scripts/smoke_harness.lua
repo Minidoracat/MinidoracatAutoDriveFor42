@@ -4409,10 +4409,10 @@ local function installNavApi(version)
         end,
         -- 改道查詢面（nav API v3；2026-09-02 重新接回）：情境以 drive.nav.detour
         -- 控制回傳，呼叫計數與參數留給斷言。
-        requestDetour = function(playerNum, tx, ty, ax, ay, r)
+        requestDetour = function(playerNum, tx, ty, ax, ay, r, more)
             local nav = drive.nav
             nav.detourCalls = (nav.detourCalls or 0) + 1
-            nav.lastDetour = { pn = playerNum, tx = tx, ty = ty, ax = ax, ay = ay, r = r }
+            nav.lastDetour = { pn = playerNum, tx = tx, ty = ty, ax = ax, ay = ay, r = r, more = more }
             if nav.detour == nil then return nil, "noroad" end
             return nav.detour, nav.detourState or "ok"
         end,
@@ -8999,6 +8999,20 @@ drive.scanRound()
 -- lane；現在同線物理過就走，速度仍由 clearance 連續縮放＋爬行檔。
 checkEq(haloKey(), DKEY.DODGE,
     "彎中窄縫：巡航 pad 打槍、同線物理 pad 過 → 爬行承諾（不再 blocked）")
+-- 換縫找更寬（1004f TUNE.DODGE_THIN_M；E2E f1004e dixie9050w 改道線：物理淨距 0.07 的爬行縫掃過就承諾、進縫落後擦車角，
+-- 另一側 0.39 的縫沒試）：同線物理複驗過的 +3.25 物理淨距只有 0.2，記下、ban 掉往下找，另一側 −4.25 以巡航 pad 掃過
+-- （物理淨距 0.6）＝換它。違規證明：thinNote 恆回 false（掃過就定案）＝紅。
+do
+    local ss, T = MDAD.Drive.debugSession(0), MDAD.Drive.debugTune()
+    local phys = (ss.dodgeMargin or -1) + (ss.dodgeNeed or 0) - ss.vehicleProfile.halfW
+    checkTrue(ss.dodging == true and phys >= T.DODGE_THIN_M
+            and ss.thinRec ~= nil and ss.thinRec.on == true and ss.thinRec.phys < T.DODGE_THIN_M,
+        string.format("彎中窄縫：兩條縫都掃得過時換物理淨距較寬的（承諾 %.2f、記下的窄縫 %s）", phys,
+            tostring(ss.thinRec and ss.thinRec.phys)))
+    -- 換成的寬縫以巡航 pad 掃過：不沿用先採納的窄縫（物理複驗＝爬行）的爬行旗標，速度不被爬行地板綁住
+    checkTrue(ss.dodgeNeed >= ss.sweepBase - 1e-6 and ss.dodgeCrawl ~= true,
+        "彎中窄縫：換成的寬縫是巡航檔、不帶窄縫的爬行旗標（dodgeCrawl=" .. tostring(ss.dodgeCrawl) .. "）")
+end
 driveReset(dveh)
 driveTick(dp, dveh)
 checkTrue(drive.calls.forceBrake > 0
@@ -9012,7 +9026,10 @@ drive.putSolid(83, 4, "harness_curve_obs_e")
 drive.putSolid(75, 4, "harness_curve_obs_f") -- 走廊 ±7 後可行帶 ±5.6：堵死要排到 l≈±5
 drive.putSolid(85, 4, "harness_curve_obs_g")
 drive.scanRound()
-checkEq(haloKey(), nil, "已在 blocked 承諾中不重複轟提示")
+-- 判堵那一輪的紅字照常（承諾那條也被新來的車蓋住）；之後同樣堵著的輪不得再轟（0828 契約：提示只在狀態轉換時）
+driveReset(dveh)
+drive.scanRound()
+checkEq(haloKey(), nil, "已在 blocked 中不重複轟提示")
 checkTrue(MDAD.Drive.isActive(0), "彎中堵死：session 活著（等待或玩家接手）")
 drive.clearCell(75, 4)
 drive.clearCell(77, 4)
@@ -9027,6 +9044,27 @@ driveReset(dveh)
 driveTick(dp, dveh)
 checkEq(dveh._regulator, true, "彎中障礙清除：自動恢復行駛")
 MDAD.Drive.stop(0, nil)
+
+-- ⑨b2 只剩窄縫（1004f 換縫找更寬的反面）：同一組彎中三車、另一側也堵住＝掃得過的只有物理淨距 0.2 的 +3.25——
+-- 窄縫照過（09-01「物理可過就過」），不因為窄就判堵或改道。違規證明：找完不採納記下的窄縫（thinAdopt 恆回 false）＝紅。
+function drive.scenarioThinOnly()
+    dveh._x, dveh._y, dveh._speed, dveh._steering = 50, 0, 20, 0
+    setHeading(dveh, 0.05)
+    dp._vehicle, dveh._driver = dveh, dp
+    checkTrue(MDAD.Drive.start(dp), "⑨b2 啟動")
+    driveReset(dveh)
+    local cells = { 79, 80, 81, 83, 84, 85 }
+    for _, x in ipairs(cells) do drive.putSolid(x, 4, "harness_thin_" .. x) end
+    drive.scanRound()
+    local ss, T = MDAD.Drive.debugSession(0), MDAD.Drive.debugTune()
+    local phys = (ss.dodgeMargin or -1) + (ss.dodgeNeed or 0) - ss.vehicleProfile.halfW
+    checkTrue(ss.dodging == true and ss.blocked ~= true and phys >= 0 and phys < T.DODGE_THIN_M
+            and (ss.fstate.offL or 0) > 0,
+        string.format("⑨b2 只剩窄縫：照樣承諾那條窄縫（offL %s、物理淨距 %.2f）", tostring(ss.fstate.offL), phys))
+    for _, x in ipairs(cells) do drive.clearCell(x, 4) end
+    MDAD.Drive.stop(0, nil)
+end
+drive.scenarioThinOnly()
 
 -- ⑨d 折點旁障礙（2026-09-01 契約更新）：comfort/squeeze 檔的長車前角 OBB
 --    掃掠照樣否決斜切候選；但物理終審檔（probe need≈halfW、接受剮蹭）窄體
@@ -10810,6 +10848,55 @@ local function scenarioDetour()
     MinidoracatMiniMapAPI.navApiVersion = 2 -- 還原本區段其餘情境沿用的版本
 end
 scenarioDetour()
+
+-- (c5h) 同一趟多次改道帶舊避讓圈（1004f；E2E e1004e dixie9050w：第二次交還前改道只避新堵點，主 MOD 原路繞回第一處
+--   路障，detour 用完交還）：第二次 requestDetour 第 7 參附上第一次的圈（nav API v9），回來的線穿舊圈＝拒收 "again"
+--   （v8 主 MOD 忽略第 7 參時靠這一關），不穿＝收下、第一次的圈進歷史；換目標清歷史。
+--   違規證明：不附舊圈／不驗穿舊圈／收下時不推歷史＝各自紅。
+function drive.scenarioDetourHist()
+    local nav = drive.nav
+    checkTrue(armDrive(), "(c5h) 啟動")
+    for _, y in ipairs({ -5, -4, -2, -1, 0, 1, 2, 4, 5 }) do drive.putSolid(20, y, "harness_wall_" .. y) end
+    dveh._x = 11
+    driveTick(dp, dveh)
+    drive.scanRound()
+    dveh._speed = 0
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    local function via(pts) -- 終點接回原路線終點 (156,0)（requestDetourRoute 驗終點）
+        return { pts = pts, len = 300, cost = 300, avoidPenalty = 0, snapDist = 1 }
+    end
+    nav.detour = via({ 11, 0, 11, -200, 156, -200, 156, 0 })
+    local ok1 = MDAD.Drive.requestDetour(0)
+    local ss = MDAD.Drive.debugSession(0)
+    local ax1, ay1 = ss.avoidX, ss.avoidY
+    checkTrue(ok1 == true and nav.lastDetour and nav.lastDetour.more == nil and ax1 ~= nil,
+        "(c5h) 第一次改道沒有舊圈可附、收下")
+    -- 開到繞行線上 (100,−200)、前方又堵：交還前改道（不要求 blocked；堵點錨在車前 10m）
+    dveh._x, dveh._y = 100, -200
+    setHeading(dveh, 0)
+    ss.blockHitX, ss.blockHitY = 110, -200
+    nav.detour = via({ 100, -200, 100, 0, 156, 0 }) -- 原路穿回第一處路障
+    local ok2, why2 = MDAD.Drive.requestDetour(0, true)
+    local more = nav.lastDetour and nav.lastDetour.more
+    checkTrue(ok2 == false and why2 == "again" and type(more) == "table" and #more == 3
+            and math.abs(more[1] - ax1) < 1e-6 and math.abs(more[2] - ay1) < 1e-6 and more[3] == 40,
+        "(c5h) 第二次改道附上第一次的避讓圈，回來的線穿回舊圈＝拒收 again（實得 " .. tostring(why2) .. "）")
+    nav.detour = via({ 100, -200, 200, -200, 200, 0, 156, 0 })
+    local ok3 = MDAD.Drive.requestDetour(0, true)
+    checkTrue(ok3 == true and type(ss.avoidHist) == "table" and #ss.avoidHist == 3
+            and ss.avoidHist[1] == ax1 and ss.avoidHist[2] == ay1 and ss.avoidX ~= ax1,
+        "(c5h) 不穿舊圈的線收下，第一次的圈進歷史、目前的圈換成第二處")
+    -- 換目標＝新的一趟：先前判死的堵點不再算
+    nav.tx = 310
+    nowMs = nowMs + 300
+    driveTick(dp, dveh)
+    checkTrue(ss.avoidHist == nil and ss.avoidX == nil, "(c5h) 換目標清掉避讓圈與歷史")
+    for _, y in ipairs({ -5, -4, -2, -1, 0, 1, 2, 4, 5 }) do drive.clearCell(20, y) end
+    nav.detour = nil
+    MDAD.Drive.stop(0, nil)
+end
+drive.scenarioDetourHist()
 
 -- (c7) 車輛精確輪廓（2026-09-02 Dixie 車陣實爆）：兩台 1.8m 寬的車並排、真縫 2.8m
 --      （車寬 1.8＋兩側各 0.3 餘裕＝2.4 可過）。格級佔位把每台膨脹成 3 格＋0.7 圓，

@@ -102,11 +102,11 @@ local EK = {
     -- 全數帶進事件；每幀 sample 已有 dodge*Cap／capReason／physicalOffroad／zombieN。
     "a", "b", "c", "offL", "curve", "clear", "vis", "space", "design",
     "crawl", "tight", "tier", "rs", "span", "hitS", "hitX", "hitY", "hitPhase", "clearance", "shape",
-    "blocker",
+    "blocker", "thin", -- thin（1004f）：dodge commit 時換縫找更寬記下的最窄候選物理淨距
     -- tow attach（0929p）：掛車幾何（寬帶繞行掃掠、判堵停止線的輸入）
     "L2", "trailLen", "halfW", "mass", "hitchZ", "boxBack", "axisSign",
-    -- 寬帶掃描層級（1004b：blocked why=wide、detour）
-    "lvl",
+    -- 寬帶掃描層級（1004b：blocked why=wide、detour）；detour 附給主 MOD 的舊避讓圈數（1004f）
+    "lvl", "avoidN",
 }
 
 local function logOnce(msg)
