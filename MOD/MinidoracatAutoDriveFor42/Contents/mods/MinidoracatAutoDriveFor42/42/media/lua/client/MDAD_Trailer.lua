@@ -356,7 +356,8 @@ function T.cornerOf(px, py, nx, ny, qx, qy, wIn, wOut)
 end
 
 -- ---------------------------------------------------------------- shape：整條路線
--- 回新 route table（pts／segSurface／segWidth 同格式，給 MDADFollower.begin），加 towBlocked＝{x1,y1,x2,y2,...}。
+-- 回新 route table（pts／segSurface／segWidth 同格式，給 MDADFollower.begin），加 towBlocked＝{x1,y1,x2,y2,...}、
+-- towBlockedR＝{r1,r2,...}（每個不可過轉角的路口方塊半對角線＝兩臂半路寬的斜邊；Driver 改道避讓圈要蓋住整個轉角）。
 -- 同一個原始 route table 快取（Driver 用原始 identity 比對 cutover）。
 local cacheA, cacheB = nil, nil -- 最近兩條（現行＋cutover 新線）；不用弱表
 
@@ -369,7 +370,7 @@ function T.shape(route, tow, tractorHalfW, tractorFront)
     local np = #pts / 2
     local g = { L2 = tow.L2, rear = tow.hitchToRear, hw = tow.halfW,
         front = tractorFront or 4, thw = tractorHalfW or 1.2 }
-    local out, ow, os, blocked = {}, {}, {}, {}
+    local out, ow, os, blocked, blockedR = {}, {}, {}, {}, {}
     -- fold＝true（轉角規劃出來的點）：新點讓上一段反向（>90°；規劃點 0.5m 一點、圓弧 R≥4，正常每點
     -- 只轉幾度）就撤掉上一點再比。相鄰轉角段很短時，前一個轉角的轉出點已畫進本段、本轉角的外靠點又從
     -- 段中起算＝線往回折（0.13.1 正式服 StepVan＋掛車：90° 左轉接 13m 後 28° 彎，改寫線在 (10853,9976)
@@ -423,7 +424,10 @@ function T.shape(route, tow, tractorHalfW, tractorFront)
                 end
             end
         else
-            if c and not plan then blocked[#blocked + 1] = nx; blocked[#blocked + 1] = ny end
+            if c and not plan then
+                blocked[#blocked + 1] = nx; blocked[#blocked + 1] = ny
+                blockedR[#blockedR + 1] = sqrt(c.hwIn * c.hwIn + c.hwOut * c.hwOut)
+            end
             push(nx, ny, wIn, ss[i - 1])
         end
     end
@@ -433,7 +437,7 @@ function T.shape(route, tow, tractorHalfW, tractorFront)
     local shaped = {}
     for k, v in pairs(route) do shaped[k] = v end
     shaped.pts, shaped.segWidth, shaped.segSurface = out, ow, os
-    shaped.towBlocked = blocked
+    shaped.towBlocked, shaped.towBlockedR = blocked, blockedR
     shaped.towSource = route
     cacheB, cacheA = cacheA, { route = route, tow = tow, shaped = shaped }
     return shaped

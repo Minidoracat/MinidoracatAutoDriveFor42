@@ -395,6 +395,11 @@ TUNE.TOW_TURN_LEN_SLACK = 2000
 TUNE.TOW_TURN_LOOK_M = 8
 TUNE.TOW_TURN_TRIES = 3        -- 每 session 上限（繞行線又要調頭＝再試，不能無限來回）
 TUNE.TOW_TURN_WAIT_MS = 2000   -- 等 cutover 的上限；逾時照舊交還
+-- 拖車路線上有過不去的轉角（MDADTrailer.shape 的 towBlocked）時的改道（Drive.towCornerDetour）：得知當下就要一條
+-- 避開那些轉角的線；避讓圈半徑＝路口方塊半對角線＋PAD；長度上限同拖車調頭（TOW_TURN_LEN_*）；每 session（換目標重置）
+-- 最多問 TRIES 次，等 cutover 的上限同 TOW_TURN_WAIT_MS。
+TUNE.TOW_CORNER_AVOID_PAD = 2
+TUNE.TOW_CORNER_TRIES = 2
 -- 同一處反覆調頭（半徑 R 內第 MAX 次 uturn enter）＝路線把車困住，受困交還
 TUNE.UTURN_LOOP_R = 30
 TUNE.UTURN_LOOP_MAX = 4
@@ -2767,6 +2772,93 @@ function Drive.towTurnaround(s, playerNum, vehicle, now, fx, fy)
     if playerObj then haloGood(playerObj, MDADTrailer.KEY_TURN) end
     voice("detour", playerNum)
     return true
+end
+
+-- 拖車路線上有過不去的轉角（生效剖面 s.profileRoute.towBlocked 非空）：得知當下就向主 MOD 要一條避開那些轉角的線，
+-- 不等開到轉角前才交還。主圈＝路線上第一個不可過轉角（最先開到的），圈心在轉角節點、半徑＝路口方塊半對角線
+-- （towBlockedR）＋TOW_CORNER_AVOID_PAD；moreAvoid＝其餘不可過轉角＋本趟判死的舊圈（Drive.avoidMore），共最多 8 圈
+-- （跳過圈住車位或目標的：任何路線都穿）。nav API <9 只給主圈，回來的線自己驗不穿其他圈（again）。
+-- 驗收：requestDetourRoute 全套＋從車頭方向出發（back）＋新線走同一條剖面管線（Drive.profileRouteOf →
+-- MDADTrailer.shape）後沒有不可過轉角（blocked）。拒收＝記 s.rejectedRoute（主 MOD 快取已被覆寫）、保留原線，
+-- 行為照舊（guard 壓速、停在轉角前交還 TrailerCorner）。同一（route identity、轉角集合）只問一次；每 session
+-- TOW_CORNER_TRIES 次；守「堵死時自動改道」選項（關著不問，同交還前改道 Drive.stuckDetour）。
+-- 收下＝下一幀 cutover why=towcorner；這期間若已停在轉角前，呼叫端等 cutover（≤TOW_TURN_WAIT_MS）不交還。
+-- 每幀呼叫：剖面沒換只比一次 identity，不配置。
+function Drive.towCornerDetour(s, playerNum, vehicle, now, fx, fy)
+    local pr = s.profileRoute
+    local b = pr and pr.towBlocked
+    if b == nil or #b == 0 or s.towCornerSeen == pr then return end
+    s.towCornerSeen = pr
+    local sig = ""
+    for k = 1, #b do sig = sig .. string.format("%.1f,", b[k]) end
+    if s.towCornerRoute == s.route and s.towCornerSig == sig then return end -- 重建同一條線（版本變、重接）
+    s.towCornerRoute, s.towCornerSig = s.route, sig
+    local fin, rr, pad = MDADDynamics.finite, pr.towBlockedR, TUNE.TOW_CORNER_AVOID_PAD
+    local vx, vy, tx, ty = vehicle:getX(), vehicle:getY(), s.lastTx, s.lastTy
+    local ax, ay = b[1], b[2]
+    local r = (rr and fin(rr[1]) and rr[1] or 0) + pad
+    local why, skip, route, rejected, left, more = nil, false, nil, nil, nil, nil
+    local api = navApi()
+    if not (type(MDAD.HUD) == "table" and type(MDAD.HUD.autoDetour) == "function" and MDAD.HUD.autoDetour() == true) then
+        why, skip = "off", true
+    elseif (s.towCornerTries or 0) >= TUNE.TOW_CORNER_TRIES then
+        why, skip = "max", true
+    elseif not api or type(api.requestDetour) ~= "function" then
+        why = "api"
+    elseif not fin(tx) or not fin(ty) or (tx - ax) * (tx - ax) + (ty - ay) * (ty - ay) <= r * r then
+        why = "target"
+    elseif (vx - ax) * (vx - ax) + (vy - ay) * (vy - ay) <= r * r then
+        why = "inside"
+    else
+        s.towCornerTries = (s.towCornerTries or 0) + 1
+        local j = 1
+        for k = 3, #b - 1, 2 do
+            j = j + 1
+            local x, y = b[k], b[k + 1]
+            local cr = (rr and fin(rr[j]) and rr[j] or 0) + pad
+            if (more == nil or #more < 24) and (vx - x) * (vx - x) + (vy - y) * (vy - y) > cr * cr
+                    and (tx - x) * (tx - x) + (ty - y) * (ty - y) > cr * cr then
+                if more == nil then more = {} end
+                more[#more + 1], more[#more + 2], more[#more + 3] = x, y, cr
+            end
+        end
+        local hist = Drive.avoidMore(s, vx, vy, tx, ty, ax, ay, true)
+        for k = 1, hist and #hist or 0 do
+            if more == nil then more = {} end
+            if #more >= 24 then break end
+            more[#more + 1] = hist[k]
+        end
+        local v9 = fin(api.navApiVersion) and api.navApiVersion >= 9
+        local remaining = s.profile and (s.profile.length - s.lastSNow) or nil
+        route, why, rejected = requestDetourRoute(api, playerNum, tx, ty, ax, ay, remaining, r,
+            fin(remaining) and remaining * TUNE.TOW_TURN_LEN_RATIO + TUNE.TOW_TURN_LEN_SLACK or nil, s.route,
+            v9 and more or nil)
+        if route and not v9 and Drive.crossesAnyAvoid(route, more) then route, why, rejected = nil, "again", route end
+        if route and not Drive.routeLeavesForward(route, vx, vy, fx, fy) then route, why, rejected = nil, "back", route end
+        if route then
+            local shaped = Drive.profileRouteOf(route, s.tow, s.vehicleProfile, vx, vy)
+            left = shaped.towBlocked and #shaped.towBlocked / 2 or 0
+            if left > 0 then route, why, rejected = nil, "blocked", route end
+        end
+        -- 主 MOD 算出線就已覆寫快取（含被拒的）：記住 identity，cutover 不收；沒算出線＝快取沒動，舊的拒收紀錄保留
+        if rejected ~= nil and not route then s.rejectedRoute = rejected end
+    end
+    diagEvent(s, playerNum, "detour", { phase = skip and "skip" or "towcorner", kind = "towcorner",
+        why = why or "ok", x = vx, y = vy, s = s.lastSNow, hitX = ax, hitY = ay, avoidR = r,
+        avoidN = more and #more / 3 or nil, towN = #b / 2, towLeft = left, attempt = s.towCornerTries,
+        len = route and route.len or (rejected and rejected.len) or nil })
+    if getDebug() then
+        print(LOG .. "pn=" .. playerNum .. " tow corner detour corners=" .. #b / 2 .. " avoid=(" .. ax .. "," .. ay
+            .. ") r=" .. r .. " more=" .. tostring(more and #more / 3) .. " -> "
+            .. (route and ("ok len=" .. tostring(route.len)) or ("rejected " .. tostring(why))
+                .. (left and left > 0 and (" left=" .. left) or "")))
+    end
+    if not route then return end
+    s.pendingDetour, s.pendingRouteWhy, s.nextRouteMs = true, "towcorner", 0
+    s.towCornerUntil = now + TUNE.TOW_TURN_WAIT_MS
+    local playerObj = getSpecificPlayer(playerNum)
+    if playerObj then haloGood(playerObj, KEY_DETOUR) end
+    voice("detour", playerNum)
 end
 
 --------------------------------------------------------------------------------
@@ -11877,7 +11969,12 @@ local function stepFollow(s, vehicle, playerNum, now)
                     end
                     return
                 end
+                -- 路線上有過不去的轉角：得知當下先要一條避開的改道（Drive.towCornerDetour），沒有才照舊停在轉角前交還
+                Drive.towCornerDetour(s, playerNum, vehicle, now, fx, fy)
                 local towCap, towWhy = MDADTrailer.guard(s, vehicle, now, speedKmh)
+                if towWhy == "corner" and s.pendingRouteWhy == "towcorner" and now < (s.towCornerUntil or 0) then
+                    towCap, towWhy = 0, nil -- 已收下避開轉角的線、等下一幀 cutover：停住不交還
+                end
                 if towWhy then
                     vehicle:setRegulator(false)
                     BaseVehicle.releaseVector3f(fwd)
@@ -12449,6 +12546,7 @@ local function onPlayerUpdate(player)
             s.avoidHist = nil -- 新目標＝新的一趟，先前判死的堵點不再算
             s.avoidLong, s.stuckDetourN, s.stuckDetourX, s.stuckDetourY = nil, 0, nil, nil -- 新目標＝新的改道額度
             s.towTurnTries, s.uturnLoopX, s.uturnLoopY = 0, nil, nil -- 新目標＝新的一趟
+            s.towCornerTries = 0 -- 新目標＝新的一趟
             s.rejectedRoute = nil
         end
         -- 被本 MOD 拒收的替代線（far／long／through）仍躺在主 MOD 快取裡（requestDetour

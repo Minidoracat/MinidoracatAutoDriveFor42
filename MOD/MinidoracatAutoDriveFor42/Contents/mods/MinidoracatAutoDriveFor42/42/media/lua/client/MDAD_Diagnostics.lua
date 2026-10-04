@@ -108,6 +108,8 @@ local EK = {
     "L2", "trailLen", "halfW", "mass", "hitchZ", "boxBack", "axisSign",
     -- 寬帶掃描層級（1004b：blocked why=wide、detour）；detour 附給主 MOD 的舊避讓圈數（1004f）
     "lvl", "avoidN",
+    -- 拖車不可過轉角改道（detour phase＝towcorner）：主避讓圈半徑、路線上不可過轉角數、替代線剖面仍不可過的轉角數
+    "avoidR", "towN", "towLeft",
 }
 
 local function logOnce(msg)
