@@ -7604,6 +7604,41 @@ do
     checkTrue(not MDAD.Drive.isActive(0), "(ex-go) 額度用盡＋GO 不動 25s：交還（intent " .. table.concat(seen, ",") .. "）")
     checkEq(haloKey(), DKEY.STUCK, "(ex-go) 交還理由 StopStuck（實得 " .. tostring(haloKey()) .. "）")
 end
+-- (ex-go-rear) 1004g：後方一寸不退時的 GO 也計停等預算（E2E k1004g nightrain：路上 24 台車，改道後車被前後夾住、
+--   GO 8 km/h 不動；rear-blocked softFail 不扣倒車額度＝次數永遠 0，舊條件只認「額度用盡」→ 3 分鐘不交還）。
+--   違規證明：計時條件拿掉後方探測＝這條紅（session 一直活著）。
+function drive.scenarioExGoRear()
+    local oldAuto = MDAD.HUD.autoDetour
+    MDAD.HUD.autoDetour = function() return false end
+    checkTrue(armDrive(), "(ex-go-rear) 重臂（淨空路）")
+    dveh._x, dveh._y, dveh._speed = 11, 0, 0
+    setHeading(dveh, 0)
+    for _, y in ipairs({ -1, 0, 1 }) do drive.putSolid(7, y, "harness_rearwall_" .. y) end -- 車尾後 0.8m＝一寸不退
+    driveReset(dveh)
+    drive.scanRound()
+    local st = MDAD.Drive.debugSession(0)
+    st.episodeActive, st.episodeAttempts, st.episodeId = true, 0, 6
+    local maxAtt, rears, intents = 0, {}, {}
+    for _ = 1, 12 do
+        nowMs = nowMs + 2500
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        local cur = MDAD.Drive.debugSession(0)
+        if not cur then break end
+        if cur.episodeAttempts > maxAtt then maxAtt = cur.episodeAttempts end
+        rears[#rears + 1] = tostring(cur.rearStatus)
+        intents[#intents + 1] = tostring(cur.intentShadow)
+    end
+    checkTrue(not MDAD.Drive.isActive(0) and maxAtt == 0,
+        "(ex-go-rear) 後方擋死＋GO 不動 30s：倒車額度沒扣也交還（倒車次數 " .. maxAtt .. "、rear "
+            .. table.concat(rears, ",") .. "、intent " .. table.concat(intents, ",") .. "）")
+    checkEq(haloKey(), DKEY.STUCK, "(ex-go-rear) 交還理由 StopStuck（實得 " .. tostring(haloKey()) .. "）")
+    for _, y in ipairs({ -1, 0, 1 }) do drive.clearCell(7, y) end
+    dveh._x, dveh._y = 0, 0
+    MDAD.HUD.autoDetour = oldAuto
+    MDAD.Drive.stop(0, nil)
+end
+drive.scenarioExGoRear()
 
 -- 對抗式 phase collision：把已烘好的第一個 baseline 點壓到一棵「弧座標不擋線」
 -- 的樹上。若碰撞判定被錯包進 a..c 的 inCap，這條會誤 commit。
@@ -11614,6 +11649,40 @@ local function scenarioNudge()
 end
 scenarioNudge()
 end
+
+-- (st) 窄縫進入段用滿跑道（1004g TUNE.ENTRY_STRETCH_MAX；E2E h1004f dixie9050w：唯一的縫物理淨距 0.16、彎上 11.45m 塞
+--   6.3m 側移、車到 b 有 19.9m 跑道沒用，轉向延遲落後 0.16–0.2 擦到）：B（+1.9）與 C（−2.6）夾一條縫，爬行設計的候選
+--   −0.40 物理淨距 <0.3 → 同一條 offL 以兩倍長的進入段重建、淨距不變＝換（variant 加 -stretch）；同組幾何把縫放寬到
+--   物理 0.4（B +2.0、C −2.8、−0.35）＝不動。對照用 ENTRY_STRETCH_MAX＝1（不可能拉長）。
+--   違規證明：stretch 一律原樣回／shapeProfile 不吃 entryStretch＝紅。
+function drive.scenarioEntryStretch()
+    local T = MDAD.Drive.debugTune()
+    local function probe(by, cy, off)
+        drive.fillWorld(-10, 120, -8, 8)
+        drive.putVehicleGeom(32, by, 0, 1.8, 4.4, true)
+        drive.putVehicleGeom(32, cy, 0, 1.8, 4.4, true)
+        driveReset(dveh)
+        drive.scanRound()
+        T.ENTRY_STRETCH_MAX = 1
+        local ok1, _, v1, mg1, a1, b1 = MDAD.Drive.debugSweepFallbacks(0, 10, 28, 36, 44, off, "st", true)
+        T.ENTRY_STRETCH_MAX = 2
+        local ok2, _, v2, mg2, a2, b2 = MDAD.Drive.debugSweepFallbacks(0, 10, 28, 36, 44, off, "st", true)
+        return ok1, v1, mg1, a1 and b1 - a1, ok2, v2, mg2, a2 and b2 - a2
+    end
+    checkTrue(armDrive(), "(st) 啟動")
+    local ok1, v1, mg1, e1, ok2, v2, mg2, e2 = probe(1.9, -2.6, -0.4)
+    checkTrue(ok1 == true and ok2 == true and type(v2) == "string" and v2:find("stretch", 1, true) ~= nil
+            and e2 >= 1.9 * e1 and mg2 >= mg1 - 0.02,
+        string.format("(st) 窄縫（爬行設計、跑道 27m）：進入段 %.1f → %.1fm（%s → %s）、淨距 %.2f → %.2f", e1 or -1, e2 or -1,
+            tostring(v1), tostring(v2), mg1 or -1, mg2 or -1))
+    ok1, v1, mg1, e1, ok2, v2, mg2, e2 = probe(2.0, -2.8, -0.35)
+    checkTrue(ok1 == true and ok2 == true and (v2 == nil or v2:find("stretch", 1, true) == nil)
+            and math.abs(e2 - e1) < 1e-6,
+        string.format("(st) 物理淨距 ≥0.3 的縫不拉長（進入段 %.1f／%.1fm、%s）", e1 or -1, e2 or -1, tostring(v2)))
+    MDAD.Drive.stop(0, nil)
+    drive.fillWorld(-2, 70, -7, 7)
+end
+drive.scenarioEntryStretch()
 
 -- (c8) MP 假速度域（2026-09-02 s012：regulator 70、直路 30 秒貼死 51 km/h）：
 --      CarController 用 v·lerp(1, fake, (v/min(120,SpeedLimit))²) 與 regulatorSpeed

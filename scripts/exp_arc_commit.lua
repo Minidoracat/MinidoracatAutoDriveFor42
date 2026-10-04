@@ -12,18 +12,26 @@
     （τ 0.35，夾 v/rMin）；G＝const、prop（G＝c·v，CarNormal 實測 55 km/h 0.98、23 km/h 0.45）或 curv（G＝KPS·v，
     同 (A) 的曲率型 plant，KPS 0.4＝高增益車），Driver 回授正規化照實。
     out＝弧上最大外漂、in＝弧上到出弧 10m 最大切內（m）。
+(C) 同 (B) 的承諾線（×DODGE），只對承諾線（trackTangent）把弧段前饋 FRAC 由 0.75（CURVE_FF_FRAC，09-08 裁定欠轉）提高：
+    外漂與切內的交換（1004g open-issues「承諾線在弧上減速仍外漂」）。
+(D) 同 (B) 的承諾線，轉向增益直接給 plant 真值（不靠線上估計）：外漂還剩多少＝設計欠轉的份，不是估計落後。
+(E) 窄縫陡進入段用滿跑道（1004g TUNE.ENTRY_STRETCH_MAX；E2E h1004f dixie9050w：R≈17 弧上 11.45m 塞 6.3m，跑道 19.9m）
+    與只降速的對照；量法同 (A)。
 垂距一律對承諾線折線本身量（不是路線弧長同 s 的橫距）。
 ]]
 local MEDIA = "MOD/MinidoracatAutoDriveFor42/Contents/mods/MinidoracatAutoDriveFor42/42/media/lua"
 assert(loadfile(MEDIA .. "/shared/MDAD_Dynamics.lua"))()
 local D = MDADDynamics
-local function loadF(variant)
+local function loadF(variant, frac)
     local fh = assert(io.open(MEDIA .. "/shared/MDAD_Follower.lua")); local src = fh:read("*a"); fh:close()
+    local n = 1
     if variant == "off" then
-        local n
         src, n = src:gsub("or arcK ~= nil and isFinite%(state%.offL%)", "or false and isFinite(state.offL)", 1)
-        assert(n == 1, variant)
+    elseif frac then
+        src, n = src:gsub("local frac, g = CURVE_FF_FRAC, yawGain",
+            "local frac, g = (state.trackTangent == true and " .. frac .. " or CURVE_FF_FRAC), yawGain", 1)
     end
+    assert(n == 1, variant)
     local env = setmetatable({}, { __index = _G }) -- 各變體各自一份（同一張 MDADFollower 表會互蓋）
     assert(load(src, "Follower-" .. variant, "t", env))()
     return env.MDADFollower
@@ -98,7 +106,7 @@ local function entry(F, cs)
     local car = { x = 60, y = cs.y0, h = 0, w = 0 }
     local sgn = cs.offL < cs.y0 and 1 or -1 -- 障礙側＝起點那側
     local prev, lagMax, overMax, dMax = nil, -1e9, 0, 0
-    for _ = 1, 30 * 40 do
+    for _ = 1, 30 * 200 do
         local kmh = cs.v
         local steer, _, rem, _, _, _, latSigned, lineLat = F.control(p, st, car.x, car.y, car.h, kmh, dt)
         local sNow = p.length - rem
@@ -109,7 +117,8 @@ local function entry(F, cs)
         local u = driverSteer(st, steer, latDev, kmh, dLat, D.CROSS_TRACK_DODGE_GAIN, D.CROSS_TRACK_DODGE_MAX)
         st.appliedSteer = u
         local v = kmh / 3.6
-        local k = u * KPS; if k > 1 / VP.rMin then k = 1 / VP.rMin elseif k < -1 / VP.rMin then k = -1 / VP.rMin end
+        local kps = cs.kps or KPS
+        local k = u * kps; if k > 1 / VP.rMin then k = 1 / VP.rMin elseif k < -1 / VP.rMin then k = -1 / VP.rMin end
         car.w = car.w + (k * v - car.w) * (dt / TAU); car.h = car.h + car.w * dt
         car.x = car.x + math.cos(car.h) * v * dt; car.y = car.y + math.sin(car.h) * v * dt
         local dv = lineDev(st, car.x, car.y)
@@ -137,6 +146,9 @@ local function cruise(F, cs, xg, xm)
     local car = { x = 60, y = cs.lane, h = 0, w = 0 }
     local prev, out, inn, kmh = nil, 0, 0, cs.v0
     for _ = 1, 30 * 40 do
+        local v = kmh / 3.6
+        local G = cs.plant == "prop" and math.max(0.12, 0.065 * v) or (cs.plant == "curv" and cs.kps * v) or cs.G
+        if cs.oracle then st.yawGain, st.yawGainFb = G, G end
         local steer, _, rem, _, _, _, latSigned, lineLat = F.control(p, st, car.x, car.y, car.h, kmh, dt)
         local sNow = p.length - rem
         local latDev = latSigned - (lineLat or cs.lane)
@@ -147,8 +159,6 @@ local function cruise(F, cs, xg, xm)
         if st.curveHardActive then g1, m1 = xg, xm end
         local u = driverSteer(st, steer, latDev, kmh, dLat, g1, m1)
         st.appliedSteer = u
-        local v = kmh / 3.6
-        local G = cs.plant == "prop" and math.max(0.12, 0.065 * v) or (cs.plant == "curv" and cs.kps * v) or cs.G
         local wT = G * u
         if wT > v / VP.rMin then wT = v / VP.rMin elseif wT < -v / VP.rMin then wT = -v / VP.rMin end
         car.w = car.w + (wT - car.w) * (dt / 0.35); car.h = car.h + car.w * dt
@@ -181,7 +191,7 @@ for _, cs in ipairs({
         cs.offL - cs.y0, cs.v, entry(Foff, cs), entry(Fon, cs)))
 end
 print("(B) 巡航承諾線在弧上（off/on × cross-track ×ARC／×DODGE）")
-for _, cs in ipairs({
+local ARC_CASES = {
     { R = 40, deg = 60, lane = -0.2, v0 = 48, v1 = 22, plant = "prop" }, -- f1004e
     { R = 40, deg = 60, lane = -0.2, v0 = 48, v1 = 22, G = 0.6 },
     { R = 40, deg = 60, lane = -0.2, v0 = 22, plant = "prop" },
@@ -195,7 +205,9 @@ for _, cs in ipairs({
     { R = 12, deg = 90, lane = -0.3, v0 = 25, plant = "curv", kps = 0.4 },
     { R = 20, deg = 90, lane = -0.3, v0 = 35, plant = "curv", kps = 0.16 },
     { R = 8, deg = 90, lane = -0.3, v0 = 15, plant = "curv", kps = 0.4 },
-}) do
+}
+local function plantTag(cs) return cs.plant == "curv" and ("k" .. cs.kps) or cs.plant or ("G" .. cs.G) end
+for _, cs in ipairs(ARC_CASES) do
     local row = {}
     for _, vr in ipairs({ { "off", Foff, "x2", D.CROSS_TRACK_ARC_GAIN, D.CROSS_TRACK_ARC_MAX },
         { "on", Fon, "x2", D.CROSS_TRACK_ARC_GAIN, D.CROSS_TRACK_ARC_MAX },
@@ -203,5 +215,35 @@ for _, cs in ipairs({
         row[#row + 1] = string.format("%s%s %s", vr[1], vr[3], cruise(vr[2], cs, vr[4], vr[5]))
     end
     print(string.format("  R%-3d lane %+4.1f %2d%s km/h %-5s | %s", cs.R, cs.lane, cs.v0, cs.v1 and ("->" .. cs.v1) or "",
-        cs.plant == "curv" and ("k" .. cs.kps) or cs.plant or ("G" .. cs.G), table.concat(row, " | ")))
+        plantTag(cs), table.concat(row, " | ")))
+end
+print("(C) 承諾線弧段前饋 FRAC（×DODGE；0.75＝現行 CURVE_FF_FRAC）")
+local FR = { "0.75", "0.85", "0.95", "1.05" }
+local Ffr = {}
+for _, f in ipairs(FR) do Ffr[f] = f == "0.75" and Fon or loadF("frac", f) end
+for _, cs in ipairs(ARC_CASES) do
+    local row = {}
+    for _, f in ipairs(FR) do
+        row[#row + 1] = "frac " .. f .. " " .. cruise(Ffr[f], cs, D.CROSS_TRACK_DODGE_GAIN, D.CROSS_TRACK_DODGE_MAX)
+    end
+    print(string.format("  R%-3d lane %+4.1f %2d%s km/h %-5s | %s", cs.R, cs.lane, cs.v0, cs.v1 and ("->" .. cs.v1) or "",
+        plantTag(cs), table.concat(row, " | ")))
+end
+print("(D) 承諾線（×DODGE）：線上估計的轉向增益 vs 直接給 plant 真值")
+for _, cs in ipairs(ARC_CASES) do
+    local est = cruise(Fon, cs, D.CROSS_TRACK_DODGE_GAIN, D.CROSS_TRACK_DODGE_MAX)
+    cs.oracle = true
+    local orc = cruise(Fon, cs, D.CROSS_TRACK_DODGE_GAIN, D.CROSS_TRACK_DODGE_MAX)
+    cs.oracle = nil
+    print(string.format("  R%-3d lane %+4.1f %2d%s km/h %-5s | 估計 %s | 真值 %s", cs.R, cs.lane, cs.v0,
+        cs.v1 and ("->" .. cs.v1) or "", plantTag(cs), est, orc))
+end
+print("(E) 窄縫陡進入段（R17 弧、+1.83 → −4.5）：進入段長 × 車速 × plant KPS")
+for _, kps in ipairs({ 0.16, 0.25 }) do
+    for _, L in ipairs({ 11.45, 15, 19.9 }) do
+        for _, v in ipairs({ 15, 10, 7, 5, 3 }) do
+            print(string.format("  KPS %.2f entry %5.2f %2d km/h  %s", kps, L, v,
+                entry(Fon, { R = 17, deg = 90, at = 4, entry = L, y0 = 1.83, offL = -4.5, v = v, kps = kps })))
+        end
+    end
 end

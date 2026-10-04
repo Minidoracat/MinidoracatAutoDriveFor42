@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1004f"
+Drive.REV = "1004g"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -640,6 +640,12 @@ TUNE.NUDGE_WIDEN_M = 0.35
 -- sweep base−halfW）低於此值時先記下、ban 掉往下找，找到更寬的就換，找完沒有就用記下最寬的那條（Drive.thinNote）。
 -- 拓寬（NUDGE_WIDEN_M）只在同一個縫裡挪一格；這裡換縫。不否決通行：只有更寬的也掃過才換。
 TUNE.DODGE_THIN_M = 0.3
+-- 窄縫進入段用滿跑道（1004g；E2E h1004f dixie9050w：唯一的縫物理淨距 0.16、彎上 11.45m 塞 6.3m 側移，最彎處半徑
+-- 約 3.4m 接近這台車的最小迴轉半徑 3.03m，轉向延遲讓車落後 0.16–0.2m 擦到；車到 b 其實有 19.9m 跑道沒用）：掃過的
+-- 候選物理淨距仍低於 DODGE_THIN_M、車到 b 的跑道比設計進入段長時，同一條 offL 以較長進入段（最多設計長的此倍數）重建
+-- 再掃，淨距沒變窄就換（sweepWithFallbacks 的 stretch）。不降速：較長的進入段讓空間帽反而放寬。離線
+-- scripts/exp_arc_commit.lua (E) 同型線（R17 弧、6.33m 側移）低增益 plant 落後 0.21–0.26 → 0.00–0.11（15／19.9m）。
+TUNE.ENTRY_STRETCH_MAX = 2
 -- 貼縫可執行下限（同 s057：commit cap 0.5／0.6／1.3／1.7 km/h＝淨距 0.05-0.08 的
 -- clearanceCap；CRAWL intent 沒有 MIN_EXEC 地板，車以 1 km/h 爬、進度看門狗 6 秒判卡
 -- → 倒車 → 再承諾同一條 0.5 km/h 的線 → 三次用盡 → attempt-limit 每 2.5 秒一次、CRAWL
@@ -7497,6 +7503,11 @@ local function shapeProfile(s, profile, a, b, c, d, offL, baseL, crawlDesign)
     -- 變陡由 shiftSpaceSpeedCapKmh 按實長連續壓速、世界掃掠 OBB 終審幾何。
     local entryLen = required > entryAvail and entryAvail or required
     if entryLen < 1 then entryLen = 1 end
+    -- 進入段用滿跑道（sweepWithFallbacks 的 stretch 設 s.entryStretch；理由見 TUNE.ENTRY_STRETCH_MAX）
+    if s.entryStretch and entryAvail > entryLen then
+        local cap = entryLen * TUNE.ENTRY_STRETCH_MAX
+        entryLen = entryAvail < cap and entryAvail or cap
+    end
     -- 陡坡閘門要用純運動學長度 sqrt(6·dl/κ)，不含 shiftLength 的 2×halfL 地板（2026-09-04
     -- s@167683 路口：路緣桿 l 3.0-6.4 在 2m 外、entryAvail 1.2m，連 dl=0.25 都被 min=4.2
     -- （＝車長地板）判 ratio 3.4 拒收 → 全滅 blocked 「明明沒有障礙擋到路線」）。
@@ -8604,6 +8615,28 @@ local function sweepWithFallbacks(s, planN, a, b, c, d, offL, baseL, tag, nb, ph
         end
         return true, wa, wb, wc, wd, wo, wmg, wovN, wovS0, wnb, variant
     end
+    -- 窄縫進入段用滿跑道（TUNE.ENTRY_STRETCH_MAX）：接在掃過的候選（含拓寬後）之後。物理淨距已夠＝原樣回；否則同一條
+    -- offL 以較長進入段重建再掃，淨距沒變窄（容差 2cm）才換、tier 加 "-stretch"；沒換就還原 shape 暫存與 tmpOv（同 widen）。
+    local function stretch(ok, xa, xb, xc, xd, xo, xmg, xovN, xovS0, xnb, variant)
+        if not ok or xmg + xnb - s.vehicleProfile.halfW >= TUNE.DODGE_THIN_M then
+            return ok, xa, xb, xc, xd, xo, xmg, xovN, xovS0, xnb, variant
+        end
+        s.entryStretch = true
+        local ya, yb, yc, yd, shapeY = shapeProfile(s, s.profile, a, b, c, d, xo, baseL, crawlDesign)
+        s.entryStretch = false
+        if shapeY and ya < xa - 1 then
+            local ovNy, ovS0y, okY, mgY = sweepCandidate(s, shapeY, ya, yb, yc, yd, xo, baseL, tag .. "-stretch", xnb)
+            if okY and mgY >= xmg - 0.02 then
+                return true, ya, yb, yc, yd, xo, mgY, ovNy, ovS0y, xnb, variant and (variant .. "-stretch") or "stretch"
+            end
+        end
+        shapeProfile(s, s.profile, a, b, c, d, xo, baseL, crawlDesign)
+        local _, _, _, covered = MDADFollower.buildOffsetLine(
+            s.profile, s.lastSNow, xa, xb, xc, xd, xo, baseL, s.tmpOvX, s.tmpOvY,
+            nil, nil, nil, startLaneOf(s, baseL))
+        s.tmpOvEndS = covered
+        return true, xa, xb, xc, xd, xo, xmg, xovN, xovS0, xnb, variant
+    end
     -- 鏈上回家候選 → 停留（理由見 TUNE.STAY_HOME_M）；停留線掃不過再走一般候選鏈。
     -- 主候選、同線物理複驗、微調三個入口都先問（s037 t=20：主候選 1.5 停留掃不過、
     -- 微調 1.75 才過——只在主候選問一次就漏成全繞行，回線段又把車拉回鏈 lane）。
@@ -8633,7 +8666,7 @@ local function sweepWithFallbacks(s, planN, a, b, c, d, offL, baseL, tag, nb, ph
             s.profile, s.lastSNow, sa, sb, sc, sd, offL, baseL, s.tmpOvX, s.tmpOvY,
             nil, nil, nil, startLaneOf(s, baseL))
         s.tmpOvEndS = covered
-        return widen(sa, sb, sc, sd, offL, mg, ovN, ovS0, nb, nil, hi)
+        return stretch(widen(sa, sb, sc, sd, offL, mg, ovN, ovS0, nb, nil, hi))
     end
     local f = s.fbFail
     if f == nil then f = {}; s.fbFail = f end
@@ -8648,7 +8681,7 @@ local function sweepWithFallbacks(s, planN, a, b, c, d, offL, baseL, tag, nb, ph
         end
         local ovN2, ovS02, ok2, mg2, hitS2, ph2, hps2, hx2, hy2, hi2 = sweepCandidate(
             s, shapeOk, sa, sb, sc, sd, offL, baseL, tag .. "-phys", physBase)
-        if ok2 then return widen(sa, sb, sc, sd, offL, mg2, ovN2, ovS02, physBase, "physical", hi2) end
+        if ok2 then return stretch(widen(sa, sb, sc, sd, offL, mg2, ovN2, ovS02, physBase, "physical", hi2)) end
         used = physBase
         mg, ph, hps, hi = mg2, ph2, hps2, hi2
         hitS, hx, hy = hitS2, hx2, hy2
@@ -8665,7 +8698,7 @@ local function sweepWithFallbacks(s, planN, a, b, c, d, offL, baseL, tag, nb, ph
         end
         local ovN3, ovS03, ok3, mg3 = sweepCandidate(
             s, shapeN, na, nb2, nc, nd, offN, baseL, tag .. "-nudge", used)
-        if ok3 then return true, na, nb2, nc, nd, offN, mg3, ovN3, ovS03, used, "nudge" end
+        if ok3 then return stretch(true, na, nb2, nc, nd, offN, mg3, ovN3, ovS03, used, "nudge") end
         -- nudge 的 shapeProfile 同樣會改寫 spaceCap／designSpeed／shapeReason；失敗後
         -- 下一步 stay 採原 offL，必先復原原線暫存（widen 同款）。
         shapeProfile(s, s.profile, a, b, c, d, offL, baseL, crawlDesign)
@@ -8729,14 +8762,15 @@ function Drive.debugStayLook(playerNum, a, b, c, d, offL, sc, b2, o2)
 end
 
 -- 測試鉤（harness 鎖同縫微調的 predicate：方向＝遠離命中點、步距一格、只在近失時）：
--- 對當前 session 的點雲跑一次 sweepWithFallbacks，回 ok, offL, variant, margin。production 無呼叫者。
-function Drive.debugSweepFallbacks(playerNum, a, b, c, d, offL, tag)
+-- 對當前 session 的點雲跑一次 sweepWithFallbacks，回 ok, offL, variant, margin, a, b, c, d。crawl＝爬行設計（窄縫的
+-- 重試／爬行檔，短進入段）。production 無呼叫者。
+function Drive.debugSweepFallbacks(playerNum, a, b, c, d, offL, tag, crawl)
     local s = sessions[playerNum]
     if not s or not s.sensor or not s.sensor.ready then return nil end
     local physBase = MDADVehicleProfile.sweepBase(s.vehicleProfile.halfW, "physical")
     local ok, ra, rb, rc, rd, ro, mg, _, _, _, variant = sweepWithFallbacks(
         s, s.sensor.hardN, a, b, c, d, offL, laneBiasOf(s), tag or "debug",
-        s.sweepBase, physBase, false)
+        s.sweepBase, physBase, crawl == true)
     if not ok then return false, s.dodgeShapeReason end
     return true, ro, variant, mg, ra, rb, rc, rd
 end
@@ -11260,11 +11294,14 @@ local function stepFollow(s, vehicle, playerNum, now)
         -- 由 waitProgressed 的航向收斂（rotating 分支）歸零，原地空轉才累計。
         -- 倒車額度用盡後的 GO 也計（1001g，E2E rc44 0007：繞行承諾中 min-exec 8 km/h、車卡在路肩 0 km/h，
         -- attempt-limit softFail 每 3.5 秒回 follow 一次、5 分鐘不交還）；額度沒用完的 GO 是起步加速，不計。
+        -- 最後一次後方探測不通的 GO 同樣計（1004g，E2E k1004g nightrain：路上 24 台車，改道後車被前後夾住、
+        -- GO 8 km/h 不動，rear-blocked softFail 不扣額度＝次數永遠 0，3 分鐘不交還——同上面「審查補刀」）。
         if s.intentShadow == "WAIT" or s.intentShadow == "RECOVER"
                 or (s.intentShadow == "ROTATE" and avProgress < 1)
                 or (s.episodeActive and avProgress < 1 and not s.areaWaitActive
                     and (s.intentShadow == "CRAWL" or s.intentShadow == "STOP"
-                        or (s.intentShadow == "GO" and s.episodeAttempts >= UNSTICK_MAX))) then
+                        or (s.intentShadow == "GO" and (s.episodeAttempts >= UNSTICK_MAX
+                            or s.rearStatus ~= "clear" and s.rearStatus ~= "unknown")))) then
             if s.waitTickMs == 0 then
                 s.waitTickMs = now
                 if s.waitAccumMs == 0 then
