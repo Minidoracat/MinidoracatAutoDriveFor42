@@ -342,8 +342,11 @@ end
 -- 反例：raw bias 2、弧前 6m 實際 1.0，l=0 的硬物對 2 不擋、對 1.0 擋，舊制 clear 直接撞）。
 -- 缺項退 baseL。縫隙搜尋（candidate lane）仍是常數 lane——側偏承諾線本身由掃掠驗。
 -- minS（第 13 參，選填）＝規劃群的弧長下界；省略不裁。只篩群錨／群聚合，不改原始點雲。
+-- ringFrom（第 14 參，選填）＝上一級寬帶的走廊半寬：只搜 |lane| > ringFrom−needHalf 的外圈（Driver 寬帶第二級，
+-- 1004c）。內圈第一級已用同一個點雲判過；不排除的話近處那幾條「走廊淨空、世界掃掠撞」的縫會先把候選額度用完、
+-- 輪不到外圈，額度放大又讓一次判堵在樹叢地卡到半秒。非有限正數＝不分圈。
 function MDADCorridor.plan(hardS, hardL, hardN, needHalf, corridorHalf, preferL, hardR, baseL,
-        roadLo, roadHi, refineComfort, baseAt, minS)
+        roadLo, roadHi, refineComfort, baseAt, minS, ringFrom)
     if minS ~= nil and (type(minS) ~= "number" or minS * 0 ~= 0) then
         return "blocked", 0, 0, 0, 0, 0
     end
@@ -443,6 +446,9 @@ function MDADCorridor.plan(hardS, hardL, hardN, needHalf, corridorHalf, preferL,
     -- 路面帶有效性：任一邊壞值或帶寬非正＝無路面資訊，直接單遍全域。
     local roadOK = type(roadLo) == "number" and roadLo * 0 == 0
         and type(roadHi) == "number" and roadHi * 0 == 0 and roadLo < roadHi
+    -- 外圈（ringFrom，見檔頭）：|j| ≤ jIn 的格點是內圈，不當候選；jIn＝−1＝不分圈
+    local jIn = -1
+    if isFinitePos(ringFrom) and ringFrom > needHalf then jIn = floor((ringFrom - needHalf) / STEP + 1e-9) end
     if limit >= 0 then
         local jMax = floor(limit / STEP)
         -- 取離 preferL 最近的格點；恰在兩格中點時取較小 l（實際左側）。
@@ -462,7 +468,7 @@ function MDADCorridor.plan(hardS, hardL, hardN, needHalf, corridorHalf, preferL,
         for pass = (roadOK and 1 or 2), 2 do
             for r = 0, 2 * jMax do
                 local j = pj + firstSign * r
-                if j >= -jMax and j <= jMax then
+                if j >= -jMax and j <= jMax and (j > jIn or j < -jIn) then
                     local cand = j * STEP
                     if (pass == 2 or (cand >= roadLo and cand <= roadHi))
                         and laneFree(hardS, hardL, hardR, n, sLo, sHi, cand, needHalf) then
@@ -473,7 +479,7 @@ function MDADCorridor.plan(hardS, hardL, hardN, needHalf, corridorHalf, preferL,
                 end
                 if r > 0 then
                     j = pj - firstSign * r
-                    if j >= -jMax and j <= jMax then
+                    if j >= -jMax and j <= jMax and (j > jIn or j < -jIn) then
                         local cand = j * STEP
                         if (pass == 2 or (cand >= roadLo and cand <= roadHi))
                             and laneFree(hardS, hardL, hardR, n, sLo, sHi, cand, needHalf) then
@@ -496,6 +502,7 @@ function MDADCorridor.plan(hardS, hardL, hardN, needHalf, corridorHalf, preferL,
         for k = 1, 3 do
             local cand = safeL + dir * k * STEP
             if cand < -limit or cand > limit then break end
+            if cand <= jIn * STEP + 1e-9 and cand >= -jIn * STEP - 1e-9 then break end
             if foundPass == 1 and (cand < roadLo or cand > roadHi) then break end
             if laneFree(hardS, hardL, hardR, n, sLo, sHi, cand,
                     needHalf + COMFORT_EXTRA) then

@@ -557,6 +557,32 @@ do
 end
 
 -- =====================================================================
+scenario("外圈 ringFrom（1004c 寬帶第二級）：內圈有縫也只搜 |lane| > ringFrom−needHalf；不給或壞值＝不分圈")
+do
+    -- 障礙 l=+0.5：不分圈時最近 safe 在左 −1.75（comfort −2.50）。ringFrom 4 → 內圈 |lane| ≤ 4−NEED 不當候選，
+    -- 最近的外圈縫在左側內圈邊界外一格。違規證明：plan 不讀 ringFrom＝回內圈 −2.50。
+    local sArr, lArr = { 30 }, { 0.5 }
+    local m0, _, _, _, _, off0 = C.plan(sArr, lArr, 1, NEED, 9, 0, nil, 0)
+    local m1, _, _, _, _, off1 = C.plan(sArr, lArr, 1, NEED, 9, 0, nil, 0, nil, nil, nil, nil, nil, 4)
+    checkEq(m0, "dodge", "不分圈：dodge")
+    checkEq(off0, -2.5, "不分圈：內圈左 comfort")
+    checkEq(m1, "dodge", "外圈：dodge")
+    checkTrue(math.abs(off1) > 4 - NEED + 1e-9, "外圈：候選在內圈外（offL=" .. tostring(off1) .. "）")
+    -- 內圈有縫、外圈全擋：擋線點 l=0.5、左側 −4.5 以外與右側 3 以外鋪滿 → 不分圈時左內圈 −2 附近可過；
+    -- ringFrom 4（內圈 |lane| ≤ 2.6）只剩外圈、全被擋＝blocked，不退回內圈
+    local sW, lW = { 30 }, { 0.5 }
+    for l = -9, -4.5, 0.5 do sW[#sW + 1], lW[#lW + 1] = 30, l end
+    for l = 3, 9, 0.5 do sW[#sW + 1], lW[#lW + 1] = 30, l end
+    local mIn, _, _, _, _, offIn = C.plan(sW, lW, #sW, NEED, 9, 0, nil, 0)
+    local m2 = C.plan(sW, lW, #sW, NEED, 9, 0, nil, 0, nil, nil, nil, nil, nil, 4)
+    checkTrue(mIn == "dodge" and math.abs(offIn) <= 4 - NEED, "內圈有縫（不分圈 offL=" .. tostring(offIn) .. "）")
+    checkEq(m2, "blocked", "外圈沒縫＝blocked，內圈的縫不收")
+    -- 壞值＝不分圈
+    local m3, _, _, _, _, off3 = C.plan(sArr, lArr, 1, NEED, 9, 0, nil, 0, nil, nil, nil, nil, nil, -1)
+    checkTrue(m3 == "dodge" and off3 == off0, "ringFrom 非正＝不分圈（offL=" .. tostring(off3) .. "）")
+end
+
+-- =====================================================================
 -- 情境十：comfort refinement — 寬縫滿額、窄縫逐位元 fallback、路面與側別不變
 -- =====================================================================
 scenario("comfort refinement：同側最多外推 0.75m，找不到即回原 safe lane")

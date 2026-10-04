@@ -6696,6 +6696,16 @@ function drive.scanRound(freezeProgress)
     end
 end
 
+-- 寬帶判到這次脫困嘗試的最寬一級（1004c：第一級仍堵就升級重掃，倒車／改道的閘等最寬那級判完）。給「寬帶判堵後看
+-- 倒車／改道時序」的情境用；升級本身由 (wide2) 逐輪檢查。武裝解除（已承諾／判淨空）或判完即停，最多三輪。
+function drive.wideRounds(freezeProgress)
+    for _ = 1, 3 do
+        drive.scanRound(freezeProgress)
+        local st = MDAD.Drive.debugSession(0)
+        if st == nil or not st.wideArmed or st.wideJudged == st.episodeAttempts then return end
+    end
+end
+
 -- 感知距離可調（0909b）：有效視距＝SCAN_NEAR＋(額度/LAT_N)×PERCEPTION_ROUND_MS/幀時，額度自 0929o 起
 -- 隨幀時放大（MDADDynamics.scanBudget，最多 3 倍）：預設 drive.mult 1.6（30 FPS＝幀時 33ms）已有 60 FPS 的
 -- 92m，要重現「幀率造成的短視距」得用 50ms 以上。個別情境在自己的區塊裡改幀時再還原。
@@ -10418,7 +10428,7 @@ do
     dveh._speed = 0
     driveReset(dveh)
     driveTick(dp, dveh)
-    drive.scanRound(true) -- 停在停點：寬帶判堵一輪（倒車要等這次嘗試的寬帶重判）
+    drive.wideRounds(true) -- 停在停點：寬帶判堵到最寬一級（倒車要等這次嘗試的寬帶重判）
     nowMs = nowMs + 6000
     driveTick(dp, dveh)
     checkEq(MDAD.Drive.hudState(0), "unstick", "(c4) 5s 後 rear 淨空倒車（實得 " .. tostring(MDAD.Drive.hudState(0)) .. "）")
@@ -10596,7 +10606,7 @@ local function scenarioDetour()
     dveh._speed = 0
     driveReset(dveh)
     driveTick(dp, dveh)
-    drive.scanRound(true) -- 寬帶判堵一輪
+    drive.wideRounds(true) -- 寬帶判堵到最寬一級
     nav.detourCalls = 0
     -- (c5c-ev) 1004b：每次改道請求記一筆 detour 事件（phase auto／manual／stuck／skip、why＝結果）；舊制自動改道被拒
     --   只在 Debug console。違規證明：requestDetour 不記事件＝紅。
@@ -10650,7 +10660,7 @@ local function scenarioDetour()
     dveh._speed = 0
     driveReset(dveh)
     driveTick(dp, dveh)
-    drive.scanRound(true) -- 寬帶判堵一輪
+    drive.wideRounds(true) -- 寬帶判堵到最寬一級
     nav.detourCalls = 0
     MDAD.HUD.autoDetour = function() return true end
     nowMs = nowMs + 5500
@@ -10686,7 +10696,7 @@ local function scenarioDetour()
             wait = cap5d and cap5d.waitAccumMs }
         return realReqDetour(...)
     end
-    drive.scanRound()
+    drive.wideRounds() -- 倒車後的新嘗試：寬帶從第一級重判到最寬一級
     MinidoracatMiniMapAPI.requestDetour = realReqDetour
     MDADOverlay.update = realOv5d
     checkEq(nav.detourCalls, 1, "(c5d) 開回原地再堵：改道先於第二次倒車（實得 " .. tostring(nav.detourCalls) .. "）")
@@ -11071,6 +11081,14 @@ local function scenarioChain()
         driveReset(dveh)
         driveTick(dp, dveh)
         st.blockSteepM = 5 -- (c9h4) 全滅含大側移 steep、差 5m 跑道：倒車要多退 5m
+        -- (c9h6) 1004c：跑道不夠不升級寬帶（更外側只會更陡）——這一輪的判定照「最寬一級已判」開倒車的閘。
+        --   注入的 steep 在第一級判定後才寫：撤回那次升級、以 steep 重跑一次判定。
+        --   違規證明：拿掉 wideJudge 的 steep 條件＝升級、倒車等第二級＝紅。
+        st.wideJudged, st.wideLevel, st.wideLevelAt = nil, nil, nil
+        MDAD.Drive.wideJudge(st, 0)
+        checkTrue(st.wideJudged == st.episodeAttempts and MDAD.Drive.wideLevelOf(st) == 1,
+            "(c9h6) steep 差額：不升級寬帶、直接開倒車的閘（judged=" .. tostring(st.wideJudged)
+            .. " lvl=" .. tostring(MDAD.Drive.wideLevelOf(st)) .. "）")
         nowMs = nowMs + 800 -- (c9h5) 0905i：steep 差額＝靜態幾何，停穩 0.5s 即倒車、不等 5s
         driveReset(dveh)
         driveTick(dp, dveh)
@@ -11575,7 +11593,7 @@ do
     dveh._speed = 0
     driveReset(dveh)
     driveTick(dp, dveh) -- 預算起算
-    drive.scanRound(true) -- 停在停點：寬帶判堵一輪（倒車要等這次嘗試的寬帶重判）
+    drive.wideRounds(true) -- 停在停點：寬帶判堵到最寬一級（倒車要等這次嘗試的寬帶重判）
     nowMs = nowMs + 200 -- 再一幀確保停等狀態穩定（監督若會臂起，此刻已臂）
     driveReset(dveh)
     driveTick(dp, dveh)
@@ -16140,7 +16158,7 @@ scenario("調頭＋blocked：遠處不倒車、近處才退、額度用盡不空
     dveh._speed = 0
     driveReset(dveh)
     driveTick(dp, dveh)
-    drive.scanRound(true) -- 寬帶判堵一輪
+    drive.wideRounds(true) -- 寬帶判堵到最寬一級
     nowMs = nowMs + 6000
     driveTick(dp, dveh)
     st = MDAD.Drive.debugSession(0)
@@ -20245,8 +20263,9 @@ function drive.scenario0929p()
     --   早已累滿，一般帶一判堵就再倒，三次倒車中間一輪寬帶都沒跑就交還）。自動改道開著時，倒車重判仍堵才改道。
     --   違規證明：拿掉倒車的閘／改道的閘＝一般帶判堵那一刻就再倒／就改道。
     for _, detourOn in ipairs({ false, true }) do
-        drive.fillWorld(-10, 160, -16, 16)
-        for x = 40, 42 do for y = -16, 16 do drive.putSolid(x, y, "gate_wall") end end
+        -- 1004c：牆蓋滿寬帶第二級（±19.5）；只蓋 ±16 時第二級看得到牆端外的空地，判成 steep、倒車多退，就不是本情境要的「整條擋死」
+        drive.fillWorld(-10, 160, -24, 24)
+        for x = 40, 42 do for y = -24, 24 do drive.putSolid(x, y, "gate_wall") end end
         if type(MDAD.HUD) ~= "table" then MDAD.HUD = {} end
         local oldAuto = MDAD.HUD.autoDetour
         MDAD.HUD.autoDetour = function() return detourOn end
@@ -20257,7 +20276,8 @@ function drive.scenario0929p()
         dveh._x, dveh._y, dveh._speed = 31, 0, 0
         driveReset(dveh)
         driveTick(dp, dveh)
-        for _ = 1, 2 do drive.frameMs(10); drive.scanRound(true) end -- 一般帶判堵、停點武裝 → 寬帶判堵
+        drive.frameMs(10); drive.scanRound(true) -- 一般帶判堵、停點武裝
+        drive.frameMs(10); drive.wideRounds(true) -- 寬帶判堵到最寬一級
         local judged0 = gs.wideArmed == true and gs.wideJudged == 0 and gs.sensor.wideDone == true
         nowMs = nowMs + 5100
         driveReset(dveh)
@@ -20278,7 +20298,7 @@ function drive.scenario0929p()
         driveTick(dp, dveh)
         local held = gs.mode ~= "unstick" and gs.episodeAttempts == 1 and (drive.nav.detourCalls or 0) == 0
         drive.frameMs(10)
-        drive.scanRound(true) -- 寬帶重判仍整條擋死：判過才准再倒／改道
+        drive.wideRounds(true) -- 寬帶重判仍整條擋死：最寬一級判過才准再倒／改道
         driveReset(dveh)
         driveTick(dp, dveh)
         local next2 = detourOn and (drive.nav.detourCalls or 0) == 1
@@ -20289,7 +20309,7 @@ function drive.scenario0929p()
             .. " next=" .. tostring(next2) .. "）")
         MDAD.HUD.autoDetour = oldAuto
         MDAD.Drive.stop(0, nil)
-        for x = 40, 42 do for y = -16, 16 do drive.clearCell(x, y) end end
+        for x = 40, 42 do for y = -24, 24 do drive.clearCell(x, y) end end
     end
     -- (wide-defer) 停點的寬帶判堵：候選伸出已載入區（覆蓋不足）照判堵走倒車重判，不延後——延後的接近帽會讓車往群
     --   前爬、吃掉進入段，清掉判堵又解除武裝，一般帶／寬帶來回判、永遠不倒車。違規證明：照舊延後＝紅。
@@ -20364,6 +20384,130 @@ function drive.scenario0929p()
     SandboxVars = oldSand
 end
 drive.scenario0929p()
+
+-- 1004c（使用者 2026-10-04「障礙多的地方不要太早判定繞遠路，逐漸掃描加大、找得到回到道路的路線就走，真的都不行才考慮繞道」）：
+--   (wide2) 牆蓋滿第一級寬帶（±13.5）可規劃的範圍：第一級判堵不開倒車／自動改道的閘（停等 11 秒也不動）、升第二級重掃
+--     （±19.5、規劃半寬 19），從更外側繞過。違規證明：TUNE.WIDE_LEVEL_MAX＝1（不升級）＝第一級判完就改道、沒有第二級＝紅。
+--   (wide2-tow) 拖車維持第一級：判完即開閘。違規證明：拿掉 wideJudge 的拖車條件＝紅。
+--   (wide2-band) 寬帶輪帶心在 nav 線：常駐偏置 +3 時第一級的帶照樣是 ±13.5（Corridor.plan 以 nav 線對稱規劃，帶心跟偏置走
+--     會留一條沒掃過的帶當淨空）。違規證明：拿掉 Sensor 寬帶輪的帶心歸零＝紅。
+function drive.scenario1004c()
+    scenario("1004c：寬帶逐級加大——第一級仍堵升第二級才倒車／改道、拖車不升、帶心在 nav 線")
+    local oldSand = SandboxVars
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    local wasMs = drive.frameMs(10)
+    if type(MDAD.HUD) ~= "table" then MDAD.HUD = {} end
+    local oldAuto = MDAD.HUD.autoDetour
+    MDAD.HUD.autoDetour = function() return true end
+    local function stopAtWall(half)
+        drive.fillWorld(-10, 160, -24, 24)
+        for x = 40, 42 do for y = -half, half do drive.putSolid(x, y, "wide2_wall") end end
+        drive.nav.detourCalls = 0
+        armDrive()
+        setHeading(dveh, 0)
+        dveh._x, dveh._y, dveh._speed = 31, 0, 0
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        drive.frameMs(10); drive.scanRound(true) -- 一般帶判堵、停點武裝
+        drive.frameMs(10); drive.scanRound(true) -- 寬帶第一級
+        return MDAD.Drive.debugSession(0)
+    end
+    local function clearWall(half)
+        MDAD.Drive.stop(0, nil)
+        for x = 40, 42 do for y = -half, half do drive.clearCell(x, y) end end
+    end
+    -- (wide2)
+    local st = stopAtWall(13)
+    local lvl1 = st.sensor.wideDoneLevel
+    local held = st.blocked == true and st.wideJudged == nil and MDAD.Drive.wideLevelOf(st) == 2
+    nowMs = nowMs + 11000 -- 超過自動改道 10s、倒車 5s 的門檻：第二級沒判完都不能動
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    local idle = st.mode ~= "unstick" and (drive.nav.detourCalls or 0) == 0
+    checkTrue(lvl1 == 1 and held and idle,
+        "(wide2) 第一級判堵：升第二級，倒車／自動改道等第二級判完（lvl=" .. tostring(lvl1) .. " held=" .. tostring(held)
+        .. " mode=" .. tostring(st.mode) .. " detour=" .. tostring(drive.nav.detourCalls) .. "）")
+    drive.frameMs(10); drive.scanRound(true) -- 第二級
+    local offL = st.fstate.offL or 0
+    checkTrue(st.sensor.wideDoneLevel == 2 and st.sensor.corridorHalf == 19 and st.dodging == true
+            and st.dodgeWide == true and st.dodgeWideLevel == 2 and math.abs(offL) > 13.5,
+        "(wide2) 第二級從更外側繞過（lvl=" .. tostring(st.sensor.wideDoneLevel) .. " half=" .. tostring(st.sensor.corridorHalf)
+        .. " dodging=" .. tostring(st.dodging) .. " offL=" .. tostring(offL) .. " plan=" .. tostring(st.planMode) .. "）")
+    -- (wide2-ring) 第二級停點輪只多出外圈：判堵候選鏈排除第一級的內圈（Corridor.plan ringFrom）；承諾後的守護輪不分圈
+    --   （途中釋放後重規劃要看得到回路面的近縫）。違規證明：守護輪也發布 corridorInner＝紅。
+    local innerStop = st.sensor.corridorInner
+    drive.frameMs(10); drive.scanRound(true) -- 承諾後的守護輪
+    checkTrue(st.sensor.wideDoneLevel == 2 and (drive.nav.detourCalls or 0) == 0,
+        "(wide2) 承諾後的守護輪沿用第二級（看得到整條承諾線），從頭到尾沒改道（lvl=" .. tostring(st.sensor.wideDoneLevel) .. "）")
+    checkTrue(innerStop == 14 and st.sensor.corridorInner == nil,
+        "(wide2-ring) 停點第二級只搜外圈（inner=" .. tostring(innerStop) .. "）、守護輪不分圈（inner="
+        .. tostring(st.sensor.corridorInner) .. "）")
+    -- (wide2-gate) 跑道不夠先倒車不問改道（額度用完或倒不了才問）；倒車後的新跑道寬帶還沒判完，停等預算到期最多再等
+    --   WIDE_JUDGE_GRACE_MS（第一次停等不寬限）。違規證明：拿掉 autoDetourNow 的 runwayRetryFirst／寬限的 attempt 條件＝紅。
+    local R, P = MDAD.Drive.runwayRetryFirst, MDAD.Drive.wideJudgePending
+    checkTrue(R({ blockSteepM = 2, episodeAttempts = 1 }) and not R({ blockSteepM = 2, episodeAttempts = 3 })
+            and not R({ blockSteepM = 2, episodeAttempts = 1, blockRetryDone = true })
+            and not R({ blockSteepM = -1, episodeAttempts = 0 }),
+        "(wide2-gate) 跑道不夠＋倒車額度還在＋沒被後方擋過＝先倒車；額度用完、倒不了、不是跑道問題＝照常可改道")
+    local T = MDAD.Drive.debugTune()
+    local W, G = T.WAIT_TIMEOUT_MS, T.WIDE_JUDGE_GRACE_MS
+    checkTrue(P({ wideArmed = true, episodeAttempts = 1, wideJudged = 0, waitAccumMs = W + 500 })
+            and not P({ wideArmed = true, episodeAttempts = 0, wideJudged = nil, waitAccumMs = W + 500 })
+            and not P({ wideArmed = true, episodeAttempts = 1, wideJudged = 1, waitAccumMs = W + 500 })
+            and not P({ wideArmed = true, episodeAttempts = 1, wideJudged = 0, waitAccumMs = W + G + 1 }),
+        "(wide2-gate) 倒車後寬帶還沒判完：預算到期再等（判完、第一次停等、超過寬限都照常交還）")
+    clearWall(13)
+    -- 整合：牆蓋滿兩級寬帶＝判堵；判定是跑道不夠（steep）、已倒車一次又停等過 5 秒＝倒車，不問改道（舊制同一幀就改道）
+    st = stopAtWall(24)
+    drive.frameMs(10); drive.scanRound(true) -- 第二級判完
+    st.blockSteepM, st.episodeAttempts, st.wideJudged, st.waitAccumMs = 3, 1, 1, 6000
+    drive.nav.detourCalls = 0
+    nowMs = nowMs + 16
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkTrue((drive.nav.detourCalls or 0) == 0 and st.mode == "unstick",
+        "(wide2-gate) 跑道不夠＋額度還在：先倒車補跑道、不問改道（detour=" .. tostring(drive.nav.detourCalls)
+        .. " mode=" .. tostring(st.mode) .. "）")
+    clearWall(24)
+    -- (wide2-stale) 沒跑候選鏈的判堵（初判無縫、降檔也沒縫）不沿用上一次判定的 steep 差額／shape：否則第二級留下的 steep
+    --   讓之後每次第一級無縫判堵都不再升級、改道一直讓給倒車（E2E blockscan dixie9350w）。違規證明：拿掉重設＝紅。
+    st = stopAtWall(24)
+    st.blockSteepM, st.dodgeShapeReason, st.planSig = 3, "steep", -1
+    drive.frameMs(10); drive.scanRound(true)
+    checkTrue(st.blocked == true and st.blockSteepM < 0 and st.dodgeShapeReason == nil,
+        "(wide2-stale) 無縫判堵重設 steep 差額（blockSteepM=" .. tostring(st.blockSteepM) .. " shape="
+        .. tostring(st.dodgeShapeReason) .. "）")
+    clearWall(24)
+    -- (wide2-tow)
+    st = stopAtWall(13)
+    st.tow = { trailLen = 0 }
+    st.wideJudged, st.wideLevel, st.wideLevelAt = nil, nil, nil
+    MDAD.Drive.wideJudge(st, 0)
+    checkTrue(st.wideJudged == st.episodeAttempts and MDAD.Drive.wideLevelOf(st) == 1,
+        "(wide2-tow) 拖車不升級：第一級判完即開倒車／改道的閘（judged=" .. tostring(st.wideJudged) .. "）")
+    st.tow = nil
+    clearWall(13)
+    -- (wide2-band)
+    st = stopAtWall(13)
+    st.sensor.scanBias = 3
+    st.wideLevel, st.wideLevelAt = nil, nil -- 撤回第一級的升級：這一輪量第一級（±13.5）的帶心
+    drive.frameMs(10); drive.scanRound(true)
+    local lo, hi = 99, -99
+    for i = 1, st.sensor.hardN do
+        local l = st.sensor.hardL[i]
+        if l < lo then lo = l end
+        if l > hi then hi = l end
+    end
+    -- 帶心跟偏置走（舊制）＝第一級只掃 [−10.5, 16.5]，牆在 −10.5 外那段（y −13..−11）看不到
+    checkTrue(st.sensor.wideDone == true and st.sensor.completedBandBias == 0 and lo < -11,
+        "(wide2-band) 寬帶輪帶心在 nav 線：常駐偏置 +3 仍掃到 −10.5 外的牆（band=" .. tostring(st.sensor.completedBandBias)
+        .. " l=[" .. tostring(lo) .. "," .. tostring(hi) .. "]）")
+    clearWall(13)
+    MDAD.HUD.autoDetour = oldAuto
+    drive.frameMs(wasMs)
+    SandboxVars = oldSand
+end
+drive.scenario1004c()
 
 do -- 主 chunk local 槽已滿：整段包成函式，內部 local 不佔主 chunk
 -- =====================================================================

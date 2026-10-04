@@ -115,7 +115,6 @@ for i = 1, 27 do LAT_FINE[i] = -6.5 + (i - 1) * 0.5 end
 local LAT_FINE_N = 27
 local FINE_STEP = 0.5
 local ALIGN_EPS = 1e-3 -- 法向分量小於此值＝軸對齊
-local HARD_MAX = LAT_N * (MDADDynamics.PERCEPTION_HARD_MAX_M - SCAN_NEAR) + 100
 local CORRIDOR_HALF = 7
 -- 寬帶（0929p，使用者裁定「允許繞到道路之外的地方繞路」）：14m 大路整條擋死時一般帶全在路面內、無縫可找。
 -- Driver 只在判堵停下（與照寬帶承諾的繞行期間）經 state.wideReq 要求，輪首鎖定（state.wideRound）；
@@ -135,6 +134,15 @@ local WIDE_AHEAD_M = 60
 -- coverage／出口被截短太陡而掛車內切）。起步後回到一般寬帶；已承諾的線守護輪不要求覆蓋（線尾看不到只是慢）。
 local WIDE_STOP_AHEAD_M = 100
 local WIDE_STOP_ROUND_K = 3
+-- 寬帶第二級（1004c，使用者 2026-10-04「障礙多的地方逐漸掃描加大，找得到回到道路的路線就走，真的都不行才考慮
+-- 繞道」）：±19.5（40 條）。停點第一級（±13.5）判完仍堵才要（Driver 經 state.wideLevelReq＝2），輪首鎖定
+-- state.wideRoundLevel。規劃半寬 half＝19（掃描帶內縮 0.5：車身外緣 ≤ 19、車心偏離最遠 ~17.9，離 RouteTooFar 的
+-- SNAP_MAX_M 20 還有 2m 追線誤差）。停點輪 40 條：60 FPS 每幀 4.2 步、仍看 ~96m；承諾後的守護輪 ~33m（線尾看不到只是慢）。
+local WIDE2 = { lat = {}, n = 40, fine = {}, fineN = 79, half = 19 }
+for i = 1, 40 do WIDE2.lat[i] = -19.5 + (i - 1) end
+for i = 1, 79 do WIDE2.fine[i] = -19.5 + (i - 1) * 0.5 end
+-- 點雲上限要高於掃描帶的數學上限（溢出＝快照不完整、消費端一律不信）：一般帶 14 條×238m，寬帶第二級停點輪 40 條×100m
+local HARD_MAX = math.max(LAT_N * (MDADDynamics.PERCEPTION_HARD_MAX_M - SCAN_NEAR), WIDE2.n * WIDE_STOP_AHEAD_M) + 100
 
 -- 世界格去重的鍵：wx * 100000 + wy。PZ 的地圖座標是非負且遠小於 100000
 -- （最大官方地圖 ~15000 格），所以這個線性組合在有效範圍內是單射，
@@ -1014,14 +1022,18 @@ local function beginRound(state, p, sNow, vehicle, now, len, cell)
     if not MDADDynamics.finite(softAhead) then softAhead = MDADDynamics.SOFT_LOOKAHEAD_M end
     state.wSoftEndS = sNow + math.min(MDADDynamics.PERCEPTION_HARD_MAX_M,
         math.max(MDADDynamics.SOFT_LOOKAHEAD_M, softAhead))
-    -- 寬帶於輪首鎖定（見 LAT_W）；兩種帶的可負擔前視不互相當回縮地板（換帶那輪重算）
+    -- 寬帶於輪首鎖定（見 LAT_W、WIDE2）；兩種帶（與寬帶兩級）的可負擔前視不互相當回縮地板（換帶那輪重算）
     local wide = state.wideReq == true or state.wideReq == "stop"
     local long = state.wideReq == "stop"
-    if wide ~= state.wideRound or long ~= state.wideLong then state.lastAffordableM = nil end
-    state.wideRound, state.wideLong = wide, long
-    local latN = wide and LAT_W_N or LAT_N
-    state.latArr, state.latArrN = wide and LAT_W or LAT, latN
-    state.latFine, state.latFineN = wide and LAT_W_FINE or LAT_FINE, wide and LAT_W_FINE_N or LAT_FINE_N
+    local lvl = wide and (state.wideLevelReq == 2 and 2 or 1) or 0
+    if wide ~= state.wideRound or long ~= state.wideLong or lvl ~= state.wideRoundLevel then
+        state.lastAffordableM = nil
+    end
+    state.wideRound, state.wideLong, state.wideRoundLevel = wide, long, lvl
+    local latN = lvl == 2 and WIDE2.n or (wide and LAT_W_N or LAT_N)
+    state.latArr, state.latArrN = lvl == 2 and WIDE2.lat or (wide and LAT_W or LAT), latN
+    state.latFine = lvl == 2 and WIDE2.fine or (wide and LAT_W_FINE or LAT_FINE)
+    state.latFineN = lvl == 2 and WIDE2.fineN or (wide and LAT_W_FINE_N or LAT_FINE_N)
     local req = state.aheadM
     if long then req = WIDE_STOP_AHEAD_M
     elseif wide and MDADDynamics.finite(req) and req > WIDE_AHEAD_M then req = WIDE_AHEAD_M end
@@ -1044,9 +1056,11 @@ local function beginRound(state, p, sNow, vehicle, now, len, cell)
 
     state.segIdx = seekSeg(p, state.baseIdx, s0)
     state.baseIdx = state.segIdx
-    -- 帶偏移於輪首鎖定（輪中 driver 更新 scanBias 不影響進行中的輪）
+    -- 帶偏移於輪首鎖定（輪中 driver 更新 scanBias 不影響進行中的輪）。寬帶輪以 nav 線為心（1004c）：Corridor.plan
+    -- 的候選以 nav 線對稱 ±(corridorHalf−needHalf) 規劃，帶心跟常駐偏置（最多 ±3）走時，遠側有一條從沒掃過的
+    -- 帶被當成淨空（寬帶候選本來就到路外，偏置那 3m 正是路外最可能有東西的地方）。
     local sb = state.scanBias
-    if type(sb) ~= "number" or sb ~= sb then sb = 0 end
+    if type(sb) ~= "number" or sb ~= sb or wide then sb = 0 end
     state.bandBias = sb
 
     local z = vehicle:getZ()                            -- IsoMovingObject 座標慣例（車在地面層）
@@ -1131,13 +1145,20 @@ local function finishRound(state, now)
     state.actualSurfaceId = state.wActualSurfaceId
     state.roundStartedAt = state.wRoundStartedAt
     state.completedBandBias = state.bandBias
-    state.corridorHalf = state.wideRound and CORRIDOR_HALF_W or CORRIDOR_HALF -- 本快照實際掃到的橫向半寬
+    -- 本快照實際掃到的橫向半寬（寬帶第二級的規劃半寬內縮，見 WIDE2）；wideDoneLevel＝0 一般帶、1／2 寬帶級
+    state.corridorHalf = (state.wideRoundLevel == 2 and WIDE2.half)
+        or (state.wideRound and CORRIDOR_HALF_W) or CORRIDOR_HALF
     state.wideDone = state.wideRound == true
+    state.wideDoneLevel = state.wideRoundLevel or 0
+    -- 第二級停點判堵只多出外圈：判堵候選鏈的 Corridor.plan 以 corridorInner（上一級的走廊半寬）排除內圈（ringFrom）。
+    -- 承諾後的守護輪（wideReq＝true、非停點）不分圈：途中釋放後重規劃要看得到回路面的近縫。
+    state.corridorInner = (state.wideRoundLevel == 2 and state.wideLong) and CORRIDOR_HALF_W or nil
     -- 簽章：障礙的「數量 + 縱向分布 + 橫向分布」三者任一有變就會變。純整數運算，
     -- 呼叫端只拿它做 ~= 比較（不是雜湊安全性），碰撞的代價只是少重規劃一次。
     -- 寬帶輪另加一項：一般帶已整條擋死、兩側空地沒有新硬點時點雲簽章不變，不加這項 replan 就不會用寬帶重規劃
-    -- （0929p 審查：牆全在 ±6.5 內即重現，車一直 blocked 到脫困流程重設簽章）。
-    state.sig = state.wHardN * 7919 + state.wSumS * 31 + state.wSumL + (state.wideRound and 104729 or 0)
+    -- （0929p 審查：牆全在 ±6.5 內即重現，車一直 blocked 到脫困流程重設簽章）；升到第二級同理（項乘上級數）。
+    state.sig = state.wHardN * 7919 + state.wSumS * 31 + state.wSumL
+        + (state.wideRound and 104729 * state.wideDoneLevel or 0)
     -- 樣本不足、橫跨 >10m、或鋪面碰到掃描帶端點＝無路面／停車場／路口歧義。
     -- 端點截斷時觀測 span 只是寬度下界，不能拿「看見 10m」證明整體只有 10m。
     -- 歧義時 roadC 與 road band 一起撤銷，退回 nav 線，不硬掰。
@@ -1199,6 +1220,7 @@ function MDADSensor.newState()
         -- 本輪的橫向取樣組（一般帶或寬帶，beginRound 鎖定）＋Driver 的寬帶要求與完成快照的帶寬
         latArr = LAT, latArrN = LAT_N, latFine = LAT_FINE, latFineN = LAT_FINE_N,
         wideReq = false, wideRound = false, wideLong = false, wideDone = false, corridorHalf = CORRIDOR_HALF,
+        wideLevelReq = 1, wideRoundLevel = 0, wideDoneLevel = 0, -- 寬帶級：Driver 要求／本輪鎖定／完成快照（WIDE2）
         segIdx = 1,
         baseIdx = 1,
         cx = 0, cy = 0,
@@ -1299,6 +1321,7 @@ function MDADSensor.reset(state)
     state.latN, state.fineStep = LAT_N, false
     state.latArr, state.latArrN, state.latFine, state.latFineN = LAT, LAT_N, LAT_FINE, LAT_FINE_N
     state.wideRound, state.wideLong, state.wideDone, state.corridorHalf = false, false, false, CORRIDOR_HALF
+    state.wideRoundLevel, state.wideDoneLevel, state.corridorInner = 0, 0, nil
     state.segIdx = 1
     state.baseIdx = 1
     state.wHardN = 0

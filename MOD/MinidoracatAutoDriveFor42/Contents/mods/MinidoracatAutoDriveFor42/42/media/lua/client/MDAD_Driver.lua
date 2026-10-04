@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1004b"
+Drive.REV = "1004c"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -566,6 +566,13 @@ TUNE.RETURN_NOLOCK_KMH = 10
 -- 堵住時放寬橫向掃描（0929p，使用者裁定「允許繞到道路之外」；見 Drive.wideScanWanted、MDADSensor 寬帶）
 TUNE.WIDE_SCAN_KMH = 5
 TUNE.WIDE_ARM_SAME_M = 6 -- 判堵錨離武裝時的錨超過這個距離＝換了一個堵點（Drive.blockedAtStop 解除武裝）
+-- 寬帶逐級加大（1004c，使用者 2026-10-04「障礙多的地方不要太早判定繞遠路，逐漸掃描加大、找得到回到道路的路線就走，
+-- 真的都不行才考慮繞道」）：停點寬帶判完仍堵（且不是跑道不夠）就升一級重掃（MDADSensor WIDE2，±19.5），最寬那級
+-- 判完倒車／改道才能動；每次倒車後的新嘗試從第一級重來（Drive.wideJudge）。第二級的判堵候選鏈只搜外圈
+-- （Corridor.plan 的 ringFrom＝sen.corridorInner）：內圈第一級已判過，再試一次只是把候選額度用在同樣掃不過的近縫。
+-- 拖車維持第一級（路外繞行的使用者範圍：拖車以外）。
+TUNE.WIDE_LEVEL_MAX = 2
+TUNE.WIDE_JUDGE_GRACE_MS = 3000 -- 停等預算到期時等這次嘗試的寬帶判完的上限（Drive.wideJudgePending）
 -- 殭屍軟縫（2026-09-06；競品 Derpy `optimize_z` 把殭屍當軟縫拉軌跡，我們只出一個橫向目標）：
 -- 每輪掃描完成、持有權 free（無 dodge／RETURN／停留／調頭）時，用 Sensor 的殭屍 (s,l) 點雲
 -- 在常駐 lane ±DELTA 的可行帶找離殭屍區間最近的 lane（Corridor.softZombieLane），時間平滑
@@ -2529,7 +2536,7 @@ function Drive.requestDetour(playerNum, stuck, src)
     diagEvent(s, playerNum, "detour", { phase = stuck and "stuck" or (src or "manual"),
         why = ok and "ok" or tostring(why), x = v and v:getX() or nil, y = v and v:getY() or nil, s = s.lastSNow,
         hitX = s.blockHitX, hitY = s.blockHitY, ms = s.waitAccumMs, attempt = s.episodeAttempts,
-        lvl = s.wideArmed and (s.wideLevel or 1) or nil, len = len })
+        lvl = s.wideArmed and Drive.wideLevelOf(s) or nil, len = len })
     return ok, why
 end
 
@@ -4879,7 +4886,47 @@ end
 -- 解除寬帶武裝（堵點已解：承諾繞行／判定淨空、開過武裝點、換目標、判堵換到別處）。
 function Drive.disarmWide(s)
     s.wideArmed, s.wideArmedS, s.wideBlockedLogged, s.wideJudged = false, nil, nil, nil
-    s.wideArmedX, s.wideArmedY = nil, nil
+    s.wideArmedX, s.wideArmedY, s.wideLevel, s.wideLevelAt = nil, nil, nil, nil
+end
+
+-- 本次脫困嘗試要求的寬帶級：每次嘗試（倒車退出新跑道）都從第一級開始（Drive.wideJudge 升級時記下嘗試編號）。
+function Drive.wideLevelOf(s)
+    return s.wideLevelAt == s.episodeAttempts and s.wideLevel or 1
+end
+
+-- 寬帶判過一輪：這次脫困嘗試的倒車／改道可以動了（autoDetourNow／blocked-retry 的閘是 wideJudged＝本次 attempt）。
+-- 判完仍堵、這一級還不是最寬（TUNE.WIDE_LEVEL_MAX）：停著先升一級重掃，閘門等最寬那級判完才開（1004c）。
+-- 跑道不夠（steep 差額，blockSteepM）不升級：更外側的縫側移更大、只會更陡，照舊先倒車補跑道（0.5s 出口不變）；
+-- 倒車後的新嘗試從第一級重來——第二級的外圈若有未載入格會截短整輪可見距離，近處剛補出跑道的縫第一級就判得到。
+function Drive.wideJudge(s, playerNum)
+    local lvl = s.sensor.wideDoneLevel or 1
+    if s.blocked and s.wideArmed and lvl < TUNE.WIDE_LEVEL_MAX and type(s.tow) ~= "table"
+            and not (finite(s.blockSteepM) and s.blockSteepM > 0) then
+        if Drive.wideLevelOf(s) <= lvl then
+            s.wideLevel, s.wideLevelAt = lvl + 1, s.episodeAttempts
+            if getDebug() then
+                print(string.format("%spn=%d wide level %d blocked -> rescan at level %d", LOG, playerNum, lvl, lvl + 1))
+            end
+        end
+        return
+    end
+    s.wideJudged = s.episodeAttempts
+end
+
+-- 判堵是「跑道不夠」（steep 差額）、倒車額度還在、這次停等的倒車沒被後方擋過：先倒車補跑道重判，不問替代路線
+-- （1004c，使用者「真的都不行才考慮繞道」；E2E blockscan dixie9050w：寬帶第二級找到外側縫只差 1.3m 跑道，同一幀
+-- 就去問改道）。額度用完或倒不了照舊改道。
+function Drive.runwayRetryFirst(s)
+    return finite(s.blockSteepM) and s.blockSteepM > 0 and s.episodeAttempts < UNSTICK_MAX and not s.blockRetryDone
+end
+
+-- 停等預算到期時，倒車退出的新跑道（episodeAttempts ≥1）還沒用寬帶判到最寬一級：最多再等 TUNE.WIDE_JUDGE_GRACE_MS
+-- 讓它判完再交還／交還前改道（1004c；倒車本身也吃預算，E2E blockscan dixie9050w 第二次倒車補出跑道後 0.2 秒預算到期，
+-- 寬帶一輪都沒判就改道繞 1.9 km）。第一次停等（attempt 0）停下約 1 秒就判完，到期還沒判＝別的問題，照常交還。
+-- 出口：寬帶判完、解除武裝或超過寬限都照常。
+function Drive.wideJudgePending(s)
+    return s.wideArmed == true and s.episodeAttempts >= 1 and s.wideJudged ~= s.episodeAttempts
+        and s.waitAccumMs < TUNE.WAIT_TIMEOUT_MS + TUNE.WIDE_JUDGE_GRACE_MS
 end
 
 -- blocked 接近包絡（0928b；E2E rc1 0005 StepVan：70 km/h 在 68m 外判 blocked，舊制只把目標壓到
@@ -7824,11 +7871,11 @@ function Drive.planDodge(s, baseL, prefer)
     local need, tight = s.needHalf, false
     local mode, a, b, c, d, offL = MDADCorridor.plan(
         sen.hardS, sen.hardL, planN, need, sen.corridorHalf or MDADSensor.CORRIDOR_HALF,
-        prefer, sen.hardR, baseL, sen.roadLo, sen.roadHi, s.pushBanL == nil, s.hardBase, minS)
+        prefer, sen.hardR, baseL, sen.roadLo, sen.roadHi, s.pushBanL == nil, s.hardBase, minS, sen.corridorInner)
     if mode ~= "dodge" and mode ~= "clear" then
         local m, aa, bb, cc, dd, ll = MDADCorridor.plan(
             sen.hardS, sen.hardL, planN, s.squeezeNeed, sen.corridorHalf or MDADSensor.CORRIDOR_HALF,
-            prefer, sen.hardR, baseL, sen.roadLo, sen.roadHi, s.pushBanL == nil, s.hardBase, minS)
+            prefer, sen.hardR, baseL, sen.roadLo, sen.roadHi, s.pushBanL == nil, s.hardBase, minS, sen.corridorInner)
         if m == "dodge" then
             mode, a, b, c, d, offL, need = m, aa, bb, cc, dd, ll, s.squeezeNeed
         end
@@ -7837,7 +7884,7 @@ function Drive.planDodge(s, baseL, prefer)
         local m, aa, bb, cc, dd, ll = MDADCorridor.plan(
             sen.hardS, sen.hardL, planN, s.needHalf + CURVE_NEED_EXTRA,
             sen.corridorHalf or MDADSensor.CORRIDOR_HALF,
-            prefer, sen.hardR, baseL, sen.roadLo, sen.roadHi, s.pushBanL == nil, s.hardBase, minS)
+            prefer, sen.hardR, baseL, sen.roadLo, sen.roadHi, s.pushBanL == nil, s.hardBase, minS, sen.corridorInner)
         tight = true
         if m == "dodge" then
             mode, a, b, c, d, offL, need = m, aa, bb, cc, dd, ll, s.needHalf + CURVE_NEED_EXTRA
@@ -8493,7 +8540,7 @@ local function demotePlan(s, sen, planN, prefer, baseL, playerNum)
         local mq, aq, bq, cq, dq, oq = MDADCorridor.plan(
             sen.hardS, sen.hardL, planN, nu, sen.corridorHalf or MDADSensor.CORRIDOR_HALF,
             prefer, sen.hardR, baseL, sen.roadLo, sen.roadHi, true, s.hardBase,
-            s.lastSNow - s.vehicleProfile.halfL)
+            s.lastSNow - s.vehicleProfile.halfL, sen.corridorInner)
         if mq == "dodge" and dq > s.lastSNow + 1 then
             local shapeQ
             aq, bq, cq, dq, shapeQ = shapeProfile(
@@ -8947,9 +8994,10 @@ local function replan(s, vehicle, playerNum)
     -- 「靠很近開導航就能繞」：近距下路線折點退化、障礙變普通直路障礙），
     -- 前進 CORNER_RETRY_DIST 就撤銷 latch 重新枚舉——手動近開流程的自動化。
     -- 寬帶是新資訊：一般帶鎖的 latch 讓第一輪寬帶照跑候選鏈（還是 corner 就以寬帶再鎖；0929v 審查：
-    -- 否則彎道旁堵住時寬帶掃完卻從不規劃路外縫，倒車閘又當成判過）。
+    -- 否則彎道旁堵住時寬帶掃完卻從不規劃路外縫，倒車閘又當成判過）；寬帶升級同理，更寬一級照跑（1004c）。
     if s.blocked and s.cornerLatch and sen.hardN > 0 then
-        if s.lastSNow - s.cornerS < CORNER_RETRY_DIST and (s.cornerLatchWide or not sen.wideDone) then
+        if s.lastSNow - s.cornerS < CORNER_RETRY_DIST
+                and (not sen.wideDone or (s.cornerLatchWide or 0) >= (sen.wideDoneLevel or 1)) then
             s.planMode = "corner-latched"
             return
         end
@@ -9122,7 +9170,7 @@ local function replan(s, vehicle, playerNum)
                             local mq, aq, bq, cq, dq, oq = MDADCorridor.plan(
                                 sen.hardS, sen.hardL, planN, nu, sen.corridorHalf or MDADSensor.CORRIDOR_HALF,
                                 prefer, sen.hardR, baseL, sen.roadLo, sen.roadHi, false, s.hardBase,
-                                s.lastSNow - s.vehicleProfile.halfL)
+                                s.lastSNow - s.vehicleProfile.halfL, sen.corridorInner)
                             if mq ~= "dodge" then break end
                             pa, pb, pc, pd, po = aq, bq, cq, dq, oq
                             if adoptIf("crawl", sweepWithFallbacks(
@@ -9148,7 +9196,7 @@ local function replan(s, vehicle, playerNum)
                             local mk, ak, bk, ck, dk, ok2 = MDADCorridor.plan(
                                 sen.hardS, sen.hardL, banN, nu, sen.corridorHalf or MDADSensor.CORRIDOR_HALF,
                                 prefer, sen.hardR, baseL, sen.roadLo, sen.roadHi, false,
-                                fillHardBase(s, sen, banN, baseL), s.lastSNow - s.vehicleProfile.halfL)
+                                fillHardBase(s, sen, banN, baseL), s.lastSNow - s.vehicleProfile.halfL, sen.corridorInner)
                             if mk ~= "dodge" then break end
                             pa, pb, pc, pd, po = ak, bk, ck, dk, ok2
                             if adoptIf(phase == 2 and "crawl-retry" or "retry", sweepWithFallbacks(
@@ -9185,7 +9233,7 @@ local function replan(s, vehicle, playerNum)
                         sen.hardS, sen.hardL, planN, probeNeed,
                         sen.corridorHalf or MDADSensor.CORRIDOR_HALF, prefer, sen.hardR, baseL,
                         sen.roadLo, sen.roadHi, false, s.hardBase,
-                        s.lastSNow - s.vehicleProfile.halfL)
+                        s.lastSNow - s.vehicleProfile.halfL, sen.corridorInner)
                     if mp == "dodge" then
                         if adoptIf("probe", sweepWithFallbacks(
                                 s, planN, pa2, pb2, pc2, pd2, po2, baseL, "probe", physBase, physBase, true)) then
@@ -9238,7 +9286,8 @@ local function replan(s, vehicle, playerNum)
                     if corner or not nonCornerFail then
                         -- BLOCKED_CORNER：latch 到障礙清除／換路線為止——之後的
                         -- replan 輪不再重跑候選鏈（重試沒有新資訊、只是洗 log），
-                        s.cornerLatch, s.cornerLatchWide = true, sen.wideDone == true
+                        -- cornerLatchWide＝鎖住時的寬帶級（0＝一般帶）：更寬一級的快照是新資訊，照跑候選鏈
+                        s.cornerLatch, s.cornerLatchWide = true, sen.wideDone and (sen.wideDoneLevel or 1) or 0
                         s.cornerS = s.lastSNow
                         s.blockHitX = firstHitX
                         s.blockHitY = firstHitY
@@ -9265,6 +9314,14 @@ local function replan(s, vehicle, playerNum)
             if okD then
                 mode, a, b, c, d, offL, commitNb = "dodge", aD, bD, cD, dD, oD, nbD
             end
+        end
+        -- 沒跑候選鏈就判堵（初判無縫、降檔也沒縫）：steep 差額只算這一輪降檔候選的（steepDeficitM 每輪 replan 起頭歸 −1），
+        -- 不沿用上一次判定的快照（1004c E2E blockscan dixie9350w：第二級的 steep 差額留到之後每次第一級無縫判堵，
+        -- 寬帶不再升級、改道一直讓給倒車）。blocked 事件的 shape 欄同理。
+        if mode == "blocked" and not sweptChain then
+            s.blockSteepM = (finite(s.steepDeficitM) and s.steepDeficitM > 0)
+                and math.min(s.steepDeficitM, TUNE.UNSTICK_STEEP_MAX_M) or -1
+            if s.blockSteepM < 0 then s.dodgeShapeReason = nil end
         end
         if mode == "dodge" then
             local vp = s.vehicleProfile
@@ -9435,6 +9492,7 @@ local function replan(s, vehicle, playerNum)
                 s.lastOvEndS or 0, coverEnd) then
             s.dodging = true
             s.dodgeWide = (s.sensor.corridorHalf or MDADSensor.CORRIDOR_HALF) > MDADSensor.CORRIDOR_HALF
+            s.dodgeWideLevel = s.dodgeWide and (s.sensor.wideDoneLevel or 1) or nil -- 守護輪沿用承諾那一級的帶寬
             Drive.disarmWide(s) -- 堵點已有承諾線（寬帶繞行本身由 dodgeWide 維持寬帶）
             if s.dodgeHandoffHold then
                 s.dodgeHandoffHold, s.dodgeDeferCap = false, -1
@@ -9674,12 +9732,13 @@ local function replan(s, vehicle, playerNum)
                 LOG, playerNum, a or 0, sen.hardN, lMin, lMax))
         end
     end
-    -- 寬帶重判後仍判堵：每次脫困嘗試記一筆（上面只在第一次判堵記，那時多半還是一般帶；路外繞不過的原因要看
-    -- 寬帶這筆，0929r）。wideBlockedLogged 在寬帶武裝解除時清。
-    if sen.wideDone and s.wideBlockedLogged ~= s.episodeAttempts then
-        s.wideBlockedLogged = s.episodeAttempts
+    -- 寬帶重判後仍判堵：每次脫困嘗試、每一級各記一筆（上面只在第一次判堵記，那時多半還是一般帶；路外繞不過的原因要看
+    -- 寬帶這筆，0929r；lvl＝寬帶級，1004c）。wideBlockedLogged 在寬帶武裝解除時清。
+    local wideKey = sen.wideDone and s.episodeAttempts * 10 + (sen.wideDoneLevel or 1) or nil
+    if wideKey and s.wideBlockedLogged ~= wideKey then
+        s.wideBlockedLogged = wideKey
         diagEvent(s, playerNum, "blocked", {
-            why = "wide", s = s.blockS, x = s.blockHitX, y = s.blockHitY, hn = sen.hardN,
+            why = "wide", s = s.blockS, x = s.blockHitX, y = s.blockHitY, hn = sen.hardN, lvl = sen.wideDoneLevel,
             attempt = s.episodeAttempts, detail = s.dodgeBlockReason, shape = s.dodgeShapeReason,
             hitPhase = s.dodgeBlockReason == "sweep" and s.fbFail and s.fbFail.ph or nil,
             hitX = s.dodgeBlockReason == "sweep" and s.fbFail and s.fbFail.hx or nil,
@@ -10133,6 +10192,8 @@ local function stepFollow(s, vehicle, playerNum, now)
             local cell = getCell()
             s.sensor.frameMs = s.frameMs
             s.sensor.wideReq = Drive.wideScanWanted(s, speedKmh)
+            -- 寬帶級：承諾中的寬帶繞行沿用承諾那一級（守護輪要看得到整條承諾線），停點判堵用本次嘗試升到的級（Drive.wideJudge）
+            s.sensor.wideLevelReq = (s.dodging and s.dodgeWide and s.dodgeWideLevel) or Drive.wideLevelOf(s)
             if not s.sensor.scanning and now >= s.sensor.nextMs then
                 Drive.updatePerception(s, speedKmh)
             end
@@ -10216,8 +10277,8 @@ local function stepFollow(s, vehicle, playerNum, now)
                     replan(s, vehicle, playerNum)
                     if s.currentBlocked then s.planMode = "current-blocked" end
                 end
-                -- 寬帶判過一輪（不論結果）：這次脫困嘗試的倒車／改道可以動了（見 autoDetourNow 的閘）
-                if s.sensor.wideDone then s.wideJudged = s.episodeAttempts end
+                -- 寬帶判過一輪：最寬那級判完（不論結果）這次脫困嘗試的倒車／改道才可以動；仍堵且還能加寬就先升級（Drive.wideJudge）
+                if s.sensor.wideDone then Drive.wideJudge(s, playerNum) end
                 -- 承諾只覆蓋到offD；已知下一台在窗外也要先留出停車與重新選縫的距離。
                 s.dodgeNextStopS = nil
                 s.dodgeNextX, s.dodgeNextY, s.dodgeNextR = nil, nil, nil
@@ -10927,7 +10988,7 @@ local function stepFollow(s, vehicle, playerNum, now)
         if Drive.rotateStall(s, now, targetSpeed, avProgress) and not s.blockRetryDone then
             requestRecover(s, "rotate-stall")
         end
-        -- 自動改道（ESC 選項，預設關）：blocked-retry 之後仍在停等、累計超過
+        -- 自動改道（ESC 選項，0928m 起預設開）：blocked-retry 之後仍在停等、累計超過
         -- AUTO_DETOUR_MS 才要替代路線；一個停等 episode 只試一次，失敗＝沒替代路，
         -- 剩下交給 WAIT_TIMEOUT 紅字。玩家按 HUD「改道」鈕走同一條 Drive.requestDetour。
         -- **排在 blocked-retry 之前**（2026-09-02 實機：自動改道勾了永遠不觸發）：
@@ -10947,6 +11008,7 @@ local function stepFollow(s, vehicle, playerNum, now)
                 or (s.episodeAttempts >= 1 and s.waitAccumMs >= TUNE.BLOCK_RETRY_MS))
             and type(MDAD.HUD) == "table" and type(MDAD.HUD.autoDetour) == "function"
             and MDAD.HUD.autoDetour() == true
+            and not Drive.runwayRetryFirst(s)
         if autoDetourNow then
             s.detourTried = true
             Drive.requestDetour(playerNum, false, "auto")
@@ -10966,7 +11028,7 @@ local function stepFollow(s, vehicle, playerNum, now)
             -- 倒不了（soft fail）回到合法停等，只試一次防洗版。
             requestRecover(s, "blocked-retry")
         end
-        if s.waitAccumMs >= TUNE.WAIT_TIMEOUT_MS then postAction = "wait" end
+        if s.waitAccumMs >= TUNE.WAIT_TIMEOUT_MS and not Drive.wideJudgePending(s) then postAction = "wait" end
 
         local skipProgressCompare = false
         if s.verifyArmPending then
