@@ -18985,6 +18985,225 @@ function drive.scenarioTowTurn()
     SandboxVars, dveh, getSpecificPlayer = oldSandbox, oldVeh, oldGet
 end
 drive.scenarioTowTurn()
+-- (tc) 1005 拖車路線上有過不去的轉角（MDADTrailer.shape 的 towBlocked）：得知當下先要一條避開那些轉角的改道
+--   （Drive.towCornerDetour），新線走同一條剖面管線（profileRouteOf → shape）後沒有不可過轉角才收；否則拒收、保留
+--   原線，照舊停在轉角前交還 TrailerCorner。fixture：半聯結車（test_trailer 的 W900＋貨櫃）、4m 巷兩個直角都不可過。
+--   (tc-ok)      起步第一個跟線幀（離轉角 60m）就問：主圈＝第一個轉角、半徑＝路口方塊半對角線＋PAD、moreAvoid＝第二個
+--                轉角；收下、cutover why=towcorner、新剖面沒有 towBlocked、不交還。違規證明：拿掉 towCornerDetour 呼叫＝
+--                calls 紅；半徑不加 towBlockedR＝半徑紅；不附其餘轉角＝more 紅。
+--   (tc-near)    已停在轉角前 18m 才得知：收下後等 cutover、不交還。違規證明：拿掉 guard 後的等待＝紅。
+--   (tc-blocked) 替代路仍是 4m 直角：拒收 blocked、記 rejectedRoute、原線不換，開到轉角前照舊交還 TrailerCorner。
+--                違規證明：不驗新剖面（left 恆 0）＝紅。
+--   (tc-once)    同一（route identity、轉角集合）只問一次：剖面重建同一條線不重問；新 identity 再問，到 TRIES 上限記
+--                skip max。違規證明：拿掉 pair 判定＝重建紅；拿掉 TRIES 上限＝max 紅。
+--   (tc-v8)      nav API 8：只給主圈（more=nil），回來的線穿第二個轉角圈＝拒收 again。違規證明：拿掉自驗＝紅。
+--   (tc-off)     「堵死時自動改道」關：不問、記 skip off。違規證明：拿掉選項閘＝紅。
+--   (tc-solo)    沒拖車：剖面帶 towBlocked 也不問。違規證明：呼叫搬到拖車分支外＝紅。
+function drive.scenarioTowCorner()
+    scenario("拖車過不去的轉角：得知當下先要避開的改道，替代線剖面也過不去才照舊交還")
+    local oldSandbox, oldVeh, oldGet = SandboxVars, dveh, getSpecificPlayer
+    local oldApi = MinidoracatMiniMapAPI.navApiVersion
+    local oldRoute, oldTx, oldTy, oldState = drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
+    local oldDetour, oldReq = drive.nav.detour, MinidoracatMiniMapAPI.requestDetour
+    local oldAuto, oldEvent = MDAD.HUD.autoDetour, MDADDiagnostics.event
+    local wasMs = drive.frameMs(20)
+    local T = MDAD.Drive.debugTune()
+    MDAD.Drive.stop(0, nil)
+    getSpecificPlayer = function(n) if n == 0 then return dp end end
+    MinidoracatMiniMapAPI.requestDetour = function(...)
+        local r, state = oldReq(...)
+        if r then drive.nav.route = r end -- 主 MOD 算出就覆寫快取（addon-api 3.10）
+        return r, state
+    end
+    local ev = {}
+    MDADDiagnostics.event = function(pn, name, a, ...)
+        if name == "detour" and type(a) == "table" and a.kind == "towcorner" then ev[#ev + 1] = a end
+        return oldEvent(pn, name, a, ...)
+    end
+    local autoOn = true
+    MDAD.HUD.autoDetour = function() return autoOn end
+    dveh = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }),
+        engineRunning = true, mass = 1600, speed = 0, maxSpeed = 100,
+        bodyW = 1.6, bodyL = 4.2, comX = 0, comZ = 0, profileFull = true,
+        enginePower = 3000, brakingForce = 100, wheelFriction = 1.5, tireFriction = 1.5 })
+    local trailer = {
+        getForwardVector = function(_, out) return out:set(dveh._fwdX, 0, dveh._fwdY) end,
+        getUpVectorDot = function() return 1 end,
+    }
+    local semi = { trailer = trailer, L2 = 9.5, hitchToRear = 12, halfW = 1.27 }
+    local function road(pts, w)
+        local sw, ss, len = {}, {}, 0
+        for i = 1, #pts / 2 - 1 do
+            sw[i], ss[i] = w, "paved"
+            len = len + math.sqrt((pts[i * 2 + 1] - pts[i * 2 - 1]) ^ 2 + (pts[i * 2 + 2] - pts[i * 2]) ^ 2)
+        end
+        return { pts = pts, segSurface = ss, segWidth = sw, len = len, cost = len, avoidPenalty = 0 }
+    end
+    -- 4m 巷：(60,0)、(60,60) 兩個直角，半聯結車都轉不過
+    local function lanes(x0) return road({ x0 or 0, 0, 60, 0, 60, 60, 0, 60 }, 4) end
+    -- 12m 大弧（每點只轉 20°＝沒有要外拉的轉角）：從 (x0,0) 朝 +x 出發、繞到 (x0,60)，再接回同一個終點
+    local function arc(x0)
+        local p = {}
+        for k = 0, 9 do
+            local th = math.rad(-90 + 20 * k)
+            p[#p + 1], p[#p + 2] = x0 + 30 * math.cos(th), 30 + 30 * math.sin(th)
+        end
+        if x0 ~= 0 then p[#p + 1], p[#p + 2] = 0, 60 end
+        return road(p, 12)
+    end
+    local function arm(route, x0, tow, api)
+        MDAD.Drive.stop(0, nil)
+        drive.fillWorld(-10, 80, -12, 72)
+        drive.putRoad(-10, 80, -3, 3)
+        setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 60, RightLaneBias = 0 })
+        dveh._x, dveh._y = x0, 0
+        setHeading(dveh, 0)
+        dveh._speed, dveh._steering, dveh._stopped = 0, 0, true
+        dveh._engine, dveh._driver = true, dp
+        dp._vehicle, dp._dead, dp._local = dveh, false, true
+        MinidoracatMiniMapAPI.navApiVersion = api or 9
+        drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = route, 0, 60, "ok"
+        drive.nav.detourCalls, drive.nav.lastDetour = 0, nil
+        clearList(halos)
+        clearList(ev)
+        if not MDAD.Drive.start(dp) then return nil end
+        local st = MDAD.Drive.debugSession(0)
+        st.diag = true
+        -- 起步時就拖著（假車沒有 getVehicleTowing）：剖面路線照 production 管線改寫，guard 讀它
+        st.tow = tow
+        st.profileRoute = MDAD.Drive.profileRouteOf(route, tow or semi, st.vehicleProfile, x0, 0, false)
+        return st
+    end
+    local function haloOf(key, kind)
+        for i = 1, #halos do
+            if halos[i].kind == kind and noteReason(halos[i].text) == key then return true end
+        end
+        return false
+    end
+    local function tickUntil(pred, n) -- driveTick 不推時間：每幀推 20ms（guard 節流、取路間隔才會過）
+        for _ = 1, n do
+            if pred() then return true end
+            nowMs = nowMs + 20
+            -- 假車的物理取樣會讓診斷 fail 關掉 s.diag（velocity-read-fail）；本案只收事件，每幀重開
+            local cur = MDAD.Drive.debugSession(0)
+            if cur then cur.diag = true end
+            driveTick(dp, dveh)
+        end
+        return pred()
+    end
+    local function tick(n) tickUntil(function() return false end, n) end
+    local r0 = 2 * math.sqrt(2) + T.TOW_CORNER_AVOID_PAD -- 4m×4m 路口方塊半對角線＋PAD
+
+    -- (tc-ok)
+    local alt = arc(0)
+    drive.nav.detour = alt
+    local st = arm(lanes(), 0, semi)
+    checkTrue(st ~= nil and #st.profileRoute.towBlocked == 4, "(tc-ok) 拖車、路線上兩個不可過轉角啟動")
+    tickUntil(function() return drive.nav.detourCalls > 0 or not MDAD.Drive.isActive(0) end, 30)
+    checkTrue(drive.nav.detourCalls == 1 and dveh._x == 0,
+        "(tc-ok) 還在起點（離轉角 60m）就要了一次改道（calls=" .. tostring(drive.nav.detourCalls) .. "）")
+    local ld = drive.nav.lastDetour or {}
+    checkTrue(ld.ax == 60 and ld.ay == 0, "(tc-ok) 主圈＝第一個不可過轉角（" .. tostring(ld.ax) .. "," .. tostring(ld.ay) .. "）")
+    checkNear(ld.r, r0, 1e-9, "(tc-ok) 主圈半徑蓋住整個路口方塊")
+    local more = ld.more
+    checkTrue(type(more) == "table" and #more == 3 and more[1] == 60 and more[2] == 60 and math.abs(more[3] - r0) < 1e-9,
+        "(tc-ok) moreAvoid＝其餘不可過轉角（n=" .. tostring(more and #more) .. "）")
+    checkTrue(MDAD.Drive.isActive(0) and haloOf("UI_MinidoracatAutoDrive_Detour", "good"), "(tc-ok) 收下：綠字改道、不交還")
+    tickUntil(function() return st.route == alt end, 30)
+    tick(3)
+    checkTrue(st.route == alt and st.routeReadyWhy == "towcorner" and #st.profileRoute.towBlocked == 0,
+        "(tc-ok) cutover 到替代線（why=" .. tostring(st.routeReadyWhy) .. "）、新剖面沒有不可過轉角")
+    checkTrue(MDAD.Drive.isActive(0) and drive.nav.detourCalls == 1, "(tc-ok) 新線不再問、仍在自駕")
+    local e1 = ev[1] or {}
+    checkTrue(#ev == 1 and e1.phase == "towcorner" and e1.why == "ok" and e1.towN == 2 and e1.avoidN == 1
+        and e1.hitX == 60 and e1.attempt == 1,
+        "(tc-ok) detour 事件 phase=towcorner why=ok towN=2 avoidN=1（why=" .. tostring(e1.why) .. "）")
+
+    -- (tc-near) 已停在轉角前 18m 才得知
+    alt = arc(42)
+    drive.nav.detour = alt
+    st = arm(lanes(42), 42, semi)
+    tickUntil(function() return st.route == alt or not MDAD.Drive.isActive(0) end, 30)
+    checkTrue(MDAD.Drive.isActive(0) and st.route == alt and drive.nav.detourCalls == 1,
+        "(tc-near) 停在轉角前：等 cutover 不交還、換到替代線")
+
+    -- (tc-blocked) 替代路仍不可過
+    local bad = road({ 0, 0, 30, 0, 30, 60, 0, 60 }, 4)
+    drive.nav.detour = bad
+    local orig = lanes()
+    st = arm(orig, 0, semi)
+    tickUntil(function() return drive.nav.detourCalls > 0 end, 30)
+    tick(20)
+    e1 = ev[1] or {}
+    checkTrue(drive.nav.detourCalls == 1 and e1.why == "blocked" and e1.towLeft == 2 and st.rejectedRoute == bad,
+        "(tc-blocked) 替代線剖面仍有不可過轉角：拒收 blocked（left=" .. tostring(e1.towLeft) .. "）")
+    checkTrue(st.route == orig and MDAD.Drive.isActive(0) and not haloOf("UI_MinidoracatAutoDrive_Detour", "good"),
+        "(tc-blocked) 原線不換、仍在自駕")
+    dveh._x = 42
+    tickUntil(function() return not MDAD.Drive.isActive(0) end, 30)
+    checkTrue(not MDAD.Drive.isActive(0) and haloOf("UI_MinidoracatAutoDrive_TrailerCorner", "bad"),
+        "(tc-blocked) 開到轉角前照舊交還 TrailerCorner")
+    checkEq(drive.nav.detourCalls, 1, "(tc-once) 同一條線從起步到交還只問一次")
+
+    -- (tc-once) 剖面重建同一條線不重問；新 identity 再問，第 TRIES+1 次記 skip max
+    st = arm(lanes(), 0, semi)
+    tickUntil(function() return drive.nav.detourCalls > 0 end, 30)
+    local cp = {}
+    for k, v in pairs(st.profileRoute) do cp[k] = v end
+    st.profileRoute = cp
+    tick(5)
+    checkEq(drive.nav.detourCalls, 1, "(tc-once) 剖面重建同一條 route：不重問")
+    local function recut(cost)
+        local nr = lanes()
+        nr.cost = cost -- 同幾何、不同 cost＝新 identity，照常 cutover（不被同目標防抖吃掉）
+        drive.nav.route = nr
+        tickUntil(function() return st.route == nr end, 30)
+        tick(5)
+        return st.route == nr
+    end
+    checkTrue(recut(181) and drive.nav.detourCalls == T.TOW_CORNER_TRIES,
+        "(tc-once) 新 identity 再問一次（calls=" .. tostring(drive.nav.detourCalls) .. "）")
+    checkTrue(recut(182) and drive.nav.detourCalls == T.TOW_CORNER_TRIES and ev[#ev].phase == "skip"
+        and ev[#ev].why == "max",
+        "(tc-once) 到上限不再問、記 skip max（why=" .. tostring(ev[#ev] and ev[#ev].why) .. "）")
+
+    -- (tc-v8) API 8：只給主圈、自己驗不穿其他圈
+    local v8 = road({ 0, 0, 20, 0, 40, 8, 55, 25, 62, 40, 62, 62, 0, 62 }, 12)
+    drive.nav.detour = v8
+    st = arm(lanes(), 0, semi, 8)
+    tickUntil(function() return drive.nav.detourCalls > 0 end, 30)
+    ld = drive.nav.lastDetour or {}
+    e1 = ev[1] or {}
+    checkTrue(drive.nav.detourCalls == 1 and ld.more == nil and ld.ax == 60 and e1.why == "again"
+        and st.rejectedRoute == v8,
+        "(tc-v8) API 8 只給主圈、穿第二個轉角圈的線拒收 again（why=" .. tostring(e1.why) .. "）")
+
+    -- (tc-off) 自動改道關
+    autoOn = false
+    drive.nav.detour = arc(0)
+    st = arm(lanes(), 0, semi)
+    tick(20)
+    e1 = ev[1] or {}
+    checkTrue(drive.nav.detourCalls == 0 and e1.phase == "skip" and e1.why == "off",
+        "(tc-off) 自動改道關：不問、記 skip off（calls=" .. tostring(drive.nav.detourCalls) .. "）")
+    autoOn = true
+
+    -- (tc-solo) 沒拖車
+    st = arm(lanes(), 0, nil)
+    checkTrue(#st.profileRoute.towBlocked == 4, "(tc-solo) 剖面帶不可過轉角")
+    tick(20)
+    checkTrue(drive.nav.detourCalls == 0 and #ev == 0, "(tc-solo) 沒拖車不問")
+
+    MDAD.Drive.stop(0, nil)
+    drive.frameMs(wasMs)
+    MinidoracatMiniMapAPI.requestDetour = oldReq
+    MinidoracatMiniMapAPI.navApiVersion = oldApi
+    MDAD.HUD.autoDetour, MDADDiagnostics.event = oldAuto, oldEvent
+    drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
+    drive.nav.detour = oldDetour
+    SandboxVars, dveh, getSpecificPlayer = oldSandbox, oldVeh, oldGet
+end
+drive.scenarioTowCorner()
 -- 0928m 交還前的最後一次改道（Drive.stuckDetour；使用者裁定「遇大量障礙可改道」）：E2E rc13 12 個固定堵點
 -- 開著自動改道仍 0 次改道——舊觸發只在 blocked 停等 WAIT，實際堵死多在倒車額度用完後的停等預算／倒車
 -- 逾時交還。違規證明：拿掉停等預算出口的 stuckDetour＝(sd1) 紅；拿掉 NEAR_M 判定＝(sd2) 紅。
