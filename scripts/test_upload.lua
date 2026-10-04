@@ -307,6 +307,27 @@ checkEq(#indexRows("C"), before + 1, "trailer lost handback: clip")
 local trailerRow = indexRows("C")[before + 1] or ""
 checkEq(field(trailerRow, 7), "trailer", "kind trailer")
 checkEq(field(trailerRow, 8), "2", "trailer priority 2")
+-- 1004b：改道請求（不論成敗）留片段，事前窗看得到判堵與寬帶判定（判斷是否太早改道）；交還前沒問的 skip 不留。
+-- 違規證明：拿掉 Upload 的 detour 觸發＝第一條紅；skip 也觸發＝第二條紅。
+nowMs = nowMs + 3600000
+before = #indexRows("C")
+start()
+drive(3000, { blocked = true })
+D.event(0, "detour", { phase = "skip", why = "off" })
+drive(3000)
+D.stop(0, "button")
+pump(60000)
+checkEq(#indexRows("C"), before, "detour skip (option off): no clip")
+start()
+drive(3000, { blocked = true })
+D.event(0, "detour", { phase = "auto", why = "noroad", ms = 12000 })
+drive(3000)
+D.stop(0, "button")
+pump(60000)
+checkEq(#indexRows("C"), before + 1, "auto detour request: clip")
+local detourRow = indexRows("C")[before + 1] or ""
+checkEq(field(detourRow, 7), "detour", "kind detour")
+checkEq(field(detourRow, 8), "3", "detour priority 3")
 
 scenario("near-standstill brake is not an incident")
 before = #indexRows("C")

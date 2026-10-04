@@ -62,8 +62,9 @@ local IMPACT_HALF_L = 2.5 -- profile 沒有 halfL 時的半車長：取偏大（
 U.PRE_MS, U.CHUNK, U.CLIP_MAX = PRE_MS, CHUNK, CLIP_MAX
 
 -- 片段優先級：數字越小越重要（伺服器每人 32 段滿了先覆蓋數字大的）。
+-- detour（1004b）：自動／HUD 改道請求（不論成敗）——事前 PRE_MS 看得到判堵、寬帶判定與倒車，判斷是否太早改道。
 local PRI = { stuck = 1, fault = 1, contact = 2, impact = 2, trailer = 2, takeover = 3, unstick = 3, route = 3,
-    brake = 4 }
+    detour = 3, brake = 4 }
 U.PRI = PRI
 local STOP_KIND = {
     UI_MinidoracatAutoDrive_StopStuck = "stuck",
@@ -557,6 +558,8 @@ function U.event(u, line, now, name, a)
     end
     if name == "unstick" and phase == "start" then
         trigger(u, now, "unstick")
+    elseif name == "detour" and phase ~= "skip" then
+        trigger(u, now, "detour")
     elseif name == "blocked" or name == "unstick" or name == "progress" then
         u.lastAnomaly = now
     elseif name == "takeover" and now - u.lastAnomaly <= ANOMALY_TAKEOVER_MS then

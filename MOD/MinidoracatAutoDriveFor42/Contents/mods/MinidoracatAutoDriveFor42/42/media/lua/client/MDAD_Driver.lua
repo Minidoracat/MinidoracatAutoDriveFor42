@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1004a"
+Drive.REV = "1004b"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -123,6 +123,10 @@ TUNE.TOW_STEER_FULL_KMH = 15
 -- contact）。低於 STEER_FULL_KMH 側推按車速縮、靜止＝零；耦力原地調頭（coupled）不受影響。
 -- 取 4：貼縫爬行 5 km/h 與調頭大弧 12 仍是全額，只有近乎靜止時才收。
 TUNE.STEER_FULL_KMH = 4
+-- 縮放量的是車身前進速度（1004b，Drive.forwardKmh）：getCurrentSpeedKmHour 是速度向量長度、含側滑，側推一推出
+-- 橫滑就把自己的縮放解鎖成全額（正式服 0.18.2 起步大弧調頭 8 段：0.2 秒內 1→13 km/h、橫向 >14 m/s²，接調頭煞停）。
+-- |v| 低於 full＋此值才讀線速度（前進速度可能還在縮放區）；起步側滑的橫向分量實測 ≤11.5 km/h。
+TUNE.STEER_SLIP_MARGIN_KMH = 12
 -- 車身 yaw 率限制（0928a，ESC 式；0.13.1 正式服片段 >3 rad/s 自轉 24 次，0.13.0 只有 2 次）：側推是施在
 -- 車頭的外力、不受前輪轉角限制，目標點突然跳到 90° 外（Z 字短 jog 放行下一臂、窄出口繞行線、大弧調頭）
 -- 時 steer 飽和，0.2 秒內自轉 6–9 rad/s（summer/clip-06 SmallCar 18 km/h、Thragg/clip-04 GTR 大弧調頭、
@@ -555,7 +559,10 @@ TUNE.BRAKE_ASSIST_NEED = 4.5 -- 需要的減速度（m/s²）超過一般硬煞�
 -- 拖車硬煞不鎖輪（0929p，使用者裁定；見 Drive.hardBrake）：這個速度以上改用兩節各自的中線外力
 TUNE.TOW_NOLOCK_KMH = 10
 TUNE.TOW_BRAKE_DECEL = 7.0 -- 兩節各自的外力減速度（m/s²，同 DODGE_ASSIST_MAX）；斷油的引擎煞車另外疊加
-TUNE.RETURN_NOLOCK_KMH = 25 -- 回線待命／調頭前煞停／blocked 接近在這個速度以上改不鎖輪（1001d／1001e；低速照舊鎖輪）
+-- 回線待命／調頭前煞停／blocked 接近／待繞行接近在這個速度以上改不鎖輪（1001d／1001e）。1004b 起 25→10（使用者核准，
+-- 與拖車／讓車／彎道同一個門檻）：不鎖輪（斷油＋中線外力）實測約 10 m/s²、鎖輪 6–8，而且照常轉向、輪胎保有側向
+-- 抓地——正式服 0.18.2 Sixya clip-14：23 km/h 回線待命鎖輪，車頭帶 0.11 rad 往右滑 1.6m 撞樹。10 以下照舊鎖輪停住。
+TUNE.RETURN_NOLOCK_KMH = 10
 -- 堵住時放寬橫向掃描（0929p，使用者裁定「允許繞到道路之外」；見 Drive.wideScanWanted、MDADSensor 寬帶）
 TUNE.WIDE_SCAN_KMH = 5
 TUNE.WIDE_ARM_SAME_M = 6 -- 判堵錨離武裝時的錨超過這個距離＝換了一個堵點（Drive.blockedAtStop 解除武裝）
@@ -2511,9 +2518,22 @@ end
 -- 把 nextRouteMs 歸零讓下一幀 fetchRoute 立刻 cutover（why="detour"）。
 -- 回 (true) 或 (false, 原因)；原因供 HUD tooltip／console。
 -- stuck＝交還前的最後一次改道（Drive.stuckDetour）：不要求 blocked、錨點要在車前附近、放寬繞遠上限。
-function Drive.requestDetour(playerNum, stuck)
+-- src＝"auto"（停等自動改道）；HUD 按鈕不帶＝manual。每次請求（不論成敗）記一筆 detour 事件（1004b：舊制只有
+-- 交還前那條有事件，自動／HUD 改道被拒的原因只在 Debug console；正式服 0.18.2 開著自動改道的 90 趟沒有任何 detour
+-- 紀錄）。Upload 以 detour 事件觸發片段（phase＝skip 除外），事前窗看得到判堵、寬帶判定與倒車。
+function Drive.requestDetour(playerNum, stuck, src)
     local s = sessions[playerNum]
     if not s then return false, "inactive" end
+    local ok, why, len = Drive.detourAttempt(s, playerNum, stuck)
+    local v = s.vehicle
+    diagEvent(s, playerNum, "detour", { phase = stuck and "stuck" or (src or "manual"),
+        why = ok and "ok" or tostring(why), x = v and v:getX() or nil, y = v and v:getY() or nil, s = s.lastSNow,
+        hitX = s.blockHitX, hitY = s.blockHitY, ms = s.waitAccumMs, attempt = s.episodeAttempts,
+        lvl = s.wideArmed and (s.wideLevel or 1) or nil, len = len })
+    return ok, why
+end
+
+function Drive.detourAttempt(s, playerNum, stuck)
     if not stuck and not s.blocked and not s.currentBlocked then return false, "not-blocked" end
     local api = navApi()
     if not api then return false, "api" end
@@ -2576,7 +2596,7 @@ function Drive.requestDetour(playerNum, stuck)
     s.nextRouteMs = 0
     haloGood(playerObj, KEY_DETOUR)
     voice("detour", playerNum)
-    return true
+    return true, nil, route.len
 end
 
 -- 新路線是不是從車頭方向出發：沿路線起點走 TOW_TURN_LOOK_M 的點落在車頭前半平面
@@ -2659,9 +2679,14 @@ local function applySteering(
         s, vehicle, fwd, fx, fy, steer, speedKmh, mult, coupled, assistForce)
     if steer > 5 then steer = 5 elseif steer < -5 then steer = -5 end
     if not coupled then
-        -- 非耦力側推隨車速（TUNE.STEER_FULL_KMH／TOW_STEER_FULL_KMH）：靜止不橫推
+        -- 非耦力側推隨車身前進速度（TUNE.STEER_FULL_KMH／TOW_STEER_FULL_KMH）：靜止不橫推，側滑也不算車速
+        -- （TUNE.STEER_SLIP_MARGIN_KMH）。讀不到線速度時退回 |v|。
         local full = s.tow and TUNE.TOW_STEER_FULL_KMH or TUNE.STEER_FULL_KMH
         local tv = speedKmh < 0 and -speedKmh or speedKmh
+        if tv < full + TUNE.STEER_SLIP_MARGIN_KMH then
+            local fwdKmh = Drive.forwardKmh(vehicle, fx, fy)
+            if fwdKmh ~= nil and fwdKmh < tv then tv = fwdKmh end
+        end
         if tv < full then steer = steer * tv / full end
     end
     if steer < STEER_DEADZONE and steer > -STEER_DEADZONE then steer = 0 end
@@ -5293,6 +5318,24 @@ local function sampleVelocity(vehicle, fx, fy)
     return vx * fx + vz * fy, -vx * fy + vz * fx
 end
 
+-- 車身前進速度 |vLong|（km/h），給 applySteering 的低速側推縮放（TUNE.STEER_SLIP_MARGIN_KMH，1004b）。
+-- 讀不到回 nil，呼叫端退回 |v|（＝1004a 以前的行為）。不共用 sampleVelocity：那條是診斷路徑、讀取錯誤要往上拋，
+-- 控制路徑只能退回、不能中斷 session；pcall 直接帶參數，不配 closure。
+function Drive.forwardKmh(vehicle, fx, fy)
+    local okLookup, fn = pcall(jindex, vehicle, "getLinearVelocity")
+    if not okLookup or type(fn) ~= "function" then return nil end
+    local vel = BaseVehicle.allocVector3f()
+    if vel == nil then return nil end
+    local vLong = nil
+    if pcall(fn, vehicle, vel) then
+        local vx, vz = vel:x(), vel:z()
+        if finite(vx) and finite(vz) then vLong = vx * fx + vz * fy end
+    end
+    pcall(BaseVehicle.releaseVector3f, vel)
+    if vLong == nil then return nil end
+    return (vLong < 0 and -vLong or vLong) * 3.6
+end
+
 local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     local phys = {}
     local po = jget(vehicle, "isDoingOffroad")
@@ -5798,18 +5841,28 @@ end
 -- 仍 0 次改道。交還前若選項開著、本 session 額度未滿、不在上次問過的地方，就先要一條避開前方的替代
 -- 路線（繞遠上限放寬到拖車調頭同一套）；拿到＝重置停等預算繼續開，拿不到＝照常交還。
 function Drive.stuckDetour(s, playerNum)
-    if not (type(MDAD.HUD) == "table" and type(MDAD.HUD.autoDetour) == "function"
-            and MDAD.HUD.autoDetour() == true) then return false end
-    if (s.stuckDetourN or 0) >= TUNE.STUCK_DETOUR_MAX then return false end
     local vx, vy = s.vehicle:getX(), s.vehicle:getY()
     local px, py = s.stuckDetourX, s.stuckDetourY
-    if finite(px) and finite(py) and (vx - px) * (vx - px) + (vy - py) * (vy - py)
-            < TUNE.STUCK_DETOUR_NEAR_M * TUNE.STUCK_DETOUR_NEAR_M then return false end
+    -- 沒問就交還的三種原因各記一筆（phase＝skip，不觸發片段）：舊制靜默 return，正式服 0.18.2 開著自動改道的受困交還
+    -- 沒有任何改道紀錄，分不出是選項關、這趟額度用完，還是在上次問過的地方附近
+    local skip = nil
+    if not (type(MDAD.HUD) == "table" and type(MDAD.HUD.autoDetour) == "function"
+            and MDAD.HUD.autoDetour() == true) then
+        skip = "off"
+    elseif (s.stuckDetourN or 0) >= TUNE.STUCK_DETOUR_MAX then
+        skip = "max"
+    elseif finite(px) and finite(py) and (vx - px) * (vx - px) + (vy - py) * (vy - py)
+            < TUNE.STUCK_DETOUR_NEAR_M * TUNE.STUCK_DETOUR_NEAR_M then
+        skip = "near"
+    end
+    if skip then
+        diagEvent(s, playerNum, "detour", { phase = "skip", why = skip, x = vx, y = vy, s = s.lastSNow,
+            ms = s.waitAccumMs, attempt = s.episodeAttempts })
+        return false
+    end
     s.stuckDetourN = (s.stuckDetourN or 0) + 1
     s.stuckDetourX, s.stuckDetourY = vx, vy
-    local ok, why = Drive.requestDetour(playerNum, true)
-    diagEvent(s, playerNum, "detour", { phase = "stuck", why = ok and "ok" or tostring(why), x = vx, y = vy,
-        attempt = s.stuckDetourN })
+    local ok = Drive.requestDetour(playerNum, true) -- 事件由 requestDetour 記（phase＝stuck）
     if not ok then return false end
     s.mode, s.recoverWhy = "follow", nil
     s.progressState, s.progressSince = "disarmed", 0
@@ -10896,7 +10949,7 @@ local function stepFollow(s, vehicle, playerNum, now)
             and MDAD.HUD.autoDetour() == true
         if autoDetourNow then
             s.detourTried = true
-            Drive.requestDetour(playerNum)
+            Drive.requestDetour(playerNum, false, "auto")
         elseif s.blocked and not s.banFromRecovery and s.recoverWhy == nil
                 and postAction == nil
                 and not s.blockRetryDone

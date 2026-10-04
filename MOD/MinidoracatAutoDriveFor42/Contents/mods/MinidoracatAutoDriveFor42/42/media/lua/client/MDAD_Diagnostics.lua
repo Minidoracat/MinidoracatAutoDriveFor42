@@ -105,6 +105,8 @@ local EK = {
     "blocker",
     -- tow attach（0929p）：掛車幾何（寬帶繞行掃掠、判堵停止線的輸入）
     "L2", "trailLen", "halfW", "mass", "hitchZ", "boxBack", "axisSign",
+    -- 寬帶掃描層級（1004b：blocked why=wide、detour）
+    "lvl",
 }
 
 local function logOnce(msg)

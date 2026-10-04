@@ -5422,7 +5422,8 @@ do
         getForwardVector = function(_, out) return out:set(dveh._fwdX, 0, dveh._fwdY) end,
         getUpVectorDot = function() return 1 end,
     }
-    local function steerMag(speed, towed)
+    -- fwdKmh：車身前進速度（給了就讓 getLinearVelocity 回「前進 fwdKmh＋橫向補足」，|v| 仍是 speed）
+    local function steerMag(speed, towed, fwdKmh)
         MDAD.Drive.stop(0, nil)
         dveh._x, dveh._y, dveh._speed = 0, 0, speed
         setHeading(dveh, 0.52)
@@ -5431,8 +5432,16 @@ do
         if towed then MDAD.Drive.debugSession(0).tow = { trailer = trailer } end
         driveReset(dveh)
         driveTick(dp, dveh) -- 第一幀可能還在 build（建剖面、不施力）
+        local realVel = dveh.getLinearVelocity
+        if fwdKmh ~= nil then
+            local f, l = fwdKmh / 3.6, math.sqrt(math.max(0, speed * speed - fwdKmh * fwdKmh)) / 3.6
+            dveh.getLinearVelocity = function(self, out)
+                return out:set(self._fwdX * f - self._fwdY * l, 0, self._fwdY * f + self._fwdX * l)
+            end
+        end
         driveReset(dveh)
         driveTick(dp, dveh)
+        dveh.getLinearVelocity = realVel
         checkTrue(MDAD.Drive.isActive(0), "拖車側推情境仍在自駕（" .. speed .. " km/h）")
         return dveh._imp.total > 0 and impulseMag(dveh) or 0
     end
@@ -5448,6 +5457,14 @@ do
         "拖車 7.5 km/h：側推為全額的一半（" .. tostring(tow75) .. " / " .. tostring(free75) .. "）")
     local free20, tow20 = steerMag(20, false), steerMag(20, true)
     checkNear(tow20, free20, free20 * 1e-6, "拖車 20 km/h：側推全額")
+    -- (slip-push) 1004b 正式服 0.18.2 起步大弧調頭 8 段：側推推出的橫滑讓 |v| 越過 STEER_FULL_KMH，縮放被自己解鎖成
+    --   全額、越推越滑。縮放改看車身前進速度：|v| 6、前進只有 0.5 km/h＝按 0.5/4 縮；前進已過 4＝全額照舊。
+    --   違規證明：applySteering 不讀前進速度（退回 |v|）＝(slip-push) 第一條紅。
+    local free6, slip6 = steerMag(6, false), steerMag(6, false, 0.5)
+    checkNear(slip6, free6 * 0.5 / 4, free6 * 1e-6,
+        "(slip-push) |v| 6 km/h 但前進只有 0.5：側推按前進速度縮成 0.5/4（" .. tostring(slip6) .. " / " .. tostring(free6) .. "）")
+    local free8, slip8 = steerMag(8, false), steerMag(8, false, 5)
+    checkNear(slip8, free8, free8 * 1e-6, "(slip-push) 前進 5 km/h（已過 4）帶側滑：側推全額照舊")
     MDAD.Drive.stop(0, nil)
 end
 
@@ -5725,8 +5742,15 @@ checkEq(drive.calls.regulatorOn, 1, "alignment handling remains best-effort afte
 setHeading(dveh, 1.66)
 driveReset(dveh)
 driveTick(dp, dveh)
-checkTrue(drive.calls.forceBrake > 0, "溫和（預設）：反向 156°＋速度 20 > entry 5：入場先煞停")
-checkEq(dveh._imp.total, 0, "溫和入場煞停幀不施轉向")
+-- 1004b：調頭前煞停 10 km/h 以上不鎖輪（RETURN_NOLOCK_KMH 25→10，使用者核准）：斷油＋中線減速力、本幀不轉向；
+-- 10 以下照舊鎖輪停住。違規證明：RETURN_NOLOCK_KMH 改回 25＝下面三條「不鎖輪」紅。
+checkTrue(drive.calls.forceBrake == 0 and (MDAD.Drive.debugSession(0).visAssistDecel or 0) > 0,
+    "溫和（預設）：反向 156°＋速度 20 > entry 5：入場先煞停（不鎖輪，forceBrake " .. drive.calls.forceBrake .. "）")
+checkTrue(drive.pureBrake(dveh), "溫和入場煞停幀不施轉向（只有中線減速力）")
+dveh._speed = 8
+driveReset(dveh)
+driveTick(dp, dveh)
+checkTrue(drive.calls.forceBrake > 0, "入場煞停降到 8（< 10）：鎖輪停住")
 checkTrue(MDAD.Drive.isActive(0), "入場煞停不放棄 session")
 dveh._speed = 4
 driveReset(dveh)
@@ -5741,12 +5765,14 @@ checkTrue(dveh._imp.total >= 1, "大弧幀施轉向力")
 dveh._speed = 14
 driveReset(dveh)
 driveTick(dp, dveh)
-checkTrue(drive.calls.forceBrake > 0, "14 > arc 13：常駐上限仍煞停")
+checkTrue(drive.calls.forceBrake == 0 and (MDAD.Drive.debugSession(0).visAssistDecel or 0) > 0,
+    "14 > arc 13：常駐上限仍煞停（不鎖輪）")
 MDAD.HUD.uturnMode = function() return "fast" end
 dveh._speed = 20
 driveReset(dveh)
 driveTick(dp, dveh)
-checkTrue(drive.calls.forceBrake > 0, "同一次調頭途中改快速：仍用溫和參數（20 > arc 13 煞停）")
+checkTrue(drive.calls.forceBrake == 0 and (MDAD.Drive.debugSession(0).visAssistDecel or 0) > 0,
+    "同一次調頭途中改快速：仍用溫和參數（20 > arc 13 煞停、不鎖輪）")
 -- 結束這次調頭：收尾看的是對前視點的誤差 < 100°——側偏 20m 時 heading 0.3 對前視點仍
 -- ≈101°（見上方假抵達守衛註解）；把車頭指向前視點（約 -73°）即收尾，不能回 y=0（會抵達）
 setHeading(dveh, -1.3)
@@ -10572,6 +10598,17 @@ local function scenarioDetour()
     driveTick(dp, dveh)
     drive.scanRound(true) -- 寬帶判堵一輪
     nav.detourCalls = 0
+    -- (c5c-ev) 1004b：每次改道請求記一筆 detour 事件（phase auto／manual／stuck／skip、why＝結果）；舊制自動改道被拒
+    --   只在 Debug console。違規證明：requestDetour 不記事件＝紅。
+    local detourEv, realEvent = {}, MDADDiagnostics.event
+    -- 本情境沒開本機紀錄：diagEvent 要 s.diag，而每幀 sample 回非 true 會把它關掉——取樣先回 true
+    local realSample = MDADDiagnostics.sample
+    MDADDiagnostics.sample = function() return true end
+    MDAD.Drive.debugSession(0).diag = true
+    MDADDiagnostics.event = function(pn, name, a, ...)
+        if name == "detour" and type(a) == "table" then detourEv[#detourEv + 1] = a end
+        return realEvent(pn, name, a, ...)
+    end
     MDAD.HUD.autoDetour = function() return true end
     nowMs = nowMs + 6000
     driveTick(dp, dveh)
@@ -10583,6 +10620,17 @@ local function scenarioDetour()
     nowMs = nowMs + 2000
     driveTick(dp, dveh)
     checkEq(nav.detourCalls, 1, "(c5c) 同一停等 episode 不重問")
+    local ev1 = detourEv[1]
+    checkTrue(#detourEv == 1 and ev1.phase == "auto" and ev1.why ~= "ok" and type(ev1.ms) == "number" and ev1.ms >= 10000,
+        "(c5c-ev) 自動改道被拒記一筆 detour（phase " .. tostring(ev1 and ev1.phase) .. "、why " .. tostring(ev1 and ev1.why)
+        .. "、等了 " .. tostring(ev1 and ev1.ms) .. " ms）")
+    MDAD.HUD.autoDetour = function() return false end
+    MDAD.Drive.stuckDetour(MDAD.Drive.debugSession(0), 0)
+    local ev2 = detourEv[2]
+    checkTrue(ev2 ~= nil and ev2.phase == "skip" and ev2.why == "off",
+        "(c5c-ev) 交還前改道因選項關沒問也記一筆（phase " .. tostring(ev2 and ev2.phase) .. "、why " .. tostring(ev2 and ev2.why) .. "）")
+    MDADDiagnostics.event, MDADDiagnostics.sample = realEvent, realSample
+    MDAD.Drive.debugSession(0).diag = false
     MDAD.HUD.autoDetour = oldAuto
     for _, y in ipairs({ -5, -4, -2, -1, 0, 1, 2, 4, 5 }) do drive.clearCell(20, y) end
     for _, y in ipairs({ -1, 0, 1 }) do drive.clearCell(7, y) end
@@ -14244,12 +14292,17 @@ local function scenarioPhaseE()
     for _ = 1, 4 do driveTick(dp, hotVeh) end
     drive.scanRound(true)
     checkTrue(captured.returnHold, "near current-lane unknown cannot crawl")
+    -- 近場未知的回線待命不能爬行、一定硬煞：10 km/h 以下鎖輪停住，以上（1004b）不鎖輪（斷油＋中線外力，減速更快）
     for _, speed in ipairs({ 8, 15 }) do
         hotVeh._speed = speed
         driveReset(hotVeh)
         driveTick(dp, hotVeh)
-        checkTrue(drive.calls.forceBrake > 0,
-            "RETURN HOLD force-brakes at " .. speed .. " km/h")
+        if speed < 10 then
+            checkTrue(drive.calls.forceBrake > 0, "RETURN HOLD force-brakes at " .. speed .. " km/h")
+        else
+            checkTrue(drive.calls.forceBrake == 0 and (captured.visAssistDecel or 0) > 0,
+                "RETURN HOLD brakes without locking at " .. speed .. " km/h（vad " .. tostring(captured.visAssistDecel) .. "）")
+        end
         checkEq(drive.calls.regulatorOn, 0,
             "RETURN HOLD never enables regulator at " .. speed .. " km/h")
     end

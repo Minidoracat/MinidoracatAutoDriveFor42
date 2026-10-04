@@ -4171,6 +4171,86 @@ do
         "(3) Semi 類 G 0.12（同相）：回授增益照常學到 %.3f（0.11–0.13）", after or -1))
 end
 
+scenario("1004b：彎內偏差退讓——低估增益的過頭前饋＋參考點側滑 plant 上，車已偏內時前饋退讓、不切內擦樹（正式服 0.18.2 Qoo／Loni 半聯結）")
+do
+    -- 正式服 0.18.2（rev 1002y）SemiTruckLite／SemiTruckBox 內切 1.1–1.4m 擦內側樹、contact 鎖輪：Qoo clip-14／17 R≈25 雙 45° 右彎
+    -- 44 km/h（學到的 yawGain 0.19、彎上實測 yaw/steer 0.65–0.73，前饋飽和 0.8＝過頭 60%）；Loni clip-31 14m 路轉 8m 路 90° 右彎
+    -- 33 km/h（車道 ramp 3→1.74 前段小 steer 轉不動、進弧已偏內，弧上前饋再推）。Plant 照片段擬合：yaw 一階追門檻型目標
+    -- （|u|≤0.4 斜率 0.18、以上 1.4；半聯結 |steer|<0.5 實測 0.15–0.2、0.75–1 約 0.6–0.8）、τ 0.15、參考點在無側滑點前 1.5m
+    -- （片段 vt/yr 1.3–1.6）；Driver 同式 cross-track（弧段 ×ARC）、回授正規化（FB_NORM_REF 0.5、夾 1..3、放大後上限 1.5）、死區。
+    -- 違規證明：FF_HI.inM 改 99（不退讓）＝(1) 1.32、(2) 1.45 紅。(3) 是代價上界：退讓後弧中少轉，門檻型 plant 出彎後小 steer
+    -- 轉不動車頭，外漂 0.26／0.63 → 0.57／0.76（離線矩陣同向），超過 0.85 就是退讓換成外甩。
+    local D = MDADDynamics
+    local VP = { valid = true, geometryValid = true, halfW = 1.06, halfL = 3.6, rMin = 5.875, wheelbase = 5.15,
+        delta0Safe = 0.72, deltaVSafe = 0.2, maxSpeed = 50, lookScale = 1.5 }
+    local G1, U0, G2, TAU, LR = 0.18, 0.4, 1.4, 0.15, 1.5
+    -- 定速閉環：回 (弧前 25m 到弧後 12m 的最大內切, 弧後 15m 的最大外漂)
+    local function run(route, kmh, yg, ygf, ygh)
+        local dt, v = 1 / 60, kmh / KMH
+        local p = F.begin(route, VP.maxSpeed, 4, VP)
+        while not p.ready do F.stepBuild(p, 4096) end
+        local a0, a9
+        for i = 1, p.n - 1 do
+            if p.segKind[i] == D.SEG_ARC then a0 = a0 or p.s[i]; a9 = p.s[i + 1] end
+        end
+        local st = F.newState()
+        F.setLaneBias(st, 3)
+        F.setRuntimeLimits(st, 3, 6, 3, 1)
+        st.yawGain, st.yawGainFb, st.fbSteerF, st.fbYawF = yg, ygf, 0.5, ygf * 0.5
+        if ygh then st.yawGainHi, st.hiLearnT, st.hiSteerF, st.hiYawF = ygh, 1, 0.5, ygh * 0.5 end
+        -- 起點：弧前 50m（夠在進彎前收斂到常駐車道），q＝無側滑點（參考點後 LR）
+        local s0, i0 = math.max(1, a0 - 50), 1
+        while p.s[i0 + 1] <= s0 do i0 = i0 + 1 end
+        local h = p.segH[i0]
+        local f0 = (s0 - p.s[i0]) / (p.s[i0 + 1] - p.s[i0])
+        local l0 = F.laneBiasAt(p, 3, i0, s0)
+        local q = { x = p.x[i0] + (p.x[i0 + 1] - p.x[i0]) * f0 - math.sin(h) * l0 - math.cos(h) * LR,
+            y = p.y[i0] + (p.y[i0 + 1] - p.y[i0]) * f0 + math.cos(h) * l0 - math.sin(h) * LR }
+        local w, prevLat, inMax, outMax = 0, nil, 0, 0
+        for _ = 1, 60 * 30 do
+            local cx, cy = q.x + math.cos(h) * LR, q.y + math.sin(h) * LR
+            local steer, _, rem, reached, _, _, latSigned = F.control(p, st, cx, cy, h, kmh, dt)
+            local sNow = p.length - rem
+            local latDev = latSigned - F.laneBiasAt(p, 3, st.idx, sNow)
+            local dLat = prevLat and (latDev - prevLat) / dt or nil
+            if dLat and (dLat > 5 or dLat < -5) then dLat = nil end
+            prevLat = latDev
+            local xg, xm
+            if st.curveHardActive then xg, xm = D.CROSS_TRACK_ARC_GAIN, D.CROSS_TRACK_ARC_MAX end
+            local u = steer - D.crossTrackSteer(latDev, kmh, dLat, xg, xm)
+            local k = 0.5 / (st.yawGainFb or st.yawGain)
+            if k < 1 then k = 1 elseif k > 3 then k = 3 end
+            local fb = u - (st.ffSteer or 0)
+            local lim = math.max(1.5, math.abs(fb))
+            u = (st.ffSteer or 0) + math.max(-lim, math.min(lim, k * fb))
+            if u > 5 then u = 5 elseif u < -5 then u = -5 end
+            if u < 0.02 and u > -0.02 then u = 0 end
+            st.appliedSteer, st.escLimited = u, false
+            local au = math.abs(u)
+            local wT = (G1 * math.min(au, U0) + G2 * math.max(0, au - U0)) * (u < 0 and -1 or 1)
+            local wMax = v / VP.rMin
+            if wT > wMax then wT = wMax elseif wT < -wMax then wT = -wMax end
+            w = w + (wT - w) * (dt / TAU)
+            h = h + w * dt
+            q.x, q.y = q.x + math.cos(h) * v * dt, q.y + math.sin(h) * v * dt
+            -- 右轉（數學 CCW）彎內＝+l
+            if sNow > a0 - 25 and sNow < a9 + 12 and latDev > inMax then inMax = latDev end
+            if sNow > a9 and sNow < a9 + 15 and -latDev > outMax then outMax = -latDev end
+            if reached or sNow > a9 + 15 then break end
+        end
+        return inMax, outMax
+    end
+    local r25 = { pts = { -120, 0, 0, 0, 16.5, 15.5, 16.53, 86.5 }, segSurface = { "paved", "paved", "paved" },
+        segWidth = { 15, 15, 15 } }
+    local in25, out25 = run(r25, 44, 0.19, 0.19, 0.24)
+    checkTrue(in25 < 0.7, string.format("(1) Qoo R25 雙 45°、44 km/h、學到 0.19（實 0.7）：切內 %.2fm < 0.7（不退讓 1.32）", in25))
+    local r90 = { pts = { -65.2, 0, 0, 0, 0, 67 }, segSurface = { "paved", "paved" }, segWidth = { 14, 8 } }
+    local in90, out90 = run(r90, 33, 0.32, 0.30, nil)
+    checkTrue(in90 < 0.9, string.format("(2) Loni 14m→8m 90°、33 km/h：切內 %.2fm < 0.9（不退讓 1.45）", in90))
+    checkTrue(out25 < 0.85 and out90 < 0.85, string.format("(3) 出彎外漂 R25 %.2f／90° %.2f < 0.85（退讓不換成外甩）",
+        out25, out90))
+end
+
 closeScenario()
 print()
 print("情境 " .. scenarios .. " 個、斷言 " .. assertions .. " 項")

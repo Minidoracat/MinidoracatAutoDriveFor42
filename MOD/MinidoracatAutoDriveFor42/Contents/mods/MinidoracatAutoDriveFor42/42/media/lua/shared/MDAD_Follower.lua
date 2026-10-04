@@ -170,10 +170,11 @@ local CURVE_FF_FRAC = 0.75
 -- 一張表（control 的 upvalue 已貼 60 上限）：fromKmh→fullKmh 補足區間、frac＝補足到的 FRAC、
 -- learnKmh／minFF＝高速增益的學習條件（實速／上幀前饋量）、learnS＝學滿才補足、settleS＝假設的 yaw 延遲 τ
 -- （穩態門檻與 steer 低通共用；前饋進弧爬升的 CURVE_FF_LEAD_S 是同一個量）。fbOppose＝回授正規化增益（yawGainFb）
--- 剔除的反相 yaw 率門檻（rad/s，見 control 的 yaw 增益估計段）；同表是為了不多占 control 的 upvalue。
+-- 剔除的反相 yaw 率門檻（rad/s，見 control 的 yaw 增益估計段）；inM／inSpanM＝弧段前饋的彎內偏差退讓（見
+-- arcFeedForward 尾段）；同表是為了不多占 control 的 upvalue。
 local CURVE_FF_LEAD_S = 0.35
 local FF_HI = { fromKmh = 30, fullKmh = 55, frac = 0.9, learnKmh = 40, minFF = 0.1, learnS = 0.5,
-    settleS = CURVE_FF_LEAD_S, fbOppose = 0.5 }
+    settleS = CURVE_FF_LEAD_S, fbOppose = 0.5, inM = 0.3, inSpanM = 0.5 }
 local CURVE_FF_MAX = 0.8 -- 小增益長車不能用倒數把前饋放大成整車橫推；回饋仍保留完整權威。
 local YAW_GAIN_INIT = 0.8
 local YAW_GAIN_TAU_S = 0.5
@@ -1177,8 +1178,16 @@ end
 -- 照 1/R 前饋＝轉過頭切內。l'' 以 LANE_FF_STEP_M 中心差分取在 lead 點；車道斜率切線同樣含隱含前饋
 -- KP·l''·(1.5·PREVIEW + v·SLOPE_LEAD)（斜率取在 q+v·SLOPE_LEAD 起 1.5m 的中點），一併扣掉。
 -- 追承諾線（ov）切線時那條線自己的側移已在切線裡，不另算車道項。
+-- 彎內偏差退讓（1004b；正式服 0.18.2 Qoo clip-12／14／17、Loni clip-31、lista clip-02：半聯結與 F250 27–44 km/h
+-- 內切 0.8–1.4m 擦內側樹）：車已在期望線「前饋推的那一側」超過 FF_HI.inM，前饋按超出量線性退讓、再多 inSpanM 退到 0
+-- （2026-09-08 裁定：前饋寧可欠轉、由位置環補）。前饋是開環：yawGain 是逐幀 yaw/steer 比值，側推的 yaw 響應
+-- 對 |steer| 是凸的（半聯結片段 |steer|<0.5 約 0.15–0.2、0.75–1 約 0.6–0.8；推論是 Bullet 輪側向摩擦的門檻），
+-- 平常小修正學到的低增益讓急彎前饋過頭 2–3 倍（Qoo 學到 0.19、彎上實測 0.65–0.73）；車道 ramp 前段的小 steer
+-- 又幾乎轉不動車頭，進弧時已偏內 0.5–0.85m。兩種誤差都是「前饋在車已偏內時照推」，cross-track 0.77·2/v 在
+-- 40 km/h 只有 0.14/m 拉不回。只退讓、不反推：外側偏差照舊由回授處理，前饋不加碼。
 local LANE_FF_STEP_M = 2
-local function arcFeedForward(profile, state, arcK, bestI, sNow, aspeed, tangentOn, yawGain, ovDen)
+local function arcFeedForward(profile, state, arcK, bestI, sNow, aspeed, tangentOn, yawGain, ovDen,
+        latSigned, lineLat)
     local kap = profile.kappa
     state.ffFull = false
     if not kap or arcK == nil or aspeed <= 0.5 then return 0 end
@@ -1282,7 +1291,16 @@ local function arcFeedForward(profile, state, arcK, bestI, sNow, aspeed, tangent
         if ff > CURVE_FF_MAX then ff = CURVE_FF_MAX
         elseif ff < -CURVE_FF_MAX then ff = -CURVE_FF_MAX end
     end
-    return ff + ffLane
+    ff = ff + ffLane
+    -- 彎內偏差退讓（見檔頭）：期望線＝cross-track 追的那條（承諾線 lineLat，否則常駐車道連續落點）
+    if ff ~= 0 and isFinite(latSigned) then
+        local lane = lineLat
+        if lane == nil then lane = clampLane(profile, bestI, isFinite(rb) and rb or 0, state.laneKeep, sNow) end
+        local over = ((latSigned - lane) * (ff > 0 and 1 or -1) - FF_HI.inM) / FF_HI.inSpanM
+        if over >= 1 then return 0 end
+        if over > 0 then ff = ff * (1 - over) end
+    end
+    return ff
 end
 
 -- 弧段即時帽（m/s）與折算後 κ：中心線 κ（j 與 j+1 取大）；行駛線往彎內側偏 latHere 時半徑＝R−lt
@@ -2201,7 +2219,7 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         state.yawGain = yawGain
         -- ---- 弧段前饋（arcFeedForward）----
         local ff = arcFeedForward(profile, state, arcK, bestI, sNow, aspeed, tangentOn, yawGain,
-            tangentOn and ovDen or nil)
+            tangentOn and ovDen or nil, latSigned, lineLat)
         if ff ~= 0 then
             steer = steer + ff
             if steer > STEER_MAX then steer = STEER_MAX
