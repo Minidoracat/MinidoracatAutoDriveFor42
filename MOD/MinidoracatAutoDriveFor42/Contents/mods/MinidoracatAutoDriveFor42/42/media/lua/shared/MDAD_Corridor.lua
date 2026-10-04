@@ -133,6 +133,11 @@ local sqrt, cos, sin = math.sqrt, math.cos, math.sin
 
 local OBS_HALF = 0.7              -- 障礙格半寬（公尺）：B42 一格 1 公尺，取略小於半格
 local FOOTPRINT_PAD = 0.15        -- current body 對點障礙的固定安全圈（見介面契約來源）
+-- 起步近物限速的前方帶（1004e）：第 10 回傳只算車身往前延伸、兩側各再寬這麼多的帶內點。舊制取前半車身任何方向
+-- 最近的點：正式服 0.18.x 28 段起步有 27 段被車側 1.6–4m 外的東西壓到 8 km/h 以下（MIN_EXEC 抬回 8 爬 1–4 秒）；
+-- 往常駐線斜切會掃到的點改由 Driver 的 Drive.transitionHold 管。
+local FRONT_STRIP_PAD = 0.5
+MDADCorridor.FRONT_STRIP_PAD = FRONT_STRIP_PAD
 local GROUP_GAP = 6               -- 群聚合的 s 間距上限（公尺）
 local ROUNDS_MAX = 8              -- 群邊界擴張的輪數上限（見上方 ② 的說明）
 local ENTRY = 8                   -- 進入段長度（公尺）：a = sObs0 - ENTRY
@@ -192,7 +197,8 @@ end
 -- pad（選填）：安全圈；nil＝FOOTPRINT_PAD。物理檔承諾（車身 −0.1 掃過的貼縫）執行中由
 -- 呼叫端傳承諾同源的負 pad——否則「規劃說 10cm 名義重疊沒事、contact 說要 15cm 淨空」
 -- 兩套標準打架，貼縫永遠在半路被 contact 煞停（2026-09-04 s063/s064 只差一點點）。
--- 第 10 回傳（0928a）：前半車身（u ≥ 0）最近點的淨距，沒有這種點＝nil；Driver 起步近物限速用。
+-- 第 10 回傳（0928a；1004e 改前方帶）：車頭前方、橫向落在車身往前延伸 ±FRONT_STRIP_PAD 帶內的點中最近者的淨距，
+-- 沒有這種點＝nil；Driver 起步近物限速用。
 -- hardB（選填，0929j）：逐點的整格方塊半邊長（0／缺＝圓）。方塊以它在車身座標的外框算（軸對齊時與
 -- 引擎方塊完全一致，斜向時略保守），r 不用。pad ≥0 照圓的語意在外框外再扣；負 pad 改成把外框縮 |pad|
 -- （夾 ≥0），同圓的 r+pad≥0：不讓車身內的點判成淨空。
@@ -280,7 +286,7 @@ function MDADCorridor.currentFootprintHit(hardS, hardL, hardX, hardY, hardR, har
                 bestClear, bestPlanned = actual, planned
                 bestI, bestS, bestL, bestX, bestY = i, hs, hl, hx, hy
             end
-            if u >= 0 and (bestFront == nil or actual < bestFront) then bestFront = actual end
+            if u >= 0 and dv - ra <= FRONT_STRIP_PAD and (bestFront == nil or actual < bestFront) then bestFront = actual end
         end
     end
 

@@ -7008,6 +7008,11 @@ end
 --       倒不了 → StopStuck）：contact 後車身整個越過命中點且 episodeAttempts=0 → ban 清掉。
 do
     local st = MDAD.Drive.debugSession(0)
+    -- 車在 1.2、常駐 0，左側 −0.3 的桿在斜切帶內：斜切保持（1004e）會讓規劃器改以 1.2 判擋、從縫物理檔擠過去，
+    -- 就沒有本案要的 contact。本案只測 contact 後的 ban 清除：門檻暫時拉到斜切保持不會啟動（另見 scenario1004e）。
+    local T = MDAD.Drive.debugTune()
+    local keepLat = T.START_GUARD_LAT_M
+    T.START_GUARD_LAT_M = 99
     dveh._x, dveh._y, dveh._speed = 18, 1.2, 5
     driveReset(dveh)
     drive.scanRound(true)
@@ -7042,6 +7047,7 @@ do
     dveh._x, dveh._y, dveh._speed = 0, 0, 20
     MDAD.Drive.stop(0, nil)
     checkTrue(armDrive(), "(ban) 重臂")
+    T.START_GUARD_LAT_M = keepLat
 end
 function drive.scenarioDesignEnvelope()
     local world, frame = drive.world, drive.frameMs(8)
@@ -7708,8 +7714,17 @@ checkEq(drive.voiceCount("blocked") - drive.blockedVoicesBefore, 1, "堵死開�
 driveReset(dveh)
 driveTick(dp, dveh)
 checkEq(drive.calls.forceBrake, 0, "障礙還在 15 公尺外：接近段不煞停")
-checkTrue(drive.calls.maxRegSpeed >= 0 and drive.calls.maxRegSpeed <= 20,
-    "blocked approach command never exceeds 20")
+do
+    -- 1004e：接近停止線只套包絡（在停止線收到 BLOCK_APPROACH_KMH），不再平壓 20 爬到停止線
+    local stB = MDAD.Drive.debugSession(0)
+    local env = stB and stB.blockedApproachCap
+    local flat = MDAD.Drive.debugTune().BLOCK_APPROACH_KMH
+    checkTrue(type(env) == "number" and env > flat,
+        "blocked 接近：停止線前 10m 的包絡高於停止線速度（實得 " .. tostring(env) .. "）")
+    checkTrue(type(env) == "number" and drive.calls.maxRegSpeed > flat and drive.calls.maxRegSpeed <= env + 1,
+        "blocked approach command follows the stop-line envelope, not a flat " .. tostring(flat) .. "（實得 "
+        .. tostring(drive.calls.maxRegSpeed) .. " ≤ " .. tostring(env) .. "）")
+end
 -- 車逼近到 11（距障礙群 <10＝BLOCK_STOP_DIST）→ 煞停等待
 dveh._x = 11
 driveTick(dp, dveh) -- 投影窗跟上新位置
@@ -9137,7 +9152,9 @@ do
         "群1 只剩右外側縫（實得 " .. tostring(offs[#offs]) .. "）")
     -- 2026-09-04 起過渡幾何按巡航意圖設計；0906c 起 dl 取車的實際橫向（車在 0、bias 1 → 側移
     -- 3.25 而非 2.25），剖面 d 延到 ≈52：車要推到剖面末端之外（55）、下一個障礙（65）仍在前方帶內。
-    dveh._x = 55 -- beyond dynamic d≈51.9 while the next obstacle at x=65 stays ahead
+    -- 1004e：車回到常駐線（bias 1）上——harness 不模擬橫移，留在 0 的話樹在「車位→常駐線」的斜切帶內，
+    -- 斜切保持會讓車沿 0 直走過樹（不需要繞行），本案測的是剖面走完後在常駐線上的新繞行選側。
+    dveh._x, dveh._y = 55, 1 -- beyond dynamic d≈51.9 while the next obstacle at x=65 stays ahead
     for _ = 1, 8 do driveTick(dp, dveh) end
     drive.clearCell(20, -1); drive.clearCell(20, 0)
     drive.putTree(65, 1, "vegetation_trees_02_1")
@@ -16653,14 +16670,30 @@ function drive.scenarioSpeedWindows()
     checkTrue(far > st.dodgeSpeedCap + 5 and drive.calls.maxRegSpeed > 10,
         "(pinch) 窄點仍遠時真的加速，不把整個入口鎖在10")
     -- 0909b：升速另外要有姿態證據——車還沒對上承諾線就提速，等於把入口的側移能力
-    -- 當成已經在走直線。追線誤差 >0.35m 或車頭偏離該格切線 >5° 一律退回整線窄點帽。
+    -- 當成已經在走直線。追線誤差超過門檻或車頭偏離該格切線 >5° 一律退回整線窄點帽。
+    -- 1004e：門檻隨車身前方逐點淨距放寬（×0.5、上限 DODGE_ALIGN_DEV_MAX_M），窄處仍是 DODGE_ALIGN_DEV_M。
     local keepDev, keepHead = st.lastLatDev, st.lastVehicleHeading
     local envAligned = MDAD.Drive.dodgeEnvelopeCap(st, 10, nowMs)
     checkTrue(type(envAligned) == "number" and envAligned > st.dodgeSpeedCap,
         "(pinch) 對線且證明完整：逐點包絡高於整線窄點帽（實得 " .. tostring(envAligned) .. "）")
+    local TA = MDAD.Drive.debugTune()
+    local kA = math.floor((st.lastSNow - st.fstate.ovS0) / MDADFollower.OV_STEP) + 1
+    local kB = math.min(st.fstate.ovN, kA + math.ceil(st.bodyReach / MDADFollower.OV_STEP))
+    local mA = 1e9
+    for j = kA, kB do mA = math.min(mA, st.dodgeClr[j]) end
+    checkTrue(mA >= 2 * TA.DODGE_ALIGN_DEV_MAX_M, "(pinch) 前置：入口中段車身前方淨距寬（實得 " .. tostring(mA) .. "）")
     st.lastLatDev = 0.5
+    checkTrue(MDAD.Drive.dodgeEnvelopeCap(st, 10, nowMs) > st.dodgeSpeedCap,
+        "(pinch) 淨距寬處追線誤差 0.5m（>0.35、< 淨距一半）：照樣升速")
+    st.lastLatDev = TA.DODGE_ALIGN_DEV_MAX_M + 0.05
     checkTrue(MDAD.Drive.dodgeEnvelopeCap(st, 10, nowMs) <= st.dodgeSpeedCap + 1e-9,
-        "(pinch) 追線誤差 0.5m（>0.35）：不得升速，退回整線帽")
+        "(pinch) 追線誤差超過放寬上限：不得升速，退回整線帽")
+    local keepClr = {}
+    for j = kA, kB do keepClr[j] = st.dodgeClr[j]; st.dodgeClr[j] = 0.4 end
+    st.lastLatDev = TA.DODGE_ALIGN_DEV_M + 0.05
+    checkTrue(MDAD.Drive.dodgeEnvelopeCap(st, 10, nowMs) <= st.dodgeSpeedCap + 1e-9,
+        "(pinch) 車身前方淨距 0.4 時門檻回到 0.35：誤差 0.4 不得升速")
+    for j = kA, kB do st.dodgeClr[j] = keepClr[j] end
     st.lastLatDev = keepDev
     st.lastVehicleHeading = keepHead + 10 * math.pi / 180
     checkTrue(MDAD.Drive.dodgeEnvelopeCap(st, 10, nowMs) <= st.dodgeSpeedCap + 1e-9,
@@ -20527,7 +20560,7 @@ function drive.scenario1004c()
 end
 drive.scenario1004c()
 
--- 1004d（使用者 2026-10-05「遇到樹叢也可以加大推力來幫助通過」）：
+-- 1004d（使用者 2026-10-04「遇到樹叢也可以加大推力來幫助通過」）：
 --   (bush-cancel) 引擎每幀對車身外 0.3m 內的每一叢施 −mul×質量×速度（側面或 <10 km/h 0.025、正面 ≥10 km/h 0.1）；
 --     Drive.bushCancel 對同一批樹叢以 −mul 呼叫同一個方法抵消。車心 (20.5,0.5) 朝 +x、車身 1.8×4.4：側面一叢（車身外
 --     0.1）、車頭內一叢、車身外 1.1 一叢（沒碰到）、車身內 d_plants_1 一叢（引擎不施力）：只抵消前兩叢，10 km/h 以上
@@ -20660,6 +20693,138 @@ function drive.scenario1004d()
     SandboxVars = oldSand
 end
 drive.scenario1004d()
+
+-- 1004e（使用者「遇到障礙可以流暢判斷路線、不要停留太久」；E2E dixie9050w 改道調頭後 start-near 被 MIN_EXEC 抬回 8 撞上）：
+--   (hold) 車不在常駐線（3.4 vs 0），往常駐線斜切的帶內有硬物：Drive.transitionHold 回車位（保持）、記 lane hold；
+--     車尾越過物件後放回常駐線、記 lane release clear。違規證明：拿掉保持＝回常駐線＝紅。
+--   (hold-far) 車心另一側、貼著車側外 0.2 的桿不算（斜切是遠離它；保持反而沿它擦過去）。違規證明：拿掉 d ≥ 0＝紅。
+--   (hold-live) 真的掃描輪：車在 1.9（不進 RETURN）、斜切帶內有硬物 → laneBias 留在車位。
+--   (strip) 起步近物限速只看車頭前方帶：車側帶外的硬物不限速（舊制取前半車身任何方向最近點＝start-near／min-exec）。
+--   (near) 車頭正對 1.4m 外的硬物（車頭偏路線 34°，規劃器以常駐線判不擋）：start-near 帽 < MIN_EXEC 不抬回、意圖 WAIT；
+--     停住 START_NEAR_STALL_MS 請求倒車（start-near）進 unstick。違規證明：拿掉 WAIT 歸類＝抬回 8＝紅；拿掉停住出口＝紅。
+function drive.scenario1004e()
+    scenario("1004e：斜切保持、起步近物限速只看前方帶、低於 MIN_EXEC 不抬回並倒車讓空間")
+    local oldSand = SandboxVars
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    drive.fillWorld(-10, 80, -10, 10)
+    local oldEvent, oldSample, events = MDADDiagnostics.event, MDADDiagnostics.sample, {}
+    MDADDiagnostics.event = function(_, name, a) events[#events + 1] = { name = name, a = a } end
+    MDADDiagnostics.sample = function() return true end
+    local function lastEvent(name, phase)
+        for i = #events, 1, -1 do
+            local e = events[i]
+            if e.name == name and e.a and e.a.phase == phase then return e.a end
+        end
+        return nil
+    end
+    armDrive()
+    local s = MDAD.Drive.debugSession(0)
+    s.diag = true
+    setHeading(dveh, 0)
+    dveh._x, dveh._y, dveh._speed = 10, 0, 10
+    driveReset(dveh)
+    drive.scanRound(true)
+    -- (hold)／(hold-far)：直接問 Drive.transitionHold（真 session 的剖面與車身，只換快照點）
+    local sen = s.sensor
+    local keepN, keepS, keepL, keepR = sen.hardN, sen.hardS[1], sen.hardL[1], sen.hardR[1]
+    local keepLat, keepRs = s.lastLatSigned, s.lastSNow
+    sen.hardN, sen.hardS[1], sen.hardL[1], sen.hardR[1] = 1, 16.5, 0.5, 0.7
+    s.lastLatSigned, s.lastSNow, s.holdLaneL = 3.4, 10, nil
+    local held = MDAD.Drive.transitionHold(s, 0, 0, 10)
+    local holdEv = lastEvent("lane", "hold")
+    s.lastSNow = 16.5 + s.vehicleProfile.halfL + 1.5
+    local passed = MDAD.Drive.transitionHold(s, 0, 0, 10)
+    local relEv = lastEvent("lane", "release")
+    checkTrue(held == 3.4 and holdEv ~= nil and holdEv.l == 3.4 and passed == 0 and s.holdLaneL == nil
+            and relEv ~= nil and relEv.why == "clear",
+        "(hold) 斜切帶內有硬物先沿車位直走、車尾越過後放回常駐線（held=" .. tostring(held) .. " passed="
+        .. tostring(passed) .. " release=" .. tostring(relEv and relEv.why) .. "）")
+    sen.hardS[1], sen.hardL[1], sen.hardR[1] = 10.5, 4.5, 0
+    s.lastSNow = 10
+    local far = MDAD.Drive.transitionHold(s, 0, 0, 10)
+    checkTrue(far == 0 and s.holdLaneL == nil,
+        "(hold-far) 車心另一側貼著車側的桿不算：不保持（實得 " .. tostring(far) .. "）")
+    sen.hardN, sen.hardS[1], sen.hardL[1], sen.hardR[1] = keepN, keepS, keepL, keepR
+    s.lastLatSigned, s.lastSNow = keepLat, keepRs
+    -- (hold-live)
+    drive.putSolid(16, -1, "harness_hold_obj") -- 格心 (16.5,−0.5)：擋常駐線 0、不擋車位 1.9
+    dveh._x, dveh._y = 10, 1.9
+    driveReset(dveh)
+    drive.scanRound(true)
+    checkTrue(s.holdLaneL ~= nil and math.abs(s.holdLaneL - 1.9) < 0.1 and math.abs(s.fstate.laneBias - s.holdLaneL) < 1e-9
+            and not s.dodging and not s.returnActive and MDAD.Drive.debugSession(0) == s,
+        "(hold-live) 掃描輪：斜切帶內有硬物，laneBias 留在車位、不另起繞行（hold=" .. tostring(s.holdLaneL)
+        .. " bias=" .. tostring(s.fstate.laneBias) .. " dodging=" .. tostring(s.dodging) .. "）")
+    drive.clearCell(16, -1)
+    MDAD.Drive.stop(0, nil)
+    -- (strip)：車側 2.5（車身外 0.9＋半徑 0.7 之外）的硬物
+    drive.putSolid(13, 2, "harness_side_obj")
+    armDrive()
+    s = MDAD.Drive.debugSession(0)
+    setHeading(dveh, 0)
+    dveh._x, dveh._y, dveh._speed = 10, 0, 10
+    driveReset(dveh)
+    drive.scanRound(true)
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkTrue(s.startGuard == true and s.frontClearance == nil and s.lastCapReason ~= "start-near"
+            and s.minExecFrom ~= "start-near",
+        "(strip) 車頭前方帶外的硬物不觸發起步近物限速（fc=" .. tostring(s.frontClearance) .. " cap="
+        .. tostring(s.lastCapReason) .. "）")
+    MDAD.Drive.stop(0, nil)
+    -- (near)：車頭偏 0.6 rad 正對同一個物件（車座標前方 4.3m、橫向 0.1）
+    armDrive()
+    s = MDAD.Drive.debugSession(0)
+    s.diag = true
+    setHeading(dveh, 0.6)
+    dveh._x, dveh._y, dveh._speed = 10, 0, 0
+    driveReset(dveh)
+    drive.scanRound(true)
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    local nearCap, nearIntent, nearReg = s.startNearCap, s.intentShadow, drive.calls.maxRegSpeed
+    checkTrue(s.startGuard == true and s.lastCapReason == "start-near" and type(nearCap) == "number"
+            and nearCap < MDADDynamics.MIN_EXEC_KMH and nearIntent == "WAIT" and nearReg < MDADDynamics.MIN_EXEC_KMH
+            and not s.blocked and not s.dodging,
+        "(near) start-near 帽 < MIN_EXEC：意圖 WAIT、不抬回 8（cap=" .. tostring(nearCap) .. " intent="
+        .. tostring(nearIntent) .. " reg=" .. tostring(nearReg) .. " reason=" .. tostring(s.lastCapReason) .. "）")
+    drive.stallFrames(MDAD.Drive.debugTune().START_NEAR_STALL_MS + 300)
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    driveTick(dp, dveh)
+    local recEv = lastEvent("progress", "recover")
+    checkTrue(s.mode == "unstick" and recEv ~= nil and recEv.why == "start-near",
+        "(near) 停住 START_NEAR_STALL_MS：請求倒車讓空間（mode=" .. tostring(s.mode) .. " why="
+        .. tostring(recEv and recEv.why) .. "）")
+    MDADDiagnostics.event, MDADDiagnostics.sample = oldEvent, oldSample
+    MDAD.Drive.stop(0, nil)
+    -- (handoff-wide)：交接停住（dodgeHandoffHold＋blocked）在停止線外也武裝寬帶，帶速不武裝（煞停途中會開過武裝點）
+    armDrive()
+    s = MDAD.Drive.debugSession(0)
+    setHeading(dveh, 0)
+    dveh._x, dveh._y, dveh._speed = 10, 0, 0
+    driveReset(dveh)
+    drive.scanRound(true)
+    local function handoffTick(speed)
+        s.dodgeHandoffHold, s.blocked, s.dodging = true, true, false
+        s.blockHitX, s.blockHitY, s.blockS = 30.5, 0.5, 30 -- 停止線（10m）外
+        s.wideArmed, s.wideArmedS = false, nil
+        dveh._speed = speed
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        return s.wideArmed == true
+    end
+    local armedMoving = handoffTick(12)
+    local armedStopped = handoffTick(0)
+    checkTrue(not armedMoving and armedStopped and MDAD.Drive.debugSession(0) == s,
+        "(handoff-wide) 交接停住在停止線外也武裝寬帶、帶速不武裝（moving=" .. tostring(armedMoving)
+        .. " stopped=" .. tostring(armedStopped) .. "）")
+    MDAD.Drive.stop(0, nil)
+    drive.clearCell(13, 2)
+    drive.fillWorld(-2, 70, -7, 7)
+    SandboxVars = oldSand
+end
+drive.scenario1004e()
 
 do -- 主 chunk local 槽已滿：整段包成函式，內部 local 不佔主 chunk
 -- =====================================================================

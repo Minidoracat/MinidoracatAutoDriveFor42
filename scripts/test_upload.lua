@@ -660,5 +660,57 @@ end)
 checkEq(imp, 3, "(d) three impacts")
 checkEq(impZ, 2, "(d) impZ counts only impacts with a zombie within halfL+4 of the car (this or previous sample)")
 
+-- 1004e 越野推力 KPI：推力夠不夠要看自己的紀錄。想加速＝目標−實速 ≥6、前進、沒強制煞車；相鄰兩筆都想加速且同地表才算一對。
+-- 違規證明：門檻改成 >6＝oaMs 600 紅；不看同地表＝paMs／oaMs 紅；不排除煞車＝paMs 紅；不擋原始間隔＝paMs 紅；
+-- 低加速看錯對＝olMs 紅；oMs 不濾跟線＝oMs 紅。
+scenario("1004e offroad accel KPI: wanted-accel pairs per surface, low accel, assist and boost time")
+nowMs = nowMs + 3600000
+start()
+local drive1 = nowMs
+local function off(extra)
+    local t = { capReason = "profile", frameMs = 16, physicalOffroad = true }
+    for k, v in pairs(extra or {}) do t[k] = v end
+    return t
+end
+drive(1000, { speed = 0, target = 0 })                                  -- 暖身：不想加速
+drive(200, { speed = 10, target = 40, phys = off() })                   -- s1 起點
+drive(200, { speed = 11, target = 40, phys = off({ assistForce = 500 }) }) -- 1.39 m/s²＝低加速、有輔助
+drive(200, { speed = 13, target = 40, phys = off({ assistForce = 500, assistBoost = 3 }) }) -- 2.78、倍率頂
+drive(200, { speed = 15, target = 40, phys = off({ accelAssist = 1, assistBoost = 2.5 }) }) -- 有輔助、倍率未頂
+drive(200, { speed = 17, target = 23, phys = off() })                   -- 差剛好 6＝算
+drive(200, { speed = 18, target = 23.9, phys = off() })                 -- 差 5.9＝不想加速，斷鏈
+drive(200, { speed = 19, target = 40, phys = off() })                   -- 前一筆不想加速＝不成對
+drive(200, { speed = 20, target = 40 })                                 -- 換鋪面＝不成對
+drive(200, { speed = 22, target = 40 })                                 -- 鋪面對
+drive(200, { speed = 24, target = 40 })                                 -- 鋪面對
+drive(200, { speed = 26, target = 40, phys = { capReason = "blocked", frameMs = 16, forceBrakeLeft = 500 } }) -- 煞車＝排除
+drive(200, { speed = 28, target = 40 })                                 -- 前一筆煞車＝不成對
+drive(200, { speed = 30, target = 40 })                                 -- 鋪面對
+pump(1000)                                                             -- 原始間隔 1.2s
+drive(200, { speed = 32, target = 40 })                                 -- 跨間隔＝不成對
+drive(400, { speed = 32, target = 32, phys = off() })                   -- 越野不想加速：只算 oMs
+drive(400, { speed = 32, target = 40, mode = "unstick", phys = off() }) -- 非跟線：全不算
+D.stop(0, "arrive")
+pump(120000)
+local sum1 = ""
+for k, content in pairs(files) do
+    if string.find(k, ROOT .. "summary-", 1, true) == 1 then
+        for line in string.gmatch(content, "[^\n]+") do
+            if string.find(line, '"drive":' .. string.format("%d", drive1) .. ",", 1, true) then sum1 = line end
+        end
+    end
+end
+local function num1(key) return tonumber(string.match(sum1, '"' .. key .. '":([%d%.%-]+)')) end
+check(sum1 ~= "", "offroad KPI drive summary found")
+checkEq(num1("oMs"), 1800, "offroad follow time: 7 wanted-segment + 2 cruise samples, unstick excluded")
+checkEq(num1("oaMs"), 800, "offroad wanted pairs: 4 (exactly-6 counts, 5.9 breaks, surface change does not pair)")
+checkEq(num1("oaDv"), 1.94, "offroad Δspeed 7 km/h = 1.94 m/s")
+checkEq(num1("olMs"), 200, "offroad low-accel (<1.5 m/s²) pair time")
+checkEq(num1("oasMs"), 600, "offroad pairs with forward assist (assistForce or accelAssist)")
+checkEq(num1("obMs"), 200, "offroad pairs with assistBoost at 3")
+checkEq(num1("paMs"), 600, "paved wanted pairs: 3 (braking and >1s gap excluded)")
+checkEq(num1("paDv"), 1.67, "paved Δspeed 6 km/h = 1.67 m/s")
+check(#sum1 < U.CHUNK, "summary still fits one chunk (" .. #sum1 .. ")")
+
 print(string.format("情境 %d 個、斷言 %d 項、失敗 %d", scenarios, assertions, failures))
 if failures > 0 then os.exit(1) end

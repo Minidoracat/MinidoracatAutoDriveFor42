@@ -133,6 +133,11 @@ local LOOKAHEAD_MAX = 18
 -- 實機若見貼縫段左右擺就加大到 2。
 local TANGENT_PREVIEW_M = 1.5
 local TANGENT_MAX_TURN_RAD = 15 * PI / 180 -- 前視窗內路線轉角超過此值交回前視點
+-- 直路段承諾線改投影到線本身時的預視距（線長，見 control 的 lineQ；1004e）。離線閉環 scripts/exp_steep_entry.lua（同 exp_gap_tangent
+-- 的 plant，含 tau 0.6／KPS 0.1 兩種慢 plant）：dixie9160 那條 13m／11.5m 的陡進入段，進入段尾端落在障礙側的落後
+-- 0.52–0.56 → 0.04–0.13；線長 1.5 降到 −0.06 但外甩 0.54、2.5 落後還有 0.31。原 exp_gap_tangent 六案落後 ≤ 舊制、
+-- 外甩多 0.01–0.15；20–45 km/h 的緩線與舊制相同（線長≈路線弧長）。
+local TANGENT_LINE_PREVIEW_M = 2.0
 -- 常駐車道斜率（見 control 的弧段切線）取在車前 LEAD 秒：yaw 滯後 τ 0.25–0.35 s（E2E 遙測辨識），斜率照
 -- 當下量＝車頭晚 τ 才跟上車道 ramp，ramp 結束時多衝出去。0928o 離線重播 11 個真彎×3 plant：0.2 s 讓 max|偏差|
 -- 幾乎每彎下降（外漂總和 16.1→12.9、切內 7.2→8.9，最大外漂 1.88→1.68）；0.3 s 起切內回升、換邊而不是變好。
@@ -1394,6 +1399,51 @@ local function kinkHandover(profile, state, idx, x, y, heading)
         and cos(heading) * (px[i + 1] - px[i]) + sin(heading) * (py[i + 1] - py[i]) > 0
 end
 
+-- 車在 ov 線上的投影（sNow ±(OV_BLEND+1) 內的最近點）與沿線 previewM（線長）處的切線預視點。回 q（路線弧長參數）,
+-- dev（車對線的帶號橫偏，右正、同 latSigned）。呼叫端保證 ovN ≥ 2 且 sNow ∈ [ovS0, ovEndS)。ovOuterBend 與直路段
+-- 承諾線切線追蹤共用。
+local function ovProject(state, x, y, sNow, previewM)
+    local ovN, ovS0, ovEndS = state.ovN, state.ovS0, state.ovEndS
+    local ovX, ovY = state.ovX, state.ovY
+    -- 投影窗：外弧整段在 [sV−OV_BLEND, sV+OV_BLEND]，車在弧上時 sNow＝sV；陡線落後 1m 時最近點離 sNow 約 1m。±(OV_BLEND+1) 都蓋得住
+    local kLo = ovIndexAt(ovS0, ovN, ovEndS, sNow - OV_BLEND - 1 > ovS0 and sNow - OV_BLEND - 1 or ovS0)
+    local kHi = ovIndexAt(ovS0, ovN, ovEndS, sNow + OV_BLEND + 1 < ovEndS and sNow + OV_BLEND + 1 or ovEndS)
+    local bestD, kB, tB, dev = 1e30, kLo, 0, 0
+    for k = kLo, kHi do
+        local ax, ay = ovX[k], ovY[k]
+        local ex, ey = ovX[k + 1] - ax, ovY[k + 1] - ay
+        local L2 = ex * ex + ey * ey
+        if L2 > 1e-8 then
+            local rx, ry = x - ax, y - ay
+            local t = (rx * ex + ry * ey) / L2
+            if t < 0 then t = 0 elseif t > 1 then t = 1 end
+            local dx, dy = rx - ex * t, ry - ey * t
+            local d2 = dx * dx + dy * dy
+            if d2 < bestD then bestD, kB, tB, dev = d2, k, t, (ex * ry - ey * rx) / sqrt(L2) end
+        end
+    end
+    -- 切線預視點：從投影點沿線走 previewM（線長，不是路線弧長）。control 的切線＝q 處相鄰段按段內比例
+    -- 混合＝q＋半格處的切線（弦向＝弦中點的切線）；平常半格＝0.5m 線長可忽略，混合區半格＝2m 以上＝提前轉入、
+    -- 切進外弧內側（離線閉環 1.9m → 0.7m），回傳前退半格對齊。
+    local sA = ovS0 + (kB - 1) * OV_STEP
+    local sPrev = sA + ((kB + 1 == ovN and ovEndS or sA + OV_STEP) - sA) * tB
+    local x0 = ovX[kB] + (ovX[kB + 1] - ovX[kB]) * tB
+    local y0 = ovY[kB] + (ovY[kB + 1] - ovY[kB]) * tB
+    local acc, i, q = 0, kB, ovEndS
+    while i < ovN do
+        i = i + 1
+        local si = i == ovN and ovEndS or ovS0 + (i - 1) * OV_STEP
+        local dx, dy = ovX[i] - x0, ovY[i] - y0
+        local L = sqrt(dx * dx + dy * dy)
+        if acc + L >= previewM and L > 0 then
+            q = sPrev + (si - sPrev) * (previewM - acc) / L
+            break
+        end
+        acc, sPrev, x0, y0 = acc + L, si, ovX[i], ovY[i]
+    end
+    return q - 0.5 * OV_STEP, dev
+end
+
 -- 承諾線在非弧折點（fallback／髮夾、折角 ≥ FILLET_MIN_RAD）的**外側**：buildOffsetLine 在頂點 ±OV_BLEND 內旋轉法向，
 -- 偏移 l 的線在這 2·OV_BLEND 的路線弧長裡實際繞一段半徑≈|l| 的外弧（143°、l −5.25 → 4m 弧長＝14.8m 線長）；車在
 -- 外弧上時投影卡在頂點（兩臂的垂足都是頂點），路線弧長 sNow 停住十幾公尺。舊制：放行後前視點量路線弧長、跳到
@@ -1423,43 +1473,7 @@ local function ovOuterBend(profile, state, bestI, x, y, sNow, sTarget)
         q = q + 1
     end
     if not found then return nil end
-    -- 車在線上的投影：外弧整段在 [sV−OV_BLEND, sV+OV_BLEND]，車在弧上時 sNow＝sV，±(OV_BLEND+1) 蓋得住
-    local kLo = ovIndexAt(ovS0, ovN, ovEndS, sNow - OV_BLEND - 1 > ovS0 and sNow - OV_BLEND - 1 or ovS0)
-    local kHi = ovIndexAt(ovS0, ovN, ovEndS, sNow + OV_BLEND + 1 < ovEndS and sNow + OV_BLEND + 1 or ovEndS)
-    local bestD, kB, tB, dev = 1e30, kLo, 0, 0
-    for k = kLo, kHi do
-        local ax, ay = ovX[k], ovY[k]
-        local ex, ey = ovX[k + 1] - ax, ovY[k + 1] - ay
-        local L2 = ex * ex + ey * ey
-        if L2 > 1e-8 then
-            local rx, ry = x - ax, y - ay
-            local t = (rx * ex + ry * ey) / L2
-            if t < 0 then t = 0 elseif t > 1 then t = 1 end
-            local dx, dy = rx - ex * t, ry - ey * t
-            local d2 = dx * dx + dy * dy
-            if d2 < bestD then bestD, kB, tB, dev = d2, k, t, (ex * ry - ey * rx) / sqrt(L2) end
-        end
-    end
-    -- 切線預視點：從投影點沿線走 TANGENT_PREVIEW_M（線長，不是路線弧長）。control 的切線＝q 處相鄰段按段內比例
-    -- 混合＝q＋半格處的切線（弦向＝弦中點的切線）；平常半格＝0.5m 線長可忽略，混合區半格＝2m 以上＝提前轉入、
-    -- 切進外弧內側（離線閉環 1.9m → 0.7m），回傳前退半格對齊。
-    local sA = ovS0 + (kB - 1) * OV_STEP
-    local sPrev = sA + ((kB + 1 == ovN and ovEndS or sA + OV_STEP) - sA) * tB
-    local x0 = ovX[kB] + (ovX[kB + 1] - ovX[kB]) * tB
-    local y0 = ovY[kB] + (ovY[kB + 1] - ovY[kB]) * tB
-    local acc, i, q = 0, kB, ovEndS
-    while i < ovN do
-        i = i + 1
-        local si = i == ovN and ovEndS or ovS0 + (i - 1) * OV_STEP
-        local dx, dy = ovX[i] - x0, ovY[i] - y0
-        local L = sqrt(dx * dx + dy * dy)
-        if acc + L >= TANGENT_PREVIEW_M and L > 0 then
-            q = sPrev + (si - sPrev) * (TANGENT_PREVIEW_M - acc) / L
-            break
-        end
-        acc, sPrev, x0, y0 = acc + L, si, ovX[i], ovY[i]
-    end
-    return q - 0.5 * OV_STEP, dev
+    return ovProject(state, x, y, sNow, TANGENT_PREVIEW_M)
 end
 
 -- 前看弧段即時帽（1002c）：剖面的滑行包絡用建表期的弧速（中心線 κ、建表當下的側向），即時帽另算內側
@@ -1871,6 +1885,20 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
     -- 外側折點窗內：投影卡在頂點時 lineLat 對中心線量不出線在哪；改成「車對線的帶號橫偏」，Driver 的
     -- latSigned − lineLat 就是車到線的距離（cross-track 不用改）
     if ovQ ~= nil then lineLat = latSigned - ovDev end
+    -- 直路段追承諾線（1004e）：前視窗無弧、無鉗點、路線轉角 ≤ TANGENT_MAX_TURN_RAD 時，投影改到線本身的最近點、切線
+    -- 預視沿線長量（ovProject）。舊制用路線弧長同 s 的點：陡進入段（E2E dixie9160：13m 側移塞 11.5m、線斜 59°）車一落後，
+    -- 同 s 點就在線上更前面、切線已攤平，車提早回正、落後再放大（正回授），進入段尾端落後 1.2m 擦到群角；同 s 的橫距也比
+    -- 垂距大 1/cosθ。緩線上兩者幾乎相同。
+    local lineQ = nil
+    if ovQ == nil and lineLat ~= nil and state.trackTangent == true and arcK == nil and kinkS == nil
+            and sNow < ovEndS then
+        local dh = wrapPi(profile.segH[j] - profile.segH[bestI])
+        if dh <= TANGENT_MAX_TURN_RAD and dh >= -TANGENT_MAX_TURN_RAD then
+            local devL
+            lineQ, devL = ovProject(state, x, y, sNow, TANGENT_LINE_PREVIEW_M)
+            lineLat = latSigned - devL
+        end
+    end
     -- 承諾線在弧的外側（1002f）：ov 線每 1m 路線弧長實際長 1−l·κ（>1）倍，轉角卻與中心線相同——路線弧長
     -- 1.5m 的切線預視＝線上預視角大 (1−l·κ) 倍、弧段前饋也照中心弧 1/R 給，車照中心弧的 yaw 率轉、切進線內
     -- （E2E rc48 0017：R 3.35 弧外側 3.75 的貼縫繞行線，yaw −0.9 rad/s＝中心弧的值、落後線 1.5m 撞上）。
@@ -1894,7 +1922,7 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
     local onArc = profile.filletAdaptive == true and arcK ~= nil
     if (state.trackTangent == true or onArc)
             and (kinkS == nil or ovQ ~= nil or sNow + TANGENT_PREVIEW_M < kinkS - OV_BLEND) then
-        local q = ovQ or sNow + TANGENT_PREVIEW_M / (ovDen or 1)
+        local q = ovQ or lineQ or sNow + TANGENT_PREVIEW_M / (ovDen or 1)
         -- ov 線是否蓋住預視點：與 ovUsed（由長前視 sEff 決定）解耦——線尾最後 look 公尺
         -- sEff 已出線、q 仍在線上，弧段仍得追線的切線（出口過渡斜率），不可提前改讀中心線。
         -- 一般繞行也由 q 的覆蓋判斷，不能因長前視已出線而提前改回弦角；折角 >15° 仍退前視點。

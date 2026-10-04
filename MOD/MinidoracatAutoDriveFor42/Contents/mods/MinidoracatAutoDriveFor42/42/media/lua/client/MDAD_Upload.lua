@@ -177,6 +177,9 @@ function U.begin(pn, now, header, profile)
         fm = 0, nm = 0, emSum = 0, loss = {},
         arcN = 0, arcOver = 0, arcDev = 0, prevArc = false, arcDevDone = false,
         impZ = 0, aaMs = 0, daMs = 0, prevZd = nil,
+        -- 1004e 越野推力：越野跟線毫秒；「想加速」相鄰兩筆同地表的對——越野／鋪面的毫秒與速度增量（m/s），
+        -- 越野對加速度 <1.5 m/s² 的毫秒、越野對有前推輔助的毫秒、遞增倍率頂到 3 的毫秒。aSurf／aSpd＝前一筆狀態。
+        oMs = 0, oaMs = 0, oaDv = 0, olMs = 0, oasMs = 0, obMs = 0, paMs = 0, paDv = 0, aSurf = nil, aSpd = nil,
         halfL = type(profile) == "table" and finite(profile.halfL) and profile.halfL or IMPACT_HALF_L,
         vmax = type(profile) == "table" and profile.maxSpeed or nil,
         svLim = nil,
@@ -418,6 +421,32 @@ local function speedKpi(u, phys, spd, target, mode, dt, capReason)
     if finite(phys.visAssistDecel) and phys.visAssistDecel > 0 then u.daMs = u.daMs + dt end
 end
 
+-- 1004e 越野推力 KPI（欄位見 U.begin）：跟線中「想加速」＝目標−實速 ≥6 km/h、前進、沒強制煞車。相鄰兩筆都想加速
+-- 且同地表（physicalOffroad）才算一對；平均加速度＝Dv/Ms×1000 離線算。原始間隔 >1s（中間沒取樣）不比；
+-- 輔助／倍率看這一對的後一筆。推力夠不夠要看自己的紀錄，不靠玩家片段。
+local function accelKpi(u, phys, speed, target, mode, gap)
+    local prev, v0 = u.aSurf, u.aSpd
+    u.aSurf = nil
+    if mode ~= "follow" or type(phys) ~= "table" or not finite(speed) then return end
+    local off = phys.physicalOffroad == true
+    if off then u.oMs = u.oMs + (gap > 1000 and 1000 or gap) end
+    local fbl = phys.forceBrakeLeft
+    if not finite(target) or target - speed < 6 or speed < 0 or (finite(fbl) and fbl > 0) then return end
+    local surf = off and "o" or "p"
+    u.aSurf, u.aSpd = surf, speed
+    if prev ~= surf or gap <= 0 or gap > 1000 then return end
+    local dv = (speed - v0) / 3.6
+    if not off then
+        u.paMs, u.paDv = u.paMs + gap, u.paDv + dv
+        return
+    end
+    u.oaMs, u.oaDv = u.oaMs + gap, u.oaDv + dv
+    if dv / gap * 1000 < 1.5 then u.olMs = u.olMs + gap end
+    local af, aca, asb = phys.assistForce, phys.accelAssist, phys.assistBoost
+    if (finite(af) and af > 0) or (finite(aca) and aca > 0) then u.oasMs = u.oasMs + gap end
+    if finite(asb) and asb >= 3 - 1e-6 then u.obMs = u.obMs + gap end
+end
+
 -- 取樣：line 已由 MDAD_Diagnostics 編好（與本機紀錄同一字串，不重複編碼）。
 function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
         blocked, footprintBlocked, phys, heading, sensor)
@@ -476,6 +505,7 @@ function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
     end
     if type(capReason) == "string" then u.capMs[capReason] = (u.capMs[capReason] or 0) + dt end
     speedKpi(u, phys, spd, target, mode, dt, capReason)
+    accelKpi(u, phys, speed, target, mode, gap)
     if finite(fdt) then
         local b = fdt < 10 and 1 or fdt < 17 and 2 or fdt < 25 and 3 or fdt < 34 and 4
             or fdt < 50 and 5 or fdt < 100 and 6 or 7
@@ -621,6 +651,9 @@ local function summaryText(u, now, reason, withMaps)
         .. ',"em":' .. jround(u.fm > 0 and u.emSum / u.fm or nil, 10)
         .. ',"arc":' .. u.arcN .. ',"arcOver":' .. u.arcOver .. ',"arcDev":' .. u.arcDev
         .. ',"impZ":' .. u.impZ .. ',"aaMs":' .. jnum(u.aaMs) .. ',"daMs":' .. jnum(u.daMs)
+        .. ',"oMs":' .. jnum(u.oMs) .. ',"oaMs":' .. jnum(u.oaMs) .. ',"oaDv":' .. jround(u.oaDv, 100)
+        .. ',"olMs":' .. jnum(u.olMs) .. ',"oasMs":' .. jnum(u.oasMs) .. ',"obMs":' .. jnum(u.obMs)
+        .. ',"paMs":' .. jnum(u.paMs) .. ',"paDv":' .. jround(u.paDv, 100)
     if withMaps then
         text = text .. ',"ev":' .. mapJson(u.evc) .. ',"mode":' .. mapJson(u.modeMs)
             .. ',"cap":' .. mapJson(u.capMs) .. ',"loss":' .. lossJson(u.loss)

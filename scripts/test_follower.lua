@@ -2018,12 +2018,10 @@ do
     local _, _, _, _, errPP = F.control(pLine, st, a - 1, 0, 0, 10, DT)
     st.trackTangent = true
     local _, _, _, _, errTan = F.control(pLine, st, a - 1, 0, 0, 10, DT)
-    -- 前視點：7.2m 外、側偏 −4 → atan(4/7.2)≈−0.51；切線：ov 段 [12,13] 與 [13,14] 按段內比例 0.5 混合
-    local function laneS(sx) local t = (sx - a) / (b - a); t = t * t * (3 - 2 * t); return dl * t end
-    local slope = 0.5 * (laneS(13) - laneS(12)) + 0.5 * (laneS(14) - laneS(13))
+    -- 前視點：7.2m 外、側偏 −4 → atan(4/7.2)≈−0.51
     checkNear(errPP, -math.atan(4 / 7.2), 0.05, "現制：誤差＝到前視點的弦角（實得 " .. string.format("%.3f", errPP) .. "）")
-    checkNear(errTan, math.atan(slope), 1e-3,
-        "切線：誤差＝線在車前 1.5m 的切線角（混合相鄰段）（實得 " .. string.format("%.3f", errTan) .. "）")
+    checkTrue(errTan < 0 and errTan > errPP,
+        "切線：誤差朝線的方向、比到前視點的弦角小（實得 " .. string.format("%.3f", errTan) .. "）")
     -- 線外（ov 範圍前）不生效：與現制同值
     st.trackTangent = false
     local _, _, _, _, e0 = F.control(pLine, st, 2, 0, 0, 10, DT)
@@ -2114,6 +2112,48 @@ do
         string.format("出口前切內（前視點提前看到回線）較現制少一半且 <0.25（%.2f → %.2f）", exA, exT))
     checkTrue(pkT < 0.8 and bT < 0.6,
         string.format("6m 塞 4m 側移／10 km/h：峰值 <0.8、到 b <0.6（%.2f／%.2f）", pkT, bT))
+    -- (5) 陡進入段（E2E dixie9160：13m 側移塞 11.5m、線斜 59°、7→10 km/h）：投影到線本身、沿線預視（1004e）。
+    --     舊制以路線弧長同 s 點取切線，車一落後切線就攤平、提早回正，進入段尾端落在障礙側 0.52m＞承諾餘裕 0.35m；
+    --     預視太短（線長 1.5）落後變小但進保持段甩到線外 0.54m。
+    do
+        local ox, oy = {}, {}
+        local sa, sb = 2, 13.5
+        local n5, s05, why5, s15 = F.buildOffsetLine(pLine, 0, sa, sb, sb + 5.8, sb + 63, -10, 3, ox, oy,
+            nil, nil, nil, 3)
+        checkEq(why5, "ok", "陡進入段承諾線建好")
+        local s5 = F.newState()
+        F.setLaneBias(s5, 3)
+        checkTrue(F.setOffset(s5, sa, sb, sb + 5.8, sb + 63, -10, ox, oy, n5, s05, s15), "陡進入段 setOffset")
+        s5.trackTangent = true
+        local car, prevLat, lagMax, overMax = { x = 0, y = 3, h = 0, w = 0 }, nil, -99, 0
+        local function lineY(sx)
+            if sx <= sa then return 3 elseif sx >= sb then return -10 end
+            local t = (sx - sa) / (sb - sa); t = t * t * (3 - 2 * t); return 3 - 13 * t
+        end
+        for _ = 1, 3000 do
+            if car.x > sb + 5.8 then break end
+            local speed = car.x < sb and 7 or 10
+            local steer, _, _, _, _, _, latS, lineLat = F.control(pLine, s5, car.x, car.y, car.h, speed, DT)
+            local latDev = latS - lineLat
+            local dLat = prevLat and (latDev - prevLat) / DT or nil
+            prevLat = latDev
+            local u = steer - D.crossTrackSteer(latDev, speed, dLat, D.CROSS_TRACK_DODGE_GAIN, D.CROSS_TRACK_DODGE_MAX)
+            if u > F.STEER_MAX then u = F.STEER_MAX elseif u < -F.STEER_MAX then u = -F.STEER_MAX end
+            local k = u * KPS
+            if k > KMAX then k = KMAX elseif k < -KMAX then k = -KMAX end
+            local v = speed / KMH
+            car.w = car.w + (k * v - car.w) * (DT / TAU)
+            car.h = car.h + car.w * DT
+            car.x = car.x + math.cos(car.h) * v * DT
+            car.y = car.y + math.sin(car.h) * v * DT
+            if car.x >= sb - 3 and car.x <= sb + 4 and car.y - lineY(car.x) > lagMax then lagMax = car.y - lineY(car.x) end
+            if car.x >= sb and lineY(car.x) - car.y > overMax then overMax = lineY(car.x) - car.y end
+        end
+        checkTrue(lagMax < 0.25,
+            string.format("陡進入段尾端落在障礙側 <0.25m（舊制 0.52；實得 %.2f）", lagMax))
+        checkTrue(overMax < 0.45,
+            string.format("陡進入段進保持段不甩出線外 0.45m 以上（預視線長 1.5 時 0.54；實得 %.2f）", overMax))
+    end
     -- 長前視已超出線尾，但切線預視點仍在保持段：不能提前朝常駐線轉回。
     local oldLook = pLine.lookScale
     pLine.lookScale = 1.5
