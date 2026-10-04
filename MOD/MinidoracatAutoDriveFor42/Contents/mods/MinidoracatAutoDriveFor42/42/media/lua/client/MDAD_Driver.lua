@@ -3527,6 +3527,34 @@ function Drive.softClearAt(pS, pL, predN, sFrom, sEnd, u)
     return dmin
 end
 
+-- 換邊遲滯（1005 soft E2E animal-sp cow：路緣硬物取樣柱在格內跳動，可行帶右緣每輪在 4.68–5.19 之間換，右縫只差
+-- 0.1m 時一輪有一輪沒有，選縫左右每輪來回翻 2–5m，lane 永遠停在牛前方，最後 43 km/h 擦過）：同一個威脅（弧長 3m、
+-- 橫向 0.5m 內、同 routeGen、軟縫持有中），上一輪選的那一側本輪若仍在可行帶（容許 SOFT_HARD_JITTER_M，正是帶緣
+-- 讓出的取樣跳動量）內、而且整個視窗的軟避讓點（含舒適餘裕與預測位）都在 R 外，就留在那一側：本輪換到另一側的縫，
+-- 或找不到縫（nogap／least／curve）時都一樣。回 (want, why)；why 為 gap 時記下這一側給下一輪。
+function Drive.softKeepSide(s, pS, pL, predN, sFrom, sTo, want, why, threatS, threatL, aLo, aHi, R)
+    local w = s.zombieSideW
+    if finite(w) and s.zombieSideGen == s.routeGen and s.zombieLane ~= nil and finite(threatS)
+            and math.abs(threatS - s.zombieSideS) < 3 and math.abs(threatL - s.zombieSideTL) < 0.5
+            and ((why == "gap" and (want - threatL) * (w - threatL) < 0)
+                or why == "nogap" or why == "least" or why == "curve")
+            and w >= aLo - TUNE.SOFT_HARD_JITTER_M and w <= aHi + TUNE.SOFT_HARD_JITTER_M then
+        local clear = true
+        for i = 1, predN do
+            local zs = pS[i]
+            if zs >= sFrom and zs <= sTo then
+                local lane = MDADFollower.laneBiasAt(s.profile, w, MDADFollower.segIndexAt(s.profile, zs), zs, s.softKeepTry)
+                if math.abs(pL[i] - lane) < R - 1e-6 then clear = false; break end
+            end
+        end
+        if clear then want, why = w, "gap" end
+    end
+    if why == "gap" then
+        s.zombieSideW, s.zombieSideS, s.zombieSideTL, s.zombieSideGen = want, threatS, threatL, s.routeGen
+    end
+    return want, why
+end
+
 -- 無縫時的最不壞 lane（0925p E2E road MAX：路肩也有殭屍、整條帶無縫時舊制停在原 lane，
 -- 車貼路緣 1.5 秒連撞兩隻）：候選＝帶兩端＋相鄰殭屍的中點，取離最近殭屍最遠者；同分取離 cur 近者。
 -- 零配置，O(n²)（n＝最近一群的點數）。
@@ -4065,6 +4093,8 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
         s.softKeepTry = 0
         end -- for keepTry
         s.softKeepTry = s.zombieKeep0 and 0 or nil
+        -- 同一個威脅不因帶緣取樣跳動換邊（Drive.softKeepSide）
+        want, why = Drive.softKeepSide(s, pS, pL, predN, sFrom, sTo, want, why, threatS, threatL, aLo, aHi, R)
     else
         s.zombieAvoidUntilS = nil
         want, why = resident, "clear"
