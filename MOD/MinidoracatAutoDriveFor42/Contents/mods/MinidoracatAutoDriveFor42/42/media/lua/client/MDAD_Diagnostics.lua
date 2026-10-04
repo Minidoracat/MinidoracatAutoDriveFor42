@@ -97,6 +97,7 @@ local EK = {
     -- dyn（2026-09-04 issue #1）：dirty 來源與基準／線上值、重建耗時——舊 telemetry
     -- 只能從 confidence 歸零反推重建次數（下限），修後要能直接數。
     "cap", "safe", "ms",
+    "wms", "sweeps", -- blocked／dodge commit：replan 開始到發事件的牆鐘 ms（節流量測，沒量就缺）、本次 replan 的掃掠數
     -- dodge commit／defer／guard（2026-09-04 使用者裁定「玩家給的 telemetry 就要足夠，
     -- 不得依賴 console」）：console 的 commit 行 cap 分解、延後理由、守護判死點
     -- 全數帶進事件；每幀 sample 已有 dodge*Cap／capReason／physicalOffroad／zombieN。
@@ -1251,6 +1252,9 @@ local function encodePhys(phys)
     addNum("forceBrakeLeft", "fbl") -- 0907f：閂鎖剩餘 ms／最後觸發原因（fbt 只記當幀會漏採）
     addStr("forceBrakeWhy", "fbw")
     addNum("frameMs", "fdt")
+    addNum("replanMs", "rpm")         -- replan 牆鐘 ms（前後兩次 getTimestampMs，最多 4 Hz；現場分佈，歸因用 GameProfiler）
+    addNum("replanSweeps", "rpw")     -- 該次 replan 的 sweepLine 掃掠數
+    addNum("replanHn", "rph")         -- 該次 replan 的硬點數（hardN）
     -- 0928a：前方區域未載入等待（引擎煞車）／車身 yaw 率與 ESC 收掉比例／起步近物限速與前半車身淨距
     addBool("areaWait", "awt")
     addNum("yawRate", "yr")
