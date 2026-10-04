@@ -954,6 +954,13 @@ local function encodeSensor(s, sensor)
     if finite(sensor.softNearS) then
         bits = bits .. ',"softNearS":' .. tostring(sensor.softNearS)
     end
+    -- 1005 soft：帶內大型動物／小型動物／其他玩家數與最近弧長（有才寫）
+    if finite(sensor.animalN) and sensor.animalN > 0 then bits = bits .. ',"animalN":' .. tostring(sensor.animalN) end
+    if finite(sensor.smallN) and sensor.smallN > 0 then bits = bits .. ',"smallN":' .. tostring(sensor.smallN) end
+    if finite(sensor.playerN) and sensor.playerN > 0 then bits = bits .. ',"playerN":' .. tostring(sensor.playerN) end
+    if finite(sensor.animalNearS) then bits = bits .. ',"animalNearS":' .. tostring(sensor.animalNearS) end
+    if finite(sensor.smallNearS) then bits = bits .. ',"smallNearS":' .. tostring(sensor.smallNearS) end
+    if finite(sensor.playerNearS) then bits = bits .. ',"playerNearS":' .. tostring(sensor.playerNearS) end
     if finite(sensor.softEndS) then
         bits = bits .. ',"softEndS":' .. tostring(sensor.softEndS)
     end
@@ -1040,6 +1047,7 @@ local function envStamp(playerNum)
         put("resume", hud.manualResumeMs)  -- 0＝介入即關閉；>0＝放手後 N ms 恢復（0906a）
         put("uturn", hud.uturnMode)        -- gentle／fast（0906b；每次調頭開始讀，途中改要看 uturn 事件）
         put("zdodge", hud.zombieDodge)     -- 殭屍軟縫開關（0906c；每輪掃描完成讀）
+        put("adodge", hud.animalDodge)     -- 閃避動物 1 關／2 大型／3 全部（1005 soft；每輪掃描完成讀）
         put("perception", hud.perceptionDistance)
     end
     local driver = MDAD and MDAD.Drive
@@ -1050,6 +1058,7 @@ local function envStamp(playerNum)
     put("policy", sandbox, "ObstaclePolicy")
     put("maxKmh", sandbox, "AutoDriveMaxSpeed")
     put("laneBias", sandbox, "RightLaneBias")
+    put("aslow", sandbox, "AnimalSlowdown") -- 動物停等 1 關／2 大型／3 全部（1005 soft）
     if n > 0 then
         bits = bits .. ',"opts":' .. jstr(table.concat(parts, ";", 1, n))
     end
@@ -1123,6 +1132,12 @@ local function encodePhys(phys)
     -- 1004a：常駐線與軟縫 lane——el 偏離 rsd 時看得出是誰持有（lc 鏈、dg 繞行、ra 回線、zln 殭屍軟縫）
     addNum("residentBias", "rsd")
     addNum("zombieLane", "zln")
+    -- 1005 soft：zk0＝軟縫這次縫是貼路緣（keep 0）找到的；shk／shm＝動物或玩家停等目標種類／停住累計 ms；
+    -- scr＝動物等待到期後爬行中（皆有才寫）
+    addBool("zombieKeep0", "zk0")
+    addStr("softHoldKind", "shk")
+    addNum("softHoldMs", "shm")
+    addBool("softCrawl", "scr")
     addStr("roadState", "rst")
     addNum("roadLo", "rlo")
     addNum("roadHi", "rhi")
