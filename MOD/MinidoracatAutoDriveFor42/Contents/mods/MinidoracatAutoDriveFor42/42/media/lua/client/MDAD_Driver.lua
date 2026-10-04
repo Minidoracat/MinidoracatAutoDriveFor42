@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1004c"
+Drive.REV = "1004d"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -532,6 +532,10 @@ TUNE.ACCEL_ASSIST_LEAD_S = 0.5
 -- 判堵、殭屍、會車、對線…）不補——那些帽本身就是「前面要煞」（正式服 0.17.0 Aho/clip-21：待承諾繞行時補到
 -- 45 km/h，再從 39.5 一秒鎖輪煞到 0）。
 TUNE.ACCEL_ASSIST_REASONS = { ["curve-coast"] = true, visibility = true, gear = true, perception = true }
+-- 樹叢阻力抵消（1004d，使用者 2026-10-05「遇到樹叢也可以加大推力來幫助通過」；見 Drive.bushCancel）：路外／繞行／
+-- 回線／倒車時每 BUSH_SCAN_MS 重抓一次車周樹叢（MDADSensor.bushNear，最多 BUSH_MAX_N 個），每幀只對候選算接觸。
+TUNE.BUSH_SCAN_MS = 200
+TUNE.BUSH_MAX_N = 64
 -- 殭屍推撞（2026-09-04 使用者「被一群殭屍阻擋的時候可以增加推力脫困嗎」；s024
 -- st148381-148398：帶內 5-10 隻、regulator 全力、speed 1.5-2.5 卡 17 秒，van 1118kg
 -- 低於 ASSIST_MASS_MIN 拿不到 assist）：帶內有殭屍、實速低於 SPEED、目標高於
@@ -2199,6 +2203,9 @@ local function startSession(playerObj, playerNum, stage)
         stayLanePending = nil, -- 停留承諾的 lane，過 b 才寫進 laneBias（nil＝無待切）
         stayNextB = nil,      -- 停留承諾時已知「下一群塞不進」的群起點弧長（對它煞停；nil＝無）
         assistBoost = 1,      -- 越野推力遞增倍率（TUNE.ASSIST_BOOST_*）
+        bushObj = {}, bushX = {}, bushY = {}, -- 車周樹叢候選（Drive.bushCancel；MDADSensor.bushNear 寫入）
+        bushN = 0, bushScanMs = 0, bushContactN = 0, -- 候選數／下次重抓時刻／本幀抵消的叢數（telemetry bsh）
+        bushOff = nil, bushOffLogged = false, -- 不抵消的原因 tow／api／call（寬帶照舊避開樹叢；Drive.bushCancel）
         episodeGearResetTried = false,
         episodeClearRounds = 0,
         episodeMapPending = false,
@@ -2217,6 +2224,9 @@ local function startSession(playerObj, playerNum, stage)
         lastCoupled = false,
     }
     if tow and sNew.sensor then sNew.sensor.selfTrailer = tow.trailer end -- 感測不把自己的掛車當障礙
+    -- 抵消得了樹叢阻力（非拖車、引擎方法在）＝寬帶不把樹叢當障礙（Drive.bushCancel；MDADSensor COST_BUSH）
+    sNew.bushOff = tow and "tow" or (not Drive.bushApi(vehicle) and "api") or nil
+    if sNew.sensor then sNew.sensor.bushPassable = sNew.bushOff == nil end
     if stage then
         -- 準備中：先寄放，claim 成功才接上（第一次碰車在 commitSession）
         stage.session = sNew
@@ -4854,6 +4864,110 @@ function Drive.towDecel(s, a, mult)
     BaseVehicle.releaseVector3f(vel)
 end
 
+-- 樹叢阻力抵消用的引擎方法在不在（BaseVehicle.applyImpulseFromHitPlant，public，BaseVehicle.java:5556-5565）
+function Drive.bushApi(vehicle)
+    local ok, fn = pcall(jindex, vehicle, "applyImpulseFromHitPlant")
+    return ok and type(fn) == "function"
+end
+
+-- 樹叢阻力抵消（1004d，使用者 2026-10-05「遇到樹叢也可以加大推力來幫助通過」）：引擎每幀對車身外 0.3m 內的每一叢
+-- 施 −mul×質量×速度的衝量（checkCollisionWithPlant，BaseVehicle.java:3074-3116；側面接觸或 <10 km/h 時 mul 0.025、
+-- 正面 ≥10 km/h 0.1），進 impulsesFromHitObjects、每個 10ms 物理步 ×30 施力（:3590-3616；WorldSimulation.java:80-110）：
+-- 每叢每幀扣約 0.75% 車速、不乘 dt，幀率越高越黏（E2E 230 FPS：W900＋貨櫃在樹叢地只剩 1 km/h）。這裡對同一批樹叢呼叫
+-- 同一個方法、mul 取負：同一個作用點、等量反向，力與偏航力矩一起抵消，車速與車頭都不再被拖。接觸照抄引擎：
+-- >1 km/h（:3080-3081；引擎沒發動時 session 早在 driveGate 收掉）、離車心 max(半寬,半長)+1.3 內、車身框（以重心偏移為中心）外 0.3m 內
+-- （testCollisionWithObject :5368-5451）；側面＝接觸點的本地橫向超過 0.98 倍半寬（isPositionOnLeftOrRight :1961-1971）。
+-- 候選只在路外／繞行／回線／倒車時抓。方法呼叫失敗＝bushOff "call"：Sensor 寬帶改回避開樹叢，事件記一次原因。
+function Drive.bushCancel(s, vehicle, now)
+    s.bushContactN = 0
+    local sen, vp = s.sensor, s.vehicleProfile
+    if s.bushOff then
+        if s.bushOff ~= "tow" and not s.bushOffLogged and s.diag then
+            s.bushOffLogged = true
+            diagEvent(s, s.playerNum, "bush", { phase = "off", why = s.bushOff })
+        end
+        return
+    end
+    if type(sen) ~= "table" or type(vp) ~= "table" then return end
+    local spd = vehicle:getCurrentSpeedKmHour()
+    if not finite(spd) then return end
+    if spd < 0 then spd = -spd end
+    if spd <= 1 or not (s.physicalOffroad == true or s.dodging == true or s.returnActive == true
+            or s.mode == "unstick" or s.mode == "settle") then
+        s.bushN, s.bushScanMs = 0, 0 -- 一動起來就重抓
+        return
+    end
+    local hw, hl = vp.halfW, vp.halfL
+    local reach = (hw > hl and hw or hl) + 1.3 -- 引擎的粗篩半徑（testCollisionWithObject selfRadius）
+    local vx, vy = vehicle:getX(), vehicle:getY()
+    if now >= s.bushScanMs then
+        s.bushScanMs = now + TUNE.BUSH_SCAN_MS
+        -- 下次重抓前車還會開 spd×間隔：候選半徑多留這段再加 1m
+        local ok, n = pcall(MDADSensor.bushNear, sen, vehicle, getCell(), vx, vy,
+            reach + 1 + spd / 3.6 * TUNE.BUSH_SCAN_MS * 0.001, s.bushObj, s.bushX, s.bushY, TUNE.BUSH_MAX_N)
+        s.bushN = ok and finite(n) and n or 0
+    end
+    if s.bushN <= 0 then return end
+    local fwd = BaseVehicle.allocVector3f()
+    vehicle:getForwardVector(fwd)
+    local fx, fy = fwd:x(), fwd:z()
+    BaseVehicle.releaseVector3f(fwd)
+    local fl = finite(fx) and finite(fy) and fx * fx + fy * fy or 0
+    if fl < 1e-6 then return end
+    fl = sqrt(fl)
+    fx, fy = fx / fl, fy / fl
+    local nx, ny = fy, -fx -- 車身本地 +x（同 getWorldPos／sweepLine 的重心換算）
+    local comX, comZ = vp.centerOfMassX or 0, vp.centerOfMassZ or 0
+    local cx, cy = vx + fx * comZ + nx * comX, vy + fy * comZ + ny * comX
+    local sideLo, sideHi = (comX - hw) * 0.98, (comX + hw) * 0.98
+    local reach2 = reach * reach
+    local n = 0
+    for i = 1, s.bushN do
+        local bx, by = s.bushX[i], s.bushY[i]
+        local ox, oy = bx - vx, by - vy
+        if ox * ox + oy * oy <= reach2 then
+            local dx, dy = bx - cx, by - cy
+            local lat, lon = dx * nx + dy * ny, dx * fx + dy * fy
+            local px = nil -- 接觸點的本地橫向（相對車身框中心）；nil＝沒碰到
+            if lat > -hw and lat < hw and lon > -hl and lon < hl then
+                -- 樹叢在車身框內：引擎把接觸點推到最近的那一面外 0.315（平手＝原點）
+                local dw, de, dn, ds = lat + hw, hw - lat, lon + hl, hl - lon
+                if dw < de and dw < dn and dw < ds then px = -hw - 0.315
+                elseif de < dw and de < dn and de < ds then px = hw + 0.315
+                elseif (dn < dw and dn < de and dn < ds) or (ds < dw and ds < de and ds < dn) then px = lat
+                else px = -comX end
+            else
+                local qx = lat < -hw and -hw or (lat > hw and hw or lat)
+                local qz = lon < -hl and -hl or (lon > hl and hl or lon)
+                local ex, ez = lat - qx, lon - qz
+                local d2 = ex * ex + ez * ez
+                if d2 < 0.09 then
+                    px = d2 > 0 and qx + ex / sqrt(d2) * 0.315 or hw + 1
+                end
+            end
+            if px then
+                local side = px + comX < sideLo or px + comX > sideHi
+                local mul = (side or spd < 10) and 0.025 or 0.1
+                local obj = s.bushObj[i]
+                if pcall(vehicle.applyImpulseFromHitPlant, vehicle, obj, -mul) then
+                    n = n + 1
+                else
+                    -- 候選抓到後才被砍掉、物件已回收（格是 nil，IsoObject reset）：引擎同樣不對它施力，下一幀重抓；
+                    -- 還在格上卻失敗＝方法本身不能用
+                    local okSq, sq = pcall(obj.getSquare, obj)
+                    if okSq and sq ~= nil then
+                        s.bushOff, s.bushN = "call", 0
+                        sen.bushPassable = false
+                        return
+                    end
+                    s.bushScanMs = 0
+                end
+            end
+        end
+    end
+    s.bushContactN = n
+end
+
 -- 判堵停止線（blockedNear 判距；接近包絡、telemetry、stepFollow 同一個數）。拖車多留掛車跟上側移的跑道
 -- （0929p）：掛車軸沿 tractrix 落後牽引車約 L2 的尺度，離線 L2 9.5／trailLen 14.5 的貨櫃要車心離群 ≥24m
 -- 才掃得過寬帶繞行（E2E semi-long-mp block：停在 10m 線、倒車 7m 仍 steep → 改道 → 急彎折斷）；
@@ -5422,6 +5536,7 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     phys.assistForce = s.lastAssistForce
     if finite(s.accelAssist) and s.accelAssist > 0 then phys.accelAssist = s.accelAssist end
     if (s.relayN or 0) > 0 then phys.relayN = s.relayN end
+    if (s.bushContactN or 0) > 0 then phys.bushContact = s.bushContactN end -- 1004d：本幀抵消的樹叢數（Drive.bushCancel）
     phys.priorAccel, phys.priorBrake, phys.priorLat =
         s.priorAccel, s.priorBrake, s.priorLat
     phys.priorCoast = s.priorCoast
@@ -12499,6 +12614,9 @@ local function onPlayerUpdate(player)
         end
         s.mode = "follow"
     end
+
+    -- 樹叢阻力抵消（Drive.bushCancel）：跟線、繞行與倒車都要；讓位（玩家自己開）在上面就 return 了
+    Drive.bushCancel(s, vehicle, now)
 
     -- Reverse recovery and its settle phase bypass normal follow control. Manual input
     -- already yielded above, so neither path can fight the player.

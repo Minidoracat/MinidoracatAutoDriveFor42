@@ -1176,6 +1176,7 @@ local function encodePhys(phys)
     addNum("assistForce", "af")
     addNum("accelAssist", "aca")      -- 1001i：加速輔助補的加速度（m/s²；Drive.accelAssistForce）
     addNum("relayN", "rly")           -- 1001i：本輪接到快照尾端的伺服器轉送遠方車台數（Drive.mergeRelay）
+    addNum("bushContact", "bsh")      -- 1004d：本幀抵消阻力的樹叢數（Drive.bushCancel；0＝沒碰到，省略）
     addNum("brakeAssistForce", "baf")
     addStr("jerkBypass", "jerkBypass")
     addNum("curveKappa", "curveKappa")

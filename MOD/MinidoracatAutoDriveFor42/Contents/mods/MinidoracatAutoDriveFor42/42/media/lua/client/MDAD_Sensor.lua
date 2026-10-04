@@ -154,10 +154,11 @@ local COST_HARD_THIN = 3       -- 細桿硬障礙：無碰撞旗標的籬笆 spr
 local COST_TREE = 4            -- 樹幹形狀（樹、室外路燈柱、PhysicsShape=Tree）：見 TRUNK_*
 local COST_DOOR = 5            -- 門／柵門 sprite（doorN／doorW）：開關狀態在格級屬性，由 closedDoor(square) 判
 local COST_WALL_N, COST_WALL_W, COST_WALL_NW = 6, 7, 8 -- 帶 collideN／collideW 的籬笆：格邊薄牆，見 WALL_*
--- 樹叢（0929t）：引擎 IsoObject.isBush＝f_bushes_1 tileset 或 Bush 屬性（IsoObject.java:6583-6585）。不擋車，但
--- checkCollisionWithPlant（BaseVehicle.java:3074-3116）對碰到的每叢每幀施 −0.025×動量（≥10 km/h 正面 0.1）的
--- 衝量（applyImpulseFromHitPlant :5556-5565），不乘 dt：幀越高越黏。E2E semi-long-mp（W900＋貨櫃，230 FPS）路外繞進
--- 樹叢地 1 km/h 動不了、倒車也退不出 → StopStuck。一般帶照舊忽略（路邊樹叢），寬帶（路外繞行）當 0.3 圓避開。
+-- 樹叢（0929t）：引擎 IsoObject.isBush＝f_bushes_1 tileset 或 Bush 屬性（IsoObject.java:6583-6585）。不擋車（原版沒有一個
+-- 樹叢 tile 帶碰撞形狀或 HitByCar），但 checkCollisionWithPlant（BaseVehicle.java:3074-3116）對碰到的每叢每幀施
+-- −0.025×動量（≥10 km/h 正面 0.1）的衝量（applyImpulseFromHitPlant :5556-5565），不乘 dt：幀越高越黏（E2E
+-- semi-long-mp：W900＋貨櫃 230 FPS 路外繞進樹叢地 1 km/h 動不了）。一般帶照舊忽略；寬帶只在 state.bushPassable 不為
+-- true 時當 0.3 圓避開——非拖車由 Driver 每幀抵消樹叢阻力（Drive.bushCancel，1004d），拖車或抵消不可用時照舊避開。
 local COST_BUSH = 9
 local BUSH_R = 0.3             -- 引擎測植物碰撞的半徑（testCollisionWithObject(object, 0.3F)）
 local SLOW_BAND_HALF = 3       -- 減速計數帶半寬（±3＝路面帶；hard 仍收全走廊 ±6.5）
@@ -739,7 +740,7 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
                 elseif cost == COST_TREE then trunk = true
                 elseif cost == COST_HARD_THIN then thin = true
                 elseif cost == COST_SOFT then soft = true
-                elseif cost == COST_BUSH then bush = state.wideRound == true -- 只有路外繞行避開（見 COST_BUSH）
+                elseif cost == COST_BUSH then bush = state.wideRound == true and state.bushPassable ~= true -- 見 COST_BUSH
                 end
             end
         end
@@ -1221,6 +1222,7 @@ function MDADSensor.newState()
         latArr = LAT, latArrN = LAT_N, latFine = LAT_FINE, latFineN = LAT_FINE_N,
         wideReq = false, wideRound = false, wideLong = false, wideDone = false, corridorHalf = CORRIDOR_HALF,
         wideLevelReq = 1, wideRoundLevel = 0, wideDoneLevel = 0, -- 寬帶級：Driver 要求／本輪鎖定／完成快照（WIDE2）
+        bushPassable = false, -- Driver 能抵消樹叢阻力（Drive.bushCancel）＝寬帶不避樹叢（見 COST_BUSH）
         segIdx = 1,
         baseIdx = 1,
         cx = 0, cy = 0,
@@ -1703,6 +1705,40 @@ function MDADSensor.probeAround(state, vehicle, cell, radius)
         end
     end
     return false
+end
+
+-- 車周樹叢物件（Driver Drive.bushCancel 的候選；冷路徑，Driver 節流呼叫）：(cx,cy) 周圍 r 內每一格的物件，sprite 成本
+-- 是 COST_BUSH 的逐一收進 outObj／outX／outY（格心＝引擎 getObjectX/Y，BaseVehicle.java:5502-5508；一格可有多叢，引擎
+-- 逐物件施力），最多 maxN 個，回個數。d_generic_1／d_plants_1 tileset 引擎只播聲音、不施衝量（BaseVehicle.java:3078），
+-- 不收。只讀格、只更新既有 sprite 快取，不碰掃描 working buffer；未載入格跳過（引擎同樣不會對它施力）。
+function MDADSensor.bushNear(state, vehicle, cell, cx, cy, r, outObj, outX, outY, maxN)
+    if type(state) ~= "table" or type(state.spriteCost) ~= "table" or not vehicle or not cell
+            or not finite(cx) or not finite(cy) or not finite(r) then return 0 end
+    if not flagsBound then bindFlags() end
+    local z = vehicle:getZ()
+    if not finite(z) then return 0 end
+    z = z - z % 1
+    local x0, x1, y0, y1 = cx - r, cx + r, cy - r, cy + r
+    x0, x1, y0, y1 = x0 - x0 % 1, x1 - x1 % 1, y0 - y0 % 1, y1 - y1 % 1
+    local n = 0
+    for gx = x0, x1 do
+        for gy = y0, y1 do
+            local square = cell:getGridSquare(gx, gy, z)
+            local objs = square and square:getObjects()
+            local nObj = objs and objs:size() or 0
+            for i = 1, nObj do
+                local obj = objs:get(i - 1)
+                local name = obj:getSpriteName()
+                if name ~= nil and spriteCostOf(state, obj, name) == COST_BUSH
+                        and find(name, "d_generic_1_", 1, true) ~= 1 and find(name, "d_plants_1_", 1, true) ~= 1 then
+                    if n >= maxN then return n end
+                    n = n + 1
+                    outObj[n], outX[n], outY[n] = obj, gx + 0.5, gy + 0.5
+                end
+            end
+        end
+    end
+    return n
 end
 
 -- 事件驅動 near 探測：current OBB＋車頭前方 1m。

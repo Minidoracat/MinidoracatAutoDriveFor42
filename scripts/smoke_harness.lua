@@ -1085,6 +1085,8 @@ local function newVehicle(opts)
         _regSpeed = nil,
         -- 每幀施力的帳：frame＝本幀次數、max＝觀測窗內單幀最高、total＝總次數
         _imp = { frame = 0, max = 0, total = 0, useAfterRelease = 0 },
+        -- applyImpulseFromHitPlant 的帳（Drive.bushCancel）：n＝累計次數，obj／mul＝每次的植物物件與 mul
+        _plant = { n = 0, obj = {}, mul = {} },
         -- 注入式裝置槽。整車只有這兩個槽認得裝置，查不到＝這輛車不支援
         -- （VehicleParts.getPartById 回 nil）。id 刻意寫死字面值：Core 若改常數，
         -- 存檔相容性就斷了，這裡必須紅。
@@ -1226,6 +1228,14 @@ local function newVehicle(opts)
         if impulse._held ~= true or relPos._held ~= true then
             imp.useAfterRelease = imp.useAfterRelease + 1
         end
+    end
+
+    -- applyImpulseFromHitPlant(obj, mul)＝BaseVehicle.java:5556-5565（public）：沿車速施 −mul×質量 的衝量、作用點＝植物格心，
+    -- 進 impulsesFromHitObjects 由物理步施力。Drive.bushCancel 以負 mul 抵消引擎的樹叢阻力；這裡只記錄碰了哪一叢、mul 多少。
+    function v:applyImpulseFromHitPlant(obj, mul)
+        local p = self._plant
+        p.n = p.n + 1
+        p.obj[p.n], p.mul[p.n] = obj, mul
     end
 
     -- setRegulator／setRegulatorSpeed＝BaseVehicle.java:9821-9831
@@ -20217,47 +20227,55 @@ function drive.scenario0929p()
     getSpecificPlayer = oldGet
     MDAD.Drive.stop(0, nil)
     for x = 60, 61 do for y = -8, 8 do drive.clearCell(x, y) end end
-    -- (bush) 樹叢：一般帶忽略（路邊樹叢不擋車），寬帶（路外繞行）當 0.3 圓避開——引擎每幀對碰到的樹叢施
-    --   −0.025×動量（不乘 dt），E2E 路外繞進樹叢地 1 km/h 動不了。違規證明：寬帶也忽略／一般帶也收＝各自紅。
+    -- (bush) 樹叢：一般帶一律不收（路邊樹叢不擋車）。寬帶：抵消得了樹叢阻力（非拖車、引擎方法在，1004d Drive.bushCancel）
+    --   ＝同樣不避；抵消不可用（假車拿掉 applyImpulseFromHitPlant）＝當 0.3 圓避開（0929t：引擎每幀對碰到的樹叢施
+    --   −0.025×動量、不乘 dt，E2E 路外繞進樹叢地 1 km/h 動不了）。違規證明：寬帶一律避開／一律不避／一般帶也收＝各自紅。
     do
         local bprops = { has = function(_, key) return key == "Bush" end, get = function() return nil end }
         local bsprite = { shouldHaveCollision = function() return false end, getProperties = function() return bprops end }
-        -- 路邊樹叢（l≈±3.5，一般帶也掃得到）與路外樹叢（l≈±10.5，寬帶才掃得到），牆整條擋死 ±6：開到停止線武裝後下一輪寬帶
-        drive.fillWorld(-10, 90, -16, 16)
-        for x = 40, 42 do for y = -6, 6 do drive.putSolid(x, y, "bush_wall") end end
-        for _, c in ipairs({ { 35, 3 }, { 45, 10 } }) do
-            local sq = drive.world[c[1] * 100000 + c[2]] or drive.mkSquare(c[1], c[2])
-            sq._objs[#sq._objs + 1] = { getSpriteName = function() return "harness_bush" end,
-                getSprite = function() return bsprite end, getProperties = function() return bprops end,
-                getType = function() return nil end }
-        end
-        armDrive()
-        setHeading(dveh, 0)
-        local bs = MDAD.Drive.debugSession(0)
-        local function bushR(x, y)
-            for i = 1, bs.sensor.hardN do
-                if math.abs(bs.sensor.hardX[i] - x) < 0.01 and math.abs(bs.sensor.hardY[i] - y) < 0.01 then
-                    return bs.sensor.hardR[i]
-                end
+        local plantFn = dveh.applyImpulseFromHitPlant
+        for _, noApi in ipairs({ false, true }) do
+            -- 路邊樹叢（l≈±3.5，一般帶也掃得到）與路外樹叢（l≈±10.5，寬帶才掃得到），牆整條擋死 ±6：開到停止線武裝後下一輪寬帶
+            drive.fillWorld(-10, 90, -16, 16)
+            for x = 40, 42 do for y = -6, 6 do drive.putSolid(x, y, "bush_wall") end end
+            for _, c in ipairs({ { 35, 3 }, { 45, 10 } }) do
+                local sq = drive.world[c[1] * 100000 + c[2]] or drive.mkSquare(c[1], c[2])
+                sq._objs[#sq._objs + 1] = { getSpriteName = function() return "harness_bush" end,
+                    getSprite = function() return bsprite end, getProperties = function() return bprops end,
+                    getType = function() return nil end }
             end
-            return nil
+            if noApi then dveh.applyImpulseFromHitPlant = nil end
+            armDrive()
+            dveh.applyImpulseFromHitPlant = plantFn
+            setHeading(dveh, 0)
+            local bs = MDAD.Drive.debugSession(0)
+            local function bushR(x, y)
+                for i = 1, bs.sensor.hardN do
+                    if math.abs(bs.sensor.hardX[i] - x) < 0.01 and math.abs(bs.sensor.hardY[i] - y) < 0.01 then
+                        return bs.sensor.hardR[i]
+                    end
+                end
+                return nil
+            end
+            dveh._x, dveh._y, dveh._speed = 15, 0, 0 -- 群在 25m 外：判堵但還沒到停止線＝一般帶
+            driveReset(dveh)
+            driveTick(dp, dveh)
+            for _ = 1, 2 do drive.frameMs(10); drive.scanRound(true) end
+            local rNormal, halfNormal = bushR(35.5, 3.5), bs.sensor.corridorHalf
+            dveh._x = 31 -- 開到停止線：武裝，下一輪寬帶
+            driveReset(dveh)
+            driveTick(dp, dveh)
+            drive.frameMs(10)
+            drive.scanRound(true)
+            local rWideIn, rWideOut = bushR(35.5, 3.5), bushR(45.5, 10.5)
+            local wideR = noApi and 0.3 or nil
+            checkTrue(halfNormal == 7 and rNormal == nil and bs.sensor.wideDone == true and rWideIn == wideR
+                    and rWideOut == wideR and bs.bushOff == (noApi and "api" or nil),
+                "(bush) " .. (noApi and "抵消不可用：寬帶收成格心 0.3 圓" or "抵消得了：寬帶也不避") .. "，一般帶不收（一般 "
+                .. tostring(rNormal) .. "、寬帶路邊 " .. tostring(rWideIn) .. "／路外 " .. tostring(rWideOut)
+                .. "、off " .. tostring(bs.bushOff) .. "）")
+            MDAD.Drive.stop(0, nil)
         end
-        dveh._x, dveh._y, dveh._speed = 15, 0, 0 -- 群在 25m 外：判堵但還沒到停止線＝一般帶
-        driveReset(dveh)
-        driveTick(dp, dveh)
-        for _ = 1, 2 do drive.frameMs(10); drive.scanRound(true) end
-        local rNormal, halfNormal = bushR(35.5, 3.5), bs.sensor.corridorHalf
-        dveh._x = 31 -- 開到停止線：武裝，下一輪寬帶
-        driveReset(dveh)
-        driveTick(dp, dveh)
-        drive.frameMs(10)
-        drive.scanRound(true)
-        local rWideIn, rWideOut = bushR(35.5, 3.5), bushR(45.5, 10.5)
-        checkTrue(halfNormal == 7 and rNormal == nil and bs.sensor.wideDone == true and rWideIn == 0.3
-                and rWideOut == 0.3,
-            "(bush) 一般帶不收路邊樹叢（" .. tostring(rNormal) .. "）、寬帶收成格心 0.3 圓（路邊 " .. tostring(rWideIn)
-            .. "／路外 " .. tostring(rWideOut) .. "）")
-        MDAD.Drive.stop(0, nil)
     end
     -- (wide-gate) 寬帶武裝後的倒車／自動改道：下一次都要等這次嘗試的寬帶重判（E2E 0929u：倒車一結束、等待額度
     --   早已累滿，一般帶一判堵就再倒，三次倒車中間一輪寬帶都沒跑就交還）。自動改道開著時，倒車重判仍堵才改道。
@@ -20508,6 +20526,140 @@ function drive.scenario1004c()
     SandboxVars = oldSand
 end
 drive.scenario1004c()
+
+-- 1004d（使用者 2026-10-05「遇到樹叢也可以加大推力來幫助通過」）：
+--   (bush-cancel) 引擎每幀對車身外 0.3m 內的每一叢施 −mul×質量×速度（側面或 <10 km/h 0.025、正面 ≥10 km/h 0.1）；
+--     Drive.bushCancel 對同一批樹叢以 −mul 呼叫同一個方法抵消。車心 (20.5,0.5) 朝 +x、車身 1.8×4.4：側面一叢（車身外
+--     0.1）、車頭內一叢、車身外 1.1 一叢（沒碰到）、車身內 d_plants_1 一叢（引擎不施力）：只抵消前兩叢，10 km/h 以上
+--     正面那叢換 0.1；倒車照抵；≤1 km/h、鋪面上跟線（不在路外／繞行／回線／倒車）不抵消。每一格都斷言 session 還活著
+--     （引擎熄火時 driveGate 直接收掉 session，在死 session 上數到 0 次＝假綠）。
+--     違規證明：mul 不取負／側正面判反／速度門檻拿掉／d_plants 排除拿掉／路外閘拿掉＝各自紅。
+--   (bush-fail) 方法呼叫失敗：bushOff "call"、Sensor 寬帶改回避開樹叢、記一次 bush off 事件、之後不再呼叫。
+--   (bush-stale) 候選抓到後才被砍掉、物件已回收（getSquare 回 nil）：只跳過那叢，不當方法失敗。違規證明：失敗一律關掉＝紅。
+--   (bush-tow) 拖車：不抵消（掛車自己的樹叢阻力抵不掉），寬帶照舊避開樹叢。違規證明：拿掉 tow 條件＝紅。
+function drive.scenario1004d()
+    scenario("1004d：樹叢阻力抵消——照引擎的接觸判定逐叢反向施力、失敗退回避開、拖車不做")
+    local oldSand = SandboxVars
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    drive.fillWorld(-10, 80, -10, 10)
+    local bprops = { has = function(_, key) return key == "Bush" end, get = function() return nil end }
+    local bsprite = { shouldHaveCollision = function() return false end, getProperties = function() return bprops end }
+    local function putBush(x, y, name)
+        local sq = drive.world[x * 100000 + y] or drive.mkSquare(x, y)
+        local obj = { getSpriteName = function() return name end, getSprite = function() return bsprite end,
+            getProperties = function() return bprops end, getType = function() return nil end,
+            getSquare = function() return sq end }
+        sq._objs[#sq._objs + 1] = obj
+        return obj
+    end
+    local side = putBush(21, 1, "harness_bush")  -- 格心 (21.5,1.5)：橫向 1.0＝車身外 0.1
+    local front = putBush(22, 0, "harness_bush") -- 格心 (22.5,0.5)：縱向 2.0、橫向 0＝車身框內、最近車頭那一面
+    putBush(20, 2, "harness_bush")               -- 格心 (20.5,2.5)：車身外 1.1，沒碰到
+    putBush(19, 0, "d_plants_1_5")               -- 車身框內，但 d_plants_1 引擎只播聲音
+    armDrive()
+    local s = MDAD.Drive.debugSession(0)
+    local passable0, off0 = s.sensor.bushPassable, s.bushOff
+    setHeading(dveh, 0)
+    dveh._x, dveh._y = 20.5, 0.5
+    dveh._offroad, s.physicalOffroad = true, true
+    local function frame(speed)
+        dveh._speed = speed
+        dveh._plant = { n = 0, obj = {}, mul = {} }
+        s.bushScanMs = 0 -- 車沒動、只換速度：每格重抓候選
+        nowMs = nowMs + 16
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        local p, got = dveh._plant, {}
+        for i = 1, p.n do got[p.obj[i]] = p.mul[i] end
+        return p.n, got[side], got[front]
+    end
+    local n8, s8, f8 = frame(8)
+    local contact8 = s.bushContactN
+    checkTrue(passable0 == true and off0 == nil and n8 == 2 and s8 == -0.025 and f8 == -0.025 and contact8 == 2,
+        "(bush-cancel) 8 km/h：側面、正面兩叢各以 −0.025 抵消，沒碰到的與 d_plants_1 不動（n=" .. tostring(n8)
+        .. " side=" .. tostring(s8) .. " front=" .. tostring(f8) .. " contact=" .. tostring(contact8)
+        .. " passable=" .. tostring(passable0) .. "）")
+    local n15, s15, f15 = frame(15)
+    checkTrue(n15 == 2 and s15 == -0.025 and f15 == -0.1,
+        "(bush-cancel) 15 km/h：正面那叢換 −0.1、側面維持 −0.025（side=" .. tostring(s15) .. " front=" .. tostring(f15) .. "）")
+    local nRev, sRev, fRev = frame(-8)
+    checkTrue(nRev == 2 and sRev == -0.025 and fRev == -0.025,
+        "(bush-cancel) 倒車 8 km/h 照樣抵消（n=" .. tostring(nRev) .. "）")
+    local nSlow = frame(0.9)
+    dveh._offroad, s.physicalOffroad = false, false
+    local nPaved = frame(8)
+    checkTrue(nSlow == 0 and nPaved == 0 and s.dodging ~= true and s.returnActive ~= true
+            and MDAD.Drive.debugSession(0) == s,
+        "(bush-cancel) ≤1 km/h、鋪面上跟線都不抵消，session 仍在（slow=" .. tostring(nSlow) .. " paved="
+        .. tostring(nPaved) .. "）")
+    -- (bush-stale) 候選抓到後被砍掉、物件已回收（getSquare 回 nil）：那叢呼叫失敗只跳過，其他照抵、不關掉抵消
+    dveh._offroad, s.physicalOffroad = true, true
+    local plantOk, sideSq = dveh.applyImpulseFromHitPlant, side.getSquare
+    side.getSquare = function() return nil end
+    dveh.applyImpulseFromHitPlant = function(self, obj, mul)
+        if obj == side then error("reclaimed") end
+        return plantOk(self, obj, mul)
+    end
+    local nStale, sStale, fStale = frame(8)
+    dveh.applyImpulseFromHitPlant, side.getSquare = plantOk, sideSq
+    checkTrue(nStale == 1 and sStale == nil and fStale == -0.025 and s.bushOff == nil and s.sensor.bushPassable == true
+            and MDAD.Drive.debugSession(0) == s,
+        "(bush-stale) 已回收的樹叢呼叫失敗：只跳過那叢、其他照抵、不關掉（n=" .. tostring(nStale) .. " front="
+        .. tostring(fStale) .. " off=" .. tostring(s.bushOff) .. "）")
+    -- (bush-fail)
+    dveh._offroad, s.physicalOffroad = true, true
+    -- 這段要 diag 開著才看得到事件：取樣也換成假的（真的 sample 沒有起 telemetry session，會把 s.diag 關掉）
+    local oldEvent, oldSample, events, calls = MDADDiagnostics.event, MDADDiagnostics.sample, {}, 0
+    MDADDiagnostics.event = function(_, name, a) events[#events + 1] = { name = name, a = a } end
+    MDADDiagnostics.sample = function() return true end
+    local plantFn = dveh.applyImpulseFromHitPlant
+    dveh.applyImpulseFromHitPlant = function() calls = calls + 1 error("plant-fail") end
+    local diagWas = s.diag
+    s.diag = true
+    frame(8)
+    local offAfter, passAfter, callsAfter = s.bushOff, s.sensor.bushPassable, calls
+    frame(8)
+    frame(8)
+    local offEvents = 0
+    for _, e in ipairs(events) do
+        if e.name == "bush" and e.a and e.a.phase == "off" and e.a.why == "call" then offEvents = offEvents + 1 end
+    end
+    local diagOn = s.diag
+    s.diag = diagWas
+    MDADDiagnostics.event, MDADDiagnostics.sample = oldEvent, oldSample
+    dveh.applyImpulseFromHitPlant = plantFn
+    checkTrue(offAfter == "call" and passAfter == false and callsAfter == 1 and calls == 1 and offEvents == 1
+            and diagOn == true and MDAD.Drive.debugSession(0) == s,
+        "(bush-fail) 呼叫失敗：bushOff call、寬帶改回避開樹叢、之後不再呼叫、bush off 事件一筆（off=" .. tostring(offAfter)
+        .. " passable=" .. tostring(passAfter) .. " calls=" .. tostring(calls) .. " events=" .. tostring(offEvents)
+        .. " diag=" .. tostring(diagOn) .. "）")
+    MDAD.Drive.stop(0, nil)
+    -- (bush-tow)
+    local oldAttach = MDADTrailer.attach
+    local trl = { getForwardVector = function(_, out) return out:set(dveh._fwdX, 0, dveh._fwdY) end,
+        getUpVectorDot = function() return 1 end }
+    MDADTrailer.attach = function()
+        return { trailer = trl, L2 = 3, hitchToRear = 3.5, halfW = 1.0, halfL = 2.0, hitchZ = -2.0, hitchX = 0,
+            boxBack = 1.0, boxSide = 0, trailLen = 5, mass = 800, axisSign = 1 }
+    end
+    local startedTow = armDrive()
+    MDADTrailer.attach = oldAttach
+    local ts = MDAD.Drive.debugSession(0)
+    setHeading(dveh, 0)
+    dveh._x, dveh._y = 20.5, 0.5
+    dveh._offroad, ts.physicalOffroad = true, true
+    s = ts
+    local nTow = frame(8)
+    checkTrue(startedTow and type(ts.tow) == "table" and ts.bushOff == "tow" and ts.sensor.bushPassable == false
+            and nTow == 0,
+        "(bush-tow) 拖車：不抵消、寬帶照舊避開樹叢（off=" .. tostring(ts.bushOff) .. " passable="
+        .. tostring(ts.sensor.bushPassable) .. " n=" .. tostring(nTow) .. "）")
+    dveh._offroad = false
+    MDAD.Drive.stop(0, nil)
+    drive.fillWorld(-2, 70, -7, 7)
+    SandboxVars = oldSand
+end
+drive.scenario1004d()
 
 do -- 主 chunk local 槽已滿：整段包成函式，內部 local 不佔主 chunk
 -- =====================================================================
