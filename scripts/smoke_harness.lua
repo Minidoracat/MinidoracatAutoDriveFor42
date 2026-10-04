@@ -4533,6 +4533,12 @@ end
 nowMs = nowMs + 5000
 players[0], players[1], players[2], players[3], players[4], players[5] = dp, nil, nil, nil, nil, nil
 activePlayers = 1
+-- 1005 同車型轉向增益快取（MDADFollower.storeGains／seedGains）：harness 的假車不會自己轉，每趟都把 yawGain 學到
+-- 0.09 上下，跨 session 帶下去會讓後面的情境起步就 ×FB_NORM_MAX（弧段 cross-track 力矩比 2→1.2）。快取只在
+-- drive.keepGains 為真的情境（scenarioGainSeeds）讀寫，其他情境照舊每趟從 YAW_GAIN_INIT 起；包的是 production 本體。
+drive.realStoreGains, drive.realSeedGains = MDADFollower.storeGains, MDADFollower.seedGains
+MDADFollower.storeGains = function(st, key) return drive.keepGains == true and drive.realStoreGains(st, key) end
+MDADFollower.seedGains = function(st, key) return drive.keepGains == true and drive.realSeedGains(st, key) end
 
 -- =====================================================================
 -- 情境十六：自駕熱路徑（沒有人在自駕時 OnPlayerUpdate 必須是零成本）
@@ -5264,6 +5270,109 @@ checkNear(dveh._imp.rz, 0, 1e-12, "純前推 relPos.z 為零")
 checkEq(drive.bad.impulse, 0, "前推全程沒有第二次 impulse")
 checkEq(drive.pool.live, 0, "前推向量池幀末歸零")
 MDAD.Drive.stop(0, nil)
+
+-- 1005 高速力臂延伸（TUNE.ARM_EXT_*）：≥FULL 時施力點沿車頭放到 arm×K、側推÷K——力矩不變、側推只剩 1/K，側推方向仍＝
+-- 轉頭方向（前臂裁定）；FROM 以下、貼縫爬行 K＝1。fake control 給固定 steer 0.6、目標 120（不觸發煞車）。
+-- 違規證明：力不除以 K＝(力矩) 紅；K 不爬升（≥FROM 直接 K）＝(爬升) 紅；拿掉 dodgeCrawl 條件＝(爬行) 紅。
+function drive.scenarioArmExt()
+    scenario("高速力臂延伸：力臂×K、側推÷K，力矩逐位不變；低速／貼縫爬行 K＝1")
+    local T = MDAD.Drive.debugTune()
+    local realControl = MDADFollower.control
+    local function shot(kmh, setup)
+        MDAD.Drive.stop(0, nil)
+        dveh._x, dveh._y, dveh._speed, dveh._steering = 0, 0, kmh, 0
+        setHeading(dveh, 0)
+        drive.nav.route = newRoute(40, 0, 0, 4, 0)
+        checkTrue(MDAD.Drive.start(dp), "(arm) " .. kmh .. " km/h 啟動")
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        MDADFollower.control = function(_, state)
+            state.curveValid, state.curveHardActive, state.curveKappa, state.curveCapKmh = true, false, 0, 120
+            return 0.6, 120, 100, false, 0.2, 0, 0
+        end
+        local s = MDAD.Drive.debugSession(0)
+        if setup then setup(s) end
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        MDADFollower.control = realControl
+        local im = dveh._imp
+        local r = { total = im.total, tq = im.torqueY, ext = s.armExt, arm = s.rearArm,
+            lat = im.x * (-dveh._fwdY) + im.z * dveh._fwdX, fwdR = im.rx * dveh._fwdX + im.rz * dveh._fwdY }
+        if setup then setup(s, true) end
+        MDAD.Drive.stop(0, nil)
+        return r
+    end
+    local keepK = T.ARM_EXT_K
+    T.ARM_EXT_K = 1
+    local base = shot(70)
+    T.ARM_EXT_K = keepK
+    local ext = shot(70)
+    checkTrue(base.total == 1 and ext.total == 1, "(arm) 兩次都施力一次")
+    checkNear(base.ext, 1, 0, "(arm) 對照組 K＝1")
+    checkNear(ext.ext, T.ARM_EXT_K, 1e-12, "(arm) ≥FULL：K＝ARM_EXT_K（實得 " .. tostring(ext.ext) .. "）")
+    checkTrue(base.tq ~= 0 and math.abs(ext.tq - base.tq) <= 1e-9 * math.abs(base.tq), string.format(
+        "(力矩) 延伸前後偏航力矩不變（%.6f vs %.6f）", ext.tq, base.tq))
+    checkNear(ext.lat / base.lat, 1 / T.ARM_EXT_K, 1e-9, "(arm) 側推只剩 1/K")
+    checkNear(ext.fwdR, base.fwdR * T.ARM_EXT_K, 1e-6, "(arm) 施力點沿車頭放到 arm×K")
+    checkTrue((ext.lat < 0) == (ext.tq > 0), "(arm) 延伸後側推方向仍＝轉頭方向（前臂裁定）")
+    local mid = shot((T.ARM_EXT_FROM_KMH + T.ARM_EXT_FULL_KMH) / 2)
+    checkNear(mid.ext, 1 + (T.ARM_EXT_K - 1) / 2, 1e-9, "(爬升) FROM 與 FULL 中點：K 走一半（實得 "
+        .. tostring(mid.ext) .. "）")
+    local low = shot(T.ARM_EXT_FROM_KMH - 5)
+    checkTrue(low.ext == 1 and math.abs(low.fwdR - low.arm) < 1e-6, "(arm) FROM 以下 K＝1、施力點＝原前臂（實得 "
+        .. tostring(low.ext) .. "）")
+    local crawl = shot(70, function(s, undo)
+        if undo then s.dodging, s.dodgeCrawl = false, false else s.dodging, s.dodgeCrawl = true, true end
+    end)
+    checkNear(crawl.ext, 1, 0, "(爬行) 貼縫爬行 K＝1（要的就是側移）")
+    -- 拖車（掛車折角動態沒有離線模型）：K＝1。直接問 Drive.armExtK（整合幀掛假 tow 表會走進拖車路徑）
+    checkNear(MDAD.Drive.armExtK({ tow = { halfW = 1.2 } }, 70), 1, 0, "(拖車) 拖掛 K＝1")
+    checkNear(MDAD.Drive.armExtK({}, 70), T.ARM_EXT_K, 1e-12, "(拖車) 對照：同速單車 K＝ARM_EXT_K")
+    checkNear(MDAD.Drive.armExtK({ zombieLane = 1.2 }, 70), 1, 0, "(軟縫) 殭屍軟縫側移中 K＝1（要的就是側移）")
+    dveh._speed = 20
+end
+drive.scenarioArmExt()
+
+-- 1005 同車型轉向增益種子（MDADFollower.storeGains／seedGains 經 Driver）：clearSession 記、startSession 種；快取鍵＝
+-- 車輛 script 名（拖掛另分鍵）。違規證明：clearSession 不呼叫 storeGains＝(seed) 紅；startSession 不呼叫 seedGains＝(seed) 紅。
+function drive.scenarioGainSeeds()
+    scenario("同車型轉向增益種子：session 結束記下、下一趟啟動就帶上；快取鍵依車型與拖掛")
+    drive.keepGains = true
+    local function startNoTick()
+        MDAD.Drive.stop(0, nil)
+        dveh._x, dveh._y, dveh._speed, dveh._steering = 0, 0, 20, 0
+        setHeading(dveh, 0.3)
+        drive.nav.route = newRoute(40, 0, 0, 4, 0)
+        checkTrue(MDAD.Drive.start(dp), "(seed) 啟動")
+        return MDAD.Drive.debugSession(0)
+    end
+    local s1 = startNoTick()
+    checkEq(s1.gainKey, dveh:getScriptName(), "(seed) 快取鍵＝車輛 script 名")
+    checkFalse(s1.gainSeeded, "(seed) 第一趟快取是空的")
+    local f = s1.fstate
+    f.yawGain, f.ygLearnT, f.yawGainFb, f.fbLearnT, f.yawGainHi, f.hiLearnT = 0.3, 1, 0.2, 1, 0.45, 1
+    MDAD.Drive.stop(0, nil)
+    local s2 = startNoTick()
+    checkTrue(s2.gainSeeded == true and s2.fstate.yawGain == 0.3 and s2.fstate.yawGainFb == 0.2
+        and s2.fstate.yawGainHi == 0.45, string.format("(seed) 第二趟啟動就帶上一趟學到的增益（yg %s ygf %s ygh %s）",
+            tostring(s2.fstate.yawGain), tostring(s2.fstate.yawGainFb), tostring(s2.fstate.yawGainHi)))
+    -- 第二趟學到飽和值（0.08）與沒學滿的 yawGainFb：都不蓋掉快取
+    s2.fstate.yawGain, s2.fstate.ygLearnT, s2.fstate.yawGainFb, s2.fstate.fbLearnT = 0.08, 1, 0.6, 0.1
+    MDAD.Drive.stop(0, nil)
+    local s3 = startNoTick()
+    checkTrue(s3.fstate.yawGain == 0.3 and s3.fstate.yawGainFb == 0.2,
+        "(seed) 飽和／沒學滿的趟次不蓋掉快取（yg " .. tostring(s3.fstate.yawGain) .. "）")
+    MDAD.Drive.stop(0, nil)
+    drive.keepGains = false
+    local vp = { scriptName = "Base.Pickup" }
+    checkEq(MDAD.Drive.gainKey(vp, nil), "Base.Pickup", "(key) 單車＝script 名")
+    checkEq(MDAD.Drive.gainKey(vp, { trailer = { getScriptName = function() return "Base.Trailer" end } }),
+        "Base.Pickup>Base.Trailer", "(key) 拖掛另分鍵（牽引車>掛車）")
+    checkEq(MDAD.Drive.gainKey(vp, { trailer = { getScriptName = function() error("boom") end } }),
+        "Base.Pickup>?", "(key) 掛車名讀不到：另一格 ?，不混進單車")
+    checkNil(MDAD.Drive.gainKey({}, nil), "(key) 沒有 script 名＝不記")
+end
+drive.scenarioGainSeeds()
 
 -- (acc) 1001i 加速輔助：目標比實速高就沿車身中線補 ACCEL_ASSIST_MPS2（輕車也有；前推輔助只給重車低速）。
 -- 違規證明：ACCEL_ASSIST_MPS2＝0 即整合案（感知情境①後）紅；拿掉伺服器速限夾＝速限案紅；拿掉折角門檻＝拖車案紅；

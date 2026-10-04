@@ -127,6 +127,16 @@ TUNE.STEER_FULL_KMH = 4
 -- 橫滑就把自己的縮放解鎖成全額（正式服 0.18.2 起步大弧調頭 8 段：0.2 秒內 1→13 km/h、橫向 >14 m/s²，接調頭煞停）。
 -- |v| 低於 full＋此值才讀線速度（前進速度可能還在縮放區）；起步側滑的橫向分量實測 ≤11.5 km/h。
 TUNE.STEER_SLIP_MARGIN_KMH = 12
+-- 高速力臂延伸（1005）：非耦力側推的施力點沿車頭方向放到 arm×K、力除以 K——偏航力矩不變，質心側推只剩 1/K。
+-- 引擎 addImpulse＝applyCentralForceToVehicle(F)＋applyTorqueToVehicle(relPos×F)（BaseVehicle.java:3351-3359），
+-- relPos 不夾，所以力臂可以超出車身。前臂同號（2026-09-02 裁定）不變，只是側移量變小。語料 177 段（.omc/uploads/
+-- 20261004）彎上（curveHardActive、|sff|≥0.1）≥35 km/h 樣本：控制 |sff|、車速、yr/v 後，側推量對車身往彎內滑的偏
+-- 相關 vt 0.60、ld 0.41（n=356；23 段內 16 段同號）；15–35 km/h 0.03／−0.12（沒有關係）。K 在 FROM→FULL 由 1 線性爬到
+-- ARM_EXT_K；拖車（掛車折角動態沒有離線模型）、貼縫爬行（s.dodgeCrawl）與殭屍軟縫側移（s.zombieLane）要的就是側移，
+-- 固定 1（Drive.armExtK）。s.armExt 進遙測（arx）。
+TUNE.ARM_EXT_FROM_KMH = 35
+TUNE.ARM_EXT_FULL_KMH = 55
+TUNE.ARM_EXT_K = 1.5
 -- 車身 yaw 率限制（0928a，ESC 式；0.13.1 正式服片段 >3 rad/s 自轉 24 次，0.13.0 只有 2 次）：側推是施在
 -- 車頭的外力、不受前輪轉角限制，目標點突然跳到 90° 外（Z 字短 jog 放行下一臂、窄出口繞行線、大弧調頭）
 -- 時 steer 飽和，0.2 秒內自轉 6–9 rad/s（summer/clip-06 SmallCar 18 km/h、Thragg/clip-04 GTR 大弧調頭、
@@ -1674,12 +1684,23 @@ local function reportAutoUsage(playerObj, vehicle, active, args, navArgs)
     end
 end
 
+-- 同車型轉向增益快取的鍵（MDADFollower.seedGains／storeGains）：車輛 script 名；拖掛另分鍵（牽引車>掛車），掛車讀不到
+-- 名字就用 "?"（同牽引車拖不同掛車共用一格，比混進單車那格好）。量不到 script 名回 nil＝這台車不記。
+function Drive.gainKey(vehicleProfile, tow)
+    local name = type(vehicleProfile) == "table" and vehicleProfile.scriptName or nil
+    if type(name) ~= "string" or name == "" then return nil end
+    if type(tow) ~= "table" then return name end
+    local ok, tn = pcall(function() return tow.trailer:getScriptName() end)
+    return name .. ">" .. (ok and type(tn) == "string" and tn or "?")
+end
+
 local function clearSession(playerNum)
     local s = sessions[playerNum]
     if not s then return end
     lastDriveSeconds[playerNum] = math.max(0, math.floor((getTimestampMs() - s.startedMs) / 1000))
     reportAutoUsage(getSpecificPlayer(playerNum), s.vehicle, false, s.usageArgs, s.navUsageArgs)
     sessions[playerNum] = nil
+    MDADFollower.storeGains(s.fstate, s.gainKey) -- 同車型轉向增益記給下一趟（記憶體、不存檔）
     sessionCount = sessionCount - 1
     -- 一般軌跡快取與 debug markers 都綁 session；停止／失效當下立即清。
     if type(MDADOverlay) == "table" then MDADOverlay.clear(playerNum) end
@@ -1833,7 +1854,7 @@ local function commitSession(playerObj, playerNum, s)
     if not dok then pcall(MDADDiagnostics.stop, playerNum, "error") end
     if not s.diag then return end
     local route, profile = s.route, s.profile
-    diagEvent(s, playerNum, "start")
+    diagEvent(s, playerNum, "start", s.gainSeeded and { seed = s.gainKey } or nil)
     diagEvent(s, playerNum, "target", {
         phase = "set", x = s.lastTx, y = s.lastTy, why = "user", tg = s.targetGen,
     })
@@ -2301,6 +2322,9 @@ local function startSession(playerObj, playerNum, stage)
     -- 抵消得了樹叢阻力（非拖車、引擎方法在）＝寬帶不把樹叢當障礙（Drive.bushCancel；MDADSensor COST_BUSH）
     sNew.bushOff = tow and "tow" or (not Drive.bushApi(vehicle) and "api") or nil
     if sNew.sensor then sNew.sensor.bushPassable = sNew.bushOff == nil end
+    -- 同一場遊戲同車型學過的轉向增益當這趟的種子（MDADFollower.seedGains；session 結束在 clearSession 寫回）
+    sNew.gainKey = Drive.gainKey(vehicleProfile, tow)
+    sNew.gainSeeded = MDADFollower.seedGains(fstate, sNew.gainKey)
     if stage then
         -- 準備中：先寄放，claim 成功才接上（第一次碰車在 commitSession）
         stage.session = sNew
@@ -2771,6 +2795,15 @@ end
 -- 每幀控制
 --------------------------------------------------------------------------------
 
+-- 高速力臂延伸倍率 K（TUNE.ARM_EXT_*；理由見 TUNE）：kmh＝|車速|。拖車、貼縫爬行、殭屍軟縫側移中（s.zombieLane；
+-- 0925p 高速側移本來就只有 1.4 m/s，要的就是側移）固定 1。
+function Drive.armExtK(s, kmh)
+    if s.tow or s.dodgeCrawl == true or s.zombieLane ~= nil or kmh <= TUNE.ARM_EXT_FROM_KMH then return 1 end
+    local t = (kmh - TUNE.ARM_EXT_FROM_KMH) / (TUNE.ARM_EXT_FULL_KMH - TUNE.ARM_EXT_FROM_KMH)
+    if t > 1 then t = 1 end
+    return 1 + (TUNE.ARM_EXT_K - 1) * t
+end
+
 -- Compose lateral steering and bounded forward assist into the one BaseVehicle
 -- impulse slot. A forward component uses the body centerline, so it adds no yaw.
 local function applySteering(
@@ -2814,6 +2847,10 @@ local function applySteering(
             * (MASS_K * mass * av * av + MASS_BASE * mass)
             * IMPULSE_SCALE * (mult / MULT_NORM)
     end
+    -- 高速力臂延伸（TUNE.ARM_EXT_*）：臂×ext、力÷ext，力矩不變
+    local ext = coupled and 1 or Drive.armExtK(s, av)
+    if ext ~= 1 then arm, force = arm * ext, force / ext end
+    s.armExt = ext
 
     local parity = s.parity
     s.parity = -parity
@@ -5758,6 +5795,7 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     phys.yawGain, phys.appliedSteer = s.fstate.yawGain, s.fstate.appliedSteer
     phys.yawGainHi, phys.yawGainFb = s.fstate.yawGainHi, s.fstate.yawGainFb
     if finite(s.fbNorm) and s.fbNorm > 1 then phys.fbNorm = s.fbNorm end
+    if finite(s.armExt) and s.armExt > 1 then phys.armExt = s.armExt end
     if s.dodgeAlignHold == true then phys.dodgeAlignHold = true end
     phys.routeHeadingError, phys.kinkExitS = s.lastRouteErr, s.fstate.kinkExitS
     phys.visibilityCap = s.visibilityCap

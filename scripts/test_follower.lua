@@ -4278,6 +4278,58 @@ do
         "(3) Semi 類 G 0.12（同相）：回授增益照常學到 %.3f（0.11–0.13）", after or -1))
 end
 
+scenario("1005：同車型轉向增益種子——學滿才記、貼夾限／非有限不收、下一趟從學到的值起步")
+do
+    -- 每趟 yawGain 從 0.8 重學，重車（G≈0.12–0.15）起步前 1 秒的前饋與回授正規化都照 0.8 算。同一場遊戲同車型
+    -- 學過就當種子（MDADFollower.storeGains／seedGains；Driver 在 clearSession 記、startSession 種）。
+    -- 違規證明：storeGains 不看學習秒數＝(2) 紅；seedGainOk 收夾限值＝(3) 紅；seedGains 不種 yawGainFb＝(4) 紅。
+    local p = buildRoute({ 0, 0, 600, 0 }, 60)
+    local function drive(st, G, frames)
+        local x, h = 0, 0
+        for k = 1, frames do
+            local ap = (math.floor((k - 1) / 15) % 2 == 0) and 0.8 or -0.8
+            h = h + G * ap * DT
+            x = x + 20 / KMH * DT
+            st.appliedSteer, st.escLimited = ap, false
+            F.control(p, st, x, 0, h, 20, DT)
+        end
+        return st
+    end
+    local a = drive(F.newState(), 0.15, 180)
+    checkTrue(F.storeGains(a, "T.semi"), "(1) 學滿 6 秒：記下")
+    local b = F.newState()
+    checkTrue(F.seedGains(b, "T.semi"), "(1) 同鍵新 state：有種子")
+    checkNear(b.yawGain, a.yawGain, 1e-12, "(1) yawGain 種子＝上一趟學到的值")
+    checkNear(b.yawGainFb, a.yawGainFb, 1e-12, "(1) yawGainFb 種子＝上一趟學到的值")
+    checkFalse(F.seedGains(F.newState(), "T.other"), "(1) 別的鍵沒有種子")
+    -- (2) 只跑 5 幀（< FF_HI.learnS）就結束：不覆寫已記的值
+    local short = drive(F.newState(), 1.0, 5)
+    checkFalse(F.storeGains(short, "T.semi"), "(2) 沒學滿：不記")
+    local c = F.newState()
+    F.seedGains(c, "T.semi")
+    checkNear(c.yawGainFb, a.yawGainFb, 1e-12, "(2) 沒學滿的趟次不蓋掉快取")
+    -- (3) 貼在夾限上（飽和）、非有限：不收
+    local bad = { yawGain = 0.08, ygLearnT = 2, yawGainFb = 0 / 0, fbLearnT = 2, yawGainHi = 3.0, hiLearnT = 2 }
+    checkFalse(F.storeGains(bad, "T.bad"), "(3) 0.08／NaN／3.0 全不收")
+    checkFalse(F.seedGains(F.newState(), "T.bad"), "(3) 沒有收到東西＝沒有種子")
+    -- (4) 下一趟第 10 幀（0.33 秒）：有種子的回授增益已在真值附近，沒種子的還在 0.8 往下爬
+    local seeded = F.newState()
+    F.seedGains(seeded, "T.semi")
+    drive(seeded, 0.15, 10)
+    local fresh = drive(F.newState(), 0.15, 10)
+    checkTrue(seeded.yawGainFb ~= nil and math.abs(seeded.yawGainFb - 0.15) < 0.03, string.format(
+        "(4) 有種子：第 10 幀 yawGainFb %.3f 在 0.15±0.03", seeded.yawGainFb or -1))
+    checkTrue(fresh.yawGainFb == nil or fresh.yawGainFb > 0.3, string.format(
+        "(4) 對照：沒種子第 10 幀 yawGainFb %s 還 > 0.3", tostring(fresh.yawGainFb)))
+    -- (5) 高速增益：學滿（hiLearnT ≥ learnS）才記；種子算學滿、權重 steer 0.5
+    local hi = { yawGainHi = 0.4, hiLearnT = 1 }
+    checkTrue(F.storeGains(hi, "T.hi"), "(5) 高速增益學滿：記下")
+    local d = F.newState()
+    F.seedGains(d, "T.hi")
+    checkTrue(d.yawGainHi == 0.4 and (d.hiLearnT or 0) >= 0.5 and d.hiSteerF == 0.5 and d.hiYawF == 0.2,
+        "(5) 高速增益種子：yawGainHi 0.4、hiLearnT 算學滿、yaw／steer 平均 0.2／0.5")
+end
+
 scenario("1004b：彎內偏差退讓——低估增益的過頭前饋＋參考點側滑 plant 上，車已偏內時前饋退讓、不切內擦樹（正式服 0.18.2 Qoo／Loni 半聯結）")
 do
     -- 正式服 0.18.2（rev 1002y）SemiTruckLite／SemiTruckBox 內切 1.1–1.4m 擦內側樹、contact 鎖輪：Qoo clip-14／17 R≈25 雙 45° 右彎

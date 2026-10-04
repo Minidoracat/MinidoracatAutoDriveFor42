@@ -105,6 +105,8 @@ local EK = {
     "blocker", "thin", -- thin（1004f）：dodge commit 時換縫找更寬記下的最窄候選物理淨距
     -- tow attach（0929p）：掛車幾何（寬帶繞行掃掠、判堵停止線的輸入）
     "L2", "trailLen", "halfW", "mass", "hitchZ", "boxBack", "axisSign",
+    -- start（1005）：這趟用了同車型轉向增益種子時的快取鍵（MDADFollower.seedGains；沒有種子就不帶）
+    "seed",
     -- 寬帶掃描層級（1004b：blocked why=wide、detour）；detour 附給主 MOD 的舊避讓圈數（1004f）
     "lvl", "avoidN",
 }
@@ -1259,6 +1261,7 @@ local function encodePhys(phys)
     addNum("frontClearance", "fcl")
     addBool("lowFps", "lfs") -- 0929c：卡頓降速狀態（只在為真時寫）
     addNum("fbNorm", "fbk")        -- 0929j：回授依轉向增益正規化的倍率（1＝未放大）
+    addNum("armExt", "arx")        -- 1005：高速力臂延伸倍率 K（力臂×K、側推÷K；1＝未延伸，省略）
     addBool("dodgeAlignHold", "dah") -- 0929j：繞行未對正、帽夾在目前車速（只在為真時寫）
     -- 0904j 鏈式停留：lc＝常駐 lane 暫時＝停留 offL；dodgeTier 帶 -stay／-nudge／-physical
     addBool("laneChained", "lc")
