@@ -2192,6 +2192,7 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
                 local alpha = dt / YAW_GAIN_TAU_S
                 if alpha > 1 then alpha = 1 end
                 yawGain = yawGain + (obs - yawGain) * alpha
+                state.ygLearnT = (state.ygLearnT or 0) + dt -- 已學秒數（MDADFollower.storeGains）
                 -- 回授正規化用的增益（Driver Drive.normalizeSteer）：轉向方向正規化後 yaw 與 steer 各自 EWMA 再相除，
                 -- 同 FF_HI。上面的逐幀比值先夾 [LO,HI] 再平均，heading 逐幀噪聲讓夾限不對稱（下面只到 0.08、上面到 3），
                 -- 低增益車被往上拉 2–3 倍（1001h 車隊：SemiTruckBox 實測 0.16、估 0.33–0.40；SemiTruckBox_mil 0.11–0.16、
@@ -2210,6 +2211,7 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
                     local gfb = yf / sf
                     if gfb < YAW_GAIN_LO then gfb = YAW_GAIN_LO elseif gfb > YAW_GAIN_HI then gfb = YAW_GAIN_HI end
                     state.yawGainFb = gfb
+                    state.fbLearnT = (state.fbLearnT or 0) + dt
                 end
             end
         end
@@ -2704,6 +2706,44 @@ end
 -- ownOvX/ownOvY＝state 自有的前視折線槽；resetState 會把 ovX/ovY 指回它們。
 function MDADFollower.newState()
     return MDADFollower.resetState({ ownOvX = {}, ownOvY = {} })
+end
+
+-- 同一場遊戲依車型記住學到的轉向增益（1005）：模組層記憶體快取，不存檔（重開遊戲／重載 Lua 就沒有）。key＝Driver
+-- Drive.gainKey（車輛 script 名；拖掛另分鍵）。每趟 yawGain 都從 YAW_GAIN_INIT 0.8 重學，重車真值 0.09–0.16，
+-- 前 0.5–1 秒的前饋與回授正規化都照 0.8 算＝起步第一個彎欠轉。只收「本趟學滿 FF_HI.learnS 秒」的估計
+-- （ygLearnT／fbLearnT／hiLearnT），值必須有限且嚴格在 YAW_GAIN_LO..HI 之間——貼在夾限上＝估計飽和（撞擊／甩尾
+-- 反相資料把 yawGainFb 壓到 0.08 的 1002y 片段），不當種子；沒學滿的欄位保留快取舊值。
+local GAIN_SEEDS = {}
+local function seedGainOk(g) return isFinite(g) and g > YAW_GAIN_LO and g < YAW_GAIN_HI end
+
+-- session 結束時呼叫（Driver clearSession）。回 true＝有寫入任一欄。
+function MDADFollower.storeGains(state, key)
+    if type(state) ~= "table" or type(key) ~= "string" then return false end
+    local e = GAIN_SEEDS[key] or {}
+    local wrote = false
+    if (state.ygLearnT or 0) >= FF_HI.learnS and seedGainOk(state.yawGain) then e.yg, wrote = state.yawGain, true end
+    if (state.fbLearnT or 0) >= FF_HI.learnS and seedGainOk(state.yawGainFb) then e.fb, wrote = state.yawGainFb, true end
+    if (state.hiLearnT or 0) >= FF_HI.learnS and seedGainOk(state.yawGainHi) then e.hi, wrote = state.yawGainHi, true end
+    if wrote then GAIN_SEEDS[key] = e end
+    return wrote
+end
+
+-- session 開始時呼叫（新 state、第一次 control 之前）。回 true＝有種子。回授估計（yawGainFb、yawGainHi）是 yaw／steer
+-- 各自平均再相除，種子以 steer 平均 0.5 的權重放進兩個平均裡，之後照常被新資料蓋過（EWMA τ＝YAW_GAIN_TAU_S）。
+-- 高速增益的種子算學滿（hiLearnT＝learnS）：同車型在同一場遊戲學過，進高速弧就直接用。
+function MDADFollower.seedGains(state, key)
+    local e = type(key) == "string" and GAIN_SEEDS[key] or nil
+    if type(state) ~= "table" or not e then return false end
+    local seeded = false
+    if seedGainOk(e.yg) then state.yawGain, seeded = e.yg, true end
+    if seedGainOk(e.fb) then
+        state.yawGainFb, state.fbYawF, state.fbSteerF, seeded = e.fb, e.fb * 0.5, 0.5, true
+    end
+    if seedGainOk(e.hi) then
+        state.yawGainHi, state.hiYawF, state.hiSteerF, seeded = e.hi, e.hi * 0.5, 0.5, true
+        state.hiLearnT = FF_HI.learnS
+    end
+    return seeded
 end
 
 -- 前向向量 → heading（弧度）。呼叫端與本模組共用同一份慣例，避免左右相反。
