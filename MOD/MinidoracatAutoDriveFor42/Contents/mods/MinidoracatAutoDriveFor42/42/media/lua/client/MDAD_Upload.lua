@@ -90,6 +90,14 @@ local function finite(n)
     return type(n) == "number" and n * 0 == 0
 end
 
+-- 撞擊的單筆門檻（U.sample 與 Diagnostics 撞擊幀強制寫 near 共用）：前一筆 prevSpd → 本筆 spd（km/h、絕對值）、原始間隔
+-- gap（ms）、locked＝本筆或前一筆在鎖輪。不含 IMPACT_REARM_MS（那是片段觸發的去重）。
+function U.impactLike(prevSpd, spd, gap, locked)
+    return prevSpd ~= nil and finite(spd) and finite(gap) and gap >= 80 and gap <= IMPACT_GAP_MAX_MS
+        and prevSpd - spd >= IMPACT_MIN_KMH
+        and (prevSpd - spd) / 3.6 / (gap / 1000) >= (locked and IMPACT_DECEL_LOCKED or IMPACT_DECEL)
+end
+
 local function nowMs()
     if type(getTimestampMs) ~= "function" then return 0 end
     local ok, v = pcall(getTimestampMs)
@@ -550,9 +558,7 @@ function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
             if zd < 0 then zd = -zd end
         end
     end
-    local decel = (fbNow or fbWas) and IMPACT_DECEL_LOCKED or IMPACT_DECEL
-    if prevSpd and finite(speed) and gap >= 80 and gap <= IMPACT_GAP_MAX_MS and prevSpd - spd >= IMPACT_MIN_KMH
-            and (prevSpd - spd) / 3.6 / (gap / 1000) >= decel
+    if finite(speed) and U.impactLike(prevSpd, spd, gap, fbNow or fbWas)
             and not (u.impactAt and now >= u.impactAt and now - u.impactAt < IMPACT_REARM_MS) then
         u.impact, u.impactAt = u.impact + 1, now
         -- 撞擊那筆或前一筆有殭屍在車身附近（多半是撞進殭屍群；也可能是殭屍旁的別的東西）

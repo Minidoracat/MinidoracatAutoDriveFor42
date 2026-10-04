@@ -33,7 +33,9 @@
 --     state.ready      boolean：reset 之後至少完成過一輪
 --     state.hardN      硬障礙格數（0 ＝ 走廊淨空）
 --     state.hardS[i]   第 i 個硬障礙的**路線絕對弧長**（公尺），i ∈ [1, hardN]
---     state.hardL[i]   第 i 個硬障礙的橫向偏移（公尺；數學 CCW 法向為正＝PZ 世界的行進方向右側）
+--     state.hardL[i]   第 i 個硬障礙的橫向偏移（公尺；數學 CCW 法向為正＝PZ 世界的行進方向右側）：命中的取樣點
+--     state.hardLc[i]  同一點引擎形狀位置（hardX/Y）的橫向偏移（同一局部框）；hardW[i]＝掃掠模型的橫向半寬
+--                      （方塊＝半邊×(|nx|+|ny|)，圓＝半徑）——擋線判定用這一組，縫隙搜尋仍用 hardL／hardR
 --     state.softN      軟障礙格數（可推開的家具／路邊雜物：撞得過但該減速）
 --     state.zombieN    走廊內殭屍數（±SLOW_BAND_HALF 減速帶；速度檔用）
 --     state.zomN       混合軟目標（s,l）筆數（±4.5 帶），座標語意同 hardS／hardL
@@ -433,6 +435,7 @@ end
 -- 旗標 wHardOverflow 讓本輪快照可被判定不完整。Driver 另在快照尾端附加
 -- 最多 4 個虛擬 ban，不經 pushHard，也不占這個 sensor 上限。
 -- b（選填）＝整格方塊的半邊長（世界軸對齊；0／nil＝圓）：掃掠與接觸以方塊算距離，規劃仍用 r。
+-- wHardLc／wHardW：形狀位置在本步局部框的橫向偏移與掃掠模型橫向半寬（擋線判定與世界掃掠同一份幾何，見檔頭）。
 local function pushHard(state, s, l, l4, wx, wy, r, b)
     local n = state.wHardN
     if n >= HARD_MAX then state.wHardOverflow = true return end
@@ -444,6 +447,13 @@ local function pushHard(state, s, l, l4, wx, wy, r, b)
     state.wHardY[n] = wy
     state.wHardR[n] = r
     state.wHardB[n] = b or 0
+    local nx, ny = state.nx, state.ny
+    state.wHardLc[n] = (wx - state.cx) * nx + (wy - state.cy) * ny
+    if b and b > 0 then
+        state.wHardW[n] = b * ((nx < 0 and -nx or nx) + (ny < 0 and -ny or ny))
+    else
+        state.wHardW[n] = r
+    end
     state.wSumS = state.wSumS + (s - s % 1)
     state.wSumL = state.wSumL + l4
 end
@@ -459,10 +469,11 @@ local function pushEdge(state, px, py)
 end
 
 -- 依 scanCell 的形狀碼推點（常數註解見 OBS_HALF_R／TRUNK_*／WALL_*）。世界座標＝引擎形狀的位置，
--- 掃掠複驗用它。方塊與樹幹的 (s,l) 刻意記命中的取樣點（與格心差到 ±0.5m）：規劃的擋線／縫隙用它，
--- 世界掃掠用形狀位置。0929f 試過改成格心（規劃與掃掠一致），同一組 E2E 路線的繞行承諾淨距中位數
--- 0.95→0.58、繞行中接觸 4/305→3/39：取樣點誤差只會讓規劃高估，或讓掃掠打回改試下一條 lane，等於一份
--- 隱含的橫向餘裕，蓋住了彎道追線落後。要改成格心，得同時補一份明確的追線餘裕並重驗。
+-- 掃掠複驗用它。方塊與樹幹的 (s,l) 刻意記命中的取樣點（與格心差到 ±0.5m）：縫隙搜尋用它，
+-- 世界掃掠與擋線判定用形狀位置（hardX/Y、hardLc／hardW，1005）。0929f 試過連縫隙搜尋一起改成格心，同一組
+-- E2E 路線的繞行承諾淨距中位數 0.95→0.58、繞行中接觸 4/305→3/39：取樣點誤差只會讓縫隙高估，或讓掃掠打回
+-- 改試下一條 lane，等於一份隱含的橫向餘裕，蓋住了彎道追線落後。縫隙搜尋要改成格心，得同時補一份明確的
+-- 追線餘裕並重驗。
 local function pushShape(state, l, wx, wy, shape)
     local l4 = l * 4
     l4 = l4 - l4 % 1
@@ -1095,16 +1106,19 @@ local function finishRound(state, now)
     local ts, tl = state.hardS, state.hardL
     local txw, tyw = state.hardX, state.hardY
     local tr, tb = state.hardR, state.hardB
+    local tc, tw = state.hardLc, state.hardW
     state.hardS = state.wHardS
     state.hardL = state.wHardL
     state.hardX = state.wHardX
     state.hardY = state.wHardY
     state.hardR, state.hardB = state.wHardR, state.wHardB
+    state.hardLc, state.hardW = state.wHardLc, state.wHardW
     state.wHardS = ts
     state.wHardL = tl
     state.wHardX = txw
     state.wHardY = tyw
     state.wHardR, state.wHardB = tr, tb
+    state.wHardLc, state.wHardW = tc, tw
 
     state.hardN = state.wHardN
     state.hardOverflow = state.wHardOverflow == true
@@ -1228,7 +1242,7 @@ function MDADSensor.newState()
         cx = 0, cy = 0,
         nx = 0, ny = 1,
         z = 0,
-        wHardS = {}, wHardL = {}, wHardX = {}, wHardY = {}, wHardR = {}, wHardB = {},
+        wHardS = {}, wHardL = {}, wHardX = {}, wHardY = {}, wHardR = {}, wHardB = {}, wHardLc = {}, wHardW = {},
         wHardN = 0,
         wHardOverflow = false,
         wZombieN = 0,
@@ -1264,6 +1278,7 @@ function MDADSensor.newState()
 
         -- 已完成的結果（呼叫端只讀這一組）
         hardS = {}, hardL = {}, hardX = {}, hardY = {}, hardR = {}, hardB = {}, -- hardX/Y＝世界座標（掃掠複驗）；hardR／hardB＝逐點半徑／方塊半邊（見 pushShape）
+        hardLc = {}, hardW = {}, -- 形狀位置的橫向偏移／掃掠模型橫向半寬（擋線判定，見檔頭）
         hardN = 0,
         hardOverflow = false,
         zombieN = 0,
