@@ -1292,6 +1292,7 @@ MDADDiagnostics.sample(0, 9200000, 100, 200, 0.25, 12, 15, 40, 1.5, 0.2, 0.3, 12
         laneCurveEnvelope = 26, envelopeBuildLat = 1.2, envelopeBuildCoast = 0.35,
         dodgeBuildReason = "capacity", dodgeBlockReason = "dodge-cap",
         dodgeCommittedLength = 18, stateError = "full-target", invalid = true,
+        replanMs = 37, replanSweeps = 9, replanHn = 581,
     }, 7, 9, 3, "verify", 2, -1.5, 2.75, "clear", 450, 120,
     0.25, 1.5, true, 123, 456)
 MDADDiagnostics.sample(0, 9200500, 101, 201, 0.25, 12, 15, 39, 1.4, 0.1, 0.3, 1200,
@@ -1335,6 +1336,7 @@ MDADDiagnostics.event(0, "unstick", {
     phase = "success", eid = 3, attempt = 2, x = 10, y = 20,
     s = 30, d = 3.1, duration = 850, speed = -0.5, rear = "clear",
 })
+MDADDiagnostics.event(0, "blocked", { why = "plan", hn = 581, wms = 41, sweeps = 12 })
 nowMs = 9201000
 MDADDiagnostics.stop(0, "end")
 local physBody = files[sessionPath(1)] or ""
@@ -1381,6 +1383,11 @@ check(string.find(physBody, '"kap":0.12', 1, true) ~= nil, "steering kappa recor
 check(string.find(physBody, '"af":1234', 1, true) ~= nil,
     "longitudinal assist force recorded")
 check(string.find(physBody, '"crt":15', 1, true) ~= nil, "RETURN cap recorded")
+check(string.find(physBody, '"rpm":37', 1, true) ~= nil and string.find(physBody, '"rpw":9', 1, true) ~= nil
+    and string.find(physBody, '"rph":581', 1, true) ~= nil, "replan wall-clock sample fields recorded")
+checkEq(countNeedle(physBody, '"rpm":'), 1, "absent replan wall-clock omits the field")
+check(string.find(physBody, '"wms":41', 1, true) ~= nil and string.find(physBody, '"sweeps":12', 1, true) ~= nil,
+    "blocked event carries replan wall ms and sweep count (EK)")
 check(string.find(physBody, '"fullGate":true', 1, true) ~= nil, "full-speed gate recorded")
 check(string.find(physBody, '"gateReason":"clear"', 1, true) ~= nil, "gate reason recorded")
 check(string.find(physBody, '"cmdV":11.1', 1, true) ~= nil, "jerk command speed recorded")

@@ -730,6 +730,8 @@ TUNE.UNSTICK_MIN_M = 1.0
 -- ＝每秒 30 行 console I/O；2026-09-04 使用者問 FPS）：同 (tag, offL) 每秒最多一行。
 -- 復盤仍拿得到每條候選的首次與每秒一次的判決；telemetry blocked 事件另有 detail。
 TUNE.SWEEP_LOG_MS = 1000
+-- replan 牆鐘遙測最多每 REPLAN_CLOCK_MS 量一次（前後各讀一次 getTimestampMs；毫秒時鐘只當現場分佈，歸因用 GameProfiler）
+TUNE.REPLAN_CLOCK_MS = 250
 
 -- 速度域上限與世界感知距離分開：距離由偏好、速度與後續障礙／彎道需求決定。
 TUNE.PERCEPTION_CAP_KMH = 85
@@ -5813,6 +5815,11 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     phys.forceBrakeThis = s.forceBrakeThis
     phys.brakeAssistForce = s.brakeAssistForce
     phys.frameMs = s.frameMs
+    -- replan 牆鐘（現場分佈；Drive.replanElapsed）：每次量測只寫一筆
+    if s.replanWallFresh then
+        phys.replanMs, phys.replanSweeps, phys.replanHn = s.replanWallMs, s.replanSweeps, s.replanHn
+        s.replanWallFresh = nil
+    end
     -- 0928a：前方區域未載入等待／車身 yaw 率與限制比例／起步近物限速與前半車身淨距
     if s.areaWaitActive then phys.areaWait = true end
     phys.yawRate = s.yawRate
@@ -6447,6 +6454,10 @@ function Drive.sweepHit(s, sen, tag, a, b, c, offL, sk, wx, wy, i, ox, oy, clear
     return false, -clearance, (sen.hardS and sen.hardS[i]) or sk, phase, sk, ox, oy or 0, i
 end
 
+-- sweepLine 的逐點常數（每次呼叫重填前 hardN 格、只長不縮，不每次配置）：兩種 pad 的掃掠半徑與整格方塊半邊。
+-- 內迴圈是 取樣×點數，原本每一對都做 type／sweepRadius／math.abs（Kahlua 裡都是函式呼叫）。不以快照為鍵快取：
+-- pad 隨 needBase 每次呼叫不同，離線 fixture 也會原地改點雲；重填是 O(點數)，相對 O(取樣×點數) 可忽略。
+Drive.sweepScratch = { rrPhys = {}, rrPad = {}, bh = {} }
 local function sweepLine(s, lx, ly, ln, lS0, lS1,
         a, b, c, d, offL, tag, needBase, startK, requireLoaded, collectClearance)
     local sen = s.sensor
@@ -6497,6 +6508,23 @@ local function sweepLine(s, lx, ly, ln, lS0, lS1,
     if not finite(startK) then startK = 1 else startK = startK - startK % 1 end
     if startK < 1 then startK = 1 end
     if startK > ln then return true, minMargin end
+    s.sweepCount = (s.sweepCount or 0) + 1 -- replan 牆鐘遙測的掃掠數（stepFollow 在 replan 前歸零）
+    -- 半徑一律 ≥ SWEEP_PHYS_PAD > 0（sweepGeom 夾底、sweepRadius 補償後不低於物理 pad），內迴圈不必取絕對值。
+    local sc = Drive.sweepScratch
+    local rrPhysT, rrPadT, bhT = sc.rrPhys, sc.rrPad, sc.bh
+    local comp = TUNE.SWEEP_QUANT_COMP
+    for i = 1, hn do
+        local bh = hb and hb[i] or 0
+        if type(bh) == "number" and bh > 0 then
+            bhT[i], rrPhysT[i], rrPadT[i] = bh, SWEEP_PHYS_PAD, pad
+        else
+            bhT[i] = 0
+            rrPhysT[i] = MDADDynamics.sweepRadius(hr[i], SWEEP_PHYS_PAD, SWEEP_PHYS_PAD, comp)
+            rrPadT[i] = MDADDynamics.sweepRadius(hr[i], pad, SWEEP_PHYS_PAD, comp)
+        end
+    end
+    local ovStep = MDADFollower.OV_STEP
+    local comX, comZ = s.vehicleProfile.centerOfMassX, s.vehicleProfile.centerOfMassZ
     -- 拖車（0929p）：沿候選線以 tractrix 推掛車（掛點走牽引車線、掛車軸無側滑，同 MDADTrailer.simulate），
     -- 掛車車身同樣逐點驗硬點——只驗牽引車時，繞過障礙後掛車內切會掃到剛閃過的東西。從車目前位置起算
     -- （起始軸向讀實車），車後的取樣點不推掛車；attach 量不到掛點偏移（沒有 trailLen）＝只驗牽引車。
@@ -6515,7 +6543,7 @@ local function sweepLine(s, lx, ly, ln, lS0, lS1,
     end
     for k = startK, ln do
         local sk = k == ln and lS1
-            or (lS0 + (k - 1) * MDADFollower.OV_STEP)
+            or (lS0 + (k - 1) * ovStep)
         local wx, wy = lx[k], ly[k]
         local k0, k1 = k, k + 1
         if k1 > ln then k0, k1 = k - 1, k end
@@ -6530,15 +6558,15 @@ local function sweepLine(s, lx, ly, ln, lS0, lS1,
         end
         local inCap = sk >= a and sk <= c
         local sampleMargin = 9
-        local pointPad = sk < a and SWEEP_PHYS_PAD or pad
-        local comX, comZ = s.vehicleProfile.centerOfMassX, s.vehicleProfile.centerOfMassZ
+        local rrT = sk < a and rrPhysT or rrPadT -- a 之前只驗物理必撞（SWEEP_PHYS_PAD），之後用檔位 pad
         local bodyX = wx + fx * comZ + fy * comX
         local bodyY = wy + fy * comZ - fx * comX
-        local extentX = math.abs(fx) * halfL + math.abs(fy) * halfW
-        local extentY = math.abs(fy) * halfL + math.abs(fx) * halfW
+        local afx, afy = fx < 0 and -fx or fx, fy < 0 and -fy or fy
+        local extentX = afx * halfL + afy * halfW
+        local extentY = afy * halfL + afx * halfW
         -- 整格方塊（sen.hardB，0929j）：以方塊在車身兩軸的外框加寬車身 OBB，只留 pad 當半徑；軸對齊時與引擎
         -- 方塊一致（圓近似在軸向多估 0.2），斜向略保守。圓點照舊 sweepRadius。
-        local boxK = math.abs(fx) + math.abs(fy)
+        local boxK = afx + afy
         local tbx, tby, tex, tey, tboxK = nil, nil, 0, 0, 0
         if tdx and sk >= s.lastSNow then
             local hxw = wx + fx * tw.hitchZ + fy * tw.hitchX
@@ -6551,28 +6579,25 @@ local function sweepLine(s, lx, ly, ln, lS0, lS1,
             tax, tay = hxw - tdx * tw.L2, hyw - tdy * tw.L2
             tbx = hxw - tdx * tw.boxBack + tdy * tw.boxSide
             tby = hyw - tdy * tw.boxBack - tdx * tw.boxSide
-            tex = math.abs(tdx) * tw.halfL + math.abs(tdy) * tw.halfW
-            tey = math.abs(tdy) * tw.halfL + math.abs(tdx) * tw.halfW
-            tboxK = math.abs(tdx) + math.abs(tdy)
+            local atx, aty = tdx < 0 and -tdx or tdx, tdy < 0 and -tdy or tdy
+            tex = atx * tw.halfL + aty * tw.halfW
+            tey = aty * tw.halfL + atx * tw.halfW
+            tboxK = atx + aty
         end
         for i = 1, hn do
-            local ox = hx[i]
-            local bh = hb and hb[i] or 0
-            local grow, rr = 0, nil
-            if type(bh) == "number" and bh > 0 then
-                grow, rr = bh * boxK, pointPad
-            else
-                rr = MDADDynamics.sweepRadius(
-                    hr[i], pointPad, SWEEP_PHYS_PAD, TUNE.SWEEP_QUANT_COMP)
-            end
+            local ox, oy = hx[i], hy[i]
+            local bh, rr = bhT[i], rrT[i]
+            local grow = bh * boxK -- 非方塊 bh＝0 → grow＝0
             -- 世界AABB只排除不可能碰撞、也不可能改善最小淨距的點；不拿近似hardS裁世界。
-            local reach = math.abs(rr) + grow * boxK + (clr and sampleMargin or (inCap and minMargin or 0)) + 1e-6
-            if not (math.abs(ox - bodyX) > extentX + reach
-                    or math.abs(hy[i] - bodyY) > extentY + reach) then
+            local reach = rr + grow * boxK + (clr and sampleMargin or (inCap and minMargin or 0)) + 1e-6
+            local dx, dy = ox - bodyX, oy - bodyY
+            if dx < 0 then dx = -dx end
+            if dy < 0 then dy = -dy end
+            if not (dx > extentX + reach or dy > extentY + reach) then
                 local d2 = obbDistanceSq(
-                    bodyX, bodyY, fx, fy, halfW + grow, halfL + grow, ox, hy[i])
+                    bodyX, bodyY, fx, fy, halfW + grow, halfL + grow, ox, oy)
                 if d2 == nil or d2 <= rr * rr then
-                    return Drive.sweepHit(s, sen, tag, a, b, c, offL, sk, wx, wy, i, ox, hy[i],
+                    return Drive.sweepHit(s, sen, tag, a, b, c, offL, sk, wx, wy, i, ox, oy,
                         d2 and (sqrt(d2) - rr) or -99)
                 end
                 if inCap or clr then
@@ -6585,13 +6610,16 @@ local function sweepLine(s, lx, ly, ln, lS0, lS1,
                 end
             end
             if tbx then
-                local tgrow = (type(bh) == "number" and bh > 0) and bh * tboxK or 0
-                local treach = math.abs(rr) + tgrow * tboxK
+                local tgrow = bh * tboxK
+                local treach = rr + tgrow * tboxK
                     + (clr and sampleMargin or (inCap and minMargin or 0)) + 1e-6
-                if not (math.abs(ox - tbx) > tex + treach or math.abs(hy[i] - tby) > tey + treach) then
-                    local d2 = obbDistanceSq(tbx, tby, tdx, tdy, tw.halfW + tgrow, tw.halfL + tgrow, ox, hy[i])
+                dx, dy = ox - tbx, oy - tby
+                if dx < 0 then dx = -dx end
+                if dy < 0 then dy = -dy end
+                if not (dx > tex + treach or dy > tey + treach) then
+                    local d2 = obbDistanceSq(tbx, tby, tdx, tdy, tw.halfW + tgrow, tw.halfL + tgrow, ox, oy)
                     if d2 == nil or d2 <= rr * rr then
-                        return Drive.sweepHit(s, sen, tag, a, b, c, offL, sk, wx, wy, i, ox, hy[i],
+                        return Drive.sweepHit(s, sen, tag, a, b, c, offL, sk, wx, wy, i, ox, oy,
                             d2 and (sqrt(d2) - rr) or -99, "trailer")
                     end
                     if inCap or clr then
@@ -8958,6 +8986,12 @@ function Drive.deferDodge(s, playerNum, why, b, c, dS)
     end
 end
 
+-- replan 牆鐘遙測（事件用）：本次 replan 有量（stepFollow 讀了開始時戳）＝從 replan 開始到發事件的毫秒，
+-- 候選鏈都在事件之前；沒量＝nil（節流，最多每 TUNE.REPLAN_CLOCK_MS 一次）。毫秒時鐘只當現場分佈，不拿來歸因。
+function Drive.replanElapsed(s)
+    return s.replanT0 and getTimestampMs() - s.replanT0 or nil
+end
+
 local function replan(s, vehicle, playerNum)
     s.dodgeDeferCap = s.dodgeHandoffHold and 0 or -1
     s.dodgeDeferS = nil
@@ -9298,7 +9332,8 @@ local function replan(s, vehicle, playerNum)
                             corner = s.cornerLatch, hitS = s.guardHitS,
                             hitPhase = s.guardHitPhase,
                             hitX = s.guardHitX, hitY = s.guardHitY,
-                            clearance = s.guardHitClearance, hn = sen.hardN })
+                            clearance = s.guardHitClearance, hn = sen.hardN,
+                            wms = Drive.replanElapsed(s), sweeps = s.sweepCount })
                     end
                     if getDebug() then
                         print(LOG .. "pn=" .. playerNum .. " dodge guard failed: hold & brake")
@@ -9888,7 +9923,8 @@ local function replan(s, vehicle, playerNum)
                 space = s.dodgeSpaceCap, design = s.dodgeDesignSpeed,
                 crawl = s.dodgeCrawl == true, tight = s.dodgeTight == true,
                 tier = s.dodgeTier, need = s.dodgeNeed, rs = s.lastSNow,
-                len = s.dodgeCommittedLength,
+                len = s.dodgeCommittedLength, hn = sen.hardN,
+                wms = Drive.replanElapsed(s), sweeps = s.sweepCount,
                 thin = s.thinRec and s.thinRec.on and s.thinRec.phys or nil }) -- 換縫找更寬時記下最窄那條的物理淨距
             if getDebug() then
                 -- cap 分解一行印清楚（2026-09-04 實機三段 8／15／14 km/h 繞行，console
@@ -10054,7 +10090,7 @@ local function replan(s, vehicle, playerNum)
         diagEvent(s, playerNum, "blocked", {
             s = s.blockS, m = s.dodgeMargin, need = s.dodgeNeed,
             x = s.blockHitX, y = s.blockHitY, why = "plan", wd = wd,
-            hn = s.sensor and s.sensor.hardN or 0,
+            hn = s.sensor and s.sensor.hardN or 0, wms = Drive.replanElapsed(s), sweeps = s.sweepCount,
             corner = s.cornerLatch, detail = s.dodgeBlockReason,
             blocker = s.dodgeDeadendS, shape = s.dodgeShapeReason,
             -- 候選鏈最後記下的命中（sweep 全滅時才有意義）：相位、世界點、牽引車或掛車（0929p）
@@ -10081,6 +10117,7 @@ local function replan(s, vehicle, playerNum)
         s.wideBlockedLogged = wideKey
         diagEvent(s, playerNum, "blocked", {
             why = "wide", s = s.blockS, x = s.blockHitX, y = s.blockHitY, hn = sen.hardN, lvl = sen.wideDoneLevel,
+            wms = Drive.replanElapsed(s), sweeps = s.sweepCount,
             attempt = s.episodeAttempts, detail = s.dodgeBlockReason, shape = s.dodgeShapeReason,
             hitPhase = s.dodgeBlockReason == "sweep" and s.fbFail and s.fbFail.ph or nil,
             hitX = s.dodgeBlockReason == "sweep" and s.fbFail and s.fbFail.hx or nil,
@@ -10618,7 +10655,16 @@ local function stepFollow(s, vehicle, playerNum, now)
                 updateReturnSnapshot(s, vehicle, playerNum, latSigned)
                 if s.sensor.sig ~= s.planSig or s.clearStreak > 0 or s.dodging then
                     s.planSig = s.sensor.sig
+                    -- replan 牆鐘（現場分佈，歸因用 GameProfiler）：前後各讀一次時鐘，最多每 REPLAN_CLOCK_MS 量一次；
+                    -- 掃掠數 sweepLine 自己累加。結果進樣本（collectPhys 的 replan*）與 replan 內的 blocked／dodge 事件。
+                    s.sweepCount = 0
+                    s.replanT0 = now - (s.replanClockAt or -1e12) >= TUNE.REPLAN_CLOCK_MS and getTimestampMs() or nil
                     replan(s, vehicle, playerNum)
+                    if s.replanT0 then
+                        s.replanClockAt = now
+                        s.replanWallMs, s.replanSweeps, s.replanHn = getTimestampMs() - s.replanT0, s.sweepCount, s.sensor.hardN
+                        s.replanWallFresh, s.replanT0 = true, nil
+                    end
                     if s.currentBlocked then s.planMode = "current-blocked" end
                 end
                 -- 寬帶判過一輪：最寬那級判完（不論結果）這次脫困嘗試的倒車／改道才可以動；仍堵且還能加寬就先升級（Drive.wideJudge）

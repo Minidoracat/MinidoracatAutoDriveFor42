@@ -9101,6 +9101,69 @@ function drive.scenarioThinOnly()
 end
 drive.scenarioThinOnly()
 
+-- ⑨b3 replan 牆鐘遙測（1005 perf）：stepFollow 在 replan 前後各讀一次 getTimestampMs，最多每 TUNE.REPLAN_CLOCK_MS 量一次；
+--   sweepLine 自己累加掃掠數。繞行承諾事件帶 wms（replan 開始到發事件的 ms，不是絕對時戳）／sweeps／hn；樣本 replanMs／
+--   replanSweeps／replanHn 每次量測只寫一筆。(rpclk) 時鐘改成每讀一次走 1ms，wms 才量得到 >0。
+--   (rpclk) 有量：承諾事件 wms ∈ [1, 1000)、sweeps ≥ 1、hn ≥ 1；樣本收到 replan 三欄。
+--   (rpclk-throttle) 窗內（離上次量測 < REPLAN_CLOCK_MS）replan 照跑（掃掠數被歸零重數）但不量：量測時戳不動、樣本不出現 replan 欄。
+--   (rpclk-reopen) 窗外再量一次，同一時戳的後續 replan 不再量＝樣本恰好一筆。
+--   違規證明：拿掉節流＝(throttle) 紅；wms 改成絕對時戳＝(rpclk) 紅；sweepLine 不累加＝(rpclk) 紅；樣本不消費＝(throttle) 紅。
+function drive.scenarioReplanClock()
+    local oldEvent, oldSample, oldShould, oldClock = MDADDiagnostics.event, MDADDiagnostics.sample,
+        MDADDiagnostics.shouldSample, getTimestampMs
+    local events, physN, lastPhys = {}, 0, nil
+    local nav = drive.nav
+    local navRoute, navTx, navTy, navState = nav.route, nav.tx, nav.ty, nav.state -- armDrive 換直路；後面 ⑨d 沿用彎道路線
+    MDADDiagnostics.event = function(_, name, a) events[#events + 1] = { name = name, a = a } end
+    MDADDiagnostics.shouldSample = function() return true end
+    MDADDiagnostics.sample = function(...)
+        local p = select(32, ...)
+        if type(p) == "table" and p.replanMs ~= nil then physN, lastPhys = physN + 1, p end
+        return true
+    end
+    checkTrue(armDrive(), "(rpclk) 啟動")
+    setHeading(dveh, 0.05)
+    driveReset(dveh)
+    local s = MDAD.Drive.debugSession(0)
+    s.diag = true
+    getTimestampMs = function() nowMs = nowMs + 1; return nowMs end
+    drive.putSolid(20, 0, "harness_rpclk_barrel")
+    drive.scanRound()
+    local commit
+    for i = #events, 1, -1 do
+        local e = events[i]
+        if e.name == "dodge" and e.a and e.a.phase == "commit" then commit = e.a; break end
+    end
+    checkTrue(commit ~= nil and type(commit.wms) == "number" and commit.wms >= 1 and commit.wms < 1000
+            and type(commit.sweeps) == "number" and commit.sweeps >= 1 and type(commit.hn) == "number" and commit.hn >= 1,
+        "(rpclk) 繞行承諾事件帶 replan 牆鐘（相對 replan 開始）、掃掠數與點數（wms=" .. tostring(commit and commit.wms)
+        .. " sweeps=" .. tostring(commit and commit.sweeps) .. " hn=" .. tostring(commit and commit.hn) .. "）")
+    checkTrue(physN >= 1 and lastPhys.replanMs >= 1 and lastPhys.replanSweeps >= 1 and lastPhys.replanHn >= 1,
+        "(rpclk) 樣本收到 replan 牆鐘三欄（筆數 " .. physN .. "）")
+    getTimestampMs = oldClock
+    -- scanRound 先把 nowMs 推 300 再跑幀：量測時戳設在那一刻前 100ms＝窗內
+    s.replanClockAt = nowMs + 300 - 100
+    local clockAt0, physN0, evN0 = s.replanClockAt, physN, #events
+    s.sweepCount = -5
+    drive.scanRound()
+    local evWms = false
+    for i = evN0 + 1, #events do
+        if events[i].a and events[i].a.wms ~= nil then evWms = true end
+    end
+    checkTrue(s.dodging == true and s.sweepCount ~= -5 and s.replanClockAt == clockAt0 and physN == physN0 and not evWms,
+        "(rpclk-throttle) 窗內 replan 照跑但不讀時鐘、樣本不重寫（sweepCount=" .. tostring(s.sweepCount)
+        .. " 樣本 +" .. (physN - physN0) .. "）")
+    s.replanClockAt = nil
+    drive.scanRound()
+    checkTrue(s.replanClockAt == nowMs and physN == physN0 + 1 and lastPhys.replanMs == 0,
+        "(rpclk-reopen) 窗外量一次、同一時戳不再量：樣本恰好一筆（+" .. (physN - physN0) .. "）")
+    MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.shouldSample = oldEvent, oldSample, oldShould
+    drive.clearCell(20, 0)
+    MDAD.Drive.stop(0, nil)
+    nav.route, nav.tx, nav.ty, nav.state = navRoute, navTx, navTy, navState
+end
+drive.scenarioReplanClock()
+
 -- ⑨d 折點旁障礙（2026-09-01 契約更新）：comfort/squeeze 檔的長車前角 OBB
 --    掃掠照樣否決斜切候選；但物理終審檔（probe need≈halfW、接受剮蹭）窄體
 --    掃掠可過 → 擠過（Dodge，速度連續縮放）。舊「一律 blocked」實為 curveCap 假 0
