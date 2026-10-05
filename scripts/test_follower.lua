@@ -4550,6 +4550,101 @@ do
         out25, out90))
 end
 
+scenario("1006：出弧殘餘轉角——yaw 快、小 steer 轉不動的車出弧時車頭落後，出口後補轉完（E2E rc61 0008 Silverado 撞路燈）")
+do
+    -- E2E campaign rc61 0008（1005c）：93chevySilveradoCC 50 km/h 出 R24 46° 左彎（8m 路轉 6m 路），出口車頭落後 0.094 rad，
+    -- 1 秒內外漂 0.93m、同時加速到 69 km/h，右前角撞路緣路燈 (2005,14708)。路線＝該案 route cutover 原點、車速照該案 rs→spd
+    -- 重播、lookScale 1.5（header profile；begin 不讀 VP.lookScale，Driver configureFollower 才設，這裡直接寫）。Plant 照該案
+    -- 擬合：yaw 一階 τ 0.1 追門檻型 G(u)·u（|u|≤0.3 斜率 0.3、以上 1.2：彎上 st 0.5–0.65 時 yr/st≈1.0，出彎 st 0.11–0.25 時
+    -- 0.4），參考點在無側滑點前 0.75（片段 vt/yr）；擬合後重現彎上切內 0.47（實 0.47）、出口落後 0.090（實 0.094）、外漂 0.91
+    -- （實 0.93）。Driver 管線照實（D.crossTrackGains、回授正規化、死區）。
+    -- 違規證明：arcExitResidual 恆回 0＝(1)(2) 紅（0.89／1.09）；拿掉 yaw 率扣除（exitTauS 0）＝(3) 紅（τ0.35 plant 出彎切內
+    -- 0.83、重車 1.02）。
+    local D = MDADDynamics
+    local VP = { valid = true, geometryValid = true, halfW = 0.84, halfL = 2.7, rMin = 3.93, wheelbase = 3.45,
+        delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 85 }
+    local route = { pts = { 1903.4, 14837.8, 1920.0, 14829.5, 2004.8, 14744.8, 2002.0, 14700.0, 2002.0, 14601.0 },
+        segWidth = { 8, 8, 6, 6 }, segSurface = { "paved", "paved", "paved", "paved" } }
+    -- 0008 實測（rs, km/h）；rs 1101.52＝弧終點
+    local SPD = { 991.7, 71.9, 1012.7, 79.4, 1031.4, 84.9, 1050.8, 85.0, 1055.6, 81.3, 1064.4, 71.9, 1071.9, 63.7,
+        1078.7, 54.9, 1084.2, 49.9, 1100.4, 50.1, 1103.4, 52.2, 1109.6, 59.4, 1116.6, 66.6, 1120.5, 69.2 }
+    -- 定速 kmh 或重播；回 (弧後 30m 內最大外漂, 弧後 30m 內最大切內)
+    local function run(pl, kmh)
+        local p = F.begin(route, VP.maxSpeed, 4, VP)
+        while not p.ready do F.stepBuild(p, 4096) end
+        p.lookScale = 1.5
+        local a0, a9
+        for i = 1, p.n - 1 do
+            if p.segKind[i] == D.SEG_ARC then a0 = a0 or p.s[i]; a9 = p.s[i + 1] end
+        end
+        local function spdAt(s)
+            if kmh then return kmh end
+            s = s + 1101.52 - a9
+            if s <= SPD[1] then return SPD[2] end
+            for i = 3, #SPD - 1, 2 do
+                if s <= SPD[i] then return SPD[i - 1] + (SPD[i + 1] - SPD[i - 1]) * (s - SPD[i - 2]) / (SPD[i] - SPD[i - 2]) end
+            end
+            return math.min(85, SPD[#SPD] + s - SPD[#SPD - 1])
+        end
+        local st = F.newState()
+        F.setLaneBias(st, 1.85)
+        F.setRuntimeLimits(st, 3, 6, 7, 1.2)
+        st.yawGain, st.yawGainFb, st.fbSteerF, st.fbYawF = pl.yg, pl.yg, 0.5, pl.yg * 0.5
+        st.yawGainHi, st.hiLearnT, st.hiSteerF, st.hiYawF = pl.ygh, 1, 0.5, pl.ygh * 0.5
+        local dt, LR = 1 / 100, 0.75
+        local s0, i0 = a0 - 60, 1
+        while p.s[i0 + 1] <= s0 do i0 = i0 + 1 end
+        local h = p.segH[i0]
+        local f0 = (s0 - p.s[i0]) / (p.s[i0 + 1] - p.s[i0])
+        local l0 = F.laneBiasAt(p, 1.85, i0, s0)
+        local q = { x = p.x[i0] + (p.x[i0 + 1] - p.x[i0]) * f0 - math.sin(h) * l0 - math.cos(h) * LR,
+            y = p.y[i0] + (p.y[i0 + 1] - p.y[i0]) * f0 + math.cos(h) * l0 - math.sin(h) * LR }
+        local w, prevLat, out, cut = 0, nil, 0, 0
+        for _ = 1, 6000 do
+            local v = spdAt(st.projS or s0)
+            local steer, _, rem, reached, _, _, latSigned = F.control(p, st, q.x + math.cos(h) * LR,
+                q.y + math.sin(h) * LR, h, v, dt)
+            local sNow = p.length - rem
+            local latDev = latSigned - F.laneBiasAt(p, 1.85, st.idx, sNow)
+            local dLat = prevLat and (latDev - prevLat) / dt or nil
+            if dLat and (dLat > 5 or dLat < -5) then dLat = nil end
+            prevLat = latDev
+            local xg, xm = D.crossTrackGains(false, false, st.curveHardActive, false, false)
+            local u = steer - D.crossTrackSteer(latDev, v, dLat, xg, xm)
+            local k = math.max(1, math.min(3, 0.5 / (st.yawGainFb or st.yawGain)))
+            local fb = u - (st.ffSteer or 0)
+            u = (st.ffSteer or 0) + math.max(-math.max(1.5, math.abs(fb)), math.min(math.max(1.5, math.abs(fb)), k * fb))
+            if u > 5 then u = 5 elseif u < -5 then u = -5 end
+            if u < 0.02 and u > -0.02 then u = 0 end
+            st.appliedSteer, st.escLimited = u, false
+            local au = math.abs(u)
+            local wT = (pl.g1 * math.min(au, 0.3) + pl.g2 * math.max(0, au - 0.3)) * (u < 0 and -1 or 1)
+            local wMax = v / KMH / VP.rMin
+            if wT > wMax then wT = wMax elseif wT < -wMax then wT = -wMax end
+            w = w + (wT - w) * (dt / pl.tau)
+            h = h + w * dt
+            q.x, q.y = q.x + math.cos(h) * v / KMH * dt, q.y + math.sin(h) * v / KMH * dt
+            -- 左彎：彎外＝右＝+l
+            if sNow > a9 and sNow < a9 + 30 then
+                if latDev > out then out = latDev end
+                if -latDev > cut then cut = -latDev end
+            end
+            if reached or sNow > a9 + 30 then break end
+        end
+        return out, cut
+    end
+    local FIT = { g1 = 0.3, g2 = 1.2, tau = 0.1, yg = 0.54, ygh = 0.63 }
+    local out0008 = run(FIT)
+    checkTrue(out0008 < 0.5, string.format("(1) 0008 重播（50 km/h 出彎後加速到 69）：出彎外漂 %.2fm < 0.5（修前 0.89）", out0008))
+    local out65 = run(FIT, 65)
+    checkTrue(out65 < 0.7, string.format("(2) 同彎定速 65 km/h：出彎外漂 %.2fm < 0.7（修前 1.09）", out65))
+    -- (3) yaw 慢的車出口時 yaw 還大、扣完 ≤0 不補：出彎不換成切內（修前 0.40／0.11）
+    local _, cutSlow = run({ g1 = 0.6, g2 = 0.6, tau = 0.35, yg = 0.6, ygh = 0.6 }, 65)
+    local _, cutHeavy = run({ g1 = 0.15, g2 = 0.6, tau = 0.3, yg = 0.3, ygh = 0.35 })
+    checkTrue(cutSlow < 0.5 and cutHeavy < 0.2, string.format(
+        "(3) τ0.35 plant 65 km/h／重車重播：出彎切內 %.2f < 0.5、%.2f < 0.2（不扣 yaw 率 0.83／1.02）", cutSlow, cutHeavy))
+end
+
 scenario("1004f：承諾線在弧上減速——cross-track 選 ×DODGE（D.crossTrackGains），欠轉前饋＋增益落後的外漂收得回（E2E f1004e dixie9050w）")
 do
     -- E2E f1004e dixie9050w 改道線：巡航承諾的 pre-a 線在 R≈40 弧外側 0.2m，48→22 km/h 減速中外漂到 0.5m、前角擦到路邊物。
