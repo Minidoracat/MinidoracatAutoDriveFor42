@@ -18,11 +18,17 @@ T.KEY_TURN = "UI_MinidoracatAutoDrive_TrailerTurn" -- 需要調頭時改走不�
 
 T.LAT_SCALE = 0.525        -- 拖車時彎道側向加速度預算乘數（牽引車單體預算對掛車太快：E2E 23 km/h 進 143° 斷開）；
                            -- 0928m 單車天花板 7→8，這裡 0.6→0.525 讓拖車實際預算維持 4.2
-T.TURN_MIN_RAD = 25 * math.pi / 180   -- 小於此折角不需要外拉
+-- 小於此折角不改寫。20°＝MDADDynamics.FILLET_MIN_RAD：改寫後的路線點數遠超 Follower 圓角的 source 容量
+-- （FILLET_SOURCE_MAX 128），容量外 ≥20° 的頂點全標 fallback＝12 km/h 爬行（GitHub #6 拖車 20–25° 小彎）；
+-- 這些折角改由本檔排圓弧。規劃不出來的 <BLOCK_MIN_RAD 折角照舊保留頂點、不列不可過（舊制本來就照開）。
+T.TURN_MIN_RAD = 20 * math.pi / 180
+T.BLOCK_MIN_RAD = 25 * math.pi / 180
 T.INTRUSION_MAX = 1.0      -- 掛車內輪壓出路面的容許量（轉角外的草地；桿／號誌由感測另管）
 T.HITCH_MAX = 60 * math.pi / 180      -- 規劃期車頭—掛車最大折角
 T.STEP = 0.5               -- 運動學步長（公尺）
 T.RAMP_MIN, T.RAMP_MAX = 8, 16        -- 外靠過渡段長
+T.R_MIN, T.R_MAX = 4, 60             -- 外拉圓弧半徑掃描範圍（planCorner 取可行的最大；60＝拖車預算 ~4 m/s² 下約 55 km/h）
+T.SEG_SHARE = 0.45 -- 圓弧切點距占臂長上限（同 MDADDynamics.FILLET_SEGMENT_SHARE：相鄰兩角合計 ≤90%）
 T.EXIT_HOLD = 8                       -- 轉出外偏保持段長（掛車軸跟進窄路）
 T.GUARD_MS = 100
 T.HITCH_SLOW = 45 * math.pi / 180     -- 行駛中折角超過＝降到爬行
@@ -297,7 +303,10 @@ end
 T._candidate = function(...) return candidate(...), XS, YS end
 
 -- 轉角規劃：回 {a, b, R, ramp, sIn, sOut, approach, exitLen} 或 nil（不可過）。外靠／外偏都用到
--- 路面邊緣（後軸在路面、半寬＋0.3m 餘裕）；先找總偏移最小的走法。
+-- 路面邊緣（後軸在路面、半寬＋0.3m 餘裕）；先找總偏移最小的走法，同一組偏移取可行的最大半徑：剖面照
+-- 圓弧曲率限速（sqrt(aLat·R)），舊制取最小 R=4＝連 28° 寬彎都壓到 12 km/h 地板（GitHub #6）；半徑大，
+-- 穩態折角 ≈atan(L2/R) 與掛車內切也小。大於 R_MIN 的圓弧切點距要在短臂段長×SEG_SHARE 內（相鄰轉角各用
+-- 不到一半，重疊＝撤點折線）；都不符才退回最小可行半徑（＝舊制，可過與否不變）。
 function T.planCorner(c, g)
     local maxA = c.wIn * 0.5 - g.thw - 0.3
     if maxA < 0 then maxA = 0 end
@@ -305,6 +314,11 @@ function T.planCorner(c, g)
     if maxB < 0 then maxB = 0 end
     local approach = g.L2 + g.rear + T.RAMP_MAX + 4
     local exitLen = g.rear + g.L2 + T.RAMP_MAX
+    -- 掃描上限：置中圓弧切點距 R·tan(θ/2) 到短臂份額為止；舊範圍（≤24）照掃，退回最小可行半徑要看得到它
+    local maxT = T.SEG_SHARE * (c.lenIn < c.lenOut and c.lenIn or c.lenOut)
+    local rTop = floor(maxT / math.tan(c.turnAbs * 0.5) * 0.5) * 2
+    if rTop > T.R_MAX then rTop = T.R_MAX end
+    if rTop < 24 then rTop = 24 end
     local total = 0
     while total <= maxA + maxB + 1e-9 do
         local a = total < maxA and total or maxA
@@ -314,13 +328,16 @@ function T.planCorner(c, g)
               local b = bAbs * sign
               if bAbs <= maxB + 1e-9 and not (sign < 0 and bAbs == 0) then
                 local ramp = (a > 0 or b ~= 0) and T.RAMP_MAX or T.RAMP_MIN
-                for R = 4, 24, 2 do
+                local fall = nil
+                for R = rTop, T.R_MIN, -2 do
                     local n, sIn, sOut = candidate(c, a, b, R, ramp, approach, exitLen)
                     if n > 3 and simulate(c, XS, YS, n, g) then
-                        return { a = a, b = b, R = R, ramp = ramp, sIn = sIn, sOut = sOut,
+                        fall = { a = a, b = b, R = R, ramp = ramp, sIn = sIn, sOut = sOut,
                             approach = approach, exitLen = exitLen }
+                        if R == T.R_MIN or (sIn >= -maxT and sOut <= maxT) then return fall end
                     end
                 end
+                if fall then return fall end
               end
             end
             a = a - 0.5
@@ -406,12 +423,20 @@ function T.shape(route, tow, tractorHalfW, tractorFront)
             if exitRoom < 0 then exitRoom = 0 end
             local n = candidate(c, plan.a, plan.b, plan.R, plan.ramp, plan.approach,
                 plan.b ~= 0 and math.min(plan.exitLen, exitRoom) or 0)
-            -- 只取節點前後各自實際段長內的點，不越過前一個／下一個路線點
+            -- 只取節點前後各自實際段長內的點，不越過前一個／下一個路線點。不外靠（a＝0）的進入段就是原中心線，
+            -- 只留到臂長一半：前一個轉角的圓弧可能畫到這一臂的 SEG_SHARE，進入點從更前面起算＝撤點後弧被截成
+            -- 40°+ 的折點（容量外標 fallback 爬行）；退回的小半徑切點在一半外時從切點起留。
+            local back = -c.lenIn * 0.9
+            if plan.a == 0 then
+                back = plan.sIn - 1e-6
+                if back > -c.lenIn * 0.5 then back = -c.lenIn * 0.5 end
+                if back < -c.lenIn * 0.9 then back = -c.lenIn * 0.9 end
+            end
             for k = 1, n do
                 local x, y = XS[k], YS[k]
                 local along = (x - nx) * c.dIn[1] + (y - ny) * c.dIn[2]
                 local ahead = (x - nx) * c.dOut[1] + (y - ny) * c.dOut[2]
-                if along > -c.lenIn * 0.9 and ahead < c.lenOut - 1 then
+                if along > back and ahead < c.lenOut - 1 then
                     local minW = 2 * g.thw + 0.4
                     local vw = minW
                     if along < plan.sIn then
@@ -424,7 +449,7 @@ function T.shape(route, tow, tractorHalfW, tractorFront)
                 end
             end
         else
-            if c and not plan then
+            if c and not plan and c.turnAbs >= T.BLOCK_MIN_RAD then
                 blocked[#blocked + 1] = nx; blocked[#blocked + 1] = ny
                 blockedR[#blockedR + 1] = sqrt(c.hwIn * c.hwIn + c.hwOut * c.hwOut)
             end
