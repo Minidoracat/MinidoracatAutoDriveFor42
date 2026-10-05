@@ -17116,6 +17116,85 @@ end
 drive.scenarioGate()
 
 -- =====================================================================
+-- 1005k：機車 MOD（Autotsar Motor Club；玩家 2026-10-05 回報 UnsupportedVehicle）。0.28m 寬、180 kg 的車要能啟動，
+-- 衝量用真質量：getMass 落在可信區間外會退 MASS_FALLBACK 1200，轉向／倒車／輔助外力全部乘質量＝放大 6.7 倍。
+-- =====================================================================
+function drive.scenarioMotorcycle()
+scenario("機車 MOD：窄底盤、輕車照常啟動，衝量用真質量")
+    MDAD.Drive.stop(0, nil)
+    local bike = newVehicle({
+        battery = newItem("Base.CarBattery", { uses = 0.8 }),
+        engineRunning = true, mass = 180, speed = 20, maxSpeed = 60,
+        bodyW = 0.28, bodyL = 1.62, profileFull = true, brakingForce = 20,
+        wheelFriction = 5.4, tireFriction = 1.6, scriptName = "Base.AMC_harley",
+    })
+    bike._driver, dp._vehicle, dp._dead, dp._local = dp, bike, false, true
+    setHeading(bike, 0.3)
+    drive.nav.tx, drive.nav.ty, drive.nav.state = 300, 0, "ok"
+    drive.nav.route = newRoute(40, 0, 0, 4, 0)
+    driveReset(bike)
+    checkTrue(MDAD.Drive.start(dp), "(moto) 0.28×1.62m、180 kg 啟動，不回 UnsupportedVehicle")
+    local s = MDAD.Drive.debugSession(0)
+    checkEq(s and s.runtimeMass, 180, "(moto) 啟動時 runtimeMass＝真質量 180，不退 1200")
+    checkNear(s and s.vehicleProfile.halfW or -1, 0.4, 1e-9, "(moto) 規劃半寬墊到騎士＋車把 0.8m")
+    checkTrue(s and s.adaptive, "(moto) 量得到的剖面走 adaptive")
+    -- 每秒冷刷新（refreshMass）同一個可信區間：拆零件後 150 kg 照收
+    bike._mass = 150
+    for _ = 1, 4 do
+        nowMs = nowMs + 400
+        driveTick(dp, bike)
+    end
+    checkEq(MDAD.Drive.debugSession(0) == s and s.runtimeMass, 150, "(moto) 每秒刷新收 150 kg")
+    -- 路外前推輔助：輕車的等效質量抬到 ASSIST_MASS_MIN，但每公斤推力不得超過原版最輕的 800 kg 車
+    -- （E2E 1005k：180 kg 機車路外繞行被當 1300 kg 推＝外力 7.2 倍，一幀加速約 1.6 km/h）。
+    local accWas = MDAD.Drive.debugTune().ACCEL_ASSIST_MPS2
+    MDAD.Drive.debugTune().ACCEL_ASSIST_MPS2 = 0
+    drive.scanRound()
+    local function roughPushPerKg(kg)
+        bike._mass, s.runtimeMass = kg, kg
+        s.forceBrakeUntil, s.assistBoost = 0, 1
+        s.physicalOffroad, bike._offroad = true, true
+        bike._speed = 5
+        nowMs = nowMs + 100
+        driveReset(bike)
+        driveTick(dp, bike)
+        return (s.lastAssistForce or 0) / kg
+    end
+    local car800 = roughPushPerKg(800)
+    local bike180 = roughPushPerKg(180)
+    MDAD.Drive.debugTune().ACCEL_ASSIST_MPS2 = accWas
+    checkTrue(car800 > 0 and bike180 > 0 and bike180 <= car800 * 1.0001,
+        "(moto) 路外推力每公斤不超過 800 kg 車（800kg " .. tostring(car800) .. "、180kg " .. tostring(bike180)
+        .. "；mode=" .. tostring(s.mode) .. " tgt=" .. tostring(s.desiredTarget) .. "）")
+    -- 樹叢阻力抵消照抄引擎的車身框（script extents），不吃規劃寬：橫向 0.6 的樹叢在 0.28m 機車外 0.46（引擎不施阻力）
+    -- 不得抵消，車身框內那叢照抵。E2E 1005k：拿墊寬 0.8 判接觸＝抵消引擎沒施的阻力＝淨前推，樹叢地 0.8 秒 0→49 km/h。
+    local bprops = { has = function(_, key) return key == "Bush" end, get = function() return nil end }
+    local bsprite = { shouldHaveCollision = function() return false end, getProperties = function() return bprops end }
+    local bsq = drive.world[20 * 100000 + 2] or drive.mkSquare(20, 2)
+    bsq._objs[#bsq._objs + 1] = { getSpriteName = function() return "harness_bush" end,
+        getSprite = function() return bsprite end, getProperties = function() return bprops end,
+        getType = function() return nil end, getSquare = function() return bsq end }
+    setHeading(bike, 0)
+    local function bushFrame(y)
+        bike._x, bike._y, bike._speed = 20.5, y, 8
+        s.physicalOffroad, bike._offroad = true, true
+        bike._plant = { n = 0, obj = {}, mul = {} }
+        s.bushScanMs = 0
+        nowMs = nowMs + 16
+        driveReset(bike)
+        driveTick(dp, bike)
+        return bike._plant.n
+    end
+    local bushOut, bushIn = bushFrame(1.9), bushFrame(2.4)
+    checkTrue(bushOut == 0 and bushIn == 1 and MDAD.Drive.debugSession(0) == s,
+        "(moto) 樹叢抵消照引擎車身框：橫向 0.6 不抵、車身框內照抵（out=" .. tostring(bushOut) .. " in=" .. tostring(bushIn) .. "）")
+    drive.fillWorld(-2, 70, -7, 7)
+    MDAD.Drive.stop(0, nil)
+    dveh._driver, dp._vehicle = dp, dveh
+end
+drive.scenarioMotorcycle()
+
+-- =====================================================================
 -- 0908a：調頭＋blocked（s030）、短帶倒車（s026）
 -- =====================================================================
 local function scenarioUturnBlocked()

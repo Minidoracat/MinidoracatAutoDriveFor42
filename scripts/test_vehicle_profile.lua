@@ -609,6 +609,108 @@ do
 end
 
 --------------------------------------------------------------------------------
+-- 機車 MOD（Autotsar Motor Club 42.15 腳本，已乘 model scale，同 VehicleScript.Loaded）：底盤比騎士窄、
+-- 輪位非鏡像（前外伸輪一對＋中線上兩顆不轉向輪，RearRight 在車身中段）、輕、極速時轉向夾角 0.05。
+-- 修前 bodyW 0.28 < 0.6 → geometryValid=false → 啟動回 UnsupportedVehicle（玩家回報 2026-10-05）。
+local AMC_HARLEY = {
+    fullName = "Base.AMC_harley",
+    bodyW = 0.3415 * 0.82,
+    bodyL = 1.98 * 0.82,
+    centerOfMassZ = -0.03 * 0.82,
+    mass = 180,
+    friction = 5.4,
+    steeringClamp = 0.05,
+    maxSpeed = 60,
+    wheels = {
+        FrontLeft = { 0.3029 * 0.82, 1.4634 * 0.82 },
+        FrontRight = { -0.3029 * 0.82, 1.3934 * 0.82 },
+        RearLeft = { 0, -0.6585 * 0.82 },
+        RearRight = { 0, 0.8171 * 0.82 },
+    },
+}
+local AMC_BMW = {
+    fullName = "Base.AMC_bmw_classic",
+    bodyW = 0.5 * 0.8,
+    bodyL = 1.55 * 0.8,
+    mass = 130,
+    friction = 5.4,
+    steeringClamp = 0.05,
+    maxSpeed = 70,
+    wheels = {
+        FrontLeft = { 0.3875 * 0.8, 1.6 * 0.8 },
+        FrontRight = { -0.3875 * 0.8, 1.6 * 0.8 },
+        RearLeft = { 0, -0.6875 * 0.8 },
+        RearRight = { 0, 0.7875 * 0.8 },
+    },
+}
+
+scenario("motorcycle mods: narrow chassis, non-mirrored wheels, light, low top-speed clamp")
+do
+    for _, spec in ipairs({ AMC_HARLEY, AMC_BMW }) do
+        local label = spec.fullName
+        local p = P.build(makeVehicle(spec))
+        checkKeys(p, label)
+        checkTrue(p.geometryValid, label .. " geometryValid (starts instead of UnsupportedVehicle)")
+        checkTrue(p.valid, label .. " valid: measured profile feeds adaptive control")
+        checkFalse(p.fallback, label .. " every source measured")
+        checkNear(p.bodyW, spec.bodyW, 1e-9, label .. " bodyW keeps raw extents")
+        checkNear(p.halfW, 0.4, 1e-9, label .. " footprint floored to rider+handlebars 0.8m")
+        checkNear(p.halfL, spec.bodyL * 0.5, 1e-9, label .. " halfL")
+        checkEq(p.mass, spec.mass, label .. " light mass kept")
+        local wb = expectGeom(spec)
+        checkNear(p.wheelbase, wb, 1e-9, label .. " wheelbase = front-group to rear-group centre")
+        checkNear(p.clampMax, javaClamp(spec.maxSpeed, spec.steeringClamp, spec.maxSpeed), 1e-9,
+            label .. " real top-speed clamp accepted")
+        checkNear(p.needHalf, 1.2, 1e-9, label .. " cruise need keeps the NEED_BASE floor")
+        checkNear(p.probeR, 3, 1e-9, label .. " probeR from raw extents (clamped low)")
+    end
+    checkNear(P.build(makeVehicle(AMC_HARLEY)).wheelbase, (1.73996 + 0.47257) * 0.5, 1e-4,
+        "Harley wheelbase: short right side (mid-body support wheel) averaged, not rejected")
+
+    -- 地板只墊窄車：0.8 以上照 extents
+    local justAbove = P.build(makeVehicle({
+        fullName = "Base.Narrow09", bodyW = 0.9, bodyL = 3.0, mass = 400,
+        friction = 1.5, steeringClamp = 0.3, maxSpeed = 70, wheels = quad(0.35, 1.0, -1.0),
+    }))
+    checkNear(justAbove.halfW, 0.45, 1e-9, "0.9m body is not floored")
+
+    -- 安全邊界：壞資料照樣擋
+    local sliver = P.build(makeVehicle({
+        fullName = "Base.Sliver", bodyW = 0.1, bodyL = 1.6, mass = 180,
+        friction = 5.4, steeringClamp = 0.05, maxSpeed = 60, wheels = AMC_HARLEY.wheels,
+    }))
+    checkFalse(sliver.geometryValid, "0.1m extents below BODY_W_LO still fail geometry")
+    local stub = P.build(makeVehicle({
+        fullName = "Base.Stub", bodyW = 0.4, bodyL = 0.5, mass = 180,
+        friction = 5.4, steeringClamp = 0.05, maxSpeed = 60, wheels = {},
+    }))
+    checkFalse(stub.geometryValid, "0.5m length below BODY_L_LO still fails geometry")
+    local feather = P.build(makeVehicle({
+        fullName = "Base.Feather", bodyW = AMC_HARLEY.bodyW, bodyL = AMC_HARLEY.bodyL, mass = 40,
+        friction = 5.4, steeringClamp = 0.05, maxSpeed = 60, wheels = AMC_HARLEY.wheels,
+    }))
+    checkFalse(feather.valid, "40 kg below MASS_LO fails valid")
+    checkTrue(feather.geometryValid, "bad mass leaves geometry usable")
+    local squat = P.build(makeVehicle({
+        fullName = "Base.Squat", bodyW = 0.4, bodyL = 1.6, mass = 180,
+        friction = 5.4, steeringClamp = 0.05, maxSpeed = 60,
+        wheels = {
+            FrontLeft = { 0.3, 0.6 }, FrontRight = { -0.3, 0.6 },
+            RearLeft = { 0, 0.2 }, RearRight = { 0, -0.1 },
+        },
+    }))
+    checkFalse(squat.valid, "side average 0.55 below WB_LO fails valid")
+    checkTrue(squat.fallback, "short average uses fallback wheelbase")
+    checkNear(squat.wheelbase, 0.65 * 1.6, 1e-9, "fallback wheelbase clamp(0.65*bodyL, 0.8, 6)")
+    local rigid = P.build(makeVehicle({
+        fullName = "Base.Rigid", bodyW = AMC_HARLEY.bodyW, bodyL = AMC_HARLEY.bodyL, mass = 180,
+        friction = 5.4, steeringClamp = 0.01, maxSpeed = 60, wheels = AMC_HARLEY.wheels,
+    }))
+    checkFalse(rigid.valid, "top-speed clamp 0.01 below CLAMP_LO fails valid")
+    checkNear(rigid.clampMax, 0.4, 1e-9, "rejected clamps use SAFE set")
+end
+
+--------------------------------------------------------------------------------
 scenario("invalid NaN / extreme: valid=false, safe fallback, never throw")
 do
     local nan = 0 / 0

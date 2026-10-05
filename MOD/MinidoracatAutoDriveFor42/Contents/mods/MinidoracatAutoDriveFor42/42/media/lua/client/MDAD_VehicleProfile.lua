@@ -33,9 +33,12 @@
 -- (VehicleScript.java:2002-2003,1670-1671,1650-1651,2701-2707).
 --
 -- Finite domains (unsupported legacy geometry -> valid=false, safe fallback, never throw):
---   bodyW [0.6, 3.5], bodyL [1.5, 12], runtime mass [200, 5000],
---   runtime maxSpeed (0, 1000], wheelbase [0.8, 7], track [0, 4],
---   wheelFriction (0, 2000] and all sampled clamps [0.1, 0.9], monotonic by sample speed.
+--   bodyW [0.2, 3.5], bodyL [1.0, 12], runtime mass [50, 5000],
+--   runtime maxSpeed (0, 1000], track [0, 4], wheelbase: each measured side <= 7 and
+--   the side average [0.8, 7], wheelFriction (0, 2000] and all sampled clamps
+--   [0.02, 0.9], monotonic by sample speed. The low ends admit motorcycle mods
+--   (AMC Harley 0.28 x 1.62 m, 180 kg, clamp 0.05 at top speed); vanilla cars start
+--   at 1.31 x 3.24 m, 800 kg, clamp 0.3.
 -- geometryValid depends only on extents and finite in-body COM x/z. Invalid COM x/z
 -- safely falls back to 0; mass, tires, steering and additive telemetry never poison it.
 -- Additive physics fields never affect valid/fallback/geometryValid. Missing APIs,
@@ -43,27 +46,35 @@
 --   enginePower [0, 50000], brakingForce [0, 5000], offroadEfficiency (0, 10],
 --   rollInfluence [0, 2], centerOfMassY [-2, 3], runtime tire friction (0, 5],
 --   tireFrictionCount [0, 16].
--- Missing wheels: wheelbase = clamp(0.65 * bodyL, 0.8, 6).
+-- Missing wheels: wheelbase = clamp(0.65 * bodyL, 0.8, 6). A side shorter than 0.8
+-- only comes from non-mirrored layouts (two-wheelers: steered outrigger pair in front,
+-- two unsteered wheels on the centreline at different z) and is judged by the average.
 -- State meanings: (valid,!fallback)=all sources measured; (valid,fallback)=
 -- in-domain wheel estimate; (!valid,fallback)=patchwork safe substitutions.
 -- The last state is not a coherent vehicle model and must never feed control.
 -- Derived values implement the approved conservative steering envelope:
 --   delta0Safe=clamp(0.8*clamp0,0.35,0.75), Rmin=wheelbase/tan(delta0Safe);
 --   lookScale and rearArm scale with sqrt(wheelbase/1.35), arm capped at +35%;
---   footprint/probe values derive from full extents. No script-name behavior branches.
+--   footprint (halfW and everything planned from it) uses max(bodyW, FOOTPRINT_W_MIN):
+--   a two-wheeler's chassis box is narrower than its rider and handlebars; bodyW and
+--   probe values keep the raw extents, and code that mirrors an engine test on the
+--   chassis box (Drive.bushCancel) must use bodyW. No script-name behavior branches.
 
 MDADVehicleProfile = MDADVehicleProfile or {}
 if MDADVehicleProfile.build then return end
 
 
-local BODY_W_LO, BODY_W_HI = 0.6, 3.5
-local BODY_L_LO, BODY_L_HI = 1.5, 12
-local MASS_LO, MASS_HI = 200, 5000
+local BODY_W_LO, BODY_W_HI = 0.2, 3.5
+local BODY_L_LO, BODY_L_HI = 1.0, 12
+local MASS_LO, MASS_HI = 50, 5000 -- Driver MASS_VALID_LO 同值（runtimeMass 可信區間）
 local WB_LO, WB_HI, WB_FALLBACK_HI = 0.8, 7, 6
 local TRACK_LO, TRACK_HI = 0, 4
 local FRIC_LO, FRIC_HI = 0, 2000
 local TIRE_FRIC_LO, TIRE_FRIC_HI = 0, 5
-local CLAMP_LO, CLAMP_RAW_HI, CLAMP_ACCEPT_HI = 0.1, 0.9, 0.900001
+local CLAMP_LO, CLAMP_RAW_HI, CLAMP_ACCEPT_HI = 0.02, 0.9, 0.900001
+-- 規劃／接觸用的最小車身寬（騎士＋車把，公尺）：機車 MOD 的物理底盤只有 0.3–0.4m，
+-- 車把與騎士在外面；照底盤寬規劃會鑽進看起來過不去的縫。原版車都 ≥1.31m，不受影響。
+local FOOTPRINT_W_MIN = 0.8
 local MAX_SPEED_HI = 1000
 local ENG_LO, ENG_HI = 0, 50000
 local BRAKE_LO, BRAKE_HI = 0, 5000
@@ -220,7 +231,7 @@ local function wheelXZ(script, id)
 end
 
 local function derive(bodyW, bodyL, wheelbase, clamp0, clampMax)
-    local halfW = bodyW * 0.5
+    local halfW = (bodyW < FOOTPRINT_W_MIN and FOOTPRINT_W_MIN or bodyW) * 0.5
     local halfL = bodyL * 0.5
     local delta0Safe = clamp(STEER_MARGIN * clamp0, SAFE_D0_LO, SAFE_D0_HI)
     local deltaVSafe = clamp(STEER_MARGIN * clampMax, SAFE_DV_LO, delta0Safe)
@@ -339,29 +350,33 @@ function MDADVehicleProfile.build(vehicle)
         local rlx, rlz = wheelXZ(script, "RearLeft")
         local rrx, rrz = wheelXZ(script, "RearRight")
 
+        -- 兩側各量前後輪距：任一側超過 WB_HI＝資料壞，不得平均回合法。單側短於 WB_LO 是非鏡像
+        -- 輪位（AMC 機車右側＝前外伸輪到車身中段的輔助輪 0.47m），合法與否看兩側平均
+        -- （＝前輪組中心到後輪組中心）。
         local wbLeft, wbRight = nil, nil
         local wbInvalid = false
         if isFinite(flz) and isFinite(rlz) then
             local d = flz - rlz
             if d < 0 then d = -d end
-            if inClosed(d, WB_LO, WB_HI) then wbLeft = d else wbInvalid = true end
+            if d <= WB_HI then wbLeft = d else wbInvalid = true end
         end
         if isFinite(frz) and isFinite(rrz) then
             local d = frz - rrz
             if d < 0 then d = -d end
-            if inClosed(d, WB_LO, WB_HI) then wbRight = d else wbInvalid = true end
+            if d <= WB_HI then wbRight = d else wbInvalid = true end
         end
         local wheelbase
-        if wbInvalid then
-            wheelbase = clamp(WB_BODY * bodyL, WB_LO, WB_FALLBACK_HI)
-            valid = false
-            fallback = true
-        elseif wbLeft and wbRight then
+        if wbLeft and wbRight then
             wheelbase = (wbLeft + wbRight) * 0.5
         elseif wbLeft or wbRight then
             wheelbase = wbLeft or wbRight
             fallback = true
-        else
+        end
+        if wbInvalid or (wheelbase ~= nil and wheelbase < WB_LO) then
+            wheelbase = clamp(WB_BODY * bodyL, WB_LO, WB_FALLBACK_HI)
+            valid = false
+            fallback = true
+        elseif wheelbase == nil then
             wheelbase = clamp(WB_BODY * bodyL, WB_LO, WB_FALLBACK_HI)
             fallback = true
         end

@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1005j"
+Drive.REV = "1005k"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -528,9 +528,14 @@ local ROTATE_PROBE_R = 4
 local CLEAR_STREAK_N = 2       -- 繞行/堵住要連續這麼多輪 clear 才解除（掃描窗漂移防抖）
 TUNE.ROTATE_PROBE_MS = 500
 local MASS_REFRESH_MS = 1000   -- BaseVehicle.getMass cold refresh；熱幀只做時戳比較
-local MASS_VALID_LO, MASS_VALID_HI = 200, 5000 -- getMass 可信區間（kg）
+-- getMass 可信區間（kg）＝MDAD_VehicleProfile MASS_LO／HI。下限 50 收得進機車 MOD（AMC 130–180 kg＋零件）：
+-- 區間外退 MASS_FALLBACK，而轉向／倒車／輔助衝量都乘質量，180 kg 的車當 1200 算＝外力放大 6.7 倍。
+local MASS_VALID_LO, MASS_VALID_HI = 50, 5000
 local MASS_FALLBACK = 1200     -- 區間外／讀取失敗時沿用的標定車質量（kg）
 TUNE.ASSIST_MASS_MIN = 1300
+-- 輕車抬到 ASSIST_MASS_MIN 時，等效質量最多是自身的這個倍數（＝原版最輕 800 kg 車本來就拿到的 1300/800）：
+-- 機車 MOD（AMC 280–330 kg）照 1300 推＝外力 4–7 倍，E2E 1005k 路外窄縫爬行一幀被推約 1.6 km/h。原版車不受影響。
+TUNE.ASSIST_LIGHT_MAX_X = 1300 / 800
 TUNE.ASSIST_MAX_ERR_RAD = 20 * math.pi / 180
 TUNE.ASSIST_TIRE_REF = 1.4   -- 輪胎抓地基準（廂型車 wheelFriction 1.4）；低於此值越野推力乘 REF/實際
 TUNE.ASSIST_BOOST_KMH = 10   -- 越野推力遞增：實速低於此、目標高於此才累積
@@ -3072,7 +3077,8 @@ local function longitudinalAssistForce(s, speedKmh, targetSpeed, mult, rough, zo
         -- 推不動——2026-09-04 s047：1118kg van 草地 3 km/h、regulator 20、assist 0，
         -- 使用者「碰到草地速度怎慢到個位數」）
         if not (zombiePush or rough) then return 0 end
-        mass = TUNE.ASSIST_MASS_MIN
+        mass = mass * TUNE.ASSIST_LIGHT_MAX_X
+        if mass > TUNE.ASSIST_MASS_MIN then mass = TUNE.ASSIST_MASS_MIN end
     end
     local scale = 1
     if rough then
@@ -5570,7 +5576,9 @@ function Drive.bushCancel(s, vehicle, now)
         s.bushN, s.bushScanMs = 0, 0 -- 一動起來就重抓
         return
     end
-    local hw, hl = vp.halfW, vp.halfL
+    -- 照抄引擎就用引擎的車身框（script extents），不是規劃寬 halfW：機車 MOD 的 halfW 墊到 FOOTPRINT_W_MIN，
+    -- 拿它判接觸會抵消引擎根本沒施的阻力＝淨前推、越快越推（E2E 1005k 哈雷樹叢地 0.8 秒 0→49 km/h）
+    local hw, hl = vp.bodyW * 0.5, vp.halfL
     local reach = (hw > hl and hw or hl) + 1.3 -- 引擎的粗篩半徑（testCollisionWithObject selfRadius）
     local vx, vy = vehicle:getX(), vehicle:getY()
     if now >= s.bushScanMs then
