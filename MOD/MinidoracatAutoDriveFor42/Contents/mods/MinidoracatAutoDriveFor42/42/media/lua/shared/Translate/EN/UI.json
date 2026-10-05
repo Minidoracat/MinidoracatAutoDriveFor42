@@ -127,6 +127,8 @@
     "UI_MinidoracatAutoDrive_HUDEta": "TIME LEFT",
     "UI_MinidoracatAutoDrive_HUDEtaMinutes": "~%1 min",
     "UI_MinidoracatAutoDrive_HUDEtaUnder": "< 1 min",
+    "UI_MinidoracatAutoDrive_HUDEtaTipKm": "%1 km to go",
+    "UI_MinidoracatAutoDrive_HUDEtaTipM": "%1 m to go",
     "UI_MinidoracatAutoDrive_HUDZombie": "Zombies",
     "UI_MinidoracatAutoDrive_HUDCorpse": "Corpses",
     "UI_MinidoracatAutoDrive_HUDAnimal": "Animals",

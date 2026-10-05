@@ -127,6 +127,8 @@
     "UI_MinidoracatAutoDrive_HUDEta": "残り時間",
     "UI_MinidoracatAutoDrive_HUDEtaMinutes": "約%1分",
     "UI_MinidoracatAutoDrive_HUDEtaUnder": "1分未満",
+    "UI_MinidoracatAutoDrive_HUDEtaTipKm": "残り %1 km",
+    "UI_MinidoracatAutoDrive_HUDEtaTipM": "残り %1 m",
     "UI_MinidoracatAutoDrive_HUDZombie": "ゾンビ",
     "UI_MinidoracatAutoDrive_HUDCorpse": "死体",
     "UI_MinidoracatAutoDrive_HUDAnimal": "動物",

@@ -92,6 +92,8 @@ local texts = {
     UI_MinidoracatAutoDrive_HUDEta = "TIME LEFT",
     UI_MinidoracatAutoDrive_HUDEtaMinutes = "~%1 min",
     UI_MinidoracatAutoDrive_HUDEtaUnder = "< 1 min",
+    UI_MinidoracatAutoDrive_HUDEtaTipKm = "%1 km to go",
+    UI_MinidoracatAutoDrive_HUDEtaTipM = "%1 m to go",
     UI_MinidoracatAutoDrive_HUDZombie = "Z",
     UI_MinidoracatAutoDrive_HUDCorpse = "C",
     UI_MinidoracatAutoDrive_HUDOn = "ON",
@@ -547,7 +549,7 @@ function MDAD.Drive.hudState()
 end
 function MDAD.Drive.hudStartReason() return state.startReason end
 function MDAD.Drive.hudStopReason() return state.stopKey, state.stopAgoMs end
-function MDAD.Drive.etaSeconds() return state.eta end
+function MDAD.Drive.etaSeconds() return state.eta, state.etaDist end
 function MDAD.Drive.slowdownInfo() return 2, 48, 3, 25, 15, 10, 20 end
 function MDAD.Drive.effectiveCap() return state.idleCap end
 function MDAD.Drive.getGear() return state.gear end
@@ -1476,6 +1478,29 @@ do
     panel:refresh(nowMs)
     check(panel._etaText == "< 1 min" and panel.width == width and panel._etaValueX == valueX,
         "(eta-place) a new estimate only changes the text, never the layout")
+    -- 滑鼠提示（1005j）：沿路線還剩多遠；四捨五入到 10 公尺、滿 1 公里改用公里一位小數。
+    -- 違規證明：提示區不加欄名寬／不跨兩列＝(eta-tip) 位置紅；公尺不取整＝(eta-tip-fmt) 紅。
+    local tipFmt = MDAD.HUD.etaTipText
+    checkEq(tipFmt(nil), nil, "(eta-tip-fmt) no distance gives no tooltip")
+    checkEq(tipFmt(-1), nil, "(eta-tip-fmt) a negative distance is refused")
+    checkEq(tipFmt(math.huge), nil, "(eta-tip-fmt) a non-finite distance is refused")
+    checkEq(tipFmt(4), "0 m to go", "(eta-tip-fmt) metres round to the nearest 10")
+    checkEq(tipFmt(994), "990 m to go", "(eta-tip-fmt) 994 m stays in metres")
+    checkEq(tipFmt(995), "1.0 km to go", "(eta-tip-fmt) what would round to 1000 m switches to km")
+    checkEq(tipFmt(12340), "12.3 km to go", "(eta-tip-fmt) kilometres keep one decimal")
+    state.etaDist = 850
+    panel:refresh(nowMs)
+    local tip, fh = panel.etaTip, textManager:getFontHeight(UIFont.Small)
+    check(tip.visible and tip.tooltip == "850 m to go" and tip.x == panel._etaX and tip.y == panel._etaLabelY
+        and tip.height == panel._etaValueY - panel._etaLabelY + fh
+        and tip.width == math.max(textManager:MeasureStringX(UIFont.Small, panel._etaLabel),
+            textManager:MeasureStringX(UIFont.Small, panel._etaText)),
+        "(eta-tip) full metal: hovering the whole estimate column (name and value) shows the distance left")
+    panel:setCollapsed(true)
+    panel:refresh(nowMs)
+    check(not panel.etaTip.visible, "(eta-tip) the collapsed badge has no estimate column and no tooltip zone")
+    panel:setCollapsed(false)
+    panel:refresh(nowMs)
     local timeRight = panel._timeX + math.max(
         textManager:MeasureStringX(UIFont.Small, panel._timeLabel),
         textManager:MeasureStringX(UIFont.Small, "00:00:00"))
@@ -1490,12 +1515,13 @@ do
     state.eta = nil
     panel:refresh(nowMs)
     checkEq(panel._etaText, "--", "(eta-live) an active drive without an estimate yet shows the placeholder")
+    check(not panel.etaTip.visible, "(eta-tip) no estimate yet, no tooltip zone")
     state.eta = 300
     state.active, state.startReason = false, "UI_MinidoracatAutoDrive_EngineOff"
     panel:refresh(nowMs)
-    check(panel._etaText == "--" and panel._etaMin == nil,
-        "(eta-idle) a stopped HUD shows no estimate and forgets the shown minute")
-    state.eta = nil
+    check(panel._etaText == "--" and panel._etaMin == nil and not panel.etaTip.visible,
+        "(eta-idle) a stopped HUD shows no estimate, forgets the shown minute and drops the tooltip zone")
+    state.eta, state.etaDist = nil, nil
 end
 
 -- 記下切換前的完整版可見性，讓下面那條斷言驗的是「換過去」而不只是「換過來」。
@@ -1856,7 +1882,16 @@ do
         and panel._etaValueX > panel._etaX + textManager:MeasureStringX(UIFont.Small, panel._etaLabel)
         and etaRight + 3 <= panel.cycleButton.x,
         "compact layout keeps the estimate name and value inline after the drive time")
-    state.eta = nil
+    local wasActive, wasToken, wasReason = state.active, state.token, state.startReason
+    state.active, state.token, state.startReason, state.etaDist = true, "follow", nil, 2310
+    panel:refresh(nowMs)
+    local zone = panel.etaTip
+    check(zone.visible and zone.tooltip == "2.3 km to go" and zone.x == panel._etaX and zone.y == panel._etaLabelY
+        and zone.height == textManager:getFontHeight(UIFont.Small)
+        and zone.x + zone.width == panel._etaValueX + textManager:MeasureStringX(UIFont.Small, panel._etaText),
+        "(eta-tip) compact layout: the tooltip zone covers the inline name and value")
+    state.active, state.token, state.startReason = wasActive, wasToken, wasReason
+    state.eta, state.etaDist = nil, nil
     state.elapsed = nil
     panel:refresh(nowMs)
 end
@@ -3016,6 +3051,7 @@ do
                     local hits = 0
                     for i = 1, #iconPanel.children do
                         local c = iconPanel.children[i]
+                        if c == iconPanel.etaTip then c = { visible = false } end -- 提示區本來就蓋在這欄上
                         if c.visible and ex < c.x + c.width and c.x < er and ey < c.y + c.height and c.y < eb then
                             hits = hits + 1
                         end
@@ -3023,6 +3059,15 @@ do
                     check(ex >= tr and er <= iconPanel.width and hits == 0,
                         label .. ": the estimate column follows the drive time inside the panel and covers no control ("
                         .. hits .. " hits)")
+                    -- 滑鼠提示區（1005j）：自駕中有估計時蓋住整欄字、不出這一欄
+                    local was = { state.active, state.token, state.eta, state.etaDist }
+                    state.active, state.token, state.eta, state.etaDist = true, "follow", 245, 2310
+                    iconPanel:refresh(nowMs)
+                    local z = iconPanel.etaTip
+                    check(z.visible and z.x == ex and z.y == ey and z.y + z.height == eb and z.x + z.width <= er
+                        and z.tooltip ~= nil, label .. ": the distance tooltip zone covers the estimate column only")
+                    state.active, state.token, state.eta, state.etaDist = was[1], was[2], was[3], was[4]
+                    iconPanel:refresh(nowMs)
                 end
             end
         end

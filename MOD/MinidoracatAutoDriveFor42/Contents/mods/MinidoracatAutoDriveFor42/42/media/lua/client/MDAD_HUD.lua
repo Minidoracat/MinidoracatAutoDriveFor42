@@ -372,6 +372,16 @@ function HUD.etaText(seconds, prev)
     return getText("UI_MinidoracatAutoDrive_HUDEtaMinutes", string.format("%d", m > 999 and 999 or m)), m
 end
 
+-- 預計剩餘欄的滑鼠提示（1005j）：沿路線還剩多遠。四捨五入到 10 公尺，滿 1 公里改用公里取一位小數；沒有距離回 nil。
+function HUD.etaTipText(meters)
+    if type(meters) ~= "number" or meters * 0 ~= 0 or meters < 0 then return nil end
+    local r = math.floor(meters / 10 + 0.5) * 10
+    if r >= 1000 then
+        return getText("UI_MinidoracatAutoDrive_HUDEtaTipKm", string.format("%.1f", meters / 1000))
+    end
+    return getText("UI_MinidoracatAutoDrive_HUDEtaTipM", string.format("%d", r))
+end
+
 local function optionIndex(id, default, maximum)
     if not modOptions then return default end
     local option = modOptions:getOption(id)
@@ -1177,6 +1187,8 @@ function MDADHUDPanel:createChildren()
     self.statusTip:setVisible(false)
     self.capTip = makeButton(self, "", MDADHUDPanel.onSpeedPin, MDADHUDCapZone)
     self.capTip:setVisible(false)
+    self.etaTip = makeButton(self, "", function() end, MDADHUDTipZone) -- 預計剩餘欄的滑鼠提示（1005j）
+    self.etaTip:setVisible(false)
     self._capChip = false
     if self.pinBox then self.pinBox:setVisible(false) end
     self.volumeSlider = MDADHUDSlider:new(self)
@@ -1239,6 +1251,7 @@ function MDADHUDPanel:setControlsVisible(gearsOn, cycleOn, policiesOn, actionOn,
     self.detourButton:setVisible(self._detourAllowed and self._blocked == true)
     self.statusTip:setVisible(false) -- 版面變了；下一輪 refresh 依新位置重放
     self.capTip:setVisible(false)
+    self.etaTip:setVisible(false)
     self._capChip = false
     if self.pinBox then self.pinBox:setVisible(false) end
 end
@@ -1433,6 +1446,7 @@ function MDADHUDPanel:layoutWings(scale, m)
     self.detourButton:setVisible(self._detourAllowed and self._blocked == true)
     self.statusTip:setVisible(false) -- 版面變了；下一輪 refresh 依新位置重放
     self.capTip:setVisible(false)
+    self.etaTip:setVisible(false)
     self._capChip = false
     if self.pinBox then self.pinBox:setVisible(false) end
 
@@ -2158,6 +2172,17 @@ function MDADHUDPanel:placeDetourButton()
     end
     self.capTip:setVisible(capTip)
     self._capChip = capTip -- 按鈕自己畫欄名／數值，面板略過
+    -- 預計剩餘欄（欄名＋數值）整塊滑過看還剩多遠；欄位讓掉（收合、摺左翼、精簡單行放不下）或沒有估計就不放
+    local etaTip = self._etaX ~= nil and self._etaTip ~= nil
+    if etaTip then
+        local x1 = math.max(self._etaX + textWidth(UIFont.Small, self._etaLabel),
+            self._etaValueX + textWidth(UIFont.Small, self._etaText))
+        local y0 = math.min(self._etaLabelY, self._etaValueY)
+        local y1 = math.max(self._etaLabelY, self._etaValueY) + (self._fontH or 16)
+        setButtonRect(self.etaTip, self._etaX, y0, x1 - self._etaX, y1 - y0)
+        self.etaTip.tooltip = self._etaTip
+    end
+    self.etaTip:setVisible(etaTip)
     self:placeSpeedPin()
 end
 
@@ -2559,10 +2584,12 @@ function MDADHUDPanel:refresh(now)
     -- 只格式化數值；欄名是版面層的固定標籤，停用後照樣是「行車時間」、值停在最後一趟。
     -- 無紀錄與無效值共用缺值顯示。
     self._clockText = clockText(elapsed) or "--:--"
-    -- 預計剩餘（1005i）：只在自駕中有估計；HUD.etaText 帶上一輪顯示的分鐘數做遲滯。
-    local etaText, etaMin = nil, nil
-    if self._active then etaText, etaMin = HUD.etaText(Drive.etaSeconds(self.playerNum), self._etaMin) end
+    -- 預計剩餘（1005i）：只在自駕中有估計；HUD.etaText 帶上一輪顯示的分鐘數做遲滯；滑鼠提示是沿路線還剩多遠（1005j）。
+    local etaSec, etaDist = nil, nil
+    if self._active then etaSec, etaDist = Drive.etaSeconds(self.playerNum) end
+    local etaText, etaMin = HUD.etaText(etaSec, self._etaMin)
     self._etaText, self._etaMin = etaText or "--", etaMin
+    self._etaTip = etaText and HUD.etaTipText(etaDist) or nil
     self._blocked = token == "blocked"
     self:refreshSpeedTip(token, cap, now)
     self._lowFpsTip = nil

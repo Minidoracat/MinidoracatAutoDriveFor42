@@ -127,6 +127,8 @@
     "UI_MinidoracatAutoDrive_HUDEta": "預計剩餘",
     "UI_MinidoracatAutoDrive_HUDEtaMinutes": "約 %1 分",
     "UI_MinidoracatAutoDrive_HUDEtaUnder": "不到 1 分",
+    "UI_MinidoracatAutoDrive_HUDEtaTipKm": "剩餘 %1 公里",
+    "UI_MinidoracatAutoDrive_HUDEtaTipM": "剩餘 %1 公尺",
     "UI_MinidoracatAutoDrive_HUDZombie": "殭屍",
     "UI_MinidoracatAutoDrive_HUDCorpse": "屍體",
     "UI_MinidoracatAutoDrive_HUDAnimal": "動物",

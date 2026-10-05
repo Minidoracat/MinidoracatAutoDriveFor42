@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1005i"
+Drive.REV = "1005j"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -13115,7 +13115,7 @@ function Drive.etaTick(s, now)
         s.etaProfile, s.etaEpoch, s.etaCapKmh = profile, profile.epoch, cap
         s.etaEnd = total and MDADFollower.planTimeAt(s.etaPlan, profile.length - MDADFollower.ARRIVE_M)
         s.etaBaseT = nil
-        if not s.etaEnd then s.etaSec, s.etaK = nil, nil end
+        if not s.etaEnd then s.etaSec, s.etaK, s.etaDistM = nil, nil, nil end
     end
     local sNow = s.fstate.projS
     if not s.etaEnd or not finite(sNow) then return end
@@ -13129,13 +13129,16 @@ function Drive.etaTick(s, now)
     if k < TUNE.ETA_K_MIN then k = TUNE.ETA_K_MIN elseif k > TUNE.ETA_K_MAX then k = TUNE.ETA_K_MAX end
     local left = s.etaEnd - tNow
     if left < 0 then left = 0 end
-    s.etaK, s.etaSec = k, left * k
+    local dist = profile.length - sNow
+    if dist < 0 then dist = 0 end
+    s.etaK, s.etaSec, s.etaDistM = k, left * k, dist
 end
 
--- HUD 預計剩餘欄：本趟估計還要幾秒（現實時間）；沒有 session 或還沒有估計＝nil。
+-- HUD 預計剩餘欄：本趟估計還要幾秒（現實時間）與沿路線還剩幾公尺（滑鼠提示，1005j）；沒有 session 或還沒有估計＝nil。
 function Drive.etaSeconds(playerNum)
     local s = sessions[playerNum]
-    return s and s.etaSec or nil
+    if not s then return nil end
+    return s.etaSec, s.etaDistM
 end
 
 -- OnPlayerUpdate 簽名：單一 IsoPlayer（IsoPlayer.java:2279 triggerEvent("OnPlayerUpdate", this)；

@@ -17347,6 +17347,7 @@ scenarioDriveClock()
 --   (eta-yield)   讓位（玩家自己開）不計時
 --   (eta-gear)    換低檔：有效上限變低就重算計畫表，估計變多
 --   (eta-cutover) 換路線：在新弧長座標重設基準，計畫行進秒不因弧長歸零而跳
+--   (eta-dist)    滑鼠提示的剩餘距離＝剖面全長－投影弧長（最近一次估計時），跟著往前開變少
 --   (eta-stop)    結束後沒有估計
 function drive.scenarioEta()
     scenario("預計剩餘時間：剖面計畫秒數×修正倍率，只算自駕中的現實時間")
@@ -17370,12 +17371,16 @@ function drive.scenarioEta()
     dveh._speed = 50
     run(2000, 1.4)
     s = D.debugSession(0)
-    local e1 = D.etaSeconds(0)
+    local e1, d1 = D.etaSeconds(0)
     checkTrue(type(e1) == "number" and e1 > 0 and e1 < 60,
         "(eta-live) 跟線後就有估計：" .. tostring(e1) .. " 秒（k " .. tostring(s.etaK) .. "）")
     run(2000, 1.4)
-    local e2 = D.etaSeconds(0)
+    local e2, d2 = D.etaSeconds(0)
     checkTrue(e2 < e1 - 1, "(eta-live) 往前開 28m，估計從 " .. tostring(e1) .. " 降到 " .. tostring(e2))
+    checkTrue(type(d1) == "number" and type(d2) == "number"
+        and math.abs(d2 - (s.profile.length - s.fstate.projS)) < 4 and d1 - d2 > 20 and d1 - d2 < 36,
+        "(eta-dist) 剩餘距離 " .. tostring(d1) .. "→" .. tostring(d2) .. "（剖面全長－投影 "
+        .. tostring(s.profile.length - s.fstate.projS) .. "）")
     -- (eta-stall) 比計畫慢很多（8 km/h 爬 6 秒，停住會被停滯監督改成倒車）：k 上升，估計不再隨距離下降
     local k0 = s.etaK
     dveh._speed = 8
