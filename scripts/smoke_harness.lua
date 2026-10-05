@@ -8418,6 +8418,31 @@ function drive.scenarioZombiePlan()
         .. tostring(s.zombieAvoidLane) .. "、R " .. tostring(R) .. "）")
     drive.clearCell(20, 0)
     drive.clearCell(31, math.floor(2 * R - 0.2))
+    -- (zp-next) 1005j 正式服 SemiTruckBox_mil clip-10：③（下一群換不過去、也併不成一群）照「離下一群縫最近」選了右側
+    --   2.05，離下一隻 l 2.2 只差 0.15。③ 改成兩側各取一條、比較換邊可及量 r12 內對下一群能留的最大淨距。
+    --   fixture：帶 [−4, 3.4]；第一群一隻正壓車道（0）；下一群在 4m 後（r12≈0.3）兩隻 R＋0.45／−R−1.35，縫 [−1.35, 0.45]
+    --   靠右側：右側 R 再偏 0.3 仍離右邊那隻 0.75，左側 −R 偏 0.3 後離左邊那隻 1.65。期望選左側 −R。
+    --   違規證明：③ 不比較兩側（照舊取離縫最近）＝紅。
+    do
+        local Dr = MDAD.Drive
+        local oldBand = Dr.softBand
+        Dr.softBand = function() return -4, 3.4, true end
+        s = arm(0)
+        local xa = 20.5
+        local xb = xa + 2 * s.vehicleProfile.halfL + MDAD.Drive.debugTune().ZOMBIE_CLUSTER_M + 4
+        put(xa, 0)
+        put(xb, R + 0.45)
+        put(xb + 0.01, -R - 1.35)
+        drive.scanRound(true)
+        Dr.softBand = oldBand
+        checkTrue(s.zombieWhy == "gap" and type(s.zombieAvoidLane) == "number"
+                and math.abs(s.zombieAvoidLane + R) < 0.05,
+            "(zp-next) ③ 比較兩側對下一群的淨距：選左側 −R，不選貼著下一隻的右側（實得 "
+            .. tostring(s.zombieAvoidLane) .. "、R " .. tostring(R) .. "）")
+        drive.clearCell(math.floor(xa), 0)
+        drive.clearCell(math.floor(xb), math.floor(R + 0.45))
+        drive.clearCell(math.floor(xb + 0.01), math.floor(-R - 1.35))
+    end
     -- (zp-return) 軟縫側移領先車身 >2m（車身完全沒跟上）：這是「還在跟」不是偏離路線，
     --   RETURN 不得接手（接手＝放掉閃避、壓到回線速度；E2E crowd 0925h）。違規證明：RETURN
     --   進入改用原始 latDev 即紅。
@@ -8587,6 +8612,93 @@ function drive.scenarioZombieReturn()
     assert(armDrive())
 end
 drive.scenarioZombieReturn()
+
+-- (zr-swap) 1005j 正式服（M998 clip-30、GTR clip-15）：keep0 閃到左側路緣後，下一隻要換到常駐線另一側；lane 跨過常駐線時
+--   車身還落在左側，「常駐線↔軟縫 lane」外 >2m → softAlignDev 判偏離 → RETURN 進場讓位 → parkForZombies 把 laneBias
+--   釘回車身，但 s.zombieLane 沒清，下一輪又算出 want、又被釘回（clip-30 連 11 次 return yield，85 km/h 直直撞上）。
+--   fixture：常駐 0、軟縫持有在左側 y0、車身不跟（最壞相位：完全落後），殭屍在 y0 右邊 1.4、左縫被帶緣切掉＝只能往右換。
+--   (zr-swap)      換邊途中車身落後在這次軟縫走過的範圍內：不是偏離，laneBias 一輪都不被釘回車身、一路換到右側
+--   (zr-swap-park) 車身真的甩出走過範圍（被撞偏）：讓位一次後軟縫從車身接著走，laneBias 不連續兩輪停在車身
+--   違規證明：softAlignDev 不看走過範圍＝(zr-swap) 紅；parkForZombies 不重設持有中的 zombieLane＝(zr-swap-park) 紅。
+function drive.scenarioZombieSwap()
+    scenario("軟縫換邊跨過常駐線：RETURN 不把 lane 釘回車身")
+    local Dr = MDAD.Drive
+    local oldDodge, oldBand = MDAD.HUD.zombieDodge, Dr.softBand
+    MDAD.HUD.zombieDodge = function() return true end
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40,
+        RightLaneBias = 0, ZombieAreaSlowdown = false, CorpseSlowdown = false })
+    local cut = nil
+    Dr.softBand = function(...)
+        local lo, hi, known = oldBand(...)
+        if cut ~= nil and lo < cut then lo = cut end
+        return lo, hi, known
+    end
+    local oldEvent, oldSample, yields = MDADDiagnostics.event, MDADDiagnostics.sample, {}
+    MDADDiagnostics.event = function(_, name, a)
+        if name == "return" and type(a) == "table" and a.phase == "yield" then yields[#yields + 1] = a end
+    end
+    MDADDiagnostics.sample = function() return true end
+    local function run(y0, thrown)
+        assert(armDrive())
+        setHeading(dveh, 0)
+        dveh._speed, dveh._y = 20, 0
+        drive.scanRound(true)
+        drive.scanRound(true)
+        local s = Dr.debugSession(0)
+        s.diag = true
+        yields = {}
+        local R = s.vehicleProfile.halfW + MDADCorridor.ZOMBIE_R + MDADCorridor.ZOMBIE_MARGIN
+        local zl, zx = y0 + 1.4, dveh._x + 40.5
+        cut = zl - R + 0.05 -- 左縫（y0 那側）被帶緣切掉
+        drive.putMoving(math.floor(zx), math.floor(zl), { _class = "IsoZombie",
+            getX = function() return zx end, getY = function() return zl end })
+        -- 前置：軟縫持有在左側 y0（上一隻已用 keep0 貼路緣閃完），車身也在 y0
+        s.zombieLane = y0
+        MDADFollower.setLaneBias(s.fstate, y0)
+        local body, pins, run2, maxLane, seq, returned = y0, 0, 0, -99, "", false
+        for k = 1, 14 do
+            if thrown and k == 9 then body = y0 - 2.6 end -- 已換到常駐線右側時車身被撞到更左
+            driveReset(dveh)
+            dveh._x, dveh._y = dveh._x + 1.6667, body
+            drive.scanRound(true)
+            local lb = s.fstate.laneBias
+            if s.returnActive then returned = true end
+            if math.abs(lb - body) < 0.05 then
+                pins = pins + 1
+                run2 = run2 + 1
+            else
+                run2 = 0
+            end
+            if run2 >= 2 then returned = returned or "pinned" end
+            if lb > maxLane then maxLane = lb end
+            seq = seq .. string.format(" %.2f", lb)
+        end
+        drive.clearCell(math.floor(zx), math.floor(zl))
+        cut = nil
+        return s, pins, returned, maxLane, seq
+    end
+    local s, pins, returned, maxLane, seq = run(-2.6, false)
+    checkTrue(pins == 0 and returned == false and maxLane > 0.3 and s.zombieLane ~= nil,
+        "(zr-swap) 換邊跨過常駐線、車身落後在走過範圍內：laneBias 不被釘回車身、換到右側（pins " .. pins
+        .. "、RETURN " .. tostring(returned) .. "、lane" .. seq .. "）")
+    local n1 = #yields
+    s, pins, returned, maxLane, seq = run(-2.6, true)
+    checkTrue(returned ~= "pinned" and s.returnActive ~= true and s.zombieLane ~= nil,
+        "(zr-swap-park) 車身甩出走過範圍：讓位後軟縫從車身接著走、laneBias 不連續兩輪停在車身（pins " .. pins
+        .. "、" .. tostring(returned) .. "、lane" .. seq .. "）")
+    local y = yields[1]
+    checkTrue(n1 == 0 and y ~= nil and type(y.zl) == "number" and y.zl > 0 and type(y.dev) == "number"
+            and type(y.d) == "number" and y.dev > y.d,
+        "(zr-swap-ev) return yield 帶讓位當下的軟縫 lane 與偏離量（換邊時 " .. n1 .. " 筆；甩出後 zl "
+        .. tostring(y and y.zl) .. "、dev " .. tostring(y and y.dev) .. "、d " .. tostring(y and y.d) .. "）")
+    MDADDiagnostics.event, MDADDiagnostics.sample = oldEvent, oldSample
+    Dr.softBand = oldBand
+    MDAD.Drive.stop(0, nil)
+    MDAD.HUD.zombieDodge = oldDodge
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    assert(armDrive())
+end
+drive.scenarioZombieSwap()
 
 -- (zfar) 1004a 玩家回報「繞道後一直走路邊草地，要到第一次轉彎或殭屍／屍體出現才回到路上」；正式服 0.18.2
 --   GGGMAMEER clip-22：殭屍走了、軟縫回常駐線的側移檢查看整個軟縫視窗（車速×4.5s，80 km/h＝100m），遠處
@@ -9066,6 +9178,86 @@ function drive.scenarioSoftSide()
     assert(armDrive())
 end
 drive.scenarioSoftSide()
+
+-- (soft-flip) 1005j 正式服 SemiTruckBox_mil clip-08（同期 imprezalhd clip-18、1004g M998 clip-17 同型）：三隻殭屍（某一輪相對車位
+--   (56,−1.7)／(60,1.6)／(63,−0.6)）、常駐 3、帶 a＝−3、b 每輪在 2.63–3.39 間跳。b 高時右縫在、b 低時無縫走 least 取帶另一端
+--   −3；lane 一擺，威脅帶（含目前 lane）就換成相距 4m 多的另一隻，softKeepSide 的「同一個威脅」（弧長 3m、橫向 0.5m）
+--   不成立，want 在 −3↔+3.3 反號，車身停在中間撞上。這裡平移成常駐 0（l 全減 3），Δs 照原樣。
+--   (soft-flip)    右縫一輪有一輪沒有：want 最多換一次邊（least 也只在上一輪那一側取）
+--   (soft-flip-id) 原車寬長（2.06×8.24）、70 km/h：先無縫往左取 least，lane 擺過去後威脅換成 4m 前那隻、b 抖到右端
+--                  離得較遠：仍是同一群，留在左側不翻
+--   違規證明：least 不套換邊遲滯＝(soft-flip) 紅；同一個威脅改回弧長 3m＝(soft-flip-id) 紅。
+function drive.scenarioSoftFlip()
+    scenario("軟縫換邊遲滯：同一群的威脅身分隨 lane 換、least 不在帶兩端互跳")
+    local Dr = MDAD.Drive
+    local oldZ, oldBand = MDAD.HUD.zombieDodge, Dr.softBand
+    MDAD.HUD.zombieDodge = function() return true end
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 120,
+        RightLaneBias = 0, ZombieAreaSlowdown = false, CorpseSlowdown = false })
+    local hi = nil
+    Dr.softBand = function(...)
+        local lo, h, known = oldBand(...)
+        if hi ~= nil then return -6, hi, true end
+        return lo, h, known
+    end
+    local wasMs = drive.frameMs(10)
+    local function run(pts, his, kmh, rounds)
+        drive.fillWorld(-10, 200, -9, 9)
+        assert(armDrive())
+        setHeading(dveh, 0)
+        dveh._speed, dveh._y = kmh, 0
+        drive.scanRound(true)
+        drive.scanRound(true)
+        local s = Dr.debugSession(0)
+        local x0 = dveh._x
+        for _, z in ipairs(pts) do
+            local zx, zl = x0 + z[1], z[2]
+            drive.putMoving(math.floor(zx), math.floor(zl), { _class = "IsoZombie",
+                getX = function() return zx end, getY = function() return zl end })
+        end
+        local seq, flips, prev = "", 0, nil
+        for k = 1, rounds do
+            hi = his[(k - 1) % #his + 1]
+            driveReset(dveh)
+            dveh._x, dveh._y = dveh._x + kmh / 3.6 * 0.3, s.fstate.laneBias
+            drive.scanRound(true)
+            local w = s.zombieWant
+            if type(w) == "number" then
+                local side = w > -3 and 1 or -1 -- 原座標的正負號（常駐 3）
+                if prev ~= nil and side ~= prev then flips = flips + 1 end
+                prev = side
+                seq = seq .. string.format(" %.2f/%s", w, tostring(s.zombieWhy))
+            end
+        end
+        hi = nil
+        for _, z in ipairs(pts) do drive.clearCell(math.floor(x0 + z[1]), math.floor(z[2])) end
+        return prev ~= nil, flips, seq
+    end
+    local magic = { { 26, -4.7 }, { 30, -1.4 }, { 33, -3.6 } }
+    local function shifted(dx)
+        local out = {}
+        for i, z in ipairs(magic) do out[i] = { z[1] + dx, z[2] } end
+        return out
+    end
+    local ok, flips, seq = run(shifted(4.5), { 0.39, -0.37 }, 20, 10) -- 原 b 3.39／2.63 減 3
+    checkTrue(ok and flips <= 1,
+        "(soft-flip) 同一群、右縫一輪有一輪沒有：want 最多換一次邊、不逐輪反號（換邊 " .. flips .. " 次、want" .. seq .. "）")
+    local ext = dveh:getScript():getExtents()
+    local ew, eh, el = ext:x(), ext:y(), ext:z()
+    ext:set(2.06, eh, 8.24) -- SemiTruckBox_mil
+    ok, flips, seq = run(shifted(54), { -0.37, 0.1 }, 70, 5) -- 原 b 2.63／3.1：3.1 時右端離右邊那隻比左端遠
+    ext:set(ew, eh, el)
+    checkTrue(ok and flips == 0,
+        "(soft-flip-id) 威脅換成同一群 4m 前那隻、b 抖到右端較遠：留在左側不翻（換邊 " .. flips .. " 次、want" .. seq .. "）")
+    drive.frameMs(wasMs)
+    Dr.softBand = oldBand
+    MDAD.Drive.stop(0, nil)
+    MDAD.HUD.zombieDodge = oldZ
+    drive.fillWorld(-2, 70, -7, 7)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    assert(armDrive())
+end
+drive.scenarioSoftFlip()
 
 -- (soft-g*) 2026-10-05 使用者裁定「沒辦法改成繞開閃過嗎？一定要停車嗎？」（E2E：AnimalDodge＝關、AnimalSlowdown＝大型，
 --   14m 路中間一頭牛，車停 6.9 秒後 4 km/h 爬過撞死牛）。兩個名單分工：閃避名單＝照巡航速閃；減速名單＝受保護：
