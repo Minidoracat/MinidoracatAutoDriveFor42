@@ -3510,9 +3510,10 @@ end
 -- lane ramp 落後（0928c）：常駐線在彎／窄段前後沿弧長 ramp（Follower clampLane），車追 ramp 本來就落後
 -- 約 LANE_LAG_S 秒——車身落在「LAG 秒前那一點的期望線」與「現在的期望線」之間＝還在跟上，不是對不準
 -- （E2E rc1 十五趟 25 次：彎後加速時期望線 0→2m、車落後 1.1m，alignment 帽把 45 壓到 20–26）。
--- 繞行／RETURN 各有自己的線，不套。回傳到該區間的距離（不大於原偏差）。
+-- 繞行／RETURN 各有自己的線，斜切保持是不夾的常數 lane（Drive.laneKeepOf＝false），都不套——保持中拿夾過的 lane 當
+-- 區間另一端，車從保持 lane 往路斜切的整段都讀成偏差 0。回傳到該區間的距離（不大於原偏差）。
 function Drive.laneRampDev(s, absDev, speedKmh)
-    if s.dodging or s.returnActive then return absDev end
+    if s.dodging or s.returnActive or finite(s.holdLaneL) then return absDev end
     local p, lat, el = s.profile, s.lastLatSigned, s.diagExpL
     if type(p) ~= "table" or p.laneRoomR == nil or not finite(lat) or not finite(el) then return absDev end
     local back = (finite(speedKmh) and speedKmh > 0 and speedKmh / 3.6 or 0) * TUNE.LANE_LAG_S
@@ -3805,11 +3806,22 @@ function Drive.softPad(kind)
     return 0
 end
 
--- 有效的離路緣保留（fstate.laneKeep 與規劃擋線基準同值）：軟縫找不到縫、改在物理 laneRoom 內貼路緣閃
--- （s.zombieKeep0，只在軟縫持有中）或鏈式停留＝0；會車側移＝TRAFFIC_EDGE_KEEP_M；其餘 nil（LANE_BIAS_KEEP）。
+-- 有效的離路緣保留（fstate.laneKeep 與規劃擋線基準同值）：斜切保持中＝false（不夾：保持 lane 是車位，車在路寬外
+-- 起步時本來就在 laneRoom 外，夾回＝期望線落在圍籬另一側，正式服 1004g 路外 11m 起步 el 2.2 斜穿圍籬）；軟縫找不到
+-- 縫、改在物理 laneRoom 內貼路緣閃（s.zombieKeep0，只在軟縫持有中）或鏈式停留＝0；會車側移＝TRAFFIC_EDGE_KEEP_M；
+-- 其餘 nil（LANE_BIAS_KEEP）。
 function Drive.laneKeepOf(s)
+    if finite(s.holdLaneL) then return false end
     if (s.zombieKeep0 and s.zombieLane ~= nil) or s.laneChained then return 0 end
     if s.trafficLane ~= nil then return TUNE.TRAFFIC_EDGE_KEEP_M end
+    return nil
+end
+
+-- 規劃擋線基準（fillHardBase／nearestLineBlocker）的 keep：保持（false）與鏈／貼路緣（0）照 laneKeepOf，
+-- 會車側移的 TRAFFIC_EDGE_KEEP_M 不帶進基準（照舊 LANE_BIAS_KEEP）。
+function Drive.baseKeepOf(s)
+    local k = Drive.laneKeepOf(s)
+    if k == false or k == 0 then return k end
     return nil
 end
 
@@ -5908,7 +5920,8 @@ end
 -- 從車心往常駐線那一側量（d ≥ 0）：車位側的邊取最慢的收斂（純追跡、車頭沿路線時偏差剩 (1+kx)e^−kx，k＝√2／前視，
 -- x 從車頭量），常駐側的邊取常駐落點，兩邊各加 needHalf＋點半徑。車心另一側的點不算：斜切是遠離它們（貼著車側另一邊的
 -- 牆，保持反而沿牆擦過去），正前方的由起步近物限速管。帶內有硬點＝先沿車位直走（laneBias＝車位，規劃器與證明線改以
--- 這條線判擋），每個掃描輪重判，帶淨空（多留 TRANSITION_RELEASE_M）才放回常駐線。回本輪要寫的 laneBias。
+-- 這條線判擋；不經 clampLane——Drive.laneKeepOf 回 false，車在路寬外也照車位走，路外的證明線判 band、走 obb 近場帽），
+-- 每個掃描輪重判，帶淨空（多留 TRANSITION_RELEASE_M）才放回常駐線。回本輪要寫的 laneBias。
 function Drive.transitionHold(s, nb, playerNum, speedKmh)
     local sen, prof, lat = s.sensor, s.profile, s.lastLatSigned
     if s.fstate.rotating == true or not sen.ready or type(prof) ~= "table" or not finite(lat) then
@@ -5943,12 +5956,14 @@ function Drive.transitionHold(s, nb, playerNum, speedKmh)
     return Drive.transitionRelease(s, playerNum, "clear", nb)
 end
 
--- 結束斜切保持（有保持才記事件、重新規劃）；回 nb 方便呼叫端直接 return。
+-- 結束斜切保持（有保持才記事件、重新規劃）；回 nb 方便呼叫端直接 return。keep 當場回一般值：recover／route 兩個
+-- 站點不經掃描輪的 setLaneBias，不重設就讓下一輪之前的 laneBias 照舊不夾（Drive.laneKeepOf）。
 function Drive.transitionRelease(s, playerNum, why, nb)
     if finite(s.holdLaneL) then
         diagEvent(s, playerNum, "lane", { phase = "release", why = why, l = s.lastLatSigned, offL = s.holdLaneL,
             rs = s.lastSNow })
         s.holdLaneL, s.planSig = nil, -1
+        s.fstate.laneKeep = Drive.laneKeepOf(s)
     end
     return nb
 end
@@ -8839,7 +8854,7 @@ local function fillHardBase(s, sen, planN, baseL)
     end
     for i = 1, planN do
         local hs = sen.hardS[i]
-        tbl[i] = MDADFollower.laneBiasAt(prof, baseL, MDADFollower.segIndexAt(prof, hs), hs, Drive.laneKeepOf(s) == 0 and 0 or nil)
+        tbl[i] = MDADFollower.laneBiasAt(prof, baseL, MDADFollower.segIndexAt(prof, hs), hs, Drive.baseKeepOf(s))
     end
     return tbl
 end
@@ -8959,7 +8974,7 @@ local function nearestLineBlocker(s, sen, minS)
             -- 擋線基準用該點所在段**夾過彎內側餘裕**的 lane（2026-09-04 st146254：
             -- 路口右轉內側角落物群以裸 +1.5 判「出口後仍擋線」拒掉全部貼縫候選，
             -- 實際轉彎時 lane 已被 laneRoom 夾回中線、角落物不在行駛線上）
-            local bl = MDADFollower.laneBiasAt(prof, bl0, MDADFollower.segIndexAt(prof, hs), hs, Drive.laneKeepOf(s) == 0 and 0 or nil)
+            local bl = MDADFollower.laneBiasAt(prof, bl0, MDADFollower.segIndexAt(prof, hs), hs, Drive.baseKeepOf(s))
             if blocksLine(sen, i, bl, nh) then bi = i end
         end
     end
