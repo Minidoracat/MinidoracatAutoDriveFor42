@@ -5825,6 +5825,28 @@ end
 function Drive.disarmWide(s)
     s.wideArmed, s.wideArmedS, s.wideBlockedLogged, s.wideJudged = false, nil, nil, nil
     s.wideArmedX, s.wideArmedY, s.wideLevel, s.wideLevelAt = nil, nil, nil, nil
+    s.wideClearAt, s.wideClearLvl, s.wideClearLogged = nil, nil, nil
+end
+
+-- 停點寬帶輪判淨空、但車是被一般帶判堵停在這裡（1006；正式服 1005j clip：路線在停止線後折進 10m 髮夾支線、車堆在
+-- 支線上——一般帶把車堆投影在支線 l≈0＝判堵；寬帶由主線測站先掃到同一格、Sensor 世界格去重後記在主線旁 l≈−7＝淨空）。
+-- 舊制寬帶淨空直接解除判堵與武裝、下一輪一般帶又判堵：每 ~1.2 秒起步一次（GO 12）、寬帶判定永遠沒完成、5 秒內沒有
+-- 倒車或改道（只靠 wideJudged 殘值碰巧開閘）。寬帶的淨空不解除一般帶的判堵：記下「寬帶淨空待確認」（wideClearAt＝本次
+-- 嘗試、wideClearLvl＝寬帶級），下一輪改掃一般帶（Drive.wideScanWanted）——一般帶也淨空＝障礙真的走了，照常解除；
+-- 一般帶仍判堵＝寬帶這一級判完（replan blocked 分支呼叫 Drive.wideJudge），升級／倒車／改道照常往下走。
+function Drive.holdWideClear(s, playerNum, sen)
+    local lvl = sen.wideDoneLevel or 1
+    s.wideClearAt, s.wideClearLvl = s.episodeAttempts, lvl
+    s.planMode = "wide-clear"
+    local key = s.episodeAttempts * 10 + lvl
+    if s.wideClearLogged == key then return end
+    s.wideClearLogged = key -- 每次嘗試、每一級記一筆（循環時不洗版）
+    diagEvent(s, playerNum, "blocked", { why = "wide-clear", lvl = lvl, l = laneBiasOf(s), hn = sen.hardN,
+        attempt = s.episodeAttempts, s = s.blockS, x = s.blockHitX, y = s.blockHitY })
+    if getDebug() then
+        print(string.format("%spn=%d wide level %d clear on lane %.2f (hardN=%d) while normal band blocked: hold, confirm with normal band",
+            LOG, playerNum, lvl, laneBiasOf(s), sen.hardN))
+    end
 end
 
 -- 本次脫困嘗試要求的寬帶級：每次嘗試（倒車退出新跑道）都從第一級開始（Drive.wideJudge 升級時記下嘗試編號）。
@@ -5836,8 +5858,9 @@ end
 -- 判完仍堵、這一級還不是最寬（TUNE.WIDE_LEVEL_MAX）：停著先升一級重掃，閘門等最寬那級判完才開（1004c）。
 -- 跑道不夠（steep 差額，blockSteepM）不升級：更外側的縫側移更大、只會更陡，照舊先倒車補跑道（0.5s 出口不變）；
 -- 倒車後的新嘗試從第一級重來——第二級的外圈若有未載入格會截短整輪可見距離，近處剛補出跑道的縫第一級就判得到。
-function Drive.wideJudge(s, playerNum)
-    local lvl = s.sensor.wideDoneLevel or 1
+-- 寬帶判淨空待確認（Drive.holdWideClear）不算判完；一般帶確認仍堵時由 replan 帶著被確認的那一級（lvl）再判一次。
+function Drive.wideJudge(s, playerNum, lvl)
+    lvl = lvl or s.sensor.wideDoneLevel or 1
     if s.blocked and s.wideArmed and lvl < TUNE.WIDE_LEVEL_MAX and type(s.tow) ~= "table"
             and not (finite(s.blockSteepM) and s.blockSteepM > 0) then
         if Drive.wideLevelOf(s) <= lvl then
@@ -5848,6 +5871,7 @@ function Drive.wideJudge(s, playerNum)
         end
         return
     end
+    if s.wideClearAt ~= nil and s.wideClearAt == s.episodeAttempts then return end -- 寬帶淨空待一般帶確認（Drive.holdWideClear）
     s.wideJudged = s.episodeAttempts
 end
 
@@ -9425,10 +9449,11 @@ end
 -- 行駛中、或群還在遠處（先開近、一般帶重判）維持一般帶。武裝撐過倒車：倒車成功會清 blocked，退出來的跑道要在
 -- 起步前（還停著，Drive.blockedAtStop）就用寬帶重判；承諾繞行／判定淨空（replan）或開過武裝點才解除。
 -- 停著判堵回 "stop"：Sensor 這一輪看 100m、輪時放寬（見 MDAD_Sensor WIDE_STOP_AHEAD_M）；繞行中回 true（一般寬帶）。
+-- 寬帶判淨空待確認（Drive.holdWideClear）的下一輪回一般帶：由一般帶決定是真的淨空還是寬帶投影看漏。
 function Drive.wideScanWanted(s, speedKmh)
     if s.dodging and s.dodgeWide then return true end
     if s.wideArmed and not (finite(s.wideArmedS) and s.lastSNow <= s.wideArmedS + 1) then Drive.disarmWide(s) end
-    if not s.blocked then return false end
+    if not s.blocked or (s.wideClearAt ~= nil and s.wideClearAt == s.episodeAttempts) then return false end
     local v = finite(speedKmh) and (speedKmh < 0 and -speedKmh or speedKmh) or 99
     return s.wideArmed == true and v < TUNE.WIDE_SCAN_KMH and "stop" or false
 end
@@ -9437,9 +9462,12 @@ end
 -- （12 格），收下＝releaseDodge 丟掉掃掠驗過的承諾線、新線起點吸在群旁重判（E2E rc43 0010：offL −12.5 承諾 7 秒
 -- 後 cutover deviation → 從群旁重判、接觸 6 次）。繞完（dodging 解除）下一次取路照常 cutover；換目標、改道請求、
 -- nav 版本變更照收；拖車維持現制（使用者 1002t 範圍：拖車以外的車輛）。
+-- 交接停住（dodgeHandoffHold：舊線剛在群前交出、下一群還沒有線）同樣先不收（1006；正式服 1005h clip：寬帶路外爬行
+-- release next-group 後 0.05 秒偏航重算換線，車離新線 7.5m 起 RETURN、回線帶被擋 hold 到玩家接手）——交接停住後走
+-- 判堵停點寬帶重判，舊線仍是這次判堵的基準；一般帶交接離線遠不到偏航門檻，實際只擋路外交接。
 function Drive.holdWideReroute(s, sameTarget, sameVersion)
     return sameTarget and sameVersion and s.pendingRouteWhy == nil and not s.pendingDetour
-        and s.dodging == true and s.dodgeWide == true and type(s.tow) ~= "table"
+        and (s.dodging == true and s.dodgeWide == true or s.dodgeHandoffHold == true) and type(s.tow) ~= "table"
 end
 
 -- Knox Pass 大門（1005c，Sensor gateCell）的 telemetry：本輪快照有會替這台車開的關門時記 `gate` 事件——
@@ -11191,6 +11219,14 @@ local function replan(s, vehicle, playerNum)
         -- 掃描窗跟著投影漂移，hardN 會 10↔0 跳動（實機 st 88,127 遙測），單輪
         -- clear 就解除＝煞停/全速反覆切換。dodging 不會走到這裡（immutable 分支
         -- 在函式開頭 return），舊的 release 守門已被「剖面走完才釋放」取代。
+        -- 停點寬帶輪的淨空不解除一般帶的判堵，先回一般帶確認（Drive.holdWideClear；1006 髮夾支線投影）。
+        -- 延後（planSig＝−1＋接近帽：align／traffic／window 等）是寬帶找到了線、只是這輪不承諾，照舊。
+        -- 只攔「上一次判定是判堵」（clearStreak 0）：一般帶已經判過淨空（遲滯中 clearStreak ≥1）＝兩種帶一致、沒有
+        -- 矛盾要確認，照常累計解除（調頭中牆移走：一般帶先判淨空、下一輪寬帶也淨空，攔了＝多拖兩輪、調頭收不了尾）。
+        if s.blocked and s.wideArmed and sen.wideDone and s.planSig ~= -1 and s.clearStreak == 0 then
+            Drive.holdWideClear(s, playerNum, sen)
+            return
+        end
         if s.blocked and s.clearStreak + 1 < CLEAR_STREAK_N then
             s.clearStreak = s.clearStreak + 1
             s.planMode = "clear-hold"
@@ -11315,6 +11351,12 @@ local function replan(s, vehicle, playerNum)
     -- 與 Corridor.plan 同一個 minS（車尾）：車後的擋線點不是這次 blocked 的原因
     resolveBlockAnchor(s, sen, vehicle, true, s.lastSNow - s.vehicleProfile.halfL)
     s.planMode = "blocked"
+    -- 寬帶判淨空待確認、這輪一般帶仍判堵＝寬帶那一級判完（看漏不是淨空；Drive.holdWideClear）。寬帶輪判堵照舊。
+    if s.wideClearAt ~= nil then
+        local lvl = not sen.wideDone and s.wideClearAt == s.episodeAttempts and s.wideClearLvl
+        s.wideClearAt, s.wideClearLvl = nil, nil
+        if lvl then Drive.wideJudge(s, playerNum, lvl) end
+    end
     if not s.blockedNotified then
         s.blockedNotified = true
         local playerObj = getSpecificPlayer(playerNum)

@@ -23102,6 +23102,25 @@ function drive.scenario0929p()
         driveTick(dp, dveh)
         checkTrue(st.routeGen == rg0 + 1 and st.route == drive.nav.route,
             "(wide-route) 繞完下一次取路照常 cutover（rg " .. tostring(st.routeGen) .. "）")
+        -- (handoff-route) 1006：交接停住（舊線剛在群前交出、下一群還沒有線）同樣不收同目標偏航重算（正式服 1005h：寬帶
+        --   路外爬行 release next-group 後 0.05 秒換線，RETURN 從離線 7.5m 起 hold 到接手）；交接解除照常 cutover。
+        --   違規證明：拿掉 holdWideReroute 的 dodgeHandoffHold 條件＝紅。
+        local rg1 = st.routeGen
+        st.dodgeHandoffHold = true
+        drive.nav.route = newRoute(40, 0, 0, 4, 0)
+        nowMs = nowMs + 300
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        local heldR = st.routeGen == rg1
+        st.dodgeHandoffHold = false
+        nowMs = nowMs + 300
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        checkTrue(heldR and st.routeGen == rg1 + 1 and st.route == drive.nav.route
+                and not MDAD.Drive.holdWideReroute({ dodgeHandoffHold = true, tow = {} }, true, true)
+                and not MDAD.Drive.holdWideReroute({ dodgeHandoffHold = true, pendingDetour = true }, true, true),
+            "(handoff-route) 交接停住時同目標偏航重算先不收、交接解除照常 cutover；拖車、改道請求照收（held="
+            .. tostring(heldR) .. " rg " .. tostring(rg1) .. "→" .. tostring(st.routeGen) .. "）")
         local base = { dodging = true, dodgeWide = true }
         local function hold(k, v)
             local t = { dodging = true, dodgeWide = true }
@@ -23460,6 +23479,121 @@ function drive.scenario0929p()
     SandboxVars = oldSand
 end
 drive.scenario0929p()
+
+-- 1006（正式服 1005j：路線在停止線後折進 10m 髮夾支線、車堆在支線上。一般帶把車堆投影在支線 l≈0＝判堵；寬帶由主線
+--   測站先掃到同一格、Sensor 世界格去重後記在主線旁 l≈−7＝淨空。舊制寬帶淨空直接解除判堵與武裝，下一輪一般帶又判堵：
+--   每 ~1.2 秒起步一次、寬帶判定永遠沒完成、5 秒沒有倒車或改道，玩家接手）。快照序列直接合成：牆只在一般帶輪看得到。
+--   (stop-flip) 停點寬帶輪判淨空不解除一般帶的判堵（一幀都不放）；兩級寬帶各判一次淨空、都由一般帶確認仍堵才算判完
+--     （待確認時不先開閘）；BLOCK_RETRY_MS 內走到倒車。違規證明：拿掉 replan 的寬帶淨空攔截＝放開判堵；拿掉
+--     wideScanWanted 的一般帶確認輪＝寬帶輪一直淨空、永遠不倒車；拿掉一般帶確認時的 wideJudge＝不開閘；拿掉 wideJudge
+--     的待確認早退＝第二級淨空當輪就開閘。
+--   (stop-flip-gone) 障礙真的移走（一般帶也淨空）：一般帶確認後照常解除、不倒車。違規證明：拿掉一般帶確認輪＝永遠不解除。
+function drive.scenarioStopFlip()
+    scenario("1006：停點寬帶判淨空、一般帶判堵交替——不解除判堵，一般帶確認後走到倒車；真的淨空照常解除")
+    local oldSand = SandboxVars
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    local wasMs = drive.frameMs(10)
+    if type(MDAD.HUD) ~= "table" then MDAD.HUD = {} end
+    local oldAuto = MDAD.HUD.autoDetour
+    MDAD.HUD.autoDetour = function() return false end
+    local gone = false
+    local props = { has = function() return false end }
+    local sprite = { shouldHaveCollision = function() return true end, getProperties = function() return props end }
+    -- 每格一個物件，sprite 名依「這一輪是不是寬帶」決定（nameFor(wide) 回 nil＝這一輪看不到）；gone＝障礙真的移走
+    local function place(x, y, nameFor)
+        local sq = drive.world[x * 100000 + y]
+        sq._objs[#sq._objs + 1] = {
+            getSpriteName = function()
+                local sc = MDAD.Drive.debugSession(0)
+                if gone then return nil end
+                return nameFor(sc ~= nil and sc.sensor and sc.sensor.wideRound == true)
+            end,
+            getSprite = function() return sprite end,
+            getProperties = function() return props end,
+            getType = function() return nil end,
+        }
+    end
+    local function normalOnly(wide) return not wide and "flip_wall" or nil end
+    local function arm(layout, x0, heading)
+        gone = false
+        drive.fillWorld(-10, 160, -24, 24)
+        layout()
+        armDrive()
+        setHeading(dveh, heading)
+        dveh._x, dveh._y, dveh._speed = x0, 0, 0
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        return MDAD.Drive.debugSession(0)
+    end
+    local function wallFlip() -- 牆只在一般帶輪看得到
+        for x = 40, 42 do for y = -6, 6 do place(x, y, normalOnly) end end
+    end
+    -- (stop-flip)
+    local st = arm(wallFlip, 31, 0)
+    local t0, released, holdLvl, early, revAt = nil, 0, {}, false, nil
+    for _ = 1, 1000 do -- 一幀 10ms（drive.frameMs(10)），最多 10 秒
+        nowMs = nowMs + 10
+        driveTick(dp, dveh)
+        if st.mode == "unstick" then revAt = nowMs; break end
+        if t0 == nil and st.blocked and st.wideArmed then t0 = nowMs end
+        if t0 ~= nil and st.blocked ~= true then released = released + 1 end
+        if st.planMode == "wide-clear" and st.sensor.wideDone == true then
+            local lv = st.sensor.wideDoneLevel or 0
+            -- 最寬一級第一次判淨空那輪：一般帶確認前閘不得已開（之後的循環沿用確認過的判定）
+            if lv == 2 and not holdLvl[2] and st.wideJudged == st.episodeAttempts then early = true end
+            holdLvl[lv] = true
+        end
+    end
+    checkTrue(t0 ~= nil and released == 0,
+        "(stop-flip) 停點寬帶判淨空不解除一般帶的判堵（放開 " .. tostring(released) .. " 幀）")
+    checkTrue(holdLvl[1] == true and holdLvl[2] == true and not early,
+        "(stop-flip) 第一、二級寬帶淨空都待一般帶確認、確認前不開倒車／改道的閘（lvl1=" .. tostring(holdLvl[1])
+        .. " lvl2=" .. tostring(holdLvl[2]) .. " early=" .. tostring(early) .. "）")
+    checkTrue(revAt ~= nil and st.episodeAttempts == 1 and revAt - t0 <= MDAD.Drive.debugTune().BLOCK_RETRY_MS + 1500,
+        "(stop-flip) 一般帶確認仍堵＝寬帶判完，停等 BLOCK_RETRY_MS 走到倒車（"
+        .. tostring(revAt and (revAt - t0)) .. "ms、attempt " .. tostring(st.episodeAttempts) .. "）")
+    MDAD.Drive.stop(0, nil)
+    -- (stop-flip-gone)
+    st = arm(wallFlip, 31, 0)
+    local held, clearAt = false, nil
+    for _ = 1, 600 do
+        nowMs = nowMs + 10
+        driveTick(dp, dveh)
+        if not held and st.planMode == "wide-clear" then held, gone = true, true end
+        if held and st.blocked ~= true then clearAt = nowMs; break end
+    end
+    checkTrue(held and clearAt ~= nil and st.episodeAttempts == 0 and st.mode ~= "unstick" and st.wideArmed ~= true,
+        "(stop-flip-gone) 障礙真的移走：一般帶確認淨空後照常解除判堵與武裝、不倒車（held=" .. tostring(held)
+        .. " clear=" .. tostring(clearAt ~= nil) .. " attempt=" .. tostring(st.episodeAttempts) .. "）")
+    MDAD.Drive.stop(0, nil)
+    -- (stop-flip-defer) 寬帶找到線、只是這輪不承諾（車頭偏 30°＝對正延後 align，planSig −1＋接近帽）：不是淨空，
+    --   不攔、照舊延後（攔了＝blockedStop 壓 0、車永遠擺不正、寬帶線永遠不承諾）。一般帶整條牆、寬帶輪牆中段讓出
+    --   (al) 那種混材縫。違規證明：攔截不排除延後（拿掉 planSig 條件）＝紅。
+    st = arm(function()
+        for y = -6, 6 do
+            place(51, y, function(wide)
+                if not wide or y >= 2 then return "flip_wall" end
+                if y <= -1 then return "fencing_vegetation_trees_01_5" end
+                return nil
+            end)
+        end
+    end, 43, 0.52)
+    local wideMode, wideCap = nil, nil
+    for _ = 1, 400 do
+        nowMs = nowMs + 10
+        driveTick(dp, dveh)
+        if st.sensor.wideDone == true then wideMode, wideCap = st.planMode, st.dodgeDeferCap; break end
+    end
+    checkTrue(wideMode ~= nil and wideMode ~= "wide-clear" and MDADDynamics.finite(wideCap) and wideCap >= 0,
+        "(stop-flip-defer) 停點寬帶輪的對正延後照舊延後、不當淨空攔下（plan=" .. tostring(wideMode)
+        .. " cap=" .. tostring(wideCap) .. "）")
+    MDAD.Drive.stop(0, nil)
+    MDAD.HUD.autoDetour = oldAuto
+    drive.frameMs(wasMs)
+    drive.fillWorld(-2, 70, -7, 7)
+    SandboxVars = oldSand
+end
+drive.scenarioStopFlip()
 
 -- 1004c（使用者 2026-10-04「障礙多的地方不要太早判定繞遠路，逐漸掃描加大、找得到回到道路的路線就走，真的都不行才考慮繞道」）：
 --   (wide2) 牆蓋滿第一級寬帶（±13.5）可規劃的範圍：第一級判堵不開倒車／自動改道的閘（停等 11 秒也不動）、升第二級重掃
