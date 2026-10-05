@@ -7231,17 +7231,20 @@ local function sampleRecovery(s, vehicle, playerNum, now, x, y, speed, fx, fy, h
     end
 end
 
--- 側帶探測（TUNE.SIDE_ESCAPE_*）：把 probeRear 的基底轉 90°——「前方」取推的反方向、半寬取車半長、半長取車半寬，
--- 後方 swept strip 就落在車身 side 側（side=+1＝(−fy,fx)）寬 band、長＝車長（各加 0.15 餘裕）。同一套 fail-closed
--- 探測（未載入／取不到＝unloaded）。out 會被 bodyCenter 覆寫；fx/fy 需已正規化。
+-- 側帶探測（TUNE.SIDE_ESCAPE_*）：車身 side 側（side=+1＝(−fy,fx)）從側面往外 band＋0.15、沿車長 ±(halfL＋0.15)
+-- 的矩形＝真正要移入的那條帶（不含車身本身、不往前後多伸）。MDADSensor.probeSide：地形格級、車輛用真車體多邊形——
+-- 1006 第一版借 probeRear 轉 90°，車輛也是格級 isIntersectingSquare（整格算命中），車頭前 0.26m 的前車和側帶共用
+-- 一排格就把兩側都判 vehicle（E2E sideescape A／A3）。未載入／取不到＝unloaded。out 會被 bodyCenter 覆寫。
 function Drive.sideProbe(s, vehicle, out, fx, fy, side, band)
     local bx, by = bodyCenter(s, vehicle, out)
-    if bx == nil or type(MDADSensor) ~= "table" or type(MDADSensor.probeRear) ~= "function" then
+    if bx == nil or type(MDADSensor) ~= "table" or type(MDADSensor.probeSide) ~= "function" then
         return "unloaded", vehicle:getX(), vehicle:getY(), "geometry"
     end
-    local ux, uy = side * fy, -side * fx
-    return MDADSensor.probeRear(s.sensor, vehicle, getCell(), bx, by, ux, uy, -uy, ux,
-        s.vehicleProfile.halfL, s.vehicleProfile.halfW, band)
+    local nx, ny = -side * fy, side * fx
+    local half = (band + 0.15) * 0.5
+    local off = s.vehicleProfile.halfW + half
+    return MDADSensor.probeSide(s.sensor, vehicle, getCell(), bx + nx * off, by + ny * off, fx, fy, nx, ny,
+        s.vehicleProfile.halfL + 0.15, half)
 end
 
 -- 前後皆堵的側向脫困起手（startRecoveryAttempt 最短倒車帶也命中真障礙時；TUNE 註解見 SIDE_ESCAPE）：前方被擋
@@ -7274,16 +7277,20 @@ function Drive.sideEscapeStart(s, vehicle, playerNum, now, vx, vy, rear, kind, c
     if finite(h) and finite(s.lastLatSigned) and finite(s.expectedLane)
             and (s.expectedLane - s.lastLatSigned) * (fx * cos(h) + fy * sin(h)) < 0 then pref = -1 end
     local room = TUNE.SIDE_ESCAPE_ROOM_M
-    local side, stB = nil, "skip"
-    local stA = Drive.sideProbe(s, vehicle, out, fx, fy, pref, room)
+    local side = nil
+    local stA, ax, ay = Drive.sideProbe(s, vehicle, out, fx, fy, pref, room)
+    local stB, bxh, byh = "skip", nil, nil
     if stA == "clear" then
         side = pref
     else
-        stB = Drive.sideProbe(s, vehicle, out, fx, fy, -pref, room)
+        stB, bxh, byh = Drive.sideProbe(s, vehicle, out, fx, fy, -pref, room)
         if stB == "clear" then side = -pref end
     end
     BaseVehicle.releaseVector3f(out)
-    local detail = (pref > 0 and "dir+1=" or "dir-1=") .. stA .. (pref > 0 and " dir-1=" or " dir+1=") .. stB
+    -- 每側的結果帶命中點（E2E 1006：只有 vehicle 兩字查不出是哪台車擋了側帶）
+    local tagA = (finite(ax) and finite(ay)) and string.format("%s@%.1f,%.1f", stA, ax, ay) or stA
+    local tagB = (finite(bxh) and finite(byh)) and string.format("%s@%.1f,%.1f", stB, bxh, byh) or stB
+    local detail = (pref > 0 and "dir+1=" or "dir-1=") .. tagA .. (pref > 0 and " dir-1=" or " dir+1=") .. tagB
     if getDebug() then
         print(string.format("%spn=%d side escape %s attempt=%d rear=%s/%s %s", LOG, playerNum,
             side and ("start dir=" .. side) or "none", s.episodeAttempts, tostring(rear), tostring(kind), detail))

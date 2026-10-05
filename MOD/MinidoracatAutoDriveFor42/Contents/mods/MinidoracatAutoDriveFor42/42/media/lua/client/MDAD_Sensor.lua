@@ -2028,3 +2028,125 @@ function MDADSensor.probeRear(state, vehicle, cell, bodyX, bodyY,
     if not ok then return "unloaded", bodyX, bodyY, "getter", tostring(status) end
     return status, hitX, hitY, kind, nil
 end
+
+-- 定向矩形（中心 rx,ry；F/N 單位正交軸；半長 halfF／halfN）對另一台車真車體多邊形的 SAT（1006 側向脫困）。
+-- 多邊形＝VehiclePoly 半徑 0 的四角（BaseVehicle.java:4177-4190；四角同 pushVehicleOutline：COM±extents 經
+-- getWorldPos）。回 true＝相交（相切也算）、false＝分離、nil＝幾何讀不到（呼叫端 fail-closed）。out 是呼叫端的池向量。
+function MDADSensor.stripHitsVehicle(cv, out, rx, ry, fx, fy, nx, ny, halfF, halfN)
+    local ok, x1, y1, x2, y2, x3, y3, x4, y4 = pcall(function()
+        local script = cv:getScript()
+        local ext, com = script:getExtents(), script:getCenterOfMassOffset()
+        local hw, hl, cx, cz = ext:x() * 0.5, ext:z() * 0.5, com:x(), com:z()
+        cv:getWorldPos(cx - hw, 0, cz + hl, out)
+        local ax, ay = out:x(), out:y()
+        cv:getWorldPos(cx + hw, 0, cz + hl, out)
+        local bx, by = out:x(), out:y()
+        cv:getWorldPos(cx + hw, 0, cz - hl, out)
+        local qx, qy = out:x(), out:y()
+        cv:getWorldPos(cx - hw, 0, cz - hl, out)
+        return ax, ay, bx, by, qx, qy, out:x(), out:y()
+    end)
+    if not ok or not finite(x1) or not finite(y1) or not finite(x2) or not finite(y2)
+            or not finite(x3) or not finite(y3) or not finite(x4) or not finite(y4) then return nil end
+    -- 矩形兩軸：四角投影（相對矩形中心）整段落在 ±half 之外＝分離
+    local p1, p2 = (x1 - rx) * fx + (y1 - ry) * fy, (x2 - rx) * fx + (y2 - ry) * fy
+    local p3, p4 = (x3 - rx) * fx + (y3 - ry) * fy, (x4 - rx) * fx + (y4 - ry) * fy
+    if (p1 > halfF and p2 > halfF and p3 > halfF and p4 > halfF)
+            or (p1 < -halfF and p2 < -halfF and p3 < -halfF and p4 < -halfF) then return false end
+    p1, p2 = (x1 - rx) * nx + (y1 - ry) * ny, (x2 - rx) * nx + (y2 - ry) * ny
+    p3, p4 = (x3 - rx) * nx + (y3 - ry) * ny, (x4 - rx) * nx + (y4 - ry) * ny
+    if (p1 > halfN and p2 > halfN and p3 > halfN and p4 > halfN)
+            or (p1 < -halfN and p2 < -halfN and p3 < -halfN and p4 < -halfN) then return false end
+    -- 多邊形兩條邊的軸：矩形中心投影 ± 半徑 對多邊形投影區間
+    for k = 1, 2 do
+        local ax, ay = x2 - x1, y2 - y1
+        if k == 2 then ax, ay = x3 - x2, y3 - y2 end
+        local len = sqrt(ax * ax + ay * ay)
+        if not (len > 1e-6) then return nil end
+        ax, ay = ax / len, ay / len
+        local q1, q2, q3, q4 = x1 * ax + y1 * ay, x2 * ax + y2 * ay, x3 * ax + y3 * ay, x4 * ax + y4 * ay
+        local lo, hi = q1, q1
+        if q2 < lo then lo = q2 elseif q2 > hi then hi = q2 end
+        if q3 < lo then lo = q3 elseif q3 > hi then hi = q3 end
+        if q4 < lo then lo = q4 elseif q4 > hi then hi = q4 end
+        local c = rx * ax + ry * ay
+        local r = halfF * abs(fx * ax + fy * ay) + halfN * abs(nx * ax + ny * ay)
+        if c - r > hi or c + r < lo then return false end
+    end
+    return true
+end
+
+-- 側向脫困的側帶探測本體（MDADSensor.probeSide 以 pcall 呼叫；out＝池向量）。地形照 probeDirectional 格級
+-- （格未載入、分類不明＝unloaded）；車輛改用真車體多邊形（stripHitsVehicle）：格級 isIntersectingSquare 整格算命中，
+-- 車頭前 0.3m 的前車與側帶共用一排格就被當成側邊有車（E2E 1006 sideescape A／A3 兩側都判 vehicle）。格級
+-- container 找到的車與 IsoCell 全域 Set 的車都驗多邊形；讀不到幾何＝unloaded（kind vehicleGeom）。
+function MDADSensor.sideScan(state, vehicle, cell, out, rx, ry, fx, fy, nx, ny, halfF, halfN)
+    if type(state) ~= "table" or vehicle == nil or cell == nil or out == nil
+            or not finite(rx) or not finite(ry) or not finite(fx) or not finite(fy)
+            or not finite(nx) or not finite(ny) or not finite(halfF) or halfF <= 0
+            or not finite(halfN) or halfN <= 0
+            or abs(fx * fx + fy * fy - 1) > 0.02 or abs(nx * nx + ny * ny - 1) > 0.02
+            or abs(fx * nx + fy * ny) > 0.02 then
+        return "unloaded", rx, ry, "geometry"
+    end
+    if not flagsBound then bindFlags() end
+    local z = vehicle:getZ()
+    if not finite(z) then return "unloaded", rx, ry, "geometry" end
+    z = z - z % 1
+    local reachX = halfF * abs(fx) + halfN * abs(nx)
+    local reachY = halfF * abs(fy) + halfN * abs(ny)
+    local gx0, gx1, gy0, gy1 = rx - reachX, rx + reachX, ry - reachY, ry + reachY
+    gx0, gx1 = gx0 - gx0 % 1 - 1, gx1 - gx1 % 1
+    gy0, gy1 = gy0 - gy0 % 1 - 1, gy1 - gy1 % 1
+    for gx = gx0, gx1 do
+        for gy = gy0, gy1 do
+            if orientedRectHitsSquare(rx, ry, fx, fy, nx, ny, halfF, halfN, gx, gy) then
+                local square = cell:getGridSquare(gx, gy, z)
+                if square == nil then return "unloaded", gx + 0.5, gy + 0.5, "gridSquare" end
+                local hard, kind = probeSquareHard(state, square)
+                if hard == nil then return "unloaded", gx + 0.5, gy + 0.5, kind end
+                if hard then return "hard", gx + 0.5, gy + 0.5, kind end
+                local cv = square:getVehicleContainer()
+                if cv ~= nil and cv ~= vehicle and cv ~= state.selfTrailer then
+                    local hit = MDADSensor.stripHitsVehicle(cv, out, rx, ry, fx, fy, nx, ny, halfF, halfN)
+                    if hit == nil then return "unloaded", gx + 0.5, gy + 0.5, "vehicleGeom" end
+                    if hit then return "vehicle", cv:getX(), cv:getY(), "vehicle" end
+                end
+            end
+        end
+    end
+    -- 格級 container 可能先回自己、遮住同格第二台車（同 probeDirectional）：全域 Set 逐台驗多邊形
+    local vehicles = cell:getVehicles()
+    if vehicles == nil then return "unloaded", rx, ry, "vehiclePool" end
+    local it = vehicles:iterator()
+    if it == nil then return "unloaded", rx, ry, "vehiclePool" end
+    local near = halfF + halfN + 8
+    while it:hasNext() do
+        local other = it:next()
+        if other ~= nil and other ~= vehicle and other ~= state.selfTrailer then
+            local ox, oy = other:getX(), other:getY()
+            if not finite(ox) or not finite(oy) then return "unloaded", rx, ry, "vehicleGeom" end
+            if (ox - rx) * (ox - rx) + (oy - ry) * (oy - ry) <= near * near then
+                local hit = MDADSensor.stripHitsVehicle(other, out, rx, ry, fx, fy, nx, ny, halfF, halfN)
+                if hit == nil then return "unloaded", ox, oy, "vehicleGeom" end
+                if hit then return "vehicle", ox, oy, "vehicle" end
+            end
+        end
+    end
+    return "clear", nil, nil, nil
+end
+
+-- 側向脫困的側帶探測（Driver Drive.sideProbe）：矩形由呼叫端給（車身側面往外要移入的那條帶）。回
+-- status,hitX,hitY,kind,detail（clear|hard|vehicle|unloaded，同 probeRear）；任何 getter／池向量失敗＝unloaded。
+function MDADSensor.probeSide(state, vehicle, cell, rx, ry, fx, fy, nx, ny, halfF, halfN)
+    if type(BaseVehicle) ~= "table" or type(BaseVehicle.allocVector3f) ~= "function" then
+        return "unloaded", rx, ry, "vectorPool", nil
+    end
+    local out = BaseVehicle.allocVector3f()
+    if out == nil then return "unloaded", rx, ry, "vectorPool", nil end
+    local ok, status, hitX, hitY, kind = pcall(MDADSensor.sideScan, state, vehicle, cell, out,
+        rx, ry, fx, fy, nx, ny, halfF, halfN)
+    BaseVehicle.releaseVector3f(out)
+    if not ok then return "unloaded", rx, ry, "getter", tostring(status) end
+    return status, hitX, hitY, kind, nil
+end
