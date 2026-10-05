@@ -565,7 +565,7 @@ local function dumpManifest()
 end
 
 -- 段落索引：只列 occupied 槽（started > 0），最多 SLOT_N 列，一列一段自駕。
--- 欄位固定 slot／startTs／endTs／bytes／reason／file，raw epoch ms、不含時區
+-- 欄位固定 slot／startTs／endTs／bytes／reason／file／drive／part（8 欄），raw epoch ms、不含時區
 -- ——時區在跨機器回報時是純噪音，epoch 直接對得上 log 內的 ts 欄位。
 -- 沒有任何 occupied 槽時寫成空檔（不是刪檔）：readback 才有穩定的期望值。
 local function dumpIndex()

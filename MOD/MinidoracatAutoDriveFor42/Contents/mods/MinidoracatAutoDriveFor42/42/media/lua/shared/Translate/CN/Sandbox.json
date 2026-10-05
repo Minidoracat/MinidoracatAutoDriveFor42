@@ -30,7 +30,7 @@
     "Sandbox_MinidoracatAutoDriveZombieAreaSlowdown_option2": "由玩家决定",
     "Sandbox_MinidoracatAutoDriveZombieAreaSlowdown_option3": "不因僵尸减速",
     "Sandbox_MinidoracatAutoDriveCorpseSlowdown": "地面尸体减速政策",
-    "Sandbox_MinidoracatAutoDriveCorpseSlowdown_tooltip": "判定范围：前方 2～48 米（高速设置时 110 米）、行驶线左右各 3 米内的地面尸体。\n开启时：闪不过的尸体（没有空隙、被障碍挡住或关闭「闪避僵尸与尸体」）只要至少 1 具便限速 20 公里／小时，数量不再分级；闪得过就不减速。尸体不算障碍物，不会为其停车。\n强制减速＝所有玩家套用；由玩家决定（默认）＝每位玩家可在 HUD／选项切换；不因尸体减速＝只取消这项尸体专属限速，其他安全限制仍然有效。\n管理员按「应用」后立即生效。",
+    "Sandbox_MinidoracatAutoDriveCorpseSlowdown_tooltip": "判定范围：前方 2～48 米（高速设置时 110 米）、行驶线左右各 3 米内的地面尸体。\n开启时：闪不过的尸体（没有空隙、被障碍挡住或关闭「闪避僵尸与尸体」）只要至少 1 具便限速 30 公里／小时，数量不再分级；闪得过就不减速。尸体不算障碍物，不会为其停车。\n强制减速＝所有玩家套用；由玩家决定（默认）＝每位玩家可在 HUD／选项切换；不因尸体减速＝只取消这项尸体专属限速，其他安全限制仍然有效。\n管理员按「应用」后立即生效。",
     "Sandbox_MinidoracatAutoDriveCorpseSlowdown_option1": "强制减速",
     "Sandbox_MinidoracatAutoDriveCorpseSlowdown_option2": "由玩家决定",
     "Sandbox_MinidoracatAutoDriveCorpseSlowdown_option3": "不因尸体减速",

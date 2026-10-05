@@ -57,6 +57,9 @@
                            console 也不留訊息（「做得出來但零產出」的成因）
  15. Phase 1 telemetry 靜態契約 — 新模組檔、HUD 選項／reader、翻譯鍵必須存在；
                            聚焦測試檔列入閘門但只檢查存在、不執行（主流程才跑）
+15b. telemetry 事件鍵 ⊆ EK — encodeEvent 只輸出 EK 白名單的鍵，其餘靜默丟掉；Driver 的
+                           diagEvent 與任何直接的 MDADDiagnostics.event 呼叫，payload 必須是
+                           字面表（或省略），每個鍵都在 EK，否則玩家上傳的紀錄少那一欄
 
 新增檢查時：同步把對應的坑記進 AGENTS.md 踩坑錄，並依「踩坑進化協議」回流到
 pz-mod-template（見 AGENTS.md）。
@@ -1403,6 +1406,138 @@ for rel in FOCUSED_TESTS:
         phase1.append(f"缺聚焦測試 {rel}（閘門只檢查存在，不執行）")
 fail("Phase 1 telemetry 靜態契約", phase1) if phase1 else ok(
     "Phase 1 telemetry 靜態契約（模組／選項／翻譯／聚焦測試檔存在且未執行）")
+
+# ---- 15b. telemetry 事件 payload 鍵 ⊆ EK ----
+# encodeEvent（MDAD_Diagnostics.lua）只照 EK 白名單輸出，其餘鍵靜默丟掉：新事件欄位忘了加進 EK，
+# 玩家上傳的紀錄就少那一欄，復盤時才發現（1004a 抓到 defer why=speed 的 spd）。核對 Driver 每個
+# diagEvent(s, playerNum, name, payload) 與任何檔案直接呼叫的 MDADDiagnostics.event(pn, name, payload)：
+# payload 省略／nil，或含字面表且每個鍵都在 EK；傳變數就核對不了，一律 FAIL。
+_LUA_LONG = re.compile(r"(--)?\[(=*)\[")
+_LUA_KEY = re.compile(r'(?:([A-Za-z_]\w*)|\[\s*"([^"]*)"\s*\])\s*=(?!=)')
+
+
+def _lua_skip_string(code, i):
+    """code[i] 是引號：回傳字串結束後的位置。"""
+    q, j, n = code[i], i + 1, len(code)
+    while j < n and code[j] != q:
+        j += 2 if code[j] == "\\" else 1
+    return j + 1
+
+
+def lua_code_only(text):
+    """Lua 註解換成空白（保留換行、字串與長字串），字串裡的 -- 不算註解。"""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == '"' or c == "'":
+            end = _lua_skip_string(text, i)
+            out.append(text[i:end])
+        elif c == "[" or text.startswith("--", i):
+            mm = _LUA_LONG.match(text, i)
+            if mm:
+                end = text.find("]" + mm.group(2) + "]", mm.end())
+                end = n if end < 0 else end + len(mm.group(2)) + 2
+                out.append(re.sub(r"[^\n]", " ", text[i:end]) if mm.group(1) else text[i:end])
+            elif c == "[":
+                end = i + 1
+                out.append(c)
+            else:
+                end = text.find("\n", i)
+                end = n if end < 0 else end
+                out.append(" " * (end - i))
+        else:
+            end = i + 1
+            out.append(c)
+        i = end
+    return "".join(out)
+
+
+def lua_split_top(code, start):
+    """code[start] 是開括號：回傳 (頂層 , 或 ; 切開的片段, 右括號位置)；不平衡回 (None, len)。"""
+    parts, depth, i, seg, n = [], 0, start, start + 1, len(code)
+    while i < n:
+        c = code[i]
+        if c == '"' or c == "'":
+            i = _lua_skip_string(code, i)
+            continue
+        if c in "({[":
+            depth += 1
+        elif c in ")}]":
+            depth -= 1
+            if depth == 0:
+                parts.append(code[seg:i])
+                return [p.strip() for p in parts], i
+        elif c in ",;" and depth == 1:
+            parts.append(code[seg:i])
+            seg = i + 1
+        i += 1
+    return None, n
+
+
+def lua_table_bodies(expr):
+    """expr 裡最外層的字面表（不在其他字面表內），每個回傳頂層項清單；不平衡的表回 None。"""
+    bodies, i, n = [], 0, len(expr)
+    while i < n:
+        c = expr[i]
+        if c == '"' or c == "'":
+            i = _lua_skip_string(expr, i)
+            continue
+        if c == "{":
+            items, end = lua_split_top(expr, i)
+            bodies.append(items)
+            i = end + 1
+            continue
+        i += 1
+    return bodies
+
+
+ek_issues, ek_calls, EK_KEYS = [], 0, set()
+ek_src = {}
+for f in LUA_FILES:
+    with open(f, encoding="utf-8") as fh:
+        ek_src[f] = lua_code_only(fh.read())
+ek_diag = [f for f in ek_src if os.path.basename(f) == "MDAD_Diagnostics.lua"]
+ek_drv = [f for f in ek_src if os.path.basename(f) == "MDAD_Driver.lua"]
+if not ek_diag or not ek_drv:
+    ek_issues.append("缺 MDAD_Diagnostics.lua 或 MDAD_Driver.lua")
+else:
+    mm = re.search(r"\blocal EK\s*=\s*\{", ek_src[ek_diag[0]])
+    ek_items = lua_split_top(ek_src[ek_diag[0]], mm.end() - 1)[0] if mm else None
+    EK_KEYS = {it[1:-1] for it in ek_items or [] if re.fullmatch(r'"[A-Za-z_]\w*"', it)}
+    if len(EK_KEYS) < 10:
+        ek_issues.append(f"MDAD_Diagnostics.lua 解析不到 EK 白名單（{len(EK_KEYS)} 鍵）：`local EK = {{ … }}` 格式變了？")
+    sites = [] if ek_issues else [(ek_drv[0], r"(?<![\w.:])diagEvent\s*\(", 3)]
+    sites += [] if ek_issues else [(f, r"(?<![\w.:])MDADDiagnostics\.event\s*\(", 2) for f in ek_src]
+    for f, pattern, idx in sites:
+        code, rel = ek_src[f], os.path.relpath(f, REPO)
+        for mm in re.finditer(pattern, code):
+            if re.search(r"function\s*$", code[max(0, mm.start() - 20):mm.start()]):
+                continue
+            line = code.count("\n", 0, mm.start()) + 1
+            args = lua_split_top(code, mm.end() - 1)[0]
+            if args is None:
+                ek_issues.append(f"{rel}:{line} 事件呼叫括號不平衡")
+                continue
+            ek_calls += 1
+            if len(args) <= idx or args[idx] in ("", "nil"):
+                continue
+            bodies = lua_table_bodies(args[idx])
+            if not bodies:
+                ek_issues.append(f"{rel}:{line} payload 不是字面表，核對不了鍵：{args[idx][:60]}")
+            for items in bodies:
+                if items is None:
+                    ek_issues.append(f"{rel}:{line} payload 字面表括號不平衡")
+                    continue
+                for it in items:
+                    km = _LUA_KEY.match(it) if it else None
+                    if it and not km:
+                        ek_issues.append(f"{rel}:{line} payload 有無名項（encodeEvent 只輸出具名鍵）：{it[:40]}")
+                    elif km and (km.group(1) or km.group(2)) not in EK_KEYS:
+                        ek_issues.append(f"{rel}:{line} 鍵 {km.group(1) or km.group(2)} 不在 EK，會被靜默丟掉")
+    if sites and ek_calls == 0:
+        ek_issues.append("MDAD_Driver.lua 找不到任何 diagEvent 呼叫（解析失效）")
+fail("telemetry 事件 payload 鍵 ⊆ EK（不在白名單的鍵會被靜默丟掉）", ek_issues) if ek_issues else ok(
+    f"telemetry 事件 payload 鍵 ⊆ EK（{ek_calls} 個事件呼叫、EK {len(EK_KEYS)} 鍵）")
 
 # ---- 16. 意圖層階段 2 結構契約（RECOVER 單一進口）----
 # 2026-09-01 重構階段 2 主體 2：舊制五個需求方各自呼 startRecoveryAttempt，

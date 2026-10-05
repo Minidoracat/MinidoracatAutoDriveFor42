@@ -30,7 +30,7 @@
     "Sandbox_MinidoracatAutoDriveZombieAreaSlowdown_option2": "プレイヤーに任せる",
     "Sandbox_MinidoracatAutoDriveZombieAreaSlowdown_option3": "ゾンビでは減速しない",
     "Sandbox_MinidoracatAutoDriveCorpseSlowdown": "地面の死体の減速ポリシー",
-    "Sandbox_MinidoracatAutoDriveCorpseSlowdown_tooltip": "判定範囲：前方2～48メートル（高速設定では110メートル）、走行ラインの左右それぞれ3メートル以内にある地面の死体。\n有効時は、よけきれない死体（隙間がない、障害物にふさがれている、または「ゾンビと死体をよける」がオフ）が1体以上あると20 km/hに制限し、数が増えても段階は変わりません。よけられる死体では減速しません。死体は障害物ではないため、停止はしません。\n強制減速は全員に適用、プレイヤーに任せる（初期値）は各自がHUD／オプションで切替、死体では減速しないはこの専用制限だけを解除し、ほかの安全制限は有効なままです。\n管理者が「適用」を押すと即座に反映されます。",
+    "Sandbox_MinidoracatAutoDriveCorpseSlowdown_tooltip": "判定範囲：前方2～48メートル（高速設定では110メートル）、走行ラインの左右それぞれ3メートル以内にある地面の死体。\n有効時は、よけきれない死体（隙間がない、障害物にふさがれている、または「ゾンビと死体をよける」がオフ）が1体以上あると30 km/hに制限し、数が増えても段階は変わりません。よけられる死体では減速しません。死体は障害物ではないため、停止はしません。\n強制減速は全員に適用、プレイヤーに任せる（初期値）は各自がHUD／オプションで切替、死体では減速しないはこの専用制限だけを解除し、ほかの安全制限は有効なままです。\n管理者が「適用」を押すと即座に反映されます。",
     "Sandbox_MinidoracatAutoDriveCorpseSlowdown_option1": "強制減速",
     "Sandbox_MinidoracatAutoDriveCorpseSlowdown_option2": "プレイヤーに任せる",
     "Sandbox_MinidoracatAutoDriveCorpseSlowdown_option3": "死体では減速しない",
