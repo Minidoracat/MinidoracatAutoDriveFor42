@@ -177,10 +177,12 @@ local CURVE_FF_FRAC = 0.75
 -- （穩態門檻與 steer 低通共用；前饋進弧爬升的 CURVE_FF_LEAD_S 是同一個量）。fbOppose＝回授正規化增益（yawGainFb）
 -- 剔除的反相 yaw 率門檻（rad/s，見 control 的 yaw 增益估計段）；inM／inSpanM＝弧段前饋的彎內偏差退讓（見
 -- arcFeedForward 尾段）；slipOut＝高速增益學習的往彎外側滑門檻（rad，state.slip；語料 >40 km/h 弧上正常幀率
--- 往彎外 |vt|/v >0.03 只占 1%，正式服 1005h 過轉 0.045／0.086）；同表是為了不多占 control 的 upvalue。
+-- 往彎外 |vt|/v >0.03 只占 1%，正式服 1005h 過轉 0.045／0.086）；exitTauS／exitTcS／exitSpanM／yawTauS＝出弧殘餘轉角
+-- （見 MDADFollower.arcExitResidual）；同表是為了不多占 control 的 upvalue。
 local CURVE_FF_LEAD_S = 0.35
 local FF_HI = { fromKmh = 30, fullKmh = 55, frac = 0.9, learnKmh = 40, minFF = 0.1, learnS = 0.5,
-    settleS = CURVE_FF_LEAD_S, fbOppose = 0.5, inM = 0.3, inSpanM = 0.5, slipOut = 0.03 }
+    settleS = CURVE_FF_LEAD_S, fbOppose = 0.5, inM = 0.3, inSpanM = 0.5, slipOut = 0.03,
+    exitTauS = 0.2, exitTcS = 0.1, exitSpanM = 15, yawTauS = 0.05 }
 local CURVE_FF_MAX = 0.8 -- 小增益長車不能用倒數把前饋放大成整車橫推；回饋仍保留完整權威。
 local YAW_GAIN_INIT = 0.8
 local YAW_GAIN_TAU_S = 0.5
@@ -1368,7 +1370,11 @@ local function arcFeedForward(profile, state, arcK, bestI, sNow, aspeed, tangent
             e = nx
         end
         local endS = s[e + 1]
-        if endS < sNow + lead then ramp = ramp * (endS - sNow) / lead end
+        if endS < sNow + lead then
+            ramp = ramp * (endS - sNow) / lead
+            -- 出弧殘餘轉角的參考（MDADFollower.arcExitResidual）：收尾終點、出口段朝向、轉向方向
+            state.exitEndS, state.exitH, state.exitTurn = endS, segH[e + 1] or segH[e], dth < 0 and -1 or 1
+        end
     end
     -- 前饋整份在推（不在爬升／收尾）：高速增益只學這種幀（FF_HI）
     state.ffFull = ramp >= 1 and k == bestI
@@ -1424,6 +1430,40 @@ local function arcFeedForward(profile, state, arcK, bestI, sNow, aspeed, tangent
         if over > 0 then ff = ff * (1 - over) end
     end
     return ff
+end
+
+-- 出弧殘餘轉角（1006；E2E campaign rc61 0008：93chevySilveradoCC 50 km/h 出 R24 46° 左彎時車頭還落後出口段 0.094 rad，
+-- 出彎後 1 秒外漂 0.93m、同時加速到 69 km/h，右前角撞路緣路燈）。弧段前饋在出口前 CURVE_FF_LEAD_S 線性收尾，收尾長度是照
+-- yaw 延遲 τ 0.25–0.35 的 plant 定的；這台車 yaw 跟得快（τ≈0.1）、小 steer 又幾乎轉不動（|st|<0.3 時 yr/st≈0.3–0.4，
+-- 弧上 0.6 以上約 1.0），前饋一收 yaw 就掉光，車頭帶著落後角出弧。出弧後只剩 KP·err 的小 steer（落在低增益區）與 1/v 的
+-- cross-track，車頭要 1 秒才轉正，外漂已是 v×落後角×1 秒。
+-- 做法：出口後 exitSpanM 內，以「車頭對出口段的落後角，扣掉 yaw 率 × exitTauS（還在路上的轉動）」補一份前饋，exitTcS 秒
+-- 轉完（÷yawGain，同弧段前饋），只補同轉向、上限 CURVE_FF_MAX；預測落後 ≤0 就收掉整段。前視窗已有下一弧時 ff 不為 0
+-- （同向弧爬升、車道 ramp 項）：同向取大者不疊加，反向（S 彎）收掉。yaw 率扣除讓它對 plant 自適應：yaw 慢的車出口時 yaw
+-- 還大、扣完 ≤0 不加（改收尾 lead 本身是兩難：lead 減半時 τ0.35 plant 出彎切內 0.47→0.70，見 route.md）。承諾線
+-- （trackTangent）有自己的切線追蹤，不補。回要加到 ff 的帶號 steer；每幀呼叫（yaw 率低通要連續）。
+-- 離線閉環 test_follower「1006：出弧殘餘轉角」。
+function MDADFollower.arcExitResidual(state, heading, ph, dt, sNow, ff)
+    if isFinite(ph) and dt > 1e-4 and dt < 0.5 then
+        local a = dt / FF_HI.yawTauS
+        if a > 1 then a = 1 end
+        local w = state.yawRateF or 0
+        state.yawRateF = w + (wrapPi(heading - ph) / dt - w) * a
+    end
+    local endS = state.exitEndS
+    if endS == nil or sNow < endS or state.trackTangent == true then return 0 end
+    local turn = state.exitTurn
+    local lag = turn * (wrapPi(state.exitH - heading) - (state.yawRateF or 0) * FF_HI.exitTauS)
+    if lag <= 0 or ff * turn < 0 or sNow > endS + FF_HI.exitSpanM then
+        state.exitEndS = nil
+        return 0
+    end
+    local g = state.yawGain
+    if not isFinite(g) or g <= 0 then g = YAW_GAIN_INIT end
+    local add = lag / (FF_HI.exitTcS * g)
+    if add > CURVE_FF_MAX then add = CURVE_FF_MAX end
+    add = add - ff * turn
+    return add > 0 and turn * add or 0
 end
 
 -- 弧段即時帽（m/s）與折算後 κ：中心線 κ（j 與 j+1 取大）；行駛線往彎內側偏 latHere 時半徑＝R−lt
@@ -2300,7 +2340,7 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         if targetSpeed > ROTATE_SPEED_KMH then targetSpeed = ROTATE_SPEED_KMH end
         state.errPrev = err
         state.ffSteer, state.ffSteadyT, state.hiSteerLag = 0, 0, nil
-        state.prevHeading = nil -- 調頭飽和轉向不進增益估計
+        state.prevHeading, state.exitEndS = nil, nil -- 調頭飽和轉向不進增益估計；調頭後不補舊弧的出弧殘餘轉角
     else
         local ePrev = state.errPrev
         if not isFinite(ePrev) then ePrev = err end
@@ -2419,6 +2459,8 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         -- ---- 弧段前饋（arcFeedForward）----
         local ff = arcFeedForward(profile, state, arcK, bestI, sNow, aspeed, tangentOn, yawGain,
             tangentOn and ovDen or nil, latSigned, lineLat)
+        -- 出弧殘餘轉角（算進 ffSteer：已 ÷yawGain，Driver 回授正規化不再放大；control 的 local 已滿 189，不另開）
+        ff = ff + MDADFollower.arcExitResidual(state, heading, ph, dt, sNow, ff)
         if ff ~= 0 then
             steer = steer + ff
             if steer > STEER_MAX then steer = STEER_MAX
@@ -2479,6 +2521,7 @@ function MDADFollower.resetControl(state)
     state.trackTangent = false
     state.tangentOn = false
     state.ffSteer, state.ffSteadyT, state.hiSteerLag = 0, 0, nil -- 低通／穩態計時跟施力歷史一起斷
+    state.exitEndS, state.yawRateF = nil, 0 -- 出弧殘餘轉角（arcExitResidual）：換線／脫困後不沿用舊弧的出口
     state.prevHeading = nil -- yawGain 是車的性質，跨 cutover／脫困保留；只斷差分
     state.slipX, state.slip = nil, 0 -- 側滑弦估計同樣斷差分（瞬移／脫困後重量）
     releaseExactLine(state)
