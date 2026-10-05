@@ -5264,11 +5264,17 @@ function Drive.visibilityCaps(s, now, visibleEnd, minBrakeVisible)
         s.visFrontRef = visibleEnd
     end
     local hold = s.visRoundS * TUNE.VIS_HOLD_MULT + TUNE.VIS_HOLD_ADD_S
+    -- 前緣錯過該有的一輪前進（停滯超過輪時保持）＝凍住：巡航帳正以 cruiseBrake 收向凍結前緣，記下這份計畫減速給
+    -- Drive.visAssistForce 的 vis 帳前饋（0＝前緣照輪前進，帳不變）。1005j 正式服三段：未載入前緣停 2–2.5 秒，巡航帽
+    -- 以 8–8.5 m/s² 下降，只靠比例項（上限 4）＋滑行跟不上、越過硬煞線。不等未載入保持用完：巡航帳在保持用完前
+    -- 就開始綁（實測約停 1 秒起），等到 1.5 秒才補已落後 5 km/h。
+    local stalled = (now - s.visFrontSince) / 1000
+    s.visStallBrake = stalled >= hold and cruiseBrake or 0
     if sen.unloaded and finite(sen.unloadedS) and sen.unloadedS <= sen.scanEndS + 0.5
             and hold < TUNE.VIS_UNLOADED_HOLD_S then
         hold = TUNE.VIS_UNLOADED_HOLD_S
     end
-    hold = hold - (now - s.visFrontSince) / 1000
+    hold = hold - stalled
     if hold < TUNE.VIS_HOLD_MIN_S then hold = TUNE.VIS_HOLD_MIN_S end
     s.visHold = hold
     local coast = s.horizonStamp == st and s.horizonMinCoast or s.safeCoast
@@ -5294,7 +5300,7 @@ function Drive.visibilityCaps(s, now, visibleEnd, minBrakeVisible)
             if termBrake < visBrake then termBrake = visBrake end
         end
         s.visibilityHardKmh = MDADDynamics.approachCapKmh(ahead, 0, TUNE.VIS_TERMINAL_TAU, termBrake)
-        cap, s.visHold = s.visibilityHardKmh, 0
+        cap, s.visHold, s.visStallBrake = s.visibilityHardKmh, 0, 0
     else
         s.visibilityHardKmh = MDADDynamics.visibilityCapKmh(hardAhead, TUNE.VIS_TAU, visBrake, halfL)
     end
@@ -5347,7 +5353,7 @@ end
 -- 巡航減速輔助（2026-09-27）：巡航帳假設能以 cruiseBrake 減速，但 regulator 斷油只有滑行
 --（NoControl brake 15，約 2.5–4.5 m/s²）；可視距離縮得比滑行快時，舊制只能等越過硬煞紅線
 -- 一秒鎖輪。實速超過巡航帽 TOL 以上就沿車身中線加反向外力補足，比例於超速量、上限
--- VIS_ASSIST_MAX；不鎖輪、轉向照常（與側推共用同一個 impulse 槽，中線分量不產生 yaw）。
+-- VIS_ASSIST_MAX（前緣停滯時另加前饋、上限放寬，見下）；不鎖輪、轉向照常（與側推共用同一個 impulse 槽，中線分量不產生 yaw）。
 -- 拖掛也加（0929o）：同一減速度依掛車質量另外施給掛車（Drive.towDecel）。掛車自己不煞車
 --（CarController.updateTrailer:383-393：Trailer 煞車力 0、被拖的車 10），只減牽引車＝掛車從後面推、
 -- 折角放大；兩節同減速度，掛點就不推。舊制拖車一律不加，重車只能滑行＝彎前很早收油，可視距離一縮
@@ -5367,6 +5373,16 @@ function Drive.visAssistForce(s, speedKmh, mult)
     -- 上限放到 DODGE_ASSIST_MAX（HOHOHO/clip-01：縫口前 1m 以 63 km/h 承諾 cap 18，只靠滑行到縫仍 56）
     local cap, amax, gain = s.visibilityCap, TUNE.VIS_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN
     local minKmh, why, ff = TUNE.VIS_ASSIST_MIN_KMH, "vis", 0
+    -- 前緣錯過一輪前進（Drive.visibilityCaps 的 s.visStallBrake）：巡航帳正以 cruiseBrake 收向凍結前緣，一超過就前饋
+    -- 「計畫－斷油」、上限放到 DODGE_ASSIST_MAX，比例項只追殘差。1005j 正式服三段：只有比例項（上限 4、要超 5 km/h
+    -- 才補滿）＋滑行 2.1＝每秒落後巡航帽數 km/h，剛好吃掉硬煞與巡航兩帳的差、一秒鎖輪停死。不用剖面帳的「帽在收
+    -- （ASSIST_FALL_KMH）」當條件：前緣照輪前進時可視帽在兩輪之間每幀都在收，一超過就前饋＝巡航一下煞一下放。
+    -- 也不把巡航煞車封頂在「滑行＋VIS_ASSIST_MAX」：那會在每次可視綁速時都降巡航速（60m 視距約少 13 km/h）。
+    local stallPlan = s.visStallBrake
+    if finite(stallPlan) and stallPlan > 0 then
+        local coast = finite(s.safeCoast) and s.safeCoast > 0 and s.safeCoast or 0
+        if stallPlan > coast then ff, amax = stallPlan - coast, TUNE.DODGE_ASSIST_MAX end
+    end
     -- 包絡在收（1002d）：剖面／車道包絡比上一次呼叫低 ASSIST_FALL_KMH 以上＝正在收向彎道。前饋只在這時補；
     -- 巡航（剖面＝上限）與弧內（平坦）一超過一點就前饋＝regulator 每次越過就脈衝減速。
     local pv = s.fstate and s.fstate.profileSpeedKmh
@@ -5376,7 +5392,7 @@ function Drive.visAssistForce(s, speedKmh, mult)
     s.assistPvLast, s.assistLceLast = pv, lce
     -- 彎前晚收油：剖面（fstate.profileSpeedKmh）已假設這份輔助（Follower.STYLES.coastAssist）
     if s.profile and (s.profile.coastAssist or 0) > 0 and finite(pv) and pv < cap then
-        cap, amax, gain, why = pv, TUNE.CURVE_ASSIST_MAX, TUNE.CURVE_ASSIST_GAIN, "profile"
+        cap, amax, gain, why, ff = pv, TUNE.CURVE_ASSIST_MAX, TUNE.CURVE_ASSIST_GAIN, "profile", 0
         -- 這段收油包絡建表時就算進輔助（coastAssistAt>0）：25 km/h 以下照補。
         -- 2026-10-01 正式服 0.14.0–0.16.0：MAX 急彎（彎帽 12）一秒鎖輪從每百公里 0.33 升到 1.2–1.8——
         -- 剖面最後 3–4m 從 25 收到 12 要 5–6 m/s²，舊制 25 以下整個不補、只剩斷油 2–3.6，抵達 18.5–20 km/h
@@ -5457,7 +5473,7 @@ function Drive.visAssistForce(s, speedKmh, mult)
     if speedKmh < minKmh then return 0 end
     local over = speedKmh - cap - TUNE.VIS_ASSIST_TOL_KMH
     local a
-    if (why == "profile" or why == "lane") and ff > 0 then
+    if ff > 0 and (why == "vis" or why == "profile" or why == "lane") then
         if speedKmh <= cap then return 0 end
         a = ff + (over > 0 and over * gain or 0)
     else

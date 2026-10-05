@@ -7304,6 +7304,13 @@ function drive.scenarioBrakeAssist()
     st.assistPvLast = 12
     MDAD.Drive.visAssistForce(st, 12.5, 1)
     checkEq(st.visAssistDecel, 0, "(curve-ff) 剖面平坦（弧內）：超一點點不前饋（" .. tostring(st.visAssistDecel) .. "）")
+    -- 可視前緣同時在停滯（s.visStallBrake，vt-freeze）：剖面帳接手時不沿用 vis 帳的停滯前饋。違規證明：剖面分支不清 ff＝紅。
+    local oldStall = st.visStallBrake
+    st.visStallBrake, st.assistPvLast = 8.4, 12
+    MDAD.Drive.visAssistForce(st, 12.5, 1)
+    checkTrue(st.visAssistDecel == 0 and st.visAssistWhy == nil,
+        "(curve-ff) 剖面平坦、可視前緣停滯：剖面帳不沿用 vis 前饋（vad=" .. tostring(st.visAssistDecel) .. "）")
+    st.visStallBrake = oldStall
     st.assistPvLast = 13
     MDAD.Drive.visAssistForce(st, 11.9, 1)
     checkEq(st.visAssistDecel, 0, "(curve-ff) 低於剖面：不補")
@@ -18993,6 +19000,66 @@ function drive.scenarioVisibilityTiming()
     end
     tn.VIS_ASSIST_MAX = assistMax
 
+    -- (vt-freeze) 1005j 正式服三段（49powerWagonPD×2、63beetleHP）：未載入前緣停住 2–2.5 秒（超過
+    --   VIS_UNLOADED_HOLD_S），巡航帳以 cruiseBrake 收向凍結前緣（實測巡航帽以 8–8.5 m/s² 下降），舊 vis 帳只有
+    --   比例項（上限 4、要超 5 km/h 才補滿）＋滑行 2.3＝跟不上，越過硬煞紅線一秒鎖輪停死。
+    --   新制：前緣錯過一輪前進（s.visStallBrake>0）且超過巡航帽就前饋「cruiseBrake－斷油」、上限 DODGE_ASSIST_MAX。
+    --   斷言：無 forceBrake／hbr=visibility、車速不歸 0、vad 超過 VIS_ASSIST_MAX 但在 DODGE_ASSIST_MAX 內、凍結期間實速
+    --   貼著巡航帽（落後 ≤ 2 km/h）。
+    --   違規證明：拿掉前饋＝全紅；上限留 VIS_ASSIST_MAX＝vad 那條紅；等未載入保持用完才前饋＝落後那條紅。
+    do
+        arm()
+        dveh._speed = 80
+        local frozen = st.lastSNow + 68
+        local t0, nextStamp = nowMs, nowMs
+        local minSpeed, maxVad, maxLag, visHbr = math.huge, 0, 0, false
+        while nowMs - t0 < 4000 and MDAD.Drive.isActive(0) do
+            if nowMs >= nextStamp then -- 輪照常完成；前 2.5 秒前緣凍在未載入區塊，之後恢復成車前 65m
+                local thawed = nowMs - t0 >= 2500
+                if thawed then frozen = st.lastSNow + 65 end
+                st.sensor.scanEndS, st.sensor.unloadedS = frozen, frozen
+                st.sensor.unloaded, st.sensor.stamp = true, nowMs
+                nextStamp = nowMs + 280
+            end
+            advance(0.02)
+            minSpeed = math.min(minSpeed, dveh._speed)
+            maxVad = math.max(maxVad, st.visAssistDecel or 0)
+            if st.lastHardBrakeReason == "visibility" then visHbr = true end
+            if nowMs - t0 < 2500 then maxLag = math.max(maxLag, dveh._speed - st.visibilityCap) end
+        end
+        checkEq(drive.calls.forceBrake, 0, "(vt-freeze) 未載入前緣凍 2.5 秒：不鎖輪")
+        checkTrue(not visHbr, "(vt-freeze) 沒有 hbr=visibility")
+        checkTrue(minSpeed > 25, "(vt-freeze) 車速不歸 0（最低 " .. string.format("%.1f", minSpeed) .. "）")
+        checkTrue(maxVad > tn.VIS_ASSIST_MAX + 1e-6 and maxVad <= tn.DODGE_ASSIST_MAX + 1e-9,
+            "(vt-freeze) 前饋補到 VIS_ASSIST_MAX 以上、不超過 DODGE_ASSIST_MAX（vad 最大 "
+            .. string.format("%.2f", maxVad) .. "）")
+        checkTrue(maxLag <= 2, "(vt-freeze) 凍結期間實速貼著巡航帽（最大落後 "
+            .. string.format("%.2f", maxLag) .. " km/h）")
+    end
+    -- (vt-steady) 一般可視行為不變：前緣每輪照常往前（車前 60m、未載入），可視帽綁速、前緣從未錯過一輪＝沒有前饋，
+    --   vis 帳每幀都等於舊制比例項 min((超速−TOL)×GAIN, VIS_ASSIST_MAX)。違規證明：前饋不看停滯＝紅。
+    do
+        arm()
+        dveh._speed = 80
+        local t0, nextStamp, bound, legacy = nowMs, nowMs, 0, true
+        while nowMs - t0 < 3000 and MDAD.Drive.isActive(0) do
+            if nowMs >= nextStamp then
+                local fr = st.lastSNow + 60
+                st.sensor.scanEndS, st.sensor.unloadedS = fr, fr
+                st.sensor.unloaded, st.sensor.stamp = true, nowMs
+                nextStamp = nowMs + 280
+            end
+            advance(0.02)
+            if st.lastCapReason == "visibility" then bound = bound + 1 end
+            if (st.visStallBrake or 0) > 0 then legacy = false end
+            local over = dveh._speed - st.visibilityCap - tn.VIS_ASSIST_TOL_KMH
+            local want = over > 0 and math.min(over * tn.VIS_ASSIST_GAIN, tn.VIS_ASSIST_MAX) or 0
+            if st.visAssistWhy == "vis" and math.abs(st.visAssistDecel - want) > 1e-6 then legacy = false end
+        end
+        checkTrue(bound > 50, "(vt-steady) 可視帽確實在綁速（" .. bound .. " 幀）")
+        checkTrue(legacy, "(vt-steady) 前緣照常前進：沒有停滯前饋、vis 帳只有舊制比例項")
+    end
+
     -- (vt-assist)
     arm()
     dveh._speed = 80
@@ -19474,9 +19541,11 @@ function drive.scenarioKnoxGate()
         .. tostring(stp.warnPrevVoice) .. "→" .. tostring(stp.warnVoice) .. " gate 語音 " .. gateVoices(stp.v0)
         .. " detail=" .. tostring(stpEv and stpEv.detail) .. " active=" .. tostring(MDAD.Drive.isActive(0)) .. "）")
 
-    -- (kv-steep-open) 同樣很快倒車，但門在停住 260ms（倒車前一刻）才開：倒車那刻的快照是開門前開始的那一輪（仍看到關門、判堵照舊），
-    -- 提示前再讀門格（MDADSensor.gateClosedAt）已經開了＝不提示。倒車照舊（判堵用的是同一份舊快照，不在本刀範圍）。
-    local stpo = approach(260, 6, 3)
+    -- (kv-steep-open) 同樣很快倒車，但門在倒車前一刻（同幾何 (kv-steep) 實測「停住→倒車」前 20ms）才開：倒車那刻的快照是開門前
+    -- 開始的那一輪（仍看到關門、判堵照舊），提示前再讀門格（MDADSensor.gateClosedAt）已經開了＝不提示。倒車照舊（判堵用的是同一份
+    -- 舊快照，不在本刀範圍）。舊 fixture 寫死「停住後 260ms」（當時停住→倒車 280ms）：vis 帳停滯前饋（關著的門＝停滯前緣）改了
+    -- 接近的速度剖面，停住→倒車變 380ms，260ms 就成了倒車前 120ms、新一輪看到開門而不倒車——改由 (kv-steep) 推「前一刻」。
+    local stpo = approach(stp.unstickAt - stp.stopAt - 20, 6, 3)
     checkTrue(stpo.stopAt ~= nil and stpo.openedAt ~= nil and stpo.unstickAt ~= nil and stpo.openedAt <= stpo.unstickAt
             and warnN(stpo.h0) == 0 and gateVoices(stpo.v0) == 0 and gateEv("shut") == nil,
         "(kv-steep-open) 倒車前一刻才開的門：不提示（停住→開門 " .. tostring(stpo.openedAt and stpo.stopAt
