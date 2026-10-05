@@ -12673,6 +12673,49 @@ end
 scenarioChain()
 end
 
+-- (c9x) 停留承諾的空間帽用停留線自己的几何（1006；open-issue「停留承諾的空間帽沿用主候選的出口長」）：
+--       c9 的 B 車＋出口後緊接一根路邊物（擋常駐線、不擋停留 lane），可視前緣在 31m——主候選出口被前緣
+--       截到 2.7m、回線段撞那根 → p4 → 停留。shape 暫存是主候選的：舊制 commit 的空間帽＝min(進入, 出口)≈0、
+--       sh 用 2.7m 出口算，進入段以爬行地板 10 km/h 起步（同一條停留線在 c9 不截短時 25.6）。
+--       契約：①空間帽＝停留自己的進入段 shiftSpaceSpeedCapKmh(dl, 進入長)，整線帽不被壓到爬行地板；
+--       ②過了進入段（保持段）沒有出口過渡：空間帽＝gearCap、整線帽＝min(保持段帽, 線曲率帽)（不在 c 前收到主候選出口帽）。
+do
+local function scenarioStayExit()
+    drive.fillWorld(-10, 120, -8, 8)
+    checkTrue(armDrive(), "(c9x) 啟動")
+    local _, cB = drive.putVehicleGeom(20, 1.6, 0, 1.8, 4.4, true)
+    drive.putSolid(29, 0, "harness_c9x_a")
+    for y = -8, 8 do drive.world[31 * 100000 + y] = nil end -- 可視前緣
+    driveReset(dveh)
+    drive.scanRound()
+    local st = MDAD.Drive.debugSession(0)
+    checkTrue(st.dodging == true and st.dodgeStay == true and st.dodgeTier == "plan-stay"
+            and st.sensor.unloaded and st.sensor.unloadedS < 32,
+        "(c9x) 前置：前緣 31m、回線段撞路邊物＝停留承諾（tier " .. tostring(st.dodgeTier) .. "）")
+    checkTrue(type(st.dodgeExitLength) == "number" and st.dodgeExitLength < 3
+            and type(st.dodgeEntryLength) == "number" and st.dodgeEntryLength > 10,
+        "(c9x) 前置：shape 暫存的主候選出口被前緣截短（exit " .. tostring(st.dodgeExitLength)
+        .. " entry " .. tostring(st.dodgeEntryLength) .. "）")
+    local vp = st.vehicleProfile
+    local own = MDADDynamics.shiftSpaceSpeedCapKmh(st.dodgeShapeDl, st.dodgeEntryLength, st.dodgeSpaceLat,
+        vp.wheelbase, vp.delta0Safe, vp.deltaVSafe, vp.maxSpeed, MDADDynamics.LATERAL_JERK_MAX)
+    checkNear(st.dodgeSpaceCap, own, 1e-9,
+        "(c9x) 空間帽＝停留自己的進入段（實得 " .. tostring(st.dodgeSpaceCap) .. " 期望 " .. tostring(own) .. "）")
+    checkTrue(st.dodgeSpeedCap > MDAD.Drive.debugTune().DODGE_CRAWL_MID_KMH + 10,
+        "(c9x) 停留整線帽不被主候選出口壓到爬行地板（實得 " .. tostring(st.dodgeSpeedCap) .. "）")
+    MDAD.Drive.debugDodgeCaps(st, st.dodgeMargin, st.dodgeKappa, st.safeLat, st.dodgeVisibilityCap, false, true)
+    checkEq(st.dodgeSpaceCap, st.gearCap, "(c9x) 保持段沒有出口過渡：空間帽＝gearCap（實得 " .. tostring(st.dodgeSpaceCap) .. "）")
+    checkNear(st.dodgeSpeedCap, math.min(st.dodgeHoldCap, st.dodgeCurveCap), 1e-9,
+        "(c9x) 保持段整線帽＝min(保持段帽, 線曲率帽)：c 前不收到主候選出口帽（cap " .. tostring(st.dodgeSpeedCap)
+        .. " hold " .. tostring(st.dodgeHoldCap) .. " curve " .. tostring(st.dodgeCurveCap) .. "）")
+    drive.clearVehicleGeom(cB)
+    drive.clearCell(29, 0)
+    MDAD.Drive.stop(0, nil)
+    drive.fillWorld(-2, 70, -7, 7)
+end
+scenarioStayExit()
+end
+
 -- (c9L) 停留 lane 前瞻（2026-09-04 st176,185「為什麼沒有提前預估」：A 北側 −3.25 停留、B 縫在
 --       +1.75、A 尾到 B 頭 6m 塞不進 5m 側移的 10m 跑道 → 每輪 steep → blocked → 倒車 → 斜切撞 B）：
 --       圍籬把路收成 ±4.3；常駐偏置 +2；A 貼北緣（只能從南側 ≤ +1.0 過，普通停留選最靠近 +2 的

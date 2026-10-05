@@ -8742,11 +8742,14 @@ local function shapeProfile(s, profile, a, b, c, d, offL, baseL, crawlDesign)
 end
 
 -- 只重算速度，不重造承諾線。shape 的基準快照不能被 guard 的輸出帽覆寫。
+-- 停留線沒有出口（rs→b 換道後平行到線尾）：shape 暫存的出口是主候選的（常被可視前緣截短），
+-- 停留只看自己的進入段；過了進入段沒有過渡可言，同 dodgePointCap 的 dl=0（gearCap）。
 local function dodgeSpaceCapOf(s, protected, entryPassed)
     local base = s.dodgeSpaceBaseCap
     local jerk = MDADDynamics.LATERAL_JERK_MAX
     if not protected then jerk = TUNE.DODGE_TUNE.jerkCap end
-    if entryPassed or jerk ~= MDADDynamics.LATERAL_JERK_MAX then
+    if s.dodgeStay and entryPassed then return s.gearCap end
+    if s.dodgeStay or entryPassed or jerk ~= MDADDynamics.LATERAL_JERK_MAX then
         local length, dl = s.dodgeCommittedLength, s.dodgeShapeDl
         if entryPassed then
             if not finite(s.dodgeExitLength) or not finite(s.dodgeExitDl) then return nil end
@@ -9064,8 +9067,9 @@ local function updateDodgeCaps(s, margin, kappa, minLat, visibilityCap, commit, 
     if reason == nil and cap > 0 and (not lifted or entryPassed) then
         local reserve = protected and 0 or tune.reserve
         if entryPassed then
-            -- 只忘掉已過的 entry；exit 原過渡長與側移需求仍完整保留。
-            sh = math.min(1, 1.2 * math.max(s.dodgeCommitDl, s.dodgeExitDl) / s.dodgeExitLength)
+            -- 只忘掉已過的 entry；exit 原過渡長與側移需求仍完整保留。停留沒有出口＝保持段的 sh。
+            sh = s.dodgeStay and TUNE.DODGE_HOLD_SH
+                or math.min(1, 1.2 * math.max(s.dodgeCommitDl, s.dodgeExitDl) / s.dodgeExitLength)
         end
         if entryPassed or not protected then
             reserveUsed = reserve
@@ -10762,6 +10766,8 @@ local function replan(s, vehicle, playerNum)
                 s.dodgeMargin, s.dodgeMarginS = mg, nil
                 s.dodgeClrN, s.dodgeEnvN = 0, 0
                 s.dodgeStay = variant == "stay" or variant == "stay-look"
+                -- 停留的承諾長＝自己的進入段：shape 暫存的 min(進入, 出口) 是主候選的出口（dodgeSpaceCapOf 同理）
+                if s.dodgeStay then s.dodgeCommittedLength = s.dodgeEntryLength end
                 -- 指派而非只設 true：換縫找更寬時同一輪可能先採納窄的（爬行）再換寬的（Drive.thinNote）
                 s.dodgeCrawl = nbUsed < s.sweepBase - 1e-6 or s.dodgeStay
                 s.dodgeTier = variant and (tier .. "-" .. variant) or tier
