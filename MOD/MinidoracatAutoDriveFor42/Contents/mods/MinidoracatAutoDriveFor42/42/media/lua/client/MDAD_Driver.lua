@@ -472,6 +472,11 @@ TUNE.DODGE_HOLD_SH = 0.15    -- 繞行保持段（entry 已過、未到 c）clea
 TUNE.APPROACH_BRAKE_FRAC = 0.7 -- 接近限速區用 safeBrake 的這個比例反推（同 laneCurveEnvelope
                                -- 的 decel 基準；2026-09-02 s064：舊制用 safeCoast 0.6 純滑行
                                -- ＝繞行縫還在 100m 外車就爬行）
+-- 證明線持續判撞（1006；campaign rc61 0017）：證明線世界掃掠連續這麼多個完成輪命中同一處（命中硬點的世界距 ≤
+-- PROOF_HIT_SAME_M；同一台車的輪廓點每輪先被打到的那點會換，離 1–1.6m），接近包絡終點從警戒帽改成在命中前一個
+-- 取樣點停住（Drive.proofSweepCap），規劃同時把該點當擋線（Drive.proofBlockMark）。單輪命中照舊只降到警戒帽。
+TUNE.PROOF_STOP_ROUNDS = 3
+TUNE.PROOF_HIT_SAME_M = 2.0
 local CORNER_NEAR = 8          -- sweep 失敗點離折點多近算「折點衝突」（BLOCKED_CORNER 判定）
 local CORNER_RETRY_DIST = 3    -- corner latch 撤銷距離：漸進接近讓車前進這麼多＝
                                -- 幾何已變、重新枚舉——實測「靠很近開導航就能繞」
@@ -5141,8 +5146,8 @@ function Drive.softStopCap(s, now, speedKmh, playerNum, capIn, whyIn)
     return capIn, whyIn
 end
 
--- classifyIntent 的 blockedStop 參數（停止線、繞行延後、下一台接近、起步近物低於 MIN_EXEC）：stepFollow 與
--- Drive.animalOnlyWait 共用同一個定義。
+-- classifyIntent 的 blockedStop 參數（停止線、繞行延後、下一台接近、起步近物低於 MIN_EXEC、證明線持續命中的停車包絡
+-- 低於 MIN_EXEC）：stepFollow 與 Drive.animalOnlyWait 共用同一個定義。
 function Drive.waitHoldArg(s, blockedStop)
     return blockedStop
         or (not s.dodging and finite(s.dodgeDeferCap) and s.dodgeDeferCap >= 0
@@ -5150,6 +5155,8 @@ function Drive.waitHoldArg(s, blockedStop)
         or (s.dodging and finite(s.dodgeNextCap) and s.dodgeNextCap >= 0
             and s.dodgeNextCap < MDADDynamics.MIN_EXEC_KMH)
         or (finite(s.startNearCap) and s.startNearCap < MDADDynamics.MIN_EXEC_KMH)
+        or ((s.proofHitN or 0) >= TUNE.PROOF_STOP_ROUNDS and finite(s.proofSweepCap)
+            and s.proofSweepCap < MDADDynamics.MIN_EXEC_KMH)
 end
 
 -- 這幀的 WAIT 只來自動物停等（沒有停止線／繞行延後／起步近物／回線待命／可視上限／會車停等）：
@@ -5421,10 +5428,11 @@ function Drive.visAssistForce(s, speedKmh, mult)
         cap, amax, gain, minKmh, why = s.blockedApproachCap, TUNE.DODGE_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN,
             TUNE.VIS_ASSIST_MIN_KMH, "blocked"
     end
-    -- 證明線掃掠命中的接近包絡（Drive.proofSweepCap，1005）：同一條中線外力、同一上限
+    -- 證明線掃掠命中的接近包絡（Drive.proofSweepCap，1005）：同一條中線外力、同一上限。持續命中（1006）的包絡要停在
+    -- 命中前：25 km/h 以下照補（只剩斷油的重車追不上 safeBrake×0.7 的停車包絡，剩 2–3m 時仍 20 km/h）
     if finite(s.proofSweepCap) and s.proofSweepCap < cap then
         cap, amax, gain, minKmh, why = s.proofSweepCap, TUNE.DODGE_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN,
-            TUNE.VIS_ASSIST_MIN_KMH, "proof"
+            (s.proofHitN or 0) >= TUNE.PROOF_STOP_ROUNDS and 0 or TUNE.VIS_ASSIST_MIN_KMH, "proof"
     end
     -- 待承諾接近帽（dodge-defer）：同一條中線外力、同一上限；鎖輪門檻見 Drive.deferHardKmh
     if not s.dodging and finite(s.dodgeDeferCap) and s.dodgeDeferCap >= 0 and s.dodgeDeferCap < cap then
@@ -5746,6 +5754,8 @@ end
 -- 「車心開到掃掠命中的車身取樣點（s.proofHitS）時降到同一個警戒帽」的包絡，煞車基準同 blocked 接近包絡
 -- （safeBrake×APPROACH_BRAKE_FRAC）；超過包絡由 Drive.visAssistForce 的 "proof" 帳沿中線補減速（誰去執行）。
 -- ungated＝原本的警戒帽（終點速度），fullTarget 是上限。命中點不明（nil）照舊回 ungated。寫 s.proofSweepCap。
+-- 持續命中（1006，s.proofHitN ≥ TUNE.PROOF_STOP_ROUNDS）：終點改成在命中前一個取樣點（最後一個掃過的車身位置）
+-- 停住——警戒帽 18 開到命中點＝帶速撞上（campaign rc61 0017：F350 約 19 km/h 撞進 Z 形錯位出口的 van）。
 function Drive.proofSweepCap(s, ungated, fullTarget)
     local hit = s.proofHitS
     if not finite(hit) or not finite(s.lastSNow) or not finite(ungated) then
@@ -5754,10 +5764,64 @@ function Drive.proofSweepCap(s, ungated, fullTarget)
     end
     local decel = s.safeBrake
     if not finite(decel) or decel <= 0 then decel = 0.6 else decel = decel * TUNE.APPROACH_BRAKE_FRAC end
-    local cap = MDADDynamics.approachCapKmh(hit - s.lastSNow, ungated, 0.5, decel)
+    local exit = ungated
+    if (s.proofHitN or 0) >= TUNE.PROOF_STOP_ROUNDS then hit, exit = hit - MDADFollower.OV_STEP, 0 end
+    local cap = MDADDynamics.approachCapKmh(hit - s.lastSNow, exit, 0.5, decel)
     if finite(fullTarget) and cap > fullTarget then cap = fullTarget end
     s.proofSweepCap = cap
     return cap
+end
+
+-- 證明線命中的接近包絡不看 gate 先後（1006）：fullSpeedGate 先查 align 再查 sweep，接近折點時 gate 名字換成 align，
+-- 舊制只在 gate＝sweep 才算包絡＝包絡與 proof 減速輔助整段消失、只剩對線帽斷油滑行（rc61 0017：17–21 km/h 進折點）。
+-- 證明線命中點已知就照算（gate＝sweep 時已算過、s.proofSweepCap 有值就不重算）；繞行／回線／判堵各有自己的帽，同
+-- nearUnknown 的排除。回套用後的目標速度。
+function Drive.proofGateCap(s, targetSpeed, fullTarget, brisk)
+    if s.proofSweepCap ~= nil or s.verifyLineReason ~= "sweep" or not finite(s.proofHitS)
+            or s.dodging or s.returnActive or s.blocked then
+        return targetSpeed
+    end
+    local cap = Drive.proofSweepCap(s, (MDADDynamics.ungatedCapKmh(fullTarget, "sweep", nil, brisk)), fullTarget)
+    if cap < targetSpeed then targetSpeed, s.lastCapReason = cap, "sweep" end
+    return targetSpeed
+end
+
+-- 證明線命中的持續輪數（buildSnapshotProof 在這輪真命中時呼叫；x/y＝命中硬點的世界座標，n＝上一輪的輪數——
+-- buildSnapshotProof 每輪先歸零，沒命中的輪就停在 0）。判同一點用世界距（點雲換手、索引會變）。剛達
+-- TUNE.PROOF_STOP_ROUNDS 的那輪強制下一輪重規劃（planSig＝−1）：點雲簽章不變時 replan 不跑，Drive.proofBlockMark
+-- 就沒機會把命中點交給規劃。
+function Drive.proofHitTrack(s, x, y, n)
+    if not finite(x) or not finite(y) then return end
+    if not finite(n) or n < 0 then n = 0 end
+    if n > 0 and finite(s.proofHitX) and finite(s.proofHitY) then
+        local dx, dy = x - s.proofHitX, y - s.proofHitY
+        if dx * dx + dy * dy > TUNE.PROOF_HIT_SAME_M * TUNE.PROOF_HIT_SAME_M then n = 0 end
+    end
+    n = n + 1
+    s.proofHitN, s.proofHitX, s.proofHitY = n, x, y
+    if n == TUNE.PROOF_STOP_ROUNDS then
+        s.planSig = -1
+        diagEvent(s, s.playerNum, "proof", { phase = "stop", x = x, y = y, s = s.proofHitS, rs = s.lastSNow })
+    end
+end
+
+-- 持續命中的點交給規劃當擋線（1006）：規劃的 (s,l) 在折點退化（長車身掃過折點的車角不在任何一段的橫向裡，
+-- obstacles.md〈縫隙搜尋仍用取樣點〉），證明線一路判撞、規劃一路判淨空＝沒有人在命中前承諾或判堵。把離命中點
+-- 最近的硬點（世界距 ≤ PROOF_HIT_SAME_M）的形狀橫向改成它所在弧長的行駛基準線（s.hardBase，fillHardBase 剛填），
+-- 擋線判定（MDADCorridor.blocksLine 的各個消費者）就認它擋線；縫隙搜尋仍用取樣點、候選照舊由世界掃掠終審，全滅就是
+-- 一般判堵（停止線、寬帶、倒車、改道）。只改本輪已發布快照的 hardLc，下一輪 Sensor 整份重寫。
+function Drive.proofBlockMark(s, sen)
+    if (s.proofHitN or 0) < TUNE.PROOF_STOP_ROUNDS or not finite(s.proofHitX) or not finite(s.proofHitY)
+            or type(sen.hardLc) ~= "table" or type(s.hardBase) ~= "table" then
+        return
+    end
+    local best, bestD2 = nil, TUNE.PROOF_HIT_SAME_M * TUNE.PROOF_HIT_SAME_M
+    for i = 1, sen.hardN do
+        local dx, dy = sen.hardX[i] - s.proofHitX, sen.hardY[i] - s.proofHitY
+        local d2 = dx * dx + dy * dy
+        if d2 <= bestD2 then best, bestD2 = i, d2 end
+    end
+    if best ~= nil and finite(s.hardBase[best]) then sen.hardLc[best] = s.hardBase[best] end
 end
 
 -- 前方區域未載入的等待（TUNE.AREA_WAIT_MAX_MS）：只在要前進（GO／CRAWL 且目標 > 0）時問引擎。
@@ -6424,6 +6488,7 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     phys.dodgeClass = s.dodgeClass
     phys.verifyLineReason = s.verifyLineReason
     phys.proofHitS = s.proofHitS -- 1005：證明線掃掠命中的車身取樣弧長（gate sweep 接近包絡的終點）
+    phys.proofHitN = s.proofHitN -- 1006：同一點連續命中的輪數（≥ TUNE.PROOF_STOP_ROUNDS＝包絡在命中前停住、規劃把它當擋線）
     -- 本幀速度裁決者與 gate 狀態（2026-09-01 使用者指示補齊離線可判數據）
     phys.capReason = s.lastCapReason
     phys.sensorCapReason = s.lastSensorReason
@@ -7348,8 +7413,11 @@ local function buildSnapshotProof(s, segI, proofEnd)
     s.verifyLineReason, s.curveVerifiedUntilS = "state", 0
     s.proofKappa, s.proofCurveCap = 0, 0
     s.proofHitS = nil -- 證明線掃掠命中的車身取樣弧長（Drive.proofSweepCap 的包絡終點）
-    if not s.adaptive or s.dodging or s.returnActive
-            or s.blocked or s.currentBlocked then return end
+    -- 判堵中不重算證明：持續命中照凍結，Drive.proofBlockMark 續把同一點交給規劃（不然判堵後下一輪規劃又判淨空）
+    if s.blocked or s.currentBlocked then return end
+    local hitN = s.proofHitN or 0
+    s.proofHitN = 0 -- 這輪命中才由 Drive.proofHitTrack 接續；其餘出口（繞行、回線、沒命中）一律歸零
+    if not s.adaptive or s.dodging or s.returnActive then return end
 
     local prof, sen = s.profile, s.sensor
     local verifyX, verifyY, verifySeg = s.verifyX, s.verifyY, s.verifySeg
@@ -7529,7 +7597,7 @@ local function buildSnapshotProof(s, segI, proofEnd)
         if sweepN >= 2 then
             sweepRan = true
             if sweepEnd < verifiedEnd then verifiedEnd = sweepEnd end
-            local sweepOk, _, _, _, sweepAt = sweepLine(
+            local sweepOk, _, _, _, sweepAt, hitX, hitY, hitI = sweepLine(
                 s, s.verifyX, s.verifyY, sweepN, lineS0, sweepEnd,
                 s.lastSNow, s.lastSNow, sweepEnd, sweepEnd,
                 lane, "profile", s.sweepBase)
@@ -7540,6 +7608,8 @@ local function buildSnapshotProof(s, segI, proofEnd)
                 if safeEnd < verifiedEnd then
                     verifiedEnd, failReason = safeEnd, "sweep"
                     s.proofHitS = finite(sweepAt) and sweepAt or nil
+                    -- 真命中才有硬點索引（壞輸入的 fail-closed 回傳沒有）：接續持續輪數
+                    if s.proofHitS and hitI then Drive.proofHitTrack(s, hitX, hitY, hitN) end
                 end
             end
         end
@@ -8848,6 +8918,7 @@ function Drive.planDodge(s, baseL, prefer)
         sen.hardLc[planN], sen.hardW[planN] = nil, nil -- 虛擬 ban 沒有形狀位置：擋線判定退回 hardL／hardR
     end
     fillHardBase(s, sen, planN, baseL)
+    Drive.proofBlockMark(s, sen) -- 證明線持續判撞的點當擋線（規劃的 (s,l) 在折點退化看不到）
     local minS = s.lastSNow - s.vehicleProfile.halfL
     local need, tight = s.needHalf, false
     local mode, a, b, c, d, offL = MDADCorridor.plan(
@@ -12024,6 +12095,8 @@ local function stepFollow(s, vehicle, playerNum, now)
                 s.invalid, s.stateError, s.dynamicsFault = true, "ungated", true
             end
         end
+        -- 證明線命中的接近包絡不看 gate 先後（align 先於 sweep 查，接近折點時包絡會整段消失；Drive.proofGateCap）
+        targetSpeed = Drive.proofGateCap(s, targetSpeed, fullTarget, s.profile.styleName == "brisk")
 
         -- 起步近物限速（TUNE.START_GUARD_*；調頭／回線／繞行各有自己的淨距體系，不疊）
         s.startNearCap = nil
