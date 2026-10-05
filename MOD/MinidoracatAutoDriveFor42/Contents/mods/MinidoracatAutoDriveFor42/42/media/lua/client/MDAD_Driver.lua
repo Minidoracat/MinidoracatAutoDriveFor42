@@ -11241,6 +11241,12 @@ local function stepFollow(s, vehicle, playerNum, now)
             s.profile, s.fstate, vx, vy,
             heading, speedKmh, mult * SECONDS_PER_MULT)
         s.followerTarget = targetSpeed -- telemetry ftg：剖面原始目標（cap／jerk 之前；0907e 錨定 bug 只靠它定罪）
+        -- 高速增益估計衝出上限、Follower 已整份重學（FF_HI；1006 正式服 ygh 貼 3.0 撞路緣）：記下當下的比值與幀時
+        if s.fstate.hiCapObs ~= nil then
+            diagEvent(s, playerNum, "yawgain", { phase = "hi-cap", obs = s.fstate.hiCapObs,
+                learnT = s.fstate.hiCapLearnT, fdt = s.frameMs, slip = s.fstate.slip, speed = speedKmh, s = s.lastSNow })
+            s.fstate.hiCapObs = nil
+        end
         -- 本幀「真的施出去的 steer」由 applySteering 回寫；煞停／不施力的幀維持 0，Follower 的
         -- yaw 增益估計就不會把滑行中的 yaw 算到一個沒施出去的 steer 頭上（0908a）
         s.fstate.appliedSteer = 0

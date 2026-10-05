@@ -176,10 +176,11 @@ local CURVE_FF_FRAC = 0.75
 -- learnKmh／minFF＝高速增益的學習條件（實速／上幀前饋量）、learnS＝學滿才補足、settleS＝假設的 yaw 延遲 τ
 -- （穩態門檻與 steer 低通共用；前饋進弧爬升的 CURVE_FF_LEAD_S 是同一個量）。fbOppose＝回授正規化增益（yawGainFb）
 -- 剔除的反相 yaw 率門檻（rad/s，見 control 的 yaw 增益估計段）；inM／inSpanM＝弧段前饋的彎內偏差退讓（見
--- arcFeedForward 尾段）；同表是為了不多占 control 的 upvalue。
+-- arcFeedForward 尾段）；slipOut＝高速增益學習的往彎外側滑門檻（rad，state.slip；語料 >40 km/h 弧上正常幀率
+-- 往彎外 |vt|/v >0.03 只占 1%，正式服 1005h 過轉 0.045／0.086）；同表是為了不多占 control 的 upvalue。
 local CURVE_FF_LEAD_S = 0.35
 local FF_HI = { fromKmh = 30, fullKmh = 55, frac = 0.9, learnKmh = 40, minFF = 0.1, learnS = 0.5,
-    settleS = CURVE_FF_LEAD_S, fbOppose = 0.5, inM = 0.3, inSpanM = 0.5 }
+    settleS = CURVE_FF_LEAD_S, fbOppose = 0.5, inM = 0.3, inSpanM = 0.5, slipOut = 0.03 }
 local CURVE_FF_MAX = 0.8 -- 小增益長車不能用倒數把前饋放大成整車橫推；回饋仍保留完整權威。
 local YAW_GAIN_INIT = 0.8
 local YAW_GAIN_TAU_S = 0.5
@@ -1372,11 +1373,15 @@ local function arcFeedForward(profile, state, arcK, bestI, sNow, aspeed, tangent
     -- 高速：學到高速增益後才補足（FF_HI）
     local frac, g = CURVE_FF_FRAC, yawGain
     local gHi = state.yawGainHi
+    -- ffGateK（control 的高速增益學習閘門讀）：補足把前饋縮小的倍數，只取 ≥1。gHi 被灌高時前饋跟著縮到 minFF 以下、
+    -- 閘門再也不開＝高估自鎖（1006 正式服 ygh 3.0 時 sff 剩 0.03–0.05）；閘門改看沒補足時的前饋就能學回來，只放寬不收緊。
+    state.ffGateK = 1
     if aspeed > FF_HI.fromKmh and isFinite(gHi) and (state.hiLearnT or 0) >= FF_HI.learnS then
         local t = (aspeed - FF_HI.fromKmh) / (FF_HI.fullKmh - FF_HI.fromKmh)
         if t > 1 then t = 1 end
         frac = CURVE_FF_FRAC + (FF_HI.frac - CURVE_FF_FRAC) * t
         g = yawGain + (gHi - yawGain) * t
+        if CURVE_FF_FRAC * g > frac * yawGain then state.ffGateK = CURVE_FF_FRAC * g / (frac * yawGain) end
     end
     local arcScale, ffLane = 1, 0
     local rb = state.laneBias
@@ -2344,8 +2349,14 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
                 state.hiSteerLag = ul
             end
         end
+        -- 1006：往彎外側滑（過轉、質心側滑 β 朝彎外超過 FF_HI.slipOut）＝穩態中斷：yaw 由甩尾帶、與 steer 脫鉤，ESC
+        -- 門檻下也會發生（正式服 1005h 12 fps 65 km/h R≈47：yr 0.73 是路徑需求兩倍、steer 已回到 0.18／反打，ESC 沒觸發），
+        -- 比值一路灌高；回抓地後的反打幀同樣脫鉤，所以歸零穩態計時、再穩 settleS 才學。β 用 state.slip（質心弦角，
+        -- 方向以上幀前饋正負號＝彎向判）。往彎內的 β 不擋：參考點穩態本來就偏內、低幀率側推也常把車推向內（0.03–0.08）。
+        if isFinite(pff) and (pff > 0 and -state.slip or state.slip) > FF_HI.slipOut then state.ffSteadyT = 0 end
         if isFinite(ph) and dt > 1e-4 and dt < 0.5 and aspeed >= FF_HI.learnKmh and isFinite(pff)
-                and (pff >= FF_HI.minFF or pff <= -FF_HI.minFF) and state.escLimited ~= true
+                and (pff * (state.ffGateK or 1) >= FF_HI.minFF or pff * (state.ffGateK or 1) <= -FF_HI.minFF)
+                and state.escLimited ~= true
                 and (state.ffSteadyT or 0) >= FF_HI.settleS and isFinite(ul) then
             local sg = pff > 0 and 1 or -1
             local alpha = dt / YAW_GAIN_TAU_S
@@ -2357,8 +2368,15 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
             state.hiLearnT = (state.hiLearnT or 0) + dt
             if sf >= FF_HI.minFF and yf > 0 then
                 local g = yf / sf
-                if g < YAW_GAIN_LO then g = YAW_GAIN_LO elseif g > YAW_GAIN_HI then g = YAW_GAIN_HI end
-                state.yawGainHi = g
+                if g > YAW_GAIN_HI then
+                    -- 衝出上限＝估計飽和：保留它會讓前饋縮到 minFF 以下、學習閘門再也打不開（自鎖）。整份重學，前饋
+                    -- 退回 yawGain／CURVE_FF_FRAC；Driver 讀 hiCapObs 發 yawgain hi-cap 事件（obs、已學秒數、幀時）。
+                    state.hiCapObs, state.hiCapLearnT = g, state.hiLearnT
+                    state.yawGainHi, state.hiYawF, state.hiSteerF, state.hiLearnT = nil, 0, 0, 0
+                else
+                    if g < YAW_GAIN_LO then g = YAW_GAIN_LO end
+                    state.yawGainHi = g
+                end
             end
         end
         state.prevHeading = heading

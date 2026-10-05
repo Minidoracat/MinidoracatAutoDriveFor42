@@ -113,6 +113,8 @@ local EK = {
     "lvl", "avoidN",
     -- 拖車不可過轉角改道（detour phase＝towcorner）：主避讓圈半徑、路線上不可過轉角數、替代線剖面仍不可過的轉角數
     "avoidR", "towN", "towLeft",
+    -- yawgain hi-cap（1006）：高速增益估計衝出上限那幀的原始比值、重學前已學秒數、引擎幀 ms、質心側滑 β（rad）
+    "obs", "learnT", "fdt", "slip",
 }
 
 local function logOnce(msg)

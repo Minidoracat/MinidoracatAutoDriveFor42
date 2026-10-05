@@ -5374,6 +5374,48 @@ function drive.scenarioGainSeeds()
 end
 drive.scenarioGainSeeds()
 
+-- 1006 高速增益估計衝出上限（Follower FF_HI 整份重學，留 fstate.hiCapObs／hiCapLearnT）：Driver 在 control 之後記一筆
+-- yawgain hi-cap 事件（原始比值、重學前已學秒數、引擎幀 ms、β）並清旗標＝一次只記一筆。違規證明：拿掉 Driver 事件段＝紅。
+function drive.scenarioYawGainHiCap()
+    scenario("高速增益估計衝出上限：Driver 記 yawgain hi-cap 事件（obs／learnT／fdt／slip）並清旗標")
+    local realControl, realEvent, realSample = MDADFollower.control, MDADDiagnostics.event, MDADDiagnostics.sample
+    MDAD.Drive.stop(0, nil)
+    dveh._x, dveh._y, dveh._speed, dveh._steering = 0, 0, 70, 0
+    setHeading(dveh, 0)
+    drive.nav.route = newRoute(40, 0, 0, 4, 0)
+    checkTrue(MDAD.Drive.start(dp), "(hicap) 啟動")
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    local s = MDAD.Drive.debugSession(0)
+    local evs, fired = {}, false
+    -- 本情境沒開本機紀錄：diagEvent 要 s.diag，而每幀 sample 回非 true 會把它關掉——取樣先回 true
+    MDADDiagnostics.sample = function() return true end
+    s.diag = true
+    MDADDiagnostics.event = function(pn, name, a, ...)
+        if name == "yawgain" and type(a) == "table" then evs[#evs + 1] = a end
+        return realEvent(pn, name, a, ...)
+    end
+    MDADFollower.control = function(_, state)
+        if not fired then state.hiCapObs, state.hiCapLearnT, state.slip, fired = 4.2, 0.75, 0.05, true end
+        state.curveValid, state.curveHardActive, state.curveKappa, state.curveCapKmh = true, false, 0, 120
+        return 0, 120, 100, false, 0, 0, 0
+    end
+    for _ = 1, 3 do
+        driveReset(dveh)
+        driveTick(dp, dveh)
+    end
+    MDADFollower.control, MDADDiagnostics.event, MDADDiagnostics.sample = realControl, realEvent, realSample
+    s.diag = false
+    local e = evs[1]
+    checkTrue(#evs == 1 and e.phase == "hi-cap" and e.obs == 4.2 and e.learnT == 0.75 and e.slip == 0.05
+        and type(e.fdt) == "number" and e.fdt > 0 and s.fstate.hiCapObs == nil, string.format(
+        "(hicap) 三幀只記一筆 yawgain hi-cap（%d 筆、obs %s、learnT %s、fdt %s、slip %s），旗標清掉", #evs,
+        tostring(e and e.obs), tostring(e and e.learnT), tostring(e and e.fdt), tostring(e and e.slip)))
+    MDAD.Drive.stop(0, nil)
+    dveh._speed = 20
+end
+drive.scenarioYawGainHiCap()
+
 -- (acc) 1001i 加速輔助：目標比實速高就沿車身中線補 ACCEL_ASSIST_MPS2（輕車也有；前推輔助只給重車低速）。
 -- 違規證明：ACCEL_ASSIST_MPS2＝0 即整合案（感知情境①後）紅；拿掉伺服器速限夾＝速限案紅；拿掉折角門檻＝拖車案紅；
 -- 拿掉全速閘門條件＝閘門案紅；拿掉偏差門檻＝偏差案紅（1001j E2E h1003：離期望線 0.9m 開始補、越線撞路邊）。

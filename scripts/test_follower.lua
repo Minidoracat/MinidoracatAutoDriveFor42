@@ -4135,6 +4135,110 @@ do
     checkTrue(g < 1.4, string.format("(4) τ 0.25 交錯小弧：高速增益最大 %.2f×G < 1.4（不看穩態 1.77）", g))
 end
 
+scenario("1006：弧上往彎外側滑（過轉）不灌高 yawGainHi、衝出上限就整份重學（正式服 1005h 12 fps：ygh 貼上限 3、前饋剩三分之一、外漂撞路緣）")
+do
+    -- 正式服 1005h（92nissanGTR，fdt 83ms）：65 km/h 進 R≈47 右彎、第一個高速弧剛開始學就過轉——yr 0.73（路徑需求 0.38 的
+    -- 1.9 倍）、vt 0.2→0.8→1.5 m/s、steer 回到 0.18 再反打，ESC 沒觸發；第一筆 ygh 就是 3.0，sff 剩 −0.03～−0.05（< minFF＝
+    -- 學習閘門再也打不開），之後 72 km/h 外漂 1.94m 側滑撞路緣。Plant：yaw 一階追 G·u（τ 0.35）、Driver 同式 cross-track；
+    -- 側滑段 yaw 固定 1.9× 路徑需求、與 steer 脫鉤，質心往彎外滑向 1.55 m/s（位置走 h+β，Follower 的 state.slip 量得到），
+    -- 之後 0.2s 回抓地。dt 1/12 與 1/60 都跑：學法的弱點與幀率無關，低幀率只是側滑多（語料 >40 km/h 弧上 |vt|/v>0.03：
+    -- 低幀率 22%、正常幀率 3%）。(3) 沒有側滑的 yaw 尖刺（碰路緣）照樣能把估計推出上限，那時整份重學、留 hiCapObs 給 Driver 發事件。
+    -- 違規證明：拿掉側滑閘門＝(1)(2) 紅；拿掉衝出上限重學＝(3) 紅；學習閘門不乘 ffGateK＝(4) 紅。
+    local D = MDADDynamics
+    local VP = { valid = true, geometryValid = true, halfW = 0.9, rMin = 4.3, wheelbase = 2.6,
+        delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 120, lookScale = 1.2 }
+    -- 直 150 → 右 60° R47 → 直 150 → 右 60° R47 → 直 150（y 向南：heading 減＝右轉）
+    local R, ang = 47, math.rad(60)
+    local tl = R * math.tan(ang / 2)
+    local w = 2 * (R * (1 - math.cos(ang / 2)) + VP.halfW + 0.45)
+    local x2, y2 = 150 + tl + (150 + 2 * tl) * math.cos(-ang), (150 + 2 * tl) * math.sin(-ang)
+    local route = { pts = { 0, 0, 150 + tl, 0, x2, y2, x2 + 150 * math.cos(-2 * ang), y2 + 150 * math.sin(-2 * ang) },
+        segSurface = { "paved", "paved", "paved" }, segWidth = { w, w, w } }
+    local p = F.begin(route, 120, 4, VP)
+    while not p.ready do F.stepBuild(p, 4096) end
+    local arcs = {}
+    for i = 1, p.n - 1 do
+        if p.segKind[i] == D.SEG_ARC then
+            local a = arcs[#arcs]
+            if a and a[2] == p.s[i] then a[2] = p.s[i + 1] else arcs[#arcs + 1] = { p.s[i], p.s[i + 1] } end
+        end
+    end
+    -- 定速 65 km/h 閉環。slideS＝第一弧前饋穩態後的側滑秒數；bump＝第一弧學滿 0.8s 後三幀 yaw 6 rad/s 尖刺（無側滑）；
+    -- seedHi＝起步就帶著學滿的高速增益（種子格式）。回 (第二弧入口的 ygh／G, 第二弧 ±10m 內最大 |latDev|, 跑完的 ygh／G,
+    -- 尖刺最後一幀之後那次 control 的 ygh／hiCapLearnT, hiCapObs)
+    local function run(dt, G, slideS, bump, seedHi)
+        local st = F.newState()
+        F.setLaneBias(st, 0.5)
+        F.setRuntimeLimits(st, 3, 6, 7, 1.2)
+        st.yawGain = G
+        if seedHi then st.yawGainHi, st.hiLearnT, st.hiSteerF, st.hiYawF = seedHi, 1, 0.5, seedHi * 0.5 end
+        local kmh = 65
+        local v = kmh / 3.6
+        local car = { x = 60, y = 0.5, h = 0, w = 0, vy = 0 }
+        local prevLat, slid, bumped, g2, dev2, capObs, after = nil, 0, 0, nil, 0, nil, nil
+        for _ = 1, math.floor(80 / dt) do
+            local steer, _, rem, reached, _, _, latSigned = F.control(p, st, car.x, car.y, car.h, kmh, dt)
+            local sNow = p.length - rem
+            if bumped == 3 and after == nil then after = { yawGainHi = st.yawGainHi, hiCapLearnT = st.hiCapLearnT } end
+            if st.hiCapObs then capObs, st.hiCapObs = st.hiCapObs, nil end
+            local latDev = latSigned - F.laneBiasAt(p, 0.5, st.idx, sNow)
+            local dLat = prevLat and (latDev - prevLat) / dt or nil
+            if dLat and (dLat > 5 or dLat < -5) then dLat = nil end
+            prevLat = latDev
+            local xg, xm
+            if st.curveHardActive then xg, xm = D.CROSS_TRACK_ARC_GAIN, D.CROSS_TRACK_ARC_MAX end
+            local u = steer - D.crossTrackSteer(latDev, kmh, dLat, xg, xm)
+            if u > 5 then u = 5 elseif u < -5 then u = -5 end
+            if u < 0.02 and u > -0.02 then u = 0 end
+            st.appliedSteer, st.escLimited = u, false
+            if slid < slideS and (slid > 0 or (sNow > arcs[1][1] and (st.ffSteadyT or 0) >= 0.35)) then
+                slid = slid + dt
+                car.w = -1.9 * v / R
+                car.vy = car.vy + (1.55 - car.vy) * math.min(1, dt / 0.3)
+            elseif bump and bumped < 3 and (bumped > 0 or (sNow < arcs[1][2] and (st.hiLearnT or 0) >= 0.8)) then
+                bumped = bumped + 1
+                car.w = -6
+            else
+                local wT = G * u
+                if wT > v / VP.rMin then wT = v / VP.rMin elseif wT < -v / VP.rMin then wT = -v / VP.rMin end
+                car.w = car.w + (wT - car.w) * math.min(1, dt / 0.35)
+                car.vy = car.vy * math.max(0, 1 - dt / 0.2)
+            end
+            local hm = car.h + car.w * dt * 0.5
+            car.h = car.h + car.w * dt
+            local b = math.atan(car.vy / v)
+            car.x, car.y = car.x + math.cos(hm + b) * v * dt, car.y + math.sin(hm + b) * v * dt
+            if g2 == nil and sNow > arcs[2][1] then g2 = (st.yawGainHi or G) / G end
+            if sNow > arcs[2][1] - 10 and sNow < arcs[2][2] + 10 and math.abs(latDev) > dev2 then dev2 = math.abs(latDev) end
+            if reached or sNow > arcs[2][2] + 30 then break end
+        end
+        return g2 or -1, dev2, (st.yawGainHi or G) / G, after, capObs
+    end
+    for _, dt in ipairs({ 1 / 12, 1 / 60 }) do
+        local fps = math.floor(1 / dt + 0.5)
+        for _, G in ipairs({ 0.7, 1.3 }) do
+            local _, dev0 = run(dt, G, 0)
+            local g2, dev2 = run(dt, G, 0.5)
+            -- (1) 過轉 0.5s 後第二弧入口的高速增益仍在真值附近（修前 2.3–3.2×G 自鎖、前饋剩一半以下）。殘差來自側滑起頭
+            --   β 還沒到門檻的一兩幀（yaw 先衝、β 後到），回抓地後第二弧照常學回真值。
+            checkTrue(g2 > 0.8 and g2 < 1.5, string.format("(1) %d fps G %.1f 第一弧過轉 0.5s：第二弧入口 ygh %.2f×G 在 0.8–1.5", fps, G, g2))
+            -- (2) 第二弧（同半徑同速）偏差：修前 +1.6m 以上（前饋只剩三分之一）
+            checkTrue(dev2 < dev0 + 0.4, string.format("(2) %d fps G %.1f：第二弧最大偏差 %.2fm < 無側滑 %.2f＋0.4", fps, G, dev2, dev0))
+        end
+    end
+    -- (3) 12 fps、G 1.1：學滿後碰一下（三幀 yaw 6 rad/s、無側滑，側滑閘門擋不到）把估計推出上限 → 那幀整份重學（ygh 清空、
+    --   留 hiCapObs／hiCapLearnT 給 Driver 發 yawgain hi-cap 事件），之後學回真值；修前夾在 3.0、前饋縮到門檻下學不回來。
+    local _, _, gEnd, after, capObs = run(1 / 12, 1.1, 0, true)
+    checkTrue(capObs ~= nil and capObs > 3 and after ~= nil and after.yawGainHi == nil and (after.hiCapLearnT or 0) >= 0.8,
+        string.format("(3) yaw 尖刺推出上限：hiCapObs %.2f > 3、重學（ygh %s）、記下已學 %.2fs", capObs or -1,
+            tostring(after and after.yawGainHi), after and after.hiCapLearnT or -1))
+    checkTrue(gEnd > 0.85 and gEnd < 1.15, string.format("(3) 重學後學回真值：%.2f×G", gEnd))
+    -- (4) 上限內的高估也不自鎖：帶著 2.5（G 1.1 的 2.3 倍，種子格式學滿）起步，補足後前饋縮到 minFF 以下；學習閘門看沒補足
+    --   時的前饋（ffGateK）才學得回來。修前整趟停在 2.5。
+    local _, _, gSeed = run(1 / 12, 1.1, 0, false, 2.5)
+    checkTrue(gSeed > 0.85 and gSeed < 1.15, string.format("(4) 起步帶 2.5 的高估：跑完學回 %.2f×G", gSeed))
+end
+
 scenario("1004：≤90° fallback 彎內側放行後前視補車道弧長（正式服 1002y：2.94m 首段接 90°、常駐 2.5，起步誤進 ROTATE 四次＝迴圈交還）")
 do
     -- 路線起點 2.94m 東行接 90° fallback 右折（+l＝彎內側），VanSpiffo（rMin 2.92）常駐 2.5，車在首段起點後 0.7m 起步。
