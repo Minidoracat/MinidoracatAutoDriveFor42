@@ -17960,14 +17960,26 @@ function drive.scenarioSideEscape()
     -- 前牆 x=20（判堵停止線）、後方 (7,y∈rearYs)（車尾 0.8m：三級倒車帶都命中）、側牆 x=9..13 y∈sideYs
     -- （y=−2 擋 dir=−1 側帶、y=1 擋 dir=+1 側帶；車身 y∈[−0.9,0.9]）。後方只放 (7,−1)：車往 +y 移過 1.05m
     -- 最短倒車帶才清（一步 1.0 到 y=1.0 仍蹭到 0.05＝第二次側推，第二步途中清＝rear-clear 接倒車）。
-    local function startSide(label, sideYs)
+    -- cars＝{ {cx, cy, heading}, … }：改用有真車體幾何的車（drive.putVehicleGeom，CarNormal 1.62×4.74）取代後牆，
+    -- 前牆照舊放（判堵）
+    local carCells = {}
+    local function startSide(label, sideYs, cars)
         clearAll()
+        for _, c in ipairs(carCells) do drive.clearVehicleGeom(c) end
+        carCells = {}
         for k in pairs(evs) do evs[k] = nil end
         for i = #sides, 1, -1 do sides[i] = nil end
         checkTrue(armDrive(), label .. " 啟動")
         setHeading(dveh, 0)
         for _, y in ipairs({ -5, -4, -2, -1, 0, 1, 2, 4, 5 }) do put(20, y) end
-        put(7, -1)
+        if cars then
+            for _, c in ipairs(cars) do
+                local _, cells = drive.putVehicleGeom(c[1], c[2], c[3] or 0, 1.62, 4.74, true)
+                carCells[#carCells + 1] = cells
+            end
+        else
+            put(7, -1)
+        end
         for _, y in ipairs(sideYs) do for x = 9, 13 do put(x, y) end end
         dveh._x = 11
         driveTick(dp, dveh)
@@ -18104,6 +18116,58 @@ function drive.scenarioSideEscape()
     checkTrue(MDAD.Drive.sideEscapeStart(st, dveh, 0, nowMs, 11, 0, "hard", "vehicle", nil),
         "(side-g) 無旗標、車頭前 1m 有障礙：算前方被擋、側推")
     checkEq(st.mode, "unstick", "(side-g) 進側推")
+
+    MDAD.Drive.stop(0, nil)
+    clearAll()
+
+    -- (side-h) E2E 1006 sideescape A／A3 的實際版面（addVehicleDebug 把座標截成整數格角，LuaManager.java:10814-10815）：
+    --   CarNormal 1.62×4.74 前車間隙 0.26m、後車 1.26m（最短倒車帶 1.5 命中）、−y 側車 0.38m，+y 淨空。第一版側帶車輛走
+    --   格級 isIntersectingSquare：前車與 +y 側帶共用 x=13 那排格＝兩側都判 vehicle、一次都不推。現制車輛用真車體多邊形。
+    local hw, hl = 0.81, 2.37
+    local frontX, rearX, sideY = 13.2 + 0.26 + hl, 8.8 - 1.26 - hl, -(0.9 + 0.38 + hw)
+    st = startSide("(side-h)", {}, { { frontX, 0 }, { rearX, 0 }, { 11, sideY } })
+    checkEq(st.mode, "unstick", "(side-h) 前車貼 0.26m、−y 有車、+y 淨空：側推（mode 實得 " .. tostring(st.mode)
+        .. "，" .. tostring(sides[1] and sides[1].detail) .. "）")
+    checkEq(st.unstickSide, 1, "(side-h) 往淨空的 +y（dir=+1）")
+    checkTrue(sides[1] ~= nil and sides[1].why == "start"
+            and string.find(sides[1].detail or "", "dir+1=clear", 1, true) ~= nil,
+        "(side-h) +y 側帶 clear（" .. tostring(sides[1] and sides[1].detail) .. "）")
+    -- (side-h2) 前後間隙都 ≥1m（主代理 A3 原意）：同樣推 +y
+    st = startSide("(side-h2)", {}, { { 13.2 + 1.2 + hl, 0 }, { 8.8 - 1.2 - hl, 0 }, { 11, sideY } })
+    checkEq(st.unstickSide, 1, "(side-h2) 前後間隙 1.2m、−y 有車：往 +y（實得 " .. tostring(st.unstickSide) .. "）")
+    -- (side-h3) 兩側都真的有車（+y 也 0.38m）：none，命中點寫進 detail
+    st = startSide("(side-h3)", {}, { { frontX, 0 }, { rearX, 0 }, { 11, sideY }, { 11, -sideY } })
+    checkEq(st.mode, "follow", "(side-h3) 兩側都有車：不推（mode 實得 " .. tostring(st.mode) .. "）")
+    checkEq(sides[1] and sides[1].why, "none", "(side-h3) 事件 why=none")
+    checkTrue(string.find(sides[1] and sides[1].detail or "", "vehicle@11.0,2.1", 1, true) ~= nil
+            and string.find(sides[1] and sides[1].detail or "", "vehicle@11.0,-2.1", 1, true) ~= nil,
+        "(side-h3) detail 帶兩側命中車的位置（實得 " .. tostring(sides[1] and sides[1].detail) .. "）")
+
+    -- (side-i) 多邊形 SAT 要驗對方車的軸：45° 斜停的車，只在它自己的長軸上和側帶分離（矩形兩軸投影都重疊）
+    --   → clear；往側帶挪近 → vehicle。直接問 predicate（沿用 (side-h3) 的 session：車身在 (11,0)、車頭 +x）
+    for _, c in ipairs(carCells) do drive.clearVehicleGeom(c) end
+    carCells = {}
+    local function probeWith(cx, cy)
+        local _, cells = drive.putVehicleGeom(cx, cy, math.pi / 4, 1.62, 4.74, true)
+        local out = BaseVehicle.allocVector3f()
+        local stS = MDAD.Drive.sideProbe(st, dveh, out, 1, 0, 1, 1.5)
+        BaseVehicle.releaseVector3f(out)
+        drive.clearVehicleGeom(cells)
+        return stS
+    end
+    checkEq(probeWith(15.4, 4.0), "clear", "(side-i) 45° 車只在自己長軸上分離：clear")
+    checkEq(probeWith(14.8, 3.4), "vehicle", "(side-i) 45° 車挪近、多邊形真的進側帶：vehicle")
+    -- (side-j) 讀不到對方車幾何＝unloaded（fail-closed，不推）
+    local gv, gcells = drive.putVehicleGeom(11, 2.0, 0, 1.62, 4.74, true)
+    local savedScript = gv.getScript
+    gv.getScript = function() return nil end
+    local outJ = BaseVehicle.allocVector3f()
+    local stJ, _, _, kindJ = MDAD.Drive.sideProbe(st, dveh, outJ, 1, 0, 1, 1.5)
+    BaseVehicle.releaseVector3f(outJ)
+    gv.getScript = savedScript
+    drive.clearVehicleGeom(gcells)
+    checkTrue(stJ == "unloaded" and kindJ == "vehicleGeom",
+        "(side-j) 側帶裡的車讀不到幾何：unloaded/vehicleGeom（實得 " .. tostring(stJ) .. "/" .. tostring(kindJ) .. "）")
 
     MDAD.Drive.stop(0, nil)
     clearAll()
