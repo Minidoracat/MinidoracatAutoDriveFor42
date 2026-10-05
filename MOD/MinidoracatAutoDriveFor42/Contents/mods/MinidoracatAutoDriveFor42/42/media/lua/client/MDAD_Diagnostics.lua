@@ -89,6 +89,7 @@ local EK = {
     "m", "need", "hn", "corner", -- blocked payload：margin/need/hardN/corner latch
     -- （2026-09-01：payload 鍵 "n" 與事件名稱欄 "n" 相撞——pairs 無序、誰蓋誰
     -- 不確定，blocked 事件多輪「消失」實為名稱欄被 need 值覆寫。禁用 "n"。）
+    "probe", -- uturn probe（1006）：調頭車周探測 clear／obstructed（本次調頭首探與翻面各一筆；console 同名 debug 行）
     -- route ready：fillet 建構結果（2026-09-02 玩家 telemetry 只能從每幀
     -- verifyLineReason=band 反推「fillet 整條放棄」，離線重建才定罪——直接帶出）；
     -- route cutover：原始路線快照 src／srcW／srcS（離線重跑 fillet／band 用）。
@@ -113,6 +114,10 @@ local EK = {
     "lvl", "avoidN",
     -- 拖車不可過轉角改道（detour phase＝towcorner）：主避讓圈半徑、路線上不可過轉角數、替代線剖面仍不可過的轉角數
     "avoidR", "towN", "towLeft",
+    -- uturn enter（1006）：Follower 前視點弧長、髮夾鉗點弧長（rs 共用上面那個鍵）
+    "sT", "kh",
+    -- yawgain hi-cap（1006）：高速增益估計衝出上限那幀的原始比值、重學前已學秒數、引擎幀 ms、質心側滑 β（rad）
+    "obs", "learnT", "fdt", "slip",
 }
 
 local function logOnce(msg)
@@ -1268,6 +1273,7 @@ local function encodePhys(phys)
     addNum("dodgeClass", "dodgeClass")
     addStr("verifyLineReason", "verifyLineReason")
     addNum("proofHitS", "phs")        -- 1005：證明線掃掠命中的車身取樣弧長（gate sweep 接近包絡的終點；同 rs 座標）
+    addNum("proofHitN", "phn")        -- 1006：證明線同一點連續命中的輪數（≥ PROOF_STOP_ROUNDS：包絡在命中前停住、規劃當擋線）
     addNum("proofKappa", "proofKappa")
     addNum("proofCurveCap", "proofCurveCap")
     addNum("laneCurveEnvelope", "laneCurveEnvelope")

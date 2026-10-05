@@ -176,10 +176,11 @@ local CURVE_FF_FRAC = 0.75
 -- learnKmh／minFF＝高速增益的學習條件（實速／上幀前饋量）、learnS＝學滿才補足、settleS＝假設的 yaw 延遲 τ
 -- （穩態門檻與 steer 低通共用；前饋進弧爬升的 CURVE_FF_LEAD_S 是同一個量）。fbOppose＝回授正規化增益（yawGainFb）
 -- 剔除的反相 yaw 率門檻（rad/s，見 control 的 yaw 增益估計段）；inM／inSpanM＝弧段前饋的彎內偏差退讓（見
--- arcFeedForward 尾段）；同表是為了不多占 control 的 upvalue。
+-- arcFeedForward 尾段）；slipOut＝高速增益學習的往彎外側滑門檻（rad，state.slip；語料 >40 km/h 弧上正常幀率
+-- 往彎外 |vt|/v >0.03 只占 1%，正式服 1005h 過轉 0.045／0.086）；同表是為了不多占 control 的 upvalue。
 local CURVE_FF_LEAD_S = 0.35
 local FF_HI = { fromKmh = 30, fullKmh = 55, frac = 0.9, learnKmh = 40, minFF = 0.1, learnS = 0.5,
-    settleS = CURVE_FF_LEAD_S, fbOppose = 0.5, inM = 0.3, inSpanM = 0.5 }
+    settleS = CURVE_FF_LEAD_S, fbOppose = 0.5, inM = 0.3, inSpanM = 0.5, slipOut = 0.03 }
 local CURVE_FF_MAX = 0.8 -- 小增益長車不能用倒數把前饋放大成整車橫推；回饋仍保留完整權威。
 local YAW_GAIN_INIT = 0.8
 local YAW_GAIN_TAU_S = 0.5
@@ -446,6 +447,8 @@ end
 -- keep（第 4 參）＝往內留多少：常駐 bias 留 LANE_BIAS_KEEP；承諾線的絕對 lane
 -- （停留 offL／RETURN target，掃掠驗的是那條線本身）只夾物理餘裕、傳 0——
 -- 否則 keep 會把停留線從 room 邊再往內拉 0.6，(kerb) 那道縫就被自己吃掉。
+-- keep＝false：不夾（斜切保持的車位 lane，Driver Drive.laneKeepOf）——車在路寬外起步時保持 lane 本來就在
+-- room 外，夾回 room−keep＝期望線落在圍籬另一側、保持等於沒做（正式服 1004g 路外 11m 起步 el 2.2 斜穿圍籬）。
 local LANE_BIAS_KEEP = 0.6
 MDADFollower.LANE_BIAS_KEEP = LANE_BIAS_KEEP
 
@@ -488,7 +491,7 @@ end
 local LANE_BLEND_M = 12
 local LANE_BLEND_WALK_MAX = 32 -- 以 run 計（同餘裕的連續段＝一個 run；混合窗內超過 32 個不同餘裕的 run 才截斷）
 local function clampLane(p, j, lane, keep, sAt)
-    if p.laneRoomR == nil then return lane end
+    if p.laneRoomR == nil or keep == false then return lane end
     if keep == nil then keep = LANE_BIAS_KEEP end
     local v = clampLaneRaw(p, j, lane, keep)
     if sAt == nil or v == 0 then return v end
@@ -668,7 +671,7 @@ function MDADFollower.planTimeAt(out, sAt, hint)
 end
 
 -- 段 segI 上常駐 laneBias 實際能落到的值（Driver 期望線／遙測 el 與 control 同一
--- 張表）。profile 未 ready 或無表＝原值。keep＝離路緣保留（nil＝LANE_BIAS_KEEP）；會車時
+-- 張表）。profile 未 ready 或無表＝原值。keep＝離路緣保留（nil＝LANE_BIAS_KEEP；false＝不夾，斜切保持）；會車時
 -- Driver 設 state.laneKeep＝0（貼到路緣錯車，1001b），control 與期望線必須傳同一個值。
 function MDADFollower.laneBiasAt(profile, bias, segI, sAt, keep)
     if type(profile) ~= "table" or profile.laneRoomR == nil
@@ -1372,11 +1375,15 @@ local function arcFeedForward(profile, state, arcK, bestI, sNow, aspeed, tangent
     -- 高速：學到高速增益後才補足（FF_HI）
     local frac, g = CURVE_FF_FRAC, yawGain
     local gHi = state.yawGainHi
+    -- ffGateK（control 的高速增益學習閘門讀）：補足把前饋縮小的倍數，只取 ≥1。gHi 被灌高時前饋跟著縮到 minFF 以下、
+    -- 閘門再也不開＝高估自鎖（1006 正式服 ygh 3.0 時 sff 剩 0.03–0.05）；閘門改看沒補足時的前饋就能學回來，只放寬不收緊。
+    state.ffGateK = 1
     if aspeed > FF_HI.fromKmh and isFinite(gHi) and (state.hiLearnT or 0) >= FF_HI.learnS then
         local t = (aspeed - FF_HI.fromKmh) / (FF_HI.fullKmh - FF_HI.fromKmh)
         if t > 1 then t = 1 end
         frac = CURVE_FF_FRAC + (FF_HI.frac - CURVE_FF_FRAC) * t
         g = yawGain + (gHi - yawGain) * t
+        if CURVE_FF_FRAC * g > frac * yawGain then state.ffGateK = CURVE_FF_FRAC * g / (frac * yawGain) end
     end
     local arcScale, ffLane = 1, 0
     local rb = state.laneBias
@@ -1483,31 +1490,61 @@ local function kinkRelease(profile, state, ji, dth, handover)
     return rel, shift, (bIn - bOut * cs) / sn, bIn
 end
 
--- 跨臂交接（投影從入彎臂 idx 跳到出彎臂 idx+1）：車在交接圓內（半徑 rel）且車頭朝出臂的前半平面。
+-- 跨臂交接（投影從入彎臂 idx 跳到出彎臂）：車在交接圓內（半徑 rel）且車頭朝出臂的前半平面。回出彎臂段號（idx+1，
+-- 或共線短樁後的真折點出臂），不成立回 false。
 -- 髮夾與 ≤90° 折點的彎內側都量到車道折點（kinkRelease handover＝true；鉗制／放行同一個基準）——中心線頂點
 -- 對彎內側的車永遠 ≥b·√2，交接圓進不去＝投影釘在入彎臂（正式服 0.17.0 clip-09）。獨立成函式是為了 control
 -- 的 local 槽數（Kahlua 190 上限）。投影每幀都問（control 的段尾延伸），遠離頂點時先粗篩、不估車道折點：
 -- 圓半徑 ≤ HAIRPIN_APEX_MAX，圓心離頂點 ≤ |shift|＋|bIn| ≤ |b|·(1＋2/sinθ)（夾過的車道偏移不超過 |b|）。
+-- 共線短樁：主 MOD 在路寬變化處插共線點，真折點前多一段短段（1006 正式服 117° 髮夾：16m 路 2.7m 短段接 8m 路）。
+-- 彎內側車道折點（頂點前 |shift|）落在短樁之前，車在入彎臂上就轉進出彎車道、永遠到不了短樁——只問 idx+1
+-- 的共線頂點＝投影釘在入彎臂、往回退，前視翻號誤進 ROTATE、四次調頭交還。所以 idx+1 是 <FILLET_MIN_RAD 的
+-- 非弧頂點時，往前跨共線頂點找 APEX_MAX＋3.8|b| 弧長內第一個真折點（同 arcLookaheadMs 放行點提前上界），
+-- idx+1 自己不成立才問它。
 local function kinkHandover(profile, state, idx, x, y, heading)
-    local px, py, i = profile.x, profile.y, idx + 1
-    local turn = wrapPi(profile.segH[i] - profile.segH[idx])
-    if turn < 0 then turn = -turn end
-    local sn, b = sin(turn), state.laneBias
-    if sn > 0.1 then
-        b = isFinite(b) and (b < 0 and -b or b) or 0
-        local reach, dx0, dy0 = HAIRPIN_APEX_MAX + b * (1 + 2 / sn), x - px[i], y - py[i]
-        if dx0 * dx0 + dy0 * dy0 > reach * reach then return false end
+    local px, py, segH, kind, ARC, n = profile.x, profile.y, profile.segH, profile.segKind, MDADDynamics.SEG_ARC, profile.n
+    local b = state.laneBias
+    b = isFinite(b) and (b < 0 and -b or b) or 0
+    local k, alt, room = idx, nil, HAIRPIN_APEX_MAX + 3.8 * b
+    while k + 1 < n and kind[k] ~= ARC and kind[k + 1] ~= ARC do
+        local t = wrapPi(segH[k + 1] - segH[k])
+        if t < 0 then t = -t end
+        if t >= MDADDynamics.FILLET_MIN_RAD then
+            if k > idx then alt = k end
+            break
+        end
+        k = k + 1
+        room = room - profile.segLen[k]
+        if room < 0 then break end
     end
-    local join, shift, _, bIn = kinkRelease(profile, state, idx, turn, true)
-    local cx, cy = px[i], py[i]
-    if shift < 0 then
-        local h = profile.segH[idx]
-        cx = cx + cos(h) * shift - sin(h) * bIn
-        cy = cy + sin(h) * shift + cos(h) * bIn
+    local j = idx
+    while j do
+        local i = j + 1
+        local turn = wrapPi(segH[i] - segH[j])
+        if turn < 0 then turn = -turn end
+        local sn, near = sin(turn), true
+        if sn > 0.1 then
+            local reach, dx0, dy0 = HAIRPIN_APEX_MAX + b * (1 + 2 / sn), x - px[i], y - py[i]
+            near = dx0 * dx0 + dy0 * dy0 <= reach * reach
+        end
+        if near then
+            local join, shift, _, bIn = kinkRelease(profile, state, j, turn, true)
+            local cx, cy = px[i], py[i]
+            if shift < 0 then
+                local h = segH[j]
+                cx = cx + cos(h) * shift - sin(h) * bIn
+                cy = cy + sin(h) * shift + cos(h) * bIn
+            end
+            local dx, dy = x - cx, y - cy
+            if dx * dx + dy * dy <= join * join
+                    and cos(heading) * (px[i + 1] - px[i]) + sin(heading) * (py[i + 1] - py[i]) > 0 then
+                return i
+            end
+        end
+        if j == alt then break end
+        j = alt
     end
-    local dx, dy = x - cx, y - cy
-    return dx * dx + dy * dy <= join * join
-        and cos(heading) * (px[i + 1] - px[i]) + sin(heading) * (py[i + 1] - py[i]) > 0
+    return false
 end
 
 -- 車在 ov 線上的投影（sNow ±(OV_BLEND+1) 內的最近點）與沿線 previewM（線長）處的切線預視點。回 q（路線弧長參數）,
@@ -1718,13 +1755,15 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         -- （髮夾入彎臂的正式服案）不延伸，前跳防護照舊。車在折點交接圓內、車頭朝出臂（kinkHandover）也照此
         -- 延伸：彎內側車道上的車永遠到不了入彎臂段尾，頂點後又緊接短段時，只有 idx+1 能交接、它的端點卻比入彎臂
         -- 遠，投影就釘在入彎臂（E2E 1004a replay：4m 首段接 90°＋兩段 0.5m，起步轉進去後 s 停在 1.5、誤進
-        -- ROTATE 三次交還）。
+        -- ROTATE 三次交還）。交接到共線短樁後的真折點時（kinkHandover 回的出臂段號），前進量量在那條出臂上。
         if idx < n - 1 then
             local ex, ey = px[idx + 1], py[idx + 1]
-            local rx, ry = x - ex, y - ey
-            if rx * (ex - px[idx]) + ry * (ey - py[idx]) > 0 or kinkHandover(profile, state, idx, x, y, heading) then
-                local along = (rx * (px[idx + 2] - ex) + ry * (py[idx + 2] - ey)) / segLen[idx + 1]
-                if along > 0 and s[idx + 1] + along + 0.5 > maxS then maxS = s[idx + 1] + along + 0.5 end
+            local ho = (x - ex) * (ex - px[idx]) + (y - ey) * (ey - py[idx]) > 0 and idx + 1
+                or kinkHandover(profile, state, idx, x, y, heading)
+            if ho then
+                ex, ey = px[ho], py[ho]
+                local along = ((x - ex) * (px[ho + 1] - ex) + (y - ey) * (py[ho + 1] - ey)) / segLen[ho]
+                if along > 0 and s[ho] + along + 0.5 > maxS then maxS = s[ho] + along + 0.5 end
             end
         end
         local reachI = MDADFollower.segIndexAt(profile, maxS)
@@ -1883,6 +1922,7 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         sTarget = kinkS
         while j > bestI and s[j] >= sTarget do j = j - 1 end
     end
+    state.sTarget = sTarget -- 前視點弧長（中心線）；Driver 只在 uturn enter 事件帶出（復盤「前視點在車後」）
     -- 承諾線在非弧折點外側（ovOuterBend）：沿線的切線預視點與車對線橫偏，給下面的 lineLat 與切線追蹤；窗外 nil、逐位元照舊
     local ovQ, ovDev = ovOuterBend(profile, state, bestI, x, y, sNow, sTarget)
     local tj = 0
@@ -2344,8 +2384,14 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
                 state.hiSteerLag = ul
             end
         end
+        -- 1006：往彎外側滑（過轉、質心側滑 β 朝彎外超過 FF_HI.slipOut）＝穩態中斷：yaw 由甩尾帶、與 steer 脫鉤，ESC
+        -- 門檻下也會發生（正式服 1005h 12 fps 65 km/h R≈47：yr 0.73 是路徑需求兩倍、steer 已回到 0.18／反打，ESC 沒觸發），
+        -- 比值一路灌高；回抓地後的反打幀同樣脫鉤，所以歸零穩態計時、再穩 settleS 才學。β 用 state.slip（質心弦角，
+        -- 方向以上幀前饋正負號＝彎向判）。往彎內的 β 不擋：參考點穩態本來就偏內、低幀率側推也常把車推向內（0.03–0.08）。
+        if isFinite(pff) and (pff > 0 and -state.slip or state.slip) > FF_HI.slipOut then state.ffSteadyT = 0 end
         if isFinite(ph) and dt > 1e-4 and dt < 0.5 and aspeed >= FF_HI.learnKmh and isFinite(pff)
-                and (pff >= FF_HI.minFF or pff <= -FF_HI.minFF) and state.escLimited ~= true
+                and (pff * (state.ffGateK or 1) >= FF_HI.minFF or pff * (state.ffGateK or 1) <= -FF_HI.minFF)
+                and state.escLimited ~= true
                 and (state.ffSteadyT or 0) >= FF_HI.settleS and isFinite(ul) then
             local sg = pff > 0 and 1 or -1
             local alpha = dt / YAW_GAIN_TAU_S
@@ -2357,8 +2403,15 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
             state.hiLearnT = (state.hiLearnT or 0) + dt
             if sf >= FF_HI.minFF and yf > 0 then
                 local g = yf / sf
-                if g < YAW_GAIN_LO then g = YAW_GAIN_LO elseif g > YAW_GAIN_HI then g = YAW_GAIN_HI end
-                state.yawGainHi = g
+                if g > YAW_GAIN_HI then
+                    -- 衝出上限＝估計飽和：保留它會讓前饋縮到 minFF 以下、學習閘門再也打不開（自鎖）。整份重學，前饋
+                    -- 退回 yawGain／CURVE_FF_FRAC；Driver 讀 hiCapObs 發 yawgain hi-cap 事件（obs、已學秒數、幀時）。
+                    state.hiCapObs, state.hiCapLearnT = g, state.hiLearnT
+                    state.yawGainHi, state.hiYawF, state.hiSteerF, state.hiLearnT = nil, 0, 0, 0
+                else
+                    if g < YAW_GAIN_LO then g = YAW_GAIN_LO end
+                    state.yawGainHi = g
+                end
             end
         end
         state.prevHeading = heading

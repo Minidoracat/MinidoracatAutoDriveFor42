@@ -163,7 +163,7 @@ local HARD_MAX = math.max(LAT_N * (MDADDynamics.PERCEPTION_HARD_MAX_M - SCAN_NEA
 local KEY_MUL = 100000
 
 local COST_NONE, COST_SOFT, COST_HARD = 0, 1, 2
-local COST_HARD_THIN = 3       -- 細桿硬障礙：無碰撞旗標的籬笆 sprite，格心 0 半徑（引擎本身不給形狀，保守留著）
+local COST_HARD_THIN = 3       -- 細桿硬障礙：無碰撞旗標、非地上碎片（attachedFloor）的籬笆 sprite，格心 0 半徑（引擎本身不給形狀，保守留著）
 local COST_TREE = 4            -- 樹幹形狀（樹、室外路燈柱、PhysicsShape=Tree）：見 TRUNK_*
 local COST_DOOR = 5            -- 門／柵門 sprite（doorN／doorW）：開關狀態在格級屬性，由 closedDoor(square) 判
 local COST_WALL_N, COST_WALL_W, COST_WALL_NW = 6, 7, 8 -- 帶 collideN／collideW 的籬笆：格邊薄牆，見 WALL_*
@@ -401,13 +401,16 @@ local function classifySprite(obj, name)
     -- 籬笆照引擎旗標給形狀（IsoChunk.calcPhysics:2058-2095）：solid／solidtrans＝整格方塊，collideN／collideW
     -- ＝格的北緣／西緣 0.1m 薄牆（HoppableN／WallNTrans 等 tile 屬性載入時就轉成 collideN，IsoWorld.java:870-1017）。
     -- 舊制一律格心 0 半徑：籬笆在近側格邊時模型晚 0.45m 看到、遠側時多擋 0.45m。沒有任何碰撞旗標的籬笆
-    -- sprite 引擎不給形狀，仍留格心 0 半徑（保守）。
+    -- sprite 引擎不給形狀；立著的（籬笆樁等）仍留格心 0 半徑（保守），躺在地上的碎片不算障礙：名稱含
+    -- damaged／trash_ 的 sprite 載入時被引擎標 attachedFloor（IsoWorld.java:737-740）。issue #7 勃蘭登堡
+    -- 整條街散落 fencing_damaged_01_168..171（地圖原生），被當硬點後寬帶兩級都找不到縫、StopStuck。
     if find(name, "fencing_", 1, true) == 1 then
         if props:has(F_solid) or props:has(F_solidtrans) then return COST_HARD end
         local n, w = props:has(F_collideN), props:has(F_collideW)
         if n and w then return COST_WALL_NW end
         if n then return COST_WALL_N end
         if w then return COST_WALL_W end
+        if props:has("attachedFloor") then return COST_NONE end
         return COST_HARD_THIN
     end
 
