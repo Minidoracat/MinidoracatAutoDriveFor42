@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1005b"
+Drive.REV = "1005c"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -134,9 +134,12 @@ TUNE.STEER_SLIP_MARGIN_KMH = 12
 -- 相關 vt 0.60、ld 0.41（n=356；23 段內 16 段同號）；15–35 km/h 0.03／−0.12（沒有關係）。K 在 FROM→FULL 由 1 線性爬到
 -- ARM_EXT_K；拖車（掛車折角動態沒有離線模型）、貼縫爬行（s.dodgeCrawl）與殭屍軟縫側移（s.zombieLane）要的就是側移，
 -- 固定 1（Drive.armExtK）。s.armExt 進遙測（arx）。
+-- K 取 1.25（1005 實機矩陣：replay 案 B 四車型＋campaign 出彎外漂案 Mustang×2，每個 K 各 6 輪）：K 1.0／1.25／1.5 的
+-- 彎上往內滑 vt_in 平均 +0.044／+0.006／−0.059 m/s，最大外偏 −0.75／−0.66／−0.73m，出彎外漂平均 0.54／0.46／0.54m，
+-- 接觸 2／0／2——1.5 把內滑壓過頭、換成往外偏；1.25 兩邊都最小。
 TUNE.ARM_EXT_FROM_KMH = 35
 TUNE.ARM_EXT_FULL_KMH = 55
-TUNE.ARM_EXT_K = 1.5
+TUNE.ARM_EXT_K = 1.25
 -- 車身 yaw 率限制（0928a，ESC 式；0.13.1 正式服片段 >3 rad/s 自轉 24 次，0.13.0 只有 2 次）：側推是施在
 -- 車頭的外力、不受前輪轉角限制，目標點突然跳到 90° 外（Z 字短 jog 放行下一臂、窄出口繞行線、大弧調頭）
 -- 時 steer 飽和，0.2 秒內自轉 6–9 rad/s（summer/clip-06 SmallCar 18 km/h、Thragg/clip-04 GTR 大弧調頭、
