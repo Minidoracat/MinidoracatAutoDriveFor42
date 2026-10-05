@@ -3682,7 +3682,7 @@ do
     end
 end
 
-scenario("1002t：髮夾彎內側以車道折點為基準：放行、出彎前視、跨臂交接（E2E hairpin-sp／0927 正式服 131°）")
+scenario("1002t：髮夾彎內側以車道折點為基準：放行、出彎前視、跨臂交接（E2E hairpin-sp／0927 正式服 131°／1006 正式服 117° 共線短樁）")
 do
     -- 違規證明：舊制（量中心線）紅 9 項；只加放行點帽（1002j 前）紅 4 項；再加放行窗內不判 ROTATE 紅 2 項。
     -- 閉環 plant 同情境二十六（自行車＋一階 yaw 延遲、Driver 死區），加速度 3／煞車 7 的速度 plant、Driver 一般 cross-track。
@@ -3759,6 +3759,42 @@ do
         local rotN, _, _, _, done = closedLoop(q, 2.01, c[1], c[2], 3)
         checkTrue(done and rotN == 0, string.format("正式服 131° 常駐 2.01、s0 %.0f／%.0f km/h：走過頂點且不進 ROTATE（rotN %d）",
             c[1], c[2], rotN))
+    end
+    -- (3) 1006 正式服 117° 右髮夾（rev 1005k，76chevyK10 rMin 3.07、常駐 3＝彎內側）：16m 路在頂點前 2.7m 插了共線點
+    --     （路寬 16→8 的分段），彎內側車道折點（頂點前 3.43m）落在短樁之前。車在入彎臂上就轉進出彎車道、到不了短樁，
+    --     舊制只問 idx+1（共線頂點、交接圓半徑 1）＝投影釘在入彎臂且往回退，前視點留在身後：正式服 err 0.64→2.60
+    --     誤進 ROTATE、7 秒四次調頭＝迴圈防護交還；閉環 plant 則繞著入彎臂原地打轉。路線取片段 route src 第 11–19 點。
+    --     違規證明：kinkHandover 不跨共線頂點（alt 恆 nil）＝(3a)(3b) 紅。
+    local r117 = F.begin({ pts = { 4498.5, 10500, 4500, 10503, 4570.3, 10643.6, 4571.5, 10646,
+            4569.48773099638, 10645.987578586397, 4500, 10645.558641975309, 4490.5, 10645.5, 4483, 10653, 4483, 10744 },
+        segSurface = { "paved", "paved", "paved", "paved", "paved", "paved", "paved", "paved" },
+        segWidth = { 17, 17, 16, 8, 8, 8, 8, 8 } }, 75, 4, { valid = true, geometryValid = true, halfW = 0.89,
+        halfL = 2.21, rMin = 3.067, wheelbase = 2.69, delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 75 })
+    r117.lookScale = 1.4116 -- 片段 header profile
+    while not F.stepBuild(r117, 100000) do end
+    checkEq(r117.filletFallbackN, 1, "fixture：117° 頂點建不出弧（fallback，同 repro_route_profile）")
+    -- (3a) 逐幀餵正式服位姿（−2.04…−0.22s；舊制重播 err 與片段逐筆相同、最後一筆 2.60 進 ROTATE）
+    local st3 = F.newState()
+    F.setRuntimeLimits(st3, 3, 7, 6, 6.23)
+    F.setLaneBias(st3, 3)
+    local rot3 = false
+    for _, r in ipairs({
+        { 4564.515625, 10638.328125, 1.0877, 20.52 }, { 4565.046875, 10639.3125, 1.0757, 14.88 },
+        { 4565.3984375, 10639.953125, 1.0648, 11.72 }, { 4565.7265625, 10640.53125, 1.0550, 11.71 },
+        { 4566.046875, 10641.140625, 1.0801, 11.78 }, { 4566.28125, 10641.765625, 1.1710, 11.83 },
+        { 4566.25, 10642.4296875, 1.4091, 12.11 }, { 4565.9609375, 10643.0390625, 1.7037, 12.04 },
+        { 4565.53125, 10643.546875, 1.9778, 11.97 }, { 4564.953125, 10643.8828125, 2.2962, 13.45 },
+    }) do
+        F.control(r117, st3, r[1], r[2], r[3], r[4], 0.2)
+        if st3.rotating then rot3 = true end
+    end
+    checkTrue(not rot3 and st3.idx == 5, string.format(
+        "正式服 117° 位姿重播：投影交接到短樁後的出彎臂（idx %d）且不進 ROTATE（%s）", st3.idx, tostring(rot3)))
+    -- (3b) 閉環：常駐 3／2.5 從頂點前 43m、13 km/h 進彎
+    for _, bias in ipairs({ 3, 2.5 }) do
+        local rotN, _, _, _, done = closedLoop(r117, bias, 120, 13, 3.067)
+        checkTrue(done and rotN == 0, string.format("正式服 117° 常駐 %.1f：走過頂點 25m 且不進 ROTATE（rotN %d、done %s）",
+            bias, rotN, tostring(done)))
     end
 end
 
