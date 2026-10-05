@@ -446,6 +446,8 @@ end
 -- keep（第 4 參）＝往內留多少：常駐 bias 留 LANE_BIAS_KEEP；承諾線的絕對 lane
 -- （停留 offL／RETURN target，掃掠驗的是那條線本身）只夾物理餘裕、傳 0——
 -- 否則 keep 會把停留線從 room 邊再往內拉 0.6，(kerb) 那道縫就被自己吃掉。
+-- keep＝false：不夾（斜切保持的車位 lane，Driver Drive.laneKeepOf）——車在路寬外起步時保持 lane 本來就在
+-- room 外，夾回 room−keep＝期望線落在圍籬另一側、保持等於沒做（正式服 1004g 路外 11m 起步 el 2.2 斜穿圍籬）。
 local LANE_BIAS_KEEP = 0.6
 MDADFollower.LANE_BIAS_KEEP = LANE_BIAS_KEEP
 
@@ -488,7 +490,7 @@ end
 local LANE_BLEND_M = 12
 local LANE_BLEND_WALK_MAX = 32 -- 以 run 計（同餘裕的連續段＝一個 run；混合窗內超過 32 個不同餘裕的 run 才截斷）
 local function clampLane(p, j, lane, keep, sAt)
-    if p.laneRoomR == nil then return lane end
+    if p.laneRoomR == nil or keep == false then return lane end
     if keep == nil then keep = LANE_BIAS_KEEP end
     local v = clampLaneRaw(p, j, lane, keep)
     if sAt == nil or v == 0 then return v end
@@ -668,7 +670,7 @@ function MDADFollower.planTimeAt(out, sAt, hint)
 end
 
 -- 段 segI 上常駐 laneBias 實際能落到的值（Driver 期望線／遙測 el 與 control 同一
--- 張表）。profile 未 ready 或無表＝原值。keep＝離路緣保留（nil＝LANE_BIAS_KEEP）；會車時
+-- 張表）。profile 未 ready 或無表＝原值。keep＝離路緣保留（nil＝LANE_BIAS_KEEP；false＝不夾，斜切保持）；會車時
 -- Driver 設 state.laneKeep＝0（貼到路緣錯車，1001b），control 與期望線必須傳同一個值。
 function MDADFollower.laneBiasAt(profile, bias, segI, sAt, keep)
     if type(profile) ~= "table" or profile.laneRoomR == nil

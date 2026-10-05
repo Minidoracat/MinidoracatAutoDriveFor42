@@ -19662,6 +19662,11 @@ function drive.scenarioTraffic()
 
     -- (edge) 1001b：7m 路對向車佔中線——會車時可貼到路緣（keep 0.1，平常 0.6）：右邊擠得出錯車淨距就
     -- 錯車不讓車，control／期望線同步用 fstate.laneKeep。違規證明：trafficScan 帶寬退回 LANE_BIAS_KEEP 即紅。
+    -- 假車不會橫移：側移後車仍在 0、對向車在斜切帶內＝斜切保持接手（laneBias 回車位、keep＝false 不夾，1006），
+    -- 這裡只測會車的 keep，暫時把 START_GUARD_LAT_M 拉大關掉保持（testing.md），區塊尾還原。
+    local tune = MDAD.Drive.debugTune()
+    local oldGuardLat = tune.START_GUARD_LAT_M
+    tune.START_GUARD_LAT_M = 99
     arm(7)
     on = car(26, 0, math.pi)
     traffic(on, -2, 2)
@@ -19670,6 +19675,7 @@ function drive.scenarioTraffic()
     checkTrue(st.trfOnWant ~= nil and st.trfOnWant > MDADFollower.laneBiasAt(st.profile, 9, st.fstate.idx) + 0.3,
         "(edge) 錯車 lane 超過平常的路緣保留")
     drive.scanRound()
+    tune.START_GUARD_LAT_M = oldGuardLat
     checkEq(st.fstate.laneKeep, MDAD.Drive.debugTune().TRAFFIC_EDGE_KEEP_M, "(edge) 側移期間 control 用會車的路緣保留")
     drive.clearVehicleGeom(on._cells)
 
@@ -22895,6 +22901,83 @@ function drive.scenario1004e()
     SandboxVars = oldSand
 end
 drive.scenario1004e()
+
+-- 1006（正式服 1004g 兩段：車在路外 8–11m 起步、圍籬隔在車與路之間，lane hold 有觸發、樣本 el 卻是路寬內的 2.2／5.0，
+--   車以 align 24 km/h 斜穿圍籬）：保持 lane 經 laneBiasAt／control 的 clampLane 被夾回 laneRoom−keep＝等於沒保持。
+--   (hold-room) 8m 路、車在 l=9（路寬外）、車頭斜 45° 朝路、斜切帶有一排硬物：holdLaneL＝車位，期望線 el、control 前視點
+--     （航向誤差）、規劃擋線基準都照保持 lane，不被夾回；對線偏差不套 lane ramp 區間。違規證明：laneKeepOf 不回 false／
+--     clampLane 不認 false＝夾回＝紅；擋線基準照舊只認 0＝紅；laneRampDev 照套＝紅。
+--   (hold-room-release) 放手後 keep 回一般值（clampLane 照舊夾常駐 lane）。違規證明：transitionRelease 不重設 keep＝紅。
+function drive.scenarioHoldRoom()
+    scenario("1006：路外起步的斜切保持不被路寬夾回（期望線／控制／規劃都照保持 lane）")
+    local oldSandbox, oldVeh, oldGet = SandboxVars, dveh, getSpecificPlayer
+    local oldApi = MinidoracatMiniMapAPI.navApiVersion
+    local oldRoute, oldTx, oldTy, oldState = drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
+    local wasMs = drive.frameMs(20)
+    MDAD.Drive.stop(0, nil)
+    getSpecificPlayer = function(n) if n == 0 then return dp end end
+    MinidoracatMiniMapAPI.navApiVersion = 5
+    dveh = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }),
+        engineRunning = true, mass = 1600, speed = 0, maxSpeed = 100,
+        bodyW = 1.6, bodyL = 4.2, comX = 0, comZ = 0, profileFull = true,
+        enginePower = 3000, brakingForce = 100, wheelFriction = 1.5, tireFriction = 1.5 })
+    drive.fillWorld(-12, 90, -12, 16)
+    drive.putRoad(0, 90, -4, 3)
+    for x = 11, 40 do drive.putSolid(x, 5, "hr_fence") end -- 圍籬 y 5..6：車位 9 與路之間（斜切帶），不擋車位線
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
+        AutoDriveMaxSpeed = 60, RightLaneBias = 0 })
+    dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = 10, 9, 0, 0, true
+    dveh._engine, dveh._driver = true, dp
+    dp._vehicle, dp._dead, dp._local = dveh, false, true
+    setHeading(dveh, -math.pi / 4) -- 車頭斜 45° 朝路（clip-07 停車格的姿態；偏頭 > RETURN_ENTER_MAX_RAD＝不進 RETURN）
+    drive.nav.route = { pts = { 0, 0, 80, 0 }, segSurface = { "paved" }, segWidth = { 8 },
+        len = 80, cost = 80, avoidPenalty = 0 }
+    drive.nav.tx, drive.nav.ty, drive.nav.state = 80, 0, "ok"
+    checkTrue(MDAD.Drive.start(dp), "(hold-room) 啟動")
+    for _ = 1, 6 do driveTick(dp, dveh) end
+    drive.scanRound(true)
+    driveTick(dp, dveh)
+    local s = MDAD.Drive.debugSession(0)
+    local finite = MDADDynamics.finite
+    local room = s and s.profile and s.profile.laneRoomR and s.profile.laneRoomR[1]
+    checkTrue(s ~= nil and finite(room) and room < 5 and s.holdLaneL ~= nil and math.abs(s.holdLaneL - 9) < 0.1
+            and not s.dodging and not s.returnActive,
+        "(hold-room) 前提：路寬 room " .. tostring(room) .. " 遠小於車位、斜切帶有圍籬＝保持（hold="
+        .. tostring(s and s.holdLaneL) .. " dodging=" .. tostring(s and s.dodging) .. " ret="
+        .. tostring(s and s.returnActive) .. "）")
+    -- 車頭 −45°：前視點在保持 lane（l=9）正前方＝航向誤差 ≈ +45°（轉回與路平行）；夾回路寬時前視點落在圍籬另一側、
+    -- 誤差 ≈ 0＝照原姿態斜穿圍籬（clip-07 el 2.2、err 0.1–0.4、24 km/h 撞上）
+    checkTrue(s ~= nil and finite(s.holdLaneL) and finite(s.diagExpL) and math.abs(s.diagExpL - s.holdLaneL) < 1e-6
+            and finite(s.lastHeadingError) and s.lastHeadingError > 0.6,
+        "(hold-room) 期望線與控制前視點照保持 lane、不夾回路寬（el=" .. tostring(s and s.diagExpL) .. " err="
+        .. tostring(s and s.lastHeadingError) .. "）")
+    -- 規劃擋線基準：車位線上（l=9）、車前 20m 的硬點必須判擋（夾回 room 的基準線看不到它）
+    local sen = s.sensor
+    local n0 = sen.hardN
+    local k = n0 + 1
+    sen.hardN, sen.hardS[k], sen.hardL[k], sen.hardR[k] = k, s.lastSNow + 20, 9, 0.3
+    sen.hardLc[k], sen.hardW[k] = nil, nil
+    local bs = MDAD.Drive.debugLineBlocker(0, s.lastSNow + 15)
+    sen.hardN = n0
+    checkTrue(bs ~= nil and math.abs(bs - (s.lastSNow + 20)) < 1e-6,
+        "(hold-room) 規劃擋線基準＝保持 lane：車位線上的硬點判擋（實得 " .. tostring(bs) .. "）")
+    -- 對線偏差：保持中車往路斜切到 l=6（離保持 lane 3m）要照實讀成 3，不被 lane ramp 區間（夾過的 lane ↔ el）吃成 0
+    local keepLat = s.lastLatSigned
+    s.lastLatSigned = 6
+    local rampDev = MDAD.Drive.laneRampDev(s, 3, 30)
+    s.lastLatSigned = keepLat
+    checkTrue(rampDev == 3, "(hold-room) 保持中的對線偏差不套 lane ramp 區間（實得 " .. tostring(rampDev) .. "）")
+    MDAD.Drive.transitionRelease(s, 0, "clear", 0)
+    checkTrue(s.holdLaneL == nil and s.fstate.laneKeep ~= false,
+        "(hold-room-release) 放手後 keep 回一般值（keep=" .. tostring(s.fstate.laneKeep) .. "）")
+    for x = 11, 40 do drive.clearCell(x, 5) end
+    MDAD.Drive.stop(0, nil)
+    drive.frameMs(wasMs)
+    MinidoracatMiniMapAPI.navApiVersion = oldApi
+    drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
+    SandboxVars, dveh, getSpecificPlayer = oldSandbox, oldVeh, oldGet
+end
+drive.scenarioHoldRoom()
 
 do -- 主 chunk local 槽已滿：整段包成函式，內部 local 不佔主 chunk
 -- =====================================================================
