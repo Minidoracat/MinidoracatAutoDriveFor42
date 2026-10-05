@@ -543,6 +543,7 @@ function MDAD.Drive.hudState()
         state.resumeIn, state.elapsed, state.legReportWhy
 end
 function MDAD.Drive.hudStartReason() return state.startReason end
+function MDAD.Drive.hudStopReason() return state.stopKey, state.stopAgoMs end
 function MDAD.Drive.slowdownInfo() return 2, 48, 3, 25, 15, 10, 20 end
 function MDAD.Drive.effectiveCap() return state.idleCap end
 function MDAD.Drive.getGear() return state.gear end
@@ -1038,6 +1039,32 @@ panel:refresh(nowMs)
 checkEq(panel._statusText, "ENGINE OFF", "inactive reason uses short HUD label")
 checkEq(panel.actionButton.tooltip, "ENGINE REASON", "full reason remains tooltip")
 checkEq(panel._capText, "30", "inactive HUD recomputes cap via Drive.effectiveCap")
+
+-- 被迫停止的原因（1005h，Drive.hudStopReason）：停用態狀態列換成停止短標籤，狀態字與主鈕 tooltip＝完整原因＋停了多久
+-- （整分鐘；不到一分鐘說「剛剛」）；沒列到的原因鍵退 other；紀錄沒了就回到啟動守門。
+texts.UI_MinidoracatAutoDrive_HUDStatusStop_animal = "STOP ANIMAL"
+texts.UI_MinidoracatAutoDrive_HUDStatusStop_other = "FORCE STOPPED"
+texts.UI_MinidoracatAutoDrive_AnimalBlockStop = "ANIMAL SENTENCE"
+texts.UI_MinidoracatAutoDrive_HUDStopAgo = "%1 MIN AGO"
+texts.UI_MinidoracatAutoDrive_HUDStopJustNow = "JUST NOW"
+state.stopKey, state.stopAgoMs = "UI_MinidoracatAutoDrive_AnimalBlockStop", 59999
+panel:refresh(nowMs)
+check(panel._statusText == "STOP ANIMAL" and panel.statusTip.visible
+    and panel.statusTip.tooltip == "ANIMAL SENTENCE\nJUST NOW"
+    and panel.actionButton.tooltip == "ANIMAL SENTENCE\nJUST NOW",
+    "forced stop: short reason on the status, full reason and age on the status and the main button ("
+        .. tostring(panel._statusText) .. " / " .. tostring(panel.statusTip.tooltip) .. ")")
+state.stopAgoMs = 12 * 60000 + 59999
+panel:refresh(nowMs)
+checkEq(panel.statusTip.tooltip, "ANIMAL SENTENCE\n12 MIN AGO", "forced-stop age counts whole minutes")
+state.stopKey = "UI_SomeAddon_CustomGate"
+panel:refresh(nowMs)
+checkEq(panel._statusText, "FORCE STOPPED", "an unmapped forced-stop reason falls back to the generic label")
+state.stopKey, state.stopAgoMs = nil, nil
+panel:refresh(nowMs)
+check(panel._statusText == "ENGINE OFF" and not panel.statusTip.visible
+        and panel.actionButton.tooltip == "ENGINE REASON",
+    "without a forced-stop record the status returns to the start gate")
 
 click(panel.collapseButton)
 checkEq(player._md.MDADHudCollapsed, true, "collapsed state persists in player modData")
@@ -1777,6 +1804,18 @@ local translatedStatusRight = panel._statusX
 check(panel._showStatusText and translatedStatusRight <= panel._speedX,
     "measured long NoNav status ends before speed column")
 
+-- 被迫停止的短標籤也在 STATUS_WIDTH_KEYS（1005h）：比其他狀態字都長也不壓速度欄
+texts.UI_MinidoracatAutoDrive_HUDStatusStop_trailer = string.rep("T", 60)
+options:apply()
+state.stopKey, state.stopAgoMs = "UI_MinidoracatAutoDrive_TrailerCorner", 0
+panel:refresh(nowMs)
+check(panel._statusText == string.rep("T", 60) and panel._showStatusText
+        and panel._statusX + textManager:MeasureStringX(UIFont.Small, panel._statusText) <= panel._speedX,
+    "measured long forced-stop label ends before speed column")
+state.stopKey, state.stopAgoMs = nil, nil
+texts.UI_MinidoracatAutoDrive_HUDStatusStop_trailer = nil
+options:apply()
+
 -- 窄分割畫面＋長語系＋1.25x：OnCreatePlayer 會重建**所有** dashboard
 -- 並改 viewport；既有 P0 與新 P1 都要立即 re-layout/reparent/dock。
 texts.UI_MinidoracatAutoDrive_HUDStatusNoNav = string.rep("N", 48)
@@ -1982,6 +2021,17 @@ do
     panel:refresh(nowMs)
     checkEq(panel._statusText, "STOPPED OVER",
         "the rejection notice expires back to the phase wording, not to the single-stop 'ready'")
+    -- 被迫停止的原因（1005h）壓過行程階段字；主鈕剛被拒的 5 秒提示仍優先，過期回到停止原因。
+    state.stopKey, state.stopAgoMs = "UI_MinidoracatAutoDrive_AnimalBlockStop", 0
+    panel:refresh(nowMs)
+    checkEq(panel._statusText, "STOP ANIMAL", "a forced stop outranks the trip phase wording")
+    trip.continueOk, trip.continueReason = false, "UI_MinidoracatAutoDrive_TripNotStopped"
+    click(panel.actionButton)
+    checkEq(panel._statusText, "STOP FIRST", "a fresh start rejection still shows before the forced-stop reason")
+    nowMs = nowMs + 6000
+    panel:refresh(nowMs)
+    checkEq(panel._statusText, "STOP ANIMAL", "once the rejection expires the forced-stop reason comes back")
+    state.stopKey, state.stopAgoMs = nil, nil
     trip.continueOk, trip.continueReason = true, nil
 
     -- 無名稱的站退座標；快照只在 phase／revision／目前站變更時重取。

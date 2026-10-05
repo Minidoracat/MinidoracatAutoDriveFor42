@@ -148,6 +148,26 @@ local TRIP_REASON_KEYS = {
     failed = "UI_MinidoracatAutoDrive_TripFailed",
 }
 
+-- 被迫停止的原因（Drive.hudStopReason，1005h）→ 停用態狀態列的短標籤；完整原因句與停了多久放狀態字 tooltip。
+-- 標籤都不比最長的既有狀態字寬（中文 6 字），面板不會因此變寬。沒列到的（addon navGate 自訂鍵等）一律 other。
+-- 主 chunk local 已貼上限：掛 HUD。
+HUD.STOP_KEYS = {
+    UI_MinidoracatAutoDrive_StopStuck = "UI_MinidoracatAutoDrive_HUDStatusStop_stuck",
+    UI_MinidoracatAutoDrive_PlayerBlockStop = "UI_MinidoracatAutoDrive_HUDStatusStop_player",
+    UI_MinidoracatAutoDrive_AnimalBlockStop = "UI_MinidoracatAutoDrive_HUDStatusStop_animal",
+    UI_MinidoracatAutoDrive_AreaLoadStop = "UI_MinidoracatAutoDrive_HUDStatusStop_area",
+    UI_MinidoracatAutoDrive_LostRoute = "UI_MinidoracatAutoDrive_HUDStatusStop_route",
+    UI_MinidoracatAutoDrive_TripLost = "UI_MinidoracatAutoDrive_HUDStatusStop_route",
+    UI_MinidoracatAutoDrive_RouteNotReady = "UI_MinidoracatAutoDrive_HUDStatusStop_route",
+    UI_MinidoracatAutoDrive_RouteTooFar = "UI_MinidoracatAutoDrive_HUDStatusStop_far",
+    UI_MinidoracatAutoDrive_TrailerCorner = "UI_MinidoracatAutoDrive_HUDStatusStop_trailer",
+    UI_MinidoracatAutoDrive_TrailerRotate = "UI_MinidoracatAutoDrive_HUDStatusStop_trailer",
+    UI_MinidoracatAutoDrive_TrailerLost = "UI_MinidoracatAutoDrive_HUDStatusStop_trailer",
+    UI_MinidoracatAutoDrive_EngineOff = "UI_MinidoracatAutoDrive_HUDStatusStop_engine",
+    UI_MinidoracatAutoDrive_NeedGPS = "UI_MinidoracatAutoDrive_HUDStatusStop_device",
+    UI_MinidoracatAutoDrive_NeedModule = "UI_MinidoracatAutoDrive_HUDStatusStop_device",
+}
+
 -- 面板寬度取「最長狀態字串」；量測鍵表固定不變，留在載入期讓 applyLayout 不重建 table。
 local STATUS_WIDTH_KEYS = {
     "UI_MinidoracatAutoDrive_HUDStatusArrive",
@@ -188,6 +208,16 @@ local STATUS_WIDTH_KEYS = {
     "UI_MinidoracatAutoDrive_HUDStatusContFailed",
     "UI_MinidoracatAutoDrive_HUDStatusTripSkipped",
     "UI_MinidoracatAutoDrive_HUDStatusTripUnavailable",
+    "UI_MinidoracatAutoDrive_HUDStatusStop_stuck",
+    "UI_MinidoracatAutoDrive_HUDStatusStop_player",
+    "UI_MinidoracatAutoDrive_HUDStatusStop_animal",
+    "UI_MinidoracatAutoDrive_HUDStatusStop_area",
+    "UI_MinidoracatAutoDrive_HUDStatusStop_route",
+    "UI_MinidoracatAutoDrive_HUDStatusStop_far",
+    "UI_MinidoracatAutoDrive_HUDStatusStop_trailer",
+    "UI_MinidoracatAutoDrive_HUDStatusStop_engine",
+    "UI_MinidoracatAutoDrive_HUDStatusStop_device",
+    "UI_MinidoracatAutoDrive_HUDStatusStop_other",
 }
 
 -- 多停靠點行程（addon-api §6）：MiniMap navApiVersion >= 6 才存在。HUD 只讀公開的
@@ -2055,7 +2085,7 @@ function MDADHUDPanel:placeDetourButton()
     end
     self.detourButton:setVisible(show)
     -- 「卡頓降速」滑過看原因：即時幀時／FPS／實際與設定感知距離＋固定門檻
-    local statusTipText = self._lowFpsTip or (self._slowCategory and self._speedTip) or nil
+    local statusTipText = self._lowFpsTip or self._stopTip or (self._slowCategory and self._speedTip) or nil
     local tip = self._detourAllowed == true and statusTipText ~= nil
     if tip then
         setButtonRect(self.statusTip, self._statusX, self._textY,
@@ -2433,6 +2463,7 @@ function MDADHUDPanel:refresh(now)
         "ZombieAreaSlowdown", self.playerNum, "zombie")
     policyCorpseOn, self._corpsePolicy = effectivePolicy(
         "CorpseSlowdown", self.playerNum, "corpse")
+    self._stopTip = nil
     if self._active then
         -- 讓位中已放手＝倒數（2026-09-06 回饋「不知道放開會變回自動駕駛」）；按著＝「手動操作中」。
         if reason then
@@ -2443,15 +2474,24 @@ function MDADHUDPanel:refresh(now)
             self._statusText = getText(STATUS_KEYS[token] or STATUS_KEYS.follow)
         end
     else
-        -- 玩家剛按下主鈕被拒的原因優先顯示（有時效），過了就回到常態啟動守門；
-        -- 快照自己帶的原因（例如 gate 不允許而留在 waiting）再接在後面。階段字
-        -- （已停靠／已略過／行程完成）只有在完全沒有原因時才出場，不會蓋掉任何守門。
-        reason = self:tripNotice(now) or Drive.hudStartReason(self.playerNum)
-            or self._tripReasonKey
-        self._statusText = getText(REASON_KEYS[reason]
-            or (reason and "UI_MinidoracatAutoDrive_HUDStatusNotReady"
-                or self._tripStatusKey
-                or "UI_MinidoracatAutoDrive_HUDStatusReady"))
+        -- 玩家剛按下主鈕被拒的原因優先顯示（有時效）；接著是被迫停止的原因（Drive.hudStopReason：持續到下一趟真的
+        -- 開始、只在停下的那台車），之後才回到常態啟動守門；快照自己帶的原因（例如 gate 不允許而留在 waiting）再接在
+        -- 後面。階段字（已停靠／已略過／行程完成）只有在完全沒有原因時才出場，不會蓋掉任何守門。
+        local stopAgoMs
+        reason = self:tripNotice(now)
+        if not reason then reason, stopAgoMs = Drive.hudStopReason(self.playerNum, vehicle) end
+        if stopAgoMs then
+            local mins = math.floor(stopAgoMs / 60000)
+            self._statusText = getText(HUD.STOP_KEYS[reason] or "UI_MinidoracatAutoDrive_HUDStatusStop_other")
+            self._stopTip = getText(reason) .. "\n" .. (mins < 1 and getText("UI_MinidoracatAutoDrive_HUDStopJustNow")
+                or getText("UI_MinidoracatAutoDrive_HUDStopAgo", string.format("%d", mins)))
+        else
+            reason = reason or Drive.hudStartReason(self.playerNum) or self._tripReasonKey
+            self._statusText = getText(REASON_KEYS[reason]
+                or (reason and "UI_MinidoracatAutoDrive_HUDStatusNotReady"
+                    or self._tripStatusKey
+                    or "UI_MinidoracatAutoDrive_HUDStatusReady"))
+        end
         gear = Drive.getGear(self.playerNum)
         cap = Drive.effectiveCap(self.playerNum, vehicle)
         zombieOn = policyZombieOn
@@ -2596,7 +2636,7 @@ function MDADHUDPanel:updateButtons()
     self.actionButton:setTitle(actionTitle)
     -- tooltip＝完整可讀的行程提示（第 N/M 站、站名、階段）＋當下的拒絕／停用原因。
     local actionTip = self._tripTip
-    local reasonText = self._reason and getText(self._reason) or nil
+    local reasonText = self._stopTip or (self._reason and getText(self._reason)) or nil
     if actionTip and reasonText then actionTip = actionTip .. "\n" .. reasonText end
     actionTip = actionTip or reasonText
     if actionTitle ~= fullAction then

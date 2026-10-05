@@ -9272,6 +9272,38 @@ function drive.scenarioSoftHoldJitter()
 end
 drive.scenarioSoftHoldJitter()
 
+-- (stop-note) 被迫停止的原因持續到下一趟（1005h；使用者 10-05：被迫停下來時要有地方持續顯示原因）：Drive.stop 帶
+--   reasonKey（系統交還）才記、記的是那台車；玩家自己停、手動接手不記；新的一趟真的接上（commitSession）才清。
+--   違規證明：commitSession 不清＝(stop-note-clear) 紅；不比對車＝(stop-note-veh) 紅；不帶原因也記＝(stop-note-manual) 紅。
+function drive.scenarioStopNote()
+    scenario("被迫停止的原因：記到下一趟真的開始、只在那台車顯示")
+    local D = MDAD.Drive
+    local other = { getId = function() return dveh:getId() + 7 end }
+    assert(armDrive())
+    D.stop(0, D.KEY_ANIMAL_STOP)
+    local key, ago = D.hudStopReason(0, dveh)
+    checkTrue(key == D.KEY_ANIMAL_STOP and ago == 0,
+        "(stop-note) 系統交還：記下原因（" .. tostring(key) .. "、" .. tostring(ago) .. "ms）")
+    nowMs = nowMs + 65000
+    key, ago = D.hudStopReason(0, dveh)
+    checkTrue(key == D.KEY_ANIMAL_STOP and ago == 65000,
+        "(stop-note) 沒有新的一趟就一直留著、回報停了多久（" .. tostring(ago) .. "ms）")
+    checkTrue(D.hudStopReason(0, other) == nil and D.hudStopReason(0, nil) == nil,
+        "(stop-note-veh) 換開別台車不顯示（" .. tostring(D.hudStopReason(0, other)) .. "）")
+    assert(armDrive())
+    checkTrue(D.hudStopReason(0, dveh) == nil,
+        "(stop-note-clear) 新的一趟真的接上就清掉（" .. tostring(D.hudStopReason(0, dveh)) .. "）")
+    D.stop(0, nil, nil, "button")
+    checkTrue(D.hudStopReason(0, dveh) == nil,
+        "(stop-note-manual) 玩家自己停不記（" .. tostring(D.hudStopReason(0, dveh)) .. "）")
+    assert(armDrive())
+    D.stop(0, nil, "manual")
+    checkTrue(D.hudStopReason(0, dveh) == nil,
+        "(stop-note-manual) 手動接手不記（" .. tostring(D.hudStopReason(0, dveh)) .. "）")
+    assert(armDrive())
+end
+drive.scenarioStopNote()
+
 -- ⑤lf 低幀率降速提示（0925；0929o 門檻改為掃描額度放大到上限的 50ms）：可視上限壓速、平均幀時 ≥50ms，
 --   且視距是被幀率截短，持續 2s 才讓 HUD 狀態變「卡頓降速」（lowfps）、恢復 3s 才消失；同趟累計 10s 跳一次
 --   通知。session 從 150ms（可負擔 32m）起算。反例：幀率低但速度沒被可視上限壓（沙盒上限 20）不顯示。

@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1005g"
+Drive.REV = "1005h"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -1298,6 +1298,22 @@ function Drive.hudStartReason(playerNum)
     return nil
 end
 
+-- 被迫停止的原因（1005h；使用者 10-05：被迫停下來時要有地方持續顯示原因，玩家暫離回來才知道為什麼停）：Drive.stop
+-- 帶 reasonKey（系統交還）就記下原因鍵、那台車的 id 與時間，下一趟 session 真正接上（commitSession）才清。玩家自己
+-- 停、手動接手、下車、抵達都不帶 reasonKey＝不記，也不清舊的。只在本機記憶體、依 playerNum 分槽，不寫磁碟。
+Drive.lastStops = {}
+function Drive.noteStop(playerNum, key, vehicle)
+    Drive.lastStops[playerNum] = { key = key, vid = vehicle and vehicle:getId() or nil, ms = getTimestampMs() }
+end
+
+-- HUD 停用態讀（MDAD_HUD refresh）：回 (原因鍵, 停止至今毫秒)。沒有紀錄、或 vehicle 不是停下的那台＝nil（換開別台
+-- 車不顯示，回到原車又出現）。
+function Drive.hudStopReason(playerNum, vehicle)
+    local rec = Drive.lastStops[playerNum]
+    if not rec or not vehicle or rec.vid == nil or vehicle:getId() ~= rec.vid then return nil end
+    return rec.key, getTimestampMs() - rec.ms
+end
+
 -- 玩家有沒有在自己操作？有就讓位。
 -- getCurrentSteering 由 CarController 每幀從 clientControls 寫入（CarController.java:321、
 -- 用例 Vehicles.lua:731），手把的類比轉向也會進到這裡，是唯一跨鍵鼠／手把的轉向觀測點。
@@ -1839,6 +1855,7 @@ function Drive.stop(playerNum, reasonKey, voiceEvent, diagWhy)
         if reasonKey then
             local playerObj = getSpecificPlayer(playerNum)
             if playerObj then haloBad(playerObj, reasonKey) end
+            Drive.noteStop(playerNum, reasonKey, playerObj and playerObj:getVehicle())
         end
         if getDebug() then
             print(LOG .. "trip prep cancel pn=" .. playerNum
@@ -1864,6 +1881,7 @@ function Drive.stop(playerNum, reasonKey, voiceEvent, diagWhy)
             .. " regulator=off nobrake")
     end
     if reasonKey then
+        Drive.noteStop(playerNum, reasonKey, s.vehicle)
         local playerObj = getSpecificPlayer(playerNum)
         if playerObj then
             haloBad(playerObj, reasonKey)
@@ -1892,6 +1910,7 @@ local function commitSession(playerObj, playerNum, s)
     local vehicle = s.vehicle
     vehicle:setRegulator(false)
     sessions[playerNum] = s
+    Drive.lastStops[playerNum] = nil -- 新的一趟真的接上：上次被迫停止的原因不再顯示（Drive.hudStopReason）
     -- 設定值在下一輪beginRound套用；不改route identity或正在執行的承諾。
     if s.sensor then s.sensor.aheadM = Drive.perceptionDistance() end
     sessionCount = sessionCount + 1
