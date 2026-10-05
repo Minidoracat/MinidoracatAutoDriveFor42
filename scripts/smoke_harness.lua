@@ -13655,6 +13655,10 @@ local function scenarioTelemetry()
         "initial route event why=initial")
     checkEq(drive.diag.phases["route:cutover"].len, nil,
         "initial cutover 無 route.len 時省略，不寫假 0")
+    -- 1006：cutover 帶車位 x/y 與主 MOD 的 snapDist（正式服一次偏航重算給出起點在 1834m 外的線，事件看不出車在哪）。
+    -- 違規證明：拿掉 initial 的 x/y＝(cut0) 紅；拿掉偏航 cutover 的 snapDist／x＝(cut1) 紅。
+    checkEq(drive.diag.phases["route:cutover"].x, dveh._x, "(cut0) initial cutover 帶車位 x")
+    checkEq(drive.diag.phases["route:cutover"].y, dveh._y, "(cut0) initial cutover 帶車位 y")
     checkNear(drive.diag.phases["route:ready"].len, 156, 1e-9,
         "profile build ready event 寫入精確非零 length")
     checkEq(drive.diag.samplePn, 0, "sample 用精確 pn")
@@ -13723,6 +13727,7 @@ local function scenarioTelemetry()
     forceShould = nil
     drive.nav.route = newRoute(40, 0, 0, 4, 0)
     drive.nav.route.len = 156
+    drive.nav.route.snapDist = 7.5
     nowMs = nowMs + 250
     driveTick(dp, dveh)
     checkEq(drive.diag.fields.route and drive.diag.fields.route.why, "deviation",
@@ -13730,6 +13735,8 @@ local function scenarioTelemetry()
     checkTrue(drive.diag.names.route == true, "route cutover 有 event")
     checkNear(drive.diag.phases["route:cutover"].len, 156, 1e-9,
         "cutover 優先寫 finite route.len")
+    checkEq(drive.diag.phases["route:cutover"].snapDist, 7.5, "(cut1) 偏航 cutover 帶 snapDist")
+    checkEq(drive.diag.phases["route:cutover"].x, dveh._x, "(cut1) 偏航 cutover 帶車位 x")
 
     drive.nav.tx = 300.1
     drive.nav.route = newRoute(40, 0, 0, 4, 0)
@@ -20783,6 +20790,75 @@ function drive.scenarioTowCorner()
     SandboxVars, dveh, getSpecificPlayer = oldSandbox, oldVeh, oldGet
 end
 drive.scenarioTowCorner()
+-- (tl) 1006 掛車脫開：TrailerLost 交還前寫一筆 tow phase=lost（MDADTrailer.lostState）——1002y 兩次平穩行駛中脫開，
+--   片段只有 tph／tup，分不出是掛車被刪、被別台搶走、還是約束斷了。欄位：cur（牽引車現在掛著 nil／other）、alive
+--   （getVehicleById 找不找得到掛車）、by（掛車被誰拖）、hd（兩掛點距離）、speed／up（掛車 km/h 與 upVectorDot）、
+--   phi（最後一筆 tph）。違規證明：拿掉 Drive.stop 的 tow lost 事件＝(tl) 紅。
+function drive.scenarioTowLost()
+    scenario("掛車脫開：交還前記 tow phase=lost（掛著誰、掛車在不在、兩掛點距離、掛車速度與傾斜、最後折角）")
+    local oldSandbox, oldVeh, oldGet = SandboxVars, dveh, getSpecificPlayer
+    local oldRoute, oldTx, oldTy, oldState = drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
+    local oldEvent, oldById, oldV3 = MDADDiagnostics.event, getVehicleById, Vector3f
+    Vector3f = { new = newVec3 } -- lostState 量掛點用 Vector3f.new()（引擎全域；harness 平常不需要）
+    local wasMs = drive.frameMs(20)
+    MDAD.Drive.stop(0, nil)
+    getSpecificPlayer = function(n) if n == 0 then return dp end end
+    local ev = {}
+    MDADDiagnostics.event = function(pn, name, a, ...)
+        if name == "tow" and type(a) == "table" and a.phase == "lost" then ev[#ev + 1] = a end
+        return oldEvent(pn, name, a, ...)
+    end
+    dveh = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }),
+        engineRunning = true, mass = 1600, speed = 0, maxSpeed = 100,
+        bodyW = 1.6, bodyL = 4.2, comX = 0, comZ = 0, profileFull = true,
+        enginePower = 3000, brakingForce = 100, wheelFriction = 1.5, tireFriction = 1.5 })
+    local trailer = {
+        getForwardVector = function(_, out) return out:set(dveh._fwdX, 0, dveh._fwdY) end,
+        getUpVectorDot = function() return 0.97 end,
+        getCurrentSpeedKmHour = function() return 31 end,
+        getVehicleTowedBy = function() return nil end,
+        getTowedByWorldPos = function(_, _, out) return out:set(dveh._x - 6, dveh._y, 0) end,
+    }
+    local towing = nil -- 啟動時沒拖（假掛車量不出幾何）；session 起來後掛上 s.tow，牽引車仍回 nil＝已脫開
+    dveh.getVehicleTowing = function() return towing end
+    dveh.getTowingWorldPos = function(_, _, out) return out:set(dveh._x - 2, dveh._y, 0) end
+    getVehicleById = function(id) if id == 77 then return trailer end end
+    drive.fillWorld(-10, 80, -12, 72)
+    drive.putRoad(-10, 80, -3, 3)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 60, RightLaneBias = 0 })
+    dveh._x, dveh._y = 0, 0
+    setHeading(dveh, 0)
+    dveh._speed, dveh._steering, dveh._stopped = 0, 0, true
+    dveh._engine, dveh._driver = true, dp
+    dp._vehicle, dp._dead, dp._local = dveh, false, true
+    drive.nav.route = { pts = { 0, 0, 70, 0 }, segSurface = { "paved" }, segWidth = { 6 }, len = 70, cost = 70,
+        avoidPenalty = 0 }
+    drive.nav.tx, drive.nav.ty, drive.nav.state = 70, 0, "ok"
+    checkTrue(MDAD.Drive.start(dp), "(tl) 啟動")
+    local st = MDAD.Drive.debugSession(0)
+    st.diag = true
+    st.tow = { trailer = trailer, id = 77, hitchSelf = "trailer", hitchOther = "trailerfront",
+        L2 = 9.5, hitchToRear = 12, halfW = 1.27 }
+    st.towPhi = 0.12
+    for _ = 1, 3 do
+        if not MDAD.Drive.isActive(0) then break end
+        nowMs = nowMs + 20
+        local cur = MDAD.Drive.debugSession(0)
+        if cur then cur.diag = true end
+        driveTick(dp, dveh)
+    end
+    checkTrue(not MDAD.Drive.isActive(0), "(tl) 掛車脫開＝交還")
+    local e = ev[1] or {}
+    checkTrue(#ev == 1 and e.cur == "nil" and e.alive == true and e.by == "nil" and e.speed == 31 and e.up == 0.97
+        and e.phi == 0.12, "(tl) tow phase=lost 帶 cur/alive/by/speed/up/phi（n=" .. #ev .. " cur=" .. tostring(e.cur)
+        .. " alive=" .. tostring(e.alive) .. " phi=" .. tostring(e.phi) .. "）")
+    checkNear(e.hd, 4, 1e-9, "(tl) 兩掛點距離")
+    drive.frameMs(wasMs)
+    MDADDiagnostics.event, getVehicleById, Vector3f = oldEvent, oldById, oldV3
+    drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
+    SandboxVars, dveh, getSpecificPlayer = oldSandbox, oldVeh, oldGet
+end
+drive.scenarioTowLost()
 -- 0928m 交還前的最後一次改道（Drive.stuckDetour；使用者裁定「遇大量障礙可改道」）：E2E rc13 12 個固定堵點
 -- 開著自動改道仍 0 次改道——舊觸發只在 blocked 停等 WAIT，實際堵死多在倒車額度用完後的停等預算／倒車
 -- 逾時交還。違規證明：拿掉停等預算出口的 stuckDetour＝(sd1) 紅；拿掉 NEAR_M 判定＝(sd2) 紅。

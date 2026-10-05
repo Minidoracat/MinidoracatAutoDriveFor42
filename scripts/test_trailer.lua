@@ -188,5 +188,37 @@ local bx, by, bfx, bfy = T.body({ trailer = trB, axisSign = -1, comX = 0, comZ =
 check(near(bx, -4.8) and near(bfx, 1) and near(bfy, 0),
     "body 倒著拖：拖行軸朝掛點（+x），倒車探測往 −x")
 
+-- ⑦ 1006 脫開鑑識（T.lostState；Driver 在 TrailerLost 交還前寫 tow phase=lost——1002y 兩次平穩行駛中脫開只有 tph／tup
+--    查不下去）：attach 記下掛車 id 與兩邊掛點名；脫開後量「牽引車掛著誰」「掛車還在不在（getVehicleById）」「掛車被誰拖」
+--    「兩掛點距離」「掛車速度／傾斜」。違規證明：attach 不記 id＝(alive) 紅；距離不用記下的掛車掛點名＝(hd) 紅；
+--    cur 分不出別台＝(other) 紅；不查 getVehicleById＝(gone) 紅。
+local trL = fakeTrailer({ name = "Base.Trailer", cx = -8, fwd = 1, len = 12, wheelZ = -4, attZ = 6 })
+trL.getId = function() return 42 end
+trL.getCurrentSpeedKmHour = function() return 37.5 end
+trL.getUpVectorDot = function() return 0.6 end
+trL.getVehicleTowedBy = function() return nil end
+trL.getTowedByWorldPos = function(_, name, out)
+    if name ~= "trailerfront" then return nil end
+    return out:set(-5, 0, 0)
+end
+local tracL = fakeTractor(trL, -2)
+tracL.getTowAttachmentOther = function() return "trailerfront" end
+local gL = T.attach(tracL)
+check(type(gL) == "table" and gL.id == 42 and gL.hitchSelf == "trailer" and gL.hitchOther == "trailerfront",
+    "attach 記下掛車 id 與兩邊掛點名")
+tracL.getVehicleTowing = function() return nil end
+getVehicleById = function(id) if id == 42 then return trL end end
+local cur, alive, by, hd, kmh, up = T.lostState(tracL, gL)
+check(cur == "nil" and alive == true and by == "nil", "(alive) 脫開：牽引車沒掛東西、掛車還在、掛車沒被拖（got "
+    .. tostring(cur) .. "/" .. tostring(alive) .. "/" .. tostring(by) .. "）")
+check(near(hd, 3), "(hd) 兩掛點距離 3m（got " .. tostring(hd) .. "）")
+check(near(kmh, 37.5) and near(up, 0.6), "掛車速度與 upVectorDot")
+tracL.getVehicleTowing = function() return {} end
+check((T.lostState(tracL, gL)) == "other", "(other) 牽引車掛著別台")
+getVehicleById = function() return nil end
+cur, alive, by, hd = T.lostState(tracL, gL)
+check(alive == false and by == nil and hd == nil, "(gone) 掛車已不存在：alive=false、不量距離")
+getVehicleById = nil
+
 print(string.format("test_trailer: %d 項斷言、%d 項失敗", asserts, fails))
 if fails > 0 then os.exit(1) end

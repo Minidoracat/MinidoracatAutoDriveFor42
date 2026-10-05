@@ -53,6 +53,11 @@ local IMPACT_REARM_MS = 2000
 -- 相鄰兩筆的原始間隔超過這麼久＝中間沒取樣（讓位接手、遊戲暫停）：速度差不是同一段減速，不比。
 -- （1002y RubyDiamond/clip-29：讓位 5.7 秒、恢復時 0 km/h，dt 被夾成 1 秒算出 24.9 m/s²＝假撞擊）
 local IMPACT_GAP_MAX_MS = 1000
+-- 伺服器拉回（瞬移）：相鄰兩筆位移超過 max(前後速度)×原始間隔×TELEPORT_K＋TELEPORT_PAD_M＝座標被伺服器改寫，不是
+-- 開過去的；同一筆的掉速也是拉回造成的，不算撞擊（1005j 正式服 41 km/h 時一筆跳 171m、另一次 49m，兩次都被記成
+-- impact、帶內殭屍讓 impZ 也記 1；1005h 另一段跳 142m）。PAD 吃 MP 位置內插的抖動，K 吃速度取樣與實際的差。
+local TELEPORT_K = 1.5
+local TELEPORT_PAD_M = 5
 -- impZ（帶內有殭屍的撞擊）：撞擊那筆或前一筆的帶內最近殭屍（Sensor zombieNearS，完成輪快照、最多舊一輪，
 -- 所以兩筆取近者）離車心 ≤ 半車長＋IMPACT_ZOMBIE_M 才算。zombieN 是整條感知帶的數量（1002y ImJustAtoms/
 -- clip-01：最近一隻在 25m 外也記成 impZ）。車心弧長取樣本字串的 rs（Driver 的 lastSNow）。
@@ -71,6 +76,8 @@ local STOP_KIND = {
     UI_MinidoracatAutoDrive_UnsupportedVehicle = "fault",
     UI_MinidoracatAutoDrive_LostRoute = "route",
     UI_MinidoracatAutoDrive_RouteTooFar = "route",
+    -- 行程模式的交還（1006）：行程中目標消失（單站同義是 LostRoute）、行程 API 失敗——同歸 route，伺服器 KINDS 不動
+    UI_MinidoracatAutoDrive_TripLost = "route",
     -- 拖掛終局（2026-09-27：43 趟拖掛停止沒有一段片段，TrailerLost 無從定罪）
     UI_MinidoracatAutoDrive_TrailerLost = "trailer",
     UI_MinidoracatAutoDrive_TrailerRotate = "trailer",
@@ -94,12 +101,23 @@ local function finite(n)
     return type(n) == "number" and n * 0 == 0
 end
 
--- 撞擊的單筆門檻（U.sample 與 Diagnostics 撞擊幀強制寫 near 共用）：前一筆 prevSpd → 本筆 spd（km/h、絕對值）、原始間隔
--- gap（ms）、locked＝本筆或前一筆在鎖輪。不含 IMPACT_REARM_MS（那是片段觸發的去重）。
-function U.impactLike(prevSpd, spd, gap, locked)
+-- 瞬移（伺服器拉回）的單筆判定：前一筆 prevSpd → 本筆 spd（km/h、絕對值）、原始間隔 gap（ms）、兩筆之間的世界位移 moved（m）。
+-- 間隔超過 IMPACT_GAP_MAX_MS 不判（中間沒取樣，車可能被玩家開走）。
+function U.teleportLike(prevSpd, spd, gap, moved)
+    if prevSpd == nil or not finite(spd) or not finite(gap) or not finite(moved) then return false end
+    if gap <= 0 or gap > IMPACT_GAP_MAX_MS then return false end
+    local v = prevSpd > spd and prevSpd or spd
+    return moved > v / 3.6 * (gap / 1000) * TELEPORT_K + TELEPORT_PAD_M
+end
+
+-- 撞擊的單筆門檻（U.sample 與 Diagnostics 撞擊幀強制寫 near、本機 impact 事件共用）：前一筆 prevSpd → 本筆 spd（km/h、絕對值）、
+-- 原始間隔 gap（ms）、locked＝本筆或前一筆在鎖輪、moved＝兩筆之間的世界位移（m；瞬移那筆不算撞擊）。不含 IMPACT_REARM_MS
+-- （那是片段觸發的去重）。
+function U.impactLike(prevSpd, spd, gap, locked, moved)
     return prevSpd ~= nil and finite(spd) and finite(gap) and gap >= 80 and gap <= IMPACT_GAP_MAX_MS
         and prevSpd - spd >= IMPACT_MIN_KMH
         and (prevSpd - spd) / 3.6 / (gap / 1000) >= (locked and IMPACT_DECEL_LOCKED or IMPACT_DECEL)
+        and not U.teleportLike(prevSpd, spd, gap, moved)
 end
 
 local function nowMs()
@@ -189,6 +207,8 @@ function U.begin(pn, now, header, profile)
         fm = 0, nm = 0, emSum = 0, loss = {},
         arcN = 0, arcOver = 0, arcDev = 0, prevArc = false, arcDevDone = false,
         impZ = 0, aaMs = 0, daMs = 0, prevZd = nil,
+        -- 1006 伺服器拉回（瞬移）次數；prevImpX／Y＝前一筆座標（與 prevImpactSpd 成對）
+        tp = 0, prevImpX = nil, prevImpY = nil,
         -- 1004e 越野推力：越野跟線毫秒；「想加速」相鄰兩筆同地表的對——越野／鋪面的毫秒與速度增量（m/s），
         -- 越野對加速度 <1.5 m/s² 的毫秒、越野對有前推輔助的毫秒、遞增倍率頂到 3 的毫秒。aSurf／aSpd＝前一筆狀態。
         oMs = 0, oaMs = 0, oaDv = 0, olMs = 0, oasMs = 0, obMs = 0, paMs = 0, paDv = 0, aSurf = nil, aSpd = nil,
@@ -566,7 +586,12 @@ function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
             if zd < 0 then zd = -zd end
         end
     end
-    if finite(speed) and U.impactLike(prevSpd, spd, gap, fbNow or fbWas)
+    -- 前一筆→本筆的世界位移（瞬移判定；任一筆沒有座標＝nil，不判）
+    local moved = nil
+    local px, py = u.prevImpX, u.prevImpY
+    if px and finite(x) and finite(y) then moved = math.sqrt((x - px) * (x - px) + (y - py) * (y - py)) end
+    if finite(speed) and U.teleportLike(prevSpd, spd, gap, moved) then u.tp = u.tp + 1 end
+    if finite(speed) and U.impactLike(prevSpd, spd, gap, fbNow or fbWas, moved)
             and not (u.impactAt and now >= u.impactAt and now - u.impactAt < IMPACT_REARM_MS) then
         u.impact, u.impactAt = u.impact + 1, now
         -- 撞擊那筆或前一筆有殭屍在車身附近（多半是撞進殭屍群；也可能是殭屍旁的別的東西）
@@ -575,6 +600,7 @@ function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
         trigger(u, now, "impact")
     end
     u.prevImpactSpd = finite(speed) and spd or nil
+    if finite(x) and finite(y) then u.prevImpX, u.prevImpY = x, y else u.prevImpX, u.prevImpY = nil, nil end
     u.prevZd = zd
     captureTick(u, now)
 end
@@ -664,7 +690,7 @@ local function summaryText(u, now, reason, withMaps)
         .. ',"fm":' .. jnum(u.fm) .. ',"nm":' .. jnum(u.nm)
         .. ',"em":' .. jround(u.fm > 0 and u.emSum / u.fm or nil, 10)
         .. ',"arc":' .. u.arcN .. ',"arcOver":' .. u.arcOver .. ',"arcDev":' .. u.arcDev
-        .. ',"impZ":' .. u.impZ .. ',"aaMs":' .. jnum(u.aaMs) .. ',"daMs":' .. jnum(u.daMs)
+        .. ',"impZ":' .. u.impZ .. ',"tp":' .. u.tp .. ',"aaMs":' .. jnum(u.aaMs) .. ',"daMs":' .. jnum(u.daMs)
         .. ',"oMs":' .. jnum(u.oMs) .. ',"oaMs":' .. jnum(u.oaMs) .. ',"oaDv":' .. jround(u.oaDv, 100)
         .. ',"olMs":' .. jnum(u.olMs) .. ',"oasMs":' .. jnum(u.oasMs) .. ',"obMs":' .. jnum(u.obMs)
         .. ',"paMs":' .. jnum(u.paMs) .. ',"paDv":' .. jround(u.paDv, 100)
