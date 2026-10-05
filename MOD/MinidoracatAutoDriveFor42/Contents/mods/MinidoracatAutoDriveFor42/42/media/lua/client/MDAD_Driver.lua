@@ -105,11 +105,20 @@ TUNE.PAUSE_VOICE_TIMEOUT_MS = 10000 -- 最長交還語音 6.3s；播放狀態失
 --   arc  ：常駐煞停上限（大弧帶）；超過主動 forceBrake（53 km/h 吃飽和側推整台車甩飛，
 --          2026-08-28 yield 恢復）。
 --   crawl：車周探測淨空（可原地轉）時的速度目標；溫和檔要壓在 spin 之下，否則煞到 5 又朝
---          Follower 的 12 加速、切回大弧。大弧仍用 Follower 的 12（也是終點脫困地板，不動）。
+--          Follower 的 12 加速、切回大弧。探測被擋的大弧改用 UTURN_BLOCKED_*（兩檔相同）；
+--          Follower 的 12 不動（也是終點脫困地板）。
 TUNE.UTURN = {
     gentle = { name = "gentle", entry = 5,  spin = 5,  force = 0.4,  arc = 13, crawl = 4 },
     fast   = { name = "fast",   entry = 25, spin = 15, force = 0.65, arc = 25, crawl = 12 },
 }
+-- 探測被擋的大弧（1006，使用者決定 2B）：正式服 1002y～1005j 被擋大弧 23 次撞 4 次（8.6–13.9 km/h），耦力原地轉
+-- 9 次 0 撞。引擎只在對靜物碰撞的線速度變化 > 1 m/s 才 crash（扣車況、傷人、damageObjects；BaseVehicle.java:3420-3443），
+-- 所以大弧目標壓到 1 m/s 以下：regulator 收整數 km/h（applySpeed），3.5 會送 4＝1.11 m/s，取 3。
+-- 只壓速不夠：被擋大弧的滿舵 5 側推（STEER_FULL 縮放後仍 3.75）一推就側滑，正式服片段施出 steer >1.5 的下一筆
+-- 合速度中位 3.3 m/s、>1 m/s 七成五；連兩筆 ≤0.5 的只有 1% 超過 1 m/s，低速 ~1 m/s 時 steer 0.5 的 yaw 率 ≈0.15 rad/s
+-- ＝已接近運動學最小迴轉半徑的上限（v/rMin），再推只會滑。夾的是 STEER_FULL 縮放後實際施出的值（遙測 ast）。
+TUNE.UTURN_BLOCKED_KMH = 3
+TUNE.UTURN_BLOCKED_STEER = 0.5
 -- 調頭大弧卡住（Drive.rotateStall）：車周探測被擋（走大弧）又連續這麼久不動＝前方沒有大弧空間，倒車創造空間
 TUNE.ROTATE_STALL_MS = 2500
 -- 拖掛車的側推限制（2026-09-26 Workshop 回報「草地起步劇烈晃動、掛車脫開」，E2E trailer-grass-mp）：
@@ -121,7 +130,7 @@ TUNE.TOW_STEER_FULL_KMH = 15
 -- 一般車同理（2026-09-27 正式服 14 段：起步 target 0／感知未就緒、ROTATE 探測否決原地轉後，
 -- 非耦力 MASS_BASE 項把靜止車首幀推 5–30 萬，0.1 秒側滑 13–30 km/h → rotate／RETURN 硬煞或
 -- contact）。低於 STEER_FULL_KMH 側推按車速縮、靜止＝零；耦力原地調頭（coupled）不受影響。
--- 取 4：貼縫爬行 5 km/h 與調頭大弧 12 仍是全額，只有近乎靜止時才收。
+-- 取 4：貼縫爬行 5 km/h 仍是全額，只有近乎靜止時才收（探測被擋的調頭大弧另有 UTURN_BLOCKED_STEER 夾限）。
 TUNE.STEER_FULL_KMH = 4
 -- 縮放量的是車身前進速度（1004b，Drive.forwardKmh）：getCurrentSpeedKmHour 是速度向量長度、含側滑，側推一推出
 -- 橫滑就把自己的縮放解鎖成全額（正式服 0.18.2 起步大弧調頭 8 段：0.2 秒內 1→13 km/h、橫向 >14 m/s²，接調頭煞停）。
@@ -2263,7 +2272,7 @@ local function startSession(playerObj, playerNum, stage)
         softGentleS = nil, softGentleOn = false, softGentleCapKmh = -1, -- gentle 動物接近帽（Drive.softGentleCap）
         zombieKeep0 = false, -- 軟縫這次縫是貼路緣（keep 0）找到的（Drive.laneKeepOf）
         rotProbeMs = 0,     -- 下一次允許車周探測的時戳（0＝第一次調頭幀就探）
-        rotProbeClear = false, -- 上次探測結果：車周淨空可原地旋轉
+        rotProbeClear = nil, -- 這次調頭最近一次車周探測：true 淨空可原地旋轉／false 被擋走大弧／nil 還沒探（uturn enter 清）
         uturn = nil,        -- 進行中的這一次調頭的參數檔（TUNE.UTURN.*）；nil＝沒在調頭
         uturnArmed = false, -- 入場減速已放行（速度降到 entry 以下過一次）
         returnActive = false,
@@ -2993,6 +3002,11 @@ local function applySteering(
             if fwdKmh ~= nil and fwdKmh < tv then tv = fwdKmh end
         end
         if tv < full then steer = steer * tv / full end
+        -- 調頭探測被擋的大弧（TUNE.UTURN_BLOCKED_STEER）：夾的是縮放後實際施出的值，滿舵側推只會側滑
+        if s.uturn and s.rotProbeClear == false and s.fstate.rotating == true then
+            local cap = TUNE.UTURN_BLOCKED_STEER
+            if steer > cap then steer = cap elseif steer < -cap then steer = -cap end
+        end
     end
     if steer < STEER_DEADZONE and steer > -STEER_DEADZONE then steer = 0 end
     -- Follower 的 yaw 增益估計要拿「真的施出去」的 steer（含 cross-track 與夾限；耦力調頭
@@ -6032,6 +6046,23 @@ function Drive.rotateStall(s, now, targetSpeed, avProgress)
     end
     if s.rotateStallSince == 0 then s.rotateStallSince = now end
     return now - s.rotateStallSince >= TUNE.ROTATE_STALL_MS
+end
+
+-- 調頭車周探測（TUNE.ROTATE_PROBE_MS 節流）：寫 s.rotProbeClear（true 淨空原地轉／false 被擋走大弧）。
+-- 本次調頭首探與每次翻面各記一筆 uturn probe 事件（1006；重探結果不變不記），console 同一句 debug 行。
+function Drive.rotateProbe(s, playerNum, vehicle, now, speedKmh)
+    if now < s.rotProbeMs then return end
+    s.rotProbeMs = now + TUNE.ROTATE_PROBE_MS
+    local clear = not MDADSensor.probeAround(s.sensor, vehicle, getCell(), s.probeR)
+    if clear ~= s.rotProbeClear then
+        diagEvent(s, playerNum, "uturn", { phase = "probe", why = s.uturn.name,
+            probe = clear and "clear" or "obstructed", speed = speedKmh })
+    end
+    s.rotProbeClear = clear
+    if getDebug() then
+        print(LOG .. "pn=" .. playerNum .. " rotate probe: "
+            .. (clear and "clear (coupled spin)" or "obstructed (wide arc)"))
+    end
 end
 
 -- Traction-keyed online observation. Every field lives in the session table;
@@ -12747,6 +12778,7 @@ local function stepFollow(s, vehicle, playerNum, now)
             end
             if rotating and not s.uturn then
                 s.uturn, s.uturnArmed = uturnProfile(), false
+                s.rotProbeClear, s.rotProbeMs = nil, 0 -- 每次調頭重探：上一次的結果不沿用（壓速／夾限／遙測都看本次）
                 diagEvent(s, playerNum, "uturn", {
                     phase = "enter", why = s.uturn.name, speed = speedKmh,
                 })
@@ -12768,9 +12800,13 @@ local function stepFollow(s, vehicle, playerNum, now)
             end
             -- 車周探測淨空（可原地轉）時目標壓到該檔 crawl：溫和檔 4 < spin 5，不會煞到 5
             -- 又朝 Follower 的 12 加速、切回大弧；快速檔 12＝Follower 值、等於不夾。
-            if rotating and s.uturn and s.rotProbeClear
-                    and targetSpeed > s.uturn.crawl then
-                targetSpeed = s.uturn.crawl
+            -- 探測被擋（大弧）壓到 TUNE.UTURN_BLOCKED_KMH（兩檔相同，1006）；nil＝還沒探，照舊。
+            if rotating and s.uturn then
+                if s.rotProbeClear then
+                    if targetSpeed > s.uturn.crawl then targetSpeed = s.uturn.crawl end
+                elseif s.rotProbeClear == false and targetSpeed > TUNE.UTURN_BLOCKED_KMH then
+                    targetSpeed = TUNE.UTURN_BLOCKED_KMH
+                end
             end
             regOn = applySpeed(s, vehicle, targetSpeed)
             if not reached then
@@ -12804,20 +12840,12 @@ local function stepFollow(s, vehicle, playerNum, now)
                     -- 幀間抵消＝原地旋轉不橫滑（實機：橫推調頭會滑出路外撞東西）。
                     -- **原地旋轉前先探車周**（500ms 節流）：走廊沿路線掃，路線反向
                     -- 要調頭時車後方／側面全是走廊盲區——貼牆貼樹貼車旋轉＝車身
-                    -- 掃掠直接撞。周邊不淨空（或未載入）就退回橫推大弧：爬行 12
-                    -- 前進轉，空間不夠自然由卡死→脫困鏈接手。
+                    -- 掃掠直接撞。周邊不淨空（或未載入）就退回橫推大弧：壓速
+                    -- UTURN_BLOCKED_KMH、側推夾 UTURN_BLOCKED_STEER 前進轉（1006），
+                    -- 空間不夠自然由卡死→rotate-stall 倒車接手；低速時每 500ms 重探，淨空就改原地轉。
                     local coupled = rotating and av <= ut.spin
                     if coupled and s.sensor then
-                        if now >= s.rotProbeMs then
-                            s.rotProbeMs = now + TUNE.ROTATE_PROBE_MS
-                            s.rotProbeClear = not MDADSensor.probeAround(
-                                s.sensor, vehicle, getCell(), s.probeR)
-                            if getDebug() then
-                                print(LOG .. "pn=" .. playerNum .. " rotate probe: "
-                                    .. (s.rotProbeClear and "clear (coupled spin)"
-                                        or "obstructed (wide arc)"))
-                            end
-                        end
+                        Drive.rotateProbe(s, playerNum, vehicle, now, speedKmh)
                         if not s.rotProbeClear then coupled = false end
                     end
                     s.crossDLat = nil -- 本幀橫向收斂速度（Drive.accelAssistForce 的預測偏差閘）；不算就不留舊值

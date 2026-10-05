@@ -89,6 +89,7 @@ local EK = {
     "m", "need", "hn", "corner", -- blocked payload：margin/need/hardN/corner latch
     -- （2026-09-01：payload 鍵 "n" 與事件名稱欄 "n" 相撞——pairs 無序、誰蓋誰
     -- 不確定，blocked 事件多輪「消失」實為名稱欄被 need 值覆寫。禁用 "n"。）
+    "probe", -- uturn probe（1006）：調頭車周探測 clear／obstructed（本次調頭首探與翻面各一筆；console 同名 debug 行）
     -- route ready：fillet 建構結果（2026-09-02 玩家 telemetry 只能從每幀
     -- verifyLineReason=band 反推「fillet 整條放棄」，離線重建才定罪——直接帶出）；
     -- route cutover：原始路線快照 src／srcW／srcS（離線重跑 fillet／band 用）。
