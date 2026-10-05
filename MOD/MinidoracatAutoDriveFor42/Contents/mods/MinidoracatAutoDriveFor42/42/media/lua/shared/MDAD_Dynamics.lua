@@ -291,6 +291,39 @@ function D.crossTrackGains(dodging, crawl, curveHard, kinkExit, arcLike)
     return nil, nil
 end
 
+-- 車身 yaw 率限制（0928a，ESC 式；0.13.1 正式服片段 >3 rad/s 自轉 24 次，0.13.0 只有 2 次）：側推是施在
+-- 車頭的外力、不受前輪轉角限制，目標點突然跳到 90° 外（Z 字短 jog 放行下一臂、窄出口繞行線、大弧調頭）
+-- 時 steer 飽和，0.2 秒內自轉 6–9 rad/s（summer/clip-06 SmallCar 18 km/h、Thragg/clip-04 GTR 大弧調頭、
+-- kenzo_L/clip-08 窄出口繞行）。量到的 yaw 率（Driver 以 ≥TUNE.ESC_WINDOW_MS 視窗量）超過「運動學 v/rMin 與
+-- 抓地 safeLat/v 的較小者 ×MARGIN＋FLOOR」時，同向 steer 依超出量線性收掉（兩倍上限歸零）；反向（修正自轉）
+-- 不受限（呼叫端判）。耦力原地調頭不經此限。Driver Drive.yawGovern 每幀與 test_follower 閉環共用這一支。
+-- 回同向 steer 的保留比例（1＝不限）；yawRate rad/s、v m/s。
+-- turnR（1006）：≤90° fallback 折點放行後、出彎收正前（Follower state.kinkTurnR，呼叫端只在 kinkExitS 有值時傳）。
+-- 放行點就是半徑 turnR 圓角的切點，車該走的就是這個圓：上限＝v/turnR、不加 MARGIN／FLOOR，超出 1/ESC_KINK_SLOPE
+-- 收光。一般上限在低速幾乎全是 FLOOR：語料放行後 yaw 峰值對 v/rMin 在 20 km/h 以上 1.4 倍、10 km/h 以下 2–5 倍，
+-- 越慢切得越深（正式服 1004g JimJim clip-09 SemiTruck_mil 22 km/h 放行 yr 1.93＝1.6 倍，撞內角物體）。
+D.ESC_MARGIN = 1.3
+D.ESC_FLOOR_RADS = 0.3
+D.ESC_KINK_SLOPE = 5
+function D.escScale(yawRate, v, rMin, safeLat, turnR)
+    local ar = yawRate < 0 and -yawRate or yawRate
+    if D.finite(turnR) and turnR > 0 then
+        local allow = v / turnR
+        if ar <= allow then return 1 end
+        local k = 1 - D.ESC_KINK_SLOPE * (ar / allow - 1)
+        if k < 0 then k = 0 end
+        return k
+    end
+    if not D.finite(rMin) or rMin < 0.5 then rMin = 5 end
+    local allow = v / rMin
+    if D.finite(safeLat) and safeLat > 0 and v > 0.1 and safeLat / v < allow then allow = safeLat / v end
+    allow = allow * D.ESC_MARGIN + D.ESC_FLOOR_RADS
+    if ar <= allow then return 1 end
+    local k = 2 - ar / allow
+    if k < 0 then k = 0 end
+    return k
+end
+
 local ASSIST_MAX_RATIO = 0.2   -- 0.15→0.2（2026-09-02 使用者裁定「推力要增加」）
 local ASSIST_GAP_MIN_KMH = 1   -- 3→1（2026-09-02 質量等比評估：實測 ratio 只用到
 local ASSIST_GAP_FULL_KMH = 6  -- 0.056/上限 0.225——瓶頸是斜坡不是上限；低速差

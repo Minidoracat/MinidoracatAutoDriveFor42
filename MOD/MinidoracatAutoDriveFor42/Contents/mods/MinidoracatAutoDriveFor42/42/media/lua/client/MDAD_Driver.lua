@@ -149,14 +149,8 @@ TUNE.STEER_SLIP_MARGIN_KMH = 12
 TUNE.ARM_EXT_FROM_KMH = 35
 TUNE.ARM_EXT_FULL_KMH = 55
 TUNE.ARM_EXT_K = 1.25
--- 車身 yaw 率限制（0928a，ESC 式；0.13.1 正式服片段 >3 rad/s 自轉 24 次，0.13.0 只有 2 次）：側推是施在
--- 車頭的外力、不受前輪轉角限制，目標點突然跳到 90° 外（Z 字短 jog 放行下一臂、窄出口繞行線、大弧調頭）
--- 時 steer 飽和，0.2 秒內自轉 6–9 rad/s（summer/clip-06 SmallCar 18 km/h、Thragg/clip-04 GTR 大弧調頭、
--- kenzo_L/clip-08 窄出口繞行）。量到的 yaw 率（≥ESC_WINDOW_MS 視窗：高幀率時物理 0.01s 子步讓單幀
--- heading 差分 0／倍數交錯）超過「運動學 v/rMin 與抓地 safeLat/v 的較小者 ×MARGIN＋FLOOR」時，同向
--- steer 依超出量線性收掉（兩倍上限歸零）；反向（修正自轉）不受限。耦力原地調頭不經此限。
-TUNE.ESC_MARGIN = 1.3
-TUNE.ESC_FLOOR_RADS = 0.3
+-- 車身 yaw 率限制（MDADDynamics.escScale 註解）：yaw 率至少用這個視窗量——高幀率時物理 0.01s 子步讓單幀
+-- heading 差分 0／倍數交錯。
 TUNE.ESC_WINDOW_MS = 30
 -- 回授依轉向增益正規化（0929j；玩家 KI5 Oshkosh 消防車撞樹／撞路邊物 2 次）：PID 與 cross-track 的增益是在
 -- 一般車上調的（Follower 的 yawGain 估計 0.5–0.9），Oshkosh 真實增益只有 0.15–0.19、SemiTruckBox_mil 0.09–0.12，
@@ -6046,17 +6040,9 @@ function Drive.yawGovern(s, steer, heading, speedKmh, now)
     s.escScale = 1
     local r = s.yawRate
     if steer == 0 or not finite(r) or steer * r <= 0 then return steer end
-    local v = (speedKmh < 0 and -speedKmh or speedKmh) / 3.6
-    local rMin = s.vehicleProfile.rMin
-    if not finite(rMin) or rMin < 0.5 then rMin = 5 end
-    local allow = v / rMin
-    local lat = s.safeLat
-    if finite(lat) and lat > 0 and v > 0.1 and lat / v < allow then allow = lat / v end
-    allow = allow * TUNE.ESC_MARGIN + TUNE.ESC_FLOOR_RADS
-    local ar = r < 0 and -r or r
-    if ar <= allow then return steer end
-    local k = 2 - ar / allow
-    if k < 0 then k = 0 end
+    local k = MDADDynamics.escScale(r, (speedKmh < 0 and -speedKmh or speedKmh) / 3.6,
+        s.vehicleProfile.rMin, s.safeLat, s.fstate.kinkExitS ~= nil and s.fstate.kinkTurnR or nil)
+    if k >= 1 then return steer end
     s.escScale = k
     return steer * k
 end
