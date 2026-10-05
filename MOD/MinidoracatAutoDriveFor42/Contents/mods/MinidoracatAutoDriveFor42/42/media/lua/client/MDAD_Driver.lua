@@ -10941,7 +10941,9 @@ local function replan(s, vehicle, playerNum)
         -- 在函式開頭 return），舊的 release 守門已被「剖面走完才釋放」取代。
         -- 停點寬帶輪的淨空不解除一般帶的判堵，先回一般帶確認（Drive.holdWideClear；1006 髮夾支線投影）。
         -- 延後（planSig＝−1＋接近帽：align／traffic／window 等）是寬帶找到了線、只是這輪不承諾，照舊。
-        if s.blocked and s.wideArmed and sen.wideDone and s.planSig ~= -1 then
+        -- 只攔「上一次判定是判堵」（clearStreak 0）：一般帶已經判過淨空（遲滯中 clearStreak ≥1）＝兩種帶一致、沒有
+        -- 矛盾要確認，照常累計解除（調頭中牆移走：一般帶先判淨空、下一輪寬帶也淨空，攔了＝多拖兩輪、調頭收不了尾）。
+        if s.blocked and s.wideArmed and sen.wideDone and s.planSig ~= -1 and s.clearStreak == 0 then
             Drive.holdWideClear(s, playerNum, sen)
             return
         end
