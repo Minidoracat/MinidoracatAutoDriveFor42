@@ -126,6 +126,8 @@
     "UI_MinidoracatAutoDrive_HUDDriveTime": "DRIVE TIME",
     "UI_MinidoracatAutoDrive_HUDZombie": "Zombies",
     "UI_MinidoracatAutoDrive_HUDCorpse": "Corpses",
+    "UI_MinidoracatAutoDrive_HUDAnimal": "Animals",
+    "UI_MinidoracatAutoDrive_HUDAnimalTip": " <RGB:0.82,0.66,0.31>Avoid animals: <RGB:0.93,0.92,0.87> <SPACE> <RGB:0.55,0.78,0.85>%1 <RGB:0.93,0.92,0.87>\n <RGB:0.82,0.66,0.31>Click: <RGB:0.93,0.92,0.87> <SPACE>switch between Off and the level you last used.\nChoose large animals or all animals in the ESC options or the minimap settings.",
     "UI_MinidoracatAutoDrive_HUDOn": "ON",
     "UI_MinidoracatAutoDrive_HUDOff": "OFF",
     "UI_MinidoracatAutoDrive_HUDForcedOn": "LOCK ON",
