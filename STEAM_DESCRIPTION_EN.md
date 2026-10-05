@@ -28,7 +28,7 @@ Keep every Minidoracat MiniMap series mod up to date and restart the game after 
 [*] [b]Driver HUD and voice[/b]: status, speed and power/fuel at a glance, plus Chinese/English/Japanese voice prompts in three voices, plus a short, casual friend style
 [*] [b]Speed gears[/b]: regular gears drive comfortably; MAX takes corners and dodges more briskly
 [*] [b]Take over anytime[/b]: steering, throttle or braking hands control back and keeps the trip
-[*] [b]Smart driving[/b]: keeps right, steers around parked vehicles and obstacles, avoids zombies and corpses, and slows for bends and traffic
+[*] [b]Smart driving[/b]: keeps right, steers around parked vehicles and obstacles, avoids zombies, corpses and animals, and slows for bends and traffic
 [*] [b]Blocked-road recovery and rerouting[/b]: reverses out when stuck; on a fully blocked road it goes around off-road or asks navigation for an alternative route
 [*] [b]Server tuning[/b]: power, fuel, crafting and loot are sandbox options; server owners can opt in to diagnostics that help improve autodrive
 [/list]
