@@ -8198,10 +8198,15 @@ end
 -- 手動把車擺到線外 3.4-4.7m → RETURN 目標線每輪 sweep[return] 打槍 → crawl-exact
 -- 直行「乾淨」保住持有權 → 五次 `sweep enumerate ok (crawl)` 全被
 -- return-suppress 吃掉 → blocked corner → contact → 倒車 → StopStuck）。
+-- 回線只持有到 returnEndS（線到目標 lane 的那一點）：之後的線尾只是沿目標 lane 直行，車還外擺（偏差
+-- > RETURN_CLEAR_DEV、RETURN 不放）時繼續壓住規劃＝前方擋常駐線的硬點被吞掉（正式服 0.18.2 Qoo clip-13：過
+-- returnEndS 後 0.5 秒 return-suppress、28 km/h 撞 pad）。線尾段交還規劃，RETURN 仍管速度與完成判定。
+-- pending（進場 returnEndS＝當下 s）在 replan 前就被同一快照的 updateReturnSnapshot 轉成 commit 或 hold。
 local function profileOwner(s)
     if s.fstate.rotating == true then return "rotate" end
     if s.dodging then return "dodge" end
-    if s.returnActive and not s.returnHold and not s.returnCrawlExact then return "return" end
+    if s.returnActive and not s.returnHold and not s.returnCrawlExact
+            and s.lastSNow < s.returnEndS then return "return" end
     return "free"
 end
 
@@ -11025,9 +11030,10 @@ local function replan(s, vehicle, playerNum)
         end
         -- 持有權仲裁（統一收口，取代點狀互斥）：dodge commit 只在剖面自由
         -- （free）時允許——ROTATE 持有＝調頭姿態下走廊反向掃、剖面無意義
-        -- （s019：commit 132 次搶 fstate）；RETURN 持有（active 且非 hold）＝
-        -- 維持「優先回線」原契約；returnHold＝回線走不了＝讓位 dodge
-        -- （st459.07k 死鎖修）。各系統安全由各自體系承擔（仲裁註解）。
+        -- （s019：commit 132 次搶 fstate）；RETURN 持有（active、非 hold、回線段 rs < returnEndS）
+        -- ＝維持「優先回線」原契約；returnHold＝回線走不了＝讓位 dodge（st459.07k 死鎖修）；
+        -- 過 returnEndS 的線尾段也讓位（Qoo clip-13，見 profileOwner）。
+        -- 各系統安全由各自體系承擔（仲裁註解）。
         local owner = profileOwner(s)
         if owner == "rotate" and mode == "dodge" then
             mode = "blocked"

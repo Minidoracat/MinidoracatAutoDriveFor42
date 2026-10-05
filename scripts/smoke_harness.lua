@@ -16508,6 +16508,66 @@ local function scenarioPhaseE()
             AutoDriveMaxSpeed = 40, ObstaclePolicy = 1, RightLaneBias = 0 })
     end
     drive.scenarioReturnDodgeLane()
+    -- ③d RETURN 回線走完（rs ≥ returnEndS）後不再壓住規劃（正式服 0.18.2 Qoo clip-13、salomon clip-32）：線尾段車還
+    --    外擺（偏差 > RETURN_CLEAR_DEV、不放）時，前方擋常駐線的硬點被 return-suppress 吞掉 0.5 秒，28 km/h 撞 pad。
+    --    回線段（rs < returnEndS）照舊由 RETURN 持有、規劃不插手；線尾段交還規劃，掃掠驗過的繞行接手（RETURN 結束）。
+    --    硬點放在回線線尾外（return-guard 只掃到線尾、看不到它），只有規劃看得到。
+    function drive.scenarioReturnTail()
+        setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
+            AutoDriveMaxSpeed = 40, ObstaclePolicy = 1, RightLaneBias = 0 })
+        drive.nav.route = v4Route("paved", 10)
+        drive.fillWorld(-10, 170, -20, 20)
+        drive.putRoad(-10, 170, -20, 20)
+        hotVeh._x, hotVeh._y, hotVeh._speed = 0, 3.6, 10
+        setHeading(hotVeh, 0)
+        driveReset(hotVeh)
+        checkTrue(MDAD.Drive.start(dp), "(ret-tail) 啟動")
+        for _ = 1, 4 do driveTick(dp, hotVeh) end
+        for _ = 1, 3 do
+            if captured and captured.returnActive and captured.fstate.exactLine and not captured.returnUnsafe then break end
+            drive.scanRound(true)
+        end
+        local st = captured
+        checkTrue(st.returnActive and not st.returnHold and not st.returnUnsafe and not st.returnCrawlExact
+                and st.fstate.exactLine == true,
+            "(ret-tail) 前置：RETURN 已承諾完整回線（ra " .. tostring(st.returnActive) .. " hold "
+            .. tostring(st.returnHold) .. " exact " .. tostring(st.fstate.exactLine) .. "）")
+        local s0, s1, lineEnd = st.returnStartS, st.returnEndS, st.fstate.ovEndS
+        local hx = math.floor(lineEnd + st.vehicleProfile.halfL + 3)
+        drive.putSolid(hx, 0, "harness_ret_tail_ahead")
+        -- 對照：回線段中途（rs < returnEndS）RETURN 持有，規劃不插手（優先回線原契約）
+        local mid = math.floor((s0 + s1) * 0.5 / MDADFollower.OV_STEP) + 1
+        hotVeh._x, hotVeh._y = st.returnX[mid], st.returnY[mid]
+        driveTick(dp, hotVeh)
+        st.planSig = -1
+        drive.scanRound(true)
+        checkTrue(st.returnActive and not st.dodging and st.planMode == "return-suppress",
+            "(ret-tail) 回線段中途：RETURN 持有、規劃讓位（rs " .. tostring(st.lastSNow) .. " end " .. tostring(s1)
+            .. " pm " .. tostring(st.planMode) .. " dodging " .. tostring(st.dodging) .. "）")
+        -- 線尾段：過 returnEndS、車外擺到目標另一側 1m（偏差 > RETURN_CLEAR_DEV，RETURN 不放）
+        hotVeh._x, hotVeh._y = s1 + 2, -1
+        setHeading(hotVeh, -0.05)
+        driveTick(dp, hotVeh)
+        local relWhy = nil
+        local origEv = MDADDiagnostics.event
+        MDADDiagnostics.event = function(pn, name, a, ...)
+            if name == "return" and type(a) == "table" and a.phase == "release" then relWhy = a.why end
+            if origEv then return origEv(pn, name, a, ...) end
+        end
+        st.planSig = -1
+        drive.scanRound(true)
+        MDADDiagnostics.event = origEv
+        checkTrue(st.dodging and not st.returnActive and (st.diag ~= true or relWhy == "dodge"),
+            "(ret-tail) 過 returnEndS 的線尾段：擋常駐線的硬點由繞行接手、RETURN 結束（rs " .. tostring(st.lastSNow)
+            .. " end " .. tostring(s1) .. " pm " .. tostring(st.planMode) .. " dodging " .. tostring(st.dodging)
+            .. " ra " .. tostring(st.returnActive) .. " why " .. tostring(relWhy) .. "）")
+        drive.clearCell(hx, 0)
+        MDAD.Drive.stop(0, nil)
+        setHeading(hotVeh, 0)
+        setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
+            AutoDriveMaxSpeed = 40, ObstaclePolicy = 1, RightLaneBias = 0 })
+    end
+    drive.scenarioReturnTail()
     -- ④ 原始折點 ±RETURN_CORNER_M 內不進 RETURN（2026-09-02 s046 Bank Road→
     --    Garnettsville T 字左轉）：窄路（width 4→band 0.6m）放不下 rMin 圓角＝fallback
     --    折點；pure pursuit 切過折點時對折線的橫向偏差是幾何必然，不是甩出。
