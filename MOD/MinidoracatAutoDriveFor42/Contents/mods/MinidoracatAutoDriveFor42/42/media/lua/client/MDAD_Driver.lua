@@ -3497,12 +3497,17 @@ function Drive.softLaneRate(speedKmh)
 end
 
 -- 軟縫移動中：常駐線到目前軟縫 lane 之間都是預期位置——車追 laneBias 的落後不是「對不準」，
--- 不得觸發 align 減速（側移加快後落後 1–2m，舊判定會把 70 壓到 40 幾）。回傳到該區間的距離，
--- 不在軟縫中時原值不變。
+-- 不得觸發 align 減速（側移加快後落後 1–2m，舊判定會把 70 壓到 40 幾）。這次持有走過的 lane 範圍
+-- （s.zombieSpanLo／Hi，zombieLaneOf 記）也算：換邊回擺時車身還在上一側（1005j 正式服 M998 clip-30：keep0 閃到
+-- −2.17 後要換到 +1.33〔常駐 1.86〕，lane 擺到 −0.28 時車身還在 −2.4 → 判偏離 → RETURN 讓位把 lane 釘回車身
+-- 11 次、直直撞上）。回傳到該區間的距離，不在軟縫中時原值不變。
+-- ponytail: 走過範圍整段持有期間都算，被撞甩回走過的範圍內也不判偏離；要更緊再改成隨 LEAD_S 收斂的範圍。
 function Drive.softAlignDev(s, absDev)
     local zl, rb, lat = s.zombieLane, s.residentBias, s.lastLatSigned
     if zl == nil or not finite(rb) or not finite(lat) then return absDev end
     local lo, hi = math.min(rb, zl), math.max(rb, zl)
+    if finite(s.zombieSpanLo) and s.zombieSpanLo < lo then lo = s.zombieSpanLo end
+    if finite(s.zombieSpanHi) and s.zombieSpanHi > hi then hi = s.zombieSpanHi end
     local d = lat < lo and lo - lat or (lat > hi and lat - hi or 0)
     return d < absDev and d or absDev
 end
@@ -3583,15 +3588,13 @@ function Drive.softClearAt(pS, pL, predN, sFrom, sEnd, u)
 end
 
 -- 換邊遲滯（1005 soft E2E animal-sp cow：路緣硬物取樣柱在格內跳動，可行帶右緣每輪在 4.68–5.19 之間換，右縫只差
--- 0.1m 時一輪有一輪沒有，選縫左右每輪來回翻 2–5m，lane 永遠停在牛前方，最後 43 km/h 擦過）：同一個威脅（弧長 3m、
--- 橫向 0.5m 內、同 routeGen、軟縫持有中），上一輪選的那一側本輪若仍在可行帶（容許 SOFT_HARD_JITTER_M，正是帶緣
--- 讓出的取樣跳動量）內、而且整個視窗的軟避讓點（含舒適餘裕與預測位）都在 R 外，就留在那一側：本輪換到另一側的縫，
--- 或找不到縫（nogap／least／curve）時都一樣。回 (want, why)；why 為 gap 時記下這一側給下一輪。
+-- 0.1m 時一輪有一輪沒有，選縫左右每輪來回翻 2–5m，lane 永遠停在牛前方，最後 43 km/h 擦過）：同一群威脅（Drive.softSideW），
+-- 上一輪選的那一側本輪若仍在可行帶（容許 SOFT_HARD_JITTER_M，正是帶緣讓出的取樣跳動量）內、而且整個視窗的軟避讓點
+-- （含舒適餘裕與預測位）都在 R 外，就留在那一側：本輪換到另一側的縫，或找不到縫（nogap／least／curve）時都一樣。
+-- 回 (want, why)；why 為 gap／least 時記下這一側給下一輪（least 的同側限制見 zombieLaneOf）。
 function Drive.softKeepSide(s, pS, pL, predN, sFrom, sTo, want, why, threatS, threatL, aLo, aHi, R)
-    local w = s.zombieSideW
-    if finite(w) and s.zombieSideGen == s.routeGen and s.zombieLane ~= nil and finite(threatS)
-            and math.abs(threatS - s.zombieSideS) < 3 and math.abs(threatL - s.zombieSideTL) < 0.5
-            and ((why == "gap" and (want - threatL) * (w - threatL) < 0)
+    local w = Drive.softSideW(s, threatS)
+    if w ~= nil and ((why == "gap" and (want - threatL) * (w - threatL) < 0)
                 or why == "nogap" or why == "least" or why == "curve")
             and w >= aLo - TUNE.SOFT_HARD_JITTER_M and w <= aHi + TUNE.SOFT_HARD_JITTER_M then
         local clear = true
@@ -3604,10 +3607,23 @@ function Drive.softKeepSide(s, pS, pL, predN, sFrom, sTo, want, why, threatS, th
         end
         if clear then want, why = w, "gap" end
     end
-    if why == "gap" then
-        s.zombieSideW, s.zombieSideS, s.zombieSideTL, s.zombieSideGen = want, threatS, threatL, s.routeGen
+    if why == "gap" or why == "least" then
+        s.zombieSideW, s.zombieSideS, s.zombieSideGen = want, threatS, s.routeGen
     end
     return want, why
+end
+
+-- 上一輪選的那一側（換邊遲滯的記憶）：同 routeGen、軟縫持有中、最近威脅仍在上一輪那一群內（弧長差 ≤ 一個車長
+-- ＋ZOMBIE_CLUSTER_M，與逐群選縫的「一群」同寬）才回 w，否則 nil。威脅帶含目前 lane，lane 一擺最近威脅就換成同一群的
+-- 另一隻（1005j 正式服 SemiTruckBox_mil clip-08：922／926 相差 4.25m、橫向 −1.7／1.6），舊制以弧長 3m、橫向 0.5m
+-- 判「同一個」＝每輪都當新威脅，want 在 −3↔+3.3 反號。
+function Drive.softSideW(s, threatS)
+    local w = s.zombieSideW
+    if finite(w) and s.zombieSideGen == s.routeGen and s.zombieLane ~= nil and finite(threatS)
+            and math.abs(threatS - s.zombieSideS) <= 2 * s.vehicleProfile.halfL + TUNE.ZOMBIE_CLUSTER_M then
+        return w
+    end
+    return nil
 end
 
 -- 無縫時的最不壞 lane（0925p E2E road MAX：路肩也有殭屍、整條帶無縫時舊制停在原 lane，
@@ -3666,6 +3682,27 @@ function Drive.softPick(s, pS, pL, predN, sFrom, sEnd, halfW, resident, cur, aLo
         if aLo > aHi then break end
     end
     return nil, why
+end
+
+-- 逐群③（下一群換不過去、也併不成一群）的這一群 lane：下一群縫 v 的左右兩側各取這一群貼緣最靠近 v 的縫
+-- （prefer 0），各自從那裡在換邊可及量 r12 內往下一群最不壞的 lane（softBest）能留多少淨距，取大者；同分取離 v 近者
+-- （＝舊制）。舊制只取離 v 最近的那條：1005j 正式服 SemiTruckBox_mil clip-10 選了右側 2.05，離下一隻 l 2.2 只差 0.15。
+-- 都沒有回 nil。
+function Drive.softLeanNext(s, pS, pL, predN, sFrom, sEnd, nextS, sEnd2, halfW, v, bLo, bHi, aLo, aHi, R, r12)
+    local bestU, bestD = nil, -1
+    for side = 1, 2 do
+        local lo, hi = bLo, bHi
+        if side == 1 then hi = math.min(hi, v) else lo = math.max(lo, v) end
+        local c = lo <= hi and Drive.softPick(s, pS, pL, predN, sFrom, sEnd, halfW, v, v, lo, hi, R, 0) or nil
+        if c ~= nil then
+            local x = Drive.softBest(pS, pL, predN, nextS, sEnd2, math.max(aLo, c - r12), math.min(aHi, c + r12), c)
+            local d = Drive.softClearAt(pS, pL, predN, nextS, sEnd2, x)
+            if bestU == nil or d > bestD + 1e-6 or (d > bestD - 1e-6 and math.abs(c - v) < math.abs(bestU - v)) then
+                bestU, bestD = c, d
+            end
+        end
+    end
+    return bestU
 end
 
 -- 選定／保持的 lane 之後（弧長 > sAfter）第一隻會撞到的軟避讓點：回 (弧長, 至少還要側移多少)
@@ -3850,21 +3887,32 @@ function Drive.returnZombieConflict(s, latNow, target, speedKmh)
     return false
 end
 
--- RETURN 讓位給殭屍軟縫：laneBias 停在車身、記成軟縫的停放點（zombieLaneOf 從這裡起算，不一幀拉回常駐線）
+-- RETURN 讓位給殭屍軟縫：laneBias 停在車身、記成軟縫的停放點（zombieLaneOf 從這裡起算，不一幀拉回常駐線）。
+-- 軟縫持有中（RETURN 進場前讓位）就把軟縫本身移到車身、從車身接著走：只停 laneBias 不動 zombieLane＝下一輪
+-- zombieLaneOf 從原 lane 又算回去、再被釘回車身（1005j 正式服 M998 clip-30 連 11 次 return yield）。
 function Drive.parkForZombies(s, latSigned)
     MDADFollower.clearOffset(s.fstate)
     MDADFollower.setLaneBias(s.fstate, latSigned)
-    s.zombieLaneParked = latSigned
+    if s.zombieLane ~= nil then
+        s.zombieLane = latSigned
+        s.zombieSpanLo = math.min(s.zombieSpanLo or latSigned, latSigned)
+        s.zombieSpanHi = math.max(s.zombieSpanHi or latSigned, latSigned)
+    else
+        s.zombieLaneParked = latSigned
+    end
     if s.sensor then s.sensor.scanBias = latSigned end
     s.planMode = "return-zombie"
 end
 
 -- RETURN 進場前的讓位（stepFollow 進場條件最後一關）：回線帶上有殭屍就不進，停在車身交軟縫；回 true＝已讓位。
 -- 承諾繞行中照舊交 RETURN（偏離承諾線 RETURN_DODGE_DEV 以上＝真甩出，RETURN 進場會先放掉繞行）。
-function Drive.returnYieldZombies(s, playerNum, latSigned, speedKmh)
+-- 事件帶讓位當下的軟縫 lane（zl，未持有＝nil）、偏離量 dev 與進場門檻 d（復盤看得出是不是軟縫換邊被誤判偏離）。
+function Drive.returnYieldZombies(s, playerNum, latSigned, speedKmh, dev, enterDev)
     if s.dodging or not Drive.returnZombieConflict(s, latSigned, laneBiasOf(s), speedKmh) then return false end
+    local zl = s.zombieLane
     Drive.parkForZombies(s, latSigned)
-    diagEvent(s, playerNum, "return", { phase = "yield", why = "zombie", l = latSigned, s = s.lastSNow })
+    diagEvent(s, playerNum, "return", { phase = "yield", why = "zombie", l = latSigned, s = s.lastSNow,
+        zl = zl, dev = dev, d = enterDev })
     return true
 end
 
@@ -4117,6 +4165,16 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
                 if near then
                     if latNow >= threatL then lo = math.max(bLo, threatL) else hi = math.min(bHi, threatL) end
                 end
+                -- least 也套換邊遲滯（Drive.softSideW）：同一群上一輪選在哪一側，就只在那一側取——帶緣抖動時舊制在帶兩端
+                -- 互跳（1005j 正式服 SemiTruckBox_mil clip-08：−3↔+3.3）。與近威脅限側相衝（空）時以近威脅為準。
+                local sw = Drive.softSideW(s, threatS)
+                if sw ~= nil then
+                    if sw >= threatL then
+                        if math.max(lo, threatL) <= hi then lo = math.max(lo, threatL) end
+                    elseif math.min(hi, threatL) >= lo then
+                        hi = math.min(hi, threatL)
+                    end
+                end
                 if lo <= hi then
                     local ul = Drive.softBest(pS, pL, predN, sFrom, sEnd, lo, hi, cur)
                     if math.abs(ul - cur) > TUNE.ZOMBIE_LANE_SETTLE_M then want, why = ul, "least" end
@@ -4146,8 +4204,10 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
                     local u2 = Drive.softPick(s, pS, pL, predN, sFrom, sEnd2, halfW, resident, cur, bLo, bHi, R, prefer)
                     if u2 == nil then
                         if s.zombieSlow then nextCap = Drive.softLaneCapKmh(math.max(0, room), need) end
-                        -- ③ 都不行：這一群照樣貼向下一群的縫，縮短換邊量（下一群盡量閃、閃不過就撞）
-                        u3 = v and Drive.softPick(s, pS, pL, predN, sFrom, sEnd, halfW, v, v, bLo, bHi, R, 0)
+                        -- ③ 都不行：這一群照樣貼向下一群的縫，縮短換邊量（下一群盡量閃、閃不過就撞）；兩側各取一條、
+                        --    取換邊可及量內對下一群淨距較大的那側（Drive.softLeanNext）
+                        u3 = v and Drive.softLeanNext(s, pS, pL, predN, sFrom, sEnd, nextS, sEnd2, halfW, v,
+                            bLo, bHi, aLo, aHi, R, r12)
                         if u3 ~= nil then want = u3 end
                         break
                     end
@@ -4289,9 +4349,15 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
         end
         return resident
     end
-    if s.zombieLane == nil then
-        diagEvent(s, playerNum, "zombie", { phase = "lane", l = nxt, hn = sen.zomN })
+    -- 這次持有走過的 lane 範圍（Drive.softAlignDev：換邊回擺時車身還在上一側不算偏離）；新持有從起點重算
+    local spLo, spHi = s.zombieSpanLo, s.zombieSpanHi
+    if s.zombieLane == nil or not finite(spLo) or not finite(spHi) then
+        if s.zombieLane == nil then
+            diagEvent(s, playerNum, "zombie", { phase = "lane", l = nxt, hn = sen.zomN })
+        end
+        spLo, spHi = cur, cur
     end
+    s.zombieSpanLo, s.zombieSpanHi = math.min(spLo, cur, nxt), math.max(spHi, cur, nxt)
     s.zombieLane = nxt
     return nxt
 end
@@ -11343,7 +11409,7 @@ local function stepFollow(s, vehicle, playerNum, now)
                 and turnPeakS(s.profile, s.lastSNow - TUNE.RETURN_CORNER_M,
                     s.lastSNow + TUNE.RETURN_CORNER_M) == nil
                 -- 回線帶上有殭屍（1002c）：不進 RETURN，讓位給軟縫從車身位置接手（Drive.returnYieldZombies）
-                and not Drive.returnYieldZombies(s, playerNum, latSigned, speedKmh) then
+                and not Drive.returnYieldZombies(s, playerNum, latSigned, speedKmh, absDev, enterDev) then
             -- pending＝unsafe crawl（≤RETURN_UNSAFE_CAP、沿當下 lane 直行），不是 hold：
             -- 舊制進入即 hold→WAIT→forceBrake，等下一輪快照 commit 再起步，每次進
             -- RETURN 都付一次「煞到 1 km/h」（s046 彎中 14.5→0.6 km/h）。回線走不走

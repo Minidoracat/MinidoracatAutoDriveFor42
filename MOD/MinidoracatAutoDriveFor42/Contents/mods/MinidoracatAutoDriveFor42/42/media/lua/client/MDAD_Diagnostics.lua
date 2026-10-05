@@ -113,6 +113,8 @@ local EK = {
     "lvl", "avoidN",
     -- 拖車不可過轉角改道（detour phase＝towcorner）：主避讓圈半徑、路線上不可過轉角數、替代線剖面仍不可過的轉角數
     "avoidR", "towN", "towLeft",
+    -- return yield why=zombie（1006）：讓位當下的軟縫 lane 與偏離量（d＝進場門檻，沿用既有鍵）
+    "zl", "dev",
 }
 
 local function logOnce(msg)
