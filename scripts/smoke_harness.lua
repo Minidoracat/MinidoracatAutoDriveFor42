@@ -9235,6 +9235,43 @@ function drive.scenarioSoftGentle()
 end
 drive.scenarioSoftGentle()
 
+-- (soft-g8) 1005e E2E animal-sp herd（rev 1005d）：車停在牛群前，停等目標位置一抖，接近帽就在 MIN_EXEC 上下跳——
+--   每隔一幀 hold 為假、計時起點被歸零，6 秒的等待實際花了 12.6 秒才爬。停住後（softHoldStarted）只要車沒在動
+--   就照牆鐘計，帽這一幀是否低於 MIN_EXEC 不影響。直接驅動 Drive.softStopCap（假 session，100ms 一幀）。
+--   違規證明：計時改回只在 hold 那幀累加＝紅。
+function drive.scenarioSoftHoldJitter()
+    scenario("動物停等：停住後接近帽在 MIN_EXEC 上下跳，等待照牆鐘計")
+    local T = MDAD.Drive.debugTune()
+    local halfL, brake = 2.4, 6
+    local dFree = 0
+    while MDADDynamics.approachCapKmh(dFree, 0, 0.5, brake * T.APPROACH_BRAKE_FRAC) < MDADDynamics.MIN_EXEC_KMH do
+        dFree = dFree + 0.05
+    end
+    local zsHold = 100 + halfL + T.SOFT_STOP_GAP_M -- d＝0：帽 0（hold）
+    local fs = { softStopKind = "animal", softHoldMs = 0, softHoldTick = 0, softHoldStarted = false, softCrawl = false,
+        softCrawlTick = 0, softCrawlMs = 0, softAnimalCarryMs = 0, softCrawlCarry = false, lastSNow = 100,
+        vehicleProfile = { halfL = halfL }, safeBrake = brake }
+    local now, crawlAt, flips = 5000000, nil, 0
+    for i = 0, 120 do
+        fs.softStopS = (i % 2 == 0) and zsHold or (zsHold + dFree + 0.05) -- 奇數幀帽 ≥ MIN_EXEC
+        local cap = MDAD.Drive.softStopCap(fs, now, 0.1, 0, -1, nil)
+        if i % 2 == 1 and not fs.softCrawl and cap >= MDADDynamics.MIN_EXEC_KMH then flips = flips + 1 end
+        if fs.softCrawl and crawlAt == nil then crawlAt = i * 100 end
+        now = now + 100
+    end
+    checkTrue(flips > 10, "(soft-g8) 前置：奇數幀接近帽確實越過 MIN_EXEC（" .. flips .. " 次）")
+    checkTrue(crawlAt ~= nil and crawlAt <= T.ANIMAL_WAIT_MS + 200,
+        "(soft-g8) 帽在 MIN_EXEC 上下跳：停 ANIMAL_WAIT_MS 就進爬行、不打折（爬行起點 " .. tostring(crawlAt) .. "ms）")
+    fs.softStopS, fs.softCrawl, fs.softHoldStarted, fs.softHoldMs, fs.softHoldTick = zsHold, false, false, 0, 0
+    fs.softHoldKind = nil
+    for i = 0, 30 do
+        MDAD.Drive.softStopCap(fs, now, 20, 0, -1, nil) -- 還在煞停中（20 km/h）：不計
+        now = now + 100
+    end
+    checkTrue(fs.softHoldMs == 0, "(soft-g8) 還在煞停中不計（" .. tostring(fs.softHoldMs) .. "ms）")
+end
+drive.scenarioSoftHoldJitter()
+
 -- ⑤lf 低幀率降速提示（0925；0929o 門檻改為掃描額度放大到上限的 50ms）：可視上限壓速、平均幀時 ≥50ms，
 --   且視距是被幀率截短，持續 2s 才讓 HUD 狀態變「卡頓降速」（lowfps）、恢復 3s 才消失；同趟累計 10s 跳一次
 --   通知。session 從 150ms（可負擔 32m）起算。反例：幀率低但速度沒被可視上限壓（沙盒上限 20）不顯示。

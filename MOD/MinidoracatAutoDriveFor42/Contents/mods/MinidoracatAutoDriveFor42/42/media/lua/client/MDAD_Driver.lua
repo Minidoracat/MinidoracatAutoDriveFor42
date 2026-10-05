@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1005d"
+Drive.REV = "1005e"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -5074,13 +5074,13 @@ function Drive.softStopCap(s, now, speedKmh, playerNum, capIn, whyIn)
                     kind, zs - s.lastSNow, s.softStopL or 0, s.softStopLane or 0, speedKmh or 0, s.softHoldMs))
             end
         end
-        -- 停住才計（還在煞停中不算等待）
-        if finite(speedKmh) and speedKmh < 1 and speedKmh > -1 then
-            if s.softHoldTick > 0 and now > s.softHoldTick then s.softHoldMs = s.softHoldMs + (now - s.softHoldTick) end
-            s.softHoldTick = now
-        else
-            s.softHoldTick = 0
-        end
+    end
+    -- 停住才計（還在煞停中不算等待）。停住後（softHoldStarted）車沒在動就照牆鐘計，這一幀接近帽有沒有低於
+    -- MIN_EXEC 不影響：1005e E2E animal-sp herd，停等目標位置一抖帽就在 MIN_EXEC 上下跳，每隔一幀計時起點被
+    -- 歸零，6 秒的等待實際 12.6 秒才爬（smoke (soft-g8)）。爬行中不計（爬行另有 softCrawlMs）。
+    if s.softHoldStarted and not s.softCrawl and finite(speedKmh) and speedKmh < 1 and speedKmh > -1 then
+        if s.softHoldTick > 0 and now > s.softHoldTick then s.softHoldMs = s.softHoldMs + (now - s.softHoldTick) end
+        s.softHoldTick = now
         if kind == "animal" and s.softHoldMs >= TUNE.ANIMAL_WAIT_MS then
             s.softCrawl = true
             cap, reason, hold = TUNE.ANIMAL_CRAWL_KMH, "animal-crawl", false
