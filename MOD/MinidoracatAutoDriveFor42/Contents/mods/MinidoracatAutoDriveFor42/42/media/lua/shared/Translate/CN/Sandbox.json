@@ -35,7 +35,7 @@
     "Sandbox_MinidoracatAutoDriveCorpseSlowdown_option2": "由玩家决定",
     "Sandbox_MinidoracatAutoDriveCorpseSlowdown_option3": "不因尸体减速",
     "Sandbox_MinidoracatAutoDriveAnimalSlowdown": "动物减速停车",
-    "Sandbox_MinidoracatAutoDriveAnimalSlowdown_tooltip": "选中的动物站在行驶线上、又躲不开时，自动驾驶会减速停在它前方，等它离开。\n等太久就以极低速缓慢通过；低速碰撞不会伤车，但动物仍可能受伤。\n大型动物（默认）＝鹿、羊、猪、牛等，以及体型已长大的幼崽；所有动物＝连鸡、兔、火鸡等小动物也算；关闭＝不为动物停车。",
+    "Sandbox_MinidoracatAutoDriveAnimalSlowdown_tooltip": "选中的动物会受到保护：自动驾驶一定会躲开它。玩家的「闪避动物」没选中的话，会先减速，再从旁边慢慢绕过。\n真的没有空间躲时，才停在它前方等它离开；等太久就以极低速缓慢通过（低速碰撞不会伤车，但动物仍可能受伤）。动物一直挡着不让开时，自动驾驶会交还给玩家。\n大型动物（默认）＝鹿、羊、猪、牛等，以及体型已长大的幼崽；所有动物＝连鸡、兔、火鸡等小动物也算；关闭＝不为动物减速或停车（玩家的「闪避动物」选中的仍会按车速躲）。",
     "Sandbox_MinidoracatAutoDriveAnimalSlowdown_option1": "关闭",
     "Sandbox_MinidoracatAutoDriveAnimalSlowdown_option2": "大型动物",
     "Sandbox_MinidoracatAutoDriveAnimalSlowdown_option3": "所有动物",

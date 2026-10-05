@@ -5,7 +5,7 @@
 
 A＝現制（真 MDADFollower.control − 真 crossTrackSteer）；B＝同外環＋固定增益 yaw-rate P 內環。
 Plant：自行車＋一階 yaw 延遲。旋鈕：TAU、K_OMEGA（下方）。印貼縫落後／S 彎翻號率對照表，
-沒有斷言（除有限性）。背景與結論見 AGENTS.md「Derpy BackStepping-MFAC 評估」條。
+沒有斷言（除有限性）。背景與結論見知識庫 route.md〈試過不要再試〉的 yaw-rate 內環條。
 ]]
 
 local MEDIA = "MOD/MinidoracatAutoDriveFor42/Contents/mods/MinidoracatAutoDriveFor42/42/media/lua"

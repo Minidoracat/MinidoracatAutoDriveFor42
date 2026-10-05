@@ -280,8 +280,7 @@ MDADFollower.OV_MAX = OV_MAX
 -- 行車風格由檔位選擇：MAX＝brisk，其餘＝comfort；切換重建速度表，不更換路線幾何。
 -- 只動建表期的剖面預算：橫向加速（過彎速）、計畫制動／滑行包絡（彎前多早開始收油）、
 -- 折點帽。運行期安全包絡（state.*Safe、Driver 的 stopping／visibility 證明）不隨風格放寬，
--- 風格只會把目標壓得更低。競品 Derpy 的「順」＝約 15 km/h 過 90° 彎＋ 0.5 km/h/m 緩坡
--- （map_nav.lua:8108-8179）；舒適檔取 lat 2.5（乘客舒適上限）、計畫制動 3.0、折點 30。
+-- 風格只會把目標壓得更低。舒適檔取 lat 2.5（乘客舒適上限）、計畫制動 3.0、折點 30。
 -- brisk＝現行常數逐位元不變（style 省略時的預設）。前向加速仍不設天花板（檔頭定案不動）。
 -- brisk coast＝天花板 3.0（2026-09-07；真值由 VehicleProfile.priors 的質量制動預算給：斷油＝
 -- CarController NoControl 對 Bullet 下 brakingForce 15，減速度≈常數力／質量，RaceCar58 1041 kg 實測

@@ -5449,8 +5449,8 @@ dveh._mass = 1200
 
 -- 力的量級：符號全對但推力小兩個數量級＝實機「按了自駕，車直直開過路口」；
 -- 2026-08-28 二輪實測連「純力矩×0.8m 臂」的 43k-122k 都只換到每秒 5-9° 偏航。
--- 幾何（前臂側向衝量；耦力調頭走後臂力偶）與量級改採 Derpy 在整個 Workshop
--- 用戶群驗證過的標定。把車頭轉到幾乎反向（2.8 rad＝160° > 原地調頭門檻
+-- 幾何（前臂側向衝量；耦力調頭走後臂力偶）與量級改照質量與車速標定（實機調校）。
+-- 把車頭轉到幾乎反向（2.8 rad＝160° > 原地調頭門檻
 -- 135°），follower 必定給飽和轉向。**速度固定 3 km/h**：帶速調頭在
 -- ROTATE_ARC_MAX 以下走大弧、以上才煞停（帶動量旋轉＝漂移甩出 22m，st 88,113
 -- 遙測）放行的區間內量。
@@ -8057,7 +8057,7 @@ setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxS
 drive.clearCell(8, 0)
 drive.scanRound()
 
--- ⑤z 殭屍軟縫（0906c；Derpy optimize_z 對應）：零星殭屍＝在路面內緩緩換 lane 穿縫；
+-- ⑤z 殭屍軟縫（0906c）：零星殭屍＝在路面內緩緩換 lane 穿縫；
 --     速率 ≤ 1.0 m/s；目標 lane 對硬障礙不淨空＝不動；選項關＝不動；殭屍散去回常駐 lane。
 --     可行帶＝常駐 ±3 ∩ 路面餘裕（本 fixture 無 laneRoom／無路面帶＝±3）。
 --     違規證明：拿掉 plan 淨空檢查＝(z3) 紅；拿掉速率上限＝(z1) 首輪 ≤0.3 紅；帶退回 ±1.5＝(z1b) 紅。
@@ -9017,6 +9017,223 @@ function drive.scenarioSoftSide()
     assert(armDrive())
 end
 drive.scenarioSoftSide()
+
+-- (soft-g*) 2026-10-05 使用者裁定「沒辦法改成繞開閃過嗎？一定要停車嗎？」（E2E：AnimalDodge＝關、AnimalSlowdown＝大型，
+--   14m 路中間一頭牛，車停 6.9 秒後 4 km/h 爬過撞死牛）。兩個名單分工：閃避名單＝照巡航速閃；減速名單＝受保護：
+--   不在閃避名單的（gentle）先降到 ANIMAL_GENTLE_KMH 再繞，真的沒縫才停等。動物停等另外計時，不吃共用停等預算。
+--   (soft-g1) dodge=1、slow=2、一側有縫：到牛前 ≤ gentle、繞開、從未 followHold、通過後解除
+--   (soft-g2) dodge=1、slow=1：兩個名單都沒有＝不繞不減速
+--   (soft-g3) dodge=2、slow=2：閃避名單內＝照巡航速閃、不套 gentle 帽
+--   (soft-g4) 共用停等預算只剩 1 秒時遇到擋路的牛：停住不吃預算、照樣進爬行、不 StopStuck
+--   (soft-g5) 爬行把牛一路推著走（MP 動物不一定會死）：ANIMAL_CRAWL_MAX_MS 後以 AnimalBlockStop 交還
+--   (soft-g6) 停→放→停（車沒前進）：停住累計接著算，不從 0 重來
+function drive.scenarioSoftGentle()
+    scenario("動物兩個名單：只在減速名單的先減速再繞、動物停等另外計時、爬行與停放停都有出口")
+    local T = MDAD.Drive.debugTune()
+    local oldZ, oldA = MDAD.HUD.zombieDodge, MDAD.HUD.animalDodge
+    local aLvl = 1
+    MDAD.HUD.zombieDodge = function() return true end
+    MDAD.HUD.animalDodge = function() return aLvl end
+    local function sandbox(slow)
+        setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40,
+            RightLaneBias = 0, ZombieAreaSlowdown = false, CorpseSlowdown = false, AnimalSlowdown = slow })
+    end
+    local function arm(speed)
+        drive.fillWorld(-10, 160, -9, 9)
+        assert(armDrive())
+        setHeading(dveh, 0)
+        dveh._speed, dveh._y = speed or 20, 0
+        drive.scanRound(true)
+        drive.scanRound(true)
+        return MDAD.Drive.debugSession(0)
+    end
+    local cow = { x = 0, l = 0, cell = nil }
+    local function putCow(x, l)
+        if cow.cell then drive.clearCell(cow.cell[1], cow.cell[2]) end
+        cow.x, cow.l, cow.cell = x, l, { math.floor(x), math.floor(l) }
+        drive.putMoving(math.floor(x), math.floor(l), { _class = "IsoAnimal", _isa = { IsoPlayer = true },
+            getX = function() return cow.x end, getY = function() return cow.l end,
+            isDead = function() return false end, getVehicle = function() return nil end,
+            isHeld = function() return false end,
+            getData = function() return { getWeight = function() return 300 end } end })
+    end
+    local function dropCow()
+        if cow.cell then drive.clearCell(cow.cell[1], cow.cell[2]) end
+        cow.cell = nil
+    end
+    local function walls(x0, x1)
+        for x = x0, x1 do drive.putSolid(x, 3, "softg_r" .. x); drive.putSolid(x, -4, "softg_l" .. x) end
+    end
+    local function parkBefore(s, x)
+        dveh._x, dveh._speed = x - s.vehicleProfile.halfL - T.SOFT_STOP_GAP_M + 0.2, 0
+        driveReset(dveh)
+        drive.scanRound(true)
+        driveReset(dveh)
+        driveTick(dp, dveh)
+    end
+
+    -- (soft-g1)
+    sandbox(2); aLvl = 1
+    local s = arm(40)
+    local R = s.vehicleProfile.halfW + MDADCorridor.ZOMBIE_R + MDADCorridor.ZOMBIE_MARGIN
+    local halfL = s.vehicleProfile.halfL
+    putCow(45.5, 0)
+    local held, maxNear, minGap, sawGentle, passed = false, -1, 99, false, false
+    local sawAssist, farCap = false, nil
+    for _ = 1, 80 do
+        driveReset(dveh)
+        drive.scanRound(true)
+        if s.followHold or s.softStopKind ~= nil then held = true end
+        if s.softGentleOn then sawGentle = true end
+        if s.visAssistWhy == "soft-gentle" then sawAssist = true end
+        if farCap == nil and s.softGentleOn and cow.x - dveh._x - halfL > 25 then farCap = s.softGentleCapKmh end
+        local d = cow.x - dveh._x - halfL -- 車頭到牛
+        if d <= T.ZOMBIE_APPROACH_LEAD_M and d > -2 * halfL then
+            if s.desiredTarget > maxNear then maxNear = s.desiredTarget end
+            local gap = math.abs(dveh._y - cow.l)
+            if gap < minGap then minGap = gap end
+        end
+        local v = s.desiredTarget > 0 and s.desiredTarget or 1
+        dveh._speed = v
+        dveh._x, dveh._y = dveh._x + v / 3.6 * 0.3, s.fstate.laneBias
+        if dveh._x - halfL > cow.x + 1 then passed = true; break end
+    end
+    checkTrue(sawGentle and maxNear >= 0 and maxNear <= T.ANIMAL_GENTLE_KMH + 1e-6,
+        "(soft-g1) 只在減速名單的牛：車頭到牠前 LEAD 內目標 ≤ gentle（實得 " .. tostring(maxNear) .. "）")
+    checkTrue(sawAssist, "(soft-g1) gentle 帽有減速輔助帳（vaw＝soft-gentle）")
+    checkTrue(farCap ~= nil and farCap > T.ANIMAL_GENTLE_KMH + 10,
+        "(soft-g1) 是接近包絡不是平帽：遠處（25m 外）帽還高（" .. tostring(farCap) .. "）")
+    checkTrue(minGap >= R + T.SOFT_COMFORT_M - 0.05,
+        "(soft-g1) 從旁邊繞開（經過時車身橫向距牛 " .. string.format("%.2f", minGap) .. "）")
+    checkTrue(not held and passed, "(soft-g1) 有縫就繞、從未停等，車尾過了牛（held " .. tostring(held) .. "）")
+    drive.scanRound(true)
+    checkTrue(not s.softGentleOn and s.softGentleCapKmh < 0, "(soft-g1) 車尾過了牛：gentle 帽解除")
+    dropCow()
+
+    -- (soft-g2)
+    sandbox(1); aLvl = 1
+    s = arm()
+    local base = s.desiredTarget
+    putCow(30.5, 0.2)
+    drive.scanRound(true)
+    checkTrue(s.zombieLane == nil and s.softGentleCapKmh < 0 and s.softStopKind == nil
+            and s.desiredTarget >= base - 1e-6,
+        "(soft-g2) 兩個名單都沒有：不繞、不減速、不停（lane " .. tostring(s.zombieLane) .. "、des "
+        .. tostring(s.desiredTarget) .. "）")
+    dropCow()
+
+    -- (soft-g3)
+    sandbox(2); aLvl = 2
+    s = arm()
+    base = s.desiredTarget
+    putCow(30.5, 0.2)
+    local gentleSeen = false
+    for _ = 1, 4 do
+        driveReset(dveh)
+        drive.scanRound(true)
+        if s.softGentleCapKmh >= 0 or s.lastSensorReason == "animal-gentle" then gentleSeen = true end
+        dveh._x, dveh._y = dveh._x + 1.6667, s.fstate.laneBias
+    end
+    checkTrue(s.zombieLane ~= nil and not gentleSeen and s.desiredTarget >= base - 1e-6,
+        "(soft-g3) 閃避名單內：照巡航速閃、不套 gentle 帽（des " .. tostring(s.desiredTarget) .. "）")
+    dropCow()
+
+    -- (soft-g4)
+    sandbox(2); aLvl = 1
+    s = arm()
+    walls(15, 60)
+    putCow(20.5, 0.1)
+    parkBefore(s, 20.5)
+    checkTrue(s.softHoldKind == "animal" and s.followHold == true,
+        "(soft-g4) 前置：沒縫、停在牛前（kind " .. tostring(s.softHoldKind) .. "）")
+    s.waitAccumMs, s.waitTickMs = T.WAIT_TIMEOUT_MS - 1000, 0
+    s.waitAnchorS = s.lastSNow
+    local acc0 = s.waitAccumMs
+    drive.stallFrames(T.ANIMAL_WAIT_MS + 1000)
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkTrue(MDAD.Drive.isActive(0) and s.softCrawl == true and s.waitAccumMs <= acc0 + 1e-6,
+        "(soft-g4) 共用預算快滿：動物停等不吃預算、照樣進爬行、不交還（active " .. tostring(MDAD.Drive.isActive(0))
+        .. "、crawl " .. tostring(s.softCrawl) .. "、wait " .. tostring(s.waitAccumMs) .. "）")
+
+    -- (soft-g5) 接著 g4：牛一直在車頭前、被推著走
+    clearList(halos)
+    local crawlAt, stopAt, steps = nil, nil, 0
+    for k = 1, 80 do
+        if not MDAD.Drive.isActive(0) then stopAt = steps * 300; break end
+        dveh._speed = T.ANIMAL_CRAWL_KMH
+        dveh._x = dveh._x + T.ANIMAL_CRAWL_KMH / 3.6 * 0.3
+        putCow(dveh._x + halfL + 2.5, 0.1)
+        driveReset(dveh)
+        drive.scanRound(true)
+        steps = k
+        if crawlAt == nil and s.softCrawl then crawlAt = k end
+    end
+    local animalKey, stuckKey = false, false
+    for _, h in ipairs(halos) do
+        local key = noteReason(h.text)
+        if key == "UI_MinidoracatAutoDrive_AnimalBlockStop" then animalKey = true end
+        if key == "UI_MinidoracatAutoDrive_StopStuck" then stuckKey = true end
+    end
+    checkTrue(stopAt ~= nil and animalKey and not stuckKey and stopAt >= T.ANIMAL_CRAWL_MAX_MS - 2000 - 1000,
+        "(soft-g5) 爬行推著牛走：爬行上限到了以 AnimalBlockStop 交還（停在 " .. tostring(stopAt) .. "ms、animalKey "
+        .. tostring(animalKey) .. "、stuck " .. tostring(stuckKey) .. "）")
+    dropCow()
+
+    -- (soft-g6)
+    s = arm()
+    walls(15, 60)
+    putCow(20.5, 0.1)
+    parkBefore(s, 20.5)
+    drive.stallFrames(3000)
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    local ms1 = s.softHoldMs
+    dropCow()
+    drive.scanRound(true)
+    checkTrue(s.softHoldKind == nil and s.softAnimalCarryMs >= ms1 - 1e-6 and ms1 >= 2000,
+        "(soft-g6) 前置：停住 " .. tostring(ms1) .. "ms 後牛走開、放行，累計留著（carry " .. tostring(s.softAnimalCarryMs) .. "）")
+    putCow(20.5, 0.1)
+    drive.scanRound(true)
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkTrue(s.softHoldKind == "animal" and s.softHoldMs >= ms1 - 1e-6,
+        "(soft-g6) 牛又擋回來、車沒前進：停住累計接著算（" .. tostring(s.softHoldMs) .. "ms ≥ " .. tostring(ms1) .. "）")
+    drive.stallFrames(T.ANIMAL_WAIT_MS - ms1 + 1000)
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkTrue(s.softCrawl == true, "(soft-g6) 停→放→停 合計到 ANIMAL_WAIT_MS 就爬過")
+    -- 車已經前進過 WAIT_PROGRESS_M（換了一處）才離開：累計歸零，下一次從 0 算
+    s.softAnimalAnchorS = s.lastSNow - MDADDynamics.WAIT_PROGRESS_M - 1
+    dropCow()
+    drive.scanRound(true)
+    checkTrue(s.softHoldKind == nil and s.softAnimalCarryMs == 0 and s.softCrawlMs == 0 and s.softCrawlCarry == false,
+        "(soft-g6) 前進過一段才離開：停住／爬行累計歸零（carry " .. tostring(s.softAnimalCarryMs) .. "）")
+    -- (soft-g7) 共用預算豁免只給「只有動物停等」的 WAIT：其他停等來源同時存在照計
+    local saved = { s.softAnimalHold, s.returnHold, s.visibilityCap, s.startNearCap, s.dodgeDeferCap, s.dodging }
+    s.softAnimalHold, s.returnHold, s.visibilityCap, s.startNearCap, s.dodgeDeferCap, s.dodging =
+        true, false, 100, nil, -1, false
+    checkTrue(MDAD.Drive.animalOnlyWait(s, false) == true, "(soft-g7) 只有動物停等：不計共用預算")
+    checkTrue(MDAD.Drive.animalOnlyWait(s, true) == false, "(soft-g7) 同時在停止線（blockedStop）：照計")
+    s.returnHold = true
+    checkTrue(MDAD.Drive.animalOnlyWait(s, false) == false, "(soft-g7) 同時回線待命：照計")
+    s.returnHold, s.visibilityCap = false, 0
+    checkTrue(MDAD.Drive.animalOnlyWait(s, false) == false, "(soft-g7) 同時可視上限低於 MIN_EXEC：照計")
+    s.visibilityCap, s.startNearCap = 100, 0
+    checkTrue(MDAD.Drive.animalOnlyWait(s, false) == false, "(soft-g7) 同時起步近物停住：照計")
+    s.startNearCap, s.softAnimalHold = nil, false
+    checkTrue(MDAD.Drive.animalOnlyWait(s, false) == false, "(soft-g7) 沒有動物停等（例如會車停等）：照計")
+    s.softAnimalHold, s.returnHold, s.visibilityCap, s.startNearCap, s.dodgeDeferCap, s.dodging =
+        saved[1], saved[2], saved[3], saved[4], saved[5], saved[6]
+    dropCow()
+
+    MDAD.Drive.stop(0, nil)
+    MDAD.HUD.zombieDodge, MDAD.HUD.animalDodge = oldZ, oldA
+    drive.fillWorld(-2, 70, -7, 7)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    assert(armDrive())
+end
+drive.scenarioSoftGentle()
 
 -- ⑤lf 低幀率降速提示（0925；0929o 門檻改為掃描額度放大到上限的 50ms）：可視上限壓速、平均幀時 ≥50ms，
 --   且視距是被幀率截短，持續 2s 才讓 HUD 狀態變「卡頓降速」（lowfps）、恢復 3s 才消失；同趟累計 10s 跳一次
@@ -18576,7 +18793,7 @@ drive.scenarioVisibilityTiming()
 --   (kp-off)    API 不在／丟錯／回 false：與舊制相同（遠處就是硬物、判堵、可視前緣不截、沒有 gate 事件）。
 --   (kp-other)  API 只認 Knox Pass 的門：同一扇門沒標記＝照舊硬物判堵；標記了＝遠處只截前緣（正對照）。
 -- 違規證明（temp/vp）：gateCell 恆回 false（拿掉退回）＝(kp-closed) 紅；gateWillOpen 恆回 true（拿掉 API 判斷）＝(kp-off)／(kp-other) 紅。
--- 1005d 提示（Drive.gateWarn／gateShut；頭上提示＋Toast＋語音 gate＋telemetry gate no／shut）：
+-- 1005e 提示（Drive.gateWarn／gateShut；頭上提示＋Toast＋語音 gate＋telemetry gate no／shut）：
 --   (kv-no)      API v3 回 false,"NotRegistered"：判堵同舊制；提示一次、文字帶 whyText、同步 Toast、語音 gate 蓋掉同幀 blocked；
 --                console 一行；倒車再開回去不重複。
 --   (kv-plain)   一般門回 false 不帶 why：不提示。(kp-off) 也驗 VERSION 2／不在／丟錯不提示；(kp-far) 抵達前打開不提示。
@@ -18621,7 +18838,7 @@ function drive.scenarioKnoxGate()
         if apiMode == "tagged" then return obj._knox == true end
         return apiMode == "yes"
     end }
-    -- 1005d 提示（Drive.gateWarn）：Halo／Toast／語音／翻譯參數接成可數的樁，情境尾還原。getText 帶 %1 時回「鍵|參數」。
+    -- 1005e 提示（Drive.gateWarn）：Halo／Toast／語音／翻譯參數接成可數的樁，情境尾還原。getText 帶 %1 時回「鍵|參數」。
     local oldHalo, oldVoice, oldToast, oldGetText, oldDebug =
         HaloTextHelper, MDAD.Voice, MDADDiagnostics.toast, getText, drive.debug
     local toasts = {}
@@ -18809,7 +19026,7 @@ function drive.scenarioKnoxGate()
                 and (mode == "absent") == (apiCalls == 0),
             "(kp-off) " .. mode .. "：照舊硬物判堵、不截前緣（hardN=" .. got.hardN .. " end=" .. tostring(got.scanEndS)
             .. " blocked=" .. tostring(got.blocked) .. " gate=" .. tostring(got.gate) .. " calls=" .. apiCalls .. "）")
-        -- VERSION 2（不帶 why）／不在／丟錯：沒有不會開的提示（1005d）
+        -- VERSION 2（不帶 why）／不在／丟錯：沒有不會開的提示（1005e）
         for _ = 1, 50 do advance(0.02) end
         checkTrue(warnN(oh0) == 0 and gateVoices(ov0) == 0 and st.sensor.gateNoX == nil and #events == 0,
             "(kp-off) " .. mode .. "：不提示（提示 " .. warnN(oh0) .. "、gate 語音 " .. gateVoices(ov0) .. "）")
@@ -18835,7 +19052,7 @@ function drive.scenarioKnoxGate()
         "(kp-other) 正對照：標記的門遠處只截前緣、帶內不當硬物（gateHard=" .. tostring(st.sensor.gateHard) .. " end="
         .. tostring(st.sensor.scanEndS) .. " hardN=" .. st.sensor.hardN .. " 只剩帶外=" .. tostring(outer) .. "）")
 
-    -- 1005d 提示（Drive.gateWarn／gateShut）：API v3 回 false,"NotRegistered"（標記的門）／false（沒標記）。
+    -- 1005e 提示（Drive.gateWarn／gateShut）：API v3 回 false,"NotRegistered"（標記的門）／false（沒標記）。
     local whyMode, whyArg = "ok", nil
     local WHY_TEXT = "這台車的感應盒沒有登記這扇門。"
     local api3 = { VERSION = 3,
@@ -21106,85 +21323,6 @@ function drive.scenario0928d()
     SandboxVars = oldSand
 end
 drive.scenario0928d()
-
--- (long-window) 1005：群長過承諾窗（TUNE.DODGE_OV_SPAN）＝車開到群前、窗跟著前移也裝不下——舊制 window 延後排在
---   候選鏈之前、每輪立即延後，永遠解不開（停在群前到交還）。現制照跑候選鏈、直接走收短停留：窗內那段承諾下來、
---   窗外維持偏移，走完由鏈式停留沿停留 lane 續行，群尾過了才解鏈。承諾窗 253m 大於感知上限，區塊內用 debugTune
---   壓到 50 重現（同 (E) 的作法）；開到群前窗就容得下的群照舊延後由 (E) 鎖。
---   違規證明：replan 照舊立即延後＝「收短停留」紅；sweepWithFallbacks 不直接走停留＝「收短停留」紅（production 的
---   OV_MAX＝窗＋3：窗外的完整繞行 build 回 capacity、不是 p4，進不了停留；區塊內同步把 build 容量壓成窗＋3）；
---   sweepStay 不收到窗內＝「線尾在窗內」紅。
-function drive.scenarioLongWindow()
-    scenario("1005：群長過承諾窗＝收短停留承諾、車前進、鏈式續行")
-    local oldSand = SandboxVars
-    local tune = MDAD.Drive.debugTune()
-    local keepSpan = tune.DODGE_OV_SPAN
-    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40,
-        RightLaneBias = 0 })
-    local wasMs = drive.frameMs(10)
-    drive.fillWorld(-10, 160, -12, 12) -- 停留 lane 的掃描帶跟著偏移走：兩側多鋪，帶緣不落在未載入格
-    for x = 30, 100 do drive.putSolid(x, 0, "long_window_" .. x) end
-    tune.DODGE_OV_SPAN = 50
-    local realBuild = MDADFollower.buildOffsetLine
-    MDADFollower.buildOffsetLine = function(profile, s0, a, b, c, d, ...)
-        if math.ceil(d + 1 - math.max(s0, 0)) + 1 > tune.DODGE_OV_SPAN + 3 then return 0, 0, "capacity", 0 end
-        return realBuild(profile, s0, a, b, c, d, ...)
-    end
-    local origEv, commitWhy = MDADDiagnostics.event, false
-    MDADDiagnostics.event = function(pn, name, a, ...)
-        if name == "dodge" and type(a) == "table" and a.phase == "commit" then commitWhy = a.why end
-        if origEv then return origEv(pn, name, a, ...) end
-    end
-    checkTrue(armDrive(), "(long-window) 啟動")
-    setHeading(dveh, 0)
-    dveh._speed = 20
-    local st = MDAD.Drive.debugSession(0)
-    local diagWas, realSample = st.diag, MDADDiagnostics.sample
-    MDADDiagnostics.sample = function() return true end
-    st.diag = true
-    drive.frameMs(10)
-    drive.scanRound()
-    drive.frameMs(10)
-    drive.scanRound()
-    MDADDiagnostics.event, MDADDiagnostics.sample, st.diag = origEv, realSample, diagWas
-    checkEq(commitWhy, "window", "(long-window) commit 事件記下延後理由 window（telemetry 分得出收短停留的來源）")
-    local fs = st.fstate
-    local rs0 = st.lastSNow
-    checkTrue(st.dodging == true and st.dodgeStay == true,
-        "(long-window) 群長過承諾窗：收短停留承諾、不延後（dodging=" .. tostring(st.dodging)
-        .. " stay=" .. tostring(st.dodgeStay) .. " tier=" .. tostring(st.dodgeTier) .. "）")
-    checkTrue(type(fs.offD) == "number" and fs.offD <= rs0 + 50 + 1e-6 and fs.offC > 30,
-        "(long-window) 停留線尾在承諾窗內、保持段過群起點（c=" .. tostring(fs.offC) .. " d=" .. tostring(fs.offD)
-        .. " rs=" .. tostring(rs0) .. "）")
-    local stayLane = fs.offL
-    local function stepTo(x)
-        dveh._x, dveh._y = x, stayLane or 0
-        driveReset(dveh)
-        driveTick(dp, dveh)
-        drive.frameMs(10)
-        drive.scanRound()
-    end
-    stepTo((fs.offC or 40) + 0.5)
-    checkTrue(st.laneChained == true and math.abs(fs.laneBias - stayLane) < 1e-6 and st.blocked ~= true,
-        "(long-window) 窗內那段走完：窗外的群仍擋常駐線＝鏈著沿停留 lane 前進（chained=" .. tostring(st.laneChained)
-        .. " bias=" .. tostring(fs.laneBias) .. " stay=" .. tostring(stayLane) .. " blocked=" .. tostring(st.blocked)
-        .. " dodging=" .. tostring(st.dodging) .. " tier=" .. tostring(st.dodgeTier) .. " pm=" .. tostring(st.planMode)
-        .. " br=" .. tostring(st.dodgeBlockReason) .. " bs=" .. tostring(st.blockS) .. " rs=" .. tostring(st.lastSNow) .. "）")
-    stepTo(80)
-    checkTrue(st.laneChained == true and math.abs(fs.laneBias - stayLane) < 1e-6 and st.blocked ~= true,
-        "(long-window) 開到群中段：停留隨看到更多延長（chained=" .. tostring(st.laneChained) .. "）")
-    stepTo(108)
-    stepTo(110)
-    checkTrue(st.laneChained == false, "(long-window) 群尾已過、常駐線淨空：解鏈（chained=" .. tostring(st.laneChained) .. "）")
-    MDAD.Drive.stop(0, nil)
-    tune.DODGE_OV_SPAN = keepSpan
-    for x = 30, 100 do drive.clearCell(x, 0) end
-    drive.frameMs(wasMs)
-    drive.fillWorld(-2, 70, -7, 7)
-    SandboxVars = oldSand
-    MDADFollower.buildOffsetLine = realBuild
-end
-drive.scenarioLongWindow()
 
 -- (chain-far) 1004a 玩家回報「繞道後判定走路邊草地，要到第一次轉彎或殭屍／屍體出現才回到路上」：鏈式停留只在
 --   常駐線前方淨空才解鏈，看的是整個感知窗——遠處還有任何擋常駐線的東西，車就沿停留 lane（常在路外）一路開，

@@ -557,8 +557,8 @@ function MDADCorridor.plan(hardS, hardL, hardN, needHalf, corridorHalf, preferL,
 end
 
 -- ---------------------------------------------------------------------------
--- 殭屍軟縫（2026-09-06；競品 Derpy 的 optimize_z 把殭屍當「軟縫」拉軌跡，
--- map_nav.lua:7675-7734；我們只出一個橫向目標，不動 commit／掃掠體系）
+-- 殭屍軟縫（2026-09-06；殭屍當「軟縫」處理：只出一個橫向目標，
+-- 不動 commit／掃掠體系）
 -- ---------------------------------------------------------------------------
 -- MDADCorridor.softZombieLane(zomS, zomL, zomN, sFrom, sTo, halfW, base, prev, aLo, aHi, lambda, tmpLo, tmpHi)
 --     zomS/zomL ＝ 殭屍 (s,l) 平行陣列（Sensor 完成輪快照，唯讀）；zomN 有效筆數。

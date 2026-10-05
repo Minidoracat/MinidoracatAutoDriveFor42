@@ -114,6 +114,11 @@ local texts = {
     UI_MinidoracatAutoDrive_HUDDetourTip = "REROUTE TIP",
     UI_MinidoracatAutoDrive_HUDAuto = "AUTO",
     UI_MinidoracatAutoDrive_HUDAutoTip = "AUTO TIP",
+    UI_MinidoracatAutoDrive_HUDAnimal = "ANIMAL",
+    UI_MinidoracatAutoDrive_HUDAnimalTip = "ANIMAL TIP %1",
+    UI_MinidoracatAutoDrive_AnimalDodgeOff = "LV OFF",
+    UI_MinidoracatAutoDrive_AnimalDodgeLarge = "LV LARGE",
+    UI_MinidoracatAutoDrive_AnimalDodgeAll = "LV ALL",
     UI_MinidoracatAutoDrive_HUDStatusBlocked = "HOLDING",
     UI_MinidoracatAutoDrive_HUDThemeMetal = "METAL",
     UI_MinidoracatAutoDrive_HUDThemeMinimal = "GLASS",
@@ -670,17 +675,52 @@ checkEq(panel.volumeSlider.value, 70, "volume slider reflects option default")
 checkEq(panel.y + panel.height, dashboards[0].y + 7,
     "HUD overlaps transparent inset and touches first visible dashboard row")
 
+-- 策略列五顆（殭屍／屍體／自動改道／閃避動物／速度明細）：看得到的每一顆都在面板內、
+-- 不碰任何其他看得到的子元件；完整版面另不得壓到同列的電量／油量字（字不是子元件）。
+local POLICY_PILLS = { "zombieButton", "corpseButton", "autoButton", "animalButton", "speedButton" }
+local function checkPolicyPills(p, label)
+    local bad, energyHit = 0, false
+    local energyY = p._style == 4 and p._energyY or p._bottomTextY
+    for _, name in ipairs(POLICY_PILLS) do
+        local a = p[name]
+        if a.visible then
+            if a.x < 0 or a.y < 0 or a.x + a.width > p.width or a.y + a.height > p.height then
+                bad = bad + 1
+            end
+            for i = 1, #p.children do
+                local b = p.children[i]
+                if b ~= a and b.visible and a.x < b.x + b.width and b.x < a.x + a.width
+                        and a.y < b.y + b.height and b.y < a.y + a.height then
+                    bad = bad + 1
+                end
+            end
+            if p._effectiveLayout == 1 and not p._collapsed and p._energyX and energyY
+                    and energyY >= a.y and energyY < a.y + a.height and a.x + a.width > p._energyX then
+                energyHit = true
+            end
+        end
+    end
+    checkEq(bad, 0, label .. ": policy pills stay inside the panel and overlap no other visible control")
+    check(not energyHit, label .. ": policy pills stay clear of the battery and fuel text")
+end
+
 -- 自動改道藥丸（2026-09-02 使用者：ESC 選項也要在 HUD 上）：每個主題都緊接在屍體藥丸
 -- 之後、同列同尺寸、與其他藥丸同時顯示／隱藏；讀寫的是 ESC／MiniMap 共用的 AutoDetour 選項。
+-- 閃避動物藥丸接在自動改道之後、速度明細之前，同列同尺寸同進退。
 local function checkAutoPill(label)
     local a, c = panel.autoButton, panel.corpseButton
     check(a.visible == c.visible and a.y == c.y and a.height == c.height and a.width == c.width
         and a.x == c.x + c.width + 4 and a.x + a.width <= panel.width,
         label .. ": auto-reroute pill follows the corpse pill on the same row")
+    local an = panel.animalButton
+    check(an.visible == a.visible and an.y == a.y and an.height == a.height and an.width == a.width
+        and an.x == a.x + a.width + 4 and an.x + an.width <= panel.width,
+        label .. ": animal-dodge pill follows the auto-reroute pill on the same row")
     local sp = panel.speedButton
-    check(sp.visible == a.visible and sp.y == a.y and sp.height == a.height and sp.width == a.width
-        and sp.x == a.x + a.width + 4 and sp.x + sp.width <= panel.width,
-        label .. ": speed-details button follows the auto-reroute pill on the same row")
+    check(sp.visible == an.visible and sp.y == an.y and sp.height == an.height and sp.width == an.width
+        and sp.x == an.x + an.width + 4 and sp.x + sp.width <= panel.width,
+        label .. ": speed-details button follows the animal-dodge pill on the same row")
+    checkPolicyPills(panel, label)
 end
 checkAutoPill("metal")
 check(panel.autoButton.title == "AUTO ON" and panel.autoButton.enable == true
@@ -696,6 +736,50 @@ click(panel.autoButton)
 check(MDAD.HUD.autoDetour() == true and panel.autoButton.title == "AUTO ON",
     "second click turns auto-reroute back on")
 optionSaveCalls = 0
+
+-- 閃避動物藥丸：兩態——點一下在「關」與上次開啟的等級（modData MDADHudAnimalLast，預設大型）
+-- 之間切換，寫入一律經 HUD.setAnimalDodge；ESC／MiniMap 改等級後下一輪 refresh 就反映。
+do
+    local animalOption = optionSets.MinidoracatAutoDrive:getOption("AnimalDodge")
+    local realSet, writes = MDAD.HUD.setAnimalDodge, {}
+    MDAD.HUD.setAnimalDodge = function(v)
+        writes[#writes + 1] = v
+        return realSet(v)
+    end
+    local ap = panel.animalButton
+    local function green() return ap.textColor.g - ap.textColor.r > 0.15 end -- 灰（muted）g 也略高於 r
+    check(ap.visible and ap.title == "ANIMAL ON" and ap.enable == true and green()
+        and ap.tooltip == "ANIMAL TIP LV LARGE",
+        "animal-dodge pill shows the large-animal default as on (green) and names the level")
+    click(ap)
+    check(MDAD.HUD.animalDodge() == 1 and animalOption:getValue() == 1 and writes[1] == 1
+        and player._md.MDADHudAnimalLast == 2 and ap.title == "ANIMAL OFF" and not green()
+        and ap.tooltip == "ANIMAL TIP LV OFF",
+        "clicking an on animal pill remembers the level and turns dodging off through the setter")
+    checkEq(optionSaveCalls, 1, "animal-dodge pill persists ModOptions immediately")
+    click(ap)
+    check(MDAD.HUD.animalDodge() == 2 and writes[2] == 2 and ap.title == "ANIMAL ON",
+        "clicking an off animal pill restores the remembered large-animal level")
+    animalOption:setValue(3) -- ESC／MiniMap 改成所有動物
+    panel:refresh(nowMs)
+    check(ap.title == "ANIMAL ON" and green() and ap.tooltip == "ANIMAL TIP LV ALL",
+        "an ESC change to all animals shows on the pill at the next refresh")
+    click(ap)
+    check(MDAD.HUD.animalDodge() == 1 and player._md.MDADHudAnimalLast == 3,
+        "turning off from all animals remembers all animals")
+    click(ap)
+    check(MDAD.HUD.animalDodge() == 3 and writes[4] == 3 and #writes == 4,
+        "turning back on restores all animals, never a hard-coded level")
+    player._md.MDADHudAnimalLast = "junk"
+    animalOption:setValue(1)
+    panel:refresh(nowMs)
+    click(ap)
+    checkEq(MDAD.HUD.animalDodge(), 2, "a corrupt remembered level falls back to large animals")
+    MDAD.HUD.setAnimalDodge = realSet
+    player._md.MDADHudAnimalLast = nil
+    panel:refresh(nowMs)
+    optionSaveCalls = 0
+end
 
 click(panel.themeButton)
 check(panel._style == 2
@@ -773,7 +857,7 @@ check(panel._wingR == true and panel._wingL == false
     and player._md.MDADHudWingR == true and player._md.MDADHudWingL == nil
     and panel._wingRightW < openRightW and panel._wingLeftW == openLeftW
     and not panel.gearButtons[1].visible and not panel.volumeSlider.visible
-    and not panel.autoButton.visible
+    and not panel.autoButton.visible and not panel.animalButton.visible
     and panel.actionButton.visible,
     "folding the right wing keeps the left one resident and persists per side")
 click(panel.wingButton)
@@ -1147,7 +1231,8 @@ do
     check(rows[8][2] == "25/" .. texts.UI_MinidoracatAutoDrive_HUDStatusSlow_zombie and rows[8][3] == rows[6][3],
         "obstacle/zombie factor shows its speed and category as a slowdown (" .. tostring(rows[8][2]) .. ")")
     -- 動物／玩家擋路的 cap 理由碼各自歸類，不落到 other
-    for _, case in ipairs({ { "animal-stop", "animal" }, { "animal-crawl", "animal" }, { "player-stop", "player" } }) do
+    for _, case in ipairs({ { "animal-stop", "animal" }, { "animal-crawl", "animal" }, { "animal-gentle", "animal" },
+            { "player-stop", "player" } }) do
         info[8], info[9] = 25, case[1]
         panel:refresh(t0 + 4520)
         checkEq(panel._pinRows[8][2], "25/" .. texts["UI_MinidoracatAutoDrive_HUDStatusSlow_" .. case[2]],
@@ -1980,6 +2065,7 @@ do
                 label .. ": trip action stays reachable inside the panel")
             check(panel.actionButton.title == "TRIP CONTINUE",
                 label .. ": trip action keeps its waiting-phase meaning")
+            checkPolicyPills(panel, label)
             if panel._tripText then
                 local right = panel._tripTextX
                     + textManager:MeasureStringX(UIFont.Small, panel._tripText)
@@ -2643,8 +2729,10 @@ check(iconPanel.themeButton.image and iconPanel.themeButton.image.path:find("hud
     and iconPanel.zombieButton.image.path:find("hud_zombie.png", 1, true)
     and iconPanel.corpseButton.image.path:find("hud_skull.png", 1, true)
     and iconPanel.autoButton.image.path:find("hud_detour.png", 1, true)
-    and iconPanel.autoButton.width == iconPanel.autoButton.height and iconPanel.autoButton.title == "",
-    "icons present: glyphs replace titles (palette / chevron / speaker / zombie / skull / detour)")
+    and iconPanel.autoButton.width == iconPanel.autoButton.height and iconPanel.autoButton.title == ""
+    and iconPanel.animalButton.image.path:find("hud_animal.png", 1, true)
+    and iconPanel.animalButton.width == iconPanel.animalButton.height and iconPanel.animalButton.title == "",
+    "icons present: glyphs replace titles (palette / chevron / speaker / zombie / skull / detour / paw)")
 check(iconPanel.voiceButton.textureColor.g > 0.7 and iconPanel.voiceButton.textureColor.r < 0.5,
     "voice-on glyph is tinted green (state lives in the tint, explanation in the tooltip)")
 iconPanel:setCollapsed(true)
@@ -2740,6 +2828,7 @@ do
                 local label = "CH " .. profile.name .. " " .. width .. "px theme " .. theme
                 checkEq(outside(iconPanel), 0,
                     label .. ": every visible control stays inside the panel")
+                checkPolicyPills(iconPanel, label)
                 check(iconPanel.actionButton.visible and iconPanel.collapseButton.visible,
                     label .. ": the main action and the fold entry never degrade away")
                 local hb = iconPanel.homeButton

@@ -518,7 +518,7 @@ local function gateWillOpen(state, vehicle, objs, nObj)
     return false, no
 end
 
--- 不會替這台車開的 Knox Pass 門格（1005d；gateWillOpen 帶 why、中央帶內）：這格照舊整格硬物（關門處理不變），
+-- 不會替這台車開的 Knox Pass 門格（1005e；gateWillOpen 帶 why、中央帶內）：這格照舊整格硬物（關門處理不變），
 -- 只記本輪最近一格的弧長／世界格心／原因，給 Driver 提示玩家（Drive.gateNote phase no）。
 local function gateNoCell(state, wx, wy, why)
     if state.wGateNoS == nil or state.curS < state.wGateNoS then
@@ -1462,7 +1462,7 @@ function MDADSensor.newState()
         wGateS = nil, wGateX = nil, wGateY = nil, wGateHard = false,
         gateS = nil, gateX = nil, gateY = nil, gateHard = false,
         gateNearM = nil, gateLatchX = nil, gateLatchY = nil,
-        -- Knox Pass 不會替這台車開的門（gateNoCell，1005d）：本輪最近一格的弧長／世界格心／API 原因代碼
+        -- Knox Pass 不會替這台車開的門（gateNoCell，1005e）：本輪最近一格的弧長／世界格心／API 原因代碼
         wGateNoS = nil, wGateNoX = nil, wGateNoY = nil, wGateNoWhy = nil,
         gateNoS = nil, gateNoX = nil, gateNoY = nil, gateNoWhy = nil,
         wSumS = 0,
