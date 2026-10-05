@@ -129,6 +129,40 @@ for k = 3, #cs4.pts - 3, 2 do
 end
 check(maxCurve < math.rad(20), string.format("連續小折點的改寫線無 ≥20° 折點（最大 %.1f°）", math.deg(maxCurve)))
 
+-- ③e 大半徑不得讓掛車比最小可行半徑更切內（1006 E2E semi-corner：#6 取最大半徑後 Dixie 14m→8m 直角 R 6→12，
+--    牽引車走大弧＝弧中點往彎內移，掛車車身出路 0.07→0.71m，撞上彎內角 0.8m 外的路邊物）。幾何取 E2E 實測
+--    SemiTruck＋貨櫃（tow attach L2 7.99、trailLen 12.38、hitchZ −2.23、halfW 1.16；牽引車 halfW 0.95、halfL 3.41）。
+--    違規證明：planCorner 拿掉「cut ≤ baseCut＋CUT_TOL」＝兩項紅。
+local GS = { L2 = 7.994, rear = 12.377 - 2.233, hw = 1.16, front = 3.41 * 2, thw = 0.95 }
+local function cutOf(cc, p)
+    local ramp = (p.a > 0 or p.b ~= 0) and T.RAMP_MAX or T.RAMP_MIN
+    local n, xs, ys = T._candidate(cc, p.a, p.b, p.R, ramp, p.approach, p.exitLen)
+    local _, _, _, cut = T._simulate(cc, xs, ys, n, GS)
+    return cut
+end
+local function baseOf(cc, p)
+    for R = T.R_MIN, 60, 2 do
+        local q = { a = p.a, b = p.b, R = R, approach = p.approach, exitLen = p.exitLen }
+        local ramp = (p.a > 0 or p.b ~= 0) and T.RAMP_MAX or T.RAMP_MIN
+        local n, xs, ys = T._candidate(cc, p.a, p.b, R, ramp, p.approach, p.exitLen)
+        if n > 3 and T._simulate(cc, xs, ys, n, GS) then return q end
+    end
+end
+for _, cc in ipairs({
+    { "Dixie 14m→8m 直角", T.cornerOf(10592, 9600, 10592, 9627, 10642, 9627, 14, 8), 0.2 },
+    { "Fallas 90° 接 72°（第二彎）", T.cornerOf(5244.6, 11176.8, 5249.5, 11167, 5230, 11147.5, 7, 7), nil },
+}) do
+    local p = T.planCorner(cc[2], GS)
+    local cut, base = p and cutOf(cc[2], p), p and baseOf(cc[2], p)
+    local baseCut = base and cutOf(cc[2], base)
+    check(p and base and cut <= baseCut + T.CUT_TOL + 1e-9,
+        string.format("%s：掛車出路不比最小可行半徑多（R=%s 出路 %.2f／R=%s 出路 %.2f）", cc[1],
+            tostring(p and p.R), cut or -1, tostring(base and base.R), baseCut or -1))
+    if cc[3] then
+        check(cut and cut <= cc[3], string.format("%s：掛車出路 ≤%.1fm（實測 %.2f）", cc[1], cc[3], cut or -1))
+    end
+end
+
 -- ④ 倒車回正：牽引車航向變化率＝steer（正＝航向增加），掛車 θ2' = v/L2·sin(θ1-θ2)，v<0。
 local function reverseRun(control)
     local th1, th2, v, dt = 0.2, 0, -1.5, 0.05
