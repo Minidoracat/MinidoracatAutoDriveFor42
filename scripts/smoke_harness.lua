@@ -18830,6 +18830,16 @@ drive.scenarioVisibilityTiming()
 --   (kp-off)    API 不在／丟錯／回 false：與舊制相同（遠處就是硬物、判堵、可視前緣不截、沒有 gate 事件）。
 --   (kp-other)  API 只認 Knox Pass 的門：同一扇門沒標記＝照舊硬物判堵；標記了＝遠處只截前緣（正對照）。
 -- 違規證明（temp/vp）：gateCell 恆回 false（拿掉退回）＝(kp-closed) 紅；gateWillOpen 恆回 true（拿掉 API 判斷）＝(kp-off)／(kp-other) 紅。
+-- 1005e 提示（Drive.gateWarn／gateShut；頭上提示＋Toast＋語音 gate＋telemetry gate no／shut）：
+--   (kv-no)      API v3 回 false,"NotRegistered"：判堵同舊制；提示一次、文字帶 whyText、同步 Toast、語音 gate 蓋掉同幀 blocked；
+--                console 一行；倒車再開回去不重複。
+--   (kv-plain)   一般門回 false 不帶 why：不提示。(kp-off) 也驗 VERSION 2／不在／丟錯不提示；(kp-far) 抵達前打開不提示。
+--   (kv-side)    不會開的門只在帶外：照開過、不提示。
+--   (kv-generic) whyText 出錯、或 VERSION 2 卻帶 why：AutoDrive 通用句。
+--   (kv-shut)    會開的門一直不開：停住、等一輪停住 GATE_SHUT_MS 後才開始的掃描仍關著，恰好一次「沒有打開」。
+--   (kv-late)    停住 2 秒後才開：不提示。
+-- 違規證明（temp/vp_1005d.py）：拿掉去重、拿掉「停住才提示」、GATE_SHUT_MS 改 0、不接 why、沒 why 也當不會開、不帶帶內條件、
+-- 不呼叫 whyText、不看 VERSION、提示前移到 replan 之前……逐條紅。
 function drive.scenarioKnoxGate()
     scenario("Knox Pass 大門：會開的門遠處不判堵不減速、一直不開仍停在門前並退回關門處理、API 不在或否認＝舊制")
     local oldWorld, oldGeo, oldSandbox, oldVeh, oldGet =
@@ -18865,6 +18875,40 @@ function drive.scenarioKnoxGate()
         if apiMode == "tagged" then return obj._knox == true end
         return apiMode == "yes"
     end }
+    -- 1005e 提示（Drive.gateWarn）：Halo／Toast／語音／翻譯參數接成可數的樁，情境尾還原。getText 帶 %1 時回「鍵|參數」。
+    local oldHalo, oldVoice, oldToast, oldGetText, oldDebug =
+        HaloTextHelper, MDAD.Voice, MDADDiagnostics.toast, getText, drive.debug
+    local toasts = {}
+    HaloTextHelper = {
+        addBadText = function(p, text) halos[#halos + 1] = { player = p, text = text, kind = "bad" } end,
+        addGoodText = function(p, text) halos[#halos + 1] = { player = p, text = text, kind = "good" } end,
+        addText = function() end }
+    MDAD.Voice = { play = function(event) drive.voiceLog[#drive.voiceLog + 1] = event return true end }
+    MDADDiagnostics.toast = function(text) toasts[#toasts + 1] = text end
+    getText = function(k, a) if a ~= nil then return k .. "|" .. tostring(a) end return k end
+    local KEY_NO, KEY_NOG, KEY_SHUT = "UI_MinidoracatAutoDrive_KnoxGateNo",
+        "UI_MinidoracatAutoDrive_KnoxGateNoGeneric", "UI_MinidoracatAutoDrive_KnoxGateShut"
+    noteReason(KEY_NO) noteReason(KEY_NOG) noteReason(KEY_SHUT) -- 末尾情境逐一驗四語翻譯
+    -- h0 之後的 Knox 提示則數（key nil＝三種都算；key 帶 %1 時比對「鍵|」前綴）
+    local function warnN(h0, key)
+        local n = 0
+        for i = h0 + 1, #halos do
+            local t = halos[i].text
+            if type(t) == "string" then
+                if key == nil then
+                    if t:find("_KnoxGate", 1, true) then n = n + 1 end
+                elseif t == key or t:sub(1, #key + 1) == key .. "|" then
+                    n = n + 1
+                end
+            end
+        end
+        return n
+    end
+    local function gateVoices(v0)
+        local n = 0
+        for i = v0 + 1, #drive.voiceLog do if drive.voiceLog[i] == "gate" then n = n + 1 end end
+        return n
+    end
     local st
     local function world(gate, tagged)
         drive.fillWorld(-12, 420, -9, 9)
@@ -18949,6 +18993,7 @@ function drive.scenarioKnoxGate()
     -- (kp-far)
     apiMode = "yes"
     world(true)
+    local fh0, fv0 = 0, #drive.voiceLog -- arm（driveReset）會清 halos：提示一律從 0 數；語音紀錄不清，從呼叫前數
     local far = run(G - D0, 52, 12)
     local farEv = gateEv("far")
     checkTrue(far.openedAt ~= nil and not far.blocked and not far.dodge and far.fb == 0,
@@ -18962,6 +19007,8 @@ function drive.scenarioKnoxGate()
     checkTrue(farEv ~= nil and farEv.d > 52 and farEv.speed > 60 and gateEv("hard") == nil,
         "(kp-far) 記 gate far（d=" .. tostring(farEv and farEv.d) .. " speed=" .. tostring(farEv and farEv.speed)
         .. "）、沒有 hard")
+    checkTrue(warnN(fh0) == 0 and gateVoices(fv0) == 0 and gateEv("no") == nil and gateEv("shut") == nil,
+        "(kp-far) 門在抵達前打開：沒有任何 Knox 提示與 gate 語音（提示 " .. warnN(fh0) .. "、語音 " .. gateVoices(fv0) .. "）")
 
     -- (kp-closed)
     world(true)
@@ -19004,6 +19051,7 @@ function drive.scenarioKnoxGate()
         apiMode, apiCalls = mode, 0
         KnoxPassAPI = mode ~= "absent" and api or nil
         world(true)
+        local oh0, ov0 = 0, #drive.voiceLog
         arm(G - D0)
         drive.scanRound(true)
         local sen = st.sensor
@@ -19015,6 +19063,10 @@ function drive.scenarioKnoxGate()
                 and (mode == "absent") == (apiCalls == 0),
             "(kp-off) " .. mode .. "：照舊硬物判堵、不截前緣（hardN=" .. got.hardN .. " end=" .. tostring(got.scanEndS)
             .. " blocked=" .. tostring(got.blocked) .. " gate=" .. tostring(got.gate) .. " calls=" .. apiCalls .. "）")
+        -- VERSION 2（不帶 why）／不在／丟錯：沒有不會開的提示（1005e）
+        for _ = 1, 50 do advance(0.02) end
+        checkTrue(warnN(oh0) == 0 and gateVoices(ov0) == 0 and st.sensor.gateNoX == nil and #events == 0,
+            "(kp-off) " .. mode .. "：不提示（提示 " .. warnN(oh0) .. "、gate 語音 " .. gateVoices(ov0) .. "）")
     end
 
     -- (kp-other)：API 只認標記的門
@@ -19037,8 +19089,172 @@ function drive.scenarioKnoxGate()
         "(kp-other) 正對照：標記的門遠處只截前緣、帶內不當硬物（gateHard=" .. tostring(st.sensor.gateHard) .. " end="
         .. tostring(st.sensor.scanEndS) .. " hardN=" .. st.sensor.hardN .. " 只剩帶外=" .. tostring(outer) .. "）")
 
+    -- 1005e 提示（Drive.gateWarn／gateShut）：API v3 回 false,"NotRegistered"（標記的門）／false（沒標記）。
+    local whyMode, whyArg = "ok", nil
+    local WHY_TEXT = "這台車的感應盒沒有登記這扇門。"
+    local api3 = { VERSION = 3,
+        willOpenFor = function(_, obj)
+            apiCalls = apiCalls + 1
+            if obj._knox then return false, "NotRegistered" end
+            return false
+        end,
+        whyText = function(why)
+            whyArg = why
+            if whyMode == "throw" then error("why-fail") end
+            return WHY_TEXT
+        end }
+    -- (kv-no) 不會替這台車開：判堵行為同舊制；本輪就提示一次（文字帶 whyText、Toast 同字、語音 gate 蓋掉同幀的 blocked）、
+    -- telemetry gate phase=no why=NotRegistered detail=api、Debug console 一行；session 欄位可讀。
+    KnoxPassAPI, apiCalls = api3, 0
+    world(true, true)
+    local h0, v0, t0 = 0, #drive.voiceLog, #toasts
+    drive.debug = true
+    drive.logs = {}
+    arm(G - D0)
+    drive.scanRound(true)
+    drive.debug = oldDebug
+    local noEv = gateEv("no")
+    local text = halos[#halos] and halos[#halos].text
+    local logged = false
+    for _, line in ipairs(drive.logs) do
+        if line:find("knox gate no why=NotRegistered", 1, true) and line:find(WHY_TEXT, 1, true) then logged = true end
+    end
+    checkTrue(st.blocked == true and st.sensor.hardN == base.hardN and st.sensor.gateX == nil and st.sensor.gateNoWhy == "NotRegistered",
+        "(kv-no) 不會開的門照舊硬物判堵（hardN=" .. st.sensor.hardN .. "／舊制 " .. base.hardN .. " blocked=" .. tostring(st.blocked)
+        .. " gateNoWhy=" .. tostring(st.sensor.gateNoWhy) .. "）")
+    local toastN = 0
+    for i = t0 + 1, #toasts do if toasts[i] == text then toastN = toastN + 1 end end
+    checkTrue(warnN(h0, KEY_NO) == 1 and warnN(h0) == 1 and text == KEY_NO .. "|" .. WHY_TEXT and whyArg == "NotRegistered"
+            and toastN == 1 and halos[#halos].kind == "bad",
+        "(kv-no) 提示一次、文字帶 whyText、同步 Toast（text=" .. tostring(text) .. " toast " .. toastN .. " 則）")
+    checkTrue(gateVoices(v0) == 1 and drive.lastVoice() == "gate" and drive.voiceLog[#drive.voiceLog - 1] == "blocked",
+        "(kv-no) 語音 gate 一次、排在同幀 blocked 之後（" .. tostring(drive.voiceLog[#drive.voiceLog - 1]) .. "→"
+        .. tostring(drive.lastVoice()) .. "）")
+    checkTrue(noEv ~= nil and noEv.why == "NotRegistered" and noEv.detail == "api" and noEv.d > 50 and logged
+            and st.gateWarnPhase == "no" and st.gateWarnWhy == "NotRegistered" and st.gateWarnText == text,
+        "(kv-no) telemetry gate no why=NotRegistered detail=api、console 一行、session gateWarn* 可讀（ev why="
+        .. tostring(noEv and noEv.why) .. " detail=" .. tostring(noEv and noEv.detail) .. " log=" .. tostring(logged) .. "）")
+    -- 開到門前停住、倒車退回再開回去（同 kp-closed）：同一扇門一直看得到，但不再提示
+    for _ = 1, 300 do if MDAD.Drive.isActive(0) then advance(0.02) end end
+    dveh._x, dveh._speed = dveh._x - 15, 0
+    MDADSensor.reset(st.sensor)
+    local reseen = false
+    for _ = 1, 400 do
+        if not MDAD.Drive.isActive(0) then break end
+        advance(0.02)
+        if st.sensor.gateNoX ~= nil then reseen = true end
+    end
+    local nNo = 0
+    for i = 1, #events do if events[i].phase == "no" then nNo = nNo + 1 end end
+    checkTrue(reseen and warnN(h0) == 1 and gateVoices(v0) == 1 and nNo == 1,
+        "(kv-no) 同一扇門再經過不重複（再看到=" .. tostring(reseen) .. " 提示 " .. warnN(h0) .. " 語音 " .. gateVoices(v0)
+        .. " no 事件 " .. nNo .. "）")
+
+    -- (kv-plain) 一般門回 false 不帶 why：不提示（行為同舊制）
+    world(true, false)
+    h0, v0 = 0, #drive.voiceLog
+    arm(G - D0)
+    drive.scanRound(true)
+    for _ = 1, 50 do advance(0.02) end
+    checkTrue(st.blocked == true and st.sensor.gateNoX == nil and warnN(h0) == 0 and gateVoices(v0) == 0 and gateEv("no") == nil,
+        "(kv-plain) 一般門不帶 why：判堵、不提示（提示 " .. warnN(h0) .. " 語音 " .. gateVoices(v0) .. "）")
+
+    -- (kv-side) 不會開的 Knox 門只在帶外（路旁的側門）：不擋線、不提示
+    drive.fillWorld(-12, 420, -9, 9)
+    drive.putRoad(-12, 420, -8, 8)
+    for _, y in ipairs({ -9, -8, -7, -6, -5, -4, 4, 5, 6, 7, 8, 9 }) do
+        drive.putGate(G, y, false, false)
+        local objs = drive.world[G * 100000 + y]._objs
+        objs[#objs]._knox = true
+    end
+    apiCalls = 0
+    h0, v0 = 0, #drive.voiceLog
+    local side = run(G - D0, nil, 6)
+    checkTrue(apiCalls > 0 and side.x > G and warnN(h0) == 0 and gateVoices(v0) == 0 and gateEv("no") == nil,
+        "(kv-side) 帶外的不會開門：照開過、不提示（calls=" .. apiCalls .. " x=" .. string.format("%.1f", side.x)
+        .. " 提示 " .. warnN(h0) .. "）")
+
+    -- (kv-generic) whyText 出錯／API VERSION 2 卻帶 why：AutoDrive 自己的通用句（detail=generic）
+    for _, case in ipairs({ { "throw", 3 }, { "ok", 2 } }) do
+        whyMode, api3.VERSION = case[1], case[2]
+        world(true, true)
+        h0, v0 = 0, #drive.voiceLog
+        arm(G - D0)
+        drive.scanRound(true)
+        local ev = gateEv("no")
+        checkTrue(warnN(h0) == 1 and halos[#halos].text == KEY_NOG and gateVoices(v0) == 1
+                and ev ~= nil and ev.detail == "generic" and ev.why == "NotRegistered",
+            "(kv-generic) whyText=" .. case[1] .. " VERSION=" .. case[2] .. "：通用句（text=" .. tostring(halos[#halos].text)
+            .. " detail=" .. tostring(ev and ev.detail) .. " 提示 " .. warnN(h0) .. " 語音 " .. gateVoices(v0) .. "）")
+    end
+    whyMode, api3.VERSION = "ok", 3
+
+    -- (kv-shut) 預告會開、門一直不開：停在停止線前、停住 GATE_SHUT_MS 後才開始的一輪仍看到門關著＝提示一次（通用句、不帶原因）
+    KnoxPassAPI, apiMode = api, "yes"
+    local SHUT_MS = MDAD.Drive.debugTune().GATE_SHUT_MS
+    local function approach(openAfterStopMs, maxS)
+        world(true)
+        arm(G - D0)
+        local r = { h0 = #halos, v0 = #drive.voiceLog, stopAt = nil, warnAt = nil, warnSpeed = nil, openedAt = nil }
+        for _ = 1, math.floor(maxS / 0.02) do
+            if not MDAD.Drive.isActive(0) then break end
+            if r.stopAt and openAfterStopMs and r.openedAt == nil and nowMs - r.stopAt >= openAfterStopMs then
+                setOpen(true)
+                r.openedAt = nowMs
+            end
+            advance(0.02)
+            if r.stopAt == nil and st.blocked and dveh._speed == 0 then r.stopAt = nowMs end
+            if r.warnAt == nil and warnN(r.h0) > 0 then r.warnAt, r.warnSpeed = nowMs, dveh._speed end
+            if r.openedAt and dveh._x > G + 10 then break end
+        end
+        r.x = dveh._x
+        return r
+    end
+    local sh = approach(nil, 14)
+    local shutEv = gateEv("shut")
+    checkTrue(sh.stopAt ~= nil and sh.warnAt ~= nil and sh.warnSpeed == 0 and sh.warnAt - sh.stopAt >= SHUT_MS
+            and warnN(sh.h0, KEY_SHUT) == 1 and warnN(sh.h0) == 1,
+        "(kv-shut) 停住後恰好一次「沒有打開」（停住→提示 " .. tostring(sh.warnAt and sh.stopAt and sh.warnAt - sh.stopAt)
+        .. " ms、提示時車速 " .. tostring(sh.warnSpeed) .. "、提示 " .. warnN(sh.h0) .. "）")
+    checkTrue(gateVoices(sh.v0) == 1 and shutEv ~= nil and shutEv.why == nil and shutEv.ms >= SHUT_MS
+            and st.gateWarnPhase == "shut" and st.gateWarnWhy == nil,
+        "(kv-shut) 語音 gate 一次、telemetry gate shut（ms=" .. tostring(shutEv and shutEv.ms) .. "）、session gateWarnPhase=shut")
+
+    -- (kv-late) 停住 GATE_SHUT_MS−200ms 才開（伺服器延遲）：不提示。開門前開始的那一輪在 GATE_SHUT_MS 時仍是關著的快照，
+    -- 所以門檻比的是「輪的開始時間」不是現在時間。（開門後通不通過不在這裡驗：harness 車退不動，blocked-retry 會先交還。）
+    local late = approach(SHUT_MS - 200, 14)
+    checkTrue(late.stopAt ~= nil and late.openedAt ~= nil and warnN(late.h0) == 0 and gateVoices(late.v0) == 0
+            and gateEv("shut") == nil,
+        "(kv-late) 停住快滿門檻才開的門：不提示（停住→開門 " .. tostring(late.openedAt and late.stopAt
+            and late.openedAt - late.stopAt) .. " ms、提示 " .. warnN(late.h0) .. "）")
+
+    -- (kv-other) 停住的原因不是那扇門：門先閂住（退回硬物），再在門前 15m 擺一整排硬物、車退回去重來——停在那排前，
+    -- 判堵錨離門 >8m，就算門還關著也不提示「沒有打開」。
+    world(true)
+    arm(G - D0)
+    local h1, v1 = 0, #drive.voiceLog
+    for _ = 1, 600 do
+        if st.sensor.gateHard ~= false and st.sensor.gateX ~= nil then break end
+        advance(0.02)
+    end
+    local latchedFirst = st.sensor.gateHard ~= false and st.sensor.gateX ~= nil and warnN(h1) == 0
+    for y = -9, 9 do drive.putSolid(G - 15, y, "kv_box") end
+    dveh._x, dveh._speed = G - 45, 0
+    MDADSensor.reset(st.sensor)
+    local stopped2, sawLatch = false, false
+    for _ = 1, 500 do
+        if not MDAD.Drive.isActive(0) then break end
+        advance(0.02)
+        if st.blocked and dveh._speed == 0 then stopped2 = true end
+        if st.sensor.gateHard == "latch" then sawLatch = true end
+    end
+    checkTrue(latchedFirst and stopped2 and sawLatch and dveh._x < G - 15 and warnN(h1) == 0 and gateVoices(v1) == 0,
+        "(kv-other) 停在門前別的硬物前（門已閂住、仍關著）：不提示（閂住=" .. tostring(latchedFirst) .. " 停住="
+        .. tostring(stopped2) .. " latch=" .. tostring(sawLatch) .. " 提示 " .. warnN(h1) .. "）")
+
     MDAD.Drive.stop(0, nil)
     KnoxPassAPI, MDADDiagnostics.event, MDADDiagnostics.sample = oldKnox, oldEvent, oldSample
+    HaloTextHelper, MDAD.Voice, MDADDiagnostics.toast, getText, drive.debug = oldHalo, oldVoice, oldToast, oldGetText, oldDebug
     drive.frameMs(wasMs)
     MDAD.HUD.perceptionDistance, MDAD.HUD.zombieDodge = oldPerception, oldZ
     MDAD.Drive.setGear(0, oldGear)

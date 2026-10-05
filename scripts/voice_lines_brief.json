@@ -70,6 +70,11 @@
     "text": "[casual] 先绕去这里，再回原来的行程。"
   },
   {
+    "id": "gate_zh",
+    "language": "zh",
+    "text": "[casual] 前面的大门打不开耶。"
+  },
+  {
     "id": "start_en",
     "language": "en",
     "text": "[cheerful] Alright, let's go. I've got this!"
@@ -140,6 +145,11 @@
     "text": "[casual] Quick stop here first, then back to the trip."
   },
   {
+    "id": "gate_en",
+    "language": "en",
+    "text": "[casual] The gate ahead won't open."
+  },
+  {
     "id": "start_ja",
     "language": "ja",
     "text": "[cheerful] よし、出発しよう。まかせて！"
@@ -208,5 +218,10 @@
     "id": "priority_ja",
     "language": "ja",
     "text": "[casual] さきにこっちによって、そのあと元の予定にもどるね。"
+  },
+  {
+    "id": "gate_ja",
+    "language": "ja",
+    "text": "[casual] 前のゲート、開かないみたい。"
   }
 ]

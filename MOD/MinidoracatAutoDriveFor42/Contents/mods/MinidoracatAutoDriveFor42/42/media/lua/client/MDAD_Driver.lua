@@ -380,6 +380,10 @@ TUNE.BLOCK_APPROACH_HARD_MARGIN = 10 -- blocked 接近包絡的一秒鎖輪只�
 --（一般 1–2 輪）：判堵在車到停止線之前就成立，停點與寬帶武裝照舊落在停止線。下限（停住時）＝停止線＋halfL，
 -- 遠於可視帽讓車停下的位置（前緣－halfL－2－爬行段 ≈ halfL＋6），車不會停在「門沒開、也沒判堵」的地方。
 TUNE.GATE_NEAR_LEAD_S = 1.0
+-- Knox Pass 會開的門一直不開的提示（1005e，Drive.gateShut）：車停在因這扇門判堵的停止線前，要等到一輪「停住此時長後
+-- 才開始」的掃描仍看到門關著才提示。涵蓋伺服器開門延遲（Knox Pass 掃描 250ms、開不了 3 秒後重試）與停點寬帶輪
+--（約 1.1 秒）；要短於 BLOCK_RETRY_MS 減一輪，提示才會在 blocked-retry 倒車前出來。
+TUNE.GATE_SHUT_MS = 3000
 TUNE.WAIT_TIMEOUT_MS = 15000   -- 停等總上限：紅字請玩家接手（2026-09-01 20s→15s）
 TUNE.BLOCK_RETRY_MS = 5000     -- blocked 停等此時長仍無縫→主動倒退重掃換視角找路
 TUNE.BLOCK_STEEP_RETRY_MS = 500 -- 全滅含大側移 steep（跑道不夠＝靜態幾何）：停穩即倒車，不等 5 秒
@@ -869,11 +873,12 @@ TUNE.DEBUG_MS = 1000           -- 跟線診斷的最小間隔（毫秒）
 TUNE.DEG_PER_RAD = 180 / 3.14159265358979
 
 -- HaloTextHelper.addBadText／addGoodText 用例：ISVehiclePartMenu.lua:252、ISReadABook.lua:95
--- 每則頭上提示同步右上 Toast（MDADDiagnostics.toast；診斷模組缺席即只有 Halo）。
-local function haloBad(playerObj, key)
-    local text = getText(key)
+-- 每則頭上提示同步右上 Toast（MDADDiagnostics.toast；診斷模組缺席即只有 Halo）。arg＝翻譯 %1（選填）；回顯示的文字。
+local function haloBad(playerObj, key, arg)
+    local text = arg ~= nil and getText(key, arg) or getText(key)
     HaloTextHelper.addBadText(playerObj, text)
     if MDADDiagnostics and MDADDiagnostics.toast then MDADDiagnostics.toast(text, "bad") end
+    return text
 end
 
 local function haloGood(playerObj, key)
@@ -8983,8 +8988,13 @@ end
 -- Knox Pass 大門（1005c，Sensor gateCell）的 telemetry：本輪快照有會替這台車開的關門時記 `gate` 事件——
 -- phase far＝遠處、只當可視前緣；hard＝退回關門處理（why near＝車已接近、latch＝這扇門先前退回過）。
 -- d＝車心到門格世界距離、speed＝車速、need＝本輪接近判距、x/y＝門格。同一扇門（8m 內）每個相位只記一次。
+-- 1005e：本輪中央帶內有 Knox Pass 不會替這台車開的門（Sensor gateNoCell）＝提示玩家（Drive.gateWarn phase no）。
+-- 在 replan 之後呼叫：同一幀的 blocked 語音先播、這句接著蓋掉它（比較具體）。
 function Drive.gateNote(s, playerNum, vehicle, speedKmh)
     local sen = s.sensor
+    if sen.gateNoX ~= nil then
+        Drive.gateWarn(s, playerNum, vehicle, sen.gateNoX, sen.gateNoY, "no", sen.gateNoWhy, speedKmh)
+    end
     local gx, gy = sen.gateX, sen.gateY
     if gx == nil then return end
     local phase = sen.gateHard and "hard" or "far"
@@ -9000,6 +9010,58 @@ function Drive.gateNote(s, playerNum, vehicle, speedKmh)
     if getDebug() then
         print(string.format("%spn=%d knox gate %s why=%s d=%.1f speed=%.1f need=%.1f at %.1f,%.1f",
             LOG, playerNum, phase, tostring(why), d, speedKmh or -1, sen.gateNearM or -1, gx, gy))
+    end
+end
+
+-- Knox Pass 大門提示（1005e）：頭上提示＋右上 Toast＋語音 gate；同一 session 同一扇門（8m 內）只提示一次，兩種共用一格去重。
+-- phase no＝不會替這台車開（文字帶 KnoxPassAPI.whyText(why)；VERSION<3、函式不在、出錯或回空時用通用句，detail 記
+-- api／generic）；shut＝預告會開、車已因它停在門前而門仍關著（原因在伺服器端，不帶）。記 `gate` 事件（why＝API 代碼，
+-- ms＝shut 的停住時長）。E2E 讀 session 的 gateWarnPhase／gateWarnWhy／gateWarnText／gateWarnX／gateWarnY。
+function Drive.gateWarn(s, playerNum, vehicle, gx, gy, phase, why, speedKmh, ms)
+    local lx, ly = s.gateWarnX, s.gateWarnY
+    if lx ~= nil and (gx - lx) * (gx - lx) + (gy - ly) * (gy - ly) <= 64 then return end
+    s.gateWarnX, s.gateWarnY, s.gateWarnPhase, s.gateWarnWhy = gx, gy, phase, why
+    local key, arg, detail = "UI_MinidoracatAutoDrive_KnoxGateShut", nil, nil
+    if phase == "no" then
+        local api = KnoxPassAPI
+        if type(api) == "table" and type(api.VERSION) == "number" and api.VERSION >= 3
+                and type(api.whyText) == "function" then
+            local ok, text = pcall(api.whyText, why)
+            if ok and type(text) == "string" and text ~= "" then arg = text end
+        end
+        key = arg and "UI_MinidoracatAutoDrive_KnoxGateNo" or "UI_MinidoracatAutoDrive_KnoxGateNoGeneric"
+        detail = arg and "api" or "generic"
+    end
+    local playerObj = getSpecificPlayer(playerNum)
+    s.gateWarnText = playerObj and haloBad(playerObj, key, arg) or nil
+    voice("gate", playerNum)
+    local dx, dy = gx - vehicle:getX(), gy - vehicle:getY()
+    local d = math.sqrt(dx * dx + dy * dy)
+    diagEvent(s, playerNum, "gate", { phase = phase, why = why, d = d, speed = speedKmh, ms = ms, detail = detail,
+        x = gx, y = gy })
+    if getDebug() then
+        print(string.format("%spn=%d knox gate %s why=%s d=%.1f speed=%.1f ms=%s detail=%s at %.1f,%.1f text=%s",
+            LOG, playerNum, phase, tostring(why), d, speedKmh or -1, tostring(ms), tostring(detail), gx, gy,
+            tostring(s.gateWarnText)))
+    end
+end
+
+-- Knox Pass 會開的門一直不開（1005e，每幀）：stopped＝停在判堵停止線前（blockedStop）且幾乎不動。判堵錨在本輪最近那扇
+-- 會開的門 8m 內、門已退回硬物（gateHard）時起算；之後要有一輪在停住 TUNE.GATE_SHUT_MS 後才開始的掃描仍看到門關著，
+-- 才提示 shut。門在接近途中或停下後打開：Sensor 不再回報這扇門（closedDoor 為假），條件斷掉、重新起算。
+function Drive.gateShut(s, playerNum, vehicle, now, speedKmh, stopped)
+    local sen = s.sensor
+    local gx, gy, bx, by = nil, nil, s.blockHitX, s.blockHitY
+    if stopped and type(sen) == "table" and sen.gateHard then gx, gy = sen.gateX, sen.gateY end
+    if not (gx ~= nil and finite(bx) and finite(by) and (bx - gx) * (bx - gx) + (by - gy) * (by - gy) <= 64) then
+        s.gateShutSince = nil
+        return
+    end
+    local since = s.gateShutSince
+    if since == nil then
+        s.gateShutSince = now
+    elseif (sen.roundStartedAt or 0) - since >= TUNE.GATE_SHUT_MS then
+        Drive.gateWarn(s, playerNum, vehicle, gx, gy, "shut", nil, speedKmh, now - since)
     end
 end
 
@@ -11301,7 +11363,6 @@ local function stepFollow(s, vehicle, playerNum, now)
                 s.residentBias = nb -- 常駐行駛線（鏈式停留解鏈判定用）
                 Drive.mergeRelay(s, now) -- 伺服器轉送的遠方行進車接到本輪快照尾端（MP）
                 Drive.trafficScan(s, now, speedKmh) -- 會車／跟車：本輪快照判讀（速度帽每幀在下方套）
-                Drive.gateNote(s, playerNum, vehicle, speedKmh) -- Knox Pass 會開的門：gate 事件（Sensor gateCell）
                 if s.dodging or s.returnActive or s.laneChained then
                     nb = laneBiasOf(s)
                     s.zombieLaneCap = -1
@@ -11365,6 +11426,7 @@ local function stepFollow(s, vehicle, playerNum, now)
                 end
                 -- 寬帶判過一輪：最寬那級判完（不論結果）這次脫困嘗試的倒車／改道才可以動；仍堵且還能加寬就先升級（Drive.wideJudge）
                 if s.sensor.wideDone then Drive.wideJudge(s, playerNum) end
+                Drive.gateNote(s, playerNum, vehicle, speedKmh) -- Knox Pass 大門：gate 事件與不會開的提示（Sensor gateCell／gateNoCell）
                 -- 承諾只覆蓋到offD；已知下一台在窗外也要先留出停車與重新選縫的距離。
                 s.dodgeNextStopS = nil
                 s.dodgeNextX, s.dodgeNextY, s.dodgeNextR = nil, nil, nil
@@ -11995,6 +12057,7 @@ local function stepFollow(s, vehicle, playerNum, now)
 
         local avProgress = speedKmh
         if avProgress < 0 then avProgress = -avProgress end
+        Drive.gateShut(s, playerNum, vehicle, now, speedKmh, blockedStop and avProgress < 1) -- Knox Pass 會開的門一直不開
         if s.returnCapacityFault and s.returnHold and avProgress < 1 then
             postAction = "return-fault"
         end
