@@ -90,6 +90,45 @@ local gentle = { pts = { -60, 0, 0, 0, 60, 10 }, segWidth = { 8, 8 }, segSurface
 local gs = T.shape(gentle, tow, G.thw, G.front)
 check(#gs.pts == 6, "小於門檻的折角原樣保留")
 
+-- ③b 可行的走法取最大半徑，不取最小的 R=4（GitHub #6：StepVan＋原版掛車連 28° 寬彎都排成 R=4 圓弧，剖面
+--    sqrt(aLat·4) 壓到 12 km/h 地板；玩家路線離線剖面 27 個轉角全是 12.0）。另驗切點不超過臂長份額。
+--    違規證明：planCorner 改回 R 由 4 往上取第一個可行＝紅；拿掉臂長份額判斷＝短段直角紅。
+local GV = { L2 = 1.79, rear = 2.67, hw = 0.57, front = 4.24, thw = 0.81 } -- StepVan＋Base.Trailer（腳本×1.82）
+local wide = T.planCorner(T.cornerOf(6737, 6700, 6737, 6663, 6754, 6630, 8, 8), GV)
+check(wide and wide.R >= 20, "28° 寬彎 8m 路取大半徑: R=" .. tostring(wide and wide.R))
+local right = T.planCorner(T.cornerOf(-60, 0, 0, 0, 0, 60, 8, 8), GV)
+check(right and right.R > 4 and right.a == 0 and right.b == 0,
+    "8m 路直角：不外拉、半徑大於 4: R=" .. tostring(right and right.R))
+-- 圓弧切點不得超過相鄰段長一半（下一個轉角的圓弧從另一半開始，重疊＝撤點折線）
+local shortC = T.cornerOf(-12, 0, 0, 0, 0, 12, 8, 8)
+local sp = T.planCorner(shortC, GV)
+check(sp and sp.sIn >= -0.5 * shortC.lenIn - 1e-6 and sp.sOut <= 0.5 * shortC.lenOut + 1e-6,
+    "12m 短段直角：切點在段長一半內: sIn=" .. tostring(sp and sp.sIn) .. " sOut=" .. tostring(sp and sp.sOut))
+-- ③c 20–25° 小彎也改寫（改寫線點數超過 Follower 圓角容量，留著的 ≥20° 頂點會被標 fallback 爬行 12 km/h），
+--    但規劃不出來時照舊保留頂點、不列不可過（舊制 <25° 本來就照開，不得因此新增 TrailerCorner）。
+--    違規證明：TURN_MIN_RAD 改回 25°＝第一項紅；拿掉 BLOCK_MIN_RAD 判斷＝第二項紅。
+local k22 = { pts = { -60, 0, 0, 0, 60 * math.cos(math.rad(22)), 60 * math.sin(math.rad(22)) },
+    segWidth = { 8, 8 }, segSurface = { "paved", "paved" } }
+check(#T.shape(k22, tow, G.thw, G.front).pts > 6, "22° 小彎改寫成圓弧")
+local k22n = { pts = k22.pts, segWidth = { 2, 2 }, segSurface = { "paved", "paved" } }
+local s22n = T.shape(k22n, tow, G.thw, G.front)
+check(#s22n.towBlocked == 0 and #s22n.pts == 6, "規劃不出來的 22° 小彎保留頂點、不列不可過")
+-- ③d 連續小折點組成的彎（玩家路線 (6973.5,7540)→(7003,7569)，四個 18–25° 折點、臂長 13–16m）：前一個圓弧畫到
+--    下一臂的 SEG_SHARE，下一個轉角不外靠的進入段若從臂長 0.9 處起算＝撤點把弧截成 40°+ 折點。
+--    違規證明：shape 的 a＝0 進入段改回 0.9 臂長起留＝紅（42°）。
+local curvePts = { 6950, 7529, 6973.5, 7540, 6986, 7546, 6997.5, 7557, 7003, 7569, 7003, 7585, 7003, 7650 }
+local cs4 = T.shape({ pts = curvePts, segWidth = { 8, 8, 8, 8, 8, 8 },
+    segSurface = { "paved", "paved", "paved", "paved", "paved", "paved" } },
+    { L2 = GV.L2, hitchToRear = GV.rear, halfW = GV.hw }, GV.thw, GV.front)
+local maxCurve = 0
+for k = 3, #cs4.pts - 3, 2 do
+    local ax, ay = cs4.pts[k] - cs4.pts[k - 2], cs4.pts[k + 1] - cs4.pts[k - 1]
+    local bx, by = cs4.pts[k + 2] - cs4.pts[k], cs4.pts[k + 3] - cs4.pts[k + 1]
+    local turn = math.abs(math.atan2(ax * by - ay * bx, ax * bx + ay * by))
+    if turn > maxCurve then maxCurve = turn end
+end
+check(maxCurve < math.rad(20), string.format("連續小折點的改寫線無 ≥20° 折點（最大 %.1f°）", math.deg(maxCurve)))
+
 -- ④ 倒車回正：牽引車航向變化率＝steer（正＝航向增加），掛車 θ2' = v/L2·sin(θ1-θ2)，v<0。
 local function reverseRun(control)
     local th1, th2, v, dt = 0.2, 0, -1.5, 0.05
