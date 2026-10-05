@@ -11242,6 +11242,83 @@ end
 drive.clearCell(12, 0)
 MDAD.Drive.stop(0, nil)
 
+-- ⑪b 調頭探測被擋的大弧（1006，使用者決定 2B）：正式服 1002y～1005j 被擋大弧 23 次撞 4 次（8.6–13.9 km/h）、
+--    耦力原地轉 9 次 0 撞。目標壓到 UTURN_BLOCKED_KMH 3（引擎 delta ≤1 m/s 不 crash，BaseVehicle.java:3420-3443；
+--    regulator 整數化，3.5 會送 4＝1.11 m/s）、側推夾到 UTURN_BLOCKED_STEER 0.5（滿舵 5 一推就 vt 2–3 m/s 側滑）；
+--    淨空照舊 crawl（溫和 4／快速 12）＋耦力；探測結果進 uturn probe 事件（console 原本只有 debug print）。
+function drive.scenarioUturnBlockedArc()
+    scenario("調頭探測被擋：大弧壓速＋側推夾限；淨空照舊耦力；探測結果進遙測")
+    local savedTelemetry, savedMode = MDAD.HUD.telemetryEnabled, drive.uturnMode
+    local savedStart, savedEvent, savedSample, savedStop =
+        MDADDiagnostics.start, MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.stop
+    local probes = {}
+    MDAD.HUD.telemetryEnabled = function() return true end
+    MDADDiagnostics.start = function() return true end
+    MDADDiagnostics.sample = function() return true end
+    MDADDiagnostics.stop = function() return true end
+    MDADDiagnostics.event = function(_, name, a)
+        if name == "uturn" and type(a) == "table" and a.phase == "probe" then probes[#probes + 1] = a end
+    end
+    for _, mode in ipairs({ "gentle", "fast" }) do
+        local tag = "(" .. mode .. ") "
+        drive.uturnMode = mode
+        checkTrue(armDrive(), tag .. "啟動")
+        dveh._x, dveh._y, dveh._speed = 10, 0, 0
+        setHeading(dveh, math.pi)
+        drive.putSolid(12, 0, "harness_arc_wall") -- 格心 (12.5,0.5) 距車 2.5m：探測半徑內
+        driveTick(dp, dveh)
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        drive.scanRound()                         -- Follower 的 12 成為基準，壓速斷言才有鑑別力
+        dveh._speed = 3                           -- 前進 3 km/h：STEER_FULL 縮放只剩 ×0.75，滿舵 5 仍推 3.75
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        local st = MDAD.Drive.debugSession(0)
+        checkTrue(st.fstate.rotating == true and st.rotProbeClear == false,
+            tag .. "前置：調頭姿態、探測被擋（rotProbeClear=" .. tostring(st.rotProbeClear) .. "）")
+        checkTrue((dveh._regSpeed or 99) <= 3,
+            tag .. "被擋大弧：定速目標 ≤ UTURN_BLOCKED_KMH 3（實得 " .. tostring(dveh._regSpeed) .. "）")
+        local ast = st.fstate.appliedSteer
+        checkTrue(type(ast) == "number" and ast ~= 0 and ast <= 0.5 and ast >= -0.5,
+            tag .. "被擋大弧：施出的側推 |steer| ≤ UTURN_BLOCKED_STEER 0.5 且仍在轉（實得 " .. tostring(ast) .. "）")
+        local last = probes[#probes]
+        checkTrue(last ~= nil and last.probe == "obstructed" and last.why == mode,
+            tag .. "探測結果進遙測：uturn probe=obstructed（實得 " .. tostring(last and last.probe) .. "）")
+        local n0 = #probes
+        drive.clearCell(12, 0)
+        nowMs = nowMs + 600                       -- 跨過 500ms 探測節流
+        driveTick(dp, dveh)                       -- 重探：淨空
+        driveTick(dp, dveh)
+        -- 快速檔 crawl 12 ≥ 這裡 Follower 的 11＝等於不夾；只證明沒被壓到被擋的 3
+        checkTrue(dveh._regSpeed == (mode == "fast" and 11 or 4),
+            tag .. "淨空：照舊 crawl（溫和 4；快速不夾＝Follower 11），不套被擋壓速（實得 " .. tostring(dveh._regSpeed) .. "）")
+        checkNil(st.fstate.appliedSteer, tag .. "淨空：耦力原地轉（不經側推夾限）")
+        checkTrue(#probes == n0 + 1 and probes[#probes].probe == "clear",
+            tag .. "探測翻成淨空才再記一筆（實得 " .. tostring(#probes - n0) .. " 筆）")
+        nowMs = nowMs + 600
+        driveTick(dp, dveh)
+        checkEq(#probes, n0 + 1, tag .. "結果不變不重記（500ms 重探不灌事件）")
+        -- 下一次調頭（同一 session、500ms 節流內）：立即重探並再記首探——上一次的結果不沿用。
+        -- 車頭對回路線要跑一輪掃描（+300ms），否則舊快照裡的牆讓這幀走 blocked、到不了調頭收尾
+        setHeading(dveh, 0)
+        driveReset(dveh)
+        drive.scanRound(true)
+        checkNil(st.uturn, tag .. "車頭對回路線：這次調頭收尾")
+        local n1 = #probes
+        setHeading(dveh, math.pi)
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        checkTrue(#probes == n1 + 1 and probes[#probes].probe == "clear",
+            tag .. "下一次調頭立即重探並記首探（實得 " .. tostring(#probes - n1) .. " 筆）")
+        MDAD.Drive.stop(0, nil)
+    end
+    drive.uturnMode = savedMode
+    MDAD.HUD.telemetryEnabled = savedTelemetry
+    MDADDiagnostics.start, MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.stop =
+        savedStart, savedEvent, savedSample, savedStop
+end
+drive.scenarioUturnBlockedArc()
+
 -- =====================================================================
 -- 情境二十八b：immutable DODGE 承諾語意＋停等豁免（2026-08-28 對抗審紅測試）
 -- =====================================================================
@@ -17288,6 +17365,9 @@ scenario("調頭＋blocked：遠處不倒車、近處才退、額度用盡不空
     st = reversedStart("(rot-stall)")
     checkTrue(st.fstate.rotating == true and st.rotProbeClear == false,
         "(rot-stall) 前置：調頭姿態、車周探測被擋（rotProbeClear=" .. tostring(st.rotProbeClear) .. "）")
+    -- 1006 被擋大弧壓到 UTURN_BLOCKED_KMH 3：轉不動時下面的 rotate-stall 倒車照樣要觸發（Drive.rotateStall 只要目標 > 0）
+    checkTrue((dveh._regSpeed or 99) <= 3,
+        "(rot-stall) 被擋大弧壓速中（定速目標實得 " .. tostring(dveh._regSpeed) .. "）")
     checkEq(st.mode, "follow", "(rot-stall) 剛開始不倒車")
     nowMs = nowMs + 1500
     driveTick(dp, dveh)
