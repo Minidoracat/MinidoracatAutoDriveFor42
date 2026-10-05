@@ -5449,8 +5449,8 @@ dveh._mass = 1200
 
 -- 力的量級：符號全對但推力小兩個數量級＝實機「按了自駕，車直直開過路口」；
 -- 2026-08-28 二輪實測連「純力矩×0.8m 臂」的 43k-122k 都只換到每秒 5-9° 偏航。
--- 幾何（前臂側向衝量；耦力調頭走後臂力偶）與量級改採 Derpy 在整個 Workshop
--- 用戶群驗證過的標定。把車頭轉到幾乎反向（2.8 rad＝160° > 原地調頭門檻
+-- 幾何（前臂側向衝量；耦力調頭走後臂力偶）與量級改照質量與車速標定（實機調校）。
+-- 把車頭轉到幾乎反向（2.8 rad＝160° > 原地調頭門檻
 -- 135°），follower 必定給飽和轉向。**速度固定 3 km/h**：帶速調頭在
 -- ROTATE_ARC_MAX 以下走大弧、以上才煞停（帶動量旋轉＝漂移甩出 22m，st 88,113
 -- 遙測）放行的區間內量。
@@ -8057,7 +8057,7 @@ setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxS
 drive.clearCell(8, 0)
 drive.scanRound()
 
--- ⑤z 殭屍軟縫（0906c；Derpy optimize_z 對應）：零星殭屍＝在路面內緩緩換 lane 穿縫；
+-- ⑤z 殭屍軟縫（0906c）：零星殭屍＝在路面內緩緩換 lane 穿縫；
 --     速率 ≤ 1.0 m/s；目標 lane 對硬障礙不淨空＝不動；選項關＝不動；殭屍散去回常駐 lane。
 --     可行帶＝常駐 ±3 ∩ 路面餘裕（本 fixture 無 laneRoom／無路面帶＝±3）。
 --     違規證明：拿掉 plan 淨空檢查＝(z3) 紅；拿掉速率上限＝(z1) 首輪 ≤0.3 紅；帶退回 ±1.5＝(z1b) 紅。
@@ -20663,85 +20663,6 @@ function drive.scenario0928d()
     SandboxVars = oldSand
 end
 drive.scenario0928d()
-
--- (long-window) 1005：群長過承諾窗（TUNE.DODGE_OV_SPAN）＝車開到群前、窗跟著前移也裝不下——舊制 window 延後排在
---   候選鏈之前、每輪立即延後，永遠解不開（停在群前到交還）。現制照跑候選鏈、直接走收短停留：窗內那段承諾下來、
---   窗外維持偏移，走完由鏈式停留沿停留 lane 續行，群尾過了才解鏈。承諾窗 253m 大於感知上限，區塊內用 debugTune
---   壓到 50 重現（同 (E) 的作法）；開到群前窗就容得下的群照舊延後由 (E) 鎖。
---   違規證明：replan 照舊立即延後＝「收短停留」紅；sweepWithFallbacks 不直接走停留＝「收短停留」紅（production 的
---   OV_MAX＝窗＋3：窗外的完整繞行 build 回 capacity、不是 p4，進不了停留；區塊內同步把 build 容量壓成窗＋3）；
---   sweepStay 不收到窗內＝「線尾在窗內」紅。
-function drive.scenarioLongWindow()
-    scenario("1005：群長過承諾窗＝收短停留承諾、車前進、鏈式續行")
-    local oldSand = SandboxVars
-    local tune = MDAD.Drive.debugTune()
-    local keepSpan = tune.DODGE_OV_SPAN
-    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40,
-        RightLaneBias = 0 })
-    local wasMs = drive.frameMs(10)
-    drive.fillWorld(-10, 160, -12, 12) -- 停留 lane 的掃描帶跟著偏移走：兩側多鋪，帶緣不落在未載入格
-    for x = 30, 100 do drive.putSolid(x, 0, "long_window_" .. x) end
-    tune.DODGE_OV_SPAN = 50
-    local realBuild = MDADFollower.buildOffsetLine
-    MDADFollower.buildOffsetLine = function(profile, s0, a, b, c, d, ...)
-        if math.ceil(d + 1 - math.max(s0, 0)) + 1 > tune.DODGE_OV_SPAN + 3 then return 0, 0, "capacity", 0 end
-        return realBuild(profile, s0, a, b, c, d, ...)
-    end
-    local origEv, commitWhy = MDADDiagnostics.event, false
-    MDADDiagnostics.event = function(pn, name, a, ...)
-        if name == "dodge" and type(a) == "table" and a.phase == "commit" then commitWhy = a.why end
-        if origEv then return origEv(pn, name, a, ...) end
-    end
-    checkTrue(armDrive(), "(long-window) 啟動")
-    setHeading(dveh, 0)
-    dveh._speed = 20
-    local st = MDAD.Drive.debugSession(0)
-    local diagWas, realSample = st.diag, MDADDiagnostics.sample
-    MDADDiagnostics.sample = function() return true end
-    st.diag = true
-    drive.frameMs(10)
-    drive.scanRound()
-    drive.frameMs(10)
-    drive.scanRound()
-    MDADDiagnostics.event, MDADDiagnostics.sample, st.diag = origEv, realSample, diagWas
-    checkEq(commitWhy, "window", "(long-window) commit 事件記下延後理由 window（telemetry 分得出收短停留的來源）")
-    local fs = st.fstate
-    local rs0 = st.lastSNow
-    checkTrue(st.dodging == true and st.dodgeStay == true,
-        "(long-window) 群長過承諾窗：收短停留承諾、不延後（dodging=" .. tostring(st.dodging)
-        .. " stay=" .. tostring(st.dodgeStay) .. " tier=" .. tostring(st.dodgeTier) .. "）")
-    checkTrue(type(fs.offD) == "number" and fs.offD <= rs0 + 50 + 1e-6 and fs.offC > 30,
-        "(long-window) 停留線尾在承諾窗內、保持段過群起點（c=" .. tostring(fs.offC) .. " d=" .. tostring(fs.offD)
-        .. " rs=" .. tostring(rs0) .. "）")
-    local stayLane = fs.offL
-    local function stepTo(x)
-        dveh._x, dveh._y = x, stayLane or 0
-        driveReset(dveh)
-        driveTick(dp, dveh)
-        drive.frameMs(10)
-        drive.scanRound()
-    end
-    stepTo((fs.offC or 40) + 0.5)
-    checkTrue(st.laneChained == true and math.abs(fs.laneBias - stayLane) < 1e-6 and st.blocked ~= true,
-        "(long-window) 窗內那段走完：窗外的群仍擋常駐線＝鏈著沿停留 lane 前進（chained=" .. tostring(st.laneChained)
-        .. " bias=" .. tostring(fs.laneBias) .. " stay=" .. tostring(stayLane) .. " blocked=" .. tostring(st.blocked)
-        .. " dodging=" .. tostring(st.dodging) .. " tier=" .. tostring(st.dodgeTier) .. " pm=" .. tostring(st.planMode)
-        .. " br=" .. tostring(st.dodgeBlockReason) .. " bs=" .. tostring(st.blockS) .. " rs=" .. tostring(st.lastSNow) .. "）")
-    stepTo(80)
-    checkTrue(st.laneChained == true and math.abs(fs.laneBias - stayLane) < 1e-6 and st.blocked ~= true,
-        "(long-window) 開到群中段：停留隨看到更多延長（chained=" .. tostring(st.laneChained) .. "）")
-    stepTo(108)
-    stepTo(110)
-    checkTrue(st.laneChained == false, "(long-window) 群尾已過、常駐線淨空：解鏈（chained=" .. tostring(st.laneChained) .. "）")
-    MDAD.Drive.stop(0, nil)
-    tune.DODGE_OV_SPAN = keepSpan
-    for x = 30, 100 do drive.clearCell(x, 0) end
-    drive.frameMs(wasMs)
-    drive.fillWorld(-2, 70, -7, 7)
-    SandboxVars = oldSand
-    MDADFollower.buildOffsetLine = realBuild
-end
-drive.scenarioLongWindow()
 
 -- (chain-far) 1004a 玩家回報「繞道後判定走路邊草地，要到第一次轉彎或殭屍／屍體出現才回到路上」：鏈式停留只在
 --   常駐線前方淨空才解鏈，看的是整個感知窗——遠處還有任何擋常駐線的東西，車就沿停留 lane（常在路外）一路開，

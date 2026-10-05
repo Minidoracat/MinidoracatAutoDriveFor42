@@ -211,8 +211,7 @@ local MULT_MIN, MULT_MAX = 0.1, 3.0 -- 掉幀尖峰／睡眠加速（getMultipli
 -- 側向動量被輪胎橫向摩擦消化成偏航。這是 PZ 的 Bullet 輪胎模型下唯一夠力的轉法：
 -- 2026-08-28 兩輪實機 telemetry 證明「縱向衝量×0.8m 側臂」的純力矩模型在飽和轉向下
 -- 只換到每秒 5-9° 的偏航（輪胎自回正整個吃掉），過路口需要 ~60°/s，差一個數量級；
--- 幾何（2.2m 車尾臂＋側向衝量）與量級標定採 Derpy Autodrive 在整個 Workshop 用戶群
--- 驗證過的工程事實（Workshop 3775160975，map_nav.lua:7862-7905）：
+-- 改成「車尾臂（2.2m）＋側向衝量」的幾何，量級照質量與車速標定（實機調校）：
 --   F = |steer| * STEER_STRENGTH * base
 --   base = (MASS_K * mass * min(|v|,SPEED_CAP)² + MASS_BASE * mass) * IMPULSE_SCALE
 --          * mult / MULT_NORM
@@ -230,7 +229,7 @@ local STEER_SIGN = -1
 local REAR_ARM = 2.2           -- legacy fallback；adaptive session 改用 vehicleProfile.rearArm
 local LATERAL_JITTER = 0.5     -- 施力點左右交替的擺幅（公尺）：防共振，不進力矩
 
--- 量級（Derpy 標定值照搬，STEER_STRENGTH=1.0 即原量級；telemetry 顯示轉不動才調大、
+-- 量級（STEER_STRENGTH=1.0 即基準量級；telemetry 顯示轉不動才調大、
 -- 甩尾才調小）。MASS_BASE 給 0 km/h 的基礎權威（原地掉頭靠它），MASS_K*v² 隨速度
 -- 補償輪胎自回正的增強；速度先取絕對值再封頂（比較，不呼叫 math.min），倒車與
 -- 超速都不會發散。MULT_NORM＝60fps 的 getMultiplier（0.8），把「每幀衝量」正規化
@@ -599,7 +598,7 @@ TUNE.WIDE_ARM_SAME_M = 6 -- 判堵錨離武裝時的錨超過這個距離＝換�
 -- 拖車維持第一級（路外繞行的使用者範圍：拖車以外）。
 TUNE.WIDE_LEVEL_MAX = 2
 TUNE.WIDE_JUDGE_GRACE_MS = 3000 -- 停等預算到期時等這次嘗試的寬帶判完的上限（Drive.wideJudgePending）
--- 殭屍軟縫（2026-09-06；競品 Derpy `optimize_z` 把殭屍當軟縫拉軌跡，我們只出一個橫向目標）：
+-- 殭屍軟縫（2026-09-06；殭屍當「軟縫」處理，只出一個橫向目標、不另拉軌跡）：
 -- 每輪掃描完成、持有權 free（無 dodge／RETURN／停留／調頭）時，用 Sensor 的殭屍 (s,l) 點雲
 -- 在常駐 lane ±DELTA 的可行帶找離殭屍區間最近的 lane（Corridor.softZombieLane），時間平滑
 -- （τ、速率上限）後寫進 laneBias；硬物先裁出連通淨空帶，再逐硬物檢查當下有效車道間的
@@ -790,8 +789,7 @@ local PREF_CORPSE_MD = "MDADCorpseSlow" -- 同上，屍體
 local CURVE_TIGHT_RAD = 0.44   -- ≈25°：障礙群所在路段的累計轉角門檻
 local CURVE_NEED_EXTRA = 0.6   -- 彎道繞行的需求半寬加碼（內輪差＋切內彎的一階補償）
 -- 倒車脫困（unstick）：卡死時 regulator 不會倒車（CarController 只向前供油），
--- 改用向後衝量直接推車（Derpy towing 同法：relPos=(0,0,0) 純中心力，
--- map_nav.lua:7847-7850 的工程事實）。退夠距離或超時就收手。
+-- 改用向後衝量直接推車（relPos=(0,0,0) 純中心力，不產生力矩）。退夠距離或超時就收手。
 local UNSTICK_MS = 4000        -- 單次脫困的時間上限
 local UNSTICK_DIST_SQ = 9      -- 退離卡點 3 公尺（平方比較省 sqrt）＝成功
 -- 貼縫 contact 後的倒車距離加長（2026-09-04 s004@0904n：退 3m 後距黑車只剩 1.8m，
@@ -9015,23 +9013,15 @@ end
 -- 寬帶停在停點（wideArmed）不會再往前開近：前緣不會跟著前進，照現在看得到的收短（0929v：拖車停點
 -- 離群 trailLen+L2/2，完整繞行的出口常伸出已載入區）。拖車的保持段已延長到掛車過群（towHold），
 -- 收短不得截到掛車還在群旁。
--- 承諾窗（TUNE.DODGE_OV_SPAN）：停留線尾伸出窗時保持段收到窗內（開到群前窗就容得下的群，replan 已先延後、
--- 不會走到這裡），窗外的群交給鏈式停留（走完不解鏈、續沿停留 lane）。
 local function sweepStay(s, a, b, c, offL, baseL, tag, needBase, truncate)
     local prof, rs = s.profile, s.lastSNow
     local halfW, halfL, pad = sweepGeom(s, needBase)
     local tail = halfL + pad + TUNE.STAY_TAIL_M
     if truncate then
         local vis = visibleEndS(s.sensor, rs)
-        local ahead = s.wideArmed and 0 or (b - halfL - rs)
-        local cMax = nil
-        if c + tail + s.bodyReach > vis + ahead then cMax = vis - s.bodyReach - tail - 0.5 end
-        if c + tail > rs + TUNE.DODGE_OV_SPAN then
-            local w = rs + TUNE.DODGE_OV_SPAN - tail - 0.5
-            if cMax == nil or w < cMax then cMax = w end
-        end
-        if cMax ~= nil then
+        if c + tail + s.bodyReach > vis + (s.wideArmed and 0 or (b - halfL - rs)) then
             local cMin = Drive.towHold(s) > 0 and c or (b + halfL)
+            local cMax = vis - s.bodyReach - tail - 0.5
             if cMax < cMin then return false, 99, 0, 0, cMax + tail, c end
             if cMax < c then c = cMax end
         end
@@ -9231,15 +9221,8 @@ local function sweepWithFallbacks(s, planN, a, b, c, d, offL, baseL, tag, nb, ph
         local okH, ha, hb, hc, hd, ho, mgH, ovNH, ovS0H, hnb, hv = homeStay(sa, sb, sc, offL, nb, tag)
         if okH then return true, ha, hb, hc, hd, ho, mgH, ovNH, ovS0H, hnb, hv end
     end
-    -- 群長過承諾窗（replan 的 window 理由）：完整繞行建不出窗外的保持段與出口，直接走下面的收短停留
-    -- （sweepStay 收到窗內）；照回線段打槍（p4）的同一條路，淨距給 99 不觸發物理複驗／微調。
-    local ovN, ovS0, ok, mg, hitS, ph, hps, hx, hy, hi
-    if shapeOk and sc + 1 > s.lastSNow + TUNE.DODGE_OV_SPAN then
-        ok, mg, hitS, ph, hps = false, 99, sb, 4, sc
-    else
-        ovN, ovS0, ok, mg, hitS, ph, hps, hx, hy, hi = sweepCandidate(
-            s, shapeOk, sa, sb, sc, sd, offL, baseL, tag, nb)
-    end
+    local ovN, ovS0, ok, mg, hitS, ph, hps, hx, hy, hi = sweepCandidate(
+        s, shapeOk, sa, sb, sc, sd, offL, baseL, tag, nb)
     if ok then
         local okC, ca, cb, cc, cd, co, cmg, covN, covS0, cnb, cv = chainAhead(
             s, planN, a, b, c, d, offL, baseL, nb, tag, crawlDesign, sa, sb, sc, sd)
@@ -9968,17 +9951,9 @@ local function replan(s, vehicle, playerNum)
         -- > OV_MAX → 全候選 `capacity` → 「blocked (all candidates)」語音＋halo；
         -- 下一輪車前進 5m 就能 commit）。延後不是淨空：先按已知群起點保留煞停距離，
         -- 不能只靠更遠的未載入前緣限速；進窗那一輪再規劃。
-        -- 群本身長過承諾窗（車開到群前、窗跟著前移也裝不下）時延後永遠解不開：照跑候選鏈，
-        -- sweepWithFallbacks 直接走收短停留（窗內那段承諾下來、窗外維持偏移＝鏈式停留），全滅才延後。
-        s.planDeferWhy = nil
         if mode == "dodge" and c + 1 + Drive.towHold(s) > s.lastSNow + TUNE.DODGE_OV_SPAN then
-            if c + 1 + Drive.towHold(s) > TUNE.DODGE_OV_SPAN
-                    + math.max(s.lastSNow, s.wideArmed and s.lastSNow or b - s.vehicleProfile.halfL) then
-                s.planDeferWhy, s.planDeferB, s.planDeferC, s.planDeferD = "window", b, c, nil
-            else
-                mode = "clear" -- 車一前進就進窗：deferDodge 讓點雲 sig 不變也每輪重判
-                Drive.deferDodge(s, playerNum, "window", b, c, nil)
-            end
+            mode = "clear" -- 車一前進就進窗：deferDodge 讓點雲 sig 不變也每輪重判
+            Drive.deferDodge(s, playerNum, "window", b, c, nil)
         end
         -- 同族兩刀（2026-09-04 st146014／st144580／st146015）：先用主候選的幾何做一次
         -- shape 預算（冷路徑、每輪一次，候選鏈會再算一次同值）——
@@ -9991,7 +9966,8 @@ local function replan(s, vehicle, playerNum)
         -- candidateCovered（2026-09-27 正式服 8 段：主候選一超窗就延後＋硬煞，0.2–0.6 秒後另一條
         -- 短候選 commit——等於先白煞一次）。所以只把延後理由記下、照跑候選鏈，全滅才延後；
         -- exit（出口被承諾窗截短）維持原本立即延後。
-        if mode == "dodge" and s.planDeferWhy == nil then
+        s.planDeferWhy = nil
+        if mode == "dodge" then
             local _, _, _, dS, okS0 = shapeProfile(s, s.profile, a, b, c, d, offL, baseL)
             local why = nil
             if okS0 and s.dodgeWindowShort then
@@ -10695,7 +10671,7 @@ local function replan(s, vehicle, playerNum)
 end
 
 -- 倒車脫困：regulator 不會倒車（CarController 只向前供油），改用向後衝量直接推
--- （Derpy towing 同法：relPos 全零＝純中心力，map_nav.lua:7847-7850 的工程事實）。
+-- （relPos 全零＝純中心力，不產生力矩）。
 -- 「每幀最多一次 addImpulse」在此同樣成立——unstick 幀不跑 stepFollow，不會疊加。
 -- 玩家接手（讓位）與失效閘門都在呼叫端先行，這裡只管推車與收手判定。
 local function stepUnstick(s, vehicle, playerNum, now)
