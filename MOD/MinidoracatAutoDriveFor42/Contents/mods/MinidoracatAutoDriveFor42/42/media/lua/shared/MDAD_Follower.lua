@@ -1485,31 +1485,61 @@ local function kinkRelease(profile, state, ji, dth, handover)
     return rel, shift, (bIn - bOut * cs) / sn, bIn
 end
 
--- 跨臂交接（投影從入彎臂 idx 跳到出彎臂 idx+1）：車在交接圓內（半徑 rel）且車頭朝出臂的前半平面。
+-- 跨臂交接（投影從入彎臂 idx 跳到出彎臂）：車在交接圓內（半徑 rel）且車頭朝出臂的前半平面。回出彎臂段號（idx+1，
+-- 或共線短樁後的真折點出臂），不成立回 false。
 -- 髮夾與 ≤90° 折點的彎內側都量到車道折點（kinkRelease handover＝true；鉗制／放行同一個基準）——中心線頂點
 -- 對彎內側的車永遠 ≥b·√2，交接圓進不去＝投影釘在入彎臂（正式服 0.17.0 clip-09）。獨立成函式是為了 control
 -- 的 local 槽數（Kahlua 190 上限）。投影每幀都問（control 的段尾延伸），遠離頂點時先粗篩、不估車道折點：
 -- 圓半徑 ≤ HAIRPIN_APEX_MAX，圓心離頂點 ≤ |shift|＋|bIn| ≤ |b|·(1＋2/sinθ)（夾過的車道偏移不超過 |b|）。
+-- 共線短樁：主 MOD 在路寬變化處插共線點，真折點前多一段短段（1006 正式服 117° 髮夾：16m 路 2.7m 短段接 8m 路）。
+-- 彎內側車道折點（頂點前 |shift|）落在短樁之前，車在入彎臂上就轉進出彎車道、永遠到不了短樁——只問 idx+1
+-- 的共線頂點＝投影釘在入彎臂、往回退，前視翻號誤進 ROTATE、四次調頭交還。所以 idx+1 是 <FILLET_MIN_RAD 的
+-- 非弧頂點時，往前跨共線頂點找 APEX_MAX＋3.8|b| 弧長內第一個真折點（同 arcLookaheadMs 放行點提前上界），
+-- idx+1 自己不成立才問它。
 local function kinkHandover(profile, state, idx, x, y, heading)
-    local px, py, i = profile.x, profile.y, idx + 1
-    local turn = wrapPi(profile.segH[i] - profile.segH[idx])
-    if turn < 0 then turn = -turn end
-    local sn, b = sin(turn), state.laneBias
-    if sn > 0.1 then
-        b = isFinite(b) and (b < 0 and -b or b) or 0
-        local reach, dx0, dy0 = HAIRPIN_APEX_MAX + b * (1 + 2 / sn), x - px[i], y - py[i]
-        if dx0 * dx0 + dy0 * dy0 > reach * reach then return false end
+    local px, py, segH, kind, ARC, n = profile.x, profile.y, profile.segH, profile.segKind, MDADDynamics.SEG_ARC, profile.n
+    local b = state.laneBias
+    b = isFinite(b) and (b < 0 and -b or b) or 0
+    local k, alt, room = idx, nil, HAIRPIN_APEX_MAX + 3.8 * b
+    while k + 1 < n and kind[k] ~= ARC and kind[k + 1] ~= ARC do
+        local t = wrapPi(segH[k + 1] - segH[k])
+        if t < 0 then t = -t end
+        if t >= MDADDynamics.FILLET_MIN_RAD then
+            if k > idx then alt = k end
+            break
+        end
+        k = k + 1
+        room = room - profile.segLen[k]
+        if room < 0 then break end
     end
-    local join, shift, _, bIn = kinkRelease(profile, state, idx, turn, true)
-    local cx, cy = px[i], py[i]
-    if shift < 0 then
-        local h = profile.segH[idx]
-        cx = cx + cos(h) * shift - sin(h) * bIn
-        cy = cy + sin(h) * shift + cos(h) * bIn
+    local j = idx
+    while j do
+        local i = j + 1
+        local turn = wrapPi(segH[i] - segH[j])
+        if turn < 0 then turn = -turn end
+        local sn, near = sin(turn), true
+        if sn > 0.1 then
+            local reach, dx0, dy0 = HAIRPIN_APEX_MAX + b * (1 + 2 / sn), x - px[i], y - py[i]
+            near = dx0 * dx0 + dy0 * dy0 <= reach * reach
+        end
+        if near then
+            local join, shift, _, bIn = kinkRelease(profile, state, j, turn, true)
+            local cx, cy = px[i], py[i]
+            if shift < 0 then
+                local h = segH[j]
+                cx = cx + cos(h) * shift - sin(h) * bIn
+                cy = cy + sin(h) * shift + cos(h) * bIn
+            end
+            local dx, dy = x - cx, y - cy
+            if dx * dx + dy * dy <= join * join
+                    and cos(heading) * (px[i + 1] - px[i]) + sin(heading) * (py[i + 1] - py[i]) > 0 then
+                return i
+            end
+        end
+        if j == alt then break end
+        j = alt
     end
-    local dx, dy = x - cx, y - cy
-    return dx * dx + dy * dy <= join * join
-        and cos(heading) * (px[i + 1] - px[i]) + sin(heading) * (py[i + 1] - py[i]) > 0
+    return false
 end
 
 -- 車在 ov 線上的投影（sNow ±(OV_BLEND+1) 內的最近點）與沿線 previewM（線長）處的切線預視點。回 q（路線弧長參數）,
@@ -1720,13 +1750,15 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         -- （髮夾入彎臂的正式服案）不延伸，前跳防護照舊。車在折點交接圓內、車頭朝出臂（kinkHandover）也照此
         -- 延伸：彎內側車道上的車永遠到不了入彎臂段尾，頂點後又緊接短段時，只有 idx+1 能交接、它的端點卻比入彎臂
         -- 遠，投影就釘在入彎臂（E2E 1004a replay：4m 首段接 90°＋兩段 0.5m，起步轉進去後 s 停在 1.5、誤進
-        -- ROTATE 三次交還）。
+        -- ROTATE 三次交還）。交接到共線短樁後的真折點時（kinkHandover 回的出臂段號），前進量量在那條出臂上。
         if idx < n - 1 then
             local ex, ey = px[idx + 1], py[idx + 1]
-            local rx, ry = x - ex, y - ey
-            if rx * (ex - px[idx]) + ry * (ey - py[idx]) > 0 or kinkHandover(profile, state, idx, x, y, heading) then
-                local along = (rx * (px[idx + 2] - ex) + ry * (py[idx + 2] - ey)) / segLen[idx + 1]
-                if along > 0 and s[idx + 1] + along + 0.5 > maxS then maxS = s[idx + 1] + along + 0.5 end
+            local ho = (x - ex) * (ex - px[idx]) + (y - ey) * (ey - py[idx]) > 0 and idx + 1
+                or kinkHandover(profile, state, idx, x, y, heading)
+            if ho then
+                ex, ey = px[ho], py[ho]
+                local along = ((x - ex) * (px[ho + 1] - ex) + (y - ey) * (py[ho + 1] - ey)) / segLen[ho]
+                if along > 0 and s[ho] + along + 0.5 > maxS then maxS = s[ho] + along + 0.5 end
             end
         end
         local reachI = MDADFollower.segIndexAt(profile, maxS)
@@ -1885,6 +1917,7 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         sTarget = kinkS
         while j > bestI and s[j] >= sTarget do j = j - 1 end
     end
+    state.sTarget = sTarget -- 前視點弧長（中心線）；Driver 只在 uturn enter 事件帶出（復盤「前視點在車後」）
     -- 承諾線在非弧折點外側（ovOuterBend）：沿線的切線預視點與車對線橫偏，給下面的 lineLat 與切線追蹤；窗外 nil、逐位元照舊
     local ovQ, ovDev = ovOuterBend(profile, state, bestI, x, y, sNow, sTarget)
     local tj = 0

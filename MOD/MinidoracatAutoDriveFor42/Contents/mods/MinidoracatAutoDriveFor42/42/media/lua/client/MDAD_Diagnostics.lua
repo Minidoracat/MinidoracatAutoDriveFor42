@@ -114,6 +114,8 @@ local EK = {
     "lvl", "avoidN",
     -- 拖車不可過轉角改道（detour phase＝towcorner）：主避讓圈半徑、路線上不可過轉角數、替代線剖面仍不可過的轉角數
     "avoidR", "towN", "towLeft",
+    -- uturn enter（1006）：Follower 前視點弧長、髮夾鉗點弧長（rs 共用上面那個鍵）
+    "sT", "kh",
 }
 
 local function logOnce(msg)

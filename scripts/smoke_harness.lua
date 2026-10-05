@@ -17385,6 +17385,12 @@ scenario("調頭＋blocked：遠處不倒車、近處才退、額度用盡不空
     stuckWorld(20)
     local st = reversedStart("(u1)")
     checkTrue(st.fstate.rotating == true, "(u1) 反向車頭＝調頭姿態")
+    -- (u1-ev) 1006：uturn enter 帶進場當幀的投影弧長 rs、前視點弧長 sT（直路無鉗點＝kh 缺）——正式服 117° 髮夾
+    --   「前視點在車後」只能離線重播才算得出。harness 車不動，進場後投影／前視不變。違規證明：payload 拿掉 sT＝紅。
+    local ue = evs["uturn:enter"] or {}
+    checkTrue(ue.rs ~= nil and ue.rs == st.fstate.projS and ue.sT ~= nil and ue.sT == st.fstate.sTarget
+        and ue.sT > ue.rs and ue.kh == nil, string.format("(u1-ev) uturn enter 帶 rs／sT（rs %s、sT %s、kh %s）",
+        tostring(ue.rs), tostring(ue.sT), tostring(ue.kh)))
     checkTrue(st.blocked == true, "(u1) 路線前方 20m 車群＝blocked（實得 " .. tostring(st.blocked) .. "）")
     for _ = 1, 8 do driveTick(dp, dveh) end
     checkEq(st.mode, "follow", "(u1) 20m 外的 blocked 不倒車（mode 實得 " .. tostring(st.mode) .. "）")

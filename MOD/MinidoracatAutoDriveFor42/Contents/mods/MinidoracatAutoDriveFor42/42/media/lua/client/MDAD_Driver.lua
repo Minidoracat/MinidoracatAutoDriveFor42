@@ -12779,8 +12779,10 @@ local function stepFollow(s, vehicle, playerNum, now)
             if rotating and not s.uturn then
                 s.uturn, s.uturnArmed = uturnProfile(), false
                 s.rotProbeClear, s.rotProbeMs = nil, 0 -- 每次調頭重探：上一次的結果不沿用（壓速／夾限／遙測都看本次）
+                -- rs／sT／kh：進場當幀的投影弧長、前視點弧長、髮夾鉗點（nil＝未鉗）——「前視點在車後」不必離線重播就看得出
                 diagEvent(s, playerNum, "uturn", {
                     phase = "enter", why = s.uturn.name, speed = speedKmh,
+                    rs = s.fstate.projS, sT = s.fstate.sTarget, kh = s.fstate.kinkHeld,
                 })
                 -- 同一處反覆調頭＝路線把車困在原地繞（0.13.1 正式服 (5180,11145) 反折點：投影釘死，
                 -- 兩名玩家 16～204 次、繞到手動接手）。UTURN_LOOP_R 內第 UTURN_LOOP_MAX 次就受困交還，
