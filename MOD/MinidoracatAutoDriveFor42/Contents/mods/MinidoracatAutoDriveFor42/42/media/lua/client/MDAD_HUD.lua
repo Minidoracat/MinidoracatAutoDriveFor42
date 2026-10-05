@@ -845,7 +845,7 @@ local SLOW_CATEGORY = {
     sensor = "road", warm = "road", state = "road", progress = "road",
     dodge = "dodge", ["dodge-defer"] = "dodge", blocked = "dodge", contact = "dodge", soft = "dodge",
     zombie = "zombie", ["zombie-lane"] = "zombie", corpse = "zombie",
-    ["animal-stop"] = "animal", ["animal-crawl"] = "animal", ["player-stop"] = "player",
+    ["animal-stop"] = "animal", ["animal-crawl"] = "animal", ["animal-gentle"] = "animal", ["player-stop"] = "player",
     moving = "traffic", traffic = "traffic", ["traffic-yield"] = "traffic",
     ["return"] = "return", ["return-unsafe"] = "return", ["return-hold"] = "return",
     ["return-capacity"] = "return", recover = "return", ["gear-reset"] = "return",

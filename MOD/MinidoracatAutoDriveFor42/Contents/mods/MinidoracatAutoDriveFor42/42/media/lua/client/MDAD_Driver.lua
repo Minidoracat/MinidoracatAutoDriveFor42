@@ -625,16 +625,27 @@ TUNE.ZOMBIE_LANE_SETTLE_M = 0.05  -- 回到常駐 lane 這麼近＝釋放
 TUNE.SOFT_HARD_JITTER_M = 0.5     -- 軟縫可行帶離硬物擋線帶緣多讓的量（hardL 取樣柱在格內跳動，見 zombieLaneOf；1002t）
 TUNE.ZOMBIE_LANE_LEAD_S = 0.3     -- 側移完成後還要留這麼多秒才到殭屍（車身追 laneBias 的落後；0925d 0.5→0.3）
 TUNE.ZOMBIE_LANE_MIN_KMH = 12     -- 縱向配合帽下限（殭屍可撞：壓到爬行仍過不去就撞，不停等）
--- 動物與車外的其他玩家（1005 soft）：併入同一次軟縫選縫（Sensor zomKind）。大型動物（ESC AnimalDodge 2/3）、
--- 小型動物（AnimalDodge 3）、其他玩家（永遠）參與選縫；碰撞模型同殭屍（引擎車撞動物也是 0.3 圓，IsoAnimal.java:466-476）。
+-- 動物與車外的其他玩家（1005 soft）：併入同一次軟縫選縫（Sensor zomKind）。動物的兩個名單（2026-10-05 使用者裁定）：
+--   ESC AnimalDodge（閃避名單，1 關／2 大型／3 全部）＝可以照巡航速度閃的動物；
+--   沙盒 AnimalSlowdown（減速名單，同分級）＝必須保護的動物：閃得過就閃，閃不過才停等。
+-- 任一名單選到就參與選縫（Drive.softJoins）；只在減速名單、不在閃避名單的（gentle，Drive.softGentle）成為威脅時，先以
+-- 接近包絡把車速降到 ANIMAL_GENTLE_KMH 再照軟縫繞過，車尾過了牠才解除（Drive.softGentleCap）。其他玩家永遠參與。
+-- 碰撞模型同殭屍（引擎車撞動物也是 0.3 圓，IsoAnimal.java:466-476）。
 TUNE.SOFT_COMFORT_M = 0.6          -- 大型動物與玩家另加的橫向舒適餘裕（佔位兩側各多這麼多；小型動物、殭屍、屍體不加）
--- 停等：沙盒 AnimalSlowdown 選到的動物（1 關／2 大型／3 全部）與其他玩家（永遠）在選定的行駛線上、軟縫清不開時，
--- 以接近包絡停在它前方 SOFT_STOP_GAP_M（Drive.softStopCap）。動物還在就等 ANIMAL_WAIT_MS，之後以 ANIMAL_CRAWL_KMH
--- 爬過（引擎 <5 km/h 車損為 0，BaseVehicle.java:5699-5705）；玩家一律停等，WAIT_TIMEOUT_MS 停等預算到期以
--- Drive.KEY_PLAYER_STOP 交還（不推人）。
+-- gentle 動物的繞行速度：軟縫側移速率＝max(ZOMBIE_LANE_RATE_MPS, 車速×RATE_PER_MPS)，15 km/h 時 1.04 m/s＝每前進 1m
+-- 側移 0.25m，跟高速時同一個比例（側移能力不因降速變差），一個車道（3m）約 12m 內做完；又高於 ZOMBIE_LANE_MIN_KMH
+-- 與 MIN_EXEC（仍是 GO，不被當成停等），碰撞速度只有巡航的一小部分。
+TUNE.ANIMAL_GENTLE_KMH = 15
+-- 停等：沙盒 AnimalSlowdown 選到的動物與其他玩家（永遠）在選定的行駛線上、軟縫清不開（含側移來不及）時，
+-- 以接近包絡停在它前方 SOFT_STOP_GAP_M（Drive.softStopCap）。動物停等另外計時、不吃共用停等預算 waitAccumMs：
+-- 停住累計 ANIMAL_WAIT_MS 後以 ANIMAL_CRAWL_KMH 爬過（引擎 <5 km/h 車損為 0，BaseVehicle.java:5699-5705）；爬行
+-- 累計 ANIMAL_CRAWL_MAX_MS 動物仍擋著（MP 動物被車推著走不一定會死）＝以 Drive.KEY_ANIMAL_STOP 交還。動物離開又回來
+-- 而車沒真的前進（WAIT_PROGRESS_M）時兩個計時都不歸零（停→放→停 也有出口）。玩家一律停等，吃共用停等預算、
+-- WAIT_TIMEOUT_MS 到期以 Drive.KEY_PLAYER_STOP 交還（不推人）。
 TUNE.SOFT_STOP_GAP_M = 3.0         -- 停在目標前（車頭到目標）的距離
-TUNE.ANIMAL_WAIT_MS = 6000         -- 動物擋線時停等多久才爬過（必須 < WAIT_TIMEOUT_MS，否則先被交還）
+TUNE.ANIMAL_WAIT_MS = 6000         -- 動物擋線時停住多久才爬過
 TUNE.ANIMAL_CRAWL_KMH = 4          -- 等待到期後的爬行速度（≤4：引擎 <5 km/h 不算車損）
+TUNE.ANIMAL_CRAWL_MAX_MS = 15000   -- 爬行累計這麼久動物仍擋著＝交還（4 km/h 約 17m：推著牠走了一段還是沒讓開）
 -- 越野旗標進 traction key 的去抖（FPS：s031 st149350-149356 彎道路緣一輪壓草一輪回鋪面，
 -- physicalOffroad 每秒翻一次 → key 1↔33 每翻一次 `dyn rebuild` 8-16ms（292 點剖面）
 -- ×8 次／6 秒＝可見 hitch）。旗標持續同值 ≥ 這麼久才進 key／priors；raw 值仍供
@@ -838,6 +849,8 @@ local KEY_TRAFFIC = { -- 會車提示（一張表：主 chunk local 槽已在上
 Drive.KEY_AREA_STOP = "UI_MinidoracatAutoDrive_AreaLoadStop"
 -- 其他玩家擋在行駛線上、停等預算 WAIT_TIMEOUT_MS 用完的交還理由（Drive.softStopCap；不推人、不改道）
 Drive.KEY_PLAYER_STOP = "UI_MinidoracatAutoDrive_PlayerBlockStop"
+-- 動物一直擋在行駛線上、爬行 ANIMAL_CRAWL_MAX_MS 仍沒讓開的交還理由（Drive.softStopCap）
+Drive.KEY_ANIMAL_STOP = "UI_MinidoracatAutoDrive_AnimalBlockStop"
 
 -- 診斷輸出（只在 getDebug() 為真時存在）。實機回報「按了關閉但車還在跑」時，唯一能
 -- 分辨「session 沒關」與「只是慣性滑行」的證據就是這幾行；跟線那行必須節流，每幀
@@ -964,7 +977,7 @@ TRIP.REASON = {
 TRIP.RELEASE = {
     [KEY_LOST] = "noroad", [KEY_ROUTE] = "noroad", [KEY_ROUTE_FAR] = "noroad",
     [KEY_STUCK] = "failed", [KEY_UNSUPPORTED] = "failed", [Drive.KEY_AREA_STOP] = "failed",
-    [Drive.KEY_PLAYER_STOP] = "failed",
+    [Drive.KEY_PLAYER_STOP] = "failed", [Drive.KEY_ANIMAL_STOP] = "failed",
 }
 -- playerNum → 開始／備路意圖（token=nil 時尚未 acquire；claim 前對車零控制輸出）
 TRIP.preps = {}
@@ -2205,6 +2218,10 @@ local function startSession(playerObj, playerNum, stage)
         softHoldMs = 0,     -- 本次停等累計 ms（停住才計）
         softHoldTick = 0, softHoldStarted = false,
         softCrawl = false,  -- 動物等待到期後的爬行中
+        softCrawlMs = 0, softCrawlTick = 0, -- 動物爬行累計（牆鐘；ANIMAL_CRAWL_MAX_MS 交還）
+        softAnimalAnchorS = nil, softAnimalCarryMs = 0, softCrawlCarry = false, -- 停→放→停 沒前進時接著算
+        softAnimalHold = false, softGiveUp = false, -- 本幀只有動物停等（不計共用預算）／爬行到上限要交還
+        softGentleS = nil, softGentleOn = false, softGentleCapKmh = -1, -- gentle 動物接近帽（Drive.softGentleCap）
         zombieKeep0 = false, -- 軟縫這次縫是貼路緣（keep 0）找到的（Drive.laneKeepOf）
         rotProbeMs = 0,     -- 下一次允許車周探測的時戳（0＝第一次調頭幀就探）
         rotProbeClear = false, -- 上次探測結果：車周淨空可原地旋轉
@@ -3654,20 +3671,34 @@ function Drive.softKindIn(kind, zOn, level)
     return zOn
 end
 
+-- 參與軟縫選縫：閃避名單（aLvl＝AnimalDodge）或減速名單（sLvl＝沙盒 AnimalSlowdown）任一選到的動物、永遠的玩家、
+-- zOn 決定的殭屍／屍體。
+function Drive.softJoins(kind, zOn, aLvl, sLvl)
+    if Drive.softKindIn(kind, zOn, aLvl) then return true end
+    return (kind == "animal" or kind == "small") and Drive.softKindIn(kind, false, sLvl)
+end
+
+-- gentle：只在減速名單、不在閃避名單的動物（不准照巡航速度閃，先降到 ANIMAL_GENTLE_KMH 再繞）
+function Drive.softGentle(kind, aLvl, sLvl)
+    return (kind == "animal" or kind == "small") and not Drive.softKindIn(kind, false, aLvl)
+        and Drive.softKindIn(kind, false, sLvl)
+end
+
 -- 有沒有參與選縫的動物／玩家（ZombieDodge 關著時軟縫仍要為牠們作用）：本輪快照，或仍有效的盲區記憶
 -- （同一 routeGen、在車前 SCAN_NEAR 內 Sensor 不再收、車尾還沒過、政策仍選到）——進盲區的行人不得在下一輪
 -- 就被當成淨空、讓軟縫釋放回常駐線（車尾過了才回線，同殭屍的盲區保持）。
 function Drive.softOthersJoin(s, sen, level)
+    local sLvl = s.animalSlow or 2
     for i = 1, sen.zomN do
         local k = sen.zomKind and sen.zomKind[i]
-        if k ~= nil and k ~= "zombie" and k ~= "corpse" and Drive.softKindIn(k, false, level) then return true end
+        if k ~= nil and k ~= "zombie" and k ~= "corpse" and Drive.softJoins(k, false, level, sLvl) then return true end
     end
     local bS, bK = s.zomBlindS, s.zomBlindK
     if bS == nil or bK == nil or s.zomBlindGen ~= s.routeGen then return false end
     local tail, near0 = s.lastSNow - s.vehicleProfile.halfL, s.lastSNow + MDADSensor.SCAN_NEAR
     for j = 1, s.zomBlindN or 0 do
         local k, zs = bK[j], bS[j]
-        if k ~= nil and k ~= "zombie" and k ~= "corpse" and Drive.softKindIn(k, false, level)
+        if k ~= nil and k ~= "zombie" and k ~= "corpse" and Drive.softJoins(k, false, level, sLvl)
                 and finite(zs) and zs >= tail and zs < near0 then return true end
     end
     return false
@@ -3764,9 +3795,9 @@ function Drive.returnZombieConflict(s, latNow, target, speedKmh)
     local aLvl, zOn = Drive.animalDodgeLevel(), Drive.zombieDodgeOn()
     for i = 1, sen.zomN do
         local zs, zl = sen.zomS[i], sen.zomL[i]
-        -- 不參與選縫的種類（閃殭屍關掉的殭屍、AnimalDodge 沒選到的動物）不算：讓位給不閃牠的軟縫沒有意義
+        -- 不參與選縫的種類（閃殭屍關掉的殭屍、兩個動物名單都沒選到的動物）不算：讓位給不閃牠的軟縫沒有意義
         if finite(zs) and finite(zl) and zs >= sFrom and zs <= sTo and sen.zomIsCorpse[i] ~= true
-                and Drive.softKindIn(sen.zomKind and sen.zomKind[i], zOn, aLvl) then
+                and Drive.softJoins(sen.zomKind and sen.zomKind[i], zOn, aLvl, s.animalSlow or 2) then
             local zlp, vl = zl, sen.zomVl and sen.zomVl[i]
             if finite(vl) and (vl > 0.2 or vl < -0.2) then
                 local t = (zs - rs - vp.halfL) / vms
@@ -3816,6 +3847,7 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
         s.zombieAvoidUntilS, s.zomBlindN = nil, 0
         s.zombiePlanWhy, s.zombieWhy = nil, nil
         s.zombieKeep0 = false
+        s.softGentleS = nil
         if cur ~= nil then
             s.zombieLane = nil
             diagEvent(s, playerNum, "zombie", { phase = "release", why = on and "owner" or "off", l = cur })
@@ -3860,6 +3892,7 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
     local blindN = s.zomBlindGen == s.routeGen and s.zomBlindN or 0
     local bS, bL, bC, bK = s.zomBlindS, s.zomBlindL, s.zomBlindC, s.zomBlindK
     local sLvl = s.animalSlow or 2 -- 沙盒 AnimalSlowdown（refreshPolicies 快取）
+    s.softGentleS = nil -- 本輪最近的 gentle 威脅弧長（Drive.softGentleCap 每幀用）
     for i = 1, sen.zomN + blindN do
         local zs, zl, corpse, vl, kind
         if i <= sen.zomN then
@@ -3871,7 +3904,7 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
             zs, zl, corpse, kind = bS[j], bL[j], bC[j], bK[j]
             if zs >= near0 then zs = nil end -- Sensor 又看得到：以快照為準
         end
-        if finite(zs) and finite(zl) and zs >= sFrom and zs <= sTo and Drive.softKindIn(kind, zOn, aLvl) then
+        if finite(zs) and finite(zl) and zs >= sFrom and zs <= sTo and Drive.softJoins(kind, zOn, aLvl, sLvl) then
             local zlp = zl
             if not corpse and finite(vl) and (vl > 0.2 or vl < -0.2) then
                 local t = (zs - rs - s.vehicleProfile.halfL) / vms
@@ -3922,6 +3955,10 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
             local crossing = gN < Rk or gC < Rk
             if gT < Rk then
                 if threatS == nil or zs < threatS then threatS, threatL = zs, zl end
+                -- gentle 動物成為威脅（同一個啟動判定）：記最近一隻，繞過前先降速（車尾過了牠才出視窗）
+                if Drive.softGentle(kind, aLvl, sLvl) and (s.softGentleS == nil or zs < s.softGentleS) then
+                    s.softGentleS = zs
+                end
             end
             if crossing and allowed and (shiftS == nil or zs < shiftS) then
                 shiftS = zs
@@ -4946,27 +4983,67 @@ function Drive.softStopScan(s, speedKmh)
     end
 end
 
+-- gentle 動物（只在減速名單、不在閃避名單；zombieLaneOf 記 s.softGentleS）成為威脅時的每幀接近帽：在車頭到牠前
+-- ZOMBIE_APPROACH_LEAD_M 降到 ANIMAL_GENTLE_KMH，再照軟縫繞過；車尾過了牠（或軟縫不再把牠當威脅）才解除。與呼叫端
+-- 目前的 sensor cap 取小後回 (cap, 理由)。減速度＝safeBrake×APPROACH_BRAKE_FRAC（Drive.visAssistForce 有 soft-gentle 帳）：
+-- 斷油滑行在重車上只有約 1 m/s²，60 km/h 起要 130m 以上才滑得到 15，軟縫視窗內來不及。
+function Drive.softGentleCap(s, playerNum, capIn, whyIn)
+    s.softGentleCapKmh = -1
+    local gs = s.softGentleS
+    local on = finite(gs) and gs >= s.lastSNow - s.vehicleProfile.halfL
+    if on ~= (s.softGentleOn == true) then
+        s.softGentleOn = on
+        diagEvent(s, playerNum, "soft", { phase = on and "gentle" or "gentle-end", why = "animal-gentle",
+            kind = "animal", s = on and gs - s.lastSNow or nil, rs = s.lastSNow, cap = TUNE.ANIMAL_GENTLE_KMH })
+        if getDebug() then
+            print(string.format("%spn=%d soft gentle %s ds=%.1f rs=%.1f cap=%d", LOG, playerNum, on and "on" or "off",
+                on and gs - s.lastSNow or -1, s.lastSNow, TUNE.ANIMAL_GENTLE_KMH))
+        end
+    end
+    if not on then return capIn, whyIn end
+    local brake = (finite(s.safeBrake) and s.safeBrake > 0) and s.safeBrake * TUNE.APPROACH_BRAKE_FRAC or 0.6
+    local cap = MDADDynamics.approachCapKmh(gs - s.lastSNow - s.vehicleProfile.halfL - TUNE.ZOMBIE_APPROACH_LEAD_M,
+        TUNE.ANIMAL_GENTLE_KMH, 0.5, brake)
+    s.softGentleCapKmh = cap
+    if capIn < 0 or cap < capIn then return cap, "animal-gentle" end
+    return capIn, whyIn
+end
+
 -- 每幀的動物／玩家停等帽：與呼叫端目前的 sensor cap（capIn／whyIn）取小後回 (cap, 理由)；合法停等時設
 -- s.followHold（stepFollow 主函式 local 槽已滿，合併在這裡做）。接近包絡停在目標前 SOFT_STOP_GAP_M
 -- （同 trafficCap 讓車的單調式；減速度＝safeBrake×APPROACH_BRAKE_FRAC，Drive.visAssistForce 有 soft-stop 帳）。
--- 低於 MIN_EXEC 就停等（WAIT：計停等預算）。動物停住累計 ANIMAL_WAIT_MS 仍在＝以 ANIMAL_CRAWL_KMH 爬過（CRAWL）；
--- 玩家一直停等，停等預算到期由 postAction wait 以 Drive.KEY_PLAYER_STOP 交還。目標離開行駛線＝立刻放行。
--- 狀態給 E2E／遙測讀：s.softHoldKind（nil／"animal"／"player"）、s.softHoldMs、s.softCrawl。
+-- 低於 MIN_EXEC 就停等（WAIT）。玩家：計共用停等預算，到期由 postAction wait 以 Drive.KEY_PLAYER_STOP 交還。
+-- 動物：另外計時、不吃共用預算（s.softAnimalHold→Drive.animalOnlyWait）——停住累計 ANIMAL_WAIT_MS 仍在＝以
+-- ANIMAL_CRAWL_KMH 爬過（CRAWL）；爬行累計 ANIMAL_CRAWL_MAX_MS 仍擋著＝s.softGiveUp（postAction animal 以
+-- Drive.KEY_ANIMAL_STOP 交還）。動物離開行駛線＝立刻放行；但從這次停等起點（s.softAnimalAnchorS）車還沒前進
+-- WAIT_PROGRESS_M 就又擋回來時，停住與爬行的累計都接著算（停→放→停 不會無限重來）。
+-- 狀態給 E2E／遙測讀：s.softHoldKind（nil／"animal"／"player"）、s.softHoldMs、s.softCrawl、s.softCrawlMs。
 function Drive.softStopCap(s, now, speedKmh, playerNum, capIn, whyIn)
-    s.softStopCapKmh = -1
+    s.softStopCapKmh, s.softAnimalHold = -1, false
     local zs, kind = s.softStopS, s.softStopKind
     if s.softHoldKind ~= nil and s.softHoldKind ~= kind then
-        if s.softHoldStarted then
+        local carry = s.softHoldKind == "animal" and finite(s.softAnimalAnchorS)
+            and s.lastSNow - s.softAnimalAnchorS < MDADDynamics.WAIT_PROGRESS_M
+        if s.softHoldStarted or s.softCrawl then
             diagEvent(s, playerNum, "soft", { phase = "end", why = kind == nil and "clear" or "kind",
-                kind = s.softHoldKind, ms = s.softHoldMs, rs = s.lastSNow })
+                kind = s.softHoldKind, ms = s.softHoldMs, rs = s.lastSNow, detail = carry and "carry" or nil })
             if getDebug() then
-                print(string.format("%spn=%d soft stop end kind=%s ms=%d rs=%.1f", LOG, playerNum,
-                    s.softHoldKind, s.softHoldMs, s.lastSNow))
+                print(string.format("%spn=%d soft stop end kind=%s ms=%d crawlMs=%d carry=%s rs=%.1f", LOG, playerNum,
+                    s.softHoldKind, s.softHoldMs, s.softCrawlMs, tostring(carry), s.lastSNow))
             end
         end
+        if carry then
+            s.softAnimalCarryMs, s.softCrawlCarry = s.softHoldMs, s.softCrawl
+        else
+            s.softAnimalCarryMs, s.softCrawlCarry, s.softCrawlMs, s.softAnimalAnchorS = 0, false, 0, nil
+        end
         s.softHoldKind, s.softHoldMs, s.softHoldTick, s.softHoldStarted, s.softCrawl = nil, 0, 0, false, false
+        s.softCrawlTick = 0
     end
     if not finite(zs) or kind == nil then return capIn, whyIn end
+    if s.softHoldKind == nil and kind == "animal" then
+        s.softHoldMs, s.softCrawl = s.softAnimalCarryMs, s.softCrawlCarry -- 同一處沒前進就接著算
+    end
     s.softHoldKind = kind
     local reason, cap, hold = kind == "player" and "player-stop" or "animal-stop", nil, false
     if s.softCrawl then
@@ -4979,12 +5056,14 @@ function Drive.softStopCap(s, now, speedKmh, playerNum, capIn, whyIn)
     if hold then
         if not s.softHoldStarted then
             s.softHoldStarted = true
+            if kind == "animal" and not finite(s.softAnimalAnchorS) then s.softAnimalAnchorS = s.lastSNow end
             -- offL＝判停用的「到目標時車身橫向」（nil＝停等目標收不下的溢出段）
             diagEvent(s, playerNum, "soft", { phase = "start", why = reason, kind = kind,
-                s = zs - s.lastSNow, l = s.softStopL, offL = s.softStopLane, rs = s.lastSNow, speed = speedKmh })
+                s = zs - s.lastSNow, l = s.softStopL, offL = s.softStopLane, rs = s.lastSNow, speed = speedKmh,
+                ms = s.softHoldMs })
             if getDebug() then
-                print(string.format("%spn=%d soft stop start kind=%s ds=%.1f l=%.2f at=%.2f v=%.1f", LOG, playerNum,
-                    kind, zs - s.lastSNow, s.softStopL or 0, s.softStopLane or 0, speedKmh or 0))
+                print(string.format("%spn=%d soft stop start kind=%s ds=%.1f l=%.2f at=%.2f v=%.1f ms=%d", LOG, playerNum,
+                    kind, zs - s.lastSNow, s.softStopL or 0, s.softStopLane or 0, speedKmh or 0, s.softHoldMs))
             end
         end
         -- 停住才計（還在煞停中不算等待）
@@ -5007,10 +5086,37 @@ function Drive.softStopCap(s, now, speedKmh, playerNum, capIn, whyIn)
     else
         s.softHoldTick = 0
     end
+    -- 爬行累計（牆鐘；動物一直擋著、被車推著走也算）：到上限＝交還，不無限爬
+    if s.softCrawl and kind == "animal" then
+        if s.softCrawlTick > 0 and now > s.softCrawlTick then s.softCrawlMs = s.softCrawlMs + (now - s.softCrawlTick) end
+        s.softCrawlTick = now
+        if s.softCrawlMs >= TUNE.ANIMAL_CRAWL_MAX_MS then s.softGiveUp = true end
+    end
     s.softStopCapKmh = cap
-    if hold then s.followHold = true end
+    if hold then
+        s.softAnimalHold = kind == "animal" and not s.followHold -- 只有動物停等（會車停等另計共用預算）
+        s.followHold = true
+    end
     if capIn < 0 or cap < capIn then return cap, reason end
     return capIn, whyIn
+end
+
+-- classifyIntent 的 blockedStop 參數（停止線、繞行延後、下一台接近、起步近物低於 MIN_EXEC）：stepFollow 與
+-- Drive.animalOnlyWait 共用同一個定義。
+function Drive.waitHoldArg(s, blockedStop)
+    return blockedStop
+        or (not s.dodging and finite(s.dodgeDeferCap) and s.dodgeDeferCap >= 0
+            and s.dodgeDeferCap < MDADDynamics.MIN_EXEC_KMH)
+        or (s.dodging and finite(s.dodgeNextCap) and s.dodgeNextCap >= 0
+            and s.dodgeNextCap < MDADDynamics.MIN_EXEC_KMH)
+        or (finite(s.startNearCap) and s.startNearCap < MDADDynamics.MIN_EXEC_KMH)
+end
+
+-- 這幀的 WAIT 只來自動物停等（沒有停止線／繞行延後／起步近物／回線待命／可視上限／會車停等）：
+-- 動物停等另外計時，不計共用停等預算 waitAccumMs（玩家照舊計）。
+function Drive.animalOnlyWait(s, blockedStop)
+    return s.softAnimalHold == true and not Drive.waitHoldArg(s, blockedStop) and s.returnHold ~= true
+        and not (finite(s.visibilityCap) and s.visibilityCap < MDADDynamics.MIN_EXEC_KMH)
 end
 
 local function jindex(obj, name)
@@ -5302,6 +5408,11 @@ function Drive.visAssistForce(s, speedKmh, mult)
     if finite(s.softStopCapKmh) and s.softStopCapKmh >= 0 and s.softStopCapKmh < cap then
         cap, amax, gain, minKmh, why = s.softStopCapKmh, TUNE.DODGE_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN,
             TUNE.VIS_ASSIST_MIN_KMH, "soft-stop"
+    end
+    -- gentle 動物接近帽（Drive.softGentleCap）：以 safeBrake 反推、到牠前降到 ANIMAL_GENTLE_KMH，同一條中線外力。
+    if finite(s.softGentleCapKmh) and s.softGentleCapKmh >= 0 and s.softGentleCapKmh < cap then
+        cap, amax, gain, minKmh, why = s.softGentleCapKmh, TUNE.DODGE_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN,
+            TUNE.VIS_ASSIST_MIN_KMH, "soft-gentle"
     end
     if speedKmh < minKmh then return 0 end
     local over = speedKmh - cap - TUNE.VIS_ASSIST_TOL_KMH
@@ -6134,6 +6245,9 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     phys.softHoldKind = s.softHoldKind
     phys.softHoldMs = s.softHoldKind ~= nil and s.softHoldMs or nil
     phys.softCrawl = s.softCrawl or nil
+    -- 1005 soft4：gentle 動物接近帽（有才寫）、動物爬行累計 ms（爬行中才寫）
+    phys.softGentleCap = (finite(s.softGentleCapKmh) and s.softGentleCapKmh >= 0) and s.softGentleCapKmh or nil
+    phys.softCrawlMs = s.softCrawl and s.softCrawlMs or nil
     phys.navVersion = s.navVersion
     phys.currentSurfaceId = s.currentSurfaceId
     phys.currentSurface = MDADFollower.surfaceName(s.currentSurfaceId)
@@ -11157,6 +11271,7 @@ local function stepFollow(s, vehicle, playerNum, now)
                     nb = laneBiasOf(s)
                     s.zombieLaneCap = -1
                     s.zombieAvoidUntilS = nil
+                    s.softGentleS = nil -- 繞行／RETURN／停留持有行駛線時不閃動物，也不套 gentle 帽（停等照判）
                     s.zombiePlanWhy, s.zombieWhy = nil, nil
                     if s.zombieLane ~= nil then
                         s.zombieLaneParked = s.zombieLane -- 重新接手時從這裡起算（zombieLaneOf）
@@ -11400,6 +11515,8 @@ local function stepFollow(s, vehicle, playerNum, now)
                     capReason = treason
                 end
             end
+            -- 只在減速名單的動物（gentle）成為威脅：先降到 ANIMAL_GENTLE_KMH 再繞（Drive.softGentleCap）
+            cap, capReason = Drive.softGentleCap(s, playerNum, cap, capReason)
             -- 動物／其他玩家擋在選定的行駛線上（Drive.softStopCap）：接近包絡停在前方、合法停等（followHold）；
             -- 動物等待到期後爬過、玩家等到停等預算交還
             cap, capReason = Drive.softStopCap(s, now, speedKmh, playerNum, cap, capReason)
@@ -11806,12 +11923,7 @@ local function stepFollow(s, vehicle, playerNum, now)
             s.currentBlocked == true, reached, s.dynamicsFault == true,
             s.recoverWhy ~= nil or s.mode == "unstick"
                 or s.mode == "settle" or s.progressState == "gear-reset",
-            s.fstate.rotating == true, blockedStop
-                or (not s.dodging and finite(s.dodgeDeferCap) and s.dodgeDeferCap >= 0
-                    and s.dodgeDeferCap < MDADDynamics.MIN_EXEC_KMH)
-                or (s.dodging and finite(s.dodgeNextCap) and s.dodgeNextCap >= 0
-                    and s.dodgeNextCap < MDADDynamics.MIN_EXEC_KMH)
-                or (finite(s.startNearCap) and s.startNearCap < MDADDynamics.MIN_EXEC_KMH),
+            s.fstate.rotating == true, Drive.waitHoldArg(s, blockedStop),
             s.followHold == true, s.returnHold == true,
             s.visibilityCap, s.dodgeCrawl == true or s.softCrawl == true
                 or (s.dodging and (s.dodgeEnvN or 0) >= 2
@@ -11893,7 +12005,8 @@ local function stepFollow(s, vehicle, playerNum, now)
         -- attempt-limit softFail 每 3.5 秒回 follow 一次、5 分鐘不交還）；額度沒用完的 GO 是起步加速，不計。
         -- 最後一次後方探測不通的 GO 同樣計（1004g，E2E k1004g nightrain：路上 24 台車，改道後車被前後夾住、
         -- GO 8 km/h 不動，rear-blocked softFail 不扣額度＝次數永遠 0，3 分鐘不交還——同上面「審查補刀」）。
-        if s.intentShadow == "WAIT" or s.intentShadow == "RECOVER"
+        -- 只有動物停等的 WAIT 不計（動物另外計時，Drive.softStopCap／Drive.animalOnlyWait；1005 使用者裁定）
+        if (s.intentShadow == "WAIT" and not Drive.animalOnlyWait(s, blockedStop)) or s.intentShadow == "RECOVER"
                 or (s.intentShadow == "ROTATE" and avProgress < 1)
                 or (s.episodeActive and avProgress < 1 and not s.areaWaitActive
                     and (s.intentShadow == "CRAWL" or s.intentShadow == "STOP"
@@ -11983,6 +12096,7 @@ local function stepFollow(s, vehicle, playerNum, now)
             requestRecover(s, "blocked-retry")
         end
         if s.waitAccumMs >= TUNE.WAIT_TIMEOUT_MS and not Drive.wideJudgePending(s) then postAction = "wait" end
+        if s.softGiveUp and postAction == nil then postAction = "animal" end -- 動物爬行到上限仍擋著
 
         local skipProgressCompare = false
         if s.verifyArmPending then
@@ -12737,6 +12851,17 @@ local function stepFollow(s, vehicle, playerNum, now)
         Drive.stop(playerNum, Drive.KEY_AREA_STOP)
         return
     end
+    -- 動物一直擋在行駛線上、爬行 ANIMAL_CRAWL_MAX_MS 仍沒讓開：專屬理由交還（不改道、不倒車）
+    if postAction == "animal" then
+        diagEvent(s, playerNum, "soft", { phase = "handback", why = "animal-crawl-timeout", kind = "animal",
+            ms = s.softCrawlMs, rs = s.lastSNow })
+        if getDebug() then
+            print(string.format("%spn=%d soft stop handback kind=animal why=animal-crawl-timeout crawlMs=%d", LOG,
+                playerNum, s.softCrawlMs))
+        end
+        Drive.stop(playerNum, Drive.KEY_ANIMAL_STOP, "handback")
+        return
+    end
     -- RECOVER 單一 dispatch（階段 2 主體 2）：五個需求方只設 s.recoverWhy＋原因，
     -- 動作選擇集中在這裡、每幀一次。車還在滑行（avProgress>=1）就留著旗標，
     -- 下一幀再判——恢復動作必須從靜止起手。
@@ -13226,6 +13351,7 @@ local function onPlayerUpdate(player)
             s.clearStreak = 0
             s.followHold = false
             s.softStopS, s.softStopKind = nil, nil -- 舊路線弧長；新路線首輪掃完再判
+            s.softGentleS, s.softAnimalAnchorS = nil, nil -- 同上（弧長座標系換了）
             -- 同目標 route cutover **不清停等預算**（階段 2 主體 1：這正是舊制
             -- 40s+ 續命的其中一條逃逸路徑）；但下面 lastSNow 歸零＝換了弧長
             -- 座標系，錨點必須跟著換算到新座標系（0），否則進度判定失效。
