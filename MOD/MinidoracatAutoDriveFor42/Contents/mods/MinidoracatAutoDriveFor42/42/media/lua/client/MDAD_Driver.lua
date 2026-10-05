@@ -442,6 +442,23 @@ local REAR_TRAVEL_M = 4
 -- 2m、再試 MIN+KEEP；帶長−KEEP＝本次退距，100ms 重探帶長＝剩餘退距＋KEEP。
 TUNE.REAR_TRAVEL_SHORT_M = 2
 TUNE.REAR_KEEP_M = 0.5
+-- 前後皆堵的側向脫困（1006 實驗，使用者 10-06「可以考慮加強側推力道」；預設關，E2E 決定去留）：最短倒車帶也命中
+-- 真障礙、前方被擋時，探車身兩側 ROOM_M 寬的側帶，只往淨空的一側推（帶寬−REAR_KEEP_M＝本次橫移上限，
+-- Drive.sideEscapeStart／stepSideEscape）。純中心橫向衝量從 ACCEL_MIN 每秒加 RAMP 到 ACCEL_MAX（m/s²；輪胎側向
+-- 摩擦各車不同，推到動為止），每幀 Δv ≤ DV_MAX、橫向或縱向車速 ≥ KMH 不施力：引擎對靜物碰撞的線速度變化
+-- >1 m/s 才算 crash（BaseVehicle.java:3420-3443），兩者相加仍在門檻下。STALL_MS 內沒前進 STALL_M、偏航 >YAW_RAD、
+-- 側帶變不清、逾時 MS 就收手回停等（既有交還流程）；與倒車共用 UNSTICK_MAX 額度。
+TUNE.SIDE_ESCAPE = false
+TUNE.SIDE_ESCAPE_ROOM_M = 1.5
+TUNE.SIDE_ESCAPE_KMH = 1.5
+TUNE.SIDE_ESCAPE_DV_MAX = 0.4
+TUNE.SIDE_ESCAPE_ACCEL_MIN = 6
+TUNE.SIDE_ESCAPE_ACCEL_MAX = 24
+TUNE.SIDE_ESCAPE_RAMP = 20
+TUNE.SIDE_ESCAPE_MS = 8000     -- 橫移速度上限 0.42 m/s：E2E sideroom=2.5（移 2m）也走得完；推不動由 STALL_MS 先收手
+TUNE.SIDE_ESCAPE_STALL_MS = 1200
+TUNE.SIDE_ESCAPE_STALL_M = 0.05
+TUNE.SIDE_ESCAPE_YAW_RAD = 8 * math.pi / 180
 TUNE.EPISODE_REARM_SQ = 100
 TUNE.SCAN_WARM_CAP = 15        -- 感知空窗（首輪掃描未完成）的爬行上限（與
                                -- UNLOADED_CAP 同級：語意都是「前方未知」）
@@ -6706,6 +6723,7 @@ TUNE.RECOVER_RANK = {
     ["start-near"] = 2,     -- 起步近物限速停在物件前不動（Drive.startNearStall）
     ["verify"] = 3,         -- VERIFY 窗內仍不動
     ["progress"] = 4,       -- 2.5s 監督 suspect（帶近場探測結果）
+    ["side-escape"] = 1,    -- 側向脫困到位 settle 後：接回倒車鏈（Drive.stepSideEscape）
 }
 local function requestRecover(s, why, pulse)
     local rank = TUNE.RECOVER_RANK[why]
@@ -7025,6 +7043,8 @@ end
 -- Called only after stepFollow released its hot-path vector. Rear unknown is fail-closed;
 -- an attempt is consumed only after a clear 4m swept-strip check.
 local function startRecoveryAttempt(s, vehicle, playerNum, now, vx, vy, softFail)
+    local sideChain = s.sideChain -- 上一步側推到位（settle 重置了判堵快照）：前方被擋的判斷沿用
+    s.sideChain = nil
     if MDAD.sandbox("ObstaclePolicy", POLICY_DODGE) ~= POLICY_DODGE
             or s.episodeAttempts >= UNSTICK_MAX then
         diagEvent(s, playerNum, "unstick", {
@@ -7085,6 +7105,7 @@ local function startRecoveryAttempt(s, vehicle, playerNum, now, vx, vy, softFail
             attempt = s.episodeAttempts, x = hitX, y = hitY,
             s = s.lastSNow, rear = status, kind = kind, detail = detail,
         })
+        if Drive.sideEscapeStart(s, vehicle, playerNum, now, vx, vy, status, kind, sideChain) then return end
         if softFail then
             -- 倒不了就回去繼續合法停等（15s 總上限另有紅字），不因一次探測
             -- 失敗放棄 session；mode 拉回 follow 免 recover 每幀空轉。
@@ -7118,6 +7139,7 @@ local function startRecoveryAttempt(s, vehicle, playerNum, now, vx, vy, softFail
     s.unstickDistance = 0
     s.reverseForce = 0
     s.mode = "unstick"
+    s.unstickSide = nil -- 倒車（不是側推；Drive.stepSideEscape）
     s.dodgeHandoffHold, s.dodgeDeferCap = false, -1
     s.progressState = "recover"
     diagEvent(s, playerNum, "unstick", {
@@ -7193,6 +7215,188 @@ local function sampleRecovery(s, vehicle, playerNum, now, x, y, speed, fx, fy, h
         s.diag = false
         pcall(MDADDiagnostics.stop, playerNum, "stopped")
     end
+end
+
+-- 側帶探測（TUNE.SIDE_ESCAPE_*）：把 probeRear 的基底轉 90°——「前方」取推的反方向、半寬取車半長、半長取車半寬，
+-- 後方 swept strip 就落在車身 side 側（side=+1＝(−fy,fx)）寬 band、長＝車長（各加 0.15 餘裕）。同一套 fail-closed
+-- 探測（未載入／取不到＝unloaded）。out 會被 bodyCenter 覆寫；fx/fy 需已正規化。
+function Drive.sideProbe(s, vehicle, out, fx, fy, side, band)
+    local bx, by = bodyCenter(s, vehicle, out)
+    if bx == nil or type(MDADSensor) ~= "table" or type(MDADSensor.probeRear) ~= "function" then
+        return "unloaded", vehicle:getX(), vehicle:getY(), "geometry"
+    end
+    local ux, uy = side * fy, -side * fx
+    return MDADSensor.probeRear(s.sensor, vehicle, getCell(), bx, by, ux, uy, -uy, ux,
+        s.vehicleProfile.halfL, s.vehicleProfile.halfW, band)
+end
+
+-- 前後皆堵的側向脫困起手（startRecoveryAttempt 最短倒車帶也命中真障礙時；TUNE 註解見 SIDE_ESCAPE）：前方被擋
+-- （判堵、footprint 接觸、上一步側推到位 chain，或車頭前 1m 近場探測不清＝起步近物、進度停滯這類沒判堵旗標的）
+-- 才探兩側，常駐線那側先探；只往淨空的一側推。回 true＝已開始（mode unstick＋s.unstickSide），false＝呼叫端照舊
+-- softFail 回停等。兩側皆堵記 phase=side why=none。
+function Drive.sideEscapeStart(s, vehicle, playerNum, now, vx, vy, rear, kind, chain)
+    if TUNE.SIDE_ESCAPE ~= true or s.tow or (rear ~= "hard" and rear ~= "vehicle")
+            or type(MDADSensor) ~= "table" or type(MDADSensor.probeNear) ~= "function" then return false end
+    local out = BaseVehicle.allocVector3f()
+    vehicle:getForwardVector(out)
+    local fx, fy = out:x(), out:z()
+    local flen = sqrt(fx * fx + fy * fy)
+    if not finite(flen) or flen < 1e-3 then
+        BaseVehicle.releaseVector3f(out)
+        return false
+    end
+    fx, fy = fx / flen, fy / flen
+    if not (s.blocked or s.currentBlocked or chain) then
+        local bx, by = bodyCenter(s, vehicle, out)
+        if bx == nil or MDADSensor.probeNear(s.sensor, vehicle, getCell(), bx, by, fx, fy, -fy, fx,
+                s.vehicleProfile.halfW, s.vehicleProfile.halfL) == "clear" then
+            BaseVehicle.releaseVector3f(out)
+            return false
+        end
+    end
+    -- 兩側都清時往常駐線那側：車的 side=+1 法線在路線左法線上的分量＝車頭與路線切線的內積
+    local pref = 1
+    local h = s.profile and s.profile.segH and s.profile.segH[s.fstate.idx or 1]
+    if finite(h) and finite(s.lastLatSigned) and finite(s.expectedLane)
+            and (s.expectedLane - s.lastLatSigned) * (fx * cos(h) + fy * sin(h)) < 0 then pref = -1 end
+    local room = TUNE.SIDE_ESCAPE_ROOM_M
+    local side, stB = nil, "skip"
+    local stA = Drive.sideProbe(s, vehicle, out, fx, fy, pref, room)
+    if stA == "clear" then
+        side = pref
+    else
+        stB = Drive.sideProbe(s, vehicle, out, fx, fy, -pref, room)
+        if stB == "clear" then side = -pref end
+    end
+    BaseVehicle.releaseVector3f(out)
+    local detail = (pref > 0 and "dir+1=" or "dir-1=") .. stA .. (pref > 0 and " dir-1=" or " dir+1=") .. stB
+    if getDebug() then
+        print(string.format("%spn=%d side escape %s attempt=%d rear=%s/%s %s", LOG, playerNum,
+            side and ("start dir=" .. side) or "none", s.episodeAttempts, tostring(rear), tostring(kind), detail))
+    end
+    if side == nil then
+        diagEvent(s, playerNum, "unstick", { phase = "side", why = "none", eid = s.episodeId,
+            attempt = s.episodeAttempts, x = vx, y = vy, s = s.lastSNow, rear = rear, kind = kind, detail = detail })
+        return false
+    end
+    s.episodeAttempts = s.episodeAttempts + 1
+    s.unstickSide = side
+    s.sideNX, s.sideNY = -side * fy, side * fx
+    s.sideFX, s.sideFY = fx, fy
+    s.sideBestD, s.sideBestAt, s.sideAccel = 0, now, 0
+    s.unstickTravelM = room - TUNE.REAR_KEEP_M
+    s.unstickX, s.unstickY = vx, vy
+    s.unstickUntil = now + TUNE.SIDE_ESCAPE_MS
+    s.unstickStartedAt = now
+    s.nextRearProbeMs = now + REAR_PROBE_MS
+    s.unstickDistance = 0
+    s.reverseForce = 0
+    s.mode = "unstick"
+    s.dodgeHandoffHold, s.dodgeDeferCap = false, -1
+    s.progressState = "recover"
+    vehicle:setRegulator(false)
+    diagEvent(s, playerNum, "unstick", { phase = "side", why = "start", eid = s.episodeId,
+        attempt = s.episodeAttempts, x = vx, y = vy, s = s.lastSNow, d = 0, dir = side,
+        len = s.unstickTravelM, rear = rear, kind = kind, detail = detail })
+    return true
+end
+
+-- 側向脫困每幀（stepUnstick 的 settle 判定之後；mode unstick 且 s.unstickSide）：量沿起手法線的橫向位移 d 與
+-- 橫向車速，每 REAR_PROBE_MS 重探側帶（剩餘＋KEEP）與最短倒車帶。到位（ok）或最短倒車帶清（rear-clear）＝settle，
+-- 停妥後由 stepUnstick 以 side-escape 接回 startRecoveryAttempt（rear 清就倒車、仍擋再側推）；停滯、偏航、側帶變
+-- 不清、逾時、讀不到車速＝收手回停等（同 rear-blocked softFail，停等預算到期照舊交還）。
+function Drive.stepSideEscape(s, vehicle, playerNum, now, vx, vy, speedKmh)
+    local nx, ny = s.sideNX, s.sideNY
+    local d = (vx - s.unstickX) * nx + (vy - s.unstickY) * ny
+    s.unstickDistance = d
+    if d >= s.sideBestD + TUNE.SIDE_ESCAPE_STALL_M then s.sideBestD, s.sideBestAt = d, now end
+    local vLat = Drive.forwardKmh(vehicle, nx, ny)
+    local out = BaseVehicle.allocVector3f()
+    vehicle:getForwardVector(out)
+    local fx, fy = out:x(), out:z()
+    local flen = sqrt(fx * fx + fy * fy)
+    local why, st, kind = nil, nil, nil
+    if not finite(flen) or flen < 1e-3 then
+        why = "forward"
+    else
+        fx, fy = fx / flen, fy / flen
+        if d >= s.unstickTravelM then
+            why = "ok"
+        elseif fx * s.sideFX + fy * s.sideFY < cos(TUNE.SIDE_ESCAPE_YAW_RAD) then
+            why = "yaw"
+        elseif now - s.sideBestAt >= TUNE.SIDE_ESCAPE_STALL_MS then
+            why = "stall"
+        elseif now >= s.unstickUntil then
+            why = "timeout"
+        elseif vLat == nil then
+            why = "speed"
+        elseif now >= s.nextRearProbeMs then
+            s.nextRearProbeMs = now + REAR_PROBE_MS
+            local band = s.unstickTravelM - d + TUNE.REAR_KEEP_M
+            if band < TUNE.REAR_KEEP_M then band = TUNE.REAR_KEEP_M end
+            local _x, _y
+            st, _x, _y, kind = Drive.sideProbe(s, vehicle, out, fx, fy, s.unstickSide, band)
+            if st ~= "clear" then
+                why = "probe"
+            else
+                st, _x, _y, kind = rearProbe(s, vehicle, out, fx, fy, vx, vy, TUNE.UNSTICK_MIN_M + TUNE.REAR_KEEP_M)
+                s.rearStatus = st
+                if st == "clear" then why = "rear-clear" end
+            end
+        end
+    end
+    if why == nil then
+        local mult = getGameTime():getMultiplier()
+        if mult < MULT_MIN then mult = MULT_MIN end
+        if mult > MULT_MAX then mult = MULT_MAX end
+        local a = TUNE.SIDE_ESCAPE_ACCEL_MIN + TUNE.SIDE_ESCAPE_RAMP * (now - s.unstickStartedAt) / 1000
+        if a > TUNE.SIDE_ESCAPE_ACCEL_MAX then a = TUNE.SIDE_ESCAPE_ACCEL_MAX end
+        local dt = mult * SECONDS_PER_MULT
+        if a * dt > TUNE.SIDE_ESCAPE_DV_MAX then a = TUNE.SIDE_ESCAPE_DV_MAX / dt end -- 每幀 Δv＝a·dt
+        local av = speedKmh < 0 and -speedKmh or speedKmh
+        if vLat >= TUNE.SIDE_ESCAPE_KMH or av >= TUNE.SIDE_ESCAPE_KMH then a = 0 end
+        local mass = s.runtimeMass
+        if not finite(mass) or mass < 1 then mass = MASS_FALLBACK end
+        -- 衝量↔Δv 換算同 Drive.visAssistForce：F＝Δv·mass/0.01
+        local force = a * dt * mass * 100
+        s.sideAccel, s.reverseForce = a, force
+        if force > 0 then
+            local impulse = BaseVehicle.allocVector3f()
+            impulse:set(force * nx, 0, force * ny)
+            out:set(0, 0, 0) -- 純中心力，不產生力矩
+            vehicle:addImpulse(impulse, out)
+            BaseVehicle.releaseVector3f(impulse)
+        end
+        BaseVehicle.releaseVector3f(out)
+        sampleRecovery(s, vehicle, playerNum, now, vx, vy, speedKmh)
+        return
+    end
+    BaseVehicle.releaseVector3f(out)
+    s.reverseForce = 0
+    diagEvent(s, playerNum, "unstick", { phase = "side", why = why, eid = s.episodeId, attempt = s.episodeAttempts,
+        x = vx, y = vy, s = s.lastSNow, d = d, dir = s.unstickSide, duration = now - s.unstickStartedAt,
+        speed = vLat, acc = s.sideAccel, rear = st, kind = kind })
+    if getDebug() then
+        print(string.format("%spn=%d side escape end why=%s dir=%d d=%.2f ms=%d vLat=%s acc=%.1f probe=%s/%s",
+            LOG, playerNum, why, s.unstickSide, d, now - s.unstickStartedAt, tostring(vLat), s.sideAccel,
+            tostring(st), tostring(kind)))
+    end
+    if why == "ok" or why == "rear-clear" then
+        s.mode = "settle"
+        s.progressState = "settle"
+        s.settleUntil = now + SETTLE_MS
+        s.currentBlocked = false
+        s.currentClearRounds = 0
+        s.episodeClearRounds = 0
+        commandForceBrake(s, vehicle, now, "side-settle")
+    else
+        s.unstickSide = nil
+        s.blockRetryDone = true
+        s.mode = "follow"
+        s.progressState = "disarmed"
+        s.progressSince = 0
+    end
+    sampleRecovery(s, vehicle, playerNum, now, vx, vy, speedKmh)
 end
 
 -- 前方彎道減速剖面（快照期建表、caller-owned 陣列）：由線尾反推每格的最高
@@ -11234,6 +11438,11 @@ local function stepUnstick(s, vehicle, playerNum, now)
         if s.sensor and type(MDADSensor) == "table"
                 and type(MDADSensor.reset) == "function" then MDADSensor.reset(s.sensor) end
         s.mode = s.profile.ready == true and "follow" or "build"
+        if s.unstickSide then
+            -- 側推到位停妥：從靜止接回倒車鏈（startRecoveryAttempt 重探：rear 清就倒車、仍擋再側推）
+            s.unstickSide, s.sideChain = nil, true
+            requestRecover(s, "side-escape")
+        end
         -- 起步接了越野線、倒車又退到接線起點之後：舊剖面從舊車位起算，退出來的距離全被夾在 s=0，
         -- 進入段一寸也沒多（E2E startpush c25 起手偏 36°：三次倒車 entry 恆 1.0 → 受困交還）。
         -- 下一次取路從現在的車位重接（同一條 cutover；路網起點在車後的一般情況由主 MOD 近線重算處理）。
@@ -11245,6 +11454,10 @@ local function stepUnstick(s, vehicle, playerNum, now)
                 s.nextRouteMs = now
             end
         end
+        return
+    end
+    if s.unstickSide then
+        Drive.stepSideEscape(s, vehicle, playerNum, now, vx, vy, speedKmh)
         return
     end
 
@@ -13734,6 +13947,7 @@ local function onPlayerUpdate(player)
                 s.mode = "settle"
                 s.progressState = "settle"
                 s.reverseForce = 0
+                s.unstickSide = nil -- 換目標中斷側推：不接回倒車鏈
                 if oldMode == "unstick" then
                     s.settleUntil = now + SETTLE_MS
                     diagEvent(s, playerNum, "unstick", {

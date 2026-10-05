@@ -123,6 +123,8 @@ local EK = {
     -- 1006：impact（撞擊上升緣，本機與上傳都記）掉速 km/h；route cutover 主 MOD 的接線距離 snapDist；
     -- tow lost（MDADTrailer.lostState）：牽引車現在掛著誰、掛車還在不在、掛車被誰拖、兩掛點距離、掛車 upVectorDot、最後一筆折角
     "dv", "snapDist", "cur", "alive", "by", "hd", "up", "phi",
+    -- 側向脫困（1006，unstick phase=side）：推的那側（+1＝車頭向量 (−fy,fx) 側）、收手時的側推加速度 m/s²
+    "dir", "acc",
 }
 
 local function logOnce(msg)
