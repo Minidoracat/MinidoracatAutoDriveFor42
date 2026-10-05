@@ -12934,6 +12934,55 @@ function drive.scenarioEntryStretch()
 end
 drive.scenarioEntryStretch()
 
+-- (kin) 承諾線進入段的運動學證明（1006；open-issue「承諾線曲率對 rMin 的可行性沒檢查」「陡峭的回家停留線」，1004a
+--   正式服 ImJustAtoms clip-03：停留回家 2.25m 側移塞 2.29m 進入段，陡坡閘比例 3 剛好放行）：線本身掃得過，但車以 rMin
+--   走 S 彎最快也要 Lo＝2·sqrt(dl·rMin−dl²/4) 才換得完。進入段拉到 Lo（b 往後推）的同一條線以物理檔重掃，撞到＝拒收
+--   （blocked 事件 kind＝kin）；障礙再遠一點、Lo 線也過＝照原線承諾；小 jog（(sp2) 0.25m／1.2m）照放行。predicate 級（測試鉤直接餵，
+--   不經 shapeProfile／陡坡閘），證明線起點＝rs（一般繞行 a−TANGENT_PREVIEW_M 早於車位就取 rs）。
+--   (kin)／(kin-stay)：一般繞行（a=rs+1、b=rs+3）與停留線（rs→b=rs+2.5）各一組，B（1.6×4）在起點側、−y 邊 −0.8、從 rs+3.5 起
+--   （原線車身物理淨距 ≈0.44／0.55，Lo 線撞）；(kin-far)／(kin-stay-far)：B 從 rs+4.5 起＝Lo 線也過（≈0.4）、照原線承諾。
+--   違規證明：sweepCandidate／sweepStay 不呼叫 Drive.kinProof＝(kin)／(kin-stay) 紅；Lo 改成 sqrt(6·dl·rMin)（曲率 ≤1/rMin 的
+--   smoothstep，比最佳 S 彎長 35%）＝(kin-far) 紅（多拒收）；停留線起點改成 a＝(kin-stay-far) 紅；不寫 kind＝(kin) 紅。
+function drive.scenarioKinProof()
+    scenario("1006：承諾線進入段運動學證明——進入段拉到 rMin 最短 S 彎的同一條線撞到才拒收，撞不到照原線承諾")
+    drive.fillWorld(-10, 120, -8, 8)
+    checkTrue(armDrive(), "(kin) 啟動")
+    driveReset(dveh)
+    drive.scanRound()
+    local st = MDAD.Drive.debugSession(0)
+    local rs, vp = st.lastSNow, st.vehicleProfile
+    local dl = 2.25
+    local Lo = 2 * math.sqrt(dl * vp.rMin - dl * dl / 4)
+    local function probe(boxS, stay)
+        local _, box = drive.putVehicleGeom(rs + boxS + 2, 0, 0, 1.6, 4, true)
+        driveReset(dveh)
+        drive.scanRound()
+        st.sweepHitBody = nil
+        local ok
+        if stay then
+            ok = MDAD.Drive.debugSweepStay(0, rs + 1, rs + 2.5, rs + 14, -dl)
+        else
+            ok = MDAD.Drive.debugSweepCandidate(0, rs + 1, rs + 3, rs + 14, rs + 22, -dl)
+        end
+        drive.clearVehicleGeom(box)
+        return ok, st.sweepHitBody
+    end
+    local tag = string.format("rMin %.2f、%.2fm 側移、Lo %.2f", vp.rMin, dl, Lo)
+    local ok, body = probe(3.5, false)
+    checkTrue(ok == false and body == "kin", "(kin) " .. tag .. "、進入段 2m：拉到 Lo 的線撞到 B＝拒收（ok="
+        .. tostring(ok) .. " kind=" .. tostring(body) .. "）")
+    ok = probe(4.5, false)
+    checkTrue(ok == true, "(kin-far) B 再遠 1m（Lo 線也過）：照原線承諾（ok=" .. tostring(ok) .. "）")
+    ok, body = probe(3.5, true)
+    checkTrue(ok == false and body == "kin", "(kin-stay) 停留線 rs→b 2.5m 同樣陡：拒收（ok=" .. tostring(ok) .. " kind="
+        .. tostring(body) .. "）")
+    ok = probe(4.5, true)
+    checkTrue(ok == true, "(kin-stay-far) 停留線、B 再遠 1m：照承諾（ok=" .. tostring(ok) .. "）")
+    MDAD.Drive.stop(0, nil)
+    drive.fillWorld(-2, 70, -7, 7)
+end
+drive.scenarioKinProof()
+
 -- (c8) MP 假速度域（2026-09-02 s012：regulator 70、直路 30 秒貼死 51 km/h）：
 --      CarController 用 v·lerp(1, fake, (v/min(120,SpeedLimit))²) 與 regulatorSpeed
 --      比，fake=120/min(SpeedLimit,120)。SpeedLimit 70 → fake 1.714；沙盒 40 的
