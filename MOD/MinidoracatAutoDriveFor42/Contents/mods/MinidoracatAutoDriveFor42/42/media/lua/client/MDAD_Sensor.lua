@@ -288,7 +288,7 @@ MDADSensor.SURFACE_PAVED = SURFACE_PAVED
 -- 改成第一輪掃描開始時綁一次，之後每輪只多一次 boolean 比較。
 local F_water, F_doorN, F_doorW, T_moveable
 local F_solid, F_solidtrans, F_collideN, F_collideW, F_solidfloor
-local F_doorWallN, F_doorWallW, F_open
+local F_doorWallN, F_doorWallW, F_open, F_attachedFloor
 local flagsBound = false
 
 local function bindFlags()
@@ -303,6 +303,10 @@ local function bindFlags()
     F_doorWallN = IsoFlagType.DoorWallN
     F_doorWallW = IsoFlagType.DoorWallW
     F_open = IsoFlagType.open
+    -- attachedFloor 是 sprite 旗標（IsoFlagType 72）：IsoWorld.java:737-740 的 set("attachedFloor","true") 經
+    -- PropertyContainer.set(…, checkIsoFlagType=true) 轉成 set(IsoFlagType)，不進字串屬性表——
+    -- props:has("attachedFloor")（字串多載查 TilePropertyAliasMap）永遠是 false，要用旗標查。
+    F_attachedFloor = IsoFlagType.attachedFloor
     T_moveable = IsoObjectType.isMoveAbleObject   -- 枚舉序 28（SpriteDetails/IsoObjectType.java:36）
     flagsBound = true
 end
@@ -402,15 +406,15 @@ local function classifySprite(obj, name)
     -- ＝格的北緣／西緣 0.1m 薄牆（HoppableN／WallNTrans 等 tile 屬性載入時就轉成 collideN，IsoWorld.java:870-1017）。
     -- 舊制一律格心 0 半徑：籬笆在近側格邊時模型晚 0.45m 看到、遠側時多擋 0.45m。沒有任何碰撞旗標的籬笆
     -- sprite 引擎不給形狀；立著的（籬笆樁等）仍留格心 0 半徑（保守），躺在地上的碎片不算障礙：名稱含
-    -- damaged／trash_ 的 sprite 載入時被引擎標 attachedFloor（IsoWorld.java:737-740）。issue #7 勃蘭登堡
-    -- 整條街散落 fencing_damaged_01_168..171（地圖原生），被當硬點後寬帶兩級都找不到縫、StopStuck。
+    -- damaged／trash_ 的 sprite 載入時被引擎標 attachedFloor 旗標（IsoWorld.java:737-740；見 bindFlags）。
+    -- issue #7 勃蘭登堡整條街散落 fencing_damaged_01_168..171（地圖原生），被當硬點後寬帶兩級都找不到縫、StopStuck。
     if find(name, "fencing_", 1, true) == 1 then
         if props:has(F_solid) or props:has(F_solidtrans) then return COST_HARD end
         local n, w = props:has(F_collideN), props:has(F_collideW)
         if n and w then return COST_WALL_NW end
         if n then return COST_WALL_N end
         if w then return COST_WALL_W end
-        if props:has("attachedFloor") then return COST_NONE end
+        if F_attachedFloor and props:has(F_attachedFloor) then return COST_NONE end
         return COST_HARD_THIN
     end
 
