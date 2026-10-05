@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1005b"
+Drive.REV = "1005c"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -373,6 +373,11 @@ local POLICY_DODGE = 1         -- 沙盒 ObstaclePolicy enum：1=繞行 2=停車
 TUNE.BLOCK_STOP_DIST = 10      -- 距障礙群這麼近才煞停等待；更遠先滑行接近
 TUNE.BLOCK_APPROACH_KMH = 20   -- blocked 接近段的速度上限（掃描逼近後縫隙判定更準）
 TUNE.BLOCK_APPROACH_HARD_MARGIN = 10 -- blocked 接近包絡的一秒鎖輪只在實速超過 BLOCK_APPROACH_KMH＋此值時（停止線前低速段交給 blockedStop）
+-- Knox Pass 大門（1005c，Sensor gateCell）：會替這台車開的關門，車心到門格 ≤ 停止線＋halfL＋車速×此秒數才當硬物
+-- （退回關門處理）。更遠只當可視前緣（可視兩帳保證停得住）。這段時間涵蓋「門格被掃到→本輪完成→replan 判堵」的延遲
+--（一般 1–2 輪）：判堵在車到停止線之前就成立，停點與寬帶武裝照舊落在停止線。下限（停住時）＝停止線＋halfL，
+-- 遠於可視帽讓車停下的位置（前緣－halfL－2－爬行段 ≈ halfL＋6），車不會停在「門沒開、也沒判堵」的地方。
+TUNE.GATE_NEAR_LEAD_S = 1.0
 TUNE.WAIT_TIMEOUT_MS = 15000   -- 停等總上限：紅字請玩家接手（2026-09-01 20s→15s）
 TUNE.BLOCK_RETRY_MS = 5000     -- blocked 停等此時長仍無縫→主動倒退重掃換視角找路
 TUNE.BLOCK_STEEP_RETRY_MS = 500 -- 全滅含大側移 steep（跑道不夠＝靜態幾何）：停穩即倒車，不等 5 秒
@@ -8860,12 +8865,38 @@ function Drive.holdWideReroute(s, sameTarget, sameVersion)
         and s.dodging == true and s.dodgeWide == true and type(s.tow) ~= "table"
 end
 
+-- Knox Pass 大門（1005c，Sensor gateCell）的 telemetry：本輪快照有會替這台車開的關門時記 `gate` 事件——
+-- phase far＝遠處、只當可視前緣；hard＝退回關門處理（why near＝車已接近、latch＝這扇門先前退回過）。
+-- d＝車心到門格世界距離、speed＝車速、need＝本輪接近判距、x/y＝門格。同一扇門（8m 內）每個相位只記一次。
+function Drive.gateNote(s, playerNum, vehicle, speedKmh)
+    local sen = s.sensor
+    local gx, gy = sen.gateX, sen.gateY
+    if gx == nil then return end
+    local phase = sen.gateHard and "hard" or "far"
+    local lx, ly = s.gateLogX, s.gateLogY
+    if lx ~= nil and (gx - lx) * (gx - lx) + (gy - ly) * (gy - ly) <= 64
+            and (s.gateLogPhase == phase or s.gateLogPhase == "hard") then return end
+    s.gateLogX, s.gateLogY, s.gateLogPhase = gx, gy, phase
+    local dx, dy = gx - vehicle:getX(), gy - vehicle:getY()
+    local d = math.sqrt(dx * dx + dy * dy)
+    local why = sen.gateHard or nil
+    diagEvent(s, playerNum, "gate", { phase = phase, why = why, d = d, speed = speedKmh, need = sen.gateNearM,
+        x = gx, y = gy })
+    if getDebug() then
+        print(string.format("%spn=%d knox gate %s why=%s d=%.1f speed=%.1f need=%.1f at %.1f,%.1f",
+            LOG, playerNum, phase, tostring(why), d, speedKmh or -1, sen.gateNearM or -1, gx, gy))
+    end
+end
+
 -- 請求範圍只在輪首重算；同一群的許多點取最遠需求，不把每個點各加一次距離。
 -- 畫面幀率的負擔控制在Sensor，這裡不把「想看更遠」誤當成「已經看見」。
 function Drive.updatePerception(s, speedKmh)
     local sen, prof, vp = s.sensor, s.profile, s.vehicleProfile
     if not sen or not prof or not prof.ready then return end
     sen.softAheadM = MDADDynamics.softLookahead(speedKmh)
+    -- Knox Pass 會開的門「接近」判距（Sensor gateCell、TUNE.GATE_NEAR_LEAD_S）：輪首寫、整輪用
+    local vNear = finite(speedKmh) and (speedKmh < 0 and -speedKmh or speedKmh) / 3.6 or 0
+    sen.gateNearM = Drive.blockStopDist(s) + vp.halfL + vNear * TUNE.GATE_NEAR_LEAD_S
     local rs = s.lastSNow
     local wanted = Drive.perceptionDistance()
     local maxM, extra = MDADDynamics.PERCEPTION_HARD_MAX_M, MDADDynamics.PERCEPTION_EXT_M
@@ -11177,6 +11208,7 @@ local function stepFollow(s, vehicle, playerNum, now)
                 s.residentBias = nb -- 常駐行駛線（鏈式停留解鏈判定用）
                 Drive.mergeRelay(s, now) -- 伺服器轉送的遠方行進車接到本輪快照尾端（MP）
                 Drive.trafficScan(s, now, speedKmh) -- 會車／跟車：本輪快照判讀（速度帽每幀在下方套）
+                Drive.gateNote(s, playerNum, vehicle, speedKmh) -- Knox Pass 會開的門：gate 事件（Sensor gateCell）
                 if s.dodging or s.returnActive or s.laneChained then
                     nb = laneBiasOf(s)
                     s.zombieLaneCap = -1

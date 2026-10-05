@@ -54,6 +54,9 @@
 --                      trfT 命中當下的時戳（呼叫端依年齡外推）、trfId 車輛 id（Driver 合併伺服器轉送時去重）；
 --                      trfOverflow 超過上限。Driver 會在完成輪之後把伺服器轉送的遠方車接在尾端（Drive.mergeRelay）
 --     state.unloaded   走廊內有未載入 chunk（規劃要保守：不是淨空，是不知道）
+--     state.gateS/gateX/gateY  本輪最近一格「Knox Pass 會開的關門」的弧長與世界格心（nil＝沒有）；
+--                      gateHard＝false（遠處：只截可視前緣）／"near"／"latch"（同格另當硬物，見 gateCell）。
+--                      請求欄 state.gateNearM 由 Driver 每輪寫（Drive.updatePerception）
 --     state.sig        整數簽章：障礙布局有變才會變（呼叫端拿它省掉重複規劃）
 --     state.scanS      本輪掃描起點弧長；state.scanEndS 終點弧長
 --     state.stamp      本輪完成時的 now（判資料新鮮度）
@@ -482,6 +485,60 @@ local function spriteCostOf(state, obj, name)
     return cost
 end
 
+-- Knox Pass 大門（1005c；介面契約 KnoxPassAPI.willOpenFor(vehicle, obj)，Minidoracat Knox Pass VERSION ≥ 2）：
+-- 關著、但 Knox Pass 預告會替這台車打開的門。預告不是保證（伺服器載入那一帶才開得了，實測開門距離 53–61 格），
+-- 所以中央帶（同未載入的定義）的門格不當硬物，而是把本輪可視前緣截在門前一步——門一直不開時，可視兩帳
+-- （巡航帳＋中線減速輔助、硬煞帳＋一秒鎖輪）照舊保證車心停在前緣 halfL+2 之前；門在遠處就開了＝不減速、
+-- 不判堵、不繞行。車心到門格的世界距離 ≤ state.gateNearM（Driver 每輪寫：判堵停止線＋halfL＋車速×
+-- TUNE.GATE_NEAR_LEAD_S，見 Drive.updatePerception）時同一格另當硬物＝退回關門處理（blocked 停等、重試、交還）；
+-- 退回一次就記下門的位置（gateLatchX/Y，session 期間不清、reset 也不清），GATE_LATCH_R 內的門格之後一律硬物——
+-- 倒車脫困退到 gateNearM 外也不會變回「遠處」再開回來（沒有出口的來回）。帶外的門格照關門處理。
+-- Knox Pass 不在、API 出錯或回 false：與舊制完全相同（整格硬物、不截前緣）。
+local GATE_LATCH_R2 = 8 * 8 -- 退回門格的同門半徑平方（柵門最寬約 6 格）
+
+-- 這格（關著的門）有沒有一片是 Knox Pass 會替這台車開的；只在 closedDoor 為真時呼叫，一格一次。
+-- 契約：偵測 type 檢查、呼叫包 pcall、出錯或非 true 一律 false。API 每次呼叫會配置一條短字串與一張小表（契約載明），
+-- 只發生在關門格。
+local function gateWillOpen(state, vehicle, objs, nObj)
+    local api = KnoxPassAPI
+    if type(api) ~= "table" or type(api.willOpenFor) ~= "function" then return false end
+    for i = 1, nObj do
+        local obj = objs:get(i - 1)
+        local name = obj:getSpriteName()
+        if name ~= nil and spriteCostOf(state, obj, name) == COST_DOOR then
+            local ok, yes = pcall(api.willOpenFor, vehicle, obj)
+            if ok and yes == true then return true end
+        end
+    end
+    return false
+end
+
+-- 會開的門格（scanCell 冷分支）：截可視前緣、記本輪最近的門；回 true＝這格同時當硬物（帶外、近、已退回）。
+-- wGateHard：false＝遠處（當可視前緣）、"near"＝車已接近、"latch"＝這扇門先前退回過（每種失敗各自的名字）。
+local function gateCell(state, vehicle, wx, wy, inBand)
+    if not inBand then return true end
+    local gx, gy = wx + 0.5, wy + 0.5
+    local why = false
+    local lx, ly = state.gateLatchX, state.gateLatchY
+    if lx ~= nil and (gx - lx) * (gx - lx) + (gy - ly) * (gy - ly) <= GATE_LATCH_R2 then
+        why = "latch"
+    else
+        local near = state.gateNearM
+        local dx, dy = gx - vehicle:getX(), gy - vehicle:getY()
+        if type(near) ~= "number" or near ~= near or dx * dx + dy * dy <= near * near then
+            why = "near"
+            state.gateLatchX, state.gateLatchY = gx, gy
+        end
+    end
+    -- 前緣截在門格前一步：取樣點在門格內，門的碰撞牆在格緣，最多比取樣點近一步
+    local cut = state.curS - SCAN_STEP
+    if cut < state.endS then state.endS = cut end
+    if state.wGateS == nil or state.curS < state.wGateS then
+        state.wGateS, state.wGateX, state.wGateY, state.wGateHard = state.curS, gx, gy, why
+    end
+    return why ~= false
+end
+
 -- 旗標 wHardOverflow 讓本輪快照可被判定不完整。Driver 另在快照尾端附加
 -- 最多 4 個虛擬 ban，不經 pushHard，也不占這個 sensor 上限。
 -- b（選填）＝整格方塊的半邊長（世界軸對齊；0／nil＝圓）：掃掠與接觸以方塊算距離，規劃仍用 r。
@@ -784,13 +841,19 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
     if not hard then
         local objs = square:getObjects()               -- IsoGridSquare.java:9635（回 PZArrayList）
         local nObj = objs:size()                       -- 迭代慣例 ISButtonPrompt.lua:535-536
+        local gate = nil                               -- Knox Pass 會開的門（gateWillOpen；nil＝這格還沒問）
         for i = 1, nObj do
             local obj = objs:get(i - 1)
             local name = obj:getSpriteName()           -- IsoObject.java:2235
             if name ~= nil then
                 local cost = spriteCostOf(state, obj, name)
                 if cost == COST_DOOR then
-                    if closedDoor(square) then cost = COST_HARD else cost = COST_NONE end
+                    if not closedDoor(square) then
+                        cost = COST_NONE
+                    else
+                        if gate == nil then gate = gateWillOpen(state, vehicle, objs, nObj) end
+                        if gate then cost = COST_NONE else cost = COST_HARD end
+                    end
                 end
                 if cost == COST_HARD then
                     box = true
@@ -805,6 +868,7 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
                 end
             end
         end
+        if gate and not box then box = gateCell(state, vehicle, wx, wy, inBand) end
         hard = box or wallN or wallW or trunk or thin or bush
     end
 
@@ -1121,6 +1185,7 @@ local function beginRound(state, p, sNow, vehicle, now, len, cell)
     state.wTrfOverflow = false
     state.wUnloaded = false
     state.wUnloadedS = nil
+    state.wGateS, state.wGateX, state.wGateY, state.wGateHard = nil, nil, nil, false
     state.wSumS = 0
     state.wSumL = 0
     state.wRoadN = 0
@@ -1265,6 +1330,7 @@ local function finishRound(state, now)
     state.vehN = state.wVehN
     state.unloaded = state.wUnloaded
     state.unloadedS = state.wUnloadedS
+    state.gateS, state.gateX, state.gateY, state.gateHard = state.wGateS, state.wGateX, state.wGateY, state.wGateHard
     state.rain = state.wRain
     state.actualSurfaceId = state.wActualSurfaceId
     state.roundStartedAt = state.wRoundStartedAt
@@ -1375,6 +1441,11 @@ function MDADSensor.newState()
         wTrfS0 = {}, wTrfS1 = {}, wTrfL0 = {}, wTrfL1 = {}, wTrfVs = {}, wTrfVl = {}, wTrfT = {}, wTrfId = {},
         nowMs = 0,          -- 本幀時戳（step 寫入；scanCell 算車速用）
         wUnloaded = false,
+        -- Knox Pass 會開的門（gateCell）：本輪最近一格的弧長／世界格心／是否當硬物（false／"near"／"latch"）；
+        -- gateNearM＝Driver 每輪寫的「接近」判距；gateLatchX/Y＝退回過的門（session 期間不清，reset 也不清）
+        wGateS = nil, wGateX = nil, wGateY = nil, wGateHard = false,
+        gateS = nil, gateX = nil, gateY = nil, gateHard = false,
+        gateNearM = nil, gateLatchX = nil, gateLatchY = nil,
         wSumS = 0,
         wSumL = 0,
         wRoadN = 0,
@@ -1475,6 +1546,7 @@ function MDADSensor.reset(state)
     state.wMovingVeh = false
     state.wVehAheadS = nil
     state.wUnloaded = false
+    state.wGateS, state.wGateX, state.wGateY, state.wGateHard = nil, nil, nil, false
     state.wSumS = 0
     state.wSumL = 0
     state.wRoadN = 0
@@ -1508,6 +1580,7 @@ function MDADSensor.reset(state)
     state.movingVeh = false
     state.vehAheadS = nil
     state.unloaded = false
+    state.gateS, state.gateX, state.gateY, state.gateHard = nil, nil, nil, false
     state.sig = 0
     state.roadC = nil
     state.roadLo = nil
@@ -1622,6 +1695,8 @@ end
 -- 冷路徑探測共用的單格硬分類；只讀 square、只更新既有 sprite 快取，
 -- 不碰 wHardN／wUnloaded 等掃描 working buffer，也不配置 table。
 -- 回 true,kind＝水／硬物；false＝淨空；nil,kind＝getter 無法提供分類，呼叫端 fail-closed。
+-- 關著的門一律硬物，不問 Knox Pass（gateCell）：探測只看車身周圍幾公尺，遠在 gateNearM（≥ 停止線＋halfL）之內，
+-- 走廊掃描在這個距離同樣已把會開的門當硬物——倒車、調頭、起步探測不能因為「門等一下會開」就判淨空。
 local function probeSquareHard(state, square)
     if waterUnderfoot(square) then
         return true, "water"

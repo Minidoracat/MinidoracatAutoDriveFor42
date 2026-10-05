@@ -18568,6 +18568,233 @@ function drive.scenarioVisibilityTiming()
 end
 drive.scenarioVisibilityTiming()
 
+-- Knox Pass 大門（1005c，Sensor gateCell＋Driver gateNearM／gateNote）：關著、但 KnoxPassAPI.willOpenFor 預告會替這台車
+-- 開的門。真 Sensor＋真 Driver、16m 直路 70 km/h，縱向模型同 (vt)（regulator 加速 2.5、滑行 2.3＋中線減速輔助、鎖輪 13）。
+--   (kp-far)    50 格外就開：不判堵、不繞行、可視帽不壓到巡航速以下（與無門對照組同速），門開後照速通過；記 gate far。
+--   (kp-closed) 一直不開：停在門前、車頭不越過門線；退回關門處理（gate hard why=near、blocked）；倒車退到判距外照樣
+--               判堵（why=latch，不變回遠處再開回來）；之後照 blocked 停等走到 blocked-retry。
+--   (kp-off)    API 不在／丟錯／回 false：與舊制相同（遠處就是硬物、判堵、可視前緣不截、沒有 gate 事件）。
+--   (kp-other)  API 只認 Knox Pass 的門：同一扇門沒標記＝照舊硬物判堵；標記了＝遠處只截前緣（正對照）。
+-- 違規證明（temp/vp）：gateCell 恆回 false（拿掉退回）＝(kp-closed) 紅；gateWillOpen 恆回 true（拿掉 API 判斷）＝(kp-off)／(kp-other) 紅。
+function drive.scenarioKnoxGate()
+    scenario("Knox Pass 大門：會開的門遠處不判堵不減速、一直不開仍停在門前並退回關門處理、API 不在或否認＝舊制")
+    local oldWorld, oldGeo, oldSandbox, oldVeh, oldGet =
+        drive.world, drive.vehGeo, SandboxVars, dveh, getSpecificPlayer
+    local oldApi, oldGear = MinidoracatMiniMapAPI.navApiVersion, MDAD.Drive.getGear(0)
+    local oldPerception, oldZ = MDAD.HUD.perceptionDistance, MDAD.HUD.zombieDodge
+    local oldRoute, oldTx, oldTy, oldState =
+        drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
+    local oldEvent, oldKnox = MDADDiagnostics.event, KnoxPassAPI
+    local wasMs = drive.frameMs(20)
+    MDAD.Drive.stop(0, nil)
+    getSpecificPlayer = function(n) if n == 0 then return dp end end
+    MinidoracatMiniMapAPI.navApiVersion = 5
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
+        AutoDriveMaxSpeed = 70, RightLaneBias = 0 })
+    MDAD.Drive.setGear(0, 4)
+    MDAD.HUD.zombieDodge = function() return false end
+    MDAD.HUD.perceptionDistance = function() return 120 end
+    dveh = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }),
+        engineRunning = true, mass = 1330, speed = 70, maxSpeed = 120,
+        bodyW = 1.62, bodyL = 3.62, comX = 0, comZ = 0.12, profileFull = true,
+        enginePower = 4100, brakingForce = 112, wheelFriction = 1.5, tireFriction = 1.5 })
+    local G = 150 -- 門線（doorW＝格的西緣，車沿 +x 開過來＝門牆在格的近緣，最壞相位）
+    local D0 = 85 -- 起點離門線（車心；20ms 幀時的一般帶可負擔視距約 90m＝第一輪就看到關著的門）
+    local events = {}
+    local oldSample = MDADDiagnostics.sample
+    MDADDiagnostics.event = function(_, name, a) if name == "gate" then events[#events + 1] = a end end
+    MDADDiagnostics.sample = function() return true end
+    local apiMode, apiCalls = "yes", 0
+    local api = { VERSION = 2, willOpenFor = function(_, obj)
+        apiCalls = apiCalls + 1
+        if apiMode == "throw" then error("knox-fail") end
+        if apiMode == "tagged" then return obj._knox == true end
+        return apiMode == "yes"
+    end }
+    local st
+    local function world(gate, tagged)
+        drive.fillWorld(-12, 420, -9, 9)
+        drive.putRoad(-12, 420, -8, 8)
+        if not gate then return end
+        for y = -9, 9 do
+            drive.putGate(G, y, false, false)
+            local objs = drive.world[G * 100000 + y]._objs
+            objs[#objs]._knox = tagged == true
+        end
+    end
+    local function setOpen(open)
+        for y = -9, 9 do drive.world[G * 100000 + y]._flags.open = open or nil end
+    end
+    local function arm(x)
+        MDAD.Drive.stop(0, nil)
+        dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = x, 0, 70, 0, false
+        dveh._engine, dveh._driver = true, dp
+        dp._vehicle, dp._dead, dp._local = dveh, false, true
+        setHeading(dveh, 0)
+        drive.nav.route = { pts = { x, 0, 400, 0 }, segSurface = { "paved" }, segWidth = { 16 } }
+        drive.nav.tx, drive.nav.ty, drive.nav.state = 400, 0, "ok"
+        drive.frameMs(20)
+        events = {}
+        checkTrue(MDAD.Drive.start(dp), "(kp) 直路啟動")
+        st = MDAD.Drive.debugSession(0)
+        st.diag = true
+        driveReset(dveh)
+    end
+    -- 縱向模型（同 (vt) advance）：真 regulator 命令＋滑行 2.3＋production 要求的中線補減速；硬煞按一秒閂鎖。
+    local function advance(dt)
+        local v = dveh._speed / 3.6
+        local acc = -2.3 - (st.visAssistDecel or 0)
+        if nowMs < (st.forceBrakeUntil or 0) then
+            acc = -13
+        elseif dveh._regulator and dveh._speed < (dveh._regSpeed or 0) then
+            acc = 2.5
+        end
+        local nv = math.max(0, v + acc * dt)
+        dveh._x = dveh._x + (v + nv) * 0.5 * dt
+        dveh._speed = nv * 3.6
+        drive.mult = dt * 48
+        nowMs = nowMs + dt * 1000
+        driveTick(dp, dveh)
+    end
+    -- 從 x0 以 70 km/h 開向門線；openAt＝車心離門線這麼近時門打開（nil＝一直不開）。回本趟統計。
+    local function run(x0, openAt, maxS)
+        arm(x0)
+        local r = { blocked = false, dodge = false, minSpeed = math.huge, minVis = math.huge, maxFront = -math.huge,
+            fb = 0, openedAt = nil, recover = nil }
+        local halfL = st.vehicleProfile.halfL
+        for _ = 1, math.floor(maxS / 0.02) do
+            if not MDAD.Drive.isActive(0) then break end
+            if openAt and r.openedAt == nil and G - dveh._x <= openAt then
+                setOpen(true)
+                r.openedAt = G - dveh._x
+            end
+            advance(0.02)
+            if st.blocked then r.blocked = true end
+            if st.dodging then r.dodge = true end
+            if st.recoverWhy ~= nil and r.recover == nil then r.recover = st.recoverWhy end
+            if nowMs < (st.forceBrakeUntil or 0) then r.fb = r.fb + 1 end
+            if dveh._x + halfL > r.maxFront then r.maxFront = dveh._x + halfL end
+            if r.openedAt == nil and st.sensor.ready and dveh._x > x0 + 5 then
+                if dveh._speed < r.minSpeed then r.minSpeed = dveh._speed end
+                if (st.visibilityCap or 0) < r.minVis then r.minVis = st.visibilityCap end
+            end
+            if openAt and dveh._x > G + 10 then break end
+        end
+        r.x, r.speed = dveh._x, dveh._speed
+        return r
+    end
+    local function gateEv(phase)
+        for i = 1, #events do if events[i].phase == phase then return events[i] end end
+        return nil
+    end
+
+    -- 對照組：同一段路沒有門
+    KnoxPassAPI = api
+    world(false)
+    local ctl = run(G - D0, 0, 6)
+    -- (kp-far)
+    apiMode = "yes"
+    world(true)
+    local far = run(G - D0, 52, 12)
+    local farEv = gateEv("far")
+    checkTrue(far.openedAt ~= nil and not far.blocked and not far.dodge and far.fb == 0,
+        "(kp-far) 門 52 格處才開：途中不判堵、不繞行、不鎖輪（blocked=" .. tostring(far.blocked) .. " dodge="
+        .. tostring(far.dodge) .. " fb=" .. far.fb .. "）")
+    checkTrue(far.minSpeed >= ctl.minSpeed - 0.5 and far.minVis >= 70,
+        "(kp-far) 門關著的那段不減速：最低 " .. string.format("%.2f", far.minSpeed) .. "（無門對照 "
+        .. string.format("%.2f", ctl.minSpeed) .. "）、可視帽最低 " .. string.format("%.1f", far.minVis))
+    checkTrue(far.x > G + 10 and far.speed > 60 and MDAD.Drive.isActive(0),
+        "(kp-far) 門開後照速通過（x=" .. string.format("%.1f", far.x) .. " v=" .. string.format("%.1f", far.speed) .. "）")
+    checkTrue(farEv ~= nil and farEv.d > 52 and farEv.speed > 60 and gateEv("hard") == nil,
+        "(kp-far) 記 gate far（d=" .. tostring(farEv and farEv.d) .. " speed=" .. tostring(farEv and farEv.speed)
+        .. "）、沒有 hard")
+
+    -- (kp-closed)
+    world(true)
+    local cl = run(G - D0, nil, 8)
+    local hardEv = gateEv("hard")
+    checkTrue(cl.maxFront < G and cl.speed == 0 and st.blocked == true,
+        "(kp-closed) 門一直不開：停在門前、車頭不越過門線、判堵（車頭最遠 " .. string.format("%.2f", cl.maxFront)
+        .. "、門線 " .. G .. "、v=" .. string.format("%.1f", cl.speed) .. " blocked=" .. tostring(st.blocked) .. "）")
+    checkTrue(gateEv("far") ~= nil and hardEv ~= nil and hardEv.why == "near" and hardEv.d <= hardEv.need + 1e-6
+            and hardEv.speed > 0,
+        "(kp-closed) 先 far 後 hard why=near（d=" .. tostring(hardEv and hardEv.d) .. " need="
+        .. tostring(hardEv and hardEv.need) .. " speed=" .. tostring(hardEv and hardEv.speed) .. "）")
+    -- 倒車退到判距外（gateNearM 停著＝停止線＋halfL）：照樣判堵（why=latch），不變回 far 再開回來；
+    -- 之後照 blocked 停等走完：停等 BLOCK_RETRY_MS 無縫→倒車（harness 車退不動）→額度用完→紅字交還 StopStuck。
+    local evN = #events
+    dveh._x, dveh._speed = dveh._x - 15, 0
+    MDADSensor.reset(st.sensor)
+    local reFront, farAgain, latched = -math.huge, false, false
+    for _ = 1, 1500 do
+        if not MDAD.Drive.isActive(0) then break end
+        advance(0.02)
+        if st.sensor.gateX ~= nil then
+            if st.sensor.gateHard == false then farAgain = true end
+            if st.sensor.gateHard == "latch" then latched = true end
+        end
+        if dveh._x + st.vehicleProfile.halfL > reFront then reFront = dveh._x + st.vehicleProfile.halfL end
+    end
+    checkTrue(latched and not farAgain and reFront < G and #events == evN,
+        "(kp-closed) 退出判距外仍是硬物（latch=" .. tostring(latched) .. " farAgain=" .. tostring(farAgain)
+        .. " 車頭最遠 " .. string.format("%.2f", reFront) .. "）、不重記事件")
+    local sawUnstick = false
+    for i = 1, #halos do if haloKey(i) == DKEY.UNSTICK then sawUnstick = true end end
+    checkTrue(sawUnstick and not MDAD.Drive.isActive(0) and haloKey(#halos) == DKEY.STUCK,
+        "(kp-closed) 之後照 blocked 停等：倒車重試、額度用完紅字交還（unstick=" .. tostring(sawUnstick)
+        .. " active=" .. tostring(MDAD.Drive.isActive(0)) .. " last=" .. tostring(haloKey(#halos)) .. "）")
+
+    -- (kp-off)：API 不在／丟錯／回 false＝舊制（遠處就是硬物、判堵、不截前緣、沒有 gate 事件）
+    local base = nil
+    for _, mode in ipairs({ "absent", "throw", "no" }) do
+        apiMode, apiCalls = mode, 0
+        KnoxPassAPI = mode ~= "absent" and api or nil
+        world(true)
+        arm(G - D0)
+        drive.scanRound(true)
+        local sen = st.sensor
+        local got = { hardN = sen.hardN, sig = sen.sig, scanEndS = sen.scanEndS, blocked = st.blocked == true,
+            gate = sen.gateX, ev = #events }
+        if base == nil then base = got end
+        checkTrue(got.hardN > 0 and got.blocked and got.gate == nil and got.ev == 0 and got.scanEndS > D0
+                and got.hardN == base.hardN and got.sig == base.sig and got.scanEndS == base.scanEndS
+                and (mode == "absent") == (apiCalls == 0),
+            "(kp-off) " .. mode .. "：照舊硬物判堵、不截前緣（hardN=" .. got.hardN .. " end=" .. tostring(got.scanEndS)
+            .. " blocked=" .. tostring(got.blocked) .. " gate=" .. tostring(got.gate) .. " calls=" .. apiCalls .. "）")
+    end
+
+    -- (kp-other)：API 只認標記的門
+    apiMode, KnoxPassAPI = "tagged", api
+    world(true, false)
+    arm(G - D0)
+    drive.scanRound(true)
+    checkTrue(st.sensor.hardN == base.hardN and st.blocked == true and st.sensor.gateX == nil and apiCalls > 0,
+        "(kp-other) 不是 Knox Pass 的門：照舊硬物判堵（hardN=" .. st.sensor.hardN .. " blocked=" .. tostring(st.blocked) .. "）")
+    world(true, true)
+    arm(G - D0)
+    drive.scanRound(true)
+    -- 帶外（|l|>3）的門格照舊是硬物，但在行駛線外，不擋線
+    local outer = true
+    for i = 1, st.sensor.hardN do
+        if math.abs(st.sensor.hardLc[i]) < 3 then outer = false end
+    end
+    checkTrue(st.sensor.gateX ~= nil and st.sensor.gateHard == false and st.sensor.scanEndS < D0
+            and outer and not st.blocked,
+        "(kp-other) 正對照：標記的門遠處只截前緣、帶內不當硬物（gateHard=" .. tostring(st.sensor.gateHard) .. " end="
+        .. tostring(st.sensor.scanEndS) .. " hardN=" .. st.sensor.hardN .. " 只剩帶外=" .. tostring(outer) .. "）")
+
+    MDAD.Drive.stop(0, nil)
+    KnoxPassAPI, MDADDiagnostics.event, MDADDiagnostics.sample = oldKnox, oldEvent, oldSample
+    drive.frameMs(wasMs)
+    MDAD.HUD.perceptionDistance, MDAD.HUD.zombieDodge = oldPerception, oldZ
+    MDAD.Drive.setGear(0, oldGear)
+    MinidoracatMiniMapAPI.navApiVersion = oldApi
+    drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
+    drive.world, drive.vehGeo, SandboxVars, dveh, getSpecificPlayer =
+        oldWorld, oldGeo, oldSandbox, oldVeh, oldGet
+end
+drive.scenarioKnoxGate()
+
 -- 會車／跟車（2026-09-24 雙客戶端 E2E 定罪：舊制帶內有行進車就壓 20、<10m 煞停，兩台自駕
 -- 面對面停死；人工車佔中線只煞不閃被迎面撞上）。真 Sensor＋真 Driver，假車用 putVehicleGeom
 -- 的真 OBB，兩輪之間真的移動（同一台車同一個 id，Sensor 才算得出沿路線速度）。
