@@ -1977,6 +1977,17 @@ function MDADSensor.bushNear(state, vehicle, cell, cx, cy, r, outObj, outX, outY
     return n
 end
 
+-- 門格 (gx,gy)（格心，世界座標非負）現在是不是關著的門（1005f，Driver Drive.gateShutRetry 冷路徑一次）：快照可能是
+-- 停住前開始的那一輪，提示前再讀一次格級屬性。未載入或判不了＝false（不提示，寧可漏報不誤報）。
+function MDADSensor.gateClosedAt(state, vehicle, cell, gx, gy)
+    if type(state) ~= "table" or not vehicle or not cell or not finite(gx) or not finite(gy) then return false end
+    if not flagsBound then bindFlags() end
+    local z = vehicle:getZ()
+    if not finite(z) then return false end
+    local square = cell:getGridSquare(gx - gx % 1, gy - gy % 1, z - z % 1) -- kahlua-mod-ok: 世界座標非負
+    return square ~= nil and closedDoor(square)
+end
+
 -- 事件驅動 near 探測：current OBB＋車頭前方 1m。
 -- bodyX/bodyY 與 F/N 由 Driver 冷路徑算好；本函式刻意不呼叫需要 caller 提供
 -- output vector 的 vehicle:getForwardVector（BaseVehicle.java:4242-4244），避免在

@@ -18799,10 +18799,12 @@ drive.scenarioVisibilityTiming()
 --   (kv-plain)   一般門回 false 不帶 why：不提示。(kp-off) 也驗 VERSION 2／不在／丟錯不提示；(kp-far) 抵達前打開不提示。
 --   (kv-side)    不會開的門只在帶外：照開過、不提示。
 --   (kv-generic) whyText 出錯、或 VERSION 2 卻帶 why：AutoDrive 通用句。
---   (kv-shut)    會開的門一直不開：停住、等一輪停住 GATE_SHUT_MS 後才開始的掃描仍關著，恰好一次「沒有打開」。
---   (kv-late)    停住 2 秒後才開：不提示。
--- 違規證明（temp/vp_1005d.py）：拿掉去重、拿掉「停住才提示」、GATE_SHUT_MS 改 0、不接 why、沒 why 也當不會開、不帶帶內條件、
--- 不呼叫 whyText、不看 VERSION、提示前移到 replan 之前……逐條紅。
+--   (kv-shut)    會開的門一直不開：停住、等一輪停住 GATE_SHUT_MS 後才開始的掃描仍關著，恰好一次「沒有打開」（detail dwell）。
+--   (kv-steep)   1005f 跑道不足、停穩約 500ms 就倒車：第一次倒車那刻恰好一次（detail retry，語音 unstick→gate），之後不重複。
+--   (kv-steep-open) 倒車前一刻才開：快照仍是關門，提示前再讀門格已開＝不提示。
+--   (kv-late)    停住快滿 GATE_SHUT_MS 才開：不提示。(kv-other) 停在門前別的硬物前：不提示。
+-- 違規證明（temp/vp_1005f.py，含 1005d 全部）：拿掉去重、拿掉「停住才提示」、GATE_SHUT_MS 改 0、不接 why、沒 why 也當不會開、
+-- 不帶帶內條件、不呼叫 whyText、不看 VERSION、提示前移到 replan 之前、拿掉倒車重試呼叫／即時讀門格／倒車前提示……逐條紅。
 function drive.scenarioKnoxGate()
     scenario("Knox Pass 大門：會開的門遠處不判堵不減速、一直不開仍停在門前並退回關門處理、API 不在或否認＝舊制")
     local oldWorld, oldGeo, oldSandbox, oldVeh, oldGet =
@@ -18986,7 +18988,13 @@ function drive.scenarioKnoxGate()
         .. tostring(hardEv and hardEv.need) .. " speed=" .. tostring(hardEv and hardEv.speed) .. "）")
     -- 倒車退到判距外（gateNearM 停著＝停止線＋halfL）：照樣判堵（why=latch），不變回 far 再開回來；
     -- 之後照 blocked 停等走完：停等 BLOCK_RETRY_MS 無縫→倒車（harness 車退不動）→額度用完→紅字交還 StopStuck。
-    local evN = #events
+    -- 1005f：倒車那刻門仍關著會記一筆 shut 提示事件（Drive.gateShutRetry），這裡只數 1005c 的 far／hard 相位不重記
+    local function farHardN()
+        local n = 0
+        for i = 1, #events do if events[i].phase == "far" or events[i].phase == "hard" then n = n + 1 end end
+        return n
+    end
+    local evN = farHardN()
     dveh._x, dveh._speed = dveh._x - 15, 0
     MDADSensor.reset(st.sensor)
     local reFront, farAgain, latched = -math.huge, false, false
@@ -18999,9 +19007,9 @@ function drive.scenarioKnoxGate()
         end
         if dveh._x + st.vehicleProfile.halfL > reFront then reFront = dveh._x + st.vehicleProfile.halfL end
     end
-    checkTrue(latched and not farAgain and reFront < G and #events == evN,
+    checkTrue(latched and not farAgain and reFront < G and farHardN() == evN,
         "(kp-closed) 退出判距外仍是硬物（latch=" .. tostring(latched) .. " farAgain=" .. tostring(farAgain)
-        .. " 車頭最遠 " .. string.format("%.2f", reFront) .. "）、不重記事件")
+        .. " 車頭最遠 " .. string.format("%.2f", reFront) .. "）、不重記 far／hard 事件")
     local sawUnstick = false
     for i = 1, #halos do if haloKey(i) == DKEY.UNSTICK then sawUnstick = true end end
     checkTrue(sawUnstick and not MDAD.Drive.isActive(0) and haloKey(#halos) == DKEY.STUCK,
@@ -19155,19 +19163,27 @@ function drive.scenarioKnoxGate()
     -- (kv-shut) 預告會開、門一直不開：停在停止線前、停住 GATE_SHUT_MS 後才開始的一輪仍看到門關著＝提示一次（通用句、不帶原因）
     KnoxPassAPI, apiMode = api, "yes"
     local SHUT_MS = MDAD.Drive.debugTune().GATE_SHUT_MS
-    local function approach(openAfterStopMs, maxS)
+    -- steep（選填）：判堵中每幀把 blockSteepM 設成這個值＝跑道不足（停穩 BLOCK_STEEP_RETRY_MS 就倒車）。直路世界湊不出
+    -- steep 幾何，照 testing.md「測試鉤／monkeypatch 上游值」直接給（replan 判堵那輪寫它，這裡每幀蓋回）。
+    local function approach(openAfterStopMs, maxS, steep)
         world(true)
         arm(G - D0)
-        local r = { h0 = #halos, v0 = #drive.voiceLog, stopAt = nil, warnAt = nil, warnSpeed = nil, openedAt = nil }
+        local r = { h0 = #halos, v0 = #drive.voiceLog, stopAt = nil, warnAt = nil, warnSpeed = nil, openedAt = nil,
+            unstickAt = nil, warnVoice = nil, warnPrevVoice = nil }
         for _ = 1, math.floor(maxS / 0.02) do
             if not MDAD.Drive.isActive(0) then break end
             if r.stopAt and openAfterStopMs and r.openedAt == nil and nowMs - r.stopAt >= openAfterStopMs then
                 setOpen(true)
                 r.openedAt = nowMs
             end
+            if steep and st.blocked then st.blockSteepM = steep end
             advance(0.02)
             if r.stopAt == nil and st.blocked and dveh._speed == 0 then r.stopAt = nowMs end
-            if r.warnAt == nil and warnN(r.h0) > 0 then r.warnAt, r.warnSpeed = nowMs, dveh._speed end
+            if r.unstickAt == nil and st.mode == "unstick" then r.unstickAt = nowMs end
+            if r.warnAt == nil and warnN(r.h0) > 0 then
+                r.warnAt, r.warnSpeed = nowMs, dveh._speed
+                r.warnVoice, r.warnPrevVoice = drive.voiceLog[#drive.voiceLog], drive.voiceLog[#drive.voiceLog - 1]
+            end
             if r.openedAt and dveh._x > G + 10 then break end
         end
         r.x = dveh._x
@@ -19179,9 +19195,52 @@ function drive.scenarioKnoxGate()
             and warnN(sh.h0, KEY_SHUT) == 1 and warnN(sh.h0) == 1,
         "(kv-shut) 停住後恰好一次「沒有打開」（停住→提示 " .. tostring(sh.warnAt and sh.stopAt and sh.warnAt - sh.stopAt)
         .. " ms、提示時車速 " .. tostring(sh.warnSpeed) .. "、提示 " .. warnN(sh.h0) .. "）")
-    checkTrue(gateVoices(sh.v0) == 1 and shutEv ~= nil and shutEv.why == nil and shutEv.ms >= SHUT_MS
-            and st.gateWarnPhase == "shut" and st.gateWarnWhy == nil,
-        "(kv-shut) 語音 gate 一次、telemetry gate shut（ms=" .. tostring(shutEv and shutEv.ms) .. "）、session gateWarnPhase=shut")
+    checkTrue(gateVoices(sh.v0) == 1 and shutEv ~= nil and shutEv.why == nil and (shutEv.ms or -1) >= SHUT_MS
+            and st.gateWarnPhase == "shut" and st.gateWarnWhy == nil and st.gateWarnDetail == "dwell" and shutEv.detail == "dwell",
+        "(kv-shut) 語音 gate 一次、telemetry gate shut detail=dwell（ms=" .. tostring(shutEv and shutEv.ms) .. " detail="
+        .. tostring(shutEv and shutEv.detail) .. "）、session gateWarnPhase=shut")
+
+    -- (kv-cell) 兩個觸發點共用的條件 Drive.gateShutCell 直接問（判堵已解除但錨還留著這類狀態整合情境湊不出來，testing.md）：
+    -- 判堵中＋門已退回硬物＋錨在門 8m 內＝門格；任一不成立＝nil。
+    local function cellOf(over)
+        local f = { blocked = true, blockHitX = 150.5, blockHitY = 1.5,
+            sensor = { gateHard = "near", gateX = 150.5, gateY = 0.5 } }
+        for k, v in pairs(over or {}) do
+            if k == "gateHard" then f.sensor.gateHard = v
+            elseif k == "noGate" then f.sensor.gateX, f.sensor.gateY = nil, nil
+            else f[k] = v end
+        end
+        return MDAD.Drive.gateShutCell(f)
+    end
+    local cx = cellOf()
+    checkTrue(cx == 150.5 and cellOf({ blocked = false }) == nil and cellOf({ gateHard = false }) == nil
+            and cellOf({ blockHitX = 160 }) == nil and cellOf({ blockHitX = 157 }) == 150.5 and cellOf({ noGate = true }) == nil
+            and cellOf({ sensor = false }) == nil,
+        "(kv-cell) gateShutCell：成立回門格、未判堵／門未退回／錨離門 >8m／快照沒有門／沒有感測＝nil（成立=" .. tostring(cx) .. "）")
+
+    -- (kv-steep) 1005f 實機（道路上橫一整排會開的門、門一直不開）：跑道不足＝停穩約 BLOCK_STEEP_RETRY_MS 就倒車，停不滿
+    -- GATE_SHUT_MS。第一次倒車那一刻提示 shut（detail retry），語音 unstick 先播、gate 接著蓋掉；之後倒車額度用完、
+    -- 交還前都不再重複。
+    local stp = approach(nil, 30, 3)
+    local stpEv = gateEv("shut")
+    checkTrue(stp.stopAt ~= nil and stp.unstickAt ~= nil and stp.unstickAt - stp.stopAt < SHUT_MS
+            and stp.warnAt == stp.unstickAt and warnN(stp.h0, KEY_SHUT) == 1 and warnN(stp.h0) == 1,
+        "(kv-steep) 停住很快倒車：第一次倒車那刻提示一次（停住→倒車 " .. tostring(stp.unstickAt and stp.stopAt
+            and stp.unstickAt - stp.stopAt) .. " ms、倒車→提示 " .. tostring(stp.warnAt and stp.unstickAt
+            and stp.warnAt - stp.unstickAt) .. " ms、提示 " .. warnN(stp.h0) .. "）")
+    checkTrue(stp.warnPrevVoice == "unstick" and stp.warnVoice == "gate" and gateVoices(stp.v0) == 1
+            and stpEv ~= nil and stpEv.detail == "retry" and st.gateWarnDetail == "retry" and not MDAD.Drive.isActive(0),
+        "(kv-steep) 語音 unstick→gate、gate 只一次、telemetry shut detail=retry、之後照常交還（"
+        .. tostring(stp.warnPrevVoice) .. "→" .. tostring(stp.warnVoice) .. " gate 語音 " .. gateVoices(stp.v0)
+        .. " detail=" .. tostring(stpEv and stpEv.detail) .. " active=" .. tostring(MDAD.Drive.isActive(0)) .. "）")
+
+    -- (kv-steep-open) 同樣很快倒車，但門在停住 260ms（倒車前一刻）才開：倒車那刻的快照是開門前開始的那一輪（仍看到關門、判堵照舊），
+    -- 提示前再讀門格（MDADSensor.gateClosedAt）已經開了＝不提示。倒車照舊（判堵用的是同一份舊快照，不在本刀範圍）。
+    local stpo = approach(260, 6, 3)
+    checkTrue(stpo.stopAt ~= nil and stpo.openedAt ~= nil and stpo.unstickAt ~= nil and stpo.openedAt <= stpo.unstickAt
+            and warnN(stpo.h0) == 0 and gateVoices(stpo.v0) == 0 and gateEv("shut") == nil,
+        "(kv-steep-open) 倒車前一刻才開的門：不提示（停住→開門 " .. tostring(stpo.openedAt and stpo.stopAt
+            and stpo.openedAt - stpo.stopAt) .. " ms、倒車=" .. tostring(stpo.unstickAt ~= nil) .. "、提示 " .. warnN(stpo.h0) .. "）")
 
     -- (kv-late) 停住 GATE_SHUT_MS−200ms 才開（伺服器延遲）：不提示。開門前開始的那一輪在 GATE_SHUT_MS 時仍是關著的快照，
     -- 所以門檻比的是「輪的開始時間」不是現在時間。（開門後通不通過不在這裡驗：harness 車退不動，blocked-retry 會先交還。）
