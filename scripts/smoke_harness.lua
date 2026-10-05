@@ -24457,6 +24457,73 @@ function drive.scenarioLagGuard()
 end
 drive.scenarioLagGuard()
 
+-- 1006m（replay S 彎 F350：出彎直路 75 km/h ld 0.81→0.67 走了約 20m，理論純追跡衰減把 12m 外的路緣物判成不重疊，守門到車前
+--   12m 才 arm、60 km/h 接觸）：衰減取理論與實測收斂率（Drive.lagRate）較慢者。直路、常駐線 0、每輪前進 4m、75 km/h、
+--   細物在 hs 225、離規劃車身 0.3（lc＝halfW＋r＋0.3）。
+--   (lag-slow) ld 0.9 起以 0.0095/m 收斂（≈實測）：車頭前約 95m 就 arm，arm 時接近包絡仍 ≥ 75（包絡來得及壓到 MIN_EXEC）。
+--     違規證明：不用實測率（rate 恆 nil）＝紅。
+--   (lag-theory) 照理論速率收斂（0.04/m）：一路不 arm（實測比理論快時行為同現行）。違規證明：取較快者（min）以外的寫法見 vp。
+--   (lag-grow) |ld| 變大：rate＝0（不衰減）。違規證明：變大也算負衰減／照算＝紅。
+--   (lag-reset) 期望線兩輪間跳 > LAG_HIST_JUMP_M、ld 換號、承諾線換手：歷史重置（rate nil）。違規證明：拿掉任一重置＝紅。
+function drive.scenarioLagRate()
+    scenario("1006m：實測落後量守門的衰減取理論與實測收斂較慢者——落後幾乎不收斂時提早 arm")
+    local Dr, F, T = MDAD.Drive, MDADFollower, MDAD.Drive.debugTune()
+    local prof = F.begin({ pts = { 0, 0, 400, 0 } }, 60, 2)
+    while not F.stepBuild(prof, 4096) do end
+    local fs = F.newState()
+    F.setLaneBias(fs, 0)
+    local halfW, halfL, r, HS = 0.9, 2.9, 0.15, 225
+    local lc = halfW + r + 0.3
+    local sen = { ready = true, hardN = 1, hardS = { HS }, hardL = { lc }, hardLc = { lc }, hardW = { r }, hardR = { r },
+        hardX = { HS }, hardY = { lc } }
+    local function newS()
+        return { sensor = sen, fstate = fs, profile = prof, dodging = false, lastSNow = 0, lastLatDev = 0, diagExpL = 0,
+            safeBrake = 6, vehicleProfile = { halfW = halfW, halfL = halfL }, lagHistD = {}, lagHistL = {}, lagHistN = 0 }
+    end
+    -- 每輪前進 4m：回第一次 arm 時的車位（沒 arm＝nil）
+    local function run(s, lam)
+        local armX = nil
+        for x = 120, 152, 4 do
+            s.lastSNow, s.lastLatDev = x, 0.9 * math.exp(-lam * (x - 120))
+            Dr.lagGuardScan(s, 0, 75, x, 0)
+            if armX == nil and s.lagHitX ~= nil then armX = x end
+        end
+        return armX
+    end
+    local s = newS()
+    local armX = run(s, 0.0095)
+    local dist = armX and (HS - armX - halfL - r) or 0
+    local env = MDADDynamics.approachCapKmh(dist, MDADDynamics.MIN_EXEC_KMH, 0.5, 6 * T.APPROACH_BRAKE_FRAC)
+    checkTrue(armX ~= nil and env >= 75,
+        "(lag-slow) 落後幾乎不收斂（0.0095/m）：提早 arm、arm 時包絡仍 ≥ 75（armX=" .. tostring(armX) .. " dist="
+        .. string.format("%.1f", dist) .. " env=" .. string.format("%.1f", env) .. "）")
+    s = newS()
+    checkNil(run(s, 0.04), "(lag-theory) 照理論速率收斂：一路不 arm（行為同只用理論衰減）")
+    -- (lag-grow)
+    s = newS()
+    s.lastLatDev = 0.5
+    checkNil(Dr.lagRate(s, 0.5, 100, 0, true), "(lag-grow) 前置：第一輪歷史不夠＝nil")
+    checkEq(Dr.lagRate(s, 0.7, 104, 0, true), 0, "(lag-grow) |ld| 變大：rate＝0（不衰減）")
+    local lam = Dr.lagRate(s, 0.6, 108, 0, true)
+    checkTrue(lam == 0, "(lag-grow) 比 8m 前的 0.5 仍大：rate＝0（實得 " .. tostring(lam) .. "）")
+    lam = Dr.lagRate(s, 0.4, 112, 0, true)
+    checkNear(lam, math.log(0.5 / 0.4) / 12, 1e-9, "(lag-grow) 收斂：取窗內最遠的樣本 ln(舊/新)／距離")
+    -- (lag-reset)
+    s.diagExpL = 0.5
+    checkNil(Dr.lagRate(s, 0.4, 116, 0, true), "(lag-reset) 期望線兩輪間跳 0.5：重置")
+    Dr.lagRate(s, 0.5, 120, 0, true)
+    checkNil(Dr.lagRate(s, -0.4, 124, 0, true), "(lag-reset) ld 換號：重置")
+    Dr.lagRate(s, -0.5, 128, 0, true)
+    s.dodging, fs.ovS0 = true, 10
+    checkNil(Dr.lagRate(s, -0.4, 132, 0, true), "(lag-reset) 承諾線換手：重置")
+    s.dodging = false
+    Dr.lagRate(s, -0.5, 136, 0, true)
+    checkNil(Dr.lagRate(s, -0.4, 140, 0, false), "(lag-reset) 守門不判的狀態：重置")
+    checkNil(Dr.lagRate(s, -0.3, 144, 0, true), "(lag-reset) 重置後第一輪歷史不夠＝nil")
+    fs.ovS0 = nil
+end
+drive.scenarioLagRate()
+
 do -- 主 chunk local 槽已滿：整段包成函式，內部 local 不佔主 chunk
 -- =====================================================================
 -- v6 多停靠點行程（docs/addon-api.md §6）

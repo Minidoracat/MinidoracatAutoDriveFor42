@@ -126,6 +126,8 @@ local EK = {
     "dv", "snapDist", "cur", "alive", "by", "hd", "up", "phi",
     -- 側向脫困（1006，unstick phase=side）：推的那側（+1＝車頭向量 (−fy,fx) 側）、收手時的側推加速度 m/s²
     "dir", "acc",
+    -- lag arm（1006m）：實測落後的收斂率 λ（每公尺；0＝沒在收斂，缺＝歷史不夠、只用理論衰減）
+    "rate",
 }
 
 local function logOnce(msg)

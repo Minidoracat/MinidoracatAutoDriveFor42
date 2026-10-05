@@ -500,6 +500,11 @@ TUNE.PROOF_HIT_SAME_M = 2.0
 -- 實測落後量守門（1006c，Drive.lagGuardScan）：|實測橫偏| 低於這個值不預測車身。一般跟線抖動在這以下，而常駐線的硬點
 -- 本來就離規劃車身 ≥ needHalf−halfW（0.3），更小的落後碰不到它。
 TUNE.LAG_GUARD_MIN_M = 0.3
+-- 實測收斂率（Drive.lagRate；1006m replay S 彎 F350）：環狀歷史格數、取舊樣本的距離窗（公尺）、期望線兩輪間跳多少算換線（重置）
+TUNE.LAG_HIST_N = 8
+TUNE.LAG_HIST_MIN_M = 3
+TUNE.LAG_HIST_SPAN_M = 25
+TUNE.LAG_HIST_JUMP_M = 0.2
 local CORNER_NEAR = 8          -- sweep 失敗點離折點多近算「折點衝突」（BLOCKED_CORNER 判定）
 local CORNER_RETRY_DIST = 3    -- corner latch 撤銷距離：漸進接近讓車前進這麼多＝
                                -- 幾何已變、重新枚舉——實測「靠很近開導航就能繞」
@@ -2255,6 +2260,7 @@ local function startSession(playerObj, playerNum, stage)
         startNearSince = 0, startNearCap = nil, -- 起步近物限速停住計時／本幀低於 MIN_EXEC 的帽（Drive.startNearStall）
         holdLaneL = nil, -- 斜切保持的 lane（Drive.transitionHold；nil＝沒保持）
         lagHitX = nil, lagHitY = nil, lagHitR = nil, -- 實測落後量守門的命中硬點（Drive.lagGuardScan；nil＝沒命中）
+        lagHistD = {}, lagHistL = {}, lagHistN = 0, -- 實測收斂率的環狀歷史（Drive.lagRate：累計行駛距離／|實測橫偏|）
         progressX = 0, progressY = 0, progressS = 0, progressH = 0,
         progressUntil = 0,
         resumeProgressPhase = nil,
@@ -9322,12 +9328,16 @@ end
 -- 每幀由 Drive.lagGuardCap 套接近包絡。規劃線：承諾線（ov 線）涵蓋處取線本身——硬點形狀中心橫向扣掉它對線的帶號橫偏
 -- （線的 CCW 法向，同 Sensor l 的正向）；其餘取常駐連續落點（同 fillHardBase）。預測橫偏：車在承諾線的進入或出口 ramp
 -- 上、硬點也在同一段 ramp 內＝不衰減（斜線的穩態落後；1006c 整段 ramp 持平 1.55–1.70，從車頭起衰減要到 20m 內才判得到、
--- 停不住）；其餘從車頭（或 ramp 尾）起以純追跡最慢收斂 (1+kx)e^−kx 衰減（同 Drive.transitionHold）。|橫偏| <
--- TUNE.LAG_GUARD_MIN_M 不判。RETURN／調頭／判堵各有自己的淨距體系，不判。arm／release 記 lag 事件（console 同一句）。
-function Drive.lagGuardScan(s, playerNum, speedKmh)
+-- 停不住）；其餘從車頭（或 ramp 尾）起衰減，衰減取「純追跡最慢收斂 (1+kx)e^−kx（同 Drive.transitionHold）」與「實測收斂
+-- e^−λx（Drive.lagRate）」較慢者——1006m replay S 彎 F350：出彎直路 75 km/h ld 0.81→0.67 走了約 20m，理論衰減把 12m 外的
+-- 路緣物判成不重疊，守門到車前 12m 才 arm、60 km/h 接觸。|橫偏| < TUNE.LAG_GUARD_MIN_M 不判。RETURN／調頭／判堵各有
+-- 自己的淨距體系，不判。arm／release 記 lag 事件（arm 帶 rate＝實測 λ；console 同一句）。
+function Drive.lagGuardScan(s, playerNum, speedKmh, vx, vy)
     local sen, fs, vp, ld = s.sensor, s.fstate, s.vehicleProfile, s.lastLatDev
     local hit, why, bl = nil, "owner", nil
-    if fs.rotating ~= true and not s.returnActive and not s.blocked and sen.ready and finite(ld) then
+    local live = fs.rotating ~= true and not s.returnActive and not s.blocked and sen.ready and finite(ld)
+    local rate = Drive.lagRate(s, ld, vx, vy, live)
+    if live then
         why = "clear"
         if ld >= TUNE.LAG_GUARD_MIN_M or ld <= -TUNE.LAG_GUARD_MIN_M then
             local prof, rs, halfL = s.profile, s.lastSNow, vp.halfL
@@ -9362,7 +9372,12 @@ function Drive.lagGuardScan(s, playerNum, speedKmh)
                             if hs <= rampEnd then from = hs elseif rampEnd > from then from = rampEnd end
                         end
                         local kx = k * (hs - from)
-                        local body = pl + ld * (1 + kx) * math.exp(-kx)
+                        local f = (1 + kx) * math.exp(-kx)
+                        if rate ~= nil then
+                            local m = math.exp(-rate * (hs - from))
+                            if m > f then f = m end
+                        end
+                        local body = pl + ld * f
                         if blocksLine(sen, i, body, vp.halfW) then bestS, hit, bl = hs, i, body end
                     end
                 end
@@ -9384,13 +9399,52 @@ function Drive.lagGuardScan(s, playerNum, speedKmh)
     if not finite(r) or r < 0 then r = MDADCorridor.OBS_HALF end
     if not finite(s.lagHitX) then
         diagEvent(s, playerNum, "lag", { phase = "arm", dev = ld, l = bl, hitS = sen.hardS[hit],
-            hitX = sen.hardX[hit], hitY = sen.hardY[hit], rs = s.lastSNow, speed = speedKmh })
+            hitX = sen.hardX[hit], hitY = sen.hardY[hit], rs = s.lastSNow, speed = speedKmh, rate = rate })
         if getDebug() then
-            print(string.format("%spn=%d lag guard arm dev=%.2f body=%.2f hit=(%.1f,%.1f) s=%.1f rs=%.1f v=%.1f", LOG,
-                playerNum, ld, bl, sen.hardX[hit], sen.hardY[hit], sen.hardS[hit], s.lastSNow, speedKmh))
+            print(string.format("%spn=%d lag guard arm dev=%.2f body=%.2f hit=(%.1f,%.1f) s=%.1f rs=%.1f v=%.1f rate=%s", LOG,
+                playerNum, ld, bl, sen.hardX[hit], sen.hardY[hit], sen.hardS[hit], s.lastSNow, speedKmh, tostring(rate)))
         end
     end
     s.lagHitX, s.lagHitY, s.lagHitR = sen.hardX[hit], sen.hardY[hit], r
+end
+
+-- 實測收斂率（Drive.lagGuardScan 每個掃描輪呼叫一次）：記 |實測橫偏| 與累計世界行駛距離的環狀歷史（TUNE.LAG_HIST_N 格，
+-- 預配在 session），回 λ（每公尺）＝ln(舊 |ld| ／ 目前 |ld|)／距離，舊樣本取距離在 [LAG_HIST_MIN_M, LAG_HIST_SPAN_M] 內最遠
+-- 的那筆；|ld| 沒在縮小＝0（不衰減）；歷史不夠＝nil（只用理論衰減）。期望線換了就重置：承諾線換手（dodging／ovS0）、
+-- ld 換號、期望線 el（s.diagExpL）兩輪間跳超過 LAG_HIST_JUMP_M、守門不判的狀態（live＝false）——否則把 el 跳變當成收斂。
+function Drive.lagRate(s, ld, vx, vy, live)
+    local hd, hl, N = s.lagHistD, s.lagHistL, TUNE.LAG_HIST_N
+    local el, key, n = s.diagExpL, s.dodging and s.fstate.ovS0 or false, s.lagHistN
+    if not live or not finite(vx) or not finite(vy) or not finite(el) or key ~= s.lagHistKey
+            or (n > 0 and ((ld >= 0) ~= (s.lagHistSign >= 0)
+                or el - s.lagHistEl > TUNE.LAG_HIST_JUMP_M or s.lagHistEl - el > TUNE.LAG_HIST_JUMP_M)) then
+        n = 0
+    end
+    s.lagHistKey = key
+    if not live or not finite(vx) or not finite(vy) or not finite(el) then
+        s.lagHistN = 0
+        return nil
+    end
+    local cum = 0
+    if n > 0 then
+        local dx, dy = vx - s.lagHistX, vy - s.lagHistY
+        cum = s.lagHistCum + sqrt(dx * dx + dy * dy)
+    end
+    local a = ld < 0 and -ld or ld
+    n = n + 1
+    local slot = (n - 1) % N + 1 -- kahlua-mod-ok: n ≥ 1
+    hd[slot], hl[slot] = cum, a
+    s.lagHistN, s.lagHistCum, s.lagHistX, s.lagHistY, s.lagHistEl, s.lagHistSign = n, cum, vx, vy, el, ld
+    local bestD, old = nil, nil
+    for j = 1, (n < N and n or N) do
+        local d = cum - hd[j]
+        if d >= TUNE.LAG_HIST_MIN_M and d <= TUNE.LAG_HIST_SPAN_M and (bestD == nil or d > bestD) then
+            bestD, old = d, hl[j]
+        end
+    end
+    if bestD == nil then return nil end
+    if a <= 0 or a >= old then return 0 end
+    return math.log(old / a) / bestD
 end
 
 -- 預檢與正式規劃共用同一組群／候選，避免預檢普通縫、正式卻換成彎道加寬縫。
@@ -12139,7 +12193,7 @@ local function stepFollow(s, vehicle, playerNum, now)
                 -- 寬帶判過一輪：最寬那級判完（不論結果）這次脫困嘗試的倒車／改道才可以動；仍堵且還能加寬就先升級（Drive.wideJudge）
                 if s.sensor.wideDone then Drive.wideJudge(s, playerNum) end
                 Drive.gateNote(s, playerNum, vehicle, speedKmh) -- Knox Pass 大門：gate 事件與不會開的提示（Sensor gateCell／gateNoCell）
-                Drive.lagGuardScan(s, playerNum, speedKmh) -- 實測落後量守門：規劃線＋實測橫偏的預測車身碰到哪個硬點（replan 後，持有者已定）
+                Drive.lagGuardScan(s, playerNum, speedKmh, vx, vy) -- 實測落後量守門：規劃線＋實測橫偏的預測車身碰到哪個硬點（replan 後，持有者已定）
                 -- 承諾只覆蓋到offD；已知下一台在窗外也要先留出停車與重新選縫的距離。
                 s.dodgeNextStopS = nil
                 s.dodgeNextX, s.dodgeNextY, s.dodgeNextR = nil, nil, nil
