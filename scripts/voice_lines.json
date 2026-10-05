@@ -70,6 +70,11 @@
     "text": "[playful, sweet] 好呀～先陪你去这里，再回原本的行程哦～"
   },
   {
+    "id": "gate_zh",
+    "language": "zh",
+    "text": "[pouty, whiny] 咦～前面的大门打不开耶，怎么办嘛～"
+  },
+  {
     "id": "start_en",
     "language": "en",
     "text": "[excited, sweet] Here we go! Let me drive you today!"
@@ -140,6 +145,11 @@
     "text": "[playful, sweet] Sure! Let's stop here first, then back to the plan!"
   },
   {
+    "id": "gate_en",
+    "language": "en",
+    "text": "[pouty, whiny] Hmm, the gate up ahead won't open... What do we do now?"
+  },
+  {
     "id": "start_ja",
     "language": "ja",
     "text": "[excited, sweet] しゅっぱーつ！今日はわたしが連れてってあげるね！"
@@ -208,5 +218,10 @@
     "id": "priority_ja",
     "language": "ja",
     "text": "[playful, sweet] いいよ～！先にここに寄って、それから元の予定に戻ろうね！"
+  },
+  {
+    "id": "gate_ja",
+    "language": "ja",
+    "text": "[pouty, whiny] あれ～、前のゲート、開かないみたい……どうしよう？"
   }
 ]

@@ -57,6 +57,8 @@
 --     state.gateS/gateX/gateY  本輪最近一格「Knox Pass 會開的關門」的弧長與世界格心（nil＝沒有）；
 --                      gateHard＝false（遠處：只截可視前緣）／"near"／"latch"（同格另當硬物，見 gateCell）。
 --                      請求欄 state.gateNearM 由 Driver 每輪寫（Drive.updatePerception）
+--     state.gateNoS/gateNoX/gateNoY/gateNoWhy  本輪中央帶內最近一格「Knox Pass 不會替這台車開的關門」（API 回
+--                      false＋why）的弧長、世界格心與原因代碼（nil＝沒有）；那格照舊整格硬物，只供 Driver 提示（gateNoCell）
 --     state.sig        整數簽章：障礙布局有變才會變（呼叫端拿它省掉重複規劃）
 --     state.scanS      本輪掃描起點弧長；state.scanEndS 終點弧長
 --     state.stamp      本輪完成時的 now（判資料新鮮度）
@@ -498,19 +500,30 @@ local GATE_LATCH_R2 = 8 * 8 -- 退回門格的同門半徑平方（柵門最寬�
 
 -- 這格（關著的門）有沒有一片是 Knox Pass 會替這台車開的；只在 closedDoor 為真時呼叫，一格一次。
 -- 契約：偵測 type 檢查、呼叫包 pcall、出錯或非 true 一律 false。API 每次呼叫會配置一條短字串與一張小表（契約載明），
--- 只發生在關門格。
+-- 只發生在關門格。第二回傳＝API 說「這扇裝了讀頭的門不會替這台車開」的原因代碼（VERSION ≥ 3 的 `false, why`；
+-- 常數字串、不配置；第一片給的為準），只供 gateNoCell 記錄提示用，不改這格的處理。
 local function gateWillOpen(state, vehicle, objs, nObj)
     local api = KnoxPassAPI
     if type(api) ~= "table" or type(api.willOpenFor) ~= "function" then return false end
+    local no = nil
     for i = 1, nObj do
         local obj = objs:get(i - 1)
         local name = obj:getSpriteName()
         if name ~= nil and spriteCostOf(state, obj, name) == COST_DOOR then
-            local ok, yes = pcall(api.willOpenFor, vehicle, obj)
+            local ok, yes, why = pcall(api.willOpenFor, vehicle, obj)
             if ok and yes == true then return true end
+            if ok and no == nil and type(why) == "string" then no = why end
         end
     end
-    return false
+    return false, no
+end
+
+-- 不會替這台車開的 Knox Pass 門格（1005d；gateWillOpen 帶 why、中央帶內）：這格照舊整格硬物（關門處理不變），
+-- 只記本輪最近一格的弧長／世界格心／原因，給 Driver 提示玩家（Drive.gateNote phase no）。
+local function gateNoCell(state, wx, wy, why)
+    if state.wGateNoS == nil or state.curS < state.wGateNoS then
+        state.wGateNoS, state.wGateNoX, state.wGateNoY, state.wGateNoWhy = state.curS, wx + 0.5, wy + 0.5, why
+    end
 end
 
 -- 會開的門格（scanCell 冷分支）：截可視前緣、記本輪最近的門；回 true＝這格同時當硬物（帶外、近、已退回）。
@@ -841,7 +854,7 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
     if not hard then
         local objs = square:getObjects()               -- IsoGridSquare.java:9635（回 PZArrayList）
         local nObj = objs:size()                       -- 迭代慣例 ISButtonPrompt.lua:535-536
-        local gate = nil                               -- Knox Pass 會開的門（gateWillOpen；nil＝這格還沒問）
+        local gate, gateNo = nil, nil                  -- Knox Pass 會開的門／不會開的原因（gateWillOpen；gate nil＝這格還沒問）
         for i = 1, nObj do
             local obj = objs:get(i - 1)
             local name = obj:getSpriteName()           -- IsoObject.java:2235
@@ -851,7 +864,7 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
                     if not closedDoor(square) then
                         cost = COST_NONE
                     else
-                        if gate == nil then gate = gateWillOpen(state, vehicle, objs, nObj) end
+                        if gate == nil then gate, gateNo = gateWillOpen(state, vehicle, objs, nObj) end
                         if gate then cost = COST_NONE else cost = COST_HARD end
                     end
                 end
@@ -868,7 +881,8 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
                 end
             end
         end
-        if gate and not box then box = gateCell(state, vehicle, wx, wy, inBand) end
+        if gate and not box then box = gateCell(state, vehicle, wx, wy, inBand)
+        elseif gateNo ~= nil and inBand then gateNoCell(state, wx, wy, gateNo) end
         hard = box or wallN or wallW or trunk or thin or bush
     end
 
@@ -1186,6 +1200,7 @@ local function beginRound(state, p, sNow, vehicle, now, len, cell)
     state.wUnloaded = false
     state.wUnloadedS = nil
     state.wGateS, state.wGateX, state.wGateY, state.wGateHard = nil, nil, nil, false
+    state.wGateNoS, state.wGateNoX, state.wGateNoY, state.wGateNoWhy = nil, nil, nil, nil
     state.wSumS = 0
     state.wSumL = 0
     state.wRoadN = 0
@@ -1331,6 +1346,7 @@ local function finishRound(state, now)
     state.unloaded = state.wUnloaded
     state.unloadedS = state.wUnloadedS
     state.gateS, state.gateX, state.gateY, state.gateHard = state.wGateS, state.wGateX, state.wGateY, state.wGateHard
+    state.gateNoS, state.gateNoX, state.gateNoY, state.gateNoWhy = state.wGateNoS, state.wGateNoX, state.wGateNoY, state.wGateNoWhy
     state.rain = state.wRain
     state.actualSurfaceId = state.wActualSurfaceId
     state.roundStartedAt = state.wRoundStartedAt
@@ -1446,6 +1462,9 @@ function MDADSensor.newState()
         wGateS = nil, wGateX = nil, wGateY = nil, wGateHard = false,
         gateS = nil, gateX = nil, gateY = nil, gateHard = false,
         gateNearM = nil, gateLatchX = nil, gateLatchY = nil,
+        -- Knox Pass 不會替這台車開的門（gateNoCell，1005d）：本輪最近一格的弧長／世界格心／API 原因代碼
+        wGateNoS = nil, wGateNoX = nil, wGateNoY = nil, wGateNoWhy = nil,
+        gateNoS = nil, gateNoX = nil, gateNoY = nil, gateNoWhy = nil,
         wSumS = 0,
         wSumL = 0,
         wRoadN = 0,
@@ -1547,6 +1566,7 @@ function MDADSensor.reset(state)
     state.wVehAheadS = nil
     state.wUnloaded = false
     state.wGateS, state.wGateX, state.wGateY, state.wGateHard = nil, nil, nil, false
+    state.wGateNoS, state.wGateNoX, state.wGateNoY, state.wGateNoWhy = nil, nil, nil, nil
     state.wSumS = 0
     state.wSumL = 0
     state.wRoadN = 0
@@ -1581,6 +1601,7 @@ function MDADSensor.reset(state)
     state.vehAheadS = nil
     state.unloaded = false
     state.gateS, state.gateX, state.gateY, state.gateHard = nil, nil, nil, false
+    state.gateNoS, state.gateNoX, state.gateNoY, state.gateNoWhy = nil, nil, nil, nil
     state.sig = 0
     state.roadC = nil
     state.roadLo = nil
