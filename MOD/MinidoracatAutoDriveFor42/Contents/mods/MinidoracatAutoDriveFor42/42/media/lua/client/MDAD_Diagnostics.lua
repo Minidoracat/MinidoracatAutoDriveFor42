@@ -106,6 +106,7 @@ local EK = {
     "crawl", "tight", "tier", "rs", "span", "hitS", "hitX", "hitY", "hitPhase", "clearance", "shape",
     "blocker", "thin", -- thin（1004f）：dodge commit 時換縫找更寬記下的最窄候選物理淨距
     "preA", -- preA（1005）：dodge commit 時承諾線 pre-a 段（起點→a）的最小物理淨距
+    "kin", -- kin（1006）：dodge commit／blocked 時本輪被進入段運動學證明（Drive.kinProof）拒收的候選數
     -- tow attach（0929p）：掛車幾何（寬帶繞行掃掠、判堵停止線的輸入）
     "L2", "trailLen", "halfW", "mass", "hitchZ", "boxBack", "axisSign",
     -- start（1005）：這趟用了同車型轉向增益種子時的快取鍵（MDADFollower.seedGains；沒有種子就不帶）

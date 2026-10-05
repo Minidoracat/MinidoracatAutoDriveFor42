@@ -800,6 +800,9 @@ TUNE.APPROACH_WIDTH_M = 4
 -- （之前 ratio 3 曾一次過）；使用者裁定「不用太保守，轉彎角度可以修」→ 單一閘 3，陡切的代價由
 -- clearanceCap／crawl 檔壓速承擔，不由拒收承擔。
 TUNE.SHIFT_MIN_RATIO = 3
+-- 進入段運動學證明（Drive.kinProof）的轉彎半徑倍率：1＝車輛 profile 的 rMin（delta0Safe 反推）。實車低速轉不到 rMin
+-- （證明線放行了追不上的線）就往上調；這是車的物理參數校正，不是比例閘。
+TUNE.KIN_PROOF_RMIN_K = 1
 -- 倒車補跑道只記大側移（> 此值）的 steep 差額：小側移的 steep 多是「障礙就在車前」，標準倒車距離即可
 TUNE.STEEP_DEFICIT_MIN_DL = 1.5
 -- 繞行承諾中 RETURN 的進入門檻（m；理由見 stepFollow 的 RETURN 入口）
@@ -2423,6 +2426,7 @@ local function startSession(playerObj, playerNum, stage)
         unstickExtraM = 0,    -- 本次倒車的額外距離（貼縫 contact 後加長，見 TUNE.UNSTICK_DODGE_EXTRA_M）
         steepDeficitM = -1,   -- 本輪 steep 拒收候選中「進入段還差多少才夠運動學長」的最小值（<0＝無）
         blockSteepM = -1,     -- 候選鏈全滅那輪的 steepDeficitM 快照（夾 UNSTICK_STEEP_MAX_M；<0＝無）
+        kinRejectN = 0,       -- 本輪 replan 被進入段運動學證明（Drive.kinProof）拒收的候選數（事件 kin 欄）
         stayLanePending = nil, -- 停留承諾的 lane，過 b 才寫進 laneBias（nil＝無待切）
         stayNextB = nil,      -- 停留承諾時已知「下一群塞不進」的群起點弧長（對它煞停；nil＝無）
         assistBoost = 1,      -- 越野推力遞增倍率（TUNE.ASSIST_BOOST_*）
@@ -9658,6 +9662,46 @@ function Drive.preAClear(s)
     return nil
 end
 
+-- 承諾線進入段的運動學證明（1006；open-issue「承諾線曲率對 rMin 的可行性」）：陡坡閘（SHIFT_MIN_RATIO）刻意放行比運動學更陡的
+-- 進入段（代價由壓速承擔，使用者裁定），所以線本身掃得過不等於車走得到。車以半徑 R＝rMin×KIN_PROOF_RMIN_K 走 S 彎換 dl，最短要
+-- Lo＝2·sqrt(dl·R−dl²/4)（dl ≥ 2R 取 2R）。進入段（一般繞行從 a 前一個切線預視距 TANGENT_PREVIEW_M 起——承諾線切線追蹤在預視點
+-- 進入過渡段時就開始轉；停留線從 rs 起；都不早於車位 rs）到 b 短於 Lo 時，同一條候選把 b 推到起點＋Lo 重建（tmpOv2；保持段比 b
+-- 短就連 c／d 一起順延），以物理檔掃一次：撞到＝車照最佳 S 彎也過不去，拒收（sweepHitBody＝"kin"、s.kinRejectN、大側移另記
+-- steepDeficitM 給倒車補跑道）；過＝原線照承諾（不改線、不加帽）。Lo 是下限：scripts/exp_kin_proof.lua (A) 閉環（plant 夾
+-- 1/rMin＋yaw 延遲、兩種車、兩檔增益）每一案車都沒換得比這條線快，只會少拒、不會多拒；否決仍由世界掃掠決定，解析式只決定
+-- 「掃哪一條」。曲率 ≤1/rMin 的 smoothstep（sqrt(6·dl·R)）不是下限：大側移比車慢 1m 以上，harness 寬帶路外繞行被它多拒 134 條。
+-- 證明線建不出來（fold／容量）或掃掠輸入無效＝沒有證據，照原線。回 sweepLine 同款 tuple，第一個值 true＝放行。
+function Drive.kinProof(s, a, b, c, d, offL, baseL, tag, stay)
+    local rs, vp = s.lastSNow, s.vehicleProfile
+    local startL = startLaneOf(s, baseL)
+    local dl, R = math.abs(offL - startL), vp.rMin
+    if not (finite(R) and R > 0) or dl <= 0 then return true end
+    R = R * TUNE.KIN_PROOF_RMIN_K
+    local x0 = stay and rs or math.max(a - MDADFollower.TANGENT_PREVIEW_M, rs)
+    local push = x0 + (dl < 2 * R and 2 * math.sqrt(dl * R - dl * dl / 4) or 2 * R) - b
+    if push <= 0 then return true end
+    local bK, cK, dK = b + push, c, d
+    if bK > c then cK, dK = bK, d + bK - c end
+    local n, s0, reason, covered
+    if stay then
+        n, s0, reason, covered = MDADFollower.buildOffsetLine(s.profile, rs, x0, bK, cK, dK - 1, offL, baseL,
+            s.tmpOv2X, s.tmpOv2Y, startL, offL, bK, nil, 0)
+    else
+        n, s0, reason, covered = MDADFollower.buildOffsetLine(s.profile, rs, x0, bK, cK, dK, offL, baseL,
+            s.tmpOv2X, s.tmpOv2Y, nil, nil, nil, startL)
+    end
+    if n < 2 or reason ~= "ok" then return true end
+    local ok, m, hs, ph, sk, hx, hy, hi = sweepLine(s, s.tmpOv2X, s.tmpOv2Y, n, s0, covered, x0, bK, cK, dK, offL,
+        tostring(tag) .. "-kin", MDADVehicleProfile.sweepBase(vp.halfW, "physical"), nil, false, false)
+    if ok or hi == nil then return true end
+    s.sweepHitBody = "kin" -- blocked 事件 kind（候選鏈全滅時）
+    s.kinRejectN = (s.kinRejectN or 0) + 1
+    if dl > TUNE.STEEP_DEFICIT_MIN_DL and (s.steepDeficitM < 0 or push < s.steepDeficitM) then
+        s.steepDeficitM = push -- 同 steep：差多少跑道交給倒車補（blockSteepM）
+    end
+    return false, m, hs, ph, sk, hx, hy, hi
+end
+
 -- Candidate sweep and commitment consume the same complete preallocated line.
 local function sweepCandidate(s, shapeOk, a, b, c, d, offL, baseL, tag, needBase)
     if not shapeOk then return 0, 0, false, 99, b, 3, b, 0, 0 end
@@ -9701,6 +9745,10 @@ local function sweepCandidate(s, shapeOk, a, b, c, d, offL, baseL, tag, needBase
             end
             return ovN, ovS0, false, 0, sen.hardS[bi], 4, d, sen.hardX[bi], sen.hardY[bi]
         end
+    end
+    if ok then
+        local kOk, kM, kS, kPh, kSs, kX, kY, kI = Drive.kinProof(s, a, b, c, d, offL, baseL, tag, false)
+        if not kOk then return ovN, ovS0, false, kM, kS, kPh, kSs, kX, kY, kI end
     end
     return ovN, ovS0, ok, margin, hardS, phase, sampleS, hitX, hitY, hitI
 end
@@ -9760,6 +9808,10 @@ local function sweepStay(s, a, b, c, offL, baseL, tag, needBase, truncate)
     s.tmpOvEndS = lastCovered
     local ok, margin = sweepLine(s, s.tmpOvX, s.tmpOvY, ovN, ovS0, lastCovered,
         a, b, c, dStay, offL, tag, needBase, nil, true)
+    if ok then
+        local kOk, kM = Drive.kinProof(s, a, b, c, dStay, offL, baseL, tag, true)
+        if not kOk then return false, kM, ovN, ovS0, dStay, c end
+    end
     return ok, margin, ovN, ovS0, dStay, c
 end
 
@@ -10080,6 +10132,13 @@ function Drive.debugSweepCandidate(playerNum, a, b, c, d, offL)
         "debug", s.sweepBase)
     return ok, phase, hitX, hitY
 end
+-- 測試鉤（harness 鎖停留線的運動學證明）：對當前 session 的點雲直接掃一條停留線（rs→b 換到 offL、平行到 c），回 ok。
+-- production 無呼叫者。
+function Drive.debugSweepStay(playerNum, a, b, c, offL)
+    local s = sessions[playerNum]
+    if not s or not s.sensor or not s.sensor.ready then return nil end
+    return (sweepStay(s, a, b, c, offL, laneBiasOf(s), "debug", s.sweepBase))
+end
 
 -- blocked 座標錨解析（plan／guard 共用；Kahlua 190-local 閘門逼出的抽取）：
 -- 把「世界距車最近」的合格點寫進 s.blockHitX/Y（blockedNear 判距權威——
@@ -10254,7 +10313,7 @@ end
 local function replan(s, vehicle, playerNum)
     s.dodgeDeferCap = s.dodgeHandoffHold and 0 or -1
     s.dodgeDeferS = nil
-    s.steepDeficitM = -1
+    s.steepDeficitM, s.kinRejectN = -1, 0
     local sen = s.sensor
     if not sen.ready then return end
     local handoff = false
@@ -11191,6 +11250,7 @@ local function replan(s, vehicle, playerNum)
                 wms = Drive.replanElapsed(s), sweeps = s.sweepCount,
                 why = s.planDeferWhy, -- 主候選本會延後（window／coverage／unloaded）、由候選鏈的替代線承諾
                 thin = s.thinRec and s.thinRec.on and s.thinRec.phys or nil, -- 換縫找更寬時記下最窄那條的物理淨距
+                kin = s.kinRejectN > 0 and s.kinRejectN or nil, -- 承諾前被運動學證明拒收的候選數（Drive.kinProof）
                 preA = s.diag and Drive.preAClear(s) or nil }) -- pre-a 段最小物理淨距（只在紀錄開著時量）
             if getDebug() then
                 -- cap 分解一行印清楚（2026-09-04 實機三段 8／15／14 km/h 繞行，console
@@ -11373,6 +11433,7 @@ local function replan(s, vehicle, playerNum)
             hn = s.sensor and s.sensor.hardN or 0, wms = Drive.replanElapsed(s), sweeps = s.sweepCount,
             corner = s.cornerLatch, detail = s.dodgeBlockReason,
             blocker = s.dodgeDeadendS, shape = s.dodgeShapeReason,
+            kin = s.kinRejectN > 0 and s.kinRejectN or nil, -- 本輪被運動學證明拒收的候選數（Drive.kinProof）
             -- 候選鏈最後記下的命中（sweep 全滅時才有意義）：相位、世界點、牽引車或掛車（0929p）
             hitPhase = s.dodgeBlockReason == "sweep" and s.fbFail and s.fbFail.ph or nil,
             hitX = s.dodgeBlockReason == "sweep" and s.fbFail and s.fbFail.hx or nil,
@@ -11399,6 +11460,7 @@ local function replan(s, vehicle, playerNum)
             why = "wide", s = s.blockS, x = s.blockHitX, y = s.blockHitY, hn = sen.hardN, lvl = sen.wideDoneLevel,
             wms = Drive.replanElapsed(s), sweeps = s.sweepCount,
             attempt = s.episodeAttempts, detail = s.dodgeBlockReason, shape = s.dodgeShapeReason,
+            kin = s.kinRejectN > 0 and s.kinRejectN or nil,
             hitPhase = s.dodgeBlockReason == "sweep" and s.fbFail and s.fbFail.ph or nil,
             hitX = s.dodgeBlockReason == "sweep" and s.fbFail and s.fbFail.hx or nil,
             hitY = s.dodgeBlockReason == "sweep" and s.fbFail and s.fbFail.hy or nil,
