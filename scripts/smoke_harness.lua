@@ -21995,6 +21995,9 @@ function drive.scenario0929j()
     drive.putTree(54, 3, "vegetation_trees_01_6")
     flagObj(58, 3, "lighting_outdoor_01_1", {}, false)
     flagObj(62, 3, "e_harnessJUMBOXL_1_0", { solid = true, StopCar = true }, true, "IsoTree")
+    -- issue #7：勃蘭登堡路面散落的籬笆碎片（fencing_damaged_01_168..171，地圖原生）只有 attachedFloor、沒有碰撞旗標
+    -- ＝calcPhysics 不給形狀、車直接壓過。違規證明：拿掉 attachedFloor 放行即紅（格心多一個 r=0 硬點）。
+    flagObj(26, 3, "fencing_damaged_01_170", { attachedFloor = true }, false)
     checkTrue(armDrive(), "(shape) 啟動")
     setHeading(dveh, 0)
     local st = MDAD.Drive.debugSession(0)
@@ -22022,6 +22025,7 @@ function drive.scenario0929j()
     shapeAt(54.6, 3.6, 0.15, 0, "同格籬笆＋樹：樹幹也推（第一個硬物不再蓋掉其他形狀）")
     shapeAt(58.6, 3.6, 0.15, 0, "室外路燈柱＝樹幹形狀")
     shapeAt(62.6, 3.6, 0.15, 0, "帶 solid 的大樹（JUMBO）：引擎只給樹幹，不是整格方塊")
+    checkTrue(pointsNear(sen, 26.5, 3.5) == nil, "(shape) 地上籬笆碎片（attachedFloor、無碰撞旗標）：不是硬點")
     MDAD.Drive.stop(0, nil)
     drive.fillWorld(-2, 70, -7, 7)
 
