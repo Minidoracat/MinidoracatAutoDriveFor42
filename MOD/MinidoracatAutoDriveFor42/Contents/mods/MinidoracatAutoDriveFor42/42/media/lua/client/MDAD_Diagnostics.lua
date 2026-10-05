@@ -993,6 +993,10 @@ local function encodeSensor(s, sensor, force)
     if finite(sensor.completedBandBias) then
         bits = bits .. ',"completedBandBias":' .. tostring(sensor.completedBandBias)
     end
+    -- 寬帶級（Sensor wideDoneLevel：1／2；一般帶 0 不寫）：復盤分得出這張快照是哪一級寬帶（1006 停點寬帶淨空／一般帶判堵交替）
+    if finite(sensor.wideDoneLevel) and sensor.wideDoneLevel > 0 then
+        bits = bits .. ',"wideDoneLevel":' .. tostring(sensor.wideDoneLevel)
+    end
     if finite(sensor.requestedAheadM) then bits = bits .. ',"requestedAheadM":' .. tostring(sensor.requestedAheadM) end
     if finite(sensor.affordableAheadM) then bits = bits .. ',"affordableAheadM":' .. tostring(sensor.affordableAheadM) end
     if finite(sensor.effectiveAheadM) then bits = bits .. ',"effectiveAheadM":' .. tostring(sensor.effectiveAheadM) end

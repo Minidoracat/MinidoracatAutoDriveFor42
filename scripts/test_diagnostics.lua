@@ -468,7 +468,7 @@ local sen = {
     softN = 1, zombieN = 2, corpseN = 3, vehN = 0, movingVeh = false,
     unloaded = false, ready = true, sig = 7, stamp = 11, scanS = 10, roadN = 4,
     roadC = 0.5, rain = false, actualSurfaceId = 2, roundStartedAt = 39950,
-    completedBandBias = 1.25,
+    completedBandBias = 1.25, wideDoneLevel = 2,
 }
 MDADDiagnostics.sample(0, 40000, 10700.25, 9800.5, 1.2, 33, 30, 12, 0.4, 8, 0.2, 1,
     "follow", 2, true, sen)
@@ -510,6 +510,8 @@ check(string.find(body, '"roundStartedAt":39950', 1, true) ~= nil,
     "sensor round start timestamp recorded")
 check(string.find(body, '"completedBandBias":1.25', 1, true) ~= nil,
     "sensor completed band bias recorded")
+check(string.find(body, '"wideDoneLevel":2', 1, true) ~= nil,
+    "sensor wide-band level recorded (1006)")
 check(string.find(body, '"hardS"', 1, true) == nil, "no full sensor S array")
 check(countNeedle(body, '"near":') == 1, "near list only when stamp changes")
 check(countNeedle(body, '{"s":') <= 8, "at most 8 near records")
