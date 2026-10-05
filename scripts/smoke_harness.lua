@@ -12942,7 +12942,8 @@ drive.scenarioEntryStretch()
 --   (kin)／(kin-stay)：一般繞行（a=rs+1、b=rs+3）與停留線（rs→b=rs+2.5）各一組，B（1.6×4）在起點側、−y 邊 −0.8、從 rs+3.5 起
 --   （原線車身物理淨距 ≈0.44／0.55，Lo 線撞）；(kin-far)／(kin-stay-far)：B 從 rs+4.5 起＝Lo 線也過（≈0.4）、照原線承諾。
 --   違規證明：sweepCandidate／sweepStay 不呼叫 Drive.kinProof＝(kin)／(kin-stay) 紅；Lo 改成 sqrt(6·dl·rMin)（曲率 ≤1/rMin 的
---   smoothstep，比最佳 S 彎長 35%）＝(kin-far) 紅（多拒收）；停留線起點改成 a＝(kin-stay-far) 紅；不寫 kind＝(kin) 紅。
+--   smoothstep，比最佳 S 彎長 35%）＝(kin-far) 紅（多拒收）；停留線起點改成 a＝(kin-stay-far) 紅；不寫 kind＝(kin) 紅；
+--   證明線改建在 tmpOv（不是 tmpOv2）＝(kin-chain) 紅。
 function drive.scenarioKinProof()
     scenario("1006：承諾線進入段運動學證明——進入段拉到 rMin 最短 S 彎的同一條線撞到才拒收，撞不到照原線承諾")
     drive.fillWorld(-10, 120, -8, 8)
@@ -12978,6 +12979,34 @@ function drive.scenarioKinProof()
         .. tostring(body) .. "）")
     ok = probe(4.5, true)
     checkTrue(ok == true, "(kin-stay-far) 停留線、B 再遠 1m：照承諾（ok=" .. tostring(ok) .. "）")
+    -- (kin-chain) 證明線拒收後同一輪改採別的候選（E2E g1006g dixie9335w 疑似回歸的排除測試）：B 從 rs+4 起，候選鏈經
+    -- shapeProfile 跑（a=rs+1、b=rs+3.5）——主候選與物理複驗都被證明線拒收，微調到 −2.5 才採納。採納的 a..d／offL 重建的線必須就是
+    -- tmpOv 裡要交給 setOffset 的那條（證明線只寫 tmpOv2，不得留在 tmpOv）、shape 暫存的進入段＝b−a、b..c 蓋住 B。
+    do
+        local _, box = drive.putVehicleGeom(rs + 4 + 2, 0, 0, 1.6, 4, true)
+        driveReset(dveh)
+        drive.scanRound()
+        local okC, roC, vC, _, aC, bC, cC, dC = MDAD.Drive.debugSweepFallbacks(0, rs + 1, rs + 3.5, rs + 14, rs + 22, -dl,
+            "kin-chain")
+        local kinN = st.kinRejectN
+        local same = false
+        if okC then
+            local ox, oy = {}, {}
+            local base = st.fstate.laneBias
+            local n = MDADFollower.buildOffsetLine(st.profile, st.lastSNow, aC, bC, cC, dC, roC, base, ox, oy,
+                nil, nil, nil, st.lastLatSigned or base)
+            same = n >= 2
+            for k = 1, n do
+                if ox[k] ~= st.tmpOvX[k] or oy[k] ~= st.tmpOvY[k] then same = false end
+            end
+        end
+        checkTrue(okC == true and kinN > 0 and same and bC <= rs + 4 and cC >= rs + 8
+            and math.abs(st.dodgeEntryLength - (bC - aC)) < 1e-9, string.format(
+            "(kin-chain) 證明線拒收 %d 條後改採 %s（offL %s）：tmpOv＝採納線 %s、b..c %.1f..%.1f 蓋住 B 4..8、進入段暫存 %s＝b−a %s",
+            kinN, tostring(vC), tostring(roC), tostring(same), (bC or 0) - rs, (cC or 0) - rs, tostring(st.dodgeEntryLength),
+            tostring(bC and bC - aC)))
+        drive.clearVehicleGeom(box)
+    end
     MDAD.Drive.stop(0, nil)
     drive.fillWorld(-2, 70, -7, 7)
 end
