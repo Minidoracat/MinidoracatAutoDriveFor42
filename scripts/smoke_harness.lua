@@ -24230,6 +24230,140 @@ function drive.scenarioHoldRoom()
 end
 drive.scenarioHoldRoom()
 
+-- 1006c（E2E blockscan f350van：承諾線出口 68m 緩 ramp 上 60 km/h 一路落後 1.6m，守護只驗規劃線，60 km/h 撞上規劃車身外
+--   0.5m、實際車身內的細物）：Drive.lagGuardScan 以「規劃線＋實測橫偏」當預測車身、Drive.lagGuardCap 套接近包絡。
+--   (lag-ramp) 承諾線 4.5、出口 ramp 30→100、車在 rs 60 落後 +1.6、細物在 85（規劃車身外 0.5，規劃判淨空）：記命中與 arm
+--     事件、帽＝開到細物降到 MIN_EXEC 的包絡（碰前就是 MIN_EXEC）、"lag" 減速輔助帳 25 km/h 以下照補。違規證明：scan 不記命中＝紅。
+--   (lag-ramp-far) 同一段 ramp 內 35m 外的細物照判（穩態落後不衰減）。違規證明：ramp 內也從車頭衰減＝紅。
+--   (lag-small) 落後 0.25（< LAG_GUARD_MIN_M）、細物離規劃車身 0.1（物理檔承諾線過得去）：不判、release why=clear、帽與命中
+--     都清。違規證明：拿掉門檻＝紅。
+--   (lag-side) 落後 1.6 但細物在規劃線另一側（車是遠離它）：不判。違規證明：橫偏反號＝紅。
+--   (lag-resident) 常駐線落後 0.6、硬點在車身外 0.35（規劃判淨空）：車頭前 2m 判、40m 外衰減後不判。違規證明：不衰減＝far 紅。
+--   (lag-owner) RETURN 接手：release why=owner。
+--   (lag-live) 真 session：掃描輪呼叫 scan、每幀帽進目標速度（capReason lag、regulator 不超過帽）。違規證明：拿掉任一掛點＝紅。
+function drive.scenarioLagGuard()
+    scenario("1006c：實測落後量守門——規劃線＋實測橫偏的預測車身碰到規劃線外的細物，碰前壓到安全速")
+    local Dr, F, T = MDAD.Drive, MDADFollower, MDAD.Drive.debugTune()
+    local prof = F.begin({ pts = { 0, 0, 300, 0 } }, 60, 2)
+    while not F.stepBuild(prof, 4096) do end
+    local ovX, ovY = {}, {}
+    local n, s0, why, ovEnd = F.buildOffsetLine(prof, 0, 5, 25, 30, 100, 4.5, 0, ovX, ovY)
+    local fs = F.newState()
+    F.setLaneBias(fs, 0)
+    checkTrue(why == "ok" and F.setOffset(fs, 5, 25, 30, 100, 4.5, ovX, ovY, n, s0, ovEnd),
+        "(lag) 前置：承諾線 4.5、出口 ramp 30→100")
+    local halfW, halfL, r, MIN = 0.9, 2.9, 0.15, MDADDynamics.MIN_EXEC_KMH
+    local function lineAt(q)
+        local j, t = F.ovIndexAt(fs.ovS0, fs.ovN, fs.ovEndS, q)
+        return ovY[j] + (ovY[j + 1] - ovY[j]) * t
+    end
+    local sen = { ready = true, hardN = 1, hardS = {}, hardL = {}, hardLc = {}, hardW = {}, hardR = {}, hardX = {}, hardY = {} }
+    local function put(hs, lc)
+        sen.hardS[1], sen.hardL[1], sen.hardLc[1], sen.hardW[1], sen.hardR[1], sen.hardX[1], sen.hardY[1] =
+            hs, lc, lc, r, r, hs, lc
+    end
+    local oldEvent, events = MDADDiagnostics.event, {}
+    MDADDiagnostics.event = function(_, name, a) events[#events + 1] = { name = name, a = a } end
+    local function lastLag(phase)
+        for i = #events, 1, -1 do
+            local e = events[i]
+            if e.name == "lag" and e.a and e.a.phase == phase then return e.a end
+        end
+        return nil
+    end
+    local s = { diag = true, sensor = sen, fstate = fs, profile = prof, dodging = true, lastSNow = 60, lastLatDev = 1.6,
+        safeBrake = 6, vehicleProfile = { halfW = halfW, halfL = halfL } }
+    -- (lag-ramp)
+    local objL = lineAt(85) + halfW + 0.5 + r
+    put(85, objL)
+    checkTrue(not MDADCorridor.blocksLine(sen.hardL, sen.hardR, sen.hardLc, sen.hardW, 1, lineAt(85), halfW + 0.3),
+        "(lag-ramp) 前置：規劃線（常駐 needHalf 餘裕 0.3）判淨空")
+    Dr.lagGuardScan(s, 0, 60)
+    local arm = lastLag("arm")
+    checkTrue(s.lagHitX == 85 and s.lagHitY == objL and arm ~= nil and arm.dev == 1.6 and arm.hitS == 85,
+        "(lag-ramp) 預測車身（規劃線＋1.6）碰到規劃線外 0.5 的細物：記命中與 lag arm 事件（hit=" .. tostring(s.lagHitX) .. "）")
+    local carY = lineAt(60) + 1.6
+    local dx, dy = 85 - 60, objL - carY
+    local want = MDADDynamics.approachCapKmh(math.sqrt(dx * dx + dy * dy) - halfL - r, MIN, 0.5, 6 * T.APPROACH_BRAKE_FRAC)
+    s.lastCapReason = "dodge"
+    local cap = Dr.lagGuardCap(s, 60, 60, carY)
+    checkTrue(math.abs(cap - want) < 1e-9 and cap < 60 and s.lagGuardCap == cap and s.lastCapReason == "lag",
+        "(lag-ramp) 60 km/h、細物 25m 外：接近包絡壓速（cap=" .. tostring(cap) .. " want=" .. tostring(want) .. "）")
+    checkNear(Dr.lagGuardCap(s, 60, 85 - halfL - r, objL), MIN, 1e-9, "(lag-ramp) 車頭開到細物前＝MIN_EXEC（只壓速不否決）")
+    checkEq(Dr.lagGuardCap(s, 5, 60, carY), 5, "(lag-ramp) 帽高於目標：不改目標")
+    local pa = { tow = false, sensor = { ready = true }, visibilityCap = 90, dodging = false, lagGuardCap = 10,
+        runtimeMass = 1500 }
+    Dr.visAssistForce(pa, 20, 0.8)
+    checkTrue(pa.visAssistDecel > 0 and pa.visAssistWhy == "lag",
+        "(lag-ramp) 超過包絡：lag 帳沿中線補減速、25 km/h 以下照補（vad=" .. tostring(pa.visAssistDecel) .. " vaw="
+        .. tostring(pa.visAssistWhy) .. "）")
+    -- (lag-ramp-far)
+    s.lagHitX = nil
+    local farL = lineAt(95) + halfW + 0.5 + r
+    put(95, farL)
+    Dr.lagGuardScan(s, 0, 60)
+    checkTrue(s.lagHitX == 95, "(lag-ramp-far) 同一段 ramp 內 35m 外：穩態落後不衰減，照判（hit=" .. tostring(s.lagHitX) .. "）")
+    -- (lag-small)
+    put(85, lineAt(85) + halfW + 0.1 + r)
+    s.lastLatDev = 0.25
+    Dr.lagGuardScan(s, 0, 60)
+    local rel = lastLag("release")
+    checkTrue(s.lagHitX == nil and rel ~= nil and rel.why == "clear" and Dr.lagGuardCap(s, 60, 60, carY) == 60
+            and s.lagGuardCap == nil,
+        "(lag-small) 落後 0.25 < LAG_GUARD_MIN_M（細物離規劃車身 0.1）：不判、release why=clear、帽清掉")
+    -- (lag-side)
+    s.lastLatDev = 1.6
+    put(85, lineAt(85) - (halfW + 0.5 + r))
+    Dr.lagGuardScan(s, 0, 60)
+    checkNil(s.lagHitX, "(lag-side) 細物在規劃線另一側（車落後是遠離它）：不判")
+    -- (lag-resident)
+    s.dodging, s.lastLatDev = false, 0.6
+    local resL = halfW + 0.35 + r
+    put(60 + halfL + 2, resL)
+    checkTrue(not MDADCorridor.blocksLine(sen.hardL, sen.hardR, sen.hardLc, sen.hardW, 1, 0, halfW + 0.3),
+        "(lag-resident) 前置：常駐線判淨空（車身外 0.35）")
+    Dr.lagGuardScan(s, 0, 60)
+    checkTrue(s.lagHitX == 60 + halfL + 2, "(lag-resident) 常駐線落後 0.6、車頭前 2m：判（hit=" .. tostring(s.lagHitX) .. "）")
+    put(60 + halfL + 40, resL)
+    Dr.lagGuardScan(s, 0, 60)
+    checkNil(s.lagHitX, "(lag-resident) 同一個硬點在 40m 外：純追跡收斂衰減後不判")
+    -- (lag-owner)
+    put(60 + halfL + 2, resL)
+    Dr.lagGuardScan(s, 0, 60)
+    s.returnActive = true
+    Dr.lagGuardScan(s, 0, 60)
+    rel = lastLag("release")
+    checkTrue(s.lagHitX == nil and rel ~= nil and rel.why == "owner", "(lag-owner) RETURN 接手：release why=owner")
+    MDADDiagnostics.event = oldEvent
+    -- (lag-live)
+    local oldSand = SandboxVars
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    drive.fillWorld(-10, 80, -10, 10)
+    armDrive()
+    local st = Dr.debugSession(0)
+    setHeading(dveh, 0)
+    dveh._x, dveh._y, dveh._speed = 10, 0, 30
+    driveReset(dveh)
+    local realScan, calls = Dr.lagGuardScan, 0
+    Dr.lagGuardScan = function(ss, pn, v)
+        calls = calls + 1
+        realScan(ss, pn, v)
+        ss.lagHitX, ss.lagHitY, ss.lagHitR = 18, 0, 0.15
+    end
+    drive.scanRound(true)
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    Dr.lagGuardScan = realScan
+    checkTrue(calls > 0 and MDADDynamics.finite(st.lagGuardCap) and st.lastCapReason == "lag"
+            and drive.calls.maxRegSpeed <= math.floor(st.lagGuardCap + 0.5) + 1e-9,
+        "(lag-live) 掃描輪呼叫 scan、每幀帽進目標速度（calls=" .. calls .. " cap=" .. tostring(st.lagGuardCap) .. " reason="
+        .. tostring(st.lastCapReason) .. " reg=" .. tostring(drive.calls.maxRegSpeed) .. "）")
+    MDAD.Drive.stop(0, nil)
+    drive.fillWorld(-2, 70, -7, 7)
+    SandboxVars = oldSand
+end
+drive.scenarioLagGuard()
+
 do -- 主 chunk local 槽已滿：整段包成函式，內部 local 不佔主 chunk
 -- =====================================================================
 -- v6 多停靠點行程（docs/addon-api.md §6）
