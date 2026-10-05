@@ -1147,7 +1147,8 @@ do
     check(rows[8][2] == "25/" .. texts.UI_MinidoracatAutoDrive_HUDStatusSlow_zombie and rows[8][3] == rows[6][3],
         "obstacle/zombie factor shows its speed and category as a slowdown (" .. tostring(rows[8][2]) .. ")")
     -- 動物／玩家擋路的 cap 理由碼各自歸類，不落到 other
-    for _, case in ipairs({ { "animal-stop", "animal" }, { "animal-crawl", "animal" }, { "player-stop", "player" } }) do
+    for _, case in ipairs({ { "animal-stop", "animal" }, { "animal-crawl", "animal" }, { "animal-gentle", "animal" },
+            { "player-stop", "player" } }) do
         info[8], info[9] = 25, case[1]
         panel:refresh(t0 + 4520)
         checkEq(panel._pinRows[8][2], "25/" .. texts["UI_MinidoracatAutoDrive_HUDStatusSlow_" .. case[2]],

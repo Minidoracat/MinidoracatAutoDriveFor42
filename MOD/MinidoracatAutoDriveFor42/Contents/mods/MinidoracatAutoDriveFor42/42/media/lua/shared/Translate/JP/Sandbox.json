@@ -35,7 +35,7 @@
     "Sandbox_MinidoracatAutoDriveCorpseSlowdown_option2": "プレイヤーに任せる",
     "Sandbox_MinidoracatAutoDriveCorpseSlowdown_option3": "死体では減速しない",
     "Sandbox_MinidoracatAutoDriveAnimalSlowdown": "動物の減速・停車",
-    "Sandbox_MinidoracatAutoDriveAnimalSlowdown_tooltip": "選んだ種類の動物が走行ライン上にいてよけきれないとき、自動運転は減速して手前で停車し、動物が離れるのを待ちます。\n待ちが長引くと極低速でゆっくり通過します。低速の接触で車は傷みませんが、動物はけがをすることがあります。\n大型動物（既定）＝シカ、ヒツジ、ブタ、ウシなど（成長して体が大きくなった子どもも含む）。すべての動物＝ニワトリ、ウサギ、七面鳥などの小動物も対象。オフ＝動物のためには停車しません。",
+    "Sandbox_MinidoracatAutoDriveAnimalSlowdown_tooltip": "選んだ種類の動物は保護の対象になり、自動運転は必ずよけて通ります。プレイヤーの「動物をよける」で選ばれていない場合は、先に減速してから横をゆっくりよけて通過します。\n本当によける余地がないときだけ手前で停車し、動物が離れるのを待ちます。待ちが長引くと極低速でゆっくり通過します（低速の接触で車は傷みませんが、動物はけがをすることがあります）。動物がどかずにふさぎ続けると、自動運転は操作をプレイヤーに返します。\n大型動物（既定）＝シカ、ヒツジ、ブタ、ウシなど（成長して体が大きくなった子どもも含む）。すべての動物＝ニワトリ、ウサギ、七面鳥などの小動物も対象。オフ＝動物のために減速・停車しません（プレイヤーの「動物をよける」で選ばれた動物は速度を保ってよけます）。",
     "Sandbox_MinidoracatAutoDriveAnimalSlowdown_option1": "オフ",
     "Sandbox_MinidoracatAutoDriveAnimalSlowdown_option2": "大型動物",
     "Sandbox_MinidoracatAutoDriveAnimalSlowdown_option3": "すべての動物",

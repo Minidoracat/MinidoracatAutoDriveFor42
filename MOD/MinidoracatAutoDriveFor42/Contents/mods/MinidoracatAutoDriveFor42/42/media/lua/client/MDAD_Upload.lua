@@ -79,6 +79,8 @@ local STOP_KIND = {
     UI_MinidoracatAutoDrive_AreaLoadStop = "stuck",
     -- 其他玩家擋路、停等預算用完（1005 soft；Driver Drive.KEY_PLAYER_STOP）
     UI_MinidoracatAutoDrive_PlayerBlockStop = "stuck",
+    -- 動物一直擋著、爬行到上限仍沒讓開（1005 soft4；Driver Drive.KEY_ANIMAL_STOP）
+    UI_MinidoracatAutoDrive_AnimalBlockStop = "stuck",
 }
 
 local outbox = {}      -- pn → { msgs..., n }
