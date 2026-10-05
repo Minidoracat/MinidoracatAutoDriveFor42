@@ -1269,6 +1269,7 @@ local function encodePhys(phys)
     addNum("dodgeClass", "dodgeClass")
     addStr("verifyLineReason", "verifyLineReason")
     addNum("proofHitS", "phs")        -- 1005：證明線掃掠命中的車身取樣弧長（gate sweep 接近包絡的終點；同 rs 座標）
+    addNum("proofHitN", "phn")        -- 1006：證明線同一點連續命中的輪數（≥ PROOF_STOP_ROUNDS：包絡在命中前停住、規劃當擋線）
     addNum("proofKappa", "proofKappa")
     addNum("proofCurveCap", "proofCurveCap")
     addNum("laneCurveEnvelope", "laneCurveEnvelope")
