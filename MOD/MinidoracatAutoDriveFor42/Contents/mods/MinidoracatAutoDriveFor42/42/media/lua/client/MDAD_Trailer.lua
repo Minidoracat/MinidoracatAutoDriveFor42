@@ -27,8 +27,9 @@ T.INTRUSION_MAX = 1.0      -- 掛車內輪壓出路面的容許量（轉角外�
 T.HITCH_MAX = 60 * math.pi / 180      -- 規劃期車頭—掛車最大折角
 T.STEP = 0.5               -- 運動學步長（公尺）
 T.RAMP_MIN, T.RAMP_MAX = 8, 16        -- 外靠過渡段長
-T.R_MIN, T.R_MAX = 4, 60             -- 外拉圓弧半徑掃描範圍（planCorner 取可行的最大；60＝拖車預算 ~4 m/s² 下約 55 km/h）
+T.R_MIN, T.R_MAX = 4, 60             -- 外拉圓弧半徑掃描範圍（planCorner 取不比最小可行半徑更切內的最大；60＝拖車預算 ~4 m/s² 下約 55 km/h）
 T.SEG_SHARE = 0.45 -- 圓弧切點距占臂長上限（同 MDADDynamics.FILLET_SEGMENT_SHARE：相鄰兩角合計 ≤90%）
+T.CUT_TOL = 0.05  -- 大半徑候選的掛車出路量只准比最小可行半徑多這麼多（m，數值容差；見 planCorner）
 T.EXIT_HOLD = 8                       -- 轉出外偏保持段長（掛車軸跟進窄路）
 T.GUARD_MS = 100
 T.HITCH_SLOW = 45 * math.pi / 180     -- 行駛中折角超過＝降到爬行
@@ -186,14 +187,14 @@ local function outside(c, px, py)
     return d > 0 and d or 0
 end
 
--- 車頭（掛點）沿路線走一遍：回 ok, 最大折角, 掛車最大出路量。路線點用 path(i) 迭代。
+-- 車頭（掛點）沿路線走一遍：回 ok, 最大折角, 最大出路量（牽引車車頭＋掛車）, 掛車車身最大出路量。
 -- 牽引車車身以「掛點前 front、半寬 thw」；掛車以軸 L2、尾 rear、半寬 hw。
 local function simulate(c, xs, ys, n, g)
     local hx, hy = xs[1], ys[1]
     local dx, dy = xs[2] - hx, ys[2] - hy
     local dl = sqrt(dx * dx + dy * dy)
     local ax, ay = hx - dx / dl * g.L2, hy - dy / dl * g.L2
-    local worstHitch, worstOut = 0, 0
+    local worstHitch, worstOut, worstTrailer = 0, 0, 0
     for i = 2, n do
         local px, py = xs[i], ys[i]
         local tx, ty = px - hx, py - hy
@@ -214,7 +215,7 @@ local function simulate(c, xs, ys, n, g)
             -- 與掛車內輪同樣只容許 INTRUSION_MAX（草地可壓、硬物由感測管）。
             for side = -1, 1, 2 do
                 if outside(c, hx + nx * g.thw * side, hy + ny * g.thw * side) > 0 then
-                    return false, worstHitch, worstOut
+                    return false, worstHitch, worstOut, worstTrailer
                 end
                 local o = outside(c, fx + nx * g.thw * side, fy + ny * g.thw * side)
                 if o > worstOut then worstOut = o end
@@ -231,12 +232,13 @@ local function simulate(c, xs, ys, n, g)
                 for side = -1, 1, 2 do
                     local o = outside(c, qx + mx * g.hw * side, qy + my * g.hw * side)
                     if o > worstOut then worstOut = o end
+                    if o > worstTrailer then worstTrailer = o end
                 end
             end
-            if worstOut > T.INTRUSION_MAX then return false, worstHitch, worstOut end
+            if worstOut > T.INTRUSION_MAX then return false, worstHitch, worstOut, worstTrailer end
         end
     end
-    return worstHitch <= T.HITCH_MAX, worstHitch, worstOut
+    return worstHitch <= T.HITCH_MAX, worstHitch, worstOut, worstTrailer
 end
 T._simulate = simulate
 
@@ -308,10 +310,13 @@ end
 T._candidate = function(...) return candidate(...), XS, YS end
 
 -- 轉角規劃：回 {a, b, R, ramp, sIn, sOut, approach, exitLen} 或 nil（不可過）。外靠／外偏都用到
--- 路面邊緣（後軸在路面、半寬＋0.3m 餘裕）；先找總偏移最小的走法，同一組偏移取可行的最大半徑：剖面照
--- 圓弧曲率限速（sqrt(aLat·R)），舊制取最小 R=4＝連 28° 寬彎都壓到 12 km/h 地板（GitHub #6）；半徑大，
--- 穩態折角 ≈atan(L2/R) 與掛車內切也小。大於 R_MIN 的圓弧切點距要在短臂段長×SEG_SHARE 內（相鄰轉角各用
--- 不到一半，重疊＝撤點折線）；都不符才退回最小可行半徑（＝舊制，可過與否不變）。
+-- 路面邊緣（後軸在路面、半寬＋0.3m 餘裕）；先找總偏移最小的走法。同一組偏移先找最小可行半徑（＝舊制，
+-- 可過與否、最保守的掛車軌跡都由它決定），再從大往小找更大的可行半徑：剖面照圓弧曲率限速（sqrt(aLat·R)），
+-- 只取最小的 R=4 連 28° 寬彎都壓到 12 km/h 地板（GitHub #6）。更大的半徑要同時滿足：①圓弧切點距在短臂段長
+-- ×SEG_SHARE 內（相鄰轉角各用不到一半，重疊＝撤點折線）；②掛車車身出路量不超過最小可行半徑那條＋CUT_TOL
+-- ——牽引車走大弧＝弧中點往彎內移 R(1/cos(θ/2)−1)，掛車再往內 off-track，車身掃進彎內角路外（1006 E2E
+-- semi-corner：14m→8m 直角 R 6→12，掛車出路 0.07→0.71m，撞上彎內 0.8m 外的路邊物）；路外有什麼只有感測知道，
+-- 規劃不得比舊制更切內。都不符就用最小可行半徑。
 function T.planCorner(c, g)
     local maxA = c.wIn * 0.5 - g.thw - 0.3
     if maxA < 0 then maxA = 0 end
@@ -333,16 +338,33 @@ function T.planCorner(c, g)
               local b = bAbs * sign
               if bAbs <= maxB + 1e-9 and not (sign < 0 and bAbs == 0) then
                 local ramp = (a > 0 or b ~= 0) and T.RAMP_MAX or T.RAMP_MIN
-                local fall = nil
-                for R = rTop, T.R_MIN, -2 do
+                -- 基準：最小可行半徑（舊制的走法與掛車出路量）
+                local base, baseCut = nil, nil
+                for R = T.R_MIN, rTop, 2 do
                     local n, sIn, sOut = candidate(c, a, b, R, ramp, approach, exitLen)
-                    if n > 3 and simulate(c, XS, YS, n, g) then
-                        fall = { a = a, b = b, R = R, ramp = ramp, sIn = sIn, sOut = sOut,
-                            approach = approach, exitLen = exitLen }
-                        if R == T.R_MIN or (sIn >= -maxT and sOut <= maxT) then return fall end
+                    if n > 3 then
+                        local ok, _, _, cut = simulate(c, XS, YS, n, g)
+                        if ok then
+                            base = { a = a, b = b, R = R, ramp = ramp, sIn = sIn, sOut = sOut,
+                                approach = approach, exitLen = exitLen }
+                            baseCut = cut
+                            break
+                        end
                     end
                 end
-                if fall then return fall end
+                if base then
+                    for R = rTop, base.R + 2, -2 do
+                        local n, sIn, sOut = candidate(c, a, b, R, ramp, approach, exitLen)
+                        if n > 3 and sIn >= -maxT and sOut <= maxT then
+                            local ok, _, _, cut = simulate(c, XS, YS, n, g)
+                            if ok and cut <= baseCut + T.CUT_TOL then
+                                return { a = a, b = b, R = R, ramp = ramp, sIn = sIn, sOut = sOut,
+                                    approach = approach, exitLen = exitLen }
+                            end
+                        end
+                    end
+                    return base
+                end
               end
             end
             a = a - 0.5
