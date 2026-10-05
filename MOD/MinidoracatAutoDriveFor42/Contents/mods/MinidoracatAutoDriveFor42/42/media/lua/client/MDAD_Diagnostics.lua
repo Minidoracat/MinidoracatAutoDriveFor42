@@ -120,6 +120,9 @@ local EK = {
     "obs", "learnT", "fdt", "slip",
     -- return yield why=zombie（1006）：讓位當下的軟縫 lane 與偏離量（d＝進場門檻，沿用既有鍵）
     "zl", "dev",
+    -- 1006：impact（撞擊上升緣，本機與上傳都記）掉速 km/h；route cutover 主 MOD 的接線距離 snapDist；
+    -- tow lost（MDADTrailer.lostState）：牽引車現在掛著誰、掛車還在不在、掛車被誰拖、兩掛點距離、掛車 upVectorDot、最後一筆折角
+    "dv", "snapDist", "cur", "alive", "by", "hd", "up", "phi",
 }
 
 local function logOnce(msg)
@@ -1078,6 +1081,12 @@ local function envStamp(playerNum)
     if type(driver) == "table" then
         put("style", driver.getStyle, playerNum)
         put("gear", driver.getGear, playerNum)
+        -- 殭屍／屍體減速（1006）：沙盒政策×玩家偏好合成後的 session 快取（Drive.hudState 第 4／5 值；改行駛決策的 cap 與軟縫）
+        if type(driver.hudState) == "function" then
+            local ok, _, _, _, zs, cs = pcall(driver.hudState, playerNum)
+            if ok and zs ~= nil then n = n + 1; parts[n] = "zslow=" .. tostring(zs) end
+            if ok and cs ~= nil then n = n + 1; parts[n] = "cslow=" .. tostring(cs) end
+        end
     end
     put("policy", sandbox, "ObstaclePolicy")
     put("maxKmh", sandbox, "AutoDriveMaxSpeed")
@@ -1316,19 +1325,113 @@ local function encodePhys(phys)
     return bits
 end
 
--- impact／contact 上升緣（encodeSensor 的 force）：contact＝footprint 命中由假轉真；impact＝與上傳片段同一個
--- 單筆門檻（MDADUpload.impactLike，前一筆→本筆的掉速與原始間隔）由假轉真。狀態記在取樣閘門擁有者 s。
-local function nearForced(s, now, speed, phys, footprintBlocked)
+-- 取樣的上升緣與瞬移（D.sample 每筆取樣、編碼之前跑一次；狀態記在取樣閘門擁有者 s，不配 table）：
+--   contact＝footprint 命中由假轉真；impact＝與上傳片段同一個單筆門檻（MDADUpload.impactLike：前一筆→本筆的掉速、
+--   原始間隔、位移）由假轉真；teleport＝MDADUpload.teleportLike（伺服器拉回，1006）。回 force（encodeSensor 強制寫 near）。
+--   s.edgeImp／s.edgeTp 為真時 edgeSpd／edgeGap／edgeMoved／edgeOldX／edgeOldY＝前一筆車速、原始間隔、位移、前一筆座標，
+--   供 D.sample 發 impact／teleport 事件、encodeSample 寫 nb。
+local function sampleEdges(s, now, x, y, speed, phys, footprintBlocked)
     local fb = footprintBlocked == true
     local fbl = type(phys) == "table" and phys.forceBrakeLeft or nil
     local locked = finite(fbl) and fbl > 0
     local spd = finite(speed) and (speed < 0 and -speed or speed) or nil
+    local px, py = s.nearX, s.nearY
+    local moved = nil
+    if px and finite(x) and finite(y) then moved = math.sqrt((x - px) * (x - px) + (y - py) * (y - py)) end
+    local gap = finite(s.nearTs) and now - s.nearTs or nil
     local U = MDADUpload
-    local imp = spd ~= nil and finite(s.nearTs) and type(U) == "table" and type(U.impactLike) == "function"
-        and U.impactLike(s.nearSpd, spd, now - s.nearTs, locked or s.nearLocked == true) or false
-    local force = (fb and s.nearFb ~= true) or (imp and s.nearImp ~= true)
+    local can = spd ~= nil and gap ~= nil and type(U) == "table" and type(U.impactLike) == "function"
+        and type(U.teleportLike) == "function"
+    local imp = can and U.impactLike(s.nearSpd, spd, gap, locked or s.nearLocked == true, moved) or false
+    local tp = can and U.teleportLike(s.nearSpd, spd, gap, moved) or false
+    s.edgeImp, s.edgeTp = imp and s.nearImp ~= true, tp
+    if s.edgeImp or tp then
+        s.edgeSpd, s.edgeGap, s.edgeMoved, s.edgeOldX, s.edgeOldY = s.nearSpd, gap, moved, px, py
+    end
+    local force = (fb and s.nearFb ~= true) or s.edgeImp
     s.nearFb, s.nearImp, s.nearSpd, s.nearTs, s.nearLocked = fb, imp, spd, now, locked
+    if finite(x) and finite(y) then s.nearX, s.nearY = x, y else s.nearX, s.nearY = nil, nil end
     return force
+end
+
+-- 撞擊上升緣那一筆的不分帶近物（1006）：感知只收走廊帶內，帶外的殭屍／動物／玩家／車撞上來時點雲全空，正式服
+-- 9 次「高速、感知全空」的撞擊定不了罪。只在上升緣掃一次：車位 NB_R 方框內逐格 getMovingObjects（同 Sensor 的
+-- 動態物件來源；動物／玩家照 MDADSensor.softKindOf 的排除：死亡、被抱、在車上）取殭屍／動物／玩家；車輛走
+-- cell:getVehicles() 全域列舉（MP 靜止車的格註冊不可靠，同 Sensor 註解），NB_V_R 內、排除自己與掛車。
+-- 每類只留最近一筆 [距離, 縱向（車頭正）, 橫向（右正）]（m，距離量車心到物件中心），車再帶 km/h（倒車為負）。
+-- 範圍內都沒有＝"nb":{}（掃了、沒有）；任何 getter 失敗＝整欄不寫。
+local NB_R = 8
+local NB_V_R = 15
+local function nearbyJson(pn, x, y, h)
+    if not finite(x) or not finite(y) then return "" end
+    local ok, out = pcall(function()
+        local own = getSpecificPlayer(pn):getVehicle()
+        local cell = getCell()
+        local z = math.floor(own and own:getZ() or 0)
+        local tow = own and own:getVehicleTowing() or nil
+        local towBy = own and own:getVehicleTowedBy() or nil
+        local ch, sh = 1, 0
+        if finite(h) then ch, sh = math.cos(h), math.sin(h) end
+        local soft = MDADSensor and MDADSensor.softKindOf
+        local zd, zx, zy, ad, ax, ay, pd, px, py
+        for gy = math.floor(y - NB_R), math.floor(y + NB_R) do
+            for gx = math.floor(x - NB_R), math.floor(x + NB_R) do
+                local sq = cell:getGridSquare(gx, gy, z)
+                if sq then
+                    local movs = sq:getMovingObjects()
+                    for i = 0, movs:size() - 1 do
+                        local mo = movs:get(i)
+                        local k = nil
+                        if instanceof(mo, "IsoZombie") then k = "z" elseif soft then k = soft(mo) end
+                        if k then
+                            local ox, oy = mo:getX(), mo:getY()
+                            local d2 = (ox - x) * (ox - x) + (oy - y) * (oy - y)
+                            if k == "z" then
+                                if zd == nil or d2 < zd then zd, zx, zy = d2, ox, oy end
+                            elseif k == "player" then
+                                if pd == nil or d2 < pd then pd, px, py = d2, ox, oy end
+                            elseif ad == nil or d2 < ad then
+                                ad, ax, ay = d2, ox, oy -- animal／small
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        local vd, vx, vy, vk = nil, nil, nil, nil
+        local set = cell:getVehicles()
+        local it = set and set:iterator()
+        while it and it:hasNext() do
+            local v = it:next()
+            if v ~= own and v ~= tow and v ~= towBy then
+                local ox, oy = v:getX(), v:getY()
+                local d2 = (ox - x) * (ox - x) + (oy - y) * (oy - y)
+                if d2 <= NB_V_R * NB_V_R and (vd == nil or d2 < vd) then vd, vx, vy, vk = d2, ox, oy, v end
+            end
+        end
+        local function r2(v) return tostring(math.floor(v * 100 + 0.5) / 100) end
+        local function one(key, d2, ox, oy)
+            if d2 == nil then return nil end
+            local dx, dy = ox - x, oy - y
+            return '"' .. key .. '":[' .. r2(math.sqrt(d2)) .. "," .. r2(dx * ch + dy * sh) .. "," .. r2(dy * ch - dx * sh)
+        end
+        local parts, n = {}, 0
+        local p = one("z", zd, zx, zy)
+        if p then n = n + 1; parts[n] = p .. "]" end
+        p = one("a", ad, ax, ay)
+        if p then n = n + 1; parts[n] = p .. "]" end
+        p = one("p", pd, px, py)
+        if p then n = n + 1; parts[n] = p .. "]" end
+        p = one("v", vd, vx, vy)
+        if p then
+            local kmh = vk:getCurrentSpeedKmHour()
+            n = n + 1
+            parts[n] = p .. (finite(kmh) and ("," .. tostring(math.floor(kmh * 10 + 0.5) / 10)) or "") .. "]"
+        end
+        return ',"nb":{' .. table.concat(parts, ",", 1, n) .. "}"
+    end)
+    if ok and type(out) == "string" then return out end
+    return ""
 end
 
 local function encodeSample(s, now, x, y, heading, speed, target, remaining, lat, err,
@@ -1347,8 +1450,9 @@ local function encodeSample(s, now, x, y, heading, speed, target, remaining, lat
     end
     local extra = ""
     if type(sensor) == "table" then
-        extra = ',"sen":' .. encodeSensor(s, sensor, nearForced(s, now, speed, phys, footprintBlocked))
+        extra = ',"sen":' .. encodeSensor(s, sensor, s.nearForce == true)
     end
+    if s.edgeImp then extra = extra .. nearbyJson(s.pn, x, y, heading) end
     extra = extra .. encodePhys(phys)
     local pmjson = "null"
     if type(planMode) == "string" then pmjson = jstr(planMode) end
@@ -1612,6 +1716,19 @@ local function dropUpload(pn)
     logOnce("diagnostics upload sink failed")
 end
 
+-- 事件交給兩個 sink（D.event 與 D.sample 的撞擊／瞬移事件共用）；呼叫端已確認至少一個 sink 在。
+local function emitEvent(pn, now, name, a)
+    local s, u = sessions[pn], uploads[pn]
+    local line = encodeEvent(now, name, a)
+    if s and s.active then enqueue(s, line, now) end
+    if u and not pcall(MDADUpload.event, u, line, now, name, a) then dropUpload(pn) end
+end
+
+local function round1(v)
+    if not finite(v) then return nil end
+    return math.floor(v * 10 + 0.5) / 10
+end
+
 -- 取樣閘門的持有者：本機 session 優先，否則上傳 sink。
 local function gateOwner(pn)
     local s = sessions[pn]
@@ -1660,6 +1777,7 @@ function D.sample(pn, now, x, y, heading, speed, target, remaining, lat, err,
     g.lastSample = now
     -- 記進 log 的是**這一幀真正採用的** 10Hz 判定（呼叫端旗標 or 誤差/模式推導），
     -- 不是呼叫端傳進來的原值：分析要對得上取樣密度。
+    g.nearForce = sampleEdges(g, now, x, y, speed, phys, footprintBlocked)
     local line = encodeSample(g, now, x, y, heading, speed, target, remaining, lat, err,
         steer, force, mode, gear, regulator, sensor, crit,
         planMode, routeS, blockS, dodgeMargin, dodgeNeed, roadBias,
@@ -1673,6 +1791,20 @@ function D.sample(pn, now, x, y, heading, speed, target, remaining, lat, err,
             remaining, lat, blocked, footprintBlocked, phys, heading, sensor) then
         dropUpload(pn)
     end
+    -- 1006：撞擊上升緣與伺服器拉回各記一筆事件，本機 session 也有（E2E／campaign 復盤；impactLike 原本只觸發上傳片段）。
+    -- 事件跟在觸發的那筆取樣之後；只在轉換時配一張 payload 表。
+    if g.edgeImp then
+        local spd = finite(speed) and (speed < 0 and -speed or speed) or nil
+        emitEvent(pn, now, "impact", {
+            x = x, y = y, speed = round1(g.edgeSpd), dv = round1(spd and g.edgeSpd and g.edgeSpd - spd), ms = g.edgeGap,
+        })
+    end
+    if g.edgeTp then
+        emitEvent(pn, now, "teleport", {
+            oldX = g.edgeOldX, oldY = g.edgeOldY, x = x, y = y, d = round1(g.edgeMoved), speed = round1(g.edgeSpd),
+            ms = g.edgeGap,
+        })
+    end
     -- 寫滿接續後 sessions[pn] 已換成新檔：回新檔的存活，不是這個被封的 s
     local cur = sessions[pn]
     return (cur ~= nil and cur.active == true) or uploads[pn] ~= nil
@@ -1682,10 +1814,7 @@ function D.event(pn, name, a)
     local s = sessions[pn]
     local u = uploads[pn]
     if not (s and s.active) and not u then return end
-    local now = nowMs()
-    local line = encodeEvent(now, name, a)
-    if s and s.active then enqueue(s, line, now) end
-    if u and not pcall(MDADUpload.event, u, line, now, name, a) then dropUpload(pn) end
+    emitEvent(pn, nowMs(), name, a)
 end
 
 -- Non-I/O diagnostics faults share one visible terminal path: preserve the

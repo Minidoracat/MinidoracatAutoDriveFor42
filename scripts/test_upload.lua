@@ -307,6 +307,18 @@ checkEq(#indexRows("C"), before + 1, "trailer lost handback: clip")
 local trailerRow = indexRows("C")[before + 1] or ""
 checkEq(field(trailerRow, 7), "trailer", "kind trailer")
 checkEq(field(trailerRow, 8), "2", "trailer priority 2")
+-- 1006：行程模式的交還（TripLost：行程中目標消失、行程 API 失敗）也留片段——單站同義的 LostRoute 是 route，
+-- 歸同一類（不新增 kind、伺服器 KINDS 不動）。違規證明：STOP_KIND 拿掉 TripLost＝紅。
+nowMs = nowMs + 3600000
+before = #indexRows("C")
+start()
+drive(3000)
+D.stop(0, "UI_MinidoracatAutoDrive_TripLost")
+pump(60000)
+checkEq(#indexRows("C"), before + 1, "trip lost handback: clip")
+local tripRow = indexRows("C")[before + 1] or ""
+checkEq(field(tripRow, 7), "route", "trip lost files under kind route (same as LostRoute)")
+checkEq(field(tripRow, 8), "3", "trip lost priority 3")
 -- 1004b：改道請求（不論成敗）留片段，事前窗看得到判堵與寬帶判定（判斷是否太早改道）；交還前沒問的 skip 不留。
 -- 違規證明：拿掉 Upload 的 detour 觸發＝第一條紅；skip 也觸發＝第二條紅。
 nowMs = nowMs + 3600000
@@ -626,7 +638,8 @@ local function impactDrive(label, steps)
     end
     check(found ~= nil, label .. ": summary of this drive found")
     found = found or ""
-    return tonumber(string.match(found, '"impact":(%d+)')), tonumber(string.match(found, '"impZ":(%d+)'))
+    return tonumber(string.match(found, '"impact":(%d+)')), tonumber(string.match(found, '"impZ":(%d+)')),
+        tonumber(string.match(found, '"tp":(%d+)'))
 end
 local locked = { capReason = "blocked", frameMs = 16, forceBrakeLeft = 900, forceBrakeWhy = "blocked" }
 local imp = impactDrive("(a) gap", function()
@@ -665,6 +678,35 @@ imp, impZ = impactDrive("(d) zombie distance", function()
 end)
 checkEq(imp, 3, "(d) three impacts")
 checkEq(impZ, 2, "(d) impZ counts only impacts with a zombie within halfL+4 of the car (this or previous sample)")
+-- 1006 伺服器拉回（瞬移）：41 km/h 時座標一筆跳 171m、速度掉到 10（1005j 正式服兩次 impact 都在跳點、帶內殭屍讓
+-- impZ 也記 1）——位移遠超 |v|·間隔＋餘裕＝不是撞擊，另記瞬移（摘要 tp）；同樣掉速、位移正常的真撞照算。
+-- 違規證明：impactLike 不看位移＝(tp) impact／impZ 紅；不數 tp＝(tp) tp 紅；瞬移門檻不加速度項（只看餘裕）＝(tp-fast) 紅。
+local tp
+imp, impZ, tp = impactDrive("(tp) teleport", function()
+    drive(3000, { speed = 41 })
+    x = x + 171
+    drive(200, { speed = 10, sensor = { zombieN = 1, zombieNearS = 11 } }) -- rs＝10：殭屍貼著車
+    drive(3000, { speed = 10 })
+end)
+checkEq(imp, 0, "(tp) a 171m jump with a speed drop is not an impact")
+checkEq(impZ, 0, "(tp) nor a zombie impact")
+checkEq(tp, 1, "(tp) the jump is counted as a teleport")
+imp, impZ, tp = impactDrive("(tp-real) same drop without a jump", function()
+    drive(3000, { speed = 41 })
+    drive(200, { speed = 10, sensor = { zombieN = 1, zombieNearS = 11 } })
+    drive(3000, { speed = 10 })
+end)
+checkEq(imp, 1, "(tp-real) the same drop with normal displacement is still an impact")
+checkEq(impZ, 1, "(tp-real) with a zombie at the car")
+checkEq(tp, 0, "(tp-real) no teleport")
+imp, impZ, tp = impactDrive("(tp-fast) 120 km/h for one 1s gap", function()
+    drive(3000, { speed = 120 })
+    pump(800)                    -- 原始間隔 1.0s，120 km/h＝33m：正常位移
+    x = x + 33
+    drive(200, { speed = 120 })
+    drive(3000, { speed = 120 })
+end)
+checkEq(tp, 0, "(tp-fast) 33m in 1s at 120 km/h is normal travel, not a teleport")
 
 -- 1005：impact／contact 上升緣那一筆強制寫 near（快照 stamp 沒換也寫；正式服 0.18.2 ImJustAtoms clip-04 撞擊幀沒有點雲），
 -- near 每顆點帶引擎形狀的橫向 lc（擋線判定用）。違規證明：拿掉 force＝(contact)(impact) 紅；impact 不看上升緣＝
@@ -703,6 +745,111 @@ do
     drive(1000, { speed = 5, sensor = sen })
     checkEq(nearCount(n0 + 1), 1, "(impact) impact rising edge writes near once with an unchanged stamp")
     U.sample = orig
+    D.stop(0, "arrive")
+    pump(120000)
+end
+
+-- 1006：impact 上升緣那一筆另寫不分感知帶的最近殭屍／動物／玩家／車各一筆（nb：[距離, 縱向（車頭正）, 橫向（右正）]，
+-- 車再帶 km/h；範圍內都沒有＝"nb":{}）——正式服 9 次「高速、感知全空」的撞擊只有帶內點雲，定不了罪。只在上升緣掃一次。
+-- 違規證明：拿掉 nb＝(nb) 紅；每筆都掃＝(once) 紅；橫向符號反了＝(fl) 紅；不排除自己這台／掛車＝(v) 紅；空時不寫＝(empty) 紅。
+scenario("1006 nb: impact rising edge writes the nearest zombie/animal/player/vehicle regardless of band")
+do
+    nowMs = nowMs + 3600000
+    local lines, orig = {}, U.sample
+    U.sample = function(u, line, ...)
+        lines[#lines + 1] = line
+        return orig(u, line, ...)
+    end
+    local gridCalls = 0
+    local function obj(cls, dx, dy, extra)
+        local o = { cls = cls, getX = function() return x + dx end, getY = function() return 200 + dy end }
+        for k, v in pairs(extra or {}) do o[k] = v end
+        return o
+    end
+    -- heading 0＝朝 +x；世界 y 向南＝右手側 +y
+    local placed = { obj("IsoZombie", 3, -1), obj("IsoZombie", -6, 0), obj("IsoAnimal", 0, 4), obj("IsoPlayer", -2, 0) }
+    local trailerCar = obj("BaseVehicle", -5, 0)
+    local ownCar = obj("BaseVehicle", 0, 0, {
+        getZ = function() return 0 end,
+        getVehicleTowing = function() return trailerCar end,
+        getVehicleTowedBy = function() return nil end,
+    })
+    local otherCar = obj("BaseVehicle", 1, 3.5, { getCurrentSpeedKmHour = function() return -35 end })
+    local vehicles = { ownCar, trailerCar, otherCar }
+    local function list(items)
+        return { size = function() return #items end, get = function(_, i) return items[i + 1] end }
+    end
+    local cell = {
+        getGridSquare = function(_, gx, gy, gz)
+            gridCalls = gridCalls + 1
+            local here = {}
+            for i = 1, #placed do
+                local o = placed[i]
+                if math.floor(o.getX()) == gx and math.floor(o.getY()) == gy and gz == 0 then here[#here + 1] = o end
+            end
+            return { getMovingObjects = function() return list(here) end }
+        end,
+        getVehicles = function()
+            local i = 0
+            return { iterator = function()
+                return { hasNext = function() return i < #vehicles end, next = function() i = i + 1; return vehicles[i] end }
+            end }
+        end,
+    }
+    local oldCell, oldInst, oldSensor, oldVeh = getCell, instanceof, MDADSensor, player0.getVehicle
+    getCell = function() return cell end
+    instanceof = function(o, c)
+        return type(o) == "table" and (o.cls == c or (c == "IsoPlayer" and o.cls == "IsoAnimal"))
+    end
+    MDADSensor = { softKindOf = function(o)
+        if o.cls == "IsoAnimal" then return "animal" elseif o.cls == "IsoPlayer" then return "player" end
+    end }
+    player0.getVehicle = function() return ownCar end
+    start()
+    drive(1000, { speed = 40 })
+    checkEq(gridCalls, 0, "(once) no scan while driving without an impact")
+    local n0 = #lines
+    drive(200, { speed = 20 }) -- 40→20／200ms＝27.8 m/s²：撞擊上升緣
+    local afterEdge = gridCalls
+    drive(200, { speed = 5 })  -- 仍達門檻、不是上升緣
+    drive(1000, { speed = 5 })
+    checkEq(gridCalls, afterEdge, "(once) only the rising-edge sample scans")
+    local nbN, nb = 0, nil
+    for i = n0 + 1, #lines do
+        local m = string.match(lines[i], '"nb":(%b{})')
+        if m then nbN, nb = nbN + 1, m end
+    end
+    checkEq(nbN, 1, "(nb) exactly one sample carries nb")
+    nb = nb or ""
+    local function arr(k)
+        local body = string.match(nb, '"' .. k .. '":%[([^%]]*)%]')
+        local out = {}
+        for v in string.gmatch(body or "", "[^,]+") do out[#out + 1] = tonumber(v) end
+        return out
+    end
+    local function near3(a, d, f, l, label)
+        check(a[1] and math.abs(a[1] - d) < 0.006 and math.abs(a[2] - f) < 0.006 and math.abs(a[3] - l) < 0.006,
+            label .. " (" .. nb .. ")")
+    end
+    near3(arr("z"), math.sqrt(10), 3, -1, "(fl) nearest zombie: 3.16m, 3m ahead, 1m left")
+    near3(arr("a"), 4, 0, 4, "(nb) nearest animal: 4m to the right")
+    near3(arr("p"), 2, -2, 0, "(nb) nearest player: 2m behind")
+    local v = arr("v")
+    near3(v, math.sqrt(13.25), 1, 3.5, "(v) nearest other vehicle, not own car or trailer")
+    checkEq(v[4], -35, "(v) vehicle carries its km/h")
+    -- 範圍內沒有東西：寫 "nb":{}，區分「掃了、沒有」與「沒掃」
+    placed, vehicles = {}, { ownCar }
+    n0 = #lines
+    drive(1000, { speed = 40 })
+    drive(200, { speed = 20 })
+    drive(1000, { speed = 20 })
+    local empty = 0
+    for i = n0 + 1, #lines do
+        if string.find(lines[i], '"nb":{}', 1, true) then empty = empty + 1 end
+    end
+    checkEq(empty, 1, "(empty) nothing in range writes an empty nb on the rising edge")
+    U.sample = orig
+    getCell, instanceof, MDADSensor, player0.getVehicle = oldCell, oldInst, oldSensor, oldVeh
     D.stop(0, "arrive")
     pump(120000)
 end

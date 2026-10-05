@@ -1187,6 +1187,47 @@ check(string.find(nearBody, '"hardR"', 1, true) == nil, "no full sensor R array"
 check(string.find(nearBody, '"hardX"', 1, true) == nil, "no full sensor X array")
 
 --------------------------------------------------------------------------------
+-- 1006：本機紀錄也要有撞擊事件（impactLike 原本只觸發上傳片段，E2E／campaign 的本機 session 看不到撞擊）；
+-- 伺服器拉回（相鄰兩筆位移遠超 |v|·間隔＋餘裕；1005j 正式服 41 km/h 時跳 171m）不算撞擊、記 teleport 事件。
+-- 違規證明：拿掉本機 impact 事件＝(impact) 紅；不看上升緣＝(edge) 紅；拿掉 teleport 事件＝(tp) 紅；瞬移仍算撞擊＝(tp-imp) 紅。
+scenario("local session records impact and teleport events (shared impactLike threshold)")
+resetFs()
+loadProd()
+MDADUpload = nil
+assert(loadfile((string.gsub(PROD, "MDAD_Diagnostics%.lua$", "MDAD_Upload.lua"))))()
+nowMs = 9050000
+MDADDiagnostics.start(0, nil, profile)
+local function impSample(t, px, spd)
+    MDADDiagnostics.sample(0, t, px, 500, 0, spd, 60, 400, 0, 0, 0, 0, "follow", 3, true, nil)
+end
+impSample(9050000, 100, 60)
+impSample(9050200, 103.3, 60)
+impSample(9050400, 104, 20)   -- 60→20／200ms＝55 m/s²：撞擊上升緣
+impSample(9050600, 104.5, 5)  -- 20→5＝20.8 m/s² 仍達門檻、不是上升緣
+impSample(9050800, 104.8, 5)
+impSample(9051000, 107, 41)
+impSample(9051200, 278, 10)   -- 跳 171m 且掉速：瞬移，不是撞擊
+impSample(9051400, 278.5, 10)
+nowMs = 9052000
+MDADDiagnostics.stop(0, "end")
+local impBody = files[sessionPath(1)] or ""
+local function evField(name, key)
+    local line = string.match(impBody, '{"t":"e","ts":[%d%.]+,"n":"' .. name .. '"[^\n]*') or ""
+    return tonumber(string.match(line, '"' .. key .. '":([%-%d%.]+)'))
+end
+checkEq(countNeedle(impBody, '"n":"impact"'), 1, "(impact)(edge)(tp-imp) one impact event: the rising edge only, not the jump")
+checkEq(evField("impact", "speed"), 60, "(impact) speed before the hit")
+checkEq(evField("impact", "dv"), 40, "(impact) speed drop km/h")
+checkEq(evField("impact", "ms"), 200, "(impact) raw sample gap")
+checkEq(evField("impact", "x"), 104, "(impact) where")
+checkEq(countNeedle(impBody, '"n":"teleport"'), 1, "(tp) one teleport event")
+checkEq(evField("teleport", "d"), 171, "(tp) jump distance")
+checkEq(evField("teleport", "oldX"), 107, "(tp) from")
+checkEq(evField("teleport", "x"), 278, "(tp) to")
+checkEq(evField("teleport", "speed"), 41, "(tp) speed before the jump")
+MDADUpload = nil
+
+--------------------------------------------------------------------------------
 scenario("sample records plan mode, route/block anchors and control-state flags")
 resetFs()
 loadProd()
@@ -1513,10 +1554,13 @@ check(string.find(envHeader, '"rev":', 1, true) < string.find(envHeader, '"game"
     "env stamp sits between rev and profile")
 -- opts（0904i）：自動改道／語音／沙盒三值；任一 getter 拋錯只省略該項，其餘照記。
 -- 0906a 加 resume（手動介入後恢復 ms；0＝介入即關閉），排在 voice 之後、沙盒之前。
+-- 1006 加 zslow／cslow（殭屍／屍體減速：政策×偏好合成，Drive.hudState 第 4／5 值），排在 driver 段。
+-- 違規證明：不寫 zslow／cslow＝這條紅。
 MDAD.HUD.autoDetour = function() return false end
 MDAD.HUD.voiceEnabled = function() error("voice boom") end
 MDAD.HUD.manualResumeMs = function() return 0 end
 MDAD.HUD.uturnMode = function() return "gentle" end
+MDAD.Drive = { hudState = function(pn) if pn == 0 then return "follow", 2, 60, true, false end end }
 MDAD.sandbox = function(name)
     return ({ ObstaclePolicy = 1, AutoDriveMaxSpeed = 70, RightLaneBias = 1.5 })[name]
 end
@@ -1525,10 +1569,12 @@ nowMs = 9301500
 MDADDiagnostics.start(0, nil, profile)
 MDADDiagnostics.stop(0, "end")
 local optsHeader = files[sessionPath(1)] or ""
-check(string.find(optsHeader, '"opts":"detour=false;resume=0;uturn=gentle;policy=1;maxKmh=70;laneBias=1.5"', 1, true) ~= nil,
-    "opts records detour/resume/uturn/sandbox values; throwing voice getter omits only itself")
+check(string.find(optsHeader,
+    '"opts":"detour=false;resume=0;uturn=gentle;zslow=true;cslow=false;policy=1;maxKmh=70;laneBias=1.5"', 1, true) ~= nil,
+    "opts records detour/resume/uturn/zombie-corpse slowdown/sandbox values; throwing voice getter omits only itself")
 MDAD.HUD.autoDetour, MDAD.HUD.voiceEnabled, MDAD.HUD.manualResumeMs, MDAD.HUD.uturnMode, MDAD.sandbox =
     nil, nil, nil, nil, nil
+MDAD.Drive = nil
 function getActivatedMods() error("boom") end
 resetFs()
 nowMs = 9302000

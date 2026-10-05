@@ -153,6 +153,11 @@ function T.attach(vehicle)
     else
         geo.hitchZ, geo.hitchX, geo.boxBack, geo.boxSide, geo.axisSign = nil, nil, nil, nil, nil
     end
+    -- 脫開鑑識用（T.lostState）：掛車 id（脫開後用 getVehicleById 查還在不在）與兩邊掛點名（牽引車自己的／掛車的）。
+    -- 各自 pcall：量不到只少鑑識欄，不拒絕啟動。
+    pcall(function() geo.id = trailer:getId() end)
+    pcall(function() geo.hitchSelf = vehicle:getTowAttachmentSelf() end)
+    pcall(function() geo.hitchOther = vehicle:getTowAttachmentOther() end)
     return geo
 end
 
@@ -504,6 +509,38 @@ end
 function T.lost(vehicle, tow)
     local ok, cur = pcall(function() return vehicle:getVehicleTowing() end)
     return ok and cur ~= tow.trailer
+end
+
+-- 脫開當下的鑑識（1006；Driver 在 TrailerLost 交還前寫 tow phase=lost）：1002y 兩次平穩行駛中脫開，片段只有 tph／tup，
+-- 分不出掛車被刪、被別台搶走、還是約束斷了。回 cur（牽引車 getVehicleTowing：nil／same／other；讀不到 nil）、
+-- alive（getVehicleById(掛車 id) 找得到；沒記到 id 或沒有這個全域＝nil）、by（掛車 getVehicleTowedBy：nil／self／other）、
+-- hd（牽引車掛點↔掛車掛點的世界距離，m）、kmh、up（掛車車速與 upVectorDot）。掛車已不存在就不讀它。只在交還時跑一次。
+function T.lostState(vehicle, tow)
+    local cur, alive, by, hd, kmh, up = nil, nil, nil, nil, nil, nil
+    pcall(function()
+        local c = vehicle:getVehicleTowing()
+        cur = c == nil and "nil" or (c == tow.trailer and "same" or "other")
+    end)
+    local tr = tow.trailer
+    if tow.id ~= nil and type(getVehicleById) == "function" then
+        local okV, v = pcall(getVehicleById, tow.id)
+        if okV then alive, tr = v ~= nil, v end
+    end
+    if tr == nil then return cur, alive, by, hd, kmh, up end
+    pcall(function()
+        local b = tr:getVehicleTowedBy()
+        by = b == nil and "nil" or (b == vehicle and "self" or "other")
+    end)
+    pcall(function() kmh = tr:getCurrentSpeedKmHour() end)
+    pcall(function() up = tr:getUpVectorDot() end)
+    if tow.hitchSelf ~= nil and tow.hitchOther ~= nil then
+        pcall(function()
+            local a = vehicle:getTowingWorldPos(tow.hitchSelf, Vector3f.new())
+            local b = tr:getTowedByWorldPos(tow.hitchOther, Vector3f.new())
+            hd = dist(a:x(), a:y(), b:x(), b:y())
+        end)
+    end
+    return cur, alive, by, hd, kmh, up
 end
 
 -- 行駛防線（Driver 每幀呼叫；Java 讀取以 GUARD_MS 節流）。回 cap（km/h 或 nil）, why：

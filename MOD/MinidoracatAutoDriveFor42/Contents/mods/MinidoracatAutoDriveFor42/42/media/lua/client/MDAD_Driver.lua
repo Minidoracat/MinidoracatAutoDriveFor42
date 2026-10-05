@@ -1882,6 +1882,13 @@ function Drive.stop(playerNum, reasonKey, voiceEvent, diagWhy)
         end
         return true
     end
+    -- 掛車脫開（guard 與每幀檢查兩條交還路徑都經這裡）：交還前記一筆鑑識（MDADTrailer.lostState；1006）。
+    if reasonKey == MDADTrailer.KEY_LOST and s.tow and s.diag then
+        local cur, alive, by, hd, kmh, up = MDADTrailer.lostState(s.vehicle, s.tow)
+        diagEvent(s, playerNum, "tow", {
+            phase = "lost", cur = cur, alive = alive, by = by, hd = hd, speed = kmh, up = up, phi = s.towPhi,
+        })
+    end
     diagStop(s, playerNum, reasonKey or diagWhy
         or (voiceEvent == "manual" and "takeover") or "manual")
     clearSession(playerNum)
@@ -1953,6 +1960,9 @@ local function commitSession(playerObj, playerNum, s)
         tg = s.targetGen, len = routeLen, pts = pointN,
         target = tostring(s.lastTx) .. "," .. tostring(s.lastTy),
         navVersion = s.navVersion,
+        -- 1006：車位與主 MOD 的接線距離（正式服一次偏航重算給出起點在 1834m 外的線，事件看不出車在哪）
+        x = vehicle:getX(), y = vehicle:getY(),
+        snapDist = MDADDynamics.finite(route.snapDist) and route.snapDist or nil,
         currentSurface = MDADFollower.surfaceName(profile.segSurface[1]),
         currentSegWidth = profile.segWidth[1] > 0 and profile.segWidth[1] or nil,
         cost = type(route.cost) == "number"
@@ -13752,6 +13762,8 @@ local function onPlayerUpdate(player)
                 tg = s.targetGen, len = routeLen, pts = pointN,
                 target = tostring(tx) .. "," .. tostring(ty),
                 navVersion = s.navVersion,
+                x = vehicle:getX(), y = vehicle:getY(),
+                snapDist = finite(route.snapDist) and route.snapDist or nil,
                 currentSurface = MDADFollower.surfaceName(profile.segSurface[1]),
                 currentSegWidth = profile.segWidth[1] > 0 and profile.segWidth[1] or nil,
                 cost = finite(route.cost) and route.cost or nil,
