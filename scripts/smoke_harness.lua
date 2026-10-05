@@ -16066,6 +16066,76 @@ local function scenarioPhaseE()
         drive.clearCell(30, 4)
         MDAD.Drive.stop(0, nil)
     end
+    -- ③c RETURN hold 被繞行接手時，承諾線出口回常駐線（回線目標），不是 RETURN 持有的車位 lane
+    --    （正式服 1004g clip：車在 −1.7、常駐 +3，兩次 return release why=dodge 後的承諾線都回 −1.7，
+    --    走完 done 時車在 −1.7 以 82 km/h 開進線尾 11m 外的硬物）。commit 用的 dodgeBaseL（出口加長
+    --    重建）與承諾線線尾橫向都要＝returnLaneTarget；對照組：沒有 RETURN 的承諾照舊回 laneBias。
+    function drive.scenarioReturnDodgeLane()
+        local function tailLat(fs) -- v4Route 沿 y=0 往 +x：線點 y＝橫向
+            return type(fs.ovY) == "table" and fs.ovN and fs.ovY[fs.ovN] or nil
+        end
+        drive.nav.route = v4Route("paved", 10)
+        drive.fillWorld(-10, 170, -20, 20)
+        drive.putRoad(-10, 170, -20, 20)
+        hotVeh._x, hotVeh._y, hotVeh._speed = 0, 3.6, 0
+        setHeading(hotVeh, 0)
+        drive.putSolid(-3, 2, "harness_retlane_side")
+        drive.putSolid(30, 4, "harness_retlane_ahead")
+        driveReset(hotVeh)
+        checkTrue(MDAD.Drive.start(dp), "(ret-lane) 啟動")
+        for _ = 1, 6 do driveTick(dp, hotVeh) end
+        local relWhy = nil
+        local origEv = MDADDiagnostics.event
+        MDADDiagnostics.event = function(pn, name, a, ...)
+            if name == "return" and type(a) == "table" and a.phase == "release" then relWhy = a.why end
+            if origEv then return origEv(pn, name, a, ...) end
+        end
+        drive.scanRound(true)
+        MDADDiagnostics.event = origEv
+        local target, fs = captured.returnLaneTarget, captured.fstate
+        checkTrue(captured.dodging and captured.lastHoldReason == "probe" and not captured.returnActive
+                and (captured.diag ~= true or relWhy == "dodge"),
+            "(ret-lane) 前置：RETURN hold 被 dodge 接手（dodging " .. tostring(captured.dodging)
+            .. " hold " .. tostring(captured.lastHoldReason) .. " why " .. tostring(relWhy) .. "）")
+        checkTrue(type(target) == "number" and math.abs(captured.lastLatSigned - target) > 1.5,
+            "(ret-lane) 前置：車位離回線目標 > 1.5m（lat " .. tostring(captured.lastLatSigned)
+            .. " target " .. tostring(target) .. "）")
+        checkNear(captured.dodgeBaseL or 1e9, target, 1e-9,
+            "(ret-lane) dodgeBaseL＝returnLaneTarget（實得 " .. tostring(captured.dodgeBaseL) .. "）")
+        checkNear(tailLat(fs) or 1e9, target, 0.05,
+            "(ret-lane) 承諾線線尾橫向＝回線目標（線尾 " .. tostring(tailLat(fs)) .. " offL "
+            .. tostring(fs.offL) .. " target " .. tostring(target) .. "）")
+        checkNear(fs.laneBias, target, 1e-9, "(ret-lane) 接手後 laneBias＝回線目標")
+        drive.clearCell(-3, 2)
+        drive.clearCell(30, 4)
+        MDAD.Drive.stop(0, nil)
+        -- 對照組：車在常駐線上、沒有 RETURN，前方障礙逼出承諾：出口照舊回 laneBias。常駐改 +1.5（10m 路 ×0.6），
+        -- 與 session 初值 returnLaneTarget＝0 分得開（違規「不看 returnActive 一律回 returnLaneTarget」才咬得到）
+        setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
+            AutoDriveMaxSpeed = 40, ObstaclePolicy = 1, RightLaneBias = 0.6 })
+        hotVeh._x, hotVeh._y, hotVeh._speed = 0, 1.5, 0
+        setHeading(hotVeh, 0)
+        drive.putSolid(30, 1, "harness_retlane_ctrl")
+        driveReset(hotVeh)
+        checkTrue(MDAD.Drive.start(dp), "(ret-lane ctrl) 啟動")
+        for _ = 1, 6 do driveTick(dp, hotVeh) end
+        drive.scanRound(true)
+        fs = captured.fstate
+        local lb = fs.laneBias
+        checkTrue(captured.dodging and not captured.returnActive and math.abs(lb - 1.5) < 0.05
+                and captured.returnLaneTarget == 0,
+            "(ret-lane ctrl) 前置：無 RETURN 的承諾、laneBias＝常駐 1.5（dodging "
+            .. tostring(captured.dodging) .. " ra " .. tostring(captured.returnActive) .. " lb " .. tostring(lb)
+            .. " rt " .. tostring(captured.returnLaneTarget) .. "）")
+        checkNear(captured.dodgeBaseL or 1e9, lb, 1e-9, "(ret-lane ctrl) dodgeBaseL＝laneBias")
+        checkNear(tailLat(fs) or 1e9, lb, 0.05,
+            "(ret-lane ctrl) 線尾橫向＝laneBias（線尾 " .. tostring(tailLat(fs)) .. " offL " .. tostring(fs.offL) .. "）")
+        drive.clearCell(30, 1)
+        MDAD.Drive.stop(0, nil)
+        setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
+            AutoDriveMaxSpeed = 40, ObstaclePolicy = 1, RightLaneBias = 0 })
+    end
+    drive.scenarioReturnDodgeLane()
     -- ④ 原始折點 ±RETURN_CORNER_M 內不進 RETURN（2026-09-02 s046 Bank Road→
     --    Garnettsville T 字左轉）：窄路（width 4→band 0.6m）放不下 rMin 圓角＝fallback
     --    折點；pure pursuit 切過折點時對折線的橫向偏差是幾何必然，不是甩出。

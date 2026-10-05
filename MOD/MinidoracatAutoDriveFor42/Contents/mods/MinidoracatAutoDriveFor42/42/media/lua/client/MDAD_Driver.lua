@@ -8023,14 +8023,23 @@ end
 -- 過渡幾何按爬行速設計（短、緊貼障礙）——長過渡線在窄縫兩側會多掃到旁邊的
 -- 樹／牆而被打回（harness「narrow tree gap」對照）。false＝巡航檔按巡航意圖設計。
 -- 候選線的起始 lane＝車的實際橫向（缺 lastLatSigned 時退回 baseL）。dl／進入段設計／
--- 陡坡閘／buildOffsetLine 的 s0..a 段／停留線的 returnLaneStart 全部以此為準；baseL
--- 仍是 corridor 擋線判定與回線 lane（車「要去」的常駐線）。2026-09-06 s025 定罪：車在
+-- 陡坡閘／buildOffsetLine 的 s0..a 段／停留線的 returnLaneStart 全部以此為準；候選鏈的 baseL
+-- 是回線 lane（車「要去」的線，`Drive.dodgeHomeL`），corridor 擋線判定另用 laneBias。2026-09-06 s025 定罪：車在
 -- 1.66、bias 夾成 0.13、候選 offL 1.25 → 舊制 dl 1.12（實際只差 0.41）且線從 0.13 起步，
 -- cross-track 先往左拉 1.5m 再右切＝前右角撞路口內側桿。「寫 lane 前先問車在哪」第五次。
 local function startLaneOf(s, baseL)
     local v = s.lastLatSigned
     if finite(v) then return v end
     return baseL
+end
+
+-- 繞行承諾線的回線 lane（出口段與線尾、dodgeBaseL、出口後擋線判定）：RETURN 持有中（hold／crawl-exact 讓位
+-- 給繞行）＝回線目標 returnLaneTarget——commit 同幀結束 RETURN 並把 laneBias 寫成它；否則＝laneBias。
+-- RETURN hold 的 laneBias 是車位（holdUnsafeReturn），舊制拿它當出口：線走完車停在 RETURN 要離開的那條
+-- lane，線尾到常駐線的斜切沒被掃過（正式服 1004g：車在 −1.7、常駐 +3，82 km/h 走完線、11m 外撞硬物）。
+function Drive.dodgeHomeL(s)
+    if s.returnActive and finite(s.returnLaneTarget) then return s.returnLaneTarget end
+    return laneBiasOf(s)
 end
 
 -- 掛車軌跡掃掠與保持段延長只用在寬帶繞行（規劃中的寬帶快照或已承諾的寬帶繞行）。0929p 第一版一般帶也驗掛車：
@@ -8939,8 +8948,9 @@ end
 -- 前方（弧長 ≥ minS）最近的擋線點索引；nil＝淨空。O(hardN)、零配置；冷路徑用。
 -- 兩個消費者：exit 提前釋放（只問有沒有）、貼縫檔死路判定（2026-09-02 使用者裁定
 -- 「複雜的障礙人工處理」：繞行出口 d+1 之後仍有擋線點＝多重障礙＝不鑽，要點位）。
+-- 基準＝回線 lane（`Drive.dodgeHomeL`）：RETURN hold 讓位規劃時出口之後走的是回線目標，不是車位。
 local function nearestLineBlocker(s, sen, minS)
-    local bl0, nh = laneBiasOf(s), s.needHalf
+    local bl0, nh = Drive.dodgeHomeL(s), s.needHalf
     local prof = s.profile
     local bi = nil
     for i = 1, sen.hardN do
@@ -9692,8 +9702,8 @@ end
 -- 候選。回 ok, a, b, c, d, offL, sweepBase；ok=false 時不動任何 s 欄位。
 -- refineComfort=true（2026-09-02 使用者「能走路面就別走草地」）：複審不是 ban
 -- 重試，first-safe 後在同側找額外餘裕／偏回路面帶。降檔縫一律標 dodgeCrawl
--- （reserve 豁免＋intent CRAWL；速度仍由 clearance 連續縮放）。
-local function demotePlan(s, sen, planN, prefer, baseL, playerNum)
+-- （reserve 豁免＋intent CRAWL；速度仍由 clearance 連續縮放）。blockL＝擋線基準（laneBias），baseL＝回線 lane。
+local function demotePlan(s, sen, planN, prefer, blockL, baseL, playerNum)
     for tier = 1, 2 do
         local nu = tier == 1 and s.squeezeNeed
             or MDADVehicleProfile.planNeed(s.vehicleProfile.halfW, "physical")
@@ -9701,7 +9711,7 @@ local function demotePlan(s, sen, planN, prefer, baseL, playerNum)
             or MDADVehicleProfile.sweepBase(s.vehicleProfile.halfW, "physical")
         local mq, aq, bq, cq, dq, oq = MDADCorridor.plan(
             sen.hardS, sen.hardL, planN, nu, sen.corridorHalf or MDADSensor.CORRIDOR_HALF,
-            prefer, sen.hardR, baseL, sen.roadLo, sen.roadHi, true, s.hardBase,
+            prefer, sen.hardR, blockL, sen.roadLo, sen.roadHi, true, s.hardBase,
             s.lastSNow - s.vehicleProfile.halfL, sen.corridorInner, sen.hardLc, sen.hardW)
         if mq == "dodge" and dq > s.lastSNow + 1 then
             local shapeQ
@@ -10188,12 +10198,13 @@ local function replan(s, vehicle, playerNum)
         -- 「車實際要走的線」為中心（以中心線判會漏掉不擋中線但擋行駛線的
         -- 路緣樹，車直接蹭上卡死——2026-08-28 實機 lat=1.2 卡死 ×3）。
         -- 完整契約見 MDADCorridor.plan。
-        local baseL = laneBiasOf(s)
-        -- 搜尋中心＝行駛基準線（immutable DODGE 後 replan 只發生在無承諾時，
-        -- 舊的 lastOffL 側別記憶已無讀者——側別穩定性由「承諾不可變」保證）
-        local prefer = baseL
+        -- 搜尋中心＝擋線基準＝行駛基準線 laneBias（immutable DODGE 後 replan 只發生在無承諾時，
+        -- 舊的 lastOffL 側別記憶已無讀者——側別穩定性由「承諾不可變」保證）；RETURN hold 時是車位。
+        -- baseL＝候選線的回線 lane（`Drive.dodgeHomeL`）：RETURN hold 讓位時是回線目標，不是車位。
+        local prefer = laneBiasOf(s)
+        local baseL = Drive.dodgeHomeL(s)
         local needUsed, planN
-        mode, a, b, c, d, offL, needUsed, s.dodgeTight, planN = Drive.planDodge(s, baseL, prefer)
+        mode, a, b, c, d, offL, needUsed, s.dodgeTight, planN = Drive.planDodge(s, prefer, prefer)
         clearHandoff = mode == "clear"
         s.dodgeCrawl = false
         s.dodgeStay = false
@@ -10341,7 +10352,7 @@ local function replan(s, vehicle, playerNum)
                             nb = s.squeezeSweepBase
                             local mq, aq, bq, cq, dq, oq = MDADCorridor.plan(
                                 sen.hardS, sen.hardL, planN, nu, sen.corridorHalf or MDADSensor.CORRIDOR_HALF,
-                                prefer, sen.hardR, baseL, sen.roadLo, sen.roadHi, false, s.hardBase,
+                                prefer, sen.hardR, prefer, sen.roadLo, sen.roadHi, false, s.hardBase,
                                 s.lastSNow - s.vehicleProfile.halfL, sen.corridorInner, sen.hardLc, sen.hardW)
                             if mq ~= "dodge" then break end
                             pa, pb, pc, pd, po = aq, bq, cq, dq, oq
@@ -10373,8 +10384,8 @@ local function replan(s, vehicle, playerNum)
                             sen.hardLc[banN], sen.hardW[banN] = nil, nil -- 虛擬 ban：擋線判定退回 hardL／hardR
                             local mk, ak, bk, ck, dk, ok2 = MDADCorridor.plan(
                                 sen.hardS, sen.hardL, banN, nu, sen.corridorHalf or MDADSensor.CORRIDOR_HALF,
-                                prefer, sen.hardR, baseL, sen.roadLo, sen.roadHi, false,
-                                fillHardBase(s, sen, banN, baseL), s.lastSNow - s.vehicleProfile.halfL, sen.corridorInner,
+                                prefer, sen.hardR, prefer, sen.roadLo, sen.roadHi, false,
+                                fillHardBase(s, sen, banN, prefer), s.lastSNow - s.vehicleProfile.halfL, sen.corridorInner,
                                 sen.hardLc, sen.hardW)
                             if mk ~= "dodge" then break end
                             pa, pb, pc, pd, po = ak, bk, ck, dk, ok2
@@ -10418,7 +10429,7 @@ local function replan(s, vehicle, playerNum)
                         MDADVehicleProfile.planNeed(s.vehicleProfile.halfW, "physical")
                     local mp, pa2, pb2, pc2, pd2, po2 = MDADCorridor.plan(
                         sen.hardS, sen.hardL, planN, probeNeed,
-                        sen.corridorHalf or MDADSensor.CORRIDOR_HALF, prefer, sen.hardR, baseL,
+                        sen.corridorHalf or MDADSensor.CORRIDOR_HALF, prefer, sen.hardR, prefer,
                         sen.roadLo, sen.roadHi, false, s.hardBase,
                         s.lastSNow - s.vehicleProfile.halfL, sen.corridorInner, sen.hardLc, sen.hardW)
                     if mp == "dodge" then
@@ -10497,7 +10508,7 @@ local function replan(s, vehicle, playerNum)
         if mode == "blocked" and not sweptChain
                 and MDAD.sandbox("ObstaclePolicy", POLICY_DODGE) == POLICY_DODGE then
             local okD, aD, bD, cD, dD, oD, nbD = demotePlan(
-                s, sen, planN, prefer, baseL, playerNum)
+                s, sen, planN, prefer, prefer, baseL, playerNum)
             if okD then
                 mode, a, b, c, d, offL, commitNb = "dodge", aD, bD, cD, dD, oD, nbD
             end
@@ -10689,8 +10700,9 @@ local function replan(s, vehicle, playerNum)
             s.dodgeBaseCap = s.dodgeSpeedCap
             s.dodgeCapPending = false
             s.dodgeNeed = commitNb or s.sweepBase -- 承諾檔淨距（守護輪同契約）
-            -- 出口加長（Drive.extendDodgeExit）重建同一條線要用的起始 lane 與回線 lane
-            s.dodgeBaseL, s.dodgeExtendFailS = laneBiasOf(s), nil
+            -- 出口加長（Drive.extendDodgeExit）重建同一條線要用的起始 lane 與回線 lane（與候選鏈同一個
+            -- Drive.dodgeHomeL；RETURN 還沒在下方結束，接手時取到的是回線目標）
+            s.dodgeBaseL, s.dodgeExtendFailS = Drive.dodgeHomeL(s), nil
             s.dodgeStartL = startLaneOf(s, s.dodgeBaseL)
             -- RETURN hold 讓位給 dodge 不能只讓剖面（2026-09-03 s017：起步就 hold(probe)
             -- → 「return line blocked: dodge takes over」→ 原地 15s 紅字）：
