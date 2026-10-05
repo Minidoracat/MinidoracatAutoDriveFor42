@@ -1102,6 +1102,8 @@ function MDADHUDPanel:createChildren()
     -- 自動改道藥丸（2026-09-02 使用者：ESC 選項也要出現在 HUD 上）：與減速藥丸同列同款，
     -- 讀寫同一個 ModOptions 選項（ESC／MiniMap 設定三處同源）；無 ModOptions＝不顯示。
     self.autoButton = makeButton(self, "", MDADHUDPanel.onAutoDetour)
+    -- 閃避動物藥丸：兩態（關／上次開啟的等級），讀寫同一個 AnimalDodge 選項；無 ModOptions＝不顯示。
+    self.animalButton = makeButton(self, "", MDADHUDPanel.onAnimalDodge)
     self.speedButton = makeButton(self, "", MDADHUDPanel.onSpeedPin)
     -- 接續模式藥丸（v7）：點一下開原版選單挑自動／逐點，寫入只在玩家挑了才發生。
     self.contButton = makeButton(self, "", MDADHUDPanel.onContinuation, MDADHUDChainButton)
@@ -1169,6 +1171,7 @@ function MDADHUDPanel:setControlsVisible(gearsOn, cycleOn, policiesOn, actionOn,
     self.zombieButton:setVisible(policiesOn)
     self.corpseButton:setVisible(policiesOn)
     self.autoButton:setVisible(policiesOn and modOptions ~= nil)
+    self.animalButton:setVisible(policiesOn and modOptions ~= nil)
     self.speedButton:setVisible(policiesOn and modOptions ~= nil)
     -- 接續模式藥丸與策略藥丸同列同進退；沒有 v7 setter／沒有行程時整顆不存在。
     self.contButton:setVisible(policiesOn and self._contAvail == true)
@@ -1253,7 +1256,8 @@ local function measure(self, scale)
         textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDZombie") .. " " .. forcedText),
         maximum(textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDCorpse") .. " " .. forcedText),
             maximum(textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDAuto") .. " " .. forcedText),
-                textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDSpeed") .. " " .. forcedText)))) + 14)
+                maximum(textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDAnimal") .. " " .. forcedText),
+                    textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDSpeed") .. " " .. forcedText))))) + 14)
     m.energyW = textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDEnergy", 100, 100))
     -- 行車時間欄（0908d）：欄名固定、數值另存一格，兩者分開量測。數值一律以
     -- "00:00:00" 保留最寬字串：跨過一小時、位數變動或 100h+ 都不推動任何幾何，
@@ -1272,7 +1276,7 @@ local function measure(self, scale)
     m.valueW = textWidth(UIFont.Small, "100") + 4
     m.sliderW = maximum(scaled(84, scale), SLIDER_KNOB * 3 + m.valueW)
     m.controlsOn = modOptions ~= nil
-    m.policyN = m.controlsOn and 4 or 2 -- 殭屍／屍體＋自動改道／速度明細（無 ModOptions 時不顯示）
+    m.policyN = m.controlsOn and 5 or 2 -- 殭屍／屍體＋自動改道／閃避動物／速度明細（無 ModOptions 時不顯示）
     local screenW = getPlayerScreenWidth(self.playerNum)
     m.maxW = type(screenW) == "number" and screenW - 16 or 1904
     return m
@@ -1357,6 +1361,7 @@ function MDADHUDPanel:layoutWings(scale, m)
     self.zombieButton:setVisible(not foldR)
     self.corpseButton:setVisible(not foldR)
     self.autoButton:setVisible(not foldR and controlsOn)
+    self.animalButton:setVisible(not foldR and controlsOn)
     self.speedButton:setVisible(not foldR and controlsOn)
     self.contButton:setVisible(not foldR and self._contAvail == true)
     self.actionButton:setVisible(not foldL)
@@ -1437,9 +1442,10 @@ function MDADHUDPanel:layoutWings(scale, m)
         setButtonRect(self.zombieButton, rightX + pad, row2, policyW, rowH)
         setButtonRect(self.corpseButton, rightX + pad + policyW + gap, row2, policyW, rowH)
         setButtonRect(self.autoButton, rightX + pad + (policyW + gap) * 2, row2, policyW, rowH)
-        setButtonRect(self.speedButton, rightX + pad + (policyW + gap) * 3, row2, policyW, rowH)
+        setButtonRect(self.animalButton, rightX + pad + (policyW + gap) * 3, row2, policyW, rowH)
+        setButtonRect(self.speedButton, rightX + pad + (policyW + gap) * 4, row2, policyW, rowH)
         if m.contW > 0 then
-            self:placeContButton(rightX + pad + (policyW + gap) * (controlsOn and 4 or 2),
+            self:placeContButton(rightX + pad + (policyW + gap) * (controlsOn and 5 or 2),
                 row2, m.contW, rowH, m)
         end
         self._energyX = rightX + rightW - pad - energyW
@@ -1672,6 +1678,8 @@ function MDADHUDPanel:layoutStacked(scale, m)
             if controlsOn then
                 setButtonRect(self.autoButton, x, y, policyW, buttonH)
                 x = x + policyW + gap
+                setButtonRect(self.animalButton, x, y, policyW, buttonH)
+                x = x + policyW + gap
                 setButtonRect(self.speedButton, x, y, policyW, buttonH)
                 x = x + policyW + gap
             end
@@ -1763,6 +1771,8 @@ function MDADHUDPanel:layoutStacked(scale, m)
         setButtonRect(self.corpseButton, x, bottomY, policyW, buttonH)
         x = x + policyW + gap
         setButtonRect(self.autoButton, x, bottomY, policyW, buttonH)
+        if m.controlsOn then x = x + policyW + gap end
+        setButtonRect(self.animalButton, x, bottomY, policyW, buttonH)
         if m.controlsOn then x = x + policyW + gap end
         setButtonRect(self.speedButton, x, bottomY, policyW, buttonH)
         if m.controlsOn then x = x + policyW + gap end
@@ -2529,6 +2539,12 @@ function MDADHUDPanel:updateButtons()
         getText("UI_MinidoracatAutoDrive_HUDAutoTip") .. "\n"
             .. getText("UI_MinidoracatAutoDrive_HUDPolicyToggle"),
         optionScale())
+    -- 閃避動物：開＝綠（大型或所有）、關＝灰；等級寫在 tooltip，ESC／MiniMap 改了下一輪 refresh 就反映。
+    local animalLevel = HUD.animalDodge()
+    applyPolicyButton(self.animalButton, "UI_MinidoracatAutoDrive_HUDAnimal", "animal",
+        animalLevel ~= 1, true,
+        getText("UI_MinidoracatAutoDrive_HUDAnimalTip", getText(HUD.ANIMAL_DODGE_KEYS[animalLevel])),
+        optionScale())
     applyPolicyButton(self.speedButton, "UI_MinidoracatAutoDrive_HUDSpeed", "gauge",
         speedDetails(), true, getText("UI_MinidoracatAutoDrive_SpeedDetails_tooltip"), optionScale())
     -- 接續模式藥丸：值＝目前行程的 autoContinue。沒有 v7 setter／沒有行程時整顆不顯示，
@@ -2819,6 +2835,23 @@ end
 
 function MDADHUDPanel:onAutoDetour()
     setAutoDetour(not autoDetour())
+    self._forceRefresh = true
+    self:refresh(getTimestampMs())
+end
+
+-- 閃避動物藥丸：關→恢復上次開啟的等級（玩家 modData，預設大型動物）；開→先記下目前等級再關。
+-- 大型／所有之間的選擇只在 ESC 與 MiniMap 設定（tooltip 有寫），HUD 只管開關。
+function MDADHUDPanel:onAnimalDodge()
+    local playerObj = getSpecificPlayer(self.playerNum)
+    local md = playerObj and playerObj:getModData()
+    local level = HUD.animalDodge()
+    if level == 1 then
+        local last = md and md.MDADHudAnimalLast
+        HUD.setAnimalDodge((last == 2 or last == 3) and last or 2)
+    else
+        if md then md.MDADHudAnimalLast = level end
+        HUD.setAnimalDodge(1)
+    end
     self._forceRefresh = true
     self:refresh(getTimestampMs())
 end

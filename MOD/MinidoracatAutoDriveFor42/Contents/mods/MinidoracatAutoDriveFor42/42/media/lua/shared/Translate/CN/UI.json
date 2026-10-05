@@ -126,6 +126,8 @@
     "UI_MinidoracatAutoDrive_HUDDriveTime": "行车时间",
     "UI_MinidoracatAutoDrive_HUDZombie": "僵尸",
     "UI_MinidoracatAutoDrive_HUDCorpse": "尸体",
+    "UI_MinidoracatAutoDrive_HUDAnimal": "动物",
+    "UI_MinidoracatAutoDrive_HUDAnimalTip": " <RGB:0.82,0.66,0.31>闪避动物： <RGB:0.55,0.78,0.85>%1 <RGB:0.93,0.92,0.87>\n <RGB:0.82,0.66,0.31>点击： <RGB:0.93,0.92,0.87>在「关闭」与上次开启的等级之间切换。\n要闪大型动物还是所有动物，请在 ESC 选项或小地图设置里选。",
     "UI_MinidoracatAutoDrive_HUDOn": "开",
     "UI_MinidoracatAutoDrive_HUDOff": "关",
     "UI_MinidoracatAutoDrive_HUDForcedOn": "固定开",
