@@ -6516,8 +6516,11 @@ checkEq(type(MDADSensor), "table", "production client/MDAD_Sensor.lua 真的載�
 -- （IsoFlagType/IsoObjectType/instanceof 首輪掃描才讀），這裡塞替身即可。
 IsoFlagType = { water = "water", solidfloor = "solidfloor", doorN = "doorN", doorW = "doorW",
     DoorWallN = "DoorWallN", DoorWallW = "DoorWallW", open = "open",
-    solidtrans = "solidtrans", solid = "solid", collideN = "collideN", collideW = "collideW" }
+    solidtrans = "solidtrans", solid = "solid", collideN = "collideN", collideW = "collideW",
+    attachedFloor = "flag:attachedFloor" }
     -- solidtrans：(C2) 用；solid／collideN／collideW：0929j 引擎形狀（putSolid 的 props 一律回 false，不受影響）
+    -- attachedFloor：引擎只存旗標（PropertyContainer.set 轉 IsoFlagType）、字串 has("attachedFloor") 查不到，
+    -- 替身值刻意和字串名不同，鍵用錯就查不到（issue #7）
 IsoObjectType = { isMoveAbleObject = 28 }
 -- _isa：繼承鏈（IsoAnimal extends IsoPlayer，IsoAnimal.java:123）——真引擎 instanceof(animal, "IsoPlayer") 為真
 function instanceof(obj, cls)
@@ -22743,8 +22746,10 @@ function drive.scenario0929j()
     flagObj(58, 3, "lighting_outdoor_01_1", {}, false)
     flagObj(62, 3, "e_harnessJUMBOXL_1_0", { solid = true, StopCar = true }, true, "IsoTree")
     -- issue #7：勃蘭登堡路面散落的籬笆碎片（fencing_damaged_01_168..171，地圖原生）只有 attachedFloor、沒有碰撞旗標
-    -- ＝calcPhysics 不給形狀、車直接壓過。違規證明：拿掉 attachedFloor 放行即紅（格心多一個 r=0 硬點）。
-    flagObj(26, 3, "fencing_damaged_01_170", { attachedFloor = true }, false)
+    -- ＝calcPhysics 不給形狀、車直接壓過。attachedFloor 在引擎是 sprite 旗標（IsoFlagType），不是字串屬性：
+    -- 替身用 IsoFlagType.attachedFloor 的值當鍵、字串 "attachedFloor" 查不到（1006c E2E 勃蘭登堡實機仍判硬點＝
+    -- production 用字串查、舊替身兩種鍵不分而假綠）。違規證明：拿掉 attachedFloor 放行、或改回字串查即紅。
+    flagObj(26, 3, "fencing_damaged_01_170", { [IsoFlagType.attachedFloor] = true }, false)
     checkTrue(armDrive(), "(shape) 啟動")
     setHeading(dveh, 0)
     local st = MDAD.Drive.debugSession(0)
