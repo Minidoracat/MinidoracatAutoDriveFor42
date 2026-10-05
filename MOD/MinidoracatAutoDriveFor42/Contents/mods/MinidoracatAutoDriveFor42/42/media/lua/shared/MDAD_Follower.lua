@@ -175,13 +175,14 @@ local CURVE_FF_FRAC = 0.75
 -- 一張表（control 的 upvalue 已貼 60 上限）：fromKmh→fullKmh 補足區間、frac＝補足到的 FRAC、
 -- learnKmh／minFF＝高速增益的學習條件（實速／上幀前饋量）、learnS＝學滿才補足、settleS＝假設的 yaw 延遲 τ
 -- （穩態門檻與 steer 低通共用；前饋進弧爬升的 CURVE_FF_LEAD_S 是同一個量）。fbOppose＝回授正規化增益（yawGainFb）
--- 剔除的反相 yaw 率門檻（rad/s，見 control 的 yaw 增益估計段）；inM／inSpanM＝弧段前饋的彎內偏差退讓（見
--- arcFeedForward 尾段）；slipOut＝高速增益學習的往彎外側滑門檻（rad，state.slip；語料 >40 km/h 弧上正常幀率
--- 往彎外 |vt|/v >0.03 只占 1%，正式服 1005h 過轉 0.045／0.086）；exitTauS／exitTcS／exitSpanM／yawTauS＝出弧殘餘轉角
+-- 剔除的反相 yaw 率門檻（rad/s，見 control 的 yaw 增益估計段）；inM／inSpanM＝弧段前饋的彎內偏差退讓，inLeadS／
+-- inBaseM＝退讓的回程預測（秒、差分基線 m；兩者見 arcFeedForward 尾段）；slipOut＝高速增益學習的往彎外側滑門檻
+-- （rad，state.slip；語料 >40 km/h 弧上正常幀率往彎外 |vt|/v >0.03 只占 1%，正式服 1005h 過轉 0.045／0.086）；
+-- exitTauS／exitTcS／exitSpanM／yawTauS＝出弧殘餘轉角
 -- （見 MDADFollower.arcExitResidual）；同表是為了不多占 control 的 upvalue。
 local CURVE_FF_LEAD_S = 0.35
 local FF_HI = { fromKmh = 30, fullKmh = 55, frac = 0.9, learnKmh = 40, minFF = 0.1, learnS = 0.5,
-    settleS = CURVE_FF_LEAD_S, fbOppose = 0.5, inM = 0.3, inSpanM = 0.5, slipOut = 0.03,
+    settleS = CURVE_FF_LEAD_S, fbOppose = 0.5, inM = 0.3, inSpanM = 0.5, inLeadS = 1.0, inBaseM = 0.5, slipOut = 0.03,
     exitTauS = 0.2, exitTcS = 0.1, exitSpanM = 15, yawTauS = 0.05 }
 local CURVE_FF_MAX = 0.8 -- 小增益長車不能用倒數把前饋放大成整車橫推；回饋仍保留完整權威。
 local YAW_GAIN_INIT = 0.8
@@ -1314,6 +1315,12 @@ MDADFollower.ovIndexAt = ovIndexAt -- Driver 的實測落後量守門（Drive.la
 -- 平常小修正學到的低增益讓急彎前饋過頭 2–3 倍（Qoo 學到 0.19、彎上實測 0.65–0.73）；車道 ramp 前段的小 steer
 -- 又幾乎轉不動車頭，進弧時已偏內 0.5–0.85m。兩種誤差都是「前饋在車已偏內時照推」，cross-track 0.77·2/v 在
 -- 40 km/h 只有 0.14/m 拉不回。只退讓、不反推：外側偏差照舊由回授處理，前饋不加碼。
+-- 回程預測（1006；E2E e1006e／h1006k f350van 同一個 S 彎兩次 63–66 km/h 撞路邊樹）：位置門檻本身是一支沒有阻尼的硬 P
+-- （0.5m 內前饋整份↔0，回授的幾十倍），車已在往回走時照退＝前饋歸零、車直走、弧把它甩向彎外。S 彎上前一彎的外漂
+-- 加上車道 ramp 剛好是下一彎的「彎內」：實機 26.6° 平移、R42 反向弧入口偏內 1.34m，前饋 0 持續 8m，車以 2.5 m/s
+-- 橫越期望線、出彎外偏 1.0m。偏差對弧長的斜率（inBaseM 基線差分）指向回程時，偏差改用 v·inLeadS 秒後的預測值——
+-- 只減不增：往內走、停在內側都照舊退讓（1004b 保護不變；雙向預測會把連續小弧的車道起伏當成往內、前饋塌到 0），
+-- 只在已往回走時把前饋還回來，回程從拋物線過衝變一階收斂。離線閉環 test_follower「1006：S 彎反向弧入口偏內」。
 local LANE_FF_STEP_M = 2
 local function arcFeedForward(profile, state, arcK, bestI, sNow, aspeed, tangentOn, yawGain, ovDen,
         latSigned, lineLat)
@@ -1429,11 +1436,23 @@ local function arcFeedForward(profile, state, arcK, bestI, sNow, aspeed, tangent
         elseif ff < -CURVE_FF_MAX then ff = -CURVE_FF_MAX end
     end
     ff = ff + ffLane
-    -- 彎內偏差退讓（見檔頭）：期望線＝cross-track 追的那條（承諾線 lineLat，否則常駐車道連續落點）
+    -- 彎內偏差退讓（見檔頭）：期望線＝cross-track 追的那條（承諾線 lineLat，否則常駐車道連續落點）；回程預測只減不增
     if ff ~= 0 and isFinite(latSigned) then
         local lane = lineLat
         if lane == nil then lane = clampLane(profile, bestI, isFinite(rb) and rb or 0, state.laneKeep, sNow) end
-        local over = ((latSigned - lane) * (ff > 0 and 1 or -1) - FF_HI.inM) / FF_HI.inSpanM
+        local dev = latSigned - lane
+        local s0 = state.ffDevS
+        if s0 == nil or sNow < s0 or sNow - s0 > 4 * FF_HI.inBaseM then
+            state.ffDev, state.ffDevS, state.ffDevSlope = dev, sNow, 0
+        elseif sNow - s0 >= FF_HI.inBaseM then
+            state.ffDevSlope = (dev - state.ffDev) / (sNow - s0)
+            state.ffDev, state.ffDevS = dev, sNow
+        end
+        local sg = ff > 0 and 1 or -1
+        dev = dev * sg
+        local back = state.ffDevSlope * sg * v * FF_HI.inLeadS
+        if back < 0 then dev = dev + back end
+        local over = (dev - FF_HI.inM) / FF_HI.inSpanM
         if over >= 1 then return 0 end
         if over > 0 then ff = ff * (1 - over) end
     end
@@ -2536,7 +2555,7 @@ function MDADFollower.resetControl(state)
     state.ffSteer, state.ffSteadyT, state.hiSteerLag = 0, 0, nil -- 低通／穩態計時跟施力歷史一起斷
     state.exitEndS, state.yawRateF = nil, 0 -- 出弧殘餘轉角（arcExitResidual）：換線／脫困後不沿用舊弧的出口
     state.prevHeading = nil -- yawGain 是車的性質，跨 cutover／脫困保留；只斷差分
-    state.slipX, state.slip = nil, 0 -- 側滑弦估計同樣斷差分（瞬移／脫困後重量）
+    state.slipX, state.slip, state.ffDevS = nil, 0, nil -- 側滑弦估計、退讓回程差分同樣斷差分（瞬移／脫困後重量）
     releaseExactLine(state)
     return state
 end
