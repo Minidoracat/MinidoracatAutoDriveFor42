@@ -1286,6 +1286,7 @@ local function ovIndexAt(ovS0, ovN, ovEndS, q)
     local i0 = fi - fi % 1
     return i0, fi - i0
 end
+MDADFollower.ovIndexAt = ovIndexAt -- Driver 的實測落後量守門（Drive.lagGuardScan）取承諾線在硬點弧長的位置
 
 -- 弧段前饋：回傳要加進 steer 的量（0＝不加）。arcK＝前視窗內第一個弧段（control 的 onArc 同源）。
 -- 弧的起點 k：進弧前 LEAD 秒線性爬升、出弧前同一個 LEAD 收尾（0908a 試收尾只差 0.02-0.05m，當時弦角預轉

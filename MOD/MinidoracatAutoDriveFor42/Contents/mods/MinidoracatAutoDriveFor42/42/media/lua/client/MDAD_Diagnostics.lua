@@ -1255,7 +1255,7 @@ local function encodePhys(phys)
     addNum("visHold", "vho")          -- 巡航帳假設的前緣停滯保持剩餘秒數
     addNum("visRoundS", "vrs")        -- 掃描輪時 EWMA（秒）
     addNum("visAssistDecel", "vad")   -- 巡航減速輔助補的減速度（m/s²）
-    addStr("visAssistWhy", "vaw")     -- 1002a：減速輔助追的帳（vis／profile／lane／dodge／blocked／proof／defer／zombie-lane／traffic；不鎖輪硬煞＝其理由）
+    addStr("visAssistWhy", "vaw")     -- 1002a：減速輔助追的帳（vis／profile／lane／dodge／blocked／proof／lag／defer／zombie-lane／traffic；不鎖輪硬煞＝其理由）
     addNum("towPhi", "tph")           -- 拖掛折角（rad）
     addNum("towUp", "tup")            -- 拖掛 upVectorDot（<0.8 原版拆掛）
     addNum("towDecel", "tda")         -- 施給掛車的減速度（m/s²；0929o 拖車減速分攤）
@@ -1287,6 +1287,7 @@ local function encodePhys(phys)
     addStr("verifyLineReason", "verifyLineReason")
     addNum("proofHitS", "phs")        -- 1005：證明線掃掠命中的車身取樣弧長（gate sweep 接近包絡的終點；同 rs 座標）
     addNum("proofHitN", "phn")        -- 1006：證明線同一點連續命中的輪數（≥ PROOF_STOP_ROUNDS：包絡在命中前停住、規劃當擋線）
+    addNum("lagGuardCap", "lgc")      -- 1006c：實測落後量守門的接近包絡（規劃線＋實測橫偏的預測車身碰到的硬點；capReason lag）
     addNum("proofKappa", "proofKappa")
     addNum("proofCurveCap", "proofCurveCap")
     addNum("laneCurveEnvelope", "laneCurveEnvelope")
