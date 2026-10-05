@@ -116,6 +116,8 @@ local EK = {
     "avoidR", "towN", "towLeft",
     -- uturn enter（1006）：Follower 前視點弧長、髮夾鉗點弧長（rs 共用上面那個鍵）
     "sT", "kh",
+    -- yawgain hi-cap（1006）：高速增益估計衝出上限那幀的原始比值、重學前已學秒數、引擎幀 ms、質心側滑 β（rad）
+    "obs", "learnT", "fdt", "slip",
 }
 
 local function logOnce(msg)
