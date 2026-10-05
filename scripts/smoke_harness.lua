@@ -9235,6 +9235,43 @@ function drive.scenarioSoftGentle()
 end
 drive.scenarioSoftGentle()
 
+-- (soft-g8) 1005e E2E animal-sp herd（rev 1005d）：車停在牛群前，停等目標位置一抖，接近帽就在 MIN_EXEC 上下跳——
+--   每隔一幀 hold 為假、計時起點被歸零，6 秒的等待實際花了 12.6 秒才爬。停住後（softHoldStarted）只要車沒在動
+--   就照牆鐘計，帽這一幀是否低於 MIN_EXEC 不影響。直接驅動 Drive.softStopCap（假 session，100ms 一幀）。
+--   違規證明：計時改回只在 hold 那幀累加＝紅。
+function drive.scenarioSoftHoldJitter()
+    scenario("動物停等：停住後接近帽在 MIN_EXEC 上下跳，等待照牆鐘計")
+    local T = MDAD.Drive.debugTune()
+    local halfL, brake = 2.4, 6
+    local dFree = 0
+    while MDADDynamics.approachCapKmh(dFree, 0, 0.5, brake * T.APPROACH_BRAKE_FRAC) < MDADDynamics.MIN_EXEC_KMH do
+        dFree = dFree + 0.05
+    end
+    local zsHold = 100 + halfL + T.SOFT_STOP_GAP_M -- d＝0：帽 0（hold）
+    local fs = { softStopKind = "animal", softHoldMs = 0, softHoldTick = 0, softHoldStarted = false, softCrawl = false,
+        softCrawlTick = 0, softCrawlMs = 0, softAnimalCarryMs = 0, softCrawlCarry = false, lastSNow = 100,
+        vehicleProfile = { halfL = halfL }, safeBrake = brake }
+    local now, crawlAt, flips = 5000000, nil, 0
+    for i = 0, 120 do
+        fs.softStopS = (i % 2 == 0) and zsHold or (zsHold + dFree + 0.05) -- 奇數幀帽 ≥ MIN_EXEC
+        local cap = MDAD.Drive.softStopCap(fs, now, 0.1, 0, -1, nil)
+        if i % 2 == 1 and not fs.softCrawl and cap >= MDADDynamics.MIN_EXEC_KMH then flips = flips + 1 end
+        if fs.softCrawl and crawlAt == nil then crawlAt = i * 100 end
+        now = now + 100
+    end
+    checkTrue(flips > 10, "(soft-g8) 前置：奇數幀接近帽確實越過 MIN_EXEC（" .. flips .. " 次）")
+    checkTrue(crawlAt ~= nil and crawlAt <= T.ANIMAL_WAIT_MS + 200,
+        "(soft-g8) 帽在 MIN_EXEC 上下跳：停 ANIMAL_WAIT_MS 就進爬行、不打折（爬行起點 " .. tostring(crawlAt) .. "ms）")
+    fs.softStopS, fs.softCrawl, fs.softHoldStarted, fs.softHoldMs, fs.softHoldTick = zsHold, false, false, 0, 0
+    fs.softHoldKind = nil
+    for i = 0, 30 do
+        MDAD.Drive.softStopCap(fs, now, 20, 0, -1, nil) -- 還在煞停中（20 km/h）：不計
+        now = now + 100
+    end
+    checkTrue(fs.softHoldMs == 0, "(soft-g8) 還在煞停中不計（" .. tostring(fs.softHoldMs) .. "ms）")
+end
+drive.scenarioSoftHoldJitter()
+
 -- ⑤lf 低幀率降速提示（0925；0929o 門檻改為掃描額度放大到上限的 50ms）：可視上限壓速、平均幀時 ≥50ms，
 --   且視距是被幀率截短，持續 2s 才讓 HUD 狀態變「卡頓降速」（lowfps）、恢復 3s 才消失；同趟累計 10s 跳一次
 --   通知。session 從 150ms（可負擔 32m）起算。反例：幀率低但速度沒被可視上限壓（沙盒上限 20）不顯示。
@@ -18800,7 +18837,7 @@ drive.scenarioVisibilityTiming()
 --   (kv-side)    不會開的門只在帶外：照開過、不提示。
 --   (kv-generic) whyText 出錯、或 VERSION 2 卻帶 why：AutoDrive 通用句。
 --   (kv-shut)    會開的門一直不開：停住、等一輪停住 GATE_SHUT_MS 後才開始的掃描仍關著，恰好一次「沒有打開」（detail dwell）。
---   (kv-steep)   1005f 跑道不足、停穩約 500ms 就倒車：第一次倒車那刻恰好一次（detail retry，語音 unstick→gate），之後不重複。
+--   (kv-steep)   1005g 跑道不足、停穩約 500ms 就倒車：第一次倒車那刻恰好一次（detail retry，語音 unstick→gate），之後不重複。
 --   (kv-steep-open) 倒車前一刻才開：快照仍是關門，提示前再讀門格已開＝不提示。
 --   (kv-late)    停住快滿 GATE_SHUT_MS 才開：不提示。(kv-other) 停在門前別的硬物前：不提示。
 -- 違規證明（temp/vp_1005f.py，含 1005d 全部）：拿掉去重、拿掉「停住才提示」、GATE_SHUT_MS 改 0、不接 why、沒 why 也當不會開、
@@ -18988,7 +19025,7 @@ function drive.scenarioKnoxGate()
         .. tostring(hardEv and hardEv.need) .. " speed=" .. tostring(hardEv and hardEv.speed) .. "）")
     -- 倒車退到判距外（gateNearM 停著＝停止線＋halfL）：照樣判堵（why=latch），不變回 far 再開回來；
     -- 之後照 blocked 停等走完：停等 BLOCK_RETRY_MS 無縫→倒車（harness 車退不動）→額度用完→紅字交還 StopStuck。
-    -- 1005f：倒車那刻門仍關著會記一筆 shut 提示事件（Drive.gateShutRetry），這裡只數 1005c 的 far／hard 相位不重記
+    -- 1005g：倒車那刻門仍關著會記一筆 shut 提示事件（Drive.gateShutRetry），這裡只數 1005c 的 far／hard 相位不重記
     local function farHardN()
         local n = 0
         for i = 1, #events do if events[i].phase == "far" or events[i].phase == "hard" then n = n + 1 end end
@@ -19218,7 +19255,7 @@ function drive.scenarioKnoxGate()
             and cellOf({ sensor = false }) == nil,
         "(kv-cell) gateShutCell：成立回門格、未判堵／門未退回／錨離門 >8m／快照沒有門／沒有感測＝nil（成立=" .. tostring(cx) .. "）")
 
-    -- (kv-steep) 1005f 實機（道路上橫一整排會開的門、門一直不開）：跑道不足＝停穩約 BLOCK_STEEP_RETRY_MS 就倒車，停不滿
+    -- (kv-steep) 1005g 實機（道路上橫一整排會開的門、門一直不開）：跑道不足＝停穩約 BLOCK_STEEP_RETRY_MS 就倒車，停不滿
     -- GATE_SHUT_MS。第一次倒車那一刻提示 shut（detail retry），語音 unstick 先播、gate 接著蓋掉；之後倒車額度用完、
     -- 交還前都不再重複。
     local stp = approach(nil, 30, 3)

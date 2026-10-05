@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1005f"
+Drive.REV = "1005g"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -5079,13 +5079,13 @@ function Drive.softStopCap(s, now, speedKmh, playerNum, capIn, whyIn)
                     kind, zs - s.lastSNow, s.softStopL or 0, s.softStopLane or 0, speedKmh or 0, s.softHoldMs))
             end
         end
-        -- 停住才計（還在煞停中不算等待）
-        if finite(speedKmh) and speedKmh < 1 and speedKmh > -1 then
-            if s.softHoldTick > 0 and now > s.softHoldTick then s.softHoldMs = s.softHoldMs + (now - s.softHoldTick) end
-            s.softHoldTick = now
-        else
-            s.softHoldTick = 0
-        end
+    end
+    -- 停住才計（還在煞停中不算等待）。停住後（softHoldStarted）車沒在動就照牆鐘計，這一幀接近帽有沒有低於
+    -- MIN_EXEC 不影響：1005e E2E animal-sp herd，停等目標位置一抖帽就在 MIN_EXEC 上下跳，每隔一幀計時起點被
+    -- 歸零，6 秒的等待實際 12.6 秒才爬（smoke (soft-g8)）。爬行中不計（爬行另有 softCrawlMs）。
+    if s.softHoldStarted and not s.softCrawl and finite(speedKmh) and speedKmh < 1 and speedKmh > -1 then
+        if s.softHoldTick > 0 and now > s.softHoldTick then s.softHoldMs = s.softHoldMs + (now - s.softHoldTick) end
+        s.softHoldTick = now
         if kind == "animal" and s.softHoldMs >= TUNE.ANIMAL_WAIT_MS then
             s.softCrawl = true
             cap, reason, hold = TUNE.ANIMAL_CRAWL_KMH, "animal-crawl", false
@@ -9047,7 +9047,7 @@ function Drive.gateWarn(s, playerNum, vehicle, gx, gy, phase, why, speedKmh, ms,
     end
 end
 
--- 會開的門沒開（1005e／1005f）的共同條件：判堵中、本輪最近那扇會開的門已退回硬物（gateHard）且最新完整快照仍看得到它
+-- 會開的門沒開（1005e／1005g）的共同條件：判堵中、本輪最近那扇會開的門已退回硬物（gateHard）且最新完整快照仍看得到它
 -- （門開了 closedDoor 為假，Sensor 就不再回報）、判堵錨在那扇門 8m 內。成立回門格心，否則 nil。
 function Drive.gateShutCell(s)
     local sen = s.sensor
@@ -9075,7 +9075,7 @@ function Drive.gateShut(s, playerNum, vehicle, now, speedKmh, stopped)
     end
 end
 
--- 倒車重試路徑（1005f）：恢復 dispatch 剛執行 startRecoveryAttempt（blocked-retry 含跑道不足那條、倒得了或倒不了都算）
+-- 倒車重試路徑（1005g）：恢復 dispatch 剛執行 startRecoveryAttempt（blocked-retry 含跑道不足那條、倒得了或倒不了都算）
 -- 之後呼叫。AutoDrive 自己決定「這個堵靠等不會好」的那一刻，Drive.gateShutCell 成立、而且門格現在仍是關著的門
 -- （MDADSensor.gateClosedAt：停穩 BLOCK_STEEP_RETRY_MS 就倒車時，快照多半是停住前開始的那一輪，門可能剛開）＝提示 shut
 --（detail retry）。預設讀頭範圍 8 格內伺服器就會開門，車停在停止線前門還關著就是沒開。排在倒車的 unstick 語音之後，

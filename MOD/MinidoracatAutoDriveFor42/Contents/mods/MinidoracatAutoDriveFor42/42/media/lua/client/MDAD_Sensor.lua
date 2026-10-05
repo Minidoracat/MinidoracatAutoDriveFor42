@@ -1977,7 +1977,7 @@ function MDADSensor.bushNear(state, vehicle, cell, cx, cy, r, outObj, outX, outY
     return n
 end
 
--- 門格 (gx,gy)（格心，世界座標非負）現在是不是關著的門（1005f，Driver Drive.gateShutRetry 冷路徑一次）：快照可能是
+-- 門格 (gx,gy)（格心，世界座標非負）現在是不是關著的門（1005g，Driver Drive.gateShutRetry 冷路徑一次）：快照可能是
 -- 停住前開始的那一輪，提示前再讀一次格級屬性。未載入或判不了＝false（不提示，寧可漏報不誤報）。
 function MDADSensor.gateClosedAt(state, vehicle, cell, gx, gy)
     if type(state) ~= "table" or not vehicle or not cell or not finite(gx) or not finite(gy) then return false end
