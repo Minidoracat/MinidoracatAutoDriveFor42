@@ -21882,7 +21882,7 @@ function drive.scenario0928()
         ObstaclePolicy = 1, RightLaneBias = 0 })
 
     -- (esc) 車身 yaw 率限制
-    local es = { vehicleProfile = { rMin = 2.2 }, safeLat = 4.2 }
+    local es = { vehicleProfile = { rMin = 2.2 }, safeLat = 4.2, fstate = {} }
     local t, h = 1000, 0
     Dr.yawGovern(es, 3.9, h, 18, t)
     t, h = t + 30, h + 6.4 * 0.03
@@ -21891,12 +21891,12 @@ function drive.scenario0928()
         "(esc) 18 km/h 自轉 6.4 rad/s：同向 steer 收掉（實得 " .. tostring(g) .. "）")
     t, h = t + 30, h + 6.4 * 0.03
     checkEq(Dr.yawGovern(es, -2, h, 18, t), -2, "(esc) 反向（修正自轉）steer 不受限")
-    local en = { vehicleProfile = { rMin = 2.2 }, safeLat = 4.2 }
+    local en = { vehicleProfile = { rMin = 2.2 }, safeLat = 4.2, fstate = {} }
     t, h = 5000, 0
     Dr.yawGovern(en, 1, h, 18, t)
     t, h = t + 30, h + (5 / 12) * 0.03
     checkEq(Dr.yawGovern(en, 1, h, 18, t), 1, "(esc) R 12m 一般過彎的 yaw 率不收")
-    local hf = { vehicleProfile = { rMin = 2.2 }, safeLat = 4.2 }
+    local hf = { vehicleProfile = { rMin = 2.2 }, safeLat = 4.2, fstate = {} }
     t, h = 9000, 0
     local minOut = 1
     for _ = 1, 40 do
@@ -21906,6 +21906,17 @@ function drive.scenario0928()
         if out < minOut then minOut = out end
     end
     checkEq(minOut, 1, "(esc-fps) 250 FPS、heading 每 10ms 子步才變：0.8 rad/s 一般修正不誤判")
+    -- (esc-kink) 1006：≤90° fallback 放行後（fstate.kinkExitS 有值）yaw 上限＝v/kinkTurnR、不加 MARGIN／FLOOR。18 km/h、
+    -- 1.25 rad/s＝R6 圓的 1.5 倍：一般上限 1.39 不收，放行窗內收光；kinkExitS 清掉後殘留的 kinkTurnR 不作用。
+    -- 違規證明：Driver 不傳 kinkTurnR＝第一條紅。
+    local ek = { vehicleProfile = { rMin = 2.2 }, safeLat = 4.2, fstate = { kinkExitS = 50, kinkTurnR = 6 } }
+    t, h = 12000, 0
+    Dr.yawGovern(ek, 1, h, 18, t)
+    t, h = t + 30, h + 1.25 * 0.03
+    checkEq(Dr.yawGovern(ek, 1, h, 18, t), 0, "(esc-kink) 放行窗內 yaw 1.5×v/R：同向 steer 收光")
+    ek.fstate.kinkExitS = nil
+    t, h = t + 30, h + 1.25 * 0.03
+    checkEq(Dr.yawGovern(ek, 1, h, 18, t), 1, "(esc-kink) 收正完成（kinkExitS 清）：回一般上限、不收")
     -- wiring：車頭 57° 偏右（追線要往右轉）又以 3.3 rad/s 往右自轉＝同向 steer 被收
     drive.fillWorld(-10, 70, -7, 7)
     checkTrue(armDrive(), "(esc-wire) 啟動")

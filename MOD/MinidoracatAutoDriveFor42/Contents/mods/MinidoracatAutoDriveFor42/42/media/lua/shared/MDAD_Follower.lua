@@ -210,6 +210,13 @@ local HAIRPIN_MAX_RAD = 150 * PI / 180
 local HAIRPIN_APEX_MIN = 1.0
 local HAIRPIN_APEX_MAX = 6.0
 local HAIRPIN_RMIN_DEFAULT = 3.0 -- 無車輛幾何（v3 路線）時的圓角半徑假設
+-- ≤90° 折點的轉向支點（1006）：rMin·tan(θ/2) 是無側滑點的圓角切點距，車身中心（參考點）在無側滑點前 LR，
+-- 放行要晚 LR＝參考點過切點 LR 才放。LR＝本常數×軸距：語料（上傳片段＋campaign）vt/yr 中位數一般車 0.5–0.7
+--（軸距 2.4–2.7 的 0.2–0.25）、F350 1.18（0.31）、半聯結 1.06–1.52（0.20–0.29）；小車 <0.4 被高估、放行略晚＝
+-- 略寬，不切內。不扣時理想 rMin 圓角照樣掃到彎內角（正式服 1004g JimJim clip-09 SemiTruck_mil 撞內角物體，
+-- 離線 −0.36m）。>90° 髮夾的放行距常被 HAIRPIN_APEX_MAX 夾，本來就晚，不扣。
+local KINK_PIVOT_WB = 0.25
+MDADFollower.KINK_PIVOT_WB = KINK_PIVOT_WB
 
 local SEARCH_BACK = 12        -- 投影搜尋窗口：往後 12 段
 -- 折點角度限速下限（不除 ds，路網點距稀釋不掉；理由見 geometryStep 內註解）
@@ -1500,7 +1507,8 @@ local function arcRuntimeCap(profile, j, latHere, runtimeLat)
     return cap, kappa
 end
 
--- 非弧折點（段 ji→ji+1 的頂點）的放行距離 rel（rMin·tan(θ/2) 夾 HAIRPIN_APEX_MIN..MAX）與常駐車道的折角位移。
+-- 非弧折點（段 ji→ji+1 的頂點）的放行距離 rel（rMin·tan(θ/2)，≤90° 再扣轉向支點 KINK_PIVOT_WB×軸距，夾
+-- HAIRPIN_APEX_MIN..MAX；鉗點、放行點帽、跨臂交接圓都用這個數）與常駐車道的折角位移。
 -- 髮夾（>90°）車走的是兩臂各偏 b 的車道線；兩線交點（車道折點）在入彎臂上是頂點前 b·tan(θ/2)、出彎臂上是
 -- 頂點後同樣距離（143°、b 1.69 → ±5.05m）——中心線弧長這 2·b·tan(θ/2) 在車道上是同一點。鉗點／放行距離／
 -- 出彎前視／跨臂交接都量到車道折點，彎內側的車就和 b＝0 的車走同一套幾何。量中心線時（舊制）彎內側車在
@@ -1514,6 +1522,7 @@ end
 -- 回 rel, shift（入彎臂、負＝提前）, cornerOut（出彎臂上車道折點離頂點的弧長）, bIn（入彎臂車道偏移）。
 local function kinkRelease(profile, state, ji, dth, handover)
     local rel = profile.rMin * tan(dth * 0.5)
+    if dth <= HAIRPIN_RAD then rel = rel - KINK_PIVOT_WB * profile.wheelbase end
     if rel < HAIRPIN_APEX_MIN then rel = HAIRPIN_APEX_MIN elseif rel > HAIRPIN_APEX_MAX then rel = HAIRPIN_APEX_MAX end
     local b = state.laneBias
     if dth < MDADDynamics.FILLET_MIN_RAD or (dth <= HAIRPIN_RAD and not handover)
@@ -1932,6 +1941,9 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
                 if cornerS < sTarget then
                     if cornerS > sNow + rel then kinkS = cornerS; break end
                     state.kinkExitS = sV
+                    -- 放行點＝無側滑點走的圓角切點，半徑（Driver ESC 的 yaw 上限，MDADDynamics.escScale）
+                    state.kinkTurnR = dth <= HAIRPIN_RAD
+                        and (rel + KINK_PIVOT_WB * profile.wheelbase) / tan(dth * 0.5) or nil
                     if shift < 0 then
                         laneCornerS, laneExtra = sV + shift, cornerOut - shift
                         sTarget = sTarget + laneExtra
