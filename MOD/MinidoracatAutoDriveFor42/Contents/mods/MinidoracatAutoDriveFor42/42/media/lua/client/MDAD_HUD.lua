@@ -355,6 +355,23 @@ local function clockText(seconds)
     return string.format("%02d:%02d", math.floor(seconds / 60), seconds % 60)
 end
 
+-- 預計剩餘的顯示字（1005i）：四捨五入到分、不到 1 分另寫，一律用分鐘（1 小時以上的車程照樣寫「約 65 分」，顯示上限 999）。
+-- prev＝目前顯示的分鐘數（0＝不到 1 分）：估計還在原值的區間外擴 10 秒內就不改字，分鐘邊界附近不來回跳。
+-- 回 文字, 分鐘數；沒有估計回 nil。
+function HUD.etaText(seconds, prev)
+    if type(seconds) ~= "number" or seconds * 0 ~= 0 or seconds < 0 then return nil end
+    local x = seconds / 60
+    local m = nil
+    if prev then
+        local lo = prev == 0 and -1 or (prev == 1 and 1 or prev - 0.5)
+        local hi = prev == 0 and 1 or prev + 0.5
+        if x >= lo - 1 / 6 and x < hi + 1 / 6 then m = prev end
+    end
+    if not m then m = x < 1 and 0 or math.floor(x + 0.5) end
+    if m == 0 then return getText("UI_MinidoracatAutoDrive_HUDEtaUnder"), 0 end
+    return getText("UI_MinidoracatAutoDrive_HUDEtaMinutes", string.format("%d", m > 999 and 999 or m)), m
+end
+
 local function optionIndex(id, default, maximum)
     if not modOptions then return default end
     local option = modOptions:getOption(id)
@@ -1074,6 +1091,11 @@ function MDADHUDPanel:new(playerNum)
     o._timeLabelY = 0
     o._timeValueX = 0
     o._timeValueY = 0
+    o._etaLabel = ""
+    o._etaText = "--"
+    o._etaMin = nil -- 目前顯示的分鐘數（HUD.etaText 的遲滯狀態；nil＝沒有估計）
+    o._etaX = nil
+    o._etaLabelY, o._etaValueX, o._etaValueY = 0, 0, 0
     o._headerH = 0
     o._blockX = nil
     o._dividerY = nil
@@ -1294,6 +1316,11 @@ local function measure(self, scale)
     -- 秒數每 250ms 變一次也只是重畫同一格。
     m.clockW = textWidth(UIFont.Small, "00:00:00")
     m.timeLabelW = textWidth(UIFont.Small, self._timeLabel)
+    -- 預計剩餘欄（1005i）：欄名與數值分開量；數值以最寬的寫法保留（約 999 分／不到 1 分），估計值跳動不推動幾何。
+    m.etaLabelW = textWidth(UIFont.Small, self._etaLabel)
+    m.etaValueW = maximum(
+        textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDEtaMinutes", "999")),
+        textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDEtaUnder")))
     -- 控制鈕寬：三顆同寬、取最長標題（樣式／隱藏／展開／語音 開／語音 關）
     local voiceLabel = getText("UI_MinidoracatAutoDrive_HUDVoice")
     m.ctrlW = maximum(scaled(44, scale), maximum(
@@ -1335,11 +1362,12 @@ function MDADHUDPanel:layoutWings(scale, m)
     local detourW, speedValueW = m.detourW, m.speedValueW
     local speedW = speedValueW + 3 + m.unitW
     local capLabelW = m.capLabelW
-    -- 巡航上限／行車時間兩欄同款（欄名上、數值下）：欄寬取兩者較寬者。
+    -- 巡航上限／行車時間／預計剩餘三欄同款（欄名上、數值下）：欄寬取兩者較寬者。
     local capW = maximum(capLabelW, m.capValueW)
     local actionW, gearW, gearLabelW, policyW, energyW = m.actionW, m.gearW, m.gearLabelW, m.policyW, m.energyW
     local ctrlW, valueW, sliderW, controlsOn, policyN = m.ctrlW, m.valueW, m.sliderW, m.controlsOn, m.policyN
     local timeW, clockW = maximum(m.timeLabelW, m.clockW), m.clockW
+    local etaW = maximum(m.etaLabelW, m.etaValueW)
 
     local dashW, dashH, dashX = self:dashboardGeometry()
     local wingH = maximum(scaled(56, scale), dashH - DASH_VISIBLE_TOP_INSET)
@@ -1347,7 +1375,7 @@ function MDADHUDPanel:layoutWings(scale, m)
 
     -- 展開／收合各自的寬度；空間不夠時先摺右翼再摺左翼（版面層強制，不動玩家的 modData）
     local leftOpenW = pad * 2 + maximum(16 + statusW + gap + speedW,
-        capW + gap + timeW + gap + ctrlW + gap + m.homeGap + actionW)
+        capW + gap + timeW + gap + etaW + gap + ctrlW + gap + m.homeGap + actionW)
     local rightOpenW = pad * 2 + maximum(
         gearLabelW + gearW * 4 + gap * 3,
         maximum(policyW * policyN + gap * policyN + m.contGap + energyW,
@@ -1408,7 +1436,7 @@ function MDADHUDPanel:layoutWings(scale, m)
     self._capChip = false
     if self.pinBox then self.pinBox:setVisible(false) end
 
-    -- 左翼：上列狀態＋現速，下列巡航上限／行車時間兩欄＋主鈕（摺起＝狀態燈＋現速＋裸時間＋chevron）
+    -- 左翼：上列狀態＋現速，下列巡航上限／行車時間／預計剩餘三欄＋主鈕（摺起＝狀態燈＋現速＋裸時間＋chevron）
     if foldL then
         self._dotX, self._dotY = pad, math.floor((wingH - 8) / 2)
         self._speedX = pad + 16
@@ -1416,7 +1444,7 @@ function MDADHUDPanel:layoutWings(scale, m)
         self._statusX, self._textY = pad + 16, math.floor((wingH - fontH) / 2)
         self._capX, self._capValueX = nil, nil
         -- 摺起的左翼＝徽章：省掉欄名只留裸時間（同收合徽章）。
-        self._timeX = nil
+        self._timeX, self._etaX = nil, nil
         self._timeValueX, self._timeValueY = pad + 16 + speedValueW + gap, self._textY
         setButtonRect(self.wingButton, leftW - pad - ctrlW,
             math.floor((wingH - ctrlH) / 2), ctrlW, ctrlH)
@@ -1436,6 +1464,8 @@ function MDADHUDPanel:layoutWings(scale, m)
         self._timeX = pad + capW + gap
         self._timeLabelY = self._capLabelY
         self._timeValueX, self._timeValueY = self._timeX, self._capValueY
+        self._etaX = self._timeX + timeW + gap
+        self._etaLabelY, self._etaValueX, self._etaValueY = self._capLabelY, self._etaX, self._capValueY
         self._detourY = topY + math.floor((rowH - ctrlH) / 2)
         setButtonRect(self.actionButton, leftW - pad - actionW, bottomY, actionW, rowH)
         -- 回家鈕貼主鈕左側（同列、控制鈕高置中）；左翼 chevron 再往左讓出同一格。
@@ -1531,6 +1561,7 @@ function MDADHUDPanel:applyLayout()
     self._unitText = getText("UI_MinidoracatAutoDrive_HUDSpeedUnit")
     self._capLabel = getText("UI_MinidoracatAutoDrive_HUDCruiseCap")
     self._timeLabel = getText("UI_MinidoracatAutoDrive_HUDDriveTime")
+    self._etaLabel = getText("UI_MinidoracatAutoDrive_HUDEta")
     self._gearLabel = getText("UI_MinidoracatAutoDrive_HUDGear")
     local m = measure(self, scale)
     -- 側掛的量測與擺位自成一套（無精簡單行／收合徽章分支），共用上面四個標籤字串；
@@ -1560,7 +1591,7 @@ function MDADHUDPanel:layoutStacked(scale, m)
     local speedValueW = m.speedValueW
     local speedW = maximum(scaled(62, scale), speedValueW + 3 + m.unitW + gap)
     local capLabelW, timeLabelW = m.capLabelW, m.timeLabelW
-    -- 巡航上限／行車時間兩欄同款，兩種欄寬都含右側間距：
+    -- 巡航上限／行車時間（與預計剩餘）同款，兩種欄寬都含右側間距：
     --   完整展開＝欄名上／數值下，欄寬取兩者較寬者；精簡單行＝欄名與數值同列相加。
     local capW = maximum(scaled(48, scale), maximum(capLabelW, m.capValueW) + gap)
     local capRowW = maximum(scaled(48, scale), capLabelW + gap + m.capValueW + gap)
@@ -1572,6 +1603,9 @@ function MDADHUDPanel:layoutStacked(scale, m)
     -- 保留巡航上限與必要操作控制。
     local timeW = maximum(timeLabelW, m.clockW) + gap
     local timeRowW = timeLabelW + gap + m.clockW + gap
+    -- 預計剩餘欄（1005i）接在行車時間後面、同款兩欄式；精簡單行與行車時間同進退。
+    local etaW = maximum(m.etaLabelW, m.etaValueW) + gap
+    local etaRowW = m.etaLabelW + gap + m.etaValueW + gap
     local clockW = m.clockW
     local trioW = controlsOn and (ctrlW * 3 + gap * 2) or (ctrlW + gap)
     local maxW = m.maxW
@@ -1591,7 +1625,7 @@ function MDADHUDPanel:layoutStacked(scale, m)
     local bottomContentW = pad * 2 + gearLabelW + gearW * 4 + gap * (4 + policyN)
         + policyW * policyN + m.contGap + energyW
     -- 回家鈕（有 v8 API 才有寬度）永遠貼在主鈕左側，所以跟主鈕一起算進主鈕那一列。
-    local topContentW = pad * 2 + statusW + speedW + capW + timeW + gap + m.homeGap + actionW
+    local topContentW = pad * 2 + statusW + speedW + capW + timeW + etaW + gap + m.homeGap + actionW
     if style == STYLE_GLASS then
         topContentW = topContentW + trioW + gap
         bottomContentW = bottomContentW + sliderW + gap
@@ -1599,9 +1633,9 @@ function MDADHUDPanel:layoutStacked(scale, m)
         topContentW = topContentW + blockW + gap * 2
         bottomContentW = bottomContentW + blockW + gap * 2
     else
-        -- 家族：標題條＝狀態＋現速＋控制三顆＋拉桿；本體第 1 列＝巡航＋行車時間＋主鈕
+        -- 家族：標題條＝狀態＋現速＋控制三顆＋拉桿；本體第 1 列＝巡航＋行車時間＋預計剩餘＋主鈕
         topContentW = maximum(pad * 2 + statusW + speedW + gap + trioW + gap + sliderW,
-            pad * 2 + capW + timeW + gap + m.homeGap + actionW)
+            pad * 2 + capW + timeW + etaW + gap + m.homeGap + actionW)
     end
     local fullContentW = maximum(topContentW, bottomContentW)
     local fullW = maximum(fullBase, fullContentW)
@@ -1609,14 +1643,16 @@ function MDADHUDPanel:layoutStacked(scale, m)
     -- 主鈕（開始／停止／取消）與收合入口永不讓位：極窄時它們是唯一保證還在的操作。
     -- 讓掉的東西都另有入口——檔位與接續模式在行程頁、樣式與語音在 ESC 選項、
     -- 回家在 MiniMap 底部按鈕列與地圖右鍵、現速原版儀表板本來就有——所以寧可讓欄位消失，
-    -- 也不把控制推出面板。
+    -- 也不把控制推出面板。預計剩餘（1005i）是唯一沒有別處入口卻排在第一階的：它是後加的一欄，
+    -- 原本排得下的精簡單行一律維持舊樣子，有空位才多一欄。
     local showPolicies, showStatusText, showCap, showTrio, showSpeed, showCycle, showHome =
         true, true, true, true, true, true, true
+    local showEta = true
     local function compactContentW()
         return pad * 2 + statusW
             + (showSpeed and speedW or 0)
             + (showCap and capRowW or 0)
-            + timeRowW
+            + timeRowW + (showEta and etaRowW or 0)
             + (showCycle and cycleW or 0)
             + (showPolicies and ((policyW + gap) * policyN + m.contGap) or 0)
             + (showTrio and trioW or (ctrlW + gap))
@@ -1634,6 +1670,7 @@ function MDADHUDPanel:layoutStacked(scale, m)
         compactW = maximum(compactBase, compactContentW())
         return effectiveLayout == LAYOUT_COMPACT and compactW > maxW
     end
+    if tooWide() then showEta = false end
     if tooWide() then showPolicies = false end
     if tooWide() then
         -- 極窄分割畫面：保留狀態燈，省掉狀態文字與行車時間欄。
@@ -1679,7 +1716,7 @@ function MDADHUDPanel:layoutStacked(scale, m)
         self._dotY = math.floor((panelH - 8) / 2)
         self._speedX = pad + 16
         self._speedY = math.floor((panelH - mediumH) / 2)
-        self._timeX = nil
+        self._timeX, self._etaX = nil, nil
         self._timeValueX = pad + 16 + speedValueW + gap
         self._timeValueY = math.floor((panelH - fontH) / 2)
         setButtonRect(self.collapseButton, panelW - pad - ctrlW,
@@ -1695,7 +1732,7 @@ function MDADHUDPanel:layoutStacked(scale, m)
         end
         local y = math.floor((panelH - buttonH) / 2)
         local x = pad + statusW + (showSpeed and speedW or 0)
-            + (showCap and capRowW or 0) + timeRowW
+            + (showCap and capRowW or 0) + timeRowW + (showEta and etaRowW or 0)
         if showCycle then
             setButtonRect(self.cycleButton, x, y, cycleW, buttonH)
             x = x + cycleW + gap
@@ -1742,15 +1779,21 @@ function MDADHUDPanel:layoutStacked(scale, m)
         else
             self._capX, self._capValueX = nil, nil
         end
-        -- 精簡單行：兩欄都是同列基線的「欄名＋數值」；極窄退化整欄消失，不留殘座標。
-        -- 行車時間欄以巡航欄為錨：退讓階梯先讓掉狀態文字＋行車時間、再讓巡航，
+        -- 精簡單行：三欄都是同列基線的「欄名＋數值」；極窄退化整欄消失，不留殘座標。
+        -- 行車時間與預計剩餘以巡航欄為錨：退讓階梯先讓掉狀態文字＋這兩欄、再讓巡航，
         -- 所以走到這裡時 _capX 一定還在（順序反過來就會拿 nil 去算 x）。
         if showStatusText then
             self._timeX, self._timeLabelY = self._capX + capRowW, self._textY
             self._timeValueX = self._timeX + timeLabelW + gap
             self._timeValueY = self._textY
+            if showEta then
+                self._etaX, self._etaLabelY = self._timeX + timeRowW, self._textY
+                self._etaValueX, self._etaValueY = self._etaX + m.etaLabelW + gap, self._textY
+            else
+                self._etaX = nil
+            end
         else
-            self._timeX, self._timeValueX = nil, nil
+            self._timeX, self._timeValueX, self._etaX = nil, nil, nil
         end
         self._detourY = math.floor((panelH - ctrlH) / 2)
     else
@@ -1776,7 +1819,7 @@ function MDADHUDPanel:layoutStacked(scale, m)
             setButtonRect(self.voiceButton, blockX, bottomY, ctrlW, ctrlH)
             setButtonRect(self.volumeSlider, col2, bottomY, cell, ctrlH)
         elseif style == STYLE_GLASS then
-            local trioX = pad + statusW + speedW + capW + timeW + gap
+            local trioX = pad + statusW + speedW + capW + timeW + etaW + gap
             self:placeControlTrio(trioX, topY + math.floor((topH - ctrlH) / 2),
                 ctrlW, ctrlH, gap, controlsOn)
             setButtonRect(self.volumeSlider, panelW - pad - sliderW, bottomY, sliderW, ctrlH)
@@ -1839,11 +1882,13 @@ function MDADHUDPanel:layoutStacked(scale, m)
         end
         self._labelX = pad
         self._bottomTextY = bottomY + math.floor((buttonH - fontH) / 2)
-        -- 巡航上限／行車時間：四主題同款，欄名在上、數值在下貼齊欄左緣，兩欄並排。
+        -- 巡航上限／行車時間／預計剩餘：四主題同款，欄名在上、數值在下貼齊欄左緣，三欄並排。
         -- topH 的地板本來就是 fontH*2+2（見上），兩行不會把面板撐高、也不壓到按鈕列。
         self._capLabelY, self._capValueX, self._capValueY = topY, self._capX, topY + fontH
         self._timeX = self._capX + capW
         self._timeLabelY, self._timeValueX, self._timeValueY = topY, self._timeX, topY + fontH
+        self._etaX = self._timeX + timeW
+        self._etaLabelY, self._etaValueX, self._etaValueY = topY, self._etaX, topY + fontH
         local energyRight = rightEdge
         if style == STYLE_GLASS then energyRight = panelW - pad - sliderW - gap end
         self._energyX = energyRight - energyW
@@ -2514,6 +2559,10 @@ function MDADHUDPanel:refresh(now)
     -- 只格式化數值；欄名是版面層的固定標籤，停用後照樣是「行車時間」、值停在最後一趟。
     -- 無紀錄與無效值共用缺值顯示。
     self._clockText = clockText(elapsed) or "--:--"
+    -- 預計剩餘（1005i）：只在自駕中有估計；HUD.etaText 帶上一輪顯示的分鐘數做遲滯。
+    local etaText, etaMin = nil, nil
+    if self._active then etaText, etaMin = HUD.etaText(Drive.etaSeconds(self.playerNum), self._etaMin) end
+    self._etaText, self._etaMin = etaText or "--", etaMin
     self._blocked = token == "blocked"
     self:refreshSpeedTip(token, cap, now)
     self._lowFpsTip = nil
@@ -2769,6 +2818,12 @@ function MDADHUDPanel:renderWings()
         end
         self:drawText(self._timeLabel, self._timeX, self._timeLabelY,
             C.muted.r, C.muted.g, C.muted.b, C.muted.a, UIFont.Small)
+        if self._etaX then
+            self:drawText(self._etaLabel, self._etaX, self._etaLabelY,
+                C.muted.r, C.muted.g, C.muted.b, C.muted.a, UIFont.Small)
+            self:drawText(self._etaText, self._etaValueX, self._etaValueY,
+                C.text.r, C.text.g, C.text.b, C.text.a, UIFont.Small)
+        end
         if self._wingLDividerY then
             self:drawRect(4, self._wingLDividerY, (self._wingLeftW or 8) - 8, 1,
                 C.faint.a, C.faint.r, C.faint.g, C.faint.b)
@@ -2820,6 +2875,12 @@ function MDADHUDPanel:prerender()
             C.muted.r, C.muted.g, C.muted.b, C.muted.a, UIFont.Small)
         self:drawText(self._clockText, self._timeValueX, self._timeValueY,
             C.muted.r, C.muted.g, C.muted.b, C.muted.a, UIFont.Small)
+        if self._etaX then
+            self:drawText(self._etaLabel, self._etaX, self._etaLabelY,
+                C.muted.r, C.muted.g, C.muted.b, C.muted.a, UIFont.Small)
+            self:drawText(self._etaText, self._etaValueX, self._etaValueY,
+                C.text.r, C.text.g, C.text.b, C.text.a, UIFont.Small)
+        end
         self:drawTripText()
     end
     -- 讓位掉的欄位沒有座標，一律不畫（極窄精簡單行：現速／巡航讓給主鈕）。

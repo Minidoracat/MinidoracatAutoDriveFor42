@@ -4478,6 +4478,74 @@ do
     checkTrue(inn < 0.15, string.format("同一段不換成切內：切內 %.2fm < 0.15", inn))
 end
 
+-- =====================================================================
+scenario("1005i：預計剩餘時間的計畫秒數——巡航＋起步加速、上限、起步車速、長段、彎道、段內、重建換 epoch")
+do
+    -- 1000m 東向直線、v[i]＝120 km/h 直給，ETA 上限另給（Driver 的檔位／沙盒／車輛極速取小）。名義加速度 2.5 m/s²。
+    -- 違規證明：拿掉 cap 夾限＝(上限) 紅；v0 不採用＝(起步車速) 紅；不做前向加速＝(巡航) 下界紅；
+    -- 段時間改回兩端平均速度＝(長段) 紅（E2E 1005i：Dixie 直路長段多估 7–8 秒）；段內改線性內插＝(段內) 紅；
+    -- stepBuild 不加 epoch＝(epoch) 紅。
+    local p = buildRoute(straight(101, 10), 120)
+    local function plan(prof, capKmh, v0Kmh)
+        local out = { t = {}, s = {} }
+        local total = F.planTimes(prof, capKmh / KMH, v0Kmh / KMH, out)
+        return total, F.planTimeAt(out, prof.length - F.ARRIVE_M), out
+    end
+    -- 到站點（終點前 ARRIVE_M）的計畫秒數＝巡航 L/v＋從靜止加速多花的 v/(2a)＋終點收油的一點點
+    local _, t72, out = plan(p, 72, 0)
+    local arriveL = p.length - F.ARRIVE_M
+    checkTrue(t72 >= arriveL / 20 + 20 / 5 - 0.01 and t72 <= arriveL / 20 + 20 / 5 + 1.5,
+        string.format("(巡航) 72 km/h 從靜止：%.2f 秒＝%.2f 巡航＋4.00 起步＋收油 <1.5", t72, arriveL / 20))
+    local _, t36 = plan(p, 36, 0)
+    checkTrue(t36 >= arriveL / 10 + 10 / 5 - 0.01 and t36 <= arriveL / 10 + 10 / 5 + 1.5,
+        string.format("(上限) 36 km/h：%.2f 秒（剖面 120 km/h 也照上限算）", t36))
+    local _, t72run = plan(p, 72, 72)
+    checkNear(t72 - t72run, 20 / 5, 0.05, "(起步車速) 已在上限速度就省掉起步的 v/(2a)")
+    -- 同長度的 L 形（500m 東＋500m 北）：90° 彎前收油、彎後再加速，比直線慢
+    local pts = straight(51, 10)
+    for i = 1, 50 do pts[#pts + 1] = 500; pts[#pts + 1] = i * 10 end
+    local pL = buildRoute(pts, 120)
+    checkNear(pL.length, p.length, 1e-6, "L 形與直線同長")
+    local _, tL = plan(pL, 72, 0)
+    checkTrue(tL > t72 + 1, string.format("(彎道) L 形 %.2f 秒 > 直線 %.2f＋1", tL, t72))
+    -- 表的形狀：t 從 0 單調不減、s 抄的是剖面弧長
+    local mono, sameS = true, true
+    for i = 1, p.n - 1 do
+        if out.t[i + 1] < out.t[i] then mono = false end
+        if out.s[i] ~= p.s[i] then sameS = false end
+    end
+    checkTrue(out.t[1] == 0 and mono and sameS and out.n == p.n, "表從 0 單調不減、弧長照抄剖面")
+    -- (長段) 同一條 1000m 只有兩段各 500m（直路的段常長達上百公尺）：累計表與段內都照段內包絡算，與 10m 一段的版本差不到 0.5 秒
+    local p2 = buildRoute({ 0, 0, 500, 0, 1000, 0 }, 120)
+    local _, t72long, outLong = plan(p2, 72, 0)
+    checkTrue(p2.n == 3 and math.abs(t72long - t72) < 0.5,
+        string.format("(長段) 兩段各 500m %.2f 秒 ≈ 10m 一段 %.2f 秒", t72long, t72))
+    -- (段內) 長段中間的巡航區：參考值自己算＝靜止以 2.5 加速到 20 m/s（8 秒、80m），之後等速
+    local accT, accX = 20 / 2.5, 20 * 20 / 5
+    checkNear(F.planTimeAt(outLong, 250), accT + (250 - accX) / 20, 1e-6, "(段內) 長段 250m 處＝加速段＋等速段")
+    checkNear(F.planTimeAt(outLong, 40), math.sqrt(2 * 2.5 * 40) / 2.5, 1e-6, "(段內) 加速中 40m 處")
+    -- (內插) 頂點上等於表值；給錯的段索引與不給都一樣；超出範圍夾在兩端
+    checkEq(F.planTimeAt(out, p.s[30]), out.t[30], "(內插) 頂點上＝表值")
+    local mid = (p.s[30] + p.s[31]) / 2
+    checkNear(F.planTimeAt(out, mid), (out.t[30] + out.t[31]) / 2, 1e-9, "(內插) 巡航段中＝兩端平均")
+    checkEq(F.planTimeAt(out, mid, 30), F.planTimeAt(out, mid), "(內插) 正確的段索引提示")
+    checkEq(F.planTimeAt(out, mid, 7), F.planTimeAt(out, mid), "(內插) 錯的提示退回二分")
+    checkEq(F.planTimeAt(out, -5), 0, "(內插) 起點之前夾在 0")
+    checkEq(F.planTimeAt(out, p.length + 50), out.t[p.n], "(內插) 終點之後夾在總秒數")
+    -- 沒建好的剖面、無效上限：不給估計、表不動
+    local raw = F.begin(mkRoute(straight(10, 10)), MAXV)
+    local keep = { t = { 7 }, s = { 7 } }
+    checkNil(F.planTimes(raw, 20, 0, keep), "剖面沒建好不給計畫秒數")
+    checkNil(F.planTimes(p, 0, 0, keep), "上限 0 不給計畫秒數")
+    checkTrue(keep.t[1] == 7 and keep.n == nil, "失敗時表不動")
+    -- (epoch) 每建完一次＋1：同一份 profile 重建（換檔、學到新的煞車）也換，Driver 據此重算計畫表
+    local e0 = p.epoch
+    checkTrue(type(e0) == "number" and e0 >= 1, "(epoch) 建完就有 epoch")
+    F.invalidateDynamics(p)
+    while not p.ready do F.stepBuild(p, 4096) end
+    checkEq(p.epoch, (e0 or 0) + 1, "(epoch) 重建完 epoch＋1")
+end
+
 closeScenario()
 print()
 print("情境 " .. scenarios .. " 個、斷言 " .. assertions .. " 項")

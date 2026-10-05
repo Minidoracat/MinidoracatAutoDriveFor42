@@ -469,6 +469,10 @@ function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
     end
     if not u.h0 and finite(heading) then u.h0 = heading end
     if finite(remaining) then u.lastRem = remaining end
+    -- 1005i 預計剩餘：第一個估計與它離出發幾 ms（摘要 eta0／eta0t；對照 dur 校準修正倍率）
+    if u.eta0 == nil and type(phys) == "table" and finite(phys.etaSec) then
+        u.eta0, u.eta0t = phys.etaSec, now - u.startTs
+    end
     if finite(speed) then lastSpeed[u.pn] = speed < 0 and -speed or speed end
     -- 片段檔頭的出事當下狀態（trigger 取這幾格；本幀觸發的就是本幀值）
     u.sSpd, u.sTgt, u.sMode, u.sLat, u.sRem = speed, target, mode, lat, remaining
@@ -664,6 +668,7 @@ local function summaryText(u, now, reason, withMaps)
         .. ',"oMs":' .. jnum(u.oMs) .. ',"oaMs":' .. jnum(u.oaMs) .. ',"oaDv":' .. jround(u.oaDv, 100)
         .. ',"olMs":' .. jnum(u.olMs) .. ',"oasMs":' .. jnum(u.oasMs) .. ',"obMs":' .. jnum(u.obMs)
         .. ',"paMs":' .. jnum(u.paMs) .. ',"paDv":' .. jround(u.paDv, 100)
+        .. ',"eta0":' .. jround(u.eta0, 10) .. ',"eta0t":' .. jround(u.eta0t, 1)
     if withMaps then
         text = text .. ',"ev":' .. mapJson(u.evc) .. ',"mode":' .. mapJson(u.modeMs)
             .. ',"cap":' .. mapJson(u.capMs) .. ',"loss":' .. lossJson(u.loss)

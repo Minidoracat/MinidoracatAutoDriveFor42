@@ -564,8 +564,9 @@ local function kp(extra)
     return t
 end
 drive(2000, { speed = 55, target = 60, phys = kp() })                         -- ≥54＝貼近上限
-drive(1000, { speed = 40, target = 40, phys = kp() })                         -- 損失 20×1s
-drive(400, { speed = 30, target = 25, phys = kp({ curveHardActive = true, curveCap = 25 }) }) -- 入弧 30>28.75
+-- 1005i：第一筆帶預計剩餘的取樣（2s 後）記成 eta0／eta0t；之後的估計不覆寫。違規證明：每筆都覆寫＝eta0 30 紅。
+drive(1000, { speed = 40, target = 40, phys = kp({ etaSec = 42.5 }) })        -- 損失 20×1s
+drive(400, { speed = 30, target = 25, phys = kp({ curveHardActive = true, curveCap = 25, etaSec = 30 }) }) -- 入弧 30>28.75
 drive(400, { speed = 28, target = 25, phys = kp({ curveHardActive = true, curveCap = 25, latDev = 0.7 }) })
 drive(400, { speed = 40, target = 60, phys = kp({ capReason = "visibility", accelAssist = 2 }) })
 drive(400, { speed = 40, target = 30, phys = kp({ visAssistDecel = 3 }) })
@@ -592,6 +593,11 @@ checkEq(num("impZ"), 1, "impact with zombies in the band")
 checkEq(num("aaMs"), 400, "accel assist time")
 checkEq(num("daMs"), 400, "decel assist time")
 check(#lastSum < U.CHUNK, "summary still fits one chunk (" .. #lastSum .. ")")
+checkEq(num("eta0"), 42.5, "first ETA estimate kept for calibration, later ones do not overwrite it")
+local eta0t = num("eta0t")
+check(eta0t ~= nil and eta0t >= 2000 and eta0t <= 2200,
+    "eta0t = ms from drive start to that first estimate (got " .. tostring(eta0t) .. ")")
+check(string.find(sum, '"eta0":null', 1, true) ~= nil, "a drive without any estimate writes eta0 null, not 0")
 
 -- 1004 撞擊誤報（正式服 1002y）：
 --  (a) 讓位接手期間不取樣，恢復時拿 5.7 秒前的 90 km/h 跟 0 比、dt 夾成 1 秒＝24.9 m/s²（RubyDiamond/clip-29）；

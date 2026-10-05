@@ -89,6 +89,9 @@ local texts = {
     UI_MinidoracatAutoDrive_HUDGear = "MODE",
     UI_MinidoracatAutoDrive_HUDEnergy = "BAT %1%% FUEL %2%%",
     UI_MinidoracatAutoDrive_HUDDriveTime = "DRIVE TIME",
+    UI_MinidoracatAutoDrive_HUDEta = "TIME LEFT",
+    UI_MinidoracatAutoDrive_HUDEtaMinutes = "~%1 min",
+    UI_MinidoracatAutoDrive_HUDEtaUnder = "< 1 min",
     UI_MinidoracatAutoDrive_HUDZombie = "Z",
     UI_MinidoracatAutoDrive_HUDCorpse = "C",
     UI_MinidoracatAutoDrive_HUDOn = "ON",
@@ -544,6 +547,7 @@ function MDAD.Drive.hudState()
 end
 function MDAD.Drive.hudStartReason() return state.startReason end
 function MDAD.Drive.hudStopReason() return state.stopKey, state.stopAgoMs end
+function MDAD.Drive.etaSeconds() return state.eta end
 function MDAD.Drive.slowdownInfo() return 2, 48, 3, 25, 15, 10, 20 end
 function MDAD.Drive.effectiveCap() return state.idleCap end
 function MDAD.Drive.getGear() return state.gear end
@@ -849,6 +853,24 @@ do
         and panel._capValueX == panel._capX and panel._timeValueX == panel._timeX
         and panel._timeX >= capRight and timeRight + 4 <= panel.wingButton.x,
         "wings theme: both columns stack the name over the value on the same two rows, clear of the chevron")
+    -- 預計剩餘（1005i）：同兩列接在行車時間後面、停在 chevron 之前；欄名翻得很長、下列變成最寬那列時，
+    -- 是左翼變寬，不是撞上 chevron。違規證明：左翼寬度不算預計剩餘欄＝長欄名那條紅。
+    local function etaClear(label)
+        local etaRight = panel._etaX + math.max(
+            textManager:MeasureStringX(UIFont.Small, panel._etaLabel),
+            textManager:MeasureStringX(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDEtaMinutes", "999")))
+        check(panel._style == 4 and panel._etaX >= timeRight
+            and panel._etaLabelY == panel._capLabelY and panel._etaValueY == panel._capValueY
+            and etaRight + 4 <= panel.wingButton.x, label)
+    end
+    etaClear("wings theme: the estimate column follows the drive time and clears the chevron")
+    local etaLabel = texts.UI_MinidoracatAutoDrive_HUDEta
+    texts.UI_MinidoracatAutoDrive_HUDEta = string.rep("E", 24)
+    panel:applyLayout()
+    panel:refresh(nowMs)
+    etaClear("wings theme: a long estimate label widens the left wing instead of running into the chevron")
+    texts.UI_MinidoracatAutoDrive_HUDEta = etaLabel
+    panel:applyLayout()
     state.elapsed = nil
     panel:refresh(nowMs)
 end
@@ -1417,6 +1439,65 @@ do
     panel:refresh(nowMs)
 end
 
+-- 預計剩餘（1005i，hudState 之外另讀 Drive.etaSeconds）：自駕中才有估計；分鐘四捨五入、不到 1 分另寫、顯示上限 999；
+-- 分鐘邊界前後各 10 秒遲滯；欄位接在行車時間後面、同兩列，整欄停在回家鈕／主鈕與金屬控制方塊之前，換字不動版面。
+-- 違規證明：拿掉遲滯＝(eta-hyst) 紅；欄位 x 不加行車時間欄寬＝(eta-place) 紅；停用態沿用舊字＝(eta-idle) 紅。
+do
+    local fmt = MDAD.HUD.etaText
+    checkEq(fmt(nil), nil, "(eta-fmt) no estimate gives no text")
+    checkEq(fmt(-1), nil, "(eta-fmt) a negative estimate is refused")
+    checkEq(fmt(math.huge), nil, "(eta-fmt) a non-finite estimate is refused")
+    checkEq((fmt(0)), "< 1 min", "(eta-fmt) arriving now reads under a minute")
+    checkEq((fmt(59)), "< 1 min", "(eta-fmt) 59 s is still under a minute")
+    checkEq((fmt(60)), "~1 min", "(eta-fmt) a full minute")
+    local text, shown = fmt(149)
+    check(text == "~2 min" and shown == 2, "(eta-fmt) rounds to the nearest minute and reports it for the next round")
+    checkEq((fmt(3900)), "~65 min", "(eta-fmt) an hour and more stays in minutes")
+    checkEq((fmt(1e6)), "~999 min", "(eta-fmt) the reserved width caps the text at 999")
+    -- 顯示 2 分時，估計在 80–160 秒（1:30–2:30 各外擴 10 秒）都不改字
+    checkEq((fmt(84, 2)), "~2 min", "(eta-hyst) 84 s keeps the shown 2 minutes")
+    checkEq((fmt(78, 2)), "~1 min", "(eta-hyst) 78 s leaves the band and reads 1 minute")
+    checkEq((fmt(159, 2)), "~2 min", "(eta-hyst) 159 s keeps 2 minutes")
+    checkEq((fmt(161, 2)), "~3 min", "(eta-hyst) 161 s moves on to 3 minutes")
+    checkEq((fmt(52, 1)), "~1 min", "(eta-hyst) the last minute holds down to 50 s")
+    checkEq((fmt(48, 1)), "< 1 min", "(eta-hyst) below 50 s it reads under a minute")
+    checkEq((fmt(68, 0)), "< 1 min", "(eta-hyst) under-a-minute holds up to 70 s")
+    checkEq((fmt(72, 0)), "~1 min", "(eta-hyst) past 70 s it reads a minute again")
+
+    state.active, state.startReason, state.token = true, nil, "follow"
+    state.eta = 119
+    panel:refresh(nowMs)
+    checkEq(panel._etaText, "~2 min", "(eta-live) the active HUD shows the estimate")
+    state.eta = 84
+    panel:refresh(nowMs)
+    checkEq(panel._etaText, "~2 min", "(eta-hyst) the panel keeps the shown minute across refreshes")
+    local width, valueX = panel.width, panel._etaValueX
+    state.eta = 20
+    panel:refresh(nowMs)
+    check(panel._etaText == "< 1 min" and panel.width == width and panel._etaValueX == valueX,
+        "(eta-place) a new estimate only changes the text, never the layout")
+    local timeRight = panel._timeX + math.max(
+        textManager:MeasureStringX(UIFont.Small, panel._timeLabel),
+        textManager:MeasureStringX(UIFont.Small, "00:00:00"))
+    local etaRight = panel._etaX + math.max(
+        textManager:MeasureStringX(UIFont.Small, panel._etaLabel),
+        textManager:MeasureStringX(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDEtaMinutes", "999")))
+    local stopX = panel.homeButton.visible and panel.homeButton.x or panel.actionButton.x
+    check(panel._etaLabel == "TIME LEFT" and panel._etaX >= timeRight
+        and panel._etaLabelY == panel._capLabelY and panel._etaValueY == panel._capValueY
+        and panel._etaValueX == panel._etaX and etaRight <= stopX and etaRight <= panel._blockX,
+        "(eta-place) full metal: the estimate column follows the drive time on the same two rows, clear of the buttons")
+    state.eta = nil
+    panel:refresh(nowMs)
+    checkEq(panel._etaText, "--", "(eta-live) an active drive without an estimate yet shows the placeholder")
+    state.eta = 300
+    state.active, state.startReason = false, "UI_MinidoracatAutoDrive_EngineOff"
+    panel:refresh(nowMs)
+    check(panel._etaText == "--" and panel._etaMin == nil,
+        "(eta-idle) a stopped HUD shows no estimate and forgets the shown minute")
+    state.eta = nil
+end
+
 -- 記下切換前的完整版可見性，讓下面那條斷言驗的是「換過去」而不只是「換過來」。
 local fullLayoutShowedGears = panel.gearButtons[1].visible and not panel.cycleButton.visible
 
@@ -1765,6 +1846,17 @@ do
             + textManager:MeasureStringX(UIFont.Small, panel._timeLabel)
         and timeRight + 3 <= panel.cycleButton.x,
         "compact layout keeps the drive-time name and clock inline on the cruise baseline")
+    -- 預計剩餘：有空位就同列接在行車時間後面、停在檔位鈕之前
+    state.eta = 245
+    panel:refresh(nowMs)
+    local etaRight = panel._etaValueX
+        + textManager:MeasureStringX(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDEtaMinutes", "999"))
+    check(panel._etaX ~= nil and panel._etaX >= timeRight
+        and panel._etaLabelY == panel._capLabelY and panel._etaValueY == panel._capValueY
+        and panel._etaValueX > panel._etaX + textManager:MeasureStringX(UIFont.Small, panel._etaLabel)
+        and etaRight + 3 <= panel.cycleButton.x,
+        "compact layout keeps the estimate name and value inline after the drive time")
+    state.eta = nil
     state.elapsed = nil
     panel:refresh(nowMs)
 end
@@ -2447,6 +2539,8 @@ do
             panel:refresh(nowMs)
             local label = "layout " .. layoutMode .. " theme " .. theme
             check(panel.contButton.visible, label .. ": continuation pill stays reachable")
+            check(not (panel._etaX ~= nil and not panel.zombieButton.visible),
+                label .. ": the estimate column never outlives the policy pills (it yields first)")
             if panel.autoButton.visible then checkAutoPill(label) end
             check(panel.contButton.x >= 0
                 and panel.contButton.x + panel.contButton.width <= panel.width
@@ -2907,6 +3001,29 @@ do
                     check(iconPanel._effectiveLayout == 2 and not iconPanel._showStatusText,
                         label .. ": only the ultra-narrow single row may drop the speed column")
                 end
+                -- 預計剩餘（1005i）：有座標時整欄（欄名與最寬數值）接在行車時間欄之後、面板之內、不壓任何可見控制
+                if iconPanel._etaX then
+                    local fh = textManager:getFontHeight(UIFont.Small)
+                    local ex = iconPanel._etaX
+                    local er = math.max(ex + textManager:MeasureStringX(UIFont.Small, iconPanel._etaLabel),
+                        iconPanel._etaValueX + textManager:MeasureStringX(UIFont.Small,
+                            getText("UI_MinidoracatAutoDrive_HUDEtaMinutes", "999")))
+                    local ey = math.min(iconPanel._etaLabelY, iconPanel._etaValueY)
+                    local eb = math.max(iconPanel._etaLabelY, iconPanel._etaValueY) + fh
+                    local tr = math.max(
+                        iconPanel._timeX + textManager:MeasureStringX(UIFont.Small, iconPanel._timeLabel),
+                        iconPanel._timeValueX + textManager:MeasureStringX(UIFont.Small, "00:00:00"))
+                    local hits = 0
+                    for i = 1, #iconPanel.children do
+                        local c = iconPanel.children[i]
+                        if c.visible and ex < c.x + c.width and c.x < er and ey < c.y + c.height and c.y < eb then
+                            hits = hits + 1
+                        end
+                    end
+                    check(ex >= tr and er <= iconPanel.width and hits == 0,
+                        label .. ": the estimate column follows the drive time inside the panel and covers no control ("
+                        .. hits .. " hits)")
+                end
             end
         end
     end
@@ -2921,6 +3038,7 @@ do
             "CH 1x 1920px keeps the chosen theme " .. theme)
         checkEq(iconPanel._effectiveLayout, 1,
             "CH 1x 1920px theme " .. theme .. " stays on the full layout")
+        check(iconPanel._etaX ~= nil, "CH 1x 1920px theme " .. theme .. " shows the estimate column")
     end
     themeOption:setValue(4)
     iconPanel:applyLayout()

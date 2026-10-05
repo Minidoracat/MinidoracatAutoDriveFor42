@@ -1171,6 +1171,8 @@ local function encodePhys(phys)
     addNum("capHeading", "ch")
     addNum("capBlocked", "cbl")
     addNum("capDodge", "cdg")
+    addNum("etaSec", "eta")           -- 1005i：HUD 預計剩餘秒數（計畫剩餘×k；Drive.etaTick）
+    addNum("etaK", "etk")             -- 1005i：預計剩餘的修正倍率 k（實際行進秒÷計畫行進秒，含先驗）
     addNum("navVersion", "nv")
     addNum("currentSurfaceId", "sid")
     addStr("currentSurface", "surf")

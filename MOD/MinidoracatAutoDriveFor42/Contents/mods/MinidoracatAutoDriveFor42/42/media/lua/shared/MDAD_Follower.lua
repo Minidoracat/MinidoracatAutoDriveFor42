@@ -558,6 +558,115 @@ function MDADFollower.segIndexAt(profile, sAt)
     return lo
 end
 
+-- 預計剩餘時間的計畫秒數（1005i，Workshop 許願「預估要開幾分鐘」）：只給 ETA，控制路徑仍不設加速天花板（檔頭「前向加速」）。
+-- 每段照剖面的段內包絡走：入口速度以 segAccel 加速、到上限（capMs）等速、再以該段收油減速度（coastRate，與建表同源）
+-- 減到出口的 v[i+1]——終點段的減速終點與建表同在 coastStopS。不能用「兩端平均速度」：直路的段常長達上百公尺，
+-- 終點段兩端是巡航速度與 0，平均會把整段算成半速（E2E 1005i hud-themes-sp：425m 直路多估 7–8 秒）。
+-- 段內最高速度與減速段的地板 PLAN_VMIN（停點之後兩端都≈0 的段時間不發散）；靜止起步照實從 0 加速。
+-- out＝呼叫端配一次的表（重算就地覆寫）：t[i]＝起點到頂點 i 的累計秒數（t[1]＝0）、s[i]＝頂點 i 的弧長（從剖面抄一份，
+-- 之後的查詢不再讀剖面）、每段 w／p／xa／xd／a／d＝入口速度、最高速度、加速結束與減速開始的段內距離、加減速度；n＝頂點數。
+-- 回總秒數；profile 未 ready、cap 無效＝nil（out 不動）。
+local PLAN_VMIN = 1
+
+-- 段內從 0 走到 x 的秒數（planTimes 的段參數）
+local function planSegT(w, p, xa, xd, a, d, x)
+    if x <= 0 then return 0 end
+    if x <= xa then return (sqrt(w * w + 2 * a * x) - w) / a end
+    local t = (p - w) / a
+    if x <= xd then return t + (x - xa) / p end
+    t = t + (xd - xa) / p
+    local xf = xd + (p * p - PLAN_VMIN * PLAN_VMIN) / (2 * d) -- 減到地板的位置
+    if x <= xf then return t + (p - sqrt(p * p - 2 * d * (x - xd))) / d end
+    return t + (p - PLAN_VMIN) / d + (x - xf) / PLAN_VMIN
+end
+
+function MDADFollower.planTimes(profile, capMs, v0, out)
+    if type(profile) ~= "table" or profile.ready ~= true or type(out) ~= "table"
+            or not isFinite(capMs) or capMs <= 0 then return nil end
+    local n, v, ps = profile.n, profile.v, profile.s
+    if not isFinite(n) or n < 2 or type(v) ~= "table" or type(ps) ~= "table" then return nil end
+    if capMs < PLAN_VMIN then capMs = PLAN_VMIN end
+    out.t, out.s = out.t or {}, out.s or {}
+    out.w, out.p, out.xa, out.xd, out.a, out.d = out.w or {}, out.p or {}, out.xa or {}, out.xd or {}, out.a or {}, out.d or {}
+    local outT, outS = out.t, out.s
+    local segAccel, coastRate, segCoast = profile.segAccel, profile.coastRate, profile.segCoast
+    local stopS = profile.coastStopS
+    local w = v[1] or 0
+    if w > capMs then w = capMs end
+    if not isFinite(v0) or v0 < 0 then v0 = 0 end
+    if v0 < w then w = v0 end
+    local t, sPrev = 0, ps[1] or 0
+    outT[1], outS[1] = 0, sPrev
+    for i = 1, n - 1 do
+        local sNext = ps[i + 1] or sPrev
+        local len = sNext - sPrev
+        if len < 0 then len = 0 end
+        local a = segAccel and segAccel[i] or ACCEL_NOMINAL
+        if not (a > 0.1) then a = ACCEL_NOMINAL end
+        local d = coastRate and coastRate[i] or (segCoast and segCoast[i]) or 3
+        if not (d > 0.1) then d = 3 end
+        local u = v[i + 1] or 0
+        if u < PLAN_VMIN then u = PLAN_VMIN end
+        -- 減速包絡的終點：建表的收油包絡在 coastStopS 收到 v[i+1]（終點段），其餘段在段尾
+        local ld = len
+        if isFinite(stopS) and sNext > stopS then
+            ld = stopS - sPrev
+            if ld < 0 then ld = 0 end
+        end
+        -- 加速曲線 w²＋2ax 與減速包絡 u²＋2d(ld−x) 的交點＝段內最高速度（再夾 cap）
+        local w2 = w * w
+        local xs = (u * u + 2 * d * ld - w2) / (2 * (a + d))
+        local p2 = w2
+        if xs >= len then p2 = w2 + 2 * a * len elseif xs > 0 then p2 = w2 + 2 * a * xs end
+        local p = sqrt(p2)
+        if p > capMs then p = capMs end
+        if p < w then p = w end
+        if p < PLAN_VMIN then p = PLAN_VMIN end -- 停點附近兩端都≈0 的段：以地板速度通過，時間不發散
+        local xa = (p * p - w2) / (2 * a)
+        if xa > len then xa = len end
+        local xd = ld - (p * p - u * u) / (2 * d)
+        if xd < xa then xd = xa end
+        if xd > len then xd = len end
+        out.w[i], out.p[i], out.xa[i], out.xd[i], out.a[i], out.d[i] = w, p, xa, xd, a, d
+        t = t + planSegT(w, p, xa, xd, a, d, len)
+        outT[i + 1], outS[i + 1] = t, sNext
+        -- 出口速度＝下一段的入口
+        local e
+        if len <= xa then
+            e = sqrt(w2 + 2 * a * len)
+        elseif len <= xd then
+            e = p
+        else
+            local e2 = p * p - 2 * d * (len - xd)
+            e = e2 > PLAN_VMIN * PLAN_VMIN and sqrt(e2) or PLAN_VMIN
+        end
+        sPrev, w = sNext, e
+    end
+    out.n = n
+    return t
+end
+
+-- 弧長 sAt 的累計計畫秒數（段內照同一套加速／等速／減速），只讀 planTimes 填好的 out。hint＝呼叫端已知的段索引
+-- （Driver 傳投影游標 fstate.idx）：涵蓋 sAt 就直接用，否則在 out.s 上二分。
+function MDADFollower.planTimeAt(out, sAt, hint)
+    if type(out) ~= "table" or not isFinite(sAt) or not isFinite(out.n) or out.n < 2 then return nil end
+    local ts, ss, n = out.t, out.s, out.n
+    local i = isFinite(hint) and math.floor(hint) or 0
+    if i < 1 or i >= n or not (ss[i] <= sAt and sAt <= ss[i + 1]) then
+        local lo, hi = 1, n - 1
+        while lo < hi do
+            local mid = math.floor((lo + hi) / 2)
+            if ss[mid + 1] <= sAt then lo = mid + 1 else hi = mid end
+        end
+        i = lo
+    end
+    local t0 = ts[i]
+    if not isFinite(t0) then return nil end
+    local x, len = sAt - ss[i], ss[i + 1] - ss[i]
+    if x > len then x = len end
+    return t0 + planSegT(out.w[i], out.p[i], out.xa[i], out.xd[i], out.a[i], out.d[i], x)
+end
+
 -- 段 segI 上常駐 laneBias 實際能落到的值（Driver 期望線／遙測 el 與 control 同一
 -- 張表）。profile 未 ready 或無表＝原值。keep＝離路緣保留（nil＝LANE_BIAS_KEEP）；會車時
 -- Driver 設 state.laneKeep＝0（貼到路緣錯車，1001b），control 與期望線必須傳同一個值。
@@ -1135,6 +1244,8 @@ function MDADFollower.stepBuild(profile, budget)
         elseif phase == "range-tree" then
             if i < 1 then
                 profile.rangeReady = true
+                -- 建完一次＋1（同一份 profile 重建也會換）：ETA 計畫秒數表以它判斷要不要重算
+                profile.epoch = (profile.epoch or 0) + 1
                 profile.phase, profile.cursor, profile.ready = "ready", n, true
                 return true
             else
@@ -1148,6 +1259,7 @@ function MDADFollower.stepBuild(profile, budget)
                 profile.cursor, ops = i - 1, ops + 1
             end
         else
+            profile.epoch = (profile.epoch or 0) + 1
             profile.phase, profile.ready = "ready", true
             return true
         end

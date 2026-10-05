@@ -17338,6 +17338,93 @@ local function scenarioDriveClock()
 end
 scenarioDriveClock()
 
+-- =====================================================================
+-- 預計剩餘時間（1005i）：剖面計畫秒數×本趟修正倍率 k，只算自駕中的現實時間
+-- =====================================================================
+--   (eta-live)    跟線後就有估計；往前開估計變少
+--   (eta-stall)   原地等：k 上升、估計變多（剩餘距離沒變）
+--   (eta-gap)     兩幀相隔超過 ETA_GAP_MS（單機暫停）不計時
+--   (eta-yield)   讓位（玩家自己開）不計時
+--   (eta-gear)    換低檔：有效上限變低就重算計畫表，估計變多
+--   (eta-cutover) 換路線：在新弧長座標重設基準，計畫行進秒不因弧長歸零而跳
+--   (eta-stop)    結束後沒有估計
+function drive.scenarioEta()
+    scenario("預計剩餘時間：剖面計畫秒數×修正倍率，只算自駕中的現實時間")
+    local D = MDAD.Drive
+    local oldGear, oldResume = D.getGear(0), drive.resumeMs
+    D.setGear(0, 3)
+    drive.resumeMs = 2000 -- 手動介入後待命 2 秒恢復（讓位案要 session 留著）
+    checkTrue(armDrive(), "(eta) 啟動")
+    drive.nav.route = newRoute(80, 0, 0, 4, 0) -- 316m：換線前留足跑道
+    drive.nav.tx, drive.nav.ty = 316, 0
+    local s = D.debugSession(0)
+    -- 每 100ms 一幀，車往 +x 走 dx（公尺／幀）；假車不會自己動
+    local function run(ms, dx)
+        for _ = 1, math.floor(ms / 100) do
+            nowMs = nowMs + 100
+            dveh._x = dveh._x + (dx or 0)
+            driveReset(dveh)
+            driveTick(dp, dveh)
+        end
+    end
+    dveh._speed = 50
+    run(2000, 1.4)
+    s = D.debugSession(0)
+    local e1 = D.etaSeconds(0)
+    checkTrue(type(e1) == "number" and e1 > 0 and e1 < 60,
+        "(eta-live) 跟線後就有估計：" .. tostring(e1) .. " 秒（k " .. tostring(s.etaK) .. "）")
+    run(2000, 1.4)
+    local e2 = D.etaSeconds(0)
+    checkTrue(e2 < e1 - 1, "(eta-live) 往前開 28m，估計從 " .. tostring(e1) .. " 降到 " .. tostring(e2))
+    -- (eta-stall) 比計畫慢很多（8 km/h 爬 6 秒，停住會被停滯監督改成倒車）：k 上升，估計不再隨距離下降
+    local k0 = s.etaK
+    dveh._speed = 8
+    run(6000, 0.22)
+    local e3 = D.etaSeconds(0)
+    checkTrue(s.etaK > k0 + 0.05 and e3 > e2 - 0.5,
+        "(eta-stall) 爬 6 秒：k " .. tostring(k0) .. "→" .. tostring(s.etaK) .. "、估計 " .. tostring(e2) .. "→" .. tostring(e3))
+    -- (eta-gap) 一次隔 10 秒（單機暫停回來的第一幀）不計時
+    local el = s.etaElapsed
+    nowMs = nowMs + 10000
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkTrue(s.etaElapsed - el < 0.001, "(eta-gap) 暫停 10 秒不計時：多算 " .. tostring(s.etaElapsed - el) .. " 秒")
+    -- (eta-yield) 讓位 3 秒＋放手觀察 2 秒都不計時
+    el = s.etaElapsed
+    dveh._steering = 0.02
+    run(3000, 0)
+    dveh._steering = 0
+    run(1900, 0)
+    -- 開始讓位那一幀照算（etaTick 排在判讓位之前）：只容一幀 100ms
+    checkTrue(s.mode == "yield" and s.etaElapsed - el < 0.15,
+        "(eta-yield) 讓位與放手觀察期不計時：多算 " .. tostring(s.etaElapsed - el) .. " 秒")
+    run(600, 0)
+    checkTrue(s.mode ~= "yield" and s.etaElapsed - el > 0.05, "(eta-yield) 恢復跟線後照常計時")
+    -- (eta-gear) 70 檔換 30 檔：計畫表照新上限重算，估計變多
+    dveh._speed = 30
+    run(1000, 0.8)
+    local e4, cap4 = D.etaSeconds(0), s.etaCapKmh
+    D.setGear(0, 1)
+    run(600, 0.8)
+    local e5 = D.etaSeconds(0)
+    checkTrue(cap4 > 30 and s.etaCapKmh == 30 and e5 > e4 + 2,
+        "(eta-gear) 上限 " .. tostring(cap4) .. "→" .. tostring(s.etaCapKmh) .. "：估計 " .. tostring(e4) .. "→" .. tostring(e5))
+    -- (eta-cutover) 從車位重開一條新路線：新弧長從 0 起，計畫行進秒不跟著跳
+    local planned, x0 = s.etaPlanned, dveh._x
+    drive.nav.route = newRoute(60, x0, 0, 4, 0)
+    drive.nav.tx = x0 + 236
+    run(1200, 0.8)
+    checkTrue(s.route == drive.nav.route and s.etaProfile == s.profile,
+        "(eta-cutover) 已換到新路線並重算計畫表")
+    checkTrue(s.etaPlanned - planned < 1.5 and s.etaPlanned - planned > -0.01,
+        "(eta-cutover) 換線前後計畫行進秒只算真的前進：" .. tostring(planned) .. "→" .. tostring(s.etaPlanned))
+    D.stop(0, nil)
+    checkEq(D.etaSeconds(0), nil, "(eta-stop) 結束後沒有估計")
+    D.setGear(0, oldGear)
+    drive.resumeMs = oldResume
+end
+drive.scenarioEta()
+
 function drive.scenarioPauseBoundaries()
     scenario("受困／抵達暫停：獨立選項、停妥與語音順序、取消等待及單人界線")
     local oldClient, oldServer, oldPlayers = clientFlag, serverFlag, activePlayers

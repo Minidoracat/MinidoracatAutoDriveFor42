@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1005h"
+Drive.REV = "1005i"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -2063,6 +2063,8 @@ local function startSession(playerObj, playerNum, stage)
     local startedAt = getTimestampMs()
     local sNew = {
         startedMs = startedAt, -- 含停等／讓位；換路線與重建不重設，清 session 時凍結末趟秒數
+        -- 預計剩餘時間（Drive.etaTick）：累計實際行進秒／計畫行進秒，與計畫秒數表（重算時就地覆寫）
+        etaElapsed = 0, etaPlanned = 0, etaPlan = { t = {}, s = {} },
         vehicle = vehicle,
         route = route,
         profileRoute = profileRoute, -- 剖面實際建構的路線（拖車＝改寫版）；證明帶的來源
@@ -6341,6 +6343,11 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     if finite(s.gearCap) and s.gearCap > 0 then phys.capGear = s.gearCap end
     if finite(s.perceptionCap) then phys.capPerception = s.perceptionCap end
     if finite(s.maxSpeed) and s.maxSpeed > 0 then phys.capMax = s.maxSpeed end -- 沙盒上限（上傳摘要的有效上限用；不進取樣）
+    -- 1005i 預計剩餘：HUD 顯示的秒數（計畫剩餘×k）與修正倍率 k（遙測 eta／etk）
+    if finite(s.etaSec) then
+        phys.etaSec = math.floor(s.etaSec * 10 + 0.5) / 10
+        phys.etaK = math.floor(s.etaK * 1000 + 0.5) / 1000
+    end
     if s.returnActive then
         phys.capOffroad = s.returnUnsafe and TUNE.RETURN_UNSAFE_CAP or TUNE.RETURN_CAP
         phys.capReturn = phys.capOffroad
@@ -13064,6 +13071,73 @@ local function stepFollow(s, vehicle, playerNum, now)
     end
 end
 
+-- 預計剩餘時間（1005i；Workshop 許願「預估要開幾分鐘」，使用者裁定只算現實時間、HUD 加第三欄）：
+-- 剖面計畫秒數（MDADFollower.planTimes）× 本趟修正倍率 k＝(實際行進秒＋τ·k0)／(計畫行進秒＋τ)：開頭先信剖面，
+-- 開越久越信這趟實際的快慢（可視距離、幀率、殭屍、繞行、停等、倒車都會算進 k）。計時每幀累加；計畫表與估計每
+-- ETA_STEP_MS 更新一次（剖面讀取不進每幀）。換路線、重建（profile.epoch）、有效上限改變時整份重算計畫表，並在新位置
+-- 重設基準，座標系跳動不算成前進；讓位（玩家自己開）與幀間隔超過 ETA_GAP_MS（單機暫停、選單）不計時。
+-- 離線回測（campaign rc57–rc61 135 趟到站，以樣本 ftg 重建剖面）中位誤差約 10%、p90 約 25%。
+TUNE.ETA_GAP_MS = 1000  -- 兩幀間隔超過這個值不計時（單機暫停、選單、長卡頓）
+TUNE.ETA_STEP_MS = 250  -- 計畫表與估計的更新節奏（HUD 每 250ms 才讀一次）
+TUNE.ETA_PRIOR_S = 60   -- 修正倍率的先驗權重（計畫秒數）
+TUNE.ETA_PRIOR_K = 1.15 -- 先驗倍率：上限附近推力遞減等剖面沒算到的部分，回測平均比計畫慢約 13%
+TUNE.ETA_K_MIN = 0.5
+TUNE.ETA_K_MAX = 4
+function Drive.etaTick(s, now)
+    local last = s.etaWallMs
+    s.etaWallMs = now
+    if s.mode == "yield" then
+        s.etaBaseT = nil -- 玩家自己開的那段不算進 k；恢復後在新位置重設基準
+        return
+    end
+    if last and now > last and now - last <= TUNE.ETA_GAP_MS then
+        s.etaElapsed = s.etaElapsed + (now - last) / 1000
+    end
+    if now < (s.etaNextMs or 0) then return end
+    s.etaNextMs = now + TUNE.ETA_STEP_MS
+    local profile = s.profile
+    if not profile or profile.ready ~= true then return end
+    -- 有效上限＝沙盒／檔位／感知／車輛極速取小（伺服器速限只在重算時讀）
+    local cap = s.maxSpeed
+    local v = s.gearCap
+    if finite(v) and v > 0 and v < cap then cap = v end
+    v = s.perceptionCap
+    if finite(v) and v > 0 and v < cap then cap = v end
+    v = s.vehicleProfile and s.vehicleProfile.maxSpeed
+    if finite(v) and v > 0 and v < cap then cap = v end
+    if profile ~= s.etaProfile or profile.epoch ~= s.etaEpoch or cap ~= s.etaCapKmh then
+        local capEff = cap
+        v = Drive.serverSpeedLimit()
+        if finite(v) and v > 0 and v < capEff then capEff = v end
+        local speed = s.vehicle:getCurrentSpeedKmHour()
+        if not finite(speed) or speed < 0 then speed = 0 end
+        local total = MDADFollower.planTimes(profile, capEff / 3.6, speed / 3.6, s.etaPlan)
+        s.etaProfile, s.etaEpoch, s.etaCapKmh = profile, profile.epoch, cap
+        s.etaEnd = total and MDADFollower.planTimeAt(s.etaPlan, profile.length - MDADFollower.ARRIVE_M)
+        s.etaBaseT = nil
+        if not s.etaEnd then s.etaSec, s.etaK = nil, nil end
+    end
+    local sNow = s.fstate.projS
+    if not s.etaEnd or not finite(sNow) then return end
+    local tNow = MDADFollower.planTimeAt(s.etaPlan, sNow, s.fstate.idx)
+    if not tNow then return end
+    if s.etaBaseT then s.etaPlanned = s.etaPlanned + tNow - s.etaBaseT end -- 倒車＝負的前進
+    s.etaBaseT = tNow
+    local planned = s.etaPlanned
+    if planned < 0 then planned = 0 end
+    local k = (s.etaElapsed + TUNE.ETA_PRIOR_S * TUNE.ETA_PRIOR_K) / (planned + TUNE.ETA_PRIOR_S)
+    if k < TUNE.ETA_K_MIN then k = TUNE.ETA_K_MIN elseif k > TUNE.ETA_K_MAX then k = TUNE.ETA_K_MAX end
+    local left = s.etaEnd - tNow
+    if left < 0 then left = 0 end
+    s.etaK, s.etaSec = k, left * k
+end
+
+-- HUD 預計剩餘欄：本趟估計還要幾秒（現實時間）；沒有 session 或還沒有估計＝nil。
+function Drive.etaSeconds(playerNum)
+    local s = sessions[playerNum]
+    return s and s.etaSec or nil
+end
+
 -- OnPlayerUpdate 簽名：單一 IsoPlayer（IsoPlayer.java:2279 triggerEvent("OnPlayerUpdate", this)；
 -- 原版用例 Steps.lua:1922、DebugDemoTime.lua:308）。伺服器端 isLocalPlayer 恆 false
 -- （IsoPlayer.java:6493），遠端玩家也擋在這裡——自駕只在駕駛自己的 client 跑。
@@ -13110,6 +13184,7 @@ local function onPlayerUpdate(player)
     end
 
     local now = getTimestampMs()
+    Drive.etaTick(s, now) -- 預計剩餘時間：每幀計時；換路線／重建後重算計畫表（arrive 收尾也照走）
     if s.brakeTerminalFault then
         Drive.stop(playerNum, KEY_UNSUPPORTED)
         return
