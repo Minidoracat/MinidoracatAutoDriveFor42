@@ -113,6 +113,8 @@ local EK = {
     "lvl", "avoidN",
     -- 拖車不可過轉角改道（detour phase＝towcorner）：主避讓圈半徑、路線上不可過轉角數、替代線剖面仍不可過的轉角數
     "avoidR", "towN", "towLeft",
+    -- 側向脫困（1006，unstick phase=side）：推的那側（+1＝車頭向量 (−fy,fx) 側）、收手時的側推加速度 m/s²
+    "dir", "acc",
 }
 
 local function logOnce(msg)

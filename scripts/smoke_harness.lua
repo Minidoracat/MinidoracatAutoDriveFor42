@@ -1327,10 +1327,11 @@ local function newVehicle(opts)
         drive.calls.getRegulatorSpeed = drive.calls.getRegulatorSpeed + 1
         return self._regSpeed or 0
     end
+    -- _vlat（km/h，沿 (−fwdY, fwdX)，預設 0）：側向脫困的橫向速度閘（scenarioSideEscape）
     function v:getLinearVelocity(out)
         drive.calls.getLinearVelocity = drive.calls.getLinearVelocity + 1
-        local ms = (self._speed or 0) / 3.6
-        return out:set(self._fwdX * ms, 0, self._fwdY * ms)
+        local ms, lat = (self._speed or 0) / 3.6, (self._vlat or 0) / 3.6
+        return out:set(self._fwdX * ms - self._fwdY * lat, 0, self._fwdY * ms + self._fwdX * lat)
     end
     return v
 end
@@ -17360,6 +17361,199 @@ scenario("調頭＋blocked：遠處不倒車、近處才退、額度用盡不空
     MDAD.Drive.stop(0, nil)
 end
 scenarioUturnBlocked()
+
+-- (side) 1006 前後皆堵的側向脫困（實驗，TUNE.SIDE_ESCAPE 預設關，本情境暫開）：最短倒車帶也命中、前方被擋時，
+--   探車身兩側 SIDE_ESCAPE_ROOM_M 的側帶，只往淨空的一側推純橫向中心衝量（每幀 Δv ≤ DV_MAX、橫向速度到 KMH 不推）；
+--   到位 settle 後接回倒車鏈（rear 清就倒車、仍擋再側推，共用 UNSTICK_MAX）；兩側皆堵、停滯、偏航、側帶變不清
+--   都回停等照舊交還。車頭對 +x：dir=+1＝(−fy,fx)＝+y 側。
+function drive.scenarioSideEscape()
+    scenario("前後皆堵側向脫困：只往有空間的一側、每幀衝量有上限、到位接回倒車；兩側皆堵／停滯照舊交還")
+    local T = MDAD.Drive.debugTune()
+    local savedOn = T.SIDE_ESCAPE
+    T.SIDE_ESCAPE = true
+    local savedTelemetry = MDAD.HUD.telemetryEnabled
+    MDAD.HUD.telemetryEnabled = function() return true end -- 事件要 s.diag
+    local savedStart, savedEvent, savedSample, savedStop =
+        MDADDiagnostics.start, MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.stop
+    local evs, sides = {}, {}
+    MDADDiagnostics.start = function() return true end
+    MDADDiagnostics.sample = function() return true end
+    MDADDiagnostics.stop = function() return true end
+    MDADDiagnostics.event = function(pn, name, a)
+        if type(a) ~= "table" then return end
+        evs[name .. ":" .. tostring(a.phase)] = a
+        if name == "unstick" and a.phase == "side" then sides[#sides + 1] = a end
+    end
+    local placed = {}
+    local function put(x, y)
+        drive.putSolid(x, y, "side_" .. x .. "_" .. y)
+        placed[#placed + 1] = { x, y }
+    end
+    local function clearAll()
+        for _, p in ipairs(placed) do drive.clearCell(p[1], p[2]) end
+        placed = {}
+    end
+    local function startsOf()
+        local n = 0
+        for _, a in ipairs(sides) do if a.why == "start" then n = n + 1 end end
+        return n
+    end
+    -- 前牆 x=20（判堵停止線）、後方 (7,y∈rearYs)（車尾 0.8m：三級倒車帶都命中）、側牆 x=9..13 y∈sideYs
+    -- （y=−2 擋 dir=−1 側帶、y=1 擋 dir=+1 側帶；車身 y∈[−0.9,0.9]）。後方只放 (7,−1)：車往 +y 移過 1.05m
+    -- 最短倒車帶才清（一步 1.0 到 y=1.0 仍蹭到 0.05＝第二次側推，第二步途中清＝rear-clear 接倒車）。
+    local function startSide(label, sideYs)
+        clearAll()
+        for k in pairs(evs) do evs[k] = nil end
+        for i = #sides, 1, -1 do sides[i] = nil end
+        checkTrue(armDrive(), label .. " 啟動")
+        setHeading(dveh, 0)
+        for _, y in ipairs({ -5, -4, -2, -1, 0, 1, 2, 4, 5 }) do put(20, y) end
+        put(7, -1)
+        for _, y in ipairs(sideYs) do for x = 9, 13 do put(x, y) end end
+        dveh._x = 11
+        driveTick(dp, dveh)
+        drive.scanRound()
+        dveh._speed = 0
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        drive.wideRounds(true)
+        nowMs = nowMs + 6000
+        driveReset(dveh)
+        driveTick(dp, dveh) -- blocked-retry：倒車探測階梯全命中
+        local st = MDAD.Drive.debugSession(0)
+        checkTrue(st.blocked == true or st.currentBlocked == true, label .. " 前提：前方被擋")
+        checkTrue(evs["unstick:rear-blocked"] ~= nil, label .. " 前提：最短倒車帶也被擋（rear-blocked）")
+        return st
+    end
+    local function tick(ms)
+        nowMs = nowMs + ms
+        driveReset(dveh)
+        driveTick(dp, dveh)
+    end
+
+    -- (side-a) dir=−1 側有牆、dir=+1 淨空：只往 +1 推；純橫向中心衝量、每幀 Δv 有上限、橫向速度到上限不推
+    local st = startSide("(side-a)", { -2 })
+    checkEq(st.mode, "unstick", "(side-a) 一側有空間：進側向脫困（mode 實得 " .. tostring(st.mode) .. "）")
+    checkEq(st.unstickSide, 1, "(side-a) 往淨空的 dir=+1 側（實得 " .. tostring(st.unstickSide) .. "）")
+    checkEq(sides[1] and sides[1].why, "start", "(side-a) 事件 unstick phase=side why=start")
+    checkEq(sides[1] and sides[1].dir, 1, "(side-a) start 事件帶 dir")
+    checkNear(st.unstickTravelM, T.SIDE_ESCAPE_ROOM_M - T.REAR_KEEP_M, 1e-9, "(side-a) 橫移上限＝側帶−KEEP")
+    local mass = st.runtimeMass
+    local function dv()
+        local imp = dveh._imp
+        return math.sqrt(imp.x * imp.x + imp.z * imp.z) * 0.01 / mass
+    end
+    tick(50)
+    checkEq(dveh._imp.total, 1, "(side-a) 起手幀施一次衝量")
+    checkTrue(dveh._imp.z > 0 and math.abs(dveh._imp.x) < 1e-9,
+        "(side-a) 衝量沿 +y（dir=+1）、無縱向分量（實得 x=" .. dveh._imp.x .. " z=" .. dveh._imp.z .. "）")
+    checkTrue(math.abs(dveh._imp.torqueY) < 1e-9, "(side-a) 作用點在中心：不產生偏航力矩")
+    checkTrue(dv() > 0 and dv() < T.SIDE_ESCAPE_DV_MAX, "(side-a) 起手推力未到上限（Δv " .. dv() .. "）")
+    dveh._y = 0.3
+    tick(500)
+    checkEq(st.mode, "unstick", "(side-a) 移 0.3m、側帶與 rear 重探：仍側推")
+    checkNear(dv(), T.SIDE_ESCAPE_DV_MAX, 1e-6, "(side-a) 推力漸增到每幀 Δv 上限為止（實得 " .. dv() .. "）")
+    dveh._vlat = T.SIDE_ESCAPE_KMH + 0.1
+    tick(20)
+    checkEq(dveh._imp.total, 0, "(side-a) 橫向速度到上限：本幀不推")
+    dveh._vlat = nil
+    dveh._y = 1.0
+    tick(50)
+    checkEq(st.mode, "settle", "(side-a) 橫移到位進 settle（實得 " .. tostring(st.mode) .. "）")
+    checkEq(sides[#sides].why, "ok", "(side-a) 事件 why=ok")
+    checkTrue(drive.calls.forceBrake >= 1, "(side-a) settle 煞停")
+    -- settle 停妥 → 接回倒車鏈：rear 在 y=1.0 仍命中 (7,−1) → 第二次側推（同 dir）
+    tick(100)
+    tick(50)
+    checkEq((evs["progress:recover"] or {}).why, "side-escape", "(side-a) 到位後以 side-escape 請求恢復")
+    checkEq(startsOf(), 2, "(side-a) rear 仍擋：第二次側推（實得 " .. startsOf() .. "）")
+    checkEq(st.unstickSide, 1, "(side-a) 第二次仍往 dir=+1")
+    -- 第二步途中 y=1.1：最短倒車帶不再碰 (7,−1) → rear-clear → settle → 倒車
+    dveh._y = 1.1
+    tick(150)
+    checkEq(sides[#sides].why, "rear-clear", "(side-a) 最短倒車帶清：rear-clear 收手（實得 " .. tostring(sides[#sides].why) .. "）")
+    checkEq(st.mode, "settle", "(side-a) rear-clear 進 settle")
+    tick(100)
+    -- 殘留旗標（讓位／交還前改道中斷側推後 unstickSide 還在）：倒車起手必須清掉，否則 stepUnstick 走側推
+    st.unstickSide = 1
+    tick(50)
+    checkEq(st.mode, "unstick", "(side-a) 接回倒車（mode 實得 " .. tostring(st.mode) .. "）")
+    checkTrue(st.unstickSide == nil and evs["unstick:start"] ~= nil, "(side-a) 這次是倒車（unstick start），不是側推")
+    checkEq(st.episodeAttempts, 3, "(side-a) 側推兩次＋倒車一次共用額度")
+    MDAD.Drive.stop(0, nil)
+
+    -- (side-b) 兩側都沒空間：不側推，事件 why=none，照舊回停等 → 15s StopStuck
+    st = startSide("(side-b)", { -2, 1 })
+    checkEq(st.mode, "follow", "(side-b) 兩側皆堵：不進側推（mode 實得 " .. tostring(st.mode) .. "）")
+    checkEq(startsOf(), 0, "(side-b) 零側推")
+    checkEq(sides[1] and sides[1].why, "none", "(side-b) 事件 why=none")
+    tick(15000)
+    checkFalse(MDAD.Drive.isActive(0), "(side-b) 停等預算到期交還")
+    local stuck = false
+    for i = 1, #halos do if haloKey(i) == DKEY.STUCK then stuck = true end end
+    checkTrue(stuck, "(side-b) 交還理由 StopStuck")
+
+    -- (side-c) 位移停滯（推了車不動）：STALL_MS 內無進展就收手回停等，不無限重試，最後照舊交還
+    st = startSide("(side-c)", { -2 })
+    checkEq(st.mode, "unstick", "(side-c) 前提：側推開始")
+    for _ = 1, 6 do tick(250) end
+    checkEq(sides[#sides].why, "stall", "(side-c) 停滯收手 why=stall（實得 " .. tostring(sides[#sides].why) .. "）")
+    checkEq(st.mode, "follow", "(side-c) 回停等")
+    -- 正式服 rc61 0021 型：progress 監督反覆重請求（這裡每 1.75 秒放開 blockRetryDone 模擬，快於停等預算能擋住的節奏）
+    -- ——每次都側推、停滯，額度 UNSTICK_MAX 用完就 attempt-limit 回停等，停等預算到期交還
+    for _ = 1, 16 do
+        st.blockRetryDone = false
+        drive.stallFrames(1500)
+        tick(250)
+    end
+    checkFalse(MDAD.Drive.isActive(0), "(side-c) 停等預算到期交還")
+    checkEq(startsOf(), 3, "(side-c) 反覆重請求：側推次數止於 UNSTICK_MAX（實得 " .. startsOf() .. "）")
+
+    -- (side-d) 側推中車身偏航超過 YAW_RAD（一端被卡住在轉）：收手 why=yaw
+    st = startSide("(side-d)", { -2 })
+    setHeading(dveh, T.SIDE_ESCAPE_YAW_RAD + 0.05)
+    tick(50)
+    checkEq(sides[#sides].why, "yaw", "(side-d) 偏航收手 why=yaw（實得 " .. tostring(sides[#sides].why) .. "）")
+    checkEq(st.mode, "follow", "(side-d) 回停等")
+
+    -- (side-e) 側推途中側帶變不清（推的那側出現障礙）：收手 why=probe
+    st = startSide("(side-e)", { -2 })
+    put(11, 2)
+    tick(150)
+    checkEq(sides[#sides].why, "probe", "(side-e) 側帶變不清收手 why=probe（實得 " .. tostring(sides[#sides].why) .. "）")
+    checkEq(st.mode, "follow", "(side-e) 回停等")
+
+    -- (side-f) dir=+1 側有牆、dir=−1 淨空（偏好側被擋）：換邊往 −1 推
+    st = startSide("(side-f)", { 1 })
+    checkEq(st.unstickSide, -1, "(side-f) 偏好側被擋：換往 dir=−1（實得 " .. tostring(st.unstickSide) .. "）")
+    tick(50)
+    checkTrue(dveh._imp.z < 0, "(side-f) 衝量沿 −y（實得 z=" .. dveh._imp.z .. "）")
+
+    -- (side-g) 前方被擋的第三種證據：沒有判堵／接觸旗標（起步近物、進度停滯這類），車頭前 1m 近場探測不清才算。
+    --   世界湊不出「旗標都沒有、近物在前」的跟線狀態，直接問 predicate（rear 由參數給）
+    clearAll()
+    checkTrue(armDrive(), "(side-g) 啟動")
+    setHeading(dveh, 0)
+    dveh._x, dveh._y, dveh._speed = 11, 0, 0
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    st = MDAD.Drive.debugSession(0)
+    st.blocked, st.currentBlocked = false, false
+    checkFalse(MDAD.Drive.sideEscapeStart(st, dveh, 0, nowMs, 11, 0, "hard", "vehicle", nil),
+        "(side-g) 無旗標、車頭前 1m 淨空：不側推")
+    put(14, 0) -- 車頭在 13.2，格 [14,15] 在 1m 內
+    checkTrue(MDAD.Drive.sideEscapeStart(st, dveh, 0, nowMs, 11, 0, "hard", "vehicle", nil),
+        "(side-g) 無旗標、車頭前 1m 有障礙：算前方被擋、側推")
+    checkEq(st.mode, "unstick", "(side-g) 進側推")
+
+    MDAD.Drive.stop(0, nil)
+    clearAll()
+    T.SIDE_ESCAPE = savedOn
+    MDAD.HUD.telemetryEnabled = savedTelemetry
+    MDADDiagnostics.start, MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.stop =
+        savedStart, savedEvent, savedSample, savedStop
+end
+drive.scenarioSideEscape()
 
 -- 弧段自適應前饋的 Driver 接線（0908a）：applySteering 把夾限／死區後真的施出去的 steer 回寫
 -- fstate.appliedSteer（Follower 的 yaw 增益估計分母）；不施力的幀歸 0（滑行中的 yaw 不歸功
