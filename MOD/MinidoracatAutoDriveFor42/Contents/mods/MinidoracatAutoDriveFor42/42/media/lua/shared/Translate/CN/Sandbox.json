@@ -1,7 +1,7 @@
 {
     "Sandbox_MinidoracatAutoDrive": "Minidoracat 自动驾驶",
     "Sandbox_MinidoracatAutoDriveNeedItemForNav": "导航需要 GPS 导航仪",
-    "Sandbox_MinidoracatAutoDriveNeedItemForNav_tooltip": "开启后，玩家必须带着有电的 GPS 导航仪，或车上装了 GPS 导航仪且电瓶还有电，才能规划车辆导航路线。\n关闭（默认）＝任何人随时都能规划路线，适合休闲或单机。\n管理员按「应用」后立即生效。",
+    "Sandbox_MinidoracatAutoDriveNeedItemForNav_tooltip": "开启后，玩家必须带着有电的 GPS 导航仪，或车上装了 GPS 导航仪且电瓶还有电，才能规划车辆导航路线。安装了地图表 MOD 时，戴着有电、装了定位模块的地图表也算。\n关闭（默认）＝任何人随时都能规划路线，适合休闲或单机。\n管理员按「应用」后立即生效。",
     "Sandbox_MinidoracatAutoDriveNeedItemForAutoDrive": "自动驾驶需要自动驾驶模块",
     "Sandbox_MinidoracatAutoDriveNeedItemForAutoDrive_tooltip": "开启（默认）后，车上必须装有自动驾驶模块才能启动自驾。\n关闭＝任何车辆都能直接自驾，适合测试或休闲玩法。\n管理员按「应用」后立即生效。",
     "Sandbox_MinidoracatAutoDriveAllowCraftGPS": "允许制作 GPS 导航仪",

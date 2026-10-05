@@ -1,7 +1,7 @@
 {
     "Sandbox_MinidoracatAutoDrive": "Minidoracat オートドライブ",
     "Sandbox_MinidoracatAutoDriveNeedItemForNav": "ナビにGPSナビゲーターが必要",
-    "Sandbox_MinidoracatAutoDriveNeedItemForNav_tooltip": "有効にすると、電池の残ったGPSナビゲーターを携帯しているか、車両にGPSナビゲーターが取り付けられていてバッテリーに残量がある場合のみルートを設定できます。\n無効（初期値）なら誰でもいつでもルートを設定できます。\n管理者が「適用」を押すと即座に反映されます。",
+    "Sandbox_MinidoracatAutoDriveNeedItemForNav_tooltip": "有効にすると、電池の残ったGPSナビゲーターを携帯しているか、車両にGPSナビゲーターが取り付けられていてバッテリーに残量がある場合のみルートを設定できます。マップウォッチMODを導入している場合は、GPSモジュールを取り付けた電池の残ったマップウォッチを着けていても設定できます。\n無効（初期値）なら誰でもいつでもルートを設定できます。\n管理者が「適用」を押すと即座に反映されます。",
     "Sandbox_MinidoracatAutoDriveNeedItemForAutoDrive": "自動運転にオートパイロットモジュールが必要",
     "Sandbox_MinidoracatAutoDriveNeedItemForAutoDrive_tooltip": "有効（初期値）にすると、車両にオートパイロットモジュールが取り付けられている場合のみ自動運転を開始できます。\n無効ならどの車両でもそのまま自動運転でき、テストやカジュアルな遊び方に向いています。\n管理者が「適用」を押すと即座に反映されます。",
     "Sandbox_MinidoracatAutoDriveAllowCraftGPS": "GPSナビゲーターの製作を許可",

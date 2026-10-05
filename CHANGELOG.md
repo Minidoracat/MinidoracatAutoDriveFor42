@@ -12,6 +12,14 @@
 
 格式基於 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/)，版本號遵循 `{PZ版本}-{主版本}.{次版本}.{修訂}` 格式。
 
+## [Unreleased]
+
+### 新增
+
+- 伺服器開啟「導航需要 GPS 導航儀」時，有裝地圖錶 MOD 的玩家，戴著有電、裝了定位模組的地圖錶也能規劃導航路線與自動駕駛，不必另外帶 GPS 導航儀；兩者有一個就行。沒裝地圖錶 MOD 時行為不變。
+
+> 技術要點：給 addon 作者——新增共用全域 `MinidoracatAutoDriveAPI`（`navDeviceApiVersion = 1`）：`hasNavDevice(playerNum)` 回傳該玩家身上是否有充電的隨身 GPS，或所在車輛裝了 GPS 且電瓶有電；不看「導航需要 GPS 導航儀」設定、也不看地圖錶，可每幀呼叫。地圖錶只有定位模組狀態為 `active` 才算數。
+
 ## [42.21.0-0.22.0] - 2026-10-06
 
 ### 新增
