@@ -1,5 +1,6 @@
 {
     "UI_MinidoracatAutoDrive_NeedGPS": "需要有电的 GPS 导航仪才能规划路线。",
+    "UI_MinidoracatAutoDrive_NeedGPSOrWatch": "需要有电的 GPS 导航仪，或戴着有电、装了定位模块的地图表，才能规划路线。",
     "UI_MinidoracatAutoDrive_InstallGPS": "安装 GPS 导航仪",
     "UI_MinidoracatAutoDrive_InstallAuto": "安装自动驾驶模块",
     "UI_MinidoracatAutoDrive_UninstallGPS": "拆下 GPS 导航仪",
@@ -118,6 +119,7 @@
     "UI_MinidoracatAutoDrive_HUDStatusEngineOff": "引擎未启动",
     "UI_MinidoracatAutoDrive_HUDStatusNoRoute": "尚无路线",
     "UI_MinidoracatAutoDrive_HUDStatusNoGPS": "缺少 GPS",
+    "UI_MinidoracatAutoDrive_HUDStatusNoGPSOrWatch": "缺 GPS／定位",
     "UI_MinidoracatAutoDrive_HUDStatusNoNav": "导航未就绪",
     "UI_MinidoracatAutoDrive_HUDStatusNotReady": "尚未就绪",
     "UI_MinidoracatAutoDrive_HUDSpeedUnit": "km/h",

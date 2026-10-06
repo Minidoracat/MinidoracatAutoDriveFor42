@@ -62,6 +62,7 @@ MDAD.AUTO_USAGE_TTL_MS = 15000
 MDAD.NAV_USAGE_TTL_MS = 15000
 
 local GATE_REASON = "UI_MinidoracatAutoDrive_NeedGPS"
+local GATE_REASON_WATCH = "UI_MinidoracatAutoDrive_NeedGPSOrWatch"
 local GATE_TTL_MS = 1000
 
 local function predicateNotBroken(item)
@@ -721,17 +722,27 @@ local function gateEntry(playerNum)
     return c
 end
 
--- 地圖錶 addon（MinidoracatMiniMapWatchFor42）的定位模組：只有 "active" 算有 GPS。
--- 契約：MinidoracatWatchAPI.watchApiVersion >= 1、getWatchModuleState(player, "gps")；
--- 不在／版本不足／拋錯一律當沒有（兩包各自更新，不保證同時到位）。
-local function watchGpsActive(player)
+-- 地圖錶 addon（MinidoracatMiniMapWatchFor42）在不在：MinidoracatWatchAPI 是 table、watchApiVersion 是 number 且 >= 1。
+-- 版本不足一律當沒裝（兩包各自更新，不保證同時到位）。
+local function watchApi()
     local api = MinidoracatWatchAPI
-    if type(api) ~= "table" or type(api.watchApiVersion) ~= "number" or api.watchApiVersion < 1
-            or type(api.getWatchModuleState) ~= "function" then
-        return false
-    end
+    if type(api) ~= "table" or type(api.watchApiVersion) ~= "number" or api.watchApiVersion < 1 then return nil end
+    return api
+end
+
+-- 錶上的定位模組：只有 getWatchModuleState(player, "gps") == "active" 算有 GPS；函式缺或拋錯當沒有。
+local function watchGpsActive(player)
+    local api = watchApi()
+    if not api or type(api.getWatchModuleState) ~= "function" then return false end
     local ok, state = pcall(api.getWatchModuleState, player, "gps")
     return ok and state == "active"
+end
+
+-- 缺 GPS 的拒絕理由（2026-10-06 使用者裁定）：裝了地圖錶時提示要提到錶上的定位模組（NeedGPSOrWatch），
+-- 沒裝時照原本的 NeedGPS。Driver 在行程因裝置失效被暫停時也用它當停止原因。熱路徑可呼叫：不配置。
+function MDAD.navDeviceReason()
+    if watchApi() then return GATE_REASON_WATCH end
+    return GATE_REASON
 end
 
 -- GPS 裝置條件（不看 NeedItemForNav、不看地圖錶）。cached＝隨身掃描走 1s 快取。
@@ -766,7 +777,7 @@ function MDAD.navGate(playerNum, context)
         watch = watchGpsActive(player)
     end
     if watch then return true end
-    return false, GATE_REASON
+    return false, MDAD.navDeviceReason()
 end
 
 -- 對外 API（契約唯一來源就是這一段）：地圖錶 addon 用它做「GPS 裝置 或 錶上定位模組」的 OR。
