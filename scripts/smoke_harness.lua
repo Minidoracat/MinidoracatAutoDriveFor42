@@ -13204,6 +13204,117 @@ function drive.scenarioKinProof()
 end
 drive.scenarioKinProof()
 
+-- (tow-fold) 1006 拖車一般帶候選的掛車折角預檢（2026-10-06 使用者裁定方案 B；issue #6 Fallas Lake：一般帶 crawl-nudge κ0.67 切內線、
+--   折角 −45° 超過倒車門檻 REVERSE_HITCH_MAX，倒車被跳過、原地卡到 StopStuck）。淨空路、測試鉤直接餵（牽引車掃掠與 kinProof 都過），
+--   假掛車 L2 8、掛點車後 2m、起始折角 0：
+--   (tow-fold) 2.25m 側移塞 4.5m 進入段（κ≈0.67）＝拒收（kind towfold、towFoldDeg >30）；(tow-fold-stay) 停留線 1.5m 塞 2m＝拒收
+--   (tow-fold-gentle) 同側移 14m 進入段＝照收；(tow-fold-car) 非拖車同一條陡線照收；(tow-fold-wide) 寬帶不驗折角（掛車掃掠另驗）
+--   (tow-fold-start) 起步時已折 40°、候選只偏 0.25m：預估折角從 40° 起但不是候選加的（同點基準線一樣大）＝照收
+--   (tow-fold-phi0) 起步折角從實測起算：自己 ~23° 的線，起步已同側折 20°＝疊過門檻拒收、反側＝照收
+--   (tow-fold-ladder) 真 replan：門檻壓到 1°＝候選鏈全滅→判堵（blocked 事件 fold 有值、不承諾）；門檻照常＝同一佈局承諾
+--   違規證明：sweepCandidate／sweepStay 不呼叫 Drive.towFold＝(tow-fold)／(tow-fold-stay)／(tow-fold-ladder) 紅；拿掉寬帶排除＝(tow-fold-wide)
+--   紅；拿掉基準線比較（只比門檻）＝(tow-fold-start) 紅；起始軸向不減 phi0＝(tow-fold-phi0) 紅；不寫 kind／fold＝(tow-fold) 紅。
+function drive.scenarioTowFold()
+    scenario("1006：拖車一般帶候選的掛車折角預檢——候選把折角推過倒車門檻＝拒收、判堵階梯接手；緩和線、非拖車、寬帶照舊")
+    local T = MDAD.Drive.debugTune()
+    drive.fillWorld(-10, 120, -8, 8)
+    checkTrue(armDrive(), "(tow-fold) 啟動")
+    setHeading(dveh, 0)
+    driveReset(dveh)
+    drive.scanRound()
+    local st = MDAD.Drive.debugSession(0)
+    local rs = st.lastSNow
+    local geo = { trailer = { getForwardVector = function(_, out) return out:set(dveh._fwdX, 0, dveh._fwdY) end,
+            getUpVectorDot = function() return 1 end },
+        L2 = 8, hitchZ = -2, hitchX = 0, boxBack = 5, boxSide = 0, halfW = 1.25, halfL = 6, hitchToRear = 11,
+        trailLen = 13, mass = 1500, axisSign = 1 }
+    local function probe(tow, phi, lb, offL, stay)
+        st.tow, st.towPhi, st.sweepHitBody, st.towFoldDeg = tow, phi, nil, nil
+        local ok
+        if stay then
+            ok = MDAD.Drive.debugSweepStay(0, rs + 1, rs + 1 + lb, rs + 16, offL)
+        else
+            ok = MDAD.Drive.debugSweepCandidate(0, rs + 1, rs + 1 + lb, rs + 16, rs + 16 + lb, offL)
+        end
+        local body, deg = st.sweepHitBody, st.towFoldDeg
+        st.tow, st.towPhi = nil, nil
+        return ok, body, deg
+    end
+    local ok, body, deg = probe(geo, 0, 4.5, -2.25)
+    checkTrue(ok == false and body == "towfold" and type(deg) == "number" and deg > 30,
+        "(tow-fold) 拖車、2.25m 側移塞 4.5m（κ≈0.67）：預估折角 " .. tostring(deg and string.format("%.1f", deg))
+        .. "° 超過倒車門檻＝拒收（ok=" .. tostring(ok) .. " kind=" .. tostring(body) .. "）")
+    -- 停留線從車位起換道（rs→b），lane 夾在路面內：1.5m 側移塞 2m
+    ok, body, deg = probe(geo, 0, 1, -1.5, true)
+    checkTrue(ok == false and body == "towfold" and type(deg) == "number" and deg > 30,
+        "(tow-fold-stay) 停留線 1.5m 側移塞 2m：預估折角 " .. tostring(deg and string.format("%.1f", deg)) .. "°＝拒收（ok="
+        .. tostring(ok) .. " kind=" .. tostring(body) .. "）")
+    ok, body = probe(geo, 0, 14, -2.25)
+    checkTrue(ok == true and body == nil, "(tow-fold-gentle) 同側移 14m 進入段：照收（ok=" .. tostring(ok) .. "）")
+    ok = probe(nil, nil, 4.5, -2.25)
+    checkTrue(ok == true, "(tow-fold-car) 非拖車同一條陡線：照收（ok=" .. tostring(ok) .. "）")
+    st.sensor.wideDone, st.sensor.corridorHalf = true, 14
+    ok, body = probe(geo, 0, 4.5, -2.25)
+    st.sensor.wideDone, st.sensor.corridorHalf = false, 7
+    checkTrue(ok == true and body ~= "towfold", "(tow-fold-wide) 寬帶不驗折角（掛車掃掠另驗）：照收（ok=" .. tostring(ok) .. "）")
+    ok, body, deg = probe(geo, 40 * math.pi / 180, 14, -0.25)
+    checkTrue(ok == true and body == nil, "(tow-fold-start) 起步已折 40°、候選只偏 0.25m：折角不是候選加的＝照收（ok="
+        .. tostring(ok) .. " kind=" .. tostring(body) .. "）")
+    -- (tow-fold-phi0) 起始折角疊加：2.25m 側移塞 9m 自己約 23°（照收）；起步已往同側折 20° 時疊到 >30°＝拒收、往另一側折＝照收
+    local ok0 = probe(geo, 0, 9, -2.25)
+    local okP = probe(geo, 20 * math.pi / 180, 9, -2.25)
+    local okM = probe(geo, -20 * math.pi / 180, 9, -2.25)
+    checkTrue(ok0 == true and okP ~= okM, "(tow-fold-phi0) 起始折角從實測起算：0° 照收、±20° 恰一側疊過門檻拒收（0="
+        .. tostring(ok0) .. " +20=" .. tostring(okP) .. " −20=" .. tostring(okM) .. "）")
+    -- (tow-fold-ladder) 真 replan：車停在車位、前方 22m 擋原車道的硬物。門檻 1°／容許量 0＝任何側移都超過
+    local oldEvent, oldSample, oldShould = MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.shouldSample
+    local events = {}
+    MDADDiagnostics.event = function(_, name, a) events[#events + 1] = { name = name, a = a } end
+    MDADDiagnostics.shouldSample = function() return false end
+    MDADDiagnostics.sample = function() return true end
+    local wasMs = drive.frameMs(10)
+    local function ladder(limDeg)
+        MDAD.Drive.stop(0, nil)
+        drive.fillWorld(-10, 120, -8, 8)
+        checkTrue(armDrive(), "(tow-fold-ladder) 啟動")
+        setHeading(dveh, 0)
+        local s = MDAD.Drive.debugSession(0)
+        s.tow = geo
+        dveh._speed = 0
+        drive.putSolid(math.floor(dveh._x) + 22, 0, "tow_fold_obs")
+        local oldLim, oldTol = T.TOW_DODGE_FOLD_MAX, T.TOW_DODGE_FOLD_TOL
+        T.TOW_DODGE_FOLD_MAX = limDeg * math.pi / 180
+        if limDeg < 30 then T.TOW_DODGE_FOLD_TOL = 0 end
+        events = {}
+        driveReset(dveh)
+        s.diag = true
+        drive.scanRound(true)
+        T.TOW_DODGE_FOLD_MAX, T.TOW_DODGE_FOLD_TOL = oldLim, oldTol
+        local blk, com
+        for _, e in ipairs(events) do
+            if e.name == "blocked" and e.a and e.a.why == "plan" then blk = e.a end
+            if e.name == "dodge" and e.a and e.a.phase == "commit" then com = e.a end
+        end
+        drive.clearCell(math.floor(dveh._x) + 22, 0)
+        return s, blk, com
+    end
+    local s1, blk1, com1 = ladder(1)
+    checkTrue(s1.blocked == true and s1.dodging ~= true and com1 == nil and blk1 ~= nil and type(blk1.fold) == "number"
+            and blk1.fold > 1,
+        "(tow-fold-ladder) 門檻 1°：候選鏈全滅→判堵、不承諾，blocked 事件記預估折角（fold=" .. tostring(blk1 and blk1.fold)
+        .. " kind=" .. tostring(blk1 and blk1.kind) .. " blocked=" .. tostring(s1.blocked) .. " dodging=" .. tostring(s1.dodging) .. "）")
+    local s2, _, com2 = ladder(30)
+    checkTrue(s2.dodging == true and com2 ~= nil,
+        "(tow-fold-ladder) 門檻照常（30°）：同一佈局照常承諾（dodging=" .. tostring(s2.dodging) .. " fold="
+        .. tostring(com2 and com2.fold) .. "）")
+    drive.frameMs(wasMs)
+    MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.shouldSample = oldEvent, oldSample, oldShould
+    s2.tow = nil
+    MDAD.Drive.stop(0, nil)
+    drive.fillWorld(-2, 70, -7, 7)
+end
+drive.scenarioTowFold()
+
 -- (c8) MP 假速度域（2026-09-02 s012：regulator 70、直路 30 秒貼死 51 km/h）：
 --      CarController 用 v·lerp(1, fake, (v/min(120,SpeedLimit))²) 與 regulatorSpeed
 --      比，fake=120/min(SpeedLimit,120)。SpeedLimit 70 → fake 1.714；沙盒 40 的

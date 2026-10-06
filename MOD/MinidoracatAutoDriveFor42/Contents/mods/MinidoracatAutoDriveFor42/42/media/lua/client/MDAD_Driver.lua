@@ -811,6 +811,13 @@ TUNE.SHIFT_MIN_RATIO = 3
 -- 進入段運動學證明（Drive.kinProof）的轉彎半徑倍率：1＝車輛 profile 的 rMin（delta0Safe 反推）。實車低速轉不到 rMin
 -- （證明線放行了追不上的線）就往上調；這是車的物理參數校正，不是比例閘。
 TUNE.KIN_PROOF_RMIN_K = 1
+-- 拖車一般帶候選的掛車折角預檢（Drive.towFold；2026-10-06 使用者裁定方案 B）：候選線上掛車預估折角超過此值、且超過同一點
+-- 「不偏移照原 lane 開」的折角＋TOW_DODGE_FOLD_TOL＝拒收。與 MDADTrailer.REVERSE_HITCH_MAX 同值（30°）：折角超過它，stepUnstick
+-- 直接當倒夠、不倒車（issue #6 Fallas Lake 一般帶 κ0.67 切內線折到 −45°，原地重試到 StopStuck）——拒收的正好是「承諾後一旦
+-- 卡住，判堵階梯就少了倒車那一級」的線。TOL＝同一點容許候選比原 lane 多折的量：路線本身（外拉轉角）與起步時已有的折角不算在
+-- 候選頭上，緩和小偏移在轉角上多出的幾度也照收（校正旋鈕：E2E 轉角旁繞行被誤拒就調大）。
+TUNE.TOW_DODGE_FOLD_MAX = 30 * math.pi / 180
+TUNE.TOW_DODGE_FOLD_TOL = 5 * math.pi / 180
 -- 倒車補跑道只記大側移（> 此值）的 steep 差額：小側移的 steep 多是「障礙就在車前」，標準倒車距離即可
 TUNE.STEEP_DEFICIT_MIN_DL = 1.5
 -- 繞行承諾中 RETURN 的進入門檻（m；理由見 stepFollow 的 RETURN 入口）
@@ -2439,6 +2446,7 @@ local function startSession(playerObj, playerNum, stage)
         steepDeficitM = -1,   -- 本輪 steep 拒收候選中「進入段還差多少才夠運動學長」的最小值（<0＝無）
         blockSteepM = -1,     -- 候選鏈全滅那輪的 steepDeficitM 快照（夾 UNSTICK_STEEP_MAX_M；<0＝無）
         kinRejectN = 0,       -- 本輪 replan 被進入段運動學證明（Drive.kinProof）拒收的候選數（事件 kin 欄）
+        towFoldDeg = nil,     -- 本輪 replan 被掛車折角預檢（Drive.towFold）拒收的候選中最大的預估折角（°；事件 fold 欄）
         stayLanePending = nil, -- 停留承諾的 lane，過 b 才寫進 laneBias（nil＝無待切）
         stayNextB = nil,      -- 停留承諾時已知「下一群塞不進」的群起點弧長（對它煞停；nil＝無）
         assistBoost = 1,      -- 越野推力遞增倍率（TUNE.ASSIST_BOOST_*）
@@ -9945,6 +9953,36 @@ function Drive.kinProof(s, a, b, c, d, offL, baseL, tag, stay)
     return false, m, hs, ph, sk, hx, hy, hi
 end
 
+-- 拖車一般帶候選的掛車折角預檢（2026-10-06 使用者裁定方案 B；TUNE.TOW_DODGE_FOLD_MAX）：一般帶候選只照牽引車設計、不驗掛車掃掠
+-- （驗了全判 sweep，trailer.md〈試過不要再試〉），但承諾線切太急時掛車折到倒車門檻以上，卡住就連倒車都沒有（issue #6）。tmpOv 裡
+-- 剛掃過的候選線（n 點、起點 s0＝車位）與同一組 a..d 不偏移的基準線（tmpOv2，同 kinProof 的工作表）各以 tractrix 推掛車，起始折角
+-- 讀 s.towPhi（T.guard 每 GUARD_MS 更新）。超過＝拒收：sweepHitBody＝"towfold"、s.towFoldDeg 記本輪被拒候選的最大預估折角（°，
+-- dodge commit／blocked 事件 fold 欄）。不回命中點（hitS／hx／hy＝nil）：折角不是障礙，判堵錨照舊落在真的硬點上；相位與弧長照給，
+-- 候選鏈的 corner 分類與停留鏈照常判。非拖車、寬帶（sweepLine 另驗掛車掃掠）、量不到掛點／折角、基準線建不出來＝不驗。
+function Drive.towFold(s, n, s0, a, b, c, d, baseL)
+    local tw = s.tow
+    if type(tw) ~= "table" or Drive.towChecks(s) then return true end
+    local phi0 = s.towPhi
+    if phi0 == nil then phi0 = MDADTrailer.state(s.vehicle, tw) end -- 起步第一輪 replan 可能早於 T.guard 第一次讀
+    if not (finite(phi0) and finite(tw.L2) and tw.L2 > 0 and finite(tw.hitchZ)) then return true end
+    local startL = startLaneOf(s, baseL)
+    local nB, s0B, why = MDADFollower.buildOffsetLine(s.profile, s0, a, b, c, d, startL, baseL,
+        s.tmpOv2X, s.tmpOv2Y, nil, nil, nil, startL)
+    if why ~= "ok" or nB ~= n or s0B ~= s0 then return true end
+    local ok, worst, k = MDADTrailer.dodgeFold(s.tmpOvX, s.tmpOvY, s.tmpOv2X, s.tmpOv2Y, n,
+        tw.hitchZ, tw.hitchX or 0, tw.L2, phi0, TUNE.TOW_DODGE_FOLD_MAX, TUNE.TOW_DODGE_FOLD_TOL)
+    if ok then return true end
+    local deg = worst * 180 / math.pi
+    s.sweepHitBody = "towfold" -- blocked 事件 kind（候選鏈全滅時）
+    if (s.towFoldDeg or 0) < deg then s.towFoldDeg = deg end
+    local sk = s0 + (k - 1) * MDADFollower.OV_STEP
+    local ph = sk < a and 1 or sk < b and 2 or sk <= c and 3 or 4
+    if getDebug() then -- fold＝事件 fold 欄；相位＝blocked 事件 hitPhase（kind towfold 時）
+        print(string.format("%stow fold reject p%d fold=%.1f", LOG, ph, deg))
+    end
+    return false, 99, nil, ph, sk, nil, nil, nil
+end
+
 -- Candidate sweep and commitment consume the same complete preallocated line.
 local function sweepCandidate(s, shapeOk, a, b, c, d, offL, baseL, tag, needBase)
     if not shapeOk then return 0, 0, false, 99, b, 3, b, 0, 0 end
@@ -9991,6 +10029,7 @@ local function sweepCandidate(s, shapeOk, a, b, c, d, offL, baseL, tag, needBase
     end
     if ok then
         local kOk, kM, kS, kPh, kSs, kX, kY, kI = Drive.kinProof(s, a, b, c, d, offL, baseL, tag, false)
+        if kOk then kOk, kM, kS, kPh, kSs, kX, kY, kI = Drive.towFold(s, ovN, ovS0, a, b, c, d, baseL) end
         if not kOk then return ovN, ovS0, false, kM, kS, kPh, kSs, kX, kY, kI end
     end
     return ovN, ovS0, ok, margin, hardS, phase, sampleS, hitX, hitY, hitI
@@ -10053,6 +10092,7 @@ local function sweepStay(s, a, b, c, offL, baseL, tag, needBase, truncate)
         a, b, c, dStay, offL, tag, needBase, nil, true)
     if ok then
         local kOk, kM = Drive.kinProof(s, a, b, c, dStay, offL, baseL, tag, true)
+        if kOk then kOk, kM = Drive.towFold(s, ovN, ovS0, a, b, c, dStay - 1, baseL) end
         if not kOk then return false, kM, ovN, ovS0, dStay, c end
     end
     return ok, margin, ovN, ovS0, dStay, c
@@ -10556,7 +10596,7 @@ end
 local function replan(s, vehicle, playerNum)
     s.dodgeDeferCap = s.dodgeHandoffHold and 0 or -1
     s.dodgeDeferS = nil
-    s.steepDeficitM, s.kinRejectN = -1, 0
+    s.steepDeficitM, s.kinRejectN, s.towFoldDeg = -1, 0, nil
     local sen = s.sensor
     if not sen.ready then return end
     local handoff = false
@@ -11497,6 +11537,7 @@ local function replan(s, vehicle, playerNum)
                 why = s.planDeferWhy, -- 主候選本會延後（window／coverage／unloaded）、由候選鏈的替代線承諾
                 thin = s.thinRec and s.thinRec.on and s.thinRec.phys or nil, -- 換縫找更寬時記下最窄那條的物理淨距
                 kin = s.kinRejectN > 0 and s.kinRejectN or nil, -- 承諾前被運動學證明拒收的候選數（Drive.kinProof）
+                fold = s.towFoldDeg, -- 承諾前被掛車折角預檢拒收的候選中最大預估折角（°；Drive.towFold）
                 preA = s.diag and Drive.preAClear(s) or nil }) -- pre-a 段最小物理淨距（只在紀錄開著時量）
             Drive.proofTightArm(s, playerNum) -- 停下之後的窄線爬行（TUNE.PROOF_TIGHT_KMH）
             if getDebug() then
@@ -11681,6 +11722,7 @@ local function replan(s, vehicle, playerNum)
             corner = s.cornerLatch, detail = s.dodgeBlockReason,
             blocker = s.dodgeDeadendS, shape = s.dodgeShapeReason,
             kin = s.kinRejectN > 0 and s.kinRejectN or nil, -- 本輪被運動學證明拒收的候選數（Drive.kinProof）
+            fold = s.towFoldDeg, -- 本輪被掛車折角預檢拒收的候選中最大預估折角（°；Drive.towFold）
             -- 候選鏈最後記下的命中（sweep 全滅時才有意義）：相位、世界點、牽引車或掛車（0929p）
             hitPhase = s.dodgeBlockReason == "sweep" and s.fbFail and s.fbFail.ph or nil,
             hitX = s.dodgeBlockReason == "sweep" and s.fbFail and s.fbFail.hx or nil,
@@ -11707,7 +11749,7 @@ local function replan(s, vehicle, playerNum)
             why = "wide", s = s.blockS, x = s.blockHitX, y = s.blockHitY, hn = sen.hardN, lvl = sen.wideDoneLevel,
             wms = Drive.replanElapsed(s), sweeps = s.sweepCount,
             attempt = s.episodeAttempts, detail = s.dodgeBlockReason, shape = s.dodgeShapeReason,
-            kin = s.kinRejectN > 0 and s.kinRejectN or nil,
+            kin = s.kinRejectN > 0 and s.kinRejectN or nil, fold = s.towFoldDeg,
             hitPhase = s.dodgeBlockReason == "sweep" and s.fbFail and s.fbFail.ph or nil,
             hitX = s.dodgeBlockReason == "sweep" and s.fbFail and s.fbFail.hx or nil,
             hitY = s.dodgeBlockReason == "sweep" and s.fbFail and s.fbFail.hy or nil,
