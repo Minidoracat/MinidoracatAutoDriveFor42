@@ -1,7 +1,7 @@
 {
     "Sandbox_MinidoracatAutoDrive": "Minidoracat 自動駕駛",
     "Sandbox_MinidoracatAutoDriveNeedItemForNav": "導航需要 GPS 導航儀",
-    "Sandbox_MinidoracatAutoDriveNeedItemForNav_tooltip": "開啟後，玩家必須帶著有電的 GPS 導航儀，或車上裝了 GPS 導航儀且電瓶還有電，才能規劃車輛導航路線。\n關閉（預設）＝任何人隨時都能規劃路線，適合休閒或單機。\n管理員按「套用」後立即生效。",
+    "Sandbox_MinidoracatAutoDriveNeedItemForNav_tooltip": "開啟後，玩家必須帶著有電的 GPS 導航儀，或車上裝了 GPS 導航儀且電瓶還有電，才能規劃車輛導航路線。有裝地圖錶 MOD 時，戴著有電、裝了定位模組的地圖錶也算。\n關閉（預設）＝任何人隨時都能規劃路線，適合休閒或單機。\n管理員按「套用」後立即生效。",
     "Sandbox_MinidoracatAutoDriveNeedItemForAutoDrive": "自動駕駛需要自動駕駛模組",
     "Sandbox_MinidoracatAutoDriveNeedItemForAutoDrive_tooltip": "開啟（預設）後，車上必須裝有自動駕駛模組才能啟動自駕。\n關閉＝任何車輛都能直接自駕，適合測試或休閒玩法。\n管理員按「套用」後立即生效。",
     "Sandbox_MinidoracatAutoDriveAllowCraftGPS": "允許製作 GPS 導航儀",

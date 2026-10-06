@@ -1919,6 +1919,146 @@ checkFalse(MDAD.isAutoInstalled(navVeh), "auto 槽裡塞 GPS：不算 auto 已�
 navSlot._item = nil
 navVeh._devices.MDADAutopilot._item = nil
 
+-- 地圖錶定位模組（2026-10-06 使用者裁定：GPS 導航儀與地圖錶定位模組任一即可導航）：
+--   navGate 在 NeedItemForNav=true 且沒有 GPS 裝置時改問 MinidoracatWatchAPI.getWatchModuleState(player, "gps")，
+--   只有 "active" 放行；API 不在／版本不足／非數字／函式缺／拋錯一律當沒有。draw 快取把錶的判斷一起算進去；
+--   MinidoracatAutoDriveAPI.hasNavDevice 只看裝置、不看選項與錶，隨身掃描與 navGate draw 共用同一份快取。
+--   違規證明：拿掉 navGate 的錶分支＝(wg-active) 紅；錶查詢不快取＝(wg-draw) 紅；hasNavDevice 自掃＝(wg-share) 紅；
+--   hasNavDevice 看 NeedItemForNav＝(wg-dev) 紅；拿掉版本守衛＝(wg-old) 紅；拿掉 pcall＝harness crash。
+function drive.scenarioWatchGps()
+    scenario("地圖錶定位模組：GPS 裝置或錶上 active 的定位模組任一即可；守衛、快取共用與 hasNavDevice")
+    local api = MinidoracatAutoDriveAPI
+    local oldNow, oldWatch = nowMs, MinidoracatWatchAPI
+    checkTrue(type(api) == "table" and api.navDeviceApiVersion == 1 and type(api.hasNavDevice) == "function",
+        "(wg-api) MinidoracatAutoDriveAPI 契約：navDeviceApiVersion=1、hasNavDevice")
+    local calls, state, args = 0, "active", {}
+    local function watchApi(version)
+        return { watchApiVersion = version, getWatchModuleState = function(p, id)
+            calls = calls + 1
+            args.p, args.id = p, id
+            if state == "throw" then error("watch boom") end
+            return state
+        end }
+    end
+    local pW = newPlayer({ num = 8 })
+    players[8] = pW
+    nowMs = 9000000
+
+    -- 真值表：NeedItemForNav 開、沒有裝置
+    setSandbox({ NeedItemForNav = true })
+    MinidoracatWatchAPI = nil
+    local ok, reason = gate(8)
+    checkFalse(ok, "(wg-none) 沒裝置、沒地圖錶 MOD：拒絕")
+    checkEq(reason, NEED_GPS, "(wg-none) 理由鍵不變")
+    MinidoracatWatchAPI = watchApi(1)
+    calls = 0
+    ok, reason = gate(8)
+    checkTrue(ok, "(wg-active) 錶上定位模組 active：放行")
+    checkNil(reason, "(wg-active) 放行不帶理由")
+    checkEq(args.p, pW, "(wg-active) 傳入的是該 slot 的 IsoPlayer")
+    checkEq(args.id, "gps", "(wg-active) 問的模組 id 是 gps")
+    for _, s in ipairs({ "notRequired", "unpowered", "paused", "missing", "disabled", "bogus" }) do
+        state = s
+        ok, reason = gate(8)
+        checkFalse(ok, "(wg-state) 錶狀態 " .. s .. "：不算有 GPS")
+        checkEq(reason, NEED_GPS, "(wg-state) " .. s .. " 拒絕帶理由鍵")
+    end
+    state = "active"
+    for _, bad in ipairs({ { 0, "版本 0" }, { "1", "版本是字串" } }) do
+        MinidoracatWatchAPI = watchApi(bad[1])
+        calls = 0
+        checkFalse(gate(8), "(wg-old) " .. bad[2] .. "：不信任")
+        checkEq(calls, 0, "(wg-old) " .. bad[2] .. "：完全不呼叫")
+    end
+    MinidoracatWatchAPI = { watchApiVersion = 1 }
+    checkFalse(gate(8), "(wg-nofn) 有版本沒函式：當沒有")
+    MinidoracatWatchAPI = "not a table"
+    checkFalse(gate(8), "(wg-nofn) 全域不是 table：當沒有")
+    MinidoracatWatchAPI = watchApi(2)
+    state = "throw"
+    ok, reason = gate(8)
+    checkFalse(ok, "(wg-throw) 錶 API 拋錯：當沒有、不中斷")
+    checkEq(reason, NEED_GPS, "(wg-throw) 理由鍵")
+    state = "active"
+    checkTrue(gate(8), "(wg-active) 較新版本（2）照樣信任")
+
+    -- 有裝置：不問錶（裝置短路在前），錶狀態怎樣都放行
+    local held = newItem(GPS_T, { uses = 0.5, useDelta = 0.006 })
+    pW:getInventory():AddItem(held)
+    state, calls = "missing", 0
+    checkTrue(gate(8), "(wg-dev) 有帶電隨身 GPS、錶 missing：放行")
+    checkEq(calls, 0, "(wg-dev) 有裝置就不問錶")
+    MinidoracatWatchAPI = nil
+    checkTrue(gate(8), "(wg-dev) 有裝置、沒地圖錶 MOD：放行")
+
+    -- NeedItemForNav 關：錶與裝置都不看
+    setSandbox({ NeedItemForNav = false })
+    MinidoracatWatchAPI = watchApi(1)
+    state, calls = "missing", 0
+    pW:getInventory():DoRemoveItem(held)
+    checkTrue(gate(8), "(wg-off) 選項關閉：沒裝置、錶 missing 也放行")
+    checkTrue(gate(8, "draw"), "(wg-off) 選項關閉的 draw 也放行")
+    checkEq(calls, 0, "(wg-off) 選項關閉不問錶")
+
+    -- hasNavDevice 不受 NeedItemForNav 影響、不看錶
+    state = "active"
+    resetStats()
+    checkFalse(api.hasNavDevice(8), "(wg-dev) 選項關閉、沒裝置：hasNavDevice=false（錶 active 也不算）")
+    setSandbox({ NeedItemForNav = true })
+    nowMs = nowMs + 1000
+    checkFalse(api.hasNavDevice(8), "(wg-dev) 選項開啟、沒裝置：hasNavDevice=false")
+    pW:getInventory():AddItem(held)
+    nowMs = nowMs + 1000
+    checkTrue(api.hasNavDevice(8), "(wg-dev) 選項開啟、帶電隨身 GPS：true")
+    setSandbox({ NeedItemForNav = false })
+    nowMs = nowMs + 1000
+    checkTrue(api.hasNavDevice(8), "(wg-dev) 選項關閉、帶電隨身 GPS：仍 true（不看選項）")
+    checkEq(calls, 0, "(wg-dev) hasNavDevice 從不問錶")
+    checkFalse(api.hasNavDevice(99), "(wg-dev) 玩家不存在：false")
+    pW:getInventory():DoRemoveItem(held)
+
+    -- draw 快取：錶與隨身掃描各 1s；hasNavDevice 與 navGate draw 共用隨身掃描
+    setSandbox({ NeedItemForNav = true })
+    nowMs = nowMs + 1000
+    state, calls = "active", 0
+    resetStats()
+    local same = true
+    for _ = 1, 60 do
+        local g, d = gate(8, "draw"), api.hasNavDevice(8)
+        same = same and g == true and d == false
+    end
+    checkTrue(same, "(wg-draw) 同一幀 60 輪：錶放行、hasNavDevice=false")
+    checkEq(stats.scanTypeEval, 1, "(wg-share) 60 輪 navGate draw＋hasNavDevice 只掃一次背包")
+    checkEq(calls, 1, "(wg-draw) 60 輪 draw 只問錶一次")
+    state = "missing"
+    nowMs = nowMs + 999
+    checkTrue(gate(8, "draw"), "(wg-draw) 999ms 內沿用錶的 active 結論")
+    nowMs = nowMs + 1
+    ok, reason = gate(8, "draw")
+    checkFalse(ok, "(wg-draw) 滿 1000ms 重問錶、改判拒絕")
+    checkEq(reason, NEED_GPS, "(wg-draw) 理由鍵")
+    checkEq(calls, 2, "(wg-draw) TTL 到期只重問一次")
+    checkEq(stats.scanTypeEval, 2, "(wg-share) 隨身掃描同步 TTL 重掃一次")
+    resetStats()
+    calls = 0
+    gate(8); gate(8); gate(8)
+    checkEq(calls, 3, "(wg-live) 非 draw 不吃錶快取（選單類要即時判定）")
+    checkEq(stats.scanTypeEval, 3, "(wg-live) 非 draw 不吃隨身快取")
+
+    -- 車上已裝 nav＋車電：hasNavDevice 走車電短路、不掃背包
+    local car = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.5 }) })
+    car._devices.MDADGPS._item = newItem(GPS_T, { uses = 0.2, useDelta = 0.006 })
+    pW._vehicle = car
+    resetStats()
+    checkTrue(api.hasNavDevice(8), "(wg-car) 車上已裝 GPS 且車電有電：hasNavDevice=true")
+    checkEq(stats.scanTypeEval, 0, "(wg-car) 車電短路不掃背包")
+    pW._vehicle = nil
+
+    players[8] = nil
+    nowMs, MinidoracatWatchAPI = oldNow, oldWatch
+end
+drive.scenarioWatchGps()
+
 -- =====================================================================
 -- 情境四：deviceBlockReason ＋ 隨身道具查詢
 -- =====================================================================

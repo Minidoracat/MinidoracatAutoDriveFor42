@@ -18,7 +18,7 @@ Settings: ESC → MOD Options or MiniMap gear → AutoDrive; server rules are sa
 [h3]Devices and recipes[/h3]
 [list]
 [*] [b]Devices[/b]: GPS and Autopilot occupy real part slots on supported vehicles; removal keeps charge and data. A handheld GPS drains its own battery but still adds the GPS fuel cost.
-[*] [b]Availability[/b]: loot or craft both, with separate sandbox toggles for crafting and loot spawns. Servers can require a charged GPS to navigate.
+[*] [b]Availability[/b]: loot or craft both, with separate sandbox toggles for crafting and loot spawns. Servers can require a charged GPS to navigate; with the Map Watch mod, a worn, powered Map Watch fitted with a GPS module also counts.
 [*] [b]Learn recipes three ways[/b]: read one Electronic Navigation Repair Manual (teaches both; found only in unlooted electronic, computer-book, library and magazine containers); research without consuming the item (GPS at Electrical 3 for itself; Autopilot at 3 for the GPS, at 6 for itself); or auto-learn (GPS at 6, Autopilot at 8; multiplayer grants them on login). Crafting needs Electrical 3 / 6.
 [/list]
 

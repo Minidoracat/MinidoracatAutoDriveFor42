@@ -1,7 +1,7 @@
 {
     "Sandbox_MinidoracatAutoDrive": "Minidoracat AutoDrive",
     "Sandbox_MinidoracatAutoDriveNeedItemForNav": "Navigation requires a GPS Navigator",
-    "Sandbox_MinidoracatAutoDriveNeedItemForNav_tooltip": "When enabled, the player must carry a charged GPS Navigator, or the vehicle must have a GPS Navigator installed and a battery with charge, before a route can be plotted.\nDisabled (default) means anyone can plot a route at any time.\nTakes effect as soon as an admin clicks Apply.",
+    "Sandbox_MinidoracatAutoDriveNeedItemForNav_tooltip": "When enabled, the player must carry a charged GPS Navigator, or the vehicle must have a GPS Navigator installed and a battery with charge, before a route can be plotted. With the Map Watch mod installed, wearing a powered Map Watch fitted with a GPS module also counts.\nDisabled (default) means anyone can plot a route at any time.\nTakes effect as soon as an admin clicks Apply.",
     "Sandbox_MinidoracatAutoDriveNeedItemForAutoDrive": "Auto-drive requires an Autopilot Module",
     "Sandbox_MinidoracatAutoDriveNeedItemForAutoDrive_tooltip": "When enabled (default), the vehicle must have an Autopilot Module installed before auto-drive can start.\nDisabled means any vehicle can auto-drive, which suits testing or casual play.\nTakes effect as soon as an admin clicks Apply.",
     "Sandbox_MinidoracatAutoDriveAllowCraftGPS": "Allow crafting the GPS Navigator",

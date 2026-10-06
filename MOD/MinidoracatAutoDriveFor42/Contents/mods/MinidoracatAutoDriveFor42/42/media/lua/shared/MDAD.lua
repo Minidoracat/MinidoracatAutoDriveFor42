@@ -705,34 +705,82 @@ function MDAD.migrateDeviceParts(vehicle)
     return done, events
 end
 
--- 閘門：NeedItemForNav false 放行；否則 charged 隨身 GPS 或 已裝 nav＋活車電。
--- draw 熱路徑：沙盒／車電 O(1)；隨身搜尋有 1s 快取，禁止每幀掃背包。
+-- 閘門：NeedItemForNav false 放行；否則（GPS 裝置 或 地圖錶上的定位模組）任一即可。
+-- GPS 裝置＝charged 隨身 GPS 或 已裝 nav＋活車電。
+-- draw 熱路徑：沙盒／車電 O(1)；隨身搜尋與地圖錶查詢各有 1s 快取，禁止每幀掃背包。
+-- gateCache[playerNum] = { t, portable, wt, watch }：隨身掃描由 navGate draw 與
+-- MinidoracatAutoDriveAPI.hasNavDevice 共用（兩者同一幀都被呼叫也只掃一次）。
 local gateCache = {}
+
+local function gateEntry(playerNum)
+    local c = gateCache[playerNum]
+    if not c then
+        c = {}
+        gateCache[playerNum] = c
+    end
+    return c
+end
+
+-- 地圖錶 addon（MinidoracatMiniMapWatchFor42）的定位模組：只有 "active" 算有 GPS。
+-- 契約：MinidoracatWatchAPI.watchApiVersion >= 1、getWatchModuleState(player, "gps")；
+-- 不在／版本不足／拋錯一律當沒有（兩包各自更新，不保證同時到位）。
+local function watchGpsActive(player)
+    local api = MinidoracatWatchAPI
+    if type(api) ~= "table" or type(api.watchApiVersion) ~= "number" or api.watchApiVersion < 1
+            or type(api.getWatchModuleState) ~= "function" then
+        return false
+    end
+    local ok, state = pcall(api.getWatchModuleState, player, "gps")
+    return ok and state == "active"
+end
+
+-- GPS 裝置條件（不看 NeedItemForNav、不看地圖錶）。cached＝隨身掃描走 1s 快取。
+local function hasNavDevice(player, playerNum, cached)
+    if MDAD.hasVehicleNavPower(player:getVehicle()) then return true end
+    if not cached then return MDAD.findChargedPortableGPS(player) ~= nil end
+    local now = getTimestampMs()
+    local c = gateEntry(playerNum)
+    if not c.t or (now - c.t) >= GATE_TTL_MS then
+        c.t = now
+        c.portable = MDAD.findChargedPortableGPS(player) ~= nil
+    end
+    return c.portable
+end
 
 function MDAD.navGate(playerNum, context)
     if MDAD.sandbox("NeedItemForNav", false) ~= true then return true end
     local player = getSpecificPlayer(playerNum)
     if not player then return true end
-    if MDAD.hasVehicleNavPower(player:getVehicle()) then return true end
-    if context == "draw" then
+    local draw = context == "draw"
+    if hasNavDevice(player, playerNum, draw) then return true end
+    local watch
+    if draw then
         local now = getTimestampMs()
-        local c = gateCache[playerNum]
-        if c and (now - c.t) < GATE_TTL_MS then
-            if c.allowed then return true end
-            return false, GATE_REASON
+        local c = gateEntry(playerNum)
+        if not c.wt or (now - c.wt) >= GATE_TTL_MS then
+            c.wt = now
+            c.watch = watchGpsActive(player)
         end
-        local allowed = MDAD.findChargedPortableGPS(player) ~= nil
-        if not c then
-            c = {}
-            gateCache[playerNum] = c
-        end
-        c.t = now
-        c.allowed = allowed
-        if allowed then return true end
-        return false, GATE_REASON
+        watch = c.watch
+    else
+        watch = watchGpsActive(player)
     end
-    if MDAD.findChargedPortableGPS(player) then return true end
+    if watch then return true end
     return false, GATE_REASON
+end
+
+-- 對外 API（契約唯一來源就是這一段）：地圖錶 addon 用它做「GPS 裝置 或 錶上定位模組」的 OR。
+-- 呼叫端偵測 type(MinidoracatAutoDriveAPI) == "table"、navDeviceApiVersion 是 number 且 >= 1、
+-- hasNavDevice 是 function；版本只增不減，改語意就加版本。
+MinidoracatAutoDriveAPI = MinidoracatAutoDriveAPI or {}
+MinidoracatAutoDriveAPI.navDeviceApiVersion = 1
+
+-- 身上有充電的隨身 GPS，或所在車輛有已裝且有電的 GPS。不看 NeedItemForNav、不看地圖錶；
+-- 可每幀呼叫（隨身掃描與 navGate draw 共用 1s 快取）。玩家不存在＝false。
+function MinidoracatAutoDriveAPI.hasNavDevice(playerNum)
+    local player = getSpecificPlayer(playerNum)
+    if not player then return false end
+    return hasNavDevice(player, playerNum, true) == true
 end
 
 
