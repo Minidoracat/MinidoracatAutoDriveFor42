@@ -436,13 +436,12 @@ local REAR_TRAVEL_M = 4
 -- 2m、再試 MIN+KEEP；帶長−KEEP＝本次退距，100ms 重探帶長＝剩餘退距＋KEEP。
 TUNE.REAR_TRAVEL_SHORT_M = 2
 TUNE.REAR_KEEP_M = 0.5
--- 前後皆堵的側向脫困（1006 實驗，使用者 10-06「可以考慮加強側推力道」；預設關，E2E 決定去留）：最短倒車帶也命中
+-- 前後皆堵的側向脫困（1006 實驗；玩家選項 SideEscape＝HUD.sideEscape，預設關，2026-10-06 使用者裁定）：最短倒車帶也命中
 -- 真障礙、前方被擋時，探車身兩側 ROOM_M 寬的側帶，只往淨空的一側推（帶寬−REAR_KEEP_M＝本次橫移上限，
 -- Drive.sideEscapeStart／stepSideEscape）。純中心橫向衝量從 ACCEL_MIN 每秒加 RAMP 到 ACCEL_MAX（m/s²；輪胎側向
 -- 摩擦各車不同，推到動為止），每幀 Δv ≤ DV_MAX、橫向或縱向車速 ≥ KMH 不施力：引擎對靜物碰撞的線速度變化
 -- >1 m/s 才算 crash（BaseVehicle.java:3420-3443），兩者相加仍在門檻下。STALL_MS 內沒前進 STALL_M、偏航 >YAW_RAD、
--- 側帶變不清、逾時 MS 就收手回停等（既有交還流程）；與倒車共用 UNSTICK_MAX 額度。
-TUNE.SIDE_ESCAPE = false
+-- 側帶變不清、逾時 MS 就收手回停等（既有交還流程）；與倒車共用 UNSTICK_MAX 額度。調頭流程中不側推（決定 2B）。
 TUNE.SIDE_ESCAPE_ROOM_M = 1.5
 TUNE.SIDE_ESCAPE_KMH = 1.5
 TUNE.SIDE_ESCAPE_DV_MAX = 0.4
@@ -1750,6 +1749,8 @@ function Drive.hudState(playerNum)
     local key
     if s.mode == "arrive" then key = "arrive"
     elseif s.mode == "yield" then key = "yield"
+    elseif s.mode == "unstick" and s.unstickSide then
+        key = "side" -- 側向脫困進行中（Drive.stepSideEscape；settle 照舊算 unstick）
     elseif s.mode == "unstick" or s.mode == "settle"
             or s.recoverWhy ~= nil then
         key = "unstick"
@@ -7280,12 +7281,15 @@ function Drive.sideProbe(s, vehicle, out, fx, fy, side, band)
         s.vehicleProfile.halfL + 0.15, half)
 end
 
--- 前後皆堵的側向脫困起手（startRecoveryAttempt 最短倒車帶也命中真障礙時；TUNE 註解見 SIDE_ESCAPE）：前方被擋
+-- 前後皆堵的側向脫困起手（startRecoveryAttempt 最短倒車帶也命中真障礙時；選項 SideEscape，TUNE 註解見 SIDE_ESCAPE_ROOM_M）：前方被擋
 -- （判堵、footprint 接觸、上一步側推到位 chain，或車頭前 1m 近場探測不清＝起步近物、進度停滯這類沒判堵旗標的）
 -- 才探兩側，常駐線那側先探；只往淨空的一側推。回 true＝已開始（mode unstick＋s.unstickSide），false＝呼叫端照舊
 -- softFail 回停等。兩側皆堵記 phase=side why=none。
 function Drive.sideEscapeStart(s, vehicle, playerNum, now, vx, vy, rear, kind, chain)
-    if TUNE.SIDE_ESCAPE ~= true or s.tow or (rear ~= "hard" and rear ~= "vehicle")
+    -- 調頭流程中（s.uturn：含 uturn-blocked／rotate-stall 倒車讓空間）不側推，維持決定 2B（大弧壓速、必要時倒車）
+    if s.uturn or s.fstate.rotating == true or s.tow or (rear ~= "hard" and rear ~= "vehicle")
+            or not (type(MDAD.HUD) == "table" and type(MDAD.HUD.sideEscape) == "function"
+                and MDAD.HUD.sideEscape() == true)
             or type(MDADSensor) ~= "table" or type(MDADSensor.probeNear) ~= "function" then return false end
     local out = BaseVehicle.allocVector3f()
     vehicle:getForwardVector(out)

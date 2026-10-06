@@ -11630,10 +11630,12 @@ MDAD.Drive.stop(0, nil)
 -- ⑪b 調頭探測被擋的大弧（1006，使用者決定 2B）：正式服 1002y～1005j 被擋大弧 23 次撞 4 次（8.6–13.9 km/h）、
 --    耦力原地轉 9 次 0 撞。目標壓到 UTURN_BLOCKED_KMH 3（引擎 delta ≤1 m/s 不 crash，BaseVehicle.java:3420-3443；
 --    regulator 整數化，3.5 會送 4＝1.11 m/s）、側推夾到 UTURN_BLOCKED_STEER 0.5（滿舵 5 一推就 vt 2–3 m/s 側滑）；
---    淨空照舊 crawl（溫和 4／快速 12）＋耦力；探測結果進 uturn probe 事件（console 原本只有 debug print）。
-function drive.scenarioUturnBlockedArc()
-    scenario("調頭探測被擋：大弧壓速＋側推夾限；淨空照舊耦力；探測結果進遙測")
-    local savedTelemetry, savedMode = MDAD.HUD.telemetryEnabled, drive.uturnMode
+--    淨空照舊 crawl（溫和 4；快速 12）＋耦力；探測結果進 uturn probe 事件（console 原本只有 debug print）。
+--    sideOn：側向脫困選項開著再跑一次（2026-10-06 使用者裁定：調頭流程中不側推）——全部斷言照舊。
+function drive.scenarioUturnBlockedArc(sideOn)
+    scenario("調頭探測被擋：大弧壓速＋側推夾限；淨空照舊耦力；探測結果進遙測" .. (sideOn and "（側向脫困選項開）" or ""))
+    local savedTelemetry, savedMode, savedSide = MDAD.HUD.telemetryEnabled, drive.uturnMode, MDAD.HUD.sideEscape
+    MDAD.HUD.sideEscape = function() return sideOn == true end
     local savedStart, savedEvent, savedSample, savedStop =
         MDADDiagnostics.start, MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.stop
     local probes = {}
@@ -11645,7 +11647,7 @@ function drive.scenarioUturnBlockedArc()
         if name == "uturn" and type(a) == "table" and a.phase == "probe" then probes[#probes + 1] = a end
     end
     for _, mode in ipairs({ "gentle", "fast" }) do
-        local tag = "(" .. mode .. ") "
+        local tag = "(" .. mode .. (sideOn and " 側推開" or "") .. ") "
         drive.uturnMode = mode
         checkTrue(armDrive(), tag .. "啟動")
         dveh._x, dveh._y, dveh._speed = 10, 0, 0
@@ -11698,11 +11700,12 @@ function drive.scenarioUturnBlockedArc()
         MDAD.Drive.stop(0, nil)
     end
     drive.uturnMode = savedMode
-    MDAD.HUD.telemetryEnabled = savedTelemetry
+    MDAD.HUD.telemetryEnabled, MDAD.HUD.sideEscape = savedTelemetry, savedSide
     MDADDiagnostics.start, MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.stop =
         savedStart, savedEvent, savedSample, savedStop
 end
 drive.scenarioUturnBlockedArc()
+drive.scenarioUturnBlockedArc(true)
 
 -- =====================================================================
 -- 情境二十八b：immutable DODGE 承諾語意＋停等豁免（2026-08-28 對抗審紅測試）
@@ -12046,52 +12049,89 @@ local function scenarioDetour()
     checkTrue(not MDAD.Drive.isActive(0), "(c5b) 停等 18s 超時交還")
     checkEq(drive.infoHaloIndex(), nil, "(c5b) 同一啟動不重複診斷提示（首次在 (ex)）")
     MDAD.Drive.stop(0, nil)
-    checkTrue(armDrive(), "(c5c) 啟動")
-    dveh._x = 11
-    driveTick(dp, dveh)
-    drive.scanRound()
-    dveh._speed = 0
-    driveReset(dveh)
-    driveTick(dp, dveh)
-    drive.wideRounds(true) -- 寬帶判堵到最寬一級
-    nav.detourCalls = 0
-    -- (c5c-ev) 1004b：每次改道請求記一筆 detour 事件（phase auto／manual／stuck／skip、why＝結果）；舊制自動改道被拒
-    --   只在 Debug console。違規證明：requestDetour 不記事件＝紅。
-    local detourEv, realEvent = {}, MDADDiagnostics.event
-    -- 本情境沒開本機紀錄：diagEvent 要 s.diag，而每幀 sample 回非 true 會把它關掉——取樣先回 true
-    local realSample = MDADDiagnostics.sample
-    MDADDiagnostics.sample = function() return true end
-    MDAD.Drive.debugSession(0).diag = true
-    MDADDiagnostics.event = function(pn, name, a, ...)
-        if name == "detour" and type(a) == "table" then detourEv[#detourEv + 1] = a end
-        return realEvent(pn, name, a, ...)
+    -- (c5c 側推開／c5c 兩側堵) 2026-10-06 使用者裁定：側向脫困是玩家選項（預設關）。選項開時前後皆堵先側推；側推收手
+    --   （harness 車不動＝stall）或兩側皆堵（why=none）後停等累計照舊，12s 內照樣自動問主 MOD 改道。
+    --   側推用掉一次額度（和倒車一樣）：寬帶要在新嘗試重判一輪才放行改道（wideJudged），遊戲裡停等期間掃描不停、
+    --   約一秒判完；harness 一次跳 6s 沒有掃描，所以收手後補跑寬帶輪。重判完 episodeAttempts≥1＝「倒過又被同一處
+    --   堵住」，累計過 BLOCK_RETRY_MS 就問（不必等到 AUTO_DETOUR_MS）。
+    --   兩側堵：x=9..13 的 y=−3／y=2 牆（側帶內、離車身 1.1m；y=1 那種貼身 0.1m 的牆會讓意圖成 STOP，與本選項無關）。
+    local oldSide = MDAD.HUD.sideEscape
+    for _, variant in ipairs({ "", " 側推開", " 兩側堵" }) do
+        local tag = "(c5c" .. variant .. ")"
+        local sideOn, pushed = variant ~= "", variant == " 側推開"
+        MDAD.HUD.sideEscape = function() return sideOn end
+        if variant == " 兩側堵" then
+            for x = 9, 13 do
+                drive.putSolid(x, -3, "harness_sidewall_" .. x .. "_-3")
+                drive.putSolid(x, 2, "harness_sidewall_" .. x .. "_2")
+            end
+        end
+        checkTrue(armDrive(), tag .. " 啟動")
+        dveh._x, dveh._y = 11, 0
+        setHeading(dveh, 0)
+        driveTick(dp, dveh)
+        drive.scanRound()
+        dveh._speed = 0
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        drive.wideRounds(true) -- 寬帶判堵到最寬一級
+        nav.detourCalls = 0
+        -- (c5c-ev) 1004b：每次改道請求記一筆 detour 事件（phase auto／manual／stuck／skip、why＝結果）；舊制自動改道被拒
+        --   只在 Debug console。違規證明：requestDetour 不記事件＝紅。
+        local detourEv, sideEv, realEvent = {}, {}, MDADDiagnostics.event
+        -- 本情境沒開本機紀錄：diagEvent 要 s.diag，而每幀 sample 回非 true 會把它關掉——取樣先回 true
+        local realSample = MDADDiagnostics.sample
+        MDADDiagnostics.sample = function() return true end
+        MDAD.Drive.debugSession(0).diag = true
+        MDADDiagnostics.event = function(pn, name, a, ...)
+            if name == "detour" and type(a) == "table" then detourEv[#detourEv + 1] = a end
+            if name == "unstick" and type(a) == "table" and a.phase == "side" then sideEv[#sideEv + 1] = a.why end
+            return realEvent(pn, name, a, ...)
+        end
+        MDAD.HUD.autoDetour = function() return true end
+        nowMs = nowMs + 6000
+        local t12 = nowMs + 6000
+        driveTick(dp, dveh)
+        checkEq(nav.detourCalls, 0, tag .. " 自動改道開：6s 還沒到門檻（先讓 blocked-retry 試）")
+        checkEq(sideEv[1], pushed and "start" or sideOn and "none" or nil,
+            tag .. " blocked-retry 倒不了：選項關不探側帶／開且有空間先側推／兩側皆堵 why=none（實得 "
+            .. tostring(sideEv[1]) .. "）")
+        if pushed then
+            checkEq(MDAD.Drive.hudState(0), "side", tag .. " 側推中 HUD 狀態鍵 side（側向挪車中）")
+            for _ = 1, 6 do
+                nowMs = nowMs + 250
+                driveReset(dveh)
+                driveTick(dp, dveh)
+            end
+            checkEq(sideEv[2], "stall", tag .. " 側推推不動：stall 收手（實得 " .. tostring(sideEv[2]) .. "）")
+            checkEq(MDAD.Drive.hudState(0), "blocked", tag .. " 收手回停等")
+            drive.wideRounds(true)
+        end
+        nowMs = t12
+        driveTick(dp, dveh)
+        checkEq(nav.detourCalls, 1, tag .. " 累計 12s 自動問主 MOD 一次")
+        checkEq(drive.lastVoice(), "nodetour", tag .. " 主 MOD 無路：語音 nodetour")
+        nowMs = nowMs + 2000
+        driveTick(dp, dveh)
+        checkEq(nav.detourCalls, 1, tag .. " 同一停等 episode 不重問")
+        local ev1 = detourEv[1]
+        local minMs = pushed and MDAD.Drive.debugTune().BLOCK_RETRY_MS or 10000
+        checkTrue(#detourEv == 1 and ev1.phase == "auto" and ev1.why ~= "ok" and type(ev1.ms) == "number" and ev1.ms >= minMs,
+            tag .. "-ev 自動改道被拒記一筆 detour（phase " .. tostring(ev1 and ev1.phase) .. "、why " .. tostring(ev1 and ev1.why)
+            .. "、等了 " .. tostring(ev1 and ev1.ms) .. " ms）")
+        MDAD.HUD.autoDetour = function() return false end
+        MDAD.Drive.stuckDetour(MDAD.Drive.debugSession(0), 0)
+        local ev2 = detourEv[2]
+        checkTrue(ev2 ~= nil and ev2.phase == "skip" and ev2.why == "off",
+            tag .. "-ev 交還前改道因選項關沒問也記一筆（phase " .. tostring(ev2 and ev2.phase) .. "、why " .. tostring(ev2 and ev2.why) .. "）")
+        MDADDiagnostics.event, MDADDiagnostics.sample = realEvent, realSample
+        MDAD.Drive.debugSession(0).diag = false
+        MDAD.Drive.stop(0, nil)
     end
-    MDAD.HUD.autoDetour = function() return true end
-    nowMs = nowMs + 6000
-    driveTick(dp, dveh)
-    checkEq(nav.detourCalls, 0, "(c5c) 自動改道開：6s 還沒到門檻（先讓 blocked-retry 試）")
-    nowMs = nowMs + 6000
-    driveTick(dp, dveh)
-    checkEq(nav.detourCalls, 1, "(c5c) 累計 12s 自動問主 MOD 一次")
-    checkEq(drive.lastVoice(), "nodetour", "(c5c) 主 MOD 無路：語音 nodetour")
-    nowMs = nowMs + 2000
-    driveTick(dp, dveh)
-    checkEq(nav.detourCalls, 1, "(c5c) 同一停等 episode 不重問")
-    local ev1 = detourEv[1]
-    checkTrue(#detourEv == 1 and ev1.phase == "auto" and ev1.why ~= "ok" and type(ev1.ms) == "number" and ev1.ms >= 10000,
-        "(c5c-ev) 自動改道被拒記一筆 detour（phase " .. tostring(ev1 and ev1.phase) .. "、why " .. tostring(ev1 and ev1.why)
-        .. "、等了 " .. tostring(ev1 and ev1.ms) .. " ms）")
-    MDAD.HUD.autoDetour = function() return false end
-    MDAD.Drive.stuckDetour(MDAD.Drive.debugSession(0), 0)
-    local ev2 = detourEv[2]
-    checkTrue(ev2 ~= nil and ev2.phase == "skip" and ev2.why == "off",
-        "(c5c-ev) 交還前改道因選項關沒問也記一筆（phase " .. tostring(ev2 and ev2.phase) .. "、why " .. tostring(ev2 and ev2.why) .. "）")
-    MDADDiagnostics.event, MDADDiagnostics.sample = realEvent, realSample
-    MDAD.Drive.debugSession(0).diag = false
-    MDAD.HUD.autoDetour = oldAuto
+    MDAD.HUD.autoDetour, MDAD.HUD.sideEscape = oldAuto, oldSide
+    for x = 9, 13 do drive.clearCell(x, -3); drive.clearCell(x, 2) end
     for _, y in ipairs({ -5, -4, -2, -1, 0, 1, 2, 4, 5 }) do drive.clearCell(20, y) end
     for _, y in ipairs({ -1, 0, 1 }) do drive.clearCell(7, y) end
-    MDAD.Drive.stop(0, nil)
 
     -- (c5d) 實機序列（2026-09-02 定罪「勾了自動改道也沒效」）：後方淨空 → 5s
     -- blocked-retry 真的倒車 → 開回原地又堵 → 非 WAIT 幀已清 blockRetryDone →
@@ -18090,15 +18130,15 @@ scenario("調頭＋blocked：遠處不倒車、近處才退、額度用盡不空
 end
 scenarioUturnBlocked()
 
--- (side) 1006 前後皆堵的側向脫困（實驗，TUNE.SIDE_ESCAPE 預設關，本情境暫開）：最短倒車帶也命中、前方被擋時，
+-- (side) 1006 前後皆堵的側向脫困（實驗；玩家選項 SideEscape＝HUD.sideEscape，預設關，本情境暫開）：最短倒車帶也命中、前方被擋時，
 --   探車身兩側 SIDE_ESCAPE_ROOM_M 的側帶，只往淨空的一側推純橫向中心衝量（每幀 Δv ≤ DV_MAX、橫向速度到 KMH 不推）；
 --   到位 settle 後接回倒車鏈（rear 清就倒車、仍擋再側推，共用 UNSTICK_MAX）；兩側皆堵、停滯、偏航、側帶變不清
 --   都回停等照舊交還。車頭對 +x：dir=+1＝(−fy,fx)＝+y 側。
 function drive.scenarioSideEscape()
     scenario("前後皆堵側向脫困：只往有空間的一側、每幀衝量有上限、到位接回倒車；兩側皆堵／停滯照舊交還")
     local T = MDAD.Drive.debugTune()
-    local savedOn = T.SIDE_ESCAPE
-    T.SIDE_ESCAPE = true
+    local savedSide = MDAD.HUD.sideEscape
+    MDAD.HUD.sideEscape = function() return true end
     local savedTelemetry = MDAD.HUD.telemetryEnabled
     MDAD.HUD.telemetryEnabled = function() return true end -- 事件要 s.diag
     local savedStart, savedEvent, savedSample, savedStop =
@@ -18177,6 +18217,7 @@ function drive.scenarioSideEscape()
     checkEq(st.unstickSide, 1, "(side-a) 往淨空的 dir=+1 側（實得 " .. tostring(st.unstickSide) .. "）")
     checkEq(sides[1] and sides[1].why, "start", "(side-a) 事件 unstick phase=side why=start")
     checkEq(sides[1] and sides[1].dir, 1, "(side-a) start 事件帶 dir")
+    checkEq(MDAD.Drive.hudState(0), "side", "(side-a) HUD 狀態鍵 side（側向挪車中，不是倒車脫困）")
     checkNear(st.unstickTravelM, T.SIDE_ESCAPE_ROOM_M - T.REAR_KEEP_M, 1e-9, "(side-a) 橫移上限＝側帶−KEEP")
     local mass = st.runtimeMass
     local function dv()
@@ -18221,6 +18262,14 @@ function drive.scenarioSideEscape()
     checkTrue(st.unstickSide == nil and evs["unstick:start"] ~= nil, "(side-a) 這次是倒車（unstick start），不是側推")
     checkEq(st.episodeAttempts, 3, "(side-a) 側推兩次＋倒車一次共用額度")
     MDAD.Drive.stop(0, nil)
+
+    -- (side-off) 選項關（getter 缺席＝HUD 缺席同義）：同一版面不探側帶、不側推，照舊回停等
+    MDAD.HUD.sideEscape = nil
+    st = startSide("(side-off)", { -2 })
+    checkEq(st.mode, "follow", "(side-off) 選項關：不進側推（mode 實得 " .. tostring(st.mode) .. "）")
+    checkEq(#sides, 0, "(side-off) 選項關：零 side 事件（不探側帶）")
+    MDAD.Drive.stop(0, nil)
+    MDAD.HUD.sideEscape = function() return true end
 
     -- (side-b) 兩側都沒空間：不側推，事件 why=none，照舊回停等 → 15s StopStuck
     st = startSide("(side-b)", { -2, 1 })
@@ -18282,6 +18331,15 @@ function drive.scenarioSideEscape()
     checkFalse(MDAD.Drive.sideEscapeStart(st, dveh, 0, nowMs, 11, 0, "hard", "vehicle", nil),
         "(side-g) 無旗標、車頭前 1m 淨空：不側推")
     put(14, 0) -- 車頭在 13.2，格 [14,15] 在 1m 內
+    -- 調頭流程中（s.uturn：含 uturn-blocked／rotate-stall 倒車讓空間）不側推，維持決定 2B
+    st.uturn = {}
+    checkFalse(MDAD.Drive.sideEscapeStart(st, dveh, 0, nowMs, 11, 0, "hard", "vehicle", nil),
+        "(side-g) 調頭流程中（s.uturn）：不側推")
+    st.uturn = nil
+    st.fstate.rotating = true
+    checkFalse(MDAD.Drive.sideEscapeStart(st, dveh, 0, nowMs, 11, 0, "hard", "vehicle", nil),
+        "(side-g) ROTATE 中（fstate.rotating，uturn 參數檔還沒掛上）：不側推")
+    st.fstate.rotating = false
     checkTrue(MDAD.Drive.sideEscapeStart(st, dveh, 0, nowMs, 11, 0, "hard", "vehicle", nil),
         "(side-g) 無旗標、車頭前 1m 有障礙：算前方被擋、側推")
     checkEq(st.mode, "unstick", "(side-g) 進側推")
@@ -18340,7 +18398,7 @@ function drive.scenarioSideEscape()
 
     MDAD.Drive.stop(0, nil)
     clearAll()
-    T.SIDE_ESCAPE = savedOn
+    MDAD.HUD.sideEscape = savedSide
     MDAD.HUD.telemetryEnabled = savedTelemetry
     MDADDiagnostics.start, MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.stop =
         savedStart, savedEvent, savedSample, savedStop

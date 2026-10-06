@@ -109,6 +109,7 @@ local STATUS_KEYS = {
     arrive = "UI_MinidoracatAutoDrive_HUDStatusArrive",
     yield = "UI_MinidoracatAutoDrive_HUDStatusYield",
     unstick = "UI_MinidoracatAutoDrive_HUDStatusUnstick",
+    side = "UI_MinidoracatAutoDrive_HUDStatusSide", -- 側向脫困進行中（Drive.hudState，1006）
     blocked = "UI_MinidoracatAutoDrive_HUDStatusBlocked",
     dodging = "UI_MinidoracatAutoDrive_HUDStatusDodging",
     build = "UI_MinidoracatAutoDrive_HUDStatusBuild",
@@ -174,6 +175,7 @@ local STATUS_WIDTH_KEYS = {
     "UI_MinidoracatAutoDrive_HUDStatusYield",
     "UI_MinidoracatAutoDrive_HUDStatusYieldResume",
     "UI_MinidoracatAutoDrive_HUDStatusUnstick",
+    "UI_MinidoracatAutoDrive_HUDStatusSide",
     "UI_MinidoracatAutoDrive_HUDStatusBlocked",
     "UI_MinidoracatAutoDrive_HUDStatusDodging",
     "UI_MinidoracatAutoDrive_HUDStatusBuild",
@@ -480,6 +482,16 @@ local function setAutoDetour(value)
     return setClientOption("AutoDetour", value == true)
 end
 
+-- 側向脫困（1006 實驗；2026-10-06 使用者裁定：玩家選項、預設關）：前後皆堵時 Driver 讀 HUD.sideEscape
+-- （Drive.sideEscapeStart）。主 chunk local 已貼上限：存取函式直接掛 HUD。
+function HUD.sideEscape()
+    return optionBool("SideEscape", false)
+end
+
+function HUD.setSideEscape(value)
+    return setClientOption("SideEscape", value == true)
+end
+
 -- 閃避殭屍（2026-09-06 殭屍軟縫）：預設開；Driver 每輪掃描完成讀 HUD.zombieDodge。
 local function zombieDodge()
     return optionBool("ZombieDodge", true)
@@ -776,7 +788,9 @@ local function statusColor(token, reason)
     if reason then return C.red end
     if token == nil then return C.blue end
     if token == "blocked" then return C.red end
-    if token == "dodging" or token == "unstick" or token == "lowfps" or token == "areawait" then return C.amber end
+    if token == "dodging" or token == "unstick" or token == "side" or token == "lowfps" or token == "areawait" then
+        return C.amber
+    end
     if token == "yield" or token == "build" then return C.blue end
     return C.green
 end
@@ -3220,6 +3234,8 @@ if PZAPI and PZAPI.ModOptions then
     end
     modOptions:addTickBox("AutoDetour", "UI_MinidoracatAutoDrive_AutoDetour", true,
         "UI_MinidoracatAutoDrive_AutoDetour_tooltip")
+    modOptions:addTickBox("SideEscape", "UI_MinidoracatAutoDrive_SideEscape", false,
+        "UI_MinidoracatAutoDrive_SideEscape_tooltip")
     modOptions:addTickBox("ZombieDodge", "UI_MinidoracatAutoDrive_ZombieDodge", true,
         "UI_MinidoracatAutoDrive_ZombieDodge_tooltip")
     -- 主 chunk local 槽已滿（區塊 local 與 for 也佔槽）：經 getOption 取回同一個 combo 加項目。
@@ -3367,6 +3383,9 @@ local function registerMiniMapSettings()
             { label = "UI_MinidoracatAutoDrive_AutoDetour",
                 tooltip = "UI_MinidoracatAutoDrive_AutoDetour_tooltip",
                 get = autoDetour, set = setAutoDetour },
+            { label = "UI_MinidoracatAutoDrive_SideEscape",
+                tooltip = "UI_MinidoracatAutoDrive_SideEscape_tooltip",
+                default = false, get = HUD.sideEscape, set = HUD.setSideEscape },
             { label = "UI_MinidoracatAutoDrive_ZombieDodge",
                 tooltip = "UI_MinidoracatAutoDrive_ZombieDodge_tooltip",
                 get = zombieDodge, set = setZombieDodge },
