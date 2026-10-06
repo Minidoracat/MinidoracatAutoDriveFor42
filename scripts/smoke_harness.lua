@@ -25007,6 +25007,130 @@ function drive.scenarioLagRate()
 end
 drive.scenarioLagRate()
 
+-- 1006 一般帶橫向覆蓋（E2E 1006xe fencepass：Dixie 南行、整條路橫擋的籬笆排，車靠右時承諾 offL −5 的貼邊線撞上）：
+--   一般帶掃描以行駛線為心（bandBias＝常駐偏置），Corridor.plan 卻以 nav 線對稱出候選；常駐 +3 時 l < −4 那條帶沒掃過、
+--   被當成淨空。車在 (10,3)、常駐 +3（keepRightTarget 打樁）、牆排在 x=40。
+--   (band-wall) 整排牆 y −14..14：舊制常駐 +3 那一輪就承諾 offL −5.5（穿過沒掃過的牆）。現制第一輪不承諾（候選被 sweepLine
+--     橫向覆蓋拒收）、延後 why=lateral-coverage、下一輪帶心歸 nav 線；第二輪看到整排牆＝判堵，那一輪不拿來做路面對中；之後
+--     判堵中帶心在常駐偏置／nav 線間交替補掃（判堵不翻成延後）。從頭到尾不承諾。
+--     違規證明：拿掉 sweepLine 的橫向覆蓋檢查＝紅；拿掉補掃要求＝紅；補掃輪照做路面對中＝紅。
+--   (band-gap) 牆只擋 y −3..14、左側真的空：第一輪延後（延後帽不壓現速）、第二輪（帶心 nav）承諾 offL −5.25，全程不判堵；
+--     承諾後帶心釘在承諾那一輪（0）讓守護看得到整條線。違規證明：拿掉延後（照判堵）＝紅；拿掉釘帶心＝紅；
+--     候選的帶緣照 RETURN 內縮 OBS_HALF＝nav 線那一輪也蓋不住遠側線＝紅。
+--   (band-guard) 承諾後帶心跟驗證時不同（停留進入段等），線上換進一個硬點、牆排遠端拿掉一格：守護照樣重驗判死。
+--     違規證明：拿掉守護的帶心移動條件（只剩 worldGrew 高水位）＝紅。
+--   (band-left)／(band-right) 掃得到的一側照舊當輪承諾、不延後（左閃 −1.25、右閃 5.5）。
+function drive.scenarioBandCover()
+    scenario("1006：一般帶候選不得承諾進沒掃過的那一側——先以 nav 線為心補掃再承諾，真的沒有線才判堵")
+    local oldSand = SandboxVars
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    local wasMs = drive.frameMs(10)
+    local Dr = MDAD.Drive
+    local oldKeep = Dr.keepRightTarget
+    Dr.keepRightTarget = function() return 3 end
+    local oldEvent, oldSample, events = MDADDiagnostics.event, MDADDiagnostics.sample, {}
+    MDADDiagnostics.event = function(_, name, a) events[#events + 1] = { name = name, a = a } end
+    MDADDiagnostics.sample = function() return true end
+    local function count(name, phase, why)
+        local n = 0
+        for i = 1, #events do
+            local e = events[i]
+            if e.name == name and e.a and e.a.phase == phase and (why == nil or e.a.why == why) then n = n + 1 end
+        end
+        return n
+    end
+    local function start(y0, y1)
+        drive.fillWorld(-10, 160, -16, 16)
+        for y = y0, y1 do drive.putSolid(40, y, "harness_band_wall") end
+        armDrive()
+        local st = Dr.debugSession(0)
+        st.diag = true
+        st.sandBias = 3
+        MDADFollower.setLaneBias(st.fstate, 3)
+        st.sensor.scanBias = 3
+        MDADSensor.reset(st.sensor) -- armDrive 已開了一輪帶心 0 的掃描：重開，第一輪就是常駐 +3 的帶
+        setHeading(dveh, 0)
+        dveh._x, dveh._y, dveh._speed = 10, 3, 10
+        driveReset(dveh)
+        for i = #events, 1, -1 do events[i] = nil end
+        return st
+    end
+    -- (band-wall)
+    local st = start(-14, 14)
+    drive.scanRound(true)
+    local r1 = { band = st.sensor.completedBandBias, dodging = st.dodging, offL = st.fstate.offL, blocked = st.blocked,
+        next = st.sensor.scanBias, defer = count("dodge", "defer", "lateral-coverage") }
+    st.roadBias = 0.4 -- 補掃輪不拿來做路面對中：沒有路面樣本時本該衰減（×ROAD_DECAY），補掃輪要原樣保留
+    drive.scanRound(true)
+    local r2 = { band = st.sensor.completedBandBias, dodging = st.dodging, blocked = st.blocked, road = st.roadBias }
+    drive.scanRound(true)
+    local r3 = { band = st.sensor.completedBandBias, road = st.roadBias }
+    drive.scanRound(true)
+    checkTrue(r1.band == 3 and not r1.dodging and r1.defer == 1 and r1.next == 0,
+        "(band-wall) 常駐 +3 那一輪：左側沒掃過的候選不承諾、延後 lateral-coverage、下一輪帶心歸 nav（band=" .. tostring(r1.band)
+        .. " dodging=" .. tostring(r1.dodging) .. " offL=" .. tostring(r1.offL) .. " defer=" .. tostring(r1.defer)
+        .. " next=" .. tostring(r1.next) .. "）")
+    checkTrue(r2.band == 0 and not r2.dodging and r2.blocked == true,
+        "(band-wall) nav 線為心那一輪看到整排牆＝判堵（band=" .. tostring(r2.band) .. " dodging=" .. tostring(r2.dodging)
+        .. " blocked=" .. tostring(r2.blocked) .. "）")
+    checkTrue(r2.road == 0.4 and r3.road < 0.4,
+        "(band-wall) 補掃輪不做路面對中、下一輪照常（road=" .. tostring(r2.road) .. "→" .. tostring(r3.road) .. "）")
+    checkTrue(r3.band == 3 and st.sensor.completedBandBias == 0 and st.blocked == true and count("dodge", "commit") == 0
+            and count("dodge", "defer", "lateral-coverage") == 1 and Dr.debugSession(0) == st,
+        "(band-wall) 判堵中帶心交替補掃、不再延後、從頭到尾不承諾（band=" .. tostring(r3.band) .. "→"
+        .. tostring(st.sensor.completedBandBias) .. " blocked=" .. tostring(st.blocked) .. " commits="
+        .. count("dodge", "commit") .. " defers=" .. count("dodge", "defer", "lateral-coverage") .. "）")
+    MDAD.Drive.stop(0, nil)
+    -- (band-gap)
+    st = start(-3, 14)
+    drive.scanRound(true)
+    local g1 = { dodging = st.dodging, blocked = st.blocked, defer = count("dodge", "defer", "lateral-coverage"),
+        cap = st.dodgeDeferCap }
+    drive.scanRound(true)
+    local g2 = { band = st.sensor.completedBandBias, dodging = st.dodging, offL = st.fstate.offL, pin = st.dodgeBandBias,
+        next = st.sensor.scanBias }
+    drive.scanRound(true)
+    checkTrue(not g1.dodging and not g1.blocked and g1.defer == 1 and type(g1.cap) == "number" and g1.cap >= 10,
+        "(band-gap) 左側真的空：第一輪延後補掃、不判堵、延後帽不壓現速 10（dodging=" .. tostring(g1.dodging) .. " blocked="
+        .. tostring(g1.blocked)
+        .. " defer=" .. tostring(g1.defer) .. " cap=" .. tostring(g1.cap) .. "）")
+    checkTrue(g2.band == 0 and g2.dodging == true and type(g2.offL) == "number" and g2.offL < -4 and g2.pin == 0
+            and g2.next == 0 and count("blocked", nil) == 0,
+        "(band-gap) nav 線為心那一輪承諾左繞、帶心釘在 0（band=" .. tostring(g2.band) .. " dodging=" .. tostring(g2.dodging)
+        .. " offL=" .. tostring(g2.offL) .. " pin=" .. tostring(g2.pin) .. " next=" .. tostring(g2.next) .. "）")
+    checkTrue(st.dodging == true and st.sensor.completedBandBias == 0 and not st.dodgeGuardFailed,
+        "(band-gap) 承諾中的守護輪帶心仍是 0、守護照常（band=" .. tostring(st.sensor.completedBandBias) .. " failed="
+        .. tostring(st.dodgeGuardFailed) .. "）")
+    -- (band-guard)：線上（hold 段、y −5）換進一個硬點、拿掉牆排遠端一格＝點數持平
+    st.dodgeGuardBand = 3
+    drive.clearCell(40, 14)
+    drive.putSolid(46, -5, "harness_band_in")
+    drive.scanRound(true)
+    checkTrue(st.dodgeGuardFailed == true and st.dodgeGuardBand == 0,
+        "(band-guard) 帶心跟驗證時不同：點數持平也重驗、判死（failed=" .. tostring(st.dodgeGuardFailed) .. " band="
+        .. tostring(st.dodgeGuardBand) .. " hardN=" .. tostring(st.sensor.hardN) .. "）")
+    MDAD.Drive.stop(0, nil)
+    -- (band-left)：只擋車道 y 1..4，左閃 −0.25（掃得到）
+    st = start(1, 4)
+    drive.scanRound(true)
+    checkTrue(st.dodging == true and st.fstate.offL ~= nil and st.fstate.offL < 1 and st.fstate.offL > -4
+            and count("dodge", "defer") == 0 and st.sensor.completedBandBias == 3,
+        "(band-left) 掃得到的左縫當輪承諾、不延後（offL=" .. tostring(st.fstate.offL) .. " defers=" .. count("dodge", "defer") .. "）")
+    MDAD.Drive.stop(0, nil)
+    -- (band-right)：擋 y 0..3，右閃 5.25（離常駐線較近）
+    st = start(0, 3)
+    drive.scanRound(true)
+    checkTrue(st.dodging == true and st.fstate.offL ~= nil and st.fstate.offL > 4 and count("dodge", "defer") == 0,
+        "(band-right) 掃得到的右縫當輪承諾、不延後（offL=" .. tostring(st.fstate.offL) .. " defers=" .. count("dodge", "defer") .. "）")
+    MDAD.Drive.stop(0, nil)
+    MDADDiagnostics.event, MDADDiagnostics.sample = oldEvent, oldSample
+    Dr.keepRightTarget = oldKeep
+    drive.fillWorld(-2, 70, -7, 7)
+    drive.frameMs(wasMs)
+    SandboxVars = oldSand
+end
+drive.scenarioBandCover()
+
 do -- 主 chunk local 槽已滿：整段包成函式，內部 local 不佔主 chunk
 -- =====================================================================
 -- v6 多停靠點行程（docs/addon-api.md §6）

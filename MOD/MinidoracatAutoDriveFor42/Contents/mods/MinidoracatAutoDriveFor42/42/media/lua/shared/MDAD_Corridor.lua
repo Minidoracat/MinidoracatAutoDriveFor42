@@ -348,9 +348,9 @@ end
 --   首次繞行傳當前 laneBias（靠右偏移）——「離現在實際行駛線橫移最小的縫」
 --   才是最優縫；以中心線為基準會在障礙居中時左右對稱、tie-break 固定選左，
 --   車得先橫跨整個 bias 才進縫（2026-08-28 實機：靠右行駛卻每次往左繞）。
--- 隱含前提：呼叫端傳入的 hardS/hardL 必須涵蓋 corridorHalf 的完整橫向帶
--- （Sensor 的掃描帶 ±4 公尺 ＝ CORRIDOR_HALF；把任一邊調大前先對齊另一邊，
--- 否則會規劃到從未掃描過的區域）。
+-- 隱含前提：候選以 l＝0（nav 線）對稱、半幅 corridorHalf−needHalf，沒掃過的地方在這裡等於淨空。Sensor 一般帶
+-- 以行駛線為心（bandBias）、帶心偏離 nav 線時遠側有一條沒掃過；Driver 以世界掃掠終審（sweepLine 橫向覆蓋，
+-- Drive.lineBandCovers）拒收落在帶外的候選、並讓下一輪帶心歸 nav 線補掃（Drive.bandNavRequest）。
 -- hardR（選填）＝逐點半徑平行陣列：樹幹 0、整格箱型物 OBS_HALF。非 table 或
 -- 缺項／壞值＝該點退 OBS_HALF（保守肥半徑），不整批拒收。
 -- baseL（選填）＝**行駛基準線**（呼叫端的常駐 laneBias）。擋線與群聚合以它為
