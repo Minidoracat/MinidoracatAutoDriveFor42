@@ -531,7 +531,7 @@ TUNE.SOFT_CAP = 25             -- 走廊內有可輾過的軟障礙（家具／�
 TUNE.CORPSE_CAP = 30           -- 走廊內有地面屍體（壓得過，但不減速輾過的體感就是撞擊）
 -- RETURN 進入門檻由 v4 segWidth 與實際車寬推導；v2/v3 width unknown 使用
 TUNE.RETURN_MAX_DEV = 12       -- RETURN 進入的偏差上限（m）。錨定＝掃描帶幾何：
-                               -- 回線 start 與 target 要同帶可驗（returnLineBandCovers
+                               -- 回線 start 與 target 要同帶可驗（Drive.lineBandCovers
                                -- ／unsafe crawl 授權都吃 ±6.5m 帶），|Δ|>2×6.5-1
                                -- 結構性蓋不住＝returnHold 永久 0（telemetry s030：
                                -- snap 爛路線 lat=19 卡死 20s 紅字）。超上限交一般
@@ -1534,6 +1534,7 @@ local function releaseDodge(s)
     s.stayLanePending = nil
     s.stayNextB = nil
     s.dodgeGuardHardN = nil -- 承諾鎖定的點雲基準（守護 lazy init）
+    s.dodgeGuardBand, s.dodgeBandBias = nil, nil -- 守護驗過的帶心／承諾中釘住的帶心（釋放後帶心回行駛線）
     s.dodgeMarginS = nil    -- commit／守護輪最緊點的弧長（過了就重掃一次放寬餘裕）
     s.dodgeDemoteS, s.dodgeDemoteM = nil, nil -- guardDemote 記下的回線段最緊點（[a,c] 掃掠看不到它）
     s.dodgeGuardFailed = false -- 物理重驗已判死（持平輪不得以「信任承諾」推翻）
@@ -7683,6 +7684,15 @@ local function sweepLine(s, lx, ly, ln, lS0, lS1,
         s.dodgeBuildReason = sen.unloaded and "unloaded" or "coverage"
         return false, 99, visibleEndS(sen, s.lastSNow), 4, lS1, 0, 0
     end
+    local halfW, halfL, pad = sweepGeom(s, needBase)
+    -- 橫向同理（1006，E2E 1006xe fencepass）：一般帶以行駛線為心掃，Corridor.plan 卻以 nav 線對稱出候選——車靠右時遠側
+    -- 那條帶沒掃過、被當成淨空，承諾貼邊線穿過整排籬笆。候選（含停留、出口加長）掃過的車身＋pad 要在完成快照的帶內；
+    -- 拒收當建線失敗（相位 3、錨在 b），候選鏈照常換縫，全滅時 replan 讓下一輪以 nav 線為心補掃（Drive.bandNavRequest）。
+    if requireLoaded and not Drive.lineBandCovers(s, lx, ly, ln, lS0, lS1, pad, 1, 0) then
+        s.dodgeBuildReason = "band"
+        s.bandRejectN = (s.bandRejectN or 0) + 1
+        return false, 99, b, 3, b, 0, 0
+    end
     local hn = sen.hardN
     if hn == 0 then return true, 9 end
     local hx, hy, hr, hb = sen.hardX, sen.hardY, sen.hardR, sen.hardB
@@ -7699,7 +7709,6 @@ local function sweepLine(s, lx, ly, ln, lS0, lS1,
     if type(obbDistanceSq) ~= "function" then
         return false, 99, s.lastSNow, 1, s.lastSNow, 0, 0
     end
-    local halfW, halfL, pad = sweepGeom(s, needBase)
     local minMargin, minI = 9, nil
     local lastFx, lastFy = 1, 0
     if not finite(startK) then startK = 1 else startK = startK - startK % 1 end
@@ -8156,7 +8165,10 @@ local function probeReturnLateral(s, vehicle, lateralM)
     return clear
 end
 
-local function returnLineBandCovers(s, lx, ly, ln, lineS0, lineS1, pad, startK)
+-- 整條線（車身 OBB＋pad）是否落在完成快照實際掃過的橫向帶（completedBandBias ± corridorHalf）內。帶外沒掃過＝不是淨空。
+-- edge＝帶緣再內縮的量：RETURN 照舊留 OBS_HALF（nil 預設）；一般帶繞行候選（sweepLine requireLoaded）傳 0——
+-- Corridor.plan 的候選以 nav 線對稱 ±(corridorHalf−needHalf)，帶心在 nav 線時整個候選集剛好落在帶內（1006）。
+function Drive.lineBandCovers(s, lx, ly, ln, lineS0, lineS1, pad, startK, edge)
     local band = s.sensor and s.sensor.completedBandBias
     if not finite(ln) or ln < 2 or not finite(lineS0)
             or not finite(lineS1) then return false end
@@ -8177,7 +8189,7 @@ local function returnLineBandCovers(s, lx, ly, ln, lineS0, lineS1, pad, startK)
     local lastFx, lastFy = 1, 0
     local half = s.sensor.corridorHalf or MDADSensor.CORRIDOR_HALF
     local bandLo, bandHi = band - half, band + half
-    local obs = MDADCorridor.OBS_HALF or 0.7
+    local obs = edge or MDADCorridor.OBS_HALF or 0.7
     for k = startK, ln do
         local sk = k == ln and lineS1
             or (lineS0 + (k - 1) * MDADFollower.OV_STEP)
@@ -8295,7 +8307,7 @@ local function holdUnsafeReturn(s, vehicle, latSigned, reason)
     local n, lineS0, _, lineS1 = MDADFollower.buildReturnLine(
         s.profile, s0, s1, latSigned, latSigned, s.returnX, s.returnY, 1, 0) -- 沿現偏移：只夾物理餘裕
     if n < 2 then return end
-    if not returnLineBandCovers(
+    if not Drive.lineBandCovers(
             s, s.returnX, s.returnY, n, lineS0, lineS1, pad, 1) then return end
     local clear = sweepLine(s, s.returnX, s.returnY, n, lineS0, lineS1,
         s0, s1, s1, coverageEnd, latSigned, "return-crawl", s.sweepBase)
@@ -8453,7 +8465,7 @@ local function updateReturnSnapshot(s, vehicle, playerNum, latSigned)
         if startK < 1 then startK = 1 end
         local lineEnd = s.fstate.ovEndS
         local guardEnd = lineEnd
-        local bandOk = returnLineBandCovers(
+        local bandOk = Drive.lineBandCovers(
             s, s.fstate.ovX, s.fstate.ovY, ovN, ovS0, lineEnd,
             returnPad, startK)
         local guardUnloaded = not bandOk or sen.scanEndS < guardEnd
@@ -8513,7 +8525,7 @@ local function updateReturnSnapshot(s, vehicle, playerNum, latSigned)
         holdUnsafeReturn(s, vehicle, laneStart, buildReason)
         return
     end
-    if not returnLineBandCovers(
+    if not Drive.lineBandCovers(
             s, s.returnX, s.returnY, lineN, lineS0, lineS1, pad, 1) then
         holdUnsafeReturn(s, vehicle, laneStart, "band")
         return
@@ -8949,7 +8961,7 @@ function Drive.extendDodgeExit(s, sen, playerNum)
     s.tmpOvY, s.tmpOv2Y = s.tmpOv2Y, s.tmpOvY
     s.lastOvN, s.lastOvS0, s.lastOvEndS, s.tmpOvEndS = n, s0, covered, covered
     s.dodgeMargin, s.dodgeMarginS = margin, mi and sen.hardS and sen.hardS[mi] or 1e9
-    s.dodgeGuardHardN = sen.hardN
+    s.dodgeGuardHardN, s.dodgeGuardBand = sen.hardN, sen.completedBandBias -- 加長的線是在這張快照驗的
     -- 新線從 rs 重建、點序位移，舊表對不上：清掉，下一個持平輪的補掃（新 ovS0）重收
     s.dodgeClrN, s.dodgeEnvN = 0, 0
     -- 出口側移量與空間帽照承諾時的算法重算（新出口段的連續落點、較長的過渡）
@@ -10579,9 +10591,9 @@ local function guardDemote(s, sen, pm, mi, cOver, cHit, playerNum)
     return margin
 end
 
--- 繞行延後（exit／coverage／unloaded）：這一輪不承諾，先按已知群起點 b 保留煞停距離（接近帽
+-- 繞行延後（exit／coverage／unloaded／lateral-coverage）：這一輪不承諾，先按已知群起點 b 保留煞停距離（接近帽
 -- 指向已知障礙，不是未載入前緣），點雲 sig 不變也要每輪重判。replan 兩個出口共用（主候選 exit
--- 立即延後；coverage／unloaded 在候選鏈全滅後才延後）。
+-- 立即延後；coverage／unloaded／lateral-coverage 在候選鏈全滅後才延後）。
 function Drive.deferDodge(s, playerNum, why, b, c, dS)
     local sen = s.sensor
     s.planSig = -1
@@ -10590,12 +10602,28 @@ function Drive.deferDodge(s, playerNum, why, b, c, dS)
     s.dodgeDeferS = b
     diagEvent(s, playerNum, "dodge", { phase = "defer", why = why,
         b = b, c = c, d = dS, rs = s.lastSNow, span = TUNE.DODGE_OV_SPAN,
-        s = sen.unloadedS, cap = s.dodgeDeferCap })
+        s = sen.unloadedS, cap = s.dodgeDeferCap,
+        l = sen.completedBandBias, band = (s.bandRejectN or 0) > 0 and s.bandRejectN or nil })
     if getDebug() then
         print(string.format(
-            "%spn=%d dodge defer (%s): c=%.1f d=%.1f rs=%.1f unloadedS=%s",
-            LOG, playerNum, why, c, dS or -1, s.lastSNow, tostring(sen.unloadedS)))
+            "%spn=%d dodge defer (%s): c=%.1f d=%.1f rs=%.1f unloadedS=%s band=%.2f bandRej=%d",
+            LOG, playerNum, why, c, dS or -1, s.lastSNow, tostring(sen.unloadedS),
+            sen.completedBandBias or 0, s.bandRejectN or 0))
     end
+end
+
+-- 一般帶候選被橫向覆蓋拒收（sweepLine 的 band）時，要求下一輪以 nav 線為心掃描（同寬帶輪 1004c：Corridor.plan 的候選以
+-- nav 線對稱，帶心在 nav 線＝候選集整個落在帶內）；回 true＝這一輪要求了。帶心已在 nav 線（或寬帶輪）、RETURN 錨定帶心
+-- 時不要求——那一輪仍蓋不住的候選就是真的不可承諾，照判堵階梯。s.bandNavPending 讓那一輪不拿來做路面對中（同寬帶輪）。
+function Drive.bandNavRequest(s)
+    local sen = s.sensor
+    local bb = sen.completedBandBias
+    if (s.bandRejectN or 0) == 0 or sen.wideDone or s.returnActive
+            or not finite(bb) or (bb > -1e-6 and bb < 1e-6) then
+        return false
+    end
+    sen.scanBias, s.bandNavPending = 0, true
+    return true
 end
 
 -- replan 牆鐘遙測（事件用）：本次 replan 有量（stepFollow 讀了開始時戳）＝從 replan 開始到發事件的毫秒，
@@ -10607,7 +10635,7 @@ end
 local function replan(s, vehicle, playerNum)
     s.dodgeDeferCap = s.dodgeHandoffHold and 0 or -1
     s.dodgeDeferS = nil
-    s.steepDeficitM, s.kinRejectN, s.towFoldDeg = -1, 0, nil
+    s.steepDeficitM, s.kinRejectN, s.towFoldDeg, s.bandRejectN = -1, 0, nil, 0
     local sen = s.sensor
     if not sen.ready then return end
     local handoff = false
@@ -10742,16 +10770,18 @@ local function replan(s, vehicle, playerNum)
                 if s.dodgeGuardHardN == nil then
                     s.dodgeGuardHardN = sen.hardN
                 end
+                if s.dodgeGuardBand == nil then s.dodgeGuardBand = sen.completedBandBias end
                 -- 重驗條件：動態世界（移動車）或點雲顯著成長（streaming 載入
                 -- 新障礙、玩家蓋牆——世界真的變了）；數量持平＝量化相位抖動
-                -- ＝信任承諾。
-                local worldGrew = sen.hardN > s.dodgeGuardHardN + 2
+                -- ＝信任承諾。帶心跟上次驗證時不同（停留進入段換到停留 lane 等）也重驗一次：帶一移，一側的點出帶、
+                -- 另一側的點進帶，數量可能持平，高水位看不出線旁換進了沒驗過的硬點（1006）。
+                local worldGrew = sen.hardN > s.dodgeGuardHardN + 2 or sen.completedBandBias ~= s.dodgeGuardBand
                 -- 每個 OBB 本身已涵蓋車尾；從目前中心取樣，不再把車身往後重複放一個 halfL。
                 local guardK = (s.lastSNow - fs.ovS0) / MDADFollower.OV_STEP + 1
                 guardK = guardK - guardK % 1
                 if guardK < 1 then guardK = 1 end
                 if Drive.movingWithin(s, fs.ovEndS) or worldGrew then
-                    s.dodgeGuardHardN = sen.hardN
+                    s.dodgeGuardHardN, s.dodgeGuardBand = sen.hardN, sen.completedBandBias
                     local hitS, hitPh, hitSk, hitX, hitY, pm, mi
                     guardOk, guardMargin, hitS, hitPh, hitSk, hitX, hitY, mi = sweepLine(
                         s, fs.ovX, fs.ovY, fs.ovN, fs.ovS0, fs.ovEndS,
@@ -11263,6 +11293,12 @@ local function replan(s, vehicle, playerNum)
                         print(string.format("%spn=%d sweep enumerate: offL=%.2f ok%s",
                             LOG, playerNum, offL, s.dodgeCrawl and " (crawl)" or ""))
                     end
+                elseif Drive.bandNavRequest(s) and not s.blocked then
+                    -- 有候選只因落在沒掃過的那一側被拒（sweepLine band）：下一輪帶心歸 nav 線補掃（bandNavRequest 先呼叫，
+                    -- 已判堵時同樣要求補掃、但不延後——判堵照舊，免得 blocked／延後逐輪翻；nav 線那一輪再判）。
+                    -- 出口：nav 線那一輪不再要求（帶心已在 nav 線），蓋得住的就承諾、蓋不住或真的沒縫就照判堵階梯。
+                    Drive.deferDodge(s, playerNum, "lateral-coverage", b, c, d)
+                    mode = "clear"
                 elseif s.planDeferWhy and not (sen.wideDone and s.wideArmed) then
                     -- 主候選未覆蓋、鏈裡也沒有覆蓋得到的替代線：回到原本的延後（先按已知群起點煞停）。
                     -- 停在停點的寬帶判堵不延後：延後的接近帽會讓車往群前爬、吃掉進入段跑道，
@@ -11526,7 +11562,13 @@ local function replan(s, vehicle, playerNum)
                 s.stayLanePending = offL
                 sen.scanBias = offL
                 s.laneChained, s.chainKeptLogged = true, nil
+            else
+                -- 承諾中帶心釘在承諾那一輪（1006）：線是在這個帶裡驗過的，守護要看得到整條線——nav 線補掃那一輪承諾的
+                -- 左右遠側線，帶心若回到常駐偏置，線又落到帶外（RETURN 接手時同理：釘在回線中點，不跳到回線目標）。
+                s.dodgeBandBias = sen.completedBandBias
+                sen.scanBias = s.dodgeBandBias
             end
+            s.dodgeGuardBand = sen.completedBandBias -- 守護：帶心跟驗證時不同就重驗（停留進入段帶心換到停留 lane）
             s.trafficLate = false
             -- 玩家可見的減速要有理由：繞行開始提示一次（持續繞行時 sig 每輪微變、
             -- replan 反覆進來，靠 dodgeNotified 防轟；clear/blocked 時重臂）
@@ -11546,6 +11588,8 @@ local function replan(s, vehicle, playerNum)
                 len = s.dodgeCommittedLength, hn = sen.hardN,
                 wms = Drive.replanElapsed(s), sweeps = s.sweepCount,
                 why = s.planDeferWhy, -- 主候選本會延後（window／coverage／unloaded）、由候選鏈的替代線承諾
+                l = sen.completedBandBias, -- 承諾那一輪的帶心（0＝nav 線補掃那一輪，或常駐偏置 0）
+                band = s.bandRejectN > 0 and s.bandRejectN or nil, -- 承諾前落在沒掃過那一側被拒收的候選數
                 thin = s.thinRec and s.thinRec.on and s.thinRec.phys or nil, -- 換縫找更寬時記下最窄那條的物理淨距
                 kin = s.kinRejectN > 0 and s.kinRejectN or nil, -- 承諾前被運動學證明拒收的候選數（Drive.kinProof）
                 fold = s.towFoldDeg, -- 承諾前被掛車折角預檢拒收的候選中最大預估折角（°；Drive.towFold）
@@ -11710,6 +11754,8 @@ local function replan(s, vehicle, playerNum)
     -- 與 Corridor.plan 同一個 minS（車尾）：車後的擋線點不是這次 blocked 的原因
     resolveBlockAnchor(s, sen, vehicle, true, s.lastSNow - s.vehicleProfile.halfL)
     s.planMode = "blocked"
+    -- 判堵這一輪有候選只因落在沒掃過的那一側被拒：維持判堵，下一輪帶心歸 nav 線補掃（候選鏈的延後分支見 bandNavRequest）
+    Drive.bandNavRequest(s)
     -- 寬帶判淨空待確認、這輪一般帶仍判堵＝寬帶那一級判完（看漏不是淨空；Drive.holdWideClear）。寬帶輪判堵照舊。
     if s.wideClearAt ~= nil then
         local lvl = not sen.wideDone and s.wideClearAt == s.episodeAttempts and s.wideClearLvl
@@ -11734,6 +11780,7 @@ local function replan(s, vehicle, playerNum)
             blocker = s.dodgeDeadendS, shape = s.dodgeShapeReason,
             kin = s.kinRejectN > 0 and s.kinRejectN or nil, -- 本輪被運動學證明拒收的候選數（Drive.kinProof）
             fold = s.towFoldDeg, -- 本輪被掛車折角預檢拒收的候選中最大預估折角（°；Drive.towFold）
+            band = s.bandRejectN > 0 and s.bandRejectN or nil, -- 本輪落在沒掃過那一側被拒收的候選數（sweepLine band）
             -- 候選鏈最後記下的命中（sweep 全滅時才有意義）：相位、世界點、牽引車或掛車（0929p）
             hitPhase = s.dodgeBlockReason == "sweep" and s.fbFail and s.fbFail.ph or nil,
             hitX = s.dodgeBlockReason == "sweep" and s.fbFail and s.fbFail.hx or nil,
@@ -11761,6 +11808,7 @@ local function replan(s, vehicle, playerNum)
             wms = Drive.replanElapsed(s), sweeps = s.sweepCount,
             attempt = s.episodeAttempts, detail = s.dodgeBlockReason, shape = s.dodgeShapeReason,
             kin = s.kinRejectN > 0 and s.kinRejectN or nil, fold = s.towFoldDeg,
+            band = s.bandRejectN > 0 and s.bandRejectN or nil,
             hitPhase = s.dodgeBlockReason == "sweep" and s.fbFail and s.fbFail.ph or nil,
             hitX = s.dodgeBlockReason == "sweep" and s.fbFail and s.fbFail.hx or nil,
             hitY = s.dodgeBlockReason == "sweep" and s.fbFail and s.fbFail.hy or nil,
@@ -12240,9 +12288,10 @@ local function stepFollow(s, vehicle, playerNum, now)
                 -- 合成行駛線走 setLaneBias 單一事實源：follower 前視、Corridor
                 -- baseL/prefer、掃掠淨距全部自動吃到。
                 -- 寬帶輪（堵住時 ±14m）的路面帶可能含平行道路／停車場：不拿來對中，沿用上一輪的 roadBias／sandBias。
+                -- 一般帶補掃輪（Drive.bandNavRequest：帶心臨時歸 nav 線）同樣不拿來對中——帶心不在行駛線，兩緣可能出帶＝假衰減。
                 local rc = s.sensor.roadC
-                if s.sensor.wideDone then
-                    rc = nil
+                if s.sensor.wideDone or s.bandNavPending then
+                    rc, s.bandNavPending = nil, nil
                 elseif rc ~= nil then
                     if rc > TUNE.ROAD_CLAMP then rc = TUNE.ROAD_CLAMP
                     elseif rc < -TUNE.ROAD_CLAMP then rc = -TUNE.ROAD_CLAMP end
@@ -12307,7 +12356,8 @@ local function stepFollow(s, vehicle, playerNum, now)
                 elseif finite(s.stayLanePending) then
                     s.sensor.scanBias = s.stayLanePending -- 停留進入段：帶心先跟停留 lane
                 else
-                    s.sensor.scanBias = nb -- 掃描帶跟隨行駛線（下一輪 beginRound 鎖定）
+                    -- 掃描帶跟隨行駛線（下一輪 beginRound 鎖定）；承諾中釘在承諾那一輪的帶心（dodgeBandBias，停留除外）
+                    s.sensor.scanBias = s.dodging and s.dodgeBandBias or nb
                 end
                 -- Current-body OBB is a safety OR-gate in front of the existing planner.
                 -- It consumes this completed immutable snapshot even when sig is unchanged.
