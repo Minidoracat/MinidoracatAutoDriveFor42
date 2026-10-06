@@ -6917,11 +6917,23 @@ function drive.putTree(x, y, name)
     }
 end
 
--- 細桿（0929j）：無碰撞旗標的籬笆 sprite＝Sensor 的格心 0 半徑細桿（引擎不給形狀，保守留著）。0929j 起樹幹照
--- 引擎放在格 +0.6/+0.6、半徑 0.15；需要「格心點狀障礙」幾何的精密夾縫情境（混材縫、守護降檔）改用它，
--- 幾何與這些情境當初設計時的樹幹模型一致。
+-- 細桿（0929j）：無碰撞旗標、帶 HitByCar 的籬笆樁（原版 fencing_01_19 這類）＝Sensor 的格心 0 半徑細桿（引擎不給
+-- 形狀，但 IsoObject.Collision 會把車擋停）。0929j 起樹幹照引擎放在格 +0.6/+0.6、半徑 0.15；需要「格心點狀障礙」
+-- 幾何的精密夾縫情境（混材縫、守護降檔）改用它，幾何與這些情境當初設計時的樹幹模型一致。
+-- 和引擎一致：沒有碰撞旗標＝shouldHaveCollision 為 false；沒有 HitByCar 的無旗標籬笆會被放行（不是細桿）。
 function drive.putPost(x, y, name)
-    drive.putSolid(x, y, "fencing_" .. (name or "harness_post"))
+    local props = { has = function(_, key) return key == "HitByCar" end }
+    local sprite = {
+        shouldHaveCollision = function() return false end,
+        getProperties = function() return props end,
+    }
+    local sq = drive.world[x * 100000 + y] or drive.mkSquare(x, y)
+    sq._objs[#sq._objs + 1] = {
+        getSpriteName = function() return "fencing_" .. (name or "harness_post") end,
+        getSprite = function() return sprite end,
+        getProperties = function() return props end,
+        getType = function() return nil end,
+    }
 end
 
 -- 門／柵門（0928m）：門 sprite 帶 doorN／doorW；格級屬性另有 DoorWallN／W，開著多一個 open（引擎 calcPhysics
@@ -23200,10 +23212,22 @@ function drive.scenario0929j()
     flagObj(58, 3, "lighting_outdoor_01_1", {}, false)
     flagObj(62, 3, "e_harnessJUMBOXL_1_0", { solid = true, StopCar = true }, true, "IsoTree")
     -- issue #7：勃蘭登堡路面散落的籬笆碎片（fencing_damaged_01_168..171，地圖原生）只有 attachedFloor、沒有碰撞旗標
-    -- ＝calcPhysics 不給形狀、車直接壓過。attachedFloor 在引擎是 sprite 旗標（IsoFlagType），不是字串屬性：
-    -- 替身用 IsoFlagType.attachedFloor 的值當鍵、字串 "attachedFloor" 查不到（1006c E2E 勃蘭登堡實機仍判硬點＝
-    -- production 用字串查、舊替身兩種鍵不分而假綠）。違規證明：拿掉 attachedFloor 放行、或改回字串查即紅。
+    -- 也沒有 HitByCar＝calcPhysics 不給形狀、車直接壓過。放行看的是「沒有 HitByCar／CarSlowFactor」，不是 attachedFloor
+    -- （attachedFloor 對車輛沒有作用；它在引擎是 sprite 旗標，字串 has("attachedFloor") 永遠查不到）。
     flagObj(26, 3, "fencing_damaged_01_170", { [IsoFlagType.attachedFloor] = true }, false)
+    -- 無碰撞旗標的籬笆（1006 fence-release）：calcPhysics 不給形狀，車只會被 HitByCar／CarSlowFactor 擋——
+    -- IsoObject.Collision（IsoObject.java:1714-1755）對 HitByCar 物件在車速低於 MinimumCarSpeedDmg（預設 150）時
+    -- 施反向衝量並 setSpeedKmHour(0)。屬性取自原版 .tiles：燒毀殘樁 fencing_burnt_01_3（CanScrap）、空屬性
+    -- fencing_burnt_01_4＝放行；燒毀籬笆樁 fencing_burnt_01_45、地上碎片但帶 HitByCar 的 fencing_damaged_02_81、
+    -- 玩家蓋的木樁 fencing_01_19（entity WoodStake，isThumpable=false）與鐵絲網角柱 fencing_01_61（IsoThumpable）＝不放行。
+    -- 違規證明：放行不看 HitByCar 即紅；放行退回只認 attachedFloor 即紅。
+    flagObj(30, 5, "fencing_burnt_01_3", { CanScrap = true }, false)
+    flagObj(34, 5, "fencing_burnt_01_4", {}, false)
+    flagObj(38, 5, "fencing_burnt_01_45", { HitByCar = true, CanScrap = true }, false)
+    flagObj(42, 5, "fencing_damaged_02_81", { HitByCar = true, [IsoFlagType.attachedFloor] = true }, false)
+    flagObj(46, 5, "fencing_01_19", { HitByCar = true }, false)
+    flagObj(50, 5, "fencing_01_61", { HitByCar = true }, false, "IsoThumpable")
+    flagObj(54, 5, "fencing_harness_slow", { CarSlowFactor = true }, false) -- MOD tile：CarSlowFactor 會壓車速（IsoObject.java:1709-1712）
     checkTrue(armDrive(), "(shape) 啟動")
     setHeading(dveh, 0)
     local st = MDAD.Drive.debugSession(0)
@@ -23232,6 +23256,13 @@ function drive.scenario0929j()
     shapeAt(58.6, 3.6, 0.15, 0, "室外路燈柱＝樹幹形狀")
     shapeAt(62.6, 3.6, 0.15, 0, "帶 solid 的大樹（JUMBO）：引擎只給樹幹，不是整格方塊")
     checkTrue(pointsNear(sen, 26.5, 3.5) == nil, "(shape) 地上籬笆碎片（attachedFloor、無碰撞旗標）：不是硬點")
+    checkTrue(pointsNear(sen, 30.5, 5.5) == nil, "(shape) 燒毀殘樁（無碰撞旗標、無 HitByCar）：放行")
+    checkTrue(pointsNear(sen, 34.5, 5.5) == nil, "(shape) 燒毀籬笆空屬性 sprite：放行")
+    shapeAt(38.5, 5.5, 0, 0, "燒毀籬笆樁（HitByCar）：引擎會把車擋停，格心細桿")
+    shapeAt(42.5, 5.5, 0, 0, "地上碎片但帶 HitByCar：照樣擋，不因 attachedFloor 放行")
+    shapeAt(46.5, 5.5, 0, 0, "玩家蓋的木樁（HitByCar）：格心細桿")
+    shapeAt(50.5, 5.5, 0, 0, "玩家蓋的 IsoThumpable 角柱（HitByCar）：格心細桿")
+    shapeAt(54.5, 5.5, 0, 0, "帶 CarSlowFactor 的無旗標籬笆：會壓車速，格心細桿")
     MDAD.Drive.stop(0, nil)
     drive.fillWorld(-2, 70, -7, 7)
 
@@ -23956,7 +23987,7 @@ function drive.scenarioStopFlip()
     local oldAuto = MDAD.HUD.autoDetour
     MDAD.HUD.autoDetour = function() return false end
     local gone = false
-    local props = { has = function() return false end }
+    local props = { has = function(_, key) return key == "HitByCar" end } -- 籬笆名的物件＝帶 HitByCar 的細桿（見 putPost）
     local sprite = { shouldHaveCollision = function() return true end, getProperties = function() return props end }
     -- 每格一個物件，sprite 名依「這一輪是不是寬帶」決定（nameFor(wide) 回 nil＝這一輪看不到）；gone＝障礙真的移走
     local function place(x, y, nameFor)

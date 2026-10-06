@@ -163,7 +163,7 @@ local HARD_MAX = math.max(LAT_N * (MDADDynamics.PERCEPTION_HARD_MAX_M - SCAN_NEA
 local KEY_MUL = 100000
 
 local COST_NONE, COST_SOFT, COST_HARD = 0, 1, 2
-local COST_HARD_THIN = 3       -- 細桿硬障礙：無碰撞旗標、非地上碎片（attachedFloor）的籬笆 sprite，格心 0 半徑（引擎本身不給形狀，保守留著）
+local COST_HARD_THIN = 3       -- 細桿硬障礙：無碰撞旗標、帶 HitByCar／CarSlowFactor 的籬笆 sprite（籬笆樁），格心 0 半徑（引擎不給形狀，但會把車擋停）
 local COST_TREE = 4            -- 樹幹形狀（樹、室外路燈柱、PhysicsShape=Tree）：見 TRUNK_*
 local COST_DOOR = 5            -- 門／柵門 sprite（doorN／doorW）：開關狀態在格級屬性，由 closedDoor(square) 判
 local COST_WALL_N, COST_WALL_W, COST_WALL_NW = 6, 7, 8 -- 帶 collideN／collideW 的籬笆：格邊薄牆，見 WALL_*
@@ -288,7 +288,7 @@ MDADSensor.SURFACE_PAVED = SURFACE_PAVED
 -- 改成第一輪掃描開始時綁一次，之後每輪只多一次 boolean 比較。
 local F_water, F_doorN, F_doorW, T_moveable
 local F_solid, F_solidtrans, F_collideN, F_collideW, F_solidfloor
-local F_doorWallN, F_doorWallW, F_open, F_attachedFloor
+local F_doorWallN, F_doorWallW, F_open
 local flagsBound = false
 
 local function bindFlags()
@@ -303,10 +303,6 @@ local function bindFlags()
     F_doorWallN = IsoFlagType.DoorWallN
     F_doorWallW = IsoFlagType.DoorWallW
     F_open = IsoFlagType.open
-    -- attachedFloor 是 sprite 旗標（IsoFlagType 72）：IsoWorld.java:737-740 的 set("attachedFloor","true") 經
-    -- PropertyContainer.set(…, checkIsoFlagType=true) 轉成 set(IsoFlagType)，不進字串屬性表——
-    -- props:has("attachedFloor")（字串多載查 TilePropertyAliasMap）永遠是 false，要用旗標查。
-    F_attachedFloor = IsoFlagType.attachedFloor
     T_moveable = IsoObjectType.isMoveAbleObject   -- 枚舉序 28（SpriteDetails/IsoObjectType.java:36）
     flagsBound = true
 end
@@ -404,18 +400,22 @@ local function classifySprite(obj, name)
 
     -- 籬笆照引擎旗標給形狀（IsoChunk.calcPhysics:2058-2095）：solid／solidtrans＝整格方塊，collideN／collideW
     -- ＝格的北緣／西緣 0.1m 薄牆（HoppableN／WallNTrans 等 tile 屬性載入時就轉成 collideN，IsoWorld.java:870-1017）。
-    -- 舊制一律格心 0 半徑：籬笆在近側格邊時模型晚 0.45m 看到、遠側時多擋 0.45m。沒有任何碰撞旗標的籬笆
-    -- sprite 引擎不給形狀；立著的（籬笆樁等）仍留格心 0 半徑（保守），躺在地上的碎片不算障礙：名稱含
-    -- damaged／trash_ 的 sprite 載入時被引擎標 attachedFloor 旗標（IsoWorld.java:737-740；見 bindFlags）。
-    -- issue #7 勃蘭登堡整條街散落 fencing_damaged_01_168..171（地圖原生），被當硬點後寬帶兩級都找不到縫、StopStuck。
+    -- 舊制一律格心 0 半徑：籬笆在近側格邊時模型晚 0.45m 看到、遠側時多擋 0.45m。
+    -- 沒有碰撞旗標的籬笆 calcPhysics 不給形狀，車碰得到它只剩 BaseVehicle.breakingObjects（:2943-2985）：HitByCar／
+    -- CarSlowFactor 物件以格心 0.3m 圓測撞，IsoObject.Collision（IsoObject.java:1707-1755）對 HitByCar 在車速低於
+    -- MinimumCarSpeedDmg（預設 150）時施反向衝量並 setSpeedKmHour(0)＝把車擋停 → 格心 0 半徑細桿。原版是籬笆樁類
+    -- （fencing_01_0/7/19/29/37/61/69…、燒毀籬笆樁 fencing_burnt_01_45/53/61/69、地上碎片 fencing_damaged_0x_81）；
+    -- 玩家蓋的木樁（entity WoodStake）與鐵絲網角柱也是這些 sprite。其餘無旗標籬笆（燒毀殘樁、燒焦地面、地上碎片
+    -- fencing_damaged_01_168..171 等）車直接壓過、不掉速不扣車況，落到下面的通用判定（原版全部 COST_NONE；
+    -- 帶 StopCar／PhysicsShape／門旗標的 MOD tile 照通用規則）。issue #7：勃蘭登堡整條街的地上碎片被當硬點 StopStuck。
+    -- 燒掉的 IsoThumpable 一律換成普通 IsoObject（IsoGridSquare.java:6299-6308、6478-6486），不會帶 blockAllTheSquare。
     if find(name, "fencing_", 1, true) == 1 then
         if props:has(F_solid) or props:has(F_solidtrans) then return COST_HARD end
         local n, w = props:has(F_collideN), props:has(F_collideW)
         if n and w then return COST_WALL_NW end
         if n then return COST_WALL_N end
         if w then return COST_WALL_W end
-        if F_attachedFloor and props:has(F_attachedFloor) then return COST_NONE end
-        return COST_HARD_THIN
+        if props:has("HitByCar") or props:has("CarSlowFactor") then return COST_HARD_THIN end
     end
 
     -- 樹先判：引擎在有樹的格只給 Tree 形狀，solid 分支是 else-if（calcPhysics:2048-2064）——大樹（JUMBO／XL，
