@@ -36,6 +36,8 @@
 --     state.hardL[i]   第 i 個硬障礙的橫向偏移（公尺；數學 CCW 法向為正＝PZ 世界的行進方向右側）：命中的取樣點
 --     state.hardLc[i]  同一點引擎形狀位置（hardX/Y）的橫向偏移（同一局部框）；hardW[i]＝掃掠模型的橫向半寬
 --                      （方塊＝半邊×(|nx|+|ny|)，圓＝半徑）——擋線判定用這一組，縫隙搜尋仍用 hardL／hardR
+--     state.hardV[i]   true＝停放車輛的精確輪廓點（pushVehicleOutline）；其他形狀 false（輪廓點與樹幹同半徑，
+--                      不能拿 hardR 分；格級佔位退回的車也是 false）
 --     state.softN      軟障礙格數（可推開的家具／路邊雜物：撞得過但該減速）
 --     state.zombieN    走廊內殭屍數（±SLOW_BAND_HALF 減速帶；速度檔用）
 --     state.zomN       混合軟目標（s,l）筆數（±4.5 帶），座標語意同 hardS／hardL
@@ -163,7 +165,7 @@ local HARD_MAX = math.max(LAT_N * (MDADDynamics.PERCEPTION_HARD_MAX_M - SCAN_NEA
 local KEY_MUL = 100000
 
 local COST_NONE, COST_SOFT, COST_HARD = 0, 1, 2
-local COST_HARD_THIN = 3       -- 細桿硬障礙：無碰撞旗標、非地上碎片（attachedFloor）的籬笆 sprite，格心 0 半徑（引擎本身不給形狀，保守留著）
+local COST_HARD_THIN = 3       -- 細桿硬障礙：無碰撞旗標、帶 HitByCar／CarSlowFactor 的籬笆 sprite（籬笆樁），格心 0 半徑（引擎不給形狀，但會把車擋停）
 local COST_TREE = 4            -- 樹幹形狀（樹、室外路燈柱、PhysicsShape=Tree）：見 TRUNK_*
 local COST_DOOR = 5            -- 門／柵門 sprite（doorN／doorW）：開關狀態在格級屬性，由 closedDoor(square) 判
 local COST_WALL_N, COST_WALL_W, COST_WALL_NW = 6, 7, 8 -- 帶 collideN／collideW 的籬笆：格邊薄牆，見 WALL_*
@@ -288,7 +290,7 @@ MDADSensor.SURFACE_PAVED = SURFACE_PAVED
 -- 改成第一輪掃描開始時綁一次，之後每輪只多一次 boolean 比較。
 local F_water, F_doorN, F_doorW, T_moveable
 local F_solid, F_solidtrans, F_collideN, F_collideW, F_solidfloor
-local F_doorWallN, F_doorWallW, F_open, F_attachedFloor
+local F_doorWallN, F_doorWallW, F_open
 local flagsBound = false
 
 local function bindFlags()
@@ -303,10 +305,6 @@ local function bindFlags()
     F_doorWallN = IsoFlagType.DoorWallN
     F_doorWallW = IsoFlagType.DoorWallW
     F_open = IsoFlagType.open
-    -- attachedFloor 是 sprite 旗標（IsoFlagType 72）：IsoWorld.java:737-740 的 set("attachedFloor","true") 經
-    -- PropertyContainer.set(…, checkIsoFlagType=true) 轉成 set(IsoFlagType)，不進字串屬性表——
-    -- props:has("attachedFloor")（字串多載查 TilePropertyAliasMap）永遠是 false，要用旗標查。
-    F_attachedFloor = IsoFlagType.attachedFloor
     T_moveable = IsoObjectType.isMoveAbleObject   -- 枚舉序 28（SpriteDetails/IsoObjectType.java:36）
     flagsBound = true
 end
@@ -404,18 +402,22 @@ local function classifySprite(obj, name)
 
     -- 籬笆照引擎旗標給形狀（IsoChunk.calcPhysics:2058-2095）：solid／solidtrans＝整格方塊，collideN／collideW
     -- ＝格的北緣／西緣 0.1m 薄牆（HoppableN／WallNTrans 等 tile 屬性載入時就轉成 collideN，IsoWorld.java:870-1017）。
-    -- 舊制一律格心 0 半徑：籬笆在近側格邊時模型晚 0.45m 看到、遠側時多擋 0.45m。沒有任何碰撞旗標的籬笆
-    -- sprite 引擎不給形狀；立著的（籬笆樁等）仍留格心 0 半徑（保守），躺在地上的碎片不算障礙：名稱含
-    -- damaged／trash_ 的 sprite 載入時被引擎標 attachedFloor 旗標（IsoWorld.java:737-740；見 bindFlags）。
-    -- issue #7 勃蘭登堡整條街散落 fencing_damaged_01_168..171（地圖原生），被當硬點後寬帶兩級都找不到縫、StopStuck。
+    -- 舊制一律格心 0 半徑：籬笆在近側格邊時模型晚 0.45m 看到、遠側時多擋 0.45m。
+    -- 沒有碰撞旗標的籬笆 calcPhysics 不給形狀，車碰得到它只剩 BaseVehicle.breakingObjects（:2943-2985）：HitByCar／
+    -- CarSlowFactor 物件以格心 0.3m 圓測撞，IsoObject.Collision（IsoObject.java:1707-1755）對 HitByCar 在車速低於
+    -- MinimumCarSpeedDmg（預設 150）時施反向衝量並 setSpeedKmHour(0)＝把車擋停 → 格心 0 半徑細桿。原版是籬笆樁類
+    -- （fencing_01_0/7/19/29/37/61/69…、燒毀籬笆樁 fencing_burnt_01_45/53/61/69、地上碎片 fencing_damaged_0x_81）；
+    -- 玩家蓋的木樁（entity WoodStake）與鐵絲網角柱也是這些 sprite。其餘無旗標籬笆（燒毀殘樁、燒焦地面、地上碎片
+    -- fencing_damaged_01_168..171 等）車直接壓過、不掉速不扣車況，落到下面的通用判定（原版全部 COST_NONE；
+    -- 帶 StopCar／PhysicsShape／門旗標的 MOD tile 照通用規則）。issue #7：勃蘭登堡整條街的地上碎片被當硬點 StopStuck。
+    -- 燒掉的 IsoThumpable 一律換成普通 IsoObject（IsoGridSquare.java:6299-6308、6478-6486），不會帶 blockAllTheSquare。
     if find(name, "fencing_", 1, true) == 1 then
         if props:has(F_solid) or props:has(F_solidtrans) then return COST_HARD end
         local n, w = props:has(F_collideN), props:has(F_collideW)
         if n and w then return COST_WALL_NW end
         if n then return COST_WALL_N end
         if w then return COST_WALL_W end
-        if F_attachedFloor and props:has(F_attachedFloor) then return COST_NONE end
-        return COST_HARD_THIN
+        if props:has("HitByCar") or props:has("CarSlowFactor") then return COST_HARD_THIN end
     end
 
     -- 樹先判：引擎在有樹的格只給 Tree 形狀，solid 分支是 else-if（calcPhysics:2048-2064）——大樹（JUMBO／XL，
@@ -563,7 +565,8 @@ end
 -- 最多 4 個虛擬 ban，不經 pushHard，也不占這個 sensor 上限。
 -- b（選填）＝整格方塊的半邊長（世界軸對齊；0／nil＝圓）：掃掠與接觸以方塊算距離，規劃仍用 r。
 -- wHardLc／wHardW：形狀位置在本步局部框的橫向偏移與掃掠模型橫向半寬（擋線判定與世界掃掠同一份幾何，見檔頭）。
-local function pushHard(state, s, l, l4, wx, wy, r, b)
+-- veh＝true 只給車輛精確輪廓點（wHardV；Driver 的證明線窄線爬行 Drive.proofTightArm 認命中物是不是車）。
+local function pushHard(state, s, l, l4, wx, wy, r, b, veh)
     local n = state.wHardN
     if n >= HARD_MAX then state.wHardOverflow = true return end
     n = n + 1
@@ -574,6 +577,7 @@ local function pushHard(state, s, l, l4, wx, wy, r, b)
     state.wHardY[n] = wy
     state.wHardR[n] = r
     state.wHardB[n] = b or 0
+    state.wHardV[n] = veh == true
     local nx, ny = state.nx, state.ny
     state.wHardLc[n] = (wx - state.cx) * nx + (wy - state.cy) * ny
     if b and b > 0 then
@@ -692,7 +696,7 @@ local function pushVehicleOutline(state, cv)
         local l = dx * nx + dy * ny
         local l4 = l * 4
         l4 = l4 - l4 % 1
-        pushHard(state, s, l, l4, px, py, VEH_OUTLINE_R)
+        pushHard(state, s, l, l4, px, py, VEH_OUTLINE_R, nil, true)
     end
     local function edge(ax, ay, bx, by, len)
         local n = len / step
@@ -1293,19 +1297,19 @@ local function finishRound(state, now)
     local ts, tl = state.hardS, state.hardL
     local txw, tyw = state.hardX, state.hardY
     local tr, tb = state.hardR, state.hardB
-    local tc, tw = state.hardLc, state.hardW
+    local tc, tw, tv = state.hardLc, state.hardW, state.hardV
     state.hardS = state.wHardS
     state.hardL = state.wHardL
     state.hardX = state.wHardX
     state.hardY = state.wHardY
     state.hardR, state.hardB = state.wHardR, state.wHardB
-    state.hardLc, state.hardW = state.wHardLc, state.wHardW
+    state.hardLc, state.hardW, state.hardV = state.wHardLc, state.wHardW, state.wHardV
     state.wHardS = ts
     state.wHardL = tl
     state.wHardX = txw
     state.wHardY = tyw
     state.wHardR, state.wHardB = tr, tb
-    state.wHardLc, state.wHardW = tc, tw
+    state.wHardLc, state.wHardW, state.wHardV = tc, tw, tv
 
     state.hardN = state.wHardN
     state.hardOverflow = state.wHardOverflow == true
@@ -1441,6 +1445,7 @@ function MDADSensor.newState()
         nx = 0, ny = 1,
         z = 0,
         wHardS = {}, wHardL = {}, wHardX = {}, wHardY = {}, wHardR = {}, wHardB = {}, wHardLc = {}, wHardW = {},
+        wHardV = {},
         wHardN = 0,
         wHardOverflow = false,
         wZombieN = 0,
@@ -1490,6 +1495,7 @@ function MDADSensor.newState()
         -- 已完成的結果（呼叫端只讀這一組）
         hardS = {}, hardL = {}, hardX = {}, hardY = {}, hardR = {}, hardB = {}, -- hardX/Y＝世界座標（掃掠複驗）；hardR／hardB＝逐點半徑／方塊半邊（見 pushShape）
         hardLc = {}, hardW = {}, -- 形狀位置的橫向偏移／掃掠模型橫向半寬（擋線判定，見檔頭）
+        hardV = {},         -- 車輛精確輪廓點＝true（見檔頭）
         hardN = 0,
         hardOverflow = false,
         zombieN = 0,

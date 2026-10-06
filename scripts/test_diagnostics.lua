@@ -1557,8 +1557,10 @@ check(string.find(envHeader, '"rev":', 1, true) < string.find(envHeader, '"game"
 -- opts（0904i）：自動改道／語音／沙盒三值；任一 getter 拋錯只省略該項，其餘照記。
 -- 0906a 加 resume（手動介入後恢復 ms；0＝介入即關閉），排在 voice 之後、沙盒之前。
 -- 1006 加 zslow／cslow（殭屍／屍體減速：政策×偏好合成，Drive.hudState 第 4／5 值），排在 driver 段。
--- 違規證明：不寫 zslow／cslow＝這條紅。
+-- 1006 加 side（側向脫困選項，預設關），排在 detour 之後。
+-- 違規證明：不寫 zslow／cslow＝這條紅；不寫 side＝這條紅。
 MDAD.HUD.autoDetour = function() return false end
+MDAD.HUD.sideEscape = function() return true end
 MDAD.HUD.voiceEnabled = function() error("voice boom") end
 MDAD.HUD.manualResumeMs = function() return 0 end
 MDAD.HUD.uturnMode = function() return "gentle" end
@@ -1572,10 +1574,10 @@ MDADDiagnostics.start(0, nil, profile)
 MDADDiagnostics.stop(0, "end")
 local optsHeader = files[sessionPath(1)] or ""
 check(string.find(optsHeader,
-    '"opts":"detour=false;resume=0;uturn=gentle;zslow=true;cslow=false;policy=1;maxKmh=70;laneBias=1.5"', 1, true) ~= nil,
-    "opts records detour/resume/uturn/zombie-corpse slowdown/sandbox values; throwing voice getter omits only itself")
-MDAD.HUD.autoDetour, MDAD.HUD.voiceEnabled, MDAD.HUD.manualResumeMs, MDAD.HUD.uturnMode, MDAD.sandbox =
-    nil, nil, nil, nil, nil
+    '"opts":"detour=false;side=true;resume=0;uturn=gentle;zslow=true;cslow=false;policy=1;maxKmh=70;laneBias=1.5"', 1, true) ~= nil,
+    "opts records detour/side/resume/uturn/zombie-corpse slowdown/sandbox values; throwing voice getter omits only itself")
+MDAD.HUD.autoDetour, MDAD.HUD.sideEscape, MDAD.HUD.voiceEnabled, MDAD.HUD.manualResumeMs, MDAD.HUD.uturnMode, MDAD.sandbox =
+    nil, nil, nil, nil, nil, nil
 MDAD.Drive = nil
 function getActivatedMods() error("boom") end
 resetFs()

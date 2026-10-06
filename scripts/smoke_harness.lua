@@ -6927,11 +6927,23 @@ function drive.putTree(x, y, name)
     }
 end
 
--- 細桿（0929j）：無碰撞旗標的籬笆 sprite＝Sensor 的格心 0 半徑細桿（引擎不給形狀，保守留著）。0929j 起樹幹照
--- 引擎放在格 +0.6/+0.6、半徑 0.15；需要「格心點狀障礙」幾何的精密夾縫情境（混材縫、守護降檔）改用它，
--- 幾何與這些情境當初設計時的樹幹模型一致。
+-- 細桿（0929j）：無碰撞旗標、帶 HitByCar 的籬笆樁（原版 fencing_01_19 這類）＝Sensor 的格心 0 半徑細桿（引擎不給
+-- 形狀，但 IsoObject.Collision 會把車擋停）。0929j 起樹幹照引擎放在格 +0.6/+0.6、半徑 0.15；需要「格心點狀障礙」
+-- 幾何的精密夾縫情境（混材縫、守護降檔）改用它，幾何與這些情境當初設計時的樹幹模型一致。
+-- 和引擎一致：沒有碰撞旗標＝shouldHaveCollision 為 false；沒有 HitByCar 的無旗標籬笆會被放行（不是細桿）。
 function drive.putPost(x, y, name)
-    drive.putSolid(x, y, "fencing_" .. (name or "harness_post"))
+    local props = { has = function(_, key) return key == "HitByCar" end }
+    local sprite = {
+        shouldHaveCollision = function() return false end,
+        getProperties = function() return props end,
+    }
+    local sq = drive.world[x * 100000 + y] or drive.mkSquare(x, y)
+    sq._objs[#sq._objs + 1] = {
+        getSpriteName = function() return "fencing_" .. (name or "harness_post") end,
+        getSprite = function() return sprite end,
+        getProperties = function() return props end,
+        getType = function() return nil end,
+    }
 end
 
 -- 門／柵門（0928m）：門 sprite 帶 doorN／doorW；格級屬性另有 DoorWallN／W，開著多一個 open（引擎 calcPhysics
@@ -11640,10 +11652,12 @@ MDAD.Drive.stop(0, nil)
 -- ⑪b 調頭探測被擋的大弧（1006，使用者決定 2B）：正式服 1002y～1005j 被擋大弧 23 次撞 4 次（8.6–13.9 km/h）、
 --    耦力原地轉 9 次 0 撞。目標壓到 UTURN_BLOCKED_KMH 3（引擎 delta ≤1 m/s 不 crash，BaseVehicle.java:3420-3443；
 --    regulator 整數化，3.5 會送 4＝1.11 m/s）、側推夾到 UTURN_BLOCKED_STEER 0.5（滿舵 5 一推就 vt 2–3 m/s 側滑）；
---    淨空照舊 crawl（溫和 4／快速 12）＋耦力；探測結果進 uturn probe 事件（console 原本只有 debug print）。
-function drive.scenarioUturnBlockedArc()
-    scenario("調頭探測被擋：大弧壓速＋側推夾限；淨空照舊耦力；探測結果進遙測")
-    local savedTelemetry, savedMode = MDAD.HUD.telemetryEnabled, drive.uturnMode
+--    淨空照舊 crawl（溫和 4；快速 12）＋耦力；探測結果進 uturn probe 事件（console 原本只有 debug print）。
+--    sideOn：側向脫困選項開著再跑一次（2026-10-06 使用者裁定：調頭流程中不側推）——全部斷言照舊。
+function drive.scenarioUturnBlockedArc(sideOn)
+    scenario("調頭探測被擋：大弧壓速＋側推夾限；淨空照舊耦力；探測結果進遙測" .. (sideOn and "（側向脫困選項開）" or ""))
+    local savedTelemetry, savedMode, savedSide = MDAD.HUD.telemetryEnabled, drive.uturnMode, MDAD.HUD.sideEscape
+    MDAD.HUD.sideEscape = function() return sideOn == true end
     local savedStart, savedEvent, savedSample, savedStop =
         MDADDiagnostics.start, MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.stop
     local probes = {}
@@ -11655,7 +11669,7 @@ function drive.scenarioUturnBlockedArc()
         if name == "uturn" and type(a) == "table" and a.phase == "probe" then probes[#probes + 1] = a end
     end
     for _, mode in ipairs({ "gentle", "fast" }) do
-        local tag = "(" .. mode .. ") "
+        local tag = "(" .. mode .. (sideOn and " 側推開" or "") .. ") "
         drive.uturnMode = mode
         checkTrue(armDrive(), tag .. "啟動")
         dveh._x, dveh._y, dveh._speed = 10, 0, 0
@@ -11708,11 +11722,12 @@ function drive.scenarioUturnBlockedArc()
         MDAD.Drive.stop(0, nil)
     end
     drive.uturnMode = savedMode
-    MDAD.HUD.telemetryEnabled = savedTelemetry
+    MDAD.HUD.telemetryEnabled, MDAD.HUD.sideEscape = savedTelemetry, savedSide
     MDADDiagnostics.start, MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.stop =
         savedStart, savedEvent, savedSample, savedStop
 end
 drive.scenarioUturnBlockedArc()
+drive.scenarioUturnBlockedArc(true)
 
 -- =====================================================================
 -- 情境二十八b：immutable DODGE 承諾語意＋停等豁免（2026-08-28 對抗審紅測試）
@@ -12056,52 +12071,89 @@ local function scenarioDetour()
     checkTrue(not MDAD.Drive.isActive(0), "(c5b) 停等 18s 超時交還")
     checkEq(drive.infoHaloIndex(), nil, "(c5b) 同一啟動不重複診斷提示（首次在 (ex)）")
     MDAD.Drive.stop(0, nil)
-    checkTrue(armDrive(), "(c5c) 啟動")
-    dveh._x = 11
-    driveTick(dp, dveh)
-    drive.scanRound()
-    dveh._speed = 0
-    driveReset(dveh)
-    driveTick(dp, dveh)
-    drive.wideRounds(true) -- 寬帶判堵到最寬一級
-    nav.detourCalls = 0
-    -- (c5c-ev) 1004b：每次改道請求記一筆 detour 事件（phase auto／manual／stuck／skip、why＝結果）；舊制自動改道被拒
-    --   只在 Debug console。違規證明：requestDetour 不記事件＝紅。
-    local detourEv, realEvent = {}, MDADDiagnostics.event
-    -- 本情境沒開本機紀錄：diagEvent 要 s.diag，而每幀 sample 回非 true 會把它關掉——取樣先回 true
-    local realSample = MDADDiagnostics.sample
-    MDADDiagnostics.sample = function() return true end
-    MDAD.Drive.debugSession(0).diag = true
-    MDADDiagnostics.event = function(pn, name, a, ...)
-        if name == "detour" and type(a) == "table" then detourEv[#detourEv + 1] = a end
-        return realEvent(pn, name, a, ...)
+    -- (c5c 側推開／c5c 兩側堵) 2026-10-06 使用者裁定：側向脫困是玩家選項（預設關）。選項開時前後皆堵先側推；側推收手
+    --   （harness 車不動＝stall）或兩側皆堵（why=none）後停等累計照舊，12s 內照樣自動問主 MOD 改道。
+    --   側推用掉一次額度（和倒車一樣）：寬帶要在新嘗試重判一輪才放行改道（wideJudged），遊戲裡停等期間掃描不停、
+    --   約一秒判完；harness 一次跳 6s 沒有掃描，所以收手後補跑寬帶輪。重判完 episodeAttempts≥1＝「倒過又被同一處
+    --   堵住」，累計過 BLOCK_RETRY_MS 就問（不必等到 AUTO_DETOUR_MS）。
+    --   兩側堵：x=9..13 的 y=−3／y=2 牆（側帶內、離車身 1.1m；y=1 那種貼身 0.1m 的牆會讓意圖成 STOP，與本選項無關）。
+    local oldSide = MDAD.HUD.sideEscape
+    for _, variant in ipairs({ "", " 側推開", " 兩側堵" }) do
+        local tag = "(c5c" .. variant .. ")"
+        local sideOn, pushed = variant ~= "", variant == " 側推開"
+        MDAD.HUD.sideEscape = function() return sideOn end
+        if variant == " 兩側堵" then
+            for x = 9, 13 do
+                drive.putSolid(x, -3, "harness_sidewall_" .. x .. "_-3")
+                drive.putSolid(x, 2, "harness_sidewall_" .. x .. "_2")
+            end
+        end
+        checkTrue(armDrive(), tag .. " 啟動")
+        dveh._x, dveh._y = 11, 0
+        setHeading(dveh, 0)
+        driveTick(dp, dveh)
+        drive.scanRound()
+        dveh._speed = 0
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        drive.wideRounds(true) -- 寬帶判堵到最寬一級
+        nav.detourCalls = 0
+        -- (c5c-ev) 1004b：每次改道請求記一筆 detour 事件（phase auto／manual／stuck／skip、why＝結果）；舊制自動改道被拒
+        --   只在 Debug console。違規證明：requestDetour 不記事件＝紅。
+        local detourEv, sideEv, realEvent = {}, {}, MDADDiagnostics.event
+        -- 本情境沒開本機紀錄：diagEvent 要 s.diag，而每幀 sample 回非 true 會把它關掉——取樣先回 true
+        local realSample = MDADDiagnostics.sample
+        MDADDiagnostics.sample = function() return true end
+        MDAD.Drive.debugSession(0).diag = true
+        MDADDiagnostics.event = function(pn, name, a, ...)
+            if name == "detour" and type(a) == "table" then detourEv[#detourEv + 1] = a end
+            if name == "unstick" and type(a) == "table" and a.phase == "side" then sideEv[#sideEv + 1] = a.why end
+            return realEvent(pn, name, a, ...)
+        end
+        MDAD.HUD.autoDetour = function() return true end
+        nowMs = nowMs + 6000
+        local t12 = nowMs + 6000
+        driveTick(dp, dveh)
+        checkEq(nav.detourCalls, 0, tag .. " 自動改道開：6s 還沒到門檻（先讓 blocked-retry 試）")
+        checkEq(sideEv[1], pushed and "start" or sideOn and "none" or nil,
+            tag .. " blocked-retry 倒不了：選項關不探側帶／開且有空間先側推／兩側皆堵 why=none（實得 "
+            .. tostring(sideEv[1]) .. "）")
+        if pushed then
+            checkEq(MDAD.Drive.hudState(0), "side", tag .. " 側推中 HUD 狀態鍵 side（側向挪車中）")
+            for _ = 1, 6 do
+                nowMs = nowMs + 250
+                driveReset(dveh)
+                driveTick(dp, dveh)
+            end
+            checkEq(sideEv[2], "stall", tag .. " 側推推不動：stall 收手（實得 " .. tostring(sideEv[2]) .. "）")
+            checkEq(MDAD.Drive.hudState(0), "blocked", tag .. " 收手回停等")
+            drive.wideRounds(true)
+        end
+        nowMs = t12
+        driveTick(dp, dveh)
+        checkEq(nav.detourCalls, 1, tag .. " 累計 12s 自動問主 MOD 一次")
+        checkEq(drive.lastVoice(), "nodetour", tag .. " 主 MOD 無路：語音 nodetour")
+        nowMs = nowMs + 2000
+        driveTick(dp, dveh)
+        checkEq(nav.detourCalls, 1, tag .. " 同一停等 episode 不重問")
+        local ev1 = detourEv[1]
+        local minMs = pushed and MDAD.Drive.debugTune().BLOCK_RETRY_MS or 10000
+        checkTrue(#detourEv == 1 and ev1.phase == "auto" and ev1.why ~= "ok" and type(ev1.ms) == "number" and ev1.ms >= minMs,
+            tag .. "-ev 自動改道被拒記一筆 detour（phase " .. tostring(ev1 and ev1.phase) .. "、why " .. tostring(ev1 and ev1.why)
+            .. "、等了 " .. tostring(ev1 and ev1.ms) .. " ms）")
+        MDAD.HUD.autoDetour = function() return false end
+        MDAD.Drive.stuckDetour(MDAD.Drive.debugSession(0), 0)
+        local ev2 = detourEv[2]
+        checkTrue(ev2 ~= nil and ev2.phase == "skip" and ev2.why == "off",
+            tag .. "-ev 交還前改道因選項關沒問也記一筆（phase " .. tostring(ev2 and ev2.phase) .. "、why " .. tostring(ev2 and ev2.why) .. "）")
+        MDADDiagnostics.event, MDADDiagnostics.sample = realEvent, realSample
+        MDAD.Drive.debugSession(0).diag = false
+        MDAD.Drive.stop(0, nil)
     end
-    MDAD.HUD.autoDetour = function() return true end
-    nowMs = nowMs + 6000
-    driveTick(dp, dveh)
-    checkEq(nav.detourCalls, 0, "(c5c) 自動改道開：6s 還沒到門檻（先讓 blocked-retry 試）")
-    nowMs = nowMs + 6000
-    driveTick(dp, dveh)
-    checkEq(nav.detourCalls, 1, "(c5c) 累計 12s 自動問主 MOD 一次")
-    checkEq(drive.lastVoice(), "nodetour", "(c5c) 主 MOD 無路：語音 nodetour")
-    nowMs = nowMs + 2000
-    driveTick(dp, dveh)
-    checkEq(nav.detourCalls, 1, "(c5c) 同一停等 episode 不重問")
-    local ev1 = detourEv[1]
-    checkTrue(#detourEv == 1 and ev1.phase == "auto" and ev1.why ~= "ok" and type(ev1.ms) == "number" and ev1.ms >= 10000,
-        "(c5c-ev) 自動改道被拒記一筆 detour（phase " .. tostring(ev1 and ev1.phase) .. "、why " .. tostring(ev1 and ev1.why)
-        .. "、等了 " .. tostring(ev1 and ev1.ms) .. " ms）")
-    MDAD.HUD.autoDetour = function() return false end
-    MDAD.Drive.stuckDetour(MDAD.Drive.debugSession(0), 0)
-    local ev2 = detourEv[2]
-    checkTrue(ev2 ~= nil and ev2.phase == "skip" and ev2.why == "off",
-        "(c5c-ev) 交還前改道因選項關沒問也記一筆（phase " .. tostring(ev2 and ev2.phase) .. "、why " .. tostring(ev2 and ev2.why) .. "）")
-    MDADDiagnostics.event, MDADDiagnostics.sample = realEvent, realSample
-    MDAD.Drive.debugSession(0).diag = false
-    MDAD.HUD.autoDetour = oldAuto
+    MDAD.HUD.autoDetour, MDAD.HUD.sideEscape = oldAuto, oldSide
+    for x = 9, 13 do drive.clearCell(x, -3); drive.clearCell(x, 2) end
     for _, y in ipairs({ -5, -4, -2, -1, 0, 1, 2, 4, 5 }) do drive.clearCell(20, y) end
     for _, y in ipairs({ -1, 0, 1 }) do drive.clearCell(7, y) end
-    MDAD.Drive.stop(0, nil)
 
     -- (c5d) 實機序列（2026-09-02 定罪「勾了自動改道也沒效」）：後方淨空 → 5s
     -- blocked-retry 真的倒車 → 開回原地又堵 → 非 WAIT 幀已清 blockRetryDone →
@@ -13161,6 +13213,117 @@ function drive.scenarioKinProof()
     drive.fillWorld(-2, 70, -7, 7)
 end
 drive.scenarioKinProof()
+
+-- (tow-fold) 1006 拖車一般帶候選的掛車折角預檢（2026-10-06 使用者裁定方案 B；issue #6 Fallas Lake：一般帶 crawl-nudge κ0.67 切內線、
+--   折角 −45° 超過倒車門檻 REVERSE_HITCH_MAX，倒車被跳過、原地卡到 StopStuck）。淨空路、測試鉤直接餵（牽引車掃掠與 kinProof 都過），
+--   假掛車 L2 8、掛點車後 2m、起始折角 0：
+--   (tow-fold) 2.25m 側移塞 4.5m 進入段（κ≈0.67）＝拒收（kind towfold、towFoldDeg >30）；(tow-fold-stay) 停留線 1.5m 塞 2m＝拒收
+--   (tow-fold-gentle) 同側移 14m 進入段＝照收；(tow-fold-car) 非拖車同一條陡線照收；(tow-fold-wide) 寬帶不驗折角（掛車掃掠另驗）
+--   (tow-fold-start) 起步時已折 40°、候選只偏 0.25m：預估折角從 40° 起但不是候選加的（同點基準線一樣大）＝照收
+--   (tow-fold-phi0) 起步折角從實測起算：自己 ~23° 的線，起步已同側折 20°＝疊過門檻拒收、反側＝照收
+--   (tow-fold-ladder) 真 replan：門檻壓到 1°＝候選鏈全滅→判堵（blocked 事件 fold 有值、不承諾）；門檻照常＝同一佈局承諾
+--   違規證明：sweepCandidate／sweepStay 不呼叫 Drive.towFold＝(tow-fold)／(tow-fold-stay)／(tow-fold-ladder) 紅；拿掉寬帶排除＝(tow-fold-wide)
+--   紅；拿掉基準線比較（只比門檻）＝(tow-fold-start) 紅；起始軸向不減 phi0＝(tow-fold-phi0) 紅；不寫 kind／fold＝(tow-fold) 紅。
+function drive.scenarioTowFold()
+    scenario("1006：拖車一般帶候選的掛車折角預檢——候選把折角推過倒車門檻＝拒收、判堵階梯接手；緩和線、非拖車、寬帶照舊")
+    local T = MDAD.Drive.debugTune()
+    drive.fillWorld(-10, 120, -8, 8)
+    checkTrue(armDrive(), "(tow-fold) 啟動")
+    setHeading(dveh, 0)
+    driveReset(dveh)
+    drive.scanRound()
+    local st = MDAD.Drive.debugSession(0)
+    local rs = st.lastSNow
+    local geo = { trailer = { getForwardVector = function(_, out) return out:set(dveh._fwdX, 0, dveh._fwdY) end,
+            getUpVectorDot = function() return 1 end },
+        L2 = 8, hitchZ = -2, hitchX = 0, boxBack = 5, boxSide = 0, halfW = 1.25, halfL = 6, hitchToRear = 11,
+        trailLen = 13, mass = 1500, axisSign = 1 }
+    local function probe(tow, phi, lb, offL, stay)
+        st.tow, st.towPhi, st.sweepHitBody, st.towFoldDeg = tow, phi, nil, nil
+        local ok
+        if stay then
+            ok = MDAD.Drive.debugSweepStay(0, rs + 1, rs + 1 + lb, rs + 16, offL)
+        else
+            ok = MDAD.Drive.debugSweepCandidate(0, rs + 1, rs + 1 + lb, rs + 16, rs + 16 + lb, offL)
+        end
+        local body, deg = st.sweepHitBody, st.towFoldDeg
+        st.tow, st.towPhi = nil, nil
+        return ok, body, deg
+    end
+    local ok, body, deg = probe(geo, 0, 4.5, -2.25)
+    checkTrue(ok == false and body == "towfold" and type(deg) == "number" and deg > 30,
+        "(tow-fold) 拖車、2.25m 側移塞 4.5m（κ≈0.67）：預估折角 " .. tostring(deg and string.format("%.1f", deg))
+        .. "° 超過倒車門檻＝拒收（ok=" .. tostring(ok) .. " kind=" .. tostring(body) .. "）")
+    -- 停留線從車位起換道（rs→b），lane 夾在路面內：1.5m 側移塞 2m
+    ok, body, deg = probe(geo, 0, 1, -1.5, true)
+    checkTrue(ok == false and body == "towfold" and type(deg) == "number" and deg > 30,
+        "(tow-fold-stay) 停留線 1.5m 側移塞 2m：預估折角 " .. tostring(deg and string.format("%.1f", deg)) .. "°＝拒收（ok="
+        .. tostring(ok) .. " kind=" .. tostring(body) .. "）")
+    ok, body = probe(geo, 0, 14, -2.25)
+    checkTrue(ok == true and body == nil, "(tow-fold-gentle) 同側移 14m 進入段：照收（ok=" .. tostring(ok) .. "）")
+    ok = probe(nil, nil, 4.5, -2.25)
+    checkTrue(ok == true, "(tow-fold-car) 非拖車同一條陡線：照收（ok=" .. tostring(ok) .. "）")
+    st.sensor.wideDone, st.sensor.corridorHalf = true, 14
+    ok, body = probe(geo, 0, 4.5, -2.25)
+    st.sensor.wideDone, st.sensor.corridorHalf = false, 7
+    checkTrue(ok == true and body ~= "towfold", "(tow-fold-wide) 寬帶不驗折角（掛車掃掠另驗）：照收（ok=" .. tostring(ok) .. "）")
+    ok, body, deg = probe(geo, 40 * math.pi / 180, 14, -0.25)
+    checkTrue(ok == true and body == nil, "(tow-fold-start) 起步已折 40°、候選只偏 0.25m：折角不是候選加的＝照收（ok="
+        .. tostring(ok) .. " kind=" .. tostring(body) .. "）")
+    -- (tow-fold-phi0) 起始折角疊加：2.25m 側移塞 9m 自己約 23°（照收）；起步已往同側折 20° 時疊到 >30°＝拒收、往另一側折＝照收
+    local ok0 = probe(geo, 0, 9, -2.25)
+    local okP = probe(geo, 20 * math.pi / 180, 9, -2.25)
+    local okM = probe(geo, -20 * math.pi / 180, 9, -2.25)
+    checkTrue(ok0 == true and okP ~= okM, "(tow-fold-phi0) 起始折角從實測起算：0° 照收、±20° 恰一側疊過門檻拒收（0="
+        .. tostring(ok0) .. " +20=" .. tostring(okP) .. " −20=" .. tostring(okM) .. "）")
+    -- (tow-fold-ladder) 真 replan：車停在車位、前方 22m 擋原車道的硬物。門檻 1°／容許量 0＝任何側移都超過
+    local oldEvent, oldSample, oldShould = MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.shouldSample
+    local events = {}
+    MDADDiagnostics.event = function(_, name, a) events[#events + 1] = { name = name, a = a } end
+    MDADDiagnostics.shouldSample = function() return false end
+    MDADDiagnostics.sample = function() return true end
+    local wasMs = drive.frameMs(10)
+    local function ladder(limDeg)
+        MDAD.Drive.stop(0, nil)
+        drive.fillWorld(-10, 120, -8, 8)
+        checkTrue(armDrive(), "(tow-fold-ladder) 啟動")
+        setHeading(dveh, 0)
+        local s = MDAD.Drive.debugSession(0)
+        s.tow = geo
+        dveh._speed = 0
+        drive.putSolid(math.floor(dveh._x) + 22, 0, "tow_fold_obs")
+        local oldLim, oldTol = T.TOW_DODGE_FOLD_MAX, T.TOW_DODGE_FOLD_TOL
+        T.TOW_DODGE_FOLD_MAX = limDeg * math.pi / 180
+        if limDeg < 30 then T.TOW_DODGE_FOLD_TOL = 0 end
+        events = {}
+        driveReset(dveh)
+        s.diag = true
+        drive.scanRound(true)
+        T.TOW_DODGE_FOLD_MAX, T.TOW_DODGE_FOLD_TOL = oldLim, oldTol
+        local blk, com
+        for _, e in ipairs(events) do
+            if e.name == "blocked" and e.a and e.a.why == "plan" then blk = e.a end
+            if e.name == "dodge" and e.a and e.a.phase == "commit" then com = e.a end
+        end
+        drive.clearCell(math.floor(dveh._x) + 22, 0)
+        return s, blk, com
+    end
+    local s1, blk1, com1 = ladder(1)
+    checkTrue(s1.blocked == true and s1.dodging ~= true and com1 == nil and blk1 ~= nil and type(blk1.fold) == "number"
+            and blk1.fold > 1,
+        "(tow-fold-ladder) 門檻 1°：候選鏈全滅→判堵、不承諾，blocked 事件記預估折角（fold=" .. tostring(blk1 and blk1.fold)
+        .. " kind=" .. tostring(blk1 and blk1.kind) .. " blocked=" .. tostring(s1.blocked) .. " dodging=" .. tostring(s1.dodging) .. "）")
+    local s2, _, com2 = ladder(30)
+    checkTrue(s2.dodging == true and com2 ~= nil,
+        "(tow-fold-ladder) 門檻照常（30°）：同一佈局照常承諾（dodging=" .. tostring(s2.dodging) .. " fold="
+        .. tostring(com2 and com2.fold) .. "）")
+    drive.frameMs(wasMs)
+    MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.shouldSample = oldEvent, oldSample, oldShould
+    s2.tow = nil
+    MDAD.Drive.stop(0, nil)
+    drive.fillWorld(-2, 70, -7, 7)
+end
+drive.scenarioTowFold()
 
 -- (c8) MP 假速度域（2026-09-02 s012：regulator 70、直路 30 秒貼死 51 km/h）：
 --      CarController 用 v·lerp(1, fake, (v/min(120,SpeedLimit))²) 與 regulatorSpeed
@@ -18100,15 +18263,15 @@ scenario("調頭＋blocked：遠處不倒車、近處才退、額度用盡不空
 end
 scenarioUturnBlocked()
 
--- (side) 1006 前後皆堵的側向脫困（實驗，TUNE.SIDE_ESCAPE 預設關，本情境暫開）：最短倒車帶也命中、前方被擋時，
+-- (side) 1006 前後皆堵的側向脫困（實驗；玩家選項 SideEscape＝HUD.sideEscape，預設關，本情境暫開）：最短倒車帶也命中、前方被擋時，
 --   探車身兩側 SIDE_ESCAPE_ROOM_M 的側帶，只往淨空的一側推純橫向中心衝量（每幀 Δv ≤ DV_MAX、橫向速度到 KMH 不推）；
 --   到位 settle 後接回倒車鏈（rear 清就倒車、仍擋再側推，共用 UNSTICK_MAX）；兩側皆堵、停滯、偏航、側帶變不清
 --   都回停等照舊交還。車頭對 +x：dir=+1＝(−fy,fx)＝+y 側。
 function drive.scenarioSideEscape()
     scenario("前後皆堵側向脫困：只往有空間的一側、每幀衝量有上限、到位接回倒車；兩側皆堵／停滯照舊交還")
     local T = MDAD.Drive.debugTune()
-    local savedOn = T.SIDE_ESCAPE
-    T.SIDE_ESCAPE = true
+    local savedSide = MDAD.HUD.sideEscape
+    MDAD.HUD.sideEscape = function() return true end
     local savedTelemetry = MDAD.HUD.telemetryEnabled
     MDAD.HUD.telemetryEnabled = function() return true end -- 事件要 s.diag
     local savedStart, savedEvent, savedSample, savedStop =
@@ -18187,6 +18350,7 @@ function drive.scenarioSideEscape()
     checkEq(st.unstickSide, 1, "(side-a) 往淨空的 dir=+1 側（實得 " .. tostring(st.unstickSide) .. "）")
     checkEq(sides[1] and sides[1].why, "start", "(side-a) 事件 unstick phase=side why=start")
     checkEq(sides[1] and sides[1].dir, 1, "(side-a) start 事件帶 dir")
+    checkEq(MDAD.Drive.hudState(0), "side", "(side-a) HUD 狀態鍵 side（側向挪車中，不是倒車脫困）")
     checkNear(st.unstickTravelM, T.SIDE_ESCAPE_ROOM_M - T.REAR_KEEP_M, 1e-9, "(side-a) 橫移上限＝側帶−KEEP")
     local mass = st.runtimeMass
     local function dv()
@@ -18231,6 +18395,14 @@ function drive.scenarioSideEscape()
     checkTrue(st.unstickSide == nil and evs["unstick:start"] ~= nil, "(side-a) 這次是倒車（unstick start），不是側推")
     checkEq(st.episodeAttempts, 3, "(side-a) 側推兩次＋倒車一次共用額度")
     MDAD.Drive.stop(0, nil)
+
+    -- (side-off) 選項關（getter 缺席＝HUD 缺席同義）：同一版面不探側帶、不側推，照舊回停等
+    MDAD.HUD.sideEscape = nil
+    st = startSide("(side-off)", { -2 })
+    checkEq(st.mode, "follow", "(side-off) 選項關：不進側推（mode 實得 " .. tostring(st.mode) .. "）")
+    checkEq(#sides, 0, "(side-off) 選項關：零 side 事件（不探側帶）")
+    MDAD.Drive.stop(0, nil)
+    MDAD.HUD.sideEscape = function() return true end
 
     -- (side-b) 兩側都沒空間：不側推，事件 why=none，照舊回停等 → 15s StopStuck
     st = startSide("(side-b)", { -2, 1 })
@@ -18292,6 +18464,15 @@ function drive.scenarioSideEscape()
     checkFalse(MDAD.Drive.sideEscapeStart(st, dveh, 0, nowMs, 11, 0, "hard", "vehicle", nil),
         "(side-g) 無旗標、車頭前 1m 淨空：不側推")
     put(14, 0) -- 車頭在 13.2，格 [14,15] 在 1m 內
+    -- 調頭流程中（s.uturn：含 uturn-blocked／rotate-stall 倒車讓空間）不側推，維持決定 2B
+    st.uturn = {}
+    checkFalse(MDAD.Drive.sideEscapeStart(st, dveh, 0, nowMs, 11, 0, "hard", "vehicle", nil),
+        "(side-g) 調頭流程中（s.uturn）：不側推")
+    st.uturn = nil
+    st.fstate.rotating = true
+    checkFalse(MDAD.Drive.sideEscapeStart(st, dveh, 0, nowMs, 11, 0, "hard", "vehicle", nil),
+        "(side-g) ROTATE 中（fstate.rotating，uturn 參數檔還沒掛上）：不側推")
+    st.fstate.rotating = false
     checkTrue(MDAD.Drive.sideEscapeStart(st, dveh, 0, nowMs, 11, 0, "hard", "vehicle", nil),
         "(side-g) 無旗標、車頭前 1m 有障礙：算前方被擋、側推")
     checkEq(st.mode, "unstick", "(side-g) 進側推")
@@ -18350,7 +18531,7 @@ function drive.scenarioSideEscape()
 
     MDAD.Drive.stop(0, nil)
     clearAll()
-    T.SIDE_ESCAPE = savedOn
+    MDAD.HUD.sideEscape = savedSide
     MDAD.HUD.telemetryEnabled = savedTelemetry
     MDADDiagnostics.start, MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.stop =
         savedStart, savedEvent, savedSample, savedStop
@@ -22492,17 +22673,12 @@ function drive.scenario0928()
 end
 drive.scenario0928()
 
--- (proof-stop) campaign rc61 0017：F350 開進 Z 形錯位（頂點 18 右轉 85°、3.9m 後頂點 19 左轉 40°，寬 6→5、折點未建圓角），
---   停放的 van 貼在頂點 19 出口臂。證明線（車道線世界掃掠）一路判撞，規劃的 (s,l) 在折點退化判淨空；舊制證明線包絡
---   只降到 18、一進 align 閘就失效，車以約 19 km/h 撞上。逐幀照真 regulator 命令＋中線減速輔助（vad）推車沿車道線走：
---   車要在命中點前停住，或在還停得住時就已轉判堵／承諾。座標＝原案平移 (−10600, −9400)。
--- noMark＝規劃不收命中點（Drive.proofBlockMark 換成空函式）：只剩速度端的停車包絡，車照樣要在命中點前停住。
-function drive.scenarioProofStop(noMark)
-    scenario("證明線持續判撞、規劃判淨空：命中點前停住或提早轉判堵／承諾（rc61 0017 Z 形錯位"
-        .. (noMark and "，規劃不收命中點" or "") .. "）")
-    local realMark = MDAD.Drive.proofBlockMark
-    if noMark then MDAD.Drive.proofBlockMark = function() end end
-    drive.traceProof = os.getenv("TRACE_PROOF") ~= nil
+-- (proof-van) campaign rc61 0017 的 Z 形錯位版面跑一趟（scenarioProofStop／scenarioProofTight 共用）：頂點 14–20 平移
+--   (−10600, −9400)（頂點 18 右轉 85°、3.9m 後頂點 19 左轉 40°，寬 6→5、折點未建圓角），真 Sensor、F350（halfW 0.90／
+--   halfL 2.90／rMin 4.32），van 2.0×5.0 東西向停在 (vanX, vanY)。車沿期望線前進：車心＝線上點、車頭＝線的切向（平常是
+--   車道線，承諾繞行後走承諾線）；縱向讀真 regulator 命令與本幀中線減速輔助（vad），斷油＝COAST_BRAKE_N／質量，硬煞按
+--   一秒閂鎖；倒車脫困不模擬。frame(st, sCar, elapsed, nv) 每幀呼叫、回 true 就停；after(st, sCar) 在收尾前呼叫。
+function drive.proofVanRun(label, vanX, vanY, maxT, frame, after)
     local oldSandbox, oldVeh, oldGet = SandboxVars, dveh, getSpecificPlayer
     local oldApi, oldGear, oldZ = MinidoracatMiniMapAPI.navApiVersion, MDAD.Drive.getGear(0), MDAD.HUD.zombieDodge
     local oldRoute, oldTx, oldTy, oldState = drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
@@ -22535,8 +22711,7 @@ function drive.scenarioProofStop(noMark)
             end
         end
     end
-    -- van：東西向停在出口臂中線左半邊、西端貼頂點 19（命中點 73.8–74.5, 37.3–38.1）
-    local _, vanCells = drive.putVehicleGeom(76.3, 37.8, 0, 2.0, 5.0, true)
+    local _, vanCells = drive.putVehicleGeom(vanX, vanY, 0, 2.0, 5.0, true)
     dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = 43.15, 109.5, 50, 0, false
     dveh._engine, dveh._driver = true, dp
     dp._vehicle, dp._dead, dp._local = dveh, false, true
@@ -22544,12 +22719,11 @@ function drive.scenarioProofStop(noMark)
     drive.nav.route = { pts = pts, segSurface = { "paved", "paved", "paved", "paved", "paved", "paved" },
         segWidth = widths }
     drive.nav.tx, drive.nav.ty, drive.nav.state = 161, 38.5, "ok"
-    checkTrue(MDAD.Drive.start(dp), "(proof-stop) 啟動")
+    checkTrue(MDAD.Drive.start(dp), label .. " 啟動")
     local st = MDAD.Drive.debugSession(0)
     local F = MDADFollower
     local lx, ly, lseg = {}, {}, {}
     local sCar = 0
-    -- 車沿期望線前進：車心＝線上點、車頭＝線的切向。平常是車道線（laneBias／laneKeep 同證明線），承諾繞行後走承諾線
     local function place()
         local fs, prof = st.fstate, st.profile
         if st.dodging and (fs.ovN or 0) >= 2 then
@@ -22573,12 +22747,9 @@ function drive.scenarioProofStop(noMark)
     for _ = 1, 3 do driveTick(dp, dveh) end
     sCar = st.lastSNow
     place()
-    -- 縱向：讀真 regulator 命令與本幀中線減速輔助（vad）；斷油＝COAST_BRAKE_N／質量；硬煞按一秒閂鎖。倒車脫困不模擬
-    -- （停住後的寬帶／倒車／改道是判堵階梯自己的事，這裡只驗命中前的反應）。
     local coast = MDADVehicleProfile.COAST_BRAKE_N / 1314
-    local hitS, react, contactV, seenClear = nil, nil, nil, nil
-    local elapsed, stillFor = 0, 0
-    while elapsed < 40 and MDAD.Drive.isActive(0) do
+    local elapsed = 0
+    while elapsed < maxT and MDAD.Drive.isActive(0) do
         local dt = 0.02
         local v = dveh._speed / 3.6
         local acc = -coast - (st.visAssistDecel or 0)
@@ -22596,6 +22767,34 @@ function drive.scenarioProofStop(noMark)
         nowMs = nowMs + dt * 1000
         elapsed = elapsed + dt
         driveTick(dp, dveh)
+        if frame(st, sCar, elapsed, nv) then break end
+    end
+    after(st, sCar)
+    drive.clearVehicleGeom(vanCells)
+    MDAD.Drive.stop(0, nil)
+    drive.frameMs(wasMs)
+    MinidoracatMiniMapAPI.navApiVersion, MDAD.HUD.zombieDodge = oldApi, oldZ
+    MDAD.Drive.setGear(0, oldGear)
+    drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
+    drive.world, drive.vehGeo = oldWorld, oldGeo
+    SandboxVars, dveh, getSpecificPlayer = oldSandbox, oldVeh, oldGet
+end
+
+-- (proof-stop) campaign rc61 0017：F350 開進 Z 形錯位，停放的 van 貼在頂點 19 出口臂。證明線（車道線世界掃掠）一路判撞，
+--   規劃的 (s,l) 在折點退化判淨空；舊制證明線包絡只降到 18、一進 align 閘就失效，車以約 19 km/h 撞上。版面與推車方式見
+--   drive.proofVanRun：車要在命中點前停住，或在還停得住時就已轉判堵／承諾。
+-- noMark＝規劃不收命中點（Drive.proofBlockMark 換成空函式）：只剩速度端的停車包絡，車照樣要在命中點前停住。
+function drive.scenarioProofStop(noMark)
+    scenario("證明線持續判撞、規劃判淨空：命中點前停住或提早轉判堵／承諾（rc61 0017 Z 形錯位"
+        .. (noMark and "，規劃不收命中點" or "") .. "）")
+    local realMark = MDAD.Drive.proofBlockMark
+    if noMark then MDAD.Drive.proofBlockMark = function() end end
+    drive.traceProof = os.getenv("TRACE_PROOF") ~= nil
+    local hitS, react, contactV, seenClear = nil, nil, nil, nil
+    local stillFor, tEnd = 0, 0
+    -- van：東西向停在出口臂中線左半邊、西端貼頂點 19（命中點 73.8–74.5, 37.3–38.1）
+    drive.proofVanRun("(proof-stop)", 76.3, 37.8, 40, function(st, sCar, elapsed, nv)
+        tEnd = elapsed
         if drive.traceProof and (math.floor(elapsed * 50 + 0.5) % 10 == 0) then
             io.stderr:write(string.format("  t=%.2f s=%.2f rs=%.2f v=%.1f reg=%s gate=%s cap=%s phs=%s vlr=%s pm=%s vad=%.2f psc=%s n=%s bl=%s dg=%s\n",
                 elapsed, sCar, st.lastSNow, dveh._speed, tostring(dveh._regSpeed), tostring(st.gateReason),
@@ -22610,53 +22809,164 @@ function drive.scenarioProofStop(noMark)
                 seenClear = hitS - sCar
             end
         end
-        if st.currentBlocked then contactV = dveh._speed break end
+        if st.currentBlocked then contactV = dveh._speed return true end
         if react == nil and (st.blocked or st.dodging) then
             react = { v = dveh._speed, s = sCar, why = st.blocked and "blocked" or "dodge" }
         end
-        if nv < 0.05 then stillFor = stillFor + dt else stillFor = 0 end
-        if stillFor > 2 then break end
-        if hitS ~= nil and sCar > hitS + 8 then break end
-    end
-    if drive.traceProof then
-        io.stderr:write(string.format("[proof-stop%s] hit=%s react=%s v=%s s=%s contactV=%s sCar=%.2f spd=%.1f t=%.1f clear@%s phx=%s,%s\n",
-            noMark and "/noMark" or "", tostring(hitS), react and react.why or "nil",
-            react and string.format("%.1f", react.v) or "nil",
-            react and string.format("%.2f", react.s) or "nil", tostring(contactV), sCar, dveh._speed,
-            elapsed, tostring(seenClear), tostring(st.proofHitX), tostring(st.proofHitY)))
-    end
-    checkTrue(seenClear ~= nil and seenClear > 30,
-        "(proof-stop) 前置：證明線判撞、規劃判淨空（命中點前 " .. tostring(seenClear) .. "m）")
-    local brake = st.safeBrake
-    local stoppable = react ~= nil and hitS ~= nil
-        and (react.v / 3.6) ^ 2 / (2 * brake) <= hitS - react.s
-    checkTrue(contactV == nil and (stoppable or (hitS ~= nil and dveh._speed < 0.2 and sCar < hitS)),
-        "(proof-stop) 命中點前停住，或還停得住時已轉判堵／承諾（命中 " .. tostring(hitS) .. "；反應 "
-        .. tostring(react and react.why) .. " v=" .. tostring(react and react.v) .. " s=" .. tostring(react and react.s)
-        .. "；接觸 v=" .. tostring(contactV) .. "）")
-    checkTrue(contactV == nil and (sCar < (hitS or 0) or st.dodging),
-        "(proof-stop) 停在命中點前、沒有接觸（停在 s=" .. string.format("%.2f", sCar) .. "、"
-        .. string.format("%.1f", dveh._speed) .. " km/h）")
-    if not noMark then
-        -- 規劃收下持續命中點：判堵（或承諾）發生在遠處，不是開到折點才翻；判堵中凍結持續輪數，規劃不翻回淨空
-        checkTrue(react ~= nil and hitS ~= nil and hitS - react.s > 30,
-            "(proof-stop) 持續命中達標就交給規劃：命中點 30m 外已判堵／承諾（離命中 "
-            .. tostring(react and hitS and hitS - react.s) .. "m）")
-        checkTrue(st.blocked or st.dodging, "(proof-stop) 判堵維持到停住，規劃不因判堵中證明停算而翻回淨空（planMode "
-            .. tostring(st.planMode) .. "）")
-    end
+        if nv < 0.05 then stillFor = stillFor + 0.02 else stillFor = 0 end
+        if stillFor > 2 then return true end
+        return hitS ~= nil and sCar > hitS + 8
+    end, function(st, sCar)
+        if drive.traceProof then
+            io.stderr:write(string.format("[proof-stop%s] hit=%s react=%s v=%s s=%s contactV=%s sCar=%.2f spd=%.1f t=%.1f clear@%s phx=%s,%s\n",
+                noMark and "/noMark" or "", tostring(hitS), react and react.why or "nil",
+                react and string.format("%.1f", react.v) or "nil",
+                react and string.format("%.2f", react.s) or "nil", tostring(contactV), sCar, dveh._speed,
+                tEnd, tostring(seenClear), tostring(st.proofHitX), tostring(st.proofHitY)))
+        end
+        checkTrue(seenClear ~= nil and seenClear > 30,
+            "(proof-stop) 前置：證明線判撞、規劃判淨空（命中點前 " .. tostring(seenClear) .. "m）")
+        local brake = st.safeBrake
+        local stoppable = react ~= nil and hitS ~= nil
+            and (react.v / 3.6) ^ 2 / (2 * brake) <= hitS - react.s
+        checkTrue(contactV == nil and (stoppable or (hitS ~= nil and dveh._speed < 0.2 and sCar < hitS)),
+            "(proof-stop) 命中點前停住，或還停得住時已轉判堵／承諾（命中 " .. tostring(hitS) .. "；反應 "
+            .. tostring(react and react.why) .. " v=" .. tostring(react and react.v) .. " s=" .. tostring(react and react.s)
+            .. "；接觸 v=" .. tostring(contactV) .. "）")
+        checkTrue(contactV == nil and (sCar < (hitS or 0) or st.dodging),
+            "(proof-stop) 停在命中點前、沒有接觸（停在 s=" .. string.format("%.2f", sCar) .. "、"
+            .. string.format("%.1f", dveh._speed) .. " km/h）")
+        if not noMark then
+            -- 規劃收下持續命中點：判堵（或承諾）發生在遠處，不是開到折點才翻；判堵中凍結持續輪數，規劃不翻回淨空
+            checkTrue(react ~= nil and hitS ~= nil and hitS - react.s > 30,
+                "(proof-stop) 持續命中達標就交給規劃：命中點 30m 外已判堵／承諾（離命中 "
+                .. tostring(react and hitS and hitS - react.s) .. "m）")
+            checkTrue(st.blocked or st.dodging, "(proof-stop) 判堵維持到停住，規劃不因判堵中證明停算而翻回淨空（planMode "
+                .. tostring(st.planMode) .. "）")
+        end
+    end)
     MDAD.Drive.proofBlockMark = realMark
-    drive.clearVehicleGeom(vanCells)
-    MDAD.Drive.stop(0, nil)
-    drive.frameMs(wasMs)
-    MinidoracatMiniMapAPI.navApiVersion, MDAD.HUD.zombieDodge = oldApi, oldZ
-    MDAD.Drive.setGear(0, oldGear)
-    drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
-    drive.world, drive.vehGeo = oldWorld, oldGeo
-    SandboxVars, dveh, getSpecificPlayer = oldSandbox, oldVeh, oldGet
 end
 drive.scenarioProofStop()
 drive.scenarioProofStop(true)
+
+-- (proof-tight) 1006p 使用者裁定 P5 方案 B：持續命中停下之後，規劃接著承諾的窄線（m < need）經過命中的車輛時，車身碰得到
+--   命中點的範圍內速度帽壓在 TUNE.PROOF_TIGHT_KMH（不被 GO 的 MIN_EXEC 抬回 8）、車尾越過命中點才解除（E2E 1006n f350van：
+--   proof stop 後承諾 m 0.40／need 0.80 的線，12 km/h 擦上 van）。版面同 (proof-stop)，van 往北移到 y 36.6：規劃在證明線
+--   第 3 輪命中前就自己承諾 probe-straight m≈0.42／need 0.8，所以這裡把 TUNE.PROOF_STOP_ROUNDS 暫降為 2，讓停下點在那次
+--   承諾之前成立（誘發「停下→窄線承諾」的順序；武裝、帽、解除走的都是 production）。mode：nil＝車輛；"rock"＝命中物不是車
+--   （proofHitTrack 收到 veh=false）；"wide"＝承諾餘裕不窄（武裝判定時把 m 看成 need）——後兩者帽不得出現、照原速度帳通過。
+function drive.scenarioProofTight(mode)
+    scenario("停下之後窄線經過命中的車：通過前壓 3 km/h、車尾過了解除" .. (mode and "（對照：" .. mode .. "）" or ""))
+    local Dr = MDAD.Drive
+    local T = Dr.debugTune()
+    local realTrack, realArm = Dr.proofHitTrack, Dr.proofTightArm
+    local stopX, stopY, stopVeh, narrow, armed, sawCap, contactV = nil, nil, nil, nil, false, false, nil
+    local zoneMax, zoneReg, relF, relDodging = 0, 0, nil, nil
+    -- 停下點在達標那輪記（同一幀內就可能被承諾消化掉，逐幀讀 s.proofStopX 會漏）
+    Dr.proofHitTrack = function(s, x, y, n, veh)
+        realTrack(s, x, y, n, mode ~= "rock" and veh)
+        if stopX == nil and s.proofStopX ~= nil then stopX, stopY, stopVeh = s.proofStopX, s.proofStopY, s.proofStopVeh end
+    end
+    if mode == "wide" then
+        Dr.proofTightArm = function(s, pn)
+            local m = s.dodgeMargin
+            s.dodgeMargin = s.dodgeNeed
+            realArm(s, pn)
+            s.dodgeMargin = m
+        end
+    end
+    local rounds = T.PROOF_STOP_ROUNDS
+    T.PROOF_STOP_ROUNDS = 2
+    drive.proofVanRun("(proof-tight)", 76.3, 36.6, 30, function(st, sCar, elapsed)
+        if drive.traceProof and (math.floor(elapsed * 50 + 0.5) % 10 == 0) then
+            io.stderr:write(string.format("  [tight%s] t=%.2f s=%.2f x=%.2f y=%.2f v=%.1f reg=%s cap=%s ptc=%s ptx=%s dg=%s m=%s n=%s it=%s\n",
+                mode or "", elapsed, sCar, dveh._x, dveh._y, dveh._speed, tostring(dveh._regSpeed),
+                tostring(st.lastCapReason), tostring(st.proofTightCap), tostring(st.proofTightX), tostring(st.dodging),
+                tostring(st.dodgeMargin), tostring(st.proofHitN), tostring(st.intentShadow)))
+        end
+        if narrow == nil and st.dodging then narrow = st.dodgeMargin < st.dodgeNeed end
+        if st.lastCapReason == "proof-tight" then sawCap = true end
+        if st.proofTightX ~= nil then armed = true end
+        -- 車身碰得到停下點（車心距 ≤ bodyReach）的那一段：記實速與 regulator 命令
+        if stopX ~= nil and narrow ~= nil and relF == nil then
+            local dx, dy = stopX - dveh._x, stopY - dveh._y
+            if math.sqrt(dx * dx + dy * dy) <= st.bodyReach then
+                if dveh._speed > zoneMax then zoneMax = dveh._speed end
+                if (dveh._regSpeed or 0) > zoneReg then zoneReg = dveh._regSpeed end
+            end
+        end
+        if armed and relF == nil and st.proofTightX == nil then
+            local h = st.lastVehicleHeading
+            relF = (stopX - dveh._x) * math.cos(h) + (stopY - dveh._y) * math.sin(h)
+            relDodging = st.dodging
+        end
+        if st.currentBlocked then contactV = dveh._speed return true end
+        if mode == nil then return relF ~= nil end
+        return narrow ~= nil and not st.dodging
+    end, function(st)
+        local pass = st.vehicleProfile.halfL + T.PROOF_TIGHT_PASS_M
+        local tag = "(proof-tight" .. (mode and "/" .. mode or "") .. ") "
+        checkTrue(stopX ~= nil and stopVeh == (mode ~= "rock") and narrow == true,
+            tag .. "前置：持續命中停下（命中物是車 " .. tostring(stopVeh) .. "）後承諾窄線（m<need " .. tostring(narrow) .. "）")
+        checkNil(contactV, tag .. "通過 van 沒有接觸")
+        if mode == nil then
+            checkTrue(armed and sawCap, tag .. "窄線經過命中的車：武裝、capReason proof-tight")
+            checkTrue(zoneReg > 0 and zoneReg <= T.PROOF_TIGHT_KMH and zoneMax <= T.PROOF_TIGHT_KMH + 0.5,
+                tag .. "車身碰得到命中點的範圍內 regulator ≤ 3、實速 ≤ 3.5（不被 MIN_EXEC 抬回；命令 "
+                .. tostring(zoneReg) .. "、實速 " .. string.format("%.2f", zoneMax) .. "）")
+            checkTrue(relDodging == true and relF ~= nil and relF < -pass and relF > -pass - 0.3,
+                tag .. "承諾中、車尾越過命中點 PROOF_TIGHT_PASS_M 才解除（解除時命中點在車心前 " .. tostring(relF) .. "m）")
+        else
+            checkTrue(not armed and not sawCap, tag .. "不武裝、不出現 proof-tight 帽")
+            checkTrue(zoneMax > T.PROOF_TIGHT_KMH + 5, tag .. "行為不變：照繞行帽通過命中點（區內最高 "
+                .. string.format("%.2f", zoneMax) .. " km/h）")
+        end
+    end)
+    Dr.proofHitTrack, Dr.proofTightArm, T.PROOF_STOP_ROUNDS = realTrack, realArm, rounds
+    if mode ~= nil then return end
+    -- 單元：武裝條件與解除（承諾換線／釋放／車尾越過）
+    local function arming(over)
+        local s = { proofStopX = 10, proofStopY = 0, proofStopVeh = true, dodgeMargin = 0.4, dodgeNeed = 0.8,
+            bodyReach = 4, lastSNow = 0, fstate = { ovN = 5, ovX = { 8, 9, 10, 11, 12 }, ovY = { 3, 3, 3, 3, 3 } } }
+        for k, v in pairs(over or {}) do s[k] = v end
+        Dr.proofTightArm(s, 0)
+        return s
+    end
+    local s = arming()
+    checkTrue(s.proofTightX == 10 and s.proofTightY == 0 and s.proofStopX == nil,
+        "(proof-tight) 車輛＋窄線＋線經過停下點：武裝，停下點消化掉")
+    checkNil(arming({ proofStopVeh = false }).proofTightX, "(proof-tight) 停下點不是車：不武裝")
+    checkNil(arming({ dodgeMargin = 0.8 }).proofTightX, "(proof-tight) 餘裕 = need（不窄）：不武裝")
+    checkNil(arming({ fstate = { ovN = 5, ovX = { 8, 9, 10, 11, 12 }, ovY = { 4.5, 4.5, 4.5, 4.5, 4.5 } } }).proofTightX,
+        "(proof-tight) 承諾線離停下點都 > bodyReach：不武裝")
+    Dr.proofTightArm(s, 0)
+    checkNil(s.proofTightX, "(proof-tight) 換線（下一次承諾）：解除，不再武裝")
+    s = arming()
+    s.dodging, s.lastVehicleHeading, s.vehicleProfile, s.safeBrake = true, 0, { halfL = 2.9, centerOfMassZ = 0 }, 6
+    local far = Dr.proofTightCap(s, 60, -40, 3, 0)
+    checkTrue(far == 60 and s.proofTightCap > 60, "(proof-tight) 遠處：包絡高於目標、不壓（" .. tostring(s.proofTightCap) .. "）")
+    checkEq(Dr.proofTightCap(s, 60, 10 + 2.9 + T.PROOF_TIGHT_PASS_M - 0.05, 0, 0), T.PROOF_TIGHT_KMH,
+        "(proof-tight) 車尾還沒越過命中點＋餘裕：帽 3")
+    checkEq(s.lastCapReason, "proof-tight", "(proof-tight) capReason 用自己的名字")
+    checkTrue(Dr.crawlIntentArg({ proofTightCap = T.PROOF_TIGHT_KMH }) == true
+            and Dr.crawlIntentArg({ proofTightCap = 10 }) == false and Dr.crawlIntentArg({}) == false,
+        "(proof-tight) 爬行帽低於 MIN_EXEC＝intent CRAWL（GO 地板不抬回 8）；高於 MIN_EXEC 或沒武裝不算")
+    local pq = { tow = false, sensor = { ready = true }, visibilityCap = 90, dodging = true, proofTightCap = 3,
+        runtimeMass = 1500 }
+    Dr.visAssistForce(pq, 12, 0.8)
+    checkTrue(pq.visAssistDecel > 0 and pq.visAssistWhy == "proof-tight",
+        "(proof-tight) 超過爬行帽：25 km/h 以下照補中線減速（" .. tostring(pq.visAssistWhy) .. "）")
+    checkEq(Dr.proofTightCap(s, 60, 10 + 2.9 + T.PROOF_TIGHT_PASS_M + 0.05, 0, 0), 60,
+        "(proof-tight) 車尾越過命中點＋餘裕：解除")
+    checkTrue(s.proofTightX == nil and s.proofTightCap == nil, "(proof-tight) 解除後不再壓")
+    s = arming()
+    s.dodging, s.lastVehicleHeading, s.vehicleProfile, s.safeBrake = false, 0, { halfL = 2.9, centerOfMassZ = 0 }, 6
+    checkTrue(Dr.proofTightCap(s, 60, 8, 3, 0) == 60 and s.proofTightX == nil, "(proof-tight) 承諾釋放：解除")
+end
+drive.scenarioProofTight()
+drive.scenarioProofTight("rock")
+drive.scenarioProofTight("wide")
 
 -- 0928c：常駐線 ramp 的追線落後不算對不準（Drive.laneRampDev）。真 Follower 剖面（R12 左彎、弧內側餘裕 0）、
 --   靠內側 bias 2：弧後期望線從 0 ramp 回 2，36 km/h 時車身落在 0.6 秒前與現在的期望線之間＝偏差 0；
@@ -23152,10 +23462,22 @@ function drive.scenario0929j()
     flagObj(58, 3, "lighting_outdoor_01_1", {}, false)
     flagObj(62, 3, "e_harnessJUMBOXL_1_0", { solid = true, StopCar = true }, true, "IsoTree")
     -- issue #7：勃蘭登堡路面散落的籬笆碎片（fencing_damaged_01_168..171，地圖原生）只有 attachedFloor、沒有碰撞旗標
-    -- ＝calcPhysics 不給形狀、車直接壓過。attachedFloor 在引擎是 sprite 旗標（IsoFlagType），不是字串屬性：
-    -- 替身用 IsoFlagType.attachedFloor 的值當鍵、字串 "attachedFloor" 查不到（1006c E2E 勃蘭登堡實機仍判硬點＝
-    -- production 用字串查、舊替身兩種鍵不分而假綠）。違規證明：拿掉 attachedFloor 放行、或改回字串查即紅。
+    -- 也沒有 HitByCar＝calcPhysics 不給形狀、車直接壓過。放行看的是「沒有 HitByCar／CarSlowFactor」，不是 attachedFloor
+    -- （attachedFloor 對車輛沒有作用；它在引擎是 sprite 旗標，字串 has("attachedFloor") 永遠查不到）。
     flagObj(26, 3, "fencing_damaged_01_170", { [IsoFlagType.attachedFloor] = true }, false)
+    -- 無碰撞旗標的籬笆（1006 fence-release）：calcPhysics 不給形狀，車只會被 HitByCar／CarSlowFactor 擋——
+    -- IsoObject.Collision（IsoObject.java:1714-1755）對 HitByCar 物件在車速低於 MinimumCarSpeedDmg（預設 150）時
+    -- 施反向衝量並 setSpeedKmHour(0)。屬性取自原版 .tiles：燒毀殘樁 fencing_burnt_01_3（CanScrap）、空屬性
+    -- fencing_burnt_01_4＝放行；燒毀籬笆樁 fencing_burnt_01_45、地上碎片但帶 HitByCar 的 fencing_damaged_02_81、
+    -- 玩家蓋的木樁 fencing_01_19（entity WoodStake，isThumpable=false）與鐵絲網角柱 fencing_01_61（IsoThumpable）＝不放行。
+    -- 違規證明：放行不看 HitByCar 即紅；放行退回只認 attachedFloor 即紅。
+    flagObj(30, 5, "fencing_burnt_01_3", { CanScrap = true }, false)
+    flagObj(34, 5, "fencing_burnt_01_4", {}, false)
+    flagObj(38, 5, "fencing_burnt_01_45", { HitByCar = true, CanScrap = true }, false)
+    flagObj(42, 5, "fencing_damaged_02_81", { HitByCar = true, [IsoFlagType.attachedFloor] = true }, false)
+    flagObj(46, 5, "fencing_01_19", { HitByCar = true }, false)
+    flagObj(50, 5, "fencing_01_61", { HitByCar = true }, false, "IsoThumpable")
+    flagObj(54, 5, "fencing_harness_slow", { CarSlowFactor = true }, false) -- MOD tile：CarSlowFactor 會壓車速（IsoObject.java:1709-1712）
     checkTrue(armDrive(), "(shape) 啟動")
     setHeading(dveh, 0)
     local st = MDAD.Drive.debugSession(0)
@@ -23184,6 +23506,17 @@ function drive.scenario0929j()
     shapeAt(58.6, 3.6, 0.15, 0, "室外路燈柱＝樹幹形狀")
     shapeAt(62.6, 3.6, 0.15, 0, "帶 solid 的大樹（JUMBO）：引擎只給樹幹，不是整格方塊")
     checkTrue(pointsNear(sen, 26.5, 3.5) == nil, "(shape) 地上籬笆碎片（attachedFloor、無碰撞旗標）：不是硬點")
+    checkTrue(pointsNear(sen, 30.5, 5.5) == nil, "(shape) 燒毀殘樁（無碰撞旗標、無 HitByCar）：放行")
+    checkTrue(pointsNear(sen, 34.5, 5.5) == nil, "(shape) 燒毀籬笆空屬性 sprite：放行")
+    shapeAt(38.5, 5.5, 0, 0, "燒毀籬笆樁（HitByCar）：引擎會把車擋停，格心細桿")
+    shapeAt(42.5, 5.5, 0, 0, "地上碎片但帶 HitByCar：照樣擋，不因 attachedFloor 放行")
+    shapeAt(46.5, 5.5, 0, 0, "玩家蓋的木樁（HitByCar）：格心細桿")
+    shapeAt(50.5, 5.5, 0, 0, "玩家蓋的 IsoThumpable 角柱（HitByCar）：格心細桿")
+    shapeAt(54.5, 5.5, 0, 0, "帶 CarSlowFactor 的無旗標籬笆：會壓車速，格心細桿")
+    -- 1006p：車輛輪廓點與樹幹同半徑 0.15，類別只能看 hardV（車輛＝true 由 (proof-tight) 的真 van 驗）
+    local trunkI, boxI = pointsNear(sen, 30.6, 3.6), pointsNear(sen, 34.5, 3.5)
+    checkTrue(trunkI ~= nil and boxI ~= nil and sen.hardV[trunkI] == false and sen.hardV[boxI] == false,
+        "(shape) 樹幹、方塊不是車（hardV false）")
     MDAD.Drive.stop(0, nil)
     drive.fillWorld(-2, 70, -7, 7)
 
@@ -23908,7 +24241,7 @@ function drive.scenarioStopFlip()
     local oldAuto = MDAD.HUD.autoDetour
     MDAD.HUD.autoDetour = function() return false end
     local gone = false
-    local props = { has = function() return false end }
+    local props = { has = function(_, key) return key == "HitByCar" end } -- 籬笆名的物件＝帶 HitByCar 的細桿（見 putPost）
     local sprite = { shouldHaveCollision = function() return true end, getProperties = function() return props end }
     -- 每格一個物件，sprite 名依「這一輪是不是寬帶」決定（nameFor(wide) 回 nil＝這一輪看不到）；gone＝障礙真的移走
     local function place(x, y, nameFor)

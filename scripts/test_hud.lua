@@ -52,6 +52,7 @@ local texts = {
     UI_MinidoracatAutoDrive_HUDStatusYield = "YIELD",
     UI_MinidoracatAutoDrive_HUDStatusYieldResume = "RESUME IN %1 S",
     UI_MinidoracatAutoDrive_HUDStatusUnstick = "UNSTICK",
+    UI_MinidoracatAutoDrive_HUDStatusSide = "SIDE",
     UI_MinidoracatAutoDrive_HUDStatusBlocked = "BLOCKED",
     UI_MinidoracatAutoDrive_HUDStatusDodging = "DODGE",
     UI_MinidoracatAutoDrive_HUDStatusBuild = "BUILD",
@@ -1378,6 +1379,16 @@ state.resumeIn = 2
 panel:refresh(nowMs)
 checkEq(panel._statusText, "RESUME IN 2 S", "yield countdown formats the seconds into the status text")
 state.resumeIn = nil
+-- 側向脫困進行中（1006；Drive.hudState 鍵 side）：專屬文字、與倒車脫困同色
+do
+    state.token = "unstick"
+    panel:refresh(nowMs)
+    local unstickColor = panel._statusColor
+    state.token = "side"
+    panel:refresh(nowMs)
+    check(panel._statusText == "SIDE" and panel._statusColor == unstickColor,
+        "side-escape token shows its own label in the unstick colour")
+end
 state.token = "follow"
 panel:refresh(nowMs)
 checkEq(panel._statusText, "FOLLOW", "countdown value is ignored outside yield")
@@ -1591,17 +1602,29 @@ check(not MDAD.HUD.setTelemetryRetentionDays(2)
     and MDAD.HUD.telemetryRetentionDays() == 14
     and optionSaveCalls == invalidRetentionSaves,
     "invalid retention days rejected without saving")
--- 閃避殭屍 tick（0906c；預設開）坐在改道與診斷之間
-check(registeredMiniMapSection.ticks[4].label == "UI_MinidoracatAutoDrive_ZombieDodge"
-    and registeredMiniMapSection.ticks[4].get() == true
+-- 側向脫困 tick（1006 實驗；2026-10-06 使用者裁定：玩家選項、預設關）坐在改道之後
+check(registeredMiniMapSection.ticks[4].label == "UI_MinidoracatAutoDrive_SideEscape"
+    and registeredMiniMapSection.ticks[4].get() == false
+    and MDAD.HUD.sideEscape() == false
+    and options:getOption("SideEscape") ~= nil,
+    "side-escape tick defaults off and sits right after auto-detour")
+registeredMiniMapSection.ticks[4].set(true)
+check(MDAD.HUD.sideEscape() == true
+    and options:getOption("SideEscape"):getValue() == true,
+    "MiniMap side-escape tick writes the shared SideEscape option")
+check(MDAD.HUD.setSideEscape(false) and MDAD.HUD.sideEscape() == false,
+    "HUD.setSideEscape writes back off")
+-- 閃避殭屍 tick（0906c；預設開）坐在側向脫困與診斷之間
+check(registeredMiniMapSection.ticks[5].label == "UI_MinidoracatAutoDrive_ZombieDodge"
+    and registeredMiniMapSection.ticks[5].get() == true
     and MDAD.HUD.zombieDodge() == true,
-    "zombie-dodge tick defaults on and sits between auto-detour and telemetry")
-registeredMiniMapSection.ticks[4].set(false)
+    "zombie-dodge tick defaults on and sits between side-escape and telemetry")
+registeredMiniMapSection.ticks[5].set(false)
 check(MDAD.HUD.zombieDodge() == false
     and options:getOption("ZombieDodge"):getValue() == false,
     "MiniMap zombie-dodge tick writes the shared ZombieDodge option")
-registeredMiniMapSection.ticks[4].set(true)
-registeredMiniMapSection.ticks[5].set(false)
+registeredMiniMapSection.ticks[5].set(true)
+registeredMiniMapSection.ticks[6].set(false)
 check(not MDAD.HUD.telemetryEnabled()
     and options:getOption("ExportTelemetry"):getValue() == false,
     "MiniMap telemetry tick writes the same AutoDrive ModOptions value")

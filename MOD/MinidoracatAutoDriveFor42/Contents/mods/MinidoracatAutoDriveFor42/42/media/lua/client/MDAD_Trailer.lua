@@ -242,6 +242,43 @@ local function simulate(c, xs, ys, n, g)
 end
 T._simulate = simulate
 
+-- 繞行候選線上的掛車折角（Driver Drive.towFold）：牽引車參考點（車輛原點）沿候選線 (cx, cy) 與基準線 (bx, by)（同弧長取樣、
+-- 不偏移照原 lane）各推一台掛車：掛點＝參考點＋前向×hz＋法向×hx（同 Driver sweepLine），掛車軸無側滑（tractrix，同 simulate）；
+-- 起始軸向＝線首航向減實測折角 phi0（T.state 同號）。某點候選 |折角| > max(lim, 同點基準 |折角|＋tol)＝不 ok：超過門檻的部分
+-- 必須是候選自己加的。回 ok, 候選線最大 |折角|（rad）, 最壞違規點索引（ok 時 nil）。
+local function trail(xs, ys, k, ax, ay, hz, hx, L2, phi0)
+    local fx, fy = xs[k + 1] - xs[k], ys[k + 1] - ys[k]
+    local fl = sqrt(fx * fx + fy * fy)
+    if fl < 1e-6 then return ax, ay, nil end
+    fx, fy = fx / fl, fy / fl
+    local px, py = xs[k] + fx * hz + fy * hx, ys[k] + fy * hz - fx * hx
+    local vx, vy
+    if ax == nil then
+        local h = atan2(fy, fx) - phi0
+        vx, vy = cos(h), sin(h)
+    else
+        vx, vy = px - ax, py - ay
+        local vl = sqrt(vx * vx + vy * vy)
+        if vl < 1e-6 then return ax, ay, nil end
+        vx, vy = vx / vl, vy / vl
+    end
+    return px - vx * L2, py - vy * L2, abs(atan2(fx * vy - fy * vx, fx * vx + fy * vy))
+end
+function T.dodgeFold(cx, cy, bx, by, n, hz, hx, L2, phi0, lim, tol)
+    local cax, cay, bax, bay, cphi, bphi
+    local worst, badK, badPhi, base = 0, nil, 0, 0
+    for k = 1, n - 1 do
+        cax, cay, cphi = trail(cx, cy, k, cax, cay, hz, hx, L2, phi0)
+        bax, bay, bphi = trail(bx, by, k, bax, bay, hz, hx, L2, phi0)
+        if bphi then base = bphi end
+        if cphi then
+            if cphi > worst then worst = cphi end
+            if cphi > lim and cphi > base + tol and cphi > badPhi then badK, badPhi = k, cphi end
+        end
+    end
+    return badK == nil, worst, badK
+end
+
 -- 產生候選車頭路線：進入段外靠 a、轉出段外偏 b（兩者正＝往轉彎外側），圓角半徑 R。
 -- 轉出後保持 b 一段再 smoothstep 回中線（大貨車司機轉進窄路後先貼外側、掛車進來再回正）。
 -- scratch 陣列重用（冷路徑，但一條路線可能試上百組）。

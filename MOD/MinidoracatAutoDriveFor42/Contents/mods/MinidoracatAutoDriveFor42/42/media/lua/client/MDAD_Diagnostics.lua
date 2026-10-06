@@ -107,6 +107,7 @@ local EK = {
     "blocker", "thin", -- thin（1004f）：dodge commit 時換縫找更寬記下的最窄候選物理淨距
     "preA", -- preA（1005）：dodge commit 時承諾線 pre-a 段（起點→a）的最小物理淨距
     "kin", -- kin（1006）：dodge commit／blocked 時本輪被進入段運動學證明（Drive.kinProof）拒收的候選數
+    "fold", -- fold（1006）：dodge commit／blocked 時本輪被掛車折角預檢（Drive.towFold）拒收的候選中最大預估折角（°）
     -- tow attach（0929p）：掛車幾何（寬帶繞行掃掠、判堵停止線的輸入）
     "L2", "trailLen", "halfW", "mass", "hitchZ", "boxBack", "axisSign",
     -- start（1005）：這趟用了同車型轉向增益種子時的快取鍵（MDADFollower.seedGains；沒有種子就不帶）
@@ -1079,6 +1080,7 @@ local function envStamp(playerNum)
     end
     if type(hud) == "table" then
         put("detour", hud.autoDetour)
+        put("side", hud.sideEscape)       -- 側向脫困（1006 實驗、預設關；前後皆堵起手時讀）
         put("voice", hud.voiceEnabled)
         put("resume", hud.manualResumeMs)  -- 0＝介入即關閉；>0＝放手後 N ms 恢復（0906a）
         put("uturn", hud.uturnMode)        -- gentle／fast（0906b；每次調頭開始讀，途中改要看 uturn 事件）
@@ -1291,6 +1293,7 @@ local function encodePhys(phys)
     addNum("proofHitS", "phs")        -- 1005：證明線掃掠命中的車身取樣弧長（gate sweep 接近包絡的終點；同 rs 座標）
     addNum("proofHitN", "phn")        -- 1006：證明線同一點連續命中的輪數（≥ PROOF_STOP_ROUNDS：包絡在命中前停住、規劃當擋線）
     addNum("lagGuardCap", "lgc")      -- 1006c：實測落後量守門的接近包絡（規劃線＋實測橫偏的預測車身碰到的硬點；capReason lag）
+    addNum("proofTightCap", "ptc")    -- 1006p：停下之後窄線爬行的接近包絡（出口 PROOF_TIGHT_KMH；capReason proof-tight）
     addNum("proofKappa", "proofKappa")
     addNum("proofCurveCap", "proofCurveCap")
     addNum("laneCurveEnvelope", "laneCurveEnvelope")
