@@ -1292,6 +1292,7 @@ local function encodePhys(phys)
     addNum("proofHitS", "phs")        -- 1005：證明線掃掠命中的車身取樣弧長（gate sweep 接近包絡的終點；同 rs 座標）
     addNum("proofHitN", "phn")        -- 1006：證明線同一點連續命中的輪數（≥ PROOF_STOP_ROUNDS：包絡在命中前停住、規劃當擋線）
     addNum("lagGuardCap", "lgc")      -- 1006c：實測落後量守門的接近包絡（規劃線＋實測橫偏的預測車身碰到的硬點；capReason lag）
+    addNum("proofTightCap", "ptc")    -- 1006p：停下之後窄線爬行的接近包絡（出口 PROOF_TIGHT_KMH；capReason proof-tight）
     addNum("proofKappa", "proofKappa")
     addNum("proofCurveCap", "proofCurveCap")
     addNum("laneCurveEnvelope", "laneCurveEnvelope")

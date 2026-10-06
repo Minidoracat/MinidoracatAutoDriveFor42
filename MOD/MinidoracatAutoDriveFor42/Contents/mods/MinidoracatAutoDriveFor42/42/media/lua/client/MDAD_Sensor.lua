@@ -36,6 +36,8 @@
 --     state.hardL[i]   第 i 個硬障礙的橫向偏移（公尺；數學 CCW 法向為正＝PZ 世界的行進方向右側）：命中的取樣點
 --     state.hardLc[i]  同一點引擎形狀位置（hardX/Y）的橫向偏移（同一局部框）；hardW[i]＝掃掠模型的橫向半寬
 --                      （方塊＝半邊×(|nx|+|ny|)，圓＝半徑）——擋線判定用這一組，縫隙搜尋仍用 hardL／hardR
+--     state.hardV[i]   true＝停放車輛的精確輪廓點（pushVehicleOutline）；其他形狀 false（輪廓點與樹幹同半徑，
+--                      不能拿 hardR 分；格級佔位退回的車也是 false）
 --     state.softN      軟障礙格數（可推開的家具／路邊雜物：撞得過但該減速）
 --     state.zombieN    走廊內殭屍數（±SLOW_BAND_HALF 減速帶；速度檔用）
 --     state.zomN       混合軟目標（s,l）筆數（±4.5 帶），座標語意同 hardS／hardL
@@ -563,7 +565,8 @@ end
 -- 最多 4 個虛擬 ban，不經 pushHard，也不占這個 sensor 上限。
 -- b（選填）＝整格方塊的半邊長（世界軸對齊；0／nil＝圓）：掃掠與接觸以方塊算距離，規劃仍用 r。
 -- wHardLc／wHardW：形狀位置在本步局部框的橫向偏移與掃掠模型橫向半寬（擋線判定與世界掃掠同一份幾何，見檔頭）。
-local function pushHard(state, s, l, l4, wx, wy, r, b)
+-- veh＝true 只給車輛精確輪廓點（wHardV；Driver 的證明線窄線爬行 Drive.proofTightArm 認命中物是不是車）。
+local function pushHard(state, s, l, l4, wx, wy, r, b, veh)
     local n = state.wHardN
     if n >= HARD_MAX then state.wHardOverflow = true return end
     n = n + 1
@@ -574,6 +577,7 @@ local function pushHard(state, s, l, l4, wx, wy, r, b)
     state.wHardY[n] = wy
     state.wHardR[n] = r
     state.wHardB[n] = b or 0
+    state.wHardV[n] = veh == true
     local nx, ny = state.nx, state.ny
     state.wHardLc[n] = (wx - state.cx) * nx + (wy - state.cy) * ny
     if b and b > 0 then
@@ -692,7 +696,7 @@ local function pushVehicleOutline(state, cv)
         local l = dx * nx + dy * ny
         local l4 = l * 4
         l4 = l4 - l4 % 1
-        pushHard(state, s, l, l4, px, py, VEH_OUTLINE_R)
+        pushHard(state, s, l, l4, px, py, VEH_OUTLINE_R, nil, true)
     end
     local function edge(ax, ay, bx, by, len)
         local n = len / step
@@ -1293,19 +1297,19 @@ local function finishRound(state, now)
     local ts, tl = state.hardS, state.hardL
     local txw, tyw = state.hardX, state.hardY
     local tr, tb = state.hardR, state.hardB
-    local tc, tw = state.hardLc, state.hardW
+    local tc, tw, tv = state.hardLc, state.hardW, state.hardV
     state.hardS = state.wHardS
     state.hardL = state.wHardL
     state.hardX = state.wHardX
     state.hardY = state.wHardY
     state.hardR, state.hardB = state.wHardR, state.wHardB
-    state.hardLc, state.hardW = state.wHardLc, state.wHardW
+    state.hardLc, state.hardW, state.hardV = state.wHardLc, state.wHardW, state.wHardV
     state.wHardS = ts
     state.wHardL = tl
     state.wHardX = txw
     state.wHardY = tyw
     state.wHardR, state.wHardB = tr, tb
-    state.wHardLc, state.wHardW = tc, tw
+    state.wHardLc, state.wHardW, state.wHardV = tc, tw, tv
 
     state.hardN = state.wHardN
     state.hardOverflow = state.wHardOverflow == true
@@ -1441,6 +1445,7 @@ function MDADSensor.newState()
         nx = 0, ny = 1,
         z = 0,
         wHardS = {}, wHardL = {}, wHardX = {}, wHardY = {}, wHardR = {}, wHardB = {}, wHardLc = {}, wHardW = {},
+        wHardV = {},
         wHardN = 0,
         wHardOverflow = false,
         wZombieN = 0,
@@ -1490,6 +1495,7 @@ function MDADSensor.newState()
         -- 已完成的結果（呼叫端只讀這一組）
         hardS = {}, hardL = {}, hardX = {}, hardY = {}, hardR = {}, hardB = {}, -- hardX/Y＝世界座標（掃掠複驗）；hardR／hardB＝逐點半徑／方塊半邊（見 pushShape）
         hardLc = {}, hardW = {}, -- 形狀位置的橫向偏移／掃掠模型橫向半寬（擋線判定，見檔頭）
+        hardV = {},         -- 車輛精確輪廓點＝true（見檔頭）
         hardN = 0,
         hardOverflow = false,
         zombieN = 0,

@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1006xb"
+Drive.REV = "1006xc"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -496,6 +496,13 @@ TUNE.APPROACH_BRAKE_FRAC = 0.7 -- 接近限速區用 safeBrake 的這個比例�
 -- 取樣點停住（Drive.proofSweepCap），規劃同時把該點當擋線（Drive.proofBlockMark）。單輪命中照舊只降到警戒帽。
 TUNE.PROOF_STOP_ROUNDS = 3
 TUNE.PROOF_HIT_SAME_M = 2.0
+-- 停下之後的窄線爬行（1006p，使用者裁定 P5 方案 B；E2E 1006n f350van：proof stop 後規劃承諾 m 0.40／need 0.80 的線、
+-- 追線落後吃掉餘裕，12 km/h 擦上 van）：持續命中停下的命中物是車輛（Sensor hardV），而規劃接著承諾的線餘裕 m < need、
+-- 線上有點離命中點 ≤ bodyReach（Drive.proofTightArm），通過前速度帽壓到 PROOF_TIGHT_KMH——regulator 收整數，3＝0.83 m/s，
+-- 低於引擎對靜物碰撞 1 m/s 的門檻（BaseVehicle.java:3420-3443；同 UTURN_BLOCKED_KMH）。車尾越過命中點 PROOF_TIGHT_PASS_M
+-- （車頭向量投影，世界座標）、承諾釋放或換線就解除（Drive.proofTightCap）。
+TUNE.PROOF_TIGHT_KMH = 3
+TUNE.PROOF_TIGHT_PASS_M = 0.5
 -- 實測落後量守門（1006c，Drive.lagGuardScan）：|實測橫偏| 低於這個值不預測車身。一般跟線抖動在這以下，而常駐線的硬點
 -- 本來就離規劃車身 ≥ needHalf−halfW（0.3），更小的落後碰不到它。
 TUNE.LAG_GUARD_MIN_M = 0.3
@@ -5287,6 +5294,15 @@ function Drive.waitHoldArg(s, blockedStop)
             and s.proofSweepCap < MDADDynamics.MIN_EXEC_KMH)
 end
 
+-- classifyIntent 的 squeeze 參數（CRAWL：GO 的 MIN_EXEC 地板不抬）：貼縫爬行、軟障礙爬行、繞行接近包絡持續低於
+-- MIN_EXEC、停下之後窄線爬行帽低於 MIN_EXEC（Drive.proofTightCap，1006p——不歸 CRAWL 會被抬回 8 km/h）。
+function Drive.crawlIntentArg(s)
+    return s.dodgeCrawl == true or s.softCrawl == true
+        or (s.dodging and (s.dodgeEnvN or 0) >= 2
+            and finite(s.dodgeApproachCap) and s.dodgeApproachCap < MDADDynamics.MIN_EXEC_KMH)
+        or (finite(s.proofTightCap) and s.proofTightCap < MDADDynamics.MIN_EXEC_KMH)
+end
+
 -- 這幀的 WAIT 只來自動物停等（沒有停止線／繞行延後／起步近物／回線待命／可視上限／會車停等）：
 -- 動物停等另外計時，不計共用停等預算 waitAccumMs（玩家照舊計）。
 function Drive.animalOnlyWait(s, blockedStop)
@@ -5582,6 +5598,10 @@ function Drive.visAssistForce(s, speedKmh, mult)
     -- （重車只靠斷油追不上 safeBrake×0.7 的包絡）
     if finite(s.lagGuardCap) and s.lagGuardCap < cap then
         cap, amax, gain, minKmh, why = s.lagGuardCap, TUNE.DODGE_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN, 0, "lag"
+    end
+    -- 窄線爬行帽（Drive.proofTightCap，1006p）：同一條中線外力、同一上限；出口 3 km/h，25 以下照補
+    if finite(s.proofTightCap) and s.proofTightCap < cap then
+        cap, amax, gain, minKmh, why = s.proofTightCap, TUNE.DODGE_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN, 0, "proof-tight"
     end
     -- 待承諾接近帽（dodge-defer）：同一條中線外力、同一上限；鎖輪門檻見 Drive.deferHardKmh
     if not s.dodging and finite(s.dodgeDeferCap) and s.dodgeDeferCap >= 0 and s.dodgeDeferCap < cap then
@@ -5977,10 +5997,11 @@ function Drive.lagGuardCap(s, targetSpeed, vx, vy)
 end
 
 -- 證明線命中的持續輪數（buildSnapshotProof 在這輪真命中時呼叫；x/y＝命中硬點的世界座標，n＝上一輪的輪數——
--- buildSnapshotProof 每輪先歸零，沒命中的輪就停在 0）。判同一點用世界距（點雲換手、索引會變）。剛達
--- TUNE.PROOF_STOP_ROUNDS 的那輪強制下一輪重規劃（planSig＝−1）：點雲簽章不變時 replan 不跑，Drive.proofBlockMark
--- 就沒機會把命中點交給規劃。
-function Drive.proofHitTrack(s, x, y, n)
+-- buildSnapshotProof 每輪先歸零，沒命中的輪就停在 0；veh＝命中硬點是車輛輪廓點，Sensor hardV）。判同一點用世界距
+-- （點雲換手、索引會變）。剛達 TUNE.PROOF_STOP_ROUNDS 的那輪強制下一輪重規劃（planSig＝−1）：點雲簽章不變時 replan
+-- 不跑，Drive.proofBlockMark 就沒機會把命中點交給規劃。達標後記停下點（s.proofStopX/Y/Veh），留給下一次承諾判
+-- 窄線爬行（Drive.proofTightArm；承諾後 proofHitN 會歸零，所以另存）。
+function Drive.proofHitTrack(s, x, y, n, veh)
     if not finite(x) or not finite(y) then return end
     if not finite(n) or n < 0 then n = 0 end
     if n > 0 and finite(s.proofHitX) and finite(s.proofHitY) then
@@ -5989,10 +6010,65 @@ function Drive.proofHitTrack(s, x, y, n)
     end
     n = n + 1
     s.proofHitN, s.proofHitX, s.proofHitY = n, x, y
+    if n >= TUNE.PROOF_STOP_ROUNDS then s.proofStopX, s.proofStopY, s.proofStopVeh = x, y, veh == true end
     if n == TUNE.PROOF_STOP_ROUNDS then
         s.planSig = -1
         diagEvent(s, s.playerNum, "proof", { phase = "stop", x = x, y = y, s = s.proofHitS, rs = s.lastSNow })
     end
+end
+
+-- 停下之後的下一次承諾（commit 成功、setOffset 已交表）判要不要窄線爬行（TUNE.PROOF_TIGHT_KMH）：停下點是車輛、
+-- 承諾線餘裕 m < need、承諾線（fstate ov 折線）有點離停下點 ≤ bodyReach 才武裝 s.proofTightX/Y。停下點這次就消化掉
+-- （之後的換線不再武裝）；換線時先解除舊的。事件 proof phase=tight 的 why＝arm／not-vehicle／wide／off-line。
+function Drive.proofTightArm(s, playerNum)
+    if s.proofTightX ~= nil then
+        s.proofTightX, s.proofTightY = nil, nil
+        diagEvent(s, playerNum, "proof", { phase = "tight-end", why = "reline", rs = s.lastSNow })
+    end
+    local x, y = s.proofStopX, s.proofStopY
+    if x == nil then return end
+    s.proofStopX, s.proofStopY = nil, nil
+    local m, need, fs, why = s.dodgeMargin, s.dodgeNeed, s.fstate, "off-line"
+    if s.proofStopVeh ~= true then
+        why = "not-vehicle"
+    elseif not (finite(m) and finite(need) and m < need) then
+        why = "wide"
+    else
+        local r2 = s.bodyReach * s.bodyReach
+        for k = 1, fs.ovN or 0 do
+            local dx, dy = fs.ovX[k] - x, fs.ovY[k] - y
+            if dx * dx + dy * dy <= r2 then why = "arm" break end
+        end
+    end
+    if why == "arm" then s.proofTightX, s.proofTightY = x, y end
+    diagEvent(s, playerNum, "proof", { phase = "tight", why = why, x = x, y = y, m = m, need = need, rs = s.lastSNow })
+end
+
+-- 窄線爬行帽（每幀，Drive.lagGuardCap 之後）：車心到停下點的世界距扣 bodyReach（車身任何一點最遠伸到的距離）處降到
+-- TUNE.PROOF_TIGHT_KMH 的接近包絡，煞車基準同其他接近包絡；超過包絡由 Drive.visAssistForce 的 "proof-tight" 帳沿中線
+-- 補減速（不鎖輪）。帽低於 MIN_EXEC 時 intent 歸 CRAWL（stepFollow 的 classifyIntent squeeze 參數），不被 GO 地板抬回。
+-- 解除：承諾釋放（release）、車尾越過停下點 PROOF_TIGHT_PASS_M（passed）；換線在 Drive.proofTightArm（reline）。
+-- 寫 s.proofTightCap（樣本 ptc），回套用後的目標速度。
+function Drive.proofTightCap(s, targetSpeed, vx, vy, playerNum)
+    s.proofTightCap = nil
+    local x, y = s.proofTightX, s.proofTightY
+    if x == nil then return targetSpeed end
+    local vp, h = s.vehicleProfile, s.lastVehicleHeading
+    local dx, dy = x - vx, y - vy
+    local why = not s.dodging and "release"
+        or finite(h) and dx * cos(h) + dy * sin(h)
+            < -(vp.halfL + math.abs(vp.centerOfMassZ or 0) + TUNE.PROOF_TIGHT_PASS_M) and "passed"
+    if why then
+        s.proofTightX, s.proofTightY = nil, nil
+        diagEvent(s, playerNum, "proof", { phase = "tight-end", why = why, rs = s.lastSNow })
+        return targetSpeed
+    end
+    local decel = s.safeBrake
+    if not finite(decel) or decel <= 0 then decel = 0.6 else decel = decel * TUNE.APPROACH_BRAKE_FRAC end
+    local cap = MDADDynamics.approachCapKmh(sqrt(dx * dx + dy * dy) - s.bodyReach, TUNE.PROOF_TIGHT_KMH, 0.5, decel)
+    s.proofTightCap = cap
+    if cap < targetSpeed then targetSpeed, s.lastCapReason = cap, "proof-tight" end
+    return targetSpeed
 end
 
 -- 持續命中的點交給規劃當擋線（1006）：規劃的 (s,l) 在折點退化（長車身掃過折點的車角不在任何一段的橫向裡，
@@ -6692,6 +6768,7 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     phys.proofHitS = s.proofHitS -- 1005：證明線掃掠命中的車身取樣弧長（gate sweep 接近包絡的終點）
     phys.proofHitN = s.proofHitN -- 1006：同一點連續命中的輪數（≥ TUNE.PROOF_STOP_ROUNDS＝包絡在命中前停住、規劃把它當擋線）
     phys.lagGuardCap = s.lagGuardCap -- 1006c：實測落後量守門的接近包絡（Drive.lagGuardCap；沒命中＝nil）
+    phys.proofTightCap = s.proofTightCap -- 1006p：停下之後窄線爬行的接近包絡（Drive.proofTightCap；沒武裝＝nil）
     -- 本幀速度裁決者與 gate 狀態（2026-09-01 使用者指示補齊離線可判數據）
     phys.capReason = s.lastCapReason
     phys.sensorCapReason = s.lastSensorReason
@@ -8009,7 +8086,9 @@ local function buildSnapshotProof(s, segI, proofEnd)
                     verifiedEnd, failReason = safeEnd, "sweep"
                     s.proofHitS = finite(sweepAt) and sweepAt or nil
                     -- 真命中才有硬點索引（壞輸入的 fail-closed 回傳沒有）：接續持續輪數
-                    if s.proofHitS and hitI then Drive.proofHitTrack(s, hitX, hitY, hitN) end
+                    if s.proofHitS and hitI then
+                        Drive.proofHitTrack(s, hitX, hitY, hitN, sen.hardV and sen.hardV[hitI] == true)
+                    end
                 end
             end
         end
@@ -11419,6 +11498,7 @@ local function replan(s, vehicle, playerNum)
                 thin = s.thinRec and s.thinRec.on and s.thinRec.phys or nil, -- 換縫找更寬時記下最窄那條的物理淨距
                 kin = s.kinRejectN > 0 and s.kinRejectN or nil, -- 承諾前被運動學證明拒收的候選數（Drive.kinProof）
                 preA = s.diag and Drive.preAClear(s) or nil }) -- pre-a 段最小物理淨距（只在紀錄開著時量）
+            Drive.proofTightArm(s, playerNum) -- 停下之後的窄線爬行（TUNE.PROOF_TIGHT_KMH）
             if getDebug() then
                 -- cap 分解一行印清楚（2026-09-04 實機三段 8／15／14 km/h 繞行，console
                 -- 只有「cap zero」才印分解，正值慢吞吞完全無從復盤）
@@ -12740,6 +12820,8 @@ local function stepFollow(s, vehicle, playerNum, now)
         targetSpeed = Drive.proofGateCap(s, targetSpeed, fullTarget, s.profile.styleName == "brisk")
         -- 實測落後量守門（Drive.lagGuardCap；命中點由掃描輪的 Drive.lagGuardScan 寫，繞行中照套）
         targetSpeed = Drive.lagGuardCap(s, targetSpeed, vx, vy)
+        -- 停下之後的窄線爬行（Drive.proofTightCap；Drive.proofTightArm 在承諾時武裝）
+        targetSpeed = Drive.proofTightCap(s, targetSpeed, vx, vy, playerNum)
 
         -- 起步近物限速（TUNE.START_GUARD_*；調頭／回線／繞行各有自己的淨距體系，不疊）
         s.startNearCap = nil
@@ -12797,9 +12879,7 @@ local function stepFollow(s, vehicle, playerNum, now)
                 or s.mode == "settle" or s.progressState == "gear-reset",
             s.fstate.rotating == true, Drive.waitHoldArg(s, blockedStop),
             s.followHold == true, s.returnHold == true,
-            s.visibilityCap, s.dodgeCrawl == true or s.softCrawl == true
-                or (s.dodging and (s.dodgeEnvN or 0) >= 2
-                    and finite(s.dodgeApproachCap) and s.dodgeApproachCap < MDADDynamics.MIN_EXEC_KMH),
+            s.visibilityCap, Drive.crawlIntentArg(s),
             type(s.sensor) == "table" and s.sensor.stamp == 0,
             s.returnUnsafe == true,
             type(s.sensor) == "table" and s.sensor.ready == true)
