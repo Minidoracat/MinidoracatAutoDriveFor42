@@ -123,6 +123,8 @@ local REASON_KEYS = {
     UI_MinidoracatAutoDrive_EngineOff = "UI_MinidoracatAutoDrive_HUDStatusEngineOff",
     UI_MinidoracatAutoDrive_RouteNotReady = "UI_MinidoracatAutoDrive_HUDStatusNoRoute",
     UI_MinidoracatAutoDrive_NeedGPS = "UI_MinidoracatAutoDrive_HUDStatusNoGPS",
+    -- 裝了地圖錶時的缺 GPS（MDAD.navDeviceReason）：短標籤也提到錶的定位模組
+    UI_MinidoracatAutoDrive_NeedGPSOrWatch = "UI_MinidoracatAutoDrive_HUDStatusNoGPSOrWatch",
     UI_MinidoracatAutoDrive_NavApiMissing = "UI_MinidoracatAutoDrive_HUDStatusNoNav",
     -- 多停靠點行程（addon-api §6）：Driver 的行程回傳鍵，短標籤只有 HUD 讀。
     UI_MinidoracatAutoDrive_TripBusy = "UI_MinidoracatAutoDrive_HUDStatusTripBusy",
@@ -165,6 +167,7 @@ HUD.STOP_KEYS = {
     UI_MinidoracatAutoDrive_TrailerLost = "UI_MinidoracatAutoDrive_HUDStatusStop_trailer",
     UI_MinidoracatAutoDrive_EngineOff = "UI_MinidoracatAutoDrive_HUDStatusStop_engine",
     UI_MinidoracatAutoDrive_NeedGPS = "UI_MinidoracatAutoDrive_HUDStatusStop_device",
+    UI_MinidoracatAutoDrive_NeedGPSOrWatch = "UI_MinidoracatAutoDrive_HUDStatusStop_device",
     UI_MinidoracatAutoDrive_NeedModule = "UI_MinidoracatAutoDrive_HUDStatusStop_device",
 }
 
@@ -195,6 +198,7 @@ local STATUS_WIDTH_KEYS = {
     "UI_MinidoracatAutoDrive_HUDStatusEngineOff",
     "UI_MinidoracatAutoDrive_HUDStatusNoRoute",
     "UI_MinidoracatAutoDrive_HUDStatusNoGPS",
+    "UI_MinidoracatAutoDrive_HUDStatusNoGPSOrWatch",
     "UI_MinidoracatAutoDrive_HUDStatusNoNav",
     "UI_MinidoracatAutoDrive_HUDStatusNotReady",
     "UI_MinidoracatAutoDrive_HUDStatusTripBusy",

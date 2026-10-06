@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1006o"
+Drive.REV = "1006p"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -1046,6 +1046,17 @@ function TRIP.key(reason, gateKey)
         return "UI_MinidoracatAutoDrive_NeedGPS"
     end
     return TRIP.REASON[reason] or TRIP.STATE
+end
+
+-- token 失效時的停止原因：主 MOD 以 reason=unavailable 暫停行程＝功能閘門 nav 失效（例：拆下地圖錶的定位模組、
+-- 錶沒電；addon-api 功能閘門表 nav 列），算裝置失效，用 NeedGPS 那一類（MDAD.navDeviceReason，裝了地圖錶時提到錶）；
+-- 其他撤銷照舊 TripLost（2026-10-06 使用者裁定）。下車／換車在 token 檢查前已靜默結束，不會走到這裡。
+function TRIP.lostKey(api, playerNum)
+    local snap = api.getNavItinerary(playerNum)
+    if type(snap) == "table" and snap.phase == "paused" and snap.reason == "unavailable" then
+        return MDAD.navDeviceReason()
+    end
+    return TRIP.LOST
 end
 
 -- 行程介面守衛（§2 分欄位分級的作法，同 cachedSnapTrusted）：navApi() 之上再要求
@@ -13900,7 +13911,7 @@ local function onPlayerUpdate(player)
         if not trip or trip.getNavLeg(playerNum) ~= s.legToken then
             -- 只有讀到不同 token 才確認已撤銷；介面缺席仍須保存待交還紀錄。
             if trip then s.legToken = nil end
-            Drive.stop(playerNum, trip and TRIP.LOST or KEY_API)
+            Drive.stop(playerNum, trip and TRIP.lostKey(trip, playerNum) or KEY_API)
             return
         end
     end

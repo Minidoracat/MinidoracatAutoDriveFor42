@@ -1,5 +1,6 @@
 {
     "UI_MinidoracatAutoDrive_NeedGPS": "ルートを設定するには電池の残ったGPSナビゲーターが必要です。",
+    "UI_MinidoracatAutoDrive_NeedGPSOrWatch": "ルートを設定するには、電池の残ったGPSナビゲーターか、測位モジュールを取り付けた電池の残ったマップウォッチの着用が必要です。",
     "UI_MinidoracatAutoDrive_InstallGPS": "GPSナビゲーターを取り付ける",
     "UI_MinidoracatAutoDrive_InstallAuto": "オートパイロットモジュールを取り付ける",
     "UI_MinidoracatAutoDrive_UninstallGPS": "GPSナビゲーターを取り外す",
@@ -117,6 +118,7 @@
     "UI_MinidoracatAutoDrive_HUDStatusEngineOff": "エンジン停止中",
     "UI_MinidoracatAutoDrive_HUDStatusNoRoute": "ルート未設定",
     "UI_MinidoracatAutoDrive_HUDStatusNoGPS": "GPS が必要です",
+    "UI_MinidoracatAutoDrive_HUDStatusNoGPSOrWatch": "GPS／測位なし",
     "UI_MinidoracatAutoDrive_HUDStatusNoNav": "ナビを利用できません",
     "UI_MinidoracatAutoDrive_HUDStatusNotReady": "準備できていません",
     "UI_MinidoracatAutoDrive_HUDSpeedUnit": "km/h",

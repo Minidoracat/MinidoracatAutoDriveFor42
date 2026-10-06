@@ -1925,9 +1925,13 @@ navVeh._devices.MDADAutopilot._item = nil
 --   MinidoracatAutoDriveAPI.hasNavDevice 只看裝置、不看選項與錶，隨身掃描與 navGate draw 共用同一份快取。
 --   違規證明：拿掉 navGate 的錶分支＝(wg-active) 紅；錶查詢不快取＝(wg-draw) 紅；hasNavDevice 自掃＝(wg-share) 紅；
 --   hasNavDevice 看 NeedItemForNav＝(wg-dev) 紅；拿掉版本守衛＝(wg-old) 紅；拿掉 pcall＝harness crash。
+--   拒絕理由（2026-10-06 使用者裁定）：裝了地圖錶（MinidoracatWatchAPI 是 table、watchApiVersion >= 1）回 NeedGPSOrWatch，
+--   提示要提到錶上的定位模組；沒裝或版本不足回原本的 NeedGPS。違規證明：navGate 固定回 NeedGPS＝(wg-reason) 紅；
+--   navDeviceReason 不看版本＝(wg-reason-old) 紅。
 function drive.scenarioWatchGps()
-    scenario("地圖錶定位模組：GPS 裝置或錶上 active 的定位模組任一即可；守衛、快取共用與 hasNavDevice")
+    scenario("地圖錶定位模組：GPS 裝置或錶上 active 的定位模組任一即可；守衛、快取共用、hasNavDevice 與拒絕理由")
     local api = MinidoracatAutoDriveAPI
+    local NEED_WATCH = "UI_MinidoracatAutoDrive_NeedGPSOrWatch"
     local oldNow, oldWatch = nowMs, MinidoracatWatchAPI
     checkTrue(type(api) == "table" and api.navDeviceApiVersion == 1 and type(api.hasNavDevice) == "function",
         "(wg-api) MinidoracatAutoDriveAPI 契約：navDeviceApiVersion=1、hasNavDevice")
@@ -1949,8 +1953,10 @@ function drive.scenarioWatchGps()
     MinidoracatWatchAPI = nil
     local ok, reason = gate(8)
     checkFalse(ok, "(wg-none) 沒裝置、沒地圖錶 MOD：拒絕")
-    checkEq(reason, NEED_GPS, "(wg-none) 理由鍵不變")
+    checkEq(reason, NEED_GPS, "(wg-none) 沒裝地圖錶：理由鍵照原本的 NeedGPS")
+    checkEq(MDAD.navDeviceReason(), NEED_GPS, "(wg-reason) 沒裝地圖錶：navDeviceReason＝NeedGPS")
     MinidoracatWatchAPI = watchApi(1)
+    checkEq(MDAD.navDeviceReason(), NEED_WATCH, "(wg-reason) 裝了地圖錶：navDeviceReason＝NeedGPSOrWatch")
     calls = 0
     ok, reason = gate(8)
     checkTrue(ok, "(wg-active) 錶上定位模組 active：放行")
@@ -1961,24 +1967,28 @@ function drive.scenarioWatchGps()
         state = s
         ok, reason = gate(8)
         checkFalse(ok, "(wg-state) 錶狀態 " .. s .. "：不算有 GPS")
-        checkEq(reason, NEED_GPS, "(wg-state) " .. s .. " 拒絕帶理由鍵")
+        checkEq(reason, NEED_WATCH, "(wg-reason) " .. s .. " 拒絕理由提到地圖錶")
     end
     state = "active"
     for _, bad in ipairs({ { 0, "版本 0" }, { "1", "版本是字串" } }) do
         MinidoracatWatchAPI = watchApi(bad[1])
         calls = 0
-        checkFalse(gate(8), "(wg-old) " .. bad[2] .. "：不信任")
+        ok, reason = gate(8)
+        checkFalse(ok, "(wg-old) " .. bad[2] .. "：不信任")
         checkEq(calls, 0, "(wg-old) " .. bad[2] .. "：完全不呼叫")
+        checkEq(reason, NEED_GPS, "(wg-reason-old) " .. bad[2] .. "：當作沒裝地圖錶，理由照原本的 NeedGPS")
     end
     MinidoracatWatchAPI = { watchApiVersion = 1 }
     checkFalse(gate(8), "(wg-nofn) 有版本沒函式：當沒有")
     MinidoracatWatchAPI = "not a table"
-    checkFalse(gate(8), "(wg-nofn) 全域不是 table：當沒有")
+    ok, reason = gate(8)
+    checkFalse(ok, "(wg-nofn) 全域不是 table：當沒有")
+    checkEq(reason, NEED_GPS, "(wg-reason-old) 全域不是 table：理由照原本的 NeedGPS")
     MinidoracatWatchAPI = watchApi(2)
     state = "throw"
     ok, reason = gate(8)
     checkFalse(ok, "(wg-throw) 錶 API 拋錯：當沒有、不中斷")
-    checkEq(reason, NEED_GPS, "(wg-throw) 理由鍵")
+    checkEq(reason, NEED_WATCH, "(wg-throw) 理由鍵提到地圖錶")
     state = "active"
     checkTrue(gate(8), "(wg-active) 較新版本（2）照樣信任")
 
@@ -2036,7 +2046,7 @@ function drive.scenarioWatchGps()
     nowMs = nowMs + 1
     ok, reason = gate(8, "draw")
     checkFalse(ok, "(wg-draw) 滿 1000ms 重問錶、改判拒絕")
-    checkEq(reason, NEED_GPS, "(wg-draw) 理由鍵")
+    checkEq(reason, NEED_WATCH, "(wg-reason) draw 拒絕理由也提到地圖錶")
     checkEq(calls, 2, "(wg-draw) TTL 到期只重問一次")
     checkEq(stats.scanTypeEval, 2, "(wg-share) 隨身掃描同步 TTL 重掃一次")
     resetStats()
@@ -25309,6 +25319,40 @@ checkEq(drive.calls.forceBrake, 0, "(t17) 撤銷那一幀不再送煞車指令")
 checkEq(haloKey(), "UI_MinidoracatAutoDrive_TripLost", "(t17) 顯示接管已結束")
 checkEq(M.reports, 0, "(t17) 不回報抵達")
 checkEq(M.releases, 0, "(t17) 已確認撤銷就不再 release")
+
+-- ⑰w 錶中途失效（2026-10-06 使用者裁定）：主 MOD 以 reason=unavailable 暫停行程並撤銷 token（功能閘門 nav 失效，
+--   例：拆下地圖錶的定位模組）＝裝置失效，停止原因改用 NeedGPS 那一類（裝了地圖錶＝NeedGPSOrWatch），HUD 顯示
+--   「裝置失效停止」；其他原因暫停（cancelled）或行程還在走（只換 token）照舊 TripLost。
+--   違規證明：拿掉 TRIP.lostKey 的 unavailable 分支＝(t17w) 紅；不看 phase／reason＝(t17w-other) 紅。
+for _, c in ipairs({
+    { phase = "paused", reason = "unavailable", watch = false, key = NEED_GPS, tag = "(t17w) 沒裝地圖錶" },
+    { phase = "paused", reason = "unavailable", watch = true, key = "UI_MinidoracatAutoDrive_NeedGPSOrWatch",
+        tag = "(t17w) 裝了地圖錶" },
+    { phase = "paused", reason = "cancelled", watch = true, key = "UI_MinidoracatAutoDrive_TripLost",
+        tag = "(t17w-other) 玩家取消" },
+    { phase = "navigating", reason = "unavailable", watch = true, key = "UI_MinidoracatAutoDrive_TripLost",
+        tag = "(t17w-other) 行程仍在走、只換了 token" },
+}) do
+    ready(true)
+    setTrip("draft")
+    checkTrue(MDAD.Drive.continueItinerary(0), c.tag .. "：出發")
+    pump()
+    checkTrue(MDAD.Drive.isActive(0), c.tag .. "：claim 後在開")
+    dveh._speed, dveh._stopped = 40, false
+    clearList(halos)
+    MinidoracatWatchAPI = c.watch and { watchApiVersion = 1 } or nil
+    M.claimOwner, M.claimToken = nil, nil
+    M.legToken = c.phase == "navigating" and newToken() or nil
+    M.phase, M.pausedReason = c.phase, c.reason
+    drive.calls.forceBrake = 0
+    bump()
+    driveTick(dp, dveh)
+    checkFalse(MDAD.Drive.isActive(0), c.tag .. "：token 失效立刻交還")
+    checkEq(haloKey(), c.key, c.tag .. "：停止原因")
+    checkEq(MDAD.Drive.hudStopReason(0, dveh), c.key, c.tag .. "：HUD 記下同一個停止原因")
+    checkEq(drive.calls.forceBrake, 0, c.tag .. "：交還不煞車")
+    MinidoracatWatchAPI = nil
+end
 
 -- ⑱ 準備中玩家自己操作／車子動起來：安靜放棄，不搶方向盤也不 claim
 ready(true)

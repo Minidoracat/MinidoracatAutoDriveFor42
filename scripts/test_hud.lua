@@ -1084,6 +1084,23 @@ checkEq(panel.statusTip.tooltip, "ANIMAL SENTENCE\n12 MIN AGO", "forced-stop age
 state.stopKey = "UI_SomeAddon_CustomGate"
 panel:refresh(nowMs)
 checkEq(panel._statusText, "FORCE STOPPED", "an unmapped forced-stop reason falls back to the generic label")
+-- 裝了地圖錶時的缺 GPS 原因（2026-10-06 使用者裁定）：被迫停止與原版 NeedGPS 同為「裝置失效」短標籤；
+-- 停用態用自己的短標籤；完整原因句照樣進 tooltip。違規證明：HUD 表拿掉 NeedGPSOrWatch 任一列＝紅。
+texts.UI_MinidoracatAutoDrive_HUDStatusStop_device = "STOP DEVICE"
+texts.UI_MinidoracatAutoDrive_NeedGPSOrWatch = "NEED GPS OR WATCH SENTENCE"
+texts.UI_MinidoracatAutoDrive_HUDStatusNoGPSOrWatch = "NO GPS/WATCH"
+state.stopKey, state.stopAgoMs = "UI_MinidoracatAutoDrive_NeedGPSOrWatch", 1000
+panel:refresh(nowMs)
+check(panel._statusText == "STOP DEVICE" and panel.statusTip.tooltip == "NEED GPS OR WATCH SENTENCE\nJUST NOW",
+    "watch-aware GPS reason: forced stop shows the device label and the full sentence ("
+        .. tostring(panel._statusText) .. " / " .. tostring(panel.statusTip.tooltip) .. ")")
+state.stopKey, state.stopAgoMs = nil, nil
+state.startReason = "UI_MinidoracatAutoDrive_NeedGPSOrWatch"
+panel:refresh(nowMs)
+check(panel._statusText == "NO GPS/WATCH" and panel.actionButton.tooltip == "NEED GPS OR WATCH SENTENCE",
+    "watch-aware GPS reason: start gate shows its own short label and keeps the sentence as tooltip ("
+        .. tostring(panel._statusText) .. ")")
+state.startReason = "UI_MinidoracatAutoDrive_EngineOff"
 state.stopKey, state.stopAgoMs = nil, nil
 panel:refresh(nowMs)
 check(panel._statusText == "ENGINE OFF" and not panel.statusTip.visible

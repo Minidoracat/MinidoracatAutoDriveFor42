@@ -1,5 +1,6 @@
 {
     "UI_MinidoracatAutoDrive_NeedGPS": "A charged GPS Navigator is required to plot a route.",
+    "UI_MinidoracatAutoDrive_NeedGPSOrWatch": "A charged GPS Navigator, or a worn, charged Map Watch with a Positioning Module, is required to plot a route.",
     "UI_MinidoracatAutoDrive_InstallGPS": "Install GPS Navigator",
     "UI_MinidoracatAutoDrive_InstallAuto": "Install Autopilot Module",
     "UI_MinidoracatAutoDrive_UninstallGPS": "Remove GPS Navigator",
@@ -117,6 +118,7 @@
     "UI_MinidoracatAutoDrive_HUDStatusEngineOff": "Engine is off",
     "UI_MinidoracatAutoDrive_HUDStatusNoRoute": "No route set",
     "UI_MinidoracatAutoDrive_HUDStatusNoGPS": "GPS required",
+    "UI_MinidoracatAutoDrive_HUDStatusNoGPSOrWatch": "No GPS or positioning",
     "UI_MinidoracatAutoDrive_HUDStatusNoNav": "Navigation unavailable",
     "UI_MinidoracatAutoDrive_HUDStatusNotReady": "Not ready",
     "UI_MinidoracatAutoDrive_HUDSpeedUnit": "km/h",
