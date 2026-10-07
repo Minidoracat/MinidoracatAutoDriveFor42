@@ -11,7 +11,7 @@
 [*] Open the world map and pick a destination
 [*] In the driver's seat, press [b]Engage Autodrive[/b] on the panel above the dashboard. Touch the controls anytime to take over
 [/olist]
-Settings: ESC → MOD Options or MiniMap gear → AutoDrive; server rules are sandbox options.
+Settings: the "Minidoracat Autodrive" page in ESC → MOD Options, or MiniMap gear → Autodrive (HUD theme, layout, scale and voice volume too); server rules are sandbox options.
 
 [h2]🧰 Features in detail[/h2]
 
