@@ -3367,7 +3367,8 @@ HUD.setUTurnIndex = setUTurnIndex
 MDAD.HUD = HUD
 
 -- MiniMap 齒輪視窗的 addon section：值與 ESC MOD Options 共用同一 option 物件，
--- MiniMap 只當第二個 UI 入口，不複製設定、不碰伺服器。
+-- MiniMap 只當第二個 UI 入口，不複製設定、不碰伺服器。icon／group／order 是 v5 欄位，
+-- 舊主 MOD 忽略未知欄位；tick 一律帶 default（v5 的「重設此分類」跳過沒 default 的 tick）。
 local miniMapSettingsApi = 0
 local function registerMiniMapSettings()
     local api = MinidoracatMiniMapAPI
@@ -3375,27 +3376,41 @@ local function registerMiniMapSettings()
             and api.settingsApiVersion >= 1
             and type(api.registerSettingsSection) == "function") then return end
     if miniMapSettingsApi >= api.settingsApiVersion then return end
+    -- HUD 外觀三個 combo：set 走 setClientOption（apply＋save），與 ESC 套用、HUD 主題鈕同一路徑。
+    local function hudCombo(id, items, default)
+        local n = #items
+        return { label = "UI_MinidoracatAutoDrive_" .. id, items = items, default = default,
+            get = function() return optionIndex(id, default, n) end,
+            set = function(value)
+                if type(value) ~= "number" or value ~= math.floor(value)
+                        or value < 1 or value > n then return false end
+                return setClientOption(id, value)
+            end }
+    end
     local spec = {
-        label = "UI_MinidoracatAutoDrive_Options",
+        label = "UI_MinidoracatAutoDrive_Section",
+        icon = "gauge",
+        group = "addon",
+        order = 15,
         ticks = {
             { label = "UI_MinidoracatAutoDrive_ShowTrajectory",
                 tooltip = "UI_MinidoracatAutoDrive_ShowTrajectory_tooltip",
-                get = trajectoryVisible, set = setTrajectoryVisible },
+                default = true, get = trajectoryVisible, set = setTrajectoryVisible },
             { label = "UI_MinidoracatAutoDrive_VoiceEnabled",
                 tooltip = "UI_MinidoracatAutoDrive_VoiceEnabled_tooltip",
-                get = voiceEnabled, set = setVoiceEnabled },
+                default = true, get = voiceEnabled, set = setVoiceEnabled },
             { label = "UI_MinidoracatAutoDrive_AutoDetour",
                 tooltip = "UI_MinidoracatAutoDrive_AutoDetour_tooltip",
-                get = autoDetour, set = setAutoDetour },
+                default = true, get = autoDetour, set = setAutoDetour },
             { label = "UI_MinidoracatAutoDrive_SideEscape",
                 tooltip = "UI_MinidoracatAutoDrive_SideEscape_tooltip",
                 default = false, get = HUD.sideEscape, set = HUD.setSideEscape },
             { label = "UI_MinidoracatAutoDrive_ZombieDodge",
                 tooltip = "UI_MinidoracatAutoDrive_ZombieDodge_tooltip",
-                get = zombieDodge, set = setZombieDodge },
+                default = true, get = zombieDodge, set = setZombieDodge },
             { label = "UI_MinidoracatAutoDrive_ExportTelemetry",
                 tooltip = "UI_MinidoracatAutoDrive_ExportTelemetry_tooltip",
-                get = telemetryEnabled, set = setTelemetryEnabled },
+                default = false, get = telemetryEnabled, set = setTelemetryEnabled },
             { label = "UI_MinidoracatAutoDrive_ShareDiagnostics",
                 tooltip = "UI_MinidoracatAutoDrive_ShareDiagnostics_tooltip",
                 default = true, get = shareDiagnostics, set = setShareDiagnostics },
@@ -3407,7 +3422,7 @@ local function registerMiniMapSettings()
                 default = true, get = pauseOnArrival, set = setPauseOnArrival },
             { label = "UI_MinidoracatAutoDrive_SpeedDetails",
                 tooltip = "UI_MinidoracatAutoDrive_SpeedDetails_tooltip",
-                get = speedDetails, set = setSpeedDetails },
+                default = false, get = speedDetails, set = setSpeedDetails },
         },
         combos = {
             { label = "UI_MinidoracatAutoDrive_TrajectoryWidth",
@@ -3463,6 +3478,16 @@ local function registerMiniMapSettings()
                 items = HUD.ANIMAL_DODGE_KEYS,
                 default = 2,
                 get = HUD.animalDodge, set = HUD.setAnimalDodge },
+            hudCombo("HUDTheme", THEME_KEYS, STYLE_METAL),
+            hudCombo("HUDLayout", {
+                "UI_MinidoracatAutoDrive_HUDLayoutFull",
+                "UI_MinidoracatAutoDrive_HUDLayoutCompact",
+            }, LAYOUT_FULL),
+            hudCombo("HUDScale", {
+                "UI_MinidoracatAutoDrive_HUDScale75",
+                "UI_MinidoracatAutoDrive_HUDScale100",
+                "UI_MinidoracatAutoDrive_HUDScale125",
+            }, 2),
         },
     }
     if api.settingsApiVersion >= 2 then
@@ -3476,6 +3501,15 @@ local function registerMiniMapSettings()
             { label = "UI_MinidoracatAutoDrive_ReportIssue",
                 tooltip = "UI_MinidoracatAutoDrive_ReportIssue_tooltip",
                 run = function(pn) copyDiag(pn, "copyReportLink") end },
+        }
+    end
+    -- v3 以下忽略 sliders：音量仍可從 ESC 與 HUD 拉桿改，不另做 combo 退路。
+    if api.settingsApiVersion >= 4 then
+        spec.sliders = {
+            { label = "UI_MinidoracatAutoDrive_VoiceVolume",
+                tooltip = "UI_MinidoracatAutoDrive_VoiceVolume_tooltip",
+                min = 0, max = 100, step = VOICE_VOLUME_STEP, default = VOICE_VOLUME_DEFAULT,
+                fmt = "%d%%", get = voiceVolume, set = setVoiceVolume },
         }
     end
     if api.registerSettingsSection(MDAD.MOD_ID, spec) == true then

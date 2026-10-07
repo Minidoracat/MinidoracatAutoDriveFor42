@@ -1072,8 +1072,8 @@ MDADDiagnostics.stop(0, "end")
 halos = {}
 check(MDADDiagnostics.copyLatestPath(0) == true, "copy latest works with the framework")
 checkEq(#toasts, 1, "copy latest raises exactly one Toast")
-checkEq(toasts[1] and toasts[1].title, "UI_MinidoracatAutoDrive_Options",
-    "Toast title resolves through the options translation key")
+checkEq(toasts[1] and toasts[1].title, "UI_MinidoracatAutoDrive_Section",
+    "Toast title resolves through the short section-name key (not the prefixed ESC page title)")
 checkEq(toasts[1] and toasts[1].message, "UI_MinidoracatAutoDrive_TelemetryCopied",
     "Toast message resolves through the copied translation key")
 checkEq(#halos, 0, "the shared Toast replaces the good Halo")

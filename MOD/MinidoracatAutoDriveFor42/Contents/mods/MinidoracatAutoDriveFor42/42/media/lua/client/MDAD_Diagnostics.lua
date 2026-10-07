@@ -267,7 +267,7 @@ function D.toast(text, kind)
     local fw = frameworkToast()
     if not fw then return end
     pcall(fw.show, {
-        title = localized("UI_MinidoracatAutoDrive_Options", "AutoDrive"),
+        title = localized("UI_MinidoracatAutoDrive_Section", "AutoDrive"),
         message = text,
         colors = TOAST_COLORS[kind],
         holdMs = D.toastHoldMs(text),
@@ -282,7 +282,7 @@ local function copiedNotice(pn, key)
     local fw = frameworkToast()
     if fw then
         local ok, shown = pcall(fw.show, {
-            title = localized("UI_MinidoracatAutoDrive_Options", "AutoDrive"),
+            title = localized("UI_MinidoracatAutoDrive_Section", "AutoDrive"),
             message = localized(key, "copied"),
         })
         if ok and shown ~= nil then return end

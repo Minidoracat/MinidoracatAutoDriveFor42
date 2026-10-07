@@ -389,7 +389,7 @@ local function newOptions(id)
         local option = { selected = 1, items = {} }
         function option:addItem(_, selected)
             self.items[#self.items + 1] = true
-            if selected then self.selected = #self.items end
+            if selected then self.selected = #self.items; self.default = #self.items end
         end
         function option:getValue() return self.selected end
         function option:setValue(value) self.selected = value end
@@ -397,7 +397,7 @@ local function newOptions(id)
         return option
     end
     function options:addTickBox(optionId, _, default)
-        local option = { value = default == true }
+        local option = { value = default == true, default = default == true }
         function option:getValue() return self.value end
         function option:setValue(value) self.value = value == true end
         self.dict[optionId] = option
@@ -405,7 +405,7 @@ local function newOptions(id)
     end
     -- PZAPI/ModOptions.lua:206-215：slider option 只有 value（數字）
     function options:addSlider(optionId, _, min, max, step, default)
-        local option = { value = default, min = min, max = max, step = step }
+        local option = { value = default, default = default, min = min, max = max, step = step }
         function option:getValue() return self.value end
         function option:setValue(value) self.value = value end
         self.dict[optionId] = option
@@ -1565,6 +1565,42 @@ check(type(registeredMiniMapSection) == "table"
     and registeredMiniMapSection.lane == nil
     and registeredMiniMapSection.actions == nil,
     "v1 MiniMap spec registers ticks/combos without actions or host layout fields")
+-- 齒輪視窗分類（settings v5 欄位；舊主 MOD 忽略）：label 用短名、不用 ESC 頁標題
+check(registeredMiniMapSection.label == "UI_MinidoracatAutoDrive_Section"
+    and registeredMiniMapSection.icon == "gauge"
+    and registeredMiniMapSection.group == "addon"
+    and registeredMiniMapSection.order == 15
+    and registeredMiniMapSection.sliders == nil,
+    "MiniMap section carries the short label, gauge icon, addon group, order 15 and no v4 sliders on v1")
+-- 每個 tick／combo 的 default 必須等於 ESC 的預設（label 尾段＝option id）；
+-- v5 的「重設此分類」跳過沒 default 的 tick，漏寫就會把開著的選項重設成 false。
+do
+    local section = registeredMiniMapSection
+    checkEq(#section.ticks, 10, "MiniMap section keeps ten ticks")
+    for i, tick in ipairs(section.ticks) do
+        local id = tick.label:gsub("^UI_MinidoracatAutoDrive_", "")
+        local esc = options:getOption(id)
+        check(esc ~= nil and type(tick.default) == "boolean" and tick.default == esc.default,
+            "tick " .. i .. " (" .. id .. ") has an explicit default equal to the ESC default")
+    end
+    checkEq(#section.combos, 11, "MiniMap section has eight setting combos plus three HUD combos")
+    for i, combo in ipairs(section.combos) do
+        local id = combo.label:gsub("^UI_MinidoracatAutoDrive_", "")
+        local esc = options:getOption(id)
+        check(esc ~= nil and combo.default == esc.default and #combo.items == #esc.items,
+            "combo " .. i .. " (" .. id .. ") mirrors the ESC default and item count")
+    end
+    check(section.combos[9].label == "UI_MinidoracatAutoDrive_HUDTheme"
+        and #section.combos[9].items == 4
+        and section.combos[9].items[1] == "UI_MinidoracatAutoDrive_HUDThemeMetal"
+        and section.combos[10].label == "UI_MinidoracatAutoDrive_HUDLayout"
+        and section.combos[10].items[2] == "UI_MinidoracatAutoDrive_HUDLayoutCompact"
+        and section.combos[11].label == "UI_MinidoracatAutoDrive_HUDScale"
+        and section.combos[11].items[1] == "UI_MinidoracatAutoDrive_HUDScale75"
+        and section.combos[9].default == 1 and section.combos[10].default == 1
+        and section.combos[11].default == 2,
+        "HUD theme/layout/scale combos follow the existing combos with defaults 1/1/2")
+end
 check(registeredMiniMapSection.ticks[2].label == "UI_MinidoracatAutoDrive_VoiceEnabled"
     and registeredMiniMapSection.ticks[2].get() == true,
     "MiniMap section exposes the voice tick between trajectory and telemetry")
@@ -1881,6 +1917,53 @@ check(reportButton ~= nil and reportButton.type == "button"
 copyReportPn = nil
 reportButton.onclick(nil, reportButton)
 checkEq(copyReportPn, 0, "ESC report-issue button copies the link for the local main player")
+-- 主 MOD 升到 v4：重註冊一次，多出語音音量滑桿（同一個 VoiceVolume option）
+MinidoracatMiniMapAPI.settingsApiVersion = 4
+fire(Events.OnGameBoot)
+checkEq(miniMapRegisterCalls, 3, "API v4 upgrade re-registers settings once")
+do
+    local sliders = registeredMiniMapSection.sliders
+    local slider = sliders and sliders[1]
+    local esc = options:getOption("VoiceVolume")
+    check(slider ~= nil and #sliders == 1
+        and slider.label == "UI_MinidoracatAutoDrive_VoiceVolume"
+        and slider.tooltip == "UI_MinidoracatAutoDrive_VoiceVolume_tooltip"
+        and slider.min == esc.min and slider.max == esc.max and slider.step == esc.step
+        and slider.default == esc.default and slider.default == 70
+        and string.format(slider.fmt, 70) == "70%",
+        "v4 spec adds the voice-volume slider mirroring the ESC slider range, step and default")
+    local before, saves = esc:getValue(), optionSaveCalls
+    check(slider.set(35) == true and esc:getValue() == 35 and MDAD.HUD.voiceVolume() == 35
+        and slider.get() == 35 and optionSaveCalls == saves + 1,
+        "MiniMap volume slider writes and persists the shared VoiceVolume option")
+    esc:setValue(before)
+    -- HUD 外觀 combo 走 setClientOption（apply＋save）：HUD 立刻換主題／佈局，與 ESC 套用同一路徑
+    local theme = registeredMiniMapSection.combos[9]
+    local layout = registeredMiniMapSection.combos[10]
+    local scale = registeredMiniMapSection.combos[11]
+    saves = optionSaveCalls
+    check(theme.set(3) and layout.set(2) and scale.set(3)
+        and panel._style == 3 and panel._layout == 2
+        and theme.get() == 3 and layout.get() == 2 and scale.get() == 3
+        and options:getOption("HUDScale"):getValue() == 3 and optionSaveCalls == saves + 3,
+        "MiniMap HUD combos write the shared options and re-apply the panel layout")
+    check(not theme.set(5) and not theme.set(0) and not layout.set(1.5) and not scale.set(0 / 0)
+        and optionSaveCalls == saves + 3 and theme.get() == 3,
+        "invalid HUD combo indices do not overwrite preferences")
+    options:getOption("HUDTheme"):setValue(9)
+    checkEq(theme.get(), 1, "corrupt theme option reads back as the default")
+    theme.set(1)
+    layout.set(1)
+    scale.set(2)
+end
+-- 主 MOD 升到 v5：再重註冊一次，同版本的 OnGameBoot 不重複
+MinidoracatMiniMapAPI.settingsApiVersion = 5
+fire(Events.OnGameBoot)
+fire(Events.OnGameBoot)
+checkEq(miniMapRegisterCalls, 4, "API v5 upgrade re-registers settings exactly once")
+check(registeredMiniMapSection.sliders ~= nil and registeredMiniMapSection.actions ~= nil
+    and registeredMiniMapSection.order == 15,
+    "v5 spec keeps actions, the volume slider and the v5 fields")
 options:getOption("HUDTheme"):setValue(2)
 options:getOption("HUDLayout"):setValue(2)
 options:getOption("HUDScale"):setValue(1)
