@@ -135,6 +135,8 @@ local EK = {
     -- 1008 拖車：tow attach 外拉規劃用的掛點→車頭（MDADTrailer.hitchFront）；detour towcorner 附了車尾正後方圈（1）；
     -- detour skip why=same 時車離上次轉角改道判定處的世界距離（m）
     "front", "towRear", "moved",
+    -- 橫向覆蓋補掃（1008，dodge defer lateral-coverage／band-clear、blocked）：補掃帶心選法 nav／mid／none／cap／done、連續延後次數
+    "bsel", "bdn",
 }
 
 local function logOnce(msg)
