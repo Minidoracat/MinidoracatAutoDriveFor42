@@ -248,19 +248,26 @@ local function evictOldest(skipFolder, skipSlot)
     return true
 end
 
--- 選槽：空槽優先；否則覆蓋優先級最低（pri 數字最大）中最舊的。
-local function pickSlot(fo, folder, busy)
+-- 選槽：空槽優先；滿了先覆蓋 rev 與這段不同的片段（1008：舊版的 pri 1–2 片段永久佔槽，正式服槽滿的玩家約八成是
+-- 舊版片段，新版的 takeover 72 段只收到 31），沒有才照原規則：優先級最低（pri 數字最大）中最舊的。rev 空（客戶端
+-- 沒帶）不分版本。
+local function pickSlot(fo, folder, busy, rev)
     local i = 1
     while i <= SLOTS do
         if not fo.slots[i] and i ~= busy then return i end
         i = i + 1
     end
-    local vs, vc = nil, nil
+    local byRev = rev ~= nil and rev ~= ""
+    local vs, vc, vStale = nil, nil, false
     i = 1
     while i <= SLOTS do
         local c = fo.slots[i]
-        if c and i ~= busy and (not vc or c.pri > vc.pri or (c.pri == vc.pri and c.ts < vc.ts)) then
-            vs, vc = i, c
+        if c and i ~= busy then
+            local stale = byRev and c.rev ~= rev
+            if not vc or (stale and not vStale)
+                    or (stale == vStale and (c.pri > vc.pri or (c.pri == vc.pri and c.ts < vc.ts))) then
+                vs, vc, vStale = i, c, stale
+            end
         end
         i = i + 1
     end
@@ -307,7 +314,7 @@ local function beginClip(user, args, t)
     if not budgetOk(user, t, len) then return nil end
     local folder = folderFor(user)
     local fo = folders[folder]
-    local slot = pickSlot(fo, folder, nil)
+    local slot = pickSlot(fo, folder, nil, cell(args.rev, 32))
     if not slot then return nil end
     if fo.slots[slot] then clearSlot(fo, folder, slot) end
     local cap = capBytes()

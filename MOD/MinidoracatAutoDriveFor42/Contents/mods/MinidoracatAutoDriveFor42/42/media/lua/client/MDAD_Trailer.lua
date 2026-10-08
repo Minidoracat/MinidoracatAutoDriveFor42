@@ -627,6 +627,32 @@ function T.lostState(vehicle, tow)
     return cur, alive, by, hd, kmh, up
 end
 
+-- 拖車樣本（1008；Driver collectPhys 只在拖車時、每筆取樣讀一次，telemetry tlo／tla／tkm／thd）：掛車車位相對牽引車車位的
+-- 縱向（車頭正）／橫向（右正，同 nb），fx, fy＝牽引車前向單位向量；掛車 km/h；hd（兩掛點世界距離 m，同 lostState）。
+-- MP 同步拉回掛車時看得到位置跳動與 hd 尖峰（正式服 0.23.0 SemiTruckLite＋貨櫃週期性掉速，缺這幾欄定不了罪）。
+-- 位置／車速與 hd 各自 pcall，讀不到的回 nil。
+function T.sampleState(vehicle, tow, fx, fy)
+    local tr = tow.trailer
+    local lon, lat, kmh, hd = nil, nil, nil, nil
+    pcall(function()
+        local dx, dy = tr:getX() - vehicle:getX(), tr:getY() - vehicle:getY()
+        lon, lat = dx * fx + dy * fy, dy * fx - dx * fy
+        kmh = tr:getCurrentSpeedKmHour()
+    end)
+    if tow.hitchSelf ~= nil and tow.hitchOther ~= nil then
+        pcall(function()
+            local a = BaseVehicle.allocVector3f()
+            local b = BaseVehicle.allocVector3f()
+            local pa = vehicle:getTowingWorldPos(tow.hitchSelf, a)
+            local pb = tr:getTowedByWorldPos(tow.hitchOther, b)
+            hd = dist(pa:x(), pa:y(), pb:x(), pb:y())
+            BaseVehicle.releaseVector3f(a)
+            BaseVehicle.releaseVector3f(b)
+        end)
+    end
+    return lon, lat, kmh, hd
+end
+
 -- 行駛防線（Driver 每幀呼叫；Java 讀取以 GUARD_MS 節流）。回 cap（km/h 或 nil）, why：
 --   "lost"＝掛車脫落（原版傾斜斷開或玩家拆掉）；"corner"＝已停在不可過轉角前。
 function T.guard(s, vehicle, now, speedKmh)

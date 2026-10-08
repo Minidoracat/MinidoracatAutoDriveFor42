@@ -639,7 +639,7 @@ local function impactDrive(label, steps)
     check(found ~= nil, label .. ": summary of this drive found")
     found = found or ""
     return tonumber(string.match(found, '"impact":(%d+)')), tonumber(string.match(found, '"impZ":(%d+)')),
-        tonumber(string.match(found, '"tp":(%d+)'))
+        tonumber(string.match(found, '"tp":(%d+)')), found
 end
 local locked = { capReason = "blocked", frameMs = 16, forceBrakeLeft = 900, forceBrakeWhy = "blocked" }
 local imp = impactDrive("(a) gap", function()
@@ -752,7 +752,9 @@ end
 -- 1006：impact 上升緣那一筆另寫不分感知帶的最近殭屍／動物／玩家／車各一筆（nb：[距離, 縱向（車頭正）, 橫向（右正）]，
 -- 車再帶 km/h；範圍內都沒有＝"nb":{}）——正式服 9 次「高速、感知全空」的撞擊只有帶內點雲，定不了罪。只在上升緣掃一次。
 -- 違規證明：拿掉 nb＝(nb) 紅；每筆都掃＝(once) 紅；橫向符號反了＝(fl) 紅；不排除自己這台／掛車＝(v) 紅；空時不寫＝(empty) 紅。
-scenario("1006 nb: impact rising edge writes the nearest zombie/animal/player/vehicle regardless of band")
+-- 1008 加最近屍體 c（同一個 8m 方框、getStaticMovingObjects 的 IsoDeadBody），讀屍體失敗只少 c、其他照寫。
+-- 違規證明：不寫 c＝(c) 紅；屍體掃描併進整欄的 pcall＝(c-fail) 紅。
+scenario("1006 nb: impact rising edge writes the nearest zombie/animal/player/vehicle/corpse regardless of band")
 do
     nowMs = nowMs + 3600000
     local lines, orig = {}, U.sample
@@ -768,6 +770,8 @@ do
     end
     -- heading 0＝朝 +x；世界 y 向南＝右手側 +y
     local placed = { obj("IsoZombie", 3, -1), obj("IsoZombie", -6, 0), obj("IsoAnimal", 0, 4), obj("IsoPlayer", -2, 0) }
+    local bodies = { obj("IsoDeadBody", 0.5, -2.5), obj("IsoDeadBody", 6, 6) }
+    local staticFails = false
     local trailerCar = obj("BaseVehicle", -5, 0)
     local ownCar = obj("BaseVehicle", 0, 0, {
         getZ = function() return 0 end,
@@ -787,7 +791,18 @@ do
                 local o = placed[i]
                 if math.floor(o.getX()) == gx and math.floor(o.getY()) == gy and gz == 0 then here[#here + 1] = o end
             end
-            return { getMovingObjects = function() return list(here) end }
+            local still = {}
+            for i = 1, #bodies do
+                local o = bodies[i]
+                if math.floor(o.getX()) == gx and math.floor(o.getY()) == gy and gz == 0 then still[#still + 1] = o end
+            end
+            return {
+                getMovingObjects = function() return list(here) end,
+                getStaticMovingObjects = function()
+                    if staticFails then error("static") end
+                    return list(still)
+                end,
+            }
         end,
         getVehicles = function()
             local i = 0
@@ -837,8 +852,20 @@ do
     local v = arr("v")
     near3(v, math.sqrt(13.25), 1, 3.5, "(v) nearest other vehicle, not own car or trailer")
     checkEq(v[4], -35, "(v) vehicle carries its km/h")
+    near3(arr("c"), math.sqrt(6.5), 0.5, -2.5, "(c) nearest corpse: 0.5m ahead, 2.5m left")
+    -- 讀屍體失敗：只少 c，其他類照寫
+    staticFails = true
+    n0 = #lines
+    drive(1000, { speed = 40 })
+    drive(200, { speed = 20 })
+    drive(1000, { speed = 20 })
+    nb = nil
+    for i = n0 + 1, #lines do nb = string.match(lines[i], '"nb":(%b{})') or nb end
+    nb = nb or ""
+    check(arr("z")[1] ~= nil and arr("c")[1] == nil, "(c-fail) corpse read failure drops only c (" .. nb .. ")")
+    staticFails = false
     -- 範圍內沒有東西：寫 "nb":{}，區分「掃了、沒有」與「沒掃」
-    placed, vehicles = {}, { ownCar }
+    placed, bodies, vehicles = {}, {}, { ownCar }
     n0 = #lines
     drive(1000, { speed = 40 })
     drive(200, { speed = 20 })
@@ -852,6 +879,164 @@ do
     getCell, instanceof, MDADSensor, player0.getVehicle = oldCell, oldInst, oldSensor, oldVeh
     D.stop(0, "arrive")
     pump(120000)
+end
+
+-- 1008 凍結樣本：MP 伺服器拉回前一筆，車速與 vl／vt 三者精確為 0（正式服 0.23.0 片段兩例 71→0、64.8→0，
+-- 下一筆跳 56／6 m）——不算 impact、不出片段，摘要另計 frz；同樣掉到 0 但 vl 還有殘值＝真撞照算。
+-- 違規證明：impactClass 不分 frozen＝(fz) impact／clips 紅；不數 frz＝(fz) frz 紅；只看車速 0 不看 vl／vt＝(fz-real) 紅。
+scenario("1008 frozen sample: exact zeros before a server pull-back are not an impact")
+do
+    local function ph(vl) return { capReason = "curve-coast", frameMs = 16, vLong = vl, vLat = vl == 0 and 0 or 0.01 } end
+    local function n(sum, key) return tonumber(string.match(sum, '"' .. key .. '":(%d+)')) end
+    local imp, _, tp, sum = impactDrive("(fz) frozen", function()
+        drive(3000, { speed = 70, phys = ph(19.4) })
+        drive(200, { speed = 0, phys = ph(0) }) -- 凍結：70→0／200ms
+        x = x + 56
+        drive(200, { speed = 0, phys = ph(0) }) -- 拉回：跳 56m
+        drive(3000, { speed = 0, phys = ph(0) })
+    end)
+    checkEq(imp, 0, "(fz) a frozen sample is not an impact")
+    checkEq(n(sum, "frz"), 1, "(fz) counted once as frozen")
+    checkEq(n(sum, "clips"), 0, "(fz) no impact clip")
+    checkEq(tp, 1, "(fz) the pull-back jump is still a teleport")
+    check(#sum < U.CHUNK, "(fz) summary still fits one chunk (" .. #sum .. ")")
+    imp, _, _, sum = impactDrive("(fz-real) same drop with a residual velocity", function()
+        drive(3000, { speed = 70, phys = ph(19.4) })
+        drive(200, { speed = 0, phys = ph(0.3) })
+        drive(3000, { speed = 0, phys = ph(0) })
+    end)
+    checkEq(imp, 1, "(fz-real) a drop to 0 with vl 0.3 is an impact")
+    checkEq(n(sum, "frz"), 0, "(fz-real) not frozen")
+end
+
+-- 1008 拖車同步拽動（tow-sync）：SemiTruckLite＋貨櫃在直路定速約每 3.2 秒掉 16–22 km/h，掉速前 0.2–0.4 s 掛車 tup 由
+-- 0.9997 掉到 ~0.994、沒煞車、沒 footprint、nb 空（正式服 0.23.0 片段 6 例，其中一例連續兩筆都過門檻）——
+-- 分類 tow-sync：不算 impact、不出片段，摘要另計 tws。反面：有 footprint、掛車沒先傾斜（SemiTruck＋Cartrailer 真撞）、
+-- 方框內有殭屍、踩煞車，都仍算 impact。
+-- 違規證明：impactClass 不分 tow-sync＝(ts) 紅；連續第二筆不沿用分類＝(ts) impact 紅；只在上升緣以外也數 tws＝(ts) tws 紅；
+-- 不看 footprint＝(ts-fb) 紅；不看 tup 降幅＝(ts-flat) 紅；不看 nb 近物＝(ts-near) 紅；不看 ib＝(ts-brake) 紅；
+-- tup 窗只看本筆（不往前）＝(ts) 紅。
+scenario("1008 tow-sync: trailer pulled back by MP sync is not an impact; real towing hits still are")
+do
+    local placed = {}
+    local function list(items)
+        return { size = function() return #items end, get = function(_, i) return items[i + 1] end }
+    end
+    local cell = {
+        getGridSquare = function(_, gx, gy)
+            local here = {}
+            for i = 1, #placed do
+                local o = placed[i]
+                if math.floor(o.getX()) == gx and math.floor(o.getY()) == gy then here[#here + 1] = o end
+            end
+            return { getMovingObjects = function() return list(here) end,
+                getStaticMovingObjects = function() return list({}) end }
+        end,
+        getVehicles = function()
+            return { iterator = function() return { hasNext = function() return false end } end }
+        end,
+    }
+    local ownCar = { getZ = function() return 0 end, getVehicleTowing = function() return nil end,
+        getVehicleTowedBy = function() return nil end }
+    local oldCell, oldInst, oldVeh = getCell, instanceof, player0.getVehicle
+    getCell = function() return cell end
+    instanceof = function(o, c) return type(o) == "table" and o.cls == c end
+    player0.getVehicle = function() return ownCar end
+    local function tw(up, extra)
+        local t = { capReason = "curve-coast", frameMs = 16, towUp = up, isBraking = false, vLong = 10, vLat = 0 }
+        for k, v in pairs(extra or {}) do t[k] = v end
+        return t
+    end
+    local function n(sum, key) return tonumber(string.match(sum, '"' .. key .. '":(%d+)')) end
+    -- 正式服案例 A 的形狀：tup 0.9997→0.9988→0.9957→0.9946，車速 50→50→43.5→21.6（30 m/s²），下一筆 5（仍過門檻）
+    local function jolt(hit, opts)
+        opts = opts or {}
+        local flat = opts.flat
+        drive(3000, { speed = 50, phys = tw(0.9997) })
+        drive(200, { speed = 50, phys = tw(flat and 0.9997 or 0.9988) })
+        drive(200, { speed = 43.5, phys = tw(flat and 0.9997 or 0.9957) })
+        drive(200, { speed = 21.6, phys = tw(flat and 0.9997 or 0.9946, hit), contact = opts.contact })
+        drive(200, { speed = 5, phys = tw(0.995) })
+        drive(3000, { speed = 5, phys = tw(0.9997) })
+    end
+    local evLines, origEvent = {}, U.event
+    U.event = function(u, line, ...)
+        if string.find(line, '"n":"impact"', 1, true) then evLines[#evLines + 1] = line end
+        return origEvent(u, line, ...)
+    end
+    local imp, _, _, sum = impactDrive("(ts) tow-sync", function() jolt() end)
+    U.event = origEvent
+    checkEq(#evLines, 1, "(ts) one impact event on the rising edge")
+    check(string.find(evLines[1] or "", '"cls":"tow-sync"', 1, true) ~= nil,
+        "(ts) the impact event carries cls tow-sync (" .. tostring(evLines[1]) .. ")")
+    checkEq(imp, 0, "(ts) trailer sync jolt is not an impact (nor its consecutive second sample)")
+    checkEq(n(sum, "tws"), 1, "(ts) counted once as tow-sync")
+    checkEq(n(sum, "clips"), 0, "(ts) no impact clip")
+    check(#sum < U.CHUNK, "(ts) summary still fits one chunk (" .. #sum .. ")")
+    imp, _, _, sum = impactDrive("(ts-fb) footprint", function() jolt(nil, { contact = true }) end)
+    checkEq(imp, 1, "(ts-fb) same jolt with a footprint hit is an impact")
+    checkEq(n(sum, "tws"), 0, "(ts-fb) not tow-sync")
+    imp, _, _, sum = impactDrive("(ts-flat) no tilt first", function() jolt(nil, { flat = true }) end)
+    checkEq(imp, 1, "(ts-flat) trailer not tilting before the drop (real hit) is an impact")
+    checkEq(n(sum, "tws"), 0, "(ts-flat) not tow-sync")
+    placed = { { cls = "IsoZombie", getX = function() return x + 3 end, getY = function() return 200 end } }
+    imp = impactDrive("(ts-near) zombie in the box", function() jolt() end)
+    checkEq(imp, 1, "(ts-near) a zombie within the nb box makes it an impact")
+    placed = {}
+    imp = impactDrive("(ts-brake) braking", function() jolt({ isBraking = true }) end)
+    checkEq(imp, 1, "(ts-brake) braking at the drop makes it an impact")
+    getCell, instanceof, player0.getVehicle = oldCell, oldInst, oldVeh
+end
+
+-- 1008 伺服器滿槽先淘汰舊版（rev 與這段不同）的片段：舊版 pri 1–2 片段永久佔槽，正式服槽滿的玩家約八成是舊版片段、
+-- 新版 takeover 72 段只收到 31。同版才照原規則（pri 數字最大中最舊）。
+-- 違規證明：pickSlot 不看 rev＝(rev) 紅；舊版裡不照 pri／時間挑＝(rev-oldest) 紅；帶 rev 時同版片段不當候選（全同版就拒收）＝(same) 紅；
+-- beginClip 沒把 rev 傳進 pickSlot＝(rev) 紅。
+scenario("server: a full player folder evicts clips of other revs first")
+do
+    S._reset()
+    for k in pairs(files) do if string.find(k, ROOT, 1, true) == 1 then files[k] = nil end end
+    local rid = 7000
+    local function msg(kind, pri, rev)
+        rid = rid + 1
+        nowMs = nowMs + 1000
+        local data = kind .. "-" .. rev .. "-" .. rid
+        return S.receive(player0, { id = rid, q = 1, n = 1, k = "clip", len = #data, kind = kind,
+            pri = pri, rev = rev, data = data })
+    end
+    local function tally()
+        local fo = S._stats().folders["玩家_One__"]
+        local t = {}
+        for slot = 1, 32 do
+            local c = fo.slots[slot]
+            local key = c and (c.kind .. "@" .. c.rev) or "empty"
+            t[key] = (t[key] or 0) + 1
+        end
+        return t, fo
+    end
+    for _ = 1, 16 do msg("stuck", 1, "1006a") end
+    for _ = 1, 16 do msg("brake", 4, "1008a") end
+    check(msg("takeover", 3, "1008a"), "(rev) new-rev clip accepted when full")
+    local t, fo = tally()
+    checkEq(t["stuck@1006a"], 15, "(rev) one old-rev stuck clip replaced")
+    checkEq(t["brake@1008a"], 16, "(rev) same-rev brake clips kept despite lower priority")
+    local oldestGone = true
+    for slot = 1, 32 do
+        local c = fo.slots[slot]
+        if c and string.find(files[folderPath() .. "clip-" .. string.format("%02d", slot) .. ".log"] or "", "stuck%-1006a%-7001") then
+            oldestGone = false
+        end
+    end
+    check(oldestGone, "(rev-oldest) the oldest old-rev clip went first")
+    -- 全部同版：照原規則換掉 pri 數字最大中最舊的
+    S._reset()
+    for k in pairs(files) do if string.find(k, ROOT, 1, true) == 1 then files[k] = nil end end
+    for _ = 1, 16 do msg("stuck", 1, "1008a") end
+    for _ = 1, 16 do msg("brake", 4, "1008a") end
+    msg("takeover", 3, "1008a")
+    t = tally()
+    checkEq(t["stuck@1008a"], 16, "(same) same rev everywhere: pri-1 clips kept")
+    checkEq(t["brake@1008a"], 15, "(same) the lowest-priority clip is replaced")
 end
 
 -- 1004e 越野推力 KPI：推力夠不夠要看自己的紀錄。想加速＝目標−實速 ≥6、前進、沒強制煞車；相鄰兩筆都想加速且同地表才算一對。

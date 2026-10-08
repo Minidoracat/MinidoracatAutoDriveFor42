@@ -1230,6 +1230,44 @@ checkEq(evField("teleport", "speed"), 41, "(tp) speed before the jump")
 MDADUpload = nil
 
 --------------------------------------------------------------------------------
+-- 1008：impact 事件帶分類 cls 與有號掉速 dvs。被頂退時車速反號，|速度| 相減會低估（正式服 0.23.0 會車被頂退一例實際約 54 記成
+-- 9.6）；凍結樣本（車速與 vl／vt 三者精確為 0，MP 伺服器拉回前一筆）本機事件也標 frozen。
+-- 違規證明：dvs 用 |速度| 相減＝(dvs) 紅；事件不帶 cls＝(cls) 紅；impactClass 不分 frozen＝(frozen) 紅。
+scenario("1008 impact event carries cls and the signed speed drop")
+resetFs()
+loadProd()
+MDADUpload = nil
+assert(loadfile((string.gsub(PROD, "MDAD_Diagnostics%.lua$", "MDAD_Upload.lua"))))()
+nowMs = 9060000
+MDADDiagnostics.start(0, nil, profile)
+local function clsSample(t, px, spd, vl)
+    MDADDiagnostics.sample(0, t, px, 500, 0, spd, 60, 400, 0, 0, 0, 0, "follow", 3, true, nil, false,
+        nil, nil, nil, nil, nil, nil, nil, nil, nil, false, false, false, false, false,
+        { vLong = vl, vLat = vl == 0 and 0 or 0.01 })
+end
+clsSample(9060000, 100, 40, 11)
+clsSample(9060200, 102.2, 40, 11)
+clsSample(9060400, 103, -20, -5.5)  -- 被頂退：40→−20，|速度| 只掉 20、有號掉 60
+clsSample(9060600, 102, -20, -5.5)
+clsSample(9060800, 101, -17, -4.7)
+clsSample(9061000, 102, 70, 19.4)
+clsSample(9061200, 106, 70, 19.4)
+clsSample(9061400, 106, 0, 0)       -- 凍結：70→0、vl／vt 精確為 0
+nowMs = 9062000
+MDADDiagnostics.stop(0, "end")
+local clsBody = files[sessionPath(1)] or ""
+local clsEv = {}
+for line in string.gmatch(clsBody, '{"t":"e","ts":[%d%.]+,"n":"impact"[^\n]*') do clsEv[#clsEv + 1] = line end
+checkEq(#clsEv, 2, "two impact rising edges")
+local function ev(i, key) return string.match(clsEv[i] or "", '"' .. key .. '":"?([%-%w%.]+)') end
+checkEq(ev(1, "cls"), "hit", "(cls) a real hit is cls hit")
+checkEq(tonumber(ev(1, "dv")), 20, "|speed| drop stays as before")
+checkEq(tonumber(ev(1, "dvs")), 60, "(dvs) signed drop 40 − (−20) = 60")
+checkEq(ev(2, "cls"), "frozen", "(frozen) exact zeros are cls frozen")
+checkEq(tonumber(ev(2, "dvs")), 70, "(dvs) frozen drop 70")
+MDADUpload = nil
+
+--------------------------------------------------------------------------------
 scenario("sample records plan mode, route/block anchors and control-state flags")
 resetFs()
 loadProd()
@@ -1336,6 +1374,7 @@ MDADDiagnostics.sample(0, 9200000, 100, 200, 0.25, 12, 15, 40, 1.5, 0.2, 0.3, 12
         dodgeBuildReason = "capacity", dodgeBlockReason = "dodge-cap",
         dodgeCommittedLength = 18, stateError = "full-target", invalid = true,
         replanMs = 37, replanSweeps = 9, replanHn = 581,
+        towLon = -8.5, towLat = 0.25, towKmh = 41.5, towHd = 0.12, -- 1008 拖車樣本
     }, 7, 9, 3, "verify", 2, -1.5, 2.75, "clear", 450, 120,
     0.25, 1.5, true, 123, 456)
 MDADDiagnostics.sample(0, 9200500, 101, 201, 0.25, 12, 15, 39, 1.4, 0.1, 0.3, 1200,
@@ -1408,6 +1447,9 @@ check(string.find(physBody, '"csen":15', 1, true) ~= nil, "capSensor recorded")
 check(string.find(physBody, '"nv":4', 1, true) ~= nil, "nav version recorded")
 check(string.find(physBody, '"surf":"paved"', 1, true) ~= nil, "declared surface recorded")
 check(string.find(physBody, '"sw":6', 1, true) ~= nil, "segment width recorded")
+check(string.find(physBody, '"tlo":-8.5,"tla":0.25,"tkm":41.5,"thd":0.12', 1, true) ~= nil,
+    "1008 tow sample: trailer relative position, km/h, hitch distance")
+checkEq(countNeedle(physBody, '"tlo":'), 1, "absent tow sample omits the fields")
 check(string.find(physBody, '"ctl":"TRACK"', 1, true) ~= nil, "derived control state recorded")
 check(string.find(physBody, '"ad":true', 1, true) ~= nil, "adaptive gate recorded")
 check(string.find(physBody, '"rn":false', 1, true) ~= nil, "dry snapshot explicit")
