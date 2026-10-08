@@ -1946,6 +1946,10 @@ function Drive.stop(playerNum, reasonKey, voiceEvent, diagWhy)
             phase = "lost", cur = cur, alive = alive, by = by, hd = hd, speed = kmh, up = up, phi = s.towPhi,
         })
     end
+    -- 調頭進行中就結束 session（玩家接手、按鈕、交還…）：記下這次調頭的結局（1008；Drive.uturnDone）
+    if s.uturn then
+        Drive.uturnDone(s, playerNum, getTimestampMs(), "stop", reasonKey or diagWhy or voiceEvent or "manual")
+    end
     diagStop(s, playerNum, reasonKey or diagWhy
         or (voiceEvent == "manual" and "takeover") or "manual")
     clearSession(playerNum)
@@ -3563,6 +3567,25 @@ function Drive.approachRoute(route, vx, vy)
         out.len = route.len - cut + gap
     end
     return out, gap
+end
+
+-- 車位到路線折線的最近世界距離（公尺）。讓位恢復判「車還在不在路上」用（1008；距離閘在讓位中不跑）；
+-- 點列不足兩點回 0＝不判離路。
+function Drive.routeDist(route, x, y)
+    local pts = route and route.pts
+    if type(pts) ~= "table" or #pts < 4 or not finite(x) or not finite(y) then return 0 end
+    local best = nil
+    for i = 1, #pts - 3, 2 do
+        local ax, ay = pts[i], pts[i + 1]
+        local ex, ey = pts[i + 2] - ax, pts[i + 3] - ay
+        local l2 = ex * ex + ey * ey
+        local t = l2 > 1e-12 and ((x - ax) * ex + (y - ay) * ey) / l2 or 0
+        if t < 0 then t = 0 elseif t > 1 then t = 1 end
+        local dx, dy = x - ax - t * ex, y - ay - t * ey
+        local d2 = dx * dx + dy * dy
+        if best == nil or d2 < best then best = d2 end
+    end
+    return sqrt(best)
 end
 
 -- 剖面實際建構的路線（起步與 cutover 共用）：先清地圖資料的微反折（MDADFollower.despikeRoute），
@@ -6414,11 +6437,21 @@ function Drive.rotateProbe(s, playerNum, vehicle, now, speedKmh)
         diagEvent(s, playerNum, "uturn", { phase = "probe", why = s.uturn.name,
             probe = clear and "clear" or "obstructed", speed = speedKmh })
     end
+    if s.rotProbeClear == nil then s.uturnProbe = clear and "clear" or "obstructed" end -- 本次調頭首探（uturn done 帶）
     s.rotProbeClear = clear
     if getDebug() then
         print(LOG .. "pn=" .. playerNum .. " rotate probe: "
             .. (clear and "clear (coupled spin)" or "obstructed (wide arc)"))
     end
+end
+
+-- 一次調頭結束（1008，2.3 只補遙測、行為不變）：why＝aligned（航向收斂到 ROTATE_EXIT_RAD 內）／loop（同處反覆調頭
+-- 受困交還）／stop（調頭中 session 結束，detail＝交還原因鍵或 manual／button／exit…）；probe＝本次首探結果（nil＝沒探過）、
+-- ms＝從 enter 起算、kind＝行為檔。正式服 0.23.0 摘要只有 uturn 計數，分不出調頭成敗與耗時。
+function Drive.uturnDone(s, playerNum, now, why, detail)
+    diagEvent(s, playerNum, "uturn", { phase = "done", why = why, detail = detail, kind = s.uturn and s.uturn.name,
+        probe = s.uturnProbe, ms = now - (s.uturnSinceMs or now) })
+    s.uturn, s.uturnArmed = nil, false
 end
 
 -- Traction-keyed online observation. Every field lives in the session table;
@@ -12158,6 +12191,16 @@ local function stepUnstick(s, vehicle, playerNum, now)
             duration = now - s.unstickStartedAt, rear = s.rearStatus,
         })
         sampleRecovery(s, vehicle, playerNum, now, vx, vy, speedKmh)
+        -- 一寸未退（< UNSTICK_MIN_M）與倒車途中後方探到障礙同規則（recovery.md）：額度還有就 softFail 回停等，
+        -- 交給停等預算／自動改道；額度用完才交還前改道→受困交還（正式服 0.23.0 片段 M998 拖車 (8641,8556)：拖車倒 4 秒只退
+        -- 0.35m，3 次額度只用 1 次就 detour stuck→StopStuck）。
+        if s.episodeAttempts < UNSTICK_MAX then
+            s.blockRetryDone = true
+            s.mode = "follow"
+            s.progressState = "disarmed"
+            s.progressSince = 0
+            return
+        end
         if Drive.stuckDetour(s, playerNum) then return end
         Drive.stop(playerNum, KEY_STUCK)
         return
@@ -12365,6 +12408,13 @@ local function stepFollow(s, vehicle, playerNum, now)
         -- 目前沿線弧長：M4 感知與脫困額度重臂共用（sensor 缺席時脫困仍要用，
         -- 所以重臂判定放在 sensor 塊之外）
         s.lastSNow = s.profile.length - (remaining or 0)
+        -- 讓位恢復後第一個跟線幀（Follower 已在新車位重新定位）：記這次讓位的結果（1008：讓位期間沒有樣本，
+        -- 正式服 0.23.0 片段 GTR (10594,10134) 恢復首幀投影仍是讓位前的游標）
+        if s.resumeLogMs ~= nil then
+            diagEvent(s, playerNum, "takeover", { phase = "resume", x = vx, y = vy, lat = latSigned,
+                fi = s.fstate.idx, s = s.lastSNow, ms = s.resumeLogMs })
+            s.resumeLogMs = nil
+        end
         local segI = s.fstate.idx
         if not finite(segI) then segI = 1 end
         segI = segI - segI % 1
@@ -13288,10 +13338,11 @@ local function stepFollow(s, vehicle, playerNum, now)
         else
             s.waitTickMs = 0
         end
-        -- ROTATE 幀不清 blockRetryDone（2026-09-08 s030）：額度用盡的 softFail 靠它擋
-        -- 重打，ROTATE 幀每幀清掉＝每幀 requestRecover→attempt-limit 事件洪水（4889 筆
-        -- ／20 秒、2MiB 滿檔），車 0 km/h 掛到手動停。
-        if s.intentShadow ~= "WAIT" and s.intentShadow ~= "ROTATE" then
+        -- ROTATE／STOP 幀不清 blockRetryDone：額度用盡或倒不了的 softFail 靠它擋重打，這兩種意圖車都不在前進，
+        -- 每幀清掉＝每幀 requestRecover→softFail 事件洪水。ROTATE：2026-09-08 s030（attempt-limit 4889 筆／20 秒、
+        -- 2MiB 滿檔，車 0 km/h 掛到手動停）；STOP：正式服 0.23.0 片段 Mustang (1472,9889)（起步車頭貼物 footprint 接觸、
+        -- 後方也堵，start-near→rear-blocked 每 30ms 一對、12 秒 820 筆）。真進度由上面 waitProgressed 清。
+        if s.intentShadow ~= "WAIT" and s.intentShadow ~= "ROTATE" and s.intentShadow ~= "STOP" then
             s.blockRetryDone = false
         end
         -- 調頭需求＋前方堵死的判準不能吊在 legalWait 上（階段 2 主體 3）：
@@ -13793,7 +13844,7 @@ local function stepFollow(s, vehicle, playerNum, now)
             local aerr = headingError or 0
             if aerr < 0 then aerr = -aerr end
             if s.uturn and aerr < MDADFollower.ROTATE_EXIT_RAD then
-                s.uturn, s.uturnArmed = nil, false
+                Drive.uturnDone(s, playerNum, now, "aligned")
             end
             if s.tow then
                 -- 拖掛車（MDAD_Trailer）：原地耦力調頭會把掛車甩斷（E2E semi-hairpin-mp），先要一條
@@ -13827,6 +13878,7 @@ local function stepFollow(s, vehicle, playerNum, now)
             if rotating and not s.uturn then
                 s.uturn, s.uturnArmed = uturnProfile(), false
                 s.rotProbeClear, s.rotProbeMs = nil, 0 -- 每次調頭重探：上一次的結果不沿用（壓速／夾限／遙測都看本次）
+                s.uturnSinceMs, s.uturnProbe = now, nil -- uturn done 的耗時起點與首探結果
                 -- rs／sT／kh：進場當幀的投影弧長、前視點弧長、髮夾鉗點（nil＝未鉗）——「前視點在車後」不必離線重播就看得出
                 diagEvent(s, playerNum, "uturn", {
                     phase = "enter", why = s.uturn.name, speed = speedKmh,
@@ -13842,6 +13894,7 @@ local function stepFollow(s, vehicle, playerNum, now)
                     s.uturnLoopX, s.uturnLoopY, s.uturnLoopN = vx, vy, 1
                 end
                 if s.uturnLoopN >= TUNE.UTURN_LOOP_MAX then
+                    Drive.uturnDone(s, playerNum, now, "loop")
                     vehicle:setRegulator(false)
                     BaseVehicle.releaseVector3f(fwd)
                     Drive.stop(playerNum, KEY_STUCK)
@@ -14493,8 +14546,15 @@ local function onPlayerUpdate(player)
         end
         -- 距離閘是新路線的接收條件（含同目標偏航重算），不重新驗收同一顆快取。
         -- 換反向目標時，合法路線起點後的煞停過衝可能超過20m；旋轉與感知仍各自把關。
-        if (route ~= s.route or targetChanged or api.navApiVersion ~= s.navVersion)
+        -- 讓位中不驗（1008 正式服 RouteTooFar 14 次有 13 次在讓位中：玩家在開，主 MOD 3 秒偏航重算一次、離路 >20m
+        -- 就紅字交還＋行程 noroad 暫停）：線照收（cutover 保留 yield），放手恢復那刻車仍離路就以手動停止結束（下方恢復分支）。
+        if s.mode ~= "yield" and (route ~= s.route or targetChanged or api.navApiVersion ~= s.navVersion)
                 and cachedSnapTrusted(api) and routeTooFar(route) then
+            -- 交還前記被拒的那條線（含 src；片段的 route 點列就是它）
+            diagEvent(s, playerNum, "route", MDADDiagnostics.routeSource(route, {
+                phase = "far", why = "gate", mode = s.mode, x = vehicle:getX(), y = vehicle:getY(),
+                snapDist = route.snapDist, len = finite(route.len) and route.len or nil,
+            }))
             Drive.stop(playerNum, KEY_ROUTE_FAR)
             return
         end
@@ -14794,10 +14854,18 @@ local function onPlayerUpdate(player)
         if s.commandControlState ~= "HOLD" then
             Drive.invalidateCommandState(s, vehicle:getCurrentSpeedKmHour(), "HOLD")
         end
+        -- 建表期間停等暫停計時、已累計的預算照留：stepFollow 不跑，回 follow 第一個停等幀會把整段建表時間一次補進預算
+        -- （正式服 0.23.0 片段 M998＋拖車：自動改道收下、4369 點建表 5.3 秒，新線一公尺沒開就 StopStuck）。記下建表起點，
+        -- 建完把計時起點往後推同樣長度——只扣建表那一段，建表前的空檔（倒車恢復鏈）照原規則由第一個停等幀補計。
+        if s.waitTickMs > 0 and s.buildPauseMs == nil then s.buildPauseMs = now end
         -- 這幀不跑 control：yaw 增益估計的航向差分斷掉（跨幀航向變化除以單幀 dt＝假增益；
         -- Codex lane 0908a residual）
         s.fstate.prevHeading = nil
         if not MDADFollower.stepBuild(s.profile, s.buildBudget) then return end
+        if s.buildPauseMs ~= nil then
+            if s.waitTickMs > 0 then s.waitTickMs = s.waitTickMs + (now - s.buildPauseMs) end
+            s.buildPauseMs = nil
+        end
         if s.rebuildStartMs > 0 then
             diagEvent(s, playerNum, "dyn", {
                 phase = "ready", ms = now - s.rebuildStartMs, pts = s.profile.n,
@@ -14891,13 +14959,31 @@ local function onPlayerUpdate(player)
             return
         end
         if now - s.cleanSinceMs < s.yieldResumeMs then return end
+        -- 讓位中不跑距離閘（上方 cutover）：放手那刻車仍離剖面路線 > SNAP_MAX_M＝玩家把車開走了，以手動停止結束
+        -- （同 resume=0 的手動接手：ManualStop 綠字、行程以 manual 釋放保留導航；不出 RouteTooFar 紅字、不越野追線）
+        local farD = Drive.routeDist(s.profileRoute or s.route, vehicle:getX(), vehicle:getY())
+        if farD > TUNE.SNAP_MAX_M then
+            diagEvent(s, playerNum, "route", { phase = "far", why = "yield", mode = s.mode,
+                x = vehicle:getX(), y = vehicle:getY(), d = farD,
+                snapDist = finite(s.route.snapDist) and s.route.snapDist or nil,
+                len = finite(s.route.len) and s.route.len or nil, ms = now - s.yieldSinceMs })
+            haloGood(player, "UI_MinidoracatAutoDrive_ManualStop")
+            Drive.stop(playerNum, nil, "manual")
+            return
+        end
         s.cleanSinceMs = 0
         s.yieldNotified = false -- 下次讓位再提示一次（讓位↔恢復是成對事件）
-        -- 清控制歷史（保留投影游標）：yield 期間玩家可能大幅改變車頭朝向，
-        -- 舊的 PID 積分／微分歷史對新姿態是雜訊
+        -- 清控制歷史：yield 期間玩家可能大幅改變車頭朝向，舊的 PID 積分／微分歷史對新姿態是雜訊。
+        -- 投影游標保留、但標記重新定位（同 cutover 首次定位 needsProjection）：車還在舊游標附近就沿用（不跳自交路線
+        -- 的另一臂），已離開舊窗口就全線找最近段、不受單幀倒退上限夾住（正式服 0.23.0 片段 GTR (10594,10134)：讓位 182 秒、
+        -- 玩家沿線開遠，恢復首幀投影仍在舊游標、lat 209m，Sensor 沿過期 s 掃到未載入、同幀 ready→可視硬煞
+        -- 98.7 km/h 鎖輪一秒）。下方 Sensor reset、stepFollow 先 control 後 Sensor.step＝第一輪感知就在新投影上，
+        -- 首輪完成前 sensorReady 為假、可視硬煞不參與裁決。
         if type(MDADFollower.resetControl) == "function" then
             MDADFollower.resetControl(s.fstate)
         end
+        s.fstate.needsProjection = true
+        s.resumeLogMs = now - s.yieldSinceMs -- takeover resume 事件在第一個跟線幀記（投影更新後的 lat／fi）
         -- 讓位期間 Sensor 不跑，proof 停在讓位前那輪快照；玩家可能已開過證明線尾（0924a
         -- 正式服兩趟：恢復首幀 currentS > laneCurveEnd → lane-envelope → UnsupportedVehicle）。
         Drive.clearLaneProof(s)
@@ -14945,6 +15031,10 @@ local function onPlayerUpdate(player)
 
     -- 離線過遠（TUNE.ROUTE_FAR_MS）：主 MOD 沒接上新路線就交還，不越野追線
     if Drive.routeFarWatch(s, now) then
+        diagEvent(s, playerNum, "route", { phase = "far", why = "watch", mode = s.mode,
+            x = vehicle:getX(), y = vehicle:getY(), lat = s.lastLatSigned,
+            snapDist = finite(s.route.snapDist) and s.route.snapDist or nil,
+            len = finite(s.route.len) and s.route.len or nil })
         Drive.stop(playerNum, KEY_ROUTE_FAR)
         return
     end

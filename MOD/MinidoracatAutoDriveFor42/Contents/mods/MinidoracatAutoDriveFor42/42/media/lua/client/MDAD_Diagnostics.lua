@@ -141,6 +141,8 @@ local EK = {
     "towArcN",
     -- lag release（1008）：車頭弧長 rs+halfL、車尾弧長（拖車含掛車）、命中點的預測車身 lane（hitS／rate 共用上面的鍵）
     "nose", "tail", "body",
+    -- 1008：takeover resume（讓位恢復後第一個跟線幀的橫偏、Follower 投影段號）；route far（why gate／watch／yield）當下的 s.mode
+    "lat", "fi", "mode",
 }
 
 local function logOnce(msg)

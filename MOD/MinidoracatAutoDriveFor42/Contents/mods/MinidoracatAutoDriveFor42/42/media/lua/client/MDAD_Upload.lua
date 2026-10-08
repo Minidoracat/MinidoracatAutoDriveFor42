@@ -664,7 +664,7 @@ function U.event(u, line, now, name, a)
         trigger(u, now, "detour")
     elseif name == "blocked" or name == "unstick" or name == "progress" then
         u.lastAnomaly = now
-    elseif name == "takeover" and now - u.lastAnomaly <= ANOMALY_TAKEOVER_MS then
+    elseif name == "takeover" and phase == "yield" and now - u.lastAnomaly <= ANOMALY_TAKEOVER_MS then -- resume（1008）不是接手
         trigger(u, now, "takeover")
     end
     captureTick(u, now)

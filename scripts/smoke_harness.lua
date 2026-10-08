@@ -13790,7 +13790,9 @@ do
 end
 
 -- (d2t) 倒車時限到時已退出 UNSTICK_MIN_M＝倒夠了進 settle 重掃，不交還（同 rear-blocked 規則）；
--- 一寸未退（<1m）照舊 StopStuck。2026-09-26 E2E trailer-grass-mp：拖著掛車在草地 4 秒只退 2.2m 就交還。
+-- 一寸未退（<1m）＝與倒車途中後方探到障礙同規則：額度還有就 softFail 回停等（1008 起；舊制直接 stuckDetour→StopStuck，
+-- 正式服 0.23.0 片段 M998 拖車 (8641,8556) 三次額度只用一次）。之後照停等預算交還見 (to-soft)。2026-09-26 E2E trailer-grass-mp：拖著掛車
+-- 在草地 4 秒只退 2.2m 就交還。
 do
     local function reverseFor(label, backM)
         drive.fillWorld(-10, 70, -7, 7)
@@ -13820,7 +13822,10 @@ do
     MDAD.Drive.stop(0, nil)
     drive.clearCell(2, 0)
     reverseFor("(d2t) 退 0.5m", 0.5)
-    checkFalse(MDAD.Drive.isActive(0), "(d2t) 時限到、只退 0.5m：照舊交還")
+    local d2tS = MDAD.Drive.debugSession(0)
+    checkTrue(MDAD.Drive.isActive(0) and d2tS.mode == "follow" and d2tS.blockRetryDone == true,
+        "(d2t) 時限到、只退 0.5m、額度還有：softFail 回停等（mode " .. tostring(d2tS and d2tS.mode) .. "）")
+    MDAD.Drive.stop(0, nil)
     drive.clearCell(2, 0)
     dveh._trans = 2
 end
@@ -18160,16 +18165,23 @@ scenario("調頭＋blocked：遠處不倒車、近處才退、額度用盡不空
     checkTrue(evs["progress:recover"] == nil, "(u1) 沒有 uturn-blocked 恢復請求")
     checkTrue(MDAD.Drive.isActive(0), "(u1) session 活著、調頭意圖持有")
     -- (u3) ROTATE 也計停等預算：原地不轉（harness 車不自轉）16 秒 → StopStuck 交還，
-    --      不再永久掛著
+    --      不再永久掛著。8 秒一跳時第一跳就請求倒車（rotate-stall／progress），第二跳倒車逾時一寸未退：1008 起
+    --      額度還有＝softFail 回停等（舊制在這裡直接交還），下一個跟線幀把倒車時間補進停等預算才交還——多跑一幀。
     nowMs = nowMs + 8000
     driveTick(dp, dveh)
     checkTrue(MDAD.Drive.isActive(0), "(u3) ROTATE 8 秒仍在預算內")
     nowMs = nowMs + 8000
     driveTick(dp, dveh)
+    nowMs = nowMs + 250
+    driveTick(dp, dveh)
     checkFalse(MDAD.Drive.isActive(0), "(u3) ROTATE 原地 16 秒：超時交還（舊制永久掛著）")
     local stuckHalo = false
     for i = 1, #halos do if haloKey(i) == DKEY.STUCK then stuckHalo = true end end
     checkTrue(stuckHalo, "(u3) 交還理由 StopStuck（同幀先有 Blocked 紅字）")
+    -- (u3-done) 1008：調頭中交還＝uturn done why=stop、detail＝交還原因鍵。違規證明：Drive.stop 不記＝紅。
+    local udone = evs["uturn:done"] or {}
+    checkTrue(udone.why == "stop" and udone.detail == DKEY.STUCK and type(udone.ms) == "number" and udone.ms >= 16000,
+        "(u3-done) 調頭中交還記 uturn done why=stop（detail " .. tostring(udone.detail) .. "、ms " .. tostring(udone.ms) .. "）")
     clearWorld(20)
     -- (u2) 車群貼在旋轉圈內（錨 4.5m ≤ probeR+1）：才走倒車創造空間。牆面在車尾後 1.8m：
     --      4m／2m 帶命中、最短帶 1.5（MIN+KEEP）清 → 退 1.0
@@ -27025,6 +27037,349 @@ MDAD.Drive.stop(0, nil)
 end
 scenarioContinuation()
 end
+
+-- =====================================================================
+-- 1008 正式服 0.23.0 復盤（recovery／讓位）：
+--   (flood)   起步車頭貼物（footprint 接觸、意圖 STOP）又倒不了：start-near→rear-blocked 不再每幀一對（正式服 0.23.0 Mustang (1472,9889)：
+--             12 秒 820 筆）；停等預算照計、到期 StopStuck。違規證明：STOP 幀照舊清 blockRetryDone＝紅。
+--   (build)   換線（改道收下）後多幀建表：建表時間不補進停等預算、建表前的累計照留（正式服 0.23.0 M998＋拖車：9.9→17.7 秒、新線
+--             一公尺沒開就 StopStuck）。違規證明：建完不把計時起點往後推＝紅。
+--   (to-soft) 倒車逾時一寸未退：額度還有走 softFail 回停等（之後再倒），三次額度用完或停等預算到期才交還（正式服
+--             0.23.0 M998 拖車 (8641,8556)：額度只用一次就交還）。違規證明：逾時一律交還＝紅。
+--   (yfar)    讓位中主 MOD 給離路 >20m 的線：線照收、仍是 yield、不交還；放手時仍離路＝ManualStop 綠字＋manual 語音、
+--             不出 RouteTooFar、記 route far why=yield；放手時已回路上照常恢復、離線過遠計時不誤觸。讓位外的距離閘照舊交還
+--             並記被拒那條線（route far why=gate，含 src）；離線過遠交還記 why=watch。違規證明：距離閘讓位中照判＝紅；
+--             拿掉恢復處的離路判定＝紅；拿掉 far 事件＝紅。
+--   (yproj)   讓位後車被移到路線遠處（前方 200m 外、舊處 chunk 卸載）再恢復：恢復首幀投影就在車位、takeover resume 帶新
+--             lat／fi，首輪感知前後都沒有 visibility 鎖輪（正式服 0.23.0 GTR (10594,10134) 98.7 km/h）；(yproj-back) 車被開回後方 160m 同樣
+--             在車位。違規證明：恢復不標 needsProjection＝紅；Follower 重新定位仍套單幀倒退上限＝(yproj-back) 紅。
+--   (ut-done) 調頭結束記 uturn done（aligned，帶首探結果與耗時；kind＝行為檔）。違規證明：拿掉 aligned 出口的事件＝紅。
+-- =====================================================================
+function drive.scenario1008()
+    scenario("1008：前貼後堵不洪水、建表不計停等、倒車逾時 softFail、讓位不跑距離閘、恢復重新投影")
+    local T = MDAD.Drive.debugTune()
+    local oldHud, oldApi, oldSand = MDAD.HUD, MinidoracatMiniMapAPI, SandboxVars
+    installNavApi(2) -- 前一個情境留下 v7 行程模型（啟動即判到站）；本情境用單站 v2，距離閘案改 v5
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    local oldStart, oldEvent, oldSample, oldStop =
+        MDADDiagnostics.start, MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.stop
+    local events = {}
+    MDADDiagnostics.start = function() return true end
+    MDADDiagnostics.sample = function() return true end
+    MDADDiagnostics.stop = function() return true end
+    MDADDiagnostics.event = function(_, name, a) events[#events + 1] = { name = name, a = a } end
+    local resumeMs = 0
+    MDAD.HUD = setmetatable({ telemetryEnabled = function() return true end,
+        autoDetour = function() return false end,
+        manualResumeMs = function() return resumeMs end }, { __index = oldHud })
+    local function count(name, phase, from)
+        local n = 0
+        for i = from or 1, #events do
+            local e = events[i]
+            if e.name == name and type(e.a) == "table" and e.a.phase == phase then n = n + 1 end
+        end
+        return n
+    end
+    local function last(name, phase, from)
+        for i = #events, from or 1, -1 do
+            local e = events[i]
+            if e.name == name and type(e.a) == "table" and e.a.phase == phase then return e.a end
+        end
+        return nil
+    end
+    local function hasHalo(key)
+        for i = 1, #halos do if haloKey(i) == key then return true end end
+        return false
+    end
+    local function paved(r) -- v4 起路線帶逐段路面／路寬
+        r.segSurface, r.segWidth = {}, {}
+        for i = 1, #r.pts / 2 - 1 do r.segSurface[i], r.segWidth[i] = "paved", 10 end
+        return r
+    end
+    -- 250ms 一幀跑到 session 結束或 maxMs；回經過的 ms
+    local function runUntilStop(maxMs)
+        local ms = 0
+        while ms < maxMs and MDAD.Drive.isActive(0) do
+            nowMs = nowMs + 250
+            driveTick(dp, dveh)
+            ms = ms + 250
+        end
+        return ms
+    end
+
+    -- (flood)
+    drive.fillWorld(-10, 70, -10, 10)
+    checkTrue(armDrive(), "(flood) 啟動")
+    local st = MDAD.Drive.debugSession(0)
+    -- 起步車頭偏路線 0.6 rad（起步近物限速武裝）、車頭貼一個硬物（footprint 接觸）、車尾後一排硬物（最短倒車帶也命中）
+    local fc, fsn, fhl = math.cos(0.6), math.sin(0.6), st.vehicleProfile.halfL
+    setHeading(dveh, 0.6)
+    dveh._x, dveh._y, dveh._speed = 10, 0, 0
+    drive.putSolid(math.floor(10 + fc * (fhl + 0.3)), math.floor(fsn * (fhl + 0.3)), "flood_front")
+    for k = -1, 1 do
+        local d = fhl + 1.0
+        drive.putSolid(math.floor(10 - fc * d - fsn * k), math.floor(-fsn * d + fc * k), "flood_rear" .. k)
+    end
+    driveReset(dveh)
+    drive.scanRound(true)
+    dveh._speed = 0
+    for _ = 1, 4 do
+        nowMs = nowMs + 250
+        driveTick(dp, dveh)
+    end
+    checkTrue(st.currentBlocked == true and st.intentShadow == "STOP" and type(st.startNearCap) == "number"
+            and st.startNearCap < MDADDynamics.MIN_EXEC_KMH,
+        "(flood) 前提：車頭貼物 footprint 接觸、意圖 STOP、起步近物帽 < MIN_EXEC（intent " .. tostring(st.intentShadow)
+        .. " cap " .. tostring(st.startNearCap) .. " cb " .. tostring(st.currentBlocked) .. " sg " .. tostring(st.startGuard)
+        .. " fc " .. tostring(st.frontClearance) .. " mode " .. tostring(st.mode) .. " capR " .. tostring(st.lastCapReason) .. "）")
+    local from, t0 = #events + 1, nowMs
+    clearList(halos)
+    for _ = 1, 24 do -- 6 秒
+        nowMs = nowMs + 250
+        driveTick(dp, dveh)
+    end
+    local rb, rec = count("unstick", "rear-blocked", from), count("progress", "recover", from)
+    checkTrue(rb >= 1 and rb <= 4 and rec <= 4 and count("unstick", "start", from) == 0,
+        "(flood) 前貼後堵 6 秒：rear-blocked／recover 有上限、不是每幀一對（rear-blocked " .. rb .. "、recover " .. rec .. "）")
+    runUntilStop(20000)
+    local total = nowMs - t0
+    checkTrue(not MDAD.Drive.isActive(0) and hasHalo(DKEY.STUCK) and total <= T.WAIT_TIMEOUT_MS + 2000,
+        "(flood) 停等預算到期照規則 StopStuck（起算後 " .. total .. "ms）")
+
+    -- (build)
+    drive.fillWorld(-10, 120, -7, 7)
+    checkTrue(armDrive(), "(build) 啟動")
+    st = MDAD.Drive.debugSession(0)
+    setHeading(dveh, 0)
+    dveh._speed = 0
+    driveTick(dp, dveh)
+    drive.scanRound(true)
+    -- 停等中：已累計 9.8 秒、計時進行中（正式服 detour auto ms=9867）
+    st.waitAccumMs, st.waitTickMs = 9800, nowMs
+    local big = newRoute(1200, 0, 0, 0.25, 0)
+    drive.nav.route = big
+    nowMs = nowMs + 300
+    driveTick(dp, dveh)
+    local buildFrames = 0
+    while st.mode == "build" and buildFrames < 400 do
+        nowMs = nowMs + 500
+        driveTick(dp, dveh)
+        buildFrames = buildFrames + 1
+    end
+    checkTrue(st.route == big and st.mode ~= "build" and buildFrames >= 3,
+        "(build) 前提：換線後分多幀建表（" .. buildFrames .. " 幀×500ms）")
+    checkTrue(MDAD.Drive.isActive(0) and st.waitAccumMs >= 9800 and st.waitAccumMs - 9800 <= 1000,
+        "(build) 建表時間不補進停等、已累計照留（" .. tostring(st.waitAccumMs) .. " ms）")
+    MDAD.Drive.stop(0, nil)
+
+    -- (to-soft)
+    drive.fillWorld(-10, 70, -7, 7)
+    checkTrue(armDrive(), "(to-soft) 啟動")
+    st = MDAD.Drive.debugSession(0)
+    setHeading(dveh, 0)
+    driveTick(dp, dveh)
+    dveh._trans = 1
+    drive.putSolid(2, 0, "to_soft_front")
+    drive.scanRound(true)
+    dveh._speed = 0
+    from, t0 = #events + 1, nowMs
+    clearList(halos)
+    local aliveAfterTimeout = nil
+    while nowMs - t0 < 40000 and MDAD.Drive.isActive(0) do
+        local nTo = count("unstick", "timeout", from)
+        nowMs = nowMs + 250
+        driveTick(dp, dveh)
+        if aliveAfterTimeout == nil and count("unstick", "timeout", from) > nTo then
+            aliveAfterTimeout = MDAD.Drive.isActive(0) and st.mode == "follow" and st.blockRetryDone == true
+        end
+    end
+    local starts = count("unstick", "start", from)
+    checkTrue(aliveAfterTimeout == true,
+        "(to-soft) 第一次倒車逾時一寸未退：softFail 回停等、session 活著")
+    checkTrue(starts >= 2 and not MDAD.Drive.isActive(0) and hasHalo(DKEY.STUCK),
+        "(to-soft) 之後再倒、最後照預算／額度交還 StopStuck（倒車 " .. starts .. " 次、" .. (nowMs - t0) .. "ms）")
+    dveh._trans = 2
+    drive.clearCell(2, 0)
+
+    -- (yfar)
+    MinidoracatMiniMapAPI.navApiVersion = 5
+    resumeMs = 2000
+    local function yieldFar(label, back)
+        drive.fillWorld(-10, 170, -40, 40)
+        MDAD.Drive.stop(0, nil)
+        local route = paved(newRoute(40, 0, 0, 4, 0))
+        route.snapDist = 1
+        drive.nav.tx, drive.nav.ty, drive.nav.state, drive.nav.route = 300, 0, "ok", route
+        dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = 0, 0, 20, 0, false
+        setHeading(dveh, 0)
+        checkTrue(MDAD.Drive.start(dp), label .. " 啟動（" .. tostring(halos[1] and halos[1].text) .. "）")
+        for _ = 1, 2 do driveTick(dp, dveh) end
+        local s = MDAD.Drive.debugSession(0)
+        dveh._steering = 0.02
+        driveTick(dp, dveh)
+        checkEq(s.mode, "yield", label .. " 轉方向盤＝讓位")
+        -- 玩家往路外開 30m；主 MOD 偏航重算給接線 30m 的線
+        dveh._x, dveh._y = 40, 30
+        local far = paved(newRoute(30, 40, 0, 4, 0))
+        far.snapDist = 30
+        drive.nav.route = far
+        nowMs = nowMs + 300
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        checkTrue(MDAD.Drive.isActive(0) and s.mode == "yield" and s.route == far and not hasHalo("UI_MinidoracatAutoDrive_RouteTooFar"),
+            label .. " 讓位中離路 30m 的線照收、不交還、仍 yield")
+        if back then dveh._x, dveh._y = 48, 1 end
+        dveh._steering = 0
+        driveTick(dp, dveh)
+        nowMs = nowMs + 2001
+        driveReset(dveh)
+        return s
+    end
+    local manualV, stopV = drive.voiceCount("manual"), drive.voiceCount("stop")
+    from = #events + 1
+    yieldFar("(yfar)", false)
+    local farTs = nowMs - 2001
+    driveTick(dp, dveh)
+    local fe = last("route", "far", from)
+    checkTrue(not MDAD.Drive.isActive(0) and hasHalo("UI_MinidoracatAutoDrive_ManualStop") and not hasHalo("UI_MinidoracatAutoDrive_RouteTooFar")
+            and drive.voiceCount("manual") == manualV + 1 and drive.voiceCount("stop") == stopV,
+        "(yfar) 放手時仍離路 30m：手動停止（ManualStop 綠字、manual 語音），不出 RouteTooFar")
+    checkTrue(fe ~= nil and fe.why == "yield" and fe.mode == "yield" and type(fe.d) == "number" and fe.d > 29
+            and fe.d < 31 and fe.snapDist == 30 and type(fe.ms) == "number" and fe.ms >= 2000,
+        "(yfar) 記 route far why=yield（d " .. tostring(fe and fe.d) .. "、ms " .. tostring(fe and fe.ms) .. "）")
+    from = #events + 1
+    st = yieldFar("(yfar-back)", true)
+    driveTick(dp, dveh)
+    checkTrue(MDAD.Drive.isActive(0) and st.mode ~= "yield" and hasHalo(DKEY.RESUME) and last("route", "far", from) == nil,
+        "(yfar-back) 放手時已回路上：照常恢復、不記 far（mode " .. tostring(st.mode) .. "）")
+    for _ = 1, 3 do
+        nowMs = nowMs + 100
+        driveTick(dp, dveh)
+    end
+    checkTrue(MDAD.Drive.isActive(0) and st.routeFarSince == 0,
+        "(yfar-back) 恢復後離線過遠計時不誤觸（routeFarSince " .. tostring(st.routeFarSince) .. "）")
+    -- (yfar-gate) 讓位外照舊：偏航重算給離路 30m 的線＝RouteTooFar 交還，交還前記被拒那條線
+    MDAD.Drive.stop(0, nil)
+    local route = paved(newRoute(40, 0, 0, 4, 0))
+    route.snapDist = 1
+    drive.nav.route = route
+    dveh._x, dveh._y, dveh._speed, dveh._steering = 0, 0, 20, 0
+    checkTrue(MDAD.Drive.start(dp), "(yfar-gate) 啟動")
+    for _ = 1, 2 do driveTick(dp, dveh) end
+    local gateFar = paved(newRoute(30, 40, 0, 4, 0))
+    gateFar.snapDist, gateFar.len = 30, 116
+    drive.nav.route = gateFar
+    from = #events + 1
+    nowMs = nowMs + 300
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    fe = last("route", "far", from)
+    checkTrue(not MDAD.Drive.isActive(0) and hasHalo("UI_MinidoracatAutoDrive_RouteTooFar") and fe ~= nil and fe.why == "gate"
+            and fe.mode == "follow" and fe.snapDist == 30 and fe.src ~= nil and fe.len ~= nil,
+        "(yfar-gate) 讓位外照舊 RouteTooFar，交還前記 route far why=gate（含被拒那條線 src）")
+    -- (yfar-watch) 離線過遠計時到期交還：記 route far why=watch（帶 lat）
+    resumeMs = 0
+    MinidoracatMiniMapAPI.navApiVersion = 2
+    checkTrue(armDrive(), "(yfar-watch) 啟動")
+    setHeading(dveh, 0)
+    dveh._y = 25
+    from = #events + 1
+    local waited = 0
+    while waited < 6000 and MDAD.Drive.isActive(0) do
+        nowMs = nowMs + 100
+        driveTick(dp, dveh)
+        waited = waited + 100
+    end
+    fe = last("route", "far", from)
+    checkTrue(not MDAD.Drive.isActive(0) and fe ~= nil and fe.why == "watch" and type(fe.lat) == "number"
+            and math.abs(fe.lat) >= T.SNAP_MAX_M,
+        "(yfar-watch) 離線過遠交還記 route far why=watch（lat " .. tostring(fe and fe.lat) .. "）")
+
+    -- (yproj)
+    resumeMs = 2000
+    local function yieldMove(label, startX, toX)
+        drive.fillWorld(-10, 330, -10, 10)
+        MDAD.Drive.stop(0, nil)
+        drive.nav.tx, drive.nav.ty, drive.nav.state = 400, 0, "ok"
+        drive.nav.route = newRoute(80, 0, 0, 4, 0)
+        dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = startX, 0, 20, 0, false
+        setHeading(dveh, 0)
+        checkTrue(MDAD.Drive.start(dp), label .. " 啟動")
+        for _ = 1, 2 do driveTick(dp, dveh) end
+        local s = MDAD.Drive.debugSession(0)
+        local lane = MDADFollower.laneBiasAt(s.profile, 1.5, 1)
+        dveh._y = lane
+        drive.scanRound()
+        local before = s.lastSNow
+        dveh._steering = 0.02
+        driveTick(dp, dveh)
+        checkEq(s.mode, "yield", label .. " 讓位")
+        -- 玩家沿路開走；舊處 chunk 卸載、只剩車附近載入
+        nowMs = nowMs + 30000
+        dveh._x, dveh._y, dveh._speed = toX, lane, 60
+        drive.fillWorld(toX - 50, toX + 130, -10, 10)
+        driveTick(dp, dveh)
+        dveh._steering = 0
+        driveTick(dp, dveh)
+        nowMs = nowMs + 2001
+        driveReset(dveh)
+        from = #events + 1
+        driveTick(dp, dveh)
+        local first = s.lastSNow
+        local brakes = drive.calls.forceBrake
+        for _ = 1, 40 do -- 跑到恢復後第一輪感知完成
+            if s.sensor.ready then break end
+            nowMs = nowMs + 50
+            driveTick(dp, dveh)
+        end
+        return s, before, first, brakes
+    end
+    local s1, before, first, brakes = yieldMove("(yproj)", 0, 200)
+    local re = last("takeover", "resume", from)
+    checkTrue(MDAD.Drive.isActive(0) and math.abs(first - 200) < 3,
+        "(yproj) 恢復首幀投影就在車位（讓位前 s " .. string.format("%.1f", before) .. "、恢復 " .. string.format("%.1f", first) .. "）")
+    checkTrue(brakes == 0 and drive.calls.forceBrake == 0 and s1.sensor.ready == true,
+        "(yproj) 首輪感知前後沒有可視鎖輪（forceBrake " .. drive.calls.forceBrake .. "、why " .. tostring(s1.forceBrakeWhy) .. "）")
+    checkTrue(re ~= nil and math.abs(re.lat) < 3 and re.fi >= 49 and re.fi <= 51 and math.abs(re.s - 200) < 3
+            and re.ms >= 30000,
+        "(yproj) takeover resume 帶新投影（fi " .. tostring(re and re.fi) .. "、lat " .. tostring(re and re.lat)
+        .. "、ms " .. tostring(re and re.ms) .. "）")
+    local _, before2, first2 = yieldMove("(yproj-back)", 200, 40)
+    checkTrue(MDAD.Drive.isActive(0) and before2 > 190 and math.abs(first2 - 40) < 3,
+        "(yproj-back) 開回後方 160m：恢復首幀投影就在車位（讓位前 s " .. string.format("%.1f", before2) .. "、恢復 "
+        .. string.format("%.1f", first2) .. "）")
+
+    -- (ut-done)
+    resumeMs = 0
+    drive.fillWorld(-10, 70, -7, 7)
+    checkTrue(armDrive(), "(ut-done) 啟動")
+    st = MDAD.Drive.debugSession(0)
+    dveh._speed = 0
+    setHeading(dveh, 2.8)
+    driveTick(dp, dveh)
+    drive.scanRound(true)
+    from = #events + 1
+    driveTick(dp, dveh)
+    checkTrue(st.uturn ~= nil and st.uturnProbe ~= nil, "(ut-done) 前提：調頭中、已首探（" .. tostring(st.uturnProbe) .. "）")
+    local utKind = st.uturn and st.uturn.name
+    nowMs = nowMs + 700
+    setHeading(dveh, 0)
+    driveTick(dp, dveh)
+    local ud = last("uturn", "done", from)
+    checkTrue(st.uturn == nil and ud ~= nil and ud.why == "aligned" and (ud.probe == "clear" or ud.probe == "obstructed")
+            and type(ud.ms) == "number" and ud.ms >= 700 and ud.kind ~= nil and ud.kind == utKind,
+        "(ut-done) 對正收尾記 uturn done why=aligned（probe " .. tostring(ud and ud.probe) .. "、ms " .. tostring(ud and ud.ms)
+        .. "、kind " .. tostring(ud and ud.kind) .. "）")
+
+    MDAD.Drive.stop(0, nil)
+    MDAD.HUD, MinidoracatMiniMapAPI, SandboxVars = oldHud, oldApi, oldSand
+    MDADDiagnostics.start, MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.stop =
+        oldStart, oldEvent, oldSample, oldStop
+    drive.nav.tx, drive.nav.ty, drive.nav.state = 300, 0, "ok"
+    drive.nav.route = newRoute(40, 0, 0, 4, 0)
+    drive.fillWorld(-2, 70, -7, 7)
+end
+drive.scenario1008()
 
 local function scenarioReasonKeys()
 scenario("理由鍵覆蓋：每個分支都跑到，且四語 UI.json 都有對應翻譯")

@@ -1903,13 +1903,16 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         end
     end
     -- 先保留能接上的原路段，避免右側合法lane較靠近平行反向臂時突然跳臂。
-    -- 快取路線首段真的離車很遠，才在首次控制補一次全域定位。
+    -- 快取路線首段真的離車很遠，才在首次控制補一次全域定位。讓位恢復（Driver 保留游標、設 needsProjection）
+    -- 同一套：車還在舊游標窗口附近就沿用，離開了才全域重新定位——那是新定位，不受下面的單幀倒退上限夾住。
+    local relocated = false
     if state.needsProjection then
         state.needsProjection = false
         local width = profile.segWidth and profile.segWidth[bestI]
         local reach = LOOKAHEAD_MIN
         if isFinite(width) and width * 0.5 > reach then reach = width * 0.5 end
         if bestD > reach * reach then
+            relocated = true
             for i = 1, n - 1 do
                 if i < lo or i > hi then
                     local t, d2 = projectT(x, y, px[i], py[i], px[i + 1], py[i + 1], segLen[i])
@@ -1922,7 +1925,7 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
     -- 回一大段——那會讓 remaining 暴增、targetSpeed 跳動，在自我交叉的路線上尤其明顯。
     local floorI = idx - REWIND_MAX
     if floorI < 1 then floorI = 1 end
-    if bestI < floorI then
+    if bestI < floorI and not relocated then
         bestI = floorI
         bestT = projectT(x, y, px[bestI], py[bestI], px[bestI + 1], py[bestI + 1], segLen[bestI])
     end
