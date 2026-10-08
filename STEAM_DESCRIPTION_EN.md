@@ -11,7 +11,7 @@ Plan a road route with the GPS Navigator and the Autopilot Module drives it for 
 [*] Requires the UI framework: [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3789836701]Minidoracat UI Library for B42[/url]
 [*] Incompatible with Navigator (both use the area above the vehicle dashboard)
 [*] [b]Add/remove mid-save:[/b] safe either way; removing it deletes GPS units, autopilot modules and devices installed in cars
-[*] [b]Languages:[/b] 繁體中文, 简体中文, English, 日本語, 한국어, Русский, Español, Português, Türkçe, Français, Polski, Deutsch (languages other than Chinese, English and Japanese are AI-translated; corrections welcome)
+[*] [b]Languages:[/b] 繁體中文, 简体中文, English, 日本語, 한국어, Русский, Español, Português, Türkçe, Français, Polski, Deutsch (please report any translation issues)
 [/list]
 Keep every Minidoracat MiniMap series mod up to date and restart the game after updating.
 
