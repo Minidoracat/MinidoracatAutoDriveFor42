@@ -132,6 +132,9 @@ local EK = {
     "rate",
     -- impact（1008）：撞擊分類 hit／frozen／tow-sync（MDADUpload.impactClass）、有號掉速（前一筆有號 km/h − 本筆；倒退反號時 dv 會低估）
     "cls", "dvs",
+    -- 1008 拖車：tow attach 外拉規劃用的掛點→車頭（MDADTrailer.hitchFront）；detour towcorner 附了車尾正後方圈（1）；
+    -- detour skip why=same 時車離上次轉角改道判定處的世界距離（m）
+    "front", "towRear", "moved",
 }
 
 local function logOnce(msg)

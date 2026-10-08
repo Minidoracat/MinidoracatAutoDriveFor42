@@ -21829,14 +21829,16 @@ drive.scenarioTowTurn()
 -- (tc) 1005 拖車路線上有過不去的轉角（MDADTrailer.shape 的 towBlocked）：得知當下先要一條避開那些轉角的改道
 --   （Drive.towCornerDetour），新線走同一條剖面管線（profileRouteOf → shape）後沒有不可過轉角才收；否則拒收、保留
 --   原線，照舊停在轉角前交還 TrailerCorner。fixture：半聯結車（test_trailer 的 W900＋貨櫃）、4m 巷兩個直角都不可過。
---   (tc-ok)      起步第一個跟線幀（離轉角 60m）就問：主圈＝第一個轉角、半徑＝路口方塊半對角線＋PAD、moreAvoid＝第二個
---                轉角；收下、cutover why=towcorner、新剖面沒有 towBlocked、不交還。違規證明：拿掉 towCornerDetour 呼叫＝
---                calls 紅；半徑不加 towBlockedR＝半徑紅；不附其餘轉角＝more 紅。
+--   (tc-ok)      起步第一個跟線幀（離轉角 60m）就問：主圈＝第一個轉角、半徑＝路口方塊半對角線＋PAD、moreAvoid＝車尾正後方圈
+--                （1008）＋第二個轉角；收下、cutover why=towcorner、新剖面沒有 towBlocked、不交還。違規證明：拿掉
+--                towCornerDetour 呼叫＝calls 紅；半徑不加 towBlockedR＝半徑紅；不附其餘轉角＝more 紅；不附後方圈＝後方圈紅。
 --   (tc-near)    已停在轉角前 18m 才得知：收下後等 cutover、不交還。違規證明：拿掉 guard 後的等待＝紅。
 --   (tc-blocked) 替代路仍是 4m 直角：拒收 blocked、記 rejectedRoute、原線不換，開到轉角前照舊交還 TrailerCorner。
 --                違規證明：不驗新剖面（left 恆 0）＝紅。
---   (tc-once)    同一（route identity、轉角集合）只問一次：剖面重建同一條線不重問；新 identity 再問，到 TRIES 上限記
---                skip max。違規證明：拿掉 pair 判定＝重建紅；拿掉 TRIES 上限＝max 紅。
+--   (tc-once)    同一轉角集合：剖面重建同一條線不重問；新 identity 但車沒前進 TOW_CORNER_REASK_M 不重問、不扣額度（skip
+--                why=same，1008）；前進夠遠再問，到 TRIES 上限記 skip max。違規證明：拿掉 pair 判定＝重建紅；拿掉同集合
+--                跳過＝same 紅；前進距離門檻恆不到＝再問紅；拿掉 TRIES 上限＝max 紅。
+--   (tc-end)     避讓圈蓋住路線終點的轉角不附進 moreAvoid（1008）。違規證明見段首。
 --   (tc-v8)      nav API 8：只給主圈（more=nil），回來的線穿第二個轉角圈＝拒收 again。違規證明：拿掉自驗＝紅。
 --   (tc-off)     「堵死時自動改道」關：不問、記 skip off。違規證明：拿掉選項閘＝紅。
 --   (tc-solo)    沒拖車：剖面帶 towBlocked 也不問。違規證明：呼叫搬到拖車分支外＝紅。
@@ -21946,8 +21948,11 @@ function drive.scenarioTowCorner()
     local ld = drive.nav.lastDetour or {}
     checkTrue(ld.ax == 60 and ld.ay == 0, "(tc-ok) 主圈＝第一個不可過轉角（" .. tostring(ld.ax) .. "," .. tostring(ld.ay) .. "）")
     checkNear(ld.r, r0, 1e-9, "(tc-ok) 主圈半徑蓋住整個路口方塊")
-    local more = ld.more
-    checkTrue(type(more) == "table" and #more == 3 and more[1] == 60 and more[2] == 60 and math.abs(more[3] - r0) < 1e-9,
+    -- 1008：moreAvoid 第一圈＝車尾正後方圈（同 towTurnaround：圓心＝車位−前向×(AVOID_R+GAP)），其後才是其餘不可過轉角
+    local more, back = ld.more, T.TOW_TURN_AVOID_R + T.TOW_TURN_GAP_M
+    checkTrue(type(more) == "table" and #more == 6 and more[1] == -back and more[2] == 0 and more[3] == T.TOW_TURN_AVOID_R,
+        "(tc-ok) moreAvoid 先附車尾正後方圈（" .. tostring(more and more[1]) .. "," .. tostring(more and more[2]) .. "）")
+    checkTrue(type(more) == "table" and more[4] == 60 and more[5] == 60 and math.abs(more[6] - r0) < 1e-9,
         "(tc-ok) moreAvoid＝其餘不可過轉角（n=" .. tostring(more and #more) .. "）")
     checkTrue(MDAD.Drive.isActive(0) and haloOf("UI_MinidoracatAutoDrive_Detour", "good"), "(tc-ok) 收下：綠字改道、不交還")
     tickUntil(function() return st.route == alt end, 30)
@@ -21956,9 +21961,10 @@ function drive.scenarioTowCorner()
         "(tc-ok) cutover 到替代線（why=" .. tostring(st.routeReadyWhy) .. "）、新剖面沒有不可過轉角")
     checkTrue(MDAD.Drive.isActive(0) and drive.nav.detourCalls == 1, "(tc-ok) 新線不再問、仍在自駕")
     local e1 = ev[1] or {}
-    checkTrue(#ev == 1 and e1.phase == "towcorner" and e1.why == "ok" and e1.towN == 2 and e1.avoidN == 1
-        and e1.hitX == 60 and e1.attempt == 1,
-        "(tc-ok) detour 事件 phase=towcorner why=ok towN=2 avoidN=1（why=" .. tostring(e1.why) .. "）")
+    checkTrue(#ev == 1 and e1.phase == "towcorner" and e1.why == "ok" and e1.towN == 2 and e1.avoidN == 2
+        and e1.towRear == 1 and e1.hitX == 60 and e1.attempt == 1,
+        "(tc-ok) detour 事件 phase=towcorner why=ok towN=2 avoidN=2 towRear=1（why=" .. tostring(e1.why) .. " avoidN="
+        .. tostring(e1.avoidN) .. " towRear=" .. tostring(e1.towRear) .. "）")
 
     -- (tc-near) 已停在轉角前 18m 才得知
     alt = arc(42)
@@ -21986,7 +21992,8 @@ function drive.scenarioTowCorner()
         "(tc-blocked) 開到轉角前照舊交還 TrailerCorner")
     checkEq(drive.nav.detourCalls, 1, "(tc-once) 同一條線從起步到交還只問一次")
 
-    -- (tc-once) 剖面重建同一條線不重問；新 identity 再問，第 TRIES+1 次記 skip max
+    -- (tc-once) 剖面重建同一條線不重問；1008 新 identity 但車沒前進 TOW_CORNER_REASK_M＝不重問、不扣額度（skip why=same）；
+    --   前進夠遠再問；第 TRIES+1 次記 skip max
     st = arm(lanes(), 0, semi)
     tickUntil(function() return drive.nav.detourCalls > 0 end, 30)
     local cp = {}
@@ -22002,11 +22009,36 @@ function drive.scenarioTowCorner()
         tick(5)
         return st.route == nr
     end
-    checkTrue(recut(181) and drive.nav.detourCalls == T.TOW_CORNER_TRIES,
-        "(tc-once) 新 identity 再問一次（calls=" .. tostring(drive.nav.detourCalls) .. "）")
-    checkTrue(recut(182) and drive.nav.detourCalls == T.TOW_CORNER_TRIES and ev[#ev].phase == "skip"
+    checkTrue(recut(181) and drive.nav.detourCalls == 1 and st.towCornerTries == 1,
+        "(tc-once) 新 identity、同一轉角集合、車沒前進：不重問、不扣額度（calls=" .. tostring(drive.nav.detourCalls)
+        .. " tries=" .. tostring(st.towCornerTries) .. "）")
+    e1 = ev[#ev] or {}
+    checkTrue(e1.phase == "skip" and e1.why == "same" and e1.towN == 2 and type(e1.moved) == "number"
+        and e1.moved < T.TOW_CORNER_REASK_M,
+        "(tc-once) 記 skip why=same 與離上次判定處的距離（why=" .. tostring(e1.why) .. " moved=" .. tostring(e1.moved) .. "）")
+    dveh._x = T.TOW_CORNER_REASK_M + 1 -- 沿線前進（仍在轉角停止線 60−18 之前）
+    checkTrue(recut(182) and drive.nav.detourCalls == T.TOW_CORNER_TRIES,
+        "(tc-once) 前進超過 REASK_M 後新 identity 再問一次（calls=" .. tostring(drive.nav.detourCalls) .. "）")
+    local reask = T.TOW_CORNER_REASK_M
+    T.TOW_CORNER_REASK_M = 0 -- 只測額度上限：任何位移都算前進夠遠
+    checkTrue(recut(183) and drive.nav.detourCalls == T.TOW_CORNER_TRIES and ev[#ev].phase == "skip"
         and ev[#ev].why == "max",
         "(tc-once) 到上限不再問、記 skip max（why=" .. tostring(ev[#ev] and ev[#ev].why) .. "）")
+    T.TOW_CORNER_REASK_M = reask
+
+    -- (tc-end) 1008：避讓圈蓋住路線終點的轉角不附進 moreAvoid（新線終點被迫離開原終點＝end 拒收；正式服 0.23.0
+    --   同一目的地 16 次 towcorner end）。第二個直角出臂 7m（> ARRIVE_M，照列不可過）、PAD 加大到圈蓋住終點。
+    --   違規證明：拿掉 moreAvoid 的終點判定＝紅。
+    local pad = T.TOW_CORNER_AVOID_PAD
+    T.TOW_CORNER_AVOID_PAD = 5
+    drive.nav.detour = bad
+    st = arm(road({ 0, 0, 60, 0, 60, 60, 53, 60 }, 4), 0, semi)
+    tickUntil(function() return drive.nav.detourCalls > 0 end, 30)
+    ld = drive.nav.lastDetour or {}
+    checkTrue(#st.profileRoute.towBlocked == 4 and drive.nav.detourCalls == 1 and ld.ax == 60 and ld.ay == 0
+        and type(ld.more) == "table" and #ld.more == 3 and ld.more[3] == T.TOW_TURN_AVOID_R,
+        "(tc-end) 圈住路線終點的轉角不附：moreAvoid 只剩車尾後方圈（n=" .. tostring(ld.more and #ld.more) .. "）")
+    T.TOW_CORNER_AVOID_PAD = pad
 
     -- (tc-v8) API 8：只給主圈、自己驗不穿其他圈
     local v8 = road({ 0, 0, 20, 0, 40, 8, 55, 25, 62, 40, 62, 62, 0, 62 }, 12)
@@ -22114,6 +22146,120 @@ function drive.scenarioTowLost()
     SandboxVars, dveh, getSpecificPlayer = oldSandbox, oldVeh, oldGet
 end
 drive.scenarioTowLost()
+-- (thr) 1008 拖車倒車的折角門檻（MDADTrailer.canReverse）：舊制折角已超過 REVERSE_HITCH_MAX 時 stepUnstick 把 dist2 設成
+--   「倒夠了」，0 位移 settle→success、3 次額度幾秒燒完（正式服 0.23.0 片段每次 7–19 ms）。
+--   (thr-start) 起手折角已超限：不倒（rear-blocked rear=hitch、phi）、不吃額度、回停等（blockRetryDone）；連三次額度仍 0。
+--               違規證明：拿掉 startRecoveryAttempt 的折角閘＝紅。
+--   (thr-mid)   起手在上限內、還沒實際退出 UNSTICK_MIN_M 就折到上限：不算成功、退回額度、回停等。違規證明：拿掉 stepUnstick
+--               的位移條件（照舊當倒夠）＝紅。
+--   (thr-keep)  已退出 UNSTICK_MIN_M 才折到上限：照舊當倒夠進 settle、額度照扣。違規證明：拿掉 dist2＝1e9＝紅。
+function drive.scenarioTowHitchReverse()
+    scenario("拖車折角已超過倒車上限：不倒、不算成功、不吃額度；倒車中途才折到上限照舊算倒夠")
+    local oldSandbox, oldVeh, oldGet = SandboxVars, dveh, getSpecificPlayer
+    local oldRoute, oldTx, oldTy, oldState = drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
+    local oldEvent, oldV3, oldSample = MDADDiagnostics.event, Vector3f, MDADDiagnostics.sample
+    Vector3f = { new = newVec3 }
+    -- 假車的物理取樣會讓診斷關掉 s.diag（事件跟著不寫）；本案只收事件：取樣一律回 live
+    MDADDiagnostics.sample = function() return true end
+    local wasMs = drive.frameMs(20)
+    MDAD.Drive.stop(0, nil)
+    getSpecificPlayer = function(n) if n == 0 then return dp end end
+    local ev = {}
+    MDADDiagnostics.event = function(pn, name, a, ...)
+        if name == "unstick" and type(a) == "table" then ev[#ev + 1] = a end
+        return oldEvent(pn, name, a, ...)
+    end
+    dveh = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }),
+        engineRunning = true, mass = 1600, speed = 0, maxSpeed = 100,
+        bodyW = 1.6, bodyL = 4.2, comX = 0, comZ = 0, profileFull = true,
+        enginePower = 3000, brakingForce = 100, wheelFriction = 1.5, tireFriction = 1.5 })
+    local psi = 0 -- 掛車航向比牽引車小 psi＝折角 φ（MDADTrailer.state）
+    local trailer = {
+        getForwardVector = function(_, out)
+            local c, s = math.cos(psi), math.sin(psi)
+            return out:set(dveh._fwdX * c + dveh._fwdY * s, 0, dveh._fwdY * c - dveh._fwdX * s)
+        end,
+        getUpVectorDot = function() return 1 end,
+        getWorldPos = function(_, _, _, _, out) return out:set(dveh._x - 8 * dveh._fwdX, dveh._y - 8 * dveh._fwdY, 0) end,
+    }
+    drive.fillWorld(-10, 120, -12, 12)
+    drive.putRoad(-10, 120, -3, 3)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 60, RightLaneBias = 0 })
+    dveh._x, dveh._y = 30, 0
+    setHeading(dveh, 0)
+    dveh._speed, dveh._steering, dveh._stopped = 0, 0, true
+    dveh._engine, dveh._driver = true, dp
+    dp._vehicle, dp._dead, dp._local = dveh, false, true
+    drive.nav.route = { pts = { 0, 0, 110, 0 }, segSurface = { "paved" }, segWidth = { 6 }, len = 110, cost = 110,
+        avoidPenalty = 0 }
+    drive.nav.tx, drive.nav.ty, drive.nav.state = 110, 0, "ok"
+    checkTrue(MDAD.Drive.start(dp), "(thr) 啟動")
+    local st = MDAD.Drive.debugSession(0)
+    st.tow = { trailer = trailer, axisSign = 1, comX = 0, comZ = 0, L2 = 6.7, hitchToRear = 8.9, halfW = 1.1, halfL = 5 }
+    local function tick()
+        nowMs = nowMs + 20
+        local cur = MDAD.Drive.debugSession(0)
+        if cur then cur.diag = true end
+        driveTick(dp, dveh)
+    end
+    for _ = 1, 10 do if st.mode == "follow" then break end tick() end
+    local function recover() -- 停妥時派一次倒車（blocked-retry 同款，dispatch 只認 speed≈0）
+        clearList(ev)
+        st.recoverWhy, st.blockRetryDone = "blocked-retry", false
+        tick()
+    end
+    local function phases()
+        local p = {}
+        for i = 1, #ev do p[#p + 1] = tostring(ev[i].phase) .. "/" .. tostring(ev[i].rear) end
+        return table.concat(p, ",")
+    end
+    local T = MDAD.Drive.debugTune()
+
+    -- (thr-start)
+    psi = math.rad(45)
+    local okAll = true
+    for _ = 1, 3 do
+        recover()
+        local e = ev[#ev] or {}
+        if not (#ev == 1 and e.phase == "rear-blocked" and e.rear == "hitch" and math.abs((e.phi or 0) - psi) < 1e-6
+                and st.mode == "follow" and st.episodeAttempts == 0 and st.rearStatus == "hitch"
+                and st.blockRetryDone == true) then okAll = false end
+    end
+    checkTrue(MDAD.Drive.isActive(0) and okAll,
+        "(thr-start) 起手折角已超限：不倒、記 rear=hitch、回停等、三次額度仍 0（mode=" .. tostring(st.mode)
+        .. " attempts=" .. tostring(st.episodeAttempts) .. " ev=" .. phases() .. "）")
+
+    -- (thr-mid)
+    psi = math.rad(10)
+    recover()
+    local started = st.mode == "unstick" and st.episodeAttempts == 1
+    psi = math.rad(45)
+    clearList(ev)
+    tick()
+    local e = ev[#ev] or {}
+    checkTrue(started and st.mode == "follow" and st.episodeAttempts == 0 and st.rearStatus == "hitch"
+        and e.phase == "rear-blocked" and e.rear == "hitch" and (e.d or 1) < T.UNSTICK_MIN_M,
+        "(thr-mid) 沒實際退出就折到上限：不算成功、退回額度（started=" .. tostring(started) .. " mode=" .. tostring(st.mode)
+        .. " attempts=" .. tostring(st.episodeAttempts) .. " ev=" .. phases() .. "）")
+
+    -- (thr-keep)
+    psi = math.rad(10)
+    recover()
+    started = st.mode == "unstick" and st.episodeAttempts == 1
+    dveh._x = 30 - (T.UNSTICK_MIN_M + 0.5) -- 假車不會自己退：直接擺到退了 UNSTICK_MIN_M＋0.5 的位置
+    psi = math.rad(45)
+    tick()
+    checkTrue(started and st.mode == "settle" and st.episodeAttempts == 1,
+        "(thr-keep) 已退出一段才折到上限：照舊當倒夠進 settle、額度照扣（mode=" .. tostring(st.mode) .. " attempts="
+        .. tostring(st.episodeAttempts) .. "）")
+
+    MDAD.Drive.stop(0, nil)
+    drive.frameMs(wasMs)
+    MDADDiagnostics.event, Vector3f, MDADDiagnostics.sample = oldEvent, oldV3, oldSample
+    drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
+    SandboxVars, dveh, getSpecificPlayer = oldSandbox, oldVeh, oldGet
+end
+drive.scenarioTowHitchReverse()
 -- 0928m 交還前的最後一次改道（Drive.stuckDetour；使用者裁定「遇大量障礙可改道」）：E2E rc13 12 個固定堵點
 -- 開著自動改道仍 0 次改道——舊觸發只在 blocked 停等 WAIT，實際堵死多在倒車額度用完後的停等預算／倒車
 -- 逾時交還。違規證明：拿掉停等預算出口的 stuckDetour＝(sd1) 紅；拿掉 NEAR_M 判定＝(sd2) 紅。
