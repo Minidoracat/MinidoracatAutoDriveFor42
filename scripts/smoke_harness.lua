@@ -472,6 +472,9 @@ local function newVec3()
     return v
 end
 
+-- Vector3f.new＝冷路徑的非池向量（MDAD_Trailer attach、Drive.headingOf）；不計入 drive.pool。
+Vector3f = { new = function() return newVec3() end }
+
 -- BaseVehicle.allocVector3f／releaseVector3f＝BaseVehicle.java:507-521。
 -- 引擎的池是 thread-local 且回收後會再發同一顆，這裡照樣重複發——這樣
 -- 「用了一顆已經 release 的向量」才會被 addImpulse 的 _held 檢查抓到。
@@ -21459,6 +21462,24 @@ function drive.scenarioApproach()
         "(apr-rev) 新剖面第一點＝倒車後的車位")
     checkTrue(st ~= nil and st.route.pts[1] == 0 and #st.route.pts == 4 and not st.reapproach,
         "(apr-rev) 原路線 identity 不動、旗標已消費")
+    -- (apr-sidestart) 1009 正式服路首側面起步（同型 6 段）：車在路線起點正側方 5m、車頭正對起點、與首段夾 90°——縱向 0
+    --   不算「後方」、5m 也沒超過 RETURN_MAX_DEV，RETURN 又因航向差進不了。接「車位→起點」。背對起點、或車頭已沿首段
+    --   （RETURN 進得了）照舊不接。違規證明：approachRoute 拿掉 side 條件＝第一條紅。
+    checkTrue(arm(0, -5, math.pi / 2), "(apr-sidestart) 路首側面、車頭正對起點啟動")
+    for _ = 1, 4 do driveTick(dp, dveh) end
+    st = MDAD.Drive.debugSession(0)
+    checkTrue(st ~= nil and math.abs(st.approachM - 5) < 1e-6 and st.profileRoute.pts[1] == 0
+        and st.profileRoute.pts[2] == -5 and st.profileRoute.pts[3] == 0 and st.profileRoute.pts[4] == 0,
+        "(apr-sidestart) 接車位→起點（approachM=" .. tostring(st and st.approachM) .. "）")
+    checkTrue(arm(0, -5, -math.pi / 2), "(apr-sidestart) 路首側面、車頭背對起點啟動")
+    for _ = 1, 4 do driveTick(dp, dveh) end
+    st = MDAD.Drive.debugSession(0)
+    checkTrue(st ~= nil and st.approachM == 0, "(apr-sidestart) 背對起點：不接（approachM=" .. tostring(st and st.approachM) .. "）")
+    checkTrue(arm(0, -5, 0), "(apr-sidestart) 路首側面、車頭沿首段啟動")
+    for _ = 1, 4 do driveTick(dp, dveh) end
+    st = MDAD.Drive.debugSession(0)
+    checkTrue(st ~= nil and st.approachM == 0,
+        "(apr-sidestart) 車頭沿首段（RETURN 進得了）：不接（approachM=" .. tostring(st and st.approachM) .. "）")
 
     MDAD.Drive.stop(0, nil)
     drive.frameMs(wasMs)
@@ -22017,7 +22038,12 @@ drive.scenarioTowTurn()
 --                why=same，1008）；前進夠遠再問，到 TRIES 上限記 skip max。違規證明：拿掉 pair 判定＝重建紅；拿掉同集合
 --                跳過＝same 紅；前進距離門檻恆不到＝再問紅；拿掉 TRIES 上限＝max 紅。
 --   (tc-end)     避讓圈蓋住路線終點的轉角不附進 moreAvoid（1008）。違規證明見段首。
---   (tc-v8)      nav API 8：只給主圈（more=nil），回來的線穿第二個轉角圈＝拒收 again。違規證明：拿掉自驗＝紅。
+--   (tc-v8)      nav API 8：只給主圈（more=nil）；回來的線穿第二個轉角圈，但自身剖面可過＝收下（1009 起轉角圈不再以
+--                again 拒收）。
+--   (tc-through) 1009 正式服 0.25.0 誤拒（直行穿過那個路口的 4280m 線因主圈 through 拒收、22m 後交還）：主 MOD 回
+--                avoidPenalty>0、直行穿過主圈、剖面沒有不可過轉角的線＝收下並 cutover；穿圈且仍在同一個彎轉＝剖面判
+--                blocked 拒收；穿本趟判死的堵車圈（avoidHist）照舊 again。違規證明：towCornerDetour 不傳 hard＝收下那條紅；
+--                hard 不驗堵車圈＝again 那條紅。
 --   (tc-off)     「堵死時自動改道」關：不問、記 skip off。違規證明：拿掉選項閘＝紅。
 --   (tc-solo)    沒拖車：剖面帶 towBlocked 也不問。違規證明：呼叫搬到拖車分支外＝紅。
 function drive.scenarioTowCorner()
@@ -22218,16 +22244,52 @@ function drive.scenarioTowCorner()
         "(tc-end) 圈住路線終點的轉角不附：moreAvoid 只剩車尾後方圈（n=" .. tostring(ld.more and #ld.more) .. "）")
     T.TOW_CORNER_AVOID_PAD = pad
 
-    -- (tc-v8) API 8：只給主圈、自己驗不穿其他圈
+    -- (tc-v8) API 8：只給主圈；穿第二個轉角圈但剖面可過＝收下
     local v8 = road({ 0, 0, 20, 0, 40, 8, 55, 25, 62, 40, 62, 62, 0, 62 }, 12)
     drive.nav.detour = v8
     st = arm(lanes(), 0, semi, 8)
     tickUntil(function() return drive.nav.detourCalls > 0 end, 30)
     ld = drive.nav.lastDetour or {}
     e1 = ev[1] or {}
-    checkTrue(drive.nav.detourCalls == 1 and ld.more == nil and ld.ax == 60 and e1.why == "again"
-        and st.rejectedRoute == v8,
-        "(tc-v8) API 8 只給主圈、穿第二個轉角圈的線拒收 again（why=" .. tostring(e1.why) .. "）")
+    checkTrue(drive.nav.detourCalls == 1 and ld.more == nil and ld.ax == 60 and e1.why == "ok" and e1.towLeft == 0,
+        "(tc-v8) API 8 只給主圈、穿第二個轉角圈但剖面可過＝收下（why=" .. tostring(e1.why) .. "）")
+
+    -- (tc-through) 直行穿過主圈（(0,0)→(70,0) 越過 (60,0) 那個直角）再接 12m 大弧，主 MOD 標 avoidPenalty>0
+    local function thruRoute()
+        local p = { 0, 0 }
+        for k = 0, 9 do
+            local th = math.rad(-90 + 20 * k)
+            p[#p + 1], p[#p + 2] = 70 + 30 * math.cos(th), 30 + 30 * math.sin(th)
+        end
+        p[#p + 1], p[#p + 2] = 0, 60
+        local rt = road(p, 12)
+        rt.avoidPenalty = 1
+        return rt
+    end
+    local thru = thruRoute()
+    drive.nav.detour = thru
+    st = arm(lanes(), 0, semi)
+    tickUntil(function() return st.route == thru or not MDAD.Drive.isActive(0) end, 40)
+    tick(3)
+    e1 = ev[1] or {}
+    checkTrue(e1.why == "ok" and st.route == thru and st.routeReadyWhy == "towcorner" and #st.profileRoute.towBlocked == 0,
+        "(tc-through) 直行穿過主圈、剖面可過＝收下並 cutover（why=" .. tostring(e1.why) .. "）")
+    local turn = lanes()
+    turn.avoidPenalty = 1
+    drive.nav.detour = turn
+    st = arm(lanes(), 0, semi)
+    tickUntil(function() return drive.nav.detourCalls > 0 end, 30)
+    tick(5)
+    e1 = ev[1] or {}
+    checkTrue(e1.why == "blocked" and e1.towLeft == 2 and st.rejectedRoute == turn and MDAD.Drive.isActive(0),
+        "(tc-through) 穿圈且仍在同一個彎轉＝剖面判 blocked 拒收（why=" .. tostring(e1.why) .. "）")
+    drive.nav.detour = thruRoute()
+    st = arm(lanes(), 0, semi)
+    st.avoidHist = { 30, 0, 4 } -- 本趟先前判死的堵車圈，落在直行段上
+    tickUntil(function() return drive.nav.detourCalls > 0 end, 30)
+    e1 = ev[1] or {}
+    checkTrue(e1.why == "again" and st.route ~= drive.nav.detour,
+        "(tc-through) 穿本趟判死的堵車圈：照舊 again 拒收（why=" .. tostring(e1.why) .. "）")
 
     -- (tc-off) 自動改道關
     autoOn = false

@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1009a"
+Drive.REV = "1009d"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -810,6 +810,13 @@ TUNE.UNSTICK_REVERSE_KMH = 10
 -- streets 寬度，取一般單線道寬：常駐靠右在接線上幾乎收成 0，車從自己的位置出發）
 TUNE.APPROACH_BEHIND_M = 1.5
 TUNE.APPROACH_WIDTH_M = 4
+-- 路首側面起步（1009；正式服 0.25.0／0.23.0 同型 6 段，其中一處停車點跨三版重複 4 次）：車停在路線起點正側方 3–8m、
+-- 車頭朝起點，首段與車頭夾 80–95°。縱向 ≈0（不在首段後方）、又沒超過 RETURN_MAX_DEV，舊制不接；RETURN 航向差超過
+-- RETURN_ENTER_MAX_RAD 進不了，斜切保持把規劃線釘在車位、與首段平行（車得原地轉 90°），穿過車旁停車判堵，倒車又沿
+-- 車頭方向退、rs 恆 0 換不到跑道→StopStuck／接手。側距 ≥ APPROACH_SIDE_MIN_M、航向差超過 RETURN 進場門檻、起點在
+-- 車頭前方（車頭與「車→起點」夾角的 cos ≥ APPROACH_SIDE_COS）時同樣接「車位→起點」。
+TUNE.APPROACH_SIDE_MIN_M = 2.5
+TUNE.APPROACH_SIDE_COS = 0.5
 -- 進入段陡坡拒收（2026-09-04 s051：stay 鏈把常駐 lane 拖到 −2.25 後，下一候選 +2.00＝
 -- 4.25m 側移塞進 2.8m 進入段；運動學最小 8.8m（sqrt(6·dl/κ_crawl)），比例 3.1 → 承諾
 -- 線掃掠過但車追不上、clearanceCap 被 sinHeading=1 壓到 2.3 km/h 爬 4 秒被 RETURN 殺）。
@@ -1252,7 +1259,10 @@ end
 -- （E2E e1004e dixie9050w：第二次交還前改道 1552m 原路回到第一處路障，detour 用完交還）。
 TUNE.DETOUR_END_M = 3 -- 冷路徑常數收 TUNE（chunk local 190 槽已滿）
 TUNE.DETOUR_HIST_MAX = 7 -- 記幾個先前的避讓圈（＋目前那圈＝主 MOD 一次最多 8 圈）
-local function requestDetourRoute(api, playerNum, tx, ty, ax, ay, remaining, r, lenMax, refRoute, more)
+-- hard（只有拖車轉角改道 Drive.towCornerDetour 給，1009）：那些圈只是請主 MOD 別在那個彎轉，直行穿過路口照樣能開——
+-- 不看 avoidPenalty，穿圈只驗 hard（本趟判死的堵車圈）；能不能過由呼叫端的剖面管線（towBlocked）判。nil＝一般改道。
+-- 正式服 0.25.0：拖車轉角改道拿到直行穿過那個路口、整條沒有不可過轉角的 4280m 線，因主圈 through 拒收、22m 後交還。
+local function requestDetourRoute(api, playerNum, tx, ty, ax, ay, remaining, r, lenMax, refRoute, more, hard)
     if type(api.requestDetour) ~= "function" then return nil, "api" end
     local route, state = api.requestDetour(playerNum, tx, ty, ax, ay, r or TUNE.DETOUR_AVOID_R, more)
     if not route or state ~= "ok" then return nil, state or "noroad" end
@@ -1269,8 +1279,12 @@ local function requestDetourRoute(api, playerNum, tx, ty, ax, ay, remaining, r, 
         local ex, ey = pts[#pts - 1] - ref[#ref - 1], pts[#pts] - ref[#ref]
         if ex * ex + ey * ey > TUNE.DETOUR_END_M * TUNE.DETOUR_END_M then return nil, "end", route end
     end
-    if MDADDynamics.finite(route.avoidPenalty) and route.avoidPenalty > 0 then return nil, "through", route end
-    if Drive.crossesAnyAvoid(route, more) then return nil, "again", route end
+    if hard == nil then
+        if MDADDynamics.finite(route.avoidPenalty) and route.avoidPenalty > 0 then return nil, "through", route end
+        if Drive.crossesAnyAvoid(route, more) then return nil, "again", route end
+    elseif Drive.crossesAnyAvoid(route, hard) then
+        return nil, "again", route
+    end
     if routeTooFar(route) then return nil, "far", route end
     if lenMax == nil and MDADDynamics.finite(remaining) then
         lenMax = remaining * TUNE.DETOUR_LEN_RATIO + TUNE.DETOUR_LEN_SLACK
@@ -2105,7 +2119,7 @@ local function startSession(playerObj, playerNum, stage)
     end
     -- 拖車時剖面建在改寫過的路線上（外拉轉角）；剖面的 segSource 索引指向這條，證明帶也要用它
     local profileRoute, approachM = Drive.profileRouteOf(route, tow, vehicleProfile,
-        vehicle:getX(), vehicle:getY(), true)
+        vehicle:getX(), vehicle:getY(), true, Drive.headingOf(vehicle))
     local profile = MDADFollower.begin(
         profileRoute,
         maxSpeed, api.navApiVersion, vehicleProfile,
@@ -2978,8 +2992,9 @@ end
 -- （towBlockedR）＋TOW_CORNER_AVOID_PAD；moreAvoid＝車尾正後方圈（同 Drive.towTurnaround，只在 v9）＋其餘不可過轉角
 -- ＋本趟判死的舊圈（Drive.avoidMore），共最多 8 圈（跳過圈住車位、目標或路線終點的：任何路線都穿，或終點得換）。
 -- 後方圈：主 MOD 從車位起算 A*，沒有它最便宜的避開路線常先往回走，被 back 拒收（正式服 0.23.0 11 次）。
--- nav API <9 只給主圈，回來的線自己驗不穿其他圈（again）。
--- 驗收：requestDetourRoute 全套＋從車頭方向出發（back）＋新線走同一條剖面管線（Drive.profileRouteOf →
+-- 主圈、後方圈、其餘轉角圈都只是請主 MOD 避開（1009）：回來的線穿過它們（through／again）不拒收，直行穿過路口能不能
+-- 開由剖面管線判；本趟判死的堵車圈（hist）照舊不准穿（requestDetourRoute 的 hard）。nav API <9 只給主圈。
+-- 驗收：requestDetourRoute 其餘各條＋從車頭方向出發（back）＋新線走同一條剖面管線（Drive.profileRouteOf →
 -- MDADTrailer.shape）後沒有不可過轉角（blocked）。拒收＝記 s.rejectedRoute（主 MOD 快取已被覆寫）、保留原線，
 -- 行為照舊（guard 壓速、停在轉角前交還 TrailerCorner）。同一轉角集合：同一 route identity 不重問；換了 identity
 -- （偏航重算等）但車離上次判定處不到 TOW_CORNER_REASK_M 也不重問、不扣額度（記 skip why=same；正式服 0.23.0
@@ -3057,8 +3072,7 @@ function Drive.towCornerDetour(s, playerNum, vehicle, now, fx, fy)
         local remaining = s.profile and (s.profile.length - s.lastSNow) or nil
         route, why, rejected = requestDetourRoute(api, playerNum, tx, ty, ax, ay, remaining, r,
             fin(remaining) and remaining * TUNE.TOW_TURN_LEN_RATIO + TUNE.TOW_TURN_LEN_SLACK or nil, s.route,
-            v9 and more or nil)
-        if route and not v9 and Drive.crossesAnyAvoid(route, more) then route, why, rejected = nil, "again", route end
+            v9 and more or nil, hist or {})
         if route and not Drive.routeLeavesForward(route, vx, vy, fx, fy) then route, why, rejected = nil, "back", route end
         if route then
             local shaped = Drive.profileRouteOf(route, s.tow, s.vehicleProfile, vx, vy)
@@ -3497,7 +3511,8 @@ end
 -- 本來就畫著的越野接線接在剖面前面：Sensor 沿它掃、corridor 沿它排、世界掃掠照驗，車從 s=0 的
 -- 自己位置出發。這不是 0908e 禁止的「虛構前置道路」（那是沿路線反方向往車後憑空延伸、可能穿牆）：
 -- 接線起點就是車本身、終點是路網，中間是車本來就得開過去的地面，否決權照舊在世界掃掠。
--- 車在路旁（投影落在第一段內）不接——那是 RETURN 的平滑併入；拖車不接（外拉轉角另有改寫）。
+-- 車在路旁（投影落在第一段內）不接——那是 RETURN 的平滑併入；例外是路首側面、車頭正對起點而 RETURN 因航向差進不了
+-- 的那型（TUNE.APPROACH_SIDE_*，heading＝車頭航向 rad，nil＝不判）。拖車不接（外拉轉角另有改寫）。
 -- 只在起步接：行駛中主 MOD 重算的路線起點就是車的投影點；中途 cutover 仍用原路線（不改既有語意）。
 -- 只接「整條路線離車最近的就是起點」且 ≤ SNAP_MAX_M（0928a）：主 MOD 同目標、偏航 ≤12 格一律回快取
 -- 同一條線（NavRoute.lua ensureRoute），玩家開著導航走了一段再按自駕時，起點早在車後——0.13.1 正式服
@@ -3507,7 +3522,7 @@ end
 -- RETURN_MAX_DEV（≤ SNAP_MAX_M）時，同樣把「車位→最近點」接成剖面開頭、最近點之前的路線捨去，讓感知／繞行
 -- 沿這段實際要開的地面規劃。
 -- 回傳 (剖面用路線, 接線長)；不接時原樣回傳同一個 table（cutover 仍以原 route identity 比對）。
-function Drive.approachRoute(route, vx, vy)
+function Drive.approachRoute(route, vx, vy, heading)
     local pts = route.pts
     if type(pts) ~= "table" or #pts < 4 or not finite(vx) or not finite(vy) then return route, 0 end
     local best, bk, bt, bx1, by1 = nil, 1, 0, pts[1], pts[2]
@@ -3535,7 +3550,14 @@ function Drive.approachRoute(route, vx, vy)
     local behind = bk == 1 and bt == 0
         and ((vx - x1) * ux + (vy - y1) * uy) / sl <= -TUNE.APPROACH_BEHIND_M
     local far = best > TUNE.RETURN_MAX_DEV * TUNE.RETURN_MAX_DEV
-    if not behind and not far then return route, 0 end
+    local side = false
+    if not behind and not far and bk == 1 and bt == 0 and finite(heading)
+            and best >= TUNE.APPROACH_SIDE_MIN_M * TUNE.APPROACH_SIDE_MIN_M then
+        local fx, fy = math.cos(heading), math.sin(heading)
+        side = (fx * ux + fy * uy) / sl < math.cos(TUNE.RETURN_ENTER_MAX_RAD)
+            and ((x1 - vx) * fx + (y1 - vy) * fy) / sqrt(best) >= TUNE.APPROACH_SIDE_COS
+    end
+    if not behind and not far and not side then return route, 0 end
     -- 最近點落在第 seg 段（pts 索引 bk）；該段的起點若就是最近點（t=0）就從它開始，否則從最近點開始、接該段終點
     local seg = (bk + 1) / 2
     local np = { vx, vy, bx1, by1 }
@@ -3573,6 +3595,15 @@ function Drive.approachRoute(route, vx, vy)
     return out, gap
 end
 
+-- 車頭航向（rad，同 MDADFollower.headingFromForward）；冷路徑（起步、cutover 的越野接線判定）用 Vector3f.new，
+-- 不碰熱路徑的 thread-local 向量池（起步與重建幀不取池）。讀不到回 nil。
+function Drive.headingOf(vehicle)
+    local f = vehicle:getForwardVector(Vector3f.new())
+    local fx, fy = f:x(), f:z()
+    if not finite(fx) or not finite(fy) or fx * fx + fy * fy < 1e-6 then return nil end
+    return MDADFollower.headingFromForward(fx, fy)
+end
+
 -- 車位到路線折線的最近世界距離（公尺）。讓位恢復判「車還在不在路上」用（1008；距離閘在讓位中不跑）；
 -- 點列不足兩點回 0＝不判離路。
 function Drive.routeDist(route, x, y)
@@ -3593,9 +3624,9 @@ function Drive.routeDist(route, x, y)
 end
 
 -- 剖面實際建構的路線（起步與 cutover 共用）：先清地圖資料的微反折（MDADFollower.despikeRoute），
--- 拖車再改寫外拉轉角並清改寫撤點殘留的折返；不拖車時 approach＝true 才接越野接線。
+-- 拖車再改寫外拉轉角並清改寫撤點殘留的折返；不拖車時 approach＝true 才接越野接線（heading＝車頭航向，見 approachRoute）。
 -- 回 (剖面路線, 接線長)；despiked 記兩次清掉的點數（route ready 事件 detail）。
-function Drive.profileRouteOf(route, tow, vp, vx, vy, approach)
+function Drive.profileRouteOf(route, tow, vp, vx, vy, approach, heading)
     local clean = MDADFollower.despikeRoute(route)
     if tow then
         local shaped = MDADFollower.despikeRoute(MDADTrailer.shape(clean, tow, vp.halfW,
@@ -3603,7 +3634,7 @@ function Drive.profileRouteOf(route, tow, vp, vx, vy, approach)
         if (clean.despiked or 0) > 0 then shaped.despiked = (shaped.despiked or 0) + clean.despiked end
         return shaped, 0
     end
-    if approach then return Drive.approachRoute(clean, vx, vy) end
+    if approach then return Drive.approachRoute(clean, vx, vy, heading) end
     return clean, 0
 end
 
@@ -12209,7 +12240,7 @@ local function stepUnstick(s, vehicle, playerNum, now)
         -- 進入段一寸也沒多（E2E startpush c25 起手偏 36°：三次倒車 entry 恆 1.0 → 受困交還）。
         -- 下一次取路從現在的車位重接（同一條 cutover；路網起點在車後的一般情況由主 MOD 近線重算處理）。
         if s.approachM > 0 and not s.tow then
-            local _, am = Drive.approachRoute(s.route, vx, vy)
+            local _, am = Drive.approachRoute(s.route, vx, vy, Drive.headingOf(vehicle))
             if am > 0 then
                 s.reapproach = true
                 s.pendingRouteWhy = "approach"
@@ -14709,7 +14740,7 @@ local function onPlayerUpdate(player)
         end
         if route ~= s.route or versionChanged or s.reapproach then
             local profileRoute, approachM = Drive.profileRouteOf(route, s.tow, s.vehicleProfile,
-                vehicle:getX(), vehicle:getY(), s.reapproach)
+                vehicle:getX(), vehicle:getY(), s.reapproach, s.reapproach and Drive.headingOf(vehicle) or nil)
             s.reapproach = nil
             local profile = MDADFollower.begin(
                 profileRoute,
