@@ -1,6 +1,7 @@
 -- test_trailer.lua：MDAD_Trailer 純運動學契約（轉角外拉規劃、不可過判定、route 改寫、倒車回正方向）。
 -- 幾何取 rSemiTruck W900＋SemiTrailerContainer（腳本×1.43，E2E 掛點對齊實測）。
 local ROOT = "MOD/MinidoracatAutoDriveFor42/Contents/mods/MinidoracatAutoDriveFor42/42/media/lua/"
+dofile(ROOT .. "shared/MDAD_Dynamics.lua") -- shape 的虛擬路寬下限讀 ROAD_EDGE_MARGIN；⑧ 用路寬證明
 dofile(ROOT .. "client/MDAD_Trailer.lua")
 local T = MDADTrailer
 
@@ -292,6 +293,52 @@ getVehicleById = function() return nil end
 cur, alive, by, hd = T.lostState(tracL, gL)
 check(alive == false and by == nil and hd == nil, "(gone) 掛車已不存在：alive=false、不量距離")
 getVehicleById = nil
+
+-- ⑧ 1008 改寫段要過 Follower 路寬證明、圓弧要標出來（正式服 0.23.0：虛擬路寬下限 2·thw+0.4 每側只留 0.2，證明要 0.4＝
+--    改寫段 verifyLineReason 永遠 band→obb 帽 18；弧點照抄成 LINE＝Follower 看不到曲率、沒有前饋，切弦內切）。
+--    證明照 Driver buildSnapshotProof：每條弦（兩端同一 raw 段）以牽引車半寬 chordCoveredByBand。幾何同 ①、正式服 0.23.0
+--    片段 SemiTruckBox_mil（halfW 1.03、halfL 4.12）＋M101A3（tow attach L2 2.33、trailLen 7.67、hitchZ −4.39、halfW 0.98）。
+--    違規證明：下限改回 2·thw+0.4＝(band) 紅；push 不帶弧半徑＝(arc) 紅。
+local D = MDADDynamics
+for _, cc in ipairs({
+    { "12m→6m 直角＋W900 貨櫃", route, tow, G.thw, G.front },
+    { "8m 直角＋SemiTruckBox_mil", { pts = { 8644.0, 8388.5, 8644.034, 8400.0, 8644.5, 8562.0, 8449.0, 8562.0, 8400.0, 8562.0 },
+        segWidth = { 8, 8, 8, 8 }, segSurface = { "paved", "paved", "paved", "paved" } },
+        { L2 = 2.327, hitchToRear = 7.670 - 4.385, halfW = 0.98 }, 1.03, 4.12 * 2 },
+}) do
+    local sh = T.shape(cc[2], cc[3], cc[4], cc[5])
+    local bandBad, narrowN, arcN, arcTurn, badR = 0, 0, 0, 0, nil
+    local plan
+    for v = 2, #cc[2].pts / 2 - 1 do
+        local p = cc[2].pts
+        local cv = T.cornerOf(p[v * 2 - 3], p[v * 2 - 2], p[v * 2 - 1], p[v * 2], p[v * 2 + 1], p[v * 2 + 2],
+            cc[2].segWidth[v - 1], cc[2].segWidth[v])
+        plan = plan or (cv and T.planCorner(cv, { L2 = cc[3].L2, rear = cc[3].hitchToRear, hw = cc[3].halfW,
+            front = cc[5], thw = cc[4] }))
+    end
+    for i = 1, #sh.segWidth do
+        local x0, y0, x1, y1 = sh.pts[i * 2 - 1], sh.pts[i * 2], sh.pts[i * 2 + 1], sh.pts[i * 2 + 2]
+        if sh.segWidth[i] < 6 then
+            narrowN = narrowN + 1
+            if not D.chordCoveredByBand(sh.pts, sh.segWidth, i, i, cc[4], x0, y0, x1, y1) then bandBad = bandBad + 1 end
+        end
+        local r = sh.segArcR[i]
+        if r > 0 then
+            arcN = arcN + 1
+            if r ~= plan.R then badR = r end
+            if i > 1 and sh.segArcR[i - 1] > 0 then
+                local ha = math.atan2(sh.pts[i * 2] - sh.pts[i * 2 - 2], sh.pts[i * 2 - 1] - sh.pts[i * 2 - 3])
+                local hb = math.atan2(y1 - y0, x1 - x0)
+                arcTurn = arcTurn + math.abs(T.wrap(hb - ha))
+            end
+        end
+    end
+    check(narrowN > 0 and bandBad == 0, string.format("(band) %s：改寫段 %d 條弦過路寬證明（失敗 %d）", cc[1], narrowN, bandBad))
+    check(#sh.segArcR == #sh.segWidth and sh.towArcN == 1 and arcN > 0 and badR == nil
+        and math.abs(arcTurn - math.pi / 2) < math.rad(10),
+        string.format("(arc) %s：segArcR 對齊段數、弧 %d 段半徑＝規劃 R %s、弧內轉角 %.0f°", cc[1], arcN,
+            tostring(plan and plan.R), math.deg(arcTurn)))
+end
 
 print(string.format("test_trailer: %d 項斷言、%d 項失敗", asserts, fails))
 if fails > 0 then os.exit(1) end

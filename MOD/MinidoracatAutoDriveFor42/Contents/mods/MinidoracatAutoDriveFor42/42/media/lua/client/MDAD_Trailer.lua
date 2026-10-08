@@ -317,6 +317,7 @@ local function candidate(c, a, b, R, ramp, approach, exitLen)
         YS[n] = c.ny + c.dIn[2] * sCur + c.nIn[2] * (-s) * off
         sCur = sCur + step
     end
+    local arc0 = n + 1 -- 圓弧第一點的索引（shape 標記弧段給 Follower）
     local a0 = atan2(tay - cy, tax - cx)
     local sweep = c.turnAbs
     local m = floor(sweep * R / step)
@@ -326,6 +327,7 @@ local function candidate(c, a, b, R, ramp, approach, exitLen)
         n = n + 1
         XS[n], YS[n] = cx + R * cos(ang), cy + R * sin(ang)
     end
+    local arc1 = n
     -- 轉出：保持 b 直到掛車也進來（hold），再 ramp 回中線；exitLen 截斷
     local hold = b ~= 0 and T.EXIT_HOLD or 0
     local e = step
@@ -341,7 +343,7 @@ local function candidate(c, a, b, R, ramp, approach, exitLen)
         YS[n] = tby + c.dOut[2] * e + c.nOut[2] * (-s) * dOff
         e = e + step
     end
-    return n, sIn, sOut
+    return n, sIn, sOut, arc0, arc1
 end
 
 T._candidate = function(...) return candidate(...), XS, YS end
@@ -438,7 +440,9 @@ end
 
 -- ---------------------------------------------------------------- shape：整條路線
 -- 回新 route table（pts／segSurface／segWidth 同格式，給 MDADFollower.begin），加 towBlocked＝{x1,y1,x2,y2,...}、
--- towBlockedR＝{r1,r2,...}（每個不可過轉角的路口方塊半對角線＝兩臂半路寬的斜邊；Driver 改道避讓圈要蓋住整個轉角）。
+-- towBlockedR＝{r1,r2,...}（每個不可過轉角的路口方塊半對角線＝兩臂半路寬的斜邊；Driver 改道避讓圈要蓋住整個轉角）、
+-- segArcR＝每段的規劃圓弧半徑（0＝不是弧）：改寫線 0.5m 一點、遠超 Follower 圓角 source 容量，不標的話 Follower 只看到
+-- 逐點小折線——沒有弧段前饋、切線追蹤與弧上即時帽，純追跡切弦內切（正式服 0.23.0 拖車轉角 ld 0.5–1.55m）。
 -- 同一個原始 route table 快取（Driver 用原始 identity 比對 cutover）。
 local cacheA, cacheB = nil, nil -- 最近兩條（現行＋cutover 新線）；不用弱表
 
@@ -451,12 +455,12 @@ function T.shape(route, tow, tractorHalfW, tractorFront)
     local np = #pts / 2
     local g = { L2 = tow.L2, rear = tow.hitchToRear, hw = tow.halfW,
         front = tractorFront or 4, thw = tractorHalfW or 1.2 }
-    local out, ow, os, blocked, blockedR = {}, {}, {}, {}, {}
+    local out, ow, os, oa, blocked, blockedR, arcN = {}, {}, {}, {}, {}, {}, 0
     -- fold＝true（轉角規劃出來的點）：新點讓上一段反向（>90°；規劃點 0.5m 一點、圓弧 R≥4，正常每點
     -- 只轉幾度）就撤掉上一點再比。相鄰轉角段很短時，前一個轉角的轉出點已畫進本段、本轉角的外靠點又從
     -- 段中起算＝線往回折（0.13.1 正式服 StepVan＋掛車：90° 左轉接 13m 後 28° 彎，改寫線在 (10853,9976)
     -- 折返 176°，車頭到那裡 Follower 判原地調頭→TrailerRotate 交還）。原始路線節點（不可過的轉角）不做。
-    local function push(x, y, w, surf, fold)
+    local function push(x, y, w, surf, fold, arcR)
         local k = #out
         if k >= 2 and out[k - 1] == x and out[k] == y then return end
         while fold and k >= 4 do
@@ -464,10 +468,10 @@ function T.shape(route, tow, tractorHalfW, tractorFront)
             local vx, vy = x - out[k - 1], y - out[k]
             if ux * vx + uy * vy > 0 then break end
             out[k], out[k - 1] = nil, nil
-            ow[#ow], os[#os] = nil, nil
+            ow[#ow], os[#os], oa[#oa] = nil, nil, nil
             k = k - 2
         end
-        if k >= 2 then ow[#ow + 1], os[#os + 1] = w, surf end
+        if k >= 2 then ow[#ow + 1], os[#os + 1], oa[#oa + 1] = w, surf, arcR or 0 end
         out[k + 1], out[k + 2] = x, y
     end
     push(pts[1], pts[2], sw[1], ss[1])
@@ -479,13 +483,14 @@ function T.shape(route, tow, tractorHalfW, tractorFront)
         local c = T.cornerOf(px, py, nx, ny, qx, qy, wIn, wOut)
         local plan = c and T.planCorner(c, g) or nil
         if plan then
+            arcN = arcN + 1
             -- 車頭路線寫進 route：外靠段寬度縮成「以偏移線為中心的虛擬路寬」，
             -- 讓 Follower 的路寬證明對偏移線仍保守成立。
             -- 轉出段只能畫到下一個路線點之前（從切出點算起）：畫過頭再接下一點＝路線往回折，
             -- Follower 判成要原地調頭（E2E semi-hairpin-mp：轉過 143° 後在支路上被 TrailerRotate 交還）
             local exitRoom = c.lenOut - 1 - (plan.sOut > 0 and plan.sOut or 0)
             if exitRoom < 0 then exitRoom = 0 end
-            local n = candidate(c, plan.a, plan.b, plan.R, plan.ramp, plan.approach,
+            local n, _, _, arc0, arc1 = candidate(c, plan.a, plan.b, plan.R, plan.ramp, plan.approach,
                 plan.b ~= 0 and math.min(plan.exitLen, exitRoom) or 0)
             -- 只取節點前後各自實際段長內的點，不越過前一個／下一個路線點。不外靠（a＝0）的進入段就是原中心線，
             -- 只留到臂長一半：前一個轉角的圓弧可能畫到這一臂的 SEG_SHARE，進入點從更前面起算＝撤點後弧被截成
@@ -496,12 +501,16 @@ function T.shape(route, tow, tractorHalfW, tractorFront)
                 if back > -c.lenIn * 0.5 then back = -c.lenIn * 0.5 end
                 if back < -c.lenIn * 0.9 then back = -c.lenIn * 0.9 end
             end
+            -- 虛擬路寬下限＝Follower 路寬證明（MDADDynamics.rawBandContains：每側 halfW＋ROAD_EDGE_MARGIN）剛好過、再留
+            -- 每側 0.05：改寫線本身已由 simulate 驗過（掛點兩側在路面、車頭與掛車出路 ≤INTRUSION_MAX），證明只需認它。
+            -- 舊下限每側只留 0.2＝改寫段證明永遠不過，彎速一律落到 obb 近場帽 18 km/h（正式服 1,290 筆 sw＝2·halfW＋0.4）。
+            local minW = 2 * (g.thw + MDADDynamics.ROAD_EDGE_MARGIN) + 0.1
+            local prevK = nil
             for k = 1, n do
                 local x, y = XS[k], YS[k]
                 local along = (x - nx) * c.dIn[1] + (y - ny) * c.dIn[2]
                 local ahead = (x - nx) * c.dOut[1] + (y - ny) * c.dOut[2]
                 if along > back and ahead < c.lenOut - 1 then
-                    local minW = 2 * g.thw + 0.4
                     local vw = minW
                     if along < plan.sIn then
                         local off = abs((x - nx) * c.nIn[1] + (y - ny) * c.nIn[2])
@@ -509,7 +518,9 @@ function T.shape(route, tow, tractorHalfW, tractorFront)
                         if vw < minW then vw = minW end
                     end
                     if vw < 1 then vw = 1 end
-                    push(x, y, vw, ss[i - 1], true)
+                    -- 弧段＝前後兩點都是這個轉角的圓弧點（弧第一點之前那段是外靠直線）
+                    push(x, y, vw, ss[i - 1], true, (prevK == k - 1 and k > arc0 and k <= arc1) and plan.R or 0)
+                    prevK = k
                 end
             end
         else
@@ -522,10 +533,10 @@ function T.shape(route, tow, tractorHalfW, tractorFront)
     end
     push(pts[np * 2 - 1], pts[np * 2], sw[np - 1], ss[np - 1])
     -- 最後一段寬度／路面補齊（push 以「前一段」屬性記，最後一點需要 np-1 段）
-    while #ow < #out / 2 - 1 do ow[#ow + 1], os[#os + 1] = sw[np - 1], ss[np - 1] end
+    while #ow < #out / 2 - 1 do ow[#ow + 1], os[#os + 1], oa[#oa + 1] = sw[np - 1], ss[np - 1], 0 end
     local shaped = {}
     for k, v in pairs(route) do shaped[k] = v end
-    shaped.pts, shaped.segWidth, shaped.segSurface = out, ow, os
+    shaped.pts, shaped.segWidth, shaped.segSurface, shaped.segArcR, shaped.towArcN = out, ow, os, oa, arcN
     shaped.towBlocked, shaped.towBlockedR = blocked, blockedR
     shaped.towSource = route
     cacheB, cacheA = cacheA, { route = route, tow = tow, shaped = shaped }

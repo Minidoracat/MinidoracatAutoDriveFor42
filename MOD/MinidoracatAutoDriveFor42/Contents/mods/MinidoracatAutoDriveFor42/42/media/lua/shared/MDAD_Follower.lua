@@ -399,10 +399,13 @@ local function buildLaneRoom(p)
         local b = w * 0.5 - halfW - margin
         return b > 0 and b or 0
     end
+    -- 拖車改寫弧（towArcR）照逐段自己的虛擬路寬：弧內側的掛車內輪差規劃只認改寫線本身，不得因標成 SEG_ARC 就從
+    -- 鄰段原路寬借出內側餘裕（殭屍軟縫、停留 lane 直接讀這張表）
+    local towArc = p.towArcR
     local i = 1
     while i <= n - 1 do
         local i1 = i
-        if kind[i] == MDADDynamics.SEG_ARC then
+        if kind[i] == MDADDynamics.SEG_ARC and not (towArc and towArc[i]) then
             while i1 + 1 <= n - 1 and kind[i1 + 1] == MDADDynamics.SEG_ARC do i1 = i1 + 1 end
         end
         local r = radius[i]
@@ -858,15 +861,17 @@ function MDADFollower.despikeRoute(route)
         return j, lat
     end
     local n = #pts / 2
-    local sw, ss = route.segWidth, route.segSurface
+    local sw, ss, sa = route.segWidth, route.segSurface, route.segArcR
     if type(sw) ~= "table" then sw = nil end
     if type(ss) ~= "table" then ss = nil end
+    -- segArcR（拖車改寫弧的規劃半徑，Trailer.shape）：原段照抄，合併／收直出來的新段不是弧（0）
+    if type(sa) ~= "table" then sa = nil end
     local found = false
     for i = 2, n - 1 do
         if spikeAt(pts, i) or jogAt(pts, n, i, sw) then found = true break end
     end
     if not found then return route end
-    local P, W, S = {}, sw and {} or nil, ss and {} or nil
+    local P, W, S, A = {}, sw and {} or nil, ss and {} or nil, sa and {} or nil
     local np, removed = 0, 0
     for i = 1, n do
         np = np + 1
@@ -874,6 +879,7 @@ function MDADFollower.despikeRoute(route)
         if np >= 2 then
             if W then W[np - 1] = sw[i - 1] end
             if S then S[np - 1] = ss[i - 1] end
+            if A then A[np - 1] = sa[i - 1] end
         end
         -- 新點進來後回頭看上一個頂點；刪掉後新的上一個頂點可能又成反折（連續鋸齒）
         while np >= 3 do
@@ -883,6 +889,7 @@ function MDADFollower.despikeRoute(route)
                 if W then W[np - 2] = W[np - 1] end
                 if S then S[np - 2] = S[np - 1] end
             end
+            if A then A[np - 2] = 0 end -- 合併段不是弧（A[np-1] 由下一點覆寫、第二趟重建）
             P[np * 2 - 3], P[np * 2 - 2] = P[np * 2 - 1], P[np * 2]
             P[np * 2 - 1], P[np * 2] = nil, nil
             if W then W[np - 1] = nil end
@@ -895,13 +902,14 @@ function MDADFollower.despikeRoute(route)
     -- 加錨點，斜線只在錨點與中點之間（折角 ≤7°），這兩段的段寬扣掉 lat（1002t：斜線在中點離兩臂中心 lat/2，照原寬
     -- 靠右＝車心貼到臂的路緣；8m 路 4m 錯位、靠右 2m 時車身出路緣約 0.9m）。扣過的寬度 ≥ JOG_CLEAR_M（jogAt 的
     -- 路寬閘），斜線兩側各 (w−lat)/2 的帶仍在兩臂的真路面內；錨點外的臂照原線原寬，靠右照舊。
-    local Q, QW, QS, nq = {}, W and {} or nil, S and {} or nil, 0
-    local function push(x, y, w, s) -- w／s＝從上一點到這點那段的屬性
+    local Q, QW, QS, QA, nq = {}, W and {} or nil, S and {} or nil, A and {} or nil, 0
+    local function push(x, y, w, s, a) -- w／s／a＝從上一點到這點那段的屬性
         nq = nq + 1
         Q[nq * 2 - 1], Q[nq * 2] = x, y
         if nq >= 2 then
             if QW then QW[nq - 1] = w end
             if QS then QS[nq - 1] = s end
+            if QA then QA[nq - 1] = a or 0 end
         end
     end
     push(P[1], P[2])
@@ -917,7 +925,7 @@ function MDADFollower.despikeRoute(route)
             local arm = JOG_ARM_RATIO * lat
             local ax, ay = ix - P[i * 2 - 3], iy - P[i * 2 - 2]
             local la = sqrt(ax * ax + ay * ay)
-            if la > arm + 0.5 then push(ix - ax / la * arm, iy - ay / la * arm, wIn, sIn) end
+            if la > arm + 0.5 then push(ix - ax / la * arm, iy - ay / la * arm, wIn, sIn, A and A[i - 1]) end
             push((ix + jx) * 0.5, (iy + jy) * 0.5, wIn and wIn - lat, sIn)
             local bx, by = P[j * 2 + 1] - jx, P[j * 2 + 2] - jy
             local lb = sqrt(bx * bx + by * by)
@@ -929,18 +937,19 @@ function MDADFollower.despikeRoute(route)
             removed = removed + (j - i)
             i = j + 1
         else
-            local w = W and W[i - 1]
-            if narrowNext then w, narrowNext = narrowW, false end
-            push(P[i * 2 - 1], P[i * 2], w, S and S[i - 1])
+            local w, a = W and W[i - 1], A and A[i - 1]
+            if narrowNext then w, a, narrowNext = narrowW, 0, false end
+            push(P[i * 2 - 1], P[i * 2], w, S and S[i - 1], a)
             i = i + 1
         end
     end
-    P, W, S = Q, QW, QS
+    P, W, S, A = Q, QW, QS, QA
     local out = {}
     for k, v in pairs(route) do out[k] = v end
     out.pts, out.despiked = P, removed
     if W then out.segWidth = W end
     if S then out.segSurface = S end
+    if A then out.segArcR = A end
     return out
 end
 
@@ -1035,10 +1044,22 @@ function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile, style)
                 buildPts, buildSurface, buildWidth, vehicleProfile.halfW, vehicleProfile.rMin,
                 pathPts, segSurface, segWidth, segKind, segSourceA, segSourceB, filletRadius)
     end
+    -- 拖車改寫弧（Trailer.shape 的 segArcR，raw 段索引）：改寫線遠超圓角 source 容量，弧點照抄成 LINE＝Follower 看不到曲率、
+    -- 沒有弧段前饋／切線追蹤／弧上即時帽，純追跡切弦內切（正式服 0.23.0 拖車轉角 ld 0.5–1.55m、curveKappa 恆 0）。
+    -- 照抄的段 source 兩端同一 raw 段：標回 SEG_ARC、半徑＝規劃半徑。towArcR（剖面段索引→R，稀疏）只給 telemetry 分辨。
+    local arcR, towArcR = route.segArcR, nil
+    if type(arcR) ~= "table" then arcR = nil end
     if n >= 2 then
         for i = 1, n - 1 do
             segSourceA[i] = rawSourceMap[segSourceA[i]] or segSourceA[i]
             segSourceB[i] = rawSourceMap[segSourceB[i]] or segSourceB[i]
+            local r = arcR and segKind[i] == MDADDynamics.SEG_LINE and segSourceA[i] == segSourceB[i]
+                and arcR[segSourceA[i]]
+            if isFinite(r) and r > 0 then
+                segKind[i], filletRadius[i] = MDADDynamics.SEG_ARC, r
+                towArcR = towArcR or {}
+                towArcR[i] = r
+            end
         end
     end
     if n < 2 then
@@ -1097,6 +1118,7 @@ function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile, style)
         segSourceA = segSourceA,
         segSourceB = segSourceB,
         filletRadius = filletRadius,
+        towArcR = towArcR, -- 拖車改寫弧（剖面段索引→規劃半徑；沒拖或沒改寫＝nil）
         segAccel = segAccel,
         segBrake = segBrake,
         segLat = segLat,

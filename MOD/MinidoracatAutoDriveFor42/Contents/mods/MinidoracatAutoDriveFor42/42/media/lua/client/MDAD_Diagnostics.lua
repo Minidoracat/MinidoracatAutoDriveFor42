@@ -130,6 +130,8 @@ local EK = {
     "dir", "acc",
     -- lag arm（1006m）：實測落後的收斂率 λ（每公尺；0＝沒在收斂，缺＝歷史不夠、只用理論衰減）
     "rate",
+    -- route ready（1008）：剖面路線上拖車外拉改寫的轉角數（Trailer.shape；弧段在樣本 tar）
+    "towArcN",
 }
 
 local function logOnce(msg)
@@ -1266,6 +1268,7 @@ local function encodePhys(phys)
     addNum("towUp", "tup")            -- 拖掛 upVectorDot（<0.8 原版拆掛）
     addNum("towDecel", "tda")         -- 施給掛車的減速度（m/s²；0929o 拖車減速分攤）
     addStr("towBrake", "tbw")          -- 拖車不鎖輪硬煞的理由（0929p Drive.hardBrake；空＝本幀沒走）
+    addNum("towArcR", "tar")          -- 1008：車所在段是拖車改寫弧＝規劃半徑（m；Trailer.shape segArcR；不是弧＝省略）
     addNum("curveVerifiedUntilS", "curveVerifiedUntilS")
     addNum("filletN", "filletN")
     addNum("filletFallbackN", "filletFallbackN")
