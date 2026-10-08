@@ -461,6 +461,18 @@ check(string.find(lastSum, '"impact":1', 1, true) ~= nil, "summary: one impact, 
 check(string.find(lastSum, '"target":"8946.8,11645"', 1, true) ~= nil, "summary keeps the destination")
 check(string.find(lastSum, '"h0":1.25', 1, true) ~= nil, "summary keeps the starting heading")
 
+-- 1009：第一筆取樣前就交還（起步第一幀判堵交還之類）的趟，摘要起點／終點＝起步車位，不是 0。
+-- 違規證明：D.start 不預填車位＝這條紅。
+scenario("1009: a drive stopped before its first sample keeps the start position in the summary")
+nowMs = math.floor((nowMs + 3600000) / 200) * 200
+D.start(0, { getX = function() return 8946.5 end, getY = function() return 11645.25 end }, profile)
+D.stop(0, "UI_MinidoracatAutoDrive_StopStuck")
+pump(10000)
+sumAll = files[ROOT .. "summary-1.log"] or ""
+for line in string.gmatch(sumAll, "[^\n]+") do lastSum = line end
+check(string.find(lastSum, '"x0":8946.5,"y0":11645.25,"x1":8946.5,"y1":11645.25', 1, true) ~= nil,
+    "summary start/end = the car position, not 0 (" .. string.sub(lastSum, 1, 240) .. ")")
+
 -- 2026-10-01：正式服 225 段有 11 段只收到前幾塊（檔長是 10000 的整數倍、index 沒有這一列），其中 8 段同趟
 -- 摘要照樣收到＝客戶端送完了。網路重送／伺服器卡頓讓間隔 500ms 送出的塊同一刻到齊，舊的固定 250ms 節流
 -- 丟掉後一塊，伺服器依序號放棄整段。違規證明：MDAD_Server 的 UPLOAD_BURST 改 1（＝固定間隔）即紅。

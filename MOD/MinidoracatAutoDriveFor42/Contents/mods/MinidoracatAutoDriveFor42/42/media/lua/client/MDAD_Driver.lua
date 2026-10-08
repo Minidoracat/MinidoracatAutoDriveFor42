@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1009e"
+Drive.REV = "1009f"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -1412,11 +1412,14 @@ end
 -- 油門／煞車沒有等價觀測（Kahlua 讀不到 clientControls 的 Java instance field，
 -- 且 isGasPedalPressed 在 regulator 供油時本來就是 true，拿來判人為輸入會永遠成立），
 -- 所以改看鍵位（CarController.java:938-942 用的就是這幾個綁定名）。
+-- 回傳哪個輸入（steer＝類比轉向、steer-key、brake、forward、backward；1009 進 takeover 事件 `key`），沒有＝false。
 local function manualInput(vehicle)
     local steering = vehicle:getCurrentSteering()
-    if steering > STEER_INPUT_EPS or steering < -STEER_INPUT_EPS then return true end
-    if isKeyDown("Left") or isKeyDown("Right") then return true end
-    if isKeyDown("Forward") or isKeyDown("Backward") or isKeyDown("Brake") then return true end
+    if steering > STEER_INPUT_EPS or steering < -STEER_INPUT_EPS then return "steer" end
+    if isKeyDown("Left") or isKeyDown("Right") then return "steer-key" end
+    if isKeyDown("Brake") then return "brake" end
+    if isKeyDown("Forward") then return "forward" end
+    if isKeyDown("Backward") then return "backward" end
     return false
 end
 
@@ -2006,6 +2009,14 @@ function Drive.stop(playerNum, reasonKey, voiceEvent, diagWhy)
     voice(voiceEvent or (reasonKey == KEY_STUCK and "handback" or "stop"), playerNum,
         reasonKey == KEY_STUCK and "pauseOnStuck" or nil)
     return true
+end
+
+-- 玩家介入即交還（「手動介入後」＝0 的預設、到站煞停途中）：先記是哪個輸入（1009，takeover manual `key`；
+-- 有自動恢復時走讓位、記 takeover yield），再照舊綠字＋manual 語音停止。
+function Drive.manualStop(s, playerNum, player, key)
+    diagEvent(s, playerNum, "takeover", { phase = "manual", key = key })
+    haloGood(player, "UI_MinidoracatAutoDrive_ManualStop")
+    Drive.stop(playerNum, nil, "manual")
 end
 
 -- 把建好的 session 正式接上：**第一次碰玩家的車就在這裡**（先把 regulator 關掉一次；
@@ -14504,9 +14515,9 @@ local function onPlayerUpdate(player)
     if s.mode == "arrive" then
         -- 煞停途中玩家自己接手就立刻交還（已送出的 forceBrake 最多殘留 1 秒後自行失效，
         -- CarController.java:973-979）——不然玩家會覺得車子在跟他搶煞車
-        if manualInput(vehicle) then
-            haloGood(player, "UI_MinidoracatAutoDrive_ManualStop")
-            Drive.stop(playerNum, nil, "manual")
+        s.manualKey = manualInput(vehicle)
+        if s.manualKey then
+            Drive.manualStop(s, playerNum, player, s.manualKey)
             return
         end
         vehicle:setRegulator(false)
@@ -15051,18 +15062,18 @@ local function onPlayerUpdate(player)
     -- 「手動介入後」選項（2026-09-06 使用者裁定預設不自動恢復）：0＝介入即關閉 session、
     -- 放手不會自己接手（回饋「不知道放開會變回自動駕駛、突然回頭被嚇到」）；>0＝待命，
     -- 放手連續這麼久才恢復。值在進入 yield 那幀讀一次，之後改選項不追溯。
-    if manualInput(vehicle) then
+    s.manualKey = manualInput(vehicle)
+    if s.manualKey then
         if s.mode ~= "yield" then
             local resumeMs = manualResumeMs()
             if resumeMs <= 0 then
-                haloGood(player, "UI_MinidoracatAutoDrive_ManualStop")
-                Drive.stop(playerNum, nil, "manual")
+                Drive.manualStop(s, playerNum, player, s.manualKey)
                 return
             end
             s.mode = "yield"
             s.yieldResumeMs = resumeMs
             s.yieldSinceMs = now
-            diagEvent(s, playerNum, "takeover", { phase = "yield" })
+            diagEvent(s, playerNum, "takeover", { phase = "yield", key = s.manualKey })
             -- 玩家接手＝舊診斷作廢（舊制由 mode 被覆寫成 "yield" 自然丟掉
             -- recover 閂鎖；旗標化後必須顯式丟，否則恢復後立刻倒車）。
             s.recoverWhy, s.recoverPulse = nil, false

@@ -27327,6 +27327,8 @@ end
 --             lat／fi，首輪感知前後都沒有 visibility 鎖輪（正式服 0.23.0 GTR (10594,10134) 98.7 km/h）；(yproj-back) 車被開回後方 160m 同樣
 --             在車位。違規證明：恢復不標 needsProjection＝紅；Follower 重新定位仍套單幀倒退上限＝(yproj-back) 紅。
 --   (ut-done) 調頭結束記 uturn done（aligned，帶首探結果與耗時；kind＝行為檔）。違規證明：拿掉 aligned 出口的事件＝紅。
+--   (take-key) 1009：讓位（takeover yield，(yproj) 方向盤＝steer）與介入即停止（takeover manual，煞車鍵＝brake）都記是哪個輸入。
+--             違規證明：manualInput 一律回 true＝兩處 key 紅。
 -- =====================================================================
 function drive.scenario1008()
     scenario("1008：前貼後堵不洪水、建表不計停等、倒車逾時 softFail、讓位不跑距離閘、恢復重新投影")
@@ -27587,6 +27589,8 @@ function drive.scenario1008()
         dveh._steering = 0.02
         driveTick(dp, dveh)
         checkEq(s.mode, "yield", label .. " 讓位")
+        local ye = last("takeover", "yield")
+        checkEq(ye and ye.key, "steer", label .. " takeover yield 記輸入 key=steer")
         -- 玩家沿路開走；舊處 chunk 卸載、只剩車附近載入
         nowMs = nowMs + 30000
         dveh._x, dveh._y, dveh._speed = toX, lane, 60
@@ -27643,6 +27647,16 @@ function drive.scenario1008()
             and type(ud.ms) == "number" and ud.ms >= 700 and ud.kind ~= nil and ud.kind == utKind,
         "(ut-done) 對正收尾記 uturn done why=aligned（probe " .. tostring(ud and ud.probe) .. "、ms " .. tostring(ud and ud.ms)
         .. "、kind " .. tostring(ud and ud.kind) .. "）")
+
+    -- (take-key) 介入即停止（手動介入後＝0）也記輸入：踩煞車鍵
+    checkTrue(armDrive(), "(take-key) 啟動")
+    from = #events + 1
+    drive.keys.Brake = true
+    driveTick(dp, dveh)
+    drive.keys.Brake = nil
+    local tk = last("takeover", "manual", from)
+    checkTrue(not MDAD.Drive.isActive(0) and tk ~= nil and tk.key == "brake",
+        "(take-key) 介入即停止記 takeover manual key=brake（" .. tostring(tk and tk.key) .. "）")
 
     MDAD.Drive.stop(0, nil)
     MDAD.HUD, MinidoracatMiniMapAPI, SandboxVars = oldHud, oldApi, oldSand

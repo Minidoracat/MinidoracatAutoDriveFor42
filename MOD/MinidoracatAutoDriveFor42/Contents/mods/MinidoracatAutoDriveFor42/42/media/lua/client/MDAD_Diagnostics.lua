@@ -145,6 +145,8 @@ local EK = {
     "lat", "fi", "mode",
     -- zombie plan（1008）：車身橫向（lat，同上）、最近威脅 l、車身／舊 laneBias 速率可及量、近威脅限側基準、新可行性模型拒縫（reach／side）
     "tl", "rb", "rl", "ns", "rej",
+    -- takeover yield／manual（1009）：玩家用了哪個輸入（steer／steer-key／brake／forward／backward，Driver manualInput）
+    "key",
 }
 
 local function logOnce(msg)
@@ -1800,7 +1802,12 @@ function D.start(pn, vehicle, profile)
         local okH, header = pcall(encodeHeader, 0, now, 0, profile, now, 1, nil, pn)
         if okH then
             local okB, u = pcall(MDADUpload.begin, pn, now, header, profile)
-            if okB and type(u) == "table" then uploads[pn] = u end
+            if okB and type(u) == "table" then
+                uploads[pn] = u
+                -- 起點先記車位（1009）：第一筆取樣前就交還的趟，摘要 x0／y0／x1／y1 原本寫成 0
+                local okP, x, y = pcall(function() return vehicle:getX(), vehicle:getY() end)
+                if okP and finite(x) and finite(y) then u.x0, u.y0, u.lastX, u.lastY = x, y, x, y end
+            end
         end
     end
     return fileOk or uploads[pn] ~= nil
