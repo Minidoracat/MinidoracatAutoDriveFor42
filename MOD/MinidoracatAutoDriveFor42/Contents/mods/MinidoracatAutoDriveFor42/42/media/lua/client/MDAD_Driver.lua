@@ -6761,6 +6761,7 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     if finite(s.visAssistDecel) and s.visAssistDecel > 0 then phys.visAssistWhy = s.visAssistWhy end
     if s.tow then
         phys.towPhi, phys.towUp, phys.towDecel, phys.towBrake = s.towPhi, s.towUp, s.towAssistDecel, s.towBrakeWhy
+        phys.towLon, phys.towLat, phys.towKmh, phys.towHd = MDADTrailer.sampleState(vehicle, s.tow, fx, fy) -- 1008
     end
     phys.curveVerifiedUntilS = s.curveVerifiedUntilS
     phys.filletN = s.profile.filletN

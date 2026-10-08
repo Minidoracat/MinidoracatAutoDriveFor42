@@ -293,5 +293,18 @@ cur, alive, by, hd = T.lostState(tracL, gL)
 check(alive == false and by == nil and hd == nil, "(gone) 掛車已不存在：alive=false、不量距離")
 getVehicleById = nil
 
+-- ⑧ 1008 拖車樣本（T.sampleState；collectPhys 每筆取樣讀一次，telemetry tlo／tla／tkm／thd）：掛車相對牽引車的縱向（車頭正）
+--    ／橫向（右正，同 nb；朝 +x 時世界 +y＝右）、掛車 km/h、兩掛點距離；掛點讀不到只少 hd。
+--    違規證明：橫向符號反了＝(lat) 紅；hd 不用記下的掛車掛點名＝(thd) 紅；位置與 hd 共用一個 pcall＝(hd-fail) 紅。
+tracL.getVehicleTowing = function() return trL end
+trL.getX = function() return -8 end
+trL.getY = function() return 1.5 end
+local lon, lat, skmh, shd = T.sampleState(tracL, gL, 1, 0)
+check(near(lon, -8) and near(lat, 1.5), "(lat) 掛車在牽引車後 8m、右側 1.5m（got " .. tostring(lon) .. "," .. tostring(lat) .. "）")
+check(near(skmh, 37.5) and near(shd, 3), "(thd) 掛車 km/h 與兩掛點距離（got " .. tostring(skmh) .. "," .. tostring(shd) .. "）")
+trL.getTowedByWorldPos = function() error("hitch") end
+lon, lat, skmh, shd = T.sampleState(tracL, gL, 1, 0)
+check(near(lon, -8) and near(skmh, 37.5) and shd == nil, "(hd-fail) 掛點讀不到只少 hd")
+
 print(string.format("test_trailer: %d 項斷言、%d 項失敗", asserts, fails))
 if fails > 0 then os.exit(1) end
