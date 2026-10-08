@@ -10,6 +10,8 @@
 [*] 必裝主 MOD：[url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763913359]Minidoracat MiniMap for B42[/url]
 [*] 必裝 UI 框架：[url=https://steamcommunity.com/sharedfiles/filedetails/?id=3789836701]Minidoracat UI Library for B42[/url]
 [*] 不相容：Navigator（兩者都用車輛儀表上方區域）
+[*] [b]中途加入／移除：[/b]都可以；移除後 GPS、自駕模組與車上裝好的裝置會消失
+[*] [b]介面語言：[/b]繁體中文、简体中文、English、日本語
 [/list]
 系列 MOD 請都更新到最新版，更新後重新啟動遊戲。
 

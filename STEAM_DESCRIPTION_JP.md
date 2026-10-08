@@ -10,6 +10,8 @@ GPSナビゲーターで道路のルートを計画すると、オートパイ�
 [*] 必須：[url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763913359]Minidoracat MiniMap for B42[/url]
 [*] 必須UIフレームワーク：[url=https://steamcommunity.com/sharedfiles/filedetails/?id=3789836701]Minidoracat UI Library for B42[/url]
 [*] Navigatorとは併用できません（どちらも車両ダッシュボード上部を使用します）
+[*] [b]途中追加・削除：[/b]どちらも可能。削除すると GPS・自動運転モジュールと車に取り付けた装置は消えます
+[*] [b]対応言語：[/b]繁體中文、简体中文、English、日本語
 [/list]
 シリーズの MOD はすべて最新版に更新し、更新後はゲームを再起動してください。
 
