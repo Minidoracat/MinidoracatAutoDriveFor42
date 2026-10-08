@@ -4839,6 +4839,119 @@ do
     checkTrue(out3 < 0.75, string.format("(3) F350 擬合 plant 66 km/h 從右弧前起跑：出彎外偏 %.2fm < 0.75（修前 0.83）", out3))
 end
 
+scenario("1008：出弧殘餘轉角遇反向轉角——車前反向折角或車已反向轉就收，同向角照補（正式服 0.23.0 ATAMustangClassic Z 字錯位）")
+do
+    -- 正式服 0.23.0 片段（ATAMustangClassic (10760.5,10050.5)，同一 Z 字錯位兩趟）：左弧出口 2m 後接 +90° fallback 折點（ff 0），
+    -- 殘餘轉角只在 ff 反號時收，車右轉時 lag 的 yaw 項反而變大，sff 頂在 −0.80 推到停車，外漂 0.8–1.0m、13／11 km/h 碰外角。
+    -- (1)–(7) 直接問 arcExitResidual（手作剖面：段 2 是出口段 s 10–20、朝 0；之後的段朝 h3；出口後 2m、車頭落後 0.1 rad、
+    --   ph nil 不更新 yaw 低通）。(8) 閉環重播該案：路線＝route cutover src、路寬照 srcW、lookScale 1.33，車速照片段 rs→spd，
+    --   plant 同「1006：出弧殘餘轉角」0008 擬合（門檻型 G、τ 0.1），重建出的剖面與片段同構（fallback 折點 s 204.57＝片段 kxs）。
+    -- 違規證明：只留 ff 反號收法（舊制）＝(2)(5)(6)(8) 紅（閉環外漂 1.58、反向前饋 0.80）；同向角也算＝(3) 紅；不限距離＝(4) 紅。
+    local function prof(segH, s)
+        return { n = #s, s = s, segH = segH }
+    end
+    local function res(p, opts)
+        opts = opts or {}
+        local st = { exitEndS = 10, exitH = 0, exitTurn = 1, yawRateF = opts.w or 0, yawGain = 0.6 }
+        local add = F.arcExitResidual(st, -0.1, nil, 0.01, 12, opts.ff or 0, p, 2)
+        return add, st.exitEndS, st.exitCut
+    end
+    local S = { 0, 10, 20, 30, 40, 50 }
+    local add, keep, cut = res(prof({ 0, 0, 0, 0, 0 }, S))
+    checkTrue(add > 0.5 and keep == 10 and cut == nil,
+        string.format("(1) 前方直路：照補 %.2f（出口還在）", add))
+    add, keep, cut = res(prof({ 0, 0, -math.pi / 2, -math.pi / 2, -math.pi / 2 }, S))
+    checkTrue(add == 0 and keep == nil and cut == "kink",
+        string.format("(2) 車前 8m 反向 90° 折點：收掉 %.2f、exitCut=%s", add, tostring(cut)))
+    add, keep, cut = res(prof({ 0, 0, math.pi / 2, math.pi / 2, math.pi / 2 }, S))
+    checkTrue(add > 0.5 and keep == 10 and cut == nil,
+        string.format("(3) 車前 8m 同向 90° 折點：照補 %.2f（同向角不受影響）", add))
+    add, keep, cut = res(prof({ 0, 0, 0, -math.pi / 2, -math.pi / 2 }, S))
+    checkTrue(add > 0.5 and keep == 10,
+        string.format("(4) 反向折點在車前 18m（> exitRevM）：照補 %.2f", add))
+    add, keep, cut = res(prof({ 0, 0, -0.04, -0.08, -0.12 }, { 0, 10, 13, 16, 19, 22 }))
+    checkTrue(add == 0 and cut == "kink",
+        string.format("(5) 反向弧 chord 累計 0.12 rad（每個 0.04）：收掉 %.2f、exitCut=%s", add, tostring(cut)))
+    add, keep, cut = res(prof({ 0, 0, 0, 0, 0 }, S), { w = -0.3 })
+    checkTrue(add == 0 and cut == "yaw",
+        string.format("(6) 車已往反向轉（yaw −0.3 rad/s）：收掉 %.2f、exitCut=%s", add, tostring(cut)))
+    add, keep, cut = res(prof({ 0, 0, -0.05, -0.05, -0.05 }, S))
+    checkTrue(add > 0.5 and cut == nil, string.format("(7) 反向 0.05 rad 小折（< exitRevRad）：照補 %.2f", add))
+    -- (8) 閉環重播
+    local D = MDADDynamics
+    local VP = { valid = true, geometryValid = true, halfW = 0.81, halfL = 2.06, rMin = 2.73, wheelbase = 2.395,
+        delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 120 }
+    local route = { pts = { 10592, 10089.1005859375, 10592, 10097, 10641, 10097, 10641, 10068.5, 10749.017116989673,
+        10070.282005941435, 10756, 10056.5, 10756, 10053, 10773.5, 10053, 10800, 10053, 10838, 10053 },
+        segWidth = { 14, 6, 6, 5, 8, 8, 4, 4, 4 }, segSurface = { "paved", "paved", "paved", "paved", "paved", "paved",
+            "paved", "paved", "paved" } }
+    local SPD = { 176, 42.8, 180, 33.4, 186, 33.9, 196, 35.1, 198, 29.9, 200, 26.9, 202, 18.6, 203, 15.6, 207, 13, 230, 25 }
+    local function spdAt(s)
+        if s <= SPD[1] then return SPD[2] end
+        for i = 3, #SPD - 1, 2 do
+            if s <= SPD[i] then return SPD[i - 1] + (SPD[i + 1] - SPD[i - 1]) * (s - SPD[i - 2]) / (SPD[i] - SPD[i - 2]) end
+        end
+        return SPD[#SPD]
+    end
+    local pl = { g1 = 0.3, g2 = 1.2, tau = 0.1, yg = 0.54 }
+    local p = F.begin(route, VP.maxSpeed, 4, VP)
+    while not p.ready do F.stepBuild(p, 4096) end
+    p.lookScale = 1.33
+    local kinkS = nil
+    for i = 2, p.n - 1 do
+        if p.s[i] > 200 and p.s[i] < 210 and p.segKind[i] ~= D.SEG_ARC and p.segH[i] - p.segH[i - 1] > 1.5 then kinkS = p.s[i] end
+    end
+    local st = F.newState()
+    F.setLaneBias(st, 0.69)
+    F.setRuntimeLimits(st, 3, 6, 7, 1.2)
+    st.yawGain, st.yawGainFb, st.fbSteerF, st.fbYawF = pl.yg, pl.yg, 0.5, pl.yg * 0.5
+    local dt, LR = 1 / 100, 0.75
+    local s0, i0 = 160, 1
+    while p.s[i0 + 1] <= s0 do i0 = i0 + 1 end
+    local h, w = p.segH[i0], 0
+    local f0 = (s0 - p.s[i0]) / (p.s[i0 + 1] - p.s[i0])
+    local l0 = F.laneBiasAt(p, 0.69, i0, s0)
+    local q = { x = p.x[i0] + (p.x[i0 + 1] - p.x[i0]) * f0 - math.sin(h) * l0 - math.cos(h) * LR,
+        y = p.y[i0] + (p.y[i0 + 1] - p.y[i0]) * f0 + math.cos(h) * l0 - math.sin(h) * LR }
+    local prevLat, out, opp, cuts = nil, 0, 0, nil
+    for _ = 1, 4000 do
+        local v = spdAt(st.projS or s0)
+        local steer, _, rem, reached, _, _, latSigned = F.control(p, st, q.x + math.cos(h) * LR,
+            q.y + math.sin(h) * LR, h, v, dt)
+        local sNow = p.length - rem
+        local latDev = latSigned - F.laneBiasAt(p, 0.69, st.idx, sNow)
+        local dLat = prevLat and (latDev - prevLat) / dt or nil
+        if dLat and (dLat > 5 or dLat < -5) then dLat = nil end
+        prevLat = latDev
+        local xg, xm = D.crossTrackGains(false, false, st.curveHardActive, false, false)
+        local u = steer - D.crossTrackSteer(latDev, v, dLat, xg, xm)
+        local k = math.max(1, math.min(3, 0.5 / (st.yawGainFb or st.yawGain)))
+        local fb = u - (st.ffSteer or 0)
+        u = (st.ffSteer or 0) + math.max(-math.max(1.5, math.abs(fb)), math.min(math.max(1.5, math.abs(fb)), k * fb))
+        if u > 5 then u = 5 elseif u < -5 then u = -5 end
+        if u < 0.02 and u > -0.02 then u = 0 end
+        st.appliedSteer, st.escLimited = u, false
+        local au = math.abs(u)
+        local wT = (pl.g1 * math.min(au, 0.3) + pl.g2 * math.max(0, au - 0.3)) * (u < 0 and -1 or 1)
+        local wMax = v / KMH / VP.rMin
+        if wT > wMax then wT = wMax elseif wT < -wMax then wT = -wMax end
+        w = w + (wT - w) * (dt / pl.tau)
+        h = h + w * dt
+        q.x, q.y = q.x + math.cos(h) * v / KMH * dt, q.y + math.sin(h) * v / KMH * dt
+        -- 折點右轉（segH 增）：外側＝−l
+        if kinkS and sNow > kinkS - 2 and sNow < kinkS + 10 then
+            if -latDev > out then out = -latDev end
+            local sf = st.ffSteer or 0
+            if sf * w < 0 and math.abs(sf) > opp then opp = math.abs(sf) end
+            cuts = cuts or st.exitCut
+        end
+        if reached or (kinkS and sNow > kinkS + 10) then break end
+    end
+    checkTrue(kinkS ~= nil and out < 0.9 and opp < 0.05 and cuts == "kink", string.format(
+        "(8) Z 字錯位閉環重播：fallback 折點 %s 後外漂 %.2fm < 0.9、與 yaw 反向的前饋 %.2f < 0.05、exitCut=%s（舊制 1.58／0.80）",
+        tostring(kinkS), out, opp, tostring(cuts)))
+end
+
 scenario("1004f：承諾線在弧上減速——cross-track 選 ×DODGE（D.crossTrackGains），欠轉前饋＋增益落後的外漂收得回（E2E f1004e dixie9050w）")
 do
     -- E2E f1004e dixie9050w 改道線：巡航承諾的 pre-a 線在 R≈40 弧外側 0.2m，48→22 km/h 減速中外漂到 0.5m、前角擦到路邊物。
