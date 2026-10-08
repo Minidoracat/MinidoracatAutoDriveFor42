@@ -1,0 +1,4 @@
+{
+    "Tooltip_MinidoracatAutoDrive_GPS": "Uso: llévalo en el inventario con una batería, abre el mapa del mundo y elige un destino para trazar una ruta por las carreteras. Opcional: colócate junto a un vehículo y haz clic derecho sobre él para instalar el navegador (requiere un destornillador, una batería de vehículo y Electrónica 1).",
+    "Tooltip_MinidoracatAutoDrive_Auto": "Uso: colócate junto a un vehículo, haz clic derecho sobre él y elige \"Instalar Módulo de piloto automático\" (requiere un destornillador, una batería de vehículo y Electrónica 1). Luego traza una ruta con un Navegador GPS, siéntate en el asiento del conductor y pulsa \"Activar conducción automática\" en el panel sobre el salpicadero."
+}

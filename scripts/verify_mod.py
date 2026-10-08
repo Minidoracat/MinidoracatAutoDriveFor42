@@ -20,6 +20,7 @@
   2. BOM / CRLF          — 有 BOM 或 CRLF 的翻譯檔會被引擎「靜默忽略」
   3. 翻譯鍵集一致          — 缺鍵的語系會顯示原始 key
   4. 裸 % 檢查           — 42.20.1 起 formatted() 遇裸 % 崩潰；只允許 %1-%9 與 %%
+ 4b. 翻譯佔位與 EN 相同   — 各語系同一鍵的 %1-%9（多重集合）與 %% 數量要和 EN 一樣：漏掉的佔位少顯示資料，多出的沒有參數可填
   5. Kahlua 禁用全域       — next/xpcall 不存在（BaseLib 未註冊），呼叫→
                            「Object tried to call nil」。luac 與標準 Lua 測試都攔不住
                            （語法合法、標準 Lua 有這些函式），只能靜態掃描
@@ -689,6 +690,7 @@ fail("BOM / CRLF（42/media 下）", bad) if bad else ok("BOM / CRLF（42/media 
 # 刻意不含 printf 旗標字元（-+空白#0）：含空白旗標會讓「50% done」的「% d」被解析成
 # 合法指令而漏抓——翻譯實務上只會出現簡單的 %s/%d/%.1f，罕見旗標用法交給豁免清單
 PRINTF_RE = re.compile(r"%\d*(?:\.\d+)?[sdifuxXcqgGeE]")
+PCT_N_RE = re.compile(r"%[1-9]")
 
 
 def find_bare_pct(value, tolerant):
@@ -717,9 +719,9 @@ for m in MEDIA_DIRS:
     langs = sorted(d for d in os.listdir(troot) if os.path.isdir(os.path.join(troot, d)))
     tolerant = set(langs) <= {"CH", "CN"}   # 翻譯包偵測
     names = sorted({n for l in langs for n in os.listdir(os.path.join(troot, l)) if n.endswith(".json")})
-    mismatch, badpct, broken = [], [], []
+    mismatch, badpct, broken, pctdiff = [], [], [], []
     for n in names:
-        keysets = {}
+        keysets, datas = {}, {}
         for l in langs:
             p = os.path.join(troot, l, n)
             if not os.path.isfile(p):
@@ -732,6 +734,7 @@ for m in MEDIA_DIRS:
                 broken.append(f"{l}/{n}: {e}")
                 continue
             keysets[l] = set(data)
+            datas[l] = data
             for k, v in data.items():
                 if find_bare_pct(v, tolerant):
                     badpct.append(f"{l}/{n} 的 {k}")
@@ -740,6 +743,15 @@ for m in MEDIA_DIRS:
             for l, ks in keysets.items():
                 if ks != base:
                     mismatch.append(f"{n}: {l} 鍵集不一致（差 {len(ks ^ base)} 鍵）")
+        en = datas.get("EN")
+        if en is not None:
+            for l, d in datas.items():
+                for k, v in d.items():
+                    ev = en.get(k)
+                    if l != "EN" and isinstance(ev, str) and isinstance(v, str) and (
+                            sorted(PCT_N_RE.findall(v)) != sorted(PCT_N_RE.findall(ev))
+                            or v.count("%%") != ev.count("%%")):
+                        pctdiff.append(f"{l}/{n} 的 {k}")
     if broken:
         fail("翻譯 JSON 可解析", broken)
     else:
@@ -747,6 +759,9 @@ for m in MEDIA_DIRS:
     fail("翻譯鍵集一致", mismatch) if mismatch else ok(f"翻譯鍵集一致（{'/'.join(langs)}）")
     pct_label = "翻譯值無裸 %（翻譯包模式：另接受 printf 指令）" if tolerant else "翻譯值無裸 %（僅 %1-%9 與 %%）"
     fail(pct_label, sorted(set(badpct))) if badpct else ok(pct_label)
+    if "EN" in langs:
+        label = "翻譯佔位與 EN 相同（%1-%9、%%）"
+        fail(label, pctdiff) if pctdiff else ok(label)
 
 # ---- 5+6. Kahlua 禁用全域 / table.sort ----
 FORBIDDEN = ("next", "xpcall")

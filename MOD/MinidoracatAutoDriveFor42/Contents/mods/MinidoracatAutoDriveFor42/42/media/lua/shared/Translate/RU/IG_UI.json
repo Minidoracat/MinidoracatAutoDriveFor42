@@ -1,0 +1,5 @@
+{
+    "IGUI_VehiclePartMDADGPS": "GPS-навигатор",
+    "IGUI_VehiclePartMDADAutopilot": "Модуль автопилота",
+    "IGUI_VehiclePartCatMDAD": "Навигация и автопилот"
+}
