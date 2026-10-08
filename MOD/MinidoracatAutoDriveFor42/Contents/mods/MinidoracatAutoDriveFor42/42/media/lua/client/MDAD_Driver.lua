@@ -9624,7 +9624,7 @@ end
 -- s.lagMem／s.lagHitPl，快照沒有它時以記下的值重判，保持到車尾過點（車頭向量投影的世界座標）或車身收回。半寬取牽引車與
 -- 掛車較寬者，再加 footprint 同一個 pad（Drive.footprintPad）：實體半寬時 0–0.15m 之間守門放行、footprint 鎖輪
 -- （SemiTruckBox_mil 出彎 66 km/h）。arm／release 記 lag 事件與同一句 console；release why：owner＝持有者接手、body＝車尾過點、
--- nose＝硬點在車身旁但實測車身已不重疊、converge＝硬點還在車頭前方而預測車身不重疊（含 |ld| 降到門檻下）。
+-- nose＝硬點在車身旁但實測車身已不重疊（拖車不用，見下方）、converge＝硬點還在車頭前方而預測車身不重疊（含 |ld| 降到門檻下）。
 function Drive.lagGuardScan(s, playerNum, speedKmh, vx, vy, heading)
     local sen, fs, vp, ld = s.sensor, s.fstate, s.vehicleProfile, s.lastLatDev
     local hit, bl, hitPl = nil, nil, nil
@@ -9708,6 +9708,13 @@ function Drive.lagGuardScan(s, playerNum, speedKmh, vx, vy, heading)
     end
     if hit == nil then
         if finite(s.lagHitX) then
+            -- 拖車：硬點還在車身（含掛車）旁就保持到車尾過點，不以「實測車身不重疊」放行——牽引車的實測橫偏量不到掛車轉彎
+            -- 往內切的量（1008 E2E：SemiTruckBox_mil＋M101A3 重播正式服 0.23.0 片段的轉角，nose 放行時牽引車 ld 0.19、
+            -- 折角 27–30°，放速到 18.9 km/h 時車身擦上彎內硬點）。出口：車尾過點（body）、倒回硬點前方（converge）、持有者接手。
+            if live and type(tw) == "table" and u ~= nil and u >= -(rear + r0) and u <= halfL + r0 then
+                s.lagHitSide = true
+                return
+            end
             local why = "owner"
             if live then
                 if u == nil or u > halfL + r0 then why = "converge"

@@ -25359,6 +25359,8 @@ drive.scenarioLagRate()
 --   (lag-tow-hold) 拖車（trailLen 11）rs 107／110：硬點在掛車旁＝保持；車心離硬點世界距 > halfL 時帽仍是 MIN_EXEC（side 旗標）。
 --     rs 114（過掛車尾）：release why=body。違規證明：車尾不含掛車＝rs 107 就放＝紅；帽不看 side＝紅。
 --   (lag-body-nose) 硬點在車身旁、ld 收到 0.35：release why=nose。
+--   (lag-tow-nose) 同一型換成拖車：仍保持（牽引車 ld 量不到掛車往內切，E2E 1008 r3tow nose 放行後擦上彎內硬點），
+--     過掛車尾才 release why=body。違規證明：拖車也照 nose 放行＝紅。
 --   (lag-tow-wide) 掛車半寬 1.6 > 牽引車 1.25：只有掛車寬才擋的硬點照判。違規證明：只用牽引車半寬＝紅。
 --   (lag-pad) 預測車身外 0.1（< FOOTPRINT_PAD）的硬點照判（footprint 會鎖輪的距離）。違規證明：不加 pad＝紅。
 function drive.scenarioLagBody()
@@ -25450,6 +25452,18 @@ function drive.scenarioLagBody()
     rel = lastLag("release")
     checkTrue(s.lagHitX == nil and rel ~= nil and rel.why == "nose" and rel.body == 0.35,
         "(lag-body-nose) 硬點在車身旁、ld 收到 0.35（車身不重疊）：release why=nose（why=" .. tostring(rel and rel.why) .. "）")
+    -- (lag-tow-nose)
+    events = {}
+    s = pass({ trailLen = 11, halfW = 1.0, hitchToRear = 6 })
+    at(s, 99)
+    sen.hardN = 0
+    at(s, 101, 0.35)
+    local heldTow = s.lagHitX == HS and s.lagHitSide == true and lastLag("release") == nil
+    at(s, 114, 0.35)
+    rel = lastLag("release")
+    checkTrue(heldTow and rel ~= nil and rel.why == "body",
+        "(lag-tow-nose) 拖車：硬點在車身旁、ld 收到 0.35 仍保持，過掛車尾才 release why=body（held=" .. tostring(heldTow)
+        .. " why=" .. tostring(rel and rel.why) .. "）")
     -- (lag-tow-wide)
     put(HS, 0.4 + halfW + PAD + r + 0.2)
     s = newS(nil)
