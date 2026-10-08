@@ -178,12 +178,12 @@ local CURVE_FF_FRAC = 0.75
 -- 剔除的反相 yaw 率門檻（rad/s，見 control 的 yaw 增益估計段）；inM／inSpanM＝弧段前饋的彎內偏差退讓，inLeadS／
 -- inBaseM＝退讓的回程預測（秒、差分基線 m；兩者見 arcFeedForward 尾段）；slipOut＝高速增益學習的往彎外側滑門檻
 -- （rad，state.slip；語料 >40 km/h 弧上正常幀率往彎外 |vt|/v >0.03 只占 1%，正式服 1005h 過轉 0.045／0.086）；
--- exitTauS／exitTcS／exitSpanM／yawTauS＝出弧殘餘轉角
--- （見 MDADFollower.arcExitResidual）；同表是為了不多占 control 的 upvalue。
+-- exitTauS／exitTcS／exitSpanM／yawTauS＝出弧殘餘轉角；exitRevM／exitRevRad／exitRevYaw＝殘餘轉角遇反向轉角就收（車前
+-- 多遠內的反向轉角累計 rad、yaw 反號門檻 rad/s；1008）（見 MDADFollower.arcExitResidual）；同表是為了不多占 control 的 upvalue。
 local CURVE_FF_LEAD_S = 0.35
 local FF_HI = { fromKmh = 30, fullKmh = 55, frac = 0.9, learnKmh = 40, minFF = 0.1, learnS = 0.5,
     settleS = CURVE_FF_LEAD_S, fbOppose = 0.5, inM = 0.3, inSpanM = 0.5, inLeadS = 1.0, inBaseM = 0.5, slipOut = 0.03,
-    exitTauS = 0.2, exitTcS = 0.1, exitSpanM = 15, yawTauS = 0.05 }
+    exitTauS = 0.2, exitTcS = 0.1, exitSpanM = 15, yawTauS = 0.05, exitRevM = 15, exitRevRad = 0.1, exitRevYaw = 0.1 }
 local CURVE_FF_MAX = 0.8 -- 小增益長車不能用倒數把前饋放大成整車橫推；回饋仍保留完整權威。
 local YAW_GAIN_INIT = 0.8
 local YAW_GAIN_TAU_S = 0.5
@@ -399,10 +399,13 @@ local function buildLaneRoom(p)
         local b = w * 0.5 - halfW - margin
         return b > 0 and b or 0
     end
+    -- 拖車改寫弧（towArcR）照逐段自己的虛擬路寬：弧內側的掛車內輪差規劃只認改寫線本身，不得因標成 SEG_ARC 就從
+    -- 鄰段原路寬借出內側餘裕（殭屍軟縫、停留 lane 直接讀這張表）
+    local towArc = p.towArcR
     local i = 1
     while i <= n - 1 do
         local i1 = i
-        if kind[i] == MDADDynamics.SEG_ARC then
+        if kind[i] == MDADDynamics.SEG_ARC and not (towArc and towArc[i]) then
             while i1 + 1 <= n - 1 and kind[i1 + 1] == MDADDynamics.SEG_ARC do i1 = i1 + 1 end
         end
         local r = radius[i]
@@ -858,15 +861,17 @@ function MDADFollower.despikeRoute(route)
         return j, lat
     end
     local n = #pts / 2
-    local sw, ss = route.segWidth, route.segSurface
+    local sw, ss, sa = route.segWidth, route.segSurface, route.segArcR
     if type(sw) ~= "table" then sw = nil end
     if type(ss) ~= "table" then ss = nil end
+    -- segArcR（拖車改寫弧的規劃半徑，Trailer.shape）：原段照抄，合併／收直出來的新段不是弧（0）
+    if type(sa) ~= "table" then sa = nil end
     local found = false
     for i = 2, n - 1 do
         if spikeAt(pts, i) or jogAt(pts, n, i, sw) then found = true break end
     end
     if not found then return route end
-    local P, W, S = {}, sw and {} or nil, ss and {} or nil
+    local P, W, S, A = {}, sw and {} or nil, ss and {} or nil, sa and {} or nil
     local np, removed = 0, 0
     for i = 1, n do
         np = np + 1
@@ -874,6 +879,7 @@ function MDADFollower.despikeRoute(route)
         if np >= 2 then
             if W then W[np - 1] = sw[i - 1] end
             if S then S[np - 1] = ss[i - 1] end
+            if A then A[np - 1] = sa[i - 1] end
         end
         -- 新點進來後回頭看上一個頂點；刪掉後新的上一個頂點可能又成反折（連續鋸齒）
         while np >= 3 do
@@ -883,6 +889,7 @@ function MDADFollower.despikeRoute(route)
                 if W then W[np - 2] = W[np - 1] end
                 if S then S[np - 2] = S[np - 1] end
             end
+            if A then A[np - 2] = 0 end -- 合併段不是弧（A[np-1] 由下一點覆寫、第二趟重建）
             P[np * 2 - 3], P[np * 2 - 2] = P[np * 2 - 1], P[np * 2]
             P[np * 2 - 1], P[np * 2] = nil, nil
             if W then W[np - 1] = nil end
@@ -895,13 +902,14 @@ function MDADFollower.despikeRoute(route)
     -- 加錨點，斜線只在錨點與中點之間（折角 ≤7°），這兩段的段寬扣掉 lat（1002t：斜線在中點離兩臂中心 lat/2，照原寬
     -- 靠右＝車心貼到臂的路緣；8m 路 4m 錯位、靠右 2m 時車身出路緣約 0.9m）。扣過的寬度 ≥ JOG_CLEAR_M（jogAt 的
     -- 路寬閘），斜線兩側各 (w−lat)/2 的帶仍在兩臂的真路面內；錨點外的臂照原線原寬，靠右照舊。
-    local Q, QW, QS, nq = {}, W and {} or nil, S and {} or nil, 0
-    local function push(x, y, w, s) -- w／s＝從上一點到這點那段的屬性
+    local Q, QW, QS, QA, nq = {}, W and {} or nil, S and {} or nil, A and {} or nil, 0
+    local function push(x, y, w, s, a) -- w／s／a＝從上一點到這點那段的屬性
         nq = nq + 1
         Q[nq * 2 - 1], Q[nq * 2] = x, y
         if nq >= 2 then
             if QW then QW[nq - 1] = w end
             if QS then QS[nq - 1] = s end
+            if QA then QA[nq - 1] = a or 0 end
         end
     end
     push(P[1], P[2])
@@ -917,7 +925,7 @@ function MDADFollower.despikeRoute(route)
             local arm = JOG_ARM_RATIO * lat
             local ax, ay = ix - P[i * 2 - 3], iy - P[i * 2 - 2]
             local la = sqrt(ax * ax + ay * ay)
-            if la > arm + 0.5 then push(ix - ax / la * arm, iy - ay / la * arm, wIn, sIn) end
+            if la > arm + 0.5 then push(ix - ax / la * arm, iy - ay / la * arm, wIn, sIn, A and A[i - 1]) end
             push((ix + jx) * 0.5, (iy + jy) * 0.5, wIn and wIn - lat, sIn)
             local bx, by = P[j * 2 + 1] - jx, P[j * 2 + 2] - jy
             local lb = sqrt(bx * bx + by * by)
@@ -929,18 +937,19 @@ function MDADFollower.despikeRoute(route)
             removed = removed + (j - i)
             i = j + 1
         else
-            local w = W and W[i - 1]
-            if narrowNext then w, narrowNext = narrowW, false end
-            push(P[i * 2 - 1], P[i * 2], w, S and S[i - 1])
+            local w, a = W and W[i - 1], A and A[i - 1]
+            if narrowNext then w, a, narrowNext = narrowW, 0, false end
+            push(P[i * 2 - 1], P[i * 2], w, S and S[i - 1], a)
             i = i + 1
         end
     end
-    P, W, S = Q, QW, QS
+    P, W, S, A = Q, QW, QS, QA
     local out = {}
     for k, v in pairs(route) do out[k] = v end
     out.pts, out.despiked = P, removed
     if W then out.segWidth = W end
     if S then out.segSurface = S end
+    if A then out.segArcR = A end
     return out
 end
 
@@ -1035,10 +1044,22 @@ function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile, style)
                 buildPts, buildSurface, buildWidth, vehicleProfile.halfW, vehicleProfile.rMin,
                 pathPts, segSurface, segWidth, segKind, segSourceA, segSourceB, filletRadius)
     end
+    -- 拖車改寫弧（Trailer.shape 的 segArcR，raw 段索引）：改寫線遠超圓角 source 容量，弧點照抄成 LINE＝Follower 看不到曲率、
+    -- 沒有弧段前饋／切線追蹤／弧上即時帽，純追跡切弦內切（正式服 0.23.0 拖車轉角 ld 0.5–1.55m、curveKappa 恆 0）。
+    -- 照抄的段 source 兩端同一 raw 段：標回 SEG_ARC、半徑＝規劃半徑。towArcR（剖面段索引→R，稀疏）只給 telemetry 分辨。
+    local arcR, towArcR = route.segArcR, nil
+    if type(arcR) ~= "table" then arcR = nil end
     if n >= 2 then
         for i = 1, n - 1 do
             segSourceA[i] = rawSourceMap[segSourceA[i]] or segSourceA[i]
             segSourceB[i] = rawSourceMap[segSourceB[i]] or segSourceB[i]
+            local r = arcR and segKind[i] == MDADDynamics.SEG_LINE and segSourceA[i] == segSourceB[i]
+                and arcR[segSourceA[i]]
+            if isFinite(r) and r > 0 then
+                segKind[i], filletRadius[i] = MDADDynamics.SEG_ARC, r
+                towArcR = towArcR or {}
+                towArcR[i] = r
+            end
         end
     end
     if n < 2 then
@@ -1097,6 +1118,7 @@ function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile, style)
         segSourceA = segSourceA,
         segSourceB = segSourceB,
         filletRadius = filletRadius,
+        towArcR = towArcR, -- 拖車改寫弧（剖面段索引→規劃半徑；沒拖或沒改寫＝nil）
         segAccel = segAccel,
         segBrake = segBrake,
         segLat = segLat,
@@ -1387,8 +1409,8 @@ local function arcFeedForward(profile, state, arcK, bestI, sNow, aspeed, tangent
         local endS = s[e + 1]
         if endS < sNow + lead then
             ramp = ramp * (endS - sNow) / lead
-            -- 出弧殘餘轉角的參考（MDADFollower.arcExitResidual）：收尾終點、出口段朝向、轉向方向
-            state.exitEndS, state.exitH, state.exitTurn = endS, segH[e + 1] or segH[e], dth < 0 and -1 or 1
+            -- 出弧殘餘轉角的參考（MDADFollower.arcExitResidual）：收尾終點、出口段朝向、轉向方向；新出口清上一個出口的收法
+            state.exitEndS, state.exitH, state.exitTurn, state.exitCut = endS, segH[e + 1] or segH[e], dth < 0 and -1 or 1, nil
         end
     end
     -- 前饋整份在推（不在爬升／收尾）：高速增益只學這種幀（FF_HI）
@@ -1469,8 +1491,13 @@ end
 -- （同向弧爬升、車道 ramp 項）：同向取大者不疊加，反向（S 彎）收掉。yaw 率扣除讓它對 plant 自適應：yaw 慢的車出口時 yaw
 -- 還大、扣完 ≤0 不加（改收尾 lead 本身是兩難：lead 減半時 τ0.35 plant 出彎切內 0.47→0.70，見 route.md）。承諾線
 -- （trackTangent）有自己的切線追蹤，不補。回要加到 ff 的帶號 steer；每幀呼叫（yaw 率低通要連續）。
--- 離線閉環 test_follower「1006：出弧殘餘轉角」。
-function MDADFollower.arcExitResidual(state, heading, ph, dt, sNow, ff)
+-- 反向收掉（1008；正式服 0.23.0 片段 ATAMustangClassic (10760.5,10050.5) Z 字錯位兩趟：左弧後 2m 接 +90° fallback 折點，sff 頂 −0.80
+-- 到停車、車在右轉 yr +0.6～+1.7，外漂 0.8–1.0m 13／11 km/h 碰外角；M998 (12521.5,2506.5) S 錯位反向弧前饋被退讓成 0，sff +0.80 側移 24.7 km/h）：
+-- 只看 ff 反號時，下一角是 fallback 折點（ff 0）或反向弧前饋還在爬升／被退讓時不收，車往新方向轉時 lag 的 yaw 項反而變大、頂到
+-- 上限往舊方向推。三種收法各記 state.exitCut（樣本 xcw）：ff＝反向弧前饋已開始；yaw＝車已往反向轉（yawRateF 反號超過
+-- FF_HI.exitRevYaw）；kink＝車前 FF_HI.exitRevM 內反向轉角累計 ≥ FF_HI.exitRevRad（折點或反向弧的 chord 都算；同向角不計）。
+-- 離線 test_follower「1006：出弧殘餘轉角」「1008：出弧殘餘轉角遇反向轉角」。
+function MDADFollower.arcExitResidual(state, heading, ph, dt, sNow, ff, profile, bestI)
     if isFinite(ph) and dt > 1e-4 and dt < 0.5 then
         local a = dt / FF_HI.yawTauS
         if a > 1 then a = 1 end
@@ -1479,10 +1506,29 @@ function MDADFollower.arcExitResidual(state, heading, ph, dt, sNow, ff)
     end
     local endS = state.exitEndS
     if endS == nil or sNow < endS or state.trackTangent == true then return 0 end
-    local turn = state.exitTurn
-    local lag = turn * (wrapPi(state.exitH - heading) - (state.yawRateF or 0) * FF_HI.exitTauS)
-    if lag <= 0 or ff * turn < 0 or sNow > endS + FF_HI.exitSpanM then
+    local turn, w = state.exitTurn, state.yawRateF or 0
+    local lag = turn * (wrapPi(state.exitH - heading) - w * FF_HI.exitTauS)
+    if lag <= 0 or sNow > endS + FF_HI.exitSpanM then
         state.exitEndS = nil
+        return 0
+    end
+    local cut = nil
+    if ff * turn < 0 then
+        cut = "ff"
+    elseif w * turn < -FF_HI.exitRevYaw then
+        cut = "yaw"
+    elseif profile ~= nil then
+        local s, segH, n, rev = profile.s, profile.segH, profile.n, 0
+        local i = (bestI or 1) + 1
+        while i <= n - 1 and s[i] <= sNow + FF_HI.exitRevM do
+            local dn = wrapPi(segH[i] - segH[i - 1]) * turn
+            if dn < 0 then rev = rev - dn end
+            i = i + 1
+        end
+        if rev >= FF_HI.exitRevRad then cut = "kink" end
+    end
+    if cut ~= nil then
+        state.exitEndS, state.exitCut = nil, cut
         return 0
     end
     local g = state.yawGain
@@ -1857,13 +1903,16 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         end
     end
     -- 先保留能接上的原路段，避免右側合法lane較靠近平行反向臂時突然跳臂。
-    -- 快取路線首段真的離車很遠，才在首次控制補一次全域定位。
+    -- 快取路線首段真的離車很遠，才在首次控制補一次全域定位。讓位恢復（Driver 保留游標、設 needsProjection）
+    -- 同一套：車還在舊游標窗口附近就沿用，離開了才全域重新定位——那是新定位，不受下面的單幀倒退上限夾住。
+    local relocated = false
     if state.needsProjection then
         state.needsProjection = false
         local width = profile.segWidth and profile.segWidth[bestI]
         local reach = LOOKAHEAD_MIN
         if isFinite(width) and width * 0.5 > reach then reach = width * 0.5 end
         if bestD > reach * reach then
+            relocated = true
             for i = 1, n - 1 do
                 if i < lo or i > hi then
                     local t, d2 = projectT(x, y, px[i], py[i], px[i + 1], py[i + 1], segLen[i])
@@ -1876,7 +1925,7 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
     -- 回一大段——那會讓 remaining 暴增、targetSpeed 跳動，在自我交叉的路線上尤其明顯。
     local floorI = idx - REWIND_MAX
     if floorI < 1 then floorI = 1 end
-    if bestI < floorI then
+    if bestI < floorI and not relocated then
         bestI = floorI
         bestT = projectT(x, y, px[bestI], py[bestI], px[bestI + 1], py[bestI + 1], segLen[bestI])
     end
@@ -2492,7 +2541,7 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         local ff = arcFeedForward(profile, state, arcK, bestI, sNow, aspeed, tangentOn, yawGain,
             tangentOn and ovDen or nil, latSigned, lineLat)
         -- 出弧殘餘轉角（算進 ffSteer：已 ÷yawGain，Driver 回授正規化不再放大；control 的 local 已滿 189，不另開）
-        ff = ff + MDADFollower.arcExitResidual(state, heading, ph, dt, sNow, ff)
+        ff = ff + MDADFollower.arcExitResidual(state, heading, ph, dt, sNow, ff, profile, bestI)
         if ff ~= 0 then
             steer = steer + ff
             if steer > STEER_MAX then steer = STEER_MAX
@@ -2553,7 +2602,7 @@ function MDADFollower.resetControl(state)
     state.trackTangent = false
     state.tangentOn = false
     state.ffSteer, state.ffSteadyT, state.hiSteerLag = 0, 0, nil -- 低通／穩態計時跟施力歷史一起斷
-    state.exitEndS, state.yawRateF = nil, 0 -- 出弧殘餘轉角（arcExitResidual）：換線／脫困後不沿用舊弧的出口
+    state.exitEndS, state.yawRateF, state.exitCut = nil, 0, nil -- 出弧殘餘轉角（arcExitResidual）：換線／脫困後不沿用舊弧的出口
     state.prevHeading = nil -- yawGain 是車的性質，跨 cutover／脫困保留；只斷差分
     state.slipX, state.slip, state.ffDevS = nil, 0, nil -- 側滑弦估計、退讓回程差分同樣斷差分（瞬移／脫困後重量）
     releaseExactLine(state)

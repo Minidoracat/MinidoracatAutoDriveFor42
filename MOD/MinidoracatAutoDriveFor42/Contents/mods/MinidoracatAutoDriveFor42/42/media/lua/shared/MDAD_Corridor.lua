@@ -138,6 +138,7 @@ local FOOTPRINT_PAD = 0.15        -- current body 對點障礙的固定安全圈
 -- 往常駐線斜切會掃到的點改由 Driver 的 Drive.transitionHold 管。
 local FRONT_STRIP_PAD = 0.5
 MDADCorridor.FRONT_STRIP_PAD = FRONT_STRIP_PAD
+MDADCorridor.FOOTPRINT_PAD = FOOTPRINT_PAD -- Driver 實測落後量守門的預測車身用同一個安全圈（Drive.lagGuardScan）
 local GROUP_GAP = 6               -- 群聚合的 s 間距上限（公尺）
 local ROUNDS_MAX = 8              -- 群邊界擴張的輪數上限（見上方 ② 的說明）
 local ENTRY = 8                   -- 進入段長度（公尺）：a = sObs0 - ENTRY
@@ -350,7 +351,7 @@ end
 --   車得先橫跨整個 bias 才進縫（2026-08-28 實機：靠右行駛卻每次往左繞）。
 -- 隱含前提：候選以 l＝0（nav 線）對稱、半幅 corridorHalf−needHalf，沒掃過的地方在這裡等於淨空。Sensor 一般帶
 -- 以行駛線為心（bandBias）、帶心偏離 nav 線時遠側有一條沒掃過；Driver 以世界掃掠終審（sweepLine 橫向覆蓋，
--- Drive.lineBandCovers）拒收落在帶外的候選、並讓下一輪帶心歸 nav 線補掃（Drive.bandNavRequest）。
+-- Drive.lineBandCovers）拒收落在帶外的候選、並讓下一輪換帶心補掃（nav 線或車位↔常駐線中點，Drive.bandNavRequest）。
 -- hardR（選填）＝逐點半徑平行陣列：樹幹 0、整格箱型物 OBS_HALF。非 table 或
 -- 缺項／壞值＝該點退 OBS_HALF（保守肥半徑），不整批拒收。
 -- baseL（選填）＝**行駛基準線**（呼叫端的常駐 laneBias）。擋線與群聚合以它為

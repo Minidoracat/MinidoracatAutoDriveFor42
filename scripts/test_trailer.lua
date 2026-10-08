@@ -1,6 +1,8 @@
 -- test_trailer.lua：MDAD_Trailer 純運動學契約（轉角外拉規劃、不可過判定、route 改寫、倒車回正方向）。
 -- 幾何取 rSemiTruck W900＋SemiTrailerContainer（腳本×1.43，E2E 掛點對齊實測）。
 local ROOT = "MOD/MinidoracatAutoDriveFor42/Contents/mods/MinidoracatAutoDriveFor42/42/media/lua/"
+dofile(ROOT .. "shared/MDAD_Dynamics.lua") -- shape 的虛擬路寬下限讀 ROAD_EDGE_MARGIN；⑩ 用路寬證明
+dofile(ROOT .. "shared/MDAD_Follower.lua") -- shape 讀 MDADFollower.ARRIVE_M（終點殘段不列不可過）
 dofile(ROOT .. "client/MDAD_Trailer.lua")
 local T = MDADTrailer
 
@@ -292,6 +294,96 @@ getVehicleById = function() return nil end
 cur, alive, by, hd = T.lostState(tracL, gL)
 check(alive == false and by == nil and hd == nil, "(gone) 掛車已不存在：alive=false、不量距離")
 getVehicleById = nil
+
+-- ⑧ 1008 拖車樣本（T.sampleState；collectPhys 每筆取樣讀一次，telemetry tlo／tla／tkm／thd）：掛車相對牽引車的縱向（車頭正）
+--    ／橫向（右正，同 nb；朝 +x 時世界 +y＝右）、掛車 km/h、兩掛點距離；掛點讀不到只少 hd。
+--    違規證明：橫向符號反了＝(lat) 紅；hd 不用記下的掛車掛點名＝(thd) 紅；位置與 hd 共用一個 pcall＝(hd-fail) 紅。
+tracL.getVehicleTowing = function() return trL end
+trL.getX = function() return -8 end
+trL.getY = function() return 1.5 end
+local lon, lat, skmh, shd = T.sampleState(tracL, gL, 1, 0)
+check(near(lon, -8) and near(lat, 1.5), "(lat) 掛車在牽引車後 8m、右側 1.5m（got " .. tostring(lon) .. "," .. tostring(lat) .. "）")
+check(near(skmh, 37.5) and near(shd, 3), "(thd) 掛車 km/h 與兩掛點距離（got " .. tostring(skmh) .. "," .. tostring(shd) .. "）")
+trL.getTowedByWorldPos = function() error("hitch") end
+lon, lat, skmh, shd = T.sampleState(tracL, gL, 1, 0)
+check(near(lon, -8) and near(skmh, 37.5) and shd == nil, "(hd-fail) 掛點讀不到只少 hd")
+
+-- ⑨ 1008 正式服 0.23.0 拖車轉角的兩個過度保守（temp/prod1008/report-trailer.md F1／F2）與倒車折角門檻。
+--   (front) 外拉規劃的車頭懸伸從量到的掛點起算（T.hitchFront＝halfL−hitchZ）：第五輪 SemiTruckLite＋SemiTrailerVan
+--           （正式服 0.23.0 案例 A）在 6m→6m 直角 (14013,2263)：整車長 7.20 判不可過、實值 5.83 可過；量不到 hitchZ
+--           退回整車長。違規證明：hitchFront 恆回整車長＝紅。
+--   (stub)  路線終點 0.7m 殘段折 135°（正式服 0.23.0 案例 B，(13956.5,3757)）不列不可過；同一個角出臂 6m（> ARRIVE_M）照列。
+--           違規證明：拿掉出臂條件＝stub 紅；出臂門檻改恆真＝6m 紅。
+--   (rev)   canReverse：上限內可倒、超過或讀不到不行。違規證明：nil 當可倒＝紅。
+do
+    local nrTow = { L2 = 6.715, hitchToRear = 8.880, halfW = 1.10, hitchZ = -2.23 }
+    local front = T.hitchFront(nrTow, 3.60)
+    check(math.abs(front - 5.83) < 1e-9, "(front) 第五輪：掛點→車頭＝halfL−hitchZ（got " .. tostring(front) .. "）")
+    check(T.hitchFront({ L2 = 6.715 }, 3.60) == 7.2, "(front) 量不到 hitchZ 退回整車長")
+    local function nr() return { pts = { 14013, 2171, 14013, 2263, 14100, 2263 }, segWidth = { 6, 6 },
+        segSurface = { "paved", "paved" } } end
+    check(#T.shape(nr(), nrTow, 1.06, 7.20).towBlocked == 2, "(front) 整車長 7.20：6m 直角判不可過（舊制誤判）")
+    check(#T.shape(nr(), nrTow, 1.06, front).towBlocked == 0, "(front) 實值 5.83：同一個直角可過")
+
+    local tmTow = { L2 = 5.773, hitchToRear = 9.533, halfW = 1.11 }
+    local stub = T.shape({ pts = { 13800, 3757, 13956.5, 3757, 13956, 3757.5 }, segWidth = { 4, 3 },
+        segSurface = { "paved", "paved" } }, tmTow, 1.09, 7.16)
+    check(#stub.towBlocked == 0, "(stub) 終點 0.7m 殘段 135° 不列不可過（n=" .. #stub.towBlocked / 2 .. "）")
+    local d = 6 / math.sqrt(2)
+    local long = T.shape({ pts = { 13800, 3757, 13956.5, 3757, 13956.5 - d, 3757 + d }, segWidth = { 4, 3 },
+        segSurface = { "paved", "paved" } }, tmTow, 1.09, 7.16)
+    check(#long.towBlocked == 2, "(stub) 同一個角出臂 6m（> ARRIVE_M）照列不可過")
+
+    local lim = T.REVERSE_HITCH_MAX
+    check(T.canReverse(0) and T.canReverse(-lim) and not T.canReverse(lim + 0.01) and not T.canReverse(-lim - 0.01)
+        and not T.canReverse(nil), "(rev) 倒車折角門檻：上限內可倒、超過或讀不到不行")
+end
+
+-- ⑩ 1008 改寫段要過 Follower 路寬證明、圓弧要標出來（正式服 0.23.0：虛擬路寬下限 2·thw+0.4 每側只留 0.2，證明要 0.4＝
+--    改寫段 verifyLineReason 永遠 band→obb 帽 18；弧點照抄成 LINE＝Follower 看不到曲率、沒有前饋，切弦內切）。
+--    證明照 Driver buildSnapshotProof：每條弦（兩端同一 raw 段）以牽引車半寬 chordCoveredByBand。幾何同 ①、正式服 0.23.0
+--    片段 SemiTruckBox_mil（halfW 1.03、halfL 4.12）＋M101A3（tow attach L2 2.33、trailLen 7.67、hitchZ −4.39、halfW 0.98）。
+--    違規證明：下限改回 2·thw+0.4＝(band) 紅；push 不帶弧半徑＝(arc) 紅。
+local D = MDADDynamics
+for _, cc in ipairs({
+    { "12m→6m 直角＋W900 貨櫃", route, tow, G.thw, G.front },
+    { "8m 直角＋SemiTruckBox_mil", { pts = { 8644.0, 8388.5, 8644.034, 8400.0, 8644.5, 8562.0, 8449.0, 8562.0, 8400.0, 8562.0 },
+        segWidth = { 8, 8, 8, 8 }, segSurface = { "paved", "paved", "paved", "paved" } },
+        { L2 = 2.327, hitchToRear = 7.670 - 4.385, halfW = 0.98 }, 1.03, 4.12 * 2 },
+}) do
+    local sh = T.shape(cc[2], cc[3], cc[4], cc[5])
+    local bandBad, narrowN, arcN, arcTurn, badR = 0, 0, 0, 0, nil
+    local plan
+    for v = 2, #cc[2].pts / 2 - 1 do
+        local p = cc[2].pts
+        local cv = T.cornerOf(p[v * 2 - 3], p[v * 2 - 2], p[v * 2 - 1], p[v * 2], p[v * 2 + 1], p[v * 2 + 2],
+            cc[2].segWidth[v - 1], cc[2].segWidth[v])
+        plan = plan or (cv and T.planCorner(cv, { L2 = cc[3].L2, rear = cc[3].hitchToRear, hw = cc[3].halfW,
+            front = cc[5], thw = cc[4] }))
+    end
+    for i = 1, #sh.segWidth do
+        local x0, y0, x1, y1 = sh.pts[i * 2 - 1], sh.pts[i * 2], sh.pts[i * 2 + 1], sh.pts[i * 2 + 2]
+        if sh.segWidth[i] < 6 then
+            narrowN = narrowN + 1
+            if not D.chordCoveredByBand(sh.pts, sh.segWidth, i, i, cc[4], x0, y0, x1, y1) then bandBad = bandBad + 1 end
+        end
+        local r = sh.segArcR[i]
+        if r > 0 then
+            arcN = arcN + 1
+            if r ~= plan.R then badR = r end
+            if i > 1 and sh.segArcR[i - 1] > 0 then
+                local ha = math.atan2(sh.pts[i * 2] - sh.pts[i * 2 - 2], sh.pts[i * 2 - 1] - sh.pts[i * 2 - 3])
+                local hb = math.atan2(y1 - y0, x1 - x0)
+                arcTurn = arcTurn + math.abs(T.wrap(hb - ha))
+            end
+        end
+    end
+    check(narrowN > 0 and bandBad == 0, string.format("(band) %s：改寫段 %d 條弦過路寬證明（失敗 %d）", cc[1], narrowN, bandBad))
+    check(#sh.segArcR == #sh.segWidth and sh.towArcN == 1 and arcN > 0 and badR == nil
+        and math.abs(arcTurn - math.pi / 2) < math.rad(10),
+        string.format("(arc) %s：segArcR 對齊段數、弧 %d 段半徑＝規劃 R %s、弧內轉角 %.0f°", cc[1], arcN,
+            tostring(plan and plan.R), math.deg(arcTurn)))
+end
 
 print(string.format("test_trailer: %d 項斷言、%d 項失敗", asserts, fails))
 if fails > 0 then os.exit(1) end

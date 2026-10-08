@@ -168,6 +168,14 @@ function T.attach(vehicle)
     return geo
 end
 
+-- 掛點到牽引車車頭（shape 的 tractorFront：simulate 從掛點往前量車頭懸伸）。hitchZ＝掛點在牽引車座標的縱向位置
+-- （車位起算，負＝在後），量得到＝halfL−hitchZ；量不到（attach 已清掉偏移）退回整車長（保守）。舊制一律整車長＝
+-- 第五輪牽引車高估 1.2–1.4 m（正式服 0.23.0 片段 SemiTruckLite 7.20 vs 5.83：兩個 90° 轉角誤判不可過）。
+function T.hitchFront(tow, halfL)
+    if finite(tow.hitchZ) then return halfL - tow.hitchZ end
+    return halfL * 2
+end
+
 -- ---------------------------------------------------------------- 2. 轉角運動學（純函式，離線可測）
 local function segDist(px, py, ax, ay, bx, by)
     local dx, dy = bx - ax, by - ay
@@ -317,6 +325,7 @@ local function candidate(c, a, b, R, ramp, approach, exitLen)
         YS[n] = c.ny + c.dIn[2] * sCur + c.nIn[2] * (-s) * off
         sCur = sCur + step
     end
+    local arc0 = n + 1 -- 圓弧第一點的索引（shape 標記弧段給 Follower）
     local a0 = atan2(tay - cy, tax - cx)
     local sweep = c.turnAbs
     local m = floor(sweep * R / step)
@@ -326,6 +335,7 @@ local function candidate(c, a, b, R, ramp, approach, exitLen)
         n = n + 1
         XS[n], YS[n] = cx + R * cos(ang), cy + R * sin(ang)
     end
+    local arc1 = n
     -- 轉出：保持 b 直到掛車也進來（hold），再 ramp 回中線；exitLen 截斷
     local hold = b ~= 0 and T.EXIT_HOLD or 0
     local e = step
@@ -341,7 +351,7 @@ local function candidate(c, a, b, R, ramp, approach, exitLen)
         YS[n] = tby + c.dOut[2] * e + c.nOut[2] * (-s) * dOff
         e = e + step
     end
-    return n, sIn, sOut
+    return n, sIn, sOut, arc0, arc1
 end
 
 T._candidate = function(...) return candidate(...), XS, YS end
@@ -438,7 +448,9 @@ end
 
 -- ---------------------------------------------------------------- shape：整條路線
 -- 回新 route table（pts／segSurface／segWidth 同格式，給 MDADFollower.begin），加 towBlocked＝{x1,y1,x2,y2,...}、
--- towBlockedR＝{r1,r2,...}（每個不可過轉角的路口方塊半對角線＝兩臂半路寬的斜邊；Driver 改道避讓圈要蓋住整個轉角）。
+-- towBlockedR＝{r1,r2,...}（每個不可過轉角的路口方塊半對角線＝兩臂半路寬的斜邊；Driver 改道避讓圈要蓋住整個轉角）、
+-- segArcR＝每段的規劃圓弧半徑（0＝不是弧）：改寫線 0.5m 一點、遠超 Follower 圓角 source 容量，不標的話 Follower 只看到
+-- 逐點小折線——沒有弧段前饋、切線追蹤與弧上即時帽，純追跡切弦內切（正式服 0.23.0 拖車轉角 ld 0.5–1.55m）。
 -- 同一個原始 route table 快取（Driver 用原始 identity 比對 cutover）。
 local cacheA, cacheB = nil, nil -- 最近兩條（現行＋cutover 新線）；不用弱表
 
@@ -451,12 +463,12 @@ function T.shape(route, tow, tractorHalfW, tractorFront)
     local np = #pts / 2
     local g = { L2 = tow.L2, rear = tow.hitchToRear, hw = tow.halfW,
         front = tractorFront or 4, thw = tractorHalfW or 1.2 }
-    local out, ow, os, blocked, blockedR = {}, {}, {}, {}, {}
+    local out, ow, os, oa, blocked, blockedR, arcN = {}, {}, {}, {}, {}, {}, 0
     -- fold＝true（轉角規劃出來的點）：新點讓上一段反向（>90°；規劃點 0.5m 一點、圓弧 R≥4，正常每點
     -- 只轉幾度）就撤掉上一點再比。相鄰轉角段很短時，前一個轉角的轉出點已畫進本段、本轉角的外靠點又從
     -- 段中起算＝線往回折（0.13.1 正式服 StepVan＋掛車：90° 左轉接 13m 後 28° 彎，改寫線在 (10853,9976)
     -- 折返 176°，車頭到那裡 Follower 判原地調頭→TrailerRotate 交還）。原始路線節點（不可過的轉角）不做。
-    local function push(x, y, w, surf, fold)
+    local function push(x, y, w, surf, fold, arcR)
         local k = #out
         if k >= 2 and out[k - 1] == x and out[k] == y then return end
         while fold and k >= 4 do
@@ -464,10 +476,10 @@ function T.shape(route, tow, tractorHalfW, tractorFront)
             local vx, vy = x - out[k - 1], y - out[k]
             if ux * vx + uy * vy > 0 then break end
             out[k], out[k - 1] = nil, nil
-            ow[#ow], os[#os] = nil, nil
+            ow[#ow], os[#os], oa[#oa] = nil, nil, nil
             k = k - 2
         end
-        if k >= 2 then ow[#ow + 1], os[#os + 1] = w, surf end
+        if k >= 2 then ow[#ow + 1], os[#os + 1], oa[#oa + 1] = w, surf, arcR or 0 end
         out[k + 1], out[k + 2] = x, y
     end
     push(pts[1], pts[2], sw[1], ss[1])
@@ -479,13 +491,14 @@ function T.shape(route, tow, tractorHalfW, tractorFront)
         local c = T.cornerOf(px, py, nx, ny, qx, qy, wIn, wOut)
         local plan = c and T.planCorner(c, g) or nil
         if plan then
+            arcN = arcN + 1
             -- 車頭路線寫進 route：外靠段寬度縮成「以偏移線為中心的虛擬路寬」，
             -- 讓 Follower 的路寬證明對偏移線仍保守成立。
             -- 轉出段只能畫到下一個路線點之前（從切出點算起）：畫過頭再接下一點＝路線往回折，
             -- Follower 判成要原地調頭（E2E semi-hairpin-mp：轉過 143° 後在支路上被 TrailerRotate 交還）
             local exitRoom = c.lenOut - 1 - (plan.sOut > 0 and plan.sOut or 0)
             if exitRoom < 0 then exitRoom = 0 end
-            local n = candidate(c, plan.a, plan.b, plan.R, plan.ramp, plan.approach,
+            local n, _, _, arc0, arc1 = candidate(c, plan.a, plan.b, plan.R, plan.ramp, plan.approach,
                 plan.b ~= 0 and math.min(plan.exitLen, exitRoom) or 0)
             -- 只取節點前後各自實際段長內的點，不越過前一個／下一個路線點。不外靠（a＝0）的進入段就是原中心線，
             -- 只留到臂長一半：前一個轉角的圓弧可能畫到這一臂的 SEG_SHARE，進入點從更前面起算＝撤點後弧被截成
@@ -496,12 +509,16 @@ function T.shape(route, tow, tractorHalfW, tractorFront)
                 if back > -c.lenIn * 0.5 then back = -c.lenIn * 0.5 end
                 if back < -c.lenIn * 0.9 then back = -c.lenIn * 0.9 end
             end
+            -- 虛擬路寬下限＝Follower 路寬證明（MDADDynamics.rawBandContains：每側 halfW＋ROAD_EDGE_MARGIN）剛好過、再留
+            -- 每側 0.05：改寫線本身已由 simulate 驗過（掛點兩側在路面、車頭與掛車出路 ≤INTRUSION_MAX），證明只需認它。
+            -- 舊下限每側只留 0.2＝改寫段證明永遠不過，彎速一律落到 obb 近場帽 18 km/h（正式服 1,290 筆 sw＝2·halfW＋0.4）。
+            local minW = 2 * (g.thw + MDADDynamics.ROAD_EDGE_MARGIN) + 0.1
+            local prevK = nil
             for k = 1, n do
                 local x, y = XS[k], YS[k]
                 local along = (x - nx) * c.dIn[1] + (y - ny) * c.dIn[2]
                 local ahead = (x - nx) * c.dOut[1] + (y - ny) * c.dOut[2]
                 if along > back and ahead < c.lenOut - 1 then
-                    local minW = 2 * g.thw + 0.4
                     local vw = minW
                     if along < plan.sIn then
                         local off = abs((x - nx) * c.nIn[1] + (y - ny) * c.nIn[2])
@@ -509,11 +526,16 @@ function T.shape(route, tow, tractorHalfW, tractorFront)
                         if vw < minW then vw = minW end
                     end
                     if vw < 1 then vw = 1 end
-                    push(x, y, vw, ss[i - 1], true)
+                    -- 弧段＝前後兩點都是這個轉角的圓弧點（弧第一點之前那段是外靠直線）
+                    push(x, y, vw, ss[i - 1], true, (prevK == k - 1 and k > arc0 and k <= arc1) and plan.R or 0)
+                    prevK = k
                 end
             end
         else
-            if c and not plan and c.turnAbs >= T.BLOCK_MIN_RAD then
+            -- 最後一個節點的出臂短於到站半徑（MDADFollower.ARRIVE_M）＝車在轉之前就到站，不是要轉的角
+            -- （正式服 0.23.0 片段 (13956.5,3757)：路線終點 0.7 m 殘段折 135°，列不可過→終點前 19 m 交還、改道圈蓋住終點全被 end 拒收）
+            if c and not plan and c.turnAbs >= T.BLOCK_MIN_RAD
+                    and not (i == np - 1 and c.lenOut < MDADFollower.ARRIVE_M) then
                 blocked[#blocked + 1] = nx; blocked[#blocked + 1] = ny
                 blockedR[#blockedR + 1] = sqrt(c.hwIn * c.hwIn + c.hwOut * c.hwOut)
             end
@@ -522,10 +544,10 @@ function T.shape(route, tow, tractorHalfW, tractorFront)
     end
     push(pts[np * 2 - 1], pts[np * 2], sw[np - 1], ss[np - 1])
     -- 最後一段寬度／路面補齊（push 以「前一段」屬性記，最後一點需要 np-1 段）
-    while #ow < #out / 2 - 1 do ow[#ow + 1], os[#os + 1] = sw[np - 1], ss[np - 1] end
+    while #ow < #out / 2 - 1 do ow[#ow + 1], os[#os + 1], oa[#oa + 1] = sw[np - 1], ss[np - 1], 0 end
     local shaped = {}
     for k, v in pairs(route) do shaped[k] = v end
-    shaped.pts, shaped.segWidth, shaped.segSurface = out, ow, os
+    shaped.pts, shaped.segWidth, shaped.segSurface, shaped.segArcR, shaped.towArcN = out, ow, os, oa, arcN
     shaped.towBlocked, shaped.towBlockedR = blocked, blockedR
     shaped.towSource = route
     cacheB, cacheA = cacheA, { route = route, tow = tow, shaped = shaped }
@@ -558,6 +580,12 @@ function T.reverseSteer(phi)
     local s = -T.REVERSE_GAIN * phi
     if s > 2 then s = 2 elseif s < -2 then s = -2 end
     return s
+end
+
+-- 倒車折角還在上限內（讀不到＝不行）。Driver 起手（startRecoveryAttempt：超限＝rear=hitch 不吃額度）與
+-- 倒車中（stepUnstick：已退出 UNSTICK_MIN_M＝倒夠了，否則同起手）共用。
+function T.canReverse(phi)
+    return phi ~= nil and abs(phi) <= T.REVERSE_HITCH_MAX
 end
 
 -- 掛車車身（倒車後方探測用）：中心、拖行軸（forward×axisSign，朝掛點；探測往它的反方向）、半寬、半長。
@@ -625,6 +653,32 @@ function T.lostState(vehicle, tow)
         end)
     end
     return cur, alive, by, hd, kmh, up
+end
+
+-- 拖車樣本（1008；Driver collectPhys 只在拖車時、每筆取樣讀一次，telemetry tlo／tla／tkm／thd）：掛車車位相對牽引車車位的
+-- 縱向（車頭正）／橫向（右正，同 nb），fx, fy＝牽引車前向單位向量；掛車 km/h；hd（兩掛點世界距離 m，同 lostState）。
+-- MP 同步拉回掛車時看得到位置跳動與 hd 尖峰（正式服 0.23.0 SemiTruckLite＋貨櫃週期性掉速，缺這幾欄定不了罪）。
+-- 位置／車速與 hd 各自 pcall，讀不到的回 nil。
+function T.sampleState(vehicle, tow, fx, fy)
+    local tr = tow.trailer
+    local lon, lat, kmh, hd = nil, nil, nil, nil
+    pcall(function()
+        local dx, dy = tr:getX() - vehicle:getX(), tr:getY() - vehicle:getY()
+        lon, lat = dx * fx + dy * fy, dy * fx - dx * fy
+        kmh = tr:getCurrentSpeedKmHour()
+    end)
+    if tow.hitchSelf ~= nil and tow.hitchOther ~= nil then
+        pcall(function()
+            local a = BaseVehicle.allocVector3f()
+            local b = BaseVehicle.allocVector3f()
+            local pa = vehicle:getTowingWorldPos(tow.hitchSelf, a)
+            local pb = tr:getTowedByWorldPos(tow.hitchOther, b)
+            hd = dist(pa:x(), pa:y(), pb:x(), pb:y())
+            BaseVehicle.releaseVector3f(a)
+            BaseVehicle.releaseVector3f(b)
+        end)
+    end
+    return lon, lat, kmh, hd
 end
 
 -- 行駛防線（Driver 每幀呼叫；Java 讀取以 GUARD_MS 節流）。回 cap（km/h 或 nil）, why：

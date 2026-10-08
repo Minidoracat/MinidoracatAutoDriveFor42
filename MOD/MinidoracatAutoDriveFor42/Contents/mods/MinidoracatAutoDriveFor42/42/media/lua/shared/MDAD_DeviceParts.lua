@@ -57,7 +57,9 @@ function MDAD_DeviceParts.onPartInit(vehicle, part)
         end
     end
 
-    -- 稽核：只印當下槽裡真的有東西的車，空車不噴日誌
+    -- 稽核：只印當下槽裡真的有東西的車，空車不噴日誌。1008 起只在 getDebug()：遷移已結案，每次載入有裝置的車都印
+    -- 一行（正式服 52 小時約 2.5 萬行）會洗掉 console；真的遷移的事件（上面 events）照印。
+    if not (type(getDebug) == "function" and getDebug()) then return end
     for _, kind in ipairs({ "nav", "auto" }) do
         local slot = MDAD.getDevicePart(vehicle, kind)
         local item = slot and slot:getInventoryItem()

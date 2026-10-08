@@ -130,6 +130,21 @@ local EK = {
     "dir", "acc",
     -- lag arm（1006m）：實測落後的收斂率 λ（每公尺；0＝沒在收斂，缺＝歷史不夠、只用理論衰減）
     "rate",
+    -- impact（1008）：撞擊分類 hit／frozen／tow-sync（MDADUpload.impactClass）、有號掉速（前一筆有號 km/h − 本筆；倒退反號時 dv 會低估）
+    "cls", "dvs",
+    -- 1008 拖車：tow attach 外拉規劃用的掛點→車頭（MDADTrailer.hitchFront）；detour towcorner 附了車尾正後方圈（1）；
+    -- detour skip why=same 時車離上次轉角改道判定處的世界距離（m）
+    "front", "towRear", "moved",
+    -- 橫向覆蓋補掃（1008，dodge defer lateral-coverage／band-clear、blocked）：補掃帶心選法 nav／mid／none／cap／done、連續延後次數
+    "bsel", "bdn",
+    -- route ready（1008）：剖面路線上拖車外拉改寫的轉角數（Trailer.shape；弧段在樣本 tar）
+    "towArcN",
+    -- lag release（1008）：車頭弧長 rs+halfL、車尾弧長（拖車含掛車）、命中點的預測車身 lane（hitS／rate 共用上面的鍵）
+    "nose", "tail", "body",
+    -- 1008：takeover resume（讓位恢復後第一個跟線幀的橫偏、Follower 投影段號）；route far（why gate／watch／yield）當下的 s.mode
+    "lat", "fi", "mode",
+    -- zombie plan（1008）：車身橫向（lat，同上）、最近威脅 l、車身／舊 laneBias 速率可及量、近威脅限側基準、新可行性模型拒縫（reach／side）
+    "tl", "rb", "rl", "ns", "rej",
 }
 
 local function logOnce(msg)
@@ -1249,6 +1264,7 @@ local function encodePhys(phys)
     addBool("curveValid", "curveValid")
     addBool("curveHardActive", "curveHardActive")
     addNum("ffSteer", "sff")
+    addStr("exitCut", "xcw")          -- 1008：出弧殘餘轉角被收掉的原因（ff＝反向弧前饋、yaw＝車已反向轉、kink＝車前反向轉角；到下一個出弧前保留）
     addNum("yawGain", "yg")
     addNum("yawGainHi", "ygh")        -- 0928m：高速弧段學到的 yaw 增益（前饋補足用）
     addNum("yawGainFb", "ygf")        -- 1001h：回授正規化用的無偏 yaw 增益（yaw、steer 各自平均再相除）
@@ -1266,6 +1282,13 @@ local function encodePhys(phys)
     addNum("towUp", "tup")            -- 拖掛 upVectorDot（<0.8 原版拆掛）
     addNum("towDecel", "tda")         -- 施給掛車的減速度（m/s²；0929o 拖車減速分攤）
     addStr("towBrake", "tbw")          -- 拖車不鎖輪硬煞的理由（0929p Drive.hardBrake；空＝本幀沒走）
+    -- 1008 拖車樣本（MDADTrailer.sampleState，每筆取樣讀一次）：掛車車位相對牽引車的縱向（車頭正）／橫向（右正，同 nb）m、
+    -- 掛車 km/h、兩掛點世界距離 m（同 tow lost 的 hd）
+    addNum("towLon", "tlo")
+    addNum("towLat", "tla")
+    addNum("towKmh", "tkm")
+    addNum("towHd", "thd")
+    addNum("towArcR", "tar")          -- 1008：車所在段是拖車改寫弧＝規劃半徑（m；Trailer.shape segArcR；不是弧＝省略）
     addNum("curveVerifiedUntilS", "curveVerifiedUntilS")
     addNum("filletN", "filletN")
     addNum("filletFallbackN", "filletFallbackN")
@@ -1339,11 +1362,44 @@ local function encodePhys(phys)
     return bits
 end
 
+-- 拖車 tup 的最近幾筆（1008 tow-sync 分類用）：固定 TUP_N 格、新的放第 1 格往後挪（不用 %），表在第一次拖車取樣時配一次；
+-- 這筆沒有 tup（不拖車、沒 phys）就清空。
+local TUP_N = 6
+local function tupRecord(s, now, tup)
+    if not finite(tup) then s.tupN = 0; return end
+    local tt, tv = s.tupT, s.tupV
+    if not tt then
+        tt, tv = {}, {}
+        s.tupT, s.tupV = tt, tv
+    end
+    local n = s.tupN or 0
+    if n < TUP_N then n = n + 1 end
+    for k = n, 2, -1 do tt[k], tv[k] = tt[k - 1], tv[k - 1] end
+    tt[1], tv[1] = now, tup
+    s.tupN = n
+end
+
+-- 往前 win ms（含本筆）內 tup「先高後低」的最大降幅；不到兩筆＝nil（量不出來）。
+local function tupDrop(s, now, win)
+    local n = s.tupN or 0
+    if n < 2 or not finite(win) then return nil end
+    local hi, drop = nil, 0
+    for k = n, 1, -1 do -- 由舊到新
+        if now - s.tupT[k] <= win then
+            local v = s.tupV[k]
+            if hi == nil or v > hi then hi = v end
+            if hi - v > drop then drop = hi - v end
+        end
+    end
+    return drop
+end
+
 -- 取樣的上升緣與瞬移（D.sample 每筆取樣、編碼之前跑一次；狀態記在取樣閘門擁有者 s，不配 table）：
 --   contact＝footprint 命中由假轉真；impact＝與上傳片段同一個單筆門檻（MDADUpload.impactLike：前一筆→本筆的掉速、
 --   原始間隔、位移）由假轉真；teleport＝MDADUpload.teleportLike（伺服器拉回，1006）。回 force（encodeSensor 強制寫 near）。
---   s.edgeImp／s.edgeTp 為真時 edgeSpd／edgeGap／edgeMoved／edgeOldX／edgeOldY＝前一筆車速、原始間隔、位移、前一筆座標，
---   供 D.sample 發 impact／teleport 事件、encodeSample 寫 nb。
+--   s.edgeImp／s.edgeTp 為真時 edgeSpd／edgeSv／edgeGap／edgeMoved／edgeOldX／edgeOldY＝前一筆車速（絕對值／有號）、
+--   原始間隔、位移、前一筆座標，供 D.sample 發 impact／teleport 事件、掃 nb 與分類（1008）。
+--   s.impCls＝本段撞擊的分類（D.sample 在上升緣寫、整段沿用），本筆不過 impactLike 就清掉。
 local function sampleEdges(s, now, x, y, speed, phys, footprintBlocked)
     local fb = footprintBlocked == true
     local fbl = type(phys) == "table" and phys.forceBrakeLeft or nil
@@ -1361,9 +1417,13 @@ local function sampleEdges(s, now, x, y, speed, phys, footprintBlocked)
     s.edgeImp, s.edgeTp = imp and s.nearImp ~= true, tp
     if s.edgeImp or tp then
         s.edgeSpd, s.edgeGap, s.edgeMoved, s.edgeOldX, s.edgeOldY = s.nearSpd, gap, moved, px, py
+        s.edgeSv = s.nearSv
     end
+    if not imp then s.impCls = nil end
+    tupRecord(s, now, type(phys) == "table" and phys.towUp or nil)
     local force = (fb and s.nearFb ~= true) or s.edgeImp
     s.nearFb, s.nearImp, s.nearSpd, s.nearTs, s.nearLocked = fb, imp, spd, now, locked
+    s.nearSv = finite(speed) and speed or nil
     if finite(x) and finite(y) then s.nearX, s.nearY = x, y else s.nearX, s.nearY = nil, nil end
     return force
 end
@@ -1373,12 +1433,15 @@ end
 -- 動態物件來源；動物／玩家照 MDADSensor.softKindOf 的排除：死亡、被抱、在車上）取殭屍／動物／玩家；車輛走
 -- cell:getVehicles() 全域列舉（MP 靜止車的格註冊不可靠，同 Sensor 註解），NB_V_R 內、排除自己與掛車。
 -- 每類只留最近一筆 [距離, 縱向（車頭正）, 橫向（右正）]（m，距離量車心到物件中心），車再帶 km/h（倒車為負）。
+-- 1008 加屍體 c：同一方框逐格 getStaticMovingObjects 的 IsoDeadBody（同 Sensor 的屍體來源），每格各自 pcall——讀不到只少 c。
 -- 範圍內都沒有＝"nb":{}（掃了、沒有）；任何 getter 失敗＝整欄不寫。
+-- 第二回傳 near（1008 tow-sync 分類）：true＝方框內有殭屍／動物／玩家／屍體或 NB_R 內有車；false＝都沒有；
+-- nil＝沒掃成，或什麼都沒找到但屍體沒讀成。
 local NB_R = 8
 local NB_V_R = 15
 local function nearbyJson(pn, x, y, h)
     if not finite(x) or not finite(y) then return "" end
-    local ok, out = pcall(function()
+    local ok, out, near = pcall(function()
         local own = getSpecificPlayer(pn):getVehicle()
         local cell = getCell()
         local z = math.floor(own and own:getZ() or 0)
@@ -1387,7 +1450,8 @@ local function nearbyJson(pn, x, y, h)
         local ch, sh = 1, 0
         if finite(h) then ch, sh = math.cos(h), math.sin(h) end
         local soft = MDADSensor and MDADSensor.softKindOf
-        local zd, zx, zy, ad, ax, ay, pd, px, py
+        local zd, zx, zy, ad, ax, ay, pd, px, py, cd, cx, cy
+        local cOk = true
         for gy = math.floor(y - NB_R), math.floor(y + NB_R) do
             for gx = math.floor(x - NB_R), math.floor(x + NB_R) do
                 local sq = cell:getGridSquare(gx, gy, z)
@@ -1408,6 +1472,19 @@ local function nearbyJson(pn, x, y, h)
                                 ad, ax, ay = d2, ox, oy -- animal／small
                             end
                         end
+                    end
+                    if cOk then
+                        cOk = pcall(function()
+                            local smovs = sq:getStaticMovingObjects()
+                            for i = 0, smovs:size() - 1 do
+                                local b = smovs:get(i)
+                                if instanceof(b, "IsoDeadBody") then
+                                    local ox, oy = b:getX(), b:getY()
+                                    local d2 = (ox - x) * (ox - x) + (oy - y) * (oy - y)
+                                    if cd == nil or d2 < cd then cd, cx, cy = d2, ox, oy end
+                                end
+                            end
+                        end)
                     end
                 end
             end
@@ -1442,9 +1519,14 @@ local function nearbyJson(pn, x, y, h)
             n = n + 1
             parts[n] = p .. (finite(kmh) and ("," .. tostring(math.floor(kmh * 10 + 0.5) / 10)) or "") .. "]"
         end
-        return ',"nb":{' .. table.concat(parts, ",", 1, n) .. "}"
+        p = cOk and one("c", cd, cx, cy) or nil
+        if p then n = n + 1; parts[n] = p .. "]" end
+        local hit = zd ~= nil or ad ~= nil or pd ~= nil or (cOk and cd ~= nil) or (vd ~= nil and vd <= NB_R * NB_R)
+        local nearOut = hit or nil
+        if not hit and cOk then nearOut = false end
+        return ',"nb":{' .. table.concat(parts, ",", 1, n) .. "}", nearOut
     end)
-    if ok and type(out) == "string" then return out end
+    if ok and type(out) == "string" then return out, near end
     return ""
 end
 
@@ -1466,7 +1548,7 @@ local function encodeSample(s, now, x, y, heading, speed, target, remaining, lat
     if type(sensor) == "table" then
         extra = ',"sen":' .. encodeSensor(s, sensor, s.nearForce == true)
     end
-    if s.edgeImp then extra = extra .. nearbyJson(s.pn, x, y, heading) end
+    if s.edgeImp then extra = extra .. (s.edgeNb or "") end
     extra = extra .. encodePhys(phys)
     local pmjson = "null"
     if type(planMode) == "string" then pmjson = jstr(planMode) end
@@ -1792,6 +1874,13 @@ function D.sample(pn, now, x, y, heading, speed, target, remaining, lat, err,
     -- 記進 log 的是**這一幀真正採用的** 10Hz 判定（呼叫端旗標 or 誤差/模式推導），
     -- 不是呼叫端傳進來的原值：分析要對得上取樣密度。
     g.nearForce = sampleEdges(g, now, x, y, speed, phys, footprintBlocked)
+    -- 1008：撞擊上升緣先掃 nb（分類要看近處有沒有東西；encodeSample 直接寫這串），再分 hit／frozen／tow-sync；
+    -- 同一段連續撞擊沿用這個分類（sampleEdges 在段落結束時清掉）。
+    if g.edgeImp then
+        local near
+        g.edgeNb, near = nearbyJson(pn, x, y, heading)
+        g.impCls = MDADUpload.impactClass(speed, phys, footprintBlocked, near, tupDrop(g, now, MDADUpload.TOW_SYNC_MS))
+    end
     local line = encodeSample(g, now, x, y, heading, speed, target, remaining, lat, err,
         steer, force, mode, gear, regulator, sensor, crit,
         planMode, routeS, blockS, dodgeMargin, dodgeNeed, roadBias,
@@ -1802,7 +1891,7 @@ function D.sample(pn, now, x, y, heading, speed, target, remaining, lat, err,
         actualClearance, plannedClearance, footprintBlocked, footHitX, footHitY)
     if s and s.active then enqueue(s, line, now) end
     if u and not pcall(MDADUpload.sample, u, line, now, x, y, speed, target, mode,
-            remaining, lat, blocked, footprintBlocked, phys, heading, sensor) then
+            remaining, lat, blocked, footprintBlocked, phys, heading, sensor, g.nearImp and g.impCls or nil) then
         dropUpload(pn)
     end
     -- 1006：撞擊上升緣與伺服器拉回各記一筆事件，本機 session 也有（E2E／campaign 復盤；impactLike 原本只觸發上傳片段）。
@@ -1811,6 +1900,7 @@ function D.sample(pn, now, x, y, heading, speed, target, remaining, lat, err,
         local spd = finite(speed) and (speed < 0 and -speed or speed) or nil
         emitEvent(pn, now, "impact", {
             x = x, y = y, speed = round1(g.edgeSpd), dv = round1(spd and g.edgeSpd and g.edgeSpd - spd), ms = g.edgeGap,
+            cls = g.impCls, dvs = round1(finite(speed) and g.edgeSv and g.edgeSv - speed),
         })
     end
     if g.edgeTp then

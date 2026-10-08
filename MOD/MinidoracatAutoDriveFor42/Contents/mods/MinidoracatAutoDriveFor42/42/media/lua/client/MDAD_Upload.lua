@@ -63,8 +63,17 @@ local TELEPORT_PAD_M = 5
 -- clip-01：最近一隻在 25m 外也記成 impZ）。車心弧長取樣本字串的 rs（Driver 的 lastSNow）。
 local IMPACT_ZOMBIE_M = 4
 local IMPACT_HALF_L = 2.5 -- profile 沒有 halfL 時的半車長：取偏大（窗寬，寧可多記不漏記）
+-- 撞擊分類（1008，U.impactClass；Diagnostics 在上升緣算一次，整段連續撞擊沿用）。frozen 與 tow-sync 不算 impact、
+-- 不觸發片段、不進 impZ，摘要另計 frz／tws；本機與上傳的 impact 事件帶 cls。
+--   frozen＝MP 伺服器拉回前一筆的凍結樣本：車速與 vl／vt 三者精確為 0（真撞 200ms 內不會剛好三個 0；正式服 0.23.0
+--     片段兩例：71→0、64.8→0，下一筆座標跳 56／6 m）。
+--   tow-sync＝拖車時掛車被同步拉回、經約束拽住牽引車：沒煞車（ib、fbl）、沒 footprint、nb 方框內沒東西，且本筆往前
+--     TOW_SYNC_MS 內掛車 tup 從高點掉了 ≥TOW_SYNC_TUP（正式服 0.23.0 SemiTruckLite＋SemiTrailerContainer 6 例掉
+--     0.0033–0.0058；同批其他拖車真撞與接觸 ≤0.0004，其中 SemiTruck＋Cartrailer 的真撞撞前 tup 平穩、撞後才傾斜）。
+local TOW_SYNC_MS = 450
+local TOW_SYNC_TUP = 0.002
 
-U.PRE_MS, U.CHUNK, U.CLIP_MAX = PRE_MS, CHUNK, CLIP_MAX
+U.PRE_MS, U.CHUNK, U.CLIP_MAX, U.TOW_SYNC_MS = PRE_MS, CHUNK, CLIP_MAX, TOW_SYNC_MS
 
 -- 片段優先級：數字越小越重要（伺服器每人 32 段滿了先覆蓋數字大的）。
 -- detour（1004b）：自動／HUD 改道請求（不論成敗）——事前 PRE_MS 看得到判堵、寬帶判定與倒車，判斷是否太早改道。
@@ -118,6 +127,20 @@ function U.impactLike(prevSpd, spd, gap, locked, moved)
         and prevSpd - spd >= IMPACT_MIN_KMH
         and (prevSpd - spd) / 3.6 / (gap / 1000) >= (locked and IMPACT_DECEL_LOCKED or IMPACT_DECEL)
         and not U.teleportLike(prevSpd, spd, gap, moved)
+end
+
+-- 撞擊上升緣的分類（見 TOW_SYNC_MS 上方註解）：spd＝本筆車速（km/h）、phys＝本筆 phys、footprint＝本筆 footprint 命中、
+-- near＝nb 掃描結果（true 有近物、false 掃了沒有、nil 沒掃成）、tupDrop＝往前 TOW_SYNC_MS 內 tup 的最大降幅（不拖車 nil）。
+-- 回 "frozen"／"tow-sync"／"hit"；任何輸入缺席都落回 hit（寧可多記撞擊）。
+function U.impactClass(spd, phys, footprint, near, tupDrop)
+    if type(phys) ~= "table" then return "hit" end
+    if spd == 0 and phys.vLong == 0 and phys.vLat == 0 then return "frozen" end
+    local fbl = phys.forceBrakeLeft
+    if near == false and footprint ~= true and phys.isBraking ~= true and not (finite(fbl) and fbl > 0)
+            and finite(tupDrop) and tupDrop >= TOW_SYNC_TUP then
+        return "tow-sync"
+    end
+    return "hit"
 end
 
 local function nowMs()
@@ -209,6 +232,8 @@ function U.begin(pn, now, header, profile)
         impZ = 0, aaMs = 0, daMs = 0, prevZd = nil,
         -- 1006 伺服器拉回（瞬移）次數；prevImpX／Y＝前一筆座標（與 prevImpactSpd 成對）
         tp = 0, prevImpX = nil, prevImpY = nil,
+        -- 1008 不算撞擊的兩類（U.impactClass）：凍結樣本、拖車同步拽動的次數；prevImpLike＝前一筆過了 impactLike（只數上升緣）
+        frz = 0, tws = 0, prevImpLike = false,
         -- 1004e 越野推力：越野跟線毫秒；「想加速」相鄰兩筆同地表的對——越野／鋪面的毫秒與速度增量（m/s），
         -- 越野對加速度 <1.5 m/s² 的毫秒、越野對有前推輔助的毫秒、遞增倍率頂到 3 的毫秒。aSurf／aSpd＝前一筆狀態。
         oMs = 0, oaMs = 0, oaDv = 0, olMs = 0, oasMs = 0, obMs = 0, paMs = 0, paDv = 0, aSurf = nil, aSpd = nil,
@@ -479,9 +504,10 @@ local function accelKpi(u, phys, speed, target, mode, gap)
     if finite(asb) and asb >= 3 - 1e-6 then u.obMs = u.obMs + gap end
 end
 
--- 取樣：line 已由 MDAD_Diagnostics 編好（與本機紀錄同一字串，不重複編碼）。
+-- 取樣：line 已由 MDAD_Diagnostics 編好（與本機紀錄同一字串，不重複編碼）。cls＝這筆若在撞擊段內，
+-- Diagnostics 在上升緣算的分類（U.impactClass；整段沿用，不在撞擊段＝nil）。
 function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
-        blocked, footprintBlocked, phys, heading, sensor)
+        blocked, footprintBlocked, phys, heading, sensor, cls)
     push(u, line, now)
     if finite(x) and finite(y) then
         if not u.x0 then u.x0, u.y0 = x, y end
@@ -591,14 +617,20 @@ function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
     local px, py = u.prevImpX, u.prevImpY
     if px and finite(x) and finite(y) then moved = math.sqrt((x - px) * (x - px) + (y - py) * (y - py)) end
     if finite(speed) and U.teleportLike(prevSpd, spd, gap, moved) then u.tp = u.tp + 1 end
-    if finite(speed) and U.impactLike(prevSpd, spd, gap, fbNow or fbWas, moved)
-            and not (u.impactAt and now >= u.impactAt and now - u.impactAt < IMPACT_REARM_MS) then
+    local imp = finite(speed) and U.impactLike(prevSpd, spd, gap, fbNow or fbWas, moved)
+    if imp and (cls == "frozen" or cls == "tow-sync") then
+        -- 1008 不是撞擊：同一段只在上升緣數一次，不觸發片段、不進 impact／impZ
+        if not u.prevImpLike then
+            if cls == "frozen" then u.frz = u.frz + 1 else u.tws = u.tws + 1 end
+        end
+    elseif imp and not (u.impactAt and now >= u.impactAt and now - u.impactAt < IMPACT_REARM_MS) then
         u.impact, u.impactAt = u.impact + 1, now
         -- 撞擊那筆或前一筆有殭屍在車身附近（多半是撞進殭屍群；也可能是殭屍旁的別的東西）
         local zw, pz = u.halfL + IMPACT_ZOMBIE_M, u.prevZd
         if (zd and zd <= zw) or (pz and pz <= zw) then u.impZ = u.impZ + 1 end
         trigger(u, now, "impact")
     end
+    u.prevImpLike = imp == true
     u.prevImpactSpd = finite(speed) and spd or nil
     if finite(x) and finite(y) then u.prevImpX, u.prevImpY = x, y else u.prevImpX, u.prevImpY = nil, nil end
     u.prevZd = zd
@@ -632,7 +664,7 @@ function U.event(u, line, now, name, a)
         trigger(u, now, "detour")
     elseif name == "blocked" or name == "unstick" or name == "progress" then
         u.lastAnomaly = now
-    elseif name == "takeover" and now - u.lastAnomaly <= ANOMALY_TAKEOVER_MS then
+    elseif name == "takeover" and phase == "yield" and now - u.lastAnomaly <= ANOMALY_TAKEOVER_MS then -- resume（1008）不是接手
         trigger(u, now, "takeover")
     end
     captureTick(u, now)
@@ -690,7 +722,8 @@ local function summaryText(u, now, reason, withMaps)
         .. ',"fm":' .. jnum(u.fm) .. ',"nm":' .. jnum(u.nm)
         .. ',"em":' .. jround(u.fm > 0 and u.emSum / u.fm or nil, 10)
         .. ',"arc":' .. u.arcN .. ',"arcOver":' .. u.arcOver .. ',"arcDev":' .. u.arcDev
-        .. ',"impZ":' .. u.impZ .. ',"tp":' .. u.tp .. ',"aaMs":' .. jnum(u.aaMs) .. ',"daMs":' .. jnum(u.daMs)
+        .. ',"impZ":' .. u.impZ .. ',"tp":' .. u.tp .. ',"frz":' .. u.frz .. ',"tws":' .. u.tws
+        .. ',"aaMs":' .. jnum(u.aaMs) .. ',"daMs":' .. jnum(u.daMs)
         .. ',"oMs":' .. jnum(u.oMs) .. ',"oaMs":' .. jnum(u.oaMs) .. ',"oaDv":' .. jround(u.oaDv, 100)
         .. ',"olMs":' .. jnum(u.olMs) .. ',"oasMs":' .. jnum(u.oasMs) .. ',"obMs":' .. jnum(u.obMs)
         .. ',"paMs":' .. jnum(u.paMs) .. ',"paDv":' .. jround(u.paDv, 100)
