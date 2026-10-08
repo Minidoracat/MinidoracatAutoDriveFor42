@@ -157,6 +157,7 @@
     "UI_MinidoracatAutoDrive_HUDWingLShow": " <RGB:0.82,0.66,0.31>Развернуть левое крыло <RGB:0.93,0.92,0.87> <SPACE>(статус, скорость, круиз, главная кнопка)",
     "UI_MinidoracatAutoDrive_HUDWingRHide": " <RGB:0.82,0.66,0.31>Свернуть правое крыло <RGB:0.93,0.92,0.87> <SPACE>(режим и настройки останутся значком)",
     "UI_MinidoracatAutoDrive_HUDWingRShow": " <RGB:0.82,0.66,0.31>Развернуть правое крыло <RGB:0.93,0.92,0.87> <SPACE>(режим, политики, АКБ/топливо, настройки)",
+    "UI_MinidoracatAutoDrive_HUDWingRBlocked": " <RGB:0.82,0.66,0.31>Мини-карта закрывает правое крыло <RGB:0.93,0.92,0.87> <SPACE>(пока свёрнуто; переместите или закройте мини-карту, чтобы развернуть)",
     "UI_MinidoracatAutoDrive_HUDStyleButton": "Стиль",
     "UI_MinidoracatAutoDrive_HUDHideButton": "Скрыть",
     "UI_MinidoracatAutoDrive_HUDShowButton": "Показать",

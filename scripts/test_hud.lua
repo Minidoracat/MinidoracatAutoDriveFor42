@@ -474,6 +474,9 @@ local function newDashboard()
 end
 local dashboards = { [0] = newDashboard(), [1] = newDashboard() }
 function getPlayerVehicleDashboard(playerNum) return dashboards[playerNum] end
+-- 原版 getPlayerMiniMap（ISPlayerData.lua）；預設沒有小地圖，側掛避開小地圖的情境自己放。
+TestMiniMaps = {}
+function getPlayerMiniMap(playerNum) return TestMiniMaps[playerNum] end
 local escapeVisible = false
 MainScreen = { instance = {
     inGame = true,
@@ -916,6 +919,65 @@ for i = 1, #wingBands do
 end
 check(#wingBands > 0 and painted == 0 and gapR > gapL,
     "wings background paints both wings and leaves the dashboard gap untouched")
+-- 小地圖壓到展開的右翼（1009）：右翼在版面層被收起、chevron 改說明原因、點了不改 modData；
+-- 小地圖關掉或移開後，下一輪 refresh 就重排回玩家自己的收合偏好。違規證明：拿掉
+-- layoutWings 的收起＝第一條紅；拿掉 refresh 的比對＝放上、關掉、移開小地圖都不重排，從第一條起連續紅。
+do
+    local mm = { x = 0, y = 0, w = 300, h = 300, shown = true }
+    function mm:isReallyVisible() return self.shown end
+    function mm:getAbsoluteX() return self.x end
+    function mm:getAbsoluteY() return self.y end
+    function mm:getWidth() return self.w end
+    function mm:getHeight() return self.h end
+    local openRightW = panel._wingRightW
+    local rightEdge = dashboards[0].x + dashboards[0].width + openRightW
+    local wingTop = dashboards[0].y + 7
+    local function place(x, y, shown)
+        mm.x, mm.y, mm.shown = x, y, shown
+        panel:refresh(nowMs)
+    end
+    local function openAndMine(label)
+        check(panel._style == 4 and panel._wingRBlocked == false and panel._wingRFolded == false
+            and panel._wingRightW == openRightW and panel.gearButtons[1].visible
+            and panel.collapseButton.tooltip == "UI_MinidoracatAutoDrive_HUDWingRHide", label)
+    end
+    TestMiniMaps[0] = mm
+    place(rightEdge - 20, 1080 - 10 - 300, true)
+    check(panel._wingRBlocked == true and panel._wingRFolded == true and panel._wingR == false
+        and player._md.MDADHudWingR ~= true and not panel.gearButtons[1].visible
+        and panel._wingRightW < openRightW and panel.collapseButton.visible,
+        "wings theme: a visible minimap over the unfolded right wing folds it without touching modData")
+    checkEq(panel.collapseButton.tooltip, "UI_MinidoracatAutoDrive_HUDWingRBlocked",
+        "wings theme: the blocked right chevron explains the minimap instead of offering to unfold")
+    local mdBefore, savesBefore = player._md.MDADHudWingR, optionSaveCalls
+    click(panel.collapseButton)
+    check(panel._wingR == false and player._md.MDADHudWingR == mdBefore
+        and optionSaveCalls == savesBefore and panel._wingRFolded == true,
+        "wings theme: clicking the blocked chevron does not flip the player's preference")
+    place(mm.x, mm.y, false)
+    openAndMine("wings theme: closing the minimap re-lays out on the next refresh and unfolds the right wing")
+    place(rightEdge - 20, 1080 - 10 - 300, true)
+    check(panel._wingRBlocked == true, "wings theme: reopening the minimap folds the right wing again")
+    place(rightEdge + 4 + 1, 1080 - 10 - 300, true)
+    openAndMine("wings theme: dragging the minimap clear of the right wing (and its gap) unfolds it")
+    place(rightEdge - 20, wingTop - 300, true)
+    openAndMine("wings theme: a minimap above the wing row does not fold the right wing")
+    click(panel.collapseButton)
+    check(panel._wingR == true and player._md.MDADHudWingR == true and panel._wingRBlocked == false,
+        "wings theme: with the minimap clear the chevron still folds by preference")
+    place(rightEdge - 20, 1080 - 10 - 300, true)
+    check(panel._wingR == true and panel._wingRFolded == true and panel._wingRBlocked == false
+        and panel.collapseButton.tooltip == "UI_MinidoracatAutoDrive_HUDWingRShow",
+        "wings theme: a wing the player folded is not reported as blocked (moving the minimap would not unfold it)")
+    place(rightEdge + 4 + 1, 1080 - 10 - 300, true)
+    check(panel._wingR == true and panel._wingRFolded == true and panel._wingRBlocked == false
+        and panel.collapseButton.tooltip == "UI_MinidoracatAutoDrive_HUDWingRShow",
+        "wings theme: after the minimap leaves, a wing the player folded stays folded")
+    click(panel.collapseButton)
+    TestMiniMaps[0] = nil
+    panel:refresh(nowMs)
+    openAndMine("wings theme: no minimap leaves the unfolded right wing as before")
+end
 click(panel.themeButton)
 check(panel._style == 1, "style button cycles wings → metal")
 check(not panel.wingButton.visible, "leaving the wings theme hides the left-wing chevron (2026-09-02 實機截圖回歸)")

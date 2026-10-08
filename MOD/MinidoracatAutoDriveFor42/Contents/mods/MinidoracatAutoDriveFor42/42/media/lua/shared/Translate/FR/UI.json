@@ -157,6 +157,7 @@
     "UI_MinidoracatAutoDrive_HUDWingLShow": " <RGB:0.82,0.66,0.31>Déplier l'aile gauche <RGB:0.93,0.92,0.87> <SPACE>(état, vitesse, croisière, bouton principal)",
     "UI_MinidoracatAutoDrive_HUDWingRHide": " <RGB:0.82,0.66,0.31>Replier l'aile droite <RGB:0.93,0.92,0.87> <SPACE>(le mode et les réglages restent en badge)",
     "UI_MinidoracatAutoDrive_HUDWingRShow": " <RGB:0.82,0.66,0.31>Déplier l'aile droite <RGB:0.93,0.92,0.87> <SPACE>(mode, politiques, batterie/carburant, réglages)",
+    "UI_MinidoracatAutoDrive_HUDWingRBlocked": " <RGB:0.82,0.66,0.31>La mini-carte masque l'aile droite <RGB:0.93,0.92,0.87> <SPACE>(repliée pour l'instant ; déplacez ou fermez la mini-carte pour la déplier)",
     "UI_MinidoracatAutoDrive_HUDStyleButton": "Style",
     "UI_MinidoracatAutoDrive_HUDHideButton": "Masquer",
     "UI_MinidoracatAutoDrive_HUDShowButton": "Afficher",

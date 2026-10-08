@@ -157,6 +157,7 @@
     "UI_MinidoracatAutoDrive_HUDWingLShow": " <RGB:0.82,0.66,0.31>Rozwiń lewe skrzydło <RGB:0.93,0.92,0.87> <SPACE>(status, prędkość, tempomat, główny przycisk)",
     "UI_MinidoracatAutoDrive_HUDWingRHide": " <RGB:0.82,0.66,0.31>Zwiń prawe skrzydło <RGB:0.93,0.92,0.87> <SPACE>(tryb i ustawienia zostają jako plakietka)",
     "UI_MinidoracatAutoDrive_HUDWingRShow": " <RGB:0.82,0.66,0.31>Rozwiń prawe skrzydło <RGB:0.93,0.92,0.87> <SPACE>(tryb, zasady, akumulator/paliwo, ustawienia)",
+    "UI_MinidoracatAutoDrive_HUDWingRBlocked": " <RGB:0.82,0.66,0.31>Minimapa zasłania prawe skrzydło <RGB:0.93,0.92,0.87> <SPACE>(na razie zwinięte; przesuń lub zamknij minimapę, aby je rozwinąć)",
     "UI_MinidoracatAutoDrive_HUDStyleButton": "Styl",
     "UI_MinidoracatAutoDrive_HUDHideButton": "Ukryj",
     "UI_MinidoracatAutoDrive_HUDShowButton": "Pokaż",

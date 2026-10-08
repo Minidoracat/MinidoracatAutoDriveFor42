@@ -157,6 +157,7 @@
     "UI_MinidoracatAutoDrive_HUDWingLShow": " <RGB:0.82,0.66,0.31>Desplegar el ala izquierda <RGB:0.93,0.92,0.87> <SPACE>(estado, velocidad, crucero, botón principal)",
     "UI_MinidoracatAutoDrive_HUDWingRHide": " <RGB:0.82,0.66,0.31>Plegar el ala derecha <RGB:0.93,0.92,0.87> <SPACE>(modo y ajustes quedan como insignia)",
     "UI_MinidoracatAutoDrive_HUDWingRShow": " <RGB:0.82,0.66,0.31>Desplegar el ala derecha <RGB:0.93,0.92,0.87> <SPACE>(modo, políticas, batería/combustible, ajustes)",
+    "UI_MinidoracatAutoDrive_HUDWingRBlocked": " <RGB:0.82,0.66,0.31>El minimapa tapa el ala derecha <RGB:0.93,0.92,0.87> <SPACE>(plegada por ahora; mueve o cierra el minimapa para desplegarla)",
     "UI_MinidoracatAutoDrive_HUDStyleButton": "Estilo",
     "UI_MinidoracatAutoDrive_HUDHideButton": "Ocultar",
     "UI_MinidoracatAutoDrive_HUDShowButton": "Mostrar",

@@ -157,6 +157,7 @@
     "UI_MinidoracatAutoDrive_HUDWingLShow": " <RGB:0.82,0.66,0.31>展開左側 <RGB:0.93,0.92,0.87>（狀態、現速、巡航與主按鈕）",
     "UI_MinidoracatAutoDrive_HUDWingRHide": " <RGB:0.82,0.66,0.31>收起右側 <RGB:0.93,0.92,0.87>（檔位與設定收成小徽章）",
     "UI_MinidoracatAutoDrive_HUDWingRShow": " <RGB:0.82,0.66,0.31>展開右側 <RGB:0.93,0.92,0.87>（檔位、策略、電量油量與設定）",
+    "UI_MinidoracatAutoDrive_HUDWingRBlocked": " <RGB:0.82,0.66,0.31>右側被小地圖擋住 <RGB:0.93,0.92,0.87>（暫時收起；移開或關閉小地圖就會展開）",
     "UI_MinidoracatAutoDrive_HUDStyleButton": "樣式",
     "UI_MinidoracatAutoDrive_HUDHideButton": "隱藏",
     "UI_MinidoracatAutoDrive_HUDShowButton": "展開",

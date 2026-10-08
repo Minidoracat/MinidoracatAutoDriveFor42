@@ -1400,7 +1400,7 @@ function MDADHUDPanel:layoutWings(scale, m)
     local timeW, clockW = maximum(m.timeLabelW, m.clockW), m.clockW
     local etaW = maximum(m.etaLabelW, m.etaValueW)
 
-    local dashW, dashH, dashX = self:dashboardGeometry()
+    local dashW, dashH, dashX, dashY = self:dashboardGeometry()
     local wingH = maximum(scaled(56, scale), dashH - DASH_VISIBLE_TOP_INSET)
     local maxW = m.maxW
 
@@ -1422,6 +1422,7 @@ function MDADHUDPanel:layoutWings(scale, m)
     if ctrlH * wingRows + gap * (wingRows - 1) > wingH
             or leftOpenW + dashW + rightFoldW > maxW then
         self._style = STYLE_METAL
+        self._wingRBlocked = false
         return self:layoutStacked(scale, m)
     end
     local foldL, foldR = self._wingL == true, self._wingR == true
@@ -1430,6 +1431,12 @@ function MDADHUDPanel:layoutWings(scale, m)
     end
     if totalW() > maxW then foldR = true end
     if totalW() > maxW then foldL = true end
+    -- 小地圖壓到展開右翼的範圍（例：原版小地圖在右下角）：右翼收起（版面層強制，不動 modData），
+    -- chevron 改說明原因、點了不切換。只有原本會展開的右翼才算被擋：玩家自己收起或寬度不夠而摺起時，
+    -- 移開小地圖也不會展開，說明會騙人。量測照樣每次做（miniMapOverWingR 順便記下矩形給 syncMiniMapAvoid）。
+    -- 左翼不避：左翼收起就沒有主鈕可按。
+    self._wingRBlocked = self:miniMapOverWingR(dashX, dashY, dashW, dashH, rightOpenW + gap, wingH) and not foldR
+    if self._wingRBlocked then foldR = true end
     self._wingLFolded, self._wingRFolded = foldL, foldR
     local leftW = foldL and leftFoldW or leftOpenW
     local rightW = foldR and rightFoldW or rightOpenW
@@ -1584,6 +1591,39 @@ function MDADHUDPanel:dashboardGeometry()
         if dashboard.getY then y = dashboard:getY() end
     end
     return w, h, x, y
+end
+
+-- 本玩家的小地圖看得到時回絕對矩形（x, y, w, h），否則 nil（同 MiniMap 的 toastAvoidRect）。
+function MDADHUDPanel:miniMapRect()
+    local mm = getPlayerMiniMap(self.playerNum)
+    if mm == nil or not mm:isReallyVisible() then return nil end
+    return mm:getAbsoluteX(), mm:getAbsoluteY(), mm:getWidth(), mm:getHeight()
+end
+
+-- 側翼列（y＝可見儀表板頂緣、高 wingH，算法同 reposition）上，小地圖是否壓到展開右翼的
+-- 範圍 [dashX＋dashW, dashX＋dashW＋openW]。順便記下這次量到的矩形，給 syncMiniMapAvoid 比對。
+function MDADHUDPanel:miniMapOverWingR(dashX, dashY, dashW, dashH, openW, wingH)
+    local mx, my, mw, mh = self:miniMapRect()
+    self._mmX, self._mmY, self._mmW, self._mmH = mx, my, mw, mh
+    if mx == nil then return false end
+    local pn = self.playerNum
+    local top, height = getPlayerScreenTop(pn), getPlayerScreenHeight(pn)
+    if dashX == nil then
+        dashX = getPlayerScreenLeft(pn) + math.floor((getPlayerScreenWidth(pn) - dashW) / 2)
+    end
+    local wy = dashY and (dashY + DASH_VISIBLE_TOP_INSET)
+        or (top + height - dashH + DASH_VISIBLE_TOP_INSET)
+    if wy + wingH > top + height then wy = top + height - wingH end
+    local x0 = dashX + dashW
+    return my < wy + wingH and wy < my + mh and mx < x0 + openW and x0 < mx + mw
+end
+
+-- 側掛主題下，小地圖開關、拖動、縮放後即時重排：只比數字欄位（不配置 table），變了才 applyLayout。
+function MDADHUDPanel:syncMiniMapAvoid()
+    local mx, my, mw, mh = self:miniMapRect()
+    if mx ~= self._mmX or my ~= self._mmY or mw ~= self._mmW or mh ~= self._mmH then
+        self:applyLayout()
+    end
 end
 
 function MDADHUDPanel:applyLayout()
@@ -2536,6 +2576,7 @@ function MDADHUDPanel:refresh(now)
         return
     end
     self:setHudVisible(true)
+    if self._style == STYLE_WINGS then self:syncMiniMapAvoid() end
     self:reposition()
 
     local token, gear, cap, zombieOn, corpseOn, resumeIn, elapsed, reason =
@@ -2744,9 +2785,12 @@ function MDADHUDPanel:updateButtons()
         actionBg, actionText = C.button, C.muted
     end
     styleButton(self.actionButton, actionBg, actionText, true)
-    -- 側掛：兩顆 chevron 各自報自己那片的方向（左翼／右翼），其餘主題沿用整面板文案。
+    -- 側掛：兩顆 chevron 各自報自己那片的方向（左翼／右翼），其餘主題沿用整面板文案；
+    -- 右翼被小地圖擋住而收起時改說明原因（點了也不切換，見 onCollapse）。
     local wings = self._style == STYLE_WINGS
-    self.collapseButton.tooltip = getText((wings and self._wingR or self._collapsed)
+    self.collapseButton.tooltip = getText((wings and self._wingRBlocked)
+        and "UI_MinidoracatAutoDrive_HUDWingRBlocked"
+        or (wings and self._wingR or self._collapsed)
         and (wings and "UI_MinidoracatAutoDrive_HUDWingRShow"
             or "UI_MinidoracatAutoDrive_HUDExpand")
         or (wings and "UI_MinidoracatAutoDrive_HUDWingRHide"
@@ -3110,7 +3154,10 @@ function MDADHUDPanel:saveSpeedBox(x, y)
 end
 
 function MDADHUDPanel:onCollapse()
-    if self._style == STYLE_WINGS then return self:setWing("right", not self._wingR) end
+    if self._style == STYLE_WINGS then
+        if self._wingRBlocked then return end
+        return self:setWing("right", not self._wingR)
+    end
     self:setCollapsed(not self._collapsed)
 end
 

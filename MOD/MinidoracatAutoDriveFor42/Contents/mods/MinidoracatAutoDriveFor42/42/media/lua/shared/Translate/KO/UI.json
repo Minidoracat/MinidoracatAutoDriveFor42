@@ -157,6 +157,7 @@
     "UI_MinidoracatAutoDrive_HUDWingLShow": " <RGB:0.82,0.66,0.31>왼쪽 날개 펼치기 <RGB:0.93,0.92,0.87> <SPACE>(상태, 속도, 순항, 주 버튼)",
     "UI_MinidoracatAutoDrive_HUDWingRHide": " <RGB:0.82,0.66,0.31>오른쪽 날개 접기 <RGB:0.93,0.92,0.87> <SPACE>(모드와 설정은 배지로 남음)",
     "UI_MinidoracatAutoDrive_HUDWingRShow": " <RGB:0.82,0.66,0.31>오른쪽 날개 펼치기 <RGB:0.93,0.92,0.87> <SPACE>(모드, 정책, 배터리/연료, 설정)",
+    "UI_MinidoracatAutoDrive_HUDWingRBlocked": " <RGB:0.82,0.66,0.31>미니맵이 오른쪽 날개를 가립니다 <RGB:0.93,0.92,0.87> <SPACE>(잠시 접어 둡니다. 미니맵을 옮기거나 닫으면 펼쳐집니다)",
     "UI_MinidoracatAutoDrive_HUDStyleButton": "스타일",
     "UI_MinidoracatAutoDrive_HUDHideButton": "숨기기",
     "UI_MinidoracatAutoDrive_HUDShowButton": "표시",

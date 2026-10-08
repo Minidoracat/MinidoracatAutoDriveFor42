@@ -157,6 +157,7 @@
     "UI_MinidoracatAutoDrive_HUDWingLShow": " <RGB:0.82,0.66,0.31>左ウィングを展開 <RGB:0.93,0.92,0.87>（状態・速度・巡航・メインボタン）",
     "UI_MinidoracatAutoDrive_HUDWingRHide": " <RGB:0.82,0.66,0.31>右ウィングを折りたたむ <RGB:0.93,0.92,0.87>（ギアと設定はバッジに）",
     "UI_MinidoracatAutoDrive_HUDWingRShow": " <RGB:0.82,0.66,0.31>右ウィングを展開 <RGB:0.93,0.92,0.87>（ギア・方針・電池／燃料・設定）",
+    "UI_MinidoracatAutoDrive_HUDWingRBlocked": " <RGB:0.82,0.66,0.31>右ウィングがミニマップと重なっています <RGB:0.93,0.92,0.87>（一時的に折りたたみ中。ミニマップを動かすか閉じると展開します）",
     "UI_MinidoracatAutoDrive_HUDStyleButton": "スタイル",
     "UI_MinidoracatAutoDrive_HUDHideButton": "隠す",
     "UI_MinidoracatAutoDrive_HUDShowButton": "表示",

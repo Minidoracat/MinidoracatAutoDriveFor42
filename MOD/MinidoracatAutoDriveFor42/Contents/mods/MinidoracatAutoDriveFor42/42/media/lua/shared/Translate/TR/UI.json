@@ -157,6 +157,7 @@
     "UI_MinidoracatAutoDrive_HUDWingLShow": " <RGB:0.82,0.66,0.31>Sol kanadı aç <RGB:0.93,0.92,0.87> <SPACE>(durum, hız, seyir, ana düğme)",
     "UI_MinidoracatAutoDrive_HUDWingRHide": " <RGB:0.82,0.66,0.31>Sağ kanadı katla <RGB:0.93,0.92,0.87> <SPACE>(mod ve ayarlar rozet olarak kalır)",
     "UI_MinidoracatAutoDrive_HUDWingRShow": " <RGB:0.82,0.66,0.31>Sağ kanadı aç <RGB:0.93,0.92,0.87> <SPACE>(mod, politikalar, akü/yakıt, ayarlar)",
+    "UI_MinidoracatAutoDrive_HUDWingRBlocked": " <RGB:0.82,0.66,0.31>Mini harita sağ kanadı kapatıyor <RGB:0.93,0.92,0.87> <SPACE>(şimdilik katlandı; açmak için mini haritayı taşıyın veya kapatın)",
     "UI_MinidoracatAutoDrive_HUDStyleButton": "Stil",
     "UI_MinidoracatAutoDrive_HUDHideButton": "Gizle",
     "UI_MinidoracatAutoDrive_HUDShowButton": "Göster",

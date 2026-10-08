@@ -157,6 +157,7 @@
     "UI_MinidoracatAutoDrive_HUDWingLShow": " <RGB:0.82,0.66,0.31>Linken Flügel ausklappen <RGB:0.93,0.92,0.87> <SPACE>(Status, Tempo, Tempomat, Hauptknopf)",
     "UI_MinidoracatAutoDrive_HUDWingRHide": " <RGB:0.82,0.66,0.31>Rechten Flügel einklappen <RGB:0.93,0.92,0.87> <SPACE>(Modus und Einstellungen bleiben als Plakette)",
     "UI_MinidoracatAutoDrive_HUDWingRShow": " <RGB:0.82,0.66,0.31>Rechten Flügel ausklappen <RGB:0.93,0.92,0.87> <SPACE>(Modus, Regeln, Batterie/Tank, Einstellungen)",
+    "UI_MinidoracatAutoDrive_HUDWingRBlocked": " <RGB:0.82,0.66,0.31>Die Minimap verdeckt den rechten Flügel <RGB:0.93,0.92,0.87> <SPACE>(vorerst eingeklappt; verschiebe oder schließe die Minimap, um ihn auszuklappen)",
     "UI_MinidoracatAutoDrive_HUDStyleButton": "Stil",
     "UI_MinidoracatAutoDrive_HUDHideButton": "Ausblenden",
     "UI_MinidoracatAutoDrive_HUDShowButton": "Einblenden",
