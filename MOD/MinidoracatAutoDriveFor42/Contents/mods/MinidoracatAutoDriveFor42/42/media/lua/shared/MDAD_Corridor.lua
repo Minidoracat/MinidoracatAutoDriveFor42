@@ -321,8 +321,8 @@ end
 -- 擋線判定（單一定義；plan 步驟①②與 Driver 的 blocksLine 共用）：第 i 點擋不擋以 bl 為中心、半寬 needHalf 的行駛線。
 -- lineL／lineR（選填）＝Sensor 的 hardLc／hardW：引擎形狀位置的橫向偏移與掃掠模型的橫向半寬（方塊半邊×|cos|+|sin|、
 -- 圓半徑），＝sweepLine 以 pad＝needHalf−halfW 掃同一條線時的命中條件 |l−bl| < halfW＋半寬＋pad——「規劃說淨空」
--- 與「世界掃掠說淨空」對同一條線一致（1005；正式服 0.18.2 Ywy clip-19：取樣點 l 在快照間 4.38→3.50→4.31，
--- 樹被判成擋線 0.01m、停止錨跳到車前；GGGMAMEER clip-22／23：端柱取樣 l 4.5、形狀 4.03，以 0.01m 判淨空後撞上）。
+-- 與「世界掃掠說淨空」對同一條線一致（1005；正式服 0.18.2 clip-19：取樣點 l 在快照間 4.38→3.50→4.31，
+-- 樹被判成擋線 0.01m、停止錨跳到車前；clip-22／23：端柱取樣 l 4.5、形狀 4.03，以 0.01m 判淨空後撞上）。
 -- 該點沒有形狀位置（呼叫端附加的虛擬 ban、舊 fixture）退回取樣點 hardL＋規劃半徑 hardR。縫隙搜尋（laneFree）
 -- 刻意留在取樣點：那份 ±0.5 的隱含餘裕蓋住彎中追線落後（0929f 全面改格心的教訓）。
 -- ponytail: 掃掠對 r ≥ 0.5 的圓扣 SWEEP_QUANT_COMP（MDADDynamics.sweepRadius），這裡不扣；Sensor 目前沒有這種圓

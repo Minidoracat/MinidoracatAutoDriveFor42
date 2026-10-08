@@ -964,7 +964,7 @@ local function encodeNear(sensor)
 end
 
 -- force（1005）＝impact／contact 上升緣那一筆：快照 stamp 沒換也寫 near（撞擊幀原本可能沒有點雲，
--- 正式服 0.18.2 ImJustAtoms clip-04、Loni clip-08）。
+-- 正式服 0.18.2 clip-04、clip-08）。
 local function encodeSensor(s, sensor, force)
     local stamp = sensor.stamp
     local near = ""

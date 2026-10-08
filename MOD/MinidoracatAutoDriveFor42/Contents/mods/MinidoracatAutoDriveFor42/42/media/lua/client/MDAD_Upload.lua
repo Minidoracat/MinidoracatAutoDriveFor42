@@ -45,13 +45,13 @@ local INC_MAX = 8
 -- （0.16.0 兩車對撞 61→1.6 km/h／0.21s＝79 m/s²、69→49／0.21s＝26 m/s²，片段只標成「煞車」）。
 local IMPACT_DECEL = 18
 -- 鎖輪中（本筆或前一筆 fbl>0）的門檻：一秒鎖輪之外，本 MOD 的中線減速輔助（Drive.visAssistForce，上限
--- DODGE_ASSIST_MAX 7 m/s²）在閂鎖期間照施，合計量到 23 m/s²（1002y 正式服 kanazawa9988/clip-11：blocked 鎖輪
+-- DODGE_ASSIST_MAX 7 m/s²）在閂鎖期間照施，合計量到 23 m/s²（1002y 正式服 clip-11：blocked 鎖輪
 -- ＋繞行輔助，停在障礙前 1.7m、沒碰到卻記成撞擊）。兩車對撞的 26／79 m/s² 仍在門檻之上。
 local IMPACT_DECEL_LOCKED = 25
 local IMPACT_MIN_KMH = 5
 local IMPACT_REARM_MS = 2000
 -- 相鄰兩筆的原始間隔超過這麼久＝中間沒取樣（讓位接手、遊戲暫停）：速度差不是同一段減速，不比。
--- （1002y RubyDiamond/clip-29：讓位 5.7 秒、恢復時 0 km/h，dt 被夾成 1 秒算出 24.9 m/s²＝假撞擊）
+-- （1002y clip-29：讓位 5.7 秒、恢復時 0 km/h，dt 被夾成 1 秒算出 24.9 m/s²＝假撞擊）
 local IMPACT_GAP_MAX_MS = 1000
 -- 伺服器拉回（瞬移）：相鄰兩筆位移超過 max(前後速度)×原始間隔×TELEPORT_K＋TELEPORT_PAD_M＝座標被伺服器改寫，不是
 -- 開過去的；同一筆的掉速也是拉回造成的，不算撞擊（1005j 正式服 41 km/h 時一筆跳 171m、另一次 49m，兩次都被記成
@@ -59,7 +59,7 @@ local IMPACT_GAP_MAX_MS = 1000
 local TELEPORT_K = 1.5
 local TELEPORT_PAD_M = 5
 -- impZ（帶內有殭屍的撞擊）：撞擊那筆或前一筆的帶內最近殭屍（Sensor zombieNearS，完成輪快照、最多舊一輪，
--- 所以兩筆取近者）離車心 ≤ 半車長＋IMPACT_ZOMBIE_M 才算。zombieN 是整條感知帶的數量（1002y ImJustAtoms/
+-- 所以兩筆取近者）離車心 ≤ 半車長＋IMPACT_ZOMBIE_M 才算。zombieN 是整條感知帶的數量（1002y
 -- clip-01：最近一隻在 25m 外也記成 impZ）。車心弧長取樣本字串的 rs（Driver 的 lastSNow）。
 local IMPACT_ZOMBIE_M = 4
 local IMPACT_HALF_L = 2.5 -- profile 沒有 halfL 時的半車長：取偏大（窗寬，寧可多記不漏記）

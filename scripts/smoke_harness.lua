@@ -5621,7 +5621,7 @@ do
     checkEq(MDAD.Drive.accelAssistForce(acc, 40, 60, 0.8), 0, "(acc) 離期望線 −0.6m：不補")
     acc.lastLatDev = 0.45
     checkTrue(MDAD.Drive.accelAssistForce(acc, 40, 60, 0.8) > 0, "(acc) 離期望線 0.45m：照補")
-    -- (acc-head) 1002a 正式服 0.17.0 Silence/clip-04：出 19° 折點車頭偏 9°、ld −0.43（偏差門檻內）時開始補，
+    -- (acc-head) 1002a 正式服 0.17.0 clip-04：出 19° 折點車頭偏 9°、ld −0.43（偏差門檻內）時開始補，
     --   1.5 秒 24→44 km/h 越線 0.56m 擦路邊。違規證明：拿掉航向門檻＝第一條紅。
     acc.lastRouteErr = 0.16
     checkEq(MDAD.Drive.accelAssistForce(acc, 40, 60, 0.8), 0, "(acc-head) 車頭偏離路線 9°：不補")
@@ -5643,7 +5643,7 @@ do
     acc.fstate.kinkHeld = nil
     checkTrue(MDAD.Drive.accelAssistForce(acc, 10, 20, 0.8) > 0, "(acc-kink) 放行之後：照補")
     acc.fstate = nil
-    -- (acc-why) 1002a 朝已知障礙接近的帽不補（Aho/clip-21：待承諾繞行時補到 45 km/h，再從 39.5 一秒鎖輪）。
+    -- (acc-why) 1002a 朝已知障礙接近的帽不補（clip-21：待承諾繞行時補到 45 km/h，再從 39.5 一秒鎖輪）。
     --   違規證明：拿掉理由白名單＝前一組紅；白名單漏 curve-coast＝後一組紅。
     for _, r in ipairs({ "dodge-defer", "zombie", "zombie-lane", "moving", "dodge", "align", "corpse" }) do
         acc.lastCapReason = r
@@ -5696,7 +5696,7 @@ checkTrue(dveh._imp.torqueY * drive.rotSnapTq > 0,
 dveh._speed = 30
 driveReset(dveh)
 driveTick(dp, dveh)
--- 1001e：25 km/h 以上的調頭前煞停改不鎖輪（正式服 susu 82 km/h 換目標要調頭，連續鎖輪 4.5 秒只減到 27 km/h）：
+-- 1001e：25 km/h 以上的調頭前煞停改不鎖輪（正式服一例 82 km/h 換目標要調頭，連續鎖輪 4.5 秒只減到 27 km/h）：
 -- 只有沿車頭反向的中線減速力、方向盤不轉。違規證明：hardBrake 拿掉 rotate 分支＝forceBrake 0 那條紅。
 checkTrue(drive.pureBrake(dveh),
     "誤差 160°、車速 30 km/h：速度閘煞停不施側推（yield 中調頭再放手不得瞬間甩車）")
@@ -7564,7 +7564,7 @@ function drive.scenarioBrakeAssist()
     st.laneCurveStamp, st.fstate.profileSpeedKmh = oldStampSA, 12
     st.profile.coastAssistAt, st.fstate.idx = oldAt, oldIdx
     -- (traffic-assist) 1002q：會車／跟車帽只夾 regulator＝斷油滑行；超過帽照超速量補中線外力（上限 DODGE_ASSIST_MAX）
-    --   （正式服 0.17.0 pigpig/clip-02：前車 35m 才出現、帽 43→25、vad 0，只滑到 61）。違規證明：拿掉 traffic 帳＝紅。
+    --   （正式服 0.17.0 clip-02：前車 35m 才出現、帽 43→25、vad 0，只滑到 61）。違規證明：拿掉 traffic 帳＝紅。
     do
         local keep = { st.trafficCapKmh, st.laneCurveStamp, st.fstate.profileSpeedKmh, st.dodgeDeferCap,
             st.zombieLaneCap, st.blockedApproachCap, st.dodging }
@@ -7582,7 +7582,7 @@ function drive.scenarioBrakeAssist()
             keep[1], keep[2], keep[3], keep[4], keep[5], keep[6], keep[7]
     end
     -- (curve-lane) 1002a：目標由車道包絡（證明線的 lane curve envelope）裁決、比剖面低時，輔助追車道包絡
-    --   （正式服 0.17.0 kkbug/clip-03：lce 26 vs 剖面 38、vad 0，38 km/h 衝進 26 km/h 的 90° 折點側滑撞上）。
+    --   （正式服 0.17.0 clip-03：lce 26 vs 剖面 38、vad 0，38 km/h 衝進 26 km/h 的 90° 折點側滑撞上）。
     --   包絡過期（stamp 不符）或等於車輛極速（直路 κ＝0）不追。
     --   違規證明：拿掉 lane 分支＝第一條紅；拿掉 stamp 條件＝第二條紅；拿掉極速條件＝第三條紅。
     local oldLce, oldStamp = st.laneCurveEnvelope, st.laneCurveStamp
@@ -7614,7 +7614,7 @@ function drive.scenarioBrakeAssist()
     checkEq(st.visAssistDecel, 0, "(curve-lane) 直路包絡＝車輛極速：不是彎道帳、不追")
     st.laneCurveEnvelope, st.laneCurveStamp = oldLce, oldStamp
     -- (zl-assist) 1002a：殭屍軟縫的縱向配合帽也用同一條中線外力追（正式服 40 段帽低於實速 8 以上、39 段 vad 0；
-    --   0.17.0 Aho/clip-19：77 km/h 對帽 12 只滑到 70 就撞進殭屍群）。繞行中不追（帽本來就不套）。
+    --   0.17.0 clip-19：77 km/h 對帽 12 只滑到 70 就撞進殭屍群）。繞行中不追（帽本來就不套）。
     --   違規證明：拿掉 zombie-lane 分支＝第一條紅；拿掉 not dodging＝第二條紅。
     st.visibilityCap, st.fstate.profileSpeedKmh = 120, 120
     st.zombieLaneCap = 12
@@ -7871,7 +7871,7 @@ do
     dveh._speed = 90
     driveReset(dveh)
     driveTick(dp, dveh)
-    -- 1002a：待承諾接近的硬煞 25 km/h 以上改不鎖輪（同 blocked 接近；正式服 0.17.0 Aho/clip-21 39.5 km/h
+    -- 1002a：待承諾接近的硬煞 25 km/h 以上改不鎖輪（同 blocked 接近；正式服 0.17.0 clip-21 39.5 km/h
     -- 一秒鎖到 0）。違規證明：hardBrake 拿掉 dodge-defer＝紅。
     checkTrue(drive.calls.forceBrake == 0 and st.lastHardBrakeReason == "dodge-defer"
             and math.abs((st.visAssistDecel or 0) - MDAD.Drive.debugTune().TOW_BRAKE_DECEL) < 1e-9
@@ -8661,7 +8661,7 @@ function drive.scenarioZombiePlan()
         "(zp-least) 無縫時往最不壞的 lane 偏（why " .. tostring(s.zombieWhy) .. "、lane "
         .. tostring(s.fstate.laneBias) .. "）")
     drive.clearCell(15, -1); drive.clearCell(15, 0); drive.clearCell(15, 3); drive.clearCell(15, -4)
-    -- (zp-least-near) 1004a 正式服 0.18.2 kanazawa clip-08：無縫、整條帶都搆得到時，least 從車身這一側翻到最近
+    -- (zp-least-near) 1004a 正式服 0.18.2 clip-08：無縫、整條帶都搆得到時，least 從車身這一側翻到最近
     --   那隻的另一側（0.6 秒後就到）。近威脅的 least 同樣只在車身這一側取。違規證明：least 不限側＝紅。
     drive.putSolid(15, 3, "zp_leastn_r"); drive.putSolid(15, -4, "zp_leastn_l")
     s = arm(0)
@@ -8884,7 +8884,7 @@ end
 drive.scenarioZombieSwap()
 
 -- (zfar) 1004a 玩家回報「繞道後一直走路邊草地，要到第一次轉彎或殭屍／屍體出現才回到路上」；正式服 0.18.2
---   GGGMAMEER clip-22：殭屍走了、軟縫回常駐線的側移檢查看整個軟縫視窗（車速×4.5s，80 km/h＝100m），遠處
+--   clip-22：殭屍走了、軟縫回常駐線的側移檢查看整個軟縫視窗（車速×4.5s，80 km/h＝100m），遠處
 --   常駐線旁一根硬物就判 hard，lane 停在偏移處 2 秒、再停 10 秒；車速降下來（彎道、殭屍／屍體減速）視窗縮到
 --   40m 才放行。現制只驗側移真的會掃過的那段（Drive.softShiftEndS，至少 SOFT_LOOKAHEAD_M）。
 --   (zfar-far)  80 km/h、lane 停在常駐線外 y0，側移路上 60m 外有樹（不擋常駐線、不擋 y0）：回到常駐線。
@@ -9362,7 +9362,7 @@ function drive.scenarioSoftSide()
 end
 drive.scenarioSoftSide()
 
--- (soft-flip) 1005j 正式服 SemiTruckBox_mil clip-08（同期 imprezalhd clip-18、1004g M998 clip-17 同型）：三隻殭屍（某一輪相對車位
+-- (soft-flip) 1005j 正式服 SemiTruckBox_mil clip-08（同期 clip-18、1004g M998 clip-17 同型）：三隻殭屍（某一輪相對車位
 --   (56,−1.7)／(60,1.6)／(63,−0.6)）、常駐 3、帶 a＝−3、b 每輪在 2.63–3.39 間跳。b 高時右縫在、b 低時無縫走 least 取帶另一端
 --   −3；lane 一擺，威脅帶（含目前 lane）就換成相距 4m 多的另一隻，softKeepSide 的「同一個威脅」（弧長 3m、橫向 0.5m）
 --   不成立，want 在 −3↔+3.3 反號，車身停在中間撞上。這裡平移成常駐 0（l 全減 3），Δs 照原樣。
@@ -13318,7 +13318,7 @@ end
 drive.scenarioEntryStretch()
 
 -- (kin) 承諾線進入段的運動學證明（1006；open-issue「承諾線曲率對 rMin 的可行性沒檢查」「陡峭的回家停留線」，1004a
---   正式服 ImJustAtoms clip-03：停留回家 2.25m 側移塞 2.29m 進入段，陡坡閘比例 3 剛好放行）：線本身掃得過，但車以 rMin
+--   正式服 clip-03：停留回家 2.25m 側移塞 2.29m 進入段，陡坡閘比例 3 剛好放行）：線本身掃得過，但車以 rMin
 --   走 S 彎最快也要 Lo＝2·sqrt(dl·rMin−dl²/4) 才換得完。進入段拉到 Lo（b 往後推）的同一條線以物理檔重掃，撞到＝拒收
 --   （blocked 事件 kind＝kin）；障礙再遠一點、Lo 線也過＝照原線承諾；小 jog（(sp2) 0.25m／1.2m）照放行。predicate 級（測試鉤直接餵，
 --   不經 shapeProfile／陡坡閘），證明線起點＝rs（一般繞行 a−TANGENT_PREVIEW_M 早於車位就取 rs）。
@@ -16038,7 +16038,7 @@ local function scenarioPhaseE()
         hotVeh._speed = speedWas7
         drive.frameMs(frameWas7)
     end
-    -- (ret-fast) 1004a 正式服 0.18.2 ImJustAtoms clip-02：62 km/h 承諾 11.7m 做 2.9m 的回線 → 轉向飽和、過衝 0.86m、
+    -- (ret-fast) 1004a 正式服 0.18.2 clip-02：62 km/h 承諾 11.7m 做 2.9m 的回線 → 轉向飽和、過衝 0.86m、
     --   62.8 km/h 撞樹。實速超過 RETURN_CAP 時回線長至少要讓側向加速度不超過可用值：L ≥ v·√(6·Δ/aLat)
     --   （與 MDADDynamics.shiftLength 的 lLat 同一個物理下限）；RETURN_CAP 以下照舊 max(4Δ, 8, 車長)。
     --   違規證明：updateReturnSnapshot 不套 Drive.returnLineFloor＝(ret-fast) 紅。
@@ -16910,7 +16910,7 @@ local function scenarioPhaseE()
             hotVeh._speed = 40
             driveReset(hotVeh)
             driveTick(dp, hotVeh)
-            -- 1001d：高於 RETURN_NOLOCK_KMH 的回線待命硬煞改不鎖輪（斷油＋中線外力、照常轉向；正式服 FuFu
+            -- 1001d：高於 RETURN_NOLOCK_KMH 的回線待命硬煞改不鎖輪（斷油＋中線外力、照常轉向；正式服一例
             -- 52 km/h 鎖輪直直滑出去）。違規證明：RETURN_NOLOCK_KMH 改 999 即紅。
             checkTrue(drive.calls.forceBrake == 0 and (captured.visAssistDecel or 0) > 0 and drive.calls.regulatorOn == 0,
                 "(hold-coast) 40 km/h 回線待命仍硬煞，但不鎖輪（forceBrake " .. drive.calls.forceBrake
@@ -17085,7 +17085,7 @@ local function scenarioPhaseE()
             AutoDriveMaxSpeed = 40, ObstaclePolicy = 1, RightLaneBias = 0 })
     end
     drive.scenarioReturnDodgeLane()
-    -- ③d RETURN 回線走完（rs ≥ returnEndS）後不再壓住規劃（正式服 0.18.2 Qoo clip-13、salomon clip-32）：線尾段車還
+    -- ③d RETURN 回線走完（rs ≥ returnEndS）後不再壓住規劃（正式服 0.18.2 clip-13、clip-32）：線尾段車還
     --    外擺（偏差 > RETURN_CLEAR_DEV、不放）時，前方擋常駐線的硬點被 return-suppress 吞掉 0.5 秒，28 km/h 撞 pad。
     --    回線段（rs < returnEndS）照舊由 RETURN 持有、規劃不插手；線尾段交還規劃，掃掠驗過的繞行接手（RETURN 結束）。
     --    硬點放在回線線尾外（return-guard 只掃到線尾、看不到它），只有規劃看得到。
@@ -19732,7 +19732,7 @@ function drive.scenarioThreeCarHandoff()
 end
 drive.scenarioThreeCarHandoff()
 
--- (beside) 1002t：正式服 20261002b Aho clip-24／AngryPanda clip-11：P1 繞行的回線段順手讓過 P2（10m 後、只擋常駐線），
+-- (beside) 1002t：正式服 20261002b clip-24／clip-11：P1 繞行的回線段順手讓過 P2（10m 後、只擋常駐線），
 --   整車過 c 的第一個完成輪 next-group 交接時 P2 就在車身旁。主候選從常駐線規劃 → entry／steep 塑形失敗，
 --   舊 handoffReady 卻以 `not ok` 回 true；正式鏈的直走／爬行檔又被 P3（舊線尾後）deadend 拒 → blocked
 --   停止線＝shape 失敗的 b（≤ rs+halfL）→ 34 km/h 鎖輪。契約：舊線仍有效時塑形失敗不交接，P2 離開規劃
@@ -19821,8 +19821,8 @@ function drive.scenarioHandoffBesideGroup(p2x, p2y)
         oldWorld, oldGeo, oldSandbox, oldVeh, oldGet
     MDAD.Drive.setGear(0, oldGear)
 end
-drive.scenarioHandoffBesideGroup(57, 1) -- P2 起點在車頭後（Aho：entry）
-drive.scenarioHandoffBesideGroup(58, 2) -- P2 起點在車頭前 1–2m（AngryPanda 同族；本 fixture 回 entry）
+drive.scenarioHandoffBesideGroup(57, 1) -- P2 起點在車頭後（clip-24：entry）
+drive.scenarioHandoffBesideGroup(58, 2) -- P2 起點在車頭前 1–2m（clip-11 同族；本 fixture 回 entry）
 
 -- 0909b 感知距離可調（48/80/120/160/200，動態上限 240）的四個審查反例。一個 setup、
 -- 四個彼此獨立的邊界；量的全是真 Sensor 快照與真承諾線的行為，不手塞 ready／stamp。
@@ -21419,7 +21419,7 @@ function drive.scenarioApproach()
     st = MDAD.Drive.debugSession(0)
     checkTrue(st ~= nil and st.approachM == 0,
         "(apr-far) 超過 20m 不接越野線（approachM=" .. tostring(st and st.approachM) .. "）")
-    -- (apr-perp) 0928b E2E replay Annilex：車在路線中段旁 15m 草地（超過 RETURN_MAX_DEV 12、未超過 SNAP_MAX_M 20）：
+    -- (apr-perp) 0928b E2E replay clip-05：車在路線中段旁 15m 草地（超過 RETURN_MAX_DEV 12、未超過 SNAP_MAX_M 20）：
     --   把「車位→最近點」接成剖面開頭、最近點之前捨去，感知／繞行才看得到中間的障礙。
     --   違規證明：拿掉 far 分支＝不接（approachM 0）紅。
     checkTrue(arm(40, -15, math.pi / 2), "(apr-perp) 路線中段旁 15m 啟動")
@@ -21678,7 +21678,7 @@ function drive.scenarioExitKeep()
 end
 drive.scenarioExitKeep()
 
--- (relg) 1004a 正式服 0.18.2 Sixya clip-11／MI clip-01（同一點、兩台車、同一事件序）：承諾期間 laneBias 凍結在
+-- (relg) 1004a 正式服 0.18.2 clip-11／clip-01（同一點、兩台車、同一事件序）：承諾期間 laneBias 凍結在
 --   commit 值、常駐線隨路面對中漂走；出口釋放後期望線一幀跳回常駐線，規劃只問常駐線判 clear，車身卻還在舊出口
 --   線上、車鼻前 1m 有物件 → 5→17 km/h 撞上。釋放時車離接下來要跟的線 > START_GUARD_LAT_M＝重新武裝起步近物
 --   限速（Drive.armReleaseGuard），以前半車身淨距限速到對正。
@@ -21772,7 +21772,7 @@ function drive.scenarioReleaseGuard()
             .. tostring(st.frontClearance) .. " floor=" .. tostring(st.startGuardFloorKmh) .. "）")
         drive.clearCell(x0 + 3, -1)
     end
-    -- (relg-tail) 1004a 正式服 0.18.2 Qoo clip-15：快照裡擋常駐線的點落在車尾與車心之間（Corridor.plan／判堵錨
+    -- (relg-tail) 1004a 正式服 0.18.2 clip-15：快照裡擋常駐線的點落在車尾與車心之間（Corridor.plan／判堵錨
     --   都從 rs−halfL 收）。提前釋放的擋線檢查也從車尾起算＝不放手、沿承諾線走；舊制從車心找＝放手後同輪判堵、
     --   錨在車身旁鎖輪。點由 Sensor.step 完成輪時注入（車身旁的點不在新掃描窗內，正式服是同輪車已開過去）。
     --   違規證明：exitReady 改回從車心找＝(relg-tail) 紅。
@@ -21823,7 +21823,7 @@ function drive.scenarioDodgeTerminalVis()
 end
 drive.scenarioDodgeTerminalVis()
 
--- 0928l 正式服 salomon 兩則回報（6289,11203 拖一般車交還；5188,11151 一直原地旋轉）：
+-- 0928l 正式服兩則玩家回報（6289,11203 拖一般車交還；5188,11151 一直原地旋轉）：
 --   (tt)  拖車要調頭：先要一條不用調頭的繞行（避讓圈在車尾正後方），等 cutover 期間停住，沒有才交還。
 --         違規證明：towTurnaround 一律回 false＝(tt1) 交還紅；routeLeavesForward 恆 true＝(tt3) 收下倒車線紅；
 --         避讓圈往車頭前放（fx 反號）＝(tt1) 圈心位置紅。
@@ -22800,9 +22800,9 @@ function drive.scenario0928()
     for y = -9, 9 do drive.clearCell(50, y) end
     -- (line-geom) 1005：擋線判定（Corridor.plan 步驟①②、blocksLine＝resolveBlockAnchor／nearestLineBlocker）用引擎形狀
     --   位置（Sensor hardLc）＋掃掠同一套橫向半寬（hardW：方塊半邊×boxK、圓半徑），縫隙搜尋仍用取樣點 hardL／hardR。
-    --   幽靈（正式服 0.18.2 Ywy clip-19）：樹的取樣點 l 在快照間跳到 3.34、離 lane 2.0 只差 r+need 0.01＝舊制判擋線、
+    --   幽靈（正式服 0.18.2 clip-19）：樹的取樣點 l 在快照間跳到 3.34、離 lane 2.0 只差 r+need 0.01＝舊制判擋線、
     --   錨落在車前 12m；樹幹形狀在 4.2，lane 2.0＋1.2＋0.15＝3.35 碰不到＝不擋，錨留在真正擋線的 60m 那台。
-    --   漏判（GGGMAMEER clip-22／23）：端柱取樣 l 3.91＝舊制以 0.01 判淨空；方塊形狀在 3.44（面 2.94），lane 2.0 的
+    --   漏判（clip-22／23）：端柱取樣 l 3.91＝舊制以 0.01 判淨空；方塊形狀在 3.44（面 2.94），lane 2.0 的
     --   規劃半寬到 3.2＝擋線；同一條線的世界掃掠（sweepLine 的方塊式）也撞。
     --   違規證明：Corridor 擋線退回 hardL／hardR、blocksLine 不傳 hardLc／hardW、Sensor 不寫形狀橫向、hardW 方塊用規劃
     --   半徑、pre-a 淨距窗改成 [a,c] 或少加 pad 各紅。
@@ -23384,7 +23384,7 @@ function drive.scenario0928c()
     driveReset(dveh)
     driveTick(dp, dveh)
     checkEq(st.progressState, "watch", "(hitch) 卡頓 3.6 秒只動 0.5m：不判 suspect（實得 " .. tostring(st.progressState) .. "）")
-    -- (freeze) 1004a 正式服 0.18.2 Qoo clip-16：整個客戶端凍住 5.8 秒、恢復首幀 fdt 只有 27ms（不是頂到上限的
+    -- (freeze) 1004a 正式服 0.18.2 clip-16：整個客戶端凍住 5.8 秒、恢復首幀 fdt 只有 27ms（不是頂到上限的
     --   83ms），物理一樣只前進一小步。違規證明：條件改回「幀時 ≥80ms」＝(freeze) 紅。
     drive.frameMs(30)
     for _ = 1, 4 do
@@ -23700,7 +23700,7 @@ function drive.scenarioChainFar()
 end
 drive.scenarioChainFar()
 
--- (chain-keep) 1004a 正式服 0.18.2 dandankk clip-30：6m 路停留 2.25 釋放後鏈上 lane 被常駐 keep 0.6 夾回 1.12，
+-- (chain-keep) 1004a 正式服 0.18.2 clip-30：6m 路停留 2.25 釋放後鏈上 lane 被常駐 keep 0.6 夾回 1.12，
 --   車被拉回障礙側、重錨兩次仍被夾 → blocked 停死交還（open-issues「鏈上 lane 被 clampLane 拉回障礙側」）。
 --   鏈上 lane 是掃掠驗過的絕對 lane：鏈著時 fstate.laneKeep＝0，期望線停在鏈 lane（只夾物理餘裕）。
 --   違規證明：laneKeep 不給鏈 0＝(chain-keep) 紅。
@@ -23923,7 +23923,7 @@ function drive.scenario0929j()
     checkTrue(ov.dodgeAlignHold, "(align) 未對正 hold 進遙測")
     ov.lastVehicleHeading, ov.lastLatDev = 0, 0.5
     checkNear(MDAD.Drive.dodgeAlignCap(ov, 30, 12), 12, 1e-12, "(align) 偏線 0.5m：同樣不加速")
-    -- (align-latch) 1004a 正式服 0.18.2 kanazawa clip-10：未對正期間被外力減速（撞殭屍），舊制每幀夾「當下車速」
+    -- (align-latch) 1004a 正式服 0.18.2 clip-10：未對正期間被外力減速（撞殭屍），舊制每幀夾「當下車速」
     --   13.8→6 km/h 一路棘輪往下爬。夾的值閂在剛偏離時的車速，只跟著自己的帽往下。
     --   違規證明：每幀改回夾當下車速＝(align-latch) 紅。
     checkNear(MDAD.Drive.dodgeAlignCap(ov, 30, 8), 12, 1e-12, "(align-latch) 外力掉到 8：帽仍是偏離時的 12")

@@ -623,12 +623,12 @@ check(eta0t ~= nil and eta0t >= 2000 and eta0t <= 2200,
 check(string.find(sum, '"eta0":null', 1, true) ~= nil, "a drive without any estimate writes eta0 null, not 0")
 
 -- 1004 撞擊誤報（正式服 1002y）：
---  (a) 讓位接手期間不取樣，恢復時拿 5.7 秒前的 90 km/h 跟 0 比、dt 夾成 1 秒＝24.9 m/s²（RubyDiamond/clip-29）；
+--  (a) 讓位接手期間不取樣，恢復時拿 5.7 秒前的 90 km/h 跟 0 比、dt 夾成 1 秒＝24.9 m/s²（clip-29）；
 --      間隔 1.2 秒、90→0 用原始間隔算是 20.8 m/s²：中間沒取樣就不比。
---  (b) blocked 一秒鎖輪＋本 MOD 中線減速輔助量到 22.9 m/s²，沒碰到東西（kanazawa9988/clip-11）：本筆或前一筆
+--  (b) blocked 一秒鎖輪＋本 MOD 中線減速輔助量到 22.9 m/s²，沒碰到東西（clip-11）：本筆或前一筆
 --      鎖輪時門檻 25；(c) 沒鎖輪的 22 m/s² 仍是撞擊。
---  (d) impZ 只算車身附近有殭屍的撞擊（ImJustAtoms/clip-01 最近一隻 25m 外也算）；殭屍快照最多舊一輪，撞擊那筆
---      或前一筆近就算（RubyDiamond/clip-28 撞上那筆的新快照已換成 31m 外的下一隻）。
+--  (d) impZ 只算車身附近有殭屍的撞擊（clip-01 最近一隻 25m 外也算）；殭屍快照最多舊一輪，撞擊那筆
+--      或前一筆近就算（clip-28 撞上那筆的新快照已換成 31m 外的下一隻）。
 -- 違規證明：拿掉間隔上限＝(a) 1.2s 紅；改回夾限 dt＝(a) 兩案紅；鎖輪門檻改回 18／拿掉本筆或前一筆的鎖輪判定＝(b) 紅；
 -- 門檻抬到 25＝(c) 紅；impZ 改回 zombieN>0／拿掉本筆或前一筆的距離＝(d) 紅。
 scenario("1004 impact false positives: sampling gap, locked wheels plus own assist, far zombies")
@@ -719,7 +719,7 @@ imp, impZ, tp = impactDrive("(tp-fast) 120 km/h for one 1s gap", function()
 end)
 checkEq(tp, 0, "(tp-fast) 33m in 1s at 120 km/h is normal travel, not a teleport")
 
--- 1005：impact／contact 上升緣那一筆強制寫 near（快照 stamp 沒換也寫；正式服 0.18.2 ImJustAtoms clip-04 撞擊幀沒有點雲），
+-- 1005：impact／contact 上升緣那一筆強制寫 near（快照 stamp 沒換也寫；正式服 0.18.2 clip-04 撞擊幀沒有點雲），
 -- near 每顆點帶引擎形狀的橫向 lc（擋線判定用）。違規證明：拿掉 force＝(contact)(impact) 紅；impact 不看上升緣＝
 -- (impact) 數到 2 紅；contact 不看上升緣＝(held) 紅；encodeNear 不寫 lc＝(lc) 紅。
 scenario("1005 near: forced on the impact/contact rising edge, carries the shape lateral lc")

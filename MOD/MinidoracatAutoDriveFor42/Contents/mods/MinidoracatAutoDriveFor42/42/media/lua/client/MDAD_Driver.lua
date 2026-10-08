@@ -175,7 +175,7 @@ TUNE.DODGE_ALIGN_COS = math.cos(5 * math.pi / 180)
 TUNE.DODGE_ALIGN_DEV_MAX_M = 1.0
 -- 起步近物限速（0928a；0.13.1 起步 15 秒內接觸 13 趟，0.13.0 為 4）：起步時車常不在規劃車道上（路邊
 -- 斜停、離線數公尺），規劃器以車道判斷的淨空與車身實際掃過的不同——前半車身旁的桿、欄杆只剩 0.2–3m
--- 時車已加到 16–28 km/h（seems/clip-14、C86/clip-06、Annilex/clip-05）。起步到「貼上車道並對正」持續
+-- 時車已加到 16–28 km/h（clip-14、clip-06、clip-05）。起步到「貼上車道並對正」持續
 -- START_GUARD_HOLD_MS（或駛離起點 START_GUARD_MAX_M）之前，車頭前方帶內最近硬物淨距以滑行減速度套接近
 -- 包絡；接觸閘照舊。倒車脫困開始時重新武裝（又是從障礙旁起步）。1004e：帽低於 MIN_EXEC 不再被抬回（見
 -- Drive.startGuardApply），停住 START_NEAR_STALL_MS 就倒車；往常駐線斜切的路徑由 Drive.transitionHold 管。
@@ -349,7 +349,7 @@ TUNE.CURVE_ASSIST_HEADROOM = 2.0
 -- 包絡「在收」的門檻（km/h／次呼叫；Drive.visAssistForce 前饋閘）：沿收油包絡每幀至少掉 a·dt（240 FPS、
 -- 4 m/s² 仍有 0.06），弧內 latSafe EWMA 的漂移遠小於此。
 TUNE.ASSIST_FALL_KMH = 0.02
--- 繞行超速的減速輔助上限（0928a；HOHOHO/clip-01：63 km/h 時已在縫口前 1m、只能承諾 cap 18 的線，
+-- 繞行超速的減速輔助上限（0928a；clip-01：63 km/h 時已在縫口前 1m、只能承諾 cap 18 的線，
 -- 繞行帽只夾 regulator＝滑行 3 m/s²，到縫仍 56 km/h、追線落後 1m 擦撞）。同一條中線外力、不鎖輪、
 -- 轉向照常；只在實速超過繞行套用帽時放大到這個上限。
 TUNE.DODGE_ASSIST_MAX = 7.0
@@ -358,10 +358,10 @@ TUNE.DODGE_ASSIST_MAX = 7.0
 TUNE.PROGRESS_BRAKE_GRACE_MS = 4000
 -- 前方區域未載入的原生煞車（0928a）：前方 1–2 個 chunk 未載入時 CarController 直接煞車（isInvalidChunkAhead，
 -- CarController.java:208-216；BaseVehicle.java:3667-3723 看 ClientServerMap／PassengerMap），MP 伺服器忙時串流
--- 跟不上，45–65 km/h 一秒煞到 0（貓貓/clip-09、salomon/clip-13）。這不是卡住：不進停滯監督、不倒車（引擎照樣
--- 煞住倒車，salomon 倒 4 秒只動 0.18m），HUD 顯示等待載入；連續等這麼久才交還。
+-- 跟不上，45–65 km/h 一秒煞到 0（clip-09、clip-13）。這不是卡住：不進停滯監督、不倒車（引擎照樣
+-- 煞住倒車，clip-13 倒 4 秒只動 0.18m），HUD 顯示等待載入；連續等這麼久才交還。
 TUNE.AREA_WAIT_MAX_MS = 30000
--- 離線過遠（0928a；FuFu/clip-01：讓位期間玩家開到路線外 98m，恢復時仍追舊路線）：車離路線超過 SNAP_MAX_M
+-- 離線過遠（0928a；clip-01：讓位期間玩家開到路線外 98m，恢復時仍追舊路線）：車離路線超過 SNAP_MAX_M
 -- 持續這麼久（主 MOD 偏航重算冷卻 3s 之後）仍沒有新路線接上，以 RouteTooFar 交還，不越野追線。
 TUNE.ROUTE_FAR_MS = 4000
 -- RETURN 待命滑行核對的車身寬帶餘裕（同 Corridor FOOTPRINT_PAD＝原生 polyPlusRadius 0.15，
@@ -606,7 +606,7 @@ TUNE.ACCEL_ASSIST_TOW_PHI = 10 * math.pi / 180 -- 拖車折角超過此值不補
 -- Silverado 出彎時離期望線 0.9m 開始補，1.2 秒 31→48 km/h、越過期望線 1m 撞路邊）。補的樣本裡只有 12% 超過 0.5m。
 TUNE.ACCEL_ASSIST_LAT_M = 0.5
 -- 車頭偏離路線超過此角也不補（1002a）：位置偏差還在 0.5m 內、但正以大角度斜穿期望線＝下一秒就越過去
--- （正式服 0.17.0 Silence/clip-04：出 19° 折點車頭偏 9°、ld −0.43 時開始補，1.5 秒 24→44 km/h 越線 0.56m
+-- （正式服 0.17.0 clip-04：出 19° 折點車頭偏 9°、ld −0.43 時開始補，1.5 秒 24→44 km/h 越線 0.56m
 -- 擦路邊；E2E acc-1001j h1003 同型 11°）。補的樣本（正式服＋E2E 6031 筆）只有 3.6% 超過 8°。
 TUNE.ACCEL_ASSIST_HEAD_RAD = 8 * math.pi / 180
 -- 偏差預測（1002t；正式服 0.17.0 clip-17：88 km/h 過 18.9° 未圓角折點，出折點時車還以 1.1–1.4 m/s 橫越期望線，
@@ -614,7 +614,7 @@ TUNE.ACCEL_ASSIST_HEAD_RAD = 8 * math.pi / 180
 -- 偏差＋橫向收斂速度×LEAD_S 超過 ACCEL_ASSIST_LAT_M 也不補（0.5 秒後就會越過）。
 TUNE.ACCEL_ASSIST_LEAD_S = 0.5
 -- 只在一般循線的限速下補（1002a）：剖面／彎道包絡、可視距離、檔位與感知上限。朝已知障礙接近（待承諾繞行、
--- 判堵、殭屍、會車、對線…）不補——那些帽本身就是「前面要煞」（正式服 0.17.0 Aho/clip-21：待承諾繞行時補到
+-- 判堵、殭屍、會車、對線…）不補——那些帽本身就是「前面要煞」（正式服 0.17.0 clip-21：待承諾繞行時補到
 -- 45 km/h，再從 39.5 一秒鎖輪煞到 0）。
 TUNE.ACCEL_ASSIST_REASONS = { ["curve-coast"] = true, visibility = true, gear = true, perception = true }
 -- 樹叢阻力抵消（1004d，使用者 2026-10-04「遇到樹叢也可以加大推力來幫助通過」；見 Drive.bushCancel）：路外／繞行／
@@ -650,7 +650,7 @@ TUNE.TOW_NOLOCK_KMH = 10
 TUNE.TOW_BRAKE_DECEL = 7.0 -- 兩節各自的外力減速度（m/s²，同 DODGE_ASSIST_MAX）；斷油的引擎煞車另外疊加
 -- 回線待命／調頭前煞停／blocked 接近／待繞行接近在這個速度以上改不鎖輪（1001d／1001e）。1004b 起 25→10（使用者核准，
 -- 與拖車／讓車／彎道同一個門檻）：不鎖輪（斷油＋中線外力）實測約 10 m/s²、鎖輪 6–8，而且照常轉向、輪胎保有側向
--- 抓地——正式服 0.18.2 Sixya clip-14：23 km/h 回線待命鎖輪，車頭帶 0.11 rad 往右滑 1.6m 撞樹。10 以下照舊鎖輪停住。
+-- 抓地——正式服 0.18.2 clip-14：23 km/h 回線待命鎖輪，車頭帶 0.11 rad 往右滑 1.6m 撞樹。10 以下照舊鎖輪停住。
 TUNE.RETURN_NOLOCK_KMH = 10
 -- 堵住時放寬橫向掃描（0929p，使用者裁定「允許繞到道路之外」；見 Drive.wideScanWanted、MDADSensor 寬帶）
 TUNE.WIDE_SCAN_KMH = 5
@@ -3316,15 +3316,15 @@ end
 -- 會車／跟車停等（followHold，why＝moving）一般車同樣不鎖輪（1001a）：正式服 0.16.0 兩台 90 km/h 在 5m 路對撞，
 -- 讓車判定出來時已經太近，隨即一秒鎖輪——鎖輪中方向盤沒用，只能直直撞上。不鎖輪的中線外力＋斷油減速度相近
 -- （輕車 3.6＋7），而且還能照讓車線往右閃。接觸（currentBlocked）照舊鎖輪。
--- 回線待命（return-hold）在 RETURN_NOLOCK_KMH 以上同樣不鎖輪（1001d）：正式服 FuFu 閃完殭屍離常駐線 2.9m、
+-- 回線待命（return-hold）在 RETURN_NOLOCK_KMH 以上同樣不鎖輪（1001d）：正式服一例閃完殭屍離常駐線 2.9m、
 -- RETURN 一進就待命，52 km/h 一秒鎖輪直直滑出去；低速照舊鎖輪停住。
--- 調頭前煞停（why＝rotate）與 blocked 接近包絡（why＝blocked-approach）同樣門檻（1001e）：正式服 susu 81.8 km/h
+-- 調頭前煞停（why＝rotate）與 blocked 接近包絡（why＝blocked-approach）同樣門檻（1001e）：正式服一例 81.8 km/h
 -- 改目標到車後，一秒鎖輪連續 4.5 秒只從 82 減到 27；GTR 50 km/h、MR2 64 km/h 在 22–56m 外判 blocked 就一秒鎖到 0，
 -- 下一輪就承諾了 18 km/h 的繞行。停止線的 blocked（blockedStop）照舊鎖輪兜底。
 -- 彎道 ×1.5 災難超速（why＝curve，1002a）10 km/h 以上同樣不鎖輪：鎖輪＝同時失去縱向與側向抓地，正好在彎裡
 -- 最需要轉向的時候（正式服 0.16.0 curve 鎖輪 0.69 次/h；片段入弧 18–45 km/h 一鎖就 sk 0.02–0.05、整台停住才轉）。
 -- 中線外力＋斷油比鎖輪快一倍（1001e E2E）、照常轉向，超速一消失就交回 regulator 與彎前減速輔助。
--- 待承諾接近的硬煞（why＝dodge-defer）同 blocked 接近門檻（正式服 0.17.0 Aho/clip-21：39.5 km/h 一秒鎖到 0）。
+-- 待承諾接近的硬煞（why＝dodge-defer）同 blocked 接近門檻（正式服 0.17.0 clip-21：39.5 km/h 一秒鎖到 0）。
 -- steer 傳 nil＝本幀只減速、不轉向（調頭要先煞到近停才轉，鎖輪時本來就不施轉向）。
 -- （`finite` 在本檔較後面才定義，這裡用 MDADDynamics.finite。）
 function Drive.hardBrake(s, vehicle, now, why, speedKmh, mult, steer, heading, fwd, fx, fy)
@@ -3502,7 +3502,7 @@ end
 -- 只接「整條路線離車最近的就是起點」且 ≤ SNAP_MAX_M（0928a）：主 MOD 同目標、偏航 ≤12 格一律回快取
 -- 同一條線（NavRoute.lua ensureRoute），玩家開著導航走了一段再按自駕時，起點早在車後——0.13.1 正式服
 -- 10 趟接出 164／7136m 的「回頭接線」（車離某段只有 0.4-6m），車被拉回起點重開一遍。
--- 離路太遠（0928b；E2E replay Annilex/clip-05：車在路旁 17m 草地，RETURN 只收 ≤RETURN_MAX_DEV 12m，超過就只剩
+-- 離路太遠（0928b；E2E replay clip-05：車在路旁 17m 草地，RETURN 只收 ≤RETURN_MAX_DEV 12m，超過就只剩
 -- pure pursuit 斜切向前視點，中間的圍籬沒有任何規劃看得到，擦撞→倒車三次→交還）：離整條路線最近點超過
 -- RETURN_MAX_DEV（≤ SNAP_MAX_M）時，同樣把「車位→最近點」接成剖面開頭、最近點之前的路線捨去，讓感知／繞行
 -- 沿這段實際要開的地面規劃。
@@ -5637,7 +5637,7 @@ function Drive.progressPauseMs(s, vehicle, now, speedKmh)
     -- 遊戲卡頓：上一個跟線幀也在看門、兩幀之間牆鐘卻隔了 > PROGRESS_HITCH_MS，物理卻只前進了一小步，車幾乎
     -- 沒動。兩種證據任一：①引擎這幀的時間係數已頂到上限（FPSTracking.java:39-42 fpsMultiplier 夾 5＝1× 速度下
     -- 單幀物理最多 83ms；0928c E2E rc1 0007：47 km/h 卡住 3.6 秒只前進 1.4m → 誤判 suspect、在 47 km/h 下令空檔
-    -- 脈衝）；②車在跑（|v|>3 km/h）、物理步長卻遠小於這段牆鐘（1004a 正式服 0.18.2 Qoo clip-16：整個客戶端凍住
+    -- 脈衝）；②車在跑（|v|>3 km/h）、物理步長卻遠小於這段牆鐘（1004a 正式服 0.18.2 clip-16：整個客戶端凍住
     -- 5.8 秒、恢復首幀 fdt 只有 27ms，①漏判 → suspect → 24 km/h 鎖輪倒車）。整段不算停滯。
     if finite(last) and last == s.prevStepMs and now - last > TUNE.PROGRESS_HITCH_MS and finite(s.frameMs)
             and (s.frameMs >= TUNE.PROGRESS_HITCH_FRAME_MS
@@ -5686,7 +5686,7 @@ function Drive.visAssistForce(s, speedKmh, mult)
         return 0
     end
     -- 已承諾繞行且實速超過本幀套用的繞行帽（接近包絡／保持段／下一群停止包絡）：同一條中線外力，
-    -- 上限放到 DODGE_ASSIST_MAX（HOHOHO/clip-01：縫口前 1m 以 63 km/h 承諾 cap 18，只靠滑行到縫仍 56）
+    -- 上限放到 DODGE_ASSIST_MAX（clip-01：縫口前 1m 以 63 km/h 承諾 cap 18，只靠滑行到縫仍 56）
     local cap, amax, gain = s.visibilityCap, TUNE.VIS_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN
     local minKmh, why, ff = TUNE.VIS_ASSIST_MIN_KMH, "vis", 0
     -- 前緣錯過一輪前進（Drive.visibilityCaps 的 s.visStallBrake）：巡航帳正以 cruiseBrake 收向凍結前緣，一超過就前饋
@@ -5726,7 +5726,7 @@ function Drive.visAssistForce(s, speedKmh, mult)
     end
     -- 車道包絡（1002a）：目標實際由證明線的 lane curve envelope 裁決（煞車×0.7 反推；靠右車道在右轉彎內側＝
     -- 半徑更小），它常比剖面低 10–40 km/h，舊制輔助只追剖面＝目標寫著 30、車只靠滑行從 41 慢慢掉
-    -- （正式服 0.17.0 kkbug/clip-03：SemiTruckLite 以 38 km/h 衝進 26 km/h 的 90° 折點、側滑撞上；近四次抓回的
+    -- （正式服 0.17.0 clip-03：SemiTruckLite 以 38 km/h 衝進 26 km/h 的 90° 折點、側滑撞上；近四次抓回的
     -- 216 個入弧有 59 個超過彎帽 1.15 倍，多數入弧前 lce 低於剖面 10 km/h 以上而 vad≈0）。lce 等於車輛極速
     -- （直路 κ＝0）時不是彎道帳，不追。上限用繞行的 DODGE_ASSIST_MAX：lce 以煞車×0.7 反推（重車約 4.2 m/s²），
     -- 剖面的 coastAssist 只假設 2.5——重車斷油 0.6＋CURVE_ASSIST_MAX 4 剛好等於包絡、追不回入口的超速
@@ -5775,12 +5775,12 @@ function Drive.visAssistForce(s, speedKmh, mult)
     end
     -- 殭屍軟縫的縱向配合帽（zombieLaneCap，只對開了減速政策的類型算）：側移在到達前做不完就先降速（1002a）。
     -- 帽只夾 regulator＝斷油滑行，正式服 0.13.1–0.17.0 片段 40 段帽低於實速 8 km/h 以上、39 段 vad 0
-    -- （0.17.0 Aho/clip-19：77 km/h 對帽 12 只滑到 70 就撞進殭屍群）。同一條中線外力、繞行的上限。
+    -- （0.17.0 clip-19：77 km/h 對帽 12 只滑到 70 就撞進殭屍群）。同一條中線外力、繞行的上限。
     if not s.dodging and finite(s.zombieLaneCap) and s.zombieLaneCap >= 0 and s.zombieLaneCap < cap then
         cap, amax, gain, minKmh, why = s.zombieLaneCap, TUNE.DODGE_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN,
             TUNE.VIS_ASSIST_MIN_KMH, "zombie-lane"
     end
-    -- 會車／跟車帽（Drive.trafficCap；1002q）：同型，帽只夾 regulator＝斷油滑行。正式服 0.17.0 pigpig/clip-02：
+    -- 會車／跟車帽（Drive.trafficCap；1002q）：同型，帽只夾 regulator＝斷油滑行。正式服 0.17.0 clip-02：
     -- 84 km/h 時前車約 35m 才出現、帽 43→25、vad 0，只滑到 61 就承諾繞行、20.6 km/h 擦上。同一條中線外力、繞行的上限。
     if finite(s.trafficCapKmh) and s.trafficCapKmh >= 0 and s.trafficCapKmh < cap then
         cap, amax, gain, minKmh, why = s.trafficCapKmh, TUNE.DODGE_ASSIST_MAX, TUNE.VIS_ASSIST_GAIN,
@@ -6393,7 +6393,7 @@ end
 
 -- 斜切保持（1004e）：車不在常駐線上（> START_GUARD_LAT_M；起步、倒車後、繞行或回線放手後）時，跟線會從車位斜切回去，
 -- 規劃器只問常駐線擋不擋，斜切掃過的地方沒人管（E2E dixie9050w 改道調頭後：車在 −3.17、常駐 +3，中間 +1.2 的物件被
--- 斜切撞上；正式服 0.18.2 GGGMAMEER clip-10 回線停等放手後同型）。斜切帶＝每個硬點所在弧長上「車位 → 常駐落點」之間、
+-- 斜切撞上；正式服 0.18.2 clip-10 回線停等放手後同型）。斜切帶＝每個硬點所在弧長上「車位 → 常駐落點」之間、
 -- 從車心往常駐線那一側量（d ≥ 0）：車位側的邊取最慢的收斂（純追跡、車頭沿路線時偏差剩 (1+kx)e^−kx，k＝√2／前視，
 -- x 從車頭量），常駐側的邊取常駐落點，兩邊各加 needHalf＋點半徑。車心另一側的點不算：斜切是遠離它們（貼著車側另一邊的
 -- 牆，保持反而沿牆擦過去），正前方的由起步近物限速管。帶內有硬點＝先沿車位直走（laneBias＝車位，規劃器與證明線改以
@@ -6447,8 +6447,8 @@ end
 
 -- 繞行釋放時車身不在接下來要跟的線上（1004a）：線尾釋放後期望線一幀跳回常駐線（承諾期間 laneBias 凍結、
 -- 常駐線隨路面對中漂走），規劃只問常駐線，車身實際要掃過的是「車位→常駐線」那段——與起步同型，用同一個
--- 前半車身淨距限速，對正 START_GUARD_HOLD_MS 或開過 START_GUARD_MAX_M 自動解除。正式服 0.18.2 Sixya clip-11
--- 與 MI clip-01 同一點：舊出口線上距車鼻 1m 的物件，釋放後判 clear、5→17 km/h 撞上。
+-- 前半車身淨距限速，對正 START_GUARD_HOLD_MS 或開過 START_GUARD_MAX_M 自動解除。正式服 0.18.2 clip-11
+-- 與 clip-01 同一點：舊出口線上距車鼻 1m 的物件，釋放後判 clear、5→17 km/h 撞上。
 -- 只擋加速、不減速（帽不低於釋放時的車速）：起步包絡用滑行減速度、又把之後開過的距離當成正朝物件開，高速釋放時
 -- 路邊任何東西都會把帽壓到十幾 km/h（E2E 1004a replay：45 km/h 繞完一放手就被壓到 12 km/h）；要擋的是低速
 -- 放手後加速撞上，真的擋在線上的東西由判堵／接觸處理。
@@ -8517,7 +8517,7 @@ end
 -- 直行「乾淨」保住持有權 → 五次 `sweep enumerate ok (crawl)` 全被
 -- return-suppress 吃掉 → blocked corner → contact → 倒車 → StopStuck）。
 -- 回線只持有到 returnEndS（線到目標 lane 的那一點）：之後的線尾只是沿目標 lane 直行，車還外擺（偏差
--- > RETURN_CLEAR_DEV、RETURN 不放）時繼續壓住規劃＝前方擋常駐線的硬點被吞掉（正式服 0.18.2 Qoo clip-13：過
+-- > RETURN_CLEAR_DEV、RETURN 不放）時繼續壓住規劃＝前方擋常駐線的硬點被吞掉（正式服 0.18.2 clip-13：過
 -- returnEndS 後 0.5 秒 return-suppress、28 km/h 撞 pad）。線尾段交還規劃，RETURN 仍管速度與完成判定。
 -- pending（進場 returnEndS＝當下 s）在 replan 前就被同一快照的 updateReturnSnapshot 轉成 commit 或 hold。
 local function profileOwner(s)
@@ -8728,7 +8728,7 @@ local function updateReturnSnapshot(s, vehicle, playerNum, latSigned)
         s.returnCrawlExact = false
         s.returnStartS, s.returnEndS = s0, s1
         s.returnLaneStart = laneStart
-        -- commit 後下一次 hold（守護打槍）要能再記一筆：hold 事件依理由去重（1004a：Sixya clip-14 23 km/h 守護打槍
+        -- commit 後下一次 hold（守護打槍）要能再記一筆：hold 事件依理由去重（1004a：clip-14 23 km/h 守護打槍
         -- 鎖輪完全沒有事件，因為 commit 前已記過同理由的 hold）
         s.lastHoldReason = nil
         MDADFollower.setLaneBias(s.fstate, laneTarget)
@@ -8742,7 +8742,7 @@ local function updateReturnSnapshot(s, vehicle, playerNum, latSigned)
 end
 
 -- RETURN 回線長的車速地板（1004a）：實速超過 RETURN_CAP 時，側移 delta 照 shapeProfile 同一式的運動學長
--- （MDADDynamics.shiftLength）——正式服 0.18.2 ImJustAtoms clip-02：62 km/h 承諾 11.7m 做 2.9m 的回線，轉向飽和、
+-- （MDADDynamics.shiftLength）——正式服 0.18.2 clip-02：62 km/h 承諾 11.7m 做 2.9m 的回線，轉向飽和、
 -- 過衝 0.86m、62.8 km/h 撞樹。RETURN_CAP 以下照舊 max(4·delta, 8, 車長)。線變長看不到線尾＝照既有 hold(unloaded)。
 function Drive.returnLineFloor(s, delta, speedKmh)
     if not finite(speedKmh) or not finite(delta) then return 0 end
@@ -8755,7 +8755,7 @@ function Drive.returnLineFloor(s, delta, speedKmh)
     return MDADDynamics.shiftLength(delta, v / 3.6, aLat, k, vp.halfL, MDADDynamics.LATERAL_JERK_MAX)
 end
 
--- 調頭接手＝RETURN 結束（0928a；summer/clip-05：起步偏頭 123°、RETURN 進入後回線驗不過 hold，車在
+-- 調頭接手＝RETURN 結束（0928a；clip-05：起步偏頭 123°、RETURN 進入後回線驗不過 hold，車在
 -- hold 中被甩到 159° → Follower rotating 成立。updateReturnSnapshot 在 rotate 持有時早退、stall 釋放
 -- 永遠跑不到，stepFollow 的 returnHold 煞停分支又排在調頭分支之前＝煞停不轉，14.5 秒後 StopStuck）。
 -- 同 dodge takeover：laneBias＝目標、帶心同步、冷卻 RETURN_STALL_BLOCK_MS；調頭完成後偏差仍大自然重進。
@@ -9493,7 +9493,7 @@ end
 
 -- 未對正不加速（TUNE.DODGE_ALIGN_*）：帽夾在剛偏離時的車速（下限 DODGE_COMMIT_MIN_KMH），只擋加速、不另外減速。
 -- 夾的值閂住（s.dodgeAlignHoldKmh），只跟著自己的帽往下：每幀改夾「當下車速」時，外力掉速（撞殭屍、被推）會被
--- 當成新上限一路棘輪往下（1004a 正式服 0.18.2 kanazawa clip-10：13.8→6 km/h 爬 1.5 秒，玩家接手）。
+-- 當成新上限一路棘輪往下（1004a 正式服 0.18.2 clip-10：13.8→6 km/h 爬 1.5 秒，玩家接手）。
 function Drive.dodgeAlignCap(s, applied, speedKmh)
     s.dodgeAlignHold = false
     if Drive.dodgeAligned(s) then
@@ -10968,7 +10968,7 @@ local function replan(s, vehicle, playerNum)
         -- 車頭一過 c 就放＝車身還在舊群旁邊就把已掃過的回線段丟掉，改由 RETURN／pure pursuit
         -- 從偏移位置斜切回常駐線，切進剛繞過的障礙（2026-09-27 正式服 K5：offL 3.75、過 c 0.27m
         -- 即釋放，期望線 3.75→−0.5 一跳、st −1.23 直接 contact）。整車越過 c（bodyReach）才提前放。
-        -- 擋線點從車尾起算（1004a，正式服 0.18.2 Qoo clip-15）：同輪 replan 的 Corridor.plan 與判堵錨都從
+        -- 擋線點從車尾起算（1004a，正式服 0.18.2 clip-15）：同輪 replan 的 Corridor.plan 與判堵錨都從
         -- rs−halfL 收點，這裡從車心找＝車身旁的擋常駐線點被略過 → 放手後同輪判堵、錨在車身旁 41 km/h 鎖輪。
         local exitReady = type(fs.offC) == "number" and s.lastSNow >= fs.offC + s.bodyReach
             and not s.trafficLate
@@ -11045,7 +11045,7 @@ local function replan(s, vehicle, playerNum)
             -- through 正常規劃
             MDADFollower.clearOffset(fs)
             -- 1004a：線尾／出口淨空的釋放也記事件（交接與停留各有自己的事件）——釋放後跳 lane 的復盤要看得到
-            -- 釋放點與當下車身／常駐線（正式服 0.18.2 Sixya clip-11、MI clip-01、Qoo clip-15 只能從 dg 翻轉推）
+            -- 釋放點與當下車身／常駐線（正式服 0.18.2 clip-11、clip-01、clip-15 只能從 dg 翻轉推）
             if not stayDone and not handoff then
                 diagEvent(s, playerNum, "dodge", { phase = "release",
                     why = (curOffL == nil and "cleared") or (exitReady and "exit") or "end",
@@ -11711,7 +11711,7 @@ local function replan(s, vehicle, playerNum)
         -- （free）時允許——ROTATE 持有＝調頭姿態下走廊反向掃、剖面無意義
         -- （s019：commit 132 次搶 fstate）；RETURN 持有（active、非 hold、回線段 rs < returnEndS）
         -- ＝維持「優先回線」原契約；returnHold＝回線走不了＝讓位 dodge（st459.07k 死鎖修）；
-        -- 過 returnEndS 的線尾段也讓位（Qoo clip-13，見 profileOwner）。
+        -- 過 returnEndS 的線尾段也讓位（clip-13，見 profileOwner）。
         -- 各系統安全由各自體系承擔（仲裁註解）。
         local owner = profileOwner(s)
         if owner == "rotate" and mode == "dodge" then
@@ -12685,7 +12685,7 @@ local function stepFollow(s, vehicle, playerNum, now)
                 -- 5m 路兩車各留 0.6 時中心只到 ±0.77，兩台轎車根本錯不開，只能讓車——而同步範圍只有
                 -- ~70m，兩台 100 km/h 對開 1.2 秒內停不下來（E2E 窄路對撞）。硬物照舊由 trafficScan 收窄。
                 -- 鏈上 lane 是停留承諾掃掠驗過的絕對 lane（承諾線本來就傳 keep 0）：常駐的 keep 0.6 會把它夾回障礙側，
-                -- 車被拉回去、重錨一再觸發（1004a 正式服 0.18.2 dandankk clip-30，6m 路停留 2.25 → 期望線 1.12 → 停死交還）。
+                -- 車被拉回去、重錨一再觸發（1004a 正式服 0.18.2 clip-30，6m 路停留 2.25 → 期望線 1.12 → 停死交還）。
                 -- 規劃端的擋線基準（fillHardBase／nearestLineBlocker）鏈著時同樣傳 keep 0。
                 -- 軟縫貼路緣（s.zombieKeep0，1005 soft）同理 keep 0；會車同時設時取小（Drive.laneKeepOf）。
                 s.fstate.laneKeep = Drive.laneKeepOf(s)
@@ -13020,7 +13020,7 @@ local function stepFollow(s, vehicle, playerNum, now)
                     true, "lane-envelope", true
             elseif currentS > lineEnd + 1e-6 or lineEnd <= lineS0 or s.verifyLineN < 2 then
                 -- 證明線已被越過或退化成一格（投影跳段／讓位後離線／未載入前緣貼臉）＝快照過期，不是
-                -- 內部錯誤：丟掉證明、這幀走未證明上限，下一輪掃描重建（0928a FuFu/clip-01：讓位恢復時
+                -- 內部錯誤：丟掉證明、這幀走未證明上限，下一輪掃描重建（0928a clip-01：讓位恢復時
                 -- 離線 98m，下一幀判 lane-envelope 當成車輛不支援交還）。
                 laneEnvelopeValid = false
                 Drive.clearLaneProof(s)
