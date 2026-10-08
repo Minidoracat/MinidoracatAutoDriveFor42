@@ -130,6 +130,8 @@ local EK = {
     "dir", "acc",
     -- lag arm（1006m）：實測落後的收斂率 λ（每公尺；0＝沒在收斂，缺＝歷史不夠、只用理論衰減）
     "rate",
+    -- 1008：takeover resume（讓位恢復後第一個跟線幀的橫偏、Follower 投影段號）；route far（why gate／watch／yield）當下的 s.mode
+    "lat", "fi", "mode",
 }
 
 local function logOnce(msg)

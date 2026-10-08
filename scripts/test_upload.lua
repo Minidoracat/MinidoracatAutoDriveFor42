@@ -284,6 +284,17 @@ D.stop(0, "takeover")
 pump(60000)
 checkEq(#indexRows("C"), before + 1, "takeover after blocked: clip")
 checkEq(field(indexRows("C")[before + 1] or "", 7), "takeover", "kind takeover")
+-- 1008：takeover phase=resume（讓位恢復）不是接手：異常後 10 秒內恢復也不開 takeover 片段（只有 phase=yield 會）
+nowMs = nowMs + 3600000 -- 跨過同 kind 冷卻與每小時上限
+before = #indexRows("C")
+start()
+drive(4000, { blocked = true })
+drive(2000)
+D.event(0, "takeover", { phase = "resume", ms = 2000 })
+drive(2000)
+D.stop(0, "button")
+pump(60000)
+checkEq(#indexRows("C"), before, "takeover resume after blocked: no takeover clip")
 
 scenario("stuck handback and expected braking")
 before = #indexRows("C")
