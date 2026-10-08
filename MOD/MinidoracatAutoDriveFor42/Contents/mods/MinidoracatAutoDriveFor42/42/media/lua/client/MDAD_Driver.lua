@@ -3864,7 +3864,10 @@ end
 -- 軟縫選 lane：在 [sFrom, sEnd] 內找離殭屍區間最近的 lane，並以逐點實際落點（laneBiasAt）複驗；
 -- 彎內混合把提案夾回殭屍佔位時只再問另一側。回 (lane 或 nil, why＝gap／nogap／curve)。
 -- prefer（選填）傳給 softZombieLane：離殭屍區間邊多留多少（nil＝預設 PREFER）。
+-- 空帶（aLo > aHi）＝沒縫：softZombieLane 對空帶回 base，舊制照收，逐群換邊①算出空的換邊帶時就選到車身搆不到、會跨過
+-- 下一群的 lane（1008 E2E zombie-sp road：want＝下一群那隻 l−R，同一隻殭屍前左右翻後撞上）。
 function Drive.softPick(s, pS, pL, predN, sFrom, sEnd, halfW, resident, cur, aLo, aHi, R, prefer)
+    if not (aLo <= aHi) then return nil, "nogap" end
     local why = "nogap"
     for _ = 1, 2 do
         local u = MDADCorridor.softZombieLane(pS, pL, predN, sFrom, sEnd, halfW, resident, cur,

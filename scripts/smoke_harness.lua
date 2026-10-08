@@ -9459,9 +9459,12 @@ drive.scenarioSoftFlip()
 --   (zg-side)  softBodySide 本身：同一弧長的點＝同一個目標、壓在佔位內從較近那端出去、兩隻之間留在中間
 --   (zg-lag)   laneBias 領先、車身卡住：可及量從車身量，不選從 laneBias 量才搆得到的對側縫
 --   (zg-keep)  遠處選了越過牠的縫、近威脅時車身在 R 外沒在穿越：softKeepSide 不把對側換回來
+--   (zg-empty) Drive.softPick 空帶（aLo > aHi：逐群換邊①的換邊帶算出來是空的）＝沒縫；softZombieLane 對空帶回 base，舊制照收＝
+--              選到車身搆不到、跨過下一群的 lane（1008 E2E zombie-sp road，同一隻殭屍前左右翻後撞上）
 --   違規證明（temp/vp_1008_zombie.py）：softReach 改回 softLaneRate＝(zg-reach) 紅；可及帶改從 cur 量＝(zg-lag) 紅；近威脅
 --   不限側／沒縫放寬到整條帶＝(zg-near) 紅；softBodySide 只看最近威脅以前的點＝(zg-group) 紅；不沿用 keep 基準＝(zg-flip)
 --   紅；拿掉佔位出口＝(zg-side) 紅；softKeepSide 不看近威脅側＝(zg-keep) 紅；拿掉 rej／ns／lat 等事件欄＝對應事件斷言紅。
+--   拿掉 softPick 的空帶守門＝(zg-empty) 紅。
 function drive.scenarioZombieGap1008()
     scenario("殭屍選縫 1008：車身橫移能力、近威脅不跨同群、穿越中不翻邊")
     local Dr = MDAD.Drive
@@ -9478,6 +9481,8 @@ function drive.scenarioZombieGap1008()
     checkTrue(lo == -0.9 and hi == 0.3, "(zg-side) 兩隻之間：留在 (−0.9, 0.3)（" .. lo .. ", " .. hi .. "）")
     lo, hi = Dr.softBodySide(fs, { 10 }, { 0 }, 1, 0, 20, 0, 10, 1.5)
     checkTrue(lo == 0 and hi == 1e9, "(zg-side) 正壓單點：取右（" .. lo .. ", " .. hi .. "）")
+    local u0, why0 = Dr.softPick({ zomTmpLo = {}, zomTmpHi = {} }, {}, {}, 0, 0, 20, 0.9, 1.4, 1.4, 0.5, -0.5, 1.46, 0)
+    checkTrue(u0 == nil and why0 == "nogap", "(zg-empty) 空帶＝沒縫，不回 base（" .. tostring(u0) .. ", " .. tostring(why0) .. "）")
     local oldZ, oldBand = MDAD.HUD.zombieDodge, Dr.softBand
     MDAD.HUD.zombieDodge = function() return true end
     setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 120,
