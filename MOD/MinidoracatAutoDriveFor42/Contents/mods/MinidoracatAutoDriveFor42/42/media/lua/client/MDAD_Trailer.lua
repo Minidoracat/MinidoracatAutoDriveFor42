@@ -168,6 +168,14 @@ function T.attach(vehicle)
     return geo
 end
 
+-- 掛點到牽引車車頭（shape 的 tractorFront：simulate 從掛點往前量車頭懸伸）。hitchZ＝掛點在牽引車座標的縱向位置
+-- （車位起算，負＝在後），量得到＝halfL−hitchZ；量不到（attach 已清掉偏移）退回整車長（保守）。舊制一律整車長＝
+-- 第五輪牽引車高估 1.2–1.4 m（正式服 0.23.0 片段 SemiTruckLite 7.20 vs 5.83：兩個 90° 轉角誤判不可過）。
+function T.hitchFront(tow, halfL)
+    if finite(tow.hitchZ) then return halfL - tow.hitchZ end
+    return halfL * 2
+end
+
 -- ---------------------------------------------------------------- 2. 轉角運動學（純函式，離線可測）
 local function segDist(px, py, ax, ay, bx, by)
     local dx, dy = bx - ax, by - ay
@@ -513,7 +521,10 @@ function T.shape(route, tow, tractorHalfW, tractorFront)
                 end
             end
         else
-            if c and not plan and c.turnAbs >= T.BLOCK_MIN_RAD then
+            -- 最後一個節點的出臂短於到站半徑（MDADFollower.ARRIVE_M）＝車在轉之前就到站，不是要轉的角
+            -- （正式服 0.23.0 片段 (13956.5,3757)：路線終點 0.7 m 殘段折 135°，列不可過→終點前 19 m 交還、改道圈蓋住終點全被 end 拒收）
+            if c and not plan and c.turnAbs >= T.BLOCK_MIN_RAD
+                    and not (i == np - 1 and c.lenOut < MDADFollower.ARRIVE_M) then
                 blocked[#blocked + 1] = nx; blocked[#blocked + 1] = ny
                 blockedR[#blockedR + 1] = sqrt(c.hwIn * c.hwIn + c.hwOut * c.hwOut)
             end
@@ -558,6 +569,12 @@ function T.reverseSteer(phi)
     local s = -T.REVERSE_GAIN * phi
     if s > 2 then s = 2 elseif s < -2 then s = -2 end
     return s
+end
+
+-- 倒車折角還在上限內（讀不到＝不行）。Driver 起手（startRecoveryAttempt：超限＝rear=hitch 不吃額度）與
+-- 倒車中（stepUnstick：已退出 UNSTICK_MIN_M＝倒夠了，否則同起手）共用。
+function T.canReverse(phi)
+    return phi ~= nil and abs(phi) <= T.REVERSE_HITCH_MAX
 end
 
 -- 掛車車身（倒車後方探測用）：中心、拖行軸（forward×axisSign，朝掛點；探測往它的反方向）、半寬、半長。

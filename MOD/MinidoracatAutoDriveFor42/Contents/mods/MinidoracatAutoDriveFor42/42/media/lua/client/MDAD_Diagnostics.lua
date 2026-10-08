@@ -130,6 +130,9 @@ local EK = {
     "dir", "acc",
     -- lag arm（1006m）：實測落後的收斂率 λ（每公尺；0＝沒在收斂，缺＝歷史不夠、只用理論衰減）
     "rate",
+    -- 1008 拖車：tow attach 外拉規劃用的掛點→車頭（MDADTrailer.hitchFront）；detour towcorner 附了車尾正後方圈（1）；
+    -- detour skip why=same 時車離上次轉角改道判定處的世界距離（m）
+    "front", "towRear", "moved",
 }
 
 local function logOnce(msg)

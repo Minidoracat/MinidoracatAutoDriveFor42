@@ -424,6 +424,9 @@ TUNE.TOW_TURN_WAIT_MS = 2000   -- 等 cutover 的上限；逾時照舊交還
 -- 最多問 TRIES 次，等 cutover 的上限同 TOW_TURN_WAIT_MS。
 TUNE.TOW_CORNER_AVOID_PAD = 2
 TUNE.TOW_CORNER_TRIES = 2
+-- 同一轉角集合換了 route identity（偏航重算等）時，車要離上次判定處（世界距離）這麼遠才重問；近於此記 skip why=same、
+-- 不扣額度（正式服 0.23.0：起步後 1–20 m 的偏航 cutover 把同一題問第二次，額度燒完就 skip max）
+TUNE.TOW_CORNER_REASK_M = 30
 -- 同一處反覆調頭（半徑 R 內第 MAX 次 uturn enter）＝路線把車困住，受困交還
 TUNE.UTURN_LOOP_R = 30
 TUNE.UTURN_LOOP_MAX = 4
@@ -2025,6 +2028,7 @@ local function commitSession(playerObj, playerNum, s)
         diagEvent(s, playerNum, "tow", {
             phase = "attach", L2 = tw.L2, trailLen = tw.trailLen, halfW = tw.halfW, mass = tw.mass,
             hitchZ = tw.hitchZ, boxBack = tw.boxBack, axisSign = tw.axisSign, d = Drive.blockStopDist(s),
+            front = MDADTrailer.hitchFront(tw, s.vehicleProfile.halfL), -- 外拉規劃用的掛點→車頭（1008）
         })
     end
 end
@@ -2957,12 +2961,16 @@ end
 
 -- 拖車路線上有過不去的轉角（生效剖面 s.profileRoute.towBlocked 非空）：得知當下就向主 MOD 要一條避開那些轉角的線，
 -- 不等開到轉角前才交還。主圈＝路線上第一個不可過轉角（最先開到的），圈心在轉角節點、半徑＝路口方塊半對角線
--- （towBlockedR）＋TOW_CORNER_AVOID_PAD；moreAvoid＝其餘不可過轉角＋本趟判死的舊圈（Drive.avoidMore），共最多 8 圈
--- （跳過圈住車位或目標的：任何路線都穿）。nav API <9 只給主圈，回來的線自己驗不穿其他圈（again）。
+-- （towBlockedR）＋TOW_CORNER_AVOID_PAD；moreAvoid＝車尾正後方圈（同 Drive.towTurnaround，只在 v9）＋其餘不可過轉角
+-- ＋本趟判死的舊圈（Drive.avoidMore），共最多 8 圈（跳過圈住車位、目標或路線終點的：任何路線都穿，或終點得換）。
+-- 後方圈：主 MOD 從車位起算 A*，沒有它最便宜的避開路線常先往回走，被 back 拒收（正式服 0.23.0 11 次）。
+-- nav API <9 只給主圈，回來的線自己驗不穿其他圈（again）。
 -- 驗收：requestDetourRoute 全套＋從車頭方向出發（back）＋新線走同一條剖面管線（Drive.profileRouteOf →
 -- MDADTrailer.shape）後沒有不可過轉角（blocked）。拒收＝記 s.rejectedRoute（主 MOD 快取已被覆寫）、保留原線，
--- 行為照舊（guard 壓速、停在轉角前交還 TrailerCorner）。同一（route identity、轉角集合）只問一次；每 session
--- TOW_CORNER_TRIES 次；守「堵死時自動改道」選項（關著不問，同交還前改道 Drive.stuckDetour）。
+-- 行為照舊（guard 壓速、停在轉角前交還 TrailerCorner）。同一轉角集合：同一 route identity 不重問；換了 identity
+-- （偏航重算等）但車離上次判定處不到 TOW_CORNER_REASK_M 也不重問、不扣額度（記 skip why=same；正式服 0.23.0
+-- 起步後 1–20 m 的偏航 cutover 重問同一題、8 趟 6 趟兩次同結果就 skip max）；每 session TOW_CORNER_TRIES 次；
+-- 守「堵死時自動改道」選項（關著不問，同交還前改道 Drive.stuckDetour）。
 -- 收下＝下一幀 cutover why=towcorner；這期間若已停在轉角前，呼叫端等 cutover（≤TOW_TURN_WAIT_MS）不交還。
 -- 每幀呼叫：剖面沒換只比一次 identity，不配置。
 function Drive.towCornerDetour(s, playerNum, vehicle, now, fx, fy)
@@ -2972,13 +2980,28 @@ function Drive.towCornerDetour(s, playerNum, vehicle, now, fx, fy)
     s.towCornerSeen = pr
     local sig = ""
     for k = 1, #b do sig = sig .. string.format("%.1f,", b[k]) end
-    if s.towCornerRoute == s.route and s.towCornerSig == sig then return end -- 重建同一條線（版本變、重接）
-    s.towCornerRoute, s.towCornerSig = s.route, sig
-    local fin, rr, pad = MDADDynamics.finite, pr.towBlockedR, TUNE.TOW_CORNER_AVOID_PAD
     local vx, vy, tx, ty = vehicle:getX(), vehicle:getY(), s.lastTx, s.lastTy
+    if s.towCornerSig == sig then
+        if s.towCornerRoute == s.route then return end -- 重建同一條線（版本變、重接）
+        local mx, my = vx - s.towCornerX, vy - s.towCornerY
+        local moved = sqrt(mx * mx + my * my)
+        if moved < TUNE.TOW_CORNER_REASK_M then
+            s.towCornerRoute = s.route
+            diagEvent(s, playerNum, "detour", { phase = "skip", kind = "towcorner", why = "same",
+                x = vx, y = vy, s = s.lastSNow, towN = #b / 2, moved = moved, attempt = s.towCornerTries })
+            return
+        end
+    end
+    s.towCornerRoute, s.towCornerSig, s.towCornerX, s.towCornerY = s.route, sig, vx, vy
+    local fin, rr, pad = MDADDynamics.finite, pr.towBlockedR, TUNE.TOW_CORNER_AVOID_PAD
+    local rp = s.route and s.route.pts
+    local ex, ey = rp and rp[#rp - 1], rp and rp[#rp]
+    local function covers(cx, cy, cr, px, py)
+        return fin(px) and fin(py) and (px - cx) * (px - cx) + (py - cy) * (py - cy) <= cr * cr
+    end
     local ax, ay = b[1], b[2]
     local r = (rr and fin(rr[1]) and rr[1] or 0) + pad
-    local why, skip, route, rejected, left, more = nil, false, nil, nil, nil, nil
+    local why, skip, route, rejected, left, more, rearAvoid = nil, false, nil, nil, nil, nil, nil
     local api = navApi()
     if not (type(MDAD.HUD) == "table" and type(MDAD.HUD.autoDetour) == "function" and MDAD.HUD.autoDetour() == true) then
         why, skip = "off", true
@@ -2986,19 +3009,27 @@ function Drive.towCornerDetour(s, playerNum, vehicle, now, fx, fy)
         why, skip = "max", true
     elseif not api or type(api.requestDetour) ~= "function" then
         why = "api"
-    elseif not fin(tx) or not fin(ty) or (tx - ax) * (tx - ax) + (ty - ay) * (ty - ay) <= r * r then
+    elseif not fin(tx) or not fin(ty) or covers(ax, ay, r, tx, ty) or covers(ax, ay, r, ex, ey) then
         why = "target"
-    elseif (vx - ax) * (vx - ax) + (vy - ay) * (vy - ay) <= r * r then
+    elseif covers(ax, ay, r, vx, vy) then
         why = "inside"
     else
         s.towCornerTries = (s.towCornerTries or 0) + 1
+        local v9 = fin(api.navApiVersion) and api.navApiVersion >= 9
+        if v9 then
+            local back, rb = TUNE.TOW_TURN_AVOID_R + TUNE.TOW_TURN_GAP_M, TUNE.TOW_TURN_AVOID_R
+            local bx, by = vx - fx * back, vy - fy * back
+            if not covers(bx, by, rb, tx, ty) and not covers(bx, by, rb, ex, ey) then
+                more, rearAvoid = { bx, by, rb }, 1
+            end
+        end
         local j = 1
         for k = 3, #b - 1, 2 do
             j = j + 1
             local x, y = b[k], b[k + 1]
             local cr = (rr and fin(rr[j]) and rr[j] or 0) + pad
-            if (more == nil or #more < 24) and (vx - x) * (vx - x) + (vy - y) * (vy - y) > cr * cr
-                    and (tx - x) * (tx - x) + (ty - y) * (ty - y) > cr * cr then
+            if (more == nil or #more < 24) and not covers(x, y, cr, vx, vy)
+                    and not covers(x, y, cr, tx, ty) and not covers(x, y, cr, ex, ey) then
                 if more == nil then more = {} end
                 more[#more + 1], more[#more + 2], more[#more + 3] = x, y, cr
             end
@@ -3009,7 +3040,6 @@ function Drive.towCornerDetour(s, playerNum, vehicle, now, fx, fy)
             if #more >= 24 then break end
             more[#more + 1] = hist[k]
         end
-        local v9 = fin(api.navApiVersion) and api.navApiVersion >= 9
         local remaining = s.profile and (s.profile.length - s.lastSNow) or nil
         route, why, rejected = requestDetourRoute(api, playerNum, tx, ty, ax, ay, remaining, r,
             fin(remaining) and remaining * TUNE.TOW_TURN_LEN_RATIO + TUNE.TOW_TURN_LEN_SLACK or nil, s.route,
@@ -3027,6 +3057,7 @@ function Drive.towCornerDetour(s, playerNum, vehicle, now, fx, fy)
     diagEvent(s, playerNum, "detour", { phase = skip and "skip" or "towcorner", kind = "towcorner",
         why = why or "ok", x = vx, y = vy, s = s.lastSNow, hitX = ax, hitY = ay, avoidR = r,
         avoidN = more and #more / 3 or nil, towN = #b / 2, towLeft = left, attempt = s.towCornerTries,
+        towRear = rearAvoid, -- 1＝附了車尾正後方圈（1008；計入 avoidN）
         len = route and route.len or (rejected and rejected.len) or nil })
     if getDebug() then
         print(LOG .. "pn=" .. playerNum .. " tow corner detour corners=" .. #b / 2 .. " avoid=(" .. ax .. "," .. ay
@@ -3534,7 +3565,8 @@ end
 function Drive.profileRouteOf(route, tow, vp, vx, vy, approach)
     local clean = MDADFollower.despikeRoute(route)
     if tow then
-        local shaped = MDADFollower.despikeRoute(MDADTrailer.shape(clean, tow, vp.halfW, vp.halfL * 2))
+        local shaped = MDADFollower.despikeRoute(MDADTrailer.shape(clean, tow, vp.halfW,
+            MDADTrailer.hitchFront(tow, vp.halfL)))
         if (clean.despiked or 0) > 0 then shaped.despiked = (shaped.despiked or 0) + clean.despiked end
         return shaped, 0
     end
@@ -7216,7 +7248,13 @@ local function startRecoveryAttempt(s, vehicle, playerNum, now, vx, vy, softFail
     local flen2 = fx * fx + fy * fy
     local status, hitX, hitY, kind, detail, travel = "unloaded", vx, vy, "geometry",
         "invalid forward vector", 0
-    if flen2 > 1e-6 then
+    -- 拖車起始折角已超過倒車上限（或讀不到）：一倒就碰 stepUnstick 的折角收手線，0 位移當倒夠 settle→success，
+    -- 3 次額度幾秒燒完（正式服 0.23.0 片段：SemiTruckLite 每次 7–19 ms）。當成後方倒不了（rear=hitch）：不吃額度、
+    -- 照 rear-blocked 回停等（s.rearStatus 非 clear＝停等預算連 GO 也計），預算到期走交還前改道。
+    local towPhi = s.tow and MDADTrailer.state(vehicle, s.tow) or nil
+    if s.tow and not MDADTrailer.canReverse(towPhi) then
+        status, kind, detail = "hitch", "trailer", nil
+    elseif flen2 > 1e-6 then
         local inv = 1 / sqrt(flen2)
         fx, fy = fx * inv, fy * inv
         -- 階梯縮帶：4m 帶清＝退標準距；命中硬物／車（非 unloaded）就縮帶再探，第一個
@@ -7249,6 +7287,7 @@ local function startRecoveryAttempt(s, vehicle, playerNum, now, vx, vy, softFail
             phase = "rear-blocked", eid = s.episodeId,
             attempt = s.episodeAttempts, x = hitX, y = hitY,
             s = s.lastSNow, rear = status, kind = kind, detail = detail,
+            phi = status == "hitch" and towPhi or nil, -- rear=hitch：起手折角（rad，讀不到就缺）
         })
         if Drive.sideEscapeStart(s, vehicle, playerNum, now, vx, vy, status, kind, sideChain) then return end
         if softFail then
@@ -11914,11 +11953,30 @@ local function stepUnstick(s, vehicle, playerNum, now)
     end
 
     local wantSq = UNSTICK_DIST_SQ
-    -- 拖車倒車：掛車折角超過上限＝再倒就折死，當成「倒夠了」走 settle
+    -- 拖車倒車：掛車折角超過上限（或讀不到）＝再倒就折死。已退出 UNSTICK_MIN_M＝「倒夠了」走 settle；
+    -- 還沒實際退出就折到上限＝不算成功、退回這次額度，同 rear-blocked 一寸未退回停等（rear=hitch；舊制 0 位移
+    -- 也 settle→success，額度幾秒燒完：正式服 0.23.0 片段每次 7–23 ms）
     local towPhi = nil
     if s.tow then
         towPhi = MDADTrailer.state(vehicle, s.tow)
-        if towPhi == nil or math.abs(towPhi) > MDADTrailer.REVERSE_HITCH_MAX then dist2 = 1e9 end
+        if not MDADTrailer.canReverse(towPhi) then
+            if s.unstickDistance < TUNE.UNSTICK_MIN_M then
+                s.episodeAttempts = s.episodeAttempts - 1
+                s.rearStatus = "hitch"
+                diagEvent(s, playerNum, "unstick", {
+                    phase = "rear-blocked", eid = s.episodeId, attempt = s.episodeAttempts,
+                    x = vx, y = vy, s = s.lastSNow, d = s.unstickDistance,
+                    duration = now - s.unstickStartedAt, rear = "hitch", kind = "trailer", phi = towPhi,
+                })
+                sampleRecovery(s, vehicle, playerNum, now, vx, vy, speedKmh)
+                s.blockRetryDone = true
+                s.mode = "follow"
+                s.progressState = "disarmed"
+                s.progressSince = 0
+                return
+            end
+            dist2 = 1e9
+        end
     end
     if s.unstickExtraM and s.unstickExtraM > 0 then
         local w = 3 + s.unstickExtraM
@@ -14270,7 +14328,7 @@ local function onPlayerUpdate(player)
             s.avoidHist = nil -- 新目標＝新的一趟，先前判死的堵點不再算
             s.avoidLong, s.stuckDetourN, s.stuckDetourX, s.stuckDetourY = nil, 0, nil, nil -- 新目標＝新的改道額度
             s.towTurnTries, s.uturnLoopX, s.uturnLoopY = 0, nil, nil -- 新目標＝新的一趟
-            s.towCornerTries = 0 -- 新目標＝新的一趟
+            s.towCornerTries, s.towCornerSig = 0, nil -- 新目標＝新的一趟（同集合不重問只限同一趟）
             s.rejectedRoute = nil
         end
         -- 被本 MOD 拒收的替代線（far／long／through）仍躺在主 MOD 快取裡（requestDetour
