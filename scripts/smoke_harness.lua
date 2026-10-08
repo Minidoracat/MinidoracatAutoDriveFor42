@@ -3584,6 +3584,9 @@ do
     clientFlag = false
 
     -- server／SP：真的遷移，日誌帶得出「哪一款車、哪一列存檔、哪一顆物品」
+    -- （1008 起 audit 只在 getDebug()；這段開 debug 驗稽核內容，區塊尾還原）
+    local oldDebug = drive.debug
+    drive.debug = true
     resetStats()
     log = capturePrint(function()
         MDAD_DeviceParts.onPartInit(v, v._devices.MDADGPS)
@@ -3597,6 +3600,20 @@ do
     -- 稽核掃兩個槽。AutopilotModule 不是 drainable（假物件刻意沒有
     -- getCurrentUsesFloat）：稽核若對 auto 也讀電量，這裡會直接炸。
     checkTrue(logHas(log, AUTO_ID), "稽核也涵蓋 auto 槽")
+
+    -- 1008：遷移已結案，正式服每次載入有裝置的車都印一行 audit（52 小時約 2.5 萬行）→ 非 debug 一個字都不印，
+    -- debug 照印。違規證明：拿掉 getDebug 閘＝(audit-off) 紅。
+    drive.debug = false
+    log = capturePrint(function()
+        MDAD_DeviceParts.onPartInit(v, v._devices.MDADGPS)
+    end)
+    checkEq(#log, 0, "(audit-off) 非 debug：裝了裝置、沒有遷移事件的車不印 audit")
+    drive.debug = true
+    log = capturePrint(function()
+        MDAD_DeviceParts.onPartInit(v, v._devices.MDADGPS)
+    end)
+    checkTrue(logHas(log, "audit"), "(audit-on) debug：照印 audit")
+    drive.debug = oldDebug
 
     -- 已經乾淨、且槽是空的車：一個字都不該印（每台車每次載入都會跑這支）
     local clean = mkVehicle()
