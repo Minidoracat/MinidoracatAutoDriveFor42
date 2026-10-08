@@ -6796,6 +6796,8 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     if s.tow then
         phys.towPhi, phys.towUp, phys.towDecel, phys.towBrake = s.towPhi, s.towUp, s.towAssistDecel, s.towBrakeWhy
         phys.towLon, phys.towLat, phys.towKmh, phys.towHd = MDADTrailer.sampleState(vehicle, s.tow, fx, fy) -- 1008
+        -- 1008：車所在剖面段是拖車改寫弧（Trailer.shape segArcR→Follower towArcR）＝規劃半徑；曲率見 curveKappa
+        if s.profile.towArcR then phys.towArcR = s.profile.towArcR[s.fstate.idx] end
     end
     phys.curveVerifiedUntilS = s.curveVerifiedUntilS
     phys.filletN = s.profile.filletN
@@ -14759,6 +14761,7 @@ local function onPlayerUpdate(player)
                 -- 清掉的微反折點數（Drive.profileRouteOf；地圖資料接點錯位／拖車改寫殘點）
                 detail = s.profileRoute and s.profileRoute.despiked
                     and ("despike " .. tostring(s.profileRoute.despiked)) or nil,
+                towArcN = s.profileRoute and s.profileRoute.towArcN or nil, -- 1008：拖車外拉改寫的轉角數
             })
         end
         s.mode = "follow"

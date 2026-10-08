@@ -137,6 +137,8 @@ local EK = {
     "front", "towRear", "moved",
     -- 橫向覆蓋補掃（1008，dodge defer lateral-coverage／band-clear、blocked）：補掃帶心選法 nav／mid／none／cap／done、連續延後次數
     "bsel", "bdn",
+    -- route ready（1008）：剖面路線上拖車外拉改寫的轉角數（Trailer.shape；弧段在樣本 tar）
+    "towArcN",
 }
 
 local function logOnce(msg)
@@ -1279,6 +1281,7 @@ local function encodePhys(phys)
     addNum("towLat", "tla")
     addNum("towKmh", "tkm")
     addNum("towHd", "thd")
+    addNum("towArcR", "tar")          -- 1008：車所在段是拖車改寫弧＝規劃半徑（m；Trailer.shape segArcR；不是弧＝省略）
     addNum("curveVerifiedUntilS", "curveVerifiedUntilS")
     addNum("filletN", "filletN")
     addNum("filletFallbackN", "filletFallbackN")

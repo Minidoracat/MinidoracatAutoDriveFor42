@@ -4975,6 +4975,175 @@ do
     checkEq(p.epoch, (e0 or 0) + 1, "(epoch) 重建完 epoch＋1")
 end
 
+scenario("1008：拖車改寫弧標回 SEG_ARC——Follower 看得到曲率與前饋、閉環內切不劣於修前（正式服 0.23.0 拖車轉角接觸）")
+do
+    -- 正式服 0.23.0（rev 1006t）拖車行進接觸 12 件中 10 件是轉角內切 0.5–1.55m：Trailer.shape 把轉角改寫成 0.5m 一點的外拉
+    -- 圓弧，遠超圓角 source 容量（filletReason=capacity），弧點照抄成 LINE＝curveKappa 恆 0、沒有弧段前饋與切線追蹤，純追跡
+    -- 切弦；虛擬路寬又讓路寬證明永遠不過＝obb 帽 18（test_trailer ⑧）。路線＝片段 route cutover src 該轉角前後點，幾何＝
+    -- header／tow attach：案例 A SemiTruckBox_mil＋M101A3（8m 直角 (8644.5,8562)）、案例 B 87chevySuburban＋拖車（8m 直角 (2099,6643)）。
+    -- 閉環：真 Follower＋Driver 同式 cross-track／回授正規化／ESC／死區；plant＝yaw 一階 τ0.33 追 G(u)·u（線性 G＝片段 yg 中位；
+    -- 凸：|u|≤0.3 斜率 yg/2、以上 1.5·yg），速度追剖面目標（舊制再套 obb 帽 18）。量撞點那個轉角弧前 10m 到弧後 15m 對改寫線的
+    -- 內切／外偏。
+    -- 違規證明：begin 不標 SEG_ARC＝(1)(2)(3) 紅；despike 不帶 segArcR＝(4) 紅、撤點不清屬性＝(4b) 紅。數字（內切 舊 LINE＋obb 18 → 新弧 18 km/h／彎速）
+    -- 見斷言訊息；全路線離線重播（5 個正式服轉角）在 commit 本文。
+    loadProduction("client/MDAD_Trailer.lua")
+    local D, T = MDADDynamics, MDADTrailer
+    local CASES = {
+        { name = "案例 A SemiTruckBox_mil", yg = 0.476, hit = { 8643.2, 8555.4 },
+            vp = { valid = true, geometryValid = true, halfW = 1.03, halfL = 4.12, rMin = 5.927, wheelbase = 5.198,
+                delta0Safe = 0.72, deltaVSafe = 0.28, maxSpeed = 70 },
+            tow = { L2 = 2.327, hitchToRear = 7.668 - 4.385, halfW = 0.98 },
+            pts = { 8646.0, 8386.5, 8644.0, 8388.5, 8644.034, 8400.0, 8644.5, 8562.0, 8449.0, 8562.0, 8400.0, 8562.0 },
+            w = { 8, 8, 8, 8, 8 } },
+        { name = "案例 B 87chevySuburban", yg = 0.304, hit = { 2092.0, 6641.8 },
+            vp = { valid = true, geometryValid = true, halfW = 0.89, halfL = 2.39, rMin = 3.238, wheelbase = 2.84,
+                delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 80 },
+            tow = { L2 = 3.357, hitchToRear = 8.032 - 2.542, halfW = 0.78 },
+            pts = { 2100.0, 6473.0, 2099.466, 6490.992, 2099.132, 6600.0, 2099.0, 6643.0, 1975.0, 6643.0, 1975.0, 6700.0 },
+            w = { 8, 8, 8, 8, 6 } },
+    }
+    local function profileOf(cs, arcs)
+        local sw = {}
+        for i = 1, #cs.w do sw[i] = "paved" end
+        local route = { pts = cs.pts, segWidth = cs.w, segSurface = sw }
+        local sh = F.despikeRoute(T.shape(F.despikeRoute(route),
+            { L2 = cs.tow.L2, hitchToRear = cs.tow.hitchToRear, halfW = cs.tow.halfW }, cs.vp.halfW, cs.vp.halfL * 2))
+        if not arcs then
+            local copy = {}
+            for k, v in pairs(sh) do copy[k] = v end
+            copy.segArcR = nil
+            sh = copy
+        end
+        local p = F.begin(sh, cs.vp.maxSpeed, 4, cs.vp, F.STYLES.comfort)
+        for i = 1, p.n - 1 do p.segLat[i] = 4.2 end -- configureFollower：priors（已乘 LAT_SCALE，片段 pl 4.2）
+        while not p.ready do F.stepBuild(p, 100000) end
+        p.lookScale = 1.5
+        return p, sh
+    end
+    -- 回 (內切, 外偏, 弧上看到的最大 curveKappa, 最大 |ffSteer|)
+    local function run(p, a, b, pl, capKmh, turn)
+        local s0, i0 = p.s[a] - 60, 1
+        while p.s[i0 + 1] <= s0 do i0 = i0 + 1 end
+        local f0 = (s0 - p.s[i0]) / (p.s[i0 + 1] - p.s[i0])
+        local car = { x = p.x[i0] + (p.x[i0 + 1] - p.x[i0]) * f0, y = p.y[i0] + (p.y[i0 + 1] - p.y[i0]) * f0,
+            h = p.segH[i0], w = 0 }
+        local st = F.newState()
+        F.setLaneBias(st, 0)
+        F.setRuntimeLimits(st, 1.5, 3, 4.16, 1.2)
+        st.yawGain, st.yawGainFb, st.fbSteerF, st.fbYawF = pl.yg, pl.yg, 0.5, pl.yg * 0.5
+        local dt, v, prevLat = 1 / 40, 30 / 3.6, nil
+        local inMax, outMax, kSeen, ffMax = 0, 0, 0, 0
+        for _ = 1, 40 * 60 do
+            local kmh = v * 3.6
+            local steer, tgt, rem, reached, _, _, latDev = F.control(p, st, car.x, car.y, car.h, kmh, dt)
+            local sNow = p.length - rem
+            if capKmh and sNow > p.s[a] - 25 and sNow < p.s[b + 1] + 10 and tgt > capKmh then tgt = capKmh end
+            local dLat = prevLat and (latDev - prevLat) / dt or nil
+            if dLat and (dLat > 5 or dLat < -5) then dLat = nil end
+            prevLat = latDev
+            local xg, xm = D.crossTrackGains(false, false, st.curveHardActive, st.kinkExitS ~= nil, false)
+            local u = steer - D.crossTrackSteer(latDev, kmh, dLat, xg, xm)
+            local k = math.max(1, math.min(3, 0.5 / (st.yawGainFb or st.yawGain)))
+            local fb = u - (st.ffSteer or 0)
+            u = (st.ffSteer or 0) + math.max(-math.max(1.5, math.abs(fb)), math.min(math.max(1.5, math.abs(fb)), k * fb))
+            if u > 5 then u = 5 elseif u < -5 then u = -5 end
+            local esc = D.escScale(car.w, v, p.rMin, 4.16, st.kinkExitS ~= nil and st.kinkTurnR or nil)
+            if esc < 1 and u * car.w > 0 then u = u * esc end
+            if u < 0.02 and u > -0.02 then u = 0 end
+            st.appliedSteer, st.escLimited = u, esc < 1
+            local au = math.abs(u)
+            local wT = (pl.g1 * math.min(au, 0.3) + pl.g2 * math.max(0, au - 0.3)) * (u < 0 and -1 or 1)
+            local wMax = v / p.rMin
+            if wT > wMax then wT = wMax elseif wT < -wMax then wT = -wMax end
+            car.w = car.w + (wT - car.w) * (dt / 0.33)
+            car.h = car.h + car.w * dt
+            car.x, car.y = car.x + math.cos(car.h) * v * dt, car.y + math.sin(car.h) * v * dt
+            local dv = tgt / 3.6 - v
+            if dv > 1.0 * dt then dv = 1.0 * dt elseif dv < -3.0 * dt then dv = -3.0 * dt end
+            v = math.max(0.5, v + dv)
+            if sNow > p.s[a] - 10 and sNow < p.s[b + 1] + 15 then
+                if turn * latDev > inMax then inMax = turn * latDev end
+                if -turn * latDev > outMax then outMax = -turn * latDev end
+                if (st.curveKappa or 0) > kSeen then kSeen = st.curveKappa end
+                if math.abs(st.ffSteer or 0) > ffMax then ffMax = math.abs(st.ffSteer or 0) end
+            end
+            if reached or sNow > p.s[b + 1] + 16 then break end
+        end
+        return inMax, outMax, kSeen, ffMax
+    end
+    for _, cs in ipairs(CASES) do
+        local pOld = profileOf(cs, false)
+        local p = profileOf(cs, true)
+        -- 撞點那個轉角的改寫弧（towArcR 連續段）
+        local a, best, kindOk = nil, 1e18, true
+        for i = 1, p.n - 1 do
+            if p.towArcR and p.towArcR[i] then
+                if p.segKind[i] ~= D.SEG_ARC or p.filletRadius[i] ~= p.towArcR[i]
+                        or p.laneRoomR[i] > 0.05 + 1e-9 or p.laneRoomL[i] > 0.05 + 1e-9 then kindOk = false end
+                local d = (p.x[i] - cs.hit[1]) ^ 2 + (p.y[i] - cs.hit[2]) ^ 2
+                if d < best then a, best = i, d end
+            end
+        end
+        local b, arcR = a, a and p.towArcR[a]
+        if a then
+            while p.towArcR[a - 1] do a = a - 1 end
+            while p.towArcR[b + 1] do b = b + 1 end
+        end
+        -- (1) 剖面：改寫弧標回 SEG_ARC、半徑＝規劃半徑；舊制（不帶 segArcR）同一段是 LINE。車道餘裕照改寫段自己的虛擬路寬
+        --     （每側 0.05），不因成了弧就從鄰段原路寬借（違規證明：buildLaneRoom 拿掉 towArcR 例外＝紅）
+        checkTrue(a ~= nil and b - a >= 10 and kindOk and pOld.segKind[a] == D.SEG_LINE,
+            string.format("(1) %s：改寫弧 %s..%s 段標 SEG_ARC、R=%s（舊制 LINE）", cs.name, tostring(a), tostring(b), tostring(arcR)))
+        if a then
+            local dh = p.segH[b] - p.segH[a]
+            if dh > math.pi then dh = dh - 2 * math.pi elseif dh < -math.pi then dh = dh + 2 * math.pi end
+            local turn = dh > 0 and 1 or -1
+            local yg = cs.yg
+            for _, pl in ipairs({ { g1 = yg, g2 = yg, yg = yg }, { g1 = yg * 0.5, g2 = yg * 1.5, yg = yg } }) do
+                local inOld = run(pOld, a, b, pl, 18, turn)
+                local in18, _, k18, ff18 = run(p, a, b, pl, 18, turn)
+                local inNew, outNew, kNew, ffNew = run(p, a, b, pl, nil, turn)
+                -- (2) 弧上看得到曲率（curveKappa＝即時帽的 1/R）與弧段前饋
+                checkTrue(k18 > 0.9 / arcR and kNew > 0.9 / arcR and ff18 > 0.1 and ffNew > 0.1, string.format(
+                    "(2) %s G1 %.2f：弧上 curveKappa %.3f／%.3f（1/R %.3f）、前饋 %.2f／%.2f", cs.name, pl.g1, k18, kNew, 1 / arcR,
+                    ff18, ffNew))
+                -- (3) 同樣 18 km/h 內切減少；放開到彎速後內切仍不劣於修前（舊制 LINE＋obb 18）
+                checkTrue(in18 < inOld - 0.1 and inNew <= inOld, string.format(
+                    "(3) %s G1 %.2f：內切 舊 %.2f → 新 18 km/h %.2f／彎速 %.2f（外偏 %.2f）", cs.name, pl.g1, inOld, in18, inNew,
+                    outNew))
+            end
+        end
+    end
+    -- (4) 改寫後再 despike（Drive.profileRouteOf 同序）：段被合併時 segArcR 跟著段走——合併段不是弧、其餘照抄、長度對齊。
+    --     路線＝改寫轉角後面接一個 0.7m 微反折（地圖資料接點錯位），終點再一個。
+    local cs = CASES[1]
+    local spiky = { pts = { 8644.0, 8388.5, 8644.034, 8400.0, 8644.5, 8562.0, 8449.0, 8562.0, 8448.3, 8562.0, 8449.0, 8562.0,
+        8400.0, 8562.0, 8400.7, 8562.0 }, segWidth = { 8, 8, 8, 8, 8, 8, 8 },
+        segSurface = { "paved", "paved", "paved", "paved", "paved", "paved", "paved" } }
+    local tw = { L2 = cs.tow.L2, hitchToRear = cs.tow.hitchToRear, halfW = cs.tow.halfW }
+    local shaped = T.shape(spiky, tw, cs.vp.halfW, cs.vp.halfL * 2)
+    local clean = F.despikeRoute(shaped)
+    local arcBefore, arcAfter = 0, 0
+    for i = 1, #shaped.segArcR do if shaped.segArcR[i] > 0 then arcBefore = arcBefore + 1 end end
+    local aligned = type(clean.segArcR) == "table" and #clean.segArcR == #clean.segWidth
+    if aligned then
+        for i = 1, #clean.segArcR do
+            if clean.segArcR[i] > 0 then
+                arcAfter = arcAfter + 1
+                local dx, dy = clean.pts[i * 2 + 1] - clean.pts[i * 2 - 1], clean.pts[i * 2 + 2] - clean.pts[i * 2]
+                if math.abs(math.sqrt(dx * dx + dy * dy) - 0.5) > 0.05 then aligned = false end
+            end
+        end
+    end
+    checkTrue(clean ~= shaped and (clean.despiked or 0) > 0 and aligned and arcAfter == arcBefore and arcBefore > 0,
+        string.format("(4) 改寫後 despike 清掉 %s 點：segArcR 對齊（弧段 %d→%d、都是 0.5m 弦）", tostring(clean.despiked),
+            arcBefore, arcAfter))
+    -- (4b) 反折頂點緊接在弧段後：撤點合併出來的段（弧弦＋折返）不是弧
+    local merged = F.despikeRoute({ pts = { 0, 0, 10, 0, 10.5, 0, 10.2, 0, 20, 0 }, segWidth = { 8, 8, 8, 8 },
+        segSurface = { "paved", "paved", "paved", "paved" }, segArcR = { 0, 5, 0, 0 } })
+    checkTrue(#merged.pts == 8 and #merged.segArcR == 3 and merged.segArcR[2] == 0,
+        "(4b) 弧段後的微反折撤點：合併段 segArcR＝0（實得 " .. tostring(merged.segArcR and merged.segArcR[2]) .. "）")
+end
+
 closeScenario()
 print()
 print("情境 " .. scenarios .. " 個、斷言 " .. assertions .. " 項")
