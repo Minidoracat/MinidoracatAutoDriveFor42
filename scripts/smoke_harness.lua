@@ -9411,7 +9411,13 @@ function drive.scenarioSoftFlip()
     local ext = dveh:getScript():getExtents()
     local ew, eh, el = ext:x(), ext:y(), ext:z()
     ext:set(2.06, eh, 8.24) -- SemiTruckBox_mil
+    -- 1008：可及帶改用車身速率（Drive.softReach）後，這組 fixture（車身每輪直接跳到 laneBias）在帶左端 −6 時搆不到右端，
+    -- 可及量本身就擋掉翻邊、量不到「同一群」的寬度；這一段把車身速率放回 laneBias 速率，只驗 softSideW 的同群判定。
+    local T = Dr.debugTune()
+    local oldRate = T.ZOMBIE_BODY_RATE_MPS
+    T.ZOMBIE_BODY_RATE_MPS = 99
     ok, flips, seq = run(shifted(54), { -0.37, 0.1 }, 70, 5) -- 原 b 2.63／3.1：3.1 時右端離右邊那隻比左端遠
+    T.ZOMBIE_BODY_RATE_MPS = oldRate
     ext:set(ew, eh, el)
     checkTrue(ok and flips == 0,
         "(soft-flip-id) 威脅換成同一群 4m 前那隻、b 抖到右端較遠：留在左側不翻（換邊 " .. flips .. " 次、want" .. seq .. "）")
@@ -9424,6 +9430,159 @@ function drive.scenarioSoftFlip()
     assert(armDrive())
 end
 drive.scenarioSoftFlip()
+
+-- (zg-*) 1008 正式服 0.23.0 殭屍撞擊復盤（19 件中 12 件選縫以為來得及、車身來不及；10 件近距離跨過殭屍換到對側）：
+--   選縫可行性改用車身做得到的橫移速率（Drive.softReach／softBodyRate，從車身量），近威脅不橫越同一群任何一隻
+--   （Drive.softBodySide），車身正在穿越時沿用這次走向。帶以 Drive.softBand 釘死、車身每輪只照 1.2 m/s 慢慢跟。
+--   (zg-rate)  車身速率：高速＝ZOMBIE_BODY_RATE_MPS，低速不超過 laneBias 速率
+--   (zg-reach) 70 km/h、遠威脅（2.6 s）：車身這側沒縫、對側縫 laneBias 速率搆得到但車身搆不到 → 不跨，plan 事件 rej＝reach
+--   (zg-near)  20 km/h、近威脅（2.0 s）：對側縫車身也搆得到，車身這側沒縫 → 留在這側取 least，plan 事件 ns＝body、rej＝side
+--   (zg-group) 近威脅：最近那隻在車身左邊、同群另一隻在右邊 → 只在兩隻之間取（不越過右邊那隻）
+--   (zg-flip)  70 km/h、遠處先選了越過那隻的 least，進入近威脅時車身正在穿越 ±R → 沿用這次走向，不左右翻
+--   (zg-side)  softBodySide 本身：同一弧長的點＝同一個目標、壓在佔位內從較近那端出去、兩隻之間留在中間
+--   (zg-lag)   laneBias 領先、車身卡住：可及量從車身量，不選從 laneBias 量才搆得到的對側縫
+--   (zg-keep)  遠處選了越過牠的縫、近威脅時車身在 R 外沒在穿越：softKeepSide 不把對側換回來
+--   違規證明（temp/vp_1008_zombie.py）：softReach 改回 softLaneRate＝(zg-reach) 紅；可及帶改從 cur 量＝(zg-lag) 紅；近威脅
+--   不限側／沒縫放寬到整條帶＝(zg-near) 紅；softBodySide 只看最近威脅以前的點＝(zg-group) 紅；不沿用 keep 基準＝(zg-flip)
+--   紅；拿掉佔位出口＝(zg-side) 紅；softKeepSide 不看近威脅側＝(zg-keep) 紅；拿掉 rej／ns／lat 等事件欄＝對應事件斷言紅。
+function drive.scenarioZombieGap1008()
+    scenario("殭屍選縫 1008：車身橫移能力、近威脅不跨同群、穿越中不翻邊")
+    local Dr = MDAD.Drive
+    local T = Dr.debugTune()
+    checkNear(Dr.softBodyRate(70), T.ZOMBIE_BODY_RATE_MPS, 1e-9, "(zg-rate) 70 km/h 車身速率＝ZOMBIE_BODY_RATE_MPS")
+    checkTrue(Dr.softBodyRate(70) < Dr.softLaneRate(70) and math.abs(Dr.softBodyRate(3) - Dr.softLaneRate(3)) < 1e-9,
+        "(zg-rate) 高速低於 laneBias 速率、低速不超過 laneBias 速率")
+    -- (zg-side) Drive.softBodySide 本身：同一弧長的點＝同一個目標（牛的舒適餘裕兩端）；車身壓在佔位內從較近那端出去，
+    --   兩隻不同目標之間＝留在兩隻之間；正壓單點＝取右（同舊制 latNow ≥ threatL）
+    local fs = {}
+    local lo, hi = Dr.softBodySide(fs, { 10, 10, 10 }, { -0.6, 0, 0.6 }, 3, 0, 20, 0.1, 10, 1.5)
+    checkTrue(lo == 0.6 and hi == 1e9, "(zg-side) 壓在牛的佔位內（偏右）：從右端 0.6 出去（" .. lo .. ", " .. hi .. "）")
+    lo, hi = Dr.softBodySide(fs, { 10, 11 }, { -0.9, 0.3 }, 2, 0, 20, 0, 10, 1.5)
+    checkTrue(lo == -0.9 and hi == 0.3, "(zg-side) 兩隻之間：留在 (−0.9, 0.3)（" .. lo .. ", " .. hi .. "）")
+    lo, hi = Dr.softBodySide(fs, { 10 }, { 0 }, 1, 0, 20, 0, 10, 1.5)
+    checkTrue(lo == 0 and hi == 1e9, "(zg-side) 正壓單點：取右（" .. lo .. ", " .. hi .. "）")
+    local oldZ, oldBand = MDAD.HUD.zombieDodge, Dr.softBand
+    MDAD.HUD.zombieDodge = function() return true end
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 120,
+        RightLaneBias = 0, ZombieAreaSlowdown = false, CorpseSlowdown = false })
+    local band = nil
+    Dr.softBand = function(...)
+        local lo, h, known = oldBand(...)
+        if band ~= nil then return band[1], band[2], true end
+        return lo, h, known
+    end
+    local oldEvent, oldSample, plans = MDADDiagnostics.event, MDADDiagnostics.sample, {}
+    MDADDiagnostics.event = function(_, name, a)
+        if name == "zombie" and type(a) == "table" and a.phase == "plan" then plans[#plans + 1] = a end
+    end
+    MDADDiagnostics.sample = function() return true end
+    local wasMs = drive.frameMs(10)
+    local cells = {}
+    -- pts＝{ 到車心的秒數（照車速換算，另加 halfL）, l, 額外弧長 }；body＝車身起點 l；rounds 輪、車身每輪最多跟 1.2×0.3m
+    -- rate＝車身每秒最多跟多少（nil＝BODY_RATE；0＝卡住不動）；pre(s)＝放殭屍前改 session（例如軟縫已持有在某 lane）
+    local function run(kmh, lo, hi, body, pts, rounds, rate, pre)
+        drive.fillWorld(-10, 200, -9, 9)
+        assert(armDrive())
+        setHeading(dveh, 0)
+        dveh._speed, dveh._y = kmh, body
+        drive.scanRound(true)
+        drive.scanRound(true)
+        local s = Dr.debugSession(0)
+        s.diag = true
+        plans = {}
+        band = { lo, hi }
+        local x0 = dveh._x
+        if pre then pre(s) end
+        for _, z in ipairs(pts) do
+            local zx, zl = x0 + s.vehicleProfile.halfL + z[1] * kmh / 3.6 + (z[3] or 0), z[2]
+            cells[#cells + 1] = { math.floor(zx), math.floor(zl) }
+            drive.putMoving(math.floor(zx), math.floor(zl), { _class = "IsoZombie",
+                getX = function() return zx end, getY = function() return zl end })
+        end
+        local wants = {}
+        for k = 1, rounds do
+            driveReset(dveh)
+            if k > 1 then
+                local d = s.fstate.laneBias - body
+                local step = (rate or T.ZOMBIE_BODY_RATE_MPS) * 0.3
+                if d > step then d = step elseif d < -step then d = -step end
+                body = body + d
+                dveh._x = dveh._x + kmh / 3.6 * 0.3
+            end
+            dveh._y = body
+            drive.scanRound(true)
+            wants[k] = s.zombieWant
+        end
+        band = nil
+        for _, c in ipairs(cells) do drive.clearCell(c[1], c[2]) end
+        cells = {}
+        return s, wants
+    end
+    local function seqOf(w)
+        local t = ""
+        for _, v in ipairs(w) do t = t .. string.format(" %.2f", type(v) == "number" and v or 0 / 0) end
+        return t
+    end
+    -- (zg-reach) 車身 0；同群兩隻 0.3／2.5（間距 < 2R，中間過不去）；左帶緣 −1.0（左縫要 ≤ 0.3−R）
+    local s, w = run(70, -1.0, 6, 0, { { 2.6, 0.3 }, { 2.6, 2.5, 0.4 } }, 1)
+    local p = plans[#plans]
+    checkTrue(type(w[1]) == "number" and w[1] < 0.3 and s.zombieWhy ~= "gap",
+        "(zg-reach) 遠威脅、對側縫車身搆不到：不跨過整群（want" .. seqOf(w) .. "、why " .. tostring(s.zombieWhy) .. "）")
+    checkTrue(p ~= nil and p.rej == "reach" and type(p.rb) == "number" and type(p.rl) == "number" and p.rb < p.rl
+            and p.ns == nil and type(p.lat) == "number" and type(p.tl) == "number",
+        "(zg-reach) plan 事件：rej＝reach、rb＜rl、遠威脅不帶 ns（rej " .. tostring(p and p.rej) .. "、rb "
+        .. tostring(p and p.rb) .. "、rl " .. tostring(p and p.rl) .. "、ns " .. tostring(p and p.ns) .. "）")
+    -- (zg-near) 單隻 0.3、車身 0；右縫 0.3＋R 在車身可及量內，左帶緣 −1.0
+    s, w = run(20, -1.0, 5, 0, { { 2.0, 0.3 } }, 1)
+    p = plans[#plans]
+    checkTrue(type(w[1]) == "number" and w[1] < 0.25 and s.zombieWhy == "least",
+        "(zg-near) 近威脅、車身這側沒縫：留在這側取 least、不跨到搆得到的對側縫（want" .. seqOf(w)
+        .. "、why " .. tostring(s.zombieWhy) .. "）")
+    checkTrue(p ~= nil and p.ns == "body" and p.rej == "side",
+        "(zg-near) plan 事件：ns＝body、rej＝side（ns " .. tostring(p and p.ns) .. "、rej " .. tostring(p and p.rej) .. "）")
+    -- (zg-group) 最近那隻 −1.4（車身左邊），同群 3m 後另一隻 1.0（車身右邊）；右縫 1.0＋R 在車身可及量內
+    s, w = run(20, -5, 5, 0, { { 2.4, -1.4 }, { 2.4, 1.0, 3 } }, 1)
+    checkTrue(type(w[1]) == "number" and w[1] > -1.4 and w[1] < 1.0,
+        "(zg-group) 近威脅：同群另一隻在對側路徑上，只在兩隻之間取（want" .. seqOf(w) .. "、why "
+        .. tostring(s.zombieWhy) .. "）")
+    -- (zg-flip) 單隻 0.3、帶 [−1.2, 1.4] 兩側都沒縫；車身 1.0。遠處（2.65 s）least 取 −1.2（越過牠），下一輪（2.35 s）進入
+    -- 近威脅時車身 0.64 還在牠右邊 ±R 內。want 落在牠身上（≥ 0.25）也算翻到右側
+    s, w = run(70, -1.2, 1.4, 1.0, { { 2.65, 0.3 } }, 6)
+    local flips, prev = 0, nil
+    for _, v in ipairs(w) do
+        if type(v) == "number" then
+            local side = v > 0.25 and 1 or -1
+            if prev ~= nil and side ~= prev then flips = flips + 1 end
+            prev = side
+        end
+    end
+    checkTrue(prev ~= nil and flips == 0 and w[1] < 0.3,
+        "(zg-flip) 穿越中沿用這次走向：least 不在同一隻上左右翻（換邊 " .. flips .. " 次、want" .. seqOf(w) .. "）")
+    -- (zg-lag) 可及帶從車身量：軟縫已持有在 3.0（laneBias 領先）、車身卡在 0.4；兩隻 1.0／2.6（中間過不去）、帶左緣 0.4。
+    --   右縫（2.6＋R）從 laneBias 量搆得到、從車身量搆不到（遠威脅 2.6 s）→ 不選它
+    local R = Dr.debugSession(0).vehicleProfile.halfW + MDADCorridor.ZOMBIE_R + MDADCorridor.ZOMBIE_MARGIN
+    s, w = run(20, 0.4, 6, 0.4, { { 2.6, 1.0 }, { 2.6, 2.6, 0.4 } }, 1, 0, function(ss)
+        ss.zombieLane = 3.0
+        MDADFollower.setLaneBias(ss.fstate, 3.0)
+    end)
+    checkTrue(type(w[1]) == "number" and s.zombieWhy ~= "gap" and w[1] < 2.6 + R,
+        "(zg-lag) laneBias 領先車身：可及量從車身量，不選車身搆不到的右縫（want" .. seqOf(w) .. "、why "
+        .. tostring(s.zombieWhy) .. "）")
+    -- (zg-keep) 單隻 0.2、帶 [−4, 4] 兩側都有縫、車身 1.9 卡住不動（離牠 1.7 > R）：遠處（3.95 s）照成本（常駐 0）選左縫
+    --   （越過牠，車身搆得到）；進入近威脅時車身仍在牠右邊 R 外＝沒在穿越 → softKeepSide 不得把記住的左側換回來
+    s, w = run(20, -4, 4, 1.9, { { 3.95, 0.2 } }, 7, 0)
+    checkTrue(type(w[1]) == "number" and w[1] < 0.2 and type(w[7]) == "number" and w[7] > 0.2,
+        "(zg-keep) 遠處選了越過牠的左縫、近威脅時車身沒在穿越：換回車身這一側，換邊遲滯不留對側（want" .. seqOf(w) .. "）")
+    drive.frameMs(wasMs)
+    MDADDiagnostics.event, MDADDiagnostics.sample = oldEvent, oldSample
+    Dr.softBand = oldBand
+    MDAD.Drive.stop(0, nil)
+    MDAD.HUD.zombieDodge = oldZ
+    drive.fillWorld(-2, 70, -7, 7)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    assert(armDrive())
+end
+drive.scenarioZombieGap1008()
 
 -- (soft-g*) 2026-10-05 使用者裁定「沒辦法改成繞開閃過嗎？一定要停車嗎？」（E2E：AnimalDodge＝關、AnimalSlowdown＝大型，
 --   14m 路中間一頭牛，車停 6.9 秒後 4 km/h 爬過撞死牛）。兩個名單分工：閃避名單＝照巡航速閃；減速名單＝受保護：
@@ -17615,8 +17774,10 @@ local function scenarioNarrowLaneProof()
         for i = 1, st.profile.n - 1 do
             if st.profile.segKind[i] == MDADDynamics.SEG_ARC then arcS = st.profile.s[i]; break end
         end
+        -- 1008：近威脅（< ZOMBIE_CROSS_S）不再橫越殭屍換到對側，車身也搆不到 3m 外的左縫（Drive.softReach 用車身速率）；
+        -- 車放在 30m 外（約 4.6 秒、車身可及 5m 以上），這裡只驗「彎前右側提案被夾回殭屍處→改走左縫」。
         local zs, zl = arcS - 2, -0.5
-        dveh._x = arcS - 15
+        dveh._x = arcS - 30
         driveTick(dp, dveh)
         local cx = math.floor(zs)
         drive.putMoving(cx, -1, { _class = "IsoZombie",

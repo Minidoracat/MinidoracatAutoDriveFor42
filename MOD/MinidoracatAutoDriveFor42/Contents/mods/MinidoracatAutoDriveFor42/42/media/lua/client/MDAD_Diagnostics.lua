@@ -130,6 +130,8 @@ local EK = {
     "dir", "acc",
     -- lag arm（1006m）：實測落後的收斂率 λ（每公尺；0＝沒在收斂，缺＝歷史不夠、只用理論衰減）
     "rate",
+    -- zombie plan（1008）：車身橫向、最近威脅 l、車身／舊 laneBias 速率可及量、近威脅限側基準、新可行性模型拒縫（reach／side）
+    "lat", "tl", "rb", "rl", "ns", "rej",
 }
 
 local function logOnce(msg)
