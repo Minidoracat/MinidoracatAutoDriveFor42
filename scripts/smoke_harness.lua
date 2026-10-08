@@ -24811,8 +24811,8 @@ drive.scenarioHoldRoom()
 --   (lag-ramp) 承諾線 4.5、出口 ramp 30→100、車在 rs 60 落後 +1.6、細物在 85（規劃車身外 0.5，規劃判淨空）：記命中與 arm
 --     事件、帽＝開到細物降到 MIN_EXEC 的包絡（碰前就是 MIN_EXEC）、"lag" 減速輔助帳 25 km/h 以下照補。違規證明：scan 不記命中＝紅。
 --   (lag-ramp-far) 同一段 ramp 內 35m 外的細物照判（穩態落後不衰減）。違規證明：ramp 內也從車頭衰減＝紅。
---   (lag-small) 落後 0.25（< LAG_GUARD_MIN_M）、細物離規劃車身 0.1（物理檔承諾線過得去）：不判、release why=clear、帽與命中
---     都清。違規證明：拿掉門檻＝紅。
+--   (lag-small) 落後 0.25（< LAG_GUARD_MIN_M）、細物離規劃車身 0.1（物理檔承諾線過得去）：不判、release why=converge（1008 前
+--     叫 clear；上一個命中點還在車頭前方）、帽與命中都清。違規證明：拿掉門檻＝紅。
 --   (lag-side) 落後 1.6 但細物在規劃線另一側（車是遠離它）：不判。違規證明：橫偏反號＝紅。
 --   (lag-resident) 常駐線落後 0.6、硬點在車身外 0.35（規劃判淨空）：車頭前 2m 判、40m 外衰減後不判。違規證明：不衰減＝far 紅。
 --   (lag-owner) RETURN 接手：release why=owner。
@@ -24884,9 +24884,9 @@ function drive.scenarioLagGuard()
     s.lastLatDev = 0.25
     Dr.lagGuardScan(s, 0, 60)
     local rel = lastLag("release")
-    checkTrue(s.lagHitX == nil and rel ~= nil and rel.why == "clear" and Dr.lagGuardCap(s, 60, 60, carY) == 60
+    checkTrue(s.lagHitX == nil and rel ~= nil and rel.why == "converge" and Dr.lagGuardCap(s, 60, 60, carY) == 60
             and s.lagGuardCap == nil,
-        "(lag-small) 落後 0.25 < LAG_GUARD_MIN_M（細物離規劃車身 0.1）：不判、release why=clear、帽清掉")
+        "(lag-small) 落後 0.25 < LAG_GUARD_MIN_M（細物離規劃車身 0.1）：不判、release why=converge、帽清掉")
     -- (lag-side)
     s.lastLatDev = 1.6
     put(85, lineAt(85) - (halfW + 0.5 + r))
@@ -24991,6 +24991,11 @@ function drive.scenarioLagRate()
     checkTrue(lam == 0, "(lag-grow) 比 8m 前的 0.5 仍大：rate＝0（實得 " .. tostring(lam) .. "）")
     lam = Dr.lagRate(s, 0.4, 112, 0, true)
     checkNear(lam, math.log(0.5 / 0.4) / 12, 1e-9, "(lag-grow) 收斂：取窗內最遠的樣本 ln(舊/新)／距離")
+    -- (lag-noise) 1008（正式服 0.23.0 片段：SemiTruckBox_mil 出彎 0.88→0.82、M998＋拖車轉角 0.94→0.89 被當成收斂、遠處硬點提早 release）：
+    --   降幅 < LAG_RATE_MIN_DROP_M 不算收斂。違規證明：拿掉降幅門檻＝紅。
+    local sn = newS()
+    Dr.lagRate(sn, 0.88, 100, 0, true)
+    checkEq(Dr.lagRate(sn, 0.82, 104, 0, true), 0, "(lag-noise) |ld| 0.88→0.82（降 0.06 < LAG_RATE_MIN_DROP_M）：rate＝0（不衰減）")
     -- (lag-reset)
     s.diagExpL = 0.5
     checkNil(Dr.lagRate(s, 0.4, 116, 0, true), "(lag-reset) 期望線兩輪間跳 0.5：重置")
@@ -25006,6 +25011,127 @@ function drive.scenarioLagRate()
     fs.ovS0 = nil
 end
 drive.scenarioLagRate()
+
+-- 1008（正式服 0.23.0 片段 SemiTruckBox_mil＋拖車轉角 (12224.5,6895.5)：lag arm 後硬點一過車頭 rs+halfL 就 release why=clear、帽從 8
+--   跳回 obb 18，車身側面 14.7 km/h 撞上；(15319.5,3321.5) 同型 18.2）：硬點過了車頭、還在車身（拖車含掛車）旁時以實測橫偏不衰減判，
+--   車尾過點才放行；半寬取牽引車與掛車較寬者、加 footprint 同一個 pad。直路、常駐線 0、車身 halfL 4.12／halfW 1.25、實測橫偏
+--   +1.1（往 +y），硬點在 hs 102.5、規劃車身外 0.5（lc＝halfW＋pad＋r＋0.5）。車位 (rs, ld)、車頭 0。
+--   (lag-body-front) rs 97：硬點在車頭前 1.4m，arm。
+--   (lag-body-side) rs 99：硬點在車身旁（hs ≤ rs+halfL、仍在快照）：照判、lagHitSide、帽＝MIN_EXEC。違規證明：只掃車頭前方＝紅。
+--   (lag-body-mem) rs 103：硬點落到掃描起點後（快照沒有它）：記下的形狀重判仍重疊＝保持、不發 release。違規證明：不保持＝紅。
+--   (lag-body-tail) 不拖車 rs 107（硬點在車尾後 0.43）：release why=body，帶 hitS／nose／tail／body。違規證明：why 分類錯＝紅。
+--   (lag-tow-hold) 拖車（trailLen 11）rs 107／110：硬點在掛車旁＝保持；車心離硬點世界距 > halfL 時帽仍是 MIN_EXEC（side 旗標）。
+--     rs 114（過掛車尾）：release why=body。違規證明：車尾不含掛車＝rs 107 就放＝紅；帽不看 side＝紅。
+--   (lag-body-nose) 硬點在車身旁、ld 收到 0.35：release why=nose。
+--   (lag-tow-wide) 掛車半寬 1.6 > 牽引車 1.25：只有掛車寬才擋的硬點照判。違規證明：只用牽引車半寬＝紅。
+--   (lag-pad) 預測車身外 0.1（< FOOTPRINT_PAD）的硬點照判（footprint 會鎖輪的距離）。違規證明：不加 pad＝紅。
+function drive.scenarioLagBody()
+    scenario("1008：實測落後量守門涵蓋整個車身（含掛車）——硬點過車頭不放行、車尾過點才放、半寬與 footprint 一致")
+    local Dr, F = MDAD.Drive, MDADFollower
+    local prof = F.begin({ pts = { 0, 0, 300, 0 } }, 60, 2)
+    while not F.stepBuild(prof, 4096) do end
+    local fs = F.newState()
+    F.setLaneBias(fs, 0)
+    local halfW, halfL, r, HS, PAD, MIN = 1.25, 4.12, 0.15, 102.5, MDADCorridor.FOOTPRINT_PAD, MDADDynamics.MIN_EXEC_KMH
+    local sen = { ready = true, hardN = 1, hardS = {}, hardL = {}, hardLc = {}, hardW = {}, hardR = {}, hardX = {}, hardY = {} }
+    local function put(hs, lc)
+        sen.hardN = 1
+        sen.hardS[1], sen.hardL[1], sen.hardLc[1], sen.hardW[1], sen.hardR[1], sen.hardX[1], sen.hardY[1] =
+            hs, lc, lc, r, r, hs, lc
+    end
+    local oldEvent, events = MDADDiagnostics.event, {}
+    MDADDiagnostics.event = function(_, name, a) events[#events + 1] = { name = name, a = a } end
+    local function lastLag(phase)
+        for i = #events, 1, -1 do
+            local e = events[i]
+            if e.name == "lag" and e.a and e.a.phase == phase then return e.a end
+        end
+        return nil
+    end
+    local function newS(tow)
+        return { diag = true, sensor = sen, fstate = fs, profile = prof, dodging = false, lastSNow = 0, lastLatDev = 1.1,
+            diagExpL = 0, safeBrake = 6, vehicleProfile = { halfW = halfW, halfL = halfL }, lagHistD = {}, lagHistL = {},
+            lagHistN = 0, tow = tow }
+    end
+    local function at(s, rs, ld)
+        s.lastSNow, s.lastLatDev = rs, ld or s.lastLatDev
+        Dr.lagGuardScan(s, 0, 18, rs, s.lastLatDev, 0)
+    end
+    local lc = halfW + PAD + r + 0.5
+    -- 一台車走完：front → side → mem → tail；回 s
+    local function pass(tow)
+        local s = newS(tow)
+        put(HS, lc)
+        at(s, 97)
+        return s
+    end
+    -- (lag-body-front)
+    local s = pass(nil)
+    checkTrue(s.lagHitX == HS and lastLag("arm") ~= nil, "(lag-body-front) 硬點在車頭前 1.4m：arm（hit=" .. tostring(s.lagHitX) .. "）")
+    -- (lag-body-side)
+    events = {}
+    at(s, 99)
+    local cap = Dr.lagGuardCap(s, 18, 99, 1.1)
+    checkTrue(s.lagHitX == HS and s.lagHitSide == true and lastLag("release") == nil and cap == MIN,
+        "(lag-body-side) 硬點過了車頭（hs ≤ rs+halfL）、在車身旁：不放行、帽＝MIN_EXEC（hit=" .. tostring(s.lagHitX)
+        .. " side=" .. tostring(s.lagHitSide) .. " cap=" .. tostring(cap) .. "）")
+    -- (lag-body-mem)
+    sen.hardN = 0
+    at(s, 103)
+    checkTrue(s.lagHitX == HS and s.lagHitSide == true and lastLag("release") == nil,
+        "(lag-body-mem) 硬點落到掃描起點後（快照沒有它）：記下的形狀仍重疊＝保持（hit=" .. tostring(s.lagHitX) .. "）")
+    -- (lag-body-tail)
+    at(s, 107)
+    local rel = lastLag("release")
+    checkTrue(s.lagHitX == nil and rel ~= nil and rel.why == "body" and rel.hitS == HS and rel.nose == 107 + halfL
+            and rel.tail == 107 - halfL and rel.body == 1.1,
+        "(lag-body-tail) 不拖車、車尾過點：release why=body、帶 hitS／nose／tail／body（why=" .. tostring(rel and rel.why)
+        .. " tail=" .. tostring(rel and rel.tail) .. " body=" .. tostring(rel and rel.body) .. "）")
+    -- (lag-tow-hold)
+    events = {}
+    local tow = { trailLen = 11, halfW = 1.0, hitchToRear = 6 }
+    s = pass(tow)
+    at(s, 99)
+    sen.hardN = 0
+    at(s, 107)
+    local held107 = s.lagHitX == HS and lastLag("release") == nil
+    at(s, 110)
+    cap = Dr.lagGuardCap(s, 18, 110, 1.1)
+    local d = math.sqrt((HS - 110) ^ 2 + (lc - 1.1) ^ 2) - halfL - r
+    checkTrue(held107 and s.lagHitX == HS and s.lagHitSide == true and cap == MIN and d > 2,
+        "(lag-tow-hold) 拖車 trailLen 11：硬點在掛車旁（rs 107／110）保持、車心距扣半車長 " .. string.format("%.1f", d)
+        .. "m 仍給 MIN_EXEC（cap=" .. tostring(cap) .. "）")
+    at(s, 114)
+    rel = lastLag("release")
+    checkTrue(s.lagHitX == nil and rel ~= nil and rel.why == "body" and rel.tail == 114 - 11,
+        "(lag-tow-hold) 過掛車尾：release why=body（tail=" .. tostring(rel and rel.tail) .. "）")
+    -- (lag-body-nose)
+    events = {}
+    s = pass(nil)
+    at(s, 99)
+    sen.hardN = 0
+    at(s, 101, 0.35)
+    rel = lastLag("release")
+    checkTrue(s.lagHitX == nil and rel ~= nil and rel.why == "nose" and rel.body == 0.35,
+        "(lag-body-nose) 硬點在車身旁、ld 收到 0.35（車身不重疊）：release why=nose（why=" .. tostring(rel and rel.why) .. "）")
+    -- (lag-tow-wide)
+    put(HS, 0.4 + halfW + PAD + r + 0.2)
+    s = newS(nil)
+    at(s, 100, 0.4)
+    local narrow = s.lagHitX
+    s = newS({ trailLen = 11, halfW = 1.6, hitchToRear = 6 })
+    at(s, 100, 0.4)
+    checkTrue(narrow == nil and s.lagHitX == HS,
+        "(lag-tow-wide) 掛車半寬 1.6 > 牽引車 1.25：只有掛車寬才擋的硬點照判（牽引車=" .. tostring(narrow) .. " 拖車="
+        .. tostring(s.lagHitX) .. "）")
+    -- (lag-pad)
+    put(HS, 0.4 + halfW + r + 0.1)
+    s = newS(nil)
+    at(s, 100, 0.4)
+    checkTrue(s.lagHitX == HS, "(lag-pad) 預測車身外 0.1（< FOOTPRINT_PAD，footprint 會鎖輪）：照判（hit=" .. tostring(s.lagHitX) .. "）")
+    MDADDiagnostics.event = oldEvent
+end
+drive.scenarioLagBody()
 
 -- 1006 一般帶橫向覆蓋（E2E 1006xe fencepass：Dixie 南行、整條路橫擋的籬笆排，車靠右時承諾 offL −5 的貼邊線撞上）：
 --   一般帶掃描以行駛線為心（bandBias＝常駐偏置），Corridor.plan 卻以 nav 線對稱出候選；常駐 +3 時 l < −4 那條帶沒掃過、

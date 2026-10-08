@@ -138,6 +138,7 @@ local FOOTPRINT_PAD = 0.15        -- current body 對點障礙的固定安全圈
 -- 往常駐線斜切會掃到的點改由 Driver 的 Drive.transitionHold 管。
 local FRONT_STRIP_PAD = 0.5
 MDADCorridor.FRONT_STRIP_PAD = FRONT_STRIP_PAD
+MDADCorridor.FOOTPRINT_PAD = FOOTPRINT_PAD -- Driver 實測落後量守門的預測車身用同一個安全圈（Drive.lagGuardScan）
 local GROUP_GAP = 6               -- 群聚合的 s 間距上限（公尺）
 local ROUNDS_MAX = 8              -- 群邊界擴張的輪數上限（見上方 ② 的說明）
 local ENTRY = 8                   -- 進入段長度（公尺）：a = sObs0 - ENTRY

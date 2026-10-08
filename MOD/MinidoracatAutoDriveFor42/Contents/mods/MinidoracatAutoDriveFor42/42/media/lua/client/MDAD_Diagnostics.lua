@@ -130,6 +130,8 @@ local EK = {
     "dir", "acc",
     -- lag arm（1006m）：實測落後的收斂率 λ（每公尺；0＝沒在收斂，缺＝歷史不夠、只用理論衰減）
     "rate",
+    -- lag release（1008）：車頭弧長 rs+halfL、車尾弧長（拖車含掛車）、命中點的預測車身 lane（hitS／rate 共用上面的鍵）
+    "nose", "tail", "body",
 }
 
 local function logOnce(msg)
@@ -1249,6 +1251,7 @@ local function encodePhys(phys)
     addBool("curveValid", "curveValid")
     addBool("curveHardActive", "curveHardActive")
     addNum("ffSteer", "sff")
+    addStr("exitCut", "xcw")          -- 1008：出弧殘餘轉角被收掉的原因（ff＝反向弧前饋、yaw＝車已反向轉、kink＝車前反向轉角；到下一個出弧前保留）
     addNum("yawGain", "yg")
     addNum("yawGainHi", "ygh")        -- 0928m：高速弧段學到的 yaw 增益（前饋補足用）
     addNum("yawGainFb", "ygf")        -- 1001h：回授正規化用的無偏 yaw 增益（yaw、steer 各自平均再相除）
