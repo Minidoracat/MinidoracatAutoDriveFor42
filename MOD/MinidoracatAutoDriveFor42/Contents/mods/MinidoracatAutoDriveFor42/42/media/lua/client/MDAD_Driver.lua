@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1009d"
+Drive.REV = "1009e"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -359,7 +359,8 @@ TUNE.PROGRESS_BRAKE_GRACE_MS = 4000
 -- 前方區域未載入的原生煞車（0928a）：前方 1–2 個 chunk 未載入時 CarController 直接煞車（isInvalidChunkAhead，
 -- CarController.java:208-216；BaseVehicle.java:3667-3723 看 ClientServerMap／PassengerMap），MP 伺服器忙時串流
 -- 跟不上，45–65 km/h 一秒煞到 0（clip-09、clip-13）。這不是卡住：不進停滯監督、不倒車（引擎照樣
--- 煞住倒車，clip-13 倒 4 秒只動 0.18m），HUD 顯示等待載入；連續等這麼久才交還。
+-- 煞住倒車，clip-13 倒 4 秒只動 0.18m），HUD 顯示等待載入；連續等這麼久才交還。1009 起後方 1–2 個 chunk 未載入
+-- （isInvalidChunkBehind，定速器供油時同樣煞住）也算，見 Drive.areaWait。
 TUNE.AREA_WAIT_MAX_MS = 30000
 -- 離線過遠（0928a；clip-01：讓位期間玩家開到路線外 98m，恢復時仍追舊路線）：車離路線超過 SNAP_MAX_M
 -- 持續這麼久（主 MOD 偏航重算冷卻 3s 之後）仍沒有新路線接上，以 RouteTooFar 交還，不越野追線。
@@ -6289,14 +6290,22 @@ function Drive.proofBlockMark(s, sen)
 end
 
 -- 前方區域未載入的等待（TUNE.AREA_WAIT_MAX_MS）：只在要前進（GO／CRAWL 且目標 > 0）時問引擎。
+-- 後方 1–2 個 chunk 未載入同樣直接煞車（CarController.update：`!isGas && isInvalidChunkBehind()`）；
+-- 定速器供油時玩家控制的 isGas 在這個判斷點恆為 false（定速器要到後面才補 isGas），所以自駕前進時
+-- 一定會被這條煞住（1009：0.25.0 一趟前方已回 false，引擎仍 ib、fbl=0 煞到停約 11 秒，停滯監督誤判倒車）。
 -- s.areaWaitActive 供進度監督暫停、停等預算排除、HUD；回 true＝已連續等滿上限且車停著（呼叫端交還）。
 function Drive.areaWait(s, vehicle, now, targetSpeed, speedKmh)
-    local active = false
+    local kind = nil
     if targetSpeed > 0 and (s.intentShadow == "GO" or s.intentShadow == "CRAWL") then
         local ok, inv = pcall(jget, vehicle, "isInvalidChunkAhead")
-        active = ok and inv == true
+        if ok and inv == true then
+            kind = "ahead"
+        else
+            ok, inv = pcall(jget, vehicle, "isInvalidChunkBehind")
+            if ok and inv == true then kind = "behind" end
+        end
     end
-    if not active then
+    if kind == nil then
         if s.areaWaitSince > 0 then
             diagEvent(s, s.playerNum, "area", { phase = "end", ms = now - s.areaWaitSince })
             s.areaWaitSince = 0
@@ -6306,7 +6315,7 @@ function Drive.areaWait(s, vehicle, now, targetSpeed, speedKmh)
     end
     if s.areaWaitSince == 0 then
         s.areaWaitSince = now
-        diagEvent(s, s.playerNum, "area", { phase = "start", speed = speedKmh, s = s.lastSNow })
+        diagEvent(s, s.playerNum, "area", { phase = "start", speed = speedKmh, s = s.lastSNow, kind = kind })
     end
     s.areaWaitActive = true
     return now - s.areaWaitSince >= TUNE.AREA_WAIT_MAX_MS and speedKmh < 1 and speedKmh > -1

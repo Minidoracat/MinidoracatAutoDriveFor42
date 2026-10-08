@@ -22618,6 +22618,8 @@ drive.scenarioStuckDetour()
 -- 0928a 正式服 0.13.1 片段修正（各段違規證明寫在段首）：
 --   (aw)          前方區域未載入的引擎煞車：不判卡死、不倒車、HUD 顯示等待、等滿上限才以專屬理由交還。
 --                 違規證明：progressPauseMs 不看 areaWaitActive＝8 秒內 suspect 紅；areaWait 恆 false＝HUD／理由紅。
+--   (aw-behind)   後方區域未載入（1009）：定速器供油時引擎同樣煞住，同樣等待、事件記 kind=behind。
+--                 違規證明：areaWait 只問 isInvalidChunkAhead＝這組紅。
 --   (ret-rot)     RETURN 待命中被甩成調頭姿態：調頭接手即結束 RETURN。違規證明：拿掉 stepFollow 的呼叫即紅。
 --   (esc)         車身 yaw 率限制：自轉同向 steer 收掉、反向不限、一般過彎與高幀率子步不誤判。
 --                 違規證明：yawGovern 原樣回 steer＝(esc)／(esc-wire) 紅；ESC_WINDOW_MS 改 0＝(esc-fps) 紅。
@@ -22678,6 +22680,35 @@ function drive.scenario0928()
     checkTrue(waited >= T.AREA_WAIT_MAX_MS, "(aw) 不提早交還（等了 " .. waited .. "ms）")
     checkEq(haloKey(), "UI_MinidoracatAutoDrive_AreaLoadStop", "(aw) 交還理由＝前方區域未載入")
     dveh.isInvalidChunkAhead, dveh._invalidAhead, dveh._braking = nil, nil, false
+
+    -- (aw-behind) 後方區域未載入：前方正常、後方 chunk 是 null
+    checkTrue(armDrive(), "(aw-behind) 啟動")
+    setHeading(dveh, 0)
+    driveTick(dp, dveh)
+    st = Dr.debugSession(0)
+    st.diag = true
+    local oldAreaEvent, oldAreaSample, areaEvents = MDADDiagnostics.event, MDADDiagnostics.sample, {}
+    MDADDiagnostics.event = function(_, name, a)
+        if name == "area" then areaEvents[#areaEvents + 1] = a end
+    end
+    MDADDiagnostics.sample = function() return true end -- 回非 true 會把 s.diag 關掉
+    dveh.isInvalidChunkBehind = function(self) return self._invalidBehind == true end
+    dveh._invalidBehind, dveh._braking, dveh._speed = true, true, 0
+    bad = false
+    for _ = 1, 80 do
+        ticks(1, 100)
+        local ps = st.progressState
+        if (ps ~= "watch" and ps ~= "disarmed") or st.mode == "unstick" then bad = true end
+    end
+    checkFalse(bad, "(aw-behind) 後方區域未載入 8 秒：不判卡死、不倒車")
+    checkEq(Dr.hudState(0), "areawait", "(aw-behind) HUD 顯示等待區域載入")
+    checkEq(areaEvents[1] and areaEvents[1].phase, "start", "(aw-behind) 記 area start")
+    checkEq(areaEvents[1] and areaEvents[1].kind, "behind", "(aw-behind) area start 記 kind=behind")
+    dveh._invalidBehind, dveh._braking = false, false
+    ticks(1, 100)
+    checkFalse(st.areaWaitActive, "(aw-behind) 後方載入後解除等待")
+    MDADDiagnostics.event, MDADDiagnostics.sample = oldAreaEvent, oldAreaSample
+    dveh.isInvalidChunkBehind, dveh._invalidBehind = nil, nil
 
     -- (ret-rot) RETURN 待命中被甩成調頭姿態
     MDAD.Drive.stop(0, nil)
