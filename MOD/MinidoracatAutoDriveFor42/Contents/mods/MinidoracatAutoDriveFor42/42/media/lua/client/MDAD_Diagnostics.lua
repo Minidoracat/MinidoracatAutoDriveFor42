@@ -130,6 +130,8 @@ local EK = {
     "dir", "acc",
     -- lag arm（1006m）：實測落後的收斂率 λ（每公尺；0＝沒在收斂，缺＝歷史不夠、只用理論衰減）
     "rate",
+    -- 橫向覆蓋補掃（1008，dodge defer lateral-coverage／band-clear、blocked）：補掃帶心選法 nav／mid／none／cap／done、連續延後次數
+    "bsel", "bdn",
 }
 
 local function logOnce(msg)

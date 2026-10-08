@@ -25131,6 +25131,139 @@ function drive.scenarioBandCover()
 end
 drive.scenarioBandCover()
 
+-- 1008 車在常駐線外遠處的橫向覆蓋出口（正式服 0.23.0 三個片段：起步離 nav 線
+--   8–12m、斜切保持把行駛線釘在車位，車位帶心那輪候選被橫向覆蓋拒收→延後、nav 線補掃那輪車身在 ±7 帶外看不到車線上的
+--   硬點→判淨空，延後↔淨空逐輪交替到接觸）。常駐 0（keepRightTarget 打樁）、斜切保持打樁成「行駛線＝車位」、牆排在 x=40、
+--   y 4..14（擋車線、左側 y<4 有縫）。
+--   (band-far) 車在 y=9：nav 線帶放不進車身＝補掃帶心取車位與常駐線中點 4.5（bsel=mid）；補掃那一輪不判淨空（承諾或判堵），
+--     之後不出現延後↔淨空交替、橫向覆蓋延後不超過 TUNE.BAND_DEFER_MAX。違規證明：補掃帶心照舊 nav 線＝紅。
+--   (band-none) 車在 y=12：中點 6 也放不進＝不補掃、不延後，當輪判堵（bsel=none）。違規證明：拿掉 none 出口（照要求中點）＝紅。
+--   (band-void) 補掃輪的帶沒蓋住車身（要求中點後帶心被改成 0，同舊制）：那一輪的淨空不算＝沿用群起點延後（band-clear，
+--     bdn 2）；下一輪連續延後到上限（cap）＝判堵。違規證明：拿掉 Drive.bandClearVoid＝紅；拿掉上限＝紅。
+--   (band-flicker) 補掃輪真的淨空、車位帶心那輪又看到：延後串不歸零，兩次後判堵。違規證明：補掃輪淨空也歸零＝紅。
+function drive.scenarioBandFar()
+    scenario("1008：車在常駐線外 9m 的橫向覆蓋——補掃帶要同時蓋住車身與常駐線，不在延後／淨空間逐輪翻，限輪進判堵階梯")
+    local oldSand = SandboxVars
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    local wasMs = drive.frameMs(10)
+    local Dr = MDAD.Drive
+    local oldKeep, oldHold = Dr.keepRightTarget, Dr.transitionHold
+    Dr.keepRightTarget = function() return 0 end
+    Dr.transitionHold = function(s) return s.lastLatSigned end -- 斜切保持：行駛線釘在車位
+    local oldEvent, oldSample, events = MDADDiagnostics.event, MDADDiagnostics.sample, {}
+    MDADDiagnostics.event = function(_, name, a) events[#events + 1] = { name = name, a = a } end
+    MDADDiagnostics.sample = function() return true end
+    local function count(name, phase, why)
+        local n = 0
+        for i = 1, #events do
+            local e = events[i]
+            if e.name == name and e.a and e.a.phase == phase and (why == nil or e.a.why == why) then n = n + 1 end
+        end
+        return n
+    end
+    local function last(name, phase)
+        for i = #events, 1, -1 do
+            local e = events[i]
+            if e.name == name and e.a and (phase == nil or e.a.phase == phase) then return e.a end
+        end
+        return {}
+    end
+    local function start(y)
+        drive.fillWorld(-10, 160, -22, 22) -- 帶心 12 的帶到 y 19：世界要蓋得住，否則是 unloaded 延後
+        for wy = 4, 14 do drive.putSolid(40, wy, "harness_band_far") end
+        armDrive()
+        local st = Dr.debugSession(0)
+        st.diag = true
+        st.sandBias, st.roadBias = 0, 0
+        MDADFollower.setLaneBias(st.fstate, y)
+        st.sensor.scanBias = y
+        MDADSensor.reset(st.sensor)
+        setHeading(dveh, 0)
+        dveh._x, dveh._y, dveh._speed = 10, y, 10
+        driveReset(dveh)
+        for i = #events, 1, -1 do events[i] = nil end
+        return st
+    end
+    -- 淨空且沒有延後帽（不承諾、不判堵）＝舊制補掃輪的假淨空（延後輪 planMode 也是 clear，要看延後帽分辨）
+    local function freeClear(st)
+        return not st.dodging and not st.blocked and not ((st.dodgeDeferCap or -1) >= 0)
+    end
+    -- (band-far)
+    local st = start(9)
+    drive.scanRound(true)
+    local r1 = { band = st.sensor.completedBandBias, next = st.sensor.scanBias, dodging = st.dodging, blocked = st.blocked,
+        defer = count("dodge", "defer", "lateral-coverage"), d = last("dodge", "defer") }
+    drive.scanRound(true)
+    local r2 = { band = st.sensor.completedBandBias, dodging = st.dodging, blocked = st.blocked, free = freeClear(st) }
+    local frees = r2.free and 1 or 0
+    for _ = 1, 6 do
+        drive.scanRound(true)
+        if freeClear(st) then frees = frees + 1 end
+    end
+    checkTrue(r1.band == 9 and not r1.dodging and not r1.blocked and r1.defer == 1 and r1.next == 4.5
+            and r1.d.bsel == "mid" and r1.d.bdn == 1,
+        "(band-far) 車位帶心那一輪延後 lateral-coverage、補掃帶心取車位↔常駐線中點 4.5（band=" .. tostring(r1.band)
+        .. " next=" .. tostring(r1.next) .. " defer=" .. tostring(r1.defer) .. " bsel=" .. tostring(r1.d.bsel)
+        .. " bdn=" .. tostring(r1.d.bdn) .. "）")
+    checkTrue(r2.band == 4.5 and not r2.free and (r2.dodging == true or r2.blocked == true),
+        "(band-far) 中點補掃那一輪蓋得住車身與常駐線：承諾或判堵、不判淨空（band=" .. tostring(r2.band) .. " dodging="
+        .. tostring(r2.dodging) .. " blocked=" .. tostring(r2.blocked) .. "）")
+    checkTrue(frees == 0 and count("dodge", "defer", "lateral-coverage") <= 2 and (st.dodging == true or st.blocked == true),
+        "(band-far) 之後不在延後／淨空間交替、延後不超過上限 2（＝TUNE.BAND_DEFER_MAX）（frees=" .. frees .. " defers="
+        .. count("dodge", "defer", "lateral-coverage") .. " dodging=" .. tostring(st.dodging) .. "）")
+    MDAD.Drive.stop(0, nil)
+    -- (band-none)
+    st = start(12)
+    drive.scanRound(true)
+    checkTrue(st.sensor.completedBandBias == 12 and st.sensor.scanBias == 12 and st.blocked == true
+            and count("dodge", "defer") == 0 and last("blocked", nil).bsel == "none" and last("blocked", nil).band ~= nil,
+        "(band-none) 中點也蓋不住車身與常駐線：不補掃、不延後、當輪判堵（next=" .. tostring(st.sensor.scanBias) .. " blocked="
+        .. tostring(st.blocked) .. " defers=" .. count("dodge", "defer") .. " bsel=" .. tostring(last("blocked", nil).bsel) .. "）")
+    MDAD.Drive.stop(0, nil)
+    -- (band-void)
+    st = start(9)
+    drive.scanRound(true)
+    st.sensor.scanBias = 0 -- 補掃輪的帶心被改成 nav 線（舊制）：車身在帶外
+    drive.scanRound(true)
+    local v2 = { band = st.sensor.completedBandBias, mode = st.planMode, cap = st.dodgeDeferCap, d = last("dodge", "defer") }
+    drive.scanRound(true)
+    checkTrue(v2.band == 0 and v2.mode == "band-clear" and v2.d.why == "band-clear" and v2.d.bdn == 2
+            and type(v2.cap) == "number" and v2.cap >= 0,
+        "(band-void) 補掃輪的帶沒蓋住車身：淨空不算、沿用群起點延後 band-clear（band=" .. tostring(v2.band) .. " mode="
+        .. tostring(v2.mode) .. " why=" .. tostring(v2.d.why) .. " bdn=" .. tostring(v2.d.bdn) .. " cap=" .. tostring(v2.cap) .. "）")
+    checkTrue(st.sensor.completedBandBias == 9 and st.blocked == true and last("blocked", nil).bsel == "cap"
+            and last("blocked", nil).bdn == 2 and count("dodge", "defer") == 2,
+        "(band-void) 連續延後到上限：不再補掃、進判堵階梯（blocked=" .. tostring(st.blocked) .. " bsel="
+        .. tostring(last("blocked", nil).bsel) .. " bdn=" .. tostring(last("blocked", nil).bdn) .. " defers="
+        .. count("dodge", "defer") .. "）")
+    MDAD.Drive.stop(0, nil)
+    -- (band-flicker)：補掃輪真的淨空（牆暫時不在），車位帶心那輪又看到（串流載入、移動物）——補掃輪的淨空不結束延後串，
+    --   兩次延後後判堵，不在延後／淨空間無限交替。違規證明：補掃輪的淨空也歸零延後次數＝紅。
+    local function wall(on)
+        for wy = 4, 14 do
+            if on then drive.putSolid(40, wy, "harness_band_far") else drive.clearCell(40, wy) end
+        end
+    end
+    st = start(9)
+    for _ = 1, 2 do
+        drive.scanRound(true) -- 車位帶心：延後、要求中點補掃
+        wall(false)
+        drive.scanRound(true) -- 補掃輪：真的淨空
+        wall(true)
+    end
+    drive.scanRound(true)
+    checkTrue(st.blocked == true and count("dodge", "defer", "lateral-coverage") == 2 and last("blocked", nil).bsel == "cap",
+        "(band-flicker) 補掃輪的淨空不結束延後串：兩次延後後判堵（blocked=" .. tostring(st.blocked) .. " defers="
+        .. count("dodge", "defer", "lateral-coverage") .. " bsel=" .. tostring(last("blocked", nil).bsel) .. "）")
+    MDAD.Drive.stop(0, nil)
+    MDADDiagnostics.event, MDADDiagnostics.sample = oldEvent, oldSample
+    Dr.keepRightTarget, Dr.transitionHold = oldKeep, oldHold
+    drive.fillWorld(-2, 70, -7, 7)
+    drive.frameMs(wasMs)
+    SandboxVars = oldSand
+end
+drive.scenarioBandFar()
+
 do -- 主 chunk local 槽已滿：整段包成函式，內部 local 不佔主 chunk
 -- =====================================================================
 -- v6 多停靠點行程（docs/addon-api.md §6）
