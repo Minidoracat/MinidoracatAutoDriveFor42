@@ -65,11 +65,14 @@ D.FILLET_MAX_RAD = 100 * PI / 180
 D.FILLET_SEGMENT_SHARE = 0.45  -- two adjacent corners therefore consume <=90%
 D.ROAD_EDGE_MARGIN = 0.4
 D.FILLET_ANGLE_MAX_RAD = 2 * PI / 180
--- 容量：近處最多前 128 個 source 點參與圓角展開，這一窗最多輸出 1024 點。
+-- 容量：近處最多前 256 個 source 點參與圓角展開，這一窗最多輸出 2048 點。
 -- 0927 正式服長路線定罪：超過 source 上限不能整條放棄圓角；原始尾段逐點保留，
 -- 角度合格者標 fallback。尾段每點只加一點、不裁遠端；建構仍 O(輸出)。
-D.FILLET_SOURCE_MAX = 128
-D.FILLET_OUTPUT_MAX = 1024
+-- 1009 128／1024→256／2048：0.25.0 建線 21/77 次帶 filletReason=capacity，12.8 km 路線第 140／141 點的 48° S 錯位
+-- 成了無弧頂點、7.2m 卡車 12 km/h 擦路邊物。同路線實機（單機）：圓角 35→70、退化頂點 26→1；單幀建構 47→72 ms、
+-- 剖面點 1054→2043、背景重建 37–52→93–99 ms（分幀，最長幀 37.7→43.2 ms、幀時 p50 不變）。短路線不受影響。
+D.FILLET_SOURCE_MAX = 256
+D.FILLET_OUTPUT_MAX = 2048
 D.FILLET_ARC_MAX = 64
 D.FILLET_FIT_ITERS = 4
 D.SEG_LINE = 0

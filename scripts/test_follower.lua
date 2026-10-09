@@ -2845,30 +2845,33 @@ do
         "首段仍合理近：右側車道不得因後方反向臂近0.2m就跳過整個迴圈")
 end
 
-scenario("CONTACT_CAPACITY_KINK：257 點保留近處弧、容量尾段與窄路折點維持保守")
+scenario("CONTACT_CAPACITY_KINK：2×容量＋1 點保留近處弧、容量尾段與窄路折點維持保守")
 do
     local vp = { valid = true, geometryValid = true, halfW = 0.9, rMin = 4.32,
         wheelbase = 3.79, delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 100 }
+    -- 尾端轉角在第 2×容量−1 點（容量 128 時＝原本寫死的 257 點路線），遠在圓角容量外（1009 容量改 256 後跟著放大）
+    local last = 2 * MDADDynamics.FILLET_SOURCE_MAX - 1
+    local tailY = (last - 2) * 60
     local function build(w)
         local r = { pts = { 0, 0, 60, 0, 60, 60 }, segSurface = {}, segWidth = {} }
-        for i = 4, 255 do r.pts[#r.pts + 1], r.pts[#r.pts + 2] = 60, (i - 2) * 60 end
-        r.pts[#r.pts + 1], r.pts[#r.pts + 2] = 120, 253 * 60
-        r.pts[#r.pts + 1], r.pts[#r.pts + 2] = 180, 253 * 60
-        for i = 1, 256 do r.segSurface[i], r.segWidth[i] = "paved", w end
+        for i = 4, last do r.pts[#r.pts + 1], r.pts[#r.pts + 2] = 60, (i - 2) * 60 end
+        r.pts[#r.pts + 1], r.pts[#r.pts + 2] = 120, tailY
+        r.pts[#r.pts + 1], r.pts[#r.pts + 2] = 180, tailY
+        for i = 1, last + 1 do r.segSurface[i], r.segWidth[i] = "paved", w end
         local p = F.begin(r, 70, 4, vp)
         while not F.stepBuild(p, 4096) do end
         return p, r
     end
     local p, r = build(8)
-    checkTrue(p.filletN >= 1 and p.segKind[2] == MDADDynamics.SEG_ARC, "257 點近處 90° 彎仍建 ARC")
+    checkTrue(p.filletN >= 1 and p.segKind[2] == MDADDynamics.SEG_ARC, "2×容量＋1 點近處 90° 彎仍建 ARC")
     checkTrue(p.filletBandValid, "容量降階不破壞 band 證明")
     checkEq(p.x[p.n], 180, "容量降階保留完整遠端 x")
-    checkEq(p.y[p.n], 253 * 60, "容量降階保留完整遠端 y")
+    checkEq(p.y[p.n], tailY, "容量降階保留完整遠端 y")
     local tail = p.n - 2
     checkNear(p.curveV[tail], math.sqrt(9 * vp.rMin), 1e-9, "capacity 尾端直角仍吃 sqrt(aLat*rMin)")
     local st = F.newState()
     st.idx = tail - 1
-    local _, _, _, _, err = F.control(p, st, 60, 253 * 60 - 6, math.pi / 2, 12, DT)
+    local _, _, _, _, err = F.control(p, st, 60, tailY - 6, math.pi / 2, 12, DT)
     checkTrue(math.abs(err) < 0.01 and st.kinkHeld ~= nil, "capacity 尾端切點前仍鉗制前視，不切內")
     local bandOK = true
     for i = 1, p.n - 1 do

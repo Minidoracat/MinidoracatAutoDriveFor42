@@ -19,7 +19,7 @@ T.KEY_TURN = "UI_MinidoracatAutoDrive_TrailerTurn" -- 需要調頭時改走不�
 T.LAT_SCALE = 0.525        -- 拖車時彎道側向加速度預算乘數（牽引車單體預算對掛車太快：E2E 23 km/h 進 143° 斷開）；
                            -- 0928m 單車天花板 7→8，這裡 0.6→0.525 讓拖車實際預算維持 4.2
 -- 小於此折角不改寫。20°＝MDADDynamics.FILLET_MIN_RAD：改寫後的路線點數遠超 Follower 圓角的 source 容量
--- （FILLET_SOURCE_MAX 128），容量外 ≥20° 的頂點全標 fallback＝12 km/h 爬行（GitHub #6 拖車 20–25° 小彎）；
+-- （FILLET_SOURCE_MAX，1009 前 128、現 256），容量外 ≥20° 的頂點全標 fallback＝12 km/h 爬行（GitHub #6 拖車 20–25° 小彎）；
 -- 這些折角改由本檔排圓弧。規劃不出來的 <BLOCK_MIN_RAD 折角照舊保留頂點、不列不可過（舊制本來就照開）。
 T.TURN_MIN_RAD = 20 * math.pi / 180
 T.BLOCK_MIN_RAD = 25 * math.pi / 180
