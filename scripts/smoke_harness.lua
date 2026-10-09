@@ -20563,14 +20563,14 @@ function drive.scenarioKnoxGate()
     local function setOpen(open)
         for y = -9, 9 do drive.world[G * 100000 + y]._flags.open = open or nil end
     end
-    local function arm(x)
+    local function arm(x, route, tx, ty)
         MDAD.Drive.stop(0, nil)
         dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = x, 0, 70, 0, false
         dveh._engine, dveh._driver = true, dp
         dp._vehicle, dp._dead, dp._local = dveh, false, true
         setHeading(dveh, 0)
-        drive.nav.route = { pts = { x, 0, 400, 0 }, segSurface = { "paved" }, segWidth = { 16 } }
-        drive.nav.tx, drive.nav.ty, drive.nav.state = 400, 0, "ok"
+        drive.nav.route = route or { pts = { x, 0, 400, 0 }, segSurface = { "paved" }, segWidth = { 16 } }
+        drive.nav.tx, drive.nav.ty, drive.nav.state = tx or 400, ty or 0, "ok"
         drive.frameMs(20)
         events = {}
         checkTrue(MDAD.Drive.start(dp), "(kp) 直路啟動")
@@ -20735,6 +20735,61 @@ function drive.scenarioKnoxGate()
         "(kp-other) 正對照：標記的門遠處只截前緣、帶內不當硬物（gateHard=" .. tostring(st.sensor.gateHard) .. " end="
         .. tostring(st.sensor.scanEndS) .. " hardN=" .. st.sensor.hardN .. " 只剩帶外=" .. tostring(outer) .. "）")
 
+    -- (kp-side) 1010（正式服 0.27.0 StopStuck）：會開的門蓋在路緣、門線與路線平行（門線 y=-3、門格在路內＝中央帶），
+    -- 路線沒有跨過門線。照一般關門＝門線上的格緣薄牆：不截前緣、不判 near／latch、不判堵，照速開過；
+    -- 1010 前當成要開過去的門：前緣截在門格、近了閂成硬物、停在門旁倒車三次交還。
+    -- 違規證明（temp/vp_1010kpside.py）：gateCrossed 恆回 true＝前兩條紅；關門改回整格方塊＝薄牆那條紅。
+    local function sideWorld()
+        drive.fillWorld(-12, 420, -9, 9)
+        drive.putRoad(-12, 420, -8, 8)
+        for x = G - 10, G + 10 do drive.putGate(x, -3, true, false) end
+    end
+    apiMode, KnoxPassAPI = "yes", api
+    sideWorld()
+    local side = run(G - D0, nil, 8)
+    checkTrue(side.x > G + 10 and not side.blocked and not side.dodge and side.fb == 0
+            and side.minSpeed >= ctl.minSpeed - 0.5 and side.minVis >= 70,
+        "(kp-side) 會開的門與路線平行：照速開過（x=" .. string.format("%.1f", side.x) .. " 最低 "
+        .. string.format("%.2f", side.minSpeed) .. "（無門對照 " .. string.format("%.2f", ctl.minSpeed) .. "）、可視帽最低 "
+        .. string.format("%.1f", side.minVis) .. " blocked=" .. tostring(side.blocked) .. " fb=" .. side.fb .. "）")
+    checkTrue(gateEv("far") == nil and gateEv("hard") == nil and warnN(0) == 0,
+        "(kp-side) 不記 gate far／hard、不提示（gate 事件 " .. #events .. "、提示 " .. warnN(0) .. "）")
+    sideWorld()
+    arm(G - 30)
+    drive.scanRound(true)
+    local edgeN, boxN = 0, 0
+    for i = 1, st.sensor.hardN do
+        if math.abs(st.sensor.hardY[i] + 2.95) < 1e-9 then edgeN = edgeN + 1 end
+        if math.abs(st.sensor.hardY[i] + 2.5) < 1e-9 then boxN = boxN + 1 end
+    end
+    checkTrue(edgeN > 0 and boxN == 0 and st.sensor.gateX == nil and not st.blocked,
+        "(kp-side) 關門＝門線上的格緣薄牆（門線點 " .. edgeN .. "、格心方塊 " .. boxN .. "）、不記門、不判堵")
+
+    -- (door-edge) 沒有 Knox Pass 的一般關門，門線在路線旁 2m（門格在車身與門線之間）：門線上的格緣薄牆不擋車道，照速開過；
+    -- 1010 前整格方塊＝門格那半格也算擋，壓進車身需要的淨空，車要繞或判堵（正式服閘門那排就是這樣擋住右車道）。
+    KnoxPassAPI = nil
+    drive.fillWorld(-12, 420, -9, 9)
+    drive.putRoad(-12, 420, -8, 8)
+    for x = G - 10, G + 10 do drive.putGate(x, -2, true, false) end
+    local de = run(G - D0, nil, 8)
+    checkTrue(de.x > G + 10 and not de.blocked and not de.dodge and de.fb == 0 and de.minSpeed >= ctl.minSpeed - 0.5,
+        "(door-edge) 門線在路線旁 2m 的關門：照速開過、不繞不判堵（x=" .. string.format("%.1f", de.x) .. " 最低 "
+        .. string.format("%.2f", de.minSpeed) .. " blocked=" .. tostring(de.blocked) .. " dodge=" .. tostring(de.dodge) .. "）")
+
+    -- (kp-turn) 路線沿路往東、在門前左轉往北穿過路緣的門（門線 y=-3）：門格先被轉彎前、與門線平行的那幾站掃到，
+    -- 仍要認成要開過去的門（gateCrossed 往前看 20m；只看取樣站方向會當成路旁的門）。違規證明：前看窗改 0＝這條紅。
+    apiMode, KnoxPassAPI = "yes", api
+    drive.fillWorld(-12, 420, -60, 9)
+    drive.putRoad(-12, G + 8, -8, 8)
+    drive.putRoad(G - 8, G + 8, -60, -8)
+    for x = G - 3, G + 3 do drive.putGate(x, -3, true, false) end
+    arm(G - 70, { pts = { G - 70, 0, G, 0, G, -55 }, segSurface = { "paved", "paved" }, segWidth = { 6, 6 } }, G, -55)
+    drive.scanRound(true)
+    -- 最近的門格要是轉彎前就掃到的西側那幾格（x≤G-2）：路線正下方那格是跨線後的測站掃到的，不必前看也認得出來
+    checkTrue(st.sensor.gateX ~= nil and st.sensor.gateX <= G - 2 and st.sensor.gateHard == false and st.sensor.gateY < -2,
+        "(kp-turn) 路線在門前轉進去：先被平行段掃到的門格仍認成要開過去的門（gate=" .. tostring(st.sensor.gateX) .. ","
+        .. tostring(st.sensor.gateY) .. " hard=" .. tostring(st.sensor.gateHard) .. "）")
+
     -- 1005e 提示（Drive.gateWarn／gateShut）：API v3 回 false,"NotRegistered"（標記的門）／false（沒標記）。
     local whyMode, whyArg = "ok", nil
     local WHY_TEXT = "這台車的感應盒沒有登記這扇門。"
@@ -20749,6 +20804,19 @@ function drive.scenarioKnoxGate()
             if whyMode == "throw" then error("why-fail") end
             return WHY_TEXT
         end }
+    -- (kv-side-row) 不會替這台車開的門與路線平行、門格在帶內（路緣別人家的大門）：路線沒跨過門線＝不提示、不記 no
+    -- （1010 前帶內就提示「不會開」＝開車經過別人的大門也跳提示）。
+    KnoxPassAPI, apiCalls = api3, 0
+    sideWorld()
+    for x = G - 10, G + 10 do
+        local o = drive.world[x * 100000 - 3]._objs
+        o[#o]._knox = true
+    end
+    arm(G - 30)
+    drive.scanRound(true)
+    for _ = 1, 50 do advance(0.02) end
+    checkTrue(apiCalls > 0 and st.sensor.gateNoX == nil and warnN(0) == 0 and gateEv("no") == nil,
+        "(kv-side-row) 不會開的門在路旁、路線沒跨過：不提示（API 呼叫 " .. apiCalls .. "、提示 " .. warnN(0) .. "）")
     -- (kv-no) 不會替這台車開：判堵行為同舊制；本輪就提示一次（文字帶 whyText、Toast 同字、語音 gate 蓋掉同幀的 blocked）、
     -- telemetry gate phase=no why=NotRegistered detail=api、Debug console 一行；session 欄位可讀。
     KnoxPassAPI, apiCalls = api3, 0

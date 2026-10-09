@@ -56,11 +56,11 @@
 --                      trfT 命中當下的時戳（呼叫端依年齡外推）、trfId 車輛 id（Driver 合併伺服器轉送時去重）；
 --                      trfOverflow 超過上限。Driver 會在完成輪之後把伺服器轉送的遠方車接在尾端（Drive.mergeRelay）
 --     state.unloaded   走廊內有未載入 chunk（規劃要保守：不是淨空，是不知道）
---     state.gateS/gateX/gateY  本輪最近一格「Knox Pass 會開的關門」的弧長與世界格心（nil＝沒有）；
---                      gateHard＝false（遠處：只截可視前緣）／"near"／"latch"（同格另當硬物，見 gateCell）。
---                      請求欄 state.gateNearM 由 Driver 每輪寫（Drive.updatePerception）
---     state.gateNoS/gateNoX/gateNoY/gateNoWhy  本輪中央帶內最近一格「Knox Pass 不會替這台車開的關門」（API 回
---                      false＋why）的弧長、世界格心與原因代碼（nil＝沒有）；那格照舊整格硬物，只供 Driver 提示（gateNoCell）
+--     state.gateS/gateX/gateY  本輪最近一格「Knox Pass 會開、路線要跨過的關門」的弧長與世界格心（nil＝沒有；
+--                      只在路線旁、不跨過門線的門不算，見 gateCrossed）；gateHard＝false（遠處：只截可視前緣）／
+--                      "near"／"latch"（同格另當牆，見 gateCell）。請求欄 state.gateNearM 由 Driver 每輪寫（Drive.updatePerception）
+--     state.gateNoS/gateNoX/gateNoY/gateNoWhy  本輪中央帶內、路線要跨過的最近一格「Knox Pass 不會替這台車開的關門」
+--                      （API 回 false＋why）的弧長、世界格心與原因代碼（nil＝沒有）；那格照舊當關門，只供 Driver 提示（gateNoCell）
 --     state.sig        整數簽章：障礙布局有變才會變（呼叫端拿它省掉重複規劃）
 --     state.scanS      本輪掃描起點弧長；state.scanEndS 終點弧長
 --     state.stamp      本輪完成時的 now（判資料新鮮度）
@@ -469,15 +469,24 @@ end
 -- 單格掃描
 --------------------------------------------------------------------------------
 
--- 關著的門／柵門＝車輛碰撞牆（IsoChunk.calcPhysics:2068-2088：格級屬性 DoorWallW＋doorW 或 DoorWallN＋doorN，
--- 且沒有 open → WallW／WallN 物理形狀）。開關會換 sprite（IsoDoor／IsoThumpable 在 closedSprite／openSprite
--- 間切換，IsoDoor.java:1604-1607），但門框／門洞 sprite 本身也帶 doorN／doorW，所以只看 sprite 會把關著的門
--- 當開口——0928m E2E rc13 0190：車頂著關著的鐵絲網柵門 0 km/h、每輪掃描淨空、倒車 100 次到逾時。
--- 門類 sprite 快取成 COST_DOOR，碰到才讀一次格級屬性；整格保守擋住（同牆 COST_HARD）。
-local function closedDoor(square)
+-- 關著的門／柵門＝車輛碰撞牆（IsoChunk.calcPhysics:2071-2091：格級屬性 DoorWallW＋doorW 或 DoorWallN＋doorN，
+-- 且沒有 open → WallW／WallN 物理形狀，與 collideW／collideN 籬笆同一種格緣薄牆）。開關會換 sprite（IsoDoor／
+-- IsoThumpable 在 closedSprite／openSprite 間切換，IsoDoor.java:1604-1607），但門框／門洞 sprite 本身也帶 doorN／doorW，
+-- 所以只看 sprite 會把關著的門當開口——0928m E2E rc13 0190：車頂著關著的鐵絲網柵門 0 km/h、每輪掃描淨空、倒車 100 次
+-- 到逾時。門類 sprite 快取成 COST_DOOR，碰到才讀一次格級屬性。回形狀碼：0＝開著／不是門；SHAPE_WALL_N／SHAPE_WALL_W
+-- （可相加）＝關著的門在格的北緣／西緣。1010 前整格當方塊：門線另一側的那半格也算擋，路邊沿著門線開的車道被當成堵死
+-- （0.27.0 正式服：雙桿閘門蓋在 6m 路北緣，車道整排 1m 被當硬物）。
+local function closedDoorEdge(square)
     local sp = square:getProperties()                  -- 格級聚合屬性（IsoGridSquare.getProperties）
-    if sp == nil or sp:has(F_open) then return false end
-    return (sp:has(F_doorW) and sp:has(F_doorWallW)) or (sp:has(F_doorN) and sp:has(F_doorWallN))
+    if sp == nil or sp:has(F_open) then return 0 end
+    local edge = 0
+    if sp:has(F_doorN) and sp:has(F_doorWallN) then edge = SHAPE_WALL_N end
+    if sp:has(F_doorW) and sp:has(F_doorWallW) then edge = edge + SHAPE_WALL_W end
+    return edge
+end
+
+local function closedDoor(square)
+    return closedDoorEdge(square) ~= 0
 end
 
 -- name→cost 查快取；miss 時 classifySprite 並在上限內收錄。上限保護：模組化地圖
@@ -498,13 +507,13 @@ end
 
 -- Knox Pass 大門（1005c；介面契約 KnoxPassAPI.willOpenFor(vehicle, obj)，Minidoracat Knox Pass VERSION ≥ 2）：
 -- 關著、但 Knox Pass 預告會替這台車打開的門。預告不是保證（伺服器載入那一帶才開得了，實測開門距離 53–61 格），
--- 所以中央帶（同未載入的定義）的門格不當硬物，而是把本輪可視前緣截在門前一步——門一直不開時，可視兩帳
--- （巡航帳＋中線減速輔助、硬煞帳＋一秒鎖輪）照舊保證車心停在前緣 halfL+2 之前；門在遠處就開了＝不減速、
+-- 所以中央帶（同未載入的定義）內、路線要跨過門線（gateCrossed）的門格不當牆，而是把本輪可視前緣截在門前一步——門一直
+-- 不開時，可視兩帳（巡航帳＋中線減速輔助、硬煞帳＋一秒鎖輪）照舊保證車心停在前緣 halfL+2 之前；門在遠處就開了＝不減速、
 -- 不判堵、不繞行。車心到門格的世界距離 ≤ state.gateNearM（Driver 每輪寫：判堵停止線＋halfL＋車速×
--- TUNE.GATE_NEAR_LEAD_S，見 Drive.updatePerception）時同一格另當硬物＝退回關門處理（blocked 停等、重試、交還）；
--- 退回一次就記下門的位置（gateLatchX/Y，session 期間不清、reset 也不清），GATE_LATCH_R 內的門格之後一律硬物——
--- 倒車脫困退到 gateNearM 外也不會變回「遠處」再開回來（沒有出口的來回）。帶外的門格照關門處理。
--- Knox Pass 不在、API 出錯或回 false：與舊制完全相同（整格硬物、不截前緣）。
+-- TUNE.GATE_NEAR_LEAD_S，見 Drive.updatePerception）時同一格另當牆＝退回關門處理（blocked 停等、重試、交還）；
+-- 退回一次就記下門的位置（gateLatchX/Y，session 期間不清、reset 也不清），GATE_LATCH_R 內的門格之後一律當牆——
+-- 倒車脫困退到 gateNearM 外也不會變回「遠處」再開回來（沒有出口的來回）。帶外、或路線沒跨過的門格照關門處理。
+-- Knox Pass 不在、API 出錯或回 false：與舊制完全相同（格緣薄牆、不截前緣）。
 local GATE_LATCH_R2 = 8 * 8 -- 退回門格的同門半徑平方（柵門最寬約 6 格）
 
 -- 這格（關著的門）有沒有一片是 Knox Pass 會替這台車開的；只在 closedDoor 為真時呼叫，一格一次。
@@ -527,7 +536,7 @@ local function gateWillOpen(state, vehicle, objs, nObj)
     return false, no
 end
 
--- 不會替這台車開的 Knox Pass 門格（1005e；gateWillOpen 帶 why、中央帶內）：這格照舊整格硬物（關門處理不變），
+-- 不會替這台車開的 Knox Pass 門格（1005e；gateWillOpen 帶 why、中央帶內、路線跨過門線）：這格照舊當關門（格緣薄牆），
 -- 只記本輪最近一格的弧長／世界格心／原因，給 Driver 提示玩家（Drive.gateNote phase no）。
 local function gateNoCell(state, wx, wy, why)
     if state.wGateNoS == nil or state.curS < state.wGateNoS then
@@ -535,10 +544,10 @@ local function gateNoCell(state, wx, wy, why)
     end
 end
 
--- 會開的門格（scanCell 冷分支）：截可視前緣、記本輪最近的門；回 true＝這格同時當硬物（帶外、近、已退回）。
--- wGateHard：false＝遠處（當可視前緣）、"near"＝車已接近、"latch"＝這扇門先前退回過（每種失敗各自的名字）。
-local function gateCell(state, vehicle, wx, wy, inBand)
-    if not inBand then return true end
+-- 會開的門格（scanCell 冷分支；只在中央帶內、路線跨過門線時呼叫，見 gateCrossed）：截可視前緣、記本輪最近的門；
+-- 回 true＝這格同時當牆（近、已退回）。wGateHard：false＝遠處（當可視前緣）、"near"＝車已接近、"latch"＝這扇門
+-- 先前退回過（每種失敗各自的名字）。
+local function gateCell(state, vehicle, wx, wy)
     local gx, gy = wx + 0.5, wy + 0.5
     local why = false
     local lx, ly = state.gateLatchX, state.gateLatchY
@@ -559,6 +568,43 @@ local function gateCell(state, vehicle, wx, wy, inBand)
         state.wGateS, state.wGateX, state.wGateY, state.wGateHard = state.curS, gx, gy, why
     end
     return why ~= false
+end
+
+-- Knox Pass 有回答的關門格（會開，或不會開並帶原因）：路線（剖面中心線）在本格取樣站往回 3m、往前 20m 弧長內，
+-- 有沒有跨過這扇門的門線（北緣＝y=wy、西緣＝x=wx），跨點沿門線離格心 ≤ 8m（同閂鎖半徑，柵門最寬約 6 格）。
+-- 只有跨過的才當「要開過去的門」（gateCell／gateNoCell）；和路線平行、只在旁邊的門照一般關門（格緣薄牆）。
+-- 只看取樣站本身的方向不夠：路邊車道的大門常是轉進去前、與門線平行的那幾站先掃到。0.27.0 正式服：雙桿閘門蓋在
+-- 6m 路北緣、路線沿路往西，閘門被當成要開過去的門——截前緣、近了閂成硬物、三次倒車交還；伺服器照規則沒開
+-- （車頭沒朝門、在 5 格感應距離外）。冷路徑：只有關著、Knox Pass 有回答的門格才跑；不配置。
+-- seekSeg 宣告在後面，這裡從本站的段（centerAt 寫的 segIdx）往回找起點。
+local function gateCrossed(state, wx, wy, edge)
+    local p = state.profile
+    if p == nil then return false end
+    local px, py, ps, hi = p.x, p.y, p.s, p.n - 1
+    local s0, s1 = state.curS - 3, state.curS + 20
+    local i = state.segIdx
+    if i > hi then i = hi end
+    while i > 1 and ps[i] > s0 do i = i - 1 end
+    local cx, cy = wx + 0.5, wy + 0.5
+    while i >= 1 and i <= hi and ps[i] <= s1 do
+        local ax, ay, bx, by = px[i], py[i], px[i + 1], py[i + 1]
+        if edge % 4 >= SHAPE_WALL_N then
+            local da, db = ay - wy, by - wy
+            if da * db <= 0 and da ~= db then
+                local d = ax + (bx - ax) * da / (da - db) - cx
+                if d >= -8 and d <= 8 then return true end
+            end
+        end
+        if edge >= SHAPE_WALL_W then
+            local da, db = ax - wx, bx - wx
+            if da * db <= 0 and da ~= db then
+                local d = ay + (by - ay) * da / (da - db) - cy
+                if d >= -8 and d <= 8 then return true end
+            end
+        end
+        i = i + 1
+    end
+    return false
 end
 
 -- 旗標 wHardOverflow 讓本輪快照可被判定不完整。Driver 另在快照尾端附加
@@ -858,26 +904,24 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
         end
     end
     local soft = false
-    -- 形狀旗標（pushShape 依此推點）：box＝整格方塊（水面、HARD、關門、車輛格級佔位），其餘可以並存
-    -- （同格的籬笆與樹）。box 蓋過一切，看到就停。
+    -- 形狀旗標（pushShape 依此推點）：box＝整格方塊（水面、HARD、車輛格級佔位），其餘可以並存
+    -- （同格的籬笆、關著的門與樹）。box 蓋過一切，看到就停。
     local box, wallN, wallW, trunk, thin, bush = hard, false, false, false, false, false
 
     if not hard then
         local objs = square:getObjects()               -- IsoGridSquare.java:9635（回 PZArrayList）
         local nObj = objs:size()                       -- 迭代慣例 ISButtonPrompt.lua:535-536
         local gate, gateNo = nil, nil                  -- Knox Pass 會開的門／不會開的原因（gateWillOpen；gate nil＝這格還沒問）
+        local doorEdge = nil                           -- 關著的門在哪個格緣（closedDoorEdge；nil＝這格還沒讀）
         for i = 1, nObj do
             local obj = objs:get(i - 1)
             local name = obj:getSpriteName()           -- IsoObject.java:2235
             if name ~= nil then
                 local cost = spriteCostOf(state, obj, name)
                 if cost == COST_DOOR then
-                    if not closedDoor(square) then
-                        cost = COST_NONE
-                    else
-                        if gate == nil then gate, gateNo = gateWillOpen(state, vehicle, objs, nObj) end
-                        if gate then cost = COST_NONE else cost = COST_HARD end
-                    end
+                    if doorEdge == nil then doorEdge = closedDoorEdge(square) end
+                    if doorEdge ~= 0 and gate == nil then gate, gateNo = gateWillOpen(state, vehicle, objs, nObj) end
+                    cost = COST_NONE -- 關著的門在迴圈後依格緣推薄牆
                 end
                 if cost == COST_HARD then
                     box = true
@@ -892,8 +936,18 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
                 end
             end
         end
-        if gate and not box then box = gateCell(state, vehicle, wx, wy, inBand)
-        elseif gateNo ~= nil and inBand then gateNoCell(state, wx, wy, gateNo) end
+        -- 關著的門＝格緣薄牆。Knox Pass 有回答（會開，或不會開並帶原因）的門，只有在中央帶內、路線跨過它的門線
+        -- （gateCrossed）才當要開過去的門：會開＝gateCell（遠處只截前緣，近了或閂住才當牆），不會開＝提示。
+        if doorEdge ~= nil and doorEdge ~= 0 and not box then
+            local wall = true
+            if (gate or gateNo ~= nil) and inBand and gateCrossed(state, wx, wy, doorEdge) then
+                if gate then wall = gateCell(state, vehicle, wx, wy) else gateNoCell(state, wx, wy, gateNo) end
+            end
+            if wall then
+                if doorEdge % 4 >= SHAPE_WALL_N then wallN = true end -- kahlua-mod-ok: 形狀碼非負
+                if doorEdge >= SHAPE_WALL_W then wallW = true end
+            end
+        end
         hard = box or wallN or wallW or trunk or thin or bush
     end
 
