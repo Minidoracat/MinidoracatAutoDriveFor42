@@ -223,5 +223,605 @@
     "id": "gate_ja",
     "language": "ja",
     "text": "[casual] 前のゲート、開かないみたい。"
+  },
+  {
+    "id": "start_ko",
+    "language": "ko",
+    "text": "[cheerful] 좋아, 출발! 나한테 맡겨!"
+  },
+  {
+    "id": "stop_ko",
+    "language": "ko",
+    "text": "[casual] 자율주행 껐어. 이제 맡길게."
+  },
+  {
+    "id": "blocked_ko",
+    "language": "ko",
+    "text": "[casual] 길이 막혔어. 잠깐만."
+  },
+  {
+    "id": "unstick_ko",
+    "language": "ko",
+    "text": "[reassuring] 끼었네. 살짝 후진할게."
+  },
+  {
+    "id": "handback_ko",
+    "language": "ko",
+    "text": "[casual] 여긴 못 지나가. 네 차례야."
+  },
+  {
+    "id": "arrive_ko",
+    "language": "ko",
+    "text": "[cheerful] 도착했어. 수고했어!"
+  },
+  {
+    "id": "detour_ko",
+    "language": "ko",
+    "text": "[casual] 길이 막혔네. 다른 길로 갈게."
+  },
+  {
+    "id": "nodetour_ko",
+    "language": "ko",
+    "text": "[casual] 돌아갈 길이 없어. 네가 맡아 줘."
+  },
+  {
+    "id": "yield_ko",
+    "language": "ko",
+    "text": "[warmly] 응, 운전해. 손 놓으면 내가 다시 할게."
+  },
+  {
+    "id": "resume_ko",
+    "language": "ko",
+    "text": "[cheerful] 다시 내 차례야. 계속 가자!"
+  },
+  {
+    "id": "manual_ko",
+    "language": "ko",
+    "text": "[casual] 알았어, 네가 운전해. 자율주행 껐어."
+  },
+  {
+    "id": "leg_next_ko",
+    "language": "ko",
+    "text": "[cheerful] 다음 목적지로 가자!"
+  },
+  {
+    "id": "stopover_ko",
+    "language": "ko",
+    "text": "[warmly] 여기 도착. 준비되면 출발하자."
+  },
+  {
+    "id": "priority_ko",
+    "language": "ko",
+    "text": "[casual] 여기 먼저 들렀다가 원래 길로 갈게."
+  },
+  {
+    "id": "gate_ko",
+    "language": "ko",
+    "text": "[casual] 앞에 게이트가 안 열려."
+  },
+  {
+    "id": "start_ru",
+    "language": "ru",
+    "text": "[cheerful] Ну что, поехали. Я справлюсь!"
+  },
+  {
+    "id": "stop_ru",
+    "language": "ru",
+    "text": "[casual] Автопилот выключен. Руль твой."
+  },
+  {
+    "id": "blocked_ru",
+    "language": "ru",
+    "text": "[casual] Дорога перекрыта. Подожди секунду."
+  },
+  {
+    "id": "unstick_ru",
+    "language": "ru",
+    "text": "[reassuring] Застряли. Сейчас чуть сдам назад."
+  },
+  {
+    "id": "handback_ru",
+    "language": "ru",
+    "text": "[casual] Тут не проехать. Давай ты."
+  },
+  {
+    "id": "arrive_ru",
+    "language": "ru",
+    "text": "[cheerful] Приехали. Отлично доехали!"
+  },
+  {
+    "id": "detour_ru",
+    "language": "ru",
+    "text": "[casual] Дорога перекрыта. Поеду в объезд."
+  },
+  {
+    "id": "nodetour_ru",
+    "language": "ru",
+    "text": "[casual] Объезда нет. Дальше ты."
+  },
+  {
+    "id": "yield_ru",
+    "language": "ru",
+    "text": "[warmly] Ладно, веди. Отпустишь руль, и я подхвачу."
+  },
+  {
+    "id": "resume_ru",
+    "language": "ru",
+    "text": "[cheerful] Снова моя очередь. Едем дальше!"
+  },
+  {
+    "id": "manual_ru",
+    "language": "ru",
+    "text": "[casual] Ладно, рулишь ты. Автопилот выключен."
+  },
+  {
+    "id": "leg_next_ru",
+    "language": "ru",
+    "text": "[cheerful] Теперь к следующей точке!"
+  },
+  {
+    "id": "stopover_ru",
+    "language": "ru",
+    "text": "[warmly] Добрались до остановки. Едем, когда скажешь."
+  },
+  {
+    "id": "priority_ru",
+    "language": "ru",
+    "text": "[casual] Сначала заскочим сюда, потом продолжим поездку."
+  },
+  {
+    "id": "gate_ru",
+    "language": "ru",
+    "text": "[casual] Ворота впереди не открываются."
+  },
+  {
+    "id": "start_es",
+    "language": "es",
+    "text": "[cheerful] ¡Vamos! Yo me encargo."
+  },
+  {
+    "id": "stop_es",
+    "language": "es",
+    "text": "[casual] Apagué la conducción automática. Todo tuyo."
+  },
+  {
+    "id": "blocked_es",
+    "language": "es",
+    "text": "[casual] Está bloqueado. Dame un segundo."
+  },
+  {
+    "id": "unstick_es",
+    "language": "es",
+    "text": "[reassuring] Nos atascamos. Retrocedo un poco."
+  },
+  {
+    "id": "handback_es",
+    "language": "es",
+    "text": "[casual] Por aquí no paso. Te toca."
+  },
+  {
+    "id": "arrive_es",
+    "language": "es",
+    "text": "[cheerful] ¡Llegamos! ¡Buen viaje!"
+  },
+  {
+    "id": "detour_es",
+    "language": "es",
+    "text": "[casual] Está bloqueado. Voy por otro lado."
+  },
+  {
+    "id": "nodetour_es",
+    "language": "es",
+    "text": "[casual] No hay otra ruta. Sigues tú."
+  },
+  {
+    "id": "yield_es",
+    "language": "es",
+    "text": "[warmly] Claro, conduce tú. Suelta y lo retomo."
+  },
+  {
+    "id": "resume_es",
+    "language": "es",
+    "text": "[cheerful] Me toca otra vez. ¡Sigamos!"
+  },
+  {
+    "id": "manual_es",
+    "language": "es",
+    "text": "[casual] Bueno, conduces tú. Apago la conducción automática."
+  },
+  {
+    "id": "leg_next_es",
+    "language": "es",
+    "text": "[cheerful] ¡A la siguiente parada!"
+  },
+  {
+    "id": "stopover_es",
+    "language": "es",
+    "text": "[warmly] Llegamos a esta parada. Seguimos cuando quieras."
+  },
+  {
+    "id": "priority_es",
+    "language": "es",
+    "text": "[casual] Paramos aquí primero, luego volvemos al viaje."
+  },
+  {
+    "id": "gate_es",
+    "language": "es",
+    "text": "[casual] La puerta de enfrente no se abre."
+  },
+  {
+    "id": "start_pt",
+    "language": "pt",
+    "text": "[cheerful] Beleza, vamos lá. Deixa comigo!"
+  },
+  {
+    "id": "stop_pt",
+    "language": "pt",
+    "text": "[casual] Direção automática desligada. É com você."
+  },
+  {
+    "id": "blocked_pt",
+    "language": "pt",
+    "text": "[casual] Caminho bloqueado. Só um segundo."
+  },
+  {
+    "id": "unstick_pt",
+    "language": "pt",
+    "text": "[reassuring] Ficamos presos. Vou voltar um pouco."
+  },
+  {
+    "id": "handback_pt",
+    "language": "pt",
+    "text": "[casual] Por aqui não passa. Sua vez."
+  },
+  {
+    "id": "arrive_pt",
+    "language": "pt",
+    "text": "[cheerful] Chegamos. Que viagem boa!"
+  },
+  {
+    "id": "detour_pt",
+    "language": "pt",
+    "text": "[casual] Caminho bloqueado. Vou por outro lado."
+  },
+  {
+    "id": "nodetour_pt",
+    "language": "pt",
+    "text": "[casual] Sem outro caminho. Agora é com você."
+  },
+  {
+    "id": "yield_pt",
+    "language": "pt",
+    "text": "[warmly] Tá, pode dirigir. Soltou, eu assumo."
+  },
+  {
+    "id": "resume_pt",
+    "language": "pt",
+    "text": "[cheerful] Minha vez de novo. Vamos seguindo!"
+  },
+  {
+    "id": "manual_pt",
+    "language": "pt",
+    "text": "[casual] Tá, você dirige. Direção automática desligada."
+  },
+  {
+    "id": "leg_next_pt",
+    "language": "pt",
+    "text": "[cheerful] Vamos pra próxima parada!"
+  },
+  {
+    "id": "stopover_pt",
+    "language": "pt",
+    "text": "[warmly] Pronto, chegamos. Seguimos quando você quiser."
+  },
+  {
+    "id": "priority_pt",
+    "language": "pt",
+    "text": "[casual] Parada rápida aqui, depois voltamos à viagem."
+  },
+  {
+    "id": "gate_pt",
+    "language": "pt",
+    "text": "[casual] O portão ali na frente não abre."
+  },
+  {
+    "id": "start_tr",
+    "language": "tr",
+    "text": "[cheerful] Tamam, gidelim. Bana bırak!"
+  },
+  {
+    "id": "stop_tr",
+    "language": "tr",
+    "text": "[casual] Otomatik sürüş kapalı. Gerisi sende."
+  },
+  {
+    "id": "blocked_tr",
+    "language": "tr",
+    "text": "[casual] Yol kapalı. Bir saniye bekle."
+  },
+  {
+    "id": "unstick_tr",
+    "language": "tr",
+    "text": "[reassuring] Sıkıştık. Biraz geri gidiyorum."
+  },
+  {
+    "id": "handback_tr",
+    "language": "tr",
+    "text": "[casual] Buradan geçemiyorum. Sıra sende."
+  },
+  {
+    "id": "arrive_tr",
+    "language": "tr",
+    "text": "[cheerful] Geldik. Güzel yolculuktu!"
+  },
+  {
+    "id": "detour_tr",
+    "language": "tr",
+    "text": "[casual] Yol kapalı. Başka yoldan gidiyorum."
+  },
+  {
+    "id": "nodetour_tr",
+    "language": "tr",
+    "text": "[casual] Başka yol yok. Sana kaldı."
+  },
+  {
+    "id": "yield_tr",
+    "language": "tr",
+    "text": "[warmly] Tamam, sen sür. Bırakınca ben devralırım."
+  },
+  {
+    "id": "resume_tr",
+    "language": "tr",
+    "text": "[cheerful] Yine sıra bende. Devam edelim!"
+  },
+  {
+    "id": "manual_tr",
+    "language": "tr",
+    "text": "[casual] Tamam, sen sürüyorsun. Otomatik sürüş kapalı."
+  },
+  {
+    "id": "leg_next_tr",
+    "language": "tr",
+    "text": "[cheerful] Sıradaki durağa gidelim!"
+  },
+  {
+    "id": "stopover_tr",
+    "language": "tr",
+    "text": "[warmly] Bu durağa geldik. Hazır olunca çıkarız."
+  },
+  {
+    "id": "priority_tr",
+    "language": "tr",
+    "text": "[casual] Önce kısaca buraya, sonra yolculuğa dönüyoruz."
+  },
+  {
+    "id": "gate_tr",
+    "language": "tr",
+    "text": "[casual] İlerideki kapı açılmıyor."
+  },
+  {
+    "id": "start_fr",
+    "language": "fr",
+    "text": "[cheerful] Allez, c'est parti. Je gère !"
+  },
+  {
+    "id": "stop_fr",
+    "language": "fr",
+    "text": "[casual] Conduite auto désactivée. À toi."
+  },
+  {
+    "id": "blocked_fr",
+    "language": "fr",
+    "text": "[casual] La route est bloquée. Attends deux secondes."
+  },
+  {
+    "id": "unstick_fr",
+    "language": "fr",
+    "text": "[reassuring] On est coincés. Je recule un peu."
+  },
+  {
+    "id": "handback_fr",
+    "language": "fr",
+    "text": "[casual] Ça passe pas ici. À toi."
+  },
+  {
+    "id": "arrive_fr",
+    "language": "fr",
+    "text": "[cheerful] On est arrivés. Belle balade !"
+  },
+  {
+    "id": "detour_fr",
+    "language": "fr",
+    "text": "[casual] Route bloquée. Je prends un autre chemin."
+  },
+  {
+    "id": "nodetour_fr",
+    "language": "fr",
+    "text": "[casual] Pas d'autre chemin. À toi de jouer."
+  },
+  {
+    "id": "yield_fr",
+    "language": "fr",
+    "text": "[warmly] D'accord, conduis. Lâche, et je reprends."
+  },
+  {
+    "id": "resume_fr",
+    "language": "fr",
+    "text": "[cheerful] Je reprends le volant. On continue !"
+  },
+  {
+    "id": "manual_fr",
+    "language": "fr",
+    "text": "[casual] D'accord, tu conduis. Conduite auto désactivée."
+  },
+  {
+    "id": "leg_next_fr",
+    "language": "fr",
+    "text": "[cheerful] En route pour la prochaine étape !"
+  },
+  {
+    "id": "stopover_fr",
+    "language": "fr",
+    "text": "[warmly] Halte atteinte. On repart quand tu veux."
+  },
+  {
+    "id": "priority_fr",
+    "language": "fr",
+    "text": "[casual] On passe d'abord ici, puis retour au trajet."
+  },
+  {
+    "id": "gate_fr",
+    "language": "fr",
+    "text": "[casual] Le portail devant ne s'ouvre pas."
+  },
+  {
+    "id": "start_pl",
+    "language": "pl",
+    "text": "[cheerful] Dobra, jedziemy. Zostaw to mnie!"
+  },
+  {
+    "id": "stop_pl",
+    "language": "pl",
+    "text": "[casual] Wyłączyłam autopilota. Prowadzisz ty."
+  },
+  {
+    "id": "blocked_pl",
+    "language": "pl",
+    "text": "[casual] Droga zablokowana. Daj mi chwilę."
+  },
+  {
+    "id": "unstick_pl",
+    "language": "pl",
+    "text": "[reassuring] Utknęło nam auto. Cofam kawałek."
+  },
+  {
+    "id": "handback_pl",
+    "language": "pl",
+    "text": "[casual] Tędy nie przejadę. Twoja kolej."
+  },
+  {
+    "id": "arrive_pl",
+    "language": "pl",
+    "text": "[cheerful] Jesteśmy. Fajna jazda!"
+  },
+  {
+    "id": "detour_pl",
+    "language": "pl",
+    "text": "[casual] Zablokowane. Jadę inną drogą."
+  },
+  {
+    "id": "nodetour_pl",
+    "language": "pl",
+    "text": "[casual] Nie ma objazdu. Teraz ty."
+  },
+  {
+    "id": "yield_pl",
+    "language": "pl",
+    "text": "[warmly] Dobra, prowadź. Puść, to przejmę."
+  },
+  {
+    "id": "resume_pl",
+    "language": "pl",
+    "text": "[cheerful] Znowu moja kolej. Jedziemy dalej!"
+  },
+  {
+    "id": "manual_pl",
+    "language": "pl",
+    "text": "[casual] Dobra, prowadzisz ty. Wyłączam autopilota."
+  },
+  {
+    "id": "leg_next_pl",
+    "language": "pl",
+    "text": "[cheerful] Jedziemy do następnego przystanku!"
+  },
+  {
+    "id": "stopover_pl",
+    "language": "pl",
+    "text": "[warmly] Jesteśmy na postoju. Ruszamy, jak zechcesz."
+  },
+  {
+    "id": "priority_pl",
+    "language": "pl",
+    "text": "[casual] Najpierw szybko tutaj, potem wracamy do podróży."
+  },
+  {
+    "id": "gate_pl",
+    "language": "pl",
+    "text": "[casual] Brama przed nami się nie otwiera."
+  },
+  {
+    "id": "start_de",
+    "language": "de",
+    "text": "[cheerful] Okay, los geht's. Ich mach das!"
+  },
+  {
+    "id": "stop_de",
+    "language": "de",
+    "text": "[casual] Autopilot ist aus. Du bist dran."
+  },
+  {
+    "id": "blocked_de",
+    "language": "de",
+    "text": "[casual] Straße ist dicht. Warte kurz."
+  },
+  {
+    "id": "unstick_de",
+    "language": "de",
+    "text": "[reassuring] Wir stecken fest. Ich setz kurz zurück."
+  },
+  {
+    "id": "handback_de",
+    "language": "de",
+    "text": "[casual] Hier geht's nicht weiter. Übernimm du."
+  },
+  {
+    "id": "arrive_de",
+    "language": "de",
+    "text": "[cheerful] Wir sind da. War eine schöne Fahrt!"
+  },
+  {
+    "id": "detour_de",
+    "language": "de",
+    "text": "[casual] Straße ist dicht. Ich nehm einen anderen Weg."
+  },
+  {
+    "id": "nodetour_de",
+    "language": "de",
+    "text": "[casual] Kein anderer Weg. Jetzt bist du dran."
+  },
+  {
+    "id": "yield_de",
+    "language": "de",
+    "text": "[warmly] Okay, fahr du. Lass los, dann übernehm ich."
+  },
+  {
+    "id": "resume_de",
+    "language": "de",
+    "text": "[cheerful] Ich bin wieder dran. Weiter geht's!"
+  },
+  {
+    "id": "manual_de",
+    "language": "de",
+    "text": "[casual] Okay, du fährst. Autopilot ist aus."
+  },
+  {
+    "id": "leg_next_de",
+    "language": "de",
+    "text": "[cheerful] Weiter zum nächsten Stopp!"
+  },
+  {
+    "id": "stopover_de",
+    "language": "de",
+    "text": "[warmly] Stopp erreicht. Weiter, wenn du so weit bist."
+  },
+  {
+    "id": "priority_de",
+    "language": "de",
+    "text": "[casual] Kurz hier halten, dann zurück zur Tour."
+  },
+  {
+    "id": "gate_de",
+    "language": "de",
+    "text": "[casual] Das Tor da vorne geht nicht auf."
   }
 ]

@@ -1,7 +1,7 @@
 -- MDAD_Voice.lua
 -- 自動駕駛語音提示（2026-09-02 使用者裁定）：啟動／關閉／受阻煞停／倒車脫困／
 -- 無法通過交還／到站／改道／無路可繞，加上手動介入三句（讓位待命／恢復接手／介入即關閉，
--- 2026-09-06），依遊戲語言選國語（CH／CN）、日語（JP）或英語，ESC「語音語言」可改指定語音包。Knox Pass 大門打不開（gate，1005e）。
+-- 2026-09-06），依遊戲語言選語音包（2026-10-09 起 11 種，對照見 LOCALE_PACK；沒有語音包的語言播英語），ESC「語音語言」可改指定語音包。Knox Pass 大門打不開（gate，1005e）。
 -- 2026-09-29 起全部改成女朋友撒嬌口吻，分 Stacy／Yui 兩種聲音（ESC「語音聲音」，預設 Stacy）；
 -- 2026-09-30 依玩家許願把舊版語音還原成第三種「經典」（classic）。
 -- 聲音檔與 sound script：42/media/sound/MinidoracatAutoDrive、scripts/sounds_autodrive.txt
@@ -55,11 +55,14 @@ local function finite(n)
     return type(n) == "number" and n * 0 == 0
 end
 
--- 語音包以「口說語言」分檔（zh 國語／en／ja），不以遊戲語系分：CH 與 CN 只差文字
--- 書寫，同一份國語音檔；遊戲語系→語音包對照只在這一張表。順序＝ESC／MiniMap
--- 「語音語言」下拉的順序（1=跟隨遊戲語言、2..=語音包），HUD 以 index 存選項。
-Voice.PACKS = { "zh", "en", "ja" }
-local LOCALE_PACK = { CH = "zh", CN = "zh", JP = "ja" }  -- 其餘語系 → en
+-- 語音包以「口說語言」分檔（zh 國語／en／ja／ko／ru／es／pt／tr／fr／pl／de），不以遊戲語系分：
+-- CH 與 CN 只差文字書寫，同一份國語音檔；ES／AR／ES_CL／ES_MX 共用中性西班牙語，PTBR／PT 共用巴西
+-- 葡萄牙語。遊戲語系→語音包對照只在這一張表。順序＝ESC／MiniMap「語音語言」下拉的順序
+-- （1=跟隨遊戲語言、2..=語音包），HUD 以 index 存選項：新語音包一律接在尾端。
+Voice.PACKS = { "zh", "en", "ja", "ko", "ru", "es", "pt", "tr", "fr", "pl", "de" }
+local LOCALE_PACK = { CH = "zh", CN = "zh", JP = "ja", KO = "ko", RU = "ru",
+    ES = "es", AR = "es", ES_CL = "es", ES_MX = "es", PTBR = "pt", PT = "pt",
+    TR = "tr", FR = "fr", PL = "pl", DE = "de" }  -- 其餘語系 → en
 local PACK_SET = {}
 for i = 1, #Voice.PACKS do PACK_SET[Voice.PACKS[i]] = true end
 
@@ -71,6 +74,16 @@ for i = 1, #Voice.PACKS do PACK_SET[Voice.PACKS[i]] = true end
 Voice.ACTORS = { "stacy", "yui", "classic", "stacy_brief", "yui_brief" }
 local ACTOR_SET = {}
 for i = 1, #Voice.ACTORS do ACTOR_SET[Voice.ACTORS[i]] = true end
+
+-- 只錄了部分語音包的聲音：classic（Fish Audio 舊版）只有 zh／en／ja，其他語言改播 en。
+-- 沒列在這裡的聲音每個語音包都有；verify「語音資產契約」照這張表檢查音檔。
+Voice.ACTOR_PACKS = { classic = { "zh", "en", "ja" } }
+local ACTOR_PACK_SET = {}
+for actor, list in pairs(Voice.ACTOR_PACKS) do
+    local set = {}
+    for i = 1, #list do set[list[i]] = true end
+    ACTOR_PACK_SET[actor] = set
+end
 
 -- 跟隨遊戲語言：`Translator.getLanguage():name()`（原版 ISLcdBar.lua:14）
 function Voice.autoLanguage()
@@ -118,7 +131,11 @@ local function voiceVolume()
 end
 
 function Voice.soundName(event)
-    return SOUND_PREFIX .. event .. "_" .. Voice.language() .. "_" .. Voice.actor()
+    local actor = Voice.actor()
+    local language = Voice.language()
+    local only = ACTOR_PACK_SET[actor]
+    if only and not only[language] then language = "en" end
+    return SOUND_PREFIX .. event .. "_" .. language .. "_" .. actor
 end
 
 local function stillPlaying(playerNum)

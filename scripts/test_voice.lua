@@ -4,7 +4,8 @@
     lua scripts/test_voice.lua
 
 契約：
-- 語言：CH／CN → zh，其餘 → en；聲音：HUD.voiceActor（stacy／yui／classic／stacy_brief／yui_brief，非法退 stacy）；
+- 語言：CH／CN → zh、JP → ja，KO RU ES(AR/ES_CL/ES_MX) PTBR(PT) TR FR PL DE 各有語音包，其餘 → en；
+  聲音：HUD.voiceActor（stacy／yui／classic／stacy_brief／yui_brief，非法退 stacy）；classic 只有 zh／en／ja，其他語言播 en；
   sound 名 MDAD_Voice_<event>_<lang>_<actor>
 - 開關／音量每次播放重讀 MDAD.HUD.voiceEnabled／voiceVolume（缺席退 on／0.7）
 - 播放走 emitter:playSoundImpl(name, nil)（本機、不送封包）＋ setVolume(ref, v)
@@ -83,7 +84,13 @@ checkEq(V.language(), "zh", "CH → zh")
 languageName = "CN"; checkEq(V.language(), "zh", "CN → zh（同一份國語音檔）")
 languageName = "EN"; checkEq(V.language(), "en", "EN → en")
 languageName = "JP"; checkEq(V.language(), "ja", "JP → ja")
-languageName = "KO"; checkEq(V.language(), "en", "無語音包的語系退 en")
+languageName = "KO"; checkEq(V.language(), "ko", "KO → ko")
+languageName = "ES_MX"; checkEq(V.language(), "es", "ES_MX → es（西語變體共用中性西語）")
+languageName = "AR"; checkEq(V.language(), "es", "AR → es")
+languageName = "PT"; checkEq(V.language(), "pt", "PT → pt（共用巴西葡語）")
+languageName = "DE"; checkEq(V.language(), "de", "DE → de")
+languageName = "IT"; checkEq(V.language(), "en", "無語音包的語系退 en")
+languageName = "UA"; checkEq(V.language(), "en", "UA 不借用 ru，退 en")
 Translator = nil
 checkEq(V.language(), "en", "Translator 缺席退 en")
 Translator = { getLanguage = function() return { name = function() return languageName end } end }
@@ -91,11 +98,12 @@ languageName = "CH"
 -- 選項指定語音包優先；非法值／"auto" 退回跟隨遊戲語言
 hud.language = "ja"; checkEq(V.language(), "ja", "選項指定 ja 蓋過 CH")
 hud.language = "en"; checkEq(V.language(), "en", "選項指定 en")
-hud.language = "fr"; checkEq(V.language(), "zh", "選項非法 pack 名退回跟隨（CH → zh）")
+hud.language = "it"; checkEq(V.language(), "zh", "選項非法 pack 名退回跟隨（CH → zh）")
 hud.language = 3;    checkEq(V.language(), "zh", "選項非字串退回跟隨")
 hud.language = "auto"
-checkEq(#V.PACKS, 3, "三個語音包 zh/en/ja")
-check(V.PACKS[1] == "zh" and V.PACKS[2] == "en" and V.PACKS[3] == "ja", "PACKS 順序＝下拉順序")
+checkEq(#V.PACKS, 11, "11 個語音包")
+check(V.PACKS[1] == "zh" and V.PACKS[2] == "en" and V.PACKS[3] == "ja" and V.PACKS[4] == "ko"
+    and V.PACKS[11] == "de", "PACKS 順序＝下拉順序（新語音包接在尾端，已存的 index 不變）")
 checkEq(V.soundName("start"), "MDAD_Voice_start_zh_stacy", "sound 名 = 前綴＋事件＋語言＋聲音（預設 stacy）")
 -- 聲音：選項指定優先；缺席／非法值退回第一個（stacy）
 check(V.ACTORS[1] == "stacy" and V.ACTORS[2] == "yui" and V.ACTORS[3] == "classic"
@@ -105,6 +113,15 @@ hud.actor = "classic"; checkEq(V.soundName("start"), "MDAD_Voice_start_zh_classi
 hud.actor = "yui_brief"; checkEq(V.soundName("detour"), "MDAD_Voice_detour_zh_yui_brief", "選 Yui（簡潔）")
 hud.actor = "yui"; checkEq(V.soundName("start"), "MDAD_Voice_start_zh_yui", "選 yui")
 hud.language = "ja"; checkEq(V.soundName("arrive"), "MDAD_Voice_arrive_ja_yui", "語言與聲音各自生效")
+-- classic 只有 zh／en／ja：其他語言改播英文，其他聲音照選的語言
+hud.language = "ko"; checkEq(V.soundName("arrive"), "MDAD_Voice_arrive_ko_yui", "Yui 有韓語")
+hud.actor = "stacy_brief"; checkEq(V.soundName("gate"), "MDAD_Voice_gate_ko_stacy_brief", "簡潔聲音也有韓語")
+hud.actor = "classic"; checkEq(V.soundName("arrive"), "MDAD_Voice_arrive_en_classic", "classic 沒有韓語，改播英語")
+hud.language = "ja"; checkEq(V.soundName("arrive"), "MDAD_Voice_arrive_ja_classic", "classic 仍有日語")
+hud.language = "auto"; languageName = "FR"
+checkEq(V.soundName("start"), "MDAD_Voice_start_en_classic", "跟隨遊戲語言 FR＋classic → 英語")
+hud.actor = "yui"; checkEq(V.soundName("start"), "MDAD_Voice_start_fr_yui", "跟隨遊戲語言 FR＋yui → 法語")
+languageName = "CH"
 hud.language = "auto"
 hud.actor = "lulu"; checkEq(V.actor(), "stacy", "非法聲音名退回 stacy")
 hud.actor = 2;      checkEq(V.actor(), "stacy", "非字串退回 stacy")

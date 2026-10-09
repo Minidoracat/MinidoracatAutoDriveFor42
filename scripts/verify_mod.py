@@ -1758,9 +1758,10 @@ else:
 fail("0902 結構契約", c0902) if c0902 else ok(
     "0902 結構契約（六參 cap／持有權仲裁唯一／coverEnd／擋線單一定義／測試常數對齊）")
 
-# ---- 33. 語音資產契約（2026-09-02；2026-09-29 加聲音維度）----
+# ---- 33. 語音資產契約（2026-09-02；2026-09-29 加聲音維度；2026-10-09 加 8 種語言）----
 # Voice.EVENTS × Voice.PACKS × Voice.ACTORS 每一格都要有 sound script 條目＋wav 檔，
-# 語言／聲音下拉都要有翻譯鍵；缺一格＝實機那句靜默（play 只警告一次），離線
+# Voice.ACTOR_PACKS 列出的聲音只查它錄了的語音包（classic 只有 zh／en／ja，其餘播 en）；
+# 語言／聲音下拉每個語系都要有翻譯鍵。缺一格＝實機那句靜默（play 只警告一次），離線
 # test_voice 用假 registered 表抓不到。
 voice_errs = []
 voice_src, sound_txt = "", ""
@@ -1784,11 +1785,18 @@ else:
     events = re.findall(r"(\w+)\s*=\s*true", ev_m.group(1)) if ev_m else []
     packs = re.findall(r'"(\w+)"', pk_m.group(1)) if pk_m else []
     actors = re.findall(r'"(\w+)"', ac_m.group(1)) if ac_m else []
+    ap_m = re.search(r"Voice\.ACTOR_PACKS = \{(.*)\}\s*$", voice_src, re.M)
+    actor_packs = {a: re.findall(r'"(\w+)"', body)
+                   for a, body in re.findall(r"(\w+)\s*=\s*\{([^}]*)\}", ap_m.group(1))} if ap_m else {}
     if not events or not packs or not actors:
         voice_errs.append("抽不到 Voice.EVENTS／Voice.PACKS／Voice.ACTORS")
+    cells = 0
     for ev in events:
         for pk in packs:
             for ac in actors:
+                if ac in actor_packs and pk not in actor_packs[ac]:
+                    continue
+                cells += 1
                 name = f"MDAD_Voice_{ev}_{pk}_{ac}"
                 m = re.search(r"sound\s+" + re.escape(name) + r"\s*\{.*?file\s*=\s*([^\s,]+)", sound_txt, re.S)
                 if not m:
@@ -1799,15 +1807,16 @@ else:
                     voice_errs.append(f"{name} 指到不存在的檔 {rel}")
     keys = [f"UI_MinidoracatAutoDrive_VoiceLang_{pk}" for pk in packs] + \
         [f"UI_MinidoracatAutoDrive_VoiceActor_{ac}" for ac in actors]
-    for lang in ("EN", "CH", "CN", "JP"):
-        ui = os.path.join(MEDIA, "lua", "shared", "Translate", lang, "UI.json")
+    tdir = os.path.join(MEDIA, "lua", "shared", "Translate")
+    for lang in sorted(os.listdir(tdir)) if os.path.isdir(tdir) else []:
+        ui = os.path.join(tdir, lang, "UI.json")
         if os.path.exists(ui):
             with open(ui, encoding="utf-8") as fh:
                 ui_txt = fh.read()
             voice_errs += [f"Translate/{lang}/UI.json 缺 {k}" for k in keys if k not in ui_txt]
 fail("語音資產契約", voice_errs) if voice_errs else ok(
-    f"語音資產契約（{len(events)} 事件 × {len(packs)} 語言 × {len(actors)} 聲音"
-    "＝sound script／wav／翻譯鍵齊全）")
+    f"語音資產契約（{len(events)} 事件 × {len(packs)} 語言 × {len(actors)} 聲音，"
+    f"扣掉只錄部分語言的聲音共 {cells} 句＝sound script／wav／翻譯鍵齊全）")
 
 # ---- 翻譯字元：原版字型能顯示 ----
 # 原版字型沒有退回機制：字碼超過該字型的最大字碼畫成「?」，範圍內但沒有字形就畫成空白（寬 0）。

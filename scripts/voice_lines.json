@@ -223,5 +223,605 @@
     "id": "gate_ja",
     "language": "ja",
     "text": "[pouty, whiny] あれ～、前のゲート、開かないみたい……どうしよう？"
+  },
+  {
+    "id": "start_ko",
+    "language": "ko",
+    "text": "[excited, sweet] 출발~! 오늘은 내가 태워 줄게!"
+  },
+  {
+    "id": "stop_ko",
+    "language": "ko",
+    "text": "[sweet, clingy] 자율주행 껐어~ 이제 운전대는 네 거야, 알았지?"
+  },
+  {
+    "id": "blocked_ko",
+    "language": "ko",
+    "text": "[pouty, whiny] 아잉~ 앞이 막혔어! 잠깐만 기다려 줘, 응?"
+  },
+  {
+    "id": "unstick_ko",
+    "language": "ko",
+    "text": "[playful, sweet] 어머, 끼어 버렸네… 걱정 마, 살짝만 후진하면 돼~"
+  },
+  {
+    "id": "handback_ko",
+    "language": "ko",
+    "text": "[whiny, pleading] 으응… 진짜 못 지나가겠어. 네가 대신 해 주면 안 돼? 응? 제발~"
+  },
+  {
+    "id": "arrive_ko",
+    "language": "ko",
+    "text": "[coquettish, giggling] 도착~! 오늘도 수고했어. 나 칭찬해 줄 거지?"
+  },
+  {
+    "id": "detour_ko",
+    "language": "ko",
+    "text": "[cheerful, sweet] 앞이 막혔는데, 내가 다른 길 찾았어! 나만 따라와~"
+  },
+  {
+    "id": "nodetour_ko",
+    "language": "ko",
+    "text": "[pouty, disappointed] 음… 돌아갈 길이 없네. 이번엔 너만 믿을게~"
+  },
+  {
+    "id": "yield_ko",
+    "language": "ko",
+    "text": "[sweet, gentle] 응, 너한테 맡길게. 다 하고 손 놓으면 내가 다시 운전할게~"
+  },
+  {
+    "id": "resume_ko",
+    "language": "ko",
+    "text": "[happy, sweet] 헤헤, 이제 내 차례! 계속 가자~!"
+  },
+  {
+    "id": "manual_ko",
+    "language": "ko",
+    "text": "[pouty, sweet] 흥, 직접 운전하고 싶어? 알았어… 자율주행 끌게!"
+  },
+  {
+    "id": "leg_next_ko",
+    "language": "ko",
+    "text": "[excited, sweet] 야호~ 다음 목적지야! 계속 가자!"
+  },
+  {
+    "id": "stopover_ko",
+    "language": "ko",
+    "text": "[coquettish, cheerful] 도착, 도착~! 잠깐 쉬었다가 다시 출발하자!"
+  },
+  {
+    "id": "priority_ko",
+    "language": "ko",
+    "text": "[playful, sweet] 좋아~! 여기 먼저 들렀다가 원래 계획으로 돌아가자!"
+  },
+  {
+    "id": "gate_ko",
+    "language": "ko",
+    "text": "[pouty, whiny] 어라~ 앞에 게이트가 안 열려… 이제 어떡해?"
+  },
+  {
+    "id": "start_ru",
+    "language": "ru",
+    "text": "[excited, sweet] Поехали! Сегодня я тебя повезу!"
+  },
+  {
+    "id": "stop_ru",
+    "language": "ru",
+    "text": "[sweet, clingy] Автопилот выключен. Руль теперь твой, хорошо?"
+  },
+  {
+    "id": "blocked_ru",
+    "language": "ru",
+    "text": "[pouty, whiny] Ну вот, впереди что-то мешает! Подожди меня секундочку, ладно?"
+  },
+  {
+    "id": "unstick_ru",
+    "language": "ru",
+    "text": "[playful, sweet] Ой, мы застряли... Не переживай, я чуть-чуть сдам назад."
+  },
+  {
+    "id": "handback_ru",
+    "language": "ru",
+    "text": "[whiny, pleading] Мм... Я правда не могу проехать. Возьмёшь руль? Ну пожалуйста!"
+  },
+  {
+    "id": "arrive_ru",
+    "language": "ru",
+    "text": "[coquettish, giggling] Приехали! Спасибо за сегодня. А похвалить меня не хочешь?"
+  },
+  {
+    "id": "detour_ru",
+    "language": "ru",
+    "text": "[cheerful, sweet] Впереди всё перекрыто, но я нашла другую дорогу. Давай за мной!"
+  },
+  {
+    "id": "nodetour_ru",
+    "language": "ru",
+    "text": "[pouty, disappointed] Хм... Других дорог нет. В этот раз вся надежда на тебя."
+  },
+  {
+    "id": "yield_ru",
+    "language": "ru",
+    "text": "[sweet, gentle] Хорошо, руль твой. Как закончишь, отпусти, и я снова поведу!"
+  },
+  {
+    "id": "resume_ru",
+    "language": "ru",
+    "text": "[happy, sweet] Хи-хи, теперь моя очередь! Поехали дальше!"
+  },
+  {
+    "id": "manual_ru",
+    "language": "ru",
+    "text": "[pouty, sweet] Хм, хочешь порулить? Ну ладно... автопилот выключаю!"
+  },
+  {
+    "id": "leg_next_ru",
+    "language": "ru",
+    "text": "[excited, sweet] Ура, следующая точка! Едем дальше!"
+  },
+  {
+    "id": "stopover_ru",
+    "language": "ru",
+    "text": "[coquettish, cheerful] Приехали, приехали! Немножко отдохнём, а потом снова в путь!"
+  },
+  {
+    "id": "priority_ru",
+    "language": "ru",
+    "text": "[playful, sweet] Конечно! Сначала заедем сюда, а потом вернёмся к плану!"
+  },
+  {
+    "id": "gate_ru",
+    "language": "ru",
+    "text": "[pouty, whiny] Хм, ворота впереди не открываются... И что нам теперь делать?"
+  },
+  {
+    "id": "start_es",
+    "language": "es",
+    "text": "[excited, sweet] ¡Aquí vamos! ¡Hoy te llevo yo!"
+  },
+  {
+    "id": "stop_es",
+    "language": "es",
+    "text": "[sweet, clingy] Ya apagué la conducción automática. El volante es todo tuyo, ¿sí?"
+  },
+  {
+    "id": "blocked_es",
+    "language": "es",
+    "text": "[pouty, whiny] ¡Ay, algo nos tapa el camino! Espérame un ratito, ¿sí?"
+  },
+  {
+    "id": "unstick_es",
+    "language": "es",
+    "text": "[playful, sweet] Uy, nos atascamos... No te preocupes, solo retrocedo un poquito."
+  },
+  {
+    "id": "handback_es",
+    "language": "es",
+    "text": "[whiny, pleading] Mmm... de verdad no puedo pasar. ¿Tomas tú el volante? ¿Porfa?"
+  },
+  {
+    "id": "arrive_es",
+    "language": "es",
+    "text": "[coquettish, giggling] ¡Llegamos! Gracias por lo de hoy. ¿No me vas a felicitar un poquito?"
+  },
+  {
+    "id": "detour_es",
+    "language": "es",
+    "text": "[cheerful, sweet] Más adelante está bloqueado, pero encontré otro camino. ¡Sígueme!"
+  },
+  {
+    "id": "nodetour_es",
+    "language": "es",
+    "text": "[pouty, disappointed] Mmm... no hay otro camino. Esta vez cuento contigo."
+  },
+  {
+    "id": "yield_es",
+    "language": "es",
+    "text": "[sweet, gentle] Bueno, todo tuyo. Suelta el volante cuando termines y yo lo retomo."
+  },
+  {
+    "id": "resume_es",
+    "language": "es",
+    "text": "[happy, sweet] ¡Jeje, me toca a mí! ¡Sigamos!"
+  },
+  {
+    "id": "manual_es",
+    "language": "es",
+    "text": "[pouty, sweet] ¡Jum! ¿Quieres conducir tú? Está bien... ¡conducción automática apagada!"
+  },
+  {
+    "id": "leg_next_es",
+    "language": "es",
+    "text": "[excited, sweet] ¡Bien, siguiente parada! ¡Sigamos!"
+  },
+  {
+    "id": "stopover_es",
+    "language": "es",
+    "text": "[coquettish, cheerful] ¡Llegamos, llegamos! Descansa un ratito y luego seguimos, ¿sí?"
+  },
+  {
+    "id": "priority_es",
+    "language": "es",
+    "text": "[playful, sweet] ¡Claro! Primero pasamos por aquí y después volvemos al plan."
+  },
+  {
+    "id": "gate_es",
+    "language": "es",
+    "text": "[pouty, whiny] Mmm, la puerta de enfrente no se abre... ¿Y ahora qué hacemos?"
+  },
+  {
+    "id": "start_pt",
+    "language": "pt",
+    "text": "[excited, sweet] Vamos lá! Hoje quem te leva sou eu!"
+  },
+  {
+    "id": "stop_pt",
+    "language": "pt",
+    "text": "[sweet, clingy] Direção automática desligada. O volante é todo seu, tá bom?"
+  },
+  {
+    "id": "blocked_pt",
+    "language": "pt",
+    "text": "[pouty, whiny] Aaah, tem alguma coisa no caminho! Me espera um pouquinho, tá?"
+  },
+  {
+    "id": "unstick_pt",
+    "language": "pt",
+    "text": "[playful, sweet] Ops, ficamos presos... Calma, é só eu voltar um pouquinho."
+  },
+  {
+    "id": "handback_pt",
+    "language": "pt",
+    "text": "[whiny, pleading] Hmm... não consigo passar mesmo. Você assume pra mim? Por favorzinho?"
+  },
+  {
+    "id": "arrive_pt",
+    "language": "pt",
+    "text": "[coquettish, giggling] Chegamos! Obrigada por hoje. Não mereço um elogiozinho?"
+  },
+  {
+    "id": "detour_pt",
+    "language": "pt",
+    "text": "[cheerful, sweet] Tá bloqueado ali na frente, mas achei outro caminho. Vem comigo!"
+  },
+  {
+    "id": "nodetour_pt",
+    "language": "pt",
+    "text": "[pouty, disappointed] Hmm... não tem outro caminho. Dessa vez eu conto com você."
+  },
+  {
+    "id": "yield_pt",
+    "language": "pt",
+    "text": "[sweet, gentle] Tá bom, pode dirigir. Quando soltar o volante, eu assumo de novo!"
+  },
+  {
+    "id": "resume_pt",
+    "language": "pt",
+    "text": "[happy, sweet] Hehe, minha vez! Vamos continuar!"
+  },
+  {
+    "id": "manual_pt",
+    "language": "pt",
+    "text": "[pouty, sweet] Ah, é? Quer dirigir por conta própria? Tá bom... direção automática desligada!"
+  },
+  {
+    "id": "leg_next_pt",
+    "language": "pt",
+    "text": "[excited, sweet] Eba, próxima parada! Vamos nessa!"
+  },
+  {
+    "id": "stopover_pt",
+    "language": "pt",
+    "text": "[coquettish, cheerful] Chegamos, chegamos! Descansa um pouquinho, e depois a gente sai de novo!"
+  },
+  {
+    "id": "priority_pt",
+    "language": "pt",
+    "text": "[playful, sweet] Claro! Primeiro a gente passa aqui, depois volta pro plano!"
+  },
+  {
+    "id": "gate_pt",
+    "language": "pt",
+    "text": "[pouty, whiny] Hmm, o portão ali na frente não abre... E agora, o que a gente faz?"
+  },
+  {
+    "id": "start_tr",
+    "language": "tr",
+    "text": "[excited, sweet] Hadi gidiyoruz! Bugün seni ben götüreyim!"
+  },
+  {
+    "id": "stop_tr",
+    "language": "tr",
+    "text": "[sweet, clingy] Otomatik sürüşü kapattım. Direksiyon artık sende, tamam mı?"
+  },
+  {
+    "id": "blocked_tr",
+    "language": "tr",
+    "text": "[pouty, whiny] Ayy, önümüz kapalı! Bir saniye bekle beni, olur mu?"
+  },
+  {
+    "id": "unstick_tr",
+    "language": "tr",
+    "text": "[playful, sweet] Hoppala, sıkıştık... Merak etme, birazcık geri gideceğim."
+  },
+  {
+    "id": "handback_tr",
+    "language": "tr",
+    "text": "[whiny, pleading] Of... Gerçekten geçemiyorum. Sen devralır mısın? Ne olursun?"
+  },
+  {
+    "id": "arrive_tr",
+    "language": "tr",
+    "text": "[coquettish, giggling] Geldik işte! Bugün için sağ ol. Bana bir aferin yok mu?"
+  },
+  {
+    "id": "detour_tr",
+    "language": "tr",
+    "text": "[cheerful, sweet] İleride yol kapalı ama başka bir yol buldum. Hadi, benimle gel!"
+  },
+  {
+    "id": "nodetour_tr",
+    "language": "tr",
+    "text": "[pouty, disappointed] Hımm... başka yol yok. Bu sefer sana güveniyorum."
+  },
+  {
+    "id": "yield_tr",
+    "language": "tr",
+    "text": "[sweet, gentle] Tamam, direksiyon sende. İşin bitince bırak, ben yine devralırım!"
+  },
+  {
+    "id": "resume_tr",
+    "language": "tr",
+    "text": "[happy, sweet] Hihi, sıra bende! Devam edelim!"
+  },
+  {
+    "id": "manual_tr",
+    "language": "tr",
+    "text": "[pouty, sweet] Hıh, kendin mi sürmek istiyorsun? Peki... otomatik sürüş kapalı!"
+  },
+  {
+    "id": "leg_next_tr",
+    "language": "tr",
+    "text": "[excited, sweet] Yaşasın, sıradaki durak! Devam edelim!"
+  },
+  {
+    "id": "stopover_tr",
+    "language": "tr",
+    "text": "[coquettish, cheerful] Geldik, geldik! Biraz dinlen, sonra yine yola çıkarız!"
+  },
+  {
+    "id": "priority_tr",
+    "language": "tr",
+    "text": "[playful, sweet] Tabii! Önce buraya uğrayalım, sonra plana geri döneriz!"
+  },
+  {
+    "id": "gate_tr",
+    "language": "tr",
+    "text": "[pouty, whiny] Hımm, ilerideki kapı açılmıyor... Şimdi ne yapacağız?"
+  },
+  {
+    "id": "start_fr",
+    "language": "fr",
+    "text": "[excited, sweet] C'est parti ! Aujourd'hui, c'est moi qui te conduis !"
+  },
+  {
+    "id": "stop_fr",
+    "language": "fr",
+    "text": "[sweet, clingy] Conduite auto désactivée. Le volant est à toi, d'accord ?"
+  },
+  {
+    "id": "blocked_fr",
+    "language": "fr",
+    "text": "[pouty, whiny] Oh non, quelque chose bloque le passage ! Attends-moi deux secondes, d'accord ?"
+  },
+  {
+    "id": "unstick_fr",
+    "language": "fr",
+    "text": "[playful, sweet] Oups, on est coincés… T'inquiète, je recule juste un petit peu."
+  },
+  {
+    "id": "handback_fr",
+    "language": "fr",
+    "text": "[whiny, pleading] Mmh… Je n'arrive vraiment pas à passer. Tu peux prendre le relais ? S'il te plaît ?"
+  },
+  {
+    "id": "arrive_fr",
+    "language": "fr",
+    "text": "[coquettish, giggling] On est arrivés ! Merci pour aujourd'hui. J'ai pas droit à un petit compliment ?"
+  },
+  {
+    "id": "detour_fr",
+    "language": "fr",
+    "text": "[cheerful, sweet] Ça bloque devant, mais j'ai trouvé un autre chemin. Suis-moi !"
+  },
+  {
+    "id": "nodetour_fr",
+    "language": "fr",
+    "text": "[pouty, disappointed] Hmm… Il n'y a pas d'autre chemin. Cette fois, je compte sur toi."
+  },
+  {
+    "id": "yield_fr",
+    "language": "fr",
+    "text": "[sweet, gentle] D'accord, je te laisse le volant. Lâche-le quand tu as fini, et je reprends !"
+  },
+  {
+    "id": "resume_fr",
+    "language": "fr",
+    "text": "[happy, sweet] Hihi, à moi ! On continue !"
+  },
+  {
+    "id": "manual_fr",
+    "language": "fr",
+    "text": "[pouty, sweet] Pff, tu veux conduire toi-même ? Bon d'accord… conduite auto désactivée !"
+  },
+  {
+    "id": "leg_next_fr",
+    "language": "fr",
+    "text": "[excited, sweet] Youpi, prochaine étape ! On continue !"
+  },
+  {
+    "id": "stopover_fr",
+    "language": "fr",
+    "text": "[coquettish, cheerful] On y est, on y est ! Fais une petite pause, et après on repart !"
+  },
+  {
+    "id": "priority_fr",
+    "language": "fr",
+    "text": "[playful, sweet] Bien sûr ! On passe d'abord par ici, puis on reprend le trajet !"
+  },
+  {
+    "id": "gate_fr",
+    "language": "fr",
+    "text": "[pouty, whiny] Hmm, le portail devant ne veut pas s'ouvrir… On fait quoi maintenant ?"
+  },
+  {
+    "id": "start_pl",
+    "language": "pl",
+    "text": "[excited, sweet] No to w drogę! Dzisiaj to ja cię zawiozę!"
+  },
+  {
+    "id": "stop_pl",
+    "language": "pl",
+    "text": "[sweet, clingy] Autopilot wyłączony. Kierownica jest cała twoja, dobrze?"
+  },
+  {
+    "id": "blocked_pl",
+    "language": "pl",
+    "text": "[pouty, whiny] Ojej, coś stoi na drodze! Poczekaj na mnie chwileczkę, dobrze?"
+  },
+  {
+    "id": "unstick_pl",
+    "language": "pl",
+    "text": "[playful, sweet] Ups, auto nam utknęło... Spokojnie, tylko troszkę się cofnę."
+  },
+  {
+    "id": "handback_pl",
+    "language": "pl",
+    "text": "[whiny, pleading] Mmm... naprawdę nie dam rady tędy przejechać. Przejmiesz? No proszę cię?"
+  },
+  {
+    "id": "arrive_pl",
+    "language": "pl",
+    "text": "[coquettish, giggling] Jesteśmy! Dzięki za dzisiaj. Nie należy mi się mała pochwała?"
+  },
+  {
+    "id": "detour_pl",
+    "language": "pl",
+    "text": "[cheerful, sweet] Dalej jest zablokowane, ale znalazłam inną drogę. Zdaj się na mnie!"
+  },
+  {
+    "id": "nodetour_pl",
+    "language": "pl",
+    "text": "[pouty, disappointed] Hmm... nie ma innej drogi. Tym razem liczę na ciebie."
+  },
+  {
+    "id": "yield_pl",
+    "language": "pl",
+    "text": "[sweet, gentle] Dobrze, kierownica twoja. Puść ją, jak skończysz, a ja znowu przejmę!"
+  },
+  {
+    "id": "resume_pl",
+    "language": "pl",
+    "text": "[happy, sweet] Hehe, moja kolej! Jedziemy dalej!"
+  },
+  {
+    "id": "manual_pl",
+    "language": "pl",
+    "text": "[pouty, sweet] Hmpf, chcesz prowadzić samodzielnie? No dobra... autopilot wyłączony!"
+  },
+  {
+    "id": "leg_next_pl",
+    "language": "pl",
+    "text": "[excited, sweet] Hurra, następny przystanek! Jedziemy dalej!"
+  },
+  {
+    "id": "stopover_pl",
+    "language": "pl",
+    "text": "[coquettish, cheerful] Jesteśmy, jesteśmy! Odpocznij chwilkę, a potem znowu ruszamy!"
+  },
+  {
+    "id": "priority_pl",
+    "language": "pl",
+    "text": "[playful, sweet] Pewnie! Najpierw zajrzymy tutaj, a potem wracamy do planu!"
+  },
+  {
+    "id": "gate_pl",
+    "language": "pl",
+    "text": "[pouty, whiny] Hmm, brama przed nami się nie otwiera... I co teraz zrobimy?"
+  },
+  {
+    "id": "start_de",
+    "language": "de",
+    "text": "[excited, sweet] Los geht's! Lass mich dich heute fahren!"
+  },
+  {
+    "id": "stop_de",
+    "language": "de",
+    "text": "[sweet, clingy] Autopilot ist aus. Das Lenkrad gehört jetzt dir, okay?"
+  },
+  {
+    "id": "blocked_de",
+    "language": "de",
+    "text": "[pouty, whiny] Ooch, da ist was im Weg! Wartest du kurz auf mich, ja?"
+  },
+  {
+    "id": "unstick_de",
+    "language": "de",
+    "text": "[playful, sweet] Hoppla, wir stecken fest... Keine Sorge, ich setz nur ein Stückchen zurück."
+  },
+  {
+    "id": "handback_de",
+    "language": "de",
+    "text": "[whiny, pleading] Mmh... ich komm hier echt nicht durch. Übernimmst du? Bitte, bitte?"
+  },
+  {
+    "id": "arrive_de",
+    "language": "de",
+    "text": "[coquettish, giggling] Wir sind da! Danke für heute. Krieg ich kein kleines Lob?"
+  },
+  {
+    "id": "detour_de",
+    "language": "de",
+    "text": "[cheerful, sweet] Vorne ist alles zu, aber ich hab einen anderen Weg gefunden. Komm mit!"
+  },
+  {
+    "id": "nodetour_de",
+    "language": "de",
+    "text": "[pouty, disappointed] Hmm... es gibt keinen anderen Weg. Diesmal zähl ich auf dich."
+  },
+  {
+    "id": "yield_de",
+    "language": "de",
+    "text": "[sweet, gentle] Okay, jetzt fährst du. Lass einfach los, wenn du fertig bist, dann übernehm ich wieder!"
+  },
+  {
+    "id": "resume_de",
+    "language": "de",
+    "text": "[happy, sweet] Hihi, jetzt bin ich dran! Weiter geht's!"
+  },
+  {
+    "id": "manual_de",
+    "language": "de",
+    "text": "[pouty, sweet] Hmpf, du willst selbst fahren? Na gut... Autopilot aus!"
+  },
+  {
+    "id": "leg_next_de",
+    "language": "de",
+    "text": "[excited, sweet] Juhu, nächster Stopp! Weiter geht's!"
+  },
+  {
+    "id": "stopover_de",
+    "language": "de",
+    "text": "[coquettish, cheerful] Wir sind da, wir sind da! Mach eine kleine Pause, dann geht's weiter!"
+  },
+  {
+    "id": "priority_de",
+    "language": "de",
+    "text": "[playful, sweet] Klar! Erst halten wir hier, dann geht's zurück zur Tour!"
+  },
+  {
+    "id": "gate_de",
+    "language": "de",
+    "text": "[pouty, whiny] Hmm, das Tor da vorne geht nicht auf... Was machen wir denn jetzt?"
   }
 ]
