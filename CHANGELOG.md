@@ -12,7 +12,7 @@
 
 格式基於 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/)，版本號遵循 `{PZ版本}-{主版本}.{次版本}.{修訂}` 格式。
 
-## [Unreleased]
+## [42.21.0-0.27.1] - 2026-10-10
 
 ### 修正
 
