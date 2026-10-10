@@ -53,7 +53,7 @@ function MDAD_DeviceParts.onPartInit(vehicle, part)
             logMigration("script=" .. script .. " " .. ev)
         end
         if not done then
-            logMigration("script=" .. script .. " INCOMPLETE：舊資料保留，下次載入重試")
+            logMigration("script=" .. script .. " INCOMPLETE: old data kept, retry on next load")
         end
     end
 
@@ -124,7 +124,7 @@ function MDAD_DeviceParts.injectAll()
     local t = sm:getVehicleTemplate("Base.MDADDeviceParts")
     if t then tmpl = t:getScript() end
     if not tmpl or not tmpl:getPartById(MDAD.PART_NAV) or not tmpl:getPartById(MDAD.PART_AUTO) then
-        logInject("ABORT: template MDADDeviceParts 缺失或不完整，這次不注入任何裝置槽")
+        logInject("ABORT: template MDADDeviceParts missing or incomplete, no device slots injected this boot")
         return
     end
 
@@ -143,8 +143,8 @@ function MDAD_DeviceParts.injectAll()
             -- 同名 part 但不是我們加的：別人（另一個 mod／手改腳本）先佔了這個 id。
             -- 覆寫會把對方的定義換掉，寧可整台不支援也不動它。
             conflict = conflict + 1
-            logInject("CONFLICT script=" .. full .. " 已存在 " .. MDAD.PART_NAV
-                .. "／" .. MDAD.PART_AUTO .. " 且非本 MOD 定義，不覆寫、此車無裝置槽")
+            logInject("CONFLICT script=" .. full .. " already has " .. MDAD.PART_NAV
+                .. "/" .. MDAD.PART_AUTO .. " not defined by this mod; not overwriting, vehicle gets no device slots")
         else
             local areaId = pickAreaId(script)
             if not areaId then
@@ -152,13 +152,13 @@ function MDAD_DeviceParts.injectAll()
             elseif script:getPartCount() + 2 > MAX_PARTS then
                 skipped = skipped + 1
                 logInject("SKIP script=" .. full .. " partCount=" .. tostring(script:getPartCount())
-                    .. " 加兩個槽會超過 byte part index 上限（128）")
+                    .. " adding two slots would exceed byte part index limit (128)")
             else
                 -- 先在 donor 準備好共同工作區；失败不把缺少 area 的半成品加進真車。
                 local ok, err = patchArea(tmpl, areaId)
                 if not ok then
                     skipped = skipped + 1
-                    logInject("SKIP script=" .. full .. " area 改寫失敗：" .. tostring(err))
+                    logInject("SKIP script=" .. full .. " area patch failed: " .. tostring(err))
                 else
                     script:copyPartsFrom(tmpl, MDAD.PART_NAV)
                     script:copyPartsFrom(tmpl, MDAD.PART_AUTO)

@@ -21,6 +21,8 @@
   3. 翻譯鍵集一致          — 缺鍵的語系會顯示原始 key
   4. 裸 % 檢查           — 42.20.1 起 formatted() 遇裸 % 崩潰；只允許 %1-%9 與 %%
  4b. 翻譯佔位與 EN 相同   — 各語系同一鍵的 %1-%9（多重集合）與 %% 數量要和 EN 一樣：漏掉的佔位少顯示資料，多出的沒有參數可填
+ 4c. Lua 字串字面值純 ASCII — Kahlua LexState 用 byte[] 存 token，code point > 255 的字面值截成 1 byte（亂碼、截出控制字元、比對永遠不中）；
+                           luac 與標準 Lua 測試都正確處理 UTF-8，只有實機才炸。註解不受影響（先剝掉再掃）
   5. Kahlua 禁用全域       — next/xpcall 不存在（BaseLib 未註冊），呼叫→
                            「Object tried to call nil」。luac 與標準 Lua 測試都攔不住
                            （語法合法、標準 Lua 有這些函式），只能靜態掃描
@@ -766,6 +768,33 @@ for m in MEDIA_DIRS:
     if "EN" in langs:
         label = "翻譯佔位與 EN 相同（%1-%9、%%）"
         fail(label, pctdiff) if pctdiff else ok(label)
+
+# ---- 4c. Lua 字串字面值不得含非 ASCII ----
+# Kahlua 的 LexState 以 Reader 讀入 char 卻用 byte[] 存 token（LexState.java:70,178,194-199），任何 code point > 255
+# 的字面值到執行期都是亂碼（pz-family-docs pitfalls「非 ASCII 字串字面值」）。luac -p 與標準 Lua 的 harness 都正確處理
+# UTF-8，只有實機才炸：Economy 2026-09-06 中文 toast 變 !p8；Safehouse 2026-10-11 寫出的報告檔頭截出單獨的 \r，
+# readLine 把註解切成壞行（模板原本沒有這項，Safehouse 照模板建立而漏掉）。玩家可見文字一律走 Translate/<LANG>/*.json；
+# 註解不受影響（先剝掉再掃）。
+_LONG_COMMENT = re.compile(r"--\[(=*)\[.*?\]\1\]", re.DOTALL)
+_LONG_STRING = re.compile(r"\[(=*)\[.*?\]\1\]", re.DOTALL)
+_SHORT_STRING = re.compile(r'"(?:[^"\\\n]|\\.)*"|\'(?:[^\'\\\n]|\\.)*\'')
+nonascii = []
+for f in LUA_FILES:
+    rel = os.path.relpath(f, REPO)
+    with open(f, encoding="utf-8", errors="replace") as fh:
+        src = fh.read()
+    src = _LONG_COMMENT.sub(lambda mm: "\n" * mm.group().count("\n"), src)
+    for mm in _LONG_STRING.finditer(src):
+        if any(ord(ch) > 127 for ch in mm.group()):
+            nonascii.append(f"{rel}:{src.count(chr(10), 0, mm.start()) + 1}: 長字串含非 ASCII")
+    src = _LONG_STRING.sub(lambda mm: "\n" * mm.group().count("\n"), src)
+    for lineno, line in enumerate(src.split("\n"), 1):
+        code = line.split("--", 1)[0]
+        for mm in _SHORT_STRING.finditer(code):
+            if any(ord(ch) > 127 for ch in mm.group()):
+                nonascii.append(f"{rel}:{lineno}: {mm.group()[:30]}")
+fail("Lua 字串字面值純 ASCII（Kahlua 截斷）", nonascii) if nonascii \
+    else ok(f"Lua 字串字面值純 ASCII（{len(LUA_FILES)} 檔）")
 
 # ---- 5+6. Kahlua 禁用全域 / table.sort ----
 FORBIDDEN = ("next", "xpcall")
