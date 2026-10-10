@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1010b"
+Drive.REV = "1010c"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -1973,19 +1973,27 @@ function Drive.stop(playerNum, reasonKey, voiceEvent, diagWhy)
         return true
     end
     -- 掛車脫開（guard 與每幀檢查兩條交還路徑都經這裡）：交還前記一筆鑑識（MDADTrailer.lostState；1006）。
+    -- 1010c：加舊掛車物件的 rmw／ox／oy／od（MDADTrailer.lostWhere）；掛車已不在世界（alive=false）時診斷收尾延後，
+    -- 脫開後回看兩次（Drive.relookArm），駕駛本身照舊立刻交還。
+    local relook = false
     if reasonKey == MDADTrailer.KEY_LOST and s.tow and s.diag then
         local cur, alive, by, hd, kmh, up = MDADTrailer.lostState(s.vehicle, s.tow)
+        local rmw, ox, oy, od, x0, y0 = MDADTrailer.lostWhere(s.vehicle, s.tow)
         diagEvent(s, playerNum, "tow", {
             phase = "lost", cur = cur, alive = alive, by = by, hd = hd, speed = kmh, up = up, phi = s.towPhi,
             vid = s.tow.id, script = s.tow.script, -- 掛車 id／script（2026-10-10；MDADTrailer.attach 記下，量不到缺）
+            rmw = rmw, ox = ox, oy = oy, od = od,
         })
+        relook = alive == false and Drive.relookArm(s, playerNum, x0, y0, reasonKey)
     end
     -- 調頭進行中就結束 session（玩家接手、按鈕、交還…）：記下這次調頭的結局（1008；Drive.uturnDone）
     if s.uturn then
         Drive.uturnDone(s, playerNum, getTimestampMs(), "stop", reasonKey or diagWhy or voiceEvent or "manual")
     end
-    diagStop(s, playerNum, reasonKey or diagWhy
-        or (voiceEvent == "manual" and "takeover") or "manual")
+    if not relook then
+        diagStop(s, playerNum, reasonKey or diagWhy
+            or (voiceEvent == "manual" and "takeover") or "manual")
+    end
     clearSession(playerNum)
     if s.vehicle then s.vehicle:setRegulator(false) end
     -- 控制輸出已停（regulator 關、本幀起不再送指令）之後才交還接管。這**不是**到站
@@ -2023,6 +2031,67 @@ function Drive.stop(playerNum, reasonKey, voiceEvent, diagWhy)
     return true
 end
 
+-- 掛車不在世界時的延後鑑識（1010c）：alive=false 的 TrailerLost 只把該玩家的診斷 session 收尾延後，脫開後
+-- MDADTrailer.RELOOK_MS 各記一筆 tow phase=relook（MDADTrailer.relook），第二筆之後才用原結束原因收尾。出口：記完第二筆；
+-- 同一玩家開新 session（commitSession 先 Drive.relookFlush：補記一筆當下的再收尾）；玩家不在／死亡或任何一步丟錯＝直接收尾；
+-- 回主選單照 menu 收。onPlayerUpdate 每幀先看 Drive.relookN（沒有待辦＝一次數值比較）。
+Drive.relooks, Drive.relookN = {}, 0
+
+function Drive.relookArm(s, playerNum, x0, y0, reason)
+    if not s.diag then return false end -- lost 事件寫失敗已收掉診斷
+    if not Drive.relooks[playerNum] then Drive.relookN = Drive.relookN + 1 end
+    Drive.relooks[playerNum] = { s = s, t0 = getTimestampMs(), x0 = x0, y0 = y0, reason = reason, n = 0 }
+    return true
+end
+
+function Drive.relookNote(playerNum, r, now)
+    local s = r.s
+    r.n = r.n + 1
+    local vid, found, same, fx, fy, fd, rmw, sn, sd, sid = MDADTrailer.relook(s.vehicle, s.tow, r.x0, r.y0)
+    diagEvent(s, playerNum, "tow", {
+        phase = "relook", dt = now - r.t0, vid = vid, found = found, same = same, fx = fx, fy = fy, fd = fd,
+        rmw = rmw, sn = sn, sd = sd, sid = sid,
+    })
+end
+
+-- 回 true＝這筆待辦結束（該收尾）。
+function Drive.relookStep(playerNum, r, now)
+    local p = getSpecificPlayer(playerNum)
+    if not p or p:isDead() then return true end
+    if now - r.t0 < MDADTrailer.RELOOK_MS[r.n + 1] then return false end
+    Drive.relookNote(playerNum, r, now)
+    return r.n >= #MDADTrailer.RELOOK_MS
+end
+
+function Drive.relookEnd(playerNum, reason)
+    local r = Drive.relooks[playerNum]
+    if not r then return end
+    Drive.relooks[playerNum] = nil
+    Drive.relookN = Drive.relookN - 1
+    diagStop(r.s, playerNum, reason or r.reason)
+end
+
+function Drive.relookTick(now)
+    local done = nil
+    for pn, r in pairs(Drive.relooks) do
+        local ok, fin = pcall(Drive.relookStep, pn, r, now)
+        if not ok or fin then
+            done = done or {}
+            done[#done + 1] = pn
+        end
+    end
+    if not done then return end
+    for i = 1, #done do Drive.relookEnd(done[i]) end
+end
+
+-- 同一玩家要開新診斷 session：先補記一筆當下的回看（dt 照實際）再用原結束原因收尾。
+function Drive.relookFlush(playerNum, now)
+    local r = Drive.relooks[playerNum]
+    if not r then return end
+    pcall(Drive.relookNote, playerNum, r, now)
+    Drive.relookEnd(playerNum)
+end
+
 -- 玩家介入即交還（「手動介入後」＝0 的預設、到站煞停途中）：先記是哪個輸入（1009，takeover manual `key`；
 -- 有自動恢復時走讓位、記 takeover yield），再照舊綠字＋manual 語音停止。
 function Drive.manualStop(s, playerNum, player, key)
@@ -2045,6 +2114,7 @@ local function commitSession(playerObj, playerNum, s)
     sessionCount = sessionCount + 1
     refreshPolicies(s, vehicle, playerNum)
     reportAutoUsage(playerObj, vehicle, true, s.usageArgs, s.navUsageArgs)
+    Drive.relookFlush(playerNum, getTimestampMs()) -- 上一趟掛車脫開的延後鑑識先收尾，再開新的診斷 session（1010c）
     if not diagEnabled() then return end
     local dok, active = pcall(MDADDiagnostics.start, playerNum, vehicle, s.vehicleProfile)
     s.diag = dok and active == true
@@ -14543,6 +14613,7 @@ end
 -- 原版用例 Steps.lua:1922、DebugDemoTime.lua:308）。伺服器端 isLocalPlayer 恆 false
 -- （IsoPlayer.java:6493），遠端玩家也擋在這裡——自駕只在駕駛自己的 client 跑。
 local function onPlayerUpdate(player)
+    if Drive.relookN > 0 then Drive.relookTick(getTimestampMs()) end -- 掛車脫開的延後鑑識（1010c；沒有 session 也要走）
     if sessionCount == 0 and prepCount == 0 then return end
     if not player or not player:isLocalPlayer() then return end
     local playerNum = player:getPlayerNum()
@@ -15289,6 +15360,8 @@ local function onMainMenuEnter()
             prepCount = prepCount - 1
         end
     end
+    for playerNum, r in pairs(Drive.relooks) do diagStop(r.s, playerNum, "menu") end
+    Drive.relooks, Drive.relookN = {}, 0
     for playerNum = 0, 3 do
         local s = sessions[playerNum]
         if s then

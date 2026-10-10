@@ -793,6 +793,11 @@ function U.event(u, line, now, name, a)
     end
     if name == "unstick" and phase == "start" then
         trigger(u, now, "unstick")
+    elseif name == "tow" and phase == "lost" then
+        -- 掛車脫開（1010c）：片段 trig＝脫開當下；alive=false 時 Driver 延後收尾，之後的 tow relook 落在同一段的觸發後窗，
+        -- 收尾的 U.finish（TrailerLost）不再觸發。lostTs＝摘要 end／dur 的終點（行駛時間不含延後的回看）。
+        u.lostTs = now
+        trigger(u, now, "trailer")
     elseif name == "detour" and phase ~= "skip" then
         trigger(u, now, "detour")
     elseif name == "blocked" or name == "unstick" or name == "progress" then
@@ -870,11 +875,17 @@ local function summaryText(u, now, reason, withMaps)
 end
 
 -- 行程結束：終局原因本身也可能是事故（卡住交還、車輛不支援、路線遺失、接手前有異常）。
+-- TrailerLost 在 tow lost 事件（U.event）就已觸發 trailer 片段：不再觸發（延後收尾時那段可能已收、會重開一段重複的），
+-- 摘要 end／dur 用脫開時間（1010c）。
 function U.finish(u, now, reason)
     if not u or not u.active then return end
     u.active = false
     reason = tostring(reason or "stop")
     local kind = STOP_KIND[reason]
+    local endTs = now
+    if reason == "UI_MinidoracatAutoDrive_TrailerLost" and u.lostTs then
+        kind, endTs = nil, u.lostTs
+    end
     if kind then
         trigger(u, now, kind)
     elseif reason == "takeover" and now - u.lastAnomaly <= ANOMALY_TAKEOVER_MS then
@@ -882,8 +893,8 @@ function U.finish(u, now, reason)
     end
     finishClip(u, now)
     if reason == "menu" then return end
-    local text = summaryText(u, now, reason, true)
-    if #text > SUM_MAX then text = summaryText(u, now, reason, false) end
+    local text = summaryText(u, endTs, reason, true)
+    if #text > SUM_MAX then text = summaryText(u, endTs, reason, false) end
     if #text > SUM_MAX then return end
     enqueueMsg(u.pn, { k = "sum", pri = 0, drive = u.drive, rev = u.rev, veh = u.veh, text = text })
 end

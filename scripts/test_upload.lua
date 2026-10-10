@@ -1404,6 +1404,68 @@ checkEq(clipByTrig(oldOffStart + U.OFF_CLIP_MS), nil, "(old) the 0.27.x server r
 MDADUploadServer = newServer
 S._reset()
 
+-- 1010c 掛車不在世界（tow lost alive=false）：Driver 把診斷收尾延後、脫開後 1s／5s 各記一筆 tow relook，之後才 D.stop(TrailerLost)。
+--   (tl-trig) tow lost 事件當下就觸發 trailer 片段（trig＝脫開時間），兩筆 relook 落在同一段；延後的 finish 不再開一段。
+--   (tl-sum)  摘要一份，end／dur 以脫開時間計（不含延後的回看）。
+--   (tl-join) lost 併入已開著的 contact 片段（同 pri、kind 留 contact、不設 trailer 冷卻）：延後 finish 時那段已收，仍不得重開 trailer 段。
+--   違規證明：拿掉 U.event 的 lost 觸發＝(tl-trig) 紅；摘要用 finish 時間＝(tl-sum) 紅；finish 照舊觸發 TrailerLost＝(tl-join) 紅。
+scenario("1010c trailer lost with deferred relook: clip at lost time, relook inside, one summary, no duplicate clip")
+local function sumLines(d0)
+    local n, last = 0, nil
+    for k, v in pairs(files) do
+        if string.find(k, ROOT .. "summary-", 1, true) == 1 then
+            for line in string.gmatch(v, "[^\n]+") do
+                if string.find(line, '"drive":' .. tostring(d0) .. ",", 1, true) then n, last = n + 1, line end
+            end
+        end
+    end
+    return n, last or ""
+end
+-- 這趟（index 第 15 欄 drive）的片段列；伺服器槽滿會覆蓋舊列，不能拿總列數比
+local function clipsOf(d0)
+    local out = {}
+    local rows = indexRows("C")
+    for i = 1, #rows do if tonumber(field(rows[i], 15)) == d0 then out[#out + 1] = rows[i] end end
+    return out
+end
+nowMs = nowMs + 3600000
+start()
+local tlDrive = nowMs
+drive(3000)
+local lostAt = nowMs
+D.event(0, "tow", { phase = "lost", alive = false, vid = 42, rmw = true, ox = 10592, oy = 9800, od = 7.5 })
+pump(1000)
+D.event(0, "tow", { phase = "relook", dt = 1000, vid = 42, found = false, sn = 0, rmw = true })
+pump(4000)
+D.event(0, "tow", { phase = "relook", dt = 5000, vid = 42, found = false, sn = 0, rmw = true })
+D.stop(0, "UI_MinidoracatAutoDrive_TrailerLost")
+pump(120000)
+local tlRow, tlText = clipByTrig(lostAt)
+checkEq(#clipsOf(tlDrive), 1, "(tl-trig) one clip for the deferred trailer lost")
+check(tlRow ~= nil and field(tlRow, 7) == "trailer", "(tl-trig) trailer clip triggered at the lost event (trig = lost time)")
+checkEq(count(tlText, '"phase":"relook"'), 2, "(tl-trig) both relook events inside the clip")
+check(string.find(tlText, '"ox":10592', 1, true) ~= nil, "(tl-trig) lost event keeps the new ox field")
+local tlSumN, tlSum = sumLines(tlDrive)
+checkEq(tlSumN, 1, "(tl-sum) one summary")
+checkEq(tonumber(string.match(tlSum, '"end":(%d+)')), lostAt, "(tl-sum) summary end = lost time")
+checkEq(tonumber(string.match(tlSum, '"dur":(%d+)')), lostAt - tlDrive, "(tl-sum) summary dur ends at lost time")
+nowMs = nowMs + 3600000
+start()
+local tjDrive = nowMs
+drive(3000)
+drive(400, { contact = true })
+drive(600)
+D.event(0, "tow", { phase = "lost", alive = false, vid = 42 })
+pump(1000)
+D.event(0, "tow", { phase = "relook", dt = 1000, vid = 42, found = false })
+pump(4000)
+D.event(0, "tow", { phase = "relook", dt = 5000, vid = 42, found = false })
+D.stop(0, "UI_MinidoracatAutoDrive_TrailerLost")
+pump(120000)
+local tjRows = clipsOf(tjDrive)
+checkEq(#tjRows, 1, "(tl-join) lost joined the open contact clip; the deferred finish opens no second clip")
+checkEq(field(tjRows[1] or "", 7), "contact", "(tl-join) the joined clip keeps kind contact")
+
 -- 1010 所有送出的片段整段 ≤ CLIP_TOTAL_MAX（第一塊宣告的 len＝全文長度；伺服器只看這個）
 local maxLen = 0
 for i = 1, #sent do

@@ -656,6 +656,75 @@ function T.lostState(vehicle, tow)
     return cur, alive, by, hd, kmh, up
 end
 
+-- 掛車不在世界時的延後鑑識（1010c；正式服平穩行駛中 TrailerLost 6/6 是 alive=false）：MP 伺服器以它記的掛車位置判客戶端
+-- 不相關就送 VehicleRemove（VehicleRequestPacket.processServer；客戶端 VehicleRemovePacket.processClient 設
+-- serverRemovedFromWorld、removeFromWorld、unregisterVehicle），車回到相關範圍時再以同一個 id 建新物件。
+-- RELOOK_MS＝脫開後兩次回看的時間（Driver Drive.relookStep），RELOOK_R＝找同 script 車的半徑（m）。
+T.RELOOK_MS = { 1000, 5000 }
+T.RELOOK_R = 100
+
+-- 脫開當下舊掛車物件（tow.trailer）的狀態：rmw＝isRemovedFromWorld、ox／oy＝最後車位、od＝牽引車到它的距離；
+-- x0／y0＝回看的基準點（ox／oy，讀不到就用牽引車車位）。各自 pcall，讀不到的回 nil。
+function T.lostWhere(vehicle, tow)
+    local tr = tow.trailer
+    local rmw, ox, oy, od, px, py = nil, nil, nil, nil, nil, nil
+    pcall(function() rmw = tr:isRemovedFromWorld() end)
+    pcall(function()
+        local x, y = tr:getX(), tr:getY()
+        if finite(x) and finite(y) then ox, oy = x, y end
+    end)
+    pcall(function()
+        local x, y = vehicle:getX(), vehicle:getY()
+        if finite(x) and finite(y) then px, py = x, y end
+    end)
+    if ox and px then od = dist(px, py, ox, oy) end
+    if ox then return rmw, ox, oy, od, ox, oy end
+    return rmw, ox, oy, od, px, py
+end
+
+-- 脫開後回看一次（Driver 在 alive=false 的 TrailerLost 後 RELOOK_MS 各記一筆 tow phase=relook）：vid＝掛車 id；
+-- found＝getVehicleById(vid) 找得到、same＝找到的就是舊物件、fx／fy／fd＝找到的車位與它到 (x0, y0) 的距離；
+-- rmw＝舊物件 isRemovedFromWorld；sn＝(x0, y0) 方圓 RELOOK_R 內同 script 的車數（不含牽引車）、sd／sid＝最近那台的距離與 id。
+-- 分三種：被移除後沒回來（found=false、sn=0）、同 id 重建（found、same=false、看 fd）、被同 script 新車取代（sid≠vid）。
+-- 每一步各自 pcall，讀不到的回 nil；冷路徑（每次脫開最多 3 次）。
+function T.relook(vehicle, tow, x0, y0)
+    local vid, script = tow.id, tow.script
+    local found, same, fx, fy, fd, rmw, sn, sd, sid = nil, nil, nil, nil, nil, nil, nil, nil, nil
+    if vid ~= nil and type(getVehicleById) == "function" then
+        local okV, v = pcall(getVehicleById, vid)
+        if okV then
+            found = v ~= nil
+            if v ~= nil then
+                same = v == tow.trailer
+                pcall(function()
+                    local x, y = v:getX(), v:getY()
+                    if finite(x) and finite(y) then fx, fy = x, y end
+                end)
+                if fx and x0 then fd = dist(fx, fy, x0, y0) end
+            end
+        end
+    end
+    pcall(function() rmw = tow.trailer:isRemovedFromWorld() end)
+    if script ~= nil and x0 ~= nil and type(getCell) == "function" then
+        pcall(function()
+            local n, bestD, bestId = 0, nil, nil
+            local it = getCell():getVehicles():iterator()
+            while it:hasNext() do
+                local v = it:next()
+                if v ~= vehicle and v:getScriptName() == script then
+                    local d = dist(v:getX(), v:getY(), x0, y0)
+                    if d <= T.RELOOK_R then
+                        n = n + 1
+                        if bestD == nil or d < bestD then bestD, bestId = d, v:getId() end
+                    end
+                end
+            end
+            sn, sd, sid = n, bestD, bestId
+        end)
+    end
+    return vid, found, same, fx, fy, fd, rmw, sn, sd, sid
+end
+
 -- 拖車樣本（1008；Driver collectPhys 只在拖車時、每筆取樣讀一次，telemetry tlo／tla／tkm／thd）：掛車車位相對牽引車車位的
 -- 縱向（車頭正）／橫向（右正，同 nb），fx, fy＝牽引車前向單位向量；掛車 km/h；hd（兩掛點世界距離 m，同 lostState）。
 -- MP 同步拉回掛車時看得到位置跳動與 hd 尖峰（正式服 0.23.0 SemiTruckLite＋貨櫃週期性掉速，缺這幾欄定不了罪）。

@@ -22776,6 +22776,170 @@ function drive.scenarioTowLost()
     SandboxVars, dveh, getSpecificPlayer = oldSandbox, oldVeh, oldGet
 end
 drive.scenarioTowLost()
+-- (rl) 1010c 掛車不在世界（alive=false）的延後鑑識：駕駛照舊立刻交還，只有診斷收尾延後——脫開後 1s／5s 各記一筆
+--   tow phase=relook（Drive.relookStep／MDADTrailer.relook）、第二筆之後才用原結束原因收尾（不超過 5 秒加一幀）。
+--   (rl-lost)  lost 事件帶舊物件 rmw／ox／oy／od。違規證明：lost payload 拿掉 rmw＝紅。
+--   (rl-defer) 交還當下不收尾；1s 前不碰 getVehicleById；兩筆 relook 的 dt／found／vid；第二筆同幀收尾。違規證明：
+--              Drive.stop 照舊立刻 diagStop＝紅；relookStep 的門檻改用 r.n（第一筆提早）＝紅；第二筆後不收尾＝紅。
+--   (rl-idle)  收尾後沒有待辦：每幀不碰 getSpecificPlayer／getVehicleById、relookN＝0。違規證明：relookEnd 不清記錄＝紅。
+--   (rl-flush) 等待中同一玩家開新 session：先補記一筆當下的 relook（dt 照實際）、用原原因收尾，然後才 start。違規證明：
+--              拿掉 commitSession 的 relookFlush＝紅（D.start 會以 restart 收掉、少一筆 relook）。
+--   (rl-alive) alive=true（原版斷鉤）：照舊立刻收尾、不排回看。違規證明：arm 不看 alive＝紅。
+--   (rl-gone)  玩家不在：下一幀直接收尾、不記 relook。違規證明：relookStep 拿掉玩家檢查＝紅。
+--   (rl-err)   回看丟錯：直接收尾。違規證明：relookTick 不 pcall＝harness 炸。
+function drive.scenarioTowRelook()
+    scenario("掛車不在世界（alive=false）：駕駛立刻交還、診斷收尾延後，脫開後 1s／5s 各記 tow relook 再收尾；各出口")
+    local oldSandbox, oldVeh, oldGet = SandboxVars, dveh, getSpecificPlayer
+    local oldRoute, oldTx, oldTy, oldState = drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
+    local oldById, oldV3, oldRelook = getVehicleById, Vector3f, MDADTrailer.relook
+    local DG = MDADDiagnostics
+    local sStart, sEvent, sSample, sStop, sTel = DG.start, DG.event, DG.sample, DG.stop, MDAD.HUD.telemetryEnabled
+    Vector3f = { new = newVec3 }
+    local wasMs = drive.frameMs(20)
+    MDAD.Drive.stop(0, nil)
+    local log, relooks, lost = {}, {}, nil
+    MDAD.HUD.telemetryEnabled = function() return true end
+    DG.start = function() log[#log + 1] = "start" return true end
+    DG.sample = function() return true end
+    DG.stop = function(_, reason) log[#log + 1] = "stop:" .. tostring(reason) end
+    DG.event = function(_, name, a)
+        if name ~= "tow" or type(a) ~= "table" then return end
+        log[#log + 1] = a.phase
+        if a.phase == "relook" then relooks[#relooks + 1] = a elseif a.phase == "lost" then lost = a end
+    end
+    local gone, getCalls, byIdCalls, alive = false, 0, 0, false
+    getSpecificPlayer = function(n) getCalls = getCalls + 1 if n == 0 and not gone then return dp end end
+    dveh = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }),
+        engineRunning = true, mass = 1600, speed = 0, maxSpeed = 100,
+        bodyW = 1.6, bodyL = 4.2, comX = 0, comZ = 0, profileFull = true,
+        enginePower = 3000, brakingForce = 100, wheelFriction = 1.5, tireFriction = 1.5 })
+    local trailer = {
+        getForwardVector = function(_, out) return out:set(dveh._fwdX, 0, dveh._fwdY) end,
+        getUpVectorDot = function() return 0.97 end,
+        getCurrentSpeedKmHour = function() return 31 end,
+        getVehicleTowedBy = function() return nil end,
+        getTowedByWorldPos = function(_, _, out) return out:set(dveh._x - 6, dveh._y, 0) end,
+        getX = function() return dveh._x - 8 end, getY = function() return dveh._y end,
+        isRemovedFromWorld = function() return true end,
+    }
+    dveh.getVehicleTowing = function() return nil end -- session 起來後掛上 s.tow，牽引車回 nil＝已脫開
+    dveh.getTowingWorldPos = function(_, _, out) return out:set(dveh._x - 2, dveh._y, 0) end
+    getVehicleById = function(id) byIdCalls = byIdCalls + 1 if alive and id == 77 then return trailer end end
+    drive.fillWorld(-10, 80, -12, 72)
+    drive.putRoad(-10, 80, -3, 3)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 60, RightLaneBias = 0 })
+    drive.nav.route = { pts = { 0, 0, 70, 0 }, segSurface = { "paved" }, segWidth = { 6 }, len = 70, cost = 70,
+        avoidPenalty = 0 }
+    drive.nav.tx, drive.nav.ty, drive.nav.state = 70, 0, "ok"
+    local function arm(tag)
+        dveh._x, dveh._y = 0, 0
+        setHeading(dveh, 0)
+        dveh._speed, dveh._steering, dveh._stopped = 0, 0, true
+        dveh._engine, dveh._driver = true, dp
+        dp._vehicle, dp._dead, dp._local = dveh, false, true
+        checkTrue(MDAD.Drive.start(dp), "(" .. tag .. ") 啟動")
+        local st = MDAD.Drive.debugSession(0)
+        st.tow = { trailer = trailer, id = 77, script = "Base.TrailerCover", hitchSelf = "trailer",
+            hitchOther = "trailerfront", L2 = 9.5, hitchToRear = 12, halfW = 1.27 }
+    end
+    -- 推到脫開交還（回傳交還那幀的時間）；之後的幀照常 20ms 一幀
+    local function untilLost()
+        for _ = 1, 3 do
+            nowMs = nowMs + 20
+            driveTick(dp, dveh)
+            if not MDAD.Drive.isActive(0) then return nowMs end
+        end
+    end
+    local function frames(ms)
+        local stop = nowMs + ms
+        while nowMs < stop do
+            nowMs = nowMs + 20
+            driveTick(dp, dveh)
+        end
+    end
+    local function has(want)
+        for i = 1, #log do if log[i] == want then return true end end
+        return false
+    end
+    local LOST = "stop:" .. MDADTrailer.KEY_LOST
+
+    arm("rl")
+    log, relooks = {}, {}
+    local t0 = untilLost()
+    checkTrue(t0 ~= nil and not MDAD.Drive.isActive(0), "(rl) 掛車脫開＝駕駛立刻交還")
+    checkTrue(lost ~= nil and lost.alive == false and lost.rmw == true and lost.ox == -8 and lost.oy == 0
+        and lost.od ~= nil and math.abs(lost.od - 8) < 1e-9,
+        "(rl-lost) lost 帶舊物件 rmw／ox／oy／od（rmw=" .. tostring(lost and lost.rmw) .. " ox=" .. tostring(lost and lost.ox)
+        .. " od=" .. tostring(lost and lost.od) .. "）")
+    checkTrue(#log == 1 and log[1] == "lost" and MDAD.Drive.relookN == 1,
+        "(rl-defer) alive=false：交還當下診斷不收尾、排一筆回看（log=" .. table.concat(log, ",") .. "）")
+    byIdCalls = 0
+    frames(900)
+    checkTrue(#relooks == 0 and byIdCalls == 0 and not has(LOST), "(rl-defer) 1s 前不回看、不碰 getVehicleById、不收尾")
+    frames(200)
+    local r1 = relooks[1] or {}
+    checkTrue(#relooks == 1 and r1.dt >= 1000 and r1.dt < 1020 and r1.found == false and r1.vid == 77 and r1.rmw == true
+        and r1.same == nil and r1.fd == nil and not has(LOST),
+        "(rl-defer) 脫開後 1s 第一筆 relook：found=false、vid、rmw（dt=" .. tostring(r1.dt) .. " found=" .. tostring(r1.found) .. "）")
+    local stopAt = nil
+    for _ = 1, 400 do
+        nowMs = nowMs + 20
+        driveTick(dp, dveh)
+        if has(LOST) then stopAt = nowMs break end
+    end
+    local r2 = relooks[2] or {}
+    checkTrue(#relooks == 2 and r2.dt >= 5000 and r2.dt < 5020 and stopAt ~= nil and stopAt - t0 < 5020
+        and log[#log] == LOST and log[#log - 1] == "relook" and MDAD.Drive.relookN == 0,
+        "(rl-defer) 5s 第二筆 relook、同幀用原原因收尾、不超過 5 秒加一幀（dt=" .. tostring(r2.dt) .. " log="
+        .. table.concat(log, ",") .. "）")
+    getCalls, byIdCalls = 0, 0
+    frames(200)
+    checkTrue(getCalls == 0 and byIdCalls == 0 and MDAD.Drive.relookN == 0,
+        "(rl-idle) 收尾後沒有待辦：每幀不碰 getter（getSpecificPlayer " .. getCalls .. "、getVehicleById " .. byIdCalls .. "）")
+
+    arm("rl-flush")
+    log, relooks = {}, {}
+    t0 = untilLost()
+    frames(2000)
+    arm("rl-flush2")
+    local rf = relooks[2] or {} -- 1s 那筆照常記過；開新 session 那刻補記第二筆
+    checkTrue(#relooks == 2 and rf.dt >= 2000 and rf.dt < 2040 and log[#log - 2] == "relook" and log[#log - 1] == LOST
+        and log[#log] == "start" and MDAD.Drive.relookN == 0,
+        "(rl-flush) 等待中開新 session：先補記一筆當下的 relook、原原因收尾，然後才 start（dt=" .. tostring(rf.dt)
+        .. " log=" .. table.concat(log, ",") .. "）")
+
+    alive = true
+    log, relooks = {}, {}
+    untilLost()
+    checkTrue(#log == 2 and log[1] == "lost" and log[2] == LOST and MDAD.Drive.relookN == 0,
+        "(rl-alive) alive=true：照舊立刻收尾、不排回看（log=" .. table.concat(log, ",") .. "）")
+    alive = false
+
+    arm("rl-gone")
+    log, relooks = {}, {}
+    untilLost()
+    gone = true
+    frames(20)
+    gone = false
+    checkTrue(#relooks == 0 and log[#log] == LOST and MDAD.Drive.relookN == 0,
+        "(rl-gone) 玩家不在：下一幀直接收尾、不記 relook（log=" .. table.concat(log, ",") .. "）")
+
+    arm("rl-err")
+    log, relooks = {}, {}
+    untilLost()
+    MDADTrailer.relook = function() error("relook-boom") end
+    frames(1020)
+    MDADTrailer.relook = oldRelook
+    checkTrue(#relooks == 0 and log[#log] == LOST and MDAD.Drive.relookN == 0,
+        "(rl-err) 回看丟錯：直接收尾（log=" .. table.concat(log, ",") .. "）")
+
+    drive.frameMs(wasMs)
+    DG.start, DG.event, DG.sample, DG.stop, MDAD.HUD.telemetryEnabled = sStart, sEvent, sSample, sStop, sTel
+    getVehicleById, Vector3f = oldById, oldV3
+    drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
+    SandboxVars, dveh, getSpecificPlayer = oldSandbox, oldVeh, oldGet
+end
+drive.scenarioTowRelook()
 -- (thr) 1008 拖車倒車的折角門檻（MDADTrailer.canReverse）：舊制折角已超過 REVERSE_HITCH_MAX 時 stepUnstick 把 dist2 設成
 --   「倒夠了」，0 位移 settle→success、3 次額度幾秒燒完（正式服 0.23.0 片段每次 7–19 ms）。
 --   (thr-start) 起手折角已超限：不倒（rear-blocked rear=hitch、phi）、不吃額度、回停等（blockRetryDone）；連三次額度仍 0。

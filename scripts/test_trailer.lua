@@ -308,6 +308,79 @@ cur, alive, by, hd = T.lostState(tracL, gL)
 check(alive == false and by == nil and hd == nil, "(gone) 掛車已不存在：alive=false、不量距離")
 getVehicleById = nil
 
+-- ⑦b 1010c 掛車不在世界的延後鑑識（T.lostWhere 脫開當下、T.relook 脫開後回看；正式服平穩行駛中 TrailerLost 6/6 alive=false）：
+--    分出「被移除後沒回來」「同 id 重建在某處」「被同 script 新車取代」。各步各自 pcall、讀不到只少那幾欄。
+--    違規證明：lostWhere 讀不到掛車位置不退回牽引車位＝(lw-fb) 紅；relook 不比物件（same 恆真）＝(rl-new) 紅；
+--    同 script 計數不排除牽引車＝(rl-sn) 紅；不限半徑＝(rl-sn) 紅；getVehicleById 丟錯整個 relook 丟出＝(rl-err) 紅。
+do
+    local function veh(id, script, x, y)
+        return { getId = function() return id end, getScriptName = function() return script end,
+            getX = function() return x end, getY = function() return y end }
+    end
+    local old = veh(42, "Base.Trailer", 100, 0)
+    old.isRemovedFromWorld = function() return true end
+    local trac = veh(7, "Base.Trailer", 103, 4) -- 牽引車同 script 也不能算進 sn
+    local tw = { trailer = old, id = 42, script = "Base.Trailer" }
+    local rmw, ox, oy, od, x0, y0 = T.lostWhere(trac, tw)
+    check(rmw == true and ox == 100 and oy == 0 and near(od, 5) and x0 == 100 and y0 == 0,
+        "(lw) 脫開當下：舊物件 rmw、最後車位、牽引車到它 5m、回看基準＝舊物件車位（got " .. tostring(rmw) .. " "
+        .. tostring(ox) .. "," .. tostring(oy) .. " od=" .. tostring(od) .. "）")
+    old.getX = function() error("gone") end
+    rmw, ox, oy, od, x0, y0 = T.lostWhere(trac, tw)
+    check(rmw == true and ox == nil and od == nil and x0 == 103 and y0 == 4,
+        "(lw-fb) 舊物件位置讀不到：ox／od 缺、回看基準退回牽引車位（got x0=" .. tostring(x0) .. "）")
+    old.getX = function() return 100 end
+
+    local list = {}
+    local cellOk = true
+    getCell = function()
+        if not cellOk then error("cell") end
+        return { getVehicles = function() return { iterator = function()
+            local i = 0
+            return { hasNext = function() return i < #list end, next = function() i = i + 1 return list[i] end }
+        end } end }
+    end
+    local byId = nil
+    getVehicleById = function(id) if id == 42 then return byId end end
+    -- 同物件還在（只是牽引車沒掛著）
+    byId, list = old, { trac, old }
+    local vid, found, same, fx, fy, fd, rrmw, sn, sd, sid = T.relook(trac, tw, 100, 0)
+    check(vid == 42 and found == true and same == true and fx == 100 and fy == 0 and near(fd, 0) and rrmw == true
+        and sn == 1 and near(sd, 0) and sid == 42,
+        "(rl-same) 同物件：found／same、車位、fd 0、sn 只算掛車本身（got " .. tostring(found) .. "/" .. tostring(same)
+        .. " sn=" .. tostring(sn) .. " sid=" .. tostring(sid) .. "）")
+    -- 同 id 重建成新物件、在 30m 外
+    local reborn = veh(42, "Base.Trailer", 130, 0)
+    byId, list = reborn, { trac, reborn }
+    vid, found, same, fx, fy, fd, rrmw, sn, sd, sid = T.relook(trac, tw, 100, 0)
+    check(found == true and same == false and fx == 130 and near(fd, 30) and sn == 1 and near(sd, 30) and sid == 42,
+        "(rl-new) 同 id 新物件：same=false、新車位與到脫開點 30m（got same=" .. tostring(same) .. " fd=" .. tostring(fd) .. "）")
+    -- 找不到；附近有同 script 新車（3m，id 99）、別的 script 更近、同 script 但 150m 外
+    byId = nil
+    list = { trac, veh(99, "Base.Trailer", 103, 0), veh(5, "Base.SmallCar", 101, 0), veh(6, "Base.Trailer", 250, 0) }
+    vid, found, same, fx, fy, fd, rrmw, sn, sd, sid = T.relook(trac, tw, 100, 0)
+    check(found == false and same == nil and fx == nil and fd == nil and sn == 1 and near(sd, 3) and sid == 99,
+        "(rl-sn) 找不到、脫開點 100m 內同 script 1 台（不含牽引車、別 script、範圍外）最近 3m id 99（got found="
+        .. tostring(found) .. " sn=" .. tostring(sn) .. " sd=" .. tostring(sd) .. " sid=" .. tostring(sid) .. "）")
+    list = { trac }
+    vid, found, same, fx, fy, fd, rrmw, sn, sd, sid = T.relook(trac, tw, 100, 0)
+    check(found == false and sn == 0 and sd == nil and sid == nil, "(rl-none) 附近沒有同 script 車：sn=0、sd／sid 缺")
+    -- getter 丟錯：只少那幾欄
+    getVehicleById = function() error("byid") end
+    old.isRemovedFromWorld = function() error("rmw") end
+    cellOk = false
+    local okR, rv, rf, rs, rfx, rfy, rfd, rr, rsn = pcall(T.relook, trac, tw, 100, 0)
+    check(okR and rv == 42 and rf == nil and rs == nil and rr == nil and rsn == nil,
+        "(rl-err) getVehicleById／isRemovedFromWorld／getCell 丟錯：不丟出、只少那幾欄（got ok=" .. tostring(okR)
+        .. " found=" .. tostring(rf) .. " sn=" .. tostring(rsn) .. "）")
+    cellOk = true
+    getVehicleById = function() return nil end
+    list = { trac, { getScriptName = function() error("bad") end } }
+    vid, found, same, fx, fy, fd, rrmw, sn = T.relook(trac, tw, 100, 0)
+    check(found == false and sn == nil, "(rl-err) 列舉中某台 getter 丟錯：sn 整欄缺、其他照記")
+    getVehicleById, getCell = nil, nil
+end
+
 -- ⑧ 1008 拖車樣本（T.sampleState；collectPhys 每筆取樣讀一次，telemetry tlo／tla／tkm／thd）：掛車相對牽引車的縱向（車頭正）
 --    ／橫向（右正，同 nb；朝 +x 時世界 +y＝右）、掛車 km/h、兩掛點距離；掛點讀不到只少 hd。
 --    違規證明：橫向符號反了＝(lat) 紅；hd 不用記下的掛車掛點名＝(thd) 紅；位置與 hd 共用一個 pcall＝(hd-fail) 紅。
