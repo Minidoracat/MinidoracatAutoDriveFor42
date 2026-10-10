@@ -683,13 +683,14 @@ function T.lostWhere(vehicle, tow)
 end
 
 -- 脫開後回看一次（Driver 在 alive=false 的 TrailerLost 後 RELOOK_MS 各記一筆 tow phase=relook）：vid＝掛車 id；
--- found＝getVehicleById(vid) 找得到、same＝找到的就是舊物件、fx／fy／fd＝找到的車位與它到 (x0, y0) 的距離；
--- rmw＝舊物件 isRemovedFromWorld；sn＝(x0, y0) 方圓 RELOOK_R 內同 script 的車數（不含牽引車）、sd／sid＝最近那台的距離與 id。
--- 分三種：被移除後沒回來（found=false、sn=0）、同 id 重建（found、same=false、看 fd）、被同 script 新車取代（sid≠vid）。
--- 每一步各自 pcall，讀不到的回 nil；冷路徑（每次脫開最多 3 次）。
+-- found＝getVehicleById(vid) 找得到、same＝找到的就是舊物件、fx／fy／fd＝找到的車位與它到 (x0, y0) 的距離、fsc＝找到那台的 script；
+-- rmw＝舊物件 isRemovedFromWorld；sn＝(x0, y0) 方圓 RELOOK_R 內同 script 的車數（不含牽引車）、sd／sv＝最近那台的距離與 id。
+-- 伺服器車輛 id 是 LIFO 空號堆疊（VehicleIDMap.allocateID:94-95）：剛釋放的 id 下一台新車就拿走，所以 same=false 時看 fsc——
+-- ≠掛車 script＝別台車拿到這個 id；＝掛車 script＝同一台被重建或同型新車拿到同 id（分不出）。found=false、sn=0＝被移除沒回來；
+-- found=false 而 sv≠vid＝附近另有同 script 的車。每一步各自 pcall，讀不到的回 nil；冷路徑（每次脫開最多 3 次）。
 function T.relook(vehicle, tow, x0, y0)
     local vid, script = tow.id, tow.script
-    local found, same, fx, fy, fd, rmw, sn, sd, sid = nil, nil, nil, nil, nil, nil, nil, nil, nil
+    local found, same, fx, fy, fd, rmw, sn, sd, sv, fsc = nil, nil, nil, nil, nil, nil, nil, nil, nil, nil
     if vid ~= nil and type(getVehicleById) == "function" then
         local okV, v = pcall(getVehicleById, vid)
         if okV then
@@ -701,6 +702,10 @@ function T.relook(vehicle, tow, x0, y0)
                     if finite(x) and finite(y) then fx, fy = x, y end
                 end)
                 if fx and x0 then fd = dist(fx, fy, x0, y0) end
+                pcall(function()
+                    local sc = v:getScriptName()
+                    if type(sc) == "string" then fsc = sc end
+                end)
             end
         end
     end
@@ -719,10 +724,10 @@ function T.relook(vehicle, tow, x0, y0)
                     end
                 end
             end
-            sn, sd, sid = n, bestD, bestId
+            sn, sd, sv = n, bestD, bestId
         end)
     end
-    return vid, found, same, fx, fy, fd, rmw, sn, sd, sid
+    return vid, found, same, fx, fy, fd, rmw, sn, sd, sv, fsc
 end
 
 -- 拖車樣本（1008；Driver collectPhys 只在拖車時、每筆取樣讀一次，telemetry tlo／tla／tkm／thd）：掛車車位相對牽引車車位的

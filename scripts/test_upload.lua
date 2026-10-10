@@ -1435,7 +1435,8 @@ drive(3000)
 local lostAt = nowMs
 D.event(0, "tow", { phase = "lost", alive = false, vid = 42, rmw = true, ox = 10592, oy = 9800, od = 7.5 })
 pump(1000)
-D.event(0, "tow", { phase = "relook", dt = 1000, vid = 42, found = false, sn = 0, rmw = true })
+D.event(0, "tow", { phase = "relook", dt = 1000, vid = 42, found = true, same = false, fsc = "Base.SmallCar", sn = 1, sd = 3,
+    sv = 99, rmw = true })
 pump(4000)
 D.event(0, "tow", { phase = "relook", dt = 5000, vid = 42, found = false, sn = 0, rmw = true })
 D.stop(0, "UI_MinidoracatAutoDrive_TrailerLost")
@@ -1445,6 +1446,8 @@ checkEq(#clipsOf(tlDrive), 1, "(tl-trig) one clip for the deferred trailer lost"
 check(tlRow ~= nil and field(tlRow, 7) == "trailer", "(tl-trig) trailer clip triggered at the lost event (trig = lost time)")
 checkEq(count(tlText, '"phase":"relook"'), 2, "(tl-trig) both relook events inside the clip")
 check(string.find(tlText, '"ox":10592', 1, true) ~= nil, "(tl-trig) lost event keeps the new ox field")
+check(string.find(tlText, '"fsc":"Base.SmallCar"', 1, true) ~= nil and string.find(tlText, '"sv":99', 1, true) ~= nil,
+    "(tl-trig) relook event keeps fsc and sv (EK)")
 local tlSumN, tlSum = sumLines(tlDrive)
 checkEq(tlSumN, 1, "(tl-sum) one summary")
 checkEq(tonumber(string.match(tlSum, '"end":(%d+)')), lostAt, "(tl-sum) summary end = lost time")

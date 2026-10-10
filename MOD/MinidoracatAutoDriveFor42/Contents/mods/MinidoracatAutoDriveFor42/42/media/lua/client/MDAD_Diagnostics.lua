@@ -159,8 +159,9 @@ local EK = {
     "ax", "ay", "sFrom", "sTo", "vid", "script", "gap", "zslow", "cslow", "aslow",
     -- 1010c 掛車不在世界的鑑識（MDADTrailer.lostWhere／relook）：tow lost／relook 舊掛車物件 isRemovedFromWorld、
     -- lost 舊物件最後車位與牽引車到它的距離；relook 的 getVehicleById 找到沒、是不是舊物件、找到的車位與到脫開點距離、
-    -- 脫開點 100m 內同 script 車數（不含牽引車）與最近那台的距離／id（dt＝脫開後 ms、vid 共用上面的鍵）
-    "rmw", "ox", "oy", "od", "found", "same", "fx", "fy", "fd", "sn", "sd", "sid",
+    -- 找到那台的 script（車輛 id 會被新車重用）、脫開點 100m 內同 script 車數（不含牽引車）與最近那台的距離／id
+    -- （dt＝脫開後 ms、vid 共用上面的鍵）
+    "rmw", "ox", "oy", "od", "found", "same", "fx", "fy", "fd", "fsc", "sn", "sd", "sv",
 }
 
 local function logOnce(msg)

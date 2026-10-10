@@ -22824,7 +22824,13 @@ function drive.scenarioTowRelook()
     }
     dveh.getVehicleTowing = function() return nil end -- session 起來後掛上 s.tow，牽引車回 nil＝已脫開
     dveh.getTowingWorldPos = function(_, _, out) return out:set(dveh._x - 2, dveh._y, 0) end
-    getVehicleById = function(id) byIdCalls = byIdCalls + 1 if alive and id == 77 then return trailer end end
+    local reborn = nil -- (rl-fsc)：脫開後同 id 換成新物件（伺服器 id 被新車重用）
+    getVehicleById = function(id)
+        byIdCalls = byIdCalls + 1
+        if id ~= 77 then return nil end
+        if reborn then return reborn end
+        if alive then return trailer end
+    end
     drive.fillWorld(-10, 80, -12, 72)
     drive.putRoad(-10, 80, -3, 3)
     setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 60, RightLaneBias = 0 })
@@ -22932,6 +22938,22 @@ function drive.scenarioTowRelook()
     MDADTrailer.relook = oldRelook
     checkTrue(#relooks == 0 and log[#log] == LOST and MDAD.Drive.relookN == 0,
         "(rl-err) 回看丟錯：直接收尾（log=" .. table.concat(log, ",") .. "）")
+
+    -- (rl-fsc) 同 id 的新物件：relook 事件帶 found／same=false／fsc（找到那台的 script）／fd，鍵名是 sv 不是 sid。違規證明：
+    --          Driver payload 拿掉 fsc＝紅。
+    arm("rl-fsc")
+    log, relooks = {}, {}
+    untilLost()
+    reborn = { getScriptName = function() return "Base.SmallCar" end, getX = function() return -20 end,
+        getY = function() return 0 end }
+    frames(1020)
+    local rb = relooks[1] or {}
+    checkTrue(rb.found == true and rb.same == false and rb.fsc == "Base.SmallCar" and rb.fd ~= nil and rb.sid == nil,
+        "(rl-fsc) 同 id 新物件：relook 帶 found／same=false／fsc／fd（found=" .. tostring(rb.found) .. " fsc="
+        .. tostring(rb.fsc) .. " fd=" .. tostring(rb.fd) .. "）")
+    frames(4100)
+    reborn = nil
+    checkTrue(MDAD.Drive.relookN == 0 and log[#log] == LOST, "(rl-fsc) 第二筆後照常收尾")
 
     drive.frameMs(wasMs)
     DG.start, DG.event, DG.sample, DG.stop, MDAD.HUD.telemetryEnabled = sStart, sEvent, sSample, sStop, sTel

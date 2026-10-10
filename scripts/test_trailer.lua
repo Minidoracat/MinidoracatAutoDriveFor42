@@ -309,9 +309,10 @@ check(alive == false and by == nil and hd == nil, "(gone) 掛車已不存在：a
 getVehicleById = nil
 
 -- ⑦b 1010c 掛車不在世界的延後鑑識（T.lostWhere 脫開當下、T.relook 脫開後回看；正式服平穩行駛中 TrailerLost 6/6 alive=false）：
---    分出「被移除後沒回來」「同 id 重建在某處」「被同 script 新車取代」。各步各自 pcall、讀不到只少那幾欄。
+--    分出「被移除後沒回來」「同 id 新物件（fsc 看是不是同型）」「附近另有同 script 車」。各步各自 pcall、讀不到只少那幾欄。
 --    違規證明：lostWhere 讀不到掛車位置不退回牽引車位＝(lw-fb) 紅；relook 不比物件（same 恆真）＝(rl-new) 紅；
---    同 script 計數不排除牽引車＝(rl-sn) 紅；不限半徑＝(rl-sn) 紅；getVehicleById 丟錯整個 relook 丟出＝(rl-err) 紅。
+--    同 script 計數不排除牽引車＝(rl-sn) 紅；不限半徑＝(rl-sn) 紅；getVehicleById 丟錯整個 relook 丟出＝(rl-err) 紅；
+--    fsc 寫成掛車 script（不讀找到那台）＝(rl-fsc-other) 紅；fsc 與車位共用一個 pcall＝(rl-fsc-err) 紅。
 do
     local function veh(id, script, x, y)
         return { getId = function() return id end, getScriptName = function() return script end,
@@ -344,27 +345,41 @@ do
     getVehicleById = function(id) if id == 42 then return byId end end
     -- 同物件還在（只是牽引車沒掛著）
     byId, list = old, { trac, old }
-    local vid, found, same, fx, fy, fd, rrmw, sn, sd, sid = T.relook(trac, tw, 100, 0)
+    local vid, found, same, fx, fy, fd, rrmw, sn, sd, sv, fsc = T.relook(trac, tw, 100, 0)
     check(vid == 42 and found == true and same == true and fx == 100 and fy == 0 and near(fd, 0) and rrmw == true
-        and sn == 1 and near(sd, 0) and sid == 42,
-        "(rl-same) 同物件：found／same、車位、fd 0、sn 只算掛車本身（got " .. tostring(found) .. "/" .. tostring(same)
-        .. " sn=" .. tostring(sn) .. " sid=" .. tostring(sid) .. "）")
-    -- 同 id 重建成新物件、在 30m 外
+        and sn == 1 and near(sd, 0) and sv == 42 and fsc == "Base.Trailer",
+        "(rl-same) 同物件：found／same、車位、fd 0、fsc、sn 只算掛車本身（got " .. tostring(found) .. "/" .. tostring(same)
+        .. " sn=" .. tostring(sn) .. " sv=" .. tostring(sv) .. " fsc=" .. tostring(fsc) .. "）")
+    -- 同 id、同 script 的新物件、在 30m 外（重建或同型新車拿到同 id，分不出）
     local reborn = veh(42, "Base.Trailer", 130, 0)
     byId, list = reborn, { trac, reborn }
-    vid, found, same, fx, fy, fd, rrmw, sn, sd, sid = T.relook(trac, tw, 100, 0)
-    check(found == true and same == false and fx == 130 and near(fd, 30) and sn == 1 and near(sd, 30) and sid == 42,
-        "(rl-new) 同 id 新物件：same=false、新車位與到脫開點 30m（got same=" .. tostring(same) .. " fd=" .. tostring(fd) .. "）")
+    vid, found, same, fx, fy, fd, rrmw, sn, sd, sv, fsc = T.relook(trac, tw, 100, 0)
+    check(found == true and same == false and fx == 130 and near(fd, 30) and fsc == "Base.Trailer" and sn == 1
+        and near(sd, 30) and sv == 42,
+        "(rl-new) 同 id 同 script 新物件：same=false、fsc＝掛車 script、新車位與到脫開點 30m（got same=" .. tostring(same)
+        .. " fsc=" .. tostring(fsc) .. " fd=" .. tostring(fd) .. "）")
+    -- 同 id 但別的 script（別台車拿到釋放的 id：VehicleIDMap LIFO 空號）
+    local other = veh(42, "Base.SmallCar", 120, 0)
+    byId, list = other, { trac, other }
+    vid, found, same, fx, fy, fd, rrmw, sn, sd, sv, fsc = T.relook(trac, tw, 100, 0)
+    check(found == true and same == false and fsc == "Base.SmallCar" and near(fd, 20) and sn == 0 and sv == nil,
+        "(rl-fsc-other) 同 id 別 script：fsc＝那台的 script、sn 不算它（got fsc=" .. tostring(fsc) .. " sn=" .. tostring(sn) .. "）")
+    -- 找到但 script 讀不到：只少 fsc
+    other.getScriptName = function() error("noscript") end
+    list = { trac }
+    vid, found, same, fx, fy, fd, rrmw, sn, sd, sv, fsc = T.relook(trac, tw, 100, 0)
+    check(found == true and same == false and fx == 120 and near(fd, 20) and fsc == nil,
+        "(rl-fsc-err) 找到那台 script 讀不到：只少 fsc、車位照記（got fx=" .. tostring(fx) .. " fsc=" .. tostring(fsc) .. "）")
     -- 找不到；附近有同 script 新車（3m，id 99）、別的 script 更近、同 script 但 150m 外
     byId = nil
     list = { trac, veh(99, "Base.Trailer", 103, 0), veh(5, "Base.SmallCar", 101, 0), veh(6, "Base.Trailer", 250, 0) }
-    vid, found, same, fx, fy, fd, rrmw, sn, sd, sid = T.relook(trac, tw, 100, 0)
-    check(found == false and same == nil and fx == nil and fd == nil and sn == 1 and near(sd, 3) and sid == 99,
+    vid, found, same, fx, fy, fd, rrmw, sn, sd, sv, fsc = T.relook(trac, tw, 100, 0)
+    check(found == false and same == nil and fx == nil and fd == nil and fsc == nil and sn == 1 and near(sd, 3) and sv == 99,
         "(rl-sn) 找不到、脫開點 100m 內同 script 1 台（不含牽引車、別 script、範圍外）最近 3m id 99（got found="
-        .. tostring(found) .. " sn=" .. tostring(sn) .. " sd=" .. tostring(sd) .. " sid=" .. tostring(sid) .. "）")
+        .. tostring(found) .. " sn=" .. tostring(sn) .. " sd=" .. tostring(sd) .. " sv=" .. tostring(sv) .. "）")
     list = { trac }
-    vid, found, same, fx, fy, fd, rrmw, sn, sd, sid = T.relook(trac, tw, 100, 0)
-    check(found == false and sn == 0 and sd == nil and sid == nil, "(rl-none) 附近沒有同 script 車：sn=0、sd／sid 缺")
+    vid, found, same, fx, fy, fd, rrmw, sn, sd, sv = T.relook(trac, tw, 100, 0)
+    check(found == false and sn == 0 and sd == nil and sv == nil, "(rl-none) 附近沒有同 script 車：sn=0、sd／sv 缺")
     -- getter 丟錯：只少那幾欄
     getVehicleById = function() error("byid") end
     old.isRemovedFromWorld = function() error("rmw") end

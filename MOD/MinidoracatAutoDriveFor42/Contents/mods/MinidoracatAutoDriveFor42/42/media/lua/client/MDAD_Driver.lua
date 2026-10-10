@@ -2047,10 +2047,10 @@ end
 function Drive.relookNote(playerNum, r, now)
     local s = r.s
     r.n = r.n + 1
-    local vid, found, same, fx, fy, fd, rmw, sn, sd, sid = MDADTrailer.relook(s.vehicle, s.tow, r.x0, r.y0)
+    local vid, found, same, fx, fy, fd, rmw, sn, sd, sv, fsc = MDADTrailer.relook(s.vehicle, s.tow, r.x0, r.y0)
     diagEvent(s, playerNum, "tow", {
-        phase = "relook", dt = now - r.t0, vid = vid, found = found, same = same, fx = fx, fy = fy, fd = fd,
-        rmw = rmw, sn = sn, sd = sd, sid = sid,
+        phase = "relook", dt = now - r.t0, vid = vid, found = found, same = same, fx = fx, fy = fy, fd = fd, fsc = fsc,
+        rmw = rmw, sn = sn, sd = sd, sv = sv,
     })
 end
 
