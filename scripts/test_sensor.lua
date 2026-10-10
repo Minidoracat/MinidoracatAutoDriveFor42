@@ -75,6 +75,7 @@ end
 IsoFlagType = {
     water = "water", solidfloor = "solidfloor", doorN = "doorN", doorW = "doorW",
     solidtrans = "solidtrans", WallN = "WallN", WallW = "WallW", WallNW = "WallNW",
+    DoorWallN = "DoorWallN", DoorWallW = "DoorWallW", open = "open", -- closedDoor 的格級屬性（hardSpriteNear 門格）
 }
 IsoObjectType = { isMoveAbleObject = "isMoveAbleObject" }
 -- getClimateManager 故意不定義：契約說天氣 API 缺席時 rain 留 nil（下游視為濕）
@@ -977,6 +978,70 @@ local function scenarioAnimalsPlayers()
     resetWorld()
 end
 
+-- 1010 命中物身分（MDADSensor.hardSpriteNear；Driver contact 事件、Diagnostics impact 事件用）：(wx,wy) 周圍 r 格內引擎
+-- 會擋車的 sprite（方塊／樹幹…）裡格心最近的一個，回名、分類、距離；樹叢／可推家具不算；getter 丟錯回 nil 不外漏。
+-- 本情境自帶最小假格子（不經走廊掃描）。違規證明：分類表收 soft＝(soft) 紅；不取最近＝(nearest) 紅；拿掉 pcall＝(err) 紅；
+-- 門類 sprite 不看格級開關（closedDoor）＝(door-open)(door-near) 紅。
+local function scenarioHardSprite()
+    scenario("1010 命中物身分：hardSpriteNear 取最近的擋車 sprite、樹叢與家具不算、getter 錯誤回 nil")
+    local cells = {}
+    local function put(x, y, name, opts)
+        opts = opts or {}
+        local sprite = {
+            getProperties = function()
+                return { has = function(_, k) return opts.door ~= nil and k == "doorN" end, get = function() return nil end }
+            end,
+            shouldHaveCollision = function() return opts.hard == true end,
+        }
+        local key = x * 100000 + y
+        local sq = cells[key]
+        if not sq then
+            sq = { objs = {}, flags = {} }
+            sq.getObjects = function()
+                return { size = function() return #sq.objs end, get = function(_, i) return sq.objs[i + 1] end }
+            end
+            -- 格級聚合屬性（closedDoor 讀這裡）：門格＝doorN＋DoorWallN，開著再加 open
+            sq.getProperties = function() return { has = function(_, k) return sq.flags[k] == true end } end
+            cells[key] = sq
+        end
+        if opts.door ~= nil then
+            sq.flags.doorN, sq.flags.DoorWallN, sq.flags.open = true, true, opts.door == "open"
+        end
+        sq.objs[#sq.objs + 1] = { _class = opts.class, getSpriteName = function() return name end,
+            getSprite = function() return sprite end, getType = function() return opts.type end }
+    end
+    local cell = { getGridSquare = function(_, x, y) return cells[x * 100000 + y] end }
+    put(10, 10, "street_pole_hard", { hard = true })
+    put(12, 10, "tree_trunk", { class = "IsoTree" })
+    put(20, 10, "f_bushes_1_3")
+    put(21, 10, "furniture_soft", { type = IsoObjectType.isMoveAbleObject })
+    local nm, cls, d = MDADSensor.hardSpriteNear(nil, cell, 10.5, 10.5, 0, 1)
+    check(nm == "street_pole_hard" and cls == "hard" and d == 0,
+        "(hard) 命中點所在格的擋車 sprite（got " .. tostring(nm) .. "/" .. tostring(cls) .. "/" .. tostring(d) .. "）")
+    nm, cls, d = MDADSensor.hardSpriteNear(nil, cell, 11.9, 10.5, 0, 2)
+    check(nm == "tree_trunk" and cls == "tree" and math.abs(d - 0.6) < 1e-9,
+        "(nearest) 兩個都在範圍內取格心最近的（樹幹 0.6m、方塊 1.4m；got " .. tostring(nm) .. "/" .. tostring(d) .. "）")
+    nm = MDADSensor.hardSpriteNear(nil, cell, 20.5, 10.5, 0, 1)
+    checkNil(nm, "(soft) 樹叢與可推家具不擋車：不回")
+    checkNil((MDADSensor.hardSpriteNear(nil, cell, 50.5, 50.5, 0, 1)), "範圍內沒有物件：回 nil")
+    local bad = { getGridSquare = function() error("chunk gone") end }
+    local okCall, res = pcall(MDADSensor.hardSpriteNear, nil, bad, 10.5, 10.5, 0, 1)
+    check(okCall and res == nil, "(err) getter 丟錯：回 nil、不外漏錯誤（ok=" .. tostring(okCall) .. "）")
+    checkNil((MDADSensor.hardSpriteNear(nil, cell, 0 / 0, 10.5, 0, 1)), "座標無效：回 nil")
+    -- (door-open) 同一個門 sprite：格級屬性關著＝擋車（door）、開著＝不算
+    put(30, 10, "harness_gate_n", { door = "closed" })
+    nm, cls = MDADSensor.hardSpriteNear(nil, cell, 30.5, 10.5, 0, 1)
+    check(nm == "harness_gate_n" and cls == "door", "(door-closed) 關著的門算擋車（got " .. tostring(nm) .. "/" .. tostring(cls) .. "）")
+    cells[30 * 100000 + 10].flags.open = true
+    checkNil((MDADSensor.hardSpriteNear(nil, cell, 30.5, 10.5, 0, 1)), "(door-open) 同一個門 sprite 開著：不算擋車")
+    -- (door-near) 開著的門比真硬物近：回報硬物，不是門
+    put(40, 10, "harness_gate_n", { door = "open" })
+    put(42, 10, "street_pole_far", { hard = true })
+    nm, cls, d = MDADSensor.hardSpriteNear(nil, cell, 40.5, 10.5, 0, 2)
+    check(nm == "street_pole_far" and cls == "hard" and d == 2,
+        "(door-near) 開著的門較近、真硬物較遠：回報硬物（got " .. tostring(nm) .. "/" .. tostring(cls) .. "/" .. tostring(d) .. "）")
+end
+
 -- =====================================================================
 scenarioCorpseAxis()
 scenarioCorpseBands()
@@ -990,6 +1055,7 @@ scenarioTraffic()
 scenarioTrafficVelocity()
 scenarioDiagonalCoverage()
 scenarioAnimalsPlayers()
+scenarioHardSprite()
 
 closeScenario()
 print()

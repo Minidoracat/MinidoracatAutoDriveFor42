@@ -9549,7 +9549,16 @@ function drive.scenarioZombieGap1008()
         return t
     end
     -- (zg-reach) 車身 0；同群兩隻 0.3／2.5（間距 < 2R，中間過不去）；左帶緣 −1.0（左縫要 ≤ 0.3−R）
+    -- 1010：選縫視窗進 plan 事件（sFrom／sTo，console zombie lane 的 win），console 行帶 rs= t=（同 telemetry ts 時鐘）。
+    --   違規證明：plan 事件拿掉 sFrom／sTo＝(zg-win) 紅；zombie lane 行拿掉 t=＝(zg-tline) 紅。
+    local dbgWas = drive.debug
+    drive.debug = true
     local s, w = run(70, -1.0, 6, 0, { { 2.6, 0.3 }, { 2.6, 2.5, 0.4 } }, 1)
+    drive.debug = dbgWas
+    local zl = nil
+    for i = 1, #drive.logs do if string.find(drive.logs[i], "zombie lane:", 1, true) then zl = drive.logs[i] end end
+    checkTrue(zl ~= nil and string.find(zl, " rs=%-?[%d%.]+ t=%d+$") ~= nil,
+        "(zg-tline) zombie lane 行尾帶 rs= t=（" .. tostring(zl) .. "）")
     local p = plans[#plans]
     checkTrue(type(w[1]) == "number" and w[1] < 0.3 and s.zombieWhy ~= "gap",
         "(zg-reach) 遠威脅、對側縫車身搆不到：不跨過整群（want" .. seqOf(w) .. "、why " .. tostring(s.zombieWhy) .. "）")
@@ -9557,6 +9566,9 @@ function drive.scenarioZombieGap1008()
             and p.ns == nil and type(p.lat) == "number" and type(p.tl) == "number",
         "(zg-reach) plan 事件：rej＝reach、rb＜rl、遠威脅不帶 ns（rej " .. tostring(p and p.rej) .. "、rb "
         .. tostring(p and p.rb) .. "、rl " .. tostring(p and p.rl) .. "、ns " .. tostring(p and p.ns) .. "）")
+    checkTrue(p ~= nil and type(p.sFrom) == "number" and type(p.sTo) == "number" and p.sFrom < p.rs and p.sTo > p.rs,
+        "(zg-win) plan 事件帶選縫視窗 sFrom＜rs＜sTo（" .. tostring(p and p.sFrom) .. "／" .. tostring(p and p.rs) .. "／"
+        .. tostring(p and p.sTo) .. "）")
     -- (zg-near) 單隻 0.3、車身 0；右縫 0.3＋R 在車身可及量內，左帶緣 −1.0
     s, w = run(20, -1.0, 5, 0, { { 2.0, 0.3 } }, 1)
     p = plans[#plans]
@@ -12314,7 +12326,15 @@ local function scenarioDetour()
             drive.wideRounds(true)
         end
         nowMs = t12
+        local dbgWas = drive.debug
+        drive.debug = true -- 1010：detour 行尾 t=（同 telemetry ts 時鐘）
+        driveReset(dveh)
         driveTick(dp, dveh)
+        drive.debug = dbgWas
+        local dl = nil
+        for i = 1, #drive.logs do if string.find(drive.logs[i], "detour pn=", 1, true) then dl = drive.logs[i] end end
+        checkTrue(pushed or (dl ~= nil and string.find(dl, " rs=%-?[%d%.]+ t=%d+$") ~= nil),
+            tag .. "-tline detour 行尾帶 rs= t=（" .. tostring(dl) .. "）")
         checkEq(nav.detourCalls, 1, tag .. " 累計 12s 自動問主 MOD 一次")
         checkEq(drive.lastVoice(), "nodetour", tag .. " 主 MOD 無路：語音 nodetour")
         nowMs = nowMs + 2000
@@ -12325,6 +12345,9 @@ local function scenarioDetour()
         checkTrue(#detourEv == 1 and ev1.phase == "auto" and ev1.why ~= "ok" and type(ev1.ms) == "number" and ev1.ms >= minMs,
             tag .. "-ev 自動改道被拒記一筆 detour（phase " .. tostring(ev1 and ev1.phase) .. "、why " .. tostring(ev1 and ev1.why)
             .. "、等了 " .. tostring(ev1 and ev1.ms) .. " ms）")
+        -- 1010：避讓圈圓心 ax／ay（console avoid=）。違規證明：事件拿掉 ax／ay＝(-ax) 紅。
+        checkTrue(ev1 ~= nil and type(ev1.ax) == "number" and type(ev1.ay) == "number",
+            tag .. "-ax detour 事件帶避讓圈圓心（ax " .. tostring(ev1 and ev1.ax) .. "、ay " .. tostring(ev1 and ev1.ay) .. "）")
         MDAD.HUD.autoDetour = function() return false end
         MDAD.Drive.stuckDetour(MDAD.Drive.debugSession(0), 0)
         local ev2 = detourEv[2]
@@ -13508,6 +13531,274 @@ function drive.scenarioTowFold()
     drive.fillWorld(-2, 70, -7, 7)
 end
 drive.scenarioTowFold()
+
+-- 1010 遙測補強（使用者 2026-10-10 核准 E2E／診斷升級）：
+--   (chain)   判堵事件帶候選鏈摘要：本次 replan 各段掃掠失敗數 p1..p4、第一個失敗（主候選）的 tag／段／命中點；沒有任何掃掠
+--             失敗（初判無縫、沒跑候選鏈）整組不寫。違規證明：拿掉 sweepHit 計數＝(chain) 紅；replan 起頭不歸零＝(chain-reset) 紅。
+--   (steep)   blockSteepM 進 blocked 事件 steep；沒有 steep 拒收不寫。違規證明：拿掉 steep 欄＝(steep) 紅。
+--   (setoff)  Follower 拒收承諾線轉判堵：detail＝set-offset。違規證明：拿掉 dodgeBlockReason 指派＝(setoff) 紅。
+--   (contact) footprint 接觸上升緣記一筆 contact（命中點、半徑、車速、sprite 名與分類）；仍接觸不再記、離開後再碰再記。
+--             違規證明：不看上升緣＝(contact-edge) 紅；拿掉 sprite 查詢＝(contact) 紅。
+--   (boost)   接觸／forceBrake／lag arm 上升緣後 TUNE.DIAG_BOOST_MS 內取樣 10Hz（critical），過了就回 5Hz。違規證明：critFlag 不看
+--             diagBoostUntil＝(boost) 紅。
+--   (latch)   取樣間閂鎖：yrp＝兩筆取樣之間最大 |yr|、hbp＝最後一個 hard-brake 理由，寫出後清。違規證明：不清＝(latch-clear) 紅；
+--             yawGovern 不記峰值＝(latch) 紅。
+--   (phys)    tlg／tlv（跟車 lead）、zwh／zwt（殭屍軟縫逐輪；none 不寫）。違規證明：collectPhys 拿掉＝(phys) 紅。
+--   (policy)  減速政策中途改變記 policy change；出發那次初值不記。違規證明：不跳過初值＝(policy-first) 紅；拿掉事件＝(policy) 紅。
+--   (suspect) progress suspect 帶與前一跟線幀的牆鐘間隔 gap 與幀時 fdt。違規證明：拿掉＝(suspect) 紅。
+--   (tline)   console 共同時間鍵：start／狀態列／sweep OBB fail／shape steep／setOffset REJECTED／blockedStop 尾端帶 t=（同 telemetry ts
+--             時鐘），有 rs 的帶 rs=。違規證明：拿掉任一行的 t=＝(tline) 紅。
+function drive.scenarioTelem1010()
+    scenario("1010 遙測補強：判堵候選鏈摘要、set-offset、接觸上升緣、10Hz 升頻、取樣間閂鎖、政策改變、console t=")
+    local Dr = MDAD.Drive
+    local oldEvent, oldSample, oldShould = MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.shouldSample
+    local oldDebug, oldSetOffset, oldTrans = drive.debug, MDADFollower.setOffset, dveh._trans
+    local events = {}
+    MDADDiagnostics.event = function(_, name, a) events[#events + 1] = { name = name, a = a } end
+    MDADDiagnostics.shouldSample = function() return false end
+    MDADDiagnostics.sample = function() return true end
+    drive.debug = true
+    local wasMs = drive.frameMs(10)
+    local realPlan = Dr.planDodge
+    local function last(name, phase)
+        for i = #events, 1, -1 do
+            local e = events[i]
+            if e.name == name and (phase == nil or (e.a and e.a.phase == phase)) then return e.a end
+        end
+        return nil
+    end
+    local function count(name)
+        local n = 0
+        for i = 1, #events do if events[i].name == name then n = n + 1 end end
+        return n
+    end
+    local function logLine(needle)
+        for i = #drive.logs, 1, -1 do
+            if string.find(drive.logs[i], needle, 1, true) then return drive.logs[i] end
+        end
+        return nil
+    end
+    local function stamped(line, withRs)
+        return type(line) == "string" and string.find(line, " t=%d+") ~= nil
+            and (not withRs or string.find(line, " rs=%-?[%d%.]+") ~= nil)
+    end
+    local WALL = { -7, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7 }
+    -- 車停在原點朝東、前方 dx 處擺 ys 一排硬物；plan＝把 planDodge 換成指定剖面 {a,b,c,d,offL}（相對車位；世界掃掠照真的跑）
+    local function run(ys, dx, plan)
+        MDAD.Drive.stop(0, nil)
+        drive.fillWorld(-10, 120, -8, 8)
+        assert(armDrive())
+        setHeading(dveh, 0)
+        local s = Dr.debugSession(0)
+        dveh._speed = 0
+        for _, y in ipairs(ys) do drive.putSolid(math.floor(dveh._x) + dx, y, "t1010_" .. y) end
+        events = {}
+        if plan then
+            Dr.planDodge = function(st, ...)
+                local _, _, _, _, _, _, need, _, n = realPlan(st, ...)
+                local rs = st.lastSNow
+                return "dodge", rs + plan[1], rs + plan[2], rs + plan[3], rs + plan[4], plan[5], need or 1.1, false, n
+            end
+        end
+        driveReset(dveh)
+        s.diag = true
+        drive.scanRound(true)
+        Dr.planDodge = realPlan
+        return s
+    end
+
+    -- (chain) 主候選穿過整排牆：候選鏈全在 p3 打槍
+    local s = run(WALL, 22, { 2, 10, 28, 36, 0 })
+    local b = last("blocked") or {}
+    checkTrue(s.blocked == true and b.detail == "sweep" and b.tag0 == "plan" and b.ph0 == 3 and (b.p3 or 0) >= 1
+            and b.p1 == 0 and b.p2 == 0 and b.p4 == 0 and math.abs((b.hx0 or 0) - 22.5) < 1 and type(b.hy0) == "number",
+        "(chain) blocked 事件帶候選鏈摘要（tag0=" .. tostring(b.tag0) .. " ph0=" .. tostring(b.ph0) .. " p=" .. tostring(b.p1)
+        .. "/" .. tostring(b.p2) .. "/" .. tostring(b.p3) .. "/" .. tostring(b.p4) .. " hx0=" .. tostring(b.hx0) .. "）")
+    checkTrue(b.steep == nil and b.avail == nil, "(steep) 沒有 steep／exit-room 拒收：不寫 steep／avail")
+    checkTrue(stamped(logLine("sweep OBB fail"), true), "(tline) sweep OBB fail 帶 rs= t=（" .. tostring(logLine("sweep OBB fail")) .. "）")
+    checkTrue(stamped(logLine("blockedStop="), true), "(tline) blockedStop 帶 t=（" .. tostring(logLine("blockedStop=")) .. "）")
+    -- (chain-reset) 同一 session 下一輪 replan 沒有掃掠失敗：計數與主候選從 replan 起頭歸零，不帶上一輪的
+    local hadTag = s.sf0Tag
+    for _, y in ipairs(WALL) do drive.clearCell(22, y) end
+    drive.scanRound(true)
+    drive.scanRound(true)
+    checkTrue(hadTag == "plan" and s.sf0Tag == nil and s.sfP3 == 0,
+        "(chain-reset) 同 session 下一輪 replan 歸零（前 " .. tostring(hadTag) .. "、後 tag0=" .. tostring(s.sf0Tag) .. " p3="
+        .. tostring(s.sfP3) .. "）")
+    -- (chain-reset) 同一 session 下一次判堵只看自己那輪：牆前沒跑候選鏈＝整組不寫
+    s = run(WALL, 22)
+    b = last("blocked") or {}
+    checkTrue(s.blocked == true and b.tag0 == nil and b.p1 == nil and b.p3 == nil and b.hx0 == nil,
+        "(chain-reset) 沒有任何掃掠失敗（初判無縫）：候選鏈摘要不寫（tag0=" .. tostring(b.tag0) .. " p3=" .. tostring(b.p3) .. "）")
+
+    -- (steep) 牆在 6m 前、主候選 2m 塞 3m 側移：steep 拒收，差額進 steep
+    s = run(WALL, 6, { 0.5, 2.5, 9, 16, -3 })
+    b = last("blocked") or {}
+    checkTrue(s.blocked == true and b.shape == "steep" and type(b.steep) == "number" and b.steep > 0
+            and math.abs(b.steep - s.blockSteepM) < 1e-9,
+        "(steep) blocked 事件 steep＝blockSteepM（shape=" .. tostring(b.shape) .. " steep=" .. tostring(b.steep) .. "）")
+    checkTrue(stamped(logLine("shape steep"), true), "(tline) shape steep 帶 rs= t=（" .. tostring(logLine("shape steep")) .. "）")
+
+    -- (setoff) 單一路中物、本該承諾：Follower 拒收承諾線
+    MDADFollower.setOffset = function() return false end
+    s = run({ 0 }, 6)
+    MDADFollower.setOffset = oldSetOffset
+    b = last("blocked") or {}
+    checkTrue(s.blocked == true and b.detail == "set-offset",
+        "(setoff) setOffset 拒收轉判堵：detail＝set-offset（detail=" .. tostring(b.detail) .. "）")
+    checkTrue(stamped(logLine("setOffset REJECTED"), true),
+        "(tline) setOffset REJECTED 帶 rs= t=（" .. tostring(logLine("setOffset REJECTED")) .. "）")
+
+    -- (contact) 硬物壓在車頭：接觸上升緣一筆；仍接觸不再記；離開後再碰再記（幀時還原：10ms 幀的長視距一輪掃不完）
+    drive.frameMs(wasMs)
+    MDAD.Drive.stop(0, nil)
+    drive.fillWorld(-10, 120, -8, 8)
+    assert(armDrive())
+    setHeading(dveh, 0)
+    s = Dr.debugSession(0)
+    dveh._speed = 3
+    s.diag = true
+    events = {}
+    drive.putSolid(2, 0, "t1010_contact_pole")
+    drive.scanRound(true)
+    local c = last("contact") or {}
+    checkTrue(s.footprintBlocked == true and count("contact") == 1 and c.sprite == "t1010_contact_pole" and c.scost == "hard"
+            and type(c.hitR) == "number" and type(c.speed) == "number" and type(c.x) == "number" and type(c.hardD) == "number",
+        "(contact) 接觸上升緣記一筆（n=" .. count("contact") .. " sprite=" .. tostring(c.sprite) .. " scost=" .. tostring(c.scost)
+        .. " hitR=" .. tostring(c.hitR) .. " hardD=" .. tostring(c.hardD) .. "）")
+    checkTrue(type(s.diagBoostUntil) == "number" and s.diagBoostUntil > nowMs,
+        "(boost) 接觸上升緣武裝 10Hz 升頻（until=" .. tostring(s.diagBoostUntil) .. "）")
+    -- forceBrake 閂鎖上升緣也武裝升頻；仍在閂鎖中再煞不重武裝
+    s.diagBoostUntil, s.forceBrakeUntil = nil, 0
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    local fbArm = s.diagBoostUntil
+    s.diagBoostUntil = nil
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkTrue(drive.calls.forceBrake >= 1 and fbArm == nowMs + Dr.debugTune().DIAG_BOOST_MS and s.diagBoostUntil == nil,
+        "(boost) forceBrake 閂鎖上升緣武裝升頻、閂鎖中再煞不重武裝（arm=" .. tostring(fbArm) .. " again=" .. tostring(s.diagBoostUntil) .. "）")
+    -- (latch-set) stepFollow 的 hard-brake 裁決者閂進 hbp：沒取樣的那一幀之後，下一筆樣本帶 hbp
+    s.hbrLatch = nil
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    local hbrNow = s.lastHardBrakeReason
+    local oldShould2, oldSample2, ph = MDADDiagnostics.shouldSample, MDADDiagnostics.sample, nil
+    MDADDiagnostics.shouldSample = function() return true end
+    MDADDiagnostics.sample = function(...) ph = select(32, ...) return true end
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    MDADDiagnostics.shouldSample, MDADDiagnostics.sample = oldShould2, oldSample2
+    checkTrue(type(hbrNow) == "string" and type(ph) == "table" and type(ph.hardBrakeLatch) == "string",
+        "(latch-set) hard-brake 那幀之後的樣本帶 hbp（hbr=" .. tostring(hbrNow) .. " hbp=" .. tostring(ph and ph.hardBrakeLatch) .. "）")
+    drive.scanRound(true)
+    checkEq(count("contact"), 1, "(contact-edge) 仍接觸：不再記")
+    drive.clearCell(2, 0)
+    drive.scanRound(true)
+    drive.putSolid(2, 0, "t1010_contact_pole")
+    drive.scanRound(true)
+    checkEq(count("contact"), 2, "(contact-edge) 離開後再碰：再記一筆")
+    drive.clearCell(2, 0)
+
+    -- (boost)(latch)(phys) 取樣參數：critical 與 phys
+    MDAD.Drive.stop(0, nil)
+    drive.fillWorld(-10, 120, -8, 8)
+    assert(armDrive())
+    s = Dr.debugSession(0)
+    s.diag = true
+    local crit, phys = nil, nil
+    MDADDiagnostics.shouldSample = function(_, _, _, _, critical) crit = critical return true end
+    MDADDiagnostics.sample = function(...) phys = select(32, ...) return true end
+    local function tick()
+        crit, phys = nil, nil
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        return crit, phys or {}
+    end
+    local c0 = tick()
+    checkTrue(c0 ~= true, "(boost) 前置：淨空跟線不是 10Hz（critical=" .. tostring(c0) .. "）")
+    s.diagBoostUntil = nowMs + Dr.debugTune().DIAG_BOOST_MS
+    local c1 = tick()
+    nowMs = nowMs + Dr.debugTune().DIAG_BOOST_MS + 1
+    local c2 = tick()
+    checkTrue(c1 == true and c2 ~= true, "(boost) 升頻窗內 critical、過了回 5Hz（" .. tostring(c1) .. "/" .. tostring(c2) .. "）")
+    -- yawGovern：100ms 轉 0.5 rad＝5 rad/s 的尖峰，下一個窗又回 0
+    local t0 = nowMs - 220
+    Dr.yawGovern(s, 0, 0, 20, t0)
+    Dr.yawGovern(s, 0, 0.5, 20, t0 + 100)
+    Dr.yawGovern(s, 0, 0.5, 20, t0 + 200)
+    s.hbrLatch = "t1010-brake"
+    s.trfLeadGap, s.trfLeadV = 12.5, 3
+    s.zombieWhy, s.zombieWant = "gap", 1.25
+    local _, p1 = tick()
+    checkTrue(type(p1.yawPeak) == "number" and math.abs(p1.yawPeak - 5) < 1e-6 and (p1.yawRate == nil or math.abs(p1.yawRate) < 1),
+        "(latch) yrp＝取樣間最大 |yr|（peak=" .. tostring(p1.yawPeak) .. " yr=" .. tostring(p1.yawRate) .. "）")
+    checkEq(p1.hardBrakeLatch, "t1010-brake", "(latch) hbp＝取樣間最後一個 hard-brake 理由")
+    checkTrue(p1.trfLeadGap == 12.5 and p1.trfLeadV == 3 and p1.zombieWhy == "gap" and p1.zombieWant == 1.25,
+        "(phys) tlg／tlv／zwh／zwt 進樣本")
+    nowMs = nowMs + 300
+    local _, p2 = tick()
+    checkTrue((p2.yawPeak == nil or p2.yawPeak < 1) and p2.hardBrakeLatch == nil,
+        "(latch-clear) 寫出後清：下一筆沒有舊峰值（peak=" .. tostring(p2.yawPeak) .. " hbp=" .. tostring(p2.hardBrakeLatch) .. "）")
+    s.zombieWhy = "none"
+    nowMs = nowMs + 300
+    local _, p3 = tick()
+    checkTrue(p3.zombieWhy == nil and p3.zombieWant == nil, "(phys) zwh=none 不寫")
+    s.trfLeadGap, s.trfLeadV, s.zombieWhy, s.zombieWant = nil, nil, nil, nil
+
+    -- (policy) session 第一次刷新只是初值（就算和預設不同也不記）；中途切殭屍減速偏好記一筆；沒變的刷新不記
+    MDADDiagnostics.shouldSample = function() return false end
+    MDADDiagnostics.sample = function() return true end
+    events = {}
+    local was = Dr.getSlowPref(0, "zombie")
+    s.policySeen, s.zombieSlow = nil, not was
+    Dr.setGear(0, Dr.getGear(0))
+    checkEq(count("policy"), 0, "(policy-first) session 第一次刷新（初值，header opts 已記）不記")
+    Dr.setSlowPref(0, "zombie", not was)
+    local pe = last("policy", "change") or {}
+    checkTrue(count("policy") == 1 and pe.zslow == (not was) and type(pe.cslow) == "boolean" and type(pe.aslow) == "number",
+        "(policy) 中途改減速偏好記 policy change（n=" .. count("policy") .. " zslow=" .. tostring(pe.zslow) .. "）")
+    Dr.setSlowPref(0, "zombie", was)
+    Dr.setSlowPref(0, "zombie", was)
+    checkEq(count("policy"), 2, "(policy) 改回記一筆、沒變的刷新不記")
+
+    -- (suspect) 輪速 70、2.5 秒沒前進（照常跑幀，同 (d) gear-reset 情境）：suspect 帶 gap／fdt
+    drive.fillWorld(-10, 70, -7, 7)
+    assert(armDrive())
+    setHeading(dveh, 0)
+    driveTick(dp, dveh)
+    drive.scanRound()
+    dveh._x = 8
+    driveTick(dp, dveh)
+    s = Dr.debugSession(0)
+    s.diag = true
+    events = {}
+    dveh._speed, dveh._trans = 70, 3
+    drive.stallFrames(2501)
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    local su = last("progress", "suspect") or {}
+    checkTrue(type(su.gap) == "number" and su.gap > 0 and su.gap <= 500 and su.fdt == s.frameMs,
+        "(suspect) progress suspect 帶牆鐘間隔與幀時（gap=" .. tostring(su.gap) .. " fdt=" .. tostring(su.fdt) .. "）")
+
+    -- (tline) start 行與狀態列
+    MDAD.Drive.stop(0, nil)
+    local startLog = capturePrint(function() assert(armDrive()) end)
+    local startLine = nil
+    for i = 1, #startLog do if string.find(startLog[i], "start pn=", 1, true) then startLine = startLog[i] end end
+    checkTrue(stamped(startLine, false), "(tline) start 行帶 t=（" .. tostring(startLine) .. "）")
+    nowMs = nowMs + 1100
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkTrue(stamped(logLine(" mode=follow speed="), true), "(tline) 狀態列帶 rs= t=（" .. tostring(logLine(" mode=follow speed=")) .. "）")
+
+    dveh._speed, dveh._trans = 20, oldTrans
+    MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.shouldSample = oldEvent, oldSample, oldShould
+    drive.debug = oldDebug
+    MDAD.Drive.stop(0, nil)
+    drive.fillWorld(-2, 70, -7, 7)
+end
+drive.scenarioTelem1010()
 
 -- (c8) MP 假速度域（2026-09-02 s012：regulator 70、直路 30 秒貼死 51 km/h）：
 --      CarController 用 v·lerp(1, fake, (v/min(120,SpeedLimit))²) 與 regulatorSpeed
@@ -21612,6 +21903,34 @@ function drive.scenarioExitKink()
     tune.EXIT_HOLD_KINK_RAD = oldKink
     checkTrue(ok == false and why == "exit-room",
         "(xk-big) 超過門檻的緊接折點照舊拒收（ok=" .. tostring(ok) .. " why=" .. tostring(why) .. "）")
+    -- 1010：exit-room 記下出口可用長度與用完它的折點弧長（小折點 40＋2.8）；判堵事件帶 avail／foldS。
+    --   違規證明：shapeProfile 不記＝(xk-avail) 紅；blocked 事件拿掉 avail／foldS＝(xk-ev) 紅。
+    checkTrue(type(st.dodgeExitAvail) == "number" and st.dodgeExitAvail <= 0 and math.abs((st.dodgeExitFoldS or 0) - 42.8) < 0.05,
+        "(xk-avail) exit-room 記出口可用長度與折點弧長（avail=" .. tostring(st.dodgeExitAvail) .. " foldS="
+        .. tostring(st.dodgeExitFoldS) .. "）")
+    do
+        local oldEv, oldSm, evs = MDADDiagnostics.event, MDADDiagnostics.sample, {}
+        MDADDiagnostics.event = function(_, name, a) if name == "blocked" then evs[#evs + 1] = a end end
+        MDADDiagnostics.sample = function() return true end
+        for y = -8, 8 do drive.putSolid(25, y, "xk_wall" .. y) end
+        local realPlan = MDAD.Drive.planDodge
+        MDAD.Drive.planDodge = function(s2, ...)
+            local _, _, _, _, _, _, need, _, n = realPlan(s2, ...)
+            return "dodge", 20, 30, 39.5, 43, -1, need or 1.1, false, n
+        end
+        tune.EXIT_HOLD_KINK_RAD = 0.16
+        st.diag = true
+        driveReset(dveh)
+        drive.scanRound(true)
+        tune.EXIT_HOLD_KINK_RAD, MDAD.Drive.planDodge = oldKink, realPlan
+        st.diag = false
+        MDADDiagnostics.event, MDADDiagnostics.sample = oldEv, oldSm
+        for y = -8, 8 do drive.clearCell(25, y) end
+        local b = evs[#evs] or {}
+        checkTrue(b.shape == "exit-room" and type(b.avail) == "number" and b.avail <= 0 and math.abs((b.foldS or 0) - 42.8) < 0.05,
+            "(xk-ev) exit-room 判堵事件帶 avail／foldS（shape=" .. tostring(b.shape) .. " avail=" .. tostring(b.avail)
+            .. " foldS=" .. tostring(b.foldS) .. "）")
+    end
     -- 19°（原案角度）：建成小弧，出口照常放得下（門檻壓低也不拒——弧不是折點）
     checkTrue(arm(19), "(xk-arc) 大折點後 2.8m 接 19° 小折點：啟動")
     st = MDAD.Drive.debugSession(0)
@@ -22432,7 +22751,7 @@ function drive.scenarioTowLost()
     checkTrue(MDAD.Drive.start(dp), "(tl) 啟動")
     local st = MDAD.Drive.debugSession(0)
     st.diag = true
-    st.tow = { trailer = trailer, id = 77, hitchSelf = "trailer", hitchOther = "trailerfront",
+    st.tow = { trailer = trailer, id = 77, script = "Base.TrailerCover", hitchSelf = "trailer", hitchOther = "trailerfront",
         L2 = 9.5, hitchToRear = 12, halfW = 1.27 }
     st.towPhi = 0.12
     for _ = 1, 3 do
@@ -22448,6 +22767,9 @@ function drive.scenarioTowLost()
         and e.phi == 0.12, "(tl) tow phase=lost 帶 cur/alive/by/speed/up/phi（n=" .. #ev .. " cur=" .. tostring(e.cur)
         .. " alive=" .. tostring(e.alive) .. " phi=" .. tostring(e.phi) .. "）")
     checkNear(e.hd, 4, 1e-9, "(tl) 兩掛點距離")
+    -- 1010：帶掛車 id／script（attach 記下；脫開後掛車可能已不存在）。違規證明：事件拿掉 vid／script＝(tl-id) 紅。
+    checkTrue(e.vid == 77 and e.script == "Base.TrailerCover",
+        "(tl-id) tow phase=lost 帶掛車 id／script（vid=" .. tostring(e.vid) .. " script=" .. tostring(e.script) .. "）")
     drive.frameMs(wasMs)
     MDADDiagnostics.event, getVehicleById, Vector3f = oldEvent, oldById, oldV3
     drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
@@ -25356,10 +25678,14 @@ function drive.scenarioLagGuard()
     put(85, objL)
     checkTrue(not MDADCorridor.blocksLine(sen.hardL, sen.hardR, sen.hardLc, sen.hardW, 1, lineAt(85), halfW + 0.3),
         "(lag-ramp) 前置：規劃線（常駐 needHalf 餘裕 0.3）判淨空")
+    s.diagBoostUntil = nil -- 1010：先清掉前面的升頻窗，只看 arm 上升緣
     Dr.lagGuardScan(s, 0, 60)
     local arm = lastLag("arm")
     checkTrue(s.lagHitX == 85 and s.lagHitY == objL and arm ~= nil and arm.dev == 1.6 and arm.hitS == 85,
         "(lag-ramp) 預測車身（規劃線＋1.6）碰到規劃線外 0.5 的細物：記命中與 lag arm 事件（hit=" .. tostring(s.lagHitX) .. "）")
+    -- 1010：lag arm 上升緣武裝 10Hz 升頻（之後 TUNE.DIAG_BOOST_MS 內取樣 critical）。違規證明：拿掉 arm 的武裝＝(lag-boost) 紅。
+    checkTrue(s.diagBoostUntil == nowMs + Dr.debugTune().DIAG_BOOST_MS,
+        "(lag-boost) lag arm 武裝升頻（until=" .. tostring(s.diagBoostUntil) .. "）")
     local carY = lineAt(60) + 1.6
     local dx, dy = 85 - 60, objL - carY
     local want = MDADDynamics.approachCapKmh(math.sqrt(dx * dx + dy * dy) - halfL - r, MIN, 0.5, 6 * T.APPROACH_BRAKE_FRAC)

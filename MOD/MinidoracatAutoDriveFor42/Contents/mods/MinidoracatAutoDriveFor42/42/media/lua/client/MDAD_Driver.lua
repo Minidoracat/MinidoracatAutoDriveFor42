@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1010a"
+Drive.REV = "1010b"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -853,6 +853,8 @@ TUNE.UNSTICK_MIN_M = 1.0
 TUNE.SWEEP_LOG_MS = 1000
 -- replan 牆鐘遙測最多每 REPLAN_CLOCK_MS 量一次（前後各讀一次 getTimestampMs；毫秒時鐘只當現場分佈，歸因用 GameProfiler）
 TUNE.REPLAN_CLOCK_MS = 250
+-- 遙測升頻（2026-10-10）：footprint 接觸、forceBrake、落後量守門 arm 的上升緣後 DIAG_BOOST_MS 內取樣強制 10Hz（critFlag）
+TUNE.DIAG_BOOST_MS = 2000
 -- sweepLine 整塊剔除的塊大小（連號硬點數；Drive.sweepScratch）：太小＝塊測試本身變貴，太大＝塊外框鬆、剔不掉
 TUNE.SWEEP_BLOCK_N = 8
 
@@ -1169,7 +1171,7 @@ function TRIP.release(playerNum, token, reason)
             nextMs = now + ROUTE_REFRESH_MS, deadlineMs = now + TRIP.RELEASE_MS }
         prepCount = prepCount + 1
     end
-    if getDebug() then
+    if getDebug() then -- telemetry: n/a 行程層換站釋放延後，不屬於任何一趟 session（結果見下一趟 header／route cutover）
         print(LOG .. "trip release deferred pn=" .. playerNum .. " why=" .. tostring(why))
     end
     return false
@@ -1670,8 +1672,11 @@ local function refreshPolicies(s, vehicle, playerNum)
     -- 沙盒 AnimalSlowdown（1005 soft）：1 不為動物停等／2 大型動物（預設）／3 所有動物
     local animalSlow = MDAD.policy3("AnimalSlowdown", 2)
     local changed = zombieSlow ~= s.zombieSlow or corpseSlow ~= s.corpseSlow or animalSlow ~= s.animalSlow
+    local first = not s.policySeen -- 出發第一次只是初值（header opts 已記 zslow／cslow／aslow）
+    s.policySeen = true
     s.zombieSlow, s.corpseSlow, s.animalSlow = zombieSlow, corpseSlow, animalSlow
     if changed then
+        if not first then Drive.policyNote(s, playerNum) end
         s.zombieLaneCap = -1
         if s.sensor and s.sensor.ready and s.profile.ready and MDADDynamics.finite(s.lastLatSigned)
                 and not s.dodging and not s.returnActive and not s.laneChained
@@ -1919,6 +1924,12 @@ local function diagEvent(s, playerNum, name, payload)
     if not ok then diagFail(s, playerNum, "event " .. tostring(name) .. " failed", err) end
 end
 
+-- 減速政策中途改變（2026-10-10；refreshPolicies：玩家切殭屍／屍體減速偏好、沙盒改值）：header opts 只記出發當下，
+-- 中途改了沒有事件就分不出「關著」與「沒走到」。refreshPolicies 在 diagEvent 之前定義，經這個表函式呼叫。
+function Drive.policyNote(s, playerNum)
+    diagEvent(s, playerNum, "policy", { phase = "change", zslow = s.zombieSlow, cslow = s.corpseSlow, aslow = s.animalSlow })
+end
+
 local function diagStop(s, playerNum, reason)
     if not s or not s.diag then return end
     pcall(MDADDiagnostics.stop, playerNum, reason)
@@ -1955,7 +1966,7 @@ function Drive.stop(playerNum, reasonKey, voiceEvent, diagWhy)
             if playerObj then haloBad(playerObj, reasonKey) end
             Drive.noteStop(playerNum, reasonKey, playerObj and playerObj:getVehicle())
         end
-        if getDebug() then
+        if getDebug() then -- telemetry: n/a 行程準備階段還沒有 session（交還原因走 HUD／Drive.noteStop）
             print(LOG .. "trip prep cancel pn=" .. playerNum
                 .. " reason=" .. tostring(reasonKey))
         end
@@ -1966,6 +1977,7 @@ function Drive.stop(playerNum, reasonKey, voiceEvent, diagWhy)
         local cur, alive, by, hd, kmh, up = MDADTrailer.lostState(s.vehicle, s.tow)
         diagEvent(s, playerNum, "tow", {
             phase = "lost", cur = cur, alive = alive, by = by, hd = hd, speed = kmh, up = up, phi = s.towPhi,
+            vid = s.tow.id, script = s.tow.script, -- 掛車 id／script（2026-10-10；MDADTrailer.attach 記下，量不到缺）
         })
     end
     -- 調頭進行中就結束 session（玩家接手、按鈕、交還…）：記下這次調頭的結局（1008；Drive.uturnDone）
@@ -1985,7 +1997,7 @@ function Drive.stop(playerNum, reasonKey, voiceEvent, diagWhy)
     end
     -- 實機回報「按了關閉、感覺沒關」時這行就是分水嶺：印出來＝session 真的收掉、
     -- regulator 也關了，車還在動就是慣性（Stop 刻意不硬煞）；沒印出來才是真的沒關。
-    if getDebug() then
+    if getDebug() then -- telemetry: footer r＋session-index reason（結束原因）
         print(LOG .. "stop pn=" .. playerNum .. " reason=" .. (reasonKey or "manual")
             .. " regulator=off nobrake")
     end
@@ -2556,9 +2568,10 @@ function TRIP.announce(playerObj, playerNum, event)
         haloGood(playerObj, "UI_MinidoracatAutoDrive_Start")
     end
     voice(event, playerNum)
-    if getDebug() then
+    if getDebug() then -- telemetry: header rev＋start 事件；t＝getTimestampMs（同 telemetry ts 時鐘）
         print(LOG .. "start pn=" .. playerNum .. " ok maxSpeed="
-            .. sessions[playerNum].maxSpeed .. " rev=" .. tostring(Drive.REV))
+            .. sessions[playerNum].maxSpeed .. " rev=" .. tostring(Drive.REV)
+            .. string.format(" t=%.0f", getTimestampMs()))
     end
 end
 
@@ -2599,7 +2612,7 @@ function TRIP.adopt(playerNum, prep, api, trip, now)
         prep.token, prep.stopId, prep.session = token, stopId, nil
         prep.nextMs, prep.deadlineMs = 0, now + TRIP.PREP_MS
         prep.event, prep.auto = "leg_next", true
-        if getDebug() then
+        if getDebug() then -- telemetry: n/a 行程準備階段還沒有 session（下一趟 route cutover 帶 target）
             print(LOG .. "trip prep adopt pn=" .. playerNum .. " stop=" .. tostring(stopId))
         end
         return true
@@ -2804,8 +2817,9 @@ function Drive.start(playerObj)
         local ok, why = Drive.continueItinerary(playerNum)
         if not ok then
             haloBad(playerObj, why)
-            if getDebug() then
-                print(LOG .. "start pn=" .. playerNum .. " trip blocked=" .. tostring(why))
+            if getDebug() then -- telemetry: n/a 起步被拒，沒有 session
+                print(LOG .. "start pn=" .. playerNum .. " trip blocked=" .. tostring(why)
+                    .. string.format(" t=%.0f", getTimestampMs()))
             end
         end
         return ok
@@ -2813,7 +2827,9 @@ function Drive.start(playerObj)
     local reason = startSession(playerObj, playerNum)
     if reason then
         haloBad(playerObj, reason)
-        if getDebug() then print(LOG .. "start pn=" .. playerNum .. " blocked=" .. reason) end
+        if getDebug() then -- telemetry: n/a 起步被拒，沒有 session
+            print(LOG .. "start pn=" .. playerNum .. " blocked=" .. reason .. string.format(" t=%.0f", getTimestampMs()))
+        end
         return false
     end
     TRIP.announce(playerObj, playerNum)
@@ -2826,11 +2842,11 @@ function Drive.toggle(playerObj)
     if Drive.isActive(playerNum) then
         Drive.stop(playerNum, nil, nil, "button")
         haloGood(playerObj, "UI_MinidoracatAutoDrive_Stop")
-        if getDebug() then print(LOG .. "toggle pn=" .. playerNum .. " off") end
+        if getDebug() then print(LOG .. "toggle pn=" .. playerNum .. " off") end -- telemetry: footer r（按鈕關閉）
         return
     end
     local ok = Drive.start(playerObj)
-    if getDebug() then
+    if getDebug() then -- telemetry: header＋start 事件（起不來時沒有 session）
         print(LOG .. "toggle pn=" .. playerNum .. " on ok=" .. tostring(ok))
     end
 end
@@ -2847,13 +2863,14 @@ end
 function Drive.requestDetour(playerNum, stuck, src)
     local s = sessions[playerNum]
     if not s then return false, "inactive" end
-    s.detourAvoidN = nil -- 本次附給主 MOD 的舊避讓圈數（detourAttempt 寫；早退＝nil）
+    s.detourAvoidN, s.detourAx, s.detourAy = nil, nil, nil -- 本次附給主 MOD 的舊避讓圈數／避讓圈圓心（detourAttempt 寫；早退＝nil）
     local ok, why, len = Drive.detourAttempt(s, playerNum, stuck)
     local v = s.vehicle
     diagEvent(s, playerNum, "detour", { phase = stuck and "stuck" or (src or "manual"),
         why = ok and "ok" or tostring(why), x = v and v:getX() or nil, y = v and v:getY() or nil, s = s.lastSNow,
         hitX = s.blockHitX, hitY = s.blockHitY, ms = s.waitAccumMs, attempt = s.episodeAttempts,
-        lvl = s.wideArmed and Drive.wideLevelOf(s) or nil, len = len, avoidN = s.detourAvoidN })
+        lvl = s.wideArmed and Drive.wideLevelOf(s) or nil, len = len, avoidN = s.detourAvoidN,
+        ax = s.detourAx, ay = s.detourAy })
     return ok, why
 end
 
@@ -2896,6 +2913,7 @@ function Drive.detourAttempt(s, playerNum, stuck)
     -- 同一趟先前判死的堵點一併避開（Drive.avoidMore；requestDetourRoute 拒收穿舊圈的線 "again"）
     local more = Drive.avoidMore(s, vx, vy, s.lastTx, s.lastTy, ax, ay, true)
     s.detourAvoidN = more and #more / 3 or nil
+    s.detourAx, s.detourAy = ax, ay
     local route, why, rejected = requestDetourRoute(api, playerNum, s.lastTx, s.lastTy, ax, ay, remaining, nil,
         stuck and fin(remaining) and remaining * TUNE.STUCK_DETOUR_LEN_RATIO + TUNE.STUCK_DETOUR_LEN_SLACK or nil, s.route,
         more)
@@ -2905,9 +2923,10 @@ function Drive.detourAttempt(s, playerNum, stuck)
     if route and s.tow and fin(vh) and not Drive.routeLeavesForward(route, vx, vy, cos(vh), sin(vh)) then
         route, why, rejected = nil, "back", route
     end
-    if getDebug() then
+    if getDebug() then -- telemetry: detour 事件（why len ax ay）
         print(LOG .. "detour pn=" .. playerNum .. " avoid=(" .. tostring(ax) .. "," .. tostring(ay)
-            .. ") -> " .. (route and ("ok len=" .. tostring(route.len)) or ("rejected " .. tostring(why))))
+            .. ") -> " .. (route and ("ok len=" .. tostring(route.len)) or ("rejected " .. tostring(why)))
+            .. string.format(" rs=%.1f t=%.0f", s.lastSNow or -1, getTimestampMs()))
     end
     if not route then
         -- 主 MOD 的 requestDetour 成功算出路線就已覆寫快取（含被本 MOD 拒收的
@@ -3328,6 +3347,7 @@ local function commandForceBrake(s, vehicle, now, why)
     s.forceBrakeThis = true
     s.forceBrakeWhy = why or "?" -- telemetry fbw（閂鎖期間持續可見）；呼叫端明確給，不猜上一個 cap
     if type(now) ~= "number" or now * 0 ~= 0 then now = getTimestampMs() end
+    if s.forceBrakeUntil <= now then s.diagBoostUntil = now + TUNE.DIAG_BOOST_MS end -- 閂鎖上升緣：之後 2 秒取樣 10Hz
     local untilMs = now + 1000
     if untilMs > s.forceBrakeUntil then s.forceBrakeUntil = untilMs end
     return true
@@ -4592,9 +4612,10 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
         -- 上一輪走向；遠威脅缺）、rej＝沒縫但舊模型會選到縫（reach 可及量拒／side 不跨同群拒）
         diagEvent(s, playerNum, "zombie", { phase = "plan", why = why,
             l = cur, offL = want, s = threatS, rs = rs, a = aLo, b = aHi, hn = sen.zomN, detail = pts,
-            lat = latNow, tl = threatL, rb = rb, rl = rl, ns = nSrc, rej = rej })
+            lat = latNow, tl = threatL, rb = rb, rl = rl, ns = nSrc, rej = rej,
+            sFrom = sFrom, sTo = sTo }) -- 2026-10-10：選縫視窗（弧長；console zombie lane 的 win）
     end
-    if getDebug() and (sen.zomN > 0 or s.zombieLane ~= nil) then
+    if getDebug() and (sen.zomN > 0 or s.zombieLane ~= nil) then -- telemetry: 樣本 zwh／zwt／zln／zombieLaneCap＋zombie plan 事件
         -- 前三個軟避讓點（殭屍一點、屍體兩端）相對車位的 (s−rs, l)；
         -- 沿用 zombie lane 日誌前綴與既有 telemetry 欄名。
         local zs = ""
@@ -4602,9 +4623,9 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
             if i > 3 then break end
             zs = zs .. string.format(" (%.0f,%.1f)", sen.zomS[i] - rs, sen.zomL[i])
         end
-        print(string.format("%spn=%d zombie lane: n=%d win=[%.0f,%.0f] band=[%.2f,%.2f] base=%.2f cur=%.2f want=%.2f why=%s vcap=%.0f keep0=%s zom=%s",
+        print(string.format("%spn=%d zombie lane: n=%d win=[%.0f,%.0f] band=[%.2f,%.2f] base=%.2f cur=%.2f want=%.2f why=%s vcap=%.0f keep0=%s zom=%s rs=%.1f t=%.0f",
             LOG, playerNum, sen.zomN, sFrom, sTo, aLo, aHi, resident, cur, want, why, s.zombieLaneCap,
-            tostring(s.zombieKeep0 == true), zs))
+            tostring(s.zombieKeep0 == true), zs, rs, now))
     end
     -- 首次呼叫 dt＝0（不得拿 zombieLaneMs=0 算出 1 s 的步長：0906e 實機首輪 1.5→2.41 一跳 0.9m
     -- → 航向誤差 17-20° → align 減速）；之後 dt＝輪距（≈0.25-0.3 s），上限 1 s
@@ -4997,7 +5018,7 @@ function Drive.trafficScan(s, now, speedKmh)
         s.trafficPlan = nil
         -- 提示去重保留到對方預計交會完（trafficHoldUntil）：判定單輪閃掉不算「新的一次會車」
         if now > (s.trafficHoldUntil or 0) then s.trafficNoticeKey = nil end
-        if getDebug() and s.trfLeadGap ~= nil then
+        if getDebug() and s.trfLeadGap ~= nil then -- telemetry: 樣本 tlg／tlv（跟車 lead 車距／速度）
             print(string.format("%spn=%d traffic lead gap=%.1f v=%.1f n=%d",
                 LOG, s.playerNum or 0, s.trfLeadGap, (s.trfLeadV or 0) * 3.6, n))
         end
@@ -6107,7 +6128,7 @@ function Drive.wideJudge(s, playerNum, lvl)
             and not (finite(s.blockSteepM) and s.blockSteepM > 0) then
         if Drive.wideLevelOf(s) <= lvl then
             s.wideLevel, s.wideLevelAt = lvl + 1, s.episodeAttempts
-            if getDebug() then
+            if getDebug() then -- telemetry: blocked why=wide 事件 lvl（每級一筆）
                 print(string.format("%spn=%d wide level %d blocked -> rescan at level %d", LOG, playerNum, lvl, lvl + 1))
             end
         end
@@ -6367,6 +6388,9 @@ function Drive.yawGovern(s, steer, heading, speedKmh, now)
         if d > math.pi then d = d - 2 * math.pi elseif d < -math.pi then d = d + 2 * math.pi end
         s.yawRate = d * 1000 / (now - refT)
         s.escH, s.escT = heading, now
+        -- 取樣間 |yr| 峰值（telemetry yrp，collectPhys 寫出後清；5Hz 取樣會漏掉尖峰幀）
+        local ar = s.yawRate < 0 and -s.yawRate or s.yawRate
+        if not (finite(s.yawPeak) and s.yawPeak >= ar) then s.yawPeak = ar end
     end
     s.escScale = 1
     local r = s.yawRate
@@ -6969,6 +6993,8 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     if finite(s.visAssistDecel) and s.visAssistDecel > 0 then phys.visAssistWhy = s.visAssistWhy end
     if s.tow then
         phys.towPhi, phys.towUp, phys.towDecel, phys.towBrake = s.towPhi, s.towUp, s.towAssistDecel, s.towBrakeWhy
+        -- 倒車脫困期間 T.guard 不跑、s.towPhi 凍結：改用 stepUnstick 每幀讀的折角（2026-10-10；不動 s.towPhi）
+        if s.mode == "unstick" and finite(s.towPhiRev) then phys.towPhi = s.towPhiRev end
         phys.towLon, phys.towLat, phys.towKmh, phys.towHd = MDADTrailer.sampleState(vehicle, s.tow, fx, fy) -- 1008
         -- 1008：車所在剖面段是拖車改寫弧（Trailer.shape segArcR→Follower towArcR）＝規劃半徑；曲率見 curveKappa
         if s.profile.towArcR then phys.towArcR = s.profile.towArcR[s.fstate.idx] end
@@ -7015,6 +7041,10 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
         s.dodgeBuildReason, s.dodgeBlockReason
     phys.dodgeCommittedLength = s.dodgeCommittedLength
     phys.laneChained = s.laneChained == true
+    -- 鏈式停留時 el＝停留 lane、rsd 是沒夾路寬的原值：另寫夾過路寬的常駐線（telemetry rsl，上傳偏離常駐線 KPI 用；1010）
+    if s.laneChained then
+        phys.residentLane = MDADFollower.laneBiasAt(s.profile, s.residentBias or 0, s.fstate.idx, s.lastSNow, nil)
+    end
     phys.dodgeTier = s.dodging and s.dodgeTier or nil
     phys.stateError, phys.invalid = s.stateError, s.invalid
     -- 2026-09-04 issue #1/#2 復盤缺口：兩份報告都數不出 forceBrake／build 次數、
@@ -7036,6 +7066,12 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     phys.frontClearance = s.frontClearance
     -- 0929c：HUD「卡頓降速」狀態（Drive.updateLowFps 遲滯後的結果；事件只記切換，片段的事前事件會被預算裁掉）
     if s.lowFps then phys.lowFps = true end
+    -- 2026-10-10：取樣間閂鎖（寫出後清，比照 fbl／xcw）——最大 |yr|（yawGovern）、最後一個 hard-brake 理由
+    phys.yawPeak, phys.hardBrakeLatch = s.yawPeak, s.hbrLatch
+    s.yawPeak, s.hbrLatch = nil, nil
+    -- 跟車 lead（Drive.trafficScan 每輪寫；console traffic lead 行）、殭屍軟縫逐輪的理由與目標 lane（none＝不寫）
+    phys.trfLeadGap, phys.trfLeadV = s.trfLeadGap, s.trfLeadV
+    if s.zombieWhy ~= nil and s.zombieWhy ~= "none" then phys.zombieWhy, phys.zombieWant = s.zombieWhy, s.zombieWant end
     return phys
 end
 
@@ -7250,6 +7286,27 @@ function Drive.footprintPad(s)
     return pad
 end
 
+-- footprint 接觸上升緣（2026-10-10；footprintSnapshot 在 s.footprintBlocked 由假轉真、且有命中硬點 i 時呼叫，冷路徑）：
+-- 之後 TUNE.DIAG_BOOST_MS 取樣強制 10Hz；記一筆 contact 事件——命中硬點世界座標／弧長／橫向、膨脹半徑 hitR、車速，
+-- 與命中物身分：他車精確輪廓點（Sensor hardV）＝scost vehicle；其餘 MDADSensor.hardSpriteNear 在命中點 1 格內找
+-- 引擎會擋車的 sprite（名、分類、格心距 hardD），讀不到只缺這三欄。
+function Drive.contactNote(s, vehicle, playerNum, i, hitS, hitL, hitX, hitY)
+    s.diagBoostUntil = getTimestampMs() + TUNE.DIAG_BOOST_MS
+    if not s.diag then return end
+    local sen = s.sensor
+    local nm, cls, d = nil, nil, nil
+    if sen.hardV and sen.hardV[i] == true then
+        cls = "vehicle"
+    elseif type(MDADSensor.hardSpriteNear) == "function" then
+        local okZ, z = pcall(vehicle.getZ, vehicle)
+        nm, cls, d = MDADSensor.hardSpriteNear(sen, getCell(), hitX, hitY, okZ and z or 0, 1)
+    end
+    local okV, kmh = pcall(vehicle.getCurrentSpeedKmHour, vehicle)
+    diagEvent(s, playerNum, "contact", { x = hitX, y = hitY, s = hitS, l = hitL, rs = s.lastSNow,
+        hitR = sen.hardR and sen.hardR[i], speed = okV and kmh or nil,
+        sprite = nm, scost = cls, hardD = d and math.floor(d * 100 + 0.5) / 100 })
+end
+
 -- Runs once per completed sensor snapshot, before the expected-path planner. It updates
 -- the current-body OR-gate, episode ban/rearm, and scalar telemetry without allocating.
 local function footprintSnapshot(s, vehicle, playerNum, out, heading, vx, vy, latSigned)
@@ -7280,6 +7337,10 @@ local function footprintSnapshot(s, vehicle, playerNum, out, heading, vx, vy, la
     s.actualClearance, s.plannedClearance = actual, planned
     -- 前半車身最近硬物淨距＋量測時的車位（起步近物限速逐幀扣掉之後開過的距離；Drive.startGuardApply）
     s.frontClearance, s.frontClearX, s.frontClearY = front, vx, vy
+    -- 接觸上升緣（命中硬點才算；bx 讀不到的 fail-closed 判擋不是接觸）
+    if blocked == true and hitI and hitI > 0 and not s.footprintBlocked then
+        Drive.contactNote(s, vehicle, playerNum, hitI, hitS, hitL, hitX, hitY)
+    end
     s.footprintBlocked = blocked == true
     s.footprintPoseOnly = poseOnly == true
     if hitI and hitI > 0 then
@@ -7509,7 +7570,7 @@ local function startRecoveryAttempt(s, vehicle, playerNum, now, vx, vy, softFail
     s.unstickDistance = 0
     s.reverseForce = 0
     s.mode = "unstick"
-    s.unstickSide = nil -- 倒車（不是側推；Drive.stepSideEscape）
+    s.unstickSide, s.towPhiRev = nil, nil -- 倒車（不是側推；Drive.stepSideEscape）；倒車中的折角由 stepUnstick 填（遙測 tph）
     s.dodgeHandoffHold, s.dodgeDeferCap = false, -1
     s.progressState = "recover"
     diagEvent(s, playerNum, "unstick", {
@@ -7650,7 +7711,7 @@ function Drive.sideEscapeStart(s, vehicle, playerNum, now, vx, vy, rear, kind, c
     local tagA = (finite(ax) and finite(ay)) and string.format("%s@%.1f,%.1f", stA, ax, ay) or stA
     local tagB = (finite(bxh) and finite(byh)) and string.format("%s@%.1f,%.1f", stB, bxh, byh) or stB
     local detail = (pref > 0 and "dir+1=" or "dir-1=") .. tagA .. (pref > 0 and " dir-1=" or " dir+1=") .. tagB
-    if getDebug() then
+    if getDebug() then -- telemetry: unstick phase=side 事件（why dir rear kind detail）
         print(string.format("%spn=%d side escape %s attempt=%d rear=%s/%s %s", LOG, playerNum,
             side and ("start dir=" .. side) or "none", s.episodeAttempts, tostring(rear), tostring(kind), detail))
     end
@@ -7857,7 +7918,13 @@ function Drive.sweepHit(s, sen, tag, a, b, c, offL, sk, wx, wy, i, ox, oy, clear
     elseif sk <= c then phase = 3
     else phase = 4 end
     s.sweepHitBody = body or "tractor" -- blocked 事件 kind：候選是牽引車還是掛車撞到（復盤拖車繞不過）
-    if getDebug() then
+    -- 候選鏈摘要（2026-10-10；replan 起頭歸零，blocked 事件 p1..p4／tag0 ph0 hx0 hy0）：本次 replan 各段失敗數＋第一個失敗
+    if phase == 1 then s.sfP1 = (s.sfP1 or 0) + 1
+    elseif phase == 2 then s.sfP2 = (s.sfP2 or 0) + 1
+    elseif phase == 3 then s.sfP3 = (s.sfP3 or 0) + 1
+    else s.sfP4 = (s.sfP4 or 0) + 1 end
+    if s.sf0Tag == nil then s.sf0Tag, s.sf0Ph, s.sf0X, s.sf0Y = tostring(tag or "?"), phase, ox, oy end
+    if getDebug() then -- telemetry: blocked 事件 p1..p4／tag0 ph0 hx0 hy0（逐條明細只在 console）
         local key = tostring(tag or "?") .. offL
         local at = s.sweepLogAt
         if at == nil then at = {}; s.sweepLogAt = at end
@@ -7865,9 +7932,9 @@ function Drive.sweepHit(s, sen, tag, a, b, c, offL, sk, wx, wy, i, ox, oy, clear
         if (at[key] or 0) + TUNE.SWEEP_LOG_MS <= nowMs then
             at[key] = nowMs
             print(string.format(
-                "%ssweep OBB fail[%s%s] p%d offL=%.2f @s=%.1f at=(%.1f,%.1f) hit#%d hw=(%.1f,%.1f) clearance=%.2f",
+                "%ssweep OBB fail[%s%s] p%d offL=%.2f @s=%.1f at=(%.1f,%.1f) hit#%d hw=(%.1f,%.1f) clearance=%.2f rs=%.1f t=%.0f",
                 LOG, tostring(tag or "?"), body and ("/" .. body) or "", phase, offL, sk, wx, wy,
-                i, ox, oy or 0, clearance))
+                i, ox, oy or 0, clearance, s.lastSNow or -1, nowMs))
         end
     end
     return false, -clearance, (sen.hardS and sen.hardS[i]) or sk, phase, sk, ox, oy or 0, i
@@ -9002,6 +9069,8 @@ local function shapeProfile(s, profile, a, b, c, d, offL, baseL, crawlDesign)
     if required <= 0 or minimum <= 0 or entryAvail <= 0 or exitAvail <= 0 then
         s.dodgeSpaceCap = 0
         s.dodgeShapeReason = entryAvail <= 0 and "entry" or (exitAvail <= 0 and "exit-room" or "length")
+        -- exit-room：出口可用長度與用完它的折點弧長（blocked 事件 avail／foldS，2026-10-10）
+        if s.dodgeShapeReason == "exit-room" then s.dodgeExitAvail, s.dodgeExitFoldS = exitAvail, exitPeak end
         return a, b, c, d, false
     end
     if required < minimum then required = minimum end
@@ -9045,9 +9114,9 @@ local function shapeProfile(s, profile, a, b, c, d, offL, baseL, crawlDesign)
             local deficit = kinMin - entryLen
             if s.steepDeficitM < 0 or deficit < s.steepDeficitM then s.steepDeficitM = deficit end
         end
-        if getDebug() then
-            print(string.format("%sshape steep: dl=%.2f entry=%.1f kin=%.1f ratio=%.1f offL=%.2f",
-                LOG, dl, entryLen, kinMin, kinMin / entryLen, offL))
+        if getDebug() then -- telemetry: blocked 事件 shape=steep＋steep（blockSteepM 差額）
+            print(string.format("%sshape steep: dl=%.2f entry=%.1f kin=%.1f ratio=%.1f offL=%.2f rs=%.1f t=%.0f",
+                LOG, dl, entryLen, kinMin, kinMin / entryLen, offL, s.lastSNow or -1, getTimestampMs()))
         end
         return a, b, c, d, false
     end
@@ -9789,6 +9858,7 @@ function Drive.lagGuardScan(s, playerNum, speedKmh, vx, vy, heading)
     local r = sen.hardW and sen.hardW[hit] or sen.hardR[hit]
     if not finite(r) or r < 0 then r = MDADCorridor.OBS_HALF end
     if not finite(s.lagHitX) then
+        s.diagBoostUntil = getTimestampMs() + TUNE.DIAG_BOOST_MS -- arm 上升緣：之後 2 秒取樣 10Hz（2026-10-10）
         diagEvent(s, playerNum, "lag", { phase = "arm", dev = ld, l = bl, hitS = sen.hardS[hit],
             hitX = sen.hardX[hit], hitY = sen.hardY[hit], rs = s.lastSNow, speed = speedKmh, rate = rate })
         if getDebug() then
@@ -10285,7 +10355,7 @@ function Drive.towFold(s, n, s0, a, b, c, d, baseL)
     if (s.towFoldDeg or 0) < deg then s.towFoldDeg = deg end
     local sk = s0 + (k - 1) * MDADFollower.OV_STEP
     local ph = sk < a and 1 or sk < b and 2 or sk <= c and 3 or 4
-    if getDebug() then -- fold＝事件 fold 欄；相位＝blocked 事件 hitPhase（kind towfold 時）
+    if getDebug() then -- telemetry: blocked／dodge 事件 fold；相位＝blocked 事件 hitPhase（kind towfold 時）
         print(string.format("%stow fold reject p%d fold=%.1f", LOG, ph, deg))
     end
     return false, 99, nil, ph, sk, nil, nil, nil
@@ -10303,7 +10373,7 @@ local function sweepCandidate(s, shapeOk, a, b, c, d, offL, baseL, tag, needBase
     local wantEnd = d + 1
     if wantEnd > s.profile.length then wantEnd = s.profile.length end
     if ovN < 2 or buildReason ~= "ok" or lastCovered < wantEnd - 1e-6 then
-        if getDebug() then
+        if getDebug() then -- telemetry: 樣本 dodgeBuildReason＋blocked 事件 detail（covered／want 只在 console）
             -- 無 log 的 build/coverage 打槍害 s051/s052 兩輪誤判 OBB——fail 必留痕
             print(string.format(
                 "%ssweep build fail[%s] ovN=%d reason=%s covered=%.1f want=%.1f a=%.1f d=%.1f s0=%.1f off=%.2f",
@@ -10327,7 +10397,7 @@ local function sweepCandidate(s, shapeOk, a, b, c, d, offL, baseL, tag, needBase
         local bi = nearestLineBlocker(s, sen, d + 1)
         if bi then
             s.dodgeDeadendS = sen.hardS[bi] -- telemetry blocked 事件 blocker 欄
-            if getDebug() then
+            if getDebug() then -- telemetry: blocked 事件 blocker（上一行 dodgeDeadendS）
                 print(string.format(
                     "%ssweep deadend[%s] offL=%.2f d=%.1f next blocker s=%.1f: crawl refused",
                     LOG, tostring(tag or "?"), offL, d, sen.hardS[bi]))
@@ -10467,7 +10537,7 @@ local function stayLaneForNext(s, planN, a, b, c, d, offL, baseL, nb, tag, crawl
                 tried = tried + 1
                 local ok, mg, ovN, ovS0, dStay = sweepStay(s, sa2, sb2, sc2, L, baseL, tag .. "-stay-look", nb)
                 if ok then
-                    if getDebug() then
+                    if getDebug() then -- telemetry: dodge commit 事件（tier *-stay、offL）
                         print(string.format("%sstay look-ahead[%s]: next gap offL=%.2f at b=%.1f runway=%.1f; stay %.2f -> %.2f",
                             LOG, tostring(tag), o2, b2, runway, offL, L))
                     end
@@ -10497,7 +10567,7 @@ local function chainAhead(s, planN, a, b, c, d, offL, baseL, nb, tag, crawlDesig
     if shiftFits(s, offL, o2, b2 - sc - 1) then
         local ok4, mg4, ovN4, ovS04, dStay = sweepStay(s, sa, sb, sc, offL, baseL, tag .. "-chain", nb)
         if ok4 then
-            if getDebug() then
+            if getDebug() then -- telemetry: dodge commit／kept 事件（停留鏈）
                 print(string.format("%schain ahead[%s]: next gap offL=%.2f at b=%.1f; return skipped, stay %.2f",
                     LOG, tostring(tag), o2, b2, offL))
             end
@@ -10653,7 +10723,7 @@ local function sweepWithFallbacks(s, planN, a, b, c, d, offL, baseL, tag, nb, ph
                 s, sa, sb, sc, offL, baseL, tag .. "-stay", used, true)
             if ok4 then return true, sa, sb, cStay, dStay, offL, mg4, ovN4, ovS04, used, "stay" end
             s.stayNextB = nil
-        elseif getDebug() then
+        elseif getDebug() then -- telemetry: n/a 停留候選逐條拒收理由（結果見 dodge commit／blocked 事件）
             print(string.format("%sstay refused[%s] offL=%.2f why=%s", LOG, tostring(tag), offL, tostring(why)))
         end
     end
@@ -10819,7 +10889,7 @@ local function demotePlan(s, sen, planN, prefer, blockL, baseL, playerNum)
                 s.lastOvN = ovN
                 s.lastOvS0 = ovS0
                 s.lastOvEndS = s.tmpOvEndS
-                if getDebug() then
+                if getDebug() then -- telemetry: dodge commit 事件 tier（demote-crawl／demote-probe）
                     print(LOG .. "pn=" .. playerNum
                         .. " plan-blocked demotion commit: tier="
                         .. tier .. " offL=" .. string.format("%.2f", oq))
@@ -10985,6 +11055,7 @@ local function replan(s, vehicle, playerNum)
     s.dodgeDeferCap = s.dodgeHandoffHold and 0 or -1
     s.dodgeDeferS = nil
     s.steepDeficitM, s.kinRejectN, s.towFoldDeg, s.bandRejectN, s.bandNavWhy = -1, 0, nil, 0, nil
+    s.sfP1, s.sfP2, s.sfP3, s.sfP4, s.sf0Tag = 0, 0, 0, 0, nil -- 候選鏈摘要（Drive.sweepHit 累計；blocked 事件 p1..p4／tag0…）
     local sen = s.sensor
     if not sen.ready then return end
     local handoff = false
@@ -11382,7 +11453,7 @@ local function replan(s, vehicle, playerNum)
         s.dodgeCrawl = false
         s.dodgeStay = false
         s.dodgeDeadendS = nil
-        if s.dodgeTight and getDebug() then
+        if s.dodgeTight and getDebug() then -- telemetry: dodge commit 事件 crawl／tight
             print(LOG .. "pn=" .. playerNum .. " curve dodge: "
                 .. (needUsed > s.needHalf and "wider gap ok, crawl"
                     or "narrow gap, crawl (sweep-guarded)"))
@@ -11393,7 +11464,7 @@ local function replan(s, vehicle, playerNum)
             -- commit→release 循環讓速度帽 flap（2026-08-29 實測 31 target
             -- 撞進樹叢）。前方淨空＝走 clear 語意。
             mode = "clear"
-            if getDebug() then
+            if getDebug() then -- telemetry: n/a 剖面整段在車後的防呆分支（結果＝不承諾，樣本 dg=false）
                 print(LOG .. "pn=" .. playerNum
                     .. " dodge profile behind car: clear (d="
                     .. string.format("%.1f rs=%.1f", d, s.lastSNow))
@@ -11610,7 +11681,7 @@ local function replan(s, vehicle, playerNum)
                     if mp == "dodge" then
                         if adoptIf("probe", sweepWithFallbacks(
                                 s, planN, pa2, pb2, pc2, pd2, po2, baseL, "probe", physBase, physBase, true)) then
-                            if getDebug() then
+                            if getDebug() then -- telemetry: dodge commit 事件（tier probe）
                                 print(LOG .. "pn=" .. playerNum
                                     .. " physical probe commit: squeeze-through at offL="
                                     .. string.format("%.2f", offL))
@@ -11628,7 +11699,7 @@ local function replan(s, vehicle, playerNum)
                                 s, planN, a, b, c - Drive.towHold(s), d - Drive.towHold(s),
                                 startLaneOf(s, baseL), baseL, "probe-straight",
                                 physBase, physBase, true)) then
-                            if getDebug() then
+                            if getDebug() then -- telemetry: dodge commit 事件（tier probe-straight）
                                 print(string.format("%spn=%d physical straight commit at offL=%.2f",
                                     LOG, playerNum, offL))
                             end
@@ -11638,7 +11709,7 @@ local function replan(s, vehicle, playerNum)
                     end
                 end
                 if committed then
-                    if getDebug() then
+                    if getDebug() then -- telemetry: dodge commit 事件 offL／crawl
                         print(string.format("%spn=%d sweep enumerate: offL=%.2f ok%s",
                             LOG, playerNum, offL, s.dodgeCrawl and " (crawl)" or ""))
                     end
@@ -11671,11 +11742,11 @@ local function replan(s, vehicle, playerNum)
                         s.cornerS = s.lastSNow
                         s.blockHitX = firstHitX
                         s.blockHitY = firstHitY
-                        if getDebug() then
+                        if getDebug() then -- telemetry: blocked 事件 corner／detail=corner
                             print(LOG .. "pn=" .. playerNum
                                 .. " blocked corner: geometry unsupported, fast detour")
                         end
-                    elseif getDebug() then
+                    elseif getDebug() then -- telemetry: blocked 事件 detail=sweep＋p1..p4／tag0
                         print(LOG .. "pn=" .. playerNum
                             .. " dodge failed sweep: blocked (all candidates)")
                     end
@@ -11747,7 +11818,7 @@ local function replan(s, vehicle, playerNum)
                 mode = "blocked"
                 s.dodgeBlockReason = capReason or "dodge-cap"
                 s.planSig = -1
-                if getDebug() then
+                if getDebug() then -- telemetry: blocked 事件 detail（capReason）＋樣本 dodge*Cap
                     -- s051 教訓：這條降級原本零 log——「plan ok 卻永遠 blocked」
                     -- 追了一輪才鎖定。cap 分解一行印清楚。
                     print(string.format(
@@ -11768,12 +11839,12 @@ local function replan(s, vehicle, playerNum)
         if owner == "rotate" and mode == "dodge" then
             mode = "blocked"
             s.planMode = "rotate-suppress"
-            if getDebug() then
+            if getDebug() then -- telemetry: 樣本 pm=rotate-suppress
                 print(LOG .. "pn=" .. playerNum .. " rotate-suppress eats dodge")
             end
         end
         if owner == "return" then
-            if getDebug() and mode == "dodge" then
+            if getDebug() and mode == "dodge" then -- telemetry: 樣本 pm=return-suppress
                 print(LOG .. "pn=" .. playerNum
                     .. " return-suppress eats dodge (latDev return active)")
             end
@@ -11781,7 +11852,7 @@ local function replan(s, vehicle, playerNum)
             s.clearStreak = 0
             s.planMode = "return-suppress"
             return
-        elseif s.returnActive and mode == "dodge" and getDebug() then
+        elseif s.returnActive and mode == "dodge" and getDebug() then -- telemetry: dodge commit 事件（當時樣本 ra=true）
             print(LOG .. "pn=" .. playerNum
                 .. " return line blocked: dodge takes over")
         end
@@ -11945,7 +12016,7 @@ local function replan(s, vehicle, playerNum)
                 fold = s.towFoldDeg, -- 承諾前被掛車折角預檢拒收的候選中最大預估折角（°；Drive.towFold）
                 preA = s.diag and Drive.preAClear(s) or nil }) -- pre-a 段最小物理淨距（只在紀錄開著時量）
             Drive.proofTightArm(s, playerNum) -- 停下之後的窄線爬行（TUNE.PROOF_TIGHT_KMH）
-            if getDebug() then
+            if getDebug() then -- telemetry: dodge commit 事件（cap 分解同欄）
                 -- cap 分解一行印清楚（2026-09-04 實機三段 8／15／14 km/h 繞行，console
                 -- 只有「cap zero」才印分解，正值慢吞吞完全無從復盤）
                 print(string.format(
@@ -11959,12 +12030,14 @@ local function replan(s, vehicle, playerNum)
             s.planMode = "dodge"
             return
         end
-        if getDebug() then
+        if getDebug() then -- telemetry: blocked 事件 detail=set-offset
             print(string.format(
-                "%spn=%d setOffset REJECTED a=%.1f b=%.1f c=%.1f d=%.1f offL=%.2f ovN=%s ovS0=%s ovEnd=%s",
+                "%spn=%d setOffset REJECTED a=%.1f b=%.1f c=%.1f d=%.1f offL=%.2f ovN=%s ovS0=%s ovEnd=%s rs=%.1f t=%.0f",
                 LOG, playerNum, a, b, c, d, offL,
-                tostring(s.lastOvN), tostring(s.lastOvS0), tostring(s.lastOvEndS)))
+                tostring(s.lastOvN), tostring(s.lastOvS0), tostring(s.lastOvEndS), s.lastSNow or -1, getTimestampMs()))
         end
+        -- Follower 拒收承諾線轉判堵：給自己的名字（2026-10-10；舊制沿用前一次的 dodgeBlockReason 或 nil，會被誤歸 sweep）
+        s.dodgeBlockReason = "set-offset"
         mode = "blocked"
     end
     if mode == "clear" then
@@ -12064,7 +12137,7 @@ local function replan(s, vehicle, playerNum)
         local dist = (finite(a) and a or s.stayHoldEndS) - s.lastSNow - s.vehicleProfile.halfL
         s.dodgeDeferCap = MDADDynamics.approachCapKmh(dist, 0, 0.5, decel)
         s.dodgeDeferS = s.lastSNow + s.vehicleProfile.halfL + dist
-        if getDebug() then
+        if getDebug() then -- telemetry: 樣本 pm=stay-hold
             print(string.format("%spn=%d stay-hold: chain candidates failed before c (rs=%.1f c=%.1f)",
                 LOG, playerNum, s.lastSNow, s.stayHoldEndS))
         end
@@ -12144,8 +12217,15 @@ local function replan(s, vehicle, playerNum)
             hitPhase = s.dodgeBlockReason == "sweep" and s.fbFail and s.fbFail.ph or nil,
             hitX = s.dodgeBlockReason == "sweep" and s.fbFail and s.fbFail.hx or nil,
             hitY = s.dodgeBlockReason == "sweep" and s.fbFail and s.fbFail.hy or nil,
-            kind = s.dodgeBlockReason == "sweep" and s.fbFail and s.fbFail.body or nil })
-        if getDebug() then
+            kind = s.dodgeBlockReason == "sweep" and s.fbFail and s.fbFail.body or nil,
+            -- 2026-10-10 候選鏈摘要：本次 replan 掃掠失敗在 p1..p4 段的次數與第一個失敗（主候選）的 tag／段／命中點（Drive.sweepHit；
+            -- 沒有任何掃掠失敗＝整組缺）、倒車補跑道差額 blockSteepM、exit-room 的出口可用長度與折點弧長
+            p1 = s.sf0Tag and s.sfP1, p2 = s.sf0Tag and s.sfP2, p3 = s.sf0Tag and s.sfP3, p4 = s.sf0Tag and s.sfP4,
+            tag0 = s.sf0Tag, ph0 = s.sf0Tag and s.sf0Ph, hx0 = s.sf0Tag and s.sf0X, hy0 = s.sf0Tag and s.sf0Y,
+            steep = (s.blockSteepM or -1) > 0 and s.blockSteepM or nil,
+            avail = s.dodgeShapeReason == "exit-room" and s.dodgeExitAvail or nil,
+            foldS = s.dodgeShapeReason == "exit-room" and s.dodgeExitFoldS or nil })
+        if getDebug() then -- telemetry: n/a 點雲 l 範圍；樣本 near 只有最近 8 顆，blocked 事件有 s／hn
             -- 點雲摘要（冷路徑一次 O(hardN)）：判「無縫」合不合理的第一手資料
             local lMin, lMax = 99, -99
             for i = 1, sen.hardN do
@@ -12172,7 +12252,12 @@ local function replan(s, vehicle, playerNum)
             hitPhase = s.dodgeBlockReason == "sweep" and s.fbFail and s.fbFail.ph or nil,
             hitX = s.dodgeBlockReason == "sweep" and s.fbFail and s.fbFail.hx or nil,
             hitY = s.dodgeBlockReason == "sweep" and s.fbFail and s.fbFail.hy or nil,
-            kind = s.dodgeBlockReason == "sweep" and s.fbFail and s.fbFail.body or nil })
+            kind = s.dodgeBlockReason == "sweep" and s.fbFail and s.fbFail.body or nil,
+            p1 = s.sf0Tag and s.sfP1, p2 = s.sf0Tag and s.sfP2, p3 = s.sf0Tag and s.sfP3, p4 = s.sf0Tag and s.sfP4,
+            tag0 = s.sf0Tag, ph0 = s.sf0Tag and s.sf0Ph, hx0 = s.sf0Tag and s.sf0X, hy0 = s.sf0Tag and s.sf0Y,
+            steep = (s.blockSteepM or -1) > 0 and s.blockSteepM or nil,
+            avail = s.dodgeShapeReason == "exit-room" and s.dodgeExitAvail or nil,
+            foldS = s.dodgeShapeReason == "exit-room" and s.dodgeExitFoldS or nil })
     end
     s.bandDeferN = 0 -- 進了判堵階梯：橫向覆蓋延後串結束（判堵中補掃不延後）
 end
@@ -12281,6 +12366,7 @@ local function stepUnstick(s, vehicle, playerNum, now)
     local towPhi = nil
     if s.tow then
         towPhi = MDADTrailer.state(vehicle, s.tow)
+        s.towPhiRev = towPhi -- 遙測 tph：倒車中 T.guard 不跑，collectPhys 改讀這個（2026-10-10）
         if not MDADTrailer.canReverse(towPhi) then
             if s.unstickDistance < TUNE.UNSTICK_MIN_M then
                 s.episodeAttempts = s.episodeAttempts - 1
@@ -12440,7 +12526,7 @@ local function stepUnstick(s, vehicle, playerNum, now)
     end
     BaseVehicle.releaseVector3f(fwd)
     sampleRecovery(s, vehicle, playerNum, now, vx, vy, speedKmh, fx, fy, heading)
-    if getDebug() and now >= s.nextDebugMs then
+    if getDebug() and now >= s.nextDebugMs then -- telemetry: 樣本 m=unstick spd ua rear
         s.nextDebugMs = now + TUNE.DEBUG_MS
         print(string.format("%spn=%d mode=unstick speed=%.1f attempt=%d rear=%s",
             LOG, playerNum, speedKmh, s.episodeAttempts, tostring(s.rearStatus)))
@@ -13342,13 +13428,13 @@ local function stepFollow(s, vehicle, playerNum, now)
         local blockedStop = s.blocked and not reached and not s.returnActive
             and s.fstate.rotating ~= true
             and Drive.blockedAtStop(s, vx, vy)
-        if getDebug() and s.blocked and s.lastBlockedStopDbg ~= blockedStop then
+        if getDebug() and s.blocked and s.lastBlockedStopDbg ~= blockedStop then -- telemetry: 樣本 bl bs rs bhx bhy capReason=blocked
             s.lastBlockedStopDbg = blockedStop -- 只印翻轉（每幀印會把 replan 鏈洗出捲軸）
             print(string.format(
-                "%spn=%d blockedStop=%s bs=%.1f rs=%.1f hit=%s,%s v=%.1f,%.1f rot=%s ret=%s",
+                "%spn=%d blockedStop=%s bs=%.1f rs=%.1f hit=%s,%s v=%.1f,%.1f rot=%s ret=%s t=%.0f",
                 LOG, playerNum, tostring(blockedStop), s.blockS or -1,
                 s.lastSNow or -1, tostring(s.blockHitX), tostring(s.blockHitY),
-                vx, vy, tostring(s.fstate.rotating), tostring(s.returnActive)))
+                vx, vy, tostring(s.fstate.rotating), tostring(s.returnActive), now))
         end
         if blockedStop then
             targetSpeed, s.lastCapReason = 0, "blocked"
@@ -13684,6 +13770,8 @@ local function stepFollow(s, vehicle, playerNum, now)
                         dt = now - s.progressSince, wd = sqrt(wd2),
                         ds = ds, dyaw = ayaw, hit = nearStatus,
                         gear = okGear and transmission or nil, detail = nearDetail,
+                        -- 2026-10-10：與前一個跟線幀的牆鐘間隔與本幀引擎幀時（卡頓造成的假 suspect 看這兩欄）
+                        gap = finite(s.prevStepMs) and now - s.prevStepMs or nil, fdt = s.frameMs,
                     })
                     if (s.currentBlocked or nearStatus ~= "clear") and s.pushBanL == nil then
                         banRecoveryLane(s, latSigned, s.lastSNow + 4)
@@ -13882,6 +13970,7 @@ local function stepFollow(s, vehicle, playerNum, now)
             hardBrakeReason = hardClampReason
         end
         s.lastHardBrakeReason = hardBrakeReason -- telemetry hbr（本幀裁決者；nil＝無）
+        if hardBrakeReason ~= nil then s.hbrLatch = hardBrakeReason end -- telemetry hbp（取樣間最後一個，collectPhys 清）
         -- 加速側直給（2026-09-01 三模型對抗審定案）：regulator 供油是二值全力
         -- （CarController.java:240-244 isGas；engineForce 不乘 throttle＝:755），
         -- jerk 積分目標貼著現速＝車一追平就斷油，加速度被人為封頂且斷續供油。
@@ -14201,7 +14290,7 @@ local function stepFollow(s, vehicle, playerNum, now)
         -- 跟線遙測：每秒最多一行。實機要判斷「轉不動」是誤差沒算出來、還是力太小，
         -- 只有同一行同時看到 errDeg 與 force 才分得開。旗標為假時整段完全不執行，
         -- 連字串都不會生成——這裡是每幀熱路徑。
-        if getDebug() and now >= s.nextDebugMs then
+        if getDebug() and now >= s.nextDebugMs then -- telemetry: 樣本 m spd tgt capReason mef ftg err st f af rem lat rb g reg po dg bl rs（t＝樣本 ts 時鐘）
             s.nextDebugMs = now + TUNE.DEBUG_MS
             -- 2026-09-04 起帶 cap 理由／越野／繞行／blocked 旗標：實機「target 12、
             -- speed 5、regulator=true 卻沒煞車」（Toadhop Road 彎）只有 off= 能分出
@@ -14209,20 +14298,21 @@ local function stepFollow(s, vehicle, playerNum, now)
             local capStr = tostring(s.lastCapReason)
             if s.lastCapReason == "min-exec" then capStr = "min-exec(" .. tostring(s.minExecFrom) .. ")" end
             print(string.format(
-                "%spn=%d mode=%s speed=%.1f target=%.1f cap=%s env=%.1f errDeg=%.1f steer=%.2f force=%.0f thrust=%.0f remaining=%.1f lat=%.1f road=%.2f gear=%d regulator=%s off=%s dg=%s bl=%s",
+                "%spn=%d mode=%s speed=%.1f target=%.1f cap=%s env=%.1f errDeg=%.1f steer=%.2f force=%.0f thrust=%.0f remaining=%.1f lat=%.1f road=%.2f gear=%d regulator=%s off=%s dg=%s bl=%s rs=%.1f t=%.0f",
                 LOG, playerNum, s.mode, speedKmh, targetSpeed or 0,
                 capStr, s.profileEnvelope or -1,
                 (headingError or 0) * TUNE.DEG_PER_RAD, steer or 0,
                 force, s.lastAssistForce, remaining or 0,
                 sqrt(lateralSq or 0), s.roadBias,
                 Drive.getGear(playerNum), tostring(regOn),
-                tostring(s.physicalOffroad), tostring(s.dodging), tostring(s.blocked)))
+                tostring(s.physicalOffroad), tostring(s.dodging), tostring(s.blocked), s.lastSNow or -1, now))
         end
         if s.diag then
             -- 新 Java getter 只在這一幀確定會 enqueue sample 時才跑；
             -- shouldSample 與 D.sample 共用同一 5/10Hz gate。
             local critFlag = s.blocked or s.currentBlocked or s.dodging or s.returnActive
                 or s.progressState == "gear-reset" or s.recoverWhy ~= nil
+                or now < (s.diagBoostUntil or 0) -- 接觸／forceBrake／lag arm 上升緣後 TUNE.DIAG_BOOST_MS（2026-10-10）
             local want = true
             local failed = false
             if type(MDADDiagnostics.shouldSample) == "function" then

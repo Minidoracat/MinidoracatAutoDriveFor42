@@ -1638,7 +1638,7 @@ check(registeredMiniMapSection.label == "UI_MinidoracatAutoDrive_Section"
 -- v5 的「重設此分類」跳過沒 default 的 tick，漏寫就會把開著的選項重設成 false。
 do
     local section = registeredMiniMapSection
-    checkEq(#section.ticks, 10, "MiniMap section keeps ten ticks")
+    checkEq(#section.ticks, 11, "MiniMap section keeps eleven ticks")
     for i, tick in ipairs(section.ticks) do
         local id = tick.label:gsub("^UI_MinidoracatAutoDrive_", "")
         local esc = options:getOption(id)
@@ -1662,6 +1662,70 @@ do
         and section.combos[9].default == 1 and section.combos[10].default == 1
         and section.combos[11].default == 2,
         "HUD theme/layout/scale combos follow the existing combos with defaults 1/1/2")
+end
+-- 診斷行（1010，DiagLine 預設關）：開著時 HUD 上方一行「限速理由碼 目標/實速 狀態 rev」，refresh 算好、prerender 零
+-- getter／零翻譯／零量測；獨立頂層框貼面板上緣外側，四個主題都不碰面板，停靠的速度明細框在它上面。
+do
+    local tick = registeredMiniMapSection.ticks[11]
+    check(tick.label == "UI_MinidoracatAutoDrive_DiagLine" and tick.default == false and tick.get() == false
+        and options:getOption("DiagLine") ~= nil and options:getOption("DiagLine").default == false
+        and MDAD.HUD.diagLine() == false,
+        "diag line is the last MiniMap tick, defaults off, and shares the ESC option")
+    local savedInfo, savedSpeed, savedRev = MDAD.Drive.speedInfo, vehicle._speed, MDAD.Drive.REV
+    MDAD.Drive.speedInfo = function() return 120, 120, nil, 18.4, "curve-coast" end
+    MDAD.Drive.REV = "9999z"
+    local savedActive, savedToken = state.active, state.token
+    local savedBoxX, savedBoxY = player._md.MDADHudSpeedBoxX, player._md.MDADHudSpeedBoxY
+    state.active, state.token = true, "follow"
+    vehicle._speed = -3.6
+    player._md.MDADHudSpeedBoxX, player._md.MDADHudSpeedBoxY = nil, nil
+    panel:refresh(nowMs)
+    check(panel.visible and panel._diagText == nil and not (panel.diagBox and panel.diagBox.visible),
+        "diag line option off: no diag line")
+    tick.set(true)
+    panel:refresh(nowMs)
+    checkEq(panel._diagText, "curve-coast 18/-4 follow 9999z",
+        "diag line shows the cap reason code, target/actual km/h (signed), state and rev")
+    local box = panel.diagBox or {}
+    check(box and box.added and box.visible and box.x == panel.x and box.y + box.height <= panel.y,
+        "diag line is a separate box docked just above the HUD's left edge")
+    local s0, t0, m0 = getters.speed, getTextCalls, measureCalls
+    local drawn = {}
+    if box.prerender then
+        box.drawText = function(_, text) drawn[#drawn + 1] = text end
+        panel:prerender()
+        box:prerender()
+        box.drawText = nil
+    end
+    check(getters.speed == s0 and getTextCalls == t0 and measureCalls == m0,
+        "prerender with the diag line performs no getter, translation or measurement")
+    check(#drawn == 1 and drawn[1] == panel._diagText, "diag box draws exactly the cached line")
+    options:getOption("SpeedDetails"):setValue(true)
+    for theme = 1, 4 do
+        options:getOption("HUDTheme"):setValue(theme)
+        options:apply()
+        panel:refresh(nowMs)
+        local b, pin = panel.diagBox or {}, panel.pinBox
+        local hitPanel = not b.x or b.x < panel.x + panel.width and panel.x < b.x + b.width
+            and b.y < panel.y + panel.height and panel.y < b.y + b.height
+        check(b.visible and not hitPanel, "theme " .. theme .. ": diag line stays outside the HUD (overlaps no control)")
+        check(pin and pin.visible and b.y and pin.y + pin.height <= b.y,
+            "theme " .. theme .. ": docked speed details sit above the diag line")
+    end
+    options:getOption("SpeedDetails"):setValue(false)
+    options:getOption("HUDTheme"):setValue(1)
+    options:apply()
+    panel:refresh(nowMs)
+    panel:setHudVisible(false)
+    check(not box.visible, "hiding the HUD hides the diag line")
+    panel:setHudVisible(true)
+    tick.set(false)
+    panel:refresh(nowMs)
+    check(panel._diagText == nil and not box.visible, "turning the option off removes the diag line")
+    MDAD.Drive.speedInfo, vehicle._speed, MDAD.Drive.REV = savedInfo, savedSpeed, savedRev
+    state.active, state.token = savedActive, savedToken
+    player._md.MDADHudSpeedBoxX, player._md.MDADHudSpeedBoxY = savedBoxX, savedBoxY
+    panel:refresh(nowMs)
 end
 check(registeredMiniMapSection.ticks[2].label == "UI_MinidoracatAutoDrive_VoiceEnabled"
     and registeredMiniMapSection.ticks[2].get() == true,
@@ -1979,6 +2043,26 @@ check(reportButton ~= nil and reportButton.type == "button"
 copyReportPn = nil
 reportButton.onclick(nil, reportButton)
 checkEq(copyReportPn, 0, "ESC report-issue button copies the link for the local main player")
+-- 匯出診斷（1010）：MiniMap v2 第 4 個 action 與 ESC 按鈕都交給 MDADDiagExport.start（帶各自的 playerNum）
+do
+    local exportPn = nil
+    local savedExport = MDADDiagExport
+    MDADDiagExport = { start = function(pn) exportPn = pn; return true end }
+    local action = registeredMiniMapSection.actions[4]
+    check(action and action.label == "UI_MinidoracatAutoDrive_ExportDiag"
+        and action.tooltip == "UI_MinidoracatAutoDrive_ExportDiag_tooltip" and type(action.run) == "function",
+        "MiniMap v2 actions end with the export-diagnostics action")
+    if action then action.run(1) end
+    checkEq(exportPn, 1, "export action starts the export for the given playerNum")
+    local button = options:getOption("ExportDiag")
+    check(button and button.type == "button" and button.name == "UI_MinidoracatAutoDrive_ExportDiag"
+        and button.tooltip == "UI_MinidoracatAutoDrive_ExportDiag_tooltip",
+        "ESC options register an export-diagnostics button")
+    exportPn = nil
+    if button then button.onclick(nil, button) end
+    checkEq(exportPn, 0, "ESC export button exports for the local main player")
+    MDADDiagExport = savedExport
+end
 -- 主 MOD 升到 v4：重註冊一次，多出語音音量滑桿（同一個 VoiceVolume option）
 MinidoracatMiniMapAPI.settingsApiVersion = 4
 fire(Events.OnGameBoot)
@@ -3363,6 +3447,189 @@ do
         "without ModOptions the trip mode stays clear of the battery and fuel text")
     noOptions:removeFromUIManager()
     PZAPI, MinidoracatMiniMapAPI, MDAD.HUD = savedOptions, savedAPI, liveHUD
+end
+
+-- 匯出診斷（1010，client/MDAD_DiagExport.lua）：假檔案系統套引擎的副檔名白名單（ini/cfg/txt/log/json、禁 ..，
+-- LuaManager.java:1035、6728）；分 tick 搬檔、回讀行數＋末行驗證落盤、最近 3 趟依 drive／part 排序、紀錄關著照樣匯出環境。
+do
+    local exportSrc = "MOD/MinidoracatAutoDriveFor42/Contents/mods/MinidoracatAutoDriveFor42/42/media/lua/client/MDAD_DiagExport.lua"
+    local diagSrc = io.open("MOD/MinidoracatAutoDriveFor42/Contents/mods/MinidoracatAutoDriveFor42/42/media/lua/client/MDAD_Diagnostics.lua"):read("*a")
+    check(diagSrc:find("D.envStamp = envStamp", 1, true) and diagSrc:find("D.encodeProfile = encodeProfile", 1, true),
+        "Diagnostics publishes envStamp/encodeProfile, the telemetry-header sources the export reuses")
+    local saved = { getFileWriter, getFileReader, MDADDiagnostics, MDADVehicleProfile, MDAD.HUD, PZAPI, SandboxVars,
+        HaloTextHelper, Clipboard, getCore, isClient, getWorld, getLotDirectories, getMyDocumentFolder, getFileSeparator,
+        MDAD.Drive.REV, MDAD.Drive.isActive, MDAD.BUILD, vehicle.getScriptName, vehicle.getVehicleTowing, MDADDiagExport }
+    local fs, writes, dropPath = {}, {}, nil
+    local ALLOWED = { ini = true, cfg = true, txt = true, log = true, json = true }
+    local EXPORT = "MinidoracatAutoDrive/Export/diag-export.txt"
+    local TEL = "MinidoracatAutoDrive/Telemetry/"
+    getFileWriter = function(path, _, append)
+        local ext = path:match("%.(%w+)$")
+        if path:find("..", 1, true) or not (ext and ALLOWED[ext]) then return nil end
+        if not append or fs[path] == nil then fs[path] = "" end
+        return { write = function(_, s)
+            if path == EXPORT then writes[#writes + 1] = #s end
+            if path ~= dropPath then fs[path] = fs[path] .. s end
+        end, close = function() end }
+    end
+    getFileReader = function(path)
+        local content = fs[path]
+        if content == nil then return nil end
+        local pos = 1
+        return { readLine = function()
+            if pos > #content then return nil end
+            local i = content:find("\n", pos, true) or (#content + 1)
+            local line = content:sub(pos, i - 1)
+            pos = i + 1
+            return line
+        end, close = function() end }
+    end
+    local toasts, clip = {}, nil
+    MDADDiagnostics = {
+        envStamp = function() return ',"game":"42.21.0","mode":"sp","mods":"ModA@1.0;ModB@2","opts":"detour=true"' end,
+        encodeProfile = function(p) return '{"valid":' .. tostring(p.valid) .. ',"fallback":' .. tostring(p.fallback) .. '}' end,
+        toast = function(text, kind) toasts[#toasts + 1] = kind .. ":" .. text end,
+    }
+    MDADVehicleProfile = { build = function() return { valid = false, fallback = true, geometryValid = false,
+        scriptName = "Base.PickUpTruck" } end }
+    local telOn = false
+    MDAD.HUD = { telemetryEnabled = function() return telOn end, shareDiagnostics = function() return true end,
+        telemetryRetentionDays = function() return 7 end }
+    PZAPI = { ModOptions = { getOptions = function(_, id)
+        if id ~= "MinidoracatAutoDrive" then return nil end
+        return { dict = { DiagLine = { getValue = function() return true end }, ExportDiag = { type = "button" } } }
+    end } }
+    SandboxVars = { MinidoracatAutoDrive = { AutoDriveMaxSpeed = 90 } }
+    HaloTextHelper = { addGoodText = function() end, addBadText = function() end }
+    Clipboard = { setClipboard = function(text) clip = text end }
+    getCore = function() return { getVersion = function() return "42.21.0" end } end
+    isClient = function() return false end
+    getWorld = function() return { getMap = function() return "Muldraugh, KY" end } end
+    getLotDirectories = function() return { size = function() return 2 end,
+        get = function(_, i) return i == 0 and "Muldraugh, KY" or "Riverside, KY" end } end
+    getMyDocumentFolder = function() return "C:/Users/u/Zomboid" end
+    getFileSeparator = function() return "/" end
+    MDAD.Drive.REV, MDAD.BUILD = "9999z", "0.99.0"
+    MDAD.Drive.isActive = function() return true end
+    vehicle.getScriptName = function() return "Base.PickUpTruck" end
+    vehicle.getVehicleTowing = function() return { getScriptName = function() return "Base.Trailer" end } end
+    Events.OnTickEvenPaused = makeEvent()
+    MDADDiagExport = nil
+    dofile(exportSrc)
+    local E = MDADDiagExport
+    check(type(E) == "table" and #Events.OnTickEvenPaused.handlers == 1,
+        "export module loads and pumps on OnTickEvenPaused (runs while paused)")
+    local function run()
+        local ticks = 0
+        while E.busy() and ticks < 500 do
+            fire(Events.OnTickEvenPaused)
+            ticks = ticks + 1
+        end
+        return ticks
+    end
+    local function has(text) return (fs[EXPORT] or ""):find(text, 1, true) ~= nil end
+    local function toasted(text) for i = 1, #toasts do if toasts[i]:find(text, 1, true) then return true end end return false end
+    local path = "C:/Users/u/Zomboid/Lua/MinidoracatAutoDrive/Export/diag-export.txt"
+
+    -- 1. 紀錄關著、沒有任何紀錄檔：照樣匯出環境段，提示開啟後重現
+    check(E.start(0) == true, "export starts with telemetry off")
+    check(E.start(0) == false and toasted("UI_MinidoracatAutoDrive_ExportDiagBusy"), "a second export while one runs is refused")
+    run()
+    check(not E.busy() and fs[EXPORT] ~= nil, "export finishes and writes the whitelisted .txt under Export/")
+    for _, needle in ipairs({ "rev: 9999z", "build: 0.99.0", "game: 42.21.0", "mode: sp",
+            'header: {"v":1,"t":"env"', '"mods":"ModA@1.0;ModB@2"', '"profile":{"valid":false,"fallback":true}',
+            "map: Muldraugh, KY", "lots: Muldraugh, KY;Riverside, KY", "telemetry: ExportTelemetry=false",
+            "vehicle: Base.PickUpTruck towing=Base.Trailer autodrive=true", "profile: valid=false fallback=true",
+            "DiagLine=true", "AutoDriveMaxSpeed=90" }) do
+        check(has(needle), "env section has " .. needle)
+    end
+    check(not has("ExportDiag="), "button options (no value) are not dumped")
+    check(fs[EXPORT]:sub(-#E.END - 1) == E.END .. "\n", "export ends with the end marker")
+    check(toasted("good:UI_MinidoracatAutoDrive_ExportDiagStarted") and toasted("good:UI_MinidoracatAutoDrive_ExportDiagDone")
+        and clip == path, "success notifies with the absolute path and copies it")
+    check(toasted("bad:UI_MinidoracatAutoDrive_ExportDiagTelemetryOff"), "telemetry off: export hints to enable it and reproduce")
+
+    -- 2. 紀錄開著：最近 3 趟（drive 欄）由舊到新、同趟依 part；讀不到的檔標 unreadable；index 裡的怪檔名不拼路徑
+    telOn, toasts, writes = true, {}, {}
+    local big = {}
+    for i = 1, 300 do big[i] = '{"t":"s","i":' .. i .. ',"pad":"' .. string.rep("x", 1000) .. '"}' end
+    fs[TEL .. "session-001.log"] = '{"t":"h","slot":1}\n{"t":"s","old":1}\n'
+    fs[TEL .. "session-002.log"] = '{"t":"h","slot":2}\n'
+    fs[TEL .. "session-005.log"] = '{"t":"h","slot":5,"part":2}\n'
+    fs[TEL .. "session-003.log"] = '{"t":"h","slot":3}\n'
+    fs[TEL .. "session-004.log"] = table.concat(big, "\n") .. "\n"
+    fs[TEL .. "session-index.txt"] = table.concat({
+        "1\t1000\t1100\t40\tarrive\tsession-001.log\t1000\t1",
+        "5\t2500\t2600\t30\tarrive\tsession-005.log\t2000\t2",
+        "2\t2000\t2500\t20\tcontinued\tsession-002.log\t2000\t1",
+        "4\t4000\t0\t300000\tactive\tsession-004.log\t4000\t1",
+        "6\t4100\t0\t10\tactive\tsession-006.log\t4000\t2",
+        "3\t3000\t3100\t20\tStopStuck\tsession-003.log\t3000\t1",
+        "7\t3500\t3600\t10\tarrive\t../../evil.log\t3500\t1",
+    }, "\n") .. "\n"
+    check(E.start(0) == true, "export starts with telemetry on")
+    local ticks = run()
+    local out = fs[EXPORT] or ""
+    local p2, p5 = out:find("== file session-002.log", 1, true), out:find("== file session-005.log", 1, true)
+    local p3, p4 = out:find("== file session-003.log", 1, true), out:find("== file session-004.log", 1, true)
+    check(p2 and p5 and p3 and p4 and p2 < p5 and p5 < p3 and p3 < p4,
+        "the 3 newest drives are exported oldest first, parts in order")
+    check(not out:find("== file session-001.log", 1, true), "drives older than the newest 3 are left out")
+    check(out:find("== file session-006.log unreadable ==", 1, true) ~= nil, "a missing part is marked unreadable")
+    check(not out:find("== file ../../evil.log", 1, true), "index rows with unsafe file names are never opened")
+    check(out:find('"i":300,', 1, true) ~= nil and out:find("-- session-index.txt --", 1, true) ~= nil,
+        "the whole latest session and the index are in the export")
+    local maxWrite = 0
+    for i = 1, #writes do if writes[i] > maxWrite then maxWrite = writes[i] end end
+    check(#writes >= 5 and maxWrite <= E.TICK_BYTES + 2048 and ticks >= 10,
+        "large files are copied and verified over several ticks (writes=" .. #writes .. " max=" .. maxWrite
+            .. " ticks=" .. ticks .. ")")
+    check(toasted("good:UI_MinidoracatAutoDrive_ExportDiagDone") and not toasted("ExportDiagTelemetryOff"),
+        "telemetry on: success without the enable hint")
+    local savedMax = E.MAX_BYTES
+    E.MAX_BYTES = 300150
+    local picked = E.pickFiles({ "4\t4000\t0\t300000\tactive\tsession-004.log\t4000\t1",
+        "6\t4100\t0\t100\tactive\tsession-006.log\t4000\t2", "3\t3000\t3100\t100\tarrive\tsession-003.log\t3000\t1" })
+    check(#picked == 2 and picked[1].file == "session-004.log" and picked[2].file == "session-006.log",
+        "the size cap stops adding older drives but keeps the newest one")
+    E.MAX_BYTES = savedMax
+    -- part 是續檔序號、沒有 64 上限（64 是槽數）：超長一趟的 part 65 以後（最接近事故的尾段）不能被漏掉
+    picked = E.pickFiles({ "9\t9000\t0\t10\tactive\tsession-009.log\t5000\t65",
+        "8\t8000\t9000\t10\tcontinued\tsession-008.log\t5000\t64" })
+    check(#picked == 2 and picked[1].file == "session-008.log" and picked[1].part == 64
+        and picked[2].file == "session-009.log" and picked[2].part == 65,
+        "parts 64 and 65 of one drive are both exported, in part order")
+    toasts = {}
+    local savedIndex = fs[TEL .. "session-index.txt"]
+    fs[TEL .. "session-010.log"] = '{"t":"h","slot":10,"part":66}\n{"t":"s","tail":66}\n'
+    fs[TEL .. "session-011.log"] = '{"t":"h","slot":11,"part":65}\n{"t":"s","tail":65}\n'
+    fs[TEL .. "session-index.txt"] = "10\t9100\t0\t40\tactive\tsession-010.log\t6000\t66\n"
+        .. "11\t9000\t9100\t40\tcontinued\tsession-011.log\t6000\t65\n"
+    check(E.start(0) == true, "export starts when every remaining part is beyond 64")
+    run()
+    out = fs[EXPORT] or ""
+    local q65, q66 = out:find("== file session-011.log", 1, true), out:find("== file session-010.log", 1, true)
+    check(q65 and q66 and q65 < q66 and out:find('"tail":66', 1, true) ~= nil
+        and toasted("good:UI_MinidoracatAutoDrive_ExportDiagDone"),
+        "all parts beyond 64: the session tail is exported (not just the env section)")
+    fs[TEL .. "session-index.txt"] = savedIndex
+    fs[TEL .. "latest.txt"] = "session-007.log\n"
+    picked = E.pickFiles({})
+    check(#picked == 1 and picked[1].file == "session-007.log", "no index: falls back to latest.txt")
+
+    -- 3. PrintWriter 吞錯：write 不丟錯但沒落盤＝回讀對不上，報失敗、不報成功
+    toasts, dropPath = {}, EXPORT
+    check(E.start(0) == true, "export starts even when the disk silently drops writes")
+    run()
+    dropPath = nil
+    check(toasted("bad:UI_MinidoracatAutoDrive_ExportDiagFailed") and not toasted("ExportDiagDone"),
+        "a silently dropped export is reported as failed after the read-back")
+
+    getFileWriter, getFileReader, MDADDiagnostics, MDADVehicleProfile, MDAD.HUD, PZAPI, SandboxVars,
+        HaloTextHelper, Clipboard, getCore, isClient, getWorld, getLotDirectories, getMyDocumentFolder, getFileSeparator,
+        MDAD.Drive.REV, MDAD.Drive.isActive, MDAD.BUILD, vehicle.getScriptName, vehicle.getVehicleTowing, MDADDiagExport =
+        saved[1], saved[2], saved[3], saved[4], saved[5], saved[6], saved[7], saved[8], saved[9], saved[10], saved[11],
+        saved[12], saved[13], saved[14], saved[15], saved[16], saved[17], saved[18], saved[19], saved[20], saved[21]
 end
 
 print("HUD assertions " .. assertions .. ", failures " .. failures)

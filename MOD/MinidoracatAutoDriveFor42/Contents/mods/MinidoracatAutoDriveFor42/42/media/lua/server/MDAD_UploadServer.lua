@@ -21,6 +21,8 @@ local ROOT = "MinidoracatAutoDrive/Uploads"
 local INDEX = ROOT .. "/index.txt"
 local SLOTS = 32
 local CHUNK_MAX = 10000
+-- 片段宣告長度上限：與 0.27.x 以前的伺服器相同（客戶端整段夾在 MDAD_Upload CLIP_TOTAL_MAX 995000；發版到伺服器重啟
+-- 之間新客戶端會連上舊伺服器，上限只能一個）。不要加大：客戶端加預算時改客戶端的分配。
 local CLIP_MAX = 1000000
 local SUM_FILES = 8
 local SUM_FILE_MAX = 1048576
@@ -29,7 +31,7 @@ local HOUR_BUDGET = 12000000
 local STALE_MS = 300000
 local MB = 1048576
 local KINDS = { stuck = true, fault = true, contact = true, impact = true, takeover = true,
-    unstick = true, route = true, brake = true, trailer = true, detour = true }
+    unstick = true, route = true, brake = true, trailer = true, detour = true, offset = true }
 S.SLOTS, S.CHUNK_MAX, S.CLIP_MAX = SLOTS, CHUNK_MAX, CLIP_MAX
 
 local loaded = false

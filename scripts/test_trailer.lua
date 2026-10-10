@@ -281,6 +281,19 @@ tracL.getTowAttachmentOther = function() return "trailerfront" end
 local gL = T.attach(tracL)
 check(type(gL) == "table" and gL.id == 42 and gL.hitchSelf == "trailer" and gL.hitchOther == "trailerfront",
     "attach 記下掛車 id 與兩邊掛點名")
+-- 1010：掛車 script 名一併記下（tow lost 事件 script；脫開後掛車可能已不存在、讀不到）；讀不到 script 只少這一欄、照樣掛上。
+--   違規證明：拿掉 attach 的 geo.script＝(script) 紅；script getter 失敗連帶整個 attach 失敗＝(script-fail) 紅。
+check(type(gL) == "table" and gL.script == "Base.Trailer", "(script) attach 記下掛車 script（got " .. tostring(gL and gL.script) .. "）")
+do
+    local trS = fakeTrailer({ name = "Base.Trailer", cx = -8, fwd = 1, len = 12, wheelZ = -4, attZ = 6 })
+    local realName = trS.getScriptName
+    local calls = 0
+    -- 量幾何（attach 前段）可能也讀 script 名：前幾次照回，之後才丟錯，確定只少 script 欄
+    trS.getScriptName = function(self) calls = calls + 1 if calls > 1 then error("no script") end return realName(self) end
+    local gS = T.attach(fakeTractor(trS, -2))
+    check(type(gS) == "table" and gS.script == nil and type(gS.L2) == "number",
+        "(script-fail) 讀不到 script：只少 script、照樣掛上（got " .. tostring(gS) .. "）")
+end
 tracL.getVehicleTowing = function() return nil end
 getVehicleById = function(id) if id == 42 then return trL end end
 local cur, alive, by, hd, kmh, up = T.lostState(tracL, gL)

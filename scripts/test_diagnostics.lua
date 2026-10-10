@@ -1637,6 +1637,131 @@ check(string.find(files[sessionPath(1)] or "", '"mode":"sp"', 1, true) ~= nil, "
 checkEq(countNeedle(throwHeader, '"mods":'), 0, "throwing mods API omits the field")
 getCore, getActivatedMods, getModInfoByID, isClient = nil, nil, nil, nil
 
+--------------------------------------------------------------------------------
+-- 1010：新樣本短碼（取樣間閂鎖 yrp／hbp、跟車 lead tlg／tlv、殭屍軟縫逐輪 zwh／zwt、鏈式停留夾過的常駐線 rsl）有值才寫。
+-- 違規證明：encodePhys 拿掉任一行＝(codes) 紅；缺值寫 0／null＝(omit) 紅。
+scenario("1010 sample short codes yrp/hbp/tlg/tlv/zwh/zwt/rsl: written when present, omitted when absent")
+do
+    resetFs()
+    loadProd()
+    nowMs = 9400000
+    MDADDiagnostics.start(0, nil, profile)
+    local function s(t, phys)
+        MDADDiagnostics.sample(0, t, 100, 200, 0, 30, 40, 400, 0, 0, 0, 0, "follow", 3, true, nil, false,
+            nil, nil, nil, nil, nil, nil, nil, nil, nil, false, false, false, false, false, phys)
+    end
+    s(9400000, { yawPeak = 2.5, hardBrakeLatch = "blocked-approach", trfLeadGap = 12.5, trfLeadV = 3,
+        zombieWhy = "gap", zombieWant = 1.25, residentLane = 1.5 })
+    s(9400300, {})
+    nowMs = 9401000
+    MDADDiagnostics.stop(0, "end")
+    local body = files[sessionPath(1)] or ""
+    local first, second = nil, nil
+    for line in string.gmatch(body, '{"t":"s"[^\n]*') do
+        if not first then first = line else second = line end
+    end
+    first, second = first or "", second or ""
+    for _, kv in ipairs({ '"yrp":2.5', '"hbp":"blocked-approach"', '"tlg":12.5', '"tlv":3', '"zwh":"gap"', '"zwt":1.25',
+            '"rsl":1.5' }) do
+        check(string.find(first, kv, 1, true) ~= nil, "(codes) sample writes " .. kv)
+    end
+    for _, k in ipairs({ "yrp", "hbp", "tlg", "tlv", "zwh", "zwt", "rsl" }) do
+        checkEq(countNeedle(second, '"' .. k .. '":'), 0, "(omit) absent " .. k .. " is not written")
+    end
+end
+
+--------------------------------------------------------------------------------
+-- 1010：impact 上升緣的事件另帶 awt（區域等待引擎煞車同幀）與車頭附近最近靜態硬物（MDADSensor.hardSpriteNear 在車頭點
+-- ＝車心沿航向 halfL 處查一次）；nb 的動物多物種／kg、他車多 vehicle id／有人駕駛。只在上升緣查、讀不到只缺該欄。
+-- 違規證明：事件不帶 awt＝(awt) 紅；awt=false 也寫＝(awt-omit) 紅；不在上升緣才查（每筆都查）＝(once) 紅；用車心不用車頭＝(nose) 紅；
+-- 事件不帶 sprite＝(sprite) 紅；nb 動物不寫物種／kg＝(nb-a) 紅；車不寫 id／driven＝(nb-v) 紅；讀不到 id 時整欄消失＝(nb-null) 紅。
+scenario("1010 impact event carries awt and the nearest hard sprite at the nose; nb identifies animals and vehicles")
+do
+    resetFs()
+    loadProd()
+    MDADUpload = nil
+    assert(loadfile((string.gsub(PROD, "MDAD_Diagnostics%.lua$", "MDAD_Upload.lua"))))()
+    local oldInst, oldCell, oldSensor = instanceof, getCell, MDADSensor
+    local own = { getZ = function() return 0 end, getVehicleTowing = function() return nil end,
+        getVehicleTowedBy = function() return nil end }
+    player0.getVehicle = function() return own end
+    local deer = { _kind = "animal", getX = function() return 104 end, getY = function() return 503 end,
+        getAnimalType = function() return "deer" end, getData = function() return { getWeight = function() return 55.5 end } end }
+    local other = { getX = function() return 110 end, getY = function() return 500 end,
+        getCurrentSpeedKmHour = function() return 12 end, getId = function() return 7 end, getDriver = function() return {} end }
+    local square = { getMovingObjects = function() return { size = function() return 1 end, get = function() return deer end } end,
+        getStaticMovingObjects = function() return { size = function() return 0 end } end }
+    local vehicles = { own, other }
+    getCell = function()
+        return {
+            getGridSquare = function(_, x, y) if x == 104 and y == 503 then return square end end,
+            getVehicles = function()
+                local i = 0
+                return { iterator = function() return {
+                    hasNext = function() return i < #vehicles end,
+                    next = function() i = i + 1 return vehicles[i] end } end }
+            end,
+        }
+    end
+    instanceof = function(o, cls) return cls == "IsoZombie" and o._kind == "zombie" end
+    local probes = {}
+    MDADSensor = {
+        softKindOf = function(mo) return mo._kind end,
+        hardSpriteNear = function(state, cell, wx, wy, z, r)
+            probes[#probes + 1] = { wx = wx, wy = wy, r = r, state = state }
+            return "fencing_01_37", "thin", 0.4249
+        end,
+    }
+    nowMs = 9500000
+    MDADDiagnostics.start(0, nil, profile)
+    local function hit(t, px, spd, phys)
+        MDADDiagnostics.sample(0, t, px, 500, 0, spd, 60, 400, 0, 0, 0, 0, "follow", 3, true, nil, false,
+            nil, nil, nil, nil, nil, nil, nil, nil, nil, false, false, false, false, false, phys)
+    end
+    hit(9500000, 100, 60, {})
+    hit(9500200, 103.3, 60, {})
+    hit(9500400, 104, 20, { areaWait = true }) -- 上升緣：在等區域載入
+    hit(9500600, 104.5, 5, { areaWait = true }) -- 同一段撞擊，不是上升緣
+    hit(9500800, 104.8, 5, {})
+    -- 第二次撞擊：動物讀不到物種／體重、他車讀不到 id，沒在等區域載入
+    deer.getAnimalType, deer.getData = nil, nil
+    other.getId = function() error("gone") end
+    MDADSensor.hardSpriteNear = function(_, _, wx, wy, _, r)
+        probes[#probes + 1] = { wx = wx, wy = wy, r = r }
+        return nil
+    end
+    hit(9501000, 107, 41, {})
+    hit(9501200, 109, 41, {})
+    hit(9501400, 109.5, 5, { areaWait = false })
+    nowMs = 9502000
+    MDADDiagnostics.stop(0, "end")
+    local body = files[sessionPath(1)] or ""
+    local evs = {}
+    for line in string.gmatch(body, '{"t":"e","ts":[%d%.]+,"n":"impact"[^\n]*') do evs[#evs + 1] = line end
+    checkEq(#evs, 2, "two impact rising edges")
+    local e1, e2 = evs[1] or "", evs[2] or ""
+    check(string.find(e1, '"awt":true', 1, true) ~= nil, "(awt) impact during an area wait carries awt=true")
+    checkEq(countNeedle(e2, '"awt"'), 0, "(awt-omit) awt is only written when true")
+    checkEq(#probes, 2, "(once) the hard-sprite probe runs once per rising edge")
+    local p1 = probes[1] or {}
+    check(p1.wx and math.abs(p1.wx - (104 + 2.25)) < 1e-9 and math.abs(p1.wy - 500) < 1e-9 and p1.r == 3 and p1.state == nil,
+        "(nose) probe at the nose (x + halfL along heading), radius 3, no sensor cache (got " .. tostring(p1.wx) .. ")")
+    check(string.find(e1, '"sprite":"fencing_01_37","scost":"thin","hardD":0.4', 1, true) ~= nil,
+        "(sprite) impact carries sprite/scost/hardD (" .. e1 .. ")")
+    checkEq(countNeedle(e2, '"sprite"'), 0, "nothing found: sprite keys omitted")
+    local nbs = {}
+    for m in string.gmatch(body, '"nb":(%b{})') do nbs[#nbs + 1] = m end
+    checkEq(#nbs, 2, "nb on both rising edges only")
+    local nb1, nb2 = nbs[1] or "", nbs[2] or ""
+    check(string.find(nb1, '"a":%[[^%]]*,"deer",55%.5%]') ~= nil, "(nb-a) animal carries species and kg (" .. nb1 .. ")")
+    check(string.find(nb1, '"v":%[[^%]]*,12[%.0]*,7,1%]') ~= nil, "(nb-v) vehicle carries km/h, id and driven=1 (" .. nb1 .. ")")
+    check(string.find(nb2, '"a":%[[%-%d%.]+,[%-%d%.]+,[%-%d%.]+%]') ~= nil, "unreadable species/kg: animal keeps 3 items (" .. nb2 .. ")")
+    check(string.find(nb2, '"v":%[[^%]]*,12[%.0]*,null,1%]') ~= nil, "(nb-null) unreadable id writes null in place (" .. nb2 .. ")")
+    instanceof, getCell, MDADSensor = oldInst, oldCell, oldSensor
+    player0.getVehicle = nil
+    MDADUpload = nil
+end
+
 closeScenario()
 print()
 print("scenarios " .. scenarios .. ", asserts " .. assertions)

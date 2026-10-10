@@ -141,7 +141,7 @@ local function sample(opts)
     local phys = opts.phys or { capReason = opts.cap or "profile", frameMs = 16 }
     return D.sample(0, nowMs, x, 200, opts.heading or 0, opts.speed or 30, opts.target or 40, 500, opts.lat or 0.1,
         0.02, 0.1, 0, opts.mode or "follow", 3, true, opts.sensor, false,
-        "clear", 10, nil, nil, nil, 0, nil, nil, 5,
+        "clear", opts.rs or 10, nil, nil, nil, 0, nil, nil, 5,
         opts.blocked == true, false, false, false, false, phys,
         1, 1, 0, "ok", 0, false, nil, nil, 0, 0, 2.0, 2.0, opts.contact == true, nil, nil)
 end
@@ -1113,6 +1113,304 @@ checkEq(num1("obMs"), 200, "offroad pairs with assistBoost at 3")
 checkEq(num1("paMs"), 600, "paved wanted pairs: 3 (braking and >1s gap excluded)")
 checkEq(num1("paDv"), 1.67, "paved Δspeed 6 km/h = 1.67 m/s")
 check(#sum1 < U.CHUNK, "summary still fits one chunk (" .. #sum1 .. ")")
+
+-- 片段工具：依觸發時刻（index 第 9 欄）找片段列與檔案內容；片段內樣本的 ts 列表
+local function clipByTrig(trig)
+    local rows = indexRows("C")
+    for i = #rows, 1, -1 do
+        if tonumber(field(rows[i], 9)) == trig then
+            local slot = tonumber(field(rows[i], 5))
+            return rows[i], files[ROOT .. field(rows[i], 4) .. "/" .. string.format("clip-%02d.log", slot)] or ""
+        end
+    end
+    return nil, ""
+end
+local function sampleTs(text)
+    local out = {}
+    for line in string.gmatch(text, "[^\n]+") do
+        local ts = string.match(line, '^{"t":"s","ts":(%d+)')
+        if ts then out[#out + 1] = tonumber(ts) end
+    end
+    return out
+end
+-- [lo, hi) 內相鄰樣本的最小間隔與筆數
+local function gapsIn(list, lo, hi)
+    local minGap, n, prev = 1e9, 0, nil
+    for i = 1, #list do
+        local t = list[i]
+        if t >= lo and t < hi then
+            n = n + 1
+            if prev and t - prev < minGap then minGap = t - prev end
+            prev = t
+        end
+    end
+    return minGap, n
+end
+
+-- 1010 片段容量：正式服 rev≥1005 片段約 600 段有 62 段 full、觸發後中位只剩 3.9 秒（事前窗佔預算八成七），29 段 unstick
+-- 只有 13 段看得到 success／timeout。full 之後樣本不收、窗內事件照收到窗結束（首行 evx＝筆數），預算＝min(CLIP_EV_MAX,
+-- 整段 CLIP_TOTAL_MAX 的剩額)；事前窗本身超過 CLIP_MAX 時捨最舊的。整段 ≤ CLIP_TOTAL_MAX：伺服器上限維持 0.27.x 的 1000000
+-- （DoLuaChecksum=false，發版到重啟之間新客戶端會連上舊伺服器，超過整段拒收）。
+-- 違規證明：full 仍收窗＝(full) success／timeout 紅；full 後事件不收＝同上；不夾整段＝(total) 紅；事件不設 CLIP_EV_MAX＝(evmax) 紅；
+-- 首行不寫 evx＝(evx) 紅；事前窗不夾 CLIP_MAX＝(bound) 紅；固定列過長不捨舊列＝(total-fixed) 紅；伺服器加大＝(server) 紅。
+scenario("1010 full clip: window events keep coming on their own budget until the window closes")
+nowMs = nowMs + 3600000
+start()
+local fat = { capReason = string.rep("x", 6000), frameMs = 16 }
+drive(31000, { phys = fat })                               -- 事前窗 ≈155 筆 × 6KB＞CLIP_MAX：觸發當下就 full
+D.event(0, "unstick", { phase = "start" })
+local fullTrig = nowMs
+drive(8000, { phys = fat, mode = "unstick" })
+D.event(0, "unstick", { phase = "timeout" })
+for _ = 1, 30 do D.event(0, "progress", { phase = "suspect", detail = string.rep("d", 5000) }) end -- 150KB＞CLIP_EV_MAX
+D.event(0, "unstick", { phase = "start" })
+drive(6000, { phys = fat, mode = "unstick" })
+D.event(0, "unstick", { phase = "success" })
+drive(12000, { phys = fat })                               -- 安靜 QUIET_MS 後收窗
+D.stop(0, "arrive")
+pump(200000)
+local fullRow, fullClip = clipByTrig(fullTrig)
+check(fullRow ~= nil, "(server) the full clip with extra events is accepted and indexed")
+local fullHead = string.match(fullClip, "^[^\n]*") or ""
+check(string.find(fullHead, '"full":true', 1, true) ~= nil, "(full) clip head says full")
+checkEq(count(fullClip, '"n":"unstick","phase":"timeout"'), 1, "(full) unstick timeout after full is in the clip")
+checkEq(count(fullClip, '"n":"unstick","phase":"success"'), 1, "(full) unstick success after full is in the clip")
+local progN = count(fullClip, '"n":"progress"')
+check(progN >= 15 and progN < 30, "(bound) 5KB events beyond the event budget are dropped (" .. progN .. " of 30 kept)")
+local evx = tonumber(string.match(fullHead, '"evx":(%d+)'))
+checkEq(evx, progN + 3, "(evx) clip head counts the events kept after full (timeout, start, success + progress)")
+local fullTs = sampleTs(fullClip)
+check(#fullTs > 0 and fullTs[#fullTs] <= fullTrig, "(full) no samples after full")
+check(#fullClip <= U.CLIP_TOTAL_MAX, "(total) the whole clip text stays <= CLIP_TOTAL_MAX (" .. #fullClip .. ")")
+checkEq(S.CLIP_MAX, 1000000, "(server) server CLIP_MAX stays at the 0.27.x limit: old and new servers share one limit")
+check(U.CLIP_TOTAL_MAX < 1000000, "(server) client total limit is below the old server's 1,000,000")
+-- 樣本很大、full 時樣本才 84 萬：整段剩額比 CLIP_EV_MAX 大，事件由 CLIP_EV_MAX 限住
+nowMs = nowMs + 3600000
+start()
+local wide = { capReason = "profile", frameMs = 16, controlState = string.rep("y", 60000) }
+-- 窗前事件 75KB：整段剩額要先讓給 full 後的事件，窗前事件只拿剩下的（不讓＝(total) 紅）
+for _ = 1, 15 do D.event(0, "dyn", { phase = "dirty", detail = string.rep("p", 5000) }) end
+drive(4000, { phys = wide })
+D.event(0, "unstick", { phase = "start" })
+local evTrig = nowMs
+drive(1000, { phys = wide, mode = "unstick" })
+for _ = 1, 150 do D.event(0, "progress", { phase = "suspect", detail = string.rep("d", 1000) }) end -- 細粒度：吃滿 CLIP_EV_MAX
+drive(12000, { phys = wide })
+D.stop(0, "arrive")
+pump(400000)
+local _, evClip = clipByTrig(evTrig)
+local evProg = count(evClip, '"n":"progress"')
+check(evClip ~= "" and string.find(evClip, '"full":true', 1, true) ~= nil, "(evmax) the wide-sample clip is full")
+check(evProg >= 80 and evProg <= math.floor(U.CLIP_EV_MAX / 1050),
+    "(evmax) events after full are held to CLIP_EV_MAX when the total leaves more room (" .. evProg .. " of 150 kept)")
+check(#evClip <= U.CLIP_TOTAL_MAX, "(total) pre-window events only get what full-window events leave (" .. #evClip .. ")")
+-- 首行異常長（出事當下的 cap 字串 20 萬字元）：固定列＋滿樣本（4 筆 80 萬）超過整段上限，捨最舊的窗內列
+nowMs = nowMs + 3600000
+start()
+local huge = { capReason = string.rep("z", 200000), frameMs = 16 }
+drive(3000, { phys = huge })
+D.event(0, "unstick", { phase = "start" })
+local hugeTrig = nowMs
+drive(6000, { phys = huge })
+D.stop(0, "arrive")
+pump(400000)
+local hugeRow, hugeClip = clipByTrig(hugeTrig)
+check(hugeRow ~= nil and #hugeClip > 0 and #hugeClip <= U.CLIP_TOTAL_MAX,
+    "(total-fixed) an oversize head still fits CLIP_TOTAL_MAX by dropping the oldest window lines (" .. #hugeClip .. ")")
+-- success 在預算內那一種：事件少時 full 之後的 success 也收到
+nowMs = nowMs + 3600000
+start()
+drive(31000, { phys = fat })
+D.event(0, "unstick", { phase = "start" })
+local fullTrig2 = nowMs
+drive(8000, { phys = fat, mode = "unstick" })
+D.event(0, "unstick", { phase = "success" })
+drive(12000, { phys = fat })
+D.stop(0, "arrive")
+pump(200000)
+local _, fullClip2 = clipByTrig(fullTrig2)
+checkEq(count(fullClip2, '"n":"unstick","phase":"success"'), 1, "(full) unstick success 8s after a full trigger is in the clip")
+check(#fullClip2 > 0 and #fullClip2 <= U.CLIP_MAX + 20000, "(bound) pre-window alone is held to CLIP_MAX (" .. #fullClip2 .. ")")
+-- full 的片段只剩事件在收：另一種事故（配額內）先收掉它、開自己的片段（帶事前窗與樣本），不併進去只升級優先級。
+-- 違規證明：full 時照舊併入＝(yield) 紅。
+nowMs = nowMs + 3600000
+start()
+drive(31000, { phys = fat })
+D.event(0, "unstick", { phase = "start" })
+local fullTrig3 = nowMs
+drive(3000, { phys = fat, mode = "unstick" })
+local contactTrig = nowMs + 200
+drive(200, { phys = fat, contact = true })
+drive(12000, { phys = fat })
+D.stop(0, "arrive")
+pump(200000)
+local row3, clip3 = clipByTrig(fullTrig3)
+local rowC = clipByTrig(contactTrig)
+checkEq(field(rowC or "", 7), "contact", "(yield) a contact during a full unstick clip gets its own clip")
+checkEq(field(row3 or "", 7), "unstick", "(yield) the full unstick clip keeps its kind")
+checkEq(tonumber(string.match(clip3, '"end":(%d+)')), contactTrig, "(yield) the full clip closes when the new one opens")
+
+-- 1010 上傳片段降頻（跳過已編好的列）：事前窗早於觸發 PRE_THIN_BEFORE_MS 的樣本、觸發 THIN_AFTER_MS 之後的樣本都降到 5Hz，
+-- 觸發前最後 10 秒與觸發後 5 秒保留 10Hz；本機紀錄照 10Hz。
+-- 違規證明：不降頻＝(thin) 紅；從觸發就降＝(early) 紅；事前窗不降＝(pre-thin) 紅；事前窗整段都降＝(pre-keep) 紅；
+-- 降頻動到本機紀錄＝(local) 紅。
+scenario("1010 upload clip thins samples to 5 Hz (pre-window before t0-10s, post after t0+5s); the local session keeps 10 Hz")
+nowMs = nowMs + 3600000
+MDAD.HUD.telemetryEnabled = function() return true end
+start()
+local function crit(ms, opts)
+    local stop = nowMs + ms
+    while nowMs < stop do
+        nowMs = nowMs + 100
+        U.tick()
+        sample(opts)
+    end
+end
+crit(25000, { mode = "unstick" })
+D.event(0, "unstick", { phase = "start" })
+local thinTrig = nowMs
+crit(12000, { mode = "unstick" })
+D.event(0, "unstick", { phase = "success" })
+crit(8000)
+D.stop(0, "arrive")
+MDAD.HUD.telemetryEnabled = function() return false end
+pump(120000)
+local _, thinClip = clipByTrig(thinTrig)
+local thinTs = sampleTs(thinClip)
+local g0, n0 = gapsIn(thinTs, thinTrig + 1, thinTrig + U.THIN_AFTER_MS) -- 觸發那筆在事前窗裡，從下一筆量
+local g1, n1 = gapsIn(thinTs, thinTrig + U.THIN_AFTER_MS, thinTrig + 12000)
+check(g0 == 100 and n0 >= 45, "(early) the first 5 s after the trigger keep 10 Hz (min " .. g0 .. ", n " .. n0 .. ")")
+check(g1 >= U.THIN_GAP_MS and n1 >= 30, "(thin) samples after 5 s are >= 200ms apart (min " .. g1 .. ", n " .. n1 .. ")")
+local gp, np = gapsIn(thinTs, thinTrig - U.PRE_MS + 1, thinTrig - U.PRE_THIN_BEFORE_MS)
+local gk, nk = gapsIn(thinTs, thinTrig - U.PRE_THIN_BEFORE_MS, thinTrig + 1)
+check(gp >= U.THIN_GAP_MS and np >= 45, "(pre-thin) pre-window samples older than 10 s are >= 200ms apart (min " .. gp .. ", n " .. np .. ")")
+check(gk == 100 and nk >= 95, "(pre-keep) the last 10 s before the trigger keep 10 Hz (min " .. gk .. ", n " .. nk .. ")")
+local localText = ""
+for k, content in pairs(files) do
+    if string.find(k, "Telemetry/session%-%d+%.log$") and string.find(content, '"ts":' .. thinTrig, 1, true) then
+        localText = content
+    end
+end
+local localTs = sampleTs(localText)
+local lg, ln = gapsIn(localTs, thinTrig + U.THIN_AFTER_MS, thinTrig + 12000)
+check(lg == 100 and ln >= 65, "(local) the local session keeps 10 Hz after 5 s (min " .. lg .. ", n " .. ln .. ")")
+local lpg, lpn = gapsIn(localTs, thinTrig - U.PRE_MS + 1, thinTrig - U.PRE_THIN_BEFORE_MS)
+check(lpg == 100 and lpn >= 95, "(local) the local session keeps 10 Hz before t0-10s (min " .. lpg .. ", n " .. lpn .. ")")
+
+-- 1010 偏離常駐線 KPI（摘要 offMs／offN／offMax）與 offset 片段：玩家回報「繞完一直走路邊」沒事故就完全沒錄到。
+-- 有主的偏移不算：繞行 AVOID、RETURN、判堵 HOLD、殭屍軟縫 zln、調頭（|att| ≥ π/2）、接回保護 sg、起步越野接線（rs < apr）；
+-- 鏈式停留（lc）量車身−夾過的常駐線 rsl（鏈著時 ld 對的是停留 lane；rsd 沒夾路寬）。連續 ≥2 秒才算一段，單段 8 秒觸發
+-- offset（pri 4）。
+-- 違規證明：拿掉任一項排除＝(owned) offN／offMs 紅；鏈式不改量＝(chain) 紅；鏈式量沒夾的 rsd＝(chain-rsd) 紅；
+-- 短於 2 秒也算＝(short) 紅；不觸發片段／伺服器 KINDS 漏 offset＝(clip) 紅。
+scenario("1010 offset KPI: unowned lateral offset > 1m for >= 2s; owned offsets excluded; 8s raises an offset clip")
+nowMs = nowMs + 3600000
+start()
+local offDrive = nowMs
+local function ln(extra)
+    local t = { capReason = "profile", frameMs = 16, controlState = "TRACK", latDev = 0.2, expectedLane = 0,
+        residentBias = 0 }
+    for k, v in pairs(extra or {}) do t[k] = v end
+    return t
+end
+D.event(0, "route", { phase = "ready", approach = 50 })
+drive(4000, { rs = 20, lat = 2.5, phys = ln({ latDev = 2.5 }) })                    -- 起步越野接線
+drive(1000, { rs = 100, phys = ln() })
+drive(4000, { rs = 100, lat = 2.5, phys = ln({ latDev = 2.5, controlState = "AVOID" }) })
+drive(1000, { rs = 100, phys = ln() })
+drive(4000, { rs = 100, lat = 2.5, phys = ln({ latDev = 2.5, controlState = "RETURN" }) })
+drive(1000, { rs = 100, phys = ln() })
+drive(4000, { rs = 100, lat = 2.5, phys = ln({ latDev = 2.5, controlState = "HOLD" }) })
+drive(1000, { rs = 100, phys = ln() })
+drive(4000, { rs = 100, lat = 2.5, phys = ln({ latDev = 2.5, zombieLane = 2.5 }) })
+drive(1000, { rs = 100, phys = ln() })
+drive(4000, { rs = 100, lat = 2.5, phys = ln({ latDev = 2.5, routeHeadingError = 2.8 }) }) -- 調頭
+drive(1000, { rs = 100, phys = ln() })
+drive(4000, { rs = 100, lat = 2.5, phys = ln({ latDev = 2.5, startGuard = true }) })  -- 接回保護
+drive(1000, { rs = 100, phys = ln() })
+drive(4000, { rs = 100, lat = 2.5, mode = "unstick", phys = ln({ latDev = 2.5 }) })
+drive(1000, { rs = 100, phys = ln() })
+drive(1600, { rs = 100, lat = 1.6, phys = ln({ latDev = 1.6 }) })                    -- 8 筆＝1.4s：太短
+drive(1000, { rs = 100, phys = ln() })
+local offStart = nowMs + 200
+drive(9000, { rs = 100, lat = -1.6, phys = ln({ latDev = -1.6 }) })                  -- 45 筆＝8.8s：一段＋片段
+drive(1000, { rs = 100, phys = ln() })
+drive(3000, { rs = 100, lat = 2.5, phys = ln({ latDev = 0.1, laneChained = true, residentLane = 0 }) }) -- 鏈著：離常駐線 2.5
+-- 鏈著、離夾過的常駐線 0.6：不算（沒夾的 rsd 2.5＝彎內側／窄段的原值，量它會誤算）
+drive(3000, { rs = 100, lat = 0.6, phys = ln({ latDev = 0.1, laneChained = true, residentLane = 0, residentBias = 2.5 }) })
+drive(2000, { rs = 100, phys = ln() })
+D.stop(0, "arrive")
+pump(120000)
+local offSum = ""
+for k, content in pairs(files) do
+    if string.find(k, ROOT .. "summary-", 1, true) == 1 then
+        for line in string.gmatch(content, "[^\n]+") do
+            if string.find(line, '"drive":' .. string.format("%d", offDrive) .. ",", 1, true) then offSum = line end
+        end
+    end
+end
+local function numO(key) return tonumber(string.match(offSum, '"' .. key .. '":([%d%.%-]+)')) end
+check(offSum ~= "", "offset drive summary found")
+checkEq(numO("offN"), 2, "(owned)(short)(chain) two segments: the 8.8s unowned one and the 2.8s chained one")
+checkEq(numO("offMs"), 8800 + 2800, "(owned)(chain) offMs = 8.8s + 2.8s")
+checkEq(numO("offMax"), 8800, "longest segment 8.8s")
+check(#offSum < U.CHUNK, "summary still fits one chunk (" .. #offSum .. ")")
+local offRow = clipByTrig(offStart + U.OFF_CLIP_MS)
+check(offRow ~= nil, "(clip) an offset clip is raised 8s into the segment and indexed")
+checkEq(field(offRow or "", 7), "offset", "(clip) kind offset")
+checkEq(field(offRow or "", 8), "4", "(clip) offset priority 4")
+
+-- 1010 新客戶端＋舊伺服器（正式服 DoLuaChecksum=false：發版到伺服器重啟之間新客戶端會連上 0.27.x 伺服器）。舊伺服器＝
+-- 8063441 的 MDAD_UploadServer 常數：CLIP_MAX 1000000、KINDS 沒有 offset。非 offset 片段（含塞滿＋full 後事件的）全收；
+-- offset 被拒（已知坑：佔用一個片段配額，伺服器重啟後恢復）。
+-- 違規證明：客戶端不夾整段＝(old) full 片段被拒紅。
+scenario("1010 new client + 0.27.x server: every non-offset clip accepted, offset rejected")
+local OLD_SERVER_CLIP_MAX = 1000000
+local srvSrc = io.open(MEDIA .. "server/MDAD_UploadServer.lua", "r"):read("*a")
+local nClip, nKinds
+srvSrc, nClip = string.gsub(srvSrc, "local CLIP_MAX = %d+", "local CLIP_MAX = " .. OLD_SERVER_CLIP_MAX)
+srvSrc, nKinds = string.gsub(srvSrc, "detour = true, offset = true }", "detour = true }")
+checkEq(nClip + nKinds, 2, "old-server constants patched (CLIP_MAX, KINDS)")
+local newServer = MDADUploadServer
+client = false
+assert(load(srvSrc))()
+client = true
+local oldServer = MDADUploadServer
+checkEq(oldServer.CLIP_MAX, OLD_SERVER_CLIP_MAX, "old server limit")
+nowMs = nowMs + 3600000
+start()
+drive(31000, { phys = fat })
+D.event(0, "unstick", { phase = "start" })
+local oldTrig = nowMs
+drive(8000, { phys = fat, mode = "unstick" })
+D.event(0, "unstick", { phase = "timeout" })
+for _ = 1, 30 do D.event(0, "progress", { phase = "suspect", detail = string.rep("d", 5000) }) end
+drive(12000, { phys = fat })
+D.stop(0, "arrive")
+pump(400000)
+local oldRow, oldClip = clipByTrig(oldTrig)
+check(oldRow ~= nil and string.find(oldClip, '"full":true', 1, true) ~= nil,
+    "(old) a full clip with events after full is accepted by the 0.27.x server (" .. #oldClip .. ")")
+checkEq(count(oldClip, '"n":"unstick","phase":"timeout"'), 1, "(old) the unstick result reaches the 0.27.x server")
+nowMs = nowMs + 3600000
+start()
+drive(1000, { rs = 100, phys = ln() })
+local oldOffStart = nowMs + 200
+drive(9000, { rs = 100, lat = -1.6, phys = ln({ latDev = -1.6 }) })
+drive(6000, { rs = 100, phys = ln() })
+D.stop(0, "arrive")
+pump(400000)
+checkEq(clipByTrig(oldOffStart + U.OFF_CLIP_MS), nil, "(old) the 0.27.x server rejects the offset kind")
+MDADUploadServer = newServer
+S._reset()
+
+-- 1010 所有送出的片段整段 ≤ CLIP_TOTAL_MAX（第一塊宣告的 len＝全文長度；伺服器只看這個）
+local maxLen = 0
+for i = 1, #sent do
+    local a = sent[i].args
+    if a.k == "clip" and a.q == 1 and a.len > maxLen then maxLen = a.len end
+end
+check(maxLen > 900000 and maxLen <= U.CLIP_TOTAL_MAX, "(total) every clip sent is <= CLIP_TOTAL_MAX (max " .. maxLen .. ")")
 
 print(string.format("情境 %d 個、斷言 %d 項、失敗 %d", scenarios, assertions, failures))
 if failures > 0 then os.exit(1) end

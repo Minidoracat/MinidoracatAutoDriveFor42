@@ -2010,6 +2010,47 @@ function MDADSensor.probeAround(state, vehicle, cell, radius)
     return false
 end
 
+-- 命中物身分（遙測，2026-10-10；冷路徑：Driver footprint 接觸上升緣、Diagnostics 撞擊上升緣各掃一次，不進熱路徑）：
+-- (wx,wy) 周圍 r 內每一格的物件裡，sprite 分類是引擎會擋車的（HARD_NAME：方塊／細桿／樹幹／門／格邊薄牆）且格心最近的那個；
+-- 門類 sprite 只在那格是關著的門（closedDoor，同 probeSquareHard）才算——開著的門、沒有門板的門洞不擋車，不能搶走證據。
+-- 回 sprite 名、分類名、格心到 (wx,wy) 的距離 m；沒有、未載入或任何 getter 失敗回 nil（全包 pcall）。state 可為 nil：
+-- 有 Driver 的感知狀態就沿用掃描的 sprite 快取，沒有就只算不記。z 取整到樓層。
+local HARD_NAME = { [COST_HARD] = "hard", [COST_HARD_THIN] = "thin", [COST_TREE] = "tree", [COST_DOOR] = "door",
+    [COST_WALL_N] = "wall", [COST_WALL_W] = "wall", [COST_WALL_NW] = "wall" }
+function MDADSensor.hardSpriteNear(state, cell, wx, wy, z, r)
+    if cell == nil or not finite(wx) or not finite(wy) or not finite(z) or not finite(r) then return nil end
+    local ok, name, cls, d = pcall(function()
+        if not flagsBound then bindFlags() end
+        local cached = type(state) == "table" and type(state.spriteCost) == "table"
+        local x0, x1, y0, y1 = wx - r, wx + r, wy - r, wy + r
+        x0, x1, y0, y1 = x0 - x0 % 1, x1 - x1 % 1, y0 - y0 % 1, y1 - y1 % 1
+        local zz = z - z % 1
+        local bn, bc, bd = nil, nil, nil
+        for gx = x0, x1 do
+            for gy = y0, y1 do
+                local square = cell:getGridSquare(gx, gy, zz)
+                local objs = square and square:getObjects()
+                local nObj = objs and objs:size() or 0
+                for i = 1, nObj do
+                    local obj = objs:get(i - 1)
+                    local nm = obj:getSpriteName()
+                    local cost = nm ~= nil and (cached and spriteCostOf(state, obj, nm) or classifySprite(obj, nm)) or nil
+                    local cn = cost and HARD_NAME[cost]
+                    if cn and cost == COST_DOOR and not closedDoor(square) then cn = nil end
+                    if cn then
+                        local dx, dy = gx + 0.5 - wx, gy + 0.5 - wy
+                        local dd = sqrt(dx * dx + dy * dy)
+                        if bd == nil or dd < bd then bn, bc, bd = nm, cn, dd end
+                    end
+                end
+            end
+        end
+        return bn, bc, bd
+    end)
+    if ok then return name, cls, d end
+    return nil
+end
+
 -- 車周樹叢物件（Driver Drive.bushCancel 的候選；冷路徑，Driver 節流呼叫）：(cx,cy) 周圍 r 內每一格的物件，sprite 成本
 -- 是 COST_BUSH 的逐一收進 outObj／outX／outY（格心＝引擎 getObjectX/Y，BaseVehicle.java:5502-5508；一格可有多叢，引擎
 -- 逐物件施力），最多 maxN 個，回個數。d_generic_1／d_plants_1 tileset 引擎只播聲音、不施衝量（BaseVehicle.java:3078），

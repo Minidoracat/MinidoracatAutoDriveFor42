@@ -583,6 +583,16 @@ local function setSpeedDetails(value)
     return setClientOption("SpeedDetails", value == true)
 end
 
+-- 診斷行（1010，預設關）：HUD 上方一行「限速理由短碼 目標/實速 狀態 rev」，給玩家截圖回報用。
+-- 主 chunk local 已貼上限：存取函式直接掛 HUD。
+function HUD.diagLine()
+    return optionBool("DiagLine", false)
+end
+
+function HUD.setDiagLine(value)
+    return setClientOption("DiagLine", value == true)
+end
+
 local function setPauseOnArrival(value)
     return setClientOption("PauseOnArrival", value == true)
 end
@@ -1994,7 +2004,7 @@ end
 -- 狀態字改成「彎道減速」等短原因（琥珀），同一份明細也掛在狀態字上。只在 250ms refresh 算字串。
 function MDADHUDPanel:refreshSpeedTip(token, cruise, now)
     self._speedTip = nil
-    local vmax, sandMax, gearCap, target, reason, curveCap, visCap
+    local vmax, sandMax, gearCap, target, reason, curveCap, visCap, factorCap, factorReason
     if type(Drive.speedInfo) == "function" then
         vmax, sandMax, gearCap, target, reason, curveCap, visCap, factorCap, factorReason =
             Drive.speedInfo(self.playerNum, self.vehicle)
@@ -2054,6 +2064,22 @@ function MDADHUDPanel:refreshSpeedTip(token, cruise, now)
         self._statusText = getText("UI_MinidoracatAutoDrive_HUDStatusSlow_" .. self._slowCategory)
         self._statusColor = C.amber
     end
+    self:refreshDiagLine(token, target, reason)
+end
+
+-- 診斷行（1010）：「限速理由短碼 目標/實速 狀態 rev」，例 `curve-coast 18/47 follow 1010a`。理由碼是 Driver 的
+-- capReason（telemetry 樣本 `acr` 同值）、狀態是 Drive.hudState 的狀態鍵；不翻譯（截圖回報時與 telemetry 字典對得上）。
+-- 字串與寬度只在 250ms refresh 算，prerender 只畫快取。選項關著＝沒有字串、框不出現。
+function MDADHUDPanel:refreshDiagLine(token, target, reason)
+    if not HUD.diagLine() then
+        self._diagText = nil
+        return
+    end
+    local function n(v) return type(v) == "number" and v * 0 == 0 and string.format("%d", math.floor(v + 0.5)) or "--" end
+    self._diagText = (reason or "-") .. " " .. n(target) .. "/" .. n(self._kmh) .. " " .. (token or "idle")
+        .. " " .. tostring(Drive.REV or "?")
+    self._diagH = (self._fontH or 16) + 4
+    self._diagW = textWidth(UIFont.Small, self._diagText) + 8
 end
 
 -- 固定顯示的速度明細：左欄名、右數值。上限類數值高於巡航＝綠（有餘裕），
@@ -2127,6 +2153,43 @@ function MDADHUDPinBox:onMouseUpOutside(x, y)
     if moved then self.owner:saveSpeedBox(self:getX(), self:getY()) end
 end
 
+-- 診斷行框（1010）：同明細框是獨立頂層元素（畫在面板範圍外實機不顯示），貼面板左上緣外側一行；
+-- 面板外＝不壓任何 HUD 控制（四個主題同理）。明細框停靠點在它上面再讓一行，兩個框不疊。
+MDADHUDDiagBox = ISPanel:derive("MDADHUDDiagBox")
+function MDADHUDDiagBox:prerender() self.owner:drawDiagLine(self) end
+function MDADHUDDiagBox:render() end
+
+function MDADHUDPanel:placeDiagLine()
+    local show = self._diagText ~= nil and self:isVisible()
+    self._diagShown = show
+    local box = self.diagBox
+    if not show then
+        if box then box:setVisible(false) end
+        return
+    end
+    if not box then
+        box = MDADHUDDiagBox:new(0, 0, 10, 10)
+        box.owner = self
+        box:initialise()
+        box:addToUIManager()
+        self.diagBox = box
+    end
+    box:setX(self:getAbsoluteX())
+    box:setY(self:getAbsoluteY() - self._diagH - 2)
+    box:setWidth(self._diagW)
+    box:setHeight(self._diagH)
+    box:setVisible(true)
+end
+
+function MDADHUDPanel:drawDiagLine(target)
+    local text = self._diagText
+    if not text then return end
+    local surface = self._style == STYLE_FAMILY and C.familySurface
+        or self._style == STYLE_GLASS and C.glass or C.metalFace
+    fill(target, 0, 0, self._diagW, self._diagH, surface, "round")
+    target:drawText(text, 4, 2, C.text.r, C.text.g, C.text.b, C.text.a, UIFont.Small)
+end
+
 -- 選項開著、HUD 顯示中（駕駛座、非 ESC）就顯示，自駕停著也看得到；收合不影響（獨立視窗）。
 function MDADHUDPanel:placeSpeedPin()
     local show = self._pinRows ~= nil and self._speedPin and self:isVisible()
@@ -2156,7 +2219,7 @@ function MDADHUDPanel:placeSpeedPin()
             box:setY(math.max(0, math.min(sh - self._pinH, sy)))
         else
             box:setX(self:getAbsoluteX() + self._pinX)
-            box:setY(self:getAbsoluteY() + self._pinY)
+            box:setY(self:getAbsoluteY() + self._pinY - (self._diagShown and self._diagH + 2 or 0))
         end
     end
     box:setWidth(self._pinW)
@@ -2241,6 +2304,7 @@ function MDADHUDPanel:placeDetourButton()
         self.etaTip.tooltip = self._etaTip
     end
     self.etaTip:setVisible(etaTip)
+    self:placeDiagLine()
     self:placeSpeedPin()
 end
 
@@ -2486,6 +2550,7 @@ end
 function MDADHUDPanel:setHudVisible(visible)
     self:setVisible(visible)
     if not visible and self.pinBox then self.pinBox:setVisible(false) end
+    if not visible and self.diagBox then self.diagBox:setVisible(false) end
 end
 
 -- ESC 開啟時的唯一收斂動作；update 與 prerender 兩條 tick 路徑共用，
@@ -2631,7 +2696,8 @@ function MDADHUDPanel:refresh(now)
     self._zombieOn = zombieOn == true
     self._corpseOn = corpseOn == true
     self._statusColor = statusColor(token, reason)
-    self._speedText = tostring(roundPositive(vehicle:getCurrentSpeedKmHour()))
+    self._kmh = vehicle:getCurrentSpeedKmHour() -- 診斷行要帶號實速（倒車為負），現速欄取絕對值
+    self._speedText = tostring(roundPositive(self._kmh))
     -- 極窄精簡單行會把現速欄整欄讓給主鈕；沒有座標就沒有單位要對齊。
     if self._speedX then
         self._unitX = self._speedX + textWidth(UIFont.Medium, self._speedText) + 3
@@ -3224,6 +3290,7 @@ local function destroyPanel(playerNum)
     panel._dashboard = nil
     panel:removeFromUIManager()
     if panel.pinBox then panel.pinBox:removeFromUIManager() end
+    if panel.diagBox then panel.diagBox:removeFromUIManager() end
     panels[playerNum] = nil
 end
 
@@ -3307,6 +3374,8 @@ if PZAPI and PZAPI.ModOptions then
     end
     modOptions:addTickBox("SpeedDetails", "UI_MinidoracatAutoDrive_SpeedDetails", false,
         "UI_MinidoracatAutoDrive_SpeedDetails_tooltip")
+    modOptions:addTickBox("DiagLine", "UI_MinidoracatAutoDrive_DiagLine", false,
+        "UI_MinidoracatAutoDrive_DiagLine_tooltip")
     modOptions:addTickBox("PauseOnStuck", "UI_MinidoracatAutoDrive_PauseOnStuck", true,
         "UI_MinidoracatAutoDrive_PauseOnStuck_tooltip")
     modOptions:addTickBox("PauseOnArrival", "UI_MinidoracatAutoDrive_PauseOnArrival", true,
@@ -3335,6 +3404,12 @@ if PZAPI and PZAPI.ModOptions then
     telemetryRetention:addItem("UI_MinidoracatAutoDrive_TelemetryRetention7", true)
     telemetryRetention:addItem("UI_MinidoracatAutoDrive_TelemetryRetention14", false)
     telemetryRetention:addItem("UI_MinidoracatAutoDrive_TelemetryRetention30", false)
+    -- 匯出診斷（1010，client/MDAD_DiagExport.lua）：環境資訊＋最近幾趟紀錄合成一個 .txt，紀錄關著也匯出環境。
+    if type(modOptions.addButton) == "function" then
+        modOptions:addButton("ExportDiag", "UI_MinidoracatAutoDrive_ExportDiag",
+            "UI_MinidoracatAutoDrive_ExportDiag_tooltip",
+            function() if MDADDiagExport then MDADDiagExport.start(0) end end)
+    end
     local theme = modOptions:addComboBox("HUDTheme", "UI_MinidoracatAutoDrive_HUDTheme")
     for i = 1, #THEME_KEYS do theme:addItem(THEME_KEYS[i], i == 1) end
     local layout = modOptions:addComboBox("HUDLayout", "UI_MinidoracatAutoDrive_HUDLayout")
@@ -3470,6 +3545,9 @@ local function registerMiniMapSettings()
             { label = "UI_MinidoracatAutoDrive_SpeedDetails",
                 tooltip = "UI_MinidoracatAutoDrive_SpeedDetails_tooltip",
                 default = false, get = speedDetails, set = setSpeedDetails },
+            { label = "UI_MinidoracatAutoDrive_DiagLine",
+                tooltip = "UI_MinidoracatAutoDrive_DiagLine_tooltip",
+                default = false, get = HUD.diagLine, set = HUD.setDiagLine },
         },
         combos = {
             { label = "UI_MinidoracatAutoDrive_TrajectoryWidth",
@@ -3548,6 +3626,9 @@ local function registerMiniMapSettings()
             { label = "UI_MinidoracatAutoDrive_ReportIssue",
                 tooltip = "UI_MinidoracatAutoDrive_ReportIssue_tooltip",
                 run = function(pn) copyDiag(pn, "copyReportLink") end },
+            { label = "UI_MinidoracatAutoDrive_ExportDiag",
+                tooltip = "UI_MinidoracatAutoDrive_ExportDiag_tooltip",
+                run = function(pn) if MDADDiagExport then MDADDiagExport.start(pn) end end },
         }
     end
     -- v3 以下忽略 sliders：音量仍可從 ESC 與 HUD 拉桿改，不另做 combo 退路。

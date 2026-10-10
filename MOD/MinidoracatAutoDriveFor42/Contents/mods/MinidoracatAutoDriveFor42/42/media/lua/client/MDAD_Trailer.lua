@@ -160,9 +160,10 @@ function T.attach(vehicle)
     else
         geo.hitchZ, geo.hitchX, geo.boxBack, geo.boxSide, geo.axisSign = nil, nil, nil, nil, nil
     end
-    -- 脫開鑑識用（T.lostState）：掛車 id（脫開後用 getVehicleById 查還在不在）與兩邊掛點名（牽引車自己的／掛車的）。
-    -- 各自 pcall：量不到只少鑑識欄，不拒絕啟動。
+    -- 脫開鑑識用（T.lostState、Driver 的 tow phase=lost）：掛車 id（脫開後用 getVehicleById 查還在不在）與 script 名、
+    -- 兩邊掛點名（牽引車自己的／掛車的）。各自 pcall：量不到只少鑑識欄，不拒絕啟動。
     pcall(function() geo.id = trailer:getId() end)
+    pcall(function() geo.script = trailer:getScriptName() end)
     pcall(function() geo.hitchSelf = vehicle:getTowAttachmentSelf() end)
     pcall(function() geo.hitchOther = vehicle:getTowAttachmentOther() end)
     return geo

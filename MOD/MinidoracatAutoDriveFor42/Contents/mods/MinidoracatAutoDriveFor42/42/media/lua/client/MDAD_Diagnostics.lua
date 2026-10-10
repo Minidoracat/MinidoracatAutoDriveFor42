@@ -147,6 +147,16 @@ local EK = {
     "tl", "rb", "rl", "ns", "rej",
     -- takeover yield／manual（1009）：玩家用了哪個輸入（steer／steer-key／brake／forward／backward，Driver manualInput）
     "key",
+    -- 2026-10-10 遙測補強：
+    -- blocked plan／wide 的候選鏈摘要：本次 replan 掃掠失敗在 p1..p4 段的次數、本次 replan 第一個掃掠失敗（主候選）的
+    -- tag／段／命中點；steep＝blockSteepM（倒車補跑道的差額 m）；exit-room 判堵的出口可用長度與折點弧長
+    "p1", "p2", "p3", "p4", "tag0", "ph0", "hx0", "hy0", "steep", "avail", "foldS",
+    -- contact（footprint 接觸上升緣）與 impact：命中物 sprite 名、分類（hard／thin／tree／door／wall；他車＝vehicle）、
+    -- sprite 格心到命中點（impact：車頭）的距離 m、命中硬點的膨脹半徑；impact 另帶區域等待旗標 awt
+    "sprite", "scost", "hardD", "hitR", "awt",
+    -- detour 避讓圈圓心；zombie plan 選縫視窗 [sFrom, sTo]（弧長）；tow lost 掛車 id／script；
+    -- progress suspect 與前一個跟線幀的牆鐘間隔 ms（幀時用既有 fdt）；policy change 的殭屍／屍體減速與 AnimalSlowdown
+    "ax", "ay", "sFrom", "sTo", "vid", "script", "gap", "zslow", "cslow", "aslow",
 }
 
 local function logOnce(msg)
@@ -889,6 +899,7 @@ local function encodeProfile(profile)
     end
     return "{" .. table.concat(parts, ",", 1, n) .. "}"
 end
+D.encodeProfile = encodeProfile -- 診斷匯出（MDAD_DiagExport）與 header 同一份來源
 
 -- 最近 8 顆硬障礙點。s/l 是弧座標（沿線／橫向），只有它們無法回答實機碰撞分析
 -- 的兩個問題：「那顆點多大」與「它在地圖哪裡」——r 是膨脹半徑（Corridor 的縫隙
@@ -1126,6 +1137,7 @@ local function envStamp(playerNum)
     end
     return bits
 end
+D.envStamp = envStamp -- 同上
 
 local function encodeHeader(slot, now, days, profile, drive, part, contFile, playerNum)
     local b = MDAD and MDAD.BUILD
@@ -1193,6 +1205,7 @@ local function encodePhys(phys)
     addNum("latDev", "ld")
     -- 1004a：常駐線與軟縫 lane——el 偏離 rsd 時看得出是誰持有（lc 鏈、dg 繞行、ra 回線、zln 殭屍軟縫）
     addNum("residentBias", "rsd")
+    addNum("residentLane", "rsl")      -- 1010：鏈式停留時夾過路寬的常駐線（只在 lc 時寫；rsd 是未夾原值）
     addNum("zombieLane", "zln")
     -- 1005 soft：zk0＝軟縫這次縫是貼路緣（keep 0）找到的；shk／shm＝動物或玩家停等目標種類／停住累計 ms；
     -- scr＝動物等待到期後爬行中（皆有才寫）
@@ -1361,6 +1374,13 @@ local function encodePhys(phys)
     -- 0904j 鏈式停留：lc＝常駐 lane 暫時＝停留 offL；dodgeTier 帶 -stay／-nudge／-physical
     addBool("laneChained", "lc")
     addStr("dodgeTier", "tier")
+    -- 2026-10-10 遙測補強（皆有值才寫）：
+    addNum("yawPeak", "yrp")          -- 上一筆取樣到這一筆之間的最大 |yr|（rad/s；閂到下一筆，比照 fbl／xcw）
+    addStr("hardBrakeLatch", "hbp")   -- 上一筆取樣到這一筆之間最後一個 hard-brake 理由（閂到下一筆；hbr 只記當幀）
+    addNum("trfLeadGap", "tlg")       -- 跟車 lead 車距 m（Drive.trafficScan 每輪寫；沒 lead＝省略）
+    addNum("trfLeadV", "tlv")         -- 跟車 lead 沿線速度 m/s（倒退或對向夾 0）
+    addStr("zombieWhy", "zwh")        -- 殭屍軟縫本輪選縫理由（s.zombieWhy；none／未持有＝省略）
+    addNum("zombieWant", "zwt")       -- 殭屍軟縫本輪目標 lane（zwh 有寫才寫）
     return bits
 end
 
@@ -1452,7 +1472,7 @@ local function nearbyJson(pn, x, y, h)
         local ch, sh = 1, 0
         if finite(h) then ch, sh = math.cos(h), math.sin(h) end
         local soft = MDADSensor and MDADSensor.softKindOf
-        local zd, zx, zy, ad, ax, ay, pd, px, py, cd, cx, cy
+        local zd, zx, zy, ad, ax, ay, pd, px, py, cd, cx, cy, am
         local cOk = true
         for gy = math.floor(y - NB_R), math.floor(y + NB_R) do
             for gx = math.floor(x - NB_R), math.floor(x + NB_R) do
@@ -1471,7 +1491,7 @@ local function nearbyJson(pn, x, y, h)
                             elseif k == "player" then
                                 if pd == nil or d2 < pd then pd, px, py = d2, ox, oy end
                             elseif ad == nil or d2 < ad then
-                                ad, ax, ay = d2, ox, oy -- animal／small
+                                ad, ax, ay, am = d2, ox, oy, mo -- animal／small
                             end
                         end
                     end
@@ -1512,14 +1532,33 @@ local function nearbyJson(pn, x, y, h)
         local p = one("z", zd, zx, zy)
         if p then n = n + 1; parts[n] = p .. "]" end
         p = one("a", ad, ax, ay)
-        if p then n = n + 1; parts[n] = p .. "]" end
+        if p then
+            -- 2026-10-10：動物第 4、5 項＝物種（getAnimalType，IsoAnimal.java:1595；讀不到 null）、體重 kg（getData():getWeight()，
+            -- AnimalData.getWeight；讀不到省略）；兩者都讀不到只留前 3 項
+            local okA, typ, kg = pcall(function()
+                local data = am:getData()
+                return am:getAnimalType(), data and data:getWeight()
+            end)
+            local ext = ""
+            if okA and (type(typ) == "string" or finite(kg)) then
+                ext = "," .. (type(typ) == "string" and jstr(typ) or "null") .. (finite(kg) and ("," .. r2(kg)) or "")
+            end
+            n = n + 1
+            parts[n] = p .. ext .. "]"
+        end
         p = one("p", pd, px, py)
         if p then n = n + 1; parts[n] = p .. "]" end
         p = one("v", vd, vx, vy)
         if p then
+            -- 2026-10-10：車第 5、6 項＝vehicle id（BaseVehicle.getId）、有人駕駛 1／0（getDriver 非 nil）；各自 pcall、讀不到 null，
+            -- 有這兩項時讀不到的 km/h 也寫 null 佔位（位置固定）
             local kmh = vk:getCurrentSpeedKmHour()
+            local okI, vid = pcall(function() return vk:getId() end)
+            local okD, drv = pcall(function() return vk:getDriver() end)
             n = n + 1
-            parts[n] = p .. (finite(kmh) and ("," .. tostring(math.floor(kmh * 10 + 0.5) / 10)) or "") .. "]"
+            parts[n] = p .. "," .. (finite(kmh) and tostring(math.floor(kmh * 10 + 0.5) / 10) or "null")
+                .. "," .. (okI and finite(vid) and tostring(vid) or "null")
+                .. "," .. (okD and (drv ~= nil and "1" or "0") or "null") .. "]"
         end
         p = cOk and one("c", cd, cx, cy) or nil
         if p then n = n + 1; parts[n] = p .. "]" end
@@ -1855,6 +1894,23 @@ local function sampleWouldEnqueue(s, now, mode, err, critical)
     return true, crit
 end
 
+-- 撞擊上升緣車頭附近最近的靜態硬物（2026-10-10；只在上升緣掃一次、全 pcall、不進熱路徑）：車頭點（車心沿航向 halfL）
+-- 方圓 IMPACT_HARD_R 格內 MDADSensor.hardSpriteNear 的結果——帶外撞到路邊物時 near 是空的，至少知道車頭旁是什麼。
+-- 回 sprite 名、分類、車頭點到該格格心的距離 m；讀不到全 nil。
+local IMPACT_HARD_R = 3
+local function impactHard(pn, x, y, h, halfL)
+    if not finite(x) or not finite(y) or not finite(h) or type(MDADSensor) ~= "table"
+            or type(MDADSensor.hardSpriteNear) ~= "function" then return nil end
+    local ok, nm, cls, d = pcall(function()
+        local own = getSpecificPlayer(pn):getVehicle()
+        local hl = finite(halfL) and halfL or 2.5
+        return MDADSensor.hardSpriteNear(nil, getCell(), x + math.cos(h) * hl, y + math.sin(h) * hl,
+            own and own:getZ() or 0, IMPACT_HARD_R)
+    end)
+    if ok then return nm, cls, d end
+    return nil
+end
+
 function D.shouldSample(pn, now, mode, err, critical)
     -- 對外只回單一布林：多回值會漏進呼叫端的參數列。
     local want = sampleWouldEnqueue(gateOwner(pn), now, mode, err, critical)
@@ -1905,9 +1961,13 @@ function D.sample(pn, now, x, y, heading, speed, target, remaining, lat, err,
     -- 事件跟在觸發的那筆取樣之後；只在轉換時配一張 payload 表。
     if g.edgeImp then
         local spd = finite(speed) and (speed < 0 and -speed or speed) or nil
+        local prof = s and s.profile
+        local hNm, hCls, hD = impactHard(pn, x, y, heading, type(prof) == "table" and prof.halfL or (u and u.halfL))
         emitEvent(pn, now, "impact", {
             x = x, y = y, speed = round1(g.edgeSpd), dv = round1(spd and g.edgeSpd and g.edgeSpd - spd), ms = g.edgeGap,
             cls = g.impCls, dvs = round1(finite(speed) and g.edgeSv and g.edgeSv - speed),
+            -- 2026-10-10：awt＝這筆取樣在等區域載入（引擎煞車同幀，dv 拆不開時看它）；車頭附近最近靜態硬物
+            awt = type(phys) == "table" and phys.areaWait == true or nil, sprite = hNm, scost = hCls, hardD = round1(hD),
         })
     end
     if g.edgeTp then

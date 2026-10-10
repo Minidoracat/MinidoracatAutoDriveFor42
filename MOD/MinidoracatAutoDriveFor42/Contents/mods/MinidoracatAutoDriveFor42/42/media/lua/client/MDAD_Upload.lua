@@ -30,6 +30,20 @@ local ANOMALY_TAKEOVER_MS = 10000
 local RING_N = 480
 local EVLOG_N = 400
 local CLIP_MAX = 900000
+-- 樣本預算（CLIP_MAX）用完＝full 之後，窗內事件另給這麼多字元、照收到窗結束（樣本不再收）：正式服 rev≥1005 片段
+-- 約 600 段有 62 段 full、觸發後中位只剩 3.9 秒，unstick 的 success／timeout 都被截掉。
+local CLIP_EV_MAX = 100000
+-- 片段整段（首行＋header＋route 點列＋窗前事件＋窗內樣本與事件＝送出的全文）上限；full 後事件實際只拿到
+-- min(CLIP_EV_MAX, 這個上限扣掉其餘的剩額)。伺服器 MDAD_UploadServer CLIP_MAX 1000000 檢查第一塊宣告的整段長度，
+-- 正式服 DoLuaChecksum=false：發版到伺服器重啟之間新客戶端會連上舊伺服器（同樣 1000000），超過就整段拒收、
+-- 最重要的事故片段消失。新舊伺服器同一個上限，不要加大伺服器那邊。
+local CLIP_TOTAL_MAX = 995000
+-- 觸發後過了這麼久，上傳片段的樣本降到 5Hz（相鄰收進片段的樣本間隔 <THIN_GAP_MS 就跳過已編好的列；ring 與本機紀錄不動）。
+local THIN_AFTER_MS = 5000
+local THIN_GAP_MS = 200
+-- 事前窗裡早於觸發這麼久的樣本同樣降到 5Hz（觸發前最後這段保留原頻率）：10Hz 段的事前 30 秒本來吃掉樣本預算約八成七，
+-- full 片段觸發後只剩約 3 秒樣本（rc70–73 重播：只降觸發後中位 0.9 s，加這條 10 s）。
+local PRE_THIN_BEFORE_MS = 10000
 local CHUNK = 10000
 local SUM_MAX = CHUNK
 local CLIPS_PER_DRIVE = 6
@@ -72,13 +86,24 @@ local IMPACT_HALF_L = 2.5 -- profile 沒有 halfL 時的半車長：取偏大（
 --     0.0033–0.0058；同批其他拖車真撞與接觸 ≤0.0004，其中 SemiTruck＋Cartrailer 的真撞撞前 tup 平穩、撞後才傾斜）。
 local TOW_SYNC_MS = 450
 local TOW_SYNC_TUP = 0.002
+-- 偏離常駐線（摘要 offMs／offN／offMax、片段 offset；排除清單見 offsetKpi）：沒人持有行駛線時 |ld|（車身 − 期望線＝
+-- 夾過路寬的常駐線）超過 OFF_LAT_M；鏈式停留（lc）改量車身 − 夾過的常駐線 rsl——鏈著時期望線就是停留 lane，
+-- 「繞完一直走路邊」正是這段（玩家回報，事故之外完全沒被錄到）。連續 ≥OFF_MIN_MS 才算一段，單段達 OFF_CLIP_MS
+-- 觸發 offset 片段（每段一次）。
+local OFF_LAT_M = 1
+local OFF_MIN_MS = 2000
+local OFF_CLIP_MS = 8000
 
 U.PRE_MS, U.CHUNK, U.CLIP_MAX, U.TOW_SYNC_MS = PRE_MS, CHUNK, CLIP_MAX, TOW_SYNC_MS
+U.CLIP_EV_MAX, U.THIN_AFTER_MS, U.THIN_GAP_MS = CLIP_EV_MAX, THIN_AFTER_MS, THIN_GAP_MS
+U.CLIP_TOTAL_MAX = CLIP_TOTAL_MAX
+U.OFF_MIN_MS, U.OFF_CLIP_MS, U.PRE_THIN_BEFORE_MS = OFF_MIN_MS, OFF_CLIP_MS, PRE_THIN_BEFORE_MS
 
 -- 片段優先級：數字越小越重要（伺服器每人 32 段滿了先覆蓋數字大的）。
 -- detour（1004b）：自動／HUD 改道請求（不論成敗）——事前 PRE_MS 看得到判堵、寬帶判定與倒車，判斷是否太早改道。
+-- offset：單段偏離常駐線達 OFF_CLIP_MS（不是事故，最先被覆蓋）。
 local PRI = { stuck = 1, fault = 1, contact = 2, impact = 2, trailer = 2, takeover = 3, unstick = 3, route = 3,
-    detour = 3, brake = 4 }
+    detour = 3, brake = 4, offset = 4 }
 U.PRI = PRI
 local STOP_KIND = {
     UI_MinidoracatAutoDrive_StopStuck = "stuck",
@@ -237,6 +262,8 @@ function U.begin(pn, now, header, profile)
         -- 1004e 越野推力：越野跟線毫秒；「想加速」相鄰兩筆同地表的對——越野／鋪面的毫秒與速度增量（m/s），
         -- 越野對加速度 <1.5 m/s² 的毫秒、越野對有前推輔助的毫秒、遞增倍率頂到 3 的毫秒。aSurf／aSpd＝前一筆狀態。
         oMs = 0, oaMs = 0, oaDv = 0, olMs = 0, oasMs = 0, obMs = 0, paMs = 0, paDv = 0, aSurf = nil, aSpd = nil,
+        -- 偏離常駐線（offsetKpi）：累計 ms／段數／最長一段 ms；offSince／offLast＝本段第一筆／最近一筆，offClip＝本段已觸發片段
+        offMs = 0, offN = 0, offMax = 0, offSince = nil, offLast = nil, offClip = false,
         halfL = type(profile) == "table" and finite(profile.halfL) and profile.halfL or IMPACT_HALF_L,
         vmax = type(profile) == "table" and profile.maxSpeed or nil,
         svLim = nil,
@@ -255,21 +282,28 @@ function U.begin(pn, now, header, profile)
     return u
 end
 
-local function push(u, line, ts)
+-- isEv＝事件列。片段擷取中：full（樣本預算 CLIP_MAX 用完）之前樣本與事件共用預算，觸發 THIN_AFTER_MS 後的樣本降到 5Hz；
+-- full 之後樣本不收，事件改吃 CLIP_EV_MAX、照收到窗結束（fullN＝full 那刻的列數；整段上限在 finishClip 再裁）。
+local function push(u, line, ts, isEv)
     local i = u.ringHead % RING_N + 1
     u.ringHead = i
     u.ring[i] = line
     u.ringTs[i] = ts
     if u.ringN < RING_N then u.ringN = u.ringN + 1 end
     local cap = u.cap
-    if cap then
-        if cap.chars + #line + 1 <= CLIP_MAX then
-            cap.n = cap.n + 1
-            cap.lines[cap.n] = line
-            cap.chars = cap.chars + #line + 1
-        else
-            cap.full = true
-        end
+    if not cap then return end
+    if not isEv and cap.lastS and ts - cap.t0 >= THIN_AFTER_MS and ts - cap.lastS < THIN_GAP_MS then return end
+    local len = #line + 1
+    if not cap.full and cap.chars + len > CLIP_MAX then cap.full, cap.fullN = true, cap.n end
+    if not cap.full then
+        if not isEv then cap.lastS = ts end
+        cap.n = cap.n + 1
+        cap.lines[cap.n] = line
+        cap.chars = cap.chars + len
+    elseif isEv and cap.evChars + len <= CLIP_EV_MAX then
+        cap.n = cap.n + 1
+        cap.lines[cap.n] = line
+        cap.evChars, cap.evN = cap.evChars + len, cap.evN + 1
     end
 end
 
@@ -295,43 +329,66 @@ local function hourlyOk(pn, now)
     return k < CLIPS_PER_HOUR
 end
 
--- 出事：已在擷取就併入（升級優先級、延長事後窗）；否則從 ring 取事前 PRE_MS 開新片段。
+local finishClip -- 定義在下方（trigger 要先收掉 full 的片段）
+
+-- 出事：已在擷取就併入（升級優先級、延長事後窗）；否則從 ring 取事前 PRE_MS 開新片段。full 的片段只剩事件在收：
+-- 配額允許開新片段時先收掉它、新片段照常帶事前窗與樣本（舊制 full 當場收窗，下一個事故本來就有自己的片段）。
 local function trigger(u, now, kind)
     u.lastAnomaly = now
     incident(u, kind, now)
     local pri = PRI[kind] or 4
     local cap = u.cap
-    if cap then
+    if cap and not cap.full then
         if pri < cap.pri then cap.pri, cap.kind = pri, kind end
         return
     end
-    if u.clips >= CLIPS_PER_DRIVE then return end
     local last = u.cooldown[kind]
-    if last and now >= last and now - last < KIND_COOLDOWN_MS then return end
-    if not hourlyOk(u.pn, now) then return end
+    if u.clips >= CLIPS_PER_DRIVE or (last and now >= last and now - last < KIND_COOLDOWN_MS)
+            or not hourlyOk(u.pn, now) then
+        if cap and pri < cap.pri then cap.pri, cap.kind = pri, kind end
+        return
+    end
+    if cap then finishClip(u, now) end
     u.cooldown[kind] = now
     cap = { kind = kind, pri = pri, t0 = now, x = u.lastX, y = u.lastY,
         spd = u.sSpd, tgt = u.sTgt, mode = u.sMode, lat = u.sLat, rem = u.sRem, cr = u.sCap, fbw = u.sFbw,
-        lines = {}, n = 0, chars = 0, full = false }
-    -- ring 由舊到新：找第一筆 ≥ t0-PRE_MS
+        lines = {}, n = 0, chars = 0, full = false, lastS = nil, evChars = 0, evN = 0 }
+    -- ring 由舊到新排：從最新往回找事前窗的起點（ts ≥ t0-PRE_MS）。早於 t0-PRE_THIN_BEFORE_MS 的樣本與上一筆收進的樣本
+    -- （較新那筆）間隔 <THIN_GAP_MS 就跳過（5Hz；事件全收）。10Hz 大樣本讓事前窗本身仍超過 CLIP_MAX 時捨最舊的
+    -- （片段總長才有上限，整段另由 finishClip 夾在 CLIP_TOTAL_MAX）。wStart＝實際收進的第一列時間：更早的事件改走 finishClip 的窗前事件。
     -- Kahlua 的 % 是截斷式（KahluaThread.java:1060-1066）：ring 繞回後 idx 為負，(idx+k-1)%N 會得負數
     -- 索引、讀到 nil——舊制 PZ 內只收到繞回點之後的樣本（事前窗平均少一半；標準 Lua 的測試照綠）。
     -- 先加 N 讓被除數恆非負（idx ≥ -N）。
-    local from = now - PRE_MS
+    local from, thinBefore = now - PRE_MS, now - PRE_THIN_BEFORE_MS
     local idx = u.ringHead - u.ringN
-    local k = 1
-    while k <= u.ringN do
+    local first, chars, ws, keptS, keep = u.ringN + 1, 0, from, nil, {}
+    local k = u.ringN
+    while k >= 1 do
         local j = (idx + k - 1 + RING_N) % RING_N + 1
         local ts = u.ringTs[j]
-        if ts and ts >= from then
-            local line = u.ring[j]
+        if not ts or ts < from then break end
+        local line = u.ring[j]
+        local isS = string.sub(line, 1, 8) == '{"t":"s"'
+        if not (isS and ts < thinBefore and keptS and keptS - ts < THIN_GAP_MS) then
+            local len = #line + 1
+            if chars + len > CLIP_MAX then cap.full = true; break end
+            chars, ws, keep[k] = chars + len, ts, true
+            if isS then keptS = ts end
+        end
+        first = k
+        k = k - 1
+    end
+    k = first
+    while k <= u.ringN do
+        if keep[k] then
             cap.n = cap.n + 1
-            cap.lines[cap.n] = line
-            cap.chars = cap.chars + #line + 1
+            cap.lines[cap.n] = u.ring[(idx + k - 1 + RING_N) % RING_N + 1]
         end
         k = k + 1
     end
-    cap.wStart = from
+    cap.chars = chars
+    cap.wStart = ws
+    if cap.full then cap.fullN = cap.n end
     u.cap = cap
     u.clips = u.clips + 1
     local list = hourly[u.pn]
@@ -367,7 +424,7 @@ local function enqueueMsg(pn, msg)
     return true
 end
 
-local function finishClip(u, now)
+finishClip = function(u, now)
     local cap = u.cap
     if not cap then return end
     u.cap = nil
@@ -379,21 +436,45 @@ local function finishClip(u, now)
             .. ',"rem":' .. jround(cap.rem, 1)
             .. ',"cap":' .. jstr(cap.cr or "") .. ',"fbw":' .. jstr(cap.fbw or "") .. '}'
     end
-    local head = '{"t":"clip","v":1,"kind":' .. jstr(cap.kind) .. ',"pri":' .. cap.pri
-        .. ',"trig":' .. jnum(cap.t0) .. ',"end":' .. jnum(now)
-        .. ',"drive":' .. jnum(u.drive) .. ',"pre":' .. PRE_MS
-        .. ',"x":' .. jnum(cap.x) .. ',"y":' .. jnum(cap.y) .. at
-        .. ',"full":' .. (cap.full and "true" or "false") .. '}'
+    local function headOf(evx)
+        return '{"t":"clip","v":1,"kind":' .. jstr(cap.kind) .. ',"pri":' .. cap.pri
+            .. ',"trig":' .. jnum(cap.t0) .. ',"end":' .. jnum(now)
+            .. ',"drive":' .. jnum(u.drive) .. ',"pre":' .. PRE_MS
+            .. ',"x":' .. jnum(cap.x) .. ',"y":' .. jnum(cap.y) .. at
+            .. ',"full":' .. (cap.full and "true" or "false") .. ',"evx":' .. evx .. '}'
+    end
+    local header = type(u.header) == "string" and u.header or nil
+    -- 路線點列與整趟事件只補事前窗之前的（窗內的已在取樣序列裡）。
+    local route = u.routeLine and (u.routeTs or 0) < cap.wStart and u.routeLine or nil
+    -- 整段 ≤ CLIP_TOTAL_MAX（舊伺服器上限，見常數註解）：固定列（首行以 full 後事件全收的 evx 估，最終只會更短）＋
+    -- 窗內列。固定列異常長（樣本已滿）時捨最舊的窗內列；full 後的事件依序能放就放（先到先收，大的放不下不擋後面小的）。
+    local fixed = #headOf(cap.evN) + 1 + (header and #header + 1 or 0) + (route and #route + 1 or 0)
+    local fullN = cap.fullN or cap.n
+    local lo, chars = 1, cap.chars
+    while lo <= fullN and fixed + chars > CLIP_TOTAL_MAX do
+        chars = chars - #cap.lines[lo] - 1
+        lo = lo + 1
+    end
+    local room = CLIP_TOTAL_MAX - fixed - chars
+    local keep, evx, evChars = {}, 0, 0
+    local i = fullN + 1
+    while i <= cap.n do
+        local len = #cap.lines[i] + 1
+        if evChars + len <= room then keep[i], evx, evChars = true, evx + 1, evChars + len end
+        i = i + 1
+    end
+    local head = headOf(evx)
     local parts, n = { head }, 1
     local used = #head + 1
-    if type(u.header) == "string" then
-        n = n + 1; parts[n] = u.header; used = used + #u.header + 1
+    if header then
+        n = n + 1; parts[n] = header; used = used + #header + 1
     end
-    -- 路線點列與整趟事件只補事前窗之前的（窗內的已在取樣序列裡）。
-    if u.routeLine and (u.routeTs or 0) < cap.wStart then
-        n = n + 1; parts[n] = u.routeLine; used = used + #u.routeLine + 1
+    if route then
+        n = n + 1; parts[n] = route; used = used + #route + 1
     end
-    local budget = CLIP_MAX - cap.chars - used
+    local budget = CLIP_MAX - chars - used
+    local left = CLIP_TOTAL_MAX - chars - used - evChars
+    if left < budget then budget = left end
     local startK = 1
     local evBytes = 0
     local k = u.evN
@@ -414,9 +495,11 @@ local function finishClip(u, now)
         end
         k = k + 1
     end
-    local i = 1
+    i = lo
     while i <= cap.n do
-        n = n + 1; parts[n] = cap.lines[i]
+        if i <= fullN or keep[i] then
+            n = n + 1; parts[n] = cap.lines[i]
+        end
         i = i + 1
     end
     enqueueMsg(u.pn, {
@@ -430,7 +513,8 @@ local function captureTick(u, now)
     local cap = u.cap
     if not cap then return end
     local age = now - cap.t0
-    if cap.full or age >= POST_MAX_MS
+    -- full 不收窗：之後的事件（脫困結果、release）照收到窗結束（push 的 CLIP_EV_MAX）
+    if age >= POST_MAX_MS
             or (age >= POST_MIN_MS and now - u.lastAnomaly >= QUIET_MS) then
         finishClip(u, now)
     end
@@ -504,6 +588,54 @@ local function accelKpi(u, phys, speed, target, mode, gap)
     if finite(asb) and asb >= 3 - 1e-6 then u.obMs = u.obMs + gap end
 end
 
+-- 偏離常駐線 KPI（常數註解見 OFF_LAT_M）。座標：lat／el／rsd／rsl 都是相對路線剖面中心線的橫向（同號同軸）；ld＝lat−el。
+-- rsd 是沒夾路寬的常駐 bias（彎內側、窄段會差 1m 以上），所以平常量 ld（沒人持有時 el＝夾過的常駐線）、鏈著時量
+-- lat−rsl（Driver 只在 lc 時寫的夾過常駐線；缺就不算）。有主的偏移不算：繞行（AVOID）、RETURN、判堵／停等（HOLD）、
+-- 脫困（RECOVER）都不是 controlState TRACK；殭屍軟縫（zln）；斜切保持與會車側移的期望線就是持有的 lane（ld 小）；
+-- 調頭＝車頭背向路線（|att| ≥ π/2）；起步與繞行放手後的接回保護（sg，START_GUARD_MAX_M 內）；起步越野接線＝rs < apr。
+-- 原始間隔超過 IMPACT_GAP_MAX_MS（中間沒取樣）重新起算一段。
+local function offsetKpi(u, phys, lat, mode, line, now, gap)
+    local dev = nil
+    if mode == "follow" and type(phys) == "table" and phys.controlState == "TRACK" and phys.zombieLane == nil
+            and phys.startGuard ~= true then
+        dev = phys.latDev
+        if phys.laneChained == true then
+            local rsl = phys.residentLane
+            dev = (finite(lat) and finite(rsl)) and lat - rsl or nil
+        end
+        local att = phys.routeHeadingError
+        if not finite(dev) or (dev <= OFF_LAT_M and dev >= -OFF_LAT_M)
+                or (finite(att) and (att >= 1.5708 or att <= -1.5708)) then
+            dev = nil
+        elseif finite(u.apr) and u.apr > 0 then
+            local rs = tonumber(string.match(line, '"rs":([%-%d%.eE%+]+)'))
+            if finite(rs) and rs < u.apr then dev = nil end
+        end
+    end
+    if dev == nil then
+        u.offSince = nil
+        return
+    end
+    if u.offSince == nil or gap > IMPACT_GAP_MAX_MS then
+        u.offSince, u.offLast, u.offClip = now, now, false
+        return
+    end
+    local dur = now - u.offSince
+    if dur >= OFF_MIN_MS then
+        if dur - (now - u.offLast) < OFF_MIN_MS then
+            u.offN, u.offMs = u.offN + 1, u.offMs + dur -- 本筆剛過門檻：整段到此的時間一次算進去
+        else
+            u.offMs = u.offMs + (now - u.offLast)
+        end
+        if dur > u.offMax then u.offMax = dur end
+        if dur >= OFF_CLIP_MS and not u.offClip then
+            u.offClip = true
+            trigger(u, now, "offset")
+        end
+    end
+    u.offLast = now
+end
+
 -- 取樣：line 已由 MDAD_Diagnostics 編好（與本機紀錄同一字串，不重複編碼）。cls＝這筆若在撞擊段內，
 -- Diagnostics 在上升緣算的分類（U.impactClass；整段沿用，不在撞擊段＝nil）。
 function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
@@ -568,6 +700,7 @@ function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
     if type(capReason) == "string" then u.capMs[capReason] = (u.capMs[capReason] or 0) + dt end
     speedKpi(u, phys, spd, target, mode, dt, capReason)
     accelKpi(u, phys, speed, target, mode, gap)
+    offsetKpi(u, phys, lat, mode, line, now, gap)
     if finite(fdt) then
         local b = fdt < 10 and 1 or fdt < 17 and 2 or fdt < 25 and 3 or fdt < 34 and 4
             or fdt < 50 and 5 or fdt < 100 and 6 or 7
@@ -638,7 +771,7 @@ function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
 end
 
 function U.event(u, line, now, name, a)
-    push(u, line, now)
+    push(u, line, now, true)
     name = tostring(name or "")
     u.evc[name] = (u.evc[name] or 0) + 1
     if name ~= "replan" then
@@ -728,6 +861,7 @@ local function summaryText(u, now, reason, withMaps)
         .. ',"olMs":' .. jnum(u.olMs) .. ',"oasMs":' .. jnum(u.oasMs) .. ',"obMs":' .. jnum(u.obMs)
         .. ',"paMs":' .. jnum(u.paMs) .. ',"paDv":' .. jround(u.paDv, 100)
         .. ',"eta0":' .. jround(u.eta0, 10) .. ',"eta0t":' .. jround(u.eta0t, 1)
+        .. ',"offMs":' .. jnum(u.offMs) .. ',"offN":' .. u.offN .. ',"offMax":' .. jnum(u.offMax)
     if withMaps then
         text = text .. ',"ev":' .. mapJson(u.evc) .. ',"mode":' .. mapJson(u.modeMs)
             .. ',"cap":' .. mapJson(u.capMs) .. ',"loss":' .. lossJson(u.loss)

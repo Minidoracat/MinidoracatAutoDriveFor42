@@ -61,6 +61,10 @@
 15b. telemetry 事件鍵 ⊆ EK — encodeEvent 只輸出 EK 白名單的鍵，其餘靜默丟掉；Driver 的
                            diagEvent 與任何直接的 MDADDiagnostics.event 呼叫，payload 必須是
                            字面表（或省略），每個鍵都在 EK，否則玩家上傳的紀錄少那一欄
+15c. telemetry 自足       — Driver／Sensor／Trailer 裡 getDebug 閘住的 print，附近要有 diagEvent／
+                           MDADDiagnostics.event、phys. 指派，或 `-- telemetry: <欄位或事件>`／
+                           `-- telemetry: n/a <理由>` 註記；沒對應＝那筆資料只在 console，玩家
+                           附的 session log 復盤不到（AGENTS.md「telemetry 自足」）
 
 新增檢查時：同步把對應的坑記進 AGENTS.md 踩坑錄，並依「踩坑進化協議」回流到
 pz-mod-template（見 AGENTS.md）。
@@ -1553,6 +1557,43 @@ else:
         ek_issues.append("MDAD_Driver.lua 找不到任何 diagEvent 呼叫（解析失效）")
 fail("telemetry 事件 payload 鍵 ⊆ EK（不在白名單的鍵會被靜默丟掉）", ek_issues) if ek_issues else ok(
     f"telemetry 事件 payload 鍵 ⊆ EK（{ek_calls} 個事件呼叫、EK {len(EK_KEYS)} 鍵）")
+
+# ---- 15c. telemetry 自足：getDebug 閘住的 print 要有 telemetry 對應 ----
+# AGENTS.md 鐵則（2026-09-04 使用者裁定）：加 console debug print 的同一刀，同樣的資料要進樣本欄位或事件 payload。
+# 15b 只管事件鍵；這節管「print 旁邊有沒有 telemetry」：rotProbeClear、traffic lead、逐候選掃掠曾經只在 console。
+# 判定：print 往上 TC_GATE 行內有 getDebug()＝閘住；從那行 getDebug 往上 TC_NEAR 行到 print 往下 3 行，要有
+# diagEvent(／MDADDiagnostics.event(、phys.<欄> 指派，或註記 `-- telemetry: <欄位或事件>`／`-- telemetry: n/a <理由>`。
+TC_FILES = ("MDAD_Driver.lua", "MDAD_Sensor.lua", "MDAD_Trailer.lua")
+TC_GATE, TC_NEAR = 6, 12
+TC_PAIR = re.compile(r"(?<![\w.:])diagEvent\s*\(|(?<![\w.:])MDADDiagnostics\.event\s*\(|\bphys\.\w+(?:\s*,\s*phys\.\w+)*\s*=(?!=)")
+TC_NOTE = re.compile(r"--\s*telemetry:\s*(?:n/a\s+\S|(?!n/a)\S)")
+tc_issues, tc_prints = [], 0
+tc_seen = [f for f in LUA_FILES if os.path.basename(f) in TC_FILES]
+if not any(os.path.basename(f) == "MDAD_Driver.lua" for f in tc_seen):
+    tc_issues.append("缺 client/MDAD_Driver.lua")
+for f in tc_seen:
+    with open(f, encoding="utf-8") as fh:
+        raw = fh.read()
+    raw_lines, code_lines = raw.split("\n"), lua_code_only(raw).split("\n")
+    rel = os.path.relpath(f, REPO)
+    for i, code in enumerate(code_lines):
+        if not re.search(r"(?<![\w.:])print\s*\(", code):
+            continue
+        gate = next((j for j in range(i, max(-1, i - TC_GATE - 1), -1) if "getDebug()" in code_lines[j]), None)
+        if gate is None:
+            continue
+        tc_prints += 1
+        lo, hi = max(0, gate - TC_NEAR), min(len(code_lines), i + 4)
+        if any(TC_PAIR.search(code_lines[k]) for k in range(lo, hi)):
+            continue
+        if any(TC_NOTE.search(raw_lines[k]) for k in range(lo, hi)):
+            continue
+        tc_issues.append(f"{rel}:{i + 1} getDebug print 沒有 telemetry 對應（diagEvent／phys. 指派／`-- telemetry:` 註記）："
+                         f"{raw_lines[i].strip()[:70]}")
+if not tc_issues and tc_prints == 0:
+    tc_issues.append("找不到任何 getDebug 閘住的 print（解析失效）")
+fail("telemetry 自足（getDebug print 要有樣本欄位／事件或註記）", tc_issues) if tc_issues else ok(
+    f"telemetry 自足（{tc_prints} 個 getDebug print 都有 telemetry 對應或註記）")
 
 # ---- 16. 意圖層階段 2 結構契約（RECOVER 單一進口）----
 # 2026-09-01 重構階段 2 主體 2：舊制五個需求方各自呼 startRecoveryAttempt，
