@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1011a"
+Drive.REV = "1012a"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -12372,7 +12372,7 @@ local function replan(s, vehicle, playerNum)
 end
 
 -- 倒車脫困：regulator 不會倒車（CarController 只向前供油），改用向後衝量直接推
--- （relPos 全零＝純中心力，不產生力矩）。
+-- （relPos 全零＝純中心力，不產生力矩；拖車另有回正側推，與倒車推力合成同一個 impulse，見推車段）。
 -- 「每幀最多一次 addImpulse」在此同樣成立——unstick 幀不跑 stepFollow，不會疊加。
 -- 玩家接手（讓位）與失效閘門都在呼叫端先行，這裡只管推車與收手判定。
 local function stepUnstick(s, vehicle, playerNum, now)
@@ -12390,7 +12390,7 @@ local function stepUnstick(s, vehicle, playerNum, now)
     local dx, dy = vx - s.unstickX, vy - s.unstickY
     local dist2 = dx * dx + dy * dy
     s.unstickDistance = sqrt(dist2)
-    s.reverseForce = 0
+    s.reverseForce, s.brakeImpulseThis = 0, false -- 本幀還沒施力（推車段的 applySteering 認 brakeImpulseThis）
     vehicle:setRegulator(false)
 
     -- Success does not immediately hand reverse velocity back to forward control.
@@ -12619,18 +12619,19 @@ local function stepUnstick(s, vehicle, playerNum, now)
     if flen2 > 1e-6 then
         local force = UNSTICK_PUSH * MASS_BASE * mass * IMPULSE_SCALE * (mult / MULT_NORM)
         if speedKmh < -TUNE.UNSTICK_REVERSE_KMH then force = 0 end -- 倒車限速（理由見 TUNE）
-        if force > 0 then
+        s.reverseForce = force
+        if towPhi then
+            -- 倒車時掛車不穩定（折角自己變大）：牽引車往掛車方向轉把折角拉回 0（MDADTrailer.reverseSteer）。
+            -- 倒車推力當中線分量（assistForce 負＝往後，與力臂平行、不產生力矩）和回正側推合成同一個 impulse：
+            -- addImpulse 一幀一個槽，分兩次送時第二次較短被忽略、較長整幀作廢（1012a 以前回正幾乎沒施出去）。
+            applySteering(s, vehicle, fwd, fx, fy, MDADTrailer.reverseSteer(towPhi),
+                speedKmh, mult, false, -force)
+        elseif force > 0 then
             local impulse = BaseVehicle.allocVector3f()
             impulse:set(-force * fx, 0, -force * fy)
             fwd:set(0, 0, 0)
             vehicle:addImpulse(impulse, fwd)
             BaseVehicle.releaseVector3f(impulse)
-        end
-        s.reverseForce = force
-        if towPhi then
-            -- 倒車時掛車不穩定（折角自己變大）：牽引車往掛車方向轉把折角拉回 0（MDADTrailer.reverseSteer）
-            applySteering(s, vehicle, fwd, fx, fy, MDADTrailer.reverseSteer(towPhi),
-                speedKmh, mult, false, 0)
         end
     end
     BaseVehicle.releaseVector3f(fwd)

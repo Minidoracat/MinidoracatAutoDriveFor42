@@ -23253,6 +23253,9 @@ drive.scenarioTowRehitch()
 --   (thr-mid)   起手在上限內、還沒實際退出 UNSTICK_MIN_M 就折到上限：不算成功、退回額度、回停等。違規證明：拿掉 stepUnstick
 --               的位移條件（照舊當倒夠）＝紅。
 --   (thr-keep)  已退出 UNSTICK_MIN_M 才折到上限：照舊當倒夠進 settle、額度照扣。違規證明：拿掉 dist2＝1e9＝紅。
+--   (thr-slot)  1012a 倒車中（4 km/h、折角 ±10°）：倒車推力與回正側推合成同一個 addImpulse——每幀恰一次、沿中線往後、
+--               偏航力矩把折角拉回（φ>0＝torqueY>0＝牽引車航向變小）。違規證明：改回先 addImpulse 推、再 applySteering
+--               （assistForce 0）＝每幀兩次紅；reverseSteer 反號＝力矩紅。
 function drive.scenarioTowHitchReverse()
     scenario("拖車折角已超過倒車上限：不倒、不算成功、不吃額度；倒車中途才折到上限照舊算倒夠")
     local oldSandbox, oldVeh, oldGet = SandboxVars, dveh, getSpecificPlayer
@@ -23341,6 +23344,27 @@ function drive.scenarioTowHitchReverse()
         and e.phase == "rear-blocked" and e.rear == "hitch" and (e.d or 1) < T.UNSTICK_MIN_M,
         "(thr-mid) 沒實際退出就折到上限：不算成功、退回額度（started=" .. tostring(started) .. " mode=" .. tostring(st.mode)
         .. " attempts=" .. tostring(st.episodeAttempts) .. " ev=" .. phases() .. "）")
+
+    -- (thr-slot)
+    psi = math.rad(10)
+    recover()
+    local inRev = st.mode == "unstick" and st.episodeAttempts == 1
+    dveh._speed = -4 -- 倒車中：拖車側推隨車速縮放（TOW_STEER_FULL_KMH），靜止＝0、量不到回正
+    local imp, slotOk, slotLog, bad0 = dveh._imp, true, {}, drive.bad.impulse
+    for _, deg in ipairs({ 10, 10, -10, -10 }) do
+        psi = math.rad(deg)
+        imp.total = 0
+        tick()
+        local back = imp.x * dveh._fwdX + imp.z * dveh._fwdY
+        slotLog[#slotLog + 1] = string.format("%d:%d/%.0f/%.0f", deg, imp.total, back, imp.torqueY)
+        if not (st.mode == "unstick" and imp.total == 1 and back < 0 and imp.torqueY * deg > 0) then slotOk = false end
+    end
+    checkTrue(inRev and slotOk and drive.bad.impulse == bad0,
+        "(thr-slot) 倒車推力與回正側推同一個 addImpulse：往後、力矩把折角拉回（mode=" .. tostring(st.mode) .. " "
+        .. table.concat(slotLog, " ") .. "）")
+    dveh._speed = 0
+    psi = math.rad(45) -- 一寸未退就折到上限＝退回額度、回停等（同 thr-mid），接 (thr-keep)
+    tick()
 
     -- (thr-keep)
     psi = math.rad(10)
