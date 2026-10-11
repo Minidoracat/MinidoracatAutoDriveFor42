@@ -117,7 +117,7 @@ Plus a screwdriver.
 [h3]Stop reason[/h3]
 [list]
 [*] [b]When it shows[/b]: when autodrive is forced to stop and hand back control, the HUD status keeps showing why (e.g. "Stopped: stuck", "Stopped: animal", "Stopped: device") until the next start.
-[*] [b]Causes[/b]: stuck, blocked by another player or an animal for too long, area not loading, route lost, too far off the road, trailer can't make a turn, engine off, GPS, Map Watch Positioning Module or Autopilot failure.
+[*] [b]Causes[/b]: stuck, blocked by another player or an animal for too long, area not loading, route lost, too far off the road, trailer can't make a turn or went out of sync, engine off, GPS, Map Watch Positioning Module or Autopilot failure.
 [*] [b]Details[/b]: hover the status or the start button for the full reason and how many minutes ago.
 [*] [b]Not shown for[/b]: your own stop, manual takeover, leaving the vehicle or arrival.
 [*] [b]Other vehicles[/b]: hidden in another vehicle, shown again back in the original one.
@@ -196,6 +196,7 @@ Plus a screwdriver.
 [*] [b]When stuck[/b]: tries another gap, or reverses after checking behind.
 [*] [b]Whole road blocked, shoulders included[/b]: stops, scans wider and goes around across grass or open ground, driving straight over bushes.
 [*] [b]When towing[/b]: avoids bushes and also checks the trailer's path.
+[*] [b]Reversing with a trailer[/b]: steers while backing up to keep the trailer in line; it won't reverse once the trailer is already folded too far.
 [*] [b]Automatic reroute[/b]: otherwise it asks navigation for a route around the blockage; later reroutes on the same trip also avoid earlier blockages ("Reroute automatically when blocked", on by default).
 [*] [b]Manual reroute[/b]: the HUD [b]Reroute[/b] button works any time.
 [*] [b]Hand back[/b]: only with no route.
@@ -207,6 +208,12 @@ Plus a screwdriver.
 [*] [b]What it does[/b]: when blocked both ahead and behind and unable to back up, it first eases sideways toward whichever side has room, then backs out.
 [*] [b]No room[/b]: if neither side has room or the vehicle won't move, it holds, reroutes or hands back control as usual.
 [*] [b]Not used[/b]: when towing or during a U-turn.
+[/list]
+[h3]Re-hitching a trailer that drops out of sync (multiplayer)[/h3]
+[list]
+[*] [b]What happens[/b]: in multiplayer the trailer sometimes vanishes from your screen because of a sync glitch, while on the server it is still there and still hitched.
+[*] [b]Re-hitch[/b]: autodrive stops, waits for the trailer to reappear, backs up until it hitches again, then continues along the route; the status shows "Re-hitching" with a voice line. Towing another car works the same way.
+[*] [b]When it hands back instead[/b]: semi-trailers, or when the trailer doesn't come back in time, the car can't line up, or something is behind it. The status shows "Trailer out of sync"; back up next to the trailer yourself and it hitches again once it reappears, then start autodrive again.
 [/list]
 [h3]Zombies, corpses and other players[/h3]
 [list]
