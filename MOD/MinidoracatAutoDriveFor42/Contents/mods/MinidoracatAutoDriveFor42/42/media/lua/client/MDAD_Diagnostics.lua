@@ -162,6 +162,8 @@ local EK = {
     -- 找到那台的 script（車輛 id 會被新車重用）、脫開點 100m 內同 script 車數（不含牽引車）與最近那台的距離／id
     -- （dt＝脫開後 ms、vid 共用上面的鍵）
     "rmw", "ox", "oy", "od", "found", "same", "fx", "fy", "fd", "fsc", "sn", "sd", "sv",
+    -- 1012 blocked 主擋物（Driver Drive.blockSprite）：hx0／hy0（退 hitX／hitY、x／y）1 格內擋車 sprite 名、分類、格心距 m
+    "sp0", "sc0", "sd0",
 }
 
 local function logOnce(msg)

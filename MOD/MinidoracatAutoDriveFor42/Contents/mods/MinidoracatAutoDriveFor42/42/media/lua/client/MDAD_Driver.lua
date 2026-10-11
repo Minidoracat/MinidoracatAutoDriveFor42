@@ -1936,9 +1936,10 @@ end
 
 local diagFail
 
--- Driver 一律送具名 payload。
+-- Driver 一律送具名 payload。blocked 事件（每次發事件一次、冷路徑）先補主命中物 sprite（Drive.blockSprite）。
 local function diagEvent(s, playerNum, name, payload)
     if not s or not s.diag then return end
+    if name == "blocked" then pcall(Drive.blockSprite, s, payload) end
     local ok, err = pcall(MDADDiagnostics.event, playerNum, name, payload)
     if not ok then diagFail(s, playerNum, "event " .. tostring(name) .. " failed", err) end
 end
@@ -7414,6 +7415,19 @@ function Drive.contactNote(s, vehicle, playerNum, i, hitS, hitL, hitX, hitY)
     diagEvent(s, playerNum, "contact", { x = hitX, y = hitY, s = hitS, l = hitL, rs = s.lastSNow,
         hitR = sen.hardR and sen.hardR[i], speed = okV and kmh or nil,
         sprite = nm, scost = cls, hardD = d and math.floor(d * 100 + 0.5) / 100 })
+end
+
+-- blocked 事件的主擋物身分（2026-10-12；diagEvent 在發 blocked 事件時呼叫一次，不進每幀路徑）：主命中點＝候選鏈第一個
+-- 掃掠失敗 hx0／hy0，沒有就退 hitX／hitY（guard 判死點、sweep 全滅的最後命中），再沒有就退 x／y（群最近擋線點）；
+-- 1 格內 MDADSensor.hardSpriteNear 的 sprite 名、分類、格心距寫進 sp0 sc0 sd0，讀不到就缺。全 pcall。
+-- 原因：正式服熱點（13 人 23 趟）卡在一排 thin 點前，telemetry 說不出是什麼物件。
+function Drive.blockSprite(s, a)
+    local x, y = a.hx0, a.hy0
+    if not finite(x) or not finite(y) then x, y = a.hitX, a.hitY end
+    if not finite(x) or not finite(y) then x, y = a.x, a.y end
+    if not finite(x) or not finite(y) then return end
+    local nm, cls, d = MDADSensor.hardSpriteNear(s.sensor, getCell(), x, y, s.vehicle and s.vehicle:getZ() or 0, 1)
+    if nm ~= nil then a.sp0, a.sc0, a.sd0 = nm, cls, finite(d) and math.floor(d * 100 + 0.5) / 100 or nil end
 end
 
 -- Runs once per completed sensor snapshot, before the expected-path planner. It updates

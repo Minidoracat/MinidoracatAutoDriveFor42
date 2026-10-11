@@ -1299,11 +1299,11 @@ check(lpg == 100 and lpn >= 95, "(local) the local session keeps 10 Hz before t0
 
 -- 1010 偏離常駐線 KPI（摘要 offMs／offN／offMax）與 offset 片段：玩家回報「繞完一直走路邊」沒事故就完全沒錄到。
 -- 有主的偏移不算：繞行 AVOID、RETURN、判堵 HOLD、殭屍軟縫 zln、調頭（|att| ≥ π/2）、接回保護 sg、起步越野接線（rs < apr）；
--- 鏈式停留（lc）量車身−夾過的常駐線 rsl（鏈著時 ld 對的是停留 lane；rsd 沒夾路寬）。連續 ≥2 秒才算一段，單段 8 秒觸發
--- offset（pri 4）。
+-- 鏈式停留（lc）量車身−夾過的常駐線 rsl（鏈著時 ld 對的是停留 lane；rsd 沒夾路寬）。連續 ≥2 秒才算一段，單段 OFF_CLIP_MS（1012 起
+-- 5 秒，原 8 秒）觸發 offset（pri 4）。
 -- 違規證明：拿掉任一項排除＝(owned) offN／offMs 紅；鏈式不改量＝(chain) 紅；鏈式量沒夾的 rsd＝(chain-rsd) 紅；
 -- 短於 2 秒也算＝(short) 紅；不觸發片段／伺服器 KINDS 漏 offset＝(clip) 紅。
-scenario("1010 offset KPI: unowned lateral offset > 1m for >= 2s; owned offsets excluded; 8s raises an offset clip")
+scenario("1010 offset KPI: unowned lateral offset > 1m for >= 2s; owned offsets excluded; OFF_CLIP_MS raises an offset clip")
 nowMs = nowMs + 3600000
 start()
 local offDrive = nowMs
@@ -1356,7 +1356,7 @@ checkEq(numO("offMs"), 8800 + 2800, "(owned)(chain) offMs = 8.8s + 2.8s")
 checkEq(numO("offMax"), 8800, "longest segment 8.8s")
 check(#offSum < U.CHUNK, "summary still fits one chunk (" .. #offSum .. ")")
 local offRow = clipByTrig(offStart + U.OFF_CLIP_MS)
-check(offRow ~= nil, "(clip) an offset clip is raised 8s into the segment and indexed")
+check(offRow ~= nil, "(clip) an offset clip is raised OFF_CLIP_MS into the segment and indexed")
 checkEq(field(offRow or "", 7), "offset", "(clip) kind offset")
 checkEq(field(offRow or "", 8), "4", "(clip) offset priority 4")
 
@@ -1493,6 +1493,140 @@ check(string.find(rhText or "", '"phase":"rh-done"', 1, true) ~= nil, "(rh-win) 
 local _, rhSum = sumLines(rhDrive)
 check(string.find(rhSum, '["brake"', 1, true) == nil and string.find(rhSum, '["trailer"', 1, true) ~= nil,
     "(rh-brake) the rehitch lock-brake is not a brake incident")
+
+-- 1012 EngineOff（引擎沒在轉／電瓶沒電）交還出 fault 片段（pri 1）；不在 STOP_KIND 的交還（NotDriver）照舊不出。
+--   違規證明：STOP_KIND 拿掉 EngineOff＝(eng) 紅。
+scenario("1012 EngineOff handback raises a fault clip; other unmapped stop keys still do not")
+do
+    nowMs = nowMs + 3600000
+    start()
+    local d0 = nowMs
+    drive(3000)
+    D.stop(0, "UI_MinidoracatAutoDrive_EngineOff")
+    pump(60000)
+    local rows = clipsOf(d0)
+    checkEq(#rows, 1, "(eng) EngineOff handback: one clip")
+    checkEq(field(rows[1] or "", 7), "fault", "(eng) kind fault (same as UnsupportedVehicle; server KINDS unchanged)")
+    checkEq(field(rows[1] or "", 8), "1", "(eng) priority 1")
+    nowMs = nowMs + 3600000
+    start()
+    d0 = nowMs
+    drive(3000)
+    D.stop(0, "UI_MinidoracatAutoDrive_NotDriver")
+    pump(60000)
+    checkEq(#clipsOf(d0), 0, "(eng-neg) an unmapped stop key raises no clip")
+end
+
+-- 1012 摘要 tko／tkoA：takeover yield／manual 那刻最近一筆取樣的狀態（key spd tgt mode rem cap ctl）與距上一個異常（同 takeover
+-- 片段的 lastAnomaly；1012 起含 uturn probe=obstructed）的 ms；沒有異常不寫 tkoA；resume 清掉；沒接手的趟不寫。
+--   違規證明：不記 tko＝(tko) 紅；tkoA 在 trigger 之後算（＝0）＝(tkoA) 紅；沒有異常也寫 tkoA＝(tko-calm) 紅；resume 不清＝(tko-resume) 紅；
+--   uturn obstructed 不算異常＝(tko-uturn) 紅；uturn done 帶的首探也算＝(tko-uturn-done) 紅。
+scenario("1012 summary tko/tkoA: state at the takeover moment and ms since the last anomaly")
+do
+    local function tr(extra)
+        local t = { capReason = "profile", frameMs = 16, controlState = "TRACK" }
+        for k, v in pairs(extra or {}) do t[k] = v end
+        return t
+    end
+    local function tkoOf(sum) return string.match(sum, '"tko":(%b{})') end
+    local function tkoA(sum) return tonumber(string.match(sum, '"tkoA":(%-?%d+)')) end
+    -- (tko-calm) 平順行駛、玩家用方向盤接手：tko 帶狀態，沒有異常＝沒有 tkoA
+    nowMs = nowMs + 3600000
+    start()
+    local d0 = nowMs
+    drive(3000, { phys = tr() })
+    D.event(0, "takeover", { phase = "yield", key = "steer" })
+    D.stop(0, "takeover")
+    pump(60000)
+    local _, sum = sumLines(d0)
+    local tko = tkoOf(sum) or ""
+    check(string.find(tko, '"key":"steer"', 1, true) and string.find(tko, '"spd":30', 1, true)
+            and string.find(tko, '"tgt":40', 1, true) and string.find(tko, '"mode":"follow"', 1, true)
+            and string.find(tko, '"rem":500', 1, true) and string.find(tko, '"cap":"profile"', 1, true)
+            and string.find(tko, '"ctl":"TRACK"', 1, true),
+        "(tko) summary records the takeover state (" .. tko .. ")")
+    checkEq(tkoA(sum), nil, "(tko-calm) no anomaly before the takeover: no tkoA")
+    check(#sum < U.CHUNK, "(tko) summary still fits one chunk (" .. #sum .. ")")
+    -- (tkoA) 判堵 2 秒後踩煞車（manual）：tkoA＝最後一筆判堵樣本到接手
+    nowMs = nowMs + 3600000
+    start()
+    d0 = nowMs
+    drive(3000, { phys = tr({ controlState = "HOLD" }), blocked = true })
+    drive(2000, { phys = tr() })
+    D.event(0, "takeover", { phase = "manual", key = "brake" })
+    D.stop(0, "takeover")
+    pump(60000)
+    _, sum = sumLines(d0)
+    check(string.find(tkoOf(sum) or "", '"key":"brake"', 1, true) ~= nil, "(tkoA) manual takeover recorded with its key")
+    checkEq(tkoA(sum), 2000, "(tkoA) ms from the last blocked sample to the takeover")
+    -- (tko-resume) 讓位後恢復自駕、之後到站：不寫 tko
+    nowMs = nowMs + 3600000
+    start()
+    d0 = nowMs
+    drive(2000, { phys = tr() })
+    D.event(0, "takeover", { phase = "yield", key = "forward" })
+    drive(2000, { phys = tr() })
+    D.event(0, "takeover", { phase = "resume", ms = 2000 })
+    drive(2000, { phys = tr() })
+    D.stop(0, "arrive")
+    pump(60000)
+    _, sum = sumLines(d0)
+    check(sum ~= "" and tkoOf(sum) == nil and tkoA(sum) == nil, "(tko-resume) a resumed yield leaves no tko")
+    -- (tko-uturn) 調頭探到擋算異常：1.4 秒後接手＝tkoA 1400 且開 takeover 片段；done 帶的首探 obstructed 不算
+    nowMs = nowMs + 3600000
+    start()
+    d0 = nowMs
+    drive(2000, { phys = tr() })
+    D.event(0, "uturn", { phase = "probe", why = "gentle", probe = "obstructed", speed = 3 })
+    drive(1400, { phys = tr() })
+    D.event(0, "takeover", { phase = "yield", key = "steer" })
+    D.stop(0, "takeover")
+    pump(60000)
+    _, sum = sumLines(d0)
+    checkEq(tkoA(sum), 1400, "(tko-uturn) uturn probe obstructed counts as the last anomaly")
+    checkEq(field(clipsOf(d0)[1] or "", 7), "takeover", "(tko-uturn) and raises the takeover clip")
+    nowMs = nowMs + 3600000
+    start()
+    d0 = nowMs
+    drive(2000, { phys = tr() })
+    D.event(0, "uturn", { phase = "done", why = "aligned", probe = "obstructed", ms = 4000 })
+    drive(1400, { phys = tr() })
+    D.event(0, "takeover", { phase = "yield", key = "steer" })
+    D.stop(0, "takeover")
+    pump(60000)
+    _, sum = sumLines(d0)
+    check(tkoOf(sum) ~= nil and tkoA(sum) == nil and #clipsOf(d0) == 0,
+        "(tko-uturn-done) uturn done carrying the first probe is not an anomaly")
+end
+
+-- 1012 offset 片段門檻 OFF_CLIP_MS 8000→5000（KPI 門檻 OFF_MIN_MS 2000 不變）：4.8 秒一段只進 KPI、5.8 秒一段在第 5 秒開片段。
+--   違規證明：OFF_CLIP_MS 改回 8000＝(off5-short) 片段數 0 紅；改 4000＝4.8 秒那段先開片段（同 kind 冷卻擋掉第二段）、(off5) 觸發時刻紅。
+scenario("1012 offset clip threshold 5s: a 4.8s segment is KPI only, a 5.8s one raises the clip at 5s")
+do
+    local function ln(extra)
+        local t = { capReason = "profile", frameMs = 16, controlState = "TRACK", latDev = 0.2, expectedLane = 0, residentBias = 0 }
+        for k, v in pairs(extra or {}) do t[k] = v end
+        return t
+    end
+    checkEq(U.OFF_MIN_MS, 2000, "(off5) KPI threshold unchanged")
+    nowMs = nowMs + 3600000
+    start()
+    local d0 = nowMs
+    drive(1000, { rs = 100, phys = ln() })
+    drive(5000, { rs = 100, lat = 1.6, phys = ln({ latDev = 1.6 }) }) -- 25 筆＝4.8 s
+    drive(1000, { rs = 100, phys = ln() })
+    local segStart = nowMs + 200
+    drive(6000, { rs = 100, lat = 1.6, phys = ln({ latDev = 1.6 }) }) -- 30 筆＝5.8 s
+    drive(1000, { rs = 100, phys = ln() })
+    D.stop(0, "arrive")
+    pump(120000)
+    local rows = clipsOf(d0)
+    checkEq(#rows, 1, "(off5-short) only the 5.8 s segment raises a clip")
+    checkEq(tonumber(field(rows[1] or "", 9)), segStart + 5000, "(off5) clip triggered 5 s into the segment")
+    checkEq(field(rows[1] or "", 7), "offset", "(off5) kind offset")
+    local _, sum = sumLines(d0)
+    checkEq(tonumber(string.match(sum, '"offN":(%d+)')), 2, "(off5) both segments counted in the KPI")
+end
 
 -- 1010 所有送出的片段整段 ≤ CLIP_TOTAL_MAX（第一塊宣告的 len＝全文長度；伺服器只看這個）
 local maxLen = 0

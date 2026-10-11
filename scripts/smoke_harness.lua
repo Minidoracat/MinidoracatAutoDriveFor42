@@ -13631,6 +13631,39 @@ function drive.scenarioTelem1010()
     checkTrue(s.blocked == true and b.tag0 == nil and b.p1 == nil and b.p3 == nil and b.hx0 == nil,
         "(chain-reset) 沒有任何掃掠失敗（初判無縫）：候選鏈摘要不寫（tag0=" .. tostring(b.tag0) .. " p3=" .. tostring(b.p3) .. "）")
 
+    -- (sp0) 1012 blocked 主擋物：hx0／hy0 1 格內擋車 sprite（名、分類、格心距）；沒有 hx0 退 hitX／hitY 再退 x／y；每次發 blocked
+    -- 事件查一次，持續判堵的幀不查。違規證明：diagEvent 不補＝(sp0) 紅；不先看 hx0＝(sp0-order) 紅；每幀查＝(sp0-once) 紅。
+    local realNear, nNear = MDADSensor.hardSpriteNear, 0
+    MDADSensor.hardSpriteNear = function(...) nNear = nNear + 1 return realNear(...) end
+    s = run(WALL, 22, { 2, 10, 28, 36, 0 })
+    b = last("blocked") or {}
+    checkTrue(type(b.sp0) == "string" and string.find(b.sp0, "t1010_", 1, true) == 1 and b.sc0 == "hard"
+            and type(b.sd0) == "number" and b.sd0 <= 1.5 and b.hx0 ~= nil,
+        "(sp0) blocked 事件帶主擋物 sprite（sp0=" .. tostring(b.sp0) .. " sc0=" .. tostring(b.sc0) .. " sd0=" .. tostring(b.sd0) .. "）")
+    checkEq(nNear, count("blocked"), "(sp0-once) 每筆 blocked 事件查一次")
+    for _ = 1, 5 do driveReset(dveh) driveTick(dp, dveh) end
+    drive.scanRound(true)
+    checkTrue(s.blocked == true and nNear == count("blocked"),
+        "(sp0-once) 持續判堵的幀與輪不重查（查 " .. nNear .. " 次、blocked 事件 " .. count("blocked") .. " 筆）")
+    for _, e in ipairs(events) do
+        if e.name ~= "blocked" and e.a and e.a.sp0 ~= nil then
+            checkTrue(false, "(sp0) 非 blocked 事件不帶 sp0（" .. e.name .. "）")
+        end
+    end
+    MDADSensor.hardSpriteNear = realNear
+    local p = { hx0 = 60.5, hy0 = 0.5, hitX = 22.5, hitY = 0.5, x = 22.5, y = 0.5 }
+    Dr.blockSprite(s, p)
+    checkTrue(p.sp0 == nil and p.sc0 == nil and p.sd0 == nil, "(sp0-order) hx0 優先：hx0 旁沒有擋車物＝不寫（不退 hitX）")
+    p = { hitX = 22.5, hitY = 0.5, x = 60.5, y = 0.5 }
+    Dr.blockSprite(s, p)
+    checkTrue(p.sp0 == "t1010_0" and p.sc0 == "hard" and p.sd0 == 0, "(sp0-order) 沒有 hx0 退 hitX（sp0=" .. tostring(p.sp0) .. "）")
+    p = { x = 22.5, y = 0.5 }
+    Dr.blockSprite(s, p)
+    checkTrue(p.sp0 == "t1010_0", "(sp0-order) 再退 x／y（sp0=" .. tostring(p.sp0) .. "）")
+    p = { why = "plan" }
+    Dr.blockSprite(s, p)
+    checkTrue(p.sp0 == nil, "(sp0-order) 沒有任何命中點：不寫")
+
     -- (steep) 牆在 6m 前、主候選 2m 塞 3m 側移：steep 拒收，差額進 steep
     s = run(WALL, 6, { 0.5, 2.5, 9, 16, -3 })
     b = last("blocked") or {}
@@ -13666,6 +13699,7 @@ function drive.scenarioTelem1010()
             and type(c.hitR) == "number" and type(c.speed) == "number" and type(c.x) == "number" and type(c.hardD) == "number",
         "(contact) 接觸上升緣記一筆（n=" .. count("contact") .. " sprite=" .. tostring(c.sprite) .. " scost=" .. tostring(c.scost)
         .. " hitR=" .. tostring(c.hitR) .. " hardD=" .. tostring(c.hardD) .. "）")
+    checkTrue(c.sp0 == nil and c.sc0 == nil, "(sp0-all-events) 帶 x／y 的非 blocked 事件（contact）不補 sp0（sp0=" .. tostring(c.sp0) .. "）")
     checkTrue(type(s.diagBoostUntil) == "number" and s.diagBoostUntil > nowMs,
         "(boost) 接觸上升緣武裝 10Hz 升頻（until=" .. tostring(s.diagBoostUntil) .. "）")
     -- forceBrake 閂鎖上升緣也武裝升頻；仍在閂鎖中再煞不重武裝

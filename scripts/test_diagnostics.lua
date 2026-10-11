@@ -1418,7 +1418,8 @@ MDADDiagnostics.event(0, "unstick", {
     phase = "success", eid = 3, attempt = 2, x = 10, y = 20,
     s = 30, d = 3.1, duration = 850, speed = -0.5, rear = "clear",
 })
-MDADDiagnostics.event(0, "blocked", { why = "plan", hn = 581, wms = 41, sweeps = 12 })
+MDADDiagnostics.event(0, "blocked", { why = "plan", hn = 581, wms = 41, sweeps = 12,
+    sp0 = "fencing_01_37", sc0 = "thin", sd0 = 0.4 })
 nowMs = 9201000
 MDADDiagnostics.stop(0, "end")
 local physBody = files[sessionPath(1)] or ""
@@ -1473,6 +1474,9 @@ check(string.find(physBody, '"rpm":37', 1, true) ~= nil and string.find(physBody
 checkEq(countNeedle(physBody, '"rpm":'), 1, "absent replan wall-clock omits the field")
 check(string.find(physBody, '"wms":41', 1, true) ~= nil and string.find(physBody, '"sweeps":12', 1, true) ~= nil,
     "blocked event carries replan wall ms and sweep count (EK)")
+-- 1012 blocked 主擋物（Driver Drive.blockSprite）：sp0 sc0 sd0 過 EK。違規證明：EK 拿掉 sp0＝紅。
+check(string.find(physBody, '"sp0":"fencing_01_37","sc0":"thin","sd0":0.4', 1, true) ~= nil,
+    "blocked event carries the primary blocker sprite sp0/sc0/sd0 (EK)")
 check(string.find(physBody, '"fullGate":true', 1, true) ~= nil, "full-speed gate recorded")
 check(string.find(physBody, '"gateReason":"clear"', 1, true) ~= nil, "gate reason recorded")
 check(string.find(physBody, '"cmdV":11.1', 1, true) ~= nil, "jerk command speed recorded")

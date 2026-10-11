@@ -89,10 +89,11 @@ local TOW_SYNC_TUP = 0.002
 -- 偏離常駐線（摘要 offMs／offN／offMax、片段 offset；排除清單見 offsetKpi）：沒人持有行駛線時 |ld|（車身 − 期望線＝
 -- 夾過路寬的常駐線）超過 OFF_LAT_M；鏈式停留（lc）改量車身 − 夾過的常駐線 rsl——鏈著時期望線就是停留 lane，
 -- 「繞完一直走路邊」正是這段（玩家回報，事故之外完全沒被錄到）。連續 ≥OFF_MIN_MS 才算一段，單段達 OFF_CLIP_MS
--- 觸發 offset 片段（每段一次）。
+-- 觸發 offset 片段（每段一次）。OFF_CLIP_MS 1012 由 8000 降到 5000：0.28.x 正式服 51 趟有偏離段、最長 2.0–8.4 秒，
+-- 只有 1 段到 8 秒＝只錄到 1 段。
 local OFF_LAT_M = 1
 local OFF_MIN_MS = 2000
-local OFF_CLIP_MS = 8000
+local OFF_CLIP_MS = 5000
 
 U.PRE_MS, U.CHUNK, U.CLIP_MAX, U.TOW_SYNC_MS = PRE_MS, CHUNK, CLIP_MAX, TOW_SYNC_MS
 U.CLIP_EV_MAX, U.THIN_AFTER_MS, U.THIN_GAP_MS = CLIP_EV_MAX, THIN_AFTER_MS, THIN_GAP_MS
@@ -122,6 +123,9 @@ local STOP_KIND = {
     UI_MinidoracatAutoDrive_PlayerBlockStop = "stuck",
     -- 動物一直擋著、爬行到上限仍沒讓開（1005 soft4；Driver Drive.KEY_ANIMAL_STOP）
     UI_MinidoracatAutoDrive_AnimalBlockStop = "stuck",
+    -- 引擎沒在轉或電瓶沒電（1012；Driver KEY_ENGINE）：車輛狀態讓自駕做不下去，與 UnsupportedVehicle 同歸 fault。
+    -- 0.28.x 正式服兩天 15 趟以它結束（一台半聯結車 5 分鐘內 10 趟）、沒有一段片段。
+    UI_MinidoracatAutoDrive_EngineOff = "fault",
 }
 
 local outbox = {}      -- pn → { msgs..., n }
@@ -243,7 +247,9 @@ function U.begin(pn, now, header, profile)
         fdt = { 0, 0, 0, 0, 0, 0, 0 }, inc = {}, incN = 0, impact = 0, impactAt = nil,
         -- 重跑用：目的地（最後一次 route 事件）與起步航向；片段檔頭用：最近一筆取樣的狀態
         target = nil, h0 = nil,
-        sSpd = nil, sTgt = nil, sMode = nil, sLat = nil, sRem = nil, sCap = nil, sFbw = nil,
+        sSpd = nil, sTgt = nil, sMode = nil, sLat = nil, sRem = nil, sCap = nil, sFbw = nil, sCtl = nil,
+        -- 1012 接手當下（takeover yield／manual 那刻編好的摘要片段 ,"tko":{…}[,"tkoA":ms]；resume 清掉）
+        tko = nil,
         -- 0928a：越野接線長、前方區域未載入等待（次數／毫秒）、自轉次數（|yaw|>3 rad/s 上升緣，
         -- <1.5 重新武裝）、有未載入前緣的毫秒
         apr = nil, awN = 0, awMs = 0, prevAw = false, spin = 0, spinArmed = true, unlMs = 0,
@@ -655,6 +661,7 @@ function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
     -- 片段檔頭的出事當下狀態（trigger 取這幾格；本幀觸發的就是本幀值）
     u.sSpd, u.sTgt, u.sMode, u.sLat, u.sRem = speed, target, mode, lat, remaining
     u.sCap = type(phys) == "table" and phys.capReason or nil
+    u.sCtl = type(phys) == "table" and phys.controlState or nil
     local fbl0 = type(phys) == "table" and phys.forceBrakeLeft or nil
     u.sFbw = finite(fbl0) and fbl0 > 0 and phys.forceBrakeWhy or nil
     local dt, gap = 0, 0
@@ -786,6 +793,16 @@ function U.event(u, line, now, name, a)
         u.routeLine, u.routeTs = line, now
     end
     local phase = type(a) == "table" and a.phase or nil
+    -- 接手當下（1012，摘要 tko／tkoA）：最近一筆取樣的狀態與距上一個異常（lastAnomaly，同 takeover 片段的判定）的 ms，
+    -- 沒有異常就不寫 tkoA。要在下方 takeover 觸發之前算（trigger 會把 lastAnomaly 設成現在）。resume＝恢復自駕，清掉。
+    if name == "takeover" and (phase == "yield" or phase == "manual") then
+        u.tko = ',"tko":{"key":' .. jstr(a.key or "") .. ',"spd":' .. jround(u.sSpd, 10) .. ',"tgt":' .. jround(u.sTgt, 10)
+            .. ',"mode":' .. jstr(u.sMode or "") .. ',"rem":' .. jround(u.sRem, 1) .. ',"cap":' .. jstr(u.sCap or "")
+            .. ',"ctl":' .. jstr(u.sCtl or "") .. '}'
+            .. (u.lastAnomaly > -1e18 and (',"tkoA":' .. jnum(now - u.lastAnomaly)) or "")
+    elseif name == "takeover" and phase == "resume" then
+        u.tko = nil
+    end
     if name == "route" and phase == "ready" and u.apr == nil and finite(a.approach) then
         u.apr = a.approach -- 起步越野接線長（Driver 只在起步的 ready 帶）
     end
@@ -801,7 +818,8 @@ function U.event(u, line, now, name, a)
         trigger(u, now, "trailer")
     elseif name == "detour" and phase ~= "skip" then
         trigger(u, now, "detour")
-    elseif name == "blocked" or name == "unstick" or name == "progress" then
+    elseif name == "blocked" or name == "unstick" or name == "progress"
+            or (name == "uturn" and phase == "probe" and a.probe == "obstructed") then -- 1012：調頭探到擋（done 帶的首探不算）
         u.lastAnomaly = now
     elseif name == "takeover" and phase == "yield" and now - u.lastAnomaly <= ANOMALY_TAKEOVER_MS then -- resume（1008）不是接手
         trigger(u, now, "takeover")
@@ -868,6 +886,7 @@ local function summaryText(u, now, reason, withMaps)
         .. ',"paMs":' .. jnum(u.paMs) .. ',"paDv":' .. jround(u.paDv, 100)
         .. ',"eta0":' .. jround(u.eta0, 10) .. ',"eta0t":' .. jround(u.eta0t, 1)
         .. ',"offMs":' .. jnum(u.offMs) .. ',"offN":' .. u.offN .. ',"offMax":' .. jnum(u.offMax)
+        .. (u.tko or "")
     if withMaps then
         text = text .. ',"ev":' .. mapJson(u.evc) .. ',"mode":' .. mapJson(u.modeMs)
             .. ',"cap":' .. mapJson(u.capMs) .. ',"loss":' .. lossJson(u.loss)
