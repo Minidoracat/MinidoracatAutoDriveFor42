@@ -20,6 +20,7 @@ https://steamcommunity.com/sharedfiles/filedetails/?id=3792675881
 [*] [b]Server rules[/b]: sandbox options.
 [/list]
 === 🧰 Devices and recipes
+{{img:05-autodrive-items-en.jpg}}
 [h3]Devices[/h3]
 [list]
 [*] [b]In the vehicle[/b]: GPS and Autopilot occupy real part slots on supported vehicles.
@@ -105,6 +106,12 @@ Plus a screwdriver.
 [*] [b]Controls[/b]: direct controls on the HUD.
 [*] [b]Looks[/b]: metal, glass, family and side-wing themes; compact and collapsed layouts.
 [/list]
+[b]Metal theme[/b]
+{{img:07-hud-theme-metal-en.jpg}}
+[b]Glass theme[/b]
+{{img:08-hud-theme-glass-en.jpg}}
+[b]Family theme[/b]
+{{img:09-hud-theme-family-en.jpg}}
 [b]Side-wing theme[/b]
 {{img:02-hud-theme-wings-route.jpg}}
 [h3]Stop reason[/h3]
@@ -171,6 +178,7 @@ Plus a screwdriver.
 [*] [b]Real range[/b]: shown in the HUD slowdown tooltip.
 [/list]
 [h3]Future trajectory[/h3]
+{{img:06-autodrive-route-intersection-en.jpg}}
 [list]
 [*] [b]Colors[/b]: blue for the route, yellow for committed dodges.
 [*] [b]Settings[/b]: toggle it and pick Thin / Standard / Thick in MOD Options or MiniMap.
