@@ -1,7 +1,7 @@
 version=1
 id=3792675881
 title=[B42] Minidoracat MiniMap - AutoDrive
-description=[h1]🚗 Minidoracat MiniMap - AutoDrive for B42[/h1]
+description=[h1]🚗 Minidoracat MiniMap - AutoDrive[/h1]
 description=[h3]By Minidoracat[/h3]
 description=
 description=[hr][/hr]
@@ -10,8 +10,8 @@ description=Plan a road route with the GPS Navigator and the Autopilot Module dr
 description=
 description=[h2]📦 Requirements[/h2]
 description=[list]
-description=[*] Requires the base mod: [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763913359]Minidoracat MiniMap for B42[/url]
-description=[*] Requires the UI framework: [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3789836701]Minidoracat UI Library for B42[/url]
+description=[*] Requires the base mod: [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763913359]Minidoracat MiniMap[/url]
+description=[*] Requires the UI framework: [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3789836701]Minidoracat UI Library[/url]
 description=[*] Incompatible with Navigator (both use the area above the vehicle dashboard)
 description=[*] [b]Add/remove mid-save:[/b] safe either way; removing it deletes GPS units, autopilot modules and devices installed in cars
 description=[*] [b]Languages:[/b] 繁體中文, 简体中文, English, 日本語, 한국어, Русский, Español, Português, Türkçe, Français, Polski, Deutsch (please report any translation issues)
@@ -42,7 +42,7 @@ description=📖 [b]Full details, settings and FAQ for every feature:[/b] [url=h
 description=
 description=[h2]🔗 Minidoracat MiniMap series[/h2]
 description=[list]
-description=[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763913359]MiniMap for B42[/url] (main mod, required) — image-based world map and minimap, search, navigation
+description=[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763913359]MiniMap[/url] (main mod, required) — image-based world map and minimap, search, navigation
 description=[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763914102]MOD Maps[/url] — map images and street-name translations for map mods
 description=[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3792675881]AutoDrive[/url] — GPS navigation and autonomous driving
 description=[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3768276209]Zones[/url] — custom server zones

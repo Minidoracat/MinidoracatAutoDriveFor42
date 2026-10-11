@@ -1,4 +1,4 @@
-[h1]🚗 Minidoracat MiniMap - AutoDrive for B42[/h1]
+[h1]🚗 Minidoracat MiniMap - AutoDrive[/h1]
 [h3]By Minidoracat[/h3]
 
 [hr][/hr]
@@ -7,8 +7,8 @@ GPSナビゲーターで道路のルートを計画すると、オートパイ�
 
 [h2]📦 必要なもの[/h2]
 [list]
-[*] 必須：[url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763913359]Minidoracat MiniMap for B42[/url]
-[*] 必須UIフレームワーク：[url=https://steamcommunity.com/sharedfiles/filedetails/?id=3789836701]Minidoracat UI Library for B42[/url]
+[*] 必須：[url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763913359]Minidoracat MiniMap[/url]
+[*] 必須UIフレームワーク：[url=https://steamcommunity.com/sharedfiles/filedetails/?id=3789836701]Minidoracat UI Library[/url]
 [*] Navigatorとは併用できません（どちらも車両ダッシュボード上部を使用します）
 [*] [b]途中追加・削除：[/b]どちらも可能。削除すると GPS・自動運転モジュールと車に取り付けた装置は消えます
 [*] [b]対応言語：[/b]繁體中文、简体中文、English、日本語、한국어、Русский、Español、Português、Türkçe、Français、Polski、Deutsch（翻訳の問題はお知らせください）
@@ -39,7 +39,7 @@ GPSナビゲーターで道路のルートを計画すると、オートパイ�
 
 [h2]🔗 Minidoracat ミニマップ シリーズ[/h2]
 [list]
-[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763913359]MiniMap for B42[/url]（本体・必須）——画像化したワールドマップとミニマップ、検索、ナビ
+[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763913359]MiniMap[/url]（本体・必須）——画像化したワールドマップとミニマップ、検索、ナビ
 [*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763914102]MOD Maps[/url]——マップ MOD の地図画像と道路名の翻訳
 [*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3792675881]AutoDrive[/url]——GPS ナビと自動運転
 [*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3768276209]Zones[/url]——サーバー独自のエリア表示

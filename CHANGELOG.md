@@ -17,6 +17,7 @@
 ### 變更
 
 - 伺服器紀錄檔裡，載具裝置槽注入與舊存檔裝置資料移轉的訊息改為英文。遊戲內的畫面與玩法沒有改變。
+- 遊戲內 MOD 清單的名稱改為「Minidoracat MiniMap - AutoDrive」（拿掉 for B42）；MOD ID 不變，不需要重新啟用。
 
 > 技術要點：Kahlua 會把 Lua 字串字面值裡的非 ASCII 字元截斷，原本的中文訊息在 console 會變成亂碼；訊息裡的 `ABORT`／`CONFLICT`／`SKIP`／`INCOMPLETE` 關鍵字不變。
 

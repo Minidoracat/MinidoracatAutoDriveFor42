@@ -1,4 +1,4 @@
-# Minidoracat MiniMap - AutoDrive for B42
+# Minidoracat MiniMap - AutoDrive
 
 道具驅動的車輛導航與自動駕駛：GPS 導航儀規劃路線，自駕模組沿路網自動行駛
 
@@ -69,11 +69,11 @@ Steam Workshop 用 JPG（每張 ≤280,000 bytes，Steamworks 預覽圖上限）
 
 ## 安裝
 
-- Steam Workshop：[Minidoracat MiniMap - AutoDrive for B42](https://steamcommunity.com/sharedfiles/filedetails/?id=3792675881)
+- Steam Workshop：[Minidoracat MiniMap - AutoDrive](https://steamcommunity.com/sharedfiles/filedetails/?id=3792675881)
 - 手動安裝：把 `MOD/MinidoracatAutoDriveFor42/Contents/mods/MinidoracatAutoDriveFor42` 複製到 `%USERPROFILE%\Zomboid\mods\` 並將資料夾改名為 `MinidoracatAutoDriveFor42`
 
-本 addon 需要 [Minidoracat MiniMap for B42](https://steamcommunity.com/sharedfiles/filedetails/?id=3763913359)
-與 Minidoracat UI for B42；不與 Navigator 共存（兩者都佔用車輛儀表上方）。
+本 addon 需要 [Minidoracat MiniMap](https://steamcommunity.com/sharedfiles/filedetails/?id=3763913359)
+與 Minidoracat UI；不與 Navigator 共存（兩者都佔用車輛儀表上方）。
 
 ## 多目標與停靠操作
 

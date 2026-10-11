@@ -1,4 +1,4 @@
-[h1]🚗 Minidoracat MiniMap - AutoDrive for B42[/h1]
+[h1]🚗 Minidoracat MiniMap - AutoDrive[/h1]
 [h3]By Minidoracat[/h3]
 
 [hr][/hr]
@@ -7,8 +7,8 @@ Plan a road route with the GPS Navigator and the Autopilot Module drives it for 
 
 [h2]📦 Requirements[/h2]
 [list]
-[*] Requires the base mod: [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763913359]Minidoracat MiniMap for B42[/url]
-[*] Requires the UI framework: [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3789836701]Minidoracat UI Library for B42[/url]
+[*] Requires the base mod: [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763913359]Minidoracat MiniMap[/url]
+[*] Requires the UI framework: [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3789836701]Minidoracat UI Library[/url]
 [*] Incompatible with Navigator (both use the area above the vehicle dashboard)
 [*] [b]Add/remove mid-save:[/b] safe either way; removing it deletes GPS units, autopilot modules and devices installed in cars
 [*] [b]Languages:[/b] 繁體中文, 简体中文, English, 日本語, 한국어, Русский, Español, Português, Türkçe, Français, Polski, Deutsch (please report any translation issues)
@@ -39,7 +39,7 @@ Keep every Minidoracat MiniMap series mod up to date and restart the game after 
 
 [h2]🔗 Minidoracat MiniMap series[/h2]
 [list]
-[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763913359]MiniMap for B42[/url] (main mod, required) — image-based world map and minimap, search, navigation
+[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763913359]MiniMap[/url] (main mod, required) — image-based world map and minimap, search, navigation
 [*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763914102]MOD Maps[/url] — map images and street-name translations for map mods
 [*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3792675881]AutoDrive[/url] — GPS navigation and autonomous driving
 [*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3768276209]Zones[/url] — custom server zones
