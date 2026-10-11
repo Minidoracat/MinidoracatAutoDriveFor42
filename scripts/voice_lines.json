@@ -75,6 +75,11 @@
     "text": "[pouty, whiny] 咦～前面的大门打不开耶，怎么办嘛～"
   },
   {
+    "id": "rehitch_zh",
+    "language": "zh",
+    "text": "[surprised, sweet] 哎呀，挂车不见了！等我一下，我倒回去把它接回来～"
+  },
+  {
     "id": "start_en",
     "language": "en",
     "text": "[excited, sweet] Here we go! Let me drive you today!"
@@ -148,6 +153,11 @@
     "id": "gate_en",
     "language": "en",
     "text": "[pouty, whiny] Hmm, the gate up ahead won't open... What do we do now?"
+  },
+  {
+    "id": "rehitch_en",
+    "language": "en",
+    "text": "[surprised, sweet] Oops, the trailer's gone! Hang on, I'll back up and hook it back on."
   },
   {
     "id": "start_ja",
@@ -225,6 +235,11 @@
     "text": "[pouty, whiny] あれ～、前のゲート、開かないみたい……どうしよう？"
   },
   {
+    "id": "rehitch_ja",
+    "language": "ja",
+    "text": "[surprised, sweet] あれっ、トレーラーが消えちゃった！ちょっと待ってね、バックして連結し直すね～"
+  },
+  {
     "id": "start_ko",
     "language": "ko",
     "text": "[excited, sweet] 출발~! 오늘은 내가 태워 줄게!"
@@ -298,6 +313,11 @@
     "id": "gate_ko",
     "language": "ko",
     "text": "[pouty, whiny] 어라~ 앞에 게이트가 안 열려… 이제 어떡해?"
+  },
+  {
+    "id": "rehitch_ko",
+    "language": "ko",
+    "text": "[surprised, sweet] 어머, 트레일러가 사라졌어! 잠깐만, 후진해서 다시 연결할게~"
   },
   {
     "id": "start_ru",
@@ -375,6 +395,11 @@
     "text": "[pouty, whiny] Хм, ворота впереди не открываются... И что нам теперь делать?"
   },
   {
+    "id": "rehitch_ru",
+    "language": "ru",
+    "text": "[surprised, sweet] Ой, прицеп пропал! Секундочку, я сдам назад и прицеплю его обратно."
+  },
+  {
     "id": "start_es",
     "language": "es",
     "text": "[excited, sweet] ¡Aquí vamos! ¡Hoy te llevo yo!"
@@ -448,6 +473,11 @@
     "id": "gate_es",
     "language": "es",
     "text": "[pouty, whiny] Mmm, la puerta de enfrente no se abre... ¿Y ahora qué hacemos?"
+  },
+  {
+    "id": "rehitch_es",
+    "language": "es",
+    "text": "[surprised, sweet] ¡Uy, el remolque desapareció! Espera un poquito, retrocedo y lo vuelvo a enganchar."
   },
   {
     "id": "start_pt",
@@ -525,6 +555,11 @@
     "text": "[pouty, whiny] Hmm, o portão ali na frente não abre... E agora, o que a gente faz?"
   },
   {
+    "id": "rehitch_pt",
+    "language": "pt",
+    "text": "[surprised, sweet] Ops, o reboque sumiu! Espera um pouquinho, vou dar ré e engatar de novo."
+  },
+  {
     "id": "start_tr",
     "language": "tr",
     "text": "[excited, sweet] Hadi gidiyoruz! Bugün seni ben götüreyim!"
@@ -598,6 +633,11 @@
     "id": "gate_tr",
     "language": "tr",
     "text": "[pouty, whiny] Hımm, ilerideki kapı açılmıyor... Şimdi ne yapacağız?"
+  },
+  {
+    "id": "rehitch_tr",
+    "language": "tr",
+    "text": "[surprised, sweet] Hoppala, römork kayboldu! Bir saniye, geri gidip onu yeniden bağlayacağım."
   },
   {
     "id": "start_fr",
@@ -675,6 +715,11 @@
     "text": "[pouty, whiny] Hmm, le portail devant ne veut pas s'ouvrir… On fait quoi maintenant ?"
   },
   {
+    "id": "rehitch_fr",
+    "language": "fr",
+    "text": "[surprised, sweet] Oups, la remorque a disparu ! Attends un peu, je recule pour la raccrocher."
+  },
+  {
     "id": "start_pl",
     "language": "pl",
     "text": "[excited, sweet] No to w drogę! Dzisiaj to ja cię zawiozę!"
@@ -750,6 +795,11 @@
     "text": "[pouty, whiny] Hmm, brama przed nami się nie otwiera... I co teraz zrobimy?"
   },
   {
+    "id": "rehitch_pl",
+    "language": "pl",
+    "text": "[surprised, sweet] Ups, przyczepa zniknęła! Chwileczkę, cofnę się i znowu ją doczepię."
+  },
+  {
     "id": "start_de",
     "language": "de",
     "text": "[excited, sweet] Los geht's! Lass mich dich heute fahren!"
@@ -823,5 +873,10 @@
     "id": "gate_de",
     "language": "de",
     "text": "[pouty, whiny] Hmm, das Tor da vorne geht nicht auf... Was machen wir denn jetzt?"
+  },
+  {
+    "id": "rehitch_de",
+    "language": "de",
+    "text": "[surprised, sweet] Hoppla, der Anhänger ist weg! Warte kurz, ich setz zurück und häng ihn wieder an."
   }
 ]

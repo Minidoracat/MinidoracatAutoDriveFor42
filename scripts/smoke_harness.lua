@@ -22962,6 +22962,290 @@ function drive.scenarioTowRelook()
     SandboxVars, dveh, getSpecificPlayer = oldSandbox, oldVeh, oldGet
 end
 drive.scenarioTowRelook()
+-- (rh) 1011a 自動掛回（Drive.rehitch*）：MP、掛車只在客戶端消失（alive=false）、一般掛車＝不交還：煞停 → 等同 id 掛車回來 →
+--   倒過去讓引擎掛上 → 煞住 REHITCH_SETTLE_MS 沒再斷 → 重新量掛車續行。失敗與不適用照舊 TrailerLost 交還；alive=false 的
+--   交還提示改成同步中斷（頭上短句、HUD 停止原因 TrailerSyncLost）。假車沿 +x：牽引車掛點在車心後 2m；回來的掛車掛點在它的
+--   車心沿 forward 前 4m。MDADTrailer.attach 換成回傳固定幾何（attach 本身在 test_trailer）。
+--   (rh-arm)    進入：session 還在、mode／HUD rehitch、s.tow 收起、lost 只記一次、rh-arm、rehitch 語音、白字提示。
+--               違規證明：每幀檢查不問 rehitchArm＝紅。
+--   (rh-brake)  ≥10 km/h 煞停不鎖輪（中線外力向後）、<10 鎖輪、停妥記 rh-stop（d＝離脫開點）。違規證明：hardBrake 不認 rehitch＝紅。
+--   (rh-found)  同 id 但 script 不同、或離脫開點 >REHITCH_FIND_R 都不認；認了才換 selfTrailer（掛回後同一個物件就是新的
+--               s.tow.trailer）；看到後 FOUND_MS 內不倒。違規證明：不比 script＝紅；不換 selfTrailer＝紅；不等 FOUND_MS＝紅。
+--   (rh-rev)    倒車一幀一次 impulse：往後推、施力點在車心後 REHITCH_TAIL_M、側推朝對準點；超過倒車速限只剩側推。
+--               違規證明：側推歸 0、施力點放車心、拿掉速限各自紅。
+--   (rh-done)   引擎掛上 → settle → rh-done、回 follow／build、s.tow 換新幾何、resume 語音。
+--   (rh-rebroke／rh-nofound／rh-mis／rh-rear) 各自 rh-fail why、交還、HUD 停止原因 TrailerSyncLost、lost 不重記。
+--               違規證明：拿掉各自的出口、或 Drive.stop 不看 s.rehitch 換提示＝紅。
+--   (rh-cut)    掛回途中換路線：保留 rehitch。違規證明：cutover 拿掉 rehitch 保留＝紅。
+--   (rh-yield)  掛回途中讓位：放手恢復回 rehitch 的 wait。違規證明：恢復不看 s.rehitch＝紅。
+--   (rh-semi／rh-sp／rh-alive／rh-max) 不適用：照舊立刻交還；alive=false 的提示同步中斷、alive=true 照舊 TrailerLost。
+function drive.scenarioTowRehitch()
+    scenario("1011a 自動掛回：掛車只在客戶端消失時煞停、等它回來、倒過去讓引擎掛上再續行；各出口與不適用的拖法")
+    local Dr, T = MDAD.Drive, MDAD.Drive.debugTune()
+    local SYNC, LOST = MDADTrailer.KEY_SYNC, MDADTrailer.KEY_LOST
+    local oldSandbox, oldVeh, oldGet = SandboxVars, dveh, getSpecificPlayer
+    local oldRoute, oldTx, oldTy, oldState = drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
+    local oldById, oldAttach, oldClient, oldVoice = getVehicleById, MDADTrailer.attach, clientFlag, MDAD.Voice
+    local oldResume = drive.resumeMs
+    local DG = MDADDiagnostics
+    local sStart, sEvent, sSample, sStop, sTel = DG.start, DG.event, DG.sample, DG.stop, MDAD.HUD.telemetryEnabled
+    local wasMs = drive.frameMs(20)
+    Dr.stop(0, nil)
+    clientFlag = true -- 只有 MP 會這樣脫開（客戶端把掛車移出世界）
+    local ev, voices = {}, {}
+    MDAD.HUD.telemetryEnabled = function() return true end
+    DG.start = function() return true end
+    DG.sample = function() return true end
+    DG.stop = function() end
+    DG.event = function(_, name, a) if name == "tow" and type(a) == "table" then ev[#ev + 1] = a end end
+    MDAD.Voice = { play = function(e) voices[#voices + 1] = e return true end }
+    getSpecificPlayer = function(n) if n == 0 then return dp end end
+    dveh = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }),
+        engineRunning = true, mass = 1600, speed = 0, maxSpeed = 100,
+        bodyW = 1.6, bodyL = 4.2, comX = 0, comZ = 0, profileFull = true,
+        enginePower = 3000, brakingForce = 100, wheelFriction = 1.5, tireFriction = 1.5 })
+    local ox = 22 -- 脫開那刻舊掛車的車心 x（舊物件已移出世界、停在那裡）
+    local old = { getX = function() return ox end, getY = function() return 0 end,
+        isRemovedFromWorld = function() return true end }
+    local script, tx, ty, tfx, tfy = "Base.Trailer", 10, 0, 1, 0 -- 回來的掛車：script、車心、forward
+    local back = { -- 回到客戶端的同 id 新物件
+        getScriptName = function() return script end,
+        getX = function() return tx end, getY = function() return ty end,
+        getForwardVector = function(_, out) return out:set(tfx, 0, tfy) end,
+        getTowedByWorldPos = function(_, _, out) return out:set(tx + 4 * tfx, ty + 4 * tfy, 0) end,
+        getUpVectorDot = function() return 1 end,
+    }
+    local towing, present = nil, nil -- 牽引車 getVehicleTowing、getVehicleById(77)
+    dveh.getVehicleTowing = function() return towing end
+    dveh.getTowingWorldPos = function(_, _, out) return out:set(dveh._x - 2 * dveh._fwdX, dveh._y - 2 * dveh._fwdY, 0) end
+    getVehicleById = function(id) if id == 77 then return present end end
+    MDADTrailer.attach = function(v)
+        local t = v:getVehicleTowing()
+        if t == nil then return nil end
+        return { trailer = t, id = 77, script = "Base.Trailer", hitchSelf = "trailer", hitchOther = "trailerfront",
+            axisSign = 1, L2 = 4, hitchToRear = 6, halfW = 1.1, halfL = 3, mass = 600 }
+    end
+    drive.fillWorld(-10, 80, -12, 72)
+    drive.putRoad(-10, 80, -3, 3)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 60, RightLaneBias = 0 })
+    drive.nav.route = { pts = { 0, 0, 70, 0 }, segSurface = { "paved" }, segWidth = { 6 }, len = 70, cost = 70,
+        avoidPenalty = 0 }
+    drive.nav.tx, drive.nav.ty, drive.nav.state = 70, 0, "ok"
+    local function tick()
+        nowMs = nowMs + 20
+        driveTick(dp, dveh)
+    end
+    local function frames(ms)
+        local stop = nowMs + ms
+        while nowMs < stop do tick() end
+    end
+    local function count(phase, why)
+        local n = 0
+        for i = 1, #ev do if ev[i].phase == phase and (why == nil or ev[i].why == why) then n = n + 1 end end
+        return n
+    end
+    local function last(phase)
+        for i = #ev, 1, -1 do if ev[i].phase == phase then return ev[i] end end
+        return {}
+    end
+    local function hasHalo(text, kind)
+        for i = 1, #halos do if halos[i].text == text and halos[i].kind == kind then return true end end
+        return false
+    end
+    -- 起步（沒拖，脫開前一刻掛上 s.tow），30 km/h 往東開到 x=30，下一幀牽引車已沒掛著＝脫開。over＝改 s.tow 欄位、
+    -- pres＝脫開那刻 getVehicleById(77) 回什麼（nil＝不在世界）、sess＝改 session 欄位。
+    local function arm(tag, over, pres, sess)
+        Dr.stop(0, nil)
+        towing, present, script, tx, ty, tfx, tfy = nil, pres, "Base.Trailer", 10, 0, 1, 0
+        dveh._x, dveh._y = 0, 0
+        setHeading(dveh, 0)
+        dveh._speed, dveh._steering, dveh._stopped = 0, 0, true
+        dveh._engine, dveh._driver = true, dp
+        dp._vehicle, dp._dead, dp._local = dveh, false, true
+        checkTrue(Dr.start(dp), "(" .. tag .. ") 啟動")
+        local st = Dr.debugSession(0)
+        st.diag = true
+        st.tow = { trailer = old, id = 77, script = "Base.Trailer", hitchSelf = "trailer", hitchOther = "trailerfront",
+            axisSign = 1, L2 = 4, hitchToRear = 6, halfW = 1.1, halfL = 3 }
+        for k, v in pairs(over or {}) do st.tow[k] = v end
+        for k, v in pairs(sess or {}) do st[k] = v end
+        ev, voices = {}, {}
+        driveReset(dveh)
+        dveh._x, dveh._speed, dveh._stopped = 30, 30, false
+        tick()
+        return st
+    end
+    -- 煞到停妥（rh-stop）
+    local function stopIt()
+        dveh._speed, dveh._stopped = 0, true
+        tick()
+    end
+    -- 掛車回來、等 FOUND_MS 起倒（rh-reverse）
+    local function toReverse()
+        present = back
+        frames(T.REHITCH_FOUND_MS + 1100)
+    end
+
+    local st = arm("rh")
+    local rh = st.rehitch
+    checkTrue(Dr.isActive(0) and st.mode == "rehitch" and Dr.hudState(0) == "rehitch" and st.tow == nil and rh ~= nil
+        and rh.tow.id == 77, "(rh-arm) 掛車只在客戶端消失：不交還、進 rehitch、s.tow 收起（mode=" .. tostring(st.mode) .. "）")
+    checkTrue(count("lost") == 1 and last("lost").alive == false and count("rh-arm") == 1 and last("rh-arm").vid == 77,
+        "(rh-arm) lost 記一次（alive=false）＋rh-arm（lost " .. count("lost") .. "、arm " .. count("rh-arm") .. "）")
+    checkTrue(voices[#voices] == "rehitch" and hasHalo("UI_MinidoracatAutoDrive_TrailerRehitch", "info"),
+        "(rh-arm) 播 rehitch 語音、白字提示（voice " .. tostring(voices[#voices]) .. "）")
+
+    driveReset(dveh)
+    tick()
+    checkTrue(drive.calls.forceBrake == 0 and dveh._imp.total == 1 and dveh._imp.x < 0 and (st.visAssistDecel or 0) > 0,
+        "(rh-brake) 30 km/h 煞停不鎖輪：中線外力向後（fb " .. drive.calls.forceBrake .. "、imp.x "
+        .. tostring(dveh._imp.x) .. "）")
+    dveh._speed = 6
+    driveReset(dveh)
+    tick()
+    checkTrue(drive.calls.forceBrake == 1 and dveh._imp.total == 0, "(rh-brake) 6 km/h 鎖輪停住")
+    stopIt()
+    checkTrue(rh.phase == "wait" and count("rh-stop") == 1 and math.abs((last("rh-stop").d or 0) - 8) < 1e-9,
+        "(rh-brake) 停妥記 rh-stop、d＝離脫開點 8m（d " .. tostring(last("rh-stop").d) .. "）")
+
+    present, script = back, "Base.SmallCar" -- id 被別台車拿走
+    tick()
+    checkTrue(rh.trailer == nil, "(rh-found) 同 id 但 script 不同：不認")
+    script, tx = "Base.Trailer", ox - T.REHITCH_FIND_R - 5
+    tick()
+    checkTrue(rh.trailer == nil, "(rh-found) 離脫開點超過 REHITCH_FIND_R：不認")
+    tx = 10
+    tick()
+    checkTrue(rh.trailer == back and st.sensor.selfTrailer == back and count("rh-found") == 1
+        and math.abs((last("rh-found").d or 0) - 12) < 1e-9,
+        "(rh-found) 同 script 在範圍內：認、倒車探測排除它、d＝離脫開點 12m")
+    driveReset(dveh)
+    frames(T.REHITCH_FOUND_MS - 100)
+    checkTrue(rh.phase == "wait" and dveh._imp.total == 0, "(rh-found) 看到後 FOUND_MS 內不倒")
+    ty = 0.5 -- 掛車軸線在牽引車左右偏 0.5m（+y）：對準點在掛點沿軸往前
+    frames(200)
+    checkTrue(rh.phase == "reverse" and count("rh-reverse") == 1 and math.abs(rh.hd - math.sqrt(14 * 14 + 0.25)) < 1e-9,
+        "(rh-rev) 起倒、記 rh-reverse（hd " .. tostring(rh.hd) .. "）")
+    dveh._speed, dveh._stopped = -3, false
+    driveReset(dveh)
+    tick()
+    local im = dveh._imp
+    checkTrue(im.total == 1 and im.x < 0 and im.z > 0 and math.abs(im.rx + T.REHITCH_TAIL_M) < 1e-9 and math.abs(im.rz) < 1e-9,
+        "(rh-rev) 一個 impulse：往後推、側推朝對準點、施力點在車心後（x " .. tostring(im.x) .. "、z " .. tostring(im.z)
+        .. "、rx " .. tostring(im.rx) .. "）")
+    dveh._speed = -T.REHITCH_FAST_KMH - 1
+    driveReset(dveh)
+    tick()
+    checkTrue(dveh._imp.total == 1 and dveh._imp.x == 0 and dveh._imp.z > 0, "(rh-rev) 超過倒車速限：只剩側推")
+    dveh._x, dveh._speed = 18, -2 -- 掛點距離約 2m（對齊）：還沒掛上照常倒
+    driveReset(dveh)
+    tick()
+    checkTrue(Dr.isActive(0) and rh.phase == "reverse" and drive.bad.impulse == 0 and drive.bad.pair == 0
+        and drive.bad.live == 0, "(rh-rev) 近處對齊照常倒；單槽與池向量成對")
+    towing = back -- 引擎掛上
+    tick()
+    checkTrue(rh.phase == "settle" and count("rh-attach") == 1, "(rh-done) 引擎掛上＝settle、記 rh-attach")
+    dveh._speed = 1
+    driveReset(dveh)
+    tick()
+    checkTrue(drive.calls.forceBrake == 1, "(rh-done) settle 中還在動：鎖輪煞住")
+    dveh._speed, dveh._stopped = 0, true
+    frames(T.REHITCH_SETTLE_MS)
+    checkTrue(Dr.isActive(0) and st.rehitch == nil and st.tow and st.tow.trailer == back and st.sensor.selfTrailer == back
+        and (st.mode == "follow" or st.mode == "build") and count("rh-done") == 1,
+        "(rh-done) 沒再斷：換新幾何、感測排除新掛車、回跟線（mode " .. tostring(st.mode) .. "）")
+    checkTrue(voices[#voices] == "resume" and hasHalo("UI_MinidoracatAutoDrive_TrailerRehitched", "good"),
+        "(rh-done) 播 resume 語音、綠字")
+
+    -- 失敗出口：交還、HUD 停止原因同步中斷、lost 不重記
+    local function failed(tag, why)
+        checkTrue(not Dr.isActive(0) and count("rh-fail", why) == 1 and count("lost") == 1
+            and Dr.hudStopReason(0, dveh) == SYNC and hasHalo(MDADTrailer.KEY_SYNC_SHORT, "bad"),
+            "(" .. tag .. ") rh-fail why=" .. why .. "、交還、提示同步中斷（active " .. tostring(Dr.isActive(0))
+            .. "、fail " .. count("rh-fail", why) .. "、stop " .. tostring(Dr.hudStopReason(0, dveh)) .. "）")
+    end
+    st = arm("rh-rebroke")
+    stopIt()
+    toReverse()
+    towing = back
+    tick()
+    towing = nil
+    tick()
+    failed("rh-rebroke", "rebroke")
+
+    st = arm("rh-nofound")
+    stopIt()
+    frames(T.REHITCH_WAIT_MS - 100)
+    checkTrue(Dr.isActive(0) and st.rehitch.phase == "wait", "(rh-nofound) 等待上限內仍在等")
+    frames(200)
+    failed("rh-nofound", "nofound")
+
+    st = arm("rh-mis")
+    stopIt()
+    tfx, tfy = math.cos(math.rad(40)), math.sin(math.rad(40)) -- 掛車軸歪 40°，掛點仍在 (14, 0)
+    tx, ty = 14 - 4 * tfx, -4 * tfy
+    dveh._x = 18
+    toReverse()
+    tick()
+    failed("rh-mis", "misaligned")
+
+    st = arm("rh-rear")
+    stopIt()
+    drive.putSolid(25, 0, "harness_rh_rear")
+    toReverse()
+    tick()
+    drive.clearCell(25, 0)
+    failed("rh-rear", "rear-hard")
+
+    st = arm("rh-cut")
+    stopIt()
+    local rg = st.routeGen
+    drive.nav.route = { pts = { 0, 0, 80, 0 }, segSurface = { "paved" }, segWidth = { 6 }, len = 80, cost = 80,
+        avoidPenalty = 0 }
+    frames(600)
+    checkTrue(st.routeGen > rg and st.mode == "rehitch" and Dr.isActive(0),
+        "(rh-cut) 掛回途中換路線：保留 rehitch（rg " .. rg .. "→" .. st.routeGen .. "、mode " .. tostring(st.mode) .. "）")
+    drive.nav.route = { pts = { 0, 0, 70, 0 }, segSurface = { "paved" }, segWidth = { 6 }, len = 70, cost = 70,
+        avoidPenalty = 0 }
+
+    drive.resumeMs = 2000
+    st = arm("rh-yield")
+    stopIt()
+    dveh._steering = 0.5
+    tick()
+    checkTrue(st.mode == "yield" and st.rehitch ~= nil, "(rh-yield) 掛回途中轉方向盤：讓位、掛回狀態留著")
+    dveh._steering = 0
+    frames(2200)
+    checkTrue(st.mode == "rehitch" and st.rehitch.phase == "wait",
+        "(rh-yield) 放手恢復回 rehitch 的 wait（mode " .. tostring(st.mode) .. "）")
+    drive.resumeMs = oldResume
+
+    -- 不適用：照舊立刻交還
+    local function handover(tag, key)
+        checkTrue(not Dr.isActive(0) and count("rh-arm") == 0 and count("lost") == 1 and Dr.hudStopReason(0, dveh) == key,
+            "(" .. tag .. ") 照舊立刻交還、停止原因 " .. key .. "（active " .. tostring(Dr.isActive(0)) .. "、stop "
+            .. tostring(Dr.hudStopReason(0, dveh)) .. "）")
+    end
+    arm("rh-semi", { hitchSelf = "trailerTruck", hitchOther = "trailerTruck" })
+    handover("rh-semi", SYNC)
+    clientFlag = false
+    arm("rh-sp")
+    handover("rh-sp", SYNC)
+    clientFlag = true
+    arm("rh-alive", nil, old) -- 掛車還在世界：真的斷鉤
+    handover("rh-alive", LOST)
+    arm("rh-max", nil, nil, { rehitchN = T.REHITCH_MAX })
+    handover("rh-max", SYNC)
+    Dr.relookFlush(0, nowMs)
+    Dr.stop(0, nil)
+    drive.frameMs(wasMs)
+    MDADTrailer.attach, MDAD.Voice, clientFlag = oldAttach, oldVoice, oldClient
+    DG.start, DG.event, DG.sample, DG.stop, MDAD.HUD.telemetryEnabled = sStart, sEvent, sSample, sStop, sTel
+    getVehicleById = oldById
+    drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
+    SandboxVars, dveh, getSpecificPlayer = oldSandbox, oldVeh, oldGet
+end
+drive.scenarioTowRehitch()
 -- (thr) 1008 拖車倒車的折角門檻（MDADTrailer.canReverse）：舊制折角已超過 REVERSE_HITCH_MAX 時 stepUnstick 把 dist2 設成
 --   「倒夠了」，0 位移 settle→success、3 次額度幾秒燒完（正式服 0.23.0 片段每次 7–19 ms）。
 --   (thr-start) 起手折角已超限：不倒（rear-blocked rear=hitch、phi）、不吃額度、回停等（blockRetryDone）；連三次額度仍 0。
@@ -22969,6 +23253,9 @@ drive.scenarioTowRelook()
 --   (thr-mid)   起手在上限內、還沒實際退出 UNSTICK_MIN_M 就折到上限：不算成功、退回額度、回停等。違規證明：拿掉 stepUnstick
 --               的位移條件（照舊當倒夠）＝紅。
 --   (thr-keep)  已退出 UNSTICK_MIN_M 才折到上限：照舊當倒夠進 settle、額度照扣。違規證明：拿掉 dist2＝1e9＝紅。
+--   (thr-slot)  1012a 倒車中（4 km/h、折角 ±10°）：倒車推力與回正側推合成同一個 addImpulse——每幀恰一次、沿中線往後、
+--               偏航力矩把折角拉回（φ>0＝torqueY>0＝牽引車航向變小）。違規證明：改回先 addImpulse 推、再 applySteering
+--               （assistForce 0）＝每幀兩次紅；reverseSteer 反號＝力矩紅。
 function drive.scenarioTowHitchReverse()
     scenario("拖車折角已超過倒車上限：不倒、不算成功、不吃額度；倒車中途才折到上限照舊算倒夠")
     local oldSandbox, oldVeh, oldGet = SandboxVars, dveh, getSpecificPlayer
@@ -23057,6 +23344,27 @@ function drive.scenarioTowHitchReverse()
         and e.phase == "rear-blocked" and e.rear == "hitch" and (e.d or 1) < T.UNSTICK_MIN_M,
         "(thr-mid) 沒實際退出就折到上限：不算成功、退回額度（started=" .. tostring(started) .. " mode=" .. tostring(st.mode)
         .. " attempts=" .. tostring(st.episodeAttempts) .. " ev=" .. phases() .. "）")
+
+    -- (thr-slot)
+    psi = math.rad(10)
+    recover()
+    local inRev = st.mode == "unstick" and st.episodeAttempts == 1
+    dveh._speed = -4 -- 倒車中：拖車側推隨車速縮放（TOW_STEER_FULL_KMH），靜止＝0、量不到回正
+    local imp, slotOk, slotLog, bad0 = dveh._imp, true, {}, drive.bad.impulse
+    for _, deg in ipairs({ 10, 10, -10, -10 }) do
+        psi = math.rad(deg)
+        imp.total = 0
+        tick()
+        local back = imp.x * dveh._fwdX + imp.z * dveh._fwdY
+        slotLog[#slotLog + 1] = string.format("%d:%d/%.0f/%.0f", deg, imp.total, back, imp.torqueY)
+        if not (st.mode == "unstick" and imp.total == 1 and back < 0 and imp.torqueY * deg > 0) then slotOk = false end
+    end
+    checkTrue(inRev and slotOk and drive.bad.impulse == bad0,
+        "(thr-slot) 倒車推力與回正側推同一個 addImpulse：往後、力矩把折角拉回（mode=" .. tostring(st.mode) .. " "
+        .. table.concat(slotLog, " ") .. "）")
+    dveh._speed = 0
+    psi = math.rad(45) -- 一寸未退就折到上限＝退回額度、回停等（同 thr-mid），接 (thr-keep)
+    tick()
 
     -- (thr-keep)
     psi = math.rad(10)

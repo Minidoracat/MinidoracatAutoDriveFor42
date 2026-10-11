@@ -210,6 +210,11 @@
     "voice": "7f93e9374aba440482d349d3254dd6fe"
   },
   {
+    "id": "rehitch_zh",
+    "text": "[surprised, determined] 咦，挂车不见了？我倒车回去重新挂上，稍等一下！",
+    "voice": "7f93e9374aba440482d349d3254dd6fe"
+  },
+  {
     "id": "leg_next_en",
     "text": "[excited, delighted, energetic] All right, next stop! Let's go!",
     "voice": "7f93e9374aba440482d349d3254dd6fe",
@@ -230,6 +235,11 @@
   {
     "id": "gate_en",
     "text": "[puzzled, concerned] Hmm, the gate ahead won't open. Heads up!",
+    "voice": "7f93e9374aba440482d349d3254dd6fe"
+  },
+  {
+    "id": "rehitch_en",
+    "text": "[surprised, determined] Huh, the trailer's gone? Backing up to hitch it again, one moment!",
     "voice": "7f93e9374aba440482d349d3254dd6fe"
   },
   {
@@ -259,6 +269,13 @@
   {
     "id": "gate_ja",
     "text": "[puzzled, concerned] あれ、前方のゲートが開きません。ご注意ください。",
+    "voice": "d1a1a920956c40c0bac4ef6a92c92a20",
+    "temperature": 0.7,
+    "top_p": 0.7
+  },
+  {
+    "id": "rehitch_ja",
+    "text": "[surprised, determined] あれ、トレーラーが消えた？バックして連結し直すね。少々お待ちを！",
     "voice": "d1a1a920956c40c0bac4ef6a92c92a20",
     "temperature": 0.7,
     "top_p": 0.7

@@ -656,9 +656,9 @@ function T.lostState(vehicle, tow)
     return cur, alive, by, hd, kmh, up
 end
 
--- 掛車不在世界時的延後鑑識（1010c；正式服平穩行駛中 TrailerLost 6/6 是 alive=false）：MP 伺服器以它記的掛車位置判客戶端
--- 不相關就送 VehicleRemove（VehicleRequestPacket.processServer；客戶端 VehicleRemovePacket.processClient 設
--- serverRemovedFromWorld、removeFromWorld、unregisterVehicle），車回到相關範圍時再以同一個 id 建新物件。
+-- 掛車不在世界時的延後鑑識（1010c；正式服平穩行駛中 TrailerLost 6/6 是 alive=false）：掛車只在客戶端被移出世界——2026-10-11
+-- 正式服 Vehicle Trace 裡同一台掛車沒有伺服器端 removeFromWorld、拖掛授權也沒變；客戶端走哪條移除路徑未定（伺服器送的
+-- VehicleRemove＝VehicleRemovePacket.processClient 只是候選之一）。掛車回到客戶端時是同一個 id 的新物件。
 -- RELOOK_MS＝脫開後兩次回看的時間（Driver Drive.relookStep），RELOOK_R＝找同 script 車的半徑（m）。
 T.RELOOK_MS = { 1000, 5000 }
 T.RELOOK_R = 100
@@ -800,6 +800,52 @@ function T.guard(s, vehicle, now, speedKmh)
     end
     s.towCap = cap
     return cap, nil
+end
+
+-- ---------------------------------------------------------------- 4. 自動掛回（1011a）
+-- 掛車只在客戶端消失（lost alive=false）時，同 id 掛車回到客戶端後，牽引車每幀的 BaseVehicle.tryReconnectToTowedVehicle
+-- 在兩掛點水平距離² <10、兩車前向 |內積| ≥0.6 時自己掛回（canAttachTrailer reconnect）。Driver（Drive.rehitch*）負責
+-- 停車、等它回來、倒過去；這裡放判斷與幾何。E2E 1011：原版掛車、拖一般車對準時 8/8 掛回；半聯結車 0/4。
+T.KEY_SYNC = "UI_MinidoracatAutoDrive_TrailerSyncLost"            -- 交還時的完整說明（Toast、HUD 停止原因 tooltip）
+T.KEY_SYNC_SHORT = "UI_MinidoracatAutoDrive_TrailerSyncLostShort" -- 同一件事的頭上短句
+T.REHITCH_AIM_MAX = 5 -- 倒車對準點在掛車掛點沿拖行軸往前的最遠距離（m；見 hitchGap）
+
+-- 能不能自動掛回：量得到掛車 id／script、兩邊掛點名與拖行軸向，而且不是第五輪（掛點 trailerTruck：半聯結車 E2E 0/4——
+-- 直線倒車側漂對不上，或掛上那一下就折成 V 字、之後 StopStuck）。
+function T.rehitchOK(tow)
+    return type(tow) == "table" and tow.id ~= nil and tow.script ~= nil
+        and tow.hitchSelf ~= nil and tow.hitchOther ~= nil
+        and tow.hitchSelf ~= "trailerTruck" and tow.hitchOther ~= "trailerTruck"
+        and (tow.axisSign == 1 or tow.axisSign == -1)
+end
+
+-- 倒車掛回的幾何（Driver Drive.rehitchStep 每幀；trailer＝回到客戶端的掛車物件，tow＝脫開前量的幾何）：
+-- hd＝兩掛點水平距離；phi＝牽引車航向減掛車拖行軸航向（同 T.state，0＝對齊）；lat＝牽引車掛點離掛車軸線的橫向距離
+-- （沿拖行軸看右正，同 T.sampleState）；px, py＝對準點（掛車掛點沿拖行軸往前 min(hd/2, REHITCH_AIM_MAX)：遠時先開上軸線、
+-- 越近越貼掛點，接上時兩車才對齊——直接對掛點倒，車停歪就會歪著掛上，E2E 內積 0.81 那輪掛上 174ms 又斷）；
+-- hx, hy＝牽引車掛點；fx, fy＝牽引車前向單位向量。讀不到回 nil。
+function T.hitchGap(vehicle, trailer, tow)
+    local a, b = BaseVehicle.allocVector3f(), BaseVehicle.allocVector3f()
+    local ok, hx, hy, tx, ty, fx, fy, ux, uy = pcall(function()
+        vehicle:getTowingWorldPos(tow.hitchSelf, a)
+        trailer:getTowedByWorldPos(tow.hitchOther, b)
+        local x1, y1, x2, y2 = a:x(), a:y(), b:x(), b:y()
+        vehicle:getForwardVector(a)
+        trailer:getForwardVector(b)
+        return x1, y1, x2, y2, a:x(), a:z(), b:x(), b:z()
+    end)
+    BaseVehicle.releaseVector3f(a)
+    BaseVehicle.releaseVector3f(b)
+    if not ok or not (finite(hx) and finite(hy) and finite(tx) and finite(ty)) then return nil end
+    local fl, ul = sqrt(fx * fx + fy * fy), sqrt(ux * ux + uy * uy)
+    if not (finite(fl) and fl > 1e-6 and finite(ul) and ul > 1e-6) then return nil end
+    local sg = tow.axisSign == -1 and -1 or 1
+    fx, fy, ux, uy = fx / fl, fy / fl, sg * ux / ul, sg * uy / ul
+    local dx, dy = hx - tx, hy - ty
+    local hd = sqrt(dx * dx + dy * dy)
+    local aim = hd * 0.5
+    if aim > T.REHITCH_AIM_MAX then aim = T.REHITCH_AIM_MAX end
+    return hd, wrap(atan2(fy, fx) - atan2(uy, ux)), dy * ux - dx * uy, tx + ux * aim, ty + uy * aim, hx, hy, fx, fy
 end
 
 return T

@@ -714,14 +714,15 @@ function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
     else
         u.stallSince = nil
     end
-    if blocked == true or mode == "unstick" or mode == "recover" then u.lastAnomaly = now end
+    -- 自動掛回（1011a）整段算異常：tow lost 觸發的片段收到掛回成功或交還為止（最長 POST_MAX_MS）
+    if blocked == true or mode == "unstick" or mode == "recover" or mode == "rehitch" then u.lastAnomaly = now end
     local fbNow = finite(fbl) and fbl > 0
     local fbWas = u.prevFbOn == true
     if fbNow and not u.prevFbOn then
         local why = type(fbw) == "string" and fbw or "?"
         u.fb[why] = (u.fb[why] or 0) + 1
-        -- 預期中的煞車（到站、脫困流程）與幾乎靜止時的煞車不算事故
-        if why ~= "arrive" and string.sub(why, 1, 7) ~= "unstick" and why ~= "contact"
+        -- 預期中的煞車（到站、脫困流程、自動掛回）與幾乎靜止時的煞車不算事故
+        if why ~= "arrive" and string.sub(why, 1, 7) ~= "unstick" and why ~= "contact" and why ~= "rehitch"
                 and spd >= 3 then
             trigger(u, now, "brake")
         end

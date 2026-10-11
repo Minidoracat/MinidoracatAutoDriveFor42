@@ -1062,7 +1062,7 @@ local function isCritical(mode, err)
     end
     if type(mode) == "string" then
         return mode == "blocked" or mode == "dodging" or mode == "offroad"
-            or mode == "unstick"
+            or mode == "unstick" or mode == "rehitch" -- rehitch：自動掛回（1011a）
     end
     return false
 end

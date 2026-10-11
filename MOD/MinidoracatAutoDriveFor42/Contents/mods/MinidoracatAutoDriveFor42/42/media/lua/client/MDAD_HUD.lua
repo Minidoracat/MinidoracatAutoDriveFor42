@@ -110,6 +110,7 @@ local STATUS_KEYS = {
     yield = "UI_MinidoracatAutoDrive_HUDStatusYield",
     unstick = "UI_MinidoracatAutoDrive_HUDStatusUnstick",
     side = "UI_MinidoracatAutoDrive_HUDStatusSide", -- 側向脫困進行中（Drive.hudState，1006）
+    rehitch = "UI_MinidoracatAutoDrive_HUDStatusRehitch", -- 自動掛回進行中（Drive.rehitchStep，1011a）
     blocked = "UI_MinidoracatAutoDrive_HUDStatusBlocked",
     dodging = "UI_MinidoracatAutoDrive_HUDStatusDodging",
     build = "UI_MinidoracatAutoDrive_HUDStatusBuild",
@@ -166,6 +167,8 @@ HUD.STOP_KEYS = {
     UI_MinidoracatAutoDrive_TrailerCorner = "UI_MinidoracatAutoDrive_HUDStatusStop_trailer",
     UI_MinidoracatAutoDrive_TrailerRotate = "UI_MinidoracatAutoDrive_HUDStatusStop_trailer",
     UI_MinidoracatAutoDrive_TrailerLost = "UI_MinidoracatAutoDrive_HUDStatusStop_trailer",
+    -- 掛車只是同步中斷（tow lost alive=false、自動掛回沒成功；1011a）：tooltip 的完整原因句教玩家倒車回去掛
+    UI_MinidoracatAutoDrive_TrailerSyncLost = "UI_MinidoracatAutoDrive_HUDStatusStop_trailerSync",
     UI_MinidoracatAutoDrive_EngineOff = "UI_MinidoracatAutoDrive_HUDStatusStop_engine",
     UI_MinidoracatAutoDrive_NeedGPS = "UI_MinidoracatAutoDrive_HUDStatusStop_device",
     UI_MinidoracatAutoDrive_NeedGPSOrWatch = "UI_MinidoracatAutoDrive_HUDStatusStop_device",
@@ -179,6 +182,7 @@ local STATUS_WIDTH_KEYS = {
     "UI_MinidoracatAutoDrive_HUDStatusYieldResume",
     "UI_MinidoracatAutoDrive_HUDStatusUnstick",
     "UI_MinidoracatAutoDrive_HUDStatusSide",
+    "UI_MinidoracatAutoDrive_HUDStatusRehitch",
     "UI_MinidoracatAutoDrive_HUDStatusBlocked",
     "UI_MinidoracatAutoDrive_HUDStatusDodging",
     "UI_MinidoracatAutoDrive_HUDStatusBuild",
@@ -221,6 +225,7 @@ local STATUS_WIDTH_KEYS = {
     "UI_MinidoracatAutoDrive_HUDStatusStop_route",
     "UI_MinidoracatAutoDrive_HUDStatusStop_far",
     "UI_MinidoracatAutoDrive_HUDStatusStop_trailer",
+    "UI_MinidoracatAutoDrive_HUDStatusStop_trailerSync",
     "UI_MinidoracatAutoDrive_HUDStatusStop_engine",
     "UI_MinidoracatAutoDrive_HUDStatusStop_device",
     "UI_MinidoracatAutoDrive_HUDStatusStop_other",
@@ -802,7 +807,8 @@ local function statusColor(token, reason)
     if reason then return C.red end
     if token == nil then return C.blue end
     if token == "blocked" then return C.red end
-    if token == "dodging" or token == "unstick" or token == "side" or token == "lowfps" or token == "areawait" then
+    if token == "dodging" or token == "unstick" or token == "side" or token == "lowfps" or token == "areawait"
+            or token == "rehitch" then
         return C.amber
     end
     if token == "yield" or token == "build" then return C.blue end
