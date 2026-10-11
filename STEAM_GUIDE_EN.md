@@ -267,8 +267,8 @@ Separate 0–500% power and extra-fuel settings for GPS and autodrive; they stac
 [/list]
 [h3]More[/h3]
 [list]
-[*] [b]Maps with author road data[/b]: [url=https://steamcommunity.com/workshop/filedetails/discussion/3763914102/586187095760050601/]Map Requests & Supported Maps[/url]
-[*] [b]Road navigation and author requirements[/b]: [url=https://steamcommunity.com/workshop/filedetails/discussion/3763913359/586187095760051259/]MiniMap Guide: Features, Navigation & Road Data[/url]
+[*] [b]Maps with author road data[/b]: [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3817840392]MOD Maps supported map list[/url]
+[*] [b]Road navigation and author requirements[/b]: [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3817841972]MiniMap Guide: Features, Navigation & Road Data[/url]
 [/list]
 === ❓ FAQ
 [h3]Does stopping autodrive brake?[/h3]

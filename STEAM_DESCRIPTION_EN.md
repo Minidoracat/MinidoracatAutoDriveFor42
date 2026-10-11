@@ -35,7 +35,7 @@ Keep every Minidoracat MiniMap series mod up to date and restart the game after 
 [*] [b]Server tuning[/b]: power, fuel, crafting and loot are sandbox options; server owners can opt in to diagnostics that help improve autodrive
 [/list]
 🗺️ Whether a map mod supports navigation and autodrive depends on its author providing correct road data.
-📖 [b]Full details, settings and FAQ for every feature:[/b] [url=https://steamcommunity.com/workshop/filedetails/discussion/3792675881/586187095760051144/]AutoDrive Guide: Features, Road Requirements & Known Issues[/url]
+📖 [b]Full details, settings and FAQ for every feature:[/b] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3817845953]AutoDrive Mod Guide: Devices, Trips, Driving Behavior & Road Requirements[/url]
 
 [h2]🔗 Minidoracat MiniMap series[/h2]
 [list]

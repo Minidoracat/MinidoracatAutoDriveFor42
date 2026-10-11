@@ -35,7 +35,7 @@
 [*] [b]伺服器可調[/b]：耗電、油耗、合成、搜刮與診斷收集皆可在沙盒設定
 [/list]
 🗺️ 地圖 MOD 能否導航與自駕，取決於地圖作者是否提供正確的道路資料。
-📖 [b]每項功能的詳細說明、設定與常見問題：[/b][url=https://steamcommunity.com/workshop/filedetails/discussion/3792675881/569297034317714529/]AutoDrive 完整說明：功能、道路需求與已知問題[/url]
+📖 [b]每項功能的詳細說明、設定與常見問題：[/b][url=https://steamcommunity.com/sharedfiles/filedetails/?id=3817845856]自動駕駛 AutoDrive MOD 完整說明：裝置取得、行程、駕駛行為與道路需求[/url]
 
 [h2]🔗 Minidoracat 小地圖系列[/h2]
 [list]

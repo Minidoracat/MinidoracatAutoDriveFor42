@@ -35,7 +35,7 @@ GPSナビゲーターで道路のルートを計画すると、オートパイ�
 [*] [b]サーバー設定[/b]：電力・燃料・クラフト・出現はサンドボックスで調整でき、サーバー管理者は自動運転改善のための診断収集を有効にできます
 [/list]
 🗺️ マップMODでナビや自動運転が使えるかどうかは、マップ作者が正しい道路データを用意しているかで決まります。
-📖 [b]各機能の詳しい説明・設定・よくある質問：[/b][url=https://steamcommunity.com/workshop/filedetails/discussion/3792675881/586187095760051144/]AutoDrive Guide: Features, Road Requirements & Known Issues[/url]（英語）
+📖 [b]各機能の詳しい説明・設定・よくある質問：[/b][url=https://steamcommunity.com/sharedfiles/filedetails/?id=3817845953]AutoDrive Mod Guide: Devices, Trips, Driving Behavior & Road Requirements[/url]（英語）
 
 [h2]🔗 Minidoracat ミニマップ シリーズ[/h2]
 [list]

@@ -38,7 +38,7 @@ description=[*] [b]Blocked-road recovery and rerouting[/b]: reverses out when st
 description=[*] [b]Server tuning[/b]: power, fuel, crafting and loot are sandbox options; server owners can opt in to diagnostics that help improve autodrive
 description=[/list]
 description=🗺️ Whether a map mod supports navigation and autodrive depends on its author providing correct road data.
-description=📖 [b]Full details, settings and FAQ for every feature:[/b] [url=https://steamcommunity.com/workshop/filedetails/discussion/3792675881/586187095760051144/]AutoDrive Guide: Features, Road Requirements & Known Issues[/url]
+description=📖 [b]Full details, settings and FAQ for every feature:[/b] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3817845953]AutoDrive Mod Guide: Devices, Trips, Driving Behavior & Road Requirements[/url]
 description=
 description=[h2]🔗 Minidoracat MiniMap series[/h2]
 description=[list]

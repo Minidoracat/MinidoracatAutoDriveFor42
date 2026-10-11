@@ -283,8 +283,8 @@ GPS 與自駕的耗電、額外油耗，各自可在沙盒調整 0–500%，同�
 [/list]
 [h3]相關說明[/h3]
 [list]
-[*] [b]哪些地圖有作者道路資料[/b]：[url=https://steamcommunity.com/workshop/filedetails/discussion/3763914102/568165880361411088/]支援地圖清單＆許願[/url]
-[*] [b]道路導航說明與地圖作者道路規範[/b]：[url=https://steamcommunity.com/workshop/filedetails/discussion/3763913359/569297034317714443/]小地圖完整說明：功能、導航與道路資料[/url]
+[*] [b]哪些地圖有作者道路資料[/b]：[url=https://steamcommunity.com/sharedfiles/filedetails/?id=3817840347]MOD 地圖擴充的支援地圖清單[/url]
+[*] [b]道路導航說明與地圖作者道路規範[/b]：[url=https://steamcommunity.com/sharedfiles/filedetails/?id=3817841920]小地圖完整說明：功能、導航與道路資料[/url]
 [/list]
 === ❓ 常見問題
 [h3]停止自駕會幫我煞車嗎？[/h3]
