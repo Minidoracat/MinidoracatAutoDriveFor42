@@ -13,9 +13,9 @@
         "japanese": "STEAM_DESCRIPTION_JP.md"
     },
     "titles": {
-        "english": "[B42] Minidoracat MiniMap - AutoDrive",
-        "tchinese": "[B42] Minidoracat 小地圖 - 自動駕駛 AutoDrive",
-        "schinese": "[B42] Minidoracat 小地图 - 自动驾驶 AutoDrive",
-        "japanese": "[B42] Minidoracat ミニマップ - オートドライブ"
+        "english": "[B42] MiniMap - AutoDrive by Minidoracat",
+        "tchinese": "[B42] 小地圖 - 自動駕駛 AutoDrive by Minidoracat",
+        "schinese": "[B42] 小地图 - 自动驾驶 AutoDrive by Minidoracat",
+        "japanese": "[B42] ミニマップ - オートドライブ by Minidoracat"
     }
 }
