@@ -75,6 +75,11 @@
     "text": "[casual] 前面的大门打不开耶。"
   },
   {
+    "id": "rehitch_zh",
+    "language": "zh",
+    "text": "[casual] 挂车不见了，我倒回去接。"
+  },
+  {
     "id": "start_en",
     "language": "en",
     "text": "[cheerful] Alright, let's go. I've got this!"
@@ -148,6 +153,11 @@
     "id": "gate_en",
     "language": "en",
     "text": "[casual] The gate ahead won't open."
+  },
+  {
+    "id": "rehitch_en",
+    "language": "en",
+    "text": "[casual] Trailer's gone. Backing up to grab it."
   },
   {
     "id": "start_ja",
@@ -225,6 +235,11 @@
     "text": "[casual] 前のゲート、開かないみたい。"
   },
   {
+    "id": "rehitch_ja",
+    "language": "ja",
+    "text": "[casual] トレーラーが消えた。バックしてつなぎ直すね。"
+  },
+  {
     "id": "start_ko",
     "language": "ko",
     "text": "[cheerful] 좋아, 출발! 나한테 맡겨!"
@@ -298,6 +313,11 @@
     "id": "gate_ko",
     "language": "ko",
     "text": "[casual] 앞에 게이트가 안 열려."
+  },
+  {
+    "id": "rehitch_ko",
+    "language": "ko",
+    "text": "[casual] 트레일러가 사라졌어. 후진해서 다시 연결할게."
   },
   {
     "id": "start_ru",
@@ -375,6 +395,11 @@
     "text": "[casual] Ворота впереди не открываются."
   },
   {
+    "id": "rehitch_ru",
+    "language": "ru",
+    "text": "[casual] Прицеп пропал. Сдаю назад, подцеплю."
+  },
+  {
     "id": "start_es",
     "language": "es",
     "text": "[cheerful] ¡Vamos! Yo me encargo."
@@ -448,6 +473,11 @@
     "id": "gate_es",
     "language": "es",
     "text": "[casual] La puerta de enfrente no se abre."
+  },
+  {
+    "id": "rehitch_es",
+    "language": "es",
+    "text": "[casual] Se perdió el remolque. Retrocedo a engancharlo."
   },
   {
     "id": "start_pt",
@@ -525,6 +555,11 @@
     "text": "[casual] O portão ali na frente não abre."
   },
   {
+    "id": "rehitch_pt",
+    "language": "pt",
+    "text": "[casual] O reboque sumiu. Vou dar ré e engatar."
+  },
+  {
     "id": "start_tr",
     "language": "tr",
     "text": "[cheerful] Tamam, gidelim. Bana bırak!"
@@ -598,6 +633,11 @@
     "id": "gate_tr",
     "language": "tr",
     "text": "[casual] İlerideki kapı açılmıyor."
+  },
+  {
+    "id": "rehitch_tr",
+    "language": "tr",
+    "text": "[casual] Römork kayboldu. Geri gidip bağlıyorum."
   },
   {
     "id": "start_fr",
@@ -675,6 +715,11 @@
     "text": "[casual] Le portail devant ne s'ouvre pas."
   },
   {
+    "id": "rehitch_fr",
+    "language": "fr",
+    "text": "[casual] La remorque a disparu. Je recule la chercher."
+  },
+  {
     "id": "start_pl",
     "language": "pl",
     "text": "[cheerful] Dobra, jedziemy. Zostaw to mnie!"
@@ -750,6 +795,11 @@
     "text": "[casual] Brama przed nami się nie otwiera."
   },
   {
+    "id": "rehitch_pl",
+    "language": "pl",
+    "text": "[casual] Przyczepa zniknęła. Cofam się po nią."
+  },
+  {
     "id": "start_de",
     "language": "de",
     "text": "[cheerful] Okay, los geht's. Ich mach das!"
@@ -823,5 +873,10 @@
     "id": "gate_de",
     "language": "de",
     "text": "[casual] Das Tor da vorne geht nicht auf."
+  },
+  {
+    "id": "rehitch_de",
+    "language": "de",
+    "text": "[casual] Der Anhänger ist weg. Ich setz zurück und hol ihn."
   }
 ]

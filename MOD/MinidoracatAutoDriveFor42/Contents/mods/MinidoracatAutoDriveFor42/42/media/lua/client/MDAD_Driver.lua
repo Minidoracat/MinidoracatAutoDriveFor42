@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1010c"
+Drive.REV = "1011a"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -649,6 +649,24 @@ TUNE.BRAKE_ASSIST_NEED = 4.5 -- 需要的減速度（m/s²）超過一般硬煞�
 -- 拖車硬煞不鎖輪（0929p，使用者裁定；見 Drive.hardBrake）：這個速度以上改用兩節各自的中線外力
 TUNE.TOW_NOLOCK_KMH = 10
 TUNE.TOW_BRAKE_DECEL = 7.0 -- 兩節各自的外力減速度（m/s²，同 DODGE_ASSIST_MAX）；斷油的引擎煞車另外疊加
+-- 自動掛回（1011a；Drive.rehitch*、MDADTrailer〈4. 自動掛回〉）：掛車只在客戶端消失時煞停、等它回來、倒過去讓引擎自己掛回。
+-- 倒車量級、掛點 8m 換速、側推增益與施力點照 2026-10-11 E2E（家族 scenarios.md〈replay〉rehitch；8/8 掛回的那組）。
+TUNE.REHITCH_MAX = 3            -- 每趟最多幾次
+TUNE.REHITCH_BRAKE_MS = 10000   -- 煞停上限（70 km/h 不鎖輪約 3 秒）
+TUNE.REHITCH_WAIT_MS = 15000    -- 停妥後等掛車回到客戶端的上限（本機 0.2–1.1 秒；正式服 3 例有 2 例超過 5 秒——推測值，照遙測調）
+TUNE.REHITCH_FOUND_MS = 1000    -- 看到掛車後等這麼久才倒（掛車在客戶端站穩；煞停的一秒鎖輪閂鎖也過了）
+TUNE.REHITCH_FIND_R = 30        -- 回來的同 id 同 script 車離脫開點超過這個距離（m）不認
+TUNE.REHITCH_FAST_KMH, TUNE.REHITCH_SLOW_M, TUNE.REHITCH_KMH = 10, 8, 4 -- 掛點距離 >8m 倒車 10 km/h，之後 4
+TUNE.REHITCH_LAT_K, TUNE.REHITCH_LAT_MAX = 0.8, 0.8 -- 車尾側推＝對準點橫向誤差（m）×K，夾 ±MAX 倍基準衝量
+TUNE.REHITCH_TAIL_M = 2         -- 倒車衝量的施力點在車心後幾公尺
+-- 掛點近到 ALIGN_M 時折角或橫偏還超過就收手（misaligned；引擎 3.16m 內就掛上，歪著掛上會再斷——E2E 內積 0.81 那輪 174ms 又斷）
+TUNE.REHITCH_ALIGN_M, TUNE.REHITCH_ALIGN_RAD, TUNE.REHITCH_ALIGN_LAT = 4, 25 * math.pi / 180, 1.0
+TUNE.REHITCH_OVER_M = 3         -- 倒車距離超過起倒時的掛點距離＋這個值＝倒過頭（far）
+TUNE.REHITCH_REV_MAX_M = 45     -- 起倒時掛點超過這個距離＝不倒（far；85 km/h 不鎖輪煞停約 30–35m）
+TUNE.REHITCH_STALL_MS = 5000    -- 掛點距離這麼久沒再縮短 0.2m＝倒不動（stall）
+TUNE.REHITCH_NEAR_M = 0.4       -- 掛點近到這裡還沒掛上（noattach）
+TUNE.REHITCH_SETTLE_MS = 2500   -- 掛上後煞住看會不會再斷
+TUNE.REHITCH_STOP_KMH = 0.5     -- 停妥判定
 -- 回線待命／調頭前煞停／blocked 接近／待繞行接近在這個速度以上改不鎖輪（1001d／1001e）。1004b 起 25→10（使用者核准，
 -- 與拖車／讓車／彎道同一個門檻）：不鎖輪（斷油＋中線外力）實測約 10 m/s²、鎖輪 6–8，而且照常轉向、輪胎保有側向
 -- 抓地——正式服 0.18.2 clip-14：23 km/h 回線待命鎖輪，車頭帶 0.11 rad 往右滑 1.6m 撞樹。10 以下照舊鎖輪停住。
@@ -1810,6 +1828,7 @@ function Drive.hudState(playerNum)
     local key
     if s.mode == "arrive" then key = "arrive"
     elseif s.mode == "yield" then key = "yield"
+    elseif s.mode == "rehitch" then key = "rehitch" -- 自動掛回進行中（Drive.rehitchStep，1011a）
     elseif s.mode == "unstick" and s.unstickSide then
         key = "side" -- 側向脫困進行中（Drive.stepSideEscape；settle 照舊算 unstick）
     elseif s.mode == "unstick" or s.mode == "settle"
@@ -1950,6 +1969,19 @@ diagFail = function(s, playerNum, stage, err)
 end
 
 
+-- 掛車脫開的鑑識（1006；1010c 加舊物件 rmw／ox／oy／od）：記 tow phase=lost（MDADTrailer.lostState／lostWhere），回 alive
+-- （getVehicleById 找不找得到掛車）與回看基準點 x0／y0。交還（Drive.stop）與進入自動掛回（Drive.rehitchArm）共用。
+function Drive.towLostNote(s, playerNum, vehicle)
+    local cur, alive, by, hd, kmh, up = MDADTrailer.lostState(vehicle, s.tow)
+    local rmw, ox, oy, od, x0, y0 = MDADTrailer.lostWhere(vehicle, s.tow)
+    diagEvent(s, playerNum, "tow", {
+        phase = "lost", cur = cur, alive = alive, by = by, hd = hd, speed = kmh, up = up, phi = s.towPhi,
+        vid = s.tow.id, script = s.tow.script, -- 掛車 id／script（2026-10-10；MDADTrailer.attach 記下，量不到缺）
+        rmw = rmw, ox = ox, oy = oy, od = od,
+    })
+    return alive, x0, y0
+end
+
 -- 停止＝只關 regulator，**不搶煞車**：停止的原因多半是玩家要自己接手（讓位逾時、下車、
 -- 換車），這時候突然硬煞比放手更危險。到達停車的煞車是 arrive 分支自己做的。
 -- regulator 是我們開的就由我們關：即使玩家已經不在車上（下車／換車），仍然關掉，
@@ -1972,19 +2004,19 @@ function Drive.stop(playerNum, reasonKey, voiceEvent, diagWhy)
         end
         return true
     end
-    -- 掛車脫開（guard 與每幀檢查兩條交還路徑都經這裡）：交還前記一筆鑑識（MDADTrailer.lostState；1006）。
-    -- 1010c：加舊掛車物件的 rmw／ox／oy／od（MDADTrailer.lostWhere）；掛車已不在世界（alive=false）時診斷收尾延後，
-    -- 脫開後回看兩次（Drive.relookArm），駕駛本身照舊立刻交還。
-    local relook = false
-    if reasonKey == MDADTrailer.KEY_LOST and s.tow and s.diag then
-        local cur, alive, by, hd, kmh, up = MDADTrailer.lostState(s.vehicle, s.tow)
-        local rmw, ox, oy, od, x0, y0 = MDADTrailer.lostWhere(s.vehicle, s.tow)
-        diagEvent(s, playerNum, "tow", {
-            phase = "lost", cur = cur, alive = alive, by = by, hd = hd, speed = kmh, up = up, phi = s.towPhi,
-            vid = s.tow.id, script = s.tow.script, -- 掛車 id／script（2026-10-10；MDADTrailer.attach 記下，量不到缺）
-            rmw = rmw, ox = ox, oy = oy, od = od,
-        })
-        relook = alive == false and Drive.relookArm(s, playerNum, x0, y0, reasonKey)
+    -- 掛車脫開（guard 與每幀檢查兩條交還路徑、自動掛回失敗都經這裡）：交還前記一筆鑑識（Drive.towLostNote；1006）。
+    -- 1010c：掛車已不在世界（alive=false）時診斷收尾延後，脫開後回看兩次（Drive.relookArm），駕駛本身照舊立刻交還。
+    -- 1011a：alive=false＝掛車只是同步中斷、不是斷鉤，提示改講倒車回去會自動掛回（sync：頭上 KEY_SYNC_SHORT 短句；Toast
+    -- 與 HUD 停止原因用 KEY_SYNC 完整說明）。自動掛回失敗（s.rehitch）時 lost 在進入掛回那刻就記過了，這裡只換提示。
+    local relook, sync = false, false
+    if reasonKey == MDADTrailer.KEY_LOST and s.rehitch then
+        sync = true
+    elseif reasonKey == MDADTrailer.KEY_LOST and s.tow then
+        local alive, x0, y0 = Drive.towLostNote(s, playerNum, s.vehicle)
+        if alive == false then
+            sync = true
+            relook = Drive.relookArm(s, playerNum, x0, y0, reasonKey)
+        end
     end
     -- 調頭進行中就結束 session（玩家接手、按鈕、交還…）：記下這次調頭的結局（1008；Drive.uturnDone）
     if s.uturn then
@@ -2010,10 +2042,17 @@ function Drive.stop(playerNum, reasonKey, voiceEvent, diagWhy)
             .. " regulator=off nobrake")
     end
     if reasonKey then
-        Drive.noteStop(playerNum, reasonKey, s.vehicle)
+        Drive.noteStop(playerNum, sync and MDADTrailer.KEY_SYNC or reasonKey, s.vehicle)
         local playerObj = getSpecificPlayer(playerNum)
         if playerObj then
-            haloBad(playerObj, reasonKey)
+            if sync then
+                HaloTextHelper.addBadText(playerObj, getText(MDADTrailer.KEY_SYNC_SHORT))
+                if MDADDiagnostics and MDADDiagnostics.toast then
+                    MDADDiagnostics.toast(getText(MDADTrailer.KEY_SYNC), "bad")
+                end
+            else
+                haloBad(playerObj, reasonKey)
+            end
             if reasonKey == KEY_STUCK and not telemetryHinted[playerNum] and not diagEnabled() then
                 telemetryHinted[playerNum] = true
                 -- addText(player, text)＝白字（HaloTextHelper.java:147-149；原版 forageClient.lua:73）
@@ -3451,8 +3490,8 @@ function Drive.hardBrake(s, vehicle, now, why, speedKmh, mult, steer, heading, f
     if not nolock and not s.currentBlocked and (why == "rotate" or why == "blocked-approach" or why == "dodge-defer"
             or ((why == "return" or why == "return-hold") and s.returnHold)) then
         nolock, minKmh = true, TUNE.RETURN_NOLOCK_KMH
-    elseif not nolock and not s.currentBlocked and why == "curve" then
-        nolock = true
+    elseif not nolock and not s.currentBlocked and (why == "curve" or why == "rehitch") then
+        nolock = true -- rehitch：自動掛回的煞停（1011a；s.tow 已收起，照拖車的門檻不鎖輪、照常轉向）
     end
     if not nolock or why == "dynamics-fault"
             or not (MDADDynamics.finite(speedKmh) and speedKmh >= minKmh) then
@@ -12603,6 +12642,262 @@ local function stepUnstick(s, vehicle, playerNum, now)
     end
 end
 
+--------------------------------------------------------------------------------
+-- 自動掛回（1011a；使用者 2026-10-11 核准）
+--------------------------------------------------------------------------------
+-- 掛車只在客戶端消失（tow lost alive=false；伺服器那份與拖掛都還在，trailer.md〈已知坑〉）時不交還：煞停 → 等同 id 掛車
+-- 回到客戶端 → 倒過去讓引擎自己掛回（MDADTrailer〈4. 自動掛回〉）→ 煞住 REHITCH_SETTLE_MS 看會不會再斷 → 重新量掛車、
+-- 沿原路線續行。只做 MP 的一般掛車與拖一般車（MDADTrailer.rehitchOK）；任何失敗照舊交還（Drive.stop 的提示改講倒車回去
+-- 會自動掛回）。s.rehitch＝這次掛回的狀態：進入時 s.tow 收進 rh.tow、s.tow＝nil——拖車防線、脫開檢查、倒車探測的掛車車身
+-- 都不碰已移出世界的舊物件；cutover 照舊用 rh.tow 改寫剖面路線、保留 rehitch 模式；讓位恢復後從 wait 重來。
+
+-- 掛回各步的事件（tow phase=rh-arm／rh-stop／rh-found／rh-reverse／rh-attach／rh-done／rh-fail）與 console 行：ms＝脫開後、
+-- attempt＝這趟第幾次、d＝rh-stop 停車處／rh-found 回來的掛車到脫開點的距離、hd／phi／lat＝最近一次量的兩掛點距離、折角、
+-- 牽引車掛點離掛車軸線的橫偏（MDADTrailer.hitchGap）、moved＝已倒車距離；rh-fail 另帶 why，後方探測不清時 x／y／kind。
+function Drive.rehitchNote(s, playerNum, vehicle, now, phase, d, why, x, y, kind)
+    local rh = s.rehitch
+    local speed = vehicle:getCurrentSpeedKmHour()
+    diagEvent(s, playerNum, "tow", { phase = phase, why = why, ms = now - rh.t0, attempt = s.rehitchN, speed = speed,
+        d = d, hd = rh.hd, phi = rh.phi, lat = rh.lat, moved = rh.moved, x = x, y = y, kind = kind, vid = rh.tow.id })
+    if getDebug() then -- telemetry: tow phase=rh-*（why／ms／attempt／speed／d／hd／phi／lat／moved）
+        print(LOG .. "pn=" .. playerNum .. " rehitch " .. phase .. " why=" .. tostring(why) .. " ms=" .. tostring(now - rh.t0)
+            .. " attempt=" .. tostring(s.rehitchN) .. " speed=" .. tostring(speed) .. " d=" .. tostring(d)
+            .. " hd=" .. tostring(rh.hd) .. " phi=" .. tostring(rh.phi) .. " lat=" .. tostring(rh.lat)
+            .. " moved=" .. tostring(rh.moved))
+    end
+end
+
+-- 掛車脫開的兩條偵測路徑（stepFollow 的 MDADTrailer.guard、onPlayerUpdate 每幀檢查）先問這裡：回 true＝已進入 rehitch
+-- （呼叫端 return），false＝照舊 TrailerLost 交還。讓位中（玩家在開）不接手；真的斷鉤（alive=true）或掛到別台照舊交還。
+function Drive.rehitchArm(s, playerNum, vehicle, now)
+    local tow = s.tow
+    if not isClient() or s.mode == "yield" or (s.rehitchN or 0) >= TUNE.REHITCH_MAX
+            or not MDADTrailer.rehitchOK(tow) then
+        return false
+    end
+    local cur, alive = MDADTrailer.lostState(vehicle, tow)
+    if alive ~= false or cur ~= "nil" then return false end
+    local _, x0, y0 = Drive.towLostNote(s, playerNum, vehicle)
+    s.rehitchN = (s.rehitchN or 0) + 1
+    s.rehitch = { phase = "brake", t0 = now, tow = tow, x0 = x0 or vehicle:getX(), y0 = y0 or vehicle:getY() }
+    s.tow, s.towPhi, s.towUp, s.towCap = nil, nil, nil, nil
+    s.mode = "rehitch"
+    s.recoverWhy, s.recoverPulse, s.unstickSide = nil, false, nil
+    vehicle:setRegulator(false)
+    Drive.invalidateCommandState(s, vehicle:getCurrentSpeedKmHour(), "RECOVER")
+    Drive.rehitchNote(s, playerNum, vehicle, now, "rh-arm")
+    local playerObj = getSpecificPlayer(playerNum)
+    if playerObj then
+        -- 白字＝資訊（HaloTextHelper.addText，同 Drive.stop 的遙測提示）
+        local text = getText("UI_MinidoracatAutoDrive_TrailerRehitch")
+        HaloTextHelper.addText(playerObj, text)
+        if MDADDiagnostics and MDADDiagnostics.toast then MDADDiagnostics.toast(text, "info") end
+    end
+    voice("rehitch", playerNum)
+    return true
+end
+
+-- 收手交還：煞車或倒車中先鎖輪停住（是我們推起來的車速，不是玩家的），記 rh-fail，照舊 TrailerLost 交還
+-- （s.rehitch 還在＝Drive.stop 換成同步中斷的提示、不再記 lost）。
+function Drive.rehitchFail(s, playerNum, vehicle, now, why, x, y, kind)
+    local speed = vehicle:getCurrentSpeedKmHour()
+    if finite(speed) and (speed > TUNE.REHITCH_STOP_KMH or speed < -TUNE.REHITCH_STOP_KMH) then
+        commandForceBrake(s, vehicle, now, "rehitch")
+    end
+    Drive.rehitchNote(s, playerNum, vehicle, now, "rh-fail", nil, why, x, y, kind)
+    Drive.stop(playerNum, MDADTrailer.KEY_LOST)
+end
+
+-- 掛上且 REHITCH_SETTLE_MS 沒再斷：重新量掛車（MDADTrailer.attach；量不到＝measure 交還），比照讓位恢復把控制、承諾、判堵、
+-- 感知全部重來（車倒退了十幾公尺，Follower 投影重新定位），回 follow（剖面沒 ready 就先 build）。
+function Drive.rehitchDone(s, playerNum, vehicle, now)
+    local tow = MDADTrailer.attach(vehicle)
+    if type(tow) ~= "table" then return Drive.rehitchFail(s, playerNum, vehicle, now, "measure") end
+    Drive.rehitchNote(s, playerNum, vehicle, now, "rh-done")
+    s.tow, s.rehitch, s.towNextMs = tow, nil, 0
+    MDADFollower.resetControl(s.fstate)
+    s.fstate.needsProjection = true
+    Drive.clearLaneProof(s)
+    clearEpisode(s)
+    MDADFollower.clearOffset(s.fstate)
+    releaseDodge(s)
+    s.blocked, s.blockedNotified, s.currentBlocked = false, false, false
+    s.planSig, s.clearStreak = -1, 0
+    if s.sensor and type(MDADSensor) == "table" and type(MDADSensor.reset) == "function" then MDADSensor.reset(s.sensor) end
+    invalidateReturnControl(s) -- 須在感知重設之後（同讓位恢復）
+    Drive.invalidateCommandState(s, vehicle:getCurrentSpeedKmHour(), "TRACK")
+    s.progressState, s.progressSince, s.routeFarSince = "disarmed", 0, 0
+    s.resumeProgressPhase, s.resumeProgressUntil = nil, 0
+    s.mode = s.profile.ready == true and "follow" or "build"
+    local playerObj = getSpecificPlayer(playerNum)
+    if playerObj then haloGood(playerObj, "UI_MinidoracatAutoDrive_TrailerRehitched") end
+    voice("resume", playerNum)
+end
+
+-- brake 一幀：照原路線轉向（剖面 ready 才轉）＋Drive.hardBrake why=rehitch（10 km/h 以上不鎖輪）。
+function Drive.rehitchBrake(s, vehicle, now, speedKmh, mult, vx, vy)
+    local fwd = BaseVehicle.allocVector3f()
+    vehicle:getForwardVector(fwd)
+    local fx, fy = fwd:x(), fwd:z()
+    local fl = sqrt(fx * fx + fy * fy)
+    if finite(fl) and fl > 1e-6 then
+        fx, fy = fx / fl, fy / fl
+        local heading = MDADFollower.headingFromForward(fx, fy)
+        local steer = nil
+        if s.profile.ready == true then
+            local okC, st = pcall(MDADFollower.control, s.profile, s.fstate, vx, vy, heading, speedKmh,
+                mult * SECONDS_PER_MULT)
+            if okC and finite(st) then steer = st end
+        end
+        Drive.hardBrake(s, vehicle, now, "rehitch", speedKmh, mult, steer, heading, fwd, fx, fy)
+    else
+        commandForceBrake(s, vehicle, now, "rehitch")
+    end
+    BaseVehicle.releaseVector3f(fwd)
+end
+
+-- reverse 一幀（回 false＝已收手交還）。出口：掛點近到 NEAR_M 還沒掛上（noattach）、近到 ALIGN_M 還歪（misaligned）、
+-- 倒過頭（far）、STALL_MS 沒再接近（stall）、後方探測不清（rear-<status>；帶長＝掛點距離，夾 0.5–REAR_TRAVEL_M）。
+-- 推車：沿車身中線往後（量級同 stepUnstick，超過速限不推）＋對準點（MDADTrailer.hitchGap）在牽引車座標的橫向誤差推車尾，
+-- 合成同一個 impulse、施在車心後 REHITCH_TAIL_M（addImpulse 一幀只有一個槽，先到先贏）。
+function Drive.rehitchReverse(s, vehicle, playerNum, now, rh, speedKmh, mult, vx, vy)
+    local hd, phi, lat, px, py, hx, hy, fx, fy = MDADTrailer.hitchGap(vehicle, rh.trailer, rh.tow)
+    if hd == nil then
+        Drive.rehitchFail(s, playerNum, vehicle, now, "geometry")
+        return false
+    end
+    local dx, dy = vx - rh.revX, vy - rh.revY
+    rh.hd, rh.phi, rh.lat, rh.moved = hd, phi, lat, sqrt(dx * dx + dy * dy)
+    if hd < rh.bestHd - 0.2 then rh.bestHd, rh.bestMs = hd, now end
+    local aphi, alat = phi < 0 and -phi or phi, lat < 0 and -lat or lat
+    local why = nil
+    if hd <= TUNE.REHITCH_NEAR_M then
+        why = "noattach"
+    elseif hd <= TUNE.REHITCH_ALIGN_M and (aphi > TUNE.REHITCH_ALIGN_RAD or alat > TUNE.REHITCH_ALIGN_LAT) then
+        why = "misaligned"
+    elseif rh.moved > rh.revHd + TUNE.REHITCH_OVER_M then
+        why = "far"
+    elseif now - rh.bestMs > TUNE.REHITCH_STALL_MS then
+        why = "stall"
+    end
+    if why then
+        Drive.rehitchFail(s, playerNum, vehicle, now, why)
+        return false
+    end
+    local out = BaseVehicle.allocVector3f()
+    if now >= rh.probeMs then
+        rh.probeMs = now + REAR_PROBE_MS
+        local band = hd
+        if band > REAR_TRAVEL_M then band = REAR_TRAVEL_M elseif band < 0.5 then band = 0.5 end
+        local status, hitX, hitY, kind, detail = rearProbe(s, vehicle, out, fx, fy, vx, vy, band)
+        if status ~= "clear" then
+            BaseVehicle.releaseVector3f(out)
+            noteProbeError(s, "rear-rehitch", status, kind, detail)
+            Drive.rehitchFail(s, playerNum, vehicle, now, "rear-" .. tostring(status), hitX, hitY, kind)
+            return false
+        end
+    end
+    local mass = s.runtimeMass
+    if not finite(mass) or mass < 1 then mass = MASS_FALLBACK end
+    local base = MASS_BASE * mass * IMPULSE_SCALE * (mult / MULT_NORM)
+    local cap = hd > TUNE.REHITCH_SLOW_M and TUNE.REHITCH_FAST_KMH or TUNE.REHITCH_KMH
+    local back = speedKmh < -cap and 0 or UNSTICK_PUSH * base
+    local g = ((px - hx) * -fy + (py - hy) * fx) * TUNE.REHITCH_LAT_K
+    if g > TUNE.REHITCH_LAT_MAX then g = TUNE.REHITCH_LAT_MAX elseif g < -TUNE.REHITCH_LAT_MAX then g = -TUNE.REHITCH_LAT_MAX end
+    local side = g * base
+    s.reverseForce = back
+    if back ~= 0 or side ~= 0 then
+        local imp = BaseVehicle.allocVector3f()
+        imp:set(-back * fx - side * fy, 0, -back * fy + side * fx)
+        out:set(-TUNE.REHITCH_TAIL_M * fx, 0, -TUNE.REHITCH_TAIL_M * fy)
+        vehicle:addImpulse(imp, out)
+        BaseVehicle.releaseVector3f(imp)
+    end
+    BaseVehicle.releaseVector3f(out)
+    return true
+end
+
+-- 每幀（onPlayerUpdate 分派；讓位與失效閘門在前面）。brake：照原路線轉向煞停 → wait：等掛車回來（看到後再等
+-- REHITCH_FOUND_MS、鎖輪閂鎖過了才倒）→ reverse（Drive.rehitchReverse）→ settle：引擎掛上後煞住 REHITCH_SETTLE_MS 沒再斷
+-- ＝成功（Drive.rehitchDone）。每一步都有出口（Drive.rehitchFail 的 why：speed／gone／rebroke／other／brake／nofound／
+-- geometry 與 reverse 的那幾種）。
+function Drive.rehitchStep(s, vehicle, playerNum, now)
+    local rh = s.rehitch
+    local speedKmh = vehicle:getCurrentSpeedKmHour()
+    if not finite(speedKmh) then return Drive.rehitchFail(s, playerNum, vehicle, now, "speed") end
+    vehicle:setRegulator(false)
+    s.forceBrakeThis, s.brakeImpulseThis, s.lastCoupled, s.reverseForce = false, false, false, 0
+    s.visAssistPrev, s.visAssistDecel, s.towAssistDecel = s.visAssistDecel, 0, 0
+    local vx, vy = vehicle:getX(), vehicle:getY()
+    local av = speedKmh < 0 and -speedKmh or speedKmh
+    local okV, t = pcall(getVehicleById, rh.tow.id)
+    if not okV then t = nil end
+    if rh.trailer ~= nil then
+        -- 回來的掛車又不見（再被移出世界）或 id 換了一台：不追著舊物件倒
+        if t ~= rh.trailer then return Drive.rehitchFail(s, playerNum, vehicle, now, "gone") end
+    elseif t ~= nil then
+        -- 同 id、同 script、在脫開點 REHITCH_FIND_R 內＝那台掛車回到客戶端了
+        local okS, sc = pcall(t.getScriptName, t)
+        local okP, tx, ty = pcall(function() return t:getX(), t:getY() end)
+        if okS and sc == rh.tow.script and okP and finite(tx) and finite(ty) then
+            local dx, dy = tx - rh.x0, ty - rh.y0
+            local fd = sqrt(dx * dx + dy * dy)
+            if fd <= TUNE.REHITCH_FIND_R then
+                rh.trailer, rh.foundMs = t, now
+                if s.sensor then s.sensor.selfTrailer = t end -- 倒車探測不把它當障礙（同 startSession）
+                Drive.rehitchNote(s, playerNum, vehicle, now, "rh-found", fd)
+            end
+        end
+    end
+    -- 引擎已經掛上（倒車中，或停車時掛車就回到掛點旁邊）
+    local okC, cur = pcall(vehicle.getVehicleTowing, vehicle)
+    if not okC then cur = nil end
+    if rh.phase == "settle" then
+        if cur ~= rh.trailer then return Drive.rehitchFail(s, playerNum, vehicle, now, "rebroke") end
+    elseif cur ~= nil then
+        if cur ~= rh.trailer then return Drive.rehitchFail(s, playerNum, vehicle, now, "other") end
+        rh.phase, rh.attachMs = "settle", now
+        Drive.rehitchNote(s, playerNum, vehicle, now, "rh-attach")
+    end
+    local mult = getGameTime():getMultiplier()
+    if mult < MULT_MIN then mult = MULT_MIN elseif mult > MULT_MAX then mult = MULT_MAX end
+    local phase = rh.phase
+    if phase == "brake" then
+        if av <= TUNE.REHITCH_STOP_KMH then
+            rh.phase, rh.waitFrom = "wait", now
+            local dx, dy = vx - rh.x0, vy - rh.y0
+            Drive.rehitchNote(s, playerNum, vehicle, now, "rh-stop", sqrt(dx * dx + dy * dy))
+        elseif now - rh.t0 > TUNE.REHITCH_BRAKE_MS then
+            return Drive.rehitchFail(s, playerNum, vehicle, now, "brake")
+        else
+            Drive.rehitchBrake(s, vehicle, now, speedKmh, mult, vx, vy)
+        end
+    elseif phase == "wait" then
+        if av > TUNE.REHITCH_STOP_KMH then commandForceBrake(s, vehicle, now, "rehitch") end
+        if rh.trailer == nil then
+            if now - rh.waitFrom >= TUNE.REHITCH_WAIT_MS then
+                return Drive.rehitchFail(s, playerNum, vehicle, now, "nofound")
+            end
+        elseif now - rh.foundMs >= TUNE.REHITCH_FOUND_MS and now >= s.forceBrakeUntil then
+            local hd, phi, lat = MDADTrailer.hitchGap(vehicle, rh.trailer, rh.tow)
+            if hd == nil then return Drive.rehitchFail(s, playerNum, vehicle, now, "geometry") end
+            rh.hd, rh.phi, rh.lat, rh.moved = hd, phi, lat, 0
+            -- 掛點太遠（讓位時玩家把車開走了）：不倒這麼長一段
+            if hd > TUNE.REHITCH_REV_MAX_M then return Drive.rehitchFail(s, playerNum, vehicle, now, "far") end
+            rh.phase, rh.revX, rh.revY, rh.revHd = "reverse", vx, vy, hd
+            rh.bestHd, rh.bestMs, rh.probeMs = hd, now, 0
+            Drive.rehitchNote(s, playerNum, vehicle, now, "rh-reverse")
+        end
+    elseif phase == "reverse" then
+        if not Drive.rehitchReverse(s, vehicle, playerNum, now, rh, speedKmh, mult, vx, vy) then return end
+    elseif now - rh.attachMs >= TUNE.REHITCH_SETTLE_MS then -- settle
+        return Drive.rehitchDone(s, playerNum, vehicle, now)
+    elseif av > 0.3 then
+        commandForceBrake(s, vehicle, now, "rehitch")
+    end
+    sampleRecovery(s, vehicle, playerNum, now, vx, vy, speedKmh)
+end
+
 local function stepFollow(s, vehicle, playerNum, now)
     s.prevStepMs, s.stepWallMs = s.stepWallMs, now -- 上一個跟線幀的牆鐘（Drive.progressPauseMs 判卡頓）
     local speedKmh = vehicle:getCurrentSpeedKmHour() -- 可負（倒車）＝BaseVehicle.java:4268
@@ -14168,6 +14463,7 @@ local function stepFollow(s, vehicle, playerNum, now)
                 if towWhy then
                     vehicle:setRegulator(false)
                     BaseVehicle.releaseVector3f(fwd)
+                    if towWhy == "lost" and Drive.rehitchArm(s, playerNum, vehicle, now) then return end
                     Drive.stop(playerNum, towWhy == "lost" and MDADTrailer.KEY_LOST or MDADTrailer.KEY_CORNER)
                     return
                 end
@@ -14920,7 +15216,9 @@ local function onPlayerUpdate(player)
             end
         end
         if route ~= s.route or versionChanged or s.reapproach then
-            local profileRoute, approachM = Drive.profileRouteOf(route, s.tow, s.vehicleProfile,
+            -- 自動掛回中（s.tow 收在 rh.tow）照舊依掛車改寫：掛回後沿這條線拖著走
+            local profileRoute, approachM = Drive.profileRouteOf(route, s.tow or s.rehitch and s.rehitch.tow,
+                s.vehicleProfile,
                 vehicle:getX(), vehicle:getY(), s.reapproach, s.reapproach and Drive.headingOf(vehicle) or nil)
             s.reapproach = nil
             local profile = MDADFollower.begin(
@@ -14983,11 +15281,12 @@ local function onPlayerUpdate(player)
                         d = s.unstickDistance, rear = "target-change",
                     })
                 end
-            elseif oldMode == "yield" then
+            elseif oldMode == "yield" or oldMode == "rehitch" then
                 -- 讓位中換路線（玩家掉頭最常觸發偏航重算）：保留 yield。舊制在這裡覆寫成
                 -- build，下一幀 build→follow 就跳過放手等待與「恢復控制」提示＝0 秒接管
                 -- （2026-09-06 回饋「放開會變回自動駕駛、突然回頭」的一條路徑）。新 profile
-                -- 由恢復幀依 ready 決定先走 build。
+                -- 由恢復幀依 ready 決定先走 build。自動掛回（倒車十幾公尺常觸發偏航重算）同樣保留，
+                -- 掛回後（Drive.rehitchDone）依 ready 決定先走 build。
             elseif resumePhase ~= nil or not preservingRecovery or oldMode == "follow" then
                 -- 「保留恢復」只保留倒車／settle 本身；跟線模式等倒車開始（recoverWhy 待命）時換線，照樣
                 -- 先 build——stepFollow 拿到 ready=false 的剖面＝curve-state 故障交還（0928m E2E rc15
@@ -15148,6 +15447,7 @@ local function onPlayerUpdate(player)
     -- 掛車脫開：每個模式都查（E2E semi-corner-mp：掛車斷開時車正在等待，guard 不跑，自駕停在原地不交還）
     if s.tow and MDADTrailer.lost(vehicle, s.tow) then
         vehicle:setRegulator(false)
+        if Drive.rehitchArm(s, playerNum, vehicle, now) then return end
         Drive.stop(playerNum, MDADTrailer.KEY_LOST)
         return
     end
@@ -15312,6 +15612,13 @@ local function onPlayerUpdate(player)
         s.routeFarSince = 0 -- 讓位前的離線計時不帶過來（Drive.routeFarWatch）
         haloGood(player, "UI_MinidoracatAutoDrive_Resume")
         if now - s.yieldSinceMs >= TUNE.YIELD_VOICE_MS then voice("resume", playerNum) end
+        -- 自動掛回途中讓位（1011a）：恢復後從 wait 重來——玩家可能已自己倒車掛上（下一幀 rehitchStep 看到就進 settle），
+        -- 或把車開走了（起倒時掛點超過 REHITCH_REV_MAX_M＝far 交還）。
+        if s.rehitch then
+            s.rehitch.phase, s.rehitch.waitFrom = "wait", now
+            s.mode = "rehitch"
+            return
+        end
         -- 讓位期間換過路線（cutover 保留 yield）：新 profile 還沒 build 完就先走 build
         -- 幀，否則 stepFollow 會拿到 ready=false 的剖面；已 ready 的當幀直接跟線。
         if s.profile.ready ~= true then
@@ -15319,6 +15626,13 @@ local function onPlayerUpdate(player)
             return
         end
         s.mode = "follow"
+    end
+
+    -- 自動掛回（1011a）：煞停、等掛車、倒車、掛上後煞住都在 rehitchStep；讓位已在上面先處理
+    if s.mode == "rehitch" then
+        Drive.rehitchStep(s, vehicle, playerNum, now)
+        if s.brakeTerminalFault then Drive.stop(playerNum, KEY_UNSUPPORTED) end
+        return
     end
 
     -- 樹叢阻力抵消（Drive.bushCancel）：跟線、繞行與倒車都要；讓位（玩家自己開）在上面就 return 了

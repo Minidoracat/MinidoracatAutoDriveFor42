@@ -1709,7 +1709,8 @@ fail("階段 2 結構契約（餘裕預算單一 authority）", phase2b) if phas
 # 恢復鏈的內部階段一律在 progressState，「有恢復需求」是 s.recoverWhy 旗標。
 # 靜態掃描賦值字面值，任何新增的第三種狀態機值都會被擋下——這是離線行為測試
 # 抓不到的（新值自己也會走出一條路，測試照綠，語意卻又分裂成兩套）。
-MODE_CONTRACT = {"build", "follow", "unstick", "settle", "yield", "arrive"}
+# rehitch（1011a）＝自動掛回：煞停／等掛車／倒車整段繞過 stepFollow（Drive.rehitchStep）。
+MODE_CONTRACT = {"build", "follow", "unstick", "settle", "yield", "arrive", "rehitch"}
 PROGRESS_CONTRACT = {"disarmed", "watch", "verify", "suspect",
                      "recover", "gear-reset", "settle"}
 phase2c = []

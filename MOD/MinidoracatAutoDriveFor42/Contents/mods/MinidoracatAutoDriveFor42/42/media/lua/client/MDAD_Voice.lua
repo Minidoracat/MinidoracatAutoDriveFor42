@@ -2,6 +2,7 @@
 -- 自動駕駛語音提示（2026-09-02 使用者裁定）：啟動／關閉／受阻煞停／倒車脫困／
 -- 無法通過交還／到站／改道／無路可繞，加上手動介入三句（讓位待命／恢復接手／介入即關閉，
 -- 2026-09-06），依遊戲語言選語音包（2026-10-09 起 11 種，對照見 LOCALE_PACK；沒有語音包的語言播英語），ESC「語音語言」可改指定語音包。Knox Pass 大門打不開（gate，1005e）。
+-- 掛車同步中斷、自動倒回去掛（rehitch，1011a）。
 -- 2026-09-29 起全部改成女朋友撒嬌口吻，分 Stacy／Yui 兩種聲音（ESC「語音聲音」，預設 Stacy）；
 -- 2026-09-30 依玩家許願把舊版語音還原成第三種「經典」（classic）。
 -- 聲音檔與 sound script：42/media/sound/MinidoracatAutoDrive、scripts/sounds_autodrive.txt
@@ -33,6 +34,8 @@ local EVENTS = {
     leg_next = true, stopover = true, priority = true,
     -- Knox Pass 大門不會開／沒有打開（1005e，Drive.gateWarn）
     gate = true,
+    -- 掛車同步中斷、自動倒回去掛（1011a，Drive.rehitchArm）
+    rehitch = true,
 }
 local SOUND_PREFIX = "MDAD_Voice_"
 local lastRef = {}       -- playerNum → emitter ref（long）

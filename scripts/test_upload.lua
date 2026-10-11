@@ -1469,6 +1469,31 @@ local tjRows = clipsOf(tjDrive)
 checkEq(#tjRows, 1, "(tl-join) lost joined the open contact clip; the deferred finish opens no second clip")
 checkEq(field(tjRows[1] or "", 7), "contact", "(tl-join) the joined clip keeps kind contact")
 
+-- 1011a 自動掛回：tow lost 觸發的 trailer 片段收到掛回結束（Driver rehitch 模式的樣本整段算異常，安靜 QUIET_MS 不收窗）；
+--   掛回中的鎖輪（fbw=rehitch）不記急煞事故。違規證明：拿掉 mode rehitch 的異常＝(rh-win) 紅；拿掉 why ~= "rehitch"＝(rh-brake) 紅。
+scenario("1011a rehitch: the trailer clip stays open through the rehitch and its brakes are not brake incidents")
+nowMs = nowMs + 3600000
+start()
+local rhDrive = nowMs
+drive(3000)
+local rhAt = nowMs
+D.event(0, "tow", { phase = "lost", alive = false, vid = 42 })
+D.event(0, "tow", { phase = "rh-arm", vid = 42, attempt = 1 })
+-- Driver sampleRecovery 的目標速度是 0（不會被「要走卻不動」的停滯規則撐開窗）
+drive(4000, { speed = 20, target = 0, mode = "rehitch", phys = { capReason = "profile", frameMs = 16, forceBrakeLeft = 900,
+    forceBrakeWhy = "rehitch" } })
+drive(14000, { speed = 0, target = 0, mode = "rehitch" })
+D.event(0, "tow", { phase = "rh-done", vid = 42, moved = 15 })
+drive(8000)
+D.stop(0, "arrive")
+pump(120000)
+local _, rhText = clipByTrig(rhAt)
+checkEq(#clipsOf(rhDrive), 1, "(rh-win) one trailer clip for the whole rehitch")
+check(string.find(rhText or "", '"phase":"rh-done"', 1, true) ~= nil, "(rh-win) rh-done 18 s after the lost is inside the clip")
+local _, rhSum = sumLines(rhDrive)
+check(string.find(rhSum, '["brake"', 1, true) == nil and string.find(rhSum, '["trailer"', 1, true) ~= nil,
+    "(rh-brake) the rehitch lock-brake is not a brake incident")
+
 -- 1010 所有送出的片段整段 ≤ CLIP_TOTAL_MAX（第一塊宣告的 len＝全文長度；伺服器只看這個）
 local maxLen = 0
 for i = 1, #sent do

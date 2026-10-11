@@ -486,5 +486,53 @@ for _, cc in ipairs({
             tostring(plan and plan.R), math.deg(arcTurn)))
 end
 
+-- ⑪ 1011a 自動掛回（T.rehitchOK／T.hitchGap；Driver Drive.rehitch*）。牽引車沿 +x、掛點在 (hx, 0)；回來的掛車掛點 (px, py)、
+--    forward (fx, fy)。
+--   (ok)    能不能掛回：缺 id／script／掛點名／軸向、或任一邊是第五輪 trailerTruck＝不行。違規證明：拿掉 trailerTruck 判斷＝紅。
+--   (gap)   hd＝兩掛點距離；phi＝牽引車航向減拖行軸航向；lat＝牽引車掛點離軸線的橫向（右正）；對準點＝掛車掛點沿軸往前
+--           min(hd/2, AIM_MAX)。違規證明：對準點不夾 AIM_MAX＝(gap-far) 紅；lat 正負號反了＝(gap-lat) 紅。
+--   (axis)  倒著拖（axisSign −1）：拖行軸＝forward 反向，直線 phi 0、對準點仍在掛點朝牽引車那側。違規證明：不乘 axisSign＝紅。
+--   (pool)  池向量成對歸還、讀不到回 nil。違規證明：讀失敗時不還向量＝(pool) 紅。
+do
+    local base = { id = 7, script = "Base.Trailer", hitchSelf = "trailer", hitchOther = "trailerfront", axisSign = 1 }
+    local function with(k, v)
+        local t = {}
+        for kk, vv in pairs(base) do t[kk] = vv end
+        t[k] = v
+        return t
+    end
+    check(T.rehitchOK(base) and T.rehitchOK(with("axisSign", -1)), "(ok) 一般掛車／倒著拖：可以掛回")
+    check(not T.rehitchOK(with("hitchSelf", "trailerTruck")) and not T.rehitchOK(with("hitchOther", "trailerTruck")),
+        "(ok) 第五輪（trailerTruck）：不掛回")
+    check(not T.rehitchOK(with("id", nil)) and not T.rehitchOK(with("script", nil))
+        and not T.rehitchOK(with("hitchOther", nil)) and not T.rehitchOK(with("axisSign", nil)) and not T.rehitchOK(nil),
+        "(ok) 量不到 id／script／掛點名／軸向：不掛回")
+    local alloc, release = 0, 0
+    local realAlloc, realRelease = BaseVehicle.allocVector3f, BaseVehicle.releaseVector3f
+    BaseVehicle.allocVector3f = function() alloc = alloc + 1 return V(0, 0, 0) end
+    BaseVehicle.releaseVector3f = function() release = release + 1 end
+    local function gap(hx, heading, px, py, fx, fy, sign)
+        local tr = { getForwardVector = function(_, out) return out:set(fx, 0, fy) end,
+            getTowedByWorldPos = function(_, _, out) return out:set(px, py, 0) end }
+        local veh = { getTowingWorldPos = function(_, _, out) return out:set(hx, 0, 0) end,
+            getForwardVector = function(_, out) return out:set(math.cos(heading), 0, math.sin(heading)) end }
+        return T.hitchGap(veh, tr, { hitchSelf = "trailer", hitchOther = "trailerfront", axisSign = sign or 1 })
+    end
+    local hd, phi, lat, ax, ay = gap(28, 0, 14, 0.5, 1, 0)
+    check(near(hd, math.sqrt(14 * 14 + 0.25)) and near(phi, 0) and near(lat, -0.5) and near(ax, 14 + T.REHITCH_AIM_MAX)
+        and near(ay, 0.5), "(gap-far) 遠：對準點夾在掛點前 AIM_MAX、牽引車掛點在軸線左 0.5（lat −0.5）")
+    hd, phi, lat, ax, ay = gap(16, 0.2, 14, -0.5, 1, 0)
+    check(near(hd, math.sqrt(4.25)) and near(phi, 0.2) and near(lat, 0.5) and near(ax, 14 + hd / 2) and near(ay, -0.5),
+        "(gap-lat) 近：對準點在掛點前 hd/2；航向比拖行軸大 0.2＝phi 0.2；牽引車掛點在軸線右 0.5")
+    hd, phi, lat, ax = gap(28, 0, 14, 0, -1, 0, -1)
+    check(near(phi, 0) and near(lat, 0) and near(ax, 14 + T.REHITCH_AIM_MAX), "(axis) 倒著拖：拖行軸朝牽引車、直線 phi 0")
+    check(alloc == 6 and release == 6, "(pool) 三次量測借 6 顆、還 6 顆（借 " .. alloc .. "、還 " .. release .. "）")
+    local bad = { getForwardVector = function() error("gone") end, getTowedByWorldPos = function() error("gone") end }
+    local veh = { getTowingWorldPos = function(_, _, out) return out:set(0, 0, 0) end,
+        getForwardVector = function(_, out) return out:set(1, 0, 0) end }
+    check(T.hitchGap(veh, bad, base) == nil and alloc == release, "(pool) 讀不到回 nil、向量照樣還")
+    BaseVehicle.allocVector3f, BaseVehicle.releaseVector3f = realAlloc, realRelease
+end
+
 print(string.format("test_trailer: %d 項斷言、%d 項失敗", asserts, fails))
 if fails > 0 then os.exit(1) end
