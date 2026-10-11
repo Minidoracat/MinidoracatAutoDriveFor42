@@ -1,6 +1,6 @@
 version=1
 id=3792675881
-title=Minidoracat MiniMap - AutoDrive for B42
+title=[B42] Minidoracat MiniMap - AutoDrive
 description=[h1]🚗 Minidoracat MiniMap - AutoDrive for B42[/h1]
 description=[h3]By Minidoracat[/h3]
 description=
