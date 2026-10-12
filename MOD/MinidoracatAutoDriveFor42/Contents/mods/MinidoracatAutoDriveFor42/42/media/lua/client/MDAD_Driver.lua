@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1012g"
+Drive.REV = "1012h"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -3366,9 +3366,77 @@ local function applySteering(
                 arm * fy + parity * LATERAL_JITTER * py)
         end
     end
-    vehicle:addImpulse(impulse, fwd)
+    Drive.addImpulse(vehicle, impulse, fwd)
     BaseVehicle.releaseVector3f(impulse)
     return force, assistForce
+end
+
+-- 其他 MOD 的推力防線（2026-10-12 使用者裁定，GitHub issue #8）：BaseVehicle.addImpulse 每台車每幀只有一個槽
+-- （BaseVehicle.java:681-692：同幀第二次呼叫較長＝整槽作廢，還把該車自己的槽物件 release 進撞物件衝量共用的
+-- VehicleImpulse 池（:12040），之後撞植物／物件的衝量會借到同一個物件；較短＝被忽略）。Ultimate Towing、
+-- Effortless Towing 的拖車助推在 OnPlayerUpdate 每幀推「拖著東西、前進檔」的車，MOD 順序在前時 MDAD 的轉向
+-- 側推永遠施不出去（玩家 0.27.1 十趟 |st|≥0.5 時 yaw 幾乎為 0，偏出路面後急甩、斷鉤）。所以 MDAD 駕駛中
+-- （本機 session 在開這台車、不在讓位），其他 Lua 對這台車的 addImpulse 一律擋掉；MDAD 自己的推力一律走
+-- Drive.addImpulse＝包裝前的原始函式（verify 15d 擋直接呼叫）。只攔 Lua 呼叫端：方法表在
+-- __classmetatables[BaseVehicle.class].__index（KahluaUtil.java:132-134、LuaJavaClassExposer.java:224-231,287；
+-- VehicleManager 包 canAccessContainer／permanentlyRemove 同一做法）。
+function Drive.addImpulse(vehicle, impulse, rel)
+    local raw = Drive.rawAddImpulse
+    if raw then
+        raw(vehicle, impulse, rel)
+    else
+        vehicle:addImpulse(impulse, rel) -- impulse-guard-ok: 方法表找不到、防線沒裝時的退路
+    end
+end
+
+-- 這次 addImpulse 要不要擋（每次其他 MOD 推車都會進來：沒有 session 一次整數比較就走）。
+-- 擋下就累計 s.foreignImpulseN（樣本 fip），第一次記事件。
+function Drive.impulseGuard(vehicle, impulse)
+    if sessionCount == 0 then return false end
+    for playerNum = 0, 3 do
+        local s = sessions[playerNum]
+        if s and s.vehicle == vehicle and s.mode ~= "yield" then
+            local n = (s.foreignImpulseN or 0) + 1
+            s.foreignImpulseN = n
+            if n == 1 then Drive.impulseNote(s, playerNum, vehicle, impulse) end
+            return true
+        end
+    end
+    return false
+end
+
+-- 這趟第一次擋下：事件 compat impulse（len＝被擋的衝量向量長，讀不到就缺）＋Debug 行。冷路徑，可以配 closure。
+function Drive.impulseNote(s, playerNum, vehicle, impulse)
+    local ok, ix, iy, iz = pcall(function() return impulse:x(), impulse:y(), impulse:z() end)
+    local len = nil
+    if ok and MDADDynamics.finite(ix) and MDADDynamics.finite(iy) and MDADDynamics.finite(iz) then
+        len = sqrt(ix * ix + iy * iy + iz * iz)
+    end
+    local speed, vx, vy = vehicle:getCurrentSpeedKmHour(), vehicle:getX(), vehicle:getY()
+    diagEvent(s, playerNum, "compat", { phase = "impulse", mode = s.mode, speed = speed, len = len, x = vx, y = vy })
+    if getDebug() then
+        print(LOG .. "pn=" .. playerNum .. " foreign addImpulse blocked while driving mode=" .. tostring(s.mode)
+            .. " len=" .. tostring(len) .. " speed=" .. tostring(speed) .. " t=" .. getTimestampMs())
+    end
+end
+
+-- 載入時包 BaseVehicle 方法表的 addImpulse。Lua 重載不疊包：原始函式記在方法表的 MinidoracatAutoDrive_addImpulse。
+-- 找不到方法表＝不裝，MDAD 照舊直接呼叫（行為同 1012g 以前）。
+function Drive.installImpulseGuard()
+    local methods = __classmetatables and BaseVehicle and BaseVehicle.class and __classmetatables[BaseVehicle.class]
+    methods = methods and methods.__index
+    local orig = methods and (rawget(methods, "MinidoracatAutoDrive_addImpulse") or methods.addImpulse)
+    if orig == nil then
+        print(LOG .. "impulse guard NOT installed: BaseVehicle method table not found")
+        return false
+    end
+    rawset(methods, "MinidoracatAutoDrive_addImpulse", orig)
+    Drive.rawAddImpulse = orig
+    methods.addImpulse = function(vehicle, impulse, rel)
+        if Drive.impulseGuard(vehicle, impulse) then return end
+        return orig(vehicle, impulse, rel)
+    end
+    return true
 end
 
 -- 前推輔助（越野／繞行加成＝2026-09-01 使用者裁定）：非道路與繞行／回線時
@@ -3438,7 +3506,7 @@ function Drive.brakeAssist(s, vehicle, dist)
         local imp = BaseVehicle.allocVector3f()
         imp:set(-f * fx, 0, -f * fy)
         rel:set(0, 0, 0)
-        vehicle:addImpulse(imp, rel)
+        Drive.addImpulse(vehicle, imp, rel)
         BaseVehicle.releaseVector3f(imp)
         s.brakeImpulseThis, s.brakeAssistForce = true, f * len
     end
@@ -6085,7 +6153,7 @@ function Drive.towDecel(s, a, mult)
         local imp = BaseVehicle.allocVector3f()
         imp:set(-f * vx, 0, -f * vz)
         vel:set(0, 0, 0)
-        tr:addImpulse(imp, vel)
+        Drive.addImpulse(tr, imp, vel)
         BaseVehicle.releaseVector3f(imp)
         s.towAssistDecel = a
     end
@@ -7129,6 +7197,7 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     if finite(s.assistBoost) and s.assistBoost > 1 then phys.assistBoost = s.assistBoost end -- 1004e：越野推力遞增倍率（>1 才寫）
     if (s.relayN or 0) > 0 then phys.relayN = s.relayN end
     if (s.bushContactN or 0) > 0 then phys.bushContact = s.bushContactN end -- 1004d：本幀抵消的樹叢數（Drive.bushCancel）
+    if (s.foreignImpulseN or 0) > 0 then phys.foreignImpulseN = s.foreignImpulseN end -- 1012h：駕駛中擋下的其他 MOD addImpulse 累計數（Drive.impulseGuard）
     phys.priorAccel, phys.priorBrake, phys.priorLat =
         s.priorAccel, s.priorBrake, s.priorLat
     phys.priorCoast = s.priorCoast
@@ -8071,7 +8140,7 @@ function Drive.stepSideEscape(s, vehicle, playerNum, now, vx, vy, speedKmh)
             local impulse = BaseVehicle.allocVector3f()
             impulse:set(force * nx, 0, force * ny)
             out:set(0, 0, 0) -- 純中心力，不產生力矩
-            vehicle:addImpulse(impulse, out)
+            Drive.addImpulse(vehicle, impulse, out)
             BaseVehicle.releaseVector3f(impulse)
         end
         BaseVehicle.releaseVector3f(out)
@@ -12948,7 +13017,7 @@ local function stepUnstick(s, vehicle, playerNum, now)
             local impulse = BaseVehicle.allocVector3f()
             impulse:set(-force * fx, 0, -force * fy)
             fwd:set(0, 0, 0)
-            vehicle:addImpulse(impulse, fwd)
+            Drive.addImpulse(vehicle, impulse, fwd)
             BaseVehicle.releaseVector3f(impulse)
         end
     end
@@ -13129,7 +13198,7 @@ function Drive.rehitchReverse(s, vehicle, playerNum, now, rh, speedKmh, mult, vx
         local imp = BaseVehicle.allocVector3f()
         imp:set(-back * fx - side * fy, 0, -back * fy + side * fx)
         out:set(-TUNE.REHITCH_TAIL_M * fx, 0, -TUNE.REHITCH_TAIL_M * fy)
-        vehicle:addImpulse(imp, out)
+        Drive.addImpulse(vehicle, imp, out)
         BaseVehicle.releaseVector3f(imp)
     end
     BaseVehicle.releaseVector3f(out)
@@ -15999,6 +16068,7 @@ local function onPlayerUpdate(player)
 end
 
 Events.OnPlayerUpdate.Add(onPlayerUpdate)
+Drive.installImpulseGuard() -- 其他 MOD 的推力防線（Drive.addImpulse 上方註解）
 
 -- 回主選單時 OnPlayerUpdate 已不可靠；主動收掉 drive state 與 telemetry writer。
 -- Diagnostics 也有自己的同事件保險，兩邊 stop 都是冪等。

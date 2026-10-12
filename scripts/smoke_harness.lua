@@ -501,6 +501,13 @@ BaseVehicle = {
     end,
 }
 
+-- BaseVehicle 的 Lua 方法表（__classmetatables[BaseVehicle.class].__index，KahluaUtil.java:132-134）：Driver 載入時的
+-- 推力防線（Drive.installImpulseGuard）包的是表裡的 addImpulse。假車的方法掛在自己身上、不經這張表，所以表裡的
+-- 「原版」轉給假車自己的記錄器；其他 MOD 推車（Ultimate Towing 的拖車助推）＝直接呼叫這張表的 addImpulse。
+BaseVehicle.class = { name = "zombie.vehicles.BaseVehicle" }
+drive.rawAddImpulse = function(v, impulse, rel) return v:addImpulse(impulse, rel) end
+__classmetatables = { [BaseVehicle.class] = { __index = { addImpulse = drive.rawAddImpulse } } }
+
 -- getGameTime():getMultiplier()＝真實秒數係數；driver 用 /48 換 dt，也用它縮放施力
 local gameTime = {}
 function gameTime:getMultiplier() return drive.mult end
@@ -29348,6 +29355,102 @@ function drive.scenario1008()
     drive.fillWorld(-2, 70, -7, 7)
 end
 drive.scenario1008()
+
+-- 1012h 其他 MOD 的推力防線（GitHub issue #8；Drive.installImpulseGuard）：Ultimate Towing／Effortless Towing 的拖車助推在
+-- OnPlayerUpdate 每幀 addImpulse 推「拖著東西、前進檔」的車，引擎單槽讓 MDAD 的轉向側推施不出去。MDAD 駕駛中擋掉其他 Lua
+-- 對同一台車的推力；MDAD 自己走 Drive.addImpulse＝包裝前的原始函式。
+--   (ig-inst)   載入時已包方法表：表裡的 addImpulse 換成防線、原始函式記在 MinidoracatAutoDrive_addImpulse 與 Drive.rawAddImpulse。
+--               違規證明：拿掉檔尾 Drive.installImpulseGuard()＝紅。
+--   (ig-frame)  助推 MOD 的 OnPlayerUpdate 排在 MDAD 前面（MOD 順序在前）、每幀都推：20 幀每幀恰一次 addImpulse、都是 MDAD 的
+--               推力；擋下 20 次、只記一筆 compat impulse（mode、len＝被擋向量長），樣本 fip＝20。
+--               違規證明：impulseGuard 一律回 false＝每幀兩次紅；只在第一次擋＝紅。
+--   (ig-own)    駕駛中 MDAD 自己的 Drive.addImpulse 照樣送到原始函式。違規證明：Drive.addImpulse 改走方法表＝紅。
+--   (ig-other)  別台車不擋。違規證明：拿掉 s.vehicle == vehicle＝紅。
+--   (ig-yield)  讓位（玩家自己開）不擋。違規證明：拿掉 mode ~= "yield"＝紅。
+--   (ig-stop)   停止自駕後不擋。
+--   (ig-reload) 再裝一次不疊包：rawAddImpulse 仍是原始函式、駕駛中 MDAD 的推力照樣送到。違規證明：拿掉 rawget 那段＝紅。
+function drive.scenarioImpulseGuard()
+    scenario("1012h 其他 MOD 的推力防線：自駕中擋掉別的 MOD 對同一台車的 addImpulse（Ultimate Towing 拖車助推）")
+    local Dr, KEY = MDAD.Drive, "MinidoracatAutoDrive_addImpulse"
+    local methods = __classmetatables[BaseVehicle.class].__index
+    checkTrue(methods.addImpulse ~= drive.rawAddImpulse and rawget(methods, KEY) == drive.rawAddImpulse
+            and Dr.rawAddImpulse == drive.rawAddImpulse,
+        "(ig-inst) 載入時已包方法表的 addImpulse、原始函式另存（Drive.rawAddImpulse）")
+    local oldApi, oldSand = MinidoracatMiniMapAPI, SandboxVars
+    installNavApi(2) -- 前一個情境留下 v7 行程模型（車在動就拒絕啟動）；本情境用單站 v2，同 scenario1008
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    local oldStart, oldStop = MDADDiagnostics.start, MDADDiagnostics.stop
+    local oldEvent, oldSample, oldShould = MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.shouldSample
+    local events, phys = {}, nil
+    MDADDiagnostics.start = function() return true end
+    MDADDiagnostics.stop = function() return true end
+    MDADDiagnostics.event = function(_, name, a) events[#events + 1] = { name = name, a = a } end
+    MDADDiagnostics.shouldSample = function() return true end
+    MDADDiagnostics.sample = function(...) phys = select(32, ...) return true end
+    -- 助推的向量：沿 +x、長 7777、施力點＝同一個向量（UT_TowAssist.lua 的 addImpulse(dir:mul(k), dir)）；記錄器看到 x＝7777 就是它
+    local push = Vector3f.new():set(7777, 0, 0)
+    push._held = true
+    local assistCalls = 0
+    local function towAssist()
+        assistCalls = assistCalls + 1
+        methods.addImpulse(dveh, push, push)
+    end
+    checkTrue(armDrive(), "(ig) 啟動自駕")
+    local s = Dr.debugSession(0) or {}
+    s.diag = true
+    local handlers = eventHandlers["OnPlayerUpdate"]
+    table.insert(handlers, 1, towAssist)
+    driveReset(dveh)
+    local mdadFrames = 0
+    for _ = 1, 20 do
+        driveTick(dp, dveh)
+        if dveh._imp.frame == 1 and dveh._imp.x ~= 7777 then mdadFrames = mdadFrames + 1 end
+    end
+    table.remove(handlers, 1)
+    local note, notes = nil, 0
+    for _, e in ipairs(events) do
+        if e.name == "compat" then notes, note = notes + 1, e.a end
+    end
+    checkTrue(assistCalls == 20 and mdadFrames == 20 and drive.bad.impulse == 0 and s.foreignImpulseN == 20,
+        "(ig-frame) 助推每幀都推（" .. assistCalls .. "）：每幀恰一次、都是 MDAD 的推力（" .. mdadFrames .. "/20，同幀兩次 "
+        .. drive.bad.impulse .. "）、擋下 " .. tostring(s.foreignImpulseN))
+    checkTrue(notes == 1 and note.phase == "impulse" and note.mode == s.mode and math.abs((note.len or 0) - 7777) < 1e-6
+            and type(phys) == "table" and phys.foreignImpulseN == 20,
+        "(ig-frame) 只記第一次：compat impulse 一筆（mode " .. tostring(note and note.mode) .. "、len "
+        .. tostring(note and note.len) .. "），樣本 fip " .. tostring(phys and phys.foreignImpulseN))
+    driveReset(dveh)
+    Dr.addImpulse(dveh, push, push)
+    checkEq(dveh._imp.total, 1, "(ig-own) 駕駛中 MDAD 自己的 Drive.addImpulse 送到原始函式")
+    local other = newVehicle({ engineRunning = true, mass = 1000, speed = 0 })
+    methods.addImpulse(other, push, push)
+    checkEq(other._imp.total, 1, "(ig-other) 駕駛中其他 MOD 推別台車不擋")
+    local mode0 = s.mode
+    s.mode = "yield"
+    driveReset(dveh)
+    methods.addImpulse(dveh, push, push)
+    s.mode = mode0
+    checkTrue(dveh._imp.total == 1 and s.foreignImpulseN == 20,
+        "(ig-yield) 讓位中（玩家自己開）助推照常送到、不計數（" .. dveh._imp.total .. "、" .. tostring(s.foreignImpulseN) .. "）")
+    checkTrue(Dr.installImpulseGuard() and Dr.rawAddImpulse == drive.rawAddImpulse and rawget(methods, KEY) == drive.rawAddImpulse,
+        "(ig-reload) 再裝一次不疊包：原始函式不變")
+    driveReset(dveh)
+    Dr.addImpulse(dveh, push, push)
+    methods.addImpulse(dveh, push, push)
+    checkTrue(dveh._imp.total == 1 and s.foreignImpulseN == 21,
+        "(ig-reload) 重裝後駕駛中 MDAD 的推力照樣送到、其他 MOD 的照樣擋（" .. dveh._imp.total .. "、"
+        .. tostring(s.foreignImpulseN) .. "）")
+    MDAD.Drive.stop(0, nil)
+    driveReset(dveh)
+    methods.addImpulse(dveh, push, push)
+    checkEq(dveh._imp.total, 1, "(ig-stop) 停止自駕後其他 MOD 的推力照常送到")
+    MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.shouldSample = oldEvent, oldSample, oldShould
+    MDADDiagnostics.start, MDADDiagnostics.stop = oldStart, oldStop
+    MinidoracatMiniMapAPI, SandboxVars = oldApi, oldSand
+    drive.nav.tx, drive.nav.ty, drive.nav.state = 300, 0, "ok"
+    drive.nav.route = newRoute(40, 0, 0, 4, 0)
+    driveReset(dveh)
+end
+drive.scenarioImpulseGuard()
 
 local function scenarioReasonKeys()
 scenario("理由鍵覆蓋：每個分支都跑到，且四語 UI.json 都有對應翻譯")

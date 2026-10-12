@@ -1282,6 +1282,7 @@ local function encodePhys(phys)
     addNum("assistBoost", "asb")      -- 1004e：越野推力遞增倍率（TUNE.ASSIST_BOOST_*；1＝沒遞增，省略）
     addNum("relayN", "rly")           -- 1001i：本輪接到快照尾端的伺服器轉送遠方車台數（Drive.mergeRelay）
     addNum("bushContact", "bsh")      -- 1004d：本幀抵消阻力的樹叢數（Drive.bushCancel；0＝沒碰到，省略）
+    addNum("foreignImpulseN", "fip")  -- 1012h：自駕中擋下的其他 MOD addImpulse 累計數（Drive.impulseGuard；沒擋過＝省略）
     addNum("brakeAssistForce", "baf")
     addStr("jerkBypass", "jerkBypass")
     addNum("curveKappa", "curveKappa")

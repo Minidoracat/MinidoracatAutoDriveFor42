@@ -67,6 +67,9 @@
                            MDADDiagnostics.event、phys. 指派，或 `-- telemetry: <欄位或事件>`／
                            `-- telemetry: n/a <理由>` 註記；沒對應＝那筆資料只在 console，玩家
                            附的 session log 復盤不到（AGENTS.md「telemetry 自足」）
+15d. 推力防線單一進口    — MDAD 駕駛中 Drive.installImpulseGuard 擋掉其他 MOD 對同一台車的 addImpulse；MDAD 自己
+                           直接寫 :addImpulse( 會被自己的防線擋掉（轉向全失），離線假車不經方法表、測不到。
+                           除了 Drive.addImpulse 的退路（行尾註記 impulse-guard-ok）一律改走 Drive.addImpulse
 
 新增檢查時：同步把對應的坑記進 AGENTS.md 踩坑錄，並依「踩坑進化協議」回流到
 pz-mod-template（見 AGENTS.md）。
@@ -1623,6 +1626,38 @@ if not tc_issues and tc_prints == 0:
     tc_issues.append("找不到任何 getDebug 閘住的 print（解析失效）")
 fail("telemetry 自足（getDebug print 要有樣本欄位／事件或註記）", tc_issues) if tc_issues else ok(
     f"telemetry 自足（{tc_prints} 個 getDebug print 都有 telemetry 對應或註記）")
+
+# ---- 15d. 推力防線單一進口：MDAD 自己的 addImpulse 只走 Drive.addImpulse ----
+# 2026-10-12 GitHub issue #8：Ultimate Towing／Effortless Towing 每幀 addImpulse 推拖車，引擎單槽讓 MDAD 的轉向施不出去。
+# Drive.installImpulseGuard 包住 BaseVehicle 方法表的 addImpulse，MDAD 駕駛中擋掉其他 Lua 對同一台車的推力；MDAD 自己的
+# 推力走包裝前的原始函式（Drive.addImpulse）。直接寫 vehicle:addImpulse(...) 會被自己的防線擋掉＝實機轉向全失，
+# harness 的假車方法不經方法表、照綠，只能靜態擋。
+ig_issues, ig_ok = [], 0
+for f in LUA_FILES:
+    with open(f, encoding="utf-8") as fh:
+        raw = fh.read()
+    raw_lines, code_lines = raw.split("\n"), lua_code_only(raw).split("\n")
+    rel = os.path.relpath(f, REPO)
+    for i, code in enumerate(code_lines):
+        if not re.search(r":\s*addImpulse\s*\(", code):
+            continue
+        if "impulse-guard-ok" in raw_lines[i]:
+            ig_ok += 1
+            continue
+        ig_issues.append(f"{rel}:{i + 1} 直接呼叫 :addImpulse(——改走 Drive.addImpulse，否則駕駛中會被自己的推力防線擋掉："
+                         f"{raw_lines[i].strip()[:70]}")
+if ig_ok != 1:
+    ig_issues.append(f"Drive.addImpulse 的退路（行尾 impulse-guard-ok）應為 1 處，實得 {ig_ok}")
+ig_drv = next((f for f in LUA_FILES if os.path.basename(f) == "MDAD_Driver.lua"), None)
+if ig_drv is None:
+    ig_issues.append("缺 client/MDAD_Driver.lua")
+else:
+    with open(ig_drv, encoding="utf-8") as fh:
+        ig_code = lua_code_only(fh.read())
+    if not re.search(r"(?m)^Drive\.installImpulseGuard\(\)", ig_code):
+        ig_issues.append("MDAD_Driver.lua 載入時沒有呼叫 Drive.installImpulseGuard()（防線不會裝上）")
+fail("推力防線單一進口（MDAD 的 addImpulse 只走 Drive.addImpulse）", ig_issues) if ig_issues else ok(
+    "推力防線單一進口（直接 :addImpulse( 只有 Drive.addImpulse 的退路一處、載入時裝防線）")
 
 # ---- 16. 意圖層階段 2 結構契約（RECOVER 單一進口）----
 # 2026-09-01 重構階段 2 主體 2：舊制五個需求方各自呼 startRecoveryAttempt，
