@@ -11990,16 +11990,20 @@ function drive.scenarioStartRotate()
             tag .. "轉到 25°：收尾 uturn done aligned、帶 start（why " .. tostring(ud.why) .. "）")
         driveTick(dp, dveh)
         checkTrue(st.startRot == false, tag .. "對正後起步段結束")
-        -- (sr-over) 1013c：收尾帶 ae（|航向誤差|）；之後 UTURN_OVER_MS 內誤差換號＝慣性過轉，窗滿記一筆 uturn over（ov rad）。
-        --   違規證明：stepFollow 不呼叫 Drive.uturnOverTrack＝沒有 over 紅。
+        -- (sr-over) 1013c：收尾帶 ae（|航向誤差|）；之後原地（開出 START_ROTATE_M 前、最多 UTURN_OVER_MS）誤差換號＝慣性過轉，
+        --   開走就結算記一筆 uturn over（ov rad）——開走後的誤差是路線轉角，不算過轉。
+        --   違規證明：stepFollow 不呼叫 Drive.uturnOverTrack＝沒有 over 紅；開走不結算＝沒有 over 紅。
         setHeading(dveh, -20 * deg)
         driveReset(dveh)
         driveTick(dp, dveh)
-        nowMs = nowMs + MDAD.Drive.debugTune().UTURN_OVER_MS
+        dveh._x = dveh._x + MDAD.Drive.debugTune().START_ROTATE_M + 0.1
+        driveReset(dveh)
         driveTick(dp, dveh)
         local uo = evs["uturn:over"] or {}
-        checkTrue(math.abs((ud.ae or 0) - 25 * deg) < 0.02 and math.abs((uo.ov or 0) - 20 * deg) < 0.02,
-            tag .. "(sr-over) done 帶 ae、過轉 20° 記 uturn over（ae " .. tostring(ud.ae) .. "、ov " .. tostring(uo.ov) .. "）")
+        checkTrue(math.abs((ud.ae or 0) - 25 * deg) < 0.02 and math.abs((uo.ov or 0) - 20 * deg) < 0.02
+                and (uo.ms or 1e9) < MDAD.Drive.debugTune().UTURN_OVER_MS,
+            tag .. "(sr-over) done 帶 ae、原地過轉 20°、開走即記 uturn over（ae " .. tostring(ud.ae) .. "、ov "
+            .. tostring(uo.ov) .. "、ms " .. tostring(uo.ms) .. "）")
         -- (sr-mid) 行進中車頭差 117°（髮夾 hairpin117 那型）：照 135° 門檻，不進原地轉
         setHeading(dveh, 117 * deg)
         dveh._speed = 20
@@ -18943,9 +18947,11 @@ scenario("調頭＋blocked：遠處不倒車、近處才退、額度用盡不空
         "(room) 倒完重探淨空：同一次調頭改耦力原地轉（mode " .. tostring(st.mode) .. "、probe "
         .. tostring(st.rotProbeClear) .. "、ast " .. tostring(st.fstate.appliedSteer) .. "）")
     -- (seg) 1013c 分段倒車（2026-10-13 使用者裁定）：側物 (2,2) 讓退 3m 後的車周圈仍被擋、退 6m 才淨空＝先退一段（len 3、need 6、
-    --   帶命中點），倒完重探仍被擋、從新車位再算再退一段（need 3、used 3），淨空才原地轉、HUD 原地調頭中；倒成的時間不補進停等預算。
-    --   違規證明：uturnRoom 只看第 1 段＝(seg) 紅；倒完不重開 uturnRoomTried＝(seg-2) 紅；成功不清 waitTickMs＝(seg-budget) 紅。
-    --   (seg-max) 剩餘額度用完：不再排下一段（rear=attempt-limit）、照舊 2B 大弧、不交還。違規證明：不看剩餘額度＝紅。
+    --   帶命中點）；一段退滿時在倒車途中重探仍被擋＝不停車接著退下一段（need 3、used 3、第 2 次額度、unstick start why=uturn-room）；
+    --   退滿 6m 圈淨空才停車（settle）、原地轉、HUD 原地調頭中；整段倒車時間不補進停等預算。
+    --   違規證明：uturnRoom 只看第 1 段＝(seg) 紅；stepUnstick 不接續＝(seg-2) 紅；成功不清 waitTickMs＝(seg-budget) 紅。
+    --   (seg-max) 剩餘額度用完：不接著退、停車（rear=attempt-limit）；停下重探仍被擋再從新車位算一次、照舊 2B 大弧、不交還。
+    --            違規證明：不看剩餘額度＝紅；倒完不重開 uturnRoomTried／重探不放回＝(seg-rearm) 紅。
     --   (seg-to) 分段吃最後一次額度時倒車逾時一寸未退：softFail 回大弧（舊制直接受困交還），之後照停等預算交還（出口）。
     --            違規證明：逾時不認 uturnRoomRev＝紅。
     do
@@ -18955,7 +18961,9 @@ scenario("調頭＋blocked：遠處不倒車、近處才退、額度用盡不空
             dveh._speed = -3
             nowMs = nowMs + 400
             driveReset(dveh)
-            driveTick(dp, dveh) -- 退滿一段 → settle
+            driveTick(dp, dveh) -- 這一段退滿：接著退或 settle
+        end
+        local function stopAndProbe()
             dveh._speed = 0
             nowMs = nowMs + 2000
             driveTick(dp, dveh) -- 停妥 → 回跟線
@@ -18974,42 +18982,39 @@ scenario("調頭＋blocked：遠處不倒車、近處才退、額度用盡不空
             "(seg) 退 3m 圈仍被擋、6m 淨空：先退第一段（len " .. tostring(r1.len) .. "、need " .. tostring(r1.need)
             .. "、hit " .. tostring(r1.hx) .. "," .. tostring(r1.hy) .. "、mode " .. tostring(st.mode) .. "）")
         local acc0 = st.waitAccumMs
-        evs["uturn:room"] = nil
+        evs["uturn:room"], evs["unstick:start"] = nil, nil
         backTo(3)
         local r2 = evs["uturn:room"] or {}
         checkTrue(r2.probe == "clear" and math.abs((r2.need or -1) - 3) < 1e-9 and math.abs((r2.used or -1) - 3) < 1e-6
-                and st.mode == "unstick" and st.episodeAttempts == 2 and (evs["progress:recover"] or {}).why == "uturn-room",
-            "(seg-2) 倒完重探仍被擋：從新車位再退一段（need " .. tostring(r2.need) .. "、used " .. tostring(r2.used)
+                and st.mode == "unstick" and st.episodeAttempts == 2 and (evs["unstick:start"] or {}).why == "uturn-room",
+            "(seg-2) 退滿一段仍被擋：不停車接著退下一段（need " .. tostring(r2.need) .. "、used " .. tostring(r2.used)
             .. "、mode " .. tostring(st.mode) .. "、attempt " .. tostring(st.episodeAttempts) .. "）")
-        checkTrue(st.waitAccumMs - acc0 < 500,
-            "(seg-budget) 倒成的一段不補進停等預算（+" .. tostring(st.waitAccumMs - acc0) .. " ms）")
         backTo(6)
+        checkEq(st.mode, "settle", "(seg-spin) 退滿 6m 圈淨空：停車")
+        stopAndProbe()
         checkTrue(st.mode == "follow" and st.rotProbeClear == true and st.fstate.appliedSteer == nil and dveh._imp.total > 0
                 and math.abs(st.uturnRoomUsedM - 6) < 1e-6 and MDAD.Drive.hudState(0) == "uturn",
-            "(seg-spin) 退滿 6m 圈淨空：原地轉、HUD 原地調頭中（mode " .. tostring(st.mode) .. "、probe "
+            "(seg-spin) 停下重探淨空：原地轉、HUD 原地調頭中（mode " .. tostring(st.mode) .. "、probe "
             .. tostring(st.rotProbeClear) .. "、used " .. tostring(st.uturnRoomUsedM) .. "）")
+        checkTrue(st.waitAccumMs - acc0 < 500,
+            "(seg-budget) 分段倒車的時間不補進停等預算（+" .. tostring(st.waitAccumMs - acc0) .. " ms）")
         -- (seg-max)
         MDAD.Drive.stop(0, nil)
         st = reversedStart("(seg-max)")
         driveTick(dp, dveh)
-        evs["uturn:room"] = nil
-        dveh._x, dveh._y = -math.cos(2.8) * 3, -math.sin(2.8) * 3
-        dveh._speed = -3
-        nowMs = nowMs + 400
-        driveReset(dveh)
-        driveTick(dp, dveh)
-        dveh._speed = 0
-        nowMs = nowMs + 2000
-        driveTick(dp, dveh)
         st.episodeAttempts = 3 -- UNSTICK_MAX：額度已用完
-        driveReset(dveh)
-        driveTick(dp, dveh)
-        driveTick(dp, dveh)
+        evs["uturn:room"] = nil
+        backTo(3)
         local rm = evs["uturn:room"] or {}
-        checkTrue(rm.rear == "attempt-limit" and rm.probe == "obstructed" and rm.need == nil and st.mode == "follow"
-                and MDAD.Drive.isActive(0) and MDAD.Drive.hudState(0) == "uturnslow",
-            "(seg-max) 額度用完：不再排下一段、照舊大弧（rear " .. tostring(rm.rear) .. "、mode " .. tostring(st.mode)
-            .. "、hud " .. tostring(MDAD.Drive.hudState(0)) .. "）")
+        checkTrue(rm.rear == "attempt-limit" and rm.probe == "obstructed" and rm.need == nil and st.mode == "settle",
+            "(seg-max) 額度用完：不接著退、停車（rear " .. tostring(rm.rear) .. "、mode " .. tostring(st.mode) .. "）")
+        evs["uturn:room"] = nil
+        stopAndProbe()
+        rm = evs["uturn:room"] or {}
+        checkTrue(rm.rear == "attempt-limit" and st.mode == "follow" and MDAD.Drive.isActive(0)
+                and MDAD.Drive.hudState(0) == "uturnslow",
+            "(seg-rearm) 停下重探仍被擋：從新車位再算一次、照舊大弧（rear " .. tostring(rm.rear) .. "、mode "
+            .. tostring(st.mode) .. "、hud " .. tostring(MDAD.Drive.hudState(0)) .. "）")
         -- (seg-to)
         MDAD.Drive.stop(0, nil)
         st = reversedStart("(seg-to)")

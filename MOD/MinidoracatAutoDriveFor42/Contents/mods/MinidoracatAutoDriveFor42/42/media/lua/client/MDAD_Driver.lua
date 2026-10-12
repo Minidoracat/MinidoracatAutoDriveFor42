@@ -2550,7 +2550,8 @@ local function startSession(playerObj, playerNum, stage)
         uturnRoomUsedM = 0, -- 這次調頭 uturn-room 已倒的距離（m；uturn room 事件 used）
         rotProbeHx = nil, rotProbeHy = nil, -- 最近一次車周探測被擋的命中點（MDADSensor.probeAround 第 2、3 回傳）
         rotSettleMs = 0, -- 起步段原地轉在出場窗內仍在轉、開始撐住出場的時刻（Drive.startRotateGate；0＝沒在撐）
-        uturnOverUntil = 0, uturnOverSign = 0, uturnOverMax = 0, uturnOverYr = 0, -- 起步調頭收尾後的過轉量測（Drive.uturnOverTrack）
+        -- 起步調頭收尾後的過轉量測（Drive.uturnOverTrack；uturnOverX/Y＝量測起點，nil＝下一個跟線幀取）
+        uturnOverUntil = 0, uturnOverSign = 0, uturnOverMax = 0, uturnOverYr = 0, uturnOverX = nil, uturnOverY = nil,
         returnActive = false,
         returnUnsafe = false,
         returnHold = false,
@@ -6932,11 +6933,15 @@ function Drive.startRotateEnd(s, headingError, vx, vy)
     end
 end
 
--- 起步調頭收尾後的過轉量測（1013c N4，遙測）：uturn done（aligned、起步段）起 UTURN_OVER_MS 內，航向誤差換號後的最大
--- |err|（ov，rad）與最大 |yr|（rad/s）；窗滿或又進調頭時記一筆 uturn phase=over。每個跟線幀 control 後呼叫，純量。
-function Drive.uturnOverTrack(s, playerNum, now, err)
+-- 起步調頭收尾後的過轉量測（1013c N4，遙測）：uturn done（aligned、起步段）後到車開出 START_ROTATE_M（最多 UTURN_OVER_MS），
+-- 航向誤差換號後的最大 |err|（ov，rad）與最大 |yr|（rad/s）；窗滿、開出或又進調頭時記一筆 uturn phase=over。只量原地這段：
+-- 開走之後的誤差是路線轉角與回線，不是慣性過轉（E2E m1013c-n4-fix1：收尾 4° 停住，3 秒窗卻量到 10m 外轉角的 36°）。
+-- 每個跟線幀 control 後呼叫，純量；起點＝收尾後第一個跟線幀的車位。
+function Drive.uturnOverTrack(s, playerNum, now, err, vx, vy)
     if s.uturnOverUntil == 0 then return end
-    if now < s.uturnOverUntil and not s.uturn then
+    if not s.uturnOverX then s.uturnOverX, s.uturnOverY = vx, vy end
+    local dx, dy = vx - s.uturnOverX, vy - s.uturnOverY
+    if now < s.uturnOverUntil and not s.uturn and dx * dx + dy * dy < TUNE.START_ROTATE_M * TUNE.START_ROTATE_M then
         if finite(err) and err * s.uturnOverSign < 0 then
             if err < 0 then err = -err end
             if err > s.uturnOverMax then s.uturnOverMax = err end
@@ -6950,7 +6955,7 @@ function Drive.uturnOverTrack(s, playerNum, now, err)
     end
     diagEvent(s, playerNum, "uturn", { phase = "over", ov = s.uturnOverMax, yr = s.uturnOverYr,
         ms = now - s.uturnOverUntil + TUNE.UTURN_OVER_MS })
-    s.uturnOverUntil = 0
+    s.uturnOverUntil, s.uturnOverX = 0, nil
 end
 
 -- 調頭車周探測（TUNE.ROTATE_PROBE_MS 節流）：寫 s.rotProbeClear（true 淨空原地轉／false 被擋走大弧）。
@@ -6986,6 +6991,7 @@ function Drive.uturnDone(s, playerNum, now, why, detail)
         yr = s.yawRate, ae = finite(e) and (e < 0 and -e or e) or nil })
     if why == "aligned" and s.uturnStart and finite(e) then
         s.uturnOverUntil, s.uturnOverSign, s.uturnOverMax, s.uturnOverYr = now + TUNE.UTURN_OVER_MS, e < 0 and -1 or 1, 0, 0
+        s.uturnOverX = nil
     end
     s.uturn, s.uturnArmed, s.uturnStart = nil, false, false
 end
@@ -7882,7 +7888,8 @@ end
 -- 車位）會淨空」。第 1 段照後方探測階梯（Drive.rearLadder，同 startRecoveryAttempt：4m 帶清＝UNSTICK_DIST、短帶＝帶長−KEEP）；
 -- 第 k 段（k ≤ 剩餘倒車額度 UNSTICK_MAX−episodeAttempts，第 1 段要是整段）累計 k·UNSTICK_DIST。路徑不另探：第 1 段的 4m 帶
 -- 蓋到車尾後 halfL＋4、目的地的圈（半徑 probeR ≥ 車身半對角）蓋住其後到退後車身；倒車途中 stepUnstick 仍每 100ms 探後方。
--- 找得到＝回 true，呼叫端 requestRecover("uturn-room") 只先退一段；倒完 Drive.rotateProbe 重探（s.uturnRoomTried
+-- 找得到＝回 true（第 2 回傳＝這一段退距），呼叫端 requestRecover("uturn-room") 只先退一段；一段退滿時 Drive.uturnRoomMore
+-- 在倒車途中重探、仍被擋就不停車接著退；停下後（含倒車中途後方探到障礙而提早停）Drive.rotateProbe 重探（s.uturnRoomTried
 -- "probe"→false），淨空就原地轉，仍被擋就從新車位再算一次。找不到（倒不了、額度不夠、退到額度用完仍被擋）＝照舊 2B 大弧
 -- （10-06 裁定壓速），大弧卡住由 Drive.rotateStall 倒車兜底。不做側推三點式。事件 uturn room：rear／len（這一段退距）／
 -- need（從這裡要退多遠圈才淨空；騰不出＝缺）／used（這次調頭已倒）／hx,hy（車周探測擋住的命中點）。
@@ -7924,7 +7931,32 @@ function Drive.uturnRoom(s, vehicle, playerNum, vx, vy)
             .. " hit=" .. tostring(s.rotProbeHx) .. "," .. tostring(s.rotProbeHy)
             .. (clear and " -> reverse then spin" or " -> wide arc"))
     end
-    return clear
+    return clear, d
+end
+
+-- 分段倒車接續（1013c）：uturn-room 的一段退滿時 stepUnstick 呼叫（車還在倒）。原地轉的圈在現位置已淨空＝回 false（照常
+-- settle、停下重探後原地轉）；仍被擋就從現位置重算（Drive.uturnRoom，記 uturn room 事件，hx／hy＝現位置的命中點）：找得到
+-- 下一段＝不停車接著退（吃一次額度、起點與 UNSTICK_MS 計時重設、記 unstick start why=uturn-room），找不到＝回 false（settle
+-- 後走大弧）。每段先 settle 再起手時，settle 的鎖輪閂把下一段拖 1.1 秒（E2E m1013c-seg-fix1 第二段 REVDELAY 1146 ms）。
+function Drive.uturnRoomMore(s, vehicle, playerNum, now, vx, vy)
+    if not s.uturn or s.rotProbeClear ~= false then return false end
+    local hit, hx, hy = MDADSensor.probeAround(s.sensor, vehicle, getCell(), s.probeR)
+    if not hit then return false end
+    s.rotProbeHx, s.rotProbeHy = hx, hy
+    local base = s.uturnRoomUsedM
+    s.uturnRoomUsedM = base + s.unstickDistance -- 事件 used 含這一段；不接著退就還原（settle 成功時整段再計）
+    local more, d = Drive.uturnRoom(s, vehicle, playerNum, vx, vy)
+    if not more then
+        s.uturnRoomUsedM = base
+        return false
+    end
+    s.episodeAttempts = s.episodeAttempts + 1
+    s.unstickTravelM = d < sqrt(UNSTICK_DIST_SQ) and d or 0
+    s.unstickX, s.unstickY, s.unstickDistance = vx, vy, 0
+    s.unstickUntil, s.unstickStartedAt, s.nextRearProbeMs = now + UNSTICK_MS, now, now
+    diagEvent(s, playerNum, "unstick", { phase = "start", why = "uturn-room", eid = s.episodeId,
+        attempt = s.episodeAttempts, x = vx, y = vy, s = s.lastSNow, d = 0, rear = "clear" })
+    return true
 end
 
 -- Called only after stepFollow released its hot-path vector. Rear unknown is fail-closed;
@@ -13007,6 +13039,8 @@ local function stepUnstick(s, vehicle, playerNum, now)
     -- 時限到但已退出 UNSTICK_MIN_M：同「倒到後方出現障礙」一樣當倒夠了進 settle 重掃
     -- （2026-09-26 E2E trailer-grass-mp：拖著掛車在草地倒車 4 秒只退 2.2m，舊制直接交還）
     if dist2 >= wantSq or (now >= s.unstickUntil and s.unstickDistance >= TUNE.UNSTICK_MIN_M) then
+        -- 1013c 分段倒車：uturn-room 這一段退滿、原地轉的圈仍被擋＝不停車，照重算接著退下一段（Drive.uturnRoomMore）
+        if s.uturnRoomRev and dist2 >= wantSq and Drive.uturnRoomMore(s, vehicle, playerNum, now, vx, vy) then return end
         s.mode = "settle"
         s.progressState = "settle"
         s.settleUntil = now + SETTLE_MS
@@ -13473,7 +13507,7 @@ local function stepFollow(s, vehicle, playerNum, now)
             s.profile, s.fstate, vx, vy,
             heading, speedKmh, mult * SECONDS_PER_MULT)
         Drive.startRotateEnd(s, headingError, vx, vy)
-        Drive.uturnOverTrack(s, playerNum, now, headingError) -- 起步調頭收尾後的過轉量測（uturn over，1013c）
+        Drive.uturnOverTrack(s, playerNum, now, headingError, vx, vy) -- 起步調頭收尾後的過轉量測（uturn over，1013c）
         s.followerTarget = targetSpeed -- telemetry ftg：剖面原始目標（cap／jerk 之前；0907e 錨定 bug 只靠它定罪）
         -- 高速增益估計衝出上限、Follower 已整份重學（FF_HI；1006 正式服 ygh 貼 3.0 撞路緣）：記下當下的比值與幀時
         if s.fstate.hiCapObs ~= nil then
