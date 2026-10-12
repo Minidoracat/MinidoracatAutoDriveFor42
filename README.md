@@ -75,6 +75,9 @@ Steam Workshop 用 JPG（每張 ≤280,000 bytes，Steamworks 預覽圖上限）
 本 addon 需要 [Minidoracat MiniMap](https://steamcommunity.com/sharedfiles/filedetails/?id=3763913359)
 與 Minidoracat UI；不與 Navigator 共存（兩者都佔用車輛儀表上方）。
 
+拖車助推類 MOD（Ultimate Towing、Effortless Towing 等）可以一起用：遊戲每台車同一時間只接受一個推力，兩邊一起推會讓自動駕駛轉不了方向，
+所以自動駕駛期間會擋下其他 MOD 對這台車的推力；玩家接手或停止自動駕駛後，助推照常運作。
+
 ## 多目標與停靠操作
 
 1. 由 MiniMap 放大鏡／`;` 開啟行程。搜尋或地圖右鍵可加到最後、指定插入位置或「先去這裡」。

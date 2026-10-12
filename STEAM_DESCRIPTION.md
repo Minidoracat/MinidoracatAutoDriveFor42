@@ -10,6 +10,7 @@
 [*] 必裝主 MOD：[url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763913359]Minidoracat MiniMap[/url]
 [*] 必裝 UI 框架：[url=https://steamcommunity.com/sharedfiles/filedetails/?id=3789836701]Minidoracat UI Library[/url]
 [*] 不相容：Navigator（兩者都用車輛儀表上方區域）
+[*] 拖車助推類 MOD（如 Ultimate Towing、Effortless Towing）：可以一起用；自動駕駛期間不套用它的助推，自己開車時照常
 [*] [b]中途加入／移除：[/b]都可以；移除後 GPS、自駕模組與車上裝好的裝置會消失
 [*] [b]介面語言：[/b]繁體中文、简体中文、English、日本語、한국어、Русский、Español、Português、Türkçe、Français、Polski、Deutsch（翻譯有問題請回報）
 [/list]

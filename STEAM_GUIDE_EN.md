@@ -314,6 +314,13 @@ Separate 0–500% power and extra-fuel settings for GPS and autodrive; they stac
 [*] [b]Motorcycle mods[/b]: can autodrive (tested with the Autotsar Motor Club Harley and BMW); gap checks use the rider-plus-handlebar width.
 [*] [b]Bicycles[/b]: no engine or battery, so they cannot autodrive.
 [/list]
+[h3]Tow-assist mods?[/h3]
+[list]
+[*] Compatible. Mods like Ultimate Towing and Effortless Towing keep pushing the car while it tows, but the game takes only one push per vehicle at a time, and AutoDrive steers with that push. With both pushing, AutoDrive can't steer; the car then swerves, surges and the trailer breaks loose.
+[*] So while AutoDrive is driving, other mods' pushes on that vehicle are skipped; once you take over or stop AutoDrive, the tow assist works as usual.
+[*] While AutoDrive tows, you don't get that extra push; AutoDrive's own acceleration assist takes over.
+[*] If the steering still doesn't respond under AutoDrive with another mod installed, report it with Telemetry (see "Feedback").
+[/list]
 [h3]One map mod fails?[/h3]
 [list]
 [*] Update all series mods and restart, then check road data with the map author.

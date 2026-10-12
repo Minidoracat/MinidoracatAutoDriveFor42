@@ -10,6 +10,7 @@ GPSナビゲーターで道路のルートを計画すると、オートパイ�
 [*] 必須：[url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763913359]Minidoracat MiniMap[/url]
 [*] 必須UIフレームワーク：[url=https://steamcommunity.com/sharedfiles/filedetails/?id=3789836701]Minidoracat UI Library[/url]
 [*] Navigatorとは併用できません（どちらも車両ダッシュボード上部を使用します）
+[*] 牽引アシスト系 MOD（Ultimate Towing、Effortless Towing など）：併用できます。自動運転中はそのアシストが無効になり、自分で運転するときは通常どおり働きます
 [*] [b]途中追加・削除：[/b]どちらも可能。削除すると GPS・自動運転モジュールと車に取り付けた装置は消えます
 [*] [b]対応言語：[/b]繁體中文、简体中文、English、日本語、한국어、Русский、Español、Português、Türkçe、Français、Polski、Deutsch（翻訳の問題はお知らせください）
 [/list]

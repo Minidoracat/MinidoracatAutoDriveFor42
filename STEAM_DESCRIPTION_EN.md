@@ -10,6 +10,7 @@ Plan a road route with the GPS Navigator and the Autopilot Module drives it for 
 [*] Requires the base mod: [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763913359]Minidoracat MiniMap[/url]
 [*] Requires the UI framework: [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3789836701]Minidoracat UI Library[/url]
 [*] Incompatible with Navigator (both use the area above the vehicle dashboard)
+[*] Tow-assist mods (e.g. Ultimate Towing, Effortless Towing): compatible; their push is skipped while AutoDrive is driving and works as usual when you drive
 [*] [b]Add/remove mid-save:[/b] safe either way; removing it deletes GPS units, autopilot modules and devices installed in cars
 [*] [b]Languages:[/b] 繁體中文, 简体中文, English, 日本語, 한국어, Русский, Español, Português, Türkçe, Français, Polski, Deutsch (please report any translation issues)
 [/list]
