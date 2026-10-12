@@ -380,11 +380,12 @@ local POLICY_DODGE = 1         -- 沙盒 ObstaclePolicy enum：1=繞行 2=停車
 TUNE.BLOCK_STOP_DIST = 10      -- 距障礙群這麼近才煞停等待；更遠先滑行接近
 TUNE.BLOCK_APPROACH_KMH = 20   -- blocked 接近段的速度上限（掃描逼近後縫隙判定更準）
 TUNE.BLOCK_APPROACH_HARD_MARGIN = 10 -- blocked 接近包絡的一秒鎖輪只在實速超過 BLOCK_APPROACH_KMH＋此值時（停止線前低速段交給 blockedStop）
--- 起步判堵爬行（1012，使用者 2026-10-12 裁定「只修起步已判堵仍先衝」；Drive.launchHold）：判堵或繞行延後（前方有已知
--- 障礙、還沒有承諾線）在離起步點 LAUNCH_HOLD_M 內成立＝起步那一刻就知道前面過不去，接近速度壓在 LAUNCH_HOLD_KMH
--- 等候選鏈結果，直到承諾或判淨空。舊制起步也套 blocked 接近包絡（停止線終點 BLOCK_APPROACH_KMH）與對正延後帽
--- （出口不低於 MIN_EXEC），regulator 是二值全油：正式服 0.28 49powerWagonPD 兩趟 0.5 秒內 0→10–12 km/h，
--- 1.1–1.2 秒在 1–2m 外的停止線一秒鎖輪，0.3 秒後就承諾繞行。行進中的判堵（離起步點更遠才成立）照舊走包絡。
+-- 起步判堵爬行（1012，使用者 2026-10-12 裁定「只修起步已判堵仍先衝」；Drive.launchHold／Drive.launchCap）：判堵或繞行
+-- 延後（前方有已知障礙、還沒有承諾線）在離起步點 LAUNCH_HOLD_M 內成立＝起步那一刻就知道前面過不去：停點（停止線／延後
+-- 停點）前以滑行減速度降到 LAUNCH_HOLD_KMH，等候選鏈結果，直到承諾或判淨空；停點遠時照包絡放行、不平壓爬行。舊制起步也套
+-- blocked 接近包絡（停止線終點 BLOCK_APPROACH_KMH）與對正延後帽（出口不低於 MIN_EXEC），regulator 是二值全油：正式服 0.28
+-- 49powerWagonPD 兩趟 0.5 秒內 0→10–12 km/h，1.1–1.2 秒在 1–2m 外的停止線一秒鎖輪，0.3 秒後就承諾繞行。行進中的判堵
+-- （離起步點更遠才成立）照舊走包絡。
 TUNE.LAUNCH_HOLD_KMH = 5
 TUNE.LAUNCH_HOLD_M = 5
 TUNE.LAUNCH_HOLD_ENTRY_KMH = 15 -- 閂上當下車速超過此值不算起步（行進中按下自駕，起步點就是行進中的位置）
@@ -6278,21 +6279,29 @@ function Drive.wideJudgePending(s)
         and s.waitAccumMs < TUNE.WAIT_TIMEOUT_MS + TUNE.WIDE_JUDGE_GRACE_MS
 end
 
--- blocked 接近包絡（0928b；E2E rc1 0005 StepVan：70 km/h 在 68m 外判 blocked，舊制只把目標壓到
--- BLOCK_APPROACH_KMH 滑行——重車斷油約 2.5 m/s²，到 10m 停止線仍 34 km/h，一秒鎖輪後仍以 26 km/h
--- 撞上前方停著的車）。以規劃煞車能力（safeBrake×APPROACH_BRAKE_FRAC，同 stay-hold／dodge-defer）
--- 反推「在停止線降到 BLOCK_APPROACH_KMH」的包絡：超過包絡由 Drive.visAssistForce 沿中線補減速，
--- 超過硬煞門檻才一秒鎖輪（hardBrakeReason blocked-approach）。停止線與 blockedNear 同一個判距。
-function Drive.blockedApproachCap(s, vx, vy)
+-- 車到判堵停止線的剩餘距離（m）：車到群最近擋線點的世界距（MDADDynamics.blockedNear；缺座標退弧長差）扣
+-- Drive.blockStopDist。量不到回 nil。blocked 接近包絡與起步判堵包絡（Drive.launchCap）共用同一個判距。
+function Drive.blockedStopGap(s, vx, vy)
     local stopDist = Drive.blockStopDist(s)
     local _, wd = MDADDynamics.blockedNear(s.blockS, s.lastSNow, stopDist, vx, vy, s.blockHitX, s.blockHitY)
     if not finite(wd) then
         if not finite(s.blockS) or not finite(s.lastSNow) then return nil end
         wd = s.blockS - s.lastSNow
     end
+    return wd - stopDist
+end
+
+-- blocked 接近包絡（0928b；E2E rc1 0005 StepVan：70 km/h 在 68m 外判 blocked，舊制只把目標壓到
+-- BLOCK_APPROACH_KMH 滑行——重車斷油約 2.5 m/s²，到 10m 停止線仍 34 km/h，一秒鎖輪後仍以 26 km/h
+-- 撞上前方停著的車）。以規劃煞車能力（safeBrake×APPROACH_BRAKE_FRAC，同 stay-hold／dodge-defer）
+-- 反推「在停止線降到 BLOCK_APPROACH_KMH」的包絡：超過包絡由 Drive.visAssistForce 沿中線補減速，
+-- 超過硬煞門檻才一秒鎖輪（hardBrakeReason blocked-approach）。停止線與 blockedNear 同一個判距。
+function Drive.blockedApproachCap(s, vx, vy)
+    local gap = Drive.blockedStopGap(s, vx, vy)
+    if gap == nil then return nil end
     local decel = s.safeBrake
     if not finite(decel) or decel <= 0 then decel = 0.6 else decel = decel * TUNE.APPROACH_BRAKE_FRAC end
-    return MDADDynamics.approachCapKmh(wd - stopDist, TUNE.BLOCK_APPROACH_KMH, 0.5, decel)
+    return MDADDynamics.approachCapKmh(gap, TUNE.BLOCK_APPROACH_KMH, 0.5, decel)
 end
 
 -- 起步判堵爬行（TUNE.LAUNCH_HOLD_*）：本幀是否把目標壓在 LAUNCH_HOLD_KMH。判堵或繞行延後（未承諾）成立的那一刻判一次
@@ -6324,6 +6333,22 @@ function Drive.launchHold(s, playerNum, vx, vy, speedKmh)
         end
     end
     return s.launchHoldOn
+end
+
+-- 起步判堵的接近帽（Drive.launchHold 閂上時用）：停點前降到 LAUNCH_HOLD_KMH 的包絡——判堵的停點＝停止線
+-- （Drive.blockedStopGap），延後的停點＝延後停點 s.dodgeDeferS 前 halfL；停點量不到＝直接爬行。減速度用滑行
+-- （s.safeCoast，下限 0.5）：25 km/h 以下沒有減速輔助（TUNE.VIS_ASSIST_MIN_KMH），照 safeBrake 算的包絡車追不上、帶速到
+-- 停止線照樣一秒鎖輪。遠處照包絡放行：平壓爬行時判堵點在 40m 外的起步要爬幾十秒（1004e 也因遠處判堵平壓 20 km/h 爬 11 秒
+-- 改成包絡；正式服 0.28 判堵後接手有 7 段是慢繞時接手）。
+function Drive.launchCap(s, vx, vy)
+    local gap = nil
+    if s.blocked then
+        gap = Drive.blockedStopGap(s, vx, vy)
+    elseif finite(s.dodgeDeferS) and finite(s.lastSNow) then
+        gap = s.dodgeDeferS - s.lastSNow - s.vehicleProfile.halfL
+    end
+    local coast = finite(s.safeCoast) and s.safeCoast > 0.5 and s.safeCoast or 0.5
+    return MDADDynamics.approachCapKmh(gap or 0, TUNE.LAUNCH_HOLD_KMH, 0.5, coast)
 end
 
 -- 證明線世界掃掠在煞停視界內命中（gate "sweep"）的接近包絡（1005）：舊制平壓近場警戒帽（ungatedCapKmh 18）只夾
@@ -14396,11 +14421,11 @@ local function stepFollow(s, vehicle, playerNum, now)
                 targetSpeed, s.lastCapReason = s.blockedApproachCap or TUNE.BLOCK_APPROACH_KMH, "blocked"
             end
         end
-        -- 起步判堵爬行（Drive.launchHold）：只夾 regulator＝起步前已帶的速度斷油滑行收（起步段 ≤ LAUNCH_HOLD_ENTRY_KMH，
-        -- 減速輔助 25 km/h 以下本來就不補），不鎖輪；停止線照舊 blockedStop。
+        -- 起步判堵（Drive.launchHold）：停點前降到爬行的滑行包絡（Drive.launchCap），只夾 regulator、不鎖輪；停止線照舊
+        -- blockedStop。
         if Drive.launchHold(s, playerNum, vx, vy, speedKmh) and not reached and s.recoverWhy == nil
-                and targetSpeed > TUNE.LAUNCH_HOLD_KMH then
-            targetSpeed, s.lastCapReason = TUNE.LAUNCH_HOLD_KMH, "launch"
+                and targetSpeed > Drive.launchCap(s, vx, vy) then
+            targetSpeed, s.lastCapReason = Drive.launchCap(s, vx, vy), "launch"
         end
         if s.dynamicsFault then postAction = "dynamics-fault" end
         local commandState = controlStateOf(s)
