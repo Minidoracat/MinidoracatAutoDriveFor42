@@ -26802,7 +26802,8 @@ drive.scenarioLagBody()
 --   RETURN_CAP 25，落後 0.54m、23 km/h 撞路邊裝飾；舊制 RETURN 期間守門不判）。直路、回線 s 10→30.4 從 l −2.35 到 +2.75。
 --   (rl-near)  車在 rs 16、落後 −0.54，回線上 s 22 的硬點離規劃車身 0.2（規劃判淨空）：預測車身重疊＝arm、帽降。違規證明：live 留
 --              returnActive 豁免、或規劃線不取回線（onOv 不含 RETURN）＝紅。
---   (rl-ramp)  同一條回線上 13m 外（s 29.5）的硬點：回線段當 ramp 不衰減，照判。違規證明：RETURN 不設 rampEnd＝紅。
+--   (rl-ramp)  車在 rs 14、同一條回線上 s 29.5、離規劃車身 0.4 的硬點：回線段當 ramp 不衰減（0.54 > 0.4）照判。違規證明：RETURN
+--              不設 rampEnd（從車頭衰減約 ×0.5）＝紅。
 --   (rl-hold)  RETURN hold（沒有精確線）：不判、release why=owner。
 function drive.scenarioReturnLag()
     scenario("1013b：實測落後量守門在 RETURN 精確線上照判——回線段當 ramp、hold 不判")
@@ -26821,8 +26822,8 @@ function drive.scenarioReturnLag()
     end
     local halfW, halfL, r, PAD = 0.9, 2.4, 0.7, MDADCorridor.FOOTPRINT_PAD
     local sen = { ready = true, hardN = 1, hardS = {}, hardL = {}, hardLc = {}, hardW = {}, hardR = {}, hardX = {}, hardY = {} }
-    local function put(hs)
-        local lc = lineAt(hs) - (halfW + PAD + r + 0.2) -- 落後那側（車在線的 −l 側）、離規劃車身 0.2
+    local function put(hs, gap)
+        local lc = lineAt(hs) - (halfW + PAD + r + gap) -- 落後那側（車在線的 −l 側）、離規劃車身 gap
         sen.hardS[1], sen.hardL[1], sen.hardLc[1], sen.hardW[1], sen.hardR[1], sen.hardX[1], sen.hardY[1] =
             hs, lc, lc, r, r, hs, lc
     end
@@ -26839,7 +26840,7 @@ function drive.scenarioReturnLag()
         returnHold = false, returnCrawlExact = false, returnStartS = 10, returnEndS = 30.4, lastSNow = 16,
         lastLatDev = -0.54, safeBrake = 6, vehicleProfile = { halfW = halfW, halfL = halfL } }
     -- (rl-near)
-    put(22)
+    put(22, 0.2)
     Dr.lagGuardScan(s, 0, 25)
     local arm = lastLag("arm")
     checkTrue(s.lagHitX == 22 and arm ~= nil and arm.hitS == 22,
@@ -26850,7 +26851,7 @@ function drive.scenarioReturnLag()
     -- (rl-ramp)
     s.lagHitX = nil
     s.lastSNow = 14
-    put(29.5)
+    put(29.5, 0.4) -- 0.54 不衰減才重疊；從車頭衰減（約 ×0.5）就判淨空
     Dr.lagGuardScan(s, 0, 25)
     checkTrue(s.lagHitX == 29.5, "(rl-ramp) 回線段內 13m 外：不衰減照判（hit=" .. tostring(s.lagHitX) .. "）")
     -- (rl-hold)
