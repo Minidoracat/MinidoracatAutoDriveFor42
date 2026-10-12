@@ -258,14 +258,17 @@ T._simulate = simulate
 -- （E2E 1013e semi-corner：W900＋貨櫃 L2 8 的 R6 90° 角穩態給 6m，整段推下來 3.4m）。牽引車出弧後掛車還會在弧尾內側多切一點，
 -- 所以取整段最深、不是只取弧尾（正式服 Q10 clip-30：Mustang hz −2.31、L2 3.25、R42 轉 26°，穩態 0.06、整段 0.10）。
 -- 步長 0.25m 比 0.05m 多內切約 1cm（偏保守）。
-function T.arcOfftrack(R, dth, hz, L2)
-    if not (R > 0 and dth > 0 and L2 > 0) then return 0 end
+-- out（選填）＝逐站表：out[b]＝掛車軸走到路徑站 [b−1, b) 公尺（從弧起點沿路徑量；入口段不記）時的最大內切，回第二值＝格數。
+-- 落後守門照硬點所在站查表，不拿整段最深值套到每個點（1013e semi-corner：整段最深 3.4m，彎內 4.5m 那點實際只切到約 2.5m）。
+function T.arcOfftrack(R, dth, hz, L2, out)
+    if not (R > 0 and dth > 0 and L2 > 0) then return 0, 0 end
     if R * dth > 8 * L2 then dth = 8 * L2 / R end
     if dth > math.pi then dth = math.pi end -- 角度判定（atan2）只到半圈；更長的弧早已穩態
     local len = R * dth
     local ex, ey, tx, ty = R * sin(dth), R - R * cos(dth), cos(dth), sin(dth) -- 弧尾與出口切線（弧心 (0, R)）
     local total = len + 2 * (L2 + abs(hz))
-    local n = math.ceil(total / 0.25)
+    local n, nb = math.ceil(total / 0.25), math.ceil(total) + 1
+    if out then for b = 1, nb do out[b] = 0 end end
     local ax, ay, best = hz - L2, 0, 0 -- 參考點自 (0,0) 朝 +x 切入
     for k = 1, n do
         local d = total * k / n
@@ -282,15 +285,19 @@ function T.arcOfftrack(R, dth, hz, L2)
         local vl = sqrt(vx * vx + vy * vy)
         ax, ay = hx - vx / vl * L2, hy - vy / vl * L2
         -- 軸到路徑三段（入口射線 x≤0／弧／出口射線）最近那段的帶號距離（彎內側正）
-        local off, dmin = ay, ax <= 0 and abs(ay) or sqrt(ax * ax + ay * ay)
+        local off, dmin, st = ay, ax <= 0 and abs(ay) or sqrt(ax * ax + ay * ay), ax
         local a, r = atan2(ax, R - ay), sqrt(ax * ax + (ay - R) * (ay - R))
-        if a >= 0 and a <= dth and abs(R - r) < dmin then off, dmin = R - r, abs(R - r) end
+        if a >= 0 and a <= dth and abs(R - r) < dmin then off, dmin, st = R - r, abs(R - r), a * R end
         local qx, qy = ax - ex, ay - ey
         local u, c = qx * tx + qy * ty, qy * tx - qx * ty
-        if (u >= 0 and abs(c) or sqrt(qx * qx + qy * qy)) < dmin then off = c end
+        if (u >= 0 and abs(c) or sqrt(qx * qx + qy * qy)) < dmin then off, st = c, len + (u > 0 and u or 0) end
         if off > best then best = off end
+        if out and st >= 0 then
+            local b = floor(st) + 1
+            if b <= nb and off > out[b] then out[b] = off end
+        end
     end
-    return best
+    return best, nb
 end
 
 -- 繞行候選線上的掛車折角（Driver Drive.towFold）：牽引車參考點（車輛原點）沿候選線 (cx, cy) 與基準線 (bx, by)（同弧長取樣、

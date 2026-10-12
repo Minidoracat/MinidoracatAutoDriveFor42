@@ -552,6 +552,12 @@ do
     check(T.arcOfftrack(20, 0.5, -1, 9) < T.arcOfftrack(20, 2, -1, 9), "(off) 同半徑轉得越多切得越深")
     check(T.arcOfftrack(15, math.pi, -3, 2) < 0.1, "(off) L2 比掛點後移短（穩態往外）：幾乎不往內")
     check(T.arcOfftrack(0, 1, -1, 9) == 0 and T.arcOfftrack(20, 0, -1, 9) == 0, "(off) 半徑或轉角非正：0")
+    local tab = {}
+    local best, nb = T.arcOfftrack(6, math.pi / 2, -2.23, 8, tab)
+    local mx, late = 0, tab[18] -- 站 17–18m＝出弧後約 8m
+    for b = 1, nb do if tab[b] > mx then mx = tab[b] end end
+    check(math.abs(mx - best) < 1e-9 and late < 0.5 * best,
+        string.format("(off-tab) 逐站表最大＝整段最深 %.2f；出弧後 8m 那站剩 %.2f（硬點照所在站查，不拿整段最深）", best, late))
 end
 
 print(string.format("test_trailer: %d 項斷言、%d 項失敗", asserts, fails))

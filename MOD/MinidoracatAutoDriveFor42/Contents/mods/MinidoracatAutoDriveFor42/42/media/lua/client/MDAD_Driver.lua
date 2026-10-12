@@ -543,6 +543,10 @@ TUNE.LAG_RATE_MIN_DROP_M = 0.08
 TUNE.TOW_MEM_AHEAD_M = 8
 TUNE.TOW_MEM_LAT_M = 2.5
 TUNE.TOW_MEM_N = 64
+-- 掛車車身（落後守門的掛車判定、Drive.towFootprint 的實際掛車車身）的安全圈（m）：0＝只看硬點膨脹半徑 r（本身已含餘裕）。
+-- 減速改變不了掛車的幾何路徑（低速更貼 tractrix），只在真的會碰到時降撞擊速度；牽引車照舊 FOOTPRINT_PAD。
+-- 1013e E2E semi-corner：pad 0.15 時 W900 貨櫃擦進 r0.7＋pad 圈 0.04（實際離 r0.7 圈 0.11、base 也 0 接觸）卻 8 km/h 開 27m、慢 9 秒。
+TUNE.TOW_BODY_PAD = 0
 local CORNER_NEAR = 8          -- sweep 失敗點離折點多近算「折點衝突」（BLOCKED_CORNER 判定）
 local CORNER_RETRY_DIST = 3    -- corner latch 撤銷距離：漸進接近讓車前進這麼多＝
                                -- 幾何已變、重新枚舉——實測「靠很近開導航就能繞」
@@ -7629,8 +7633,8 @@ end
 -- 掛車內側 38.9 km/h 撞路邊硬點，footprint 只算牽引車、牽引車淨距 0.02 沒判接觸。掃描從車心前 SCAN_NEAR 起，掛車旁的點不在
 -- 快照裡：車頭前 TOW_MEM_AHEAD_M 內、橫向離車位 ≤ 掛車半寬＋TOW_MEM_LAT_M＋點半徑的硬點（含停著的車的輪廓點，hardV 照抄）記進
 -- s.towMem（同 Sensor 欄位名，世界座標相等＝同一點；最多 TOW_MEM_N），車頭向量投影過掛車尾 2m 或離車心 trailLen＋20m 外就丟。掛車車身＝MDADTrailer.body
--- （量到的 com 與拖行軸）以 MDADCorridor.currentFootprintHit 對記憶點判，pad 同牽引車（Drive.footprintPad）。寫 s.towClr（掛車最近
--- 硬點淨距，含 pad，同 ac）／s.towClrX／Y、s.towFootBlocked；上升緣記 contact kind＝trailer。碰到只由 Drive.lagGuardCap 壓到
+-- （量到的 com 與拖行軸）以 MDADCorridor.currentFootprintHit 對記憶點判，pad＝TUNE.TOW_BODY_PAD。寫 s.towClr（掛車最近
+-- 硬點淨距，含該 pad）／s.towClrX／Y、s.towFootBlocked；上升緣記 contact kind＝trailer。碰到只由 Drive.lagGuardCap 壓到
 -- MIN_EXEC，不進 currentBlocked（不鎖輪、不開脫困）：掛車旁的點規劃繞不開（一般帶候選只照牽引車設計），鎖輪→倒車→同線再碰＝
 -- 在原本開得過的路邊物前 StopStuck（trailer.md〈試過不要再試〉只驗不產生）；實體真擋住時由進度監督照常脫困。
 function Drive.towFootprint(s, vehicle, playerNum, vx, vy, heading, latSigned)
@@ -7681,7 +7685,7 @@ function Drive.towFootprint(s, vehicle, playerNum, vx, vy, heading, latSigned)
     local tx, ty, fx, fy = MDADTrailer.body(tw)
     if not finite(tx) or not finite(fx) then return end
     local blocked, actual, _, hitI = MDADCorridor.currentFootprintHit(MS, ML, MX, MY, MR, n,
-        tx, ty, math.atan2(fy, fx), tw.halfW, tw.halfL, 0, Drive.footprintPad(s), MB)
+        tx, ty, math.atan2(fy, fx), tw.halfW, tw.halfL, 0, TUNE.TOW_BODY_PAD, MB)
     if not finite(hitI) or hitI < 1 then return end
     s.towClr, s.towClrX, s.towClrY = actual, MX[hitI], MY[hitI]
     s.towFootBlocked = blocked == true
@@ -10276,8 +10280,8 @@ end
 -- （SemiTruckBox_mil 出彎 66 km/h）。arm／release 記 lag 事件與同一句 console；release why：owner＝持有者接手、body＝車尾過點、
 -- nose＝硬點在車身旁但實測車身已不重疊（拖車不用，見下方）、converge＝硬點還在車頭前方而預測車身不重疊（含 |ld| 降到門檻下）。
 -- 掛車車身（1013e N6；正式服 Q10 clip-30：R42 改寫弧上牽引車 ld 0.24 < 門檻，掛車內側 38.9 km/h 撞路邊硬點）：車在弧上
--- （Drive.towArcRuns 有穩態內輪差的弧段落在硬點的 [hs−2·L2, hs＋車尾] 窗內）時，掛車預測車身＝牽引車預測車身＋該段內輪差、
--- 半寬＝掛車半寬＋同一個 pad，不看 |ld| 門檻另判；命中照樣 arm／保持（事件 kind＝trailer、toff＝用的內輪差）。直路沒有弧段＝
+-- （Drive.towArcRuns 的弧段落在硬點的 [hs−2·L2, hs＋車尾] 窗內）時，掛車預測車身＝牽引車預測車身＋該站內輪差（Drive.towOffAt）、
+-- 半寬＝掛車半寬＋TUNE.TOW_BODY_PAD，不看 |ld| 門檻另判；命中照樣 arm／保持（事件 kind＝trailer、toff＝用的內輪差）。直路沒有弧段＝
 -- 舊制不變。只壓速不否決，同上。
 function Drive.lagGuardScan(s, playerNum, speedKmh, vx, vy, heading)
     local sen, fs, vp, ld = s.sensor, s.fstate, s.vehicleProfile, s.lastLatDev
@@ -10296,7 +10300,7 @@ function Drive.lagGuardScan(s, playerNum, speedKmh, vx, vy, heading)
         if live and finite(tw.halfW) then
             runs = Drive.towArcRuns(s, rs - rear - 2 * (tw.L2 or 0),
                 (finite(sen.scanEndS) and sen.scanEndS or rs + MDADDynamics.PERCEPTION_DEFAULT_M) + rear)
-            hwT = tw.halfW + pad
+            hwT = tw.halfW + TUNE.TOW_BODY_PAD
         end
     end
     hw = hw + pad
@@ -10368,8 +10372,8 @@ function Drive.lagGuardScan(s, playerNum, speedKmh, vx, vy, heading)
                     elseif runs ~= nil then
                         local lo, hi = hs - 2 * tw.L2, hs + rear
                         for q = 1, runs.n do
-                            local off = runs.off[q]
-                            if runs.s1[q] > lo and runs.s0[q] < hi and blocksLine(sen, i, body + off, hwT) then
+                            local off = runs.s1[q] > lo and runs.s0[q] < hi and Drive.towOffAt(runs, q, hs) or 0
+                            if off ~= 0 and blocksLine(sen, i, body + off, hwT) then
                                 bestS, hit, bl, hitPl, hitOff = hs, i, body + off, pl, off
                                 break
                             end
@@ -10440,8 +10444,8 @@ end
 
 -- 拖車弧段的內輪差（1013e N6；Drive.lagGuardScan 每個掃描輪呼叫一次）：剖面 [sFrom, sTo] 內的 SEG_ARC 段（Follower 圓角與
 -- 拖車改寫弧，filletRadius）同向相連的併成一段（起點往回找到弧真正的起點），以 MDADTrailer.arcOfftrack(最小半徑, 整段轉角,
--- hitchZ, L2) 換成掛車往彎內的偏移，帶號＝彎的方向（前後段航向遞增＝彎心在 +l 側：lane 正向是 (−sin h, cos h)）。回 s.towRuns
--- （s0／s1／off／n，session 重用）；沒拖、量不到掛點偏移（attach 清掉 hitchZ）、範圍內沒有弧段＝nil。
+-- hitchZ, L2) 換成掛車往彎內的偏移：off＝整段最深（帶號＝彎的方向：前後段航向遞增＝彎心在 +l 側，lane 正向是 (−sin h, cos h)），
+-- tab／tn＝從弧起點量的逐公尺站表（Drive.towOffAt 查）。回 s.towRuns（session 重用）；沒拖、量不到掛點偏移、範圍內沒有弧段＝nil。
 function Drive.towArcRuns(s, sFrom, sTo)
     local tw, prof = s.tow, s.profile
     if type(tw) ~= "table" or not finite(tw.hitchZ) or not finite(tw.L2) or type(prof) ~= "table"
@@ -10450,7 +10454,7 @@ function Drive.towArcRuns(s, sFrom, sTo)
     end
     local runs = s.towRuns
     if runs == nil then
-        runs = { s0 = {}, s1 = {}, off = {}, rmin = {}, dth = {}, n = 0 }
+        runs = { s0 = {}, s1 = {}, off = {}, rmin = {}, dth = {}, tab = {}, tn = {}, n = 0 }
         s.towRuns = runs
     end
     local S0, S1, OFF, RM, DT = runs.s0, runs.s1, runs.off, runs.rmin, runs.dth
@@ -10476,9 +10480,28 @@ function Drive.towArcRuns(s, sFrom, sTo)
             end
         end
     end
-    for q = 1, k do OFF[q] = OFF[q] * MDADTrailer.arcOfftrack(RM[q], DT[q], tw.hitchZ, tw.L2) end
+    for q = 1, k do
+        local tab = runs.tab[q]
+        if tab == nil then tab = {}; runs.tab[q] = tab end
+        local best, nb = MDADTrailer.arcOfftrack(RM[q], DT[q], tw.hitchZ, tw.L2, tab)
+        OFF[q], runs.tn[q] = OFF[q] * best, nb
+    end
     runs.n = k
     return k > 0 and runs or nil
+end
+
+-- 硬點弧長 hs 處的掛車內切（帶號；Drive.towArcRuns 第 q 段的站表，取所在格與前後各一格的最大：表是 1m 格、掛車車身有長度）。
+-- 弧起點之前＝0（入口段掛車還在直線上）。
+function Drive.towOffAt(runs, q, hs)
+    local st = hs - runs.s0[q]
+    if st < 0 then return 0 end
+    local tab, nb, v = runs.tab[q], runs.tn[q], 0
+    local b = math.floor(st) + 1
+    for j = b - 1, b + 1 do
+        local x = j >= 1 and j <= nb and tab[j] or 0
+        if x > v then v = x end
+    end
+    return runs.off[q] < 0 and -v or v
 end
 
 -- 實測收斂率（Drive.lagGuardScan 每個掃描輪呼叫一次）：記 |實測橫偏| 與累計世界行駛距離的環狀歷史（TUNE.LAG_HIST_N 格，
