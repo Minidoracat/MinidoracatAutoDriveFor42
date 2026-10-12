@@ -168,6 +168,9 @@ local EK = {
     "start", "ae",
     -- 1013a route ready：起步沒接越野接線的原因碼（far／near／behind／side／tow／other）、車頭與最近段夾角 rad、車到最近點 m
     "apw", "aph", "apd", -- 1013a
+    -- 1013d dodge commit：承諾線對殭屍（軟縫會閃的點、不含屍體）的最小淨距 zm（距離 − R，負＝R 內）與那一點的 zmS／zmL；
+    -- zv＝本輪候選鏈因線在 R 內經過殭屍而先不採納的候選數（Driver Drive.zombieSweep）
+    "zm", "zmS", "zmL", "zv", -- 1013d
 }
 
 local function logOnce(msg)

@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1013b"
+Drive.REV = "1013d"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -11267,6 +11267,80 @@ local function sweepWithFallbacks(s, planN, a, b, c, d, offL, baseL, tag, nb, ph
     return false
 end
 
+-- 繞行候選線對殭屍的最小淨距（N2，1013d；正式服 Q01 clip-17：殭屍承諾前 1.8 秒就站在進入段，承諾線離牠 0.78m、60 km/h
+-- 正撞——候選只驗硬點、承諾中軟縫不跑）。只看軟縫會閃的點：不含屍體，種類照 Drive.softJoins（與 RETURN 讓位
+-- Drive.returnZombieConflict 同一套），弧長在車頭到 min(d, 軟縫視窗) 之間，點取現位到預測位整段；線在該弧長的 lane 用
+-- profileLaneAt（停留線過 b 後平行在 offL）。回 m＝最小（橫向距離 − R），R 與軟縫同一個（halfW＋ZOMBIE_R＋ZOMBIE_MARGIN），
+-- m < 0＝線在 R 內經過；那一點的 (s, l) 寫進 s.zmS／s.zmL。沒有點回 nil。
+function Drive.zombieLineGap(s, a, b, c, d, offL, baseL, stay)
+    s.zmS, s.zmL = nil, nil
+    local sen = s.sensor
+    if not sen or not finite(sen.zomN) or sen.zomN <= 0 or sen.zomOverflow then return nil end
+    local vp, rs = s.vehicleProfile, s.lastSNow
+    local kmh = s.vehicle and s.vehicle:getCurrentSpeedKmHour() or 0
+    if not finite(kmh) then kmh = 0 end
+    local sTo = rs + MDADDynamics.softLookahead(kmh)
+    if finite(sen.softEndS) and sen.softEndS < sTo then sTo = sen.softEndS end
+    if d < sTo then sTo = d end
+    local R = vp.halfW + MDADCorridor.ZOMBIE_R + MDADCorridor.ZOMBIE_MARGIN
+    local vms = kmh / 3.6
+    if vms < 3 then vms = 3 end
+    local startL = startLaneOf(s, baseL)
+    local aLvl, zOn = Drive.animalDodgeLevel(), Drive.zombieDodgeOn()
+    local best = nil
+    for i = 1, sen.zomN do
+        local zs, zl = sen.zomS[i], sen.zomL[i]
+        if finite(zs) and finite(zl) and zs >= rs + vp.halfL and zs <= sTo and sen.zomIsCorpse[i] ~= true
+                and Drive.softJoins(sen.zomKind and sen.zomKind[i], zOn, aLvl, s.animalSlow or 2) then
+            local zlp, vl = zl, sen.zomVl and sen.zomVl[i]
+            if finite(vl) and (vl > 0.2 or vl < -0.2) then
+                local t = (zs - rs - vp.halfL) / vms
+                if t > TUNE.ZOMBIE_PREDICT_S then t = TUNE.ZOMBIE_PREDICT_S end
+                zlp = zl + vl * t
+            end
+            local ll = (stay and zs >= b) and offL or profileLaneAt(a, b, c, d, offL, baseL, zs, startL)
+            local lo, hi = math.min(zl, zlp), math.max(zl, zlp)
+            local m = (ll < lo and lo - ll or ll > hi and ll - hi or 0) - R
+            if best == nil or m < best then best, s.zmS, s.zmL = m, zs, zl end
+        end
+    end
+    return best
+end
+
+-- 候選鏈的殭屍偏好（N2，1013d）：plan 與 retry 檔掃過的候選，線在 R 內經過殭屍（Drive.zombieLineGap < 0）就先不採納——
+-- 回 false（s.fbFail 記成 p3、無命中點：候選鏈照常 ban 掉這條縫往下找），並記下「今天會承諾的那條」到 s.zomRec：第一條
+-- 非窄縫的，只有窄縫就記物理淨距最寬的（Drive.thinNote 同一把尺；plan 檔今天不分窄縫，一律算非窄縫）。找到 R 外的候選
+-- 就採納它；retry 檔找完沒有，Drive.zombieAdopt 換回記下的那條＝今天的行為（09-25 裁定：不減速閃，閃不過就撞）。
+-- 只換線：不加帽、不否決通行，承諾後的守護不看殭屍。tier＝nil 直接轉呼叫（crawl 檔：爬行速度，不在本防線範圍）。
+-- s.zomRec.n＝本輪被殭屍擋下的候選數（dodge commit 事件 zv）。
+function Drive.zombieSweep(s, planN, a, b, c, d, offL, baseL, tag, nb, physBase, crawl, tier)
+    local ok, ra, rb, rc, rd, ro, mg, ovN, ovS0, nbU, var = sweepWithFallbacks(
+        s, planN, a, b, c, d, offL, baseL, tag, nb, physBase, crawl)
+    if not ok or tier == nil then return ok, ra, rb, rc, rd, ro, mg, ovN, ovS0, nbU, var end
+    local m = Drive.zombieLineGap(s, ra, rb, rc, rd, ro, baseL, var == "stay" or var == "stay-look")
+    if m == nil or m >= 0 then return ok, ra, rb, rc, rd, ro, mg, ovN, ovS0, nbU, var end
+    local r = s.zomRec
+    if r == nil then r = { n = 0 }; s.zomRec = r end
+    r.n = r.n + 1
+    local phys = mg + nbU - s.vehicleProfile.halfW
+    local thin = tier == "retry" and phys < TUNE.DODGE_THIN_M
+    if not r.on or (r.thin and (not thin or phys > r.phys)) then
+        r.on, r.thin, r.phys, r.tier = true, thin, phys, tier
+        r.a, r.b, r.c, r.d, r.offL, r.planN, r.tag, r.nb, r.crawl = a, b, c, d, offL, planN, tag, nb, crawl
+    end
+    local f = s.fbFail
+    if f == nil then f = {}; s.fbFail = f end
+    f.hitS, f.ph, f.hps, f.hx, f.hy, f.a, f.b, f.c, f.d, f.body = nil, 3, nil, nil, nil, ra, rb, rc, rd, nil
+    return false
+end
+
+-- 找完沒有離殭屍 R 外的候選：以記下的原始輸入重跑一次採納（同幀同點雲＝同一條線，Drive.thinAdopt 同款）。沒有記錄回 false。
+function Drive.zombieAdopt(s, adoptIf, baseL, physBase)
+    local r = s.zomRec
+    if r == nil or not r.on then return false end
+    return adoptIf(r.tier, sweepWithFallbacks(s, r.planN, r.a, r.b, r.c, r.d, r.offL, baseL, r.tag, r.nb, physBase, r.crawl))
+end
+
 -- 測試鉤：回 session 表本身（harness 直接讀 dodging／returnActive／fstate；production 無呼叫者）
 function Drive.debugSession(playerNum)
     return sessions[playerNum]
@@ -12085,6 +12159,7 @@ local function replan(s, vehicle, playerNum)
         -- 短候選 commit——等於先白煞一次）。所以只把延後理由記下、照跑候選鏈，全滅才延後；
         -- exit（出口被承諾窗截短）維持原本立即延後。
         s.planDeferWhy = nil
+        if s.zomRec then s.zomRec.on, s.zomRec.n = false, 0 end -- 殭屍偏好的記錄每輪重來（Drive.zombieSweep）
         if mode == "dodge" then
             local _, _, _, dS, okS0 = shapeProfile(s, s.profile, a, b, c, d, offL, baseL)
             local why = nil
@@ -12171,8 +12246,10 @@ local function replan(s, vehicle, playerNum)
                 if ok then adopt(pa, pb, pc, pd, po, mg, ovN, ovS0, nbUsed, variant, tier) end
                 return ok
             end
-            if not adoptIf(s.dodgeTight and "curve" or "plan", sweepWithFallbacks(
-                    s, planN, a, b, c, d, offL, baseL, "plan", needBase, physBase, false)) then
+            -- plan／retry 檔經 Drive.zombieSweep：線在 R 內經過殭屍的先不採納、往下找 R 外的（N2，1013d）
+            if not adoptIf(s.dodgeTight and "curve" or "plan", Drive.zombieSweep(
+                    s, planN, a, b, c, d, offL, baseL, "plan", needBase, physBase, false,
+                    s.dodgeTight and "curve" or "plan")) then
                 local f = s.fbFail
                 a, b, c, d = f.a, f.b, f.c, f.d -- shape 後的斷點（blocked 錨沿用舊語意）
                 firstHit, firstHitX, firstHitY = f.hitS, f.hx, f.hy
@@ -12229,8 +12306,9 @@ local function replan(s, vehicle, playerNum)
                                 sen.hardLc, sen.hardW)
                             if mk ~= "dodge" then break end
                             pa, pb, pc, pd, po = ak, bk, ck, dk, ok2
-                            if adoptIf(phase == 2 and "crawl-retry" or "retry", sweepWithFallbacks(
-                                    s, banN, pa, pb, pc, pd, po, baseL, tierName, nb, physBase, phase == 2)) then
+                            if adoptIf(phase == 2 and "crawl-retry" or "retry", Drive.zombieSweep(
+                                    s, banN, pa, pb, pc, pd, po, baseL, tierName, nb, physBase, phase == 2,
+                                    phase == 1 and "retry" or nil)) then
                                 if not Drive.thinNote(s, s.dodgeMargin + commitNb - s.vehicleProfile.halfW,
                                         phase == 2 and "crawl-retry" or "retry", tierName,
                                         pa, pb, pc, pd, po, banN, nb, phase == 2) then
@@ -12248,6 +12326,8 @@ local function replan(s, vehicle, playerNum)
                         end
                         -- 找完沒有更寬的：採納記下最寬的那條（窄縫照過，09-01「物理可過就過」）
                         if not committed then Drive.thinAdopt(s, adoptIf, sweepWithFallbacks, baseL, physBase) end
+                        -- 沒有離殭屍 R 外的候選：採納記下的那條＝今天的行為（Drive.zombieSweep）
+                        if not committed then Drive.zombieAdopt(s, adoptIf, baseL, physBase) end
                         if committed or aborted then break end
                     end
                 end
@@ -12594,6 +12674,7 @@ local function replan(s, vehicle, playerNum)
                 if playerObj then haloGood(playerObj, KEY_DODGE) end
             end
             -- 每次 commit 一筆（含 cap 分解）：玩家 telemetry 必須自足（2026-09-04）
+            s.zmM = Drive.zombieLineGap(s, a, b, c, d, offL, s.dodgeBaseL, s.dodgeStay) -- 承諾線對殭屍的最小淨距（N2）
             diagEvent(s, playerNum, "dodge", {
                 phase = "commit", a = a, b = b, c = c, d = d, offL = offL,
                 cap = s.dodgeSpeedCap, m = s.dodgeMargin, curve = s.dodgeCurveCap,
@@ -12609,7 +12690,9 @@ local function replan(s, vehicle, playerNum)
                 thin = s.thinRec and s.thinRec.on and s.thinRec.phys or nil, -- 換縫找更寬時記下最窄那條的物理淨距
                 kin = s.kinRejectN > 0 and s.kinRejectN or nil, -- 承諾前被運動學證明拒收的候選數（Drive.kinProof）
                 fold = s.towFoldDeg, -- 承諾前被掛車折角預檢拒收的候選中最大預估折角（°；Drive.towFold）
-                preA = s.diag and Drive.preAClear(s) or nil }) -- pre-a 段最小物理淨距（只在紀錄開著時量）
+                preA = s.diag and Drive.preAClear(s) or nil, -- pre-a 段最小物理淨距（只在紀錄開著時量）
+                -- 承諾線對殭屍的最小淨距（距離 − R；Drive.zombieLineGap）與那一隻的 (s, l)；本輪被殭屍擋下的候選數（1013d）
+                zm = s.zmM, zmS = s.zmS, zmL = s.zmL, zv = s.zomRec and s.zomRec.n > 0 and s.zomRec.n or nil })
             Drive.proofTightArm(s, playerNum) -- 停下之後的窄線爬行（TUNE.PROOF_TIGHT_KMH）
             if getDebug() then -- telemetry: dodge commit 事件（cap 分解同欄）
                 -- cap 分解一行印清楚（2026-09-04 實機三段 8／15／14 km/h 繞行，console

@@ -8957,6 +8957,78 @@ function drive.scenarioZombieFarHard()
 end
 drive.scenarioZombieFarHard()
 
+-- (zd) 1013d N2（正式服 Q01 clip-17：殭屍承諾前 1.8 秒就站在進入段，承諾線離牠 0.78m，60 km/h 正撞；該玩家關了殭屍減速）：
+--   候選鏈只驗硬點。現制 plan／retry 檔掃過的候選，線在軟縫 R 內經過殭屍就先 ban 掉往下找，找不到 R 外的才採納原本那條。
+--   fixture：直路 l=0 一個硬物；對照組承諾 plan 檔、往負側。殭屍擺最壞相位：正站在對照線進入段的線上（s=14）。
+--   (zd-clear) 殭屍在對照線的進入段：換到另一側、承諾線在 R 外（commit 事件 zm ≥ 0、zv ≥ 1）
+--   (zd-none)  兩側候選的進入段都站著殭屍：照今天承諾對照那條（同 offL／tier／d；zm < 0、zv ≥ 2，09-25 裁定閃不過就撞）
+--   違規證明（temp/vp_1013d_zdodge.py）：zombieSweep 不擋＝(zd-clear) 紅；zombieAdopt 恆 false＝(zd-none) 紅；
+--   只看保持段（zs ≥ b）＝(zd-clear) 紅；commit 不帶 zm＝(zd-clear)／(zd-none) 紅。
+function drive.scenarioZombieDodge()
+    scenario("繞行候選避開站在進入段的殭屍（N2）")
+    local oldDodge, oldEvent, oldSample, oldShould = MDAD.HUD.zombieDodge, MDADDiagnostics.event,
+        MDADDiagnostics.sample, MDADDiagnostics.shouldSample
+    MDADDiagnostics.sample = function() return true end -- 回 false＝紀錄關閉、s.diag 被清，承諾事件就不發
+    MDADDiagnostics.shouldSample = function() return true end
+    MDAD.HUD.zombieDodge = function() return true end
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40,
+        RightLaneBias = 0, ZombieAreaSlowdown = false, CorpseSlowdown = false })
+    local events = {}
+    MDADDiagnostics.event = function(_, name, a) events[#events + 1] = { name = name, a = a } end
+    local function run(zs)
+        drive.fillWorld(-10, 160, -8, 8)
+        assert(armDrive(0, 40))
+        dveh._y = 0
+        drive.scanRound(true)
+        drive.scanRound(true)
+        local s = MDAD.Drive.debugSession(0)
+        s.diag = true
+        for _, z in ipairs(zs) do
+            local x, l = z[1], z[2]
+            drive.putMoving(math.floor(x), math.floor(l), { _class = "IsoZombie",
+                getX = function() return x end, getY = function() return l end })
+        end
+        drive.putSolid(24, 0, "harness_zd_barrel")
+        events = {}
+        drive.scanRound(true)
+        local e = nil
+        for i = #events, 1, -1 do
+            if events[i].name == "dodge" and events[i].a and events[i].a.phase == "commit" then e = events[i].a; break end
+        end
+        return s, e or {}
+    end
+    local s, e = run({})
+    local fs = s.fstate
+    local off0, tier0, a0, b0, d0 = fs.offL, s.dodgeTier, fs.offA, fs.offB, fs.offD
+    checkTrue(s.dodging == true and tier0 == "plan" and type(off0) == "number" and off0 < 0 and e.zm == nil,
+        "(zd) 對照：沒有殭屍＝plan 檔往負側承諾、事件不帶 zm（tier " .. tostring(tier0) .. " offL " .. tostring(off0) .. "）")
+    local zs = 14
+    local t = (zs - (a0 or 0)) / ((b0 or 1) - (a0 or 0))
+    local zl = (off0 or 0) * t * t * (3 - 2 * t) -- 對照線在 s=14 的 lane（startL 0）：殭屍正站在線上
+    checkTrue(t > 0.2 and t < 0.9 and zs > s.lastSNow + s.vehicleProfile.halfL,
+        "(zd) 前置：s=14 在對照線的進入段、車頭之前（t " .. string.format("%.2f", t) .. "）")
+    s, e = run({ { zs, zl } })
+    fs = s.fstate
+    checkTrue(s.dodging == true and type(fs.offL) == "number" and fs.offL > 0
+            and type(e.zm) == "number" and e.zm >= 0 and (e.zv or 0) >= 1,
+        "(zd-clear) 殭屍站在對照線進入段：換到另一側、承諾線在 R 外（offL " .. tostring(fs.offL) .. " tier "
+        .. tostring(s.dodgeTier) .. " zm " .. tostring(e.zm) .. " zv " .. tostring(e.zv) .. "）")
+    s, e = run({ { zs, zl }, { zs, -zl } })
+    fs = s.fstate
+    checkTrue(s.dodging == true and fs.offL == off0 and s.dodgeTier == tier0 and fs.offD == d0
+            and type(e.zm) == "number" and e.zm < 0 and (e.zv or 0) >= 2
+            and type(e.zmS) == "number" and math.abs(e.zmS - zs) < 0.6,
+        "(zd-none) 兩側都站著殭屍：照今天承諾對照那條（offL " .. tostring(fs.offL) .. " tier " .. tostring(s.dodgeTier)
+        .. " zm " .. tostring(e.zm) .. " zmS " .. tostring(e.zmS) .. " zv " .. tostring(e.zv) .. "）")
+    MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.shouldSample = oldEvent, oldSample, oldShould
+    MDAD.HUD.zombieDodge = oldDodge
+    MDAD.Drive.stop(0, nil)
+    drive.fillWorld(-2, 70, -7, 7)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    assert(armDrive())
+end
+drive.scenarioZombieDodge()
+
 -- (soft) 1005 動物與車外的其他玩家：併入殭屍軟縫選縫（大型動物與玩家多 SOFT_COMFORT_M），閃不開就以接近包絡
 --   停在前方等；動物等 ANIMAL_WAIT_MS 後以 ≤ANIMAL_CRAWL_KMH 爬過、玩家等到停等預算以專屬理由交還；殭屍軟縫在
 --   keep 版帶寬沒縫時改在物理 laneRoom 內貼路緣找（fstate.laneKeep＝0，釋放還原）。fixture 擺正壓車道。
