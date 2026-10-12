@@ -137,7 +137,8 @@ TUNE.START_ROTATE_M = 3
 TUNE.START_ROTATE_EXIT_YR = 1.5      -- rad/s
 TUNE.START_ROTATE_SETTLE_MS = 2000
 TUNE.ROTATE_COAST_DECEL = 8          -- rad/s²
-TUNE.UTURN_OVER_MS = 3000            -- uturn over 事件：起步調頭收尾後量過轉的窗
+TUNE.UTURN_OVER_MS = 3000            -- uturn over 事件：起步調頭收尾後量過轉的窗（時間上限）
+TUNE.UTURN_OVER_M = 1                -- 同上，車開出這麼遠就結算：之後的誤差是回線／轉角，不是慣性過轉
 -- 拖掛車的側推限制（2026-09-26 Workshop 回報「草地起步劇烈晃動、掛車脫開」，E2E trailer-grass-mp）：
 -- 側推的 MASS_BASE 項與車速無關，低速照樣整台橫推——真車低速轉不動掛點，這裡卻把車頭橫甩、
 -- 掛車原地不動（遙測首幀 spd 0、f −46k，折角 0→61° 只花 0.4 秒）。拖車時側推按車速線性放大到
@@ -6933,15 +6934,15 @@ function Drive.startRotateEnd(s, headingError, vx, vy)
     end
 end
 
--- 起步調頭收尾後的過轉量測（1013c N4，遙測）：uturn done（aligned、起步段）後到車開出 START_ROTATE_M（最多 UTURN_OVER_MS），
+-- 起步調頭收尾後的過轉量測（1013c N4，遙測）：uturn done（aligned、起步段）後到車開出 UTURN_OVER_M（最多 UTURN_OVER_MS），
 -- 航向誤差換號後的最大 |err|（ov，rad）與最大 |yr|（rad/s）；窗滿、開出或又進調頭時記一筆 uturn phase=over。只量原地這段：
--- 開走之後的誤差是路線轉角與回線，不是慣性過轉（E2E m1013c-n4-fix1：收尾 4° 停住，3 秒窗卻量到 10m 外轉角的 36°）。
--- 每個跟線幀 control 後呼叫，純量；起點＝收尾後第一個跟線幀的車位。
+-- 開走之後的誤差是回線與路線轉角，不是慣性過轉（E2E m1013c-n4-fix1：收尾 4° 停住，3 秒窗量到 10m 外轉角的 36°；
+-- m1013c-seg-fix2：收尾 1°，開出 3m 內的回線 18°）。每個跟線幀 control 後呼叫，純量；起點＝收尾後第一個跟線幀的車位。
 function Drive.uturnOverTrack(s, playerNum, now, err, vx, vy)
     if s.uturnOverUntil == 0 then return end
     if not s.uturnOverX then s.uturnOverX, s.uturnOverY = vx, vy end
     local dx, dy = vx - s.uturnOverX, vy - s.uturnOverY
-    if now < s.uturnOverUntil and not s.uturn and dx * dx + dy * dy < TUNE.START_ROTATE_M * TUNE.START_ROTATE_M then
+    if now < s.uturnOverUntil and not s.uturn and dx * dx + dy * dy < TUNE.UTURN_OVER_M * TUNE.UTURN_OVER_M then
         if finite(err) and err * s.uturnOverSign < 0 then
             if err < 0 then err = -err end
             if err > s.uturnOverMax then s.uturnOverMax = err end

@@ -11990,13 +11990,13 @@ function drive.scenarioStartRotate()
             tag .. "轉到 25°：收尾 uturn done aligned、帶 start（why " .. tostring(ud.why) .. "）")
         driveTick(dp, dveh)
         checkTrue(st.startRot == false, tag .. "對正後起步段結束")
-        -- (sr-over) 1013c：收尾帶 ae（|航向誤差|）；之後原地（開出 START_ROTATE_M 前、最多 UTURN_OVER_MS）誤差換號＝慣性過轉，
+        -- (sr-over) 1013c：收尾帶 ae（|航向誤差|）；之後原地（開出 UTURN_OVER_M 前、最多 UTURN_OVER_MS）誤差換號＝慣性過轉，
         --   開走就結算記一筆 uturn over（ov rad）——開走後的誤差是路線轉角，不算過轉。
         --   違規證明：stepFollow 不呼叫 Drive.uturnOverTrack＝沒有 over 紅；開走不結算＝沒有 over 紅。
         setHeading(dveh, -20 * deg)
         driveReset(dveh)
         driveTick(dp, dveh)
-        dveh._x = dveh._x + MDAD.Drive.debugTune().START_ROTATE_M + 0.1
+        dveh._x = dveh._x + MDAD.Drive.debugTune().UTURN_OVER_M + 0.1
         driveReset(dveh)
         driveTick(dp, dveh)
         local uo = evs["uturn:over"] or {}
