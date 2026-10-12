@@ -166,6 +166,9 @@ local EK = {
     "sp0", "sc0", "sd0",
     -- 1012 起步先原地轉：uturn enter／done 的起步段旗標、enter 當幀 |航向誤差| rad（uturn room 用既有 rear／len／probe）
     "start", "ae",
+    -- 1013e 掛車車身（Driver Drive.towFootprint／lagGuardScan）：impact／contact 的掛車最近硬點淨距（含 pad，同 ac）、該點座標、
+    -- 該點 1 格內 sprite 名／分類／格心距；lag arm kind＝trailer 時預測掛車車身用的穩態內輪差（m，正＝往 +l）
+    "tcl", "tcx", "tcy", "tsp", "tsc", "tsd", "toff", -- 1013e
 }
 
 local function logOnce(msg)
@@ -1974,12 +1977,23 @@ function D.sample(pn, now, x, y, heading, speed, target, remaining, lat, err,
         local spd = finite(speed) and (speed < 0 and -speed or speed) or nil
         local prof = s and s.profile
         local hNm, hCls, hD = impactHard(pn, x, y, heading, type(prof) == "table" and prof.halfL or (u and u.halfL))
-        emitEvent(pn, now, "impact", {
+        local a = {
             x = x, y = y, speed = round1(g.edgeSpd), dv = round1(spd and g.edgeSpd and g.edgeSpd - spd), ms = g.edgeGap,
             cls = g.impCls, dvs = round1(finite(speed) and g.edgeSv and g.edgeSv - speed),
             -- 2026-10-10：awt＝這筆取樣在等區域載入（引擎煞車同幀，dv 拆不開時看它）；車頭附近最近靜態硬物
             awt = type(phys) == "table" and phys.areaWait == true or nil, sprite = hNm, scost = hCls, hardD = round1(hD),
-        })
+        }
+        -- 1013e 拖車：掛車最近硬點（Driver Drive.towFootprint）的淨距（含 pad，同 ac）、座標與那點 1 格內的 sprite——上面的 sprite
+        -- 只從牽引車車頭找，掛車撞的會誤歸因（正式服 Q10 clip-30 摘要寫成樹）
+        if type(phys) == "table" and finite(phys.towClr) and finite(phys.towClrX) and finite(phys.towClrY) then
+            a.tcl, a.tcx, a.tcy = math.floor(phys.towClr * 100 + 0.5) / 100, phys.towClrX, phys.towClrY
+            local ok, nm, cls, d = pcall(function()
+                local own = getSpecificPlayer(pn):getVehicle()
+                return MDADSensor.hardSpriteNear(nil, getCell(), phys.towClrX, phys.towClrY, own and own:getZ() or 0, 1)
+            end)
+            if ok then a.tsp, a.tsc, a.tsd = nm, cls, round1(d) end
+        end
+        emitEvent(pn, now, "impact", a)
     end
     if g.edgeTp then
         emitEvent(pn, now, "teleport", {
