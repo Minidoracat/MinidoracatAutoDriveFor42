@@ -1254,6 +1254,7 @@ local function encodePhys(phys)
     addBool("returnUnsafe", "ru")
     addBool("returnHold", "rh")
     addBool("returnCapacityFault", "rcf")
+    addBool("followHold", "fh")       -- 1013b：會車／跟車停等（Driver s.followHold）
     addBool("surfaceMismatch", "sm")
     addNum("tractionKey", "tk")
     addNum("runtimeMass", "rm")
