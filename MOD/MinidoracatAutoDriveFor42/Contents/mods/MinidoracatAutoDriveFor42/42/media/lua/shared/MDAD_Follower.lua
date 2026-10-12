@@ -1172,6 +1172,7 @@ function MDADFollower.stepBuild(profile, budget)
                 profile.coastStopS = profile.length - COAST_STOP_M
                 coastV[n] = 0
                 profile.coastFromEnd = true -- 從終點倒推、還沒被彎道帽接手的段用停車減速度
+                profile.coastEndI = n -- 1013a 遙測 pw：coastV[i] 仍從終點倒推（沒被彎道帽接手）的最小 i
                 buildLaneRoom(profile)
                 profile.phase, profile.cursor = "coast", n - 1
             else
@@ -1211,6 +1212,7 @@ function MDADFollower.stepBuild(profile, budget)
                     profile.coastFromEnd = false -- 彎道／速限接手：再往前是一般（風格）收油包絡
                 else
                     coastV[i] = lim
+                    if profile.coastFromEnd then profile.coastEndI = i end
                 end
                 profile.cursor, ops = i - 1, ops + 1
             end
@@ -1791,6 +1793,7 @@ local function arcLookaheadMs(profile, state, from, sNow, target, coast, skipRun
                 local lim = sqrt(cap * cap + 2 * coast * dist)
                 if lim < target then
                     target = lim
+                    state.profileWhy = "look"
                     reach = (target * target - floor2) / (2 * coast)
                 end
             end
@@ -1809,6 +1812,7 @@ local function arcLookaheadMs(profile, state, from, sNow, target, coast, skipRun
                     local lim = sqrt(cap * cap + 2 * coast * d)
                     if lim < target then
                         target = lim
+                        state.profileWhy = "look"
                         reach = (target * target - floor2) / (2 * coast)
                     end
                 end
@@ -1826,6 +1830,7 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         state.curveKappa = 0
         state.curveCapKmh = 0
         state.profileSpeedKmh = nil
+        state.profileWhy = nil
     end
     if type(profile) ~= "table" or profile.ready ~= true or type(state) ~= "table" then
         return 0, 0, 0, false, 0, 0, 0
@@ -2343,9 +2348,19 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         end
         local coastLim = sqrt(coastNext * coastNext + 2 * coast * coastReach)
         local stopLim = sqrt(brakeNext * brakeNext + 2 * brake * remainI)
+        -- 1013a 遙測 pw（state.profileWhy）：剖面目標由哪一項綁住——coast＝彎前收油包絡、stop＝終點停車包絡
+        -- （制動或仍從終點倒推的收油）、max、arc＝當下弧段即時帽、look＝前方弧段的提前收油，之後的姿態帽
+        -- err／start（起步段的航向誤差減速與原地轉）／kink（出彎收正）／rot（原地轉）／arr（到站爬行地板）
         targetSpeed = coastLim
-        if stopLim < targetSpeed then targetSpeed = stopLim end
-        if targetSpeed > profile.maxSpeedMs then targetSpeed = profile.maxSpeedMs end
+        state.profileWhy = (profile.coastEndI ~= nil and bestI + 1 >= profile.coastEndI) and "stop" or "coast"
+        if stopLim < targetSpeed then
+            targetSpeed = stopLim
+            state.profileWhy = "stop"
+        end
+        if targetSpeed > profile.maxSpeedMs then
+            targetSpeed = profile.maxSpeedMs
+            state.profileWhy = "max"
+        end
         -- 當下弧段的即時帽（arcRuntimeCap：行駛線往彎內側的半徑折算、轉向域、MIN_SPEED 地板）
         local curveHardActive = profile.segKind[bestI] == MDADDynamics.SEG_ARC
         local actualKappa, curveCap = 0, profile.maxSpeedMs
@@ -2356,7 +2371,10 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
             cap, actualKappa = arcRuntimeCap(profile, bestI, latHere, state.latSafe)
             if cap ~= nil then
                 curveCap = cap
-                if curveCap < targetSpeed then targetSpeed = curveCap end
+                if curveCap < targetSpeed then
+                    targetSpeed = curveCap
+                    state.profileWhy = "arc"
+                end
             end
         end
         -- 前方弧段的即時帽改成滑行包絡提前減（arcLookaheadMs），不在弧口一步掉下來
@@ -2379,7 +2397,10 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         local t = (ERR_SLOW_END - aerr) / ERR_SLOW_RANGE
         if t < 0 then t = 0 end
         local cap = ROTATE_SPEED_KMH + (targetSpeed - ROTATE_SPEED_KMH) * t
-        if cap < targetSpeed then targetSpeed = cap end
+        if cap < targetSpeed then
+            targetSpeed = cap
+            state.profileWhy = state.rotEnter ~= nil and "start" or "err"
+        end
     end
 
     -- 前視點對準不代表車身已收正。急折點放行後，先收掉殘餘姿態／橫偏再恢復巡航；
@@ -2400,6 +2421,7 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
             state.kinkExitS = nil
         elseif targetSpeed > ROTATE_SPEED_KMH then
             targetSpeed = ROTATE_SPEED_KMH
+            state.profileWhy = "kink"
         end
     end
 
@@ -2415,6 +2437,7 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
     -- 同一個值，兩者同時成立（橫向偏離終點且車頭反向）時就是剛好爬行速度。
     if not reached and remaining <= ARRIVE_M and targetSpeed < ROTATE_SPEED_KMH then
         targetSpeed = ROTATE_SPEED_KMH
+        state.profileWhy = "arr"
     end
 
     -- ---- 轉向 ----
@@ -2423,7 +2446,10 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         -- 幾乎完全反向：PID 的線性假設不成立（±180° 附近誤差正負號會抖）。
         -- 直接飽和轉向把車頭甩回來、速度壓到爬行，並凍結 I／D 避免 windup。
         steer = (err >= 0) and STEER_MAX or -STEER_MAX
-        if targetSpeed > ROTATE_SPEED_KMH then targetSpeed = ROTATE_SPEED_KMH end
+        if targetSpeed > ROTATE_SPEED_KMH then
+            targetSpeed = ROTATE_SPEED_KMH
+            state.profileWhy = state.rotEnter ~= nil and "start" or "rot"
+        end
         state.errPrev = err
         state.ffSteer, state.ffSteadyT, state.hiSteerLag = 0, 0, nil
         state.prevHeading, state.exitEndS = nil, nil -- 調頭飽和轉向不進增益估計；調頭後不補舊弧的出弧殘餘轉角
@@ -2603,6 +2629,7 @@ function MDADFollower.resetControl(state)
     state.curveKappa = 0
     state.curveCapKmh = 0
     state.profileSpeedKmh = nil
+    state.profileWhy = nil
     state.offL = nil
     state.trackTangent = false
     state.tangentOn = false

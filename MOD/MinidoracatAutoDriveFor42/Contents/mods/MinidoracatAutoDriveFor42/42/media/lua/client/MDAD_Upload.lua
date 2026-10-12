@@ -270,6 +270,15 @@ function U.begin(pn, now, header, profile)
         oMs = 0, oaMs = 0, oaDv = 0, olMs = 0, oasMs = 0, obMs = 0, paMs = 0, paDv = 0, aSurf = nil, aSpd = nil,
         -- 偏離常駐線（offsetKpi）：累計 ms／段數／最長一段 ms；offSince／offLast＝本段第一筆／最近一筆，offClip＝本段已觸發片段
         offMs = 0, offN = 0, offMax = 0, offSince = nil, offLast = nil, offClip = false,
+        -- 1013a 速度損失拆帳（speedKpi，只算跟線）：loss.none 依 Follower 綁速項（樣本 pw）分、追蹤不足（min(目標,上限)−實速）
+        -- 與目標不足、依路段（弧上／彎前＝前方 200m 內有弧（樣本 na）／出彎＝最後一筆弧上樣本後 100m 內／其他）分；
+        -- capReason visibility 時各帳（樣本 vac）的 ms；arcEndDist＝最後一筆弧上樣本時的 dist
+        lossPw = {}, lossPh = {}, lTrk = 0, lTgt = 0, arcEndDist = nil, visMs = {},
+        -- 可視前緣前進間隔分桶（樣本 vfi：<250／<500／<1000／<1500／<2500／≥2500 ms）；他車首見距離分桶（樣本 vfs，跟線且
+        -- ≥10 km/h 才算：<30／<45／<55／<70／≥70 m；停著／行進分開）與各自最小；原地轉（intent ROTATE）ms
+        vfa = { 0, 0, 0, 0, 0, 0 }, vfP = { 0, 0, 0, 0, 0 }, vfM = { 0, 0, 0, 0, 0 }, vfMinP = nil, vfMinM = nil, rotMs = 0,
+        -- 起步段調頭（uturn 事件 start＝true 的第一次）：suOpen＝進了還沒 done；首探、room 探測結果與次數、done why／ms
+        suOpen = nil, suProbe = nil, suRoom = nil, suRn = 0, suWhy = nil, suMs = nil,
         halfL = type(profile) == "table" and finite(profile.halfL) and profile.halfL or IMPACT_HALF_L,
         vmax = type(profile) == "table" and profile.maxSpeed or nil,
         svLim = nil,
@@ -550,10 +559,59 @@ local function speedKpi(u, phys, spd, target, mode, dt, capReason)
     else
         local r = capReason
         if type(r) ~= "string" then r = (finite(target) and target >= 0.9 * em) and "accel" or "none" end
-        u.loss[r] = (u.loss[r] or 0) + (em - spd) * dt
+        local l = (em - spd) * dt
+        u.loss[r] = (u.loss[r] or 0) + l
+        -- 1013a：none 依剖面綁速項分；追蹤不足＝min(目標, 上限)−實速（≥0），其餘是目標不足；路段分帳
+        if r == "none" then
+            local k = type(phys.profileWhy) == "string" and phys.profileWhy or "?"
+            u.lossPw[k] = (u.lossPw[k] or 0) + l
+        end
+        local trk = 0
+        if finite(target) then trk = (target < em and target or em) - spd end
+        if trk < 0 then trk = 0 end
+        u.lTrk, u.lTgt = u.lTrk + trk * dt, u.lTgt + l - trk * dt
+        local ph = "oth"
+        if phys.curveHardActive == true then
+            ph = "arc"
+        else
+            local na, post = phys.nextArc, u.arcEndDist and u.dist - u.arcEndDist or nil
+            if finite(na) and (post == nil or post >= 100 or na <= post) then
+                ph = "pre"
+            elseif post ~= nil and post < 100 then
+                ph = "post"
+            end
+        end
+        u.lossPh[ph] = (u.lossPh[ph] or 0) + l
     end
     -- 彎道：入弧（curveHardActive 上升緣）次數、入弧速超過彎帽 1.15 倍、弧內離期望線超過 0.5m 的弧數
     local arc = phys.curveHardActive == true
+    if arc then u.arcEndDist = u.dist end
+    if capReason == "visibility" then
+        local a = type(phys.visAcct) == "string" and phys.visAcct or "?"
+        u.visMs[a] = (u.visMs[a] or 0) + dt
+    end
+    -- 前緣前進間隔（Driver 閂到這一筆的最近一次）
+    local vi = phys.visAdvMs
+    if finite(vi) then
+        local b = vi < 250 and 1 or vi < 500 and 2 or vi < 1000 and 3 or vi < 1500 and 4 or vi < 2500 and 5 or 6
+        u.vfa[b] = u.vfa[b] + 1
+    end
+    -- 他車首見：停車在 MP 約 52–55m 才同步進客戶端（10-05 裁定），起步前就看到的不算
+    if type(phys.firstSeen) == "string" and spd >= 10 then
+        for d, p in string.gmatch(phys.firstSeen, "%[([%d%.eE%+%-]+),([01])%]") do
+            d = tonumber(d)
+            if finite(d) then
+                local b = d < 30 and 1 or d < 45 and 2 or d < 55 and 3 or d < 70 and 4 or 5
+                if p == "1" then
+                    u.vfP[b] = u.vfP[b] + 1
+                    if u.vfMinP == nil or d < u.vfMinP then u.vfMinP = d end
+                else
+                    u.vfM[b] = u.vfM[b] + 1
+                    if u.vfMinM == nil or d < u.vfMinM then u.vfMinM = d end
+                end
+            end
+        end
+    end
     if arc and not u.prevArc then
         u.arcN, u.arcDevDone = u.arcN + 1, false
         local cc = phys.curveCap
@@ -703,6 +761,7 @@ function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
             u.lfMs = u.lfMs + dt
         end
         u.prevLf = lf
+        if phys.intent == "ROTATE" then u.rotMs = u.rotMs + dt end -- 1013a 原地轉（調頭）ms
     end
     if type(capReason) == "string" then u.capMs[capReason] = (u.capMs[capReason] or 0) + dt end
     speedKpi(u, phys, spd, target, mode, dt, capReason)
@@ -793,6 +852,16 @@ function U.event(u, line, now, name, a)
         u.routeLine, u.routeTs = line, now
     end
     local phase = type(a) == "table" and a.phase or nil
+    -- 1013a 起步段調頭結果（摘要 su）：這趟第一次 start＝true 的 uturn；enter 開、room 記退後的圈探測、done 收（why／ms／首探）
+    if name == "uturn" and type(a) == "table" then
+        if phase == "enter" and a.start == true and u.suOpen == nil then
+            u.suOpen = true
+        elseif phase == "room" and u.suOpen == true then
+            u.suRoom, u.suRn = a.probe, u.suRn + 1
+        elseif phase == "done" and (u.suOpen == true or (u.suOpen == nil and a.start == true)) then
+            u.suOpen, u.suProbe, u.suWhy, u.suMs = false, a.probe, a.why, a.ms
+        end
+    end
     -- 接手當下（1012，摘要 tko／tkoA）：最近一筆取樣的狀態與距上一個異常（lastAnomaly，同 takeover 片段的判定）的 ms，
     -- 沒有異常就不寫 tkoA。要在下方 takeover 觸發之前算（trigger 會把 lastAnomaly 設成現在）。resume＝恢復自駕，清掉。
     if name == "takeover" and (phase == "yield" or phase == "manual") then
@@ -887,9 +956,19 @@ local function summaryText(u, now, reason, withMaps)
         .. ',"eta0":' .. jround(u.eta0, 10) .. ',"eta0t":' .. jround(u.eta0t, 1)
         .. ',"offMs":' .. jnum(u.offMs) .. ',"offN":' .. u.offN .. ',"offMax":' .. jnum(u.offMax)
         .. (u.tko or "")
+    -- 1013a 速度損失拆帳（km/h×秒）、前緣前進間隔與他車首見分桶、原地轉 ms、起步段調頭（另起一式，不再拉長上面那條百多個運算元的串接）
+    text = text .. ',"ltr":' .. jnum(math.floor(u.lTrk / 1000 + 0.5)) .. ',"ltg":' .. jnum(math.floor(u.lTgt / 1000 + 0.5))
+        .. ',"vfa":[' .. table.concat(u.vfa, ",") .. ']'
+        .. ',"vfP":[' .. table.concat(u.vfP, ",") .. '],"vfM":[' .. table.concat(u.vfM, ",") .. ']'
+        .. ',"vfMinP":' .. jround(u.vfMinP, 10) .. ',"vfMinM":' .. jround(u.vfMinM, 10)
+        .. ',"rotMs":' .. jnum(u.rotMs)
+        .. (u.suOpen ~= nil and (',"su":{"probe":' .. jstr(u.suProbe or "") .. ',"room":' .. jstr(u.suRoom or "")
+            .. ',"rn":' .. u.suRn .. ',"why":' .. jstr(u.suOpen and "open" or u.suWhy or "")
+            .. ',"ms":' .. (finite(u.suMs) and jnum(math.floor(u.suMs + 0.5)) or "null") .. '}') or "")
     if withMaps then
         text = text .. ',"ev":' .. mapJson(u.evc) .. ',"mode":' .. mapJson(u.modeMs)
             .. ',"cap":' .. mapJson(u.capMs) .. ',"loss":' .. lossJson(u.loss)
+            .. ',"lpw":' .. lossJson(u.lossPw) .. ',"lph":' .. lossJson(u.lossPh) .. ',"vsMs":' .. mapJson(u.visMs)
     end
     return text .. "}"
 end

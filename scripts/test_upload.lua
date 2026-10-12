@@ -1628,6 +1628,64 @@ do
     checkEq(tonumber(string.match(sum, '"offN":(%d+)')), 2, "(off5) both segments counted in the KPI")
 end
 
+-- 1013a 摘要拆帳：loss.none 依剖面綁速項（樣本 pw）分 lpw；ltr＝追蹤不足（min(目標,上限)−實速）、ltg＝其餘（目標不足）；
+-- lph 依路段（arc＝弧上、pre＝前方 200m 內有弧（na）、post＝最後一筆弧上樣本後 100m 內、oth）；vsMs＝capReason visibility 時各帳 ms；
+-- vfa＝前緣前進間隔分桶；vfP／vfM＝他車首見（停著／行進，跟線且 ≥10 km/h）分桶與最小；rotMs＝intent ROTATE；su＝第一次起步段調頭。
+--   違規證明：none 不分 pw＝(lpw) 紅；追蹤不足不夾上限＝(ltr) 紅；出彎門檻 100 改 200＝(lph) 紅；首見不看車速＝(vf-slow) 紅；
+--   首見停著／行進對調＝(vfP) 紅；分桶邊界 55 改 50＝(vfP) 紅；第二次（非起步）調頭覆蓋 su＝(su) 紅；rotMs 不算＝(rot) 紅。
+scenario("1013a summary: none split by profile term, tracking vs target deficit, loss by road phase, visibility accounts, first-seen")
+do
+    local function tp(extra)
+        local t = { frameMs = 16, capGear = 60, capPerception = 120, capMax = 120 }
+        for k, v in pairs(extra or {}) do t[k] = v end
+        return t
+    end
+    local cruise = { speed = 55, target = 60, phys = tp({ capReason = "curve-coast" }) }
+    nowMs = nowMs + 3600000
+    start()
+    local d0 = nowMs
+    drive(1000, cruise)
+    drive(1000, { speed = 40, target = 50, phys = tp({ profileWhy = "coast", nextArc = 80 }) })       -- pre：none/coast 20、追蹤 10
+    drive(400, { speed = 30, target = 30, phys = tp({ profileWhy = "arc", curveHardActive = true, curveCap = 30 }) }) -- arc 12
+    drive(1000, { speed = 40, target = 70, phys = tp() })                                              -- post：accel 20、追蹤 20（目標 70 夾到上限 60）
+    drive(8000, cruise)                                                                                -- 出彎 >100m
+    drive(200, { speed = 55, target = 60, phys = tp({ capReason = "curve-coast", visAdvMs = 300 }) })
+    drive(200, { speed = 55, target = 60, phys = tp({ capReason = "curve-coast", visAdvMs = 1700 }) })
+    drive(200, { speed = 55, target = 60, phys = tp({ capReason = "curve-coast", firstSeen = "[[52.3,1],[71,0]]" }) })
+    drive(600, { speed = 55, target = 60, phys = tp({ capReason = "curve-coast", intent = "ROTATE" }) })
+    drive(200, { speed = 5, target = 5, phys = tp({ capReason = "blocked", firstSeen = "[[12,1]]" }) })  -- 慢速首見不算；oth 11
+    drive(1000, { speed = 40, target = 40, phys = tp({ capReason = "visibility", visAcct = "hold" }) }) -- oth 20
+    D.event(0, "uturn", { phase = "enter", start = true })
+    D.event(0, "uturn", { phase = "room", probe = "clear" })
+    D.event(0, "uturn", { phase = "done", why = "aligned", probe = "obstructed", ms = 3200, start = true })
+    D.event(0, "uturn", { phase = "done", why = "loop", probe = "clear", ms = 999 })
+    D.stop(0, "arrive")
+    pump(120000)
+    local _, sum = sumLines(d0)
+    local function n(key) return tonumber(string.match(sum, '"' .. key .. '":([%d%.%-]+)')) end
+    local function m(map, key) return tonumber(string.match(sum, '"' .. map .. '":{[^}]*"' .. key .. '":(%d+)')) end
+    check(sum ~= "", "(1013a) summary found")
+    checkEq(m("lpw", "coast"), 20, "(lpw) none bound by the coast envelope: 20 km/h x 1 s")
+    checkEq(m("lpw", "arc"), 12, "(lpw) none bound by the arc cap: 30 km/h x 0.4 s")
+    checkEq(m("loss", "none"), 32, "(lpw) loss.none unchanged = 20 + 12")
+    checkEq(n("ltr"), 30, "(ltr) tracking deficit: 10 (target 50) + 20 (target 70 clipped to cap 60)")
+    checkEq(n("ltg"), 53, "(ltg) target deficit: 10 + 12 + 11 + 20")
+    checkEq(m("lph", "pre"), 20, "(lph) pre-corner")
+    checkEq(m("lph", "arc"), 12, "(lph) on arc")
+    checkEq(m("lph", "post"), 20, "(lph) within 100 m after the arc")
+    checkEq(m("lph", "oth"), 31, "(lph) other: slow sample 11 + visibility 20")
+    checkEq(m("vsMs", "hold"), 1000, "(vsMs) visibility bound by the hold account")
+    check(string.find(sum, '"vfa":[0,1,0,0,1,0]', 1, true) ~= nil, "(vfa) advance intervals 300 and 1700 ms bucketed")
+    check(string.find(sum, '"vfP":[0,0,1,0,0],"vfM":[0,0,0,0,1]', 1, true) ~= nil,
+        "(vfP)(vf-slow) parked 52.3 m in 45-55, moving 71 m in >=70, the 12 m one at 5 km/h not counted")
+    checkEq(n("vfMinP"), 52.3, "(vfP) parked minimum")
+    checkEq(n("vfMinM"), 71, "(vfP) moving minimum")
+    checkEq(n("rotMs"), 600, "(rot) rotate intent time")
+    check(string.find(sum, '"su":{"probe":"obstructed","room":"clear","rn":1,"why":"aligned","ms":3200}', 1, true) ~= nil,
+        "(su) first start-segment uturn: probe, room, why, ms (" .. sum .. ")")
+    check(#sum < U.CHUNK, "(1013a) summary still fits one chunk (" .. #sum .. ")")
+end
+
 -- 1010 所有送出的片段整段 ≤ CLIP_TOTAL_MAX（第一塊宣告的 len＝全文長度；伺服器只看這個）
 local maxLen = 0
 for i = 1, #sent do

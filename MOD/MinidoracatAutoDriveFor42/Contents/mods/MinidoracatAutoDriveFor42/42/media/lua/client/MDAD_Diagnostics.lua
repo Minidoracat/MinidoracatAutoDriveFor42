@@ -166,6 +166,8 @@ local EK = {
     "sp0", "sc0", "sd0",
     -- 1012 起步先原地轉：uturn enter／done 的起步段旗標、enter 當幀 |航向誤差| rad（uturn room 用既有 rear／len／probe）
     "start", "ae",
+    -- 1013a route ready：起步沒接越野接線的原因碼（far／near／behind／side／tow／other）、車頭與最近段夾角 rad、車到最近點 m
+    "apw", "aph", "apd", -- 1013a
 }
 
 local function logOnce(msg)
@@ -1229,6 +1231,7 @@ local function encodePhys(phys)
     addNum("roadLo", "rlo")
     addNum("roadHi", "rhi")
     addNum("unloadedS", "us")
+    addNum("scanEndS", "sce")        -- 1013a：中央帶掃描終點弧長（us 是任何一帶最近的未載入格；兩者比對看外側帶截短）
     addStr("activeCapReason", "acr")
     addNum("capSensor", "csen")
     addNum("capGear", "cg")
@@ -1392,6 +1395,13 @@ local function encodePhys(phys)
     addNum("trfLeadV", "tlv")         -- 跟車 lead 沿線速度 m/s（倒退或對向夾 0）
     addStr("zombieWhy", "zwh")        -- 殭屍軟縫本輪選縫理由（s.zombieWhy；none／未持有＝省略）
     addNum("zombieWant", "zwt")       -- 殭屍軟縫本輪目標 lane（zwh 有寫才寫）
+    -- 1013a 速度損失拆帳與 MP 首見（皆有值才寫）：
+    addStr("profileWhy", "pw")        -- capReason 空時 Follower 剖面由哪一項綁（coast／stop／max／arc／look／err／start／kink／rot／arr；? ＝沒記到）
+    addNum("profileKmh", "pv")        -- 同上那幀的 fstate.profileSpeedKmh（姿態帽之前的剖面值）
+    addStr("visAcct", "vac")          -- capReason visibility 時巡航帽由哪本帳綁：cruise／hold（前緣停滯保持）／term（前緣＝終點）
+    addNum("visAdvMs", "vfi")         -- 可視前緣兩次前進的間隔 ms（閂到下一筆，寫出後清）
+    addNum("nextArc", "na")           -- 前方 200m 內下一段弧起點的弧長距離 m（在弧上或沒有＝省略）
+    if type(phys.firstSeen) == "string" then bits = bits .. ',"vfs":' .. phys.firstSeen end -- 他車首見 [[m, 停著 1／0],…]（Driver 組好的數字陣列）
     return bits
 end
 

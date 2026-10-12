@@ -1675,6 +1675,43 @@ do
 end
 
 --------------------------------------------------------------------------------
+-- 1013a：速度損失拆帳與 MP 首見的樣本短碼（pw／pv／vac／vfi／na／sce／vfs）有值才寫；route ready 的越野接線拒接原因（apw／aph／apd）過 EK。
+-- 違規證明：encodePhys 拿掉任一行＝(codes) 紅；vfs 不寫原樣陣列＝(vfs) 紅；EK 少 apw＝(ek) 紅。
+scenario("1013a sample codes pw/pv/vac/vfi/na/sce/vfs and route ready apw/aph/apd")
+do
+    resetFs()
+    loadProd()
+    nowMs = 9450000
+    MDADDiagnostics.start(0, nil, profile)
+    local function s(t, phys)
+        MDADDiagnostics.sample(0, t, 100, 200, 0, 30, 40, 400, 0, 0, 0, 0, "follow", 3, true, nil, false,
+            nil, nil, nil, nil, nil, nil, nil, nil, nil, false, false, false, false, false, phys)
+    end
+    s(9450000, { profileWhy = "coast", profileKmh = 61.5, visAcct = "hold", visAdvMs = 1700, nextArc = 84.5,
+        scanEndS = 152.3, firstSeen = "[[52.3,1],[71,0]]" })
+    s(9450300, {})
+    MDADDiagnostics.event(0, "route", { phase = "ready", apw = "side", aph = 1.57, apd = 6.5 })
+    nowMs = 9451000
+    MDADDiagnostics.stop(0, "end")
+    local body = files[sessionPath(1)] or ""
+    local first, second = nil, nil
+    for line in string.gmatch(body, '{"t":"s"[^\n]*') do
+        if not first then first = line else second = line end
+    end
+    first, second = first or "", second or ""
+    for _, kv in ipairs({ '"pw":"coast"', '"pv":61.5', '"vac":"hold"', '"vfi":1700', '"na":84.5', '"sce":152.3' }) do
+        check(string.find(first, kv, 1, true) ~= nil, "(codes) sample writes " .. kv)
+    end
+    check(string.find(first, '"vfs":[[52.3,1],[71,0]]', 1, true) ~= nil, "(vfs) first-seen array written verbatim")
+    for _, k in ipairs({ "pw", "pv", "vac", "vfi", "na", "sce", "vfs" }) do
+        checkEq(countNeedle(second, '"' .. k .. '":'), 0, "(omit) absent " .. k .. " is not written")
+    end
+    local ready = string.match(body, '{"t":"e"[^\n]*"n":"route"[^\n]*') or ""
+    check(string.find(ready, '"apw":"side","aph":1.57,"apd":6.5', 1, true) ~= nil,
+        "(ek) route ready keeps apw/aph/apd (" .. ready .. ")")
+end
+
+--------------------------------------------------------------------------------
 -- 1010：impact 上升緣的事件另帶 awt（區域等待引擎煞車同幀）與車頭附近最近靜態硬物（MDADSensor.hardSpriteNear 在車頭點
 -- ＝車心沿航向 halfL 處查一次）；nb 的動物多物種／kg、他車多 vehicle id／有人駕駛。只在上升緣查、讀不到只缺該欄。
 -- 違規證明：事件不帶 awt＝(awt) 紅；awt=false 也寫＝(awt-omit) 紅；不在上升緣才查（每筆都查）＝(once) 紅；用車心不用車頭＝(nose) 紅；

@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1012h"
+Drive.REV = "1013a"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -2333,6 +2333,8 @@ local function startSession(playerObj, playerNum, stage)
         route = route,
         profileRoute = profileRoute, -- 剖面實際建構的路線（拖車＝改寫版）；證明帶的來源
         approachM = approachM, -- 剖面前接的越野接線長（Drive.approachRoute；0＝沒接）
+        -- 1013a：起步沒接越野接線的原因碼、車頭與最近段夾角 rad、車到最近點 m（route ready apw／aph／apd）
+        approachWhy = Drive.approachWhy, approachHd = Drive.approachHd, approachD = Drive.approachD,
         profile = profile,
         fstate = fstate,
         playerNum = playerNum,
@@ -3761,6 +3763,10 @@ end
 -- 沿這段實際要開的地面規劃。
 -- 回傳 (剖面用路線, 接線長)；不接時原樣回傳同一個 table（cutover 仍以原 route identity 比對）。
 function Drive.approachRoute(route, vx, vy, heading)
+    -- 1013a 遙測：沒接時的原因碼（呼叫端照 profileRouteOf 之後讀 Drive.approachWhy／Hd／D，帶進 route ready apw／aph／apd）：
+    -- far＝超過 SNAP_MAX_M、near＝側距 < APPROACH_SIDE_MIN_M（RETURN 收）、behind＝最近點是路線起點但車沒在它後方
+    -- APPROACH_BEHIND_M 以外、side＝側面條件不成立（車頭沿路或沒正對最近點；看 aph）、other＝點列／航向讀不到；接了＝nil
+    Drive.approachWhy, Drive.approachHd, Drive.approachD = "other", nil, nil
     local pts = route.pts
     if type(pts) ~= "table" or #pts < 4 or not finite(vx) or not finite(vy) then return route, 0 end
     local best, bk, bt, bx1, by1 = nil, 1, 0, pts[1], pts[2]
@@ -3780,7 +3786,10 @@ function Drive.approachRoute(route, vx, vy, heading)
         if best == nil or d2 < best then best, bk, bt, bx1, by1 = d2, i, t, px, py end
     end
     local snap2 = TUNE.SNAP_MAX_M * TUNE.SNAP_MAX_M
-    if best == nil or not finite(best) or best > snap2 then return route, 0 end
+    if best == nil or not finite(best) or best > snap2 then
+        if finite(best) then Drive.approachWhy, Drive.approachD = "far", math.floor(sqrt(best) * 10 + 0.5) / 10 end
+        return route, 0
+    end
     local x1, y1 = pts[1], pts[2]
     local ux, uy = pts[3] - x1, pts[4] - y1
     local sl = sqrt(ux * ux + uy * uy)
@@ -3800,7 +3809,24 @@ function Drive.approachRoute(route, vx, vy, heading)
         side = nl > 1e-6 and (fx * nx + fy * ny) / nl < math.cos(TUNE.RETURN_ENTER_MAX_RAD)
             and ((bx1 - vx) * fx + (by1 - vy) * fy) / sqrt(best) >= TUNE.APPROACH_SIDE_COS
     end
-    if not behind and not far and not side then return route, 0 end
+    if not behind and not far and not side then
+        local gap = sqrt(best)
+        local why = "side"
+        if gap < TUNE.APPROACH_SIDE_MIN_M then why = "near"
+        elseif bk == 1 and bt == 0 then why = "behind"
+        elseif not finite(heading) then why = "other" end
+        Drive.approachWhy, Drive.approachD = why, math.floor(gap * 10 + 0.5) / 10
+        if finite(heading) then
+            local nx, ny = pts[bk + 2] - pts[bk], pts[bk + 3] - pts[bk + 1]
+            local nl = sqrt(nx * nx + ny * ny)
+            if nl > 1e-6 then
+                local c = (math.cos(heading) * nx + math.sin(heading) * ny) / nl
+                if c > 1 then c = 1 elseif c < -1 then c = -1 end
+                Drive.approachHd = math.floor(math.acos(c) * 100 + 0.5) / 100
+            end
+        end
+        return route, 0
+    end
     -- 最近點落在第 seg 段（pts 索引 bk）；該段的起點若就是最近點（t=0）就從它開始，否則從最近點開始、接該段終點
     local seg = (bk + 1) / 2
     local np = { vx, vy, bx1, by1 }
@@ -3835,6 +3861,7 @@ function Drive.approachRoute(route, vx, vy, heading)
         cut = cut + sqrt(dx * dx + dy * dy)
         out.len = route.len - cut + gap
     end
+    Drive.approachWhy = nil
     return out, gap
 end
 
@@ -3870,6 +3897,7 @@ end
 -- 拖車再改寫外拉轉角並清改寫撤點殘留的折返；不拖車時 approach＝true 才接越野接線（heading＝車頭航向，見 approachRoute）。
 -- 回 (剖面路線, 接線長)；despiked 記兩次清掉的點數（route ready 事件 detail）。
 function Drive.profileRouteOf(route, tow, vp, vx, vy, approach, heading)
+    Drive.approachWhy, Drive.approachHd, Drive.approachD = approach and tow and "tow" or nil, nil, nil
     local clean = MDADFollower.despikeRoute(route)
     if tow then
         local shaped = MDADFollower.despikeRoute(MDADTrailer.shape(clean, tow, vp.halfW,
@@ -5850,6 +5878,8 @@ function Drive.visibilityCaps(s, now, visibleEnd, minBrakeVisible)
     end
     -- 前緣前進才重設停滯起點；回縮不算前進（停滯照算）
     if not finite(s.visFrontRef) or visibleEnd > s.visFrontRef + TUNE.VIS_FRONT_ADVANCE_M then
+        -- 1013a 遙測 vfi：前緣兩次前進的間隔 ms（閂到下一筆取樣、寫出後清；上傳摘要 vfa 分桶，標定停滯保持）
+        if finite(s.visFrontRef) then s.visAdvMs = now - s.visFrontSince end
         s.visFrontRef, s.visFrontSince = visibleEnd, now
     elseif visibleEnd < s.visFrontRef then
         s.visFrontRef = visibleEnd
@@ -5871,7 +5901,12 @@ function Drive.visibilityCaps(s, now, visibleEnd, minBrakeVisible)
     local coast = s.horizonStamp == st and s.horizonMinCoast or s.safeCoast
     if not finite(coast) or coast < 0 then coast = 0 end
     local holdCap = MDADDynamics.visibilityHoldCapKmh(ahead, TUNE.VIS_TAU, visBrake, halfL, coast, hold)
-    if holdCap < cap then cap = holdCap end
+    -- 1013a 遙測 vac：巡航帽由哪本帳綁（cruise＝巡航煞車帳、hold＝前緣停滯保持帳、term＝前緣就是終點）
+    s.visAcct = "cruise"
+    if holdCap < cap then
+        cap = holdCap
+        s.visAcct = "hold"
+    end
     -- 硬煞帳的前緣若就是路線終點（可視已含終點、無未載入截斷），終點不是障礙：不扣
     -- halfL+2 的障礙緩衝（0924d E2E：MAX 檔 90 km/h 滑行到站，實速落後剖面 3-4 km/h，
     -- 終點前 7m 以 18 km/h 撞上硬煞紅線 14.8 一秒鎖輪；到站本身由剖面與 arrive 管）。
@@ -5892,6 +5927,7 @@ function Drive.visibilityCaps(s, now, visibleEnd, minBrakeVisible)
         end
         s.visibilityHardKmh = MDADDynamics.approachCapKmh(ahead, 0, TUNE.VIS_TERMINAL_TAU, termBrake)
         cap, s.visHold, s.visStallBrake = s.visibilityHardKmh, 0, 0
+        s.visAcct = "term"
     else
         s.visibilityHardKmh = MDADDynamics.visibilityCapKmh(hardAhead, TUNE.VIS_TAU, visBrake, halfL)
     end
@@ -7232,6 +7268,20 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
         if finite(sen.unloadedS) then
             phys.unloadedS = sen.unloadedS
         end
+        -- 1013a：中央帶掃描終點（Sensor scanEndS；us 會被外側帶的未載入格截短，兩者比對才看得出）
+        if sen.ready and finite(sen.scanEndS) then phys.scanEndS = math.floor(sen.scanEndS * 10 + 0.5) / 10 end
+        -- 1013a 他車首見距離：Sensor 每台車（不含自己與掛車）第一次掃到時排進佇列，這裡每筆取樣取走一次
+        -- （vfs＝[[車心到他車 m, 停著 1／行進 0],…]；上傳摘要 vfP／vfM／vfMinP／vfMinM）
+        local fsN = sen.fsN
+        if finite(fsN) and fsN > 0 then
+            local t = ""
+            for i = 1, fsN do
+                t = t .. (i > 1 and ",[" or "[") .. tostring(math.floor(sen.fsD[i] * 10 + 0.5) / 10)
+                    .. (sen.fsP[i] and ",1]" or ",0]")
+            end
+            phys.firstSeen = "[" .. t .. "]"
+            sen.fsN = 0
+        end
         if finite(s.lastSensorCap) then phys.capSensor = s.lastSensorCap end
         if sen.stamp == 0 then phys.capWarm = TUNE.SCAN_WARM_CAP end
     end
@@ -7365,8 +7415,37 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     s.yawPeak, s.hbrLatch = nil, nil
     -- 跟車 lead（Drive.trafficScan 每輪寫；console traffic lead 行）、殭屍軟縫逐輪的理由與目標 lane（none＝不寫）
     phys.trfLeadGap, phys.trfLeadV = s.trfLeadGap, s.trfLeadV
+    -- 1013a 速度損失拆帳：capReason 空時 Follower 剖面由哪一項綁（pw）與剖面值（pv）；可視帳（vac，只在 capReason
+    -- visibility）；前緣前進間隔（vfi，閂鎖）；前方下一段弧的距離（na，上傳摘要的彎前／出彎分段）
+    if s.lastCapReason == nil and s.profileBind then
+        phys.profileWhy = s.profileBind
+        local pv = s.fstate.profileSpeedKmh
+        if finite(pv) then phys.profileKmh = math.floor(pv * 10 + 0.5) / 10 end
+    end
+    if s.lastCapReason == "visibility" then phys.visAcct = s.visAcct end
+    phys.visAdvMs = s.visAdvMs
+    s.visAdvMs = nil
+    phys.nextArc = Drive.nextArcDist(s)
     if s.zombieWhy ~= nil and s.zombieWhy ~= "none" then phys.zombieWhy, phys.zombieWant = s.zombieWhy, s.zombieWant end
     return phys
+end
+
+-- 1013a 遙測 na：前方 200m 內下一段弧（SEG_ARC）起點離車的弧長 m（車在弧上或 200m 內沒有＝nil）。只在取樣時算
+-- （collectPhys）。ponytail: 最多走 64 段；弧前若有更多碎段會漏報成 nil（摘要歸 oth），要準再改用剖面預算的下一弧索引。
+function Drive.nextArcDist(s)
+    local p, f = s.profile, s.fstate
+    if not (p and p.ready and f) or f.curveHardActive == true then return nil end
+    local i, sNow = f.idx, s.lastSNow
+    if not finite(i) or not finite(sNow) then return nil end
+    local kind, ss, n, arc = p.segKind, p.s, p.n, MDADDynamics.SEG_ARC
+    local steps = 0
+    while i <= n - 1 and steps < 64 do
+        local d = ss[i] - sNow
+        if d > 200 then return nil end
+        if kind[i] == arc and d >= 0 then return math.floor(d * 10 + 0.5) / 10 end
+        i, steps = i + 1, steps + 1
+    end
+    return nil
 end
 
 -- Recovery episode survives sensor resets and same-target route identities. Only a true
@@ -13310,6 +13389,7 @@ local function stepFollow(s, vehicle, playerNum, now)
     -- 每幀先歸零，applySteering 真的走耦力時才寫 true（純觀測；一個 boolean 寫入）
     s.lastCoupled = false
     s.lastCapReason = nil
+    s.profileBind = nil -- 1013a 遙測 pw：本幀目標可能是 Follower 剖面時才寫（見 proofGateCap 前；collectPhys 再看 capReason）
     s.lastHeadingCap = nil
     s.lastDcap = nil
     s.lastSensorCap, s.lastSensorReason = nil, nil
@@ -13972,6 +14052,7 @@ local function stepFollow(s, vehicle, playerNum, now)
         local stopEnd = s.lastSNow
         local visibilityCap = s.sensor and 0 or 15
         s.visibilityHardKmh = visibilityCap -- 尚未有快照時不得沿用上一幀的高門檻。
+        s.visAcct = nil
         if s.sensor and s.sensor.ready and finite(s.sensor.stamp) then
             sensorReady = true
             local age = now - s.sensor.stamp
@@ -14158,6 +14239,11 @@ local function stepFollow(s, vehicle, playerNum, now)
             if gateReason == "dynamics-invalid" then
                 s.invalid, s.stateError, s.dynamicsFault = true, "ungated", true
             end
+        end
+        -- 1013a 遙測 pw：capReason 空＝目標就是 Follower 剖面（fullTarget 由檔位／感知／極速裁決時除外）；記剖面由哪一項
+        -- 綁住（Follower state.profileWhy）。capReason 只會在這之前或之後被寫、不會清回空，collectPhys 只在最後仍空時才寫出
+        if not s.fullGate or fullTarget == s.profileEnvelope then
+            s.profileBind = s.fstate.profileWhy or "?"
         end
         -- 證明線命中的接近包絡不看 gate 先後（align 先於 sweep 查，接近折點時包絡會整段消失；Drive.proofGateCap）
         targetSpeed = Drive.proofGateCap(s, targetSpeed, fullTarget, s.profile.styleName == "brisk")
@@ -15669,6 +15755,7 @@ local function onPlayerUpdate(player)
             s.route = route
             s.profileRoute = profileRoute
             s.approachM = approachM -- 越野接線只在起步與倒車退到接線起點後接（見 Drive.approachRoute）
+            s.approachWhy, s.approachHd, s.approachD = Drive.approachWhy, Drive.approachHd, Drive.approachD
             s.profile = profile
             s.rejectedRoute = nil
             s.navVersion = api.navApiVersion
@@ -15903,6 +15990,8 @@ local function onPlayerUpdate(player)
                 filletBandValid = s.profile.filletBandValid,
                 filletReason = s.profile.filletReason,
                 approach = s.approachM > 0 and s.approachM or nil, -- 越野接線長（Drive.approachRoute）
+                -- 1013a：沒接越野接線的原因碼／車頭與最近段夾角 rad／車到最近點 m（Drive.approachRoute 註解）
+                apw = s.approachWhy, aph = s.approachHd, apd = s.approachD,
                 -- 清掉的微反折點數（Drive.profileRouteOf；地圖資料接點錯位／拖車改寫殘點）
                 detail = s.profileRoute and s.profileRoute.despiked
                     and ("despike " .. tostring(s.profileRoute.despiked)) or nil,

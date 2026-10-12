@@ -1024,6 +1024,18 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
             state.vehPosT[vid] = state.nowMs
             state.vehPosGen[vid] = state.gen
             state.vehStill[vid] = still
+            -- 1013a 遙測：這趟第一次掃到這台車（自己與掛車已在上面排除）＝排進首見佇列（車心距離、停著與否），
+            -- Driver collectPhys 每筆取樣取走（樣本 vfs）。最多 8 筆，取樣跟不上就丟（首見很少見，不配置）。
+            if not state.vehSeen[vid] then
+                state.vehSeen[vid] = true
+                local n = state.fsN
+                if n < 8 then
+                    n = n + 1
+                    state.fsN = n
+                    state.fsD[n] = dist(vehicle:getX(), vehicle:getY(), vwx, vwy)
+                    state.fsP[n] = still
+                end
+            end
             if not still then pushTraffic(state, cv, vs, vl) end
         end
         if still then                                  -- 兩輪沒動或 isStopped（BaseVehicle.java:4303-4304）
@@ -1585,6 +1597,8 @@ function MDADSensor.newState()
         vehPosX = {}, vehPosY = {}, vehPosGen = {}, vehStill = {},
         vehPosT = {},       -- vehicleId → 最後一次首輪命中的時戳（車速＝兩輪位移／時差）
         vehFirstMs = {},    -- vehicleId → 這一次連續目擊的首見時戳（有人駕駛車的插值暖機窗）
+        vehSeen = {},       -- 1013a：vehicleId → true＝這趟已掃到過（reset 不清：首見只算一次）
+        fsN = 0, fsD = {}, fsP = {}, -- 1013a 首見佇列：筆數／車心距離 m／停著（Driver collectPhys 取走後歸 0）
         vehOutlineGen = {}, -- vehicleId → gen：本輪已推過該車輪廓（格級命中只計數不再推點）
         aheadM = SCAN_AHEAD, -- 掃描帶前伸長（高速檔由 driver 拉長：120km/h 需 ~110m 才煞得住）
         scanS = 0,

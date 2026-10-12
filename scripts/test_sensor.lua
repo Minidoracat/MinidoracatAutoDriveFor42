@@ -679,6 +679,16 @@ local function scenarioTraffic()
     local st = newSensor(80, 4, 0)
     checkTrue(runRound(st), "第一輪完成")
     checkEq(st.trfN, 3, "三台首次看到都先當行進中（還沒有位移可判靜止）")
+    -- 1013a 他車首見佇列：每台第一次掃到排一筆（車心距離、停著與否），之後的輪、reset 後都不再排。
+    -- 違規證明：用 vehFirstMs 的「每段連續目擊」當首見＝(once) 紅；距離改用弧長＝(dist) 紅。
+    checkEq(st.fsN, 3, "1013a (first) 三台各排一筆首見")
+    local d45 = nil
+    for k = 1, st.fsN do if math.abs(st.fsD[k] - 45) < 1e-6 then d45 = k end end
+    checkTrue(d45 ~= nil and st.fsP[d45] == false, "1013a (dist) 停著那台首見距離＝車心直線 45m、首輪判行進")
+    local d30 = false
+    for k = 1, st.fsN do if math.abs(st.fsD[k] - math.sqrt(30 * 30 + 2 * 2)) < 1e-6 then d30 = true end end
+    checkTrue(d30, "1013a (dist) 對向車首見距離＝車心直線（含橫向 2m）")
+    st.fsN = 0 -- Driver collectPhys 取走
     local function entry(sMid)
         for i = 1, st.trfN do
             if math.abs((st.trfS0[i] + st.trfS1[i]) * 0.5 - sMid) < 1 then return i end
@@ -697,6 +707,7 @@ local function scenarioTraffic()
     place(on); place(lead)
     checkTrue(runRound(st), "第二輪完成")
     checkEq(st.trfN, 2, "靜止車（兩輪位移 <0.3m）改走硬障礙，不再是 trf")
+    checkEq(st.fsN, 0, "1013a (once) 第二輪同三台不再排首見")
     local io, il = entry(27), entry(22)
     checkTrue(io ~= nil and st.trfVs[io] < -5 and st.trfVs[io] > -20,
         "對向車沿路線速度為負（實得 " .. show(io and st.trfVs[io]) .. "）")
@@ -704,6 +715,11 @@ local function scenarioTraffic()
     checkTrue(il ~= nil and st.trfVs[il] > 3 and st.trfVs[il] < 15,
         "同向車沿路線速度為正（實得 " .. show(il and st.trfVs[il]) .. "）")
     checkTrue(st.hardN > 0, "靜止車進入硬障礙點雲")
+    MDADSensor.reset(st)
+    on._x = on._x - 3
+    place(on)
+    checkTrue(runRound(st), "1013a reset 後再一輪完成")
+    checkEq(st.fsN, 0, "1013a (once) reset（換路線）後同一台也不再算首見")
     BaseVehicle = nil
 end
 
