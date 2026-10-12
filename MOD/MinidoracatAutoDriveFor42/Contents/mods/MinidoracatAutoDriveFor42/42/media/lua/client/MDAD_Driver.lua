@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1012c"
+Drive.REV = "1012d"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -7097,6 +7097,7 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     phys.yawGainHi, phys.yawGainFb = s.fstate.yawGainHi, s.fstate.yawGainFb
     if finite(s.fbNorm) and s.fbNorm > 1 then phys.fbNorm = s.fbNorm end
     if finite(s.armExt) and s.armExt > 1 then phys.armExt = s.armExt end
+    if finite(s.fstate.xtOut) and s.fstate.xtOut > 1 then phys.xtOut = s.fstate.xtOut end
     if s.dodgeAlignHold == true then phys.dodgeAlignHold = true end
     phys.routeHeadingError, phys.kinkExitS = s.lastRouteErr, s.fstate.kinkExitS
     phys.visibilityCap = s.visibilityCap
@@ -14669,14 +14670,15 @@ local function stepFollow(s, vehicle, playerNum, now)
                             end
                         end
                         s.prevCrossLat, s.prevCrossLatMs, s.crossDLat = latDev, now, dLat
-                        -- 增益倍率選擇（貼縫／承諾線在弧上 ×DODGE、弧段／殭屍軟縫側移／回線精確線 ×ARC）的理由見
-                        -- MDADDynamics.crossTrackGains（離線閉環 test_follower 用同一支）
+                        -- 增益倍率選擇（貼縫／承諾線在弧上 ×DODGE、弧段／殭屍軟縫側移／回線精確線 ×ARC、弧上往彎外偏再乘外漂倍率）
+                        -- 的理由見 MDADDynamics.crossTrackGains（離線閉環 test_follower 用同一支）
                         local xg, xm = MDADDynamics.crossTrackGains(s.dodging, s.dodgeCrawl, s.curveHardActive,
-                            s.fstate.kinkExitS ~= nil, s.zombieLane ~= nil or (s.returnActive and not s.returnHold))
+                            s.fstate.kinkExitS ~= nil, s.zombieLane ~= nil or (s.returnActive and not s.returnHold),
+                            latDev, s.fstate)
                         steer = (steer or 0)
                             - MDADDynamics.crossTrackSteer(latDev, speedKmh, dLat, xg, xm)
                     else
-                        s.prevCrossLat = nil
+                        s.prevCrossLat, s.fstate.xtOut = nil, nil
                     end
                     -- 前推輔助的姿態門檻（2026-09-01 使用者裁定「繞行與越野
                     -- 要能用推力幫忙通過」）：繞行／回線／物理越野時姿態誤差

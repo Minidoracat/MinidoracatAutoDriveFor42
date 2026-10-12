@@ -3740,7 +3740,7 @@ do
             local dLat = prevLat and (latDev - prevLat) / dt or nil
             if dLat and (dLat > 5 or dLat < -5) then dLat = nil end
             prevLat = latDev
-            local xg, xm = D.crossTrackGains(false, false, st.curveHardActive, st.kinkExitS ~= nil, false)
+            local xg, xm = D.crossTrackGains(false, false, st.curveHardActive, st.kinkExitS ~= nil, false, latDev, st)
             local u = steer - D.crossTrackSteer(latDev, kmh, dLat, xg, xm)
             local k = 0.5 / (st.yawGainFb or st.yawGain)
             if k < 1 then k = 1 elseif k > 3 then k = 3 end
@@ -4708,7 +4708,7 @@ do
             local dLat = prevLat and (latDev - prevLat) / dt or nil
             if dLat and (dLat > 5 or dLat < -5) then dLat = nil end
             prevLat = latDev
-            local xg, xm = D.crossTrackGains(false, false, st.curveHardActive, false, false)
+            local xg, xm = D.crossTrackGains(false, false, st.curveHardActive, false, false, latDev, st)
             local u = steer - D.crossTrackSteer(latDev, v, dLat, xg, xm)
             local k = math.max(1, math.min(3, 0.5 / (st.yawGainFb or st.yawGain)))
             local fb = u - (st.ffSteer or 0)
@@ -4809,7 +4809,7 @@ do
             local dLat = prevLat and (latDev - prevLat) / dt or nil
             if dLat and (dLat > 5 or dLat < -5) then dLat = nil end
             prevLat = latDev
-            local xg, xm = D.crossTrackGains(false, false, st.curveHardActive, false, false)
+            local xg, xm = D.crossTrackGains(false, false, st.curveHardActive, false, false, latDev, st)
             local u = steer - D.crossTrackSteer(latDev, v, dLat, xg, xm)
             local k = math.max(1, math.min(3, 0.5 / (st.yawGainFb or st.yawGain)))
             local fb = u - (st.ffSteer or 0)
@@ -4926,7 +4926,7 @@ do
         local dLat = prevLat and (latDev - prevLat) / dt or nil
         if dLat and (dLat > 5 or dLat < -5) then dLat = nil end
         prevLat = latDev
-        local xg, xm = D.crossTrackGains(false, false, st.curveHardActive, false, false)
+        local xg, xm = D.crossTrackGains(false, false, st.curveHardActive, false, false, latDev, st)
         local u = steer - D.crossTrackSteer(latDev, v, dLat, xg, xm)
         local k = math.max(1, math.min(3, 0.5 / (st.yawGainFb or st.yawGain)))
         local fb = u - (st.ffSteer or 0)
@@ -4992,7 +4992,7 @@ do
         local dLat = prev and (latDev - prev) / dt or nil
         if dLat and (dLat > 5 or dLat < -5) then dLat = nil end
         prev = latDev
-        local xg, xm = D.crossTrackGains(true, false, st.curveHardActive, st.kinkExitS ~= nil, false)
+        local xg, xm = D.crossTrackGains(true, false, st.curveHardActive, st.kinkExitS ~= nil, false, latDev, st)
         local u = steer - D.crossTrackSteer(latDev, kmh, dLat, xg, xm)
         local g = st.yawGainFb or st.yawGain -- Drive.normalizeSteer
         local k = 0.5 / g
@@ -5157,7 +5157,7 @@ do
             local dLat = prevLat and (latDev - prevLat) / dt or nil
             if dLat and (dLat > 5 or dLat < -5) then dLat = nil end
             prevLat = latDev
-            local xg, xm = D.crossTrackGains(false, false, st.curveHardActive, st.kinkExitS ~= nil, false)
+            local xg, xm = D.crossTrackGains(false, false, st.curveHardActive, st.kinkExitS ~= nil, false, latDev, st)
             local u = steer - D.crossTrackSteer(latDev, kmh, dLat, xg, xm)
             local k = math.max(1, math.min(3, 0.5 / (st.yawGainFb or st.yawGain)))
             local fb = u - (st.ffSteer or 0)
@@ -5258,6 +5258,85 @@ do
         segSurface = { "paved", "paved", "paved", "paved" }, segArcR = { 0, 5, 0, 0 } })
     checkTrue(#merged.pts == 8 and #merged.segArcR == 3 and merged.segArcR[2] == 0,
         "(4b) 弧段後的微反折撤點：合併段 segArcR＝0（實得 " .. tostring(merged.segArcR and merged.segArcR[2]) .. "）")
+end
+
+scenario("1012d：弧上往彎外偏——cross-track 依側向需求 v²κ 加權（只加往外），外漂減、切內與出彎不變（正式服 0.28 左彎外側車道 40–80 km/h 擦樹）")
+do
+    -- 正式服 0.28.x：ATAMustangClassic 79 km/h 過 R≈63 左彎（靠右＝外側車道）ld 0.58→1.11 碰路燈、GTR／M1031 同一棵樹 0.57–0.73。
+    -- 前饋照設計欠轉，缺口 ∝ v²κ、1/v 的 cross-track 回正與車速無關＝穩態外漂 ∝ v²κ（MDADDynamics.arcOutwardScale）。
+    -- Plant：yaw 一階 τ 追門檻型 G(u)、參考點在無側滑點前 LR；Driver 管線照實（D.crossTrackGains 帶 latDev、回授正規化、死區）。
+    -- 違規證明：CROSS_TRACK_OUT_MAX＝1（不加權）或 Follower 記的轉向方向反號＝(1)(2) 紅。(3) 是不劣化檢查（加權不碰往內那一側）。
+    local D = MDADDynamics
+    local KMH_ = 3.6
+    local VP = { valid = true, geometryValid = true, halfW = 0.81, halfL = 2.06, rMin = 2.75, wheelbase = 2.41,
+        delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 120 }
+    -- 直 120 → 左折 ang（圓角 R）→ 直 150；bias＞0＝右＝左彎外側
+    local function run(R, angDeg, kmh, bias, pl)
+        local ang = math.rad(angDeg)
+        local w = math.max(8, 2 * (R * (1 - math.cos(ang / 2)) + VP.halfW + 0.45 + math.abs(bias)))
+        local tl = R * math.tan(ang / 2)
+        local x2, y2 = 120 + (10 + 2 * tl) * math.cos(-ang), (10 + 2 * tl) * math.sin(-ang)
+        local p = F.begin({ pts = { 0, 0, 120, 0, x2, y2, x2 + 150 * math.cos(-ang), y2 + 150 * math.sin(-ang) },
+            segWidth = { w, w, w }, segSurface = { "paved", "paved", "paved" } }, VP.maxSpeed, 4, VP)
+        while not p.ready do F.stepBuild(p, 4096) end
+        p.lookScale = 1.336
+        local a0, a9
+        for i = 1, p.n - 1 do
+            if p.segKind[i] == D.SEG_ARC then a0 = a0 or p.s[i]; a9 = p.s[i + 1] end
+        end
+        local st = F.newState()
+        F.setLaneBias(st, bias)
+        F.setRuntimeLimits(st, 3, 6, 7, 1.2)
+        st.yawGain, st.yawGainFb, st.fbSteerF, st.fbYawF = pl.yg, pl.yg, 0.5, pl.yg * 0.5
+        st.yawGainHi, st.hiLearnT, st.hiSteerF, st.hiYawF = pl.ygh, 1, 0.5, pl.ygh * 0.5
+        local dt, LR, v = 1 / 60, pl.lr or 0.6, kmh / KMH_
+        local h, w0, prevLat = 0, 0, nil
+        local q = { x = 40 - LR, y = F.laneBiasAt(p, bias, 1, 40) }
+        local out, cut = 0, 0
+        for _ = 1, 60 * 30 do
+            local steer, _, rem, reached, _, _, latSigned = F.control(p, st, q.x + math.cos(h) * LR, q.y + math.sin(h) * LR,
+                h, kmh, dt)
+            local sNow = p.length - rem
+            local latDev = latSigned - F.laneBiasAt(p, bias, st.idx, sNow)
+            local dLat = prevLat and (latDev - prevLat) / dt or nil
+            if dLat and (dLat > 5 or dLat < -5) then dLat = nil end
+            prevLat = latDev
+            local xg, xm = D.crossTrackGains(false, false, st.curveHardActive, false, false, latDev, st)
+            local u = steer - D.crossTrackSteer(latDev, kmh, dLat, xg, xm)
+            local k = math.max(1, math.min(3, 0.5 / (st.yawGainFb or st.yawGain)))
+            local fb = u - (st.ffSteer or 0)
+            u = (st.ffSteer or 0) + math.max(-math.max(1.5, math.abs(fb)), math.min(math.max(1.5, math.abs(fb)), k * fb))
+            if u > 5 then u = 5 elseif u < -5 then u = -5 end
+            if u < 0.02 and u > -0.02 then u = 0 end
+            st.appliedSteer, st.escLimited = u, false
+            local au = math.abs(u)
+            local wT = (pl.g1 * math.min(au, 0.3) + pl.g2 * math.max(0, au - 0.3)) * (u < 0 and -1 or 1)
+            local wMax = v / VP.rMin
+            if wT > wMax then wT = wMax elseif wT < -wMax then wT = -wMax end
+            w0 = w0 + (wT - w0) * (dt / pl.tau)
+            h = h + w0 * dt
+            q.x, q.y = q.x + math.cos(h) * v * dt, q.y + math.sin(h) * v * dt
+            if sNow > a0 - 5 and sNow < a9 + 30 then
+                if latDev > out then out = latDev end
+                if -latDev > cut then cut = -latDev end
+            end
+            if reached or sNow > a9 + 30 then break end
+        end
+        return out, cut
+    end
+    local THR = { g1 = 0.3, g2 = 1.2, tau = 0.1, yg = 0.54, ygh = 0.63, lr = 0.75 } -- 0008 擬合（小 steer 轉不動）
+    local UNDER = { g1 = 0.8, g2 = 0.8, tau = 0.3, yg = 1.0, ygh = 1.0 }             -- 增益高估＝前饋偏少
+    local o1, c1 = run(63, 35, 80, 1.2, THR)
+    checkTrue(o1 < 0.55 and c1 < 0.15, string.format("(1) 80 km/h 左彎外側車道、門檻 plant：彎上到出彎外漂 %.2f < 0.55（不加權 0.65）、切內 %.2f", o1, c1))
+    local o2, c2 = run(30, 35, 50, 1.2, UNDER)
+    checkTrue(o2 < 0.26 and c2 < 0.15, string.format("(2) 50 km/h R30 外側車道、前饋偏少：外漂 %.2f < 0.26（不加權 0.30）、切內 %.2f", o2, c2))
+    -- (3) 內側車道（bias＜0）：往外的倍率不碰往內那一側，切內不增
+    local _, c3 = run(26, 40, 45, -1.2, THR)
+    checkTrue(c3 < 0.50, string.format("(3) 45 km/h R26 內側車道：切內 %.2f < 0.50（不加權 0.48）", c3))
+    local rs = F.newState()
+    rs.xtTurn = 1
+    F.resetControl(rs)
+    checkNil(rs.xtTurn, "(4) resetControl 清外漂加權的轉向方向（換線／脫困後不沿用舊弧）")
 end
 
 closeScenario()

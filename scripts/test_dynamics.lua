@@ -213,6 +213,38 @@ near(D.sweepRadius(0.7, 0.15, 0.05, 0.1), 0.85, 1e-12,
     "補償門檻邊界（pad=phys+comp）不觸發")
 near(D.sweepRadius(0.4, 0.35, 0.05, 0.1), 0.75, 1e-12,
     "非整格障礙（樹幹細桿）不補償")
+-- 1012d 弧上外漂加權（D.arcOutwardScale／crossTrackGains）：左彎（xtTurn −1）外側＝latDev>0。違規證明：不看方向（往內也加）＝
+--   「往內不加」紅；不乘 ramp＝「收尾段」紅；不看 latSafe＝「超預算」兩行紅；承諾／軟縫／回線照乘＝「off」紅。
+do
+    local f = { xtTurn = -1, xtDem = 7, xtRamp = 1, latSafe = 7.7 }
+    near(D.arcOutwardScale(0.5, f, true), 1 + (math.min(7 / D.CROSS_TRACK_OUT_REF, D.CROSS_TRACK_OUT_MAX) - 1), 1e-12,
+        "弧上往外偏 0.5、需求 7 m/s²：倍率 v²κ/REF")
+    near(f.xtOut, D.arcOutwardScale(0.5, f, true), 1e-12, "倍率記在 fstate.xtOut（遙測 xto）")
+    near(D.arcOutwardScale(-0.5, f, true), 1, 1e-12, "往內偏不加")
+    near(D.arcOutwardScale(0.5, f, false), 1, 1e-12, "不在弧上（或承諾／軟縫／回線）不加")
+    f.xtDem = 30
+    near(D.arcOutwardScale(0.5, f, true), 1, 1e-12, "需求超過 latSafe×OVER（超速入彎）不加")
+    f.xtDem, f.latSafe = 8, 4
+    near(D.arcOutwardScale(0.5, f, true), 1, 1e-12, "需求 2×latSafe 不加")
+    f.latSafe = 8 / ((1 + D.CROSS_TRACK_OUT_OVER) / 2)
+    near(D.arcOutwardScale(0.5, f, true), 1 + (D.CROSS_TRACK_OUT_MAX - 1) * 0.5, 1e-9, "超預算一半＝倍率退一半")
+    f.xtDem, f.latSafe, f.xtRamp = 6, 7.7, 0.25
+    near(D.arcOutwardScale(0.5, f, true), 1 + (6 / D.CROSS_TRACK_OUT_REF - 1) * 0.25, 1e-12, "收尾段乘前饋 ramp")
+    f.xtRamp = 1
+    f.xtDem = 1
+    near(D.arcOutwardScale(0.5, f, true), 1, 1e-12, "需求 < REF 不加")
+    f.xtDem = 6
+    local g, m = D.crossTrackGains(false, false, true, false, false, 0.5, f)
+    near(g, D.CROSS_TRACK_ARC_GAIN * 3, 1e-12, "crossTrackGains：弧段增益再乘倍率")
+    eq(m, D.CROSS_TRACK_ARC_MAX, "上限不放大")
+    g = D.crossTrackGains(true, false, true, false, false, 0.5, f)
+    near(g, D.CROSS_TRACK_DODGE_GAIN, 1e-12, "承諾線在弧上照 ×DODGE、不乘")
+    near(f.xtOut, 1, 1e-12, "off 時 xtOut 歸 1")
+    g = D.crossTrackGains(false, false, true, false, true, 0.5, f)
+    near(g, D.CROSS_TRACK_ARC_GAIN, 1e-12, "軟縫／回線（arcLike）不乘")
+    near(D.crossTrackGains(false, false, true, false, false), D.CROSS_TRACK_ARC_GAIN, 1e-12, "不給 latDev／fstate＝原三檔")
+    near(D.arcOutwardScale(0 / 0, f, true), 1, 1e-12, "非法 latDev 不加")
+end
 
 scenario("full-speed gate truth table")
 local all = { true, true, true, true, true, true, true, true, true, true, true, true }

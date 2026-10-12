@@ -1377,6 +1377,7 @@ local function encodePhys(phys)
     addBool("lowFps", "lfs") -- 0929c：卡頓降速狀態（只在為真時寫）
     addNum("fbNorm", "fbk")        -- 0929j：回授依轉向增益正規化的倍率（1＝未放大）
     addNum("armExt", "arx")        -- 1005：高速力臂延伸倍率 K（力臂×K、側推÷K；1＝未延伸，省略）
+    addNum("xtOut", "xto")         -- 1012d：弧上往彎外偏的 cross-track 外漂倍率（MDADDynamics.arcOutwardScale；1＝未加權，省略）
     addBool("dodgeAlignHold", "dah") -- 0929j：繞行未對正、帽夾在目前車速（只在為真時寫）
     -- 0904j 鏈式停留：lc＝常駐 lane 暫時＝停留 offL；dodgeTier 帶 -stay／-nudge／-physical
     addBool("laneChained", "lc")

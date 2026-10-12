@@ -1446,6 +1446,10 @@ local function arcFeedForward(profile, state, arcK, bestI, sNow, aspeed, tangent
         if ffLane > CURVE_FF_MAX then ffLane = CURVE_FF_MAX
         elseif ffLane < -CURVE_FF_MAX then ffLane = -CURVE_FF_MAX end
     end
+    -- 車在弧上：記轉向方向、行駛線側向需求 v²κ、前饋 ramp，給 Driver cross-track 的外漂加權（MDADDynamics.arcOutwardScale，1012d）
+    if k == bestI then
+        state.xtTurn, state.xtDem, state.xtRamp = kk < 0 and -1 or 1, v * v * (kk < 0 and -kk or kk) * arcScale, ramp
+    end
     local ff = 0
     if ramp > 0 then
         ff = frac * v * kk * arcScale / g
@@ -2603,6 +2607,7 @@ function MDADFollower.resetControl(state)
     state.tangentOn = false
     state.ffSteer, state.ffSteadyT, state.hiSteerLag = 0, 0, nil -- 低通／穩態計時跟施力歷史一起斷
     state.exitEndS, state.yawRateF, state.exitCut = nil, 0, nil -- 出弧殘餘轉角（arcExitResidual）：換線／脫困後不沿用舊弧的出口
+    state.xtTurn = nil -- 外漂加權（MDADDynamics.arcOutwardScale）同理不沿用舊弧
     state.prevHeading = nil -- yawGain 是車的性質，跨 cutover／脫困保留；只斷差分
     state.slipX, state.slip, state.ffDevS = nil, 0, nil -- 側滑弦估計、退讓回程差分同樣斷差分（瞬移／脫困後重量）
     releaseExactLine(state)

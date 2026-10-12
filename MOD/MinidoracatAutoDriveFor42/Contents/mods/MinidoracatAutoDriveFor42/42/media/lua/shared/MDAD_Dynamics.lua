@@ -286,12 +286,45 @@ end
 --   橫移 1.4 m/s；隨車速再放大至 ×5 實測更差，兩輪 15／18 撞）、回線精確線非 hold（1002p；正式服 0.17.0 起步斜 0.37 rad
 --   回線 25 km/h 衝過期望線 1.1m，切線追蹤把姿態誤差歸零後位置只剩 0.77/v＝2 秒收不回；離線 temp/exp_return_gain.lua
 --   過衝 0.91→0.66m、線後偏 >0.3m 的時間 3.6→2.0 秒）。
-function D.crossTrackGains(dodging, crawl, curveHard, kinkExit, arcLike)
+-- 弧上往彎外偏（1012d，D.arcOutwardScale）：不承諾、不在軟縫／回線時再乘外漂倍率。latDev／fstate 不給＝不加權。
+function D.crossTrackGains(dodging, crawl, curveHard, kinkExit, arcLike, latDev, fstate)
+    local k = D.arcOutwardScale(latDev, fstate, curveHard and not dodging and not arcLike)
     if dodging and (crawl or curveHard) and not kinkExit then
         return D.CROSS_TRACK_DODGE_GAIN, D.CROSS_TRACK_DODGE_MAX
     end
-    if curveHard or arcLike then return D.CROSS_TRACK_ARC_GAIN, D.CROSS_TRACK_ARC_MAX end
-    return nil, nil
+    local gain, maxSteer = nil, nil
+    if curveHard or arcLike then gain, maxSteer = D.CROSS_TRACK_ARC_GAIN, D.CROSS_TRACK_ARC_MAX end
+    if k > 1 then gain = (gain or 1) * k end
+    return gain, maxSteer
+end
+
+-- 弧上外漂的位置環倍率（1012d；正式服 0.28.x contact ≥10 km/h 22 件裡 9 件是左彎靠右（外側車道）40–80 km/h 弧上到出彎外漂
+-- 0.6–1.1m 擦路邊樹與路燈，落後守門 arm 只早 0.3–0.5 秒）：弧段前饋照設計欠轉（Follower CURVE_FF_FRAC／FF_HI.frac，2026-09-08
+-- 裁定由位置環補），缺口的側向加速度 ∝ (1−frac)·v²κ，cross-track 的回正加速度 ≈ G·K·e 與車速無關——穩態外漂 ∝ v²κ，
+-- 同一個彎開越快偏越多。車在弧上往彎外偏（latDev 與轉向反號）時，增益乘 v²κ／CROSS_TRACK_OUT_REF（夾 CROSS_TRACK_OUT_MAX）；
+-- 只加往外那一側：越過期望線往內就回原增益。兩個退場（離線閉環 test_follower「1006：出弧殘餘轉角」(3) 定的，沒有就把出彎切內
+-- 0.40 推到 0.74）：①倍率乘弧段前饋的 ramp（進弧爬升、出弧收尾同一個 lead）——收尾段照樣加權，yaw 滯後讓修正帶過出口、
+-- 出彎往內甩；②行駛線需求超過 Follower 側向預算 latSafe 時線性退回，到 CROSS_TRACK_OUT_OVER 倍歸 1——超速入彎是抓地域，
+-- 加權只會把 yaw 堆到出口。v²κ（行駛線曲率 1/(R∓l)）、轉向方向、ramp 由 Follower arcFeedForward 記在 fstate.xtDem／xtTurn／
+-- xtRamp。arc＝車在弧上且不在承諾／軟縫／回線。回倍率（1＝不加權），同時記在 fstate.xtOut（遙測 xto）。
+D.CROSS_TRACK_OUT_REF = 2      -- m/s²
+D.CROSS_TRACK_OUT_MAX = 4
+D.CROSS_TRACK_OUT_OVER = 1.3
+function D.arcOutwardScale(latDev, fstate, arc)
+    if type(fstate) ~= "table" then return 1 end
+    local k, turn, dem, ls = 1, fstate.xtTurn, fstate.xtDem, fstate.latSafe
+    if arc and turn ~= nil and D.finite(latDev) and latDev * turn < 0 and D.finite(dem) then
+        local fade = fstate.xtRamp or 1
+        if D.finite(ls) and ls > 0 and dem > ls then
+            local o = (D.CROSS_TRACK_OUT_OVER - dem / ls) / (D.CROSS_TRACK_OUT_OVER - 1)
+            fade = fade * (o > 0 and o or 0)
+        end
+        local r = dem / D.CROSS_TRACK_OUT_REF
+        if r > D.CROSS_TRACK_OUT_MAX then r = D.CROSS_TRACK_OUT_MAX end
+        if r > 1 and fade > 0 then k = 1 + (r - 1) * fade end
+    end
+    fstate.xtOut = k
+    return k
 end
 
 -- 車身 yaw 率限制（0928a，ESC 式；0.13.1 正式服片段 >3 rad/s 自轉 24 次，0.13.0 只有 2 次）：側推是施在
