@@ -170,6 +170,8 @@ Plus a screwdriver.
 [list]
 [*] [b]Gentle[/b] (default): slows before turning.
 [*] [b]Fast[/b]: swings around with momentum.
+[*] [b]Starting at an angle[/b]: if the car faces more than about 60° away from the route when autodrive starts, it turns in place first, then drives off (not when towing).
+[*] [b]No room to turn[/b]: if it is too tight to turn in place, it backs up a little first; only if that is still not enough does it make a slow wide turn.
 [/list]
 [h3]Sensing distance[/h3]
 [list]
