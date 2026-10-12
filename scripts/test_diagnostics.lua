@@ -1805,6 +1805,109 @@ do
     MDADUpload = nil
 end
 
+--------------------------------------------------------------------------------
+-- 1013f：撞擊上升緣的 nb 也收剛死的動物（正式服 226 次撞擊 65 次 nb={}：撞死的母雞當幀被 softKindOf 的 isDead 排掉）。
+--   (dying)  死亡動畫中的 IsoAnimal（isDead、不在車上）：a＝[d,lon,lat,物種,kg,1]。
+--   (corpse) 剛 becomeCorpse 的動物屍體（IsoDeadBody isAnimal、死亡 ≤ NB_DEAD_H 遊戲小時）：a 同上、c 照舊收。
+--   (old)    死亡超過 NB_DEAD_H 的動物屍體不進 a（只在 c）。
+--   (null)   剛死但物種／體重讀不到：第 4、5 項寫 null 佔位、第 6 項仍是 1。
+--   (live)   活的動物格式不變（5 項、不帶死亡旗標）。
+--   規劃語意不動：Sensor softKindOf 對死亡動物照樣回 nil（本情境用真函式）。
+-- 違規證明：不收 isDead 的 IsoAnimal＝(dying) 紅；屍體不看死亡時間＝(old) 紅；不收動物屍體＝(corpse) 紅；死亡旗標不寫＝(dying) 紅；
+--   讀不到時不補 null＝(null) 紅；活的也寫旗標＝(live) 紅。
+scenario("1013f nb keeps freshly dead animals (dying IsoAnimal or fresh animal corpse) with a dead flag")
+do
+    resetFs()
+    loadProd()
+    MDADUpload = nil
+    assert(loadfile((string.gsub(PROD, "MDAD_Diagnostics%.lua$", "MDAD_Upload.lua"))))()
+    local sensorPath = string.gsub(PROD, "MDAD_Diagnostics%.lua$", "MDAD_Sensor.lua")
+    local oldInst, oldCell, oldSensor, oldGT = instanceof, getCell, MDADSensor, getGameTime
+    MDADSensor = nil
+    local oldDyn = MDADDynamics
+    if not MDADDynamics then
+        assert(loadfile((string.gsub(PROD, "client/MDAD_Diagnostics%.lua$", "shared/MDAD_Dynamics.lua"))))()
+    end
+    assert(loadfile(sensorPath))()
+    local own = { getZ = function() return 0 end, getVehicleTowing = function() return nil end,
+        getVehicleTowedBy = function() return nil end }
+    player0.getVehicle = function() return own end
+    local function animal(x, y, typ, kg, dead)
+        return { _cls = "IsoAnimal", _dead = dead, getX = function() return x end, getY = function() return y end,
+            isDead = function(self) return self._dead end, getVehicle = function() return nil end,
+            isHeld = function() return false end,
+            getAnimalType = typ and function() return typ end or nil,
+            getData = kg and function() return { getWeight = function() return kg end } end or nil }
+    end
+    local function body(x, y, typ, kg, deathH)
+        return { _cls = "IsoDeadBody", getX = function() return x end, getY = function() return y end,
+            isAnimal = function() return typ ~= nil end, getAnimalType = function() return typ end,
+            getWeight = function() return kg end, getDeathTime = function() return deathH end }
+    end
+    local movs, smovs = {}, {}
+    local square = {
+        getMovingObjects = function() return { size = function() return #movs end, get = function(_, i) return movs[i + 1] end } end,
+        getStaticMovingObjects = function() return { size = function() return #smovs end, get = function(_, i) return smovs[i + 1] end } end }
+    getCell = function()
+        return {
+            getGridSquare = function(_, x, y) if x == 104 and y == 501 then return square end end,
+            getVehicles = function() return { iterator = function() return { hasNext = function() return false end } end } end,
+        }
+    end
+    instanceof = function(o, cls)
+        if cls == "IsoPlayer" then return o._cls == "IsoAnimal" end -- IsoAnimal extends IsoPlayer
+        return o._cls == cls
+    end
+    getGameTime = function() return { getWorldAgeHours = function() return 100 end } end
+    local hen = animal(104.2, 501.3, "hen", 2.4, true)
+    check(MDADSensor.softKindOf(hen) == nil, "planning semantics kept: softKindOf(dead animal) is nil")
+    local nowT = 9600000
+    MDADDiagnostics.start(0, nil, profile)
+    local px = 100
+    local function bump(step)
+        -- 60 → 60 → 20 km/h：第三筆是撞擊上升緣，之後拉開間隔讓下一次重新武裝
+        for _, spd in ipairs({ 60, 60, 20 }) do
+            nowT, px = nowT + 200, px + 3
+            MDADDiagnostics.sample(0, nowT, px, 500, 0, spd, 60, 400, 0, 0, 0, 0, "follow", 3, true, nil, false,
+                nil, nil, nil, nil, nil, nil, nil, nil, nil, false, false, false, false, false, {})
+        end
+        nowT = nowT + 6000
+        step()
+    end
+    -- 每次撞擊都在 (104,501) 那一格擺物件；車位 px 在 8m 方框內
+    local cases = {}
+    local function case(label, setup)
+        cases[#cases + 1] = label
+        movs, smovs = {}, {}
+        setup()
+        px = 100
+        bump(function() end)
+    end
+    case("dying", function() movs = { hen } end)
+    case("corpse", function() smovs = { body(104.5, 501.5, "chick", 0.3, 99.99) } end)
+    case("old", function() smovs = { body(104.5, 501.5, "chick", 0.3, 99.5) } end)
+    case("null", function() movs = { animal(104.2, 501.3, nil, nil, true) } end)
+    case("live", function() movs = { animal(104.2, 501.3, "cow", 600, false) } end)
+    nowMs = nowT + 1000
+    MDADDiagnostics.stop(0, "end")
+    local nbs = {}
+    for m in string.gmatch(files[sessionPath(1)] or "", '"nb":(%b{})') do nbs[#nbs + 1] = m end
+    checkEq(#nbs, #cases, "one nb per impact rising edge")
+    local nb = {}
+    for i, label in ipairs(cases) do nb[label] = nbs[i] or "" end
+    check(string.find(nb.dying, '"a":%[[^%]]*,"hen",2%.4,1%]') ~= nil, "(dying) dying hen kept with species, kg, dead flag (" .. nb.dying .. ")")
+    check(string.find(nb.corpse, '"a":%[[^%]]*,"chick",0%.3,1%]') ~= nil and string.find(nb.corpse, '"c":%[', 1) ~= nil,
+        "(corpse) fresh animal corpse is a dead animal and still a corpse (" .. nb.corpse .. ")")
+    check(string.find(nb.old, '"a":', 1, true) == nil and string.find(nb.old, '"c":%[', 1) ~= nil,
+        "(old) corpse older than NB_DEAD_H is only a corpse (" .. nb.old .. ")")
+    check(string.find(nb.null, '"a":%[[%-%d%.]+,[%-%d%.]+,[%-%d%.]+,null,null,1%]') ~= nil,
+        "(null) unreadable species/kg keep null placeholders and the flag (" .. nb.null .. ")")
+    check(string.find(nb.live, '"a":%[[^%]]*,"cow",600[%.0]*%]') ~= nil, "(live) live animal format unchanged (" .. nb.live .. ")")
+    instanceof, getCell, MDADSensor, getGameTime, MDADDynamics = oldInst, oldCell, oldSensor, oldGT, oldDyn
+    player0.getVehicle = nil
+    MDADUpload = nil
+end
+
 closeScenario()
 print()
 print("scenarios " .. scenarios .. ", asserts " .. assertions)
