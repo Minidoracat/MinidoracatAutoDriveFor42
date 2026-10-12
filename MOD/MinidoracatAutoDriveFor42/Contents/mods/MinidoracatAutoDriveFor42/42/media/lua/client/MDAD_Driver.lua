@@ -13389,7 +13389,7 @@ local function stepFollow(s, vehicle, playerNum, now)
     -- 每幀先歸零，applySteering 真的走耦力時才寫 true（純觀測；一個 boolean 寫入）
     s.lastCoupled = false
     s.lastCapReason = nil
-    s.profileBind = nil -- 1013a 遙測 pw：本幀 capReason 空且目標就是 Follower 剖面時才寫（見 proofGateCap 前）
+    s.profileBind = nil -- 1013a 遙測 pw：本幀目標可能是 Follower 剖面時才寫（見 proofGateCap 前；collectPhys 再看 capReason）
     s.lastHeadingCap = nil
     s.lastDcap = nil
     s.lastSensorCap, s.lastSensorReason = nil, nil
@@ -14240,9 +14240,9 @@ local function stepFollow(s, vehicle, playerNum, now)
                 s.invalid, s.stateError, s.dynamicsFault = true, "ungated", true
             end
         end
-        -- 1013a 遙測 pw：到這裡 capReason 仍空＝目標就是 Follower 剖面（fullTarget 由檔位／感知／極速裁決時除外）；
-        -- 記剖面由哪一項綁住（Follower state.profileWhy），之後的帽寫了 capReason 就不寫（collectPhys）
-        if s.lastCapReason == nil and (not s.fullGate or fullTarget == s.profileEnvelope) then
+        -- 1013a 遙測 pw：capReason 空＝目標就是 Follower 剖面（fullTarget 由檔位／感知／極速裁決時除外）；記剖面由哪一項
+        -- 綁住（Follower state.profileWhy）。capReason 只會在這之前或之後被寫、不會清回空，collectPhys 只在最後仍空時才寫出
+        if not s.fullGate or fullTarget == s.profileEnvelope then
             s.profileBind = s.fstate.profileWhy or "?"
         end
         -- 證明線命中的接近包絡不看 gate 先後（align 先於 sweep 查，接近折點時包絡會整段消失；Drive.proofGateCap）
