@@ -78,6 +78,8 @@ Steam Workshop 用 JPG（每張 ≤280,000 bytes，Steamworks 預覽圖上限）
 拖車助推類 MOD（Ultimate Towing、Effortless Towing 等）可以一起用：遊戲每台車同一時間只接受一個推力，兩邊一起推會讓自動駕駛轉不了方向，
 所以自動駕駛期間會擋下其他 MOD 對這台車的推力；玩家接手或停止自動駕駛後，助推照常運作。
 
+限制：只擋得到從 Lua 呼叫 `addImpulse` 的推力；日後若有 MOD 改在 Java 裡推車（例如 ZombieBuddy 的 Java 修補、直接對 Bullet 施力），就擋不下來，自動駕駛拖車時又會轉不了方向。
+
 ## 多目標與停靠操作
 
 1. 由 MiniMap 放大鏡／`;` 開啟行程。搜尋或地圖右鍵可加到最後、指定插入位置或「先去這裡」。
