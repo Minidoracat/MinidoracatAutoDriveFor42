@@ -24274,6 +24274,12 @@ function drive.scenario0928()
         checkTrue(pt.proofHitN == stopN and pt.planSig == -1, "(proof-stop) 剛達持續輪數：強制下一輪重規劃")
         Dr.proofHitTrack(pt, 20, 5.5, pt.proofHitN)
         checkEq(pt.proofHitN, 1, "(proof-stop) 換到別處：從 1 重數")
+        -- 1013f：同一台 2.0m 寬 van 換到車寬另一側的角仍是同一處（smoke (proof-stop) 規劃不收命中點案實測
+        --   (73.8,36.8)→(74.11,38.8)＝2.02m，舊門檻 2.0 歸 1、停車包絡在命中前 4.5m 失效）。違規證明（temp/vp_1013f_proofsame.py）：門檻回 2.0＝紅。
+        local pv = { planSig = 7, lastSNow = 0 }
+        Dr.proofHitTrack(pv, 73.8, 36.8, 0)
+        Dr.proofHitTrack(pv, 74.1125, 38.8, pv.proofHitN)
+        checkEq(pv.proofHitN, 2, "(proof-stop) 同一台車換到車寬另一側的角（2.02m）：照樣累計")
         local msen = { hardN = 3, hardX = { 10, 10.6, 30 }, hardY = { 5, 5, 5 }, hardLc = { 4, 4.2, 4 } }
         local mses = { proofHitN = stopN, proofHitX = 10.5, proofHitY = 5.1, hardBase = { 1.1, 1.2, 1.3 } }
         Dr.proofBlockMark(mses, msen)

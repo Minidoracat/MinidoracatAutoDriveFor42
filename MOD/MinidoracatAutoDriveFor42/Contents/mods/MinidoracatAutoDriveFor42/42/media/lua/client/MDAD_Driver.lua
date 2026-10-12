@@ -518,8 +518,10 @@ TUNE.APPROACH_BRAKE_FRAC = 0.7 -- 接近限速區用 safeBrake 的這個比例�
 -- 證明線持續判撞（1006；campaign rc61 0017）：證明線世界掃掠連續這麼多個完成輪命中同一處（命中硬點的世界距 ≤
 -- PROOF_HIT_SAME_M；同一台車的輪廓點每輪先被打到的那點會換，離 1–1.6m），接近包絡終點從警戒帽改成在命中前一個
 -- 取樣點停住（Drive.proofSweepCap），規劃同時把該點當擋線（Drive.proofBlockMark）。單輪命中照舊只降到警戒帽。
+-- 1013f：2.0→2.5。換到同一台車寬那一側的角（2.0m 寬 van：(73.8,36.8)→(74.11,38.8)＝2.02m）被當成新命中、輪數歸 1，
+-- 停車包絡在命中前 4.5m 失效、重新加速到 14 km/h 擦上（smoke (proof-stop) 規劃不收命中點那案）。
 TUNE.PROOF_STOP_ROUNDS = 3
-TUNE.PROOF_HIT_SAME_M = 2.0
+TUNE.PROOF_HIT_SAME_M = 2.5
 -- 停下之後的窄線爬行（1006p，使用者裁定 P5 方案 B；E2E 1006n f350van：proof stop 後規劃承諾 m 0.40／need 0.80 的線、
 -- 追線落後吃掉餘裕，12 km/h 擦上 van）：持續命中停下的命中物是車輛（Sensor hardV），而規劃接著承諾的線餘裕 m < need、
 -- 線上有點離命中點 ≤ bodyReach（Drive.proofTightArm），通過前速度帽壓到 PROOF_TIGHT_KMH——regulator 收整數，3＝0.83 m/s，
