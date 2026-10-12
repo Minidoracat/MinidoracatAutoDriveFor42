@@ -27129,6 +27129,84 @@ function drive.scenarioRouteStub()
 end
 drive.scenarioRouteStub()
 
+-- (cb-*) 1012 折點前的障礙（正式服 0.28 F4 #37：7.2m 半聯結左轉 90° fallback 折點外側圍欄端柱、`exit-room avail=-1.75`
+--   停住交還；對向車道空著）：障礙群 c 落在折點前 2m 內、Corridor 的 d 在折點後 4m 外時，舊制不延保持段、出口窗被折點
+--   吃光＝所有候選 exit-room。fixture：路寬 4 的 L 形路線，折點 (60,0)（turnPeakS 認得的大折點），車在 (30,0) 東行。
+--   (cb-inner)  左轉、障礙在右側 (56|57,1)：候選往左（內側＝借對向車道）→ 承諾、保持段延過折點（offC > 60）、不 corner。
+--   (cb-outer)  右轉、同一障礙（右側＝內側）：候選往左＝外側偏移繞急彎，照舊 exit-room 拒收、判堵。
+--   (cb-both)   左轉、對向車道也堵（x=57 的 y −2..−4）：只剩外側縫，照舊 exit-room 判堵。
+--   違規證明（temp/corner/vp_corner.py）：拿掉新條件＝(cb-inner) 紅；內側判定恆真＝(cb-outer)／(cb-both) 紅；
+--   內外號反＝(cb-inner) 紅。
+function drive.scenarioCornerBorrow()
+    scenario("1012：折點前的障礙——內側偏移（借對向車道）保持段延過折點；外側偏移照舊拒收")
+    local oldSand = SandboxVars
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    local wasMs = drive.frameMs(10)
+    local Dr = MDAD.Drive
+    local oldKeep = Dr.keepRightTarget
+    Dr.keepRightTarget = function() return 0 end
+    local oldEvent, oldSample, events = MDADDiagnostics.event, MDADDiagnostics.sample, {}
+    MDADDiagnostics.event = function(_, name, a) events[#events + 1] = { name = name, a = a } end
+    MDADDiagnostics.sample = function() return true end
+    -- turn＝-1 左轉（往 -y）、+1 右轉
+    local function run(turn, solids)
+        MDAD.Drive.stop(0, nil)
+        drive.fillWorld(-10, 100, -50, 50)
+        drive.putRoad(-10, 100, -50, 50)
+        for i = 1, #solids do drive.putSolid(solids[i][1], solids[i][2], "harness_cb_" .. i) end
+        local pts = {}
+        for i = 0, 15 do pts[#pts + 1] = i * 4; pts[#pts + 1] = 0 end
+        for i = 1, 15 do pts[#pts + 1] = 60; pts[#pts + 1] = turn * i * 4 end
+        local r = { pts = pts, segSurface = {}, segWidth = {}, avoidPenalty = 0, approachSurface = "unknown" }
+        for i = 1, #pts / 2 - 1 do r.segSurface[i], r.segWidth[i] = "paved", 4 end
+        drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = r, 60, turn * 60, "ok"
+        dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = 30, 0, 15, 0, false
+        dveh._engine, dveh._driver = true, dp
+        dp._vehicle, dp._dead, dp._local = dveh, false, true
+        setHeading(dveh, 0)
+        driveReset(dveh)
+        MDAD.Drive.start(dp)
+        Dr.debugSession(0).diag = true
+        for _ = 1, 4 do driveTick(dp, dveh) end
+        for i = #events, 1, -1 do events[i] = nil end
+        drive.scanRound(true)
+        local st = Dr.debugSession(0)
+        local commit
+        for i = 1, #events do
+            if events[i].name == "dodge" and events[i].a and events[i].a.phase == "commit" then commit = events[i].a end
+        end
+        return st, commit
+    end
+    local function desc(st, cm)
+        local fs = st.fstate
+        return "dodging=" .. tostring(st.dodging) .. " blocked=" .. tostring(st.blocked) .. " shape=" .. tostring(st.dodgeShapeReason)
+            .. " corner=" .. tostring(st.cornerLatch) .. " offL=" .. tostring(fs.offL) .. " c=" .. tostring(fs.offC)
+            .. " d=" .. tostring(fs.offD) .. " commit=" .. tostring(cm and (cm.offL .. "/" .. cm.c))
+            .. " foldS=" .. tostring(st.dodgeExitFoldS) .. " avail=" .. tostring(st.dodgeExitAvail)
+    end
+    for x = 56, 57 do
+        local st, cm = run(-1, { { x, 1 } })
+        checkTrue(st.dodging == true and not st.blocked and not st.cornerLatch and st.fstate.offL < 0
+                and st.fstate.offC > 60 and st.fstate.offD > st.fstate.offC
+                and cm ~= nil and cm.offL == st.fstate.offL and cm.c == st.fstate.offC,
+            "(cb-inner) 左轉、障礙 (" .. x .. ",1) 在外側：借對向車道（內側）承諾、保持段延過折點 60（" .. desc(st, cm) .. "）")
+        st, cm = run(1, { { x, 1 } })
+        checkTrue(st.dodging ~= true and st.blocked == true and cm == nil and st.dodgeExitFoldS == 60
+                and st.dodgeExitAvail <= 0,
+            "(cb-outer) 右轉、同一障礙在內側：往左＝外側偏移繞急彎，照舊 exit-room 判堵（" .. desc(st, cm) .. "）")
+    end
+    local st, cm = run(-1, { { 57, 1 }, { 57, -2 }, { 57, -3 }, { 57, -4 } })
+    checkTrue(st.dodging ~= true and st.blocked == true and cm == nil and st.dodgeShapeReason == "exit-room",
+        "(cb-both) 對向車道也堵：只剩外側縫，照舊 exit-room 判堵（" .. desc(st, cm) .. "）")
+    MDAD.Drive.stop(0, nil)
+    MDADDiagnostics.event, MDADDiagnostics.sample = oldEvent, oldSample
+    Dr.keepRightTarget = oldKeep
+    drive.fillWorld(-2, 70, -7, 7)
+    drive.frameMs(wasMs)
+    SandboxVars = oldSand
+end
+drive.scenarioCornerBorrow()
+
 -- 1008 車在常駐線外遠處的橫向覆蓋出口（正式服 0.23.0 三個片段：起步離 nav 線
 --   8–12m、斜切保持把行駛線釘在車位，車位帶心那輪候選被橫向覆蓋拒收→延後、nav 線補掃那輪車身在 ±7 帶外看不到車線上的
 --   硬點→判淨空，延後↔淨空逐輪交替到接觸）。常駐 0（keepRightTarget 打樁）、斜切保持打樁成「行駛線＝車位」、牆排在 x=40、

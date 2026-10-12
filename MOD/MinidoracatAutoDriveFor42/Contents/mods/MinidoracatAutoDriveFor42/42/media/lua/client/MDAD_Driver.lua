@@ -3582,13 +3582,13 @@ local function routeTurnWithin(profile, s0, s1)
 end
 
 -- 路線在 [s0, s1] 內單一折點的峰值位置（最大單段轉角的弧長；< 0.15 rad 視為
--- 無折點回 nil）與該折角（rad）。過渡段提早完成用；事件驅動冷路徑。
+-- 無折點回 nil）、該折角（rad）與有號折角（>0＝右轉，內側＝l>0）。過渡段提早完成用；事件驅動冷路徑。
 -- 終點停點（profile.coastStopS）之後的折點不算（1012）：車開不到那裡，尾端短接線的 90° 折點拿來當進入／出口的
 -- 折點上限＝停點前的繞行全部 exit-room（正式服 0.28 takeover #1；sweepLine 同一個停點）。
 local function turnPeakS(profile, s0, s1)
     local n = profile.n
     local ss, hh = profile.s, profile.segH
-    local best, bestS = 0.15, nil
+    local best, bestS, bestDh = 0.15, nil, 0
     local stopS = profile.coastStopS
     if MDADDynamics.finite(stopS) and stopS < s1 then s1 = stopS end -- （本檔的 finite 在後面才定義）
     for i = 1, n - 2 do
@@ -3598,14 +3598,13 @@ local function turnPeakS(profile, s0, s1)
             local dh = hh[i + 1] - hh[i]
             while dh > 3.14159265 do dh = dh - 6.2831853 end
             while dh < -3.14159265 do dh = dh + 6.2831853 end
-            if dh < 0 then dh = -dh end
-            if dh > best then
-                best = dh
-                bestS = sa
+            local adh = dh < 0 and -dh or dh
+            if adh > best then
+                best, bestS, bestDh = adh, sa, dh
             end
         end
     end
-    return bestS, best
+    return bestS, best, bestDh
 end
 
 -- 由弧長取路線上的世界點與法向（事件驅動輔助，線性走段；不在每幀熱路徑）
@@ -9195,7 +9194,7 @@ local function shapeProfile(s, profile, a, b, c, d, offL, baseL, crawlDesign)
     -- 掛車實際走的軌跡另由 sweepLine 逐點驗。
     local tl = Drive.towHold(s)
     if tl > 0 then c, d = c + tl, d + tl end
-    local sTurn = turnPeakS(profile, a, d + 6)
+    local sTurn, _, turnDh = turnPeakS(profile, a, d + 6)
     local minA = s.lastSNow + 1
     if s.laneChained and finite(s.stayHoldEndS) and s.stayHoldEndS > minA then
         minA = s.stayHoldEndS -- 提早釋放的停留：進入段不早於停留段終點（TUNE.STAY_SETTLED_M）
@@ -9222,7 +9221,11 @@ local function shapeProfile(s, profile, a, b, c, d, offL, baseL, crawlDesign)
                 if b3 < c and a3 < b3 then a, b = a3, b3 end
             end
         end
-        if sTurn > c - 2 and d < sTurn + 4 and sTurn >= b then
+        -- 折點離 c 不到 2m（出口窗被折點吃光、照舊必 exit-room）時，內側偏移（offL 與轉向同側：右轉 l>0、左轉 l<0，
+        -- 例如左轉角借對向車道）保持段同樣延過折點、出口放到折點後；外側偏移繞急彎照舊拒收（車追不上、切內）。
+        -- 正式服 0.28 F4（1012）：7.2m 半聯結左轉 90° fallback 折點外側圍欄端柱，c 停在折點前 0.25m、
+        -- Corridor 的 d 在折點後 4m 外＝舊條件不延，`exit-room avail=-1.75` 停住交還；對向車道空著。
+        if sTurn > c - 2 and sTurn >= b and (d < sTurn + 4 or (sTurn <= c + 2 and offL * turnDh > 0)) then
             local span2 = d - c
             if span2 > 4 then span2 = 4 end
             c = sTurn + 1
