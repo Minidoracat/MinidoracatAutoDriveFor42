@@ -2292,7 +2292,7 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
 
 
     -- ---- 原地調頭遲滯 ----
-    -- state.rotEnter／rotExit（Driver 起步段設，nil＝ROTATE_ENTER／ROTATE_EXIT）：起步先原地轉的門檻（Drive.startRotateArm）
+    -- state.rotEnter／rotExit（Driver 起步段設，nil＝ROTATE_ENTER／ROTATE_EXIT）：起步先原地轉的門檻（Drive.startRotateGate）
     local aerr = err
     if aerr < 0 then aerr = -aerr end
     local rotating = state.rotating == true

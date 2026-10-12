@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1012e"
+Drive.REV = "1012f"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -125,7 +125,7 @@ TUNE.ROTATE_STALL_MS = 2500
 -- （前視點；離路起步＝接回路線的方向）差 > ENTER 就走調頭那套（耦力原地轉／探測被擋走大弧），轉到 < EXIT 才前進。
 -- 行進中照舊 Follower 的 135°／100°（髮夾誤進 ROTATE 的舊坑）。正式服 0.28 起步 3 秒內打滑依航向差：0–30° 3/56、
 -- 30–60° 2/13、60–90° 7/13、90–135° 11/16、≥135°（原地轉）3/26——分界在 60°。不在調頭中、轉到 < EXIT 或離起點
--- 開出 START_ROTATE_M 就結束起步段（Drive.startRotateArm）；拖車排除（原地轉會甩斷掛車）。
+-- 開出 START_ROTATE_M 就結束起步段（Drive.startRotateEnd）；拖車排除（原地轉會甩斷掛車）。
 TUNE.START_ROTATE_ENTER_RAD = 60 * math.pi / 180
 TUNE.START_ROTATE_EXIT_RAD = 30 * math.pi / 180
 TUNE.START_ROTATE_M = 3
@@ -2526,7 +2526,7 @@ local function startSession(playerObj, playerNum, stage)
         rotProbeClear = nil, -- 這次調頭最近一次車周探測：true 淨空可原地旋轉／false 被擋走大弧／nil 還沒探（uturn enter 清）
         uturn = nil,        -- 進行中的這一次調頭的參數檔（TUNE.UTURN.*）；nil＝沒在調頭
         uturnArmed = false, -- 入場減速已放行（速度降到 entry 以下過一次）
-        startRot = true,    -- 起步段：Follower 調頭門檻用 TUNE.START_ROTATE_*（Drive.startRotateArm 結束）
+        startRot = true,    -- 起步段：Follower 調頭門檻用 TUNE.START_ROTATE_*（Drive.startRotateGate 寫、Drive.startRotateEnd 結束）
         startRotX = vehicle:getX(), startRotY = vehicle:getY(), -- 起步段的起點（開出 START_ROTATE_M 就結束）
         uturnStart = false, -- 進行中的這次調頭是起步段進的（門檻 START_ROTATE_*、不計迴圈防護）
         uturnRoomTried = false, -- 這次調頭已算過「倒車騰空間再原地轉」（Drive.uturnRoom；uturn enter 清）
