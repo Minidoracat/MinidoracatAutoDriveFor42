@@ -21881,8 +21881,9 @@ drive.scenarioTraffic()
 -- 的 3m 被夾掉，入口跑道只剩 2.5m＋起始 lane 在路外 5.5m → steep／sweep 全滅 → blocked，倒車又垂直於路線
 -- 換不到跑道。現制把「車位→路線起點」接在剖面前面（Drive.approachRoute）。
 --   (apr)      車在起點之前：剖面第一點＝車位、接線長 ≈ 6.3、不 blocked
---   (apr-side) 車在路旁（投影落在第一段內）：不接，維持 RETURN 併入
--- 違規證明：approachRoute 一律回原路線＝(apr) blocked 紅。
+--   (apr-side) 車在路旁（投影落在第一段內）、車頭沿路：不接，維持 RETURN 併入
+--   (apr-near) 1012 F3：中段旁 8m、車頭正對路線（RETURN 航向差進不了）：接車位→垂足；車頭沿路／背對／側距 <2.5 不接
+-- 違規證明：approachRoute 一律回原路線＝(apr) blocked 紅；side 只認起點、量首段、前方恆真＝(apr-near) 紅（temp/vp_f3.py）。
 function drive.scenarioApproach()
     scenario("路外起步：路網在車前才開始時把越野接線接在剖面前面，路線起點旁有硬物也排得出入口")
     local oldSandbox, oldVeh, oldGet = SandboxVars, dveh, getSpecificPlayer
@@ -21963,11 +21964,37 @@ function drive.scenarioApproach()
         "(apr-perp) 剖面＝車位→(40,0)→(80,0)，最近點之前捨去")
     checkTrue(st ~= nil and #st.profileRoute.segWidth == #st.profileRoute.pts / 2 - 1,
         "(apr-perp) 段屬性數量對齊點數")
-    -- (apr-near) 同樣在中段旁但只 8m（RETURN 管得到）：不接
-    checkTrue(arm(40, -8, math.pi / 2), "(apr-near) 路線中段旁 8m 啟動")
+    -- (apr-near) 1012 F3（正式服 #20／#5）：中段旁 8m、車頭正對路線——RETURN 航向差 90° 進不了，斜切保持會沿平行線開
+    --   進樹叢。接「車位→垂足」，垂足之前捨去。
+    checkTrue(arm(40, -8, math.pi / 2), "(apr-near) 路線中段旁 8m、車頭正對路線啟動")
     for _ = 1, 4 do driveTick(dp, dveh) end
     st = MDAD.Drive.debugSession(0)
-    checkTrue(st ~= nil and st.approachM == 0, "(apr-near) 12m 內交給 RETURN：不接（approachM=" .. tostring(st and st.approachM) .. "）")
+    checkTrue(st ~= nil and math.abs(st.approachM - 8) < 1e-6 and st.profileRoute.pts[1] == 40
+        and st.profileRoute.pts[2] == -8 and st.profileRoute.pts[3] == 40 and st.profileRoute.pts[4] == 0,
+        "(apr-near) 接車位→垂足（approachM=" .. tostring(st and st.approachM) .. "）")
+    -- 中段旁折線：首段朝東、最近段朝北；車在北向段西 8m、車頭朝東——量首段夾角 0 會不接
+    checkTrue(arm(32, -4, 0, { pts = { 0, 10, 40, 10, 40, -12 }, segSurface = { "gravel", "gravel" },
+        segWidth = { 5, 5 }, len = 62, cost = 62, avoidPenalty = 0 }), "(apr-near) 北向段旁 8m、車頭朝路線啟動")
+    for _ = 1, 4 do driveTick(dp, dveh) end
+    st = MDAD.Drive.debugSession(0)
+    checkTrue(st ~= nil and math.abs(st.approachM - 8) < 1e-6 and st.profileRoute.pts[3] == 40
+        and st.profileRoute.pts[4] == -4,
+        "(apr-near) 夾角量最近段：接車位→(40,-4)（approachM=" .. tostring(st and st.approachM) .. "）")
+    checkTrue(arm(40, -8, 0), "(apr-near) 中段旁 8m、車頭沿路啟動")
+    for _ = 1, 4 do driveTick(dp, dveh) end
+    st = MDAD.Drive.debugSession(0)
+    checkTrue(st ~= nil and st.approachM == 0,
+        "(apr-near) 車頭沿路（RETURN 進得了）：不接（approachM=" .. tostring(st and st.approachM) .. "）")
+    checkTrue(arm(40, -8, -math.pi / 2), "(apr-near) 中段旁 8m、車頭背對路線啟動")
+    for _ = 1, 4 do driveTick(dp, dveh) end
+    st = MDAD.Drive.debugSession(0)
+    checkTrue(st ~= nil and st.approachM == 0,
+        "(apr-near) 車頭背對路線：不接（approachM=" .. tostring(st and st.approachM) .. "）")
+    checkTrue(arm(40, -2, math.pi / 2), "(apr-near) 中段旁 2m、車頭正對路線啟動")
+    for _ = 1, 4 do driveTick(dp, dveh) end
+    st = MDAD.Drive.debugSession(0)
+    checkTrue(st ~= nil and st.approachM == 0,
+        "(apr-near) 側距 2m（< APPROACH_SIDE_MIN_M）：不接（approachM=" .. tostring(st and st.approachM) .. "）")
     -- (apr-rev) 0928g E2E startpush c25（起手偏 36°）：起步接了越野線，倒車又退到接線起點之後——
     --   舊剖面從舊車位起算，退出來的距離夾在 s=0、進入段一寸也沒多（三次倒車 entry 恆 1.0 → 受困）。
     --   倒車收手後從現在的車位重接越野線。違規證明：拿掉 settle 成功處的旗標＝剖面仍從舊車位起算、紅。
@@ -26353,11 +26380,14 @@ function drive.scenarioHoldRoom()
     dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = 10, 9, 0, 0, true
     dveh._engine, dveh._driver = true, dp
     dp._vehicle, dp._dead, dp._local = dveh, false, true
-    setHeading(dveh, -math.pi / 4) -- 車頭斜 45° 朝路（clip-07 停車格的姿態；偏頭 > RETURN_ENTER_MAX_RAD＝不進 RETURN）
+    -- 起步時車頭沿路、起步後才斜 45° 朝路（clip-07 停車格的姿態；偏頭 > RETURN_ENTER_MAX_RAD＝不進 RETURN）：1012 F3 起
+    -- 起步就斜 45° 朝路會接越野線（approachRoute side），保持留給行駛中離線（倒車後等）——本情境驗的是保持本身。
+    setHeading(dveh, 0)
     drive.nav.route = { pts = { 0, 0, 80, 0 }, segSurface = { "paved" }, segWidth = { 8 },
         len = 80, cost = 80, avoidPenalty = 0 }
     drive.nav.tx, drive.nav.ty, drive.nav.state = 80, 0, "ok"
     checkTrue(MDAD.Drive.start(dp), "(hold-room) 啟動")
+    setHeading(dveh, -math.pi / 4)
     for _ = 1, 6 do driveTick(dp, dveh) end
     drive.scanRound(true)
     driveTick(dp, dveh)

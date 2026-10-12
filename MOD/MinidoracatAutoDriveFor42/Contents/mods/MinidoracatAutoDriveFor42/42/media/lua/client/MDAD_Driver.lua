@@ -851,8 +851,10 @@ TUNE.APPROACH_WIDTH_M = 4
 -- 路首側面起步（1009；正式服 0.25.0／0.23.0 同型 6 段，其中一處停車點跨三版重複 4 次）：車停在路線起點正側方 3–8m、
 -- 車頭朝起點，首段與車頭夾 80–95°。縱向 ≈0（不在首段後方）、又沒超過 RETURN_MAX_DEV，舊制不接；RETURN 航向差超過
 -- RETURN_ENTER_MAX_RAD 進不了，斜切保持把規劃線釘在車位、與首段平行（車得原地轉 90°），穿過車旁停車判堵，倒車又沿
--- 車頭方向退、rs 恆 0 換不到跑道→StopStuck／接手。側距 ≥ APPROACH_SIDE_MIN_M、航向差超過 RETURN 進場門檻、起點在
--- 車頭前方（車頭與「車→起點」夾角的 cos ≥ APPROACH_SIDE_COS）時同樣接「車位→起點」。
+-- 車頭方向退、rs 恆 0 換不到跑道→StopStuck／接手。側距 ≥ APPROACH_SIDE_MIN_M、航向差超過 RETURN 進場門檻、最近點在
+-- 車頭前方（車頭與「車→最近點」夾角的 cos ≥ APPROACH_SIDE_COS）時同樣接「車位→最近點」。1012 F3 放寬到路線中段：
+-- 正式服 #20（車朝東、路線在東 9m 往南）／#5（離線 8m 垂直、車頭前有樹）起步原地轉對正後，斜切保持仍把規劃線
+-- 釘在車位、沿平行線開進樹叢判堵→倒車→改道；航向差改量最近點所在段。
 TUNE.APPROACH_SIDE_MIN_M = 2.5
 TUNE.APPROACH_SIDE_COS = 0.5
 -- 進入段陡坡拒收（2026-09-04 s051：stay 鏈把常駐 lane 拖到 −2.25 後，下一候選 +2.00＝
@@ -3679,10 +3681,10 @@ end
 -- 本來就畫著的越野接線接在剖面前面：Sensor 沿它掃、corridor 沿它排、世界掃掠照驗，車從 s=0 的
 -- 自己位置出發。這不是 0908e 禁止的「虛構前置道路」（那是沿路線反方向往車後憑空延伸、可能穿牆）：
 -- 接線起點就是車本身、終點是路網，中間是車本來就得開過去的地面，否決權照舊在世界掃掠。
--- 車在路旁（投影落在第一段內）不接——那是 RETURN 的平滑併入；例外是路首側面、車頭正對起點而 RETURN 因航向差進不了
--- 的那型（TUNE.APPROACH_SIDE_*，heading＝車頭航向 rad，nil＝不判）。拖車不接（外拉轉角另有改寫）。
+-- 車在路旁（投影落在路線內）、車頭沿路不接——那是 RETURN 的平滑併入；例外是側面、車頭正對最近點而 RETURN 因航向差
+-- 進不了的那型（TUNE.APPROACH_SIDE_*，heading＝車頭航向 rad，nil＝不判）。拖車不接（外拉轉角另有改寫）。
 -- 只在起步接：行駛中主 MOD 重算的路線起點就是車的投影點；中途 cutover 仍用原路線（不改既有語意）。
--- 只接「整條路線離車最近的就是起點」且 ≤ SNAP_MAX_M（0928a）：主 MOD 同目標、偏航 ≤12 格一律回快取
+-- (a) behind 只接「整條路線離車最近的就是起點」且 ≤ SNAP_MAX_M（0928a）：主 MOD 同目標、偏航 ≤12 格一律回快取
 -- 同一條線（NavRoute.lua ensureRoute），玩家開著導航走了一段再按自駕時，起點早在車後——0.13.1 正式服
 -- 10 趟接出 164／7136m 的「回頭接線」（車離某段只有 0.4-6m），車被拉回起點重開一遍。
 -- 離路太遠（0928b；E2E replay clip-05：車在路旁 17m 草地，RETURN 只收 ≤RETURN_MAX_DEV 12m，超過就只剩
@@ -3718,12 +3720,17 @@ function Drive.approachRoute(route, vx, vy, heading)
     local behind = bk == 1 and bt == 0
         and ((vx - x1) * ux + (vy - y1) * uy) / sl <= -TUNE.APPROACH_BEHIND_M
     local far = best > TUNE.RETURN_MAX_DEV * TUNE.RETURN_MAX_DEV
+    -- side（1009 路首；1012 F3 放寬到路線中段）：量最近點所在段的方向與「車→最近點」。中段旁垂直停車
+    -- （正式服 #20／#5：離線 5–10m、車頭對路線）舊制只認起點，斜切保持把 laneBias 釘在車位、沿平行線開進樹叢。
+    -- 接的是車位→最近點、最近點之前捨去，不會出 0928a 的回頭線。
     local side = false
-    if not behind and not far and bk == 1 and bt == 0 and finite(heading)
+    if not behind and not far and finite(heading)
             and best >= TUNE.APPROACH_SIDE_MIN_M * TUNE.APPROACH_SIDE_MIN_M then
+        local nx, ny = pts[bk + 2] - pts[bk], pts[bk + 3] - pts[bk + 1]
+        local nl = sqrt(nx * nx + ny * ny)
         local fx, fy = math.cos(heading), math.sin(heading)
-        side = (fx * ux + fy * uy) / sl < math.cos(TUNE.RETURN_ENTER_MAX_RAD)
-            and ((x1 - vx) * fx + (y1 - vy) * fy) / sqrt(best) >= TUNE.APPROACH_SIDE_COS
+        side = nl > 1e-6 and (fx * nx + fy * ny) / nl < math.cos(TUNE.RETURN_ENTER_MAX_RAD)
+            and ((bx1 - vx) * fx + (by1 - vy) * fy) / sqrt(best) >= TUNE.APPROACH_SIDE_COS
     end
     if not behind and not far and not side then return route, 0 end
     -- 最近點落在第 seg 段（pts 索引 bk）；該段的起點若就是最近點（t=0）就從它開始，否則從最近點開始、接該段終點
