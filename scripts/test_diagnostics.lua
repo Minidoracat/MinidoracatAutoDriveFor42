@@ -1346,6 +1346,7 @@ MDADDiagnostics.sample(0, 9200000, 100, 200, 0.25, 12, 15, 40, 1.5, 0.2, 0.3, 12
         returnUnsafe = false,
         returnHold = false,
         returnCapacityFault = false,
+        followHold = true,
         surfaceMismatch = false,
         tractionKey = 1,
         runtimeMass = 1200,
@@ -1458,6 +1459,7 @@ check(string.find(physBody, '"ra":false', 1, true) ~= nil, "RETURN false explici
 check(string.find(physBody, '"tk":1', 1, true) ~= nil, "traction key recorded")
 check(string.find(physBody, '"rh":false', 1, true) ~= nil, "RETURN HOLD false explicit")
 check(string.find(physBody, '"rcf":false', 1, true) ~= nil, "RETURN capacity fault false explicit")
+check(string.find(physBody, '"fh":true', 1, true) ~= nil, "1013b follow/traffic hold recorded")
 check(string.find(physBody, '"rm":1200', 1, true) ~= nil, "runtime mass recorded")
 check(string.find(physBody, '"pa":2.5', 1, true) ~= nil, "drive prior recorded")
 check(string.find(physBody, '"pco":0.6', 1, true) ~= nil, "coast prior recorded")

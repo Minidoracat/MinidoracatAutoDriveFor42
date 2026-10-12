@@ -21673,6 +21673,19 @@ function drive.scenarioTraffic()
     checkTrue(st.followHold and drive.calls.forceBrake == 0 and (st.visAssistDecel or 0) > 0,
         string.format("(yield-nolock) 30 km/h 讓車停等：不鎖輪、施減速外力（forceBrake %d、vad %s）",
             drive.calls.forceBrake, tostring(st.visAssistDecel)))
+    -- (yield-return) 1013b N1（正式服 0.29 Q16 clip-17：路外起步 RETURN 回線中讓對向車，16.4 km/h `hbr=return fbt=true`）：回線帽
+    -- 同值 0 不得把會車停等的 moving 改名成 return（Drive.hardBrake 對 return 只在 returnHold 才不鎖輪）。違規證明：拿掉 return 帽
+    -- 「真的更低才改名」的條件＝紅。
+    st.returnActive, st.returnHold, st.returnUnsafe = true, false, true
+    st.returnLaneTarget, st.returnStartS, st.returnEndS = st.fstate.laneBias, st.lastSNow, st.lastSNow + 20
+    driveReset(dveh)
+    dveh._speed = 16
+    driveTick(dp, dveh)
+    checkTrue(st.followHold and st.returnActive and drive.calls.forceBrake == 0 and st.lastHardBrakeReason == "moving"
+            and (st.visAssistDecel or 0) > 0,
+        string.format("(yield-return) RETURN 回線中 16 km/h 讓車停等：不鎖輪（forceBrake %d、hbr %s、vad %s）",
+            drive.calls.forceBrake, tostring(st.lastHardBrakeReason), tostring(st.visAssistDecel)))
+    st.returnActive, st.returnUnsafe = false, false
     driveReset(dveh)
     dveh._speed = 5
     driveTick(dp, dveh)
@@ -26785,6 +26798,70 @@ function drive.scenarioLagBody()
 end
 drive.scenarioLagBody()
 
+-- 1013b 實測落後量守門在 RETURN 精確線上照判（正式服 0.29 Q03 clip-18：84mercSWB 14 km/h 承諾 20.4m 回線做 5.1m 側移、之後加到
+--   RETURN_CAP 25，落後 0.54m、23 km/h 撞路邊裝飾；舊制 RETURN 期間守門不判）。直路、回線 s 10→30.4 從 l −2.35 到 +2.75。
+--   (rl-near)  車在 rs 16、落後 −0.54，回線上 s 22 的硬點離規劃車身 0.2（規劃判淨空）：預測車身重疊＝arm、帽降。違規證明：live 留
+--              returnActive 豁免、或規劃線不取回線（onOv 不含 RETURN）＝紅。
+--   (rl-ramp)  同一條回線上 13m 外（s 29.5）的硬點：回線段當 ramp 不衰減，照判。違規證明：RETURN 不設 rampEnd＝紅。
+--   (rl-hold)  RETURN hold（沒有精確線）：不判、release why=owner。
+function drive.scenarioReturnLag()
+    scenario("1013b：實測落後量守門在 RETURN 精確線上照判——回線段當 ramp、hold 不判")
+    local Dr, F = MDAD.Drive, MDADFollower
+    local prof = F.begin({ pts = { 0, 0, 300, 0 } }, 60, 2)
+    while not F.stepBuild(prof, 4096) do end
+    local xs, ys = {}, {}
+    local n, ls0, why, ls1 = F.buildReturnLine(prof, 10, 30.4, -2.35, 2.75, xs, ys, 14)
+    local fs = F.newState()
+    F.setLaneBias(fs, 2.75)
+    checkTrue(why == "ok" and F.setExactLine(fs, xs, ys, n, ls0, ls1) and fs.exactLine == true,
+        "(rl) 前置：回線 −2.35→2.75、s 10→30.4（why=" .. tostring(why) .. "）")
+    local function lineAt(q)
+        local j, t = F.ovIndexAt(fs.ovS0, fs.ovN, fs.ovEndS, q)
+        return ys[j] + (ys[j + 1] - ys[j]) * t
+    end
+    local halfW, halfL, r, PAD = 0.9, 2.4, 0.7, MDADCorridor.FOOTPRINT_PAD
+    local sen = { ready = true, hardN = 1, hardS = {}, hardL = {}, hardLc = {}, hardW = {}, hardR = {}, hardX = {}, hardY = {} }
+    local function put(hs)
+        local lc = lineAt(hs) - (halfW + PAD + r + 0.2) -- 落後那側（車在線的 −l 側）、離規劃車身 0.2
+        sen.hardS[1], sen.hardL[1], sen.hardLc[1], sen.hardW[1], sen.hardR[1], sen.hardX[1], sen.hardY[1] =
+            hs, lc, lc, r, r, hs, lc
+    end
+    local oldEvent, events = MDADDiagnostics.event, {}
+    MDADDiagnostics.event = function(_, name, a) events[#events + 1] = { name = name, a = a } end
+    local function lastLag(phase)
+        for i = #events, 1, -1 do
+            local e = events[i]
+            if e.name == "lag" and e.a and e.a.phase == phase then return e.a end
+        end
+        return nil
+    end
+    local s = { diag = true, sensor = sen, fstate = fs, profile = prof, dodging = false, returnActive = true,
+        returnHold = false, returnCrawlExact = false, returnStartS = 10, returnEndS = 30.4, lastSNow = 16,
+        lastLatDev = -0.54, safeBrake = 6, vehicleProfile = { halfW = halfW, halfL = halfL } }
+    -- (rl-near)
+    put(22)
+    Dr.lagGuardScan(s, 0, 25)
+    local arm = lastLag("arm")
+    checkTrue(s.lagHitX == 22 and arm ~= nil and arm.hitS == 22,
+        "(rl-near) 回線上落後 0.54、硬點離規劃車身 0.2：arm（hit=" .. tostring(s.lagHitX) .. "）")
+    local cap = Dr.lagGuardCap(s, 25, 16, lineAt(16) - 0.54)
+    checkTrue(cap < 25 and s.lastCapReason == "lag",
+        "(rl-near) 接近包絡壓速（cap=" .. tostring(cap) .. " acr=" .. tostring(s.lastCapReason) .. "）")
+    -- (rl-ramp)
+    s.lagHitX = nil
+    s.lastSNow = 14
+    put(29.5)
+    Dr.lagGuardScan(s, 0, 25)
+    checkTrue(s.lagHitX == 29.5, "(rl-ramp) 回線段內 13m 外：不衰減照判（hit=" .. tostring(s.lagHitX) .. "）")
+    -- (rl-hold)
+    s.returnHold = true
+    Dr.lagGuardScan(s, 0, 25)
+    local rel = lastLag("release")
+    checkTrue(s.lagHitX == nil and rel ~= nil and rel.why == "owner", "(rl-hold) RETURN hold：不判、release why=owner")
+    MDADDiagnostics.event = oldEvent
+end
+drive.scenarioReturnLag()
+
 -- 1006 一般帶橫向覆蓋（E2E 1006xe fencepass：Dixie 南行、整條路橫擋的籬笆排，車靠右時承諾 offL −5 的貼邊線撞上）：
 --   一般帶掃描以行駛線為心（bandBias＝常駐偏置），Corridor.plan 卻以 nav 線對稱出候選；常駐 +3 時 l < −4 那條帶沒掃過、
 --   被當成淨空。車在 (10,3)、常駐 +3（keepRightTarget 打樁）、牆排在 x=40。
@@ -27193,6 +27270,91 @@ function drive.scenarioLaunchHold()
     SandboxVars = oldSand
 end
 drive.scenarioLaunchHold()
+
+-- 1013b RETURN 不豁免判堵（2026-10-13 使用者裁定 9；1012 E2E blockscan Dixie 路心起步：回線被擋 return crawl why=sweep、
+--   回線爬行帽 14 km/h 照開，blockedApproachCap／blockedStop／launchHold 在 returnActive 時都不套，車開過停止線 2.5m 才停）：
+--   RETURN 只管橫向，判堵停止線、接近包絡、起步判堵包絡照套。車離常駐線 4m 起步、前方 20m 整排牆。
+--   (rb-launch)   起步：RETURN 活躍＋判堵，目標壓在起步判堵包絡（cap=launch、低於回線爬行帽）。違規證明：launchHold 留 returnActive 豁免＝紅。
+--   (rb-approach) 已離起步點、帶 14 km/h：接近包絡照算（blockedApproachCap 有值）。違規證明：接近包絡留 returnActive 豁免＝紅。
+--   (rb-stop)     停止線上：目標 0、cap=blocked、意圖 WAIT、12 km/h 一秒鎖輪（10-08 裁定停止線照舊鎖輪）。違規證明：blockedStop 留
+--                 returnActive 豁免＝紅。
+--   (rb-wait)     停在停止線：停等預算照計（出口＝倒車／改道／交還照常）。
+function drive.scenarioReturnBlocked()
+    scenario("1013b：RETURN 活躍又已判堵——停止線、接近包絡、起步判堵包絡照套（RETURN 只管橫向）")
+    local oldSand = SandboxVars
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 90, RightLaneBias = 0 })
+    local wasMs = drive.frameMs(20)
+    local Dr, T = MDAD.Drive, MDAD.Drive.debugTune()
+    local function wall(x, on)
+        for y = -9, 9 do
+            if on then drive.putSolid(x, y, "rb_wall_" .. y) else drive.clearCell(x, y) end
+        end
+    end
+    local function tick(n)
+        for _ = 1, n do
+            nowMs = nowMs + 20
+            driveTick(dp, dveh)
+        end
+    end
+    drive.fillWorld(-10, 90, -10, 10)
+    wall(20, true)
+    checkTrue(armDrive(0, 0), "(rb) 啟動（前方 20m 整排牆）")
+    local st = Dr.debugSession(0)
+    st.diag = true
+    local oldEvent, oldSample, hold = MDADDiagnostics.event, MDADDiagnostics.sample, nil
+    MDADDiagnostics.sample = function() return true end -- 假 sample 回 false 會關掉 s.diag（事件就不送了）
+    MDADDiagnostics.event = function(_, name, a)
+        if name == "return" and a and a.phase == "hold" and hold == nil then hold = a end
+    end
+    dveh._x, dveh._y, dveh._speed = 0, 4, 0
+    driveReset(dveh)
+    tick(2)
+    for _ = 1, 4 do drive.scanRound(true) end
+    tick(2)
+    MDADDiagnostics.event, MDADDiagnostics.sample = oldEvent, oldSample
+    -- (rb-hold-hit) 1013b 遙測：回線被牆擋的 hold 事件帶命中點（hitX／hitY／hitS／m）。違規證明：returnSweepNote 不記＝紅。
+    checkTrue(hold ~= nil and hold.why == "sweep" and math.abs((hold.hitX or 0) - 20.5) <= 1 and type(hold.hitY) == "number"
+            and type(hold.hitS) == "number" and type(hold.m) == "number" and hold.m <= 0,
+        "(rb-hold-hit) return hold 帶回線打槍點（why=" .. tostring(hold and hold.why) .. " hit=" .. tostring(hold and hold.hitX)
+        .. "," .. tostring(hold and hold.hitY) .. " s=" .. tostring(hold and hold.hitS) .. " m=" .. tostring(hold and hold.m) .. "）")
+    checkTrue(st.returnActive == true and not st.returnHold and st.blocked == true and st.launchHoldOn == true
+            and type(st.blockHitX) == "number",
+        "(rb) 前置：RETURN 活躍（回線被牆擋、crawl-exact）＋起步判堵閂上（ra=" .. tostring(st.returnActive) .. " rh="
+        .. tostring(st.returnHold) .. " bl=" .. tostring(st.blocked) .. " lh=" .. tostring(st.launchHoldOn) .. "）")
+    local sd = Dr.blockStopDist(st)
+    -- (rb-launch)／(rb-approach)：停止線前 1.5m、帶回線爬行速 14
+    dveh._x, dveh._speed = st.blockHitX - sd - 1.5, T.RETURN_UNSAFE_CAP
+    driveReset(dveh)
+    tick(1)
+    local lc = Dr.launchCap(st, dveh._x, dveh._y)
+    checkTrue(st.returnActive and st.lastCapReason == "launch" and st.desiredTarget <= lc + 1e-9
+            and st.desiredTarget < T.RETURN_UNSAFE_CAP - 1,
+        "(rb-launch) RETURN 活躍：停止線前目標照起步判堵包絡降（acr=" .. tostring(st.lastCapReason) .. " des="
+        .. tostring(st.desiredTarget) .. " launchCap=" .. tostring(lc) .. "）")
+    checkTrue(MDADDynamics.finite(st.blockedApproachCap),
+        "(rb-approach) RETURN 活躍：判堵接近包絡照算（cap=" .. tostring(st.blockedApproachCap) .. "）")
+    -- (rb-stop)：停止線上、12 km/h
+    dveh._x, dveh._speed = st.blockHitX - sd + 0.2, 12
+    driveReset(dveh)
+    tick(1)
+    checkTrue(st.returnActive and st.desiredTarget == 0 and st.lastCapReason == "blocked" and st.intentShadow == "WAIT"
+            and drive.calls.forceBrake >= 1 and st.forceBrakeWhy == "blocked",
+        "(rb-stop) RETURN 活躍：停止線上目標 0、WAIT、停止線照舊鎖輪（des=" .. tostring(st.desiredTarget) .. " acr="
+        .. tostring(st.lastCapReason) .. " intent=" .. tostring(st.intentShadow) .. " fb=" .. drive.calls.forceBrake
+        .. " fbw=" .. tostring(st.forceBrakeWhy) .. "）")
+    -- (rb-wait)
+    dveh._speed = 0
+    st.forceBrakeUntil = 0
+    tick(50)
+    checkTrue(st.intentShadow == "WAIT" and st.waitAccumMs >= 900,
+        "(rb-wait) 停在停止線：停等預算照計（wait=" .. tostring(st.waitAccumMs) .. " intent=" .. tostring(st.intentShadow) .. "）")
+    wall(20, false)
+    MDAD.Drive.stop(0, nil)
+    drive.fillWorld(-2, 70, -7, 7)
+    drive.frameMs(wasMs)
+    SandboxVars = oldSand
+end
+drive.scenarioReturnBlocked()
 
 -- 1012 路線頭尾比車身短的 90° fallback 短接線（正式服 0.28 takeover #1／#39，Louisville 玩家自建大門：柱列離車道中線 2.5m）。
 --   predicate 級：Drive.debugSweepLine 以物理檔掃路線中線（硬點直接寫進 sensor，不經世界掃描）、Drive.debugTurnPeak 問剖面折點。

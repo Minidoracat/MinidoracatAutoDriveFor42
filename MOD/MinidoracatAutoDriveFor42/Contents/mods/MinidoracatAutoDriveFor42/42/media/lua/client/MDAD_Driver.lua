@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1012h"
+Drive.REV = "1013b"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -6393,7 +6393,7 @@ end
 -- 起步判堵爬行（TUNE.LAUNCH_HOLD_*）：本幀是否把目標壓在 LAUNCH_HOLD_KMH。判堵或繞行延後（未承諾）成立的那一刻判一次
 -- 「是不是起步」——起步近物保護武裝中（開局或倒車後，不含繞行釋放武裝的 startGuardRelease）、車離武裝點 ≤ LAUNCH_HOLD_M、
 -- 車速 ≤ LAUNCH_HOLD_ENTRY_KMH（行進中按下自駕不算）——
--- 結果閂在 s.launchHoldOn，直到判堵與延後都解除（承諾、判淨空）、RETURN 或調頭接手才清；同一次判堵不重判，車爬遠了也不
+-- 結果閂在 s.launchHoldOn，直到判堵與延後都解除（承諾、判淨空）或調頭接手才清（RETURN 活躍照閂，1013b）；同一次判堵不重判，車爬遠了也不
 -- 放回包絡。出口：承諾／淨空照常加速；一直過不去就爬到停止線（blockedStop 停等，判堵階梯照舊）。閂上那一刻記
 -- launch phase=hold（why blocked／defer、d＝離武裝點、speed）。
 function Drive.launchHold(s, playerNum, vx, vy, speedKmh)
@@ -6401,7 +6401,7 @@ function Drive.launchHold(s, playerNum, vx, vy, speedKmh)
     if why == nil and not s.dodging and not s.dodgeHandoffHold and finite(s.dodgeDeferCap) and s.dodgeDeferCap >= 0 then
         why = "defer"
     end
-    if why == nil or s.returnActive or s.fstate.rotating == true then
+    if why == nil or s.fstate.rotating == true then -- RETURN 活躍照閂（1013b：RETURN 只管橫向）
         s.launchHoldOn = nil
         return false
     end
@@ -7189,6 +7189,7 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     phys.returnUnsafe = s.returnUnsafe
     phys.returnHold = s.returnHold
     phys.returnCapacityFault = s.returnCapacityFault
+    phys.followHold = s.followHold == true -- 1013b：會車／跟車停等（樣本 fh；N1 回線中讓車鎖輪要看得到）
     phys.surfaceMismatch = s.surfaceMismatch
     phys.tractionKey = s.tractionKey
     phys.runtimeMass = s.runtimeMass
@@ -7247,7 +7248,7 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
         phys.capOffroad = s.returnUnsafe and TUNE.RETURN_UNSAFE_CAP or TUNE.RETURN_CAP
         phys.capReturn = phys.capOffroad
     end
-    if s.blocked and not s.returnActive then
+    if s.blocked then
         if Drive.blockedAtStop(s, vehicle:getX(), vehicle:getY()) then
             phys.capBlocked = 0
         else
@@ -8841,10 +8842,14 @@ local function probeReturnLateral(s, vehicle, lateralM)
         fx, fy = fx * inv, fy * inv
         local bx, by = bodyCenter(s, vehicle, vec)
         if bx ~= nil then
-            local status = MDADSensor.probeLateral(s.sensor, vehicle, getCell(),
+            local status, hx, hy = MDADSensor.probeLateral(s.sensor, vehicle, getCell(),
                 bx, by, fx, fy, -fy, fx, s.vehicleProfile.halfW,
                 s.vehicleProfile.halfL, lateralM)
             clear = status == "clear"
+            -- return hold 事件的命中點（1013b）：探測沒有弧長與淨距；未載入回的是車心，不記
+            if not clear and status ~= "unloaded" then
+                s.returnHitX, s.returnHitY, s.returnHitS, s.returnHitM = hx, hy, nil, nil
+            end
         end
     end
     BaseVehicle.releaseVector3f(vec)
@@ -8955,6 +8960,13 @@ local function invalidateReturnControl(s)
     end
 end
 
+-- RETURN 回線掃掠打槍點（1013b；return hold 事件 hitX／hitY／hitS／m＝淨距，負＝重疊）：sweepLine 的回傳原樣傳進來，只記
+-- 命中硬點的失敗（第 8 回傳＝硬點索引；線長不合法、帶外等失敗沒有點）。回傳 ok，呼叫端照舊只看第一個值。
+function Drive.returnSweepNote(s, ok, neg, hs, ph, sk, x, y, i)
+    if not ok and i ~= nil then s.returnHitX, s.returnHitY, s.returnHitS, s.returnHitM = x, y, hs, -neg end
+    return ok
+end
+
 local function holdUnsafeReturn(s, vehicle, latSigned, reason)
     MDADFollower.clearOffset(s.fstate)
     MDADFollower.setLaneBias(s.fstate, latSigned)
@@ -8964,7 +8976,8 @@ local function holdUnsafeReturn(s, vehicle, latSigned, reason)
     if s.lastHoldReason ~= reason then
         s.lastHoldReason = reason
         diagEvent(s, s.playerNum, "return", { phase = "hold", why = reason,
-            l = latSigned, s = s.lastSNow })
+            l = latSigned, s = s.lastSNow, hitX = s.returnHitX, hitY = s.returnHitY, hitS = s.returnHitS,
+            m = s.returnHitM })
     end
     s.returnLaneStart = latSigned
     s.returnCapacityFault = reason == "capacity"
@@ -9058,6 +9071,7 @@ local function updateReturnSnapshot(s, vehicle, playerNum, latSigned)
     end
     s.surfaceMismatch = s.surfaceMismatchRounds >= 2
     if not s.returnActive or not finite(latSigned) then return end
+    s.returnHitX, s.returnHitY, s.returnHitS, s.returnHitM = nil, nil, nil, nil -- 本輪 hold 事件的命中點（1013b）
     -- 持有權仲裁：ROTATE／DODGE 活躍時 RETURN 不得寫 fstate（st462.29k 定罪：
     -- holdUnsafeReturn 開頭的 clearOffset 每輪清掉剛 commit 的 dodge 剖面 →
     -- 釋放 → 重 commit → 又被清的原地死循環；s019 同型：ROTATE 下 RETURN cap
@@ -9160,10 +9174,10 @@ local function updateReturnSnapshot(s, vehicle, playerNum, latSigned)
         local lateral = s.returnLaneTarget - latSigned
         if not guardUnloaded and startK <= ovN
                 and probeReturnLateral(s, vehicle, lateral) then
-            guardOk = sweepLine(
+            guardOk = Drive.returnSweepNote(s, sweepLine(
                 s, s.fstate.ovX, s.fstate.ovY, ovN, ovS0, lineEnd,
                 s.returnStartS, s.returnEndS, s.returnEndS, lineEnd,
-                s.returnLaneTarget, "return-guard", s.sweepBase, startK)
+                s.returnLaneTarget, "return-guard", s.sweepBase, startK))
         end
         if guardOk then
             if not s.returnCrawlExact then return end
@@ -9232,8 +9246,8 @@ local function updateReturnSnapshot(s, vehicle, playerNum, latSigned)
         holdUnsafeReturn(s, vehicle, laneStart, "probe")
         return
     end
-    local safe = sweepLine(s, s.returnX, s.returnY, lineN, lineS0, lineS1,
-        s0, s1, s1, coverageEnd, laneTarget, "return", s.sweepBase)
+    local safe = Drive.returnSweepNote(s, sweepLine(s, s.returnX, s.returnY, lineN, lineS0, lineS1,
+        s0, s1, s1, coverageEnd, laneTarget, "return", s.sweepBase))
     if safe and MDADFollower.setExactLine(
             s.fstate, s.returnX, s.returnY, lineN, lineS0, lineS1) then
         s.returnUnsafe, s.returnHold, s.returnCapacityFault = false, false, false
@@ -10176,8 +10190,10 @@ end
 -- 上、硬點也在同一段 ramp 內＝不衰減（斜線的穩態落後；1006c 整段 ramp 持平 1.55–1.70，從車頭起衰減要到 20m 內才判得到、
 -- 停不住）；其餘從車頭（或 ramp 尾）起衰減，衰減取「純追跡最慢收斂 (1+kx)e^−kx（同 Drive.transitionHold）」與「實測收斂
 -- e^−λx（Drive.lagRate）」較慢者——1006m replay S 彎 F350：出彎直路 75 km/h ld 0.81→0.67 走了約 20m，理論衰減把 12m 外的
--- 路緣物判成不重疊，守門到車前 12m 才 arm、60 km/h 接觸。|橫偏| < TUNE.LAG_GUARD_MIN_M 不判。RETURN／調頭／判堵各有
--- 自己的淨距體系，不判。
+-- 路緣物判成不重疊，守門到車前 12m 才 arm、60 km/h 接觸。|橫偏| < TUNE.LAG_GUARD_MIN_M 不判。調頭／判堵各有自己的淨距體系，
+-- 不判；RETURN 走精確線（回線或 crawl-exact，非 hold）時照判（1013b）：規劃線＝那條 ov 線、回線段 [returnStartS, returnEndS]
+-- 當成 ramp（不衰減）——正式服 0.29 Q03 clip-18：14 km/h 承諾 20.4m 回線做 5.1m、之後加到 RETURN_CAP 25，落後 0.54m、
+-- 23 km/h 撞路邊裝飾；線長以 J=2 的 shiftLength 模型可行到約 23.5 km/h（25 只超 6%），落後是追線不是線不可行，只有實測落後量守得到。
 -- 車身範圍與寬度（1008；正式服 0.23.0 片段 SemiTruckBox_mil＋拖車轉角 (12224.5,6895.5)：硬點一過車頭 rs+halfL 就 release、
 -- 帽從 8 跳回 obb 18，0.64 秒後車身側面 14.7 km/h 撞上；(15319.5,3321.5) 同型 18.2、另兩段同車型 footprint）：硬點過了車頭、
 -- 還在車身（拖車含掛車：attach 的 trailLen，量不到掛點偏移時 halfL＋hitchToRear）旁＝用實測橫偏不衰減判，命中就
@@ -10189,7 +10205,9 @@ end
 function Drive.lagGuardScan(s, playerNum, speedKmh, vx, vy, heading)
     local sen, fs, vp, ld = s.sensor, s.fstate, s.vehicleProfile, s.lastLatDev
     local hit, bl, hitPl = nil, nil, nil
-    local live = fs.rotating ~= true and not s.returnActive and not s.blocked and sen.ready and finite(ld)
+    -- RETURN 只有走精確線時才有「規劃線」可比（hold 時 laneBias＝車位、沒有線；1013b）
+    local ret = s.returnActive and not s.returnHold and fs.exactLine == true
+    local live = fs.rotating ~= true and (ret or not s.returnActive) and not s.blocked and sen.ready and finite(ld)
     local rate = Drive.lagRate(s, ld, vx, vy, live)
     local rs, halfL = s.lastSNow, vp.halfL
     local rear, hw, tw = halfL, vp.halfW, s.tow
@@ -10214,11 +10232,13 @@ function Drive.lagGuardScan(s, playerNum, speedKmh, vx, vy, heading)
         local prof = s.profile
         local k = 1.4142 / MDADFollower.lookaheadM(speedKmh, prof.lookScale or 1)
         local ovN, ovS0, ovEndS = fs.ovN or 0, fs.ovS0, fs.ovEndS
-        local onOv = s.dodging and ovN >= 2 and finite(ovS0) and finite(ovEndS)
-        local rampEnd = nil -- 車所在的承諾線 ramp 尾（進入段 b、出口段 d）
+        local onOv = (s.dodging or ret) and ovN >= 2 and finite(ovS0) and finite(ovEndS)
+        local rampEnd = nil -- 車所在的承諾線 ramp 尾（進入段 b、出口段 d；RETURN 回線段尾 returnEndS）
         if s.dodging and finite(fs.offA) then
             if rs > fs.offA and rs < fs.offB then rampEnd = fs.offB
             elseif rs > fs.offC and rs < fs.offD then rampEnd = fs.offD end
+        elseif ret and not s.returnCrawlExact and rs > s.returnStartS and rs < s.returnEndS then
+            rampEnd = s.returnEndS
         end
         local bestS = nil
         for i = 1, sen.hardN do
@@ -10321,7 +10341,7 @@ end
 -- ld 換號、期望線 el（s.diagExpL）兩輪間跳超過 LAG_HIST_JUMP_M、守門不判的狀態（live＝false）——否則把 el 跳變當成收斂。
 function Drive.lagRate(s, ld, vx, vy, live)
     local hd, hl, N = s.lagHistD, s.lagHistL, TUNE.LAG_HIST_N
-    local el, key, n = s.diagExpL, s.dodging and s.fstate.ovS0 or false, s.lagHistN
+    local el, key, n = s.diagExpL, (s.dodging or s.returnActive) and s.fstate.ovS0 or false, s.lagHistN
     if not live or not finite(vx) or not finite(vy) or not finite(el) or key ~= s.lagHistKey
             or (n > 0 and ((ld >= 0) ~= (s.lagHistSign >= 0)
                 or el - s.lagHistEl > TUNE.LAG_HIST_JUMP_M or s.lagHistEl - el > TUNE.LAG_HIST_JUMP_M)) then
@@ -14174,13 +14194,15 @@ local function stepFollow(s, vehicle, playerNum, now)
 
         -- Final target is known before the supervisor. Planned blocked/followHold at target
         -- zero are legal waits; current-body contact remains a recovery demand.
-        -- RETURN outranks planned blocked; current-body contact still outranks RETURN.
+        -- RETURN 只管橫向（2026-10-13 使用者裁定）：判堵停止線、接近包絡、起步判堵包絡在 RETURN 活躍時照套——
+        -- 舊制 RETURN 豁免判堵，起步回線爬行帽 14 km/h 開過停止線 2.5m 才因 stall 停住（1012 E2E blockscan 路心起步）。
+        -- 停在停止線＝WAIT，停等預算／倒車／改道照常。current-body contact still outranks RETURN.
         -- 調頭豁免（2026-09-01 圖 1「煞停等待」僵死）：調頭姿態下走廊沿路線
         -- 反向掃＝掃描帶在車尾方向，掃到的 hard 是「倒著撞的東西」不是調頭
         -- 路徑上的障礙；blockedStop 壓 0 會把 rotate 鏈整個鎖死（else 分支
         -- 進不去）。調頭安全由 probeAround（原地轉）＋contact/sweep（大弧）
         -- 管；err 收斂回 90° 內即恢復 blocked 停等語意。
-        local blockedStop = s.blocked and not reached and not s.returnActive
+        local blockedStop = s.blocked and not reached
             and s.fstate.rotating ~= true
             and Drive.blockedAtStop(s, vx, vy)
         if getDebug() and s.blocked and s.lastBlockedStopDbg ~= blockedStop then -- telemetry: 樣本 bl bs rs bhx bhy capReason=blocked
@@ -14564,7 +14586,7 @@ local function stepFollow(s, vehicle, playerNum, now)
         end
 
         s.blockedApproachCap = nil
-        if s.blocked and not reached and not s.returnActive and not blockedStop then
+        if s.blocked and not reached and not blockedStop then -- RETURN 活躍照套（1013b，見 blockedStop 註解）
             -- 接近判堵停止線只套包絡（1004e，使用者「遇到障礙不要停留太久」）：舊制另把目標平壓 BLOCK_APPROACH_KMH，
             -- 遠處判堵（E2E dixie9160：68m 外）就以 20 km/h 爬 11 秒才到停止線。包絡在停止線收到同一個值，減速由
             -- Drive.visAssistForce 的 blocked 帳補、越線照舊 blocked-approach 煞車；判堵時 fullGate 已關，加速輔助不推。
@@ -14631,7 +14653,10 @@ local function stepFollow(s, vehicle, playerNum, now)
         if s.returnHold then
             hardCapV, hardClampReason, okHard =
                 MDADDynamics.lowerHardCap(hardCapV, hardClampReason, 0, "return")
-        elseif s.returnActive then
+        elseif s.returnActive and not (targetSpeed / 3.6 >= hardCapV) then
+            -- 只在 RETURN 的帽真的更低時才改名（1013b）：lowerHardCap 同值取後者，先套的會車停等 moving（同值 0）會被
+            -- 改成 return，Drive.hardBrake 對 return 只在 returnHold 才不鎖輪＝回線中讓車 16 km/h 一秒鎖輪
+            -- （正式服 0.29 Q16 clip-17 `hbr=return fbt=true`）。NaN 照舊進 lowerHardCap 判 dynamics-invalid。
             hardCapV, hardClampReason, okHard = MDADDynamics.lowerHardCap(
                 hardCapV, hardClampReason, targetSpeed / 3.6, "return")
         end
