@@ -380,6 +380,14 @@ local POLICY_DODGE = 1         -- 沙盒 ObstaclePolicy enum：1=繞行 2=停車
 TUNE.BLOCK_STOP_DIST = 10      -- 距障礙群這麼近才煞停等待；更遠先滑行接近
 TUNE.BLOCK_APPROACH_KMH = 20   -- blocked 接近段的速度上限（掃描逼近後縫隙判定更準）
 TUNE.BLOCK_APPROACH_HARD_MARGIN = 10 -- blocked 接近包絡的一秒鎖輪只在實速超過 BLOCK_APPROACH_KMH＋此值時（停止線前低速段交給 blockedStop）
+-- 起步判堵爬行（1012，使用者 2026-10-12 裁定「只修起步已判堵仍先衝」；Drive.launchHold）：判堵或繞行延後（前方有已知
+-- 障礙、還沒有承諾線）在離起步點 LAUNCH_HOLD_M 內成立＝起步那一刻就知道前面過不去，接近速度壓在 LAUNCH_HOLD_KMH
+-- 等候選鏈結果，直到承諾或判淨空。舊制起步也套 blocked 接近包絡（停止線終點 BLOCK_APPROACH_KMH）與對正延後帽
+-- （出口不低於 MIN_EXEC），regulator 是二值全油：正式服 0.28 49powerWagonPD 兩趟 0.5 秒內 0→10–12 km/h，
+-- 1.1–1.2 秒在 1–2m 外的停止線一秒鎖輪，0.3 秒後就承諾繞行。行進中的判堵（離起步點更遠才成立）照舊走包絡。
+TUNE.LAUNCH_HOLD_KMH = 5
+TUNE.LAUNCH_HOLD_M = 5
+TUNE.LAUNCH_HOLD_ENTRY_KMH = 15 -- 閂上當下車速超過此值不算起步（行進中按下自駕，起步點就是行進中的位置）
 -- Knox Pass 大門（1005c，Sensor gateCell）：會替這台車開的關門，車心到門格 ≤ 停止線＋halfL＋車速×此秒數才當硬物
 -- （退回關門處理）。更遠只當可視前緣（可視兩帳保證停得住）。這段時間涵蓋「門格被掃到→本輪完成→replan 判堵」的延遲
 --（一般 1–2 輪）：判堵在車到停止線之前就成立，停點與寬帶武裝照舊落在停止線。下限（停住時）＝停止線＋halfL，
@@ -6283,6 +6291,37 @@ function Drive.blockedApproachCap(s, vx, vy)
     return MDADDynamics.approachCapKmh(wd - stopDist, TUNE.BLOCK_APPROACH_KMH, 0.5, decel)
 end
 
+-- 起步判堵爬行（TUNE.LAUNCH_HOLD_*）：本幀是否把目標壓在 LAUNCH_HOLD_KMH。判堵或繞行延後（未承諾）成立的那一刻判一次
+-- 「是不是起步」——起步近物保護武裝中（開局或倒車後，不含繞行釋放武裝的 startGuardRelease）、車離武裝點 ≤ LAUNCH_HOLD_M、
+-- 車速 ≤ LAUNCH_HOLD_ENTRY_KMH（行進中按下自駕不算）——
+-- 結果閂在 s.launchHoldOn，直到判堵與延後都解除（承諾、判淨空）、RETURN 或調頭接手才清；同一次判堵不重判，車爬遠了也不
+-- 放回包絡。出口：承諾／淨空照常加速；一直過不去就爬到停止線（blockedStop 停等，判堵階梯照舊）。閂上那一刻記
+-- launch phase=hold（why blocked／defer、d＝離武裝點、speed）。
+function Drive.launchHold(s, playerNum, vx, vy, speedKmh)
+    local why = s.blocked and "blocked" or nil
+    if why == nil and not s.dodging and not s.dodgeHandoffHold and finite(s.dodgeDeferCap) and s.dodgeDeferCap >= 0 then
+        why = "defer"
+    end
+    if why == nil or s.returnActive or s.fstate.rotating == true then
+        s.launchHoldOn = nil
+        return false
+    end
+    if s.launchHoldOn == nil then
+        local on, d = false, nil
+        if s.startGuard and not s.startGuardRelease and finite(s.startGuardX) and finite(s.startGuardY) then
+            local dx, dy = vx - s.startGuardX, vy - s.startGuardY
+            d = sqrt(dx * dx + dy * dy)
+            local v = finite(speedKmh) and (speedKmh < 0 and -speedKmh or speedKmh) or 0
+            on = d <= TUNE.LAUNCH_HOLD_M and v <= TUNE.LAUNCH_HOLD_ENTRY_KMH
+        end
+        s.launchHoldOn = on
+        if on then
+            diagEvent(s, playerNum, "launch", { phase = "hold", why = why, d = d, speed = speedKmh, s = s.lastSNow })
+        end
+    end
+    return s.launchHoldOn
+end
+
 -- 證明線世界掃掠在煞停視界內命中（gate "sweep"）的接近包絡（1005）：舊制平壓近場警戒帽（ungatedCapKmh 18）只夾
 -- regulator＝斷油滑行，41–53 km/h 時滑不到就撞上路口物件（open-issue「規劃與世界掃掠的硬點位置不一致」）。改成
 -- 「車心開到掃掠命中的車身取樣點（s.proofHitS）時降到同一個警戒帽」的包絡，煞車基準同 blocked 接近包絡
@@ -7070,7 +7109,7 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
         if Drive.blockedAtStop(s, vehicle:getX(), vehicle:getY()) then
             phys.capBlocked = 0
         else
-            phys.capBlocked = TUNE.BLOCK_APPROACH_KMH
+            phys.capBlocked = s.launchHoldOn and TUNE.LAUNCH_HOLD_KMH or TUNE.BLOCK_APPROACH_KMH
         end
     end
     if s.dodging and finite(s.lastDcap) then
@@ -14278,6 +14317,12 @@ local function stepFollow(s, vehicle, playerNum, now)
             if targetSpeed > (s.blockedApproachCap or TUNE.BLOCK_APPROACH_KMH) then
                 targetSpeed, s.lastCapReason = s.blockedApproachCap or TUNE.BLOCK_APPROACH_KMH, "blocked"
             end
+        end
+        -- 起步判堵爬行（Drive.launchHold）：只夾 regulator＝起步前已帶的速度斷油滑行收（起步段 ≤ LAUNCH_HOLD_ENTRY_KMH，
+        -- 減速輔助 25 km/h 以下本來就不補），不鎖輪；停止線照舊 blockedStop。
+        if Drive.launchHold(s, playerNum, vx, vy, speedKmh) and not reached and s.recoverWhy == nil
+                and targetSpeed > TUNE.LAUNCH_HOLD_KMH then
+            targetSpeed, s.lastCapReason = TUNE.LAUNCH_HOLD_KMH, "launch"
         end
         if s.dynamicsFault then postAction = "dynamics-fault" end
         local commandState = controlStateOf(s)

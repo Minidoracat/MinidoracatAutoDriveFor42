@@ -934,7 +934,7 @@ local SLOW_CATEGORY = {
     visibility = "vis", perception = "vis",
     band = "road", obb = "road", sweep = "road", corridor = "road", stale = "road",
     sensor = "road", warm = "road", state = "road", progress = "road",
-    dodge = "dodge", ["dodge-defer"] = "dodge", blocked = "dodge", contact = "dodge", soft = "dodge",
+    dodge = "dodge", ["dodge-defer"] = "dodge", blocked = "dodge", launch = "dodge", contact = "dodge", soft = "dodge",
     zombie = "zombie", ["zombie-lane"] = "zombie", corpse = "zombie",
     ["animal-stop"] = "animal", ["animal-crawl"] = "animal", ["animal-gentle"] = "animal", ["player-stop"] = "player",
     moving = "traffic", traffic = "traffic", ["traffic-yield"] = "traffic",

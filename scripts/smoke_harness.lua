@@ -26864,6 +26864,114 @@ function drive.scenarioGuardFar()
 end
 drive.scenarioGuardFar()
 
+-- (launch) 1012 起步已判堵仍先衝（正式服 0.28 49powerWagonPD 兩趟：0.5 秒內 0→10–12 km/h、1–2m 外的停止線一秒鎖輪）：
+--   判堵／繞行延後在離起步點 TUNE.LAUNCH_HOLD_M 內、車速 ≤ LAUNCH_HOLD_ENTRY_KMH 時成立＝目標壓在 TUNE.LAUNCH_HOLD_KMH，
+--   閂到判堵解除。
+--   (launch)        起步時前方 30m 整排牆：cap=launch、目標 ≤ 爬行、launch phase=hold why=blocked 記一次；已帶 12 km/h
+--                   時同樣只壓目標、不鎖輪。
+--   (launch-clear)  牆拆掉判淨空：閂清掉、目標回到爬行以上。
+--   (launch-run)    行進中判堵（車已離起步點 12m、10 km/h，起步近物保護仍武裝）：照舊包絡、不閂、不記事件。
+--   (launch-moving) 行進中按下自駕（起步點判堵、30 km/h）：不閂。
+--   (launch-defer)  未承諾的繞行延後（dodgeDeferCap ≥ 0）在起步點：同樣閂上；承諾中不算。
+--   違規證明：launchHold 恆回 false＝(launch) 紅；拿掉距離閘＝(launch-run) 紅；拿掉車速閘＝(launch-moving) 紅；
+--   判堵解除不清閂＝(launch-clear) 紅。
+function drive.scenarioLaunchHold()
+    scenario("1012：起步已判堵——接近速度壓在爬行、等候選鏈結果；行進中判堵照舊包絡")
+    local oldSand = SandboxVars
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 90, RightLaneBias = 0 })
+    local wasMs = drive.frameMs(20)
+    local Dr, T = MDAD.Drive, MDAD.Drive.debugTune()
+    local oldEvent, oldSample, events = MDADDiagnostics.event, MDADDiagnostics.sample, {}
+    MDADDiagnostics.event = function(_, name, a) events[#events + 1] = { name = name, a = a } end
+    MDADDiagnostics.sample = function() return true end
+    local function launches()
+        local n, last = 0, nil
+        for i = 1, #events do
+            if events[i].name == "launch" then n, last = n + 1, events[i].a end
+        end
+        return n, last
+    end
+    local function wall(x, on)
+        for y = -9, 9 do
+            if on then drive.putSolid(x, y, "launch_wall_" .. y) else drive.clearCell(x, y) end
+        end
+    end
+    local function tick(n)
+        for _ = 1, n do
+            nowMs = nowMs + 20
+            driveTick(dp, dveh)
+        end
+    end
+    -- (launch)
+    drive.fillWorld(-10, 90, -10, 10)
+    wall(30, true)
+    checkTrue(armDrive(), "(launch) 啟動（前方 30m 整排牆）")
+    local st = Dr.debugSession(0)
+    st.diag = true
+    setHeading(dveh, 0)
+    dveh._x, dveh._y, dveh._speed = 0, 0, 0
+    for i = #events, 1, -1 do events[i] = nil end
+    for _ = 1, 3 do drive.scanRound(true) end
+    checkTrue(st.blocked == true and st.startGuard == true, "(launch) 前置：判堵、起步近物保護武裝（blocked="
+        .. tostring(st.blocked) .. " sg=" .. tostring(st.startGuard) .. "）")
+    tick(3)
+    local n, ev = launches()
+    checkTrue(st.launchHoldOn == true and st.lastCapReason == "launch" and st.desiredTarget <= T.LAUNCH_HOLD_KMH + 1e-9,
+        "(launch) 起步已判堵：目標壓在爬行（acr=" .. tostring(st.lastCapReason) .. " des=" .. tostring(st.desiredTarget) .. "）")
+    checkTrue(n == 1 and ev.phase == "hold" and ev.why == "blocked" and type(ev.d) == "number" and ev.d <= T.LAUNCH_HOLD_M,
+        "(launch) launch phase=hold why=blocked 只記一次（n=" .. n .. " d=" .. tostring(ev and ev.d) .. "）")
+    dveh._speed = 12
+    st.forceBrakeUntil = 0
+    tick(1)
+    checkTrue(st.desiredTarget <= T.LAUNCH_HOLD_KMH + 1e-9 and (st.forceBrakeUntil or 0) == 0 and st.lastHardBrakeReason == nil,
+        "(launch) 已帶 12 km/h：只壓目標、不鎖輪（des=" .. tostring(st.desiredTarget) .. " fbu=" .. tostring(st.forceBrakeUntil)
+        .. " hbr=" .. tostring(st.lastHardBrakeReason) .. "）")
+    -- (launch-clear)
+    dveh._speed = 0
+    wall(30, false)
+    for _ = 1, 6 do drive.scanRound(true) end
+    tick(2)
+    checkTrue(not st.blocked and st.launchHoldOn == nil and st.lastCapReason ~= "launch",
+        "(launch-clear) 判淨空：閂清掉、不再壓爬行（blocked=" .. tostring(st.blocked) .. " on="
+        .. tostring(st.launchHoldOn) .. " acr=" .. tostring(st.lastCapReason) .. "）")
+    -- (launch-run)
+    MDAD.Drive.stop(0, nil)
+    drive.fillWorld(-10, 90, -10, 10)
+    checkTrue(armDrive(), "(launch-run) 啟動（前方淨空）")
+    st = Dr.debugSession(0)
+    st.diag = true
+    setHeading(dveh, 0)
+    dveh._x, dveh._y, dveh._speed = 12, 0, 10
+    drive.scanRound(true)
+    st.startGuard, st.startGuardRelease = true, nil
+    wall(50, true)
+    for i = #events, 1, -1 do events[i] = nil end
+    for _ = 1, 3 do drive.scanRound(true) end
+    tick(1)
+    n = launches()
+    checkTrue(st.blocked == true and st.launchHoldOn == false and n == 0 and st.lastCapReason ~= "launch"
+            and st.desiredTarget > T.LAUNCH_HOLD_KMH,
+        "(launch-run) 離起步點 12m 才判堵（10 km/h）：照舊包絡、不閂（blocked=" .. tostring(st.blocked) .. " on=" .. tostring(st.launchHoldOn)
+        .. " n=" .. n .. " acr=" .. tostring(st.lastCapReason) .. " des=" .. tostring(st.desiredTarget) .. "）")
+    wall(50, false)
+    MDAD.Drive.stop(0, nil)
+    -- (launch-defer)：predicate 直接問
+    local fs = { blocked = false, dodging = false, dodgeDeferCap = 10, fstate = {}, startGuard = true,
+        startGuardX = 0, startGuardY = 0, lastSNow = 0 }
+    checkTrue(Dr.launchHold(fs, 0, 1, 0, 0) == true, "(launch-defer) 起步點的未承諾延後：閂上")
+    fs.launchHoldOn, fs.dodging = nil, true
+    checkTrue(Dr.launchHold(fs, 0, 1, 0, 0) == false and fs.launchHoldOn == nil, "(launch-defer) 承諾中：不算")
+    -- (launch-moving)
+    fs.launchHoldOn, fs.dodging, fs.blocked = nil, false, true
+    checkTrue(Dr.launchHold(fs, 0, 1, 0, 30) == false and fs.launchHoldOn == false,
+        "(launch-moving) 行進中按下自駕（起步點判堵、30 km/h）：不閂")
+    MDADDiagnostics.event, MDADDiagnostics.sample = oldEvent, oldSample
+    drive.fillWorld(-2, 70, -7, 7)
+    drive.frameMs(wasMs)
+    SandboxVars = oldSand
+end
+drive.scenarioLaunchHold()
+
 -- 1008 車在常駐線外遠處的橫向覆蓋出口（正式服 0.23.0 三個片段：起步離 nav 線
 --   8–12m、斜切保持把行駛線釘在車位，車位帶心那輪候選被橫向覆蓋拒收→延後、nav 線補掃那輪車身在 ±7 帶外看不到車線上的
 --   硬點→判淨空，延後↔淨空逐輪交替到接觸）。常駐 0（keepRightTarget 打樁）、斜切保持打樁成「行駛線＝車位」、牆排在 x=40、
