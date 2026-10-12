@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1012a"
+Drive.REV = "1012b"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -294,6 +294,7 @@ TUNE.ONCOMING_INTRUDE_M = 0.5     -- 路寬未知時：車身左緣壓過路面�
 TUNE.ONCOMING_PASS_M = 2.4        -- 對向車道被吃掉後剩不到這麼寬（一台車＋餘裕）＝借對向車道
 TUNE.EXIT_EXTEND_MIN_M = 4        -- 承諾後出口加長：至少長這麼多才重建（Drive.extendDodgeExit）
 TUNE.EXIT_EXTEND_RETRY_M = 5      -- 加長掃不過：車再前進這麼多才重試
+TUNE.EXIT_SHORTEN_MIN_M = 2      -- 下一群擋回線 lane 時出口收短：至少短這麼多才重建（Drive.exitNextRoom／extendDodgeExit）
 -- 出口轉場塞不進緊接的小折點前（c 後 2m 內）時，偏移照樣通過這個折點、出口放到它之後（shapeProfile）。
 -- 大折點（外側偏移繞急彎＝車追不上、切內）照舊拒收。
 TUNE.EXIT_HOLD_KINK_RAD = 0.6
@@ -9331,10 +9332,37 @@ local function dodgeSpaceCapOf(s, protected, entryPassed)
     return base
 end
 
+-- 出口之後回線 lane 上的下一群（正式服 0.28 Raven Creek 檢查站，13 位玩家 23 趟：繞過外圍圍欄殘柱的承諾線出口
+-- 被加長到北側長圍欄起點前 3m，回線後跑道不到一個車身＝shape steep 判堵→寬帶→倒車，多數玩家在倒車時接手；
+-- 承諾當下圍欄還在可視前緣外，chainAhead 看不到）。回 c 之後出口最多還能多長＝下一群偏到位點 b2 −「車頭前伸＋
+-- 以目前車速再側移到那群縫的設計長」− c（Drive.chainBlockerFar 同一把尺），以及 b2 與那群的縫 lane o2；
+-- 回線 lane 淨空、整寬牆（blocked：之後照判堵階梯）或群不在 c 之後都回 nil。冷路徑：只在出口調整時算一次 corridor。
+function Drive.exitNextRoom(s, sen, c, speedKmh)
+    local baseL, vp, aLat = s.dodgeBaseL, s.vehicleProfile, s.horizonMinLat
+    if not finite(baseL) or not finite(c) or type(sen) ~= "table" or type(sen.hardS) ~= "table"
+            or not finite(aLat) or aLat <= 0 or type(vp) ~= "table" then
+        return nil
+    end
+    local mode, _, b2, _, _, o2 = MDADCorridor.plan(sen.hardS, sen.hardL, sen.hardN or 0, s.needHalf,
+        sen.corridorHalf or MDADSensor.CORRIDOR_HALF, baseL, sen.hardR, baseL, sen.roadLo, sen.roadHi, false,
+        nil, c, nil, sen.hardLc, sen.hardW)
+    if mode ~= "dodge" or not finite(b2) or not finite(o2) or b2 <= c then return nil end
+    local v = finite(speedKmh) and (speedKmh < 0 and -speedKmh or speedKmh) or 0
+    local k = MDADDynamics.steeringKappa(vp.wheelbase, vp.delta0Safe, vp.deltaVSafe, vp.maxSpeed,
+        v > MDADDynamics.DODGE_SQUEEZE_CAP and v or MDADDynamics.DODGE_SQUEEZE_CAP)
+    if k <= 0 then k = 1 / 6 end
+    local dl = o2 - baseL
+    if dl < 0 then dl = -dl end
+    local one = MDADDynamics.shiftLength(dl, v / 3.6, aLat, k, vp.halfL, MDADDynamics.LATERAL_JERK_MAX)
+    return b2 - s.bodyReach - one - c, b2, o2
+end
+
 -- 承諾後出口加長（0928f；E2E rc2–rc4：40–70m 外就看到障礙、出口被當下的可視範圍截到 2–6m，
 -- 空間帽 0 → 整段繞行最後降到 10 km/h；10/89 筆承諾是這型）。車還沒到出口時，可視範圍跟著車前進；
 -- 前緣容得下更長的出口就用同一組 a/b/c/offL、同一個起始 lane 重建整條線（進入段與保持段
 -- 取樣同一條曲線），世界掃掠過了才換（第二張工作表，成功才交換；失敗舊線原封不動）。
+-- 回線 lane 上看得到下一群時（Drive.exitNextRoom），出口不加長到吃掉「再側移到那群縫」的跑道；已加長過頭
+-- （下一群在加長之後才進可視範圍）就收短，但不短於承諾時驗過的出口（s.dodgeExitMin）。
 -- 停留（沒有出口）、脫困 episode、降級的線不做。同一位置失敗後前進 EXIT_EXTEND_RETRY_M 再試。
 function Drive.extendDodgeExit(s, sen, playerNum)
     local fs = s.fstate
@@ -9349,13 +9377,24 @@ function Drive.extendDodgeExit(s, sen, playerNum)
     if finite(s.dodgeExtendFailS) and rs < s.dodgeExtendFailS + TUNE.EXIT_EXTEND_RETRY_M then return false end
     local have = fs.offD - c
     local room = s.dodgeExitWant
-    if have >= room - TUNE.EXIT_EXTEND_MIN_M then return false end
-    local peak = turnPeakS(prof, c, rs + TUNE.DODGE_OV_SPAN + 6)
-    if peak and peak > c and peak - 2 - c < room then room = peak - 2 - c end
-    if rs + TUNE.DODGE_OV_SPAN - c < room then room = rs + TUNE.DODGE_OV_SPAN - c end
-    local cov = visibleEndS(sen, rs) - 1 - s.bodyReach - c
-    if cov < room then room = cov end
-    if room < have + TUNE.EXIT_EXTEND_MIN_M then return false end
+    local veh = s.vehicle
+    local nextRoom, nextB, nextL = Drive.exitNextRoom(s, sen, c, veh and veh:getCurrentSpeedKmHour() or 0)
+    local short = false
+    if nextRoom then
+        local floor = finite(s.dodgeExitMin) and s.dodgeExitMin or have
+        if nextRoom < floor then nextRoom = floor end
+        if nextRoom < room then room = nextRoom end
+        short = have > room + TUNE.EXIT_SHORTEN_MIN_M
+    end
+    if not short then
+        if have >= room - TUNE.EXIT_EXTEND_MIN_M then return false end
+        local peak = turnPeakS(prof, c, rs + TUNE.DODGE_OV_SPAN + 6)
+        if peak and peak > c and peak - 2 - c < room then room = peak - 2 - c end
+        if rs + TUNE.DODGE_OV_SPAN - c < room then room = rs + TUNE.DODGE_OV_SPAN - c end
+        local cov = visibleEndS(sen, rs) - 1 - s.bodyReach - c
+        if cov < room then room = cov end
+        if room < have + TUNE.EXIT_EXTEND_MIN_M then return false end
+    end
     local d2 = c + room
     local coverEnd = math.min(d2 + 1, prof.length)
     local n, s0, reason, covered = MDADFollower.buildOffsetLine(prof, rs, fs.offA, fs.offB, c, d2,
@@ -9402,10 +9441,12 @@ function Drive.extendDodgeExit(s, sen, playerNum)
     if finite(s.dodgeShapeDl) and finite(s.dodgeSpaceLat) and finite(s.dodgeEntryLength) then
         s.dodgeSpaceBaseCap = math.min(spaceCap(s.dodgeEntryLength), spaceCap(room))
     end
-    diagEvent(s, playerNum, "dodge", { phase = "extend", c = c, d = d2, len = room, m = margin, rs = rs })
-    if getDebug() then
-        print(string.format("%spn=%d dodge exit extended: c=%.1f d %.1f -> %.1f (exit %.1f -> %.1f) m=%.2f rs=%.1f",
-            LOG, playerNum, c, c + have, d2, have, room, margin, rs))
+    diagEvent(s, playerNum, "dodge", { phase = "extend", c = c, d = d2, len = room, m = margin, rs = rs,
+        why = short and "short" or (nextRoom and "next" or nil), blocker = nextB, l = nextL })
+    if getDebug() then -- telemetry: dodge phase=extend（why short／next、blocker＝下一群 b2、l＝那群縫 lane）
+        print(string.format("%spn=%d dodge exit %s: c=%.1f d %.1f -> %.1f (exit %.1f -> %.1f) m=%.2f rs=%.1f next=%s,%s",
+            LOG, playerNum, short and "shortened" or "extended", c, c + have, d2, have, room, margin, rs,
+            tostring(nextB), tostring(nextL)))
     end
     return true
 end
@@ -12080,6 +12121,7 @@ local function replan(s, vehicle, playerNum)
             -- 出口加長（Drive.extendDodgeExit）重建同一條線要用的起始 lane 與回線 lane（與候選鏈同一個
             -- Drive.dodgeHomeL；RETURN 還沒在下方結束，接手時取到的是回線目標）
             s.dodgeBaseL, s.dodgeExtendFailS = Drive.dodgeHomeL(s), nil
+            s.dodgeExitMin = d - c -- 承諾時驗過的出口長：下一群擋回線時收短的下限（Drive.extendDodgeExit）
             s.dodgeStartL = startLaneOf(s, s.dodgeBaseL)
             -- RETURN hold 讓位給 dodge 不能只讓剖面（2026-09-03 s017：起步就 hold(probe)
             -- → 「return line blocked: dodge takes over」→ 原地 15s 紅字）：

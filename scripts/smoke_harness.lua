@@ -24645,6 +24645,89 @@ function drive.scenario0928d()
 end
 drive.scenario0928d()
 
+-- (exit-next)／(exit-short) 1012：正式服 0.28 Raven Creek 檢查站（13 位玩家 23 趟）——繞過外圍圍欄殘柱 A 的承諾線，
+--   出口被加長到回線 lane 上長圍欄 B 起點前 3m，回線後跑道不到一個車身＝steep 判堵→寬帶→倒車，玩家多半在倒車時接手。
+--   現制：回線 lane 上看得到下一群時出口不加長到吃掉「車頭前伸＋以目前車速再側移到 B 縫的設計長」（Drive.exitNextRoom）；
+--   B 在加長之後才進可視範圍就收短，但不短於承諾時驗過的出口（s.dodgeExitMin）。fixture 同 (exit-extend)：A 在 x=34 l=0。
+--   違規證明：Drive.exitNextRoom 恆回 nil＝(exit-next)／(exit-short) 紅。
+function drive.scenarioExitNext()
+    scenario("1012：出口加長不吃掉回線後再側移到下一群的跑道；下一群晚出現就收短")
+    local oldSand = SandboxVars
+    local oldPer, oldGear = MDAD.HUD.perceptionDistance, MDAD.Drive.getGear(0)
+    local oldEvent, oldSample = MDADDiagnostics.event, MDADDiagnostics.sample
+    local events = {}
+    MDADDiagnostics.event = function(_, name, a) events[#events + 1] = { name = name, a = a } end
+    MDADDiagnostics.sample = function() return true end
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 120, RightLaneBias = 0 })
+    MDAD.Drive.setGear(0, 4)
+    MDAD.HUD.perceptionDistance = function() return 48 end
+    local wasE = drive.frameMs(10)
+    local function extendWhy(why)
+        for i = #events, 1, -1 do
+            local e = events[i]
+            if e.name == "dodge" and type(e.a) == "table" and e.a.phase == "extend" and e.a.why == why then return e.a end
+        end
+    end
+    -- A 在 x=34 l=0；bx／bl＝下一群（另一台車）位置；先跑四輪讓承諾與加長完成
+    local function arm(bx, bl)
+        events = {}
+        drive.fillWorld(-10, 200, -8, 8)
+        drive.putVehicleGeom(34, 0, 0, 1.8, 4.4, true)
+        if bx then drive.putVehicleGeom(bx, bl, 0, 1.8, 4.4, true) end
+        local ok = armDrive()
+        setHeading(dveh, 0)
+        dveh._speed = 30
+        local st = MDAD.Drive.debugSession(0)
+        if st then st.diag = true end
+        for _ = 1, 4 do drive.frameMs(10); drive.scanRound(true) end
+        return ok, st
+    end
+    local function num(x) return type(x) == "number" and x == x end
+    -- 對照：回線 lane 上沒有下一群＝出口照常加長到可視前緣
+    local okF, stF = arm(nil)
+    local cF, dF = stF.fstate.offC, stF.fstate.offD
+    checkTrue(okF and stF.dodging == true and num(stF.dodgeExitMin) and dF - cF > stF.dodgeExitMin + 4,
+        string.format("(exit-next) 對照：回線 lane 淨空＝出口照常加長（出口 %.1f、承諾時 %s）", dF - cF,
+            tostring(stF.dodgeExitMin)))
+    MDAD.Drive.stop(0, nil)
+    -- 下一群在路外側（l=+5，不擋回線 lane）＝照常加長，不誤觸
+    local okO, stO = arm(60, 5)
+    checkTrue(okO and stO.dodging == true and math.abs(stO.fstate.offD - dF) < 0.5,
+        string.format("(exit-next) 下一群不擋回線 lane：出口照常加長（d %.1f、對照 %.1f）", stO.fstate.offD, dF))
+    MDAD.Drive.stop(0, nil)
+    -- 下一群在回線 lane 上、加長的線碰不到它（車頭到線尾 +1 之外）但回線後的側移跑道不夠、承諾時就在可視範圍：
+    --   出口不加長（舊制照樣加長到 64.1，回線後離 B 只剩約 1.7m）
+    local okN, stN = arm(70, 0)
+    local fsN = stN.fstate
+    local roomN, bN = MDAD.Drive.exitNextRoom(stN, stN.sensor, fsN.offC, dveh._speed)
+    checkTrue(okN and stN.dodging == true and num(roomN) and fsN.offD < dF - 4
+            and fsN.offD - fsN.offC <= math.max(roomN, stN.dodgeExitMin) + 1e-6,
+        string.format("(exit-next) 回線 lane 上有下一群（b2 %s）：出口不加長到吃掉側移跑道（d %.1f、對照 %.1f、可給 %s）",
+            tostring(bN), fsN.offD, dF, tostring(roomN)))
+    MDAD.Drive.stop(0, nil)
+    -- (exit-short) 出口已加長到可視前緣，之後下一群才出現在線尾後：收短，不短於承諾時驗過的出口
+    local okS, stS = arm(nil)
+    local fsS = stS.fstate
+    local dLong = fsS.offD
+    -- 車速 60：再側移的設計長大於線尾到 B 的空間＝可給的出口比承諾時還短，收短以承諾時的出口為下限
+    dveh._speed = 60
+    drive.putVehicleGeom(70, 0, 0, 1.8, 4.4, true)
+    for _ = 1, 3 do drive.frameMs(10); drive.scanRound(true) end
+    local evS = extendWhy("short")
+    checkTrue(okS and stS.dodging == true and evS ~= nil and fsS.offD < dLong - 2
+            and fsS.offD - fsS.offC >= stS.dodgeExitMin - 1e-6 and num(evS.blocker) and evS.blocker > fsS.offD,
+        string.format("(exit-short) 下一群晚出現在加長後的線尾後：出口收短（d %.1f → %.1f、承諾時出口 %s、事件 %s）",
+            dLong, fsS.offD, tostring(stS.dodgeExitMin), evS and tostring(evS.blocker) or "nil"))
+    MDAD.Drive.stop(0, nil)
+    MDADDiagnostics.event, MDADDiagnostics.sample = oldEvent, oldSample
+    drive.frameMs(wasE)
+    MDAD.HUD.perceptionDistance = oldPer
+    MDAD.Drive.setGear(0, oldGear)
+    drive.fillWorld(-2, 70, -7, 7)
+    SandboxVars = oldSand
+end
+drive.scenarioExitNext()
+
 -- (chain-far) 1004a 玩家回報「繞道後判定走路邊草地，要到第一次轉彎或殭屍／屍體出現才回到路上」：鏈式停留只在
 --   常駐線前方淨空才解鏈，看的是整個感知窗——遠處還有任何擋常駐線的東西，車就沿停留 lane（常在路外）一路開，
 --   直到減速把窗縮短。現制擋常駐線那群夠遠（回常駐線＋再側移出去兩段都塞得進，Drive.chainBlockerFar）就解鏈。
