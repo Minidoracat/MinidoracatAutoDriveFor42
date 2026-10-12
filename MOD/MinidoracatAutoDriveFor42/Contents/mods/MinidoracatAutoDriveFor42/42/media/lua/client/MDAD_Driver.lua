@@ -3582,10 +3582,14 @@ end
 
 -- 路線在 [s0, s1] 內單一折點的峰值位置（最大單段轉角的弧長；< 0.15 rad 視為
 -- 無折點回 nil）與該折角（rad）。過渡段提早完成用；事件驅動冷路徑。
+-- 終點停點（profile.coastStopS）之後的折點不算（1012）：車開不到那裡，尾端短接線的 90° 折點拿來當進入／出口的
+-- 折點上限＝停點前的繞行全部 exit-room（正式服 0.28 takeover #1；sweepLine 同一個停點）。
 local function turnPeakS(profile, s0, s1)
     local n = profile.n
     local ss, hh = profile.s, profile.segH
     local best, bestS = 0.15, nil
+    local stopS = profile.coastStopS
+    if MDADDynamics.finite(stopS) and stopS < s1 then s1 = stopS end -- （本檔的 finite 在後面才定義）
     for i = 1, n - 2 do
         local sa = ss[i + 1]
         if sa > s1 then break end
@@ -8105,6 +8109,20 @@ function Drive.sweepHit(s, sen, tag, a, b, c, offL, sk, wx, wy, i, ox, oy, clear
     return false, -clearance, (sen.hardS and sen.hardS[i]) or sk, phase, sk, ox, oy or 0, i
 end
 
+-- 路線起點短接線的折點弧長（1012；sweepLine 的車身擺法用）：剖面第一個內頂點是 ≤90° 的 fallback 折點、離起點不到 maxM
+-- 才回，其餘 nil（>90° 屬起步原地轉／調頭）。
+function Drive.startStubKinkS(prof, maxM)
+    if type(prof) ~= "table" or type(prof.segKind) ~= "table" or not finite(prof.n) or prof.n < 3 then return nil end
+    local ss, kind, FB = prof.s, prof.segKind, MDADDynamics.SEG_FALLBACK
+    if not finite(ss[2]) or not finite(ss[1]) or ss[2] - ss[1] > maxM then return nil end
+    if kind[1] ~= FB and kind[2] ~= FB then return nil end
+    local th = prof.segH[2] - prof.segH[1]
+    if th > math.pi then th = th - 2 * math.pi elseif th < -math.pi then th = th + 2 * math.pi end
+    if th < 0 then th = -th end
+    if not (th <= math.pi * 0.5 + 1e-3) then return nil end
+    return ss[2]
+end
+
 -- sweepLine 的逐點常數（每次呼叫重填前 hardN 格、只長不縮，不每次配置）：兩種 pad 的掃掠半徑與整格方塊半邊。
 -- 內迴圈是 取樣×點數，原本每一對都做 type／sweepRadius／math.abs（Kahlua 裡都是函式呼叫）。不以快照為鍵快取：
 -- pad 隨 needBase 每次呼叫不同，離線 fixture 也會原地改點雲；重填是 O(點數)，相對 O(取樣×點數) 可忽略。
@@ -8203,6 +8221,33 @@ local function sweepLine(s, lx, ly, ln, lS0, lS1,
         inBlk = inBlk + 1
     end
     local ovStep = MDADFollower.OV_STEP
+    -- 終點停點之後車不轉彎（1012）：剖面滑行包絡在 profile.coastStopS 收到 0、車心在那附近停下或沿當下朝向直直滑過幾公尺，
+    -- 不會開進停點之後的折點。停點之後的取樣改擺在「停點＋沿停點所在段朝向直線外推」上（直路終點與原擺法相同，牆、路底照驗）。
+    -- 路線尾端 ≈3m 的 90° 短接線（玩家大門內的目標）折點落在停點之後：原擺法折點那個取樣的車身朝向已是出臂方向，車尾往入臂
+    -- 外側伸出 halfL＝假命中門柱（正式服 0.28 takeover #1：證明線停車→所有候選 exit-room）。
+    local stopS = s.profile and s.profile.coastStopS
+    local stopX, stopY, stopFx, stopFy = nil, nil, 0, 0
+    if finite(stopS) and stopS < lS1 then
+        if stopS < lS0 then stopS = lS0 end
+        local j = math.floor((stopS - lS0) / ovStep) + 1 -- 停點所在段 lx[j]→lx[j+1]
+        if j > ln - 1 then j = ln - 1 end
+        local sj = lS0 + (j - 1) * ovStep
+        local sj1 = j + 1 == ln and lS1 or sj + ovStep
+        local dx, dy = lx[j + 1] - lx[j], ly[j + 1] - ly[j]
+        local dl = sqrt(dx * dx + dy * dy)
+        if dl > 1e-6 then
+            local t = (stopS - sj) / (sj1 - sj)
+            stopX, stopY, stopFx, stopFy = lx[j] + t * dx, ly[j] + t * dy, dx / dl, dy / dl
+        end
+    end
+    -- 起點短接線（1012）：剖面第一個內頂點是離起點不到一個車身長的 fallback 折點（Drive.startStubKinkS）時，折點 ±halfL 內的
+    -- 取樣車身改照「兩端都在線上」擺：車尾、車頭取線上前後 halfL 的點（線頭之前沿第一段外推），車心在兩點中點、朝向沿弦。
+    -- 原擺法以取樣點為車心、朝向取下一段：折點那個取樣已是出臂方向，車尾往入臂外側伸出 halfL；這段比車身短，車從起點就邊走
+    -- 邊轉，車尾擺不過去（正式服 0.28 takeover #39：起點 3.3m 外 90° 左轉、車右 2.5m 的門柱列假命中→判堵倒車）。一般 fallback
+    -- 折點照原擺法驗（長車窄路直角是真問題，route.md〈已知坑〉）。這段命中的 blocked 事件 kind＝stub。
+    local stubLo, stubHi, stubH = 1e9, -1e9, 0
+    local stubS = Drive.startStubKinkS(s.profile, 2 * halfL)
+    if stubS then stubLo, stubHi, stubH = stubS - halfL, stubS + halfL, math.ceil(halfL / ovStep) end
     local comX, comZ = s.vehicleProfile.centerOfMassX, s.vehicleProfile.centerOfMassZ
     -- 拖車（0929p）：沿候選線以 tractrix 推掛車（掛點走牽引車線、掛車軸無側滑，同 MDADTrailer.simulate），
     -- 掛車車身同樣逐點驗硬點——只驗牽引車時，繞過障礙後掛車內切會掃到剛閃過的東西。從車目前位置起算
@@ -8234,6 +8279,24 @@ local function sweepLine(s, lx, ly, ln, lS0, lS1,
             lastFx, lastFy = fx, fy
         else
             fx, fy = lastFx, lastFy
+        end
+        local stub = sk >= stubLo and sk <= stubHi
+        if stub then
+            local kb, kf = k - stubH, k + stubH
+            if kf > ln then kf = ln end
+            local rx, ry
+            if kb >= 1 then
+                rx, ry = lx[kb], ly[kb]
+            else
+                rx, ry = lx[1] + (kb - 1) * (lx[2] - lx[1]), ly[1] + (kb - 1) * (ly[2] - ly[1])
+            end
+            local cx, cy = lx[kf] - rx, ly[kf] - ry
+            local cl = sqrt(cx * cx + cy * cy)
+            if cl > 1e-6 then wx, wy, fx, fy = (rx + lx[kf]) * 0.5, (ry + ly[kf]) * 0.5, cx / cl, cy / cl end
+        end
+        if stopX and sk > stopS then
+            local e = sk - stopS
+            wx, wy, fx, fy = stopX + stopFx * e, stopY + stopFy * e, stopFx, stopFy
         end
         local inCap = sk >= a and sk <= c
         local sampleMargin = 9
@@ -8294,7 +8357,7 @@ local function sweepLine(s, lx, ly, ln, lS0, lS1,
                             bodyX, bodyY, fx, fy, halfW + grow, halfL + grow, ox, oy)
                         if d2 == nil or d2 <= rr * rr then
                             return Drive.sweepHit(s, sen, tag, a, b, c, offL, sk, wx, wy, i, ox, oy,
-                                d2 and (sqrt(d2) - rr) or -99)
+                                d2 and (sqrt(d2) - rr) or -99, stub and "stub" or nil)
                         end
                         if inCap or clr then
                             local probe = rr + (clr and sampleMargin or minMargin)
@@ -10989,6 +11052,21 @@ function Drive.debugShape(playerNum, a, b, c, d, offL)
     return ok, ra, rb, rc, rd, s.dodgeShapeReason
 end
 
+-- 測試鉤（harness 鎖路線頭尾短接線：停點後不驗、起點短接線車身擺法、停點後的折點不算）：以物理檔 base 對當前點雲掃一條
+-- 給定折線（lx／ly 共 ln 點、弧長 lS0..lS1，不收表、不驗覆蓋），回 ok, 命中取樣弧長, hitX, hitY, kind；debugTurnPeak 回
+-- 當前剖面 turnPeakS(s0, s1)。production 無呼叫者。
+function Drive.debugSweepLine(playerNum, lx, ly, ln, lS0, lS1)
+    local s = sessions[playerNum]
+    if not s or not s.sensor then return nil end
+    local ok, _, _, _, sk, hx, hy = sweepLine(s, lx, ly, ln, lS0, lS1, lS0, lS0, lS1, lS1, 0, "debug",
+        MDADVehicleProfile.sweepBase(s.vehicleProfile.halfW, "physical"))
+    return ok, sk, hx, hy, s.sweepHitBody
+end
+function Drive.debugTurnPeak(playerNum, s0, s1)
+    local s = sessions[playerNum]
+    if not s or not s.profile then return nil end
+    return turnPeakS(s.profile, s0, s1)
+end
 -- 測試鉤（harness 鎖拖車掃掠：同一條候選線牽引車過得去、掛車內切撞到）：對當前 session 的點雲直接掃一條
 -- 給定剖面的候選線（不經 shapeProfile 與拓寬／微調等退路），回 ok, phase, hitX, hitY。production 無呼叫者。
 function Drive.debugSweepCandidate(playerNum, a, b, c, d, offL)

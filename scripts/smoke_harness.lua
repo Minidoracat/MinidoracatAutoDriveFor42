@@ -26972,6 +26972,127 @@ function drive.scenarioLaunchHold()
 end
 drive.scenarioLaunchHold()
 
+-- 1012 路線頭尾比車身短的 90° fallback 短接線（正式服 0.28 takeover #1／#39，Louisville 玩家自建大門：柱列離車道中線 2.5m）。
+--   predicate 級：Drive.debugSweepLine 以物理檔掃路線中線（硬點直接寫進 sensor，不經世界掃描）、Drive.debugTurnPeak 問剖面折點。
+--   車 F350 類（halfL 2.9）；柱列 x=−2.5（行進 +y 時的右側），r 0.7。
+function drive.scenarioRouteStub()
+    scenario("1012：路線頭尾短接線——停點之後沿停點朝向直線外推、折點不算；起點短接線車身照兩端在線上擺；一般折點照驗")
+    local Dr = MDAD.Drive
+    local oldSandbox, oldVeh, oldApi = SandboxVars, dveh, MinidoracatMiniMapAPI.navApiVersion
+    MinidoracatMiniMapAPI.navApiVersion = 4 -- adaptive 剖面（fallback 折點的標記）只在 nav v4 以上
+    local oldRoute, oldTx, oldTy, oldState = drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 60, RightLaneBias = 0 })
+    dveh = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }), scriptName = "Base.93fordF350",
+        engineRunning = true, mass = 1900, speed = 0, maxSpeed = 85, bodyW = 1.9, bodyL = 5.8, wheelZ = 1.895,
+        comX = 0, comZ = 0, profileFull = true, enginePower = 4200, brakingForce = 112,
+        wheelFriction = 1.7, tireFriction = 1.5 })
+    drive.fillWorld(-10, 70, -30, 80)
+    local function arm(label, pts)
+        Dr.stop(0, nil)
+        local surf, wid = {}, {}
+        for i = 1, #pts / 2 - 1 do surf[i], wid[i] = "paved", 4 end -- 4m 路：放不下 rMin 圓角＝fallback 折點
+        drive.nav.route = { pts = pts, segSurface = surf, segWidth = wid }
+        drive.nav.tx, drive.nav.ty, drive.nav.state = pts[#pts - 1], pts[#pts], "ok"
+        dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = pts[1], pts[2], 0, 0, true
+        dveh._engine, dveh._driver = true, dp
+        dp._vehicle, dp._dead, dp._local = dveh, false, true
+        setHeading(dveh, math.atan2(pts[4] - pts[2], pts[3] - pts[1]))
+        checkTrue(Dr.start(dp), label .. " 啟動")
+        local st = Dr.debugSession(0)
+        for _ = 1, 20 do
+            if st.profile and st.profile.ready then break end
+            driveTick(dp, dveh)
+        end
+        checkTrue(st.profile and st.profile.ready and (st.profile.filletFallbackN or 0) >= 1,
+            label .. " 前置：剖面建好、折點是 fallback（fb=" .. tostring(st.profile and st.profile.filletFallbackN) .. "）")
+        return st
+    end
+    local function setHard(st, list)
+        local sen = st.sensor
+        sen.hardX, sen.hardY, sen.hardR, sen.hardS = sen.hardX or {}, sen.hardY or {}, sen.hardR or {}, sen.hardS or {}
+        if type(sen.hardB) == "table" then for i = 1, #list do sen.hardB[i] = 0 end end
+        for i, p in ipairs(list) do sen.hardX[i], sen.hardY[i], sen.hardR[i], sen.hardS[i] = p[1], p[2], p[3], 0 end
+        sen.hardN = #list
+    end
+    local function column(y0, y1, extra)
+        local list = {}
+        for y = y0, y1 do list[#list + 1] = { -2.5, y + 0.5, 0.7 } end
+        if extra then list[#list + 1] = extra end
+        return list
+    end
+    -- 路線折線上弧長 s0..s1 的 1m 取樣（sweepLine 的線格式：最後一點落在 s1）
+    local function line(pts, s0, s1)
+        local lx, ly, n, sk = {}, {}, 0, s0
+        while true do
+            local acc, m = 0, #pts / 2 - 1
+            for i = 1, m do
+                local ax, ay, bx, by = pts[2 * i - 1], pts[2 * i], pts[2 * i + 1], pts[2 * i + 2]
+                local L = math.sqrt((bx - ax) ^ 2 + (by - ay) ^ 2)
+                if sk <= acc + L or i == m then
+                    local t = (sk - acc) / L
+                    n = n + 1
+                    lx[n], ly[n] = ax + t * (bx - ax), ay + t * (by - ay)
+                    break
+                end
+                acc = acc + L
+            end
+            if sk >= s1 - 1e-9 then break end
+            sk = math.min(sk + 1, s1)
+        end
+        return lx, ly, n
+    end
+    local function sweep(pts, s0, s1)
+        local lx, ly, n = line(pts, s0, s1)
+        return Dr.debugSweepLine(0, lx, ly, n, s0, s1)
+    end
+    -- (stub-start) #39：起點 3.9m 南向（+y）短接線接 90° 左轉（+x），柱列在車右 2.5m。原擺法折點那個取樣朝 +x、車尾伸到
+    --   x≈−2.8 假命中；照兩端在線上擺＝車尾仍在入臂上
+    local A = { 0, 0, 0, 3.9, 60, 3.9 }
+    local st = arm("(stub-start)", A)
+    local halfL = st.vehicleProfile.halfL
+    local kS = Dr.startStubKinkS(st.profile, 2 * halfL)
+    checkTrue(kS and math.abs(kS - 3.9) < 0.2, "(stub-start) 前置：起點短接線折點 3.9m（kS=" .. tostring(kS) .. "）")
+    setHard(st, column(-4, 9))
+    local ok, hs, hx, hy = sweep(A, 0, 14)
+    checkTrue(ok == true, "(stub-start) 起點短接線轉得過、不假命中車右柱列（hit s=" .. tostring(hs) .. " @"
+        .. tostring(hx) .. "," .. tostring(hy) .. "）")
+    local kind
+    -- (stub-start-real) 同一折點內側真的有東西（弦擺的車身蓋過）：照判、kind＝stub
+    setHard(st, column(-4, 9, { 1.5, 2.4, 0.3 }))
+    ok, hs, hx, hy, kind = sweep(A, 0, 14)
+    checkTrue(ok == false and kind == "stub" and hx == 1.5,
+        "(stub-start-real) 折點內側的真障礙照判、kind=stub（ok=" .. tostring(ok) .. " kind=" .. tostring(kind) .. " hx=" .. tostring(hx) .. "）")
+    -- (kink-mid) 反面：同一個 90° fallback 折點在 23.9m 處（不是起點短接線）＝原擺法照驗、照命中柱列
+    local B = { 0, -20, 0, 3.9, 60, 3.9 }
+    st = arm("(kink-mid)", B)
+    checkTrue(Dr.startStubKinkS(st.profile, 2 * halfL) == nil, "(kink-mid) 前置：不是起點短接線")
+    setHard(st, column(-4, 9))
+    ok, hs = sweep(B, 18, 32)
+    checkTrue(ok == false and hs and hs >= 23 and hs <= 25,
+        "(kink-mid) 一般 fallback 折點照原擺法驗：車尾外擺命中柱列（ok=" .. tostring(ok) .. " s=" .. tostring(hs) .. "）")
+    local tp = Dr.debugTurnPeak(0, 10, 30)
+    checkTrue(tp and math.abs(tp - 23.9) < 0.2, "(kink-mid) 停點前的折點照算（peak=" .. tostring(tp) .. "）")
+    -- (stub-end) #1：北行到終點前 2.8m 的 90° 短接線，折點（60）在停點（coastStopS＝62.8−COAST_STOP_M）之後
+    local C = { 0, 0, 0, 60, 2.8, 60 }
+    st = arm("(stub-end)", C)
+    local stopS = st.profile.coastStopS
+    checkTrue(stopS and stopS < 59.9, "(stub-end) 前置：停點在折點前（stop=" .. tostring(stopS) .. "）")
+    setHard(st, column(46, 70))
+    ok, hs = sweep(C, 46, 62.8)
+    checkTrue(ok == true, "(stub-end) 停點之後沿入臂直線外推：折點不再擺出臂朝向、不假命中柱列（hit s=" .. tostring(hs) .. "）")
+    tp = Dr.debugTurnPeak(0, 46, 70)
+    checkTrue(tp == nil, "(stub-end) 停點之後的折點不算（peak=" .. tostring(tp) .. "）")
+    -- (stub-end-front) 反面：停點之後車直直滑過的範圍（入臂延長線上、折點後 2.3m）的真障礙照判（原擺法沿出臂掃、看不到它）
+    setHard(st, column(46, 70, { 0, 62.3, 0.3 }))
+    ok, hs = sweep(C, 46, 62.8)
+    checkTrue(ok == false and hs and hs > stopS,
+        "(stub-end-front) 停點後直直滑過範圍內的真障礙照判（ok=" .. tostring(ok) .. " s=" .. tostring(hs) .. "）")
+    Dr.stop(0, nil)
+    drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
+    SandboxVars, dveh, MinidoracatMiniMapAPI.navApiVersion = oldSandbox, oldVeh, oldApi
+end
+drive.scenarioRouteStub()
+
 -- 1008 車在常駐線外遠處的橫向覆蓋出口（正式服 0.23.0 三個片段：起步離 nav 線
 --   8–12m、斜切保持把行駛線釘在車位，車位帶心那輪候選被橫向覆蓋拒收→延後、nav 線補掃那輪車身在 ±7 帶外看不到車線上的
 --   硬點→判淨空，延後↔淨空逐輪交替到接觸）。常駐 0（keepRightTarget 打樁）、斜切保持打樁成「行駛線＝車位」、牆排在 x=40、
