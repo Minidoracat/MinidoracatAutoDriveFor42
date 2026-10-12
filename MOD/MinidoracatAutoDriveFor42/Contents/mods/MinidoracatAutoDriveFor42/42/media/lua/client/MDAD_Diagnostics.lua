@@ -166,6 +166,9 @@ local EK = {
     "sp0", "sc0", "sd0",
     -- 1012 起步先原地轉：uturn enter／done 的起步段旗標、enter 當幀 |航向誤差| rad（uturn room 用既有 rear／len／probe）
     "start", "ae",
+    -- 1013d dodge commit：承諾線對殭屍（軟縫會閃的點、不含屍體）的最小淨距 zm（距離 − R，負＝R 內）與那一點的 zmS／zmL；
+    -- zv＝本輪候選鏈因線在 R 內經過殭屍而先不採納的候選數（Driver Drive.zombieSweep）
+    "zm", "zmS", "zmL", "zv", -- 1013d
 }
 
 local function logOnce(msg)
