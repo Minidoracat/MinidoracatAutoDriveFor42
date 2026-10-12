@@ -11954,7 +11954,7 @@ function drive.scenarioStartRotate()
     local deg = math.pi / 180
     for _, d0 in ipairs({ 70, 100 }) do
         local tag = "(sr" .. d0 .. ") "
-        evs["uturn:enter"], evs["uturn:done"] = nil, nil
+        evs["uturn:enter"], evs["uturn:done"], evs["uturn:over"] = nil, nil, nil
         checkTrue(armDrive(d0 * deg, 0), tag .. "啟動")
         local st = MDAD.Drive.debugSession(0)
         driveReset(dveh)
@@ -11963,9 +11963,19 @@ function drive.scenarioStartRotate()
         checkTrue(st.fstate.rotating == true and st.uturnStart == true and ue.start == true
             and math.abs((ue.ae or 0) - d0 * deg) < 0.05,
             tag .. "起步差 " .. d0 .. "°：起步段原地轉、enter 帶 start／ae（ae " .. tostring(ue.ae) .. "）")
-        checkTrue(st.rotProbeClear == true and st.fstate.appliedSteer == nil and (dveh._regSpeed or 99) <= 4,
-            tag .. "探測淨空：耦力原地轉、不側推前進（ast " .. tostring(st.fstate.appliedSteer) .. "、reg "
-            .. tostring(dveh._regSpeed) .. "）")
+        checkTrue(st.rotProbeClear == true and st.fstate.appliedSteer == nil and (dveh._regSpeed or 99) <= 4
+            and MDAD.Drive.hudState(0) == "uturn",
+            tag .. "探測淨空：耦力原地轉、不側推前進、HUD 原地調頭中（ast " .. tostring(st.fstate.appliedSteer) .. "、reg "
+            .. tostring(dveh._regSpeed) .. "、hud " .. tostring(MDAD.Drive.hudState(0)) .. "）")
+        -- (sr-yr) 1013c：耦力幀照量車身 yaw 率（舊制耦力幀不呼叫 yawGovern，樣本 yr 凍在進場前）。50ms 轉 5°＝1.75 rad/s。
+        --   違規證明：耦力幀不走 Drive.rotateCouple＝yawRate 仍 nil 紅。量完隔 300ms 讓下一幀重設視窗（harness 車是瞬移）。
+        nowMs = nowMs + 50
+        setHeading(dveh, (d0 - 5) * deg)
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        checkTrue(type(st.yawRate) == "number" and math.abs(st.yawRate + 5 * deg / 0.05) < 0.05,
+            tag .. "(sr-yr) 耦力原地轉幀照量 yaw 率（yr " .. tostring(st.yawRate) .. "）")
+        nowMs = nowMs + 300
         setHeading(dveh, 45 * deg)
         driveReset(dveh)
         driveTick(dp, dveh)
@@ -11980,6 +11990,16 @@ function drive.scenarioStartRotate()
             tag .. "轉到 25°：收尾 uturn done aligned、帶 start（why " .. tostring(ud.why) .. "）")
         driveTick(dp, dveh)
         checkTrue(st.startRot == false, tag .. "對正後起步段結束")
+        -- (sr-over) 1013c：收尾帶 ae（|航向誤差|）；之後 UTURN_OVER_MS 內誤差換號＝慣性過轉，窗滿記一筆 uturn over（ov rad）。
+        --   違規證明：stepFollow 不呼叫 Drive.uturnOverTrack＝沒有 over 紅。
+        setHeading(dveh, -20 * deg)
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        nowMs = nowMs + MDAD.Drive.debugTune().UTURN_OVER_MS
+        driveTick(dp, dveh)
+        local uo = evs["uturn:over"] or {}
+        checkTrue(math.abs((ud.ae or 0) - 25 * deg) < 0.02 and math.abs((uo.ov or 0) - 20 * deg) < 0.02,
+            tag .. "(sr-over) done 帶 ae、過轉 20° 記 uturn over（ae " .. tostring(ud.ae) .. "、ov " .. tostring(uo.ov) .. "）")
         -- (sr-mid) 行進中車頭差 117°（髮夾 hairpin117 那型）：照 135° 門檻，不進原地轉
         setHeading(dveh, 117 * deg)
         dveh._speed = 20
@@ -12004,6 +12024,67 @@ function drive.scenarioStartRotate()
         savedStart, savedEvent, savedSample, savedStop
 end
 drive.scenarioStartRotate()
+
+-- ⑪d 起步原地轉的出場（1013c N4；正式服 fast 檔出場 yaw 4–10 rad/s、慣性過轉 27–105° 後以 TRACK 側滑）。harness 車不自轉，
+--    判斷式層級驗（合成 session 只放判斷式讀的欄位）：
+--   (n4-gate)  起步段那次調頭還在甩（|yr| ≥ START_ROTATE_EXIT_YR）＝出場門檻 0、上一幀已在窗內就開始計時；撐滿 SETTLE_MS 照角度收；
+--              甩得慢或不是起步段那次＝照舊 30°。違規證明：startRotateGate 不看 yaw 率＝紅；不設撐住上限＝(n4-gate-max) 紅。
+--   (n4-coast) 往目標轉且照現在的 yaw 率斷力滑得到＝不推；往外甩／量不到＝照推。違規證明：rotateCouple 不問斷力點＝(n4-couple) 紅。
+--   (n4-end)   起步段要甩完才結束（保留起步段＝過轉超過 60° 重進原地轉的門檻）；開出 START_ROTATE_M 照舊結束。
+--              違規證明：startRotateEnd 不看 yaw 率＝紅。
+function drive.scenarioRotateExit()
+    scenario("起步原地轉出場：還在甩不收、到斷力點不推、起步段甩完才結束（1013c N4）")
+    local Dr, T = MDAD.Drive, MDAD.Drive.debugTune()
+    local deg = math.pi / 180
+    local EXIT = T.START_ROTATE_EXIT_RAD
+    local function S(o)
+        local s = { fstate = {}, startRot = true, uturnStart = true, rotSettleMs = 0, lastHeadingError = 20 * deg }
+        for k, v in pairs(o or {}) do s[k] = v end
+        return s
+    end
+    local s = S({ yawRate = 3 })
+    Dr.startRotateGate(s, 1000)
+    checkTrue(s.fstate.rotExit == 0 and s.rotSettleMs == 1000 and s.fstate.rotEnter == EXIT,
+        "(n4-gate) 窗內仍以 3 rad/s 甩：出場門檻 0、開始計時（exit " .. tostring(s.fstate.rotExit) .. "）")
+    Dr.startRotateGate(s, 1000 + T.START_ROTATE_SETTLE_MS - 1)
+    checkEq(s.fstate.rotExit, 0, "(n4-gate) 撐住期間仍不收")
+    Dr.startRotateGate(s, 1000 + T.START_ROTATE_SETTLE_MS)
+    checkEq(s.fstate.rotExit, EXIT, "(n4-gate-max) 撐滿 START_ROTATE_SETTLE_MS：照角度收（出口）")
+    s = S({ yawRate = 3, lastHeadingError = 80 * deg })
+    Dr.startRotateGate(s, 1000)
+    checkTrue(s.fstate.rotExit == 0 and s.rotSettleMs == 0, "(n4-gate) 窗外甩著：門檻 0、還不計時")
+    s = S({ yawRate = 0.5 })
+    Dr.startRotateGate(s, 1000)
+    checkEq(s.fstate.rotExit, EXIT, "(n4-gate) 甩得慢（0.5 rad/s）：照角度收")
+    s = S({ yawRate = 3, uturnStart = false })
+    Dr.startRotateGate(s, 1000)
+    checkTrue(s.fstate.rotExit == EXIT and s.fstate.rotEnter == T.START_ROTATE_ENTER_RAD,
+        "(n4-gate) 不是起步段那次調頭：照舊 60°／30°")
+    s = S({ yawRate = 3, tow = {} })
+    Dr.startRotateGate(s, 1000)
+    checkTrue(s.fstate.rotExit == nil, "(n4-gate) 拖車照舊不設起步門檻")
+    -- (n4-coast)：6 rad/s、離目標 0.8 rad＝滑得到（36/(2·DECEL) ≥ 0.8）；1 rad/s 離 1.5 rad＝照推；往外甩＝照推
+    checkTrue(Dr.rotateCoastDue(S({ yawRate = 6 }), 0.8) and Dr.rotateCoastDue(S({ yawRate = -6 }), -0.8)
+            and not Dr.rotateCoastDue(S({ yawRate = 1 }), 1.5) and not Dr.rotateCoastDue(S({ yawRate = -6 }), 0.8)
+            and not Dr.rotateCoastDue(S({}), 0.1),
+        "(n4-coast) 往目標甩且滑得到才斷力；往外甩、太遠、量不到照推")
+    -- (n4-couple)：耦力幀先量 yaw 率（50ms 轉 0.3 rad＝6 rad/s），起步段那次到斷力點回 0；非起步段照推
+    s = S({ escT = 950, escH = 0 })
+    checkTrue(Dr.rotateCouple(s, 5, 0.8, 0.3, 0, 1000) == 0 and math.abs(s.yawRate - 6) < 1e-9,
+        "(n4-couple) 起步段到斷力點：耦力歸零（yr " .. tostring(s.yawRate) .. "）")
+    s = S({ escT = 950, escH = 0, uturnStart = false })
+    checkTrue(Dr.rotateCouple(s, 5, 0.8, 0.3, 0, 1000) == 5 and math.abs(s.yawRate - 6) < 1e-9,
+        "(n4-couple) 非起步段的調頭：照推（只量 yaw 率）")
+    -- (n4-end)
+    local function E(yr, x)
+        local e = S({ yawRate = yr, uturnStart = false, profile = { ready = true }, startRotX = 0, startRotY = 0 })
+        Dr.startRotateEnd(e, 10 * deg, x or 0, 0)
+        return e.startRot
+    end
+    checkTrue(E(3) == true and E(0.5) == false and E(nil) == false and E(3, T.START_ROTATE_M) == false,
+        "(n4-end) 對正但還在甩＝保留起步段；甩完／量不到／開出 START_ROTATE_M＝結束")
+end
+drive.scenarioRotateExit()
 
 -- =====================================================================
 -- 情境二十八b：immutable DODGE 承諾語意＋停等豁免（2026-08-28 對抗審紅測試）
@@ -18814,6 +18895,7 @@ scenario("調頭＋blocked：遠處不倒車、近處才退、額度用盡不空
         and (room.len or 0) >= 1,
         "(room-no) 倒得了 ≥1m 但退完車周圈仍碰側牆：不倒、照舊大弧（probe " .. tostring(room.probe) .. "、len "
         .. tostring(room.len) .. "）")
+    checkEq(MDAD.Drive.hudState(0), "uturnslow", "(room-no) HUD：空間不足、慢速調頭（1013c）")
     -- 1006 被擋大弧壓到 UTURN_BLOCKED_KMH 3：轉不動時下面的 rotate-stall 倒車照樣要觸發（Drive.rotateStall 只要目標 > 0）
     checkTrue((dveh._regSpeed or 99) <= 3,
         "(rot-stall) 被擋大弧壓速中（定速目標實得 " .. tostring(dveh._regSpeed) .. "）")
@@ -18839,6 +18921,10 @@ scenario("調頭＋blocked：遠處不倒車、近處才退、額度用盡不空
     checkTrue(st.mode == "unstick" and (evs["progress:recover"] or {}).why == "uturn-room",
         "(room) 不等大弧卡住：先倒車騰空間（mode " .. tostring(st.mode) .. "、why "
         .. tostring((evs["progress:recover"] or {}).why) .. "）")
+    -- (n5) 1013c：車已靜止時恢復請求同一幀就起手倒車，不下 recover 的一秒鎖輪閂（正式服 fbw=recover fbl≈1000，倒車晚 1.0–1.1 秒）。
+    --   違規證明：Drive.recoverReady 恆 false＝forceBrake why=recover 紅。
+    checkTrue(st.forceBrakeWhy == nil and st.forceBrakeUntil <= nowMs,
+        "(n5) 靜止起手倒車：沒有鎖輪閂（why " .. tostring(st.forceBrakeWhy) .. "）")
     -- 倒車退滿 3m（沿車頭反方向）→ settle → 回跟線：重探淨空＝耦力原地轉（不經側推夾限）
     dveh._x, dveh._y = -math.cos(2.8) * 3, -math.sin(2.8) * 3
     dveh._speed = -3
@@ -18856,6 +18942,93 @@ scenario("調頭＋blocked：遠處不倒車、近處才退、額度用盡不空
         and dveh._imp.total > 0,
         "(room) 倒完重探淨空：同一次調頭改耦力原地轉（mode " .. tostring(st.mode) .. "、probe "
         .. tostring(st.rotProbeClear) .. "、ast " .. tostring(st.fstate.appliedSteer) .. "）")
+    -- (seg) 1013c 分段倒車（2026-10-13 使用者裁定）：側物 (2,2) 讓退 3m 後的車周圈仍被擋、退 6m 才淨空＝先退一段（len 3、need 6、
+    --   帶命中點），倒完重探仍被擋、從新車位再算再退一段（need 3、used 3），淨空才原地轉、HUD 原地調頭中；倒成的時間不補進停等預算。
+    --   違規證明：uturnRoom 只看第 1 段＝(seg) 紅；倒完不重開 uturnRoomTried＝(seg-2) 紅；成功不清 waitTickMs＝(seg-budget) 紅。
+    --   (seg-max) 剩餘額度用完：不再排下一段（rear=attempt-limit）、照舊 2B 大弧、不交還。違規證明：不看剩餘額度＝紅。
+    --   (seg-to) 分段吃最後一次額度時倒車逾時一寸未退：softFail 回大弧（舊制直接受困交還），之後照停等預算交還（出口）。
+    --            違規證明：逾時不認 uturnRoomRev＝紅。
+    do
+        drive.putSolid(2, 2, "seg_side")
+        local function backTo(m)
+            dveh._x, dveh._y = -math.cos(2.8) * m, -math.sin(2.8) * m
+            dveh._speed = -3
+            nowMs = nowMs + 400
+            driveReset(dveh)
+            driveTick(dp, dveh) -- 退滿一段 → settle
+            dveh._speed = 0
+            nowMs = nowMs + 2000
+            driveTick(dp, dveh) -- 停妥 → 回跟線
+            driveReset(dveh)
+            driveTick(dp, dveh) -- 重探
+            driveTick(dp, dveh) -- 仍被擋就從新車位再算
+        end
+        MDAD.Drive.stop(0, nil)
+        evs["uturn:room"], evs["progress:recover"] = nil, nil
+        st = reversedStart("(seg)")
+        driveTick(dp, dveh)
+        local r1 = evs["uturn:room"] or {}
+        checkTrue(r1.probe == "clear" and math.abs((r1.len or -1) - 3) < 1e-9 and math.abs((r1.need or -1) - 6) < 1e-9
+                and r1.used == 0 and type(r1.hx) == "number" and type(r1.hy) == "number"
+                and st.mode == "unstick" and st.episodeAttempts == 1,
+            "(seg) 退 3m 圈仍被擋、6m 淨空：先退第一段（len " .. tostring(r1.len) .. "、need " .. tostring(r1.need)
+            .. "、hit " .. tostring(r1.hx) .. "," .. tostring(r1.hy) .. "、mode " .. tostring(st.mode) .. "）")
+        local acc0 = st.waitAccumMs
+        evs["uturn:room"] = nil
+        backTo(3)
+        local r2 = evs["uturn:room"] or {}
+        checkTrue(r2.probe == "clear" and math.abs((r2.need or -1) - 3) < 1e-9 and math.abs((r2.used or -1) - 3) < 1e-6
+                and st.mode == "unstick" and st.episodeAttempts == 2 and (evs["progress:recover"] or {}).why == "uturn-room",
+            "(seg-2) 倒完重探仍被擋：從新車位再退一段（need " .. tostring(r2.need) .. "、used " .. tostring(r2.used)
+            .. "、mode " .. tostring(st.mode) .. "、attempt " .. tostring(st.episodeAttempts) .. "）")
+        checkTrue(st.waitAccumMs - acc0 < 500,
+            "(seg-budget) 倒成的一段不補進停等預算（+" .. tostring(st.waitAccumMs - acc0) .. " ms）")
+        backTo(6)
+        checkTrue(st.mode == "follow" and st.rotProbeClear == true and st.fstate.appliedSteer == nil and dveh._imp.total > 0
+                and math.abs(st.uturnRoomUsedM - 6) < 1e-6 and MDAD.Drive.hudState(0) == "uturn",
+            "(seg-spin) 退滿 6m 圈淨空：原地轉、HUD 原地調頭中（mode " .. tostring(st.mode) .. "、probe "
+            .. tostring(st.rotProbeClear) .. "、used " .. tostring(st.uturnRoomUsedM) .. "）")
+        -- (seg-max)
+        MDAD.Drive.stop(0, nil)
+        st = reversedStart("(seg-max)")
+        driveTick(dp, dveh)
+        evs["uturn:room"] = nil
+        dveh._x, dveh._y = -math.cos(2.8) * 3, -math.sin(2.8) * 3
+        dveh._speed = -3
+        nowMs = nowMs + 400
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        dveh._speed = 0
+        nowMs = nowMs + 2000
+        driveTick(dp, dveh)
+        st.episodeAttempts = 3 -- UNSTICK_MAX：額度已用完
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        driveTick(dp, dveh)
+        local rm = evs["uturn:room"] or {}
+        checkTrue(rm.rear == "attempt-limit" and rm.probe == "obstructed" and rm.need == nil and st.mode == "follow"
+                and MDAD.Drive.isActive(0) and MDAD.Drive.hudState(0) == "uturnslow",
+            "(seg-max) 額度用完：不再排下一段、照舊大弧（rear " .. tostring(rm.rear) .. "、mode " .. tostring(st.mode)
+            .. "、hud " .. tostring(MDAD.Drive.hudState(0)) .. "）")
+        -- (seg-to)
+        MDAD.Drive.stop(0, nil)
+        st = reversedStart("(seg-to)")
+        driveTick(dp, dveh)
+        st.episodeAttempts = 3 -- 這一段吃的是最後一次額度
+        nowMs = nowMs + 4100 -- 過 UNSTICK_MS、一寸未退
+        driveTick(dp, dveh)
+        checkTrue(MDAD.Drive.isActive(0) and st.mode == "follow" and st.blockRetryDone == true,
+            "(seg-to) 最後一段逾時一寸未退：softFail 回大弧、不交還（mode " .. tostring(st.mode) .. "）")
+        local alive = true
+        for _ = 1, 4 do
+            nowMs = nowMs + 8000
+            driveTick(dp, dveh)
+            alive = MDAD.Drive.isActive(0)
+            if not alive then break end
+        end
+        checkFalse(alive, "(seg-to) 之後大弧原地不動：照停等預算交還（出口）")
+        drive.clearCell(2, 2)
+    end
     for _, y in ipairs({ -1, 0, 1, 2 }) do drive.clearCell(-3, y) end
     MDAD.Drive.stop(0, nil)
     MDAD.Drive.stop(0, nil)

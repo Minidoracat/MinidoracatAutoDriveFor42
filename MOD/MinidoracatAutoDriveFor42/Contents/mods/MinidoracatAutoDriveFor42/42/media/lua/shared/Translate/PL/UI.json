@@ -115,6 +115,8 @@
     "UI_MinidoracatAutoDrive_HUDStatusUnstick": "Wycofuje się",
     "UI_MinidoracatAutoDrive_HUDStatusSide": "Odsuwa się w bok",
     "UI_MinidoracatAutoDrive_HUDStatusRehitch": "Doczepianie",
+    "UI_MinidoracatAutoDrive_HUDStatusUturn": "Zawraca w miejscu",
+    "UI_MinidoracatAutoDrive_HUDStatusUturnSlow": "Ciasno: zawraca powoli",
     "UI_MinidoracatAutoDrive_HUDStatusYield": "Sterowanie ręczne",
     "UI_MinidoracatAutoDrive_HUDStatusYieldResume": "Wznowienie za %1 s",
     "UI_MinidoracatAutoDrive_HUDStatusArrive": "Postój u celu",

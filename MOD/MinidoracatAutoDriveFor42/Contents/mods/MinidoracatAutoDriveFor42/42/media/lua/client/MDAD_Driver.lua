@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1012h"
+Drive.REV = "1013c"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -129,6 +129,15 @@ TUNE.ROTATE_STALL_MS = 2500
 TUNE.START_ROTATE_ENTER_RAD = 60 * math.pi / 180
 TUNE.START_ROTATE_EXIT_RAD = 30 * math.pi / 180
 TUNE.START_ROTATE_M = 3
+-- 起步段原地轉的出場（1013c，N4）：舊制只看角度，耦力推到 |err| < EXIT 那幀才放，正式服 fast 檔出場 yaw 率 4–10 rad/s、
+-- 慣性多轉 27–100°，接著以 TRACK 側滑。現制 ①耦力只推到「照現在的 yaw 率斷力滑行就到得了」（|err| ≤ yr²/(2·COAST_DECEL)，
+-- Drive.rotateCoastDue）；②|yr| ≥ EXIT_YR 時出場門檻暫改 0（Follower 照轉，過頭就反向耦力拉回），最多在出場窗內撐
+-- SETTLE_MS（出口：之後照角度收）；③起步段結束也要 |yr| < EXIT_YR（還在甩就保留起步段，過轉 > ENTER 時重進原地轉）。
+-- COAST_DECEL 取保守值（正式服四例反推 8–22 rad/s²）：估低＝提早斷力、停在窗外再補推；估高才會過頭。
+TUNE.START_ROTATE_EXIT_YR = 1.5      -- rad/s
+TUNE.START_ROTATE_SETTLE_MS = 2000
+TUNE.ROTATE_COAST_DECEL = 8          -- rad/s²
+TUNE.UTURN_OVER_MS = 3000            -- uturn over 事件：起步調頭收尾後量過轉的窗
 -- 拖掛車的側推限制（2026-09-26 Workshop 回報「草地起步劇烈晃動、掛車脫開」，E2E trailer-grass-mp）：
 -- 側推的 MASS_BASE 項與車速無關，低速照樣整台橫推——真車低速轉不動掛點，這裡卻把車頭橫甩、
 -- 掛車原地不動（遙測首幀 spd 0、f −46k，折角 0→61° 只花 0.4 秒）。拖車時側推按車速線性放大到
@@ -1825,9 +1834,9 @@ end
 -- HUD 唯讀狀態（M5.5b 面板的資料面）。回**多值純量**、不洩漏 session table
 -- （session 是可變內部狀態，交出參考＝UI 能繞過所有入口改駕駛行為）：
 --   statusKey, gearId, effectiveCapKmh, zombieSlowOn, corpseSlowOn, resumeIn, elapsedSeconds, arrivalReason
--- statusKey ∈ arrive/yield/unstick/blocked/dodging/build/lowfps/follow；nil＝無 session 且無準備意圖。
+-- statusKey ∈ arrive/yield/rehitch/side/unstick/uturn/uturnslow/blocked/areawait/dodging/build/lowfps/follow；nil＝無 session 且無準備意圖。
 -- arrivalReason 是到站回報拒絕原因的翻譯鍵，沒有拒絕原因則為 nil。
--- 顯示優先序：arrive > yield > recovery（unstick/recover/settle）>
+-- 顯示優先序：arrive > yield > recovery（unstick/recover/settle）> 調頭（uturn 原地／uturnslow 被擋大弧，1013c）>
 -- current/planned blocked > dodging > build > follow。
 -- effectiveCap＝min(session 啟動時沙盒上限, 當前檔位)。AutoDriveMaxSpeed 要重開
 -- session 才重建 profile；HUD 不得先讀新沙盒值而顯示車子尚未套用的上限。
@@ -1855,6 +1864,9 @@ function Drive.hudState(playerNum)
     elseif s.mode == "unstick" or s.mode == "settle"
             or s.recoverWhy ~= nil then
         key = "unstick"
+    elseif s.uturn and s.mode == "follow" and s.rotProbeClear ~= nil then
+        -- 調頭中（1013c 使用者裁定）：探測淨空＝原地調頭中；被擋走 2B 大弧＝空間不足、慢速調頭（玩家不再以為車卡住）
+        key = s.rotProbeClear and "uturn" or "uturnslow"
     elseif s.currentBlocked or s.blocked then key = "blocked"
     elseif s.areaWaitActive then key = "areawait" -- 前方區域未載入、引擎煞住等待（Drive.areaWait）
     elseif s.dodging then key = "dodging"
@@ -2531,7 +2543,14 @@ local function startSession(playerObj, playerNum, stage)
         startRot = true,    -- 起步段：Follower 調頭門檻用 TUNE.START_ROTATE_*（Drive.startRotateGate 寫、Drive.startRotateEnd 結束）
         startRotX = vehicle:getX(), startRotY = vehicle:getY(), -- 起步段的起點（開出 START_ROTATE_M 就結束）
         uturnStart = false, -- 進行中的這次調頭是起步段進的（門檻 START_ROTATE_*、不計迴圈防護）
-        uturnRoomTried = false, -- 這次調頭已算過「倒車騰空間再原地轉」（Drive.uturnRoom；uturn enter 清）
+        -- 這次調頭的「倒車騰空間再原地轉」（Drive.uturnRoom）：false＝還沒算／可再算；true＝算過、騰不出或倒不了（走大弧）；
+        -- "probe"＝一段倒完、等下一次車周重探（Drive.rotateProbe 收到新結果才放回 false）。uturn enter 清
+        uturnRoomTried = false,
+        uturnRoomRev = false, -- 正在跑的倒車是 uturn-room 的一段（dispatch 設；成功不扣停等預算、最後一段逾時不交還）
+        uturnRoomUsedM = 0, -- 這次調頭 uturn-room 已倒的距離（m；uturn room 事件 used）
+        rotProbeHx = nil, rotProbeHy = nil, -- 最近一次車周探測被擋的命中點（MDADSensor.probeAround 第 2、3 回傳）
+        rotSettleMs = 0, -- 起步段原地轉在出場窗內仍在轉、開始撐住出場的時刻（Drive.startRotateGate；0＝沒在撐）
+        uturnOverUntil = 0, uturnOverSign = 0, uturnOverMax = 0, uturnOverYr = 0, -- 起步調頭收尾後的過轉量測（Drive.uturnOverTrack）
         returnActive = false,
         returnUnsafe = false,
         returnHold = false,
@@ -6855,26 +6874,83 @@ end
 -- 起步先原地轉（TUNE.START_ROTATE_*；1012）：control 前呼叫，寫本幀 Follower 的調頭門檻（state.rotEnter／rotExit）。
 -- 起步段（s.startRot）＝進 ENTER、出 EXIT；起步段進的那次調頭（s.uturnStart）進場門檻也用 EXIT：cutover／倒車騰空間的
 -- resetState 會清 rotating，|err| 還在 EXIT..ENTER 之間時要接著原地轉，不改成邊走邊轉。拖車不設（原地轉甩斷掛車）。
-function Drive.startRotateGate(s)
+-- 1013c（N4）：起步段那次調頭還在轉（Drive.rotateSpinning）＝出場門檻 0（Follower 與 uturn done 同一個值，不收；過頭時
+-- Follower 的耦力換向把車拉回）；上一幀已在出場窗內就開始計時，撐滿 START_ROTATE_SETTLE_MS 後照角度收（出口）。
+function Drive.startRotateGate(s, now)
     local f = s.fstate
     if s.tow or not (s.startRot or s.uturnStart) then
         f.rotEnter, f.rotExit = nil, nil
-    else
-        f.rotEnter = s.uturnStart and TUNE.START_ROTATE_EXIT_RAD or TUNE.START_ROTATE_ENTER_RAD
-        f.rotExit = TUNE.START_ROTATE_EXIT_RAD
+        s.rotSettleMs = 0
+        return
+    end
+    f.rotEnter = s.uturnStart and TUNE.START_ROTATE_EXIT_RAD or TUNE.START_ROTATE_ENTER_RAD
+    f.rotExit = TUNE.START_ROTATE_EXIT_RAD
+    if not s.uturnStart then
+        s.rotSettleMs = 0
+    elseif Drive.rotateSpinning(s) and (s.rotSettleMs == 0 or now - s.rotSettleMs < TUNE.START_ROTATE_SETTLE_MS) then
+        f.rotExit = 0
+        local e = s.lastHeadingError
+        if s.rotSettleMs == 0 and finite(e) and e < TUNE.START_ROTATE_EXIT_RAD and e > -TUNE.START_ROTATE_EXIT_RAD then
+            s.rotSettleMs = now
+        end
     end
 end
 
--- control 後呼叫：不在調頭中且（車頭已在 START_ROTATE_EXIT_RAD 內、或離起點開出 START_ROTATE_M、或掛上拖車）＝起步段結束，
--- 之後照 Follower 的 135°／100°（行進中的髮夾不得進原地轉）。
+-- 車身還在甩（|s.yawRate| ≥ TUNE.START_ROTATE_EXIT_YR；量不到＝不算，照舊只看角度）。1013c N4。
+function Drive.rotateSpinning(s)
+    local r = s.yawRate
+    return finite(r) and (r >= TUNE.START_ROTATE_EXIT_YR or r <= -TUNE.START_ROTATE_EXIT_YR)
+end
+
+-- 耦力原地轉的斷力點（1013c N4）：車頭正往目標轉（yr 與 err 同號）且照現在的 yaw 率斷力滑行（減速度 TUNE.ROTATE_COAST_DECEL）
+-- 就轉得到目標（|err| ≤ yr²/(2·DECEL)）＝本幀不施耦力。往外甩（過頭）或量不到 yaw 率＝照推。
+function Drive.rotateCoastDue(s, err)
+    local r = s.yawRate
+    if not finite(r) or not finite(err) then return false end
+    if err < 0 then err, r = -err, -r end
+    return r > 0 and err <= r * r / (2 * TUNE.ROTATE_COAST_DECEL)
+end
+
+-- 耦力原地轉幀的轉向（1013c）：照樣量車身 yaw 率（yawGovern 傳 0 只更新 s.yawRate、不夾；舊制耦力幀不呼叫，樣本 yr 凍在
+-- 進場前的值——正式服 Q14 卡在 1.43、Q05 缺值）；起步段那次到了斷力點就不推（Drive.rotateCoastDue）。
+function Drive.rotateCouple(s, steer, err, heading, speedKmh, now)
+    Drive.yawGovern(s, 0, heading, speedKmh, now)
+    if s.uturnStart and Drive.rotateCoastDue(s, err) then return 0 end
+    return steer
+end
+
+-- control 後呼叫：不在調頭中且（車頭已在 START_ROTATE_EXIT_RAD 內且不再甩、或離起點開出 START_ROTATE_M、或掛上拖車）＝
+-- 起步段結束，之後照 Follower 的 135°／100°（行進中的髮夾不得進原地轉）。還在甩（Drive.rotateSpinning）就保留起步段：
+-- 慣性過轉超過 START_ROTATE_ENTER_RAD 時重進原地轉（1013c N4；舊制角度一進窗就結束，過轉 105° 只能以 TRACK 側滑收）。
 function Drive.startRotateEnd(s, headingError, vx, vy)
     if not s.startRot or s.uturn or s.fstate.rotating == true or not (s.profile and s.profile.ready) then return end
     local dx, dy = vx - s.startRotX, vy - s.startRotY
     if s.tow or (finite(headingError) and headingError < TUNE.START_ROTATE_EXIT_RAD
-                and headingError > -TUNE.START_ROTATE_EXIT_RAD)
+                and headingError > -TUNE.START_ROTATE_EXIT_RAD and not Drive.rotateSpinning(s))
             or dx * dx + dy * dy >= TUNE.START_ROTATE_M * TUNE.START_ROTATE_M then
         s.startRot = false
     end
+end
+
+-- 起步調頭收尾後的過轉量測（1013c N4，遙測）：uturn done（aligned、起步段）起 UTURN_OVER_MS 內，航向誤差換號後的最大
+-- |err|（ov，rad）與最大 |yr|（rad/s）；窗滿或又進調頭時記一筆 uturn phase=over。每個跟線幀 control 後呼叫，純量。
+function Drive.uturnOverTrack(s, playerNum, now, err)
+    if s.uturnOverUntil == 0 then return end
+    if now < s.uturnOverUntil and not s.uturn then
+        if finite(err) and err * s.uturnOverSign < 0 then
+            if err < 0 then err = -err end
+            if err > s.uturnOverMax then s.uturnOverMax = err end
+        end
+        local r = s.yawRate
+        if finite(r) then
+            if r < 0 then r = -r end
+            if r > s.uturnOverYr then s.uturnOverYr = r end
+        end
+        return
+    end
+    diagEvent(s, playerNum, "uturn", { phase = "over", ov = s.uturnOverMax, yr = s.uturnOverYr,
+        ms = now - s.uturnOverUntil + TUNE.UTURN_OVER_MS })
+    s.uturnOverUntil = 0
 end
 
 -- 調頭車周探測（TUNE.ROTATE_PROBE_MS 節流）：寫 s.rotProbeClear（true 淨空原地轉／false 被擋走大弧）。
@@ -6882,7 +6958,10 @@ end
 function Drive.rotateProbe(s, playerNum, vehicle, now, speedKmh)
     if now < s.rotProbeMs then return end
     s.rotProbeMs = now + TUNE.ROTATE_PROBE_MS
-    local clear = not MDADSensor.probeAround(s.sensor, vehicle, getCell(), s.probeR)
+    local hit, hx, hy = MDADSensor.probeAround(s.sensor, vehicle, getCell(), s.probeR)
+    local clear = not hit
+    s.rotProbeHx, s.rotProbeHy = hx, hy -- 被擋的命中點（uturn room 事件 hx／hy）
+    if s.uturnRoomTried == "probe" then s.uturnRoomTried = false end -- 一段倒完的重探到了：仍被擋就再算下一段（Drive.uturnRoom）
     if clear ~= s.rotProbeClear then
         diagEvent(s, playerNum, "uturn", { phase = "probe", why = s.uturn.name,
             probe = clear and "clear" or "obstructed", speed = speedKmh })
@@ -6899,9 +6978,15 @@ end
 -- MDADFollower.ROTATE_EXIT_RAD）／loop（同處反覆調頭受困交還）／stop（調頭中 session 結束，detail＝交還原因鍵或
 -- manual／button／exit…）；probe＝本次首探結果（nil＝沒探過）、ms＝從 enter 起算、kind＝行為檔、start＝起步段進的
 -- （1012；出場門檻不同，ms 不能和行進中的調頭混著比）。正式服 0.23.0 摘要只有 uturn 計數，分不出調頭成敗與耗時。
+-- 1013c：yr＝收尾那刻的車身 yaw 率（rad/s）、ae＝收尾那刻 |航向誤差|（rad）；起步段 aligned 另開過轉量測（Drive.uturnOverTrack）。
 function Drive.uturnDone(s, playerNum, now, why, detail)
+    local e = s.lastHeadingError
     diagEvent(s, playerNum, "uturn", { phase = "done", why = why, detail = detail, kind = s.uturn and s.uturn.name,
-        probe = s.uturnProbe, ms = now - (s.uturnSinceMs or now), start = s.uturnStart or nil })
+        probe = s.uturnProbe, ms = now - (s.uturnSinceMs or now), start = s.uturnStart or nil,
+        yr = s.yawRate, ae = finite(e) and (e < 0 and -e or e) or nil })
+    if why == "aligned" and s.uturnStart and finite(e) then
+        s.uturnOverUntil, s.uturnOverSign, s.uturnOverMax, s.uturnOverYr = now + TUNE.UTURN_OVER_MS, e < 0 and -1 or 1, 0, 0
+    end
     s.uturn, s.uturnArmed, s.uturnStart = nil, false, false
 end
 
@@ -7412,6 +7497,12 @@ TUNE.RECOVER_RANK = {
     ["progress"] = 4,       -- 2.5s 監督 suspect（帶近場探測結果）
     ["side-escape"] = 1,    -- 側向脫困到位 settle 後：接回倒車鏈（Drive.stepSideEscape）
 }
+-- 本幀恢復 dispatch 會起手倒車（有請求、非空檔脈衝、車已靜止 |v|<1——同 stepFollow 尾端 dispatch 的條件）：stepFollow 用它
+-- 跳過 recover／contact 的一秒鎖輪閂（1013c N5）。
+function Drive.recoverReady(s, speedKmh)
+    return s.recoverWhy ~= nil and not s.recoverPulse and speedKmh < 1 and speedKmh > -1
+end
+
 local function requestRecover(s, why, pulse)
     local rank = TUNE.RECOVER_RANK[why]
     if rank == nil then return end
@@ -7787,33 +7878,50 @@ function Drive.rearLadder(s, vehicle, out, fx, fy, vx, vy)
     return status, hitX, hitY, kind, detail, 0
 end
 
--- 調頭探測被擋（1012，2026-10-12 使用者裁定，取代「只走大弧」）：照後方探測的倒車（同 startRecoveryAttempt 的階梯，長度同
--- 脫困倒車：4m 帶清＝UNSTICK_DIST、短帶＝帶長−KEEP）退完之後，原地轉的掃掠圈（probeAround 圓心移到退後的車位）淨空＝回
--- true，呼叫端 requestRecover("uturn-room") 先倒再原地轉；倒不了或退完仍被擋（路寬小於車長之類）＝照舊大弧（10-06 裁定
--- 2B 壓速），大弧卡住由 Drive.rotateStall 倒車兜底。每次調頭只算一次（uturn enter 清 s.uturnRoomTried）。不做側推三點式。
+-- 調頭探測被擋（1012；1013c 改分段，2026-10-13 使用者裁定）：問「再退幾段，原地轉的掃掠圈（probeAround 圓心移到退後的
+-- 車位）會淨空」。第 1 段照後方探測階梯（Drive.rearLadder，同 startRecoveryAttempt：4m 帶清＝UNSTICK_DIST、短帶＝帶長−KEEP）；
+-- 第 k 段（k ≤ 剩餘倒車額度 UNSTICK_MAX−episodeAttempts，第 1 段要是整段）累計 k·UNSTICK_DIST。路徑不另探：第 1 段的 4m 帶
+-- 蓋到車尾後 halfL＋4、目的地的圈（半徑 probeR ≥ 車身半對角）蓋住其後到退後車身；倒車途中 stepUnstick 仍每 100ms 探後方。
+-- 找得到＝回 true，呼叫端 requestRecover("uturn-room") 只先退一段；倒完 Drive.rotateProbe 重探（s.uturnRoomTried
+-- "probe"→false），淨空就原地轉，仍被擋就從新車位再算一次。找不到（倒不了、額度不夠、退到額度用完仍被擋）＝照舊 2B 大弧
+-- （10-06 裁定壓速），大弧卡住由 Drive.rotateStall 倒車兜底。不做側推三點式。事件 uturn room：rear／len（這一段退距）／
+-- need（從這裡要退多遠圈才淨空；騰不出＝缺）／used（這次調頭已倒）／hx,hy（車周探測擋住的命中點）。
 function Drive.uturnRoom(s, vehicle, playerNum, vx, vy)
     s.uturnRoomTried = true
+    local left = UNSTICK_MAX - s.episodeAttempts
     local out = BaseVehicle.allocVector3f()
     vehicle:getForwardVector(out)
     local fx, fy = out:x(), out:z()
     local flen2 = fx * fx + fy * fy
-    local status, travel, d = "unloaded", 0, 0
-    if flen2 > 1e-6 then
+    local status, travel, d, need = left > 0 and "unloaded" or "attempt-limit", 0, 0, 0
+    if flen2 > 1e-6 and left > 0 then
         local inv = 1 / sqrt(flen2)
         fx, fy = fx * inv, fy * inv
         local _
         status, _, _, _, _, travel = Drive.rearLadder(s, vehicle, out, fx, fy, vx, vy)
+        if status == "clear" then
+            local seg = sqrt(UNSTICK_DIST_SQ)
+            d = travel >= REAR_TRAVEL_M and seg or travel - TUNE.REAR_KEEP_M
+            for k = 1, left do
+                local dk = k == 1 and d or k * seg
+                if k > 1 and d < seg then break end
+                if not MDADSensor.probeAround(s.sensor, vehicle, getCell(), s.probeR, vx - fx * dk, vy - fy * dk) then
+                    need = dk
+                    break
+                end
+            end
+        end
     end
     BaseVehicle.releaseVector3f(out)
-    if status == "clear" then
-        d = travel >= REAR_TRAVEL_M and sqrt(UNSTICK_DIST_SQ) or travel - TUNE.REAR_KEEP_M
-    end
-    local clear = d > 0 and not MDADSensor.probeAround(s.sensor, vehicle, getCell(), s.probeR, vx - fx * d, vy - fy * d)
+    local clear = need > 0
     if clear then s.rotProbeMs = 0 end -- 倒完第一個跟線幀就重探
     diagEvent(s, playerNum, "uturn", { phase = "room", why = s.uturn.name, rear = status, len = d,
-        probe = clear and "clear" or "obstructed" })
-    if getDebug() then -- telemetry: uturn room（rear len probe）
+        probe = clear and "clear" or "obstructed", need = clear and need or nil, used = s.uturnRoomUsedM,
+        hx = s.rotProbeHx, hy = s.rotProbeHy })
+    if getDebug() then -- telemetry: uturn room（rear len need used hx hy probe）
         print(LOG .. "pn=" .. playerNum .. " uturn room: rear=" .. tostring(status) .. " len=" .. string.format("%.2f", d)
+            .. " need=" .. string.format("%.2f", need) .. " used=" .. string.format("%.2f", s.uturnRoomUsedM)
+            .. " hit=" .. tostring(s.rotProbeHx) .. "," .. tostring(s.rotProbeHy)
             .. (clear and " -> reverse then spin" or " -> wide arc"))
     end
     return clear
@@ -12832,6 +12940,13 @@ local function stepUnstick(s, vehicle, playerNum, now)
         if s.sensor and type(MDADSensor) == "table"
                 and type(MDADSensor.reset) == "function" then MDADSensor.reset(s.sensor) end
         s.mode = s.profile.ready == true and "follow" or "build"
+        -- 1013c 分段倒車：uturn-room 這一段倒成了＝倒車時間不補進停等預算（成功不受罰；分段不會在中途被 15 秒交還），
+        -- 記這次調頭已倒距離；調頭中每次倒車成功都等車周重探（rotateProbe 把 "probe" 放回 false）才再算下一段
+        if s.uturnRoomRev then
+            s.waitTickMs, s.uturnRoomUsedM = 0, s.uturnRoomUsedM + s.unstickDistance
+        end
+        if s.uturn then s.uturnRoomTried, s.rotProbeMs = "probe", 0 end
+        s.uturnRoomRev = false
         if s.unstickSide then
             -- 側推到位停妥：從靜止接回倒車鏈（startRecoveryAttempt 重探：rear 清就倒車、仍擋再側推）
             s.unstickSide, s.sideChain = nil, true
@@ -12917,8 +13032,9 @@ local function stepUnstick(s, vehicle, playerNum, now)
         sampleRecovery(s, vehicle, playerNum, now, vx, vy, speedKmh)
         -- 一寸未退（< UNSTICK_MIN_M）與倒車途中後方探到障礙同規則（recovery.md）：額度還有就 softFail 回停等，
         -- 交給停等預算／自動改道；額度用完才交還前改道→受困交還（正式服 0.23.0 片段 M998 拖車 (8641,8556)：拖車倒 4 秒只退
-        -- 0.35m，3 次額度只用 1 次就 detour stuck→StopStuck）。
-        if s.episodeAttempts < UNSTICK_MAX then
+        -- 0.35m，3 次額度只用 1 次就 detour stuck→StopStuck）。uturn-room 的一段（1013c）一律 softFail：調頭還有 2B 大弧可走，
+        -- 分段用到最後一次額度時逾時不得直接交還。
+        if s.episodeAttempts < UNSTICK_MAX or s.uturnRoomRev then
             s.blockRetryDone = true
             s.mode = "follow"
             s.progressState = "disarmed"
@@ -13352,11 +13468,12 @@ local function stepFollow(s, vehicle, playerNum, now)
         -- 大半進入段，姿態早早追平、位置落後擦到旁物）；crawl-exact 是沿現偏移的平行線，一併無妨。
         s.fstate.trackTangent = s.dodging == true
             or (s.returnActive == true and not s.returnHold)
-        Drive.startRotateGate(s) -- 起步段的調頭門檻（TUNE.START_ROTATE_*）
+        Drive.startRotateGate(s, now) -- 起步段的調頭門檻（TUNE.START_ROTATE_*；還在甩不收，1013c）
         local steer, targetSpeed, remaining, done, headingError, lateralSq, latSigned, lineLat = MDADFollower.control(
             s.profile, s.fstate, vx, vy,
             heading, speedKmh, mult * SECONDS_PER_MULT)
         Drive.startRotateEnd(s, headingError, vx, vy)
+        Drive.uturnOverTrack(s, playerNum, now, headingError) -- 起步調頭收尾後的過轉量測（uturn over，1013c）
         s.followerTarget = targetSpeed -- telemetry ftg：剖面原始目標（cap／jerk 之前；0907e 錨定 bug 只靠它定罪）
         -- 高速增益估計衝出上限、Follower 已整份重學（FF_HI；1006 正式服 ygh 貼 3.0 撞路緣）：記下當下的比值與幀時
         if s.fstate.hiCapObs ~= nil then
@@ -14736,6 +14853,9 @@ local function stepFollow(s, vehicle, playerNum, now)
                 or s.returnHold or blockedStop or reached) and not returnHoldCoast then
             hardBrakeReason = hardClampReason
         end
+        -- 1013c（N5）：恢復請求在車已靜止時本幀就 dispatch 倒車（同幀下方 |v|<1 那段）：不下一秒鎖輪閂（stepUnstick 推車不靠它，
+        -- 閂住反而讓倒車晚 1.0–1.1 秒才動；正式服 fbw=recover fbl≈1000）。還在滑就照舊煞到停。
+        if Drive.recoverReady(s, speedKmh) then hardBrakeReason = nil end
         s.lastHardBrakeReason = hardBrakeReason -- telemetry hbr（本幀裁決者；nil＝無）
         if hardBrakeReason ~= nil then s.hbrLatch = hardBrakeReason end -- telemetry hbp（取樣間最後一個，collectPhys 清）
         -- 加速側直給（2026-09-01 三模型對抗審定案）：regulator 供油是二值全力
@@ -14811,8 +14931,10 @@ local function stepFollow(s, vehicle, playerNum, now)
             vehicle:setRegulator(false)
         elseif s.recoverWhy ~= nil or s.currentBlocked then
             vehicle:setRegulator(false)
-            force = Drive.hardBrake(s, vehicle, now, s.currentBlocked and "contact" or "recover",
-                speedKmh, mult, steer, heading, fwd, fx, fy) or 0
+            if not Drive.recoverReady(s, speedKmh) then
+                force = Drive.hardBrake(s, vehicle, now, s.currentBlocked and "contact" or "recover",
+                    speedKmh, mult, steer, heading, fwd, fx, fy) or 0
+            end
             targetSpeed = 0
         elseif s.returnHold then
             vehicle:setRegulator(false)
@@ -14879,6 +15001,7 @@ local function stepFollow(s, vehicle, playerNum, now)
                 s.uturnStart = s.startRot == true -- 起步段進的（Drive.startRotateGate：轉到 START_ROTATE_EXIT_RAD 才收）
                 s.rotProbeClear, s.rotProbeMs = nil, 0 -- 每次調頭重探：上一次的結果不沿用（壓速／夾限／遙測都看本次）
                 s.uturnSinceMs, s.uturnProbe, s.uturnRoomTried = now, nil, false -- uturn done 的耗時起點與首探結果
+                s.uturnRoomUsedM, s.rotSettleMs = 0, 0 -- 分段倒車已倒距離、起步段出場撐住計時（1013c）
                 -- rs／sT／kh：進場當幀的投影弧長、前視點弧長、髮夾鉗點（nil＝未鉗）——「前視點在車後」不必離線重播就看得出；
                 -- start＝起步段進的、ae＝進場當幀 |航向誤差|（rad，對 Follower 前視方向）
                 diagEvent(s, playerNum, "uturn", {
@@ -15051,9 +15174,12 @@ local function stepFollow(s, vehicle, playerNum, now)
                         assistForce = -Drive.visAssistForce(s, speedKmh, mult)
                         if s.tow and s.visAssistDecel > 0 then Drive.towDecel(s, s.visAssistDecel, mult) end
                     end
-                    -- 回授依轉向增益正規化（TUNE.FB_NORM_*）後，車身 yaw 率限制（TUNE.ESC_*）；耦力原地調頭兩者都不經
+                    -- 回授依轉向增益正規化（TUNE.FB_NORM_*）後，車身 yaw 率限制（TUNE.ESC_*）；耦力原地調頭兩者都不經，只量 yaw 率
+                    -- 並在起步段到斷力點時不推（Drive.rotateCouple，1013c）
                     if not coupled then
                         steer = Drive.yawGovern(s, Drive.normalizeSteer(s, steer or 0), heading, speedKmh, now)
+                    else
+                        steer = Drive.rotateCouple(s, steer or 0, headingError, heading, speedKmh, now)
                     end
                     force, s.lastAssistForce = applySteering(
                         s, vehicle, fwd, fx, fy, steer or 0,
@@ -15213,6 +15339,7 @@ local function stepFollow(s, vehicle, playerNum, now)
             hit = why == "progress" and s.recoverHit or s.rearStatus,
             detail = why == "progress" and s.recoverDetail or nil,
         })
+        s.uturnRoomRev = why == "uturn-room" -- 1013c：這一段倒車屬分段騰空間（成功不扣預算、逾時不交還）
         startRecoveryAttempt(s, vehicle, playerNum, now, vx, vy, true)
         Drive.gateShutRetry(s, playerNum, vehicle, now) -- Knox Pass 會開的門到倒車那刻仍關著：提示 shut（unstick 語音之後）
         return

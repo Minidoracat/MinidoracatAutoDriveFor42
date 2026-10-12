@@ -115,6 +115,8 @@
     "UI_MinidoracatAutoDrive_HUDStatusUnstick": "Reversing free",
     "UI_MinidoracatAutoDrive_HUDStatusSide": "Edging sideways",
     "UI_MinidoracatAutoDrive_HUDStatusRehitch": "Re-hitching",
+    "UI_MinidoracatAutoDrive_HUDStatusUturn": "Turning in place",
+    "UI_MinidoracatAutoDrive_HUDStatusUturnSlow": "Tight spot: slow turn",
     "UI_MinidoracatAutoDrive_HUDStatusYield": "Manual control",
     "UI_MinidoracatAutoDrive_HUDStatusYieldResume": "Resuming in %1 s",
     "UI_MinidoracatAutoDrive_HUDStatusArrive": "Arrival stop",

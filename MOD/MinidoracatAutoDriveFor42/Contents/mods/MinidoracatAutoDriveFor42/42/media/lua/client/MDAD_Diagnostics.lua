@@ -166,6 +166,9 @@ local EK = {
     "sp0", "sc0", "sd0",
     -- 1012 起步先原地轉：uturn enter／done 的起步段旗標、enter 當幀 |航向誤差| rad（uturn room 用既有 rear／len／probe）
     "start", "ae",
+    -- 1013c 分段倒車與原地轉出場：uturn room 的車周命中點 hx／hy、已倒 used（m；need 沿用）；uturn done／over 的 yaw 率 yr
+    -- （rad/s）與起步調頭收尾後的過轉 ov（rad）
+    "hx", "hy", "used", "yr", "ov", -- 1013c
 }
 
 local function logOnce(msg)

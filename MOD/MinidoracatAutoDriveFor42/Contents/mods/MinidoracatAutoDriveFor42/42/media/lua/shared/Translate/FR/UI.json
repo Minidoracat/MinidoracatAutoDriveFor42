@@ -115,6 +115,8 @@
     "UI_MinidoracatAutoDrive_HUDStatusUnstick": "Dégagement en marche arrière",
     "UI_MinidoracatAutoDrive_HUDStatusSide": "Décalage latéral",
     "UI_MinidoracatAutoDrive_HUDStatusRehitch": "Réattelage",
+    "UI_MinidoracatAutoDrive_HUDStatusUturn": "Demi-tour sur place",
+    "UI_MinidoracatAutoDrive_HUDStatusUturnSlow": "Demi-tour lent (étroit)",
     "UI_MinidoracatAutoDrive_HUDStatusYield": "Contrôle manuel",
     "UI_MinidoracatAutoDrive_HUDStatusYieldResume": "Reprise dans %1 s",
     "UI_MinidoracatAutoDrive_HUDStatusArrive": "Arrêt à l'arrivée",

@@ -53,6 +53,8 @@ local texts = {
     UI_MinidoracatAutoDrive_HUDStatusYieldResume = "RESUME IN %1 S",
     UI_MinidoracatAutoDrive_HUDStatusUnstick = "UNSTICK",
     UI_MinidoracatAutoDrive_HUDStatusSide = "SIDE",
+    UI_MinidoracatAutoDrive_HUDStatusUturn = "Turning in place",
+    UI_MinidoracatAutoDrive_HUDStatusUturnSlow = "Tight spot: slow turn", -- 1013c：長度對齊真實英文字串
     UI_MinidoracatAutoDrive_HUDStatusBlocked = "BLOCKED",
     UI_MinidoracatAutoDrive_HUDStatusDodging = "DODGE",
     UI_MinidoracatAutoDrive_HUDStatusBuild = "BUILD",
@@ -1450,6 +1452,21 @@ do
     panel:refresh(nowMs)
     check(panel._statusText == "SIDE" and panel._statusColor == unstickColor,
         "side-escape token shows its own label in the unstick colour")
+end
+-- 調頭中（1013c；Drive.hudState 鍵 uturn／uturnslow）：原地調頭中／空間不足慢速調頭，專屬文字、與倒車脫困同色（車在動、不是卡住）
+-- 違規證明：STATUS_KEYS 拿掉 uturnslow＝文字退成鍵名紅；statusColor 不認 uturn＝顏色紅。
+do
+    state.token = "unstick"
+    panel:refresh(nowMs)
+    local unstickColor = panel._statusColor
+    state.token = "uturn"
+    panel:refresh(nowMs)
+    check(panel._statusText == "Turning in place" and panel._statusColor == unstickColor,
+        "in-place U-turn token shows its own label in the unstick colour (" .. tostring(panel._statusText) .. ")")
+    state.token = "uturnslow"
+    panel:refresh(nowMs)
+    check(panel._statusText == "Tight spot: slow turn" and panel._statusColor == unstickColor,
+        "wide-arc U-turn token shows its own label in the unstick colour (" .. tostring(panel._statusText) .. ")")
 end
 state.token = "follow"
 panel:refresh(nowMs)

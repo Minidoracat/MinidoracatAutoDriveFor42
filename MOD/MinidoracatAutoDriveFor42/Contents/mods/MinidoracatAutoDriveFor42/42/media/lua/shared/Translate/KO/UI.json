@@ -115,6 +115,8 @@
     "UI_MinidoracatAutoDrive_HUDStatusUnstick": "후진 탈출 중",
     "UI_MinidoracatAutoDrive_HUDStatusSide": "옆으로 이동 중",
     "UI_MinidoracatAutoDrive_HUDStatusRehitch": "트레일러 재연결 중",
+    "UI_MinidoracatAutoDrive_HUDStatusUturn": "제자리 유턴 중",
+    "UI_MinidoracatAutoDrive_HUDStatusUturnSlow": "공간 부족, 천천히 유턴",
     "UI_MinidoracatAutoDrive_HUDStatusYield": "수동 조작",
     "UI_MinidoracatAutoDrive_HUDStatusYieldResume": "%1초 후 재개",
     "UI_MinidoracatAutoDrive_HUDStatusArrive": "도착 정지",
