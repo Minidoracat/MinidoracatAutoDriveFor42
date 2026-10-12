@@ -964,7 +964,7 @@ local function summaryText(u, now, reason, withMaps)
         .. ',"rotMs":' .. jnum(u.rotMs)
         .. (u.suOpen ~= nil and (',"su":{"probe":' .. jstr(u.suProbe or "") .. ',"room":' .. jstr(u.suRoom or "")
             .. ',"rn":' .. u.suRn .. ',"why":' .. jstr(u.suOpen and "open" or u.suWhy or "")
-            .. ',"ms":' .. jround(u.suMs, 1) .. '}') or "")
+            .. ',"ms":' .. (finite(u.suMs) and jnum(math.floor(u.suMs + 0.5)) or "null") .. '}') or "")
     if withMaps then
         text = text .. ',"ev":' .. mapJson(u.evc) .. ',"mode":' .. mapJson(u.modeMs)
             .. ',"cap":' .. mapJson(u.capMs) .. ',"loss":' .. lossJson(u.loss)

@@ -1668,6 +1668,7 @@ do
     -- 路口 9.1 爬 20m 就是這條沒地板）。違規證明：拿掉 MIN_SPEED 夾即紅
     checkNear(arcState.curveCapKmh, 12, 1e-9,
         "即時弧帽不低於曲率地板 12（實得 " .. tostring(arcState.curveCapKmh) .. "）")
+    checkEq(arcState.profileWhy, "arc", "1013a pw：當下弧段即時帽綁住＝arc")
     checkNear(p.segLat[firstArc], retainedSegLat, 1e-12,
         "immediate runtime tightening does not mutate the still-high profile")
     checkTrue(arcState.curveValid, "successful control explicitly publishes valid curve state")
@@ -3604,7 +3605,7 @@ do
             y = offL
         end
         F.control(p, st, sCar, y, 0, 40, DT)
-        return st.profileSpeedKmh
+        return st.profileSpeedKmh, st.profileWhy
     end
     -- 期望值：與 Follower 同一份即時帽公式（內側折算、轉向域、地板 12），coast 取該段剖面與 runtime 的較小者
     local function expectKmh(lat, latSafe, envKmh)
@@ -3623,8 +3624,12 @@ do
         c = math.min(c, 1.0 + (p.coastAssistAt and p.coastAssistAt[1] or 0))
         return math.min(envKmh, 3.6 * math.sqrt(cap * cap + 2 * c * (p.s[ai] - sCar)))
     end
-    local env = pvAt(1.5, 30) -- 即時帽寬鬆（latSafe 30 高於建表側向）：前看不綁，剖面包絡本身
-    local out = pvAt(-1.5, 3.5)
+    local env, envWhy = pvAt(1.5, 30) -- 即時帽寬鬆（latSafe 30 高於建表側向）：前看不綁，剖面包絡本身
+    local out, outWhy = pvAt(-1.5, 3.5)
+    -- 1013a pw：弧前 20m 的建表收油包絡（不是從終點倒推的那段）＝coast；即時帽前看壓得更低＝look。
+    -- 違規證明：coastEndI 判式反向＝coast 變 stop 紅；前看降速不標＝look 紅。
+    checkEq(envWhy, "coast", "1013a pw：彎前建表收油包絡＝coast")
+    checkEq(outWhy, "look", "1013a pw：前方弧段即時帽的提前收油＝look")
     local inn = pvAt(1.5, 3.5)
     checkTrue(out < env - 1, string.format("runtime latSafe 低於建表：弧前 20m 目標先降（%.1f < 包絡 %.1f）", out, env))
     checkNear(out, expectKmh(-1.5, 3.5, env), 1e-6, "外側偏移：前看＝sqrt(即時帽²＋2·coast·距離)（中心線 κ）")
@@ -5351,6 +5356,24 @@ do
     rs.xtTurn = 1
     F.resetControl(rs)
     checkNil(rs.xtTurn, "(4) resetControl 清外漂加權的轉向方向（換線／脫困後不沿用舊弧）")
+end
+
+scenario("1013a pw：剖面綁速項——長直路 max、終點前 stop、反向 err、起步段原地轉門檻 start")
+do
+    -- 違規證明：coastEndI 判式反向＝(stop) 紅；姿態帽不標＝(err) 紅；起步段不分＝(start) 紅。
+    local p = buildRoute(straight(41, 10), 70)
+    local function why(s, h, extra)
+        local st = F.newState()
+        st.idx = 1
+        F.setRuntimeLimits(st, 3, 6, 7, 2)
+        for k, v in pairs(extra or {}) do st[k] = v end
+        F.control(p, st, s, 0, h, 30, DT)
+        return st.profileWhy
+    end
+    checkEq(why(25, 0), "max", "(max) 400m 直路段中：剖面＝車輛上限")
+    checkEq(why(390, 0), "stop", "(stop) 終點前 10m：終點停車包絡")
+    checkEq(why(25, math.pi), "err", "(err) 車頭反向：航向誤差減速")
+    checkEq(why(25, math.pi, { rotEnter = 1.0, rotExit = 0.5 }), "start", "(start) 起步段門檻下的姿態帽另記 start")
 end
 
 closeScenario()

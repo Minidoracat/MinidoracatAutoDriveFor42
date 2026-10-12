@@ -18132,8 +18132,22 @@ local function scenarioNarrowLaneProof()
         st.progressState, st.progressSince = "watch", nowMs
         st.cmdV, st.cmdA, st.cmdInitialized = 40 / 3.6, 0, true
         st.startGuard = false -- 已過起步近物保護（真的上路會在貼線對正 1 秒後解除）
+        -- 1013a (pw)：這一幀 fullGate 開、capReason 空＝目標就是剖面；樣本帶 pw＝Follower 綁速項、pv＝剖面值（0.1）。
+        --   違規證明：profileBind 不寫或 collectPhys 不帶＝紅（見 drive.scenarioTele1013a 註解）。
+        local oldSample13, oldShould13, ph13 = MDADDiagnostics.sample, MDADDiagnostics.shouldSample, nil
+        MDADDiagnostics.shouldSample = function() return true end
+        MDADDiagnostics.sample = function(...) ph13 = select(32, ...) return true end
+        local oldDiag13 = st.diag
+        st.diag = true
         driveReset(dveh)
         driveTick(dp, dveh)
+        st.diag = oldDiag13
+        MDADDiagnostics.sample, MDADDiagnostics.shouldSample = oldSample13, oldShould13
+        ph13 = ph13 or {}
+        checkTrue(st.lastCapReason == nil and type(ph13.profileWhy) == "string" and ph13.profileWhy == st.fstate.profileWhy
+                and ph13.profileKmh == math.floor(st.fstate.profileSpeedKmh * 10 + 0.5) / 10,
+            tag .. "1013a (pw) capReason 空：樣本帶 pw／pv（cap=" .. tostring(st.lastCapReason) .. " pw="
+            .. tostring(ph13.profileWhy) .. " pv=" .. tostring(ph13.profileKmh) .. "）")
         checkEq(st.verifyLineReason, "ok", tag .. "空直路 proof 線不得 band（實得 "
             .. tostring(st.verifyLineReason) .. "）")
         checkEq(st.gateReason, "clear", tag .. "gate clear（實得 " .. tostring(st.gateReason) .. "）")
@@ -21935,6 +21949,9 @@ function drive.scenarioApproach()
     checkTrue(st ~= nil and not st.blocked,
         "(apr) 路線起點旁有硬物：排得出入口、不 blocked（blocked=" .. tostring(st and st.blocked)
         .. " mode=" .. tostring(st and st.mode) .. " pm=" .. tostring(st and st.planMode) .. "）")
+    -- 1013a 沒接越野接線的原因碼（route ready apw／aph／apd）：接了＝nil；far／near／behind／side 各一例。
+    --   違規證明：原因判式順序對調（behind 先於 near）＝(apw-mid) 紅；夾角量首段＝(apw-back) 紅。
+    checkTrue(st ~= nil and st.approachWhy == nil, "1013a (apw) 接了越野接線：沒有原因碼（" .. tostring(st and st.approachWhy) .. "）")
     drive.clearCell(2, 0)
     -- 車在路旁（投影落在第一段內）：不接越野線（RETURN 的平滑併入）
     checkTrue(arm(20, -5.5, 0), "(apr-side) 路旁起步啟動")
@@ -21942,6 +21959,9 @@ function drive.scenarioApproach()
     st = MDAD.Drive.debugSession(0)
     checkTrue(st ~= nil and st.approachM == 0 and st.profile.x[1] == 0,
         "(apr-side) 車在路旁：不接越野線（approachM=" .. tostring(st and st.approachM) .. "）")
+    checkTrue(st ~= nil and st.approachWhy == "side" and st.approachHd == 0 and st.approachD == 5.5,
+        "1013a (apw-side) 路旁車頭沿路：side、aph 0、apd 5.5（" .. tostring(st and st.approachWhy) .. " "
+        .. tostring(st and st.approachHd) .. " " .. tostring(st and st.approachD) .. "）")
     -- (apr-mid) 0928a：開著導航走了一段才按自駕，主 MOD 回快取同一條線、起點早在車後（正式服 10 趟接出
     --   164／7136m 回頭接線）。車離第三段只有 1m，只是剛好也在第一段反向延長線上、10m 內。
     --   違規證明：拿掉「整條路線最近點」檢查即紅（舊制接出 10.3m）。
@@ -21952,12 +21972,16 @@ function drive.scenarioApproach()
     st = MDAD.Drive.debugSession(0)
     checkTrue(st ~= nil and st.approachM == 0 and st.profile.x[1] == 0,
         "(apr-mid) 車離後段只有 1m：不從車位接回起點（approachM=" .. tostring(st and st.approachM) .. "）")
+    checkTrue(st ~= nil and st.approachWhy == "near" and st.approachD == 1,
+        "1013a (apw-mid) 離後段 1m：near（" .. tostring(st and st.approachWhy) .. " " .. tostring(st and st.approachD) .. "）")
     -- (apr-far) 起點在車後 25m（> SNAP_MAX_M）：不接越野線。違規證明：拿掉距離上限即紅（舊制接出 25m）。
     checkTrue(arm(-25, 0, 0), "(apr-far) 起點前 25m 啟動")
     for _ = 1, 4 do driveTick(dp, dveh) end
     st = MDAD.Drive.debugSession(0)
     checkTrue(st ~= nil and st.approachM == 0,
         "(apr-far) 超過 20m 不接越野線（approachM=" .. tostring(st and st.approachM) .. "）")
+    checkTrue(st ~= nil and st.approachWhy == "far" and st.approachD == 25,
+        "1013a (apw-far) 超過 SNAP_MAX_M：far、apd 25（" .. tostring(st and st.approachWhy) .. " " .. tostring(st and st.approachD) .. "）")
     -- (apr-perp) 0928b E2E replay clip-05：車在路線中段旁 15m 草地（超過 RETURN_MAX_DEV 12、未超過 SNAP_MAX_M 20）：
     --   把「車位→最近點」接成剖面開頭、最近點之前捨去，感知／繞行才看得到中間的障礙。
     --   違規證明：拿掉 far 分支＝不接（approachM 0）紅。
@@ -21997,6 +22021,8 @@ function drive.scenarioApproach()
     st = MDAD.Drive.debugSession(0)
     checkTrue(st ~= nil and st.approachM == 0,
         "(apr-near) 車頭背對路線：不接（approachM=" .. tostring(st and st.approachM) .. "）")
+    checkTrue(st ~= nil and st.approachWhy == "side" and st.approachHd == 1.57,
+        "1013a (apw-back) 背對路線：side、aph＝π/2（" .. tostring(st and st.approachWhy) .. " " .. tostring(st and st.approachHd) .. "）")
     checkTrue(arm(40, -2, math.pi / 2), "(apr-near) 中段旁 2m、車頭正對路線啟動")
     for _ = 1, 4 do driveTick(dp, dveh) end
     st = MDAD.Drive.debugSession(0)
@@ -22037,6 +22063,8 @@ function drive.scenarioApproach()
     for _ = 1, 4 do driveTick(dp, dveh) end
     st = MDAD.Drive.debugSession(0)
     checkTrue(st ~= nil and st.approachM == 0, "(apr-sidestart) 背對起點：不接（approachM=" .. tostring(st and st.approachM) .. "）")
+    checkTrue(st ~= nil and st.approachWhy == "behind",
+        "1013a (apw-behind) 最近點是路線起點、車沒在它後方：behind（" .. tostring(st and st.approachWhy) .. "）")
     checkTrue(arm(0, -5, 0), "(apr-sidestart) 路首側面、車頭沿首段啟動")
     for _ = 1, 4 do driveTick(dp, dveh) end
     st = MDAD.Drive.debugSession(0)
@@ -29451,6 +29479,107 @@ function drive.scenarioImpulseGuard()
     driveReset(dveh)
 end
 drive.scenarioImpulseGuard()
+
+-- 1013a 遙測（使用者 2026-10-13 核准：速度損失拆帳、MP 首見距離、scanEndS）：
+--   (pw)   capReason 空的樣本帶 Follower 剖面綁速項 pw（＝本幀 fstate.profileWhy）與剖面值 pv；capReason 有值的樣本不帶。
+--          違規證明：collectPhys 不看 capReason＝(pw-omit) 紅；profileBind 不寫＝(pw) 紅。
+--   (sce)  樣本帶中央帶掃描終點（Sensor scanEndS，0.1m）。違規證明：拿掉＝紅。
+--   (vfs)  Sensor 首見佇列進樣本後歸 0。違規證明：不歸 0＝(vfs-drain) 紅。
+--   (vfi)  可視前緣前進間隔閂進樣本、寫出後清。違規證明：不清＝(vfi-clear) 紅。
+--   (vac)  巡航帽由哪本帳綁：hold＝停滯保持帳比巡航煞車帳低、cruise＝反之、term＝前緣就是終點。違規證明：判式反向＝紅。
+--   (na)   前方 200m 內下一段弧的距離；在弧上／太遠＝nil。違規證明：不看 200m＝(na-far) 紅。
+function drive.scenarioTele1013a()
+    scenario("1013a 遙測：剖面綁速項、scanEndS、他車首見、可視帳與前緣間隔、下一段弧距離")
+    local Dr, D = MDAD.Drive, MDADDynamics
+    local oldApi, oldSand = MinidoracatMiniMapAPI, SandboxVars
+    installNavApi(2)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    local oldStart, oldStop = MDADDiagnostics.start, MDADDiagnostics.stop
+    local oldEvent, oldSample, oldShould = MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.shouldSample
+    local phys = nil
+    MDADDiagnostics.start = function() return true end
+    MDADDiagnostics.stop = function() return true end
+    MDADDiagnostics.event = function() end
+    MDADDiagnostics.shouldSample = function() return true end
+    MDADDiagnostics.sample = function(...) phys = select(32, ...) return true end
+    drive.fillWorld(-10, 300, -8, 8)
+    checkTrue(armDrive(), "(1013a) 啟動自駕")
+    setHeading(dveh, 0)
+    local s = Dr.debugSession(0) or {}
+    s.diag = true
+    -- (pw-omit) 這段路一直被 gate 帽（align／arc）綁：capReason 有值的樣本不帶 pw（正案在 scenarioNarrowLaneProof 的 1013a (pw)）
+    local setBad, setN = nil, 0
+    for _ = 1, 40 do
+        phys = nil
+        drive.scanRound()
+        local p = phys or {}
+        if s.lastCapReason ~= nil then
+            setN = setN + 1
+            if p.profileWhy ~= nil then setBad = tostring(s.lastCapReason) .. ":" .. tostring(p.profileWhy) end
+        end
+    end
+    checkTrue(setN >= 10 and setBad == nil, "(pw-omit) capReason 有值的樣本不帶 pw（" .. setN .. " 筆，錯 " .. tostring(setBad) .. "）")
+    local sen = s.sensor
+    checkTrue(sen and sen.ready and phys and phys.scanEndS == math.floor(sen.scanEndS * 10 + 0.5) / 10,
+        "(sce) 樣本帶中央帶掃描終點（" .. tostring(phys and phys.scanEndS) .. " / " .. tostring(sen and sen.scanEndS) .. "）")
+    -- (vfs) 首見佇列：兩筆（52.34 停著、71 行進）
+    sen.fsN, sen.fsD[1], sen.fsP[1], sen.fsD[2], sen.fsP[2] = 2, 52.34, true, 71, false
+    phys = nil
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    local fs = phys and phys.firstSeen
+    checkTrue(type(fs) == "string" and string.find(fs, "^%[%[52%.3,1%],%[71[%.0]*,0%]") ~= nil,
+        "(vfs) 首見佇列進樣本（" .. tostring(fs) .. "）")
+    checkEq(sen.fsN, 0, "(vfs-drain) 取走後佇列歸 0")
+    -- (vfi)(vac) 直接問 Drive.visibilityCaps：前緣 50m → 0.7 秒後 60m＝前進間隔 700ms
+    local len, halfL = s.profile.length, s.vehicleProfile.halfL
+    local base = s.lastSNow
+    s.visFrontRef = nil
+    Dr.visibilityCaps(s, 100000, base + 50, 6)
+    checkEq(s.visAdvMs, nil, "(vfi) 第一次（沒有前一個前緣）不記間隔")
+    local cap, cb = Dr.visibilityCaps(s, 100700, base + 60, 6)
+    checkEq(s.visAdvMs, 700, "(vfi) 前緣前進間隔 700ms")
+    local function acctOk(c, brake, ahead)
+        local cruise = D.visibilityCapKmh(ahead, Dr.debugTune().VIS_TAU, brake, halfL)
+        return s.visAcct == (c < cruise - 1e-9 and "hold" or "cruise")
+    end
+    checkTrue(acctOk(cap, cb, base + 60 - s.lastSNow), "(vac) 剛前進：帳別＝較低那本（" .. tostring(s.visAcct) .. "）")
+    local seen = { [s.visAcct] = true }
+    for k = 1, 8 do -- 前緣停住、保持逐步耗盡：兩本帳都會綁到一次
+        cap, cb = Dr.visibilityCaps(s, 100700 + k * 400, base + 60, 6)
+        checkTrue(acctOk(cap, cb, base + 60 - s.lastSNow), "(vac) 停滯 " .. (k * 400) .. "ms：帳別＝較低那本（" .. tostring(s.visAcct) .. "）")
+        seen[s.visAcct] = true
+    end
+    checkTrue(seen.hold == true and seen.cruise == true, "(vac) 停滯保持帳與巡航帳都出現過")
+    Dr.visibilityCaps(s, 104000, len, 6)
+    checkEq(s.visAcct, "term", "(vac) 前緣就是路線終點＝term")
+    phys = nil
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    nowMs = nowMs + 300
+    phys = nil
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkTrue(phys ~= nil and phys.visAdvMs ~= 700, "(vfi-clear) 寫出後清：下一筆不是舊間隔（" .. tostring(phys and phys.visAdvMs) .. "）")
+    -- (na) 純函式：剖面 4 點、第 2 段是弧
+    local ARC = D.SEG_ARC
+    local fake = { profile = { ready = true, n = 4, s = { 0, 50, 60, 300 }, segKind = { "line", ARC, "line" } },
+        fstate = { idx = 1, curveHardActive = false }, lastSNow = 10 }
+    checkEq(Dr.nextArcDist(fake), 40, "(na) 前方弧起點 40m")
+    fake.fstate.curveHardActive = true
+    checkEq(Dr.nextArcDist(fake), nil, "(na) 在弧上不寫")
+    fake.fstate.curveHardActive = false
+    fake.profile.s = { 0, 250, 260, 300 }
+    checkEq(Dr.nextArcDist(fake), nil, "(na-far) 200m 外的弧不寫")
+    MDAD.Drive.stop(0, nil)
+    MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.shouldSample = oldEvent, oldSample, oldShould
+    MDADDiagnostics.start, MDADDiagnostics.stop = oldStart, oldStop
+    MinidoracatMiniMapAPI, SandboxVars = oldApi, oldSand
+    drive.nav.tx, drive.nav.ty, drive.nav.state = 300, 0, "ok"
+    drive.nav.route = newRoute(40, 0, 0, 4, 0)
+    driveReset(dveh)
+end
+drive.scenarioTele1013a()
 
 local function scenarioReasonKeys()
 scenario("理由鍵覆蓋：每個分支都跑到，且四語 UI.json 都有對應翻譯")
