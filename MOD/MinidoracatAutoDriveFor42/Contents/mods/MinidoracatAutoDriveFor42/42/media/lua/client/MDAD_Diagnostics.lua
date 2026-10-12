@@ -1484,8 +1484,13 @@ end
 -- 範圍內都沒有＝"nb":{}（掃了、沒有）；任何 getter 失敗＝整欄不寫。
 -- 第二回傳 near（1008 tow-sync 分類）：true＝方框內有殭屍／動物／玩家／屍體或 NB_R 內有車；false＝都沒有；
 -- nil＝沒掃成，或什麼都沒找到但屍體沒讀成。
+-- 1013f：動物 a 也收剛死的——撞死的動物在死亡動畫期間仍是 getMovingObjects 裡 isDead() 的 IsoAnimal（softKindOf 回 nil，
+-- 規劃語意不動），動畫完才 becomeCorpse 成 isAnimal() 的 IsoDeadBody（同時照舊算進屍體 c）；屍體只收死亡 NB_DEAD_H 遊戲
+-- 小時內的（路上舊屍不冒充這次撞的）。死的與活的一起比最近，死的第 6 項＝1（第 4、5 項讀不到寫 null 佔位）。
+-- 正式服 0.29.x 226 次撞擊 65 次 nb={}：撞死的小動物當幀被 softKindOf 排掉，小動物撞擊拆不出碰撞 KPI。
 local NB_R = 8
 local NB_V_R = 15
+local NB_DEAD_H = 0.02 -- 遊戲小時（預設一天＝現實 1 小時時約 3 秒）
 local function nearbyJson(pn, x, y, h)
     if not finite(x) or not finite(y) then return "" end
     local ok, out, near = pcall(function()
@@ -1498,6 +1503,9 @@ local function nearbyJson(pn, x, y, h)
         if finite(h) then ch, sh = math.cos(h), math.sin(h) end
         local soft = MDADSensor and MDADSensor.softKindOf
         local zd, zx, zy, ad, ax, ay, pd, px, py, cd, cx, cy, am
+        local adead = false -- 最近那隻動物是剛死的（am＝IsoAnimal 或 IsoDeadBody）
+        local worldH = nil
+        pcall(function() worldH = getGameTime():getWorldAgeHours() end)
         local cOk = true
         for gy = math.floor(y - NB_R), math.floor(y + NB_R) do
             for gx = math.floor(x - NB_R), math.floor(x + NB_R) do
@@ -1508,6 +1516,10 @@ local function nearbyJson(pn, x, y, h)
                         local mo = movs:get(i)
                         local k = nil
                         if instanceof(mo, "IsoZombie") then k = "z" elseif soft then k = soft(mo) end
+                        local dead = false
+                        if k == nil and instanceof(mo, "IsoAnimal") and mo:isDead() and mo:getVehicle() == nil then
+                            k, dead = "small", true -- 死亡動畫中的動物（nb 用，規劃不收）
+                        end
                         if k then
                             local ox, oy = mo:getX(), mo:getY()
                             local d2 = (ox - x) * (ox - x) + (oy - y) * (oy - y)
@@ -1516,7 +1528,7 @@ local function nearbyJson(pn, x, y, h)
                             elseif k == "player" then
                                 if pd == nil or d2 < pd then pd, px, py = d2, ox, oy end
                             elseif ad == nil or d2 < ad then
-                                ad, ax, ay, am = d2, ox, oy, mo -- animal／small
+                                ad, ax, ay, am, adead = d2, ox, oy, mo, dead -- animal／small（含剛死）
                             end
                         end
                     end
@@ -1529,6 +1541,13 @@ local function nearbyJson(pn, x, y, h)
                                     local ox, oy = b:getX(), b:getY()
                                     local d2 = (ox - x) * (ox - x) + (oy - y) * (oy - y)
                                     if cd == nil or d2 < cd then cd, cx, cy = d2, ox, oy end
+                                    -- 剛變成屍體的動物（isAnimal、死亡 NB_DEAD_H 內）也進動物候選；讀不到就略過、不影響 c
+                                    if (ad == nil or d2 < ad) and worldH ~= nil then
+                                        local okB, fresh = pcall(function()
+                                            return b:isAnimal() and worldH - b:getDeathTime() <= NB_DEAD_H
+                                        end)
+                                        if okB and fresh == true then ad, ax, ay, am, adead = d2, ox, oy, b, true end
+                                    end
                                 end
                             end
                         end)
@@ -1559,13 +1578,18 @@ local function nearbyJson(pn, x, y, h)
         p = one("a", ad, ax, ay)
         if p then
             -- 2026-10-10：動物第 4、5 項＝物種（getAnimalType，IsoAnimal.java:1595；讀不到 null）、體重 kg（getData():getWeight()，
-            -- AnimalData.getWeight；讀不到省略）；兩者都讀不到只留前 3 項
+            -- AnimalData.getWeight；讀不到省略）；兩者都讀不到只留前 3 項。1013f：剛死的第 6 項＝1，第 4、5 項讀不到寫 null；
+            -- 屍體的體重是 IsoDeadBody.getWeight（物種同名方法）
             local okA, typ, kg = pcall(function()
+                if instanceof(am, "IsoDeadBody") then return am:getAnimalType(), am:getWeight() end
                 local data = am:getData()
                 return am:getAnimalType(), data and data:getWeight()
             end)
+            if not okA then typ, kg = nil, nil end
             local ext = ""
-            if okA and (type(typ) == "string" or finite(kg)) then
+            if adead then
+                ext = "," .. (type(typ) == "string" and jstr(typ) or "null") .. "," .. (finite(kg) and r2(kg) or "null") .. ",1"
+            elseif type(typ) == "string" or finite(kg) then
                 ext = "," .. (type(typ) == "string" and jstr(typ) or "null") .. (finite(kg) and ("," .. r2(kg)) or "")
             end
             n = n + 1

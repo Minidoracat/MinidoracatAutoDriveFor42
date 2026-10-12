@@ -7,11 +7,13 @@
 --current＝駕駛行為與 HEAD 相同的 rev（C／D／K 與 B 的可用性只看這些）。玩家名一律輸出匿名代號（P01…，同一次執行內穩定）；
 --picks 寫 TSV（category time anon rev kind veh path note）列出 C–E、G–J 背後的片段，path 含真實資料夾名，只留本機。
   A 摘要：(u, drive) 去重、依 build 分組：趟數／玩家／km、impact／impZ／contact 每千 km＋Poisson 95%、相鄰 build 條件二項 p、
+    impact 另列「不含小動物」（扣掉窗口片段裡歸成 small-animal、同 (u, drive) 的撞擊；片段有配額，扣的是下限）、
     結束原因、loss 佔比、nm/fm、offset（offN／offMax）
   B 窗口片段：rev×kind、玩家數、現行 rev 可用性（事前 ≥3s、樣本 ≥10、有 route 點列）
   C 撞擊歸因（現行 rev；事件 (u, drive, ts) 去重）：上升緣樣本（ts ≤ 事件+5ms、帶 nb 的最後一筆）nb {kind: [d, s, l]}，
     貼車＝|s| ≤ halfL+0.8 且 |l| ≤ halfW+0.8；旗標 awt、maneuver（前 2.5s 主導 ctl 為 AVOID／RETURN 或任一 dg）；
-    類別 zombie＞animal＞vehicle（貼車）＞static（事件 scost tree／hard／wall）＞corpse（貼車）＞far（有 nb 沒貼車）＞empty
+    類別 zombie＞small-animal／animal＞vehicle（貼車）＞static（事件 scost tree／hard／wall）＞corpse（貼車）＞far（有 nb 沒貼車）＞empty；
+    small-animal＝貼車的動物 a 體重 <SMALL_KG（nb a 第 5 項；1013f 起含剛死的，第 6 項＝1），讀不到體重算 animal
   D contact ≥10 km/h（現行 rev）：scost、弧上（前 2.5s curveHardActive）、前 2.5s |ld|>0.5、lag 帽（capReason=lag）、主導 ctl、sprite 家族
   E 判堵後接手：takeover 片段觸發前 10s 內有 blocked；窗口內首筆 blocked→接手秒數、其間 unstick start、detour=false、最後一筆 why／shape
   F 判堵熱點：blocked x,y 的 25m 格（玩家、趟、事件、車型）
@@ -44,6 +46,7 @@ GRID = 25               # 判堵熱點格 m
 STATIC = ("tree", "hard", "wall")
 ANOMALY = ("blocked", "uturn", "unstick", "contact", "impact", "progress")
 NB_KIND = (("z", "zombie"), ("a", "animal"), ("v", "vehicle"))
+SMALL_KG = 20          # 同 MDADSensor.ANIMAL_BIG_KG：小型動物不閃不減（2026-10-13 裁定 7：撞母雞 0 車損），撞擊 KPI 拆開
 
 
 class Anon:
@@ -172,14 +175,28 @@ def classify_impact(e, rec):
     man = dominant_ctl(pre) in ("AVOID", "RETURN") or any(r.get("dg") for r in pre)
     touch = {k for k, _, t in nb if t}
     cls = next((name for k, name in NB_KIND if k in touch), None)
+    if cls == "animal":
+        a = (edge[-1]["nb"] or {}).get("a")
+        kg = a[4] if isinstance(a, list) and len(a) >= 5 else None
+        if isinstance(kg, (int, float)) and kg < SMALL_KG:
+            cls = "small-animal"
     if cls is None:
         cls = ("static" if e.get("scost") in STATIC else "corpse" if "c" in touch else "far" if nb else "empty")
     return cls, bool(e.get("awt")), man, nb
 
 
+def small_impacts(E):
+    """(u, drive) → 歸成 small-animal 的撞擊件數（A 節扣除用；E 不限 rev）。"""
+    out = collections.Counter()
+    for e, rec in events(E, "impact"):
+        if classify_impact(e, rec)[0] == "small-animal":
+            out[(rec["u"], rec["drive"])] += 1
+    return out
+
+
 # ---------- 各節 ----------
 
-def sec_a(S):
+def sec_a(S, small=None):
     print("== A 摘要（(u, drive) 去重、依 build）")
     by = collections.defaultdict(list)
     for o in S.values():
@@ -191,12 +208,16 @@ def sec_a(S):
         n = len(L)
         km = sum(o.get("dist") or 0 for o in L) / 1000
         k = {f: sum(o.get(f) or 0 for o in L) for f in ("impact", "impZ", "contact")}
-        K[b] = (km, k)
+        sm = sum((small or {}).get((o.get("u"), o.get("drive")), 0) for o in L)
+        ns = max(0, k["impact"] - sm)
         revs = dict(collections.Counter(o.get("rev") for o in L))
         print(f"{b} rev={revs} trips={n} users={len({o.get('u') for o in L})} km={km:.0f}")
         if km:
             print("  " + "  ".join(f"{f} {v}={v / km * 1000:.1f}/千km (95% {ci(v)[0] / km * 1000:.1f}-{ci(v)[1] / km * 1000:.1f})"
                                    for f, v in k.items()))
+            print(f"  impact 不含小動物 {ns}={ns / km * 1000:.1f}/千km (95% {ci(ns)[0] / km * 1000:.1f}-{ci(ns)[1] / km * 1000:.1f})"
+                  f"（扣 small-animal {sm}）")
+        K[b] = (km, k, ns)
         rs = collections.Counter((o.get("reason") or "?").replace(PFX, "") for o in L)
         print("  reasons " + ", ".join(f"{r}:{v}({v / n * 100:.1f}%)" for r, v in rs.most_common(10)))
         loss = collections.Counter()
@@ -216,10 +237,11 @@ def sec_a(S):
                      f"（{offn / km * 100 if km else 0:.1f}/百km） offMax={max(o.get('offMax') or 0 for o in hasoff) / 1000:.1f}s")
         print(line)
     for i in range(1, len(order)):
-        (w1, k1), (w2, k2) = K[order[i]], K[order[i - 1]]
+        (w1, k1, n1), (w2, k2, n2) = K[order[i]], K[order[i - 1]]
         if w1 and w2:
-            print(f"  {order[i]} vs {order[i - 1]}: " + " ".join(f"{f} p={binom_p(k1[f], k2[f], w1, w2):.3f}" for f in k1))
-    return {b: dict(trips=len(by[b]), km=K[b][0], **K[b][1]) for b in order}
+            print(f"  {order[i]} vs {order[i - 1]}: " + " ".join(f"{f} p={binom_p(k1[f], k2[f], w1, w2):.3f}" for f in k1)
+                  + f" impact不含小動物 p={binom_p(n1, n2, w1, w2):.3f}")
+    return {b: dict(trips=len(by[b]), km=K[b][0], impactNoSmall=K[b][2], **K[b][1]) for b in order}
 
 
 def sec_b(C, cur, A):
@@ -249,8 +271,8 @@ def sec_c(E, A, picks):
     cnt = collections.Counter((r[0], r[1]) for r in rows)
     revs = sorted({r[0] for r in rows})
     print(f"  共 {len(rows)} 件；awt {sum(1 for r in rows if r[2])}、maneuver {sum(1 for r in rows if r[3])}")
-    for cls in ("zombie", "animal", "vehicle", "static", "corpse", "far", "empty"):
-        print(f"  {cls:8s} " + "  ".join(f"{rev}:{cnt[(rev, cls)]}" for rev in revs) + f"  計 {sum(cnt[(rev, cls)] for rev in revs)}"
+    for cls in ("zombie", "small-animal", "animal", "vehicle", "static", "corpse", "far", "empty"):
+        print(f"  {cls:12s} " + "  ".join(f"{rev}:{cnt[(rev, cls)]}" for rev in revs) + f"  計 {sum(cnt[(rev, cls)] for rev in revs)}"
               + ("（maneuver %d）" % sum(1 for r in rows if r[1] == cls and r[3])))
     zo = collections.Counter(f"zdodge={r[4]['opts'].get('zdodge')} zslow={r[4]['opts'].get('zslow')}" for r in rows if r[1] == "zombie")
     print("  zombie 依 opts " + ", ".join(f"{k}:{v}" for k, v in zo.most_common()))
@@ -430,8 +452,8 @@ def report(root, since_s, cur, picks_path=None):
     since = float(since_s) * 1000
     A, picks = Anon(), []
     S = load_summaries(root)
-    a = sec_a(S)
     C = load_clips(root, since)
+    a = sec_a(S, small_impacts(dedupe(C)))            # 不限 rev：摘要也是全部 build
     b = sec_b(C, cur, A)
     C = [r for r in C if r["rev"] in cur]             # C–J 只看現行 rev（舊版只能排除，不拿來定罪）
     E = dedupe(C)
@@ -477,9 +499,9 @@ def self_test():
         put("summary-2.log", new)                                   # new[:10] 在兩份輪寫摘要都有：去重
         put("summary-3.log", [sm("u1", T + 200, "b-3")])             # <20 趟的 build 不列
 
-        def clip(u, slot, kind, trig, rows, evs, rev="2"):
-            put(f"{u}/clip-{slot:02d}.log", [dict(t="clip", kind=kind, trig=trig, drive=T, at={"fbw": "blocked", "spd": 14}),
-                                            dict(t="h", rev=rev, build="b-2", drive=T, opts="detour=false", profile=prof),
+        def clip(u, slot, kind, trig, rows, evs, rev="2", drive=T):
+            put(f"{u}/clip-{slot:02d}.log", [dict(t="clip", kind=kind, trig=trig, drive=drive, at={"fbw": "blocked", "spd": 14}),
+                                            dict(t="h", rev=rev, build="b-2", drive=drive, opts="detour=false", profile=prof),
                                             dict(t="e", ts=trig - 30000, n="route", src=[1])]
                  + [dict(t="s", ts=trig - 100 * k, ctl="TRACK", x=0, y=0, **r) for k, r in rows]
                  + [dict(t="e", **e) for e in evs])
@@ -502,14 +524,30 @@ def self_test():
         clip("pd", 1, "takeover", T + 100000, base, [dict(ts=T + 100080, n="blocked", why="guard", x=100, y=100)])  # 觸發後 80ms
         clip("pe", 1, "takeover", T + 100000, base, [dict(ts=T + 99000, n="blocked", why="plan", x=5010, y=7010)], rev="1")  # 舊 rev
         clip("pa", 9, "impact", T - 10 ** 7, base, [])                # 窗口外
+        # 1013f 小動物：貼車的動物 a 體重 <20 kg＝small-animal（剛死的帶第 6 項 1）；20 kg 整、讀不到體重（1010 前格式）＝animal。
+        # u0／u1 是摘要 b-2 有 impact 的兩趟：A 的「不含小動物」扣掉它們（u1 那段是舊 rev，A 不限 rev、C 只算現行 rev）
+        def ani(u, drive, a, rev="2"):
+            clip(u, 1, "impact", T + 110000, base + [(0, {"nb": {"a": a}})], [dict(ts=T + 110000, n="impact", speed=30)],
+                 rev=rev, drive=drive)
+        ani("u0", T + 100, [1.0, 1.0, 0.3, "hen", 2.4, 1])
+        ani("u1", T + 101, [1.2, 1.1, -0.2, "chick", 0.3, 1], rev="1")
+        ani("u5", T + 105, [1.5, 1.5, 0.2, "cow", 600])
+        ani("u6", T + 106, [1.5, 1.5, 0.2, "lamb", 20])
+        ani("u7", T + 107, [1.5, 1.5, 0.2])
+        ani("u8", T + 108, [6.0, 6.0, 0.2, "hen", 2.4, 1])             # 小動物沒貼車＝far
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             res = report(d, T / 1000, {"2"}, os.path.join(d, "picks.tsv"))
         a = res["A"]
         check(set(a) == {"b-1", "b-2"} and a["b-2"]["trips"] == 20 and a["b-2"]["impact"] == 2 and a["b-2"]["km"] == 20,
               "摘要 (u, drive) 去重、依 build 分組、<20 趟不列")
-        check(res["B"]["clips"] == 9, "窗口：trig < since 的片段不算")
-        check(res["C"] == {"zombie": 2, "far": 1, "static": 1}, "撞擊 (u, drive, ts) 去重、類別 zombie／far／static")
+        check(a["b-2"]["impactNoSmall"] == 0 and a["b-1"]["impactNoSmall"] == 0,
+              "A impact 不含小動物：扣掉同 (u, drive) 的 small-animal 片段撞擊（不限 rev）")
+        check(any("impact 不含小動物 0=0.0/千km" in ln and "扣 small-animal 2" in ln for ln in out.getvalue().splitlines()),
+              "A 印出不含小動物的 impact／千 km 與扣掉的件數")
+        check(res["B"]["clips"] == 15, "窗口：trig < since 的片段不算")
+        check(res["C"] == {"zombie": 2, "far": 2, "static": 1, "small-animal": 1, "animal": 3},
+              "撞擊 (u, drive, ts) 去重、類別 zombie／far／static；<20 kg 貼車動物＝small-animal，20 kg 整／缺體重／舊 rev／沒貼車不算")
         man = [ln for ln in out.getvalue().splitlines() if ln.strip().startswith("static")]
         check(man and "maneuver 1" in man[0], "前 2.5s 有 dg＝maneuver")
         e = res["E"]
