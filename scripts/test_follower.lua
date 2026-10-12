@@ -878,6 +878,20 @@ do
     checkEq(stFreeze.dFilt, 0, "調頭期間不更新微分項")
     checkNear(stFreeze.errPrev, 170 * math.pi / 180, 1e-12,
         "調頭期間仍更新誤差歷史（離開調頭時 D 才不會吃到過期的 errPrev）")
+
+    -- 1012 起步先原地轉：Driver 起步段把門檻換成 state.rotEnter／rotExit（Drive.startRotateGate）；nil＝135°／100°。
+    -- 違規證明：control 不讀 rotEnter／rotExit＝70° 不進、45° 已出紅。
+    local stS = F.newState()
+    stS.rotEnter, stS.rotExit = 60 * math.pi / 180, 30 * math.pi / 180
+    F.control(pLine, stS, 100, 0, headOf(70), 0, DT)
+    checkTrue(stS.rotating, "起步門檻 60°：70° 進入調頭")
+    F.control(pLine, stS, 100, 0, headOf(45), 0, DT)
+    checkTrue(stS.rotating, "起步出場 30°：45° 仍在調頭（不邊走邊轉）")
+    F.control(pLine, stS, 100, 0, headOf(25), 0, DT)
+    checkFalse(stS.rotating, "起步出場 30°：25° 離開調頭")
+    stS.rotEnter, stS.rotExit = nil, nil
+    F.control(pLine, stS, 100, 0, headOf(117), 0, DT)
+    checkFalse(stS.rotating, "門檻清回 nil（行進中）：117° 照 135° 不進")
 end
 
 -- =====================================================================

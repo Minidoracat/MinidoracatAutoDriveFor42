@@ -164,6 +164,8 @@ local EK = {
     "rmw", "ox", "oy", "od", "found", "same", "fx", "fy", "fd", "fsc", "sn", "sd", "sv",
     -- 1012 blocked 主擋物（Driver Drive.blockSprite）：hx0／hy0（退 hitX／hitY、x／y）1 格內擋車 sprite 名、分類、格心距 m
     "sp0", "sc0", "sd0",
+    -- 1012 起步先原地轉：uturn enter／done 的起步段旗標、enter 當幀 |航向誤差| rad（uturn room 用既有 rear／len／probe）
+    "start", "ae",
 }
 
 local function logOnce(msg)

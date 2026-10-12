@@ -4672,13 +4672,13 @@ local droute = nil
 
 -- 每個失效情境都要一顆乾淨的 session：復原車況、換一條新路線、啟動，
 -- 再跑一幀把剖面建完並進入跟線，最後開新的觀測窗。
-local function armDrive()
+local function armDrive(heading, kmh)
     MDAD.Drive.stop(0, nil)
-    dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = 0, 0, 20, 0, false
+    dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = 0, 0, kmh or 20, 0, false
     dveh._engine, dveh._driver = true, dp
     dveh._part._item._uses = 0.8
     dp._vehicle, dp._dead, dp._local = dveh, false, true
-    setHeading(dveh, 0.3)
+    setHeading(dveh, heading or 0.3)
     drive.nav.tx, drive.nav.ty, drive.nav.state = 300, 0, "ok"
     drive.nav.route = newRoute(40, 0, 0, 4, 0)
     if not MDAD.Drive.start(dp) then return false end
@@ -11925,6 +11925,79 @@ end
 drive.scenarioUturnBlockedArc()
 drive.scenarioUturnBlockedArc(true)
 
+-- ⑪c 起步先原地轉（1012，2026-10-12 使用者裁定）：自駕開始後的第一段車頭對期望方向差 ≥ START_ROTATE_ENTER_RAD（60°）
+--    就走耦力原地轉，轉到 < START_ROTATE_EXIT_RAD（30°）才前進——正式服 0.28 起步 3 秒內打滑 60–90° 7/13、90–135° 11/16，
+--    走原地轉的 ≥135° 只有 3/26。行進中照舊 135°／100°（髮夾誤進 ROTATE 的舊坑）。
+--    違規證明：Drive.startRotateGate 不設門檻＝(sr70)／(sr100) 不轉紅；出場門檻用 100°＝45° 那幀已不轉紅；
+--    Drive.startRotateEnd 不結束起步段＝(sr-mid) 117° 進原地轉紅；uturn enter／done 不帶 start＝事件斷言紅。
+function drive.scenarioStartRotate()
+    scenario("起步先原地轉：起步 ≥60° 原地轉到 ≤30° 才走；行進中 117° 不進原地轉；起步段進的調頭帶 start 遙測")
+    local savedTelemetry = MDAD.HUD.telemetryEnabled
+    local savedStart, savedEvent, savedSample, savedStop =
+        MDADDiagnostics.start, MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.stop
+    local evs = {}
+    MDAD.HUD.telemetryEnabled = function() return true end
+    MDADDiagnostics.start = function() return true end
+    MDADDiagnostics.sample = function() return true end
+    MDADDiagnostics.stop = function() return true end
+    MDADDiagnostics.event = function(_, name, a)
+        if type(a) == "table" then evs[name .. ":" .. tostring(a.phase)] = a end
+    end
+    drive.fillWorld(-8, 70, -8, 8) -- 車周探測圈（r 4）全在已載入格：淨空＝耦力原地轉
+    local deg = math.pi / 180
+    for _, d0 in ipairs({ 70, 100 }) do
+        local tag = "(sr" .. d0 .. ") "
+        evs["uturn:enter"], evs["uturn:done"] = nil, nil
+        checkTrue(armDrive(d0 * deg, 0), tag .. "啟動")
+        local st = MDAD.Drive.debugSession(0)
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        local ue = evs["uturn:enter"] or {}
+        checkTrue(st.fstate.rotating == true and st.uturnStart == true and ue.start == true
+            and math.abs((ue.ae or 0) - d0 * deg) < 0.05,
+            tag .. "起步差 " .. d0 .. "°：起步段原地轉、enter 帶 start／ae（ae " .. tostring(ue.ae) .. "）")
+        checkTrue(st.rotProbeClear == true and st.fstate.appliedSteer == nil and (dveh._regSpeed or 99) <= 4,
+            tag .. "探測淨空：耦力原地轉、不側推前進（ast " .. tostring(st.fstate.appliedSteer) .. "、reg "
+            .. tostring(dveh._regSpeed) .. "）")
+        setHeading(dveh, 45 * deg)
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        checkTrue(st.fstate.rotating == true and st.uturn ~= nil and st.fstate.appliedSteer == nil
+            and evs["uturn:done"] == nil,
+            tag .. "轉到 45°（< 舊出場 100°、> 30°）：仍原地轉，不邊走邊轉、不提前記 done")
+        setHeading(dveh, 25 * deg)
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        local ud = evs["uturn:done"] or {}
+        checkTrue(st.fstate.rotating ~= true and st.uturn == nil and ud.why == "aligned" and ud.start == true,
+            tag .. "轉到 25°：收尾 uturn done aligned、帶 start（why " .. tostring(ud.why) .. "）")
+        driveTick(dp, dveh)
+        checkTrue(st.startRot == false, tag .. "對正後起步段結束")
+        -- (sr-mid) 行進中車頭差 117°（髮夾 hairpin117 那型）：照 135° 門檻，不進原地轉
+        setHeading(dveh, 117 * deg)
+        dveh._speed = 20
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        driveTick(dp, dveh)
+        checkTrue(st.fstate.rotating ~= true and st.uturn == nil,
+            tag .. "(sr-mid) 起步段結束後差 117°：不進原地轉（rotEnter " .. tostring(st.fstate.rotEnter) .. "）")
+        MDAD.Drive.stop(0, nil)
+    end
+    -- (sr50) 起步差 50°（< 60°）：照舊前進中轉，不原地轉
+    checkTrue(armDrive(50 * deg, 0), "(sr50) 啟動")
+    local st = MDAD.Drive.debugSession(0)
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkTrue(st.fstate.rotating ~= true and st.uturn == nil, "(sr50) 起步差 50°：不原地轉")
+    MDAD.Drive.stop(0, nil)
+    setHeading(dveh, 0)
+    drive.fillWorld(-2, 70, -7, 7)
+    MDAD.HUD.telemetryEnabled = savedTelemetry
+    MDADDiagnostics.start, MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.stop =
+        savedStart, savedEvent, savedSample, savedStop
+end
+drive.scenarioStartRotate()
+
 -- =====================================================================
 -- 情境二十八b：immutable DODGE 承諾語意＋停等豁免（2026-08-28 對抗審紅測試）
 -- =====================================================================
@@ -18648,7 +18721,9 @@ scenario("調頭＋blocked：遠處不倒車、近處才退、額度用盡不空
         driveTick(dp, dveh)
         return MDAD.Drive.debugSession(0)
     end
-    -- (u1) 車群在路線前方 20m（車尾方向）：blocked 但不倒車，調頭照跑
+    -- (u1) 車群在路線前方 20m（車尾方向）：blocked 但不倒車，調頭照跑。世界往車頭方向多填 6 格：車周探測圈（r 4）
+    --      照預設世界會吃到 x<−2 的未載入格＝被擋，1012 起會先倒車騰空間（Drive.uturnRoom），那不是本案要看的
+    drive.fillWorld(-8, 70, -7, 7)
     stuckWorld(20)
     local st = reversedStart("(u1)")
     checkTrue(st.fstate.rotating == true, "(u1) 反向車頭＝調頭姿態")
@@ -18682,6 +18757,7 @@ scenario("調頭＋blocked：遠處不倒車、近處才退、額度用盡不空
     checkTrue(udone.why == "stop" and udone.detail == DKEY.STUCK and type(udone.ms) == "number" and udone.ms >= 16000,
         "(u3-done) 調頭中交還記 uturn done why=stop（detail " .. tostring(udone.detail) .. "、ms " .. tostring(udone.ms) .. "）")
     clearWorld(20)
+    drive.fillWorld(-2, 70, -7, 7)
     -- (u2) 車群貼在旋轉圈內（錨 4.5m ≤ probeR+1）：才走倒車創造空間。牆面在車尾後 1.8m：
     --      4m／2m 帶命中、最短帶 1.5（MIN+KEEP）清 → 退 1.0
     stuckWorld(4)
@@ -18709,12 +18785,28 @@ scenario("調頭＋blocked：遠處不倒車、近處才退、額度用盡不空
     clearWorld(4)
     -- (rot-stall) 0928b E2E replay：車頭朝路線反方向、車頭前 2m 有牆（走廊沿路線往車尾方向掃、看不到），
     --   車周探測被擋＝走大弧前進，但車根本動不了。連續 ROTATE_STALL_MS 不動＝倒車創造空間。
-    --   違規證明：Drive.rotateStall 恆 false＝原地乾等到停等預算紅。
+    --   1012 起探測被擋先算「倒車騰不騰得出原地轉的空間」（Drive.uturnRoom）：這裡兩側 y=−4／4 也有牆（路寬小於車周圈）＝
+    --   後方淨空、倒得了（短帶），退完車周圈仍碰到側牆＝騰不出（room obstructed）→ 照舊大弧＋rotate-stall 兜底。
+    --   違規證明：Drive.rotateStall 恆 false＝原地乾等到停等預算紅；uturnRoom 不看退後的圈恆回 true＝(room-no) 紅。
+    local function sideWalls(put)
+        for x = -2, 10 do
+            if put then drive.putSolid(x, -4, "rot_side_s" .. x); drive.putSolid(x, 4, "rot_side_n" .. x)
+            else drive.clearCell(x, -4); drive.clearCell(x, 4) end
+        end
+    end
     MDAD.Drive.stop(0, nil)
     for _, y in ipairs({ -1, 0, 1, 2 }) do drive.putSolid(-3, y, "rot_front_" .. y) end
+    sideWalls(true)
+    evs["uturn:room"] = nil
     st = reversedStart("(rot-stall)")
     checkTrue(st.fstate.rotating == true and st.rotProbeClear == false,
         "(rot-stall) 前置：調頭姿態、車周探測被擋（rotProbeClear=" .. tostring(st.rotProbeClear) .. "）")
+    driveTick(dp, dveh)
+    local room = evs["uturn:room"] or {}
+    checkTrue(st.uturnRoomTried == true and room.probe == "obstructed" and room.rear == "clear"
+        and (room.len or 0) >= 1,
+        "(room-no) 倒得了 ≥1m 但退完車周圈仍碰側牆：不倒、照舊大弧（probe " .. tostring(room.probe) .. "、len "
+        .. tostring(room.len) .. "）")
     -- 1006 被擋大弧壓到 UTURN_BLOCKED_KMH 3：轉不動時下面的 rotate-stall 倒車照樣要觸發（Drive.rotateStall 只要目標 > 0）
     checkTrue((dveh._regSpeed or 99) <= 3,
         "(rot-stall) 被擋大弧壓速中（定速目標實得 " .. tostring(dveh._regSpeed) .. "）")
@@ -18727,6 +18819,36 @@ scenario("調頭＋blocked：遠處不倒車、近處才退、額度用盡不空
     driveTick(dp, dveh)
     checkEq(st.mode, "unstick", "(rot-stall) 走大弧卻 3 秒不動：倒車創造空間（mode 實得 " .. tostring(st.mode) .. "）")
     checkEq((evs["progress:recover"] or {}).why, "rotate-stall", "(rot-stall) 恢復理由 rotate-stall")
+    sideWalls(false)
+    -- (room) 同一面前牆、車尾後淨空：倒 3m（脫困倒車標準距）後車周圈淨空＝先倒（uturn-room）再原地轉，不走大弧。
+    --   違規證明：拿掉 uturn-room 請求＝(room) 仍 follow、rotate-stall 才倒紅。
+    MDAD.Drive.stop(0, nil)
+    evs["uturn:room"], evs["progress:recover"] = nil, nil
+    st = reversedStart("(room)")
+    driveTick(dp, dveh)
+    room = evs["uturn:room"] or {}
+    checkTrue(room.probe == "clear" and room.rear == "clear" and math.abs((room.len or -1) - 3) < 1e-9,
+        "(room) 後方 4m 帶淨空、退 3m 後車周圈淨空（probe " .. tostring(room.probe) .. "、len " .. tostring(room.len) .. "）")
+    checkTrue(st.mode == "unstick" and (evs["progress:recover"] or {}).why == "uturn-room",
+        "(room) 不等大弧卡住：先倒車騰空間（mode " .. tostring(st.mode) .. "、why "
+        .. tostring((evs["progress:recover"] or {}).why) .. "）")
+    -- 倒車退滿 3m（沿車頭反方向）→ settle → 回跟線：重探淨空＝耦力原地轉（不經側推夾限）
+    dveh._x, dveh._y = -math.cos(2.8) * 3, -math.sin(2.8) * 3
+    dveh._speed = -3
+    nowMs = nowMs + 400
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkEq(st.mode, "settle", "(room) 退滿 3m 進 settle（實得 " .. tostring(st.mode) .. "）")
+    dveh._speed = 0
+    nowMs = nowMs + 2000
+    driveTick(dp, dveh)
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    driveTick(dp, dveh)
+    checkTrue(st.mode == "follow" and st.uturn ~= nil and st.rotProbeClear == true and st.fstate.appliedSteer == nil
+        and dveh._imp.total > 0,
+        "(room) 倒完重探淨空：同一次調頭改耦力原地轉（mode " .. tostring(st.mode) .. "、probe "
+        .. tostring(st.rotProbeClear) .. "、ast " .. tostring(st.fstate.appliedSteer) .. "）")
     for _, y in ipairs({ -1, 0, 1, 2 }) do drive.clearCell(-3, y) end
     MDAD.Drive.stop(0, nil)
     MDAD.Drive.stop(0, nil)
@@ -22389,12 +22511,16 @@ function drive.scenarioTowTurn()
     checkFalse(MDAD.Drive.isActive(0), "(tt3) 往後出發的線不收：交還")
     drive.nav.detour = nil
 
-    -- (ul) 沒拖車、目標在車後：同一處第 4 次進入調頭＝受困交還
+    -- (ul) 沒拖車、目標在車後：同一處第 4 次進入調頭＝受困交還。起步就要調頭那一次是起步段的原地轉（1012 起 60° 就進、
+    --      一趟一次的對正，不是被路線困住）：不計迴圈。違規證明：起步段照計＝(ul-start) 紅。
     checkTrue(arm(behind(), -80, 0), "(ul) 目標在車後啟動")
     st = MDAD.Drive.debugSession(0)
     tickUntil(function() return st.uturn ~= nil or not MDAD.Drive.isActive(0) end, 60)
     checkTrue(st.uturn ~= nil, "(ul) 進入調頭")
-    for _ = 2, 3 do
+    checkTrue(st.uturnStart == true and st.uturnLoopN == nil,
+        "(ul-start) 起步段的調頭不計迴圈（start=" .. tostring(st.uturnStart) .. " N=" .. tostring(st.uturnLoopN) .. "）")
+    st.startRot = false -- 之後的調頭都在行進中（起步段已結束）
+    for _ = 1, 3 do
         st.uturn = nil
         driveTick(dp, dveh)
     end
@@ -22408,6 +22534,7 @@ function drive.scenarioTowTurn()
     checkTrue(arm(behind(), -80, 0), "(ul-far) 目標在車後啟動")
     st = MDAD.Drive.debugSession(0)
     tickUntil(function() return st.uturn ~= nil end, 60)
+    st.startRot = false
     for _ = 2, 4 do
         dveh._x = dveh._x + 40
         st.uturn = nil
@@ -22416,6 +22543,28 @@ function drive.scenarioTowTurn()
     checkTrue(MDAD.Drive.isActive(0) and st.uturnLoopN == 1,
         "(ul-far) 每次調頭相隔 40m：計數重來、不交還（N=" .. tostring(st.uturnLoopN) .. "）")
     dveh._x = 0
+    -- (sr-tow) 1012 起步先原地轉排除拖車：路線往東、車頭差 100°，沒拖車＝起步段原地轉；拖著車＝不進（照 135° 門檻、
+    --   原地轉會甩斷掛車）。違規證明：Drive.startRotateGate 不看 s.tow＝拖車那輪 rotating 紅。
+    local east = { pts = { 0, 0, 80, 0 }, segSurface = { "paved" }, segWidth = { 8 }, len = 80, cost = 80, avoidPenalty = 0 }
+    setHeading(dveh, 100 * math.pi / 180)
+    checkTrue(arm(east, 80, 0), "(sr-tow) 沒拖車、差 100° 啟動")
+    st = MDAD.Drive.debugSession(0)
+    tickUntil(function() return st.fstate.rotating == true end, 10)
+    checkTrue(st.fstate.rotating == true and st.uturnStart == true, "(sr-tow) 沒拖車：起步段原地轉")
+    setHeading(dveh, 100 * math.pi / 180)
+    checkTrue(arm({ pts = { 0, 0, 80, 0 }, segSurface = { "paved" }, segWidth = { 8 }, len = 80, cost = 80, avoidPenalty = 0 },
+        80, 0), "(sr-tow) 拖車、差 100° 啟動")
+    st = MDAD.Drive.debugSession(0)
+    st.tow = towGeo
+    local towRot = false
+    for _ = 1, 10 do
+        driveTick(dp, dveh)
+        if st.fstate.rotating == true then towRot = true end
+    end
+    checkTrue(not towRot and st.fstate.rotEnter == nil and st.startRot == false,
+        "(sr-tow) 拖車：不進起步原地轉、起步段結束（rotEnter=" .. tostring(st.fstate.rotEnter) .. "）")
+    MDAD.Drive.stop(0, nil)
+    setHeading(dveh, 0)
 
     -- (ds) 路線中段 0.7m 倒退段（161° 兩次折返）：建剖面前清掉，靠右開過去不原地調頭
     local spiky = { pts = { 0, 0, 30, 0, 29.4, -0.2, 80, 0 }, segSurface = { "paved", "paved", "paved" },

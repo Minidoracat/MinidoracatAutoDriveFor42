@@ -15,7 +15,7 @@
   D contact ≥10 km/h（現行 rev）：scost、弧上（前 2.5s curveHardActive）、前 2.5s |ld|>0.5、lag 帽（capReason=lag）、主導 ctl、sprite 家族
   E 判堵後接手：takeover 片段觸發前 10s 內有 blocked；窗口內首筆 blocked→接手秒數、其間 unstick start、detour=false、最後一筆 why／shape
   F 判堵熱點：blocked x,y 的 25m 格（玩家、趟、事件、車型）
-  G 起步調頭 uturn done：依 probe 分組（aligned ms、stop 的 detail）
+  G 起步調頭 uturn done：依 start（1012 起步段原地轉，出場 30°）× probe 分組（aligned ms、stop 的 detail）；room＝倒車騰空間判定
   H 判堵鎖輪 brake 片段（at.fbw=blocked）：鎖輪速度、該趟是否 5s 內結束（摘要 end）
   I tow lost／relook
   J 結案檢查：area start kind=behind 後 20s 同趟 progress suspect；gate phase／why；detour kind=towcorner why=ok
@@ -327,22 +327,25 @@ def sec_f(E, A):
 
 
 def sec_g(E, A, picks):
-    print("\n== G 起步調頭 uturn done（依 probe）")
+    print("\n== G 起步調頭 uturn done（依 start × probe；start＝1012 起步段、轉到 30° 才收，ms 不和舊制比）")
     by = collections.defaultdict(list)
     for e, rec in events(E, "uturn", "done"):
-        by[e.get("probe")].append(e)
+        by[(bool(e.get("start")), e.get("probe"))].append(e)
         picks.append((f"uturn-{e.get('probe')}", e["ts"], rec, f"why={e.get('why')} ms={e.get('ms')} detail={e.get('detail')}"))
     print(f"  共 {sum(len(v) for v in by.values())}")
-    for probe, L in sorted(by.items(), key=lambda kv: str(kv[0])):
+    for (start, probe), L in sorted(by.items(), key=lambda kv: (kv[0][0], str(kv[0][1]))):
         al = [(e.get("ms") or 0) / 1000 for e in L if e.get("why") == "aligned"]
-        line = f"  probe={probe} n={len(L)} why " + ", ".join(f"{k}:{v}" for k, v in collections.Counter(e.get("why") for e in L).most_common())
+        line = f"  start={int(start)} probe={probe} n={len(L)} why " + ", ".join(f"{k}:{v}" for k, v in collections.Counter(e.get("why") for e in L).most_common())
         if al:
             line += f"；aligned s 中位 {statistics.median(al):.2f} p75 {q(al, .75):.2f} max {max(al):.2f}"
         stop = collections.Counter(e.get("detail") for e in L if e.get("why") == "stop")
         if stop:
             line += "；stop " + ", ".join(f"{k}:{v}" for k, v in stop.most_common())
         print(line)
-    return {k: len(v) for k, v in by.items()}
+    room = collections.Counter(e.get("probe") for e, _ in events(E, "uturn", "room"))
+    if room:
+        print("  room（被擋時倒車騰空間的判定）" + ", ".join(f"{k}:{v}" for k, v in room.most_common()))
+    return {f"{int(k[0])}/{k[1]}": len(v) for k, v in by.items()}
 
 
 def sec_h(C, S, A, picks):

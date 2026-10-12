@@ -1948,11 +1948,12 @@ end
 -- fail-safe）。走廊掃描沿**路線**掃——路線反向要調頭時，車後方與側面全是走廊
 -- 盲區，原地耦力旋轉的車身掃掠 ~2.5m 貼牆貼車就撞（2026-08-28 使用者需求：
 -- 調頭前檢查左右）。與走廊掃描共用 sprite 成本快取；**不碰 working 欄位**，
--- 掃描輪進行中呼叫也安全。r=3 → 最多 37 格，一次性成本。
-function MDADSensor.probeAround(state, vehicle, cell, radius)
+-- 掃描輪進行中呼叫也安全。r=3 → 最多 37 格，一次性成本。cx／cy 可指定圓心（Driver Drive.uturnRoom：倒車後的車位），
+-- 缺＝車心。
+function MDADSensor.probeAround(state, vehicle, cell, radius, cx, cy)
     if type(state) ~= "table" or not vehicle or not cell then return true end
     if not flagsBound then bindFlags() end
-    local cx, cy = vehicle:getX(), vehicle:getY()
+    cx, cy = cx or vehicle:getX(), cy or vehicle:getY()
     local z = vehicle:getZ()
     z = z - z % 1
     local r = radius or 3

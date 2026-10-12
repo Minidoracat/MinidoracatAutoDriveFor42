@@ -121,6 +121,14 @@ TUNE.UTURN_BLOCKED_KMH = 3
 TUNE.UTURN_BLOCKED_STEER = 0.5
 -- 調頭大弧卡住（Drive.rotateStall）：車周探測被擋（走大弧）又連續這麼久不動＝前方沒有大弧空間，倒車創造空間
 TUNE.ROTATE_STALL_MS = 2500
+-- 起步先原地轉（1012，2026-10-12 使用者裁定）：自駕開始後的第一段（含起步調頭）車頭對 Follower 的期望方向
+-- （前視點；離路起步＝接回路線的方向）差 > ENTER 就走調頭那套（耦力原地轉／探測被擋走大弧），轉到 < EXIT 才前進。
+-- 行進中照舊 Follower 的 135°／100°（髮夾誤進 ROTATE 的舊坑）。正式服 0.28 起步 3 秒內打滑依航向差：0–30° 3/56、
+-- 30–60° 2/13、60–90° 7/13、90–135° 11/16、≥135°（原地轉）3/26——分界在 60°。不在調頭中、轉到 < EXIT 或離起點
+-- 開出 START_ROTATE_M 就結束起步段（Drive.startRotateArm）；拖車排除（原地轉會甩斷掛車）。
+TUNE.START_ROTATE_ENTER_RAD = 60 * math.pi / 180
+TUNE.START_ROTATE_EXIT_RAD = 30 * math.pi / 180
+TUNE.START_ROTATE_M = 3
 -- 拖掛車的側推限制（2026-09-26 Workshop 回報「草地起步劇烈晃動、掛車脫開」，E2E trailer-grass-mp）：
 -- 側推的 MASS_BASE 項與車速無關，低速照樣整台橫推——真車低速轉不動掛點，這裡卻把車頭橫甩、
 -- 掛車原地不動（遙測首幀 spd 0、f −46k，折角 0→61° 只花 0.4 秒）。拖車時側推按車速線性放大到
@@ -2518,6 +2526,10 @@ local function startSession(playerObj, playerNum, stage)
         rotProbeClear = nil, -- 這次調頭最近一次車周探測：true 淨空可原地旋轉／false 被擋走大弧／nil 還沒探（uturn enter 清）
         uturn = nil,        -- 進行中的這一次調頭的參數檔（TUNE.UTURN.*）；nil＝沒在調頭
         uturnArmed = false, -- 入場減速已放行（速度降到 entry 以下過一次）
+        startRot = true,    -- 起步段：Follower 調頭門檻用 TUNE.START_ROTATE_*（Drive.startRotateArm 結束）
+        startRotX = vehicle:getX(), startRotY = vehicle:getY(), -- 起步段的起點（開出 START_ROTATE_M 就結束）
+        uturnStart = false, -- 進行中的這次調頭是起步段進的（門檻 START_ROTATE_*、不計迴圈防護）
+        uturnRoomTried = false, -- 這次調頭已算過「倒車騰空間再原地轉」（Drive.uturnRoom；uturn enter 清）
         returnActive = false,
         returnUnsafe = false,
         returnHold = false,
@@ -6765,6 +6777,31 @@ function Drive.rotateStall(s, now, targetSpeed, avProgress)
     return now - s.rotateStallSince >= TUNE.ROTATE_STALL_MS
 end
 
+-- 起步先原地轉（TUNE.START_ROTATE_*；1012）：control 前呼叫，寫本幀 Follower 的調頭門檻（state.rotEnter／rotExit）。
+-- 起步段（s.startRot）＝進 ENTER、出 EXIT；起步段進的那次調頭（s.uturnStart）進場門檻也用 EXIT：cutover／倒車騰空間的
+-- resetState 會清 rotating，|err| 還在 EXIT..ENTER 之間時要接著原地轉，不改成邊走邊轉。拖車不設（原地轉甩斷掛車）。
+function Drive.startRotateGate(s)
+    local f = s.fstate
+    if s.tow or not (s.startRot or s.uturnStart) then
+        f.rotEnter, f.rotExit = nil, nil
+    else
+        f.rotEnter = s.uturnStart and TUNE.START_ROTATE_EXIT_RAD or TUNE.START_ROTATE_ENTER_RAD
+        f.rotExit = TUNE.START_ROTATE_EXIT_RAD
+    end
+end
+
+-- control 後呼叫：不在調頭中且（車頭已在 START_ROTATE_EXIT_RAD 內、或離起點開出 START_ROTATE_M、或掛上拖車）＝起步段結束，
+-- 之後照 Follower 的 135°／100°（行進中的髮夾不得進原地轉）。
+function Drive.startRotateEnd(s, headingError, vx, vy)
+    if not s.startRot or s.uturn or s.fstate.rotating == true or not (s.profile and s.profile.ready) then return end
+    local dx, dy = vx - s.startRotX, vy - s.startRotY
+    if s.tow or (finite(headingError) and headingError < TUNE.START_ROTATE_EXIT_RAD
+                and headingError > -TUNE.START_ROTATE_EXIT_RAD)
+            or dx * dx + dy * dy >= TUNE.START_ROTATE_M * TUNE.START_ROTATE_M then
+        s.startRot = false
+    end
+end
+
 -- 調頭車周探測（TUNE.ROTATE_PROBE_MS 節流）：寫 s.rotProbeClear（true 淨空原地轉／false 被擋走大弧）。
 -- 本次調頭首探與每次翻面各記一筆 uturn probe 事件（1006；重探結果不變不記），console 同一句 debug 行。
 function Drive.rotateProbe(s, playerNum, vehicle, now, speedKmh)
@@ -6783,13 +6820,14 @@ function Drive.rotateProbe(s, playerNum, vehicle, now, speedKmh)
     end
 end
 
--- 一次調頭結束（1008，2.3 只補遙測、行為不變）：why＝aligned（航向收斂到 ROTATE_EXIT_RAD 內）／loop（同處反覆調頭
--- 受困交還）／stop（調頭中 session 結束，detail＝交還原因鍵或 manual／button／exit…）；probe＝本次首探結果（nil＝沒探過）、
--- ms＝從 enter 起算、kind＝行為檔。正式服 0.23.0 摘要只有 uturn 計數，分不出調頭成敗與耗時。
+-- 一次調頭結束（1008）：why＝aligned（航向收斂到出場門檻內：起步段進的＝START_ROTATE_EXIT_RAD，其餘
+-- MDADFollower.ROTATE_EXIT_RAD）／loop（同處反覆調頭受困交還）／stop（調頭中 session 結束，detail＝交還原因鍵或
+-- manual／button／exit…）；probe＝本次首探結果（nil＝沒探過）、ms＝從 enter 起算、kind＝行為檔、start＝起步段進的
+-- （1012；出場門檻不同，ms 不能和行進中的調頭混著比）。正式服 0.23.0 摘要只有 uturn 計數，分不出調頭成敗與耗時。
 function Drive.uturnDone(s, playerNum, now, why, detail)
     diagEvent(s, playerNum, "uturn", { phase = "done", why = why, detail = detail, kind = s.uturn and s.uturn.name,
-        probe = s.uturnProbe, ms = now - (s.uturnSinceMs or now) })
-    s.uturn, s.uturnArmed = nil, false
+        probe = s.uturnProbe, ms = now - (s.uturnSinceMs or now), start = s.uturnStart or nil })
+    s.uturn, s.uturnArmed, s.uturnStart = nil, false, false
 end
 
 -- Traction-keyed online observation. Every field lives in the session table;
@@ -7291,6 +7329,7 @@ end
 TUNE.RECOVER_RANK = {
     ["blocked-retry"] = 1,  -- 停等累計 5s 無縫：換視角重掃
     ["uturn-blocked"] = 2,  -- 調頭需求＋前方堵死
+    ["uturn-room"] = 2,     -- 調頭探測被擋、倒車後原地轉的圈會淨空（Drive.uturnRoom）
     ["rotate-stall"] = 2,   -- 調頭走大弧卻原地不動（Drive.rotateStall）
     ["start-near"] = 2,     -- 起步近物限速停在物件前不動（Drive.startNearStall）
     ["verify"] = 3,         -- VERIFY 窗內仍不動
@@ -7657,6 +7696,53 @@ function Drive.stuckDetour(s, playerNum)
     return true
 end
 
+-- 後方探測階梯縮帶（startRecoveryAttempt 起手與 Drive.uturnRoom 共用）：4m 帶清＝退標準距；命中硬物／車（非 unloaded）
+-- 就縮帶再探，第一個清的帶長決定本次退距（帶長−KEEP）。回 status, hitX, hitY, kind, detail, 帶長（都不清＝第一帶的結果、0）。
+-- out 會被 bodyCenter 覆寫；fx/fy 需已正規化。
+function Drive.rearLadder(s, vehicle, out, fx, fy, vx, vy)
+    local status, hitX, hitY, kind, detail = rearProbe(s, vehicle, out, fx, fy, vx, vy)
+    if status == "clear" or status == "unloaded" then return status, hitX, hitY, kind, detail, REAR_TRAVEL_M end
+    local short = TUNE.REAR_TRAVEL_SHORT_M
+    local s2, x2, y2, k2, d2 = rearProbe(s, vehicle, out, fx, fy, vx, vy, short)
+    if s2 == "clear" then return s2, x2, y2, k2, d2, short end
+    local least = TUNE.UNSTICK_MIN_M + TUNE.REAR_KEEP_M
+    if least < short then s2, x2, y2, k2, d2 = rearProbe(s, vehicle, out, fx, fy, vx, vy, least) end
+    if s2 == "clear" then return s2, x2, y2, k2, d2, least end
+    return status, hitX, hitY, kind, detail, 0
+end
+
+-- 調頭探測被擋（1012，2026-10-12 使用者裁定，取代「只走大弧」）：照後方探測的倒車（同 startRecoveryAttempt 的階梯，長度同
+-- 脫困倒車：4m 帶清＝UNSTICK_DIST、短帶＝帶長−KEEP）退完之後，原地轉的掃掠圈（probeAround 圓心移到退後的車位）淨空＝回
+-- true，呼叫端 requestRecover("uturn-room") 先倒再原地轉；倒不了或退完仍被擋（路寬小於車長之類）＝照舊大弧（10-06 裁定
+-- 2B 壓速），大弧卡住由 Drive.rotateStall 倒車兜底。每次調頭只算一次（uturn enter 清 s.uturnRoomTried）。不做側推三點式。
+function Drive.uturnRoom(s, vehicle, playerNum, vx, vy)
+    s.uturnRoomTried = true
+    local out = BaseVehicle.allocVector3f()
+    vehicle:getForwardVector(out)
+    local fx, fy = out:x(), out:z()
+    local flen2 = fx * fx + fy * fy
+    local status, travel, d = "unloaded", 0, 0
+    if flen2 > 1e-6 then
+        local inv = 1 / sqrt(flen2)
+        fx, fy = fx * inv, fy * inv
+        local _
+        status, _, _, _, _, travel = Drive.rearLadder(s, vehicle, out, fx, fy, vx, vy)
+    end
+    BaseVehicle.releaseVector3f(out)
+    if status == "clear" then
+        d = travel >= REAR_TRAVEL_M and sqrt(UNSTICK_DIST_SQ) or travel - TUNE.REAR_KEEP_M
+    end
+    local clear = d > 0 and not MDADSensor.probeAround(s.sensor, vehicle, getCell(), s.probeR, vx - fx * d, vy - fy * d)
+    if clear then s.rotProbeMs = 0 end -- 倒完第一個跟線幀就重探
+    diagEvent(s, playerNum, "uturn", { phase = "room", why = s.uturn.name, rear = status, len = d,
+        probe = clear and "clear" or "obstructed" })
+    if getDebug() then -- telemetry: uturn room（rear len probe）
+        print(LOG .. "pn=" .. playerNum .. " uturn room: rear=" .. tostring(status) .. " len=" .. string.format("%.2f", d)
+            .. (clear and " -> reverse then spin" or " -> wide arc"))
+    end
+    return clear
+end
+
 -- Called only after stepFollow released its hot-path vector. Rear unknown is fail-closed;
 -- an attempt is consumed only after a clear 4m swept-strip check.
 local function startRecoveryAttempt(s, vehicle, playerNum, now, vx, vy, softFail)
@@ -7697,27 +7783,7 @@ local function startRecoveryAttempt(s, vehicle, playerNum, now, vx, vy, softFail
     elseif flen2 > 1e-6 then
         local inv = 1 / sqrt(flen2)
         fx, fy = fx * inv, fy * inv
-        -- 階梯縮帶：4m 帶清＝退標準距；命中硬物／車（非 unloaded）就縮帶再探，第一個
-        -- 清的帶長決定本次退距（帶長−KEEP）。
-        status, hitX, hitY, kind, detail = rearProbe(s, vehicle, out, fx, fy, vx, vy)
-        travel = REAR_TRAVEL_M
-        if status ~= "clear" and status ~= "unloaded" then
-            local short = TUNE.REAR_TRAVEL_SHORT_M
-            local s2, x2, y2, k2, d2 = rearProbe(s, vehicle, out, fx, fy, vx, vy, short)
-            if s2 == "clear" then
-                status, hitX, hitY, kind, detail, travel = s2, x2, y2, k2, d2, short
-            else
-                local least = TUNE.UNSTICK_MIN_M + TUNE.REAR_KEEP_M
-                if least < short then
-                    s2, x2, y2, k2, d2 = rearProbe(s, vehicle, out, fx, fy, vx, vy, least)
-                end
-                if s2 == "clear" then
-                    status, hitX, hitY, kind, detail, travel = s2, x2, y2, k2, d2, least
-                else
-                    travel = 0
-                end
-            end
-        end
+        status, hitX, hitY, kind, detail, travel = Drive.rearLadder(s, vehicle, out, fx, fy, vx, vy)
     end
     BaseVehicle.releaseVector3f(out)
     s.rearStatus = status
@@ -13210,9 +13276,11 @@ local function stepFollow(s, vehicle, playerNum, now)
         -- 大半進入段，姿態早早追平、位置落後擦到旁物）；crawl-exact 是沿現偏移的平行線，一併無妨。
         s.fstate.trackTangent = s.dodging == true
             or (s.returnActive == true and not s.returnHold)
+        Drive.startRotateGate(s) -- 起步段的調頭門檻（TUNE.START_ROTATE_*）
         local steer, targetSpeed, remaining, done, headingError, lateralSq, latSigned, lineLat = MDADFollower.control(
             s.profile, s.fstate, vx, vy,
             heading, speedKmh, mult * SECONDS_PER_MULT)
+        Drive.startRotateEnd(s, headingError, vx, vy)
         s.followerTarget = targetSpeed -- telemetry ftg：剖面原始目標（cap／jerk 之前；0907e 錨定 bug 只靠它定罪）
         -- 高速增益估計衝出上限、Follower 已整份重學（FF_HI；1006 正式服 ygh 貼 3.0 撞路緣）：記下當下的比值與幀時
         if s.fstate.hiCapObs ~= nil then
@@ -14202,6 +14270,12 @@ local function stepFollow(s, vehicle, playerNum, now)
             -- closed 照舊），4m＋settle 重掃後 rotate probe 空間自然變大。
             requestRecover(s, "uturn-blocked")
         end
+        -- 調頭探測被擋：先算倒車騰不騰得出原地轉的空間（Drive.uturnRoom，每次調頭一次）；騰不出才留給大弧＋rotate-stall
+        if s.uturn and s.rotProbeClear == false and not s.uturnRoomTried and s.recoverWhy == nil
+                and s.intentShadow == "ROTATE" and not s.blockRetryDone
+                and Drive.uturnRoom(s, vehicle, playerNum, vx, vy) then
+            requestRecover(s, "uturn-room")
+        end
         if Drive.rotateStall(s, now, targetSpeed, avProgress) and not s.blockRetryDone then
             requestRecover(s, "rotate-stall")
         end
@@ -14684,14 +14758,14 @@ local function stepFollow(s, vehicle, playerNum, now)
             targetSpeed = 0
             s.lastCapReason = "blocked"
         else
-            -- 調頭生命週期（TUNE.UTURN；2026-09-06）：以航向誤差收尾（< ROTATE_EXIT），
-            -- 不是 fstate.rotating——cutover／yield 的 resetState 會清 rotating，同一次
+            -- 調頭生命週期（TUNE.UTURN；2026-09-06）：以航向誤差收尾（< 本幀出場門檻：起步段進的 START_ROTATE_EXIT_RAD，
+            -- 其餘 ROTATE_EXIT），不是 fstate.rotating——cutover／yield 的 resetState 會清 rotating，同一次
             -- 調頭不得因此重讀選項或重新入場煞停。參數檔在調頭開始讀一次。
             local rotating = s.fstate.rotating == true
             -- aerr 只剩前推輔助與調頭收尾在用（調頭判定已改讀 fstate.rotating）
             local aerr = headingError or 0
             if aerr < 0 then aerr = -aerr end
-            if s.uturn and aerr < MDADFollower.ROTATE_EXIT_RAD then
+            if s.uturn and aerr < (s.fstate.rotExit or MDADFollower.ROTATE_EXIT_RAD) then
                 Drive.uturnDone(s, playerNum, now, "aligned")
             end
             if s.tow then
@@ -14726,28 +14800,33 @@ local function stepFollow(s, vehicle, playerNum, now)
             end
             if rotating and not s.uturn then
                 s.uturn, s.uturnArmed = uturnProfile(), false
+                s.uturnStart = s.startRot == true -- 起步段進的（Drive.startRotateGate：轉到 START_ROTATE_EXIT_RAD 才收）
                 s.rotProbeClear, s.rotProbeMs = nil, 0 -- 每次調頭重探：上一次的結果不沿用（壓速／夾限／遙測都看本次）
-                s.uturnSinceMs, s.uturnProbe = now, nil -- uturn done 的耗時起點與首探結果
-                -- rs／sT／kh：進場當幀的投影弧長、前視點弧長、髮夾鉗點（nil＝未鉗）——「前視點在車後」不必離線重播就看得出
+                s.uturnSinceMs, s.uturnProbe, s.uturnRoomTried = now, nil, false -- uturn done 的耗時起點與首探結果
+                -- rs／sT／kh：進場當幀的投影弧長、前視點弧長、髮夾鉗點（nil＝未鉗）——「前視點在車後」不必離線重播就看得出；
+                -- start＝起步段進的、ae＝進場當幀 |航向誤差|（rad，對 Follower 前視方向）
                 diagEvent(s, playerNum, "uturn", {
                     phase = "enter", why = s.uturn.name, speed = speedKmh,
                     rs = s.fstate.projS, sT = s.fstate.sTarget, kh = s.fstate.kinkHeld,
+                    start = s.uturnStart or nil, ae = aerr,
                 })
                 -- 同一處反覆調頭＝路線把車困在原地繞（0.13.1 正式服 (5180,11145) 反折點：投影釘死，
                 -- 兩名玩家 16～204 次、繞到手動接手）。UTURN_LOOP_R 內第 UTURN_LOOP_MAX 次就受困交還，
-                -- 留片段定罪，不讓車一直轉。
-                if s.uturnLoopX ~= nil and (vx - s.uturnLoopX) * (vx - s.uturnLoopX)
-                        + (vy - s.uturnLoopY) * (vy - s.uturnLoopY) <= TUNE.UTURN_LOOP_R * TUNE.UTURN_LOOP_R then
-                    s.uturnLoopN = s.uturnLoopN + 1
-                else
-                    s.uturnLoopX, s.uturnLoopY, s.uturnLoopN = vx, vy, 1
-                end
-                if s.uturnLoopN >= TUNE.UTURN_LOOP_MAX then
-                    Drive.uturnDone(s, playerNum, now, "loop")
-                    vehicle:setRegulator(false)
-                    BaseVehicle.releaseVector3f(fwd)
-                    Drive.stop(playerNum, KEY_STUCK)
-                    return
+                -- 留片段定罪，不讓車一直轉。起步段的原地轉（1012 起 60° 就進）是一趟一次的對正、不是被路線困住，不計。
+                if not s.uturnStart then
+                    if s.uturnLoopX ~= nil and (vx - s.uturnLoopX) * (vx - s.uturnLoopX)
+                            + (vy - s.uturnLoopY) * (vy - s.uturnLoopY) <= TUNE.UTURN_LOOP_R * TUNE.UTURN_LOOP_R then
+                        s.uturnLoopN = s.uturnLoopN + 1
+                    else
+                        s.uturnLoopX, s.uturnLoopY, s.uturnLoopN = vx, vy, 1
+                    end
+                    if s.uturnLoopN >= TUNE.UTURN_LOOP_MAX then
+                        Drive.uturnDone(s, playerNum, now, "loop")
+                        vehicle:setRegulator(false)
+                        BaseVehicle.releaseVector3f(fwd)
+                        Drive.stop(playerNum, KEY_STUCK)
+                        return
+                    end
                 end
             end
             -- 車周探測淨空（可原地轉）時目標壓到該檔 crawl：溫和檔 4 < spin 5，不會煞到 5
