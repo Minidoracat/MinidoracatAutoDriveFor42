@@ -1647,7 +1647,7 @@ do
     drive(1000, cruise)
     drive(1000, { speed = 40, target = 50, phys = tp({ profileWhy = "coast", nextArc = 80 }) })       -- pre：none/coast 20、追蹤 10
     drive(400, { speed = 30, target = 30, phys = tp({ profileWhy = "arc", curveHardActive = true, curveCap = 30 }) }) -- arc 12
-    drive(1000, { speed = 40, target = 60, phys = tp() })                                              -- post：accel 20、追蹤 20
+    drive(1000, { speed = 40, target = 70, phys = tp() })                                              -- post：accel 20、追蹤 20（目標 70 夾到上限 60）
     drive(8000, cruise)                                                                                -- 出彎 >100m
     drive(200, { speed = 55, target = 60, phys = tp({ capReason = "curve-coast", visAdvMs = 300 }) })
     drive(200, { speed = 55, target = 60, phys = tp({ capReason = "curve-coast", visAdvMs = 1700 }) })
@@ -1668,7 +1668,7 @@ do
     checkEq(m("lpw", "coast"), 20, "(lpw) none bound by the coast envelope: 20 km/h x 1 s")
     checkEq(m("lpw", "arc"), 12, "(lpw) none bound by the arc cap: 30 km/h x 0.4 s")
     checkEq(m("loss", "none"), 32, "(lpw) loss.none unchanged = 20 + 12")
-    checkEq(n("ltr"), 30, "(ltr) tracking deficit: 10 (target 50) + 20 (target 60 clipped to cap 60)")
+    checkEq(n("ltr"), 30, "(ltr) tracking deficit: 10 (target 50) + 20 (target 70 clipped to cap 60)")
     checkEq(n("ltg"), 53, "(ltg) target deficit: 10 + 12 + 11 + 20")
     checkEq(m("lph", "pre"), 20, "(lph) pre-corner")
     checkEq(m("lph", "arc"), 12, "(lph) on arc")

@@ -21950,7 +21950,7 @@ function drive.scenarioApproach()
         "(apr) 路線起點旁有硬物：排得出入口、不 blocked（blocked=" .. tostring(st and st.blocked)
         .. " mode=" .. tostring(st and st.mode) .. " pm=" .. tostring(st and st.planMode) .. "）")
     -- 1013a 沒接越野接線的原因碼（route ready apw／aph／apd）：接了＝nil；far／near／behind／side 各一例。
-    --   違規證明：原因判式順序對調（behind 先於 near）＝(apw-mid) 紅；夾角量首段＝(apw-back) 紅。
+    --   違規證明：near 門檻失效＝(apw-mid) 紅；拿掉 behind 分支＝(apw-behind) 紅；夾角取反＝(apw-side) 紅；接了不清＝(apw) 紅；far 不記＝(apw-far) 紅。
     checkTrue(st ~= nil and st.approachWhy == nil, "1013a (apw) 接了越野接線：沒有原因碼（" .. tostring(st and st.approachWhy) .. "）")
     drive.clearCell(2, 0)
     -- 車在路旁（投影落在第一段內）：不接越野線（RETURN 的平滑併入）
