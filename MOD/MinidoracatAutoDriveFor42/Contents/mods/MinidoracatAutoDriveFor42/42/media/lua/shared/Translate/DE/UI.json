@@ -115,6 +115,8 @@
     "UI_MinidoracatAutoDrive_HUDStatusUnstick": "Setzt zurück",
     "UI_MinidoracatAutoDrive_HUDStatusSide": "Weicht seitlich aus",
     "UI_MinidoracatAutoDrive_HUDStatusRehitch": "Kuppelt wieder an",
+    "UI_MinidoracatAutoDrive_HUDStatusUturn": "Wendet auf der Stelle",
+    "UI_MinidoracatAutoDrive_HUDStatusUturnSlow": "Eng: wendet langsam",
     "UI_MinidoracatAutoDrive_HUDStatusYield": "Manuelle Steuerung",
     "UI_MinidoracatAutoDrive_HUDStatusYieldResume": "Weiter in %1 s",
     "UI_MinidoracatAutoDrive_HUDStatusArrive": "Halt am Ziel",

@@ -115,6 +115,8 @@
     "UI_MinidoracatAutoDrive_HUDStatusUnstick": "倒車脫困",
     "UI_MinidoracatAutoDrive_HUDStatusSide": "側向挪車中",
     "UI_MinidoracatAutoDrive_HUDStatusRehitch": "接回掛車中",
+    "UI_MinidoracatAutoDrive_HUDStatusUturn": "原地調頭中",
+    "UI_MinidoracatAutoDrive_HUDStatusUturnSlow": "空間不足，慢速調頭",
     "UI_MinidoracatAutoDrive_HUDStatusYield": "手動操作中",
     "UI_MinidoracatAutoDrive_HUDStatusYieldResume": "%1 秒後恢復",
     "UI_MinidoracatAutoDrive_HUDStatusArrive": "抵達停車",

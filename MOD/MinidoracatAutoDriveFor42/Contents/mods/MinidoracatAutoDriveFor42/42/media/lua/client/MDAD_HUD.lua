@@ -111,6 +111,8 @@ local STATUS_KEYS = {
     unstick = "UI_MinidoracatAutoDrive_HUDStatusUnstick",
     side = "UI_MinidoracatAutoDrive_HUDStatusSide", -- 側向脫困進行中（Drive.hudState，1006）
     rehitch = "UI_MinidoracatAutoDrive_HUDStatusRehitch", -- 自動掛回進行中（Drive.rehitchStep，1011a）
+    uturn = "UI_MinidoracatAutoDrive_HUDStatusUturn", -- 原地調頭中（Drive.hudState，1013c）
+    uturnslow = "UI_MinidoracatAutoDrive_HUDStatusUturnSlow", -- 探測被擋、2B 大弧慢速調頭（1013c）
     blocked = "UI_MinidoracatAutoDrive_HUDStatusBlocked",
     dodging = "UI_MinidoracatAutoDrive_HUDStatusDodging",
     build = "UI_MinidoracatAutoDrive_HUDStatusBuild",
@@ -183,6 +185,8 @@ local STATUS_WIDTH_KEYS = {
     "UI_MinidoracatAutoDrive_HUDStatusUnstick",
     "UI_MinidoracatAutoDrive_HUDStatusSide",
     "UI_MinidoracatAutoDrive_HUDStatusRehitch",
+    "UI_MinidoracatAutoDrive_HUDStatusUturn",
+    "UI_MinidoracatAutoDrive_HUDStatusUturnSlow",
     "UI_MinidoracatAutoDrive_HUDStatusBlocked",
     "UI_MinidoracatAutoDrive_HUDStatusDodging",
     "UI_MinidoracatAutoDrive_HUDStatusBuild",
@@ -808,7 +812,7 @@ local function statusColor(token, reason)
     if token == nil then return C.blue end
     if token == "blocked" then return C.red end
     if token == "dodging" or token == "unstick" or token == "side" or token == "lowfps" or token == "areawait"
-            or token == "rehitch" then
+            or token == "rehitch" or token == "uturn" or token == "uturnslow" then
         return C.amber
     end
     if token == "yield" or token == "build" then return C.blue end

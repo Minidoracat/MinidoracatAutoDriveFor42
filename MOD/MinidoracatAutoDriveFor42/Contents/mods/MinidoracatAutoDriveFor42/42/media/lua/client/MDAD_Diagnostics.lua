@@ -171,6 +171,9 @@ local EK = {
     -- 1013d dodge commit：承諾線對殭屍（軟縫會閃的點、不含屍體）的最小淨距 zm（距離 − R，負＝R 內）與那一點的 zmS／zmL；
     -- zv＝本輪候選鏈因線在 R 內經過殭屍而先不採納的候選數（Driver Drive.zombieSweep）
     "zm", "zmS", "zmL", "zv", -- 1013d
+    -- 1013c 分段倒車與原地轉出場：uturn room 的車周命中點 hx／hy、已倒 used（m；need 沿用）；uturn done／over 的 yaw 率 yr
+    -- （rad/s）與起步調頭收尾後的過轉 ov（rad）
+    "hx", "hy", "used", "yr", "ov", -- 1013c
 }
 
 local function logOnce(msg)

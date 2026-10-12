@@ -115,6 +115,8 @@
     "UI_MinidoracatAutoDrive_HUDStatusUnstick": "バックで脱出中",
     "UI_MinidoracatAutoDrive_HUDStatusSide": "横に移動中",
     "UI_MinidoracatAutoDrive_HUDStatusRehitch": "再連結中",
+    "UI_MinidoracatAutoDrive_HUDStatusUturn": "その場で転回中",
+    "UI_MinidoracatAutoDrive_HUDStatusUturnSlow": "狭いため低速で転回",
     "UI_MinidoracatAutoDrive_HUDStatusYield": "手動操作中",
     "UI_MinidoracatAutoDrive_HUDStatusYieldResume": "%1 秒後に再開",
     "UI_MinidoracatAutoDrive_HUDStatusArrive": "到着・停止",

@@ -115,6 +115,8 @@
     "UI_MinidoracatAutoDrive_HUDStatusUnstick": "Geri gidip kurtuluyor",
     "UI_MinidoracatAutoDrive_HUDStatusSide": "Yana kayıyor",
     "UI_MinidoracatAutoDrive_HUDStatusRehitch": "Römork bağlanıyor",
+    "UI_MinidoracatAutoDrive_HUDStatusUturn": "Yerinde dönüyor",
+    "UI_MinidoracatAutoDrive_HUDStatusUturnSlow": "Dar alan: yavaş dönüş",
     "UI_MinidoracatAutoDrive_HUDStatusYield": "Manuel kontrol",
     "UI_MinidoracatAutoDrive_HUDStatusYieldResume": "%1 sn sonra devam",
     "UI_MinidoracatAutoDrive_HUDStatusArrive": "Varış duruşu",

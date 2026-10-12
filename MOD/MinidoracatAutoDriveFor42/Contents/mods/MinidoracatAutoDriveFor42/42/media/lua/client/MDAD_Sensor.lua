@@ -1963,7 +1963,7 @@ end
 -- 盲區，原地耦力旋轉的車身掃掠 ~2.5m 貼牆貼車就撞（2026-08-28 使用者需求：
 -- 調頭前檢查左右）。與走廊掃描共用 sprite 成本快取；**不碰 working 欄位**，
 -- 掃描輪進行中呼叫也安全。r=3 → 最多 37 格，一次性成本。cx／cy 可指定圓心（Driver Drive.uturnRoom：倒車後的車位），
--- 缺＝車心。
+-- 缺＝車心。被擋時第 2、3 回傳＝命中點（別台車＝車心、格＝格心；參數不全＝nil；1013c uturn room 事件 hx／hy）。
 function MDADSensor.probeAround(state, vehicle, cell, radius, cx, cy)
     if type(state) ~= "table" or not vehicle or not cell then return true end
     if not flagsBound then bindFlags() end
@@ -1993,7 +1993,7 @@ function MDADSensor.probeAround(state, vehicle, cell, radius, cx, cy)
                 if v ~= nil and v ~= vehicle and v ~= state.selfTrailer then
                     local dvx = v:getX() - cx
                     local dvy = v:getY() - cy
-                    if dvx * dvx + dvy * dvy <= vr2 then return true end
+                    if dvx * dvx + dvy * dvy <= vr2 then return true, v:getX(), v:getY() end
                 end
             end
         end
@@ -2004,21 +2004,21 @@ function MDADSensor.probeAround(state, vehicle, cell, radius, cx, cy)
             local dy = gy + 0.5 - cy
             if dx * dx + dy * dy <= r2 then
                 local square = cell:getGridSquare(gx, gy, z)
-                if square == nil then return true end
+                if square == nil then return true, gx + 0.5, gy + 0.5 end
                 -- 只有明確的 false（分類完成且淨空）才放行；nil＝sprite 快取或
                 -- getObjects 取不到分類，不知道就別原地轉（與 square == nil 同調）
                 local hard = probeSquareHard(state, square)
-                if hard ~= false then return true end
+                if hard ~= false then return true, gx + 0.5, gy + 0.5 end
                 local movs = square:getMovingObjects()
                 local nMov = movs:size()
                 for i = 1, nMov do
                     local mv = movs:get(i - 1)
-                    if instanceof(mv, "BaseVehicle") and mv ~= vehicle and mv ~= state.selfTrailer then return true end
+                    if instanceof(mv, "BaseVehicle") and mv ~= vehicle and mv ~= state.selfTrailer then return true, gx + 0.5, gy + 0.5 end
                 end
                 -- 格級幾何查詢（同 scanCell 的理由）：全域列舉／movingObjects
                 -- 都可能漏掉 streaming 波動車，貼著看不見的車原地旋轉＝掃到
                 local cv = square:getVehicleContainer()
-                if cv ~= nil and cv ~= vehicle and cv ~= state.selfTrailer then return true end
+                if cv ~= nil and cv ~= vehicle and cv ~= state.selfTrailer then return true, gx + 0.5, gy + 0.5 end
             end
         end
     end

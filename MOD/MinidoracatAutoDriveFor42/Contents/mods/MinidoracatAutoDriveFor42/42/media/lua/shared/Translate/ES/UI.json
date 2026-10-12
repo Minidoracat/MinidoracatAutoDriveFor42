@@ -115,6 +115,8 @@
     "UI_MinidoracatAutoDrive_HUDStatusUnstick": "Retrocediendo",
     "UI_MinidoracatAutoDrive_HUDStatusSide": "Moviéndose de lado",
     "UI_MinidoracatAutoDrive_HUDStatusRehitch": "Reenganchando",
+    "UI_MinidoracatAutoDrive_HUDStatusUturn": "Girando en el sitio",
+    "UI_MinidoracatAutoDrive_HUDStatusUturnSlow": "Poco espacio: giro lento",
     "UI_MinidoracatAutoDrive_HUDStatusYield": "Control manual",
     "UI_MinidoracatAutoDrive_HUDStatusYieldResume": "Se reanuda en %1 s",
     "UI_MinidoracatAutoDrive_HUDStatusArrive": "Parada de llegada",

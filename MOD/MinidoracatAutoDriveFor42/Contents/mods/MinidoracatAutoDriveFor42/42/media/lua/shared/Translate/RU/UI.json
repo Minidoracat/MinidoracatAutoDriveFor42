@@ -115,6 +115,8 @@
     "UI_MinidoracatAutoDrive_HUDStatusUnstick": "Выезд задним ходом",
     "UI_MinidoracatAutoDrive_HUDStatusSide": "Смещение вбок",
     "UI_MinidoracatAutoDrive_HUDStatusRehitch": "Перецепка прицепа",
+    "UI_MinidoracatAutoDrive_HUDStatusUturn": "Разворот на месте",
+    "UI_MinidoracatAutoDrive_HUDStatusUturnSlow": "Тесно: медленный разворот",
     "UI_MinidoracatAutoDrive_HUDStatusYield": "Ручное управление",
     "UI_MinidoracatAutoDrive_HUDStatusYieldResume": "Продолжение через %1 с",
     "UI_MinidoracatAutoDrive_HUDStatusArrive": "Остановка по прибытии",
