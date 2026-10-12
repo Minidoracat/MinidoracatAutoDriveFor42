@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1012b"
+Drive.REV = "1012c"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -640,6 +640,7 @@ TUNE.ZOMBIE_PUSH_SCALE = 2.0       -- 1.5→2.0（2026-09-04 使用者「可以�
 TUNE.EXIT_KEEP_DEV = 0.5 -- 繞行出口：車離常駐線超過此值、且出口還有窄點就沿承諾線走完（Drive.exitKeepsDodge）
 TUNE.EXIT_KEEP_CLEAR = 0.5 -- 出口窄點：guard 收集的逐點淨距（已扣 pad）低於此值
 TUNE.NEXT_HANDOFF_M = 0.3 -- 下一群滑行停點：離停點這麼近＝已經開到了（Drive.nextStopHandoff；帽趨近 0 時車會先停）
+TUNE.GUARD_FAR_MARGIN_M = 5 -- 守護遠端判死釋放（Drive.guardFarRelease）：判死點與群起點都比「停止線＋目前車速煞停距」再遠這麼多才釋放重規劃
 TUNE.BRAKE_ASSIST_MIN_KMH = 40
 TUNE.BRAKE_ASSIST_FULL_KMH = 60
 TUNE.BRAKE_ASSIST_RATIO = 0.4
@@ -11110,6 +11111,44 @@ local function guardDemote(s, sen, pm, mi, cOver, cHit, playerNum)
     return margin
 end
 
+-- 守護遠端判死就釋放重規劃（1012；正式服 takeover-after-blocked F1 八個片段）：commit 時最緊點在 50–75m 外、餘裕略低於
+-- need，0.3–3 秒後點雲長大、守護在那個遠點判死（p3／p4，淨距 −0.01…−0.2）。舊制 sticky 判死後沿死線、帶整線繞行帽
+-- （逐點包絡因判死停用）一路爬到停止線才清線重規劃（10 km/h 8 秒、16 km/h 7 秒），玩家接手。
+-- 判死點與群起點 b 的世界距（扣 bodyReach）都在「停止線＋目前車速煞停距（safeBrake×APPROACH_BRAKE_FRAC，同 blocked
+-- 接近包絡）＋GUARD_FAR_MARGIN_M」以外、且車頭還沒到 b（車不在群旁，清線後回常駐線不會切進群）：本輪釋放承諾，
+-- 回 true 讓守護分支往下從車位跑候選鏈（點雲已長大）；沒有線就是一般判堵、走 blocked 接近包絡。每個守護輪重算：
+-- 近的照舊 sticky 煞停（死線不被信任輪推翻；釋放也不再開它）。p2 走既有 guard-entry 交接；cap 歸零類（無命中點）不適用。
+function Drive.guardFarRelease(s, vehicle, playerNum)
+    local fs = s.fstate
+    local ph = s.guardHitPhase
+    if not s.dodgeGuardFailed or (ph ~= 3 and ph ~= 4) or not finite(s.guardHitX) or not finite(s.guardHitY)
+            or not finite(fs.offB) or not finite(fs.ovS0) or type(fs.ovX) ~= "table" or (fs.ovN or 0) < 1
+            or s.lastSNow + s.bodyReach >= fs.offB then
+        return false
+    end
+    local kmh = vehicle:getCurrentSpeedKmHour()
+    if not finite(kmh) then return false end
+    local vx, vy = vehicle:getX(), vehicle:getY()
+    local k = math.floor((fs.offB - fs.ovS0) / MDADFollower.OV_STEP) + 1
+    if k > fs.ovN then k = fs.ovN elseif k < 1 then k = 1 end
+    local dx, dy = s.guardHitX - vx, s.guardHitY - vy
+    local d2 = dx * dx + dy * dy
+    dx, dy = fs.ovX[k] - vx, fs.ovY[k] - vy
+    if dx * dx + dy * dy < d2 then d2 = dx * dx + dy * dy end
+    local d = math.sqrt(d2) - s.bodyReach
+    local decel = s.safeBrake
+    if not finite(decel) or decel <= 0 then decel = 0.6 else decel = decel * TUNE.APPROACH_BRAKE_FRAC end
+    local v = kmh / 3.6
+    local need = v * v / (2 * decel) + Drive.blockStopDist(s) + TUNE.GUARD_FAR_MARGIN_M
+    if d <= need then return false end
+    diagEvent(s, playerNum, "dodge", { phase = "release", why = "guard-far", rs = s.lastSNow, b = fs.offB,
+        d = d, need = need, speed = kmh, hitS = s.guardHitS, hitPhase = ph, hitX = s.guardHitX, hitY = s.guardHitY,
+        clearance = s.guardHitClearance })
+    MDADFollower.clearOffset(fs)
+    releaseDodge(s)
+    return true
+end
+
 -- 繞行延後（exit／coverage／unloaded／lateral-coverage／band-clear）：這一輪不承諾，先按已知群起點 b 保留煞停距離（接近帽
 -- 指向已知障礙，不是未載入前緣），點雲 sig 不變也要每輪重判。replan 兩個出口共用（主候選 exit
 -- 立即延後；coverage／unloaded／lateral-coverage 在候選鏈全滅後才延後；band-clear 見 Drive.bandClearVoid）。
@@ -11524,7 +11563,9 @@ local function replan(s, vehicle, playerNum)
                     s.planSig = -1
                 end
             end
-            if not guardOk then
+            if not guardOk and Drive.guardFarRelease(s, vehicle, playerNum) then
+                -- 遠端判死已釋放承諾（條件見 Drive.guardFarRelease）：不轉 blocked，下方不 return、本輪從車位跑候選鏈
+            elseif not guardOk then
                 -- 守護驗證失敗：轉 blocked，剖面保留——車還在動時清剖面＝目標
                 -- 線瞬跳，近停後才清（stepFollow 收尾）。煞停基準＝守護判死的那一點
                 -- （guardHitS／X／Y；blockedNear 保留漸進接近：>BLOCK_STOP_DIST 滑行、
@@ -11573,8 +11614,10 @@ local function replan(s, vehicle, playerNum)
             end
             -- 純觀測分類（遙測用；不影響任何決策）：守護輪的兩種結局在 log 裡
             -- 必須分得開——同樣是 dodging，guard-blocked 那幀是煞停的起因。
-            s.planMode = s.blocked and "guard-blocked" or "guard"
-            return
+            if s.dodging then
+                s.planMode = s.blocked and "guard-blocked" or "guard"
+                return
+            end
         end
     end
     -- BLOCKED_CORNER latch：障礙仍在且**車沒移動**時不重跑候選鏈——原地

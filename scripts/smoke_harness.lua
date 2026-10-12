@@ -16928,7 +16928,11 @@ local function scenarioPhaseE()
     --     硬物必須真的落在**保持段**（p3）。掃掠回報的 phase 是失敗**車身取樣點**的弧長，
     --     車頭前伸會讓貼在 offB 後緣的硬物先被 p2 的取樣點命中——因此這裡把障礙群補成
     --     4 格長（保持段 ≈8m），硬物放保持段尾端，並用前置斷言鎖住深度。
+    --     1012 起車還沒到群、判死點在煞停距外的判死改成釋放重規劃（Drive.guardFarRelease，遠近兩案見
+    --     drive.scenarioGuardFar）；本案只鎖 sticky 本身，把遠端釋放門檻拉到無限大。
     do
+        local farMargin = MDAD.Drive.debugTune().GUARD_FAR_MARGIN_M
+        MDAD.Drive.debugTune().GUARD_FAR_MARGIN_M = 1e9
         MDAD.Drive.stop(0, nil)
         for x = 47, 49 do drive.putSolid(x, 0, "guard_group_" .. x) end -- 與既有 (46,0) 併成一群
         hotVeh._x, hotVeh._y, hotVeh._speed = 0, 0, 0
@@ -16976,6 +16980,7 @@ local function scenarioPhaseE()
         for _, c in ipairs(cells) do drive.clearCell(c[1], c[2]) end
         for x = 47, 49 do drive.clearCell(x, 0) end
         MDAD.Drive.stop(0, nil)
+        MDAD.Drive.debugTune().GUARD_FAR_MARGIN_M = farMargin
     end
     -- (B2) 0909b：判死落在**遠處 entry**（p2）時不得再沿著已經判死的線一路爬到障礙前
     --      （實機 035：判死點在 50m 外、車照舊線爬完那 50m 才停）。契約：p2 判死、失敗點
@@ -19953,8 +19958,21 @@ function drive.scenarioThreeCarHandoff()
         round()
         checkTrue(st.dodging and not st.dodgeStay, "(handoff) 首線是普通繞行，不是假造停留")
         local firstB, firstC = st.fstate.offB, st.fstate.offC
-        for x = 77, 180 do
-            for y = -10, 10 do drive.mkSquare(x, y) end
+        -- 1012：車還沒到第一群就看到第二台＝遠端判死、當場釋放重規劃（Drive.guardFarRelease，見 drive.scenarioGuardFar）。
+        -- 本案鎖的是「車頭已到第一群才看到第二台」的行進中交接：先沿承諾線開到群起點再載入後兩台。
+        local x = 4
+        local function advance(untilX)
+            while x <= untilX do
+                place(x, math.min(20, math.max(0, st.cmdV * 3.6)))
+                round()
+                checkTrue(st.fstate.offB == firstB and st.dodging,
+                    "(handoff) 整車未過舊群不改入口／保持段")
+                x = x + 3
+            end
+        end
+        advance(firstB - st.bodyReach)
+        for x2 = 77, 180 do
+            for y = -10, 10 do drive.mkSquare(x2, y) end
         end
         drive.putVehicleGeom(nextX or 75, 1.17, -0.1165, 1.31, 3.24, true)
         if not nextX then drive.putVehicleGeom(90, -0.21, 0.0292, 1.64, 4.72, true) end
@@ -19965,12 +19983,7 @@ function drive.scenarioThreeCarHandoff()
             checkTrue(st.blocked and st.dodgeGuardFailed and st.guardHitPhase == 4,
                 "(handoff) 真守護在後載入第二台的回線段判死")
         end
-        for x = 4, 58, 3 do
-            place(x, math.min(20, math.max(0, st.cmdV * 3.6)))
-            round()
-            checkTrue(st.fstate.offB == firstB and st.dodging,
-                "(handoff) 整車未過舊群不改入口／保持段")
-        end
+        advance(58)
         checkTrue(st.lastSNow < firstC + st.bodyReach, "(handoff) 前置位置仍在全車過清門檻內")
         return firstB
     end
@@ -26680,11 +26693,15 @@ function drive.scenarioBandCover()
     checkTrue(st.dodging == true and st.sensor.completedBandBias == 0 and not st.dodgeGuardFailed,
         "(band-gap) 承諾中的守護輪帶心仍是 0、守護照常（band=" .. tostring(st.sensor.completedBandBias) .. " failed="
         .. tostring(st.dodgeGuardFailed) .. "）")
-    -- (band-guard)：線上（hold 段、y −5）換進一個硬點、拿掉牆排遠端一格＝點數持平
+    -- (band-guard)：線上（hold 段、y −5）換進一個硬點、拿掉牆排遠端一格＝點數持平。
+    -- 只驗「有重驗、判死」：遠端釋放（1012 Drive.guardFarRelease）門檻拉到無限大，判決留在 session 上給斷言看
     st.dodgeGuardBand = 3
+    local farMargin = Dr.debugTune().GUARD_FAR_MARGIN_M
+    Dr.debugTune().GUARD_FAR_MARGIN_M = 1e9
     drive.clearCell(40, 14)
     drive.putSolid(46, -5, "harness_band_in")
     drive.scanRound(true)
+    Dr.debugTune().GUARD_FAR_MARGIN_M = farMargin
     checkTrue(st.dodgeGuardFailed == true and st.dodgeGuardBand == 0,
         "(band-guard) 帶心跟驗證時不同：點數持平也重驗、判死（failed=" .. tostring(st.dodgeGuardFailed) .. " band="
         .. tostring(st.dodgeGuardBand) .. " hardN=" .. tostring(st.sensor.hardN) .. "）")
@@ -26709,6 +26726,143 @@ function drive.scenarioBandCover()
     SandboxVars = oldSand
 end
 drive.scenarioBandCover()
+
+-- (gfar) 1012 守護遠端判死就釋放重規劃（正式服 takeover-after-blocked F1：commit 時最緊點 50–75m 外、點雲長大後守護在那個
+--   遠點判死，舊制 sticky 沿死線帶整線繞行帽爬到停止線才重規劃，玩家接手）。常駐 0、牆在 x=60 y −2..2（兩側都繞得過）；
+--   承諾後沿承諾線把車開到群起點前約 22m，再在承諾線出口段放 3 格硬物（點雲成長＝守護重驗，判死在 p3／p4）。
+--   (gfar)      車速 5 km/h：判死點與群起點都在「停止線＋煞停距＋GUARD_FAR_MARGIN_M」外＝同一輪 dodge release
+--               why=guard-far（帶 d／need／speed）、不發 blocked why=guard、不留判決，同輪從車位重跑候選鏈承諾新線；
+--               下一輪新線的守護照過（不 blocked）。
+--   (gfar-near) 同一位置車速 70 km/h：煞停距吃掉餘量＝照舊 sticky：guard-blocked、判決留在 session、沒有 guard-far；
+--               點雲持平的下一輪不推翻。
+--   (gfar-beside) 牆拉長到 50m、車停在群起點後 25m（車在群旁）、5 km/h：判死點與群起點的世界距都夠遠，仍照舊 sticky——
+--               車旁就是群，清線回常駐線會切進去。
+--   違規證明：Drive.guardFarRelease 恆回 false＝(gfar) 紅；need 拿掉煞停距＝(gfar-near) 紅；釋放後照舊 return（不在同輪
+--   重規劃）＝(gfar) 同輪承諾那條紅；拿掉「車頭還沒到 b」閘＝(gfar-beside) 紅。
+function drive.scenarioGuardFar()
+    scenario("1012：守護在遠處判死——煞停距外就釋放承諾、同輪從車位重規劃；近的照舊 sticky 煞停")
+    local oldSand = SandboxVars
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 120, RightLaneBias = 0 })
+    local wasMs = drive.frameMs(10)
+    local Dr = MDAD.Drive
+    local oldKeep = Dr.keepRightTarget
+    Dr.keepRightTarget = function() return 0 end
+    local oldEvent, oldSample, events = MDADDiagnostics.event, MDADDiagnostics.sample, {}
+    MDADDiagnostics.event = function(_, name, a) events[#events + 1] = { name = name, a = a } end
+    MDADDiagnostics.sample = function() return true end
+    local function find(name, phase, why)
+        local n, last = 0, nil
+        for i = 1, #events do
+            local e = events[i]
+            if e.name == name and (phase == nil or (e.a and e.a.phase == phase)) and (why == nil or (e.a and e.a.why == why)) then
+                n, last = n + 1, e.a
+            end
+        end
+        return n, last
+    end
+    -- 回傳 session 與判死前承諾線的 offL／ovEndS；最後一輪（放硬物那輪）的事件留在 events。
+    -- wallLen＝牆長（x 從 60 起）、ahead＝放硬物前把車沿承諾線開到 offB＋ahead（nil＝群起點前 22m）
+    local function run(kmh, wallLen, ahead)
+        drive.fillWorld(-10, 200, -16, 16)
+        for y = -2, 2 do drive.putSolid(60, y, "harness_gfar_wall") end
+        for x = 61, 60 + wallLen - 1 do drive.putSolid(x, 0, "harness_gfar_wall") end -- 長群只放一排：整面牆會塞爆點雲
+        armDrive()
+        local st = Dr.debugSession(0)
+        st.diag = true
+        setHeading(dveh, 0)
+        dveh._x, dveh._y, dveh._speed = 10, 0, 20
+        driveReset(dveh)
+        drive.scanRound(true)
+        checkTrue(st.dodging == true, "(gfar) 前置：牆前承諾繞行（dodging=" .. tostring(st.dodging) .. "）")
+        local fs = st.fstate
+        local function place(x)
+            local k = math.floor((x - fs.ovS0) / MDADFollower.OV_STEP) + 1
+            dveh._x = x
+            if k >= 1 and k < fs.ovN then
+                dveh._y = fs.ovY[k]
+                setHeading(dveh, math.atan(fs.ovY[k + 1] - fs.ovY[k], fs.ovX[k + 1] - fs.ovX[k]))
+            end
+            driveReset(dveh)
+            drive.scanRound(true)
+        end
+        local target = fs.offB + (ahead or -st.bodyReach - 22)
+        local x = 10
+        while x + 3 < target do
+            x = x + 3
+            place(x)
+        end
+        place(target)
+        checkTrue(st.dodging == true and not st.blocked and math.abs(st.lastSNow - target) < 0.5,
+            "(gfar) 前置：沿承諾線開到 offB" .. tostring(ahead) .. "、承諾仍在（rs=" .. tostring(st.lastSNow) .. " b="
+            .. tostring(fs.offB) .. "）")
+        local offL, endS = fs.offL, fs.ovEndS
+        local kc = math.floor((fs.offC - fs.ovS0) / MDADFollower.OV_STEP) + 1
+        local kd = math.floor((fs.offD - fs.ovS0) / MDADFollower.OV_STEP) + 1
+        if kd > fs.ovN then kd = fs.ovN end
+        local km = math.floor((kc + kd) / 2)
+        for k = km - 1, km + 1 do drive.putSolid(math.floor(fs.ovX[k]), math.floor(fs.ovY[k]), "harness_gfar_exit_" .. k) end
+        dveh._speed = kmh
+        st.dodgeGuardHardN = -10 -- 守護高水位：車往前開後點雲會縮（車後的點出帶），3 格硬物不一定超過舊高水位
+        for i = #events, 1, -1 do events[i] = nil end
+        driveReset(dveh)
+        drive.scanRound(true)
+        return st, offL, endS
+    end
+    -- (gfar)
+    local st, offL, endS = run(5, 1)
+    local nRel, rel = find("dodge", "release", "guard-far")
+    local nGuard = find("blocked", nil, "guard")
+    local nCommit = find("dodge", "commit")
+    checkTrue(nRel == 1 and type(rel.d) == "number" and type(rel.need) == "number" and rel.d > rel.need
+            and rel.speed == 5 and (rel.hitPhase == 3 or rel.hitPhase == 4) and nGuard == 0,
+        "(gfar) 遠端判死：同輪 release why=guard-far（d=" .. tostring(rel and rel.d) .. " need=" .. tostring(rel and rel.need)
+        .. " speed=" .. tostring(rel and rel.speed) .. " ph=" .. tostring(rel and rel.hitPhase) .. "）、沒有 blocked why=guard（"
+        .. nGuard .. "）")
+    checkTrue(not st.dodgeGuardFailed and st.planMode ~= "guard-blocked",
+        "(gfar) 判決不留在 session、不是 guard-blocked（failed=" .. tostring(st.dodgeGuardFailed) .. " pm=" .. tostring(st.planMode) .. "）")
+    checkTrue(nCommit == 1 and st.dodging == true and not st.blocked
+            and (st.fstate.offL ~= offL or st.fstate.ovEndS ~= endS),
+        "(gfar) 同輪從車位重跑候選鏈、承諾新線（commits=" .. nCommit .. " dodging=" .. tostring(st.dodging) .. " offL="
+        .. tostring(offL) .. "→" .. tostring(st.fstate.offL) .. " endS=" .. tostring(endS) .. "→" .. tostring(st.fstate.ovEndS) .. "）")
+    drive.scanRound(true)
+    checkTrue(st.dodging == true and not st.blocked and not st.dodgeGuardFailed,
+        "(gfar) 下一輪新線守護照過（blocked=" .. tostring(st.blocked) .. " failed=" .. tostring(st.dodgeGuardFailed) .. "）")
+    MDAD.Drive.stop(0, nil)
+    -- (gfar-near)
+    st = run(70, 1)
+    nRel = find("dodge", "release", "guard-far")
+    nGuard = find("blocked", nil, "guard")
+    checkTrue(nRel == 0 and nGuard == 1 and st.dodging == true and st.blocked == true and st.dodgeGuardFailed == true
+            and (st.guardHitPhase == 3 or st.guardHitPhase == 4) and st.planMode == "guard-blocked",
+        "(gfar-near) 70 km/h 煞停距吃掉餘量：照舊 sticky guard-blocked（guard-far=" .. nRel .. " blocked guard=" .. nGuard
+        .. " failed=" .. tostring(st.dodgeGuardFailed) .. " ph=" .. tostring(st.guardHitPhase) .. " pm=" .. tostring(st.planMode) .. "）")
+    drive.scanRound(true)
+    checkTrue(st.dodging == true and st.blocked == true and st.dodgeGuardFailed == true
+            and find("dodge", "release", "guard-far") == 0,
+        "(gfar-near) 點雲持平的下一輪不推翻判決、也不釋放（blocked=" .. tostring(st.blocked) .. " failed="
+        .. tostring(st.dodgeGuardFailed) .. "）")
+    MDAD.Drive.stop(0, nil)
+    -- (gfar-beside)
+    st = run(5, 50, 25)
+    checkTrue(st.dodging == true and st.lastSNow + st.bodyReach >= st.fstate.offB and find("dodge", "release", "guard-far") == 0
+            and st.blocked == true and st.dodgeGuardFailed == true and (st.guardHitPhase == 3 or st.guardHitPhase == 4),
+        "(gfar-beside) 車在群旁：判死點再遠也照舊 sticky（dodging=" .. tostring(st.dodging) .. " rs=" .. tostring(st.lastSNow)
+        .. " b=" .. tostring(st.fstate.offB) .. " c=" .. tostring(st.fstate.offC) .. " d=" .. tostring(st.fstate.offD)
+        .. " guard-far=" .. find("dodge", "release", "guard-far") .. " blocked=" .. tostring(st.blocked) .. " ph="
+        .. tostring(st.guardHitPhase) .. " pm=" .. tostring(st.planMode) .. " ev=" .. (function()
+            local t = {}
+            for i = 1, #events do t[#t + 1] = events[i].name .. "/" .. tostring(events[i].a and events[i].a.phase) .. "/"
+                .. tostring(events[i].a and events[i].a.why) end
+            return table.concat(t, ",")
+        end)() .. "）")
+    MDAD.Drive.stop(0, nil)
+    MDADDiagnostics.event, MDADDiagnostics.sample = oldEvent, oldSample
+    Dr.keepRightTarget = oldKeep
+    drive.fillWorld(-2, 70, -7, 7)
+    drive.frameMs(wasMs)
+    SandboxVars = oldSand
+end
+drive.scenarioGuardFar()
 
 -- 1008 車在常駐線外遠處的橫向覆蓋出口（正式服 0.23.0 三個片段：起步離 nav 線
 --   8–12m、斜切保持把行駛線釘在車位，車位帶心那輪候選被橫向覆蓋拒收→延後、nav 線補掃那輪車身在 ±7 帶外看不到車線上的
