@@ -534,5 +534,31 @@ do
     BaseVehicle.allocVector3f, BaseVehicle.releaseVector3f = realAlloc, realRelease
 end
 
+-- ⑩ 1013e 弧段內輪差（T.arcOfftrack；Driver Drive.towArcRuns／落後守門的掛車車身）：牽引車參考點從直線切入半徑 R、轉 dth 的弧，
+-- 掛點在參考點後 |hz|、掛車軸再後 L2，回掛車軸偏到路徑彎內的最大量。長弧對照穩態解析式 R−sqrt(R²+hz²−L2²)；急彎走不到穩態
+-- （穩態在 R < sqrt(L2²−hz²) 時把軸拉到弧心）；正式服 Q10 clip-30 Mustang hz −2.31、L2 3.25、R42 轉 26°。
+do
+    local function steady(R, hz, L2) return R - math.sqrt(math.max(0, R * R + hz * hz - L2 * L2)) end
+    for _, c in ipairs({ { 42, -2.31, 3.25 }, { 20, -1, 9 }, { 60, -1.5, 8 } }) do
+        local f, sim = steady(c[1], c[2], c[3]), T.arcOfftrack(c[1], math.pi, c[2], c[3])
+        check(sim >= f and sim - f < 0.06,
+            string.format("(off) 長弧 R%g hz%g L2 %g：收斂到穩態 %.3f（推得 %.3f，離散只會偏內幾公分）", c[1], c[2], c[3], f, sim))
+    end
+    local q10 = T.arcOfftrack(42, 26 * math.pi / 180, -2.31, 3.25)
+    check(q10 > 0.05 and q10 < 0.12, string.format("(off) 正式服 Q10 clip-30 幾何：往內 %.3f（穩態 0.062，出弧多切）", q10))
+    local semi = T.arcOfftrack(6, math.pi / 2, -2.23, 8)
+    check(semi > 2.5 and semi < 0.7 * steady(6, -2.23, 8),
+        string.format("(off) W900＋貨櫃 R6 90°：急彎走不到穩態（%.2f，穩態 %.2f 是軸拉到弧心）", semi, steady(6, -2.23, 8)))
+    check(T.arcOfftrack(20, 0.5, -1, 9) < T.arcOfftrack(20, 2, -1, 9), "(off) 同半徑轉得越多切得越深")
+    check(T.arcOfftrack(15, math.pi, -3, 2) < 0.1, "(off) L2 比掛點後移短（穩態往外）：幾乎不往內")
+    check(T.arcOfftrack(0, 1, -1, 9) == 0 and T.arcOfftrack(20, 0, -1, 9) == 0, "(off) 半徑或轉角非正：0")
+    local tab = {}
+    local best, nb = T.arcOfftrack(6, math.pi / 2, -2.23, 8, tab)
+    local mx, late = 0, tab[18] -- 站 17–18m＝出弧後約 8m
+    for b = 1, nb do if tab[b] > mx then mx = tab[b] end end
+    check(math.abs(mx - best) < 1e-9 and late < 0.5 * best,
+        string.format("(off-tab) 逐站表最大＝整段最深 %.2f；出弧後 8m 那站剩 %.2f（硬點照所在站查，不拿整段最深）", best, late))
+end
+
 print(string.format("test_trailer: %d 項斷言、%d 項失敗", asserts, fails))
 if fails > 0 then os.exit(1) end

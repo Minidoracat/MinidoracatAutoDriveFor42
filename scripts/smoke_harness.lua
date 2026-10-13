@@ -27146,6 +27146,156 @@ function drive.scenarioReturnLag()
     MDADDiagnostics.event = oldEvent
 end
 drive.scenarioReturnLag()
+-- 1013e N6（正式服 Q10 clip-30：Mustang＋掛車在 R42 改寫弧上，牽引車 ld 0.24 < LAG_GUARD_MIN_M、footprint 只算牽引車，掛車內側
+--   38.9 km/h 撞路邊硬點）：落後守門在弧上另判掛車車身（牽引車預測車身＋弧段內輪差 MDADTrailer.arcOfftrack、掛車半寬＋pad，不看
+--   |ld| 門檻），掛車實際車身對記下的硬點做 footprint（Drive.towFootprint）。牽引車 halfW 1.0／halfL 2.3，掛車 halfW 0.9、
+--   L2 5、hitchZ −1.5；90° 角的 Follower 圓角弧（R12），ld 0。
+--   (tb-arc)  弧中段內側的硬點：牽引車車身碰不到、掛車往內 off 才碰到 → arm kind=trailer、toff＝該段內輪差；到硬點旁帽＝MIN_EXEC。
+--             違規證明：拿掉掛車判定／內輪差歸零／方向反＝紅。
+--   (tb-out)  同距離放在彎外側：不 arm（內輪差往內）。違規證明：方向反＝紅。
+--   (tb-straight) 直路、只差掛車半寬就碰得到的硬點：不 arm＝舊制不變。違規證明：直路也判掛車車身＝紅。
+--   (tb-nogeo) 量不到掛點偏移（attach 清掉 hitchZ）：不判。
+--   (tb-pad)  掛車半寬用 TUNE.TOW_BODY_PAD（0）：只差 0.05 碰不到的點不 arm，實際車身離點 0.05 也不算接觸。違規證明：掛車用牽引車 pad＝紅。
+--   (tb-foot) 硬點在牽引車快照裡時記下；快照沒有它、掛車實際車身（MDADTrailer.body）碰到：towFootBlocked、contact kind=trailer 帶
+--             tcl，帽＝MIN_EXEC、不進 currentBlocked（不鎖輪、不開脫困）；車尾過點後丟掉、解除。違規證明：不記憶／帽不看／改鎖輪＝紅。
+function drive.scenarioTowBody()
+    scenario("1013e：拖車掛車車身——弧上預測內輪差壓速、掛車實際車身接觸只壓速不鎖輪")
+    local Dr, F, T = MDAD.Drive, MDADFollower, MDADTrailer
+    local PAD, MIN, ARC = MDADCorridor.FOOTPRINT_PAD, MDADDynamics.MIN_EXEC_KMH, MDADDynamics.SEG_ARC
+    local TP = Dr.debugTune().TOW_BODY_PAD
+    -- 真 v4 剖面（同 scenario0928c：R12 圓角，(0,−40)→(0,0)→(40,0) 航向 π/2→0＝航向遞減，彎心在 −l 側：SG＝−1）
+    local w = 2 * (12 * (1 - math.cos(math.pi / 4)) + 0.656 + 0.4)
+    local vp = { valid = true, geometryValid = true, halfW = 0.656, rMin = 2.26, wheelbase = 1.985,
+        delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 120 }
+    local function build(route)
+        local p = F.begin(route, 120, 4, vp)
+        while not p.ready do F.stepBuild(p, 4096) end
+        return p
+    end
+    local SG = -1
+    local arcP = build({ pts = { 0, -40, 0, 0, 40, 0 }, segSurface = { "paved", "paved" }, segWidth = { w, w } })
+    local straightP = build({ pts = { 0, 0, 300, 0 }, segSurface = { "paved" }, segWidth = { w } })
+    local arcs = {}
+    for i = 1, arcP.n - 1 do
+        if arcP.segKind[i] == ARC and arcP.filletRadius[i] > 0 then arcs[#arcs + 1] = i end
+    end
+    if not checkTrue(#arcs > 0, "(tb-arc) fixture：剖面有圓角弧段") then return end
+    local ai = arcs[math.floor((#arcs + 1) / 2)]
+    local HS, R = (arcP.s[ai] + arcP.s[ai + 1]) * 0.5, arcP.filletRadius[ai]
+    local geo = { halfW = 0.9, L2 = 5, hitchZ = -1.5, trailLen = 8.5, hitchToRear = 7 }
+    local dth, tab = 0, {}
+    for _, i in ipairs(arcs) do dth = dth + (arcP.s[i + 1] - arcP.s[i]) / arcP.filletRadius[i] end
+    T.arcOfftrack(R, dth, geo.hitchZ, geo.L2, tab)
+    local b0, off = math.floor(HS - arcP.s[arcs[1]]) + 1, 0 -- 硬點所在站（同 Drive.towOffAt：所在格與前後各一格）
+    for j = b0 - 1, b0 + 1 do if (tab[j] or 0) > off then off = tab[j] end end
+    checkTrue(off > 0.5, "(tb-arc) fixture：R" .. string.format("%.1f", R) .. " 硬點那站的內輪差夠大（" .. string.format("%.2f", off) .. "）")
+    local r, hwT = 0.15, geo.halfW + TP
+    local fs = F.newState()
+    F.setLaneBias(fs, 0)
+    local sen = { ready = true, hardN = 1, hardS = {}, hardL = {}, hardLc = {}, hardW = {}, hardR = {}, hardX = {}, hardY = {},
+        scanEndS = HS + 60 }
+    local function put(hs, lc)
+        sen.hardN = 1
+        sen.hardS[1], sen.hardL[1], sen.hardLc[1], sen.hardW[1], sen.hardR[1], sen.hardX[1], sen.hardY[1] =
+            hs, lc, lc, r, r, 1000 + hs, lc
+    end
+    local oldEvent, events = MDADDiagnostics.event, {}
+    MDADDiagnostics.event = function(_, name, a) events[#events + 1] = { name = name, a = a } end
+    local function last(name, phase)
+        for i = #events, 1, -1 do
+            local e = events[i]
+            if e.name == name and e.a and (phase == nil or e.a.phase == phase) then return e.a end
+        end
+        return nil
+    end
+    local function newS(prof, tow)
+        return { diag = true, sensor = sen, fstate = fs, profile = prof, dodging = false, lastSNow = 0, lastLatDev = 0,
+            diagExpL = 0, safeBrake = 6, vehicleProfile = { halfW = 1.0, halfL = 2.3 }, lagHistD = {}, lagHistL = {},
+            lagHistN = 0, tow = tow }
+    end
+    local function at(s, rs)
+        s.lastSNow = rs
+        Dr.lagGuardScan(s, 0, 40, rs, 0, 0)
+    end
+    -- 牽引車預測車身（ld 0、半寬 1.0＋pad）碰不到、掛車往內 off 才碰到的距離
+    local lcIn = SG * (hwT + r + off * 0.5)
+    checkTrue(SG * lcIn >= 1.0 + PAD + r, "(tb-arc) fixture：硬點在牽引車預測車身外（lc " .. string.format("%.2f", lcIn) .. "）")
+    -- (tb-arc)
+    put(HS, lcIn)
+    local s = newS(arcP, geo)
+    at(s, HS - 10)
+    local arm = last("lag", "arm")
+    checkTrue(s.lagHitX == 1000 + HS and arm ~= nil and arm.kind == "trailer" and math.abs((arm.toff or 0) - SG * off) < 1e-6,
+        "(tb-arc) 弧中段內側硬點：掛車內輪差 " .. string.format("%.2f", off) .. " 才碰到 → arm kind=trailer、toff（hit="
+        .. tostring(s.lagHitX) .. " kind=" .. tostring(arm and arm.kind) .. " toff=" .. tostring(arm and arm.toff) .. "）")
+    at(s, HS - 1)
+    checkTrue(s.lagHitSide == true and Dr.lagGuardCap(s, 40, 0, 0) == MIN,
+        "(tb-arc) 到硬點旁：帽＝MIN_EXEC（side=" .. tostring(s.lagHitSide) .. "）")
+    -- (tb-pad)
+    events = {}
+    put(HS, SG * (hwT + r + off + 0.05))
+    s = newS(arcP, geo)
+    at(s, HS - 10)
+    checkTrue(s.lagHitX == nil, "(tb-pad) 預測掛車車身外 0.05（< FOOTPRINT_PAD）：掛車用 TOW_BODY_PAD 不 arm（hit=" .. tostring(s.lagHitX) .. "）")
+    -- (tb-out)
+    events = {}
+    put(HS, -lcIn)
+    s = newS(arcP, geo)
+    at(s, HS - 10)
+    checkTrue(s.lagHitX == nil and last("lag", "arm") == nil, "(tb-out) 同距離在彎外側：不 arm（hit=" .. tostring(s.lagHitX) .. "）")
+    -- (tb-straight)
+    put(100, hwT + r - 0.05)
+    s = newS(straightP, geo)
+    at(s, 90)
+    checkTrue(s.lagHitX == nil, "(tb-straight) 直路、只差掛車半寬就碰得到的硬點：不 arm（舊制不變；hit=" .. tostring(s.lagHitX) .. "）")
+    -- (tb-nogeo)
+    put(HS, lcIn)
+    s = newS(arcP, { halfW = 0.9, L2 = 8, hitchToRear = 10 })
+    at(s, HS - 10)
+    checkTrue(s.lagHitX == nil, "(tb-nogeo) 量不到掛點偏移：不判（hit=" .. tostring(s.lagHitX) .. "）")
+    -- (tb-foot)：直路往 +x，l 正＝+y；掛車車身中心在車位後 8m、沿 +x
+    events = {}
+    local oldBody = T.body
+    local tow = { halfW = 0.9, halfL = 3, comZ = 0, trailLen = 11.5, L2 = 8, hitchZ = -1.5 }
+    T.body = function() return tow.cx, 0, 1, 0, tow.halfW, tow.halfL end
+    local veh = { getZ = function() return 0 end, getCurrentSpeedKmHour = function() return 8 end }
+    s = newS(straightP, tow)
+    sen.hardN = 1
+    sen.hardS[1], sen.hardL[1], sen.hardLc[1], sen.hardW[1], sen.hardR[1], sen.hardX[1], sen.hardY[1] =
+        103, 1.0, 1.0, r, r, 103, 1.0
+    s.lastSNow, tow.cx = 100, 92
+    Dr.towFootprint(s, veh, 0, 100, 0, 0, 0)
+    local kept = s.towMem and s.towMem.hardN == 1 and s.towFootBlocked == false and type(s.towClr) == "number"
+    sen.hardN = 0
+    s.lastSNow, tow.cx = 110, 102
+    Dr.towFootprint(s, veh, 0, 110, 0, 0, 0)
+    local c = last("contact")
+    checkTrue(kept and s.towFootBlocked == true and c ~= nil and c.kind == "trailer" and c.x == 103
+            and type(c.tcl) == "number" and c.tcl < 0,
+        "(tb-foot) 快照沒有它、掛車車身碰到記下的硬點：towFootBlocked、contact kind=trailer 帶 tcl（kept=" .. tostring(kept)
+        .. " fb=" .. tostring(s.towFootBlocked) .. " kind=" .. tostring(c and c.kind) .. " tcl=" .. tostring(c and c.tcl) .. "）")
+    checkTrue(Dr.lagGuardCap(s, 30, 110, 0) == MIN and s.currentBlocked ~= true,
+        "(tb-foot) 掛車接觸：帽＝MIN_EXEC、不進 currentBlocked（不鎖輪不脫困；cur=" .. tostring(s.currentBlocked) .. "）")
+    s.lastSNow, tow.cx = 130, 122
+    Dr.towFootprint(s, veh, 0, 130, 0, 0, 0)
+    checkTrue(s.towMem.hardN == 0 and s.towFootBlocked == false and Dr.lagGuardCap(s, 30, 130, 0) == 30,
+        "(tb-foot) 過掛車尾：記憶丟掉、解除（n=" .. tostring(s.towMem.hardN) .. "）")
+    -- (tb-pad) 實際車身離點 0.05：不算接觸
+    s = newS(straightP, tow)
+    sen.hardN = 1
+    sen.hardS[1], sen.hardL[1], sen.hardLc[1], sen.hardW[1], sen.hardR[1], sen.hardX[1], sen.hardY[1] =
+        103, 1.1, 1.1, r, r, 103, 1.1
+    s.lastSNow, tow.cx = 100, 92
+    Dr.towFootprint(s, veh, 0, 100, 0, 0, 0)
+    sen.hardN = 0
+    s.lastSNow, tow.cx = 110, 102
+    Dr.towFootprint(s, veh, 0, 110, 0, 0, 0)
+    checkTrue(s.towFootBlocked == false and type(s.towClr) == "number" and math.abs(s.towClr - 0.05) < 1e-6,
+        "(tb-pad) 掛車實際車身離點 0.05：不算接觸（tcl=" .. tostring(s.towClr) .. "）")
+    T.body = oldBody
+    MDADDiagnostics.event = oldEvent
+end
+drive.scenarioTowBody()
 
 -- 1006 一般帶橫向覆蓋（E2E 1006xe fencepass：Dixie 南行、整條路橫擋的籬笆排，車靠右時承諾 offL −5 的貼邊線撞上）：
 --   一般帶掃描以行駛線為心（bandBias＝常駐偏置），Corridor.plan 卻以 nav 線對稱出候選；常駐 +3 時 l < −4 那條帶沒掃過、
