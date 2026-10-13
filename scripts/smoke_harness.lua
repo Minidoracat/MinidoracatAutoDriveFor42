@@ -17451,6 +17451,8 @@ local function scenarioPhaseE()
         setHeading(hotVeh, 1.0)
         driveReset(hotVeh)
         checkTrue(MDAD.Drive.start(dp), "RETURN 偏頭門檻 fixture 啟動")
+        -- 驗的是行進中的偏頭門檻：先結束起步段（1012f 起步原地轉＋1014a 轉後重評越野接線會改由接線收這個偏差）
+        MDAD.Drive.debugSession(0).startRot = false
         for _ = 1, 6 do driveTick(dp, hotVeh) end
         drive.scanRound(true)
         checkFalse(captured.returnActive,
@@ -22341,6 +22343,137 @@ function drive.scenarioApproach()
     SandboxVars, dveh, getSpecificPlayer = oldSandbox, oldVeh, oldGet
 end
 drive.scenarioApproach()
+
+-- 1014a 起步原地轉收尾重評越野接線（N7 正式服 0.29.1 Q17 clip-07；#28 同型）：cutover 時車頭背對路線、側距 8m＝照 1012g
+-- 不接；原地轉後車頭沿路、偏 8m，RETURN 斜切帶有硬點就由斜切保持沿平行線開。轉完照新姿態重評：既有三條不成立時接
+-- 「最近點往前、第一個落進車頭前方 60° 錐（APPROACH_SIDE_COS）的路線點」。車頭偏路 20°、側距 8＝接 (40+8/tan80°, 0)。
+--   (at-rot)   背對路線啟動、原地轉到沿路偏 20°：接車位→(41.41,0)，cutover why=rotapr
+--   (at-near)  側距 2m：不接、記 route recheck why=near
+--   (at-unit)  turned 以外照 1012g（沿路不接）；接點在車後／走出終點不接；跨折點往前走、段屬性對齊
+--   (at-guard) 非起步段那次調頭、拖車不重評
+-- 違規證明：temp/vp_1014a_recheck.py。
+function drive.scenarioApproachTurn()
+    scenario("起步原地轉收尾：照轉後姿態重評越野接線，沿路偏移的車斜切回路")
+    local oldSandbox, oldVeh, oldGet = SandboxVars, dveh, getSpecificPlayer
+    local oldApi = MinidoracatMiniMapAPI.navApiVersion
+    local oldRoute, oldTx, oldTy, oldState = drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
+    local savedTelemetry = MDAD.HUD.telemetryEnabled
+    local savedStart, savedEvent, savedSample, savedStop =
+        MDADDiagnostics.start, MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.stop
+    local evs = {}
+    MDAD.HUD.telemetryEnabled = function() return true end
+    MDADDiagnostics.start = function() return true end
+    MDADDiagnostics.sample = function() return true end
+    MDADDiagnostics.stop = function() return true end
+    MDADDiagnostics.event = function(_, name, a)
+        if type(a) == "table" then evs[name .. ":" .. tostring(a.phase)] = a end
+    end
+    local Dr, deg = MDAD.Drive, math.pi / 180
+    local wasMs = drive.frameMs(20)
+    Dr.stop(0, nil)
+    getSpecificPlayer = function(n) if n == 0 then return dp end end
+    MinidoracatMiniMapAPI.navApiVersion = 5
+    dveh = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }),
+        engineRunning = true, mass = 1600, speed = 0, maxSpeed = 100,
+        bodyW = 1.6, bodyL = 4.2, comX = 0, comZ = 0, profileFull = true,
+        enginePower = 3000, brakingForce = 100, wheelFriction = 1.5, tireFriction = 1.5 })
+    local function road() return { pts = { 0, 0, 80, 0 }, segSurface = { "gravel" }, segWidth = { 5 },
+        len = 80, cost = 80, avoidPenalty = 0 } end
+    local function arm(x, y, heading)
+        Dr.stop(0, nil)
+        drive.fillWorld(-12, 90, -16, 12)
+        drive.putRoad(0, 90, -3, 2)
+        setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 60, RightLaneBias = 0 })
+        dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = x, y, 0, 0, true
+        dveh._engine, dveh._driver = true, dp
+        dp._vehicle, dp._dead, dp._local = dveh, false, true
+        setHeading(dveh, heading)
+        drive.nav.route = road()
+        drive.nav.tx, drive.nav.ty, drive.nav.state = 80, 0, "ok"
+        evs = {}
+        return Dr.start(dp)
+    end
+    -- 背對路線啟動 → 起步段原地轉；轉到「期望方向」以內、車頭沿路偏 20° 收尾
+    local function turnTo(x, y, post)
+        checkTrue(arm(x, y, -math.pi / 2), "(at) 背對路線啟動 (" .. x .. "," .. y .. ")")
+        local st = Dr.debugSession(0)
+        for _ = 1, 4 do
+            driveReset(dveh)
+            driveTick(dp, dveh)
+        end
+        checkTrue(st.approachM == 0 and st.uturn ~= nil and st.uturnStart == true,
+            "(at) cutover 照 1012g 不接、起步段原地轉（approachM=" .. tostring(st.approachM) .. "）")
+        local desired = -math.pi / 2 + (st.lastHeadingError or 0)
+        checkTrue(math.abs(desired - post) < 28 * deg,
+            "(at) 前提：收尾航向在出場窗內（期望 " .. string.format("%.1f", desired / deg) .. "°）")
+        setHeading(dveh, post)
+        for _ = 1, 6 do
+            driveReset(dveh)
+            driveTick(dp, dveh)
+        end
+        return Dr.debugSession(0)
+    end
+    local st = turnTo(40, -8, 20 * deg)
+    local ud, rc = evs["uturn:done"] or {}, evs["route:cutover"] or {}
+    checkTrue(ud.why == "aligned" and ud.start == true, "(at-rot) 起步原地轉收尾（why " .. tostring(ud.why) .. "）")
+    local px, am0 = 40 + 8 / math.tan(80 * deg), 8 / math.sin(80 * deg)
+    checkTrue(st ~= nil and math.abs(st.approachM - am0) < 1e-4 and not st.reapproach,
+        "(at-rot) 轉後重評接斜切線（approachM=" .. tostring(st and st.approachM) .. " 期望 " .. am0 .. "）")
+    checkTrue(st ~= nil and st.profileRoute.pts[1] == 40 and st.profileRoute.pts[2] == -8
+        and math.abs(st.profileRoute.pts[3] - px) < 1e-4 and st.profileRoute.pts[4] == 0 and st.profileRoute.pts[5] == 80,
+        "(at-rot) 剖面＝車位→(41.41,0)→(80,0)（" .. tostring(st and st.profileRoute.pts[3]) .. ","
+        .. tostring(st and st.profileRoute.pts[4]) .. "）")
+    checkTrue(rc.why == "rotapr" and st.route.pts[1] == 0 and #st.route.pts == 4,
+        "(at-rot) cutover why=rotapr、原路線 identity 不動（why " .. tostring(rc.why) .. "）")
+    st = turnTo(40, -2, 14 * deg)
+    local rr = evs["route:recheck"] or {}
+    checkTrue(st ~= nil and st.approachM == 0 and rr.why == "near" and rr.apd == 2,
+        "(at-near) 側距 2m：不接、記 route recheck why=near apd 2（" .. tostring(rr.why) .. " " .. tostring(rr.apd) .. "）")
+    Dr.stop(0, nil)
+    -- (at-unit) 直接問 approachRoute
+    local r = road()
+    local out, am = Dr.approachRoute(r, 40, -8, 20 * deg)
+    checkTrue(out == r and am == 0, "(at-unit) 沒轉過（turned 假）：照 1012g 沿路不接")
+    out, am = Dr.approachRoute(r, 40, -8, 20 * deg, true)
+    checkTrue(am > 0 and math.abs(out.pts[3] - px) < 1e-4 and out.pts[4] == 0
+        and math.abs(out.len - (80 - px + am0)) < 1e-4,
+        "(at-unit) 轉過：接 (41.41,0)、len 扣掉捨去段（len " .. tostring(out.len) .. "）")
+    out, am = Dr.approachRoute(r, 40, -8, math.pi, true)
+    checkTrue(out == r and am == 0, "(at-back) 斜切點在車後（車頭朝西）：不接")
+    out, am = Dr.approachRoute(r, 79, -8, 20 * deg, true)
+    checkTrue(out == r and am == 0, "(at-end) 錐內的點在終點之後：不接")
+    out, am = Dr.approachRoute(r, 20, -11, -32 * deg, true)
+    checkTrue(out == r and am == 0, "(at-far) 車頭偏離路 32°：錐內第一點離車 23m（> SNAP_MAX_M）不接")
+    -- 第二段微朝南（非共線）：錐邊 80° 與第二段 (41+39t, 4t) 的交點 t＝(8−tan80°)/(39·tan80°−4)
+    local L2 = math.sqrt(39 * 39 + 16)
+    r = { pts = { 0, 0, 41, 0, 80, 4 }, segSurface = { "gravel", "paved" }, segWidth = { 5, 6 },
+        len = 41 + L2, cost = 41 + L2, avoidPenalty = 0 }
+    local tn = math.tan(80 * deg)
+    local tv = (8 - tn) / (39 * tn - 4)
+    local vx2, vy2 = 41 + 39 * tv, 4 * tv
+    local gv = math.sqrt((vx2 - 40) ^ 2 + (vy2 + 8) ^ 2)
+    out, am = Dr.approachRoute(r, 40, -8, 20 * deg, true)
+    checkTrue(am > 0 and math.abs(out.pts[3] - vx2) < 1e-4 and math.abs(out.pts[4] - vy2) < 1e-4 and out.pts[5] == 80
+        and #out.pts == 6 and #out.segWidth == #out.pts / 2 - 1 and out.segSurface[1] == "paved"
+        and math.abs(out.len - (L2 - L2 * tv + gv)) < 1e-4,
+        "(at-vertex) 跨折點往前找：接第二段 (" .. string.format("%.3f,%.3f", vx2, vy2) .. ")、段屬性沿用接入段（"
+        .. tostring(out.pts[3]) .. "," .. tostring(out.pts[4]) .. " " .. tostring(out.segSurface[1]) .. "）")
+    -- (at-guard)
+    local s = { uturnStart = false, approachM = 0, route = road() }
+    Dr.approachRecheck(s, 0, 0, 40, -8, 20 * deg)
+    checkTrue(s.reapproach == nil, "(at-guard) 非起步段那次調頭：不重評")
+    s = { uturnStart = true, tow = {}, approachM = 0, route = road() }
+    Dr.approachRecheck(s, 0, 0, 40, -8, 20 * deg)
+    checkTrue(s.reapproach == nil, "(at-guard) 拖車：不重評")
+    drive.frameMs(wasMs)
+    MinidoracatMiniMapAPI.navApiVersion = oldApi
+    drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
+    SandboxVars, dveh, getSpecificPlayer = oldSandbox, oldVeh, oldGet
+    MDAD.HUD.telemetryEnabled = savedTelemetry
+    MDADDiagnostics.start, MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.stop =
+        savedStart, savedEvent, savedSample, savedStop
+end
+drive.scenarioApproachTurn()
 
 -- (xk) 0928i rc6 0070 路口 jog：保持段延過 −75° 大折點後，2.8m 外又一個 19° 小折點落在 c 後 2m 內
 --   → 出口轉場塞不進 → 全部候選 exit-room → 倒車三次交還。緊接的小折點一併在偏移上通過；
