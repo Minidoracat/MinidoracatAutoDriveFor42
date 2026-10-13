@@ -362,8 +362,9 @@ TUNE.VIS_ASSIST_MAX = 4.0       -- 補的減速度上限（m/s²），疊在滑�
 -- 超速量補（增益比可視帳高一倍，均衡時只超剖面約 2 km/h），上限 CURVE_ASSIST_MAX。
 TUNE.CURVE_ASSIST_GAIN = 2.0
 -- 1002d：4→5.5，剖面假設的輔助（Follower.STYLES.coastAssist）提到 3.5，前饋之外要留比例項的餘地。
-TUNE.CURVE_ASSIST_MAX = 5.5
--- 剖面假設的輔助之上留給比例項的餘地（1002l：終點段假設 STOP_ASSIST 6，上限跟著到 8；彎前 3.5＋2＝原 5.5）。
+-- 1013g：5.5→6.5，同一本帳＝coastAssist 4.5＋CURVE_ASSIST_HEADROOM（smoke (curve-ledger) 鎖）。
+TUNE.CURVE_ASSIST_MAX = 6.5
+-- 剖面假設的輔助之上留給比例項的餘地（1002l：終點段假設 STOP_ASSIST 6，上限跟著到 8；彎前 coastAssist＋2＝CURVE_ASSIST_MAX）。
 TUNE.CURVE_ASSIST_HEADROOM = 2.0
 -- 包絡「在收」的門檻（km/h／次呼叫；Drive.visAssistForce 前饋閘）：沿收油包絡每幀至少掉 a·dt（240 FPS、
 -- 4 m/s² 仍有 0.06），弧內 latSafe EWMA 的漂移遠小於此。

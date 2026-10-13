@@ -7559,7 +7559,7 @@ function drive.scenarioBrakeAssist()
     MDAD.Drive.visAssistForce(st, 14, 1)
     checkEq(st.visAssistDecel, 0, "(curve-assist-low) 沒算輔助的段：25 以下照舊不補")
     -- (stop-assist) 1002l：終點段建表假設 Follower.STOP_ASSIST（6），上限跟著留 CURVE_ASSIST_HEADROOM＝8；
-    --   彎前段（3.5）仍是 5.5。違規證明：拿掉上限放寬＝第一條紅（只剩 5.5）。
+    --   彎前段仍是 CURVE_ASSIST_MAX。違規證明：拿掉上限放寬＝第一條紅（只剩 CURVE_ASSIST_MAX）。
     local oldStampSA = st.laneCurveStamp
     st.laneCurveStamp = -1
     st.profile.coastAssistAt, st.fstate.idx = { MDADFollower.STOP_ASSIST }, 1
@@ -7573,6 +7573,13 @@ function drive.scenarioBrakeAssist()
         "(stop-assist) 終點段在收、超剖面 0.5：前饋補終點假設的那一份（" .. tostring(st.visAssistDecel) .. "）")
     st.laneCurveStamp, st.fstate.profileSpeedKmh = oldStampSA, 12
     st.profile.coastAssistAt, st.fstate.idx = oldAt, oldIdx
+    -- (curve-ledger) 1013g 同一本帳（speed.md〈改動前後必做〉4）：Driver 剖面帳上限＝彎前假設輔助＋比例項餘地；
+    --   終點包絡上限倍率（STOP_BRAKE_RATIO）低於終點硬煞帳的緊急倍率＝終點包絡在硬煞帳之下。
+    --   違規證明（temp/vp_1013g_L5.py）：CURVE_ASSIST_MAX 留 5.5＝第一條紅；STOP_BRAKE_RATIO 抬到 2.5＝第二條紅。
+    checkNear(tune.CURVE_ASSIST_MAX, MDADFollower.STYLES.brisk.coastAssist + tune.CURVE_ASSIST_HEADROOM, 1e-12,
+        "(curve-ledger) CURVE_ASSIST_MAX＝coastAssist＋HEADROOM（" .. tostring(tune.CURVE_ASSIST_MAX) .. "）")
+    checkTrue(MDADFollower.STOP_BRAKE_RATIO < tune.EMERGENCY_BRAKE_GAIN,
+        "(curve-ledger) 終點包絡倍率 STOP_BRAKE_RATIO 低於終點硬煞帳 EMERGENCY_BRAKE_GAIN")
     -- (traffic-assist) 1002q：會車／跟車帽只夾 regulator＝斷油滑行；超過帽照超速量補中線外力（上限 DODGE_ASSIST_MAX）
     --   （正式服 0.17.0 clip-02：前車 35m 才出現、帽 43→25、vad 0，只滑到 61）。違規證明：拿掉 traffic 帳＝紅。
     do
@@ -17974,8 +17981,9 @@ local function scenarioPhaseE()
     drive.scanRound(true)
     checkEq(captured.verifyLineReason, "ok",
         "actual-lane curve proof passes continuous road-band and world sweep")
+    -- 上界＝車輛極速 90−1（Drive.visAssistForce 判「是彎道帳」的同一條件）；1013g coastAssist 4.5 後 45m 外 86.8（舊 85 是當時值）。
     checkTrue(captured.laneCurveEnvelope > 0
-            and captured.laneCurveEnvelope < 85,
+            and captured.laneCurveEnvelope < 89,
         "future actual-lane curve envelope finite（2026-09-02 煞車反推：45m 外"
         .. "彎前不再提前壓速＝envelope 高於 cruise 合法；近彎下壓由後續斷言驗）")
     checkFalse(captured.curveHardActive,
