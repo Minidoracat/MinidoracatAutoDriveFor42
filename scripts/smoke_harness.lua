@@ -25221,6 +25221,66 @@ function drive.scenarioExitNext()
 end
 drive.scenarioExitNext()
 
+-- (rl-next) 1014b N9（正式服 0.29.1 Q07 clip-31：路網錯位把常駐線推進路肩樹列，繞過 A 的出口回到承諾時的 lane，
+--   出口後 4.3m 就是下一棵樹 → steep 判堵、倒車 8m、玩家接手）：停留 lane 一路淨空、下一群只擋回線 lane 時，
+--   chainAhead 從停留 lane 問 corridor 得 clear、看不到那群＝照常回線。fixture 同 (ch)：B 在 +1.6、候選 −1.5；
+--   回線線尾後放一根只擋常駐線 0 的路邊物（停留 lane −1.5 淨空）。
+--   契約：回線後切到那根的縫塞不進＝改停留在 −1.5（variant stay、offL 不往縫收）；那根遠到塞得進＝照常回線；
+--   沒有那根＝照常回線。違規證明：拿掉 clear 分支的回線 lane 查詢＝紅。
+function drive.scenarioReturnLaneNext()
+    scenario("1014b：停留 lane 淨空、下一群只擋回線 lane 且回線後塞不進側移＝停留不回線")
+    drive.fillWorld(-10, 120, -8, 8)
+    checkTrue(armDrive(), "(rl-next) 啟動")
+    local _, cB = drive.putVehicleGeom(20, 1.6, 0, 1.8, 4.4, true)
+    local wasMs = drive.frameMs(10) -- 有效視距＝請求值（同 (ch)）
+    local function probe(tx)
+        if tx then drive.putSolid(tx, 0, "harness_rlnext") end
+        driveReset(dveh)
+        drive.scanRound()
+        local ok, ro, v, _, _, _, _, d = MDAD.Drive.debugSweepFallbacks(0, 6, 14, 24, 32, -1.5, "rl")
+        if tx then drive.clearCell(tx, 0) end
+        return ok, ro, v, d
+    end
+    -- 回線線尾 d≈47.1；x=51 的路邊物（格心 l 0.5）擋常駐線 0、不擋 −1.5，回線後跑道約 4m（N9 是 4.3m）：
+    -- 主候選掃得過（車身碰不到）、停留 lane 一路淨空＝舊制照常回線
+    local okN, roN, vN, dN = probe(51)
+    checkTrue(okN == true and vN == "stay" and roN == -1.5 and dN < 32,
+        "(rl-next) 回線後緊接只擋常駐線的路邊物、側移塞不進：停留在 −1.5、不回線（實得 " .. tostring(okN) .. "/"
+        .. tostring(vN) .. "/" .. tostring(roN) .. " d=" .. tostring(dN) .. "）")
+    local okF, _, vF, dF = probe(58)
+    checkTrue(okF == true and vF == nil and dF > 40,
+        "(rl-next) 路邊物遠到回線後塞得進側移：照常回線（實得 " .. tostring(vF) .. " d=" .. tostring(dF) .. "）")
+    local okC, _, vC, dC = probe(nil)
+    checkTrue(okC == true and vC == nil and math.abs(dC - dF) < 1e-6,
+        "(rl-next) 對照：回線 lane 淨空＝照常回線（實得 " .. tostring(vC) .. " d=" .. tostring(dC) .. "）")
+    -- 整合：同一片地真的 replan 一輪＝以停留承諾，commit 事件帶出口 lane dbl（停留沒有出口，仍記承諾時的回線 lane）
+    local oldEvent, oldSample = MDADDiagnostics.event, MDADDiagnostics.sample
+    local commitEv
+    MDADDiagnostics.event = function(_, name, a)
+        if name == "dodge" and type(a) == "table" and a.phase == "commit" then commitEv = a end
+    end
+    MDADDiagnostics.sample = function() return true end
+    MDAD.Drive.stop(0, nil) -- probe 的 scanRound 已經承諾過：重開一趟，第一輪就是承諾輪
+    checkTrue(armDrive(), "(rl-next) 整合：重新啟動")
+    drive.putSolid(51, 0, "harness_rlnext")
+    local st = MDAD.Drive.debugSession(0)
+    st.diag = true
+    driveReset(dveh)
+    drive.scanRound()
+    MDADDiagnostics.event, MDADDiagnostics.sample = oldEvent, oldSample
+    checkTrue(st.dodging == true and st.dodgeStay == true and st.dodgeTier == "plan-stay" and st.fstate.offL == -1.5,
+        "(rl-next) 整合：replan 一輪就以停留 −1.5 承諾（實得 " .. tostring(st.dodgeTier) .. " offL "
+        .. tostring(st.fstate.offL) .. "）")
+    checkTrue(commitEv ~= nil and commitEv.dbl == 0,
+        "(rl-next) commit 事件帶出口 lane dbl（實得 " .. tostring(commitEv and commitEv.dbl) .. "）")
+    drive.clearCell(51, 0)
+    drive.frameMs(wasMs)
+    drive.clearVehicleGeom(cB)
+    MDAD.Drive.stop(0, nil)
+    drive.fillWorld(-2, 70, -7, 7)
+end
+drive.scenarioReturnLaneNext()
+
 -- (chain-far) 1004a 玩家回報「繞道後判定走路邊草地，要到第一次轉彎或殭屍／屍體出現才回到路上」：鏈式停留只在
 --   常駐線前方淨空才解鏈，看的是整個感知窗——遠處還有任何擋常駐線的東西，車就沿停留 lane（常在路外）一路開，
 --   直到減速把窗縮短。現制擋常駐線那群夠遠（回常駐線＋再側移出去兩段都塞得進，Drive.chainBlockerFar）就解鏈。
