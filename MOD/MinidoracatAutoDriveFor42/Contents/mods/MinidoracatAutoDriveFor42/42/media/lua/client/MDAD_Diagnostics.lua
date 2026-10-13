@@ -1303,6 +1303,7 @@ local function encodePhys(phys)
     addBool("curveHardActive", "curveHardActive")
     addNum("ffSteer", "sff")
     addStr("exitCut", "xcw")          -- 1008：出弧殘餘轉角被收掉的原因（ff＝反向弧前饋、yaw＝車已反向轉、kink＝車前反向轉角；到下一個出弧前保留）
+    addBool("laneHold", "lth")        -- 1014c：弧出口後車道 ramp 續追切線中（MDADFollower.laneRampHold；只寫 true）
     addNum("yawGain", "yg")
     addNum("yawGainHi", "ygh")        -- 0928m：高速弧段學到的 yaw 增益（前饋補足用）
     addNum("yawGainFb", "ygf")        -- 1001h：回授正規化用的無偏 yaw 增益（yaw、steer 各自平均再相除）
