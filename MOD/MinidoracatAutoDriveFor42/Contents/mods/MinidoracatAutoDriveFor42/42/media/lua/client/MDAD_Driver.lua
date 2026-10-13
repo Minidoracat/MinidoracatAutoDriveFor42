@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1013k"
+Drive.REV = "1014m"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -14611,8 +14611,8 @@ local function stepFollow(s, vehicle, playerNum, now)
             if s.alignSince == 0 then s.alignSince = now end
         elseif absHeading > MDADDynamics.ALIGN_BREAK_RAD
                 or absDev > latTol * 1.25 then
-            -- 非對稱遲滯（2026-09-01）：5°/latTol 進入、8°/1.25×latTol 才重置。
-            -- 路網折線與轉向雜訊在 5-8° 之間抖動時不再歸零 250ms 計時器，
+            -- 非對稱遲滯（2026-09-01）：ALIGN_HEADING_RAD（15°）／latTol 進入、ALIGN_BREAK_RAD（22°）／1.25×latTol 才重置。
+            -- 路網折線與轉向雜訊在 15–22° 之間抖動時不再歸零 ALIGN_HOLD_MS 計時器，
             -- full-speed 資格不因單幀雜訊反覆得而復失。
             s.alignSince = 0
         end
