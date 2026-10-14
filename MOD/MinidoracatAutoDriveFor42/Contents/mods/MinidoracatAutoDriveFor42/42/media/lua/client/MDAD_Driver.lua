@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1014b"
+Drive.REV = "1014i"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -3794,8 +3794,11 @@ end
 -- pure pursuit 斜切向前視點，中間的圍籬沒有任何規劃看得到，擦撞→倒車三次→交還）：離整條路線最近點超過
 -- RETURN_MAX_DEV（≤ SNAP_MAX_M）時，同樣把「車位→最近點」接成剖面開頭、最近點之前的路線捨去，讓感知／繞行
 -- 沿這段實際要開的地面規劃。
+-- turned（1014a，只由 Drive.approachRecheck／其 cutover 傳）：起步原地轉剛收尾，上面三條都不成立、側距 ≥ APPROACH_SIDE_MIN_M
+-- 時改接「最近點往前、第一個落進車頭前方錐（同 (c) 的 APPROACH_SIDE_COS）的路線點」（Drive.approachAhead）：車頭沿路時
+-- 接線與車頭夾約 60°、越朝路越陡，車頭再朝路一點就連續接到 (c) 的垂足。
 -- 回傳 (剖面用路線, 接線長)；不接時原樣回傳同一個 table（cutover 仍以原 route identity 比對）。
-function Drive.approachRoute(route, vx, vy, heading)
+function Drive.approachRoute(route, vx, vy, heading, turned)
     -- 1013a 遙測：沒接時的原因碼（呼叫端照 profileRouteOf 之後讀 Drive.approachWhy／Hd／D，帶進 route ready apw／aph／apd）：
     -- far＝超過 SNAP_MAX_M、near＝側距 < APPROACH_SIDE_MIN_M（RETURN 收）、behind＝最近點是路線起點但車沒在它後方
     -- APPROACH_BEHIND_M 以外、side＝側面條件不成立（車頭沿路或沒正對最近點；看 aph）、other＝點列／航向讀不到；接了＝nil
@@ -3858,7 +3861,11 @@ function Drive.approachRoute(route, vx, vy, heading)
                 Drive.approachHd = math.floor(math.acos(c) * 100 + 0.5) / 100
             end
         end
-        return route, 0
+        if not (turned and (why == "side" or why == "behind")) then return route, 0 end
+        local k, px, py = Drive.approachAhead(pts, bk, bx1, by1, vx, vy, heading)
+        if not k then return route, 0 end
+        bk, bt, bx1, by1 = k, 0, px, py
+        best = (px - vx) * (px - vx) + (py - vy) * (py - vy)
     end
     -- 最近點落在第 seg 段（pts 索引 bk）；該段的起點若就是最近點（t=0）就從它開始，否則從最近點開始、接該段終點
     local seg = (bk + 1) / 2
@@ -3898,6 +3905,45 @@ function Drive.approachRoute(route, vx, vy, heading)
     return out, gap
 end
 
+-- 1014a 原地轉後的斜切接點：從最近點 (px,py)（pts 第 k 點起的那段上）沿路線往前，第一個在車頭前方錐內（車頭與「車→點」
+-- 夾角 cos ≥ APPROACH_SIDE_COS）的點；回 (所在段索引, x, y)。段內二分（錐內外只在段內換一次邊）；接點離車超過 SNAP_MAX_M、
+-- 走到終點或一直在錐外回 nil。
+function Drive.approachAhead(pts, k, px, py, vx, vy, heading)
+    local fx, fy = math.cos(heading), math.sin(heading)
+    local lim2 = TUNE.SNAP_MAX_M * TUNE.SNAP_MAX_M
+    while k + 3 <= #pts do
+        if Drive.coneCos(vx, vy, fx, fy, px, py) >= TUNE.APPROACH_SIDE_COS then return k, px, py end
+        local ex, ey = pts[k + 2], pts[k + 3]
+        if Drive.coneCos(vx, vy, fx, fy, ex, ey) >= TUNE.APPROACH_SIDE_COS then
+            local lo, hi = 0, 1
+            for _ = 1, 30 do
+                local t = (lo + hi) / 2
+                if Drive.coneCos(vx, vy, fx, fy, px + (ex - px) * t, py + (ey - py) * t) >= TUNE.APPROACH_SIDE_COS then
+                    hi = t
+                else
+                    lo = t
+                end
+            end
+            if hi < 1 then
+                local x, y = px + (ex - px) * hi, py + (ey - py) * hi
+                if (x - vx) * (x - vx) + (y - vy) * (y - vy) > lim2 then return nil end
+                return k, x, y
+            end
+        end
+        if (ex - vx) * (ex - vx) + (ey - vy) * (ey - vy) > lim2 then return nil end
+        k, px, py = k + 2, ex, ey
+    end
+    return nil
+end
+
+-- 車頭單位向量 (fx,fy) 與「車→(x,y)」的夾角餘弦；點與車重合回 −1。
+function Drive.coneCos(vx, vy, fx, fy, x, y)
+    local dx, dy = x - vx, y - vy
+    local d = sqrt(dx * dx + dy * dy)
+    if d < 1e-6 then return -1 end
+    return (dx * fx + dy * fy) / d
+end
+
 -- 車頭航向（rad，同 MDADFollower.headingFromForward）；冷路徑（起步、cutover 的越野接線判定）用 Vector3f.new，
 -- 不碰熱路徑的 thread-local 向量池（起步與重建幀不取池）。讀不到回 nil。
 function Drive.headingOf(vehicle)
@@ -3927,7 +3973,8 @@ function Drive.routeDist(route, x, y)
 end
 
 -- 剖面實際建構的路線（起步與 cutover 共用）：先清地圖資料的微反折（MDADFollower.despikeRoute），
--- 拖車再改寫外拉轉角並清改寫撤點殘留的折返；不拖車時 approach＝true 才接越野接線（heading＝車頭航向，見 approachRoute）。
+-- 拖車再改寫外拉轉角並清改寫撤點殘留的折返；不拖車時 approach 為真才接越野接線（heading＝車頭航向；approach＝"turn"
+-- ＝原地轉後重評的那次 cutover，見 approachRoute 的 turned）。
 -- 回 (剖面路線, 接線長)；despiked 記兩次清掉的點數（route ready 事件 detail）。
 function Drive.profileRouteOf(route, tow, vp, vx, vy, approach, heading)
     Drive.approachWhy, Drive.approachHd, Drive.approachD = approach and tow and "tow" or nil, nil, nil
@@ -3938,7 +3985,7 @@ function Drive.profileRouteOf(route, tow, vp, vx, vy, approach, heading)
         if (clean.despiked or 0) > 0 then shaped.despiked = (shaped.despiked or 0) + clean.despiked end
         return shaped, 0
     end
-    if approach then return Drive.approachRoute(clean, vx, vy, heading) end
+    if approach then return Drive.approachRoute(clean, vx, vy, heading, approach == "turn") end
     return clean, 0
 end
 
@@ -7046,6 +7093,23 @@ function Drive.uturnDone(s, playerNum, now, why, detail)
         s.uturnOverX = nil
     end
     s.uturn, s.uturnArmed, s.uturnStart = nil, false, false
+end
+
+-- 起步原地轉收尾時重評越野接線（1014a，N7／#28）：cutover 依轉前航向判，背對路線、側距 ≤ RETURN_MAX_DEV 不接（交 RETURN）；
+-- 原地轉把車頭轉到期望方向後常變成沿路、偏 5–8m，RETURN 的斜切帶有硬點就由斜切保持把 laneBias 釘在車位、沿平行線開
+-- （正式服 0.29.1 Q17 clip-07 停車場起步：轉後偏 7.5m 往西撞圍籬、倒車被擋 StopStuck；0.28 #28 開進樹叢）。
+-- 在 uturn done aligned（起步段那次，s.uturnStart 還在）之前呼叫：照現在的車位與航向再問 approachRoute（turned＝既有三條之外
+-- 再試斜切接點）。接得上＝s.reapproach "turn"，下一次取路走同一條 cutover（why=rotapr，route ready 帶 approach）；
+-- 接不上記 route phase=recheck（why＝原因碼、aph、apd，同 route ready 的 apw／aph／apd）。拖車、已接過線、行進中的調頭不判。
+function Drive.approachRecheck(s, playerNum, now, vx, vy, heading)
+    if not s.uturnStart or s.tow or s.approachM > 0 or s.reapproach then return end
+    local _, am = Drive.approachRoute(s.route, vx, vy, heading, true)
+    if am > 0 then
+        s.reapproach, s.pendingRouteWhy, s.nextRouteMs = "turn", "rotapr", now
+        return
+    end
+    diagEvent(s, playerNum, "route", { phase = "recheck", why = Drive.approachWhy, aph = Drive.approachHd,
+        apd = Drive.approachD })
 end
 
 -- Traction-keyed online observation. Every field lives in the session table;
@@ -15399,6 +15463,7 @@ local function stepFollow(s, vehicle, playerNum, now)
             local aerr = headingError or 0
             if aerr < 0 then aerr = -aerr end
             if s.uturn and aerr < (s.fstate.rotExit or MDADFollower.ROTATE_EXIT_RAD) then
+                Drive.approachRecheck(s, playerNum, now, vx, vy, heading) -- 起步原地轉收尾：重評越野接線（1014a）
                 Drive.uturnDone(s, playerNum, now, "aligned")
             end
             if s.tow then
