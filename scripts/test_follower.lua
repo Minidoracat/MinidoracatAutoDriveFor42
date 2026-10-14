@@ -5376,6 +5376,97 @@ do
     checkEq(why(25, math.pi, { rotEnter = 1.0, rotExit = 0.5 }), "start", "(start) 起步段門檻下的姿態帽另記 start")
 end
 
+scenario("1014c：弧出口後常駐車道 ramp 續追切線——不在出口那一幀換回長前視點，車道放回時不落後（campaign rc72／73 右彎出口外偏）")
+do
+    -- 弧半徑貼滿路面帶時彎內側常駐車道在弧上歸零、出口後 12m×dl 內放回（keep-right 1.3＝右彎內側）。舊制出口那一幀換回
+    -- pure pursuit，長前視把 ramp 攤成弦、車頭轉得慢：campaign rc72／73 MP 出口後 60m |ld| ≥0.5 的 24 個出口 19 個是這型。
+    -- Plant＝yaw 一階 τ 追門檻型 G(u)、參考點在無側滑點前 LR（側滑 plant）；Driver 管線照實（D.crossTrackGains 帶 latDev、
+    -- 回授正規化、死區）。違規證明（temp/vp_1014c_lanehold.py）：laneRampHold 恆回 false＝(1)(2)(3) 紅；沒有上一幀車道切線也開續追＝
+    -- (7) 與 26 km/h 放行出彎、0929a ① 紅；續追不算車道 l'' 前饋＝(2) 紅；拿掉小折角交回（rampHoldRad）＝0929a ① 紅；resetControl
+    -- 不清閂＝(5) 紅。
+    local D = MDADDynamics
+    local VP = { valid = true, geometryValid = true, halfW = 0.85, halfL = 2.4, rMin = 3.5, wheelbase = 2.8,
+        delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 120 }
+    -- 直 120 → 折 angDeg（dir +1 右轉）→ 直 190；回 (出口後 60m |ld| p95, 最大外偏, 最大內偏, 出口後續追幀數, 續追結束弧長−出口)
+    local function run(angDeg, dir, W, kmh, pl)
+        local a = math.rad(angDeg) * dir
+        local x2, y2 = 120 + 40 * math.cos(a), 40 * math.sin(a)
+        local p = F.begin({ pts = { 0, 0, 120, 0, x2, y2, x2 + 150 * math.cos(a), y2 + 150 * math.sin(a) },
+            segWidth = { W, W, W }, segSurface = { "paved", "paved", "paved" } }, VP.maxSpeed, 4, VP)
+        while not p.ready do F.stepBuild(p, 4096) end
+        p.lookScale = 1.4
+        local a9
+        for i = 1, p.n - 1 do if p.segKind[i] == D.SEG_ARC then a9 = p.s[i + 1] end end
+        local st = F.newState()
+        F.setLaneBias(st, 1.3)
+        F.setRuntimeLimits(st, 3, 6, 7, 1.2)
+        st.yawGain, st.yawGainFb, st.fbSteerF, st.fbYawF = pl.yg, pl.yg, 0.5, pl.yg * 0.5
+        st.yawGainHi, st.hiLearnT, st.hiSteerF, st.hiYawF = pl.yg, 1, 0.5, pl.yg * 0.5
+        local dt, LR, v = 1 / 60, pl.lr, kmh / KMH
+        local h, w, prevLat = 0, 0, nil
+        local q = { x = 40 - LR, y = F.laneBiasAt(p, 1.3, 1, 40) }
+        local lds, out, inn, holdN, holdEnd, pre = {}, 0, 0, 0, nil, 0
+        for _ = 1, 3600 do
+            local steer, _, rem, reached, _, _, latSigned = F.control(p, st, q.x + math.cos(h) * LR, q.y + math.sin(h) * LR,
+                h, kmh, dt)
+            local sNow = p.length - rem
+            local latDev = latSigned - F.laneBiasAt(p, 1.3, st.idx, sNow)
+            local dLat = prevLat and (latDev - prevLat) / dt or nil
+            if dLat and (dLat > 5 or dLat < -5) then dLat = nil end
+            prevLat = latDev
+            local xg, xm = D.crossTrackGains(false, false, st.curveHardActive, false, false, latDev, st)
+            local u = steer - D.crossTrackSteer(latDev, kmh, dLat, xg, xm)
+            local k = math.max(1, math.min(3, 0.5 / (st.yawGainFb or st.yawGain)))
+            local fb = u - (st.ffSteer or 0)
+            u = (st.ffSteer or 0) + math.max(-math.max(1.5, math.abs(fb)), math.min(math.max(1.5, math.abs(fb)), k * fb))
+            if u > 5 then u = 5 elseif u < -5 then u = -5 end
+            if u < 0.02 and u > -0.02 then u = 0 end
+            st.appliedSteer, st.escLimited = u, false
+            local au = math.abs(u)
+            local wT = (pl.g1 * math.min(au, 0.3) + pl.g2 * math.max(0, au - 0.3)) * (u < 0 and -1 or 1)
+            local wMax = v / VP.rMin
+            if wT > wMax then wT = wMax elseif wT < -wMax then wT = -wMax end
+            w = w + (wT - w) * (dt / pl.tau)
+            h = h + w * dt
+            q.x, q.y = q.x + math.cos(h) * v * dt, q.y + math.sin(h) * v * dt
+            if sNow < a9 and st.laneHold == true then pre = pre + 1 end
+            if sNow >= a9 and sNow <= a9 + 60 then
+                lds[#lds + 1] = math.abs(latDev)
+                local o = -dir * latDev -- 右轉彎外＝左＝−ld
+                if o > out then out = o end
+                if -o > inn then inn = -o end
+                if st.laneHold == true then holdN = holdN + 1 elseif holdN > 0 and holdEnd == nil then holdEnd = sNow - a9 end
+            end
+            if reached or sNow > a9 + 60 then break end
+        end
+        table.sort(lds)
+        return lds[math.max(1, math.floor(0.95 * #lds + 0.5))] or 0, out, inn, holdN, holdEnd, pre
+    end
+    local FAST = { g1 = 0.9, g2 = 0.9, tau = 0.1, yg = 0.9, lr = 0.6 }               -- yaw 快、近線性（GTR 類）
+    local THR = { g1 = 0.3, g2 = 1.2, tau = 0.1, yg = 0.54, lr = 0.75 }              -- 0008 擬合（小 steer 轉不動）
+    local _, o1, _, n1, e1 = run(45, 1, 8, 50, FAST)
+    checkTrue(o1 < 0.45 and n1 > 0 and e1 ~= nil and e1 < 20, string.format(
+        "(1) 右彎 45° 8m 路 50 km/h、快 plant：出口後外偏 %.2f < 0.45（舊制 0.52），續追 %d 幀、出口後 %s m 交回前視點",
+        o1, n1, tostring(e1 and string.format("%.1f", e1))))
+    local p2 = run(35, 1, 10, 65, THR)
+    checkTrue(p2 < 0.4, string.format("(2) 右彎 35° 10m 路 65 km/h、門檻 plant：出口後 |ld| p95 %.2f < 0.4（舊制 0.50）", p2))
+    -- (3) yaw 慢的車：續追不換成越過期望線往右（路緣側）甩
+    local _, _, i3 = run(60, 1, 12, 55, { g1 = 0.15, g2 = 0.6, tau = 0.3, yg = 0.3, lr = 1.2 })
+    local _, _, i4 = run(60, 1, 12, 55, { g1 = 0.6, g2 = 0.6, tau = 0.35, yg = 0.6, lr = 0.6 })
+    checkTrue(i3 < 0.9 and i4 < 0.5, string.format(
+        "(3) 右彎 60° 12m 路 55 km/h、重車／τ0.35：出口後越線往右 %.2f < 0.9、%.2f < 0.5（舊制 1.06／0.59）", i3, i4))
+    -- (4) 左彎（外側車道、出口沒有 ramp）：不續追
+    local _, _, _, n4 = run(45, -1, 8, 50, FAST)
+    checkEq(n4, 0, "(4) 左彎外側車道出口沒有車道 ramp：不續追切線")
+    -- (7) 只續不開：低速（前視 10m 短於進弧前 15m 的車道收窄）進右彎，弧還沒進前視窗前不得自己開始追車道切線
+    local _, _, _, _, _, pre7 = run(45, 1, 8, 15, FAST)
+    checkEq(pre7, 0, "(7) 15 km/h 進右彎：進弧前的車道收窄不開續追")
+    local rs = F.newState()
+    rs.laneTangent, rs.laneHold = true, true
+    F.resetControl(rs)
+    checkTrue(rs.laneTangent == false and rs.laneHold == false, "(5) resetControl 清續追的閂（換線／脫困後不沿用）")
+end
+
 closeScenario()
 print()
 print("情境 " .. scenarios .. " 個、斷言 " .. assertions .. " 項")

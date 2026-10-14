@@ -7496,6 +7496,7 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     phys.curveValid = s.curveValid
     phys.curveHardActive = s.curveHardActive
     phys.ffSteer, phys.exitCut = s.fstate.ffSteer, s.fstate.exitCut -- exitCut（1008）：出弧殘餘轉角上次被誰收掉（ff／yaw／kink）
+    phys.laneHold = s.fstate.laneHold == true or nil -- 1014c：弧出口後車道 ramp 續追切線中（MDADFollower.laneRampHold）
     phys.yawGain, phys.appliedSteer = s.fstate.yawGain, s.fstate.appliedSteer
     phys.yawGainHi, phys.yawGainFb = s.fstate.yawGainHi, s.fstate.yawGainFb
     if finite(s.fbNorm) and s.fbNorm > 1 then phys.fbNorm = s.fbNorm end

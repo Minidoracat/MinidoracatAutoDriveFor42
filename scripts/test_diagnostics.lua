@@ -1714,6 +1714,32 @@ do
 end
 
 --------------------------------------------------------------------------------
+-- 1014c：弧出口後車道 ramp 續追切線（MDADFollower.laneRampHold）的樣本短碼 lth，只在續追中寫 true。
+-- 違規證明：encodePhys 拿掉 lth 那行＝(code) 紅。
+scenario("1014c sample code lth: written while the post-exit lane ramp hold is on, omitted otherwise")
+do
+    resetFs()
+    loadProd()
+    nowMs = 9460000
+    MDADDiagnostics.start(0, nil, profile)
+    local function s(t, phys)
+        MDADDiagnostics.sample(0, t, 100, 200, 0, 30, 40, 400, 0, 0, 0, 0, "follow", 3, true, nil, false,
+            nil, nil, nil, nil, nil, nil, nil, nil, nil, false, false, false, false, false, phys)
+    end
+    s(9460000, { laneHold = true })
+    s(9460300, {})
+    nowMs = 9461000
+    MDADDiagnostics.stop(0, "end")
+    local body = files[sessionPath(1)] or ""
+    local first, second = nil, nil
+    for line in string.gmatch(body, '{"t":"s"[^\n]*') do
+        if not first then first = line else second = line end
+    end
+    check(string.find(first or "", '"lth":true', 1, true) ~= nil, "(code) sample writes lth while the hold is on")
+    checkEq(countNeedle(second or "", '"lth":'), 0, "(omit) no hold, no lth")
+end
+
+--------------------------------------------------------------------------------
 -- 1010：impact 上升緣的事件另帶 awt（區域等待引擎煞車同幀）與車頭附近最近靜態硬物（MDADSensor.hardSpriteNear 在車頭點
 -- ＝車心沿航向 halfL 處查一次）；nb 的動物多物種／kg、他車多 vehicle id／有人駕駛。只在上升緣查、讀不到只缺該欄。
 -- 違規證明：事件不帶 awt＝(awt) 紅；awt=false 也寫＝(awt-omit) 紅；不在上升緣才查（每筆都查）＝(once) 紅；用車心不用車頭＝(nose) 紅；

@@ -179,11 +179,14 @@ local CURVE_FF_FRAC = 0.75
 -- inBaseM＝退讓的回程預測（秒、差分基線 m；兩者見 arcFeedForward 尾段）；slipOut＝高速增益學習的往彎外側滑門檻
 -- （rad，state.slip；語料 >40 km/h 弧上正常幀率往彎外 |vt|/v >0.03 只占 1%，正式服 1005h 過轉 0.045／0.086）；
 -- exitTauS／exitTcS／exitSpanM／yawTauS＝出弧殘餘轉角；exitRevM／exitRevRad／exitRevYaw＝殘餘轉角遇反向轉角就收（車前
--- 多遠內的反向轉角累計 rad、yaw 反號門檻 rad/s；1008）（見 MDADFollower.arcExitResidual）；同表是為了不多占 control 的 upvalue。
+-- 多遠內的反向轉角累計 rad、yaw 反號門檻 rad/s；1008）（見 MDADFollower.arcExitResidual）；rampHoldM／rampHoldRad＝出口後
+-- 車道 ramp 續追切線的門檻（預視點 1.5m 內車道變化 m、窗內路線轉角上限 rad；見 MDADFollower.laneRampHold，1014c）；
+-- 同表是為了不多占 control 的 upvalue。
 local CURVE_FF_LEAD_S = 0.35
 local FF_HI = { fromKmh = 30, fullKmh = 55, frac = 0.9, learnKmh = 40, minFF = 0.1, learnS = 0.5,
     settleS = CURVE_FF_LEAD_S, fbOppose = 0.5, inM = 0.3, inSpanM = 0.5, inLeadS = 1.0, inBaseM = 0.5, slipOut = 0.03,
-    exitTauS = 0.2, exitTcS = 0.1, exitSpanM = 15, yawTauS = 0.05, exitRevM = 15, exitRevRad = 0.1, exitRevYaw = 0.1 }
+    exitTauS = 0.2, exitTcS = 0.1, exitSpanM = 15, yawTauS = 0.05, exitRevM = 15, exitRevRad = 0.1, exitRevYaw = 0.1,
+    rampHoldM = 0.015, rampHoldRad = 0.05 }
 local CURVE_FF_MAX = 0.8 -- 小增益長車不能用倒數把前饋放大成整車橫推；回饋仍保留完整權威。
 local YAW_GAIN_INIT = 0.8
 local YAW_GAIN_TAU_S = 0.5
@@ -1320,7 +1323,8 @@ local function ovIndexAt(ovS0, ovN, ovEndS, q)
 end
 MDADFollower.ovIndexAt = ovIndexAt -- Driver 的實測落後量守門（Drive.lagGuardScan）取承諾線在硬點弧長的位置
 
--- 弧段前饋：回傳要加進 steer 的量（0＝不加）。arcK＝前視窗內第一個弧段（control 的 onArc 同源）。
+-- 弧段前饋：回傳要加進 steer 的量（0＝不加）。arcK＝前視窗內第一個弧段（control 的 onArc 同源）；nil 且在追車道切線＝出口後
+-- 車道 ramp 續追（laneRampHold，1014c），只算下面的車道 l'' 項（沒有它續追比舊制更落後：離線 6 種 plant p95 0.34→0.41）。
 -- 弧的起點 k：進弧前 LEAD 秒線性爬升、出弧前同一個 LEAD 收尾（0908a 試收尾只差 0.02-0.05m，當時弦角預轉
 -- 還在、切內另有來源，0928o 拿掉預轉後收尾才顯出效果）。切線預視本身在弧上就有 KP·κ·PREVIEW 的隱含前饋
 -- （誤差＝車前 1.5m 切線與車頭夾角＝κ·1.5），顯式前饋扣掉它，否則兩份相加＝120% 切內（離線閉環 KPS 0.1
@@ -1350,22 +1354,26 @@ local function arcFeedForward(profile, state, arcK, bestI, sNow, aspeed, tangent
         latSigned, lineLat)
     local kap = profile.kappa
     state.ffFull = false
-    if not kap or arcK == nil or aspeed <= 0.5 then return 0 end
+    if not kap or aspeed <= 0.5 or arcK == nil and state.laneTangent ~= true then return 0 end
     local s, n, segKindW, segH = profile.s, profile.n, profile.segKind, profile.segH
     local v = aspeed * MS_PER_KMH
     local lead = v * CURVE_FF_LEAD_S
     local ramp = 1
-    if arcK > bestI then
+    if arcK == nil then
+        ramp = 0 -- 出口後車道 ramp（MDADFollower.laneRampHold）：沒有弧，只算下面的車道項
+    elseif arcK > bestI then
         local dist = s[arcK] - sNow
         if dist > 0 then ramp = lead > 0 and (1 - dist / lead) or 0 end
     end
-    local k = arcK
+    local k = arcK or bestI
     -- 弧的真曲率＝1/圓角半徑（kap[k] 是三點曲率：弧的第一個 chord 與前面的直臂
     -- 算出來只有 1/R 的百分之一，Codex lane 2026-09-08 抓的；即時弧帽同樣避開它）
     local kk = 0
     local fr = profile.filletRadius
     local r = fr and fr[k]
-    if isFinite(r) and r > 0 then
+    if arcK == nil then
+        kk = 0
+    elseif isFinite(r) and r > 0 then
         kk = 1 / r
     else
         kk = kap[k] or 0
@@ -1449,7 +1457,7 @@ local function arcFeedForward(profile, state, arcK, bestI, sNow, aspeed, tangent
         elseif ffLane < -CURVE_FF_MAX then ffLane = -CURVE_FF_MAX end
     end
     -- 車在弧上：記轉向方向、行駛線側向需求 v²κ、前饋 ramp，給 Driver cross-track 的外漂加權（MDADDynamics.arcOutwardScale，1012d）
-    if k == bestI then
+    if arcK == bestI then
         state.xtTurn, state.xtDem, state.xtRamp = kk < 0 and -1 or 1, v * v * (kk < 0 and -kk or kk) * arcScale, ramp
     end
     local ff = 0
@@ -1543,6 +1551,30 @@ function MDADFollower.arcExitResidual(state, heading, ph, dt, sNow, ff, profile,
     if add > CURVE_FF_MAX then add = CURVE_FF_MAX end
     add = add - ff * turn
     return add > 0 and turn * add or 0
+end
+
+-- 出口後車道 ramp 續追切線（1014c）：弧半徑貼滿路面帶時，彎內側常駐車道在弧上被夾回中線、出口後才沿 clampLane
+-- 的 smoothstep 放回（12m×dl，dl 1.3 時 15m 內橫移 1.3m）。進弧那段 ramp 有弧在前視窗、一直是車道切線追蹤（含 l''
+-- 前饋）；出口後弧一離開前視窗就換回 pure pursuit，15–20m 的長前視把 ramp 攤成弦、車頭轉得慢，期望線已放回、車還
+-- 在中線側（campaign rc72／73 MP 出口後 60m |ld| ≥0.5 的 24 個出口有 19 個是這型，GTR replay 右彎出口 0.6–0.8）。
+-- control 只在上一幀已是車道切線追蹤時才問（只續、不新開）：一般跟線（非承諾／停留線／M4 繞行）、預視點起 1.5m 內
+-- 車道仍變化 ≥ FF_HI.rampHoldM、到預視點之間路線轉角 ≤ FF_HI.rampHoldRad（折點交回前視點）。斜率點與 control 的車道
+-- 斜率切線同一個（預視點再往前 v·TANGENT_SLOPE_LEAD_S）。
+function MDADFollower.laneRampHold(profile, state, bestI, sNow, aspeed)
+    local rb = state.laneBias
+    if state.trackTangent == true or (state.ovN or 0) >= 2 or state.offL ~= nil
+            or not isFinite(rb) or rb == 0 then return false end
+    local s, n = profile.s, profile.n
+    local q = sNow + TANGENT_PREVIEW_M + aspeed * MS_PER_KMH * TANGENT_SLOPE_LEAD_S
+    local i = bestI
+    while i < n - 1 and s[i + 1] < q do i = i + 1 end
+    local dh = wrapPi(profile.segH[i] - profile.segH[bestI])
+    if dh > FF_HI.rampHoldRad or dh < -FF_HI.rampHoldRad then return false end
+    local l1 = clampLane(profile, i, rb, state.laneKeep, q)
+    q = q + TANGENT_PREVIEW_M
+    while i < n - 1 and s[i + 1] < q do i = i + 1 end
+    local d = clampLane(profile, i, rb, state.laneKeep, q) - l1
+    return d >= FF_HI.rampHoldM or d <= -FF_HI.rampHoldM
 end
 
 -- 弧段即時帽（m/s）與折算後 κ：中心線 κ（j 與 j+1 取大）；行駛線往彎內側偏 latHere 時半徑＝R−lt
@@ -2204,8 +2236,11 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         end
     end
     local tangentOn = false
+    -- 弧出口後常駐車道還在 ramp（MDADFollower.laneRampHold，1014c）：上一幀在追車道切線就續追到 ramp 走完，
+    -- 不在出口那一幀換回長前視點。讀上一幀的 laneTangent，所以先判再清。
+    local onArc = profile.filletAdaptive == true and (arcK ~= nil
+        or state.laneTangent == true and MDADFollower.laneRampHold(profile, state, bestI, sNow, aspeed))
     state.laneTangent = false -- 切線取自剖面＋車道斜率（弧段前饋的車道項只在這時算）
-    local onArc = profile.filletAdaptive == true and arcK ~= nil
     if (state.trackTangent == true or onArc)
             and (kinkS == nil or ovQ ~= nil or sNow + TANGENT_PREVIEW_M < kinkS - OV_BLEND) then
         local q = ovQ or lineQ or sNow + TANGENT_PREVIEW_M / (ovDen or 1)
@@ -2253,6 +2288,7 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
             state.laneTangent = true
         end
     end
+    state.laneHold = arcK == nil and state.laneTangent -- 出口後車道 ramp 續追中（laneRampHold；Driver 樣本 lth）
     local err = atan2(fx * vy - fy * vx, fx * vx + fy * vy)
     -- 承諾線（繞行／回線，state.trackTangent）在弧上：切線對「參考點的行進方向」而非車頭（1002n；E2E rc53 0005／0022：
     -- vehicle:getX/Y 不是無側滑點，穩態彎上行進方向比車頭偏彎內 β≈0.7·ω/v＝0.07–0.16 rad；車頭對準切線＝速度向量
@@ -2632,7 +2668,7 @@ function MDADFollower.resetControl(state)
     state.profileWhy = nil
     state.offL = nil
     state.trackTangent = false
-    state.tangentOn = false
+    state.tangentOn, state.laneTangent, state.laneHold = false, false, false -- laneTangent 也是出口後車道 ramp 續追的閂（laneRampHold）
     state.ffSteer, state.ffSteadyT, state.hiSteerLag = 0, 0, nil -- 低通／穩態計時跟施力歷史一起斷
     state.exitEndS, state.yawRateF, state.exitCut = nil, 0, nil -- 出弧殘餘轉角（arcExitResidual）：換線／脫困後不沿用舊弧的出口
     state.xtTurn = nil -- 外漂加權（MDADDynamics.arcOutwardScale）同理不沿用舊弧
