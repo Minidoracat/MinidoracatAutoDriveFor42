@@ -656,7 +656,9 @@ function D.lowerHardCap(currentCap, currentReason, candidateCap, candidateReason
 end
 
 -- A non-gated line remains proportional to its measured alignment error; the
--- 500ms settle window uses 85% rather than reintroducing a fixed 70km/h ceiling.
+-- ALIGN_HOLD_MS settle window uses 85% rather than reintroducing a fixed 70km/h ceiling.
+-- 1014h：已在門檻內（航向 ≤ ALIGN_HEADING_RAD、偏差 ≤ latTol，ratio＝1）只是在等 ALIGN_HOLD_MS 時不套 85%（gate 仍關、
+-- 照 ungatedCapKmh 的檔位比例）；85% 只留給落在遲滯帶、還沒 settle 的姿態。
 function D.alignmentCapKmh(targetKmh, headingError, latDev, latTol, settled)
     if not D.finite(targetKmh) or targetKmh <= 0 then return 0 end
     local ah = headingError
@@ -672,7 +674,7 @@ function D.alignmentCapKmh(targetKmh, headingError, latDev, latTol, settled)
         local lr = latTol / al
         if lr < ratio then ratio = lr end
     end
-    if settled ~= true and ratio > 0.85 then ratio = 0.85 end
+    if settled ~= true and ratio < 1 and ratio > 0.85 then ratio = 0.85 end
     if ratio < 0.2 then ratio = 0.2 end
     local cap = targetKmh * ratio
     -- 地板無條件化（2026-09-01 s060/s062）：舊版只在 targetKmh>12 時地板，

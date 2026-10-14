@@ -652,6 +652,10 @@ eq(D.alignmentCapKmh(8, 2.06, 3.0, 0.5, false), 8, "target<12 全額傳遞")
 -- 未對齊仍壓（err 34°>15°）但絕不低於爬行檔
 local ac = D.alignmentCapKmh(40, 0.6, 0.3, 0.5, true)
 check(ac < 40 and ac >= 12, "err 34° 仍壓速但不低於爬行（實得 " .. tostring(ac) .. "）")
+-- 1014h：已在門檻內（err 8°、lat 0.3 ≤ latTol 0.5）只是還沒 settle（等 ALIGN_HOLD_MS）：不套 85%；遲滯帶（err 16°、ratio
+-- 0.94）還沒 settle：照 85%。違規證明：85% 不看 ratio＝第一條紅；整個拿掉 settle＝第二條紅。
+eq(D.alignmentCapKmh(40, 0.14, 0.3, 0.5, false), 40, "(align-settle) 門檻內、等 settle：不套 85%")
+eq(D.alignmentCapKmh(40, 16 * math.pi / 180, 0.3, 0.5, false), 40 * 0.85, "(align-settle) 遲滯帶、未 settle：照 85%")
 
 scenario("buildFilletPath：臂長預算按角間距、不按取樣段（2026-09-01 過彎太慢定罪）")
 -- 4m 取樣、兩臂各 12m 的 90° 路口（住宅區真實幾何）＋皮卡 rMin 5：

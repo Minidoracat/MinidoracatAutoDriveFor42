@@ -14691,8 +14691,8 @@ local function stepFollow(s, vehicle, playerNum, now)
             if s.alignSince == 0 then s.alignSince = now end
         elseif absHeading > MDADDynamics.ALIGN_BREAK_RAD
                 or absDev > latTol * 1.25 then
-            -- 非對稱遲滯（2026-09-01）：5°/latTol 進入、8°/1.25×latTol 才重置。
-            -- 路網折線與轉向雜訊在 5-8° 之間抖動時不再歸零 250ms 計時器，
+            -- 非對稱遲滯（2026-09-01）：ALIGN_HEADING_RAD（15°）／latTol 進入、ALIGN_BREAK_RAD（22°）／1.25×latTol 才重置。
+            -- 路網折線與轉向雜訊在 15–22° 之間抖動時不再歸零 ALIGN_HOLD_MS 計時器，
             -- full-speed 資格不因單幀雜訊反覆得而復失。
             s.alignSince = 0
         end
