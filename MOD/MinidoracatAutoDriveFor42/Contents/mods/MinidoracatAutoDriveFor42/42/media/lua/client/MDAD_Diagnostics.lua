@@ -177,6 +177,8 @@ local EK = {
     -- 1013e 掛車車身（Driver Drive.towFootprint／lagGuardScan）：impact／contact 的掛車最近硬點淨距（含 TOW_BODY_PAD，同 ac）、該點
     -- 座標、該點 1 格內 sprite 名／分類／格心距；lag arm kind＝trailer 時預測掛車車身用的該站內輪差（m，正＝往 +l）
     "tcl", "tcx", "tcy", "tsp", "tsc", "tsd", "toff", -- 1013e
+    -- 1014b dodge commit／extend／release（exit、end、done）：出口回的 lane s.dodgeBaseL（Drive.dodgeHomeL，承諾時凍結）
+    "dbl", -- 1014b
 }
 
 local function logOnce(msg)

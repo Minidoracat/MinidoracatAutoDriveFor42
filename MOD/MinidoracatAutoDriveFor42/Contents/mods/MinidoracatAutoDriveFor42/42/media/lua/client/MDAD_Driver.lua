@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1013k"
+Drive.REV = "1014b"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -10045,7 +10045,7 @@ function Drive.extendDodgeExit(s, sen, playerNum)
         s.dodgeSpaceBaseCap = math.min(spaceCap(s.dodgeEntryLength), spaceCap(room))
     end
     diagEvent(s, playerNum, "dodge", { phase = "extend", c = c, d = d2, len = room, m = margin, rs = rs,
-        why = short and "short" or (nextRoom and "next" or nil), blocker = nextB, l = nextL })
+        why = short and "short" or (nextRoom and "next" or nil), blocker = nextB, l = nextL, dbl = s.dodgeBaseL })
     if getDebug() then -- telemetry: dodge phase=extend（why short／next、blocker＝下一群 b2、l＝那群縫 lane）
         print(string.format("%spn=%d dodge exit %s: c=%.1f d %.1f -> %.1f (exit %.1f -> %.1f) m=%.2f rs=%.1f next=%s,%s",
             LOG, playerNum, short and "shortened" or "extended", c, c + have, d2, have, room, margin, rs,
@@ -11426,14 +11426,28 @@ end
 -- blocked → 倒車 ×3 → StopStuck；遠距離起步同一段一次過——使用者「通用性要再加強」）：
 -- 回線之後緊接下一群且「回線 lane → 下一群縫」的側移塞不進跑道時，把本次繞行改成停留
 -- （不回線），停留 lane 再往下一群縫收（stayLaneForNext）。回 stay 結果或 nil（照常回線）。
+-- 停留 lane 一路淨空、下一群只擋回線 lane（1014b N9，正式服 0.29.1：路網錯位把常駐線推進路肩樹列，繞過 A 的出口回到
+-- 承諾時的 lane、出口後 4.3m 就是下一棵樹 → steep 判堵、倒車、玩家接手）：從停留 lane 問 corridor 是 clear、看不到那群，
+-- 舊制照常回線。改從回線 lane（d 之後）問一次：回線後切到那群縫塞不進就停在 offL（不往那群的縫收，停留 lane 本來就淨空）。
 local function chainAhead(s, planN, a, b, c, d, offL, baseL, nb, tag, crawlDesign, sa, sb, sc, sd)
     local sen = s.sensor
     local allowed, why, b2, o2 = stayAllowed(s, sen, planN, sb, sc, offL)
-    if not allowed or why ~= "dodge" or not (finite(b2) and finite(o2)) or b2 <= sc then return nil end
-    -- 回線後從 baseL 再切到 o2 塞得進＝照常回線
-    if shiftFits(s, baseL, o2, b2 - sd - 1) then return nil end
-    -- 停在 offL 就塞得進＝普通停留；否則往 o2 收
-    if shiftFits(s, offL, o2, b2 - sc - 1) then
+    if not allowed then return nil end
+    local stayPlain
+    if why == "dodge" and finite(b2) and finite(o2) and b2 > sc then
+        -- 回線後從 baseL 再切到 o2 塞得進＝照常回線
+        if shiftFits(s, baseL, o2, b2 - sd - 1) then return nil end
+        -- 停在 offL 就塞得進＝普通停留；否則往 o2 收
+        stayPlain = shiftFits(s, offL, o2, b2 - sc - 1)
+    else
+        if why ~= "clear" then return nil end
+        local m2, _, rb2, _, _, ro2 = MDADCorridor.plan(sen.hardS, sen.hardL, planN, s.needHalf,
+            sen.corridorHalf or MDADSensor.CORRIDOR_HALF, baseL, sen.hardR, baseL, sen.roadLo, sen.roadHi, false,
+            nil, sd, nil, sen.hardLc, sen.hardW)
+        if m2 ~= "dodge" or shiftFits(s, baseL, ro2, rb2 - sd - 1) then return nil end
+        b2, o2, stayPlain = rb2, ro2, true
+    end
+    if stayPlain then
         local ok4, mg4, ovN4, ovS04, dStay = sweepStay(s, sa, sb, sc, offL, baseL, tag .. "-chain", nb)
         if ok4 then
             if getDebug() then -- telemetry: dodge commit／kept 事件（停留鏈）
@@ -12167,7 +12181,7 @@ local function replan(s, vehicle, playerNum)
             if not stayDone and not handoff then
                 diagEvent(s, playerNum, "dodge", { phase = "release",
                     why = (curOffL == nil and "cleared") or (exitReady and "exit") or "end",
-                    rs = s.lastSNow, l = s.lastLatSigned, offL = s.residentBias })
+                    rs = s.lastSNow, l = s.lastLatSigned, offL = s.residentBias, dbl = s.dodgeBaseL })
             end
             releaseDodge(s)
             -- releaseDodge 先清 hold，交接輪須在完整重設之後接續等待新線。
@@ -13024,7 +13038,8 @@ local function replan(s, vehicle, playerNum)
                 fold = s.towFoldDeg, -- 承諾前被掛車折角預檢拒收的候選中最大預估折角（°；Drive.towFold）
                 preA = s.diag and Drive.preAClear(s) or nil, -- pre-a 段最小物理淨距（只在紀錄開著時量）
                 -- 承諾線對殭屍的最小淨距（距離 − R；Drive.zombieLineGap）與那一隻的 (s, l)；本輪被殭屍擋下的候選數（1013d）
-                zm = s.zmM, zmS = s.zmS, zmL = s.zmL, zv = s.zomRec and s.zomRec.n > 0 and s.zomRec.n or nil })
+                zm = s.zmM, zmS = s.zmS, zmL = s.zmL, zv = s.zomRec and s.zomRec.n > 0 and s.zomRec.n or nil,
+                dbl = s.dodgeBaseL }) -- 出口回的 lane（Drive.dodgeHomeL，承諾時凍結；1014b N9）
             Drive.proofTightArm(s, playerNum) -- 停下之後的窄線爬行（TUNE.PROOF_TIGHT_KMH）
             if getDebug() then -- telemetry: dodge commit 事件（cap 分解同欄）
                 -- cap 分解一行印清楚（2026-09-04 實機三段 8／15／14 km/h 繞行，console
@@ -14204,7 +14219,7 @@ local function stepFollow(s, vehicle, playerNum, now)
                 if type(fsD) ~= "number" or s.lastSNow >= fsD then
                     MDADFollower.clearOffset(s.fstate)
                     diagEvent(s, playerNum, "dodge", { phase = "release", why = "done",
-                        rs = s.lastSNow, l = s.lastLatSigned, offL = s.residentBias })
+                        rs = s.lastSNow, l = s.lastLatSigned, offL = s.residentBias, dbl = s.dodgeBaseL })
                     releaseDodge(s)
                     if getDebug() then
                         print(LOG .. "pn=" .. playerNum .. " dodge released (profile done)")
