@@ -328,6 +328,21 @@ MDADFollower.STYLES = {
 MDADFollower.STOP_ASSIST = 6.0
 MDADFollower.STOP_BRAKE_RATIO = 1.5
 
+-- 制動包絡（只管終點煞停）抬到同段收油率：1002l 起不比收油包絡（斷油＋輔助）更早綁。1015c 起抬的上限是終點同一本帳
+-- ＝車輛煞車（segStopBrake）×STOP_BRAKE_RATIO：彎前收油率（斷油＋coastAssist）高過它時，彎緊貼終點的低煞車車剖面會
+-- 越過 Driver 終點硬煞帳（煞車×EMERGENCY_BRAKE_GAIN）、終點前鎖輪（2026-10-13 離線推算；L5 把範圍從煞車 ≤1.9 擴到 ≤2.3）。
+-- 只在終點附近綁：離終點遠時 sqrt(2·煞車×1.5·距離) 高過任何彎前收油包絡。建表與 control 共用；brake 0 仍是 fail-safe。
+function MDADFollower.raiseBrake(profile, i, brake, rate)
+    if not rate or brake <= 0 or rate <= brake then return brake end
+    local stop = profile.segStopBrake and profile.segStopBrake[i]
+    if stop then
+        stop = stop * MDADFollower.STOP_BRAKE_RATIO
+        if rate > stop then rate = stop end
+    end
+    if rate > brake then return rate end
+    return brake
+end
+
 -- 初始化與換檔共用；呼叫端隨後重填動力預算、重建速度表，保留承諾線與投影位置。
 function MDADFollower.setStyle(profile, style)
     profile.styleName = style.name
@@ -1225,12 +1240,11 @@ function MDADFollower.stepBuild(profile, budget)
             if i < 1 then
                 profile.phase, profile.cursor = "merge", 1
             else
-                -- 制動包絡沒有彎道帽、只管終點煞停：不比同段收油包絡（斷油＋輔助）更早綁（1002l）。終點停車由
+                -- 制動包絡沒有彎道帽、只管終點煞停：抬到同段收油率、上限終點帳（MDADFollower.raiseBrake）。終點停車由
                 -- Driver 的中線外力執行、不經輪胎，學到的低鎖輪煞車不再限它（Driver 終點硬煞帳另吃學到的煞車）；
                 -- 煞車 0 仍是 fail-safe 全線停車。
-                local brake = profile.segBrake[i] or BRAKE
-                local rate = profile.coastRate and profile.coastRate[i]
-                if rate and brake > 0 and rate > brake then brake = rate end
+                local brake = MDADFollower.raiseBrake(profile, i, profile.segBrake[i] or BRAKE,
+                    profile.coastRate and profile.coastRate[i])
                 local lim = sqrt(brakeV[i + 1] * brakeV[i + 1]
                     + 2 * brake * segLen[i])
                 if lim > profile.maxSpeedMs then lim = profile.maxSpeedMs end
@@ -2373,8 +2387,8 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
             runtimeCoast = runtimeCoast + (profile.coastAssistAt and profile.coastAssistAt[bestI] or 0)
             if runtimeCoast < coast then coast = runtimeCoast end
         end
-        -- 同建表（1002l）：制動包絡只管終點煞停，不比收油包絡（斷油＋輔助）更早綁；0 仍是 fail-safe
-        if brake > 0 and brake < coast then brake = coast end
+        -- 同建表（MDADFollower.raiseBrake）：制動包絡抬到收油率、上限終點帳；0 仍是 fail-safe
+        brake = MDADFollower.raiseBrake(profile, bestI, brake, coast)
         local coastNext = profile.coastV[bestI + 1] or profile.maxSpeedMs
         local brakeNext = profile.brakeV[bestI + 1] or 0
         -- 滑行包絡的停點在終點前 COAST_STOP_M（與建表同一個 coastStopS），段內也要量到那裡

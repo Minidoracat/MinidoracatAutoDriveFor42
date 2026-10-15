@@ -5477,6 +5477,43 @@ do
     checkTrue(rs.laneTangent == false and rs.laneHold == false, "(5) resetControl 清續追的閂（換線／脫困後不沿用）")
 end
 
+scenario("1015c：彎緊貼終點的低煞車車——制動包絡抬到收油率、上限終點帳（車輛煞車×STOP_BRAKE_RATIO），建表與 control 同一本帳")
+do
+    -- 300m 直路接直角、彎後 40m 到終點，120 km/h。低煞車車：煞車＝斷油＝1.2，彎前收油率 1.2＋coastAssist 遠高於 1.2×1.5。
+    -- 違規證明：raiseBrake 不夾（舊制直接抬到收油率）＝彎前 100m 仍以極速接近，越過 Driver 終點硬煞帳。
+    local pts = { 0, 0, 100, 0, 200, 0, 300, 0, 300, 20, 300, 40 }
+    local function build(weak)
+        local p = F.begin(mkRoute(pts), 120, nil, nil, F.STYLES.brisk)
+        if weak then
+            for i = 1, p.n - 1 do
+                p.segBrake[i], p.segCoast[i], p.segStopCoast[i], p.segStopBrake[i] = weak, weak, weak, weak
+            end
+            F.invalidateDynamics(p)
+        end
+        while not p.ready do F.stepBuild(p, 4096) end
+        return p
+    end
+    local p = build(1.2)
+    local ledger = 1.2 * F.STOP_BRAKE_RATIO
+    checkTrue(1.2 + F.STYLES.brisk.coastAssist > ledger + 1, "前提：彎前收油率高過終點帳")
+    local worst = -math.huge
+    for i = 1, p.n do
+        local over = p.v[i] - math.sqrt(2 * ledger * (p.length - p.s[i]))
+        if over > worst then worst = over end
+    end
+    checkTrue(worst <= 1e-9, string.format("建表每一點 ≤ sqrt(2·煞車×1.5·距終點)（最差 %+.4f m/s）", worst))
+    local x, y, h = pointAt(p, p.length - 70)
+    local _, target = F.control(p, F.newState(), x, y, h, 20, 1 / 60)
+    local bound = math.sqrt(2 * ledger * 70) * KMH
+    checkTrue(target <= bound + 0.5,
+        string.format("control 彎前（距終點 70m）目標 ≤ 終點帳（%.1f ≤ %.1f km/h）", target, bound))
+    -- 一般煞車（預設 8.0×1.5＝12 高過收油率）：同一處仍由彎前收油包絡綁，L5 的晚收油不受影響
+    local pN = build(nil)
+    local k
+    for i = 1, pN.n do if pN.s[i] <= pN.length - 70 then k = i end end
+    checkNear(pN.v[k], pN.coastV[k], 1e-9, "一般煞車：彎前仍是收油包絡（制動包絡不先綁）")
+end
+
 closeScenario()
 print()
 print("情境 " .. scenarios .. " 個、斷言 " .. assertions .. " 項")
