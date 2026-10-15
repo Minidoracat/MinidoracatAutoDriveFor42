@@ -170,8 +170,8 @@ Plus a screwdriver.
 [list]
 [*] [b]Gentle[/b] (default): slows before turning.
 [*] [b]Fast[/b]: swings around with momentum.
-[*] [b]Starting at an angle[/b]: if the car faces more than about 60° away from the route when autodrive starts, it turns in place first, then drives off (not when towing).
-[*] [b]No room to turn[/b]: if it is too tight to turn in place, it backs up a little first; only if that is still not enough does it make a slow wide turn.
+[*] [b]Starting at an angle[/b]: if the car faces more than about 60° away from the route when autodrive starts, it turns in place first, then drives off (not when towing); if it ends up parallel to the road and still far from it, it heads back to the road on a diagonal.
+[*] [b]No room to turn[/b]: if it is too tight to turn in place, it backs up a little first and keeps backing up in short steps if needed (up to three); only if it still can't make room does it make a slow wide turn. The status shows "Turning in place" or "Tight spot: slow turn" meanwhile.
 [/list]
 [h3]Sensing distance[/h3]
 [list]
@@ -190,7 +190,7 @@ Plus a screwdriver.
 [list]
 [*] [b]Keep right[/b]: so oncoming traffic separates (server-adjustable).
 [*] [b]Far-away traffic[/b] (multiplayer): the server relays driven vehicles within about 300 tiles, so oncoming cars are seen beyond the game's sync range ("Share far-away traffic with auto-drive", on by default).
-[*] [b]Obstacles[/b]: passes parked vehicles or obstacles through a gap, then returns to its lane.
+[*] [b]Obstacles[/b]: passes parked vehicles or obstacles through a gap, then returns to its lane; if its lane is blocked again right after and the dodge line ahead is clear, it stays on the dodge line until its lane is free.
 [*] [b]Fences[/b]: broken fence planks, burnt fence debris and stumps that the game itself lets cars through are driven over; fences that actually stop a car are still avoided.
 [/list]
 [h3]Recovery and rerouting[/h3]
@@ -220,7 +220,7 @@ Plus a screwdriver.
 [h3]Zombies, corpses and other players[/h3]
 [list]
 [*] [b]Slowdown[/b]: adapts to bends, traffic and unloaded areas.
-[*] [b]Avoid zombies and corpses[/b] (default on): finds one shared safe gap; without one it keeps the route and slowdown settings.
+[*] [b]Avoid zombies and corpses[/b] (default on): finds one shared safe gap; without one it keeps the route and slowdown settings. When going around an obstacle it also avoids the side where zombies are standing.
 [*] [b]Other players[/b] (multiplayer): steers around players walking on the road; with no room it stops and waits for them to move.
 [*] [b]If they stay[/b]: hands back control after too long; it never pushes through.
 [/list]
@@ -299,7 +299,7 @@ Separate 0–500% power and extra-fuel settings for GPS and autodrive; they stac
 [list]
 [*] 30/50/70 corner more gently than MAX; use MAX for speed
 [*] It only drives as fast as it can stop within road it has already checked, so at very low FPS it checks less and the HUD shows "Low FPS: slower" (raise FPS)
-[*] Towing corners slower
+[*] Towing corners slower: it slows early when the trailer is about to cut into something on the inside of a turn, and crawls past if the trailer touches it
 [*] Turn off the HUD Zombies / Corpses buttons to stop slowing for them (it drives through if it can't dodge)
 [/list]
 [/list]
