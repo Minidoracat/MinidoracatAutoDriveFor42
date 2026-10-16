@@ -248,14 +248,15 @@ The "Autodrive" category in MiniMap's Map Display Settings:
 The "Minidoracat AutoDrive" sandbox page:
 {{img:03-autodrive-sandbox-settings-en.jpg}}
 [h3]Power and fuel[/h3]
-Separate 0–500% power and extra-fuel settings for GPS and autodrive; they stack.
+Separate 0–500% power and extra-fuel settings for GPS and autodrive (default 50%); they stack.
 [table]
-[tr][th]Device[/th][th]Extra fuel use at 100%[/th][/tr]
-[tr][td]GPS (navigating)[/td][td]5%[/td][/tr]
-[tr][td]Autodrive[/td][td]25%[/td][/tr]
-[tr][td]Both together[/td][td]30% total[/td][/tr]
+[tr][th]Device[/th][th]Extra fuel at the default 50%[/th][th]At 100%[/th][/tr]
+[tr][td]GPS (navigating)[/td][td]2.5%[/td][td]5%[/td][/tr]
+[tr][td]Autodrive[/td][td]12.5%[/td][td]25%[/td][/tr]
+[tr][td]Both together[/td][td]15% total[/td][td]30% total[/td][/tr]
 [/table]
 [list]
+[*] [b]Bends and detours cost no extra fuel[/b]: autodrive fuel is counted in the gear you would use at that speed, so slowing for bends or obstacles burns no more than driving yourself.
 [*] [b]Engine running[/b]: still charges the battery on net.
 [*] [b]Engine off[/b]: the GPS drains the battery.
 [/list]

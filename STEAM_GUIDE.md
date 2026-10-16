@@ -254,14 +254,15 @@ https://steamcommunity.com/sharedfiles/filedetails/?id=3792675881
 沙盒設定的「Minidoracat 自動駕駛」頁：
 {{img:03-autodrive-sandbox-settings.jpg}}
 [h3]電油成本[/h3]
-GPS 與自駕的耗電、額外油耗，各自可在沙盒調整 0–500%，同時使用會相加。
+GPS 與自駕的耗電、額外油耗，各自可在沙盒調整 0–500%（預設 50%），同時使用會相加。
 [table]
-[tr][th]裝置[/th][th]100% 時的額外油耗[/th][/tr]
-[tr][td]GPS（導航中）[/td][td]5%[/td][/tr]
-[tr][td]自動駕駛[/td][td]25%[/td][/tr]
-[tr][td]同時使用[/td][td]共 30%[/td][/tr]
+[tr][th]裝置[/th][th]預設 50% 時的額外油耗[/th][th]100% 時[/th][/tr]
+[tr][td]GPS（導航中）[/td][td]2.5%[/td][td]5%[/td][/tr]
+[tr][td]自動駕駛[/td][td]12.5%[/td][td]25%[/td][/tr]
+[tr][td]同時使用[/td][td]共 15%[/td][td]共 30%[/td][/tr]
 [/table]
 [list]
+[*] [b]轉彎、繞行不多耗油[/b]：自駕時的原版油耗照同樣車速自己開會用的檔位計算，彎前或繞過障礙物減速不會比自己開多扣。
 [*] [b]引擎運轉時[/b]：在現行倍率範圍內，電瓶仍會淨充電，倍率影響的是回充速度。
 [*] [b]熄火時[/b]：GPS 直接消耗電瓶。
 [/list]
