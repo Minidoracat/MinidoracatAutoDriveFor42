@@ -1223,6 +1223,7 @@ local function encodePhys(phys)
     addNum("engineSpeed", "es")
     addNum("transmissionNumber", "tn")
     addNum("regulatorSpeed", "rgs")
+    addNum("fuelPercent", "fu")
     addNum("expectedLane", "el")
     addNum("latDev", "ld")
     -- 1004a：常駐線與軟縫 lane——el 偏離 rsd 時看得出是誰持有（lc 鏈、dg 繞行、ra 回線、zln 殭屍軟縫）

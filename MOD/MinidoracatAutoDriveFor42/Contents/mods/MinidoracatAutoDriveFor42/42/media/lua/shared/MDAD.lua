@@ -53,7 +53,7 @@ MDAD.FAIL_NO_BATTERY = "UI_MinidoracatAutoDrive_NoBattery"
 MDAD.FAIL_TOO_FAR = "UI_MinidoracatAutoDrive_TooFar"
 
 -- 裝置電力基準（電瓶 usedDelta／遊戲分鐘）與 fuel 原生實耗加成基準。
--- 四個 sandbox 百分比各自縮放；GPS＋自駕同時啟用時只相加一次。
+-- 四個 sandbox 百分比各自縮放（預設 50＝基準的一半，2026-10-17 使用者裁定）；GPS＋自駕同時啟用時只相加一次。
 MDAD.RATE_NAV = 0.00002
 MDAD.RATE_AUTO = 0.0001
 MDAD.FUEL_OVERHEAD_NAV = 0.05
@@ -125,9 +125,10 @@ function MDAD.policy3(name, default)
     return default
 end
 
+-- 缺值／非數字退回 sandbox-options.txt 的預設 50（四個倍率同一個預設）。
 local function percentScale(name)
-    local v = MDAD.sandbox(name, 100)
-    if type(v) ~= "number" or v ~= v then v = 100 end
+    local v = MDAD.sandbox(name, 50)
+    if type(v) ~= "number" or v ~= v then v = 50 end
     if v < 0 then v = 0 elseif v > 500 then v = 500 end
     return v / 100
 end

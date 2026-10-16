@@ -2,6 +2,7 @@
 --
 -- Fuel：包住 vanilla Vehicles.Update.GasTank，先讓原版依引擎、檔位、車重、車況、
 -- CarGasConsumption 等條件扣一次，再只對 before-after 差分加成。client 永不突變。
+-- 自駕時原版那份改照「同車速手動駕駛會用的檔」計（autoFuelBase），再乘加成。
 -- Power：不能包 Battery（client 的 drainBatteryUpdateHack 也會跑該 updater，會雙扣）；
 -- 改用 EveryOneMinute，在 server/SP 依 world age 差分補扣裝置負載。
 if isClient() then return end
@@ -79,6 +80,64 @@ local function onEveryOneMinute()
     MDAD.pruneAutoUsage()
 end
 
+-- 自駕的原版油耗基準（2026-10-17 使用者裁定：修好自駕轉彎、繞行多耗的油，不得影響車速——只改計費、不動控制）。
+-- 原版每遊戲分鐘扣 max(800, (極速÷檔數×0.71×檔位−車速)×350)×轉速÷2500×其他倍率（Vehicles.lua:464-487）：
+-- 同一檔車速越低扣越多。自駕靠 regulator 控速，regulator 開著時引擎不掛 N、加油只升不降檔
+-- （CarController.java:494-504、719-727），彎前與繞行減速後一路卡在高檔，每分鐘多扣 4–14 倍；玩家自己開會掛 N，
+-- 再踩油門照車速選檔。所以改照 CarController 依當下車速會選的檔（control_ForwardNew :687-690）換算。
+-- 只在實扣量吻合原版公式時換算：別的 MOD 改寫 GasTank、或原版改了公式，就照實扣量計。
+local GAS_MATCH_REL = 0.02
+local GAS_MATCH_ABS = 0.0002
+
+local function gasGearTerm(gear, kmh, perGear)
+    local m = (perGear * 0.71 * gear - kmh) * 350
+    if m < 800 then return 800 end
+    return m
+end
+
+-- CarController 拿 MP 假速度域選檔（CarController.java:139-146；BaseVehicle.java:666-673，SP＝1），
+-- 同 Driver regulatorDomainKmh 的換算。
+local function gearboxKmh(kmh)
+    local fn = BaseVehicle and BaseVehicle.getFakeSpeedModifier
+    if type(fn) ~= "function" then return kmh end
+    local ok, fake = pcall(fn)
+    if not ok or type(fake) ~= "number" or fake ~= fake or fake <= 1 then return kmh end
+    local d = kmh * fake / 120
+    return kmh * (1 + (fake - 1) * d * d)
+end
+
+local function autoFuelBase(vehicle, burned, elapsedMinutes)
+    local kmh = vehicle:getCurrentSpeedKmHour()
+    if not (kmh >= 1) then return burned end -- 原版 floor(車速)>0 才看檔位（停車段另一條式子）；NaN 也擋
+    local gear = vehicle:getTransmissionNumber()
+    if gear < 2 then return burned end
+    local script = vehicle:getScript()
+    local gears = script and script:getGearRatioCount()
+    local maxKmh = vehicle:getMaxSpeed()
+    local cgc = SandboxVars and SandboxVars.CarGasConsumption
+    if type(gears) ~= "number" or gears < 2 or type(maxKmh) ~= "number" or maxKmh <= 0
+            or type(cgc) ~= "number" then
+        return burned
+    end
+    local perGear = maxKmh / gears
+    local limited = gearboxKmh(kmh)
+    if limited > maxKmh then limited = maxKmh end
+    local fair = math.floor(limited / perGear) + 1
+    if fair > gears then fair = gears end
+    if gear <= fair then return burned end
+    local held = gasGearTerm(gear, kmh, perGear)
+    local gasMult = 90000
+    local heater = vehicle:getHeater()
+    if heater and heater:getModData().active then gasMult = gasMult - 5000 end
+    gasMult = gasMult / ((100 - vehicle:getEngineQuality()) / 200 + 1)
+        / (math.abs(1000 - script:getMass()) / 300 + 1)
+    local expect = held / gasMult * cgc * vehicle:getEngineSpeed() / 2500 * elapsedMinutes
+    local miss = burned - expect
+    if miss < 0 then miss = -miss end
+    if not (miss <= expect * GAS_MATCH_REL + GAS_MATCH_ABS) then return burned end
+    return burned * gasGearTerm(fair, kmh, perGear) / held
+end
+
 local fuelHookWarned = false
 
 local function installFuelHook()
@@ -95,12 +154,15 @@ local function installFuelHook()
         if burned <= 0 then return result end
 
         local navOn, autoOn = MDAD.vehicleUsageModes(vehicle)
+        local base = burned
+        if autoOn then base = autoFuelBase(vehicle, burned, elapsedMinutes) end
         local factor = MDAD.extraFuelFactor(navOn, autoOn)
-        if factor <= 0 then return result end
+        if factor <= 0 and base >= burned then return result end
 
-        local amount = after - burned * factor
+        -- 退回原版多扣的檔位差（burned−base），再扣本 MOD 的加成（base×factor）
+        local amount = after + (burned - base) - base * factor
         if amount < 0 then amount = 0 end
-        if amount >= after then return result end
+        if amount == after then return result end
         part:setContainerContentAmount(amount, false, true)
         amount = part:getContainerContentAmount()
         local precision = amount < 0.5 and 2 or 1

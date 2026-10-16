@@ -1108,6 +1108,9 @@ local function newVehicle(opts)
     function script:getFullName() return opts.scriptName or "Base.TestVehicle" end
     function script:getExtents() return ext end
     function script:getCenterOfMassOffset() return com end
+    -- 原版 Vehicles.Update.GasTank 讀的 script 欄位（Vehicles.lua:464-467；MDAD_Consumption 的自駕油耗換算同式）
+    function script:getGearRatioCount() return opts.gears or 4 end
+    function script:getMass() return opts.scriptMass or 1000 end
     if opts.profileFull then
         local ids = { "FrontLeft", "FrontRight", "RearLeft", "RearRight" }
         local wheels = {}
@@ -1333,6 +1336,10 @@ local function newVehicle(opts)
         drive.calls.getTransmissionNumber = drive.calls.getTransmissionNumber + 1
         return self._trans or 2
     end
+    -- 原版 GasTank 公式的另兩個輸入（引擎品質、暖氣零件 modData.active）與儀表油量（telemetry fu）
+    function v:getEngineQuality() return opts.engineQuality or 100 end
+    function v:getHeater() return self._heater end
+    function v:getRemainingFuelPercentage() return self._fuelPct or 100 end
     function v:getRegulatorSpeed()
         drive.calls.getRegulatorSpeed = drive.calls.getRegulatorSpeed + 1
         return self._regSpeed or 0
@@ -2354,11 +2361,14 @@ checkTrue(RATE_NAV * 5 + RATE_AUTO * 5 < 0.001,
 setSandbox({ GPSPowerPercent = 100000, AutoDrivePowerPercent = -50 })
 checkNear(MDAD.powerScale("nav"), 5, EPS, "GPS 倍率超過 500 截到 500")
 checkNear(MDAD.powerScale("auto"), 0, EPS, "自駕倍率負值截到 0")
-setSandbox({ GPSPowerPercent = "abc", AutoDrivePowerPercent = 0 / 0 })
-checkNear(MDAD.powerScale("nav"), 1, EPS, "GPS 倍率非數字退回 100")
-checkNear(MDAD.powerScale("auto"), 1, EPS, "自駕倍率 NaN 退回 100")
+-- 缺值／壞值退回 sandbox-options.txt 的預設：2026-10-17 使用者裁定四個倍率預設 100→50（＝基準的一半）。
+setSandbox({ GPSPowerPercent = "abc", AutoDrivePowerPercent = 0 / 0, GPSFuelPercent = "x", AutoDriveFuelPercent = 0 / 0 })
+checkNear(MDAD.powerScale("nav"), 0.5, EPS, "GPS 倍率非數字退回預設 50")
+checkNear(MDAD.powerScale("auto"), 0.5, EPS, "自駕倍率 NaN 退回預設 50")
+checkNear(MDAD.extraFuelFactor(true, true), 0.15, EPS, "油耗倍率壞值也退回預設 50：GPS 2.5%＋自駕 12.5%")
 setSandbox(nil)
-checkNear(MDAD.powerScale("nav"), 1, EPS, "沙盒未載入時 GPS 使用預設 100")
+checkNear(MDAD.powerScale("nav"), 0.5, EPS, "沙盒未載入時 GPS 使用預設 50")
+checkNear(MDAD.fuelScale("auto"), 0.5, EPS, "沙盒未載入時自駕油耗使用預設 50")
 checkNil(MDAD.powerScale("radio"), "未知 power mode 沒有倍率")
 
 setSandbox({ GPSPowerPercent = 100, AutoDrivePowerPercent = 100 })
@@ -2743,6 +2753,85 @@ do
     MDAD.clearNavUsage(c.walker)
     drive.online = {}
     clientFlag, serverFlag = false, true
+end
+
+-- =====================================================================
+-- 自駕卡高檔的油耗（1017；使用者 2026-10-17：修好轉彎／繞行多耗的油、不得影響車速 → 只改計費）
+-- regulator 開著時引擎不降檔，原版 GasTank 以「高檔低速」計費；自駕時 wrapper 改照 CarController 依車速會選的檔計。
+-- 假原版扣 drive.fuelBurn×分鐘；要讓 wrapper 認得「這筆是原版公式算的」，fuelBurn 照 Vehicles.lua:457-487 手算。
+-- =====================================================================
+scenario("自駕卡高檔：原版油耗照車速對應檔計（只限自駕、公式對得上才換算、停車段與低檔不動）")
+do
+    local c = {}
+    clientFlag, serverFlag = false, true
+    setSandbox({ NeedItemForAutoDrive = false }) -- 四個倍率不給＝走預設 50
+    SandboxVars.CarGasConsumption = 1
+    c.driver = newPlayer({ num = 0, username = "gear-driver", remote = true })
+    c.battery = newItem("Base.CarBattery", { uses = 0.9 })
+    c.vehicle = newVehicle({ battery = c.battery, engineRunning = true, driver = c.driver,
+        maxSpeed = 70, gears = 4, scriptMass = 1030, engineQuality = 80 })
+    c.driver._vehicle = c.vehicle
+    c.vehicle._speed, c.vehicle._trans, c.vehicle._engineSpeed = 15, 4, 3600
+    checkTrue(MDAD.setAutoUsage(c.driver, c.vehicle), "(gear) 自駕 registry ACTIVE")
+
+    -- 原版這一分鐘的扣油（手算）：q＝(100−80)/200+1＝1.1、m＝|1000−1030|/300+1＝1.1，gasMult＝90000/q/m；
+    -- 檔位項＝max(800, (極速/檔數·0.71·檔位−車速)·350)，再乘轉速/2500（耗油量 1、一分鐘）
+    local function term(maxKmh, gears, gear, kmh)
+        local m = (maxKmh / gears * 0.71 * gear - kmh) * 350
+        return m < 800 and 800 or m
+    end
+    local function vanilla(t, gm) return t / (gm or 90000 / 1.1 / 1.1) * 3600 / 2500 end
+    local function charged(fuelBurn)
+        drive.fuelBurn = fuelBurn
+        local gas = newGasPart(10, 20)
+        resetStats()
+        Vehicles.Update.GasTank(c.vehicle, gas, 1)
+        return 10 - gas._amount
+    end
+    local AUTO = 1 + 0.25 * 0.5 -- 只有自駕：預設 50＝原版 +12.5%
+
+    local held = term(70, 4, 4, 15)
+    checkTrue(held > 15 * 800, "(gear) fixture：卡 4 檔的檔位項是 1 檔下限的 15 倍以上")
+    checkNear(charged(vanilla(held)), vanilla(term(70, 4, 1, 15)) * AUTO, EPS,
+        "(gear) 4 檔 15 km/h：照車速對應的 1 檔計原版油耗，再加自駕 12.5%")
+    checkEq(stats.setFuel, 2, "(gear) 原版一次寫入＋換算後一次寫入")
+    checkNear(charged(vanilla(held) * 2), vanilla(held) * 2 * AUTO, EPS,
+        "(gear) 實扣量對不上原版公式（別的 MOD 改寫 GasTank）：照實扣量計，只加自駕 12.5%")
+
+    local hot = 85000 / 1.1 / 1.1
+    c.vehicle._heater = { getModData = function() return { active = true } end }
+    checkNear(charged(vanilla(held, hot)), vanilla(term(70, 4, 1, 15), hot) * AUTO, EPS,
+        "(gear) 開暖氣（原版 gasMult −5000）照樣認得原版公式並換算")
+    c.vehicle._heater = nil
+
+    c.vehicle._speed = 0.9
+    checkNear(charged(vanilla(term(70, 4, 4, 0.9))), vanilla(term(70, 4, 4, 0.9)) * AUTO, EPS,
+        "(gear) 車速 <1（原版走停車式、不看檔位）不換算")
+    c.vehicle._speed = 33
+    local held33 = term(70, 4, 4, 33)
+    checkNear(charged(vanilla(held33)), vanilla(term(70, 4, 2, 33)) * AUTO, EPS,
+        "(gear) SP：33 km/h 照 2 檔計")
+    local fakeWas = BaseVehicle.getFakeSpeedModifier
+    BaseVehicle.getFakeSpeedModifier = function() return 120 / 70 end
+    checkNear(charged(vanilla(held33)), vanilla(term(70, 4, 3, 33)) * AUTO, EPS,
+        "(gear) MP 速限 70：CarController 拿假速度域選檔（33 km/h 當 38），照 3 檔計")
+    BaseVehicle.getFakeSpeedModifier = fakeWas
+
+    -- 比車速對應檔還低的檔（升檔慢半拍）：照原版扣，不換成較貴的檔（極速 120、4 檔：61 km/h 對應 3 檔）
+    c.vehicle._maxSpeed, c.vehicle._speed, c.vehicle._trans = 120, 61, 2
+    checkTrue(term(120, 4, 3, 61) > term(120, 4, 2, 61), "(gear) fixture：對應的 3 檔確實比 2 檔貴")
+    checkNear(charged(vanilla(term(120, 4, 2, 61))), vanilla(term(120, 4, 2, 61)) * AUTO, EPS,
+        "(gear) 低於車速對應檔：照原版實扣，不換成較貴的檔")
+    c.vehicle._maxSpeed, c.vehicle._speed, c.vehicle._trans = 70, 15, 4
+
+    MDAD.clearAutoUsage(c.driver, c.vehicle:getId())
+    c.vehicle._devices.MDADGPS._item = newItem(GPS_T, { uses = 0.7, useDelta = 0.006 })
+    checkTrue(MDAD.setNavUsage(c.driver), "(gear) 只開 GPS 導航（玩家自己開）")
+    checkNear(charged(vanilla(held)), vanilla(held) * (1 + 0.05 * 0.5), EPS,
+        "(gear) 沒在自駕：不換算，只加 GPS 2.5%")
+    MDAD.clearNavUsage(c.driver)
+    drive.fuelBurn = nil
+    SandboxVars.CarGasConsumption = nil
 end
 
 -- =====================================================================
@@ -15178,6 +15267,7 @@ local function scenarioTelemetry()
     checkEq(drive.diag.samplePn, 0, "sample 用精確 pn")
     checkTrue(drive.diag.names.start == true, "event start 有接到")
     driveReset(dveh)
+    dveh._fuelPct = 63.4567 -- 儀表油量 %（telemetry fu，取兩位小數）；本區塊結束前還原
     for _ = 1, 5 do
         dveh._x = dveh._x + 0.1852
         driveTick(dp, dveh)
@@ -15210,6 +15300,8 @@ local function scenarioTelemetry()
     checkEq(type(dlast.phys.engineSpeed), "number", "phys.engineSpeed")
     checkEq(type(dlast.phys.transmissionNumber), "number", "phys.transmissionNumber")
     checkEq(type(dlast.phys.regulatorSpeed), "number", "phys.regulatorSpeed")
+    checkEq(dlast.phys.fuelPercent, 63.46, "phys.fuelPercent＝儀表油量 %，四捨五入到兩位")
+    dveh._fuelPct = nil
     checkEq(type(dlast.phys.expectedLane), "number", "phys.expectedLane")
     checkEq(type(dlast.phys.latDev), "number", "phys.latDev")
     checkEq(type(dlast.phys.roadState), "string", "phys.roadState")

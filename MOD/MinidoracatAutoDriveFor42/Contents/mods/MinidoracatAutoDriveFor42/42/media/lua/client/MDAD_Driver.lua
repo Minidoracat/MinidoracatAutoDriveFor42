@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1015c"
+Drive.REV = "1017a"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -7373,6 +7373,9 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     if finite(tn) then phys.transmissionNumber = tn end
     local rgs = jget(vehicle, "getRegulatorSpeed")
     if finite(rgs) then phys.regulatorSpeed = rgs end
+    -- 1017：油量 %（原版儀表同一支，BaseVehicle.java:9293-9296；MP 是伺服器同步來的值），油耗回報直接看每段扣多少
+    local fu = jget(vehicle, "getRemainingFuelPercentage")
+    if finite(fu) then phys.fuelPercent = math.floor(fu * 100 + 0.5) / 100 end
     if finite(expL) then phys.expectedLane = expL end
     if finite(latDev) then phys.latDev = latDev end
     phys.residentBias, phys.zombieLane = s.residentBias, s.zombieLane
