@@ -522,6 +522,7 @@ end
 -- alignment 帽把 45 壓到 20–26、lane 曲率帽再壓一次（E2E rc1 十五趟 25 次）。每個因子的混合長＝
 -- 12m×max(1, dl)（dl＝本 bias 與該 run 夾值之差），峰值 κ＝0.042／dl：1m 以內與舊值相同。
 local LANE_BLEND_M = 12
+MDADFollower.LANE_BLEND_M = LANE_BLEND_M -- Driver Drive.arcPassScan：出弧後車道 ramp 的最短長度（窗＝12m×max(1,|bias|)）
 local LANE_BLEND_WALK_MAX = 32 -- 以 run 計（同餘裕的連續段＝一個 run；混合窗內超過 32 個不同餘裕的 run 才截斷）
 local function clampLane(p, j, lane, keep, sAt)
     if p.laneRoomR == nil or keep == false then return lane end
