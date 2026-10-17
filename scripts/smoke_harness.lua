@@ -25023,17 +25023,19 @@ function drive.scenario0928()
             sensor = { hardN = 2, hardS = { 10, 25 }, hardX = { 10, 25 }, hardY = { 1.7, 1.45 }, hardR = { 0.7, 0.7 },
                 hardB = { 0.5, 0.5 } },
             vehicleProfile = { halfW = halfW, halfL = 2.2, centerOfMassX = 0, centerOfMassZ = 0 }, lastSNow = 0 }
-        checkNear(Dr.preAClear(ps), 0.3, 1e-6, "(line-geom) preA＝pre-a 段最小物理淨距（[a,c] 段更近的方塊不算）")
+        checkNear(Dr.preAClear(ps, lx, ly, 41, 0, ps.fstate.offA, 0), 0.3, 1e-6,
+            "(line-geom) preA＝pre-a 段最小物理淨距（[a,c] 段更近的方塊不算）")
         ps.sensor.hardN, ps.sensor.hardS[1], ps.sensor.hardX[1] = 1, 35, 35 -- 只剩出口段旁的方塊：離 pre-a 段車身 > 9m
-        checkTrue(Dr.preAClear(ps) >= 9, "(line-geom) pre-a 段沒有近物：preA ≥ 9（實得 " .. tostring(Dr.preAClear(ps)) .. "）")
+        checkTrue(Dr.preAClear(ps, lx, ly, 41, 0, ps.fstate.offA, 0) >= 9, "(line-geom) pre-a 段沒有近物：preA ≥ 9（實得 "
+            .. tostring(Dr.preAClear(ps, lx, ly, 41, 0, ps.fstate.offA, 0)) .. "）")
         ps.fstate.offA = 0.5
-        checkNil(Dr.preAClear(ps), "(line-geom) pre-a 段不足兩個取樣點：nil")
+        checkNil(Dr.preAClear(ps, lx, ly, 41, 0, ps.fstate.offA, 0), "(line-geom) pre-a 段不足兩個取樣點：nil")
         -- 命中時只量不留痕：blocked 事件 kind（sweepHitBody）與 replan 掃掠數（sweepCount）不被這次診斷掃描改寫。
         -- 違規證明：拿掉 preAClear 的還原就紅。
         ps.fstate.offA = 20
         ps.sensor.hardN, ps.sensor.hardS[1], ps.sensor.hardX[1], ps.sensor.hardY[1] = 1, 10, 10, 0.4
         ps.sweepHitBody, ps.sweepCount = "trailer", 7
-        local hitPreA = Dr.preAClear(ps)
+        local hitPreA = Dr.preAClear(ps, lx, ly, 41, 0, ps.fstate.offA, 0)
         checkTrue(type(hitPreA) == "number" and ps.sweepHitBody == "trailer" and ps.sweepCount == 7,
             "(line-geom) preA 命中：回淨距、不改寫 sweepHitBody／sweepCount（實得 " .. tostring(hitPreA) .. "／"
             .. tostring(ps.sweepHitBody) .. "／" .. tostring(ps.sweepCount) .. "）")
@@ -27682,6 +27684,7 @@ function drive.scenarioLagGuard()
     Dr.lagGuardScan(s, 0, 60)
     checkTrue(s.lagHitX == 60 + halfL + 2, "(lag-resident) 常駐線落後 0.6、車頭前 2m：判（hit=" .. tostring(s.lagHitX) .. "）")
     put(60 + halfL + 40, resL)
+    s.lagHitX = nil -- 1017d：上一個命中點還在車頭前方、|ld| 0.6 沒在收斂＝converge 遲滯會保持它；這裡只驗遠點的衰減判定
     Dr.lagGuardScan(s, 0, 60)
     checkNil(s.lagHitX, "(lag-resident) 同一個硬點在 40m 外：純追跡收斂衰減後不判")
     -- (lag-owner)
@@ -27792,6 +27795,161 @@ function drive.scenarioLagRate()
     fs.ovS0 = nil
 end
 drive.scenarioLagRate()
+
+-- 1017d converge 遲滯（2026-10-17 使用者裁定；正式服 |dev|≥0.3 放行後 8 s 內 ≥10 km/h 接觸／撞擊 10/84、<0.3 是 8/225）：直路、
+--   常駐線 0、硬點在車頭前 2m（hs 64.9）、離規劃車身 0.35。車在 rs 60、落後 0.6＝arm；車退到 rs 25（硬點 40m 外，衰減後預測不重疊）。
+--   (cv-hold) |ld| 0.6 持平、只變小 1 輪（0.55）：保持命中、照樣壓速、keep 事件只記一次。違規證明：拿掉遲滯、只要 1 輪變小各紅。
+--   (cv-shrink) 連 2 輪變小（0.6→0.55→0.5）：release converge、cvw＝保持的輪數。
+--   (cv-small) |ld| 0.25 < LAG_GUARD_MIN_M：當輪 release converge（不保持）。違規證明：遲滯不看門檻＝紅。
+--   (cv-line) 期望線 el 兩輪間跳 0.5：release why=line。違規證明：拿掉 line 出口＝紅。
+--   (cv-body) 保持中車開過硬點（車尾過點）：release body——遲滯不會永久壓速。
+--   (cv-owner) 保持中 RETURN 接手：release owner。
+function drive.scenarioLagConverge()
+    scenario("1017d：落後守門 converge 放行遲滯——|ld|≥門檻時要連 2 輪變小才放手，出口 body／owner／line 照舊")
+    local Dr, F = MDAD.Drive, MDADFollower
+    local prof = F.begin({ pts = { 0, 0, 300, 0 } }, 60, 2)
+    while not F.stepBuild(prof, 4096) do end
+    local fs = F.newState()
+    F.setLaneBias(fs, 0)
+    local halfW, halfL, r = 0.9, 2.9, 0.15
+    local hs, lc = 60 + halfL + 2, halfW + 0.35 + r
+    local sen = { ready = true, hardN = 1, hardS = { hs }, hardL = { lc }, hardLc = { lc }, hardW = { r }, hardR = { r },
+        hardX = { hs }, hardY = { lc } }
+    local oldEvent, ev = MDADDiagnostics.event, {}
+    MDADDiagnostics.event = function(_, name, a) if name == "lag" then ev[#ev + 1] = a end end
+    local s = { diag = true, sensor = sen, fstate = fs, profile = prof, diagExpL = 0, lagHistD = {}, lagHistL = {},
+        lagHistN = 0, safeBrake = 6, vehicleProfile = { halfW = halfW, halfL = halfL } }
+    local function scan(rs, ld)
+        s.lastSNow, s.lastLatDev = rs, ld
+        Dr.lagGuardScan(s, 0, 60, rs, ld, 0)
+        return ev[#ev] or {}
+    end
+    local function keeps()
+        local k = 0
+        for _, a in ipairs(ev) do if a.phase == "keep" then k = k + 1 end end
+        return k
+    end
+    checkTrue(scan(60, 0.6).phase == "arm" and s.lagHitX == hs, "(cv) 前置：車頭前 2m、落後 0.6：arm")
+    local e = scan(25, 0.6)
+    checkTrue(s.lagHitX == hs and s.lagCvw == 1 and e.phase == "keep" and e.dev == 0.6,
+        "(cv-hold) 預測已不重疊但 |ld| 0.6 沒變小：保持命中、記 keep（hit=" .. tostring(s.lagHitX) .. " phase="
+        .. tostring(e.phase) .. "）")
+    checkTrue(Dr.lagGuardCap(s, 60, 25, 0.6) < 60 and s.lastCapReason == "lag", "(cv-hold) 保持中照樣壓速（capReason lag）")
+    scan(25, 0.55)
+    checkTrue(s.lagHitX == hs and s.lagCvw == 2 and keeps() == 1,
+        "(cv-hold) 只變小 1 輪：繼續保持、keep 只記一次（cvw=" .. tostring(s.lagCvw) .. " keep=" .. keeps() .. "）")
+    e = scan(25, 0.5)
+    checkTrue(s.lagHitX == nil and s.lagCvw == nil and e.phase == "release" and e.why == "converge" and e.cvw == 2,
+        "(cv-shrink) 連 2 輪變小（0.6→0.55→0.5）：release converge、cvw 2（why=" .. tostring(e.why) .. " cvw="
+        .. tostring(e.cvw) .. "）")
+    scan(60, 0.6)
+    e = scan(25, 0.25)
+    checkTrue(s.lagHitX == nil and e.phase == "release" and e.why == "converge" and e.cvw == nil,
+        "(cv-small) |ld| 0.25 < LAG_GUARD_MIN_M：當輪放手（why=" .. tostring(e.why) .. "）")
+    scan(60, 0.6)
+    s.diagExpL = 0.5
+    e = scan(25, 0.6)
+    checkTrue(s.lagHitX == nil and e.phase == "release" and e.why == "line",
+        "(cv-line) 期望線兩輪間跳 0.5（換線）：release why=line（why=" .. tostring(e.why) .. "）")
+    scan(60, 0.6)
+    scan(25, 0.6)
+    checkTrue(s.lagHitX == hs and s.lagCvw == 1, "(cv-body) 前置：保持中")
+    e = scan(hs + halfL + r + 1, 0.6)
+    checkTrue(s.lagHitX == nil and e.phase == "release" and e.why == "body" and e.cvw == 1,
+        "(cv-body) 保持中車尾開過硬點：release body（why=" .. tostring(e.why) .. " cvw=" .. tostring(e.cvw) .. "）")
+    scan(60, 0.6)
+    scan(25, 0.6)
+    s.returnActive = true
+    e = scan(25, 0.6)
+    s.returnActive = nil
+    checkTrue(s.lagHitX == nil and e.phase == "release" and e.why == "owner",
+        "(cv-owner) 保持中 RETURN 接手：release owner（why=" .. tostring(e.why) .. "）")
+    MDADDiagnostics.event = oldEvent
+end
+drive.scenarioLagConverge()
+
+-- 1017d 繞行前段已貼上障礙時不承諾（2026-10-17 使用者裁定；正式服 P18 clip-32：preA −0.15 仍以 20.5 km/h 承諾、1.0 s 後撞同一棵樹）：
+--   沿 +x 的候選線（tmpOv）、a＝20、pre-a 段旁方塊面離車身 c。
+--   (pa-ok) c 0.3：照承諾、記 commitPreA。
+--   (pa-reject) c 0.02 < SWEEP_PHYS_PAD（巡航檔承諾後 pre-a 段的 footprint pad）：拒收、dodgeBlockReason pre-a、blockSteepM −1、
+--     事件 dodge reject why=pre-a（同一段判堵只記一次）。違規證明：門檻拿掉＝紅。
+--   (pa-phys) c −0.05、物理檔（nb＝halfW−0.1，承諾後 pad −0.1）：不拒收（footprint 不會觸發）；同 c 巡航檔：拒收。P18 那型
+--     （c −0.15、物理檔）：拒收。違規證明：pad 不照承諾檔取＝紅。
+--   (pa-live) 真 session：preA 量到 −0.15 時當輪判堵、不承諾；沒有時照承諾、commit 事件帶 preA。違規證明：replan 不呼叫＝紅。
+function drive.scenarioPreAReject()
+    scenario("1017d：繞行前段已貼上障礙不承諾——pre-a 段物理淨距小於承諾後的 footprint pad 就拒收、判堵")
+    local Dr = MDAD.Drive
+    local halfW = 0.9
+    local lx, ly = {}, {}
+    for k = 1, 41 do lx[k], ly[k] = k - 1, 0 end
+    local ev = {}
+    local oldEvent = MDADDiagnostics.event
+    MDADDiagnostics.event = function(_, name, a) if name == "dodge" then ev[#ev + 1] = a end end
+    local ps = { tmpOvX = lx, tmpOvY = ly, lastOvN = 41, lastOvS0 = 0, lastSNow = 0, diag = true, dodgeTier = "plan",
+        sweepBase = MDADVehicleProfile.sweepBase(halfW, "cruise"),
+        sensor = { hardN = 1, hardS = { 10 }, hardX = { 10 }, hardY = { 0 }, hardR = { 0.15 }, hardB = { 0 } }, -- 樹（圓）
+        vehicleProfile = { halfW = halfW, halfL = 2.2, centerOfMassX = 0, centerOfMassZ = 0 } }
+    local function at(c) ps.sensor.hardY[1], ps.blocked, ps.dodgeBlockReason, ps.blockSteepM = halfW + 0.15 + c, nil, nil, nil end
+    at(0.3)
+    checkTrue(Dr.preARejects(ps, 0, 20, 25, 0, nil) == false and math.abs(ps.commitPreA - 0.3) < 1e-6 and #ev == 0,
+        "(pa-ok) pre-a 段淨距 0.3：照承諾、記 commitPreA（" .. tostring(ps.commitPreA) .. "）")
+    at(0.02)
+    local rej = Dr.preARejects(ps, 0, 20, 25, 0, nil)
+    local e = ev[#ev] or {}
+    checkTrue(rej == true and ps.dodgeBlockReason == "pre-a" and ps.blockSteepM == -1 and e.phase == "reject"
+            and e.why == "pre-a" and math.abs(e.preA - 0.02) < 1e-6 and math.abs(e.need - 0.05) < 1e-9,
+        "(pa-reject) 淨距 0.02 < 巡航檔 pad 0.05：拒收、判堵理由 pre-a、事件 reject（preA=" .. tostring(e.preA) .. "）")
+    ps.blocked = true
+    Dr.preARejects(ps, 0, 20, 25, 0, nil)
+    checkEq(#ev, 1, "(pa-reject) 同一段判堵再拒收：事件只記一次")
+    local phys = halfW - 0.1
+    at(-0.05)
+    checkTrue(Dr.preARejects(ps, 0, 20, 25, 0, phys) == false,
+        "(pa-phys) 淨距 −0.05、物理檔（承諾後 pad −0.1）：不拒收（" .. tostring(ps.commitPreA) .. "）")
+    at(-0.05)
+    checkTrue(Dr.preARejects(ps, 0, 20, 25, 0, nil) == true, "(pa-phys) 同淨距、巡航檔：拒收")
+    at(-0.15)
+    checkTrue(Dr.preARejects(ps, 0, 20, 25, 0, phys) == true,
+        "(pa-phys) P18 那型（−0.15、物理檔）：拒收（" .. tostring(ps.commitPreA) .. "）")
+    -- (pa-live)
+    local oldSample, oldShould, oldClear = MDADDiagnostics.sample, MDADDiagnostics.shouldSample, Dr.preAClear
+    MDADDiagnostics.sample = function() return true end
+    MDADDiagnostics.shouldSample = function() return true end
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    local function run()
+        drive.fillWorld(-10, 160, -8, 8)
+        assert(armDrive(0, 40))
+        dveh._y = 0
+        drive.scanRound(true)
+        drive.scanRound(true)
+        local s = Dr.debugSession(0)
+        s.diag = true
+        drive.putSolid(24, 0, "harness_pa_barrel")
+        ev = {}
+        drive.scanRound(true)
+        local c, r2 = nil, nil
+        for _, a in ipairs(ev) do
+            if a.phase == "commit" then c = a elseif a.phase == "reject" then r2 = a end
+        end
+        return s, c, r2
+    end
+    local s, c, r2 = run()
+    checkTrue(s.dodging == true and c ~= nil and type(c.preA) == "number" and r2 == nil,
+        "(pa-live) 對照：照承諾、commit 事件帶 preA（" .. tostring(c and c.preA) .. "）")
+    Dr.preAClear = function() return -0.15 end
+    s, c, r2 = run()
+    Dr.preAClear = oldClear
+    checkTrue(s.dodging ~= true and s.blocked == true and s.dodgeBlockReason == "pre-a" and c == nil and r2 ~= nil
+            and r2.why == "pre-a",
+        "(pa-live) pre-a 段已重疊（−0.15）：不承諾、當輪判堵 pre-a（dodging=" .. tostring(s.dodging) .. " blocked="
+        .. tostring(s.blocked) .. " why=" .. tostring(s.dodgeBlockReason) .. "）")
+    MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.shouldSample = oldEvent, oldSample, oldShould
+    MDAD.Drive.stop(0, nil)
+    drive.fillWorld(-2, 70, -7, 7)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    assert(armDrive())
+end
+drive.scenarioPreAReject()
 
 -- 1008（正式服 0.23.0 片段 SemiTruckBox_mil＋拖車轉角 (12224.5,6895.5)：lag arm 後硬點一過車頭 rs+halfL 就 release why=clear、帽從 8
 --   跳回 obb 18，車身側面 14.7 km/h 撞上；(15319.5,3321.5) 同型 18.2）：硬點過了車頭、還在車身（拖車含掛車）旁時以實測橫偏不衰減判，

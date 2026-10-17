@@ -131,6 +131,8 @@ local EK = {
     "dir", "acc",
     -- lag arm（1006m）：實測落後的收斂率 λ（每公尺；0＝沒在收斂，缺＝歷史不夠、只用理論衰減）
     "rate",
+    -- lag release（1017d）：converge 遲滯保持了幾個掃描輪（Driver Drive.lagGuardScan s.lagCvw；沒保持就缺）
+    "cvw",
     -- impact（1008）：撞擊分類 hit／frozen／tow-sync（MDADUpload.impactClass）、有號掉速（前一筆有號 km/h − 本筆；倒退反號時 dv 會低估）
     "cls", "dvs",
     -- impact（1017）：當下檔位、引擎煞車、距上一次 tow rh-attach 的 ms（自動掛回拉攏的假撞）、跟車 lead 車距／速度（m 共用上面的鍵＝mode）

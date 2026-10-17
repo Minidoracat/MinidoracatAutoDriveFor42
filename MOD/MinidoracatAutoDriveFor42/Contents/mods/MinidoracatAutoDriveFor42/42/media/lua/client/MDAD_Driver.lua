@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1017k"
+Drive.REV = "1017m"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -10820,7 +10820,12 @@ end
 -- s.lagMem／s.lagHitPl，快照沒有它時以記下的值重判，保持到車尾過點（車頭向量投影的世界座標）或車身收回。半寬取牽引車與
 -- 掛車較寬者，再加 footprint 同一個 pad（Drive.footprintPad）：實體半寬時 0–0.15m 之間守門放行、footprint 鎖輪
 -- （SemiTruckBox_mil 出彎 66 km/h）。arm／release 記 lag 事件與同一句 console；release why：owner＝持有者接手、body＝車尾過點、
--- nose＝硬點在車身旁但實測車身已不重疊（拖車不用，見下方）、converge＝硬點還在車頭前方而預測車身不重疊（含 |ld| 降到門檻下）。
+-- nose＝硬點在車身旁但實測車身已不重疊（拖車不用，見下方）、converge＝硬點還在車頭前方而預測車身不重疊（含 |ld| 降到門檻下）、
+-- line＝期望線換了（Drive.lagRate 的換線重置：承諾線換手、el 兩輪間跳）。
+-- converge 遲滯（1017d，2026-10-17 使用者裁定；正式服 |dev|≥0.3 放行後 8 s 內 ≥10 km/h 接觸／撞擊 10/84、<0.3 是 8/225）：
+-- 預測已不重疊但 |ld| ≥ LAG_GUARD_MIN_M 時，只有 |ld| 連 2 輪變小（lagRate 環狀歷史最新三筆嚴格遞減）才放手，否則保持命中
+-- 繼續壓速（s.lagCvw 計輪數，第一輪記 lag phase=keep，release 帶 cvw）。出口不變：車開到硬點旁就換 nose／body 判、持有者接手
+-- owner、換線 line；車照 MIN_EXEC 前進，所以不會永久壓速。量不到縱向位置（u＝nil）不保持。
 -- 掛車車身（1013e N6；正式服 Q10 clip-30：R42 改寫弧上牽引車 ld 0.24 < 門檻，掛車內側 38.9 km/h 撞路邊硬點）：車在弧上
 -- （Drive.towArcRuns 的弧段落在硬點的 [hs−2·L2, hs＋車尾] 窗內）時，掛車預測車身＝牽引車預測車身＋該站內輪差（Drive.towOffAt）、
 -- 半寬＝掛車半寬＋TUNE.TOW_BODY_PAD，不看 |ld| 門檻另判；命中照樣 arm／保持（事件 kind＝trailer、toff＝用的內輪差）。直路沒有弧段＝
@@ -10831,7 +10836,7 @@ function Drive.lagGuardScan(s, playerNum, speedKmh, vx, vy, heading)
     -- RETURN 只有走精確線時才有「規劃線」可比（hold 時 laneBias＝車位、沒有線；1013b）
     local ret = s.returnActive and not s.returnHold and fs.exactLine == true
     local live = fs.rotating ~= true and (ret or not s.returnActive) and not s.blocked and sen.ready and finite(ld)
-    local rate = Drive.lagRate(s, ld, vx, vy, live)
+    local rate, relined = Drive.lagRate(s, ld, vx, vy, live)
     local rs, halfL = s.lastSNow, vp.halfL
     local rear, hw, tw = halfL, vp.halfW, s.tow
     local pad = Drive.footprintPad(s) or (MDADCorridor and MDADCorridor.FOOTPRINT_PAD or 0) -- Corridor 選配：缺它時也沒有硬點
@@ -10953,8 +10958,23 @@ function Drive.lagGuardScan(s, playerNum, speedKmh, vx, vy, heading)
                 elseif u < -(rear + r0) then why = "body"
                 else why = "nose" end
             end
+            -- converge 遲滯（1017d）：|ld| 還在門檻上、沒連 2 輪變小、期望線沒換＝保持命中繼續壓速
+            if why == "converge" and u ~= nil and (ld >= TUNE.LAG_GUARD_MIN_M or ld <= -TUNE.LAG_GUARD_MIN_M) then
+                local n, N, hl = s.lagHistN, TUNE.LAG_HIST_N, s.lagHistL
+                local shrink = n >= 3 and hl[(n - 1) % N + 1] < hl[(n - 2) % N + 1] -- kahlua-mod-ok: n ≥ 3
+                    and hl[(n - 2) % N + 1] < hl[(n - 3) % N + 1] -- kahlua-mod-ok: n ≥ 3
+                if relined then
+                    why = "line"
+                elseif not shrink then
+                    s.lagCvw = (s.lagCvw or 0) + 1
+                    if s.lagCvw == 1 then
+                        diagEvent(s, playerNum, "lag", { phase = "keep", dev = ld, rs = rs, hitS = s.lagHitS, rate = rate })
+                    end
+                    return
+                end
+            end
             diagEvent(s, playerNum, "lag", { phase = "release", why = why, dev = ld, rs = rs, hitS = s.lagHitS,
-                nose = rs + halfL, tail = rs - rear, body = relBody, rate = rate })
+                nose = rs + halfL, tail = rs - rear, body = relBody, rate = rate, cvw = s.lagCvw })
             if getDebug() then
                 print(string.format("%spn=%d lag guard release why=%s dev=%.2f rs=%.1f hitS=%s nose=%.1f tail=%.1f body=%s rate=%s",
                     LOG, playerNum, why, finite(ld) and ld or 0, rs, tostring(s.lagHitS), rs + halfL, rs - rear,
@@ -10962,6 +10982,7 @@ function Drive.lagGuardScan(s, playerNum, speedKmh, vx, vy, heading)
             end
         end
         s.lagHitX, s.lagHitY, s.lagHitR, s.lagHitS, s.lagHitPl, s.lagHitSide = nil, nil, nil, nil, nil, nil
+        s.lagCvw = nil
         return
     end
     local r = sen.hardW and sen.hardW[hit] or sen.hardR[hit]
@@ -10985,6 +11006,7 @@ function Drive.lagGuardScan(s, playerNum, speedKmh, vx, vy, heading)
     mem.hardL[1], mem.hardR[1] = sen.hardL[hit], sen.hardR[hit]
     mem.hardLc[1], mem.hardW[1] = sen.hardLc and sen.hardLc[hit], sen.hardW and sen.hardW[hit]
     s.lagHitX, s.lagHitY, s.lagHitR, s.lagHitS, s.lagHitPl = sen.hardX[hit], sen.hardY[hit], r, sen.hardS[hit], hitPl
+    s.lagCvw = nil -- 又預測重疊：converge 遲滯的輪數重算
     s.lagHitSide = sen.hardS[hit] <= rs + halfL
 end
 
@@ -11054,12 +11076,16 @@ end
 -- 預配在 session），回 λ（每公尺）＝ln(舊 |ld| ／ 目前 |ld|)／距離，舊樣本取距離在 [LAG_HIST_MIN_M, LAG_HIST_SPAN_M] 內最遠
 -- 的那筆；|ld| 沒在縮小、或降幅 < LAG_RATE_MIN_DROP_M＝0（不衰減）；歷史不夠＝nil（只用理論衰減）。期望線換了就重置：承諾線換手（dodging／ovS0）、
 -- ld 換號、期望線 el（s.diagExpL）兩輪間跳超過 LAG_HIST_JUMP_M、守門不判的狀態（live＝false）——否則把 el 跳變當成收斂。
+-- 第二回傳 relined＝這一輪因換線（承諾線換手或 el 跳）把有歷史的環重置（ld 換號不算；1017d converge 遲滯的 line 出口）。
 function Drive.lagRate(s, ld, vx, vy, live)
     local hd, hl, N = s.lagHistD, s.lagHistL, TUNE.LAG_HIST_N
     local el, key, n = s.diagExpL, (s.dodging or s.returnActive) and s.fstate.ovS0 or false, s.lagHistN
+    local relined = false
     if not live or not finite(vx) or not finite(vy) or not finite(el) or key ~= s.lagHistKey
             or (n > 0 and ((ld >= 0) ~= (s.lagHistSign >= 0)
                 or el - s.lagHistEl > TUNE.LAG_HIST_JUMP_M or s.lagHistEl - el > TUNE.LAG_HIST_JUMP_M)) then
+        relined = live and finite(vx) and finite(vy) and finite(el) and n > 0 and (key ~= s.lagHistKey
+            or el - s.lagHistEl > TUNE.LAG_HIST_JUMP_M or s.lagHistEl - el > TUNE.LAG_HIST_JUMP_M)
         n = 0
     end
     s.lagHistKey = key
@@ -11084,9 +11110,9 @@ function Drive.lagRate(s, ld, vx, vy, live)
             bestD, old = d, hl[j]
         end
     end
-    if bestD == nil then return nil end
-    if a <= 0 or old - a < TUNE.LAG_RATE_MIN_DROP_M then return 0 end -- 沒在縮小、或降幅不顯著（TUNE.LAG_RATE_MIN_DROP_M）
-    return math.log(old / a) / bestD
+    if bestD == nil then return nil, relined end
+    if a <= 0 or old - a < TUNE.LAG_RATE_MIN_DROP_M then return 0, relined end -- 沒在縮小、或降幅不顯著（TUNE.LAG_RATE_MIN_DROP_M）
+    return math.log(old / a) / bestD, relined
 end
 
 -- 預檢與正式規劃共用同一組群／候選，避免預檢普通縫、正式卻換成彎道加寬縫。
@@ -11443,25 +11469,49 @@ function Drive.debugLineBlocker(playerNum, minS)
     return bi and s.sensor.hardS[bi] or nil
 end
 
--- dodge commit 事件的 pre-a 段（承諾線起點→a）最小物理淨距（1005 遙測；open-issue「pre-a 段物理檔窄縫沒有依
--- 淨距縮速」先定罪用）：候選掃掠只在 [a,c] 收淨距、逐點表要等守護輪才建，commit 當下沒有這段的數。以同一條承諾線
--- （fstate.ovX/Y）、物理檔 base 把 [ovS0, a] 當成淨距窗重掃一次，淨距＝sweepLine 餘裕＋SWEEP_PHYS_PAD（車身 OBB
--- 到形狀表面，與 pre-a 段掃掠同一個 pad）。冷路徑：每次 commit 一次；只讀不收表。nil＝pre-a 段不足兩個取樣點、
--- a 在線尾之外，或掃掠輸入無效。9 以上＝窗內沒有近物（sweepLine 的淨距上限）。
-function Drive.preAClear(s)
-    local fs, step = s.fstate, MDADFollower.OV_STEP
-    if not finite(fs.ovN) or not finite(fs.ovS0) or not finite(fs.offA) then return nil end
-    local k = math.floor((fs.offA - fs.ovS0) / step) + 1
-    if k < 2 or k >= fs.ovN then return nil end
-    local s1 = fs.ovS0 + (k - 1) * step
+-- 承諾線 pre-a 段（線起點→a）的最小物理淨距（1005 遙測；1017d 起也是承諾閘，見 Drive.preARejects）：候選掃掠只在 [a,c] 收淨距、
+-- 逐點表要等守護輪才建，commit 當下沒有這段的數。以要承諾的那條線（X／Y／n／s0＝候選工作表 tmpOv 或 fstate.ov）、物理檔 base
+-- 把 [s0, a] 當成淨距窗重掃一次，淨距＝sweepLine 餘裕＋SWEEP_PHYS_PAD（車身 OBB 到形狀表面，與 pre-a 段掃掠同一個 pad）。
+-- 冷路徑：每次承諾一次；只讀不收表。nil＝pre-a 段不足兩個取樣點、a 在線尾之外，或掃掠輸入無效。9 以上＝窗內沒有近物
+-- （sweepLine 的淨距上限）。
+function Drive.preAClear(s, X, Y, n, s0, a, offL)
+    local step = MDADFollower.OV_STEP
+    if not finite(n) or not finite(s0) or not finite(a) then return nil end
+    local k = math.floor((a - s0) / step) + 1
+    if k < 2 or k >= n then return nil end
+    local s1 = s0 + (k - 1) * step
     -- 只量不留痕：sweepLine 命中會寫 blocked 事件的 kind（sweepHitBody）、每次呼叫累加 replan 掃掠數（sweepCount）
     local hitBody, nSweep = s.sweepHitBody, s.sweepCount
-    local ok, m, _, _, _, _, _, hitI = sweepLine(s, fs.ovX, fs.ovY, k, fs.ovS0, s1, fs.ovS0, fs.ovS0, s1, s1,
-        fs.offL, "pre-a", MDADVehicleProfile.sweepBase(s.vehicleProfile.halfW, "physical"), nil, false, false)
+    local ok, m, _, _, _, _, _, hitI = sweepLine(s, X, Y, k, s0, s1, s0, s0, s1, s1,
+        offL, "pre-a", MDADVehicleProfile.sweepBase(s.vehicleProfile.halfW, "physical"), nil, false, false)
     s.sweepHitBody, s.sweepCount = hitBody, nSweep
     if ok then return m + SWEEP_PHYS_PAD end
     if hitI ~= nil then return SWEEP_PHYS_PAD - m end -- 命中：sweepHit 回 −淨距
     return nil
+end
+
+-- 繞行前段已貼上障礙時不承諾（1017d，2026-10-17 使用者裁定；正式服 P18 clip-32：preA −0.15 仍以 20.5 km/h 承諾
+-- curve-physical，1.0 s 後 9.7 km/h 撞同一棵樹）：承諾前（延後與 setOffset 之前）一律對候選工作表 tmpOv 算 pre-a 段物理淨距
+-- （不受 s.diag 限制，結果記 s.commitPreA 給 commit 事件），小於承諾後 pre-a 段 footprint 會用的 pad（同 Drive.footprintPad：
+-- SWEEP_PHYS_PAD，承諾檔低於巡航時取 nb−halfW 較小者）＝一承諾 contact 就觸發，拒收這條候選、當輪判堵（dodgeBlockReason
+-- pre-a、blockSteepM −1 照標準倒車），走判堵階梯（停等／倒車／改道）。事件 dodge phase=reject why=pre-a（同一段判堵只記一次）。
+-- 回 true＝拒收。
+function Drive.preARejects(s, playerNum, a, b, offL, nb)
+    local pad, hw = SWEEP_PHYS_PAD, s.vehicleProfile.halfW
+    if finite(nb) and nb < s.sweepBase - 1e-6 and nb - hw < pad then pad = nb - hw end
+    local m = Drive.preAClear(s, s.tmpOvX, s.tmpOvY, s.lastOvN, s.lastOvS0, a, offL)
+    s.commitPreA = m
+    if not finite(m) or m >= pad then return false end
+    if not (s.blocked and s.dodgeBlockReason == "pre-a") then
+        diagEvent(s, playerNum, "dodge", { phase = "reject", why = "pre-a", preA = m, need = pad, offL = offL,
+            a = a, b = b, rs = s.lastSNow, tier = s.dodgeTier })
+        if getDebug() then
+            print(string.format("%spn=%d dodge reject (pre-a): preA=%.2f pad=%.2f offL=%.2f a=%.1f rs=%.1f tier=%s",
+                LOG, playerNum, m, pad, offL, a, s.lastSNow, tostring(s.dodgeTier)))
+        end
+    end
+    s.dodgeBlockReason, s.blockSteepM, s.dodgeShapeReason = "pre-a", -1, nil
+    return true
 end
 
 -- 承諾線進入段的運動學證明（1006；open-issue「承諾線曲率對 rMin 的可行性」）：陡坡閘（SHIFT_MIN_RATIO）刻意放行比運動學更陡的
@@ -13219,6 +13269,8 @@ local function replan(s, vehicle, playerNum)
                 .. " return line blocked: dodge takes over")
         end
     end
+    -- 繞行前段已貼上障礙時不承諾（1017d，Drive.preARejects）：延後與 setOffset 之前一律算 pre-a 段物理淨距，不夠就當輪判堵
+    if mode == "dodge" and Drive.preARejects(s, playerNum, a, b, offL, commitNb) then mode = "blocked" end
     if mode == "dodge" and s.dodgeCrawl and not s.dodging
             and finite(s.lastRouteErr) and s.lastRouteErr > TUNE.DODGE_CRAWL_ALIGN_RAD then
         -- 理由見 TUNE.DODGE_CRAWL_ALIGN_RAD：姿態沒擺正不承諾貼縫，下一輪再問；擺正前先按縫口降速
@@ -13378,7 +13430,7 @@ local function replan(s, vehicle, playerNum)
                 thin = s.thinRec and s.thinRec.on and s.thinRec.phys or nil, -- 換縫找更寬時記下最窄那條的物理淨距
                 kin = s.kinRejectN > 0 and s.kinRejectN or nil, -- 承諾前被運動學證明拒收的候選數（Drive.kinProof）
                 fold = s.towFoldDeg, -- 承諾前被掛車折角預檢拒收的候選中最大預估折角（°；Drive.towFold）
-                preA = s.diag and Drive.preAClear(s) or nil, -- pre-a 段最小物理淨距（只在紀錄開著時量）
+                preA = s.commitPreA, -- pre-a 段最小物理淨距（承諾前 Drive.preARejects 量的，1017d 起一律量）
                 -- 承諾線對殭屍的最小淨距（距離 − R；Drive.zombieLineGap）與那一隻的 (s, l)；本輪被殭屍擋下的候選數（1013d）
                 zm = s.zmM, zmS = s.zmS, zmL = s.zmL, zv = s.zomRec and s.zomRec.n > 0 and s.zomRec.n or nil,
                 -- 1017：本輪第一條被殭屍擋下的候選的 min(彎帽, 餘裕帽)（Drive.zombieCap0）；被承諾那條在 chainAhead 走到的分支
