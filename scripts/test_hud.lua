@@ -55,6 +55,10 @@ local texts = {
     UI_MinidoracatAutoDrive_HUDStatusSide = "SIDE",
     UI_MinidoracatAutoDrive_HUDStatusUturn = "Turning in place",
     UI_MinidoracatAutoDrive_HUDStatusUturnSlow = "Tight spot: slow turn", -- 1013c：長度對齊真實英文字串
+    -- 1017g 自動掛回三段（長度對齊真實英文字串）
+    UI_MinidoracatAutoDrive_HUDStatusRehitchWait = "Awaiting trailer: %1 s",
+    UI_MinidoracatAutoDrive_HUDStatusRehitchFound = "Trailer found",
+    UI_MinidoracatAutoDrive_HUDStatusRehitchBack = "Backing to trailer",
     UI_MinidoracatAutoDrive_HUDStatusBlocked = "BLOCKED",
     UI_MinidoracatAutoDrive_HUDStatusDodging = "DODGE",
     UI_MinidoracatAutoDrive_HUDStatusBuild = "BUILD",
@@ -1468,6 +1472,27 @@ do
     check(panel._statusText == "Tight spot: slow turn" and panel._statusColor == unstickColor,
         "wide-arc U-turn token shows its own label in the unstick colour (" .. tostring(panel._statusText) .. ")")
 end
+-- 自動掛回三段（1017g；Drive.hudState 鍵 rehitchwait／rehitchfound／rehitchback）：等掛車帶倒數秒數（第 6 值）、找到掛車、
+-- 倒車對準，專屬文字、與倒車脫困同色；倒數只給等掛車那段用。
+-- 違規證明：STATUS_KEYS 拿掉 rehitchwait 或 refresh 不帶秒數＝文字紅；statusColor 不認 rehitchback＝顏色紅。
+do
+    state.token = "unstick"
+    panel:refresh(nowMs)
+    local unstickColor = panel._statusColor
+    state.token, state.resumeIn = "rehitchwait", 12
+    panel:refresh(nowMs)
+    check(panel._statusText == "Awaiting trailer: 12 s" and panel._statusColor == unstickColor,
+        "(rh-wait) rehitch wait shows the countdown in the unstick colour (" .. tostring(panel._statusText) .. ")")
+    state.token = "rehitchfound"
+    panel:refresh(nowMs)
+    check(panel._statusText == "Trailer found" and panel._statusColor == unstickColor,
+        "(rh-found) trailer-found token shows its own label (" .. tostring(panel._statusText) .. ")")
+    state.token = "rehitchback"
+    panel:refresh(nowMs)
+    check(panel._statusText == "Backing to trailer" and panel._statusColor == unstickColor,
+        "(rh-back) reversing-to-trailer token shows its own label (" .. tostring(panel._statusText) .. ")")
+    state.resumeIn = nil
+end
 state.token = "follow"
 panel:refresh(nowMs)
 checkEq(panel._statusText, "FOLLOW", "countdown value is ignored outside yield")
@@ -2228,6 +2253,28 @@ check(panel._statusText == string.rep("T", 60) and panel._showStatusText
 state.stopKey, state.stopAgoMs = nil, nil
 texts.UI_MinidoracatAutoDrive_HUDStatusStop_trailer = nil
 options:apply()
+
+-- 自動掛回三段的短標籤（1017g）也在 STATUS_WIDTH_KEYS：比其他狀態字都長也不壓速度欄；等掛車那段以最大參數量寬
+-- 違規證明：STATUS_WIDTH_KEYS 拿掉任一鍵＝這條紅。
+do
+    local savedActive, savedReason, savedToken = state.active, state.startReason, state.token
+    state.active, state.startReason = true, nil
+    for _, case in ipairs({ { "rehitchwait", "HUDStatusRehitchWait", 12 }, { "rehitchfound", "HUDStatusRehitchFound" },
+            { "rehitchback", "HUDStatusRehitchBack" } }) do
+        local key = "UI_MinidoracatAutoDrive_" .. case[2]
+        local oldText = texts[key]
+        texts[key] = string.rep("R", 56) .. (case[3] and " %1" or "")
+        options:apply()
+        state.token, state.resumeIn = case[1], case[3]
+        panel:refresh(nowMs)
+        check(panel._showStatusText and #panel._statusText >= 56
+                and panel._statusX + textManager:MeasureStringX(UIFont.Small, panel._statusText) <= panel._speedX,
+            "(rh-width) measured long " .. case[1] .. " label ends before speed column")
+        texts[key] = oldText
+    end
+    state.active, state.startReason, state.token, state.resumeIn = savedActive, savedReason, savedToken, nil
+    options:apply()
+end
 
 -- 窄分割畫面＋長語系＋1.25x：OnCreatePlayer 會重建**所有** dashboard
 -- 並改 viewport；既有 P0 與新 P1 都要立即 re-layout/reparent/dock。
