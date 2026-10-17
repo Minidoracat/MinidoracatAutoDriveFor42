@@ -24134,6 +24134,11 @@ function drive.scenarioTowRehitch()
     stopIt()
     checkTrue(rh.phase == "wait" and count("rh-stop") == 1 and math.abs((last("rh-stop").d or 0) - 8) < 1e-9,
         "(rh-brake) 停妥記 rh-stop、d＝離脫開點 8m（d " .. tostring(last("rh-stop").d) .. "）")
+    -- (rh-hud) 1017g HUD 分段：等掛車＝rehitchwait＋倒數（第 6 值，向上取整到 REHITCH_WAIT_MS 放棄）、找到＝rehitchfound、
+    --   倒車＝rehitchback、煞停與掛上後確認＝rehitch。違規證明：hudState 不分段／倒數不看 waitFrom＝紅。
+    local hk, _, _, _, _, hLeft = Dr.hudState(0)
+    checkTrue(hk == "rehitchwait" and hLeft == math.ceil(T.REHITCH_WAIT_MS / 1000),
+        "(rh-hud) 停妥等掛車：HUD rehitchwait、倒數 " .. tostring(hLeft) .. " 秒（" .. tostring(hk) .. "）")
 
     present, script = back, "Base.SmallCar" -- id 被別台車拿走
     tick()
@@ -24146,6 +24151,8 @@ function drive.scenarioTowRehitch()
     checkTrue(rh.trailer == back and st.sensor.selfTrailer == back and count("rh-found") == 1
         and math.abs((last("rh-found").d or 0) - 12) < 1e-9,
         "(rh-found) 同 script 在範圍內：認、倒車探測排除它、d＝離脫開點 12m")
+    checkEq(Dr.hudState(0), "rehitchfound", "(rh-hud) 找到掛車：HUD rehitchfound、不再倒數")
+    checkEq(select(6, Dr.hudState(0)), nil, "(rh-hud) 找到掛車後第 6 值 nil")
     driveReset(dveh)
     frames(T.REHITCH_FOUND_MS - 100)
     checkTrue(rh.phase == "wait" and dveh._imp.total == 0, "(rh-found) 看到後 FOUND_MS 內不倒")
@@ -24153,6 +24160,7 @@ function drive.scenarioTowRehitch()
     frames(200)
     checkTrue(rh.phase == "reverse" and count("rh-reverse") == 1 and math.abs(rh.hd - math.sqrt(14 * 14 + 0.25)) < 1e-9,
         "(rh-rev) 起倒、記 rh-reverse（hd " .. tostring(rh.hd) .. "）")
+    checkEq(Dr.hudState(0), "rehitchback", "(rh-hud) 倒車對準：HUD rehitchback")
     dveh._speed, dveh._stopped = -3, false
     driveReset(dveh)
     tick()
@@ -24172,6 +24180,7 @@ function drive.scenarioTowRehitch()
     towing = back -- 引擎掛上
     tick()
     checkTrue(rh.phase == "settle" and count("rh-attach") == 1, "(rh-done) 引擎掛上＝settle、記 rh-attach")
+    checkEq(Dr.hudState(0), "rehitch", "(rh-hud) 掛上後確認：HUD 照舊 rehitch")
     dveh._speed = 1
     driveReset(dveh)
     tick()
@@ -24202,8 +24211,11 @@ function drive.scenarioTowRehitch()
 
     st = arm("rh-nofound")
     stopIt()
-    frames(T.REHITCH_WAIT_MS - 100)
-    checkTrue(Dr.isActive(0) and st.rehitch.phase == "wait", "(rh-nofound) 等待上限內仍在等")
+    frames(5000)
+    checkEq(select(6, Dr.hudState(0)), math.ceil((T.REHITCH_WAIT_MS - 5000) / 1000), "(rh-hud) 等 5 秒：倒數跟著少")
+    frames(T.REHITCH_WAIT_MS - 5100)
+    checkTrue(Dr.isActive(0) and st.rehitch.phase == "wait" and select(6, Dr.hudState(0)) == 1,
+        "(rh-nofound) 等待上限內仍在等；剩 100 ms 倒數顯示 1")
     frames(200)
     failed("rh-nofound", "nofound")
 
@@ -24273,6 +24285,134 @@ function drive.scenarioTowRehitch()
     SandboxVars, dveh, getSpecificPlayer = oldSandbox, oldVeh, oldGet
 end
 drive.scenarioTowRehitch()
+-- (mh) 1017g 手動介入後的提示（Drive.manualHintNote／manualHint）：「手動介入後」是預設（介入即關閉）時，接手（Drive.manualStop）
+--   後 TUNE.MANUAL_HINT_MS 內、離接手點 TUNE.MANUAL_HINT_M 內以同一目標重開＝白字＋Toast 提示一次、記 takeover phase=hint。
+--   (mh-hint)   20 s 後、50 m 外重開同目標：提示一次（halo info＋toast）、事件 dt／d。違規證明：拿掉 commitSession 後的呼叫＝紅。
+--   (mh-once)   同一場遊戲第二次照樣停一下又開：不再提示。違規證明：不設 manualHinted＝紅。
+--   (mh-late／mh-far／mh-target／mh-opt) 超過時間、超過距離、換目標、重開時選項已改成自動恢復：都不提示。
+--               違規證明：各自拿掉時間／距離／目標／選項條件＝對應那條紅。
+--   (mh-yield)  選自動恢復時接手走讓位、不記接手：放手前按停再重開不提示。
+--   (mh-consume) 不符合的那次重開就消費掉接手紀錄：再停一次（按停）重開不提示。違規證明：不清紀錄＝紅。
+function drive.scenarioManualHint()
+    scenario("1017g 手動介入後的提示：預設介入即關閉時，接手後原地以同一目標重開提示一次")
+    local Dr, T = MDAD.Drive, MDAD.Drive.debugTune()
+    local DG = MDADDiagnostics
+    local sStart, sEvent, sStop, sToast, sTel = DG.start, DG.event, DG.stop, DG.toast, MDAD.HUD.telemetryEnabled
+    local oldSandbox, oldResume = SandboxVars, drive.resumeMs
+    local oldRoute, oldTx, oldTy, oldState = drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
+    local ev, toasts = {}, {}
+    MDAD.HUD.telemetryEnabled = function() return true end
+    DG.start = function() return true end
+    DG.stop = function() end
+    DG.event = function(_, name, a) if name == "takeover" and type(a) == "table" then ev[#ev + 1] = a end end
+    DG.toast = function(text) toasts[#toasts + 1] = text end
+    drive.fillWorld(-10, 320, -12, 12)
+    drive.putRoad(-10, 320, -3, 3)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 60, RightLaneBias = 0 })
+    local HINT = "UI_MinidoracatAutoDrive_ManualResumeHint"
+    local function setTarget(tx)
+        drive.nav.route = { pts = { 0, 0, tx, 0 }, segSurface = { "paved" }, segWidth = { 6 }, len = tx, cost = tx,
+            avoidPenalty = 0 }
+        drive.nav.tx, drive.nav.ty, drive.nav.state = tx, 0, "ok"
+    end
+    local function startAt(x)
+        Dr.stop(0, nil)
+        dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = x, 0, 0, 0, true
+        setHeading(dveh, 0)
+        dp._vehicle, dveh._driver = dveh, dp
+        clearList(halos)
+        ev, toasts = {}, {}
+        checkTrue(Dr.start(dp), "(mh) 啟動 x=" .. x)
+    end
+    local function takeOver()
+        nowMs = nowMs + 20
+        driveTick(dp, dveh)
+        dveh._steering = 0.02 -- 碰方向盤
+        nowMs = nowMs + 20
+        driveTick(dp, dveh)
+        checkTrue(not Dr.isActive(0), "(mh) 介入即關閉")
+        dveh._steering = 0
+    end
+    local function hinted()
+        local n = 0
+        for i = 1, #halos do if halos[i].text == HINT and halos[i].kind == "info" then n = n + 1 end end
+        return n
+    end
+    local function hintEv()
+        for i = #ev, 1, -1 do if ev[i].phase == "hint" then return ev[i] end end
+    end
+    local function toasted() -- 只數這則提示（啟動／停止也會出別的 Toast）
+        local n = 0
+        for i = 1, #toasts do if toasts[i] == HINT then n = n + 1 end end
+        return n
+    end
+    drive.resumeMs = 0
+    Dr.manualHinted = nil
+    setTarget(300)
+
+    startAt(0)
+    takeOver()
+    nowMs = nowMs + 20000
+    startAt(50)
+    local e = hintEv()
+    checkTrue(hinted() == 1 and toasted() == 1 and noteReason(HINT) and e ~= nil
+            and math.abs(e.dt - 20000) < 100 and math.abs(e.d - 50) < 1e-6,
+        "(mh-hint) 20 s、50 m 內同目標重開：白字＋Toast 提示一次、takeover hint dt／d（halo " .. hinted()
+        .. "、dt " .. tostring(e and e.dt) .. "、d " .. tostring(e and e.d) .. "）")
+    takeOver()
+    nowMs = nowMs + 5000
+    startAt(50)
+    checkTrue(hinted() == 0 and toasted() == 0 and hintEv() == nil, "(mh-once) 同一場遊戲只提示一次")
+
+    local function negative(tag, ms, x, tx, resume)
+        Dr.manualHinted = nil
+        setTarget(300)
+        startAt(0)
+        takeOver()
+        nowMs = nowMs + ms
+        drive.resumeMs = resume or 0
+        if tx then setTarget(tx) end
+        startAt(x)
+        checkTrue(hinted() == 0 and toasted() == 0 and hintEv() == nil, "(" .. tag .. ") 不提示（halo " .. hinted() .. "）")
+        drive.resumeMs = 0
+    end
+    negative("mh-late", T.MANUAL_HINT_MS + 1000, 50)
+    negative("mh-far", 20000, T.MANUAL_HINT_M + 50)
+    negative("mh-target", 20000, 50, 280)
+    negative("mh-opt", 20000, 50, nil, 2000)
+
+    -- 選自動恢復：接手走讓位、不記接手（Drive.manualStop 不跑）
+    Dr.manualHinted = nil
+    setTarget(300)
+    drive.resumeMs = 2000
+    startAt(0)
+    nowMs = nowMs + 20
+    driveTick(dp, dveh)
+    dveh._steering = 0.02
+    nowMs = nowMs + 20
+    driveTick(dp, dveh)
+    checkTrue(Dr.isActive(0) and Dr.hudState(0) == "yield", "(mh-yield) 選自動恢復：讓位")
+    dveh._steering = 0
+    drive.resumeMs = 0
+    startAt(10) -- Drive.start 先按停再開
+    checkTrue(hinted() == 0 and hintEv() == nil, "(mh-yield) 讓位中按停重開：不提示")
+
+    -- 不符合的那次重開就消費掉接手紀錄
+    startAt(0)
+    takeOver()
+    nowMs = nowMs + 20000
+    startAt(T.MANUAL_HINT_M + 50)
+    nowMs = nowMs + 1000
+    startAt(50)
+    checkTrue(hinted() == 0 and hintEv() == nil, "(mh-consume) 上一趟重開已消費接手紀錄：按停後再重開不提示")
+
+    Dr.stop(0, nil)
+    Dr.manualHinted = true -- 其餘情境不出這則提示
+    DG.start, DG.event, DG.stop, DG.toast, MDAD.HUD.telemetryEnabled = sStart, sEvent, sStop, sToast, sTel
+    SandboxVars, drive.resumeMs = oldSandbox, oldResume
+    drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
+end
+drive.scenarioManualHint()
 -- (thr) 1008 拖車倒車的折角門檻（MDADTrailer.canReverse）：舊制折角已超過 REVERSE_HITCH_MAX 時 stepUnstick 把 dist2 設成
 --   「倒夠了」，0 位移 settle→success、3 次額度幾秒燒完（正式服 0.23.0 片段每次 7–19 ms）。
 --   (thr-start) 起手折角已超限：不倒（rear-blocked rear=hitch、phi）、不吃額度、回停等（blockRetryDone）；連三次額度仍 0。

@@ -111,6 +111,10 @@ local STATUS_KEYS = {
     unstick = "UI_MinidoracatAutoDrive_HUDStatusUnstick",
     side = "UI_MinidoracatAutoDrive_HUDStatusSide", -- 側向脫困進行中（Drive.hudState，1006）
     rehitch = "UI_MinidoracatAutoDrive_HUDStatusRehitch", -- 自動掛回進行中（Drive.rehitchStep，1011a）
+    -- 自動掛回的三段（1017g）：等掛車（帶倒數秒數，hudState 第 6 值）／找到掛車／倒車對準
+    rehitchwait = "UI_MinidoracatAutoDrive_HUDStatusRehitchWait",
+    rehitchfound = "UI_MinidoracatAutoDrive_HUDStatusRehitchFound",
+    rehitchback = "UI_MinidoracatAutoDrive_HUDStatusRehitchBack",
     uturn = "UI_MinidoracatAutoDrive_HUDStatusUturn", -- 原地調頭中（Drive.hudState，1013c）
     uturnslow = "UI_MinidoracatAutoDrive_HUDStatusUturnSlow", -- 探測被擋、2B 大弧慢速調頭（1013c）
     blocked = "UI_MinidoracatAutoDrive_HUDStatusBlocked",
@@ -185,6 +189,9 @@ local STATUS_WIDTH_KEYS = {
     "UI_MinidoracatAutoDrive_HUDStatusUnstick",
     "UI_MinidoracatAutoDrive_HUDStatusSide",
     "UI_MinidoracatAutoDrive_HUDStatusRehitch",
+    "UI_MinidoracatAutoDrive_HUDStatusRehitchWait",
+    "UI_MinidoracatAutoDrive_HUDStatusRehitchFound",
+    "UI_MinidoracatAutoDrive_HUDStatusRehitchBack",
     "UI_MinidoracatAutoDrive_HUDStatusUturn",
     "UI_MinidoracatAutoDrive_HUDStatusUturnSlow",
     "UI_MinidoracatAutoDrive_HUDStatusBlocked",
@@ -812,7 +819,8 @@ local function statusColor(token, reason)
     if token == nil then return C.blue end
     if token == "blocked" then return C.red end
     if token == "dodging" or token == "unstick" or token == "side" or token == "lowfps" or token == "areawait"
-            or token == "rehitch" or token == "uturn" or token == "uturnslow" then
+            or token == "rehitch" or token == "rehitchwait" or token == "rehitchfound" or token == "rehitchback"
+            or token == "uturn" or token == "uturnslow" then
         return C.amber
     end
     if token == "yield" or token == "build" then return C.blue end
@@ -2674,6 +2682,8 @@ function MDADHUDPanel:refresh(now)
             self._statusText = getText(REASON_KEYS[reason] or "UI_MinidoracatAutoDrive_HUDStatusNotReady")
         elseif token == "yield" and resumeIn then
             self._statusText = getText("UI_MinidoracatAutoDrive_HUDStatusYieldResume", resumeIn)
+        elseif token == "rehitchwait" then
+            self._statusText = getText(STATUS_KEYS.rehitchwait, resumeIn or 1)
         else
             self._statusText = getText(STATUS_KEYS[token] or STATUS_KEYS.follow)
         end

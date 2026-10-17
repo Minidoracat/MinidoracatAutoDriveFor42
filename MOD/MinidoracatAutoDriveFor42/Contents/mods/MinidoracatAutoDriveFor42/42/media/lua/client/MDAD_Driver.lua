@@ -90,6 +90,11 @@ TUNE.MAX_SESSIONS = 4          -- 分割畫面本機玩家槽上限（getSpecifi
 -- 0＝介入即關閉，2026-09-06 使用者裁定預設不自動恢復）。恢復語音只在讓位持續夠久
 -- 才播——老玩家勾了自動恢復後輕推方向盤微調，每 2 秒念一句「我接手了」會吵。
 TUNE.YIELD_VOICE_MS = 5000
+-- 手動介入後的提示（1017g，2026-10-17 使用者裁定；Drive.manualHint）：選項是預設（介入即關閉）時，接手後這麼久內、
+-- 離接手點這麼近、以同一目標重開＝停一下又開，提示一次可以設成放手後自動接回。2026-10-17 正式服分析：剩餘 ≥300 m、
+-- 沒異常就接手的 139 趟有 39 趟（28%、21 人）在 60 秒、150 m 內以同一目標重開，中位間隔 21 秒。
+TUNE.MANUAL_HINT_MS = 60000
+TUNE.MANUAL_HINT_M = 150
 TUNE.PAUSE_VOICE_TIMEOUT_MS = 10000 -- 最長交還語音 6.3s；播放狀態失效時不永久等待
 -- 調頭方式（2026-09-06 使用者裁定預設「溫和」；codex 交叉審：「被嚇到」對應**帶多少速度
 -- 開始轉**，其次才是轉多快——力矩倍率只管原地旋轉，管不到 15-25 km/h 帶速大弧）。
@@ -1858,7 +1863,8 @@ end
 -- HUD 唯讀狀態（M5.5b 面板的資料面）。回**多值純量**、不洩漏 session table
 -- （session 是可變內部狀態，交出參考＝UI 能繞過所有入口改駕駛行為）：
 --   statusKey, gearId, effectiveCapKmh, zombieSlowOn, corpseSlowOn, resumeIn, elapsedSeconds, arrivalReason
--- statusKey ∈ arrive/yield/rehitch/side/unstick/uturn/uturnslow/blocked/areawait/dodging/build/lowfps/follow；nil＝無 session 且無準備意圖。
+-- statusKey ∈ arrive/yield/rehitch/rehitchwait/rehitchfound/rehitchback/side/unstick/uturn/uturnslow/blocked/areawait/
+-- dodging/build/lowfps/follow；nil＝無 session 且無準備意圖。
 -- arrivalReason 是到站回報拒絕原因的翻譯鍵，沒有拒絕原因則為 nil。
 -- 顯示優先序：arrive > yield > recovery（unstick/recover/settle）> 調頭（uturn 原地／uturnslow 被擋大弧，1013c）>
 -- current/planned blocked > dodging > build > follow。
@@ -1882,7 +1888,13 @@ function Drive.hudState(playerNum)
     local key
     if s.mode == "arrive" then key = "arrive"
     elseif s.mode == "yield" then key = "yield"
-    elseif s.mode == "rehitch" then key = "rehitch" -- 自動掛回進行中（Drive.rehitchStep，1011a）
+    elseif s.mode == "rehitch" then
+        -- 自動掛回（Drive.rehitchStep，1011a）；1017g 等掛車（第 6 值倒數到 REHITCH_WAIT_MS 放棄）／找到掛車／倒車對準
+        -- 分開顯示（正式服 2 次玩家等 8–9 秒沒看到動靜就自己倒車）；煞停與掛上後確認照舊「接回掛車中」
+        local rh = s.rehitch
+        local ph = rh and rh.phase
+        key = ph == "reverse" and "rehitchback"
+            or ph == "wait" and (rh.trailer and "rehitchfound" or "rehitchwait") or "rehitch"
     elseif s.mode == "unstick" and s.unstickSide then
         key = "side" -- 側向脫困進行中（Drive.stepSideEscape；settle 照舊算 unstick）
     elseif s.mode == "unstick" or s.mode == "settle"
@@ -1899,11 +1911,16 @@ function Drive.hudState(playerNum)
     else key = "follow" end
     local cap = s.maxSpeed
     if s.gearCap and s.gearCap > 0 and s.gearCap < cap then cap = s.gearCap end
-    -- 第 6 值：讓位中已放手時「幾秒後恢復」（向上取整、最少 1），按著或非讓位＝nil。
-    -- HUD 狀態列以此顯示倒數（2026-09-06 回饋「不知道放開會變回自動駕駛」）。
-    local resumeIn = nil
+    -- 第 6 值：讓位中已放手時「幾秒後恢復」、等掛車時「還等幾秒」（向上取整、最少 1），其餘＝nil。
+    -- HUD 狀態列以此顯示倒數（2026-09-06 回饋「不知道放開會變回自動駕駛」；1017g 掛回等待）。
+    local resumeIn, left = nil, nil
     if key == "yield" and s.cleanSinceMs > 0 then
-        local left = s.cleanSinceMs + s.yieldResumeMs - getTimestampMs() + 999
+        left = s.cleanSinceMs + s.yieldResumeMs
+    elseif key == "rehitchwait" then
+        left = s.rehitch.waitFrom + TUNE.REHITCH_WAIT_MS
+    end
+    if left then
+        left = left - getTimestampMs() + 999
         resumeIn = (left - left % 1000) / 1000
         if resumeIn < 1 then resumeIn = 1 end
     end
@@ -2192,11 +2209,41 @@ end
 -- 玩家介入即交還（「手動介入後」＝0 的預設、到站煞停途中）：先記是哪個輸入（1009，takeover manual `key`；
 -- 有自動恢復時走讓位、記 takeover yield），再照舊綠字＋manual 語音停止。
 function Drive.manualStop(s, playerNum, player, key)
+    Drive.manualHintNote(s, playerNum)
     diagEvent(s, playerNum, "takeover", { phase = "manual", key = key })
     -- 1017：自動掛回中玩家接手（正式服 2 次等 8–9 秒沒等到就自己倒）也是掛回的一種結局，kind＝當時的掛回階段
     if s.rehitch then Drive.rehitchNote(s, playerNum, s.vehicle, getTimestampMs(), "rh-fail", nil, "manual", nil, nil, s.rehitch.phase) end
     haloGood(player, "UI_MinidoracatAutoDrive_ManualStop")
     Drive.stop(playerNum, nil, "manual")
+end
+
+-- 手動介入後的提示（1017g，2026-10-17 使用者裁定；「手動介入後」預設照 09-06 裁定不改）：Drive.manualStop 記下接手的時間、
+-- 車位與目標，下一趟真的接上（commitSession 之後，兩個呼叫點）時消費掉——選項仍是預設（manualResumeMs()＝0）、
+-- 同一目標、TUNE.MANUAL_HINT_MS 內、離接手點 TUNE.MANUAL_HINT_M 內＝停一下又開，白字＋Toast 提示一次可以設成放手後
+-- 自動接回，記 takeover phase=hint（dt＝接手到重開 ms、d＝離接手點 m）。一場遊戲（Lua 狀態）最多一次。
+Drive.manualTakes = {}
+function Drive.manualHintNote(s, playerNum)
+    local v = s.vehicle
+    if Drive.manualHinted or not v or s.lastTx == nil then return end
+    Drive.manualTakes[playerNum] = { t = getTimestampMs(), x = v:getX(), y = v:getY(), tx = s.lastTx, ty = s.lastTy }
+end
+
+function Drive.manualHint(playerObj, playerNum)
+    local m, s = Drive.manualTakes[playerNum], sessions[playerNum]
+    Drive.manualTakes[playerNum] = nil
+    if not m or not s or Drive.manualHinted or m.tx ~= s.lastTx or m.ty ~= s.lastTy or manualResumeMs() > 0 then return end
+    local dt = getTimestampMs() - m.t
+    local dx, dy = s.vehicle:getX() - m.x, s.vehicle:getY() - m.y
+    local d = sqrt(dx * dx + dy * dy)
+    if dt > TUNE.MANUAL_HINT_MS or d > TUNE.MANUAL_HINT_M then return end
+    Drive.manualHinted = true
+    local hint = getText("UI_MinidoracatAutoDrive_ManualResumeHint")
+    if playerObj then HaloTextHelper.addText(playerObj, hint) end -- 白字＝資訊（同 Drive.stop 的遙測提示）
+    if MDADDiagnostics and MDADDiagnostics.toast then MDADDiagnostics.toast(hint, "info") end
+    diagEvent(s, playerNum, "takeover", { phase = "hint", dt = dt, d = d })
+    if getDebug() then -- telemetry: takeover phase=hint（dt／d）
+        print(LOG .. "pn=" .. playerNum .. " takeover hint dt=" .. dt .. " d=" .. d)
+    end
 end
 
 -- 把建好的 session 正式接上：**第一次碰玩家的車就在這裡**（先把 regulator 關掉一次；
@@ -2737,6 +2784,7 @@ local function startSession(playerObj, playerNum, stage)
         return nil
     end
     commitSession(playerObj, playerNum, sNew)
+    Drive.manualHint(playerObj, playerNum) -- 接手後停一下又開：提示「手動介入後」可設自動接回（1017g）
     return nil
 end
 
@@ -2950,6 +2998,7 @@ function TRIP.stepPrep(playerNum, now)
         TRIP.cancel(playerNum, prep)
         commitSession(playerObj, playerNum, prep.session)
         TRIP.announce(playerObj, playerNum, prep.event)
+        Drive.manualHint(playerObj, playerNum)
         return nil
     end
     if now < prep.nextMs then return nil end
