@@ -6862,9 +6862,17 @@ function Drive.towTight(s, playerNum, err, speedKmh)
 end
 
 -- align 閘的橫向容許（stepFollow full gate／alignmentCapKmh）：0.25×(路寬−車寬)，夾 [0.35, 0.75]；沒路寬 0.5。
--- 結果記 s.alignTol（1017e 樣本 atl：拖車 capReason=align 時寫，正式服 D8 定罪用）。
+-- 拖車改寫弧（1017e，2026-10-17 使用者裁定）：該段 segWidth 是以改寫線為中心的虛擬路寬（MDADTrailer.shape 下限
+-- 2·(thw＋ROAD_EDGE_MARGIN)＋0.1＝容許永遠落在下限 0.35），路寬改取該轉角原路寬 min(進入, 轉出)（shape 的 segRoadW，
+-- 經剖面 segSourceA 對回）＝同一條路非拖車的容許。只動速度閘：路寬證明、RETURN、車道餘裕照舊用虛擬路寬（決策 3.1），掛車內切
+-- 由落後守門與掛車 footprint 照舊壓速（1013e）。正式服 D8：拖車 align 1.90 vs 非拖車 0.58 s/km，57% 在改寫弧上。結果記 s.alignTol（樣本 atl）。
 function Drive.alignLatTol(s)
-    local w = s.currentSegWidth
+    local w, p = s.currentSegWidth, s.profile
+    if s.tow and p.towArcR and p.towArcR[s.fstate.idx] then
+        local rw, src = s.profileRoute and s.profileRoute.segRoadW, p.segSourceA and p.segSourceA[s.fstate.idx]
+        local real = rw and src and rw[src]
+        if finite(real) and (not finite(w) or real > w) then w = real end
+    end
     local tol = 0.5
     if finite(w) and w > 0 then
         tol = 0.25 * (w - 2 * s.vehicleProfile.halfW)

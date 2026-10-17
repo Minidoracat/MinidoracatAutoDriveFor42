@@ -24149,7 +24149,8 @@ drive.scenarioTowHitchReverse()
 --   (rope-start)  繩索：當下掛點距−相碰距扣 REAR_KEEP_M 退不出 UNSTICK_MIN_M＝不倒（rear=rope、hd／hdMin）、不吃額度、回停等。
 --   (rope-mid)    倒車中還沒退出 UNSTICK_MIN_M 就貼近被拖車：退回額度、回停等。
 --   (rope-keep)   已退出一段才貼近：當倒夠進 settle（why=rope）、額度照扣。違規證明：stepUnstick 不看 ropeStop＝(rope-mid／keep) 紅。
---   (align-tow)   align 閘的橫向容許照段寬算、記 s.alignTol（樣本 atl）。
+--   (align)       拖車改寫弧上 align 閘的橫向容許取原路寬（segRoadW 經 segSourceA 對回）；弧外、沒拖照虛擬路寬。
+--                 違規證明：alignLatTol 不看 segRoadW＝紅。
 --   (tl-1017)     tow lost alive=true 帶前 1 秒 phiMax／phiRate 與 st；alive=false 不帶。
 --   (tkc)         樣本 tkc 取樣間最小倍率、寫出後清。
 function drive.scenarioTow1017()
@@ -24235,15 +24236,18 @@ function drive.scenarioTow1017()
     s.pendingRouteWhy = "towturn"
     checkTrue(Dr.towTight(s, 0, 2.0, 3) and count("tight") == 0, "(tight-wait) 等調頭繞行 cutover：照判、不重記")
 
-    -- (align-tow) align 閘橫向容許照段寬算、記 s.alignTol（樣本 atl）
+    -- (align)
     s = { tow = {}, profile = { towArcR = { [3] = 6 }, segSourceA = { [3] = 7 } },
         profileRoute = { segRoadW = { [7] = 8 } }, fstate = { idx = 3 }, currentSegWidth = 3.5,
         vehicleProfile = { halfW = 1.3 } }
-    local tolA = Dr.alignLatTol(s)
-    s.currentSegWidth = 8
-    local tolB = Dr.alignLatTol(s)
-    checkTrue(tolA == 0.35 and tolB == 0.75 and s.alignTol == 0.75,
-        "(align-tow) 容許照段寬 3.5／8m＝0.35／0.75、記 alignTol（got " .. tostring(tolA) .. "/" .. tostring(tolB) .. "）")
+    local onArc = Dr.alignLatTol(s)
+    s.fstate.idx = 2
+    local offArc = Dr.alignLatTol(s)
+    s.fstate.idx, s.tow = 3, nil
+    local noTow = Dr.alignLatTol(s)
+    checkTrue(onArc == 0.75 and s.alignTol == noTow and offArc == 0.35 and noTow == 0.35,
+        "(align) 改寫弧上照原路寬 8m（0.75）、弧外與沒拖照虛擬路寬 3.5m（0.35）（got " .. tostring(onArc) .. "/"
+        .. tostring(offArc) .. "/" .. tostring(noTow) .. "）")
 
     -- (tl-1017)
     local oldLS, oldLW = MDADTrailer.lostState, MDADTrailer.lostWhere

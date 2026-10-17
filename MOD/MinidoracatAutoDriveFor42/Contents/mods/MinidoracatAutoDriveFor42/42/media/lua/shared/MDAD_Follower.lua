@@ -881,17 +881,18 @@ function MDADFollower.despikeRoute(route)
         return j, lat
     end
     local n = #pts / 2
-    local sw, ss, sa = route.segWidth, route.segSurface, route.segArcR
+    local sw, ss, sa, sr = route.segWidth, route.segSurface, route.segArcR, route.segRoadW
     if type(sw) ~= "table" then sw = nil end
     if type(ss) ~= "table" then ss = nil end
-    -- segArcR（拖車改寫弧的規劃半徑，Trailer.shape）：原段照抄，合併／收直出來的新段不是弧（0）
+    -- segArcR（拖車改寫弧的規劃半徑，Trailer.shape）與 segRoadW（同一段弧的原路寬，1017e）：原段照抄，合併／收直出來的新段不是弧（0）
     if type(sa) ~= "table" then sa = nil end
+    if type(sr) ~= "table" then sr = nil end
     local found = false
     for i = 2, n - 1 do
         if spikeAt(pts, i) or jogAt(pts, n, i, sw) then found = true break end
     end
     if not found then return route end
-    local P, W, S, A = {}, sw and {} or nil, ss and {} or nil, sa and {} or nil
+    local P, W, S, A, RW = {}, sw and {} or nil, ss and {} or nil, sa and {} or nil, sr and {} or nil
     local np, removed = 0, 0
     for i = 1, n do
         np = np + 1
@@ -900,6 +901,7 @@ function MDADFollower.despikeRoute(route)
             if W then W[np - 1] = sw[i - 1] end
             if S then S[np - 1] = ss[i - 1] end
             if A then A[np - 1] = sa[i - 1] end
+            if RW then RW[np - 1] = sr[i - 1] end
         end
         -- 新點進來後回頭看上一個頂點；刪掉後新的上一個頂點可能又成反折（連續鋸齒）
         while np >= 3 do
@@ -910,6 +912,7 @@ function MDADFollower.despikeRoute(route)
                 if S then S[np - 2] = S[np - 1] end
             end
             if A then A[np - 2] = 0 end -- 合併段不是弧（A[np-1] 由下一點覆寫、第二趟重建）
+            if RW then RW[np - 2] = 0 end
             P[np * 2 - 3], P[np * 2 - 2] = P[np * 2 - 1], P[np * 2]
             P[np * 2 - 1], P[np * 2] = nil, nil
             if W then W[np - 1] = nil end
@@ -922,14 +925,15 @@ function MDADFollower.despikeRoute(route)
     -- 加錨點，斜線只在錨點與中點之間（折角 ≤7°），這兩段的段寬扣掉 lat（1002t：斜線在中點離兩臂中心 lat/2，照原寬
     -- 靠右＝車心貼到臂的路緣；8m 路 4m 錯位、靠右 2m 時車身出路緣約 0.9m）。扣過的寬度 ≥ JOG_CLEAR_M（jogAt 的
     -- 路寬閘），斜線兩側各 (w−lat)/2 的帶仍在兩臂的真路面內；錨點外的臂照原線原寬，靠右照舊。
-    local Q, QW, QS, QA, nq = {}, W and {} or nil, S and {} or nil, A and {} or nil, 0
-    local function push(x, y, w, s, a) -- w／s／a＝從上一點到這點那段的屬性
+    local Q, QW, QS, QA, QR, nq = {}, W and {} or nil, S and {} or nil, A and {} or nil, RW and {} or nil, 0
+    local function push(x, y, w, s, a, rw) -- w／s／a／rw＝從上一點到這點那段的屬性
         nq = nq + 1
         Q[nq * 2 - 1], Q[nq * 2] = x, y
         if nq >= 2 then
             if QW then QW[nq - 1] = w end
             if QS then QS[nq - 1] = s end
             if QA then QA[nq - 1] = a or 0 end
+            if QR then QR[nq - 1] = rw or 0 end
         end
     end
     push(P[1], P[2])
@@ -945,7 +949,7 @@ function MDADFollower.despikeRoute(route)
             local arm = JOG_ARM_RATIO * lat
             local ax, ay = ix - P[i * 2 - 3], iy - P[i * 2 - 2]
             local la = sqrt(ax * ax + ay * ay)
-            if la > arm + 0.5 then push(ix - ax / la * arm, iy - ay / la * arm, wIn, sIn, A and A[i - 1]) end
+            if la > arm + 0.5 then push(ix - ax / la * arm, iy - ay / la * arm, wIn, sIn, A and A[i - 1], RW and RW[i - 1]) end
             push((ix + jx) * 0.5, (iy + jy) * 0.5, wIn and wIn - lat, sIn)
             local bx, by = P[j * 2 + 1] - jx, P[j * 2 + 2] - jy
             local lb = sqrt(bx * bx + by * by)
@@ -957,19 +961,20 @@ function MDADFollower.despikeRoute(route)
             removed = removed + (j - i)
             i = j + 1
         else
-            local w, a = W and W[i - 1], A and A[i - 1]
-            if narrowNext then w, a, narrowNext = narrowW, 0, false end
-            push(P[i * 2 - 1], P[i * 2], w, S and S[i - 1], a)
+            local w, a, rw = W and W[i - 1], A and A[i - 1], RW and RW[i - 1]
+            if narrowNext then w, a, rw, narrowNext = narrowW, 0, 0, false end
+            push(P[i * 2 - 1], P[i * 2], w, S and S[i - 1], a, rw)
             i = i + 1
         end
     end
-    P, W, S, A = Q, QW, QS, QA
+    P, W, S, A, RW = Q, QW, QS, QA, QR
     local out = {}
     for k, v in pairs(route) do out[k] = v end
     out.pts, out.despiked = P, removed
     if W then out.segWidth = W end
     if S then out.segSurface = S end
     if A then out.segArcR = A end
+    if RW then out.segRoadW = RW end
     return out
 end
 

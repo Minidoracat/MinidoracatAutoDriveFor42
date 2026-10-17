@@ -643,5 +643,29 @@ do
     check(T.phiStats({}, 0) == nil, "(phi-none) 沒讀過折角：nil")
 end
 
+-- ⑭ 1017e 改寫弧的原路寬（shape segRoadW；Driver Drive.alignLatTol 用它取代弧段的虛擬路寬）：弧段＝min(進入, 轉出)、其他段 0、
+-- 與 segArcR 逐段對齊；清微反折（despikeRoute）照搬。
+do
+    local sh = T.shape({ pts = { -60, 0, 0, 0, 0, 60 }, segWidth = { 12, 6 }, segSurface = { "paved", "paved" } },
+        { L2 = G.L2, hitchToRear = G.rear, halfW = G.hw }, G.thw, G.front)
+    local ok, arcs = #sh.segRoadW == #sh.segArcR, 0
+    for i = 1, #sh.segArcR do
+        if (sh.segArcR[i] > 0) ~= (sh.segRoadW[i] == 6) or (sh.segArcR[i] == 0 and sh.segRoadW[i] ~= 0) then ok = false end
+        if sh.segArcR[i] > 0 then arcs = arcs + 1 end
+    end
+    check(ok and arcs > 0, "(roadw) 弧段的原路寬＝min(12, 6)、非弧 0、與 segArcR 對齊（弧段 " .. arcs .. "）")
+    -- 微反折在第 3 點（合併段不是弧）；後兩段的弧要原樣留下、原路寬跟著走
+    local spiky = { pts = { 0, 0, 10, 0, 10.4, 0.05, 10.1, 0, 30, 0, 40, 0 }, segWidth = { 6, 6, 6, 6, 6 },
+        segSurface = { "paved", "paved", "paved", "paved", "paved" }, segArcR = { 0, 5, 5, 6, 6 }, segRoadW = { 0, 7, 7, 8, 8 } }
+    local d = MDADFollower.despikeRoute(spiky)
+    local okD, kept = d ~= spiky and #d.segRoadW == #d.segArcR and #d.segRoadW == #d.pts / 2 - 1, 0
+    for i = 1, #(d.segArcR or {}) do
+        if (d.segArcR[i] > 0) ~= (d.segRoadW[i] > 0) or (d.segArcR[i] == 6 and d.segRoadW[i] ~= 8) then okD = false end
+        if d.segArcR[i] == 6 then kept = kept + 1 end
+    end
+    check(okD and kept > 0, "(roadw-despike) 清微反折後 segRoadW 與 segArcR 同步（段數 " .. tostring(d.segRoadW and #d.segRoadW)
+        .. "、留下的弧 " .. kept .. "）")
+end
+
 print(string.format("test_trailer: %d 項斷言、%d 項失敗", asserts, fails))
 if fails > 0 then os.exit(1) end
