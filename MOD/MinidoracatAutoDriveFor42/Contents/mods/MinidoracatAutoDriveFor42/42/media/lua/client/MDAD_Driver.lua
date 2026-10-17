@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1017a"
+Drive.REV = "1017b"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -328,6 +328,12 @@ TUNE.FOLLOW_STOP_M = 5            -- 跟車：車頭到前車車尾小於此值�
 TUNE.FOLLOW_MIN_M = 6             -- 跟車距離＝MIN＋前車速度×TIME
 TUNE.FOLLOW_TIME_S = 1.0
 TUNE.FOLLOW_LATERAL_M = 0.3       -- 前車車身離我方車身橫向這麼近以內才算擋在行駛線上
+-- 前車速度差分與單輪保持（1017b D1，Drive.followLead）：差分基線短於 MIN 不換錨點、長於 MAX 作廢；前車單輪沒選到時
+-- 照上一輪外推最多 HOLD_MS；lead-lost 事件同一台最多每 NOTE_MS 一筆（逐輪閃爍不灌事件）
+TUNE.FOLLOW_DIFF_MIN_S = 0.2
+TUNE.FOLLOW_DIFF_MAX_S = 1.5
+TUNE.FOLLOW_HOLD_MS = 1000
+TUNE.FOLLOW_NOTE_MS = 2000
 TUNE.KEEP_RIGHT_FALLBACK_M = 1.0  -- 靠右行駛：路寬未知（v2/v3 路線）時，沙盒比例 1.0 換算的公尺數
 -- 靠右不貼路邊物（0929j；玩家 Camden County 15m 路、常駐 3.0，右側 l≈+5 一排路邊物離車身 0.76m；E2E 同路段 Oshkosh
 -- 23 km/h 擦上 → 倒車兩次 → StopStuck）：靠右是路寬的比例，不知道路緣擺了什麼。前方 KEEP_RIGHT_LOOK_M 內、車身
@@ -2659,6 +2665,9 @@ local function startSession(playerObj, playerNum, stage)
         laneRatio = laneBias, -- 沙盒靠右比例（1.0＝右車道中心）
         -- 會車／跟車（Drive.trafficScan 每輪寫、trafficCap 每幀讀；nil＝無）
         trfStamp = 0, trfLeadGap = nil, trfLeadV = nil,
+        -- 前車辨識與差分（Drive.followLead）：id／來源、錨點弧長與時戳、差分速度、最後一次真的看到（時刻、gap、v）
+        trfLeadId = nil, trfLeadSrc = 0, trfLeadAS = 0, trfLeadAT = nil, trfLeadVd = nil,
+        trfLeadSeen = 0, trfLeadSeenGap = 0, trfLeadSeenV = 0, trfLeadLost = false, trfLeadNoteMs = nil,
         trfOnGap = nil, trfOnV = nil, trfOnWant = nil, trfOnSide = 1, trfOnYield = false, trfOnMargin = nil,
         trafficLane = nil, trafficLaneMs = 0, trafficHoldUntil = 0, trafficSide = 1,
         trafficPlan = nil, trafficPlanL = nil,
@@ -5261,10 +5270,12 @@ function Drive.trafficScan(s, now, speedKmh)
     s.trfLeadGap, s.trfLeadV = nil, nil
     s.trfOnGap, s.trfOnV, s.trfOnWant, s.trfOnYield, s.trfOnMargin = nil, nil, nil, false, nil
     local n = sen.trfN or 0
-    if n <= 0 or type(p) ~= "table" or not p.ready then return end
+    local vSelf = (finite(speedKmh) and speedKmh > 0) and speedKmh / 3.6 or 0
+    if n <= 0 or type(p) ~= "table" or not p.ready then return Drive.followLead(s, now, vSelf, nil, "sensor") end
     local rs = s.lastSNow
     local halfW, halfL = vp.halfW, vp.halfL
-    local vSelf = (finite(speedKmh) and speedKmh > 0) and speedKmh / 3.6 or 0
+    -- 前車：本輪選到的那台（li）；上一輪的前車本輪沒選上的原因（lostWhy，lead-lost 事件；不在快照＝sensor）
+    local li, liGap, lostWhy = nil, nil, "sensor"
     local resident = finite(s.residentBias) and s.residentBias or (s.sandBias or 0)
     local current = laneBiasOf(s)
     local M = TUNE.TRAFFIC_MARGIN_M
@@ -5279,11 +5290,15 @@ function Drive.trafficScan(s, now, speedKmh)
         local age = (now - (sen.trfT[i] or now)) / 1000
         if age < 0 then age = 0 elseif age > 1 then age = 1 end
         if vs then s0, s1 = s0 + vs * age, s1 + vs * age end
-        if s1 >= rs - halfL then
+        local mine = s.trfLeadId ~= nil and sen.trfId[i] == s.trfLeadId
+        if s1 < rs - halfL then
+            if mine then lostWhy = "behind" end
+        else
             local at = s0 > rs and s0 or rs
             local idx = MDADFollower.segIndexAt(p, at)
             local gap = s0 - rs - halfL
             if vs and vs < -TUNE.TRAFFIC_ONCOMING_MPS then
+                if mine then lostWhy = "oncoming" end
                 local closing = vSelf - vs
                 -- 衝突看「交會前」我方會在的 lane，不是對方現在的位置：承諾線在對方現位處可能已回線、
                 -- 交會時卻正好在全偏移段（E2E park400：對方 48m 外判不衝突，交會在停車旁才撞上）。
@@ -5326,21 +5341,23 @@ function Drive.trafficScan(s, now, speedKmh)
                     if t > TUNE.TRAFFIC_HORIZON_S then t = TUNE.TRAFFIC_HORIZON_S end
                     if vl < 0 then l0 = l0 + vl * t else l1 = l1 + vl * t end
                 end
-                if s0 > rs and l0 < lane + halfW + fl and l1 > lane - halfW - fl
-                        and (s.trfLeadGap == nil or gap < s.trfLeadGap) then
-                    s.trfLeadGap = gap
-                    s.trfLeadV = (vs and vs > 0) and vs or 0
+                if s0 > rs and l0 < lane + halfW + fl and l1 > lane - halfW - fl then
+                    if li == nil or gap < liGap then li, liGap = i, gap end
+                elseif mine then
+                    lostWhy = s0 > rs and "lateral" or "s0"
                 end
             end
         end
     end
+    Drive.followLead(s, now, vSelf, li, lostWhy)
     if need == nil then
         s.trafficPlan = nil
         -- 提示去重保留到對方預計交會完（trafficHoldUntil）：判定單輪閃掉不算「新的一次會車」
         if now > (s.trafficHoldUntil or 0) then s.trafficNoticeKey = nil end
-        if getDebug() and s.trfLeadGap ~= nil then -- telemetry: 樣本 tlg／tlv（跟車 lead 車距／速度）
-            print(string.format("%spn=%d traffic lead gap=%.1f v=%.1f n=%d",
-                LOG, s.playerNum or 0, s.trfLeadGap, (s.trfLeadV or 0) * 3.6, n))
+        if getDebug() and s.trfLeadGap ~= nil then -- telemetry: 樣本 tlg／tlv／tlvd（跟車 lead 車距／速度／差分速度）
+            print(string.format("%spn=%d traffic lead gap=%.1f v=%.1f vd=%s n=%d",
+                LOG, s.playerNum or 0, s.trfLeadGap, (s.trfLeadV or 0) * 3.6,
+                s.trfLeadVd and string.format("%.1f", s.trfLeadVd * 3.6) or "-", n))
         end
         return
     end
@@ -5451,6 +5468,66 @@ function Drive.trafficScan(s, now, speedKmh)
         print(string.format("%spn=%d traffic on gap=%.1f v=%.1f need=%.2f want=%.2f band=[%.2f,%.2f] m=%.2f %s lead=%s",
             LOG, s.playerNum or 0, onGap, onV * 3.6, need, want, lo, hi, M - short, why,
             s.trfLeadGap and string.format("%.1f", s.trfLeadGap) or "-"))
+    end
+end
+
+-- 前車（1017b D1）：選到的那台（li）寫 trfLeadGap／trfLeadV；沒選到時照上一輪外推保持 ≤FOLLOW_HOLD_MS。
+-- 速度取 min(回報 vs, 同一台前車的弧長差分)、下限 0：MP 遠端車回報的線速度會失真（正式服 P06 clip-01：回報 73–76 km/h、
+-- 間距 4.4 秒由 31 縮到 3.5 m，70 km/h 追撞兩次）。差分＝前車自己的弧長對 Sensor 命中時戳 trfT 的差（等同 vSelf＋Δgap/Δt，
+-- 但不吃掃描輪時與快照年齡）；同一台＝同 trfId 且同來源（原生／轉送本機位置／轉送封包位置——封包位置的延遲是估的，跨來源
+-- 差分會把延遲誤差算成速度）。換了前車＝錨點重設、舊差分作廢；基線 <FOLLOW_DIFF_MIN_S 不換錨點（沿用上次差分），
+-- >FOLLOW_DIFF_MAX_S 作廢。保持只在帶內仍有車（movingVeh／vehN／trfN）時做（正式服 P03／P08／P21：前車撞前 1.7–2.5 秒
+-- 從追蹤消失後加速撞上）；同一台還在快照、只是改判成對向（首見速度未知先當前車）或整台到了車後＝不是丟失、不保持。
+-- 出口：超過 FOLLOW_HOLD_MS、帶內沒車、換路線（cutover 清 trfLeadId）。
+function Drive.followLead(s, now, vSelf, li, why)
+    local sen = s.sensor
+    if li ~= nil then
+        local id, s0, t = sen.trfId[li], sen.trfS0[li], sen.trfT[li] or now
+        local src = li <= (sen.trfNativeN or sen.trfN) and 0 or (t == now and 1 or 2)
+        local vs = sen.trfVs[li]
+        if not finite(vs) or vs < 0 then vs = 0 end
+        if id ~= nil and id == s.trfLeadId and src == s.trfLeadSrc and finite(s.trfLeadAT) then
+            local dt = (t - s.trfLeadAT) / 1000
+            if dt > TUNE.FOLLOW_DIFF_MAX_S then
+                s.trfLeadVd, s.trfLeadAS, s.trfLeadAT = nil, s0, t
+            elseif dt >= TUNE.FOLLOW_DIFF_MIN_S then
+                local vd = (s0 - s.trfLeadAS) / dt
+                s.trfLeadVd, s.trfLeadAS, s.trfLeadAT = vd > 0 and vd or 0, s0, t
+            end
+        else
+            s.trfLeadId, s.trfLeadSrc, s.trfLeadAS, s.trfLeadAT, s.trfLeadVd = id, src, s0, t, nil
+        end
+        local vL = vs
+        if s.trfLeadVd ~= nil and s.trfLeadVd < vL then vL = s.trfLeadVd end
+        local age = (now - t) / 1000
+        if age < 0 then age = 0 elseif age > 1 then age = 1 end
+        s.trfLeadGap, s.trfLeadV = s0 + vL * age - s.lastSNow - s.vehicleProfile.halfL, vL
+        s.trfLeadSeen, s.trfLeadSeenGap, s.trfLeadSeenV, s.trfLeadLost = now, s.trfLeadGap, vL, false
+        return
+    end
+    if s.trfLeadId == nil then return end
+    local dt = now - s.trfLeadSeen
+    local hold = why ~= "oncoming" and why ~= "behind" and dt <= TUNE.FOLLOW_HOLD_MS
+        and (sen.movingVeh == true or (sen.vehN or 0) > 0 or (sen.trfN or 0) > 0)
+    if not s.trfLeadLost then
+        s.trfLeadLost = true
+        if why == "sensor" and type(sen.vehStill) == "table" and sen.vehStill[s.trfLeadId] == true then why = "still" end
+        if s.trfLeadNoteMs == nil or now - s.trfLeadNoteMs >= TUNE.FOLLOW_NOTE_MS then
+            s.trfLeadNoteMs = now
+            diagEvent(s, s.playerNum, "traffic", { phase = "lead-lost", why = why, d = s.trfLeadSeenGap,
+                speed = s.trfLeadSeenV * 3.6, dt = dt, hold = hold, vn = sen.vehN or 0, mv = sen.movingVeh == true,
+                kind = s.trfLeadSrc == 0 and "near" or "relay" })
+            if getDebug() then
+                print(string.format("%spn=%d traffic lead-lost why=%s d=%.1f v=%.1f dt=%d hold=%s vn=%d mv=%s",
+                    LOG, s.playerNum or 0, why, s.trfLeadSeenGap, s.trfLeadSeenV * 3.6, dt, tostring(hold),
+                    sen.vehN or 0, tostring(sen.movingVeh == true)))
+            end
+        end
+    end
+    if hold then
+        s.trfLeadGap, s.trfLeadV = s.trfLeadSeenGap - (vSelf - s.trfLeadSeenV) * dt / 1000, s.trfLeadSeenV
+    else
+        s.trfLeadId = nil
     end
 end
 
@@ -7594,6 +7671,7 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     s.yawPeak, s.hbrLatch = nil, nil
     -- 跟車 lead（Drive.trafficScan 每輪寫；console traffic lead 行）、殭屍軟縫逐輪的理由與目標 lane（none＝不寫）
     phys.trfLeadGap, phys.trfLeadV = s.trfLeadGap, s.trfLeadV
+    phys.trfLeadVd = s.trfLeadGap ~= nil and s.trfLeadVd or nil -- 1017b：同一台前車的弧長差分速度（Drive.followLead）
     -- 1013a 速度損失拆帳：capReason 空時 Follower 剖面由哪一項綁（pw）與剖面值（pv）；可視帳（vac，只在 capReason
     -- visibility）；前緣前進間隔（vfi，閂鎖）；前方下一段弧的距離（na，上傳摘要的彎前／出彎分段）
     if s.lastCapReason == nil and s.profileBind then
@@ -16357,6 +16435,7 @@ local function onPlayerUpdate(player)
             s.laneChained, s.chainKeptLogged = false, nil
             s.trafficLane, s.trafficPlan = nil, nil -- 換弧長座標系：錯車側移從新路線常駐線重來
             s.trfLeadGap, s.trfOnGap, s.trfOnWant, s.trfOnYield = nil, nil, nil, false
+            s.trfLeadId = nil -- 前車辨識與保持綁舊路線弧長（Drive.followLead 的出口之一）
             MDADFollower.setLaneBias(s.fstate, s.sandBias)
             Drive.transitionRelease(s, playerNum, "route", nil) -- 保持的 lane 是舊路線座標
             if s.sensor then s.sensor.scanBias = s.sandBias end
