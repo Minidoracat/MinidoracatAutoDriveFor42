@@ -1026,6 +1026,8 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
             state.vehStill[vid] = still
             -- 1013a 遙測：這趟第一次掃到這台車（自己與掛車已在上面排除）＝排進首見佇列（車心距離、停著與否），
             -- Driver collectPhys 每筆取樣取走（樣本 vfs）。最多 8 筆，取樣跟不上就丟（首見很少見，不配置）。
+            -- 1017：另記他車車心相對本車的路線弧長（本步投影 − 輪首車位 wSNow）、對路線中心線的橫向，與本車當下 km/h
+            -- （10-27 MP 可視裁定要分「路中停車首見」）。
             if not state.vehSeen[vid] then
                 state.vehSeen[vid] = true
                 local n = state.fsN
@@ -1034,6 +1036,11 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
                     state.fsN = n
                     state.fsD[n] = dist(vehicle:getX(), vehicle:getY(), vwx, vwy)
                     state.fsP[n] = still
+                    local dx, dy = vwx - state.cx, vwy - state.cy
+                    state.fsS[n] = state.curS + dx * state.ny - dy * state.nx - (state.wSNow or 0)
+                    state.fsL[n] = dx * state.nx + dy * state.ny
+                    local okV, kmh = pcall(function() return vehicle:getCurrentSpeedKmHour() end) -- 首見才跑（少見）
+                    state.fsV[n] = okV and kmh or nil
                 end
             end
             if not still then pushTraffic(state, cv, vs, vl) end
@@ -1286,6 +1293,7 @@ local function beginRound(state, p, sNow, vehicle, now, len, cell)
     state.wRoadHi = -999
 
     local s0 = sNow + SCAN_NEAR
+    state.wSNow = sNow -- 1017：輪首車位弧長（首見 vfs 的相對弧長基準）
     if s0 < 0 then s0 = 0 end
     local softAhead = state.softAheadM
     if not MDADDynamics.finite(softAhead) then softAhead = MDADDynamics.SOFT_LOOKAHEAD_M end
@@ -1599,6 +1607,7 @@ function MDADSensor.newState()
         vehFirstMs = {},    -- vehicleId → 這一次連續目擊的首見時戳（有人駕駛車的插值暖機窗）
         vehSeen = {},       -- 1013a：vehicleId → true＝這趟已掃到過（reset 不清：首見只算一次）
         fsN = 0, fsD = {}, fsP = {}, -- 1013a 首見佇列：筆數／車心距離 m／停著（Driver collectPhys 取走後歸 0）
+        fsS = {}, fsL = {}, fsV = {}, -- 1017：首見他車的相對弧長／橫向（m）與本車 km/h
         vehOutlineGen = {}, -- vehicleId → gen：本輪已推過該車輪廓（格級命中只計數不再推點）
         aheadM = SCAN_AHEAD, -- 掃描帶前伸長（高速檔由 driver 拉長：120km/h 需 ~110m 才煞得住）
         scanS = 0,

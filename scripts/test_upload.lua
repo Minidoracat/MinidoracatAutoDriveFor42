@@ -1686,6 +1686,185 @@ do
     check(#sum < U.CHUNK, "(1013a) summary still fits one chunk (" .. #sum .. ")")
 end
 
+-- 1017 假撞：自動掛回（mode rehitch，或 tow rh-attach 後 REHITCH_SETTLE_MS 內）與下車煞車（撞擊那筆 tn 0、fbl 0，EXIT_BRAKE_MS
+-- 內以 exit 結束）不算 impact、不出片段，摘要另計 rhi／xbk；同樣掉速在 rh-attach 3 秒後、或 tn 0 卻以別的原因結束／過了 2 秒才結束、
+-- 或有檔位時以 exit 結束，都照算 impact（片段 trig＝撞擊那刻）。
+--   違規證明：impactClass 不看 mode＝(rh-mode) 紅；不看 rhMs＝(rh-attach) 紅；rehitch 照算 impact＝(rh-*) 紅；不擱下車候選＝(xb) 紅；
+--   finish 不看 reason＝(xb-other) 紅；不看 EXIT_BRAKE_MS 逾時＝(xb-late) 紅；不看 tn＝(xb-geared) 紅。
+scenario("1017 rehitch pull and exit brake are not impacts; real hits around them still are")
+do
+    local function one(label, steps, reason)
+        nowMs = nowMs + 3600000
+        start()
+        local d0 = nowMs
+        local hitAt = steps()
+        D.stop(0, reason or "arrive")
+        pump(120000)
+        local _, sum = sumLines(d0)
+        local function n(key) return tonumber(string.match(sum, '"' .. key .. '":(%d+)')) end
+        local rows = clipsOf(d0)
+        local hasImpact = false
+        for i = 1, #rows do
+            if field(rows[i], 7) == "impact" and (hitAt == nil or tonumber(field(rows[i], 9)) == hitAt) then hasImpact = true end
+        end
+        check(sum ~= "", label .. " summary found")
+        return n("impact"), n("rhi"), n("xbk"), hasImpact, sum
+    end
+    local gear = function(tn) return { capReason = "profile", frameMs = 16, transmissionNumber = tn, forceBrakeLeft = 0 } end
+    -- (rh-mode) 掛回模式中引擎拉攏：30→0
+    local imp, rhi, _, clip = one("(rh-mode)", function()
+        drive(3000, { speed = 30 })
+        drive(200, { speed = 30, mode = "rehitch" })
+        drive(200, { speed = 0, mode = "rehitch" })
+        drive(2000, { speed = 0, mode = "rehitch" })
+    end)
+    checkEq(imp, 0, "(rh-mode) the pull in rehitch mode is not an impact")
+    checkEq(rhi, 1, "(rh-mode) counted once as rhi")
+    check(not clip, "(rh-mode) no impact clip")
+    -- (rh-attach) 掛上後 1 秒、已回 follow 的拉攏；(rh-late) 掛上 3 秒後＝真撞
+    imp, rhi = one("(rh-attach)", function()
+        drive(3000, { speed = 30 })
+        D.event(0, "tow", { phase = "rh-attach", vid = 42 })
+        drive(1000, { speed = 30 })
+        drive(200, { speed = 5 })
+        drive(2000, { speed = 5 })
+    end)
+    checkEq(imp, 0, "(rh-attach) 1 s after rh-attach the drop is not an impact")
+    checkEq(rhi, 1, "(rh-attach) counted as rhi")
+    imp, rhi = one("(rh-late)", function()
+        drive(3000, { speed = 30 })
+        D.event(0, "tow", { phase = "rh-attach", vid = 42 })
+        drive(3000, { speed = 30 })
+        drive(200, { speed = 5 })
+        drive(2000, { speed = 5 })
+    end)
+    checkEq(imp, 1, "(rh-late) 3 s after rh-attach the same drop is an impact")
+    checkEq(rhi, 0, "(rh-late) not rhi")
+    -- (xb) 玩家下車：tn 4→0、ib、fbl 0，80→50／200ms，1 秒後以 exit 結束
+    local xbk
+    imp, _, xbk, clip = one("(xb)", function()
+        drive(3000, { speed = 80, phys = gear(4) })
+        drive(200, { speed = 50, phys = gear(0) })
+        drive(1000, { speed = 20, phys = gear(0) })
+    end, "exit")
+    checkEq(imp, 0, "(xb) exit brake is not an impact")
+    checkEq(xbk, 1, "(xb) counted as xbk")
+    check(not clip, "(xb) no impact clip")
+    local hit
+    imp, _, xbk, clip = one("(xb-other)", function()
+        drive(3000, { speed = 80, phys = gear(4) })
+        drive(200, { speed = 50, phys = gear(0) })
+        hit = nowMs
+        drive(1000, { speed = 20, phys = gear(0) })
+        return hit
+    end, "takeover")
+    checkEq(imp, 1, "(xb-other) same drop ending as takeover is an impact")
+    checkEq(xbk, 0, "(xb-other) not xbk")
+    check(clip, "(xb-other) impact clip triggered at the hit time")
+    imp, _, xbk, clip = one("(xb-late)", function()
+        drive(3000, { speed = 80, phys = gear(4) })
+        drive(200, { speed = 50, phys = gear(0) })
+        hit = nowMs
+        drive(3000, { speed = 20, phys = gear(0) })
+        return hit
+    end, "exit")
+    checkEq(imp, 1, "(xb-late) exit 3 s after the drop: the drop is an impact")
+    checkEq(xbk, 0, "(xb-late) not xbk")
+    check(clip, "(xb-late) impact clip trig = the hit time, not the 2 s confirmation")
+    imp, _, xbk = one("(xb-geared)", function()
+        drive(3000, { speed = 80, phys = gear(4) })
+        drive(200, { speed = 50, phys = gear(4) })
+        drive(1000, { speed = 20, phys = gear(4) })
+    end, "exit")
+    checkEq(imp, 1, "(xb-geared) in gear the drop is an impact even when the drive ends by exit")
+    checkEq(xbk, 0, "(xb-geared) not xbk")
+end
+
+-- 1017 摘要新欄位：vfIn／vfInX（路中停車首見 <55 m、≥60 km/h、s>0、|l|<halfW+1；8 秒內鎖輪／接觸／vad 頂滿）、aoi（入彎超速明細最多 4）、
+-- exN／exDev／exN50／exDev50（出弧後 60 m 內 |ld|>0.5，軟縫或期望車道跳 >1 m 的出口不算）、fu0／fu1／fuS（加油不算）、t40／t40k、
+-- blr、eng；缺值（vfs 舊格式、讀不到的 s／l／車速）不算進 vfIn。
+--   違規證明：vfIn 不看停著＝(vfIn) 紅；不看 l＝(vfIn) 紅；8 秒窗拿掉＝(vfInX) 紅；aoi 不設上限＝(aoi) 紅；出口不排除換道＝(ex) 紅；
+--   出口門檻 0.5 改 0.3＝(ex) 紅；加油算油耗＝(fu) 紅；t40 用 0 起算的距離以外＝(t40) 紅；起步型優先序錯＝(t40k) 紅。
+scenario("1017 summary: vfIn/vfInX, aoi, exit deviation, fuel by segment, t40, brake-learning rejects, EngineOff gate")
+do
+    local function tp(extra)
+        local t = { frameMs = 16, capGear = 120, capPerception = 120, capMax = 120, capReason = "profile",
+            controlState = "TRACK", expectedLane = 0, latDev = 0.1 }
+        for k, v in pairs(extra or {}) do t[k] = v end
+        return t
+    end
+    nowMs = nowMs + 3600000
+    start()
+    local d0 = nowMs
+    D.event(0, "tow", { phase = "attach", L2 = 5 })
+    D.event(0, "uturn", { phase = "enter", start = true })
+    drive(4000, { speed = 50, phys = tp({ fuelPercent = 50 }) })     -- 55 m：t40 在這段
+    -- 首見：只有第一筆合格；其餘依序 l 太大、在後方、太遠、本車太慢、行進、缺值、舊格式
+    drive(200, { speed = 70, phys = tp({ firstSeen = "[[40,1,30,0.5,70],[40,1,30,3,70],[40,1,-5,0,70],[60,1,30,0,70],"
+        .. "[40,1,30,0,50],[40,0,30,0,70],[40,1,null,null,null],[40,1]]" }) })
+    drive(1000, { speed = 70, phys = tp() })
+    drive(200, { speed = 70, phys = tp({ forceBrakeLeft = 900, forceBrakeWhy = "visibility" }) }) -- 1.2 s 後鎖輪＝vfInX
+    drive(200, { speed = 70, phys = tp({ firstSeen = "[[45,1,40,-0.8,72]]" }) })                    -- 第二筆：8 秒內沒出事
+    drive(9000, { speed = 70, phys = tp({ fuelPercent = 49.5 }) })
+    drive(200, { speed = 70, phys = tp({ forceBrakeLeft = 900, forceBrakeWhy = "visibility" }) }) -- 9 秒後的鎖輪不算
+    drive(1000, { speed = 70, phys = tp() })
+    -- 5 個入彎超速的弧（彎帽 40、車速 60）；第 1 個出口 |ld| 0.7、60 km/h；第 2 個出口有殭屍軟縫；第 3 個期望車道跳 1.5 m；
+    -- 第 4 個 30 km/h、|ld| 0.3；第 5 個之後直走離開
+    local arcP = tp({ curveHardActive = true, curveCap = 40, curveKappa = 0.02, visAssistDecel = 3.5,
+        visAssistWhy = "curve", priorBrake = 6.2, fuelPercent = 49 })
+    local exits = {
+        { speed = 60, phys = tp({ latDev = 0.7, fuelPercent = 48.9 }) },
+        { speed = 60, phys = tp({ latDev = 0.9, zombieLane = 1.5 }) },
+        { speed = 60, phys = tp({ latDev = 0.9 }) },
+        { speed = 30, phys = tp({ latDev = 0.3 }) },
+    }
+    for i = 1, 5 do
+        drive(400, { speed = 60, phys = arcP })
+        if i == 3 then
+            drive(200, { speed = 60, phys = tp({ expectedLane = 0 }) })
+            drive(200, { speed = 60, phys = tp({ expectedLane = 1.5, latDev = 0.9 }) })
+        end
+        if exits[i] then drive(i == 4 and 8000 or 4000, exits[i]) end
+    end
+    drive(8000, { speed = 60, phys = tp() })                          -- 離開出彎 100 m
+    drive(200, { speed = 60, phys = tp({ fuelPercent = 60 }) })       -- 加油：不算油耗
+    drive(200, { speed = 60, phys = tp({ fuelPercent = 59.9, brakeReject = "unloaded" }) })
+    drive(200, { speed = 60, phys = tp({ brakeReject = "unloaded" }) })
+    drive(200, { speed = 60, phys = tp({ brakeReject = "heading" }) })
+    D.event(0, "engine", { phase = "off", why = "battery", chg = 0, es = 2412.4, fu = 59.9 })
+    D.stop(0, "UI_MinidoracatAutoDrive_EngineOff")
+    pump(120000)
+    local _, sum = sumLines(d0)
+    local function n(key) return tonumber(string.match(sum, '"' .. key .. '":([%d%.%-]+)')) end
+    check(sum ~= "", "(1017) summary found")
+    checkEq(n("vfIn"), 2, "(vfIn) two qualifying parked first-seens (in path, ahead, <55 m, ego >=60 km/h)")
+    checkEq(n("vfInX"), 1, "(vfInX) only the first is followed by a lock within 8 s")
+    local aoi = string.match(sum, '"aoi":(%b[])') or ""
+    checkEq(count(aoi, '"curve"'), 4, "(aoi) at most 4 overspeed entries (" .. aoi .. ")")
+    checkEq(n("arcOver"), 5, "(aoi) all 5 still counted in arcOver")
+    -- 數字照 Kahlua tostring（整數不帶 .0）；標準 Lua 5.3 的浮點會多 .0，兩種都認
+    check(string.find(aoi, '^%[%[%d+,60[%.0]*,40[%.0]*,50[%.0]*,3%.5,"curve",6%.2,1,%d+') ~= nil,
+        "(aoi) first entry: ts, spd, cap, R=1/kappa, vad, vaw, pb, first arc (" .. aoi .. ")")
+    checkEq(n("exN"), 3, "(ex) zombie-lane and lane-jump exits excluded (exits 1, 4, 5 counted)")
+    checkEq(n("exDev"), 1, "(ex) one exit beyond 0.5 m")
+    checkEq(n("exN50"), 2, "(ex) two fast exits (1 and 5)")
+    checkEq(n("exDev50"), 1, "(ex) the fast exit deviated")
+    checkEq(n("fu0"), 50, "(fu) start fuel")
+    checkEq(n("fu1"), 59.9, "(fu) end fuel")
+    local fuS = string.match(sum, '"fuS":(%b{})') or ""
+    check(string.find(fuS, '"arc":[0.5,', 1, true) ~= nil, "(fu) 49.5→49 on the arc (" .. fuS .. ")")
+    check(string.find(fuS, '"post":[0.1,', 1, true) ~= nil, "(fu) 49→48.9 after the arc, refuel ignored (" .. fuS .. ")")
+    check(string.find(fuS, '"oth":[0.6,', 1, true) ~= nil, "(fu) 50→49.5 and 60→59.9 elsewhere (" .. fuS .. ")")
+    local t40 = n("t40")
+    check(t40 ~= nil and t40 >= 3000 and t40 <= 3400, "(t40) 40 m at 50 km/h, first sample has no dt (" .. tostring(t40) .. ")")
+    check(string.find(sum, '"t40k":"tow"', 1, true) ~= nil, "(t40k) tow outranks the start uturn")
+    check(string.find(sum, '"blr":{', 1, true) ~= nil and string.match(sum, '"blr":{[^}]*"unloaded":2') ~= nil
+        and string.match(sum, '"blr":{[^}]*"heading":1') ~= nil, "(blr) reject reasons counted")
+    check(string.find(sum, '"eng":{"why":"battery","chg":0[%.0]*,"es":2412[%.0]*,"fu":59%.9}') ~= nil,
+        "(eng) EngineOff gate in the summary")
+    check(#sum < U.CHUNK, "(1017) summary still fits one chunk (" .. #sum .. ")")
+end
+
 -- 1010 所有送出的片段整段 ≤ CLIP_TOTAL_MAX（第一塊宣告的 len＝全文長度；伺服器只看這個）
 local maxLen = 0
 for i = 1, #sent do
