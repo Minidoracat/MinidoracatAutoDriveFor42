@@ -27385,6 +27385,15 @@ function drive.scenarioArcPass()
     put(90, 0.1)
     scan(60)
     checkTrue(s.arcPassX == 90, "(ap-exit) 出弧 10m（出口車道 ramp 窗內）：照做（x=" .. tostring(s.arcPassX) .. "）")
+    -- (ap-keep) 出弧 13m：60 km/h 前視 13.2 的窗內記下；減到 10 km/h 窗縮成 12（ramp 長）也不放（減速＝窗縮＝放手＝再加速）。
+    --   違規證明：記下的點不沿用 κ＝紅。
+    s.arcPassX = nil
+    put(93, 0.1)
+    scan(60)
+    checkTrue(s.arcPassX == 93, "(ap-keep) 前置：出弧 13m、60 km/h 窗內記下（x=" .. tostring(s.arcPassX) .. "）")
+    s.lastSNow = 70
+    Dr.arcPassScan(s, 0, 10, 70, 0, 0)
+    checkTrue(s.arcPassX == 93, "(ap-keep) 減到 10 km/h（窗縮到 12m）：記下的點不放（x=" .. tostring(s.arcPassX) .. "）")
     s.arcPassX = nil
     put(65, -0.2)
     scan(40)

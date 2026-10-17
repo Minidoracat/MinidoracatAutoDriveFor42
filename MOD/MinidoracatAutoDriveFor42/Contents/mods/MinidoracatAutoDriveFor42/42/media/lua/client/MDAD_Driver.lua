@@ -6685,6 +6685,8 @@ function Drive.arcPassScan(s, playerNum, speedKmh, vx, vy, heading)
                     for q = 1, k do
                         if hs >= runs.s0[q] - halfL and hs <= runs.s1[q] + back and runs.k[q] > kap then kap = runs.k[q] end
                     end
+                    -- 記下的點不因窗變短而放（窗含前視距，減速＝窗縮＝放手＝再加速；E2E gtr 出弧 37 km/h 放掉、加速到 52、外漂撞樹）
+                    if kap == 0 and had and sen.hardX[i] == s.arcPassX and sen.hardY[i] == s.arcPassY then kap = s.arcPassK end
                     if kap > 0 then
                         local pl = MDADFollower.laneBiasAt(prof, bias, MDADFollower.segIndexAt(prof, hs), hs, fs.laneKeep)
                         local r = sen.hardR[i]
@@ -6726,6 +6728,7 @@ function Drive.arcPassScan(s, playerNum, speedKmh, vx, vy, heading)
                 end
             end
             s.arcPassX, s.arcPassY, s.arcPassR, s.arcPassV = sen.hardX[bestI], sen.hardY[bestI], sen.hardR[bestI], bestV
+            s.arcPassK = bestK
             return
         end
         if had then return end
