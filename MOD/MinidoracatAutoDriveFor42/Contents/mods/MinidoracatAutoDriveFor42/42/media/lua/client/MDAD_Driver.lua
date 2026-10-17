@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1017a"
+Drive.REV = "1017c"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -399,6 +399,10 @@ local POLICY_DODGE = 1         -- 沙盒 ObstaclePolicy enum：1=繞行 2=停車
 TUNE.BLOCK_STOP_DIST = 10      -- 距障礙群這麼近才煞停等待；更遠先滑行接近
 TUNE.BLOCK_APPROACH_KMH = 20   -- blocked 接近段的速度上限（掃描逼近後縫隙判定更準）
 TUNE.BLOCK_APPROACH_HARD_MARGIN = 10 -- blocked 接近包絡的一秒鎖輪只在實速超過 BLOCK_APPROACH_KMH＋此值時（停止線前低速段交給 blockedStop）
+-- 停止線／接觸停等時車已靜止（|v| 低於此值）就不續一秒鎖輪閂（Drive.hardBrake，1017c）：停下後由 regulator 關的
+-- NoControl 煞車（CarController.control_NoControl brakingForce 10）撐住；每幀續閂＝blocked-retry／progress 下倒車時
+-- 引擎閂還剩約 1 秒（正式服 1015b–1017a 30 次中位 1067 ms，29/30 起手前一筆 fbw=blocked）。滑起來（≥此值）照舊續閂。
+TUNE.BLOCK_HOLD_STILL_KMH = 0.5
 -- 起步判堵爬行（1012，使用者 2026-10-12 裁定「只修起步已判堵仍先衝」；Drive.launchHold／Drive.launchCap）：判堵或繞行
 -- 延後（前方有已知障礙、還沒有承諾線）在離起步點 LAUNCH_HOLD_M 內成立＝起步那一刻就知道前面過不去：停點（停止線／延後
 -- 停點）前以滑行減速度降到 LAUNCH_HOLD_KMH，等候選鏈結果，直到承諾或判淨空；停點遠時照包絡放行、不平壓爬行。舊制起步也套
@@ -3613,6 +3617,13 @@ end
 -- steer 傳 nil＝本幀只減速、不轉向（調頭要先煞到近停才轉，鎖輪時本來就不施轉向）。
 -- （`finite` 在本檔較後面才定義，這裡用 MDADDynamics.finite。）
 function Drive.hardBrake(s, vehicle, now, why, speedKmh, mult, steer, heading, fwd, fx, fy)
+    -- 停止線（blocked）／接觸（contact）停等、車已靜止：不續閂（TUNE.BLOCK_HOLD_STILL_KMH，1017c）。停下那一刻的閂照舊跑完
+    -- （10-08 停止線鎖輪）；之後 regulator 已關＝NoControl 煞車撐住，blocked-retry／progress 下倒車時閂已到期。回 nil＝
+    -- 呼叫端照鎖輪路徑補 brakeAssist（低於 BRAKE_ASSIST_MIN_KMH 不施力）。
+    if (why == "blocked" or why == "contact") and MDADDynamics.finite(speedKmh)
+            and speedKmh < TUNE.BLOCK_HOLD_STILL_KMH and speedKmh > -TUNE.BLOCK_HOLD_STILL_KMH then
+        return nil
+    end
     -- 只對「往前開」的車不鎖輪：外力沿車頭反向，倒退時施下去會加速倒退（0929p 審查）
     local nolock = s.tow or ((why == "moving" or why == "animal-stop" or why == "player-stop")
         and s.followHold and not s.currentBlocked)
@@ -6499,12 +6510,22 @@ end
 -- 撞上前方停著的車）。以規劃煞車能力（safeBrake×APPROACH_BRAKE_FRAC，同 stay-hold／dodge-defer）
 -- 反推「在停止線降到 BLOCK_APPROACH_KMH」的包絡：超過包絡由 Drive.visAssistForce 沿中線補減速，
 -- 超過硬煞門檻才一秒鎖輪（hardBrakeReason blocked-approach）。停止線與 blockedNear 同一個判距。
+-- 天花板（2026-10-17 使用者裁定，1017c）：判堵後還沒承諾，包絡不超過 max(判堵 episode 第一幀車速 s.blockedEntryKmh,
+-- BLOCK_APPROACH_KMH)——停止線上的終點速度不動（10-12 裁定），只擋中段再加速（正式服行進中第一次判堵 71 次有 18 次又加速
+-- ≥5 km/h、14 次在停止線鎖輪）。s.blockedEntryKmh 在判堵上升緣（blockedNotified 由假變真）寫，承諾、淨空、倒車成功、換線、
+-- 停止都經 blocked＝false＋blockedNotified＝false 結束這個 episode，下一次判堵重寫。
 function Drive.blockedApproachCap(s, vx, vy)
     local gap = Drive.blockedStopGap(s, vx, vy)
     if gap == nil then return nil end
     local decel = s.safeBrake
     if not finite(decel) or decel <= 0 then decel = 0.6 else decel = decel * TUNE.APPROACH_BRAKE_FRAC end
-    return MDADDynamics.approachCapKmh(gap, TUNE.BLOCK_APPROACH_KMH, 0.5, decel)
+    local cap = MDADDynamics.approachCapKmh(gap, TUNE.BLOCK_APPROACH_KMH, 0.5, decel)
+    local ceil = s.blockedEntryKmh
+    if finite(ceil) then
+        if ceil < TUNE.BLOCK_APPROACH_KMH then ceil = TUNE.BLOCK_APPROACH_KMH end
+        if cap > ceil then cap = ceil end
+    end
+    return cap
 end
 
 -- 起步判堵爬行（TUNE.LAUNCH_HOLD_*）：本幀是否把目標壓在 LAUNCH_HOLD_KMH。判堵或繞行延後（未承諾）成立的那一刻判一次
@@ -8296,6 +8317,7 @@ local function startRecoveryAttempt(s, vehicle, playerNum, now, vx, vy, softFail
     diagEvent(s, playerNum, "unstick", {
         phase = "start", eid = s.episodeId, attempt = s.episodeAttempts,
         x = vx, y = vy, s = s.lastSNow, d = 0, rear = status, len = travel,
+        fbl = s.forceBrakeUntil > now and s.forceBrakeUntil - now or 0, -- 起手當下引擎一秒煞車閂剩餘 ms（1017c；>0＝倒車要等它到期）
     })
     -- 只在 episode 第一次倒退開口：同一堵局的第 2、3 次重試不再重複唸。
     if s.episodeAttempts <= 1 then voice("unstick", playerNum) end
@@ -12467,6 +12489,7 @@ local function replan(s, vehicle, playerNum)
                     end
                     if not s.blockedNotified then
                         s.blockedNotified = true
+                        s.blockedEntryKmh = math.abs(vehicle:getCurrentSpeedKmHour()) -- 判堵上升緣車速（Drive.blockedApproachCap 天花板）
                         local playerObj = getSpecificPlayer(playerNum)
                         if playerObj then haloBad(playerObj, KEY_BLOCKED) end
                         voice("blocked", playerNum)
@@ -12477,7 +12500,8 @@ local function replan(s, vehicle, playerNum)
                             hitPhase = s.guardHitPhase,
                             hitX = s.guardHitX, hitY = s.guardHitY,
                             clearance = s.guardHitClearance, hn = sen.hardN,
-                            wms = Drive.replanElapsed(s), sweeps = s.sweepCount })
+                            wms = Drive.replanElapsed(s), sweeps = s.sweepCount,
+                            bv = s.blockedEntryKmh }) -- bv＝判堵當下車速 km/h（1017c）
                     end
                     if getDebug() then
                         print(LOG .. "pn=" .. playerNum .. " dodge guard failed: hold & brake")
@@ -13288,6 +13312,7 @@ local function replan(s, vehicle, playerNum)
     end
     if not s.blockedNotified then
         s.blockedNotified = true
+        s.blockedEntryKmh = math.abs(vehicle:getCurrentSpeedKmHour()) -- 判堵上升緣車速（Drive.blockedApproachCap 天花板）
         local playerObj = getSpecificPlayer(playerNum)
         if playerObj then haloBad(playerObj, KEY_BLOCKED) end
         voice("blocked", playerNum)
@@ -13297,7 +13322,7 @@ local function replan(s, vehicle, playerNum)
             s.blockS, s.lastSNow, TUNE.BLOCK_STOP_DIST,
             vehicle:getX(), vehicle:getY(), s.blockHitX, s.blockHitY)
         diagEvent(s, playerNum, "blocked", {
-            s = s.blockS, m = s.dodgeMargin, need = s.dodgeNeed,
+            s = s.blockS, m = s.dodgeMargin, need = s.dodgeNeed, bv = s.blockedEntryKmh, -- bv＝判堵當下車速 km/h（1017c）
             x = s.blockHitX, y = s.blockHitY, why = "plan", wd = wd,
             hn = s.sensor and s.sensor.hardN or 0, wms = Drive.replanElapsed(s), sweeps = s.sweepCount,
             corner = s.cornerLatch, detail = s.dodgeBlockReason,

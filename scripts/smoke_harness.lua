@@ -8198,6 +8198,9 @@ drive.scanRound()
 checkEq(haloKey(), DKEY.BLOCKED, "堵死提示 Blocked")
 checkEq(halos[1] and halos[1].kind, "bad", "堵死是紅字（要玩家注意）")
 checkEq(drive.voiceCount("blocked") - drive.blockedVoicesBefore, 1, "堵死開口 blocked")
+-- 1017c：包絡上限＝max(判堵當下車速, BLOCK_APPROACH_KMH)；這裡驗 1004e 的「行進中判堵照包絡、不平壓 20」，判堵當下車速
+-- 照行進中 60 km/h 記（慢速判堵的天花板見 drive.scenarioBlocked1017c）
+MDAD.Drive.debugSession(0).blockedEntryKmh = 60
 -- 車在 s≈0、障礙群 20：距離 >15 → 接近段（滑行不煞停）
 driveReset(dveh)
 driveTick(dp, dveh)
@@ -14278,6 +14281,135 @@ do
     for _, y in ipairs({ -5, -4, -2, -1, 0, 1, 2, 4, 5 }) do drive.clearCell(20, y) end
     MDAD.Drive.stop(0, nil)
 end
+
+-- (bc-*) 1017c（2026-10-17 使用者裁定；正式服 1015b–1017a）：
+--   (bc-ceil)    12 km/h 判堵、停止線遠：未承諾的接近帽＝max(判堵當下車速, BLOCK_APPROACH_KMH)＝20，包絡本身更高（不再加速衝停止線）
+--   (bc-bv)      blocked 事件帶 bv＝判堵當下車速
+--   (bc-fast)    30 km/h 判堵：帽＝30（包絡更高）；淨空後再判堵＝新 episode 重記（40 km/h → 帽 40）
+--   (bc-still)   停止線：還在滑的那幀照舊下閂（10-08 停止線鎖輪），之後靜止的幀不續閂、1 秒後到期
+--   (bc-roll)    停等中滑起來（≥BLOCK_HOLD_STILL_KMH）照舊續閂
+--   (bc-retry)   blocked-retry 起手當下閂已到期：unstick start fbl＝0（舊制每幀續閂＝fbl≈1000）
+--   (bc-contact) 接觸停等同規則：靜止不續閂、在動照鎖
+-- 違規證明（temp/s1017-blocked/vp）：拿掉天花板＝(bc-ceil)／(bc-fast) 紅；拿掉 hardBrake 靜止早退＝(bc-still)／(bc-retry)／
+--   (bc-contact) 紅；不記 bv＝(bc-bv) 紅。
+function drive.scenarioBlocked1017c()
+    scenario("1017c：判堵後未承諾的接近帽不超過判堵當下車速；停止線／接觸靜止不續一秒鎖輪閂")
+    local Dr, T = MDAD.Drive, MDAD.Drive.debugTune()
+    local savedTelemetry, savedAuto = MDAD.HUD.telemetryEnabled, MDAD.HUD.autoDetour
+    local savedStart, savedEvent, savedSample, savedStop =
+        MDADDiagnostics.start, MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.stop
+    local evs = {}
+    MDAD.HUD.telemetryEnabled = function() return true end
+    MDAD.HUD.autoDetour = function() return false end
+    MDADDiagnostics.start = function() return true end
+    MDADDiagnostics.sample = function() return true end
+    MDADDiagnostics.stop = function() return true end
+    MDADDiagnostics.event = function(_, name, a)
+        if type(a) == "table" then evs[name .. ":" .. tostring(a.phase or a.why)] = a end
+    end
+    local function wall(put)
+        for y = -9, 9 do
+            if put then drive.putSolid(50, y, "bc_wall_" .. y) else drive.clearCell(50, y) end
+        end
+    end
+    local function envOf(st) -- 沒有天花板的包絡（同一個停止線判距）
+        local keep = st.blockedEntryKmh
+        st.blockedEntryKmh = nil
+        local e = Dr.blockedApproachCap(st, dveh._x, dveh._y)
+        st.blockedEntryKmh = keep
+        return e
+    end
+    -- (bc-ceil)／(bc-bv)：12 km/h 判堵
+    wall(true)
+    checkTrue(armDrive(nil, 12), "(bc) 啟動（前方 50m 整排牆、12 km/h）")
+    local st = Dr.debugSession(0)
+    for _ = 1, 3 do if not st.blocked then drive.scanRound(true) end end
+    checkTrue(st.blocked == true, "(bc) 前置：判堵")
+    checkNear((evs["blocked:plan"] or {}).bv, 12, 1e-9, "(bc-bv) blocked 事件帶判堵當下車速")
+    local env = envOf(st)
+    checkTrue(type(env) == "number" and env > T.BLOCK_APPROACH_KMH + 5,
+        "(bc-ceil) 前置：停止線遠、包絡本身高於停止線速度（" .. tostring(env) .. "）")
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkNear(st.blockedApproachCap, T.BLOCK_APPROACH_KMH, 1e-9,
+        "(bc-ceil) 慢於 BLOCK_APPROACH_KMH 判堵：接近帽＝BLOCK_APPROACH_KMH，不跟包絡加速")
+    checkTrue(drive.calls.maxRegSpeed <= T.BLOCK_APPROACH_KMH,
+        "(bc-ceil) 定速目標不超過天花板（實得 " .. tostring(drive.calls.maxRegSpeed) .. "）")
+    -- (bc-fast)：30 km/h 判堵；淨空後再判堵＝新 episode
+    wall(false)
+    Dr.stop(0, nil)
+    wall(true)
+    evs["blocked:plan"] = nil
+    checkTrue(armDrive(nil, 30), "(bc-fast) 啟動（30 km/h）")
+    st = Dr.debugSession(0)
+    for _ = 1, 3 do if not st.blocked then drive.scanRound(true) end end
+    checkTrue(st.blocked == true and (evs["blocked:plan"] or {}).bv == 30, "(bc-fast) 前置：30 km/h 判堵（bv "
+        .. tostring((evs["blocked:plan"] or {}).bv) .. "）")
+    env = envOf(st)
+    driveTick(dp, dveh)
+    checkTrue(env > 30 and math.abs(st.blockedApproachCap - 30) < 1e-9,
+        "(bc-fast) 包絡 " .. tostring(env) .. " 高於判堵車速：帽壓在 30（實得 " .. tostring(st.blockedApproachCap) .. "）")
+    wall(false)
+    drive.scanRound(true)
+    drive.scanRound(true)
+    checkTrue(st.blocked ~= true, "(bc-fast) 前置：淨空解除判堵")
+    wall(true)
+    dveh._speed = 40
+    for _ = 1, 3 do if not st.blocked then drive.scanRound(true) end end
+    driveTick(dp, dveh)
+    checkTrue(st.blocked == true and math.abs(st.blockedApproachCap - math.min(40, envOf(st))) < 1e-9,
+        "(bc-fast) 新的判堵 episode 重記車速：帽＝min(40, 包絡)（實得 " .. tostring(st.blockedApproachCap) .. "）")
+    -- (bc-still)：開到停止線
+    dveh._x, dveh._speed = 41, 3
+    driveTick(dp, dveh)
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    local fbu0 = st.forceBrakeUntil
+    checkTrue(st.forceBrakeWhy == "blocked" and fbu0 > nowMs,
+        "(bc-still) 停止線還在滑：照舊一秒鎖輪（fbw " .. tostring(st.forceBrakeWhy) .. "）")
+    dveh._speed = 0
+    nowMs = nowMs + 300
+    driveTick(dp, dveh)
+    checkEq(st.forceBrakeUntil, fbu0, "(bc-still) 靜止的停等幀不續閂")
+    nowMs = nowMs + 800
+    driveTick(dp, dveh)
+    checkTrue(st.forceBrakeUntil == fbu0 and fbu0 <= nowMs and dveh._regulator ~= true,
+        "(bc-still) 停下 1 秒後閂到期、regulator 仍關（NoControl 煞車撐住）")
+    -- (bc-roll)
+    dveh._speed = 1
+    driveTick(dp, dveh)
+    checkTrue(st.forceBrakeUntil > nowMs, "(bc-roll) 停等中滑起來：照舊續閂")
+    dveh._speed = 0
+    -- (bc-retry)：停等累計到 BLOCK_RETRY_MS 前一幀、再到期那幀起手
+    drive.wideRounds(true)
+    for _ = 1, 40 do
+        if st.waitAccumMs >= T.BLOCK_RETRY_MS - 100 or st.mode ~= "follow" then break end
+        nowMs = nowMs + 100
+        driveTick(dp, dveh)
+    end
+    evs["unstick:start"] = nil
+    for _ = 1, 5 do
+        if st.mode ~= "follow" then break end
+        nowMs = nowMs + 50
+        driveTick(dp, dveh)
+    end
+    local us = evs["unstick:start"]
+    checkTrue(us ~= nil and (evs["progress:recover"] or {}).why == "blocked-retry",
+        "(bc-retry) 前置：blocked-retry 起手倒車（mode " .. tostring(st.mode) .. "）")
+    checkEq(us and us.fbl, 0, "(bc-retry) 起手當下引擎煞車閂已到期（unstick start fbl）")
+    -- (bc-contact)
+    st.forceBrakeUntil = 0
+    checkTrue(Dr.hardBrake(st, dveh, nowMs, "contact", 0.2, 1, 0, 0, nil, 1, 0) == nil and st.forceBrakeUntil == 0,
+        "(bc-contact) 接觸停等靜止：不下閂")
+    Dr.hardBrake(st, dveh, nowMs, "contact", 3, 1, 0, 0, nil, 1, 0)
+    checkEq(st.forceBrakeUntil, nowMs + 1000, "(bc-contact) 接觸在動：照舊一秒鎖輪")
+    Dr.stop(0, nil)
+    wall(false)
+    MDAD.HUD.telemetryEnabled, MDAD.HUD.autoDetour = savedTelemetry, savedAuto
+    MDADDiagnostics.start, MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.stop =
+        savedStart, savedEvent, savedSample, savedStop
+end
+drive.scenarioBlocked1017c()
 
 -- (c2) 近距跟車（followHold）同豁免：前車臨停常超過 5 秒，倒車＝追撞隊友
 do
@@ -24492,6 +24624,7 @@ function drive.scenario0928()
     st = Dr.debugSession(0)
     for _ = 1, 3 do drive.scanRound(true) end
     checkTrue(st.blocked == true, "(blk-app) 前置：判 blocked")
+    st.blockedEntryKmh = 70 -- 1017c：照原型「70 km/h 判堵」記判堵當下車速（天花板高於包絡；慢速判堵見 (bc-ceil)）
     local capNow = Dr.blockedApproachCap(st, dveh._x, dveh._y)
     dveh._speed = capNow + 1.5
     st.forceBrakeUntil = 0
