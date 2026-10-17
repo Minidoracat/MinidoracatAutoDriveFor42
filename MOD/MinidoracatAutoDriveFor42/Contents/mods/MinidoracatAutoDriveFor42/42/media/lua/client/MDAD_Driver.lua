@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1017a"
+Drive.REV = "1017h"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -363,7 +363,8 @@ TUNE.VIS_ASSIST_MAX = 4.0       -- 補的減速度上限（m/s²），疊在滑�
 TUNE.CURVE_ASSIST_GAIN = 2.0
 -- 1002d：4→5.5，剖面假設的輔助（Follower.STYLES.coastAssist）提到 3.5，前饋之外要留比例項的餘地。
 -- 1013g：5.5→6.5，同一本帳＝coastAssist 4.5＋CURVE_ASSIST_HEADROOM（smoke (curve-ledger) 鎖）。
-TUNE.CURVE_ASSIST_MAX = 6.5
+-- 1017h：6.5→7.5，同上（coastAssist 5.5）。
+TUNE.CURVE_ASSIST_MAX = 7.5
 -- 剖面假設的輔助之上留給比例項的餘地（1002l：終點段假設 STOP_ASSIST 6，上限跟著到 8；彎前 coastAssist＋2＝CURVE_ASSIST_MAX）。
 TUNE.CURVE_ASSIST_HEADROOM = 2.0
 -- 包絡「在收」的門檻（km/h／次呼叫；Drive.visAssistForce 前饋閘）：沿收油包絡每幀至少掉 a·dt（240 FPS、

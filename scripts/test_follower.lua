@@ -397,9 +397,9 @@ do
     checkTrue(tgtA > tgtB + 1, string.format("線上滑行 0.6 夾限加回輔助：目標 %.1f > 不加 %.1f km/h", tgtA, tgtB))
     checkNear(F.STYLES.brisk.coast, 3.0, 1e-12,
         "brisk coast 天花板 3.0（0907e：真值由 VehicleProfile 質量制動預算取 min）")
-    -- 1013g：彎前收油輔助 3.5→4.5；兩檔同值（1001i 起舒適檔彎前收油「同最高檔」，2026-10-01 使用者放寬舒適檔）。
-    --   違規證明（temp/vp_1013g_L5.py）：brisk 回 3.5＝第一條紅；只抬 brisk＝第二條紅。
-    checkNear(F.STYLES.brisk.coastAssist, 4.5, 1e-12, "brisk 彎前收油輔助 4.5（1013g）")
+    -- 1013g：彎前收油輔助 3.5→4.5；1017h：4.5→5.5。兩檔同值（1001i 起舒適檔彎前收油「同最高檔」，2026-10-01 使用者放寬舒適檔）。
+    --   違規證明（temp/s1017-l5plus/vp_l5plus.py）：brisk 留 4.5＝第一條紅；只抬 brisk＝第二條紅。
+    checkNear(F.STYLES.brisk.coastAssist, 5.5, 1e-12, "brisk 彎前收油輔助 5.5（1017h）")
     checkNear(F.STYLES.comfort.coastAssist, F.STYLES.brisk.coastAssist, 1e-12,
         "舒適檔彎前收油輔助同最高檔（1001i／2026-10-01 裁定）")
     -- 彎後不再有前向加速包絡（2026-09-01 拆除 forward pass）：v[5] 直接由
@@ -3802,9 +3802,9 @@ end
 scenario("1002t：髮夾彎內側以車道折點為基準：放行、出彎前視、跨臂交接（E2E hairpin-sp／0927 正式服 131°／1006 正式服 117° 共線短樁）")
 do
     -- 違規證明：舊制（量中心線）紅 9 項；只加放行點帽（1002j 前）紅 4 項；再加放行窗內不判 ROTATE 紅 2 項。
-    -- 閉環 plant 同情境二十六（自行車＋一階 yaw 延遲、Driver 死區），加速度 3／煞車 8 的速度 plant、Driver 一般 cross-track。
-    -- 煞車 7→8（1013g）：剖面彎前收油＝斷油 3＋coastAssist 4.5＝7.5，Driver 照計畫補（前饋＋比例，上限斷油＋CURVE_ASSIST_MAX）；
-    -- plant 低於計畫減速度＝量的是 plant 跟不上剖面，不是放行點。
+    -- 閉環 plant 同情境二十六（自行車＋一階 yaw 延遲、Driver 死區），加速度 3／煞車 9 的速度 plant、Driver 一般 cross-track。
+    -- 煞車 7→8（1013g）→9（1017h）：剖面彎前收油＝斷油 3＋coastAssist 5.5＝8.5，Driver 照計畫補（前饋＋比例，上限斷油＋
+    -- CURVE_ASSIST_MAX）；plant 低於計畫減速度＝量的是 plant 跟不上剖面，不是放行點（1017h 留 8 時三種 bias 放行 21–21.5 km/h）。
     -- 回傳：rotN、放行速度、放行 err、出彎臂往對向的最大偏、是否走過頂點 25m。
     local function closedLoop(p, bias, s0, v0, rMin)
         local st = F.newState()
@@ -3836,7 +3836,7 @@ do
                 prevLd = ld
             end
             local tv = tgt / KMH
-            if tv < car.v then car.v = math.max(tv, car.v - 8 * DT) else car.v = math.min(tv, car.v + 3 * DT) end
+            if tv < car.v then car.v = math.max(tv, car.v - 9 * DT) else car.v = math.min(tv, car.v + 3 * DT) end
             if steer > 5 then steer = 5 elseif steer < -5 then steer = -5 end
             if steer < 0.02 and steer > -0.02 then steer = 0 end
             local k = math.max(-1 / rMin, math.min(1 / rMin, steer * 0.4))
