@@ -14095,14 +14095,14 @@ function drive.scenarioTelem1010()
     Dr.yawGovern(s, 0, 0.5, 20, t0 + 100)
     Dr.yawGovern(s, 0, 0.5, 20, t0 + 200)
     s.hbrLatch = "t1010-brake"
-    s.trfLeadGap, s.trfLeadV = 12.5, 3
+    s.trfLeadGap, s.trfLeadV, s.trfLeadVd = 12.5, 3, 2.5
     s.zombieWhy, s.zombieWant = "gap", 1.25
     local _, p1 = tick()
     checkTrue(type(p1.yawPeak) == "number" and math.abs(p1.yawPeak - 5) < 1e-6 and (p1.yawRate == nil or math.abs(p1.yawRate) < 1),
         "(latch) yrp＝取樣間最大 |yr|（peak=" .. tostring(p1.yawPeak) .. " yr=" .. tostring(p1.yawRate) .. "）")
     checkEq(p1.hardBrakeLatch, "t1010-brake", "(latch) hbp＝取樣間最後一個 hard-brake 理由")
-    checkTrue(p1.trfLeadGap == 12.5 and p1.trfLeadV == 3 and p1.zombieWhy == "gap" and p1.zombieWant == 1.25,
-        "(phys) tlg／tlv／zwh／zwt 進樣本")
+    checkTrue(p1.trfLeadGap == 12.5 and p1.trfLeadV == 3 and p1.trfLeadVd == 2.5 and p1.zombieWhy == "gap"
+            and p1.zombieWant == 1.25, "(phys) tlg／tlv／tlvd／zwh／zwt 進樣本")
     nowMs = nowMs + 300
     local _, p2 = tick()
     checkTrue((p2.yawPeak == nil or p2.yawPeak < 1) and p2.hardBrakeLatch == nil,
@@ -14112,6 +14112,10 @@ function drive.scenarioTelem1010()
     local _, p3 = tick()
     checkTrue(p3.zombieWhy == nil and p3.zombieWant == nil, "(phys) zwh=none 不寫")
     s.trfLeadGap, s.trfLeadV, s.zombieWhy, s.zombieWant = nil, nil, nil, nil
+    nowMs = nowMs + 300
+    local _, p4 = tick()
+    checkEq(p4.trfLeadVd, nil, "(phys) 沒有前車（tlg 省略）時 tlvd 也不寫（殘留的差分不外洩）")
+    s.trfLeadVd = nil
 
     -- (policy) session 第一次刷新只是初值（就算和預設不同也不記）；中途切殭屍減速偏好記一筆；沒變的刷新不記
     MDADDiagnostics.shouldSample = function() return false end
@@ -22261,6 +22265,143 @@ function drive.scenarioTraffic()
     clientFlag = oldClient
 end
 drive.scenarioTraffic()
+
+-- (fl-*) 1017b D1 MP 跟車追撞（正式服 P06 clip-01：前車回報 73–76 km/h、間距 4.4 秒 31→3.5 m，本車 70 沒減速撞兩次；P03／P08／P21：
+--   前車撞前 1.7–2.5 秒從追蹤消失後加速撞上）。真 Driver 的 trafficScan／trafficCap，Sensor 快照直接寫（不跑 scanRound），
+--   每輪 250ms、本車照帽以 3 m/s² 減速的簡單 plant：
+--   (fl-diff)  回報 75 km/h、實際 40：兩輪後前車速度＝差分（≈11 m/s），帽降到前車速附近，全程間距 > FOLLOW_STOP_M。
+--   (fl-fast)  前車真的比較快（間距變大、回報 40）：照回報速度，不多減速。
+--   (fl-short) 基線 < FOLLOW_DIFF_MIN_S 不換錨點、不出差分；換了前車（id）／換來源（原生→轉送）差分作廢。
+--   (fl-hold)  前車單輪消失、帶內仍有車：沿用外推、帽照套，事件 lead-lost hold=true；超過 FOLLOW_HOLD_MS 放掉；帶內沒車不保持。
+--   違規證明（temp/s1017-follow/vp_follow.py）：速度不取差分＝(fl-diff) 紅；拿掉保持＝(fl-hold) 紅；換前車不重設＝(fl-short) 紅。
+function drive.scenarioFollowLead()
+    scenario("1017b 跟車：前車速度取 min(回報, 差分)、單輪消失保持 ≤1 秒、換前車不沿用舊差分")
+    local T = MDAD.Drive.debugTune()
+    local oldWorld, oldGeo, oldSandbox, oldVeh, oldGet =
+        drive.world, drive.vehGeo, SandboxVars, dveh, getSpecificPlayer
+    local oldApi, oldGear = MinidoracatMiniMapAPI.navApiVersion, MDAD.Drive.getGear(0)
+    local oldRoute, oldTx, oldTy, oldState = drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
+    local oldEvent = MDADDiagnostics.event
+    local events = {}
+    MDADDiagnostics.event = function(_, name, a) events[#events + 1] = { name = name, a = a } end
+    MDAD.Drive.stop(0, nil)
+    getSpecificPlayer = function(n) if n == 0 then return dp end end
+    MinidoracatMiniMapAPI.navApiVersion = 5
+    MDAD.Drive.setGear(0, 3)
+    dveh = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }),
+        engineRunning = true, mass = 1200, speed = 70, maxSpeed = 120,
+        bodyW = 1.8, bodyL = 4.6, comX = 0, comZ = 0, profileFull = true,
+        enginePower = 4000, brakingForce = 100, wheelFriction = 1.5, tireFriction = 1.5 })
+    drive.vehGeo = {}
+    drive.fillWorld(-12, 220, -10, 10)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 120, RightLaneBias = 1 })
+    dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = 0, 0, 70, 0, false
+    dveh._engine, dveh._driver = true, dp
+    dp._vehicle, dp._dead, dp._local = dveh, false, true
+    setHeading(dveh, 0)
+    -- 路線比判讀用到的弧長長（本車走約 200m、前車再前 40m）
+    drive.nav.route = { pts = { 0, 0, 600, 0 }, segSurface = { "paved" }, segWidth = { 8 }, navVersion = 4 }
+    drive.nav.tx, drive.nav.ty, drive.nav.state = 600, 0, "ok"
+    checkTrue(MDAD.Drive.start(dp), "(fl) 8m 直路啟動")
+    for _ = 1, 30 do driveTick(dp, dveh) end
+    local st = MDAD.Drive.debugSession(0)
+    st.diag = true
+    local sen, halfL = st.sensor, st.vehicleProfile.halfL
+    local lane = st.fstate.laneBias
+    local now, rs, v = 5000000, st.lastSNow, 70 / 3.6
+    -- 一輪：本車照上一輪的帽以 3 m/s² 減速（不加速超過 70）、前進 250ms；前車照實際速度前進；寫一筆快照後判讀
+    local cap = -1
+    local function round(id, leadS, vs, opts)
+        opts = opts or {}
+        now = now + (opts.dt or 250)
+        local dt = (opts.dt or 250) / 1000
+        local want = (cap >= 0 and cap < 70) and cap / 3.6 or 70 / 3.6
+        if v > want then v = math.max(want, v - 3 * dt) end
+        rs = rs + v * dt
+        st.lastSNow = rs
+        sen.trfN, sen.trfNativeN = 0, 0
+        if leadS then
+            sen.trfN = 1
+            sen.trfNativeN = opts.relay and 0 or 1
+            sen.trfS0[1], sen.trfS1[1] = leadS, leadS + 4.6
+            sen.trfL0[1], sen.trfL1[1] = lane - 0.9, lane + 0.9
+            sen.trfVs[1], sen.trfVl[1] = vs, 0
+            sen.trfT[1], sen.trfId[1] = opts.relay and now or now - 20, id
+        end
+        sen.movingVeh = opts.empty ~= true
+        sen.vehN = opts.empty and 0 or 4
+        MDAD.Drive.trafficScan(st, now, v * 3.6)
+        local reason
+        cap, reason = MDAD.Drive.trafficCap(st, now, v * 3.6)
+        return cap, reason
+    end
+    local function gapNow(leadS) return leadS - rs - halfL end
+    -- (fl-diff) 回報 75 km/h（20.8 m/s）、實際 40 km/h（11.1 m/s），起始間距 31m、本車 70
+    local vReal, vRep = 40 / 3.6, 75 / 3.6
+    local leadS = rs + halfL + 31
+    local minGap, capAt2 = math.huge, nil
+    for k = 1, 40 do
+        leadS = leadS + vReal * 0.25
+        local c = round(701, leadS, vRep)
+        if k == 3 then capAt2 = c end
+        minGap = math.min(minGap, gapNow(leadS))
+    end
+    checkTrue(st.trfLeadVd ~= nil and math.abs(st.trfLeadVd - vReal) < 0.3,
+        "(fl-diff) 同一台前車的弧長差分＝實際速度（vd=" .. tostring(st.trfLeadVd) .. "）")
+    checkTrue(st.trfLeadV ~= nil and math.abs(st.trfLeadV - vReal) < 0.3,
+        "(fl-diff) 前車速度取 min(回報, 差分)（v=" .. tostring(st.trfLeadV) .. "）")
+    checkTrue(capAt2 ~= nil and capAt2 < 60, "(fl-diff) 第三輪帽已低於本車 70（cap=" .. tostring(capAt2) .. "）")
+    checkTrue(minGap > T.FOLLOW_STOP_M, string.format("(fl-diff) 照帽減速不貼上（最小間距 %.1f > %.1f）", minGap, T.FOLLOW_STOP_M))
+    checkTrue(math.abs(v - vReal) < 1.5, string.format("(fl-diff) 穩定跟在前車後（本車 %.1f、前車 %.1f m/s）", v, vReal))
+    -- (fl-hold) 跟車中前車單輪消失、帶內仍有車：沿用外推，帽照套；事件 lead-lost 一筆、hold=true
+    local followGap = gapNow(leadS)
+    leadS = leadS + vReal * 0.25
+    local c, why = round(701, nil, nil)
+    checkTrue(st.trfLeadGap ~= nil and math.abs(st.trfLeadGap - followGap) < 3 and why == "moving" and c < 60,
+        string.format("(fl-hold) 前車單輪消失：沿用外推（gap %s、帽 %s／%s）", tostring(st.trfLeadGap), tostring(c), tostring(why)))
+    local ev
+    for i = #events, 1, -1 do
+        if events[i].name == "traffic" and events[i].a.phase == "lead-lost" then ev = events[i].a break end
+    end
+    checkTrue(ev ~= nil and ev.hold == true and ev.why == "sensor" and ev.vn == 4 and ev.mv == true and ev.kind == "near"
+            and math.abs(ev.d - followGap) < 1 and math.abs(ev.speed - vReal * 3.6) < 1,
+        "(fl-hold) 事件 traffic lead-lost（why／d／speed／hold／vn／mv／kind）")
+    local nEv = #events
+    for _ = 1, 3 do leadS = leadS + vReal * 0.25; round(701, nil, nil) end
+    checkTrue(st.trfLeadGap ~= nil, "(fl-hold) 1 秒內仍保持（gap " .. tostring(st.trfLeadGap) .. "）")
+    checkEq(#events, nEv, "(fl-hold) 保持中不重複記 lead-lost")
+    leadS = leadS + vReal * 0.25
+    round(701, nil, nil)
+    checkEq(st.trfLeadGap, nil, "(fl-hold) 超過 FOLLOW_HOLD_MS 放掉")
+    -- 回來再跟、再消失但帶內沒車：不保持
+    for _ = 1, 3 do leadS = leadS + vReal * 0.25; round(701, leadS, vRep) end
+    checkTrue(st.trfLeadGap ~= nil, "(fl-hold) 前車回來照跟")
+    round(701, nil, nil, { empty = true })
+    checkEq(st.trfLeadGap, nil, "(fl-hold) 帶內沒有車：不保持")
+    -- (fl-fast) 前車真的比較快（回報 40、實際 50＝間距變大）：照回報速度，帽不比只看回報低
+    cap, v, rs = -1, 70 / 3.6, st.lastSNow
+    leadS = rs + halfL + 30
+    for _ = 1, 6 do leadS = leadS + (50 / 3.6) * 0.25; round(702, leadS, vReal) end
+    checkTrue(st.trfLeadVd ~= nil and st.trfLeadVd > vReal + 1 and math.abs(st.trfLeadV - vReal) < 1e-9,
+        "(fl-fast) 差分比回報快：照回報（v=" .. tostring(st.trfLeadV) .. " vd=" .. tostring(st.trfLeadVd) .. "）")
+    -- (fl-short) 換前車：舊差分作廢；基線不到 FOLLOW_DIFF_MIN_S 不出差分；換來源（原生→轉送封包）也重來
+    round(703, leadS + 10, vRep)
+    checkEq(st.trfLeadVd, nil, "(fl-short) 換了前車（id）不沿用舊差分")
+    round(703, leadS + 10.5, vRep, { dt = 100 })
+    checkEq(st.trfLeadVd, nil, "(fl-short) 基線 0.1 秒＜FOLLOW_DIFF_MIN_S：不出差分")
+    round(703, leadS + 13, vRep)
+    checkTrue(st.trfLeadVd ~= nil and math.abs(st.trfLeadVd - 3 / 0.35) < 0.1,
+        "(fl-short) 錨點留在第一輪：差分基線 0.35 秒（vd=" .. tostring(st.trfLeadVd) .. "）")
+    round(703, leadS + 15, vRep, { relay = true })
+    checkEq(st.trfLeadVd, nil, "(fl-short) 同一台換來源（原生→轉送）差分作廢")
+    MDADDiagnostics.event = oldEvent
+    MDAD.Drive.stop(0, nil)
+    MDAD.Drive.setGear(0, oldGear)
+    MinidoracatMiniMapAPI.navApiVersion = oldApi
+    drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
+    drive.world, drive.vehGeo, SandboxVars, dveh, getSpecificPlayer = oldWorld, oldGeo, oldSandbox, oldVeh, oldGet
+end
+drive.scenarioFollowLead()
 
 -- 路外起步的越野接線（2026-09-27 E2E startpush-sp loc=c25＝正式服原位置）：路網在車前才開始（死路端點），
 -- 車停在路外、車頭垂直朝路，路線起點 2.5m 處硬物擋住中線。舊制剖面從路線起點 s=0 起算、車在起點之前

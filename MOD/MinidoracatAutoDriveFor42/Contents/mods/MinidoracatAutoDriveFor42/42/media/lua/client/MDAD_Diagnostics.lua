@@ -151,6 +151,8 @@ local EK = {
     "lat", "fi", "mode",
     -- zombie plan（1008）：車身橫向（lat，同上）、最近威脅 l、車身／舊 laneBias 速率可及量、近威脅限側基準、新可行性模型拒縫（reach／side）
     "tl", "rb", "rl", "ns", "rej",
+    -- 1017b traffic lead-lost（Driver Drive.followLead）：有沒有進單輪保持、當下帶內車輛格數 vehN、帶內有沒有行進車
+    "hold", "vn", "mv",
     -- takeover yield／manual（1009）：玩家用了哪個輸入（steer／steer-key／brake／forward／backward，Driver manualInput）
     "key",
     -- 2026-10-10 遙測補強：
@@ -1415,7 +1417,8 @@ local function encodePhys(phys)
     addNum("yawPeak", "yrp")          -- 上一筆取樣到這一筆之間的最大 |yr|（rad/s；閂到下一筆，比照 fbl／xcw）
     addStr("hardBrakeLatch", "hbp")   -- 上一筆取樣到這一筆之間最後一個 hard-brake 理由（閂到下一筆；hbr 只記當幀）
     addNum("trfLeadGap", "tlg")       -- 跟車 lead 車距 m（Drive.trafficScan 每輪寫；沒 lead＝省略）
-    addNum("trfLeadV", "tlv")         -- 跟車 lead 沿線速度 m/s（倒退或對向夾 0）
+    addNum("trfLeadV", "tlv")         -- 跟車 lead 沿線速度 m/s（倒退或對向夾 0；1017b 起＝min(回報, 差分)）
+    addNum("trfLeadVd", "tlvd")       -- 1017b：同一台前車連兩輪的弧長差分速度 m/s（Drive.followLead；還沒差分＝省略）
     addStr("zombieWhy", "zwh")        -- 殭屍軟縫本輪選縫理由（s.zombieWhy；none／未持有＝省略）
     addNum("zombieWant", "zwt")       -- 殭屍軟縫本輪目標 lane（zwh 有寫才寫）
     -- 1013a 速度損失拆帳與 MP 首見（皆有值才寫）：

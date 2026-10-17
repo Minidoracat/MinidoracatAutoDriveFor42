@@ -1646,7 +1646,7 @@ getCore, getActivatedMods, getModInfoByID, isClient = nil, nil, nil, nil
 --------------------------------------------------------------------------------
 -- 1010：新樣本短碼（取樣間閂鎖 yrp／hbp、跟車 lead tlg／tlv、殭屍軟縫逐輪 zwh／zwt、鏈式停留夾過的常駐線 rsl）有值才寫。
 -- 違規證明：encodePhys 拿掉任一行＝(codes) 紅；缺值寫 0／null＝(omit) 紅。
-scenario("1010 sample short codes yrp/hbp/tlg/tlv/zwh/zwt/rsl: written when present, omitted when absent")
+scenario("1010 sample short codes yrp/hbp/tlg/tlv/tlvd/zwh/zwt/rsl: written when present, omitted when absent")
 do
     resetFs()
     loadProd()
@@ -1656,7 +1656,7 @@ do
         MDADDiagnostics.sample(0, t, 100, 200, 0, 30, 40, 400, 0, 0, 0, 0, "follow", 3, true, nil, false,
             nil, nil, nil, nil, nil, nil, nil, nil, nil, false, false, false, false, false, phys)
     end
-    s(9400000, { yawPeak = 2.5, hardBrakeLatch = "blocked-approach", trfLeadGap = 12.5, trfLeadV = 3,
+    s(9400000, { yawPeak = 2.5, hardBrakeLatch = "blocked-approach", trfLeadGap = 12.5, trfLeadV = 3, trfLeadVd = 2.5,
         zombieWhy = "gap", zombieWant = 1.25, residentLane = 1.5 })
     s(9400300, {})
     nowMs = 9401000
@@ -1667,11 +1667,11 @@ do
         if not first then first = line else second = line end
     end
     first, second = first or "", second or ""
-    for _, kv in ipairs({ '"yrp":2.5', '"hbp":"blocked-approach"', '"tlg":12.5', '"tlv":3', '"zwh":"gap"', '"zwt":1.25',
-            '"rsl":1.5' }) do
+    for _, kv in ipairs({ '"yrp":2.5', '"hbp":"blocked-approach"', '"tlg":12.5', '"tlv":3', '"tlvd":2.5', '"zwh":"gap"',
+            '"zwt":1.25', '"rsl":1.5' }) do
         check(string.find(first, kv, 1, true) ~= nil, "(codes) sample writes " .. kv)
     end
-    for _, k in ipairs({ "yrp", "hbp", "tlg", "tlv", "zwh", "zwt", "rsl" }) do
+    for _, k in ipairs({ "yrp", "hbp", "tlg", "tlv", "tlvd", "zwh", "zwt", "rsl" }) do
         checkEq(countNeedle(second, '"' .. k .. '":'), 0, "(omit) absent " .. k .. " is not written")
     end
 end
