@@ -164,6 +164,7 @@ Plus a screwdriver.
 [list]
 [*] [b]Default[/b]: steering, throttle or brake stops autodrive; the trip is kept.
 [*] [b]Auto-resume[/b]: "After manual input" can resume 2 / 3 / 5 / 10 s after letting go, with a HUD countdown.
+[*] [b]Tip[/b]: on the default, if you restart to the same destination right after taking over, a one-time tip suggests auto-resume (at most once per game session).
 [*] [b]Far off the route[/b]: if you have driven far off the route by then, autodrive simply ends (like a manual stop) and keeps the navigation target.
 [/list]
 [h3]U-turn style[/h3]
@@ -214,7 +215,7 @@ Plus a screwdriver.
 [h3]Re-hitching a trailer that drops out of sync (multiplayer)[/h3]
 [list]
 [*] [b]What happens[/b]: in multiplayer the trailer sometimes vanishes from your screen because of a sync glitch, while on the server it is still there and still hitched.
-[*] [b]Re-hitch[/b]: autodrive stops, waits for the trailer to reappear, backs up until it hitches again, then continues along the route; the status shows "Re-hitching" with a voice line. Towing another car works the same way.
+[*] [b]Re-hitch[/b]: autodrive stops, waits for the trailer to reappear, backs up until it hitches again, then continues along the route; the status shows "Awaiting trailer: N s", "Trailer found", "Backing to trailer" and "Re-hitching" in turn, with a voice line. Towing another car works the same way.
 [*] [b]When it hands back instead[/b]: semi-trailers, or when the trailer doesn't come back in time, the car can't line up, or something is behind it. The status shows "Trailer out of sync"; back up next to the trailer yourself and it hitches again once it reappears, then start autodrive again.
 [/list]
 [h3]Zombies, corpses and other players[/h3]
