@@ -77,15 +77,29 @@ local TELEPORT_PAD_M = 5
 -- clip-01：最近一隻在 25m 外也記成 impZ）。車心弧長取樣本字串的 rs（Driver 的 lastSNow）。
 local IMPACT_ZOMBIE_M = 4
 local IMPACT_HALF_L = 2.5 -- profile 沒有 halfL 時的半車長：取偏大（窗寬，寧可多記不漏記）
--- 撞擊分類（1008，U.impactClass；Diagnostics 在上升緣算一次，整段連續撞擊沿用）。frozen 與 tow-sync 不算 impact、
--- 不觸發片段、不進 impZ，摘要另計 frz／tws；本機與上傳的 impact 事件帶 cls。
+-- 撞擊分類（1008，U.impactClass；Diagnostics 在上升緣算一次，整段連續撞擊沿用）。frozen、tow-sync、rehitch 不算 impact、
+-- 不觸發片段、不進 impZ，摘要另計 frz／tws／rhi；本機與上傳的 impact 事件帶 cls。
 --   frozen＝MP 伺服器拉回前一筆的凍結樣本：車速與 vl／vt 三者精確為 0（真撞 200ms 內不會剛好三個 0；正式服 0.23.0
 --     片段兩例：71→0、64.8→0，下一筆座標跳 56／6 m）。
 --   tow-sync＝拖車時掛車被同步拉回、經約束拽住牽引車：沒煞車（ib、fbl）、沒 footprint、nb 方框內沒東西，且本筆往前
 --     TOW_SYNC_MS 內掛車 tup 從高點掉了 ≥TOW_SYNC_TUP（正式服 0.23.0 SemiTruckLite＋SemiTrailerContainer 6 例掉
 --     0.0033–0.0058；同批其他拖車真撞與接觸 ≤0.0004，其中 SemiTruck＋Cartrailer 的真撞撞前 tup 平穩、撞後才傾斜）。
+--   rehitch（1017）＝自動掛回：樣本 mode rehitch，或 tow rh-attach 後 REHITCH_SETTLE_MS 內（同 Driver TUNE.REHITCH_SETTLE_MS）——
+--     引擎掛上那一下把倒退中的牽引車拉攏（正式服 1015c 2 件、1015b 1 件，dvs −15～−23）。
 local TOW_SYNC_MS = 450
 local TOW_SYNC_TUP = 0.002
+local REHITCH_SETTLE_MS = 2500
+-- 下車煞車（1017，摘要 xbk）：玩家下車時引擎打空檔＋煞車（tn 0、ib、fbl 0），80 km/h 單一間隔 19.6 m/s² 略過 IMPACT_DECEL
+-- （正式服 1015c P17：撞擊後 1.03 秒以 exit 結束）。撞擊上升緣 fbl 0 且 tn 0 的先擱著：EXIT_BRAKE_MS 內以 exit 結束＝不算
+-- impact、不出片段；過了這麼久或用別的原因結束才照常算（片段 trig＝撞擊那刻）。
+local EXIT_BRAKE_MS = 2000
+-- 路中停車首見（1017，摘要 vfIn／vfInX；10-27 MP 可視裁定的判準）：他車首見樣本 vfs 停著、距離 <VFS_IN_M、首見當下本車
+-- ≥VFS_IN_KMH、在本車前方（s>0）且 |l| < 本車半寬＋1 m；之後 VFS_OUT_MS 內有接觸、鎖輪或可視輔助頂到 VFS_VAD_FULL
+-- （Driver TUNE.VIS_ASSIST_MAX）的算 vfInX。ponytail: 同一窗內再來一筆首見共用同一個結果（最多計一次），要分開計再改成佇列。
+local VFS_IN_M, VFS_IN_KMH, VFS_OUT_MS, VFS_VAD_FULL = 55, 60, 8000, 4
+-- 入彎超速明細（1017，摘要 aoi）最多幾筆；出彎偏差（exN／exDev）：出弧後 EX_M 內 |ld| 最大值 >EX_DEV 的出口，出口車速
+-- ≥EX_FAST_KMH 另計；期間有殭屍軟縫或期望車道相鄰兩筆跳 >EX_JUMP_M（換道）的出口不算。起步到 T40_M 的 ms（t40）。
+local AOI_MAX, EX_M, EX_DEV, EX_FAST_KMH, EX_JUMP_M, T40_M = 4, 60, 0.5, 50, 1, 40
 -- 偏離常駐線（摘要 offMs／offN／offMax、片段 offset；排除清單見 offsetKpi）：沒人持有行駛線時 |ld|（車身 − 期望線＝
 -- 夾過路寬的常駐線）超過 OFF_LAT_M；鏈式停留（lc）改量車身 − 夾過的常駐線 rsl——鏈著時期望線就是停留 lane，
 -- 「繞完一直走路邊」正是這段（玩家回報，事故之外完全沒被錄到）。連續 ≥OFF_MIN_MS 才算一段，單段達 OFF_CLIP_MS
@@ -159,9 +173,11 @@ function U.impactLike(prevSpd, spd, gap, locked, moved)
 end
 
 -- 撞擊上升緣的分類（見 TOW_SYNC_MS 上方註解）：spd＝本筆車速（km/h）、phys＝本筆 phys、footprint＝本筆 footprint 命中、
--- near＝nb 掃描結果（true 有近物、false 掃了沒有、nil 沒掃成）、tupDrop＝往前 TOW_SYNC_MS 內 tup 的最大降幅（不拖車 nil）。
--- 回 "frozen"／"tow-sync"／"hit"；任何輸入缺席都落回 hit（寧可多記撞擊）。
-function U.impactClass(spd, phys, footprint, near, tupDrop)
+-- near＝nb 掃描結果（true 有近物、false 掃了沒有、nil 沒掃成）、tupDrop＝往前 TOW_SYNC_MS 內 tup 的最大降幅（不拖車 nil）、
+-- mode＝本筆 s.mode、rhMs＝距最近一次 tow rh-attach 的 ms（沒有＝nil）。
+-- 回 "frozen"／"rehitch"／"tow-sync"／"hit"；任何輸入缺席都落回 hit（寧可多記撞擊）。
+function U.impactClass(spd, phys, footprint, near, tupDrop, mode, rhMs)
+    if mode == "rehitch" or (finite(rhMs) and rhMs >= 0 and rhMs <= REHITCH_SETTLE_MS) then return "rehitch" end
     if type(phys) ~= "table" then return "hit" end
     if spd == 0 and phys.vLong == 0 and phys.vLat == 0 then return "frozen" end
     local fbl = phys.forceBrakeLeft
@@ -170,6 +186,11 @@ function U.impactClass(spd, phys, footprint, near, tupDrop)
         return "tow-sync"
     end
     return "hit"
+end
+
+-- 下車煞車候選（EXIT_BRAKE_MS 註解）：撞擊那筆沒在鎖輪（fbl 0）而檔位在空檔（tn 0）。
+local function exitBrakeLike(phys)
+    return type(phys) == "table" and phys.transmissionNumber == 0 and phys.forceBrakeLeft == 0
 end
 
 local function nowMs()
@@ -265,6 +286,8 @@ function U.begin(pn, now, header, profile)
         tp = 0, prevImpX = nil, prevImpY = nil,
         -- 1008 不算撞擊的兩類（U.impactClass）：凍結樣本、拖車同步拽動的次數；prevImpLike＝前一筆過了 impactLike（只數上升緣）
         frz = 0, tws = 0, prevImpLike = false,
+        -- 1017 不算撞擊的另兩類：自動掛回拉攏（cls rehitch）、下車煞車（xbPend＝擱著的候選時間、xbZ＝它算不算 impZ）
+        rhi = 0, xbk = 0, xbPend = nil, xbZ = false,
         -- 1004e 越野推力：越野跟線毫秒；「想加速」相鄰兩筆同地表的對——越野／鋪面的毫秒與速度增量（m/s），
         -- 越野對加速度 <1.5 m/s² 的毫秒、越野對有前推輔助的毫秒、遞增倍率頂到 3 的毫秒。aSurf／aSpd＝前一筆狀態。
         oMs = 0, oaMs = 0, oaDv = 0, olMs = 0, oasMs = 0, obMs = 0, paMs = 0, paDv = 0, aSurf = nil, aSpd = nil,
@@ -279,6 +302,15 @@ function U.begin(pn, now, header, profile)
         vfa = { 0, 0, 0, 0, 0, 0 }, vfP = { 0, 0, 0, 0, 0 }, vfM = { 0, 0, 0, 0, 0 }, vfMinP = nil, vfMinM = nil, rotMs = 0,
         -- 起步段調頭（uturn 事件 start＝true 的第一次）：suOpen＝進了還沒 done；首探、room 探測結果與次數、done why／ms
         suOpen = nil, suProbe = nil, suRoom = nil, suRn = 0, suWhy = nil, suMs = nil,
+        -- 1017：路中停車首見次數與之後 VFS_OUT_MS 內出事次數（vfInT＝等待結果的那筆首見時間）；入彎超速明細（JSON 片段）；
+        -- 出彎偏差（exFrom＝開著的出口窗起點 dist；exEl 上一筆期望車道、exSpd 出口車速、exMax 最大 |ld|、exBad 換道或軟縫）；
+        -- 油量起訖與各路段油量差／m（fuD／fuM，鍵 arc／pre／post／dodge／oth）；起步到 T40_M 的 ms 與起步型旗標；
+        -- 煞車學習拒收理由次數；EngineOff 的關卡（JSON 片段）
+        vfIn = 0, vfInX = 0, vfInT = nil, aoi = {}, aoiN = 0,
+        exN = 0, exDev = 0, exN50 = 0, exDev50 = 0, exFrom = nil, exEl = nil, exSpd = 0, exMax = 0, exBad = false,
+        fu0 = nil, fu1 = nil, fuD = {}, fuM = {}, t40 = nil, stTow = false, stU = false, stApr = false, stRet = false,
+        blr = {}, eng = nil,
+        halfW = type(profile) == "table" and finite(profile.halfW) and profile.halfW or 1,
         halfL = type(profile) == "table" and finite(profile.halfL) and profile.halfL or IMPACT_HALF_L,
         vmax = type(profile) == "table" and profile.maxSpeed or nil,
         svLim = nil,
@@ -535,11 +567,61 @@ local function captureTick(u, now)
     end
 end
 
+-- 路段（1013a lph；1017 起油量 fuD 共用）：arc＝弧上、pre＝前方 200m 內有弧（樣本 na）、post＝最後一筆弧上樣本後 100m 內、oth。
+local function segOf(u, phys)
+    if phys.curveHardActive == true then return "arc" end
+    local na, post = phys.nextArc, u.arcEndDist and u.dist - u.arcEndDist or nil
+    if finite(na) and (post == nil or post >= 100 or na <= post) then return "pre" end
+    if post ~= nil and post < 100 then return "post" end
+    return "oth"
+end
+
+-- 1017 出彎偏差（EX_M 上方註解）：收掉開著的出口窗。
+local function exitClose(u)
+    if u.exFrom ~= nil and not u.exBad then
+        local dev = u.exMax > EX_DEV
+        u.exN = u.exN + 1
+        if dev then u.exDev = u.exDev + 1 end
+        if u.exSpd >= EX_FAST_KMH then
+            u.exN50 = u.exN50 + 1
+            if dev then u.exDev50 = u.exDev50 + 1 end
+        end
+    end
+    u.exFrom = nil
+end
+
+-- 1013a 他車首見分桶＋1017 路中停車首見（VFS_IN_M 上方註解）。vfs 每筆 [d, 停著, s, l, 本車 km/h]（1017 前只有前兩項）。
+local function firstSeenKpi(u, phys, spd, now)
+    for body in string.gmatch(phys.firstSeen, "%[([^%[%]]*)%]") do
+        local d, p, rest = string.match(body, "^([^,]*),([01])(.*)$")
+        d = tonumber(d)
+        if finite(d) then
+            -- 停車在 MP 約 52–55m 才同步進客戶端（10-05 裁定），起步前就看到的不算
+            if spd >= 10 then
+                local b = d < 30 and 1 or d < 45 and 2 or d < 55 and 3 or d < 70 and 4 or 5
+                if p == "1" then
+                    u.vfP[b] = u.vfP[b] + 1
+                    if u.vfMinP == nil or d < u.vfMinP then u.vfMinP = d end
+                else
+                    u.vfM[b] = u.vfM[b] + 1
+                    if u.vfMinM == nil or d < u.vfMinM then u.vfMinM = d end
+                end
+            end
+            local s, l, v = string.match(rest or "", "^,([^,]*),([^,]*),([^,]*)$")
+            s, l, v = tonumber(s), tonumber(l), tonumber(v)
+            if p == "1" and d < VFS_IN_M and finite(v) and v >= VFS_IN_KMH and finite(s) and s > 0
+                    and finite(l) and l < u.halfW + 1 and l > -u.halfW - 1 then
+                u.vfIn, u.vfInT = u.vfIn + 1, now
+            end
+        end
+    end
+end
+
 -- 1002a 摘要 KPI（欄位見 U.begin）：只算跟線中（mode follow）的取樣。有效上限＝檔位／感知／沙盒／車輛極速／
 -- 伺服器速限取小；「貼近上限」＝實速 ≥0.9×有效上限（引擎推力在極速附近遞減，多數車只到極速的九成多）。
 -- 舊摘要只有限速理由的時間：車在直路已經跑到車輛極速時也記成 curve-coast（車道包絡在直路＝車輛極速），
 -- 量不到「多少時間在最高速」與「慢在哪」。
-local function speedKpi(u, phys, spd, target, mode, dt, capReason)
+local function speedKpi(u, phys, spd, target, mode, dt, capReason, now)
     if dt <= 0 or mode ~= "follow" or type(phys) ~= "table" then return end
     local em = u.vmax
     if not finite(em) or em <= 0 then em = nil end
@@ -570,17 +652,7 @@ local function speedKpi(u, phys, spd, target, mode, dt, capReason)
         if finite(target) then trk = (target < em and target or em) - spd end
         if trk < 0 then trk = 0 end
         u.lTrk, u.lTgt = u.lTrk + trk * dt, u.lTgt + l - trk * dt
-        local ph = "oth"
-        if phys.curveHardActive == true then
-            ph = "arc"
-        else
-            local na, post = phys.nextArc, u.arcEndDist and u.dist - u.arcEndDist or nil
-            if finite(na) and (post == nil or post >= 100 or na <= post) then
-                ph = "pre"
-            elseif post ~= nil and post < 100 then
-                ph = "post"
-            end
-        end
+        local ph = segOf(u, phys)
         u.lossPh[ph] = (u.lossPh[ph] or 0) + l
     end
     -- 彎道：入弧（curveHardActive 上升緣）次數、入弧速超過彎帽 1.15 倍、弧內離期望線超過 0.5m 的弧數
@@ -596,30 +668,47 @@ local function speedKpi(u, phys, spd, target, mode, dt, capReason)
         local b = vi < 250 and 1 or vi < 500 and 2 or vi < 1000 and 3 or vi < 1500 and 4 or vi < 2500 and 5 or 6
         u.vfa[b] = u.vfa[b] + 1
     end
-    -- 他車首見：停車在 MP 約 52–55m 才同步進客戶端（10-05 裁定），起步前就看到的不算
-    if type(phys.firstSeen) == "string" and spd >= 10 then
-        for d, p in string.gmatch(phys.firstSeen, "%[([%d%.eE%+%-]+),([01])%]") do
-            d = tonumber(d)
-            if finite(d) then
-                local b = d < 30 and 1 or d < 45 and 2 or d < 55 and 3 or d < 70 and 4 or 5
-                if p == "1" then
-                    u.vfP[b] = u.vfP[b] + 1
-                    if u.vfMinP == nil or d < u.vfMinP then u.vfMinP = d end
-                else
-                    u.vfM[b] = u.vfM[b] + 1
-                    if u.vfMinM == nil or d < u.vfMinM then u.vfMinM = d end
-                end
-            end
-        end
-    end
+    if type(phys.firstSeen) == "string" then firstSeenKpi(u, phys, spd, now) end
     if arc and not u.prevArc then
+        exitClose(u) -- 上一個出口窗沒走滿 EX_M 就進下一個弧：以量到的結算
         u.arcN, u.arcDevDone = u.arcN + 1, false
         local cc = phys.curveCap
-        if finite(cc) and cc > 0 and spd > 1.15 * cc then u.arcOver = u.arcOver + 1 end
+        if finite(cc) and cc > 0 and spd > 1.15 * cc then
+            u.arcOver = u.arcOver + 1
+            -- 1017 入彎超速明細 aoi：[ts, 車速, 彎帽, R（1/curveKappa）, vad, vaw, pb, 這趟第一個弧 1／0, 離出發 m]
+            if u.aoiN < AOI_MAX then
+                local k = phys.curveKappa
+                u.aoiN = u.aoiN + 1
+                u.aoi[u.aoiN] = "[" .. jnum(now) .. "," .. jround(spd, 10) .. "," .. jround(cc, 10) .. ","
+                    .. jround(finite(k) and (k > 1e-6 or k < -1e-6) and 1 / (k < 0 and -k or k) or nil, 10) .. ","
+                    .. jround(phys.visAssistDecel, 100) .. "," .. (type(phys.visAssistWhy) == "string"
+                        and jstr(phys.visAssistWhy) or "null") .. ","
+                    .. jround(phys.priorBrake, 100) .. "," .. (u.arcN == 1 and "1" or "0") .. "," .. jround(u.dist, 1) .. "]"
+            end
+        end
     end
     if arc and not u.arcDevDone then
         local ld = phys.latDev
         if finite(ld) and (ld > 0.5 or ld < -0.5) then u.arcDev, u.arcDevDone = u.arcDev + 1, true end
+    end
+    -- 1017 出彎偏差：出弧那筆開窗，之後 EX_M 內量 |ld| 最大值；軟縫或期望車道跳（換道）＝這個出口不算
+    if not arc and u.prevArc then
+        u.exFrom, u.exEl, u.exSpd, u.exMax, u.exBad = u.dist, phys.expectedLane, spd, 0, false
+    end
+    if u.exFrom ~= nil and not arc then
+        if u.dist - u.exFrom > EX_M then
+            exitClose(u)
+        else
+            local el, ld = phys.expectedLane, phys.latDev
+            if phys.zombieLane ~= nil or (finite(el) and finite(u.exEl) and (el - u.exEl > EX_JUMP_M or u.exEl - el > EX_JUMP_M)) then
+                u.exBad = true
+            end
+            if finite(el) then u.exEl = el end
+            if finite(ld) then
+                if ld < 0 then ld = -ld end
+                if ld > u.exMax then u.exMax = ld end
+            end
+        end
     end
     u.prevArc = arc
     if finite(phys.accelAssist) and phys.accelAssist > 0 then u.aaMs = u.aaMs + dt end
@@ -700,6 +789,31 @@ local function offsetKpi(u, phys, lat, mode, line, now, gap)
     u.offLast = now
 end
 
+-- 1017 起步、油量、煞車學習（欄位見 U.begin）：t40＝第一次累計 T40_M 公尺時離出發的 ms；油量下降依這筆的路段記（加油不算），
+-- 距離同段累計；mode 不是 follow 一律 oth、繞行（ctl AVOID）記 dodge。
+local function tripKpi(u, phys, mode, now, moved)
+    if u.t40 == nil and u.dist >= T40_M then u.t40 = now - u.startTs end
+    if type(phys) ~= "table" then return end
+    local seg = "oth"
+    if mode == "follow" then seg = phys.controlState == "AVOID" and "dodge" or segOf(u, phys) end
+    u.fuM[seg] = (u.fuM[seg] or 0) + moved
+    local fu = phys.fuelPercent
+    if finite(fu) then
+        if u.fu0 == nil then u.fu0 = fu end
+        if u.fu1 ~= nil and fu < u.fu1 then u.fuD[seg] = (u.fuD[seg] or 0) + (u.fu1 - fu) end
+        u.fu1 = fu
+    end
+    local r = phys.brakeReject
+    if type(r) == "string" then u.blr[r] = (u.blr[r] or 0) + 1 end
+end
+
+-- 算進 impact：次數、impZ（zHit）、觸發片段（ts＝撞擊那筆；下車煞車候選延後確認時也用撞擊那刻）。
+local function commitImpact(u, ts, zHit)
+    u.impact = u.impact + 1
+    if zHit then u.impZ = u.impZ + 1 end
+    trigger(u, ts, "impact")
+end
+
 -- 取樣：line 已由 MDAD_Diagnostics 編好（與本機紀錄同一字串，不重複編碼）。cls＝這筆若在撞擊段內，
 -- Diagnostics 在上升緣算的分類（U.impactClass；整段沿用，不在撞擊段＝nil）。
 function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
@@ -729,7 +843,8 @@ function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
     end
     u.lastTs = now
     local spd = finite(speed) and (speed < 0 and -speed or speed) or 0
-    u.dist = u.dist + spd / 3.6 * dt / 1000
+    local moved0 = spd / 3.6 * dt / 1000
+    u.dist = u.dist + moved0
     if finite(lat) then
         local a = lat < 0 and -lat or lat
         if a > u.maxLat then u.maxLat = a end
@@ -764,7 +879,8 @@ function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
         if phys.intent == "ROTATE" then u.rotMs = u.rotMs + dt end -- 1013a 原地轉（調頭）ms
     end
     if type(capReason) == "string" then u.capMs[capReason] = (u.capMs[capReason] or 0) + dt end
-    speedKpi(u, phys, spd, target, mode, dt, capReason)
+    speedKpi(u, phys, spd, target, mode, dt, capReason, now)
+    tripKpi(u, phys, mode, now, moved0)
     accelKpi(u, phys, speed, target, mode, gap)
     offsetKpi(u, phys, lat, mode, line, now, gap)
     if finite(fdt) then
@@ -799,6 +915,15 @@ function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
         u.contact = u.contact + 1
         trigger(u, now, "contact")
     end
+    -- 1017 路中停車首見之後 VFS_OUT_MS 內：接觸、鎖輪上升緣或可視輔助頂滿＝vfInX（每個等待窗最多一次）
+    if u.vfInT ~= nil then
+        local vad = type(phys) == "table" and phys.visAssistDecel or nil
+        if now - u.vfInT > VFS_OUT_MS then
+            u.vfInT = nil
+        elseif (fbHit and not u.prevFb) or (fbNow and not fbWas) or (finite(vad) and vad >= VFS_VAD_FULL) then
+            u.vfInX, u.vfInT = u.vfInX + 1, nil
+        end
+    end
     u.prevFb = fbHit
     -- 撞擊（含鎖輪中撞上）；同一次撞擊的連續幾筆只算一次。本筆或前一筆在鎖輪＝門檻 IMPACT_DECEL_LOCKED；
     -- 原始間隔超過 IMPACT_GAP_MAX_MS（中間沒取樣）不比。
@@ -818,17 +943,29 @@ function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
     if px and finite(x) and finite(y) then moved = math.sqrt((x - px) * (x - px) + (y - py) * (y - py)) end
     if finite(speed) and U.teleportLike(prevSpd, spd, gap, moved) then u.tp = u.tp + 1 end
     local imp = finite(speed) and U.impactLike(prevSpd, spd, gap, fbNow or fbWas, moved)
-    if imp and (cls == "frozen" or cls == "tow-sync") then
-        -- 1008 不是撞擊：同一段只在上升緣數一次，不觸發片段、不進 impact／impZ
+    if imp and (cls == "frozen" or cls == "tow-sync" or cls == "rehitch") then
+        -- 1008／1017 不是撞擊：同一段只在上升緣數一次，不觸發片段、不進 impact／impZ
         if not u.prevImpLike then
-            if cls == "frozen" then u.frz = u.frz + 1 else u.tws = u.tws + 1 end
+            if cls == "frozen" then u.frz = u.frz + 1
+            elseif cls == "rehitch" then u.rhi = u.rhi + 1
+            else u.tws = u.tws + 1 end
         end
     elseif imp and not (u.impactAt and now >= u.impactAt and now - u.impactAt < IMPACT_REARM_MS) then
-        u.impact, u.impactAt = u.impact + 1, now
+        u.impactAt = now
         -- 撞擊那筆或前一筆有殭屍在車身附近（多半是撞進殭屍群；也可能是殭屍旁的別的東西）
         local zw, pz = u.halfL + IMPACT_ZOMBIE_M, u.prevZd
-        if (zd and zd <= zw) or (pz and pz <= zw) then u.impZ = u.impZ + 1 end
-        trigger(u, now, "impact")
+        local zHit = (zd and zd <= zw) or (pz and pz <= zw) or false
+        if exitBrakeLike(phys) and u.xbPend == nil then
+            u.xbPend, u.xbZ = now, zHit -- 下車煞車候選：EXIT_BRAKE_MS 內以 exit 結束＝不算（U.finish）
+        else
+            commitImpact(u, now, zHit)
+        end
+    end
+    -- 下車煞車候選過了 EXIT_BRAKE_MS 還在開＝不是下車，照常算撞擊
+    if u.xbPend ~= nil and now - u.xbPend > EXIT_BRAKE_MS then
+        local ts = u.xbPend
+        u.xbPend = nil
+        commitImpact(u, ts, u.xbZ)
     end
     u.prevImpLike = imp == true
     u.prevImpactSpd = finite(speed) and spd or nil
@@ -878,6 +1015,18 @@ function U.event(u, line, now, name, a)
     if name == "route" and type(a) == "table" and type(a.target) == "string" then
         u.target = a.target -- 最後一個目的地（行程換站時跟著換）
     end
+    -- 1017 起步型（摘要 t40k）：開到 T40_M 之前出現過的起步動作——拖車、起步段原地轉、越野接線、回線
+    if u.t40 == nil and type(a) == "table" then
+        if name == "tow" and phase == "attach" then u.stTow = true
+        elseif name == "uturn" and phase == "enter" and a.start == true then u.stU = true
+        elseif name == "route" and phase == "ready" and finite(a.approach) and a.approach > 0 then u.stApr = true
+        elseif name == "return" and phase == "enter" then u.stRet = true end
+    end
+    -- 1017 EngineOff 是哪一關（Driver Drive.engineOffNote）：摘要 eng
+    if name == "engine" and phase == "off" then
+        u.eng = ',"eng":{"why":' .. jstr(a.why or "") .. ',"chg":' .. jround(a.chg, 1000) .. ',"es":' .. jround(a.es, 1)
+            .. ',"fu":' .. jround(a.fu, 100) .. '}'
+    end
     if name == "unstick" and phase == "start" then
         trigger(u, now, "unstick")
     elseif name == "tow" and phase == "lost" then
@@ -911,6 +1060,19 @@ local function lossJson(t)
     for k, v in pairs(t) do
         n = n + 1
         parts[n] = jstr(k) .. ":" .. tostring(math.floor(v / 1000 + 0.5))
+    end
+    return "{" .. table.concat(parts, ",", 1, n) .. "}"
+end
+
+-- 1017 各路段油量差（%）與里程（km）：{"arc":[d,km],…}（有里程或有油耗的段才列）
+local function fuelJson(u)
+    local parts, n = {}, 0
+    for k, m in pairs(u.fuM) do
+        local d = u.fuD[k] or 0
+        if m > 0 or d > 0 then
+            n = n + 1
+            parts[n] = jstr(k) .. ":[" .. jround(d, 100) .. "," .. jround(m / 1000, 1000) .. "]"
+        end
     end
     return "{" .. table.concat(parts, ",", 1, n) .. "}"
 end
@@ -965,6 +1127,14 @@ local function summaryText(u, now, reason, withMaps)
         .. (u.suOpen ~= nil and (',"su":{"probe":' .. jstr(u.suProbe or "") .. ',"room":' .. jstr(u.suRoom or "")
             .. ',"rn":' .. u.suRn .. ',"why":' .. jstr(u.suOpen and "open" or u.suWhy or "")
             .. ',"ms":' .. (finite(u.suMs) and jnum(math.floor(u.suMs + 0.5)) or "null") .. '}') or "")
+    -- 1017：不算撞擊的掛回／下車煞車、路中停車首見與結果、入彎超速明細、出彎偏差、油量、起步到 40m、煞車學習拒收、EngineOff 關卡
+    text = text .. ',"rhi":' .. u.rhi .. ',"xbk":' .. u.xbk .. ',"vfIn":' .. u.vfIn .. ',"vfInX":' .. u.vfInX
+        .. ',"aoi":[' .. table.concat(u.aoi, ",", 1, u.aoiN) .. ']'
+        .. ',"exN":' .. u.exN .. ',"exDev":' .. u.exDev .. ',"exN50":' .. u.exN50 .. ',"exDev50":' .. u.exDev50
+        .. ',"fu0":' .. jround(u.fu0, 100) .. ',"fu1":' .. jround(u.fu1, 100) .. ',"fuS":' .. fuelJson(u)
+        .. ',"t40":' .. jround(u.t40, 1)
+        .. ',"t40k":' .. jstr(u.stTow and "tow" or u.stU and "uturn" or u.stApr and "approach" or u.stRet and "return" or "plain")
+        .. ',"blr":' .. mapJson(u.blr) .. (u.eng or "")
     if withMaps then
         text = text .. ',"ev":' .. mapJson(u.evc) .. ',"mode":' .. mapJson(u.modeMs)
             .. ',"cap":' .. mapJson(u.capMs) .. ',"loss":' .. lossJson(u.loss)
@@ -984,6 +1154,15 @@ function U.finish(u, now, reason)
     local endTs = now
     if reason == "UI_MinidoracatAutoDrive_TrailerLost" and u.lostTs then
         kind, endTs = nil, u.lostTs
+    end
+    -- 1017 下車煞車候選還擱著：以 exit 結束＝下車（xbk），其他原因＝照常算撞擊（片段 trig＝撞擊那刻）
+    if u.xbPend ~= nil then
+        if reason == "exit" and now - u.xbPend <= EXIT_BRAKE_MS then
+            u.xbk = u.xbk + 1
+        else
+            commitImpact(u, u.xbPend, u.xbZ)
+        end
+        u.xbPend = nil
     end
     if kind then
         trigger(u, now, kind)

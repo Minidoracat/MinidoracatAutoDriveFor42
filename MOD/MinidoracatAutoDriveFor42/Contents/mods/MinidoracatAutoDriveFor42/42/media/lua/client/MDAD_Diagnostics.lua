@@ -132,6 +132,12 @@ local EK = {
     "rate",
     -- impact（1008）：撞擊分類 hit／frozen／tow-sync（MDADUpload.impactClass）、有號掉速（前一筆有號 km/h − 本筆；倒退反號時 dv 會低估）
     "cls", "dvs",
+    -- impact（1017）：當下檔位、引擎煞車、距上一次 tow rh-attach 的 ms（自動掛回拉攏的假撞）、跟車 lead 車距／速度（m 共用上面的鍵＝mode）
+    "tn", "ib", "rhMs", "tlg", "tlv",
+    -- engine off（1017，Drive.engineOffNote）：EngineOff 交還前的電瓶 charge、引擎轉速、油量 %（why＝engine／battery）
+    "chg", "es", "fu",
+    -- unstick settle（1017）：車在剖面首段反向延長上的距離 m（>0＝在起點後方，Drive.startBehind）
+    "bh",
     -- 1008 拖車：tow attach 外拉規劃用的掛點→車頭（MDADTrailer.hitchFront）；detour towcorner 附了車尾正後方圈（1）；
     -- detour skip why=same 時車離上次轉角改道判定處的世界距離（m）
     "front", "towRear", "moved",
@@ -179,6 +185,9 @@ local EK = {
     "tcl", "tcx", "tcy", "tsp", "tsc", "tsd", "toff", -- 1013e
     -- 1014b dodge commit／extend／release（exit、end、done）：出口回的 lane s.dodgeBaseL（Drive.dodgeHomeL，承諾時凍結）
     "dbl", -- 1014b
+    -- 1017 dodge commit：本輪第一條被殭屍擋下的候選的 min(彎帽, 餘裕帽)（Drive.zombieCap0）、chainAhead 走到的分支；
+    -- release：回線 lane 上線尾之後最近一群的位置與種類（Drive.releaseNext：dodge＝偏到位點、blocked＝群起點）
+    "zc0", "chain", "nxB", "nxC",
 }
 
 local function logOnce(msg)
@@ -1413,9 +1422,12 @@ local function encodePhys(phys)
     addStr("profileWhy", "pw")        -- capReason 空時 Follower 剖面由哪一項綁（coast／stop／max／arc／look／err／start／kink／rot／arr；? ＝沒記到）
     addNum("profileKmh", "pv")        -- 同上那幀的 fstate.profileSpeedKmh（姿態帽之前的剖面值）
     addStr("visAcct", "vac")          -- capReason visibility 時巡航帽由哪本帳綁：cruise／hold（前緣停滯保持）／term（前緣＝終點）
+    addNum("visCruiseCap", "vcc")     -- 1017：同上時巡航帳的帽 km/h（term＝終點帳）
+    addNum("visHoldCap", "vhc")       -- 1017：同上時前緣停滯保持帳的帽 km/h（term 時缺）
+    addStr("brakeReject", "blr")      -- 1017：上一筆以來結束、沒學到觀測的 forceBrake 窗的拒收理由（Driver Drive.brakeRejNote）
     addNum("visAdvMs", "vfi")         -- 可視前緣兩次前進的間隔 ms（閂到下一筆，寫出後清）
     addNum("nextArc", "na")           -- 前方 200m 內下一段弧起點的弧長距離 m（在弧上或沒有＝省略）
-    if type(phys.firstSeen) == "string" then bits = bits .. ',"vfs":' .. phys.firstSeen end -- 他車首見 [[m, 停著 1／0],…]（Driver 組好的數字陣列）
+    if type(phys.firstSeen) == "string" then bits = bits .. ',"vfs":' .. phys.firstSeen end -- 他車首見 [[m, 停著 1／0, s, l, 本車 km/h],…]（Driver 組好的數字陣列）
     return bits
 end
 
@@ -1918,9 +1930,14 @@ local function dropUpload(pn)
 end
 
 -- 事件交給兩個 sink（D.event 與 D.sample 的撞擊／瞬移事件共用）；呼叫端已確認至少一個 sink 在。
+-- 1017：記下最近一次 tow rh-attach（自動掛回引擎掛上）的時間到兩個 sink（取樣閘門持有者可能是任一個），撞擊分類與 impact rhMs 用。
 local function emitEvent(pn, now, name, a)
     local s, u = sessions[pn], uploads[pn]
     local line = encodeEvent(now, name, a)
+    if name == "tow" and type(a) == "table" and a.phase == "rh-attach" then
+        if s then s.rhAt = now end
+        if u then u.rhAt = now end
+    end
     if s and s.active then enqueue(s, line, now) end
     if u and not pcall(MDADUpload.event, u, line, now, name, a) then dropUpload(pn) end
 end
@@ -1996,12 +2013,14 @@ function D.sample(pn, now, x, y, heading, speed, target, remaining, lat, err,
     -- 記進 log 的是**這一幀真正採用的** 10Hz 判定（呼叫端旗標 or 誤差/模式推導），
     -- 不是呼叫端傳進來的原值：分析要對得上取樣密度。
     g.nearForce = sampleEdges(g, now, x, y, speed, phys, footprintBlocked)
-    -- 1008：撞擊上升緣先掃 nb（分類要看近處有沒有東西；encodeSample 直接寫這串），再分 hit／frozen／tow-sync；
-    -- 同一段連續撞擊沿用這個分類（sampleEdges 在段落結束時清掉）。
+    -- 1008：撞擊上升緣先掃 nb（分類要看近處有沒有東西；encodeSample 直接寫這串），再分 hit／frozen／tow-sync／rehitch；
+    -- 同一段連續撞擊沿用這個分類（sampleEdges 在段落結束時清掉）。1017：edgeRhMs＝距最近一次 tow rh-attach 的 ms（emitEvent 記）。
     if g.edgeImp then
         local near
         g.edgeNb, near = nearbyJson(pn, x, y, heading)
-        g.impCls = MDADUpload.impactClass(speed, phys, footprintBlocked, near, tupDrop(g, now, MDADUpload.TOW_SYNC_MS))
+        g.edgeRhMs = finite(g.rhAt) and now - g.rhAt or nil
+        g.impCls = MDADUpload.impactClass(speed, phys, footprintBlocked, near, tupDrop(g, now, MDADUpload.TOW_SYNC_MS),
+            mode, g.edgeRhMs)
     end
     local line = encodeSample(g, now, x, y, heading, speed, target, remaining, lat, err,
         steer, force, mode, gear, regulator, sensor, crit,
@@ -2027,7 +2046,13 @@ function D.sample(pn, now, x, y, heading, speed, target, remaining, lat, err,
             cls = g.impCls, dvs = round1(finite(speed) and g.edgeSv and g.edgeSv - speed),
             -- 2026-10-10：awt＝這筆取樣在等區域載入（引擎煞車同幀，dv 拆不開時看它）；車頭附近最近靜態硬物
             awt = type(phys) == "table" and phys.areaWait == true or nil, sprite = hNm, scost = hCls, hardD = round1(hD),
+            -- 1017：mode 與距 rh-attach 的 ms（假撞分得出掛回）；檔位／引擎煞車／lead 在下面（ib=false 也要寫）
+            m = mode, rhMs = g.edgeRhMs,
         }
+        -- 1017：檔位、引擎煞車（下車煞車＝tn 0、ib true、fbl 0）、跟車 lead 車距／速度（車對車追撞）
+        if type(phys) == "table" then
+            a.tn, a.ib, a.tlg, a.tlv = phys.transmissionNumber, phys.isBraking, round1(phys.trfLeadGap), round1(phys.trfLeadV)
+        end
         -- 1013e 拖車：掛車最近硬點（Driver Drive.towFootprint）的淨距（含 pad，同 ac）、座標與那點 1 格內的 sprite——上面的 sprite
         -- 只從牽引車車頭找，掛車撞的會誤歸因（正式服 Q10 clip-30 摘要寫成樹）
         if type(phys) == "table" and finite(phys.towClr) and finite(phys.towClrX) and finite(phys.towClrY) then

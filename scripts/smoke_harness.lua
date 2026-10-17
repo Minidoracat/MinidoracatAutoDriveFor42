@@ -25483,9 +25483,11 @@ function drive.scenarioReturnLaneNext()
     local okF, _, vF, dF = probe(58)
     checkTrue(okF == true and vF == nil and dF > 40,
         "(rl-next) 路邊物遠到回線後塞得進側移：照常回線（實得 " .. tostring(vF) .. " d=" .. tostring(dF) .. "）")
+    checkEq(MDAD.Drive.debugSession(0).chainWhy, "clear-ret", "(chain) 1017 遙測：停留 lane 淨空、回線後塞得進＝clear-ret")
     local okC, _, vC, dC = probe(nil)
     checkTrue(okC == true and vC == nil and math.abs(dC - dF) < 1e-6,
         "(rl-next) 對照：回線 lane 淨空＝照常回線（實得 " .. tostring(vC) .. " d=" .. tostring(dC) .. "）")
+    checkEq(MDAD.Drive.debugSession(0).chainWhy, "clear-none", "(chain) 1017 遙測：回線 lane 也淨空＝clear-none")
     -- 整合：同一片地真的 replan 一輪＝以停留承諾，commit 事件帶出口 lane dbl（停留沒有出口，仍記承諾時的回線 lane）
     local oldEvent, oldSample = MDADDiagnostics.event, MDADDiagnostics.sample
     local commitEv
@@ -25506,6 +25508,7 @@ function drive.scenarioReturnLaneNext()
         .. tostring(st.fstate.offL) .. "）")
     checkTrue(commitEv ~= nil and commitEv.dbl == 0,
         "(rl-next) commit 事件帶出口 lane dbl（實得 " .. tostring(commitEv and commitEv.dbl) .. "）")
+    checkEq(commitEv and commitEv.chain, "clear-stay", "(chain) 1017：commit 事件帶 N9 clear 分支走到停留（chain=clear-stay）")
     drive.clearCell(51, 0)
     drive.frameMs(wasMs)
     drive.clearVehicleGeom(cB)
@@ -25513,6 +25516,142 @@ function drive.scenarioReturnLaneNext()
     drive.fillWorld(-2, 70, -7, 7)
 end
 drive.scenarioReturnLaneNext()
+
+-- 1017 遙測（Driver 端；2026-10-17 裁定 EngineOff 照舊交還、只補紀錄）：
+--   (eng)      行進中電瓶沒電／引擎熄火：照舊 EngineOff 交還（玩家看到的鍵不變），交還前記 engine off why＝battery／engine、
+--              電瓶 charge、油量。違規證明：driveGate 兩關回同一個第二值＝(eng) why 紅；不記事件＝(eng) 紅。
+--   (ac-nil)   footprint 沒有命中硬點（帶內沒點）：樣本 ac／pc 缺值，不寫 0。違規證明：照舊寫 0＝紅。
+--   (bh)       Drive.startBehind：車在首段反向延長上的距離（後方正、前方負、剖面讀不到 nil）。
+--   (nx)       Drive.releaseNext：回線 lane 上線尾之後最近一群——要側移＝dodge＋偏到位點、整寬＝blocked＋群起點、群在線尾前或
+--              紀錄關著＝缺。違規證明：from 不用線尾（用車位）＝(nx-past) 紅。
+--   (blr)      Drive.brakeRejNote：窗結束沒學到才閂理由；第一個拒收理由優先；學到＝不閂；每幀都合格但窗太短＝short。
+--   (over-cut) 起步調頭過轉量測窗開著時換路線：cutover 那刻結算 uturn over why=cutover。違規證明：拿掉 cutover 結算＝紅。
+--   (rh-man)   自動掛回中玩家介入（手動介入後＝0）：記 tow rh-fail why=manual、kind＝當時階段。違規證明：拿掉該行＝紅。
+function drive.scenarioTelem1017()
+    scenario("1017 遙測：EngineOff 關卡、ac／pc 缺值、首段反向延長、回線 lane 下一群、煞車學習拒收、cutover 結算過轉、掛回中接手")
+    local Dr = MDAD.Drive
+    local oldEvent, oldSample = MDADDiagnostics.event, MDADDiagnostics.sample
+    local evs = {}
+    MDADDiagnostics.event = function(_, name, a) evs[#evs + 1] = { n = name, a = a } end
+    MDADDiagnostics.sample = function() return true end -- 沒有真的診斷 session：取樣回 false 會把 s.diag 關掉
+    local function last(name, phase)
+        for i = #evs, 1, -1 do
+            local e = evs[i]
+            if e.n == name and type(e.a) == "table" and (phase == nil or e.a.phase == phase) then return e.a end
+        end
+    end
+    -- (eng)
+    checkTrue(armDrive(), "(eng) 啟動")
+    Dr.debugSession(0).diag = true
+    dveh._part._item._uses = 0
+    driveTick(dp, dveh)
+    local e = last("engine", "off")
+    checkTrue(not Dr.isActive(0) and haloKey() == DKEY.ENGINE, "(eng) 行進中電瓶沒電：照舊 EngineOff 交還、提示鍵不變")
+    checkTrue(e ~= nil and e.why == "battery" and e.chg == 0,
+        "(eng) 交還前記 engine off why=battery、chg 0（實得 " .. tostring(e and e.why) .. "/" .. tostring(e and e.chg) .. "）")
+    dveh._part._item._uses = 0.8
+    evs = {}
+    checkTrue(armDrive(), "(eng) 重新啟動")
+    Dr.debugSession(0).diag = true
+    dveh._engine = false
+    driveTick(dp, dveh)
+    e = last("engine", "off")
+    checkTrue(not Dr.isActive(0) and haloKey() == DKEY.ENGINE and e ~= nil and e.why == "engine" and e.chg == 0.8,
+        "(eng) 引擎熄火：why=engine、電瓶 charge 0.8（實得 " .. tostring(e and e.why) .. "/" .. tostring(e and e.chg) .. "）")
+    dveh._engine = true
+    -- (ac-nil) 空路：沒有命中硬點＝ac／pc 缺值；放一根硬物在車頭旁＝有值
+    checkTrue(armDrive(), "(ac-nil) 啟動")
+    local st = Dr.debugSession(0)
+    driveReset(dveh)
+    drive.scanRound(true)
+    driveTick(dp, dveh)
+    checkTrue(st.actualClearance == nil and st.plannedClearance == nil,
+        "(ac-nil) 帶內沒有硬點：ac／pc 缺值（實得 " .. tostring(st.actualClearance) .. "/" .. tostring(st.plannedClearance) .. "）")
+    drive.putSolid(4, 3, "harness_acnil")
+    driveReset(dveh)
+    drive.scanRound(true)
+    driveTick(dp, dveh)
+    checkTrue(type(st.actualClearance) == "number" and type(st.plannedClearance) == "number",
+        "(ac-nil) 對照：有命中硬點＝有值（實得 " .. tostring(st.actualClearance) .. "）")
+    drive.clearCell(4, 3)
+    Dr.stop(0, nil)
+    -- (bh)
+    local pS = { profile = { x = { 0, 10 }, y = { 0, 0 }, segH = { 0 } } }
+    checkEq(Dr.startBehind(pS, -3, 1), 3, "(bh) 起點後方 3 m")
+    checkEq(Dr.startBehind(pS, 5, 0), -5, "(bh) 首段上 5 m＝−5")
+    checkEq(Dr.startBehind({}, 0, 0), nil, "(bh) 剖面讀不到＝nil")
+    -- (nx)
+    local function sen(ls)
+        local t = { hardS = {}, hardL = {}, hardR = {}, hardN = 0, roadLo = -6, roadHi = 6 }
+        for i = 1, #ls do t.hardS[i], t.hardL[i], t.hardR[i] = 40, ls[i], 0.3 end
+        t.hardN = #ls
+        return t
+    end
+    local nS = { diag = true, sensor = sen({ 0 }), fstate = { offD = 30 }, dodgeBaseL = 0, needHalf = 1.2, lastSNow = 10 }
+    Dr.releaseNext(nS)
+    checkTrue(nS.nxC == "dodge" and type(nS.nxB) == "number" and nS.nxB <= 40,
+        "(nx) 回線 lane 上線尾後的一群要側移：dodge＋偏到位點（實得 " .. tostring(nS.nxC) .. "/" .. tostring(nS.nxB) .. "）")
+    nS.fstate.offD = 50
+    Dr.releaseNext(nS)
+    checkTrue(nS.nxC == nil and nS.nxB == nil, "(nx-past) 群在線尾之前＝缺")
+    local wall = {}
+    for l = -6, 6, 0.5 do wall[#wall + 1] = l end
+    nS.sensor, nS.fstate.offD = sen(wall), 30
+    Dr.releaseNext(nS)
+    checkTrue(nS.nxC == "blocked" and type(nS.nxB) == "number",
+        "(nx) 整寬牆：blocked＋群起點（實得 " .. tostring(nS.nxC) .. "/" .. tostring(nS.nxB) .. "）")
+    nS.diag = false
+    Dr.releaseNext(nS)
+    checkTrue(nS.nxC == nil, "(nx) 紀錄關著不算（冷路徑也不跑 corridor）")
+    -- (blr)
+    local bS = {}
+    Dr.brakeRejNote(bS, true, false, 0.2, 0.1, 50)  -- 航向差 >5°
+    Dr.brakeRejNote(bS, true, false, 0.01, 0.9, 50) -- 之後 |ld| 也超：仍記第一個
+    Dr.brakeRejNote(bS, false, false, 0, 0, 50)
+    checkEq(bS.brakeRej, "heading", "(blr) 窗結束沒學到：記第一個拒收理由")
+    bS.brakeRej = nil
+    Dr.brakeRejNote(bS, true, false, 0, 0, 5)
+    bS.brakeWinOk = true -- 窗內學到一筆（EWMA 分支）
+    Dr.brakeRejNote(bS, false, false, 0, 0, 5)
+    checkEq(bS.brakeRej, nil, "(blr) 窗內學到觀測＝不閂")
+    Dr.brakeRejNote(bS, true, true, 0, 0, 50)
+    Dr.brakeRejNote(bS, false, false, 0, 0, 50)
+    checkEq(bS.brakeRej, "short", "(blr) 每幀都合格但窗太短＝short")
+    bS.sensor = { ready = false }
+    Dr.brakeRejNote(bS, true, false, 0.2, 0.9, 5)
+    Dr.brakeRejNote(bS, false, false, 0, 0, 5)
+    checkEq(bS.brakeRej, "unloaded", "(blr) 感知未就緒優先")
+    -- (over-cut)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 60, RightLaneBias = 0 })
+    local oldRoute, oldTx, oldTy = drive.nav.route, drive.nav.tx, drive.nav.ty
+    drive.nav.route = { pts = { 0, 0, 70, 0 }, segSurface = { "paved" }, segWidth = { 6 }, len = 70, cost = 70, avoidPenalty = 0 }
+    drive.nav.tx, drive.nav.ty = 70, 0
+    checkTrue(armDrive(nil, 0), "(over-cut) 啟動")
+    st = Dr.debugSession(0)
+    st.diag = true
+    evs = {}
+    st.uturnOverUntil, st.uturnOverSign, st.uturnOverMax, st.uturnOverYr = nowMs + 30000, 1, 0.12, 0.3
+    drive.nav.route = { pts = { 0, 0, 80, 0 }, segSurface = { "paved" }, segWidth = { 6 }, len = 80, cost = 80, avoidPenalty = 0 }
+    for _ = 1, 30 do
+        nowMs = nowMs + 20
+        driveTick(dp, dveh)
+    end
+    e = last("uturn", "over")
+    checkTrue(e ~= nil and e.why == "cutover" and type(e.ov) == "number" and e.ov >= 0.12 and st.uturnOverUntil == 0,
+        "(over-cut) 量測窗內換路線：cutover 那刻結算 uturn over why=cutover（實得 " .. tostring(e and e.why) .. " ov "
+        .. tostring(e and e.ov) .. " until " .. tostring(st.uturnOverUntil) .. "）")
+    -- (rh-man)
+    evs = {}
+    st.rehitch = { phase = "wait", t0 = nowMs - 3000, tow = { id = 42 } }
+    Dr.manualStop(st, 0, dp, "backward")
+    e = last("tow", "rh-fail")
+    checkTrue(e ~= nil and e.why == "manual" and e.kind == "wait" and e.ms == 3000 and not Dr.isActive(0),
+        "(rh-man) 掛回中玩家介入：rh-fail why=manual、kind＝階段（實得 " .. tostring(e and e.why) .. "/" .. tostring(e and e.kind) .. "）")
+    drive.nav.route, drive.nav.tx, drive.nav.ty = oldRoute, oldTx, oldTy
+    MDADDiagnostics.event, MDADDiagnostics.sample = oldEvent, oldSample
+    Dr.stop(0, nil)
+end
+drive.scenarioTelem1017()
 
 -- (chain-far) 1004a 玩家回報「繞道後判定走路邊草地，要到第一次轉彎或殭屍／屍體出現才回到路上」：鏈式停留只在
 --   常駐線前方淨空才解鏈，看的是整個感知窗——遠處還有任何擋常駐線的東西，車就沿停留 lane（常在路外）一路開，
@@ -30384,14 +30523,17 @@ function drive.scenarioTele1013a()
     local sen = s.sensor
     checkTrue(sen and sen.ready and phys and phys.scanEndS == math.floor(sen.scanEndS * 10 + 0.5) / 10,
         "(sce) 樣本帶中央帶掃描終點（" .. tostring(phys and phys.scanEndS) .. " / " .. tostring(sen and sen.scanEndS) .. "）")
-    -- (vfs) 首見佇列：兩筆（52.34 停著、71 行進）
+    -- (vfs) 首見佇列：兩筆（52.34 停著、71 行進）；1017 起每筆另帶弧長、橫向、本車車速（第二筆讀不到＝null，不寫 0）
     sen.fsN, sen.fsD[1], sen.fsP[1], sen.fsD[2], sen.fsP[2] = 2, 52.34, true, 71, false
+    sen.fsS[1], sen.fsL[1], sen.fsV[1] = 40.25, -0.5, 62.34
+    sen.fsS[2], sen.fsL[2], sen.fsV[2] = nil, nil, nil
     phys = nil
     driveReset(dveh)
     driveTick(dp, dveh)
     local fs = phys and phys.firstSeen
-    checkTrue(type(fs) == "string" and string.find(fs, "^%[%[52%.3,1%],%[71[%.0]*,0%]") ~= nil,
-        "(vfs) 首見佇列進樣本（" .. tostring(fs) .. "）")
+    checkTrue(type(fs) == "string"
+            and string.find(fs, "^%[%[52%.3,1,40%.3,%-0%.5,62%.3%],%[71[%.0]*,0,null,null,null%]%]") ~= nil,
+        "(vfs) 首見佇列進樣本、1017 帶弧長／橫向／車速，缺值寫 null（" .. tostring(fs) .. "）")
     checkEq(sen.fsN, 0, "(vfs-drain) 取走後佇列歸 0")
     -- (vfi)(vac) 直接問 Drive.visibilityCaps：前緣 50m → 0.7 秒後 60m＝前進間隔 700ms
     local len, halfL = s.profile.length, s.vehicleProfile.halfL
