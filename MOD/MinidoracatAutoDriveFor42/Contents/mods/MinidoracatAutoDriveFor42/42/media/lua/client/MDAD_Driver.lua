@@ -159,6 +159,8 @@ TUNE.STEER_FULL_KMH = 4
 -- 橫滑就把自己的縮放解鎖成全額（正式服 0.18.2 起步大弧調頭 8 段：0.2 秒內 1→13 km/h、橫向 >14 m/s²，接調頭煞停）。
 -- |v| 低於 full＋此值才讀線速度（前進速度可能還在縮放區）；起步側滑的橫向分量實測 ≤11.5 km/h。
 TUNE.STEER_SLIP_MARGIN_KMH = 12
+-- 拖車曲率上限（Drive.towTurnR，1017e）收到 steer 時記 tow phase=kcap；帽是逐幀 ESC 式回授、會一開一關，停帽超過此值再觸發才算新的一筆
+TUNE.TOW_KCAP_GAP_MS = 1000
 -- 高速力臂延伸（1005）：非耦力側推的施力點沿車頭方向放到 arm×K、力除以 K——偏航力矩不變，質心側推只剩 1/K。
 -- 引擎 addImpulse＝applyCentralForceToVehicle(F)＋applyTorqueToVehicle(relPos×F)（BaseVehicle.java:3351-3359），
 -- relPos 不夾，所以力臂可以超出車身。前臂同號（2026-09-02 裁定）不變，只是側移量變小。語料 177 段（.omc/uploads/
@@ -2046,13 +2048,18 @@ end
 
 -- 掛車脫開的鑑識（1006；1010c 加舊物件 rmw／ox／oy／od）：記 tow phase=lost（MDADTrailer.lostState／lostWhere），回 alive
 -- （getVehicleById 找不找得到掛車）與回看基準點 x0／y0。交還（Drive.stop）與進入自動掛回（Drive.rehitchArm）共用。
+-- 1017e：alive=true（真的斷鉤）另帶前 1 秒折角最大值 phiMax、最大變化率 phiRate（rad/s，MDADTrailer.phiStats）與最後一幀 st——
+-- 起步滿舵折斷（D2）是 phiRate 大、st 飽和；同步拉回斷鉤是 phi 小。
 function Drive.towLostNote(s, playerNum, vehicle)
     local cur, alive, by, hd, kmh, up = MDADTrailer.lostState(vehicle, s.tow)
     local rmw, ox, oy, od, x0, y0 = MDADTrailer.lostWhere(vehicle, s.tow)
+    local phiMax, phiRate = nil, nil
+    if alive == true then phiMax, phiRate = MDADTrailer.phiStats(s, getTimestampMs()) end
     diagEvent(s, playerNum, "tow", {
         phase = "lost", cur = cur, alive = alive, by = by, hd = hd, speed = kmh, up = up, phi = s.towPhi,
         vid = s.tow.id, script = s.tow.script, -- 掛車 id／script（2026-10-10；MDADTrailer.attach 記下，量不到缺）
         rmw = rmw, ox = ox, oy = oy, od = od,
+        phiMax = phiMax, phiRate = phiRate, st = alive == true and s.towSt or nil,
     })
     return alive, x0, y0
 end
@@ -2297,6 +2304,7 @@ local function commitSession(playerObj, playerNum, s)
             hitchZ = tw.hitchZ, boxBack = tw.boxBack, axisSign = tw.axisSign, d = Drive.blockStopDist(s),
             front = MDADTrailer.hitchFront(tw, s.vehicleProfile.halfL), -- 外拉規劃用的掛點→車頭（1008）
             script = tw.script, -- 掛車 script（1013e：正式服 Q10 clip-30 replay 給不出 trailer=）
+            hd = tw.rope and MDADTrailer.hitchDist(vehicle, tw) or nil, hdMin = tw.ropeHdMin, -- 1017e 繩索：起步掛點距與相碰距
         })
     end
 end
@@ -6916,6 +6924,8 @@ function Drive.normalizeSteer(s, steer)
 end
 
 -- 車身 yaw 率限制（TUNE.ESC_*）：回收掉同向部分後的 steer；s.yawRate／s.escScale 進遙測。
+-- 拖車另限曲率（1017e，Drive.towTurnR）：上限 v/R 走 escScale 的 turnR 分支（與折點放行的 kinkTurnR 取較大的半徑）；
+-- 真的收到時記 s.towKcap（取樣間最小倍率，樣本 tkc）與帽觸發事件（停帽 TOW_KCAP_GAP_MS 以上再觸發才記一筆）。
 function Drive.yawGovern(s, steer, heading, speedKmh, now)
     local refT = s.escT
     if not finite(refT) or now < refT or now - refT > 250 then
@@ -6932,11 +6942,87 @@ function Drive.yawGovern(s, steer, heading, speedKmh, now)
     s.escScale = 1
     local r = s.yawRate
     if steer == 0 or not finite(r) or steer * r <= 0 then return steer end
-    local k = MDADDynamics.escScale(r, (speedKmh < 0 and -speedKmh or speedKmh) / 3.6,
-        s.vehicleProfile.rMin, s.safeLat, s.fstate.kinkExitS ~= nil and s.fstate.kinkTurnR or nil)
+    local turnR = s.fstate.kinkExitS ~= nil and s.fstate.kinkTurnR or nil
+    local towR = s.tow and Drive.towTurnR(s, s.lastHeadingError) or nil
+    if towR and not (finite(turnR) and turnR >= towR) then turnR = towR else towR = nil end
+    local v = (speedKmh < 0 and -speedKmh or speedKmh) / 3.6
+    local k = MDADDynamics.escScale(r, v, s.vehicleProfile.rMin, s.safeLat, turnR)
     if k >= 1 then return steer end
     s.escScale = k
+    if towR then
+        if not (finite(s.towKcap) and s.towKcap <= k) then s.towKcap = k end
+        if now - (s.towKcapMs or 0) > TUNE.TOW_KCAP_GAP_MS then
+            local ae = s.lastHeadingError or 0
+            if ae < 0 then ae = -ae end
+            diagEvent(s, s.playerNum, "tow", { phase = "kcap", kMax = 1 / towR, kNeed = Drive.towKNeed(s, ae),
+                ae = ae, yr = r, speed = speedKmh, phi = s.towPhi })
+        end
+        s.towKcapMs = now
+    end
     return steer * k
+end
+
+-- 拖車轉向曲率上限（1017e，2026-10-17 使用者裁定）：掛車穩態折角 sin φ＝L2·κ，κ ≤ sin(MDADTrailer.HITCH_SLOW)/L2 折角就停在
+-- HITCH_SLOW 內；回最小轉彎半徑 L2/sin(HITCH_SLOW)（m；SemiTrailerVan L2 6.71＝9.5 m）。正式服 D2：半聯結車起步航向差 94–134°
+-- 滿舵，折角 1 秒內 0.15–0.47→1.4–1.55 rad 斷鉤（3 例 2 人 2 版），tow 爬行帽只拖慢。不限（回 nil）：沒拖、量不到 L2；或車頭朝
+-- 前半平面（|err|<90°）且前視窗 [車所在段, 前視點弧長] 碰到拖車改寫弧（towArcR）——改寫弧是 T.simulate 以 HITCH_MAX 驗過的
+-- 短弧暫態（semi-corner-mp 的 R6 角折角峰 50–51°，照 HITCH_SLOW 套會追不了規劃好的弧）。err＝Follower 航向誤差。
+function Drive.towTurnR(s, err)
+    local tw = s.tow
+    if type(tw) ~= "table" or not finite(tw.L2) or tw.L2 <= 0 then return nil end
+    local p, fs = s.profile, s.fstate
+    local ta = p and p.towArcR
+    if ta and finite(err) and err < math.pi * 0.5 and err > -math.pi * 0.5 then
+        local i, sT, ss, n = fs.idx, fs.sTarget, p.s, p.n
+        if finite(i) and finite(sT) then
+            while i < n do
+                if ta[i] then return nil end
+                if ss[i + 1] >= sT then break end
+                i = i + 1
+            end
+        end
+    end
+    return MDADTrailer.minTurnR(tw.L2)
+end
+
+-- 追到前視點要的曲率 2·sin|err|/D（純追跡；D＝車到前視點，取沿線弧長差與橫偏的斜邊）。ae＝|航向誤差|。
+function Drive.towKNeed(s, ae)
+    local ds = (s.fstate.sTarget or s.lastSNow or 0) - (s.lastSNow or 0)
+    local l = s.lastLatSigned or 0
+    local d = sqrt(ds * ds + l * l)
+    if d < 0.5 then d = 0.5 end
+    return 2 * sin(ae) / d, d
+end
+
+-- 拖車轉不過（1017e）：前視點在車頭後半平面（|err|>90°，同 Drive.routeLeavesForward 的半平面）而且落在最小轉彎圓內
+-- （要的曲率 > 1/Drive.towTurnR）＝照曲率上限往前開要繞一整圈。呼叫端（stepFollow 拖車分支）比照 ROTATE 走
+-- Drive.towTurnaround，拿不到才 TrailerRotate 交還。首幀記 tow phase=tight（等改道期間不重記）。
+function Drive.towTight(s, playerNum, err, speedKmh)
+    if not finite(err) then return false end
+    local ae = err < 0 and -err or err
+    if ae <= math.pi * 0.5 then return false end
+    local R = Drive.towTurnR(s, err)
+    if not R then return false end
+    local kNeed, d = Drive.towKNeed(s, ae)
+    if kNeed * R <= 1 then return false end
+    if s.pendingRouteWhy ~= "towturn" then
+        diagEvent(s, playerNum, "tow", { phase = "tight", kMax = 1 / R, kNeed = kNeed, ae = ae, d = d,
+            speed = speedKmh, phi = s.towPhi })
+    end
+    return true
+end
+
+-- align 閘的橫向容許（stepFollow full gate／alignmentCapKmh）：0.25×(路寬−車寬)，夾 [0.35, 0.75]；沒路寬 0.5。
+-- 結果記 s.alignTol（1017e 樣本 atl：拖車 capReason=align 時寫，正式服 D8 定罪用）。
+function Drive.alignLatTol(s)
+    local w = s.currentSegWidth
+    local tol = 0.5
+    if finite(w) and w > 0 then
+        tol = 0.25 * (w - 2 * s.vehicleProfile.halfW)
+        if tol < 0.35 then tol = 0.35 elseif tol > 0.75 then tol = 0.75 end
+    end
+    s.alignTol = tol
+    return tol
 end
 
 -- 起步近物限速（TUNE.START_GUARD_*）：回套用後的目標速度。車頭前方帶內（MDADCorridor.FRONT_STRIP_PAD）最近硬物的
@@ -7724,6 +7810,9 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
         if s.profile.towArcR then phys.towArcR = s.profile.towArcR[s.fstate.idx] end
         -- 1013e：掛車最近硬點（Drive.towFootprint 記憶點）淨距與座標——只給 impact 事件讀（tcl／tcx／tcy），樣本不寫
         phys.towClr, phys.towClrX, phys.towClrY = s.towClr, s.towClrX, s.towClrY
+        -- 1017e：取樣間曲率上限收到的最小倍率（Drive.yawGovern；沒收＝缺）；align 帽綁速時的橫向容許與偏差（Drive.alignLatTol）
+        phys.towKcap, s.towKcap = s.towKcap, nil
+        if s.lastCapReason == "align" then phys.alignTol, phys.alignDev = s.alignTol, s.alignDev end
     end
     phys.curveVerifiedUntilS = s.curveVerifiedUntilS
     phys.filletN = s.profile.filletN
@@ -8419,6 +8508,14 @@ function Drive.uturnRoomMore(s, vehicle, playerNum, now, vx, vy)
     return true
 end
 
+-- 繩索拖法倒車上限（1017e；正式服 D7：P05 三次倒車 thd 2.12→1.26–1.35 m 後不再縮、牽引車再退 1.3–2 m 頂到被拖車）：倒車探測排除
+-- 自己的掛車（selfTrailer），被拖車只能從兩掛點距看。回 true＝當下兩掛點距−相碰距（MDADTrailer.ropeRoom）扣掉 REAR_KEEP_M
+-- 後退不出 need 公尺（起手 need＝UNSTICK_MIN_M、倒車中 0＝接近就當倒夠），第二回傳＝當下兩掛點距。不是繩索或量不到＝false。
+function Drive.ropeStop(s, vehicle, need)
+    local room, hd = MDADTrailer.ropeRoom(vehicle, s.tow)
+    return room ~= nil and room - TUNE.REAR_KEEP_M < need, hd
+end
+
 -- Called only after stepFollow released its hot-path vector. Rear unknown is fail-closed;
 -- an attempt is consumed only after a clear 4m swept-strip check.
 local function startRecoveryAttempt(s, vehicle, playerNum, now, vx, vy, softFail)
@@ -8453,9 +8550,14 @@ local function startRecoveryAttempt(s, vehicle, playerNum, now, vx, vy, softFail
     -- 拖車起始折角已超過倒車上限（或讀不到）：一倒就碰 stepUnstick 的折角收手線，0 位移當倒夠 settle→success，
     -- 3 次額度幾秒燒完（正式服 0.23.0 片段：SemiTruckLite 每次 7–19 ms）。當成後方倒不了（rear=hitch）：不吃額度、
     -- 照 rear-blocked 回停等（s.rearStatus 非 clear＝停等預算連 GO 也計），預算到期走交還前改道。
+    -- 繩索拖法（1017e，Drive.ropeStop）：被拖車在車尾、倒車探測看不到它；退不出 UNSTICK_MIN_M 就同 rear=hitch（rear=rope）。
     local towPhi = s.tow and MDADTrailer.state(vehicle, s.tow) or nil
+    local ropeStop, ropeHd = false, nil
+    if s.tow then ropeStop, ropeHd = Drive.ropeStop(s, vehicle, TUNE.UNSTICK_MIN_M) end
     if s.tow and not MDADTrailer.canReverse(towPhi) then
         status, kind, detail = "hitch", "trailer", nil
+    elseif ropeStop then
+        status, kind, detail = "rope", "trailer", nil
     elseif flen2 > 1e-6 then
         local inv = 1 / sqrt(flen2)
         fx, fy = fx * inv, fy * inv
@@ -8470,6 +8572,7 @@ local function startRecoveryAttempt(s, vehicle, playerNum, now, vx, vy, softFail
             attempt = s.episodeAttempts, x = hitX, y = hitY,
             s = s.lastSNow, rear = status, kind = kind, detail = detail,
             phi = status == "hitch" and towPhi or nil, -- rear=hitch：起手折角（rad，讀不到就缺）
+            hd = ropeStop and ropeHd or nil, hdMin = ropeStop and s.tow.ropeHdMin or nil, -- rear=rope：掛點距與相碰距
         })
         if Drive.sideEscapeStart(s, vehicle, playerNum, now, vx, vy, status, kind, sideChain) then return end
         if softFail then
@@ -13791,19 +13894,24 @@ local function stepUnstick(s, vehicle, playerNum, now)
     local wantSq = UNSTICK_DIST_SQ
     -- 拖車倒車：掛車折角超過上限（或讀不到）＝再倒就折死。已退出 UNSTICK_MIN_M＝「倒夠了」走 settle；
     -- 還沒實際退出就折到上限＝不算成功、退回這次額度，同 rear-blocked 一寸未退回停等（rear=hitch；舊制 0 位移
-    -- 也 settle→success，額度幾秒燒完：正式服 0.23.0 片段每次 7–23 ms）
-    local towPhi = nil
+    -- 也 settle→success，額度幾秒燒完：正式服 0.23.0 片段每次 7–23 ms）。繩索拖法退到被拖車前 REAR_KEEP_M（1017e，
+    -- Drive.ropeStop）同一套規則（rear=rope）。
+    local towPhi, towStop, ropeHd = nil, nil, nil
     if s.tow then
         towPhi = MDADTrailer.state(vehicle, s.tow)
         s.towPhiRev = towPhi -- 遙測 tph：倒車中 T.guard 不跑，collectPhys 改讀這個（2026-10-10）
-        if not MDADTrailer.canReverse(towPhi) then
+        local rs
+        rs, ropeHd = Drive.ropeStop(s, vehicle, 0)
+        if not MDADTrailer.canReverse(towPhi) then towStop = "hitch" elseif rs then towStop = "rope" end
+        if towStop then
             if s.unstickDistance < TUNE.UNSTICK_MIN_M then
                 s.episodeAttempts = s.episodeAttempts - 1
-                s.rearStatus = "hitch"
+                s.rearStatus = towStop
                 diagEvent(s, playerNum, "unstick", {
                     phase = "rear-blocked", eid = s.episodeId, attempt = s.episodeAttempts,
                     x = vx, y = vy, s = s.lastSNow, d = s.unstickDistance,
-                    duration = now - s.unstickStartedAt, rear = "hitch", kind = "trailer", phi = towPhi,
+                    duration = now - s.unstickStartedAt, rear = towStop, kind = "trailer", phi = towPhi,
+                    hd = ropeHd, hdMin = s.tow.ropeHdMin,
                 })
                 sampleRecovery(s, vehicle, playerNum, now, vx, vy, speedKmh)
                 s.blockRetryDone = true
@@ -13838,6 +13946,7 @@ local function stepUnstick(s, vehicle, playerNum, now)
             x = vx, y = vy, s = s.lastSNow, d = s.unstickDistance,
             duration = now - s.unstickStartedAt, rear = s.rearStatus,
             bh = Drive.startBehind(s, vx, vy), -- 1017：車在剖面首段反向延長上的距離（B-D4 s=0 死鎖）
+            why = towStop, hd = towStop == "rope" and ropeHd or nil, -- 1017e：拖車倒夠的原因（hitch／rope；空＝距離或時限）
         })
         commandForceBrake(s, vehicle, now, "unstick-settle")
         sampleRecovery(s, vehicle, playerNum, now, vx, vy, speedKmh)
@@ -15013,14 +15122,11 @@ local function stepFollow(s, vehicle, playerNum, now)
             targetSpeed, s.lastCapReason = visibilityCap, "visibility"
         end
 
-        local latTol = 0.5
-        if finite(s.currentSegWidth) and s.currentSegWidth > 0 then
-            latTol = 0.25 * (s.currentSegWidth - 2 * s.vehicleProfile.halfW)
-            if latTol < 0.35 then latTol = 0.35 elseif latTol > 0.75 then latTol = 0.75 end
-        end
+        local latTol = Drive.alignLatTol(s)
         local absHeading = headingError or 0
         if absHeading < 0 then absHeading = -absHeading end
         absDev = Drive.laneRampDev(s, Drive.softAlignDev(s, absDev), speedKmh)
+        s.alignDev = absDev -- 1017e 樣本 adv（拖車 capReason=align 時寫；atl＝s.alignTol）
         local alignedNow = absDev <= latTol and absHeading <= MDADDynamics.ALIGN_HEADING_RAD
         if alignedNow then
             if s.alignSince == 0 then s.alignSince = now end
@@ -15806,7 +15912,8 @@ local function stepFollow(s, vehicle, playerNum, now)
                 -- 拖掛車（MDAD_Trailer）：原地耦力調頭會把掛車甩斷（E2E semi-hairpin-mp），先要一條
                 -- 不用調頭的繞行（Drive.towTurnaround，等 cutover 時停住），沒有才交還；
                 -- 掛車脫落／前方不可過轉角停妥也交還；折角、傾斜、接近不可過轉角時壓速。
-                if rotating then
+                -- 1017e：前視點在車後且落在曲率上限的轉彎圓內（Drive.towTight）＝照帽往前開轉不過，同 ROTATE 處理
+                if rotating or Drive.towTight(s, playerNum, headingError, speedKmh) then
                     vehicle:setRegulator(false)
                     BaseVehicle.releaseVector3f(fwd)
                     if not Drive.towTurnaround(s, playerNum, vehicle, now, fx, fy) then
@@ -16020,6 +16127,7 @@ local function stepFollow(s, vehicle, playerNum, now)
                     force, s.lastAssistForce = applySteering(
                         s, vehicle, fwd, fx, fy, steer or 0,
                         speedKmh, mult, coupled, assistForce)
+                    s.towSt = steer -- 1017e：tow lost alive=true 帶當下 st（Drive.towLostNote）
                 end
             end
         end

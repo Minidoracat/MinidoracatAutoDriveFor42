@@ -32,7 +32,7 @@ T.SEG_SHARE = 0.45 -- 圓弧切點距占臂長上限（同 MDADDynamics.FILLET_S
 T.CUT_TOL = 0.05  -- 大半徑候選的掛車出路量只准比最小可行半徑多這麼多（m，數值容差；見 planCorner）
 T.EXIT_HOLD = 8                       -- 轉出外偏保持段長（掛車軸跟進窄路）
 T.GUARD_MS = 100
-T.HITCH_SLOW = 45 * math.pi / 180     -- 行駛中折角超過＝降到爬行
+T.HITCH_SLOW = 45 * math.pi / 180     -- 行駛中折角超過＝降到爬行；也是轉向曲率上限的穩態折角（T.minTurnR）
 T.TILT_SLOW = 0.94                    -- 掛車 upVectorDot 低於（≈20°）＝降到爬行
 T.CRAWL_KMH = 5
 T.CORNER_STOP_M = 18                  -- 不可過轉角：停在距轉角這麼遠
@@ -83,9 +83,10 @@ function T.attach(vehicle)
         local axle = trailer:getWorldPos(com:x(), 0, axleZ, Vector3f.new())
         local front = trailer:getWorldPos(com:x(), 0, com:z() + ext:z() * 0.5, Vector3f.new())
         local rear = trailer:getWorldPos(com:x(), 0, com:z() - ext:z() * 0.5, Vector3f.new())
-        local slack = 0
+        local slack, rope = 0, false
         if not string.find(vehicle:getScriptName(), "Trailer", 1, true)
                 and not string.find(trailer:getScriptName(), "Trailer", 1, true) then
+            rope = true
             local hb = trailer:getTowingWorldPos(trailer:getTowAttachmentSelf(), Vector3f.new())
             slack = T.ROPE_M - dist(h:x(), h:y(), hb:x(), hb:y())
             if slack < 0 then slack = 0 end
@@ -117,6 +118,18 @@ function T.attach(vehicle)
             boxBack, boxSide = -(cx * ux + cy * uy) + slack, cx * uy - cy * ux
             axisSign = (ux * tfx + uy * tfy) >= 0 and 1 or -1
         end
+        -- 繩索（1017e）：牽引車車尾到被拖車近端（離掛點近的那端）沿牽引車前向的車身間距；ropeHdMin 由它推（見下方）。
+        -- 自己 pcall：量不到只少倒車上限，不拒絕啟動。
+        local ropeGap = nil
+        if rope and vl > 1e-6 then
+            pcall(function()
+                local vs = vehicle:getScript()
+                local vext, vcom = vs:getExtents(), vs:getCenterOfMassOffset()
+                local tr = vehicle:getWorldPos(vcom:x(), 0, vcom:z() - vext:z() * 0.5, Vector3f.new())
+                local near = toFront < toRear and front or rear
+                ropeGap = (tr:x() - near:x()) * vfx + (tr:y() - near:y()) * vfy
+            end)
+        end
         return {
             trailer = trailer,
             L2 = ul + slack,
@@ -128,6 +141,7 @@ function T.attach(vehicle)
             mass = trailer:getMass(),
             wheels = n,
             hitchZ = hitchZ, hitchX = hitchX, boxBack = boxBack, boxSide = boxSide, axisSign = axisSign,
+            rope = rope or nil, ropeGap = ropeGap,
         }
     end)
     local why = nil
@@ -166,6 +180,14 @@ function T.attach(vehicle)
     pcall(function() geo.script = trailer:getScriptName() end)
     pcall(function() geo.hitchSelf = vehicle:getTowAttachmentSelf() end)
     pcall(function() geo.hitchOther = vehicle:getTowAttachmentOther() end)
+    -- 繩索拖法倒車上限（1017e，Driver Drive.ropeStop）：兩車身相碰時的兩掛點距 ropeHdMin＝當下掛點距−車身間距（直線時）。
+    -- 正式服 P05 三次倒車 thd 2.12→1.26–1.35 m 後不再縮、牽引車再退 1.3–2 m（頂到被拖車）。間距量成 ≤0（extents 框比車模大、
+    -- 起步時兩框已重疊）＝量不到相碰距、不設上限：E2E CarNormal 拖 SmallCar 起步掛點距 0.57、框已重疊，base 倒車退到掛點距
+    -- 0.09 才停，拿 0.57 當相碰距會一寸都不准倒。
+    if geo.rope and finite(geo.ropeGap) and geo.ropeGap > 0 then
+        local hd0 = T.hitchDist(vehicle, geo)
+        if hd0 then geo.ropeHdMin = hd0 - geo.ropeGap end
+    end
     return geo
 end
 
@@ -638,6 +660,13 @@ function T.canReverse(phi)
     return phi ~= nil and abs(phi) <= T.REVERSE_HITCH_MAX
 end
 
+-- 前進時的最小轉彎半徑（1017e，2026-10-17 使用者裁定；Driver Drive.towTurnR）：掛車無側滑 φ' = v·κ − v/L2·sin φ，
+-- 穩態 sin φ = L2·κ；κ ≤ sin(HITCH_SLOW)/L2 折角就收斂在 HITCH_SLOW 內，再大任何車速都發散（降速只拖慢）。掛點在牽引車
+-- 參考點後方時穩態折角更小（偏保守）。離線驗證見 scripts/test_trailer.lua ⑪。
+function T.minTurnR(L2)
+    return L2 / sin(T.HITCH_SLOW)
+end
+
 -- 掛車車身（倒車後方探測用）：中心、拖行軸（forward×axisSign，朝掛點；探測往它的反方向）、半寬、半長。
 function T.body(tow)
     local ok, x, y, fx, fy = pcall(function()
@@ -779,30 +808,70 @@ function T.relook(vehicle, tow, x0, y0)
     return vid, found, same, fx, fy, fd, rmw, sn, sd, sv, fsc
 end
 
+-- 兩掛點世界距離（m；牽引車 getTowingWorldPos(hitchSelf)↔掛車 getTowedByWorldPos(hitchOther)，同 lostState 的 hd）；
+-- 量不到掛點名或讀取失敗回 nil。樣本 thd（sampleState）與繩索倒車上限（ropeRoom）共用。
+function T.hitchDist(vehicle, tow)
+    if tow.hitchSelf == nil or tow.hitchOther == nil then return nil end
+    local hd = nil
+    pcall(function()
+        local a = BaseVehicle.allocVector3f()
+        local b = BaseVehicle.allocVector3f()
+        local pa = vehicle:getTowingWorldPos(tow.hitchSelf, a)
+        local pb = tow.trailer:getTowedByWorldPos(tow.hitchOther, b)
+        hd = dist(pa:x(), pa:y(), pb:x(), pb:y())
+        BaseVehicle.releaseVector3f(a)
+        BaseVehicle.releaseVector3f(b)
+    end)
+    return hd
+end
+
+-- 繩索拖法還能往後退多少（1017e）：當下兩掛點距−車身相碰時的掛點距（attach 的 ropeHdMin），回 room, hd；不是繩索或量不到回 nil。
+-- 倒車探測排除自己的掛車（selfTrailer），被拖車在車尾只有這道看得到。
+function T.ropeRoom(vehicle, tow)
+    if not finite(tow.ropeHdMin) then return nil end
+    local hd = T.hitchDist(vehicle, tow)
+    if not hd then return nil end
+    return hd - tow.ropeHdMin, hd
+end
+
 -- 拖車樣本（1008；Driver collectPhys 只在拖車時、每筆取樣讀一次，telemetry tlo／tla／tkm／thd）：掛車車位相對牽引車車位的
--- 縱向（車頭正）／橫向（右正，同 nb），fx, fy＝牽引車前向單位向量；掛車 km/h；hd（兩掛點世界距離 m，同 lostState）。
+-- 縱向（車頭正）／橫向（右正，同 nb），fx, fy＝牽引車前向單位向量；掛車 km/h；hd（兩掛點世界距離 m，T.hitchDist）。
 -- MP 同步拉回掛車時看得到位置跳動與 hd 尖峰（正式服 0.23.0 SemiTruckLite＋貨櫃週期性掉速，缺這幾欄定不了罪）。
 -- 位置／車速與 hd 各自 pcall，讀不到的回 nil。
 function T.sampleState(vehicle, tow, fx, fy)
     local tr = tow.trailer
-    local lon, lat, kmh, hd = nil, nil, nil, nil
+    local lon, lat, kmh = nil, nil, nil
     pcall(function()
         local dx, dy = tr:getX() - vehicle:getX(), tr:getY() - vehicle:getY()
         lon, lat = dx * fx + dy * fy, dy * fx - dx * fy
         kmh = tr:getCurrentSpeedKmHour()
     end)
-    if tow.hitchSelf ~= nil and tow.hitchOther ~= nil then
-        pcall(function()
-            local a = BaseVehicle.allocVector3f()
-            local b = BaseVehicle.allocVector3f()
-            local pa = vehicle:getTowingWorldPos(tow.hitchSelf, a)
-            local pb = tr:getTowedByWorldPos(tow.hitchOther, b)
-            hd = dist(pa:x(), pa:y(), pb:x(), pb:y())
-            BaseVehicle.releaseVector3f(a)
-            BaseVehicle.releaseVector3f(b)
-        end)
+    return lon, lat, kmh, T.hitchDist(vehicle, tow)
+end
+
+-- 折角歷史（1017e；tow lost alive=true 的 phiMax／phiRate，D2 起步折斷一眼分辨）：guard 每次讀折角記一筆（GUARD_MS 節流，
+-- PHI_RING 筆環＝約 1 秒），環在 session 第一次讀時配一次。phiStats 回 now 前 PHI_WIN_MS 內最大 |φ| 與相鄰兩筆最大 |Δφ/Δt|（rad/s）。
+T.PHI_RING = 10
+T.PHI_WIN_MS = 1000
+function T.phiStats(s, now)
+    local r = s.towPhiRing
+    if r == nil or r.k == 0 then return nil, nil end
+    local N, k = T.PHI_RING, r.k
+    local mx, rate, tPrev, pPrev = nil, nil, nil, nil
+    for _ = 1, N do
+        local t, p = r[k * 2 - 1], r[k * 2]
+        if t == nil or now - t > T.PHI_WIN_MS then break end
+        local a = abs(p)
+        if mx == nil or a > mx then mx = a end
+        if tPrev and tPrev > t then
+            local v = abs(pPrev - p) * 1000 / (tPrev - t)
+            if rate == nil or v > rate then rate = v end
+        end
+        tPrev, pPrev = t, p
+        k = k - 1
+        if k < 1 then k = N end
     end
-    return lon, lat, kmh, hd
+    return mx, rate
 end
 
 -- 行駛防線（Driver 每幀呼叫；Java 讀取以 GUARD_MS 節流）。回 cap（km/h 或 nil）, why：
@@ -815,6 +884,12 @@ function T.guard(s, vehicle, now, speedKmh)
     local cap = nil
     local phi, up = T.state(vehicle, tow)
     s.towPhi, s.towUp = phi, up -- telemetry tph／tup：脫掛前的折角與傾斜（TrailerLost 定罪用）
+    if phi then
+        local r = s.towPhiRing
+        if r == nil then r = { k = 0 }; s.towPhiRing = r end
+        local k = r.k % T.PHI_RING + 1 -- kahlua-mod-ok: r.k ≥ 0
+        r.k, r[k * 2 - 1], r[k * 2] = k, now, phi
+    end
     if phi and (abs(phi) > T.HITCH_SLOW or (finite(up) and up < T.TILT_SLOW)) then cap = T.CRAWL_KMH end
     -- 剖面實際建構的那條（Driver.profileRouteOf：清過微反折再改寫）；拿原始路線重算會把資料殘點
     -- 當成不可過轉角（2026-09-28 正式服 SemiTruck 在 (5180,11145) 反折點前停下交還）

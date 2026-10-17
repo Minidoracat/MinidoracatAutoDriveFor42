@@ -24551,6 +24551,262 @@ function drive.scenarioTowHitchReverse()
     SandboxVars, dveh, getSpecificPlayer = oldSandbox, oldVeh, oldGet
 end
 drive.scenarioTowHitchReverse()
+-- (k1017-*) 1017e 拖車（2026-10-17 使用者裁定；正式服 D2／D7／D8）：
+--   (kcap)        yaw 率超過 v/T.minTurnR(L2) 收 steer、記 tow kcap 與 towKcap；沒拖、低 yaw 率不收。違規證明：yawGovern 不傳 towR＝紅。
+--   (kcap-arc)    前視窗內有拖車改寫弧（towArcR）且車頭朝前半平面：不收（規劃好的 R4–R6 弧照追）；弧在窗外、或 |err|>90° 照收。
+--                 違規證明：拿掉 towTurnR 的改寫弧豁免＝(kcap-arc) 紅；豁免不看 |err|＝(kcap-arc-back) 紅。
+--   (kcap-gap)    帽一開一關：停帽超過 TOW_KCAP_GAP_MS 才記新的一筆。
+--   (tight)       前視點在車後且在最小轉彎圓內＝轉不過（記 tow tight）；在前半平面、遠到圓外、沒拖＝照開。等調頭繞行時不重記。
+--   (tight-wire)  stepFollow 拖車分支：轉不過＝走 Drive.towTurnaround（等 cutover 停住），拿不到才 TrailerRotate 交還。
+--                 違規證明：拖車分支只看 rotating＝紅。
+--   (rope-start)  繩索：當下掛點距−相碰距扣 REAR_KEEP_M 退不出 UNSTICK_MIN_M＝不倒（rear=rope、hd／hdMin）、不吃額度、回停等。
+--   (rope-mid)    倒車中還沒退出 UNSTICK_MIN_M 就貼近被拖車：退回額度、回停等。
+--   (rope-keep)   已退出一段才貼近：當倒夠進 settle（why=rope）、額度照扣。違規證明：stepUnstick 不看 ropeStop＝(rope-mid／keep) 紅。
+--   (align-tow)   align 閘的橫向容許照段寬算、記 s.alignTol（樣本 atl）。
+--   (tl-1017)     tow lost alive=true 帶前 1 秒 phiMax／phiRate 與 st；alive=false 不帶。
+--   (tkc)         樣本 tkc 取樣間最小倍率、寫出後清。
+function drive.scenarioTow1017()
+    scenario("1017e 拖車：轉向曲率上限、轉不過走調頭繞行、繩索倒車上限、改寫弧對正容許、斷鉤遙測")
+    local Dr, T = MDAD.Drive, MDAD.Drive.debugTune()
+    local oldEvent = MDADDiagnostics.event
+    local tev = {}
+    MDADDiagnostics.event = function(pn, name, a, ...)
+        if (name == "tow" or name == "unstick") and type(a) == "table" then a._n = name; tev[#tev + 1] = a end
+        return oldEvent(pn, name, a, ...)
+    end
+    local function lastEv(phase)
+        for i = #tev, 1, -1 do if tev[i].phase == phase then return tev[i] end end
+    end
+    local function count(phase)
+        local n = 0
+        for i = 1, #tev do if tev[i].phase == phase then n = n + 1 end end
+        return n
+    end
+    local L2 = 6.71
+    local R = MDADTrailer.minTurnR(L2)
+    local function sess(err)
+        local ss = {}
+        for i = 1, 41 do ss[i] = (i - 1) * 0.5 end
+        return { diag = true, playerNum = 0, tow = { L2 = L2 }, fstate = { idx = 1, sTarget = 8 },
+            profile = { n = 41, s = ss }, vehicleProfile = { rMin = 5, halfW = 1.3 }, safeLat = 4,
+            lastHeadingError = err or 0.3, lastSNow = 0, lastLatSigned = 0 }
+    end
+    -- 10 km/h：拖車上限 v/R≈0.29 rad/s；一般 ESC 上限 (v/rMin)×1.3＋0.3≈1.02。yr 0.6 只超拖車上限
+    local function gov(s, yr, now)
+        s.escH, s.escT = 1 - yr * 0.04, now - 40
+        return Dr.yawGovern(s, 2, 1, 10, now)
+    end
+
+    -- (kcap)
+    clearList(tev)
+    local s = sess()
+    local out = gov(s, 0.6, 10000)
+    local e = lastEv("kcap") or {}
+    checkTrue(out == 0 and s.towKcap == 0 and math.abs((e.kMax or 0) - 1 / R) < 1e-9 and type(e.kNeed) == "number"
+        and e.yr and math.abs(e.yr - 0.6) < 1e-6,
+        "(kcap) yaw 率超過 v/R：收 steer、記 kcap（out=" .. tostring(out) .. " kMax=" .. tostring(e.kMax) .. "）")
+    local solo = sess()
+    solo.tow = nil
+    checkTrue(gov(solo, 0.6, 10000) == 2 and gov(sess(), 0.25, 10000) == 2,
+        "(kcap-solo) 沒拖、或拖車 yaw 率在上限內：不收")
+
+    -- (kcap-arc)
+    s = sess()
+    s.profile.towArcR = { [10] = 6 }
+    checkTrue(gov(s, 0.6, 10000) == 2, "(kcap-arc) 前視窗內有改寫弧、車頭朝前：照追規劃好的弧，不收")
+    s = sess()
+    s.profile.towArcR = { [30] = 6 }
+    checkTrue(gov(s, 0.6, 10000) == 0, "(kcap-arc-far) 改寫弧在前視窗外：照收")
+    s = sess(2.0)
+    s.profile.towArcR = { [10] = 6 }
+    checkTrue(gov(s, 0.6, 10000) == 0, "(kcap-arc-back) 車頭背著前視點（|err|>90°）：改寫弧不豁免")
+
+    -- (kcap-gap)
+    clearList(tev)
+    s = sess()
+    gov(s, 0.6, 20000)
+    gov(s, 0.6, 20500)
+    local n1 = count("kcap")
+    gov(s, 0.6, 22000)
+    checkTrue(n1 == 1 and count("kcap") == 2, "(kcap-gap) 連續收帽只記一筆、停帽超過 TOW_KCAP_GAP_MS 再記（"
+        .. n1 .. "/" .. count("kcap") .. "）")
+
+    -- (tight)
+    clearList(tev)
+    s = sess(2.0)
+    local tight = Dr.towTight(s, 0, 2.0, 3)
+    e = lastEv("tight") or {}
+    checkTrue(tight and math.abs((e.kNeed or 0) - 2 * math.sin(2.0) / 8) < 1e-9 and math.abs((e.kMax or 0) - 1 / R) < 1e-9
+        and e.speed == 3, "(tight) 前視點在車後 8m（轉彎圓 R" .. string.format("%.1f", R) .. " 內）：轉不過、記 tight")
+    local far = sess(2.0)
+    far.fstate.sTarget = 40
+    local soloT = sess(2.0)
+    soloT.tow = nil
+    checkTrue(not Dr.towTight(sess(1.2), 0, 1.2, 3) and not Dr.towTight(far, 0, 2.0, 3) and not Dr.towTight(soloT, 0, 2.0, 3),
+        "(tight-ok) 前半平面、遠在轉彎圓外、沒拖：照開")
+    clearList(tev)
+    s.pendingRouteWhy = "towturn"
+    checkTrue(Dr.towTight(s, 0, 2.0, 3) and count("tight") == 0, "(tight-wait) 等調頭繞行 cutover：照判、不重記")
+
+    -- (align-tow) align 閘橫向容許照段寬算、記 s.alignTol（樣本 atl）
+    s = { tow = {}, profile = { towArcR = { [3] = 6 }, segSourceA = { [3] = 7 } },
+        profileRoute = { segRoadW = { [7] = 8 } }, fstate = { idx = 3 }, currentSegWidth = 3.5,
+        vehicleProfile = { halfW = 1.3 } }
+    local tolA = Dr.alignLatTol(s)
+    s.currentSegWidth = 8
+    local tolB = Dr.alignLatTol(s)
+    checkTrue(tolA == 0.35 and tolB == 0.75 and s.alignTol == 0.75,
+        "(align-tow) 容許照段寬 3.5／8m＝0.35／0.75、記 alignTol（got " .. tostring(tolA) .. "/" .. tostring(tolB) .. "）")
+
+    -- (tl-1017)
+    local oldLS, oldLW = MDADTrailer.lostState, MDADTrailer.lostWhere
+    local alive = true
+    MDADTrailer.lostState = function() return "nil", alive, "nil", 0.2, 0, 1 end
+    MDADTrailer.lostWhere = function() return nil end
+    s = { diag = true, tow = { id = 7 }, towPhi = 1.41, towSt = 4.2, towPhiRing = { k = 0 } }
+    for i, p in ipairs({ 0.40, 0.47, 0.74, 1.10, 1.41 }) do
+        local r = s.towPhiRing
+        r.k, r[i * 2 - 1], r[i * 2] = i, nowMs - 500 + i * 100, p
+    end
+    clearList(tev)
+    Dr.towLostNote(s, 0, {})
+    local la = lastEv("lost") or {}
+    alive = false
+    Dr.towLostNote(s, 0, {})
+    local lb = tev[#tev] or {}
+    MDADTrailer.lostState, MDADTrailer.lostWhere = oldLS, oldLW
+    checkTrue(la.alive == true and la.phiMax == 1.41 and la.phiRate and math.abs(la.phiRate - 3.6) < 1e-6 and la.st == 4.2
+        and lb.alive == false and lb.phiMax == nil and lb.st == nil,
+        "(tl-1017) alive=true 帶前 1 秒 phiMax／phiRate 與 st；alive=false 不帶（got " .. tostring(la.phiMax) .. "/"
+        .. tostring(la.phiRate) .. "/" .. tostring(la.st) .. "）")
+
+    -- 整合：真 session（同 scenarioTowHitchReverse 的直路與假掛車）
+    local oldSandbox, oldVeh, oldGet = SandboxVars, dveh, getSpecificPlayer
+    local oldRoute, oldTx, oldTy, oldState = drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
+    local oldV3, oldSample, oldShould = Vector3f, MDADDiagnostics.sample, MDADDiagnostics.shouldSample
+    local oldTight, oldTurn = Dr.towTight, Dr.towTurnaround
+    Vector3f = { new = newVec3 }
+    local physLog = {}
+    MDADDiagnostics.sample = function(...)
+        local p = select(32, ...)
+        if type(p) == "table" then physLog[#physLog + 1] = p end
+        return true
+    end
+    local wasMs = drive.frameMs(20)
+    MDAD.Drive.stop(0, nil)
+    getSpecificPlayer = function(n) if n == 0 then return dp end end
+    dveh = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }),
+        engineRunning = true, mass = 1600, speed = 0, maxSpeed = 100,
+        bodyW = 1.6, bodyL = 4.2, comX = 0, comZ = 0, profileFull = true,
+        enginePower = 3000, brakingForce = 100, wheelFriction = 1.5, tireFriction = 1.5 })
+    local towX = 0 -- 被拖車掛點的世界 x（不動）；牽引車掛點在車心後 2.5
+    dveh.getTowingWorldPos = function(_, _, o) return o:set(dveh._x - 2.5 * dveh._fwdX, dveh._y - 2.5 * dveh._fwdY, 0) end
+    local trailer = {
+        getForwardVector = function(_, o) return o:set(dveh._fwdX, 0, dveh._fwdY) end,
+        getUpVectorDot = function() return 1 end,
+        getWorldPos = function(_, _, _, _, o) return o:set(dveh._x - 8 * dveh._fwdX, dveh._y - 8 * dveh._fwdY, 0) end,
+        getTowedByWorldPos = function(_, _, o) return o:set(towX, 0, 0) end,
+    }
+    drive.fillWorld(-10, 120, -12, 12)
+    drive.putRoad(-10, 120, -3, 3)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 60, RightLaneBias = 0 })
+    dveh._x, dveh._y = 30, 0
+    setHeading(dveh, 0)
+    dveh._speed, dveh._steering, dveh._stopped = 0, 0, true
+    dveh._engine, dveh._driver = true, dp
+    dp._vehicle, dp._dead, dp._local = dveh, false, true
+    drive.nav.route = { pts = { 0, 0, 110, 0 }, segSurface = { "paved" }, segWidth = { 6 }, len = 110, cost = 110,
+        avoidPenalty = 0 }
+    drive.nav.tx, drive.nav.ty, drive.nav.state = 110, 0, "ok"
+    checkTrue(MDAD.Drive.start(dp), "(k1017) 啟動")
+    local st = MDAD.Drive.debugSession(0)
+    st.tow = { trailer = trailer, axisSign = 1, comX = 0, comZ = 0, L2 = 6.7, hitchToRear = 8.9, halfW = 1.1, halfL = 5,
+        rope = true, ropeHdMin = 0.5, hitchSelf = "trailer", hitchOther = "trailerfront" }
+    local function tick()
+        nowMs = nowMs + 20
+        local cur = MDAD.Drive.debugSession(0)
+        if cur then cur.diag = true end
+        driveTick(dp, dveh)
+    end
+    for _ = 1, 10 do if st.mode == "follow" then break end tick() end
+    local function recover()
+        clearList(tev)
+        st.recoverWhy, st.blockRetryDone = "blocked-retry", false
+        tick()
+    end
+    local function unstickEv(phase)
+        for i = #tev, 1, -1 do if tev[i]._n == "unstick" and tev[i].phase == phase then return tev[i] end end
+    end
+
+    -- (rope-start)：掛點距 1.8、相碰距 0.5 → 扣 REAR_KEEP_M 只剩 0.8 < UNSTICK_MIN_M
+    towX = 30 - 2.5 - 1.8
+    recover()
+    e = unstickEv("rear-blocked") or {}
+    checkTrue(st.mode == "follow" and st.episodeAttempts == 0 and st.rearStatus == "rope" and e.rear == "rope"
+        and e.kind == "trailer" and math.abs((e.hd or 0) - 1.8) < 1e-6 and e.hdMin == 0.5,
+        "(rope-start) 退不出 UNSTICK_MIN_M：不倒、rear=rope 帶 hd／hdMin、不吃額度（mode=" .. tostring(st.mode)
+        .. " attempts=" .. tostring(st.episodeAttempts) .. " rear=" .. tostring(e.rear) .. "）")
+
+    -- (rope-mid)：起手掛點距 3.5（能退 2.5），被拖車溜近到 0.9＝一寸未退就貼近
+    towX = 30 - 2.5 - 3.5
+    recover()
+    local started = st.mode == "unstick" and st.episodeAttempts == 1
+    towX = 30 - 2.5 - 0.9
+    clearList(tev)
+    tick()
+    e = unstickEv("rear-blocked") or {}
+    checkTrue(started and st.mode == "follow" and st.episodeAttempts == 0 and e.rear == "rope"
+        and (e.d or 1) < T.UNSTICK_MIN_M,
+        "(rope-mid) 沒退出 UNSTICK_MIN_M 就貼近被拖車：退回額度、回停等（started=" .. tostring(started) .. " mode="
+        .. tostring(st.mode) .. "）")
+
+    -- (rope-keep)：起手 3.5，牽引車退 2.7（掛點距 0.8、只剩 0.3 < REAR_KEEP_M）＝倒夠
+    towX = 30 - 2.5 - 3.5
+    recover()
+    started = st.mode == "unstick" and st.episodeAttempts == 1
+    dveh._x = 30 - 2.7
+    clearList(tev)
+    tick()
+    e = unstickEv("settle") or {}
+    checkTrue(started and st.mode == "settle" and st.episodeAttempts == 1 and e.why == "rope"
+        and math.abs((e.hd or 0) - 0.8) < 1e-6,
+        "(rope-keep) 已退出一段才貼近：當倒夠進 settle（why=rope）、額度照扣（mode=" .. tostring(st.mode) .. "）")
+
+    -- (tkc)：取樣間最小倍率寫出後清
+    for _ = 1, 200 do if st.mode == "follow" then break end tick() end
+    dveh._x, dveh._speed = 30, 0
+    MDADDiagnostics.shouldSample = function() return true end
+    clearList(physLog)
+    st.towKcap = 0.3
+    tick()
+    local p1 = physLog[#physLog] or {}
+    local cleared = st.towKcap == nil
+    clearList(physLog)
+    tick()
+    local p2 = physLog[#physLog] or {}
+    checkTrue(st.mode == "follow" and p1.towKcap == 0.3 and cleared and p2.towKcap == nil,
+        "(tkc) 樣本帶取樣間最小倍率、寫出後清（mode=" .. tostring(st.mode) .. " p1=" .. tostring(p1.towKcap) .. "）")
+
+    -- (tight-wire)
+    local turnCalls, turnOk = 0, true
+    Dr.towTight = function() return true end
+    Dr.towTurnaround = function() turnCalls = turnCalls + 1; return turnOk end
+    tick()
+    local waited = MDAD.Drive.isActive(0) and turnCalls == 1
+    turnOk = false
+    tick()
+    checkTrue(waited and turnCalls == 2 and not MDAD.Drive.isActive(0),
+        "(tight-wire) 拖車轉不過＝走 towTurnaround、等 cutover 停住；拿不到才 TrailerRotate 交還（calls="
+        .. turnCalls .. "）")
+
+    Dr.towTight, Dr.towTurnaround = oldTight, oldTurn
+    MDAD.Drive.stop(0, nil)
+    drive.frameMs(wasMs)
+    MDADDiagnostics.event, Vector3f, MDADDiagnostics.sample, MDADDiagnostics.shouldSample = oldEvent, oldV3, oldSample, oldShould
+    drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
+    SandboxVars, dveh, getSpecificPlayer = oldSandbox, oldVeh, oldGet
+end
+drive.scenarioTow1017()
 -- 0928m 交還前的最後一次改道（Drive.stuckDetour；使用者裁定「遇大量障礙可改道」）：E2E rc13 12 個固定堵點
 -- 開著自動改道仍 0 次改道——舊觸發只在 blocked 停等 WAIT，實際堵死多在倒車額度用完後的停等預算／倒車
 -- 逾時交還。違規證明：拿掉停等預算出口的 stuckDetour＝(sd1) 紅；拿掉 NEAR_M 判定＝(sd2) 紅。

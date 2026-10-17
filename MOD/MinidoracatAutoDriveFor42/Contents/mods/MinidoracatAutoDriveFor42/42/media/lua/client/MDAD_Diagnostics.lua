@@ -188,6 +188,9 @@ local EK = {
     -- 1013e 掛車車身（Driver Drive.towFootprint／lagGuardScan）：impact／contact 的掛車最近硬點淨距（含 TOW_BODY_PAD，同 ac）、該點
     -- 座標、該點 1 格內 sprite 名／分類／格心距；lag arm kind＝trailer 時預測掛車車身用的該站內輪差（m，正＝往 +l）
     "tcl", "tcx", "tcy", "tsp", "tsc", "tsd", "toff", -- 1013e
+    -- 1017e 拖車：tow kcap／tight 的曲率上限 sin(HITCH_SLOW)/L2 與追前視點要的曲率（1/m）；tow lost alive=true 前 1 秒最大 |折角|、
+    -- 最大折角變化率（rad/s）與最後一幀 st；unstick rear=rope 的繩索兩掛點相碰距（m，hd 沿用上面的鍵）
+    "kMax", "kNeed", "phiMax", "phiRate", "st", "hdMin", -- 1017e
     -- 1014b dodge commit／extend／release（exit、end、done）：出口回的 lane s.dodgeBaseL（Drive.dodgeHomeL，承諾時凍結）
     "dbl", -- 1014b
     -- 1017 dodge commit：本輪第一條被殭屍擋下的候選的 min(彎帽, 餘裕帽)（Drive.zombieCap0）、chainAhead 走到的分支；
@@ -1345,6 +1348,9 @@ local function encodePhys(phys)
     addNum("towKmh", "tkm")
     addNum("towHd", "thd")
     addNum("towArcR", "tar")          -- 1008：車所在段是拖車改寫弧＝規劃半徑（m；Trailer.shape segArcR；不是弧＝省略）
+    addNum("towKcap", "tkc")          -- 1017e：取樣間拖車曲率上限（Drive.towTurnR）收到的最小 steer 倍率（沒收＝省略）
+    addNum("alignTol", "atl")         -- 1017e：拖車 capReason=align 時 align 閘的橫向容許 m（Drive.alignLatTol）
+    addNum("alignDev", "adv")         -- 1017e：同上，當下橫向偏差 m
     addNum("curveVerifiedUntilS", "curveVerifiedUntilS")
     addNum("filletN", "filletN")
     addNum("filletFallbackN", "filletFallbackN")
