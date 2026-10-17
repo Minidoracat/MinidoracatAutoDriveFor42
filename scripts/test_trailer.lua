@@ -560,5 +560,88 @@ do
         string.format("(off-tab) 逐站表最大＝整段最深 %.2f；出弧後 8m 那站剩 %.2f（硬點照所在站查，不拿整段最深）", best, late))
 end
 
+-- ⑪ 1017e 起步大角度發散（正式服 D2：SemiTruckLite＋SemiTrailerVan L2 6.71，航向差 94–134° 滿舵，折角 1 秒內 0.15–0.47→1.4–1.55 rad
+-- 斷鉤）。掛車無側滑 φ' = v·κ − v/L2·sin φ（v 約掉＝按走過的距離積分）。牽引車把航向轉過 dth：滿舵（R≈3）折角衝過 80°；
+-- 曲率帽 κ ≤ 1/T.minTurnR(L2) 折角停在 HITCH_SLOW 內，起步就已折 0.96 rad（P36 clip-20）也往回收。
+do
+    local L2 = 6.71
+    local function run(R, phi0, dth)
+        local phi, mx, ds = phi0, phi0, 0.05
+        for _ = 1, math.floor(dth * R / ds) do
+            phi = phi + ds * (1 / R - math.sin(phi) / L2)
+            if phi > mx then mx = phi end
+        end
+        return mx, phi
+    end
+    local R = T.minTurnR(L2)
+    check(math.abs(R - L2 / math.sin(T.HITCH_SLOW)) < 1e-9 and R > 9.4 and R < 9.6,
+        string.format("(d2-r) SemiTrailerVan L2 6.71 最小轉彎半徑 %.2f m（L2/sin 45°）", R))
+    local free = run(3, 0.4, 2.0)
+    check(free > 80 * math.pi / 180,
+        string.format("(d2-free) 沒有曲率帽：滿舵 R3 轉 115° 折角衝到 %.0f°（證明模型會發散）", math.deg(free)))
+    local capped = run(R, 0.4, 2.4)
+    check(capped <= T.HITCH_SLOW + 1e-6,
+        string.format("(d2-cap) 曲率帽 R%.2f 轉 137°：折角最大 %.1f° ≤ HITCH_SLOW", R, math.deg(capped)))
+    local mx, last = run(R, 0.96, 2.4)
+    check(mx <= 0.96 + 1e-9 and last < 0.96 - 0.05,
+        string.format("(d2-back) 起步已折 55°（P36）：曲率帽下只往回收（末值 %.1f°）", math.deg(last)))
+    check(run(R * 0.9, 0.4, 6) > T.HITCH_SLOW, "(d2-edge) 半徑小於上限就會越過 HITCH_SLOW（上限不是寬鬆值）")
+end
+
+-- ⑫ 1017e 繩索拖法倒車上限（正式服 D7：P05 三次倒車 thd 2.12→1.26–1.35 m 後不再縮、牽引車再退 1.3–2 m）：attach 量兩車身相碰時
+-- 的兩掛點距 ropeHdMin＝當下掛點距−車身間距；T.ropeRoom＝當下掛點距−ropeHdMin。假車沿 x：牽引車車心 0、長 4.6（車尾 −2.3）、
+-- 掛點 −2.5；被拖車朝 +x、車心 −5.5、長 4.6（車頭 −3.2）、自己的掛點在車頭內 0.3（−3.5）：間距 0.9、掛點距 1.0、相碰距 0.1。
+do
+    local o = { name = "Base.SmallCar", cx = -5.5, fwd = 1, len = 4.6, wheelZ = 0, attZ = 2.0 }
+    local trl = fakeTrailer(o)
+    trl.getTowedByWorldPos = function(_, _, out) return out:set(o.cx + o.fwd * o.attZ, 0, 0) end
+    local trac = fakeTractor(trl, -2.5)
+    trac.getTowAttachmentOther = function() return "trailerfront" end
+    trac.getScript = function() return { getExtents = function() return V(1.8, 1, 4.6) end,
+        getCenterOfMassOffset = function() return V(0, 0, 0) end } end
+    trac.getWorldPos = function(_, _, _, lz, out) return out:set(lz, 0, 0) end
+    local g = T.attach(trac)
+    check(type(g) == "table" and g.rope == true and near(g.ropeHdMin, 0.1),
+        "(rope) attach 繩索：相碰時兩掛點距 0.1（got " .. tostring(type(g) == "table" and g.ropeHdMin) .. "）")
+    local room, hd = T.ropeRoom(trac, g)
+    check(near(room, 0.9) and near(hd, 1.0), "(rope-room) 當下還能退 0.9（掛點距 1.0）")
+    o.cx = -5.0 -- 牽引車往後退 0.5＝等於被拖車往前 0.5
+    room = T.ropeRoom(trac, g)
+    check(near(room, 0.4), "(rope-room2) 退 0.5 之後剩 0.4（got " .. tostring(room) .. "）")
+    o.name = "Base.Trailer"
+    local gt = T.attach(trac)
+    check(type(gt) == "table" and gt.rope == nil and gt.ropeHdMin == nil and T.ropeRoom(trac, gt) == nil,
+        "(rope-rigid) 掛車（腳本名含 Trailer＝剛性連結）不設繩索上限")
+    o.name = "Base.SmallCar"
+    o.cx = -4.0 -- 被拖車車頭 −1.7 已越過牽引車車尾 −2.3：extents 框重疊＝量不到相碰距
+    local go = T.attach(trac)
+    check(type(go) == "table" and go.rope == true and go.ropeHdMin == nil and T.ropeRoom(trac, go) == nil,
+        "(rope-overlap) 起步兩車框已重疊：不設倒車上限（E2E CarNormal 拖 SmallCar）")
+    trac.getScript = function() error("no script") end
+    local gx = T.attach(trac)
+    check(type(gx) == "table" and gx.rope == true and gx.ropeHdMin == nil,
+        "(rope-noscript) 量不到牽引車車尾：照常啟動、只少倒車上限")
+end
+
+-- ⑬ 1017e 折角歷史（T.guard 每次讀折角記一筆；tow lost alive=true 的 phiMax／phiRate）：D2 那例 0.40→0.47→0.74→1.10→1.41 rad，
+-- 每 100ms 一筆；1 秒窗外的舊筆不算。
+do
+    local s = { towPhiRing = { k = 0 } }
+    local function put(t, p)
+        local r = s.towPhiRing
+        local k = r.k % T.PHI_RING + 1
+        r.k, r[k * 2 - 1], r[k * 2] = k, t, p
+    end
+    put(0, 1.5) -- 窗外
+    for i, p in ipairs({ 0.40, 0.47, 0.74, 1.10, 1.41 }) do put(1000 + i * 100, p) end
+    local mx, rate = T.phiStats(s, 1500)
+    check(near(mx, 1.41) and math.abs(rate - 3.6) < 1e-6,
+        string.format("(phi-stats) 1 秒內最大 1.41、最大變化率 3.6 rad/s（got %s, %s）", tostring(mx), tostring(rate)))
+    for i = 1, 12 do put(2000 + i * 100, 0.1) end -- 繞過環尾
+    mx, rate = T.phiStats(s, 3200)
+    check(near(mx, 0.1) and near(rate, 0), "(phi-ring) 環繞回後只看最近 1 秒")
+    check(T.phiStats({}, 0) == nil, "(phi-none) 沒讀過折角：nil")
+end
+
 print(string.format("test_trailer: %d 項斷言、%d 項失敗", asserts, fails))
 if fails > 0 then os.exit(1) end
