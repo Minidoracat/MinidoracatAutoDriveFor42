@@ -37,6 +37,13 @@ do
             local file = assert(io.open(path, "rb")); local source = file:read("*a"); file:close()
             return assert(compile(source .. (suffix or ""), name))()
         end
+        -- 主檔的「顯示在」兩格（Core.layerOn：行程預覽要不要算看它）：抽主檔 test:layer-maps 真實作
+        local mainFile = assert(io.open(root .. "MinidoracatMiniMap.lua", "rb"))
+        local layerMaps = assert(mainFile:read("*a"):gsub("\r\n", "\n"):match(
+            "%-%- test:layer%-maps:start\n(.-)\n%-%- test:layer%-maps:end"), "missing MiniMap layer-maps section")
+        mainFile:close()
+        assert(compile("local Core, getBoolOption = ...\n" .. layerMaps, "layer-maps"))(MinidoracatMiniMapCore,
+            MinidoracatMiniMapCore.getBoolOption)
         module("MinidoracatMiniMap_Itinerary.lua")
         local engine = module("MinidoracatMiniMap_NavRoute.lua", "\nreturn engine")
         local core, api = MinidoracatMiniMapCore, MinidoracatMiniMapAPI
