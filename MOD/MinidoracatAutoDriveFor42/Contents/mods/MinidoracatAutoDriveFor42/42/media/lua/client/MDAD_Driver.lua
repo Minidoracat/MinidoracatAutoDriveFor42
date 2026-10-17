@@ -2698,8 +2698,7 @@ local function startSession(playerObj, playerNum, stage)
         episodeGearResetTried = false,
         episodeClearRounds = 0,
         episodeMapPending = false,
-        actualClearance = 0,
-        plannedClearance = 0,
+        actualClearance = nil, plannedClearance = nil, -- 第一個 footprint 快照前＝沒量到（樣本 ac／pc 缺值，1017；舊制 0 混進統計）
         footprintBlocked = false,
         footprintPoseOnly = false,
         footprintHitX = nil, footprintHitY = nil,
