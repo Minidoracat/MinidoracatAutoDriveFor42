@@ -30443,6 +30443,397 @@ function drive.scenarioTele1013a()
 end
 drive.scenarioTele1013a()
 
+-- 1017j 轉角改線（design-raven 方案二；obstacles.md〈轉角改線〉）：L 型路線東行 y=0（路寬 15）到 K=(60,0) 左轉北上（−y，路寬 9），
+--   車停在 (40,0)、寬帶第一級完成快照（點雲直接填，不跑 Sensor）。柱 r 0.15：入臂中心 (52,0)、內側 (52,−6)、出臂門 (59,−10)／(51,−10)
+--   ——原中心線與原 R≈14.8 圓角都撞，內側有一條「折點內移、急一點轉」的直線縫。
+--   (cut-commit)  停點寬帶判堵：cut plan＋commit、pendingRouteWhy="cut"、T 在內側；下一幀 cutover（why=cut）、cut apply、新剖面經過 T。
+--   (cut-equiv)   掃過的線（局部 buildFilletPath）與 cutover 後 begin 建的剖面逐點差 ≤1 cm（承諾線＝掃過的線）。
+--   (cut-rmono)   限寬後 T 的圓角半徑隨淨空 w 單調不減。
+--   (cut-reapply) 同目標偏航重算（新 identity）重套；(cut-drop) 車過 B 丟棄、換目標丟棄。
+--   (cut-once)    找不到時同 (K, 寬帶級, 嘗試) 不再試；嘗試或寬帶級變了才再試。
+--   (cut-owner)   承諾中、RETURN 持有、ROTATE、拖車：都不試；(cut-move) 車速 ≥ WIDE_SCAN_KMH 不試。
+--   (cut-cover)   掃掠段在完成快照帶外＝拒收；Drive.zoneCovered 不把折點外角扇形當帶內（lineBandCovers 會）。
+--   (cut-kin)     限寬後圓角 R < rMin×KIN_PROOF_RMIN_K（或 fallback 折點）＝拒收。
+--   (cut-ladder)  找不到時判堵階梯用到的狀態逐欄不變（只多 cornerCutTried）。
+--   違規證明（temp/s1017-cut/vp/）：拿掉 zoneCovered、允許外側 l、跳過 owner 檢查、驗線不限寬，各自紅。
+function drive.scenarioCornerCut()
+    scenario("1017j：轉角改線——停點寬帶判堵改走內移折點的局部路線（掃過才 cutover），不在時、不行時判堵階梯照舊")
+    local Dr = MDAD.Drive
+    local T = Dr.debugTune()
+    local oldSandbox, oldVeh, oldApi = SandboxVars, dveh, MinidoracatMiniMapAPI
+    installNavApi(4) -- 沒有行程 API（前面情境裝過的行程 API 會讓 Drive.start 走 continueItinerary）
+    local oldRoute, oldTx, oldTy, oldState = drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    local oldKeep = Dr.keepRightTarget
+    Dr.keepRightTarget = function() return 0 end
+    local oldEvent, oldSample, events = MDADDiagnostics.event, MDADDiagnostics.sample, {}
+    MDADDiagnostics.event = function(_, name, a) events[#events + 1] = { name = name, a = a } end
+    MDADDiagnostics.sample = function() return true end
+    dveh = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }), scriptName = "Base.CarNormal",
+        engineRunning = true, mass = 1200, speed = 0, maxSpeed = 80, bodyW = 1.8, bodyL = 4.5, wheelZ = 1.4,
+        comX = 0, comZ = 0, profileFull = true, enginePower = 3000, brakingForce = 80,
+        wheelFriction = 1.7, tireFriction = 1.5 })
+    drive.fillWorld(-10, 100, -110, 20)
+    local K = { 60, 0 }
+    local function lroute(tx, ty)
+        local pts = {}
+        for i = 0, 15 do pts[#pts + 1] = i * 4; pts[#pts + 1] = 0 end
+        for i = 1, 25 do pts[#pts + 1] = 60; pts[#pts + 1] = -i * 4 end
+        if tx then pts[#pts - 1], pts[#pts] = tx, ty end
+        local r = { pts = pts, segSurface = {}, segWidth = {} }
+        for i = 1, #pts / 2 - 1 do r.segSurface[i], r.segWidth[i] = "paved", i <= 15 and 15 or 9 end
+        return r
+    end
+    local function arm(x)
+        Dr.stop(0, nil)
+        drive.nav.route = lroute()
+        drive.nav.tx, drive.nav.ty, drive.nav.state = 60, -100, "ok"
+        dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = x or 40, 0, 0, 0, true
+        dveh._engine, dveh._driver = true, dp
+        dp._vehicle, dp._dead, dp._local = dveh, false, true
+        setHeading(dveh, 0)
+        local okStart = Dr.start(dp)
+        local st = Dr.debugSession(0)
+        if not okStart or not st then
+            checkTrue(false, "(cut) 前置：啟動失敗（" .. table.concat(drive.logs, " | "):sub(-600) .. "）")
+            error("corner cut fixture start failed")
+        end
+        for _ = 1, 20 do
+            if st.profile and st.profile.ready then break end
+            driveTick(dp, dveh)
+        end
+        st.diag = true
+        return st
+    end
+    -- 點在剖面上的 (s, l)（hardS／hardL；擋線判定的 hardLc 同值）
+    local function projectSL(st, x, y)
+        local p, best, bs, bl = st.profile, nil, nil, nil
+        for j = 1, p.n - 1 do
+            local L = p.segLen[j]
+            if L > 1e-9 then
+                local tx, ty = math.cos(p.segH[j]), math.sin(p.segH[j])
+                local dx, dy = x - p.x[j], y - p.y[j]
+                local t = math.max(0, math.min(L, dx * tx + dy * ty))
+                local d2 = (dx - tx * t) ^ 2 + (dy - ty * t) ^ 2
+                if best == nil or d2 < best then best, bs, bl = d2, p.s[j] + t, -dx * ty + dy * tx end
+            end
+        end
+        return bs, bl
+    end
+    local POSTS = { { 52, 0 }, { 52, -6 }, { 59, -10 }, { 51, -10 } }
+    local function snap(st, list, opts)
+        opts = opts or {}
+        local sen = st.sensor
+        for _, k in ipairs({ "hardX", "hardY", "hardR", "hardB", "hardS", "hardL", "hardLc", "hardW" }) do
+            sen[k] = sen[k] or {}
+        end
+        for i, q in ipairs(list) do
+            local s0, l0 = projectSL(st, q[1], q[2])
+            sen.hardX[i], sen.hardY[i], sen.hardR[i], sen.hardB[i] = q[1], q[2], 0.15, 0
+            sen.hardS[i], sen.hardL[i], sen.hardLc[i], sen.hardW[i] = s0, l0, l0, 0.15
+        end
+        sen.hardN = #list
+        sen.ready, sen.wideDone, sen.wideDoneLevel, sen.hardOverflow = true, true, opts.lvl or 1, false
+        sen.corridorHalf, sen.completedBandBias = opts.half or 14, opts.band or 0
+        sen.scanS, sen.scanEndS, sen.unloaded = st.lastSNow - 5, st.lastSNow + 100, false
+        st.blocked, st.wideArmed, st.wideArmedS, st.wideArmedX, st.wideArmedY = true, true, st.lastSNow, nil, nil
+        st.blockHitX, st.blockHitY, st.blockS = 52, 0, st.lastSNow + 12
+        st.pendingRouteWhy, st.pendingDetour, st.reapproach = nil, false, nil
+        dveh._speed = 0
+    end
+    local function cutEv(phase)
+        local out = {}
+        for _, e in ipairs(events) do
+            if e.name == "cut" and (phase == nil or e.a.phase == phase) then out[#out + 1] = e.a end
+        end
+        return out
+    end
+    local function clearEv() for i = #events, 1, -1 do events[i] = nil end end
+    local function desc()
+        local n = cutEv("none")[1]
+        return n and ("none why=" .. tostring(n.why) .. " nc=" .. tostring(n.nc) .. " np=" .. tostring(n.np)) or "no none"
+    end
+    -- 點到折線最近距離
+    local function polyDist(pts, n, x, y)
+        local best = nil
+        for k = 1, n - 1 do
+            local ax, ay, bx, by = pts[2 * k - 1], pts[2 * k], pts[2 * k + 1], pts[2 * k + 2]
+            local ex, ey = bx - ax, by - ay
+            local L2 = ex * ex + ey * ey
+            local t = L2 > 0 and math.max(0, math.min(1, ((x - ax) * ex + (y - ay) * ey) / L2)) or 0
+            local d = math.sqrt((x - ax - ex * t) ^ 2 + (y - ay - ey * t) ^ 2)
+            if best == nil or d < best then best = d end
+        end
+        return best
+    end
+    local function hasVertexNear(route, x, y)
+        local pts = route and route.pts or {}
+        for k = 1, #pts / 2 do
+            if math.abs(pts[2 * k - 1] - x) < 1e-6 and math.abs(pts[2 * k] - y) < 1e-6 then return true end
+        end
+        return false
+    end
+    local function tickUntilReady(st)
+        for _ = 1, 40 do
+            nowMs = nowMs + 50
+            driveTick(dp, dveh)
+            if st.profile and st.profile.ready and st.mode ~= "build" then break end
+        end
+    end
+
+    -- (cut-replan) 整條管線（真 Sensor 掃假世界、replan 的判堵出口掛點）：5m 路直角、角上一塊 5×5 箱擋死、入臂 x=51 一道內側門
+    --   （y −1..3 與 −14..−7 封住，只留 −6..−2）、出臂 y=−10 一道門（x 58 與 49）、外側空地整片封住。單一偏移鏈（一般帶＋寬帶第一級）
+    --   全滅判堵（入臂門與出臂門要的側移不同：−3 與 −3.5 以上），停點寬帶那一輪 replan 結尾試改線 → commit；下一幀 cutover why=cut。
+    --   違規證明：拿掉 replan 結尾的掛點＝紅。
+    do
+        drive.fillWorld(-10, 100, -110, 20)
+        drive.putRoad(-10, 63, -3, 3)
+        drive.putRoad(57, 63, -110, 3)
+        for x = 58, 62 do for y = -2, 2 do drive.putSolid(x, y, "cut_box") end end
+        for y = -1, 3 do drive.putSolid(51, y, "cut_g1") end
+        for y = -14, -7 do drive.putSolid(51, y, "cut_g1") end
+        drive.putSolid(58, -10, "cut_g2")
+        drive.putSolid(49, -10, "cut_g2")
+        for x = 46, 72 do for y = 4, 10 do drive.putSolid(x, y, "cut_out") end end
+        for x = 64, 72 do for y = -40, 3 do drive.putSolid(x, y, "cut_out") end end
+        Dr.stop(0, nil)
+        local r5 = lroute()
+        for i = 1, #r5.segWidth do r5.segWidth[i] = 5 end
+        local s1 = arm(42)
+        drive.nav.route = r5
+        nowMs = nowMs + 400
+        driveTick(dp, dveh)
+        tickUntilReady(s1)
+        local wasMs = drive.frameMs(10)
+        clearEv()
+        -- 一般帶判堵→停止線武裝寬帶→寬帶那一輪：前面情境留下的 Sensor 節奏不同，最多 3 輪等到寬帶判堵或改線事件
+        for _ = 1, 3 do
+            drive.scanRound(true)
+            if #cutEv() > 0 then break end
+        end
+        local wide, commit1 = nil, cutEv("commit")[1]
+        for _, e in ipairs(events) do
+            if e.name == "blocked" and e.a.why == "wide" then wide = e.a end
+        end
+        checkTrue(wide ~= nil and wide.kd ~= nil and wide.ka ~= nil and math.abs(wide.ka - 90) < 0.5,
+            "(cut-replan) 停點寬帶判堵（blocked why=wide 帶 kd／ka：kd=" .. tostring(wide and wide.kd) .. " ka="
+                .. tostring(wide and wide.ka) .. "）")
+        checkTrue(commit1 ~= nil and s1.pendingRouteWhy == "cut" and s1.cornerCut ~= nil and s1.blocked == true,
+            "(cut-replan) 同一輪 replan 結尾試改線、承諾（判堵照舊，下一幀換線；" .. desc() .. "）")
+        local rg0 = s1.routeGen
+        nowMs = nowMs + 50
+        driveTick(dp, dveh)
+        checkTrue(s1.routeGen == rg0 + 1 and s1.blocked == false and s1.cornerCut ~= nil and s1.pendingRouteWhy == nil,
+            "(cut-replan) 下一幀 cutover：清判堵、換成改線路線（rg " .. rg0 .. "→" .. tostring(s1.routeGen) .. "）")
+        drive.frameMs(wasMs)
+        drive.fillWorld(-10, 100, -110, 20)
+    end
+
+    -- (cut-commit)
+    local st = arm()
+    snap(st, POSTS)
+    clearEv()
+    Dr.cornerCutPlan(st, dveh, 0)
+    local plan, commit, c = cutEv("plan")[1], cutEv("commit")[1], st.cornerCut
+    checkTrue(plan ~= nil and plan.kx == 60 and plan.ky == 0 and math.abs(plan.ka - 90) < 0.5 and (plan.nc or 0) >= 1,
+        "(cut-commit) 錨在轉角區：記 cut plan（K=(60,0)、90°、格網有候選；plan=" .. tostring(plan and (plan.kx .. "," .. plan.ky
+            .. " ka=" .. plan.ka .. " nc=" .. plan.nc .. " np=" .. plan.np)) .. "）")
+    checkTrue(commit ~= nil and c ~= nil and st.pendingRouteWhy == "cut" and c.tx <= K[1] + 1e-9 and c.ty <= K[2] + 1e-9
+            and (c.tx < K[1] - 0.25 or c.ty < K[2] - 0.25) and (c.r or 0) >= st.vehicleProfile.rMin * T.KIN_PROOF_RMIN_K,
+        "(cut-commit) 承諾：pendingRouteWhy=cut、T 往內側移、T 的圓角 ≥ rMin（" .. (c and string.format(
+            "T=(%.2f,%.2f) lin=%.2f lout=%.2f r=%s tier=%s", c.tx, c.ty, c.lin, c.lout, tostring(c.r), tostring(c.tier))
+            or desc()) .. "）")
+    if c then
+        local rg0 = st.routeGen
+        clearEv()
+        nowMs = nowMs + 50
+        driveTick(dp, dveh)
+        local cut0, apply
+        for _, e in ipairs(events) do
+            if e.name == "route" and e.a.phase == "cutover" then cut0 = e.a end
+        end
+        apply = cutEv("apply")[1]
+        checkTrue(st.routeGen == rg0 + 1 and cut0 ~= nil and cut0.why == "cut" and apply ~= nil and apply.why == "cut"
+                and st.pendingRouteWhy == nil and hasVertexNear(st.profileRoute, c.tx, c.ty) and st.cornerCut == c,
+            "(cut-commit) 下一幀 cutover why=cut、cut apply、剖面路線經過 T（rg " .. rg0 .. "→" .. tostring(st.routeGen)
+                .. " apply=" .. tostring(apply and apply.r) .. " rd=" .. tostring(apply and apply.rd) .. "）")
+        checkTrue(apply ~= nil and apply.rd ~= nil and apply.rd < 1e-6,
+            "(cut-commit) 新剖面在 T 的圓角半徑＝驗線時的（rd=" .. tostring(apply and apply.rd) .. "）")
+        tickUntilReady(st)
+        -- (cut-equiv)
+        local worst = 0
+        for q = 1, c.swn do
+            local d = polyDist(st.profile.pts, st.profile.n, c.swx[q], c.swy[q])
+            if d > worst then worst = d end
+        end
+        checkTrue(st.profile.ready == true and c.swn >= 10 and worst <= 0.01,
+            "(cut-equiv) 掃過的線（" .. c.swn .. " 點）與 cutover 後 begin 建的剖面逐點差 ≤1 cm（最大 "
+                .. string.format("%.4f", worst) .. "）")
+        -- (cut-reapply) 同目標偏航重算：新 identity、同幾何
+        clearEv()
+        drive.nav.route = lroute()
+        nowMs = nowMs + 400
+        driveTick(dp, dveh)
+        apply = cutEv("apply")[1]
+        checkTrue(apply ~= nil and apply.why == "deviation" and hasVertexNear(st.profileRoute, c.tx, c.ty)
+                and st.cornerCut == c,
+            "(cut-reapply) 同目標偏航重算：重套改線（apply why=" .. tostring(apply and apply.why) .. "）")
+        -- (cut-drop) 車過 B：下一次重算丟棄
+        clearEv()
+        dveh._x, dveh._y = c.bx, c.by - 2
+        setHeading(dveh, -math.pi / 2)
+        drive.nav.route = lroute()
+        nowMs = nowMs + 400
+        driveTick(dp, dveh)
+        local drop = cutEv("drop")[1]
+        checkTrue(drop ~= nil and drop.why == "passed" and st.cornerCut == nil and not hasVertexNear(st.profileRoute, c.tx, c.ty),
+            "(cut-drop) 車過 B：丟棄改線、新剖面回原路線（drop why=" .. tostring(drop and drop.why) .. "）")
+    end
+    -- (cut-drop) 換目標
+    st = arm()
+    snap(st, POSTS)
+    Dr.cornerCutPlan(st, dveh, 0)
+    nowMs = nowMs + 50
+    driveTick(dp, dveh)
+    clearEv()
+    drive.nav.tx, drive.nav.ty = 60, -96
+    drive.nav.route = lroute(60, -96)
+    nowMs = nowMs + 400
+    driveTick(dp, dveh)
+    local drop = cutEv("drop")[1]
+    checkTrue(drop ~= nil and drop.why == "target" and st.cornerCut == nil,
+        "(cut-drop) 換目標：丟棄改線（drop why=" .. tostring(drop and drop.why) .. "）")
+    -- 這個轉角的幾何（Drive.cornerCutPlan 給 cornerCutTry 的 g，直接問驗線用）
+    local function gOf(s1)
+        local R0 = s1.vehicleProfile.rMin * T.KIN_PROOF_RMIN_K
+        return { kx = 60, ky = 0, ix = 1, iy = 0, ox = 0, oy = -1, R0 = R0, zarm = Dr.cutArm(R0, math.pi / 2, s1.bodyReach),
+            uC = dveh._x - 60, vx = dveh._x, vy = dveh._y, adh = math.pi / 2, inW = 15, outW = 9 }
+    end
+    -- (cut-rmono) 限寬後 T 的圓角半徑隨淨空單調不減（空點雲：只看圓角，不讓掃掠擋）；放不下 rMin＝kin（記 0）
+    do
+        local s1 = arm()
+        snap(s1, {})
+        local g = gOf(s1)
+        local prev, mono, rs = -1, true, {}
+        for _, w in ipairs({ 1.8, 2.2, 2.6, 3.0, 3.5, 4.5, 6, 9 }) do
+            local why, c1 = Dr.cornerCutTry(s1, g, -2.5, -2.5, w, w)
+            local r = c1 and c1.r or 0
+            rs[#rs + 1] = string.format("%.2f%s", r, why and ("/" .. why) or "")
+            if r < prev - 1e-6 then mono = false end
+            prev = r
+        end
+        checkTrue(mono and prev > s1.vehicleProfile.rMin * T.KIN_PROOF_RMIN_K + 1,
+            "(cut-rmono) T 的圓角半徑隨淨空 w 單調不減、寬了就大於 rMin（R=" .. table.concat(rs, ",") .. "）")
+    end
+    -- (cut-owner)／(cut-move)：都不試、不記事件
+    local function noCut(label, setup)
+        local s1 = arm()
+        snap(s1, POSTS)
+        setup(s1)
+        clearEv()
+        Dr.cornerCutPlan(s1, dveh, 0)
+        checkTrue(#cutEv() == 0 and s1.cornerCut == nil and s1.pendingRouteWhy == nil and s1.cornerCutTried == nil,
+            label .. "：不試（事件 " .. #cutEv() .. "）")
+    end
+    noCut("(cut-owner) 承諾中的繞行", function(s1) s1.dodging = true end)
+    noCut("(cut-owner) RETURN 持有回線段", function(s1)
+        s1.returnActive, s1.returnHold, s1.returnCrawlExact, s1.returnEndS = true, false, false, s1.lastSNow + 10
+    end)
+    noCut("(cut-owner) ROTATE", function(s1) s1.fstate.rotating = true end)
+    noCut("(cut-owner) 拖車", function(s1) s1.tow = {} end)
+    noCut("(cut-move) 車速 ≥ WIDE_SCAN_KMH", function() dveh._speed = T.WIDE_SCAN_KMH end)
+    noCut("(cut-move) 寬帶沒武裝／不是寬帶完整快照", function(s1) s1.sensor.wideDone = false end)
+    noCut("(cut-move) 已有別的路線改寫待辦（改道）", function(s1) s1.pendingDetour = true end)
+    -- (cut-once)：內側封死＝找不到；同 (K, 級, 嘗試) 不再試，嘗試／級變了才再試
+    do
+        local wall = {}
+        for _, q in ipairs(POSTS) do wall[#wall + 1] = q end
+        for x = 36, 59 do for y = -20, -1 do wall[#wall + 1] = { x, y } end end
+        for x = 30, 59 do wall[#wall + 1] = { x, 1.5 } end
+        local s1 = arm()
+        snap(s1, wall)
+        clearEv()
+        Dr.cornerCutPlan(s1, dveh, 0)
+        local n1 = cutEv("none")[1]
+        local before = {}
+        for k, v in pairs(s1) do before[k] = v end
+        checkTrue(n1 ~= nil and n1.why == "grid" and s1.cornerCut == nil and s1.pendingRouteWhy == nil,
+            "(cut-once) 內側封死：cut none why=grid（" .. desc() .. "）")
+        clearEv()
+        Dr.cornerCutPlan(s1, dveh, 0)
+        local again = #cutEv()
+        s1.episodeAttempts = s1.episodeAttempts + 1
+        Dr.cornerCutPlan(s1, dveh, 0)
+        local afterAtt = #cutEv("plan")
+        s1.sensor.wideDoneLevel = 2
+        Dr.cornerCutPlan(s1, dveh, 0)
+        local afterLvl = #cutEv("plan")
+        checkTrue(again == 0 and afterAtt == 1 and afterLvl == 2,
+            "(cut-once) 同 (K, 寬帶級, 嘗試) 不再試；嘗試、寬帶級變了才再試（again=" .. again .. " att=" .. afterAtt
+                .. " lvl=" .. afterLvl .. "）")
+        -- (cut-ladder)：找不到時判堵階梯的狀態逐欄不變（cornerCutPlan 只寫 cornerCutTried／cutScratch）
+        s1.episodeAttempts = s1.episodeAttempts + 1
+        for k, v in pairs(s1) do before[k] = v end
+        Dr.cornerCutPlan(s1, dveh, 0)
+        local diff = {}
+        for k, v in pairs(s1) do
+            if before[k] ~= v and k ~= "cornerCutTried" and k ~= "cutScratch" and k ~= "sweepCount"
+                    and k ~= "sfP1" and k ~= "sfP2" and k ~= "sfP3" and k ~= "sfP4" and k ~= "sf0Tag" and k ~= "sf0Ph"
+                    and k ~= "sf0X" and k ~= "sf0Y" and k ~= "sweepHitBody" and k ~= "sweepLogAt" then
+                diff[#diff + 1] = k
+            end
+        end
+        for k in pairs(before) do if s1[k] == nil and before[k] ~= nil then diff[#diff + 1] = k end end
+        checkTrue(#diff == 0, "(cut-ladder) 找不到時不動判堵階梯的狀態（改了：" .. table.concat(diff, ",") .. "）")
+    end
+    -- (cut-cover)／(cut-kin)：直接問驗線（Drive.cornerCutTry）
+    do
+        local s1 = arm()
+        snap(s1, POSTS)
+        Dr.cornerCutPlan(s1, dveh, 0)
+        local cc = s1.cornerCut
+        local g = gOf(s1)
+        s1.cornerCut, s1.pendingRouteWhy = nil, nil
+        if cc then
+            local why = Dr.cornerCutTry(s1, g, cc.lin, cc.lout, cc.wIn, cc.wOut)
+            checkTrue(why == nil, "(cut-kin) 前置：承諾的那條直接再問一次照樣過（why=" .. tostring(why) .. "）")
+            why = Dr.cornerCutTry(s1, g, cc.lin, cc.lout, 1.2, 1.2)
+            checkEq(why, "kin", "(cut-kin) 同一條線、淨空只有 1.2m（段寬 2.4）：圓角放不下 rMin＝拒收")
+            s1.sensor.completedBandBias, s1.sensor.corridorHalf = 8, 7
+            why = Dr.cornerCutTry(s1, g, cc.lin, cc.lout, cc.wIn, cc.wOut)
+            checkEq(why, "cover", "(cut-cover) 完成快照的帶只蓋右側（帶心 +8、半寬 7）：內側改線沒掃過＝拒收")
+        else
+            checkTrue(false, "(cut-kin)/(cut-cover) 前置：commit fixture 沒有承諾（" .. desc() .. "）")
+        end
+    end
+    -- (cut-cover) zoneCovered 對折點外角：4m 路的 fallback 直角，外角扇形 (63,2) 兩段的垂足都落在段外＝沒掃過
+    do
+        local s1 = arm()
+        local w4 = lroute()
+        for i = 1, #w4.segWidth do w4.segWidth[i] = 4 end
+        drive.nav.route = w4
+        nowMs = nowMs + 400
+        driveTick(dp, dveh)
+        tickUntilReady(s1)
+        snap(s1, POSTS)
+        local fb = (s1.profile.filletFallbackN or 0) >= 1
+        local outer = Dr.zoneCovered(s1, { 63, 63.5 }, { 2, 2 }, 2, 0.1)
+        local inner = Dr.zoneCovered(s1, { 57, 57.5 }, { -2, -2.5 }, 2, 0.1)
+        local kS = s1.profile.s[16]
+        local legacy = Dr.lineBandCovers(s1, { 63, 63.5 }, { 2, 2 }, 2, kS, kS + 1, 0.1, 1, 0)
+        checkTrue(fb and outer == false and inner == true and legacy == true,
+            "(cut-cover) 折點外角扇形不算帶內（舊 lineBandCovers 夾段端點會算）；內側照算（fb=" .. tostring(fb) .. " outer="
+                .. tostring(outer) .. " inner=" .. tostring(inner) .. " legacy=" .. tostring(legacy) .. "）")
+    end
+    Dr.stop(0, nil)
+    MDADDiagnostics.event, MDADDiagnostics.sample = oldEvent, oldSample
+    Dr.keepRightTarget = oldKeep
+    drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
+    SandboxVars, dveh, MinidoracatMiniMapAPI = oldSandbox, oldVeh, oldApi
+    drive.fillWorld(-2, 70, -7, 7)
+end
+drive.scenarioCornerCut()
+
 local function scenarioReasonKeys()
 scenario("理由鍵覆蓋：每個分支都跑到，且四語 UI.json 都有對應翻譯")
 

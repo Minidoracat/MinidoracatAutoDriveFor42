@@ -354,6 +354,7 @@ function MDADFollower.setStyle(profile, style)
     return profile
 end
 MDADFollower.OV_STEP = OV_STEP
+MDADFollower.HAIRPIN_MAX_RAD = HAIRPIN_MAX_RAD -- Driver 轉角改線（Drive.cornerZoneOf）：≥ 此角交給調頭，不改線
 MDADFollower.TANGENT_PREVIEW_M = TANGENT_PREVIEW_M
 MDADFollower.LANE_MAX = LANE_MAX
 MDADFollower.SURFACE_UNKNOWN = 0

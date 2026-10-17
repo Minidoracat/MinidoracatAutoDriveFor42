@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1017a"
+Drive.REV = "1017j"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -566,6 +566,14 @@ local CORNER_RETRY_DIST = 3    -- corner latch 撤銷距離：漸進接近讓車
                                -- ＝近距下折點幾何退化成直路障礙，把手動流程自動化
 TUNE.CORNER_STOP_DIST = 8      -- corner 下的煞停線（普通 blocked 10m）：爬更近再停，
                                -- 給近距重枚舉創造與「近開導航」相同的幾何條件
+-- 轉角改線（1017j，design-raven 方案二；Drive.cornerCutPlan）：停點寬帶判堵、錨在路線轉角區內時，把轉角當成可改的路線幾何
+-- ——折點往內側移（兩臂各平移 l_in／l_out）、圓角寬改照實際淨空，世界掃掠驗過才 cutover 成新路線（pendingRouteWhy="cut"）。
+-- 區長由 rMin×KIN_PROOF_RMIN_K 的切線長＋bodyReach 推（不設常數）；以下只有角度、格網與重套容差。
+TUNE.CORNER_CUT_MIN_RAD = math.pi / 4 -- 路線頂點折角 ≥ 此值（且 < 髮夾上限）才算轉角
+TUNE.CORNER_CUT_STEP_M = 0.5          -- 兩臂平移格網步長
+TUNE.CORNER_CUT_MAX = 4               -- 格網篩出、送世界掃掠的候選上限
+TUNE.CORNER_CUT_PAIRS = 400           -- 格網對數上限（超過截斷，事件 np 記試了幾對）
+TUNE.CORNER_CUT_SNAP_M = 2            -- 重算的路線仍經過原轉角（頂點 2m 內、兩臂同向）才重套改線
 local CURVE_LEAD = 8           -- 過渡段要在折點前多遠完成（公尺）：進彎前把側移
                                -- 做完、彎中全程保持目標線——過渡線切折角掃到彎
                                -- 外側障礙是 2026-08-29 路口七連殺的幾何根因
@@ -1985,7 +1993,10 @@ local diagFail
 -- Driver 一律送具名 payload。blocked 事件（每次發事件一次、冷路徑）先補主命中物 sprite（Drive.blockSprite）。
 local function diagEvent(s, playerNum, name, payload)
     if not s or not s.diag then return end
-    if name == "blocked" then pcall(Drive.blockSprite, s, payload) end
+    if name == "blocked" then
+        pcall(Drive.blockSprite, s, payload)
+        pcall(Drive.blockKink, s, payload)
+    end
     local ok, err = pcall(MDADDiagnostics.event, playerNum, name, payload)
     if not ok then diagFail(s, playerNum, "event " .. tostring(name) .. " failed", err) end
 end
@@ -3977,9 +3988,16 @@ end
 -- 拖車再改寫外拉轉角並清改寫撤點殘留的折返；不拖車時 approach 為真才接越野接線（heading＝車頭航向；approach＝"turn"
 -- ＝原地轉後重評的那次 cutover，見 approachRoute 的 turned）。
 -- 回 (剖面路線, 接線長)；despiked 記兩次清掉的點數（route ready 事件 detail）。
-function Drive.profileRouteOf(route, tow, vp, vx, vy, approach, heading)
+-- cut（1017j）＝s.cornerCut（Drive.cornerCutFor 決定要不要重套）：despike 之後、越野接線之前拼上轉角改線（Drive.cornerCutRoute）；
+-- Drive.cutUsed 記結果（表＝套了、false＝拼不上），由 Drive.cornerCutNote 在 begin 之後發 cut apply／drop。拖車不套。
+function Drive.profileRouteOf(route, tow, vp, vx, vy, approach, heading, cut)
     Drive.approachWhy, Drive.approachHd, Drive.approachD = approach and tow and "tow" or nil, nil, nil
     local clean = MDADFollower.despikeRoute(route)
+    if cut and not tow then
+        local cc = Drive.cornerCutRoute(clean, cut)
+        Drive.cutUsed = cc and cut or false
+        if cc then clean = cc end
+    end
     if tow then
         local shaped = MDADFollower.despikeRoute(MDADTrailer.shape(clean, tow, vp.halfW,
             MDADTrailer.hitchFront(tow, vp.halfL)))
@@ -12130,6 +12148,547 @@ function Drive.replanElapsed(s)
     return s.replanT0 and getTimestampMs() - s.replanT0 or nil
 end
 
+-- ===== 轉角改線（1017j，design-raven 方案二；obstacles.md〈轉角改線〉） =====
+-- 停點寬帶判堵、錨落在路線轉角區內：單一偏移候選鏈只能「沿固定的轉彎做常數側偏」，路口窄門要的是「換一個轉彎點／轉彎半徑」。
+-- 這裡把轉角當成可改的路線幾何：兩臂各往內側平移（Corridor.cornerCut 格網篩候選）、新段寬＝實際淨空（圓角半徑由淨空推），
+-- 拼成局部路線以 buildFilletPath（＝begin 建剖面的同一支）建世界折線、sweepLine 掃過才承諾，走既有 cutover 換成新路線。
+-- cutover 之後判堵、守護、證明線、運動學證明全部在新剖面上照原規則再驗，改線不豁免任何防線。
+
+-- 路線點列第 i 個頂點的有號折角（右轉 >0，同 turnPeakS）；前後段長 0＝nil。
+function Drive.routeTurnAt(pts, i)
+    local ax, ay = pts[2 * i - 1] - pts[2 * i - 3], pts[2 * i] - pts[2 * i - 2]
+    local cx, cy = pts[2 * i + 1] - pts[2 * i - 1], pts[2 * i + 2] - pts[2 * i]
+    if (ax == 0 and ay == 0) or (cx == 0 and cy == 0) then return nil end
+    return math.atan2(ax * cy - ay * cx, ax * cx + ay * cy)
+end
+
+-- blocked 事件的轉角距離（1017j，diagEvent 每筆 blocked 查一次）：主命中點（取法同 Drive.blockSprite）到剖面路線上最近的
+-- ≥CORNER_CUT_MIN_RAD 頂點（含髮夾）的世界距離 kd、折角 ka（°）。沒有這種頂點＝兩欄缺。之後的路口窄門頻率直接數，不再從 src 推。
+function Drive.blockKink(s, p)
+    local x, y = p.hx0, p.hy0
+    if not finite(x) or not finite(y) then x, y = p.hitX, p.hitY end
+    if not finite(x) or not finite(y) then x, y = p.x, p.y end
+    local pts = type(s.profileRoute) == "table" and s.profileRoute.pts
+    if not finite(x) or not finite(y) or type(pts) ~= "table" then return end
+    local bd, ba = nil, nil
+    for i = 2, #pts / 2 - 1 do
+        local dh = Drive.routeTurnAt(pts, i)
+        if dh and (dh < 0 and -dh or dh) >= TUNE.CORNER_CUT_MIN_RAD then
+            local dx, dy = pts[2 * i - 1] - x, pts[2 * i] - y
+            local d = sqrt(dx * dx + dy * dy)
+            if bd == nil or d < bd then bd, ba = d, dh end
+        end
+    end
+    if bd then p.kd, p.ka = bd, (ba < 0 and -ba or ba) * TUNE.DEG_PER_RAD end
+end
+
+-- 轉角改線的臂長（區長）：rMin×KIN_PROOF_RMIN_K 圓角在折角 θ 要用掉的切線長 ÷ buildFilletPath 的臂長份額（每個角最多吃臂長的
+-- FILLET_SEGMENT_SHARE，臂比這短＝圓角半徑掉到 rMin 以下）＋車身前伸。兩臂窗、錨落區、出臂偏移直線都用這一個數。
+function Drive.cutArm(R0, adh, reach)
+    return R0 * math.tan(adh * 0.5) / MDADDynamics.FILLET_SEGMENT_SHARE + reach
+end
+
+-- 判堵錨所在的轉角：點列上折角 ∈ [CORNER_CUT_MIN_RAD, 髮夾上限) 的頂點 K，錨離 K ≤ 臂長（Drive.cutArm），而且車還在它的
+-- 入彎臂上（車心投影 u < −0.5）；多個取離錨最近的。回 i, 有號折角。
+function Drive.cornerZoneOf(pts, hx, hy, vx, vy, R0, reach)
+    local bi, bd, bdh = nil, nil, nil
+    local hp = MDADFollower.HAIRPIN_MAX_RAD
+    for i = 2, #pts / 2 - 1 do
+        local kx, ky = pts[2 * i - 1], pts[2 * i]
+        local dx, dy = hx - kx, hy - ky
+        local d = sqrt(dx * dx + dy * dy)
+        if bd == nil or d < bd then
+            local dh = Drive.routeTurnAt(pts, i)
+            local adh = dh and (dh < 0 and -dh or dh) or 0
+            if adh >= TUNE.CORNER_CUT_MIN_RAD and adh < hp and d <= Drive.cutArm(R0, adh, reach) then
+                local ix, iy = kx - pts[2 * i - 3], ky - pts[2 * i - 2]
+                if (vx - kx) * ix + (vy - ky) * iy < -0.5 * sqrt(ix * ix + iy * iy) then bi, bd, bdh = i, d, dh end
+            end
+        end
+    end
+    return bi, bdh
+end
+
+-- 轉角改線的路線拼接（profileRouteOf 在 despike 之後、越野接線之前套；cornerCutPlan 驗線用同一支）：在 route 上找原轉角
+-- （頂點離 K ≤ CORNER_CUT_SNAP_M、兩臂與記下的方向同向），入彎臂上 u < uP 的頂點與出彎臂上 u′ > uM 的頂點原樣保留，中間換成
+-- 改線折線 c.cx／cy（P_in→A→T→B→M）。被換掉的頂點要落在臂的延長線上（|v| ≤ 0.5；臂上另有轉彎＝改不了）。路線起點已在改線段
+-- 內（沿改線開時主 MOD 偏航重算）＝從起點在改線折線上的垂足接上（離 > SNAP＝改不了）。段寬：c.ck 1／4＝原臂寬，2／3＝
+-- 2·min(淨空, 原臂寬)（改線段以改線為中心、半寬＝實際淨空，不超過原路寬；下限 1、上限 64＝begin 的合法範圍）。回新路線
+-- （pts／segSurface／segWidth；cutI0／cutI1＝改線折線頭尾索引）或 nil。
+function Drive.cornerCutRoute(route, c)
+    local pts = type(route) == "table" and route.pts
+    local sf, sw = type(route) == "table" and route.segSurface, type(route) == "table" and route.segWidth
+    if type(pts) ~= "table" or type(sf) ~= "table" or type(sw) ~= "table" then return nil end
+    local n = #pts / 2
+    if n < 3 then return nil end
+    local snap = TUNE.CORNER_CUT_SNAP_M
+    local kx, ky, ix, iy, ox, oy = c.kx, c.ky, c.ix, c.iy, c.ox, c.oy
+    local iK, best = nil, snap * snap
+    for i = 2, n - 1 do
+        local dx, dy = pts[2 * i - 1] - kx, pts[2 * i] - ky
+        if dx * dx + dy * dy <= best then iK, best = i, dx * dx + dy * dy end
+    end
+    if not iK then return nil end
+    local ax, ay = pts[2 * iK - 1] - pts[2 * iK - 3], pts[2 * iK] - pts[2 * iK - 2]
+    local bx, by = pts[2 * iK + 1] - pts[2 * iK - 1], pts[2 * iK + 2] - pts[2 * iK]
+    local la, lb = sqrt(ax * ax + ay * ay), sqrt(bx * bx + by * by)
+    if la < 1e-6 or lb < 1e-6 or (ax * ix + ay * iy) < 0.95 * la or (bx * ox + by * oy) < 0.95 * lb then return nil end
+    local lo, hi = nil, nil
+    for i = iK - 1, 1, -1 do
+        local dx, dy = pts[2 * i - 1] - kx, pts[2 * i] - ky
+        if dx * ix + dy * iy < c.uP - 0.05 then
+            lo = i
+            break
+        end
+        local v = -dx * iy + dy * ix
+        if i > 1 and (v < -0.5 or v > 0.5) then return nil end
+    end
+    for i = iK + 1, n do
+        local dx, dy = pts[2 * i - 1] - kx, pts[2 * i] - ky
+        if dx * ox + dy * oy > c.uM + 0.05 then
+            hi = i
+            break
+        end
+        local v = -dx * oy + dy * ox
+        if v < -0.5 or v > 0.5 then return nil end
+    end
+    if not hi then return nil end
+    local cx, cy, ck, cn = c.cx, c.cy, c.ck, c.cn
+    local j0, sx, sy = 1, cx[1], cy[1]
+    if not lo then
+        local px, py, bd2 = pts[1], pts[2], nil
+        for j = 1, cn - 1 do
+            local ex, ey = cx[j + 1] - cx[j], cy[j + 1] - cy[j]
+            local L2 = ex * ex + ey * ey
+            local t = L2 > 0 and ((px - cx[j]) * ex + (py - cy[j]) * ey) / L2 or 0
+            if t < 0 then t = 0 elseif t > 1 then t = 1 end
+            local fx, fy = cx[j] + ex * t, cy[j] + ey * t
+            local d2 = (px - fx) * (px - fx) + (py - fy) * (py - fy)
+            if bd2 == nil or d2 < bd2 then bd2, j0, sx, sy = d2, j, fx, fy end
+        end
+        if bd2 > snap * snap then return nil end
+        local ex, ey = cx[j0 + 1] - sx, cy[j0 + 1] - sy
+        if ex * ex + ey * ey < 0.0025 then j0, sx, sy = j0 + 1, cx[j0 + 1], cy[j0 + 1] end
+        if j0 >= cn then return nil end
+    end
+    local inS, inW, outS, outW = sf[iK - 1], sw[iK - 1], sf[iK], sw[iK]
+    local P, S, W = {}, {}, {}
+    local m = 0
+    if lo then
+        for i = 1, lo do
+            P[2 * i - 1], P[2 * i] = pts[2 * i - 1], pts[2 * i]
+            S[i], W[i] = sf[i], sw[i] -- 第 lo 段＝lo→P_in 的接線段
+        end
+        m = lo
+    end
+    m = m + 1
+    P[2 * m - 1], P[2 * m] = sx, sy
+    local i0 = m
+    for j = j0, cn - 1 do
+        local kd = ck[j]
+        local w = (kd == 2 or kd == 3) and 2 * math.min(kd == 2 and c.wIn or c.wOut, kd == 2 and inW or outW)
+            or (kd == 1 and inW or outW)
+        if w < 1 then w = 1 elseif w > 64 then w = 64 end
+        S[m], W[m] = kd <= 2 and inS or outS, w
+        m = m + 1
+        P[2 * m - 1], P[2 * m] = cx[j + 1], cy[j + 1]
+    end
+    local i1 = m
+    S[m], W[m] = sf[hi - 1], sw[hi - 1] -- M→hi 接線段
+    for i = hi, n do
+        m = m + 1
+        P[2 * m - 1], P[2 * m] = pts[2 * i - 1], pts[2 * i]
+        if i < n then S[m], W[m] = sf[i], sw[i] end
+    end
+    return { pts = P, segSurface = S, segWidth = W, cutI0 = i0, cutI1 = i1 }
+end
+
+-- 轉角改線的預配暫存（每 session 一份，第一次用到才建）：格網逐點投影與候選輸出（Corridor.cornerCut）、掃掠取樣線。
+function Drive.cutScratchOf(s)
+    local sc = s.cutScratch
+    if not sc then
+        sc = { u1 = {}, v1 = {}, u2 = {}, v2 = {}, lin = {}, lout = {}, cost = {}, win = {}, wout = {}, lx = {}, ly = {} }
+        s.cutScratch = sc
+    end
+    return sc
+end
+
+-- 車已經過改線的 B（出臂偏移直線的尾端，沿出臂方向量）。
+function Drive.cutPassed(c, vx, vy)
+    return (vx - c.bx) * c.ox + (vy - c.by) * c.oy > 0
+end
+
+function Drive.cornerCutDrop(s, playerNum, why)
+    local c = s.cornerCut
+    s.cornerCut = nil
+    if c then diagEvent(s, playerNum, "cut", { phase = "drop", why = why, kx = c.kx, ky = c.ky }) end
+end
+
+-- 轉角改線的橫向覆蓋（sweepLine requireLoaded 的 Drive.lineBandCovers 換成這支）：每個取樣的車身（OBB 在該段法向的投影半寬＋pad）
+-- 要整個落在完成快照掃過的帶內——垂足落在剖面某一段的 s 範圍內、s 在 [scanS, 可視前緣]、橫向在 completedBandBias ± corridorHalf 內。
+-- lineBandCovers 以名目弧長找段、把垂足夾在段端點，改線離原線數公尺時，折點外角那個沒掃過的扇形會被當成帶內。
+-- 圓角弦的接點（轉角 ≤ FILLET_SMALL_RAD）外側那條細楔（|l|·tan(轉角)，14m 外約 0.5m）算帶內：相鄰兩弦的掃描帶在那裡是連著的；
+-- 只有真折點（fallback、>10° 的弦接點）外角的扇形不算。
+function Drive.zoneCovered(s, lx, ly, ln, pad)
+    local sen, prof, vp = s.sensor, s.profile, s.vehicleProfile
+    local band, half = sen.completedBandBias, sen.corridorHalf
+    if not (finite(band) and finite(half) and finite(pad) and finite(sen.scanS)) or type(prof) ~= "table"
+            or prof.ready ~= true or not finite(ln) or ln < 2 then return false end
+    -- 下界：掃描帶從車頭前 SCAN_NEAR 起算（scanS 在車心前），車身現在佔的那段沒人掃但也不會有東西（有就是接觸）——同 sweepLine 不管下界
+    local s0, s1 = math.min(sen.scanS, s.lastSNow) - s.bodyReach, visibleEndS(sen, s.lastSNow)
+    local px, py, ps, pl, ph = prof.x, prof.y, prof.s, prof.segLen, prof.segH
+    local segLo, segHi = MDADFollower.segIndexAt(prof, s0), MDADFollower.segIndexAt(prof, s1)
+    local comX, comZ, halfL, halfW = vp.centerOfMassX, vp.centerOfMassZ, vp.halfL, vp.halfW
+    local lastFx, lastFy = 1, 0
+    for k = 1, ln do
+        local k0, k1 = k, k + 1
+        if k1 > ln then k0, k1 = k - 1, k end
+        local fx, fy = lx[k1] - lx[k0], ly[k1] - ly[k0]
+        local f2 = fx * fx + fy * fy
+        if f2 > 1e-8 then
+            local inv = 1 / sqrt(f2)
+            fx, fy = fx * inv, fy * inv
+            lastFx, lastFy = fx, fy
+        else
+            fx, fy = lastFx, lastFy
+        end
+        local cx = lx[k] + fx * comZ + fy * comX
+        local cy = ly[k] + fy * comZ - fx * comX
+        local inBand = false
+        for j = segLo, segHi do
+            local L = pl[j]
+            if L > 1e-6 then
+                local tx, ty = cos(ph[j]), sin(ph[j])
+                local dx, dy = cx - px[j], cy - py[j]
+                local t = dx * tx + dy * ty
+                local lat = -dx * ty + dy * tx
+                local al = lat < 0 and -lat or lat
+                local tLo, tHi = 0, L
+                if j > 1 then
+                    local d = ph[j] - ph[j - 1]
+                    if d > math.pi then d = d - 2 * math.pi elseif d < -math.pi then d = d + 2 * math.pi end
+                    if d < 0 then d = -d end
+                    if d <= MDADDynamics.FILLET_SMALL_RAD then tLo = -al * math.tan(d) end
+                end
+                if j < prof.n - 1 then
+                    local d = ph[j + 1] - ph[j]
+                    if d > math.pi then d = d - 2 * math.pi elseif d < -math.pi then d = d + 2 * math.pi end
+                    if d < 0 then d = -d end
+                    if d <= MDADDynamics.FILLET_SMALL_RAD then tHi = L + al * math.tan(d) end
+                end
+                if t >= tLo and t <= tHi and ps[j] + t >= s0 and ps[j] + t <= s1 then
+                    local fp = -fx * ty + fy * tx
+                    local xp = -fy * ty - fx * tx
+                    if fp < 0 then fp = -fp end
+                    if xp < 0 then xp = -xp end
+                    local hw = halfL * fp + halfW * xp + pad
+                    if lat - hw >= band - half and lat + hw <= band + half then
+                        inBand = true
+                        break
+                    end
+                end
+            end
+        end
+        if not inBand then return false end
+    end
+    return true
+end
+
+-- 一條格網候選的驗線（Drive.cornerCutPlan 用；冷路徑、每停點每級最多 CORNER_CUT_MAX 次）。g＝這個轉角的幾何。
+-- 回 nil, cut（過）或拒收理由：room（臂上沒地方拼、或終點落在改線段）／kin（任一圓角 R < rMin×KIN_PROOF_RMIN_K 或 fallback 折點）
+-- ／cover（掃掠段不在完成快照的帶內）／sweep（plan、physical 兩檔世界掃掠都撞）／wall（出臂下一群整寬擋死，09-02「出口後仍擋線＝不鑽」）。
+function Drive.cornerCutTry(s, g, lin, lout, win, wout)
+    local sen, vp = s.sensor, s.vehicleProfile
+    local sn, cs = g.ix * g.oy - g.iy * g.ox, g.ix * g.ox + g.iy * g.oy
+    local ut = (lout - lin * cs) / -sn
+    local upt = lin * sn + ut * cs
+    local nix, niy, nox, noy = -g.iy, g.ix, -g.oy, g.ox
+    local uP, zarm = g.uC, g.zarm
+    local alin, alout = lin < 0 and -lin or lin, lout < 0 and -lout or lout
+    -- 兩臂長：至少一個臂長（T 的圓角吃得到 rMin）；淨空 w（夾原路半寬）撐得起更大的圓角時臂再拉長——圓角半徑照實際淨空推，
+    -- 不被 buildFilletPath 的臂長份額卡在 rMin（帶內 R ≤ (w−halfW−ROAD_EDGE_MARGIN)/(1−cos(θ/2))，要的切線長 R·tan(θ/2)÷份額）。
+    local sag, tn, share = 1 - math.cos(g.adh * 0.5), math.tan(g.adh * 0.5), MDADDynamics.FILLET_SEGMENT_SHARE
+    local edge = vp.halfW + MDADDynamics.ROAD_EDGE_MARGIN
+    local wi, wo = math.min(win, g.inW), math.min(wout, g.outW)
+    -- 上限兩個臂長（區尾）：寬路沒有內側點時淨空＝原路寬，不讓臂伸到下一個路口
+    local armA = math.min(2 * zarm, math.max(zarm, (wi - edge) / sag * tn / share))
+    local armB = math.min(2 * zarm, math.max(zarm, (wo - edge) / sag * tn / share))
+    -- 進場：入臂偏移線上 A＝T 前 armA；P_in→A 斜接至少 2·|l_in|（≈27°），不夠就把 A 往 T 挪（窗內盡量是格網驗過的平行線），
+    -- 挪到 A→T 不足 rMin 圓角的臂長才不要 A、P_in 直接斜接到 T。更陡的圓角由下面的 R 檢查拒收。
+    local uA = ut - armA
+    if uA < uP + 2 * alin then uA = uP + 2 * alin end
+    if uA > ut - (zarm - s.bodyReach) then uA = uP end
+    if ut - uP < zarm - s.bodyReach then return "room" end
+    local cx, cy, ck = { g.kx + uP * g.ix }, { g.ky + uP * g.iy }, {}
+    local m = 1
+    if uA > uP + 0.05 then
+        m = m + 1
+        cx[m], cy[m], ck[m - 1] = g.kx + lin * nix + uA * g.ix, g.ky + lin * niy + uA * g.iy, 1
+    end
+    m = m + 1
+    cx[m], cy[m], ck[m - 1] = g.kx + lin * nix + ut * g.ix, g.ky + lin * niy + ut * g.iy, 2
+    local tm = m
+    -- 出臂偏移直線延到 T 後 armB、至少兩個臂長（區尾），再以 ≤18° 斜回原出臂
+    local uB = upt + armB
+    if uB < 2 * zarm then uB = 2 * zarm end
+    m = m + 1
+    cx[m], cy[m], ck[m - 1] = g.kx + lout * nox + uB * g.ox, g.ky + lout * noy + uB * g.oy, 3
+    local uM = uB + math.max(zarm, 3 * alout)
+    m = m + 1
+    cx[m], cy[m], ck[m - 1] = g.kx + uM * g.ox, g.ky + uM * g.oy, 4
+    local c = { kx = g.kx, ky = g.ky, ix = g.ix, iy = g.iy, ox = g.ox, oy = g.oy, uP = uP, uM = uM,
+        cn = m, cx = cx, cy = cy, ck = ck, wIn = win, wOut = wout, lin = lin, lout = lout,
+        tx = cx[tm], ty = cy[tm], bx = cx[m - 1], by = cy[m - 1] }
+    local full = Drive.cornerCutRoute(s.profileRoute, c)
+    if not full then return "room" end
+    -- 局部窗：改線折線前後各延到下一個 >3° 的頂點（共線臂鏈不切斷，圓角的臂長預算＝begin 建整條路線時的同一份）
+    local fp, fsf, fw = full.pts, full.segSurface, full.segWidth
+    local fn = #fp / 2
+    local w0, w1 = full.cutI0 - 1, full.cutI1 + 1
+    if w0 < 1 then w0 = 1 end
+    if w1 > fn then w1 = fn end
+    local lim3 = 3 / TUNE.DEG_PER_RAD
+    while w0 > 1 do
+        local dh = Drive.routeTurnAt(fp, w0)
+        if dh == nil or dh > lim3 or dh < -lim3 then break end
+        w0 = w0 - 1
+    end
+    while w1 < fn do
+        local dh = Drive.routeTurnAt(fp, w1)
+        if dh == nil or dh > lim3 or dh < -lim3 then break end
+        w1 = w1 + 1
+    end
+    local lp, ls, lw = {}, {}, {}
+    for i = w0, w1 do
+        local q = i - w0 + 1
+        lp[2 * q - 1], lp[2 * q] = fp[2 * i - 1], fp[2 * i]
+        if i < w1 then ls[q], lw[q] = 1, fw[i] end
+    end
+    local op, osf, ow, okd, oa, ob, orad = {}, {}, {}, {}, {}, {}, {}
+    local on = MDADDynamics.buildFilletPath(lp, ls, lw, vp.halfW, vp.rMin, op, osf, ow, okd, oa, ob, orad)
+    if on < 2 then return "kin" end
+    local R0, rT, bestT = g.R0, nil, nil
+    for k = 1, on - 1 do
+        if okd[k] == MDADDynamics.SEG_FALLBACK then return "kin" end
+        if okd[k] == MDADDynamics.SEG_ARC then
+            if orad[k] < R0 then return "kin" end
+            local dx, dy = op[2 * k - 1] - c.tx, op[2 * k] - c.ty
+            if bestT == nil or dx * dx + dy * dy < bestT then bestT, rT = dx * dx + dy * dy, orad[k] end
+        end
+    end
+    c.r = rT
+    -- 掃掠線：局部折線上從車的垂足到出臂窗尾（T 後一個臂長）再加 bodyReach，OV_STEP 取樣（sweepLine 的線格式）。窗尾之後
+    -- 是改線後的直路：那裡的障礙（例：門後的崗亭）交給 cutover 後新剖面的單一偏移鏈／停留鏈，下面只擋整寬牆。
+    local wEx, wEy = g.kx + (upt + zarm) * g.ox + lout * nox, g.ky + (upt + zarm) * g.oy + lout * noy
+    local cum, sCar, sB, dCar, dB = 0, 0, 0, nil, nil
+    for k = 1, on - 1 do
+        local x0, y0 = op[2 * k - 1], op[2 * k]
+        local ex, ey = op[2 * k + 1] - x0, op[2 * k + 2] - y0
+        local L = sqrt(ex * ex + ey * ey)
+        if L > 1e-9 then
+            for w = 1, 2 do
+                local qx, qy = w == 1 and g.vx or wEx, w == 1 and g.vy or wEy
+                local t = ((qx - x0) * ex + (qy - y0) * ey) / (L * L)
+                if t < 0 then t = 0 elseif t > 1 then t = 1 end
+                local dx, dy = qx - x0 - ex * t, qy - y0 - ey * t
+                local d2 = dx * dx + dy * dy
+                if w == 1 and (dCar == nil or d2 < dCar) then dCar, sCar = d2, cum + L * t end
+                if w == 2 and (dB == nil or d2 < dB) then dB, sB = d2, cum + L * t end
+            end
+        end
+        cum = cum + L
+    end
+    local sEnd = sB + s.bodyReach
+    if sEnd > cum then sEnd = cum end
+    local len = sEnd - sCar
+    if not (len > 1) then return "room" end
+    local stopS = s.profile.coastStopS
+    if finite(stopS) and stopS < s.lastSNow + len + 2 then return "room" end
+    local sc, step = Drive.cutScratchOf(s), MDADFollower.OV_STEP
+    local lx, ly = sc.lx, sc.ly
+    local ln, k, acc, want = 0, 1, 0, sCar
+    while true do
+        local x0, y0 = op[2 * k - 1], op[2 * k]
+        local ex, ey = op[2 * k + 1] - x0, op[2 * k + 2] - y0
+        local L = sqrt(ex * ex + ey * ey)
+        if want <= acc + L or k >= on - 1 then
+            local t = L > 1e-9 and (want - acc) / L or 0
+            if t < 0 then t = 0 elseif t > 1 then t = 1 end
+            ln = ln + 1
+            lx[ln], ly[ln] = x0 + ex * t, y0 + ey * t
+            if want >= sEnd - 1e-9 then break end
+            want = want + step
+            if want > sEnd then want = sEnd end
+        else
+            acc, k = acc + L, k + 1
+        end
+    end
+    local lS0 = s.lastSNow
+    local lS1 = lS0 + len
+    local physBase = MDADVehicleProfile.sweepBase(vp.halfW, "physical")
+    local covered, tier = false, nil
+    for pass = 1, 2 do
+        local nb = pass == 1 and s.sweepBase or physBase
+        local _, _, pad = sweepGeom(s, nb)
+        if Drive.zoneCovered(s, lx, ly, ln, pad) then
+            covered = true
+            if sweepLine(s, lx, ly, ln, lS0, lS1, lS0, lS0, lS1, lS1, 0, "cut", nb, 1, false, false) then
+                tier = pass == 1 and "plan" or "physical"
+                break
+            end
+        end
+    end
+    if not covered then return "cover" end
+    if not tier then return "sweep" end
+    -- 掃過的那條線留在候選上（cutover 後新剖面要與它逐點一致：承諾線＝掃過的線；smoke (cut-equiv)）
+    c.tier, c.swn, c.swx, c.swy = tier, ln, {}, {}
+    for q = 1, ln do c.swx[q], c.swy[q] = lx[q], ly[q] end
+    -- 出臂下一群：出臂窗尾（u′＝T 後 zarm）投影回剖面的弧長之後，以改線出臂（剖面上 l≈l_out）當行駛基準線問 Corridor.plan，
+    -- 整寬牆（blocked）＝不收。點雲用同一份完成快照（擋線判定照舊用形狀位置 hardLc／hardW）。
+    local prof = s.profile
+    local minS, bd2 = nil, nil
+    for j = MDADFollower.segIndexAt(prof, s.lastSNow), MDADFollower.segIndexAt(prof, visibleEndS(sen, s.lastSNow)) do
+        local L = prof.segLen[j]
+        if L > 1e-6 then
+            local tx, ty = cos(prof.segH[j]), sin(prof.segH[j])
+            local t = (wEx - prof.x[j]) * tx + (wEy - prof.y[j]) * ty
+            if t < 0 then t = 0 elseif t > L then t = L end
+            local dx, dy = wEx - prof.x[j] - tx * t, wEy - prof.y[j] - ty * t
+            if bd2 == nil or dx * dx + dy * dy < bd2 then bd2, minS = dx * dx + dy * dy, prof.s[j] + t end
+        end
+    end
+    local wall = minS and MDADCorridor.plan(sen.hardS, sen.hardL, sen.hardN, s.needHalf,
+        sen.corridorHalf or MDADSensor.CORRIDOR_HALF, lout, sen.hardR, lout, nil, nil, false, nil, minS, nil,
+        sen.hardLc, sen.hardW)
+    if wall == "blocked" then return "wall" end
+    return nil, c
+end
+
+-- 停點掛點（replan 的判堵出口與 corner-latched 早退各呼叫一次）：只在停點寬帶判堵（blockedAtStop、寬帶完整快照、幾乎停住）、
+-- 剖面 owner＝free（沒有承諾中的繞行、RETURN 持有回線段、ROTATE）、非拖車、沒有其他路線改寫待辦時跑；每個 (K, 寬帶級,
+-- episodeAttempts) 最多試一次（s.cornerCutTried），一次只持有一個改線（車過 B 才放）。找到＝寫 s.cornerCut、pendingRouteWhy="cut"
+-- （下一幀既有 cutover 換線）；找不到＝記 cut none、判堵階梯照舊。寬帶武裝時機、BLOCKED_CORNER 分類與閂鎖都不動。
+-- ponytail: 只取內側（10-13 外側繞急彎照舊拒收）、拖車排除（有自己的 T.shape）；轉角版 chainAhead（在區前提早停下）待使用者裁定。
+function Drive.cornerCutPlan(s, vehicle, playerNum)
+    local sen, vp, prof = s.sensor, s.vehicleProfile, s.profile
+    if not s.blocked or not sen.ready or sen.wideDone ~= true or s.wideArmed ~= true or sen.hardOverflow
+            or (sen.hardN or 0) < 1 or type(prof) ~= "table" or prof.filletAdaptive ~= true then return end
+    if type(s.tow) == "table" or s.rehitch or profileOwner(s) ~= "free"
+            or MDAD.sandbox("ObstaclePolicy", POLICY_DODGE) ~= POLICY_DODGE then return end
+    if s.pendingRouteWhy ~= nil or s.pendingDetour or s.reapproach then return end
+    local route = s.profileRoute
+    if type(route) ~= "table" or type(route.pts) ~= "table" then return end
+    if finite(s.approachM) and s.approachM > 0 and s.lastSNow < s.approachM then return end
+    local vx, vy = vehicle:getX(), vehicle:getY()
+    local v = vehicle:getCurrentSpeedKmHour()
+    if not finite(v) or v >= TUNE.WIDE_SCAN_KMH or v <= -TUNE.WIDE_SCAN_KMH or not Drive.blockedAtStop(s, vx, vy) then return end
+    if s.cornerCut then
+        if not Drive.cutPassed(s.cornerCut, vx, vy) then return end
+        Drive.cornerCutDrop(s, playerNum, "passed")
+    end
+    local hx, hy = s.blockHitX, s.blockHitY
+    if not finite(hx) or not finite(hy) then return end
+    local pts = route.pts
+    local R0 = vp.rMin * TUNE.KIN_PROOF_RMIN_K
+    local iK, dh = Drive.cornerZoneOf(pts, hx, hy, vx, vy, R0, s.bodyReach)
+    if not iK then return end
+    local kx, ky = pts[2 * iK - 1], pts[2 * iK]
+    local lvl, att = sen.wideDoneLevel or 1, s.episodeAttempts
+    local tr = s.cornerCutTried
+    if tr and tr.att == att and tr.lvl == lvl and math.abs(tr.x - kx) < 1 and math.abs(tr.y - ky) < 1 then return end
+    s.cornerCutTried = { x = kx, y = ky, lvl = lvl, att = att }
+    local t0, sweeps0 = getTimestampMs(), s.sweepCount or 0
+    local ix, iy = kx - pts[2 * iK - 3], ky - pts[2 * iK - 2]
+    local ox, oy = pts[2 * iK + 1] - kx, pts[2 * iK + 2] - ky
+    local li, lo = sqrt(ix * ix + iy * iy), sqrt(ox * ox + oy * oy)
+    ix, iy, ox, oy = ix / li, iy / li, ox / lo, oy / lo
+    local adh = dh < 0 and -dh or dh
+    local zarm = Drive.cutArm(R0, adh, s.bodyReach)
+    local lim = (sen.corridorHalf or MDADSensor.CORRIDOR_HALF) - s.needHalf
+    local sc = Drive.cutScratchOf(s)
+    local nc, np = MDADCorridor.cornerCut(sen.hardX, sen.hardY, sen.hardR, sen.hardN, kx, ky, ix, iy, ox, oy,
+        dh > 0 and 1 or -1, s.needHalf, lim, lim, TUNE.CORNER_CUT_STEP_M, zarm, zarm, 2 * zarm + lim,
+        TUNE.CORNER_CUT_PAIRS, TUNE.CORNER_CUT_MAX, sc)
+    local uC = (vx - kx) * ix + (vy - ky) * iy
+    diagEvent(s, playerNum, "cut", { phase = "plan", kx = kx, ky = ky, ka = adh * TUNE.DEG_PER_RAD, lvl = lvl,
+        attempt = att, np = np, nc = nc, d = -uC })
+    local sw = route.segWidth
+    local g = { kx = kx, ky = ky, ix = ix, iy = iy, ox = ox, oy = oy, zarm = zarm, uC = uC, R0 = R0, vx = vx, vy = vy,
+        adh = adh, inW = finite(sw and sw[iK - 1]) and sw[iK - 1] or 0, outW = finite(sw and sw[iK]) and sw[iK] or 0 }
+    local rank = { room = 1, kin = 2, cover = 3, sweep = 4, wall = 5 }
+    local why, cut = "grid", nil
+    for q = 1, nc do
+        local w, c = Drive.cornerCutTry(s, g, sc.lin[q], sc.lout[q], sc.win[q], sc.wout[q])
+        if c then
+            cut = c
+            break
+        end
+        if why == "grid" or rank[w] > rank[why] then why = w end
+    end
+    local ms = getTimestampMs() - t0
+    local sweeps = (s.sweepCount or 0) - sweeps0
+    if not cut then
+        diagEvent(s, playerNum, "cut", { phase = "none", why = why, kx = kx, ky = ky, lvl = lvl, np = np, nc = nc,
+            sweeps = sweeps, wms = Drive.replanElapsed(s), ms = ms })
+        if getDebug() then -- telemetry: cut none 事件
+            print(string.format("%spn=%d corner cut none: K=(%.1f,%.1f) why=%s cand=%d pairs=%d", LOG, playerNum,
+                kx, ky, why, nc, np))
+        end
+        return
+    end
+    cut.lvl = lvl
+    s.cornerCut = cut
+    s.pendingRouteWhy, s.nextRouteMs = "cut", 0
+    local w = math.min(cut.wIn, cut.wOut)
+    diagEvent(s, playerNum, "cut", { phase = "commit", kx = kx, ky = ky, tx = cut.tx, ty = cut.ty, lin = cut.lin,
+        lout = cut.lout, w = w < MDADCorridor.CUT_BIG and w or nil, r = cut.r, tier = cut.tier, lvl = lvl, np = np,
+        nc = nc, sweeps = sweeps, wms = Drive.replanElapsed(s), ms = ms })
+    if getDebug() then -- telemetry: cut commit 事件
+        print(string.format("%spn=%d corner cut commit: K=(%.1f,%.1f) T=(%.1f,%.1f) lin=%.2f lout=%.2f r=%s tier=%s",
+            LOG, playerNum, kx, ky, cut.tx, cut.ty, cut.lin, cut.lout, tostring(cut.r), cut.tier))
+    end
+end
+
+-- cutover 時要不要重套改線（profileRouteOf 第 8 參）：換目標、改道請求（含拖車改道）、拖車、車已過 B＝丟掉（cut drop）；
+-- 其餘（cut 自己那次、同目標偏航重算）交 profileRouteOf 拼接，拼不上（新路線不經過 K）由 Drive.cornerCutNote 記 drop。
+function Drive.cornerCutFor(s, playerNum, vehicle, targetChanged)
+    Drive.cutUsed = nil
+    local c = s.cornerCut
+    if not c then return nil end
+    local rw = s.pendingRouteWhy
+    local why = (targetChanged and "target")
+        or ((s.pendingDetour or rw == "detour" or rw == "towturn" or rw == "towcorner") and "detour")
+        or ((type(s.tow) == "table" or s.rehitch) and "tow")
+        or (Drive.cutPassed(c, vehicle:getX(), vehicle:getY()) and "passed") or nil
+    if why then
+        Drive.cornerCutDrop(s, playerNum, why)
+        return nil
+    end
+    return c
+end
+
+-- cutover 建完剖面（begin 之後、stepBuild 之前）：套了改線＝記 cut apply（r＝新剖面在 T 的圓角半徑、rd＝與驗線時的差：圓角容量是
+-- 整條路線共用，長路線上可能不同——以新剖面的正規判堵為準，不另修）；拼不上＝drop why=route。
+function Drive.cornerCutNote(s, playerNum, profile, why)
+    local u = Drive.cutUsed
+    Drive.cutUsed = nil
+    if u == false then
+        Drive.cornerCutDrop(s, playerNum, "route")
+        return
+    end
+    if type(u) ~= "table" or type(profile) ~= "table" then return end
+    local pp, kind, rad = profile.pts, profile.segKind, profile.filletRadius
+    local r, best = nil, nil
+    for k = 1, (profile.n or 0) - 1 do
+        if kind[k] == MDADDynamics.SEG_ARC then
+            local dx, dy = pp[2 * k - 1] - u.tx, pp[2 * k] - u.ty
+            if best == nil or dx * dx + dy * dy < best then best, r = dx * dx + dy * dy, rad[k] end
+        end
+    end
+    diagEvent(s, playerNum, "cut", { phase = "apply", why = why, kx = u.kx, ky = u.ky, r = r,
+        rd = r and u.r and math.abs(r - u.r) or nil })
+end
+
 local function replan(s, vehicle, playerNum)
     s.dodgeDeferCap = s.dodgeHandoffHold and 0 or -1
     s.dodgeDeferS = nil
@@ -12506,6 +13065,7 @@ local function replan(s, vehicle, playerNum)
         if s.lastSNow - s.cornerS < CORNER_RETRY_DIST
                 and (not sen.wideDone or (s.cornerLatchWide or 0) >= (sen.wideDoneLevel or 1)) then
             s.planMode = "corner-latched"
+            Drive.cornerCutPlan(s, vehicle, playerNum) -- 閂鎖對單一偏移鏈照舊成立；改線是閂鎖之後的退路（1017j）
             return
         end
         s.cornerLatch = false
@@ -13354,6 +13914,7 @@ local function replan(s, vehicle, playerNum)
             foldS = s.dodgeShapeReason == "exit-room" and s.dodgeExitFoldS or nil })
     end
     s.bandDeferN = 0 -- 進了判堵階梯：橫向覆蓋延後串結束（判堵中補掃不延後）
+    Drive.cornerCutPlan(s, vehicle, playerNum) -- 停點寬帶判堵、錨在轉角區：試轉角改線（1017j；找不到＝階梯照舊）
 end
 
 -- 倒車脫困：regulator 不會倒車（CarController 只向前供油），改用向後衝量直接推
@@ -16255,11 +16816,12 @@ local function onPlayerUpdate(player)
                 end
             end
         end
-        if route ~= s.route or versionChanged or s.reapproach then
+        if route ~= s.route or versionChanged or s.reapproach or s.pendingRouteWhy == "cut" then
             -- 自動掛回中（s.tow 收在 rh.tow）照舊依掛車改寫：掛回後沿這條線拖著走
             local profileRoute, approachM = Drive.profileRouteOf(route, s.tow or s.rehitch and s.rehitch.tow,
                 s.vehicleProfile,
-                vehicle:getX(), vehicle:getY(), s.reapproach, s.reapproach and Drive.headingOf(vehicle) or nil)
+                vehicle:getX(), vehicle:getY(), s.reapproach, s.reapproach and Drive.headingOf(vehicle) or nil,
+                Drive.cornerCutFor(s, playerNum, vehicle, targetChanged))
             s.reapproach = nil
             local profile = MDADFollower.begin(
                 profileRoute,
@@ -16283,6 +16845,7 @@ local function onPlayerUpdate(player)
             local routeWhy = s.pendingRouteWhy
             if routeWhy == nil then routeWhy = targetChanged and "target" or "deviation" end
             s.pendingRouteWhy = nil
+            Drive.cornerCutNote(s, playerNum, profile, routeWhy)
             s.pendingDetour = false
             s.routeGen = s.routeGen + 1
             Drive.disarmWide(s) -- 武裝點是舊路線的弧長

@@ -164,6 +164,10 @@ local EK = {
     "rmw", "ox", "oy", "od", "found", "same", "fx", "fy", "fd", "fsc", "sn", "sd", "sv",
     -- 1012 blocked 主擋物（Driver Drive.blockSprite）：hx0／hy0（退 hitX／hitY、x／y）1 格內擋車 sprite 名、分類、格心距 m
     "sp0", "sc0", "sd0",
+    -- 1017j blocked：主命中點到最近 ≥45° 路線頂點的世界距離 kd、折角 ka（°）；cut（轉角改線 plan／none／commit／apply／drop）：
+    -- 原轉角 kx／ky、新折點 tx／ty、兩臂平移 lin／lout、內側淨空 w、T 的圓角半徑 r、cutover 後新剖面與驗線的半徑差 rd、
+    -- 格網試的對數 np 與篩出的候選數 nc（d／lvl／attempt／why／tier／sweeps／wms／ms 共用既有鍵）
+    "kd", "ka", "kx", "ky", "tx", "ty", "lin", "lout", "w", "r", "rd", "np", "nc", -- 1017j
     -- 1012 起步先原地轉：uturn enter／done 的起步段旗標、enter 當幀 |航向誤差| rad（uturn room 用既有 rear／len／probe）
     "start", "ae",
     -- 1013a route ready：起步沒接越野接線的原因碼（far／near／behind／side／tow／other）、車頭與最近段夾角 rad、車到最近點 m
