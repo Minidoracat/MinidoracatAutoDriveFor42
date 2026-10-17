@@ -132,8 +132,6 @@ local EK = {
     "rate",
     -- lag release（1017d）：converge 遲滯保持了幾個掃描輪（Driver Drive.lagGuardScan s.lagCvw；沒保持就缺）
     "cvw",
-    -- arcpass arm（1017d，Driver Drive.arcPassScan）：彎上近距通過用的曲率 κ（1／m，窗內弧段最小半徑的倒數）
-    "kp",
     -- impact（1008）：撞擊分類 hit／frozen／tow-sync（MDADUpload.impactClass）、有號掉速（前一筆有號 km/h − 本筆；倒退反號時 dv 會低估）
     "cls", "dvs",
     -- 1008 拖車：tow attach 外拉規劃用的掛點→車頭（MDADTrailer.hitchFront）；detour towcorner 附了車尾正後方圈（1）；
@@ -1363,7 +1361,6 @@ local function encodePhys(phys)
     addNum("proofHitS", "phs")        -- 1005：證明線掃掠命中的車身取樣弧長（gate sweep 接近包絡的終點；同 rs 座標）
     addNum("proofHitN", "phn")        -- 1006：證明線同一點連續命中的輪數（≥ PROOF_STOP_ROUNDS：包絡在命中前停住、規劃當擋線）
     addNum("lagGuardCap", "lgc")      -- 1006c：實測落後量守門的接近包絡（規劃線＋實測橫偏的預測車身碰到的硬點；capReason lag）
-    addNum("arcPassCap", "apc")       -- 1017d：彎上近距通過的接近包絡（弧上／出弧窗內 pc＜巡航預算的路邊硬點；capReason arc-pass）
     addNum("proofTightCap", "ptc")    -- 1006p：停下之後窄線爬行的接近包絡（出口 PROOF_TIGHT_KMH；capReason proof-tight）
     addNum("proofKappa", "proofKappa")
     addNum("proofCurveCap", "proofCurveCap")
