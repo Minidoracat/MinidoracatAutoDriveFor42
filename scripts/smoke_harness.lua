@@ -18209,9 +18209,10 @@ local function scenarioPhaseE()
     drive.scanRound(true)
     checkEq(captured.verifyLineReason, "ok",
         "actual-lane curve proof passes continuous road-band and world sweep")
-    -- 上界＝車輛極速 90−1（Drive.visAssistForce 判「是彎道帳」的同一條件）；1013g coastAssist 4.5 後 45m 外 86.8（舊 85 是當時值）。
+    -- 上界＝車輛極速 90（包絡夾在極速，不是 math.huge）；1013g coastAssist 4.5 後 45m 外 86.8，1017h 5.5 後車道包絡減速度
+    -- 7.26（斷油 1.76＋5.5），45m 外已高過極速＝夾在 90。進「彎道帳」（< 極速−1，Drive.visAssistForce 同條件）改在 10m 處驗。
     checkTrue(captured.laneCurveEnvelope > 0
-            and captured.laneCurveEnvelope < 89,
+            and captured.laneCurveEnvelope <= 90 + 1e-9,
         "future actual-lane curve envelope finite（2026-09-02 煞車反推：45m 外"
         .. "彎前不再提前壓速＝envelope 高於 cruise 合法；近彎下壓由後續斷言驗）")
     checkFalse(captured.curveHardActive,
@@ -18227,6 +18228,8 @@ local function scenarioPhaseE()
     driveReset(hotVeh)
     driveTick(dp, hotVeh)
     local coastCap10 = captured.laneCurveEnvelope
+    checkTrue(coastCap10 > 0 and coastCap10 < 89,
+        "actual-lane curve envelope 10m 處已低於極速−1（進彎道帳，實得 " .. tostring(coastCap10) .. "）")
     checkEq(captured.sensor.stamp, curveStamp,
         "10m approach remains on the same completed snapshot")
     checkEq(drive.calls.forceBrake, 0,
