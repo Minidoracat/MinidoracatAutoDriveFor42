@@ -313,10 +313,11 @@ MDADFollower.OV_MAX = OV_MAX
 -- 計畫的減速度就是實得的減速度；E2E rc47 彎前收油＋彎內循線佔速度損失約 9%。
 -- 1013g：3.5→4.5（正式服 1012g／h 彎前收油損失約 1.9 s/km）。兩檔同值：1001i 起舒適檔彎前收油「同最高檔」，
 -- 只抬 brisk 等於把 10-01 放寬的舒適檔收回去。Driver CURVE_ASSIST_MAX 跟著＝本值＋CURVE_ASSIST_HEADROOM（smoke 鎖）。
+-- 1017h：4.5→5.5（2026-10-17 使用者裁定 L5 再加大；正式服 1015c 彎前收油帳目標部分仍約 2.6 s/km）。
 MDADFollower.STYLES = {
-    brisk = { name = "brisk", lat = LAT_ACCEL, brake = BRAKE, coast = 3.0, coastAssist = 4.5,
+    brisk = { name = "brisk", lat = LAT_ACCEL, brake = BRAKE, coast = 3.0, coastAssist = 5.5,
         turnSoft = TURN_SOFT_RAD, turnHard = TURN_HARD_RAD, turnHardMs = TURN_HARD_MS },
-    comfort = { name = "comfort", lat = 6.0, brake = 3.0, coast = 3.0, coastAssist = 4.5,
+    comfort = { name = "comfort", lat = 6.0, brake = 3.0, coast = 3.0, coastAssist = 5.5,
         turnSoft = 25 * PI / 180, turnHard = 50 * PI / 180, turnHardMs = 30 / 3.6 },
 }
 -- 終點停車的中線減速輔助（1002l；使用者「快到目的地的通過時間再縮短」）：終點段收油包絡用「車輛斷油＋這一份」，

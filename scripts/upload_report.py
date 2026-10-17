@@ -10,10 +10,14 @@
     impact 另列「不含小動物」（扣掉窗口片段裡歸成 small-animal、同 (u, drive) 的撞擊；片段有配額，扣的是下限）、
     結束原因、loss 佔比、nm/fm、offset（offN／offMax）
   B 窗口片段：rev×kind、玩家數、現行 rev 可用性（事前 ≥3s、樣本 ≥10、有 route 點列）
-  C 撞擊歸因（現行 rev；事件 (u, drive, ts) 去重）：上升緣樣本（ts ≤ 事件+5ms、帶 nb 的最後一筆）nb {kind: [d, s, l]}，
-    貼車＝|s| ≤ halfL+0.8 且 |l| ≤ halfW+0.8；旗標 awt、maneuver（前 2.5s 主導 ctl 為 AVOID／RETURN 或任一 dg）；
-    類別 zombie＞small-animal／animal＞vehicle（貼車）＞static（事件 scost tree／hard／wall）＞corpse（貼車）＞far（有 nb 沒貼車）＞empty；
+  C 撞擊歸因（現行 rev；事件 (u, drive, ts) 去重）：先排除不算撞擊的上升緣（事件 cls≠hit；1017 前片段：上升緣樣本 m=rehitch、
+    rh-attach 後 REHITCH_SETTLE_MS 內＝rehitch，摘要 reason=exit 且撞擊在結束前 EXIT_BRAKE_MS 內、tn 0、fbl 0＝exit），同 (u, drive)
+    IMPACT_REARM_MS 內只留第一件；上升緣樣本（ts ≤ 事件+5ms、帶 nb 的最後一筆）nb {kind: [d, s, l]}，
+    貼車＝|s| ≤ halfL+0.8（他車再加對方半長 2.5）且 |l| ≤ halfW+0.8；旗標 awt、maneuver（前 2.5s 主導 ctl 為 AVOID／RETURN 或任一 dg）；
+    撞擊前 2.5s 內有 contact 事件時 sprite／scost 用它的（命中點 1 格，比車頭 3 格準；scost vehicle 或 tlg ≤1＝vehicle）；
+    類別 zombie＞small-animal／animal＞vehicle（貼車）＞static（scost tree／hard／wall）＞corpse（貼車）＞far（有 nb 沒貼車）＞empty；
     small-animal＝貼車的動物 a 體重 <SMALL_KG（nb a 第 5 項；1013f 起含剛死的，第 6 項＝1），讀不到體重算 animal
+  L 1017 摘要新欄位（rev 有 rhi 的趟）：rhi／xbk、vfIn／vfInX、aoi、出口偏差、油量分段 %/km、起步到 40m 中位（依 t40k）、blr、eng
   D contact ≥10 km/h（現行 rev）：scost、弧上（前 2.5s curveHardActive）、前 2.5s |ld|>0.5、lag 帽（capReason=lag）、主導 ctl、sprite 家族
   E 判堵後接手：takeover 片段觸發前 10s 內有 blocked；窗口內首筆 blocked→接手秒數、其間 unstick start、detour=false、最後一筆 why／shape
   F 判堵熱點：blocked x,y 的 25m 格（玩家、趟、事件、車型）
@@ -47,6 +51,10 @@ STATIC = ("tree", "hard", "wall")
 ANOMALY = ("blocked", "uturn", "unstick", "contact", "impact", "progress")
 NB_KIND = (("z", "zombie"), ("a", "animal"), ("v", "vehicle"))
 SMALL_KG = 20          # 同 MDADSensor.ANIMAL_BIG_KG：小型動物不閃不減（2026-10-13 裁定 7：撞母雞 0 車損），撞擊 KPI 拆開
+IMPACT_REARM_MS = 2000  # 同 MDAD_Upload IMPACT_REARM_MS：同一趟 2 秒內的第二次撞擊上升緣算同一件
+REHITCH_SETTLE_MS = 2500  # 同 Driver TUNE.REHITCH_SETTLE_MS：rh-attach 後這麼久內的掉速是掛回拉攏
+EXIT_BRAKE_MS = 2000   # 同 MDAD_Upload EXIT_BRAKE_MS：撞擊後這麼久內以 exit 結束、tn 0、fbl 0＝下車煞車
+OTHER_HALF_L = 2.5     # 車對車貼車：對方半車長（nb v 不帶對方幾何）
 
 
 class Anon:
@@ -156,24 +164,71 @@ def dominant_ctl(rows):
 
 # ---------- 撞擊歸因 ----------
 
-def nb_touch(nb, prof):
-    """nb {kind: [d, s, l]} → [(kind, d, 貼車?)]。"""
+def nb_touch(nb, prof, ego_kmh=None, gap_ms=None):
+    """nb {kind: [d, s, l]} → [(kind, d, 貼車?)]。他車（v）縱向用兩車半長（本車＋OTHER_HALF_L），並扣掉撞後到這筆取樣兩車已拉開的距離
+    （nb v 第 4 項＝對方 km/h；(對方 − 本車)×原始間隔，只扣正值）：nb 在撞擊上升緣那筆（撞後）才掃，追撞後前車照開、本車掉到 7 km/h，
+    200 ms 就拉開 3–4 m（正式服 P06 E150long 追撞 F350，車心距 7.2 m 被歸 far）。"""
     hl, hw = (prof.get("halfL") or 0) + TOUCH_PAD, (prof.get("halfW") or 0) + TOUCH_PAD
     out = []
     for k, v in (nb or {}).items():
-        if isinstance(v, list) and len(v) >= 3:
-            out.append((k, v[0], abs(v[1]) <= hl and abs(v[2]) <= hw))
+        if isinstance(v, list) and len(v) >= 3 and isinstance(v[1], (int, float)) and isinstance(v[2], (int, float)):
+            s = abs(v[1])
+            if k == "v":
+                ov = v[3] if len(v) >= 4 and isinstance(v[3], (int, float)) else None
+                if ov is not None and isinstance(ego_kmh, (int, float)) and isinstance(gap_ms, (int, float)):
+                    s -= max(0.0, (abs(ov) - abs(ego_kmh)) / 3.6 * gap_ms / 1000)
+            lim = hl + OTHER_HALF_L if k == "v" else hl
+            out.append((k, v[0], s <= lim and abs(v[2]) <= hw))
     return out
 
 
+def edge_row(rec, ts):
+    rows = [r for r in rec["rows"] if r["ts"] <= ts + 5]
+    return rows[-1] if rows else {}
+
+
+def impact_false(e, rec, S=None):
+    """不算撞擊的上升緣 → 類別或 None：事件 cls≠hit（frozen／tow-sync／rehitch，1008／1017）；1017 前的片段用樣本推：
+    上升緣樣本 m=rehitch、或 rh-attach 後 REHITCH_SETTLE_MS 內＝rehitch；摘要 reason=exit、撞擊在結束前 EXIT_BRAKE_MS 內、
+    上升緣 tn 0 且 fbl 0＝exit。"""
+    cls = e.get("cls")
+    if cls and cls != "hit":
+        return cls
+    ts = e["ts"]
+    r = edge_row(rec, ts)
+    rh = e.get("rhMs")
+    if e.get("m") == "rehitch" or r.get("m") == "rehitch" or (isinstance(rh, (int, float)) and 0 <= rh <= REHITCH_SETTLE_MS) \
+            or any(x.get("n") == "tow" and x.get("phase") == "rh-attach" and 0 <= ts - (x.get("ts") or 0) <= REHITCH_SETTLE_MS
+                   for x in rec["evs"]):
+        return "rehitch"
+    o = (S or {}).get((rec["u"], rec["drive"])) or (S or {}).get(("*", rec["drive"])) or {}
+    tn = e.get("tn", r.get("tn"))
+    if (o.get("reason") or "").replace(PFX, "") == "exit" and isinstance(o.get("end"), (int, float)) \
+            and 0 <= o["end"] - ts <= EXIT_BRAKE_MS and tn == 0 and not (r.get("fbl") or 0) > 0:
+        return "exit"
+    return None
+
+
+def contact_near(e, rec):
+    """撞擊前 PRE_MS 內（到撞擊後 5 ms）最後一筆 contact 事件：命中點 1 格內的 sprite，比車頭 3 格搜尋準。"""
+    cs = [x for x in rec["evs"] if x.get("n") == "contact" and e["ts"] - PRE_MS <= (x.get("ts") or 0) <= e["ts"] + 5]
+    return max(cs, key=lambda x: x["ts"]) if cs else None
+
+
 def classify_impact(e, rec):
-    """→ (類別, awt, maneuver, nb 清單)。"""
+    """→ (類別, awt, maneuver, nb 清單, sprite, scost)。static 判定與 sprite：有 contact 事件時用它的，否則用事件車頭 3 格；
+    contact 命中他車輪廓（scost vehicle）或撞擊當下 lead 車距 tlg ≤1 m（1017 起事件帶）＝vehicle。"""
     ts = e["ts"]
     edge = [r for r in rec["rows"] if r["ts"] <= ts + 5 and "nb" in r]
-    nb = nb_touch(edge[-1]["nb"], rec["prof"]) if edge else []
+    nb = nb_touch(edge[-1]["nb"], rec["prof"], edge[-1].get("spd"), e.get("ms")) if edge else []
     pre = window(rec["rows"], ts)
     man = dominant_ctl(pre) in ("AVOID", "RETURN") or any(r.get("dg") for r in pre)
     touch = {k for k, _, t in nb if t}
+    c = contact_near(e, rec)
+    sprite, scost = (c.get("sprite"), c.get("scost")) if c else (e.get("sprite"), e.get("scost"))
+    tlg = e.get("tlg")
+    if scost == "vehicle" or (isinstance(tlg, (int, float)) and tlg <= 1):
+        touch.add("v")
     cls = next((name for k, name in NB_KIND if k in touch), None)
     if cls == "animal":
         a = (edge[-1]["nb"] or {}).get("a")
@@ -181,14 +236,31 @@ def classify_impact(e, rec):
         if isinstance(kg, (int, float)) and kg < SMALL_KG:
             cls = "small-animal"
     if cls is None:
-        cls = ("static" if e.get("scost") in STATIC else "corpse" if "c" in touch else "far" if nb else "empty")
-    return cls, bool(e.get("awt")), man, nb
+        cls = ("static" if scost in STATIC else "corpse" if "c" in touch else "far" if nb else "empty")
+    return cls, bool(e.get("awt")), man, nb, sprite, scost
 
 
-def small_impacts(E):
-    """(u, drive) → 歸成 small-animal 的撞擊件數（A 節扣除用；E 不限 rev）。"""
-    out = collections.Counter()
+def real_impacts(E, S=None):
+    """→ ([(e, rec)…] 真撞擊, Counter 不算的類別)：排除 impact_false，同 (u, drive) IMPACT_REARM_MS 內只留第一件。"""
+    out, skip, last = [], collections.Counter(), {}
     for e, rec in events(E, "impact"):
+        f = impact_false(e, rec, S)
+        if f:
+            skip[f] += 1
+            continue
+        k = (rec["u"], rec["drive"])
+        if k in last and e["ts"] - last[k] < IMPACT_REARM_MS:
+            skip["rearm"] += 1
+            continue
+        last[k] = e["ts"]
+        out.append((e, rec))
+    return out, skip
+
+
+def small_impacts(E, S=None):
+    """(u, drive) → 歸成 small-animal 的撞擊件數（A 節扣除用；E 不限 rev；假撞與 rearm 重複先排除）。"""
+    out = collections.Counter()
+    for e, rec in real_impacts(E, S)[0]:
         if classify_impact(e, rec)[0] == "small-animal":
             out[(rec["u"], rec["drive"])] += 1
     return out
@@ -259,24 +331,76 @@ def sec_b(C, cur, A):
     return dict(clips=len(C), usable=len(ok))
 
 
-def sec_c(E, A, picks):
-    print("\n== C 撞擊歸因（現行 rev，(u, drive, ts) 去重）")
+def sec_c(E, A, picks, S=None):
+    print("\n== C 撞擊歸因（現行 rev，(u, drive, ts) 去重；排除 cls≠hit／掛回／下車煞車，同趟 2s 內只算一件）")
     rows = []
-    for e, rec in events(E, "impact"):
-        cls, awt, man, nb = classify_impact(e, rec)
+    real, skip = real_impacts(E, S)
+    for e, rec in real:
+        cls, awt, man, nb, sprite, scost = classify_impact(e, rec)
         rows.append((rec["rev"], cls, awt, man, rec))
         tag = "awt-" if awt else "maneuver-" if man else ""
-        picks.append((f"impact-{tag}{cls}", e["ts"], rec, f"v={e.get('speed')} dv={e.get('dv')} scost={e.get('scost')} "
-                      f"sprite={e.get('sprite')} nb={[(k, round(d, 2), t) for k, d, t in nb]}"))
+        picks.append((f"impact-{tag}{cls}", e["ts"], rec, f"v={e.get('speed')} dv={e.get('dv')} scost={scost} "
+                      f"sprite={sprite} tlg={e.get('tlg')} nb={[(k, round(d, 2), t) for k, d, t in nb]}"))
     cnt = collections.Counter((r[0], r[1]) for r in rows)
     revs = sorted({r[0] for r in rows})
-    print(f"  共 {len(rows)} 件；awt {sum(1 for r in rows if r[2])}、maneuver {sum(1 for r in rows if r[3])}")
+    print(f"  共 {len(rows)} 件；awt {sum(1 for r in rows if r[2])}、maneuver {sum(1 for r in rows if r[3])}；"
+          f"排除 " + ", ".join(f"{k}:{v}" for k, v in sorted(skip.items())))
     for cls in ("zombie", "small-animal", "animal", "vehicle", "static", "corpse", "far", "empty"):
         print(f"  {cls:12s} " + "  ".join(f"{rev}:{cnt[(rev, cls)]}" for rev in revs) + f"  計 {sum(cnt[(rev, cls)] for rev in revs)}"
               + ("（maneuver %d）" % sum(1 for r in rows if r[1] == cls and r[3])))
     zo = collections.Counter(f"zdodge={r[4]['opts'].get('zdodge')} zslow={r[4]['opts'].get('zslow')}" for r in rows if r[1] == "zombie")
     print("  zombie 依 opts " + ", ".join(f"{k}:{v}" for k, v in zo.most_common()))
-    return collections.Counter(r[1] for r in rows)
+    out = collections.Counter(r[1] for r in rows)
+    out.update({"skip-" + k: v for k, v in skip.items()})
+    return out
+
+
+def sec_l(S, cur):
+    """1017 摘要新欄位（只算帶 rhi 的摘要＝rev ≥1017f）：假撞另計、路中停車首見、入彎超速明細、出彎偏差、油量、起步、
+    煞車學習拒收、EngineOff 關卡。"""
+    print("\n== L 1017 摘要新欄位（rev 有 rhi 欄的趟）")
+    L = [o for o in S.values() if "rhi" in o and (not cur or o.get("rev") in cur)]
+    out = dict(trips=len(L))
+    if not L:
+        print("  （沒有）")
+        return out
+    km = sum(o.get("dist") or 0 for o in L) / 1000
+    tot = {f: sum(o.get(f) or 0 for o in L) for f in ("impact", "rhi", "xbk", "vfIn", "vfInX", "exN", "exDev", "exN50", "exDev50")}
+    out.update(tot, km=round(km, 3))
+    print(f"  趟 {len(L)} km {km:.1f}：impact {tot['impact']} rhi {tot['rhi']} xbk {tot['xbk']}；路中停車首見 vfIn {tot['vfIn']}"
+          f"（8s 內出事 {tot['vfInX']}）；出口 {tot['exDev']}/{tot['exN']}（≥50 km/h {tot['exDev50']}/{tot['exN50']}）")
+    aoi = [a for o in L for a in (o.get("aoi") or [])]
+    out["aoi"] = len(aoi)
+    if aoi:
+        print(f"  入彎超速明細 {len(aoi)} 筆：第一個弧 {sum(1 for a in aoi if len(a) > 7 and a[7] == 1)}、"
+              f"有 vad {sum(1 for a in aoi if len(a) > 4 and (a[4] or 0) > 0)}、spd/cap 中位 "
+              f"{statistics.median(a[1] / a[2] for a in aoi if len(a) > 2 and a[1] and a[2]):.2f}")
+    fu = [o for o in L if isinstance(o.get("fu0"), (int, float)) and isinstance(o.get("fu1"), (int, float))]
+    seg = collections.defaultdict(lambda: [0.0, 0.0])
+    for o in fu:
+        for k, v in (o.get("fuS") or {}).items():
+            if isinstance(v, list) and len(v) >= 2:
+                seg[k][0] += v[0] or 0
+                seg[k][1] += v[1] or 0
+    out["fuel"] = {k: [round(d, 2), round(m, 3)] for k, (d, m) in seg.items()}
+    if fu:
+        print(f"  油量 {len(fu)} 趟：起訖差 {sum(o['fu0'] - o['fu1'] for o in fu):.2f}%；分段 %/km "
+              + ", ".join(f"{k}:{d / m if m else 0:.2f}({m:.1f}km)" for k, (d, m) in sorted(seg.items())))
+    t40 = collections.defaultdict(list)
+    for o in L:
+        if isinstance(o.get("t40"), (int, float)):
+            t40[o.get("t40k") or "?"].append(o["t40"])
+    out["t40"] = {k: round(statistics.median(v)) for k, v in t40.items()}
+    print("  起步到 40m 中位 ms " + ", ".join(f"{k}:{statistics.median(v):.0f}(n={len(v)})" for k, v in sorted(t40.items())))
+    blr = collections.Counter()
+    for o in L:
+        blr.update(o.get("blr") or {})
+    out["blr"] = dict(blr)
+    print("  煞車學習拒收 " + (", ".join(f"{k}:{v}" for k, v in blr.most_common()) or "0"))
+    eng = collections.Counter((o.get("eng") or {}).get("why") for o in L if o.get("eng"))
+    out["eng"] = dict(eng)
+    print("  EngineOff 關卡 " + (", ".join(f"{k}:{v}" for k, v in eng.most_common()) or "0"))
+    return out
 
 
 def sec_d(E, A, picks):
@@ -453,13 +577,19 @@ def report(root, since_s, cur, picks_path=None):
     A, picks = Anon(), []
     S = load_summaries(root)
     C = load_clips(root, since)
-    a = sec_a(S, small_impacts(dedupe(C)))            # 不限 rev：摘要也是全部 build
+    # 下車煞車判定要查同趟摘要：片段資料夾名是伺服器清理過的玩家名，和摘要 u 不一定相同，另以 drive 唯一時備查
+    Sd = dict(S)
+    byd = collections.Counter(d for _, d in S)
+    for (u, d), o in S.items():
+        if byd[d] == 1:
+            Sd[("*", d)] = o
+    a = sec_a(S, small_impacts(dedupe(C), Sd))        # 不限 rev：摘要也是全部 build
     b = sec_b(C, cur, A)
     C = [r for r in C if r["rev"] in cur]             # C–J 只看現行 rev（舊版只能排除，不拿來定罪）
     E = dedupe(C)
-    res = dict(A=a, B=b, C=sec_c(E, A, picks), D=sec_d(E, A, picks), E=sec_e(C, A, picks),
+    res = dict(A=a, B=b, C=sec_c(E, A, picks, Sd), D=sec_d(E, A, picks), E=sec_e(C, A, picks),
                F=sec_f(E, A), G=sec_g(E, A, picks), H=sec_h(C, S, A, picks), I=sec_i(E, A, picks), J=sec_j(E, A, picks),
-               K=sec_k(S, cur))
+               K=sec_k(S, cur), L=sec_l(S, cur))
     if picks_path:
         write_picks(picks_path, picks, A)
         print(f"\npicks {len(picks)} 列 → {picks_path}（含真實資料夾名，只留本機）")
@@ -482,6 +612,10 @@ def self_test():
     prof = {"halfL": 2.0, "halfW": 0.8, "scriptName": "Base.Car"}
     check([t for _, _, t in nb_touch({"z": [2.5, 2.5, 1.0], "a": [2.9, 2.9, 0], "c": [1.7, 0, 1.7]}, prof)] == [True, False, False],
           "nb 貼車：|s|≤halfL+0.8 且 |l|≤halfW+0.8（邊界含）")
+    lp = {"halfL": 3.3, "halfW": 1.0}
+    check([t for _, _, t in nb_touch({"v": [7.2, 7.2, 0.2, 74]}, lp, 7.3, 220)] == [True]
+          and [t for _, _, t in nb_touch({"v": [7.2, 7.2, 0.2, 74]}, lp)] == [False],
+          "他車貼車扣掉撞後拉開的距離（P06 型：車心 7.2 m、前車 74 本車 7.3 km/h、間隔 220 ms＝貼車；沒車速資料＝不貼）")
     T = 1790000000000
     with tempfile.TemporaryDirectory() as d:
         def put(name, objs):
@@ -535,6 +669,30 @@ def self_test():
         ani("u6", T + 106, [1.5, 1.5, 0.2, "lamb", 20])
         ani("u7", T + 107, [1.5, 1.5, 0.2])
         ani("u8", T + 108, [6.0, 6.0, 0.2, "hen", 2.4, 1])             # 小動物沒貼車＝far
+        # 1017：不算撞擊（事件 cls≠hit；1017 前片段用樣本推）、同趟 2s 內只算一件、他車用兩車半長、contact sprite 優先
+        zb = base + [(0, {"nb": {"z": [1.0, 1.0, 0.5]}})]
+        t1 = T + 120000
+        clip("x1", 1, "impact", t1, zb, [dict(ts=t1, n="impact", speed=60, cls="frozen")])
+        clip("x2", 1, "impact", t1, zb, [dict(ts=t1, n="impact", speed=30, cls="rehitch", m="follow", rhMs=300)])
+        clip("x3", 1, "impact", t1, base + [(0, {"m": "rehitch", "nb": {"z": [1.0, 1.0, 0.5]}})],
+             [dict(ts=t1, n="impact", speed=30)])                                        # 1015c 舊格式：樣本 m=rehitch
+        clip("x4", 1, "impact", t1, zb, [dict(ts=t1 - 1000, n="tow", phase="rh-attach"), dict(ts=t1, n="impact", speed=30)])
+        clip("x5", 1, "impact", t1, base + [(0, {"tn": 0, "fbl": 0, "nb": {"z": [1.0, 1.0, 0.5]}})],
+             [dict(ts=t1, n="impact", speed=50)], drive=T + 500)                         # 1.0 s 後以 exit 結束
+        clip("x6", 1, "impact", t1, base + [(10, {"nb": {"z": [1.0, 1.0, 0.5]}}), (0, {"nb": {"z": [1.0, 1.0, 0.5]}})],
+             [dict(ts=t1 - 1000, n="impact", speed=40), dict(ts=t1, n="impact", speed=20)])
+        clip("x7", 1, "impact", t1, base + [(0, {"nb": {"v": [4.0, 4.0, 0.3, 70]}})], [dict(ts=t1, n="impact", speed=70)])
+        clip("x8", 1, "impact", t1, base + [(0, {"nb": {}})],
+             [dict(ts=t1 - 1000, n="contact", sprite=None, scost="vehicle"), dict(ts=t1, n="impact", speed=50, scost="hard",
+                                                                                   sprite="lighting_outdoor_01_16")])
+        clip("x9", 1, "impact", t1, base + [(0, {"nb": {}})],
+             [dict(ts=t1 - 800, n="contact", sprite="vegetation_trees_01_8", scost="tree"),
+              dict(ts=t1, n="impact", speed=50, sprite="lighting_outdoor_01_16", scost="hard")])
+        put("summary-4.log", [dict(t="sum", u="x5", drive=T + 500, build="b-9", rev="2", dist=1000, end=t1 + 1000, reason="exit",
+                                   impact=0, rhi=1, xbk=1, vfIn=2, vfInX=1, exN=3, exDev=1, exN50=2, exDev50=1,
+                                   aoi=[[t1, 60, 40, 50, 3.5, "curve", 6.2, 1, 120]], fu0=50, fu1=48.5,
+                                   fuS={"arc": [0.5, 0.2], "oth": [1.0, 0.8]}, t40=3200, t40k="tow",
+                                   blr={"unloaded": 2}, eng={"why": "battery", "chg": 0, "es": 2400, "fu": 48.5})])
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             res = report(d, T / 1000, {"2"}, os.path.join(d, "picks.tsv"))
@@ -545,9 +703,18 @@ def self_test():
               "A impact 不含小動物：扣掉同 (u, drive) 的 small-animal 片段撞擊（不限 rev）")
         check(any("impact 不含小動物 0=0.0/千km" in ln and "扣 small-animal 2" in ln for ln in out.getvalue().splitlines()),
               "A 印出不含小動物的 impact／千 km 與扣掉的件數")
-        check(res["B"]["clips"] == 15, "窗口：trig < since 的片段不算")
-        check(res["C"] == {"zombie": 2, "far": 2, "static": 1, "small-animal": 1, "animal": 3},
-              "撞擊 (u, drive, ts) 去重、類別 zombie／far／static；<20 kg 貼車動物＝small-animal，20 kg 整／缺體重／舊 rev／沒貼車不算")
+        check(res["B"]["clips"] == 24, "窗口：trig < since 的片段不算")
+        check(res["C"] == {"zombie": 3, "far": 2, "static": 2, "small-animal": 1, "animal": 3, "vehicle": 2,
+                           "skip-frozen": 1, "skip-rehitch": 3, "skip-exit": 1, "skip-rearm": 1},
+              "撞擊 (u, drive, ts) 去重、類別 zombie／far／static；<20 kg 貼車動物＝small-animal，20 kg 整／缺體重／舊 rev／沒貼車不算；"
+              "1017：cls frozen／rehitch、樣本 m=rehitch、rh-attach 後 1 s、exit 前 1 s 且 tn 0＝不算，同趟 1 s 內第二件不算，"
+              "他車 s 4.0 在兩車半長內＝vehicle，contact 撞他車輪廓＝vehicle、contact 樹＝static（" + str(dict(res["C"])) + "）")
+        check("lighting_outdoor_01_16" not in [ln for ln in open(os.path.join(d, "picks.tsv"), encoding="utf-8")
+                                                if "vegetation_trees_01_8" in ln][0], "static 用 contact 事件的 sprite，不用車頭 3 格")
+        L = res["L"]
+        check(L["trips"] == 1 and L["rhi"] == 1 and L["xbk"] == 1 and L["vfIn"] == 2 and L["vfInX"] == 1 and L["aoi"] == 1
+              and L["exN50"] == 2 and L["fuel"] == {"arc": [0.5, 0.2], "oth": [1.0, 0.8]} and L["t40"] == {"tow": 3200}
+              and L["blr"] == {"unloaded": 2} and L["eng"] == {"battery": 1}, "L 1017 摘要新欄位彙整（" + str(L) + "）")
         man = [ln for ln in out.getvalue().splitlines() if ln.strip().startswith("static")]
         check(man and "maneuver 1" in man[0], "前 2.5s 有 dg＝maneuver")
         e = res["E"]

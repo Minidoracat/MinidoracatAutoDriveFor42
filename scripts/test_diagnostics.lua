@@ -1646,7 +1646,7 @@ getCore, getActivatedMods, getModInfoByID, isClient = nil, nil, nil, nil
 --------------------------------------------------------------------------------
 -- 1010：新樣本短碼（取樣間閂鎖 yrp／hbp、跟車 lead tlg／tlv、殭屍軟縫逐輪 zwh／zwt、鏈式停留夾過的常駐線 rsl）有值才寫。
 -- 違規證明：encodePhys 拿掉任一行＝(codes) 紅；缺值寫 0／null＝(omit) 紅。
-scenario("1010 sample short codes yrp/hbp/tlg/tlv/zwh/zwt/rsl: written when present, omitted when absent")
+scenario("1010 sample short codes yrp/hbp/tlg/tlv/tlvd/zwh/zwt/rsl: written when present, omitted when absent")
 do
     resetFs()
     loadProd()
@@ -1656,7 +1656,7 @@ do
         MDADDiagnostics.sample(0, t, 100, 200, 0, 30, 40, 400, 0, 0, 0, 0, "follow", 3, true, nil, false,
             nil, nil, nil, nil, nil, nil, nil, nil, nil, false, false, false, false, false, phys)
     end
-    s(9400000, { yawPeak = 2.5, hardBrakeLatch = "blocked-approach", trfLeadGap = 12.5, trfLeadV = 3,
+    s(9400000, { yawPeak = 2.5, hardBrakeLatch = "blocked-approach", trfLeadGap = 12.5, trfLeadV = 3, trfLeadVd = 2.5,
         zombieWhy = "gap", zombieWant = 1.25, residentLane = 1.5 })
     s(9400300, {})
     nowMs = 9401000
@@ -1667,11 +1667,11 @@ do
         if not first then first = line else second = line end
     end
     first, second = first or "", second or ""
-    for _, kv in ipairs({ '"yrp":2.5', '"hbp":"blocked-approach"', '"tlg":12.5', '"tlv":3', '"zwh":"gap"', '"zwt":1.25',
-            '"rsl":1.5' }) do
+    for _, kv in ipairs({ '"yrp":2.5', '"hbp":"blocked-approach"', '"tlg":12.5', '"tlv":3', '"tlvd":2.5', '"zwh":"gap"',
+            '"zwt":1.25', '"rsl":1.5' }) do
         check(string.find(first, kv, 1, true) ~= nil, "(codes) sample writes " .. kv)
     end
-    for _, k in ipairs({ "yrp", "hbp", "tlg", "tlv", "zwh", "zwt", "rsl" }) do
+    for _, k in ipairs({ "yrp", "hbp", "tlg", "tlv", "tlvd", "zwh", "zwt", "rsl" }) do
         checkEq(countNeedle(second, '"' .. k .. '":'), 0, "(omit) absent " .. k .. " is not written")
     end
 end
@@ -1957,6 +1957,78 @@ do
     check(string.find(nb.live, '"a":%[[^%]]*,"cow",600[%.0]*%]') ~= nil, "(live) live animal format unchanged (" .. nb.live .. ")")
     instanceof, getCell, MDADSensor, getGameTime, MDADDynamics = oldInst, oldCell, oldSensor, oldGT, oldDyn
     player0.getVehicle = nil
+    MDADUpload = nil
+end
+
+--------------------------------------------------------------------------------
+-- 1017 遙測：樣本 vcc／vhc／blr 與新格式 vfs 有值才寫、ac／pc 缺值不寫；impact 事件帶 m／tn／ib（false 也寫）／rhMs／tlg／tlv，
+-- rh-attach 後 REHITCH_SETTLE_MS 內或 mode rehitch 的撞擊 cls＝rehitch；engine off／unstick settle／dodge／uturn over 新鍵過 EK。
+-- 違規證明：encodePhys 拿掉 vcc＝(codes) 紅；impactClass 不看 rhMs＝(rh-attach) 紅；不看 mode＝(rh-mode) 紅；
+-- emitEvent 不記 rhAt＝(rh-attach)(rhMs) 紅；ib 用 and/or 寫法（false 變 nil）＝(ib-false) 紅；EK 少 chg／bh／zc0＝(ek) 紅。
+scenario("1017 sample codes vcc/vhc/blr/vfs, impact m/tn/ib/rhMs/tlg/tlv and cls rehitch, new event keys")
+do
+    resetFs()
+    loadProd()
+    MDADUpload = nil
+    assert(loadfile((string.gsub(PROD, "MDAD_Diagnostics%.lua$", "MDAD_Upload.lua"))))()
+    nowMs = 9480000
+    MDADDiagnostics.start(0, nil, profile)
+    local function s(t, px, spd, mode, phys, ac)
+        MDADDiagnostics.sample(0, t, px, 200, 0, spd, 40, 400, 0, 0, 0, 0, mode or "follow", 3, true, nil, false,
+            nil, nil, nil, nil, nil, nil, nil, nil, nil, false, false, false, false, false, phys,
+            nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, ac, ac)
+    end
+    s(9480000, 100, 30, nil, { visCruiseCap = 71.5, visHoldCap = 64.2, brakeReject = "unloaded",
+        firstSeen = "[[40.3,1,38.2,-0.4,72.1],[66,0,null,null,null]]" }, 0.42)
+    s(9480300, 101.6, 30, nil, {}, nil)
+    -- (rh-attach) 引擎掛上（事件 ts＝nowMs）後 1.4 秒的拉攏
+    nowMs = 9480300
+    MDADDiagnostics.event(0, "tow", { phase = "rh-attach", vid = 7 })
+    s(9481300, 102, 0, nil, { transmissionNumber = 1, isBraking = false })
+    s(9481500, 103, 20, nil, { transmissionNumber = 1, isBraking = false })
+    s(9481700, 103.5, 0, nil, { transmissionNumber = 1, isBraking = false }) -- 20→0／200ms
+    -- 掛上 4.9 秒後（> REHITCH_SETTLE_MS）的同樣掉速＝真撞（hit），帶 lead
+    s(9485000, 110, 40, nil, { transmissionNumber = 4, isBraking = false, trfLeadGap = 3.46, trfLeadV = 20.04 })
+    s(9485200, 112, 10, nil, { transmissionNumber = 4, isBraking = false, trfLeadGap = 3.46, trfLeadV = 20.04 })
+    -- (rh-mode) 掛回模式中
+    s(9490000, 120, 25, "rehitch", {})
+    s(9490200, 121, 5, "rehitch", {})
+    MDADDiagnostics.event(0, "engine", { phase = "off", why = "battery", chg = 0, es = 2400, fu = 41.5 })
+    MDADDiagnostics.event(0, "unstick", { phase = "settle", bh = 4.25 })
+    MDADDiagnostics.event(0, "dodge", { phase = "commit", zc0 = 18.5, chain = "clear-stay" })
+    MDADDiagnostics.event(0, "dodge", { phase = "release", why = "next-group", offL = 1.5, dbl = 0, nxB = 66.2, nxC = "dodge" })
+    MDADDiagnostics.event(0, "uturn", { phase = "over", ov = 0.2, why = "cutover" })
+    nowMs = 9491000
+    MDADDiagnostics.stop(0, "end")
+    local body = files[sessionPath(1)] or ""
+    local smp = {}
+    for line in string.gmatch(body, '{"t":"s"[^\n]*') do smp[#smp + 1] = line end
+    local first, second = smp[1] or "", smp[2] or ""
+    for _, kv in ipairs({ '"vcc":71.5', '"vhc":64.2', '"blr":"unloaded"', '"ac":0.42', '"pc":0.42',
+            '"vfs":[[40.3,1,38.2,-0.4,72.1],[66,0,null,null,null]]' }) do
+        check(string.find(first, kv, 1, true) ~= nil, "(codes) sample writes " .. kv)
+    end
+    for _, k in ipairs({ "vcc", "vhc", "blr", "vfs", "ac", "pc" }) do
+        checkEq(countNeedle(second, '"' .. k .. '":'), 0, "(omit) absent " .. k .. " is not written")
+    end
+    local evs = {}
+    for line in string.gmatch(body, '{"t":"e","ts":[%d%.]+,"n":"impact"[^\n]*') do evs[#evs + 1] = line end
+    checkEq(#evs, 3, "three impact rising edges")
+    local function ev(i, key) return string.match(evs[i] or "", '"' .. key .. '":"?([%-%w%.]+)') end
+    checkEq(ev(1, "cls"), "rehitch", "(rh-attach) 1 s after rh-attach the drop is cls rehitch")
+    checkEq(tonumber(ev(1, "rhMs")), 1400, "(rhMs) impact carries ms since rh-attach")
+    checkEq(ev(1, "m"), "follow", "impact carries the mode")
+    checkEq(tonumber(ev(1, "tn")), 1, "impact carries the gear")
+    checkEq(ev(1, "ib"), "false", "(ib-false) isBraking=false is written")
+    checkEq(ev(2, "cls"), "hit", "(rh-late) 3.5 s after rh-attach it is a hit again")
+    checkEq(tonumber(ev(2, "tlg")), 3.5, "impact carries the lead gap")
+    checkEq(tonumber(ev(2, "tlv")), 20, "impact carries the lead speed")
+    checkEq(ev(3, "cls"), "rehitch", "(rh-mode) a drop in mode rehitch is cls rehitch")
+    checkEq(ev(3, "m"), "rehitch", "(rh-mode) mode written")
+    for _, kv in ipairs({ '"why":"battery","chg":0,"es":2400,"fu":41.5', '"bh":4.25', '"zc0":18.5', '"chain":"clear-stay"',
+            '"nxB":66.2', '"nxC":"dodge"', '"why":"cutover"' }) do
+        check(string.find(body, kv, 1, true) ~= nil, "(ek) event key passes EK: " .. kv)
+    end
     MDADUpload = nil
 end
 
