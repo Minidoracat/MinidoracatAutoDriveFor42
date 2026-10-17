@@ -21400,6 +21400,61 @@ function drive.scenarioVisibilityTiming()
         checkTrue(legacy, "(vt-steady) 前緣照常前進：沒有停滯前饋、vis 帳只有舊制比例項")
     end
 
+    -- (vt-mp) 1017i：MP 的未載入前緣停滯保持＝VIS_UNLOADED_HOLD_MP_S（正式服 vfa p95），SP 維持 VIS_UNLOADED_HOLD_S；
+    --   硬煞帳不看保持、兩邊相同。MP 前緣照 p97 每次停 1.5 秒（超過保持）跟三個週期：靠 vis 帳輔助（比例項＋停滯前饋）
+    --   不鎖輪、不爬行，且平均車速不低於 SP。違規證明（temp/s1017-vis/vp_vis.py）：拿掉 isClient＝(vt-mp) 保持兩條紅；
+    --   拿掉 vis 帳輔助（VIS_ASSIST_MAX 0＋停滯前饋恆 0）＝(vt-mp-stream) 不鎖輪那條紅。
+    do
+        local holds, caps, hards = {}, {}, {}
+        for _, mp in ipairs({ false, true }) do
+            clientFlag = mp
+            arm()
+            dveh._speed = 80
+            front(68, true)
+            driveTick(dp, dveh)
+            holds[mp], caps[mp], hards[mp] = st.visHold, st.visibilityCap, st.visibilityHardKmh
+        end
+        clientFlag = false
+        checkNear(holds[true], tn.VIS_UNLOADED_HOLD_MP_S, 1e-9,
+            "(vt-mp) MP 未載入前緣保持＝VIS_UNLOADED_HOLD_MP_S（" .. tostring(holds[true]) .. "）")
+        checkNear(holds[false], tn.VIS_UNLOADED_HOLD_S, 1e-9,
+            "(vt-mp) SP 未載入前緣保持不動＝VIS_UNLOADED_HOLD_S（" .. tostring(holds[false]) .. "）")
+        checkTrue(caps[true] > caps[false] + 1, string.format("(vt-mp) 同前緣 68m：MP 巡航帽 %.1f 高於 SP %.1f",
+            caps[true], caps[false]))
+        checkNear(hards[true], hards[false], 1e-9, "(vt-mp) 硬煞帳不隨保持改變（MP＝SP）")
+        local mean = {}
+        for _, mp in ipairs({ false, true }) do
+            clientFlag = mp
+            arm()
+            dveh._speed = 80
+            local base, nextStamp, stallUntil, cycles = st.lastSNow + 70, nowMs, nowMs + 1500, 0
+            local minSpeed, sum, n = math.huge, 0, 0
+            front(base - st.lastSNow, true)
+            while cycles < 3 and MDAD.Drive.isActive(0) do
+                if nowMs >= stallUntil then
+                    base, stallUntil, cycles = base + 40, nowMs + 1500, cycles + 1
+                end
+                if nowMs >= nextStamp then
+                    st.sensor.scanEndS, st.sensor.unloadedS = base, base
+                    st.sensor.unloaded, st.sensor.stamp = true, nowMs
+                    nextStamp = nowMs + 400
+                end
+                advance(0.02)
+                if cycles >= 1 then
+                    minSpeed, sum, n = math.min(minSpeed, dveh._speed), sum + dveh._speed, n + 1
+                end
+            end
+            mean[mp] = n > 0 and sum / n or 0
+            if mp then
+                checkEq(drive.calls.forceBrake, 0, "(vt-mp-stream) MP 前緣每次停 1.5 秒（超過保持 1.0）：三個週期都不鎖輪")
+                checkTrue(minSpeed > 35, "(vt-mp-stream) 不爬行（最低 " .. string.format("%.1f", minSpeed) .. "）")
+            end
+        end
+        clientFlag = false
+        checkTrue(mean[true] >= mean[false] - 0.5, string.format("(vt-mp-stream) MP 平均 %.1f 不低於 SP %.1f km/h",
+            mean[true], mean[false]))
+    end
+
     -- (vt-assist)
     arm()
     dveh._speed = 80

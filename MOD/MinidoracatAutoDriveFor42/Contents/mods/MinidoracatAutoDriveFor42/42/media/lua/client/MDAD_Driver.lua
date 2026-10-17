@@ -362,7 +362,10 @@ TUNE.VIS_ROUND_MAX_S = 1.5      -- 單次間隔上限（卡頓一次不把輪時
 TUNE.VIS_FRONT_ADVANCE_M = 1.0  -- 可視前緣前進超過這麼多才算「前緣有動」，重設停滯計時
 TUNE.VIS_HOLD_MULT = 1.25       -- 巡航帳假設前緣停住：輪時×MULT＋ADD 秒
 TUNE.VIS_HOLD_ADD_S = 0.15
-TUNE.VIS_UNLOADED_HOLD_S = 1.5  -- 前緣是未載入區塊時至少假設停這麼久（正式服串流停滯 p97）
+TUNE.VIS_UNLOADED_HOLD_S = 1.5  -- 前緣是未載入區塊時至少假設停這麼久（SP；正式服串流停滯 p97）
+-- MP 同一帳改用正式服前緣前進間隔 p95（1017i；2026-10-17 使用者裁定 10-27 前放寬 MP 可視速度：vfa 30.6 萬次
+-- <1.0 s 95.0%、<1.5 s 97.6%）。停滯超過保持的那 5% 由停滯前饋（s.visStallBrake）與不看保持的硬煞帳接手。
+TUNE.VIS_UNLOADED_HOLD_MP_S = 1.0
 TUNE.VIS_HOLD_MIN_S = 0.3       -- 停滯逾時後仍保留的最短保持（巡航帳留一點滑行餘裕）
 -- 可視前緣就是路線終點時（1002l）：終點是建表就知道的定點，不是會突然冒出來的未知前緣，硬煞帳只算致動延遲；
 -- 巡航帳不再另扣障礙緩衝與停滯保持（終點停車由剖面的 Follower.STOP_ASSIST 包絡負責，見 Drive.visibilityCaps）。
@@ -6082,7 +6085,7 @@ end
 --    1.5 秒（世界沒前進、牆鐘有）後第一幀也直接越線。停住不動的掃描仍安全：前緣距離隨車位
 --    縮短，縮到緊急停距才硬煞，車照樣停在已知淨空範圍內。
 -- ② 巡航帳再加「前緣停滯保持」：假設可視前緣從上次前進起再停 T 秒（輪時 EWMA×MULT＋ADD；
---    前緣是未載入區塊時至少 VIS_UNLOADED_HOLD_S），期間只能滑行，停滯結束時仍不越過硬煞帳
+--    前緣是未載入區塊時至少 VIS_UNLOADED_HOLD_S，MP 為 VIS_UNLOADED_HOLD_MP_S），期間只能滑行，停滯結束時仍不越過硬煞帳
 --   （MDADDynamics.visibilityHoldCapKmh）。串流前緣在 80 km/h 停 1.5 秒＝逼近 33m，舊巡航帳
 --    只按當下距離算、滑行（約 3 m/s²）跟不上它每秒 7 m/s² 的下降。
 -- 回 (巡航帽 km/h, 巡航煞車帳 m/s²)；硬煞帳寫 s.visibilityHardKmh。
@@ -6120,9 +6123,10 @@ function Drive.visibilityCaps(s, now, visibleEnd, minBrakeVisible)
     -- 就開始綁（實測約停 1 秒起），等到 1.5 秒才補已落後 5 km/h。
     local stalled = (now - s.visFrontSince) / 1000
     s.visStallBrake = stalled >= hold and cruiseBrake or 0
+    local unlHold = isClient() and TUNE.VIS_UNLOADED_HOLD_MP_S or TUNE.VIS_UNLOADED_HOLD_S
     if sen.unloaded and finite(sen.unloadedS) and sen.unloadedS <= sen.scanEndS + 0.5
-            and hold < TUNE.VIS_UNLOADED_HOLD_S then
-        hold = TUNE.VIS_UNLOADED_HOLD_S
+            and hold < unlHold then
+        hold = unlHold
     end
     hold = hold - stalled
     if hold < TUNE.VIS_HOLD_MIN_S then hold = TUNE.VIS_HOLD_MIN_S end
