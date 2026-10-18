@@ -4,7 +4,9 @@
     python scripts/upload_report.py --self-test
 
 <pull 目錄>＝pull_uploads.py 的落地目錄（<玩家>/clip-NN.log、summary-*.log）；窗口＝片段 trig ≥ since。
---current＝駕駛行為與 HEAD 相同的 rev（C／D／K 與 B 的可用性只看這些）。玩家名一律輸出匿名代號（P01…，同一次執行內穩定）；
+--current＝駕駛行為與 HEAD 相同的 rev（C／D／K 與 B 的可用性只看這些）。玩家名一律輸出匿名代號（P##，沿用 pull 目錄的
+anon-users.tsv、新玩家接續編號）；每次執行重寫 <pull 目錄>/anon-users.tsv（代碼<TAB>玩家名，摘要＋片段全部玩家）與
+clips-anon.tsv（anon path overview，目錄內全部片段），寫完重讀、有人沒代碼或片段沒列到就中止。兩檔含真名，只留本機。
 --picks 寫 TSV（category time anon rev kind veh path note）列出 C–E、G–J 背後的片段，path 含真實資料夾名，只留本機。
   A 摘要：(u, drive) 去重、依 build 分組：趟數／玩家／km、impact／impZ／contact 每千 km＋Poisson 95%、相鄰 build 條件二項 p、
     impact 另列「不含小動物」（扣掉窗口片段裡歸成 small-animal、同 (u, drive) 的撞擊；片段有配額，扣的是下限）、
@@ -26,6 +28,8 @@
   I tow lost／relook
   J 結案檢查：area start kind=behind 後 20s 同趟 progress suspect；gate phase／why；detour kind=towcorner why=ok
   K 接手結束的趟（現行 rev）依 rem 分桶；≥300m 的趟 ev 沒有異常事件（blocked／uturn／unstick／contact／impact／progress）的數量
+  分析用 helper（`import upload_report as UR`）：Anon(root)、hm、q、ci、binom_p、opts_of、is_tow、per_em、load_summaries、
+    load_clips（since 省略＝pull.json）、dedupe、trips、events、window、edge_row、classify_impact、real_impacts
 """
 import argparse
 import collections
@@ -40,6 +44,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import analyze_telemetry as AT  # noqa: E402
+import upload_index as UI  # noqa: E402
 
 PFX = "UI_MinidoracatAutoDrive_"
 PRE_MS = 2500           # 撞擊／接觸前的回看窗
@@ -55,14 +60,34 @@ IMPACT_REARM_MS = 2000  # 同 MDAD_Upload IMPACT_REARM_MS：同一趟 2 秒內�
 REHITCH_SETTLE_MS = 2500  # 同 Driver TUNE.REHITCH_SETTLE_MS：rh-attach 後這麼久內的掉速是掛回拉攏
 EXIT_BRAKE_MS = 2000   # 同 MDAD_Upload EXIT_BRAKE_MS：撞擊後這麼久內以 exit 結束、tn 0、fbl 0＝下車煞車
 OTHER_HALF_L = 2.5     # 車對車貼車：對方半車長（nb v 不帶對方幾何）
+ANON_USERS, CLIPS_ANON = "anon-users.tsv", "clips-anon.tsv"
 
 
 class Anon:
-    def __init__(self):
-        self.ids = {}
+    """玩家 → P##。給 root 時沿用 <root>/anon-users.tsv（每列「代碼<TAB>玩家名」），沒列到的從最大號往後編；
+    片段資料夾名先經 index.txt 換回玩家名（伺服器把路徑危險字元換成 _），同一人摘要與片段同碼。"""
+
+    def __init__(self, root=None):
+        self.ids, self.alias, self.n = {}, {}, 0
+        if not root:
+            return
+        p = os.path.join(root, ANON_USERS)
+        if os.path.exists(p):
+            with open(p, encoding="utf-8") as fh:
+                for ln in fh:
+                    code, _, u = ln.rstrip("\n").partition("\t")
+                    if u:
+                        self.ids[u] = code
+                        self.n = max(self.n, int(code[1:]))
+        if os.path.exists(os.path.join(root, "index.txt")):
+            self.alias = {t[3]: t[13] for t in UI.rows(root) if t[0] == "C" and len(t) > 13}
 
     def __call__(self, u):
-        return self.ids.setdefault(u, f"P{len(self.ids) + 1:02d}")
+        u = self.alias.get(u, u)
+        if u not in self.ids:
+            self.n += 1
+            self.ids[u] = f"P{self.n:02d}"
+        return self.ids[u]
 
 
 def hm(ms):
@@ -96,6 +121,17 @@ def opts_of(s):
     return dict(p.split("=", 1) for p in (s or "").split(";") if "=" in p)
 
 
+def is_tow(o):
+    """摘要這趟有拖車（ev.tow 或 cap.tow）。"""
+    return bool((o.get("ev") or {}).get("tow") or (o.get("cap") or {}).get("tow"))
+
+
+def per_em(d, o):
+    """摘要 km/h·s 帳（loss／lpw…）÷ em（有效上限時間平均）＝秒；em 缺或 0 回 {}。"""
+    em = o.get("em") or 0
+    return {k: v / em for k, v in (d or {}).items()} if em > 0 else {}
+
+
 def fam(sprite):
     return re.sub(r"_\d+$", "", sprite) if sprite else None
 
@@ -117,7 +153,11 @@ def load_summaries(root):
     return S
 
 
-def load_clips(root, since_ms):
+def load_clips(root, since_ms=None):
+    """since_ms 省略＝pull.json 的 since（pull_uploads 寫的窗口）。"""
+    if since_ms is None:
+        with open(os.path.join(root, "pull.json"), encoding="utf-8") as fh:
+            since_ms = json.load(fh)["since"] * 1000
     C = []
     for f in sorted(glob.glob(os.path.join(root, "*", "clip-*.log"))):
         clip, hdr, recs = AT.load_file(f)
@@ -141,6 +181,22 @@ def dedupe(C):
         for e in rec["evs"]:
             E[(rec["u"], rec["drive"], e.get("ts"), e.get("n"), e.get("phase"))].append((e, rec))
     return E
+
+
+def trips(C):
+    """(u, drive) → dict(rows, evs, clips)：同趟多個片段的樣本依 ts、事件依 (ts, n, phase) 去重後合併、依 ts 排序。"""
+    T = {}
+    for rec in C:
+        t = T.setdefault((rec["u"], rec["drive"]), dict(rows={}, evs={}, clips=[]))
+        t["clips"].append(rec)
+        for r in rec["rows"]:
+            t["rows"].setdefault(r["ts"], r)
+        for e in rec["evs"]:
+            t["evs"].setdefault((e.get("ts"), e.get("n"), e.get("phase")), e)
+    for t in T.values():
+        t["rows"] = sorted(t["rows"].values(), key=lambda r: r["ts"])
+        t["evs"] = sorted(t["evs"].values(), key=lambda e: e.get("ts") or 0)
+    return T
 
 
 def window(rows, ts, ms=PRE_MS):
@@ -289,7 +345,9 @@ def sec_a(S, small=None):
                                    for f, v in k.items()))
             print(f"  impact 不含小動物 {ns}={ns / km * 1000:.1f}/千km (95% {ci(ns)[0] / km * 1000:.1f}-{ci(ns)[1] / km * 1000:.1f})"
                   f"（扣 small-animal {sm}）")
-        K[b] = (km, k, ns)
+        K[b] = (km, k, ns, collections.Counter(o.get("rpt") or "unknown" for o in L))
+        if set(K[b][3]) != {"unknown"}:      # 1018a 起摘要 rpt＝最後一次 route cutover 的主 MOD RoadPatch 狀態；缺＝舊 rev／舊主 MOD
+            print("  RoadPatch rpt " + ", ".join(f"{r}:{v}" for r, v in K[b][3].most_common()))
         rs = collections.Counter((o.get("reason") or "?").replace(PFX, "") for o in L)
         print("  reasons " + ", ".join(f"{r}:{v}({v / n * 100:.1f}%)" for r, v in rs.most_common(10)))
         loss = collections.Counter()
@@ -309,11 +367,11 @@ def sec_a(S, small=None):
                      f"（{offn / km * 100 if km else 0:.1f}/百km） offMax={max(o.get('offMax') or 0 for o in hasoff) / 1000:.1f}s")
         print(line)
     for i in range(1, len(order)):
-        (w1, k1, n1), (w2, k2, n2) = K[order[i]], K[order[i - 1]]
+        (w1, k1, n1, _), (w2, k2, n2, _) = K[order[i]], K[order[i - 1]]
         if w1 and w2:
             print(f"  {order[i]} vs {order[i - 1]}: " + " ".join(f"{f} p={binom_p(k1[f], k2[f], w1, w2):.3f}" for f in k1)
                   + f" impact不含小動物 p={binom_p(n1, n2, w1, w2):.3f}")
-    return {b: dict(trips=len(by[b]), km=K[b][0], impactNoSmall=K[b][2], **K[b][1]) for b in order}
+    return {b: dict(trips=len(by[b]), km=K[b][0], impactNoSmall=K[b][2], rpt=dict(K[b][3]), **K[b][1]) for b in order}
 
 
 def sec_b(C, cur, A):
@@ -565,6 +623,30 @@ def sec_k(S, cur):
     return out
 
 
+def write_anon(root, S, A):
+    """摘要與片段裡的玩家全部編碼，寫 anon-users.tsv 與 clips-anon.tsv（path 一律 / 分隔）；寫完用 Anon(root) 重讀，
+    有玩家沒代碼或片段沒列到就中止（2026-10-17 舊表漏 2 人、clips-anon 缺 11 段，各復盤代理自補 X##／Px1／P?? 對不起來）。"""
+    files = sorted(glob.glob(os.path.join(root, "*", "clip-*.log")))
+    folders = [os.path.basename(os.path.dirname(f)) for f in files]
+    rows = [(A(u), f.replace("\\", "/"), AT.clip_row(f) or "") for u, f in zip(folders, files)]
+    users = sorted({u for u, _ in S if u is not None})
+    for u in users:
+        A(u)
+    with open(os.path.join(root, ANON_USERS), "w", encoding="utf-8", newline="") as fh:
+        fh.write("".join(f"{c}\t{u}\n" for u, c in sorted(A.ids.items(), key=lambda x: int(x[1][1:]))))
+    with open(os.path.join(root, CLIPS_ANON), "w", encoding="utf-8", newline="") as fh:
+        fh.write("anon\tpath\toverview\n" + "".join("\t".join(r) + "\n" for r in rows))
+    back = Anon(root)
+    miss = {back.alias.get(u, u) for u in folders + users} - set(back.ids)
+    with open(os.path.join(root, CLIPS_ANON), encoding="utf-8") as fh:
+        listed = {ln.split("\t")[1] for ln in list(fh)[1:]}
+    lost = [f for f in files if f.replace("\\", "/") not in listed]
+    if miss or lost:
+        raise SystemExit(f"匿名對照不完整（{root}）：{len(miss)} 位玩家沒代碼、{len(lost)} 段片段沒列進 {CLIPS_ANON}")
+    print(f"匿名對照：{ANON_USERS} {len(back.ids)} 人（片段 {len(set(folders))} 人＋摘要 {len(users)} 人全有代碼）、"
+          f"{CLIPS_ANON} {len(files)} 段 → {root}（含真名，只留本機）\n")
+
+
 def write_picks(path, picks, A):
     with open(path, "w", encoding="utf-8", newline="") as fh:
         fh.write("category\ttime(+08)\tanon\trev\tkind\tveh\tpath\tnote\n")
@@ -574,8 +656,9 @@ def write_picks(path, picks, A):
 
 def report(root, since_s, cur, picks_path=None):
     since = float(since_s) * 1000
-    A, picks = Anon(), []
+    A, picks = Anon(root), []
     S = load_summaries(root)
+    write_anon(root, S, A)
     C = load_clips(root, since)
     # 下車煞車判定要查同趟摘要：片段資料夾名是伺服器清理過的玩家名，和摘要 u 不一定相同，另以 drive 唯一時備查
     Sd = dict(S)
@@ -628,7 +711,8 @@ def self_test():
             return dict(t="sum", u=u, drive=drive, build=build, rev=build[-1], dist=1000, end=drive + 60000, **kw)
 
         old = [sm("u%d" % i, T + i, "b-1", impact=0) for i in range(20)]
-        new = [sm("u%d" % i, T + 100 + i, "b-2", impact=1 if i < 2 else 0, reason=PFX + "takeover", rem=400) for i in range(20)]
+        new = [sm("u%d" % i, T + 100 + i, "b-2", impact=1 if i < 2 else 0, reason=PFX + "takeover", rem=400,
+                  **({"rpt": "raw"} if i < 3 else {})) for i in range(20)]
         put("summary-1.log", old + new[:10])
         put("summary-2.log", new)                                   # new[:10] 在兩份輪寫摘要都有：去重
         put("summary-3.log", [sm("u1", T + 200, "b-3")])             # <20 趟的 build 不列
@@ -693,6 +777,9 @@ def self_test():
                                    aoi=[[t1, 60, 40, 50, 3.5, "curve", 6.2, 1, 120]], fu0=50, fu1=48.5,
                                    fuS={"arc": [0.5, 0.2], "oth": [1.0, 0.8]}, t40=3200, t40k="tow",
                                    blr={"unloaded": 2}, eng={"why": "battery", "chg": 0, "es": 2400, "fu": 48.5})])
+        clip("p q", 1, "route", T + 130000, base, [])                  # 資料夾名有空白（2026-10-17 舊 clips-anon 漏掉這種）
+        with open(os.path.join(d, ANON_USERS), "w", encoding="utf-8", newline="") as fh:
+            fh.write("P05\tpa\n")                                     # 上一輪的表：沿用、新玩家從 P06 接續
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             res = report(d, T / 1000, {"2"}, os.path.join(d, "picks.tsv"))
@@ -703,7 +790,24 @@ def self_test():
               "A impact 不含小動物：扣掉同 (u, drive) 的 small-animal 片段撞擊（不限 rev）")
         check(any("impact 不含小動物 0=0.0/千km" in ln and "扣 small-animal 2" in ln for ln in out.getvalue().splitlines()),
               "A 印出不含小動物的 impact／千 km 與扣掉的件數")
-        check(res["B"]["clips"] == 24, "窗口：trig < since 的片段不算")
+        check(res["B"]["clips"] == 25, "窗口：trig < since 的片段不算")
+        check(a["b-2"]["rpt"] == {"raw": 3, "unknown": 17} and any("RoadPatch rpt unknown:17, raw:3" in ln
+                                                                     for ln in out.getvalue().splitlines()),
+              "A RoadPatch rpt 計數（缺＝unknown）")
+        back = Anon(d)
+        files = glob.glob(os.path.join(d, "*", "clip-*.log"))
+        users = {u for u, _ in load_summaries(d)} | {os.path.basename(os.path.dirname(f)) for f in files}
+        check(back.ids.get("pa") == "P05" and set(back.ids) == users
+              and sorted(int(c[1:]) for c in back.ids.values()) == list(range(5, 5 + len(users))),
+              "anon-users.tsv：摘要＋片段全部玩家，沿用舊碼、新碼從最大號接續不重複")
+        with open(os.path.join(d, CLIPS_ANON), encoding="utf-8") as fh:
+            paths = [ln.split("\t")[1] for ln in list(fh)[1:]]
+        check(len(paths) == len(files) and any(p.endswith("/p q/clip-01.log") for p in paths) and not any("\\" in p for p in paths),
+              "clips-anon.tsv 列全部片段（含空白資料夾名），路徑一律 /")
+        tr = trips(load_clips(d, T))[("pa", T)]
+        check(len(tr["clips"]) == 4 and sum(1 for e in tr["evs"] if e.get("n") == "impact" and e["ts"] == T + 50000) == 1
+              and [r["ts"] for r in tr["rows"]] == sorted({r["ts"] for c in tr["clips"] for r in c["rows"]}),
+              "trips：同趟多片段合併，事件 (ts, n, phase) 去重、樣本依 ts 去重排序")
         check(res["C"] == {"zombie": 3, "far": 2, "static": 2, "small-animal": 1, "animal": 3, "vehicle": 2,
                            "skip-frozen": 1, "skip-rehitch": 3, "skip-exit": 1, "skip-rearm": 1},
               "撞擊 (u, drive, ts) 去重、類別 zombie／far／static；<20 kg 貼車動物＝small-animal，20 kg 整／缺體重／舊 rev／沒貼車不算；"
