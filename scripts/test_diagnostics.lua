@@ -1395,7 +1395,7 @@ MDADDiagnostics.event(0, "target", {
 -- route cutover 原始路線快照＋ready 的 fillet 結果（2026-09-02 玩家 telemetry 定罪缺口）
 local srcRoute = {
     pts = { 7426.5, 8275, 7277, 8275, 7277, 8372 },
-    segWidth = { 6, 8 }, segSurface = { "paved", "unknown" },
+    segWidth = { 6, 8 }, segSurface = { "paved", "unknown" }, patchState = "applied",
 }
 MDADDiagnostics.event(0, "route", MDADDiagnostics.routeSource(srcRoute, {
     phase = "cutover", why = "initial", tg = 7, rg = 9, len = 246.5, pts = 3,
@@ -1408,7 +1408,7 @@ MDADDiagnostics.event(0, "route", {
     phase = "ready", why = "target", tg = 8, rg = 10, len = 7400, pts = 62,
     filletN = 0, filletFallbackN = 60, filletBandValid = true, filletReason = "capacity",
 })
-local noPts = MDADDiagnostics.routeSource({ len = 5 }, { phase = "cutover" })
+local noPts = MDADDiagnostics.routeSource({ len = 5, patchState = "raw" }, { phase = "cutover" })
 local bigRoute = { pts = {}, segWidth = {}, segSurface = {} }
 for i = 1, 600 do
     bigRoute.pts[i * 2 - 1], bigRoute.pts[i * 2] = i, 0
@@ -1530,6 +1530,11 @@ check(string.find(physBody,
     1, true) ~= nil, "route ready names capacity fallback")
 checkEq(noPts.src, nil, "route without points adds no src field")
 checkEq(noPts.phase, "cutover", "routeSource returns the same payload table")
+-- 1018a rpt：主 MOD route.patchState（v4 起）；舊 API 沒這欄（bigRoute）＝不寫、不出錯
+check(string.find(physBody, '"srcS":"paved;unknown","rpt":"applied"}', 1, true) ~= nil,
+    "(1018a) route cutover carries main MOD patchState applied")
+checkEq(noPts.rpt, "raw", "(1018a) patchState raw recorded even without points")
+checkEq(bigPayload.rpt, nil, "(1018a) route without patchState (nav API < v4) adds no rpt")
 checkEq(select(2, string.gsub(bigPayload.src, ";", "")), 511,
     "oversize route snapshot truncates to 512 points")
 checkEq(select(2, string.gsub(bigPayload.srcW, ";", "")), 510,

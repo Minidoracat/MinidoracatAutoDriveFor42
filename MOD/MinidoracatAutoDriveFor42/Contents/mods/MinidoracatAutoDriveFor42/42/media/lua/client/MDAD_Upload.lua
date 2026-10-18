@@ -1012,6 +1012,8 @@ function U.event(u, line, now, name, a)
     if name == "route" and phase == "ready" and u.apr == nil and finite(a.approach) then
         u.apr = a.approach -- 起步越野接線長（Driver 只在起步的 ready 帶）
     end
+    -- 1018a 摘要 rpt：這趟最後一次 cutover 的主 MOD patchState（far 是被拒的線，不算）
+    if name == "route" and phase == "cutover" and type(a.rpt) == "string" then u.rpt = a.rpt end
     if name == "route" and type(a) == "table" and type(a.target) == "string" then
         u.target = a.target -- 最後一個目的地（行程換站時跟著換）
     end
@@ -1135,6 +1137,7 @@ local function summaryText(u, now, reason, withMaps)
         .. ',"t40":' .. jround(u.t40, 1)
         .. ',"t40k":' .. jstr(u.stTow and "tow" or u.stU and "uturn" or u.stApr and "approach" or u.stRet and "return" or "plain")
         .. ',"blr":' .. mapJson(u.blr) .. (u.eng or "")
+        .. (u.rpt and (',"rpt":' .. jstr(u.rpt)) or "")
     if withMaps then
         text = text .. ',"ev":' .. mapJson(u.evc) .. ',"mode":' .. mapJson(u.modeMs)
             .. ',"cap":' .. mapJson(u.capMs) .. ',"loss":' .. lossJson(u.loss)

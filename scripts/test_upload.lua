@@ -1865,6 +1865,31 @@ do
     check(#sum < U.CHUNK, "(1017) summary still fits one chunk (" .. #sum .. ")")
 end
 
+scenario("1018a summary rpt: last route cutover's main MOD patchState; old API omits it")
+do
+    local pts = { 0, 0, 10, 0 }
+    nowMs = nowMs + 3600000
+    start()
+    local d0 = nowMs
+    D.event(0, "route", D.routeSource({ pts = pts, patchState = "raw" }, { phase = "cutover", why = "initial" }))
+    drive(1000, { speed = 40 })
+    D.event(0, "route", D.routeSource({ pts = pts, patchState = "applied" }, { phase = "cutover", why = "target" }))
+    D.event(0, "route", D.routeSource({ pts = pts, patchState = "raw" }, { phase = "far", why = "gate" }))
+    D.stop(0, "UI_MinidoracatAutoDrive_Arrived")
+    pump(120000)
+    local _, sum = sumLines(d0)
+    check(string.find(sum, '"rpt":"applied"', 1, true) ~= nil, "(rpt) last cutover wins; rejected far line ignored")
+    nowMs = nowMs + 3600000
+    start()
+    local d1 = nowMs
+    D.event(0, "route", D.routeSource({ pts = pts }, { phase = "cutover", why = "initial" }))
+    drive(1000, { speed = 40 })
+    D.stop(0, "UI_MinidoracatAutoDrive_Arrived")
+    pump(120000)
+    _, sum = sumLines(d1)
+    check(sum ~= "" and string.find(sum, '"rpt"', 1, true) == nil, "(rpt) route without patchState (nav API < v4) omits rpt")
+end
+
 -- 1010 所有送出的片段整段 ≤ CLIP_TOTAL_MAX（第一塊宣告的 len＝全文長度；伺服器只看這個）
 local maxLen = 0
 for i = 1, #sent do
