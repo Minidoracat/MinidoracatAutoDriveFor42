@@ -7,6 +7,7 @@
 判綠＝rc 0、輸出最末端是這支自己的摘要行、摘要的失敗數為 0（verify 另要 SKIP 0）、全文沒有 FAIL 行。
 只數 FAIL 不夠：harness 中途 crash 時 FAIL 數也是 0，所以摘要行缺席本身就是紅。
 """
+import os
 import re
 import subprocess
 import sys
@@ -89,6 +90,9 @@ def self_test():
 def main(argv):
     if "--self-test" in argv:
         return self_test()
+    # 單跑用的 SMOKE_ONLY 留在環境裡會讓 smoke 只跑一部分還印「全部通過」＝假綠燈：gates 一律跑完整 smoke
+    if os.environ.pop("SMOKE_ONLY", None) is not None:
+        print("（已忽略環境變數 SMOKE_ONLY：gates 一律跑完整 smoke）")
     with ThreadPoolExecutor(max_workers=6) as ex:
         results = list(ex.map(run, GATES))
     bad = 0

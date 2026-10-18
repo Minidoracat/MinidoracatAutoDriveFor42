@@ -1452,6 +1452,7 @@ local function show(v)
 end
 
 local function check(ok, label)
+    if drive.skip then return ok end -- SMOKE_ONLY 沒選的頂層情境：照跑、不計不印
     assertions = assertions + 1
     if not ok then
         failures = failures + 1
@@ -1486,11 +1487,49 @@ end
 
 local function scenario(title)
     closeScenario()
+    if drive.only then
+        drive.skip = true
+        for want in string.gmatch(drive.only, "[^,%s][^,]*") do
+            if string.find(title, want, 1, true) then drive.skip = false end
+        end
+        if drive.skip then
+            scenarioTitle = nil
+            if drive.onlyIn then error(drive.onlySkip, 0) end -- 第一行就中止，函式還沒動任何狀態
+            return
+        end
+    end
     scenarios = scenarios + 1
     scenarioBase = assertions
     scenarioFails = 0
     scenarioTitle = title
     print("情境" .. scenarios .. "：" .. title)
+end
+
+-- SMOKE_ONLY=<標題片段>[,<片段>…]：只跑標題含任一片段的情境（2026-10-17 為單跑一個情境改寫整份 harness 約 20 分鐘）。
+-- 沒選到的 drive.scenario* 在第一行 scenario() 就被中止；頂層直寫的情境與不帶標題的子函式照跑但不計不印——
+-- 情境之間有狀態相依，單跑過不代表整份過。主 chunk local 已滿，狀態全掛在 drive 上。
+drive.only = os.getenv("SMOKE_ONLY")
+if drive.only == "" then drive.only = nil end
+if drive.only then
+    drive.onlyNote = "!!!!!!!! SMOKE_ONLY=" .. drive.only .. "：只跑部分情境，不是完整 smoke；定版前跑 python scripts/gates.py !!!!!!!!"
+    print(drive.onlyNote)
+    drive.onlySkip = {}
+    setmetatable(drive, { __newindex = function(t, k, fn)
+        if type(fn) == "function" and string.sub(k, 1, 8) == "scenario" then
+            local raw = fn
+            fn = function(...)
+                local was = drive.onlyIn
+                drive.onlyIn = true
+                local ok, err = xpcall(raw, function(e)
+                    if e == drive.onlySkip then return e end
+                    return debug.traceback(tostring(e), 2)
+                end, ...)
+                drive.onlyIn = was
+                if not ok and err ~= drive.onlySkip then error(err, 0) end
+            end
+        end
+        rawset(t, k, fn)
+    end })
 end
 
 -- 收集所有真的被 production 吐出來的理由鍵；最後一個情境驗證每個鍵都有翻譯
@@ -15810,8 +15849,8 @@ scenarioTelemetry()
 -- =====================================================================
 -- Phase E：v4 strict consumer、hot getter、EWMA key、surface-aware RETURN
 -- =====================================================================
+function drive.scenarioPhaseE()
 scenario("Phase E：v4 strict metadata、adaptive getter cache、traction reset、RETURN exact line")
-local function scenarioPhaseE()
     local oldVeh = dveh
     local oldGear = MDAD.Drive.getGear(0)
     MDAD.Drive.setGear(0, 4) -- 此組驗積極策略；不依賴使用者預設檔位。
@@ -18421,7 +18460,7 @@ local function scenarioPhaseE()
     drive.nav.route = newRoute(40, 0, 0, 4, 0)
     drive.fillWorld(-2, 70, -7, 7)
 end
-scenarioPhaseE()
+drive.scenarioPhaseE()
 
 -- (kerb) 停留不受路面餘裕否決（2026-09-04 s004@0904n Quiet St 東向）：v4 路寬 6（餘裕
 --        ±1.75），車 B 斜跨到南緣（y 0..−3）、回線段再撞後方 C（y −0.5）；唯一出路是北側
@@ -31604,6 +31643,12 @@ print()
 print("情境 " .. scenarios .. " 個、斷言 " .. assertions .. " 項")
 if failures > 0 then
     print(failures .. " 項失敗")
+    if drive.only then print(drive.onlyNote) end
     os.exit(1)
 end
 print("全部通過")
+-- SMOKE_ONLY：提示印在最後一行（gates.py 要求摘要在最末端，這樣也不會被當成整份綠燈）；一個都沒選到＝紅
+if drive.only then
+    print(drive.onlyNote)
+    if scenarios == 0 then print("SMOKE_ONLY 沒有選到任何情境（比對的是情境標題）") os.exit(1) end
+end
