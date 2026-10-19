@@ -299,6 +299,7 @@ Separate 0–500% power and extra-fuel settings for GPS and autodrive (default 5
 [*] Click CRUISE LIMIT on the HUD to open Speed info; "Main reason" shows what is holding speed down.
 [*] [b]Common causes[/b]:
 [list]
+[*] The car is already at its own top speed: "Main reason" says "already at the vehicle's top speed", and changing gear will not make it faster; use a faster vehicle
 [*] 30/50/70 corner more gently than MAX; use MAX for speed
 [*] It only drives as fast as it can stop within road it has already checked, so at very low FPS it checks less and the HUD shows "Low FPS: slower" (raise FPS)
 [*] Towing corners slower: it slows early when the trailer is about to cut into something on the inside of a turn, and crawls past if the trailer touches it
