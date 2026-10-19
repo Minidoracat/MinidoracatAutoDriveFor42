@@ -1,16 +1,20 @@
 """正式服上傳批次評估：摘要 KPI、窗口片段、撞擊歸因與各確認項盤點（取代一次性的 temp/eval1012.py）。
 
-    python scripts/upload_report.py <pull 目錄> <sinceEpoch秒> [--current 1010a,1010c] [--picks out.tsv]
+    python scripts/upload_report.py <pull 目錄> <sinceEpoch秒> [--current 1010a,1010c] [--picks out.tsv] [--with <較早的 pull 目錄>…]
     python scripts/upload_report.py --self-test
 
 <pull 目錄>＝pull_uploads.py 的落地目錄（<玩家>/clip-NN.log、summary-*.log）；窗口＝片段 trig ≥ since。
 --current＝駕駛行為與 HEAD 相同的 rev（C／D／K 與 B 的可用性只看這些）。玩家名一律輸出匿名代號（P##，沿用 pull 目錄的
-anon-users.tsv、新玩家接續編號）；每次執行重寫 <pull 目錄>/anon-users.tsv（代碼<TAB>玩家名，摘要＋片段全部玩家）與
+anon-users.tsv、新玩家接續編號；新的一批還沒有這個檔時沿用同層最新一批的表，代碼才跟前次報告與 open-issues 一致）；每次執行重寫
+<pull 目錄>/anon-users.tsv（代碼<TAB>玩家名，摘要＋片段全部玩家）與
 clips-anon.tsv（anon path overview，目錄內全部片段），寫完重讀、有人沒代碼或片段沒列到就中止。兩檔含真名，只留本機。
 --picks 寫 TSV（category time anon rev kind veh path note）列出 C–E、G–J 背後的片段，path 含真實資料夾名，只留本機。
-  A 摘要：(u, drive) 去重、依 build 分組：趟數／玩家／km、impact／impZ／contact 每千 km＋Poisson 95%、相鄰 build 條件二項 p、
-    impact 另列「不含小動物」（扣掉窗口片段裡歸成 small-animal、同 (u, drive) 的撞擊；片段有配額，扣的是下限）、
-    結束原因、loss 佔比、nm/fm、offset（offN／offMax）
+--with（可重複）＝較早的 pull 目錄：A 節併入它們的摘要（8 檔輪寫，舊 build 的趟會被輪掉；同 (u, drive) 以本批為準）與全部片段。
+  A 摘要：(u, drive) 去重、依 build 分組：趟數／玩家／km、impact／impZ／contact 每千 km＋Poisson 95%、
+    impact 另列「不含小動物」（扣掉本批與 --with 全部片段裡歸成 small-animal、同 (u, drive) 的撞擊，不限窗口；片段有配額，
+    扣的是下限，另印片段涵蓋 n/k 件）、結束原因（全部）、loss 佔比、nm/fm、offset（offN／offMax）；
+    相鄰 build 與「同碼 A/A」（--current 內兩個以上 build 時，最早一個對其餘合併）的率比＋玩家叢集 bootstrap 95%（boot_ratio）
+    ＋Poisson 條件二項 p——同一玩家連撞時 p 偏小（2026-10-20 同碼 A/A impact p 0.004、玩家叢集區間 0.94–3.84），判版本差看區間並對照 A/A
   B 窗口片段：rev×kind、玩家數、現行 rev 可用性（事前 ≥3s、樣本 ≥10、有 route 點列）
   C 撞擊歸因（現行 rev；事件 (u, drive, ts) 去重）：先排除不算撞擊的上升緣（事件 cls≠hit；1017 前片段：上升緣樣本 m=rehitch、
     rh-attach 後 REHITCH_SETTLE_MS 內＝rehitch，摘要 reason=exit 且撞擊在結束前 EXIT_BRAKE_MS 內、tn 0、fbl 0＝exit），同 (u, drive)
@@ -28,8 +32,8 @@ clips-anon.tsv（anon path overview，目錄內全部片段），寫完重讀、
   I tow lost／relook
   J 結案檢查：area start kind=behind 後 20s 同趟 progress suspect；gate phase／why；detour kind=towcorner why=ok
   K 接手結束的趟（現行 rev）依 rem 分桶；≥300m 的趟 ev 沒有異常事件（blocked／uturn／unstick／contact／impact／progress）的數量
-  分析用 helper（`import upload_report as UR`）：Anon(root)、hm、q、ci、binom_p、opts_of、is_tow、per_em、load_summaries、
-    load_clips（since 省略＝pull.json）、dedupe、trips、events、window、edge_row、classify_impact、real_impacts
+  分析用 helper（`import upload_report as UR`）：Anon(root)、hm、q、ci、binom_p、boot_ratio、opts_of、is_tow、per_em、
+    load_summaries、load_clips（since 省略＝pull.json）、dedupe、trips、events、window、edge_row、classify_impact、real_impacts
 """
 import argparse
 import collections
@@ -38,6 +42,7 @@ import glob
 import json
 import math
 import os
+import random
 import re
 import statistics
 import sys
@@ -72,6 +77,9 @@ class Anon:
         if not root:
             return
         p = os.path.join(root, ANON_USERS)
+        if not os.path.exists(p):   # 新的一批：沿用同層最新一批的表（2026-10-20 新批從 P01 重編，open-issues 的 P## 全對不上）
+            prev = glob.glob(os.path.join(os.path.dirname(os.path.abspath(root)), "*", ANON_USERS))
+            p = max(prev, key=os.path.getmtime, default=p)
         if os.path.exists(p):
             with open(p, encoding="utf-8") as fh:
                 for ln in fh:
@@ -106,6 +114,32 @@ def binom_p(k1, k2, w1, w2):
     n, p = k1 + k2, w1 / (w1 + w2)
     pr = [math.comb(n, i) * p ** i * (1 - p) ** (n - i) for i in range(n + 1)]
     return min(1.0, sum(x for x in pr if x <= pr[k1] * (1 + 1e-9)))
+
+
+def boot_ratio(L1, L2, val, B=2000, seed=7):
+    """每千 km 率比（L1／L2）的玩家叢集 bootstrap：兩組各自以玩家（摘要 u）為單位重抽，回傳 (點估計, 2.5%, 97.5%)；
+    val(o)＝該趟件數。L2 沒有件數或任一組沒有里程時回 None。撞擊常同一人連發，以趟或件為單位的 Poisson p 會偏小。"""
+    def agg(L):
+        U = collections.defaultdict(lambda: [0.0, 0.0])
+        for o in L:
+            u = U[o.get("u")]
+            u[0] += val(o)
+            u[1] += (o.get("dist") or 0) / 1000
+        return list(U.values())
+
+    U1, U2 = agg(L1), agg(L2)
+    k1, w1 = sum(x[0] for x in U1), sum(x[1] for x in U1)
+    k2, w2 = sum(x[0] for x in U2), sum(x[1] for x in U2)
+    if not (k2 and w1 and w2):
+        return None
+    rnd, rr = random.Random(seed), []
+    for _ in range(B):
+        a = [rnd.choice(U1) for _ in U1]
+        b = [rnd.choice(U2) for _ in U2]
+        kb, wa, wb = sum(x[0] for x in b), sum(x[1] for x in a), sum(x[1] for x in b)
+        if kb and wa and wb:
+            rr.append(sum(x[0] for x in a) / wa / (kb / wb))
+    return k1 / w1 / (k2 / w2), q(rr, 0.025), q(rr, 0.975)
 
 
 def q(xs, p):
@@ -324,7 +358,7 @@ def small_impacts(E, S=None):
 
 # ---------- 各節 ----------
 
-def sec_a(S, small=None):
+def sec_a(S, small=None, cur=(), cover=None):
     print("== A 摘要（(u, drive) 去重、依 build）")
     by = collections.defaultdict(list)
     for o in S.values():
@@ -344,12 +378,12 @@ def sec_a(S, small=None):
             print("  " + "  ".join(f"{f} {v}={v / km * 1000:.1f}/千km (95% {ci(v)[0] / km * 1000:.1f}-{ci(v)[1] / km * 1000:.1f})"
                                    for f, v in k.items()))
             print(f"  impact 不含小動物 {ns}={ns / km * 1000:.1f}/千km (95% {ci(ns)[0] / km * 1000:.1f}-{ci(ns)[1] / km * 1000:.1f})"
-                  f"（扣 small-animal {sm}）")
+                  f"（扣 small-animal {sm}；片段涵蓋 {(cover or {}).get(b, 0)}/{k['impact']} 件）")
         K[b] = (km, k, ns, collections.Counter(o.get("rpt") or "unknown" for o in L))
         if set(K[b][3]) != {"unknown"}:      # 1018a 起摘要 rpt＝最後一次 route cutover 的主 MOD RoadPatch 狀態；缺＝舊 rev／舊主 MOD
             print("  RoadPatch rpt " + ", ".join(f"{r}:{v}" for r, v in K[b][3].most_common()))
         rs = collections.Counter((o.get("reason") or "?").replace(PFX, "") for o in L)
-        print("  reasons " + ", ".join(f"{r}:{v}({v / n * 100:.1f}%)" for r, v in rs.most_common(10)))
+        print("  reasons " + ", ".join(f"{r}:{v}({v / n * 100:.1f}%)" for r, v in rs.most_common()))
         loss = collections.Counter()
         for o in L:
             for r, v in (o.get("loss") or {}).items():
@@ -366,11 +400,26 @@ def sec_a(S, small=None):
             line += (f"  offset 趟={len(hasoff)} 有偏離={sum(1 for o in hasoff if o.get('offN'))} offN={offn}"
                      f"（{offn / km * 100 if km else 0:.1f}/百km） offMax={max(o.get('offMax') or 0 for o in hasoff) / 1000:.1f}s")
         print(line)
+    sm = small or {}
+    val = {"impact": lambda o: o.get("impact") or 0, "impZ": lambda o: o.get("impZ") or 0,
+           "contact": lambda o: o.get("contact") or 0,
+           "impact不含小動物": lambda o: max(0, (o.get("impact") or 0) - sm.get((o.get("u"), o.get("drive")), 0))}
+
+    def cmp(name, L1, L2):
+        w1, w2 = (sum(o.get("dist") or 0 for o in L) / 1000 for L in (L1, L2))
+        parts = []
+        for f, fn in val.items():
+            r = boot_ratio(L1, L2, fn)
+            p = binom_p(sum(map(fn, L1)), sum(map(fn, L2)), w1, w2) if w1 + w2 else 1.0
+            parts.append(f"{f} ×{r[0]:.2f}（{r[1]:.2f}–{r[2]:.2f}）p={p:.3f}" if r else f"{f} —（基準 0 件）p={p:.3f}")
+        print(f"  {name}: " + "  ".join(parts))
+
+    print("  率比（玩家叢集 bootstrap 95%；p＝Poisson 條件二項，同一玩家連撞時偏小：判版本差看區間，並對照同碼 A/A）")
     for i in range(1, len(order)):
-        (w1, k1, n1, _), (w2, k2, n2, _) = K[order[i]], K[order[i - 1]]
-        if w1 and w2:
-            print(f"  {order[i]} vs {order[i - 1]}: " + " ".join(f"{f} p={binom_p(k1[f], k2[f], w1, w2):.3f}" for f in k1)
-                  + f" impact不含小動物 p={binom_p(n1, n2, w1, w2):.3f}")
+        cmp(f"{order[i]} vs {order[i - 1]}", by[order[i]], by[order[i - 1]])
+    same = [b for b in order if cur and {o.get("rev") for o in by[b]} <= set(cur)]
+    if len(same) >= 2:
+        cmp(f"同碼 A/A（--current 駕駛相同）{same[0]} vs {'+'.join(same[1:])}", by[same[0]], [o for b in same[1:] for o in by[b]])
     return {b: dict(trips=len(by[b]), km=K[b][0], impactNoSmall=K[b][2], rpt=dict(K[b][3]), **K[b][1]) for b in order}
 
 
@@ -654,10 +703,12 @@ def write_picks(path, picks, A):
             fh.write("\t".join(map(str, (cat, hm(ts), A(rec["u"]), rec["rev"], rec["kind"], rec["veh"], rec["f"], note))) + "\n")
 
 
-def report(root, since_s, cur, picks_path=None):
+def report(root, since_s, cur, picks_path=None, withs=()):
     since = float(since_s) * 1000
     A, picks = Anon(root), []
-    S = load_summaries(root)
+    S = {}
+    for d in (*withs, root):                          # 摘要 8 檔輪寫、舊 build 的趟會被輪掉：先載較早的批，同 (u, drive) 以本批為準
+        S.update(load_summaries(d))
     write_anon(root, S, A)
     C = load_clips(root, since)
     # 下車煞車判定要查同趟摘要：片段資料夾名是伺服器清理過的玩家名，和摘要 u 不一定相同，另以 drive 唯一時備查
@@ -666,7 +717,9 @@ def report(root, since_s, cur, picks_path=None):
     for (u, d), o in S.items():
         if byd[d] == 1:
             Sd[("*", d)] = o
-    a = sec_a(S, small_impacts(dedupe(C), Sd))        # 不限 rev：摘要也是全部 build
+    Eall = dedupe([r for d in (*withs, root) for r in load_clips(d, 0)])   # A 不限窗口：各 build 有片段的撞擊都扣小動物
+    cover = collections.Counter(rec["build"] for _, rec in real_impacts(Eall, Sd)[0])
+    a = sec_a(S, small_impacts(Eall, Sd), cur, cover)  # 不限 rev：摘要也是全部 build
     b = sec_b(C, cur, A)
     C = [r for r in C if r["rev"] in cur]             # C–J 只看現行 rev（舊版只能排除，不拿來定罪）
     E = dedupe(C)
@@ -829,6 +882,32 @@ def self_test():
         check(res["K"] == {"2": (20, 20, 20)}, "接手結束 rem ≥300 且 ev 無異常")
         tsv = open(os.path.join(d, "picks.tsv"), encoding="utf-8").read()
         check("pa/clip-04.log" in tsv and "pa/" not in out.getvalue() and "pb" not in out.getvalue(), "picks 有路徑、stdout 不含玩家名")
+        dold = os.path.join(d, "_old")                                 # 較早的一批：只有摘要（同 (u, drive) 的那趟以本批為準）
+        put("_old/summary-1.log", [sm("o%d" % i, T - 10 ** 6 + i, "b-0", impact=0) for i in range(20)]
+            + [sm("u0", T + 100, "b-2", impact=5)])
+        with contextlib.redirect_stdout(io.StringIO()):
+            a2 = report(d, T / 1000, {"2"}, None, [dold])["A"]
+        check(a2.get("b-0", {}).get("trips") == 20 and a2["b-2"]["impact"] == 2,
+              "--with 併入較早一批的摘要（多出 b-0）；同 (u, drive) 以本批為準（b-2 impact 仍 2）")
+    one = [dict(u="a0", dist=1000, impact=1) for _ in range(20)] + [dict(u="a%d" % i, dist=1000, impact=0) for i in range(1, 20)]
+    two = [dict(u="b%d" % i, dist=1000, impact=1 if i < 2 else 0) for i in range(20)]
+    r = boot_ratio(one, two, lambda o: o["impact"])
+    check(binom_p(20, 2, 39, 20) < 0.05 and r[1] < 1 < r[2],
+          f"boot_ratio 以玩家重抽：20 件全是同一人的 20 趟時 Poisson p<0.05、玩家叢集區間仍含 1（{r}）")
+    S2 = {("u%d" % i, i): dict(u="u%d" % i, drive=i, build="b-7" if i < 20 else "b-8", rev="x", dist=1000, impact=int(i % 7 == 0))
+          for i in range(40)}
+    out2 = io.StringIO()
+    with contextlib.redirect_stdout(out2):
+        sec_a(S2, {}, {"x"})
+    check("同碼 A/A（--current 駕駛相同）b-7 vs b-8" in out2.getvalue() and "同碼 A/A（--current" not in out.getvalue(),
+          "A：--current 內有兩個以上 build 才印同碼 A/A 率比")
+    with tempfile.TemporaryDirectory() as par:
+        for sub in ("old", "new"):
+            os.makedirs(os.path.join(par, sub))
+        with open(os.path.join(par, "old", ANON_USERS), "w", encoding="utf-8", newline="") as fh:
+            fh.write("P07\tzz\n")
+        an = Anon(os.path.join(par, "new"))
+        check(an("zz") == "P07" and an("yy") == "P08", "新一批還沒有 anon-users.tsv：沿用同層最新一批的表，代碼不重編")
     print(f"self-test：{len(bad)} 項失敗")
     return 1 if bad else 0
 
@@ -841,8 +920,9 @@ def main(argv):
     ap.add_argument("since", type=float, help="窗口起點 epoch 秒（片段 trig ≥ since）")
     ap.add_argument("--current", default="1010a,1010c", help="駕駛行為與 HEAD 相同的 rev，逗號分隔")
     ap.add_argument("--picks", help="輸出片段清單 TSV（含真實資料夾名，只留本機）")
+    ap.add_argument("--with", dest="withs", action="append", default=[], help="較早的 pull 目錄（可重複）：A 節併入它們的摘要與片段")
     a = ap.parse_args(argv)
-    report(a.root, a.since, set(a.current.split(",")), a.picks)
+    report(a.root, a.since, set(a.current.split(",")), a.picks, a.withs)
     return 0
 
 
