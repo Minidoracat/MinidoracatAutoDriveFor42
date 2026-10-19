@@ -84,6 +84,7 @@
     "UI_MinidoracatAutoDrive_HUDSpeedRowWhy": "Raison principale",
     "UI_MinidoracatAutoDrive_HUDSpeedLegend": "Vert = marge disponible, rouge/ambre = retient la vitesse",
     "UI_MinidoracatAutoDrive_SlowWhy_none": "aucune limite supplémentaire",
+    "UI_MinidoracatAutoDrive_SlowWhy_vehicle": "déjà à la vitesse max du véhicule",
     "UI_MinidoracatAutoDrive_SlowWhy_idle": "pas en conduite auto pour le moment",
     "UI_MinidoracatAutoDrive_SlowWhy_curve": "virage, ou la voiture n'est pas encore alignée sur l'itinéraire",
     "UI_MinidoracatAutoDrive_SlowWhy_vis": "anticipation limitée (carte non chargée ou saccades)",

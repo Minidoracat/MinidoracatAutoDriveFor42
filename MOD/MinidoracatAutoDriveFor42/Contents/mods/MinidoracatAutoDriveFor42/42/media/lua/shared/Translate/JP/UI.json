@@ -84,6 +84,7 @@
     "UI_MinidoracatAutoDrive_HUDSpeedRowWhy": "主な理由",
     "UI_MinidoracatAutoDrive_HUDSpeedLegend": "緑＝余裕あり・赤／琥珀＝速度を抑えている",
     "UI_MinidoracatAutoDrive_SlowWhy_none": "追加の制限なし",
+    "UI_MinidoracatAutoDrive_SlowWhy_vehicle": "すでに車両の最高速度",
     "UI_MinidoracatAutoDrive_SlowWhy_idle": "現在は自動運転していません",
     "UI_MinidoracatAutoDrive_SlowWhy_curve": "カーブ、または車の向きがまだルートに合っていない",
     "UI_MinidoracatAutoDrive_SlowWhy_vis": "前方の見える距離が短い（未読み込み・カクつき）",

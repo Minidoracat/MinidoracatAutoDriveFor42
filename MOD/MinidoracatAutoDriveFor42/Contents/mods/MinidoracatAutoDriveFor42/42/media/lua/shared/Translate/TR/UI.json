@@ -84,6 +84,7 @@
     "UI_MinidoracatAutoDrive_HUDSpeedRowWhy": "Ana neden",
     "UI_MinidoracatAutoDrive_HUDSpeedLegend": "Yeşil = pay var, kırmızı/kehribar = hızı tutuyor",
     "UI_MinidoracatAutoDrive_SlowWhy_none": "ek sınır yok",
+    "UI_MinidoracatAutoDrive_SlowWhy_vehicle": "zaten araç azami hızında",
     "UI_MinidoracatAutoDrive_SlowWhy_idle": "şu anda otomatik sürüş yok",
     "UI_MinidoracatAutoDrive_SlowWhy_curve": "viraj ya da araç henüz rotaya hizalanmadı",
     "UI_MinidoracatAutoDrive_SlowWhy_vis": "sınırlı ileri görüş (yüklenmemiş harita veya takılma)",

@@ -84,6 +84,7 @@ local texts = {
     UI_MinidoracatAutoDrive_HUDSpeed = "SPEED",
     UI_MinidoracatAutoDrive_SlowWhy_curve = "CURVE",
     UI_MinidoracatAutoDrive_SlowWhy_none = "NONE",
+    UI_MinidoracatAutoDrive_SlowWhy_vehicle = "VEHICLE",
     UI_MinidoracatAutoDrive_SlowWhy_idle = "IDLE",
     UI_MinidoracatAutoDrive_HUDStatusReady = "READY",
     UI_MinidoracatAutoDrive_HUDStatusEngineOff = "ENGINE OFF",
@@ -1436,6 +1437,43 @@ do
     check(not panel._speedPin and optionSets.MinidoracatAutoDrive:getOption("SpeedDetails"):getValue() == false
         and not box.visible,
         "second click unpins the speed details")
+    MDAD.Drive.speedInfo = nil
+    state.cap = 50
+end
+-- 車輛極速低於檔位上限（2026-10-19 玩家回報：極速 65 的廂型車選 70 檔，直路貼著極速跑，主因卻寫「彎道」）：
+-- 「被壓低」以巡航上限與車輛極速取小為準；貼著極速時主因寫極速、只有車輛列在限；真的被彎道壓低照舊標彎道。
+do
+    local info = { 65, 120, 70, 65, "curve-coast", 120, 86 }
+    MDAD.Drive.speedInfo = function() return info[1], info[2], info[3], info[4], info[5], info[6], info[7] end
+    state.token, state.cap = "follow", 70
+    local t1 = nowMs + 20000
+    click(panel.speedButton)
+    panel:refresh(t1)
+    panel:refresh(t1 + 2100)
+    local rows = panel._pinRows
+    check(rows and rows[10][2] == "VEHICLE" and rows[10][3] == rows[3][3] and rows[9][3] == rows[3][3]
+        and rows[4][3] == rows[3][3] and rows[1][3] ~= rows[3][3],
+        "(vmax-gear) at its own top speed below the gear limit: reason says top speed, only the vehicle row limits")
+    -- 極速 20 的車（坦克類 MOD）選 70 檔：貼著極速也不把狀態字換成彎道減速
+    info[1], info[4] = 20, 20
+    panel:refresh(t1 + 2200)
+    panel:refresh(t1 + 4400)
+    check(panel._pinRows[10][2] == "VEHICLE" and panel._statusText == "FOLLOW",
+        "(vmax-low) a slow vehicle at its top speed is not reported as slowed (" .. tostring(panel._statusText) .. ")")
+    -- 同一台車被壓到 15：主因是彎道，但只低到極速的 75%，狀態字的 70% 門檻也以極速為準、不換字
+    info[4] = 15
+    panel:refresh(t1 + 4410)
+    panel:refresh(t1 + 6600)
+    check(panel._pinRows[10][2] == "CURVE" and panel._statusText == "FOLLOW",
+        "(vmax-ratio) the slow-status threshold is 70% of the vehicle top speed, not of the gear limit ("
+            .. tostring(panel._statusText) .. ")")
+    -- 真的被彎道壓到 40：主因照舊是彎道，持續 2 秒換狀態字
+    info[1], info[4] = 65, 40
+    panel:refresh(t1 + 6700)
+    panel:refresh(t1 + 8900)
+    check(panel._pinRows[10][2] == "CURVE" and panel._statusText == "CORNER",
+        "(vmax-curve) a real corner slowdown below the vehicle top speed still shows the corner reason")
+    click(panel.speedButton)
     MDAD.Drive.speedInfo = nil
     state.cap = 50
 end

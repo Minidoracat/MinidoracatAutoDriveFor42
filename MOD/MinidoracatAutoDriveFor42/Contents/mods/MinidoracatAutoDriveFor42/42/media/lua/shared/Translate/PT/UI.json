@@ -84,6 +84,7 @@
     "UI_MinidoracatAutoDrive_HUDSpeedRowWhy": "Motivo principal",
     "UI_MinidoracatAutoDrive_HUDSpeedLegend": "Verde = folga, vermelho/âmbar = segurando a velocidade",
     "UI_MinidoracatAutoDrive_SlowWhy_none": "sem limite extra",
+    "UI_MinidoracatAutoDrive_SlowWhy_vehicle": "já na velocidade máxima do veículo",
     "UI_MinidoracatAutoDrive_SlowWhy_idle": "sem direção automática no momento",
     "UI_MinidoracatAutoDrive_SlowWhy_curve": "curva, ou o carro ainda não está alinhado com a rota",
     "UI_MinidoracatAutoDrive_SlowWhy_vis": "visão limitada (mapa não carregado ou travadas)",

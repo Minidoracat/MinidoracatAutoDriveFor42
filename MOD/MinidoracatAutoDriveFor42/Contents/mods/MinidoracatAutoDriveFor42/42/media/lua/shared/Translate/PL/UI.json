@@ -84,6 +84,7 @@
     "UI_MinidoracatAutoDrive_HUDSpeedRowWhy": "Główny powód",
     "UI_MinidoracatAutoDrive_HUDSpeedLegend": "Zielony = zapas, czerwony/bursztynowy = ogranicza prędkość",
     "UI_MinidoracatAutoDrive_SlowWhy_none": "brak dodatkowego limitu",
+    "UI_MinidoracatAutoDrive_SlowWhy_vehicle": "już jedzie z prędkością maks. pojazdu",
     "UI_MinidoracatAutoDrive_SlowWhy_idle": "autopilot teraz nie jedzie",
     "UI_MinidoracatAutoDrive_SlowWhy_curve": "zakręt lub auto nie jest jeszcze ustawione wzdłuż trasy",
     "UI_MinidoracatAutoDrive_SlowWhy_vis": "ograniczony zasięg widzenia (niewczytana mapa lub przycięcia)",

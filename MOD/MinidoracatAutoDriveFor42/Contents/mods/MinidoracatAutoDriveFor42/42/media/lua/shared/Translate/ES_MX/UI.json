@@ -84,6 +84,7 @@
     "UI_MinidoracatAutoDrive_HUDSpeedRowWhy": "Motivo principal",
     "UI_MinidoracatAutoDrive_HUDSpeedLegend": "Verde = margen libre, rojo/ámbar = está frenando la velocidad",
     "UI_MinidoracatAutoDrive_SlowWhy_none": "sin límite adicional",
+    "UI_MinidoracatAutoDrive_SlowWhy_vehicle": "ya va a la velocidad máxima del vehículo",
     "UI_MinidoracatAutoDrive_SlowWhy_idle": "no hay conducción automática ahora",
     "UI_MinidoracatAutoDrive_SlowWhy_curve": "curva, o el auto aún no está alineado con la ruta",
     "UI_MinidoracatAutoDrive_SlowWhy_vis": "visión limitada (mapa sin cargar o tirones)",

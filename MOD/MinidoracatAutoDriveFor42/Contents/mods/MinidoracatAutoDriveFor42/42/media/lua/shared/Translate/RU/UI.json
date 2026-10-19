@@ -84,6 +84,7 @@
     "UI_MinidoracatAutoDrive_HUDSpeedRowWhy": "Главная причина",
     "UI_MinidoracatAutoDrive_HUDSpeedLegend": "Зелёный = есть запас, красный/янтарный = сдерживает скорость",
     "UI_MinidoracatAutoDrive_SlowWhy_none": "нет доп. ограничений",
+    "UI_MinidoracatAutoDrive_SlowWhy_vehicle": "уже макс. скорость машины",
     "UI_MinidoracatAutoDrive_SlowWhy_idle": "автопилот сейчас не активен",
     "UI_MinidoracatAutoDrive_SlowWhy_curve": "поворот, или машина ещё не выровнена по маршруту",
     "UI_MinidoracatAutoDrive_SlowWhy_vis": "ограниченный обзор (незагруженная карта или подтормаживания)",

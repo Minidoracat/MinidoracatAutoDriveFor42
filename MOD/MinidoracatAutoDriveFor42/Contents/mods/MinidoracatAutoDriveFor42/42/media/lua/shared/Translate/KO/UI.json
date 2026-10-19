@@ -84,6 +84,7 @@
     "UI_MinidoracatAutoDrive_HUDSpeedRowWhy": "주된 이유",
     "UI_MinidoracatAutoDrive_HUDSpeedLegend": "녹색 = 여유, 빨강/주황 = 속도 억제 중",
     "UI_MinidoracatAutoDrive_SlowWhy_none": "추가 제한 없음",
+    "UI_MinidoracatAutoDrive_SlowWhy_vehicle": "이미 차량 최고 속도",
     "UI_MinidoracatAutoDrive_SlowWhy_idle": "현재 자율주행 중 아님",
     "UI_MinidoracatAutoDrive_SlowWhy_curve": "코너이거나 차량이 아직 경로와 정렬되지 않음",
     "UI_MinidoracatAutoDrive_SlowWhy_vis": "전방 감지 제한(지도 미로딩 또는 끊김)",

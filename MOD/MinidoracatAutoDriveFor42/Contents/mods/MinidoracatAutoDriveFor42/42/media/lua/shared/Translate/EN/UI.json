@@ -84,6 +84,7 @@
     "UI_MinidoracatAutoDrive_HUDSpeedRowWhy": "Main reason",
     "UI_MinidoracatAutoDrive_HUDSpeedLegend": "Green = headroom, red/amber = holding speed down",
     "UI_MinidoracatAutoDrive_SlowWhy_none": "no extra limit",
+    "UI_MinidoracatAutoDrive_SlowWhy_vehicle": "already at the vehicle's top speed",
     "UI_MinidoracatAutoDrive_SlowWhy_idle": "not auto-driving right now",
     "UI_MinidoracatAutoDrive_SlowWhy_curve": "corner, or the car is not yet lined up with the route",
     "UI_MinidoracatAutoDrive_SlowWhy_vis": "limited look-ahead (unloaded map or stuttering)",

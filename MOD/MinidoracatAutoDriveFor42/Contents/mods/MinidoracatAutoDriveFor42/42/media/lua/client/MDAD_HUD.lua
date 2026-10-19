@@ -2030,18 +2030,12 @@ function MDADHUDPanel:refreshSpeedTip(token, cruise, now)
     self._speedPin = speedDetails()
     self._pinRows = nil
     local category = nil
+    -- 判「被壓低」的基準＝實際上限：巡航上限（沙盒×檔位；30/50/70 檔不含車輛極速）與車輛極速（有伺服器速限時換算成
+    -- 實際可達）取小。直路的車道包絡＝車輛極速，Driver 照記 curve-coast；拿巡航上限判，極速低於檔位的車貼著極速跑
+    -- 也會被標成「彎道」（2026-10-19 玩家回報：極速 65 的廂型車選 70 檔）。
+    local ceiling = cruise
     if type(sandMax) == "number" then
         local driving = type(target) == "number"
-        if driving then
-            category = reason and (SLOW_CATEGORY[reason] or "other") or nil
-            -- 沒有任何限速在綁、目標仍低於巡航：Follower 剖面在前方彎道／終點提前收油
-            if not category and type(cruise) == "number" and target < cruise - 2 then category = "plan" end
-            -- 目標已貼著巡航上限：殘留的限速代碼沒在壓速度，不列為主因
-            if type(cruise) == "number" and target >= cruise * 0.95 then category = nil end
-        end
-        local function n(v) return type(v) == "number" and v >= 0 and string.format("%d", math.floor(v + 0.5)) or "--" end
-        local why = getText(category and ("UI_MinidoracatAutoDrive_SlowWhy_" .. category)
-            or (driving and "UI_MinidoracatAutoDrive_SlowWhy_none" or "UI_MinidoracatAutoDrive_SlowWhy_idle"))
         -- 伺服器速限下的真實可達速度：引擎推力在「放大後車速」超過極速起遞減、極速+20 歸零；
         -- 取放大後＝極速+15 反解（本機實測極速 70／速限 70 停在 58–59）。二分只在 refresh 跑。
         local serverL = type(Drive.serverSpeedLimit) == "function" and Drive.serverSpeedLimit() or nil
@@ -2054,17 +2048,34 @@ function MDADHUDPanel:refreshSpeedTip(token, cruise, now)
             end
             realV = math.min(vmax, lo)
         end
+        if type(ceiling) == "number" and type(realV) == "number" and realV > 0 and realV < ceiling then
+            ceiling = realV
+        end
+        local atVehicle = false
+        if driving then
+            category = reason and (SLOW_CATEGORY[reason] or "other") or nil
+            -- 沒有任何限速在綁、目標仍低於實際上限：Follower 剖面在前方彎道／終點提前收油
+            if not category and type(ceiling) == "number" and target < ceiling - 2 then category = "plan" end
+            -- 目標已貼著實際上限：殘留的限速代碼沒在壓速度，不列為主因；上限是車輛極速時主因寫明
+            if type(ceiling) == "number" and target >= ceiling * 0.95 then
+                category, atVehicle = nil, ceiling ~= cruise
+            end
+        end
+        local function n(v) return type(v) == "number" and v >= 0 and string.format("%d", math.floor(v + 0.5)) or "--" end
+        local why = getText(category and ("UI_MinidoracatAutoDrive_SlowWhy_" .. category)
+            or atVehicle and "UI_MinidoracatAutoDrive_SlowWhy_vehicle"
+            or (driving and "UI_MinidoracatAutoDrive_SlowWhy_none" or "UI_MinidoracatAutoDrive_SlowWhy_idle"))
         local vehText = n(vmax)
         if realV ~= vmax then vehText = getText("UI_MinidoracatAutoDrive_HUDSpeedVehicleReal", n(vmax), n(realV)) end
         local serverText = serverL and n(serverL) or getText("UI_MinidoracatAutoDrive_HUDSpeedServerNone")
         self._speedTip = getText("UI_MinidoracatAutoDrive_HUDSpeedTip", vehText, n(sandMax), n(gearCap), n(cruise),
             n(target), why, n(curveCap), n(visCap), serverText) .. "\n" .. getText("UI_MinidoracatAutoDrive_HUDSpeedPinOn")
         if self._speedPin then self:buildPinRows(n, vmax, sandMax, gearCap, cruise, target, why, category, curveCap, visCap,
-            vehText, realV, serverL, serverText, factorCap, factorReason) end
+            vehText, realV, serverL, serverText, factorCap, factorReason, ceiling) end
     end
-    local slowed = token == "follow" and category ~= nil and type(cruise) == "number" and cruise > 0
+    local slowed = token == "follow" and category ~= nil and type(ceiling) == "number" and ceiling > 0
         and type(target) == "number"
-        and target < cruise * SLOW_RATIO
+        and target < ceiling * SLOW_RATIO
     if slowed then
         self._slowClear = nil
         self._slowSince = self._slowSince or now
@@ -2100,17 +2111,17 @@ function MDADHUDPanel:refreshDiagLine(token, target, reason)
     self._diagW = textWidth(UIFont.Small, self._diagText) + 8
 end
 
--- 固定顯示的速度明細：左欄名、右數值。上限類數值高於巡航＝綠（有餘裕），
--- 壓在巡航以下＝紅（正在減速）；目標到巡航＝綠、被壓低＝琥珀。顏色之外，末列圖例與
+-- 固定顯示的速度明細：左欄名、右數值。顏色的基準是實際上限 ceiling（巡航上限與車輛極速取小，見 refreshSpeedTip）：
+-- 上限類數值高於它＝綠（有餘裕），壓在它以下＝紅（正在減速）；目標到它＝綠、被壓低＝琥珀。顏色之外，末列圖例與
 -- 「主因」一列用文字說明，不靠顏色單獨表意。只在 250ms refresh 建表與量寬。
 function MDADHUDPanel:buildPinRows(n, vmax, sandMax, gearCap, cruise, target, why, category, curveCap, visCap,
-        vehText, realV, serverL, serverText, factorCap, factorReason)
-    local cr = type(cruise) == "number" and cruise or 0
+        vehText, realV, serverL, serverText, factorCap, factorReason, ceiling)
+    local cr = type(ceiling) == "number" and ceiling or 0
     local function limit(v)
         if type(v) ~= "number" or v < 0 then return C.muted end
         return v < cr - 0.5 and C.slowText or C.green
     end
-    local function capOf(v) -- 巡航的組成：等於巡航的那一項就是它在限
+    local function capOf(v) -- 上限的組成：等於實際上限的那一項就是它在限
         if type(v) ~= "number" or v < 0 then return C.muted end
         return v <= cr + 0.5 and C.amber or C.green
     end

@@ -84,6 +84,7 @@
     "UI_MinidoracatAutoDrive_HUDSpeedRowWhy": "主因",
     "UI_MinidoracatAutoDrive_HUDSpeedLegend": "綠＝還有餘裕·紅／琥珀＝正在壓低速度",
     "UI_MinidoracatAutoDrive_SlowWhy_none": "沒有額外限制",
+    "UI_MinidoracatAutoDrive_SlowWhy_vehicle": "已是這台車的極速",
     "UI_MinidoracatAutoDrive_SlowWhy_idle": "目前沒有在自動駕駛",
     "UI_MinidoracatAutoDrive_SlowWhy_curve": "彎道或車頭還沒對準路線",
     "UI_MinidoracatAutoDrive_SlowWhy_vis": "前方看得到的距離有限（未載入或畫面卡頓）",

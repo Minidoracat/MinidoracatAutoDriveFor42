@@ -84,6 +84,7 @@
     "UI_MinidoracatAutoDrive_HUDSpeedRowWhy": "Hauptgrund",
     "UI_MinidoracatAutoDrive_HUDSpeedLegend": "Grün = Spielraum, Rot/Gelb = drückt das Tempo",
     "UI_MinidoracatAutoDrive_SlowWhy_none": "kein zusätzliches Limit",
+    "UI_MinidoracatAutoDrive_SlowWhy_vehicle": "schon bei der Höchstgeschwindigkeit des Fahrzeugs",
     "UI_MinidoracatAutoDrive_SlowWhy_idle": "Autopilot fährt gerade nicht",
     "UI_MinidoracatAutoDrive_SlowWhy_curve": "Kurve, oder das Auto steht noch nicht in Routenrichtung",
     "UI_MinidoracatAutoDrive_SlowWhy_vis": "begrenzte Vorausschau (Karte nicht geladen oder Ruckeln)",
