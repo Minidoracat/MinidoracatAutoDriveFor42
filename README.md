@@ -65,7 +65,7 @@ Project Zomboid Build 42 MOD。
 | ![Autodrive HUD with voice prompt tooltip](docs/screenshots/en/01-autodrive-hud-voice.png) | ![Wings HUD theme following a route through an intersection](docs/screenshots/en/02-hud-theme-wings-route.png) |
 | ![AutoDrive sandbox options](docs/screenshots/en/03-autodrive-sandbox-settings-en.png) | ![MiniMap settings, Autodrive category](docs/screenshots/en/04-minimap-autodrive-settings.png) |
 
-Steam Workshop 用 JPG（每張 ≤280,000 bytes，Steamworks 預覽圖上限）在 `docs/screenshots/steam/{zh,en}/`，編號與上表一致；`scripts/publish_workshop.py --mode screenshots` 同步到作品頁。
+Steam Workshop 用 JPG（每張 ≤280,000 bytes）在 `docs/screenshots/steam/{zh,en}/`，編號與上表一致。
 
 ## 安裝
 
