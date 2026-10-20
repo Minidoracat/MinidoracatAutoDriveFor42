@@ -57,6 +57,15 @@ def recs(path):
     return out
 
 
+def hit_xy(o):
+    """blocked／detour stuck 的命中點：hitX,hitY → x,y；(0,0) 不算（1020a 前非撞擊的掃掠失敗寫 0,0，舊片段還會有）。"""
+    for kx, ky in (("hitX", "hitY"), ("x", "y")):
+        x, y = o.get(kx), o.get(ky)
+        if x is not None and y is not None and (x, y) != (0, 0):
+            return x, y
+    return None, None
+
+
 def show(path):
     return "/".join(path.replace("\\", "/").split("/")[-3:])
 
@@ -281,8 +290,8 @@ def collect(dirs, A, surf):
                     if k:
                         hard.setdefault((math.floor(p["x"]), math.floor(p["y"]), k), (p["x"], p["y"], act, label))
             elif o.get("t") == "e" and (o.get("n") == "blocked" or (o.get("n") == "detour" and o.get("phase") == "stuck")):
-                hx, hy = o.get("hitX") or o.get("x"), o.get("hitY") or o.get("y")
-                if hx and line_dist(act, hx, hy) <= ON_LINE_M:
+                hx, hy = hit_xy(o)
+                if hx is not None and line_dist(act, hx, hy) <= ON_LINE_M:
                     label = near_at.get((round(hx, 1), round(hy, 1)), "?")
                     mk(hx, hy, "hit" if label != "車輛" else "hit-veh", 2 if label != "車輛" else 0,
                        "%s %s %s 命中導航線上（%s）" % (o["n"], o.get("why") or o.get("phase"), o.get("detail") or "", label))
@@ -470,6 +479,8 @@ def selftest(_args):
     assert kinds([(0, 0), (100, 0), (200, 1), (300, 1)], [8, 8, 8]) == set()
     assert hard_kind({"r": 0, "x": 1.5, "y": 1.5})[0] == "thin" and hard_kind({"r": 0.15, "x": 3.6, "y": 4.6})[0] == "tree"
     assert hard_kind({"r": 0.15, "x": 3.2, "y": 4.9})[0] is None
+    assert hit_xy({"hitX": 0, "hitY": 0, "x": 12.5, "y": 3.5}) == (12.5, 3.5)
+    assert hit_xy({"hitX": 0, "hitY": 0, "x": 0, "y": 0}) == (None, None) and hit_xy({"hitX": 7, "hitY": 0}) == (7, 0)
     print("selftest ok")
 
 

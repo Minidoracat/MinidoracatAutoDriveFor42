@@ -29063,6 +29063,196 @@ function drive.scenarioLaunchHold()
 end
 drive.scenarioLaunchHold()
 
+-- (launch-still) 1020a 靜止判堵也套起步包絡（正式服 1019a：倒車脫困退出 LAUNCH_HOLD_M 外、靜止判堵 bv 0.07，舊制照 blocked
+--   天花板 20 從 3.8 加到 15.6 km/h、撞回同一棵樹）：判堵上升緣車速 s.blockedEntryKmh ≤ LAUNCH_HOLD_KMH 就閂上，不看離武裝點多遠。
+--   (launch-still)       起步點 12m 外（起步近物保護武裝點在 0）靜止判堵：閂上、launch hold why=still 一次、停止線前 2m
+--                        目標＝Drive.launchCap（停止線收到 LAUNCH_HOLD_KMH）。
+--   (launch-still-run)   同一位置以 10 km/h 判堵：不閂、停止線前 2m 照舊 blocked 接近包絡（停止線收到 BLOCK_APPROACH_KMH）。
+--   (launch-still-defer) 延後先閂成 false、之後靜止判堵：判堵那一幀重判、閂上（predicate）。
+--   違規證明：拿掉 still 條件＝(launch-still)／(launch-still-defer) 紅；門檻換成 LAUNCH_HOLD_ENTRY_KMH＝(launch-still-run) 紅；
+--   只在閂為 nil 時判＝(launch-still-defer) 紅。
+function drive.scenarioLaunchStill()
+    scenario("1020a：靜止判堵也套起步包絡；行進中判堵照舊 blocked 包絡")
+    local oldSand = SandboxVars
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 90, RightLaneBias = 0 })
+    local wasMs = drive.frameMs(20)
+    local Dr, T = MDAD.Drive, MDAD.Drive.debugTune()
+    local oldEvent, oldSample, events = MDADDiagnostics.event, MDADDiagnostics.sample, {}
+    MDADDiagnostics.event = function(_, name, a) events[#events + 1] = { name = name, a = a } end
+    MDADDiagnostics.sample = function() return true end
+    -- 起步點 12m 外、以 kmh 判堵（前方 50m 整排牆），再把車擺到停止線前 2m 跑一幀；回 session、launch 事件數、最後一筆
+    local function round(kmh)
+        drive.fillWorld(-10, 90, -10, 10)
+        armDrive()
+        local st = Dr.debugSession(0)
+        st.diag = true
+        setHeading(dveh, 0)
+        dveh._x, dveh._y, dveh._speed = 12, 0, kmh
+        drive.scanRound(true)
+        st.startGuard, st.startGuardRelease, st.startGuardX, st.startGuardY = true, nil, 0, 0
+        for y = -9, 9 do drive.putSolid(50, y, "still_wall_" .. y) end
+        for i = #events, 1, -1 do events[i] = nil end
+        for _ = 1, 3 do drive.scanRound(true) end
+        local n, last = 0, nil
+        for i = 1, #events do
+            if events[i].name == "launch" then n, last = n + 1, events[i].a end
+        end
+        if st.blocked and type(st.blockHitX) == "number" then
+            dveh._x = st.blockHitX - Dr.blockStopDist(st) - 2
+            nowMs = nowMs + 20
+            driveTick(dp, dveh)
+        end
+        for y = -9, 9 do drive.clearCell(50, y) end
+        return st, n, last
+    end
+    local st, n, ev = round(0)
+    local lc = Dr.launchCap(st, dveh._x, dveh._y)
+    checkTrue(st.blocked == true and (st.blockedEntryKmh or 99) <= T.LAUNCH_HOLD_KMH and st.launchHoldOn == true
+            and n == 1 and ev.why == "still" and st.lastCapReason == "launch" and st.desiredTarget <= lc + 1e-9
+            and lc < T.BLOCK_APPROACH_KMH - 5,
+        "(launch-still) 起步點 12m 外靜止判堵：閂上、停止線前 2m 壓在起步包絡（on=" .. tostring(st.launchHoldOn) .. " n=" .. n
+        .. " why=" .. tostring(ev and ev.why) .. " acr=" .. tostring(st.lastCapReason) .. " des=" .. tostring(st.desiredTarget)
+        .. " lc=" .. tostring(lc) .. "）")
+    MDAD.Drive.stop(0, nil)
+    st, n = round(10)
+    local bc = st.blockedApproachCap
+    checkTrue(st.blocked == true and st.launchHoldOn == false and n == 0 and st.lastCapReason ~= "launch"
+            and type(bc) == "number" and bc >= T.BLOCK_APPROACH_KMH - 1e-6 and st.desiredTarget > T.LAUNCH_HOLD_KMH + 5,
+        "(launch-still-run) 10 km/h 判堵：不閂、停止線前 2m 照舊 blocked 包絡（on=" .. tostring(st.launchHoldOn) .. " n=" .. n
+        .. " acr=" .. tostring(st.lastCapReason) .. " bc=" .. tostring(bc) .. " des=" .. tostring(st.desiredTarget) .. "）")
+    MDAD.Drive.stop(0, nil)
+    -- (launch-still-defer)：predicate 直接問（起步近物保護沒武裝）
+    local fs = { blocked = false, dodging = false, dodgeDeferCap = 10, fstate = {}, lastSNow = 0, blockedEntryKmh = 0 }
+    local d0 = Dr.launchHold(fs, 0, 30, 0, 0)
+    fs.blocked = true
+    local d1 = Dr.launchHold(fs, 0, 30, 0, 0)
+    checkTrue(d0 == false and d1 == true and fs.launchHoldOn == true,
+        "(launch-still-defer) 延後閂成 false 之後靜止判堵：重判閂上（defer=" .. tostring(d0) .. " blocked=" .. tostring(d1) .. "）")
+    MDADDiagnostics.event, MDADDiagnostics.sample = oldEvent, oldSample
+    drive.fillWorld(-2, 70, -7, 7)
+    drive.frameMs(wasMs)
+    SandboxVars = oldSand
+end
+drive.scenarioLaunchStill()
+
+-- (anchor) 1020a 候選鏈 corner 判堵錨（正式服 1017a–1019a 長車 3 趟：shape／建線／覆蓋／band 失敗回 hx,hy＝0,0、hitS＝b 比真命中
+--   近，被選成錨；blockedNear 量世界原點 13 km 外、停止線失效，1019a 從 0 加速到 18.7 km/h）：
+--   (anchor-early) 非撞擊早退不回命中點：sweepLine 輸入無效、sweepCandidate 建線失敗 → hx／hy＝nil。
+--   (anchor-hit)   主候選建線失敗（真的 sweepCandidate 早退，hitS＝b）、重試候選真命中（ph1、hitS 比 b 遠）→ corner 錨＝真命中、
+--                  停止線照世界距、blocked 事件 x／y＝真命中。
+--   (anchor-none)  失敗都沒有命中點 → 錨 nil、s.blockS＝最小 hitS、停止線照弧長（blockedStopGap＝blockS−rs−stopDist）。
+--   fixture：Drive.planDodge／MDADCorridor.plan 換成固定 dodge 剖面、MDADFollower.buildOffsetLine 一律失敗（沒有候選能承諾）、
+--   Drive.zombieSweep 第一條照跑真的（建線早退）、之後照腳本寫 s.fbFail；世界只有路旁 6m 一格（hardN>0、不擋線＝
+--   resolveBlockAnchor 找不到擋線點，錨就是候選鏈給的，正式服 corner 幾何同此）。
+--   違規證明：sweepCandidate 建線早退回 0,0＝(anchor-early)／(anchor-hit)／(anchor-none) 紅；shape 早退、sweepLine 早退回 0,0＝
+--   (anchor-early) 紅；
+--   replan 照舊取 hitS 最小那筆的座標＝(anchor-hit) 紅。
+function drive.scenarioBlockAnchor()
+    scenario("1020a：corner 判堵錨只取真命中點；都沒有就退弧長")
+    local oldSand = SandboxVars
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 90, RightLaneBias = 0 })
+    local Dr = MDAD.Drive
+    local oldEvent, oldSample, events = MDADDiagnostics.event, MDADDiagnostics.sample, {}
+    MDADDiagnostics.event = function(_, name, a) events[#events + 1] = { name = name, a = a } end
+    MDADDiagnostics.sample = function() return true end
+    local oBuild = MDADFollower.buildOffsetLine
+    local function failBuild(_, rs) return 0, rs, "fold", 0 end
+    -- (anchor-early)
+    drive.fillWorld(-10, 90, -10, 10)
+    drive.putSolid(20, 6, "anchor_side")
+    armDrive()
+    setHeading(dveh, 0)
+    dveh._x, dveh._y, dveh._speed = 0, 0, 0
+    drive.scanRound(true)
+    local okL, _, lx, ly = Dr.debugSweepLine(0, { 0 }, { 0 }, 1, 0, 0)
+    MDADFollower.buildOffsetLine = failBuild
+    local okC, phC, cx, cy = Dr.debugSweepCandidate(0, 4, 8, 14, 20, 2)
+    MDADFollower.buildOffsetLine = oBuild
+    -- shape 失敗（橫向加速度預算 0＝shapeProfile 拒收）：s.fbFail 記成 p3、沒有命中點
+    local se = Dr.debugSession(0)
+    local oLat = se.safeLat
+    se.safeLat = 0
+    local okS, whyS = Dr.debugSweepFallbacks(0, 4, 8, 14, 20, 2)
+    se.safeLat = oLat
+    local fS = se.fbFail or {}
+    checkTrue(okL == false and lx == nil and ly == nil and okC == false and phC == 3 and cx == nil and cy == nil
+            and okS == false and fS.ph == 3 and type(fS.hitS) == "number" and fS.hx == nil and fS.hy == nil,
+        "(anchor-early) 非撞擊早退不回命中點（line=" .. tostring(lx) .. "," .. tostring(ly) .. " cand=" .. tostring(cx) .. ","
+        .. tostring(cy) .. " ph=" .. tostring(phC) .. " shape=" .. tostring(okS) .. "/" .. tostring(whyS) .. " fb="
+        .. tostring(fS.hx) .. "," .. tostring(fS.hy) .. "）")
+    MDAD.Drive.stop(0, nil)
+    -- 腳本：第 2 條起的候選失敗（hitS＝rs+off、ph1＝baseline→corner、hx/hy）
+    local function run(off, hx, hy)
+        drive.fillWorld(-10, 90, -10, 10)
+        drive.putSolid(20, 6, "anchor_side")
+        armDrive()
+        local st = Dr.debugSession(0)
+        st.diag = true
+        setHeading(dveh, 0)
+        dveh._x, dveh._y, dveh._speed = 0, 0, 0
+        drive.scanRound(true)
+        local oPlan, oCorr, oZom, n = Dr.planDodge, MDADCorridor.plan, Dr.zombieSweep, 0
+        Dr.planDodge = function(s)
+            n = 0
+            local rs = s.lastSNow
+            return "dodge", rs + 10, rs + 16, rs + 22, rs + 28, 2, s.needHalf, false, s.sensor.hardN
+        end
+        MDADCorridor.plan = function()
+            local rs = st.lastSNow
+            return "dodge", rs + 10, rs + 16, rs + 22, rs + 28, -2
+        end
+        MDADFollower.buildOffsetLine = failBuild
+        Dr.zombieSweep = function(s, ...)
+            n = n + 1
+            if n == 1 then return oZom(s, ...) end
+            local f, rs = s.fbFail, s.lastSNow
+            f.hitS, f.ph, f.hps, f.hx, f.hy, f.body = rs + off, 1, rs + off - 4, hx, hy, "tractor"
+            f.a, f.b, f.c, f.d = rs + 10, rs + 16, rs + 22, rs + 28
+            return false
+        end
+        for i = #events, 1, -1 do events[i] = nil end
+        st.planSig = -1
+        drive.scanRound(true)
+        Dr.planDodge, MDADCorridor.plan, Dr.zombieSweep, MDADFollower.buildOffsetLine = oPlan, oCorr, oZom, oBuild
+        local ev = nil
+        for i = 1, #events do
+            if events[i].name == "blocked" and events[i].a.why == "plan" then ev = events[i].a end
+        end
+        return st, ev, n
+    end
+    local st, ev, n = run(20, 20.5, 0.5)
+    local stop = Dr.blockStopDist(st)
+    local gap = Dr.blockedStopGap(st, 0, 0)
+    checkTrue(st.blocked == true and st.cornerLatch == true and st.dodgeBlockReason == "corner" and n >= 2
+            and st.blockHitX == 20.5 and st.blockHitY == 0.5 and ev ~= nil and ev.x == 20.5 and type(ev.wd) == "number"
+            and type(gap) == "number" and math.abs(gap - (math.sqrt(20.5 * 20.5 + 0.25) - stop)) < 1e-6,
+        "(anchor-hit) 建線失敗在前、真命中在後：錨＝真命中、停止線照世界距（blocked=" .. tostring(st.blocked) .. " why="
+        .. tostring(st.dodgeBlockReason) .. " n=" .. n .. " hit=" .. tostring(st.blockHitX) .. "," .. tostring(st.blockHitY)
+        .. " ev.x=" .. tostring(ev and ev.x) .. " gap=" .. tostring(gap) .. "）")
+    MDAD.Drive.stop(0, nil)
+    st, ev, n = run(20, nil, nil)
+    stop = Dr.blockStopDist(st)
+    gap = Dr.blockedStopGap(st, 0, 0)
+    local rs, bs = st.lastSNow, st.blockS
+    st.lastSNow = bs - stop - 1
+    local far = Dr.blockedAtStop(st, 0, 0)
+    st.lastSNow = bs - stop + 0.1
+    local near = Dr.blockedAtStop(st, 0, 0)
+    st.lastSNow = rs
+    checkTrue(st.blocked == true and st.cornerLatch == true and n >= 2 and st.blockHitX == nil and st.blockHitY == nil
+            and ev ~= nil and ev.x == nil and ev.wd == nil and type(bs) == "number" and bs > rs + stop and bs < rs + 20
+            and type(gap) == "number" and math.abs(gap - (bs - rs - stop)) < 1e-6 and far == false and near == true,
+        "(anchor-none) 都沒有命中點：錨 nil、停止線照弧長（hit=" .. tostring(st.blockHitX) .. " ev.x=" .. tostring(ev and ev.x)
+        .. " bs=" .. tostring(bs) .. " rs=" .. tostring(rs) .. " gap=" .. tostring(gap) .. " far=" .. tostring(far)
+        .. " near=" .. tostring(near) .. "）")
+    MDAD.Drive.stop(0, nil)
+    MDADDiagnostics.event, MDADDiagnostics.sample = oldEvent, oldSample
+    drive.clearCell(20, 6)
+    drive.fillWorld(-2, 70, -7, 7)
+    SandboxVars = oldSand
+end
+drive.scenarioBlockAnchor()
+
 -- 1013b RETURN 不豁免判堵（2026-10-13 使用者裁定 9；1012 E2E blockscan Dixie 路心起步：回線被擋 return crawl why=sweep、
 --   回線爬行帽 14 km/h 照開，blockedApproachCap／blockedStop／launchHold 在 returnActive 時都不套，車開過停止線 2.5m 才停）：
 --   RETURN 只管橫向，判堵停止線、接近包絡、起步判堵包絡照套。車離常駐線 4m 起步、前方 20m 整排牆。

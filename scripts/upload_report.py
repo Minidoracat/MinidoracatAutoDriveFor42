@@ -560,12 +560,22 @@ def sec_e(C, A, picks):
     return out
 
 
+def blocked_xy(e):
+    """blocked 事件的熱點座標：錨 x,y → 主候選第一個失敗 hx0,hy0 → 候選鏈命中 hitX,hitY；(0,0) 不算（1020a 前非撞擊的掃掠
+    失敗寫 0,0，舊片段還會有）。都沒有回 (None, None)。"""
+    for kx, ky in (("x", "y"), ("hx0", "hy0"), ("hitX", "hitY")):
+        x, y = e.get(kx), e.get(ky)
+        if x is not None and y is not None and (x, y) != (0, 0):
+            return x, y
+    return None, None
+
+
 def sec_f(E, A):
     print(f"\n== F 判堵熱點（blocked 事件 x,y 的 {GRID}m 格，前 10）")
     cells = collections.defaultdict(lambda: dict(u=set(), d=set(), n=0, veh=set()))
     for e, rec in events(E, "blocked"):
-        x, y = e.get("x", e.get("hitX")), e.get("y", e.get("hitY"))
-        if x is None or y is None:
+        x, y = blocked_xy(e)
+        if x is None:
             continue
         c = cells[(int(x // GRID), int(y // GRID))]
         c["u"].add(rec["u"])
@@ -752,6 +762,10 @@ def self_test():
     check([t for _, _, t in nb_touch({"v": [7.2, 7.2, 0.2, 74]}, lp, 7.3, 220)] == [True]
           and [t for _, _, t in nb_touch({"v": [7.2, 7.2, 0.2, 74]}, lp)] == [False],
           "他車貼車扣掉撞後拉開的距離（P06 型：車心 7.2 m、前車 74 本車 7.3 km/h、間隔 220 ms＝貼車；沒車速資料＝不貼）")
+    check(blocked_xy({"x": 0, "y": 0, "hx0": 12.5, "hy0": 3.5, "hitX": 0, "hitY": 0}) == (12.5, 3.5)
+          and blocked_xy({"hitX": 0, "hitY": 0}) == (None, None) and blocked_xy({"x": 5, "y": 0}) == (5, 0)
+          and blocked_xy({"hitX": 7, "hitY": 8}) == (7, 8),
+          "F 熱點座標：x→hx0→hitX，(0,0) 略過（1020a 前非撞擊掃掠失敗寫 0,0）；單軸 0 照收")
     T = 1790000000000
     with tempfile.TemporaryDirectory() as d:
         def put(name, objs):
