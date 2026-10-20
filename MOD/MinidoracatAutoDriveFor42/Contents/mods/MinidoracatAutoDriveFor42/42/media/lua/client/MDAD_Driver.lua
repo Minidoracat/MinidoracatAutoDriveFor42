@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1020j"
+Drive.REV = "1021c"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -1342,7 +1342,8 @@ end
 -- 向主 MOD 要「繞開 (ax,ay) 半徑 r」的替代路線並驗收。回 (route, nil) 或 (nil, 原因)。
 -- 驗收：仍穿避讓圈（avoidPenalty>0＝沒有替代路，主 MOD 是軟封鎖照樣給原線）、
 -- 起點太遠、長度 > lenMax（預設剩餘×ratio+slack）一律拒——這三條就是舊自動改道「拿回爛路線」的
--- 全部型態。成功時主 MOD 已覆寫路線快取，下一次 requestRoute 回的就是替代線。
+-- 全部型態。收下的線由呼叫端做完自己的驗收後經 Drive.detourSettle 定案（v11 commit 進主 MOD 快取；v10 以下主 MOD
+-- 算出就已覆寫快取），下一次 requestRoute 回的就是替代線。
 -- r／lenMax 省略＝堵車改道（DETOUR_AVOID_R、DETOUR_LEN_*）；拖車繞開調頭另給（Drive.towTurnaround）。
 -- refRoute＝目前的路線：替代線的終點要跟它同一個（DETOUR_END_M）。
 -- more＝同一趟先前改道判死的避讓圈（Drive.avoidMore，扁平 { x, y, r, … }；nil＝沒有）：一併交給主 MOD（nav API v9
@@ -1355,11 +1356,12 @@ TUNE.DETOUR_HIST_MAX = 7 -- 記幾個先前的避讓圈（＋目前那圈＝主 
 -- 正式服 0.25.0：拖車轉角改道拿到直行穿過那個路口、整條沒有不可過轉角的 4280m 線，因主圈 through 拒收、22m 後交還。
 -- nav API v10 起第 8 參給 SNAP_MAX_M：主 MOD 不再拿離車超過它的路當起點（跳出避讓圈從百米外起步比繞合法迴圈便宜，
 -- 回來就是 far；正式服 0.31.x 拖車調頭 4 趟 why=far）。v9 以下不傳＝舊行為，far 照舊在下面拒收。
+-- nav API v11 起第 9 參 deferCommit＝true（Drive.detourDeferred）：主 MOD 不寫快取，收下才 commit（Drive.detourSettle）。
 local function requestDetourRoute(api, playerNum, tx, ty, ax, ay, remaining, r, lenMax, refRoute, more, hard)
     if type(api.requestDetour) ~= "function" then return nil, "api" end
     local v10 = type(api.navApiVersion) == "number" and api.navApiVersion >= 10
     local route, state = api.requestDetour(playerNum, tx, ty, ax, ay, r or TUNE.DETOUR_AVOID_R, more,
-        v10 and TUNE.SNAP_MAX_M or nil)
+        v10 and TUNE.SNAP_MAX_M or nil, Drive.detourDeferred(api) or nil)
     if not route or state ~= "ok" then return nil, state or "noroad" end
     -- 空線（1002h E2E rc50 0017：目標 46m 外判堵、主 MOD 回 ok 但 len 0）收下＝下一幀 cutover 建不出剖面、
     -- 直接 LostRoute 交還；當成沒有改道，照常走受困流程。
@@ -1388,6 +1390,33 @@ local function requestDetourRoute(api, playerNum, tx, ty, ax, ay, remaining, r, 
         return nil, "long", route
     end
     return route, nil
+end
+
+-- nav API v11：requestDetour 第 9 參 deferCommit＝true 時主 MOD 不寫路線快取，收下才 commitDetour 寫進去——拒收的線
+-- 不會躺在快取裡，小地圖藍線維持車在走的那條。v10 以下或缺 commitDetour＝不傳、當成舊制：主 MOD 算出即覆寫，拒收靠
+-- s.rejectedRoute 補位（v10 會忽略第 9 參照樣覆寫，當成 deferred 就漏記 rejectedRoute）；第一次遇到 log 一次。
+function Drive.detourDeferred(api)
+    local v = api.navApiVersion
+    if type(v) == "number" and v >= 11 and type(api.commitDetour) == "function" then return true end
+    if not Drive.detourLegacyLogged then
+        Drive.detourLegacyLogged = true
+        print(LOG .. "nav API v" .. tostring(v) .. " without commitDetour: rejected detours stay in MiniMap route cache"
+            .. " (rejectedRoute fallback)") -- telemetry: 樣本 nv＝navApiVersion（一次性相容提示，非 getDebug）
+    end
+    return false
+end
+
+-- 改道驗收的最後一步（四個收線點共用：Drive.detourAttempt、Drive.towTurnaround、Drive.towCornerDetour、cutover 的
+-- sticky 重問），傳入呼叫端驗收後的 (route, why, rejected)、回同樣三個值。v11：收下＝commitDetour 寫進主 MOD 快取，
+-- 失敗＝拒收 "commit"（快取沒換，不 cutover）；拒收不用記（快取沒動）。v10 以下：收下不用做事（主 MOD 算出就覆寫了）；
+-- 拒收＝快取已被覆寫成被拒那條，記 s.rejectedRoute 讓 cutover 跳過。沒算出線（rejected＝nil）＝快取沒動，舊紀錄保留。
+function Drive.detourSettle(s, api, playerNum, route, why, rejected)
+    local deferred = Drive.detourDeferred(api)
+    if route and deferred and api.commitDetour(playerNum, route) ~= true then
+        route, why, rejected = nil, "commit", route
+    end
+    if not route and not deferred and rejected ~= nil then s.rejectedRoute = rejected end
+    return route, why, rejected
 end
 
 -- 同一趟（同目標）先前改道判死的避讓圈：s.avoidHist＝扁平 { x, y, r, … }，不含目前的 s.avoidX（拖車調頭圈不記）。
@@ -2733,7 +2762,7 @@ local function startSession(playerObj, playerNum, stage)
         detourTried = false,    -- 自動改道每個停等 episode 只試一次（清除同 blockRetryDone）
         avoidX = nil, avoidY = nil, -- 已接受的改道避讓圈（sticky：之後主 MOD 重算若穿回去再要一次）
         avoidHist = nil, detourAvoidN = nil, -- 同一趟先前的避讓圈（Drive.pushAvoidHist）／本次附給主 MOD 的圈數
-        pendingDetour = false,  -- requestDetour 已覆寫主 MOD 快取，等下一次 fetchRoute cutover
+        pendingDetour = false,  -- 改道已收下、主 MOD 快取已換線（v11 經 commit），等下一次 fetchRoute cutover
         -- RECOVER 單一進口（階段 2 主體 2）：why＝需求原因（nil＝無需求，
         -- 同時是舊 mode=="recover" 閂鎖的替代）；其餘三個是 suspect 探測留給
         -- dispatch 選動作用的純量，只有 why=="progress" 時有效。
@@ -2749,7 +2778,7 @@ local function startSession(playerObj, playerNum, stage)
         guardHitS = nil, guardHitX = nil, guardHitY = nil, -- 守護判死命中點（guard-blocked 煞停錨）
         guardHitPhase = nil, -- 只有回線段 p4 的失敗可在舊群過清後行駛中交接
         dodgeApproachCap = 0, -- 接近段 envelope（telemetry：分辨「遠壓速」vs「縫本身的帽」）
-        rejectedRoute = nil,  -- 本 MOD 拒收、但仍在主 MOD 快取裡的替代線 identity（cutover 跳過）
+        rejectedRoute = nil,  -- 本 MOD 拒收、但仍在主 MOD 快取裡的替代線 identity（cutover 跳過；只有 nav API v10 以下會有）
         laneChained = false,  -- 鏈式停留中：常駐 lane 暫時＝停留 offL（前方淨空解鏈）
         residentBias = fstate.laneBias, -- 常駐行駛線（sandBias＋roadBias 夾後；每輪路面對中更新）
         dodgeStay = false,    -- 本次承諾是停留承諾（線只到 c＋車身、無回線段）
@@ -3157,7 +3186,7 @@ end
 
 -- 改道（HUD「改道」鈕與自動改道共用）：只在 blocked 停等時有意義。以堵點
 -- （群最近擋線點 blockHitX/Y，缺則車位）為圓心向主 MOD 要替代路線並驗收
--- （requestDetourRoute）；成功＝主 MOD 快取已換線，這裡只記 sticky 避讓圈、
+-- （requestDetourRoute＋Drive.detourSettle）；成功＝主 MOD 快取已換線（v11 由 commit 換），這裡只記 sticky 避讓圈、
 -- 把 nextRouteMs 歸零讓下一幀 fetchRoute 立刻 cutover（why="detour"）。
 -- 回 (true) 或 (false, 原因)；原因供 HUD tooltip／console。
 -- stuck＝交還前的最後一次改道（Drive.stuckDetour）：不要求 blocked、錨點要在車前附近、放寬繞遠上限。
@@ -3227,16 +3256,14 @@ function Drive.detourAttempt(s, playerNum, stuck)
     if route and s.tow and fin(vh) and not Drive.routeLeavesForward(route, vx, vy, cos(vh), sin(vh)) then
         route, why, rejected = nil, "back", route
     end
+    route, why, rejected = Drive.detourSettle(s, api, playerNum, route, why, rejected)
     if getDebug() then -- telemetry: detour 事件（why len ax ay）
         print(LOG .. "detour pn=" .. playerNum .. " avoid=(" .. tostring(ax) .. "," .. tostring(ay)
             .. ") -> " .. (route and ("ok len=" .. tostring(route.len)) or ("rejected " .. tostring(why)))
             .. string.format(" rs=%.1f t=%.0f", s.lastSNow or -1, getTimestampMs()))
     end
     if not route then
-        -- 主 MOD 的 requestDetour 成功算出路線就已覆寫快取（含被本 MOD 拒收的
-        -- far／long 線）；記住被拒的 identity，cutover 不得沿用（下一次 250ms 取
-        -- 路仍會拿到同一個 table，直到主 MOD 冷卻後重算）。
-        s.rejectedRoute = rejected
+        -- 拒收紀錄（v10 以下主 MOD 快取已被覆寫成被拒那條、s.rejectedRoute）由 Drive.detourSettle 記
         haloBad(playerObj, KEY_NO_DETOUR)
         voice("nodetour", playerNum)
         return false, why
@@ -3300,6 +3327,7 @@ function Drive.towTurnaround(s, playerNum, vehicle, now, fx, fy)
     if route and not Drive.routeLeavesForward(route, vx, vy, fx, fy) then
         route, why, rejected = nil, "back", route
     end
+    route, why, rejected = Drive.detourSettle(s, api, playerNum, route, why, rejected)
     diagEvent(s, playerNum, "tow", {
         phase = "turn", why = why or "ok", x = ax, y = ay, attempt = s.towTurnTries,
         len = route and route.len or (rejected and rejected.len) or nil,
@@ -3309,8 +3337,7 @@ function Drive.towTurnaround(s, playerNum, vehicle, now, fx, fy)
             .. (route and ("ok len=" .. tostring(route.len)) or ("rejected " .. tostring(why))))
     end
     if not route then
-        s.rejectedRoute = rejected -- 主 MOD 快取已被覆寫成這條，交還前別讓 cutover 收下
-        return false
+        return false -- 拒收紀錄由 Drive.detourSettle 記（v10 以下主 MOD 快取已被覆寫成這條）
     end
     Drive.pushAvoidHist(s) -- 先前的堵車避讓圈不因調頭圈蓋掉而遺失（調頭圈本身不進歷史）
     s.avoidX, s.avoidY, s.avoidR, s.avoidTow = ax, ay, TUNE.TOW_TURN_AVOID_R, true
@@ -3330,7 +3357,7 @@ end
 -- 主圈、後方圈、其餘轉角圈都只是請主 MOD 避開（1009）：回來的線穿過它們（through／again）不拒收，直行穿過路口能不能
 -- 開由剖面管線判；本趟判死的堵車圈（hist）照舊不准穿（requestDetourRoute 的 hard）。nav API <9 只給主圈。
 -- 驗收：requestDetourRoute 其餘各條＋從車頭方向出發（back）＋新線走同一條剖面管線（Drive.profileRouteOf →
--- MDADTrailer.shape）後沒有不可過轉角（blocked）。拒收＝記 s.rejectedRoute（主 MOD 快取已被覆寫）、保留原線，
+-- MDADTrailer.shape）後沒有不可過轉角（blocked）。拒收＝保留原線（v10 以下記 s.rejectedRoute，Drive.detourSettle），
 -- 行為照舊（guard 壓速、停在轉角前交還 TrailerCorner）。同一轉角集合：同一 route identity 不重問；換了 identity
 -- （偏航重算等）但車離上次判定處不到 TOW_CORNER_REASK_M 也不重問、不扣額度（記 skip why=same；正式服 0.23.0
 -- 起步後 1–20 m 的偏航 cutover 重問同一題、8 趟 6 趟兩次同結果就 skip max）；每 session TOW_CORNER_TRIES 次；
@@ -3414,8 +3441,8 @@ function Drive.towCornerDetour(s, playerNum, vehicle, now, fx, fy)
             left = shaped.towBlocked and #shaped.towBlocked / 2 or 0
             if left > 0 then route, why, rejected = nil, "blocked", route end
         end
-        -- 主 MOD 算出線就已覆寫快取（含被拒的）：記住 identity，cutover 不收；沒算出線＝快取沒動，舊的拒收紀錄保留
-        if rejected ~= nil and not route then s.rejectedRoute = rejected end
+        -- 收下＝v11 commit（失敗＝拒收 commit）；拒收＝v10 以下記 rejectedRoute；沒算出線＝快取沒動，舊的拒收紀錄保留
+        route, why, rejected = Drive.detourSettle(s, api, playerNum, route, why, rejected)
     end
     diagEvent(s, playerNum, "detour", { phase = skip and "skip" or "towcorner", kind = "towcorner",
         why = why or "ok", x = vx, y = vy, s = s.lastSNow, hitX = ax, hitY = ay, avoidR = r,
@@ -16792,8 +16819,8 @@ local function onPlayerUpdate(player)
             s.towCornerTries, s.towCornerSig = 0, nil -- 新目標＝新的一趟（同集合不重問只限同一趟）
             s.rejectedRoute = nil
         end
-        -- 被本 MOD 拒收的替代線（far／long／through）仍躺在主 MOD 快取裡（requestDetour
-        -- 成功即覆寫），下一次取路會原樣拿回同一個 table——不得當成一般 cutover 收下
+        -- 被本 MOD 拒收的替代線（far／long／through）在 nav API v10 以下仍躺在主 MOD 快取裡（requestDetour
+        -- 成功即覆寫；v11 起收下才 commit，拒收的不進快取），下一次取路會原樣拿回同一個 table——不得當成一般 cutover 收下
         -- （2026-09-02 s064：拒收 far 之後同一幀就以 "deviation" 名義跟著它開進樹林；
         -- 主 MOD 冷卻後重算會換新 identity，屆時照常 cutover）。**必須在距離閘之前**：拒收的
         -- far 線走到距離閘＝RouteTooFar 交還（0928m E2E rc15 0095：改道被拒 far，15 幀後交還）。
@@ -16861,17 +16888,18 @@ local function onPlayerUpdate(player)
             if routeCrossesAvoid(route, s.avoidX, s.avoidY, s.avoidR or TUNE.DETOUR_AVOID_R)
                     or Drive.crossesAnyAvoid(route, more) then
                 local remaining = s.profile and (s.profile.length - s.lastSNow) or nil
-                local detour, _, rejected = requestDetourRoute(api, playerNum, tx, ty, s.avoidX, s.avoidY,
+                local detour, _, rejected = Drive.detourSettle(s, api, playerNum, requestDetourRoute(api, playerNum,
+                    tx, ty, s.avoidX, s.avoidY,
                     remaining, s.avoidR, s.avoidLong and finite(remaining)
                         and remaining * TUNE.STUCK_DETOUR_LEN_RATIO + TUNE.STUCK_DETOUR_LEN_SLACK
                         or s.avoidTow and finite(remaining)
-                        and remaining * TUNE.TOW_TURN_LEN_RATIO + TUNE.TOW_TURN_LEN_SLACK or nil, route, more)
+                        and remaining * TUNE.TOW_TURN_LEN_RATIO + TUNE.TOW_TURN_LEN_SLACK or nil, route, more))
                 if detour then
                     route = detour
                     s.pendingRouteWhy = s.avoidTow and "towturn" or "detour"
                 else
                     s.avoidX, s.avoidY, s.avoidR, s.avoidTow, s.avoidLong = nil, nil, nil, nil, nil
-                    if rejected ~= nil then s.rejectedRoute = rejected end
+                    -- 拒收紀錄由 Drive.detourSettle 記（v10 以下）
                 end
             end
         end
