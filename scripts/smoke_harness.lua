@@ -28154,7 +28154,9 @@ drive.scenarioLagRate()
 --   (cv-hold) |ld| 0.6 持平、只變小 1 輪（0.55）：保持命中、照樣壓速、keep 事件只記一次。違規證明：拿掉遲滯、只要 1 輪變小各紅。
 --   (cv-shrink) 連 2 輪變小（0.6→0.55→0.5）：release converge、cvw＝保持的輪數。
 --   (cv-small) |ld| 0.25 < LAG_GUARD_MIN_M：當輪 release converge（不保持）。違規證明：遲滯不看門檻＝紅。
---   (cv-line) 期望線 el 兩輪間跳 0.5：release why=line。違規證明：拿掉 line 出口＝紅。
+--   (cv-line) 期望線 el 兩輪間跳 0.5、規劃線往遠離硬點側移 0.5（新線＋ld 不再重疊）：release why=line。違規證明：拿掉 line 出口＝紅。
+--   (cv-reline) 1020c X4（正式服 P52 clip-18：出彎 el 往外 ramp 觸發 line 放手、dev 1.08，加速到 40 km/h 擦回原命中點）：換線、規劃線
+--     往硬點側移 0.1（衰減後的預測不碰、新線＋ld 仍碰記下的形狀）：不放手、keep why=reline 只記一次、lagHitPl 換成新線。違規證明：換線不重驗＝紅。
 --   (cv-body) 保持中車開過硬點（車尾過點）：release body——遲滯不會永久壓速。
 --   (cv-owner) 保持中 RETURN 接手：release owner。
 function drive.scenarioLagConverge()
@@ -28201,9 +28203,31 @@ function drive.scenarioLagConverge()
         "(cv-small) |ld| 0.25 < LAG_GUARD_MIN_M：當輪放手（why=" .. tostring(e.why) .. "）")
     scan(60, 0.6)
     s.diagExpL = 0.5
+    F.setLaneBias(fs, -0.5)
     e = scan(25, 0.6)
     checkTrue(s.lagHitX == nil and e.phase == "release" and e.why == "line",
-        "(cv-line) 期望線兩輪間跳 0.5（換線）：release why=line（why=" .. tostring(e.why) .. "）")
+        "(cv-line) 期望線兩輪間跳 0.5、新線遠離硬點（換線）：release why=line（why=" .. tostring(e.why) .. "）")
+    F.setLaneBias(fs, 0)
+    s.diagExpL = 0
+    scan(60, 0.6)
+    scan(25, 0.6)
+    s.diagExpL = 0.5
+    F.setLaneBias(fs, 0.1) -- 衰減後的預測（0.1＋0.6·f(40m)）不碰、不衰減（0.1＋0.6）仍碰：只有換線重驗留得住
+    local pl1 = Dr.lagPlanLane(s, false, hs, hs, lc, lc)
+    e = scan(25, 0.6)
+    local held = s.lagHitX == hs and e.phase == "keep" and e.why == "reline" and s.lagHitPl == pl1 and pl1 > 0.05
+    s.diagExpL = 1.0
+    F.setLaneBias(fs, 0.15)
+    scan(25, 0.6)
+    local n = 0
+    for _, a in ipairs(ev) do if a.phase == "keep" and a.why == "reline" then n = n + 1 end end
+    checkTrue(held and s.lagHitX == hs and n == 1,
+        "(cv-reline) 換線但新線往硬點側移（新線＋ld 仍碰記下的形狀）：保持、keep why=reline 只記一次、lagHitPl 換新線（held="
+        .. tostring(held) .. " pl=" .. tostring(s.lagHitPl) .. " keeps=" .. n .. "）")
+    F.setLaneBias(fs, 0)
+    s.diagExpL = 0
+    e = scan(hs + halfL + r + 1, 0.6)
+    checkTrue(s.lagHitX == nil and e.why == "body" and s.lagKeep == nil, "(cv-reline) 保持中車尾過點：release body、保持理由清掉")
     scan(60, 0.6)
     scan(25, 0.6)
     checkTrue(s.lagHitX == hs and s.lagCvw == 1, "(cv-body) 前置：保持中")
@@ -28220,6 +28244,106 @@ function drive.scenarioLagConverge()
     MDADDiagnostics.event = oldEvent
 end
 drive.scenarioLagConverge()
+
+-- 1020c X3（正式服 0.31.x：拖車 arm 後 converge 放手、2–3 s 後同點再撞 5 件 4 人——P30 clip-20 掛車因此脫開、P02 clip-01／-20 同一棵樹
+--   18.5–18.8 km/h；放手時 dev ≤0.22、命中點在車心前 15–25 m）：拖車或車頭與命中點之間有弧時，命中點在「車頭＋前視距＋煞到 MIN_EXEC
+--   的距離」內不以 converge 放手，保持到車尾過點。halfW 0.9／halfL 2.9、硬點離規劃車身 0.35；車頭前 2m 以 ld 0.6 arm，之後 ld 0.2（< 門檻、
+--   舊制當輪 converge 放手）。世界座標＝(弧長, lane)、航向 0，u＝hs−rs。
+--   (h-arcfn) Drive.arcAhead：圓角弧段＝1/R、弧前直段＝0、範圍空＝0。違規證明：弧段不計／範圍外也計＝紅。
+--   (h-tow) 拖車、命中點在車心前 14.9m（40 km/h 窗 ≈28m）：保持、keep why=tow 只記一次、照樣壓速。違規證明：拿掉拖車保持＝紅。
+--   (h-latch) 保持中被別的帽壓到 5 km/h（窗縮到 ≈9m < 12.9m）：照樣保持（進保持距離 lagKeepU）。違規證明：拿掉 lagKeepU＝紅。
+--   (h-rev) 倒回到命中點前 44.9m（超過 max(窗, lagKeepU)）：release converge、kind=tow、arcAhead 0。違規證明：不設上限＝紅。
+--   (h-tow-body) 保持到車尾（含掛車 trailLen 11）過點：release body。
+--   (h-arc) 不拖車、車頭與命中點之間有圓角弧：保持、keep why=arc、arcAhead＝1/R。違規證明：拿掉弧前保持＝紅。
+--   (h-straight) 不拖車、直路：照舊當輪 release converge、arcAhead 0、kind 缺。違規證明：直路也保持＝紅。
+function drive.scenarioLagHold1020()
+    scenario("1020c X3：落後守門拖車與弧前 converge 保持——命中點在前視＋煞停距離內保持到車尾過點，倒回超過上限才放")
+    local Dr, F, ARC = MDAD.Drive, MDADFollower, MDADDynamics.SEG_ARC
+    local straightP = F.begin({ pts = { 0, 0, 300, 0 } }, 60, 2)
+    while not F.stepBuild(straightP, 4096) do end
+    local w = 2 * (12 * (1 - math.cos(math.pi / 4)) + 0.656 + 0.4)
+    local arcP = F.begin({ pts = { 0, -40, 0, 0, 40, 0 }, segSurface = { "paved", "paved" }, segWidth = { w, w } }, 120, 4,
+        { valid = true, geometryValid = true, halfW = 0.656, rMin = 2.26, wheelbase = 1.985, delta0Safe = 0.72,
+            deltaVSafe = 0.24, maxSpeed = 120 })
+    while not arcP.ready do F.stepBuild(arcP, 4096) end
+    local sA, R
+    for i = 1, arcP.n - 1 do
+        if arcP.segKind[i] == ARC and arcP.filletRadius[i] > 0 then sA, R = arcP.s[i], arcP.filletRadius[i] break end
+    end
+    if not checkTrue(sA ~= nil and sA > 20, "(h-arcfn) fixture：剖面有圓角弧段（sA=" .. tostring(sA) .. "）") then return end
+    -- (h-arcfn)
+    local kA, k0, kE = Dr.arcAhead({ profile = arcP }, sA - 10, sA + 1), Dr.arcAhead({ profile = arcP }, 0, sA - 1),
+        Dr.arcAhead({ profile = arcP }, sA + 1, sA - 10)
+    checkTrue(math.abs(kA - 1 / R) < 1e-9 and k0 == 0 and kE == 0,
+        "(h-arcfn) arcAhead：跨進弧＝1/R、弧前直段 0、範圍空 0（" .. tostring(kA) .. "／" .. tostring(k0) .. "／" .. tostring(kE) .. "）")
+    local fs = F.newState()
+    F.setLaneBias(fs, 0)
+    local halfW, halfL, r = 0.9, 2.9, 0.15
+    local sen = { ready = true, hardN = 1, hardS = {}, hardL = {}, hardLc = {}, hardW = { r }, hardR = { r }, hardX = {}, hardY = {} }
+    local oldEvent, ev = MDADDiagnostics.event, {}
+    MDADDiagnostics.event = function(_, name, a) if name == "lag" then ev[#ev + 1] = a end end
+    local s, hs
+    local function newS(prof, tow, hitS)
+        hs = hitS
+        s = { diag = true, sensor = sen, fstate = fs, profile = prof, diagExpL = 0, lagHistD = {}, lagHistL = {}, lagHistN = 0,
+            safeBrake = 6, vehicleProfile = { halfW = halfW, halfL = halfL }, tow = tow }
+        local lc = Dr.lagPlanLane(s, false, hs, hs, 0, 0) + halfW + 0.35 + r
+        sen.hardS[1], sen.hardL[1], sen.hardLc[1], sen.hardX[1], sen.hardY[1] = hs, lc, lc, hs, lc
+        ev = {}
+    end
+    local function scan(rs, ld, kmh)
+        s.lastSNow, s.lastLatDev = rs, ld
+        Dr.lagGuardScan(s, 0, kmh or 40, rs, ld, 0)
+        return ev[#ev] or {}
+    end
+    local function keeps(why)
+        local k = 0
+        for _, a in ipairs(ev) do if a.phase == "keep" and a.why == why then k = k + 1 end end
+        return k
+    end
+    -- (h-tow)
+    newS(straightP, { trailLen = 11, halfW = 0.9, hitchToRear = 6 }, 64.9)
+    checkTrue(scan(60, 0.6).phase == "arm" and s.lagHitX == hs, "(h-tow) 前置：拖車、車頭前 2m、落後 0.6：arm")
+    local e = scan(50, 0.2)
+    scan(50.5, 0.2)
+    checkTrue(s.lagHitX == hs and e.phase == "keep" and e.why == "tow" and keeps("tow") == 1 and s.lagKeepU == hs - 50
+            and Dr.lagGuardCap(s, 40, 50.5, 0.2) < 40 and s.lastCapReason == "lag",
+        "(h-tow) 拖車、命中點在車心前 14.9m、ld 0.2：不以 converge 放手、keep why=tow 只記一次、照樣壓速（phase="
+        .. tostring(e.phase) .. " why=" .. tostring(e.why) .. " keeps=" .. keeps("tow") .. "）")
+    -- (h-latch)
+    scan(52, 0.2, 5)
+    checkTrue(s.lagHitX == hs, "(h-latch) 保持中車速被壓到 5 km/h（窗縮到 9m < 12.9m）：照樣保持（hit=" .. tostring(s.lagHitX) .. "）")
+    -- (h-rev)
+    e = scan(20, 0.2, -5)
+    checkTrue(s.lagHitX == nil and e.phase == "release" and e.why == "converge" and e.kind == "tow" and e.arcAhead == 0
+            and s.lagKeep == nil and s.lagKeepU == nil,
+        "(h-rev) 倒回到命中點前 44.9m（超過窗與進保持距離）：release converge、kind=tow、arcAhead 0（why=" .. tostring(e.why)
+        .. " kind=" .. tostring(e.kind) .. " arcAhead=" .. tostring(e.arcAhead) .. "）")
+    -- (h-tow-body)
+    scan(60, 0.6)
+    scan(50, 0.2)
+    scan(hs - 2, 0.2, 8)
+    local side = s.lagHitX == hs and s.lagHitSide == true
+    e = scan(hs + 11 + r + 1, 0.2, 8)
+    checkTrue(side and s.lagHitX == nil and e.why == "body" and e.kind == "tow",
+        "(h-tow-body) 保持到硬點旁（side）、掛車尾過點才 release body（side=" .. tostring(side) .. " why=" .. tostring(e.why) .. "）")
+    -- (h-arc)
+    newS(arcP, nil, sA + 3)
+    checkTrue(scan(hs - halfL - 2, 0.6, 60).phase == "arm" and s.lagHitX == hs, "(h-arc) 前置：弧上 3m 的硬點、落後 0.6：arm")
+    e = scan(hs - 14, 0.2)
+    checkTrue(s.lagHitX == hs and e.phase == "keep" and e.why == "arc" and math.abs((e.arcAhead or 0) - 1 / R) < 1e-9,
+        "(h-arc) 不拖車、車頭與命中點之間有 R" .. string.format("%.1f", R) .. " 圓角：保持、keep why=arc、arcAhead＝1/R（phase="
+        .. tostring(e.phase) .. " why=" .. tostring(e.why) .. " arcAhead=" .. tostring(e.arcAhead) .. "）")
+    -- (h-straight)
+    newS(straightP, nil, 64.9)
+    scan(60, 0.6)
+    e = scan(50, 0.2)
+    checkTrue(s.lagHitX == nil and e.phase == "release" and e.why == "converge" and e.arcAhead == 0 and e.kind == nil,
+        "(h-straight) 不拖車、直路：照舊當輪 release converge、arcAhead 0、kind 缺（why=" .. tostring(e.why) .. " kind="
+        .. tostring(e.kind) .. "）")
+    MDADDiagnostics.event = oldEvent
+end
+drive.scenarioLagHold1020()
 
 -- 1017d 繞行前段已貼上障礙時不承諾（2026-10-17 使用者裁定；正式服 P18 clip-32：preA −0.15 仍以 20.5 km/h 承諾、1.0 s 後撞同一棵樹）：
 --   沿 +x 的候選線（tmpOv）、a＝20、pre-a 段旁方塊面離車身 c。
