@@ -4715,10 +4715,10 @@ local function installNavApi(version)
         end,
         -- 改道查詢面（nav API v3；2026-09-02 重新接回）：情境以 drive.nav.detour
         -- 控制回傳，呼叫計數與參數留給斷言。
-        requestDetour = function(playerNum, tx, ty, ax, ay, r, more)
+        requestDetour = function(playerNum, tx, ty, ax, ay, r, more, maxSnap)
             local nav = drive.nav
             nav.detourCalls = (nav.detourCalls or 0) + 1
-            nav.lastDetour = { pn = playerNum, tx = tx, ty = ty, ax = ax, ay = ay, r = r, more = more }
+            nav.lastDetour = { pn = playerNum, tx = tx, ty = ty, ax = ax, ay = ay, r = r, more = more, maxSnap = maxSnap }
             if nav.detour == nil then return nil, "noroad" end
             return nav.detour, nav.detourState or "ok"
         end,
@@ -12533,6 +12533,22 @@ local function scenarioDetour()
     nav.detour = detourRoute(60, 0, 30)
     ok, why = MDAD.Drive.requestDetour(0)
     checkTrue(ok == false and why == "far", "(c5) 起點 30m 外的路線拒收")
+    -- nav API v10：requestDetourRoute 傳第 8 參 SNAP_MAX_M（主 MOD 不拿離車超過它的路當起點，拖車調頭 why=far）；
+    -- v9 以下不傳（舊主 MOD 照舊，far 由上一條拒收）。三支呼叫端都經 requestDetourRoute。
+    -- 違規證明：拿掉版本閘（一律傳）＝v2／v9 兩條紅；不傳＝v10／v12 兩條紅。
+    do
+        local apiWas, snapMax = MinidoracatMiniMapAPI.navApiVersion, MDAD.Drive.debugTune().SNAP_MAX_M
+        checkEq(nav.lastDetour.maxSnap, nil, "(c5) nav v" .. tostring(apiWas) .. "：不傳 maxSnap")
+        for _, c in ipairs({ { 9, nil }, { 10, snapMax }, { 12, snapMax } }) do
+            MinidoracatMiniMapAPI.navApiVersion = c[1]
+            local calls = nav.detourCalls
+            ok, why = MDAD.Drive.requestDetour(0)
+            checkTrue(nav.detourCalls == calls + 1 and nav.lastDetour.maxSnap == c[2] and why == "far",
+                "(c5) nav v" .. c[1] .. "：maxSnap＝" .. tostring(c[2]) .. "（實得 " .. tostring(nav.lastDetour.maxSnap)
+                .. "，" .. tostring(why) .. "）")
+        end
+        MinidoracatMiniMapAPI.navApiVersion = apiWas
+    end
     -- 空線（1002h E2E rc50 0017：主 MOD 回 ok 但 len 0）收下＝下一幀建不出剖面、LostRoute 交還
     nav.detour = detourRoute(0, 0, 1)
     ok, why = MDAD.Drive.requestDetour(0)

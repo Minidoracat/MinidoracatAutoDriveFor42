@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1019a"
+Drive.REV = "1020g"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -1347,9 +1347,13 @@ TUNE.DETOUR_HIST_MAX = 7 -- 記幾個先前的避讓圈（＋目前那圈＝主 
 -- hard（只有拖車轉角改道 Drive.towCornerDetour 給，1009）：那些圈只是請主 MOD 別在那個彎轉，直行穿過路口照樣能開——
 -- 不看 avoidPenalty，穿圈只驗 hard（本趟判死的堵車圈）；能不能過由呼叫端的剖面管線（towBlocked）判。nil＝一般改道。
 -- 正式服 0.25.0：拖車轉角改道拿到直行穿過那個路口、整條沒有不可過轉角的 4280m 線，因主圈 through 拒收、22m 後交還。
+-- nav API v10 起第 8 參給 SNAP_MAX_M：主 MOD 不再拿離車超過它的路當起點（跳出避讓圈從百米外起步比繞合法迴圈便宜，
+-- 回來就是 far；正式服 0.31.x 拖車調頭 4 趟 why=far）。v9 以下不傳＝舊行為，far 照舊在下面拒收。
 local function requestDetourRoute(api, playerNum, tx, ty, ax, ay, remaining, r, lenMax, refRoute, more, hard)
     if type(api.requestDetour) ~= "function" then return nil, "api" end
-    local route, state = api.requestDetour(playerNum, tx, ty, ax, ay, r or TUNE.DETOUR_AVOID_R, more)
+    local v10 = type(api.navApiVersion) == "number" and api.navApiVersion >= 10
+    local route, state = api.requestDetour(playerNum, tx, ty, ax, ay, r or TUNE.DETOUR_AVOID_R, more,
+        v10 and TUNE.SNAP_MAX_M or nil)
     if not route or state ~= "ok" then return nil, state or "noroad" end
     -- 空線（1002h E2E rc50 0017：目標 46m 外判堵、主 MOD 回 ok 但 len 0）收下＝下一幀 cutover 建不出剖面、
     -- 直接 LostRoute 交還；當成沒有改道，照常走受困流程。
