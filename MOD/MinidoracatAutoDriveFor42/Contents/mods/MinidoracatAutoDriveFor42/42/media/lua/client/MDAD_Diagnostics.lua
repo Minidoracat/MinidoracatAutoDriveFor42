@@ -137,8 +137,9 @@ local EK = {
     "cls", "dvs",
     -- impact（1017）：當下檔位、引擎煞車、距上一次 tow rh-attach 的 ms（自動掛回拉攏的假撞）、跟車 lead 車距／速度（m 共用上面的鍵＝mode）
     "tn", "ib", "rhMs", "tlg", "tlv",
-    -- engine off（1017，Drive.engineOffNote）：EngineOff 交還前的電瓶 charge、引擎轉速、油量 %（why＝engine／battery）
-    "chg", "es", "fu",
+    -- engine off（1017，Drive.engineOffNote）：EngineOff 交還前的電瓶 charge、引擎轉速、油量 %（why＝engine／battery）；
+    -- 1020 加引擎零件狀況 ecd（0–100，<50 原版會隨機熄火）、引擎品質 eq
+    "chg", "es", "fu", "ecd", "eq",
     -- unstick settle（1017）：車在剖面首段反向延長上的距離 m（>0＝在起點後方，Drive.startBehind）
     "bh",
     -- 1008 拖車：tow attach 外拉規劃用的掛點→車頭（MDADTrailer.hitchFront）；detour towcorner 附了車尾正後方圈（1）；
@@ -1928,7 +1929,7 @@ function D.start(pn, vehicle, profile)
         -- slot 0／ret 0＝上傳片段的檔頭（不對應本機槽）
         local okH, header = pcall(encodeHeader, 0, now, 0, profile, now, 1, nil, pn)
         if okH then
-            local okB, u = pcall(MDADUpload.begin, pn, now, header, profile)
+            local okB, u = pcall(MDADUpload.begin, pn, now, header, profile, vehicle)
             if okB and type(u) == "table" then
                 uploads[pn] = u
                 -- 起點先記車位（1009）：第一筆取樣前就交還的趟，摘要 x0／y0／x1／y1 原本寫成 0

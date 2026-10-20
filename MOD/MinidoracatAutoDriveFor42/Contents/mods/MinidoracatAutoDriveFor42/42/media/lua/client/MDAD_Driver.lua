@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1019a"
+Drive.REV = "1020f"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -7625,14 +7625,20 @@ end
 
 -- 1017：EngineOff 交還前記是哪一關（driveGate 第二回傳 engine／battery；2026-10-17 裁定照舊交還、只補紀錄）＋電瓶 charge、
 -- 引擎轉速、油量 %。正式服 22 趟「巡航中 EngineOff、玩家幾秒後原地重開」推論是電瓶歸零那關，缺這筆定不了罪。
+-- 1020：加引擎零件狀況 ecd（VehiclePart.getCondition，VehiclePart.java:866-868）與引擎品質 eq（BaseVehicle.getEngineQuality，
+-- BaseVehicle.java:8130-8132）——原版只在伺服器跑的 shouldAutoStall：狀況 <50 時每次更新以 1/(狀況×12) 機率熄火
+-- （VehicleEngine.java:230-231、249-252），跟車速、電瓶無關。
 function Drive.engineOffNote(s, playerNum, vehicle, gate)
     local okC, chg = pcall(jget, vehicle, "getBatteryCharge")
     local okE, es = pcall(jget, vehicle, "getEngineSpeed")
     local okF, fu = pcall(jget, vehicle, "getRemainingFuelPercentage")
+    local okQ, eq = pcall(jget, vehicle, "getEngineQuality")
+    local okD, ecd = pcall(function() return vehicle:getPartById("Engine"):getCondition() end)
     diagEvent(s, playerNum, "engine", { phase = "off", why = gate,
         chg = okC and finite(chg) and math.floor(chg * 1000 + 0.5) / 1000 or nil,
         es = okE and finite(es) and math.floor(es + 0.5) or nil,
-        fu = okF and finite(fu) and math.floor(fu * 100 + 0.5) / 100 or nil })
+        fu = okF and finite(fu) and math.floor(fu * 100 + 0.5) / 100 or nil,
+        ecd = okD and finite(ecd) and ecd or nil, eq = okQ and finite(eq) and eq or nil })
 end
 
 -- 1017 遙測 unstick settle `bh`：車位在剖面首段反向延長上的距離（m，>0＝在起點後方；首段航向 segH[1]、起點 x[1]／y[1]）。
