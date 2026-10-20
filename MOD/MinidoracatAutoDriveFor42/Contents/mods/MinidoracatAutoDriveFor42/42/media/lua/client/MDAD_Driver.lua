@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1020j"
+Drive.REV = "1021f"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -2269,7 +2269,8 @@ end
 -- 接手提示的異常計時（1020e）：每幀（onPlayerUpdate，讓位中不跑）把上傳摘要 tkoA 的異常（MDAD_Upload U.sample／U.event：
 -- 判堵、脫困、掛回、停滯、接觸、撞擊；事件那半在 diagEvent、急煞在 commandForceBrake）記到 s.anomAt。上傳只在 MP 跑，
 -- Driver 自己記＝SP 與 MP、關遙測都同一套判準。比上傳略寬（寧可少提示）：recoverWhy 也算、接觸看持續而非上升緣、
--- 撞擊不排除伺服器拉回與凍結樣本。
+-- 撞擊不分類（MDADUpload.impactClass 的 frozen／tow-sync／rehitch／tow-slack／small-animal 在這裡照樣算異常：撞到小動物或
+-- 拖車頓一下之後接手，多半就是因為那一下）。
 function Drive.anomTick(s, vehicle, now)
     local m = s.mode
     if m == "yield" then return end
