@@ -1989,8 +1989,7 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
     -- 快取路線首段真的離車很遠，才在首次控制補一次全域定位。讓位恢復（Driver 保留游標、設 needsProjection）
     -- 同一套：車還在舊游標窗口附近就沿用，離開了才全域重新定位——那是新定位，不受下面的單幀倒退上限夾住。
     local relocated = false
-    if state.needsProjection then
-        state.needsProjection = false
+    if state.needsProjection then -- 這一幀結束前才清（下方防退臂要分辨明確重新定位）
         local width = profile.segWidth and profile.segWidth[bestI]
         local reach = LOOKAHEAD_MIN
         if isFinite(width) and width * 0.5 > reach then reach = width * 0.5 end
@@ -2015,12 +2014,16 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
     -- 往回退過折點要車頭不朝出臂（kinkHandover 前跳條件的鏡像）：車頭在出臂前半平面、又背向入臂時，退回入臂只會是
     -- 兩臂同在窗內、取了較近的那條。Y 字岔路（兩臂夾角小、反折 >90°）承諾線往楔形內側偏，車離入臂比出臂近，
     -- 投影一幀從出臂退回入臂、前視落到車後，err>135° 再調頭、四次後交還（1018a 正式服 153° 反折）。
-    -- 被撞回／倒車的車頭仍朝入臂（或不朝出臂），照舊逐段退；共線段兩個 cos 相等，不受影響。
-    if bestI < idx and not relocated
+    -- 被撞回／倒車的車頭仍朝入臂（或不朝出臂），照舊逐段退；共線段兩個 cos 相等，不受影響。倒車脫困只清控制歷史、照套。
+    -- 明確重新定位的幀（needsProjection：讓位恢復、掛回後、cutover）不套（relocated 只在這種幀成立，一併涵蓋）：車是玩家
+    -- 或掛回倒車搬過去的，舊游標不代表車在哪一臂——讓位中開回入臂、車頭向西時鎖在出臂＝對出臂 22 m 的假橫偏（1021i）。
+    -- 不另開 local（control 已 190 locals／60 upvalues）：needsProjection 留到這裡才清。
+    if bestI < idx and not state.needsProjection
             and cos(heading - profile.segH[bestI]) <= 0 and cos(heading - profile.segH[idx]) > 0 then
         bestI = idx
         bestT = projectT(x, y, px[idx], py[idx], px[idx + 1], py[idx + 1], segLen[idx])
     end
+    state.needsProjection = false
     state.idx = bestI
 
     -- 帶號橫偏（第 7 回傳值）：車相對投影點沿 CCW 法向的距離——正＝行進方向
