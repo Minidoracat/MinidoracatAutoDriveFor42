@@ -1686,6 +1686,39 @@ do
     check(#sum < U.CHUNK, "(1013a) summary still fits one chunk (" .. #sum .. ")")
 end
 
+-- 1020d 摘要：lhg＝卡高檔（樣本 tn ≥ gf＋2）時的追蹤不足（km/h×秒，同 ltr 的 min(目標,上限)−實速）；vsL＝capReason visibility 時
+--   各帳（樣本 vac）的損失（km/h×秒，同 loss）；regear 事件照常計數（ev）。
+--   違規證明：lhg 門檻改 +1＝(lhg) 紅；vsL 不分帳（全記 ?）＝(vsL) 紅。
+scenario("1020d summary: tracking deficit stuck two gears high (lhg), visibility loss by account (vsL)")
+do
+    local function tp(extra)
+        local t = { frameMs = 16, capGear = 60, capPerception = 120, capMax = 120 }
+        for k, v in pairs(extra or {}) do t[k] = v end
+        return t
+    end
+    nowMs = nowMs + 3600000
+    start()
+    local d0 = nowMs
+    drive(1000, { speed = 55, target = 60, phys = tp({ capReason = "curve-coast" }) })
+    drive(1000, { speed = 40, target = 50, phys = tp({ transmissionNumber = 3, gearFair = 1 }) })      -- 追蹤 10、卡高檔
+    drive(1000, { speed = 40, target = 70, phys = tp({ transmissionNumber = 2, gearFair = 1 }) })      -- 追蹤 20、只高一檔
+    drive(1000, { speed = 40, target = 40, phys = tp({ capReason = "visibility", visAcct = "cruise" }) }) -- vsL cruise 20
+    drive(400, { speed = 50, target = 50, phys = tp({ capReason = "visibility", visAcct = "hold" }) })    -- vsL hold 4
+    D.event(0, "regear", { tn = 4, tn1 = 1, gf = 1, speed = 20, v1 = 21, target = 40, ms = 33 })
+    D.stop(0, "arrive")
+    pump(120000)
+    local _, sum = sumLines(d0)
+    local function n(key) return tonumber(string.match(sum, '"' .. key .. '":([%d%.%-]+)')) end
+    local function m(map, key) return tonumber(string.match(sum, '"' .. map .. '":{[^}]*"' .. key .. '":(%d+)')) end
+    check(sum ~= "", "(1020d) summary found")
+    checkEq(n("ltr"), 30, "(lhg) ltr unchanged: 10 + 20")
+    checkEq(n("lhg"), 10, "(lhg) only the sample two gears above the speed's gear counts")
+    checkEq(m("vsL", "cruise"), 20, "(vsL) cruise account loss 20 km/h x 1 s")
+    checkEq(m("vsL", "hold"), 4, "(vsL) hold account loss 10 km/h x 0.4 s")
+    checkEq(m("ev", "regear"), 1, "(regear) event counted")
+    check(#sum < U.CHUNK, "(1020d) summary still fits one chunk (" .. #sum .. ")")
+end
+
 -- 1017 假撞：自動掛回（mode rehitch，或 tow rh-attach 後 REHITCH_SETTLE_MS 內）與下車煞車（撞擊那筆 tn 0、fbl 0，EXIT_BRAKE_MS
 -- 內以 exit 結束）不算 impact、不出片段，摘要另計 rhi／xbk；同樣掉速在 rh-attach 3 秒後、或 tn 0 卻以別的原因結束／過了 2 秒才結束、
 -- 或有檔位時以 exit 結束，都照算 impact（片段 trig＝撞擊那刻）。
