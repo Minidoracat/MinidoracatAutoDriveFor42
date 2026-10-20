@@ -1890,6 +1890,119 @@ do
     check(sum ~= "" and string.find(sum, '"rpt"', 1, true) == nil, "(rpt) route without patchState (nav API < v4) omits rpt")
 end
 
+-- 1020 摘要：
+--   (T1)   有理由碼但目標 ≥ em−1（車在加速）的損失記 accel；目標 < em−1 照舊記理由碼。
+--   (T3)   vfInX 只認可視帳（vaw=vis）輔助頂到 VIS_ASSIST_MAX、fbw ∈ visibility／moving／blocked 的鎖輪上升緣、或接觸；
+--          vfInTs＝前 4 件首見時間。
+--   (T4)   fuT＝各段 ms；fuE＝原版 GasTank 期望扣量 [held, fair]（held＝實際檔、fair＝MDAD.fairGear 換算檔；停車式 150、
+--          轉速 0 不計）；沒有 vehicle（讀不到檔數）＝fuE {}，fuT 照寫。
+--   (eng)  engine off 的 ecd／eq 有值才進摘要 eng；舊事件（沒這兩鍵）的 eng 字串與 1017 相同。
+--   違規證明：T1 拿掉 elseif＝(T1) 紅；vfInX 不看 fbw＝(T3) arrive 紅；不看 vaw＝(T3) profile 紅；vfInTs 不設上限＝(T3) ts 紅；
+--   fair 不換算＝(T4) fair 紅；停車式乘車重＝(T4) stop 紅；摘要 eng 不接 ecd／eq＝(eng) 紅。轉速 0 的筆期望本來就是 0，
+--   (T4) es0 只守 fuT 照算、fuE 不多算。
+scenario("1020 summary: loss accel with a cap reason, vfInX visibility-only, vfInTs, fuT/fuE vanilla fuel expectation, eng ecd/eq")
+do
+    -- 共用伺服器同一份公式（shared/MDAD.lua 的 gasGearTerm／fairGear）：在獨立環境載入，只取這兩支
+    local env = setmetatable({ MDAD = {} }, { __index = _G })
+    assert(loadfile(MEDIA .. "shared/MDAD.lua", "t", env))()
+    MDAD.gasGearTerm, MDAD.fairGear = env.MDAD.gasGearTerm, env.MDAD.fairGear
+    local function tp(extra)
+        local t = { frameMs = 16, capGear = 120, capPerception = 120, capMax = 120, capReason = "curve-coast",
+            controlState = "TRACK" }
+        for k, v in pairs(extra or {}) do t[k] = v end
+        return t
+    end
+    -- 5 檔、極速 100（每檔 20 km/h）、腳本質量 1300（車重倍率 2）
+    local script = { getGearRatioCount = function() return 5 end, getMass = function() return 1300 end }
+    local veh = { getScript = function() return script end, getMaxSpeed = function() return 100 end,
+        getX = function() return x end, getY = function() return 200 end }
+    nowMs = math.floor((nowMs + 3600000) / 200) * 200
+    D.start(0, veh, profile)
+    local d0 = nowMs
+    -- (T1) em＝120：目標 119.5（≥119）＝加速；目標 100＝照舊 curve-coast
+    drive(2000, { speed = 60, target = 119.5, phys = tp() })
+    drive(2000, { speed = 60, target = 100, phys = tp() })
+    -- (T3) 6 件首見；1：8 秒內只有 arrive 鎖輪＝不算；2：只有剖面帳 vad 5＝不算；3：可視帳 vad 4 算；4：moving 鎖輪算；
+    -- 5：接觸算；6：沒事
+    local seen = "[[40,1,30,0.5,70]]"
+    drive(200, { speed = 70, phys = tp({ firstSeen = seen }) })
+    drive(400, { speed = 70, phys = tp({ forceBrakeLeft = 900, forceBrakeWhy = "arrive" }) })
+    drive(9000, { speed = 70, phys = tp() })
+    drive(200, { speed = 70, phys = tp({ firstSeen = seen }) })
+    drive(200, { speed = 70, phys = tp({ visAssistDecel = 5, visAssistWhy = "profile" }) })
+    drive(9000, { speed = 70, phys = tp() })
+    drive(200, { speed = 70, phys = tp({ firstSeen = seen }) })
+    drive(200, { speed = 70, phys = tp({ visAssistDecel = 4, visAssistWhy = "vis" }) })
+    drive(200, { speed = 70, phys = tp({ firstSeen = seen }) })
+    drive(200, { speed = 70, phys = tp({ forceBrakeLeft = 900, forceBrakeWhy = "moving" }) })
+    drive(200, { speed = 70, phys = tp({ firstSeen = seen }) })
+    drive(200, { speed = 70, phys = tp(), contact = true })
+    drive(200, { speed = 70, phys = tp({ firstSeen = seen }) })
+    drive(9000, { speed = 70, phys = tp() })
+    -- (T4) 換一趟：只看油量帳。oth：30 km/h、4 檔、轉速 2500；arc：同樣 2 秒＋轉速 0 的 2 秒；post：停車、轉速 1250
+    D.event(0, "engine", { phase = "off", why = "engine", chg = 1, es = 4500, fu = 40, ecd = 38, eq = 61 })
+    D.stop(0, "UI_MinidoracatAutoDrive_EngineOff")
+    pump(120000)
+    local _, sum = sumLines(d0)
+    local function n(key) return tonumber(string.match(sum, '"' .. key .. '":([%d%.%-]+)')) end
+    local function lossOf(k) return tonumber(string.match(sum, '"loss":{[^}]*"' .. k .. '":(%d+)')) end
+    local acc, cc = lossOf("accel"), lossOf("curve%-coast")
+    check(acc ~= nil and acc >= 100 and acc <= 130, "(T1) target at the cap with a reason: loss goes to accel (" .. tostring(acc) .. ")")
+    check(cc ~= nil and cc >= 100, "(T1) target below em-1 keeps its reason (" .. tostring(cc) .. ")")
+    checkEq(n("vfIn"), 6, "(T3) six qualifying first-seens")
+    checkEq(n("vfInX"), 3, "(T3) arrive lock and profile assist do not count; vis assist, moving lock and contact do")
+    local ts = string.match(sum, '"vfInTs":(%b[])') or ""
+    checkEq(count(ts, ","), 3, "(T3) ts vfInTs keeps the first 4 (" .. ts .. ")")
+    check(string.find(ts, "^%[" .. (d0 + 4200) .. ",") ~= nil, "(T3) first ts = first-seen sample time (" .. ts .. ")")
+    check(string.find(sum, '"eng":{"why":"engine","chg":1[%.0]*,"es":4500[%.0]*,"fu":40[%.0]*,"ecd":38,"eq":61}') ~= nil,
+        "(eng) ecd/eq appended to the summary eng")
+    check(string.find(sum, '"fuT":{', 1, true) ~= nil, "(T4) fuT written")
+    check(#sum < U.CHUNK, "(1020) summary still fits one chunk (" .. #sum .. ")")
+
+    nowMs = math.floor((nowMs + 3600000) / 200) * 200
+    D.start(0, veh, profile)
+    local d1 = nowMs
+    local g = { engineSpeed = 2500, transmissionNumber = 4 }
+    drive(2000, { speed = 30, phys = tp(g) })
+    drive(2000, { speed = 30, phys = tp({ engineSpeed = 2500, transmissionNumber = 4, curveHardActive = true }) })
+    drive(2000, { speed = 30, phys = tp({ engineSpeed = 0, transmissionNumber = 4, curveHardActive = true }) })
+    drive(2000, { speed = 0, phys = tp({ engineSpeed = 1250, transmissionNumber = 0 }) })
+    D.stop(0, "UI_MinidoracatAutoDrive_Arrived")
+    pump(120000)
+    _, sum = sumLines(d1)
+    local function pair(seg)
+        local h, f = string.match(sum, '"fuE":{[^}]*"' .. seg .. '":%[([%d%.]+),([%d%.]+)%]')
+        return tonumber(h), tonumber(f)
+    end
+    local function tms(seg) return tonumber(string.match(sum, '"fuT":{[^}]*"' .. seg .. '":(%d+)')) end
+    -- 每筆 200 ms：held＝(20×0.71×4−30)×350×2×(2500/2500)×(200/60000)＝62.53；fair 換到 2 檔＝max(800, …)×2÷300＝5.33
+    local h, f = pair("oth")
+    local per = (tms("oth") or 0) / 200
+    check(h ~= nil and math.abs(h - 62.533 * per) < 0.2, "(T4) held = vanilla term in the actual gear (" .. tostring(h) .. ", n " .. per .. ")")
+    check(f ~= nil and math.abs(f - 5.333 * per) < 0.2, "(T4) fair = term in MDAD.fairGear's gear (" .. tostring(f) .. ")")
+    h = pair("arc")
+    checkEq(tms("arc"), 4000, "(T4) fuT counts the arc's 4 s including engine-off samples")
+    check(h ~= nil and math.abs(h - 625.3) < 0.2, "(T4) es0 engine-off samples add no expectation (" .. tostring(h) .. ")")
+    h, f = pair("post")
+    check(h ~= nil and math.abs(h - 2.5) < 0.05 and h == f, "(T4) stop stopped: 150×es/2500, no mass, no conversion (" .. tostring(h) .. ")")
+
+    -- 舊路徑：沒有 vehicle＝讀不到檔數，fuE 空、fuT 照寫；舊 engine off 事件（沒 ecd／eq）的 eng 不變
+    nowMs = nowMs + 3600000
+    start()
+    local d2 = nowMs
+    drive(1000, { speed = 30, phys = tp(g) })
+    D.event(0, "engine", { phase = "off", why = "battery", chg = 0, es = 2400, fu = 41.5 })
+    D.stop(0, "UI_MinidoracatAutoDrive_EngineOff")
+    pump(120000)
+    _, sum = sumLines(d2)
+    check(string.find(sum, '"fuE":{}', 1, true) ~= nil and string.find(sum, '"fuT":{"oth":', 1, true) ~= nil,
+        "(compat) no vehicle: fuE empty, fuT still written")
+    check(string.find(sum, '"eng":{"why":"battery","chg":0[%.0]*,"es":2400[%.0]*,"fu":41%.5}') ~= nil,
+        "(compat) old engine off event: eng unchanged")
+    check(string.find(sum, '"vfInTs":[]', 1, true) ~= nil, "(compat) no first-seen: vfInTs empty")
+    MDAD.gasGearTerm, MDAD.fairGear = nil, nil
+end
+
 -- 1010 所有送出的片段整段 ≤ CLIP_TOTAL_MAX（第一塊宣告的 len＝全文長度；伺服器只看這個）
 local maxLen = 0
 for i = 1, #sent do

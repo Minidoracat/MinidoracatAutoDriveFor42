@@ -1969,7 +1969,8 @@ end
 -- 1017 遙測：樣本 vcc／vhc／blr 與新格式 vfs 有值才寫、ac／pc 缺值不寫；impact 事件帶 m／tn／ib（false 也寫）／rhMs／tlg／tlv，
 -- rh-attach 後 REHITCH_SETTLE_MS 內或 mode rehitch 的撞擊 cls＝rehitch；engine off／unstick settle／dodge／uturn over 新鍵過 EK。
 -- 違規證明：encodePhys 拿掉 vcc＝(codes) 紅；impactClass 不看 rhMs＝(rh-attach) 紅；不看 mode＝(rh-mode) 紅；
--- emitEvent 不記 rhAt＝(rh-attach)(rhMs) 紅；ib 用 and/or 寫法（false 變 nil）＝(ib-false) 紅；EK 少 chg／bh／zc0＝(ek) 紅。
+-- emitEvent 不記 rhAt＝(rh-attach)(rhMs) 紅；ib 用 and/or 寫法（false 變 nil）＝(ib-false) 紅；EK 少 chg／bh／zc0／ecd／eq＝(ek) 紅。
+-- 1020：engine off 加 ecd（引擎零件狀況）／eq（引擎品質）。
 scenario("1017 sample codes vcc/vhc/blr/vfs, impact m/tn/ib/rhMs/tlg/tlv and cls rehitch, new event keys")
 do
     resetFs()
@@ -1999,6 +2000,7 @@ do
     s(9490000, 120, 25, "rehitch", {})
     s(9490200, 121, 5, "rehitch", {})
     MDADDiagnostics.event(0, "engine", { phase = "off", why = "battery", chg = 0, es = 2400, fu = 41.5 })
+    MDADDiagnostics.event(0, "engine", { phase = "off", why = "engine", chg = 1, es = 4500, fu = 40, ecd = 38, eq = 61 })
     MDADDiagnostics.event(0, "unstick", { phase = "settle", bh = 4.25 })
     MDADDiagnostics.event(0, "dodge", { phase = "commit", zc0 = 18.5, chain = "clear-stay" })
     MDADDiagnostics.event(0, "dodge", { phase = "release", why = "next-group", offL = 1.5, dbl = 0, nxB = 66.2, nxC = "dodge" })
@@ -2031,7 +2033,7 @@ do
     checkEq(ev(3, "cls"), "rehitch", "(rh-mode) a drop in mode rehitch is cls rehitch")
     checkEq(ev(3, "m"), "rehitch", "(rh-mode) mode written")
     for _, kv in ipairs({ '"why":"battery","chg":0,"es":2400,"fu":41.5', '"bh":4.25', '"zc0":18.5', '"chain":"clear-stay"',
-            '"nxB":66.2', '"nxC":"dodge"', '"why":"cutover"' }) do
+            '"nxB":66.2', '"nxC":"dodge"', '"why":"cutover"', '"why":"engine","chg":1,"es":4500,"fu":40,"ecd":38,"eq":61' }) do
         check(string.find(body, kv, 1, true) ~= nil, "(ek) event key passes EK: " .. kv)
     end
     MDADUpload = nil

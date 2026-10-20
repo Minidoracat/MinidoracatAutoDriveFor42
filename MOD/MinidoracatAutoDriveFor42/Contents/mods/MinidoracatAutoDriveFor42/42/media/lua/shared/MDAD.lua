@@ -156,6 +156,35 @@ function MDAD.extraFuelFactor(navOn, autoOn)
     return factor
 end
 
+-- 原版 Vehicles.Update.GasTank 的檔位項（Vehicles.lua:467-479）：每遊戲分鐘扣 max(800, (極速÷檔數×0.71×檔位−車速)×350)
+-- ×轉速÷2500×其他倍率，同一檔車速越低扣越多。伺服器 autoFuelBase（自駕油耗換算）與客戶端摘要 fuE（期望扣量）共用。
+function MDAD.gasGearTerm(gear, kmh, perGear)
+    local m = (perGear * 0.71 * gear - kmh) * 350
+    if m < 800 then return 800 end
+    return m
+end
+
+-- 自駕油耗換算檔：CarController 依當下車速會選的檔（control_ForwardNew :687-690）。它拿 MP 假速度域選檔
+-- （CarController.java:139-146；BaseVehicle.java:666-673，SP＝1），同 Driver regulatorDomainKmh 的換算。
+-- 回 nil＝不換算：車速 <1（原版停車式，NaN 也擋）、檔位 <2、或實際檔不高於換算檔。gears／maxKmh 由呼叫端驗過。
+function MDAD.fairGear(kmh, gear, gears, maxKmh)
+    if not (kmh >= 1) or not (gear >= 2) then return nil end
+    local limited = kmh
+    local fn = BaseVehicle and BaseVehicle.getFakeSpeedModifier
+    if type(fn) == "function" then
+        local ok, fake = pcall(fn)
+        if ok and type(fake) == "number" and fake == fake and fake > 1 then
+            local d = kmh * fake / 120
+            limited = kmh * (1 + (fake - 1) * d * d)
+        end
+    end
+    if limited > maxKmh then limited = maxKmh end
+    local fair = math.floor(limited / (maxKmh / gears)) + 1
+    if fair > gears then fair = gears end
+    if gear <= fair then return nil end
+    return fair
+end
+
 -- vehicle:getBattery()＝VehicleParts.java:148-149（腳踏車／拖車可能無此 part）
 function MDAD.getBatteryPart(vehicle)
     if not vehicle then return nil end

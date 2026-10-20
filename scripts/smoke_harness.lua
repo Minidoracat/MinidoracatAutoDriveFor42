@@ -26288,7 +26288,8 @@ drive.scenarioReturnLaneNext()
 
 -- 1017 遙測（Driver 端；2026-10-17 裁定 EngineOff 照舊交還、只補紀錄）：
 --   (eng)      行進中電瓶沒電／引擎熄火：照舊 EngineOff 交還（玩家看到的鍵不變），交還前記 engine off why＝battery／engine、
---              電瓶 charge、油量。違規證明：driveGate 兩關回同一個第二值＝(eng) why 紅；不記事件＝(eng) 紅。
+--              電瓶 charge、油量；1020 加引擎零件狀況 ecd、引擎品質 eq（讀不到零件＝缺）。違規證明：driveGate 兩關回同一個
+--              第二值＝(eng) why 紅；不記事件＝(eng) 紅；ecd 讀 vehicle 而非 Engine 零件＝(eng) ecd 紅。
 --   (ac-nil)   footprint 沒有命中硬點（帶內沒點）：樣本 ac／pc 缺值，不寫 0。違規證明：照舊寫 0＝紅。
 --   (bh)       Drive.startBehind：車在首段反向延長上的距離（後方正、前方負、剖面讀不到 nil）。
 --   (nx)       Drive.releaseNext：回線 lane 上線尾之後最近一群——要側移＝dodge＋偏到位點、整寬＝blocked＋群起點、群在線尾前或
@@ -26316,18 +26317,23 @@ function drive.scenarioTelem1017()
     driveTick(dp, dveh)
     local e = last("engine", "off")
     checkTrue(not Dr.isActive(0) and haloKey() == DKEY.ENGINE, "(eng) 行進中電瓶沒電：照舊 EngineOff 交還、提示鍵不變")
-    checkTrue(e ~= nil and e.why == "battery" and e.chg == 0,
-        "(eng) 交還前記 engine off why=battery、chg 0（實得 " .. tostring(e and e.why) .. "/" .. tostring(e and e.chg) .. "）")
+    checkTrue(e ~= nil and e.why == "battery" and e.chg == 0 and e.ecd == nil and e.eq == 100,
+        "(eng) 交還前記 engine off why=battery、chg 0、沒有 Engine 零件＝ecd 缺、eq 照記（實得 " .. tostring(e and e.why) .. "/"
+        .. tostring(e and e.chg) .. "/" .. tostring(e and e.ecd) .. "/" .. tostring(e and e.eq) .. "）")
     dveh._part._item._uses = 0.8
     evs = {}
     checkTrue(armDrive(), "(eng) 重新啟動")
     Dr.debugSession(0).diag = true
     dveh._engine = false
+    dveh._devices.Engine = { getCondition = function() return 38 end }
     driveTick(dp, dveh)
     e = last("engine", "off")
-    checkTrue(not Dr.isActive(0) and haloKey() == DKEY.ENGINE and e ~= nil and e.why == "engine" and e.chg == 0.8,
-        "(eng) 引擎熄火：why=engine、電瓶 charge 0.8（實得 " .. tostring(e and e.why) .. "/" .. tostring(e and e.chg) .. "）")
+    checkTrue(not Dr.isActive(0) and haloKey() == DKEY.ENGINE and e ~= nil and e.why == "engine" and e.chg == 0.8
+        and e.ecd == 38,
+        "(eng) 引擎熄火：why=engine、電瓶 charge 0.8、引擎零件狀況 38（實得 " .. tostring(e and e.why) .. "/"
+        .. tostring(e and e.chg) .. "/" .. tostring(e and e.ecd) .. "）")
     dveh._engine = true
+    dveh._devices.Engine = nil
     -- (ac-nil) 空路：沒有命中硬點＝ac／pc 缺值；放一根硬物在車頭旁＝有值
     checkTrue(armDrive(), "(ac-nil) 啟動")
     local st = Dr.debugSession(0)
