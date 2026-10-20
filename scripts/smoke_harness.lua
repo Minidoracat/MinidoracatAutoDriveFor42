@@ -4715,10 +4715,10 @@ local function installNavApi(version)
         end,
         -- 改道查詢面（nav API v3；2026-09-02 重新接回）：情境以 drive.nav.detour
         -- 控制回傳，呼叫計數與參數留給斷言。
-        requestDetour = function(playerNum, tx, ty, ax, ay, r, more)
+        requestDetour = function(playerNum, tx, ty, ax, ay, r, more, maxSnap)
             local nav = drive.nav
             nav.detourCalls = (nav.detourCalls or 0) + 1
-            nav.lastDetour = { pn = playerNum, tx = tx, ty = ty, ax = ax, ay = ay, r = r, more = more }
+            nav.lastDetour = { pn = playerNum, tx = tx, ty = ty, ax = ax, ay = ay, r = r, more = more, maxSnap = maxSnap }
             if nav.detour == nil then return nil, "noroad" end
             return nav.detour, nav.detourState or "ok"
         end,
@@ -12533,6 +12533,22 @@ local function scenarioDetour()
     nav.detour = detourRoute(60, 0, 30)
     ok, why = MDAD.Drive.requestDetour(0)
     checkTrue(ok == false and why == "far", "(c5) 起點 30m 外的路線拒收")
+    -- nav API v10：requestDetourRoute 傳第 8 參 SNAP_MAX_M（主 MOD 不拿離車超過它的路當起點，拖車調頭 why=far）；
+    -- v9 以下不傳（舊主 MOD 照舊，far 由上一條拒收）。三支呼叫端都經 requestDetourRoute。
+    -- 違規證明：拿掉版本閘（一律傳）＝v2／v9 兩條紅；不傳＝v10／v12 兩條紅。
+    do
+        local apiWas, snapMax = MinidoracatMiniMapAPI.navApiVersion, MDAD.Drive.debugTune().SNAP_MAX_M
+        checkEq(nav.lastDetour.maxSnap, nil, "(c5) nav v" .. tostring(apiWas) .. "：不傳 maxSnap")
+        for _, c in ipairs({ { 9, nil }, { 10, snapMax }, { 12, snapMax } }) do
+            MinidoracatMiniMapAPI.navApiVersion = c[1]
+            local calls = nav.detourCalls
+            ok, why = MDAD.Drive.requestDetour(0)
+            checkTrue(nav.detourCalls == calls + 1 and nav.lastDetour.maxSnap == c[2] and why == "far",
+                "(c5) nav v" .. c[1] .. "：maxSnap＝" .. tostring(c[2]) .. "（實得 " .. tostring(nav.lastDetour.maxSnap)
+                .. "，" .. tostring(why) .. "）")
+        end
+        MinidoracatMiniMapAPI.navApiVersion = apiWas
+    end
     -- 空線（1002h E2E rc50 0017：主 MOD 回 ok 但 len 0）收下＝下一幀建不出剖面、LostRoute 交還
     nav.detour = detourRoute(0, 0, 1)
     ok, why = MDAD.Drive.requestDetour(0)
@@ -24390,11 +24406,19 @@ drive.scenarioTowRehitch()
 --               違規證明：各自拿掉時間／距離／目標／選項條件＝對應那條紅。
 --   (mh-yield)  選自動恢復時接手走讓位、不記接手：放手前按停再重開不提示。
 --   (mh-consume) 不符合的那次重開就消費掉接手紀錄：再停一次（按停）重開不提示。違規證明：不清紀錄＝紅。
+-- (mhc) 1020e 接手前 TUNE.MANUAL_HINT_CALM_MS 內有異常（Drive.anomTick）或剩餘短於 TUNE.MANUAL_HINT_REM_M：不記接手，
+--   takeover manual 帶 why／tkoA／rem。
+--   (mhc-anom)  停止線判堵停住時接手：manual why=hint-anom、重開不提示。違規證明：拿掉異常條件、anomTick 不看判堵或不呼叫＝紅。
+--   (mhc-brake) 行駛中硬煞後接手、(mhc-impact) 一筆掉速到 0 後接手：同上。違規證明：急煞／撞擊不算異常＝對應那條紅。
+--   (mhc-calm)  判堵後過了 CALM_MS 才接手（中間正常行駛）：照提示，hint 帶 tkoA ≥ CALM_MS、rem。違規證明：不看 tkoA 新舊＝紅。
+--   (mhc-rem)   離終點 200 m 接手：manual why=hint-rem、重開不提示。違規證明：拿掉剩餘條件＝紅。
+--   resume>0 不提示由 (mh-opt)（重開時已改自動恢復）與 (mh-yield)（接手時是自動恢復）涵蓋。
 function drive.scenarioManualHint()
     scenario("1017g 手動介入後的提示：預設介入即關閉時，接手後原地以同一目標重開提示一次")
     local Dr, T = MDAD.Drive, MDAD.Drive.debugTune()
     local DG = MDADDiagnostics
     local sStart, sEvent, sStop, sToast, sTel = DG.start, DG.event, DG.stop, DG.toast, MDAD.HUD.telemetryEnabled
+    local sShould, sSample = DG.shouldSample, DG.sample
     local oldSandbox, oldResume = SandboxVars, drive.resumeMs
     local oldRoute, oldTx, oldTy, oldState = drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
     local ev, toasts = {}, {}
@@ -24403,8 +24427,10 @@ function drive.scenarioManualHint()
     DG.stop = function() end
     DG.event = function(_, name, a) if name == "takeover" and type(a) == "table" then ev[#ev + 1] = a end end
     DG.toast = function(text) toasts[#toasts + 1] = text end
-    drive.fillWorld(-10, 320, -12, 12)
-    drive.putRoad(-10, 320, -3, 3)
+    -- 假 start 沒有真 session：取樣回 false 會把 s.diag 關掉、接手事件收不到
+    DG.shouldSample, DG.sample = function() return false end, function() return true end
+    drive.fillWorld(-10, 620, -12, 12)
+    drive.putRoad(-10, 620, -3, 3)
     setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 60, RightLaneBias = 0 })
     local HINT = "UI_MinidoracatAutoDrive_ManualResumeHint"
     local function setTarget(tx)
@@ -24445,7 +24471,7 @@ function drive.scenarioManualHint()
     end
     drive.resumeMs = 0
     Dr.manualHinted = nil
-    setTarget(300)
+    setTarget(600)
 
     startAt(0)
     takeOver()
@@ -24453,9 +24479,11 @@ function drive.scenarioManualHint()
     startAt(50)
     local e = hintEv()
     checkTrue(hinted() == 1 and toasted() == 1 and noteReason(HINT) and e ~= nil
-            and math.abs(e.dt - 20000) < 100 and math.abs(e.d - 50) < 1e-6,
-        "(mh-hint) 20 s、50 m 內同目標重開：白字＋Toast 提示一次、takeover hint dt／d（halo " .. hinted()
-        .. "、dt " .. tostring(e and e.dt) .. "、d " .. tostring(e and e.d) .. "）")
+            and math.abs(e.dt - 20000) < 100 and math.abs(e.d - 50) < 1e-6
+            and e.tkoA == nil and e.rem ~= nil and e.rem >= T.MANUAL_HINT_REM_M,
+        "(mh-hint) 20 s、50 m 內同目標重開：白字＋Toast 提示一次、takeover hint dt／d／tkoA 缺／rem（halo " .. hinted()
+        .. "、dt " .. tostring(e and e.dt) .. "、d " .. tostring(e and e.d) .. "、tkoA " .. tostring(e and e.tkoA)
+        .. "、rem " .. tostring(e and e.rem) .. "）")
     takeOver()
     nowMs = nowMs + 5000
     startAt(50)
@@ -24463,7 +24491,7 @@ function drive.scenarioManualHint()
 
     local function negative(tag, ms, x, tx, resume)
         Dr.manualHinted = nil
-        setTarget(300)
+        setTarget(600)
         startAt(0)
         takeOver()
         nowMs = nowMs + ms
@@ -24475,12 +24503,12 @@ function drive.scenarioManualHint()
     end
     negative("mh-late", T.MANUAL_HINT_MS + 1000, 50)
     negative("mh-far", 20000, T.MANUAL_HINT_M + 50)
-    negative("mh-target", 20000, 50, 280)
+    negative("mh-target", 20000, 50, 580)
     negative("mh-opt", 20000, 50, nil, 2000)
 
     -- 選自動恢復：接手走讓位、不記接手（Drive.manualStop 不跑）
     Dr.manualHinted = nil
-    setTarget(300)
+    setTarget(600)
     drive.resumeMs = 2000
     startAt(0)
     nowMs = nowMs + 20
@@ -24503,9 +24531,100 @@ function drive.scenarioManualHint()
     startAt(50)
     checkTrue(hinted() == 0 and hintEv() == nil, "(mh-consume) 上一趟重開已消費接手紀錄：按停後再重開不提示")
 
+    local function manualEv()
+        for i = #ev, 1, -1 do if ev[i].phase == "manual" then return ev[i] end end
+    end
+    local function cruise(ms) -- 沿 +x 以 30 km/h 行駛 ms（車位跟著走，不停滯、進度監督不起疑）
+        dveh._speed = 30
+        for _ = 1, ms / 100 do
+            nowMs = nowMs + 100
+            dveh._x = dveh._x + 30 / 3.6 * 0.1
+            driveTick(dp, dveh)
+        end
+    end
+    local function blockedThenCruise(ms) -- 跑 1 s 後判堵一幀，再正常行駛 ms
+        cruise(1000)
+        local S = Dr.debugSession(0)
+        S.blocked = true
+        cruise(100)
+        S.blocked = false
+        cruise(ms)
+    end
+    -- 接手前 1 s 內各種異常：manual why=hint-anom、tkoA < CALM_MS、rem 照記；重開不提示
+    local function anomCase(tag, what, setup) -- 每案先清 manualHinted：違規時前一案的提示不連帶染紅後面
+        Dr.manualHinted = nil
+        startAt(0)
+        setup(Dr.debugSession(0))
+        takeOver()
+        local m = manualEv()
+        checkTrue(m ~= nil and m.why == "hint-anom" and m.tkoA ~= nil and m.tkoA < T.MANUAL_HINT_CALM_MS
+                and m.rem ~= nil and m.rem >= T.MANUAL_HINT_REM_M,
+            "(" .. tag .. ") " .. what .. "後接手：manual why=hint-anom（why " .. tostring(m and m.why) .. "、tkoA "
+            .. tostring(m and m.tkoA) .. "、rem " .. tostring(m and m.rem) .. "）")
+        nowMs = nowMs + 20000
+        startAt(50)
+        checkTrue(hinted() == 0 and hintEv() == nil, "(" .. tag .. ") " .. what .. "後接手：重開不提示（halo " .. hinted() .. "）")
+    end
+    anomCase("mhc-anom", "停止線判堵停住", function(S) -- 靜止＝不算急煞、不算撞擊，只剩判堵狀態
+        for _ = 1, 10 do
+            S.blocked = true
+            nowMs = nowMs + 100
+            driveTick(dp, dveh)
+        end
+    end)
+    anomCase("mhc-brake", "行駛中硬煞", function(S)
+        cruise(1000)
+        Dr.hardBrake(S, dveh, nowMs, "visibility", 30, 1, 0, 0, nil, 1, 0)
+        cruise(500)
+    end)
+    -- harness 沒載 MDAD_Upload：撞擊門檻本身由 test_upload 驗，這裡只驗 anomTick 以 10Hz 間隔把相鄰兩點車速交給它
+    local oldUp, upArgs = MDADUpload, nil
+    MDADUpload = { impactLike = function(prev, v, gap)
+        if prev - v >= 20 then upArgs = { prev, v, gap } end
+        return prev - v >= 20 and gap >= 80
+    end }
+    anomCase("mhc-impact", "30 km/h 一筆掉到 0（撞擊）", function()
+        cruise(1000)
+        dveh._speed = 0
+        for _ = 1, 2 do
+            nowMs = nowMs + 100
+            driveTick(dp, dveh)
+        end
+    end)
+    MDADUpload = oldUp
+    checkTrue(upArgs ~= nil and upArgs[1] == 30 and upArgs[2] == 0 and upArgs[3] >= 100,
+        "(mhc-impact) 撞擊門檻拿到前一點 30、本點 0、間隔 ≥100 ms（" .. tostring(upArgs and upArgs[3]) .. "）")
+
+    Dr.manualHinted = nil
+    startAt(0)
+    blockedThenCruise(T.MANUAL_HINT_CALM_MS + 500)
+    takeOver()
+    local me = manualEv()
+    local why0 = me and me.why
+    nowMs = nowMs + 20000
+    startAt(50)
+    e = hintEv()
+    checkTrue(why0 == nil and hinted() == 1 and e ~= nil and e.tkoA ~= nil and e.tkoA >= T.MANUAL_HINT_CALM_MS
+            and e.rem ~= nil and e.rem >= T.MANUAL_HINT_REM_M,
+        "(mhc-calm) 判堵過了 CALM_MS 才接手：照提示、hint 帶 tkoA／rem（why " .. tostring(why0) .. "、halo " .. hinted()
+        .. "、tkoA " .. tostring(e and e.tkoA) .. "、rem " .. tostring(e and e.rem) .. "）")
+
+    Dr.manualHinted = nil
+    startAt(400)
+    cruise(500)
+    takeOver()
+    me = manualEv()
+    checkTrue(me ~= nil and me.why == "hint-rem" and me.tkoA == nil and me.rem ~= nil and me.rem < T.MANUAL_HINT_REM_M,
+        "(mhc-rem) 離終點 200 m 接手：manual why=hint-rem（why " .. tostring(me and me.why) .. "、rem "
+        .. tostring(me and me.rem) .. "）")
+    nowMs = nowMs + 20000
+    startAt(410)
+    checkTrue(hinted() == 0 and hintEv() == nil, "(mhc-rem) 快到站接手：重開不提示（halo " .. hinted() .. "）")
+
     Dr.stop(0, nil)
     Dr.manualHinted = true -- 其餘情境不出這則提示
     DG.start, DG.event, DG.stop, DG.toast, MDAD.HUD.telemetryEnabled = sStart, sEvent, sStop, sToast, sTel
+    DG.shouldSample, DG.sample = sShould, sSample
     SandboxVars, drive.resumeMs = oldSandbox, oldResume
     drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
 end
@@ -26288,7 +26407,8 @@ drive.scenarioReturnLaneNext()
 
 -- 1017 遙測（Driver 端；2026-10-17 裁定 EngineOff 照舊交還、只補紀錄）：
 --   (eng)      行進中電瓶沒電／引擎熄火：照舊 EngineOff 交還（玩家看到的鍵不變），交還前記 engine off why＝battery／engine、
---              電瓶 charge、油量。違規證明：driveGate 兩關回同一個第二值＝(eng) why 紅；不記事件＝(eng) 紅。
+--              電瓶 charge、油量；1020 加引擎零件狀況 ecd、引擎品質 eq（讀不到零件＝缺）。違規證明：driveGate 兩關回同一個
+--              第二值＝(eng) why 紅；不記事件＝(eng) 紅；ecd 讀 vehicle 而非 Engine 零件＝(eng) ecd 紅。
 --   (ac-nil)   footprint 沒有命中硬點（帶內沒點）：樣本 ac／pc 缺值，不寫 0。違規證明：照舊寫 0＝紅。
 --   (bh)       Drive.startBehind：車在首段反向延長上的距離（後方正、前方負、剖面讀不到 nil）。
 --   (nx)       Drive.releaseNext：回線 lane 上線尾之後最近一群——要側移＝dodge＋偏到位點、整寬＝blocked＋群起點、群在線尾前或
@@ -26316,18 +26436,23 @@ function drive.scenarioTelem1017()
     driveTick(dp, dveh)
     local e = last("engine", "off")
     checkTrue(not Dr.isActive(0) and haloKey() == DKEY.ENGINE, "(eng) 行進中電瓶沒電：照舊 EngineOff 交還、提示鍵不變")
-    checkTrue(e ~= nil and e.why == "battery" and e.chg == 0,
-        "(eng) 交還前記 engine off why=battery、chg 0（實得 " .. tostring(e and e.why) .. "/" .. tostring(e and e.chg) .. "）")
+    checkTrue(e ~= nil and e.why == "battery" and e.chg == 0 and e.ecd == nil and e.eq == 100,
+        "(eng) 交還前記 engine off why=battery、chg 0、沒有 Engine 零件＝ecd 缺、eq 照記（實得 " .. tostring(e and e.why) .. "/"
+        .. tostring(e and e.chg) .. "/" .. tostring(e and e.ecd) .. "/" .. tostring(e and e.eq) .. "）")
     dveh._part._item._uses = 0.8
     evs = {}
     checkTrue(armDrive(), "(eng) 重新啟動")
     Dr.debugSession(0).diag = true
     dveh._engine = false
+    dveh._devices.Engine = { getCondition = function() return 38 end }
     driveTick(dp, dveh)
     e = last("engine", "off")
-    checkTrue(not Dr.isActive(0) and haloKey() == DKEY.ENGINE and e ~= nil and e.why == "engine" and e.chg == 0.8,
-        "(eng) 引擎熄火：why=engine、電瓶 charge 0.8（實得 " .. tostring(e and e.why) .. "/" .. tostring(e and e.chg) .. "）")
+    checkTrue(not Dr.isActive(0) and haloKey() == DKEY.ENGINE and e ~= nil and e.why == "engine" and e.chg == 0.8
+        and e.ecd == 38,
+        "(eng) 引擎熄火：why=engine、電瓶 charge 0.8、引擎零件狀況 38（實得 " .. tostring(e and e.why) .. "/"
+        .. tostring(e and e.chg) .. "/" .. tostring(e and e.ecd) .. "）")
     dveh._engine = true
+    dveh._devices.Engine = nil
     -- (ac-nil) 空路：沒有命中硬點＝ac／pc 缺值；放一根硬物在車頭旁＝有值
     checkTrue(armDrive(), "(ac-nil) 啟動")
     local st = Dr.debugSession(0)
@@ -28154,7 +28279,9 @@ drive.scenarioLagRate()
 --   (cv-hold) |ld| 0.6 持平、只變小 1 輪（0.55）：保持命中、照樣壓速、keep 事件只記一次。違規證明：拿掉遲滯、只要 1 輪變小各紅。
 --   (cv-shrink) 連 2 輪變小（0.6→0.55→0.5）：release converge、cvw＝保持的輪數。
 --   (cv-small) |ld| 0.25 < LAG_GUARD_MIN_M：當輪 release converge（不保持）。違規證明：遲滯不看門檻＝紅。
---   (cv-line) 期望線 el 兩輪間跳 0.5：release why=line。違規證明：拿掉 line 出口＝紅。
+--   (cv-line) 期望線 el 兩輪間跳 0.5、規劃線往遠離硬點側移 0.5（新線＋ld 不再重疊）：release why=line。違規證明：拿掉 line 出口＝紅。
+--   (cv-reline) 1020c X4（正式服 P52 clip-18：出彎 el 往外 ramp 觸發 line 放手、dev 1.08，加速到 40 km/h 擦回原命中點）：換線、規劃線
+--     往硬點側移 0.1（衰減後的預測不碰、新線＋ld 仍碰記下的形狀）：不放手、keep why=reline 只記一次、lagHitPl 換成新線。違規證明：換線不重驗＝紅。
 --   (cv-body) 保持中車開過硬點（車尾過點）：release body——遲滯不會永久壓速。
 --   (cv-owner) 保持中 RETURN 接手：release owner。
 function drive.scenarioLagConverge()
@@ -28201,9 +28328,31 @@ function drive.scenarioLagConverge()
         "(cv-small) |ld| 0.25 < LAG_GUARD_MIN_M：當輪放手（why=" .. tostring(e.why) .. "）")
     scan(60, 0.6)
     s.diagExpL = 0.5
+    F.setLaneBias(fs, -0.5)
     e = scan(25, 0.6)
     checkTrue(s.lagHitX == nil and e.phase == "release" and e.why == "line",
-        "(cv-line) 期望線兩輪間跳 0.5（換線）：release why=line（why=" .. tostring(e.why) .. "）")
+        "(cv-line) 期望線兩輪間跳 0.5、新線遠離硬點（換線）：release why=line（why=" .. tostring(e.why) .. "）")
+    F.setLaneBias(fs, 0)
+    s.diagExpL = 0
+    scan(60, 0.6)
+    scan(25, 0.6)
+    s.diagExpL = 0.5
+    F.setLaneBias(fs, 0.1) -- 衰減後的預測（0.1＋0.6·f(40m)）不碰、不衰減（0.1＋0.6）仍碰：只有換線重驗留得住
+    local pl1 = Dr.lagPlanLane(s, false, hs, hs, lc, lc)
+    e = scan(25, 0.6)
+    local held = s.lagHitX == hs and e.phase == "keep" and e.why == "reline" and s.lagHitPl == pl1 and pl1 > 0.05
+    s.diagExpL = 1.0
+    F.setLaneBias(fs, 0.15)
+    scan(25, 0.6)
+    local n = 0
+    for _, a in ipairs(ev) do if a.phase == "keep" and a.why == "reline" then n = n + 1 end end
+    checkTrue(held and s.lagHitX == hs and n == 1,
+        "(cv-reline) 換線但新線往硬點側移（新線＋ld 仍碰記下的形狀）：保持、keep why=reline 只記一次、lagHitPl 換新線（held="
+        .. tostring(held) .. " pl=" .. tostring(s.lagHitPl) .. " keeps=" .. n .. "）")
+    F.setLaneBias(fs, 0)
+    s.diagExpL = 0
+    e = scan(hs + halfL + r + 1, 0.6)
+    checkTrue(s.lagHitX == nil and e.why == "body" and s.lagKeep == nil, "(cv-reline) 保持中車尾過點：release body、保持理由清掉")
     scan(60, 0.6)
     scan(25, 0.6)
     checkTrue(s.lagHitX == hs and s.lagCvw == 1, "(cv-body) 前置：保持中")
@@ -28220,6 +28369,106 @@ function drive.scenarioLagConverge()
     MDADDiagnostics.event = oldEvent
 end
 drive.scenarioLagConverge()
+
+-- 1020c X3（正式服 0.31.x：拖車 arm 後 converge 放手、2–3 s 後同點再撞 5 件 4 人——P30 clip-20 掛車因此脫開、P02 clip-01／-20 同一棵樹
+--   18.5–18.8 km/h；放手時 dev ≤0.22、命中點在車心前 15–25 m）：拖車或車頭與命中點之間有弧時，命中點在「車頭＋前視距＋煞到 MIN_EXEC
+--   的距離」內不以 converge 放手，保持到車尾過點。halfW 0.9／halfL 2.9、硬點離規劃車身 0.35；車頭前 2m 以 ld 0.6 arm，之後 ld 0.2（< 門檻、
+--   舊制當輪 converge 放手）。世界座標＝(弧長, lane)、航向 0，u＝hs−rs。
+--   (h-arcfn) Drive.arcAhead：圓角弧段＝1/R、弧前直段＝0、範圍空＝0。違規證明：弧段不計／範圍外也計＝紅。
+--   (h-tow) 拖車、命中點在車心前 14.9m（40 km/h 窗 ≈28m）：保持、keep why=tow 只記一次、照樣壓速。違規證明：拿掉拖車保持＝紅。
+--   (h-latch) 保持中被別的帽壓到 5 km/h（窗縮到 ≈9m < 12.9m）：照樣保持（進保持距離 lagKeepU）。違規證明：拿掉 lagKeepU＝紅。
+--   (h-rev) 倒回到命中點前 44.9m（超過 max(窗, lagKeepU)）：release converge、kind=tow、arcAhead 0。違規證明：不設上限＝紅。
+--   (h-tow-body) 保持到車尾（含掛車 trailLen 11）過點：release body。
+--   (h-arc) 不拖車、車頭與命中點之間有圓角弧：保持、keep why=arc、arcAhead＝1/R。違規證明：拿掉弧前保持＝紅。
+--   (h-straight) 不拖車、直路：照舊當輪 release converge、arcAhead 0、kind 缺。違規證明：直路也保持＝紅。
+function drive.scenarioLagHold1020()
+    scenario("1020c X3：落後守門拖車與弧前 converge 保持——命中點在前視＋煞停距離內保持到車尾過點，倒回超過上限才放")
+    local Dr, F, ARC = MDAD.Drive, MDADFollower, MDADDynamics.SEG_ARC
+    local straightP = F.begin({ pts = { 0, 0, 300, 0 } }, 60, 2)
+    while not F.stepBuild(straightP, 4096) do end
+    local w = 2 * (12 * (1 - math.cos(math.pi / 4)) + 0.656 + 0.4)
+    local arcP = F.begin({ pts = { 0, -40, 0, 0, 40, 0 }, segSurface = { "paved", "paved" }, segWidth = { w, w } }, 120, 4,
+        { valid = true, geometryValid = true, halfW = 0.656, rMin = 2.26, wheelbase = 1.985, delta0Safe = 0.72,
+            deltaVSafe = 0.24, maxSpeed = 120 })
+    while not arcP.ready do F.stepBuild(arcP, 4096) end
+    local sA, R
+    for i = 1, arcP.n - 1 do
+        if arcP.segKind[i] == ARC and arcP.filletRadius[i] > 0 then sA, R = arcP.s[i], arcP.filletRadius[i] break end
+    end
+    if not checkTrue(sA ~= nil and sA > 20, "(h-arcfn) fixture：剖面有圓角弧段（sA=" .. tostring(sA) .. "）") then return end
+    -- (h-arcfn)
+    local kA, k0, kE = Dr.arcAhead({ profile = arcP }, sA - 10, sA + 1), Dr.arcAhead({ profile = arcP }, 0, sA - 1),
+        Dr.arcAhead({ profile = arcP }, sA + 1, sA - 10)
+    checkTrue(math.abs(kA - 1 / R) < 1e-9 and k0 == 0 and kE == 0,
+        "(h-arcfn) arcAhead：跨進弧＝1/R、弧前直段 0、範圍空 0（" .. tostring(kA) .. "／" .. tostring(k0) .. "／" .. tostring(kE) .. "）")
+    local fs = F.newState()
+    F.setLaneBias(fs, 0)
+    local halfW, halfL, r = 0.9, 2.9, 0.15
+    local sen = { ready = true, hardN = 1, hardS = {}, hardL = {}, hardLc = {}, hardW = { r }, hardR = { r }, hardX = {}, hardY = {} }
+    local oldEvent, ev = MDADDiagnostics.event, {}
+    MDADDiagnostics.event = function(_, name, a) if name == "lag" then ev[#ev + 1] = a end end
+    local s, hs
+    local function newS(prof, tow, hitS)
+        hs = hitS
+        s = { diag = true, sensor = sen, fstate = fs, profile = prof, diagExpL = 0, lagHistD = {}, lagHistL = {}, lagHistN = 0,
+            safeBrake = 6, vehicleProfile = { halfW = halfW, halfL = halfL }, tow = tow }
+        local lc = Dr.lagPlanLane(s, false, hs, hs, 0, 0) + halfW + 0.35 + r
+        sen.hardS[1], sen.hardL[1], sen.hardLc[1], sen.hardX[1], sen.hardY[1] = hs, lc, lc, hs, lc
+        ev = {}
+    end
+    local function scan(rs, ld, kmh)
+        s.lastSNow, s.lastLatDev = rs, ld
+        Dr.lagGuardScan(s, 0, kmh or 40, rs, ld, 0)
+        return ev[#ev] or {}
+    end
+    local function keeps(why)
+        local k = 0
+        for _, a in ipairs(ev) do if a.phase == "keep" and a.why == why then k = k + 1 end end
+        return k
+    end
+    -- (h-tow)
+    newS(straightP, { trailLen = 11, halfW = 0.9, hitchToRear = 6 }, 64.9)
+    checkTrue(scan(60, 0.6).phase == "arm" and s.lagHitX == hs, "(h-tow) 前置：拖車、車頭前 2m、落後 0.6：arm")
+    local e = scan(50, 0.2)
+    scan(50.5, 0.2)
+    checkTrue(s.lagHitX == hs and e.phase == "keep" and e.why == "tow" and keeps("tow") == 1 and s.lagKeepU == hs - 50
+            and Dr.lagGuardCap(s, 40, 50.5, 0.2) < 40 and s.lastCapReason == "lag",
+        "(h-tow) 拖車、命中點在車心前 14.9m、ld 0.2：不以 converge 放手、keep why=tow 只記一次、照樣壓速（phase="
+        .. tostring(e.phase) .. " why=" .. tostring(e.why) .. " keeps=" .. keeps("tow") .. "）")
+    -- (h-latch)
+    scan(52, 0.2, 5)
+    checkTrue(s.lagHitX == hs, "(h-latch) 保持中車速被壓到 5 km/h（窗縮到 9m < 12.9m）：照樣保持（hit=" .. tostring(s.lagHitX) .. "）")
+    -- (h-rev)
+    e = scan(20, 0.2, -5)
+    checkTrue(s.lagHitX == nil and e.phase == "release" and e.why == "converge" and e.kind == "tow" and e.arcAhead == 0
+            and s.lagKeep == nil and s.lagKeepU == nil,
+        "(h-rev) 倒回到命中點前 44.9m（超過窗與進保持距離）：release converge、kind=tow、arcAhead 0（why=" .. tostring(e.why)
+        .. " kind=" .. tostring(e.kind) .. " arcAhead=" .. tostring(e.arcAhead) .. "）")
+    -- (h-tow-body)
+    scan(60, 0.6)
+    scan(50, 0.2)
+    scan(hs - 2, 0.2, 8)
+    local side = s.lagHitX == hs and s.lagHitSide == true
+    e = scan(hs + 11 + r + 1, 0.2, 8)
+    checkTrue(side and s.lagHitX == nil and e.why == "body" and e.kind == "tow",
+        "(h-tow-body) 保持到硬點旁（side）、掛車尾過點才 release body（side=" .. tostring(side) .. " why=" .. tostring(e.why) .. "）")
+    -- (h-arc)
+    newS(arcP, nil, sA + 3)
+    checkTrue(scan(hs - halfL - 2, 0.6, 60).phase == "arm" and s.lagHitX == hs, "(h-arc) 前置：弧上 3m 的硬點、落後 0.6：arm")
+    e = scan(hs - 14, 0.2)
+    checkTrue(s.lagHitX == hs and e.phase == "keep" and e.why == "arc" and math.abs((e.arcAhead or 0) - 1 / R) < 1e-9,
+        "(h-arc) 不拖車、車頭與命中點之間有 R" .. string.format("%.1f", R) .. " 圓角：保持、keep why=arc、arcAhead＝1/R（phase="
+        .. tostring(e.phase) .. " why=" .. tostring(e.why) .. " arcAhead=" .. tostring(e.arcAhead) .. "）")
+    -- (h-straight)
+    newS(straightP, nil, 64.9)
+    scan(60, 0.6)
+    e = scan(50, 0.2)
+    checkTrue(s.lagHitX == nil and e.phase == "release" and e.why == "converge" and e.arcAhead == 0 and e.kind == nil,
+        "(h-straight) 不拖車、直路：照舊當輪 release converge、arcAhead 0、kind 缺（why=" .. tostring(e.why) .. " kind="
+        .. tostring(e.kind) .. "）")
+    MDADDiagnostics.event = oldEvent
+end
+drive.scenarioLagHold1020()
 
 -- 1017d 繞行前段已貼上障礙時不承諾（2026-10-17 使用者裁定；正式服 P18 clip-32：preA −0.15 仍以 20.5 km/h 承諾、1.0 s 後撞同一棵樹）：
 --   沿 +x 的候選線（tmpOv）、a＝20、pre-a 段旁方塊面離車身 c。
@@ -29062,6 +29311,196 @@ function drive.scenarioLaunchHold()
     SandboxVars = oldSand
 end
 drive.scenarioLaunchHold()
+
+-- (launch-still) 1020a 靜止判堵也套起步包絡（正式服 1019a：倒車脫困退出 LAUNCH_HOLD_M 外、靜止判堵 bv 0.07，舊制照 blocked
+--   天花板 20 從 3.8 加到 15.6 km/h、撞回同一棵樹）：判堵上升緣車速 s.blockedEntryKmh ≤ LAUNCH_HOLD_KMH 就閂上，不看離武裝點多遠。
+--   (launch-still)       起步點 12m 外（起步近物保護武裝點在 0）靜止判堵：閂上、launch hold why=still 一次、停止線前 2m
+--                        目標＝Drive.launchCap（停止線收到 LAUNCH_HOLD_KMH）。
+--   (launch-still-run)   同一位置以 10 km/h 判堵：不閂、停止線前 2m 照舊 blocked 接近包絡（停止線收到 BLOCK_APPROACH_KMH）。
+--   (launch-still-defer) 延後先閂成 false、之後靜止判堵：判堵那一幀重判、閂上（predicate）。
+--   違規證明：拿掉 still 條件＝(launch-still)／(launch-still-defer) 紅；門檻換成 LAUNCH_HOLD_ENTRY_KMH＝(launch-still-run) 紅；
+--   只在閂為 nil 時判＝(launch-still-defer) 紅。
+function drive.scenarioLaunchStill()
+    scenario("1020a：靜止判堵也套起步包絡；行進中判堵照舊 blocked 包絡")
+    local oldSand = SandboxVars
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 90, RightLaneBias = 0 })
+    local wasMs = drive.frameMs(20)
+    local Dr, T = MDAD.Drive, MDAD.Drive.debugTune()
+    local oldEvent, oldSample, events = MDADDiagnostics.event, MDADDiagnostics.sample, {}
+    MDADDiagnostics.event = function(_, name, a) events[#events + 1] = { name = name, a = a } end
+    MDADDiagnostics.sample = function() return true end
+    -- 起步點 12m 外、以 kmh 判堵（前方 50m 整排牆），再把車擺到停止線前 2m 跑一幀；回 session、launch 事件數、最後一筆
+    local function round(kmh)
+        drive.fillWorld(-10, 90, -10, 10)
+        armDrive()
+        local st = Dr.debugSession(0)
+        st.diag = true
+        setHeading(dveh, 0)
+        dveh._x, dveh._y, dveh._speed = 12, 0, kmh
+        drive.scanRound(true)
+        st.startGuard, st.startGuardRelease, st.startGuardX, st.startGuardY = true, nil, 0, 0
+        for y = -9, 9 do drive.putSolid(50, y, "still_wall_" .. y) end
+        for i = #events, 1, -1 do events[i] = nil end
+        for _ = 1, 3 do drive.scanRound(true) end
+        local n, last = 0, nil
+        for i = 1, #events do
+            if events[i].name == "launch" then n, last = n + 1, events[i].a end
+        end
+        if st.blocked and type(st.blockHitX) == "number" then
+            dveh._x = st.blockHitX - Dr.blockStopDist(st) - 2
+            nowMs = nowMs + 20
+            driveTick(dp, dveh)
+        end
+        for y = -9, 9 do drive.clearCell(50, y) end
+        return st, n, last
+    end
+    local st, n, ev = round(0)
+    local lc = Dr.launchCap(st, dveh._x, dveh._y)
+    checkTrue(st.blocked == true and (st.blockedEntryKmh or 99) <= T.LAUNCH_HOLD_KMH and st.launchHoldOn == true
+            and n == 1 and ev.why == "still" and st.lastCapReason == "launch" and st.desiredTarget <= lc + 1e-9
+            and lc < T.BLOCK_APPROACH_KMH - 5,
+        "(launch-still) 起步點 12m 外靜止判堵：閂上、停止線前 2m 壓在起步包絡（on=" .. tostring(st.launchHoldOn) .. " n=" .. n
+        .. " why=" .. tostring(ev and ev.why) .. " acr=" .. tostring(st.lastCapReason) .. " des=" .. tostring(st.desiredTarget)
+        .. " lc=" .. tostring(lc) .. "）")
+    MDAD.Drive.stop(0, nil)
+    st, n = round(10)
+    local bc = st.blockedApproachCap
+    checkTrue(st.blocked == true and st.launchHoldOn == false and n == 0 and st.lastCapReason ~= "launch"
+            and type(bc) == "number" and bc >= T.BLOCK_APPROACH_KMH - 1e-6 and st.desiredTarget > T.LAUNCH_HOLD_KMH + 5,
+        "(launch-still-run) 10 km/h 判堵：不閂、停止線前 2m 照舊 blocked 包絡（on=" .. tostring(st.launchHoldOn) .. " n=" .. n
+        .. " acr=" .. tostring(st.lastCapReason) .. " bc=" .. tostring(bc) .. " des=" .. tostring(st.desiredTarget) .. "）")
+    MDAD.Drive.stop(0, nil)
+    -- (launch-still-defer)：predicate 直接問（起步近物保護沒武裝）
+    local fs = { blocked = false, dodging = false, dodgeDeferCap = 10, fstate = {}, lastSNow = 0, blockedEntryKmh = 0 }
+    local d0 = Dr.launchHold(fs, 0, 30, 0, 0)
+    fs.blocked = true
+    local d1 = Dr.launchHold(fs, 0, 30, 0, 0)
+    checkTrue(d0 == false and d1 == true and fs.launchHoldOn == true,
+        "(launch-still-defer) 延後閂成 false 之後靜止判堵：重判閂上（defer=" .. tostring(d0) .. " blocked=" .. tostring(d1) .. "）")
+    MDADDiagnostics.event, MDADDiagnostics.sample = oldEvent, oldSample
+    drive.fillWorld(-2, 70, -7, 7)
+    drive.frameMs(wasMs)
+    SandboxVars = oldSand
+end
+drive.scenarioLaunchStill()
+
+-- (anchor) 1020a 候選鏈 corner 判堵錨（正式服 1017a–1019a 長車 3 趟：shape／建線／覆蓋／band 失敗回 hx,hy＝0,0、hitS＝b 比真命中
+--   近，被選成錨；blockedNear 量世界原點 13 km 外、停止線失效，1019a 從 0 加速到 18.7 km/h）：
+--   (anchor-early) 非撞擊早退不回命中點：sweepLine 輸入無效、sweepCandidate 建線失敗 → hx／hy＝nil。
+--   (anchor-hit)   主候選建線失敗（真的 sweepCandidate 早退，hitS＝b）、重試候選真命中（ph1、hitS 比 b 遠）→ corner 錨＝真命中、
+--                  停止線照世界距、blocked 事件 x／y＝真命中。
+--   (anchor-none)  失敗都沒有命中點 → 錨 nil、s.blockS＝最小 hitS、停止線照弧長（blockedStopGap＝blockS−rs−stopDist）。
+--   fixture：Drive.planDodge／MDADCorridor.plan 換成固定 dodge 剖面、MDADFollower.buildOffsetLine 一律失敗（沒有候選能承諾）、
+--   Drive.zombieSweep 第一條照跑真的（建線早退）、之後照腳本寫 s.fbFail；世界只有路旁 6m 一格（hardN>0、不擋線＝
+--   resolveBlockAnchor 找不到擋線點，錨就是候選鏈給的，正式服 corner 幾何同此）。
+--   違規證明：sweepCandidate 建線早退回 0,0＝(anchor-early)／(anchor-hit)／(anchor-none) 紅；shape 早退、sweepLine 早退回 0,0＝
+--   (anchor-early) 紅；
+--   replan 照舊取 hitS 最小那筆的座標＝(anchor-hit) 紅。
+function drive.scenarioBlockAnchor()
+    scenario("1020a：corner 判堵錨只取真命中點；都沒有就退弧長")
+    local oldSand = SandboxVars
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 90, RightLaneBias = 0 })
+    local Dr = MDAD.Drive
+    local oldEvent, oldSample, events = MDADDiagnostics.event, MDADDiagnostics.sample, {}
+    MDADDiagnostics.event = function(_, name, a) events[#events + 1] = { name = name, a = a } end
+    MDADDiagnostics.sample = function() return true end
+    local oBuild = MDADFollower.buildOffsetLine
+    local function failBuild(_, rs) return 0, rs, "fold", 0 end
+    -- (anchor-early)
+    drive.fillWorld(-10, 90, -10, 10)
+    drive.putSolid(20, 6, "anchor_side")
+    armDrive()
+    setHeading(dveh, 0)
+    dveh._x, dveh._y, dveh._speed = 0, 0, 0
+    drive.scanRound(true)
+    local okL, _, lx, ly = Dr.debugSweepLine(0, { 0 }, { 0 }, 1, 0, 0)
+    MDADFollower.buildOffsetLine = failBuild
+    local okC, phC, cx, cy = Dr.debugSweepCandidate(0, 4, 8, 14, 20, 2)
+    MDADFollower.buildOffsetLine = oBuild
+    -- shape 失敗（橫向加速度預算 0＝shapeProfile 拒收）：s.fbFail 記成 p3、沒有命中點
+    local se = Dr.debugSession(0)
+    local oLat = se.safeLat
+    se.safeLat = 0
+    local okS, whyS = Dr.debugSweepFallbacks(0, 4, 8, 14, 20, 2)
+    se.safeLat = oLat
+    local fS = se.fbFail or {}
+    checkTrue(okL == false and lx == nil and ly == nil and okC == false and phC == 3 and cx == nil and cy == nil
+            and okS == false and fS.ph == 3 and type(fS.hitS) == "number" and fS.hx == nil and fS.hy == nil,
+        "(anchor-early) 非撞擊早退不回命中點（line=" .. tostring(lx) .. "," .. tostring(ly) .. " cand=" .. tostring(cx) .. ","
+        .. tostring(cy) .. " ph=" .. tostring(phC) .. " shape=" .. tostring(okS) .. "/" .. tostring(whyS) .. " fb="
+        .. tostring(fS.hx) .. "," .. tostring(fS.hy) .. "）")
+    MDAD.Drive.stop(0, nil)
+    -- 腳本：第 2 條起的候選失敗（hitS＝rs+off、ph1＝baseline→corner、hx/hy）
+    local function run(off, hx, hy)
+        drive.fillWorld(-10, 90, -10, 10)
+        drive.putSolid(20, 6, "anchor_side")
+        armDrive()
+        local st = Dr.debugSession(0)
+        st.diag = true
+        setHeading(dveh, 0)
+        dveh._x, dveh._y, dveh._speed = 0, 0, 0
+        drive.scanRound(true)
+        local oPlan, oCorr, oZom, n = Dr.planDodge, MDADCorridor.plan, Dr.zombieSweep, 0
+        Dr.planDodge = function(s)
+            n = 0
+            local rs = s.lastSNow
+            return "dodge", rs + 10, rs + 16, rs + 22, rs + 28, 2, s.needHalf, false, s.sensor.hardN
+        end
+        MDADCorridor.plan = function()
+            local rs = st.lastSNow
+            return "dodge", rs + 10, rs + 16, rs + 22, rs + 28, -2
+        end
+        MDADFollower.buildOffsetLine = failBuild
+        Dr.zombieSweep = function(s, ...)
+            n = n + 1
+            if n == 1 then return oZom(s, ...) end
+            local f, rs = s.fbFail, s.lastSNow
+            f.hitS, f.ph, f.hps, f.hx, f.hy, f.body = rs + off, 1, rs + off - 4, hx, hy, "tractor"
+            f.a, f.b, f.c, f.d = rs + 10, rs + 16, rs + 22, rs + 28
+            return false
+        end
+        for i = #events, 1, -1 do events[i] = nil end
+        st.planSig = -1
+        drive.scanRound(true)
+        Dr.planDodge, MDADCorridor.plan, Dr.zombieSweep, MDADFollower.buildOffsetLine = oPlan, oCorr, oZom, oBuild
+        local ev = nil
+        for i = 1, #events do
+            if events[i].name == "blocked" and events[i].a.why == "plan" then ev = events[i].a end
+        end
+        return st, ev, n
+    end
+    local st, ev, n = run(20, 20.5, 0.5)
+    local stop = Dr.blockStopDist(st)
+    local gap = Dr.blockedStopGap(st, 0, 0)
+    checkTrue(st.blocked == true and st.cornerLatch == true and st.dodgeBlockReason == "corner" and n >= 2
+            and st.blockHitX == 20.5 and st.blockHitY == 0.5 and ev ~= nil and ev.x == 20.5 and type(ev.wd) == "number"
+            and type(gap) == "number" and math.abs(gap - (math.sqrt(20.5 * 20.5 + 0.25) - stop)) < 1e-6,
+        "(anchor-hit) 建線失敗在前、真命中在後：錨＝真命中、停止線照世界距（blocked=" .. tostring(st.blocked) .. " why="
+        .. tostring(st.dodgeBlockReason) .. " n=" .. n .. " hit=" .. tostring(st.blockHitX) .. "," .. tostring(st.blockHitY)
+        .. " ev.x=" .. tostring(ev and ev.x) .. " gap=" .. tostring(gap) .. "）")
+    MDAD.Drive.stop(0, nil)
+    st, ev, n = run(20, nil, nil)
+    stop = Dr.blockStopDist(st)
+    gap = Dr.blockedStopGap(st, 0, 0)
+    local rs, bs = st.lastSNow, st.blockS
+    st.lastSNow = bs - stop - 1
+    local far = Dr.blockedAtStop(st, 0, 0)
+    st.lastSNow = bs - stop + 0.1
+    local near = Dr.blockedAtStop(st, 0, 0)
+    st.lastSNow = rs
+    checkTrue(st.blocked == true and st.cornerLatch == true and n >= 2 and st.blockHitX == nil and st.blockHitY == nil
+            and ev ~= nil and ev.x == nil and ev.wd == nil and type(bs) == "number" and bs > rs + stop and bs < rs + 20
+            and type(gap) == "number" and math.abs(gap - (bs - rs - stop)) < 1e-6 and far == false and near == true,
+        "(anchor-none) 都沒有命中點：錨 nil、停止線照弧長（hit=" .. tostring(st.blockHitX) .. " ev.x=" .. tostring(ev and ev.x)
+        .. " bs=" .. tostring(bs) .. " rs=" .. tostring(rs) .. " gap=" .. tostring(gap) .. " far=" .. tostring(far)
+        .. " near=" .. tostring(near) .. "）")
+    MDAD.Drive.stop(0, nil)
+    MDADDiagnostics.event, MDADDiagnostics.sample = oldEvent, oldSample
+    drive.clearCell(20, 6)
+    drive.fillWorld(-2, 70, -7, 7)
+    SandboxVars = oldSand
+end
+drive.scenarioBlockAnchor()
 
 -- 1013b RETURN 不豁免判堵（2026-10-13 使用者裁定 9；1012 E2E blockscan Dixie 路心起步：回線被擋 return crawl why=sweep、
 --   回線爬行帽 14 km/h 照開，blockedApproachCap／blockedStop／launchHold 在 returnActive 時都不套，車開過停止線 2.5m 才停）：

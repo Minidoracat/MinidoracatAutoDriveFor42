@@ -93,10 +93,12 @@ local REHITCH_SETTLE_MS = 2500
 -- （正式服 1015c P17：撞擊後 1.03 秒以 exit 結束）。撞擊上升緣 fbl 0 且 tn 0 的先擱著：EXIT_BRAKE_MS 內以 exit 結束＝不算
 -- impact、不出片段；過了這麼久或用別的原因結束才照常算（片段 trig＝撞擊那刻）。
 local EXIT_BRAKE_MS = 2000
--- 路中停車首見（1017，摘要 vfIn／vfInX；10-27 MP 可視裁定的判準）：他車首見樣本 vfs 停著、距離 <VFS_IN_M、首見當下本車
--- ≥VFS_IN_KMH、在本車前方（s>0）且 |l| < 本車半寬＋1 m；之後 VFS_OUT_MS 內有接觸、鎖輪或可視輔助頂到 VFS_VAD_FULL
--- （Driver TUNE.VIS_ASSIST_MAX）的算 vfInX。ponytail: 同一窗內再來一筆首見共用同一個結果（最多計一次），要分開計再改成佇列。
-local VFS_IN_M, VFS_IN_KMH, VFS_OUT_MS, VFS_VAD_FULL = 55, 60, 8000, 4
+-- 路中停車首見（1017，摘要 vfIn／vfInX／vfInTs；10-27 MP 可視裁定的判準）：他車首見樣本 vfs 停著、距離 <VFS_IN_M、首見當下本車
+-- ≥VFS_IN_KMH、在本車前方（s>0）且 |l| < 本車半寬＋1 m；之後 VFS_OUT_MS 內有接觸、fbw 是 visibility／moving／blocked 的鎖輪
+-- 上升緣、或可視帳（vaw＝vis）的輔助頂到 VFS_VAD_FULL（Driver TUNE.VIS_ASSIST_MAX）的算 vfInX（1020：之前 vad 吃的是總減速
+-- 輔助，剖面 5.5／7.5、return、proof 都算進去，鎖輪也不分原因）。vfInTs＝前 VFS_TS_MAX 件的首見時間。
+-- ponytail: 同一窗內再來一筆首見共用同一個結果（最多計一次），要分開計再改成佇列。
+local VFS_IN_M, VFS_IN_KMH, VFS_OUT_MS, VFS_VAD_FULL, VFS_TS_MAX = 55, 60, 8000, 4, 4
 -- 入彎超速明細（1017，摘要 aoi）最多幾筆；出彎偏差（exN／exDev）：出弧後 EX_M 內 |ld| 最大值 >EX_DEV 的出口，出口車速
 -- ≥EX_FAST_KMH 另計；期間有殭屍軟縫或期望車道相鄰兩筆跳 >EX_JUMP_M（換道）的出口不算。起步到 T40_M 的 ms（t40）。
 local AOI_MAX, EX_M, EX_DEV, EX_FAST_KMH, EX_JUMP_M, T40_M = 4, 60, 0.5, 50, 1, 40
@@ -252,7 +254,8 @@ local function notice(pn)
     if MDADDiagnostics and MDADDiagnostics.toast then MDADDiagnostics.toast(text, "info") end
 end
 
-function U.begin(pn, now, header, profile)
+-- vehicle＝BaseVehicle（摘要 fuE 讀檔數／極速／腳本質量，讀不到或 nil＝不算 fuE）。
+function U.begin(pn, now, header, profile, vehicle)
     local u = {
         pn = pn, active = true,
         -- 與本機 session 共用的取樣閘門欄位（MDAD_Diagnostics.sampleWouldEnqueue／encodeSensor）
@@ -306,9 +309,10 @@ function U.begin(pn, now, header, profile)
         -- 出彎偏差（exFrom＝開著的出口窗起點 dist；exEl 上一筆期望車道、exSpd 出口車速、exMax 最大 |ld|、exBad 換道或軟縫）；
         -- 油量起訖與各路段油量差／m（fuD／fuM，鍵 arc／pre／post／dodge／oth）；起步到 T40_M 的 ms 與起步型旗標；
         -- 煞車學習拒收理由次數；EngineOff 的關卡（JSON 片段）
-        vfIn = 0, vfInX = 0, vfInT = nil, aoi = {}, aoiN = 0,
+        -- 1020：路中停車首見時間（前 VFS_TS_MAX 件）；各路段 ms 與原版 GasTank 公式的期望扣量 {段: {held, fair}}（tripKpi）
+        vfIn = 0, vfInX = 0, vfInT = nil, vfInTs = {}, aoi = {}, aoiN = 0,
         exN = 0, exDev = 0, exN50 = 0, exDev50 = 0, exFrom = nil, exEl = nil, exSpd = 0, exMax = 0, exBad = false,
-        fu0 = nil, fu1 = nil, fuD = {}, fuM = {}, t40 = nil, stTow = false, stU = false, stApr = false, stRet = false,
+        fu0 = nil, fu1 = nil, fuD = {}, fuM = {}, fuT = {}, fuE = {}, t40 = nil, stTow = false, stU = false, stApr = false, stRet = false,
         blr = {}, eng = nil,
         halfW = type(profile) == "table" and finite(profile.halfW) and profile.halfW or 1,
         halfL = type(profile) == "table" and finite(profile.halfL) and profile.halfL or IMPACT_HALF_L,
@@ -324,6 +328,15 @@ function U.begin(pn, now, header, profile)
     if type(drv) == "table" and type(drv.serverSpeedLimit) == "function" then
         local ok, lim = pcall(drv.serverSpeedLimit)
         if ok and finite(lim) and lim > 0 then u.svLim = lim end
+    end
+    -- 1020 摘要 fuE：原版 GasTank 的檔數、極速與車重倍率（Vehicles.lua:465-467，腳本質量不是 runtime 質量）
+    local okG, gears, mx, sm = pcall(function()
+        local sc = vehicle:getScript()
+        return sc:getGearRatioCount(), vehicle:getMaxSpeed(), sc:getMass()
+    end)
+    if okG and finite(gears) and gears >= 2 and finite(mx) and mx > 0 and finite(sm)
+            and MDAD and type(MDAD.fairGear) == "function" then
+        u.gGears, u.gMax, u.gMass = gears, mx, (sm > 1000 and sm - 1000 or 1000 - sm) / 300 + 1
     end
     notice(pn)
     return u
@@ -612,6 +625,7 @@ local function firstSeenKpi(u, phys, spd, now)
             if p == "1" and d < VFS_IN_M and finite(v) and v >= VFS_IN_KMH and finite(s) and s > 0
                     and finite(l) and l < u.halfW + 1 and l > -u.halfW - 1 then
                 u.vfIn, u.vfInT = u.vfIn + 1, now
+                if u.vfIn <= VFS_TS_MAX then u.vfInTs[u.vfIn] = jnum(now) end
             end
         end
     end
@@ -639,8 +653,11 @@ local function speedKpi(u, phys, spd, target, mode, dt, capReason, now)
     if spd >= 0.9 * em then
         u.nm = u.nm + dt
     else
+        -- 目標已到上限（≥em−1）卻沒加上去＝車在加速，理由碼再怎麼寫都記 accel（1020：車道包絡在直路＝極速，
+        -- 有理由碼的加速段原本記成 curve-coast 等，正式服 curve-coast 約一半是這種）；沒理由碼照舊 ≥0.9 em 算加速
         local r = capReason
-        if type(r) ~= "string" then r = (finite(target) and target >= 0.9 * em) and "accel" or "none" end
+        if type(r) ~= "string" then r = (finite(target) and target >= 0.9 * em) and "accel" or "none"
+        elseif finite(target) and target >= em - 1 then r = "accel" end
         local l = (em - spd) * dt
         u.loss[r] = (u.loss[r] or 0) + l
         -- 1013a：none 依剖面綁速項分；追蹤不足＝min(目標, 上限)−實速（≥0），其餘是目標不足；路段分帳
@@ -791,12 +808,33 @@ end
 
 -- 1017 起步、油量、煞車學習（欄位見 U.begin）：t40＝第一次累計 T40_M 公尺時離出發的 ms；油量下降依這筆的路段記（加油不算），
 -- 距離同段累計；mode 不是 follow 一律 oth、繞行（ctl AVOID）記 dodge。
-local function tripKpi(u, phys, mode, now, moved)
+-- 1020 fuT／fuE：各段 ms 與原版 Vehicles.Update.GasTank（Vehicles.lua:450-503）的期望扣量，單位＝每分鐘扣量的相對項×分鐘
+-- （品質、耗油沙盒值、遊戲時間倍率、油箱容量每趟固定，讀者以整趟總量正規化消掉）：held＝實際檔位 tn、fair＝伺服器 autoFuelBase
+-- 換算的檔（MDAD.fairGear）；floor(車速)>0 用檔位項×車重倍率，否則停車式 150（300÷2，不乘車重）；轉速 es≤0（沒在轉）不計。
+-- ponytail: 暖氣（gasMult −5000）沒算，整趟開著時正規化會消掉，中途開關才有誤差。
+local function tripKpi(u, phys, mode, now, moved, dt, speed)
     if u.t40 == nil and u.dist >= T40_M then u.t40 = now - u.startTs end
     if type(phys) ~= "table" then return end
     local seg = "oth"
     if mode == "follow" then seg = phys.controlState == "AVOID" and "dodge" or segOf(u, phys) end
     u.fuM[seg] = (u.fuM[seg] or 0) + moved
+    u.fuT[seg] = (u.fuT[seg] or 0) + dt
+    local es, tn = phys.engineSpeed, phys.transmissionNumber
+    if u.gGears and dt > 0 and finite(es) and es > 0 and finite(tn) and finite(speed) then
+        local held, fair = 150, 150
+        if math.floor(speed) > 0 then
+            local per = u.gMax / u.gGears
+            held = MDAD.gasGearTerm(tn, speed, per) * u.gMass
+            local fg = MDAD.fairGear(speed, tn, u.gGears, u.gMax)
+            fair = fg and MDAD.gasGearTerm(fg, speed, per) * u.gMass or held
+        end
+        local k, e = es / 2500 * dt / 60000, u.fuE[seg]
+        if not e then
+            e = { 0, 0 }
+            u.fuE[seg] = e
+        end
+        e[1], e[2] = e[1] + held * k, e[2] + fair * k
+    end
     local fu = phys.fuelPercent
     if finite(fu) then
         if u.fu0 == nil then u.fu0 = fu end
@@ -880,7 +918,7 @@ function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
     end
     if type(capReason) == "string" then u.capMs[capReason] = (u.capMs[capReason] or 0) + dt end
     speedKpi(u, phys, spd, target, mode, dt, capReason, now)
-    tripKpi(u, phys, mode, now, moved0)
+    tripKpi(u, phys, mode, now, moved0, dt, speed)
     accelKpi(u, phys, speed, target, mode, gap)
     offsetKpi(u, phys, lat, mode, line, now, gap)
     if finite(fdt) then
@@ -915,12 +953,15 @@ function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
         u.contact = u.contact + 1
         trigger(u, now, "contact")
     end
-    -- 1017 路中停車首見之後 VFS_OUT_MS 內：接觸、鎖輪上升緣或可視輔助頂滿＝vfInX（每個等待窗最多一次）
+    -- 1017 路中停車首見之後 VFS_OUT_MS 內：接觸、可視類鎖輪上升緣或可視帳輔助頂滿＝vfInX（每個等待窗最多一次；條件見 VFS_IN_M 上方）
     if u.vfInT ~= nil then
-        local vad = type(phys) == "table" and phys.visAssistDecel or nil
+        local vad, vaw = nil, nil
+        if type(phys) == "table" then vad, vaw = phys.visAssistDecel, phys.visAssistWhy end
         if now - u.vfInT > VFS_OUT_MS then
             u.vfInT = nil
-        elseif (fbHit and not u.prevFb) or (fbNow and not fbWas) or (finite(vad) and vad >= VFS_VAD_FULL) then
+        elseif (fbHit and not u.prevFb)
+                or (fbNow and not fbWas and (fbw == "visibility" or fbw == "moving" or fbw == "blocked"))
+                or (vaw == "vis" and finite(vad) and vad >= VFS_VAD_FULL) then
             u.vfInX, u.vfInT = u.vfInX + 1, nil
         end
     end
@@ -1024,10 +1065,11 @@ function U.event(u, line, now, name, a)
         elseif name == "route" and phase == "ready" and finite(a.approach) and a.approach > 0 then u.stApr = true
         elseif name == "return" and phase == "enter" then u.stRet = true end
     end
-    -- 1017 EngineOff 是哪一關（Driver Drive.engineOffNote）：摘要 eng
+    -- 1017 EngineOff 是哪一關（Driver Drive.engineOffNote）：摘要 eng；1020 加引擎零件狀況 ecd、引擎品質 eq（讀不到＝不寫）
     if name == "engine" and phase == "off" then
         u.eng = ',"eng":{"why":' .. jstr(a.why or "") .. ',"chg":' .. jround(a.chg, 1000) .. ',"es":' .. jround(a.es, 1)
-            .. ',"fu":' .. jround(a.fu, 100) .. '}'
+            .. ',"fu":' .. jround(a.fu, 100) .. (finite(a.ecd) and (',"ecd":' .. jnum(a.ecd)) or "")
+            .. (finite(a.eq) and (',"eq":' .. jnum(a.eq)) or "") .. '}'
     end
     if name == "unstick" and phase == "start" then
         trigger(u, now, "unstick")
@@ -1075,6 +1117,16 @@ local function fuelJson(u)
             n = n + 1
             parts[n] = jstr(k) .. ":[" .. jround(d, 100) .. "," .. jround(m / 1000, 1000) .. "]"
         end
+    end
+    return "{" .. table.concat(parts, ",", 1, n) .. "}"
+end
+
+-- 1020 各路段原版 GasTank 期望扣量（相對單位，tripKpi）：{"arc":[held,fair],…}；讀不到檔數的車＝{}
+local function fuelExpJson(u)
+    local parts, n = {}, 0
+    for k, e in pairs(u.fuE) do
+        n = n + 1
+        parts[n] = jstr(k) .. ":[" .. jround(e[1], 10) .. "," .. jround(e[2], 10) .. "]"
     end
     return "{" .. table.concat(parts, ",", 1, n) .. "}"
 end
@@ -1138,6 +1190,8 @@ local function summaryText(u, now, reason, withMaps)
         .. ',"t40k":' .. jstr(u.stTow and "tow" or u.stU and "uturn" or u.stApr and "approach" or u.stRet and "return" or "plain")
         .. ',"blr":' .. mapJson(u.blr) .. (u.eng or "")
         .. (u.rpt and (',"rpt":' .. jstr(u.rpt)) or "")
+    -- 1020：路中停車首見時間（前 VFS_TS_MAX 件）、各路段 ms 與原版 GasTank 期望扣量（油量判準：實扣÷fair 期望的段比）
+    text = text .. ',"vfInTs":[' .. table.concat(u.vfInTs, ",") .. '],"fuT":' .. mapJson(u.fuT) .. ',"fuE":' .. fuelExpJson(u)
     if withMaps then
         text = text .. ',"ev":' .. mapJson(u.evc) .. ',"mode":' .. mapJson(u.modeMs)
             .. ',"cap":' .. mapJson(u.capMs) .. ',"loss":' .. lossJson(u.loss)

@@ -23,7 +23,9 @@ clips-anon.tsv（anon path overview，目錄內全部片段），寫完重讀、
     撞擊前 2.5s 內有 contact 事件時 sprite／scost 用它的（命中點 1 格，比車頭 3 格準；scost vehicle 或 tlg ≤1＝vehicle）；
     類別 zombie＞small-animal／animal＞vehicle（貼車）＞static（scost tree／hard／wall）＞corpse（貼車）＞far（有 nb 沒貼車）＞empty；
     small-animal＝貼車的動物 a 體重 <SMALL_KG（nb a 第 5 項；1013f 起含剛死的，第 6 項＝1），讀不到體重算 animal
-  L 1017 摘要新欄位（rev 有 rhi 的趟）：rhi／xbk、vfIn／vfInX、aoi、出口偏差、油量分段 %/km、起步到 40m 中位（依 t40k）、blr、eng
+  L 1017 摘要新欄位（rev 有 rhi 的趟）：rhi／xbk、vfIn／vfInX、aoi、出口偏差、油量分段 %/km、起步到 40m 中位（依 t40k）、blr、eng；
+    1020 起（摘要有 fuT／fuE）另印各段每分鐘扣量、實扣÷原版公式期望（held＝實際檔、fair＝伺服器換算檔），與油量判準
+    (彎道＋繞行)/其他 的實扣÷期望比＋玩家叢集 95%（boot_players；fair 區間含 1＝換算在作用）
   D contact ≥10 km/h（現行 rev）：scost、弧上（前 2.5s curveHardActive）、前 2.5s |ld|>0.5、lag 帽（capReason=lag）、主導 ctl、sprite 家族
   E 判堵後接手：takeover 片段觸發前 10s 內有 blocked；窗口內首筆 blocked→接手秒數、其間 unstick start、detour=false、最後一筆 why／shape
   F 判堵熱點：blocked x,y 的 25m 格（玩家、趟、事件、車型）
@@ -32,8 +34,9 @@ clips-anon.tsv（anon path overview，目錄內全部片段），寫完重讀、
   I tow lost／relook
   J 結案檢查：area start kind=behind 後 20s 同趟 progress suspect；gate phase／why；detour kind=towcorner why=ok
   K 接手結束的趟（現行 rev）依 rem 分桶；≥300m 的趟 ev 沒有異常事件（blocked／uturn／unstick／contact／impact／progress）的數量
-  分析用 helper（`import upload_report as UR`）：Anon(root)、hm、q、ci、binom_p、boot_ratio、opts_of、is_tow、per_em、
-    load_summaries、load_clips（since 省略＝pull.json）、dedupe、trips、events、window、edge_row、classify_impact、real_impacts
+  分析用 helper（`import upload_report as UR`）：Anon(root)、hm、q、ci、binom_p、boot_ratio、boot_players、fuel_model、opts_of、
+    is_tow、per_em、load_summaries、load_clips（since 省略＝pull.json）、dedupe、trips、events、window、edge_row、classify_impact、
+    real_impacts
 """
 import argparse
 import collections
@@ -140,6 +143,47 @@ def boot_ratio(L1, L2, val, B=2000, seed=7):
         if kb and wa and wb:
             rr.append(sum(x[0] for x in a) / wa / (kb / wb))
     return k1 / w1 / (k2 / w2), q(rr, 0.025), q(rr, 0.975)
+
+
+def boot_players(L, stat, B=2000, seed=7):
+    """玩家叢集 bootstrap：以玩家（摘要 u）為單位重抽 L，stat(趟清單)→值（None 略過）；回傳 (點估計, 2.5%, 97.5%)，
+    點估計是 None 就回 None。比值型 KPI（不是每千 km 件數）用這支，率比用 boot_ratio。"""
+    by = collections.defaultdict(list)
+    for o in L:
+        by[o.get("u")].append(o)
+    U = list(by.values())
+    pt = stat(L)
+    if pt is None:
+        return None
+    rnd, rr = random.Random(seed), []
+    for _ in range(B):
+        v = stat([o for _ in U for o in rnd.choice(U)])
+        if v is not None:
+            rr.append(v)
+    return pt, q(rr, 0.025), q(rr, 0.975)
+
+
+FUEL_HI = ("arc", "dodge")   # 油量判準的「彎道＋繞行」段
+
+
+def fuel_model(L, mi):
+    """1020 摘要 fuS（實扣 %）與 fuE（原版 GasTank 期望，[held, fair]）→ (段比, {段: [實扣, 正規化期望]})。mi 0＝held、1＝fair。
+    每趟期望以該趟實扣總量正規化（消掉油箱、引擎品質、耗油沙盒值、遊戲時間倍率）；段比＝(arc+dodge) 實扣÷期望 對其他段，
+    1＝和模型一致。沒有 fuE 或實扣 0 的趟不算；段比缺分母回 None。fu 是伺服器同步值、落在值到達那一筆的段：弧上的油有一部分記到 post。"""
+    seg = collections.defaultdict(lambda: [0.0, 0.0])
+    for o in L:
+        fs, fe = o.get("fuS") or {}, o.get("fuE") or {}
+        tot_o = sum(((fs.get(s) or [0])[0] or 0) for s in fe)
+        tot_e = sum(v[mi] or 0 for v in fe.values())
+        if tot_o <= 0 or tot_e <= 0:
+            continue
+        k = tot_o / tot_e
+        for s, v in fe.items():
+            seg[s][0] += (fs.get(s) or [0])[0] or 0
+            seg[s][1] += (v[mi] or 0) * k
+    o1, e1 = (sum(seg[s][i] for s in seg if s in FUEL_HI) for i in (0, 1))
+    o2, e2 = (sum(seg[s][i] for s in seg if s not in FUEL_HI) for i in (0, 1))
+    return ((o1 / e1) / (o2 / e2) if e1 and e2 and o2 else None), dict(seg)
 
 
 def q(xs, p):
@@ -493,6 +537,31 @@ def sec_l(S, cur):
     if fu:
         print(f"  油量 {len(fu)} 趟：起訖差 {sum(o['fu0'] - o['fu1'] for o in fu):.2f}%；分段 %/km "
               + ", ".join(f"{k}:{d / m if m else 0:.2f}({m:.1f}km)" for k, (d, m) in sorted(seg.items())))
+    # 1020 油量判準：實扣÷原版公式期望（fair＝伺服器換算後；held＝沒換算），(彎道＋繞行)/其他 的玩家叢集 95% 區間含 1＝換算在作用
+    fe = [o for o in fu if o.get("fuE")]
+    if fe:
+        tm, dr = collections.Counter(), collections.Counter()
+        for o in fe:
+            tm.update(o.get("fuT") or {})
+            dr.update({s: v[0] or 0 for s, v in (o.get("fuS") or {}).items() if isinstance(v, list) and v})
+        segs = sorted(set(tm) | set(dr))
+        fit = {m: fuel_model(fe, i)[1] for i, m in enumerate(("held", "fair"))}
+        res = {m: boot_players(fe, lambda xs, i=i: fuel_model(xs, i)[0]) for i, m in enumerate(("held", "fair"))}
+        out["fuelE"] = dict(trips=len(fe), users=len({o.get("u") for o in fe}), ratio=res,
+                            perMin={s: round(dr[s] / (tm[s] / 60000), 3) for s in segs if tm[s] > 0},
+                            seg={s: [round(fit[m][s][0] / fit[m][s][1], 3) if s in fit[m] and fit[m][s][1] else None
+                                     for m in ("held", "fair")] for s in segs})
+        print(f"  油量模型 {len(fe)} 趟 {out['fuelE']['users']} 人：每分鐘扣量 %/min "
+              + ", ".join(f"{s}:{v:.3f}({tm[s] / 60000:.0f}min)" for s, v in out["fuelE"]["perMin"].items()))
+        print("    實扣÷期望（每趟總量正規化，1＝和模型一致）held/fair "
+              + ", ".join(f"{s}:{h if h is None else round(h, 2)}/{f if f is None else round(f, 2)}"
+                          for s, (h, f) in out["fuelE"]["seg"].items()))
+        for m in ("fair", "held"):
+            r = res[m]
+            print(f"    (彎道＋繞行)/其他 {m}：" + ("分母不足" if r is None else
+                                              f"{r[0]:.2f}（玩家 95% {r[1]:.2f}–{r[2]:.2f}）"
+                                              + ("" if m == "held" else "；判準：區間含 1"
+                                                 + ("，過" if r[1] <= 1 <= r[2] else "，不過"))))
     t40 = collections.defaultdict(list)
     for o in L:
         if isinstance(o.get("t40"), (int, float)):
@@ -506,7 +575,10 @@ def sec_l(S, cur):
     print("  煞車學習拒收 " + (", ".join(f"{k}:{v}" for k, v in blr.most_common()) or "0"))
     eng = collections.Counter((o.get("eng") or {}).get("why") for o in L if o.get("eng"))
     out["eng"] = dict(eng)
-    print("  EngineOff 關卡 " + (", ".join(f"{k}:{v}" for k, v in eng.most_common()) or "0"))
+    ecd = [o["eng"]["ecd"] for o in L if isinstance((o.get("eng") or {}).get("ecd"), (int, float))]
+    out["engLow"] = (sum(1 for c in ecd if c < 50), len(ecd))
+    print("  EngineOff 關卡 " + (", ".join(f"{k}:{v}" for k, v in eng.most_common()) or "0")
+          + (f"；引擎零件狀況 <50（原版隨機熄火區）{out['engLow'][0]}/{len(ecd)}" if ecd else ""))
     return out
 
 
@@ -560,12 +632,22 @@ def sec_e(C, A, picks):
     return out
 
 
+def blocked_xy(e):
+    """blocked 事件的熱點座標：錨 x,y → 主候選第一個失敗 hx0,hy0 → 候選鏈命中 hitX,hitY；(0,0) 不算（1020a 前非撞擊的掃掠
+    失敗寫 0,0，舊片段還會有）。都沒有回 (None, None)。"""
+    for kx, ky in (("x", "y"), ("hx0", "hy0"), ("hitX", "hitY")):
+        x, y = e.get(kx), e.get(ky)
+        if x is not None and y is not None and (x, y) != (0, 0):
+            return x, y
+    return None, None
+
+
 def sec_f(E, A):
     print(f"\n== F 判堵熱點（blocked 事件 x,y 的 {GRID}m 格，前 10）")
     cells = collections.defaultdict(lambda: dict(u=set(), d=set(), n=0, veh=set()))
     for e, rec in events(E, "blocked"):
-        x, y = e.get("x", e.get("hitX")), e.get("y", e.get("hitY"))
-        if x is None or y is None:
+        x, y = blocked_xy(e)
+        if x is None:
             continue
         c = cells[(int(x // GRID), int(y // GRID))]
         c["u"].add(rec["u"])
@@ -752,6 +834,10 @@ def self_test():
     check([t for _, _, t in nb_touch({"v": [7.2, 7.2, 0.2, 74]}, lp, 7.3, 220)] == [True]
           and [t for _, _, t in nb_touch({"v": [7.2, 7.2, 0.2, 74]}, lp)] == [False],
           "他車貼車扣掉撞後拉開的距離（P06 型：車心 7.2 m、前車 74 本車 7.3 km/h、間隔 220 ms＝貼車；沒車速資料＝不貼）")
+    check(blocked_xy({"x": 0, "y": 0, "hx0": 12.5, "hy0": 3.5, "hitX": 0, "hitY": 0}) == (12.5, 3.5)
+          and blocked_xy({"hitX": 0, "hitY": 0}) == (None, None) and blocked_xy({"x": 5, "y": 0}) == (5, 0)
+          and blocked_xy({"hitX": 7, "hitY": 8}) == (7, 8),
+          "F 熱點座標：x→hx0→hitX，(0,0) 略過（1020a 前非撞擊掃掠失敗寫 0,0）；單軸 0 照收")
     T = 1790000000000
     with tempfile.TemporaryDirectory() as d:
         def put(name, objs):
@@ -872,6 +958,29 @@ def self_test():
         check(L["trips"] == 1 and L["rhi"] == 1 and L["xbk"] == 1 and L["vfIn"] == 2 and L["vfInX"] == 1 and L["aoi"] == 1
               and L["exN50"] == 2 and L["fuel"] == {"arc": [0.5, 0.2], "oth": [1.0, 0.8]} and L["t40"] == {"tow": 3200}
               and L["blr"] == {"unloaded": 2} and L["eng"] == {"battery": 1}, "L 1017 摘要新欄位彙整（" + str(L) + "）")
+        check("fuelE" not in L and L["engLow"] == (0, 0), "L 舊摘要（沒有 fuE、eng 沒有 ecd）不出油量模型與引擎狀況")
+        # 1020 油量模型：A、B 兩種趟（油箱大小不同＝每 % 對應的油量不同），實扣都照 fair 期望扣；B 的段比例和 A 不同。
+        # 每趟正規化後 fair 段比＝1；不正規化會變 0.75。held（沒換算）在彎道期望偏高，段比 <1。舊格式（沒 fuE）與實扣 0 的趟不算。
+        def fs(u, drive, fuS, fuT=None, fuE=None, eng=None):
+            o = dict(t="sum", u=u, drive=drive, rev="2", rhi=0, fu0=50, fu1=40, fuS=fuS)
+            o.update({k: v for k, v in (("fuT", fuT), ("fuE", fuE), ("eng", eng)) if v is not None})
+            return o
+        A = dict(fuS={"arc": [1.0, 0.2], "oth": [1.0, 1.0]}, fuT={"arc": 60000, "oth": 120000},
+                 fuE={"arc": [200, 100], "oth": [100, 100]})
+        B = dict(fuS={"arc": [5.0, 0.2], "oth": [15.0, 1.0]}, fuT={"arc": 60000, "oth": 60000},
+                 fuE={"arc": [400, 100], "oth": [100, 300]})
+        SF = [fs("f1", 1, **A), fs("f2", 2, **B), fs("f3", 3, **A), fs("f4", 4, {"arc": [9.0, 0.1]}),
+              fs("f5", 5, {}, None, {"oth": [10, 10]}, {"why": "engine", "ecd": 38, "eq": 60})]
+        with contextlib.redirect_stdout(io.StringIO()):
+            LE = sec_l({(o["u"], o["drive"]): o for o in SF}, {"2"})
+        LF = LE["fuelE"]
+        fair, held = LF["ratio"]["fair"], LF["ratio"]["held"]
+        check(LF["trips"] == 4 and LF["users"] == 4 and all(abs(x - 1) < 1e-9 for x in fair),
+              "L 油量模型：照 fair 扣的趟每趟正規化後 (arc+dodge)/其他＝1、玩家區間也是 1；沒 fuE 的趟不算（" + str(LF) + "）")
+        check(held[0] < 0.9 and held[2] < 1, "L 油量模型：held（沒換算）段比 <1、區間不含 1（" + str(held) + "）")
+        check(LF["perMin"] == {"arc": round(7 / 3, 3), "oth": round(17 / 5, 3)}, "L 每分鐘扣量＝fuS 實扣 ÷ fuT 分鐘（只算有 fuE 的趟）")
+        check(LF["seg"]["arc"][1] == 1.0 and LF["seg"]["oth"][1] == 1.0, "L 各段實扣÷fair 期望＝1")
+        check(LE["engLow"] == (1, 1), "L eng ecd <50 計數")
         man = [ln for ln in out.getvalue().splitlines() if ln.strip().startswith("static")]
         check(man and "maneuver 1" in man[0], "前 2.5s 有 dg＝maneuver")
         e = res["E"]

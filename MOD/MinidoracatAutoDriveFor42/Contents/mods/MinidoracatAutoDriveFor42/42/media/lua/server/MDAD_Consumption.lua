@@ -81,30 +81,13 @@ local function onEveryOneMinute()
 end
 
 -- 自駕的原版油耗基準（2026-10-17 使用者裁定：修好自駕轉彎、繞行多耗的油，不得影響車速——只改計費、不動控制）。
--- 原版每遊戲分鐘扣 max(800, (極速÷檔數×0.71×檔位−車速)×350)×轉速÷2500×其他倍率（Vehicles.lua:464-487）：
+-- 原版每遊戲分鐘扣 MDAD.gasGearTerm（檔位項）×轉速÷2500×其他倍率（Vehicles.lua:464-487）：
 -- 同一檔車速越低扣越多。自駕靠 regulator 控速，regulator 開著時引擎不掛 N、加油只升不降檔
 -- （CarController.java:494-504、719-727），彎前與繞行減速後一路卡在高檔，每分鐘多扣 4–14 倍；玩家自己開會掛 N，
--- 再踩油門照車速選檔。所以改照 CarController 依當下車速會選的檔（control_ForwardNew :687-690）換算。
+-- 再踩油門照車速選檔。所以改照 CarController 依當下車速會選的檔（MDAD.fairGear）換算；客戶端摘要 fuE 用同兩支算期望。
 -- 只在實扣量吻合原版公式時換算：別的 MOD 改寫 GasTank、或原版改了公式，就照實扣量計。
 local GAS_MATCH_REL = 0.02
 local GAS_MATCH_ABS = 0.0002
-
-local function gasGearTerm(gear, kmh, perGear)
-    local m = (perGear * 0.71 * gear - kmh) * 350
-    if m < 800 then return 800 end
-    return m
-end
-
--- CarController 拿 MP 假速度域選檔（CarController.java:139-146；BaseVehicle.java:666-673，SP＝1），
--- 同 Driver regulatorDomainKmh 的換算。
-local function gearboxKmh(kmh)
-    local fn = BaseVehicle and BaseVehicle.getFakeSpeedModifier
-    if type(fn) ~= "function" then return kmh end
-    local ok, fake = pcall(fn)
-    if not ok or type(fake) ~= "number" or fake ~= fake or fake <= 1 then return kmh end
-    local d = kmh * fake / 120
-    return kmh * (1 + (fake - 1) * d * d)
-end
 
 local function autoFuelBase(vehicle, burned, elapsedMinutes)
     local kmh = vehicle:getCurrentSpeedKmHour()
@@ -119,13 +102,10 @@ local function autoFuelBase(vehicle, burned, elapsedMinutes)
             or type(cgc) ~= "number" then
         return burned
     end
+    local fair = MDAD.fairGear(kmh, gear, gears, maxKmh)
+    if not fair then return burned end
     local perGear = maxKmh / gears
-    local limited = gearboxKmh(kmh)
-    if limited > maxKmh then limited = maxKmh end
-    local fair = math.floor(limited / perGear) + 1
-    if fair > gears then fair = gears end
-    if gear <= fair then return burned end
-    local held = gasGearTerm(gear, kmh, perGear)
+    local held = MDAD.gasGearTerm(gear, kmh, perGear)
     local gasMult = 90000
     local heater = vehicle:getHeater()
     if heater and heater:getModData().active then gasMult = gasMult - 5000 end
@@ -135,7 +115,7 @@ local function autoFuelBase(vehicle, burned, elapsedMinutes)
     local miss = burned - expect
     if miss < 0 then miss = -miss end
     if not (miss <= expect * GAS_MATCH_REL + GAS_MATCH_ABS) then return burned end
-    return burned * gasGearTerm(fair, kmh, perGear) / held
+    return burned * MDAD.gasGearTerm(fair, kmh, perGear) / held
 end
 
 local fuelHookWarned = false

@@ -137,8 +137,9 @@ local EK = {
     "cls", "dvs",
     -- impact（1017）：當下檔位、引擎煞車、距上一次 tow rh-attach 的 ms（自動掛回拉攏的假撞）、跟車 lead 車距／速度（m 共用上面的鍵＝mode）
     "tn", "ib", "rhMs", "tlg", "tlv",
-    -- engine off（1017，Drive.engineOffNote）：EngineOff 交還前的電瓶 charge、引擎轉速、油量 %（why＝engine／battery）
-    "chg", "es", "fu",
+    -- engine off（1017，Drive.engineOffNote）：EngineOff 交還前的電瓶 charge、引擎轉速、油量 %（why＝engine／battery）；
+    -- 1020 加引擎零件狀況 ecd（0–100，<50 原版會隨機熄火）、引擎品質 eq
+    "chg", "es", "fu", "ecd", "eq",
     -- unstick settle（1017）：車在剖面首段反向延長上的距離 m（>0＝在起點後方，Drive.startBehind）
     "bh",
     -- 1008 拖車：tow attach 外拉規劃用的掛點→車頭（MDADTrailer.hitchFront）；detour towcorner 附了車尾正後方圈（1）；
@@ -150,6 +151,8 @@ local EK = {
     "towArcN",
     -- lag release（1008）：車頭弧長 rs+halfL、車尾弧長（拖車含掛車）、命中點的預測車身 lane（hitS／rate 共用上面的鍵）
     "nose", "tail", "body",
+    -- lag release／keep（1020c）：車頭到命中點之間剖面最大曲率 κ（1/m，Driver Drive.arcAhead；圓角 1/R、fallback 頂點 1/rMin）
+    "arcAhead",
     -- 1008：takeover resume（讓位恢復後第一個跟線幀的橫偏、Follower 投影段號）；route far（why gate／watch／yield）當下的 s.mode
     "lat", "fi", "mode",
     -- zombie plan（1008）：車身橫向（lat，同上）、最近威脅 l、車身／舊 laneBias 速率可及量、近威脅限側基準、新可行性模型拒縫（reach／side）
@@ -158,6 +161,9 @@ local EK = {
     "hold", "vn", "mv",
     -- takeover yield／manual（1009）：玩家用了哪個輸入（steer／steer-key／brake／forward／backward，Driver manualInput）
     "key",
+    -- takeover manual／hint（1020e，Drive.manualHintNote）：接手當下距最後異常 ms（這趟沒異常＝缺）、剩餘 m（剖面重建中＝缺）；
+    -- manual 的 why＝提示條件擋下接手紀錄（hint-anom／hint-rem）
+    "tkoA", "rem",
     -- 2026-10-10 遙測補強：
     -- blocked plan／wide 的候選鏈摘要：本次 replan 掃掠失敗在 p1..p4 段的次數、本次 replan 第一個掃掠失敗（主候選）的
     -- tag／段／命中點；steep＝blockSteepM（倒車補跑道的差額 m）；exit-room 判堵的出口可用長度與折點弧長
@@ -1928,7 +1934,7 @@ function D.start(pn, vehicle, profile)
         -- slot 0／ret 0＝上傳片段的檔頭（不對應本機槽）
         local okH, header = pcall(encodeHeader, 0, now, 0, profile, now, 1, nil, pn)
         if okH then
-            local okB, u = pcall(MDADUpload.begin, pn, now, header, profile)
+            local okB, u = pcall(MDADUpload.begin, pn, now, header, profile, vehicle)
             if okB and type(u) == "table" then
                 uploads[pn] = u
                 -- 起點先記車位（1009）：第一筆取樣前就交還的趟，摘要 x0／y0／x1／y1 原本寫成 0
