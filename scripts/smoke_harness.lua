@@ -24390,11 +24390,19 @@ drive.scenarioTowRehitch()
 --               違規證明：各自拿掉時間／距離／目標／選項條件＝對應那條紅。
 --   (mh-yield)  選自動恢復時接手走讓位、不記接手：放手前按停再重開不提示。
 --   (mh-consume) 不符合的那次重開就消費掉接手紀錄：再停一次（按停）重開不提示。違規證明：不清紀錄＝紅。
+-- (mhc) 1020e 接手前 TUNE.MANUAL_HINT_CALM_MS 內有異常（Drive.anomTick）或剩餘短於 TUNE.MANUAL_HINT_REM_M：不記接手，
+--   takeover manual 帶 why／tkoA／rem。
+--   (mhc-anom)  停止線判堵停住時接手：manual why=hint-anom、重開不提示。違規證明：拿掉異常條件、anomTick 不看判堵或不呼叫＝紅。
+--   (mhc-brake) 行駛中硬煞後接手、(mhc-impact) 一筆掉速到 0 後接手：同上。違規證明：急煞／撞擊不算異常＝對應那條紅。
+--   (mhc-calm)  判堵後過了 CALM_MS 才接手（中間正常行駛）：照提示，hint 帶 tkoA ≥ CALM_MS、rem。違規證明：不看 tkoA 新舊＝紅。
+--   (mhc-rem)   離終點 200 m 接手：manual why=hint-rem、重開不提示。違規證明：拿掉剩餘條件＝紅。
+--   resume>0 不提示由 (mh-opt)（重開時已改自動恢復）與 (mh-yield)（接手時是自動恢復）涵蓋。
 function drive.scenarioManualHint()
     scenario("1017g 手動介入後的提示：預設介入即關閉時，接手後原地以同一目標重開提示一次")
     local Dr, T = MDAD.Drive, MDAD.Drive.debugTune()
     local DG = MDADDiagnostics
     local sStart, sEvent, sStop, sToast, sTel = DG.start, DG.event, DG.stop, DG.toast, MDAD.HUD.telemetryEnabled
+    local sShould, sSample = DG.shouldSample, DG.sample
     local oldSandbox, oldResume = SandboxVars, drive.resumeMs
     local oldRoute, oldTx, oldTy, oldState = drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
     local ev, toasts = {}, {}
@@ -24403,8 +24411,10 @@ function drive.scenarioManualHint()
     DG.stop = function() end
     DG.event = function(_, name, a) if name == "takeover" and type(a) == "table" then ev[#ev + 1] = a end end
     DG.toast = function(text) toasts[#toasts + 1] = text end
-    drive.fillWorld(-10, 320, -12, 12)
-    drive.putRoad(-10, 320, -3, 3)
+    -- 假 start 沒有真 session：取樣回 false 會把 s.diag 關掉、接手事件收不到
+    DG.shouldSample, DG.sample = function() return false end, function() return true end
+    drive.fillWorld(-10, 620, -12, 12)
+    drive.putRoad(-10, 620, -3, 3)
     setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 60, RightLaneBias = 0 })
     local HINT = "UI_MinidoracatAutoDrive_ManualResumeHint"
     local function setTarget(tx)
@@ -24445,7 +24455,7 @@ function drive.scenarioManualHint()
     end
     drive.resumeMs = 0
     Dr.manualHinted = nil
-    setTarget(300)
+    setTarget(600)
 
     startAt(0)
     takeOver()
@@ -24453,9 +24463,11 @@ function drive.scenarioManualHint()
     startAt(50)
     local e = hintEv()
     checkTrue(hinted() == 1 and toasted() == 1 and noteReason(HINT) and e ~= nil
-            and math.abs(e.dt - 20000) < 100 and math.abs(e.d - 50) < 1e-6,
-        "(mh-hint) 20 s、50 m 內同目標重開：白字＋Toast 提示一次、takeover hint dt／d（halo " .. hinted()
-        .. "、dt " .. tostring(e and e.dt) .. "、d " .. tostring(e and e.d) .. "）")
+            and math.abs(e.dt - 20000) < 100 and math.abs(e.d - 50) < 1e-6
+            and e.tkoA == nil and e.rem ~= nil and e.rem >= T.MANUAL_HINT_REM_M,
+        "(mh-hint) 20 s、50 m 內同目標重開：白字＋Toast 提示一次、takeover hint dt／d／tkoA 缺／rem（halo " .. hinted()
+        .. "、dt " .. tostring(e and e.dt) .. "、d " .. tostring(e and e.d) .. "、tkoA " .. tostring(e and e.tkoA)
+        .. "、rem " .. tostring(e and e.rem) .. "）")
     takeOver()
     nowMs = nowMs + 5000
     startAt(50)
@@ -24463,7 +24475,7 @@ function drive.scenarioManualHint()
 
     local function negative(tag, ms, x, tx, resume)
         Dr.manualHinted = nil
-        setTarget(300)
+        setTarget(600)
         startAt(0)
         takeOver()
         nowMs = nowMs + ms
@@ -24475,12 +24487,12 @@ function drive.scenarioManualHint()
     end
     negative("mh-late", T.MANUAL_HINT_MS + 1000, 50)
     negative("mh-far", 20000, T.MANUAL_HINT_M + 50)
-    negative("mh-target", 20000, 50, 280)
+    negative("mh-target", 20000, 50, 580)
     negative("mh-opt", 20000, 50, nil, 2000)
 
     -- 選自動恢復：接手走讓位、不記接手（Drive.manualStop 不跑）
     Dr.manualHinted = nil
-    setTarget(300)
+    setTarget(600)
     drive.resumeMs = 2000
     startAt(0)
     nowMs = nowMs + 20
@@ -24503,9 +24515,100 @@ function drive.scenarioManualHint()
     startAt(50)
     checkTrue(hinted() == 0 and hintEv() == nil, "(mh-consume) 上一趟重開已消費接手紀錄：按停後再重開不提示")
 
+    local function manualEv()
+        for i = #ev, 1, -1 do if ev[i].phase == "manual" then return ev[i] end end
+    end
+    local function cruise(ms) -- 沿 +x 以 30 km/h 行駛 ms（車位跟著走，不停滯、進度監督不起疑）
+        dveh._speed = 30
+        for _ = 1, ms / 100 do
+            nowMs = nowMs + 100
+            dveh._x = dveh._x + 30 / 3.6 * 0.1
+            driveTick(dp, dveh)
+        end
+    end
+    local function blockedThenCruise(ms) -- 跑 1 s 後判堵一幀，再正常行駛 ms
+        cruise(1000)
+        local S = Dr.debugSession(0)
+        S.blocked = true
+        cruise(100)
+        S.blocked = false
+        cruise(ms)
+    end
+    -- 接手前 1 s 內各種異常：manual why=hint-anom、tkoA < CALM_MS、rem 照記；重開不提示
+    local function anomCase(tag, what, setup) -- 每案先清 manualHinted：違規時前一案的提示不連帶染紅後面
+        Dr.manualHinted = nil
+        startAt(0)
+        setup(Dr.debugSession(0))
+        takeOver()
+        local m = manualEv()
+        checkTrue(m ~= nil and m.why == "hint-anom" and m.tkoA ~= nil and m.tkoA < T.MANUAL_HINT_CALM_MS
+                and m.rem ~= nil and m.rem >= T.MANUAL_HINT_REM_M,
+            "(" .. tag .. ") " .. what .. "後接手：manual why=hint-anom（why " .. tostring(m and m.why) .. "、tkoA "
+            .. tostring(m and m.tkoA) .. "、rem " .. tostring(m and m.rem) .. "）")
+        nowMs = nowMs + 20000
+        startAt(50)
+        checkTrue(hinted() == 0 and hintEv() == nil, "(" .. tag .. ") " .. what .. "後接手：重開不提示（halo " .. hinted() .. "）")
+    end
+    anomCase("mhc-anom", "停止線判堵停住", function(S) -- 靜止＝不算急煞、不算撞擊，只剩判堵狀態
+        for _ = 1, 10 do
+            S.blocked = true
+            nowMs = nowMs + 100
+            driveTick(dp, dveh)
+        end
+    end)
+    anomCase("mhc-brake", "行駛中硬煞", function(S)
+        cruise(1000)
+        Dr.hardBrake(S, dveh, nowMs, "visibility", 30, 1, 0, 0, nil, 1, 0)
+        cruise(500)
+    end)
+    -- harness 沒載 MDAD_Upload：撞擊門檻本身由 test_upload 驗，這裡只驗 anomTick 以 10Hz 間隔把相鄰兩點車速交給它
+    local oldUp, upArgs = MDADUpload, nil
+    MDADUpload = { impactLike = function(prev, v, gap)
+        if prev - v >= 20 then upArgs = { prev, v, gap } end
+        return prev - v >= 20 and gap >= 80
+    end }
+    anomCase("mhc-impact", "30 km/h 一筆掉到 0（撞擊）", function()
+        cruise(1000)
+        dveh._speed = 0
+        for _ = 1, 2 do
+            nowMs = nowMs + 100
+            driveTick(dp, dveh)
+        end
+    end)
+    MDADUpload = oldUp
+    checkTrue(upArgs ~= nil and upArgs[1] == 30 and upArgs[2] == 0 and upArgs[3] >= 100,
+        "(mhc-impact) 撞擊門檻拿到前一點 30、本點 0、間隔 ≥100 ms（" .. tostring(upArgs and upArgs[3]) .. "）")
+
+    Dr.manualHinted = nil
+    startAt(0)
+    blockedThenCruise(T.MANUAL_HINT_CALM_MS + 500)
+    takeOver()
+    local me = manualEv()
+    local why0 = me and me.why
+    nowMs = nowMs + 20000
+    startAt(50)
+    e = hintEv()
+    checkTrue(why0 == nil and hinted() == 1 and e ~= nil and e.tkoA ~= nil and e.tkoA >= T.MANUAL_HINT_CALM_MS
+            and e.rem ~= nil and e.rem >= T.MANUAL_HINT_REM_M,
+        "(mhc-calm) 判堵過了 CALM_MS 才接手：照提示、hint 帶 tkoA／rem（why " .. tostring(why0) .. "、halo " .. hinted()
+        .. "、tkoA " .. tostring(e and e.tkoA) .. "、rem " .. tostring(e and e.rem) .. "）")
+
+    Dr.manualHinted = nil
+    startAt(400)
+    cruise(500)
+    takeOver()
+    me = manualEv()
+    checkTrue(me ~= nil and me.why == "hint-rem" and me.tkoA == nil and me.rem ~= nil and me.rem < T.MANUAL_HINT_REM_M,
+        "(mhc-rem) 離終點 200 m 接手：manual why=hint-rem（why " .. tostring(me and me.why) .. "、rem "
+        .. tostring(me and me.rem) .. "）")
+    nowMs = nowMs + 20000
+    startAt(410)
+    checkTrue(hinted() == 0 and hintEv() == nil, "(mhc-rem) 快到站接手：重開不提示（halo " .. hinted() .. "）")
+
     Dr.stop(0, nil)
     Dr.manualHinted = true -- 其餘情境不出這則提示
     DG.start, DG.event, DG.stop, DG.toast, MDAD.HUD.telemetryEnabled = sStart, sEvent, sStop, sToast, sTel
+    DG.shouldSample, DG.sample = sShould, sSample
     SandboxVars, drive.resumeMs = oldSandbox, oldResume
     drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
 end
