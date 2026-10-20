@@ -1799,18 +1799,25 @@ end
 -- 弧口 15.3，入弧 16.5–19.4）。沿滑行能影響的距離往前找弧，每段弧只看第一段（即時帽從那裡開始作用），
 -- 以同一個 coast 反推 sqrt(cap² + 2·coast·距離)。行駛線取承諾線（蓋得到該點時）否則常駐 lane 在該處的
 -- 落點（clampLane 連續版）。skipRun＝車已在弧上：同一段弧由當下帽管，從下一段弧起算。
--- 沒有弧的 fallback 頂點車從放行點（頂點前 rel−shift，與 control 的鉗點同一個數，kinkRelease）就開始以 rMin 轉，
--- 帽要在那裡達到（1002e：建表帽記在頂點＝放行時還快 5–6 m 的滑行量，E2E SemiTruckLite 90° 折點放行 34 對帽 23、
--- 側滑外甩 2.3m；十批 campaign 56 次放行 32 次 >20 km/h、50 次打滑）。≤90° 帽＝sqrt(latSafe·rMin)（geometryStep
--- 同式），>90° 髮夾＝MIN_SPEED（geometryStep 的 dth>π/2 同類；1002j 一度拿掉，真因是放行點量中心線、見 kinkRelease）。
+-- 沒有圓角的頂點（adaptive 的 fallback 頂點、任何剖面 >90° 的頂點）：帽要在頂點前 lookaheadM(帽) 就到（1020b／1021a；
+-- route.md〈使用者裁定〉2026-10-20）——pure pursuit 在前視點越過頂點時就開始轉，帽記在頂點等於開始轉時還快
+-- 一個前視距的滑行量（正式服 0.31.x：(6592,14608) 153° 髮夾帽 12、開始轉時 41–45 km/h、前視 11.4 m）。鉗住的頂點
+-- （≤90° fallback 與 90°–150°，control 的 kinkS）另不晚於放行點（頂點前 rel−shift，kinkRelease；1002e：放行時還快
+-- 5–6 m 的滑行量就側滑外甩）。≤90° 帽＝抓地 sqrt(latSafe·rMin)（geometryStep 同式；1021a 拿掉 1020b 的重車轉向帽：
+-- 低速大轉角在放行點切內更深，A/B 不過），>90°＝MIN_SPEED（geometryStep 的 dth>π/2 同類）。
+-- 同一處記遙測 fvo（state.fvo，Driver phys.fvo → 摘要 fvo）：前視點（state.sTarget）越過頂點那幀＝開始轉，記帽、車速
+-- speedKmh、折角；鉗住的頂點前視點停在頂點（或彎內側車道折點），放行那幀才越過。fvoS 只往前（同幀越過兩個頂點不重記）。
+-- reach≤0（目標已在 MIN_SPEED 以下）照走一遍：帽都 ≥MIN、不會再壓，只為記 fvo。
 -- 回新的目標（m/s）；最多走 ARC_LOOK_STEPS 段，零配置。
 local ARC_LOOK_STEPS = 48
-local function arcLookaheadMs(profile, state, from, sNow, target, coast, skipRun)
+local function arcLookaheadMs(profile, state, from, sNow, target, coast, skipRun, speedKmh)
     local look = state.latSafe
     if not isFinite(look) or look < 0 or not isFinite(coast) or coast <= 0 then return target end
     local floor2 = MIN_SPEED_MS * MIN_SPEED_MS
     local reach = (target * target - floor2) / (2 * coast)
-    if not (reach > 0) then return target end
+    if not (reach > 0) then reach = 0 end
+    local lookScale = profile.lookScale
+    if not isFinite(lookScale) or lookScale <= 0 then lookScale = 1 end
     local n, s, segKind, SEG_ARC = profile.n, profile.s, profile.segKind, MDADDynamics.SEG_ARC
     local SEG_FALLBACK, segH = MDADDynamics.SEG_FALLBACK, profile.segH
     local rMin = profile.rMin
@@ -1818,14 +1825,20 @@ local function arcLookaheadMs(profile, state, from, sNow, target, coast, skipRun
     local rawBias = state.laneBias
     if not isFinite(rawBias) then rawBias = 0 end
     local ovN, ovS0, ovEndS = state.ovN or 0, state.ovS0, state.ovEndS
+    -- 掃描距離：放行點（髮夾彎內側再提前 b·tan(θ/2)，θ<150° → ≤3.73·|b|）、帽的前視距（帽 ≤ 目標才有作用）、
+    -- 前視點本身（fvo）取大，再加滑行能影響的 reach
+    local span = HAIRPIN_APEX_MAX + 3.8 * (rawBias < 0 and -rawBias or rawBias)
+    local spanLook = MDADFollower.lookaheadM(target * KMH_PER_MS, lookScale)
+    if spanLook > span then span = spanLook end
+    local sTarget = state.sTarget
+    if isFinite(sTarget) and sTarget - sNow > span then span = sTarget - sNow end
     local j, steps = from, 0
     if skipRun then
         while j <= n - 1 and segKind[j] == SEG_ARC and steps < ARC_LOOK_STEPS do j, steps = j + 1, steps + 1 end
     end
     while j <= n - 1 and steps < ARC_LOOK_STEPS do
         local dist = s[j] - sNow
-        -- 髮夾彎內側的放行點再提前 b·tan(θ/2)（θ<150° → ≤3.73·|b|，kinkRelease）
-        if dist - HAIRPIN_APEX_MAX - 3.8 * (rawBias < 0 and -rawBias or rawBias) > reach then break end
+        if dist - span > reach then break end
         if segKind[j] == SEG_ARC then
             local sj, lat = s[j], nil
             if ovN >= 2 and isFinite(ovS0) and isFinite(ovEndS) and sj >= ovS0 and sj <= ovEndS then
@@ -1851,18 +1864,30 @@ local function arcLookaheadMs(profile, state, from, sNow, target, coast, skipRun
             if j >= 2 and segKind[j - 1] ~= SEG_ARC then
                 local dth = wrapPi(segH[j] - segH[j - 1])
                 if dth < 0 then dth = -dth end
-                if profile.filletAdaptive and dth >= MDADDynamics.FILLET_MIN_RAD and dth < HAIRPIN_MAX_RAD
-                    and (segKind[j - 1] == SEG_FALLBACK or segKind[j] == SEG_FALLBACK) then
-                    local rel, shift = kinkRelease(profile, state, j - 1, dth)
-                    local cap = sqrt(look * rMin)
-                    if dth > HAIRPIN_RAD or cap < MIN_SPEED_MS then cap = MIN_SPEED_MS end
-                    local d = dist + shift - rel
+                local fb = profile.filletAdaptive and dth >= MDADDynamics.FILLET_MIN_RAD
+                    and (segKind[j - 1] == SEG_FALLBACK or segKind[j] == SEG_FALLBACK)
+                if fb or dth > HAIRPIN_RAD then
+                    local cap = MIN_SPEED_MS
+                    if dth <= HAIRPIN_RAD then cap = sqrt(look * rMin) end
+                    if cap < MIN_SPEED_MS then cap = MIN_SPEED_MS end
+                    local lead = MDADFollower.lookaheadM(cap * KMH_PER_MS, lookScale)
+                    if dth < HAIRPIN_MAX_RAD then
+                        local rel, shift = kinkRelease(profile, state, j - 1, dth)
+                        if rel - shift > lead then lead = rel - shift end
+                    end
+                    local d = dist - lead
                     if d < 0 then d = 0 end
                     local lim = sqrt(cap * cap + 2 * coast * d)
                     if lim < target then
                         target = lim
                         state.profileWhy = "look"
                         reach = (target * target - floor2) / (2 * coast)
+                    end
+                    if isFinite(sTarget) and sTarget > s[j] and s[j] > (state.fvoS or -1) then
+                        local f = state.fvo
+                        if f == nil then f = { n = 0 }; state.fvo = f end
+                        state.fvoS = s[j]
+                        f.n, f.capKmh, f.kmh, f.th = f.n + 1, cap * KMH_PER_MS, speedKmh, dth
                     end
                 end
             end
@@ -2440,7 +2465,7 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
             end
         end
         -- 前方弧段的即時帽改成滑行包絡提前減（arcLookaheadMs），不在弧口一步掉下來
-        targetSpeed = arcLookaheadMs(profile, state, bestI + 1, sNow, targetSpeed, coast, curveHardActive)
+        targetSpeed = arcLookaheadMs(profile, state, bestI + 1, sNow, targetSpeed, coast, curveHardActive, aspeed)
         state.curveHardActive = curveHardActive
         state.curveKappa = actualKappa
         state.curveCapKmh = curveCap * KMH_PER_MS
@@ -2665,6 +2690,7 @@ function MDADFollower.resetState(state)
     if type(state) ~= "table" then return state end
     state.idx = 1
     state.needsProjection = true
+    state.fvoS = nil -- 遙測 fvo 的「已記到哪個頂點」是舊路線的弧長（計數 state.fvo.n 不歸零，Driver／摘要靠它判新筆）
     return MDADFollower.resetControl(state)
 end
 

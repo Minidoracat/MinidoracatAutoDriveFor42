@@ -17178,7 +17178,10 @@ scenario("Phase E：v4 strict metadata、adaptive getter cache、traction reset�
     checkTrue(prefixReads * 2 < 250,
         "late-index snapshot only binary-searches the route prefix, never walks it; prefixReads="
         .. prefixReads)
-    checkTrue(sReads < 1500,
+    -- 上限 1500→1600（1020b）：Follower arcLookaheadMs 找沒有圓角頂點的帽要掃到 max(lookaheadM(目標), 前視點)＋reach
+    -- （舊制 HAIRPIN_APEX_MAX＋reach），4m 一段的直路每幀多讀 1–2 段；同 fixture 修前 1471、修後 1527。仍是局部視界
+    -- （每幀另有 ARC_LOOK_STEPS 段數上限），線性走前綴由上一條 prefixReads 擋。
+    checkTrue(sReads < 1600,
         "late-index snapshot reads remain bounded by local horizons; reads=" .. sReads)
     MDAD.Drive.stop(0, nil)
 

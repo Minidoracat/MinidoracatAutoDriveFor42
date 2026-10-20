@@ -7885,6 +7885,7 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     if finite(s.fstate.xtOut) and s.fstate.xtOut > 1 then phys.xtOut = s.fstate.xtOut end
     if s.dodgeAlignHold == true then phys.dodgeAlignHold = true end
     phys.routeHeadingError, phys.kinkExitS = s.lastRouteErr, s.fstate.kinkExitS
+    phys.fvo = s.fstate.fvo -- 1020b：沒有圓角的頂點開始轉的最近一筆 {n, capKmh, kmh, th}（Follower arcLookaheadMs；只給摘要 fvo）
     phys.visibilityCap = s.visibilityCap
     phys.visibilityHardKmh = s.visibilityHardKmh
     phys.visHold, phys.visRoundS, phys.visAssistDecel = s.visHold, s.visRoundS, s.visAssistDecel

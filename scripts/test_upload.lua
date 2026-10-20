@@ -1955,6 +1955,9 @@ do
     drive(200, { speed = 60, phys = tp({ fuelPercent = 59.9, brakeReject = "unloaded" }) })
     drive(200, { speed = 60, phys = tp({ brakeReject = "unloaded" }) })
     drive(200, { speed = 60, phys = tp({ brakeReject = "heading" }) })
+    for k = 1, 5 do -- 1020b fvo 滿 4 筆也要塞得進一塊（下面的 CHUNK 斷言）
+        drive(200, { speed = 20, phys = tp({ fvo = { n = k, capKmh = 12.3, kmh = 25.6, th = 2.6 } }) })
+    end
     D.event(0, "engine", { phase = "off", why = "battery", chg = 0, es = 2412.4, fu = 59.9 })
     D.stop(0, "UI_MinidoracatAutoDrive_EngineOff")
     pump(120000)
@@ -2125,6 +2128,47 @@ do
         "(compat) old engine off event: eng unchanged")
     check(string.find(sum, '"vfInTs":[]', 1, true) ~= nil, "(compat) no first-seen: vfInTs empty")
     MDAD.gasGearTerm, MDAD.fairGear = nil, nil
+end
+
+-- 1020b：入彎超速要 >1.15×彎帽且 >彎帽＋3（12 km/h 下限彎的 1.15 倍只多 1.8，落在致動器雜訊內）；沒有圓角的頂點開始轉
+-- 明細 fvo（Follower state.fvo → phys.fvo；n 遞增才算新筆、只留前 4 筆、次數照 n 的差）。
+--   違規證明：門檻只留 1.15 倍＝(aoi-floor) 紅；fvo 每筆樣本都記＝(fvo) 紅；次數只加 1＝(fvoN) 紅。
+scenario("1020b summary: arcOver floor margin, fvo no-fillet vertex turn-in")
+do
+    local function tp(extra)
+        local t = { frameMs = 16, capGear = 120, capPerception = 120, capMax = 120, capReason = "profile",
+            controlState = "TRACK", expectedLane = 0, latDev = 0.1 }
+        for k, v in pairs(extra or {}) do t[k] = v end
+        return t
+    end
+    nowMs = nowMs + 3600000
+    start()
+    local d0 = nowMs
+    local function arc(cap, spd)
+        drive(400, { speed = spd, phys = tp({ curveHardActive = true, curveCap = cap, curveKappa = 0.05 }) })
+        drive(400, { speed = spd, phys = tp() })
+    end
+    arc(12, 14)  -- 1.17×、+2：雜訊內，不算
+    arc(12, 16)  -- +4：算
+    arc(40, 47)  -- 1.175×、+7：算
+    arc(40, 45)  -- 1.125×：不算
+    local f1 = { n = 1, capKmh = 12, kmh = 30, th = math.rad(153) }
+    drive(600, { speed = 30, phys = tp({ fvo = f1 }) })  -- 同一筆跨多個樣本只記一次
+    drive(200, { speed = 30, phys = tp({ fvo = { n = 3, capKmh = 16.2, kmh = 21, th = math.rad(63.4) } }) }) -- 取樣間過兩個
+    for k = 4, 6 do drive(200, { speed = 20, phys = tp({ fvo = { n = k, capKmh = 12, kmh = 14, th = math.pi / 2 } }) }) end
+    drive(200, { speed = 20, phys = tp() })
+    D.stop(0, "UI_MinidoracatAutoDrive_Arrived")
+    pump(120000)
+    local _, sum = sumLines(d0)
+    local function n(key) return tonumber(string.match(sum, '"' .. key .. '":([%d%.%-]+)')) end
+    checkEq(n("arc"), 4, "(aoi-floor) four arcs")
+    checkEq(n("arcOver"), 2, "(aoi-floor) 12→14 and 40→45 are not overspeed; 12→16 and 40→47 are")
+    checkEq(n("fvoN"), 6, "(fvoN) passes counted by n difference (1, then 3, then 4–6)")
+    local fvo = string.match(sum, '"fvo":(%b[])') or ""
+    checkEq(count(fvo, "["), 5, "(fvo) at most 4 entries (" .. fvo .. ")")
+    check(string.find(fvo, '^%[%[%d+,12[%.0]*,30[%.0]*,153[%.0]*%],%[%d+,16%.2,21[%.0]*,63[%.0]*%]') ~= nil,
+        "(fvo) entries: ts, cap, turn-in speed, angle deg; one per new n (" .. fvo .. ")")
+    check(#sum < U.CHUNK, "(1020b) summary still fits one chunk (" .. #sum .. ")")
 end
 
 -- 1010 所有送出的片段整段 ≤ CLIP_TOTAL_MAX（第一塊宣告的 len＝全文長度；伺服器只看這個）
