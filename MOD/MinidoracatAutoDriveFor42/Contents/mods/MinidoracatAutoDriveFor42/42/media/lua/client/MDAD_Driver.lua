@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1020j"
+Drive.REV = "1021g"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -13417,7 +13417,7 @@ local function replan(s, vehicle, playerNum)
                 elseif s.planDeferWhy and not (sen.wideDone and s.wideArmed) then
                     -- 主候選未覆蓋、鏈裡也沒有覆蓋得到的替代線：回到原本的延後（先按已知群起點煞停）。
                     -- 停在停點的寬帶判堵不延後：延後的接近帽會讓車往群前爬、吃掉進入段跑道，
-                    -- 而且清掉判堵＝解除寬帶武裝，一般帶／寬帶來回判、永遠不倒車（0929v）。照判堵走倒車重判。
+                    -- 而且清掉判堵＝下一輪不掃寬帶（Drive.wideScanWanted 要 blocked），一般帶／寬帶來回判、永遠不倒車（0929v）。照判堵走倒車重判。
                     Drive.deferDodge(s, playerNum, s.planDeferWhy, s.planDeferB, s.planDeferC, s.planDeferD)
                     mode = "clear"
                 else
@@ -13773,7 +13773,10 @@ local function replan(s, vehicle, playerNum)
             s.dodgeHandoffHold, s.dodgeDeferCap = false, -1
         end
         s.blocked = false
-        Drive.disarmWide(s)
+        -- 延後（planSig −1）不是淨空，不解除寬帶武裝（1021g）：倒車成功清了 blocked，退出來那一輪延後（lateral-coverage 等）
+        -- 舊制在這裡解除武裝，下一輪同一堵點再判堵時 Drive.blockedAtStop 不再停住，車照起步包絡開回停止線、下一次倒車又退回原處
+        -- （E2E blockscan launch7 三輪來回；正式服 0.31.x 6 次）。出口不變：承諾、真淨空、開過武裝點、錨移到 WIDE_ARM_SAME_M 外。
+        if s.planSig ~= -1 then Drive.disarmWide(s) end
         s.blockedNotified = false
         s.dodgeNotified = false
         if s.laneChained then

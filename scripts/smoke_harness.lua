@@ -29919,6 +29919,128 @@ function drive.scenarioBandFar()
 end
 drive.scenarioBandFar()
 
+-- (reap) 1021g 倒車脫困後別開回同一條停止線（E2E blockscan launch7 每輪重現、正式服 0.31.x 6 次）：停止線武裝寬帶、blocked-retry
+--   倒車成功（清 blocked、Sensor reset），退出來第一輪一般帶（常駐 +3）候選被橫向覆蓋拒收＝dodge defer why=lateral-coverage，
+--   下一輪 nav 帶判堵同一排牆。舊制 replan 的 clear 分支把延後當淨空、解除寬帶武裝，Drive.blockedAtStop 不再停住，車照起步包絡
+--   （launch，約 15 km/h）開回停止線、下一次倒車又退回原處。現制延後不解除武裝：再判堵就停在退出來的地方（capReason blocked、
+--   目標 0）、照寬帶重判，下一次倒車從這裡接著退。車在 (10,3)、常駐 +3（keepRightTarget 打樁）、整排牆 x=40 y −14..14。
+--   (reap)       同一堵點：延後一次、再判堵時武裝仍在、目標 0。
+--   (reap-moved) 倒車後牆搬到 x=60（錨移 20m ＞ WIDE_ARM_SAME_M）：解除武裝、照判堵接近包絡往前開。
+--   (reap-clear) 倒車後牆拿掉（真淨空）：解除武裝、不判堵、照常往前。
+--   (reap-gap)   倒車後牆左段拿掉（y −14..−3 空）：延後補掃後承諾左繞（延後保住武裝不擋承諾，承諾才解除）。
+--   違規證明（temp/s1021-reapproach/vp）：clear 分支照舊一律 disarmWide＝(reap) 紅；clear 分支一律不解除＝(reap-clear) 紅。
+function drive.scenarioReapproach()
+    scenario("1021g：倒車脫困後的延後不解除寬帶武裝——同一堵點再判堵停在退出來的地方，不開回停止線")
+    local oldSand = SandboxVars
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    local wasMs = drive.frameMs(10)
+    local Dr = MDAD.Drive
+    local oldKeep, oldAuto = Dr.keepRightTarget, MDAD.HUD.autoDetour
+    Dr.keepRightTarget = function() return 3 end
+    MDAD.HUD.autoDetour = function() return false end
+    local oldEvent, oldSample, events = MDADDiagnostics.event, MDADDiagnostics.sample, {}
+    MDADDiagnostics.event = function(_, name, a) events[#events + 1] = { name = name, a = a } end
+    MDADDiagnostics.sample = function() return true end
+    local function count(name, phase, why)
+        local n = 0
+        for i = 1, #events do
+            local e = events[i]
+            if e.name == name and e.a and e.a.phase == phase and (why == nil or e.a.why == why) then n = n + 1 end
+        end
+        return n
+    end
+    -- 開到停止線判堵、寬帶判完、blocked-retry 倒車成功；回 session 與停止線車位 x（倒車後車停在退出來的地方）
+    local function backedOut()
+        drive.fillWorld(-10, 160, -16, 16)
+        for y = -14, 14 do drive.putSolid(40, y, "harness_reap_wall") end
+        armDrive(0, 10)
+        local st = Dr.debugSession(0)
+        st.diag = true
+        st.sandBias = 3
+        MDADFollower.setLaneBias(st.fstate, 3)
+        st.sensor.scanBias = 3
+        MDADSensor.reset(st.sensor)
+        setHeading(dveh, 0)
+        dveh._x, dveh._y, dveh._speed = 10, 3, 10
+        driveReset(dveh)
+        for _ = 1, 3 do drive.scanRound(true) end
+        if st.blocked and type(st.blockHitX) == "number" then
+            dveh._x = st.blockHitX - Dr.blockStopDist(st) + 0.5 -- 停止線內停住：stepFollow 武裝寬帶
+        end
+        dveh._speed = 0
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        drive.wideRounds(true)
+        local stopX = dveh._x
+        if st.mode ~= "unstick" then
+            nowMs = nowMs + 5500
+            driveReset(dveh)
+            driveTick(dp, dveh)
+        end
+        for _ = 1, 30 do -- 倒車：每幀退 0.5m 到 settle
+            if st.mode ~= "unstick" then break end
+            dveh._x, dveh._speed = dveh._x - 0.5, -3
+            nowMs = nowMs + 100
+            driveReset(dveh)
+            driveTick(dp, dveh)
+        end
+        dveh._speed = 0
+        nowMs = nowMs + 16
+        driveTick(dp, dveh) -- settle → success
+        for i = #events, 1, -1 do events[i] = nil end
+        return st, stopX
+    end
+    -- (reap)
+    local st, stopX = backedOut()
+    local pre = { mode = st.mode, blocked = st.blocked, armed = st.wideArmed, back = stopX - dveh._x }
+    drive.scanRound(true)
+    local r1 = { defer = count("dodge", "defer", "lateral-coverage"), blocked = st.blocked, armed = st.wideArmed }
+    drive.scanRound(true)
+    checkTrue(pre.mode == "follow" and pre.blocked == false and pre.armed == true and pre.back >= 3
+            and r1.defer == 1 and r1.blocked == false and r1.armed == true,
+        "(reap) 前置：倒車成功（退 " .. tostring(pre.back) .. "m、blocked 清、武裝在），退出來那一輪延後 lateral-coverage、武裝仍在（defer="
+        .. tostring(r1.defer) .. " armed=" .. tostring(r1.armed) .. "）")
+    checkTrue(st.blocked == true and st.wideArmed == true and Dr.blockedAtStop(st, dveh._x, dveh._y) == true
+            and st.lastCapReason == "blocked" and st.desiredTarget == 0,
+        "(reap) 同一堵點再判堵：停在退出來的地方、不開回停止線（blocked=" .. tostring(st.blocked) .. " armed="
+        .. tostring(st.wideArmed) .. " acr=" .. tostring(st.lastCapReason) .. " tgt=" .. tostring(st.desiredTarget) .. "）")
+    MDAD.Drive.stop(0, nil)
+    -- (reap-moved)
+    st = backedOut()
+    for y = -14, 14 do drive.clearCell(40, y) drive.putSolid(60, y, "harness_reap_far") end
+    for _ = 1, 3 do drive.scanRound(true) end
+    checkTrue(st.blocked == true and st.wideArmed == false and Dr.blockedAtStop(st, dveh._x, dveh._y) == false
+            and (st.desiredTarget or 0) > 5,
+        "(reap-moved) 錨移到 20m 外：解除武裝、照接近包絡往前（blocked=" .. tostring(st.blocked) .. " armed="
+        .. tostring(st.wideArmed) .. " acr=" .. tostring(st.lastCapReason) .. " tgt=" .. tostring(st.desiredTarget) .. "）")
+    MDAD.Drive.stop(0, nil)
+    -- (reap-clear)
+    st = backedOut()
+    for y = -14, 14 do drive.clearCell(40, y) end
+    for _ = 1, 3 do drive.scanRound(true) end
+    checkTrue(st.blocked == false and st.wideArmed == false and count("blocked", nil) == 0 and (st.desiredTarget or 0) > 5,
+        "(reap-clear) 牆拿掉：解除武裝、不判堵、照常往前（blocked=" .. tostring(st.blocked) .. " armed="
+        .. tostring(st.wideArmed) .. " tgt=" .. tostring(st.desiredTarget) .. "）")
+    MDAD.Drive.stop(0, nil)
+    -- (reap-gap)
+    st = backedOut()
+    for y = -14, -3 do drive.clearCell(40, y) end
+    for _ = 1, 3 do
+        drive.scanRound(true)
+        if st.dodging then break end
+    end
+    checkTrue(st.dodging == true and st.wideArmed == false and type(st.fstate.offL) == "number" and st.fstate.offL < -2,
+        "(reap-gap) 左側空出來：延後補掃後承諾左繞、承諾才解除武裝（dodging=" .. tostring(st.dodging) .. " armed="
+        .. tostring(st.wideArmed) .. " offL=" .. tostring(st.fstate.offL) .. " defers=" .. count("dodge", "defer") .. "）")
+    MDAD.Drive.stop(0, nil)
+    MDADDiagnostics.event, MDADDiagnostics.sample = oldEvent, oldSample
+    Dr.keepRightTarget, MDAD.HUD.autoDetour = oldKeep, oldAuto
+    drive.fillWorld(-2, 70, -7, 7)
+    drive.frameMs(wasMs)
+    SandboxVars = oldSand
+end
+drive.scenarioReapproach()
+
 do -- 主 chunk local 槽已滿：整段包成函式，內部 local 不佔主 chunk
 -- =====================================================================
 -- v6 多停靠點行程（docs/addon-api.md §6）
