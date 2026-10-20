@@ -15430,7 +15430,9 @@ local function scenarioTelemetry()
     checkEq(drive.calls.isBraking, 0, "off：零 isBraking")
     checkEq(drive.calls.getMinWheelSkid, 0, "off：零 getMinWheelSkid")
     checkEq(drive.calls.getEngineSpeed, 0, "off：零 getEngineSpeed")
-    checkEq(drive.calls.getTransmissionNumber, 0, "off：零 getTransmissionNumber")
+    -- 1020d 再加速重選檔（Drive.regear）在控制路徑讀檔位：只在目標 ≥ 實速＋REGEAR_GAP_KMH 時、每 REGEAR_MS 最多一次（8 幀內 ≤1）
+    checkTrue(drive.calls.getTransmissionNumber <= 1,
+        "off：getTransmissionNumber 只剩重選檔的節流讀取（" .. drive.calls.getTransmissionNumber .. "）")
     checkEq(drive.calls.getRegulatorSpeed, 0, "off：零 getRegulatorSpeed")
     checkEq(drive.calls.getLinearVelocity, 0, "off：零 getLinearVelocity")
 
@@ -32073,6 +32075,136 @@ function drive.scenarioTele1013a()
     driveReset(dveh)
 end
 drive.scenarioTele1013a()
+
+-- 1020d 速度切片（speed.md〈使用者裁定〉2026-10-20 兩條）：
+--   (rg-*) V1 再加速重選檔 Drive.regear：目標 ≥ 實速＋REGEAR_GAP_KMH、檔位 ≥ 車速對應檔＋2、冷卻 REGEAR_MS 過了才關 regulator
+--     一幀；冷卻內、差距不足、只高一檔、倒車、鎖輪閂鎖、調頭、掛回中都不關；regear 事件延後兩幀帶前後 tn 與車速；stepFollow
+--     真的接上（關的那一幀 regulator 最後是 false，下一幀照常開）。(gf-*) 車速對應檔照抄引擎 gearForSpeed（MP 假速度域）。
+--   (vrd-*) V2 可視巡航帳去鋸齒：visibilityCaps 只在巡航帳綁速時記一輪預期帽降幅；vis 帳沒有停滯前饋時超速在降幅內只斷油、
+--     超過照比例補；停滯前饋與其他帳不吃降幅。
+--   違規證明（temp/s1020-speed/vp/）：見 .omc/plans/mdad-prod-1020/impl-speed.md。
+function drive.scenarioSpeed1020d()
+    scenario("1020d 再加速重選檔（V1）與可視巡航帳去鋸齒（V2）")
+    local Dr, D = MDAD.Drive, MDADDynamics
+    local tune = Dr.debugTune()
+    local oldEvent = MDADDiagnostics.event
+    local evs = {}
+    local oldApi, oldSand = MinidoracatMiniMapAPI, SandboxVars
+    installNavApi(2)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 60, RightLaneBias = 0 })
+    MDADDiagnostics.event = function(_, name, payload)
+        if name == "regear" then evs[#evs + 1] = payload end
+    end
+    checkTrue(armDrive(), "(1020d) 啟動自駕")
+    local s = Dr.debugSession(0)
+    -- (gf) 極速 200、4 檔＝每檔 50 km/h；超過極速夾在最高檔；MP 假速度域（SpeedLimit 70）45 km/h 已是 2 檔
+    dveh._maxSpeed, s.gearN = 200, nil
+    checkEq(Dr.gearFair(s, dveh, 20), 1, "(gf) 20 km/h＝1 檔")
+    checkEq(Dr.gearFair(s, dveh, 60), 2, "(gf) 60 km/h＝2 檔")
+    checkEq(Dr.gearFair(s, dveh, 260), 4, "(gf) 超過極速＝最高檔")
+    checkEq(Dr.gearFair(s, dveh, 45), 1, "(gf) SP 45 km/h＝1 檔")
+    local fakeWas = BaseVehicle.getFakeSpeedModifier
+    BaseVehicle.getFakeSpeedModifier = function() return 120 / 70 end
+    checkEq(Dr.gearFair(s, dveh, 45), 2, "(gf-mp) MP SpeedLimit 70：45 km/h 的 speedLimited≈58＝2 檔（引擎照假速度域選檔）")
+    BaseVehicle.getFakeSpeedModifier = fakeWas
+    -- V1 單元：每個反面情境都先讓冷卻過期，只留一個條件不成立
+    local function rg(speed, target, trans)
+        s.regearNext, s.regearPend = nil, nil
+        dveh._trans, dveh._regulator = trans or 4, true
+        local reads = drive.calls.getTransmissionNumber
+        local on = Dr.regear(s, dveh, 0, nowMs, speed, target)
+        return on, drive.calls.getTransmissionNumber - reads
+    end
+    s.diag, s.forceBrakeUntil, s.fstate.rotating, s.uturn, s.rehitch = true, 0, false, nil, nil
+    local on = rg(20, 40, 4)
+    checkTrue(on and dveh._regulator == false, "(rg-on) 20 km/h 目標 40、4 檔（對應 1 檔）：關 regulator 一幀")
+    checkEq(s.regearNext, nowMs + tune.REGEAR_MS, "(rg-on) 冷卻到 now＋REGEAR_MS")
+    dveh._trans, dveh._regulator = 1, true
+    checkTrue(not Dr.regear(s, dveh, 0, nowMs + 16, 21, 40) and #evs == 0, "(rg-ev) 下一幀照常開、事件還沒發")
+    checkTrue(not Dr.regear(s, dveh, 0, nowMs + 33, 22, 40) and dveh._regulator == true, "(rg-ev) 第二幀不再關")
+    local e = evs[1] or {}
+    checkTrue(#evs == 1 and e.tn == 4 and e.tn1 == 1 and e.gf == 1 and e.speed == 20 and e.v1 == 22
+            and e.target == 40 and e.ms == 33,
+        "(rg-ev) regear 事件延後兩幀：tn 4→1、gf 1、車速 20→22、目標 40、33 ms")
+    dveh._trans = 4
+    checkTrue(not Dr.regear(s, dveh, 0, nowMs + 50, 20, 40) and dveh._regulator == true,
+        "(rg-cool) 冷卻內不再關（REGEAR_MS）")
+    local _, reads = rg(20, 20 + tune.REGEAR_GAP_KMH - 0.5, 4)
+    checkTrue(not _ and reads == 0, "(rg-gap) 目標只比實速高不到 REGEAR_GAP_KMH：不關、也不讀檔位")
+    on = rg(20, 40, 2)
+    checkTrue(not on and dveh._regulator == true, "(rg-one) 只比對應檔高一檔：不關")
+    on = rg(-10, 40, 4)
+    checkTrue(not on, "(rg-rev) 倒車：不關")
+    s.forceBrakeUntil = nowMs + 500
+    on = rg(20, 40, 4)
+    checkTrue(not on, "(rg-lock) 鎖輪閂鎖中：不關")
+    s.forceBrakeUntil, s.fstate.rotating = 0, true
+    on = rg(20, 40, 4)
+    checkTrue(not on, "(rg-uturn) 調頭（fstate.rotating）中：不關")
+    s.fstate.rotating, s.uturn = false, { name = "gentle" }
+    on = rg(20, 40, 4)
+    checkTrue(not on, "(rg-uturn) 調頭收尾（s.uturn）中：不關")
+    s.uturn, s.rehitch = nil, { phase = "brake" }
+    on = rg(20, 40, 4)
+    checkTrue(not on, "(rg-rehitch) 自動掛回中：不關")
+    s.rehitch, s.diag = nil, false
+    -- (rg-wire) stepFollow 接上：20 km/h、4 檔、直路目標遠高於實速，關的那一幀 regulator 最後是 false；下一幀照常開
+    drive.fillWorld(-10, 300, -8, 8)
+    for _ = 1, 3 do drive.scanRound() end
+    s.regearNext, s.regearPend, s.forceBrakeUntil = nil, nil, 0
+    dveh._speed, dveh._trans = 20, 4
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    checkTrue(dveh._regulator == false and drive.calls.regulatorOff >= 1 and (s.targetPrev or 0) >= 28,
+        "(rg-wire) 跟線幀：卡 4 檔再加速時這一幀 regulator 關（目標 " .. tostring(s.targetPrev) .. "）")
+    dveh._trans = 1
+    nowMs = nowMs + 16
+    driveTick(dp, dveh)
+    checkTrue(dveh._regulator == true, "(rg-wire) 下一幀照常開（引擎看到 N 照車速進檔）")
+    -- V2：一輪預期帽降幅（直接問 visibilityCaps；前緣停住、保持逐步耗盡＝兩本帳都綁到）
+    local halfL, base = s.vehicleProfile.halfL, s.lastSNow
+    s.visFrontRef = nil
+    local seen, okAll = {}, true
+    for k = 0, 8 do
+        local cap, cb = Dr.visibilityCaps(s, 200000 + k * 400, base + 60, 6, 80)
+        local ahead = base + 60 - s.lastSNow
+        local want = 0
+        if s.visAcct == "cruise" then
+            want = cap - D.visibilityCapKmh(ahead - 80 / 3.6 * s.visRoundS, tune.VIS_TAU, cb, halfL)
+        end
+        if math.abs((s.visRoundDrop or -1) - want) > 1e-9 or (s.visAcct == "cruise" and not (want > 0)) then okAll = false end
+        seen[s.visAcct] = true
+    end
+    checkTrue(okAll and seen.cruise and seen.hold,
+        "(vrd-calc)(vrd-hold) 巡航帳綁速：降幅＝帽(ahead)−帽(ahead−v·輪時)>0；保持帳綁速：0")
+    Dr.visibilityCaps(s, 204000, base + 60, 6, nil)
+    checkEq(s.visRoundDrop, 0, "(vrd-calc) 沒有車速：降幅 0")
+    -- V2 單元：只留 vis 帳（剖面在帽上、車道包絡過期、其他帽關）
+    s.sensor.ready, s.visibilityCap, s.visStallBrake, s.visRoundDrop = true, 80, 0, 2.5
+    s.fstate.profileSpeedKmh, s.laneCurveStamp, s.trafficCapKmh = 200, -1, -1
+    s.dodging, s.blockedApproachCap, s.proofSweepCap, s.lagGuardCap, s.proofTightCap = false, nil, nil, nil, nil
+    s.dodgeDeferCap, s.zombieLaneCap, s.softStopCapKmh, s.softGentleCapKmh = -1, -1, -1, -1
+    local tol = tune.VIS_ASSIST_TOL_KMH
+    Dr.visAssistForce(s, 80 + tol + 2, 1)
+    checkTrue(s.visAssistDecel == 0 and s.visAssistWhy == nil, "(vrd-small) 超巡航帽 TOL＋2（降幅 2.5 內）：只斷油、不補")
+    Dr.visAssistForce(s, 80 + tol + 2.5 + 3, 1)
+    checkTrue(s.visAssistWhy == "vis" and math.abs(s.visAssistDecel - 3 * tune.VIS_ASSIST_GAIN) < 1e-9,
+        "(vrd-big) 超過降幅 3 km/h：照比例補（vad " .. tostring(s.visAssistDecel) .. "）")
+    s.visStallBrake, s.safeCoast = 8, 2
+    Dr.visAssistForce(s, 80 + tol + 0.5, 1)
+    checkTrue(math.abs(s.visAssistDecel - math.min(6 + 0.5 * tune.VIS_ASSIST_GAIN, tune.DODGE_ASSIST_MAX)) < 1e-9,
+        "(vrd-stall) 前緣停滯：前饋照舊、比例項不扣降幅（vad " .. tostring(s.visAssistDecel) .. "）")
+    s.visStallBrake, s.trafficCapKmh = 0, 70
+    Dr.visAssistForce(s, 70 + tol + 2, 1)
+    checkTrue(s.visAssistWhy == "traffic" and math.abs(s.visAssistDecel - 2 * tune.VIS_ASSIST_GAIN) < 1e-9,
+        "(vrd-other) 其他帳（traffic）不吃可視降幅（vad " .. tostring(s.visAssistDecel) .. "）")
+    s.trafficCapKmh = -1
+    MDAD.Drive.stop(0, nil)
+    MDADDiagnostics.event = oldEvent
+    MinidoracatMiniMapAPI, SandboxVars = oldApi, oldSand
+    driveReset(dveh)
+end
+drive.scenarioSpeed1020d()
 
 local function scenarioReasonKeys()
 scenario("理由鍵覆蓋：每個分支都跑到，且四語 UI.json 都有對應翻譯")
