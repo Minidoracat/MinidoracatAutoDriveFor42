@@ -1806,10 +1806,34 @@ end
 -- 5–6 m 的滑行量就側滑外甩）。≤90° 帽＝抓地 sqrt(latSafe·rMin)（geometryStep 同式；1021a 拿掉 1020b 的重車轉向帽：
 -- 低速大轉角在放行點切內更深，A/B 不過），>90°＝MIN_SPEED（geometryStep 的 dth>π/2 同類）。
 -- 同一處記遙測 fvo（state.fvo，Driver phys.fvo → 摘要 fvo）：前視點（state.sTarget）越過頂點那幀＝開始轉，記帽、車速
--- speedKmh、折角；鉗住的頂點前視點停在頂點（或彎內側車道折點），放行那幀才越過。fvoS 只往前（同幀越過兩個頂點不重記）。
+-- speedKmh、折角；鉗住的頂點前視點停在頂點（或彎內側車道折點），放行那幀才越過。fvoS 只往前（同一頂點不重記）。
+-- 跨臂交接（kinkHandover）可以在放行同一幀把投影交給出臂，那個頂點已在掃描起點 from 後方：本幀投影跨過的頂點
+-- （state.fvoFrom..from−1，control 只在連續跟線時給，見 control 投影段尾）照記一次 fvo，不套帽——帽管的是車前方（1021k）。
 -- reach≤0（目標已在 MIN_SPEED 以下）照走一遍：帽都 ≥MIN、不會再壓，只為記 fvo。
 -- 回新的目標（m/s）；最多走 ARC_LOOK_STEPS 段，零配置。
 local ARC_LOOK_STEPS = 48
+-- 沒有圓角的頂點 j（段 j−1→j 的頂點，兩段都不是弧）：adaptive fallback ≥FILLET_MIN_RAD 或任何剖面 >90°。回帽（m/s，
+-- ≤90°＝sqrt(look·rMin)、>90°＝MIN_SPEED，夾 MIN）與折角；不是這種頂點回 nil。arcLookaheadMs 的前看與跨過補記共用。
+local function noFilletVertex(profile, j, look, rMin)
+    local segKind, ARC, FB = profile.segKind, MDADDynamics.SEG_ARC, MDADDynamics.SEG_FALLBACK
+    if j < 2 or segKind[j] == ARC or segKind[j - 1] == ARC then return nil end
+    local dth = wrapPi(profile.segH[j] - profile.segH[j - 1])
+    if dth < 0 then dth = -dth end
+    if not (dth > HAIRPIN_RAD or profile.filletAdaptive and dth >= MDADDynamics.FILLET_MIN_RAD
+            and (segKind[j - 1] == FB or segKind[j] == FB)) then return nil end
+    local cap = MIN_SPEED_MS
+    if dth <= HAIRPIN_RAD then cap = sqrt(look * rMin) end
+    if cap < MIN_SPEED_MS then cap = MIN_SPEED_MS end
+    return cap, dth
+end
+-- 記一筆 fvo（頂點弧長 sj 要在已記的 fvoS 之後）
+local function fvoMark(state, sj, cap, dth, speedKmh)
+    if sj <= (state.fvoS or -1) then return end
+    local f = state.fvo
+    if f == nil then f = { n = 0 }; state.fvo = f end
+    state.fvoS = sj
+    f.n, f.capKmh, f.kmh, f.th = f.n + 1, cap * KMH_PER_MS, speedKmh, dth
+end
 local function arcLookaheadMs(profile, state, from, sNow, target, coast, skipRun, speedKmh)
     local look = state.latSafe
     if not isFinite(look) or look < 0 or not isFinite(coast) or coast <= 0 then return target end
@@ -1819,9 +1843,16 @@ local function arcLookaheadMs(profile, state, from, sNow, target, coast, skipRun
     local lookScale = profile.lookScale
     if not isFinite(lookScale) or lookScale <= 0 then lookScale = 1 end
     local n, s, segKind, SEG_ARC = profile.n, profile.s, profile.segKind, MDADDynamics.SEG_ARC
-    local SEG_FALLBACK, segH = MDADDynamics.SEG_FALLBACK, profile.segH
     local rMin = profile.rMin
     if not isFinite(rMin) or rMin < 0 then rMin = 0 end
+    local j0 = state.fvoFrom
+    if j0 ~= nil then
+        if from - j0 > ARC_LOOK_STEPS then j0 = from - ARC_LOOK_STEPS end
+        for jc = j0, from - 1 do
+            local cap, dth = noFilletVertex(profile, jc, look, rMin)
+            if cap then fvoMark(state, s[jc], cap, dth, speedKmh) end
+        end
+    end
     local rawBias = state.laneBias
     if not isFinite(rawBias) then rawBias = 0 end
     local ovN, ovS0, ovEndS = state.ovN or 0, state.ovS0, state.ovEndS
@@ -1861,35 +1892,22 @@ local function arcLookaheadMs(profile, state, from, sNow, target, coast, skipRun
             end
             while j <= n - 1 and segKind[j] == SEG_ARC and steps < ARC_LOOK_STEPS do j, steps = j + 1, steps + 1 end
         else
-            if j >= 2 and segKind[j - 1] ~= SEG_ARC then
-                local dth = wrapPi(segH[j] - segH[j - 1])
-                if dth < 0 then dth = -dth end
-                local fb = profile.filletAdaptive and dth >= MDADDynamics.FILLET_MIN_RAD
-                    and (segKind[j - 1] == SEG_FALLBACK or segKind[j] == SEG_FALLBACK)
-                if fb or dth > HAIRPIN_RAD then
-                    local cap = MIN_SPEED_MS
-                    if dth <= HAIRPIN_RAD then cap = sqrt(look * rMin) end
-                    if cap < MIN_SPEED_MS then cap = MIN_SPEED_MS end
-                    local lead = MDADFollower.lookaheadM(cap * KMH_PER_MS, lookScale)
-                    if dth < HAIRPIN_MAX_RAD then
-                        local rel, shift = kinkRelease(profile, state, j - 1, dth)
-                        if rel - shift > lead then lead = rel - shift end
-                    end
-                    local d = dist - lead
-                    if d < 0 then d = 0 end
-                    local lim = sqrt(cap * cap + 2 * coast * d)
-                    if lim < target then
-                        target = lim
-                        state.profileWhy = "look"
-                        reach = (target * target - floor2) / (2 * coast)
-                    end
-                    if isFinite(sTarget) and sTarget > s[j] and s[j] > (state.fvoS or -1) then
-                        local f = state.fvo
-                        if f == nil then f = { n = 0 }; state.fvo = f end
-                        state.fvoS = s[j]
-                        f.n, f.capKmh, f.kmh, f.th = f.n + 1, cap * KMH_PER_MS, speedKmh, dth
-                    end
+            local cap, dth = noFilletVertex(profile, j, look, rMin)
+            if cap then
+                local lead = MDADFollower.lookaheadM(cap * KMH_PER_MS, lookScale)
+                if dth < HAIRPIN_MAX_RAD then
+                    local rel, shift = kinkRelease(profile, state, j - 1, dth)
+                    if rel - shift > lead then lead = rel - shift end
                 end
+                local d = dist - lead
+                if d < 0 then d = 0 end
+                local lim = sqrt(cap * cap + 2 * coast * d)
+                if lim < target then
+                    target = lim
+                    state.profileWhy = "look"
+                    reach = (target * target - floor2) / (2 * coast)
+                end
+                if isFinite(sTarget) and sTarget > s[j] then fvoMark(state, s[j], cap, dth, speedKmh) end
             end
             j, steps = j + 1, steps + 1
         end
@@ -2024,6 +2042,10 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         bestT = projectT(x, y, px[idx], py[idx], px[idx + 1], py[idx + 1], segLen[idx])
     end
     state.needsProjection = false
+    -- 本幀投影跨過的頂點 idx+1..bestI 給 arcLookaheadMs 補記 fvo（跨臂交接在放行同一幀把頂點留在掃描起點後方）。
+    -- 只在連續跟線時給：沒有上幀投影（初次定位、resetControl 後）或全域重新定位跨過的頂點不是這次開過去的。
+    -- 寫 state 不開 local：control 已 190 locals／60 upvalues。
+    state.fvoFrom = state.projS ~= nil and not relocated and bestI > idx and idx + 1 or nil
     state.idx = bestI
 
     -- 帶號橫偏（第 7 回傳值）：車相對投影點沿 CCW 法向的距離——正＝行進方向
