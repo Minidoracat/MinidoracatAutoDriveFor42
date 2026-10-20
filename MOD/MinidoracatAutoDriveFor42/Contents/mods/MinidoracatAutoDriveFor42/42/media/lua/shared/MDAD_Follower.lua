@@ -1987,6 +1987,15 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
         bestI = floorI
         bestT = projectT(x, y, px[bestI], py[bestI], px[bestI + 1], py[bestI + 1], segLen[bestI])
     end
+    -- 往回退過折點要車頭不朝出臂（kinkHandover 前跳條件的鏡像）：車頭在出臂前半平面、又背向入臂時，退回入臂只會是
+    -- 兩臂同在窗內、取了較近的那條。Y 字岔路（兩臂夾角小、反折 >90°）承諾線往楔形內側偏，車離入臂比出臂近，
+    -- 投影一幀從出臂退回入臂、前視落到車後，err>135° 再調頭、四次後交還（1018a 正式服 153° 反折）。
+    -- 被撞回／倒車的車頭仍朝入臂（或不朝出臂），照舊逐段退；共線段兩個 cos 相等，不受影響。
+    if bestI < idx and not relocated
+            and cos(heading - profile.segH[bestI]) <= 0 and cos(heading - profile.segH[idx]) > 0 then
+        bestI = idx
+        bestT = projectT(x, y, px[idx], py[idx], px[idx + 1], py[idx + 1], segLen[idx])
+    end
     state.idx = bestI
 
     -- 帶號橫偏（第 7 回傳值）：車相對投影點沿 CCW 法向的距離——正＝行進方向

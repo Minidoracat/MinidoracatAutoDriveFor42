@@ -5514,6 +5514,56 @@ do
     checkNear(pN.v[k], pN.coastV[k], 1e-9, "一般煞車：彎前仍是收油包絡（制動包絡不先綁）")
 end
 
+scenario("1021b：Y 字岔路反折頂點（153°／149°）——車頭朝出臂時投影不退回入臂，車頭朝入臂照舊退（1018a 正式服 69mini：承諾線往楔形內側偏，退回入臂 err>135° 調頭四次交還）")
+do
+    -- 違規證明：拿掉 control 的「往回退過折點要車頭不朝出臂」，楔形內側案每個角度、每種車頭各紅 3 項（共 12 項）。
+    -- 153° 走調頭遲滯、149° 走髮夾鉗制（HAIRPIN_MAX_RAD 兩側），退回入臂後前視都落到車後。
+    local vp = { valid = true, geometryValid = true, halfW = 0.67, halfL = 1.46, rMin = 2.19, wheelbase = 1.92,
+        delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 80 }
+    local function wrap(a)
+        while a > math.pi do a = a - 2 * math.pi end
+        while a < -math.pi do a = a + 2 * math.pi end
+        return a
+    end
+    for _, deg in ipairs({ 153, 149 }) do
+        local th = math.rad(deg)
+        local ux, uy = math.cos(-th), math.sin(-th) -- 出臂方向；入臂沿 +x 進頂點 (100,0)
+        local route = { pts = { 0, 0, 100, 0, 100 + 100 * ux, 100 * uy },
+            segSurface = { "paved", "paved" }, segWidth = { 6, 8 } }
+        local p = F.begin(route, 80, 4, vp)
+        while not p.ready do F.stepBuild(p, 4096) end
+        local outI
+        for i = 2, p.n - 1 do
+            if outI == nil and math.abs(math.abs(wrap(p.segH[i] - p.segH[i - 1])) - th) < 1e-6 then outI = i end
+        end
+        checkTrue(outI ~= nil, deg .. "°：頂點保留成折點（入臂段 outI-1、出臂段 outI）")
+        if outI then
+            local tag = "（" .. deg .. "°）"
+            -- 楔形內側：出臂上頂點後 11m、往入臂那側偏 d，使離入臂比離出臂近 0.6m（正式服 lat −2.61、離入臂 2.8 的同型）
+            local a = 11
+            local d = (a * math.sin(th) + 0.6) / (1 + math.cos(math.pi - th))
+            local x, y = 100 + a * ux + d * uy, a * uy - d * ux
+            checkTrue(math.abs(y) < d - 0.5, string.format("前提%s：離入臂 %.2f < 離出臂 %.2f", tag, math.abs(y), d))
+            for _, h in ipairs({ -th, math.pi }) do
+                local htag = tag .. string.format("車頭 %.0f°", math.deg(h))
+                local st = F.newState()
+                st.idx, st.needsProjection = outI, false
+                local _, _, _, _, err = F.control(p, st, x, y, h, 10, DT)
+                checkEq(st.idx, outI, "楔形內側、車頭朝出臂：投影留在出臂" .. htag)
+                checkTrue(math.abs(err) < math.rad(100), string.format("前視在車前（|err| %.0f° < 100°）%s", math.deg(math.abs(err)), htag))
+                checkFalse(st.rotating, "不進調頭" .. htag)
+            end
+            -- 反面：被推回入臂、車頭朝入臂（含斜 60°）照舊逐段退回入臂
+            for _, h in ipairs({ 0, math.rad(60) }) do
+                local st = F.newState()
+                st.idx, st.needsProjection = outI, false
+                F.control(p, st, 95, 0.3, h, 3, DT)
+                checkEq(st.idx, outI - 1, string.format("車在入臂、車頭 %.0f°：退回入臂%s", math.deg(h), tag))
+            end
+        end
+    end
+end
+
 closeScenario()
 print()
 print("情境 " .. scenarios .. " 個、斷言 " .. assertions .. " 項")
