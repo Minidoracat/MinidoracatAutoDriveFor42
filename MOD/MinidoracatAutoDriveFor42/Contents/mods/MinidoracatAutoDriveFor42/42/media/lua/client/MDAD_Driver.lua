@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1020f"
+Drive.REV = "1020h"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -6677,6 +6677,9 @@ end
 -- 結果閂在 s.launchHoldOn，直到判堵與延後都解除（承諾、判淨空）或調頭接手才清（RETURN 活躍照閂，1013b）；同一次判堵不重判，車爬遠了也不
 -- 放回包絡。出口：承諾／淨空照常加速；一直過不去就爬到停止線（blockedStop 停等，判堵階梯照舊）。閂上那一刻記
 -- launch phase=hold（why blocked／defer、d＝離武裝點、speed）。
+-- 靜止判堵（1020a）：判堵上升緣車速 s.blockedEntryKmh ≤ LAUNCH_HOLD_KMH 也閂上、不看離武裝點多遠（倒車脫困退出 LAUNCH_HOLD_M
+-- 外再判堵、contact 停住後判堵；正式服 1019a 倒車後靜止判堵以天花板 20 從 3.8 加到 15.6 km/h 撞回同一棵樹）；起步條件不成立時
+-- 事件 why＝still。延後先閂成 false、之後才靜止判堵的，判堵那一幀重判一次。行進中判堵照舊走 blocked 接近包絡（10-12 裁定）。
 function Drive.launchHold(s, playerNum, vx, vy, speedKmh)
     local why = s.blocked and "blocked" or nil
     if why == nil and not s.dodging and not s.dodgeHandoffHold and finite(s.dodgeDeferCap) and s.dodgeDeferCap >= 0 then
@@ -6686,7 +6689,8 @@ function Drive.launchHold(s, playerNum, vx, vy, speedKmh)
         s.launchHoldOn = nil
         return false
     end
-    if s.launchHoldOn == nil then
+    local still = why == "blocked" and finite(s.blockedEntryKmh) and s.blockedEntryKmh <= TUNE.LAUNCH_HOLD_KMH
+    if s.launchHoldOn == nil or (still and not s.launchHoldOn) then
         local on, d = false, nil
         if s.startGuard and not s.startGuardRelease and finite(s.startGuardX) and finite(s.startGuardY) then
             local dx, dy = vx - s.startGuardX, vy - s.startGuardY
@@ -6694,6 +6698,7 @@ function Drive.launchHold(s, playerNum, vx, vy, speedKmh)
             local v = finite(speedKmh) and (speedKmh < 0 and -speedKmh or speedKmh) or 0
             on = d <= TUNE.LAUNCH_HOLD_M and v <= TUNE.LAUNCH_HOLD_ENTRY_KMH
         end
+        if still and not on then on, why = true, "still" end
         s.launchHoldOn = on
         if on then
             diagEvent(s, playerNum, "launch", { phase = "hold", why = why, d = d, speed = speedKmh, s = s.lastSNow })
@@ -9027,18 +9032,20 @@ local function sweepLine(s, lx, ly, ln, lS0, lS1,
             if sameLine then clrKeepS = visibleEndS(sen, s.lastSNow) - s.bodyReach else clr = nil end
         end
     end
+    -- 非撞擊早退（輸入無效、覆蓋、band）不回命中點（hx／hy＝nil，同 Drive.towFold）：寫 0,0 會被候選鏈當成 corner
+    -- 判堵錨，blockedNear 量到世界原點 13 km 外、停止線失效（正式服 1017a–1019a 長車 3 趟，1020a）。
     if not finite(ln) or ln < 2 or not finite(lS0) or not finite(lS1) then
-        return false, 99, s.lastSNow, 1, s.lastSNow, 0, 0
+        return false, 99, s.lastSNow, 1, s.lastSNow, nil, nil
     end
     local lastStart = lS0 + (ln - 2) * MDADFollower.OV_STEP
     if lS1 <= lastStart
             or lS1 > lastStart + MDADFollower.OV_STEP + 1e-6 then
-        return false, 99, s.lastSNow, 1, s.lastSNow, 0, 0
+        return false, 99, s.lastSNow, 1, s.lastSNow, nil, nil
     end
     -- 新候選逐條驗實際輸出的線尾，不能沿用主候選的預檢；既有承諾的guard不重設視界。
     if requireLoaded and not Drive.candidateCovered(s, lS1) then
         s.dodgeBuildReason = sen.unloaded and "unloaded" or "coverage"
-        return false, 99, visibleEndS(sen, s.lastSNow), 4, lS1, 0, 0
+        return false, 99, visibleEndS(sen, s.lastSNow), 4, lS1, nil, nil
     end
     local halfW, halfL, pad = sweepGeom(s, needBase)
     -- 橫向同理（1006，E2E 1006xe fencepass）：一般帶以行駛線為心掃，Corridor.plan 卻以 nav 線對稱出候選——車靠右時遠側
@@ -9047,23 +9054,23 @@ local function sweepLine(s, lx, ly, ln, lS0, lS1,
     if requireLoaded and not Drive.lineBandCovers(s, lx, ly, ln, lS0, lS1, pad, 1, 0) then
         s.dodgeBuildReason = "band"
         s.bandRejectN = (s.bandRejectN or 0) + 1
-        return false, 99, b, 3, b, 0, 0
+        return false, 99, b, 3, b, nil, nil
     end
     local hn = sen.hardN
     if hn == 0 then return true, 9 end
     local hx, hy, hr, hb = sen.hardX, sen.hardY, sen.hardR, sen.hardB
     if type(hx) ~= "table" or type(hy) ~= "table" or type(hr) ~= "table" then
-        return false, 99, s.lastSNow, 1, s.lastSNow, 0, 0
+        return false, 99, s.lastSNow, 1, s.lastSNow, nil, nil
     end
     for i = 1, hn do
         if not finite(hx[i]) or not finite(hy[i])
                 or not finite(hr[i]) or hr[i] < 0 then
-            return false, 99, s.lastSNow, 1, s.lastSNow, 0, 0
+            return false, 99, s.lastSNow, 1, s.lastSNow, nil, nil
         end
     end
     if not obbDistanceSq then obbDistanceSq = MDADCorridor.orientedDistanceSqUnchecked end
     if type(obbDistanceSq) ~= "function" then
-        return false, 99, s.lastSNow, 1, s.lastSNow, 0, 0
+        return false, 99, s.lastSNow, 1, s.lastSNow, nil, nil
     end
     local minMargin, minI = 9, nil
     local lastFx, lastFy = 1, 0
@@ -11699,8 +11706,9 @@ function Drive.towFold(s, n, s0, a, b, c, d, baseL)
 end
 
 -- Candidate sweep and commitment consume the same complete preallocated line.
+-- shape／建線／覆蓋失敗不回命中點（hx／hy＝nil，同 sweepLine 早退與 Drive.towFold）；相位與弧長照給（corner 分類照判）。
 local function sweepCandidate(s, shapeOk, a, b, c, d, offL, baseL, tag, needBase)
-    if not shapeOk then return 0, 0, false, 99, b, 3, b, 0, 0 end
+    if not shapeOk then return 0, 0, false, 99, b, 3, b, nil, nil end
     local ovN, ovS0, buildReason, lastCovered = MDADFollower.buildOffsetLine(
         s.profile, s.lastSNow, a, b, c, d, offL, baseL, s.tmpOvX, s.tmpOvY,
         nil, nil, nil, startLaneOf(s, baseL))
@@ -11717,7 +11725,7 @@ local function sweepCandidate(s, shapeOk, a, b, c, d, offL, baseL, tag, needBase
                 LOG, tostring(tag or "?"), ovN or 0, tostring(buildReason),
                 lastCovered or -1, wantEnd, a, d, s.lastSNow or -1, offL))
         end
-        return 0, ovS0, false, 99, b, 3, b, 0, 0
+        return 0, ovS0, false, 99, b, 3, b, nil, nil
     end
     s.tmpOvEndS = lastCovered
     local ok, margin, hardS, phase, sampleS, hitX, hitY, hitI = sweepLine(
@@ -12302,6 +12310,16 @@ local function resolveBlockAnchor(s, sen, vehicle, lineOnly, minS, maxS, laneL)
     return bs
 end
 Drive.debugResolveBlockAnchor = resolveBlockAnchor -- 測試鉤：錨與 Corridor.plan 的擋線基準是否同一組
+
+-- 候選鏈 corner 判堵錨（replan 的 firstHitX/Y，1020a）：只收有命中點的失敗（建線／覆蓋／band／shape／折角早退沒有點），
+-- 多個取世界距車最近的（同 resolveBlockAnchor：弧長跨候選不可比）。都沒有＝nil，blockedNear 退弧長（s.blockS＝最小 hitS）。
+function Drive.nearerHit(vehicle, x0, y0, x1, y1)
+    if not (finite(x1) and finite(y1)) then return x0, y0 end
+    if not (finite(x0) and finite(y0)) then return x1, y1 end
+    local vx, vy = vehicle:getX(), vehicle:getY()
+    if (x1 - vx) * (x1 - vx) + (y1 - vy) * (y1 - vy) < (x0 - vx) * (x0 - vx) + (y0 - vy) * (y0 - vy) then return x1, y1 end
+    return x0, y0
+end
 Drive.debugAssistForce = longitudinalAssistForce -- 測試鉤：路外前推的車速上限（0928m）
 
 -- 換縫找更寬（TUNE.DODGE_THIN_M）：重試／爬行檔剛採納的候選物理淨距 phys < 門檻時記下（只留目前最寬的那條：
@@ -13135,9 +13153,8 @@ local function replan(s, vehicle, playerNum)
                             else
                                 local f = s.fbFail
                                 pa, pb, pc, pd = f.a, f.b, f.c, f.d
-                                if f.hitS ~= nil and (firstHit == nil or f.hitS < firstHit) then
-                                    firstHit, firstHitX, firstHitY = f.hitS, f.hx, f.hy
-                                end
+                                if f.hitS ~= nil and (firstHit == nil or f.hitS < firstHit) then firstHit = f.hitS end
+                                firstHitX, firstHitY = Drive.nearerHit(vehicle, firstHitX, firstHitY, f.hx, f.hy)
                                 if classify(f.ph, f.hps) then break end
                             end
                         end
@@ -13170,9 +13187,8 @@ local function replan(s, vehicle, playerNum)
                             else
                                 local f = s.fbFail
                                 pa, pb, pc, pd = f.a, f.b, f.c, f.d
-                                if f.hitS ~= nil and (firstHit == nil or f.hitS < firstHit) then
-                                    firstHit, firstHitX, firstHitY = f.hitS, f.hx, f.hy
-                                end
+                                if f.hitS ~= nil and (firstHit == nil or f.hitS < firstHit) then firstHit = f.hitS end
+                                firstHitX, firstHitY = Drive.nearerHit(vehicle, firstHitX, firstHitY, f.hx, f.hy)
                                 if classify(f.ph, f.hps) then aborted = true; break end
                             end
                         end
