@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1019a"
+Drive.REV = "1020e"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -95,6 +95,12 @@ TUNE.YIELD_VOICE_MS = 5000
 -- 沒異常就接手的 139 趟有 39 趟（28%、21 人）在 60 秒、150 m 內以同一目標重開，中位間隔 21 秒。
 TUNE.MANUAL_HINT_MS = 60000
 TUNE.MANUAL_HINT_M = 150
+-- 2026-10-20 使用者裁定（H1）：提示縮回 10-17 裁定的依據——接手前這麼久內沒有異常（Drive.anomTick，同上傳摘要 tkoA 的
+-- 異常）且剩餘（profile.length − lastSNow，同摘要 rem）不短於這麼遠才記接手。0.31.x 15 次提示 8 次是判堵／脫困時接手、
+-- 2 次離終點 <30 m。STALL＝要走（目標 ≥10）卻 <3 km/h 持續這麼久算異常（同 MDAD_Upload STALL_MS）。
+TUNE.MANUAL_HINT_CALM_MS = 5000
+TUNE.MANUAL_HINT_REM_M = 300
+TUNE.MANUAL_HINT_STALL_MS = 3000
 TUNE.PAUSE_VOICE_TIMEOUT_MS = 10000 -- 最長交還語音 6.3s；播放狀態失效時不永久等待
 -- 調頭方式（2026-09-06 使用者裁定預設「溫和」；codex 交叉審：「被嚇到」對應**帶多少速度
 -- 開始轉**，其次才是轉多快——力矩倍率只管原地旋轉，管不到 15-25 km/h 帶速大弧）。
@@ -2017,8 +2023,15 @@ end
 local diagFail
 
 -- Driver 一律送具名 payload。blocked 事件（每次發事件一次、冷路徑）先補主命中物 sprite（Drive.blockSprite）。
+-- 接手提示的異常事件（1020e，同 MDAD_Upload U.event 的異常與片段觸發）在遙測閘之前記，關遙測的 SP 也照判。
 local function diagEvent(s, playerNum, name, payload)
-    if not s or not s.diag then return end
+    if not s then return end
+    local ph = payload and payload.phase
+    if name == "blocked" or name == "unstick" or name == "progress" or (name == "detour" and ph ~= "skip")
+            or (name == "tow" and ph == "lost") or (name == "uturn" and ph == "probe" and payload.probe == "obstructed") then
+        s.anomAt = getTimestampMs()
+    end
+    if not s.diag then return end
     if name == "blocked" then pcall(Drive.blockSprite, s, payload) end
     local ok, err = pcall(MDADDiagnostics.event, playerNum, name, payload)
     if not ok then diagFail(s, playerNum, "event " .. tostring(name) .. " failed", err) end
@@ -2220,8 +2233,8 @@ end
 -- 玩家介入即交還（「手動介入後」＝0 的預設、到站煞停途中）：先記是哪個輸入（1009，takeover manual `key`；
 -- 有自動恢復時走讓位、記 takeover yield），再照舊綠字＋manual 語音停止。
 function Drive.manualStop(s, playerNum, player, key)
-    Drive.manualHintNote(s, playerNum)
-    diagEvent(s, playerNum, "takeover", { phase = "manual", key = key })
+    local why, tkoA, rem = Drive.manualHintNote(s, playerNum)
+    diagEvent(s, playerNum, "takeover", { phase = "manual", key = key, why = why, tkoA = tkoA, rem = rem })
     -- 1017：自動掛回中玩家接手（正式服 2 次等 8–9 秒沒等到就自己倒）也是掛回的一種結局，kind＝當時的掛回階段
     if s.rehitch then Drive.rehitchNote(s, playerNum, s.vehicle, getTimestampMs(), "rh-fail", nil, "manual", nil, nil, s.rehitch.phase) end
     haloGood(player, "UI_MinidoracatAutoDrive_ManualStop")
@@ -2231,12 +2244,50 @@ end
 -- 手動介入後的提示（1017g，2026-10-17 使用者裁定；「手動介入後」預設照 09-06 裁定不改）：Drive.manualStop 記下接手的時間、
 -- 車位與目標，下一趟真的接上（commitSession 之後，兩個呼叫點）時消費掉——選項仍是預設（manualResumeMs()＝0）、
 -- 同一目標、TUNE.MANUAL_HINT_MS 內、離接手點 TUNE.MANUAL_HINT_M 內＝停一下又開，白字＋Toast 提示一次可以設成放手後
--- 自動接回，記 takeover phase=hint（dt＝接手到重開 ms、d＝離接手點 m）。一場遊戲（Lua 狀態）最多一次。
+-- 自動接回，記 takeover phase=hint（dt＝接手到重開 ms、d＝離接手點 m、tkoA／rem＝接手當下）。一場遊戲（Lua 狀態）最多一次。
+-- 2026-10-20 使用者裁定（1020e）：接手前 TUNE.MANUAL_HINT_CALM_MS 內有異常（tkoA＝距 Drive.anomTick 記的最後異常 ms，
+-- 這趟沒有異常＝nil）或剩餘（剖面 length − lastSNow；重建中讀不到＝nil）短於 TUNE.MANUAL_HINT_REM_M＝不記接手，
+-- 回 why（hint-anom／hint-rem）寫進 takeover manual。
 Drive.manualTakes = {}
 function Drive.manualHintNote(s, playerNum)
+    local now, p = getTimestampMs(), s.profile
+    local tkoA = s.anomAt and now - s.anomAt or nil
+    local rem = p and p.ready and p.length - s.lastSNow or nil
     local v = s.vehicle
-    if Drive.manualHinted or not v or s.lastTx == nil then return end
-    Drive.manualTakes[playerNum] = { t = getTimestampMs(), x = v:getX(), y = v:getY(), tx = s.lastTx, ty = s.lastTy }
+    if Drive.manualHinted or not v or s.lastTx == nil then return nil, tkoA, rem end
+    local why = (tkoA and tkoA < TUNE.MANUAL_HINT_CALM_MS) and "hint-anom"
+        or (not (rem and rem >= TUNE.MANUAL_HINT_REM_M) and "hint-rem") or nil
+    Drive.manualTakes[playerNum] = not why
+        and { t = now, x = v:getX(), y = v:getY(), tx = s.lastTx, ty = s.lastTy, tkoA = tkoA, rem = rem } or nil
+    return why, tkoA, rem
+end
+
+-- 接手提示的異常計時（1020e）：每幀（onPlayerUpdate，讓位中不跑）把上傳摘要 tkoA 的異常（MDAD_Upload U.sample／U.event：
+-- 判堵、脫困、掛回、停滯、接觸、撞擊；事件那半在 diagEvent、急煞在 commandForceBrake）記到 s.anomAt。上傳只在 MP 跑，
+-- Driver 自己記＝SP 與 MP、關遙測都同一套判準。比上傳略寬（寧可少提示）：recoverWhy 也算、接觸看持續而非上升緣、
+-- 撞擊不排除伺服器拉回與凍結樣本。
+function Drive.anomTick(s, vehicle, now)
+    local m = s.mode
+    if m == "yield" then return end
+    local v = vehicle:getCurrentSpeedKmHour()
+    if type(v) ~= "number" or v * 0 ~= 0 then return end -- finite（local 在本檔後段才定義）
+    if v < 0 then v = -v end
+    if s.blocked or s.currentBlocked or s.footprintBlocked or s.recoverWhy ~= nil or m == "unstick" or m == "rehitch" then
+        s.anomAt = now
+    end
+    if m == "follow" and s.targetPrev >= 10 and v < 3 then
+        s.anomStall = s.anomStall or now
+        if now - s.anomStall >= TUNE.MANUAL_HINT_STALL_MS then s.anomAt = now end
+    else
+        s.anomStall = nil
+    end
+    -- 撞擊：同上傳的單筆門檻（MDADUpload.impactLike），以 10Hz 取樣的間隔比相鄰兩點車速
+    local t0 = s.anomVT
+    if t0 == nil or now - t0 >= 100 then
+        local U = MDADUpload
+        if t0 and U and U.impactLike(s.anomV, v, now - t0, now < s.forceBrakeUntil, nil) then s.anomAt = now end
+        s.anomV, s.anomVT = v, now
+    end
 end
 
 function Drive.manualHint(playerObj, playerNum)
@@ -2251,9 +2302,10 @@ function Drive.manualHint(playerObj, playerNum)
     local hint = getText("UI_MinidoracatAutoDrive_ManualResumeHint")
     if playerObj then HaloTextHelper.addText(playerObj, hint) end -- 白字＝資訊（同 Drive.stop 的遙測提示）
     if MDADDiagnostics and MDADDiagnostics.toast then MDADDiagnostics.toast(hint, "info") end
-    diagEvent(s, playerNum, "takeover", { phase = "hint", dt = dt, d = d })
-    if getDebug() then -- telemetry: takeover phase=hint（dt／d）
-        print(LOG .. "pn=" .. playerNum .. " takeover hint dt=" .. dt .. " d=" .. d)
+    diagEvent(s, playerNum, "takeover", { phase = "hint", dt = dt, d = d, tkoA = m.tkoA, rem = m.rem })
+    if getDebug() then -- telemetry: takeover phase=hint（dt／d／tkoA／rem）
+        print(LOG .. "pn=" .. playerNum .. " takeover hint dt=" .. dt .. " d=" .. d .. " tkoA=" .. tostring(m.tkoA)
+            .. " rem=" .. m.rem)
     end
 end
 
@@ -3662,7 +3714,16 @@ local function commandForceBrake(s, vehicle, now, why)
     s.forceBrakeThis = true
     s.forceBrakeWhy = why or "?" -- telemetry fbw（閂鎖期間持續可見）；呼叫端明確給，不猜上一個 cap
     if type(now) ~= "number" or now * 0 ~= 0 then now = getTimestampMs() end
-    if s.forceBrakeUntil <= now then s.diagBoostUntil = now + TUNE.DIAG_BOOST_MS end -- 閂鎖上升緣：之後 2 秒取樣 10Hz
+    if s.forceBrakeUntil <= now then -- 閂鎖上升緣
+        s.diagBoostUntil = now + TUNE.DIAG_BOOST_MS -- 之後 2 秒取樣 10Hz
+        -- 接手提示的異常（1020e）：同上傳 brake 片段觸發——到站、脫困、接觸、掛回與近乎靜止的煞車不算
+        -- （車速取 Drive.anomTick 最近一點，≤100 ms 舊）
+        local w = s.forceBrakeWhy
+        if w ~= "arrive" and w ~= "contact" and w ~= "rehitch" and string.sub(w, 1, 7) ~= "unstick"
+                and (s.anomV or 0) >= 3 then
+            s.anomAt = now
+        end
+    end
     local untilMs = now + 1000
     if untilMs > s.forceBrakeUntil then s.forceBrakeUntil = untilMs end
     return true
@@ -16437,6 +16498,7 @@ local function onPlayerUpdate(player)
 
     local now = getTimestampMs()
     Drive.etaTick(s, now) -- 預計剩餘時間：每幀計時；換路線／重建後重算計畫表（arrive 收尾也照走）
+    Drive.anomTick(s, vehicle, now) -- 接手提示的異常計時（1020e；讀上一幀的控制狀態，排在接手判定之前）
     if s.brakeTerminalFault then
         Drive.stop(playerNum, KEY_UNSUPPORTED)
         return

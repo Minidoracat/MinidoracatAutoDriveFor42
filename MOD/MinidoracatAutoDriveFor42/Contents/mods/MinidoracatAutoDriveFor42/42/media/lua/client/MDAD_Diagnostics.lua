@@ -158,6 +158,9 @@ local EK = {
     "hold", "vn", "mv",
     -- takeover yield／manual（1009）：玩家用了哪個輸入（steer／steer-key／brake／forward／backward，Driver manualInput）
     "key",
+    -- takeover manual／hint（1020e，Drive.manualHintNote）：接手當下距最後異常 ms（這趟沒異常＝缺）、剩餘 m（剖面重建中＝缺）；
+    -- manual 的 why＝提示條件擋下接手紀錄（hint-anom／hint-rem）
+    "tkoA", "rem",
     -- 2026-10-10 遙測補強：
     -- blocked plan／wide 的候選鏈摘要：本次 replan 掃掠失敗在 p1..p4 段的次數、本次 replan 第一個掃掠失敗（主候選）的
     -- tag／段／命中點；steep＝blockSteepM（倒車補跑道的差額 m）；exit-room 判堵的出口可用長度與折點弧長
