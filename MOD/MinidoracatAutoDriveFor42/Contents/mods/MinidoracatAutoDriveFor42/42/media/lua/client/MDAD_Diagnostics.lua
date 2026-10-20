@@ -151,6 +151,8 @@ local EK = {
     "towArcN",
     -- lag release（1008）：車頭弧長 rs+halfL、車尾弧長（拖車含掛車）、命中點的預測車身 lane（hitS／rate 共用上面的鍵）
     "nose", "tail", "body",
+    -- lag release／keep（1020c）：車頭到命中點之間剖面最大曲率 κ（1/m，Driver Drive.arcAhead；圓角 1/R、fallback 頂點 1/rMin）
+    "arcAhead",
     -- 1008：takeover resume（讓位恢復後第一個跟線幀的橫偏、Follower 投影段號）；route far（why gate／watch／yield）當下的 s.mode
     "lat", "fi", "mode",
     -- zombie plan（1008）：車身橫向（lat，同上）、最近威脅 l、車身／舊 laneBias 速率可及量、近威脅限側基準、新可行性模型拒縫（reach／side）
