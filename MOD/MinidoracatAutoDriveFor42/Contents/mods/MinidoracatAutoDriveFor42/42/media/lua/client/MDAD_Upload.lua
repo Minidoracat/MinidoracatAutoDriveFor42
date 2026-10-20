@@ -89,11 +89,12 @@ local IMPACT_HALF_L = 2.5 -- profile 沒有 halfL 時的半車長：取偏大（
 --   tow-slack（1021）＝拖車連結拉緊：同一個取樣間隔裡掛車 |km/h| 增加 ≥IMPACT_MIN_KMH（tkm 本筆 − 前一筆）、牽引車同時掉速——
 --     動量由牽引車傳給掛車，不是撞到東西（E2E 1020 trailerfront 拖 SmallCar 起步 0.8 s：牽引車 16.6→9.3、掛車 0→11.0、
 --     thd 1.19→1.51；正式服 1017a–1018a 5 件都在起步 0.6–0.9 s、掛車 0→9.4–11.6；拖車真撞時掛車同降或不變）。
---   small-animal（1021）＝撞小型動物：nb 最近的動物貼車（|縱向| ≤ halfL＋IMPACT_TOUCH_PAD、|橫向| ≤ halfW＋pad）且體重
---     <SMALL_ANIMAL_KG（同 MDADSensor.ANIMAL_BIG_KG；2026-10-13 裁定小型動物不閃不減、撞擊從碰撞 KPI 拆開），同時沒有殭屍／
---     玩家貼車、他車車心不在 halfL＋IMPACT_HALF_L＋pad 內（Diagnostics nearbyJson 判，有一項不成立就不給體重），且車頭 3 格
---     最近的擋車 sprite 不在 halfW＋pad 內（動物＋硬物＝hit）。讀不到體重＝hit（正式服 1012h–1019a 192 件真撞擊有 30 件）。
---   兩類都要本筆沒有 footprint 命中。
+--   small-animal（1021）＝撞小型動物：貼車（|縱向| ≤ halfL＋IMPACT_TOUCH_PAD、|橫向| ≤ halfW＋pad）的動物最重的一隻也
+--     <SMALL_ANIMAL_KG（同 MDADSensor.ANIMAL_BIG_KG；2026-10-13 裁定小型動物不閃不減、撞擊從碰撞 KPI 拆開）。讀不到體重＝hit
+--     （正式服 1012h–1019a 192 件真撞擊有 30 件）。
+--   兩類共用的碰撞反證（1021h，有一項就照算 hit）：本筆 footprint 命中；任一殭屍／玩家貼車、他車車心在 halfL＋IMPACT_HALF_L＋pad
+--     內（Diagnostics nearbyJson 掃描時逐隻判，busy）；車頭 3 格最近的擋車 sprite 在 halfW＋pad 內（hardD）。判不了（busy 或 halfW
+--     缺）也照算 hit。tow-slack 另要沒有動物貼車（有貼車動物時改看 small-animal）。
 local TOW_SYNC_MS = 450
 local TOW_SYNC_TUP = 0.002
 local REHITCH_SETTLE_MS = 2500
@@ -189,9 +190,10 @@ end
 -- 撞擊上升緣的分類（見 TOW_SYNC_MS 上方註解）：spd＝本筆車速（km/h）、phys＝本筆 phys、footprint＝本筆 footprint 命中、
 -- near＝nb 掃描結果（true 有近物、false 掃了沒有、nil 沒掃成）、tupDrop＝往前 TOW_SYNC_MS 內 tup 的最大降幅（不拖車 nil）、
 -- mode＝本筆 s.mode、rhMs＝距最近一次 tow rh-attach 的 ms（沒有＝nil）、tkmGain＝掛車 |km/h| 本筆減前一筆（不拖車 nil）、
--- animalKg＝貼車且沒有別的東西貼車時最近動物的體重（否則 nil）、hardD＝車頭 3 格最近擋車 sprite 的距離 m、halfW＝本車半寬。
+-- animalKg＝貼車動物最重的體重（nearbyJson akg；沒有貼車＝nil）、busy＝殭屍／玩家／他車貼車（nearbyJson busy；判不了＝nil）、
+-- hardD＝車頭 3 格最近擋車 sprite 的距離 m、halfW＝本車半寬。
 -- 回 "frozen"／"rehitch"／"tow-sync"／"tow-slack"／"small-animal"／"hit"；任何輸入缺席都落回 hit（寧可多記撞擊）。
-function U.impactClass(spd, phys, footprint, near, tupDrop, mode, rhMs, tkmGain, animalKg, hardD, halfW)
+function U.impactClass(spd, phys, footprint, near, tupDrop, mode, rhMs, tkmGain, animalKg, busy, hardD, halfW)
     if mode == "rehitch" or (finite(rhMs) and rhMs >= 0 and rhMs <= REHITCH_SETTLE_MS) then return "rehitch" end
     if type(phys) ~= "table" then return "hit" end
     if spd == 0 and phys.vLong == 0 and phys.vLat == 0 then return "frozen" end
@@ -200,10 +202,14 @@ function U.impactClass(spd, phys, footprint, near, tupDrop, mode, rhMs, tkmGain,
             and finite(tupDrop) and tupDrop >= TOW_SYNC_TUP then
         return "tow-sync"
     end
-    if footprint == true then return "hit" end
-    if finite(tkmGain) and tkmGain >= IMPACT_MIN_KMH then return "tow-slack" end
-    if finite(animalKg) and animalKg < U.SMALL_ANIMAL_KG
-            and not (finite(hardD) and finite(halfW) and hardD <= halfW + U.IMPACT_TOUCH_PAD) then
+    -- 1021h 兩類共用的碰撞反證
+    if footprint == true or busy ~= false or not finite(halfW)
+            or (finite(hardD) and hardD <= halfW + U.IMPACT_TOUCH_PAD) then
+        return "hit"
+    end
+    if animalKg == nil then
+        if finite(tkmGain) and tkmGain >= IMPACT_MIN_KMH then return "tow-slack" end
+    elseif finite(animalKg) and animalKg < U.SMALL_ANIMAL_KG then
         return "small-animal"
     end
     return "hit"

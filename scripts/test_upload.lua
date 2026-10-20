@@ -1082,6 +1082,9 @@ do
     checkEq(n(sum, "clips"), 0, "(sa) no impact clip")
     check(string.find(ev, '"cls":"small-animal"', 1, true) ~= nil, "(sa) the impact event carries cls small-animal (" .. ev .. ")")
     check(#sum < U.CHUNK, "(sa) summary still fits one chunk (" .. #sum .. ")")
+    check(string.find(ev, '"icv":1', 1, true) ~= nil and string.find(ev, '"akg":3.6', 1, true) ~= nil
+        and string.find(ev, '"bz":false', 1, true) ~= nil,
+        "(sa-keys) the event carries the classifier inputs icv 1, akg 3.6, bz false (" .. ev .. ")")
     imp, sum, ev = one("(sa-hard)", function() placed = { animal(1.0, 0.3, 3.6) }; hard = 1.0 end)
     checkEq(imp, 1, "(sa-hard) animal plus a hard sprite 1 m from the nose is an impact")
     checkEq(n(sum, "sma"), 0, "(sa-hard) not small-animal")
@@ -1093,6 +1096,17 @@ do
         placed = { animal(1.0, 0.3, 3.6), { cls = "IsoZombie", getX = function() return x + 1.5 end, getY = function() return 199.5 end } }
     end)
     checkEq(imp, 1, "(sa-z) animal plus a touching zombie is an impact")
+    -- 1021h：最近那隻殭屍在車側 1.8 m（|橫向| 超出 halfW＋0.8＝1.7、沒貼車），較遠那隻在車頭 2.3 m 貼車——要看任一隻，不是最近那隻
+    imp = one("(sa-z2) nearest zombie off to the side, farther one at the nose", function()
+        placed = { animal(1.0, 0.3, 3.6),
+            { cls = "IsoZombie", getX = function() return x end, getY = function() return 198.2 end },
+            { cls = "IsoZombie", getX = function() return x + 2.3 end, getY = function() return 200 end } }
+    end)
+    checkEq(imp, 1, "(sa-z2) a touching zombie that is not the nearest one still makes it an impact")
+    imp = one("(sa-big2) small animal nearest, a 60 kg one also touching", function()
+        placed = { animal(1.0, 0.3, 3.6), animal(2.5, 0.2, 60) }
+    end)
+    checkEq(imp, 1, "(sa-big2) a second touching animal of 60 kg makes it an impact")
     imp = one("(sa-fb)", function() placed = { animal(1.0, 0.3, 3.6) } end, function() bump(true) end)
     checkEq(imp, 1, "(sa-fb) animal plus a footprint hit is an impact")
     imp = one("(sa-big)", function() placed = { animal(1.0, 0.3, 60) } end)
@@ -1120,6 +1134,17 @@ do
     checkEq(n(sum, "tsl"), 1, "(tsl) counted once as tow-slack")
     checkEq(n(sum, "clips"), 0, "(tsl) no impact clip")
     check(string.find(ev, '"cls":"tow-slack"', 1, true) ~= nil, "(tsl) the impact event carries cls tow-slack (" .. ev .. ")")
+    check(string.find(ev, '"tkg":13', 1, true) ~= nil, "(tsl-keys) the event carries the trailer gain tkg 13 (" .. ev .. ")")
+    -- 1021h：掛車增速也要沒有別的碰撞反證（同 small-animal 的硬物、殭屍／玩家／他車、貼車動物）
+    imp, sum = one("(tsl-hard)", function() hard = 1.0 end, function() pull() end)
+    checkEq(imp, 1, "(tsl-hard) trailer gain plus a hard sprite 1 m from the nose is an impact")
+    checkEq(n(sum, "tsl"), 0, "(tsl-hard) not tow-slack")
+    imp = one("(tsl-z)", function()
+        placed = { { cls = "IsoZombie", getX = function() return x + 2 end, getY = function() return 200 end } }
+    end, function() pull() end)
+    checkEq(imp, 1, "(tsl-z) trailer gain plus a touching zombie is an impact")
+    imp = one("(tsl-a)", function() placed = { animal(1.5, 0.2, 60) } end, function() pull() end)
+    checkEq(imp, 1, "(tsl-a) trailer gain plus a touching 60 kg animal is an impact")
     imp, sum = one("(tsl-fb)", function() end, function() pull(true) end)
     checkEq(imp, 1, "(tsl-fb) the same jerk with a footprint hit is an impact")
     checkEq(n(sum, "tsl"), 0, "(tsl-fb) not tow-slack")
