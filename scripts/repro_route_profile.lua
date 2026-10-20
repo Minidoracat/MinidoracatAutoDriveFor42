@@ -128,7 +128,9 @@ local function routeFromNav(sx, sy, tx, ty)
     local weight = tonumber(os.getenv("MDAD_APPROACH_WEIGHT")) or 12
     -- MDAD_AVOID="ax,ay,r"：同 requestDetour 的避讓圈（拖車繞開調頭／堵車改道離線重現）
     local ax, ay, ar = (os.getenv("MDAD_AVOID") or ""):match("([%d%.%-]+),([%d%.%-]+),([%d%.]+)")
-    local route, err = NavCore.findRoute(b.graph, sx, sy, tx, ty, tonumber(ax), tonumber(ay), tonumber(ar), weight)
+    -- MDAD_MAX_SNAP＝requestDetour 第 8 參（nav API v10；本 MOD 傳 TUNE.SNAP_MAX_M）：起點候選投影距離上限
+    local route, err = NavCore.findRoute(b.graph, sx, sy, tx, ty, tonumber(ax), tonumber(ay), tonumber(ar), weight,
+        nil, tonumber(os.getenv("MDAD_MAX_SNAP")))
     assert(route, "route NIL: " .. tostring(err))
     if ax then print("avoid (" .. ax .. "," .. ay .. ") r=" .. ar .. " avoidPenalty=" .. tostring(route.avoidPenalty)) end
     return route, VOLVO
