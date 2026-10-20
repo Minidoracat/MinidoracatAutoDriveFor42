@@ -165,6 +165,7 @@ Plus a screwdriver.
 [*] [b]Default[/b]: steering, throttle or brake stops autodrive; the trip is kept.
 [*] [b]Auto-resume[/b]: "After manual input" can resume 2 / 3 / 5 / 10 s after letting go, with a HUD countdown.
 [*] [b]Tip[/b]: on the default, if you restart to the same destination right after taking over, a one-time tip suggests auto-resume (at most once per game session).
+[*] [b]No tip when[/b]: you took over right after the car was blocked, backed out of a jam or braked hard, or it was nearly at the destination.
 [*] [b]Far off the route[/b]: if you have driven far off the route by then, autodrive simply ends (like a manual stop) and keeps the navigation target.
 [/list]
 [h3]U-turn style[/h3]
