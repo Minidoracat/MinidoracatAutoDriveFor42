@@ -1017,6 +1017,103 @@ nowMs = nowMs + 100
 panel:update()
 check(panel.visible, "dashboard UIManager restore immediately recovers HUD")
 
+-- 選配 MOD 換掉原版儀表（MinidoracatTeslaAPI.hudRect，契約見 hud-voice.md）：可見＝當成儀表，頂邊不透明（inset 0）；
+-- 矩形數字變了（提醒膠囊長高）下一個 UI tick 重排、沒變不重排；API 不在／丟錯／visible=false＝原版儀表規則。
+do
+    local theme = optionSets.MinidoracatAutoDrive:getOption("HUDTheme")
+    local dash = dashboards[0]
+    local ts = { x = 684, y = 968, w = 552, h = 112, visible = true }
+    MinidoracatTeslaAPI = { hudRect = function()
+        if ts.err then error("tesla boom") end
+        return ts.x, ts.y, ts.w, ts.h, ts.visible
+    end }
+    local layouts = 0
+    panel.applyLayout = function(self)
+        layouts = layouts + 1
+        return MDAD.HUD.Panel.applyLayout(self)
+    end
+    local function tick() nowMs = nowMs + 100; panel:update() end
+    local function setTheme(s) theme:setValue(s); panel:applyLayout(); panel:refresh(nowMs) end
+    local function docked(label)
+        if panel._style == 4 then
+            check(panel.visible and panel.y == ts.y and panel.height == ts.h
+                and panel.x + panel._wingLeftW == ts.x and panel._wingDashW == ts.w
+                and panel._wingRightX == panel._wingLeftW + ts.w, label)
+        else
+            check(panel.visible and panel.y + panel.height == ts.y
+                and panel.x == math.floor((1920 - panel.width) / 2), label)
+        end
+    end
+    -- 進來時是側掛：先驗 update 自己就換回原版幾何（不靠 setTheme 的 applyLayout），再逐主題驗。
+    local function vanillaWings(label)
+        check(panel.visible and panel._style == 4 and panel.y == dash.y + 7 and panel.height == dash.height - 7
+            and panel.x + panel._wingLeftW == dash.x and panel._wingDashW == dash.width, label .. " (wings)")
+    end
+    local function vanilla(label)
+        vanillaWings(label .. " on the next UI tick")
+        setTheme(1)
+        check(panel.visible and panel.y + panel.height == dash.y + 7, label .. " (metal)")
+        setTheme(4)
+        vanillaWings(label)
+    end
+    dash.visible = false -- 對方 MOD 把原版儀表 setVisible(false)
+    tick()
+    docked("(tesla) metal: a visible Tesla dashboard shows the HUD with its bottom on the Tesla top edge (no 7px inset)")
+    for s = 2, 4 do
+        setTheme(s)
+        check(panel._style == s, "(tesla) theme " .. s .. " fits beside/above the Tesla dashboard")
+        docked("(tesla) theme " .. s .. ": HUD hugs the Tesla dashboard")
+    end
+    layouts = 0
+    tick(); tick()
+    checkEq(layouts, 0, "(tesla) an unchanged Tesla rect never re-lays out the HUD")
+    ts.y, ts.h = 930, 150
+    tick()
+    checkEq(layouts, 1, "(tesla) a taller Tesla dashboard re-lays out once on the next UI tick")
+    docked("(tesla) wings: the HUD follows the Tesla dashboard when an alert pill makes it taller")
+    panel:prerender()
+    check(panel.visible and layouts == 1, "(tesla) prerender keeps the HUD on a visible Tesla dashboard without re-layout")
+    setTheme(1)
+    docked("(tesla) metal: the stacked HUD sits on the taller Tesla dashboard")
+    setTheme(4)
+    local mm = { x = ts.x + ts.w + 10, y = ts.y + 3 - 300, w = 300, h = 300 }
+    function mm:isReallyVisible() return true end
+    function mm:getAbsoluteX() return self.x end
+    function mm:getAbsoluteY() return self.y end
+    function mm:getWidth() return self.w end
+    function mm:getHeight() return self.h end
+    TestMiniMaps[0] = mm
+    panel:refresh(nowMs)
+    check(panel._wingRBlocked == true and panel._wingRFolded == true,
+        "(tesla) wings: a minimap reaching the Tesla dashboard's top row folds the right wing (no 7px inset)")
+    TestMiniMaps[0] = nil
+    panel:refresh(nowMs)
+    check(panel._wingRBlocked == false and panel._wingRFolded == false, "(tesla) wings: removing the minimap unfolds it again")
+
+    ts.visible = false
+    tick()
+    check(not panel.visible, "(tesla) visible=false with the vanilla dashboard hidden hides the HUD like before")
+    dash.visible = true
+    tick()
+    vanilla("(tesla) visible=false falls back to the vanilla dashboard with the 7px inset")
+    ts.visible, dash.visible = true, false
+    tick()
+    docked("(tesla) wings: the HUD returns to the Tesla dashboard when it shows again")
+    ts.err = true
+    tick()
+    check(not panel.visible, "(tesla) a throwing hudRect is ignored: vanilla rules apply (dashboard hidden, HUD hidden)")
+    dash.visible = true
+    tick()
+    vanilla("(tesla) a throwing hudRect falls back to the vanilla dashboard")
+    MinidoracatTeslaAPI = nil
+    tick()
+    vanilla("(tesla) without the API the HUD docks to the vanilla dashboard as before")
+    panel.applyLayout = nil
+    theme:setValue(1)
+    panel:applyLayout()
+    tick()
+end
+
 check(panel._capLabelY < panel._capValueY and panel._capValueX == panel._capX
     and panel._timeLabelY == panel._capLabelY and panel._timeValueY == panel._capValueY
     and panel._timeValueX == panel._timeX and panel._timeX > panel._capX

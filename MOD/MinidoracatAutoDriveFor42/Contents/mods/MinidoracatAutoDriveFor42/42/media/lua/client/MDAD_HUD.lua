@@ -6,7 +6,7 @@
 --
 -- 效能契約：UIElement.update 約 10Hz（UIElement.java:1661-1687），本檔再以
 -- getTimestampMs 做 250ms 閘門；車輛 getter、getText、文字量測只在 refresh/layout。
--- prerender 每幀只讀 ESC root 與 dashboard identity/可見性，其餘只畫快取，不配置 table/closure。
+-- prerender 每幀只讀 ESC root 與 dashboard identity/可見性（含 HUD.teslaRect），其餘只畫快取，不配置 table/closure。
 --
 -- 原版／框架出處：
 --   ISPanel/ISButton 建構：ISPanel.lua:96-115、ISButton.lua:479-533
@@ -807,6 +807,20 @@ local function dashboardVisible(dashboard)
         and (not dashboard.isReallyVisible or dashboard:isReallyVisible()) or false
 end
 
+-- 選配的車輛儀表 MOD（無 require=）會把原版儀表 setVisible(false)、改畫自己的儀表，並提供
+-- MinidoracatTeslaAPI.hudRect(pn) → x, y, w, h, visible（絕對螢幕像素、左上原點；頂邊沒有透明列）。
+-- 顯示中回矩形，否則 nil：API 不在、丟錯、回 visible ~= true 一律退回原版儀表。只讀快取欄位，可每幀呼叫。
+function HUD.teslaRect(playerNum)
+    local api = MinidoracatTeslaAPI
+    if type(api) ~= "table" or type(api.hudRect) ~= "function" then return nil end
+    local ok, x, y, w, h, visible = pcall(api.hudRect, playerNum)
+    if not ok or visible ~= true or type(x) ~= "number" or type(y) ~= "number"
+            or type(w) ~= "number" or type(h) ~= "number" or w <= 0 or h <= 0 then
+        return nil
+    end
+    return x, y, w, h
+end
+
 local function effectivePolicy(name, playerNum, kind)
     local policy = MDAD.policy3(name, MDAD.POLICY_PLAYER)
     if policy == MDAD.POLICY_FORCE_ON then return true, policy end
@@ -1428,8 +1442,8 @@ function MDADHUDPanel:layoutWings(scale, m)
     local timeW, clockW = maximum(m.timeLabelW, m.clockW), m.clockW
     local etaW = maximum(m.etaLabelW, m.etaValueW)
 
-    local dashW, dashH, dashX, dashY = self:dashboardGeometry()
-    local wingH = maximum(scaled(56, scale), dashH - DASH_VISIBLE_TOP_INSET)
+    local dashW, dashH, dashX, dashY, dashInset = self:dashboardGeometry()
+    local wingH = maximum(scaled(56, scale), dashH - dashInset)
     local maxW = m.maxW
 
     -- 展開／收合各自的寬度；空間不夠時先摺右翼再摺左翼（版面層強制，不動玩家的 modData）
@@ -1463,7 +1477,8 @@ function MDADHUDPanel:layoutWings(scale, m)
     -- chevron 改說明原因、點了不切換。只有原本會展開的右翼才算被擋：玩家自己收起或寬度不夠而摺起時，
     -- 移開小地圖也不會展開，說明會騙人。量測照樣每次做（miniMapOverWingR 順便記下矩形給 syncMiniMapAvoid）。
     -- 左翼不避：左翼收起就沒有主鈕可按。
-    self._wingRBlocked = self:miniMapOverWingR(dashX, dashY, dashW, dashH, rightOpenW + gap, wingH) and not foldR
+    self._wingRBlocked = self:miniMapOverWingR(dashX, dashY, dashW, dashH, rightOpenW + gap, wingH, dashInset)
+        and not foldR
     if self._wingRBlocked then foldR = true end
     self._wingLFolded, self._wingRFolded = foldL, foldR
     local leftW = foldL and leftFoldW or leftOpenW
@@ -1605,8 +1620,10 @@ function MDADHUDPanel:layoutWings(scale, m)
     self:reposition()
 end
 
--- 儀表板幾何（寬／高／螢幕 x／螢幕 y）；缺席時退 552×120、x／y nil（呼叫端自算置中）。
+-- 儀表板幾何（寬／高／螢幕 x／螢幕 y／頂端透明列數）。貼著 Tesla 儀表時（_tsX，由 syncDashboardBeforeRefresh
+-- 同步）用它的矩形、頂端 0 列透明；原版缺席時退 552×120、x／y nil（呼叫端自算置中）。
 function MDADHUDPanel:dashboardGeometry()
+    if self._tsX then return self._tsW, self._tsH, self._tsX, self._tsY, 0 end
     local dashboard = getPlayerVehicleDashboard(self.playerNum)
     local w, h, x, y = 552, 120, nil, nil
     if dashboard then
@@ -1618,7 +1635,7 @@ function MDADHUDPanel:dashboardGeometry()
         if dashboard.getX then x = dashboard:getX() end
         if dashboard.getY then y = dashboard:getY() end
     end
-    return w, h, x, y
+    return w, h, x, y, DASH_VISIBLE_TOP_INSET
 end
 
 -- 本玩家的小地圖看得到時回絕對矩形（x, y, w, h），否則 nil（同 MiniMap 的 toastAvoidRect）。
@@ -1628,9 +1645,9 @@ function MDADHUDPanel:miniMapRect()
     return mm:getAbsoluteX(), mm:getAbsoluteY(), mm:getWidth(), mm:getHeight()
 end
 
--- 側翼列（y＝可見儀表板頂緣、高 wingH，算法同 reposition）上，小地圖是否壓到展開右翼的
+-- 側翼列（y＝可見儀表板頂緣＝dashY＋inset、高 wingH，算法同 reposition）上，小地圖是否壓到展開右翼的
 -- 範圍 [dashX＋dashW, dashX＋dashW＋openW]。順便記下這次量到的矩形，給 syncMiniMapAvoid 比對。
-function MDADHUDPanel:miniMapOverWingR(dashX, dashY, dashW, dashH, openW, wingH)
+function MDADHUDPanel:miniMapOverWingR(dashX, dashY, dashW, dashH, openW, wingH, inset)
     local mx, my, mw, mh = self:miniMapRect()
     self._mmX, self._mmY, self._mmW, self._mmH = mx, my, mw, mh
     if mx == nil then return false end
@@ -1639,8 +1656,8 @@ function MDADHUDPanel:miniMapOverWingR(dashX, dashY, dashW, dashH, openW, wingH)
     if dashX == nil then
         dashX = getPlayerScreenLeft(pn) + math.floor((getPlayerScreenWidth(pn) - dashW) / 2)
     end
-    local wy = dashY and (dashY + DASH_VISIBLE_TOP_INSET)
-        or (top + height - dashH + DASH_VISIBLE_TOP_INSET)
+    local wy = dashY and (dashY + inset)
+        or (top + height - dashH + inset)
     if wy + wingH > top + height then wy = top + height - wingH end
     local x0 = dashX + dashW
     return my < wy + wingH and wy < my + mh and mx < x0 + openW and x0 < mx + mw
@@ -2593,7 +2610,19 @@ end
 
 -- dashboard 的 UIManager membership／identity 不屬於 250ms 車況資料；
 -- 每個 UI tick（約 100ms）先收斂，手把 inventory 或 split-screen 重建不殘影。
+-- Tesla 儀表顯示中（原版此時隱藏）就貼它：矩形數字有變（上下車、提醒膠囊長高、解析度）才重排；
+-- _tsX 兼作「目前貼 Tesla」的旗標，離開時連 identity 一起清，回到原版儀表一定重排。
 function MDADHUDPanel:syncDashboardBeforeRefresh()
+    local tx, ty, tw, th = HUD.teslaRect(self.playerNum)
+    if tx then
+        if tx ~= self._tsX or ty ~= self._tsY or tw ~= self._tsW or th ~= self._tsH then
+            self._tsX, self._tsY, self._tsW, self._tsH = tx, ty, tw, th
+            self:applyLayout()
+            self._forceRefresh = true
+        end
+        return true
+    end
+    if self._tsX then self._tsX, self._dashboard = nil, nil end
     local dashboard = getPlayerVehicleDashboard(self.playerNum)
     if not dashboardVisible(dashboard) then
         self:setHudVisible(false)
@@ -2609,6 +2638,7 @@ function MDADHUDPanel:syncDashboardBeforeRefresh()
 end
 
 function MDADHUDPanel:dashboardAttachedAndVisible()
+    if self._tsX then return HUD.teslaRect(self.playerNum) ~= nil end
     local dashboard = getPlayerVehicleDashboard(self.playerNum)
     return dashboardVisible(dashboard) and self._dashboard == dashboard
 end
@@ -2620,24 +2650,24 @@ function MDADHUDPanel:reposition()
     local width = getPlayerScreenWidth(playerNum)
     local height = getPlayerScreenHeight(playerNum)
     self._dashboard = getPlayerVehicleDashboard(playerNum)
-    local _, dashboardH, _, dashboardY = self:dashboardGeometry()
+    local _, dashboardH, _, dashboardY, inset = self:dashboardGeometry()
     -- 側掛：左翼右緣貼儀表板左緣、右翼左緣貼右緣，高度與可見儀表板同高。
     if self._style == STYLE_WINGS then
         local dashX = self._wingDashX
         if dashX == nil then dashX = left + math.floor((width - (self._wingDashW or 552)) / 2) end
         local wx = dashX - (self._wingLeftW or 0)
         if wx < left then wx = left end
-        local wy = dashboardY and (dashboardY + DASH_VISIBLE_TOP_INSET)
-            or (top + height - dashboardH + DASH_VISIBLE_TOP_INSET)
+        local wy = dashboardY and (dashboardY + inset)
+            or (top + height - dashboardH + inset)
         if wy + self.height > top + height then wy = top + height - self.height end
         self:setX(wx)
         self:setY(wy)
         return
     end
     local x = left + math.floor((width - self.width) / 2)
-    -- element row 0-6 是透明斜角；HUD 向下 overlap 7px，底邊正好碰到第一列
-    -- 可見 dashboard 像素，而不是只貼到看不見的 element 邊界。
-    local y = dashboardY and (dashboardY - self.height + DASH_VISIBLE_TOP_INSET)
+    -- 原版 element row 0-6 是透明斜角（inset＝7）；HUD 向下 overlap inset，底邊正好碰到第一列
+    -- 可見 dashboard 像素，而不是只貼到看不見的 element 邊界。Tesla 儀表頂邊不透明，inset＝0。
+    local y = dashboardY and (dashboardY - self.height + inset)
         or (top + height - dashboardH - self.height)
     if y < top + 4 then y = top + 4 end
     self:setX(x)
@@ -2660,9 +2690,7 @@ function MDADHUDPanel:refresh(now)
     end
     self:loadCollapsed(playerObj)
     self.vehicle = vehicle
-    local dashboard = getPlayerVehicleDashboard(self.playerNum)
-    if not dashboard
-        or not dashboardVisible(dashboard)
+    if not (self._tsX or dashboardVisible(getPlayerVehicleDashboard(self.playerNum)))
         or escapeMenuVisible()
         or (ISUIHandler and ISUIHandler.allUIVisible == false) then
         self:setHudVisible(false)
