@@ -3453,6 +3453,22 @@ if PZAPI and PZAPI.ModOptions then
     function modOptions:apply()
         applyAllOptions()
     end
+    -- 原版缺陷：主選單沒有 MOD 建選項時按套用，Lua/ModOptions.ini 會被清成 0 byte，進遊戲設定全回預設。
+    -- UI 框架 rev 23 從自己的備份（Lua/MinidoracatUI/ModOptions_MinidoracatAutoDrive.ini）補回本 MOD 的值；
+    -- 必須在選項全部加完之後、MainOptions:create 的 load 之前跑（本段在檔案載入時執行，早於它）。
+    -- 掛在 HUD 表上呼叫而非區塊 local：主 chunk local 槽只剩 4（區塊 local 也佔槽）。
+    function HUD.protectOptionsBackup()
+        local UI = MinidoracatUI and MinidoracatUI.v1
+        if UI and UI.API_MAJOR == 1 and type(UI.API_REVISION) == "number" and UI.API_REVISION >= 23
+                and UI.CAPABILITIES and UI.CAPABILITIES.modOptionsBackup and UI.ModOptionsBackup then
+            local restored = UI.ModOptionsBackup.protect(modOptions)
+            if type(restored) == "number" and restored > 0 then
+                print("[" .. MDAD.MOD_ID .. "] restored " .. restored
+                    .. " settings from the backup (ModOptions.ini was wiped)")
+            end
+        end
+    end
+    HUD.protectOptionsBackup()
 end
 
 local function onGameStart()

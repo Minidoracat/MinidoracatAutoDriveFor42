@@ -12,6 +12,14 @@
 
 格式基於 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/)，版本號遵循 `{PZ版本}-{主版本}.{次版本}.{修訂}` 格式。
 
+## [Unreleased]
+
+### 修正
+
+- 在主選單的「選項」按了套用之後，進遊戲時本 MOD 的設定（軌跡、語音、HUD 樣式等）全部回到預設；現在會自動補回你原本的設定（需要同時更新 Minidoracat UI Library）。
+
+> 技術要點：使用 UI 框架的 `ModOptionsBackup.protect`（API rev 23 起），備份檔在 `Zomboid/Lua/MinidoracatUI/ModOptions_MinidoracatAutoDrive.ini`；框架較舊時維持原本行為。
+
 ## [42.21.0-0.32.0] - 2026-10-21
 
 ### 修正
