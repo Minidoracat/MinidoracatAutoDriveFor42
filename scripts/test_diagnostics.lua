@@ -1415,6 +1415,21 @@ for i = 1, 600 do
     if i < 600 then bigRoute.segWidth[i], bigRoute.segSurface[i] = 8, "paved" end
 end
 local bigPayload = MDADDiagnostics.routeSource(bigRoute, {})
+-- 1023a rcu：主 MOD route.segCustom 是表＝數 1..n-1 中 true 的段數（截斷前的整條線；n 以後與非 true 不算）；
+-- 空表＝0（新主 MOD、這條線沒走自訂道路）；沒這欄（舊主 MOD）＝不寫。
+do
+    local cu = MDADDiagnostics.routeSource({ pts = { 0, 0, 10, 0, 20, 0, 30, 0 },
+        segCustom = { [1] = true, [2] = false, [3] = true, [4] = true } }, { phase = "cutover", why = "custom" })
+    checkEq(cu.rcu, 2, "(1023a) rcu counts true custom segments within 1..n-1")
+    MDADDiagnostics.event(0, "route", cu)
+    checkEq(MDADDiagnostics.routeSource({ pts = { 0, 0, 10, 0 }, segCustom = {} }, {}).rcu, 0,
+        "(1023a) segCustom present but empty writes rcu=0")
+    checkEq(bigPayload.rcu, nil, "(1023a) route without segCustom (old main MOD) adds no rcu")
+    bigRoute.segCustom = { [1] = true, [550] = true, [599] = true, [600] = true }
+    checkEq(MDADDiagnostics.routeSource(bigRoute, {}).rcu, 3,
+        "(1023a) rcu counts the whole route, not the truncated snapshot")
+    bigRoute.segCustom = nil
+end
 MDADDiagnostics.event(0, "unstick", {
     phase = "success", eid = 3, attempt = 2, x = 10, y = 20,
     s = 30, d = 3.1, duration = 850, speed = -0.5, rear = "clear",
@@ -1535,6 +1550,8 @@ check(string.find(physBody, '"srcS":"paved;unknown","rpt":"applied"}', 1, true) 
     "(1018a) route cutover carries main MOD patchState applied")
 checkEq(noPts.rpt, "raw", "(1018a) patchState raw recorded even without points")
 checkEq(bigPayload.rpt, nil, "(1018a) route without patchState (nav API < v4) adds no rpt")
+check(string.find(physBody, '"why":"custom"[^\n]*"rcu":2}') ~= nil,
+    "(1023a) route event keeps rcu through the EK whitelist")
 checkEq(select(2, string.gsub(bigPayload.src, ";", "")), 511,
     "oversize route snapshot truncates to 512 points")
 checkEq(select(2, string.gsub(bigPayload.srcW, ";", "")), 510,

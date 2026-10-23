@@ -31949,6 +31949,58 @@ function drive.scenarioTele1013a()
 end
 drive.scenarioTele1013a()
 
+-- 1023a 同目標防抖比形狀（Drive.samePts）：主 MOD 自訂道路改形後路網重建，新線的 len／cost／點數／逐段路寬路面
+-- 可能都跟舊線一樣，只有點不同。
+--   (same)  完全相同、或只有第 1 點（車位投影起點）移動＝沿用：只換 route identity，routeGen／剖面不動。
+--   (shape) 第 2 點起有點移動超過 0.01＝照常 cutover：routeGen+1、換剖面、s.route＝新線。
+--   (pts)   samePts 邊界：|d|＝0.01 算同、0.02 不同、點數不同不同。
+--   違規證明：防抖拿掉 samePts＝(shape) 紅；samePts 從第 1 點比＝(same) 紅。
+function drive.scenarioRouteShape1023a()
+    scenario("1023a 同目標防抖比形狀：同長同段資料但形狀不同照常換剖面、完全相同才沿用")
+    local Dr = MDAD.Drive
+    local oldApi, oldSand = MinidoracatMiniMapAPI, SandboxVars
+    installNavApi(2)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    drive.fillWorld(-10, 310, -10, 10)
+    local function road(pts) -- 段資料、len、cost 全部固定：只有點不同
+        local ss, sw = {}, {}
+        for i = 1, #pts / 2 - 1 do ss[i], sw[i] = "paved", 8 end
+        return { pts = pts, segSurface = ss, segWidth = sw, len = 300, cost = 300, avoidPenalty = 0 }
+    end
+    local function feed(route) -- 主 MOD 下一輪（250ms）回這條線
+        drive.nav.route = route
+        nowMs = nowMs + 250
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        return route
+    end
+    checkTrue(armDrive(0), "(1023a) 啟動自駕")
+    local s = Dr.debugSession(0) or {}
+    feed(road({ 0, 0, 100, 0, 200, 0, 300, 0 }))
+    for _ = 1, 3 do driveTick(dp, dveh) end
+    local rg, prof = s.routeGen, s.profile
+    checkTrue(Dr.isActive(0) and prof ~= nil, "(1023a) 收下第一條帶 cost 的線、剖面建好")
+    local r = feed(road({ 0, 0, 100, 0, 200, 0, 300, 0 }))
+    checkTrue(s.route == r and s.routeGen == rg and s.profile == prof,
+        "(same) 完全相同：沿用剖面（rg " .. tostring(rg) .. "→" .. tostring(s.routeGen) .. "）")
+    r = feed(road({ 0.6, 0.2, 100, 0, 200, 0.005, 300, 0 }))
+    checkTrue(s.route == r and s.routeGen == rg and s.profile == prof,
+        "(same) 只有起點投影移動、其餘點差 ≤0.01：沿用剖面（rg " .. tostring(s.routeGen) .. "）")
+    r = feed(road({ 0, 0, 100, 0, 200, 6, 300, 0 }))
+    checkTrue(Dr.isActive(0) and s.route == r and s.routeGen == rg + 1 and s.profile ~= prof,
+        "(shape) 同長同段資料但第 3 點移動：照常 cutover 換剖面（rg " .. tostring(rg) .. "→" .. tostring(s.routeGen) .. "）")
+    checkTrue(Dr.samePts({ 9, 9, 0, 0 }, { 0, 0, 0.01, -0.01 }), "(pts) |d|＝0.01 算同形狀、第 1 點不比")
+    checkFalse(Dr.samePts({ 0, 0, 0, 0 }, { 0, 0, 0.02, 0 }), "(pts) |dx|＝0.02 不同")
+    checkFalse(Dr.samePts({ 0, 0, 0, 0 }, { 0, 0, 0, -0.02 }), "(pts) |dy|＝0.02 不同")
+    checkFalse(Dr.samePts({ 0, 0, 1, 1 }, { 0, 0, 1, 1, 2, 2 }), "(pts) 點數不同＝不同")
+    MDAD.Drive.stop(0, nil)
+    MinidoracatMiniMapAPI, SandboxVars = oldApi, oldSand
+    drive.nav.tx, drive.nav.ty, drive.nav.state = 300, 0, "ok"
+    drive.nav.route = newRoute(40, 0, 0, 4, 0)
+    driveReset(dveh)
+end
+drive.scenarioRouteShape1023a()
+
 local function scenarioReasonKeys()
 scenario("理由鍵覆蓋：每個分支都跑到，且四語 UI.json 都有對應翻譯")
 

@@ -204,6 +204,8 @@ local EK = {
     "zc0", "chain", "nxB", "nxC",
     -- 1018a route cutover／far：主 MOD route.patchState（nav API v4 起 applied＝已套 RoadPatch／raw；舊版沒這欄＝缺，D.routeSource）
     "rpt",
+    -- 1023a route cutover／far：整條線（截斷前）走主 MOD 自訂道路的段數（route.segCustom[i]＝true；舊主 MOD 沒這欄＝缺，D.routeSource）
+    "rcu",
 }
 
 local function logOnce(msg)
@@ -1775,7 +1777,7 @@ end
 -- 把 src＝"x,y;…" 點列、srcW＝"w;…" 段寬、srcS＝"surface;…" 段面填進 payload
 -- 後回傳同一張表（Driver 的 update 大函式 local／upvalue 槽緊，呼叫端零新 local）。
 -- 超過 ROUTE_SRC_MAX 只截前段（事件的 pts 欄仍是真總數，讀者可辨截斷）；
--- route 沒有可用點列＝不填 src 三欄（rpt 照填）。
+-- route 沒有可用點列＝不填 src 三欄與 rcu（rpt 照填）。
 local ROUTE_SRC_MAX = 512
 function D.routeSource(route, payload)
     if type(payload) ~= "table" then payload = {} end
@@ -1786,6 +1788,14 @@ function D.routeSource(route, payload)
     local pts = route.pts
     local n = #pts / 2
     if n < 2 or n % 1 ~= 0 then return payload end
+    local custom = route.segCustom
+    if type(custom) == "table" then
+        local c = 0
+        for i = 1, n - 1 do
+            if custom[i] == true then c = c + 1 end
+        end
+        payload.rcu = c
+    end
     if n > ROUTE_SRC_MAX then n = ROUTE_SRC_MAX end
     local widths, surfaces = route.segWidth, route.segSurface
     local sp, sw, ss = {}, {}, {}

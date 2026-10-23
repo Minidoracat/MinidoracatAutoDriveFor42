@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1020j"
+Drive.REV = "1023a"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -16563,6 +16563,19 @@ function Drive.etaSeconds(playerNum)
     return s.etaSec, s.etaDistM
 end
 
+-- 同目標防抖的形狀比對（1023a）：扁平點列 a、b 點數相同，且第 2 點起每點 |dx|、|dy| 都 ≤0.01 才算同一條線。
+-- 第 1 點是主 MOD 把車位投影到路上的起點，隨車移動，不比。主 MOD 自訂道路改形狀後路網重建，新線的
+-- len／cost／點數／逐段路寬路面都可能和舊線一樣，只有點不同——不比點就會沿用舊剖面照舊形狀開。
+function Drive.samePts(a, b)
+    local n = #a
+    if n ~= #b then return false end
+    for i = 3, n do
+        local d = a[i] - b[i]
+        if d > 0.01 or d < -0.01 then return false end
+    end
+    return true
+end
+
 -- OnPlayerUpdate 簽名：單一 IsoPlayer（IsoPlayer.java:2279 triggerEvent("OnPlayerUpdate", this)；
 -- 原版用例 Steps.lua:1922、DebugDemoTime.lua:308）。伺服器端 isLocalPlayer 恆 false
 -- （IsoPlayer.java:6493），遠端玩家也擋在這裡——自駕只在駕駛自己的 client 跑。
@@ -16823,9 +16836,10 @@ local function onPlayerUpdate(player)
         -- 同目標 route identity 防抖（2026-09-01，telemetry s033：主 MOD 對同一
         -- 目標每 250ms 回新 table identity，rg 1→9 反覆 cutover 把繞行枚舉進度、
         -- episode ban 與感知快照全部清空重來——blocked 永遠來不及解）。
-        -- 等價判定＝len/cost/點數，再逐段比 segSurface/segWidth（O(n) 冷路徑、
-        -- 250ms 一次）：同幾何但 metadata 更新（surface/width）必須照常 cutover，
-        -- 否則剖面吃到舊路面權重。無 cost 的 v2/v3 route 不防抖。
+        -- 等價判定＝len/cost/點數，再逐段比 segSurface/segWidth、逐點比形狀（Drive.samePts；
+        -- O(n) 冷路徑、250ms 一次）：同幾何但 metadata 更新（surface/width）或同 metadata 但
+        -- 形狀不同（1023a 自訂道路改形）必須照常 cutover，否則剖面吃到舊路面權重或舊形狀。
+        -- 無 cost 的 v2/v3 route 不防抖。
         if route ~= s.route and not versionChanged and not targetChanged
                 and s.route ~= nil and s.profile ~= nil
                 and finite(route.len) and finite(s.route.len)
@@ -16850,7 +16864,7 @@ local function onPlayerUpdate(player)
                     break
                 end
             end
-            if same then s.route = route end
+            if same and Drive.samePts(route.pts, s.route.pts) then s.route = route end
         end
         -- sticky 避讓：主 MOD 之後因偏航／冷卻自行重算（不帶 avoid）若又穿回堵點（目前這圈或同一趟先前判死的圈，
         -- Drive.avoidMore），立刻以同一圈再要一次替代線、舊圈一併附上，拿不到才照原線走（每次 cutover 最多一次）。
