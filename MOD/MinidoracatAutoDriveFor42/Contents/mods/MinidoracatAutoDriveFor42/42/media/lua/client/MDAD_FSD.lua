@@ -35,7 +35,10 @@ F.COLORS = T
 -- YMIN 防除以 0。KF＝橫向相對縱向的放大（路面看起來比 1:1 寬，同原廠視覺）。
 local D0, FAR, NEAR, YMIN, KF = 15, 52, -4, -9, 1.3
 local PATH_HW = 0.55  -- 路徑帶半寬（公尺）
-local ZOM_M = 0.55    -- 軟目標方塊邊長（公尺）
+-- 軟目標畫成直立柱、車輛畫成有高度的方塊（高度用橫向比例 pK×w 換像素）：場景高度只有約 130px 卻涵蓋 56m，
+-- 30–50m 外的車只有 1–2px 深，平面多邊形看起來是一條線（實機 1024a6 車牆截圖）。
+local ZOM_W, ZOM_H = 0.5, 1.6
+local VEH_H = 1.4
 local EGO_HW, EGO_HL = 0.95, 2.35
 local DESIGN_W, CARD_GAP = 552, 8
 local AMBER = { dodging = true, unstick = true, side = true, lowfps = true, areawait = true, rehitch = true,
@@ -482,25 +485,36 @@ local function drawScene(p, snap, now)
             end
         end
         local hot = p._fHot
-        for i = 1, snap.zomN do
+        -- 快照是近→遠（掃描順序），由遠往近畫，近的蓋住遠的
+        for i = snap.zomN, 1, -1 do
             local x, y = mv(snap.zomX[i], snap.zomY[i])
             local px, py, w = proj(x, y)
-            local s = max(3, ZOM_M * pK * w)
+            local zw, zh = max(3, ZOM_W * pK * w), max(5, ZOM_H * pK * w)
             local k = snap.zomKind[i]
             c = k == "corpse" and T.parked or (hot and snap.zomBand[i]) and T.warn or T.text3
-            p:drawRect(px - s / 2, py - s / 2, s, s, c.a, c.r, c.g, c.b)
+            if k == "corpse" then zh = zw end -- 倒地的屍體不立起來
+            p:drawRect(px - zw / 2, py - zh, zw, zh, c.a, c.r, c.g, c.b)
         end
-        for i = 1, snap.vehN do
+        -- 車輛：OBB 四角投影成底面，四個側面往上拉 VEH_H，頂面最後畫（前側面蓋住後側面露出的部分，不必判可見面）
+        for i = snap.vehN, 1, -1 do
             local cx, cy = mv(snap.vehX[i], snap.vehY[i])
             local dx, dy = snap.vehDX[i], snap.vehDY[i]
             local DX, DY = dx * ca - dy * sa, dx * sa + dy * ca
             local hl, hw = snap.vehHL[i], snap.vehHW[i]
             local fx, fy, rx, ry = DX * hl, DY * hl, DY * hw, -DX * hw
-            local x1, y1 = proj(cx + fx - rx, cy + fy - ry)
-            local x2, y2 = proj(cx + fx + rx, cy + fy + ry)
-            local x3, y3 = proj(cx - fx + rx, cy - fy + ry)
-            local x4, y4 = proj(cx - fx - rx, cy - fy - ry)
-            poly(p, x1, y1, x2, y2, x3, y3, x4, y4, snap.vehMoving[i] and T.text3 or T.parked)
+            local x1, y1, w1 = proj(cx + fx - rx, cy + fy - ry)
+            local x2, y2, w2 = proj(cx + fx + rx, cy + fy + ry)
+            local x3, y3, w3 = proj(cx - fx + rx, cy - fy + ry)
+            local x4, y4, w4 = proj(cx - fx - rx, cy - fy - ry)
+            local h = VEH_H * pK
+            local t1, t2, t3, t4 = y1 - h * w1, y2 - h * w2, y3 - h * w3, y4 - h * w4
+            local moving = snap.vehMoving[i]
+            local side = moving and T.parked or T.track
+            poly(p, x1, y1, x2, y2, x2, t2, x1, t1, side)
+            poly(p, x2, y2, x3, y3, x3, t3, x2, t2, side)
+            poly(p, x3, y3, x4, y4, x4, t4, x3, t3, side)
+            poly(p, x4, y4, x1, y1, x1, t1, x4, t4, side)
+            poly(p, x1, t1, x2, t2, x3, t3, x4, t4, moving and T.text3 or T.parked)
         end
     end
     -- 自車（航向朝上，固定在畫面下方）：車身＋前後擋風玻璃

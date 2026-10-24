@@ -1207,14 +1207,14 @@ do
     local energy = false
     for i = 1, #drawn do if tostring(drawn[i]):find("BAT", 1, true) then energy = true end end
     check(not energy, "(fsd-energy) the battery-shown-as-fuel line is not drawn on the card")
-    check(panel.polys == 8 and panel.stencil == 0, "(fsd) scene = road 1 + curbs 2 + path 1 + car 1 + ego 3 polygons"
-        .. " inside a balanced stencil (" .. panel.polys .. ")")
+    check(panel.polys == 12 and panel.stencil == 0, "(fsd) scene = road 1 + curbs 2 + path 1 + car 5 (4 sides + top) + ego 3"
+        .. " polygons inside a balanced stencil (" .. panel.polys .. ")")
     local py1, py2 = snap.pathY[1], snap.pathY[2]
     snap.pathY[1], snap.pathY[2] = -8, -3
     panel.polys = 0
     panel:prerender()
     snap.pathY[1], snap.pathY[2] = py1, py2
-    check(panel.polys == 7, "(fsd-path-behind) a path segment already behind the ego centre is not drawn (" .. panel.polys .. ")")
+    check(panel.polys == 11, "(fsd-path-behind) a path segment already behind the ego centre is not drawn (" .. panel.polys .. ")")
     collectgarbage("collect")
     collectgarbage("stop")
     local before = collectgarbage("count")
