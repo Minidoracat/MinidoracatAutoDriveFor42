@@ -1262,11 +1262,30 @@ do
     tick()
     check(not panel._collapsed and panel.height == H, "(fsd-pill) expanding restores the card")
 
+    -- 儀表 MOD 的充電卡（chargeCardRect，舊版沒有）開著：卡片疊在它上方；放不下就當場收成晶片、不寫 modData，關掉就展開回來。
+    local cc = { x = 700, y = 760, w = 520, h = 200, visible = true }
+    local mdWas = player._md.MDADHudCollapsed
+    MinidoracatTeslaAPI.chargeCardRect = function() return cc.x, cc.y, cc.w, cc.h, cc.visible end
+    tick()
+    check(not panel._collapsed and panel.height == H and panel.y + H + 8 == cc.y and panel.x == ts.x,
+        "(fsd-charge) an open charge card pushes the FSD card above it (" .. panel.y .. ")")
+    cc.y = 150
+    tick()
+    check(panel._collapsed and panel.height < 40 and panel.y + panel.height + 8 == cc.y
+        and player._md.MDADHudCollapsed == mdWas,
+        "(fsd-charge-pill) no room above the charge card: a chip above it, the player's collapse choice untouched")
+    cc.visible = false
+    tick()
+    check(not panel._collapsed and panel.height == H and panel.y + H + 8 == ts.y,
+        "(fsd-charge) closing the charge card puts the card back above the dashboard")
+    cc.visible, cc.y = true, 150
+    tick()
+
     MinidoracatTeslaAPI = nil
     dash.visible = true
     tick()
-    check(not panel._fsd and panel.capTip.fsd == nil and panel.themeButton:isVisible(),
-        "(fsd) other cars keep the four themes")
+    check(not panel._fsd and panel.capTip.fsd == nil and panel.themeButton:isVisible() and not panel._collapsed,
+        "(fsd) other cars keep the four themes; a chip forced by the charge card does not follow the player out")
     state.active, state.token = true, "follow"
     MDADFSD, MDADScene, Vector3f, MDADOverlay.trail = nil, nil, nil, nil
     MDAD.Drive.hudArrive, MDAD.Drive.clearArrive = nil, nil

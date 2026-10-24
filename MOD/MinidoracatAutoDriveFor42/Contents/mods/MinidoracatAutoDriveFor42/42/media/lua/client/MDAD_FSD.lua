@@ -151,10 +151,11 @@ local function hideAll(p)
     p.collapseButton:setVisible(true)
 end
 
--- 卡片貼在儀表上方 CARD_GAP×S、水平置中；收合成晶片時同一位置。
+-- 卡片貼在儀表上方 CARD_GAP×S、水平置中；儀表 MOD 的充電卡開著（_ccY＝它的頂邊，HUD.chargeCardTop）就疊在充電卡上方。
+-- 收合成晶片時同一位置。
 function F.reposition(p)
     local x = p._tsX + floor((p._tsW - p.width) / 2)
-    local y = p._tsY - p.height - floor(CARD_GAP * (p._fS or 1) + 0.5)
+    local y = (p._ccY or p._tsY) - p.height - floor(CARD_GAP * (p._fS or 1) + 0.5)
     local top = getPlayerScreenTop(p.playerNum)
     if y < top + 4 then y = top + 4 end
     p:setX(x)
@@ -183,11 +184,21 @@ function F.layout(p, m)
     p._fS, p._fPad, p._fGap, p._fCtrlH = S, pad, gap, ctrlH
     p._fDotS = max(6, floor(8 * S + 0.5))
     p._fPillH = fontH + max(6, floor(10 * S + 0.5))
-    if p._collapsed then return F.sizePill(p) end
     local largeH = getTextManager():getFontHeight(UIFont.Large)
     local half = floor(gap / 2)
     local colH = fontH * 3 + largeH + ctrlH + half * 3 + gap
     local sceneH = max(colH, floor(118 * S + 0.5))
+    -- 充電卡把錨點往上推，展開的卡片頂端會超出這位玩家的畫面：當場收成晶片（只改這次版面、不寫 modData＝玩家的
+    -- 收合選擇不變），充電卡關掉或有空間就展開回來。
+    local fullH = pad + sceneH + gap + ctrlH + pad
+    local cramped = p._ccY ~= nil
+        and p._ccY - floor(CARD_GAP * S + 0.5) - fullH < getPlayerScreenTop(p.playerNum) + 4
+    if cramped and not p._collapsed then
+        p._collapsed, p._fForced = true, true
+    elseif not cramped and p._fForced then
+        p._collapsed, p._fForced = false, nil
+    end
+    if p._collapsed then return F.sizePill(p) end
     local W = p._tsW
     local sceneW = floor(W * 0.58 + 0.5)
     p._fSX, p._fSY, p._fSW, p._fSH = pad, pad, sceneW, sceneH

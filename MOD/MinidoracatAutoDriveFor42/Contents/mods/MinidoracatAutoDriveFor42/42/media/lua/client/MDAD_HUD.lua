@@ -821,6 +821,19 @@ function HUD.teslaRect(playerNum)
     return x, y, w, h
 end
 
+-- 同一個選配 MOD 的充電卡（MinidoracatTeslaAPI.chargeCardRect(pn) → x, y, w, h, visible，座標系同 hudRect；
+-- 舊版沒有這個函式）貼在它的儀表上方：開著就回卡片頂邊 y，FSD 卡片改疊在它上面（MDAD_FSD.lua）。否則 nil。
+function HUD.chargeCardTop(playerNum)
+    local api = MinidoracatTeslaAPI
+    if type(api) ~= "table" or type(api.chargeCardRect) ~= "function" then return nil end
+    local ok, _, y, w, h, visible = pcall(api.chargeCardRect, playerNum)
+    if not ok or visible ~= true or type(y) ~= "number" or type(w) ~= "number" or type(h) ~= "number"
+            or w <= 0 or h <= 0 then
+        return nil
+    end
+    return y
+end
+
 local function effectivePolicy(name, playerNum, kind)
     local policy = MDAD.policy3(name, MDAD.POLICY_PLAYER)
     if policy == MDAD.POLICY_FORCE_ON then return true, policy end
@@ -1689,6 +1702,8 @@ function MDADHUDPanel:applyLayout()
         self._style = STYLE_METAL
         return MDADFSD.layout(self, m)
     end
+    -- 充電卡逼 FSD 卡片收成晶片（_fForced，不寫 modData）時下車或換車：回到玩家原本的展開狀態
+    if self._fForced then self._collapsed, self._fForced = false, nil end
     -- 側掛的量測與擺位自成一套（無精簡單行／收合徽章分支），共用上面四個標籤字串；
     -- 儀表板讓出的框放不下側翼時，它自己退回下面這套上掛版面。
     if self._style == STYLE_WINGS then return self:layoutWings(scale, m) end
@@ -2621,19 +2636,20 @@ end
 
 -- dashboard 的 UIManager membership／identity 不屬於 250ms 車況資料；
 -- 每個 UI tick（約 100ms）先收斂，手把 inventory 或 split-screen 重建不殘影。
--- Tesla 儀表顯示中（原版此時隱藏）就貼它：矩形數字有變（上下車、提醒膠囊長高、解析度）才重排；
--- _tsX 兼作「目前貼 Tesla」的旗標，離開時連 identity 一起清，回到原版儀表一定重排。
+-- Tesla 儀表顯示中（原版此時隱藏）就貼它：矩形數字有變（上下車、提醒膠囊長高、解析度）或 FSD 卡片下面的
+-- 充電卡開關／移動（_ccY）才重排；_tsX 兼作「目前貼 Tesla」的旗標，離開時連 identity 一起清，回到原版儀表一定重排。
 function MDADHUDPanel:syncDashboardBeforeRefresh()
     local tx, ty, tw, th = HUD.teslaRect(self.playerNum)
     if tx then
-        if tx ~= self._tsX or ty ~= self._tsY or tw ~= self._tsW or th ~= self._tsH then
-            self._tsX, self._tsY, self._tsW, self._tsH = tx, ty, tw, th
+        local cy = MDADFSD and HUD.chargeCardTop(self.playerNum) or nil
+        if tx ~= self._tsX or ty ~= self._tsY or tw ~= self._tsW or th ~= self._tsH or cy ~= self._ccY then
+            self._tsX, self._tsY, self._tsW, self._tsH, self._ccY = tx, ty, tw, th, cy
             self:applyLayout()
             self._forceRefresh = true
         end
         return true
     end
-    if self._tsX then self._tsX, self._dashboard = nil, nil end
+    if self._tsX then self._tsX, self._dashboard, self._ccY = nil, nil, nil end
     local dashboard = getPlayerVehicleDashboard(self.playerNum)
     if not dashboardVisible(dashboard) then
         self:setHudVisible(false)
