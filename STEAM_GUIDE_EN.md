@@ -105,6 +105,7 @@ Plus a screwdriver.
 [*] [b]Shows[/b]: status, targets, speed, cruise cap, drive time, time left, gear, slowdown reason, power/fuel.
 [*] [b]Controls[/b]: direct controls on the HUD.
 [*] [b]Looks[/b]: metal, glass, family and side-wing themes; compact and collapsed layouts.
+[*] [b]Other mods' dashboards[/b]: when another mod replaces the vanilla dashboard, the panel attaches to that dashboard (the other mod must provide its position).
 [/list]
 [b]Metal theme[/b]
 {{img:07-hud-theme-metal-en.jpg}}
@@ -273,6 +274,7 @@ Separate 0–500% power and extra-fuel settings for GPS and autodrive (default 5
 [list]
 [*] [b]Road network[/b]: AutoDrive follows MiniMap's navigation network; map images provide no routes.
 [*] [b]Added or changed roads[/b]: need correct road data from the map or patch author.
+[*] [b]MiniMap custom roads[/b]: AutoDrive drives MiniMap custom roads by their width and surface, and switches to the new line when a road's shape changes (MiniMap 0.50.0+).
 [/list]
 [h3]Wrong road data[/h3]
 [list]
