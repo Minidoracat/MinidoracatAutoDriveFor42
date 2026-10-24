@@ -45,7 +45,7 @@ if ($modKv['require']) { $REQUIRED_MOD_IDS = @($modKv['require'] -split ',' | Fo
 # 家族依賴（同步引擎會從兄弟 repo 一併複製）vs 第三方依賴（Steam 訂閱，僅提醒、不複製）
 $FamilyDeps = @($REQUIRED_MOD_IDS | Where-Object { $_ -like 'Minidoracat*' -or $_ -like 'Cat*For42' })
 # 翻譯包永遠墊底（後載入者覆蓋先載入者）：只重排既有條目、不新增
-$TranslationModsLast = @('CatModLangFor42', 'CatLangFor42')
+$TranslationModsLast = @('CatLangFor42', 'CatModLangFor42')
 
 # Zomboid 快取根（同步目的地與伺服器設定都由此推導）
 $ZomboidDir = Join-Path $env:UserProfile "Zomboid"
@@ -244,7 +244,7 @@ function Update-ServerIniMods {
         $updated = @($current | Where-Object { $ServerModIds -notcontains $_.TrimStart('\') })
         foreach ($id in $ServerModIds) { $updated += "$prefix$id" }
     }
-    # 翻譯包墊底：CatModLangFor42 倒數第二、CatLangFor42 最後（只重排既有條目）
+    # 翻譯包墊底：CatLangFor42 倒數第二、CatModLangFor42 最後（只重排既有條目）
     $tail = @($TranslationModsLast | ForEach-Object { $t = $_; $updated | Where-Object { $_.TrimStart('\\') -ieq $t } | Select-Object -First 1 })
     if ($tail.Count -gt 0) { $updated = @($updated | Where-Object { $TranslationModsLast -notcontains $_.TrimStart('\\') }) + $tail }
 
