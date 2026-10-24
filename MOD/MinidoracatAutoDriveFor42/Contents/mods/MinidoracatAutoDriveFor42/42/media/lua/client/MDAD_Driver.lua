@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1023b"
+Drive.REV = "1024a"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -1501,6 +1501,24 @@ function Drive.hudStopReason(playerNum, vehicle)
     return rec.key, getTimestampMs() - rec.ms
 end
 
+-- 抵達紀錄（1024a，FSD 卡片「已抵達：目的地」＋行程時間）：到站回報成立、這趟沒有自動接下一段時記下車輛 id 與時間；
+-- 下一趟 session 真正接上（commitSession）或玩家按卡片的「完成」（Drive.clearArrive）才清。同 lastStops 只在本機記憶體。
+Drive.lastArrive = {}
+function Drive.noteArrive(playerNum, vehicle)
+    Drive.lastArrive[playerNum] = { vid = vehicle and vehicle:getId() or nil, ms = getTimestampMs() }
+end
+
+-- 回抵達至今毫秒；沒有紀錄或不是抵達的那台車＝nil。
+function Drive.hudArrive(playerNum, vehicle)
+    local rec = Drive.lastArrive[playerNum]
+    if not rec or not vehicle or rec.vid == nil or vehicle:getId() ~= rec.vid then return nil end
+    return getTimestampMs() - rec.ms
+end
+
+function Drive.clearArrive(playerNum)
+    Drive.lastArrive[playerNum] = nil
+end
+
 -- 玩家有沒有在自己操作？有就讓位。
 -- getCurrentSteering 由 CarController 每幀從 clientControls 寫入（CarController.java:321、
 -- 用例 Vehicles.lua:731），手把的類比轉向也會進到這裡，是唯一跨鍵鼠／手把的轉向觀測點。
@@ -2322,6 +2340,7 @@ local function commitSession(playerObj, playerNum, s)
     vehicle:setRegulator(false)
     sessions[playerNum] = s
     Drive.lastStops[playerNum] = nil -- 新的一趟真的接上：上次被迫停止的原因不再顯示（Drive.hudStopReason）
+    Drive.lastArrive[playerNum] = nil -- 上一趟的抵達紀錄同理（Drive.hudArrive）
     -- 設定值在下一輪beginRound套用；不改route identity或正在執行的承諾。
     if s.sensor then s.sensor.aheadM = Drive.perceptionDistance() end
     sessionCount = sessionCount + 1
@@ -2334,7 +2353,9 @@ local function commitSession(playerObj, playerNum, s)
     if not dok then pcall(MDADDiagnostics.stop, playerNum, "error") end
     if not s.diag then return end
     local route, profile = s.route, s.profile
-    diagEvent(s, playerNum, "start", s.gainSeeded and { seed = s.gainKey } or nil)
+    -- 1024a：坐的是換掉原版儀表、會顯示 FSD 卡片的車（HUD.teslaRect 可見）＝hud "fsd"，復盤分得出玩家看的是哪種面板
+    local hud = MDADFSD and MDAD.HUD and MDAD.HUD.teslaRect and MDAD.HUD.teslaRect(playerNum) and "fsd" or nil
+    diagEvent(s, playerNum, "start", (s.gainSeeded or hud) and { seed = s.gainSeeded and s.gainKey or nil, hud = hud } or nil)
     diagEvent(s, playerNum, "target", {
         phase = "set", x = s.lastTx, y = s.lastTy, why = "user", tg = s.targetGen,
     })
@@ -16690,6 +16711,8 @@ local function onPlayerUpdate(player)
             diagStop(s, playerNum, "arrive")
             clearSession(playerNum)
             if outcome == "arrived" then
+                -- FSD 卡片「已抵達」：停靠點／整趟完成／單站都記；自動接下一段（nextPrep）與 continue 失效不記。
+                if not nextPrep and disposition ~= "continue" then Drive.noteArrive(playerNum, s.vehicle) end
                 if nextPrep then
                     -- report 的版本授權在 acquire 重驗；第一個 Core API 之前已有可取消意圖。
                     TRIP.preps[playerNum] = nextPrep

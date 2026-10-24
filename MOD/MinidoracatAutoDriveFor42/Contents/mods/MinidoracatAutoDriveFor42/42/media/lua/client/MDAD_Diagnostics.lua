@@ -206,6 +206,8 @@ local EK = {
     "rpt",
     -- 1023a route cutover／far：整條線（截斷前）走主 MOD 自訂道路的段數（route.segCustom[i]＝true；舊主 MOD 沒這欄＝缺，D.routeSource）
     "rcu",
+    -- 1024a start：這趟坐的車顯示 FSD 卡片（換掉原版儀表的選配 MOD）＝"fsd"；原版儀表的車沒有這欄
+    "hud",
 }
 
 local function logOnce(msg)

@@ -1114,6 +1114,185 @@ do
     tick()
 end
 
+-- FSD 卡片（1024a，MDAD_FSD.lua／MDAD_Scene.lua）：貼著選配儀表 MOD（hudRect 可見）時 HUD 改畫成同寬卡片、貼在它上方
+-- CARD_GAP；六種狀態的晶片／主鈕、電量／油量列不畫、主題控制不出現、收合成晶片、場景快照換自車座標、prerender 零配置；
+-- API 不在＝原本四主題（上面 (tesla) 段是模組不在時的退路）。違規證明：F.refresh 不看停止原因＝(fsd-takeover) 紅；
+-- F.draw 改畫 _energyText＝(fsd-energy) 紅；Scene 右向量反號＝(fsd-scene) 紅。
+do
+    local client = "MOD/MinidoracatAutoDriveFor42/Contents/mods/MinidoracatAutoDriveFor42/42/media/lua/client/"
+    local dash = dashboards[0]
+    local ts = { x = 684, y = 968, w = 552, h = 112 }
+    MinidoracatTeslaAPI = { hudRect = function() return ts.x, ts.y, ts.w, ts.h, true end }
+    Vector3f = { new = function()
+        local v = {}
+        function v:x() return self.vx end
+        function v:z() return self.vz end
+        return v
+    end }
+    vehicle.getForwardVector = function(_, out) out.vx, out.vz = 0, -1 return out end -- 車頭朝北
+    vehicle.getX = function() return 100 end
+    vehicle.getY = function() return 100 end
+    local arriveMs, cleared = nil, 0
+    MDAD.Drive.hudArrive = function() return arriveMs end
+    MDAD.Drive.clearArrive = function() arriveMs, cleared = nil, cleared + 1 end
+    local world = { rN = 2, rLX = { 97, 97 }, rLY = { 100, 60 }, rRX = { 103, 103 }, rRY = { 100, 60 },
+        zN = 1, zX = { 102 }, zY = { 90 }, zK = { "zombie" }, zB = { true },
+        vN = 1, vX = { 97 }, vY = { 80 }, vFx = { -1 }, vFy = { 0 }, vHL = { 2.3 }, vHW = { 0.9 }, vStill = { true } }
+    MDADOverlay.trail = function() return { 100, 100 }, { 98, 60 }, { false, true }, 2, world end
+    function ISPanel:drawPolygon() self.polys = (self.polys or 0) + 1 end
+    function ISPanel:setStencilRect() self.stencil = (self.stencil or 0) + 1 end
+    function ISPanel:clearStencilRect() self.stencil = self.stencil - 1 end
+    require = function() return true end
+    dofile(client .. "MDAD_Scene.lua")
+    dofile(client .. "MDAD_FSD.lua")
+    require = realRequire
+    local T = MDADFSD.COLORS
+    local function tick() nowMs = nowMs + 300; panel:update() end
+    local function same(c, want) return c and c.r == want.r and c.g == want.g and c.b == want.b end
+
+    dash.visible = false
+    state.active, state.token, state.stopKey, state.stopAgoMs = true, "follow", nil, nil
+    tick()
+    local W, H = panel.width, panel.height
+    check(panel._fsd == true and panel.visible, "(fsd) a visible Tesla dashboard turns the HUD into the FSD card")
+    check(W == ts.w and panel.x == ts.x and panel.y + H + 8 == ts.y,
+        "(fsd) card is as wide as the dashboard and sits 8px above it (" .. panel.x .. "," .. panel.y .. " " .. W .. "x" .. H .. ")")
+    check(H >= 160 and H <= 200, "(fsd) card is about 180 tall at 1x (" .. H .. ")")
+    check(not panel.themeButton:isVisible() and not panel.volumeSlider:isVisible() and not panel.cycleButton:isVisible()
+        and not panel.wingButton:isVisible(), "(fsd) theme, volume slider, gear cycle and wing chevron are not on the card")
+    local kids = { panel.zombieButton, panel.corpseButton, panel.autoButton, panel.animalButton, panel.speedButton,
+        panel.voiceButton, panel.collapseButton, panel.actionButton, panel.capTip }
+    for i = 1, 4 do kids[#kids + 1] = panel.gearButtons[i] end
+    local inside, overlap, allVisible = true, nil, true
+    for i = 1, #kids do
+        local a = kids[i]
+        allVisible = allVisible and a:isVisible()
+        if a.x < 0 or a.y < 0 or a.x + a.width > W or a.y + a.height > H then inside = false end
+        for j = i + 1, #kids do
+            local b = kids[j]
+            if a.x < b.x + b.width and b.x < a.x + a.width and a.y < b.y + b.height and b.y < a.y + a.height then
+                overlap = (a.title or "?") .. "/" .. (b.title or "?")
+            end
+        end
+    end
+    check(allVisible and inside and overlap == nil,
+        "(fsd) 4 driving styles, 5 policy keys, voice, collapse, main button and cap sit inside the card without overlap ("
+            .. tostring(overlap) .. ")")
+    check(panel._fState == "engaged" and same(panel._fChipC, T.accent) and panel._fChip == "FOLLOW"
+        and same(panel._fCapC, T.accent) and same(panel._fPathC, T.accentFill),
+        "(fsd-engaged) engaged: blue chip, blue cap, blue path (green is left for charging)")
+    check(panel.actionButton.title == "STOP" and same(panel.actionButton.textColor, T.danger),
+        "(fsd-engaged) main button stops, red text")
+    check(panel.gearButtons[state.gear]._fOn and same(panel.gearButtons[state.gear].backgroundColor, T.track)
+        and panel.zombieButton._fOn and same(panel.zombieButton.textureColor, T.accent),
+        "(fsd) selected style and enabled policies use the accent (plus an underline in render)")
+    local snap = MDADScene.get(0, nowMs)
+    check(snap and snap.version == 1 and snap.pathN == 2 and snap.pathX[1] == 0 and snap.pathY[1] == 2
+        and snap.pathY[2] == 40 and snap.pathDodge[2] == true and snap.roadN == 2 and snap.roadLX[1] == -3
+        and snap.roadRX[2] == 3 and snap.roadLY[2] == 40,
+        "(fsd-scene) path and curbs in ego metres: x right, y ahead (heading north)")
+    check(snap.zomN == 1 and snap.zomX[1] == 2 and snap.zomY[1] == 10 and snap.zomBand[1] == true
+        and snap.vehN == 1 and snap.vehX[1] == -3 and snap.vehY[1] == 20 and snap.vehDX[1] == -1 and snap.vehDY[1] == 0
+        and snap.vehMoving[1] == false and snap.state == "follow" and snap.cap == state.cap,
+        "(fsd-scene) zombies and vehicles (west-facing parked car) in ego metres; state and cap from Drive.hudState")
+    local ca, sa, mx, my = MDADScene.motion(snap, snap.t + 100)
+    check(ca == 1 and sa == 0 and mx == 0 and math.abs(my - 47.4 / 3.6 * 0.1) < 1e-9,
+        "(fsd-scene) per-frame extrapolation moves the scene by speed x dt only")
+    check(MDADScene.get(0, snap.t + 600) == nil, "(fsd-scene) a snapshot older than 500 ms is not handed out")
+    local drawn, rawText = {}, panel.drawText
+    panel.drawText = function(self, s) drawn[#drawn + 1] = s end
+    panel.polys, panel.stencil = 0, 0
+    panel:prerender()
+    panel.drawText = rawText
+    local energy = false
+    for i = 1, #drawn do if tostring(drawn[i]):find("BAT", 1, true) then energy = true end end
+    check(not energy, "(fsd-energy) the battery-shown-as-fuel line is not drawn on the card")
+    check(panel.polys == 12 and panel.stencil == 0, "(fsd) scene = road 1 + curbs 2 + path 1 + car 5 (4 sides + top) + ego 3"
+        .. " polygons inside a balanced stencil (" .. panel.polys .. ")")
+    local py1, py2 = snap.pathY[1], snap.pathY[2]
+    snap.pathY[1], snap.pathY[2] = -8, -3
+    panel.polys = 0
+    panel:prerender()
+    snap.pathY[1], snap.pathY[2] = py1, py2
+    check(panel.polys == 11, "(fsd-path-behind) a path segment already behind the ego centre is not drawn (" .. panel.polys .. ")")
+    collectgarbage("collect")
+    collectgarbage("stop")
+    local before = collectgarbage("count")
+    for _ = 1, 500 do panel:prerender() end
+    local grew = collectgarbage("count") - before
+    collectgarbage("restart")
+    check(grew < 0.5, "(fsd) 500 card prerenders allocate nothing (" .. string.format("%.2f", grew) .. " KB)")
+
+    state.token = "dodging"
+    tick()
+    check(panel._fState == "slowing" and same(panel._fChipC, T.accent) and panel._fWhy == "DODGE"
+        and same(panel._fWhyC, T.warn), "(fsd-slowing) still blue, the reason shows under the chip")
+    state.token = "blocked"
+    tick()
+    check(panel._fState == "blocked" and same(panel._fChipC, T.danger) and panel.detourButton:isVisible()
+        and panel.detourButton.x < panel.actionButton.x and panel.detourButton.title == "REROUTE"
+        and panel.actionButton.x + panel.actionButton.width <= W,
+        "(fsd-blocked) red chip, reroute key before the stop key")
+    state.active, state.token = false, nil
+    state.stopKey, state.stopAgoMs = "UI_MinidoracatAutoDrive_StopStuck", 65000
+    tick()
+    check(panel._fState == "takeover" and same(panel._fChipC, T.danger) and not panel.detourButton:isVisible()
+        and panel.statusTip:isVisible() == (panel._fWhy ~= nil) and same(panel._fPathC, T.danger),
+        "(fsd-takeover) forced stop: red take-over chip, reason kept until the next drive")
+    state.stopKey, state.stopAgoMs = nil, nil
+    arriveMs = 1000
+    tick()
+    check(panel._fState == "arrived" and same(panel._fChipC, T.ok) and panel._fsdDone
+        and panel.actionButton.title == "UI_MinidoracatAutoDrive_FsdDone",
+        "(fsd-arrived) arrived: green chip with trip time, main button finishes")
+    click(panel.actionButton)
+    tick()
+    check(cleared == 1 and panel._fState == "standby" and same(panel._fChipC, T.text2)
+        and same(panel.actionButton.backgroundColor, T.accentFill) and same(panel._fPathC, T.text3),
+        "(fsd-standby) Done clears the arrival; standby is grey with a blue start key")
+
+    click(panel.collapseButton)
+    tick()
+    local visibleKids = 0
+    for i = 1, #panel.children do if panel.children[i]:isVisible() then visibleKids = visibleKids + 1 end end
+    check(panel._collapsed and panel.height < 40 and visibleKids == 1 and panel.collapseButton.width == panel.width
+        and panel.y + panel.height + 8 == ts.y and panel._fPill ~= nil,
+        "(fsd-pill) the card folds into one chip above the dashboard; tapping it expands")
+    click(panel.collapseButton)
+    tick()
+    check(not panel._collapsed and panel.height == H, "(fsd-pill) expanding restores the card")
+
+    -- 儀表 MOD 的充電卡（chargeCardRect，舊版沒有）開著：卡片疊在它上方；放不下就當場收成晶片、不寫 modData，關掉就展開回來。
+    local cc = { x = 700, y = 760, w = 520, h = 200, visible = true }
+    local mdWas = player._md.MDADHudCollapsed
+    MinidoracatTeslaAPI.chargeCardRect = function() return cc.x, cc.y, cc.w, cc.h, cc.visible end
+    tick()
+    check(not panel._collapsed and panel.height == H and panel.y + H + 8 == cc.y and panel.x == ts.x,
+        "(fsd-charge) an open charge card pushes the FSD card above it (" .. panel.y .. ")")
+    cc.y = 150
+    tick()
+    check(panel._collapsed and panel.height < 40 and panel.y + panel.height + 8 == cc.y
+        and player._md.MDADHudCollapsed == mdWas,
+        "(fsd-charge-pill) no room above the charge card: a chip above it, the player's collapse choice untouched")
+    cc.visible = false
+    tick()
+    check(not panel._collapsed and panel.height == H and panel.y + H + 8 == ts.y,
+        "(fsd-charge) closing the charge card puts the card back above the dashboard")
+    cc.visible, cc.y = true, 150
+    tick()
+
+    MinidoracatTeslaAPI = nil
+    dash.visible = true
+    tick()
+    check(not panel._fsd and panel.capTip.fsd == nil and panel.themeButton:isVisible() and not panel._collapsed,
+        "(fsd) other cars keep the four themes; a chip forced by the charge card does not follow the player out")
+    state.active, state.token = true, "follow"
+    MDADFSD, MDADScene, Vector3f, MDADOverlay.trail = nil, nil, nil, nil
+    MDAD.Drive.hudArrive, MDAD.Drive.clearArrive = nil, nil
+    vehicle.getForwardVector, vehicle.getX, vehicle.getY = nil, nil, nil
+    tick()
+end
+
 check(panel._capLabelY < panel._capValueY and panel._capValueX == panel._capX
     and panel._timeLabelY == panel._capLabelY and panel._timeValueY == panel._capValueY
     and panel._timeValueX == panel._timeX and panel._timeX > panel._capX

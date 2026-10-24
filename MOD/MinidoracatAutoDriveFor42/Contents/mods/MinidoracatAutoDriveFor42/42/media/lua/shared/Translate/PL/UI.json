@@ -364,5 +364,12 @@
     "UI_MinidoracatAutoDrive_HUDTripSkippedEnd": "Pominięto: %1, podróż zakończona",
     "UI_MinidoracatAutoDrive_ShareDiagnostics": "Pomóż ulepszyć autopilota (udostępniaj diagnostykę temu serwerowi)",
     "UI_MinidoracatAutoDrive_ShareDiagnostics_tooltip": "Tylko na serwerach z włączonym zbieraniem diagnostyki. Gdy podczas jazdy na autopilocie coś pójdzie nie tak, krótkie nagranie danych jazdy (pozycja, prędkość, przeszkody, decyzje) oraz krótkie podsumowanie każdej jazdy są wysyłane na serwer, aby autor mógł znaleźć i naprawić problem.\nNic nie jest zapisywane na twoim dysku i nie ma to wpływu na grę jednoosobową. Domyślnie włączone; wyłącz, aby zrezygnować.",
-    "UI_MinidoracatAutoDrive_UploadNotice": "Ten serwer zbiera diagnostykę autopilota, by go ulepszyć. Dziękujemy! (Możesz zrezygnować w opcjach MOD-a.)"
+    "UI_MinidoracatAutoDrive_UploadNotice": "Ten serwer zbiera diagnostykę autopilota, by go ulepszyć. Dziękujemy! (Możesz zrezygnować w opcjach MOD-a.)",
+    "UI_MinidoracatAutoDrive_FsdSlowTo": "%1, zwalnia do %2 km/h",
+    "UI_MinidoracatAutoDrive_FsdBlocked": "Droga zablokowana",
+    "UI_MinidoracatAutoDrive_FsdTakeover": "Przejmij kierowanie",
+    "UI_MinidoracatAutoDrive_FsdArrived": "Na miejscu: %1",
+    "UI_MinidoracatAutoDrive_FsdArrivedNoName": "Na miejscu",
+    "UI_MinidoracatAutoDrive_FsdTripTime": "Trasa %1",
+    "UI_MinidoracatAutoDrive_FsdDone": "Gotowe"
 }

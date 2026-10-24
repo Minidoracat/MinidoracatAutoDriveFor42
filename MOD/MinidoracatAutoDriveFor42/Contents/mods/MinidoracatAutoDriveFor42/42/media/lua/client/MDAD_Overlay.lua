@@ -44,6 +44,19 @@ local trailDodge = { {}, {}, {}, {} }
 local trailN = { 0, 0, 0, 0 }
 local trailZ = { 0, 0, 0, 0 }
 local trailWidth = { 2, 2, 2, 2 }
+-- 軌跡點列照算（FSD 卡片的路徑也讀它），關閉軌跡顯示只是 render 不畫地面線（1024a）。
+local trailShow = { true, true, true, true }
+-- FSD 卡片場景來源（MDAD_Scene.lua 讀，1024a）：與軌跡同一輪覆寫的世界座標——路緣（Sensor roadLo/roadHi 沿中心線
+-- 每 SCENE_ROAD_STEP 公尺一對點）、殭屍等軟目標（Sensor zom*，前 SCENE_ZOM_MAX 個；zB＝在 ±3 減速帶內）、
+-- 車輛（Sensor sc*）。沒有 session（updatePassive）或掃描還沒完成＝三種都 0 筆。
+local SCENE_ROAD_STEP = 3
+local SCENE_ZOM_MAX = 24
+local world = {}
+for i = 1, MAX_PLAYERS do
+    world[i] = { rN = 0, rLX = {}, rLY = {}, rRX = {}, rRY = {},
+        zN = 0, zX = {}, zY = {}, zK = {}, zB = {},
+        vN = 0, vX = {}, vY = {}, vFx = {}, vFy = {}, vHL = {}, vHW = {}, vStill = {} }
+end
 
 local markers = { {}, {}, {}, {} } -- debug WorldMarkers 亦按 split-screen 槽隔離
 local markerN = { 0, 0, 0, 0 }
@@ -75,13 +88,25 @@ local function clearMarkers(playerNum)
     for i = 1, MAX_PLAYERS do clearMarkerSlot(i) end
 end
 
+local function clearSlot(slot)
+    local w = world[slot]
+    trailN[slot], w.rN, w.zN, w.vN = 0, 0, 0, 0
+end
+
 function MDADOverlay.clearTrail(playerNum)
     local slot = slotOf(playerNum)
     if slot then
-        trailN[slot] = 0
+        clearSlot(slot)
         return
     end
-    for i = 1, MAX_PLAYERS do trailN[i] = 0 end
+    for i = 1, MAX_PLAYERS do clearSlot(i) end
+end
+
+-- MDAD_Scene 讀（唯讀）：軌跡世界點列 x／y／dodge、點數，與本槽的場景來源表（見上方 world）。
+function MDADOverlay.trail(playerNum)
+    local slot = slotOf(playerNum)
+    if not slot then return nil end
+    return trailX[slot], trailY[slot], trailDodge[slot], trailN[slot], world[slot]
 end
 
 function MDADOverlay.clear(playerNum)
@@ -106,7 +131,7 @@ function MDADOverlay.render()
     local slot = slotOf(playerObj:getPlayerNum())
     if not slot then return end
     local n = trailN[slot]
-    if n < 2 then return end
+    if n < 2 or not trailShow[slot] then return end
     local xs, ys, ds = trailX[slot], trailY[slot], trailDodge[slot]
     local thickness = TRAIL_THICKNESS[trailWidth[slot]] or TRAIL_THICKNESS[2]
     local z = trailZ[slot] + TRAIL_Z_LIFT
@@ -244,16 +269,16 @@ end
 -- 沒有自駕 session 時（按下停止／手動接手之後）：仍在導航就沿導航路線畫同一條藍線，
 -- 讓玩家照著自己開。由 HUD 250ms refresh 呼叫（Driver 的 OnPlayerUpdate 在無 session 時
 -- 必須零成本）；route 取主 MOD requestRoute 的共用快取（小地圖同一條），車位投影到折線、
--- 往前 TRAIL_AHEAD。不在駕駛座、沒目標、沒路線或關閉軌跡顯示＝清空。
+-- 往前 TRAIL_AHEAD。不在駕駛座、沒目標、沒路線＝清空；關閉軌跡顯示照算（FSD 卡片要用），只是不畫地面線。
 function MDADOverlay.updatePassive(playerNum, player, vehicle)
     local slot = slotOf(playerNum)
     if not slot then return end
-    trailN[slot] = 0
+    clearSlot(slot)
     local api = MinidoracatMiniMapAPI
     if vehicle == nil or player == nil or not vehicle:isDriver(player) or type(api) ~= "table"
             or type(api.getNavTarget) ~= "function" or type(api.requestRoute) ~= "function" then return end
     local showTrajectory, width = trajectoryOptions()
-    if not showTrajectory then return end
+    trailShow[slot] = showTrajectory
     local tx, ty = api.getNavTarget(playerNum)
     if not tx then return end
     local ok, route, state = pcall(api.requestRoute, playerNum, tx, ty)
@@ -295,12 +320,65 @@ function MDADOverlay.updatePassive(playerNum, player, vehicle)
     trailZ[slot], trailWidth[slot], trailN[slot] = z - z % 1, width, n
 end
 
--- 每輪掃描完成更新軌跡快取；debugOn 只控制額外 markers，不控制一般線。
+-- FSD 卡片場景來源（world 槽）：路緣、軟目標與車輛換成世界座標。zomS／zomL 與 roadLo／roadHi 是相對 nav 中心線的
+-- (弧長, 橫向)，橫向正＝行進方向右側（同 edgeAt）；索引從追線段 idx0（fstate.idx）起、沿用上一點（掃描近→遠，lineAt
+-- 單調前進）——從 1 起找會在長路線後段每輪線性走完前綴（smoke late-index 斷言）。
+-- 路緣先用感測路面帶；帶兩緣都要在掃描帶內才成立（寬路常是 nil，Sensor finishRound），這時退用該段路線寬度
+-- （profile.segWidth＝streets.xml，中心線 ±寬/2；0＝v2/v3 不知道，該點不畫）。
+local function fillWorld(w, profile, sen, sFrom, sTo, idx0)
+    local lo, hi, sEnd = sen.roadLo, sen.roadHi, sen.scanEndS
+    local band = type(lo) == "number" and type(hi) == "number"
+    local widths = profile.segWidth
+    if type(sEnd) == "number" and (band or type(widths) == "table") then
+        if sEnd > sTo then sEnd = sTo end
+        local n, sPos, idx = 0, sFrom, idx0
+        while sPos <= sEnd do
+            local x, y, h
+            x, y, h, idx = lineAt(profile, sPos, idx)
+            if not band then
+                local sw = widths[idx]
+                hi = type(sw) == "number" and sw > 0 and sw * 0.5 or nil
+                lo = hi and -hi
+            end
+            if lo then
+                local nx, ny = -sin(h), cos(h)
+                n = n + 1
+                w.rLX[n], w.rLY[n], w.rRX[n], w.rRY[n] = x + nx * lo, y + ny * lo, x + nx * hi, y + ny * hi
+            end
+            sPos = sPos + SCENE_ROAD_STEP
+        end
+        w.rN = n
+    end
+    local zn = sen.zomN
+    if type(zn) == "number" and zn > 0 then
+        if zn > SCENE_ZOM_MAX then zn = SCENE_ZOM_MAX end
+        local idx = idx0
+        for i = 1, zn do
+            local x, y, h
+            x, y, h, idx = lineAt(profile, sen.zomS[i], idx)
+            local l = sen.zomL[i]
+            w.zX[i], w.zY[i] = x - sin(h) * l, y + cos(h) * l
+            w.zK[i] = sen.zomKind[i]
+            w.zB[i] = l >= -3 and l <= 3 -- Sensor SLOW_BAND_HALF（帶偏移 bandBias 略：只決定顏色）
+        end
+        w.zN = zn
+    end
+    local vn = sen.scN
+    if type(vn) == "number" and vn > 0 then
+        for i = 1, vn do
+            w.vX[i], w.vY[i], w.vFx[i], w.vFy[i] = sen.scX[i], sen.scY[i], sen.scFx[i], sen.scFy[i]
+            w.vHL[i], w.vHW[i], w.vStill[i] = sen.scHL[i], sen.scHW[i], sen.scStill[i]
+        end
+        w.vN = vn
+    end
+end
+
+-- 每輪掃描完成更新軌跡快取與 FSD 場景來源；debugOn 只控制額外 markers，不控制一般線。
 function MDADOverlay.update(playerNum, s, vehicle, cell, debugOn)
     local slot = slotOf(playerNum)
     if not slot then return end
     clearMarkers(playerNum)
-    trailN[slot] = 0
+    clearSlot(slot)
     if vehicle == nil then return end
     local profile = s.profile
     if type(profile) ~= "table" or profile.ready ~= true then return end
@@ -308,31 +386,31 @@ function MDADOverlay.update(playerNum, s, vehicle, cell, debugOn)
     z = z - z % 1
 
     local showTrajectory, width = trajectoryOptions()
-    trailWidth[slot] = width
-    if showTrajectory then
-        local sFrom = s.lastSNow
-        if type(sFrom) ~= "number" then sFrom = 0 end
-        local sTo = sFrom + TRAIL_AHEAD
-        if sTo > profile.length then sTo = profile.length end
-        local xs, ys, ds = trailX[slot], trailY[slot], trailDodge[slot]
-        local n = 0
-        local sPos = sFrom
-        local segIdx = s.fstate.idx
-        while sPos <= sTo do
-            local x, y, dodging
-            x, y, dodging, segIdx = trailPoint(profile, s.fstate, sPos, segIdx)
-            n = n + 1
-            xs[n], ys[n], ds[n] = x, y, dodging
-            sPos = sPos + TRAIL_STEP
-        end
-        if n == 1 and sTo > sFrom then
-            local x, y, dodging = trailPoint(profile, s.fstate, sTo, segIdx)
-            n = 2
-            xs[n], ys[n], ds[n] = x, y, dodging
-        end
-        trailZ[slot] = z
-        trailN[slot] = n
+    trailWidth[slot], trailShow[slot] = width, showTrajectory
+    local sFrom = s.lastSNow
+    if type(sFrom) ~= "number" then sFrom = 0 end
+    local sTo = sFrom + TRAIL_AHEAD
+    if sTo > profile.length then sTo = profile.length end
+    local xs, ys, ds = trailX[slot], trailY[slot], trailDodge[slot]
+    local n = 0
+    local sPos = sFrom
+    local segIdx = s.fstate.idx
+    while sPos <= sTo do
+        local x, y, dodging
+        x, y, dodging, segIdx = trailPoint(profile, s.fstate, sPos, segIdx)
+        n = n + 1
+        xs[n], ys[n], ds[n] = x, y, dodging
+        sPos = sPos + TRAIL_STEP
     end
+    if n == 1 and sTo > sFrom then
+        local x, y, dodging = trailPoint(profile, s.fstate, sTo, segIdx)
+        n = 2
+        xs[n], ys[n], ds[n] = x, y, dodging
+    end
+    trailZ[slot] = z
+    trailN[slot] = n
+    local sen = s.sensor
+    if type(sen) == "table" and sen.ready == true then fillWorld(world[slot], profile, sen, sFrom, sTo, s.fstate.idx) end
 
     if debugOn ~= true or type(getWorldMarkers) ~= "function" or cell == nil then return end
 
