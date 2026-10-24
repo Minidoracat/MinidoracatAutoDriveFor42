@@ -364,5 +364,12 @@
     "UI_MinidoracatAutoDrive_HUDTripSkippedEnd": "%1 passée, trajet terminé",
     "UI_MinidoracatAutoDrive_ShareDiagnostics": "Aider à améliorer la conduite auto (partager les diagnostics avec ce serveur)",
     "UI_MinidoracatAutoDrive_ShareDiagnostics_tooltip": "Uniquement sur les serveurs qui ont activé la collecte de diagnostics. En cas de problème pendant la conduite auto, un court extrait des données de conduite (position, vitesse, obstacles, décisions) et un petit résumé de chaque trajet sont envoyés au serveur pour que l'auteur puisse trouver et corriger le problème.\nRien n'est écrit sur votre disque et cela n'a aucun effet en solo. Activé par défaut ; désactivez pour refuser.",
-    "UI_MinidoracatAutoDrive_UploadNotice": "Ce serveur collecte des diagnostics de conduite auto pour aider à l'améliorer. Merci ! (Vous pouvez refuser dans les options de MOD.)"
+    "UI_MinidoracatAutoDrive_UploadNotice": "Ce serveur collecte des diagnostics de conduite auto pour aider à l'améliorer. Merci ! (Vous pouvez refuser dans les options de MOD.)",
+    "UI_MinidoracatAutoDrive_FsdSlowTo": "%1, ralentit à %2 km/h",
+    "UI_MinidoracatAutoDrive_FsdBlocked": "Voie bloquée",
+    "UI_MinidoracatAutoDrive_FsdTakeover": "Reprenez la main",
+    "UI_MinidoracatAutoDrive_FsdArrived": "Arrivé : %1",
+    "UI_MinidoracatAutoDrive_FsdArrivedNoName": "Arrivé",
+    "UI_MinidoracatAutoDrive_FsdTripTime": "Trajet %1",
+    "UI_MinidoracatAutoDrive_FsdDone": "Terminé"
 }

@@ -6302,6 +6302,11 @@ checkEq(#halos, 1, "抵達提示一次")
 checkEq(haloKey(), DKEY.ARRIVED, "抵達提示 Arrived")
 checkEq(halos[1] and halos[1].kind, "good", "抵達是綠字")
 checkEq(drive.lastVoice(), "arrive", "停妥開口 arrive")
+-- (fsd-arrive) 1024a FSD 卡片「已抵達」：停妥抵達記下那台車；換車不顯示；新的一趟接上才清（下面重新啟動那段驗）。
+--   違規證明：拿掉 Driver 到站段的 Drive.noteArrive＝(fsd-arrive) 紅；commitSession 不清＝(fsd-arrive-clear) 紅。
+checkTrue(MDAD.Drive.hudArrive(0, dveh) ~= nil, "(fsd-arrive) 停妥抵達記下抵達紀錄")
+checkTrue(MDAD.Drive.hudArrive(0, { getId = function() return dveh:getId() + 7 end }) == nil,
+    "(fsd-arrive-veh) 換開別台車不顯示抵達")
 dveh._stopped = false
 
 -- 煞停途中玩家自己踩煞車：立刻交還，不跟他搶（已送出的 forceBrake 1 秒後自行失效）
@@ -6310,6 +6315,7 @@ dveh._x, dveh._y = 0, 0
 drive.nav.route = newRoute(8, 0, 0, 4, 0)
 checkTrue(MDAD.Drive.start(dp), "重新啟動以再測一次抵達")
 driveTick(dp, dveh)
+checkTrue(MDAD.Drive.hudArrive(0, dveh) == nil, "(fsd-arrive-clear) 新的一趟接上就清掉抵達紀錄")
 dveh._x = 26
 driveTick(dp, dveh)
 checkTrue(MDAD.Drive.isActive(0), "已進入煞停")
@@ -11823,6 +11829,68 @@ function drive.scenarioPassiveTrail()
     MinidoracatMiniMapAPI = savedApi
 end
 drive.scenarioPassiveTrail()
+
+-- (fsd-world) 1024a FSD 卡片的場景來源（MDADOverlay.update 的 world 槽、MDADOverlay.trail）：路緣沿中心線每 3m 一對到掃描
+--   終點、軟目標前 24 個換世界座標（橫向正＝行進方向右側）並標減速帶、車輛照抄 Sensor sc*；關閉軌跡顯示照算點列、只是
+--   不畫地面線；clear 清空。Sensor.pushSceneVeh：上限 8、停著旗標、extents 讀不到退一般轎車、車頭向量讀不到整筆不記。
+--   違規證明：fillWorld 不夾 24＝(fsd-world-zom) 紅；橫向號誌反了＝(fsd-world-zom) 紅；render 不看 trailShow＝(fsd-world-hidden) 紅。
+function drive.scenarioFsdWorld()
+    scenario("FSD 卡片場景來源：路緣／軟目標／車輛換世界座標、上限、關閉軌跡照算、清除")
+    local profile = { ready = true, length = 100, n = 2, s = { 0, 100 }, x = { 0, 100 }, y = { 0, 0 },
+        segLen = { 100 }, segH = { 0 } }
+    local zs, zl, zk = {}, {}, {}
+    for i = 1, 30 do zs[i], zl[i], zk[i] = 11 + i, i == 2 and 4 or 2, i == 3 and "corpse" or "zombie" end
+    local sen = { ready = true, roadLo = -3, roadHi = 3.5, scanEndS = 60, zomN = 30, zomS = zs, zomL = zl, zomKind = zk,
+        scN = 1, scX = { 40 }, scY = { 1 }, scFx = { 1 }, scFy = { 0 }, scHL = { 2.3 }, scHW = { 0.9 }, scStill = { true } }
+    local s = { profile = profile, fstate = { idx = 1, laneBias = 0 }, sensor = sen, lastSNow = 10 }
+    local car = { getZ = function() return 0 end }
+    drive.trajectoryVisible = false
+    MDADOverlay.update(0, s, car, nil, false)
+    local xs, ys, _, n, w = MDADOverlay.trail(0)
+    checkTrue(n == 35 and xs[1] == 10 and ys[1] == 0 and math.abs(xs[n] - 61) < 1e-9,
+        "(fsd-world-hidden) 關閉軌跡顯示照算 52m 點列（" .. tostring(n) .. " 點）")
+    clearList(drive.worldLines)
+    drive.renderPlayerNum = 0
+    fire("OnPostRender")
+    checkEq(#drive.worldLines, 0, "(fsd-world-hidden) 關閉軌跡顯示不畫地面線")
+    local function near(a, b) return type(a) == "number" and math.abs(a - b) < 1e-6 end
+    checkTrue(w.rN == 17 and near(w.rLX[1], 10) and near(w.rLY[1], -3) and near(w.rRY[1], 3.5) and near(w.rLX[17], 58),
+        "(fsd-world-road) 路緣每 3m 一對、到掃描終點（" .. tostring(w.rN) .. "、" .. tostring(w.rLX[1]) .. ","
+            .. tostring(w.rLY[1]) .. "／" .. tostring(w.rRY[1]) .. "、" .. tostring(w.rLX[17]) .. "）")
+    checkTrue(w.zN == 24 and near(w.zX[1], 12) and near(w.zY[1], 2) and w.zB[1] == true and w.zB[2] == false
+            and w.zK[3] == "corpse",
+        "(fsd-world-zom) 軟目標夾 24 個、橫向正＝行進方向右側、減速帶外標 false（" .. tostring(w.zN) .. "、y "
+            .. tostring(w.zY[1]) .. "）")
+    checkTrue(w.vN == 1 and w.vX[1] == 40 and w.vY[1] == 1 and w.vStill[1] == true, "(fsd-world-veh) 車輛照抄 Sensor")
+    drive.trajectoryVisible = true
+    MDADOverlay.clear(0)
+    _, _, _, n, w = MDADOverlay.trail(0)
+    checkTrue(n == 0 and w.rN == 0 and w.zN == 0 and w.vN == 0, "(fsd-world-clear) clear 連場景來源一起清")
+
+    local st = MDADSensor.newState()
+    local out = {}
+    function out:x() return self.vx end
+    function out:z() return self.vz end
+    local savedBV = BaseVehicle
+    BaseVehicle = { allocVector3f = function() return out end, releaseVector3f = function() end }
+    local function cv(fx, fz, ext)
+        return { getForwardVector = function(_, o) o.vx, o.vz = fx, fz return o end,
+            getScript = function() return ext and { getExtents = function() return ext end } or nil end }
+    end
+    local ext = { x = function() return 2.2 end, z = function() return 5.0 end }
+    MDADSensor.pushSceneVeh(st, cv(0, 1, ext), 5, 6, true)
+    checkTrue(st.wScN == 1 and st.wScHW[1] == 1.1 and st.wScHL[1] == 2.5 and st.wScStill[1] == true
+            and st.wScFy[1] == 1 and st.wScX[1] == 5, "(fsd-veh) 記車心、車頭向量、半寬半長、停著")
+    MDADSensor.pushSceneVeh(st, cv(1, 0, nil), 7, 8, false)
+    checkTrue(st.wScN == 2 and st.wScHW[2] == 0.9 and st.wScHL[2] == 2.3 and st.wScStill[2] == false,
+        "(fsd-veh-ext) extents 讀不到退一般轎車尺寸")
+    MDADSensor.pushSceneVeh(st, { getForwardVector = function() error("no forward") end }, 0, 0, false)
+    checkEq(st.wScN, 2, "(fsd-veh-nofwd) 車頭向量讀不到整筆不記")
+    for i = 1, 10 do MDADSensor.pushSceneVeh(st, cv(1, 0, nil), i, 0, false) end
+    checkEq(st.wScN, MDADSensor.SCENE_VEH_MAX, "(fsd-veh-cap) 每輪最多 SCENE_VEH_MAX 台")
+    BaseVehicle = savedBV
+end
+drive.scenarioFsdWorld()
 checkEq(#(eventHandlers.OnPostRender or {}), drive.overlayRenderBefore + 1,
     "Overlay 只註冊一個 OnPostRender 世界線 renderer")
 checkTrue(type(MDADFollower.OV_STEP) == "number" and MDADFollower.OV_STEP > 0,

@@ -981,6 +981,7 @@ local CAP_FACE_HOVER = { r = 0.34, g = 0.34, b = 0.32, a = 0.97 }
 local CAP_FACE_DOWN = { r = 0.10, g = 0.10, b = 0.10, a = 0.95 }
 local CAP_LIGHT = { r = 0.55, g = 0.55, b = 0.52, a = 0.9 }
 function MDADHUDCapZone:render()
+    if self.fsd then return MDADFSD.drawCap(self) end -- FSD 卡片（MDAD_FSD.lua）：大字數值，不畫立體斜面
     local w, h, on = self.width, self.height, self.pinned
     local face = on and CAP_FACE_DOWN or self.mouseOver and CAP_FACE_HOVER or CAP_FACE
     local hi, lo = on and C.shadow or CAP_LIGHT, on and CAP_LIGHT or C.shadow
@@ -1681,6 +1682,13 @@ function MDADHUDPanel:applyLayout()
     self._etaLabel = getText("UI_MinidoracatAutoDrive_HUDEta")
     self._gearLabel = getText("UI_MinidoracatAutoDrive_HUDGear")
     local m = measure(self, scale)
+    -- 貼著換掉原版儀表的選配 MOD（Tesla 儀表）：改畫 FSD 卡片（MDAD_FSD.lua），主題不適用。其他車照舊走下面四主題。
+    self._fsd = false
+    self.capTip.fsd = nil
+    if self._tsX and MDADFSD then
+        self._style = STYLE_METAL
+        return MDADFSD.layout(self, m)
+    end
     -- 側掛的量測與擺位自成一套（無精簡單行／收合徽章分支），共用上面四個標籤字串；
     -- 儀表板讓出的框放不下側翼時，它自己退回下面這套上掛版面。
     if self._style == STYLE_WINGS then return self:layoutWings(scale, m) end
@@ -2043,6 +2051,7 @@ function MDADHUDPanel:refreshSpeedTip(token, cruise, now)
     if type(Drive.speedInfo) == "function" then
         vmax, sandMax, gearCap, target, reason, curveCap, visCap, factorCap, factorReason =
             Drive.speedInfo(self.playerNum, self.vehicle)
+        self._targetKmh = target -- FSD 卡片「減速到 N km/h」
     end
     self._speedPin = speedDetails()
     self._pinRows = nil
@@ -2358,6 +2367,7 @@ end
 -- 低頻讀取）。要顯示的字串在這裡一次建好，之後每輪 refresh 與每幀 prerender 都只用快取。
 function MDADHUDPanel:readItinerary(api, phase)
     self._tripCounter, self._tripFull, self._tripShort, self._tripTip = nil, nil, nil, nil
+    self._tripLabel, self._tripTotal = nil, nil
     self._tripAutoContinue, self._tripSnapRevision = nil, nil
     self._tripRemaining, self._tripStatusKey, self._tripReasonKey = 0, nil, nil
     if not (api and phase) then return end
@@ -2422,6 +2432,7 @@ function MDADHUDPanel:readItinerary(api, phase)
     local counter = tostring(index) .. "/" .. tostring(total)
     self._tripCounter = counter
     local label = stopName(stop) or counter
+    self._tripLabel, self._tripTotal = stopName(stop), total -- FSD 卡片的目的地名稱與站數
     self._tripShort = phase == "waiting" and nextName
         and getText("UI_MinidoracatAutoDrive_HUDTripTargets", label, nextName) or label
     local message
@@ -2644,6 +2655,7 @@ function MDADHUDPanel:dashboardAttachedAndVisible()
 end
 
 function MDADHUDPanel:reposition()
+    if self._fsd then return MDADFSD.reposition(self) end
     local playerNum = self.playerNum
     local left = getPlayerScreenLeft(playerNum)
     local top = getPlayerScreenTop(playerNum)
@@ -2772,7 +2784,7 @@ function MDADHUDPanel:refresh(now)
     local etaSec, etaDist = nil, nil
     if self._active then etaSec, etaDist = Drive.etaSeconds(self.playerNum) end
     local etaText, etaMin = HUD.etaText(etaSec, self._etaMin)
-    self._etaText, self._etaMin = etaText or "--", etaMin
+    self._etaText, self._etaMin, self._etaDist = etaText or "--", etaMin, etaDist
     self._etaTip = etaText and HUD.etaTipText(etaDist) or nil
     self._blocked = token == "blocked"
     self:refreshSpeedTip(token, cap, now)
@@ -2796,6 +2808,7 @@ function MDADHUDPanel:refresh(now)
     end
     self.volumeSlider.valueText = tostring(self.volumeSlider.value)
     self:updateButtons()
+    if self._fsd then MDADFSD.refresh(self, token, now) end
 end
 
 function MDADHUDPanel:updateButtons()
@@ -2955,6 +2968,8 @@ function MDADHUDPanel:update()
     if self:hideIfEscapeMenu() then return end
     if not self:syncDashboardBeforeRefresh() then return end
     local now = getTimestampMs()
+    -- FSD 卡片的場景快照 0.1 秒一份（2026-10-24 裁定的 10 Hz；MDAD_Scene.lua），不受下面 250ms 閘門限制。
+    if self._fsd and self.vehicle and self:isVisible() then MDADFSD.update(self, now) end
     if not self._forceRefresh and now < self._nextMs then return end
     self:refresh(now)
 end
@@ -3071,6 +3086,7 @@ function MDADHUDPanel:prerender()
         self._forceRefresh = true
         return
     end
+    if self._fsd then return MDADFSD.draw(self) end
     self:drawBackground()
     if self._style == STYLE_WINGS then return self:renderWings() end
     dot(self, self._dotX, self._dotY, 8, self._statusColor)
@@ -3120,6 +3136,11 @@ function MDADHUDPanel:prerender()
         self:drawText(self._energyText, self._energyX, self._bottomTextY,
             C.muted.r, C.muted.g, C.muted.b, C.muted.a, UIFont.Small)
     end
+end
+
+-- 子元件之後（UIElement.java:1615-1635）：FSD 卡片的選中底線要蓋在按鈕上。
+function MDADHUDPanel:render()
+    if self._fsd then MDADFSD.overlay(self) end
 end
 
 function MDADHUDPanel:onGear(button)
@@ -3217,6 +3238,7 @@ function MDADHUDPanel:onContinuationPick(enabled, expectedRevision)
 end
 
 function MDADHUDPanel:onAction()
+    if self._fsdDone then return MDADFSD.done(self) end -- FSD 卡片「已抵達」的「完成」：收掉抵達紀錄，不發車
     local now = getTimestampMs()
     if self._tripAction then
         -- 行程接續只在玩家明確按下時發生：Driver 自己 start→備路線／剖面→claim→控制。
@@ -3529,6 +3551,7 @@ local function onPlayerDeath(playerObj)
 end
 
 HUD.Panel = MDADHUDPanel
+HUD.setGlyph = setGlyph -- FSD 卡片（MDAD_FSD.lua）沿用同一套圖示退文字規則
 HUD.ensure = ensurePanel
 HUD.trajectoryVisible = trajectoryVisible
 HUD.trajectoryWidth = trajectoryWidth

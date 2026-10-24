@@ -364,5 +364,12 @@
     "UI_MinidoracatAutoDrive_HUDTripSkippedEnd": "Saltado %1, viaje completado",
     "UI_MinidoracatAutoDrive_ShareDiagnostics": "Ayuda a mejorar la conducción automática (compartir diagnósticos con este servidor)",
     "UI_MinidoracatAutoDrive_ShareDiagnostics_tooltip": "Solo en servidores que activaron la recopilación de diagnósticos. Cuando algo sale mal durante la conducción automática, se envían al servidor un clip corto de datos de conducción (posición, velocidad, obstáculos, decisiones) y un pequeño resumen de cada trayecto para que el autor pueda encontrar y corregir el problema.\nNo se escribe nada en tu disco y no tiene efecto en partidas de un jugador. Activado por defecto; desactívalo para excluirte.",
-    "UI_MinidoracatAutoDrive_UploadNotice": "Este servidor recopila diagnósticos de conducción automática para mejorarla. ¡Gracias! (Puedes excluirte en las opciones del MOD)."
+    "UI_MinidoracatAutoDrive_UploadNotice": "Este servidor recopila diagnósticos de conducción automática para mejorarla. ¡Gracias! (Puedes excluirte en las opciones del MOD).",
+    "UI_MinidoracatAutoDrive_FsdSlowTo": "%1, frenando a %2 km/h",
+    "UI_MinidoracatAutoDrive_FsdBlocked": "Camino bloqueado",
+    "UI_MinidoracatAutoDrive_FsdTakeover": "Toma el control",
+    "UI_MinidoracatAutoDrive_FsdArrived": "Llegaste: %1",
+    "UI_MinidoracatAutoDrive_FsdArrivedNoName": "Llegaste",
+    "UI_MinidoracatAutoDrive_FsdTripTime": "Viaje %1",
+    "UI_MinidoracatAutoDrive_FsdDone": "Listo"
 }

@@ -364,5 +364,12 @@
     "UI_MinidoracatAutoDrive_HUDTripSkippedEnd": "%1 übersprungen, Tour abgeschlossen",
     "UI_MinidoracatAutoDrive_ShareDiagnostics": "Autopilot verbessern helfen (Diagnose mit diesem Server teilen)",
     "UI_MinidoracatAutoDrive_ShareDiagnostics_tooltip": "Nur auf Servern mit aktivierter Diagnosesammlung. Geht beim Autopilot-Fahren etwas schief, werden ein kurzer Clip mit Fahrdaten (Position, Tempo, Hindernisse, Entscheidungen) und eine kleine Zusammenfassung jeder Fahrt an den Server gesendet, damit der Autor das Problem finden und beheben kann.\nAuf deiner Festplatte wird nichts gespeichert, und im Einzelspieler hat es keine Wirkung. Standardmäßig an; zum Widersprechen ausschalten.",
-    "UI_MinidoracatAutoDrive_UploadNotice": "Dieser Server sammelt Autopilot-Diagnosedaten, um ihn zu verbessern. Danke! (Du kannst in den MOD-Optionen widersprechen.)"
+    "UI_MinidoracatAutoDrive_UploadNotice": "Dieser Server sammelt Autopilot-Diagnosedaten, um ihn zu verbessern. Danke! (Du kannst in den MOD-Optionen widersprechen.)",
+    "UI_MinidoracatAutoDrive_FsdSlowTo": "%1, bremst auf %2 km/h",
+    "UI_MinidoracatAutoDrive_FsdBlocked": "Weg blockiert",
+    "UI_MinidoracatAutoDrive_FsdTakeover": "Bitte übernehmen",
+    "UI_MinidoracatAutoDrive_FsdArrived": "Angekommen: %1",
+    "UI_MinidoracatAutoDrive_FsdArrivedNoName": "Angekommen",
+    "UI_MinidoracatAutoDrive_FsdTripTime": "Fahrt %1",
+    "UI_MinidoracatAutoDrive_FsdDone": "Fertig"
 }

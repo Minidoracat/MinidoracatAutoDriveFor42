@@ -364,5 +364,12 @@
     "UI_MinidoracatAutoDrive_HUDTripSkippedEnd": "Pulou %1, viagem concluída",
     "UI_MinidoracatAutoDrive_ShareDiagnostics": "Ajude a melhorar a direção automática (compartilhar diagnósticos com este servidor)",
     "UI_MinidoracatAutoDrive_ShareDiagnostics_tooltip": "Só em servidores que ativaram a coleta de diagnósticos. Quando algo dá errado durante a direção automática, um clipe curto de dados de direção (posição, velocidade, obstáculos, decisões) e um pequeno resumo de cada viagem são enviados ao servidor para que o autor possa encontrar e corrigir o problema.\nNada é gravado no seu disco e não há efeito no modo de um jogador. Ligado por padrão; desligue para recusar.",
-    "UI_MinidoracatAutoDrive_UploadNotice": "Este servidor coleta diagnósticos da direção automática para melhorá-la. Obrigado! (Você pode recusar nas opções do MOD.)"
+    "UI_MinidoracatAutoDrive_UploadNotice": "Este servidor coleta diagnósticos da direção automática para melhorá-la. Obrigado! (Você pode recusar nas opções do MOD.)",
+    "UI_MinidoracatAutoDrive_FsdSlowTo": "%1, reduzindo para %2 km/h",
+    "UI_MinidoracatAutoDrive_FsdBlocked": "Caminho bloqueado",
+    "UI_MinidoracatAutoDrive_FsdTakeover": "Assuma o controle",
+    "UI_MinidoracatAutoDrive_FsdArrived": "Chegou: %1",
+    "UI_MinidoracatAutoDrive_FsdArrivedNoName": "Chegou",
+    "UI_MinidoracatAutoDrive_FsdTripTime": "Viagem %1",
+    "UI_MinidoracatAutoDrive_FsdDone": "Concluir"
 }

@@ -67,6 +67,8 @@
 --     state.rain       本輪 weather snapshot；nil＝API unknown（控制端視為 wet）
 --     state.actualSurfaceId  車身當前 floor：unknown/paved/gravel/dirt numeric id
 --     state.roundStartedAt   本輪開始時戳；與 stamp（完成）界定 immutable snapshot
+--     state.scN        FSD 卡片場景用的車輛（MDADSensor.pushSceneVeh，上限 SCENE_VEH_MAX）：scX/scY 世界車心、
+--                      scFx/scFy 世界車頭單位向量、scHL/scHW 半長／半寬（公尺）、scStill 停著＝true；只供顯示
 --
 -- ---------------------------------------------------------------------------
 -- 效能守則（step 每幀跑，且每一格都是跨 Lua↔Java 邊界的呼叫）
@@ -851,6 +853,38 @@ local function pushTraffic(state, cv, vs, vl)
     state.wTrfId[n] = cv:getId()
 end
 
+-- FSD 卡片的場景快照（MDAD_Scene.lua，1024a）：本輪每台車（停著或行進中）首次命中時記一筆世界車心、車頭向量
+-- （getForwardVector 的 x,z＝世界 x,y，同 Driver Drive.headingOf）、半長／半寬（script extents；讀不到退一般轎車
+-- TRF_FALLBACK_*）與停著與否，上限 SCENE_VEH_MAX——掃描由近而遠，收到的就是最近的幾台。只供顯示，不進
+-- hard／sig／規劃；車頭向量讀不到就整筆不記。池向量同段歸還（BaseVehicle.java:507-521）。
+MDADSensor.SCENE_VEH_MAX = 8
+function MDADSensor.pushSceneVeh(state, cv, wx, wy, still)
+    local n = state.wScN
+    local cls = BaseVehicle
+    if n >= MDADSensor.SCENE_VEH_MAX or cls == nil or type(cls.allocVector3f) ~= "function" then return end
+    local out = cls.allocVector3f()
+    if out == nil then return end
+    local fx, fy
+    if pcall(cv.getForwardVector, cv, out) then fx, fy = out:x(), out:z() end
+    cls.releaseVector3f(out)
+    if type(fx) ~= "number" or fx * 0 ~= 0 or type(fy) ~= "number" or fy * 0 ~= 0
+            or fx * fx + fy * fy < 1e-6 then return end
+    local hw, hl = TRF_FALLBACK_HALF_W, TRF_FALLBACK_HALF_L
+    local okS, script = pcall(cv.getScript, cv)
+    local okE, ext = false, nil
+    if okS and script ~= nil then okE, ext = pcall(script.getExtents, script) end
+    if okE and ext ~= nil then
+        local ex, ez = ext:x(), ext:z()
+        if type(ex) == "number" and ex > 0.6 and ex <= 6 and type(ez) == "number" and ez > 1 and ez <= 16 then
+            hw, hl = ex * 0.5, ez * 0.5
+        end
+    end
+    n = n + 1
+    state.wScN = n
+    state.wScX[n], state.wScY[n], state.wScFx[n], state.wScFy[n] = wx, wy, fx, fy
+    state.wScHL[n], state.wScHW[n], state.wScStill[n] = hl, hw, still == true
+end
+
 -- 回 boolean：這一格是不是硬障礙。軟障礙／殭屍／屍體／行進中車輛／未載入 chunk
 -- 直接就地累加到 state 的 working 欄位（回傳只有一個值才不用配置）。
 -- l＝本取樣點的橫向偏移（相對 nav 線）：**減速計數**（殭屍/屍體/軟障礙/跟車）
@@ -1024,6 +1058,7 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
             state.vehPosT[vid] = state.nowMs
             state.vehPosGen[vid] = state.gen
             state.vehStill[vid] = still
+            MDADSensor.pushSceneVeh(state, cv, vwx, vwy, still)
             -- 1013a 遙測：這趟第一次掃到這台車（自己與掛車已在上面排除）＝排進首見佇列（車心距離、停著與否），
             -- Driver collectPhys 每筆取樣取走（樣本 vfs）。最多 8 筆，取樣跟不上就丟（首見很少見，不配置）。
             -- 1017：另記他車車心相對本車的路線弧長（本步投影 − 輪首車位 wSNow）、對路線中心線的橫向，與本車當下 km/h
@@ -1279,6 +1314,7 @@ local function beginRound(state, p, sNow, vehicle, now, len, cell)
     state.wMovingVeh = false
     state.wVehAheadS = nil
     state.wVehN = 0
+    state.wScN = 0
     state.wTrfN = 0
     state.wTrfOverflow = false
     state.wUnloaded = false
@@ -1428,6 +1464,14 @@ local function finishRound(state, now)
     state.trfN = state.wTrfN
     state.trfOverflow = state.wTrfOverflow == true
     state.vehN = state.wVehN
+    state.scX, state.wScX = state.wScX, state.scX
+    state.scY, state.wScY = state.wScY, state.scY
+    state.scFx, state.wScFx = state.wScFx, state.scFx
+    state.scFy, state.wScFy = state.wScFy, state.scFy
+    state.scHL, state.wScHL = state.wScHL, state.scHL
+    state.scHW, state.wScHW = state.wScHW, state.scHW
+    state.scStill, state.wScStill = state.wScStill, state.scStill
+    state.scN = state.wScN
     state.unloaded = state.wUnloaded
     state.unloadedS = state.wUnloadedS
     state.gateS, state.gateX, state.gateY, state.gateHard = state.wGateS, state.wGateX, state.wGateY, state.wGateHard
@@ -1541,6 +1585,9 @@ function MDADSensor.newState()
         wVehAheadS = nil,  -- 最近「行進中」前車弧長（本輪 working）
         wTrfN = 0, wTrfOverflow = false, -- 行進中車輛（working；每台一筆，見 pushTraffic）
         wTrfS0 = {}, wTrfS1 = {}, wTrfL0 = {}, wTrfL1 = {}, wTrfVs = {}, wTrfVl = {}, wTrfT = {}, wTrfId = {},
+        -- FSD 卡片場景（MDADSensor.pushSceneVeh，1024a）：本輪每台車一筆世界車心／車頭向量／半長半寬／停著，只供顯示
+        wScN = 0, wScX = {}, wScY = {}, wScFx = {}, wScFy = {}, wScHL = {}, wScHW = {}, wScStill = {},
+        scN = 0, scX = {}, scY = {}, scFx = {}, scFy = {}, scHL = {}, scHW = {}, scStill = {},
         nowMs = 0,          -- 本幀時戳（step 寫入；scanCell 算車速用）
         wUnloaded = false,
         -- Knox Pass 會開的門（gateCell）：本輪最近一格的弧長／世界格心／是否當硬物（false／"near"／"latch"）；
@@ -1671,6 +1718,7 @@ function MDADSensor.reset(state)
     state.wVehN = 0
     state.wTrfN, state.wTrfOverflow = 0, false
     state.trfN, state.trfOverflow = 0, false
+    state.wScN, state.scN = 0, 0
     for k in pairs(state.vehOutlineGen) do state.vehOutlineGen[k] = 0 end
 
     state.hardN = 0

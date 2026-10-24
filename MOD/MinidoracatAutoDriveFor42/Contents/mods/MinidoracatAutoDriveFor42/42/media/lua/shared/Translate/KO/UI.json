@@ -364,5 +364,12 @@
     "UI_MinidoracatAutoDrive_HUDTripSkippedEnd": "%1 건너뜀, 여정 완료",
     "UI_MinidoracatAutoDrive_ShareDiagnostics": "자율주행 개선에 참여(이 서버와 진단 데이터 공유)",
     "UI_MinidoracatAutoDrive_ShareDiagnostics_tooltip": "진단 데이터 수집을 켠 서버에서만 작동합니다. 자율주행 중 문제가 생기면 짧은 주행 데이터 클립(위치, 속도, 장애물, 판단)과 주행마다 작은 요약이 서버로 전송되어 제작자가 문제를 찾아 고칠 수 있습니다.\n디스크에는 아무것도 기록하지 않으며 싱글플레이에는 영향이 없습니다. 기본적으로 켜져 있으며, 끄면 참여하지 않습니다.",
-    "UI_MinidoracatAutoDrive_UploadNotice": "이 서버는 자율주행 개선을 위해 진단 데이터를 수집합니다. 감사합니다! (MOD 설정에서 참여를 거부할 수 있습니다.)"
+    "UI_MinidoracatAutoDrive_UploadNotice": "이 서버는 자율주행 개선을 위해 진단 데이터를 수집합니다. 감사합니다! (MOD 설정에서 참여를 거부할 수 있습니다.)",
+    "UI_MinidoracatAutoDrive_FsdSlowTo": "%1, %2 km/h로 감속",
+    "UI_MinidoracatAutoDrive_FsdBlocked": "전방 막힘",
+    "UI_MinidoracatAutoDrive_FsdTakeover": "직접 운전하세요",
+    "UI_MinidoracatAutoDrive_FsdArrived": "도착: %1",
+    "UI_MinidoracatAutoDrive_FsdArrivedNoName": "도착",
+    "UI_MinidoracatAutoDrive_FsdTripTime": "주행 %1",
+    "UI_MinidoracatAutoDrive_FsdDone": "완료"
 }

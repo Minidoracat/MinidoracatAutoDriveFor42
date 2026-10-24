@@ -364,5 +364,12 @@
     "UI_MinidoracatAutoDrive_HUDTripSkippedEnd": "Atlandı: %1, yolculuk tamamlandı",
     "UI_MinidoracatAutoDrive_ShareDiagnostics": "Otomatik sürüşü geliştirmeye yardım edin (tanılamaları bu sunucuyla paylaş)",
     "UI_MinidoracatAutoDrive_ShareDiagnostics_tooltip": "Yalnızca tanılama toplamayı etkinleştirmiş sunucularda geçerlidir. Otomatik sürüş sırasında bir sorun olduğunda kısa bir sürüş verisi kesiti (konum, hız, engeller, kararlar) ve her sürüşün küçük bir özeti sunucuya gönderilir; böylece yazar sorunu bulup düzeltebilir.\nDiskinize hiçbir şey yazılmaz ve tek oyunculu oyunda hiçbir etkisi yoktur. Varsayılan olarak açık; katılmamak için kapatın.",
-    "UI_MinidoracatAutoDrive_UploadNotice": "Bu sunucu, otomatik sürüşü geliştirmeye yardımcı olmak için tanılama verisi topluyor. Teşekkürler! (MOD seçeneklerinden katılmamayı seçebilirsiniz.)"
+    "UI_MinidoracatAutoDrive_UploadNotice": "Bu sunucu, otomatik sürüşü geliştirmeye yardımcı olmak için tanılama verisi topluyor. Teşekkürler! (MOD seçeneklerinden katılmamayı seçebilirsiniz.)",
+    "UI_MinidoracatAutoDrive_FsdSlowTo": "%1, %2 km/s hıza düşüyor",
+    "UI_MinidoracatAutoDrive_FsdBlocked": "Yol kapalı",
+    "UI_MinidoracatAutoDrive_FsdTakeover": "Kontrolü devral",
+    "UI_MinidoracatAutoDrive_FsdArrived": "Varıldı: %1",
+    "UI_MinidoracatAutoDrive_FsdArrivedNoName": "Varıldı",
+    "UI_MinidoracatAutoDrive_FsdTripTime": "Yolculuk %1",
+    "UI_MinidoracatAutoDrive_FsdDone": "Tamam"
 }
