@@ -321,18 +321,30 @@ function MDADOverlay.updatePassive(playerNum, player, vehicle)
 end
 
 -- FSD 卡片場景來源（world 槽）：路緣、軟目標與車輛換成世界座標。zomS／zomL 與 roadLo／roadHi 是相對 nav 中心線的
--- (弧長, 橫向)，橫向正＝行進方向右側（同 edgeAt）；索引沿用上一點（掃描近→遠，lineAt 單調前進）。
-local function fillWorld(w, profile, sen, sFrom, sTo)
+-- (弧長, 橫向)，橫向正＝行進方向右側（同 edgeAt）；索引從追線段 idx0（fstate.idx）起、沿用上一點（掃描近→遠，lineAt
+-- 單調前進）——從 1 起找會在長路線後段每輪線性走完前綴（smoke late-index 斷言）。
+-- 路緣先用感測路面帶；帶兩緣都要在掃描帶內才成立（寬路常是 nil，Sensor finishRound），這時退用該段路線寬度
+-- （profile.segWidth＝streets.xml，中心線 ±寬/2；0＝v2/v3 不知道，該點不畫）。
+local function fillWorld(w, profile, sen, sFrom, sTo, idx0)
     local lo, hi, sEnd = sen.roadLo, sen.roadHi, sen.scanEndS
-    if type(lo) == "number" and type(hi) == "number" and type(sEnd) == "number" then
+    local band = type(lo) == "number" and type(hi) == "number"
+    local widths = profile.segWidth
+    if type(sEnd) == "number" and (band or type(widths) == "table") then
         if sEnd > sTo then sEnd = sTo end
-        local n, sPos, idx = 0, sFrom, nil
+        local n, sPos, idx = 0, sFrom, idx0
         while sPos <= sEnd do
             local x, y, h
             x, y, h, idx = lineAt(profile, sPos, idx)
-            local nx, ny = -sin(h), cos(h)
-            n = n + 1
-            w.rLX[n], w.rLY[n], w.rRX[n], w.rRY[n] = x + nx * lo, y + ny * lo, x + nx * hi, y + ny * hi
+            if not band then
+                local sw = widths[idx]
+                hi = type(sw) == "number" and sw > 0 and sw * 0.5 or nil
+                lo = hi and -hi
+            end
+            if lo then
+                local nx, ny = -sin(h), cos(h)
+                n = n + 1
+                w.rLX[n], w.rLY[n], w.rRX[n], w.rRY[n] = x + nx * lo, y + ny * lo, x + nx * hi, y + ny * hi
+            end
             sPos = sPos + SCENE_ROAD_STEP
         end
         w.rN = n
@@ -340,7 +352,7 @@ local function fillWorld(w, profile, sen, sFrom, sTo)
     local zn = sen.zomN
     if type(zn) == "number" and zn > 0 then
         if zn > SCENE_ZOM_MAX then zn = SCENE_ZOM_MAX end
-        local idx = nil
+        local idx = idx0
         for i = 1, zn do
             local x, y, h
             x, y, h, idx = lineAt(profile, sen.zomS[i], idx)
@@ -398,7 +410,7 @@ function MDADOverlay.update(playerNum, s, vehicle, cell, debugOn)
     trailZ[slot] = z
     trailN[slot] = n
     local sen = s.sensor
-    if type(sen) == "table" and sen.ready == true then fillWorld(world[slot], profile, sen, sFrom, sTo) end
+    if type(sen) == "table" and sen.ready == true then fillWorld(world[slot], profile, sen, sFrom, sTo, s.fstate.idx) end
 
     if debugOn ~= true or type(getWorldMarkers) ~= "function" or cell == nil then return end
 

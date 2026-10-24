@@ -11862,6 +11862,17 @@ function drive.scenarioFsdWorld()
         "(fsd-world-zom) 軟目標夾 24 個、橫向正＝行進方向右側、減速帶外標 false（" .. tostring(w.zN) .. "、y "
             .. tostring(w.zY[1]) .. "）")
     checkTrue(w.vN == 1 and w.vX[1] == 40 and w.vY[1] == 1 and w.vStill[1] == true, "(fsd-world-veh) 車輛照抄 Sensor")
+    -- 感測路面帶不成立（寬路兩緣不在掃描帶內＝nil）：退用路段寬度 ±寬/2；寬度 0（v2/v3）不畫
+    sen.roadLo, sen.roadHi, profile.segWidth = nil, nil, { 12 }
+    MDADOverlay.update(0, s, car, nil, false)
+    _, _, _, _, w = MDADOverlay.trail(0)
+    checkTrue(w.rN == 17 and near(w.rLY[1], -6) and near(w.rRY[1], 6),
+        "(fsd-world-width) 路面帶 nil 時路緣退用路段寬度（" .. tostring(w.rN) .. "、" .. tostring(w.rLY[1]) .. "）")
+    profile.segWidth[1] = 0
+    MDADOverlay.update(0, s, car, nil, false)
+    _, _, _, _, w = MDADOverlay.trail(0)
+    checkEq(w.rN, 0, "(fsd-world-width0) 路段寬度不明且無路面帶＝不畫路緣")
+    sen.roadLo, sen.roadHi, profile.segWidth = -3, 3.5, nil
     drive.trajectoryVisible = true
     MDADOverlay.clear(0)
     _, _, _, n, w = MDADOverlay.trail(0)
@@ -17246,7 +17257,9 @@ scenario("Phase E：v4 strict metadata、adaptive getter cache、traction reset�
     checkTrue(prefixReads * 2 < 250,
         "late-index snapshot only binary-searches the route prefix, never walks it; prefixReads="
         .. prefixReads)
-    checkTrue(sReads < 1500,
+    -- 1024a：FSD 卡片場景路緣（寬路退用路段寬度，52m 內每 3m 一次 lineAt）在本 fixture 加 67 次讀取（1471→1538），
+    -- 仍是局部視距內的常數；線性走前綴由上一條 prefixReads 擋。
+    checkTrue(sReads < 1600,
         "late-index snapshot reads remain bounded by local horizons; reads=" .. sReads)
     MDAD.Drive.stop(0, nil)
 
