@@ -470,11 +470,15 @@ local function drawScene(p, snap, now)
                 LX[i], LY[i] = proj(mv(xs[i] - nx, ys[i] - ny))
                 RX[i], RY[i] = proj(mv(xs[i] + nx, ys[i] + ny))
             end
+            -- 軌跡起點是上一輪掃描的 lastSNow，車已往前開（70 km/h 一輪約 5m）：遠端已在車心後方的段不畫，
+            -- 跨過車心的那段壓在自車底下（實機 1024a4 截圖：藍帶從車底一路畫到場景下緣）
             local pc, pa, dodge = p._fPathC, p._fPathA, snap.pathDodge
             for i = 1, n - 1 do
-                local d = dodge[i] or dodge[i + 1]
-                poly(p, LX[i], LY[i], RX[i], RY[i], RX[i + 1], RY[i + 1], LX[i + 1], LY[i + 1],
-                    d and T.accent or pc, d and 0.75 or pa)
+                if LY[i + 1] + RY[i + 1] < pyE + pyE then
+                    local d = dodge[i] or dodge[i + 1]
+                    poly(p, LX[i], LY[i], RX[i], RY[i], RX[i + 1], RY[i + 1], LX[i + 1], LY[i + 1],
+                        d and T.accent or pc, d and 0.75 or pa)
+                end
             end
         end
         local hot = p._fHot
