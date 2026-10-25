@@ -998,6 +998,8 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
     if cv ~= nil and cv ~= vehicle and cv ~= state.selfTrailer then
         -- 排除自己：SCAN_NEAR 只讓過車頭前 2 公尺，長車／拖車仍會佔到取樣格
         state.wVehN = state.wVehN + 1
+        -- 1026g T14：命中車輛格的最近弧長（vehNearS；純遙測：vehN 從 0 變正那筆＝他車首見時離車頭多遠，NC5）
+        if state.wVehNearS == nil or state.curS < state.wVehNearS then state.wVehNearS = state.curS end
         -- 跨輪位置比對（2026-08-29 路口實測定讞）：MP 半更新的靜止車 isStopped
         -- 恆回 false（「假動」）→ 不進 hard → plan 永遠不會規劃繞過它的縫，
         -- 跟車軌把車按在原地等一台永遠不動的「行進車」讓路（blocked 摘要
@@ -1313,7 +1315,7 @@ local function beginRound(state, p, sNow, vehicle, now, len, cell)
     state.wCorpseNearS, state.wSoftNearS = nil, nil
     state.wMovingVeh = false
     state.wVehAheadS = nil
-    state.wVehN = 0
+    state.wVehN, state.wVehNearS = 0, nil
     state.wScN = 0
     state.wTrfN = 0
     state.wTrfOverflow = false
@@ -1463,7 +1465,7 @@ local function finishRound(state, now)
     state.trfId, state.wTrfId = state.wTrfId, state.trfId
     state.trfN = state.wTrfN
     state.trfOverflow = state.wTrfOverflow == true
-    state.vehN = state.wVehN
+    state.vehN, state.vehNearS = state.wVehN, state.wVehNearS
     state.scX, state.wScX = state.wScX, state.scX
     state.scY, state.wScY = state.wScY, state.scY
     state.scFx, state.wScFx = state.wScFx, state.scFx
@@ -1647,6 +1649,7 @@ function MDADSensor.newState()
         ready = false,
         vehN = 0,           -- 上輪掃描帶內車輛命中格數（格級幾何查詢；遙測與推撞 gate 用）
         wVehN = 0,
+        vehNearS = nil, wVehNearS = nil, -- 1026g：上輪命中車輛格的最近弧長（遙測 sen.vehNearS）
         -- 跨輪車輛位置快照（vehicleId 鍵、gen 過期標記——假動判定用；常駐
         -- 不清，鍵數＝見過的車輛數量級，值全為數字）
         vehPosX = {}, vehPosY = {}, vehPosGen = {}, vehStill = {},
@@ -1714,8 +1717,8 @@ function MDADSensor.reset(state)
     state.wRain = nil
     state.wActualSurfaceId = SURFACE_UNKNOWN
     state.wRoundStartedAt = 0
-    state.vehN = 0
-    state.wVehN = 0
+    state.vehN, state.vehNearS = 0, nil
+    state.wVehN, state.wVehNearS = 0, nil
     state.wTrfN, state.wTrfOverflow = 0, false
     state.trfN, state.trfOverflow = 0, false
     state.wScN, state.scN = 0, 0

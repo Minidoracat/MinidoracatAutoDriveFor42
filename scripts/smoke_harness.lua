@@ -413,6 +413,8 @@ ISWorldObjectContextMenu = {
 
 ISVehicleMenu = {
     onExit = function(playerObj) uiCalls.exit[#uiCalls.exit + 1] = playerObj end,
+    -- 原版關引擎入口（N 鍵／儀表／radial；ISVehicleMenu.lua:1176-1182）；Driver 載入時包一層記時間（1026g T9 kso）
+    onShutOff = function(playerObj) uiCalls.shutOff = (uiCalls.shutOff or 0) + 1 end,
 }
 
 -- 原版維修面板的兩支入口。右鍵選單改成直接呼叫它們（不再自己排 pathfind／
@@ -26973,6 +26975,129 @@ function drive.scenarioTelem1017()
     Dr.stop(0, nil)
 end
 drive.scenarioTelem1017()
+
+-- 1026g 遙測（Driver 端；只補紀錄，行為與玩家文字不變）：
+--   (eng-T9)  按 N（ISVehicleMenu.onShutOff 包一層）記時間、原版照跑；driveGate 看到引擎從不轉變成轉才記 at；熄火交還的 engine off
+--             帶 est（getEngineState 名稱）、kso（距按 N ms）、erm（距進入 Running ms）；上車時已在轉、沒按過 N＝erm／kso 缺。
+--             違規證明：包裝不呼叫原版＝(eng-T9) orig 紅；engineSeen 第一次看到就記 at＝(erm-unknown) 紅。
+--   (dbs)     Drive.dodgeHomeSrc：RETURN／鏈／斜切／軟縫／會車優先；等於常駐線時拖車 tow、靠右 keep、沙盒關 center；其他 other。
+--             違規證明：拖車不先判＝(dbs) tow 紅。
+--   (gsl)     Drive.guardBlockNote：停止線剩餘（負記 0）與以 min(承諾帽, BLOCK_APPROACH_KMH) 爬完的秒數；承諾帽 0＝gcs 缺。
+--   (lost)    路線拿不到（noroad）交還 LostRoute 前記 route phase=lost：why＝查詢結果、kind single、目標與距離。
+--             違規證明：拿掉呼叫＝(lost) 紅。
+--   (tl-T10)  towLostNote alive=true 帶 MDADTrailer.jumpAt 的 tj／tps；alive=false 不帶。
+--   (H2)      REHITCH_WAIT_MS＝7 秒（正式服停妥到 rh-found 最慢 3.3 秒）。
+function drive.scenarioTelem1026()
+    scenario("1026g 遙測：EngineOff est／kso／erm、dodge 出口 lane 來源、guard 判堵爬行預估、route lost、tow lost 拉回跳動")
+    local Dr = MDAD.Drive
+    local oldEvent, oldSample = MDADDiagnostics.event, MDADDiagnostics.sample
+    local evs = {}
+    MDADDiagnostics.event = function(_, name, a) evs[#evs + 1] = { n = name, a = a } end
+    MDADDiagnostics.sample = function() return true end
+    local function last(name, phase)
+        for i = #evs, 1, -1 do
+            local e = evs[i]
+            if e.n == name and type(e.a) == "table" and (phase == nil or e.a.phase == phase) then return e.a end
+        end
+    end
+    -- (eng-T9) 上車時引擎已在轉：erm、kso 缺；est 照記
+    Dr.engRun[0], Dr.shutOffAt[0] = nil, nil
+    dveh.getEngineState = function() return "ShuttingDown" end
+    checkTrue(armDrive(), "(eng-T9) 啟動")
+    Dr.debugSession(0).diag = true
+    dveh._engine = false
+    driveTick(dp, dveh)
+    local e = last("engine", "off")
+    checkTrue(not Dr.isActive(0) and e ~= nil and e.est == "ShuttingDown" and e.erm == nil and e.kso == nil,
+        "(erm-unknown) 一開始就在轉、沒按 N：est 照記、erm／kso 缺（實得 " .. tostring(e and e.est) .. "/"
+        .. tostring(e and e.erm) .. "/" .. tostring(e and e.kso) .. "）")
+    -- 看到不轉→轉（啟動時 driveGate 那一讀）＋5 秒後按 N、0.3 秒後熄火
+    evs = {}
+    local tOn = nowMs
+    checkTrue(armDrive(), "(eng-T9) 引擎發動後再啟動")
+    Dr.debugSession(0).diag = true
+    nowMs = nowMs + 5000
+    local calls = uiCalls.shutOff or 0
+    ISVehicleMenu.onShutOff(dp)
+    local tN = nowMs
+    nowMs = nowMs + 300
+    dveh._engine = false
+    driveTick(dp, dveh)
+    e = last("engine", "off")
+    checkTrue((uiCalls.shutOff or 0) == calls + 1, "(eng-T9) orig 包裝照呼叫原版 onShutOff")
+    checkTrue(e ~= nil and e.kso ~= nil and e.kso >= 300 and e.kso < 1000 and e.erm ~= nil and e.erm >= 5300
+        and e.erm == e.kso + (tN - tOn),
+        "(eng-T9) 按 N 0.3 秒後熄火：kso <1000、erm＝發動到熄火（實得 kso " .. tostring(e and e.kso) .. " erm "
+        .. tostring(e and e.erm) .. "）")
+    dveh._engine = true
+    dveh.getEngineState = nil
+    -- (dbs)
+    local function src(t)
+        t.fstate = t.fstate or { laneBias = t.lb or 0 }
+        return Dr.dodgeHomeSrc(t)
+    end
+    checkEq(src({ returnActive = true, returnLaneTarget = 1.5, laneChained = true }), "ret", "(dbs) RETURN 回線目標優先")
+    checkEq(src({ laneChained = true, holdLaneL = 1 }), "chain", "(dbs) 鏈式停留")
+    checkEq(src({ holdLaneL = 1, zombieLane = 1 }), "trans", "(dbs) 斜切保持")
+    checkEq(src({ zombieLane = 1, trafficLane = 2 }), "zombie", "(dbs) 殭屍軟縫")
+    checkEq(src({ trafficLane = 2 }), "traffic", "(dbs) 會車側移")
+    checkEq(src({ residentBias = 0.02, sandBias = 0, tow = {}, lb = 0 }), "tow", "(dbs) tow 拖車在常駐線（中線）")
+    checkEq(src({ residentBias = 1.5, sandBias = 1.4, lb = 1.5 }), "keep", "(dbs) 靠右常駐線")
+    checkEq(src({ residentBias = 0.1, sandBias = 0, lb = 0.12 }), "center", "(dbs) 沙盒關靠右")
+    checkEq(src({ residentBias = 1.5, sandBias = 1.4, lb = -1 }), "other", "(dbs) 重錨在車位：other")
+    -- (gsl)
+    local oldGap = Dr.blockedStopGap
+    local gapV = 25
+    Dr.blockedStopGap = function() return gapV end
+    local g = { dodgeBaseCap = 5 }
+    Dr.guardBlockNote(g, dveh)
+    checkTrue(g.gbSg == 25 and g.gbCs == 18, "(gsl) 剩 25 m、承諾帽 5 km/h：爬 18 秒（實得 " .. tostring(g.gbSg) .. "/" .. tostring(g.gbCs) .. "）")
+    g.dodgeBaseCap = 40
+    Dr.guardBlockNote(g, dveh)
+    checkTrue(g.gbCs == 4.5, "(gsl) 承諾帽超過 BLOCK_APPROACH_KMH 夾到 20（實得 " .. tostring(g.gbCs) .. "）")
+    gapV = -3
+    g.dodgeBaseCap = 0
+    Dr.guardBlockNote(g, dveh)
+    checkTrue(g.gbSg == 0 and g.gbCs == nil, "(gsl) 已過停止線記 0；承諾帽 0＝gcs 缺")
+    Dr.blockedStopGap = oldGap
+    -- (lost) 路線拿不到：交還 LostRoute 前記 route phase=lost
+    evs = {}
+    checkTrue(armDrive(), "(lost) 啟動")
+    Dr.debugSession(0).diag = true
+    local oldRoute, oldState = drive.nav.route, drive.nav.state
+    drive.nav.route, drive.nav.state = nil, "noroad"
+    for _ = 1, 40 do
+        if not Dr.isActive(0) then break end
+        nowMs = nowMs + 100
+        driveTick(dp, dveh)
+    end
+    e = last("route", "lost")
+    checkTrue(not Dr.isActive(0) and e ~= nil and e.why == "noroad" and e.kind == "single" and e.tx == 300 and e.ty == 0
+        and type(e.d) == "number" and e.d > 0,
+        "(lost) 交還前記 route lost why=noroad、目標 300,0、距離（實得 " .. tostring(e and e.why) .. "/" .. tostring(e and e.tx)
+        .. "/" .. tostring(e and e.d) .. "）")
+    drive.nav.route, drive.nav.state = oldRoute, oldState
+    -- (tl-T10)
+    local oldLS, oldLW, oldJA = MDADTrailer.lostState, MDADTrailer.lostWhere, MDADTrailer.jumpAt
+    local alive = true
+    MDADTrailer.lostState = function() return "nil", alive, "nil", 0.2, 0, 1 end
+    MDADTrailer.lostWhere = function() return nil end
+    MDADTrailer.jumpAt = function() return 0.9, 3200 end
+    local s = { diag = true, tow = { id = 7 }, towPhi = 0.1 }
+    evs = {}
+    Dr.towLostNote(s, 0, {})
+    local la = last("tow", "lost") or {}
+    alive = false
+    Dr.towLostNote(s, 0, {})
+    local lb = last("tow", "lost") or {}
+    MDADTrailer.lostState, MDADTrailer.lostWhere, MDADTrailer.jumpAt = oldLS, oldLW, oldJA
+    checkTrue(la.tj == 0.9 and la.tps == 3200 and lb.alive == false and lb.tj == nil and lb.tps == nil,
+        "(tl-T10) alive=true 帶 tj／tps，alive=false 不帶")
+    checkEq(Dr.debugTune().REHITCH_WAIT_MS, 7000, "(H2) REHITCH_WAIT_MS＝7 秒")
+    MDADDiagnostics.event, MDADDiagnostics.sample = oldEvent, oldSample
+    Dr.stop(0, nil)
+end
+drive.scenarioTelem1026()
 
 -- (chain-far) 1004a 玩家回報「繞道後判定走路邊草地，要到第一次轉彎或殭屍／屍體出現才回到路上」：鏈式停留只在
 --   常駐線前方淨空才解鏈，看的是整個感知窗——遠處還有任何擋常駐線的東西，車就沿停留 lane（常在路外）一路開，

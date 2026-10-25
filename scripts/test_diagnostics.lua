@@ -1426,9 +1426,17 @@ do
         "(1023a) segCustom present but empty writes rcu=0")
     checkEq(bigPayload.rcu, nil, "(1023a) route without segCustom (old main MOD) adds no rcu")
     bigRoute.segCustom = { [1] = true, [550] = true, [599] = true, [600] = true }
-    checkEq(MDADDiagnostics.routeSource(bigRoute, {}).rcu, 3,
-        "(1023a) rcu counts the whole route, not the truncated snapshot")
+    local bigC = MDADDiagnostics.routeSource(bigRoute, {})
+    checkEq(bigC.rcu, 3, "(1023a) rcu counts the whole route, not the truncated snapshot")
     bigRoute.segCustom = nil
+    -- 1026g T14 srcC：逐段自訂道路旗標，與 srcW 同長、同樣截斷；true 才是 1；沒 segCustom（舊主 MOD）＝不寫。
+    -- 違規證明：srcC 不截斷（用 rcu 的 n-1）＝(srcC-trunc) 紅；EK 少 srcC＝(srcC-ek) 紅。
+    checkEq(cu.srcC, "1;0;1", "(1026g) srcC flags each segment, only true counts as 1")
+    checkEq(MDADDiagnostics.routeSource({ pts = { 0, 0, 10, 0 }, segCustom = {} }, {}).srcC, "0",
+        "(1026g) segCustom present but empty writes all-zero srcC")
+    checkEq(bigPayload.srcC, nil, "(1026g) route without segCustom adds no srcC")
+    checkEq(select(2, string.gsub(bigC.srcC or "", ";", "")), 510, "(srcC-trunc) srcC truncates with srcW (511 segments)")
+    checkEq(string.sub(bigC.srcC or "", 1, 2), "1;", "(1026g) srcC first segment flagged")
 end
 MDADDiagnostics.event(0, "unstick", {
     phase = "success", eid = 3, attempt = 2, x = 10, y = 20,
@@ -1550,8 +1558,8 @@ check(string.find(physBody, '"srcS":"paved;unknown","rpt":"applied"}', 1, true) 
     "(1018a) route cutover carries main MOD patchState applied")
 checkEq(noPts.rpt, "raw", "(1018a) patchState raw recorded even without points")
 checkEq(bigPayload.rpt, nil, "(1018a) route without patchState (nav API < v4) adds no rpt")
-check(string.find(physBody, '"why":"custom"[^\n]*"rcu":2}') ~= nil,
-    "(1023a) route event keeps rcu through the EK whitelist")
+check(string.find(physBody, '"why":"custom"[^\n]*"rcu":2,"srcC":"1;0;1"}') ~= nil,
+    "(1023a)(srcC-ek) route event keeps rcu and srcC through the EK whitelist")
 checkEq(select(2, string.gsub(bigPayload.src, ";", "")), 511,
     "oversize route snapshot truncates to 512 points")
 checkEq(select(2, string.gsub(bigPayload.srcW, ";", "")), 510,
@@ -2053,6 +2061,88 @@ do
             '"nxB":66.2', '"nxC":"dodge"', '"why":"cutover"', '"why":"engine","chg":1,"es":4500,"fu":40,"ecd":38,"eq":61' }) do
         check(string.find(body, kv, 1, true) ~= nil, "(ek) event key passes EK: " .. kv)
     end
+    MDADUpload = nil
+end
+
+--------------------------------------------------------------------------------
+-- 1026g 遙測（T9／T10／T12／T13／T14）：新事件鍵過 EK（engine off est／kso／erm、tow lost tj／tps、dodge commit dbs、
+-- blocked guard gsl／gcs、route lost tx／ty、impact dms／tw（false 也寫））、樣本 sen.vehNearS 有值才寫，以及撞擊車損 damage：
+-- 撞前 1 秒內的零件耐久量測、撞擊上升緣凍結、DMG_POST_MS 後再量，dmg＝掉量合計（含等待中的再撞）、dmx／dpt＝最大掉量與零件 id、
+-- ms＝前後量測間隔、cls＝撞擊分類；撞擊時沒有有效的撞前量測（讀不到車）＝不記 damage（反面）。
+-- 違規證明：EK 少任一新鍵＝(ek) 紅；tw 用 and/or 寫（false 變 nil）＝(tw-false) 紅；damageTick 上升緣不凍結（撞後才量撞前）＝(dmg) 紅；
+-- 沒有撞前量測也照記＝(dmg-none) 紅。
+scenario("1026g telemetry: new event keys, impact dms/tw, sen.vehNearS, damage after impact")
+do
+    resetFs()
+    loadProd()
+    MDADUpload = nil
+    assert(loadfile((string.gsub(PROD, "MDAD_Diagnostics%.lua$", "MDAD_Upload.lua"))))()
+    local conds, ids = { 100, 100, 80 }, { "Engine", "FrontBumper", "TireFrontLeft" }
+    local car = {
+        getZ = function() return 0 end, getVehicleTowing = function() return nil end,
+        getVehicleTowedBy = function() return nil end,
+        getPartCount = function() return #conds end,
+        getPartByIndex = function(_, i)
+            return { getCondition = function() return conds[i + 1] end, getId = function() return ids[i + 1] end }
+        end,
+    }
+    local hasCar = true
+    player0.getVehicle = function() return hasCar and car or nil end
+    local function s(t, px, spd, phys, sensor)
+        MDADDiagnostics.sample(0, t, px, 200, 0, spd, 40, 400, 0, 0, 0, 0, "follow", 3, true, sensor, false,
+            nil, nil, nil, nil, nil, nil, nil, nil, nil, false, false, false, false, false, phys)
+    end
+    local t0 = 9600000
+    nowMs = t0
+    MDADDiagnostics.start(0, nil, profile)
+    local ph = { startedMs = t0 - 5000, towing = false }
+    s(t0, 100, 40, ph, { vehN = 1, vehNearS = 55.5, stamp = 1, ready = true })
+    s(t0 + 300, 102, 40, ph)
+    conds[2] = 73 -- 撞擊（SP：物理幀直接扣車損，比上升緣那筆樣本早）
+    s(t0 + 500, 103, 10, ph) -- 40→10／200ms＝撞擊上升緣
+    conds[3] = 78 -- 等待中再掉一點（MP 同步晚到也算進同一筆）
+    s(t0 + 1200, 104, 10, ph)
+    s(t0 + 2100, 105, 10, ph) -- 上升緣後 1.6 秒＞DMG_POST_MS
+    nowMs = t0 + 2200
+    MDADDiagnostics.event(0, "engine", { phase = "off", why = "engine", est = "ShuttingDown", kso = 420, erm = 65000 })
+    MDADDiagnostics.event(0, "tow", { phase = "lost", alive = true, tj = 0.912, tps = 3200 })
+    MDADDiagnostics.event(0, "dodge", { phase = "commit", dbl = 0, dbs = "tow" })
+    MDADDiagnostics.event(0, "blocked", { why = "guard", tier = "crawl-stretch", cap = 5, b = 60, rs = 40, gsl = 12.5, gcs = 9 })
+    MDADDiagnostics.event(0, "route", { phase = "lost", why = "noroad", kind = "trip", x = 1, y = 2, tx = 10, ty = 20, d = 20.1 })
+    nowMs = t0 + 3000
+    MDADDiagnostics.stop(0, "end")
+    local body = files[sessionPath(1)] or ""
+    local imp = string.match(body, '{"t":"e","ts":[%d%.]+,"n":"impact"[^\n]*') or ""
+    check(string.find(imp, '"dms":5500', 1, true) ~= nil, "(dms) impact carries ms since drive start")
+    check(string.find(imp, '"tw":false', 1, true) ~= nil, "(tw-false) impact writes tw=false when not towing")
+    local dmg = string.match(body, '{"t":"e","ts":[%d%.]+,"n":"damage"[^\n]*') or ""
+    check(string.find(dmg, '"ms":2100', 1, true) ~= nil, "(dmg) damage window spans pre snapshot (t0) to post read (" .. dmg .. ")")
+    check(string.find(dmg, '"dmg":29,"dmx":27,"dpt":"FrontBumper"', 1, true) ~= nil,
+        "(dmg) damage sums both drops (27+2) and names the biggest part")
+    check(string.find(dmg, '"cls":"hit"', 1, true) ~= nil, "(dmg) damage carries the impact class")
+    checkEq(countNeedle(body, '"n":"damage"'), 1, "(dmg) one damage event per impact")
+    local smp1 = string.match(body, '{"t":"s"[^\n]*') or ""
+    check(string.find(smp1, '"vehNearS":55.5', 1, true) ~= nil, "(vehNearS) sensor block writes vehNearS when present")
+    checkEq(countNeedle(body, '"vehNearS"'), 1, "(vehNearS) absent vehNearS is not written")
+    for _, kv in ipairs({ '"why":"engine","est":"ShuttingDown","kso":420,"erm":65000', '"alive":true,"tj":0.912,"tps":3200',
+            '"dbl":0,"dbs":"tow"', '"gsl":12.5,"gcs":9', '"tier":"crawl-stretch"', '"why":"noroad"', '"tx":10,"ty":20' }) do
+        check(string.find(body, kv, 1, true) ~= nil, "(ek) 1026g event key passes EK: " .. kv)
+    end
+    -- (dmg-none) 撞擊當下沒有有效的撞前量測（讀不到車）：不記 damage
+    resetFs()
+    nowMs = t0
+    hasCar = false
+    MDADDiagnostics.start(0, nil, profile)
+    s(t0, 100, 40, ph)
+    s(t0 + 200, 102, 10, ph)
+    hasCar = true
+    s(t0 + 2000, 103, 10, ph)
+    nowMs = t0 + 2500
+    MDADDiagnostics.stop(0, "end")
+    body = files[sessionPath(1)] or ""
+    checkEq(countNeedle(body, '"n":"impact"'), 1, "(dmg-none) the impact itself is recorded")
+    checkEq(countNeedle(body, '"n":"damage"'), 0, "(dmg-none) no pre-impact snapshot: no damage event")
+    player0.getVehicle = nil
     MDADUpload = nil
 end
 

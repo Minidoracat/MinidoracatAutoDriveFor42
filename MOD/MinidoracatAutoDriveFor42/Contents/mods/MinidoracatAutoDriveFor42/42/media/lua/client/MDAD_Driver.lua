@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1026a"
+Drive.REV = "1026g"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -725,7 +725,10 @@ TUNE.TOW_BRAKE_DECEL = 7.0 -- 兩節各自的外力減速度（m/s²，同 DODGE
 -- 倒車量級、掛點 8m 換速、側推增益與施力點照 2026-10-11 E2E（家族 scenarios.md〈replay〉rehitch；8/8 掛回的那組）。
 TUNE.REHITCH_MAX = 3            -- 每趟最多幾次
 TUNE.REHITCH_BRAKE_MS = 10000   -- 煞停上限（70 km/h 不鎖輪約 3 秒）
-TUNE.REHITCH_WAIT_MS = 15000    -- 停妥後等掛車回到客戶端的上限（本機 0.2–1.1 秒；正式服 3 例有 2 例超過 5 秒——推測值，照遙測調）
+-- 停妥後等掛車回到客戶端的上限。1026g H2：15 → 7 秒。正式服片段 19 次掛回（1012h–1023b）停妥到 rh-found 最慢 3.3 秒（其餘
+-- ≤1.5 秒），約 2 倍餘裕取 7 秒；沒等到的 5 次玩家在停妥後 4.5–8.5 秒自己動手（rh-fail why=manual kind=wait）、1 次等滿 15 秒
+-- nofound——縮短讓 MOD 先給出完整的「掛車同步遺失」說明。
+TUNE.REHITCH_WAIT_MS = 7000
 TUNE.REHITCH_FOUND_MS = 1000    -- 看到掛車後等這麼久才倒（掛車在客戶端站穩；煞停的一秒鎖輪閂鎖也過了）
 TUNE.REHITCH_FIND_R = 30        -- 回來的同 id 同 script 車離脫開點超過這個距離（m）不認
 TUNE.REHITCH_FAST_KMH, TUNE.REHITCH_SLOW_M, TUNE.REHITCH_KMH = 10, 8, 4 -- 掛點距離 >8m 倒車 10 km/h，之後 4
@@ -1081,13 +1084,20 @@ end
 -- 「tx 是否為 nil」區分兩類（抵達接管只認前者）。route 物件的 identity 就是
 -- 版本號：主 MOD 重算路線時會產生新 table（ensureRoute→findRoute 新建，
 -- MinidoracatMiniMap_NavRoute.lua:1181-1186），沿用時回同一顆。
+-- 1026g（T13）：最近一次查詢結果記在 Drive.routeState[playerNum]（notarget＝沒有目標；其餘＝主 MOD requestRoute 的
+-- state：ok／noroad／badargs／noplayer／idle／extracting／building／failed），給 route phase=lost 帶（Drive.routeLostNote）。
 local function fetchRoute(api, playerNum)
     local tx, ty = api.getNavTarget(playerNum)
-    if not tx then return nil end
+    if not tx then
+        Drive.routeState[playerNum] = "notarget"
+        return nil
+    end
     local route, state = api.requestRoute(playerNum, tx, ty)
+    Drive.routeState[playerNum] = state or "nil"
     if not route or state ~= "ok" then return nil, tx, ty, state end
     return route, tx, ty, state
 end
+Drive.routeState = {}
 
 -- 路線起點太遠（`route.snapDist`＝玩家到路線最近點的投影距離＝出發前必須越野走完的
 -- 接線；MinidoracatMiniMap_NavRoute.lua:1386-1389、1827-1832）。判在啟動與換目標。
@@ -1481,7 +1491,10 @@ local function driveGate(playerObj, vehicle, playerNum, context)
     -- 熄火不自駕，也不代客發動（M3 不呼叫 tryStartEngine）。電瓶死掉一併走這條：
     -- 引擎運轉中本來就靠發電機供電，電瓶沒電＝電系已經不成立。
     -- isEngineRunning＝BaseVehicle.java:7639；getBatteryCharge＝VehicleParts.java:152-156
-    if not vehicle:isEngineRunning() then return KEY_ENGINE, "engine" end
+    -- 1026g：同一個讀值順手記引擎進入 Running 的時間（Drive.engineSeen；engine off 的 erm）
+    local on = vehicle:isEngineRunning()
+    Drive.engineSeen(playerNum, vehicle, on)
+    if not on then return KEY_ENGINE, "engine" end
     if not MDAD.isBatteryLive(vehicle) then return KEY_ENGINE, "battery" end
     if MDAD.sandbox("NeedItemForAutoDrive", true) == true and not MDAD.isAutoInstalled(vehicle) then
         return KEY_NEED_MODULE
@@ -2122,16 +2135,23 @@ end
 -- （getVehicleById 找不找得到掛車）與回看基準點 x0／y0。交還（Drive.stop）與進入自動掛回（Drive.rehitchArm）共用。
 -- 1017e：alive=true（真的斷鉤）另帶前 1 秒折角最大值 phiMax、最大變化率 phiRate（rad/s，MDADTrailer.phiStats）與最後一幀 st——
 -- 起步滿舵折斷（D2）是 phiRate 大、st 飽和；同步拉回斷鉤是 phi 小。
+-- 1026g（T10）：alive=true 另帶 tj（脫開那一步掛車位移減牽引車位移的長度 m，MDADTrailer.jumpAt）與 tps（距上一次 >JUMP_M
+-- 跳動的 ms，沒跳過缺）——同步拉回是掛車整段被拽回（tj 大、之前常有週期性跳動），撞擊衝量是 tj 小。
 function Drive.towLostNote(s, playerNum, vehicle)
     local cur, alive, by, hd, kmh, up = MDADTrailer.lostState(vehicle, s.tow)
     local rmw, ox, oy, od, x0, y0 = MDADTrailer.lostWhere(vehicle, s.tow)
-    local phiMax, phiRate = nil, nil
-    if alive == true then phiMax, phiRate = MDADTrailer.phiStats(s, getTimestampMs()) end
+    local phiMax, phiRate, tj, tps = nil, nil, nil, nil
+    if alive == true then
+        local now = getTimestampMs()
+        phiMax, phiRate = MDADTrailer.phiStats(s, now)
+        tj, tps = MDADTrailer.jumpAt(s, vehicle, s.tow, now)
+    end
     diagEvent(s, playerNum, "tow", {
         phase = "lost", cur = cur, alive = alive, by = by, hd = hd, speed = kmh, up = up, phi = s.towPhi,
         vid = s.tow.id, script = s.tow.script, -- 掛車 id／script（2026-10-10；MDADTrailer.attach 記下，量不到缺）
         rmw = rmw, ox = ox, oy = oy, od = od,
         phiMax = phiMax, phiRate = phiRate, st = alive == true and s.towSt or nil,
+        tj = tj, tps = tps,
     })
     return alive, x0, y0
 end
@@ -7817,17 +7837,119 @@ end
 -- 1020：加引擎零件狀況 ecd（VehiclePart.getCondition，VehiclePart.java:866-868）與引擎品質 eq（BaseVehicle.getEngineQuality，
 -- BaseVehicle.java:8130-8132）——原版只在伺服器跑的 shouldAutoStall：狀況 <50 時每次更新以 1/(狀況×12) 機率熄火
 -- （VehicleEngine.java:230-231、249-252），跟車速、電瓶無關。
+-- 1026g（T9）：加 est（getEngineState 的名稱：ShuttingDown＝關引擎、Stalling＝熄火或沒油、Idle＝狀態已走完；42.21
+-- BaseVehicle.getEngineState，VehicleEngine.java 不曝露給 Lua 所以原因碼讀不到）、kso（距本機最近一次 ISVehicleMenu.onShutOff
+-- 的 ms＝玩家按 N／儀表鑰匙／radial 關引擎，Drive.shutOffNote；沒按過缺）、erm（距本機看到這台車引擎進入 Running 的 ms，
+-- Drive.engineSeen；上車時引擎已在轉、沒看到轉換＝缺）。正式服 12 趟行駛中熄火機制未定，缺這三欄分不出玩家按 N 與狀態翻轉。
 function Drive.engineOffNote(s, playerNum, vehicle, gate)
     local okC, chg = pcall(jget, vehicle, "getBatteryCharge")
     local okE, es = pcall(jget, vehicle, "getEngineSpeed")
     local okF, fu = pcall(jget, vehicle, "getRemainingFuelPercentage")
     local okQ, eq = pcall(jget, vehicle, "getEngineQuality")
     local okD, ecd = pcall(function() return vehicle:getPartById("Engine"):getCondition() end)
+    local okS, est = pcall(Drive.engineStateOf, vehicle)
+    local now, ka, r = getTimestampMs(), Drive.shutOffAt[playerNum], Drive.engRun[playerNum]
     diagEvent(s, playerNum, "engine", { phase = "off", why = gate,
         chg = okC and finite(chg) and math.floor(chg * 1000 + 0.5) / 1000 or nil,
         es = okE and finite(es) and math.floor(es + 0.5) or nil,
         fu = okF and finite(fu) and math.floor(fu * 100 + 0.5) / 100 or nil,
-        ecd = okD and finite(ecd) and ecd or nil, eq = okQ and finite(eq) and eq or nil })
+        ecd = okD and finite(ecd) and ecd or nil, eq = okQ and finite(eq) and eq or nil,
+        est = okS and est or nil, kso = finite(ka) and now - ka or nil,
+        erm = type(r) == "table" and r.v == vehicle and finite(r.at) and now - r.at or nil })
+end
+
+-- 1026g（T9）：引擎狀態名稱（BaseVehicle.engineStateTypes 的 tostring；讀不到或不是字串回 nil）。
+function Drive.engineStateOf(vehicle)
+    local st = vehicle:getEngineState()
+    if st == nil then return nil end
+    st = tostring(st)
+    return type(st) == "string" and st ~= "" and st or nil
+end
+
+-- 1026g（T9）：引擎進入 Running 的時間（engine off 的 erm）。driveGate 每次讀 isEngineRunning 時呼叫（HUD 與自駕每幀），
+-- 只在換車或狀態轉換時寫：同一台車由不轉變成轉＝at 記現在；第一次看到這台車就在轉＝不知道何時發動，at 缺；
+-- 轉變成不轉時 at 保留（engine off 那筆量的是這次運轉多久）。熱路徑只有一次表查詢與兩次比較。
+Drive.engRun = {}
+function Drive.engineSeen(playerNum, vehicle, on)
+    if playerNum == nil then return end
+    local r = Drive.engRun[playerNum]
+    if r == nil then
+        r = {}
+        Drive.engRun[playerNum] = r
+    end
+    if r.v ~= vehicle then
+        r.v, r.on, r.at = vehicle, on == true, nil
+    elseif on == true and not r.on then
+        r.on, r.at = true, getTimestampMs()
+    elseif on ~= true and r.on then
+        r.on = false
+    end
+end
+
+-- 1026g（T9）：玩家關引擎請求的時間（engine off 的 kso）。N 鍵（ISVehicleMenu.lua:1659-1662）、儀表鑰匙／引擎點擊
+-- （ISVehicleDashboard.lua:503-512、556-564）、radial 選單（ISVehicleMenu.lua:89 建片時取函式值，在本檔載入之後）都走
+-- ISVehicleMenu.onShutOff；包一層只記時間（pcall），原版照跑、回傳照回。量不到 playerNum 就不記。
+Drive.shutOffAt = {}
+function Drive.shutOffNote(playerObj)
+    Drive.shutOffAt[playerObj:getPlayerNum()] = getTimestampMs()
+end
+Drive.origShutOff = ISVehicleMenu and ISVehicleMenu.onShutOff
+if type(Drive.origShutOff) == "function" then
+    function ISVehicleMenu.onShutOff(playerObj, ...)
+        pcall(Drive.shutOffNote, playerObj)
+        return Drive.origShutOff(playerObj, ...)
+    end
+end
+
+-- 1026g（T13）：LostRoute／TripLost 交還前記 route phase=lost（正式服新圖只能從結束原因猜是路網斷點還是偏航）：why＝最近一次
+-- 查詢的結果（Drive.routeState：notarget＝目標不見了、noroad＝有目標但主 MOD 找不到路、idle／extracting／building／failed＝
+-- 路網引擎沒就緒），kind＝trip（行程模式）／single，x y＝車位，tx ty＝目標（沒有目標缺；單站模式另看緊鄰的 target clear），
+-- d＝車到目標 m，rs／len＝剖面弧長與總長。車位最近的街名主 MOD 沒有 API（只有 getNavGraph 整張圖），由分析端用 x y 對 streets。
+function Drive.routeLostNote(s, playerNum, vehicle, tx, ty)
+    local x, y = vehicle:getX(), vehicle:getY()
+    local d = nil
+    if finite(tx) and finite(ty) and finite(x) and finite(y) then
+        d = math.floor(sqrt((tx - x) * (tx - x) + (ty - y) * (ty - y)) * 10 + 0.5) / 10
+    end
+    local p = s.profile
+    diagEvent(s, playerNum, "route", { phase = "lost", why = Drive.routeState[playerNum],
+        kind = s.legToken and "trip" or "single", x = x, y = y, tx = tx, ty = ty, d = d, rs = s.lastSNow,
+        len = type(p) == "table" and finite(p.length) and p.length or nil })
+end
+
+-- 1026g（T13）：繞行出口回的 lane（dodge commit 的 dbl＝Drive.dodgeHomeL，承諾時凍結）是哪一種，dodge commit 的 dbs。
+-- 順序同持有優先：ret＝RETURN 回線目標；chain＝鏈式停留 lane；trans＝斜切保持；zombie＝殭屍軟縫；traffic＝會車側移；
+-- laneBias 等於常駐線（差 ≤0.05 m）時 tow＝拖車（常駐不靠右，只有路面對中）、keep＝靠右、center＝沙盒關靠右；
+-- other＝都不是（例：判堵重錨在車位）。NB2（拖車在分隔帶公路出口回中線＝樹籬）定罪用。純觀測，不進決策。
+function Drive.dodgeHomeSrc(s)
+    if s.returnActive and finite(s.returnLaneTarget) then return "ret" end
+    if s.laneChained then return "chain" end
+    if finite(s.holdLaneL) then return "trans" end
+    if s.zombieLane ~= nil then return "zombie" end
+    if s.trafficLane ~= nil then return "traffic" end
+    local rb = s.residentBias
+    if finite(rb) then
+        local d = laneBiasOf(s) - rb
+        if d < 0 then d = -d end
+        if d <= 0.05 then
+            if s.tow then return "tow" end
+            local sb = s.sandBias
+            return (finite(sb) and (sb > 0.05 or sb < -0.05)) and "keep" or "center"
+        end
+    end
+    return "other"
+end
+
+-- 1026g（T13）：守護判死轉判堵（blocked why=guard）那一刻的爬行預估（NB3：群旁判死後 sticky 爬到停止線、玩家中途接手）。
+-- s.gbSg＝車到判堵停止線的剩餘 m（Drive.blockedStopGap，負的記 0）；s.gbCs＝以 min(承諾帽 dodgeBaseCap, BLOCK_APPROACH_KMH)
+-- 爬完的秒數（承諾帽缺或 ≤0＝缺；只是預估，實際接近包絡見樣本 cbl／tgt）。事件 gsl／gcs。
+function Drive.guardBlockNote(s, vehicle)
+    local ok, sg = pcall(Drive.blockedStopGap, s, vehicle:getX(), vehicle:getY())
+    if not ok or not finite(sg) then sg = nil elseif sg < 0 then sg = 0 end
+    local v = s.dodgeBaseCap
+    if not finite(v) or v <= 0 then v = nil elseif v > TUNE.BLOCK_APPROACH_KMH then v = TUNE.BLOCK_APPROACH_KMH end
+    s.gbSg = sg and math.floor(sg * 10 + 0.5) / 10 or nil
+    s.gbCs = (sg and v) and math.floor(sg * 3.6 / v * 10 + 0.5) / 10 or nil
 end
 
 -- 1017 遙測 unstick settle `bh`：車位在剖面首段反向延長上的距離（m，>0＝在起點後方；首段航向 segH[1]、起點 x[1]／y[1]）。
@@ -8000,6 +8122,8 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     if s.dodgeAlignHold == true then phys.dodgeAlignHold = true end
     phys.routeHeadingError, phys.kinkExitS = s.lastRouteErr, s.fstate.kinkExitS
     phys.fvo = s.fstate.fvo -- 1020b：沒有圓角的頂點開始轉的最近一筆 {n, capKmh, kmh, th}（Follower arcLookaheadMs；只給摘要 fvo）
+    -- 1026g（T12）：只給 impact 事件讀（dms＝開出 ms、tw＝拖車），樣本不寫
+    phys.startedMs, phys.towing = s.startedMs, s.tow ~= nil
     phys.visibilityCap = s.visibilityCap
     phys.visibilityHardKmh = s.visibilityHardKmh
     phys.visHold, phys.visRoundS, phys.visAssistDecel = s.visHold, s.visRoundS, s.visAssistDecel
@@ -13193,6 +13317,7 @@ local function replan(s, vehicle, playerNum)
                         local playerObj = getSpecificPlayer(playerNum)
                         if playerObj then haloBad(playerObj, KEY_BLOCKED) end
                         voice("blocked", playerNum)
+                        Drive.guardBlockNote(s, vehicle) -- 1026g T13：停止線剩餘與爬行秒數預估（gsl／gcs）
                         diagEvent(s, playerNum, "blocked", {
                             s = s.blockS, m = s.dodgeMargin, need = s.dodgeNeed,
                             x = s.blockHitX, y = s.blockHitY, why = "guard",
@@ -13201,9 +13326,12 @@ local function replan(s, vehicle, playerNum)
                             hitX = s.guardHitX, hitY = s.guardHitY,
                             clearance = s.guardHitClearance, hn = sen.hardN,
                             wms = Drive.replanElapsed(s), sweeps = s.sweepCount,
-                            bv = s.blockedEntryKmh }) -- bv＝判堵當下車速 km/h（1017c）
+                            bv = s.blockedEntryKmh, -- bv＝判堵當下車速 km/h（1017c）
+                            -- 1026g T13：承諾 tier／承諾帽、群起點 b 與車弧長 rs（rs+bodyReach ≥ b＝guard-far 不放）、停止線剩餘、爬行秒數
+                            tier = s.dodgeTier, cap = s.dodgeBaseCap, b = s.fstate.offB, rs = s.lastSNow,
+                            gsl = s.gbSg, gcs = s.gbCs })
                     end
-                    if getDebug() then
+                    if getDebug() then -- telemetry: blocked why=guard 事件（上方）
                         print(LOG .. "pn=" .. playerNum .. " dodge guard failed: hold & brake")
                     end
                 end
@@ -13835,7 +13963,8 @@ local function replan(s, vehicle, playerNum)
                 zm = s.zmM, zmS = s.zmS, zmL = s.zmL, zv = s.zomRec and s.zomRec.n > 0 and s.zomRec.n or nil,
                 -- 1017：本輪第一條被殭屍擋下的候選的 min(彎帽, 餘裕帽)（Drive.zombieCap0）；被承諾那條在 chainAhead 走到的分支
                 zc0 = s.zomRec and s.zomRec.n > 0 and s.zomRec.c0 or nil, chain = s.chainWhy,
-                dbl = s.dodgeBaseL }) -- 出口回的 lane（Drive.dodgeHomeL，承諾時凍結；1014b N9）
+                dbl = s.dodgeBaseL, -- 出口回的 lane（Drive.dodgeHomeL，承諾時凍結；1014b N9）
+                dbs = Drive.dodgeHomeSrc(s) }) -- 1026g T13：dbl 是哪一種 lane（ret／chain／trans／zombie／traffic／tow／keep／center／other）
             Drive.proofTightArm(s, playerNum) -- 停下之後的窄線爬行（TUNE.PROOF_TIGHT_KMH）
             if getDebug() then -- telemetry: dodge commit 事件（cap 分解同欄）
                 -- cap 分解一行印清楚（2026-09-04 實機三段 8／15／14 km/h 繞行，console
@@ -16879,6 +17008,7 @@ local function onPlayerUpdate(player)
                 -- 有 claim 時 MiniMap 不會因距離清目標、也不會替我們完成站（§6.3），
                 -- 所以這裡的「目標不見了」只代表本段不再有效——絕不能沿用 v5 的
                 -- 「目標消失＝抵達」收旗啟發把它當成到站。
+                Drive.routeLostNote(s, playerNum, vehicle, tx, ty) -- 1026g T13：交還前記 route phase=lost
                 Drive.stop(playerNum, tx == nil and TRIP.LOST or KEY_LOST)
                 return
             end
@@ -16903,6 +17033,7 @@ local function onPlayerUpdate(player)
                 end
                 return
             end
+            Drive.routeLostNote(s, playerNum, vehicle, tx, ty)
             Drive.stop(playerNum, KEY_LOST)
             return
         end

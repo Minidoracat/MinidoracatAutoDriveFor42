@@ -139,11 +139,17 @@ local EK = {
     "icv", "tkg", "akg", "bz",
     -- impact（1017）：當下檔位、引擎煞車、距上一次 tow rh-attach 的 ms（自動掛回拉攏的假撞）、跟車 lead 車距／速度（m 共用上面的鍵＝mode）
     "tn", "ib", "rhMs", "tlg", "tlv",
+    -- impact（1026g T12）：開出 ms（Driver s.startedMs 起算，含停等／讓位）、拖車旗標（true／false 都寫）
+    "dms", "tw",
+    -- damage（1026g T14，D.sample 撞擊上升緣後 DMG_POST_MS）：零件耐久合計掉多少、單一零件最大掉量與那個零件 id
+    "dmg", "dmx", "dpt",
     -- regear（1020d，Driver Drive.regear）：再加速重選檔後的檔位 tn1、觸發當下的車速對應檔 gf、選檔後車速 v1（tn／speed／target／ms 沿用上面的鍵）
     "tn1", "gf", "v1",
     -- engine off（1017，Drive.engineOffNote）：EngineOff 交還前的電瓶 charge、引擎轉速、油量 %（why＝engine／battery）；
     -- 1020 加引擎零件狀況 ecd（0–100，<50 原版會隨機熄火）、引擎品質 eq
     "chg", "es", "fu", "ecd", "eq",
+    -- 1026g T9 加引擎狀態名稱 est（ShuttingDown／Stalling／Idle…）、距本機最近一次關引擎請求 ms kso、距本機看到引擎進入 Running ms erm
+    "est", "kso", "erm",
     -- unstick settle（1017）：車在剖面首段反向延長上的距離 m（>0＝在起點後方，Drive.startBehind）
     "bh",
     -- 1008 拖車：tow attach 外拉規劃用的掛點→車頭（MDADTrailer.hitchFront）；detour towcorner 附了車尾正後方圈（1）；
@@ -201,8 +207,13 @@ local EK = {
     -- 1017e 拖車：tow kcap／tight 的曲率上限 sin(HITCH_SLOW)/L2 與追前視點要的曲率（1/m）；tow lost alive=true 前 1 秒最大 |折角|、
     -- 最大折角變化率（rad/s）與最後一幀 st；unstick rear=rope 的繩索兩掛點相碰距（m，hd 沿用上面的鍵）
     "kMax", "kNeed", "phiMax", "phiRate", "st", "hdMin", -- 1017e
+    -- 1026g T10 tow lost alive=true：脫開那一步兩掛點距的變化 m（帶號）、距上一次掛點距跳動 >JUMP_M 的 ms（MDADTrailer.jumpAt）
+    "tj", "tps",
     -- 1014b dodge commit／extend／release（exit、end、done）：出口回的 lane s.dodgeBaseL（Drive.dodgeHomeL，承諾時凍結）
     "dbl", -- 1014b
+    -- 1026g T13 dodge commit：dbl 是哪一種 lane（Drive.dodgeHomeSrc：ret／chain／trans／zombie／traffic／tow／keep／center／other）；
+    -- blocked why=guard：停止線剩餘 m、以承諾帽爬完的預估秒數（Drive.guardBlockNote）
+    "dbs", "gsl", "gcs",
     -- 1017 dodge commit：本輪第一條被殭屍擋下的候選的 min(彎帽, 餘裕帽)（Drive.zombieCap0）、chainAhead 走到的分支；
     -- release：回線 lane 上線尾之後最近一群的位置與種類（Drive.releaseNext：dodge＝偏到位點、blocked＝群起點）
     "zc0", "chain", "nxB", "nxC",
@@ -210,6 +221,9 @@ local EK = {
     "rpt",
     -- 1023a route cutover／far：整條線（截斷前）走主 MOD 自訂道路的段數（route.segCustom[i]＝true；舊主 MOD 沒這欄＝缺，D.routeSource）
     "rcu",
+    -- 1026g T14 route cutover／far：逐段走主 MOD 自訂道路旗標（"1;0;…"，與 srcW／srcS 同長；舊主 MOD 沒 segCustom＝缺，D.routeSource）；
+    -- 1026g T13 route lost（Drive.routeLostNote）：目標座標
+    "srcC", "tx", "ty",
     -- 1024a start：這趟坐的車顯示 FSD 卡片（換掉原版儀表的選配 MOD）＝"fsd"；原版儀表的車沒有這欄
     "hud",
 }
@@ -1060,6 +1074,8 @@ local function encodeSensor(s, sensor, force)
     if finite(sensor.zombieNearS) then
         bits = bits .. ',"zombieNearS":' .. tostring(sensor.zombieNearS)
     end
+    -- 1026g T14：命中車輛格的最近弧長（同 zombieNearS 座標；vehN 從 0 變正那筆減 rs＋半車長＝他車首見離車頭多遠）
+    if finite(sensor.vehNearS) then bits = bits .. ',"vehNearS":' .. tostring(sensor.vehNearS) end
     if finite(sensor.corpseNearS) then
         bits = bits .. ',"corpseNearS":' .. tostring(sensor.corpseNearS)
     end
@@ -1828,7 +1844,9 @@ end
 -- 把 src＝"x,y;…" 點列、srcW＝"w;…" 段寬、srcS＝"surface;…" 段面填進 payload
 -- 後回傳同一張表（Driver 的 update 大函式 local／upvalue 槽緊，呼叫端零新 local）。
 -- 超過 ROUTE_SRC_MAX 只截前段（事件的 pts 欄仍是真總數，讀者可辨截斷）；
--- route 沒有可用點列＝不填 src 三欄與 rcu（rpt 照填）。
+-- route 沒有可用點列＝不填 src 三欄、srcC 與 rcu（rpt 照填）。
+-- 1026g T14：srcC＝逐段自訂道路旗標 "1;0;…"（route.segCustom[i]＝true 記 1，與 srcW／srcS 同長、同樣截斷）；
+-- 舊主 MOD 沒 segCustom＝不寫。rcu 只有整條線的段數，事故在不在自訂路上要逐段看。
 local ROUTE_SRC_MAX = 512
 function D.routeSource(route, payload)
     if type(payload) ~= "table" then payload = {} end
@@ -1850,6 +1868,7 @@ function D.routeSource(route, payload)
     if n > ROUTE_SRC_MAX then n = ROUTE_SRC_MAX end
     local widths, surfaces = route.segWidth, route.segSurface
     local sp, sw, ss = {}, {}, {}
+    local sc = type(custom) == "table" and {} or nil
     for i = 1, n do
         sp[i] = jnum(pts[i * 2 - 1]) .. "," .. jnum(pts[i * 2])
         if i < n then
@@ -1857,11 +1876,13 @@ function D.routeSource(route, payload)
             local sf = type(surfaces) == "table" and surfaces[i] or nil
             sw[i] = finite(w) and tostring(w) or ""
             ss[i] = type(sf) == "string" and sf or ""
+            if sc then sc[i] = custom[i] == true and "1" or "0" end
         end
     end
     payload.src = table.concat(sp, ";", 1, n)
     payload.srcW = table.concat(sw, ";", 1, n - 1)
     payload.srcS = table.concat(ss, ";", 1, n - 1)
+    if sc then payload.srcC = table.concat(sc, ";", 1, n - 1) end
     return payload
 end
 
@@ -2071,6 +2092,65 @@ local function impactHard(pn, x, y, h, halfL)
     return nil
 end
 
+-- 1026g T14 撞擊車損（damage 事件）：取樣中每 DMG_SNAP_MS 量一次本車全部零件耐久（getPartByIndex(i):getCondition()，
+-- 表重用不配新表）；撞擊上升緣（任何 cls，含 small-animal——10-26 兔子車損判準要它）凍結最近一次量測當撞前值，DMG_POST_MS
+-- 後再量一次，記 damage：dmg＝各零件掉量合計（只算變少的）、dmx／dpt＝掉最多的零件掉量與 id、ms＝撞前量測到撞後量測的間隔、
+-- cls＝撞擊分類。MP 的車損由伺服器 BaseVehicle.crash 算完再同步（BaseVehicle.java:4647-4690、transmitPartCondition），撞後
+-- 1.5 秒足夠回到客戶端；等待中再撞一次併進同一筆。上升緣時還沒有有效的撞前量測（剛開始取樣、讀不到車）＝不記。
+local DMG_SNAP_MS, DMG_POST_MS = 1000, 1500
+local function partConds(v, out)
+    local c = v:getPartCount()
+    for i = 0, c - 1 do out[i + 1] = v:getPartByIndex(i):getCondition() end
+    out.n = c
+    return c
+end
+local function ownVehicle(pn)
+    return getSpecificPlayer(pn):getVehicle()
+end
+local function partIdAt(v, i)
+    return v:getPartByIndex(i - 1):getId()
+end
+-- 量一次到 out：回 (成功, vehicle)。
+local function dmgRead(pn, out)
+    local okV, v = pcall(ownVehicle, pn)
+    if not okV or v == nil then return false end
+    local ok, c = pcall(partConds, v, out)
+    return ok and finite(c) and c > 0, v
+end
+local function damageTick(g, pn, now)
+    if g.edgeImp and g.dmgAt == nil and g.dmgOk then
+        g.dmgPre, g.dmgSnap = g.dmgSnap, g.dmgPre or {}
+        g.dmgAt, g.dmgPreT, g.dmgCls, g.dmgOk = now, g.dmgT, g.impCls, false
+        return
+    end
+    if g.dmgAt ~= nil then
+        if now - g.dmgAt < DMG_POST_MS then return end
+        local post, pre = g.dmgSnap, g.dmgPre
+        local ok, v = dmgRead(pn, post)
+        g.dmgAt, g.dmgT, g.dmgOk = nil, now, ok
+        if not ok then return end
+        local n, sum, mx, mi = pre.n, 0, 0, nil
+        if post.n < n then n = post.n end
+        for i = 1, n do
+            local a, b = pre[i], post[i]
+            if finite(a) and finite(b) and b < a then
+                sum = sum + (a - b)
+                if a - b > mx then mx, mi = a - b, i end
+            end
+        end
+        local okI, id = false, nil
+        if mi then okI, id = pcall(partIdAt, v, mi) end
+        emitEvent(pn, now, "damage", { dmg = sum, dmx = mi and mx or nil, dpt = okI and id or nil,
+            ms = now - g.dmgPreT, cls = g.dmgCls })
+        return
+    end
+    if g.dmgT == nil or now - g.dmgT >= DMG_SNAP_MS then
+        if not g.dmgSnap then g.dmgSnap = {} end
+        g.dmgOk = dmgRead(pn, g.dmgSnap)
+        g.dmgT = now
+    end
+end
+
 function D.shouldSample(pn, now, mode, err, critical)
     -- 對外只回單一布林：多回值會漏進呼叫端的參數列。
     local want = sampleWouldEnqueue(gateOwner(pn), now, mode, err, critical)
@@ -2145,6 +2225,9 @@ function D.sample(pn, now, x, y, heading, speed, target, remaining, lat, err,
         -- 1017：檔位、引擎煞車（下車煞車＝tn 0、ib true、fbl 0）、跟車 lead 車距／速度（車對車追撞）
         if type(phys) == "table" then
             a.tn, a.ib, a.tlg, a.tlv = phys.transmissionNumber, phys.isBraking, round1(phys.trfLeadGap), round1(phys.trfLeadV)
+            -- 1026g T12：開出 ms（Driver s.startedMs）、拖車旗標（false 也寫；拖車起步拉緊不必靠片段推）
+            a.tw = phys.towing
+            if finite(phys.startedMs) then a.dms = now - phys.startedMs end
         end
         -- 1013e 拖車：掛車最近硬點（Driver Drive.towFootprint）的淨距（含 pad，同 ac）、座標與那點 1 格內的 sprite——上面的 sprite
         -- 只從牽引車車頭找，掛車撞的會誤歸因（正式服 Q10 clip-30 摘要寫成樹）
@@ -2164,6 +2247,7 @@ function D.sample(pn, now, x, y, heading, speed, target, remaining, lat, err,
             ms = g.edgeGap,
         })
     end
+    damageTick(g, pn, now) -- 1026g T14：撞擊車損（damage 事件）
     -- 寫滿接續後 sessions[pn] 已換成新檔：回新檔的存活，不是這個被封的 s
     local cur = sessions[pn]
     return (cur ~= nil and cur.active == true) or uploads[pn] ~= nil
