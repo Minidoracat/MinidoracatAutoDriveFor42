@@ -1139,6 +1139,10 @@ do
         zN = 1, zX = { 102 }, zY = { 90 }, zK = { "zombie" }, zB = { true },
         vN = 1, vX = { 97 }, vY = { 80 }, vFx = { -1 }, vFy = { 0 }, vHL = { 2.3 }, vHW = { 0.9 }, vStill = { true } }
     MDADOverlay.trail = function() return { 100, 100 }, { 98, 60 }, { false, true }, 2, world end
+    -- 1025a：沒有 session 時卡片展開才被動掃描（MDADOverlay.scanPassive）；自駕中與收成晶片都不掃
+    local scans = 0
+    MDAD.Drive.isActive = function() return state.active end
+    MDADOverlay.scanPassive = function() scans = scans + 1 end
     function ISPanel:drawPolygon() self.polys = (self.polys or 0) + 1 end
     function ISPanel:setStencilRect() self.stencil = (self.stencil or 0) + 1 end
     function ISPanel:clearStencilRect() self.stencil = self.stencil - 1 end
@@ -1233,12 +1237,14 @@ do
         and panel.detourButton.x < panel.actionButton.x and panel.detourButton.title == "REROUTE"
         and panel.actionButton.x + panel.actionButton.width <= W,
         "(fsd-blocked) red chip, reroute key before the stop key")
+    check(scans == 0, "(fsd-passive) no passive scan while a session drives (" .. scans .. ")")
     state.active, state.token = false, nil
     state.stopKey, state.stopAgoMs = "UI_MinidoracatAutoDrive_StopStuck", 65000
     tick()
     check(panel._fState == "takeover" and same(panel._fChipC, T.danger) and not panel.detourButton:isVisible()
         and panel.statusTip:isVisible() == (panel._fWhy ~= nil) and same(panel._fPathC, T.danger),
         "(fsd-takeover) forced stop: red take-over chip, reason kept until the next drive")
+    check(scans == 1, "(fsd-passive) manual driving: the expanded card scans passively (" .. scans .. ")")
     state.stopKey, state.stopAgoMs = nil, nil
     arriveMs = 1000
     tick()
@@ -1258,6 +1264,9 @@ do
     check(panel._collapsed and panel.height < 40 and visibleKids == 1 and panel.collapseButton.width == panel.width
         and panel.y + panel.height + 8 == ts.y and panel._fPill ~= nil,
         "(fsd-pill) the card folds into one chip above the dashboard; tapping it expands")
+    local scansFolded = scans
+    tick()
+    check(scans == scansFolded, "(fsd-passive) a folded card does not scan")
     click(panel.collapseButton)
     tick()
     check(not panel._collapsed and panel.height == H, "(fsd-pill) expanding restores the card")
@@ -1287,7 +1296,8 @@ do
     check(not panel._fsd and panel.capTip.fsd == nil and panel.themeButton:isVisible() and not panel._collapsed,
         "(fsd) other cars keep the four themes; a chip forced by the charge card does not follow the player out")
     state.active, state.token = true, "follow"
-    MDADFSD, MDADScene, Vector3f, MDADOverlay.trail = nil, nil, nil, nil
+    MDADFSD, MDADScene, Vector3f, MDADOverlay.trail, MDADOverlay.scanPassive = nil, nil, nil, nil, nil
+    MDAD.Drive.isActive = nil
     MDAD.Drive.hudArrive, MDAD.Drive.clearArrive = nil, nil
     vehicle.getForwardVector, vehicle.getX, vehicle.getY = nil, nil, nil
     tick()

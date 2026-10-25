@@ -11902,6 +11902,91 @@ function drive.scenarioFsdWorld()
     BaseVehicle = savedBV
 end
 drive.scenarioFsdWorld()
+-- (fsd-passive) 1025a 沒有 session 時 FSD 卡片的障礙與路緣：scanPassive 只收自車前方框內（y∈[-6,54]、|x|≤24、同層）的殭屍／
+--   動物與車輛，近→遠、殭屍夾 24、排除自己與拖車、停著看車速；殭屍每拍最多 80 隻、看完才收車輛、最後一拍才發布；
+--   清單丟錯＝0 筆不 crash。updatePassive 沿導航線每點用路段寬度給路緣、折點用出去那段的法向。
+--   違規證明：boxD2 不擋後方＝(fsd-passive-box) 紅；keepNear 不排序／切片從頭看＝(fsd-passive-zom) 紅；提早發布＝(fsd-passive-slice) 紅。
+function drive.scenarioFsdPassive()
+    scenario("FSD 卡片被動場景：手動開時的殭屍／動物／車輛與導航線路緣")
+    local function near(a, b) return type(a) == "number" and math.abs(a - b) < 1e-6 end
+    local function list(t)
+        return { size = function() return #t end, get = function(_, i) return t[i + 1] end,
+            iterator = function()
+                local i = 0
+                return { hasNext = function() return i < #t end, next = function() i = i + 1 return t[i] end }
+            end }
+    end
+    local function mo(x, y, z, extra)
+        local m = extra or {}
+        m.getX, m.getY, m.getZ = function() return x end, function() return y end, function() return z or 0 end
+        return m
+    end
+    -- 框內 26 隻拆在清單頭尾、中間夾框外 400 隻：分 6 拍看完（切片從頭重看＝頭那批重複＝zX[24] 不是 133），清單內遠→近
+    local zs = {}
+    for i = 26, 14, -1 do zs[#zs + 1] = mo(110 + i, 101) end
+    for i = 1, 400 do zs[#zs + 1] = mo(400 + i, 400) end
+    for i = 13, 1, -1 do zs[#zs + 1] = mo(110 + i, 101) end
+    zs[#zs + 1] = mo(90, 100)       -- 後方 10m：框外
+    zs[#zs + 1] = mo(110, 130)      -- 橫向 30m：框外
+    zs[#zs + 1] = mo(104, 100, 1)   -- 樓上
+    local animal = mo(103, 100, 0, { _class = "IsoAnimal", isDead = function() return false end,
+        getVehicle = function() return nil end })
+    local function car(x, y, kmh)
+        return mo(x, y, 0, { getCurrentSpeedKmHour = function() return kmh end,
+            getForwardVector = function(_, o) o._x, o._z = 1, 0 return o end, getScript = function() return nil end })
+    end
+    local ego = car(100, 100, 40)
+    ego.getForwardVector = function(_, o) o._x, o._y, o._z = 1, 0, 0 return o end
+    local trailer = car(94, 100, 40)
+    ego.getVehicleTowing = function() return trailer end
+    local vehs = { ego, trailer, car(120, 102, 30), car(105, 98, 0), car(80, 100, 0) }
+    local broken = false
+    local fakeCell = {
+        getZombieList = function() if broken then error("IndexOutOfBounds") end return list(zs) end,
+        getAnimals = function() return list({ animal }) end,
+        getVehicles = function() return list(vehs) end,
+    }
+    local savedGetCell = getCell
+    getCell = function() return fakeCell end
+    local _, _, _, _, w = MDADOverlay.trail(0)
+    for t = 1000, 1500, 100 do MDADOverlay.scanPassive(0, ego, t) end
+    checkTrue(w.zN == 0 and w.vN == 0, "(fsd-passive-slice) 429 隻殭屍分 6 拍、車輛第 7 拍，之前不發布（" .. w.zN .. "）")
+    MDADOverlay.scanPassive(0, ego, 1600)
+    _, _, _, _, w = MDADOverlay.trail(0)
+    local sorted = true
+    for i = 3, w.zN do if w.zX[i] < w.zX[i - 1] then sorted = false end end
+    checkTrue(w.zN == 24 and w.zK[1] == "animal" and near(w.zX[1], 103) and w.zK[2] == "zombie" and near(w.zX[2], 111)
+            and near(w.zX[24], 133) and sorted and w.zB[1] == false,
+        "(fsd-passive-zom) 近→遠夾 24、動物照 softKindOf 標種類（" .. tostring(w.zN) .. "、" .. tostring(w.zX[2]) .. "）")
+    local outside = false
+    for i = 1, w.zN do
+        if w.zX[i] < 100 or w.zY[i] > 120 or near(w.zX[i], 104) then outside = true end
+    end
+    checkFalse(outside, "(fsd-passive-box) 後方、橫向框外、別層不收")
+    checkTrue(w.vN == 2 and near(w.vX[1], 105) and w.vStill[1] == true and near(w.vX[2], 120) and w.vStill[2] == false
+            and near(w.vHL[1], 2.3),
+        "(fsd-passive-veh) 車輛近→遠、排除自己／拖車／後方、停著看車速（" .. tostring(w.vN) .. "）")
+    broken = true
+    MDADOverlay.scanPassive(0, ego, 5000)
+    _, _, _, _, w = MDADOverlay.trail(0)
+    checkTrue(w.zN == 0 and w.vN == 0, "(fsd-passive-err) 清單丟錯＝本輪 0 筆、不 crash")
+    getCell = savedGetCell
+
+    local savedApi = MinidoracatMiniMapAPI
+    MinidoracatMiniMapAPI = {
+        getNavTarget = function() return 30, 40 end,
+        requestRoute = function() return { pts = { 0, 0, 30, 0, 30, 40 }, segWidth = { 8, 6 } }, "ok" end,
+    }
+    local driver = mo(10, 3, 0, { isDriver = function() return true end })
+    MDADOverlay.updatePassive(0, {}, driver)
+    _, _, _, _, w = MDADOverlay.trail(0)
+    checkTrue(w.rN == 3 and near(w.rLX[1], 10) and near(w.rLY[1], -4) and near(w.rRY[1], 4)
+            and near(w.rLX[2], 33) and near(w.rRX[2], 27) and near(w.rLY[3], 32) and near(w.rLX[3], 33),
+        "(fsd-passive-road) 導航線路緣用路段寬度、折點用出去那段（" .. tostring(w.rN) .. "）")
+    MinidoracatMiniMapAPI = savedApi
+    MDADOverlay.clear(0)
+end
+drive.scenarioFsdPassive()
 checkEq(#(eventHandlers.OnPostRender or {}), drive.overlayRenderBefore + 1,
     "Overlay 只註冊一個 OnPostRender 世界線 renderer")
 checkTrue(type(MDADFollower.OV_STEP) == "number" and MDADFollower.OV_STEP > 0,

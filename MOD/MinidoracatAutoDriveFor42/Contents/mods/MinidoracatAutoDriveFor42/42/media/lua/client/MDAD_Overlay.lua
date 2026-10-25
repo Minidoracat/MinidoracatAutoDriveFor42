@@ -48,7 +48,8 @@ local trailWidth = { 2, 2, 2, 2 }
 local trailShow = { true, true, true, true }
 -- FSD 卡片場景來源（MDAD_Scene.lua 讀，1024a）：與軌跡同一輪覆寫的世界座標——路緣（Sensor roadLo/roadHi 沿中心線
 -- 每 SCENE_ROAD_STEP 公尺一對點）、殭屍等軟目標（Sensor zom*，前 SCENE_ZOM_MAX 個；zB＝在 ±3 減速帶內）、
--- 車輛（Sensor sc*）。沒有 session（updatePassive）或掃描還沒完成＝三種都 0 筆。
+-- 車輛（Sensor sc*）。沒有 session 時（1025a）：路緣由 updatePassive 沿導航線＋路段寬度算，軟目標與車輛由
+-- scanPassive（FSD 卡片展開時）寫；掃描還沒完成＝0 筆。
 local SCENE_ROAD_STEP = 3
 local SCENE_ZOM_MAX = 24
 local world = {}
@@ -266,14 +267,27 @@ local function trajectoryOptions()
     return visible, width - width % 1
 end
 
+-- 被動路緣：(x, y) 沿方向 (ex, ey) 的左右緣（橫向正＝行進方向右側，同 edgeAt）各 寬/2，追加到 w.r*。
+-- 寬度不是正數（v2/v3 不知道）或方向長度 0（投影點正好在折點）＝不加。
+local function curbAt(w, x, y, ex, ey, width)
+    local len = math.sqrt(ex * ex + ey * ey)
+    if type(width) ~= "number" or not (width > 0) or not (len > 1e-6) then return end
+    local nx, ny, hw = -ey / len, ex / len, width * 0.5
+    local n = w.rN + 1
+    w.rLX[n], w.rLY[n], w.rRX[n], w.rRY[n] = x - nx * hw, y - ny * hw, x + nx * hw, y + ny * hw
+    w.rN = n
+end
+
 -- 沒有自駕 session 時（按下停止／手動接手之後）：仍在導航就沿導航路線畫同一條藍線，
 -- 讓玩家照著自己開。由 HUD 250ms refresh 呼叫（Driver 的 OnPlayerUpdate 在無 session 時
 -- 必須零成本）；route 取主 MOD requestRoute 的共用快取（小地圖同一條），車位投影到折線、
 -- 往前 TRAIL_AHEAD。不在駕駛座、沒目標、沒路線＝清空；關閉軌跡顯示照算（FSD 卡片要用），只是不畫地面線。
+-- 同時給 FSD 卡片的路緣：每個點用所在路段的寬度 route.segWidth ±寬/2（純算術；寬度 0＝不知道，該點不畫）。
+-- 軟目標與車輛歸 scanPassive，這裡不清。
 function MDADOverlay.updatePassive(playerNum, player, vehicle)
     local slot = slotOf(playerNum)
     if not slot then return end
-    clearSlot(slot)
+    trailN[slot], world[slot].rN = 0, 0
     local api = MinidoracatMiniMapAPI
     if vehicle == nil or player == nil or not vehicle:isDriver(player) or type(api) ~= "table"
             or type(api.getNavTarget) ~= "function" or type(api.requestRoute) ~= "function" then return end
@@ -299,10 +313,13 @@ function MDADOverlay.updatePassive(playerNum, player, vehicle)
         if best == nil or d < best then best, bi, bt = d, i, t end
     end
     local xs, ys, ds = trailX[slot], trailY[slot], trailDodge[slot]
+    local widths, w = route.segWidth, world[slot]
+    if type(widths) ~= "table" then widths = nil end
     local ax, ay = pts[bi * 2 - 1], pts[bi * 2]
     local cx, cy = ax + (pts[bi * 2 + 1] - ax) * bt, ay + (pts[bi * 2 + 2] - ay) * bt
     local n, left = 1, TRAIL_AHEAD
     xs[1], ys[1], ds[1] = cx, cy, false
+    if widths then curbAt(w, cx, cy, pts[bi * 2 + 1] - ax, pts[bi * 2 + 2] - ay, widths[bi]) end
     for i = bi + 1, np do
         local nx, ny = pts[i * 2 - 1], pts[i * 2]
         local dx, dy = nx - cx, ny - cy
@@ -311,13 +328,189 @@ function MDADOverlay.updatePassive(playerNum, player, vehicle)
         if len >= left then
             local k = len > 0 and left / len or 0
             xs[n], ys[n], ds[n] = cx + dx * k, cy + dy * k, false
+            if widths then curbAt(w, xs[n], ys[n], dx, dy, widths[i - 1]) end
             break
         end
         xs[n], ys[n], ds[n] = nx, ny, false
+        if widths then
+            -- 折點用出去那段的法向與寬度；終點沒有下一段，用進來那段
+            if i < np then
+                curbAt(w, nx, ny, pts[i * 2 + 1] - nx, pts[i * 2 + 2] - ny, widths[i])
+            else
+                curbAt(w, nx, ny, dx, dy, widths[i - 1])
+            end
+        end
         left, cx, cy = left - len, nx, ny
     end
     local z = vehicle:getZ()
     trailZ[slot], trailWidth[slot], trailN[slot] = z - z % 1, width, n
+end
+
+-- 沒有 session 時 FSD 卡片的障礙（1025a）：FSD 卡片展開時 MDADFSD.update（約 10 Hz）每次都呼叫，把附近的殭屍、玩家、
+-- 動物與車輛寫進 world 槽（近→遠，各取前 SCENE_ZOM_MAX／Sensor.SCENE_VEH_MAX）。只走引擎現成清單——殭屍
+-- IsoCell.getZombieList（活 ArrayList）、車輛 IsoCell.getVehicles（Set）、動物 IsoCell.getAnimals（Java 端過濾 objectList
+-- 回新 LinkedList）、MP 線上玩家 getOnlinePlayers——不逐格掃（單格查詢約 6µs，sensor.md）。
+-- 一輪分好幾拍做，每拍有上限：殭屍每拍最多 PASSIVE_SLICE 隻（成本隨載入的殭屍數線性長，殭屍群實測每隻約 1.3µs），看完殭屍
+-- 才收動物／玩家，車輛另一拍（固定約 0.1 ms），最後一拍才整份發布；上一輪開始滿 PASSIVE_MS 才開新的一輪。殭屍越多一輪越久、
+-- 卡片上的位置越舊，但每拍與每秒的成本都有上限。中斷超過 PASSIVE_STALE_MS（自駕、收起卡片）就從頭來。
+-- 範圍＝卡片畫得到的自車座標 y∈[PASSIVE_BACK, PASSIVE_FAR]、|x|≤PASSIVE_SIDE、同一層，自車位姿每拍重讀。
+-- 屍體與路面帶要逐格掃，被動不做。清單在模擬端增刪（拍與拍之間索引會位移，偶爾漏看或重複一隻，只影響顯示）；
+-- 每拍包 pcall，丟錯＝本輪作廢、卡片 0 筆，下一拍重來。
+local PASSIVE_BACK, PASSIVE_FAR, PASSIVE_SIDE = -6, 54, 24
+local PASSIVE_MS, PASSIVE_SLICE, PASSIVE_STALE_MS = 250, 80, 1000
+local passive = {}
+for i = 1, MAX_PLAYERS do
+    passive[i] = { stage = nil, zi = 0, zn = 0, at = 0, nextAt = 0, zb = { d = {}, x = {}, y = {}, k = {} },
+        vb = { d = {}, x = {}, y = {}, k = {} } } -- vb.k＝車輛物件，發布完即清
+end
+local vehScratch = { wScN = 0, wScX = {}, wScY = {}, wScFx = {}, wScFy = {}, wScHL = {}, wScHW = {}, wScStill = {} }
+local pox, poy, poz, pfx, pfy = 0, 0, 0, 0, 1
+local passiveFwd = nil
+
+-- 在掃描框內＝回到自車的平方距離，否則 nil（rx,ry＝(−fy, fx)，同 MDAD_Scene）。
+local function boxD2(wx, wy)
+    local dx, dy = wx - pox, wy - poy
+    local ey = dx * pfx + dy * pfy
+    if ey < PASSIVE_BACK or ey > PASSIVE_FAR then return nil end
+    local ex = pfx * dy - pfy * dx
+    if ex < -PASSIVE_SIDE or ex > PASSIVE_SIDE then return nil end
+    return dx * dx + dy * dy
+end
+
+-- 依距離插入排序、只留最近 cap 筆（滿了就擠掉最遠的）。回新筆數。
+local function keepNear(b, n, cap, d, x, y, k)
+    local bd = b.d
+    if n >= cap then
+        if d >= bd[n] then return n end
+    else
+        n = n + 1
+    end
+    local i = n
+    while i > 1 and bd[i - 1] > d do
+        bd[i], b.x[i], b.y[i], b.k[i] = bd[i - 1], b.x[i - 1], b.y[i - 1], b.k[i - 1]
+        i = i - 1
+    end
+    bd[i], b.x[i], b.y[i], b.k[i] = d, x, y, k
+    return n
+end
+
+local function sameFloor(m)
+    local dz = m:getZ() - poz
+    return dz > -1 and dz < 1
+end
+
+-- softKindOf 判種類（死亡、被抱著、在車上＝nil）；players 是 Java List。
+local function scanSoft(b, list, zn, useIterator)
+    if list == nil then return zn end
+    local kindOf = MDADSensor.softKindOf
+    if useIterator then
+        local it = list:iterator()
+        while it:hasNext() do
+            local m = it:next()
+            local d = boxD2(m:getX(), m:getY())
+            if d and sameFloor(m) then
+                local k = kindOf(m)
+                if k then zn = keepNear(b, zn, SCENE_ZOM_MAX, d, m:getX(), m:getY(), k) end
+            end
+        end
+        return zn
+    end
+    for i = 1, list:size() do
+        local m = list:get(i - 1)
+        local d = m and boxD2(m:getX(), m:getY())
+        if d and sameFloor(m) then
+            local k = kindOf(m)
+            if k then zn = keepNear(b, zn, SCENE_ZOM_MAX, d, m:getX(), m:getY(), k) end
+        end
+    end
+    return zn
+end
+
+-- 一拍：stage "zom" 看下一段殭屍（看完再收動物／玩家，轉 "veh"）；stage "veh" 收車輛並整份發布。
+local function passiveStep(st, w, vehicle, cell)
+    local b = st.zb
+    if st.stage == "zom" then
+        local list = cell:getZombieList()
+        local n = list:size()
+        local last = st.zi + PASSIVE_SLICE
+        if last > n then last = n end
+        local zn = st.zn
+        for i = st.zi + 1, last do
+            local m = list:get(i - 1)
+            if m then
+                local x, y = m:getX(), m:getY()
+                local d = boxD2(x, y)
+                if d and (zn < SCENE_ZOM_MAX or d < b.d[zn]) and sameFloor(m) then
+                    zn = keepNear(b, zn, SCENE_ZOM_MAX, d, x, y, "zombie")
+                end
+            end
+        end
+        st.zi = last
+        if last >= n then
+            zn = scanSoft(b, cell:getAnimals(), zn, true)
+            if isClient() then zn = scanSoft(b, getOnlinePlayers(), zn, false) end
+            st.stage = "veh"
+        end
+        st.zn = zn
+        return
+    end
+    local vb, cap, vn = st.vb, MDADSensor.SCENE_VEH_MAX, 0
+    local towing = vehicle:getVehicleTowing()
+    local it = cell:getVehicles():iterator()
+    while it:hasNext() do
+        local v = it:next()
+        if v ~= vehicle and v ~= towing then
+            local x, y = v:getX(), v:getY()
+            local d = boxD2(x, y)
+            if d then vn = keepNear(vb, vn, cap, d, x, y, v) end
+        end
+    end
+    local sc = vehScratch
+    sc.wScN = 0
+    for i = 1, vn do
+        local v = vb.k[i]
+        local kmh = v:getCurrentSpeedKmHour()
+        MDADSensor.pushSceneVeh(sc, v, vb.x[i], vb.y[i], kmh > -1 and kmh < 1)
+    end
+    for i = 1, st.zn do
+        w.zX[i], w.zY[i], w.zK[i], w.zB[i] = b.x[i], b.y[i], b.k[i], false
+    end
+    w.zN = st.zn
+    for i = 1, sc.wScN do
+        w.vX[i], w.vY[i], w.vFx[i], w.vFy[i] = sc.wScX[i], sc.wScY[i], sc.wScFx[i], sc.wScFy[i]
+        w.vHL[i], w.vHW[i], w.vStill[i] = sc.wScHL[i], sc.wScHW[i], sc.wScStill[i]
+    end
+    w.vN = sc.wScN
+    st.stage = nil
+end
+
+function MDADOverlay.scanPassive(playerNum, vehicle, now)
+    local slot = slotOf(playerNum)
+    if not slot then return end
+    local st, w = passive[slot], world[slot]
+    if st.stage and now - st.at > PASSIVE_STALE_MS then st.stage = nil end
+    if not st.stage then
+        if now < st.nextAt then return end
+        st.stage, st.zi, st.zn, st.nextAt = "zom", 0, 0, now + PASSIVE_MS
+    end
+    st.at = now
+    local cell = getCell()
+    if vehicle == nil or cell == nil or type(MDADSensor) ~= "table" then
+        st.stage, w.zN, w.vN = nil, 0, 0
+        return
+    end
+    passiveFwd = passiveFwd or Vector3f.new()
+    local f = vehicle:getForwardVector(passiveFwd)
+    local fx, fy = f:x(), f:z()
+    local len = math.sqrt(fx * fx + fy * fy)
+    if not (len > 1e-3) then return end
+    pfx, pfy = fx / len, fy / len
+    pox, poy, poz = vehicle:getX(), vehicle:getY(), vehicle:getZ()
+    if not pcall(passiveStep, st, w, vehicle, cell) then st.stage, w.zN, w.vN = nil, 0, 0 end
+    if not st.stage then
+        local vk = st.vb.k
+        for i = 1, MDADSensor.SCENE_VEH_MAX do vk[i] = nil end
+    end
 end
 
 -- FSD 卡片場景來源（world 槽）：路緣、軟目標與車輛換成世界座標。zomS／zomL 與 roadLo／roadHi 是相對 nav 中心線的
