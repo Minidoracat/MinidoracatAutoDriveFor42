@@ -212,6 +212,9 @@ local EK = {
     "rcu",
     -- 1024a start：這趟坐的車顯示 FSD 卡片（換掉原版儀表的選配 MOD）＝"fsd"；原版儀表的車沒有這欄
     "hud",
+    -- 1026d detour why=back／back-turn／towturn 與 tow turn 拒收（Driver Drive.rejectFields）：被拒改道線前 2 點、第一段長度 m
+    -- 與對車頭夾角（度，0＝正前）；snapDist 沿用上面的鍵。detour 的 tt＝接拖車調頭繞路（Drive.towTurnaround）的結果
+    "r1x", "r1y", "r2x", "r2y", "blen", "bdeg", "tt",
 }
 
 local function logOnce(msg)
