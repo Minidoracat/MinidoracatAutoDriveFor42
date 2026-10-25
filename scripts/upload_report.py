@@ -24,8 +24,10 @@ clips-anon.tsv（anon path overview，目錄內全部片段），寫完重讀、
     類別 zombie＞small-animal／animal＞vehicle（貼車）＞static（scost tree／hard／wall）＞corpse（貼車）＞far（有 nb 沒貼車）＞empty；
     small-animal＝貼車的動物 a 體重 <SMALL_KG（nb a 第 5 項；1013f 起含剛死的，第 6 項＝1），讀不到體重算 animal
   L 1017 摘要新欄位（rev 有 rhi 的趟）：rhi／xbk、vfIn／vfInX、aoi、出口偏差、油量分段 %/km、起步到 40m 中位（依 t40k）、blr、eng；
-    1020 起（摘要有 fuT／fuE）另印各段每分鐘扣量、實扣÷原版公式期望（held＝實際檔、fair＝伺服器換算檔），與油量判準
-    (彎道＋繞行)/其他 的實扣÷期望比＋玩家叢集 95%（boot_players；fair 區間含 1＝換算在作用）
+    1020 起（摘要有 fuT／fuE）另印各段每分鐘扣量（記在值到達那筆的段，只描述）。油量換算判準看片段（現行 rev、窗口內）：
+    兩次油量同步之間積分原版公式期望（held＝實際檔、fair＝伺服器換算檔），擬合換算比例 α＋玩家叢集 95%，fuel_verdict 判過／不過／
+    不確定（fuel_intervals／fuel_alpha）；另印步長指紋（≤FUEL_SMALL_STEP% 的下降佔比）。摘要的 (彎道＋繞行)/其他 段比不能當判準：同步由
+    換算前的扣量觸發、下降記在到達那筆的段，換算有作用／沒作用都落在 1.2–1.5（mdad-prod-1025/agent-TowFuelHud.md §1.4）
   D contact ≥10 km/h（現行 rev）：scost、弧上（前 2.5s curveHardActive）、前 2.5s |ld|>0.5、lag 帽（capReason=lag）、主導 ctl、sprite 家族
   E 判堵後接手：takeover 片段觸發前 10s 內有 blocked；窗口內首筆 blocked→接手秒數、其間 unstick start、detour=false、最後一筆 why／shape
   F 判堵熱點：blocked x,y 的 25m 格（玩家、趟、事件、車型）
@@ -34,8 +36,8 @@ clips-anon.tsv（anon path overview，目錄內全部片段），寫完重讀、
   I tow lost／relook
   J 結案檢查：area start kind=behind 後 20s 同趟 progress suspect；gate phase／why；detour kind=towcorner why=ok
   K 接手結束的趟（現行 rev）依 rem 分桶；≥300m 的趟 ev 沒有異常事件（blocked／uturn／unstick／contact／impact／progress）的數量
-  分析用 helper（`import upload_report as UR`）：Anon(root)、hm、q、ci、binom_p、boot_ratio、boot_players、fuel_model、opts_of、
-    is_tow、per_em、load_summaries、load_clips（since 省略＝pull.json）、dedupe、trips、events、window、edge_row、classify_impact、
+  分析用 helper（`import upload_report as UR`）：Anon(root)、hm、q、ci、binom_p、boot_ratio、boot_players、fuel_intervals、fuel_alpha、
+    opts_of、is_tow、per_em、load_summaries、load_clips（since 省略＝pull.json）、dedupe、trips、events、window、edge_row、classify_impact、
     real_impacts
 """
 import argparse
@@ -163,27 +165,90 @@ def boot_players(L, stat, B=2000, seed=7):
     return pt, q(rr, 0.025), q(rr, 0.975)
 
 
-FUEL_HI = ("arc", "dodge")   # 油量判準的「彎道＋繞行」段
+FUEL_PASS_LO = 0.9      # 油量換算判準：α 玩家 95% 下限 ≥ 這個值＝過（2026-10-25 正式服 0.95，0.95–1.00）
+FUEL_MIN_USERS = 5      # α 玩家叢集 bootstrap 至少這麼多人才判
+FUEL_SMALL_STEP = 0.03  # 步長指紋：≤ 這個 % 的油量下降＝退款後的小步（模擬：換算有作用 48–57%、沒換算 9–11%）
 
 
-def fuel_model(L, mi):
-    """1020 摘要 fuS（實扣 %）與 fuE（原版 GasTank 期望，[held, fair]）→ (段比, {段: [實扣, 正規化期望]})。mi 0＝held、1＝fair。
-    每趟期望以該趟實扣總量正規化（消掉油箱、引擎品質、耗油沙盒值、遊戲時間倍率）；段比＝(arc+dodge) 實扣÷期望 對其他段，
-    1＝和模型一致。沒有 fuE 或實扣 0 的趟不算；段比缺分母回 None。fu 是伺服器同步值、落在值到達那一筆的段：弧上的油有一部分記到 post。"""
-    seg = collections.defaultdict(lambda: [0.0, 0.0])
-    for o in L:
-        fs, fe = o.get("fuS") or {}, o.get("fuE") or {}
-        tot_o = sum(((fs.get(s) or [0])[0] or 0) for s in fe)
-        tot_e = sum(v[mi] or 0 for v in fe.values())
-        if tot_o <= 0 or tot_e <= 0:
+def fuel_intervals(C):
+    """片段 → (同步區間 [dict(u, rev, key, obs, H, F, ms)], 油量下降步長 % 清單)。
+    樣本 fu 是伺服器同步值：兩次油量變動之間＝整數個伺服器計費步，區間內積分原版 GasTank 期望（held＝實際檔 tn、fair＝伺服器換算檔，
+    公式同 MDAD_Upload tripKpi 的 fuE；檔數＝片段裡車速 ≥0.4×極速時最高的 tn，同 scriptName 共用），不受「值到達那筆」歸段影響。
+    只收「上一次變動是下降、這次下降 0–1%」的區間（第一段起點不明、加油後那段不算）；樣本間隔 ≤0 或 >2 s 切開重來。"""
+    gears, mx = collections.Counter(), {}
+    for c in C:
+        sc, m = c["prof"].get("scriptName"), c["prof"].get("maxSpeed")
+        mx[sc] = m
+        for r in c["rows"]:
+            if isinstance(r.get("tn"), int) and m and abs(r.get("spd") or 0) >= 0.4 * m:
+                gears[sc] = max(gears[sc], r["tn"])
+    iv, steps = [], []
+    for key, t in trips(C).items():
+        rec = t["clips"][0]
+        sc = rec["prof"].get("scriptName")
+        n, m = gears.get(sc), mx.get(sc)
+        if not n or n < 2 or not m:
             continue
-        k = tot_o / tot_e
-        for s, v in fe.items():
-            seg[s][0] += (fs.get(s) or [0])[0] or 0
-            seg[s][1] += (v[mi] or 0) * k
-    o1, e1 = (sum(seg[s][i] for s in seg if s in FUEL_HI) for i in (0, 1))
-    o2, e2 = (sum(seg[s][i] for s in seg if s not in FUEL_HI) for i in (0, 1))
-    return ((o1 / e1) / (o2 / e2) if e1 and e2 and o2 else None), dict(seg)
+        per, mm = m / n, abs(1000 - (rec["prof"].get("mass") or 1000)) / 300 + 1
+        R = [r for r in t["rows"] if isinstance(r.get("fu"), (int, float))]
+        last, H, F, ms, ok = None, 0.0, 0.0, 0, False
+        for a, b in zip(R, R[1:]):
+            dt = (b["ts"] - a["ts"]) / 1000
+            if dt <= 0 or dt > 2:
+                last, H, F, ms, ok = None, 0.0, 0.0, 0, False
+                continue
+            v, es, g = abs(a.get("spd") or 0), a.get("es") or 0, a.get("tn")
+            if es > 0 and isinstance(g, int):
+                if math.floor(v) > 0:
+                    h = gas_term(g, v, per) * mm
+                    fg = min(n, math.floor(min(v, m) / per) + 1)
+                    f = gas_term(fg, v, per) * mm if g >= 2 and g > fg else h
+                else:
+                    h = f = 150.0
+                H += h * es / 2500 * dt
+                F += f * es / 2500 * dt
+            ms += b["ts"] - a["ts"]
+            if b["fu"] < a["fu"]:
+                steps.append(a["fu"] - b["fu"])
+            if last is None:
+                last = a["fu"]
+            if b["fu"] != last:
+                if ok and 0 < last - b["fu"] < 1.0:
+                    iv.append(dict(u=rec["u"], rev=rec["rev"], key=key, obs=last - b["fu"], H=H, F=F, ms=ms))
+                ok = b["fu"] < last
+                last, H, F, ms = b["fu"], 0.0, 0.0, 0
+    return iv, steps
+
+
+def gas_term(gear, kmh, per):
+    """同 MDAD.gasGearTerm（原版 Vehicles.lua:467-479 的檔位項）。"""
+    x = (per * 0.71 * gear - kmh) * 350
+    return 800.0 if x < 800 else x
+
+
+def fuel_alpha(iv):
+    """同步區間 → 換算比例 α（0–1，格距 0.05）：擬合 obs ≈ k_趟 ×(α·F + (1−α)·H)，k_趟 以該趟區間總量正規化（消掉油箱、
+    引擎品質、耗油沙盒值、自駕加成），α 取 Σ(obs−pred)²/pred 最小。1＝照換算後的檔計費、0＝照實際檔（換算沒作用）。
+    少於 3 個區間的趟不算；沒有可用的趟回 None。"""
+    byt = collections.defaultdict(list)
+    for x in iv:
+        byt[x["key"]].append(x)
+    rs = [r for r in byt.values() if len(r) >= 3]
+    if not rs:
+        return None
+    best = None
+    for i in range(21):
+        a, dev = i / 20, 0.0
+        for r in rs:
+            M = [a * x["F"] + (1 - a) * x["H"] for x in r]
+            to, tm = sum(x["obs"] for x in r), sum(M)
+            if to <= 0 or tm <= 0:
+                continue
+            k = to / tm
+            dev += sum((x["obs"] - k * p) ** 2 / (k * p) for x, p in zip(r, M) if p > 0)
+        if best is None or dev < best[1]:
+            best = (a, dev)
+    return best[0]
 
 
 def q(xs, p):
@@ -506,14 +571,48 @@ def sec_c(E, A, picks, S=None):
     return out
 
 
-def sec_l(S, cur):
+def fuel_verdict(res):
+    """α 的 (點估計, 2.5%, 97.5%) → 判定：下限 ≥FUEL_PASS_LO＝過；上限 <FUEL_PASS_LO＝不過（換算沒作用或只部分作用；
+    反證模擬沒換算 α 0.05–0.25）；區間跨過 FUEL_PASS_LO＝不確定（樣本太少分不出，不能當成不過）；None＝樣本不足。"""
+    if res is None:
+        return "樣本不足"
+    return "過" if res[1] >= FUEL_PASS_LO else "不過" if res[2] < FUEL_PASS_LO else "不確定"
+
+
+def fuel_check(C):
+    """L 節油量判準（片段同步區間積分，fuel_intervals／fuel_alpha）：α 全部與依 rev 的玩家叢集 95% 與 fuel_verdict，
+    少於 FUEL_MIN_USERS 人＝樣本不足；另印步長指紋（≤FUEL_SMALL_STEP % 的下降佔比，只監控）。
+    取代 1020 起的摘要 (彎道＋繞行)/其他 段比：伺服器同步由原版扣量（換算前）觸發，下降記在值到達那筆的段，
+    模擬在換算有作用／沒作用時段比都落在 1.2–1.5，沒有鑑別力（.omc/plans/mdad-prod-1025/agent-TowFuelHud.md §1.4）。"""
+    iv, steps = fuel_intervals(C)
+    out = dict(steps=len(steps), small=sum(1 for s in steps if s <= FUEL_SMALL_STEP + 1e-9))
+    print("  油量換算判準（片段兩次油量同步之間積分原版公式期望；α 1＝照伺服器換算檔計費、0＝照實際檔＝換算沒作用）")
+    revs = sorted({x["rev"] for x in iv})
+    for name, g in [("全部", iv)] + ([(r, [x for x in iv if x["rev"] == r]) for r in revs] if len(revs) > 1 else []):
+        users = len({x["u"] for x in g})
+        res = boot_players(g, fuel_alpha, B=500) if users >= FUEL_MIN_USERS else None
+        verdict = fuel_verdict(res)
+        out[name] = dict(alpha=res and tuple(round(v, 2) for v in res), n=len(g), trips=len({x["key"] for x in g}),
+                         users=users, verdict=verdict)
+        print(f"    {name}：α " + ("—" if res is None else f"{res[0]:.2f}（玩家 95% {res[1]:.2f}–{res[2]:.2f}）")
+              + f"；區間 {len(g)}、趟 {out[name]['trips']}、人 {users}、{sum(x['ms'] for x in g) / 60000:.0f} 分鐘"
+              + f"；判準（{FUEL_MIN_USERS} 人以上）下限 ≥{FUEL_PASS_LO} 過、上限 <{FUEL_PASS_LO} 不過、跨過＝不確定：{verdict}")
+    if steps:
+        print(f"    步長指紋：油量下降 {len(steps)} 步，≤{FUEL_SMALL_STEP}% 佔 {out['small'] / len(steps) * 100:.0f}%"
+              "（模擬：換算有作用 48–57%、沒換算 9–11%；只監控）")
+    return out
+
+
+def sec_l(S, cur, C=()):
     """1017 摘要新欄位（只算帶 rhi 的摘要＝rev ≥1017f）：假撞另計、路中停車首見、入彎超速明細、出彎偏差、油量、起步、
-    煞車學習拒收、EngineOff 關卡。"""
+    煞車學習拒收、EngineOff 關卡；C（現行 rev 片段）另算油量換算判準 fuel_check。"""
     print("\n== L 1017 摘要新欄位（rev 有 rhi 欄的趟）")
     L = [o for o in S.values() if "rhi" in o and (not cur or o.get("rev") in cur)]
     out = dict(trips=len(L))
+    if C:
+        out["fuelA"] = fuel_check(C)
     if not L:
-        print("  （沒有）")
+        print("  （沒有摘要）")
         return out
     km = sum(o.get("dist") or 0 for o in L) / 1000
     tot = {f: sum(o.get(f) or 0 for o in L) for f in ("impact", "rhi", "xbk", "vfIn", "vfInX", "exN", "exDev", "exN50", "exDev50")}
@@ -535,33 +634,18 @@ def sec_l(S, cur):
                 seg[k][1] += v[1] or 0
     out["fuel"] = {k: [round(d, 2), round(m, 3)] for k, (d, m) in seg.items()}
     if fu:
-        print(f"  油量 {len(fu)} 趟：起訖差 {sum(o['fu0'] - o['fu1'] for o in fu):.2f}%；分段 %/km "
+        print(f"  油量 {len(fu)} 趟：起訖差 {sum(o['fu0'] - o['fu1'] for o in fu):.2f}%；分段 %/km（記在值到達那筆的段，只描述） "
               + ", ".join(f"{k}:{d / m if m else 0:.2f}({m:.1f}km)" for k, (d, m) in sorted(seg.items())))
-    # 1020 油量判準：實扣÷原版公式期望（fair＝伺服器換算後；held＝沒換算），(彎道＋繞行)/其他 的玩家叢集 95% 區間含 1＝換算在作用
     fe = [o for o in fu if o.get("fuE")]
     if fe:
         tm, dr = collections.Counter(), collections.Counter()
         for o in fe:
             tm.update(o.get("fuT") or {})
             dr.update({s: v[0] or 0 for s, v in (o.get("fuS") or {}).items() if isinstance(v, list) and v})
-        segs = sorted(set(tm) | set(dr))
-        fit = {m: fuel_model(fe, i)[1] for i, m in enumerate(("held", "fair"))}
-        res = {m: boot_players(fe, lambda xs, i=i: fuel_model(xs, i)[0]) for i, m in enumerate(("held", "fair"))}
-        out["fuelE"] = dict(trips=len(fe), users=len({o.get("u") for o in fe}), ratio=res,
-                            perMin={s: round(dr[s] / (tm[s] / 60000), 3) for s in segs if tm[s] > 0},
-                            seg={s: [round(fit[m][s][0] / fit[m][s][1], 3) if s in fit[m] and fit[m][s][1] else None
-                                     for m in ("held", "fair")] for s in segs})
-        print(f"  油量模型 {len(fe)} 趟 {out['fuelE']['users']} 人：每分鐘扣量 %/min "
+        out["fuelE"] = dict(trips=len(fe), users=len({o.get("u") for o in fe}),
+                            perMin={s: round(dr[s] / (tm[s] / 60000), 3) for s in sorted(set(tm) | set(dr)) if tm[s] > 0})
+        print(f"  每分鐘扣量 %/min（摘要 fuT 有記的 {len(fe)} 趟 {out['fuelE']['users']} 人，同樣是到達歸段，只描述） "
               + ", ".join(f"{s}:{v:.3f}({tm[s] / 60000:.0f}min)" for s, v in out["fuelE"]["perMin"].items()))
-        print("    實扣÷期望（每趟總量正規化，1＝和模型一致）held/fair "
-              + ", ".join(f"{s}:{h if h is None else round(h, 2)}/{f if f is None else round(f, 2)}"
-                          for s, (h, f) in out["fuelE"]["seg"].items()))
-        for m in ("fair", "held"):
-            r = res[m]
-            print(f"    (彎道＋繞行)/其他 {m}：" + ("分母不足" if r is None else
-                                              f"{r[0]:.2f}（玩家 95% {r[1]:.2f}–{r[2]:.2f}）"
-                                              + ("" if m == "held" else "；判準：區間含 1"
-                                                 + ("，過" if r[1] <= 1 <= r[2] else "，不過"))))
     t40 = collections.defaultdict(list)
     for o in L:
         if isinstance(o.get("t40"), (int, float)):
@@ -807,7 +891,7 @@ def report(root, since_s, cur, picks_path=None, withs=()):
     E = dedupe(C)
     res = dict(A=a, B=b, C=sec_c(E, A, picks, Sd), D=sec_d(E, A, picks), E=sec_e(C, A, picks),
                F=sec_f(E, A), G=sec_g(E, A, picks), H=sec_h(C, S, A, picks), I=sec_i(E, A, picks), J=sec_j(E, A, picks),
-               K=sec_k(S, cur), L=sec_l(S, cur))
+               K=sec_k(S, cur), L=sec_l(S, cur, C))
     if picks_path:
         write_picks(picks_path, picks, A)
         print(f"\npicks {len(picks)} 列 → {picks_path}（含真實資料夾名，只留本機）")
@@ -958,9 +1042,9 @@ def self_test():
         check(L["trips"] == 1 and L["rhi"] == 1 and L["xbk"] == 1 and L["vfIn"] == 2 and L["vfInX"] == 1 and L["aoi"] == 1
               and L["exN50"] == 2 and L["fuel"] == {"arc": [0.5, 0.2], "oth": [1.0, 0.8]} and L["t40"] == {"tow": 3200}
               and L["blr"] == {"unloaded": 2} and L["eng"] == {"battery": 1}, "L 1017 摘要新欄位彙整（" + str(L) + "）")
-        check("fuelE" not in L and L["engLow"] == (0, 0), "L 舊摘要（沒有 fuE、eng 沒有 ecd）不出油量模型與引擎狀況")
-        # 1020 油量模型：A、B 兩種趟（油箱大小不同＝每 % 對應的油量不同），實扣都照 fair 期望扣；B 的段比例和 A 不同。
-        # 每趟正規化後 fair 段比＝1；不正規化會變 0.75。held（沒換算）在彎道期望偏高，段比 <1。舊格式（沒 fuE）與實扣 0 的趟不算。
+        check("fuelE" not in L and L["engLow"] == (0, 0) and L["fuelA"]["全部"]["verdict"] == "樣本不足",
+              "L 舊摘要（沒有 fuE、eng 沒有 ecd）不出每分鐘扣量與引擎狀況；片段沒有 fu＝油量判準樣本不足")
+        # 1020 摘要 fuT／fuE：每分鐘扣量只算有 fuE 的趟（舊格式沒 fuE 的不算）；段比判準已拿掉（到達歸段沒有鑑別力）。
         def fs(u, drive, fuS, fuT=None, fuE=None, eng=None):
             o = dict(t="sum", u=u, drive=drive, rev="2", rhi=0, fu0=50, fu1=40, fuS=fuS)
             o.update({k: v for k, v in (("fuT", fuT), ("fuE", fuE), ("eng", eng)) if v is not None})
@@ -974,13 +1058,42 @@ def self_test():
         with contextlib.redirect_stdout(io.StringIO()):
             LE = sec_l({(o["u"], o["drive"]): o for o in SF}, {"2"})
         LF = LE["fuelE"]
-        fair, held = LF["ratio"]["fair"], LF["ratio"]["held"]
-        check(LF["trips"] == 4 and LF["users"] == 4 and all(abs(x - 1) < 1e-9 for x in fair),
-              "L 油量模型：照 fair 扣的趟每趟正規化後 (arc+dodge)/其他＝1、玩家區間也是 1；沒 fuE 的趟不算（" + str(LF) + "）")
-        check(held[0] < 0.9 and held[2] < 1, "L 油量模型：held（沒換算）段比 <1、區間不含 1（" + str(held) + "）")
+        check(LF["trips"] == 4 and LF["users"] == 4 and set(LF) == {"trips", "users", "perMin"},
+              "L 每分鐘扣量只算有 fuE 的趟，不再輸出段比 ratio／seg（" + str(LF) + "）")
         check(LF["perMin"] == {"arc": round(7 / 3, 3), "oth": round(17 / 5, 3)}, "L 每分鐘扣量＝fuS 實扣 ÷ fuT 分鐘（只算有 fuE 的趟）")
-        check(LF["seg"]["arc"][1] == 1.0 and LF["seg"]["oth"][1] == 1.0, "L 各段實扣÷fair 期望＝1")
         check(LE["engLow"] == (1, 1), "L eng ecd <50 計數")
+        # 油量換算判準（片段同步區間積分）：合成片段，油箱照 truth（fair＝換算檔、held＝實際檔）的原版公式扣，
+        # 累積下降 ≥0.02% 才同步一次（樣本 fu 只在同步時變）。換算有作用＝α 1 過；沒作用＝α 0 不過；不到 5 人＝樣本不足。
+        def fuel_clips(truth, users, seed=3):
+            rnd, C = random.Random(seed), []
+            fprof = {"scriptName": "Base.F", "maxSpeed": 150, "mass": 1300}   # 5 檔、每檔 30 km/h、車重倍率 2
+            for i in range(users):
+                rows, tank, shown, ts = [], 40.0, 40.0, T
+                while ts < T + 120000:
+                    v = rnd.choice((30, 55, 80, 120))
+                    end = ts + rnd.uniform(2000, 10000)
+                    while ts < end:
+                        g = 5 if v >= 120 else 4
+                        rows.append(dict(t="s", ts=ts, spd=v, tn=g, es=2500, fu=shown))
+                        fg = min(5, v // 30 + 1)
+                        rate = gas_term(g if truth == "held" or g <= fg else fg, v, 30) * 2
+                        tank -= rate * 0.05 / 38640 * 0.25
+                        if shown - tank >= 0.02:
+                            shown = tank
+                        ts += 250
+                C.append(dict(u="g%d" % i, drive=T + i, rev="ab"[i % 2], prof=fprof, rows=rows, evs=[]))
+            return C
+        with contextlib.redirect_stdout(io.StringIO()):
+            fa, fh, fn = (fuel_check(fuel_clips(t, n)) for t, n in (("fair", 10), ("held", 10), ("fair", 4)))
+        check(fa["全部"]["alpha"][0] == 1.0 and fa["全部"]["verdict"] == "過" and fa["a"]["verdict"] == "過"
+              and fa["b"]["users"] == 5 and fa["全部"]["n"] >= 30,
+              "L 油量判準：油照換算檔扣＝α 1、全部與各 rev 都過（" + str(fa["全部"]) + "）")
+        check(fh["全部"]["alpha"][2] <= 0.1 and fh["全部"]["verdict"] == "不過",
+              "L 油量判準：油照實際檔扣（換算沒作用）＝α≈0、不過（" + str(fh["全部"]) + "）")
+        check(fn["全部"]["verdict"] == "樣本不足" and fn["全部"]["alpha"] is None, "L 油量判準：不到 5 人＝樣本不足、不判")
+        check([fuel_verdict(r) for r in ((0.95, 0.95, 1.0), (0.85, 0.6, 1.0), (0.5, 0.3, 0.85), None)]
+              == ["過", "不確定", "不過", "樣本不足"],
+              "L 油量判定：下限 ≥0.9 過、區間跨 0.9 不確定（1020 批 1018a 型：0.85，0.60–1.00）、上限 <0.9 不過")
         man = [ln for ln in out.getvalue().splitlines() if ln.strip().startswith("static")]
         check(man and "maneuver 1" in man[0], "前 2.5s 有 dg＝maneuver")
         e = res["E"]
