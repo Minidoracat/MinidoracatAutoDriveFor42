@@ -28,6 +28,8 @@ local T = {
     warn = rgb(245, 181, 68), danger = rgb(255, 107, 107), white = rgb(255, 255, 255),
     scene = rgb(14, 16, 19), road = rgb(32, 37, 43), curb = rgb(58, 65, 72), parked = rgb(74, 82, 91),
     ego = rgb(230, 233, 237), glass = rgb(42, 48, 55), clear = rgb(0, 0, 0, 0), hover = rgb(46, 52, 59, 0.6),
+    -- 停著的車（2026-10-25 使用者裁定：對路面與場景底色 ≥3:1，WCAG 相對亮度）：側面對路面 3.11、頂面 4.17
+    parkedSide = rgb(104, 113, 123), parkedTop = rgb(124, 134, 145),
 }
 F.COLORS = T
 
@@ -522,12 +524,12 @@ local function drawScene(p, snap, now)
             local h = VEH_H * pK
             local t1, t2, t3, t4 = y1 - h * w1, y2 - h * w2, y3 - h * w3, y4 - h * w4
             local moving = snap.vehMoving[i]
-            local side = moving and T.parked or T.track
+            local side = moving and T.parked or T.parkedSide
             poly(p, x1, y1, x2, y2, x2, t2, x1, t1, side)
             poly(p, x2, y2, x3, y3, x3, t3, x2, t2, side)
             poly(p, x3, y3, x4, y4, x4, t4, x3, t3, side)
             poly(p, x4, y4, x1, y1, x1, t1, x4, t4, side)
-            poly(p, x1, t1, x2, t2, x3, t3, x4, t4, moving and T.text3 or T.parked)
+            poly(p, x1, t1, x2, t2, x3, t3, x4, t4, moving and T.text3 or T.parkedTop)
         end
     end
     -- 自車（航向朝上，固定在畫面下方）：車身＋前後擋風玻璃

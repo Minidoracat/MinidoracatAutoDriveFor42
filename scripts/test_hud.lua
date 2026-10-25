@@ -1143,7 +1143,13 @@ do
     local scans = 0
     MDAD.Drive.isActive = function() return state.active end
     MDADOverlay.scanPassive = function() scans = scans + 1 end
-    function ISPanel:drawPolygon() self.polys = (self.polys or 0) + 1 end
+    -- 停著的車用 parkedSide／parkedTop（1025a）：只比 r 分量計數，不配置（下面 500 次 prerender 量 0 KB）
+    function ISPanel:drawPolygon(_, _, _, _, _, _, _, _, _, r)
+        self.polys = (self.polys or 0) + 1
+        local C = MDADFSD and MDADFSD.COLORS
+        if not C then return end
+        if r == C.parkedSide.r then self.pSide = (self.pSide or 0) + 1 elseif r == C.parkedTop.r then self.pTop = (self.pTop or 0) + 1 end
+    end
     function ISPanel:setStencilRect() self.stencil = (self.stencil or 0) + 1 end
     function ISPanel:clearStencilRect() self.stencil = self.stencil - 1 end
     require = function() return true end
@@ -1205,7 +1211,7 @@ do
     check(MDADScene.get(0, snap.t + 600) == nil, "(fsd-scene) a snapshot older than 500 ms is not handed out")
     local drawn, rawText = {}, panel.drawText
     panel.drawText = function(self, s) drawn[#drawn + 1] = s end
-    panel.polys, panel.stencil = 0, 0
+    panel.polys, panel.stencil, panel.pSide, panel.pTop = 0, 0, 0, 0
     panel:prerender()
     panel.drawText = rawText
     local energy = false
@@ -1213,6 +1219,20 @@ do
     check(not energy, "(fsd-energy) the battery-shown-as-fuel line is not drawn on the card")
     check(panel.polys == 12 and panel.stencil == 0, "(fsd) scene = road 1 + curbs 2 + path 1 + car 5 (4 sides + top) + ego 3"
         .. " polygons inside a balanced stencil (" .. panel.polys .. ")")
+    -- 2026-10-25 使用者裁定：停著的車對路面與場景底色 ≥3:1（WCAG 相對亮度）
+    local function lum(c)
+        local function ch(v) return v <= 0.03928 and v / 12.92 or ((v + 0.055) / 1.055) ^ 2.4 end
+        return 0.2126 * ch(c.r) + 0.7152 * ch(c.g) + 0.0722 * ch(c.b)
+    end
+    local function contrast(a, b)
+        local la, lb = lum(a), lum(b)
+        if la < lb then la, lb = lb, la end
+        return (la + 0.05) / (lb + 0.05)
+    end
+    local minC = math.min(contrast(T.parkedSide, T.road), contrast(T.parkedTop, T.road),
+        contrast(T.parkedSide, T.scene), contrast(T.parkedTop, T.scene))
+    check(panel.pSide == 4 and panel.pTop == 1 and minC >= 3,
+        string.format("(fsd-parked) parked car: 4 sides parkedSide + top parkedTop, contrast >= 3:1 on road and scene (%.2f)", minC))
     local py1, py2 = snap.pathY[1], snap.pathY[2]
     snap.pathY[1], snap.pathY[2] = -8, -3
     panel.polys = 0
