@@ -212,6 +212,9 @@ local EK = {
     "rcu",
     -- 1024a start：這趟坐的車顯示 FSD 卡片（換掉原版儀表的選配 MOD）＝"fsd"；原版儀表的車沒有這欄
     "hud",
+    -- 1026b blocked plan：判堵錨所在的基準 lane al（lat＝車當下橫向，沿用上面的鍵）、被斜切保持排除的擋線點數 aoff、
+    -- 全被排除而照舊取最近擋線點 afb（Driver resolveBlockAnchor）
+    "al", "aoff", "afb",
 }
 
 local function logOnce(msg)

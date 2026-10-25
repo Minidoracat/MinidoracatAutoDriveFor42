@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1026a"
+Drive.REV = "1026b"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -7302,27 +7302,47 @@ function Drive.transitionHold(s, nb, playerNum, speedKmh)
     for i = 1, sen.hardN do
         local hs = sen.hardS[i]
         if hs >= rs - halfL and hs <= far then
-            local target = MDADFollower.laneBiasAt(prof, nb, MDADFollower.segIndexAt(prof, hs), hs, s.fstate.laneKeep)
-            local dl = target - lat
-            if dl > TUNE.START_GUARD_LAT_M or dl < -TUNE.START_GUARD_LAT_M then
-                local sg = dl > 0 and 1 or -1
-                local kx = k * math.max(0, hs - rs - halfL)
-                local edge = dl * sg * (1 - (1 + kx) * math.exp(-kx)) -- 車位側的邊（往常駐線方向量，0＝車心）
-                local r = sen.hardR[i]
-                local w = s.needHalf + (finite(r) and r >= 0 and r or MDADCorridor.OBS_HALF) + pad
-                local d = (sen.hardL[i] - lat) * sg
-                if d >= 0 and d > edge - w and d < dl * sg + w then
-                    if not finite(s.holdLaneL) then
-                        s.holdLaneL, s.planSig = lat, -1
-                        diagEvent(s, playerNum, "lane", { phase = "hold", l = lat, offL = target, rs = rs,
-                            hitS = hs, hitX = sen.hardX[i], hitY = sen.hardY[i] })
-                    end
-                    return s.holdLaneL
+            local hit, target = Drive.transitionBandHit(s, sen, i, lat, nb, k, pad)
+            if hit then
+                if not finite(s.holdLaneL) then
+                    s.holdLaneL, s.planSig = lat, -1
+                    diagEvent(s, playerNum, "lane", { phase = "hold", l = lat, offL = target, rs = rs,
+                        hitS = hs, hitX = sen.hardX[i], hitY = sen.hardY[i] })
                 end
+                return s.holdLaneL
             end
         end
     end
     return Drive.transitionRelease(s, playerNum, "clear", nb)
+end
+
+-- 斜切帶判定（Drive.transitionHold 與判堵錨 Drive.anchorHoldBand 共用的單一定義）：第 i 個硬點落在「車位 lat → 該點弧長的
+-- 常駐落點」斜切帶內＝true（視窗 [rs−halfL, far] 由呼叫端判）。k＝√2／前視、pad＝帶寬多留。第二回傳＝該點弧長的常駐落點。
+function Drive.transitionBandHit(s, sen, i, lat, nb, k, pad)
+    local prof, hs = s.profile, sen.hardS[i]
+    local target = MDADFollower.laneBiasAt(prof, nb, MDADFollower.segIndexAt(prof, hs), hs, s.fstate.laneKeep)
+    local dl = target - lat
+    if dl <= TUNE.START_GUARD_LAT_M and dl >= -TUNE.START_GUARD_LAT_M then return false, target end
+    local sg = dl > 0 and 1 or -1
+    local kx = k * math.max(0, hs - s.lastSNow - s.vehicleProfile.halfL)
+    local edge = dl * sg * (1 - (1 + kx) * math.exp(-kx)) -- 車位側的邊（往常駐線方向量，0＝車心）
+    local r = sen.hardR[i]
+    local w = s.needHalf + (finite(r) and r >= 0 and r or MDADCorridor.OBS_HALF) + pad
+    local d = (sen.hardL[i] - lat) * sg
+    return d >= 0 and d > edge - w and d < dl * sg + w, target
+end
+
+-- 判堵錨的斜切保持排除（1026b S1）：下一個掃描輪起 Drive.transitionHold 會持有行駛線（沒在繞行／RETURN／停留鏈／調頭）時，
+-- 回保持帶參數 k、視窗尾 far、常駐基準 nb；不會＝nil。用靜止前視（車速 0）：視窗最短、k 最大＝斜切帶最窄，車之後減速
+-- 也還在帶內——這種點會自己觸發保持，車沿車位直走到它過了車尾，不會開上它擋的那條線（resolveBlockAnchor 的 pathLat）。
+function Drive.anchorHoldBand(s, sen, lat)
+    local prof, nb = s.profile, s.residentBias
+    if not finite(lat) or not finite(nb) or s.dodging or s.returnActive or s.laneChained
+            or s.fstate.rotating == true or not sen.ready or type(prof) ~= "table" then
+        return nil
+    end
+    local look = MDADFollower.lookaheadM(0, prof.lookScale or 1)
+    return 1.4142 / look, s.lastSNow + s.vehicleProfile.halfL + 2 * look, nb
 end
 
 -- 結束斜切保持（有保持才記事件、重新規劃）；回 nb 方便呼叫端直接 return。keep 當場回一般值：recover／route 兩個
@@ -12557,25 +12577,52 @@ end
 -- 0928b E2E rc1 0008：126° 折點出口的桿，Corridor 以彎道連續落點判它擋線、錨卻用原始
 -- laneBias 判它不擋，改挑 51m 外的點；blockedNear 永遠不近、車以 12-16 km/h 撞上。
 -- guard 檔傳承諾線 offL，路肩雜點不入選）。
+-- pathLat（只有 plan 檔判堵傳＝車當下橫向 s.lastLatSigned，1026b S1）：錨只取車身真的會掃到的點。擋基準線、但不擋車位那條線、
+-- 又落在下一輪斜切保持帶內（Drive.anchorHoldBand／transitionBandHit）的點不當錨——它自己就會讓保持接手，車沿車位直走過它。
+-- 有這種點（保持會接手）時，保持視窗內擋車位那條線的點不論擋不擋基準線都列入候選（那段車走的是車位那條線）。正式服 6 件 6 人：
+-- dodge release why=next-group 後同輪判堵、clearOffset 把基準換回常駐線，錨抓到車頭旁擋常駐線的樹（wd 2.7–8.6），
+-- 24–34 km/h 一秒鎖輪，下一輪斜切保持一上來就判淨空。保持帶外擋基準線的點照收；全被排除＝照舊取最近的
+-- （s.blockAnchorFb，事件 afb）。s.blockAnchorL／blockAnchorOff＝錨的基準 lane／被排除的點數（blocked 事件 al／aoff）。
 -- 回傳合格點中的最小弧長（guard 的 blockS 用）。
-local function resolveBlockAnchor(s, sen, vehicle, lineOnly, minS, maxS, laneL)
-    local bestD2, bi, bs
+local function resolveBlockAnchor(s, sen, vehicle, lineOnly, minS, maxS, laneL, pathLat)
+    local bestD2, bi, bs, fD2, fi, fs, pD2, pI, ps
     local vx, vy = vehicle:getX(), vehicle:getY()
     local bl, nh = laneL or laneBiasOf(s), s.needHalf
     local hb = laneL == nil and s.hardBaseStamp == sen.stamp and s.hardBase or nil
+    local hk, hfar, hnb
+    if pathLat ~= nil then hk, hfar, hnb = Drive.anchorHoldBand(s, sen, pathLat) end
+    local off = 0
     for i = 1, sen.hardN do
         local hs = sen.hardS[i]
-        local base = hb and hb[i] or bl
-        if (minS == nil or hs >= minS) and (maxS == nil or hs <= maxS)
-                and (not lineOnly or blocksLine(sen, i, base, nh)) then
-            if bs == nil or hs < bs then bs = hs end
+        if (minS == nil or hs >= minS) and (maxS == nil or hs <= maxS) then
+            local base = hb and hb[i] or bl
+            local onBase = not lineOnly or blocksLine(sen, i, base, nh)
+            local onPath = hk ~= nil and hs <= hfar and blocksLine(sen, i, pathLat, nh)
             local dx, dy = sen.hardX[i] - vx, sen.hardY[i] - vy
             local d2 = dx * dx + dy * dy
-            if bestD2 == nil or d2 < bestD2 then bestD2, bi = d2, i end
+            if onBase and hk ~= nil and hs <= hfar and not onPath
+                    and Drive.transitionBandHit(s, sen, i, pathLat, hnb, hk, 0) then
+                off = off + 1
+                if fs == nil or hs < fs then fs = hs end
+                if fD2 == nil or d2 < fD2 then fD2, fi = d2, i end
+            elseif onBase then
+                if bs == nil or hs < bs then bs = hs end
+                if bestD2 == nil or d2 < bestD2 then bestD2, bi = d2, i end
+            elseif onPath then
+                if ps == nil or hs < ps then ps = hs end
+                if pD2 == nil or d2 < pD2 then pD2, pI = d2, i end
+            end
         end
     end
+    local onPathAnchor = off > 0 and pI ~= nil and (bi == nil or pD2 < bestD2)
+    if off > 0 and ps ~= nil and (bs == nil or ps < bs) then bs = ps end
+    if onPathAnchor then bi = pI end
+    s.blockAnchorFb = bi == nil and fi ~= nil
+    if s.blockAnchorFb then bi, bs = fi, fs end
+    s.blockAnchorOff, s.blockAnchorL = off, nil
     if bi ~= nil then
         s.blockHitX, s.blockHitY = sen.hardX[bi], sen.hardY[bi]
+        s.blockAnchorL = onPathAnchor and pathLat or (hb and hb[bi] or bl)
     end
     return bs
 end
@@ -14005,8 +14052,9 @@ local function replan(s, vehicle, playerNum)
     -- 群最近擋線點世界座標＝blockedNear 判距權威（s051 定罪：blockS 是判定輪
     -- 快照的弧長、hardS 是當前快照的弧長，車一動兩基準脫節）。每輪 blocked 都
     -- 重掃（車接近時錨跟著新快照走）；掃不到擋線點（保守分支）留 nil → 退弧長。
-    -- 與 Corridor.plan 同一個 minS（車尾）：車後的擋線點不是這次 blocked 的原因
-    resolveBlockAnchor(s, sen, vehicle, true, s.lastSNow - s.vehicleProfile.halfL)
+    -- 與 Corridor.plan 同一個 minS（車尾）：車後的擋線點不是這次 blocked 的原因。車位 lat 傳進去：下一輪斜切保持會帶車
+    -- 直走過、不擋車位那條線的點不當錨（1026b S1，見 resolveBlockAnchor）
+    resolveBlockAnchor(s, sen, vehicle, true, s.lastSNow - s.vehicleProfile.halfL, nil, nil, s.lastLatSigned)
     s.planMode = "blocked"
     -- 判堵這一輪有候選只因落在沒掃過的那一側被拒：維持判堵，下一輪換帶心補掃（候選鏈的延後分支見 bandNavRequest）
     Drive.bandNavRequest(s)
@@ -14049,7 +14097,10 @@ local function replan(s, vehicle, playerNum)
             tag0 = s.sf0Tag, ph0 = s.sf0Tag and s.sf0Ph, hx0 = s.sf0Tag and s.sf0X, hy0 = s.sf0Tag and s.sf0Y,
             steep = (s.blockSteepM or -1) > 0 and s.blockSteepM or nil,
             avail = s.dodgeShapeReason == "exit-room" and s.dodgeExitAvail or nil,
-            foldS = s.dodgeShapeReason == "exit-room" and s.dodgeExitFoldS or nil })
+            foldS = s.dodgeShapeReason == "exit-room" and s.dodgeExitFoldS or nil,
+            -- 1026b S1：錨所在的基準 lane、車當下橫向；被斜切保持排除的擋線點數與「全被排除、照舊取最近」旗標（resolveBlockAnchor）
+            al = s.blockAnchorL, lat = s.lastLatSigned,
+            aoff = (s.blockAnchorOff or 0) > 0 and s.blockAnchorOff or nil, afb = s.blockAnchorFb or nil })
         if getDebug() then -- telemetry: n/a 點雲 l 範圍；樣本 near 只有最近 8 顆，blocked 事件有 s／hn
             -- 點雲摘要（冷路徑一次 O(hardN)）：判「無縫」合不合理的第一手資料
             local lMin, lMax = 99, -99
