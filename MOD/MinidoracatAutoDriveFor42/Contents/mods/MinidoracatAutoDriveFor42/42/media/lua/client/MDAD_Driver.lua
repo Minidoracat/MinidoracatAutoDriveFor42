@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1026a"
+Drive.REV = "1026e"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -354,6 +354,14 @@ TUNE.KEEP_RIGHT_FALLBACK_M = 1.0  -- 靠右行駛：路寬未知（v2/v3 路線�
 -- 距離，不過中線（下限 0）。車身右緣內側的硬物是繞行的事，這裡不管。
 TUNE.KEEP_RIGHT_CLEAR_M = 0.6
 TUNE.KEEP_RIGHT_LOOK_M = 50
+-- 1026e（NC2）：出右彎後常駐車道從弧內側夾限放回靠右（clampLane 的 ramp），車追 ramp 正常過衝 0.44–0.74 m
+-- （正式服 1023b 新圖 a2 15 件 contact，14 件 lth 沒開＝laneRampHold 沒延續到弧離開前視窗之後），大於 CLEAR 0.6。
+-- 路邊硬物所在弧長的常駐落點比它前 RAMP_BACK_M 處往右多 ≥RAMP_RISE_M＝它在放回區段（或剛放回完），留邊加
+-- RAMP_M。直路、左彎、路寬不變的段落點沒有上升，不受影響。
+-- ponytail: 固定預算（實測 p90），過衝和上升量、車速有關；要按上升量比例給再加係數。
+TUNE.KEEP_RIGHT_RAMP_M = 0.75
+TUNE.KEEP_RIGHT_RAMP_BACK_M = 25
+TUNE.KEEP_RIGHT_RAMP_RISE_M = 0.5
 TUNE.UNLOADED_CAP = 15         -- 走廊內有未載入 chunk（不知道前面有什麼，先慢）
 -- 可視巡航用一般制動域；緊急紅線沿用forceBrake的既有先驗，不再依unloaded旗標切換。
 -- 實測的煞車下界另以信心收緊，不能把已學到的弱煞車能力再乘2.5。
@@ -5244,10 +5252,21 @@ function Drive.keepRightShy(s, target)
                 local face = l - rad
                 local edgeNow = MDADFollower.laneBiasAt(prof, rawNow, j, hs) + vp.halfW
                 if face < edgeNow and l + rad > edgeNow - 2 * vp.halfW then return target end
-                if face >= edgeNow and face < MDADFollower.laneBiasAt(prof, rawReach, j, hs)
-                        + vp.halfW + TUNE.KEEP_RIGHT_CLEAR_M then
-                    local want = face - TUNE.KEEP_RIGHT_CLEAR_M - vp.halfW - rb
-                    if want < best then best = want end
+                local laneHere = MDADFollower.laneBiasAt(prof, rawReach, j, hs)
+                local clear = TUNE.KEEP_RIGHT_CLEAR_M
+                local gap = face - laneHere - vp.halfW
+                if face >= edgeNow and gap < clear + TUNE.KEEP_RIGHT_RAMP_M then
+                    -- 放回區段（這裡的常駐落點比 RAMP_BACK_M 前往右多 ≥RAMP_RISE_M）：留邊含過衝預算（1026e NC2）
+                    local sb = hs - TUNE.KEEP_RIGHT_RAMP_BACK_M
+                    if sb < 0 then sb = 0 end
+                    if laneHere - MDADFollower.laneBiasAt(prof, rawReach, MDADFollower.segIndexAt(prof, sb), sb)
+                            >= TUNE.KEEP_RIGHT_RAMP_RISE_M then
+                        clear = clear + TUNE.KEEP_RIGHT_RAMP_M
+                    end
+                    if gap < clear then
+                        local want = face - clear - vp.halfW - rb
+                        if want < best then best = want end
+                    end
                 end
             end
         end
