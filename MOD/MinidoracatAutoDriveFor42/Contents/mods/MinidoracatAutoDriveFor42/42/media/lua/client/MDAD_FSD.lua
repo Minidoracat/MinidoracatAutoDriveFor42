@@ -438,15 +438,11 @@ function F.restyle(p, st)
     end
 end
 
--- HUD update（約 10 Hz）：卡片展開才建場景快照。沒有自駕 session（手動開）時每 PASSIVE_MS 被動掃一次附近的殭屍、
--- 玩家、動物與車輛（MDADOverlay.scanPassive，1025a）；有 session 由 Sensor 每輪寫，這裡不掃。
-local PASSIVE_MS = 250
+-- HUD update（約 10 Hz）：卡片展開才建場景快照。沒有自駕 session（手動開）時每拍交給 MDADOverlay.scanPassive 被動掃
+-- 附近的殭屍、玩家、動物與車輛（1025a；節流與分拍在它裡面）；有 session 由 Sensor 每輪寫，這裡不掃。
 function F.update(p, now)
     if p._collapsed or not p.vehicle or not MDADScene then return end
-    if MDADOverlay and now >= (p._fScanAt or 0) and not MDAD.Drive.isActive(p.playerNum) then
-        p._fScanAt = now + PASSIVE_MS
-        MDADOverlay.scanPassive(p.playerNum, p.vehicle)
-    end
+    if MDADOverlay and not MDAD.Drive.isActive(p.playerNum) then MDADOverlay.scanPassive(p.playerNum, p.vehicle, now) end
     MDADScene.build(p.playerNum, p.vehicle, now, p._tripLabel)
 end
 

@@ -2,7 +2,7 @@
 --
 -- 資料流：Driver 每輪掃描完成 → MDADOverlay.update 把軌跡、路緣、軟目標、車輛寫成世界座標（MDADOverlay.trail）；
 -- 沒有 session（手動開）時 HUD refresh 呼叫 MDADOverlay.updatePassive 寫導航線＋沿線路緣（路段寬度），卡片展開時
--- MDADFSD.update 每 0.25 秒呼叫 MDADOverlay.scanPassive 寫附近的殭屍／玩家／動物與車輛（1025a；沒有屍體）。
+-- MDADFSD.update 每拍呼叫 MDADOverlay.scanPassive，分拍掃完一輪（≥0.25 秒）才發布附近的殭屍／玩家／動物與車輛（1025a；沒有屍體）。
 -- MDADScene.build 由 HUD update（約 10 Hz，只在 FSD 卡片顯示中）呼叫：讀一次自車位姿與 Drive 的純量，換成自車座標
 -- 寫進每位玩家一份的快照（就地覆寫、零配置）。prerender 只讀快照，用 MDADScene.motion 依快照時戳外推自車位移。
 --
