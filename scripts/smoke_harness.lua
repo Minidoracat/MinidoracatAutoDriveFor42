@@ -11903,7 +11903,7 @@ function drive.scenarioFsdWorld()
 end
 drive.scenarioFsdWorld()
 -- (fsd-passive) 1025a 沒有 session 時 FSD 卡片的障礙與路緣：scanPassive 只收自車前方框內（y∈[-6,54]、|x|≤24、同層）的殭屍／
---   動物與車輛，近→遠、殭屍夾 24、排除自己與拖車、停著看車速；殭屍每拍最多 200 隻、看完才收車輛、最後一拍才發布；
+--   動物與車輛，近→遠、殭屍夾 24、排除自己與拖車、停著看車速；殭屍每拍最多 80 隻、看完才收車輛、最後一拍才發布；
 --   清單丟錯＝0 筆不 crash。updatePassive 沿導航線每點用路段寬度給路緣、折點用出去那段的法向。
 --   違規證明：boxD2 不擋後方＝(fsd-passive-box) 紅；keepNear 不排序／切片從頭看＝(fsd-passive-zom) 紅；提早發布＝(fsd-passive-slice) 紅。
 function drive.scenarioFsdPassive()
@@ -11921,7 +11921,7 @@ function drive.scenarioFsdPassive()
         m.getX, m.getY, m.getZ = function() return x end, function() return y end, function() return z or 0 end
         return m
     end
-    -- 框內 26 隻拆在清單頭尾、中間夾框外 400 隻：分 3 拍看完（切片從頭重看＝頭那批重複＝zX[24] 不是 133），清單內遠→近
+    -- 框內 26 隻拆在清單頭尾、中間夾框外 400 隻：分 6 拍看完（切片從頭重看＝頭那批重複＝zX[24] 不是 133），清單內遠→近
     local zs = {}
     for i = 26, 14, -1 do zs[#zs + 1] = mo(110 + i, 101) end
     for i = 1, 400 do zs[#zs + 1] = mo(400 + i, 400) end
@@ -11949,9 +11949,9 @@ function drive.scenarioFsdPassive()
     local savedGetCell = getCell
     getCell = function() return fakeCell end
     local _, _, _, _, w = MDADOverlay.trail(0)
-    for t = 1000, 1200, 100 do MDADOverlay.scanPassive(0, ego, t) end
-    checkTrue(w.zN == 0 and w.vN == 0, "(fsd-passive-slice) 429 隻殭屍分 3 拍、車輛第 4 拍，之前不發布（" .. w.zN .. "）")
-    MDADOverlay.scanPassive(0, ego, 1300)
+    for t = 1000, 1500, 100 do MDADOverlay.scanPassive(0, ego, t) end
+    checkTrue(w.zN == 0 and w.vN == 0, "(fsd-passive-slice) 429 隻殭屍分 6 拍、車輛第 7 拍，之前不發布（" .. w.zN .. "）")
+    MDADOverlay.scanPassive(0, ego, 1600)
     _, _, _, _, w = MDADOverlay.trail(0)
     local sorted = true
     for i = 3, w.zN do if w.zX[i] < w.zX[i - 1] then sorted = false end end

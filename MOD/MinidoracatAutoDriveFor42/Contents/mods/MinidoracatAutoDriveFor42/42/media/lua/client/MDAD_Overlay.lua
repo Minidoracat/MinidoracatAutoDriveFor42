@@ -350,14 +350,14 @@ end
 -- 動物與車輛寫進 world 槽（近→遠，各取前 SCENE_ZOM_MAX／Sensor.SCENE_VEH_MAX）。只走引擎現成清單——殭屍
 -- IsoCell.getZombieList（活 ArrayList）、車輛 IsoCell.getVehicles（Set）、動物 IsoCell.getAnimals（Java 端過濾 objectList
 -- 回新 LinkedList）、MP 線上玩家 getOnlinePlayers——不逐格掃（單格查詢約 6µs，sensor.md）。
--- 一輪分好幾拍做，每拍有上限：殭屍每拍最多 PASSIVE_SLICE 隻（成本隨載入的殭屍數線性長，實測每隻約 0.6µs），看完殭屍
+-- 一輪分好幾拍做，每拍有上限：殭屍每拍最多 PASSIVE_SLICE 隻（成本隨載入的殭屍數線性長，殭屍群實測每隻約 1.3µs），看完殭屍
 -- 才收動物／玩家，車輛另一拍（固定約 0.1 ms），最後一拍才整份發布；上一輪開始滿 PASSIVE_MS 才開新的一輪。殭屍越多一輪越久、
 -- 卡片上的位置越舊，但每拍與每秒的成本都有上限。中斷超過 PASSIVE_STALE_MS（自駕、收起卡片）就從頭來。
 -- 範圍＝卡片畫得到的自車座標 y∈[PASSIVE_BACK, PASSIVE_FAR]、|x|≤PASSIVE_SIDE、同一層，自車位姿每拍重讀。
 -- 屍體與路面帶要逐格掃，被動不做。清單在模擬端增刪（拍與拍之間索引會位移，偶爾漏看或重複一隻，只影響顯示）；
 -- 每拍包 pcall，丟錯＝本輪作廢、卡片 0 筆，下一拍重來。
 local PASSIVE_BACK, PASSIVE_FAR, PASSIVE_SIDE = -6, 54, 24
-local PASSIVE_MS, PASSIVE_SLICE, PASSIVE_STALE_MS = 250, 200, 1000
+local PASSIVE_MS, PASSIVE_SLICE, PASSIVE_STALE_MS = 250, 80, 1000
 local passive = {}
 for i = 1, MAX_PLAYERS do
     passive[i] = { stage = nil, zi = 0, zn = 0, at = 0, nextAt = 0, zb = { d = {}, x = {}, y = {}, k = {} },
