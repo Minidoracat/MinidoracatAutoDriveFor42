@@ -77,8 +77,8 @@ local TELEPORT_PAD_M = 5
 -- clip-01：最近一隻在 25m 外也記成 impZ）。車心弧長取樣本字串的 rs（Driver 的 lastSNow）。
 local IMPACT_ZOMBIE_M = 4
 local IMPACT_HALF_L = 2.5 -- profile 沒有 halfL 時的半車長：取偏大（窗寬，寧可多記不漏記）
--- 撞擊分類（1008，U.impactClass；Diagnostics 在上升緣算一次，整段連續撞擊沿用）。frozen、tow-sync、rehitch 不算 impact、
--- 不觸發片段、不進 impZ，摘要另計 frz／tws／rhi；本機與上傳的 impact 事件帶 cls。
+-- 撞擊分類（1008，U.impactClass；Diagnostics 在上升緣算一次，整段連續撞擊沿用）。frozen、tow-sync、rehitch、tow-slack、
+-- small-animal 不算 impact、不觸發片段、不進 impZ，摘要另計 frz／tws／rhi／tsl／sma；本機與上傳的 impact 事件帶 cls。
 --   frozen＝MP 伺服器拉回前一筆的凍結樣本：車速與 vl／vt 三者精確為 0（真撞 200ms 內不會剛好三個 0；正式服 0.23.0
 --     片段兩例：71→0、64.8→0，下一筆座標跳 56／6 m）。
 --   tow-sync＝拖車時掛車被同步拉回、經約束拽住牽引車：沒煞車（ib、fbl）、沒 footprint、nb 方框內沒東西，且本筆往前
@@ -86,6 +86,15 @@ local IMPACT_HALF_L = 2.5 -- profile 沒有 halfL 時的半車長：取偏大（
 --     0.0033–0.0058；同批其他拖車真撞與接觸 ≤0.0004，其中 SemiTruck＋Cartrailer 的真撞撞前 tup 平穩、撞後才傾斜）。
 --   rehitch（1017）＝自動掛回：樣本 mode rehitch，或 tow rh-attach 後 REHITCH_SETTLE_MS 內（同 Driver TUNE.REHITCH_SETTLE_MS）——
 --     引擎掛上那一下把倒退中的牽引車拉攏（正式服 1015c 2 件、1015b 1 件，dvs −15～−23）。
+--   tow-slack（1021）＝拖車連結拉緊：同一個取樣間隔裡掛車 |km/h| 增加 ≥IMPACT_MIN_KMH（tkm 本筆 − 前一筆）、牽引車同時掉速——
+--     動量由牽引車傳給掛車，不是撞到東西（E2E 1020 trailerfront 拖 SmallCar 起步 0.8 s：牽引車 16.6→9.3、掛車 0→11.0、
+--     thd 1.19→1.51；正式服 1017a–1018a 5 件都在起步 0.6–0.9 s、掛車 0→9.4–11.6；拖車真撞時掛車同降或不變）。
+--   small-animal（1021）＝撞小型動物：貼車（|縱向| ≤ halfL＋IMPACT_TOUCH_PAD、|橫向| ≤ halfW＋pad）的動物最重的一隻也
+--     <SMALL_ANIMAL_KG（同 MDADSensor.ANIMAL_BIG_KG；2026-10-13 裁定小型動物不閃不減、撞擊從碰撞 KPI 拆開）。讀不到體重＝hit
+--     （正式服 1012h–1019a 192 件真撞擊有 30 件）。
+--   兩類共用的碰撞反證（1021h，有一項就照算 hit）：本筆 footprint 命中；任一殭屍／玩家貼車、他車車心在 halfL＋IMPACT_HALF_L＋pad
+--     內（Diagnostics nearbyJson 掃描時逐隻判，busy）；車頭 3 格最近的擋車 sprite 在 halfW＋pad 內（hardD）。判不了（busy 或 halfW
+--     缺）也照算 hit。tow-slack 另要沒有動物貼車（有貼車動物時改看 small-animal）。
 local TOW_SYNC_MS = 450
 local TOW_SYNC_TUP = 0.002
 local REHITCH_SETTLE_MS = 2500
@@ -101,7 +110,10 @@ local EXIT_BRAKE_MS = 2000
 local VFS_IN_M, VFS_IN_KMH, VFS_OUT_MS, VFS_VAD_FULL, VFS_TS_MAX = 55, 60, 8000, 4, 4
 -- 入彎超速明細（1017，摘要 aoi）最多幾筆；出彎偏差（exN／exDev）：出弧後 EX_M 內 |ld| 最大值 >EX_DEV 的出口，出口車速
 -- ≥EX_FAST_KMH 另計；期間有殭屍軟縫或期望車道相鄰兩筆跳 >EX_JUMP_M（換道）的出口不算。起步到 T40_M 的 ms（t40）。
-local AOI_MAX, EX_M, EX_DEV, EX_FAST_KMH, EX_JUMP_M, T40_M = 4, 60, 0.5, 50, 1, 40
+-- 入彎超速（arcOver／aoi）要超過彎帽 1.15 倍且超過彎帽＋AOI_MIN_KMH（1020b）：12 km/h 下限彎的 1.15 倍只多 1.8 km/h，落在
+-- 致動器雜訊內（regulator 整數化＋bang-bang 漣漪約 2 km/h，同 MDADDynamics.HARD_BREACH_MIN_KMH 的理由），會把下限彎
+-- 的正常入弧記成超速。沒有圓角的頂點開始轉的明細（fvo）同用 AOI_MAX 筆。
+local AOI_MAX, AOI_MIN_KMH, EX_M, EX_DEV, EX_FAST_KMH, EX_JUMP_M, T40_M = 4, 3, 60, 0.5, 50, 1, 40
 -- 偏離常駐線（摘要 offMs／offN／offMax、片段 offset；排除清單見 offsetKpi）：沒人持有行駛線時 |ld|（車身 − 期望線＝
 -- 夾過路寬的常駐線）超過 OFF_LAT_M；鏈式停留（lc）改量車身 − 夾過的常駐線 rsl——鏈著時期望線就是停留 lane，
 -- 「繞完一直走路邊」正是這段（玩家回報，事故之外完全沒被錄到）。連續 ≥OFF_MIN_MS 才算一段，單段達 OFF_CLIP_MS
@@ -112,6 +124,7 @@ local OFF_MIN_MS = 2000
 local OFF_CLIP_MS = 5000
 
 U.PRE_MS, U.CHUNK, U.CLIP_MAX, U.TOW_SYNC_MS = PRE_MS, CHUNK, CLIP_MAX, TOW_SYNC_MS
+U.SMALL_ANIMAL_KG, U.IMPACT_TOUCH_PAD, U.IMPACT_HALF_L = 20, 0.8, IMPACT_HALF_L -- 1021 small-animal（上方撞擊分類）
 U.CLIP_EV_MAX, U.THIN_AFTER_MS, U.THIN_GAP_MS = CLIP_EV_MAX, THIN_AFTER_MS, THIN_GAP_MS
 U.CLIP_TOTAL_MAX = CLIP_TOTAL_MAX
 U.OFF_MIN_MS, U.OFF_CLIP_MS, U.PRE_THIN_BEFORE_MS = OFF_MIN_MS, OFF_CLIP_MS, PRE_THIN_BEFORE_MS
@@ -176,9 +189,11 @@ end
 
 -- 撞擊上升緣的分類（見 TOW_SYNC_MS 上方註解）：spd＝本筆車速（km/h）、phys＝本筆 phys、footprint＝本筆 footprint 命中、
 -- near＝nb 掃描結果（true 有近物、false 掃了沒有、nil 沒掃成）、tupDrop＝往前 TOW_SYNC_MS 內 tup 的最大降幅（不拖車 nil）、
--- mode＝本筆 s.mode、rhMs＝距最近一次 tow rh-attach 的 ms（沒有＝nil）。
--- 回 "frozen"／"rehitch"／"tow-sync"／"hit"；任何輸入缺席都落回 hit（寧可多記撞擊）。
-function U.impactClass(spd, phys, footprint, near, tupDrop, mode, rhMs)
+-- mode＝本筆 s.mode、rhMs＝距最近一次 tow rh-attach 的 ms（沒有＝nil）、tkmGain＝掛車 |km/h| 本筆減前一筆（不拖車 nil）、
+-- animalKg＝貼車動物最重的體重（nearbyJson akg；沒有貼車＝nil）、busy＝殭屍／玩家／他車貼車（nearbyJson busy；判不了＝nil）、
+-- hardD＝車頭 3 格最近擋車 sprite 的距離 m、halfW＝本車半寬。
+-- 回 "frozen"／"rehitch"／"tow-sync"／"tow-slack"／"small-animal"／"hit"；任何輸入缺席都落回 hit（寧可多記撞擊）。
+function U.impactClass(spd, phys, footprint, near, tupDrop, mode, rhMs, tkmGain, animalKg, busy, hardD, halfW)
     if mode == "rehitch" or (finite(rhMs) and rhMs >= 0 and rhMs <= REHITCH_SETTLE_MS) then return "rehitch" end
     if type(phys) ~= "table" then return "hit" end
     if spd == 0 and phys.vLong == 0 and phys.vLat == 0 then return "frozen" end
@@ -186,6 +201,16 @@ function U.impactClass(spd, phys, footprint, near, tupDrop, mode, rhMs)
     if near == false and footprint ~= true and phys.isBraking ~= true and not (finite(fbl) and fbl > 0)
             and finite(tupDrop) and tupDrop >= TOW_SYNC_TUP then
         return "tow-sync"
+    end
+    -- 1021h 兩類共用的碰撞反證
+    if footprint == true or busy ~= false or not finite(halfW)
+            or (finite(hardD) and hardD <= halfW + U.IMPACT_TOUCH_PAD) then
+        return "hit"
+    end
+    if animalKg == nil then
+        if finite(tkmGain) and tkmGain >= IMPACT_MIN_KMH then return "tow-slack" end
+    elseif finite(animalKg) and animalKg < U.SMALL_ANIMAL_KG then
+        return "small-animal"
     end
     return "hit"
 end
@@ -291,6 +316,8 @@ function U.begin(pn, now, header, profile, vehicle)
         frz = 0, tws = 0, prevImpLike = false,
         -- 1017 不算撞擊的另兩類：自動掛回拉攏（cls rehitch）、下車煞車（xbPend＝擱著的候選時間、xbZ＝它算不算 impZ）
         rhi = 0, xbk = 0, xbPend = nil, xbZ = false,
+        -- 1021 不算撞擊的再兩類：拖車連結拉緊（cls tow-slack）、小型動物（cls small-animal）
+        tsl = 0, sma = 0,
         -- 1004e 越野推力：越野跟線毫秒；「想加速」相鄰兩筆同地表的對——越野／鋪面的毫秒與速度增量（m/s），
         -- 越野對加速度 <1.5 m/s² 的毫秒、越野對有前推輔助的毫秒、遞增倍率頂到 3 的毫秒。aSurf／aSpd＝前一筆狀態。
         oMs = 0, oaMs = 0, oaDv = 0, olMs = 0, oasMs = 0, obMs = 0, paMs = 0, paDv = 0, aSurf = nil, aSpd = nil,
@@ -300,6 +327,8 @@ function U.begin(pn, now, header, profile, vehicle)
         -- 與目標不足、依路段（弧上／彎前＝前方 200m 內有弧（樣本 na）／出彎＝最後一筆弧上樣本後 100m 內／其他）分；
         -- capReason visibility 時各帳（樣本 vac）的 ms；arcEndDist＝最後一筆弧上樣本時的 dist
         lossPw = {}, lossPh = {}, lTrk = 0, lTgt = 0, arcEndDist = nil, visMs = {},
+        -- 1020d：卡高檔（樣本 tn ≥ gf＋2）時的追蹤不足（km/h×ms，同 lTrk）；capReason visibility 時各帳（vac）的損失（同 loss）
+        lHg = 0, visL = {},
         -- 可視前緣前進間隔分桶（樣本 vfi：<250／<500／<1000／<1500／<2500／≥2500 ms）；他車首見距離分桶（樣本 vfs，跟線且
         -- ≥10 km/h 才算：<30／<45／<55／<70／≥70 m；停著／行進分開）與各自最小；原地轉（intent ROTATE）ms
         vfa = { 0, 0, 0, 0, 0, 0 }, vfP = { 0, 0, 0, 0, 0 }, vfM = { 0, 0, 0, 0, 0 }, vfMinP = nil, vfMinM = nil, rotMs = 0,
@@ -311,6 +340,9 @@ function U.begin(pn, now, header, profile, vehicle)
         -- 煞車學習拒收理由次數；EngineOff 的關卡（JSON 片段）
         -- 1020：路中停車首見時間（前 VFS_TS_MAX 件）；各路段 ms 與原版 GasTank 公式的期望扣量 {段: {held, fair}}（tripKpi）
         vfIn = 0, vfInX = 0, vfInT = nil, vfInTs = {}, aoi = {}, aoiN = 0,
+        -- 1020b 沒有圓角的頂點（Follower arcLookaheadMs 的 fallback／>90° 頂點）開始轉：fvoN＝次數，fvo＝前 AOI_MAX 筆
+        -- [ts, 帽 km/h, 開始轉時車速 km/h, 折角 °]；fvoSeen＝已讀到的 phys.fvo.n（fstate 每趟新建，從 0 起）
+        fvo = {}, fvoN = 0, fvoSeen = 0,
         exN = 0, exDev = 0, exN50 = 0, exDev50 = 0, exFrom = nil, exEl = nil, exSpd = 0, exMax = 0, exBad = false,
         fu0 = nil, fu1 = nil, fuD = {}, fuM = {}, fuT = {}, fuE = {}, t40 = nil, stTow = false, stU = false, stApr = false, stRet = false,
         blr = {}, eng = nil,
@@ -669,6 +701,12 @@ local function speedKpi(u, phys, spd, target, mode, dt, capReason, now)
         if finite(target) then trk = (target < em and target or em) - spd end
         if trk < 0 then trk = 0 end
         u.lTrk, u.lTgt = u.lTrk + trk * dt, u.lTgt + l - trk * dt
+        local tn, gf = phys.transmissionNumber, phys.gearFair
+        if finite(tn) and finite(gf) and tn >= gf + 2 then u.lHg = u.lHg + trk * dt end
+        if capReason == "visibility" then
+            local a = type(phys.visAcct) == "string" and phys.visAcct or "?"
+            u.visL[a] = (u.visL[a] or 0) + l
+        end
         local ph = segOf(u, phys)
         u.lossPh[ph] = (u.lossPh[ph] or 0) + l
     end
@@ -690,7 +728,7 @@ local function speedKpi(u, phys, spd, target, mode, dt, capReason, now)
         exitClose(u) -- 上一個出口窗沒走滿 EX_M 就進下一個弧：以量到的結算
         u.arcN, u.arcDevDone = u.arcN + 1, false
         local cc = phys.curveCap
-        if finite(cc) and cc > 0 and spd > 1.15 * cc then
+        if finite(cc) and cc > 0 and spd > 1.15 * cc and spd > cc + AOI_MIN_KMH then
             u.arcOver = u.arcOver + 1
             -- 1017 入彎超速明細 aoi：[ts, 車速, 彎帽, R（1/curveKappa）, vad, vaw, pb, 這趟第一個弧 1／0, 離出發 m]
             if u.aoiN < AOI_MAX then
@@ -915,6 +953,15 @@ function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
         end
         u.prevLf = lf
         if phys.intent == "ROTATE" then u.rotMs = u.rotMs + dt end -- 1013a 原地轉（調頭）ms
+        -- 1020b fvo：phys.fvo 只留最近一筆，取樣間連過兩個頂點時明細只記後一筆、次數照 n 的差計
+        local fv = phys.fvo
+        if type(fv) == "table" and finite(fv.n) and fv.n > u.fvoSeen then
+            u.fvoN, u.fvoSeen = u.fvoN + (fv.n - u.fvoSeen), fv.n
+            if #u.fvo < AOI_MAX then
+                u.fvo[#u.fvo + 1] = "[" .. jnum(now) .. "," .. jround(fv.capKmh, 10) .. "," .. jround(fv.kmh, 10) .. ","
+                    .. jround(finite(fv.th) and fv.th * 180 / math.pi or nil, 1) .. "]"
+            end
+        end
     end
     if type(capReason) == "string" then u.capMs[capReason] = (u.capMs[capReason] or 0) + dt end
     speedKpi(u, phys, spd, target, mode, dt, capReason, now)
@@ -984,11 +1031,13 @@ function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
     if px and finite(x) and finite(y) then moved = math.sqrt((x - px) * (x - px) + (y - py) * (y - py)) end
     if finite(speed) and U.teleportLike(prevSpd, spd, gap, moved) then u.tp = u.tp + 1 end
     local imp = finite(speed) and U.impactLike(prevSpd, spd, gap, fbNow or fbWas, moved)
-    if imp and (cls == "frozen" or cls == "tow-sync" or cls == "rehitch") then
-        -- 1008／1017 不是撞擊：同一段只在上升緣數一次，不觸發片段、不進 impact／impZ
+    if imp and cls ~= nil and cls ~= "hit" then
+        -- 1008／1017／1021 不是撞擊（U.impactClass）：同一段只在上升緣數一次，不觸發片段、不進 impact／impZ
         if not u.prevImpLike then
             if cls == "frozen" then u.frz = u.frz + 1
             elseif cls == "rehitch" then u.rhi = u.rhi + 1
+            elseif cls == "tow-slack" then u.tsl = u.tsl + 1
+            elseif cls == "small-animal" then u.sma = u.sma + 1
             else u.tws = u.tws + 1 end
         end
     elseif imp and not (u.impactAt and now >= u.impactAt and now - u.impactAt < IMPACT_REARM_MS) then
@@ -1174,6 +1223,7 @@ local function summaryText(u, now, reason, withMaps)
         .. (u.tko or "")
     -- 1013a 速度損失拆帳（km/h×秒）、前緣前進間隔與他車首見分桶、原地轉 ms、起步段調頭（另起一式，不再拉長上面那條百多個運算元的串接）
     text = text .. ',"ltr":' .. jnum(math.floor(u.lTrk / 1000 + 0.5)) .. ',"ltg":' .. jnum(math.floor(u.lTgt / 1000 + 0.5))
+        .. ',"lhg":' .. jnum(math.floor(u.lHg / 1000 + 0.5))
         .. ',"vfa":[' .. table.concat(u.vfa, ",") .. ']'
         .. ',"vfP":[' .. table.concat(u.vfP, ",") .. '],"vfM":[' .. table.concat(u.vfM, ",") .. ']'
         .. ',"vfMinP":' .. jround(u.vfMinP, 10) .. ',"vfMinM":' .. jround(u.vfMinM, 10)
@@ -1184,18 +1234,22 @@ local function summaryText(u, now, reason, withMaps)
     -- 1017：不算撞擊的掛回／下車煞車、路中停車首見與結果、入彎超速明細、出彎偏差、油量、起步到 40m、煞車學習拒收、EngineOff 關卡
     text = text .. ',"rhi":' .. u.rhi .. ',"xbk":' .. u.xbk .. ',"vfIn":' .. u.vfIn .. ',"vfInX":' .. u.vfInX
         .. ',"aoi":[' .. table.concat(u.aoi, ",", 1, u.aoiN) .. ']'
+        .. ',"fvoN":' .. u.fvoN .. ',"fvo":[' .. table.concat(u.fvo, ",") .. ']'
         .. ',"exN":' .. u.exN .. ',"exDev":' .. u.exDev .. ',"exN50":' .. u.exN50 .. ',"exDev50":' .. u.exDev50
         .. ',"fu0":' .. jround(u.fu0, 100) .. ',"fu1":' .. jround(u.fu1, 100) .. ',"fuS":' .. fuelJson(u)
         .. ',"t40":' .. jround(u.t40, 1)
         .. ',"t40k":' .. jstr(u.stTow and "tow" or u.stU and "uturn" or u.stApr and "approach" or u.stRet and "return" or "plain")
         .. ',"blr":' .. mapJson(u.blr) .. (u.eng or "")
         .. (u.rpt and (',"rpt":' .. jstr(u.rpt)) or "")
-    -- 1020：路中停車首見時間（前 VFS_TS_MAX 件）、各路段 ms 與原版 GasTank 期望扣量（油量判準：實扣÷fair 期望的段比）
+    -- 1020：路中停車首見時間（前 VFS_TS_MAX 件）、各路段 ms 與原版 GasTank 期望扣量（油量判準：實扣÷fair 期望的段比）；
+    -- 1021：不算撞擊的拖車連結拉緊／小型動物段數（U.impactClass tow-slack／small-animal）
     text = text .. ',"vfInTs":[' .. table.concat(u.vfInTs, ",") .. '],"fuT":' .. mapJson(u.fuT) .. ',"fuE":' .. fuelExpJson(u)
+        .. ',"tsl":' .. u.tsl .. ',"sma":' .. u.sma
     if withMaps then
         text = text .. ',"ev":' .. mapJson(u.evc) .. ',"mode":' .. mapJson(u.modeMs)
             .. ',"cap":' .. mapJson(u.capMs) .. ',"loss":' .. lossJson(u.loss)
             .. ',"lpw":' .. lossJson(u.lossPw) .. ',"lph":' .. lossJson(u.lossPh) .. ',"vsMs":' .. mapJson(u.visMs)
+            .. ',"vsL":' .. lossJson(u.visL)
     end
     return text .. "}"
 end

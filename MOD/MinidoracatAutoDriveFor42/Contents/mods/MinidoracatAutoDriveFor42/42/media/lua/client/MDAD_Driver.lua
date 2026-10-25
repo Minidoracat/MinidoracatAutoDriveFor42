@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1025b"
+Drive.REV = "1026a"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -685,6 +685,10 @@ TUNE.ACCEL_ASSIST_LEAD_S = 0.5
 -- 判堵、殭屍、會車、對線…）不補——那些帽本身就是「前面要煞」（正式服 0.17.0 clip-21：待承諾繞行時補到
 -- 45 km/h，再從 39.5 一秒鎖輪煞到 0）。
 TUNE.ACCEL_ASSIST_REASONS = { ["curve-coast"] = true, visibility = true, gear = true, perception = true }
+-- 再加速重選檔（1020d，2026-10-20 使用者裁定；見 Drive.regear）：目標比實速高這麼多（km/h）以上、檔位 ≥ 車速對應檔＋2 才關
+-- regulator 一幀讓引擎照車速重選檔；同一台車每 REGEAR_MS 最多讀一次檔位（也是觸發後的冷卻）。
+TUNE.REGEAR_GAP_KMH = 8
+TUNE.REGEAR_MS = 2000
 -- 樹叢阻力抵消（1004d，使用者 2026-10-04「遇到樹叢也可以加大推力來幫助通過」；見 Drive.bushCancel）：路外／繞行／
 -- 回線／倒車時每 BUSH_SCAN_MS 重抓一次車周樹叢（MDADSensor.bushNear，最多 BUSH_MAX_N 個），每幀只對候選算接觸。
 TUNE.BUSH_SCAN_MS = 200
@@ -1342,7 +1346,8 @@ end
 -- 向主 MOD 要「繞開 (ax,ay) 半徑 r」的替代路線並驗收。回 (route, nil) 或 (nil, 原因)。
 -- 驗收：仍穿避讓圈（avoidPenalty>0＝沒有替代路，主 MOD 是軟封鎖照樣給原線）、
 -- 起點太遠、長度 > lenMax（預設剩餘×ratio+slack）一律拒——這三條就是舊自動改道「拿回爛路線」的
--- 全部型態。成功時主 MOD 已覆寫路線快取，下一次 requestRoute 回的就是替代線。
+-- 全部型態。收下的線由呼叫端做完自己的驗收後經 Drive.detourSettle 定案（v11 commit 進主 MOD 快取；v10 以下主 MOD
+-- 算出就已覆寫快取），下一次 requestRoute 回的就是替代線。
 -- r／lenMax 省略＝堵車改道（DETOUR_AVOID_R、DETOUR_LEN_*）；拖車繞開調頭另給（Drive.towTurnaround）。
 -- refRoute＝目前的路線：替代線的終點要跟它同一個（DETOUR_END_M）。
 -- more＝同一趟先前改道判死的避讓圈（Drive.avoidMore，扁平 { x, y, r, … }；nil＝沒有）：一併交給主 MOD（nav API v9
@@ -1355,11 +1360,12 @@ TUNE.DETOUR_HIST_MAX = 7 -- 記幾個先前的避讓圈（＋目前那圈＝主 
 -- 正式服 0.25.0：拖車轉角改道拿到直行穿過那個路口、整條沒有不可過轉角的 4280m 線，因主圈 through 拒收、22m 後交還。
 -- nav API v10 起第 8 參給 SNAP_MAX_M：主 MOD 不再拿離車超過它的路當起點（跳出避讓圈從百米外起步比繞合法迴圈便宜，
 -- 回來就是 far；正式服 0.31.x 拖車調頭 4 趟 why=far）。v9 以下不傳＝舊行為，far 照舊在下面拒收。
+-- nav API v11 起第 9 參 deferCommit＝true（Drive.detourDeferred）：主 MOD 不寫快取，收下才 commit（Drive.detourSettle）。
 local function requestDetourRoute(api, playerNum, tx, ty, ax, ay, remaining, r, lenMax, refRoute, more, hard)
     if type(api.requestDetour) ~= "function" then return nil, "api" end
     local v10 = type(api.navApiVersion) == "number" and api.navApiVersion >= 10
     local route, state = api.requestDetour(playerNum, tx, ty, ax, ay, r or TUNE.DETOUR_AVOID_R, more,
-        v10 and TUNE.SNAP_MAX_M or nil)
+        v10 and TUNE.SNAP_MAX_M or nil, Drive.detourDeferred(api) or nil)
     if not route or state ~= "ok" then return nil, state or "noroad" end
     -- 空線（1002h E2E rc50 0017：目標 46m 外判堵、主 MOD 回 ok 但 len 0）收下＝下一幀 cutover 建不出剖面、
     -- 直接 LostRoute 交還；當成沒有改道，照常走受困流程。
@@ -1388,6 +1394,33 @@ local function requestDetourRoute(api, playerNum, tx, ty, ax, ay, remaining, r, 
         return nil, "long", route
     end
     return route, nil
+end
+
+-- nav API v11：requestDetour 第 9 參 deferCommit＝true 時主 MOD 不寫路線快取，收下才 commitDetour 寫進去——拒收的線
+-- 不會躺在快取裡，小地圖藍線維持車在走的那條。v10 以下或缺 commitDetour＝不傳、當成舊制：主 MOD 算出即覆寫，拒收靠
+-- s.rejectedRoute 補位（v10 會忽略第 9 參照樣覆寫，當成 deferred 就漏記 rejectedRoute）；第一次遇到 log 一次。
+function Drive.detourDeferred(api)
+    local v = api.navApiVersion
+    if type(v) == "number" and v >= 11 and type(api.commitDetour) == "function" then return true end
+    if not Drive.detourLegacyLogged then
+        Drive.detourLegacyLogged = true
+        print(LOG .. "nav API v" .. tostring(v) .. " without commitDetour: rejected detours stay in MiniMap route cache"
+            .. " (rejectedRoute fallback)") -- telemetry: 樣本 nv＝navApiVersion（一次性相容提示，非 getDebug）
+    end
+    return false
+end
+
+-- 改道驗收的最後一步（四個收線點共用：Drive.detourAttempt、Drive.towTurnaround、Drive.towCornerDetour、cutover 的
+-- sticky 重問），傳入呼叫端驗收後的 (route, why, rejected)、回同樣三個值。v11：收下＝commitDetour 寫進主 MOD 快取，
+-- 失敗＝拒收 "commit"（快取沒換，不 cutover）；拒收不用記（快取沒動）。v10 以下：收下不用做事（主 MOD 算出就覆寫了）；
+-- 拒收＝快取已被覆寫成被拒那條，記 s.rejectedRoute 讓 cutover 跳過。沒算出線（rejected＝nil）＝快取沒動，舊紀錄保留。
+function Drive.detourSettle(s, api, playerNum, route, why, rejected)
+    local deferred = Drive.detourDeferred(api)
+    if route and deferred and api.commitDetour(playerNum, route) ~= true then
+        route, why, rejected = nil, "commit", route
+    end
+    if not route and not deferred and rejected ~= nil then s.rejectedRoute = rejected end
+    return route, why, rejected
 end
 
 -- 同一趟（同目標）先前改道判死的避讓圈：s.avoidHist＝扁平 { x, y, r, … }，不含目前的 s.avoidX（拖車調頭圈不記）。
@@ -2287,7 +2320,8 @@ end
 -- 接手提示的異常計時（1020e）：每幀（onPlayerUpdate，讓位中不跑）把上傳摘要 tkoA 的異常（MDAD_Upload U.sample／U.event：
 -- 判堵、脫困、掛回、停滯、接觸、撞擊；事件那半在 diagEvent、急煞在 commandForceBrake）記到 s.anomAt。上傳只在 MP 跑，
 -- Driver 自己記＝SP 與 MP、關遙測都同一套判準。比上傳略寬（寧可少提示）：recoverWhy 也算、接觸看持續而非上升緣、
--- 撞擊不排除伺服器拉回與凍結樣本。
+-- 撞擊不分類（MDADUpload.impactClass 的 frozen／tow-sync／rehitch／tow-slack／small-animal 在這裡照樣算異常：撞到小動物或
+-- 拖車頓一下之後接手，多半就是因為那一下）。
 function Drive.anomTick(s, vehicle, now)
     local m = s.mode
     if m == "yield" then return end
@@ -2754,7 +2788,7 @@ local function startSession(playerObj, playerNum, stage)
         detourTried = false,    -- 自動改道每個停等 episode 只試一次（清除同 blockRetryDone）
         avoidX = nil, avoidY = nil, -- 已接受的改道避讓圈（sticky：之後主 MOD 重算若穿回去再要一次）
         avoidHist = nil, detourAvoidN = nil, -- 同一趟先前的避讓圈（Drive.pushAvoidHist）／本次附給主 MOD 的圈數
-        pendingDetour = false,  -- requestDetour 已覆寫主 MOD 快取，等下一次 fetchRoute cutover
+        pendingDetour = false,  -- 改道已收下、主 MOD 快取已換線（v11 經 commit），等下一次 fetchRoute cutover
         -- RECOVER 單一進口（階段 2 主體 2）：why＝需求原因（nil＝無需求，
         -- 同時是舊 mode=="recover" 閂鎖的替代）；其餘三個是 suspect 探測留給
         -- dispatch 選動作用的純量，只有 why=="progress" 時有效。
@@ -2770,7 +2804,7 @@ local function startSession(playerObj, playerNum, stage)
         guardHitS = nil, guardHitX = nil, guardHitY = nil, -- 守護判死命中點（guard-blocked 煞停錨）
         guardHitPhase = nil, -- 只有回線段 p4 的失敗可在舊群過清後行駛中交接
         dodgeApproachCap = 0, -- 接近段 envelope（telemetry：分辨「遠壓速」vs「縫本身的帽」）
-        rejectedRoute = nil,  -- 本 MOD 拒收、但仍在主 MOD 快取裡的替代線 identity（cutover 跳過）
+        rejectedRoute = nil,  -- 本 MOD 拒收、但仍在主 MOD 快取裡的替代線 identity（cutover 跳過；只有 nav API v10 以下會有）
         laneChained = false,  -- 鏈式停留中：常駐 lane 暫時＝停留 offL（前方淨空解鏈）
         residentBias = fstate.laneBias, -- 常駐行駛線（sandBias＋roadBias 夾後；每輪路面對中更新）
         dodgeStay = false,    -- 本次承諾是停留承諾（線只到 c＋車身、無回線段）
@@ -3178,7 +3212,7 @@ end
 
 -- 改道（HUD「改道」鈕與自動改道共用）：只在 blocked 停等時有意義。以堵點
 -- （群最近擋線點 blockHitX/Y，缺則車位）為圓心向主 MOD 要替代路線並驗收
--- （requestDetourRoute）；成功＝主 MOD 快取已換線，這裡只記 sticky 避讓圈、
+-- （requestDetourRoute＋Drive.detourSettle）；成功＝主 MOD 快取已換線（v11 由 commit 換），這裡只記 sticky 避讓圈、
 -- 把 nextRouteMs 歸零讓下一幀 fetchRoute 立刻 cutover（why="detour"）。
 -- 回 (true) 或 (false, 原因)；原因供 HUD tooltip／console。
 -- stuck＝交還前的最後一次改道（Drive.stuckDetour）：不要求 blocked、錨點要在車前附近、放寬繞遠上限。
@@ -3248,16 +3282,14 @@ function Drive.detourAttempt(s, playerNum, stuck)
     if route and s.tow and fin(vh) and not Drive.routeLeavesForward(route, vx, vy, cos(vh), sin(vh)) then
         route, why, rejected = nil, "back", route
     end
+    route, why, rejected = Drive.detourSettle(s, api, playerNum, route, why, rejected)
     if getDebug() then -- telemetry: detour 事件（why len ax ay）
         print(LOG .. "detour pn=" .. playerNum .. " avoid=(" .. tostring(ax) .. "," .. tostring(ay)
             .. ") -> " .. (route and ("ok len=" .. tostring(route.len)) or ("rejected " .. tostring(why)))
             .. string.format(" rs=%.1f t=%.0f", s.lastSNow or -1, getTimestampMs()))
     end
     if not route then
-        -- 主 MOD 的 requestDetour 成功算出路線就已覆寫快取（含被本 MOD 拒收的
-        -- far／long 線）；記住被拒的 identity，cutover 不得沿用（下一次 250ms 取
-        -- 路仍會拿到同一個 table，直到主 MOD 冷卻後重算）。
-        s.rejectedRoute = rejected
+        -- 拒收紀錄（v10 以下主 MOD 快取已被覆寫成被拒那條、s.rejectedRoute）由 Drive.detourSettle 記
         haloBad(playerObj, KEY_NO_DETOUR)
         voice("nodetour", playerNum)
         return false, why
@@ -3321,6 +3353,7 @@ function Drive.towTurnaround(s, playerNum, vehicle, now, fx, fy)
     if route and not Drive.routeLeavesForward(route, vx, vy, fx, fy) then
         route, why, rejected = nil, "back", route
     end
+    route, why, rejected = Drive.detourSettle(s, api, playerNum, route, why, rejected)
     diagEvent(s, playerNum, "tow", {
         phase = "turn", why = why or "ok", x = ax, y = ay, attempt = s.towTurnTries,
         len = route and route.len or (rejected and rejected.len) or nil,
@@ -3330,8 +3363,7 @@ function Drive.towTurnaround(s, playerNum, vehicle, now, fx, fy)
             .. (route and ("ok len=" .. tostring(route.len)) or ("rejected " .. tostring(why))))
     end
     if not route then
-        s.rejectedRoute = rejected -- 主 MOD 快取已被覆寫成這條，交還前別讓 cutover 收下
-        return false
+        return false -- 拒收紀錄由 Drive.detourSettle 記（v10 以下主 MOD 快取已被覆寫成這條）
     end
     Drive.pushAvoidHist(s) -- 先前的堵車避讓圈不因調頭圈蓋掉而遺失（調頭圈本身不進歷史）
     s.avoidX, s.avoidY, s.avoidR, s.avoidTow = ax, ay, TUNE.TOW_TURN_AVOID_R, true
@@ -3351,7 +3383,7 @@ end
 -- 主圈、後方圈、其餘轉角圈都只是請主 MOD 避開（1009）：回來的線穿過它們（through／again）不拒收，直行穿過路口能不能
 -- 開由剖面管線判；本趟判死的堵車圈（hist）照舊不准穿（requestDetourRoute 的 hard）。nav API <9 只給主圈。
 -- 驗收：requestDetourRoute 其餘各條＋從車頭方向出發（back）＋新線走同一條剖面管線（Drive.profileRouteOf →
--- MDADTrailer.shape）後沒有不可過轉角（blocked）。拒收＝記 s.rejectedRoute（主 MOD 快取已被覆寫）、保留原線，
+-- MDADTrailer.shape）後沒有不可過轉角（blocked）。拒收＝保留原線（v10 以下記 s.rejectedRoute，Drive.detourSettle），
 -- 行為照舊（guard 壓速、停在轉角前交還 TrailerCorner）。同一轉角集合：同一 route identity 不重問；換了 identity
 -- （偏航重算等）但車離上次判定處不到 TOW_CORNER_REASK_M 也不重問、不扣額度（記 skip why=same；正式服 0.23.0
 -- 起步後 1–20 m 的偏航 cutover 重問同一題、8 趟 6 趟兩次同結果就 skip max）；每 session TOW_CORNER_TRIES 次；
@@ -3435,8 +3467,8 @@ function Drive.towCornerDetour(s, playerNum, vehicle, now, fx, fy)
             left = shaped.towBlocked and #shaped.towBlocked / 2 or 0
             if left > 0 then route, why, rejected = nil, "blocked", route end
         end
-        -- 主 MOD 算出線就已覆寫快取（含被拒的）：記住 identity，cutover 不收；沒算出線＝快取沒動，舊的拒收紀錄保留
-        if rejected ~= nil and not route then s.rejectedRoute = rejected end
+        -- 收下＝v11 commit（失敗＝拒收 commit）；拒收＝v10 以下記 rejectedRoute；沒算出線＝快取沒動，舊的拒收紀錄保留
+        route, why, rejected = Drive.detourSettle(s, api, playerNum, route, why, rejected)
     end
     diagEvent(s, playerNum, "detour", { phase = skip and "skip" or "towcorner", kind = "towcorner",
         why = why or "ok", x = vx, y = vy, s = s.lastSNow, hitX = ax, hitY = ay, avoidR = r,
@@ -6175,8 +6207,11 @@ end
 --    前緣是未載入區塊時至少 VIS_UNLOADED_HOLD_S，MP 為 VIS_UNLOADED_HOLD_MP_S），期間只能滑行，停滯結束時仍不越過硬煞帳
 --   （MDADDynamics.visibilityHoldCapKmh）。串流前緣在 80 km/h 停 1.5 秒＝逼近 33m，舊巡航帳
 --    只按當下距離算、滑行（約 3 m/s²）跟不上它每秒 7 m/s² 的下降。
--- 回 (巡航帽 km/h, 巡航煞車帳 m/s²)；硬煞帳寫 s.visibilityHardKmh。
-function Drive.visibilityCaps(s, now, visibleEnd, minBrakeVisible)
+-- ③ 一輪預期帽降幅（1020d，2026-10-20 使用者裁定）：前緣照輪前進時，兩輪之間車逼近前緣 v·輪時，巡航帽一路降、下一輪
+--    前緣前進又跳回（1017i 保持帳讓位後露出的鋸齒）。s.visRoundDrop＝巡航帽(ahead)－巡航帽(ahead－v·輪時)，只算巡航帳
+--   （保持帳／終點帳綁速時 0）；Drive.visAssistForce 的 vis 帳在這個降幅內只斷油、不補減速。
+-- 回 (巡航帽 km/h, 巡航煞車帳 m/s²)；硬煞帳寫 s.visibilityHardKmh。speedKmh＝本幀實速（算 ③；nil＝降幅 0）。
+function Drive.visibilityCaps(s, now, visibleEnd, minBrakeVisible, speedKmh)
     local sen, halfL = s.sensor, s.vehicleProfile.halfL
     local visBrake = math.min(minBrakeVisible * TUNE.EMERGENCY_BRAKE_GAIN, TUNE.EMERGENCY_BRAKE_MAX)
     visBrake = tightenLimit(visBrake, s.brakeLower, s.brakeConfidence, TUNE.EMERGENCY_BRAKE_MAX)
@@ -6254,6 +6289,11 @@ function Drive.visibilityCaps(s, now, visibleEnd, minBrakeVisible)
         s.visibilityHardKmh = MDADDynamics.visibilityCapKmh(hardAhead, TUNE.VIS_TAU, visBrake, halfL)
     end
     s.visHardAhead = hardAhead -- 可視硬煞觸發時的輔助煞車距離（Drive.emergencyBrakeDist）
+    s.visRoundDrop = 0
+    if s.visAcct == "cruise" and finite(speedKmh) and speedKmh > 0 then
+        s.visRoundDrop = cap - MDADDynamics.visibilityCapKmh(ahead - speedKmh / 3.6 * s.visRoundS,
+            TUNE.VIS_TAU, cruiseBrake, halfL)
+    end
     return cap, cruiseBrake
 end
 
@@ -6431,6 +6471,10 @@ function Drive.visAssistForce(s, speedKmh, mult)
     end
     if speedKmh < minKmh then return 0 end
     local over = speedKmh - cap - TUNE.VIS_ASSIST_TOL_KMH
+    -- 1020d：vis 帳沒有停滯前饋（前緣照輪前進）時，超速在一輪預期帽降幅（Drive.visibilityCaps 的 s.visRoundDrop）內只斷油：
+    -- 下一輪前緣前進帽就跳回，補減速只是煞一下再加速（正式服 0.31.x 可視綁速相鄰 |Δtgt| 1.81→2.77、vaw=vis 11.8%→18.2%）。
+    -- 硬煞帳、保持帳、停滯前饋不動；超過降幅照比例補。
+    if why == "vis" and ff == 0 then over = over - (s.visRoundDrop or 0) end
     local a
     if ff > 0 and (why == "vis" or why == "profile" or why == "lane") then
         if speedKmh <= cap then return 0 end
@@ -6489,6 +6533,54 @@ function Drive.accelAssistForce(s, speedKmh, targetSpeed, mult)
     if not finite(mass) or mass < 1 then mass = MASS_FALLBACK end
     s.accelAssist = a
     return a * mass * (mult / MULT_NORM) / (0.01 * 48 / MULT_NORM)
+end
+
+-- 車速對應檔（照抄 CarController.control_ForwardNew:687-690 的 gearForSpeed）：floor(min(speedLimited, 極速)÷(極速÷檔數))+1，
+-- 上限檔數；speedLimited＝MP 假速度域（regulatorDomainKmh，SP 恆等）。檔數與極速每個 session 讀一次；讀不到回 nil。
+function Drive.gearFair(s, vehicle, kmh)
+    if s.gearN == nil then
+        local script = jget(vehicle, "getScript")
+        local n, vm = script and jget(script, "getGearRatioCount"), jget(vehicle, "getMaxSpeed")
+        s.gearN = finite(n) and n >= 1 and finite(vm) and vm > 0 and n or false
+        s.gearVm = vm
+    end
+    if not s.gearN or not finite(kmh) then return nil end
+    local v = regulatorDomainKmh(kmh > 0 and kmh or 0)
+    if v > s.gearVm then v = s.gearVm end
+    local g = math.floor(v / (s.gearVm / s.gearN)) + 1
+    if g > s.gearN then g = s.gearN end
+    return g
+end
+
+-- 再加速重選檔（V1，1020d；2026-10-20 使用者裁定准做原型，目的是加速；devices-mp〈使用者裁定〉10-17「不為省油換檔」照舊）：
+-- regulator 開著時超速只斷油、不掛 N（CarController.control_NoControl:502-504），control_ForwardNew 只升不降檔（:719-727），
+-- 出彎、繞行、可視減速後再加速都卡在原本的高檔（正式服 0.31.x 同車型同速段 42 組 30 組卡高檔時較慢，加速度比 1.25）。
+-- 目標 ≥ 實速＋REGEAR_GAP_KMH、檔位 ≥ 車速對應檔＋2 時關 regulator 一幀＝NoControl 掛 N；下一幀照常開，引擎看到 N 直接
+-- 進 gearForSpeed（:719-720）。物理在駕駛的客戶端（IsoPlayer.updateWhileInVehicle→BaseVehicle.updatePhysics），MP 同樣成立。
+-- 鎖輪閂鎖（Braking 本來就掛 N）、倒車、調頭、掛回中不做；每 REGEAR_MS 最多讀一次檔位（也是冷卻）。這一幀滑行學習
+-- 只開窗、下一幀供油就作廢（updateTraction），不會被當斷油觀測。回 true＝本幀關了 regulator。
+-- 事件 regear 延後兩幀發（引擎要再跑一次物理才選檔）：觸發前 tn、對應檔 gf、車速、目標，選檔後 tn1、車速 v1、ms。
+function Drive.regear(s, vehicle, playerNum, now, speedKmh, targetSpeed)
+    local rg = s.regearPend
+    if rg ~= nil then
+        rg.f = rg.f + 1
+        if rg.f >= 2 then
+            s.regearPend = nil
+            diagEvent(s, playerNum, "regear", { tn = rg.tn, tn1 = jget(vehicle, "getTransmissionNumber"), gf = rg.gf,
+                speed = rg.v, v1 = speedKmh, target = rg.tgt, ms = now - rg.at })
+        end
+        return false
+    end
+    if now < (s.regearNext or 0) or not (speedKmh > 0) or not (targetSpeed >= speedKmh + TUNE.REGEAR_GAP_KMH)
+            or now < s.forceBrakeUntil or s.fstate.rotating or s.uturn or s.rehitch then
+        return false
+    end
+    s.regearNext = now + TUNE.REGEAR_MS
+    local tn, gf = jget(vehicle, "getTransmissionNumber"), Drive.gearFair(s, vehicle, speedKmh)
+    if not (finite(tn) and gf and tn >= gf + 2) then return false end
+    vehicle:setRegulator(false)
+    if s.diag then s.regearPend = { tn = tn, gf = gf, v = speedKmh, tgt = targetSpeed, at = now, f = 0 } end
+    return true
 end
 
 -- 掛車分攤（見 Drive.visAssistForce）：沿掛車自己的速度反向施 a×掛車質量的中線外力（relPos 0，不產生
@@ -7763,6 +7855,8 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     if finite(es) then phys.engineSpeed = es end
     local tn = jget(vehicle, "getTransmissionNumber")
     if finite(tn) then phys.transmissionNumber = tn end
+    -- 1020d：車速對應檔（Drive.gearFair；樣本 gf）——tn ≥ gf＋2＝卡高檔（摘要 lhg、再加速重選檔 Drive.regear 同一把尺）
+    phys.gearFair = Drive.gearFair(s, vehicle, jget(vehicle, "getCurrentSpeedKmHour"))
     local rgs = jget(vehicle, "getRegulatorSpeed")
     if finite(rgs) then phys.regulatorSpeed = rgs end
     -- 1017：油量 %（原版儀表同一支，BaseVehicle.java:9293-9296；MP 是伺服器同步來的值），油耗回報直接看每段扣多少
@@ -7905,6 +7999,7 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     if finite(s.fstate.xtOut) and s.fstate.xtOut > 1 then phys.xtOut = s.fstate.xtOut end
     if s.dodgeAlignHold == true then phys.dodgeAlignHold = true end
     phys.routeHeadingError, phys.kinkExitS = s.lastRouteErr, s.fstate.kinkExitS
+    phys.fvo = s.fstate.fvo -- 1020b：沒有圓角的頂點開始轉的最近一筆 {n, capKmh, kmh, th}（Follower arcLookaheadMs；只給摘要 fvo）
     phys.visibilityCap = s.visibilityCap
     phys.visibilityHardKmh = s.visibilityHardKmh
     phys.visHold, phys.visRoundS, phys.visAssistDecel = s.visHold, s.visRoundS, s.visAssistDecel
@@ -8005,6 +8100,8 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     if s.lastCapReason == "visibility" then
         -- 1017：兩本帳各自的帽（vcc 巡航帳、vhc 前緣停滯保持帳；term 時只有巡航帳＝終點帳）
         phys.visAcct, phys.visCruiseCap, phys.visHoldCap = s.visAcct, s.visCruiseCap, s.visHoldCap
+        -- 1020d：一輪預期帽降幅（vis 帳只斷油的容忍；樣本 vrd，km/h 一位小數）
+        phys.visRoundDrop = finite(s.visRoundDrop) and math.floor(s.visRoundDrop * 10 + 0.5) / 10 or nil
     end
     -- 1017：最近一個沒學到的 forceBrake 窗被拒收的理由（Drive.brakeRejNote；閂到這一筆、寫出後清）
     phys.brakeReject, s.brakeRej = s.brakeRej, nil
@@ -13438,7 +13535,7 @@ local function replan(s, vehicle, playerNum)
                 elseif s.planDeferWhy and not (sen.wideDone and s.wideArmed) then
                     -- 主候選未覆蓋、鏈裡也沒有覆蓋得到的替代線：回到原本的延後（先按已知群起點煞停）。
                     -- 停在停點的寬帶判堵不延後：延後的接近帽會讓車往群前爬、吃掉進入段跑道，
-                    -- 而且清掉判堵＝解除寬帶武裝，一般帶／寬帶來回判、永遠不倒車（0929v）。照判堵走倒車重判。
+                    -- 而且清掉判堵＝下一輪不掃寬帶（Drive.wideScanWanted 要 blocked），一般帶／寬帶來回判、永遠不倒車（0929v）。照判堵走倒車重判。
                     Drive.deferDodge(s, playerNum, s.planDeferWhy, s.planDeferB, s.planDeferC, s.planDeferD)
                     mode = "clear"
                 else
@@ -13794,7 +13891,10 @@ local function replan(s, vehicle, playerNum)
             s.dodgeHandoffHold, s.dodgeDeferCap = false, -1
         end
         s.blocked = false
-        Drive.disarmWide(s)
+        -- 延後（planSig −1）不是淨空，不解除寬帶武裝（1021g）：倒車成功清了 blocked，退出來那一輪延後（lateral-coverage 等）
+        -- 舊制在這裡解除武裝，下一輪同一堵點再判堵時 Drive.blockedAtStop 不再停住，車照起步包絡開回停止線、下一次倒車又退回原處
+        -- （E2E blockscan launch7 三輪來回；正式服 0.31.x 6 次）。出口不變：承諾、真淨空、開過武裝點、錨移到 WIDE_ARM_SAME_M 外。
+        if s.planSig ~= -1 then Drive.disarmWide(s) end
         s.blockedNotified = false
         s.dodgeNotified = false
         if s.laneChained then
@@ -15222,7 +15322,7 @@ local function stepFollow(s, vehicle, playerNum, now)
         local stopEnd = s.lastSNow
         local visibilityCap = s.sensor and 0 or 15
         s.visibilityHardKmh = visibilityCap -- 尚未有快照時不得沿用上一幀的高門檻。
-        s.visAcct, s.visCruiseCap, s.visHoldCap = nil, nil, nil
+        s.visAcct, s.visCruiseCap, s.visHoldCap, s.visRoundDrop = nil, nil, nil, 0
         if s.sensor and s.sensor.ready and finite(s.sensor.stamp) then
             sensorReady = true
             local age = now - s.sensor.stamp
@@ -15257,7 +15357,7 @@ local function stepFollow(s, vehicle, playerNum, now)
             -- 同一可視前綴分兩個速度帳：巡航先收油（必要時中線外力補減速），緊急停距不足才
             -- 動用一秒硬煞。時間模型與定罪理由見 Drive.visibilityCaps。
             local cruiseBrake
-            visibilityCap, cruiseBrake = Drive.visibilityCaps(s, now, visibleEnd, minBrakeVisible)
+            visibilityCap, cruiseBrake = Drive.visibilityCaps(s, now, visibleEnd, minBrakeVisible, speedKmh)
             -- 終點不是障礙（2026-09-01 s058 定罪）：可視帶已含路線終點且終點前
             -- 無 unloaded 截斷時，把近終點 visibilityCap 地板到爬行檔（squeeze
             -- 同檔 12）。不地板的話 ARRIVE_M(5)~8m 環帶被壓到 3-5 km/h，而引擎
@@ -16182,6 +16282,7 @@ local function stepFollow(s, vehicle, playerNum, now)
                 end
             end
             regOn = applySpeed(s, vehicle, targetSpeed)
+            if Drive.regear(s, vehicle, playerNum, now, speedKmh, targetSpeed) then regOn = false end
             if not reached then
                 local av = speedKmh
                 if av < 0 then av = -av end
@@ -16828,8 +16929,8 @@ local function onPlayerUpdate(player)
             s.towCornerTries, s.towCornerSig = 0, nil -- 新目標＝新的一趟（同集合不重問只限同一趟）
             s.rejectedRoute = nil
         end
-        -- 被本 MOD 拒收的替代線（far／long／through）仍躺在主 MOD 快取裡（requestDetour
-        -- 成功即覆寫），下一次取路會原樣拿回同一個 table——不得當成一般 cutover 收下
+        -- 被本 MOD 拒收的替代線（far／long／through）在 nav API v10 以下仍躺在主 MOD 快取裡（requestDetour
+        -- 成功即覆寫；v11 起收下才 commit，拒收的不進快取），下一次取路會原樣拿回同一個 table——不得當成一般 cutover 收下
         -- （2026-09-02 s064：拒收 far 之後同一幀就以 "deviation" 名義跟著它開進樹林；
         -- 主 MOD 冷卻後重算會換新 identity，屆時照常 cutover）。**必須在距離閘之前**：拒收的
         -- far 線走到距離閘＝RouteTooFar 交還（0928m E2E rc15 0095：改道被拒 far，15 幀後交還）。
@@ -16898,17 +16999,18 @@ local function onPlayerUpdate(player)
             if routeCrossesAvoid(route, s.avoidX, s.avoidY, s.avoidR or TUNE.DETOUR_AVOID_R)
                     or Drive.crossesAnyAvoid(route, more) then
                 local remaining = s.profile and (s.profile.length - s.lastSNow) or nil
-                local detour, _, rejected = requestDetourRoute(api, playerNum, tx, ty, s.avoidX, s.avoidY,
+                local detour, _, rejected = Drive.detourSettle(s, api, playerNum, requestDetourRoute(api, playerNum,
+                    tx, ty, s.avoidX, s.avoidY,
                     remaining, s.avoidR, s.avoidLong and finite(remaining)
                         and remaining * TUNE.STUCK_DETOUR_LEN_RATIO + TUNE.STUCK_DETOUR_LEN_SLACK
                         or s.avoidTow and finite(remaining)
-                        and remaining * TUNE.TOW_TURN_LEN_RATIO + TUNE.TOW_TURN_LEN_SLACK or nil, route, more)
+                        and remaining * TUNE.TOW_TURN_LEN_RATIO + TUNE.TOW_TURN_LEN_SLACK or nil, route, more))
                 if detour then
                     route = detour
                     s.pendingRouteWhy = s.avoidTow and "towturn" or "detour"
                 else
                     s.avoidX, s.avoidY, s.avoidR, s.avoidTow, s.avoidLong = nil, nil, nil, nil, nil
-                    if rejected ~= nil then s.rejectedRoute = rejected end
+                    -- 拒收紀錄由 Drive.detourSettle 記（v10 以下）
                 end
             end
         end

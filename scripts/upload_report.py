@@ -11,18 +11,20 @@ clips-anon.tsv（anon path overview，目錄內全部片段），寫完重讀、
 --picks 寫 TSV（category time anon rev kind veh path note）列出 C–E、G–J 背後的片段，path 含真實資料夾名，只留本機。
 --with（可重複）＝較早的 pull 目錄：A 節併入它們的摘要（8 檔輪寫，舊 build 的趟會被輪掉；同 (u, drive) 以本批為準）與全部片段。
   A 摘要：(u, drive) 去重、依 build 分組：趟數／玩家／km、impact／impZ／contact 每千 km＋Poisson 95%、
-    impact 另列「不含小動物」（扣掉本批與 --with 全部片段裡歸成 small-animal、同 (u, drive) 的撞擊，不限窗口；片段有配額，
-    扣的是下限，另印片段涵蓋 n/k 件）、結束原因（全部）、loss 佔比、nm/fm、offset（offN／offMax）；
+    impact 另列「不含小動物／拖車拉緊」（1021 前的 rev：扣掉本批與 --with 全部片段裡推成 small-animal／tow-slack、同 (u, drive)
+    的撞擊，不限窗口；片段有配額，扣的是下限，另印片段涵蓋 n/k 件；1021 起客戶端自己排除、摘要另計 sma／tsl）、結束原因（全部）、loss 佔比、nm/fm、offset（offN／offMax）；
     相鄰 build 與「同碼 A/A」（--current 內兩個以上 build 時，最早一個對其餘合併）的率比＋玩家叢集 bootstrap 95%（boot_ratio）
     ＋Poisson 條件二項 p——同一玩家連撞時 p 偏小（2026-10-20 同碼 A/A impact p 0.004、玩家叢集區間 0.94–3.84），判版本差看區間並對照 A/A
   B 窗口片段：rev×kind、玩家數、現行 rev 可用性（事前 ≥3s、樣本 ≥10、有 route 點列）
   C 撞擊歸因（現行 rev；事件 (u, drive, ts) 去重）：先排除不算撞擊的上升緣（事件 cls≠hit；1017 前片段：上升緣樣本 m=rehitch、
-    rh-attach 後 REHITCH_SETTLE_MS 內＝rehitch，摘要 reason=exit 且撞擊在結束前 EXIT_BRAKE_MS 內、tn 0、fbl 0＝exit），同 (u, drive)
+    rh-attach 後 REHITCH_SETTLE_MS 內＝rehitch，摘要 reason=exit 且撞擊在結束前 EXIT_BRAKE_MS 內、tn 0、fbl 0＝exit；舊客戶端
+    （事件沒 icv、同趟摘要沒 sma）：impact_soft 照客戶端規則推 tow-slack 與 small-animal，證據不齊（上升緣樣本、nb、相鄰原始樣本）不推），同 (u, drive)
     IMPACT_REARM_MS 內只留第一件；上升緣樣本（ts ≤ 事件+5ms、帶 nb 的最後一筆）nb {kind: [d, s, l]}，
     貼車＝|s| ≤ halfL+0.8（他車再加對方半長 2.5）且 |l| ≤ halfW+0.8；旗標 awt、maneuver（前 2.5s 主導 ctl 為 AVOID／RETURN 或任一 dg）；
     撞擊前 2.5s 內有 contact 事件時 sprite／scost 用它的（命中點 1 格，比車頭 3 格準；scost vehicle 或 tlg ≤1＝vehicle）；
     類別 zombie＞small-animal／animal＞vehicle（貼車）＞static（scost tree／hard／wall）＞corpse（貼車）＞far（有 nb 沒貼車）＞empty；
-    small-animal＝貼車的動物 a 體重 <SMALL_KG（nb a 第 5 項；1013f 起含剛死的，第 6 項＝1），讀不到體重算 animal
+    small-animal＝貼車的動物 a 體重 <SMALL_KG（nb a 第 5 項；1013f 起含剛死的，第 6 項＝1），讀不到體重算 animal——排除之後還留在這類的
+    是小動物同時撞到別的（上升緣 footprint、車頭擋車 sprite 在 halfW+0.8 內、或他車貼著），仍算撞擊
   L 1017 摘要新欄位（rev 有 rhi 的趟）：rhi／xbk、vfIn／vfInX、aoi、出口偏差、油量分段 %/km、起步到 40m 中位（依 t40k）、blr、eng；
     1020 起（摘要有 fuT／fuE）另印各段每分鐘扣量、實扣÷原版公式期望（held＝實際檔、fair＝伺服器換算檔），與油量判準
     (彎道＋繞行)/其他 的實扣÷期望比＋玩家叢集 95%（boot_players；fair 區間含 1＝換算在作用）
@@ -63,8 +65,9 @@ GRID = 25               # 判堵熱點格 m
 STATIC = ("tree", "hard", "wall")
 ANOMALY = ("blocked", "uturn", "unstick", "contact", "impact", "progress")
 NB_KIND = (("z", "zombie"), ("a", "animal"), ("v", "vehicle"))
-SMALL_KG = 20          # 同 MDADSensor.ANIMAL_BIG_KG：小型動物不閃不減（2026-10-13 裁定 7：撞母雞 0 車損），撞擊 KPI 拆開
+SMALL_KG = 20          # 同 MDADSensor.ANIMAL_BIG_KG／MDAD_Upload SMALL_ANIMAL_KG：小型動物不閃不減（2026-10-13 裁定 7：撞母雞 0 車損），撞擊 KPI 拆開
 IMPACT_REARM_MS = 2000  # 同 MDAD_Upload IMPACT_REARM_MS：同一趟 2 秒內的第二次撞擊上升緣算同一件
+IMPACT_MIN_KMH = 5     # 同 MDAD_Upload IMPACT_MIN_KMH：tow-slack 掛車 |km/h| 增加的門檻
 REHITCH_SETTLE_MS = 2500  # 同 Driver TUNE.REHITCH_SETTLE_MS：rh-attach 後這麼久內的掉速是掛回拉攏
 EXIT_BRAKE_MS = 2000   # 同 MDAD_Upload EXIT_BRAKE_MS：撞擊後這麼久內以 exit 結束、tn 0、fbl 0＝下車煞車
 OTHER_HALF_L = 2.5     # 車對車貼車：對方半車長（nb v 不帶對方幾何）
@@ -321,10 +324,44 @@ def edge_row(rec, ts):
     return rows[-1] if rows else {}
 
 
+def impact_soft(e, rec):
+    """舊客戶端（沒有 icv）的事件照 U.impactClass 的 1021h 兩類推 → 類別或 None。證據要齊全才推，缺一樣就 None（保留撞擊）：
+    上升緣那筆樣本（ts＝事件 ts；事件與樣本同一個 now）要在、帶 nb、沒有 footprint（fb）；halfL／halfW 要有。
+    碰撞反證（有一項就 None）：nb 殭屍／玩家貼車（|s| ≤ halfL＋TOUCH_PAD、|l| ≤ halfW＋TOUCH_PAD；nb 只有各類最近一隻）、他車車心在
+    halfL＋OTHER_HALF_L＋TOUCH_PAD 內、事件 hardD 在 halfW＋TOUCH_PAD 內。
+    small-animal＝nb 動物貼車、體重 <SMALL_KG；tow-slack＝沒有動物貼車，且前一筆樣本正好在事件 ms 之前（片段降頻或 full 後不推）、
+    掛車 |tkm| 多 ≥IMPACT_MIN_KMH。"""
+    ts = e["ts"]
+    r = next((x for x in rec["rows"] if x["ts"] == ts), None)
+    nb = r.get("nb") if r else None
+    hl, hw = rec["prof"].get("halfL"), rec["prof"].get("halfW")
+    if not isinstance(nb, dict) or r.get("fb") or not isinstance(hl, (int, float)) or not isinstance(hw, (int, float)):
+        return None
+
+    def touch(v):
+        return isinstance(v, list) and len(v) >= 3 and all(isinstance(t, (int, float)) for t in v[:3]) \
+            and abs(v[1]) <= hl + TOUCH_PAD and abs(v[2]) <= hw + TOUCH_PAD
+    v, hd = nb.get("v"), e.get("hardD")
+    if touch(nb.get("z")) or touch(nb.get("p")) \
+            or (isinstance(v, list) and v and isinstance(v[0], (int, float)) and v[0] <= hl + OTHER_HALF_L + TOUCH_PAD) \
+            or (isinstance(hd, (int, float)) and hd <= hw + TOUCH_PAD):
+        return None
+    a = nb.get("a")
+    if touch(a):
+        return "small-animal" if len(a) >= 5 and isinstance(a[4], (int, float)) and a[4] < SMALL_KG else None
+    ms = e.get("ms")
+    p = next((x for x in rec["rows"] if x["ts"] == ts - ms), None) if isinstance(ms, (int, float)) else None
+    tk, tk0 = r.get("tkm"), p.get("tkm") if p else None
+    if isinstance(tk, (int, float)) and isinstance(tk0, (int, float)) and abs(tk) - abs(tk0) >= IMPACT_MIN_KMH:
+        return "tow-slack"
+    return None
+
+
 def impact_false(e, rec, S=None):
-    """不算撞擊的上升緣 → 類別或 None：事件 cls≠hit（frozen／tow-sync／rehitch，1008／1017）；1017 前的片段用樣本推：
-    上升緣樣本 m=rehitch、或 rh-attach 後 REHITCH_SETTLE_MS 內＝rehitch；摘要 reason=exit、撞擊在結束前 EXIT_BRAKE_MS 內、
-    上升緣 tn 0 且 fbl 0＝exit。"""
+    """不算撞擊的上升緣 → 類別或 None：事件 cls≠hit（frozen／tow-sync／rehitch，1008／1017；tow-slack／small-animal，1021）；
+    1017 前的片段用樣本推：上升緣樣本 m=rehitch、或 rh-attach 後 REHITCH_SETTLE_MS 內＝rehitch；舊客戶端用 impact_soft 推
+    tow-slack／small-animal——事件帶 icv（1021h 起）或同趟摘要有 sma（1021f 起）＝客戶端已分過，cls=hit 照留；
+    摘要 reason=exit、撞擊在結束前 EXIT_BRAKE_MS 內、上升緣 tn 0 且 fbl 0＝exit。"""
     cls = e.get("cls")
     if cls and cls != "hit":
         return cls
@@ -336,6 +373,9 @@ def impact_false(e, rec, S=None):
                    for x in rec["evs"]):
         return "rehitch"
     o = (S or {}).get((rec["u"], rec["drive"])) or (S or {}).get(("*", rec["drive"])) or {}
+    soft = None if "icv" in e or "sma" in o else impact_soft(e, rec)
+    if soft:
+        return soft
     tn = e.get("tn", r.get("tn"))
     if (o.get("reason") or "").replace(PFX, "") == "exit" and isinstance(o.get("end"), (int, float)) \
             and 0 <= o["end"] - ts <= EXIT_BRAKE_MS and tn == 0 and not (r.get("fbl") or 0) > 0:
@@ -375,29 +415,31 @@ def classify_impact(e, rec):
 
 
 def real_impacts(E, S=None):
-    """→ ([(e, rec)…] 真撞擊, Counter 不算的類別)：排除 impact_false，同 (u, drive) IMPACT_REARM_MS 內只留第一件。"""
-    out, skip, last = [], collections.Counter(), {}
+    """→ ([(e, rec)…] 真撞擊, Counter 不算的類別, [(e, rec)…] 客戶端摘要算進 impact、這裡推成 tow-slack／small-animal 的)：
+    排除 impact_false；同 (u, drive) IMPACT_REARM_MS 內只留第一件（摘要算進 impact 的才佔 rearm，同客戶端 impactAt）。"""
+    out, skip, last, soft = [], collections.Counter(), {}, []
     for e, rec in events(E, "impact"):
         f = impact_false(e, rec, S)
-        if f:
-            skip[f] += 1
-            continue
         k = (rec["u"], rec["drive"])
-        if k in last and e["ts"] - last[k] < IMPACT_REARM_MS:
+        counted = f is None or (f in ("small-animal", "tow-slack") and (e.get("cls") or "hit") == "hit")
+        if counted and k in last and e["ts"] - last[k] < IMPACT_REARM_MS:
             skip["rearm"] += 1
             continue
-        last[k] = e["ts"]
+        if counted:
+            last[k] = e["ts"]
+        if f:
+            skip[f] += 1
+            if counted:
+                soft.append((e, rec))
+            continue
         out.append((e, rec))
-    return out, skip
+    return out, skip, soft
 
 
 def small_impacts(E, S=None):
-    """(u, drive) → 歸成 small-animal 的撞擊件數（A 節扣除用；E 不限 rev；假撞與 rearm 重複先排除）。"""
-    out = collections.Counter()
-    for e, rec in real_impacts(E, S)[0]:
-        if classify_impact(e, rec)[0] == "small-animal":
-            out[(rec["u"], rec["drive"])] += 1
-    return out
+    """(u, drive) → 摘要算進 impact、其實是 tow-slack／small-animal 的撞擊件數（1021 前的 rev；A 節扣除用；E 不限 rev）。
+    1021 起客戶端自己排除（事件 cls tow-slack／small-animal、摘要 tsl／sma），不再扣。"""
+    return collections.Counter((rec["u"], rec["drive"]) for _, rec in real_impacts(E, S)[2])
 
 
 # ---------- 各節 ----------
@@ -421,8 +463,8 @@ def sec_a(S, small=None, cur=(), cover=None):
         if km:
             print("  " + "  ".join(f"{f} {v}={v / km * 1000:.1f}/千km (95% {ci(v)[0] / km * 1000:.1f}-{ci(v)[1] / km * 1000:.1f})"
                                    for f, v in k.items()))
-            print(f"  impact 不含小動物 {ns}={ns / km * 1000:.1f}/千km (95% {ci(ns)[0] / km * 1000:.1f}-{ci(ns)[1] / km * 1000:.1f})"
-                  f"（扣 small-animal {sm}；片段涵蓋 {(cover or {}).get(b, 0)}/{k['impact']} 件）")
+            print(f"  impact 不含小動物／拖車拉緊 {ns}={ns / km * 1000:.1f}/千km (95% {ci(ns)[0] / km * 1000:.1f}-{ci(ns)[1] / km * 1000:.1f})"
+                  f"（扣 small-animal／tow-slack {sm}；片段涵蓋 {(cover or {}).get(b, 0)}/{k['impact']} 件）")
         K[b] = (km, k, ns, collections.Counter(o.get("rpt") or "unknown" for o in L))
         if set(K[b][3]) != {"unknown"}:      # 1018a 起摘要 rpt＝最後一次 route cutover 的主 MOD RoadPatch 狀態；缺＝舊 rev／舊主 MOD
             print("  RoadPatch rpt " + ", ".join(f"{r}:{v}" for r, v in K[b][3].most_common()))
@@ -483,9 +525,9 @@ def sec_b(C, cur, A):
 
 
 def sec_c(E, A, picks, S=None):
-    print("\n== C 撞擊歸因（現行 rev，(u, drive, ts) 去重；排除 cls≠hit／掛回／下車煞車，同趟 2s 內只算一件）")
+    print("\n== C 撞擊歸因（現行 rev，(u, drive, ts) 去重；排除 cls≠hit／掛回／下車煞車／拖車拉緊／小動物，同趟 2s 內只算一件）")
     rows = []
-    real, skip = real_impacts(E, S)
+    real, skip, _ = real_impacts(E, S)
     for e, rec in real:
         cls, awt, man, nb, sprite, scost = classify_impact(e, rec)
         rows.append((rec["rev"], cls, awt, man, rec))
@@ -800,7 +842,8 @@ def report(root, since_s, cur, picks_path=None, withs=()):
         if byd[d] == 1:
             Sd[("*", d)] = o
     Eall = dedupe([r for d in (*withs, root) for r in load_clips(d, 0)])   # A 不限窗口：各 build 有片段的撞擊都扣小動物
-    cover = collections.Counter(rec["build"] for _, rec in real_impacts(Eall, Sd)[0])
+    real, _, soft = real_impacts(Eall, Sd)
+    cover = collections.Counter(rec["build"] for _, rec in real + soft)   # 摘要算進 impact、片段裡找得到的
     a = sec_a(S, small_impacts(Eall, Sd), cur, cover)  # 不限 rev：摘要也是全部 build
     b = sec_b(C, cur, A)
     C = [r for r in C if r["rev"] in cur]             # C–J 只看現行 rev（舊版只能排除，不拿來定罪）
@@ -882,16 +925,43 @@ def self_test():
         clip("pe", 1, "takeover", T + 100000, base, [dict(ts=T + 99000, n="blocked", why="plan", x=5010, y=7010)], rev="1")  # 舊 rev
         clip("pa", 9, "impact", T - 10 ** 7, base, [])                # 窗口外
         # 1013f 小動物：貼車的動物 a 體重 <20 kg＝small-animal（剛死的帶第 6 項 1）；20 kg 整、讀不到體重（1010 前格式）＝animal。
-        # u0／u1 是摘要 b-2 有 impact 的兩趟：A 的「不含小動物」扣掉它們（u1 那段是舊 rev，A 不限 rev、C 只算現行 rev）
-        def ani(u, drive, a, rev="2"):
-            clip(u, 1, "impact", T + 110000, base + [(0, {"nb": {"a": a}})], [dict(ts=T + 110000, n="impact", speed=30)],
+        # 1021：小動物（沒同時撞到別的）與拖車拉緊不算撞擊——1021 前的事件照客戶端規則推（u0），1021 起看事件 cls（u2）。
+        # u0／u1 是摘要 b-2 有 impact 的兩趟：A 的「不含小動物」扣掉它們（u1 那段是舊 rev，A 不限 rev、C 只算現行 rev）；
+        # u2 的摘要沒算進 impact（客戶端已排除）＝不扣。u3 小動物＋車頭擋車 sprite 1 m＝仍是撞擊、C 歸 small-animal。
+        def ani(u, drive, a, rev="2", **ev):
+            clip(u, 1, "impact", T + 110000, base + [(0, {"nb": {"a": a}})], [dict(ts=T + 110000, n="impact", speed=30, **ev)],
                  rev=rev, drive=drive)
         ani("u0", T + 100, [1.0, 1.0, 0.3, "hen", 2.4, 1])
         ani("u1", T + 101, [1.2, 1.1, -0.2, "chick", 0.3, 1], rev="1")
+        ani("u2", T + 102, [1.0, 1.0, 0.3, "rabdoe", 3.6], cls="small-animal")
+        ani("u3", T + 103, [1.0, 1.0, 0.3, "rat", 0.4], sprite="fencing_01_32", scost="hard", hardD=1.0)
         ani("u5", T + 105, [1.5, 1.5, 0.2, "cow", 600])
         ani("u6", T + 106, [1.5, 1.5, 0.2, "lamb", 20])
         ani("u7", T + 107, [1.5, 1.5, 0.2])
         ani("u8", T + 108, [6.0, 6.0, 0.2, "hen", 2.4, 1])             # 小動物沒貼車＝far
+        # 1021 拖車拉緊（1021 前格式）：上升緣掛車 tkm 0→11、前一筆正好在事件 ms 之前＝tow-slack；起步後真撞（掛車 30→28，沒加速）
+        # ＝仍是撞擊（nb 空＝empty）
+        tow0 = [(k, {"tkm": 0}) for k in range(40, 0, -1)]
+        clip("u4", 1, "impact", T + 110000, tow0 + [(0, {"tkm": 11, "nb": {}})],
+             [dict(ts=T + 110000, n="impact", speed=16.6, ms=100)])
+        clip("u9", 1, "impact", T + 110000, [(k, {"tkm": 30}) for k in range(40, 0, -1)] + [(0, {"tkm": -28, "nb": {}})],
+             [dict(ts=T + 110000, n="impact", speed=30, ms=100)])
+        # 1021h 證據不完整就不排除：w1 片段降頻（前一筆在 200 ms 前、事件 ms 100）不推 tow-slack；w2 上升緣那筆沒 nb（只有更早一筆有）
+        # 不推 small-animal（C 仍用最後一筆 nb 歸類）。w3／w4 新客戶端（事件 icv、或同趟摘要有 sma）寫的 cls=hit 照留，即使 nb 取整後
+        # 落在貼車邊界（橫向 1.60＝halfW＋0.8）。w5／w6 掛車增速但車頭有硬物（hardD 1.0）／殭屍貼車＝仍是撞擊。
+        clip("w1", 1, "impact", T + 110000, [(k, {"tkm": 0}) for k in range(40, 0, -2)] + [(0, {"tkm": 10, "nb": {}})],
+             [dict(ts=T + 110000, n="impact", speed=30, ms=100)])
+        clip("w2", 1, "impact", T + 110000, [(k, {}) for k in range(40, 5, -1)]
+             + [(5, {"nb": {"a": [1.0, 1.0, 0.3, "rat", 0.4]}})] + [(k, {}) for k in range(4, -1, -1)],
+             [dict(ts=T + 110000, n="impact", speed=30, ms=100)])
+        ani("w3", T + 113, [1.6, 0, 1.6, "rat", 0.4], cls="hit", icv=1)
+        ani("w4", T + 114, [1.6, 0, 1.6, "rat", 0.4], cls="hit")
+        put("summary-5.log", [dict(t="sum", u="w4", drive=T + 114, build="b-9", rev="2", dist=1000, end=T + 120000,
+                                   reason="arrive", impact=1, sma=0, tsl=0)])
+        clip("w5", 1, "impact", T + 110000, tow0 + [(0, {"tkm": 11, "nb": {}})],
+             [dict(ts=T + 110000, n="impact", speed=16.6, ms=100, sprite="fencing_01_32", scost="hard", hardD=1.0)])
+        clip("w6", 1, "impact", T + 110000, tow0 + [(0, {"tkm": 11, "nb": {"z": [2.0, 2.0, 0.2]}})],
+             [dict(ts=T + 110000, n="impact", speed=16.6, ms=100)])
         # 1017：不算撞擊（事件 cls≠hit；1017 前片段用樣本推）、同趟 2s 內只算一件、他車用兩車半長、contact sprite 優先
         zb = base + [(0, {"nb": {"z": [1.0, 1.0, 0.5]}})]
         t1 = T + 120000
@@ -926,10 +996,11 @@ def self_test():
         check(set(a) == {"b-1", "b-2"} and a["b-2"]["trips"] == 20 and a["b-2"]["impact"] == 2 and a["b-2"]["km"] == 20,
               "摘要 (u, drive) 去重、依 build 分組、<20 趟不列")
         check(a["b-2"]["impactNoSmall"] == 0 and a["b-1"]["impactNoSmall"] == 0,
-              "A impact 不含小動物：扣掉同 (u, drive) 的 small-animal 片段撞擊（不限 rev）")
-        check(any("impact 不含小動物 0=0.0/千km" in ln and "扣 small-animal 2" in ln for ln in out.getvalue().splitlines()),
-              "A 印出不含小動物的 impact／千 km 與扣掉的件數")
-        check(res["B"]["clips"] == 25, "窗口：trig < since 的片段不算")
+              "A impact 不含小動物：扣掉同 (u, drive) 推成 small-animal 的片段撞擊（不限 rev）")
+        check(any("impact 不含小動物／拖車拉緊 0=0.0/千km" in ln and "扣 small-animal／tow-slack 2" in ln
+                  for ln in out.getvalue().splitlines()),
+              "A 印出不含小動物／拖車拉緊的 impact／千 km 與扣掉的件數（事件 cls 已是 small-animal 的 u2 不扣）")
+        check(res["B"]["clips"] == 35, "窗口：trig < since 的片段不算")
         check(a["b-2"]["rpt"] == {"raw": 3, "unknown": 17} and any("RoadPatch rpt unknown:17, raw:3" in ln
                                                                      for ln in out.getvalue().splitlines()),
               "A RoadPatch rpt 計數（缺＝unknown）")
@@ -947,11 +1018,23 @@ def self_test():
         check(len(tr["clips"]) == 4 and sum(1 for e in tr["evs"] if e.get("n") == "impact" and e["ts"] == T + 50000) == 1
               and [r["ts"] for r in tr["rows"]] == sorted({r["ts"] for c in tr["clips"] for r in c["rows"]}),
               "trips：同趟多片段合併，事件 (ts, n, phase) 去重、樣本依 ts 去重排序")
-        check(res["C"] == {"zombie": 3, "far": 2, "static": 2, "small-animal": 1, "animal": 3, "vehicle": 2,
-                           "skip-frozen": 1, "skip-rehitch": 3, "skip-exit": 1, "skip-rearm": 1},
+        check(res["C"] == {"zombie": 4, "far": 2, "static": 3, "small-animal": 4, "animal": 3, "vehicle": 2, "empty": 2,
+                           "skip-frozen": 1, "skip-rehitch": 3, "skip-exit": 1, "skip-rearm": 1,
+                           "skip-small-animal": 2, "skip-tow-slack": 1},
               "撞擊 (u, drive, ts) 去重、類別 zombie／far／static；<20 kg 貼車動物＝small-animal，20 kg 整／缺體重／舊 rev／沒貼車不算；"
               "1017：cls frozen／rehitch、樣本 m=rehitch、rh-attach 後 1 s、exit 前 1 s 且 tn 0＝不算，同趟 1 s 內第二件不算，"
-              "他車 s 4.0 在兩車半長內＝vehicle，contact 撞他車輪廓＝vehicle、contact 樹＝static（" + str(dict(res["C"])) + "）")
+              "他車 s 4.0 在兩車半長內＝vehicle，contact 撞他車輪廓＝vehicle、contact 樹＝static；"
+              "1021：小動物（舊格式推＋cls）與拖車拉緊（tkm 0→11）不算，小動物＋車頭 sprite 1 m、起步後真撞（tkm 30→28）仍算；"
+              "1021h：降頻、上升緣沒 nb、新客戶端 cls=hit、拉緊＋硬物／殭屍都仍算（" + str(dict(res["C"])) + "）")
+        Sw = load_summaries(d)
+        Ew = {rec["u"]: (e, rec) for e, rec in events(dedupe(load_clips(d, T)), "impact") if rec["u"].startswith("w")}
+        for u, label in (("w1", "降頻：前一筆不在事件 ms 之前＝不推 tow-slack"),
+                         ("w2", "上升緣那筆沒 nb＝不借更早一筆的 nb 推 small-animal"),
+                         ("w3", "事件帶 icv（新客戶端）的 cls=hit 照留，不因 nb 取整翻成 small-animal"),
+                         ("w4", "同趟摘要有 sma（新客戶端）的 cls=hit 照留"),
+                         ("w5", "掛車增速＋車頭硬物 1.0 m＝不推 tow-slack"),
+                         ("w6", "掛車增速＋殭屍貼車＝不推 tow-slack")):
+            check(u in Ew and impact_false(*Ew[u], Sw) is None, f"1021h {u}：{label}")
         check("lighting_outdoor_01_16" not in [ln for ln in open(os.path.join(d, "picks.tsv"), encoding="utf-8")
                                                 if "vegetation_trees_01_8" in ln][0], "static 用 contact 事件的 sprite，不用車頭 3 格")
         L = res["L"]

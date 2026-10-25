@@ -3653,10 +3653,12 @@ do
     checkNear(ovIn, expectKmh(1.5, 3.5, env), 0.3, "承諾線內側 1.5：與常駐 1.5 的前看同值（±0.3）")
 end
 
-scenario("1002e：fallback 折點的帽在放行點（頂點前 rMin·tan(θ/2)）就達到，不是到頂點才達到")
+scenario("1002e→1020b：fallback 折點的帽在頂點前 max(lookaheadM(帽), 放行距) 就達到，不是到頂點才達到")
 do
     -- E2E SemiTruckLite 90° fallback 折點：剖面帽記在頂點，車在頂點前 5.9m 被放行開始轉時還有 34 km/h
-    -- （帽 23）→ 打滑外甩 2.3m。違規證明：拿掉前看的頂點分支＝放行點目標與寬鬆對照組相同（第一條紅）。
+    -- （帽 23）→ 打滑外甩 2.3m（1002e 把帽移到放行點）。1020b（route.md〈使用者裁定〉2026-10-20）：再移到頂點前
+    -- lookaheadM(帽)——pure pursuit 在前視點越過頂點時就開始轉；鉗住的頂點不晚於放行點。
+    -- 違規證明：拿掉前看的頂點分支＝目標等於剖面（第一條紅）；lead 退回放行距＝(lead) 紅。
     local vp = { valid = true, geometryValid = true, halfW = 0.9, halfL = 2.9, rMin = 4.32,
         wheelbase = 3.79, delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 100 }
     local route = { pts = { 0, 0, 60, 0, 60, 60, 60, 120 }, segSurface = { "paved", "paved", "paved" },
@@ -3665,49 +3667,213 @@ do
     while not F.stepBuild(p, 4096) do end
     checkEq(p.filletFallbackN, 1, "fixture：4m 路 90° 折點建不出弧（fallback 頂點）")
     local rel = 4.32 * math.tan(math.pi / 4) - F.KINK_PIVOT_WB * 3.79 -- 1006：放行點扣轉向支點
-    local function pvAt(sCar, latSafe)
+    -- latSafe nil＝不跑即時前看（arcLookaheadMs 第一行就回）＝剖面本身
+    local function pvAt(prof, sCar, latSafe)
         local st = F.newState()
         st.idx = 1
-        F.setRuntimeLimits(st, 3, 6, latSafe, 1.0)
-        F.control(p, st, sCar, 0, 0, 40, DT)
+        if latSafe then F.setRuntimeLimits(st, 3, 6, latSafe, 1.0) end
+        F.control(prof, st, sCar, 0, 0, 40, DT)
         return st.profileSpeedKmh
     end
     local c = p.coastRate and p.coastRate[1] or p.segCoast[1] or 0.6
     c = math.min(c, 1.0 + (p.coastAssistAt and p.coastAssistAt[1] or 0))
     local cap = math.max(math.sqrt(3.5 * 4.32), 12 / 3.6)
-    for _, before in ipairs({ 0.2, 6, 12 }) do
-        local sCar = 60 - rel - before
-        local env = pvAt(sCar, 30) -- 側向寬鬆：頂點帽不綁＝剖面本身
-        local got = pvAt(sCar, 3.5)
+    local lead = F.lookaheadM(cap * 3.6, 1)
+    checkTrue(lead > rel, string.format("fixture：前視距 %.2f 比放行距 %.2f 遠（lead 取前視）", lead, rel))
+    for _, before in ipairs({ 0, 0.2, 6, 12 }) do
+        local sCar = 60 - lead - before
+        local env = pvAt(p, sCar, nil)
+        local got = pvAt(p, sCar, 3.5)
         local want = math.min(env, 3.6 * math.sqrt(cap * cap + 2 * c * before))
-        checkNear(got, want, 1e-6, string.format("放行點前 %.1fm：目標＝sqrt(帽²＋2·coast·到放行點)（%.2f，剖面 %.2f）",
+        checkNear(got, want, 1e-6, string.format("(lead) 頂點前 look(帽)＋%.1fm：目標＝sqrt(帽²＋2·coast·到該點)（%.2f，剖面 %.2f）",
             before, got, env))
         if before < 1 then
-            checkTrue(got < env - 3, string.format("放行點目標 %.1f 遠低於剖面在頂點達帽的 %.1f", got, env))
+            checkTrue(got < env - 3, string.format("頂點前 look(帽) 的目標 %.1f 遠低於剖面在頂點達帽的 %.1f", got, env))
         end
     end
-    -- >90° 髮夾也套放行點帽（帽＝MIN_SPEED，geometryStep 的 dth>π/2 同類；1002t）。1002j 一度拿掉（E2E hairpin-sp
-    -- 放行 12 km/h 後誤進原地調頭），真因是放行點量中心線、前視走中心線弧長（見「髮夾彎內側以車道折點為基準」）。
-    -- 舊斷言「與側向寬鬆對照組相同」在 MIN_SPEED 下恆真、測不到東西；改鎖放行點前 0.2／6／12m 的目標身分。
+    checkNear(pvAt(p, 60 - rel - 0.2, 3.5), cap * 3.6, 1e-6, "(lead) 放行點前 0.2m 早已在帽上")
+    -- >90° 髮夾也套（帽＝MIN_SPEED，geometryStep 的 dth>π/2 同類；1002t）。143° 鉗住：放行距＝HAIRPIN_APEX_MAX 6，
+    -- lookaheadM(12)＝7.44 較遠。1002j 一度拿掉（E2E hairpin-sp 放行 12 km/h 後誤進原地調頭），真因是放行點量中心線。
     -- 違規證明：髮夾不套帽（dth ≤ HAIRPIN_RAD）＝三條紅。
     local hp = F.begin({ pts = { 0, 0, 60, 0, 60 + 40 * math.cos(math.rad(143)), 40 * math.sin(math.rad(143)) },
         segSurface = { "paved", "paved" }, segWidth = { 8, 8 } }, 100, 4, vp)
     while not F.stepBuild(hp, 4096) do end
     local ch = hp.coastRate and hp.coastRate[1] or hp.segCoast[1] or 0.6
     ch = math.min(ch, 1.0 + (hp.coastAssistAt and hp.coastAssistAt[1] or 0))
+    local leadH = math.max(F.lookaheadM(12, 1), 6)
     for _, before in ipairs({ 0.2, 6, 12 }) do
-        local sCar = 60 - 6 - before
-        local function at(latSafe)
-            local st = F.newState()
-            st.idx = 1
-            F.setRuntimeLimits(st, 3, 6, latSafe, 1.0)
-            F.control(hp, st, sCar, 0, 0, 40, DT)
-            return st.profileSpeedKmh
-        end
-        local want = math.min(at(30), 3.6 * math.sqrt((12 / 3.6) ^ 2 + 2 * ch * before))
-        checkNear(at(3.5), want, 1e-6,
-            string.format("143° 髮夾放行點前 %.1fm：目標＝sqrt(MIN²＋2·coast·到放行點)（%.2f）", before, want))
+        local sCar = 60 - leadH - before
+        local want = math.min(pvAt(hp, sCar, nil), 3.6 * math.sqrt((12 / 3.6) ^ 2 + 2 * ch * before))
+        checkNear(pvAt(hp, sCar, 3.5), want, 1e-6,
+            string.format("143° 髮夾頂點前 look(12)＋%.1fm：目標＝sqrt(MIN²＋2·coast·到該點)（%.2f）", before, want))
     end
+end
+
+scenario("1020b／1021a：沒有圓角的頂點——≥150° 髮夾與非 adaptive >90° 的帽也在頂點前 look(帽) 到、fallback 帽只取抓地（重車不另取轉向帽）、fvo 開始轉時記一次、弧不記")
+do
+    -- 正式服 0.31.x：(6592,14608) 153° 髮夾（≥150° 不鉗、不在前看）帽 12 只記在頂點，開始轉時 41–45 km/h、前視 11.4 m，
+    -- 4 次東行通過 4 次出事；P18 Petyarbuilt（rMin 5.69、軸距 4.99）同一個 90° fallback 角三版各撞一次。1020b 另取的
+    -- 重車轉向帽 A/B 不過（低速大轉角在放行點切內更深），1021a 拿掉、只留帽前移（lead）。
+    -- 違規證明：lead 退回放行距＝(lead) 紅；≥150° 不進前看＝(150) 紅；非 adaptive >90° 不進前看＝(150) 非 adaptive 紅；
+    -- fvo 不閂（每幀都記）＝(fvo) 紅；鉗住的頂點用 sNow＋前視距判開始轉＝(fvo-rel) 紅。
+    local TRUCK = { valid = true, geometryValid = true, halfW = 1.09, halfL = 3.58, rMin = 5.69, wheelbase = 4.99,
+        delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 70 }
+    local CAR = { valid = true, geometryValid = true, halfW = 0.76, halfL = 2.23, rMin = 2.76, wheelbase = 2.42,
+        delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 80 }
+    local function corner(deg, w, vp)
+        local a = math.rad(deg)
+        local p = F.begin({ pts = { 0, 0, 60, 0, 60 + 60 * math.cos(a), 60 * math.sin(a) },
+            segSurface = { "paved", "paved" }, segWidth = { w, w } }, vp.maxSpeed, 4, vp)
+        while not F.stepBuild(p, 4096) do end
+        local m
+        for i = 2, p.n - 1 do if math.abs(p.s[i] - 60) < 1e-6 then m = i end end
+        return p, m
+    end
+    local function pvAt(prof, sCar, latSafe, st)
+        st = st or F.newState()
+        if latSafe then F.setRuntimeLimits(st, 3, 6, latSafe, 1.0) end
+        F.control(prof, st, sCar, 0, 0, 40, DT)
+        return st.profileSpeedKmh, st
+    end
+    -- (grip) 重車 90° 建表帽＝sqrt(aLat·rMin)，不另取轉向帽（1020b 會壓到 MIN 12）
+    local pt, mt = corner(90, 3, TRUCK)
+    checkEq(pt.filletFallbackN, 1, "fixture：3m 路 90° 重車 fallback")
+    local lat = math.min(pt.segLat[mt - 1], pt.segLat[mt])
+    checkNear(pt.curveV[mt], math.sqrt(lat * 5.69), 1e-9,
+        string.format("(grip) 重車 90° 建表帽＝sqrt(aLat·rMin)＝%.1f km/h（不取轉向帽）", math.sqrt(lat * 5.69) * 3.6))
+    -- (lead) 重車 90° 即時帽＝抓地 sqrt(latSafe·rMin)，在頂點前 look(帽) 就到（比放行距 rel 遠）
+    local capT = math.sqrt(3.5 * 5.69)
+    local leadT = F.lookaheadM(capT * 3.6, pt.lookScale or 1)
+    local relT = 5.69 - F.KINK_PIVOT_WB * 4.99
+    checkTrue(leadT > relT + 2, string.format("fixture：前視距 %.2f 比放行距 %.2f 遠 2m 以上", leadT, relT))
+    local envT = pvAt(pt, 60 - leadT, nil)
+    local gotT = pvAt(pt, 60 - leadT, 3.5)
+    checkNear(gotT, math.min(envT, capT * 3.6), 1e-6,
+        string.format("(lead) 重車 90° 頂點前 look(帽)：目標＝抓地帽 %.2f（剖面 %.2f）", capT * 3.6, envT))
+    checkTrue(gotT < envT - 3, string.format("(lead) 重車 90° 頂點前 look(帽) 的目標 %.1f 遠低於剖面 %.1f", gotT, envT))
+    -- (150) 153° 髮夾：≥HAIRPIN_MAX 不鉗，舊制只有建表帽記在頂點
+    local ph = corner(153, 8, CAR)
+    local lead = F.lookaheadM(12, 1)
+    checkNear(pvAt(ph, 60 - lead, 7), 12, 1e-6, "(150) 153° 頂點前 look(12)：目標已是 MIN")
+    local env = pvAt(ph, 60 - lead, nil)
+    checkTrue(env > 20, string.format("(150) 對照：剖面在頂點前 look(12) 還有 %.1f km/h", env))
+    local ch = math.min(ph.coastRate[1], 1.0 + ph.coastAssistAt[1])
+    checkNear(pvAt(ph, 60 - lead - 5, 7), math.min(pvAt(ph, 60 - lead - 5, nil),
+        3.6 * math.sqrt((12 / 3.6) ^ 2 + 2 * ch * 5)), 1e-6, "(150) 再往前 5m＝sqrt(MIN²＋2·coast·5)")
+    -- 沒有車輛幾何的剖面（v3 路線、非 adaptive）沒有 fallback 標記，>90° 頂點照樣前移（舊制不在前看）
+    local a120 = math.rad(120)
+    local pn = buildRoute({ 0, 0, 60, 0, 60 + 60 * math.cos(a120), 60 * math.sin(a120) }, 70)
+    checkNear(pvAt(pn, 60 - F.lookaheadM(12, 1), 7), 12, 1e-6, "(150) 非 adaptive 120°：頂點前 look(12) 已是 MIN")
+    -- (fvo) 同一份 state 定速 40 km/h 走過：前視點越過頂點那幀記一次，之後不重記
+    local function drive(prof, vkmh, to)
+        local st = F.newState()
+        F.setRuntimeLimits(st, 3, 6, 7, 1.0)
+        local at
+        for k = 0, math.floor(to * 4) do
+            local s0 = k * 0.25
+            F.control(prof, st, s0, 0, 0, vkmh, DT)
+            if at == nil and st.fvo then at = s0 end
+        end
+        return st, at
+    end
+    local st, at = drive(ph, 40, 59.5)
+    checkEq(st.fvo and st.fvo.n, 1, "(fvo) 153° 髮夾記一次")
+    checkNear(st.fvo.capKmh, 12, 1e-9, "(fvo) 帽")
+    checkNear(st.fvo.kmh, 40, 1e-9, "(fvo) 開始轉時車速")
+    checkNear(st.fvo.th, math.rad(153), 1e-6, "(fvo) 折角")
+    local look40 = F.lookaheadM(40, 1)
+    checkTrue(at ~= nil and at >= 60 - look40 - 0.25 and at <= 60 - look40 + 0.25,
+        string.format("(fvo) 不鉗的頂點：前視點越過頂點（頂點前 %.2fm）就記（實得 %s）", look40, tostring(at)))
+    local stT, atT = drive(pt, 20, 59.5)
+    checkEq(stT.fvo and stT.fvo.n, 1, "(fvo) 重車 90° 記一次")
+    checkTrue(atT ~= nil and atT >= 60 - relT - 0.25 and atT <= 60 - relT + 0.25,
+        string.format("(fvo-rel) 鉗住的頂點放行時才記（頂點前 %.2fm，實得 %s）", relT, tostring(atT)))
+    -- (fvo-once) 正常前看路徑記過後，車開過頂點、投影跨到出臂（1021k 的跨過補記）也不再記：同一頂點 n 只加一次
+    local function drivePast(prof, vkmh, deg)
+        local st2 = drive(prof, vkmh, 59.5)
+        local a = math.rad(deg)
+        for k = 1, 60 do
+            local d = k * 0.25
+            F.control(prof, st2, 60 + d * math.cos(a), d * math.sin(a), a, vkmh, DT)
+        end
+        return st2
+    end
+    local sh, stp = drivePast(ph, 40, 153), drivePast(pt, 20, 90)
+    checkTrue(sh.idx >= 2 and stp.idx >= 2, string.format("fixture：投影已跨到出臂（%d, %d）", sh.idx, stp.idx))
+    checkEq(sh.fvo and sh.fvo.n, 1, "(fvo-once) 153° 髮夾開過頂點後仍只記一次")
+    checkEq(stp.fvo and stp.fvo.n, 1, "(fvo-once) 重車 90° 開過頂點後仍只記一次")
+    -- 弧：寬路 90° 建得出弧，走過不記 fvo（弧不走沒有圓角頂點的路徑）
+    local pa = corner(90, 14, CAR)
+    checkTrue(pa.filletN >= 1 and pa.filletFallbackN == 0, "fixture：14m 路 90° 建得出弧")
+    checkNil(drive(pa, 30, 100).fvo, "弧：不記 fvo")
+end
+
+scenario("1021k：fvo 在鉗制解除同一幀跨臂交接時照記一次（頂點已在前看起點後方）、不對車後方頂點套帽、沒有上幀投影或全域重新定位跨過的不記")
+do
+    -- 審查反例：容量退化（2×FILLET_SOURCE_MAX−1 點）的寬路 90° fallback，彎內側 laneBias，車在入臂中心線頂點前 3.1 m
+    -- 仍被鉗住（rel 2.16），下一幀 2.9 m、車頭朝出臂 5°：已在彎內側車道折點的交接圓內，kinkHandover 把投影直接交給
+    -- 出臂，前看從出臂下一個頂點起掃＝這次轉入永久漏記（修前 fvo nil）。
+    -- 違規證明：拿掉跨過補記＝(ho) 紅；補記也套帽＝(ho-cap) 紅；fvoMark 不閂＝(fvo-once)／(ho-once) 紅；
+    -- 不看上幀投影＝(fresh) 紅；不看全域重新定位＝(reloc) 紅。
+    local D = MDADDynamics
+    local CAR = { valid = true, geometryValid = true, halfW = 0.76, halfL = 2.23, rMin = 2.76, wheelbase = 2.42,
+        delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 80 }
+    local last = 2 * D.FILLET_SOURCE_MAX - 1
+    local tailY = (last - 2) * 60
+    local r = { pts = { 0, 0, 60, 0, 60, 60 }, segSurface = {}, segWidth = {} }
+    for i = 4, last do r.pts[#r.pts + 1], r.pts[#r.pts + 2] = 60, (i - 2) * 60 end
+    r.pts[#r.pts + 1], r.pts[#r.pts + 2] = 120, tailY
+    r.pts[#r.pts + 1], r.pts[#r.pts + 2] = 180, tailY
+    for i = 1, last + 1 do r.segSurface[i], r.segWidth[i] = "paved", 14 end
+    local p = F.begin(r, 80, 4, CAR)
+    while not F.stepBuild(p, 4096) do end
+    local m
+    for i = 2, p.n - 1 do if p.x[i] == 60 and p.y[i] == tailY then m = i end end
+    checkTrue(m ~= nil and p.segKind[m - 1] == D.SEG_FALLBACK, "fixture：容量尾端 14m 路 90° 是 fallback 頂點")
+    local function newSt()
+        local st = F.newState()
+        F.setRuntimeLimits(st, 3, 6, 7, 1.0)
+        F.setLaneBias(st, -3)
+        st.idx = m - 2
+        return st
+    end
+    local h = math.pi / 2
+    local st = newSt()
+    for y = tailY - 20, tailY - 3.1 + 1e-9, 0.2 do F.control(p, st, 63, y, h, 15, DT) end
+    checkTrue(st.kinkHeld ~= nil and st.idx == m - 1 and st.fvo == nil,
+        string.format("fixture：頂點前 3.1m 仍鉗在中心線頂點、投影在入臂、還沒記（idx %d）", st.idx))
+    F.control(p, st, 63, tailY - 2.9, h - math.rad(5), 15, DT)
+    checkTrue(st.idx == m and st.kinkHeld == nil, string.format("fixture：下一幀跨臂交接到出臂（idx %d）", st.idx))
+    local cap = math.sqrt(7 * 2.76) * 3.6
+    checkEq(st.fvo and st.fvo.n, 1, "(ho) 交接那幀記這個頂點一次")
+    checkNear(st.fvo and st.fvo.capKmh or -1, cap, 1e-9, "(ho) 帽＝sqrt(latSafe·rMin)")
+    checkNear(st.fvo and st.fvo.kmh or -1, 15, 1e-9, "(ho) 車速")
+    checkNear(st.fvo and st.fvo.th or -1, math.pi / 2, 1e-6, "(ho) 折角")
+    checkTrue(st.profileSpeedKmh > cap + 3, string.format("(ho-cap) 車後方的頂點不套帽（目標 %.1f、帽 %.1f）",
+        st.profileSpeedKmh, cap))
+    for k = 1, 30 do F.control(p, st, 63 + k * 0.3, tailY + 3, 0, 15, DT) end
+    checkEq(st.fvo and st.fvo.n, 1, "(ho-once) 之後在出臂上不再記")
+    -- (fresh) 沒有上幀投影（新 state／resetControl 後）就在出臂上：跨過的頂點不是這次開過去的，不記
+    local sf = newSt()
+    F.control(p, sf, 63, tailY + 3, 0, 15, DT)
+    checkTrue(sf.idx == m, string.format("fixture：新 state 投影在出臂（idx %d）", sf.idx))
+    checkNil(sf.fvo, "(fresh) 沒有上幀投影：不記")
+    -- (reloc) 有上幀投影但全域重新定位跨過頂點：不記。窗口靠「2×位移」延伸，車要離窗口內每一段都遠（>半路寬／
+    -- LOOKAHEAD_MIN）才會全域搜尋——170° 反折的出臂繞回入臂起點旁 33 m：入臂 20 段×10 m、出臂同樣 20 段。
+    local fold = { 0, 0 }
+    for i = 1, 20 do fold[#fold + 1], fold[#fold + 2] = i * 10, 0 end
+    local a170 = math.rad(170)
+    for i = 1, 20 do fold[#fold + 1], fold[#fold + 2] = 200 + i * 10 * math.cos(a170), i * 10 * math.sin(a170) end
+    local pf = buildRoute(fold, 70)
+    local sr = F.newState()
+    F.setRuntimeLimits(sr, 3, 6, 7, 1.0)
+    F.control(pf, sr, 15, 0, 0, 30, DT)
+    checkTrue(sr.idx == 2 and sr.projS ~= nil and sr.fvo == nil, "fixture：入臂起點、有上幀投影、還沒記")
+    sr.needsProjection = true
+    local sOut = 190
+    F.control(pf, sr, 200 + sOut * math.cos(a170), sOut * math.sin(a170), a170, 30, DT)
+    checkTrue(sr.idx > 21, string.format("fixture：全域重新定位到出臂（idx %d）", sr.idx))
+    checkNil(sr.fvo, "(reloc) 全域重新定位跨過的頂點：不記")
 end
 
 scenario("1006：重車 fallback 90° 不切內——放行點扣車身轉向支點、放行後 yaw 不超過 rMin 圓（正式服 1004g clip-09 SemiTruck_mil）")
@@ -5512,6 +5678,82 @@ do
     local k
     for i = 1, pN.n do if pN.s[i] <= pN.length - 70 then k = i end end
     checkNear(pN.v[k], pN.coastV[k], 1e-9, "一般煞車：彎前仍是收油包絡（制動包絡不先綁）")
+end
+
+scenario("1021b：Y 字岔路反折頂點（153°／149°）——車頭朝出臂時投影不退回入臂，車頭朝入臂照舊退（1018a 正式服 69mini：承諾線往楔形內側偏，退回入臂 err>135° 調頭四次交還）")
+do
+    -- 違規證明：拿掉 control 的「往回退過折點要車頭不朝出臂」，楔形內側案每個角度、每種車頭各紅 3 項＋倒車脫困後 1 項（共 14 項）；
+    -- 拿掉「明確重新定位（needsProjection）不套」，讓位恢復反例每個角度紅 2 項（共 4 項，1021i）。
+    -- 153° 走調頭遲滯、149° 走髮夾鉗制（HAIRPIN_MAX_RAD 兩側），退回入臂後前視都落到車後。
+    local vp = { valid = true, geometryValid = true, halfW = 0.67, halfL = 1.46, rMin = 2.19, wheelbase = 1.92,
+        delta0Safe = 0.72, deltaVSafe = 0.24, maxSpeed = 80 }
+    local function wrap(a)
+        while a > math.pi do a = a - 2 * math.pi end
+        while a < -math.pi do a = a + 2 * math.pi end
+        return a
+    end
+    for _, deg in ipairs({ 153, 149 }) do
+        local th = math.rad(deg)
+        local ux, uy = math.cos(-th), math.sin(-th) -- 出臂方向；入臂沿 +x 進頂點 (100,0)
+        local route = { pts = { 0, 0, 100, 0, 100 + 100 * ux, 100 * uy },
+            segSurface = { "paved", "paved" }, segWidth = { 6, 8 } }
+        local p = F.begin(route, 80, 4, vp)
+        while not p.ready do F.stepBuild(p, 4096) end
+        local outI
+        for i = 2, p.n - 1 do
+            if outI == nil and math.abs(math.abs(wrap(p.segH[i] - p.segH[i - 1])) - th) < 1e-6 then outI = i end
+        end
+        checkTrue(outI ~= nil, deg .. "°：頂點保留成折點（入臂段 outI-1、出臂段 outI）")
+        if outI then
+            local tag = "（" .. deg .. "°）"
+            -- 楔形內側：出臂上頂點後 11m、往入臂那側偏 d，使離入臂比離出臂近 0.6m（正式服 lat −2.61、離入臂 2.8 的同型）
+            local a = 11
+            local d = (a * math.sin(th) + 0.6) / (1 + math.cos(math.pi - th))
+            local x, y = 100 + a * ux + d * uy, a * uy - d * ux
+            checkTrue(math.abs(y) < d - 0.5, string.format("前提%s：離入臂 %.2f < 離出臂 %.2f", tag, math.abs(y), d))
+            for _, h in ipairs({ -th, math.pi }) do
+                local htag = tag .. string.format("車頭 %.0f°", math.deg(h))
+                local st = F.newState()
+                st.idx, st.needsProjection = outI, false
+                local _, _, _, _, err = F.control(p, st, x, y, h, 10, DT)
+                checkEq(st.idx, outI, "楔形內側、車頭朝出臂：投影留在出臂" .. htag)
+                checkTrue(math.abs(err) < math.rad(100), string.format("前視在車前（|err| %.0f° < 100°）%s", math.deg(math.abs(err)), htag))
+                checkFalse(st.rotating, "不進調頭" .. htag)
+            end
+            -- 反面：被推回入臂、車頭朝入臂（含斜 60°）照舊逐段退回入臂
+            for _, h in ipairs({ 0, math.rad(60) }) do
+                local st = F.newState()
+                st.idx, st.needsProjection = outI, false
+                F.control(p, st, 95, 0.3, h, 3, DT)
+                checkEq(st.idx, outI - 1, string.format("車在入臂、車頭 %.0f°：退回入臂%s", math.deg(h), tag))
+            end
+            -- 同一份 state 跨過讓位（審查反例）：出臂上連續跟線 → 讓位中玩家把車開回入臂 (50,0)、車頭向西 → 恢復
+            -- （Driver 讓位恢復＝resetControl＋needsProjection）。明確重新定位的那一幀不套防退臂：投影要回入臂、橫偏≈0，
+            -- 不能被舊出臂游標鎖住（修前 idx 留出臂、橫偏約 22 m）。
+            local function followOut(st)
+                for k = 0, 5 do
+                    local a = 15 + k * 0.3
+                    F.control(p, st, 100 + a * ux, a * uy, -th, 10, DT)
+                end
+                checkEq(st.idx, outI, "前提：出臂上連續跟線，投影在出臂" .. tag)
+            end
+            local st = F.newState()
+            followOut(st)
+            F.resetControl(st)
+            st.needsProjection = true
+            local _, _, _, _, _, _, latY = F.control(p, st, 50, 0, math.pi, 0, DT)
+            checkTrue(st.idx < outI, string.format("讓位恢復、車在入臂車頭向西：投影回入臂（idx %d < 出臂 %d）%s", st.idx, outI, tag))
+            checkTrue(math.abs(latY) < 1, string.format("讓位恢復：橫偏 %.2f m（不是對出臂的假橫偏）%s", latY, tag))
+            -- 倒車脫困成功（Driver 只 resetControl、不設 needsProjection）＝控制脈絡連續的同一趟：楔形內側照舊留在出臂
+            local a = 11
+            local d = (a * math.sin(th) + 0.6) / (1 + math.cos(math.pi - th))
+            st = F.newState()
+            followOut(st)
+            F.resetControl(st)
+            F.control(p, st, 100 + a * ux + d * uy, a * uy - d * ux, -th, 3, DT)
+            checkEq(st.idx, outI, "倒車脫困後（只清控制歷史）楔形內側、車頭朝出臂：照舊留在出臂" .. tag)
+        end
+    end
 end
 
 closeScenario()
