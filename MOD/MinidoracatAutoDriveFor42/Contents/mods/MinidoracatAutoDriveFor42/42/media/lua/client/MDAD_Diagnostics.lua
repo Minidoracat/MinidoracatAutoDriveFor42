@@ -1078,6 +1078,10 @@ local function encodeSensor(s, sensor, force)
     if sensor.stopOverflow == true and finite(sensor.stopOverS) then
         bits = bits .. ',"stopOverS":' .. tostring(sensor.stopOverS)
     end
+    -- 1026i：本輪改用傾斜投影輪廓的停放車台數與最大超出量 m（Sensor vehTiltN／vehTiltM，MDADSensor.vehFootprint；有才寫）
+    if finite(sensor.vehTiltN) and sensor.vehTiltN > 0 then
+        bits = bits .. ',"vehTiltN":' .. tostring(sensor.vehTiltN) .. ',"vehTiltM":' .. tostring(sensor.vehTiltM)
+    end
     if finite(sensor.softEndS) then
         bits = bits .. ',"softEndS":' .. tostring(sensor.softEndS)
     end
