@@ -1121,7 +1121,7 @@ end
 do
     local client = "MOD/MinidoracatAutoDriveFor42/Contents/mods/MinidoracatAutoDriveFor42/42/media/lua/client/"
     local dash = dashboards[0]
-    local ts = { x = 684, y = 968, w = 552, h = 112 }
+    local ts = { x = 684, y = 968, w = 506, h = 112 }  -- S=1 的 Tesla 儀表寬（MDAD_FSD.lua DESIGN_W，2026-10-26 552→506）
     MinidoracatTeslaAPI = { hudRect = function() return ts.x, ts.y, ts.w, ts.h, true end }
     Vector3f = { new = function()
         local v = {}
