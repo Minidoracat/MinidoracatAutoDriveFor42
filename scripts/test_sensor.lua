@@ -32,8 +32,8 @@ IsoObject**——sprite 分類不在本檔範圍，也讓「屍體不進 hard」
   原始碼字串，也不讀 w 前綴的 working 欄位
 - 期望值全部由測試按檔頭契約手算（±0.65 長軸、±3 減速帶、±4.5 軟縫帶、64 點上限、
   每幀 56 格（>16.7ms 按比例、最多 3 倍）、硬上限 240、下限 24、名目輪時 375ms），刻意不重用 production 常數推導
-- sprite 分類、車輛精確輪廓、probeNear／probeRear／probeAround 冷路徑不在本檔
-  （各自另有 smoke_harness 情境）
+- sprite 分類、probeNear／probeRear／probeAround 冷路徑不在本檔（各自另有 smoke_harness 情境）；車輛精確輪廓
+  只驗傾斜／直立兩種投影（scenarioTiltedOutline），點雲怎麼被規劃吃掉在 smoke_harness
 - 這是標準 Lua 不是 Kahlua：本檔在 42/media 之外，可自由用標準函式庫
 ]]
 
@@ -638,8 +638,8 @@ local function scenarioTraffic()
     local function newCar(id, cx, cy, heading)
         local W, L = 1.8, 4.6
         local car = { _class = "BaseVehicle", _x = cx, _y = cy, _h = heading }
-        local ext = { x = function() return W end, z = function() return L end }
-        local com = { x = function() return 0 end, z = function() return 0 end }
+        local ext = { x = function() return W end, z = function() return L end, y = function() return 1.5 end }
+        local com = { x = function() return 0 end, z = function() return 0 end, y = function() return 0.6 end }
         local script = { getExtents = function() return ext end,
             getCenterOfMassOffset = function() return com end }
         function car:getId() return id end
@@ -743,8 +743,8 @@ local function scenarioTrafficVelocity()
     local function newCar(id, cx, cy, heading, vx, vy)
         local W, L = 1.8, 4.6
         local car = { _x = cx, _y = cy, _h = heading, _vx = vx, _vy = vy }
-        local ext = { x = function() return W end, z = function() return L end }
-        local com = { x = function() return 0 end, z = function() return 0 end }
+        local ext = { x = function() return W end, z = function() return L end, y = function() return 1.5 end }
+        local com = { x = function() return 0 end, z = function() return 0 end, y = function() return 0.6 end }
         local script = { getExtents = function() return ext end,
             getCenterOfMassOffset = function() return com end }
         function car:getId() return id end
@@ -1059,6 +1059,178 @@ local function scenarioHardSprite()
 end
 
 -- =====================================================================
+-- 1026i E6：傾斜／翻覆車的俯視輪廓（MDADSensor.vehFootprint）。正式服 Riverside 一台車頭朝下立著的 SemiTrailerVan
+-- （objdump：up=(0.389,−0.921,0)、fwd=(0,0,−1)、ext 2.20×2.28×9.58、com.y 2.28）：舊四角只取局部 y＝0，看到的是
+-- 路線左側 l +2.4…+3.3 一條；物理箱投地伸到 l −0.71（車道中央），4 人 40–67 km/h 撞停。
+-- 違規證明（temp/vp_1026i.py）：拿掉傾斜分支（vehFootprint 一律回四角）＝(tilt-*) 紅；門檻 VEH_TILT_SLACK 放寬到 0＝
+-- (upright-pitch) 紅；凸包不含 y＝0 四角＝(tilt-super) 紅；凸包沿用直立步距＝(tilt-max) 紅；SAT 只取兩條邊＝(tilt-sat-hex) 紅。
+-- =====================================================================
+local function scenarioTiltedOutline()
+    scenario("1026i 傾斜車輪廓：立起來的拖車伸進車道要看到；直立車（含 2° 俯仰）輪廓逐點同修前")
+    resetWorld()
+    BaseVehicle = {
+        allocVector3f = function()
+            local v = { _x = 0, _y = 0, _z = 0 }
+            function v:set(x, y, z) self._x, self._y, self._z = x, y, z or 0 return self end
+            function v:x() return self._x end
+            function v:y() return self._y end
+            function v:z() return self._z end
+            return v
+        end,
+        releaseVector3f = function() end,
+    }
+    -- 剛體：世界 = 原點 + lx·A + ly·U + lz·F（三軸皆為世界 (x, y, 高度)）
+    local function newBody(id, ox, oy, A, U, F, ew, eh, el, comY, comZ)
+        local ext = { x = function() return ew end, y = function() return eh end, z = function() return el end }
+        local com = { x = function() return 0 end, y = function() return comY end, z = function() return comZ end }
+        local script = { getExtents = function() return ext end, getCenterOfMassOffset = function() return com end }
+        local car = { _x = ox, _y = oy, _stopped = true }
+        function car:getId() return id end
+        function car:getX() return self._x end
+        function car:getY() return self._y end
+        function car:isStopped() return self._stopped end
+        function car:getScript() return script end
+        function car:getWorldPos(lx, ly, lz, out)
+            return out:set(self._x + lx * A[1] + ly * U[1] + lz * F[1], self._y + lx * A[2] + ly * U[2] + lz * F[2],
+                lx * A[3] + ly * U[3] + lz * F[3])
+        end
+        return car
+    end
+    -- 平放：航向 h、俯仰 p（車頭往上抬 p rad，繞車寬軸）
+    local function flat(id, ox, oy, h, p)
+        local c, s, cp, sp = math.cos(h), math.sin(h), math.cos(p), math.sin(p)
+        return newBody(id, ox, oy, { -s, c, 0 }, { -c * sp, -s * sp, cp }, { c * cp, s * cp, sp }, 1.8, 1.5, 4.6, 0.6, 0)
+    end
+    -- 修前演算法（手抄 1026i 前的 pushVehicleOutline：y＝0 四角、周長步距、每邊 floor(len/step) 點、中心）
+    local function oldOutline(car)
+        local o = BaseVehicle.allocVector3f()
+        local hw, hl = 0.9, 2.3
+        local cz = car:getScript():getCenterOfMassOffset():z()
+        local P = {}
+        for _, c in ipairs({ { -1, 1 }, { 1, 1 }, { 1, -1 }, { -1, -1 } }) do
+            car:getWorldPos(c[1] * hw, 0, cz + c[2] * hl, o)
+            P[#P + 1] = { o:x(), o:y() }
+        end
+        local function d(a, b) return math.sqrt((b[1] - a[1]) ^ 2 + (b[2] - a[2]) ^ 2) end
+        local e = { d(P[1], P[2]), d(P[2], P[3]), d(P[3], P[4]), d(P[4], P[1]) }
+        local perim = e[1] + e[2] + e[3] + e[4]
+        local step = 0.3
+        if perim / step > 63 then step = perim / 63 end
+        local pts = {}
+        for i = 1, 4 do
+            local a, b = P[i], P[i % 4 + 1]
+            local n = math.floor(e[i] / step)
+            if n < 1 then n = 1 end
+            for k = 0, n - 1 do
+                local t = k / n
+                pts[#pts + 1] = { a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t }
+            end
+        end
+        pts[#pts + 1] = { (P[1][1] + P[3][1]) * 0.5, (P[1][2] + P[3][2]) * 0.5 }
+        return pts
+    end
+    local function vehPts(st, cx, cy, r)
+        local pts = {}
+        for i = 1, st.hardN do
+            if st.hardV[i] and math.abs(st.hardX[i] - cx) <= r and math.abs(st.hardY[i] - cy) <= r then
+                pts[#pts + 1] = { st.hardX[i], st.hardY[i], st.hardL[i] }
+            end
+        end
+        return pts
+    end
+    local function sameSet(a, b)
+        if #a ~= #b then return false end
+        local function lt(p, q) return p[1] < q[1] or (p[1] == q[1] and p[2] < q[2]) end
+        table.sort(a, lt)
+        table.sort(b, lt)
+        for i = 1, #a do
+            if a[i][1] ~= b[i][1] or a[i][2] ~= b[i][2] then return false end
+        end
+        return true
+    end
+    local function register(car, x0, x1, y0, y1)
+        for gx = math.floor(x0), math.floor(x1) do
+            for gy = math.floor(y0), math.floor(y1) do
+                local sq = squareAt(gx + 0.5, gy + 0.5)
+                sq._veh = car
+                function sq:getVehicleContainer() return self._veh end
+            end
+        end
+    end
+    -- 任意姿態：寬 A=(1,0,0)、高 U=(0,0,1)、長 F=(0,1,0) 依序繞 F 滾、繞 A 俯仰、繞高度軸偏航
+    local function rot(yaw, pitch, roll)
+        local function apply(x, y, h)
+            local c, s = math.cos(roll), math.sin(roll)
+            x, h = x * c - h * s, x * s + h * c
+            c, s = math.cos(pitch), math.sin(pitch)
+            y, h = y * c - h * s, y * s + h * c
+            c, s = math.cos(yaw), math.sin(yaw)
+            return { x * c - y * s, x * s + y * c, h }
+        end
+        return apply(1, 0, 0), apply(0, 0, 1), apply(0, 1, 0)
+    end
+    -- 立著的拖車（objdump 原值）：車頭朝下、車頂朝世界 −y 偏 +x，再繞車寬軸偏 0.004 rad（fwd 水平分量 0.004＝
+    -- 凸包多兩條 4cm 短邊）；只在 y＝0 那條登記格（引擎多邊形也只蓋到那裡）
+    local a, b = math.asin(0.389), 0.004
+    local TX, TY = X0 + 30.3, Y0 + 2.87
+    local trailer = newBody(41, TX, TY, { -math.cos(a), -math.sin(a), 0 },
+        { math.sin(a) * math.cos(b), -math.cos(a) * math.cos(b), -math.sin(b) },
+        { -math.sin(a) * math.sin(b), math.cos(a) * math.sin(b), -math.cos(b) }, 2.20, 2.28, 9.58, 2.28, 2.62)
+    trailer._stopped = false -- 第一輪當行進車（pushTraffic），第二輪位置沒動＝停車輪廓（pushVehicleOutline）
+    register(trailer, TX - 1.2, TX + 1.2, TY - 0.6, TY + 0.6)
+    -- 直立車：完全平放、俯仰 2°（坡道／懸吊：超出量 0.044m < 輪廓圓 0.15）
+    local up0 = flat(42, X0 + 45, Y0 + 3, 0.3, 0)
+    local up2 = flat(43, X0 + 55, Y0 - 3, -0.2, math.rad(2))
+    register(up0, X0 + 43, X0 + 47, Y0 + 2, Y0 + 4)
+    register(up2, X0 + 53, X0 + 57, Y0 - 4, Y0 - 2)
+    -- 16m 長車側翻 88°：凸包六角、兩條 9cm 短邊；舊步距（周長／63）會推到 65 點＝超出整台預留的 64
+    local bA, bU, bF = rot(3.2530129044868, -0.04473084474774, -1.5382502785044)
+    local bus = newBody(44, X0 + 70, Y0, bA, bU, bF, 3.0, 3.2, 16, 1.5, 0)
+    register(bus, X0 + 68, X0 + 72, Y0 - 1, Y0 + 1)
+    local st = newSensor(80, 4, 0)
+    checkTrue(runRound(st), "第一輪完成")
+    local ti
+    for i = 1, st.trfN do if st.trfId[i] == 41 then ti = i end end
+    checkTrue(ti ~= nil and st.trfL0[ti] < -0.65 and st.trfL0[ti] > -0.75,
+        "(tilt-trf) 行進車 l 區間下緣＝物理箱投地 −0.71（舊四角 +2.44）（實得 " .. show(ti and st.trfL0[ti]) .. "）")
+    checkTrue(runRound(st), "第二輪完成")
+    local tp = vehPts(st, TX, Y0, 6)
+    local lo, hi, inLane = math.huge, -math.huge, false
+    for _, p in ipairs(tp) do
+        if p[3] < lo then lo = p[3] end
+        if p[3] > hi then hi = p[3] end
+        if math.abs(p[3]) <= 0.3 then inLane = true end
+    end
+    checkTrue(#tp > 0 and lo < -0.65 and lo > -0.75,
+        "(tilt-outline) 拖車輪廓伸到 l −0.71（車道中央在 l 0；舊四角最低 +2.44）（實得 " .. show(lo) .. "）")
+    checkTrue(inLane, "(tilt-outline) 路線上（|l|≤0.3）有拖車輪廓點")
+    checkTrue(hi > 3.25, "(tilt-super) 凸包含 y＝0 四角（舊輪廓 l 最高 +3.30 仍在）（實得 " .. show(hi) .. "）")
+    local bp = vehPts(st, X0 + 70, Y0, 9)
+    checkTrue(#bp > 0 and #bp <= 64, "(tilt-max) 側翻長車整台輪廓點 ≤ VEH_OUTLINE_MAX 64（實得 " .. #bp .. "）")
+    checkEq(st.vehTiltN, 2, "(tilt-tele) 快照記兩台傾斜輪廓（拖車、側翻長車）")
+    checkNear(st.vehTiltM, 3.42, 1e-3, "(tilt-tele) 最大超出量＝拖車 up 水平分量 ~1×箱頂離 y＝0 的 3.42m")
+    -- 直立兩台：hardV 點與修前演算法逐點相同（世界座標 ==）
+    checkTrue(sameSet(vehPts(st, X0 + 45, Y0 + 3, 4), oldOutline(up0)), "(upright-flat) 平放車輪廓逐點同修前")
+    checkTrue(sameSet(vehPts(st, X0 + 55, Y0 - 3, 4), oldOutline(up2)), "(upright-pitch) 俯仰 2° 的車輪廓逐點同修前")
+    -- 側帶 SAT：路線上 4.6×1.8 的長方形（l 0）碰得到立著的拖車；舊四角在 l +2.44 以上＝分離
+    local o = BaseVehicle.allocVector3f()
+    checkTrue(MDADSensor.stripHitsVehicle(trailer, o, TX, Y0, 1, 0, 0, 1, 2.3, 0.9),
+        "(tilt-sat) 車道上的長方形與立著的拖車相交")
+    checkFalse(MDADSensor.stripHitsVehicle(trailer, o, TX, Y0 - 1.75, 1, 0, 0, 1, 2.3, 0.9),
+        "(tilt-sat) 拖車投地最低 −0.71 之外（長方形上緣 −0.85）＝分離")
+    checkFalse(MDADSensor.stripHitsVehicle(up0, o, X0 + 45, Y0, 1, 0, 0, 1, 2.3, 0.9),
+        "(upright-sat) 平放車在 l +3 附近、路線上的長方形分離")
+    -- 六角凸包要用全部邊的軸：切角外 1×1 的方塊只在第三條邊的軸上分離（只用兩條邊＝誤判相交）
+    local rA, rU, rF = rot(0.3, 0.5, 0.7)
+    local rolled = newBody(45, X0 + 200, Y0 + 50, rA, rU, rF, 1.8, 1.5, 4.6, 0.6, 0)
+    checkFalse(MDADSensor.stripHitsVehicle(rolled, o, X0 + 200 - 2.4, Y0 + 50 - 3.0, 1, 0, 0, 1, 0.5, 0.5),
+        "(tilt-sat-hex) 六角凸包切角外的方塊＝分離")
+    checkTrue(MDADSensor.stripHitsVehicle(rolled, o, X0 + 200, Y0 + 50, 1, 0, 0, 1, 0.5, 0.5),
+        "(tilt-sat-hex) 凸包中心的方塊＝相交")
+    BaseVehicle = nil
+end
+
+-- =====================================================================
 scenarioCorpseAxis()
 scenarioCorpseBands()
 scenarioFullRange()
@@ -1072,6 +1244,7 @@ scenarioTrafficVelocity()
 scenarioDiagonalCoverage()
 scenarioAnimalsPlayers()
 scenarioHardSprite()
+scenarioTiltedOutline()
 
 closeScenario()
 print()

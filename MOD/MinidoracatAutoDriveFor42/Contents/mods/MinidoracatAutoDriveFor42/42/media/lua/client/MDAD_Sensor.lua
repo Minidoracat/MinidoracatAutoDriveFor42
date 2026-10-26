@@ -38,6 +38,8 @@
 --                      （方塊＝半邊×(|nx|+|ny|)，圓＝半徑）——擋線判定用這一組，縫隙搜尋仍用 hardL／hardR
 --     state.hardV[i]   true＝停放車輛的精確輪廓點（pushVehicleOutline）；其他形狀 false（輪廓點與樹幹同半徑，
 --                      不能拿 hardR 分；格級佔位退回的車也是 false）
+--     state.vehTiltN   本輪改用傾斜投影輪廓（MDADSensor.vehFootprint 凸包）的停放車台數；vehTiltM＝其中最大的
+--                      傾斜超出量 m（八角投影比 y＝0 四角多伸出的水平距離）。0／nil＝都直立
 --     state.softN      軟障礙格數（可推開的家具／路邊雜物：撞得過但該減速）
 --     state.zombieN    走廊內殭屍數（±SLOW_BAND_HALF 減速帶；速度檔用）
 --     state.zomN       混合軟目標（s,l）筆數（±4.5 帶），座標語意同 hardS／hardL
@@ -193,9 +195,10 @@ local WALL_R = 0.26            -- 格邊薄牆（1×0.1）以兩顆圓覆蓋：�
 local SHAPE_BOX, SHAPE_WALL_N, SHAPE_WALL_W, SHAPE_TRUNK, SHAPE_THIN, SHAPE_BUSH = 1, 2, 4, 8, 16, 32
 -- 車輛精確輪廓（2026-09-02 車陣實爆：格級佔位把 1.8m 寬的車體膨脹成 3 格＋0.7
 -- 圓＝4.4m，兩台車之間 2.8m 的真縫被吃到 0.2m，plan 永遠 blocked）。發現
--- 車輛仍靠 getVehicleContainer 的格級幾何查詢（可靠），幾何改用該車的 OBB：四角
--- 走 getWorldPos(com.x±halfW, 0, com.z±halfL)——與引擎自己的碰撞多邊形同式
--- （VehiclePoly.java:52-88；isIntersectingSquare 用 radius 0 的 poly，BaseVehicle.java:
+-- 車輛仍靠 getVehicleContainer 的格級幾何查詢（可靠），幾何改用該車的 OBB：直立的車四角
+-- 走 getWorldPos(com.x±halfW, 0, com.z±halfL)（傾斜／翻覆的車改用物理箱八角投地凸包，見
+-- MDADSensor.vehFootprint；引擎 VehiclePoly.java:52-88 依 q.x 抬兩角到半高，同樣不只看 y＝0）
+-- （isIntersectingSquare 用 radius 0 的 poly，BaseVehicle.java:
 -- 4145、5704-5712）。周長每 VEH_OUTLINE_STEP 取一點、半徑 VEH_OUTLINE_R（相鄰圓相切
 -- ＝邊線連續覆蓋；0.15＝引擎自己的 polyPlusRadius 安全圈，BaseVehicle.java:4146）；
 -- 車體內部不取點——同尺寸車不可能整台鑽進另一台裡，中心點另補一顆保底。
@@ -680,21 +683,92 @@ local function dist(ax, ay, bx, by)
     return sqrt(dx * dx + dy * dy)
 end
 
+-- 車輛俯視輪廓（1026i E6；停車輪廓 pushVehicleOutline、行進車 pushTraffic、側帶 SAT stripHitsVehicle 共用）。
+-- 頂點寫進 MDADSensor.vfpX／vfpY[1..n]（沿周長順序），回 n、tilt、中心 mx、my。
+-- 直立：n＝4，四角 getWorldPos(com.x±halfW, 0, com.z±halfL)，順序 -W+L、+W+L、+W-L、-W-L（VehiclePoly.java:69-76）
+--   ——和 1026i 前逐點相同；tilt＝0。
+-- 傾斜／翻覆：物理箱局部 y∈[min(0, com.y−半高), max(0, com.y+半高)] 的八角投地凸包（含 y＝0 四角＝舊輪廓的
+--   超集）；tilt＝局部 up 軸的水平分量×箱面離 y＝0 最遠的距離＝八角投影最多比四角多伸出多少 m。
+--   2026-10-26 E6：Riverside 立起來的 SemiTrailerVan（up 水平分量 1.0、com.y 2.28）四角只看到 y 5285.9–5286.8，
+--   物理箱投地伸到 5282.8＝東行車道，4 人 40–67 km/h 撞停。
+-- 門檻 VEH_TILT_SLACK＝VEH_OUTLINE_R：超出量小於輪廓圓半徑時四角的圓已經蓋住，照舊（坡道、懸吊下沉的直立車）。
+-- getWorldPos 是剛體仿射（BaseVehicle.java:1874-1885），(x,y,z) 的投影＝(x,0,z) 的投影＋y×up 水平分量：只多叫一次。
+-- 會丟錯（getter 失敗、尺寸不是數字）：呼叫端在 pcall 內呼叫。out 是呼叫端的池向量。傾斜才配置（少見）。
+MDADSensor.VEH_TILT_SLACK = VEH_OUTLINE_R
+MDADSensor.vfpX, MDADSensor.vfpY = { 0, 0, 0, 0 }, { 0, 0, 0, 0 }
+function MDADSensor.vehFootprint(cv, out, halfW, halfL, comX, comZ, halfH, comY)
+    local X, Y = MDADSensor.vfpX, MDADSensor.vfpY
+    cv:getWorldPos(comX - halfW, 0, comZ + halfL, out)
+    X[1], Y[1] = out:x(), out:y()
+    cv:getWorldPos(comX + halfW, 0, comZ + halfL, out)
+    X[2], Y[2] = out:x(), out:y()
+    cv:getWorldPos(comX + halfW, 0, comZ - halfL, out)
+    X[3], Y[3] = out:x(), out:y()
+    cv:getWorldPos(comX - halfW, 0, comZ - halfL, out)
+    X[4], Y[4] = out:x(), out:y()
+    local mx, my = (X[1] + X[3]) * 0.5, (Y[1] + Y[3]) * 0.5
+    cv:getWorldPos(comX - halfW, 1, comZ + halfL, out)
+    local ux, uy = out:x() - X[1], out:y() - Y[1]
+    local yLo, yHi = comY - halfH, comY + halfH
+    if yLo > 0 then yLo = 0 end
+    if yHi < 0 then yHi = 0 end
+    local reach = yHi
+    if -yLo > reach then reach = -yLo end
+    local tilt = sqrt(ux * ux + uy * uy) * reach
+    if not (tilt > MDADSensor.VEH_TILT_SLACK) then return 4, 0, mx, my end
+    -- 八角：四角各沿 up 平移到箱底／箱頂；Andrew monotone chain 取凸包（共線點丟掉）
+    local px, py = {}, {}
+    for i = 1, 4 do
+        px[i], py[i] = X[i] + ux * yLo, Y[i] + uy * yLo
+        px[i + 4], py[i + 4] = X[i] + ux * yHi, Y[i] + uy * yHi
+    end
+    local idx = { 1, 2, 3, 4, 5, 6, 7, 8 }
+    for i = 2, 8 do -- 插入排序（x、再 y）；Kahlua 禁用 table.sort（verify 6）
+        local p, j = idx[i], i - 1
+        while j >= 1 and (px[idx[j]] > px[p] or (px[idx[j]] == px[p] and py[idx[j]] > py[p])) do
+            idx[j + 1] = idx[j]
+            j = j - 1
+        end
+        idx[j + 1] = p
+    end
+    local function cross(o, a, b)
+        return (px[a] - px[o]) * (py[b] - py[o]) - (py[a] - py[o]) * (px[b] - px[o])
+    end
+    local H, k = {}, 0
+    for i = 1, 8 do
+        local p = idx[i]
+        while k >= 2 and cross(H[k - 1], H[k], p) <= 0 do k = k - 1 end
+        k = k + 1
+        H[k] = p
+    end
+    local lower = k + 1
+    for i = 7, 1, -1 do
+        local p = idx[i]
+        while k >= lower and cross(H[k - 1], H[k], p) <= 0 do k = k - 1 end
+        k = k + 1
+        H[k] = p
+    end
+    local n = k - 1 -- 最後一點＝第一點
+    for i = 1, n do X[i], Y[i] = px[H[i]], py[H[i]] end
+    local mid = (yLo + yHi) * 0.5
+    return n, tilt, mx + ux * mid, my + uy * mid
+end
+
 -- 車輛精確輪廓（常數註解見 VEH_OUTLINE_*）。回 true＝已把該車輪廓推進本輪點雲；
 -- false＝任何 getter 失敗（呼叫端退回格級佔位）。(s,l) 以**目前掃描步的局部框**
 -- 線性化（state.cx/cy 為路線點、nx/ny 法向、前向＝(ny,-nx)）：輪廓點離命中格
 -- ≤ 5m，直路精確、彎道有曲率誤差——只影響 plan 的提案品質；安全判定
 -- （sweep／footprint／blockedNear）全用世界座標 wHardX/Y，不受影響。
--- 零配置：一顆池向量四角各取一次，成對歸還（BaseVehicle.java:507-521）。
+-- 零配置（傾斜車除外，見 vehFootprint）：一顆池向量取完歸還（BaseVehicle.java:507-521）。
 local function pushVehicleOutline(state, cv)
     -- 整台輪廓要嘛全進要嘛不進：緩衝剩餘不夠就退回格級（近車精確、遠車粗略、
     -- 再遠才被 HARD_MAX 丟——掃描由近而遠，這個退化順序是對的）。
     if HARD_MAX - state.wHardN < VEH_OUTLINE_MAX then return false end
     -- script／extents／COM 任一 nil 在 pcall 內索引即 error → 同樣退回格級
-    local okV, halfW, halfL, comX, comZ = pcall(function()
+    local okV, halfW, halfL, comX, comZ, halfH, comY = pcall(function()
         local script = cv:getScript()
         local ext, com = script:getExtents(), script:getCenterOfMassOffset()
-        return ext:x() * 0.5, ext:z() * 0.5, com:x(), com:z()
+        return ext:x() * 0.5, ext:z() * 0.5, com:x(), com:z(), ext:y() * 0.5, com:y()
     end)
     if not okV or type(halfW) ~= "number" or halfW * 0 ~= 0 or halfW <= 0.3 or halfW > 3
             or type(halfL) ~= "number" or halfL * 0 ~= 0 or halfL <= 0.5 or halfL > 8
@@ -707,35 +781,29 @@ local function pushVehicleOutline(state, cv)
     end
     local out = BaseVehicle.allocVector3f()
     if out == nil then return false end
-    -- 四角（VehiclePoly.java:69-76 同序：-W+L、+W+L、+W-L、-W-L；y 取 0＝俯視）
-    local ok, x1, y1, x2, y2, x3, y3, x4, y4 = pcall(function()
-        cv:getWorldPos(comX - halfW, 0, comZ + halfL, out)
-        local ax, ay = out:x(), out:y()
-        cv:getWorldPos(comX + halfW, 0, comZ + halfL, out)
-        local bx, by = out:x(), out:y()
-        cv:getWorldPos(comX + halfW, 0, comZ - halfL, out)
-        local cx, cy = out:x(), out:y()
-        cv:getWorldPos(comX - halfW, 0, comZ - halfL, out)
-        return ax, ay, bx, by, cx, cy, out:x(), out:y()
-    end)
+    local ok, n, tilt, mx, my = pcall(MDADSensor.vehFootprint, cv, out, halfW, halfL, comX, comZ, halfH, comY)
     BaseVehicle.releaseVector3f(out)
-    if not ok then return false end
-    if type(x1) ~= "number" or x1 * 0 ~= 0 or type(y1) ~= "number" or y1 * 0 ~= 0
-            or type(x2) ~= "number" or x2 * 0 ~= 0 or type(y2) ~= "number" or y2 * 0 ~= 0
-            or type(x3) ~= "number" or x3 * 0 ~= 0 or type(y3) ~= "number" or y3 * 0 ~= 0
-            or type(x4) ~= "number" or x4 * 0 ~= 0 or type(y4) ~= "number" or y4 * 0 ~= 0 then
-        return false
+    if not ok or type(mx) ~= "number" or mx * 0 ~= 0 or type(my) ~= "number" or my * 0 ~= 0 then return false end
+    local X, Y = MDADSensor.vfpX, MDADSensor.vfpY
+    for i = 1, n do
+        local x, y = X[i], Y[i]
+        if type(x) ~= "number" or x * 0 ~= 0 or type(y) ~= "number" or y * 0 ~= 0 then return false end
     end
     -- 局部框：s＝curS＋前向分量、l＝法向分量（相對路線點）
     local cx0, cy0, nx, ny = state.cx, state.cy, state.nx, state.ny
     local fx, fy = ny, -nx
     local curS = state.curS
-    -- 步距：周長／(MAX−1) 與 VEH_OUTLINE_STEP 取大者——長車放大步距而不是截斷
-    local e1, e2, e3, e4 = dist(x1, y1, x2, y2), dist(x2, y2, x3, y3),
-        dist(x3, y3, x4, y4), dist(x4, y4, x1, y1)
-    local perim = e1 + e2 + e3 + e4
+    -- 步距：周長／(MAX−1) 與 VEH_OUTLINE_STEP 取大者——長車放大步距而不是截斷。傾斜凸包每條短邊至少一點，
+    -- 預留 n 點（直立四角沿用舊步距：四邊都 ≥ 車寬 0.6、不會有短邊）
+    local perim = 0
+    for i = 1, n do
+        local j = i % n + 1
+        perim = perim + dist(X[i], Y[i], X[j], Y[j])
+    end
+    local cap = VEH_OUTLINE_MAX - 1
+    if tilt > 0 then cap = cap - n end
     local step = VEH_OUTLINE_STEP
-    if perim / step > VEH_OUTLINE_MAX - 1 then step = perim / (VEH_OUTLINE_MAX - 1) end
+    if perim / step > cap then step = perim / cap end
     local pushed = 0
     local function emit(px, py)
         pushed = pushed + 1
@@ -746,26 +814,28 @@ local function pushVehicleOutline(state, cv)
         l4 = l4 - l4 % 1
         pushHard(state, s, l, l4, px, py, VEH_OUTLINE_R, nil, true)
     end
-    local function edge(ax, ay, bx, by, len)
-        local n = len / step
-        n = n - n % 1
-        if n < 1 then n = 1 end
-        local dx, dy = bx - ax, by - ay
-        for k = 0, n - 1 do
-            local t = k / n
+    for i = 1, n do
+        local j = i % n + 1
+        local ax, ay = X[i], Y[i]
+        local e = dist(ax, ay, X[j], Y[j]) / step
+        e = e - e % 1
+        if e < 1 then e = 1 end
+        local dx, dy = X[j] - ax, Y[j] - ay
+        for k = 0, e - 1 do
+            local t = k / e
             emit(ax + dx * t, ay + dy * t)
         end
     end
-    edge(x1, y1, x2, y2, e1)
-    edge(x2, y2, x3, y3, e2)
-    edge(x3, y3, x4, y4, e3)
-    edge(x4, y4, x1, y1, e4)
-    emit((x1 + x3) * 0.5, (y1 + y3) * 0.5) -- 中心保底
+    emit(mx, my) -- 中心保底
+    if tilt > 0 then
+        state.wVehTiltN = state.wVehTiltN + 1
+        if tilt > state.wVehTiltM then state.wVehTiltM = tilt end
+    end
     return pushed > 0
 end
 
 -- 行進中車輛（會車／跟車）：每台每輪一筆，記車身 OBB 在目前掃描步局部框的 (s,l) 區間與
--- 沿路線速度。四角同 pushVehicleOutline（getWorldPos，VehiclePoly.java:52-88）；取不到幾何
+-- 沿路線速度。輪廓頂點同 pushVehicleOutline（MDADSensor.vehFootprint）；取不到幾何
 -- 退回「車心 ± 一般轎車半寬 0.9／半長 2.3、與路線同向」的保守框。vs/vl＝nil＝首輪沒位移可算。
 local TRF_MAX = 8
 local TRF_FALLBACK_HALF_W, TRF_FALLBACK_HALF_L = 0.9, 2.3
@@ -807,10 +877,10 @@ local function pushTraffic(state, cv, vs, vl)
     local cx0, cy0, nx, ny = state.cx, state.cy, state.nx, state.ny
     local curS = state.curS
     local s0, s1, l0, l1
-    local okG, halfW, halfL, comX, comZ = pcall(function()
+    local okG, halfW, halfL, comX, comZ, halfH, comY = pcall(function()
         local script = cv:getScript()
         local ext, com = script:getExtents(), script:getCenterOfMassOffset()
-        return ext:x() * 0.5, ext:z() * 0.5, com:x(), com:z()
+        return ext:x() * 0.5, ext:z() * 0.5, com:x(), com:z(), ext:y() * 0.5, com:y()
     end)
     local out = okG and type(halfW) == "number" and halfW * 0 == 0 and halfW > 0.3 and halfW <= 3
         and type(halfL) == "number" and halfL * 0 == 0 and halfL > 0.5 and halfL <= 8
@@ -819,11 +889,10 @@ local function pushTraffic(state, cv, vs, vl)
         and BaseVehicle.allocVector3f() or nil
     if out ~= nil then
         local ok = pcall(function()
-            for k = 1, 4 do
-                local sx = (k == 1 or k == 4) and -1 or 1
-                local sz = k <= 2 and 1 or -1
-                cv:getWorldPos(comX + sx * halfW, 0, comZ + sz * halfL, out)
-                local dx, dy = out:x() - cx0, out:y() - cy0
+            local n = MDADSensor.vehFootprint(cv, out, halfW, halfL, comX, comZ, halfH, comY)
+            local X, Y = MDADSensor.vfpX, MDADSensor.vfpY
+            for k = 1, n do
+                local dx, dy = X[k] - cx0, Y[k] - cy0
                 local s = curS + dx * ny - dy * nx
                 local l = dx * nx + dy * ny
                 if s0 == nil or s < s0 then s0 = s end
@@ -1319,6 +1388,7 @@ local function beginRound(state, p, sNow, vehicle, now, len, cell)
     state.wScN = 0
     state.wTrfN = 0
     state.wTrfOverflow = false
+    state.wVehTiltN, state.wVehTiltM = 0, 0
     state.wUnloaded = false
     state.wUnloadedS = nil
     state.wGateS, state.wGateX, state.wGateY, state.wGateHard = nil, nil, nil, false
@@ -1464,6 +1534,7 @@ local function finishRound(state, now)
     state.trfT, state.wTrfT = state.wTrfT, state.trfT
     state.trfId, state.wTrfId = state.wTrfId, state.trfId
     state.trfN = state.wTrfN
+    state.vehTiltN, state.vehTiltM = state.wVehTiltN, state.wVehTiltM
     state.trfOverflow = state.wTrfOverflow == true
     state.vehN, state.vehNearS = state.wVehN, state.wVehNearS
     state.scX, state.wScX = state.wScX, state.scX
@@ -1647,6 +1718,7 @@ function MDADSensor.newState()
         roadHi = nil,
         roadN = 0,          -- 上輪路面格樣本數（診斷：0＝地板 sprite 沒被認出）
         ready = false,
+        vehTiltN = 0, vehTiltM = 0, wVehTiltN = 0, wVehTiltM = 0, -- 傾斜投影輪廓台數／最大超出量 m（vehFootprint）
         vehN = 0,           -- 上輪掃描帶內車輛命中格數（格級幾何查詢；遙測與推撞 gate 用）
         wVehN = 0,
         vehNearS = nil, wVehNearS = nil, -- 1026g：上輪命中車輛格的最近弧長（遙測 sen.vehNearS）
@@ -1721,6 +1793,7 @@ function MDADSensor.reset(state)
     state.wVehN, state.wVehNearS = 0, nil
     state.wTrfN, state.wTrfOverflow = 0, false
     state.trfN, state.trfOverflow = 0, false
+    state.vehTiltN, state.vehTiltM, state.wVehTiltN, state.wVehTiltM = 0, 0, 0, 0
     state.wScN, state.scN = 0, 0
     for k in pairs(state.vehOutlineGen) do state.vehOutlineGen[k] = 0 end
 
@@ -2206,45 +2279,45 @@ function MDADSensor.probeRear(state, vehicle, cell, bodyX, bodyY,
 end
 
 -- 定向矩形（中心 rx,ry；F/N 單位正交軸；半長 halfF／halfN）對另一台車真車體多邊形的 SAT（1006 側向脫困）。
--- 多邊形＝VehiclePoly 半徑 0 的四角（BaseVehicle.java:4177-4190；四角同 pushVehicleOutline：COM±extents 經
--- getWorldPos）。回 true＝相交（相切也算）、false＝分離、nil＝幾何讀不到（呼叫端 fail-closed）。out 是呼叫端的池向量。
+-- 多邊形＝MDADSensor.vehFootprint（直立＝VehiclePoly 半徑 0 的四角，BaseVehicle.java:4177-4190；傾斜＝八角投地凸包）。
+-- 回 true＝相交（相切也算）、false＝分離、nil＝幾何讀不到（呼叫端 fail-closed）。out 是呼叫端的池向量。
 function MDADSensor.stripHitsVehicle(cv, out, rx, ry, fx, fy, nx, ny, halfF, halfN)
-    local ok, x1, y1, x2, y2, x3, y3, x4, y4 = pcall(function()
+    local ok, n = pcall(function()
         local script = cv:getScript()
         local ext, com = script:getExtents(), script:getCenterOfMassOffset()
-        local hw, hl, cx, cz = ext:x() * 0.5, ext:z() * 0.5, com:x(), com:z()
-        cv:getWorldPos(cx - hw, 0, cz + hl, out)
-        local ax, ay = out:x(), out:y()
-        cv:getWorldPos(cx + hw, 0, cz + hl, out)
-        local bx, by = out:x(), out:y()
-        cv:getWorldPos(cx + hw, 0, cz - hl, out)
-        local qx, qy = out:x(), out:y()
-        cv:getWorldPos(cx - hw, 0, cz - hl, out)
-        return ax, ay, bx, by, qx, qy, out:x(), out:y()
+        return MDADSensor.vehFootprint(cv, out, ext:x() * 0.5, ext:z() * 0.5, com:x(), com:z(), ext:y() * 0.5, com:y())
     end)
-    if not ok or not finite(x1) or not finite(y1) or not finite(x2) or not finite(y2)
-            or not finite(x3) or not finite(y3) or not finite(x4) or not finite(y4) then return nil end
-    -- 矩形兩軸：四角投影（相對矩形中心）整段落在 ±half 之外＝分離
-    local p1, p2 = (x1 - rx) * fx + (y1 - ry) * fy, (x2 - rx) * fx + (y2 - ry) * fy
-    local p3, p4 = (x3 - rx) * fx + (y3 - ry) * fy, (x4 - rx) * fx + (y4 - ry) * fy
-    if (p1 > halfF and p2 > halfF and p3 > halfF and p4 > halfF)
-            or (p1 < -halfF and p2 < -halfF and p3 < -halfF and p4 < -halfF) then return false end
-    p1, p2 = (x1 - rx) * nx + (y1 - ry) * ny, (x2 - rx) * nx + (y2 - ry) * ny
-    p3, p4 = (x3 - rx) * nx + (y3 - ry) * ny, (x4 - rx) * nx + (y4 - ry) * ny
-    if (p1 > halfN and p2 > halfN and p3 > halfN and p4 > halfN)
-            or (p1 < -halfN and p2 < -halfN and p3 < -halfN and p4 < -halfN) then return false end
-    -- 多邊形兩條邊的軸：矩形中心投影 ± 半徑 對多邊形投影區間
+    if not ok or type(n) ~= "number" or n < 2 then return nil end
+    local X, Y = MDADSensor.vfpX, MDADSensor.vfpY
+    for i = 1, n do
+        if not finite(X[i]) or not finite(Y[i]) then return nil end
+    end
+    -- 矩形兩軸：頂點投影（相對矩形中心）整段落在 ±half 之外＝分離
     for k = 1, 2 do
-        local ax, ay = x2 - x1, y2 - y1
-        if k == 2 then ax, ay = x3 - x2, y3 - y2 end
+        local ax, ay, h = fx, fy, halfF
+        if k == 2 then ax, ay, h = nx, ny, halfN end
+        local lo = (X[1] - rx) * ax + (Y[1] - ry) * ay
+        local hi = lo
+        for i = 2, n do
+            local p = (X[i] - rx) * ax + (Y[i] - ry) * ay
+            if p < lo then lo = p elseif p > hi then hi = p end
+        end
+        if lo > h or hi < -h then return false end
+    end
+    -- 多邊形邊的軸（四角＝平行四邊形，兩條就夠）：矩形中心投影 ± 半徑 對多邊形投影區間
+    local m = n == 4 and 2 or n
+    for k = 1, m do
+        local j = k % n + 1
+        local ax, ay = X[j] - X[k], Y[j] - Y[k]
         local len = sqrt(ax * ax + ay * ay)
         if not (len > 1e-6) then return nil end
         ax, ay = ax / len, ay / len
-        local q1, q2, q3, q4 = x1 * ax + y1 * ay, x2 * ax + y2 * ay, x3 * ax + y3 * ay, x4 * ax + y4 * ay
-        local lo, hi = q1, q1
-        if q2 < lo then lo = q2 elseif q2 > hi then hi = q2 end
-        if q3 < lo then lo = q3 elseif q3 > hi then hi = q3 end
-        if q4 < lo then lo = q4 elseif q4 > hi then hi = q4 end
+        local lo = X[1] * ax + Y[1] * ay
+        local hi = lo
+        for i = 2, n do
+            local q = X[i] * ax + Y[i] * ay
+            if q < lo then lo = q elseif q > hi then hi = q end
+        end
         local c = rx * ax + ry * ay
         local r = halfF * abs(fx * ax + fy * ay) + halfN * abs(nx * ax + ny * ay)
         if c - r > hi or c + r < lo then return false end
