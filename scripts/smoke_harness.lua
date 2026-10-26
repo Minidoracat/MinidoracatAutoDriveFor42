@@ -23672,6 +23672,153 @@ function drive.scenarioReleaseGuard()
 end
 drive.scenarioReleaseGuard()
 
+-- (s1) 1026b S1（正式服 6 件 6 人：P115 clip-15 等）：一排擋常駐線的路邊樹，繞過第一棵、出口段整車過 c，下一棵（T1）在車頭旁、
+--   再下一棵（T2）18m 外、整排牆在 30m 外讓候選鏈全滅。dodge release why=next-group 同輪判堵（sweep／shape entry），clearOffset
+--   把基準換回常駐線，舊制錨＝「擋常駐線的點中世界距最近」＝車頭旁的 T1 → blockedStop 一秒鎖輪；車當下的橫向（lat≈−1.2）
+--   其實淨空，下一輪斜切保持就帶車直走過去。T1 由 Sensor.step 完成輪時注入（車身旁的點不在新掃描窗內）。
+--   (s1)      放手那一輪：判堵照舊、錨是保持帶外的 T2（不是 T1）、每個 tick 都不在停止線內；blocked 事件帶 al／lat／aoff。
+--   (s1-next) 下一輪斜切保持持有行駛線（laneBias＝車位），錨換到真的擋車位那條線的牆，仍不在停止線內。
+--   (s1-path) 反面：車位那條線上 8m 外真的有樹（不擋常駐線，舊制錨也不收它）＝保持會接手時錨就是它、停止線成立
+--             （不得放鬆真擋在路徑上的點）。
+--   (s1-fb)   反面：只剩保持帶內的點（弧長窗只含 T1）＝全被排除，照舊取最近的 T1（afb）——判堵一定有錨。
+--   違規證明：plan 分支不傳 pathLat＝(s1) 紅；不把保持窗內擋車位線的點列入候選＝(s1-path) 紅；拿掉保持帶視窗（帶外也排除）
+--   ＝(s1) T2 紅；全被排除時不退回最近點＝(s1-fb) 紅。
+function drive.scenarioReleaseAnchorPath()
+    scenario("1026b：next-group 放手後判堵錨只收車目前橫向位置掃得到的點，車頭旁擋常駐線的樹不當停止線")
+    local oldSandbox, oldVeh, oldGet = SandboxVars, dveh, getSpecificPlayer
+    local oldApi = MinidoracatMiniMapAPI.navApiVersion
+    local oldRoute, oldTx, oldTy, oldState = drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
+    local oldEvent, oldSample, oldShould = MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.shouldSample
+    local realStep, originalTick = MDADSensor.step, driveTick
+    local wasMs = drive.frameMs(20)
+    local events = {}
+    MDADDiagnostics.sample = function() return true end
+    MDADDiagnostics.shouldSample = function() return true end
+    MDADDiagnostics.event = function(_, name, a) events[#events + 1] = { name = name, a = a } end
+    getSpecificPlayer = function(n) if n == 0 then return dp end end
+    MinidoracatMiniMapAPI.navApiVersion = 5
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false,
+        AutoDriveMaxSpeed = 60, RightLaneBias = 0.5 }) -- 12m 路 ×0.5＝常駐 +1.5
+    local st, atStopTick
+    driveTick = function(player, vehicle)
+        originalTick(player, vehicle)
+        if st and st.blocked and not st.dodging and MDAD.Drive.blockedAtStop(st, dveh._x, dveh._y) then atStopTick = true end
+    end
+    -- 承諾左繞第一棵、車擺到出口段整車過 c（沿承諾線），佈好 T2／牆（pathTree＝車位那條線上再放一棵），回車位 x0
+    local function setup(pathTree)
+        MDAD.Drive.stop(0, nil)
+        dveh = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }),
+            engineRunning = true, mass = 1600, speed = 0, maxSpeed = 100,
+            bodyW = 1.6, bodyL = 4.2, comX = 0, comZ = 0, profileFull = true,
+            enginePower = 3000, brakingForce = 100, wheelFriction = 1.5, tireFriction = 1.5 })
+        drive.fillWorld(-12, 160, -12, 12)
+        drive.putRoad(0, 160, -6, 6)
+        dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = 0, 1.5, 0, 0, true
+        dveh._engine, dveh._driver = true, dp
+        dp._vehicle, dp._dead, dp._local = dveh, false, true
+        setHeading(dveh, 0)
+        drive.nav.route = { pts = { 0, 0, 150, 0 }, segSurface = { "paved" }, segWidth = { 12 },
+            len = 150, cost = 150, avoidPenalty = 0 }
+        drive.nav.tx, drive.nav.ty, drive.nav.state = 150, 0, "ok"
+        st = nil
+        checkTrue(MDAD.Drive.start(dp), "(s1) 啟動")
+        for _ = 1, 6 do driveTick(dp, dveh) end
+        drive.scanRound(true)
+        local s = MDAD.Drive.debugSession(0)
+        s.diag = true
+        drive.putTree(40, 1, "s1_t0"); drive.putTree(40, 2, "s1_t0b")
+        for _ = 1, 3 do drive.scanRound(true) end
+        local fs = s.fstate
+        local ok = s.dodging == true and type(fs.offC) == "number" and type(fs.offL) == "number" and fs.offL < 0
+        checkTrue(ok, "(s1) 前置：承諾左繞第一棵（offL=" .. tostring(fs.offL) .. "）")
+        if not ok then return nil end
+        s.startGuard = false
+        local x0 = math.floor(fs.offC + s.bodyReach + 2)
+        local k = math.floor((x0 - fs.ovS0) / MDADFollower.OV_STEP) + 1
+        dveh._x, dveh._y, dveh._speed, dveh._stopped = x0, fs.ovY[k], 30, false
+        setHeading(dveh, math.atan(fs.ovY[k + 1] - fs.ovY[k], fs.ovX[k + 1] - fs.ovX[k]))
+        for _ = 1, 2 do driveTick(dp, dveh) end
+        drive.putTree(x0 + 18, 1, "s1_t2"); drive.putTree(x0 + 18, 2, "s1_t2b")
+        for y = -6, 6 do drive.putSolid(x0 + 30, y, "s1_wall" .. y) end
+        if pathTree then drive.putTree(x0 + 8, math.floor(fs.ovY[k] + 0.5), "s1_path") end
+        MDADSensor.step = function(sen, ...)
+            local done = realStep(sen, ...)
+            if done and sen.ready then -- T1：車頭旁、擋常駐線 +1.5
+                local n = sen.hardN + 1
+                local hs = s.lastSNow + s.vehicleProfile.halfL - 0.5
+                sen.hardS[n], sen.hardL[n], sen.hardR[n], sen.hardN = hs, 1.5, 0.3, n
+                sen.hardX[n], sen.hardY[n] = hs, 1.5
+                if sen.hardLc then sen.hardLc[n], sen.hardW[n] = nil, nil end
+                sen.sig = sen.sig + 7
+            end
+            return done
+        end
+        st, atStopTick, events = s, false, {}
+        s.planSig = -1
+        return x0
+    end
+    local function eventOf(name, key, val)
+        for _, e in ipairs(events) do
+            if e.name == name and e.a and e.a[key] == val then return e.a end
+        end
+    end
+
+    local x0 = setup(false)
+    if x0 then
+        local lat0 = st.lastLatSigned
+        drive.scanRound(true)
+        local rel = eventOf("dodge", "phase", "release")
+        checkTrue(rel ~= nil and rel.why == "next-group",
+            "(s1) 前置：放手 why=next-group（why=" .. tostring(rel and rel.why) .. "）")
+        checkTrue(st.blocked == true and not st.dodging and st.dodgeShapeReason == "entry",
+            "(s1) 前置：同輪判堵照舊（blocked=" .. tostring(st.blocked) .. " shape=" .. tostring(st.dodgeShapeReason) .. "）")
+        checkTrue(math.abs(st.blockHitX - (x0 + 18.5)) < 1.5,
+            "(s1) 錨＝保持帶外 18m 那棵 T2，不是車頭旁的 T1（bhx=" .. tostring(st.blockHitX) .. " x0=" .. x0 .. "）")
+        checkFalse(atStopTick, "(s1) 放手那一輪每個 tick 都不在判堵停止線內（不一秒鎖輪）")
+        local be = eventOf("blocked", "why", "plan")
+        checkTrue(be ~= nil and math.abs((be.al or 99) - 1.5) < 0.3 and math.abs((be.lat or 99) - lat0) < 0.3
+            and (be.aoff or 0) >= 1 and be.afb == nil,
+            "(s1) blocked plan 事件帶 al（錨的基準 lane）／lat（車位）／aoff（排除數）（al=" .. tostring(be and be.al)
+            .. " lat=" .. tostring(be and be.lat) .. " aoff=" .. tostring(be and be.aoff) .. " afb=" .. tostring(be and be.afb) .. "）")
+        -- (s1-fb) 弧長窗只含 T1：全被排除＝照舊取最近的 T1
+        local sen = st.sensor
+        local t1 = st.lastSNow + st.vehicleProfile.halfL - 0.5
+        local keepX, keepY = st.blockHitX, st.blockHitY
+        MDAD.Drive.debugResolveBlockAnchor(st, sen, dveh, true, st.lastSNow - st.vehicleProfile.halfL, t1 + 1, nil,
+            st.lastLatSigned)
+        checkTrue(st.blockAnchorFb == true and math.abs(st.blockHitX - t1) < 0.01,
+            "(s1-fb) 只剩保持帶內的點：全被排除、照舊取最近的 T1（fb=" .. tostring(st.blockAnchorFb) .. " bhx="
+            .. tostring(st.blockHitX) .. "）")
+        st.blockHitX, st.blockHitY = keepX, keepY -- 測試鉤寫了 live session 的錨：還原，下一輪 tick 照放手輪的錨
+        -- (s1-next) 下一輪：斜切保持持有行駛線（車位），錨＝擋車位那條線的牆
+        atStopTick = false
+        st.planSig = -1
+        drive.scanRound(true)
+        checkTrue(math.abs(st.fstate.laneBias - lat0) < 0.05 and st.blocked == true
+            and math.abs(st.blockHitX - (x0 + 30.5)) < 1 and not atStopTick,
+            "(s1-next) 下一輪斜切保持沿車位、錨換到牆、不在停止線內（laneBias=" .. tostring(st.fstate.laneBias)
+            .. " bhx=" .. tostring(st.blockHitX) .. " atStop=" .. tostring(atStopTick) .. "）")
+    end
+    MDADSensor.step = realStep
+    -- (s1-path) 反面：車位那條線上 8m 外真的有樹（不擋常駐線＝舊制的錨也不收它）
+    x0 = setup(true)
+    if x0 then
+        drive.scanRound(true)
+        checkTrue(st.blocked == true and math.abs(st.blockHitX - (x0 + 8.5)) < 1.5 and atStopTick == true,
+            "(s1-path) 車位那條線上真的有樹：錨就是它、停止線成立（bhx=" .. tostring(st.blockHitX) .. " x0=" .. x0
+            .. " atStop=" .. tostring(atStopTick) .. "）")
+    end
+    MDADSensor.step = realStep
+    driveTick = originalTick
+    MDAD.Drive.stop(0, nil)
+    drive.frameMs(wasMs)
+    MDADDiagnostics.event, MDADDiagnostics.sample, MDADDiagnostics.shouldSample = oldEvent, oldSample, oldShould
+    MinidoracatMiniMapAPI.navApiVersion = oldApi
+    drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
+    SandboxVars, dveh, getSpecificPlayer = oldSandbox, oldVeh, oldGet
+end
+drive.scenarioReleaseAnchorPath()
+
 -- (dvis) 0928k rc9 0104／0109：路線終點前 4–9m 的繞行，可視帽把終點當未知前緣扣 halfL＋2 → 0，
 --   車停在終點前、帶著偏移進不了到站圈。可視帶已含終點、剩 ≤ ARRIVE_M+3 時地板到爬行（同一般跟線）。
 --   違規證明：拿掉地板＝終點前 4m 的帽回 0、(dvis) 紅。
