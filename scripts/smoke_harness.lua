@@ -29080,6 +29080,14 @@ drive.scenarioLagConverge()
 --   (h-tow-body) 保持到車尾（含掛車 trailLen 11）過點：release body。
 --   (h-arc) 不拖車、車頭與命中點之間有圓角弧：保持、keep why=arc、arcAhead＝1/R。違規證明：拿掉弧前保持＝紅。
 --   (h-straight) 不拖車、直路：照舊當輪 release converge、arcAhead 0、kind 缺。違規證明：直路也保持＝紅。
+--   (h-nose-arc) 1026c S2（正式服 P97 clip-14：keep arc 後 release why=nose、弧上加速切內 18 km/h 擦同一硬點）：弧上 3m 的硬點 arm 後
+--     車頭過點、ld 0（實測車身不重疊）：不以 nose 放手、keep why=nose 只記一次、lagHitSide＝MIN_EXEC，車尾過點才 release body
+--     （帶 u）。違規證明：拿掉弧上 nose 保持＝紅（修前碼同樣紅）。
+--   (h-nose-cap) 保持中沿路線前進超過 LAG_NOSE_HOLD_K×（車長＋2r0）、u 仍在車身旁：release why=nose-cap；剛好在上限內照樣保持。
+--     違規證明：不設上限＝紅。
+--   (h-nose-straight)／(h-nose-far) 直路、或弧在車身窗 [車尾, 車心＋u＋車尾＋r0] 外：照舊當輪 release nose、arcAhead 0、帶 u、
+--     不壓速。違規證明：不看弧也保持＝紅。
+--   (h-nose-body) 弧上、arm 後下一輪車尾已過點：直接 release body（不經保持）。
 function drive.scenarioLagHold1020()
     scenario("1020c X3：落後守門拖車與弧前 converge 保持——命中點在前視＋煞停距離內保持到車尾過點，倒回超過上限才放")
     local Dr, F, ARC = MDAD.Drive, MDADFollower, MDADDynamics.SEG_ARC
@@ -29165,6 +29173,55 @@ function drive.scenarioLagHold1020()
     checkTrue(s.lagHitX == nil and e.phase == "release" and e.why == "converge" and e.arcAhead == 0 and e.kind == nil,
         "(h-straight) 不拖車、直路：照舊當輪 release converge、arcAhead 0、kind 缺（why=" .. tostring(e.why) .. " kind="
         .. tostring(e.kind) .. "）")
+    -- (h-nose-arc)
+    newS(arcP, nil, sA + 3)
+    checkTrue(scan(hs - halfL - 2, 0.6, 60).phase == "arm" and s.lagHitX == hs, "(h-nose-arc) 前置：弧上 3m 的硬點、落後 0.6：arm")
+    e = scan(hs - 1, 0, 12)
+    scan(hs + 1, 0, 12)
+    local held = s.lagHitX == hs and s.lagHitSide == true and keeps("nose") == 1
+        and Dr.lagGuardCap(s, 30, hs + 1, 0) <= MDADDynamics.MIN_EXEC_KMH
+    checkTrue(held and e.phase == "keep" and e.why == "nose" and math.abs((e.u or 0) - 1) < 1e-9 and (e.arcAhead or 0) > 0,
+        "(h-nose-arc) 弧上車頭過點、實測車身不重疊：不以 nose 放手、keep why=nose 只記一次、壓 MIN_EXEC（held=" .. tostring(held)
+        .. " phase=" .. tostring(e.phase) .. " why=" .. tostring(e.why) .. " u=" .. tostring(e.u) .. "）")
+    e = scan(hs + halfL + r + 1, 0, 8)
+    checkTrue(s.lagHitX == nil and e.phase == "release" and e.why == "body" and math.abs((e.u or 0) + halfL + r + 1) < 1e-9
+            and s.lagNoseS == nil and s.lagKeep == nil,
+        "(h-nose-arc) 車尾過點：release body、帶 u、保持起點清掉（why=" .. tostring(e.why) .. " u=" .. tostring(e.u) .. "）")
+    -- (h-nose-cap)：車心世界位置不動（u 固定 1）、路線弧長 rs 往前推
+    local lim = 2 * (2 * halfL + 2 * r) -- 2＝TUNE.LAG_NOSE_HOLD_K
+    newS(arcP, nil, sA + 3)
+    scan(hs - halfL - 2, 0.6, 60)
+    scan(hs - 1, 0, 12)
+    s.lastSNow = hs - 1 + lim - 0.1
+    Dr.lagGuardScan(s, 0, 8, hs - 1, 0, 0)
+    local within = s.lagHitX == hs
+    s.lastSNow = hs - 1 + lim + 0.1
+    Dr.lagGuardScan(s, 0, 8, hs - 1, 0, 0)
+    e = ev[#ev] or {}
+    checkTrue(within and s.lagHitX == nil and e.phase == "release" and e.why == "nose-cap" and math.abs((e.u or 0) - 1) < 1e-9,
+        "(h-nose-cap) 保持中前進超過上限 " .. string.format("%.2f", lim) .. "m 仍在車身旁：release nose-cap（within="
+        .. tostring(within) .. " why=" .. tostring(e.why) .. "）")
+    -- (h-nose-straight)
+    newS(straightP, nil, 64.9)
+    scan(60, 0.6)
+    e = scan(hs - 1, 0, 12)
+    checkTrue(s.lagHitX == nil and e.phase == "release" and e.why == "nose" and e.arcAhead == 0
+            and math.abs((e.u or 0) - 1) < 1e-9 and keeps("nose") == 0 and Dr.lagGuardCap(s, 30, hs - 1, 0) == 30,
+        "(h-nose-straight) 直路車頭過點：照舊當輪 release nose、arcAhead 0、帶 u、不壓速（why=" .. tostring(e.why) .. " arcAhead="
+        .. tostring(e.arcAhead) .. "）")
+    -- (h-nose-far)
+    newS(arcP, nil, sA - 20)
+    scan(hs - halfL - 2, 0.6, 60)
+    e = scan(hs - 1, 0, 12)
+    checkTrue(s.lagHitX == nil and e.phase == "release" and e.why == "nose" and e.arcAhead == 0,
+        "(h-nose-far) 弧在車身窗外（命中點在弧前 20m）：照舊 release nose（why=" .. tostring(e.why) .. " arcAhead="
+        .. tostring(e.arcAhead) .. "）")
+    -- (h-nose-body)
+    newS(arcP, nil, sA + 3)
+    scan(hs - halfL - 2, 0.6, 60)
+    e = scan(hs + halfL + r + 1, 0, 12)
+    checkTrue(s.lagHitX == nil and e.phase == "release" and e.why == "body" and keeps("nose") == 0,
+        "(h-nose-body) 弧上、下一輪車尾已過點：直接 release body、不保持（why=" .. tostring(e.why) .. "）")
     MDADDiagnostics.event = oldEvent
 end
 drive.scenarioLagHold1020()

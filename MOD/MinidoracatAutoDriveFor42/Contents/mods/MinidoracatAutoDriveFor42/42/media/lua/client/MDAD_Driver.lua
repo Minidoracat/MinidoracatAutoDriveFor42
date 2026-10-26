@@ -578,6 +578,10 @@ TUNE.LAG_HIST_JUMP_M = 0.2
 -- 實測收斂要顯著（1008）：|ld| 在取樣窗內至少降這麼多才算在收斂，否則 rate＝0（不衰減）。正式服 0.23.0 片段：SemiTruckBox_mil
 -- 出彎 0.88→0.82、M998＋拖車轉角 0.94→0.89 被當成收斂，遠處硬點的預測車身縮回門檻內就 release、硬點還在車前。
 TUNE.LAG_RATE_MIN_DROP_M = 0.08
+-- 弧上 nose 保持的出口上限（1026c S2，Drive.lagGuardScan）：進保持後沿路線前進超過 K×（車長＋2·硬點半寬）仍判在車身旁＝放手
+-- （why=nose-cap）。直路上車尾過點只要走 1×；弧上彎內點相對車身的縱向速率是 v(1−κd)（d＝點離路線的彎內橫距），d ≤ R/2 時 ≥0.5v，
+-- 2 倍留得住；車照 MIN_EXEC 前進，最多多壓兩個車長。
+TUNE.LAG_NOSE_HOLD_K = 2
 -- 掛車車身記憶（1013e，Drive.towFootprint）：掃描從車心前 SCAN_NEAR 起，掛車旁的硬點不在快照裡。車頭前這麼遠（m，從車頭起算）內、
 -- 橫向離車位 ≤ 掛車半寬＋TOW_MEM_LAT_M 的硬點記下來（最多 TOW_MEM_N 個，過掛車尾就丟），給掛車實際車身做 footprint。
 TUNE.TOW_MEM_AHEAD_M = 8
@@ -2706,6 +2710,7 @@ local function startSession(playerObj, playerNum, stage)
         lagHitX = nil, lagHitY = nil, lagHitR = nil, -- 實測落後量守門的命中硬點（Drive.lagGuardScan；nil＝沒命中）
         lagHitS = nil, lagHitPl = nil, lagHitSide = nil, -- 命中點弧長／該處規劃線 lane／已在車身旁（1008；lagMem 掃描時才建）
         lagHitKind = nil, lagKeep = nil, lagKeepU = nil, -- 命中由掛車車身判（trailer）／X3·X4 保持理由／X3 進保持時命中點的縱向距離（1020c）
+        lagNoseS = nil, -- 弧上 nose 保持（1026c S2）開始時的弧長 rs（出口上限 TUNE.LAG_NOSE_HOLD_K 從這裡量）
         lagHistD = {}, lagHistL = {}, lagHistN = 0, -- 實測收斂率的環狀歷史（Drive.lagRate：累計行駛距離／|實測橫偏|）
         progressX = 0, progressY = 0, progressS = 0, progressH = 0,
         progressUntil = 0,
@@ -11338,8 +11343,14 @@ end
 -- 進保持時的距離記 s.lagKeepU（車被其他帽壓慢、窗跟著縮時不放手）。出口：body／owner、倒回超過 max(窗, lagKeepU)＝converge。
 -- 換線重驗（1020c X4；正式服 P52 出彎 el 往外 ramp 觸發 line 放手、當時 dev 1.08，加速到 40 km/h 後擦回原命中點）：relined 時
 -- 用新規劃線在命中點處的 lane（Drive.lagPlanLane）＋實測橫偏（不衰減，同記憶重判）重驗 s.lagMem，還重疊就改記 lagHitPl、保持。
--- 保持理由各記一次 lag phase=keep why＝tow／arc／reline（s.lagKeep；1017d 遲滯的 keep 不帶 why）；release 帶 arcAhead（車頭到
--- 命中點間最大 κ）與 kind（trailer＝命中由掛車車身判、tow＝拖車但由牽引車判）。
+-- 弧上 nose 保持（1026c S2；正式服 0.30.x–1020j 6 件 6 人 5–19 km/h：P97 clip-14 keep arc 後 release why=nose，車在弧上 8→16 km/h、
+-- err 0.27→0.83 切內，18 km/h 擦同一硬點 (10732.5,10228.5)）：nose 只看當下實測車身，看不到放手後加速在弧上追線切內、車身後段
+-- 掃進彎內。車身要經過的那段剖面 [車尾, 車心＋u＋車尾＋r0]（車尾過點時車心的位置）有弧（Drive.arcAhead）時比照拖車保持
+-- （lagHitSide＝MIN_EXEC）到車尾過點；keep why=nose 記一次。出口：body／owner、倒回＝converge、弧離開窗＝nose、進保持
+-- （s.lagNoseS）後沿路線前進超過 TUNE.LAG_NOSE_HOLD_K×（車長＋2r0）仍在車身旁＝nose-cap。
+-- 保持理由各記一次 lag phase=keep why＝tow／arc／reline／nose（s.lagKeep；1017d 遲滯的 keep 不帶 why）；release 帶 arcAhead（車頭到
+-- 命中點間最大 κ；nose／nose-cap 改為上述車身窗的最大 κ）、u（命中點對車心的縱距，車頭向量投影；1026c T12）與 kind（trailer＝命中由
+-- 掛車車身判、tow＝拖車但由牽引車判）。
 function Drive.lagGuardScan(s, playerNum, speedKmh, vx, vy, heading)
     local sen, fs, vp, ld = s.sensor, s.fstate, s.vehicleProfile, s.lastLatDev
     local hit, bl, hitPl, hitOff = nil, nil, nil, nil
@@ -11457,6 +11468,23 @@ function Drive.lagGuardScan(s, playerNum, speedKmh, vx, vy, heading)
                 else why = "nose" end
             end
             local arcK = u ~= nil and Drive.arcAhead(s, rs + halfL, rs + u) or nil
+            -- 弧上 nose 保持（1026c S2，見函式頭）
+            if why == "nose" then
+                arcK = Drive.arcAhead(s, rs - rear, rs + u + rear + r0)
+                if arcK ~= nil and arcK > 0 then
+                    if s.lagNoseS == nil then s.lagNoseS = rs end
+                    if rs - s.lagNoseS <= TUNE.LAG_NOSE_HOLD_K * (halfL + rear + 2 * r0) then
+                        s.lagHitSide = true
+                        if s.lagKeep ~= "nose" then
+                            s.lagKeep = "nose"
+                            diagEvent(s, playerNum, "lag", { phase = "keep", why = "nose", dev = ld, rs = rs, hitS = s.lagHitS,
+                                rate = rate, arcAhead = arcK, u = u })
+                        end
+                        return
+                    end
+                    why = "nose-cap"
+                end
+            end
             -- 拖車／弧前保持（1020c X3，見函式頭）：窗＝車頭＋前視距＋煞到 MIN_EXEC 的距離，與進保持時的距離取大
             if why == "converge" and u ~= nil then
                 local keep = type(tw) == "table" and "tow" or (arcK ~= nil and arcK > 0 and "arc" or nil)
@@ -11508,15 +11536,15 @@ function Drive.lagGuardScan(s, playerNum, speedKmh, vx, vy, heading)
             local kind = s.lagHitKind or (type(tw) == "table" and "tow" or nil)
             diagEvent(s, playerNum, "lag", { phase = "release", why = why, dev = ld, rs = rs, hitS = s.lagHitS,
                 nose = rs + halfL, tail = rs - rear, body = relBody, rate = rate, cvw = s.lagCvw, arcAhead = arcK,
-                kind = kind })
+                kind = kind, u = u })
             if getDebug() then
-                print(string.format("%spn=%d lag guard release why=%s dev=%.2f rs=%.1f hitS=%s nose=%.1f tail=%.1f body=%s rate=%s arcAhead=%s kind=%s",
+                print(string.format("%spn=%d lag guard release why=%s dev=%.2f rs=%.1f hitS=%s nose=%.1f tail=%.1f body=%s rate=%s arcAhead=%s kind=%s u=%s",
                     LOG, playerNum, why, finite(ld) and ld or 0, rs, tostring(s.lagHitS), rs + halfL, rs - rear,
-                    tostring(relBody), tostring(rate), tostring(arcK), tostring(kind)))
+                    tostring(relBody), tostring(rate), tostring(arcK), tostring(kind), tostring(u)))
             end
         end
         s.lagHitX, s.lagHitY, s.lagHitR, s.lagHitS, s.lagHitPl, s.lagHitSide = nil, nil, nil, nil, nil, nil
-        s.lagCvw, s.lagKeep, s.lagKeepU, s.lagHitKind = nil, nil, nil, nil
+        s.lagCvw, s.lagKeep, s.lagKeepU, s.lagHitKind, s.lagNoseS = nil, nil, nil, nil, nil
         return
     end
     local r = sen.hardW and sen.hardW[hit] or sen.hardR[hit]
@@ -11541,7 +11569,7 @@ function Drive.lagGuardScan(s, playerNum, speedKmh, vx, vy, heading)
     mem.hardLc[1], mem.hardW[1] = sen.hardLc and sen.hardLc[hit], sen.hardW and sen.hardW[hit]
     s.lagHitX, s.lagHitY, s.lagHitR, s.lagHitS, s.lagHitPl = sen.hardX[hit], sen.hardY[hit], r, sen.hardS[hit], hitPl
     s.lagHitKind = hitOff and "trailer" or nil
-    s.lagCvw, s.lagKeepU = nil, nil -- 又預測重疊：converge 遲滯的輪數與 X3 進保持距離重算（keep 事件理由 s.lagKeep 留到 release）
+    s.lagCvw, s.lagKeepU, s.lagNoseS = nil, nil, nil -- 又預測重疊：converge 遲滯輪數、X3 進保持距離、S2 nose 保持起點重算（keep 理由 s.lagKeep 留到 release）
     s.lagHitSide = sen.hardS[hit] <= rs + halfL
 end
 
