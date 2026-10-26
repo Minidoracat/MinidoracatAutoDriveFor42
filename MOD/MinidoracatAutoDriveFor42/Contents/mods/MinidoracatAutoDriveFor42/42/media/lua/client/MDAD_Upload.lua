@@ -119,10 +119,7 @@ local VFX_KEYS = { "c", "vv", "vm", "vb", "va" }
 local VH_LATE_M = 15
 -- 入彎超速明細（1017，摘要 aoi）最多幾筆；出彎偏差（exN／exDev）：出弧後 EX_M 內 |ld| 最大值 >EX_DEV 的出口，出口車速
 -- ≥EX_FAST_KMH 另計；期間有殭屍軟縫或期望車道相鄰兩筆跳 >EX_JUMP_M（換道）的出口不算。起步到 T40_M 的 ms（t40）。
--- 入彎超速（arcOver／aoi）要超過彎帽 1.15 倍且超過彎帽＋AOI_MIN_KMH（1020b）：12 km/h 下限彎的 1.15 倍只多 1.8 km/h，落在
--- 致動器雜訊內（regulator 整數化＋bang-bang 漣漪約 2 km/h，同 MDADDynamics.HARD_BREACH_MIN_KMH 的理由），會把下限彎
--- 的正常入弧記成超速。沒有圓角的頂點開始轉的明細（fvo）同用 AOI_MAX 筆。
-local AOI_MAX, AOI_MIN_KMH, EX_M, EX_DEV, EX_FAST_KMH, EX_JUMP_M, T40_M = 4, 3, 60, 0.5, 50, 1, 40
+local AOI_MAX, EX_M, EX_DEV, EX_FAST_KMH, EX_JUMP_M, T40_M = 4, 60, 0.5, 50, 1, 40
 -- 偏離常駐線（摘要 offMs／offN／offMax、片段 offset；排除清單見 offsetKpi）：沒人持有行駛線時 |ld|（車身 − 期望線＝
 -- 夾過路寬的常駐線）超過 OFF_LAT_M；鏈式停留（lc）改量車身 − 夾過的常駐線 rsl——鏈著時期望線就是停留 lane，
 -- 「繞完一直走路邊」正是這段（玩家回報，事故之外完全沒被錄到）。連續 ≥OFF_MIN_MS 才算一段，單段達 OFF_CLIP_MS
@@ -353,9 +350,6 @@ function U.begin(pn, now, header, profile, vehicle)
         vfW = 0, vfWX = 0, vfWT = nil, vfWf = {}, vfXk = { c = 0, vv = 0, vm = 0, vb = 0, va = 0 }, vfWs = {},
         -- 1026g T14：他車首見離車頭（VH_LATE_M 上方）；vhPrev＝上一筆的 vehN
         vhN = 0, vhMin = nil, vhLt = 0, vhPrev = 0,
-        -- 1020b 沒有圓角的頂點（Follower arcLookaheadMs 的 fallback／>90° 頂點）開始轉：fvoN＝次數，fvo＝前 AOI_MAX 筆
-        -- [ts, 帽 km/h, 開始轉時車速 km/h, 折角 °]；fvoSeen＝已讀到的 phys.fvo.n（fstate 每趟新建，從 0 起）
-        fvo = {}, fvoN = 0, fvoSeen = 0,
         exN = 0, exDev = 0, exN50 = 0, exDev50 = 0, exFrom = nil, exEl = nil, exSpd = 0, exMax = 0, exBad = false,
         fu0 = nil, fu1 = nil, fuD = {}, fuM = {}, fuT = {}, fuE = {}, t40 = nil, stTow = false, stU = false, stApr = false, stRet = false,
         blr = {}, eng = nil,
@@ -750,7 +744,7 @@ local function speedKpi(u, phys, spd, target, mode, dt, capReason, now)
         exitClose(u) -- 上一個出口窗沒走滿 EX_M 就進下一個弧：以量到的結算
         u.arcN, u.arcDevDone = u.arcN + 1, false
         local cc = phys.curveCap
-        if finite(cc) and cc > 0 and spd > 1.15 * cc and spd > cc + AOI_MIN_KMH then
+        if finite(cc) and cc > 0 and spd > 1.15 * cc then
             u.arcOver = u.arcOver + 1
             -- 1017 入彎超速明細 aoi：[ts, 車速, 彎帽, R（1/curveKappa）, vad, vaw, pb, 這趟第一個弧 1／0, 離出發 m]
             if u.aoiN < AOI_MAX then
@@ -1021,15 +1015,6 @@ function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
         end
         u.prevLf = lf
         if phys.intent == "ROTATE" then u.rotMs = u.rotMs + dt end -- 1013a 原地轉（調頭）ms
-        -- 1020b fvo：phys.fvo 只留最近一筆，取樣間連過兩個頂點時明細只記後一筆、次數照 n 的差計
-        local fv = phys.fvo
-        if type(fv) == "table" and finite(fv.n) and fv.n > u.fvoSeen then
-            u.fvoN, u.fvoSeen = u.fvoN + (fv.n - u.fvoSeen), fv.n
-            if #u.fvo < AOI_MAX then
-                u.fvo[#u.fvo + 1] = "[" .. jnum(now) .. "," .. jround(fv.capKmh, 10) .. "," .. jround(fv.kmh, 10) .. ","
-                    .. jround(finite(fv.th) and fv.th * 180 / math.pi or nil, 1) .. "]"
-            end
-        end
     end
     if type(capReason) == "string" then u.capMs[capReason] = (u.capMs[capReason] or 0) + dt end
     speedKpi(u, phys, spd, target, mode, dt, capReason, now)
@@ -1307,7 +1292,6 @@ local function summaryText(u, now, reason, withMaps)
     -- 1017：不算撞擊的掛回／下車煞車、路中停車首見與結果、入彎超速明細、出彎偏差、油量、起步到 40m、煞車學習拒收、EngineOff 關卡
     text = text .. ',"rhi":' .. u.rhi .. ',"xbk":' .. u.xbk .. ',"vfIn":' .. u.vfIn .. ',"vfInX":' .. u.vfInX
         .. ',"aoi":[' .. table.concat(u.aoi, ",", 1, u.aoiN) .. ']'
-        .. ',"fvoN":' .. u.fvoN .. ',"fvo":[' .. table.concat(u.fvo, ",") .. ']'
         .. ',"exN":' .. u.exN .. ',"exDev":' .. u.exDev .. ',"exN50":' .. u.exN50 .. ',"exDev50":' .. u.exDev50
         .. ',"fu0":' .. jround(u.fu0, 100) .. ',"fu1":' .. jround(u.fu1, 100) .. ',"fuS":' .. fuelJson(u)
         .. ',"t40":' .. jround(u.t40, 1)
