@@ -643,5 +643,41 @@ do
     check(T.phiStats({}, 0) == nil, "(phi-none) 沒讀過折角：nil")
 end
 
+-- ⑭ 1026g T10 掛車拉回跳動（T.guard 每次量兩掛點距；tow lost alive=true 的 tj／tps）：相鄰兩次 |Δhd| >JUMP_M＝跳動、記時間；
+-- 間隔超過 JUMP_GAP_MS 不比（掛回、倒車期間 guard 不跑）；jumpAt＝當下掛點距減最後一次（帶號）＋距上次跳動 ms。
+-- 違規證明：jumpTrack 不看間隔＝(jump-gap) 紅；jumpAt 用絕對值＝(jump-at) 正負號紅；門檻用 ≥ 0＝(jump-small) 紅。
+do
+    local hx = 0
+    local veh = { getTowingWorldPos = function(_, _, out) return out:set(0, 0, 0) end }
+    local tow = { hitchSelf = "trailer", hitchOther = "trailerfront",
+        trailer = { getTowedByWorldPos = function(_, _, out) return out:set(hx, 0, 0) end } }
+    local s = {}
+    hx = 0.02
+    T.jumpTrack(s, veh, tow, 1000)
+    hx = 0.15
+    T.jumpTrack(s, veh, tow, 1100)
+    check(s.towJAt == nil, "(jump-small) 0.13 m 的變化不算跳動")
+    hx = 0.95
+    T.jumpTrack(s, veh, tow, 1200)
+    check(s.towJAt == 1200, "(jump) |Δhd| 0.8 m＞JUMP_M：記跳動時間")
+    hx = 0.1
+    T.jumpTrack(s, veh, tow, 1800)
+    check(s.towJAt == 1200, "(jump-gap) 間隔 600 ms＞JUMP_GAP_MS：不比、只重新起算")
+    hx = 1.0
+    local tj, tps = T.jumpAt(s, veh, tow, 1900)
+    check(near(tj, 0.9) and tps == 700, "(jump-at) 脫開那刻：tj＝當下減最後一次（+0.9）、tps＝距上次跳動 700 ms（got "
+        .. tostring(tj) .. ", " .. tostring(tps) .. "）")
+    hx = 0.05
+    tj = T.jumpAt(s, veh, tow, 1900)
+    check(near(tj, -0.05), "(jump-at) 帶號：掛點距縮小為負")
+    tj, tps = T.jumpAt(s, veh, tow, 2500)
+    check(tj == nil and tps == 1300, "(jump-stale) 最後一次記錄太舊：tj 缺、tps 照給")
+    tj, tps = T.jumpAt({}, veh, tow, 0)
+    check(tj == nil and tps == nil, "(jump-none) 沒記過：兩欄都缺")
+    local s2 = {}
+    T.jumpTrack(s2, veh, { trailer = tow.trailer }, 0)
+    check(s2.towJt == nil, "(jump-nohitch) 量不到掛點名：不記")
+end
+
 print(string.format("test_trailer: %d 項斷言、%d 項失敗", asserts, fails))
 if fails > 0 then os.exit(1) end

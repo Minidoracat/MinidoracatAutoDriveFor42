@@ -133,13 +133,21 @@ local EK = {
     "rate",
     -- lag release（1017d）：converge 遲滯保持了幾個掃描輪（Driver Drive.lagGuardScan s.lagCvw；沒保持就缺）
     "cvw",
-    -- impact（1008）：撞擊分類 hit／frozen／tow-sync（MDADUpload.impactClass）、有號掉速（前一筆有號 km/h − 本筆；倒退反號時 dv 會低估）
+    -- impact（1008）：撞擊分類 hit／frozen／tow-sync／rehitch／tow-slack／small-animal（MDADUpload.impactClass）、有號掉速（前一筆有號 km/h − 本筆；倒退反號時 dv 會低估）
     "cls", "dvs",
+    -- impact（1021h）：分類器版本、掛車 |km/h| 增量、貼車動物最重 kg、殭屍／玩家／他車貼車（D.sample；upload_report 看 icv 決定要不要推回）
+    "icv", "tkg", "akg", "bz",
     -- impact（1017）：當下檔位、引擎煞車、距上一次 tow rh-attach 的 ms（自動掛回拉攏的假撞）、跟車 lead 車距／速度（m 共用上面的鍵＝mode）
     "tn", "ib", "rhMs", "tlg", "tlv",
+    -- impact（1026g T12）：開出 ms（Driver s.startedMs 起算，含停等／讓位）、拖車旗標（true／false 都寫）
+    "dms", "tw",
+    -- damage（1026g T14，D.sample 撞擊上升緣後 DMG_POST_MS）：零件耐久合計掉多少、單一零件最大掉量與那個零件 id
+    "dmg", "dmx", "dpt",
     -- engine off（1017，Drive.engineOffNote）：EngineOff 交還前的電瓶 charge、引擎轉速、油量 %（why＝engine／battery）；
     -- 1020 加引擎零件狀況 ecd（0–100，<50 原版會隨機熄火）、引擎品質 eq
     "chg", "es", "fu", "ecd", "eq",
+    -- 1026g T9 加引擎狀態名稱 est（ShuttingDown／Stalling／Idle…）、距本機最近一次關引擎請求 ms kso、距本機看到引擎進入 Running ms erm
+    "est", "kso", "erm",
     -- unstick settle（1017）：車在剖面首段反向延長上的距離 m（>0＝在起點後方，Drive.startBehind）
     "bh",
     -- 1008 拖車：tow attach 外拉規劃用的掛點→車頭（MDADTrailer.hitchFront）；detour towcorner 附了車尾正後方圈（1）；
@@ -151,8 +159,9 @@ local EK = {
     "towArcN",
     -- lag release（1008）：車頭弧長 rs+halfL、車尾弧長（拖車含掛車）、命中點的預測車身 lane（hitS／rate 共用上面的鍵）
     "nose", "tail", "body",
-    -- lag release／keep（1020c）：車頭到命中點之間剖面最大曲率 κ（1/m，Driver Drive.arcAhead；圓角 1/R、fallback 頂點 1/rMin）
-    "arcAhead",
+    -- lag release／keep（1020c）：車頭到命中點之間剖面最大曲率 κ（1/m，Driver Drive.arcAhead；圓角 1/R、fallback 頂點 1/rMin；
+    -- 1026c why=nose／nose-cap 時改為車身窗 [車尾, 車尾過點時的車心] 的最大 κ）；u＝命中點對車心的縱距（m，車頭向量投影，1026c T12）
+    "arcAhead", "u",
     -- 1008：takeover resume（讓位恢復後第一個跟線幀的橫偏、Follower 投影段號）；route far（why gate／watch／yield）當下的 s.mode
     "lat", "fi", "mode",
     -- zombie plan（1008）：車身橫向（lat，同上）、最近威脅 l、車身／舊 laneBias 速率可及量、近威脅限側基準、新可行性模型拒縫（reach／side）
@@ -197,8 +206,13 @@ local EK = {
     -- 1017e 拖車：tow kcap／tight 的曲率上限 sin(HITCH_SLOW)/L2 與追前視點要的曲率（1/m）；tow lost alive=true 前 1 秒最大 |折角|、
     -- 最大折角變化率（rad/s）與最後一幀 st；unstick rear=rope 的繩索兩掛點相碰距（m，hd 沿用上面的鍵）
     "kMax", "kNeed", "phiMax", "phiRate", "st", "hdMin", -- 1017e
+    -- 1026g T10 tow lost alive=true：脫開那一步兩掛點距的變化 m（帶號）、距上一次掛點距跳動 >JUMP_M 的 ms（MDADTrailer.jumpAt）
+    "tj", "tps",
     -- 1014b dodge commit／extend／release（exit、end、done）：出口回的 lane s.dodgeBaseL（Drive.dodgeHomeL，承諾時凍結）
     "dbl", -- 1014b
+    -- 1026g T13 dodge commit：dbl 是哪一種 lane（Drive.dodgeHomeSrc：ret／chain／trans／zombie／traffic／tow／keep／center／other）；
+    -- blocked why=guard：停止線剩餘 m、以承諾帽爬完的預估秒數（Drive.guardBlockNote）
+    "dbs", "gsl", "gcs",
     -- 1017 dodge commit：本輪第一條被殭屍擋下的候選的 min(彎帽, 餘裕帽)（Drive.zombieCap0）、chainAhead 走到的分支；
     -- release：回線 lane 上線尾之後最近一群的位置與種類（Drive.releaseNext：dodge＝偏到位點、blocked＝群起點）
     "zc0", "chain", "nxB", "nxC",
@@ -206,8 +220,17 @@ local EK = {
     "rpt",
     -- 1023a route cutover／far：整條線（截斷前）走主 MOD 自訂道路的段數（route.segCustom[i]＝true；舊主 MOD 沒這欄＝缺，D.routeSource）
     "rcu",
+    -- 1026g T14 route cutover／far：逐段走主 MOD 自訂道路旗標（"1;0;…"，與 srcW／srcS 同長；舊主 MOD 沒 segCustom＝缺，D.routeSource）；
+    -- 1026g T13 route lost（Drive.routeLostNote）：目標座標
+    "srcC", "tx", "ty",
     -- 1024a start：這趟坐的車顯示 FSD 卡片（換掉原版儀表的選配 MOD）＝"fsd"；原版儀表的車沒有這欄
     "hud",
+    -- 1026b blocked plan：判堵錨所在的基準 lane al（lat＝車當下橫向，沿用上面的鍵）、被斜切保持排除的擋線點數 aoff、
+    -- 全被排除而照舊取最近擋線點 afb（Driver resolveBlockAnchor）
+    "al", "aoff", "afb",
+    -- 1026d detour why=back／back-turn／towturn 與 tow turn 拒收（Driver Drive.rejectFields）：被拒改道線前 2 點、第一段長度 m
+    -- 與對車頭夾角（度，0＝正前）；snapDist 沿用上面的鍵。detour 的 tt＝接拖車調頭繞路（Drive.towTurnaround）的結果
+    "r1x", "r1y", "r2x", "r2y", "blen", "bdeg", "tt",
 }
 
 local function logOnce(msg)
@@ -1056,6 +1079,8 @@ local function encodeSensor(s, sensor, force)
     if finite(sensor.zombieNearS) then
         bits = bits .. ',"zombieNearS":' .. tostring(sensor.zombieNearS)
     end
+    -- 1026g T14：命中車輛格的最近弧長（同 zombieNearS 座標；vehN 從 0 變正那筆減 rs＋半車長＝他車首見離車頭多遠）
+    if finite(sensor.vehNearS) then bits = bits .. ',"vehNearS":' .. tostring(sensor.vehNearS) end
     if finite(sensor.corpseNearS) then
         bits = bits .. ',"corpseNearS":' .. tostring(sensor.corpseNearS)
     end
@@ -1073,6 +1098,10 @@ local function encodeSensor(s, sensor, force)
     if finite(sensor.stopN) and sensor.stopN > 0 then bits = bits .. ',"stopN":' .. tostring(sensor.stopN) end
     if sensor.stopOverflow == true and finite(sensor.stopOverS) then
         bits = bits .. ',"stopOverS":' .. tostring(sensor.stopOverS)
+    end
+    -- 1026i：本輪改用傾斜投影輪廓的停放車台數與最大超出量 m（Sensor vehTiltN／vehTiltM，MDADSensor.vehFootprint；有才寫）
+    if finite(sensor.vehTiltN) and sensor.vehTiltN > 0 then
+        bits = bits .. ',"vehTiltN":' .. tostring(sensor.vehTiltN) .. ',"vehTiltM":' .. tostring(sensor.vehTiltM)
     end
     if finite(sensor.softEndS) then
         bits = bits .. ',"softEndS":' .. tostring(sensor.softEndS)
@@ -1491,13 +1520,16 @@ end
 --   contact＝footprint 命中由假轉真；impact＝與上傳片段同一個單筆門檻（MDADUpload.impactLike：前一筆→本筆的掉速、
 --   原始間隔、位移）由假轉真；teleport＝MDADUpload.teleportLike（伺服器拉回，1006）。回 force（encodeSensor 強制寫 near）。
 --   s.edgeImp／s.edgeTp 為真時 edgeSpd／edgeSv／edgeGap／edgeMoved／edgeOldX／edgeOldY＝前一筆車速（絕對值／有號）、
---   原始間隔、位移、前一筆座標，供 D.sample 發 impact／teleport 事件、掃 nb 與分類（1008）。
+--   原始間隔、位移、前一筆座標，供 D.sample 發 impact／teleport 事件、掃 nb 與分類（1008）；edgeTkm（1021）＝掛車 |km/h|
+--   本筆減前一筆（任一筆沒有 tkm＝nil；impactClass tow-slack）。
 --   s.impCls＝本段撞擊的分類（D.sample 在上升緣寫、整段沿用），本筆不過 impactLike 就清掉。
 local function sampleEdges(s, now, x, y, speed, phys, footprintBlocked)
     local fb = footprintBlocked == true
     local fbl = type(phys) == "table" and phys.forceBrakeLeft or nil
     local locked = finite(fbl) and fbl > 0
     local spd = finite(speed) and (speed < 0 and -speed or speed) or nil
+    local tkm = type(phys) == "table" and phys.towKmh or nil
+    if not finite(tkm) then tkm = nil elseif tkm < 0 then tkm = -tkm end
     local px, py = s.nearX, s.nearY
     local moved = nil
     if px and finite(x) and finite(y) then moved = math.sqrt((x - px) * (x - px) + (y - py) * (y - py)) end
@@ -1511,12 +1543,14 @@ local function sampleEdges(s, now, x, y, speed, phys, footprintBlocked)
     if s.edgeImp or tp then
         s.edgeSpd, s.edgeGap, s.edgeMoved, s.edgeOldX, s.edgeOldY = s.nearSpd, gap, moved, px, py
         s.edgeSv = s.nearSv
+        s.edgeTkm = tkm and s.nearTkm and tkm - s.nearTkm or nil
     end
     if not imp then s.impCls = nil end
     tupRecord(s, now, type(phys) == "table" and phys.towUp or nil)
     local force = (fb and s.nearFb ~= true) or s.edgeImp
     s.nearFb, s.nearImp, s.nearSpd, s.nearTs, s.nearLocked = fb, imp, spd, now, locked
     s.nearSv = finite(speed) and speed or nil
+    s.nearTkm = tkm
     if finite(x) and finite(y) then s.nearX, s.nearY = x, y else s.nearX, s.nearY = nil, nil end
     return force
 end
@@ -1534,12 +1568,17 @@ end
 -- 規劃語意不動），動畫完才 becomeCorpse 成 isAnimal() 的 IsoDeadBody（同時照舊算進屍體 c）；屍體只收死亡 NB_DEAD_H 遊戲
 -- 小時內的（路上舊屍不冒充這次撞的）。死的與活的一起比最近，死的第 6 項＝1（第 4、5 項讀不到寫 null 佔位）。
 -- 正式服 0.29.x 226 次撞擊 65 次 nb={}：撞死的小動物當幀被 softKindOf 排掉，小動物撞擊拆不出碰撞 KPI。
+-- 第三、四回傳（1021 small-animal／tow-slack 分類，MDADUpload.impactClass；1021h 改成掃描時逐隻判，不只看最近那隻）：
+-- 貼車＝|縱向| ≤ hl＋IMPACT_TOUCH_PAD 且 |橫向| ≤ hw＋pad（hl／hw＝本車半長／半寬，世界座標未取整）。
+--   akg＝所有貼車動物（活的、死亡動畫中、NB_DEAD_H 內的動物屍體）裡最重的體重 kg；有一隻讀不到體重＝1e9；沒有貼車的＝nil。
+--   busy＝有任一隻殭屍／玩家貼車，或他車車心在 hl＋IMPACT_HALF_L（他車半長，nb 不帶對方幾何）＋pad 內＝true；都沒有＝false；
+--   讀不到航向、車寬或 MDADUpload 常數＝nil（判不了就不排除，分類照算 hit）。
 local NB_R = 8
 local NB_V_R = 15
 local NB_DEAD_H = 0.02 -- 遊戲小時（預設一天＝現實 1 小時時約 3 秒）
-local function nearbyJson(pn, x, y, h)
+local function nearbyJson(pn, x, y, h, hl, hw)
     if not finite(x) or not finite(y) then return "" end
-    local ok, out, near = pcall(function()
+    local ok, out, near, akg, busy = pcall(function()
         local own = getSpecificPlayer(pn):getVehicle()
         local cell = getCell()
         local z = math.floor(own and own:getZ() or 0)
@@ -1553,6 +1592,26 @@ local function nearbyJson(pn, x, y, h)
         local worldH = nil
         pcall(function() worldH = getGameTime():getWorldAgeHours() end)
         local cOk = true
+        local U = MDADUpload
+        local pad = type(U) == "table" and U.IMPACT_TOUCH_PAD or nil
+        local canT = finite(pad) and finite(U.IMPACT_HALF_L) and finite(h) and finite(hl) and finite(hw)
+        local busy, akg = nil, nil
+        if canT then busy = false end
+        local function touchAt(ox, oy)
+            local dx, dy = ox - x, oy - y
+            local s, l = dx * ch + dy * sh, dy * ch - dx * sh
+            return (s < 0 and -s or s) <= hl + pad and (l < 0 and -l or l) <= hw + pad
+        end
+        local function animalTouch(o, ox, oy) -- 貼車動物：akg 取最重；讀不到體重＝1e9（不算小動物）
+            if not canT or not touchAt(ox, oy) then return end
+            local okW, w = pcall(function()
+                if instanceof(o, "IsoDeadBody") then return o:getWeight() end
+                local data = o:getData()
+                return data and data:getWeight()
+            end)
+            if not okW or not finite(w) then w = 1e9 end
+            if akg == nil or w > akg then akg = w end
+        end
         for gy = math.floor(y - NB_R), math.floor(y + NB_R) do
             for gx = math.floor(x - NB_R), math.floor(x + NB_R) do
                 local sq = cell:getGridSquare(gx, gy, z)
@@ -1569,12 +1628,18 @@ local function nearbyJson(pn, x, y, h)
                         if k then
                             local ox, oy = mo:getX(), mo:getY()
                             local d2 = (ox - x) * (ox - x) + (oy - y) * (oy - y)
-                            if k == "z" then
-                                if zd == nil or d2 < zd then zd, zx, zy = d2, ox, oy end
-                            elseif k == "player" then
-                                if pd == nil or d2 < pd then pd, px, py = d2, ox, oy end
-                            elseif ad == nil or d2 < ad then
-                                ad, ax, ay, am, adead = d2, ox, oy, mo, dead -- animal／small（含剛死）
+                            if k == "z" or k == "player" then
+                                if canT and touchAt(ox, oy) then busy = true end
+                                if k == "z" then
+                                    if zd == nil or d2 < zd then zd, zx, zy = d2, ox, oy end
+                                elseif pd == nil or d2 < pd then
+                                    pd, px, py = d2, ox, oy
+                                end
+                            else
+                                animalTouch(mo, ox, oy)
+                                if ad == nil or d2 < ad then
+                                    ad, ax, ay, am, adead = d2, ox, oy, mo, dead -- animal／small（含剛死）
+                                end
                             end
                         end
                     end
@@ -1587,12 +1652,15 @@ local function nearbyJson(pn, x, y, h)
                                     local ox, oy = b:getX(), b:getY()
                                     local d2 = (ox - x) * (ox - x) + (oy - y) * (oy - y)
                                     if cd == nil or d2 < cd then cd, cx, cy = d2, ox, oy end
-                                    -- 剛變成屍體的動物（isAnimal、死亡 NB_DEAD_H 內）也進動物候選；讀不到就略過、不影響 c
-                                    if (ad == nil or d2 < ad) and worldH ~= nil then
+                                    -- 剛變成屍體的動物（isAnimal、死亡 NB_DEAD_H 內）也進動物候選與貼車判定；讀不到就略過、不影響 c
+                                    if worldH ~= nil then
                                         local okB, fresh = pcall(function()
                                             return b:isAnimal() and worldH - b:getDeathTime() <= NB_DEAD_H
                                         end)
-                                        if okB and fresh == true then ad, ax, ay, am, adead = d2, ox, oy, b, true end
+                                        if okB and fresh == true then
+                                            animalTouch(b, ox, oy)
+                                            if ad == nil or d2 < ad then ad, ax, ay, am, adead = d2, ox, oy, b, true end
+                                        end
                                     end
                                 end
                             end
@@ -1611,6 +1679,10 @@ local function nearbyJson(pn, x, y, h)
                 local d2 = (ox - x) * (ox - x) + (oy - y) * (oy - y)
                 if d2 <= NB_V_R * NB_V_R and (vd == nil or d2 < vd) then vd, vx, vy, vk = d2, ox, oy, v end
             end
+        end
+        if canT and vd ~= nil then
+            local vr = hl + U.IMPACT_HALF_L + pad
+            if vd <= vr * vr then busy = true end
         end
         local function r2(v) return tostring(math.floor(v * 100 + 0.5) / 100) end
         local function one(key, d2, ox, oy)
@@ -1660,9 +1732,9 @@ local function nearbyJson(pn, x, y, h)
         local hit = zd ~= nil or ad ~= nil or pd ~= nil or (cOk and cd ~= nil) or (vd ~= nil and vd <= NB_R * NB_R)
         local nearOut = hit or nil
         if not hit and cOk then nearOut = false end
-        return ',"nb":{' .. table.concat(parts, ",", 1, n) .. "}", nearOut
+        return ',"nb":{' .. table.concat(parts, ",", 1, n) .. "}", nearOut, akg, busy
     end)
-    if ok and type(out) == "string" then return out, near end
+    if ok and type(out) == "string" then return out, near, akg, busy end
     return ""
 end
 
@@ -1779,7 +1851,9 @@ end
 -- 把 src＝"x,y;…" 點列、srcW＝"w;…" 段寬、srcS＝"surface;…" 段面填進 payload
 -- 後回傳同一張表（Driver 的 update 大函式 local／upvalue 槽緊，呼叫端零新 local）。
 -- 超過 ROUTE_SRC_MAX 只截前段（事件的 pts 欄仍是真總數，讀者可辨截斷）；
--- route 沒有可用點列＝不填 src 三欄與 rcu（rpt 照填）。
+-- route 沒有可用點列＝不填 src 三欄、srcC 與 rcu（rpt 照填）。
+-- 1026g T14：srcC＝逐段自訂道路旗標 "1;0;…"（route.segCustom[i]＝true 記 1，與 srcW／srcS 同長、同樣截斷）；
+-- 舊主 MOD 沒 segCustom＝不寫。rcu 只有整條線的段數，事故在不在自訂路上要逐段看。
 local ROUTE_SRC_MAX = 512
 function D.routeSource(route, payload)
     if type(payload) ~= "table" then payload = {} end
@@ -1801,6 +1875,7 @@ function D.routeSource(route, payload)
     if n > ROUTE_SRC_MAX then n = ROUTE_SRC_MAX end
     local widths, surfaces = route.segWidth, route.segSurface
     local sp, sw, ss = {}, {}, {}
+    local sc = type(custom) == "table" and {} or nil
     for i = 1, n do
         sp[i] = jnum(pts[i * 2 - 1]) .. "," .. jnum(pts[i * 2])
         if i < n then
@@ -1808,11 +1883,13 @@ function D.routeSource(route, payload)
             local sf = type(surfaces) == "table" and surfaces[i] or nil
             sw[i] = finite(w) and tostring(w) or ""
             ss[i] = type(sf) == "string" and sf or ""
+            if sc then sc[i] = custom[i] == true and "1" or "0" end
         end
     end
     payload.src = table.concat(sp, ";", 1, n)
     payload.srcW = table.concat(sw, ";", 1, n - 1)
     payload.srcS = table.concat(ss, ";", 1, n - 1)
+    if sc then payload.srcC = table.concat(sc, ";", 1, n - 1) end
     return payload
 end
 
@@ -2022,6 +2099,65 @@ local function impactHard(pn, x, y, h, halfL)
     return nil
 end
 
+-- 1026g T14 撞擊車損（damage 事件）：取樣中每 DMG_SNAP_MS 量一次本車全部零件耐久（getPartByIndex(i):getCondition()，
+-- 表重用不配新表）；撞擊上升緣（任何 cls，含 small-animal——10-26 兔子車損判準要它）凍結最近一次量測當撞前值，DMG_POST_MS
+-- 後再量一次，記 damage：dmg＝各零件掉量合計（只算變少的）、dmx／dpt＝掉最多的零件掉量與 id、ms＝撞前量測到撞後量測的間隔、
+-- cls＝撞擊分類。MP 的車損由伺服器 BaseVehicle.crash 算完再同步（BaseVehicle.java:4647-4690、transmitPartCondition），撞後
+-- 1.5 秒足夠回到客戶端；等待中再撞一次併進同一筆。上升緣時還沒有有效的撞前量測（剛開始取樣、讀不到車）＝不記。
+local DMG_SNAP_MS, DMG_POST_MS = 1000, 1500
+local function partConds(v, out)
+    local c = v:getPartCount()
+    for i = 0, c - 1 do out[i + 1] = v:getPartByIndex(i):getCondition() end
+    out.n = c
+    return c
+end
+local function ownVehicle(pn)
+    return getSpecificPlayer(pn):getVehicle()
+end
+local function partIdAt(v, i)
+    return v:getPartByIndex(i - 1):getId()
+end
+-- 量一次到 out：回 (成功, vehicle)。
+local function dmgRead(pn, out)
+    local okV, v = pcall(ownVehicle, pn)
+    if not okV or v == nil then return false end
+    local ok, c = pcall(partConds, v, out)
+    return ok and finite(c) and c > 0, v
+end
+local function damageTick(g, pn, now)
+    if g.edgeImp and g.dmgAt == nil and g.dmgOk then
+        g.dmgPre, g.dmgSnap = g.dmgSnap, g.dmgPre or {}
+        g.dmgAt, g.dmgPreT, g.dmgCls, g.dmgOk = now, g.dmgT, g.impCls, false
+        return
+    end
+    if g.dmgAt ~= nil then
+        if now - g.dmgAt < DMG_POST_MS then return end
+        local post, pre = g.dmgSnap, g.dmgPre
+        local ok, v = dmgRead(pn, post)
+        g.dmgAt, g.dmgT, g.dmgOk = nil, now, ok
+        if not ok then return end
+        local n, sum, mx, mi = pre.n, 0, 0, nil
+        if post.n < n then n = post.n end
+        for i = 1, n do
+            local a, b = pre[i], post[i]
+            if finite(a) and finite(b) and b < a then
+                sum = sum + (a - b)
+                if a - b > mx then mx, mi = a - b, i end
+            end
+        end
+        local okI, id = false, nil
+        if mi then okI, id = pcall(partIdAt, v, mi) end
+        emitEvent(pn, now, "damage", { dmg = sum, dmx = mi and mx or nil, dpt = okI and id or nil,
+            ms = now - g.dmgPreT, cls = g.dmgCls })
+        return
+    end
+    if g.dmgT == nil or now - g.dmgT >= DMG_SNAP_MS then
+        if not g.dmgSnap then g.dmgSnap = {} end
+        g.dmgOk = dmgRead(pn, g.dmgSnap)
+        g.dmgT = now
+    end
+end
+
 function D.shouldSample(pn, now, mode, err, critical)
     -- 對外只回單一布林：多回值會漏進呼叫端的參數列。
     local want = sampleWouldEnqueue(gateOwner(pn), now, mode, err, critical)
@@ -2050,12 +2186,19 @@ function D.sample(pn, now, x, y, heading, speed, target, remaining, lat, err,
     g.nearForce = sampleEdges(g, now, x, y, speed, phys, footprintBlocked)
     -- 1008：撞擊上升緣先掃 nb（分類要看近處有沒有東西；encodeSample 直接寫這串），再分 hit／frozen／tow-sync／rehitch；
     -- 同一段連續撞擊沿用這個分類（sampleEdges 在段落結束時清掉）。1017：edgeRhMs＝距最近一次 tow rh-attach 的 ms（emitEvent 記）。
+    -- 1021：tow-slack 看 edgeTkm（sampleEdges）；small-animal 看 nb 貼車的小動物體重與車頭 3 格的擋車 sprite（impactHard，
+    -- 事件 sprite／scost／hardD 用同一次結果）。
+    local hNm, hCls, hD
     if g.edgeImp then
+        local prof = s and s.profile
+        local hl = type(prof) == "table" and prof.halfL or (u and u.halfL)
+        local hw = type(prof) == "table" and prof.halfW or (u and u.halfW)
         local near
-        g.edgeNb, near = nearbyJson(pn, x, y, heading)
+        g.edgeNb, near, g.edgeAkg, g.edgeBz = nearbyJson(pn, x, y, heading, hl, hw)
+        hNm, hCls, hD = impactHard(pn, x, y, heading, hl)
         g.edgeRhMs = finite(g.rhAt) and now - g.rhAt or nil
         g.impCls = MDADUpload.impactClass(speed, phys, footprintBlocked, near, tupDrop(g, now, MDADUpload.TOW_SYNC_MS),
-            mode, g.edgeRhMs)
+            mode, g.edgeRhMs, g.edgeTkm, g.edgeAkg, g.edgeBz, hD, hw)
     end
     local line = encodeSample(g, now, x, y, heading, speed, target, remaining, lat, err,
         steer, force, mode, gear, regulator, sensor, crit,
@@ -2074,8 +2217,6 @@ function D.sample(pn, now, x, y, heading, speed, target, remaining, lat, err,
     -- 事件跟在觸發的那筆取樣之後；只在轉換時配一張 payload 表。
     if g.edgeImp then
         local spd = finite(speed) and (speed < 0 and -speed or speed) or nil
-        local prof = s and s.profile
-        local hNm, hCls, hD = impactHard(pn, x, y, heading, type(prof) == "table" and prof.halfL or (u and u.halfL))
         local a = {
             x = x, y = y, speed = round1(g.edgeSpd), dv = round1(spd and g.edgeSpd and g.edgeSpd - spd), ms = g.edgeGap,
             cls = g.impCls, dvs = round1(finite(speed) and g.edgeSv and g.edgeSv - speed),
@@ -2083,10 +2224,17 @@ function D.sample(pn, now, x, y, heading, speed, target, remaining, lat, err,
             awt = type(phys) == "table" and phys.areaWait == true or nil, sprite = hNm, scost = hCls, hardD = round1(hD),
             -- 1017：mode 與距 rh-attach 的 ms（假撞分得出掛回）；檔位／引擎煞車／lead 在下面（ib=false 也要寫）
             m = mode, rhMs = g.edgeRhMs,
+            -- 1021h：分類的輸入（icv＝分類器版本，有這鍵＝客戶端已分 tow-slack／small-animal，upload_report 不再推回）：
+            -- tkg＝掛車 |km/h| 增量、akg＝貼車動物最重 kg（1e9＝讀不到體重）、bz＝殭屍／玩家／他車貼車（判不了缺）
+            icv = 1, tkg = round1(g.edgeTkm), akg = finite(g.edgeAkg) and math.floor(g.edgeAkg * 100 + 0.5) / 100 or nil,
+            bz = g.edgeBz,
         }
         -- 1017：檔位、引擎煞車（下車煞車＝tn 0、ib true、fbl 0）、跟車 lead 車距／速度（車對車追撞）
         if type(phys) == "table" then
             a.tn, a.ib, a.tlg, a.tlv = phys.transmissionNumber, phys.isBraking, round1(phys.trfLeadGap), round1(phys.trfLeadV)
+            -- 1026g T12：開出 ms（Driver s.startedMs）、拖車旗標（false 也寫；拖車起步拉緊不必靠片段推）
+            a.tw = phys.towing
+            if finite(phys.startedMs) then a.dms = now - phys.startedMs end
         end
         -- 1013e 拖車：掛車最近硬點（Driver Drive.towFootprint）的淨距（含 pad，同 ac）、座標與那點 1 格內的 sprite——上面的 sprite
         -- 只從牽引車車頭找，掛車撞的會誤歸因（正式服 Q10 clip-30 摘要寫成樹）
@@ -2106,6 +2254,7 @@ function D.sample(pn, now, x, y, heading, speed, target, remaining, lat, err,
             ms = g.edgeGap,
         })
     end
+    damageTick(g, pn, now) -- 1026g T14：撞擊車損（damage 事件）
     -- 寫滿接續後 sessions[pn] 已換成新檔：回新檔的存活，不是這個被封的 s
     local cur = sessions[pn]
     return (cur ~= nil and cur.active == true) or uploads[pn] ~= nil

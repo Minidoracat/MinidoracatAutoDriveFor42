@@ -1011,6 +1011,155 @@ do
     getCell, instanceof, player0.getVehicle = oldCell, oldInst, oldVeh
 end
 
+-- 1021 不算撞擊的再兩類（U.impactClass）：
+--   small-animal＝nb 最近的動物貼車、<20 kg，殭屍／玩家沒貼車、他車不在兩車半長內、沒 footprint、車頭擋車 sprite 不在 halfW＋0.8 內
+--     （E2E 1020 直路 70 km/h 撞兔子 dv 19.3；正式服 1012h–1019a 192 件真撞擊 30 件）；
+--   tow-slack＝拖車時同一個間隔掛車 |km/h| 增加 ≥5、牽引車掉速（連結拉緊；E2E 1020 trailerfront 拖 SmallCar 起步 0.8 s 掛車 0→11）。
+-- 兩類都不算 impact、不出片段，摘要另計 sma／tsl。反面：動物＋硬物（sprite 1 m）、動物＋殭屍貼車、動物＋footprint、20 kg 以上、
+-- 沒貼車、他車貼著、起步後真撞（掛車同降）、拉緊同時 footprint 命中，都仍是 impact。
+-- 違規證明：impactClass 不分 small-animal／tow-slack＝(sa)／(tsl) 紅；不看車頭 sprite＝(sa-hard) 紅；不看殭屍貼車＝(sa-z) 紅；
+-- footprint 不擋＝(sa-fb)／(tsl-fb) 紅；不看體重＝(sa-big) 紅；不看貼車＝(sa-far) 紅；不看他車＝(sa-v) 紅；tkm 不取差（看本筆值）＝(tsl-real) 紅。
+scenario("1021 small-animal and tow-slack: not impacts; animal plus hard object or a real towing hit still are")
+do
+    local placed, vehicles, hard = {}, {}, nil
+    local function list(items)
+        return { size = function() return #items end, get = function(_, i) return items[i + 1] end }
+    end
+    local cell = {
+        getGridSquare = function(_, gx, gy)
+            local here = {}
+            for i = 1, #placed do
+                local o = placed[i]
+                if math.floor(o.getX()) == gx and math.floor(o.getY()) == gy then here[#here + 1] = o end
+            end
+            return { getMovingObjects = function() return list(here) end,
+                getStaticMovingObjects = function() return list({}) end }
+        end,
+        getVehicles = function()
+            local i = 0
+            return { iterator = function()
+                return { hasNext = function() return i < #vehicles end, next = function() i = i + 1; return vehicles[i] end }
+            end }
+        end,
+    }
+    local ownCar = { getZ = function() return 0 end, getVehicleTowing = function() return nil end,
+        getVehicleTowedBy = function() return nil end }
+    local oldCell, oldInst, oldVeh, oldSensor = getCell, instanceof, player0.getVehicle, MDADSensor
+    getCell = function() return cell end
+    instanceof = function(o, c) return type(o) == "table" and o.cls == c end
+    player0.getVehicle = function() return ownCar end
+    MDADSensor = {
+        softKindOf = function(o) if o.cls == "IsoAnimal" then return "small" end end,
+        hardSpriteNear = function() if hard then return "fencing_01_32", "hard", hard end end,
+    }
+    -- heading 0＝朝 +x、右手側 +y；profile halfL 2.3／halfW 0.9＝貼車 |縱向| ≤ 3.1、|橫向| ≤ 1.7
+    local function animal(dx, dy, kg)
+        return { cls = "IsoAnimal", getX = function() return x + dx end, getY = function() return 200 + dy end,
+            isDead = function() return false end, getVehicle = function() return nil end,
+            getAnimalType = function() return "rabdoe" end, getData = function() return { getWeight = function() return kg end } end }
+    end
+    local function n(sum, key) return tonumber(string.match(sum, '"' .. key .. '":(%d+)')) end
+    local evLines, origEvent = {}, U.event
+    U.event = function(u, line, ...)
+        if string.find(line, '"n":"impact"', 1, true) then evLines[#evLines + 1] = line end
+        return origEvent(u, line, ...)
+    end
+    local function bump(contact)
+        drive(3000, { speed = 70 })
+        drive(200, { speed = 50, contact = contact }) -- 70→50／200ms＝27.8 m/s²
+        drive(3000, { speed = 50 })
+    end
+    local function one(label, setup, steps)
+        placed, vehicles, hard = {}, {}, nil
+        setup()
+        local e0 = #evLines
+        local imp, _, _, sum = impactDrive(label, steps or function() bump() end)
+        return imp, sum, evLines[e0 + 1] or ""
+    end
+    local imp, sum, ev = one("(sa) rabbit", function() placed = { animal(1.0, 0.3, 3.6) } end)
+    checkEq(imp, 0, "(sa) a touching 3.6 kg animal is not an impact")
+    checkEq(n(sum, "sma"), 1, "(sa) counted once as small-animal")
+    checkEq(n(sum, "clips"), 0, "(sa) no impact clip")
+    check(string.find(ev, '"cls":"small-animal"', 1, true) ~= nil, "(sa) the impact event carries cls small-animal (" .. ev .. ")")
+    check(#sum < U.CHUNK, "(sa) summary still fits one chunk (" .. #sum .. ")")
+    check(string.find(ev, '"icv":1', 1, true) ~= nil and string.find(ev, '"akg":3.6', 1, true) ~= nil
+        and string.find(ev, '"bz":false', 1, true) ~= nil,
+        "(sa-keys) the event carries the classifier inputs icv 1, akg 3.6, bz false (" .. ev .. ")")
+    imp, sum, ev = one("(sa-hard)", function() placed = { animal(1.0, 0.3, 3.6) }; hard = 1.0 end)
+    checkEq(imp, 1, "(sa-hard) animal plus a hard sprite 1 m from the nose is an impact")
+    checkEq(n(sum, "sma"), 0, "(sa-hard) not small-animal")
+    check(string.find(ev, '"cls":"hit"', 1, true) ~= nil and string.find(ev, '"hardD":1', 1, true) ~= nil,
+        "(sa-hard) event cls hit with the same hardD (" .. ev .. ")")
+    imp = one("(sa-hard-far)", function() placed = { animal(1.0, 0.3, 3.6) }; hard = 2.4 end)
+    checkEq(imp, 0, "(sa-hard-far) a hard sprite 2.4 m from the nose (beyond halfW+0.8) does not veto")
+    imp = one("(sa-z)", function()
+        placed = { animal(1.0, 0.3, 3.6), { cls = "IsoZombie", getX = function() return x + 1.5 end, getY = function() return 199.5 end } }
+    end)
+    checkEq(imp, 1, "(sa-z) animal plus a touching zombie is an impact")
+    -- 1021h：最近那隻殭屍在車側 1.8 m（|橫向| 超出 halfW＋0.8＝1.7、沒貼車），較遠那隻在車頭 2.3 m 貼車——要看任一隻，不是最近那隻
+    imp = one("(sa-z2) nearest zombie off to the side, farther one at the nose", function()
+        placed = { animal(1.0, 0.3, 3.6),
+            { cls = "IsoZombie", getX = function() return x end, getY = function() return 198.2 end },
+            { cls = "IsoZombie", getX = function() return x + 2.3 end, getY = function() return 200 end } }
+    end)
+    checkEq(imp, 1, "(sa-z2) a touching zombie that is not the nearest one still makes it an impact")
+    imp = one("(sa-big2) small animal nearest, a 60 kg one also touching", function()
+        placed = { animal(1.0, 0.3, 3.6), animal(2.5, 0.2, 60) }
+    end)
+    checkEq(imp, 1, "(sa-big2) a second touching animal of 60 kg makes it an impact")
+    imp = one("(sa-fb)", function() placed = { animal(1.0, 0.3, 3.6) } end, function() bump(true) end)
+    checkEq(imp, 1, "(sa-fb) animal plus a footprint hit is an impact")
+    imp = one("(sa-big)", function() placed = { animal(1.0, 0.3, 60) } end)
+    checkEq(imp, 1, "(sa-big) a 60 kg animal is an impact")
+    imp = one("(sa-far)", function() placed = { animal(5.0, 0.3, 3.6) } end)
+    checkEq(imp, 1, "(sa-far) a small animal 5 m ahead (not touching) is an impact")
+    imp = one("(sa-v)", function()
+        placed = { animal(1.0, 0.3, 3.6) }
+        vehicles = { { getX = function() return x + 4 end, getY = function() return 201 end,
+            getCurrentSpeedKmHour = function() return 0 end } }
+    end)
+    checkEq(imp, 1, "(sa-v) animal plus another car 4.1 m away (within two half lengths) is an impact")
+    -- 拖車：tkm＝掛車 km/h（樣本 phys.towKmh），tup 平穩（不是 tow-sync）
+    local function tw(kmh) return { capReason = "profile", frameMs = 16, towUp = 1.0, towKmh = kmh, isBraking = false,
+        vLong = 5, vLat = 0 } end
+    local function pull(contact)
+        drive(1000, { speed = 0, phys = tw(0) })
+        drive(200, { speed = 15, phys = tw(0) })
+        drive(200, { speed = 30, phys = tw(0) })
+        drive(200, { speed = 15, phys = tw(13), contact = contact }) -- 30→15／200ms＝20.8 m/s²；掛車 0→13
+        drive(3000, { speed = 20, phys = tw(20) })
+    end
+    imp, sum, ev = one("(tsl) slack", function() end, function() pull() end)
+    checkEq(imp, 0, "(tsl) tractor drop while the trailer gains 13 km/h is not an impact")
+    checkEq(n(sum, "tsl"), 1, "(tsl) counted once as tow-slack")
+    checkEq(n(sum, "clips"), 0, "(tsl) no impact clip")
+    check(string.find(ev, '"cls":"tow-slack"', 1, true) ~= nil, "(tsl) the impact event carries cls tow-slack (" .. ev .. ")")
+    check(string.find(ev, '"tkg":13', 1, true) ~= nil, "(tsl-keys) the event carries the trailer gain tkg 13 (" .. ev .. ")")
+    -- 1021h：掛車增速也要沒有別的碰撞反證（同 small-animal 的硬物、殭屍／玩家／他車、貼車動物）
+    imp, sum = one("(tsl-hard)", function() hard = 1.0 end, function() pull() end)
+    checkEq(imp, 1, "(tsl-hard) trailer gain plus a hard sprite 1 m from the nose is an impact")
+    checkEq(n(sum, "tsl"), 0, "(tsl-hard) not tow-slack")
+    imp = one("(tsl-z)", function()
+        placed = { { cls = "IsoZombie", getX = function() return x + 2 end, getY = function() return 200 end } }
+    end, function() pull() end)
+    checkEq(imp, 1, "(tsl-z) trailer gain plus a touching zombie is an impact")
+    imp = one("(tsl-a)", function() placed = { animal(1.5, 0.2, 60) } end, function() pull() end)
+    checkEq(imp, 1, "(tsl-a) trailer gain plus a touching 60 kg animal is an impact")
+    imp, sum = one("(tsl-fb)", function() end, function() pull(true) end)
+    checkEq(imp, 1, "(tsl-fb) the same jerk with a footprint hit is an impact")
+    checkEq(n(sum, "tsl"), 0, "(tsl-fb) not tow-slack")
+    imp, sum = one("(tsl-real) hit after start", function() end, function()
+        drive(1000, { speed = 0, phys = tw(0) })
+        drive(3000, { speed = 30, phys = tw(30) })
+        drive(200, { speed = 10, phys = tw(28) }) -- 牽引車撞停，掛車照走（沒有加速）
+        drive(3000, { speed = 0, phys = tw(0) })
+    end)
+    checkEq(imp, 1, "(tsl-real) a towing hit after the start (trailer not gaining) is an impact")
+    checkEq(n(sum, "tsl"), 0, "(tsl-real) not tow-slack")
+    U.event = origEvent
+    getCell, instanceof, player0.getVehicle, MDADSensor = oldCell, oldInst, oldVeh, oldSensor
+end
+
 -- 1008 伺服器滿槽先淘汰舊版（rev 與這段不同）的片段：舊版 pri 1–2 片段永久佔槽，正式服槽滿的玩家約八成是舊版片段、
 -- 新版 takeover 72 段只收到 31。同版才照原規則（pri 數字最大中最舊）。
 -- 違規證明：pickSlot 不看 rev＝(rev) 紅；舊版裡不照 pri／時間挑＝(rev-oldest) 紅；帶 rev 時同版片段不當候選（全同版就拒收）＝(same) 紅；
@@ -2001,6 +2150,77 @@ do
         "(compat) old engine off event: eng unchanged")
     check(string.find(sum, '"vfInTs":[]', 1, true) ~= nil, "(compat) no first-seen: vfInTs empty")
     MDAD.gasGearTerm, MDAD.fairGear = nil, nil
+end
+
+-- 1026g 摘要（V5、T14）：
+--   (V5)   vfIn／vfInX 舊語意不動；vfW＝首見落在沒開著的 8 秒窗才 +1（同一筆兩個停車條目、0.4 秒後重複首見都併進同窗）；
+--          vfXk＝窗內 c（接觸）／vv／vm／vb（鎖輪 fbw）／va（可視帳輔助頂滿）各計一次；vfWX＝出現 c、vv 或 vm 的窗數（blocked 鎖輪、
+--          vis 輔助不算失敗）；vfWs＝前 4 窗的 [首見 ts, 距離, 本車 km/h]。
+--   (vh)   跟線、≥10 km/h 時 vehN 0→正那筆：vehNearS − rs − halfL＞0 才算進 vhN／vhMin，<15 m 另計 vhLt；持續看到、低速不算。
+--   違規證明：vfW 每個首見都 +1＝(V5) vfW 紅；vfWX 收 vb＝(V5) vfWX 紅；同窗同種類重複計＝(V5) c 紅；vh 不看上升緣＝(vh) vhN 紅；
+--   不扣半車長＝(vh) vhMin 紅。
+scenario("1026g summary: windowed vfW/vfWX/vfXk/vfWs, vehicle first-seen distance vhN/vhMin/vhLt")
+do
+    local function tp(extra)
+        local t = { frameMs = 16, capGear = 120, capPerception = 120, capMax = 120, capReason = "profile",
+            controlState = "TRACK" }
+        for k, v in pairs(extra or {}) do t[k] = v end
+        return t
+    end
+    nowMs = nowMs + 3600000
+    start()
+    drive(1000, { speed = 70, phys = tp() }) -- 暖機：第一筆取樣沒有間隔，不進 KPI
+    local d0, t1 = nowMs - 1000, nowMs + 200
+    local seen1, seen2 = "[[40,1,30,0.5,70],[45,1,35,0.2,70]]", "[[50,1,48,0.1,72]]"
+    -- 窗 1：同一筆兩個停車條目；blocked 鎖輪與可視帳輔助頂滿（參考，不算失敗）
+    drive(200, { speed = 70, phys = tp({ firstSeen = seen1 }) })
+    drive(400, { speed = 70, phys = tp({ forceBrakeLeft = 900, forceBrakeWhy = "blocked" }) })
+    drive(200, { speed = 70, phys = tp({ visAssistDecel = 4, visAssistWhy = "vis" }) })
+    drive(9000, { speed = 70, phys = tp() })
+    -- 窗 2：首見、0.4 秒後同車重複首見；moving 鎖輪；接觸兩次（同窗只計一次）
+    drive(200, { speed = 70, phys = tp({ firstSeen = seen2 }) })
+    drive(200, { speed = 70, phys = tp() })
+    drive(200, { speed = 70, phys = tp({ firstSeen = seen2 }) })
+    drive(400, { speed = 70, phys = tp({ forceBrakeLeft = 900, forceBrakeWhy = "moving" }) })
+    drive(200, { speed = 70, phys = tp(), contact = true })
+    drive(200, { speed = 70, phys = tp() })
+    drive(200, { speed = 70, phys = tp(), contact = true })
+    drive(9000, { speed = 70, phys = tp() })
+    -- 窗 3：visibility 鎖輪
+    drive(200, { speed = 70, phys = tp({ firstSeen = seen2 }) })
+    drive(400, { speed = 70, phys = tp({ forceBrakeLeft = 900, forceBrakeWhy = "visibility" }) })
+    drive(9000, { speed = 70, phys = tp() })
+    -- (vh) rs 10、halfL 2.3：近的 8 m（20.3）、遠的 40 m（52.3）；持續看到不再算；低速上升緣不算；車頭後方（d≤0）不算
+    local function sen(n, s) return { vehN = n, vehNearS = s, stamp = 1, ready = true } end
+    drive(200, { speed = 50, phys = tp(), sensor = sen(0) })
+    drive(200, { speed = 50, phys = tp(), sensor = sen(2, 20.3) })
+    drive(400, { speed = 50, phys = tp(), sensor = sen(3, 18) })
+    drive(200, { speed = 50, phys = tp(), sensor = sen(0) })
+    drive(200, { speed = 50, phys = tp(), sensor = sen(1, 52.3) })
+    drive(200, { speed = 5, phys = tp(), sensor = sen(0) })
+    drive(200, { speed = 5, phys = tp(), sensor = sen(1, 14) })
+    drive(200, { speed = 50, phys = tp(), sensor = sen(0) })
+    drive(200, { speed = 50, phys = tp(), sensor = sen(1, 11) })
+    -- (eng-T9) engine off 的 est／kso／erm 進摘要 eng（有值才寫；舊事件不變由 1020 (compat) 守）
+    D.event(0, "engine", { phase = "off", why = "engine", chg = 1, es = 3000, fu = 100, est = "ShuttingDown", kso = 209, erm = 16933 })
+    D.stop(0, "UI_MinidoracatAutoDrive_Arrived")
+    pump(120000)
+    local _, sum = sumLines(d0)
+    check(string.find(sum, '"est":"ShuttingDown","kso":209,"erm":16933}', 1, true) ~= nil,
+        "(eng-T9) summary eng carries est/kso/erm (" .. tostring(string.match(sum, '"eng":%b{}')) .. ")")
+    local function n(key) return tonumber(string.match(sum, '"' .. key .. '":([%d%.%-]+)')) end
+    checkEq(n("vfIn"), 5, "(V5) old vfIn still counts every qualifying entry")
+    checkEq(n("vfW"), 3, "(V5) vfW counts windows: same-sample and 0.4 s repeat entries fold in")
+    checkEq(n("vfWX"), 2, "(V5) vfWX: windows with contact/moving/visibility; blocked lock and vis assist do not fail")
+    check(string.find(sum, '"vfXk":{"c":1,"vv":1,"vm":1,"vb":1,"va":1}', 1, true) ~= nil,
+        "(V5) c vfXk counts each kind once per window (" .. tostring(string.match(sum, '"vfXk":%b{}')) .. ")")
+    local ws = string.match(sum, '"vfWs":(%b[])') or ""
+    checkEq(count(ws, "],["), 2, "(V5) vfWs keeps one entry per window (" .. ws .. ")")
+    check(string.find(ws, "^%[%[" .. t1 .. ",40[%.0]*,70[%.0]*%]") ~= nil, "(V5) vfWs entry = [ts, distance, ego km/h] (" .. ws .. ")")
+    checkEq(n("vhN"), 2, "(vh) vhN: rising edges ahead of the nose while following >=10 km/h")
+    checkEq(n("vhMin"), 8, "(vh) vhMin = vehNearS - rs - halfL")
+    checkEq(n("vhLt"), 1, "(vh) vhLt counts first-seen closer than 15 m")
+    check(#sum < U.CHUNK, "(1026g) summary still fits one chunk (" .. #sum .. ")")
 end
 
 -- 1010 所有送出的片段整段 ≤ CLIP_TOTAL_MAX（第一塊宣告的 len＝全文長度；伺服器只看這個）

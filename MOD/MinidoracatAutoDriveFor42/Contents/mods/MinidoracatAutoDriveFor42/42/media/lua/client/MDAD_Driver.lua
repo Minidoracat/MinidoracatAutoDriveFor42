@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1025b"
+Drive.REV = "1026m"
 
 -- 熱路徑（每幀）用到的庫函式在載入期取成 local upvalue：Kahlua 的庫函式都是
 -- JavaFunction，寫 math.sqrt 等於每幀多一次 table 查詢。與 MDAD_Follower.lua
@@ -354,6 +354,14 @@ TUNE.KEEP_RIGHT_FALLBACK_M = 1.0  -- 靠右行駛：路寬未知（v2/v3 路線�
 -- 距離，不過中線（下限 0）。車身右緣內側的硬物是繞行的事，這裡不管。
 TUNE.KEEP_RIGHT_CLEAR_M = 0.6
 TUNE.KEEP_RIGHT_LOOK_M = 50
+-- 1026e（NC2）：出右彎後常駐車道從弧內側夾限放回靠右（clampLane 的 ramp），車追 ramp 正常過衝 0.44–0.74 m
+-- （正式服 1023b 新圖 a2 15 件 contact，14 件 lth 沒開＝laneRampHold 沒延續到弧離開前視窗之後），大於 CLEAR 0.6。
+-- 路邊硬物所在弧長的常駐落點比它前 RAMP_BACK_M 處往右多 ≥RAMP_RISE_M＝它在放回區段（或剛放回完），留邊加
+-- RAMP_M。直路、左彎、路寬不變的段落點沒有上升，不受影響。
+-- ponytail: 固定預算（實測 p90），過衝和上升量、車速有關；要按上升量比例給再加係數。
+TUNE.KEEP_RIGHT_RAMP_M = 0.75
+TUNE.KEEP_RIGHT_RAMP_BACK_M = 25
+TUNE.KEEP_RIGHT_RAMP_RISE_M = 0.5
 TUNE.UNLOADED_CAP = 15         -- 走廊內有未載入 chunk（不知道前面有什麼，先慢）
 -- 可視巡航用一般制動域；緊急紅線沿用forceBrake的既有先驗，不再依unloaded旗標切換。
 -- 實測的煞車下界另以信心收緊，不能把已學到的弱煞車能力再乘2.5。
@@ -578,6 +586,10 @@ TUNE.LAG_HIST_JUMP_M = 0.2
 -- 實測收斂要顯著（1008）：|ld| 在取樣窗內至少降這麼多才算在收斂，否則 rate＝0（不衰減）。正式服 0.23.0 片段：SemiTruckBox_mil
 -- 出彎 0.88→0.82、M998＋拖車轉角 0.94→0.89 被當成收斂，遠處硬點的預測車身縮回門檻內就 release、硬點還在車前。
 TUNE.LAG_RATE_MIN_DROP_M = 0.08
+-- 弧上 nose 保持的出口上限（1026c S2，Drive.lagGuardScan）：進保持後沿路線前進超過 K×（車長＋2·硬點半寬）仍判在車身旁＝放手
+-- （why=nose-cap）。直路上車尾過點只要走 1×；弧上彎內點相對車身的縱向速率是 v(1−κd)（d＝點離路線的彎內橫距），d ≤ R/2 時 ≥0.5v，
+-- 2 倍留得住；車照 MIN_EXEC 前進，最多多壓兩個車長。
+TUNE.LAG_NOSE_HOLD_K = 2
 -- 掛車車身記憶（1013e，Drive.towFootprint）：掃描從車心前 SCAN_NEAR 起，掛車旁的硬點不在快照裡。車頭前這麼遠（m，從車頭起算）內、
 -- 橫向離車位 ≤ 掛車半寬＋TOW_MEM_LAT_M 的硬點記下來（最多 TOW_MEM_N 個，過掛車尾就丟），給掛車實際車身做 footprint。
 TUNE.TOW_MEM_AHEAD_M = 8
@@ -721,7 +733,10 @@ TUNE.TOW_BRAKE_DECEL = 7.0 -- 兩節各自的外力減速度（m/s²，同 DODGE
 -- 倒車量級、掛點 8m 換速、側推增益與施力點照 2026-10-11 E2E（家族 scenarios.md〈replay〉rehitch；8/8 掛回的那組）。
 TUNE.REHITCH_MAX = 3            -- 每趟最多幾次
 TUNE.REHITCH_BRAKE_MS = 10000   -- 煞停上限（70 km/h 不鎖輪約 3 秒）
-TUNE.REHITCH_WAIT_MS = 15000    -- 停妥後等掛車回到客戶端的上限（本機 0.2–1.1 秒；正式服 3 例有 2 例超過 5 秒——推測值，照遙測調）
+-- 停妥後等掛車回到客戶端的上限。1026g H2：15 → 7 秒。正式服片段 19 次掛回（1012h–1023b）停妥到 rh-found 最慢 3.3 秒（其餘
+-- ≤1.5 秒），約 2 倍餘裕取 7 秒；沒等到的 5 次玩家在停妥後 4.5–8.5 秒自己動手（rh-fail why=manual kind=wait）、1 次等滿 15 秒
+-- nofound——縮短讓 MOD 先給出完整的「掛車同步遺失」說明。
+TUNE.REHITCH_WAIT_MS = 7000
 TUNE.REHITCH_FOUND_MS = 1000    -- 看到掛車後等這麼久才倒（掛車在客戶端站穩；煞停的一秒鎖輪閂鎖也過了）
 TUNE.REHITCH_FIND_R = 30        -- 回來的同 id 同 script 車離脫開點超過這個距離（m）不認
 TUNE.REHITCH_FAST_KMH, TUNE.REHITCH_SLOW_M, TUNE.REHITCH_KMH = 10, 8, 4 -- 掛點距離 >8m 倒車 10 km/h，之後 4
@@ -1077,13 +1092,20 @@ end
 -- 「tx 是否為 nil」區分兩類（抵達接管只認前者）。route 物件的 identity 就是
 -- 版本號：主 MOD 重算路線時會產生新 table（ensureRoute→findRoute 新建，
 -- MinidoracatMiniMap_NavRoute.lua:1181-1186），沿用時回同一顆。
+-- 1026g（T13）：最近一次查詢結果記在 Drive.routeState[playerNum]（notarget＝沒有目標；其餘＝主 MOD requestRoute 的
+-- state：ok／noroad／badargs／noplayer／idle／extracting／building／failed），給 route phase=lost 帶（Drive.routeLostNote）。
 local function fetchRoute(api, playerNum)
     local tx, ty = api.getNavTarget(playerNum)
-    if not tx then return nil end
+    if not tx then
+        Drive.routeState[playerNum] = "notarget"
+        return nil
+    end
     local route, state = api.requestRoute(playerNum, tx, ty)
+    Drive.routeState[playerNum] = state or "nil"
     if not route or state ~= "ok" then return nil, tx, ty, state end
     return route, tx, ty, state
 end
+Drive.routeState = {}
 
 -- 路線起點太遠（`route.snapDist`＝玩家到路線最近點的投影距離＝出發前必須越野走完的
 -- 接線；MinidoracatMiniMap_NavRoute.lua:1386-1389、1827-1832）。判在啟動與換目標。
@@ -1342,7 +1364,8 @@ end
 -- 向主 MOD 要「繞開 (ax,ay) 半徑 r」的替代路線並驗收。回 (route, nil) 或 (nil, 原因)。
 -- 驗收：仍穿避讓圈（avoidPenalty>0＝沒有替代路，主 MOD 是軟封鎖照樣給原線）、
 -- 起點太遠、長度 > lenMax（預設剩餘×ratio+slack）一律拒——這三條就是舊自動改道「拿回爛路線」的
--- 全部型態。成功時主 MOD 已覆寫路線快取，下一次 requestRoute 回的就是替代線。
+-- 全部型態。收下的線由呼叫端做完自己的驗收後經 Drive.detourSettle 定案（v11 commit 進主 MOD 快取；v10 以下主 MOD
+-- 算出就已覆寫快取），下一次 requestRoute 回的就是替代線。
 -- r／lenMax 省略＝堵車改道（DETOUR_AVOID_R、DETOUR_LEN_*）；拖車繞開調頭另給（Drive.towTurnaround）。
 -- refRoute＝目前的路線：替代線的終點要跟它同一個（DETOUR_END_M）。
 -- more＝同一趟先前改道判死的避讓圈（Drive.avoidMore，扁平 { x, y, r, … }；nil＝沒有）：一併交給主 MOD（nav API v9
@@ -1355,11 +1378,12 @@ TUNE.DETOUR_HIST_MAX = 7 -- 記幾個先前的避讓圈（＋目前那圈＝主 
 -- 正式服 0.25.0：拖車轉角改道拿到直行穿過那個路口、整條沒有不可過轉角的 4280m 線，因主圈 through 拒收、22m 後交還。
 -- nav API v10 起第 8 參給 SNAP_MAX_M：主 MOD 不再拿離車超過它的路當起點（跳出避讓圈從百米外起步比繞合法迴圈便宜，
 -- 回來就是 far；正式服 0.31.x 拖車調頭 4 趟 why=far）。v9 以下不傳＝舊行為，far 照舊在下面拒收。
+-- nav API v11 起第 9 參 deferCommit＝true（Drive.detourDeferred）：主 MOD 不寫快取，收下才 commit（Drive.detourSettle）。
 local function requestDetourRoute(api, playerNum, tx, ty, ax, ay, remaining, r, lenMax, refRoute, more, hard)
     if type(api.requestDetour) ~= "function" then return nil, "api" end
     local v10 = type(api.navApiVersion) == "number" and api.navApiVersion >= 10
     local route, state = api.requestDetour(playerNum, tx, ty, ax, ay, r or TUNE.DETOUR_AVOID_R, more,
-        v10 and TUNE.SNAP_MAX_M or nil)
+        v10 and TUNE.SNAP_MAX_M or nil, Drive.detourDeferred(api) or nil)
     if not route or state ~= "ok" then return nil, state or "noroad" end
     -- 空線（1002h E2E rc50 0017：目標 46m 外判堵、主 MOD 回 ok 但 len 0）收下＝下一幀 cutover 建不出剖面、
     -- 直接 LostRoute 交還；當成沒有改道，照常走受困流程。
@@ -1388,6 +1412,33 @@ local function requestDetourRoute(api, playerNum, tx, ty, ax, ay, remaining, r, 
         return nil, "long", route
     end
     return route, nil
+end
+
+-- nav API v11：requestDetour 第 9 參 deferCommit＝true 時主 MOD 不寫路線快取，收下才 commitDetour 寫進去——拒收的線
+-- 不會躺在快取裡，小地圖藍線維持車在走的那條。v10 以下或缺 commitDetour＝不傳、當成舊制：主 MOD 算出即覆寫，拒收靠
+-- s.rejectedRoute 補位（v10 會忽略第 9 參照樣覆寫，當成 deferred 就漏記 rejectedRoute）；第一次遇到 log 一次。
+function Drive.detourDeferred(api)
+    local v = api.navApiVersion
+    if type(v) == "number" and v >= 11 and type(api.commitDetour) == "function" then return true end
+    if not Drive.detourLegacyLogged then
+        Drive.detourLegacyLogged = true
+        print(LOG .. "nav API v" .. tostring(v) .. " without commitDetour: rejected detours stay in MiniMap route cache"
+            .. " (rejectedRoute fallback)") -- telemetry: 樣本 nv＝navApiVersion（一次性相容提示，非 getDebug）
+    end
+    return false
+end
+
+-- 改道驗收的最後一步（四個收線點共用：Drive.detourAttempt、Drive.towTurnaround、Drive.towCornerDetour、cutover 的
+-- sticky 重問），傳入呼叫端驗收後的 (route, why, rejected)、回同樣三個值。v11：收下＝commitDetour 寫進主 MOD 快取，
+-- 失敗＝拒收 "commit"（快取沒換，不 cutover）；拒收不用記（快取沒動）。v10 以下：收下不用做事（主 MOD 算出就覆寫了）；
+-- 拒收＝快取已被覆寫成被拒那條，記 s.rejectedRoute 讓 cutover 跳過。沒算出線（rejected＝nil）＝快取沒動，舊紀錄保留。
+function Drive.detourSettle(s, api, playerNum, route, why, rejected)
+    local deferred = Drive.detourDeferred(api)
+    if route and deferred and api.commitDetour(playerNum, route) ~= true then
+        route, why, rejected = nil, "commit", route
+    end
+    if not route and not deferred and rejected ~= nil then s.rejectedRoute = rejected end
+    return route, why, rejected
 end
 
 -- 同一趟（同目標）先前改道判死的避讓圈：s.avoidHist＝扁平 { x, y, r, … }，不含目前的 s.avoidX（拖車調頭圈不記）。
@@ -1448,7 +1499,10 @@ local function driveGate(playerObj, vehicle, playerNum, context)
     -- 熄火不自駕，也不代客發動（M3 不呼叫 tryStartEngine）。電瓶死掉一併走這條：
     -- 引擎運轉中本來就靠發電機供電，電瓶沒電＝電系已經不成立。
     -- isEngineRunning＝BaseVehicle.java:7639；getBatteryCharge＝VehicleParts.java:152-156
-    if not vehicle:isEngineRunning() then return KEY_ENGINE, "engine" end
+    -- 1026g：同一個讀值順手記引擎進入 Running 的時間（Drive.engineSeen；engine off 的 erm）
+    local on = vehicle:isEngineRunning()
+    Drive.engineSeen(playerNum, vehicle, on)
+    if not on then return KEY_ENGINE, "engine" end
     if not MDAD.isBatteryLive(vehicle) then return KEY_ENGINE, "battery" end
     if MDAD.sandbox("NeedItemForAutoDrive", true) == true and not MDAD.isAutoInstalled(vehicle) then
         return KEY_NEED_MODULE
@@ -2089,16 +2143,23 @@ end
 -- （getVehicleById 找不找得到掛車）與回看基準點 x0／y0。交還（Drive.stop）與進入自動掛回（Drive.rehitchArm）共用。
 -- 1017e：alive=true（真的斷鉤）另帶前 1 秒折角最大值 phiMax、最大變化率 phiRate（rad/s，MDADTrailer.phiStats）與最後一幀 st——
 -- 起步滿舵折斷（D2）是 phiRate 大、st 飽和；同步拉回斷鉤是 phi 小。
+-- 1026g（T10）：alive=true 另帶 tj（脫開那一步掛車位移減牽引車位移的長度 m，MDADTrailer.jumpAt）與 tps（距上一次 >JUMP_M
+-- 跳動的 ms，沒跳過缺）——同步拉回是掛車整段被拽回（tj 大、之前常有週期性跳動），撞擊衝量是 tj 小。
 function Drive.towLostNote(s, playerNum, vehicle)
     local cur, alive, by, hd, kmh, up = MDADTrailer.lostState(vehicle, s.tow)
     local rmw, ox, oy, od, x0, y0 = MDADTrailer.lostWhere(vehicle, s.tow)
-    local phiMax, phiRate = nil, nil
-    if alive == true then phiMax, phiRate = MDADTrailer.phiStats(s, getTimestampMs()) end
+    local phiMax, phiRate, tj, tps = nil, nil, nil, nil
+    if alive == true then
+        local now = getTimestampMs()
+        phiMax, phiRate = MDADTrailer.phiStats(s, now)
+        tj, tps = MDADTrailer.jumpAt(s, vehicle, s.tow, now)
+    end
     diagEvent(s, playerNum, "tow", {
         phase = "lost", cur = cur, alive = alive, by = by, hd = hd, speed = kmh, up = up, phi = s.towPhi,
         vid = s.tow.id, script = s.tow.script, -- 掛車 id／script（2026-10-10；MDADTrailer.attach 記下，量不到缺）
         rmw = rmw, ox = ox, oy = oy, od = od,
         phiMax = phiMax, phiRate = phiRate, st = alive == true and s.towSt or nil,
+        tj = tj, tps = tps,
     })
     return alive, x0, y0
 end
@@ -2287,7 +2348,8 @@ end
 -- 接手提示的異常計時（1020e）：每幀（onPlayerUpdate，讓位中不跑）把上傳摘要 tkoA 的異常（MDAD_Upload U.sample／U.event：
 -- 判堵、脫困、掛回、停滯、接觸、撞擊；事件那半在 diagEvent、急煞在 commandForceBrake）記到 s.anomAt。上傳只在 MP 跑，
 -- Driver 自己記＝SP 與 MP、關遙測都同一套判準。比上傳略寬（寧可少提示）：recoverWhy 也算、接觸看持續而非上升緣、
--- 撞擊不排除伺服器拉回與凍結樣本。
+-- 撞擊不分類（MDADUpload.impactClass 的 frozen／tow-sync／rehitch／tow-slack／small-animal 在這裡照樣算異常：撞到小動物或
+-- 拖車頓一下之後接手，多半就是因為那一下）。
 function Drive.anomTick(s, vehicle, now)
     local m = s.mode
     if m == "yield" then return end
@@ -2652,6 +2714,7 @@ local function startSession(playerObj, playerNum, stage)
         lagHitX = nil, lagHitY = nil, lagHitR = nil, -- 實測落後量守門的命中硬點（Drive.lagGuardScan；nil＝沒命中）
         lagHitS = nil, lagHitPl = nil, lagHitSide = nil, -- 命中點弧長／該處規劃線 lane／已在車身旁（1008；lagMem 掃描時才建）
         lagHitKind = nil, lagKeep = nil, lagKeepU = nil, -- 命中由掛車車身判（trailer）／X3·X4 保持理由／X3 進保持時命中點的縱向距離（1020c）
+        lagNoseS = nil, -- 弧上 nose 保持（1026c S2）開始時的弧長 rs（出口上限 TUNE.LAG_NOSE_HOLD_K 從這裡量）
         lagHistD = {}, lagHistL = {}, lagHistN = 0, -- 實測收斂率的環狀歷史（Drive.lagRate：累計行駛距離／|實測橫偏|）
         progressX = 0, progressY = 0, progressS = 0, progressH = 0,
         progressUntil = 0,
@@ -2754,7 +2817,7 @@ local function startSession(playerObj, playerNum, stage)
         detourTried = false,    -- 自動改道每個停等 episode 只試一次（清除同 blockRetryDone）
         avoidX = nil, avoidY = nil, -- 已接受的改道避讓圈（sticky：之後主 MOD 重算若穿回去再要一次）
         avoidHist = nil, detourAvoidN = nil, -- 同一趟先前的避讓圈（Drive.pushAvoidHist）／本次附給主 MOD 的圈數
-        pendingDetour = false,  -- requestDetour 已覆寫主 MOD 快取，等下一次 fetchRoute cutover
+        pendingDetour = false,  -- 改道已收下、主 MOD 快取已換線（v11 經 commit），等下一次 fetchRoute cutover
         -- RECOVER 單一進口（階段 2 主體 2）：why＝需求原因（nil＝無需求，
         -- 同時是舊 mode=="recover" 閂鎖的替代）；其餘三個是 suspect 探測留給
         -- dispatch 選動作用的純量，只有 why=="progress" 時有效。
@@ -2770,7 +2833,7 @@ local function startSession(playerObj, playerNum, stage)
         guardHitS = nil, guardHitX = nil, guardHitY = nil, -- 守護判死命中點（guard-blocked 煞停錨）
         guardHitPhase = nil, -- 只有回線段 p4 的失敗可在舊群過清後行駛中交接
         dodgeApproachCap = 0, -- 接近段 envelope（telemetry：分辨「遠壓速」vs「縫本身的帽」）
-        rejectedRoute = nil,  -- 本 MOD 拒收、但仍在主 MOD 快取裡的替代線 identity（cutover 跳過）
+        rejectedRoute = nil,  -- 本 MOD 拒收、但仍在主 MOD 快取裡的替代線 identity（cutover 跳過；只有 nav API v10 以下會有）
         laneChained = false,  -- 鏈式停留中：常駐 lane 暫時＝停留 offL（前方淨空解鏈）
         residentBias = fstate.laneBias, -- 常駐行駛線（sandBias＋roadBias 夾後；每輪路面對中更新）
         dodgeStay = false,    -- 本次承諾是停留承諾（線只到 c＋車身、無回線段）
@@ -3178,25 +3241,55 @@ end
 
 -- 改道（HUD「改道」鈕與自動改道共用）：只在 blocked 停等時有意義。以堵點
 -- （群最近擋線點 blockHitX/Y，缺則車位）為圓心向主 MOD 要替代路線並驗收
--- （requestDetourRoute）；成功＝主 MOD 快取已換線，這裡只記 sticky 避讓圈、
+-- （requestDetourRoute＋Drive.detourSettle）；成功＝主 MOD 快取已換線（v11 由 commit 換），這裡只記 sticky 避讓圈、
 -- 把 nextRouteMs 歸零讓下一幀 fetchRoute 立刻 cutover（why="detour"）。
--- 回 (true) 或 (false, 原因)；原因供 HUD tooltip／console。
+-- 回 (true[, "towturn"]) 或 (false, 原因)；原因供 HUD tooltip／console。
 -- stuck＝交還前的最後一次改道（Drive.stuckDetour）：不要求 blocked、錨點要在車前附近、放寬繞遠上限。
 -- src＝"auto"（停等自動改道）；HUD 按鈕不帶＝manual。每次請求（不論成敗）記一筆 detour 事件（1004b：舊制只有
 -- 交還前那條有事件，自動／HUD 改道被拒的原因只在 Debug console；正式服 0.18.2 開著自動改道的 90 趟沒有任何 detour
 -- 紀錄）。Upload 以 detour 事件觸發片段（phase＝skip 除外），事前窗看得到判堵、寬帶判定與倒車。
+-- 1026d 拖車往車後的線（back）：事件帶被拒線前 2 點／snapDist／第一段長度 blen 與對車頭夾角 bdeg（Drive.rejectFields），
+-- 接了拖車調頭繞路時 tt＝Drive.towTurnaround 的結果（ok 或它的拒收原因）。
 function Drive.requestDetour(playerNum, stuck, src)
     local s = sessions[playerNum]
     if not s then return false, "inactive" end
     s.detourAvoidN, s.detourAx, s.detourAy = nil, nil, nil -- 本次附給主 MOD 的舊避讓圈數／避讓圈圓心（detourAttempt 寫；早退＝nil）
+    s.detourRej, s.detourTT = nil, nil -- 本次 back 拒收的線與接調頭繞路的結果（detourAttempt 寫；只活到本函式記完事件）
     local ok, why, len = Drive.detourAttempt(s, playerNum, stuck)
-    local v = s.vehicle
-    diagEvent(s, playerNum, "detour", { phase = stuck and "stuck" or (src or "manual"),
-        why = ok and "ok" or tostring(why), x = v and v:getX() or nil, y = v and v:getY() or nil, s = s.lastSNow,
+    local v, vh, rej = s.vehicle, s.lastVehicleHeading, s.detourRej
+    if not v or not MDADDynamics.finite(vh) then rej, vh = nil, 0 end
+    local vx, vy = v and v:getX() or nil, v and v:getY() or nil
+    -- 字面表＋Drive.rejectFields 補被拒線欄位（verify 15b 核對字面鍵；rejectFields 的鍵也在 EK）
+    diagEvent(s, playerNum, "detour", Drive.rejectFields({ phase = stuck and "stuck" or (src or "manual"),
+        why = ok and (why or "ok") or tostring(why), x = vx, y = vy, s = s.lastSNow,
         hitX = s.blockHitX, hitY = s.blockHitY, ms = s.waitAccumMs, attempt = s.episodeAttempts,
         lvl = s.wideArmed and Drive.wideLevelOf(s) or nil, len = len, avoidN = s.detourAvoidN,
-        ax = s.detourAx, ay = s.detourAy })
+        ax = s.detourAx, ay = s.detourAy, tt = s.detourTT }, rej, vx, vy, cos(vh), sin(vh)))
+    s.detourRej, s.detourTT = nil, nil
     return ok, why
+end
+
+-- 被拒改道線的形狀寫進事件 payload p（1026d，T11／T13；冷路徑）：前 2 點 r1x,r1y／r2x,r2y、起點接線距離 snapDist
+-- （主 MOD route.snapDist，缺＝車到首點的世界距離）、第一段長度 blen 與它對車頭 (fx,fy) 的夾角 bdeg（度，0＝正前、180＝正後）。
+-- 分清「目標在車後只能調頭」與「新圖路網 snap 讓起點落到車後」。
+function Drive.rejectFields(p, route, vx, vy, fx, fy)
+    local pts = route and route.pts
+    if type(pts) ~= "table" or #pts < 4 then return p end
+    local fin = MDADDynamics.finite
+    local x1, y1, x2, y2 = pts[1], pts[2], pts[3], pts[4]
+    p.r1x, p.r1y, p.r2x, p.r2y = x1, y1, x2, y2
+    local sd = route.snapDist
+    if not fin(sd) and fin(x1) and fin(y1) then sd = sqrt((x1 - vx) * (x1 - vx) + (y1 - vy) * (y1 - vy)) end
+    p.snapDist = sd
+    local dx, dy = x2 - x1, y2 - y1
+    local l, fl = sqrt(dx * dx + dy * dy), sqrt(fx * fx + fy * fy)
+    p.blen = l
+    if l > 1e-6 and fl > 1e-6 then
+        local c = (dx * fx + dy * fy) / (l * fl)
+        if c > 1 then c = 1 elseif c < -1 then c = -1 end
+        p.bdeg = math.floor(math.acos(c) * 1800 / math.pi + 0.5) / 10
+    end
+    return p
 end
 
 function Drive.detourAttempt(s, playerNum, stuck)
@@ -3248,16 +3341,34 @@ function Drive.detourAttempt(s, playerNum, stuck)
     if route and s.tow and fin(vh) and not Drive.routeLeavesForward(route, vx, vy, cos(vh), sin(vh)) then
         route, why, rejected = nil, "back", route
     end
-    if getDebug() then -- telemetry: detour 事件（why len ax ay）
+    route, why, rejected = Drive.detourSettle(s, api, playerNum, route, why, rejected)
+    -- 1026d NB1：拖車的替代線往車後（密集街廓被堵時最短替代線幾乎都先往回走）＝接拖車調頭繞路：車尾正後方圈＋
+    -- 本堵點圈（同一個 ax,ay、DETOUR_AVOID_R）一起避，要一條從車頭方向出發、也不穿堵點的線（長度上限同調頭）。
+    -- 舊制拒收 back 就沒有出口、停等到 WAIT_TIMEOUT 交還（正式服 1023b 新圖 14 趟 StopStuck／9 人）。
+    -- 收下＝下一幀 cutover why=towturn（事件 why=towturn、tt=ok）；調頭也無解＝拒收 "back-turn"（tt＝調頭那次的原因），
+    -- 照舊走停等／交還。額度＝Drive.towTurnaround 的每趟 TOW_TURN_TRIES（與 ROTATE 共用），用完 tt=max 不再問主 MOD。
+    if not route and why == "back" then
+        s.detourRej = rejected
+        local ok, tt, tlen = Drive.towTurnaround(s, playerNum, s.vehicle, getTimestampMs(), cos(vh), sin(vh),
+            ax, ay, TUNE.DETOUR_AVOID_R)
+        s.detourTT = tt
+        if ok then
+            if getDebug() then -- telemetry: detour 事件（why=towturn tt r1x r1y r2x r2y snapDist blen bdeg）
+                print(LOG .. "detour pn=" .. playerNum .. " rejected back -> tow turn " .. tostring(tt)
+                    .. string.format(" rs=%.1f t=%.0f", s.lastSNow or -1, getTimestampMs()))
+            end
+            return true, "towturn", tlen
+        end
+        why = "back-turn"
+    end
+    if getDebug() then -- telemetry: detour 事件（why len ax ay；back 拒收另帶 tt r1x r1y r2x r2y snapDist blen bdeg）
         print(LOG .. "detour pn=" .. playerNum .. " avoid=(" .. tostring(ax) .. "," .. tostring(ay)
             .. ") -> " .. (route and ("ok len=" .. tostring(route.len)) or ("rejected " .. tostring(why)))
+            .. (s.detourTT and (" tt=" .. tostring(s.detourTT)) or "")
             .. string.format(" rs=%.1f t=%.0f", s.lastSNow or -1, getTimestampMs()))
     end
     if not route then
-        -- 主 MOD 的 requestDetour 成功算出路線就已覆寫快取（含被本 MOD 拒收的
-        -- far／long 線）；記住被拒的 identity，cutover 不得沿用（下一次 250ms 取
-        -- 路仍會拿到同一個 table，直到主 MOD 冷卻後重算）。
-        s.rejectedRoute = rejected
+        -- 拒收紀錄（v10 以下主 MOD 快取已被覆寫成被拒那條、s.rejectedRoute）由 Drive.detourSettle 記
         haloBad(playerObj, KEY_NO_DETOUR)
         voice("nodetour", playerNum)
         return false, why
@@ -3303,44 +3414,63 @@ end
 -- 路線——避讓圈放在車尾正後方（近緣離車心 TOW_TURN_GAP_M），往回開都得穿圈，只剩往前繞一圈。
 -- 驗收同堵車改道（穿圈／起點太遠拒）但長度放寬，另要從車頭方向出發。成功＝下一幀 cutover
 -- （why=towturn），等待期間回 true 讓呼叫端停住（上限 TOW_TURN_WAIT_MS）；每 session 最多
--- TOW_TURN_TRIES 次。回 false＝沒有不用調頭的走法，呼叫端照舊交還。
-function Drive.towTurnaround(s, playerNum, vehicle, now, fx, fy)
-    if s.pendingRouteWhy == "towturn" then return now < (s.towTurnUntil or 0) end
-    if (s.towTurnTries or 0) >= TUNE.TOW_TURN_TRIES then return false end
+-- TOW_TURN_TRIES 次。回 false＝沒有不用調頭的走法，呼叫端照舊交還。第二回傳＝結果（ok／wait＝已收下等 cutover／
+-- max＝額度用完／api＝主 MOD 或目標不在／requestDetourRoute 與 back 的拒收原因），第三回傳＝收下那條的長度。
+-- bx,by,br（1026d NB1，堵車改道拒收 back 時由 Drive.detourAttempt 給）＝本堵點的避讓圈：一併附給主 MOD（moreAvoid，
+-- 連同本趟判死的舊圈 Drive.avoidMore），回來的線穿它＝拒收（through／again），不得收「往前直穿堵點」的原線——
+-- 那等於判堵→改道→cutover 回同一處的迴圈；收下時這圈進 s.avoidHist（之後的改道與 sticky 重問照樣避開）。
+-- 事件 tow turn：kind=back（堵車改道接來的）；拒收且有算出線時帶被拒線前 2 點／snapDist／blen／bdeg（T11）。
+function Drive.towTurnaround(s, playerNum, vehicle, now, fx, fy, bx, by, br)
+    if s.pendingRouteWhy == "towturn" then return now < (s.towTurnUntil or 0), "wait" end
+    if (s.towTurnTries or 0) >= TUNE.TOW_TURN_TRIES then return false, "max" end
     s.towTurnTries = (s.towTurnTries or 0) + 1
     local api = navApi()
     local fin = MDADDynamics.finite -- 本檔的 local finite 定義在更後面
-    if not api or not fin(s.lastTx) or not fin(s.lastTy) then return false end
+    if not api or not fin(s.lastTx) or not fin(s.lastTy) then return false, "api" end
     local vx, vy = vehicle:getX(), vehicle:getY()
     local back = TUNE.TOW_TURN_AVOID_R + TUNE.TOW_TURN_GAP_M
     local ax, ay = vx - fx * back, vy - fy * back
     local remaining = s.profile and (s.profile.length - s.lastSNow) or nil
+    local more = nil
+    if bx ~= nil then
+        more = { bx, by, br }
+        local hist = Drive.avoidMore(s, vx, vy, s.lastTx, s.lastTy, bx, by, true)
+        for k = 1, hist and #hist or 0 do
+            if #more >= 24 then break end -- 主 MOD moreAvoid 最多 8 圈
+            more[#more + 1] = hist[k]
+        end
+    end
     local route, why, rejected = requestDetourRoute(api, playerNum, s.lastTx, s.lastTy, ax, ay,
         remaining, TUNE.TOW_TURN_AVOID_R,
-        fin(remaining) and remaining * TUNE.TOW_TURN_LEN_RATIO + TUNE.TOW_TURN_LEN_SLACK or nil, s.route)
+        fin(remaining) and remaining * TUNE.TOW_TURN_LEN_RATIO + TUNE.TOW_TURN_LEN_SLACK or nil, s.route, more)
     if route and not Drive.routeLeavesForward(route, vx, vy, fx, fy) then
         route, why, rejected = nil, "back", route
     end
-    diagEvent(s, playerNum, "tow", {
-        phase = "turn", why = why or "ok", x = ax, y = ay, attempt = s.towTurnTries,
-        len = route and route.len or (rejected and rejected.len) or nil,
-    })
-    if getDebug() then
-        print(LOG .. "pn=" .. playerNum .. " tow turnaround try=" .. s.towTurnTries .. " -> "
+    route, why, rejected = Drive.detourSettle(s, api, playerNum, route, why, rejected)
+    diagEvent(s, playerNum, "tow", Drive.rejectFields({ phase = "turn", why = why or "ok", x = ax, y = ay,
+        attempt = s.towTurnTries, len = route and route.len or (rejected and rejected.len) or nil,
+        kind = bx ~= nil and "back" or nil, avoidN = more and #more / 3 or nil },
+        not route and rejected or nil, vx, vy, fx, fy))
+    if getDebug() then -- telemetry: tow turn 事件（why kind avoidN；拒收另帶 r1x r1y r2x r2y snapDist blen bdeg）
+        print(LOG .. "pn=" .. playerNum .. " tow turnaround try=" .. s.towTurnTries
+            .. (bx ~= nil and " from=back" or "") .. " -> "
             .. (route and ("ok len=" .. tostring(route.len)) or ("rejected " .. tostring(why))))
     end
     if not route then
-        s.rejectedRoute = rejected -- 主 MOD 快取已被覆寫成這條，交還前別讓 cutover 收下
-        return false
+        return false, why -- 拒收紀錄由 Drive.detourSettle 記（v10 以下主 MOD 快取已被覆寫成這條）
     end
     Drive.pushAvoidHist(s) -- 先前的堵車避讓圈不因調頭圈蓋掉而遺失（調頭圈本身不進歷史）
+    if bx ~= nil then -- 本堵點圈也進歷史（目前那圈先寫成它再推，下一行換成調頭圈）
+        s.avoidX, s.avoidY, s.avoidR, s.avoidTow = bx, by, br, nil
+        Drive.pushAvoidHist(s)
+    end
     s.avoidX, s.avoidY, s.avoidR, s.avoidTow = ax, ay, TUNE.TOW_TURN_AVOID_R, true
     s.pendingDetour, s.pendingRouteWhy, s.nextRouteMs = true, "towturn", 0
     s.towTurnUntil = now + TUNE.TOW_TURN_WAIT_MS
     local playerObj = getSpecificPlayer(playerNum)
     if playerObj then haloGood(playerObj, MDADTrailer.KEY_TURN) end
     voice("detour", playerNum)
-    return true
+    return true, "ok", route.len
 end
 
 -- 拖車路線上有過不去的轉角（生效剖面 s.profileRoute.towBlocked 非空）：得知當下就向主 MOD 要一條避開那些轉角的線，
@@ -3351,7 +3481,7 @@ end
 -- 主圈、後方圈、其餘轉角圈都只是請主 MOD 避開（1009）：回來的線穿過它們（through／again）不拒收，直行穿過路口能不能
 -- 開由剖面管線判；本趟判死的堵車圈（hist）照舊不准穿（requestDetourRoute 的 hard）。nav API <9 只給主圈。
 -- 驗收：requestDetourRoute 其餘各條＋從車頭方向出發（back）＋新線走同一條剖面管線（Drive.profileRouteOf →
--- MDADTrailer.shape）後沒有不可過轉角（blocked）。拒收＝記 s.rejectedRoute（主 MOD 快取已被覆寫）、保留原線，
+-- MDADTrailer.shape）後沒有不可過轉角（blocked）。拒收＝保留原線（v10 以下記 s.rejectedRoute，Drive.detourSettle），
 -- 行為照舊（guard 壓速、停在轉角前交還 TrailerCorner）。同一轉角集合：同一 route identity 不重問；換了 identity
 -- （偏航重算等）但車離上次判定處不到 TOW_CORNER_REASK_M 也不重問、不扣額度（記 skip why=same；正式服 0.23.0
 -- 起步後 1–20 m 的偏航 cutover 重問同一題、8 趟 6 趟兩次同結果就 skip max）；每 session TOW_CORNER_TRIES 次；
@@ -3435,8 +3565,8 @@ function Drive.towCornerDetour(s, playerNum, vehicle, now, fx, fy)
             left = shaped.towBlocked and #shaped.towBlocked / 2 or 0
             if left > 0 then route, why, rejected = nil, "blocked", route end
         end
-        -- 主 MOD 算出線就已覆寫快取（含被拒的）：記住 identity，cutover 不收；沒算出線＝快取沒動，舊的拒收紀錄保留
-        if rejected ~= nil and not route then s.rejectedRoute = rejected end
+        -- 收下＝v11 commit（失敗＝拒收 commit）；拒收＝v10 以下記 rejectedRoute；沒算出線＝快取沒動，舊的拒收紀錄保留
+        route, why, rejected = Drive.detourSettle(s, api, playerNum, route, why, rejected)
     end
     diagEvent(s, playerNum, "detour", { phase = skip and "skip" or "towcorner", kind = "towcorner",
         why = why or "ok", x = vx, y = vy, s = s.lastSNow, hitX = ax, hitY = ay, avoidR = r,
@@ -5212,10 +5342,21 @@ function Drive.keepRightShy(s, target)
                 local face = l - rad
                 local edgeNow = MDADFollower.laneBiasAt(prof, rawNow, j, hs) + vp.halfW
                 if face < edgeNow and l + rad > edgeNow - 2 * vp.halfW then return target end
-                if face >= edgeNow and face < MDADFollower.laneBiasAt(prof, rawReach, j, hs)
-                        + vp.halfW + TUNE.KEEP_RIGHT_CLEAR_M then
-                    local want = face - TUNE.KEEP_RIGHT_CLEAR_M - vp.halfW - rb
-                    if want < best then best = want end
+                local laneHere = MDADFollower.laneBiasAt(prof, rawReach, j, hs)
+                local clear = TUNE.KEEP_RIGHT_CLEAR_M
+                local gap = face - laneHere - vp.halfW
+                if face >= edgeNow and gap < clear + TUNE.KEEP_RIGHT_RAMP_M then
+                    -- 放回區段（這裡的常駐落點比 RAMP_BACK_M 前往右多 ≥RAMP_RISE_M）：留邊含過衝預算（1026e NC2）
+                    local sb = hs - TUNE.KEEP_RIGHT_RAMP_BACK_M
+                    if sb < 0 then sb = 0 end
+                    if laneHere - MDADFollower.laneBiasAt(prof, rawReach, MDADFollower.segIndexAt(prof, sb), sb)
+                            >= TUNE.KEEP_RIGHT_RAMP_RISE_M then
+                        clear = clear + TUNE.KEEP_RIGHT_RAMP_M
+                    end
+                    if gap < clear then
+                        local want = face - clear - vp.halfW - rb
+                        if want < best then best = want end
+                    end
                 end
             end
         end
@@ -7210,27 +7351,47 @@ function Drive.transitionHold(s, nb, playerNum, speedKmh)
     for i = 1, sen.hardN do
         local hs = sen.hardS[i]
         if hs >= rs - halfL and hs <= far then
-            local target = MDADFollower.laneBiasAt(prof, nb, MDADFollower.segIndexAt(prof, hs), hs, s.fstate.laneKeep)
-            local dl = target - lat
-            if dl > TUNE.START_GUARD_LAT_M or dl < -TUNE.START_GUARD_LAT_M then
-                local sg = dl > 0 and 1 or -1
-                local kx = k * math.max(0, hs - rs - halfL)
-                local edge = dl * sg * (1 - (1 + kx) * math.exp(-kx)) -- 車位側的邊（往常駐線方向量，0＝車心）
-                local r = sen.hardR[i]
-                local w = s.needHalf + (finite(r) and r >= 0 and r or MDADCorridor.OBS_HALF) + pad
-                local d = (sen.hardL[i] - lat) * sg
-                if d >= 0 and d > edge - w and d < dl * sg + w then
-                    if not finite(s.holdLaneL) then
-                        s.holdLaneL, s.planSig = lat, -1
-                        diagEvent(s, playerNum, "lane", { phase = "hold", l = lat, offL = target, rs = rs,
-                            hitS = hs, hitX = sen.hardX[i], hitY = sen.hardY[i] })
-                    end
-                    return s.holdLaneL
+            local hit, target = Drive.transitionBandHit(s, sen, i, lat, nb, k, pad)
+            if hit then
+                if not finite(s.holdLaneL) then
+                    s.holdLaneL, s.planSig = lat, -1
+                    diagEvent(s, playerNum, "lane", { phase = "hold", l = lat, offL = target, rs = rs,
+                        hitS = hs, hitX = sen.hardX[i], hitY = sen.hardY[i] })
                 end
+                return s.holdLaneL
             end
         end
     end
     return Drive.transitionRelease(s, playerNum, "clear", nb)
+end
+
+-- 斜切帶判定（Drive.transitionHold 與判堵錨 Drive.anchorHoldBand 共用的單一定義）：第 i 個硬點落在「車位 lat → 該點弧長的
+-- 常駐落點」斜切帶內＝true（視窗 [rs−halfL, far] 由呼叫端判）。k＝√2／前視、pad＝帶寬多留。第二回傳＝該點弧長的常駐落點。
+function Drive.transitionBandHit(s, sen, i, lat, nb, k, pad)
+    local prof, hs = s.profile, sen.hardS[i]
+    local target = MDADFollower.laneBiasAt(prof, nb, MDADFollower.segIndexAt(prof, hs), hs, s.fstate.laneKeep)
+    local dl = target - lat
+    if dl <= TUNE.START_GUARD_LAT_M and dl >= -TUNE.START_GUARD_LAT_M then return false, target end
+    local sg = dl > 0 and 1 or -1
+    local kx = k * math.max(0, hs - s.lastSNow - s.vehicleProfile.halfL)
+    local edge = dl * sg * (1 - (1 + kx) * math.exp(-kx)) -- 車位側的邊（往常駐線方向量，0＝車心）
+    local r = sen.hardR[i]
+    local w = s.needHalf + (finite(r) and r >= 0 and r or MDADCorridor.OBS_HALF) + pad
+    local d = (sen.hardL[i] - lat) * sg
+    return d >= 0 and d > edge - w and d < dl * sg + w, target
+end
+
+-- 判堵錨的斜切保持排除（1026b S1）：下一個掃描輪起 Drive.transitionHold 會持有行駛線（沒在繞行／RETURN／停留鏈／調頭）時，
+-- 回保持帶參數 k、視窗尾 far、常駐基準 nb；不會＝nil。用靜止前視（車速 0）：視窗最短、k 最大＝斜切帶最窄，車之後減速
+-- 也還在帶內——這種點會自己觸發保持，車沿車位直走到它過了車尾，不會開上它擋的那條線（resolveBlockAnchor 的 pathLat）。
+function Drive.anchorHoldBand(s, sen, lat)
+    local prof, nb = s.profile, s.residentBias
+    if not finite(lat) or not finite(nb) or s.dodging or s.returnActive or s.laneChained
+            or s.fstate.rotating == true or not sen.ready or type(prof) ~= "table" then
+        return nil
+    end
+    local look = MDADFollower.lookaheadM(0, prof.lookScale or 1)
+    return 1.4142 / look, s.lastSNow + s.vehicleProfile.halfL + 2 * look, nb
 end
 
 -- 結束斜切保持（有保持才記事件、重新規劃）；回 nb 方便呼叫端直接 return。keep 當場回一般值：recover／route 兩個
@@ -7725,17 +7886,119 @@ end
 -- 1020：加引擎零件狀況 ecd（VehiclePart.getCondition，VehiclePart.java:866-868）與引擎品質 eq（BaseVehicle.getEngineQuality，
 -- BaseVehicle.java:8130-8132）——原版只在伺服器跑的 shouldAutoStall：狀況 <50 時每次更新以 1/(狀況×12) 機率熄火
 -- （VehicleEngine.java:230-231、249-252），跟車速、電瓶無關。
+-- 1026g（T9）：加 est（getEngineState 的名稱：ShuttingDown＝關引擎、Stalling＝熄火或沒油、Idle＝狀態已走完；42.21
+-- BaseVehicle.getEngineState，VehicleEngine.java 不曝露給 Lua 所以原因碼讀不到）、kso（距本機最近一次 ISVehicleMenu.onShutOff
+-- 的 ms＝玩家按 N／儀表鑰匙／radial 關引擎，Drive.shutOffNote；沒按過缺）、erm（距本機看到這台車引擎進入 Running 的 ms，
+-- Drive.engineSeen；上車時引擎已在轉、沒看到轉換＝缺）。正式服 12 趟行駛中熄火機制未定，缺這三欄分不出玩家按 N 與狀態翻轉。
 function Drive.engineOffNote(s, playerNum, vehicle, gate)
     local okC, chg = pcall(jget, vehicle, "getBatteryCharge")
     local okE, es = pcall(jget, vehicle, "getEngineSpeed")
     local okF, fu = pcall(jget, vehicle, "getRemainingFuelPercentage")
     local okQ, eq = pcall(jget, vehicle, "getEngineQuality")
     local okD, ecd = pcall(function() return vehicle:getPartById("Engine"):getCondition() end)
+    local okS, est = pcall(Drive.engineStateOf, vehicle)
+    local now, ka, r = getTimestampMs(), Drive.shutOffAt[playerNum], Drive.engRun[playerNum]
     diagEvent(s, playerNum, "engine", { phase = "off", why = gate,
         chg = okC and finite(chg) and math.floor(chg * 1000 + 0.5) / 1000 or nil,
         es = okE and finite(es) and math.floor(es + 0.5) or nil,
         fu = okF and finite(fu) and math.floor(fu * 100 + 0.5) / 100 or nil,
-        ecd = okD and finite(ecd) and ecd or nil, eq = okQ and finite(eq) and eq or nil })
+        ecd = okD and finite(ecd) and ecd or nil, eq = okQ and finite(eq) and eq or nil,
+        est = okS and est or nil, kso = finite(ka) and now - ka or nil,
+        erm = type(r) == "table" and r.v == vehicle and finite(r.at) and now - r.at or nil })
+end
+
+-- 1026g（T9）：引擎狀態名稱（BaseVehicle.engineStateTypes 的 tostring；讀不到或不是字串回 nil）。
+function Drive.engineStateOf(vehicle)
+    local st = vehicle:getEngineState()
+    if st == nil then return nil end
+    st = tostring(st)
+    return type(st) == "string" and st ~= "" and st or nil
+end
+
+-- 1026g（T9）：引擎進入 Running 的時間（engine off 的 erm）。driveGate 每次讀 isEngineRunning 時呼叫（HUD 與自駕每幀），
+-- 只在換車或狀態轉換時寫：同一台車由不轉變成轉＝at 記現在；第一次看到這台車就在轉＝不知道何時發動，at 缺；
+-- 轉變成不轉時 at 保留（engine off 那筆量的是這次運轉多久）。熱路徑只有一次表查詢與兩次比較。
+Drive.engRun = {}
+function Drive.engineSeen(playerNum, vehicle, on)
+    if playerNum == nil then return end
+    local r = Drive.engRun[playerNum]
+    if r == nil then
+        r = {}
+        Drive.engRun[playerNum] = r
+    end
+    if r.v ~= vehicle then
+        r.v, r.on, r.at = vehicle, on == true, nil
+    elseif on == true and not r.on then
+        r.on, r.at = true, getTimestampMs()
+    elseif on ~= true and r.on then
+        r.on = false
+    end
+end
+
+-- 1026g（T9）：玩家關引擎請求的時間（engine off 的 kso）。N 鍵（ISVehicleMenu.lua:1659-1662）、儀表鑰匙／引擎點擊
+-- （ISVehicleDashboard.lua:503-512、556-564）、radial 選單（ISVehicleMenu.lua:89 建片時取函式值，在本檔載入之後）都走
+-- ISVehicleMenu.onShutOff；包一層只記時間（pcall），原版照跑、回傳照回。量不到 playerNum 就不記。
+Drive.shutOffAt = {}
+function Drive.shutOffNote(playerObj)
+    Drive.shutOffAt[playerObj:getPlayerNum()] = getTimestampMs()
+end
+Drive.origShutOff = ISVehicleMenu and ISVehicleMenu.onShutOff
+if type(Drive.origShutOff) == "function" then
+    function ISVehicleMenu.onShutOff(playerObj, ...)
+        pcall(Drive.shutOffNote, playerObj)
+        return Drive.origShutOff(playerObj, ...)
+    end
+end
+
+-- 1026g（T13）：LostRoute／TripLost 交還前記 route phase=lost（正式服新圖只能從結束原因猜是路網斷點還是偏航）：why＝最近一次
+-- 查詢的結果（Drive.routeState：notarget＝目標不見了、noroad＝有目標但主 MOD 找不到路、idle／extracting／building／failed＝
+-- 路網引擎沒就緒），kind＝trip（行程模式）／single，x y＝車位，tx ty＝目標（沒有目標缺；單站模式另看緊鄰的 target clear），
+-- d＝車到目標 m，rs／len＝剖面弧長與總長。車位最近的街名主 MOD 沒有 API（只有 getNavGraph 整張圖），由分析端用 x y 對 streets。
+function Drive.routeLostNote(s, playerNum, vehicle, tx, ty)
+    local x, y = vehicle:getX(), vehicle:getY()
+    local d = nil
+    if finite(tx) and finite(ty) and finite(x) and finite(y) then
+        d = math.floor(sqrt((tx - x) * (tx - x) + (ty - y) * (ty - y)) * 10 + 0.5) / 10
+    end
+    local p = s.profile
+    diagEvent(s, playerNum, "route", { phase = "lost", why = Drive.routeState[playerNum],
+        kind = s.legToken and "trip" or "single", x = x, y = y, tx = tx, ty = ty, d = d, rs = s.lastSNow,
+        len = type(p) == "table" and finite(p.length) and p.length or nil })
+end
+
+-- 1026g（T13）：繞行出口回的 lane（dodge commit 的 dbl＝Drive.dodgeHomeL，承諾時凍結）是哪一種，dodge commit 的 dbs。
+-- 順序同持有優先：ret＝RETURN 回線目標；chain＝鏈式停留 lane；trans＝斜切保持；zombie＝殭屍軟縫；traffic＝會車側移；
+-- laneBias 等於常駐線（差 ≤0.05 m）時 tow＝拖車（常駐不靠右，只有路面對中）、keep＝靠右、center＝沙盒關靠右；
+-- other＝都不是（例：判堵重錨在車位）。NB2（拖車在分隔帶公路出口回中線＝樹籬）定罪用。純觀測，不進決策。
+function Drive.dodgeHomeSrc(s)
+    if s.returnActive and finite(s.returnLaneTarget) then return "ret" end
+    if s.laneChained then return "chain" end
+    if finite(s.holdLaneL) then return "trans" end
+    if s.zombieLane ~= nil then return "zombie" end
+    if s.trafficLane ~= nil then return "traffic" end
+    local rb = s.residentBias
+    if finite(rb) then
+        local d = laneBiasOf(s) - rb
+        if d < 0 then d = -d end
+        if d <= 0.05 then
+            if s.tow then return "tow" end
+            local sb = s.sandBias
+            return (finite(sb) and (sb > 0.05 or sb < -0.05)) and "keep" or "center"
+        end
+    end
+    return "other"
+end
+
+-- 1026g（T13）：守護判死轉判堵（blocked why=guard）那一刻的爬行預估（NB3：群旁判死後 sticky 爬到停止線、玩家中途接手）。
+-- s.gbSg＝車到判堵停止線的剩餘 m（Drive.blockedStopGap，負的記 0）；s.gbCs＝以 min(承諾帽 dodgeBaseCap, BLOCK_APPROACH_KMH)
+-- 爬完的秒數（承諾帽缺或 ≤0＝缺；只是預估，實際接近包絡見樣本 cbl／tgt）。事件 gsl／gcs。
+function Drive.guardBlockNote(s, vehicle)
+    local ok, sg = pcall(Drive.blockedStopGap, s, vehicle:getX(), vehicle:getY())
+    if not ok or not finite(sg) then sg = nil elseif sg < 0 then sg = 0 end
+    local v = s.dodgeBaseCap
+    if not finite(v) or v <= 0 then v = nil elseif v > TUNE.BLOCK_APPROACH_KMH then v = TUNE.BLOCK_APPROACH_KMH end
+    s.gbSg = sg and math.floor(sg * 10 + 0.5) / 10 or nil
+    s.gbCs = (sg and v) and math.floor(sg * 3.6 / v * 10 + 0.5) / 10 or nil
 end
 
 -- 1017 遙測 unstick settle `bh`：車位在剖面首段反向延長上的距離（m，>0＝在起點後方；首段航向 segH[1]、起點 x[1]／y[1]）。
@@ -7905,6 +8168,8 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     if finite(s.fstate.xtOut) and s.fstate.xtOut > 1 then phys.xtOut = s.fstate.xtOut end
     if s.dodgeAlignHold == true then phys.dodgeAlignHold = true end
     phys.routeHeadingError, phys.kinkExitS = s.lastRouteErr, s.fstate.kinkExitS
+    -- 1026g（T12）：只給 impact 事件讀（dms＝開出 ms、tw＝拖車），樣本不寫
+    phys.startedMs, phys.towing = s.startedMs, s.tow ~= nil
     phys.visibilityCap = s.visibilityCap
     phys.visibilityHardKmh = s.visibilityHardKmh
     phys.visHold, phys.visRoundS, phys.visAssistDecel = s.visHold, s.visRoundS, s.visAssistDecel
@@ -11097,8 +11362,14 @@ end
 -- 進保持時的距離記 s.lagKeepU（車被其他帽壓慢、窗跟著縮時不放手）。出口：body／owner、倒回超過 max(窗, lagKeepU)＝converge。
 -- 換線重驗（1020c X4；正式服 P52 出彎 el 往外 ramp 觸發 line 放手、當時 dev 1.08，加速到 40 km/h 後擦回原命中點）：relined 時
 -- 用新規劃線在命中點處的 lane（Drive.lagPlanLane）＋實測橫偏（不衰減，同記憶重判）重驗 s.lagMem，還重疊就改記 lagHitPl、保持。
--- 保持理由各記一次 lag phase=keep why＝tow／arc／reline（s.lagKeep；1017d 遲滯的 keep 不帶 why）；release 帶 arcAhead（車頭到
--- 命中點間最大 κ）與 kind（trailer＝命中由掛車車身判、tow＝拖車但由牽引車判）。
+-- 弧上 nose 保持（1026c S2；正式服 0.30.x–1020j 6 件 6 人 5–19 km/h：P97 clip-14 keep arc 後 release why=nose，車在弧上 8→16 km/h、
+-- err 0.27→0.83 切內，18 km/h 擦同一硬點 (10732.5,10228.5)）：nose 只看當下實測車身，看不到放手後加速在弧上追線切內、車身後段
+-- 掃進彎內。車身要經過的那段剖面 [車尾, 車心＋u＋車尾＋r0]（車尾過點時車心的位置）有弧（Drive.arcAhead）時比照拖車保持
+-- （lagHitSide＝MIN_EXEC）到車尾過點；keep why=nose 記一次。出口：body／owner、倒回＝converge、弧離開窗＝nose、進保持
+-- （s.lagNoseS）後沿路線前進超過 TUNE.LAG_NOSE_HOLD_K×（車長＋2r0）仍在車身旁＝nose-cap。
+-- 保持理由各記一次 lag phase=keep why＝tow／arc／reline／nose（s.lagKeep；1017d 遲滯的 keep 不帶 why）；release 帶 arcAhead（車頭到
+-- 命中點間最大 κ；nose／nose-cap 改為上述車身窗的最大 κ）、u（命中點對車心的縱距，車頭向量投影；1026c T12）與 kind（trailer＝命中由
+-- 掛車車身判、tow＝拖車但由牽引車判）。
 function Drive.lagGuardScan(s, playerNum, speedKmh, vx, vy, heading)
     local sen, fs, vp, ld = s.sensor, s.fstate, s.vehicleProfile, s.lastLatDev
     local hit, bl, hitPl, hitOff = nil, nil, nil, nil
@@ -11216,6 +11487,23 @@ function Drive.lagGuardScan(s, playerNum, speedKmh, vx, vy, heading)
                 else why = "nose" end
             end
             local arcK = u ~= nil and Drive.arcAhead(s, rs + halfL, rs + u) or nil
+            -- 弧上 nose 保持（1026c S2，見函式頭）
+            if why == "nose" then
+                arcK = Drive.arcAhead(s, rs - rear, rs + u + rear + r0)
+                if arcK ~= nil and arcK > 0 then
+                    if s.lagNoseS == nil then s.lagNoseS = rs end
+                    if rs - s.lagNoseS <= TUNE.LAG_NOSE_HOLD_K * (halfL + rear + 2 * r0) then
+                        s.lagHitSide = true
+                        if s.lagKeep ~= "nose" then
+                            s.lagKeep = "nose"
+                            diagEvent(s, playerNum, "lag", { phase = "keep", why = "nose", dev = ld, rs = rs, hitS = s.lagHitS,
+                                rate = rate, arcAhead = arcK, u = u })
+                        end
+                        return
+                    end
+                    why = "nose-cap"
+                end
+            end
             -- 拖車／弧前保持（1020c X3，見函式頭）：窗＝車頭＋前視距＋煞到 MIN_EXEC 的距離，與進保持時的距離取大
             if why == "converge" and u ~= nil then
                 local keep = type(tw) == "table" and "tow" or (arcK ~= nil and arcK > 0 and "arc" or nil)
@@ -11267,15 +11555,15 @@ function Drive.lagGuardScan(s, playerNum, speedKmh, vx, vy, heading)
             local kind = s.lagHitKind or (type(tw) == "table" and "tow" or nil)
             diagEvent(s, playerNum, "lag", { phase = "release", why = why, dev = ld, rs = rs, hitS = s.lagHitS,
                 nose = rs + halfL, tail = rs - rear, body = relBody, rate = rate, cvw = s.lagCvw, arcAhead = arcK,
-                kind = kind })
+                kind = kind, u = u })
             if getDebug() then
-                print(string.format("%spn=%d lag guard release why=%s dev=%.2f rs=%.1f hitS=%s nose=%.1f tail=%.1f body=%s rate=%s arcAhead=%s kind=%s",
+                print(string.format("%spn=%d lag guard release why=%s dev=%.2f rs=%.1f hitS=%s nose=%.1f tail=%.1f body=%s rate=%s arcAhead=%s kind=%s u=%s",
                     LOG, playerNum, why, finite(ld) and ld or 0, rs, tostring(s.lagHitS), rs + halfL, rs - rear,
-                    tostring(relBody), tostring(rate), tostring(arcK), tostring(kind)))
+                    tostring(relBody), tostring(rate), tostring(arcK), tostring(kind), tostring(u)))
             end
         end
         s.lagHitX, s.lagHitY, s.lagHitR, s.lagHitS, s.lagHitPl, s.lagHitSide = nil, nil, nil, nil, nil, nil
-        s.lagCvw, s.lagKeep, s.lagKeepU, s.lagHitKind = nil, nil, nil, nil
+        s.lagCvw, s.lagKeep, s.lagKeepU, s.lagHitKind, s.lagNoseS = nil, nil, nil, nil, nil
         return
     end
     local r = sen.hardW and sen.hardW[hit] or sen.hardR[hit]
@@ -11300,7 +11588,7 @@ function Drive.lagGuardScan(s, playerNum, speedKmh, vx, vy, heading)
     mem.hardLc[1], mem.hardW[1] = sen.hardLc and sen.hardLc[hit], sen.hardW and sen.hardW[hit]
     s.lagHitX, s.lagHitY, s.lagHitR, s.lagHitS, s.lagHitPl = sen.hardX[hit], sen.hardY[hit], r, sen.hardS[hit], hitPl
     s.lagHitKind = hitOff and "trailer" or nil
-    s.lagCvw, s.lagKeepU = nil, nil -- 又預測重疊：converge 遲滯的輪數與 X3 進保持距離重算（keep 事件理由 s.lagKeep 留到 release）
+    s.lagCvw, s.lagKeepU, s.lagNoseS = nil, nil, nil -- 又預測重疊：converge 遲滯輪數、X3 進保持距離、S2 nose 保持起點重算（keep 理由 s.lagKeep 留到 release）
     s.lagHitSide = sen.hardS[hit] <= rs + halfL
 end
 
@@ -12460,25 +12748,52 @@ end
 -- 0928b E2E rc1 0008：126° 折點出口的桿，Corridor 以彎道連續落點判它擋線、錨卻用原始
 -- laneBias 判它不擋，改挑 51m 外的點；blockedNear 永遠不近、車以 12-16 km/h 撞上。
 -- guard 檔傳承諾線 offL，路肩雜點不入選）。
+-- pathLat（只有 plan 檔判堵傳＝車當下橫向 s.lastLatSigned，1026b S1）：錨只取車身真的會掃到的點。擋基準線、但不擋車位那條線、
+-- 又落在下一輪斜切保持帶內（Drive.anchorHoldBand／transitionBandHit）的點不當錨——它自己就會讓保持接手，車沿車位直走過它。
+-- 有這種點（保持會接手）時，保持視窗內擋車位那條線的點不論擋不擋基準線都列入候選（那段車走的是車位那條線）。正式服 6 件 6 人：
+-- dodge release why=next-group 後同輪判堵、clearOffset 把基準換回常駐線，錨抓到車頭旁擋常駐線的樹（wd 2.7–8.6），
+-- 24–34 km/h 一秒鎖輪，下一輪斜切保持一上來就判淨空。保持帶外擋基準線的點照收；全被排除＝照舊取最近的
+-- （s.blockAnchorFb，事件 afb）。s.blockAnchorL／blockAnchorOff＝錨的基準 lane／被排除的點數（blocked 事件 al／aoff）。
 -- 回傳合格點中的最小弧長（guard 的 blockS 用）。
-local function resolveBlockAnchor(s, sen, vehicle, lineOnly, minS, maxS, laneL)
-    local bestD2, bi, bs
+local function resolveBlockAnchor(s, sen, vehicle, lineOnly, minS, maxS, laneL, pathLat)
+    local bestD2, bi, bs, fD2, fi, fs, pD2, pI, ps
     local vx, vy = vehicle:getX(), vehicle:getY()
     local bl, nh = laneL or laneBiasOf(s), s.needHalf
     local hb = laneL == nil and s.hardBaseStamp == sen.stamp and s.hardBase or nil
+    local hk, hfar, hnb
+    if pathLat ~= nil then hk, hfar, hnb = Drive.anchorHoldBand(s, sen, pathLat) end
+    local off = 0
     for i = 1, sen.hardN do
         local hs = sen.hardS[i]
-        local base = hb and hb[i] or bl
-        if (minS == nil or hs >= minS) and (maxS == nil or hs <= maxS)
-                and (not lineOnly or blocksLine(sen, i, base, nh)) then
-            if bs == nil or hs < bs then bs = hs end
+        if (minS == nil or hs >= minS) and (maxS == nil or hs <= maxS) then
+            local base = hb and hb[i] or bl
+            local onBase = not lineOnly or blocksLine(sen, i, base, nh)
+            local onPath = hk ~= nil and hs <= hfar and blocksLine(sen, i, pathLat, nh)
             local dx, dy = sen.hardX[i] - vx, sen.hardY[i] - vy
             local d2 = dx * dx + dy * dy
-            if bestD2 == nil or d2 < bestD2 then bestD2, bi = d2, i end
+            if onBase and hk ~= nil and hs <= hfar and not onPath
+                    and Drive.transitionBandHit(s, sen, i, pathLat, hnb, hk, 0) then
+                off = off + 1
+                if fs == nil or hs < fs then fs = hs end
+                if fD2 == nil or d2 < fD2 then fD2, fi = d2, i end
+            elseif onBase then
+                if bs == nil or hs < bs then bs = hs end
+                if bestD2 == nil or d2 < bestD2 then bestD2, bi = d2, i end
+            elseif onPath then
+                if ps == nil or hs < ps then ps = hs end
+                if pD2 == nil or d2 < pD2 then pD2, pI = d2, i end
+            end
         end
     end
+    local onPathAnchor = off > 0 and pI ~= nil and (bi == nil or pD2 < bestD2)
+    if off > 0 and ps ~= nil and (bs == nil or ps < bs) then bs = ps end
+    if onPathAnchor then bi = pI end
+    s.blockAnchorFb = bi == nil and fi ~= nil
+    if s.blockAnchorFb then bi, bs = fi, fs end
+    s.blockAnchorOff, s.blockAnchorL = off, nil
     if bi ~= nil then
         s.blockHitX, s.blockHitY = sen.hardX[bi], sen.hardY[bi]
+        s.blockAnchorL = onPathAnchor and pathLat or (hb and hb[bi] or bl)
     end
     return bs
 end
@@ -13096,6 +13411,7 @@ local function replan(s, vehicle, playerNum)
                         local playerObj = getSpecificPlayer(playerNum)
                         if playerObj then haloBad(playerObj, KEY_BLOCKED) end
                         voice("blocked", playerNum)
+                        Drive.guardBlockNote(s, vehicle) -- 1026g T13：停止線剩餘與爬行秒數預估（gsl／gcs）
                         diagEvent(s, playerNum, "blocked", {
                             s = s.blockS, m = s.dodgeMargin, need = s.dodgeNeed,
                             x = s.blockHitX, y = s.blockHitY, why = "guard",
@@ -13104,9 +13420,12 @@ local function replan(s, vehicle, playerNum)
                             hitX = s.guardHitX, hitY = s.guardHitY,
                             clearance = s.guardHitClearance, hn = sen.hardN,
                             wms = Drive.replanElapsed(s), sweeps = s.sweepCount,
-                            bv = s.blockedEntryKmh }) -- bv＝判堵當下車速 km/h（1017c）
+                            bv = s.blockedEntryKmh, -- bv＝判堵當下車速 km/h（1017c）
+                            -- 1026g T13：承諾 tier／承諾帽、群起點 b 與車弧長 rs（rs+bodyReach ≥ b＝guard-far 不放）、停止線剩餘、爬行秒數
+                            tier = s.dodgeTier, cap = s.dodgeBaseCap, b = s.fstate.offB, rs = s.lastSNow,
+                            gsl = s.gbSg, gcs = s.gbCs })
                     end
-                    if getDebug() then
+                    if getDebug() then -- telemetry: blocked why=guard 事件（上方）
                         print(LOG .. "pn=" .. playerNum .. " dodge guard failed: hold & brake")
                     end
                 end
@@ -13438,7 +13757,7 @@ local function replan(s, vehicle, playerNum)
                 elseif s.planDeferWhy and not (sen.wideDone and s.wideArmed) then
                     -- 主候選未覆蓋、鏈裡也沒有覆蓋得到的替代線：回到原本的延後（先按已知群起點煞停）。
                     -- 停在停點的寬帶判堵不延後：延後的接近帽會讓車往群前爬、吃掉進入段跑道，
-                    -- 而且清掉判堵＝解除寬帶武裝，一般帶／寬帶來回判、永遠不倒車（0929v）。照判堵走倒車重判。
+                    -- 而且清掉判堵＝下一輪不掃寬帶（Drive.wideScanWanted 要 blocked），一般帶／寬帶來回判、永遠不倒車（0929v）。照判堵走倒車重判。
                     Drive.deferDodge(s, playerNum, s.planDeferWhy, s.planDeferB, s.planDeferC, s.planDeferD)
                     mode = "clear"
                 else
@@ -13738,7 +14057,8 @@ local function replan(s, vehicle, playerNum)
                 zm = s.zmM, zmS = s.zmS, zmL = s.zmL, zv = s.zomRec and s.zomRec.n > 0 and s.zomRec.n or nil,
                 -- 1017：本輪第一條被殭屍擋下的候選的 min(彎帽, 餘裕帽)（Drive.zombieCap0）；被承諾那條在 chainAhead 走到的分支
                 zc0 = s.zomRec and s.zomRec.n > 0 and s.zomRec.c0 or nil, chain = s.chainWhy,
-                dbl = s.dodgeBaseL }) -- 出口回的 lane（Drive.dodgeHomeL，承諾時凍結；1014b N9）
+                dbl = s.dodgeBaseL, -- 出口回的 lane（Drive.dodgeHomeL，承諾時凍結；1014b N9）
+                dbs = Drive.dodgeHomeSrc(s) }) -- 1026g T13：dbl 是哪一種 lane（ret／chain／trans／zombie／traffic／tow／keep／center／other）
             Drive.proofTightArm(s, playerNum) -- 停下之後的窄線爬行（TUNE.PROOF_TIGHT_KMH）
             if getDebug() then -- telemetry: dodge commit 事件（cap 分解同欄）
                 -- cap 分解一行印清楚（2026-09-04 實機三段 8／15／14 km/h 繞行，console
@@ -13794,7 +14114,10 @@ local function replan(s, vehicle, playerNum)
             s.dodgeHandoffHold, s.dodgeDeferCap = false, -1
         end
         s.blocked = false
-        Drive.disarmWide(s)
+        -- 延後（planSig −1）不是淨空，不解除寬帶武裝（1021g）：倒車成功清了 blocked，退出來那一輪延後（lateral-coverage 等）
+        -- 舊制在這裡解除武裝，下一輪同一堵點再判堵時 Drive.blockedAtStop 不再停住，車照起步包絡開回停止線、下一次倒車又退回原處
+        -- （E2E blockscan launch7 三輪來回；正式服 0.31.x 6 次）。出口不變：承諾、真淨空、開過武裝點、錨移到 WIDE_ARM_SAME_M 外。
+        if s.planSig ~= -1 then Drive.disarmWide(s) end
         s.blockedNotified = false
         s.dodgeNotified = false
         if s.laneChained then
@@ -13905,8 +14228,9 @@ local function replan(s, vehicle, playerNum)
     -- 群最近擋線點世界座標＝blockedNear 判距權威（s051 定罪：blockS 是判定輪
     -- 快照的弧長、hardS 是當前快照的弧長，車一動兩基準脫節）。每輪 blocked 都
     -- 重掃（車接近時錨跟著新快照走）；掃不到擋線點（保守分支）留 nil → 退弧長。
-    -- 與 Corridor.plan 同一個 minS（車尾）：車後的擋線點不是這次 blocked 的原因
-    resolveBlockAnchor(s, sen, vehicle, true, s.lastSNow - s.vehicleProfile.halfL)
+    -- 與 Corridor.plan 同一個 minS（車尾）：車後的擋線點不是這次 blocked 的原因。車位 lat 傳進去：下一輪斜切保持會帶車
+    -- 直走過、不擋車位那條線的點不當錨（1026b S1，見 resolveBlockAnchor）
+    resolveBlockAnchor(s, sen, vehicle, true, s.lastSNow - s.vehicleProfile.halfL, nil, nil, s.lastLatSigned)
     s.planMode = "blocked"
     -- 判堵這一輪有候選只因落在沒掃過的那一側被拒：維持判堵，下一輪換帶心補掃（候選鏈的延後分支見 bandNavRequest）
     Drive.bandNavRequest(s)
@@ -13949,7 +14273,10 @@ local function replan(s, vehicle, playerNum)
             tag0 = s.sf0Tag, ph0 = s.sf0Tag and s.sf0Ph, hx0 = s.sf0Tag and s.sf0X, hy0 = s.sf0Tag and s.sf0Y,
             steep = (s.blockSteepM or -1) > 0 and s.blockSteepM or nil,
             avail = s.dodgeShapeReason == "exit-room" and s.dodgeExitAvail or nil,
-            foldS = s.dodgeShapeReason == "exit-room" and s.dodgeExitFoldS or nil })
+            foldS = s.dodgeShapeReason == "exit-room" and s.dodgeExitFoldS or nil,
+            -- 1026b S1：錨所在的基準 lane、車當下橫向；被斜切保持排除的擋線點數與「全被排除、照舊取最近」旗標（resolveBlockAnchor）
+            al = s.blockAnchorL, lat = s.lastLatSigned,
+            aoff = (s.blockAnchorOff or 0) > 0 and s.blockAnchorOff or nil, afb = s.blockAnchorFb or nil })
         if getDebug() then -- telemetry: n/a 點雲 l 範圍；樣本 near 只有最近 8 顆，blocked 事件有 s／hn
             -- 點雲摘要（冷路徑一次 O(hardN)）：判「無縫」合不合理的第一手資料
             local lMin, lMax = 99, -99
@@ -16778,6 +17105,7 @@ local function onPlayerUpdate(player)
                 -- 有 claim 時 MiniMap 不會因距離清目標、也不會替我們完成站（§6.3），
                 -- 所以這裡的「目標不見了」只代表本段不再有效——絕不能沿用 v5 的
                 -- 「目標消失＝抵達」收旗啟發把它當成到站。
+                Drive.routeLostNote(s, playerNum, vehicle, tx, ty) -- 1026g T13：交還前記 route phase=lost
                 Drive.stop(playerNum, tx == nil and TRIP.LOST or KEY_LOST)
                 return
             end
@@ -16802,6 +17130,7 @@ local function onPlayerUpdate(player)
                 end
                 return
             end
+            Drive.routeLostNote(s, playerNum, vehicle, tx, ty)
             Drive.stop(playerNum, KEY_LOST)
             return
         end
@@ -16828,8 +17157,8 @@ local function onPlayerUpdate(player)
             s.towCornerTries, s.towCornerSig = 0, nil -- 新目標＝新的一趟（同集合不重問只限同一趟）
             s.rejectedRoute = nil
         end
-        -- 被本 MOD 拒收的替代線（far／long／through）仍躺在主 MOD 快取裡（requestDetour
-        -- 成功即覆寫），下一次取路會原樣拿回同一個 table——不得當成一般 cutover 收下
+        -- 被本 MOD 拒收的替代線（far／long／through）在 nav API v10 以下仍躺在主 MOD 快取裡（requestDetour
+        -- 成功即覆寫；v11 起收下才 commit，拒收的不進快取），下一次取路會原樣拿回同一個 table——不得當成一般 cutover 收下
         -- （2026-09-02 s064：拒收 far 之後同一幀就以 "deviation" 名義跟著它開進樹林；
         -- 主 MOD 冷卻後重算會換新 identity，屆時照常 cutover）。**必須在距離閘之前**：拒收的
         -- far 線走到距離閘＝RouteTooFar 交還（0928m E2E rc15 0095：改道被拒 far，15 幀後交還）。
@@ -16898,17 +17227,18 @@ local function onPlayerUpdate(player)
             if routeCrossesAvoid(route, s.avoidX, s.avoidY, s.avoidR or TUNE.DETOUR_AVOID_R)
                     or Drive.crossesAnyAvoid(route, more) then
                 local remaining = s.profile and (s.profile.length - s.lastSNow) or nil
-                local detour, _, rejected = requestDetourRoute(api, playerNum, tx, ty, s.avoidX, s.avoidY,
+                local detour, _, rejected = Drive.detourSettle(s, api, playerNum, requestDetourRoute(api, playerNum,
+                    tx, ty, s.avoidX, s.avoidY,
                     remaining, s.avoidR, s.avoidLong and finite(remaining)
                         and remaining * TUNE.STUCK_DETOUR_LEN_RATIO + TUNE.STUCK_DETOUR_LEN_SLACK
                         or s.avoidTow and finite(remaining)
-                        and remaining * TUNE.TOW_TURN_LEN_RATIO + TUNE.TOW_TURN_LEN_SLACK or nil, route, more)
+                        and remaining * TUNE.TOW_TURN_LEN_RATIO + TUNE.TOW_TURN_LEN_SLACK or nil, route, more))
                 if detour then
                     route = detour
                     s.pendingRouteWhy = s.avoidTow and "towturn" or "detour"
                 else
                     s.avoidX, s.avoidY, s.avoidR, s.avoidTow, s.avoidLong = nil, nil, nil, nil, nil
-                    if rejected ~= nil then s.rejectedRoute = rejected end
+                    -- 拒收紀錄由 Drive.detourSettle 記（v10 以下）
                 end
             end
         end
