@@ -42,7 +42,8 @@ local PATH_HW = 0.55  -- 路徑帶半寬（公尺）
 local ZOM_W, ZOM_H = 0.5, 1.6
 local VEH_H = 1.4
 local EGO_HW, EGO_HL = 0.95, 2.35
-local DESIGN_W, CARD_GAP = 552, 8
+-- DESIGN_W：Tesla 儀表的設計寬（S=1 時 hudRect 的寬，Tesla references/hud.md 的 hudRect 契約；2026-10-26 拿掉尾門鍵後 552→506）
+local DESIGN_W, CARD_GAP = 506, 8
 local AMBER = { dodging = true, unstick = true, side = true, lowfps = true, areawait = true, rehitch = true,
     rehitchwait = true, rehitchfound = true, rehitchback = true, uturn = true, uturnslow = true }
 local HOT = { zombie = true, animal = true, player = true }
