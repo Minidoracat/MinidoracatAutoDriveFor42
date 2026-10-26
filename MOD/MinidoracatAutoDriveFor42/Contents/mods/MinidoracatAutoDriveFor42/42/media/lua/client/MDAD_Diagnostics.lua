@@ -230,6 +230,9 @@ local EK = {
     -- 1026b blocked plan：判堵錨所在的基準 lane al（lat＝車當下橫向，沿用上面的鍵）、被斜切保持排除的擋線點數 aoff、
     -- 全被排除而照舊取最近擋線點 afb（Driver resolveBlockAnchor）
     "al", "aoff", "afb",
+    -- 1026d detour why=back／back-turn／towturn 與 tow turn 拒收（Driver Drive.rejectFields）：被拒改道線前 2 點、第一段長度 m
+    -- 與對車頭夾角（度，0＝正前）；snapDist 沿用上面的鍵。detour 的 tt＝接拖車調頭繞路（Drive.towTurnaround）的結果
+    "r1x", "r1y", "r2x", "r2y", "blen", "bdeg", "tt",
 }
 
 local function logOnce(msg)

@@ -27970,7 +27970,8 @@ function drive.scenario0929p()
     drive.scanRound(true)
     checkTrue(ts.dodging == true and ts.dodgeWide == true and (ts.fstate.offL or 0) < -7,
         "(tow-stop) 停在拖車線上寬帶一次繞過（offL=" .. tostring(ts.fstate.offL) .. "）")
-    -- (tow-back) 拖車改道線要從車頭方向出發：先往車後再轉進支路＝拒收（非拖車照收）
+    -- (tow-back) 拖車改道線要從車頭方向出發：先往車後再轉進支路＝拒收（非拖車照收）；1026d 起拒收 back 會接拖車調頭繞路，
+    --   主 MOD 那次也只給同一條往後的線＝調頭也無解，拒收名 back-turn（下方 (nb1*) 細驗）
     local oldGet = getSpecificPlayer
     getSpecificPlayer = function(n) if n == 0 then return dp end end
     local cx = dveh._x
@@ -27989,14 +27990,126 @@ function drive.scenario0929p()
     ts.pendingDetour, ts.pendingRouteWhy = nil, nil
     detourReply({ cx, 0, cx - 4, 0, cx - 4, 20 })
     local okCar = MDAD.Drive.requestDetour(0, true)
-    checkTrue(okBack == false and whyBack == "back" and okFwd == true and okCar == true,
-        "(tow-back) 拖車：往車後再轉的改道線拒收、往前的照收；非拖車同一條照收（back=" .. tostring(okBack)
-        .. "/" .. tostring(whyBack) .. " fwd=" .. tostring(okFwd) .. " car=" .. tostring(okCar) .. "）")
+    checkTrue(okBack == false and whyBack == "back-turn" and okFwd == true and okCar == true,
+        "(tow-back) 拖車：往車後再轉的改道線拒收（調頭也無解＝back-turn）、往前的照收；非拖車同一條照收（back="
+        .. tostring(okBack) .. "/" .. tostring(whyBack) .. " fwd=" .. tostring(okFwd) .. " car=" .. tostring(okCar) .. "）")
     -- (tow-back2) 先退 3m 再斜向前（8m 點已在車前）仍拒收：Follower 會先投影在往後那段判調頭；起點略在車後、
     --   第一段本身朝前（車投影就在這段上）照收（0929v 審查）。違規證明：拿掉第一段方向檢查＝紅。
     checkTrue(MDAD.Drive.routeLeavesForward({ pts = { 0, 0, -3, 0, 10, 6 } }, 0, 0, 1, 0) == false
             and MDAD.Drive.routeLeavesForward({ pts = { -2, 0, 10, 8 } }, 0, 0, 1, 0) == true,
         "(tow-back2) 先退 3m 再斜向前拒收；起點略在車後、第一段朝前照收")
+    -- (nb1*) 1026d NB1：拖車堵車改道的替代線往車後（back）＝接拖車調頭繞路 Drive.towTurnaround：主圈＝車尾正後方圈
+    --   （r＝TOW_TURN_AVOID_R），moreAvoid 第一圈＝本堵點圈（detour 的 ax,ay、DETOUR_AVOID_R）。nav API v11 樁：commit 才換快取。
+    --   (nb1-fail) 調頭那次也往後＝拒收 back-turn（tt=back），不 cutover、nodetour；detour 與 tow turn 事件都帶被拒線前 2 點、
+    --              snapDist、blen、bdeg（T11／T13）。
+    --   (nb1-thru) 調頭線往前但直穿堵點＝拒收（tt=again）：不得收「往前回到同一堵點」的線（判堵→改道→cutover→判堵迴圈）。
+    --   (nb1-max)  調頭額度（TOW_TURN_TRIES，與 ROTATE 共用）用完＝tt=max、不再問主 MOD：延後分支的出口。
+    --   (nb1)      往前繞開堵點的線＝收下：detour why=towturn tt=ok、commit 一次、下一幀 cutover why=towturn、本堵點圈進 avoidHist。
+    --   違規證明（temp/vp）：拿掉 back→towTurnaround＝(nb1) 紅；不附堵點圈＝(nb1-thru) 紅；失敗名沿用 back＝(nb1-fail) 紅；
+    --   不看額度＝(nb1-max) 紅；收下時堵點圈不進歷史＝(nb1) 紅。
+    do
+        local T = MDAD.Drive.debugTune()
+        local api = MinidoracatMiniMapAPI
+        local realReq, realCommit, realVer = api.requestDetour, api.commitDetour, api.navApiVersion
+        local realEvent, realSample = MDADDiagnostics.event, MDADDiagnostics.sample
+        local evs, calls, commits, pending, turnR = {}, {}, 0, nil, nil
+        local rp = ts.route.pts
+        local ex, ey = rp[#rp - 1], rp[#rp]
+        local function mk(pts)
+            pts[#pts + 1], pts[#pts + 2] = ex, ey
+            local sf, sw = {}, {}
+            for i = 1, #pts / 2 - 1 do sf[i], sw[i] = "paved", 8 end
+            return { pts = pts, segSurface = sf, segWidth = sw, len = 140, cost = 140, avoidPenalty = 0 }
+        end
+        local backR = mk({ cx, 0, cx - 4, 0, cx - 4, 60, 156, 60 }) -- 往後再繞，不穿堵點圈（圓心 (100,0) r=40）
+        api.navApiVersion = 11
+        api.requestDetour = function(_, _, _, ax, ay, r, more, _, defer)
+            calls[#calls + 1] = { ax = ax, ay = ay, r = r, more = more, defer = defer }
+            local out = backR
+            if r == T.TOW_TURN_AVOID_R then out = turnR end
+            pending = out
+            if out == nil then return nil, "noroad" end
+            return out, "ok"
+        end
+        api.commitDetour = function(pn, r)
+            commits = commits + 1
+            if pn ~= 0 or r ~= pending then return false, "stale" end
+            drive.nav.route = r
+            return true, "ok"
+        end
+        MDADDiagnostics.sample = function() return true end
+        MDADDiagnostics.event = function(pn, name, a, ...)
+            if type(a) == "table" and (name == "detour" or (name == "tow" and a.phase == "turn")) then
+                evs[name] = a
+            end
+            return realEvent(pn, name, a, ...)
+        end
+        local function ask(tr, tries)
+            ts.tow, ts.diag = big, true
+            ts.pendingDetour, ts.pendingRouteWhy, ts.towTurnTries = false, nil, tries or 0
+            ts.avoidX, ts.avoidY, ts.avoidR, ts.avoidTow, ts.avoidHist = nil, nil, nil, nil, nil
+            ts.blockHitX, ts.blockHitY = 60, 0
+            turnR, commits, evs.detour, evs.tow = tr, 0, nil, nil
+            clearList(calls)
+            clearList(halos)
+            return MDAD.Drive.requestDetour(0, true)
+        end
+        local origRoute = drive.nav.route
+        -- (nb1-fail)
+        local okF, whyF = ask(backR)
+        local dE, tE, c2 = evs.detour or {}, evs.tow or {}, calls[2] or {}
+        local m2 = c2.more or {}
+        checkTrue(okF == false and whyF == "back-turn" and #calls == 2 and c2.r == T.TOW_TURN_AVOID_R
+                and math.abs((c2.ax or 0) - (cx - T.TOW_TURN_AVOID_R - T.TOW_TURN_GAP_M)) < 1e-6
+                and m2[1] == 100 and m2[2] == 0 and m2[3] == T.DETOUR_AVOID_R
+                and ts.pendingRouteWhy ~= "towturn" and commits == 0 and drive.lastVoice() == "nodetour",
+            "(nb1-fail) 改道往後→接調頭繞路（主圈車尾正後方 r=12、moreAvoid 先附堵點圈）；調頭也往後＝拒收 back-turn（why="
+            .. tostring(whyF) .. " calls=" .. #calls .. " ax=" .. tostring(c2.ax) .. " more=" .. tostring(m2[1]) .. ","
+            .. tostring(m2[2]) .. "," .. tostring(m2[3]) .. "）")
+        checkTrue(dE.why == "back-turn" and dE.tt == "back" and dE.r1x == cx and dE.r2x == cx - 4 and dE.r2y == 0
+                and dE.blen == 4 and dE.bdeg == 180 and dE.snapDist == 0
+                and tE.why == "back" and tE.kind == "back" and tE.r1x == cx and tE.bdeg == 180 and tE.blen == 4
+                and tE.avoidN == 1,
+            "(nb1-fail) detour 事件 why=back-turn tt=back、被拒線前 2 點／blen／bdeg／snapDist；tow turn 事件 kind=back 同帶（detour "
+            .. tostring(dE.why) .. "/" .. tostring(dE.tt) .. " bdeg=" .. tostring(dE.bdeg) .. " blen=" .. tostring(dE.blen)
+            .. "；tow " .. tostring(tE.why) .. "/" .. tostring(tE.kind) .. " bdeg=" .. tostring(tE.bdeg) .. "）")
+        -- (nb1-thru)
+        local okT, whyT = ask(mk({ cx, 0, cx + 5, 0 }))
+        checkTrue(okT == false and whyT == "back-turn" and (evs.detour or {}).tt == "again" and commits == 0
+                and drive.nav.route == origRoute,
+            "(nb1-thru) 調頭線往前但直穿堵點＝拒收（tt=" .. tostring((evs.detour or {}).tt) .. " commit=" .. commits .. "）")
+        -- (nb1-max)
+        local okM, whyM = ask(mk({ cx, 0, cx + 5, 0, cx + 5, 50, 156, 50 }), T.TOW_TURN_TRIES)
+        checkTrue(okM == false and whyM == "back-turn" and (evs.detour or {}).tt == "max" and #calls == 1
+                and ts.towTurnTries == T.TOW_TURN_TRIES,
+            "(nb1-max) 調頭額度用完：tt=max、不再問主 MOD（tt=" .. tostring((evs.detour or {}).tt) .. " calls=" .. #calls .. "）")
+        -- (nb1)
+        local good = mk({ cx, 0, cx + 5, 0, cx + 5, 50, 156, 50 })
+        local okG, whyG = ask(good)
+        dE, tE = evs.detour or {}, evs.tow or {}
+        local h = ts.avoidHist or {}
+        local histHas = false
+        for k = 1, #h - 2, 3 do
+            if h[k] == 100 and h[k + 1] == 0 and h[k + 2] == T.DETOUR_AVOID_R then histHas = true end
+        end
+        checkTrue(okG == true and whyG == "towturn" and dE.why == "towturn" and dE.tt == "ok" and dE.len == 140
+                and dE.r1x == cx and dE.bdeg == 180 and tE.why == "ok" and tE.kind == "back" and tE.r1x == nil
+                and commits == 1 and ts.pendingRouteWhy == "towturn" and ts.avoidTow == true
+                and ts.avoidR == T.TOW_TURN_AVOID_R and histHas and drive.lastVoice() == "detour",
+            "(nb1) 往前繞開堵點的調頭線收下：detour why=towturn tt=ok、commit 一次、等 cutover、堵點圈進歷史（why="
+            .. tostring(whyG) .. " tt=" .. tostring(dE.tt) .. " commit=" .. commits .. " pending="
+            .. tostring(ts.pendingRouteWhy) .. " hist=" .. tostring(histHas) .. "）")
+        for _ = 1, 4 do
+            if ts.route == good then break end
+            nowMs = nowMs + 16
+            driveTick(dp, dveh)
+        end
+        checkTrue(ts.route == good and ts.routeReadyWhy == "towturn" and MDAD.Drive.isActive(0),
+            "(nb1) 下一幀 cutover 到調頭繞路線（why=" .. tostring(ts.routeReadyWhy) .. "）")
+        api.requestDetour, api.commitDetour, api.navApiVersion = realReq, realCommit, realVer
+        MDADDiagnostics.event, MDADDiagnostics.sample = realEvent, realSample
+        drive.nav.route = origRoute
+    end
     drive.nav.detour = nil
     getSpecificPlayer = oldGet
     MDAD.Drive.stop(0, nil)

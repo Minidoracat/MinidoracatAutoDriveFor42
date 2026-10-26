@@ -3239,23 +3239,53 @@ end
 -- （群最近擋線點 blockHitX/Y，缺則車位）為圓心向主 MOD 要替代路線並驗收
 -- （requestDetourRoute＋Drive.detourSettle）；成功＝主 MOD 快取已換線（v11 由 commit 換），這裡只記 sticky 避讓圈、
 -- 把 nextRouteMs 歸零讓下一幀 fetchRoute 立刻 cutover（why="detour"）。
--- 回 (true) 或 (false, 原因)；原因供 HUD tooltip／console。
+-- 回 (true[, "towturn"]) 或 (false, 原因)；原因供 HUD tooltip／console。
 -- stuck＝交還前的最後一次改道（Drive.stuckDetour）：不要求 blocked、錨點要在車前附近、放寬繞遠上限。
 -- src＝"auto"（停等自動改道）；HUD 按鈕不帶＝manual。每次請求（不論成敗）記一筆 detour 事件（1004b：舊制只有
 -- 交還前那條有事件，自動／HUD 改道被拒的原因只在 Debug console；正式服 0.18.2 開著自動改道的 90 趟沒有任何 detour
 -- 紀錄）。Upload 以 detour 事件觸發片段（phase＝skip 除外），事前窗看得到判堵、寬帶判定與倒車。
+-- 1026d 拖車往車後的線（back）：事件帶被拒線前 2 點／snapDist／第一段長度 blen 與對車頭夾角 bdeg（Drive.rejectFields），
+-- 接了拖車調頭繞路時 tt＝Drive.towTurnaround 的結果（ok 或它的拒收原因）。
 function Drive.requestDetour(playerNum, stuck, src)
     local s = sessions[playerNum]
     if not s then return false, "inactive" end
     s.detourAvoidN, s.detourAx, s.detourAy = nil, nil, nil -- 本次附給主 MOD 的舊避讓圈數／避讓圈圓心（detourAttempt 寫；早退＝nil）
+    s.detourRej, s.detourTT = nil, nil -- 本次 back 拒收的線與接調頭繞路的結果（detourAttempt 寫；只活到本函式記完事件）
     local ok, why, len = Drive.detourAttempt(s, playerNum, stuck)
-    local v = s.vehicle
-    diagEvent(s, playerNum, "detour", { phase = stuck and "stuck" or (src or "manual"),
-        why = ok and "ok" or tostring(why), x = v and v:getX() or nil, y = v and v:getY() or nil, s = s.lastSNow,
+    local v, vh, rej = s.vehicle, s.lastVehicleHeading, s.detourRej
+    if not v or not MDADDynamics.finite(vh) then rej, vh = nil, 0 end
+    local vx, vy = v and v:getX() or nil, v and v:getY() or nil
+    -- 字面表＋Drive.rejectFields 補被拒線欄位（verify 15b 核對字面鍵；rejectFields 的鍵也在 EK）
+    diagEvent(s, playerNum, "detour", Drive.rejectFields({ phase = stuck and "stuck" or (src or "manual"),
+        why = ok and (why or "ok") or tostring(why), x = vx, y = vy, s = s.lastSNow,
         hitX = s.blockHitX, hitY = s.blockHitY, ms = s.waitAccumMs, attempt = s.episodeAttempts,
         lvl = s.wideArmed and Drive.wideLevelOf(s) or nil, len = len, avoidN = s.detourAvoidN,
-        ax = s.detourAx, ay = s.detourAy })
+        ax = s.detourAx, ay = s.detourAy, tt = s.detourTT }, rej, vx, vy, cos(vh), sin(vh)))
+    s.detourRej, s.detourTT = nil, nil
     return ok, why
+end
+
+-- 被拒改道線的形狀寫進事件 payload p（1026d，T11／T13；冷路徑）：前 2 點 r1x,r1y／r2x,r2y、起點接線距離 snapDist
+-- （主 MOD route.snapDist，缺＝車到首點的世界距離）、第一段長度 blen 與它對車頭 (fx,fy) 的夾角 bdeg（度，0＝正前、180＝正後）。
+-- 分清「目標在車後只能調頭」與「新圖路網 snap 讓起點落到車後」。
+function Drive.rejectFields(p, route, vx, vy, fx, fy)
+    local pts = route and route.pts
+    if type(pts) ~= "table" or #pts < 4 then return p end
+    local fin = MDADDynamics.finite
+    local x1, y1, x2, y2 = pts[1], pts[2], pts[3], pts[4]
+    p.r1x, p.r1y, p.r2x, p.r2y = x1, y1, x2, y2
+    local sd = route.snapDist
+    if not fin(sd) and fin(x1) and fin(y1) then sd = sqrt((x1 - vx) * (x1 - vx) + (y1 - vy) * (y1 - vy)) end
+    p.snapDist = sd
+    local dx, dy = x2 - x1, y2 - y1
+    local l, fl = sqrt(dx * dx + dy * dy), sqrt(fx * fx + fy * fy)
+    p.blen = l
+    if l > 1e-6 and fl > 1e-6 then
+        local c = (dx * fx + dy * fy) / (l * fl)
+        if c > 1 then c = 1 elseif c < -1 then c = -1 end
+        p.bdeg = math.floor(math.acos(c) * 1800 / math.pi + 0.5) / 10
+    end
+    return p
 end
 
 function Drive.detourAttempt(s, playerNum, stuck)
@@ -3308,9 +3338,29 @@ function Drive.detourAttempt(s, playerNum, stuck)
         route, why, rejected = nil, "back", route
     end
     route, why, rejected = Drive.detourSettle(s, api, playerNum, route, why, rejected)
-    if getDebug() then -- telemetry: detour 事件（why len ax ay）
+    -- 1026d NB1：拖車的替代線往車後（密集街廓被堵時最短替代線幾乎都先往回走）＝接拖車調頭繞路：車尾正後方圈＋
+    -- 本堵點圈（同一個 ax,ay、DETOUR_AVOID_R）一起避，要一條從車頭方向出發、也不穿堵點的線（長度上限同調頭）。
+    -- 舊制拒收 back 就沒有出口、停等到 WAIT_TIMEOUT 交還（正式服 1023b 新圖 14 趟 StopStuck／9 人）。
+    -- 收下＝下一幀 cutover why=towturn（事件 why=towturn、tt=ok）；調頭也無解＝拒收 "back-turn"（tt＝調頭那次的原因），
+    -- 照舊走停等／交還。額度＝Drive.towTurnaround 的每趟 TOW_TURN_TRIES（與 ROTATE 共用），用完 tt=max 不再問主 MOD。
+    if not route and why == "back" then
+        s.detourRej = rejected
+        local ok, tt, tlen = Drive.towTurnaround(s, playerNum, s.vehicle, getTimestampMs(), cos(vh), sin(vh),
+            ax, ay, TUNE.DETOUR_AVOID_R)
+        s.detourTT = tt
+        if ok then
+            if getDebug() then -- telemetry: detour 事件（why=towturn tt r1x r1y r2x r2y snapDist blen bdeg）
+                print(LOG .. "detour pn=" .. playerNum .. " rejected back -> tow turn " .. tostring(tt)
+                    .. string.format(" rs=%.1f t=%.0f", s.lastSNow or -1, getTimestampMs()))
+            end
+            return true, "towturn", tlen
+        end
+        why = "back-turn"
+    end
+    if getDebug() then -- telemetry: detour 事件（why len ax ay；back 拒收另帶 tt r1x r1y r2x r2y snapDist blen bdeg）
         print(LOG .. "detour pn=" .. playerNum .. " avoid=(" .. tostring(ax) .. "," .. tostring(ay)
             .. ") -> " .. (route and ("ok len=" .. tostring(route.len)) or ("rejected " .. tostring(why)))
+            .. (s.detourTT and (" tt=" .. tostring(s.detourTT)) or "")
             .. string.format(" rs=%.1f t=%.0f", s.lastSNow or -1, getTimestampMs()))
     end
     if not route then
@@ -3360,44 +3410,63 @@ end
 -- 路線——避讓圈放在車尾正後方（近緣離車心 TOW_TURN_GAP_M），往回開都得穿圈，只剩往前繞一圈。
 -- 驗收同堵車改道（穿圈／起點太遠拒）但長度放寬，另要從車頭方向出發。成功＝下一幀 cutover
 -- （why=towturn），等待期間回 true 讓呼叫端停住（上限 TOW_TURN_WAIT_MS）；每 session 最多
--- TOW_TURN_TRIES 次。回 false＝沒有不用調頭的走法，呼叫端照舊交還。
-function Drive.towTurnaround(s, playerNum, vehicle, now, fx, fy)
-    if s.pendingRouteWhy == "towturn" then return now < (s.towTurnUntil or 0) end
-    if (s.towTurnTries or 0) >= TUNE.TOW_TURN_TRIES then return false end
+-- TOW_TURN_TRIES 次。回 false＝沒有不用調頭的走法，呼叫端照舊交還。第二回傳＝結果（ok／wait＝已收下等 cutover／
+-- max＝額度用完／api＝主 MOD 或目標不在／requestDetourRoute 與 back 的拒收原因），第三回傳＝收下那條的長度。
+-- bx,by,br（1026d NB1，堵車改道拒收 back 時由 Drive.detourAttempt 給）＝本堵點的避讓圈：一併附給主 MOD（moreAvoid，
+-- 連同本趟判死的舊圈 Drive.avoidMore），回來的線穿它＝拒收（through／again），不得收「往前直穿堵點」的原線——
+-- 那等於判堵→改道→cutover 回同一處的迴圈；收下時這圈進 s.avoidHist（之後的改道與 sticky 重問照樣避開）。
+-- 事件 tow turn：kind=back（堵車改道接來的）；拒收且有算出線時帶被拒線前 2 點／snapDist／blen／bdeg（T11）。
+function Drive.towTurnaround(s, playerNum, vehicle, now, fx, fy, bx, by, br)
+    if s.pendingRouteWhy == "towturn" then return now < (s.towTurnUntil or 0), "wait" end
+    if (s.towTurnTries or 0) >= TUNE.TOW_TURN_TRIES then return false, "max" end
     s.towTurnTries = (s.towTurnTries or 0) + 1
     local api = navApi()
     local fin = MDADDynamics.finite -- 本檔的 local finite 定義在更後面
-    if not api or not fin(s.lastTx) or not fin(s.lastTy) then return false end
+    if not api or not fin(s.lastTx) or not fin(s.lastTy) then return false, "api" end
     local vx, vy = vehicle:getX(), vehicle:getY()
     local back = TUNE.TOW_TURN_AVOID_R + TUNE.TOW_TURN_GAP_M
     local ax, ay = vx - fx * back, vy - fy * back
     local remaining = s.profile and (s.profile.length - s.lastSNow) or nil
+    local more = nil
+    if bx ~= nil then
+        more = { bx, by, br }
+        local hist = Drive.avoidMore(s, vx, vy, s.lastTx, s.lastTy, bx, by, true)
+        for k = 1, hist and #hist or 0 do
+            if #more >= 24 then break end -- 主 MOD moreAvoid 最多 8 圈
+            more[#more + 1] = hist[k]
+        end
+    end
     local route, why, rejected = requestDetourRoute(api, playerNum, s.lastTx, s.lastTy, ax, ay,
         remaining, TUNE.TOW_TURN_AVOID_R,
-        fin(remaining) and remaining * TUNE.TOW_TURN_LEN_RATIO + TUNE.TOW_TURN_LEN_SLACK or nil, s.route)
+        fin(remaining) and remaining * TUNE.TOW_TURN_LEN_RATIO + TUNE.TOW_TURN_LEN_SLACK or nil, s.route, more)
     if route and not Drive.routeLeavesForward(route, vx, vy, fx, fy) then
         route, why, rejected = nil, "back", route
     end
     route, why, rejected = Drive.detourSettle(s, api, playerNum, route, why, rejected)
-    diagEvent(s, playerNum, "tow", {
-        phase = "turn", why = why or "ok", x = ax, y = ay, attempt = s.towTurnTries,
-        len = route and route.len or (rejected and rejected.len) or nil,
-    })
-    if getDebug() then
-        print(LOG .. "pn=" .. playerNum .. " tow turnaround try=" .. s.towTurnTries .. " -> "
+    diagEvent(s, playerNum, "tow", Drive.rejectFields({ phase = "turn", why = why or "ok", x = ax, y = ay,
+        attempt = s.towTurnTries, len = route and route.len or (rejected and rejected.len) or nil,
+        kind = bx ~= nil and "back" or nil, avoidN = more and #more / 3 or nil },
+        not route and rejected or nil, vx, vy, fx, fy))
+    if getDebug() then -- telemetry: tow turn 事件（why kind avoidN；拒收另帶 r1x r1y r2x r2y snapDist blen bdeg）
+        print(LOG .. "pn=" .. playerNum .. " tow turnaround try=" .. s.towTurnTries
+            .. (bx ~= nil and " from=back" or "") .. " -> "
             .. (route and ("ok len=" .. tostring(route.len)) or ("rejected " .. tostring(why))))
     end
     if not route then
-        return false -- 拒收紀錄由 Drive.detourSettle 記（v10 以下主 MOD 快取已被覆寫成這條）
+        return false, why -- 拒收紀錄由 Drive.detourSettle 記（v10 以下主 MOD 快取已被覆寫成這條）
     end
     Drive.pushAvoidHist(s) -- 先前的堵車避讓圈不因調頭圈蓋掉而遺失（調頭圈本身不進歷史）
+    if bx ~= nil then -- 本堵點圈也進歷史（目前那圈先寫成它再推，下一行換成調頭圈）
+        s.avoidX, s.avoidY, s.avoidR, s.avoidTow = bx, by, br, nil
+        Drive.pushAvoidHist(s)
+    end
     s.avoidX, s.avoidY, s.avoidR, s.avoidTow = ax, ay, TUNE.TOW_TURN_AVOID_R, true
     s.pendingDetour, s.pendingRouteWhy, s.nextRouteMs = true, "towturn", 0
     s.towTurnUntil = now + TUNE.TOW_TURN_WAIT_MS
     local playerObj = getSpecificPlayer(playerNum)
     if playerObj then haloGood(playerObj, MDADTrailer.KEY_TURN) end
     voice("detour", playerNum)
-    return true
+    return true, "ok", route.len
 end
 
 -- 拖車路線上有過不去的轉角（生效剖面 s.profileRoute.towBlocked 非空）：得知當下就向主 MOD 要一條避開那些轉角的線，
