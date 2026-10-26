@@ -926,6 +926,52 @@ for m in MEDIA_DIRS:
 fail("mod.info 依賴／衝突語法", manifest_bad) if manifest_bad \
     else ok("mod.info 依賴／衝突語法")
 
+# ---- 7c. MOD 清單封面（poster=）----
+# 主選單「模組」的封面走一般貼圖，只畫 poster= 的第一張（ChooseGameInfo.java:519-536）。
+# APNG 在這條路上只解出各幀、主貼圖是空的，畫成空白也不報錯（ImageData.java:136-191）；
+# poster= 找不到檔一樣是空白。路徑照引擎：先找版本資料夾，沒有再找 common/（ChooseGameInfo.java:210-219）。
+# 有 preview.png 的項目（要上 Workshop）版本資料夾的 mod.info 一定要有 poster=；還沒做封面的開發中 MOD 不擋。
+# 2026-10-26 Zones 玩家回報後盤點：24 個 MOD 的封面都是 APNG，SafeSpawn 的 42/mod.info 沒有 poster=。
+def png_animated(path):
+    """第一個 IDAT 之前有 acTL 就是 APNG；不是 PNG 回 False（只抓已知會畫成空白的 APNG）。"""
+    with open(path, "rb") as fh:
+        if fh.read(8) != b"\x89PNG\r\n\x1a\n":
+            return False
+        while len(head := fh.read(8)) == 8:
+            if head[4:] in (b"acTL", b"IDAT"):
+                return head[4:] == b"acTL"
+            fh.seek(int.from_bytes(head[:4], "big") + 4, 1)
+    return False
+
+
+poster_bad, poster_n = [], 0
+for base, _, files in os.walk(os.path.join(REPO, "MOD")):
+    mod_dir = os.path.dirname(base)
+    if "mod.info" not in files or os.path.basename(os.path.dirname(mod_dir)) != "mods" \
+            or os.path.basename(base) == "common":
+        continue
+    rel_info = os.path.relpath(os.path.join(base, "mod.info"), REPO)
+    item_dir = os.path.dirname(os.path.dirname(os.path.dirname(mod_dir)))   # MOD/<資料夾>
+    publish = os.path.isfile(os.path.join(item_dir, "preview.png"))
+    with open(os.path.join(base, "mod.info"), encoding="utf-8") as fh:
+        names = [line.strip().replace("poster=", "") for line in fh if "poster=" in line]
+    names = [n for n in names if n]
+    if publish and not names:
+        poster_bad.append(f"{rel_info}: 沒有 poster=，MOD 清單的封面是空白")
+    for name in names:
+        path = os.path.join(base, name)
+        if not os.path.isfile(path):
+            path = os.path.join(mod_dir, "common", name)
+        if not os.path.isfile(path):
+            if publish:
+                poster_bad.append(f"{rel_info}: poster={name} 找不到檔")
+            continue
+        poster_n += 1
+        if png_animated(path):
+            poster_bad.append(f"{os.path.relpath(path, REPO)}: APNG 在 MOD 清單畫成空白，改用靜態 PNG（still.png）")
+fail("MOD 清單封面（poster=）", poster_bad) if poster_bad \
+    else ok(f"MOD 清單封面是靜態 PNG（{poster_n} 張）")
+
 # ---- 8. 佔位符殘留 ----
 tokens = []
 SELF = os.path.abspath(__file__)   # 本檔 docstring 有 {{TOKEN}} 範例字樣，排除自己
