@@ -26,19 +26,27 @@ clips-anon.tsv（anon path overview，目錄內全部片段），寫完重讀、
     small-animal＝貼車的動物 a 體重 <SMALL_KG（nb a 第 5 項；1013f 起含剛死的，第 6 項＝1），讀不到體重算 animal——排除之後還留在這類的
     是小動物同時撞到別的（上升緣 footprint、車頭擋車 sprite 在 halfW+0.8 內、或他車貼著），仍算撞擊
   L 1017 摘要新欄位（rev 有 rhi 的趟）：rhi／xbk、vfIn／vfInX、aoi、出口偏差、油量分段 %/km、起步到 40m 中位（依 t40k）、blr、eng；
-    1020 起（摘要有 fuT／fuE）另印各段每分鐘扣量、實扣÷原版公式期望（held＝實際檔、fair＝伺服器換算檔），與油量判準
-    (彎道＋繞行)/其他 的實扣÷期望比＋玩家叢集 95%（boot_players；fair 區間含 1＝換算在作用）
+    1020 起（摘要有 fuT／fuE）另印各段每分鐘扣量（記在值到達那筆的段，只描述）。油量換算判準看片段（現行 rev、窗口內）：
+    兩次油量同步之間積分原版公式期望（held＝實際檔、fair＝伺服器換算檔），擬合換算比例 α＋玩家叢集 95%，fuel_verdict 判過／不過／
+    不確定（fuel_intervals／fuel_alpha）；另印步長指紋（≤FUEL_SMALL_STEP% 的下降佔比）。摘要的 (彎道＋繞行)/其他 段比不能當判準：同步由
+    換算前的扣量觸發、下降記在到達那筆的段，換算有作用／沒作用都落在 1.2–1.5（mdad-prod-1025/agent-TowFuelHud.md §1.4）。
+    1026g 起：EngineOff 機制（eng_class：est／kso／erm，舊 rev 未分類）；路中停車首見 V5 依區域（trip_region）——摘要有 vfW 用
+    vfW／vfWX（失敗窗，vb／va 只參考）與 vfWs 本車 ≥VF_FAST_KMH，舊 rev 以 vfInTs 同玩家 8 s 去重（vf_dedupe，SpeedTime §4a）；
+    他車首見 vhN／vhLt／vhMin 依區域
   D contact ≥10 km/h（現行 rev）：scost、弧上（前 2.5s curveHardActive）、前 2.5s |ld|>0.5、lag 帽（capReason=lag）、主導 ctl、sprite 家族
   E 判堵後接手：takeover 片段觸發前 10s 內有 blocked；窗口內首筆 blocked→接手秒數、其間 unstick start、detour=false、最後一筆 why／shape
   F 判堵熱點：blocked x,y 的 25m 格（玩家、趟、事件、車型）
   G 起步調頭 uturn done：依 start（1012 起步段原地轉，出場 30°）× probe 分組（aligned ms、stop 的 detail）；room＝倒車騰空間判定
   H 判堵鎖輪 brake 片段（at.fbw=blocked）：鎖輪速度、該趟是否 5s 內結束（摘要 end）
-  I tow lost／relook
+  I tow lost／relook（1026g alive=true 另帶 tj／tps，門檻未標定，只列值）
   J 結案檢查：area start kind=behind 後 20s 同趟 progress suspect；gate phase／why；detour kind=towcorner why=ok
   K 接手結束的趟（現行 rev）依 rem 分桶；≥300m 的趟 ev 沒有異常事件（blocked／uturn／unstick／contact／impact／progress）的數量
-  分析用 helper（`import upload_report as UR`）：Anon(root)、hm、q、ci、binom_p、boot_ratio、boot_players、fuel_model、opts_of、
-    is_tow、per_em、load_summaries、load_clips（since 省略＝pull.json）、dedupe、trips、events、window、edge_row、classify_impact、
-    real_impacts
+  M 1026g 新鍵（現行 rev 片段，sec_m）：engine off 機制、impact tw／dms（拖車起步拉緊）與 srcC 所在段、damage 依 cls、
+    route lost why×區域、dodge commit dbs×區域×拖車與 NB2 型、blocked why=guard 的 gsl／gcs 與之後接手。區域＝NEW_CELLS（三張新圖
+    lotheader 的 cell；Riverside 原版格算舊區）
+  分析用 helper（`import upload_report as UR`）：Anon(root)、hm、q、ci、binom_p、boot_ratio、boot_players、fuel_intervals、fuel_alpha、
+    opts_of、is_tow、per_em、load_summaries、load_clips（since 省略＝pull.json）、dedupe、trips、events、window、edge_row、classify_impact、
+    real_impacts、region、trip_region、ev_region、eng_class、vf_dedupe、seg_flag
 """
 import argparse
 import collections
@@ -72,6 +80,19 @@ REHITCH_SETTLE_MS = 2500  # 同 Driver TUNE.REHITCH_SETTLE_MS：rh-attach 後這
 EXIT_BRAKE_MS = 2000   # 同 MDAD_Upload EXIT_BRAKE_MS：撞擊後這麼久內以 exit 結束、tn 0、fbl 0＝下車煞車
 OTHER_HALF_L = 2.5     # 車對車貼車：對方半車長（nb v 不帶對方幾何）
 ANON_USERS, CLIPS_ANON = "anon-users.tsv", "clips-anon.tsv"
+KSO_PLAYER_MS = 2000  # 1026g engine off kso（距本機 onShutOff）< 這個值＝玩家關引擎（N 鍵／儀表鑰匙／radial）
+ERM_EARLY_MS = 3000   # 1026g engine off erm（距本機看到引擎轉起來）< 這個值＝剛發動就熄（1025 批 3 趟 1.2–2.2 s）
+TOW_START_MS = 2000   # 1026g impact tw＝true 且 dms < 這個值＝拖車起步拉緊（正式服 9 件開出 0.8–1.3 s，agent-Safety）
+VF_WIN_MS = 8000      # 路中停車首見同玩家去重窗（同 MDAD_Upload VFS_OUT_MS；SpeedTime §4a）
+VF_FAST_KMH = 70      # vfWs 第 3 項（本車 km/h）≥ 這個值＝判準要的高速首見
+NB2_DBL = 0.5         # dodge commit dbs=tow 且 |dbl| < 這個值＝NB2 型（出口 lane 被拖車線拉回中線）
+# 新圖區域＝三張地圖 lotheader 所在的 cell（256 格）：(地圖, cy0, cy1, ((cx0, cx1)…))，範圍含兩端。取自 Workshop 版
+# DirkerdamIntegratedB42／BBL_b42／New Hartburg, KY 的 *.lotheader 檔名（2026-10-26）；德克丹 bounds 南緣的 Riverside 原版格
+# （如 (24,20)）沒有 lotheader＝舊區（mdad-prod-1025 README：bounds 會把它算進德克丹）。換圖或地圖更新時重抓。
+NEW_CELLS = (("Dirkerdam", 7, 12, ((5, 40),)), ("Dirkerdam", 13, 17, ((5, 8), (11, 40))),
+             ("Dirkerdam", 18, 18, ((5, 8), (21, 21), (23, 40))), ("Dirkerdam", 19, 19, ((5, 6), (20, 40))),
+             ("Dirkerdam", 20, 20, ((5, 5), (18, 19), (28, 30))), ("Dirkerdam", 21, 21, ((5, 5), (28, 28))),
+             ("BigBearLake", 26, 33, ((14, 23),)), ("NewHartburg", 42, 45, ((24, 28),)))
 
 
 class Anon:
@@ -166,27 +187,90 @@ def boot_players(L, stat, B=2000, seed=7):
     return pt, q(rr, 0.025), q(rr, 0.975)
 
 
-FUEL_HI = ("arc", "dodge")   # 油量判準的「彎道＋繞行」段
+FUEL_PASS_LO = 0.9      # 油量換算判準：α 玩家 95% 下限 ≥ 這個值＝過（2026-10-25 正式服 0.95，0.95–1.00）
+FUEL_MIN_USERS = 5      # α 玩家叢集 bootstrap 至少這麼多人才判
+FUEL_SMALL_STEP = 0.03  # 步長指紋：≤ 這個 % 的油量下降＝退款後的小步（模擬：換算有作用 48–57%、沒換算 9–11%）
 
 
-def fuel_model(L, mi):
-    """1020 摘要 fuS（實扣 %）與 fuE（原版 GasTank 期望，[held, fair]）→ (段比, {段: [實扣, 正規化期望]})。mi 0＝held、1＝fair。
-    每趟期望以該趟實扣總量正規化（消掉油箱、引擎品質、耗油沙盒值、遊戲時間倍率）；段比＝(arc+dodge) 實扣÷期望 對其他段，
-    1＝和模型一致。沒有 fuE 或實扣 0 的趟不算；段比缺分母回 None。fu 是伺服器同步值、落在值到達那一筆的段：弧上的油有一部分記到 post。"""
-    seg = collections.defaultdict(lambda: [0.0, 0.0])
-    for o in L:
-        fs, fe = o.get("fuS") or {}, o.get("fuE") or {}
-        tot_o = sum(((fs.get(s) or [0])[0] or 0) for s in fe)
-        tot_e = sum(v[mi] or 0 for v in fe.values())
-        if tot_o <= 0 or tot_e <= 0:
+def fuel_intervals(C):
+    """片段 → (同步區間 [dict(u, rev, key, obs, H, F, ms)], 油量下降步長 % 清單)。
+    樣本 fu 是伺服器同步值：兩次油量變動之間＝整數個伺服器計費步，區間內積分原版 GasTank 期望（held＝實際檔 tn、fair＝伺服器換算檔，
+    公式同 MDAD_Upload tripKpi 的 fuE；檔數＝片段裡車速 ≥0.4×極速時最高的 tn，同 scriptName 共用），不受「值到達那筆」歸段影響。
+    只收「上一次變動是下降、這次下降 0–1%」的區間（第一段起點不明、加油後那段不算）；樣本間隔 ≤0 或 >2 s 切開重來。"""
+    gears, mx = collections.Counter(), {}
+    for c in C:
+        sc, m = c["prof"].get("scriptName"), c["prof"].get("maxSpeed")
+        mx[sc] = m
+        for r in c["rows"]:
+            if isinstance(r.get("tn"), int) and m and abs(r.get("spd") or 0) >= 0.4 * m:
+                gears[sc] = max(gears[sc], r["tn"])
+    iv, steps = [], []
+    for key, t in trips(C).items():
+        rec = t["clips"][0]
+        sc = rec["prof"].get("scriptName")
+        n, m = gears.get(sc), mx.get(sc)
+        if not n or n < 2 or not m:
             continue
-        k = tot_o / tot_e
-        for s, v in fe.items():
-            seg[s][0] += (fs.get(s) or [0])[0] or 0
-            seg[s][1] += (v[mi] or 0) * k
-    o1, e1 = (sum(seg[s][i] for s in seg if s in FUEL_HI) for i in (0, 1))
-    o2, e2 = (sum(seg[s][i] for s in seg if s not in FUEL_HI) for i in (0, 1))
-    return ((o1 / e1) / (o2 / e2) if e1 and e2 and o2 else None), dict(seg)
+        per, mm = m / n, abs(1000 - (rec["prof"].get("mass") or 1000)) / 300 + 1
+        R = [r for r in t["rows"] if isinstance(r.get("fu"), (int, float))]
+        last, H, F, ms, ok = None, 0.0, 0.0, 0, False
+        for a, b in zip(R, R[1:]):
+            dt = (b["ts"] - a["ts"]) / 1000
+            if dt <= 0 or dt > 2:
+                last, H, F, ms, ok = None, 0.0, 0.0, 0, False
+                continue
+            v, es, g = abs(a.get("spd") or 0), a.get("es") or 0, a.get("tn")
+            if es > 0 and isinstance(g, int):
+                if math.floor(v) > 0:
+                    h = gas_term(g, v, per) * mm
+                    fg = min(n, math.floor(min(v, m) / per) + 1)
+                    f = gas_term(fg, v, per) * mm if g >= 2 and g > fg else h
+                else:
+                    h = f = 150.0
+                H += h * es / 2500 * dt
+                F += f * es / 2500 * dt
+            ms += b["ts"] - a["ts"]
+            if b["fu"] < a["fu"]:
+                steps.append(a["fu"] - b["fu"])
+            if last is None:
+                last = a["fu"]
+            if b["fu"] != last:
+                if ok and 0 < last - b["fu"] < 1.0:
+                    iv.append(dict(u=rec["u"], rev=rec["rev"], key=key, obs=last - b["fu"], H=H, F=F, ms=ms))
+                ok = b["fu"] < last
+                last, H, F, ms = b["fu"], 0.0, 0.0, 0
+    return iv, steps
+
+
+def gas_term(gear, kmh, per):
+    """同 MDAD.gasGearTerm（原版 Vehicles.lua:467-479 的檔位項）。"""
+    x = (per * 0.71 * gear - kmh) * 350
+    return 800.0 if x < 800 else x
+
+
+def fuel_alpha(iv):
+    """同步區間 → 換算比例 α（0–1，格距 0.05）：擬合 obs ≈ k_趟 ×(α·F + (1−α)·H)，k_趟 以該趟區間總量正規化（消掉油箱、
+    引擎品質、耗油沙盒值、自駕加成），α 取 Σ(obs−pred)²/pred 最小。1＝照換算後的檔計費、0＝照實際檔（換算沒作用）。
+    少於 3 個區間的趟不算；沒有可用的趟回 None。"""
+    byt = collections.defaultdict(list)
+    for x in iv:
+        byt[x["key"]].append(x)
+    rs = [r for r in byt.values() if len(r) >= 3]
+    if not rs:
+        return None
+    best = None
+    for i in range(21):
+        a, dev = i / 20, 0.0
+        for r in rs:
+            M = [a * x["F"] + (1 - a) * x["H"] for x in r]
+            to, tm = sum(x["obs"] for x in r), sum(M)
+            if to <= 0 or tm <= 0:
+                continue
+            k = to / tm
+            dev += sum((x["obs"] - k * p) ** 2 / (k * p) for x, p in zip(r, M) if p > 0)
+        if best is None or dev < best[1]:
+            best = (a, dev)
+    return best[0]
 
 
 def q(xs, p):
@@ -215,6 +299,84 @@ def per_em(d, o):
 
 def fam(sprite):
     return re.sub(r"_\d+$", "", sprite) if sprite else None
+
+
+def group_by(L, key):
+    g = collections.defaultdict(list)
+    for o in L:
+        g[key(o)].append(o)
+    return g
+
+
+def region(x, y):
+    """世界座標 → 新圖地圖名（NEW_CELLS）／"old"；沒座標回 None。"""
+    if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+        return None
+    cx, cy = int(x // 256), int(y // 256)
+    return next((m for m, y0, y1, xs in NEW_CELLS if y0 <= cy <= y1 and any(a <= cx <= b for a, b in xs)), "old")
+
+
+def trip_region(o):
+    """摘要起訖 x0,y0／x1,y1 → "old"、地圖名、"mixed"（一新一舊或兩張新圖）、"?"（都沒座標）。"""
+    s = {r for r in (region(o.get("x0"), o.get("y0")), region(o.get("x1"), o.get("y1"))) if r}
+    return "?" if not s else s.pop() if len(s) == 1 else "mixed"
+
+
+def ev_region(e, rec):
+    """事件區域：事件自帶 x,y，否則用事件當下（≤ts+5ms）最後一筆樣本的 x,y；都沒有＝"?"。"""
+    r = edge_row(rec, e.get("ts") or 0)
+    return region(e.get("x"), e.get("y")) or region(r.get("x"), r.get("y")) or "?"
+
+
+def eng_class(d):
+    """engine off 事件或摘要 eng（1026g est／kso／erm）→ 機制：kso <KSO_PLAYER_MS＝玩家關引擎；est=Stalling＝熄火或沒油；
+    erm <ERM_EARLY_MS＝剛發動就熄；有新鍵但都不中＝其他（est）；三鍵都沒有（舊 rev）＝未分類。"""
+    d = d or {}
+    if not any(k in d for k in ("est", "kso", "erm")):
+        return "未分類"
+    if isinstance(d.get("kso"), (int, float)) and d["kso"] < KSO_PLAYER_MS:
+        return "玩家關引擎"
+    if d.get("est") == "Stalling":
+        return "熄火或沒油"
+    if isinstance(d.get("erm"), (int, float)) and d["erm"] < ERM_EARLY_MS:
+        return "剛發動就熄"
+    return f"其他（est={d.get('est')}）"
+
+
+def vf_dedupe(L):
+    """舊 rev（摘要沒有 vfW）路中停車首見 vfInTs 以「同玩家 VF_WIN_MS 窗」去重 → 件數（SpeedTime §4a：同一筆兩個停車條目、
+    0.4 s 後再記一次都會 +1）。窗從該窗第一筆起算，不因窗內再見延長。"""
+    by = collections.defaultdict(list)
+    for o in L:
+        by[o.get("u")] += [t for t in o.get("vfInTs") or [] if isinstance(t, (int, float))]
+    n = 0
+    for ts in by.values():
+        t0 = None
+        for t in sorted(ts):
+            if t0 is None or t - t0 >= VF_WIN_MS:
+                n, t0 = n + 1, t
+    return n
+
+
+def seg_flag(e, pt):
+    """route 事件的 src（"x,y;x,y;…"）與逐段旗標 srcC（"1;0;…"，第 i 項＝第 i→i+1 點那段）→ 離 pt 最近那段的旗標字串；
+    沒有 srcC、點列不足或該段被截掉回 None。"""
+    P, F = [], e.get("srcC").split(";") if isinstance(e.get("srcC"), str) else []
+    for p in e.get("src").split(";") if isinstance(e.get("src"), str) else ():
+        try:
+            x, y = map(float, p.split(","))
+        except ValueError:          # 截斷的尾點：前面的段照用
+            break
+        P.append((x, y))
+    if not F or len(P) < 2 or None in pt:
+        return None
+
+    def d2(a, b):
+        vx, vy, wx, wy = b[0] - a[0], b[1] - a[1], pt[0] - a[0], pt[1] - a[1]
+        t = max(0.0, min(1.0, (vx * wx + vy * wy) / (vx * vx + vy * vy))) if vx or vy else 0.0
+        return (wx - t * vx) ** 2 + (wy - t * vy) ** 2
+    i = min(range(len(P) - 1), key=lambda k: d2(P[k], P[k + 1]))
+    return F[i] if i < len(F) and F[i] != "" else None
 
 
 # ---------- 載入 ----------
@@ -548,14 +710,48 @@ def sec_c(E, A, picks, S=None):
     return out
 
 
-def sec_l(S, cur):
+def fuel_verdict(res):
+    """α 的 (點估計, 2.5%, 97.5%) → 判定：下限 ≥FUEL_PASS_LO＝過；上限 <FUEL_PASS_LO＝不過（換算沒作用或只部分作用；
+    反證模擬沒換算 α 0.05–0.25）；區間跨過 FUEL_PASS_LO＝不確定（樣本太少分不出，不能當成不過）；None＝樣本不足。"""
+    if res is None:
+        return "樣本不足"
+    return "過" if res[1] >= FUEL_PASS_LO else "不過" if res[2] < FUEL_PASS_LO else "不確定"
+
+
+def fuel_check(C):
+    """L 節油量判準（片段同步區間積分，fuel_intervals／fuel_alpha）：α 全部與依 rev 的玩家叢集 95% 與 fuel_verdict，
+    少於 FUEL_MIN_USERS 人＝樣本不足；另印步長指紋（≤FUEL_SMALL_STEP % 的下降佔比，只監控）。
+    取代 1020 起的摘要 (彎道＋繞行)/其他 段比：伺服器同步由原版扣量（換算前）觸發，下降記在值到達那筆的段，
+    模擬在換算有作用／沒作用時段比都落在 1.2–1.5，沒有鑑別力（.omc/plans/mdad-prod-1025/agent-TowFuelHud.md §1.4）。"""
+    iv, steps = fuel_intervals(C)
+    out = dict(steps=len(steps), small=sum(1 for s in steps if s <= FUEL_SMALL_STEP + 1e-9))
+    print("  油量換算判準（片段兩次油量同步之間積分原版公式期望；α 1＝照伺服器換算檔計費、0＝照實際檔＝換算沒作用）")
+    revs = sorted({x["rev"] for x in iv})
+    for name, g in [("全部", iv)] + ([(r, [x for x in iv if x["rev"] == r]) for r in revs] if len(revs) > 1 else []):
+        users = len({x["u"] for x in g})
+        res = boot_players(g, fuel_alpha, B=500) if users >= FUEL_MIN_USERS else None
+        verdict = fuel_verdict(res)
+        out[name] = dict(alpha=res and tuple(round(v, 2) for v in res), n=len(g), trips=len({x["key"] for x in g}),
+                         users=users, verdict=verdict)
+        print(f"    {name}：α " + ("—" if res is None else f"{res[0]:.2f}（玩家 95% {res[1]:.2f}–{res[2]:.2f}）")
+              + f"；區間 {len(g)}、趟 {out[name]['trips']}、人 {users}、{sum(x['ms'] for x in g) / 60000:.0f} 分鐘"
+              + f"；判準（{FUEL_MIN_USERS} 人以上）下限 ≥{FUEL_PASS_LO} 過、上限 <{FUEL_PASS_LO} 不過、跨過＝不確定：{verdict}")
+    if steps:
+        print(f"    步長指紋：油量下降 {len(steps)} 步，≤{FUEL_SMALL_STEP}% 佔 {out['small'] / len(steps) * 100:.0f}%"
+              "（模擬：換算有作用 48–57%、沒換算 9–11%；只監控）")
+    return out
+
+
+def sec_l(S, cur, C=()):
     """1017 摘要新欄位（只算帶 rhi 的摘要＝rev ≥1017f）：假撞另計、路中停車首見、入彎超速明細、出彎偏差、油量、起步、
-    煞車學習拒收、EngineOff 關卡。"""
+    煞車學習拒收、EngineOff 關卡；C（現行 rev 片段）另算油量換算判準 fuel_check。"""
     print("\n== L 1017 摘要新欄位（rev 有 rhi 欄的趟）")
     L = [o for o in S.values() if "rhi" in o and (not cur or o.get("rev") in cur)]
     out = dict(trips=len(L))
+    if C:
+        out["fuelA"] = fuel_check(C)
     if not L:
-        print("  （沒有）")
+        print("  （沒有摘要）")
         return out
     km = sum(o.get("dist") or 0 for o in L) / 1000
     tot = {f: sum(o.get(f) or 0 for o in L) for f in ("impact", "rhi", "xbk", "vfIn", "vfInX", "exN", "exDev", "exN50", "exDev50")}
@@ -577,33 +773,18 @@ def sec_l(S, cur):
                 seg[k][1] += v[1] or 0
     out["fuel"] = {k: [round(d, 2), round(m, 3)] for k, (d, m) in seg.items()}
     if fu:
-        print(f"  油量 {len(fu)} 趟：起訖差 {sum(o['fu0'] - o['fu1'] for o in fu):.2f}%；分段 %/km "
+        print(f"  油量 {len(fu)} 趟：起訖差 {sum(o['fu0'] - o['fu1'] for o in fu):.2f}%；分段 %/km（記在值到達那筆的段，只描述） "
               + ", ".join(f"{k}:{d / m if m else 0:.2f}({m:.1f}km)" for k, (d, m) in sorted(seg.items())))
-    # 1020 油量判準：實扣÷原版公式期望（fair＝伺服器換算後；held＝沒換算），(彎道＋繞行)/其他 的玩家叢集 95% 區間含 1＝換算在作用
     fe = [o for o in fu if o.get("fuE")]
     if fe:
         tm, dr = collections.Counter(), collections.Counter()
         for o in fe:
             tm.update(o.get("fuT") or {})
             dr.update({s: v[0] or 0 for s, v in (o.get("fuS") or {}).items() if isinstance(v, list) and v})
-        segs = sorted(set(tm) | set(dr))
-        fit = {m: fuel_model(fe, i)[1] for i, m in enumerate(("held", "fair"))}
-        res = {m: boot_players(fe, lambda xs, i=i: fuel_model(xs, i)[0]) for i, m in enumerate(("held", "fair"))}
-        out["fuelE"] = dict(trips=len(fe), users=len({o.get("u") for o in fe}), ratio=res,
-                            perMin={s: round(dr[s] / (tm[s] / 60000), 3) for s in segs if tm[s] > 0},
-                            seg={s: [round(fit[m][s][0] / fit[m][s][1], 3) if s in fit[m] and fit[m][s][1] else None
-                                     for m in ("held", "fair")] for s in segs})
-        print(f"  油量模型 {len(fe)} 趟 {out['fuelE']['users']} 人：每分鐘扣量 %/min "
+        out["fuelE"] = dict(trips=len(fe), users=len({o.get("u") for o in fe}),
+                            perMin={s: round(dr[s] / (tm[s] / 60000), 3) for s in sorted(set(tm) | set(dr)) if tm[s] > 0})
+        print(f"  每分鐘扣量 %/min（摘要 fuT 有記的 {len(fe)} 趟 {out['fuelE']['users']} 人，同樣是到達歸段，只描述） "
               + ", ".join(f"{s}:{v:.3f}({tm[s] / 60000:.0f}min)" for s, v in out["fuelE"]["perMin"].items()))
-        print("    實扣÷期望（每趟總量正規化，1＝和模型一致）held/fair "
-              + ", ".join(f"{s}:{h if h is None else round(h, 2)}/{f if f is None else round(f, 2)}"
-                          for s, (h, f) in out["fuelE"]["seg"].items()))
-        for m in ("fair", "held"):
-            r = res[m]
-            print(f"    (彎道＋繞行)/其他 {m}：" + ("分母不足" if r is None else
-                                              f"{r[0]:.2f}（玩家 95% {r[1]:.2f}–{r[2]:.2f}）"
-                                              + ("" if m == "held" else "；判準：區間含 1"
-                                                 + ("，過" if r[1] <= 1 <= r[2] else "，不過"))))
     t40 = collections.defaultdict(list)
     for o in L:
         if isinstance(o.get("t40"), (int, float)):
@@ -621,6 +802,46 @@ def sec_l(S, cur):
     out["engLow"] = (sum(1 for c in ecd if c < 50), len(ecd))
     print("  EngineOff 關卡 " + (", ".join(f"{k}:{v}" for k, v in eng.most_common()) or "0")
           + (f"；引擎零件狀況 <50（原版隨機熄火區）{out['engLow'][0]}/{len(ecd)}" if ecd else ""))
+    ec = collections.Counter(eng_class(o["eng"]) for o in L if o.get("eng"))
+    out["engClass"] = dict(ec)
+    if ec:
+        print(f"  EngineOff 機制（1026g 摘要 eng est／kso／erm：kso <{KSO_PLAYER_MS}ms 玩家關引擎、est=Stalling 熄火或沒油、"
+              f"erm <{ERM_EARLY_MS}ms 剛發動就熄；舊 rev 未分類） " + ", ".join(f"{k}:{v}" for k, v in ec.most_common()))
+    out["vf"] = {}
+    for g, R in sorted(group_by(L, trip_region).items()):
+        nw, od = [o for o in R if "vfW" in o], [o for o in R if "vfW" not in o]
+        km_g = sum(o.get("dist") or 0 for o in R) / 1000
+        v = dict(km=round(km_g, 1))
+        if nw:   # 1026g 起：以窗計，vfWX＝窗內接觸／visibility／moving 鎖輪＝判準的失敗窗；vb（blocked 鎖輪）／va（可視輔助）只參考
+            xk = collections.Counter()
+            for o in nw:
+                xk.update({k: n for k, n in (o.get("vfXk") or {}).items() if isinstance(n, (int, float))})
+            ws = [w for o in nw for w in o.get("vfWs") or [] if isinstance(w, list) and len(w) >= 3]
+            v.update(trips=len(nw), vfW=sum(o.get("vfW") or 0 for o in nw), vfWX=sum(o.get("vfWX") or 0 for o in nw),
+                     xk=dict(xk), fast=sum(1 for w in ws if isinstance(w[2], (int, float)) and w[2] >= VF_FAST_KMH), ws=len(ws))
+        if od:   # 舊 rev：vfIn 每個首見 +1、vfInX 含 blocked 鎖輪 → vfInTs 同玩家 8 s 去重；失敗只能參考 fb visibility／moving
+            v.update(oldTrips=len(od), vfIn=sum(o.get("vfIn") or 0 for o in od), vfInDedup=vf_dedupe(od),
+                     vfInX=sum(o.get("vfInX") or 0 for o in od),
+                     fbVM=sum((o.get("fb") or {}).get(k) or 0 for o in od for k in ("visibility", "moving")))
+        out["vf"][g] = v
+    print(f"  路中停車首見 V5（依區域；1026g vfW 窗數／vfWX 失敗窗、vfWs 本車 ≥{VF_FAST_KMH} km/h 的窗；"
+          f"舊 rev vfInTs 同玩家 {VF_WIN_MS // 1000}s 去重，vfInX 含 blocked 鎖輪只參考）")
+    for g, v in out["vf"].items():
+        line = f"    {g} {v['km']}km"
+        if "vfW" in v:
+            line += (f"：1026g {v['trips']} 趟 vfW {v['vfW']} vfWX {v['vfWX']}（vb {v['xk'].get('vb', 0)} va {v['xk'].get('va', 0)} 參考）"
+                     f" ≥{VF_FAST_KMH}km/h {v['fast']}/{v['ws']}")
+        if "vfIn" in v:
+            line += (f"：舊 rev {v['oldTrips']} 趟 vfIn {v['vfIn']} 去重 {v['vfInDedup']}；vfInX {v['vfInX']}、"
+                     f"fb visibility+moving {v['fbVM']}（參考）")
+        print(line)
+    vh = group_by([o for o in L if "vhN" in o], trip_region)
+    out["vh"] = {g: dict(trips=len(R), vhN=sum(o.get("vhN") or 0 for o in R), vhLt=sum(o.get("vhLt") or 0 for o in R),
+                         vhMin=min((o["vhMin"] for o in R if isinstance(o.get("vhMin"), (int, float))), default=None))
+                 for g, R in sorted(vh.items())}
+    if out["vh"]:
+        print("  他車首見（1026g vhN 次／vhLt <15m 次／vhMin m，依區域） " + ", ".join(
+            f"{g}:{v['vhN']}/{v['vhLt']}/{v['vhMin']}({v['trips']}趟)" for g, v in out["vh"].items()))
     return out
 
 
@@ -747,7 +968,7 @@ def sec_h(C, S, A, picks):
 
 def sec_i(E, A, picks):
     print("\n== I tow lost／relook")
-    keys = ("alive", "rmw", "phi", "od", "dt", "found", "same", "fsc", "fd", "sn", "script")
+    keys = ("alive", "rmw", "phi", "od", "dt", "found", "same", "fsc", "fd", "sn", "script", "tj", "tps")  # tj／tps：1026g（門檻未標定，只列值）
     L = [er for ph in ("lost", "relook") for er in events(E, "tow", ph)]
     for e, rec in sorted(L, key=lambda er: er[0]["ts"]):
         note = " ".join(f"{k}={e[k]}" for k in keys if k in e)
@@ -793,6 +1014,68 @@ def sec_k(S, cur):
         out[rev] = (len(L), calm, len(far))
         print(f"  rev={rev} {len(L)} 趟：<50m {sum(1 for r in rem if r < 50)}、50–300m {sum(1 for r in rem if 50 <= r < 300)}、"
               f"≥300m {len(far)}（ev 無異常事件 {calm}，{calm / len(far) * 100 if far else 0:.0f}%）")
+    return out
+
+
+def sec_m(E, C, A, S=None):
+    """1026g 新鍵（現行 rev 片段；舊 rev 沒有這些鍵＝未分類／缺，不推）：engine off 機制（eng_class）；真撞擊的 tw／dms（拖車且
+    dms <TOW_START_MS＝拖車起步拉緊）與 srcC（撞前最後一筆 route cutover／far 離車位最近那段＝自訂道路）；damage 依 cls 的 dmg
+    中位／p90 與 dpt 前 3（small-animal 先列）；route lost why×區域；dodge commit dbs×區域×拖車（樣本有 thd＝拖車）與 NB2 型；
+    blocked why=guard 的 gsl／gcs 與同趟之後第一個 takeover 片段的等待秒數。"""
+    print("\n== M 1026g 新鍵（現行 rev 片段；沒有新鍵＝未分類／缺）")
+    out = dict(engine=collections.Counter(eng_class(e) for e, _ in events(E, "engine", "off")))
+    print("  engine off 機制 " + (", ".join(f"{k}:{v}" for k, v in out["engine"].most_common()) or "0"))
+    tw, start, src = collections.Counter(), [], collections.Counter()
+    for e, rec in real_impacts(E, S)[0]:
+        cls = classify_impact(e, rec)[0]
+        tw["缺" if "tw" not in e else "拖車" if e["tw"] else "非拖車"] += 1
+        if e.get("tw") is True and isinstance(e.get("dms"), (int, float)) and e["dms"] < TOW_START_MS:
+            start.append((e, rec, cls))
+        rt = [x for x in rec["evs"] if x.get("n") == "route" and x.get("phase") in ("cutover", "far") and "srcC" in x
+              and (x.get("ts") or 0) <= e["ts"]]
+        r = edge_row(rec, e["ts"])
+        f = seg_flag(max(rt, key=lambda x: x["ts"]), (r.get("x"), r.get("y"))) if rt else None
+        src[(cls, {"1": "自訂", "0": "原版"}.get(f, "缺"))] += 1
+    out.update(impactTw=tw, towStart=len(start), srcC=src)
+    print(f"  impact tw（真撞擊）" + (", ".join(f"{k}:{v}" for k, v in tw.most_common()) or "0")
+          + f"；拖車起步拉緊（tw 且 dms <{TOW_START_MS}ms）{len(start)}")
+    for e, rec, cls in start:
+        print(f"    {hm(e['ts'])} {A(rec['u'])} rev={rec['rev']} dms={e.get('dms')} v={e.get('speed')} dv={e.get('dv')} 歸類 {cls}")
+    print("  impact 所在段 srcC（cls/自訂｜原版｜缺） " + (", ".join(f"{c}/{k}:{v}" for (c, k), v in sorted(src.items())) or "0"))
+    dm = group_by([e for e, _ in events(E, "damage")], lambda e: e.get("cls") or "?")
+    out["damage"] = {}
+    for cls in sorted(dm, key=lambda c: (c != "small-animal", -len(dm[c]), c)):
+        g = [e["dmg"] for e in dm[cls] if isinstance(e.get("dmg"), (int, float))]
+        top = collections.Counter(e.get("dpt") for e in dm[cls] if e.get("dpt")).most_common(3)
+        out["damage"][cls] = dict(n=len(dm[cls]), med=g and statistics.median(g), p90=g and q(g, 0.9), dpt=top)
+        print(f"  damage {cls} n={len(dm[cls])} dmg 中位 " + (f"{statistics.median(g):.1f} p90 {q(g, 0.9):.1f}" if g else "—")
+              + " dpt " + (", ".join(f"{k}:{v}" for k, v in top) or "—"))
+    out["routeLost"] = collections.Counter((e.get("why") or "?", ev_region(e, rec)) for e, rec in events(E, "route", "lost"))
+    print("  route lost why/區域 " + (", ".join(f"{w}/{g}:{v}" for (w, g), v in sorted(out["routeLost"].items())) or "0"))
+    db, nb2, nodbs = collections.Counter(), collections.Counter(), 0
+    for e, rec in events(E, "dodge", "commit"):
+        if "dbs" not in e:
+            nodbs += 1
+            continue
+        g = ev_region(e, rec)
+        db[(g, "拖車" if edge_row(rec, e["ts"]).get("thd") is not None else "無拖車", e["dbs"])] += 1
+        if e["dbs"] == "tow" and isinstance(e.get("dbl"), (int, float)) and abs(e["dbl"]) < NB2_DBL:
+            nb2[g] += 1
+    out.update(dbs=db, nb2=nb2)
+    print("  dodge commit dbs（區域/拖車/dbs） " + (", ".join(f"{g}/{t}/{s}:{v}" for (g, t, s), v in sorted(db.items())) or "0")
+          + f"；缺 dbs {nodbs}；NB2 型（dbs=tow 且 |dbl|<{NB2_DBL}） " + (", ".join(f"{g}:{v}" for g, v in sorted(nb2.items())) or "0"))
+    gd, waits = [(e, rec) for e, rec in events(E, "blocked") if e.get("why") == "guard" and "gsl" in e], []
+    for e, rec in gd:
+        tk = [c["trig"] for c in C if c["kind"] == "takeover" and (c["u"], c["drive"]) == (rec["u"], rec["drive"]) and c["trig"] >= e["ts"]]
+        if tk and isinstance(e.get("gcs"), (int, float)):
+            waits.append(((min(tk) - e["ts"]) / 1000, e["gcs"]))
+    gsl = [e["gsl"] for e, _ in gd if isinstance(e.get("gsl"), (int, float))]
+    gcs = [e["gcs"] for e, _ in gd if isinstance(e.get("gcs"), (int, float))]
+    out["guard"] = dict(n=len(gd), takeover=len(waits), early=sum(1 for w, c in waits if w < c))
+    print(f"  blocked why=guard 帶 gsl {len(gd)} 件" + (f"：gsl m 中位 {statistics.median(gsl):.1f} p90 {q(gsl, 0.9):.1f}" if gsl else "")
+          + (f"；gcs s 中位 {statistics.median(gcs):.1f}（帽 ≤0 缺 {len(gd) - len(gcs)}）" if gcs else "")
+          + f"；之後同趟接手 {len(waits)}，等不到 gcs 就接手 {out['guard']['early']}"
+          + (f"、等待/gcs 中位 {statistics.median(w / c for w, c in waits if c > 0):.2f}" if any(c > 0 for _, c in waits) else ""))
     return out
 
 
@@ -850,7 +1133,7 @@ def report(root, since_s, cur, picks_path=None, withs=()):
     E = dedupe(C)
     res = dict(A=a, B=b, C=sec_c(E, A, picks, Sd), D=sec_d(E, A, picks), E=sec_e(C, A, picks),
                F=sec_f(E, A), G=sec_g(E, A, picks), H=sec_h(C, S, A, picks), I=sec_i(E, A, picks), J=sec_j(E, A, picks),
-               K=sec_k(S, cur), L=sec_l(S, cur))
+               K=sec_k(S, cur), L=sec_l(S, cur, C), M=sec_m(E, C, A, Sd))
     if picks_path:
         write_picks(picks_path, picks, A)
         print(f"\npicks {len(picks)} 列 → {picks_path}（含真實資料夾名，只留本機）")
@@ -1041,9 +1324,9 @@ def self_test():
         check(L["trips"] == 1 and L["rhi"] == 1 and L["xbk"] == 1 and L["vfIn"] == 2 and L["vfInX"] == 1 and L["aoi"] == 1
               and L["exN50"] == 2 and L["fuel"] == {"arc": [0.5, 0.2], "oth": [1.0, 0.8]} and L["t40"] == {"tow": 3200}
               and L["blr"] == {"unloaded": 2} and L["eng"] == {"battery": 1}, "L 1017 摘要新欄位彙整（" + str(L) + "）")
-        check("fuelE" not in L and L["engLow"] == (0, 0), "L 舊摘要（沒有 fuE、eng 沒有 ecd）不出油量模型與引擎狀況")
-        # 1020 油量模型：A、B 兩種趟（油箱大小不同＝每 % 對應的油量不同），實扣都照 fair 期望扣；B 的段比例和 A 不同。
-        # 每趟正規化後 fair 段比＝1；不正規化會變 0.75。held（沒換算）在彎道期望偏高，段比 <1。舊格式（沒 fuE）與實扣 0 的趟不算。
+        check("fuelE" not in L and L["engLow"] == (0, 0) and L["fuelA"]["全部"]["verdict"] == "樣本不足",
+              "L 舊摘要（沒有 fuE、eng 沒有 ecd）不出每分鐘扣量與引擎狀況；片段沒有 fu＝油量判準樣本不足")
+        # 1020 摘要 fuT／fuE：每分鐘扣量只算有 fuE 的趟（舊格式沒 fuE 的不算）；段比判準已拿掉（到達歸段沒有鑑別力）。
         def fs(u, drive, fuS, fuT=None, fuE=None, eng=None):
             o = dict(t="sum", u=u, drive=drive, rev="2", rhi=0, fu0=50, fu1=40, fuS=fuS)
             o.update({k: v for k, v in (("fuT", fuT), ("fuE", fuE), ("eng", eng)) if v is not None})
@@ -1057,13 +1340,42 @@ def self_test():
         with contextlib.redirect_stdout(io.StringIO()):
             LE = sec_l({(o["u"], o["drive"]): o for o in SF}, {"2"})
         LF = LE["fuelE"]
-        fair, held = LF["ratio"]["fair"], LF["ratio"]["held"]
-        check(LF["trips"] == 4 and LF["users"] == 4 and all(abs(x - 1) < 1e-9 for x in fair),
-              "L 油量模型：照 fair 扣的趟每趟正規化後 (arc+dodge)/其他＝1、玩家區間也是 1；沒 fuE 的趟不算（" + str(LF) + "）")
-        check(held[0] < 0.9 and held[2] < 1, "L 油量模型：held（沒換算）段比 <1、區間不含 1（" + str(held) + "）")
+        check(LF["trips"] == 4 and LF["users"] == 4 and set(LF) == {"trips", "users", "perMin"},
+              "L 每分鐘扣量只算有 fuE 的趟，不再輸出段比 ratio／seg（" + str(LF) + "）")
         check(LF["perMin"] == {"arc": round(7 / 3, 3), "oth": round(17 / 5, 3)}, "L 每分鐘扣量＝fuS 實扣 ÷ fuT 分鐘（只算有 fuE 的趟）")
-        check(LF["seg"]["arc"][1] == 1.0 and LF["seg"]["oth"][1] == 1.0, "L 各段實扣÷fair 期望＝1")
         check(LE["engLow"] == (1, 1), "L eng ecd <50 計數")
+        # 油量換算判準（片段同步區間積分）：合成片段，油箱照 truth（fair＝換算檔、held＝實際檔）的原版公式扣，
+        # 累積下降 ≥0.02% 才同步一次（樣本 fu 只在同步時變）。換算有作用＝α 1 過；沒作用＝α 0 不過；不到 5 人＝樣本不足。
+        def fuel_clips(truth, users, seed=3):
+            rnd, C = random.Random(seed), []
+            fprof = {"scriptName": "Base.F", "maxSpeed": 150, "mass": 1300}   # 5 檔、每檔 30 km/h、車重倍率 2
+            for i in range(users):
+                rows, tank, shown, ts = [], 40.0, 40.0, T
+                while ts < T + 120000:
+                    v = rnd.choice((30, 55, 80, 120))
+                    end = ts + rnd.uniform(2000, 10000)
+                    while ts < end:
+                        g = 5 if v >= 120 else 4
+                        rows.append(dict(t="s", ts=ts, spd=v, tn=g, es=2500, fu=shown))
+                        fg = min(5, v // 30 + 1)
+                        rate = gas_term(g if truth == "held" or g <= fg else fg, v, 30) * 2
+                        tank -= rate * 0.05 / 38640 * 0.25
+                        if shown - tank >= 0.02:
+                            shown = tank
+                        ts += 250
+                C.append(dict(u="g%d" % i, drive=T + i, rev="ab"[i % 2], prof=fprof, rows=rows, evs=[]))
+            return C
+        with contextlib.redirect_stdout(io.StringIO()):
+            fa, fh, fn = (fuel_check(fuel_clips(t, n)) for t, n in (("fair", 10), ("held", 10), ("fair", 4)))
+        check(fa["全部"]["alpha"][0] == 1.0 and fa["全部"]["verdict"] == "過" and fa["a"]["verdict"] == "過"
+              and fa["b"]["users"] == 5 and fa["全部"]["n"] >= 30,
+              "L 油量判準：油照換算檔扣＝α 1、全部與各 rev 都過（" + str(fa["全部"]) + "）")
+        check(fh["全部"]["alpha"][2] <= 0.1 and fh["全部"]["verdict"] == "不過",
+              "L 油量判準：油照實際檔扣（換算沒作用）＝α≈0、不過（" + str(fh["全部"]) + "）")
+        check(fn["全部"]["verdict"] == "樣本不足" and fn["全部"]["alpha"] is None, "L 油量判準：不到 5 人＝樣本不足、不判")
+        check([fuel_verdict(r) for r in ((0.95, 0.95, 1.0), (0.85, 0.6, 1.0), (0.5, 0.3, 0.85), None)]
+              == ["過", "不確定", "不過", "樣本不足"],
+              "L 油量判定：下限 ≥0.9 過、區間跨 0.9 不確定（1020 批 1018a 型：0.85，0.60–1.00）、上限 <0.9 不過")
         man = [ln for ln in out.getvalue().splitlines() if ln.strip().startswith("static")]
         check(man and "maneuver 1" in man[0], "前 2.5s 有 dg＝maneuver")
         e = res["E"]
@@ -1072,6 +1384,11 @@ def self_test():
         top = res["F"]
         check(top[0][0] == (200, 280) and len(top[0][1]["u"]) == 3 and top[0][1]["n"] == 3, "熱點 25m 格聚合三位玩家")
         check(res["K"] == {"2": (20, 20, 20)}, "接手結束 rem ≥300 且 ev 無異常")
+        check(res["L"]["engClass"] == {"未分類": 1} and res["L"]["vf"] == {"?": dict(km=1.0, oldTrips=1, vfIn=2, vfInDedup=0, vfInX=1, fbVM=0)}
+              and res["L"]["vh"] == {} and not res["M"]["engine"] and set(res["M"]["impactTw"]) == {"缺"}
+              and set(k for _, k in res["M"]["srcC"]) == {"缺"} and not res["M"]["damage"] and not res["M"]["dbs"]
+              and res["M"]["guard"]["n"] == 0,
+              "1026g 新鍵：舊 rev 片段／摘要一律未分類／缺（沒有 vfW 走 vfIn、沒有 vhN 不列、impact 沒 tw＝缺、src 不是字串＝缺）")
         tsv = open(os.path.join(d, "picks.tsv"), encoding="utf-8").read()
         check("pa/clip-04.log" in tsv and "pa/" not in out.getvalue() and "pb" not in out.getvalue(), "picks 有路徑、stdout 不含玩家名")
         dold = os.path.join(d, "_old")                                 # 較早的一批：只有摘要（同 (u, drive) 的那趟以本批為準）
@@ -1100,6 +1417,104 @@ def self_test():
             fh.write("P07\tzz\n")
         an = Anon(os.path.join(par, "new"))
         check(an("zz") == "P07" and an("yy") == "P08", "新一批還沒有 anon-users.tsv：沿用同層最新一批的表，代碼不重編")
+    # 1026g 新鍵（Telemetry.md §4）：區域（lotheader cell）、EngineOff 機制、V5、他車首見、impact tw／dms／srcC、damage、route lost、
+    # dodge dbs、guard gsl／gcs、tow lost tj／tps。
+    check([region(6377.9, 5283.5), region(4462.6, 2809.6), region(4000, 7000), region(6500, 11000), region(9 * 256 + 10, 14 * 256 + 10),
+           region(None, 1)] == ["old", "Dirkerdam", "BigBearLake", "NewHartburg", "old", None],
+          "區域＝新圖 lotheader cell：Riverside 原版格 (24,20) 在德克丹 bounds 內但算 old、德克丹 (9,14) 空洞算 old、沒座標 None")
+    DK, OL = dict(x=4462.6, y=2809.6), dict(x=10760, y=9771)
+    check([trip_region(dict(x0=DK["x"], y0=DK["y"], x1=OL["x"], y1=OL["y"])), trip_region(dict(x0=DK["x"], y0=DK["y"])),
+           trip_region(dict(x0=4000, y0=7000, x1=DK["x"], y1=DK["y"])), trip_region({})] == ["mixed", "Dirkerdam", "mixed", "?"],
+          "摘要區域：一新一舊／兩張新圖＝mixed、只有起點照起點、沒座標＝?")
+    check([eng_class(x) for x in ({"why": "engine", "ecd": 30}, {"est": "ShuttingDown", "kso": 209, "erm": 16933},
+                                  {"est": "Stalling", "kso": 1999}, {"est": "Stalling", "kso": 5000}, {"est": "Idle", "erm": 1500},
+                                  {"est": "Idle", "kso": 2000, "erm": 3000}, None)]
+          == ["未分類", "玩家關引擎", "玩家關引擎", "熄火或沒油", "剛發動就熄", "其他（est=Idle）", "未分類"],
+          "EngineOff 機制：kso <2000 先判玩家關引擎、Stalling＝熄火或沒油、erm <3000＝剛發動就熄、門檻值本身不中、舊 rev 未分類")
+    check(vf_dedupe([dict(u="a", vfInTs=[7999, 0, 400, 8000, 20000]), dict(u="b", vfInTs=[0]), dict(u="a", vfInTs=None)]) == 4,
+          "vfInTs 同玩家 8 s 窗去重：0／400／7999 一件、8000 起新窗、不同玩家各算")
+    sg = dict(src="0,0;10,0;10,10", srcC="0;1")
+    check([seg_flag(sg, (10.5, 5)), seg_flag(sg, (5, 0.2)), seg_flag(dict(src=sg["src"]), (5, 0)), seg_flag(dict(sg, srcC="0"), (10.5, 5)),
+           seg_flag(dict(src="0,0;10,0;10,", srcC="0;1"), (10.5, 5)), seg_flag(dict(src=[1], srcC="1"), (0, 0)), seg_flag(sg, (None, None))]
+          == ["1", "0", None, None, "0", None, None],
+          "srcC 取離車位最近那段：第 2 段＝1、第 1 段＝0；沒 srcC、該段被截掉、src 不是字串、沒車位＝None；截斷的尾點不用")
+    T6 = 1792900000000
+    old_xy, dk_xy = dict(x0=10760, y0=9771, x1=10750, y1=9700), dict(x0=DK["x"], y0=DK["y"], x1=DK["x"] + 50, y1=DK["y"])
+    SV = [dict(u="v1", drive=1, rev="2", rhi=0, dist=2000, vfIn=2, vfInX=1, vfW=2, vfWX=1, vfXk={"c": 1, "vb": 3, "va": 1},
+               vfWs=[[T6, 50, 72], [T6 + 9000, 40, 60]], vhN=2, vhMin=12.0, vhLt=1, eng={"why": "engine", "est": "Stalling"}, **old_xy),
+          dict(u="v2", drive=2, rev="2", rhi=0, dist=1000, vfIn=1, vfW=1, vfWX=0, vfXk={}, vfWs=[[T6, 45, 80]], vhN=1, vhMin=30.0,
+               vhLt=0, **dk_xy),
+          dict(u="v3", drive=3, rev="2", rhi=0, dist=1000, vfIn=3, vfInX=2, vfInTs=[T6, T6 + 400, T6 + 9000],
+               fb={"visibility": 1, "moving": 1, "blocked": 4}, eng={"why": "engine"}, **old_xy)]
+    with contextlib.redirect_stdout(io.StringIO()):
+        LV = sec_l({(o["u"], o["drive"]): o for o in SV}, {"2"})
+    check(LV["vf"] == {"old": dict(km=3.0, trips=1, vfW=2, vfWX=1, xk={"c": 1, "vb": 3, "va": 1}, fast=1, ws=2,
+                                   oldTrips=1, vfIn=3, vfInDedup=2, vfInX=2, fbVM=2),
+                       "Dirkerdam": dict(km=1.0, trips=1, vfW=1, vfWX=0, xk={}, fast=1, ws=1)},
+          "V5：1026g 用 vfW／vfWX（vb／va 只參考、不加進失敗）、vfWs ≥70 km/h；舊 rev 同玩家 8 s 去重；新舊區分開（" + str(LV["vf"]) + "）")
+    check(LV["vh"] == {"old": dict(trips=1, vhN=2, vhLt=1, vhMin=12.0), "Dirkerdam": dict(trips=1, vhN=1, vhLt=0, vhMin=30.0)}
+          and LV["engClass"] == {"熄火或沒油": 1, "未分類": 1},
+          "他車首見依區域（沒有 vhN 的舊 rev 不列）；L EngineOff 機制計數")
+    mp = {"halfL": 2.0, "halfW": 0.8, "scriptName": "Base.Car"}
+
+    def rc(u, kind, trig, rows, evs, drive=T6):
+        return dict(u=u, drive=drive, kind=kind, trig=trig, rev="2", build="b", veh="Car", prof=mp, opts={}, at={},
+                    f=u + "/clip-01.log", src=True, rows=sorted(rows, key=lambda r: r["ts"]), evs=evs)
+
+    def rw(t, n=50, **kw):
+        return [dict(t="s", ts=t - 100 * k, **kw) for k in range(n, -1, -1)]
+    t = T6 + 60000
+    route = dict(t="e", ts=t - 5000, n="route", phase="cutover", src="0,0;10,0;10,10", srcC="1;0")
+    zb = {"nb": {"z": [1.0, 1.0, 0.5]}}
+    CM = [rc("m1", "impact", t, rw(t, x=5, y=0.5, thd=0.1, **zb),
+             [route, dict(t="e", ts=t, n="impact", speed=18, dv=8, tw=True, dms=1200),
+              dict(t="e", ts=t + 1500, n="damage", cls="small-animal", dmg=2, dpt="TireFrontLeft"),
+              dict(t="e", ts=t - 3000, n="dodge", phase="commit", dbs="tow", dbl=0.2),
+              dict(t="e", ts=t - 2000, n="engine", phase="off", why="engine", est="Stalling", kso=9000)]),
+          rc("m2", "impact", t, rw(t, x=10.5, y=5),
+             [route, dict(t="e", ts=t, n="impact", speed=30, tw=False, dms=500),
+              dict(t="e", ts=t - 3000, n="dodge", phase="commit", dbs="tow", dbl=2),
+              dict(t="e", ts=t - 2500, n="dodge", phase="commit"),
+              dict(t="e", ts=t - 2000, n="engine", phase="off", why="engine")]),
+          rc("m3", "impact", t, rw(t, x=5, y=0), [dict(route, srcC=None), dict(t="e", ts=t, n="impact", speed=30)]),
+          rc("m4", "impact", t, rw(t, x=5, y=0, **zb), [dict(t="e", ts=t, n="impact", speed=20, tw=True, dms=2000)]),
+          rc("m5", "route", t, rw(t, **DK),
+             [dict(t="e", ts=t - 3000, n="route", phase="lost", why="noroad", x=DK["x"], y=DK["y"]),
+              dict(t="e", ts=t - 2000, n="route", phase="lost", why="notarget", **OL),
+              dict(t="e", ts=t - 1000, n="route", phase="lost", why="noroad")]
+             + [dict(t="e", ts=t - 900 + i, n="damage", cls="zombie", dmg=v, dpt=p)
+                for i, (v, p) in enumerate(((5, "EngineDoor"), (15, "EngineDoor"), (25, "HeadlightLeft"), (35, "EngineDoor")))]
+             + [dict(t="e", ts=t - 400, n="damage", cls="vehicle")]),
+          rc("m6", "brake", t, rw(t, **OL), [dict(t="e", ts=t, n="blocked", why="guard", gsl=12.0, gcs=3.0),
+                                             dict(t="e", ts=t + 10, n="blocked", why="plan", gsl=1.0, gcs=9.0),
+                                             dict(t="e", ts=t + 20, n="blocked", why="guard", **OL)]),
+          rc("m6", "takeover", t + 2000, rw(t + 2000, **OL), []),
+          rc("m7", "brake", t, rw(t, **OL), [dict(t="e", ts=t, n="blocked", why="guard", gsl=5.0)])]
+    with contextlib.redirect_stdout(io.StringIO()) as mo:
+        M = sec_m(dedupe(CM), CM, Anon(), {})
+    check(M["engine"] == {"熄火或沒油": 1, "未分類": 1}, "M engine off 機制（事件）：est=Stalling、舊格式未分類")
+    check(M["impactTw"] == {"拖車": 2, "非拖車": 1, "缺": 1} and M["towStart"] == 1
+          and any("dms=1200" in ln for ln in mo.getvalue().splitlines()) and "dms=2000" not in mo.getvalue(),
+          "M impact tw：拖車且 dms <2000＝拖車起步拉緊（1200 中、2000 整與非拖車 500 不中、沒 tw＝缺）")
+    check(M["srcC"] == {("zombie", "自訂"): 1, ("empty", "原版"): 1, ("empty", "缺"): 1, ("zombie", "缺"): 1},
+          "M srcC：撞前最後一筆 route 離車位最近那段（第 1 段 1＝自訂、第 2 段 0＝原版）；srcC 空或沒有 route＝缺（" + str(M["srcC"]) + "）")
+    check(list(M["damage"]) == ["small-animal", "zombie", "vehicle"] and M["damage"]["zombie"]["med"] == 20
+          and abs(M["damage"]["zombie"]["p90"] - 32) < 1e-9 and M["damage"]["zombie"]["dpt"][0] == ("EngineDoor", 3)
+          and M["damage"]["small-animal"]["n"] == 1 and M["damage"]["vehicle"]["med"] == [],
+          "M damage：small-animal 先列、依 cls 的 dmg 中位／p90 與 dpt 前 3；沒 dmg 不算進中位")
+    check(M["routeLost"] == {("noroad", "Dirkerdam"): 2, ("notarget", "old"): 1},
+          "M route lost why×區域（事件沒 x,y 用當下樣本座標）")
+    check(M["dbs"] == {("old", "拖車", "tow"): 1, ("old", "無拖車", "tow"): 1} and M["nb2"] == {"old": 1}
+          and "缺 dbs 1" in mo.getvalue(),
+          "M dodge dbs×區域×拖車（樣本有 thd＝拖車）；NB2 型只算 dbs=tow 且 |dbl|<0.5；沒 dbs 另計")
+    check(M["guard"] == dict(n=2, takeover=1, early=1),
+          "M guard：只算 why=guard 且帶 gsl；之後同趟 takeover 2 s < gcs 3 s＝等不到爬完就接手；gcs 缺不比")
+    tl = [rc("t1", "tow", t, rw(t), [dict(t="e", ts=t, n="tow", phase="lost", alive=True, tj=0.9, tps=300),
+                                     dict(t="e", ts=t + 1, n="tow", phase="lost", alive=False)])]
+    with contextlib.redirect_stdout(io.StringIO()) as io_:
+        sec_i(dedupe(tl), Anon(), [])
+    il = [ln for ln in io_.getvalue().splitlines() if "alive=" in ln]
+    check(len(il) == 2 and "alive=True tj=0.9 tps=300" in il[0] and "tj=" not in il[1], "I tow lost 列 tj／tps 值（沒有就不印）")
     print(f"self-test：{len(bad)} 項失敗")
     return 1 if bad else 0
 
