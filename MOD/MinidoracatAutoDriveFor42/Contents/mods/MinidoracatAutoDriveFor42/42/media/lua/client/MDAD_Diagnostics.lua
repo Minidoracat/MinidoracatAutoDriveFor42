@@ -143,8 +143,6 @@ local EK = {
     "dms", "tw",
     -- damage（1026g T14，D.sample 撞擊上升緣後 DMG_POST_MS）：零件耐久合計掉多少、單一零件最大掉量與那個零件 id
     "dmg", "dmx", "dpt",
-    -- regear（1020d，Driver Drive.regear）：再加速重選檔後的檔位 tn1、觸發當下的車速對應檔 gf、選檔後車速 v1（tn／speed／target／ms 沿用上面的鍵）
-    "tn1", "gf", "v1",
     -- engine off（1017，Drive.engineOffNote）：EngineOff 交還前的電瓶 charge、引擎轉速、油量 %（why＝engine／battery）；
     -- 1020 加引擎零件狀況 ecd（0–100，<50 原版會隨機熄火）、引擎品質 eq
     "chg", "es", "fu", "ecd", "eq",
@@ -1282,7 +1280,6 @@ local function encodePhys(phys)
     addNum("vLat", "vt")
     addNum("engineSpeed", "es")
     addNum("transmissionNumber", "tn")
-    addNum("gearFair", "gf")           -- 1020d：車速對應檔（Driver Drive.gearFair＝引擎 gearForSpeed）；tn ≥ gf＋2＝卡高檔
     addNum("regulatorSpeed", "rgs")
     addNum("fuelPercent", "fu")
     addNum("expectedLane", "el")
@@ -1480,7 +1477,6 @@ local function encodePhys(phys)
     addStr("visAcct", "vac")          -- capReason visibility 時巡航帽由哪本帳綁：cruise／hold（前緣停滯保持）／term（前緣＝終點）
     addNum("visCruiseCap", "vcc")     -- 1017：同上時巡航帳的帽 km/h（term＝終點帳）
     addNum("visHoldCap", "vhc")       -- 1017：同上時前緣停滯保持帳的帽 km/h（term 時缺）
-    addNum("visRoundDrop", "vrd")     -- 1020d：同上時一輪預期帽降幅 km/h（vis 帳在這之內只斷油；保持帳／終點帳綁速＝0）
     addStr("brakeReject", "blr")      -- 1017：上一筆以來結束、沒學到觀測的 forceBrake 窗的拒收理由（Driver Drive.brakeRejNote）
     addNum("visAdvMs", "vfi")         -- 可視前緣兩次前進的間隔 ms（閂到下一筆，寫出後清）
     addNum("nextArc", "na")           -- 前方 200m 內下一段弧起點的弧長距離 m（在弧上或沒有＝省略）

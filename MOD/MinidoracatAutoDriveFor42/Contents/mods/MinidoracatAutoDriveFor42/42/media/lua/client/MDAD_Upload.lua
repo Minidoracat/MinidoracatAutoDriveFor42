@@ -333,8 +333,6 @@ function U.begin(pn, now, header, profile, vehicle)
         -- 與目標不足、依路段（弧上／彎前＝前方 200m 內有弧（樣本 na）／出彎＝最後一筆弧上樣本後 100m 內／其他）分；
         -- capReason visibility 時各帳（樣本 vac）的 ms；arcEndDist＝最後一筆弧上樣本時的 dist
         lossPw = {}, lossPh = {}, lTrk = 0, lTgt = 0, arcEndDist = nil, visMs = {},
-        -- 1020d：卡高檔（樣本 tn ≥ gf＋2）時的追蹤不足（km/h×ms，同 lTrk）；capReason visibility 時各帳（vac）的損失（同 loss）
-        lHg = 0, visL = {},
         -- 可視前緣前進間隔分桶（樣本 vfi：<250／<500／<1000／<1500／<2500／≥2500 ms）；他車首見距離分桶（樣本 vfs，跟線且
         -- ≥10 km/h 才算：<30／<45／<55／<70／≥70 m；停著／行進分開）與各自最小；原地轉（intent ROTATE）ms
         vfa = { 0, 0, 0, 0, 0, 0 }, vfP = { 0, 0, 0, 0, 0 }, vfM = { 0, 0, 0, 0, 0 }, vfMinP = nil, vfMinM = nil, rotMs = 0,
@@ -717,12 +715,6 @@ local function speedKpi(u, phys, spd, target, mode, dt, capReason, now)
         if finite(target) then trk = (target < em and target or em) - spd end
         if trk < 0 then trk = 0 end
         u.lTrk, u.lTgt = u.lTrk + trk * dt, u.lTgt + l - trk * dt
-        local tn, gf = phys.transmissionNumber, phys.gearFair
-        if finite(tn) and finite(gf) and tn >= gf + 2 then u.lHg = u.lHg + trk * dt end
-        if capReason == "visibility" then
-            local a = type(phys.visAcct) == "string" and phys.visAcct or "?"
-            u.visL[a] = (u.visL[a] or 0) + l
-        end
         local ph = segOf(u, phys)
         u.lossPh[ph] = (u.lossPh[ph] or 0) + l
     end
@@ -1281,7 +1273,6 @@ local function summaryText(u, now, reason, withMaps)
         .. (u.tko or "")
     -- 1013a 速度損失拆帳（km/h×秒）、前緣前進間隔與他車首見分桶、原地轉 ms、起步段調頭（另起一式，不再拉長上面那條百多個運算元的串接）
     text = text .. ',"ltr":' .. jnum(math.floor(u.lTrk / 1000 + 0.5)) .. ',"ltg":' .. jnum(math.floor(u.lTgt / 1000 + 0.5))
-        .. ',"lhg":' .. jnum(math.floor(u.lHg / 1000 + 0.5))
         .. ',"vfa":[' .. table.concat(u.vfa, ",") .. ']'
         .. ',"vfP":[' .. table.concat(u.vfP, ",") .. '],"vfM":[' .. table.concat(u.vfM, ",") .. ']'
         .. ',"vfMinP":' .. jround(u.vfMinP, 10) .. ',"vfMinM":' .. jround(u.vfMinM, 10)
@@ -1312,7 +1303,6 @@ local function summaryText(u, now, reason, withMaps)
         text = text .. ',"ev":' .. mapJson(u.evc) .. ',"mode":' .. mapJson(u.modeMs)
             .. ',"cap":' .. mapJson(u.capMs) .. ',"loss":' .. lossJson(u.loss)
             .. ',"lpw":' .. lossJson(u.lossPw) .. ',"lph":' .. lossJson(u.lossPh) .. ',"vsMs":' .. mapJson(u.visMs)
-            .. ',"vsL":' .. lossJson(u.visL)
     end
     return text .. "}"
 end
