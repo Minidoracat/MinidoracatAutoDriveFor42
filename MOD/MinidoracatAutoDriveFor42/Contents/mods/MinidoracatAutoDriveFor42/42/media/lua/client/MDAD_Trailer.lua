@@ -874,6 +874,31 @@ function T.phiStats(s, now)
     return mx, rate
 end
 
+-- 掛車拉回跳動（1026g T10；tow lost alive=true 的 tj／tps）：guard 每次（GUARD_MS 節流）量兩掛點距離（T.hitchDist，同樣本
+-- thd），相鄰兩次的差 |Δhd| ＞ JUMP_M＝跳動（MP 同步把掛車拽回時 thd 跳）。報告原提「掛車位移 − 牽引車位移」，但兩節車位
+-- 取樣不同步：巡航中 tlo 每筆就隨幀時跳 ±0.2–0.6 m、thd 不動（telemetry.md〈已知坑〉tow-sync 那條），車位差會把正常拖行
+-- 也記成跳動，所以改量掛點距。兩次相隔超過 JUMP_GAP_MS（掛回、倒車脫困期間 guard 不跑）不比、從這次重新起算。
+-- jumpAt 在脫開那一刻拿當下掛點距跟最後一次比。
+T.JUMP_M = 0.3
+T.JUMP_GAP_MS = 400
+function T.jumpTrack(s, vehicle, tow, now)
+    local hd = T.hitchDist(vehicle, tow)
+    if not finite(hd) then
+        s.towJt = nil
+        return
+    end
+    if s.towJt ~= nil and now - s.towJt <= T.JUMP_GAP_MS and abs(hd - s.towJhd) > T.JUMP_M then s.towJAt = now end
+    s.towJt, s.towJhd = now, hd
+end
+-- 回 tj（當下掛點距減最後一次記錄，m，帶號：正＝拉開；沒有可比的記錄＝nil）, tps（距上一次跳動的 ms；沒跳過＝nil）。
+function T.jumpAt(s, vehicle, tow, now)
+    local tps = s.towJAt ~= nil and now - s.towJAt or nil
+    if s.towJt == nil or now - s.towJt > T.JUMP_GAP_MS then return nil, tps end
+    local hd = T.hitchDist(vehicle, tow)
+    if not finite(hd) then return nil, tps end
+    return math.floor((hd - s.towJhd) * 1000 + 0.5) / 1000, tps
+end
+
 -- 行駛防線（Driver 每幀呼叫；Java 讀取以 GUARD_MS 節流）。回 cap（km/h 或 nil）, why：
 --   "lost"＝掛車脫落（原版傾斜斷開或玩家拆掉）；"corner"＝已停在不可過轉角前。
 function T.guard(s, vehicle, now, speedKmh)
@@ -890,6 +915,7 @@ function T.guard(s, vehicle, now, speedKmh)
         local k = r.k % T.PHI_RING + 1 -- kahlua-mod-ok: r.k ≥ 0
         r.k, r[k * 2 - 1], r[k * 2] = k, now, phi
     end
+    T.jumpTrack(s, vehicle, tow, now) -- 1026g T10：掛車位移跳動（tow lost 的 tj／tps）
     if phi and (abs(phi) > T.HITCH_SLOW or (finite(up) and up < T.TILT_SLOW)) then cap = T.CRAWL_KMH end
     -- 剖面實際建構的那條（Driver.profileRouteOf：清過微反折再改寫）；拿原始路線重算會把資料殘點
     -- 當成不可過轉角（2026-09-28 正式服 SemiTruck 在 (5180,11145) 反折點前停下交還）

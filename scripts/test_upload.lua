@@ -2229,6 +2229,77 @@ do
     check(#sum < U.CHUNK, "(1020b) summary still fits one chunk (" .. #sum .. ")")
 end
 
+-- 1026g 摘要（V5、T14）：
+--   (V5)   vfIn／vfInX 舊語意不動；vfW＝首見落在沒開著的 8 秒窗才 +1（同一筆兩個停車條目、0.4 秒後重複首見都併進同窗）；
+--          vfXk＝窗內 c（接觸）／vv／vm／vb（鎖輪 fbw）／va（可視帳輔助頂滿）各計一次；vfWX＝出現 c、vv 或 vm 的窗數（blocked 鎖輪、
+--          vis 輔助不算失敗）；vfWs＝前 4 窗的 [首見 ts, 距離, 本車 km/h]。
+--   (vh)   跟線、≥10 km/h 時 vehN 0→正那筆：vehNearS − rs − halfL＞0 才算進 vhN／vhMin，<15 m 另計 vhLt；持續看到、低速不算。
+--   違規證明：vfW 每個首見都 +1＝(V5) vfW 紅；vfWX 收 vb＝(V5) vfWX 紅；同窗同種類重複計＝(V5) c 紅；vh 不看上升緣＝(vh) vhN 紅；
+--   不扣半車長＝(vh) vhMin 紅。
+scenario("1026g summary: windowed vfW/vfWX/vfXk/vfWs, vehicle first-seen distance vhN/vhMin/vhLt")
+do
+    local function tp(extra)
+        local t = { frameMs = 16, capGear = 120, capPerception = 120, capMax = 120, capReason = "profile",
+            controlState = "TRACK" }
+        for k, v in pairs(extra or {}) do t[k] = v end
+        return t
+    end
+    nowMs = nowMs + 3600000
+    start()
+    drive(1000, { speed = 70, phys = tp() }) -- 暖機：第一筆取樣沒有間隔，不進 KPI
+    local d0, t1 = nowMs - 1000, nowMs + 200
+    local seen1, seen2 = "[[40,1,30,0.5,70],[45,1,35,0.2,70]]", "[[50,1,48,0.1,72]]"
+    -- 窗 1：同一筆兩個停車條目；blocked 鎖輪與可視帳輔助頂滿（參考，不算失敗）
+    drive(200, { speed = 70, phys = tp({ firstSeen = seen1 }) })
+    drive(400, { speed = 70, phys = tp({ forceBrakeLeft = 900, forceBrakeWhy = "blocked" }) })
+    drive(200, { speed = 70, phys = tp({ visAssistDecel = 4, visAssistWhy = "vis" }) })
+    drive(9000, { speed = 70, phys = tp() })
+    -- 窗 2：首見、0.4 秒後同車重複首見；moving 鎖輪；接觸兩次（同窗只計一次）
+    drive(200, { speed = 70, phys = tp({ firstSeen = seen2 }) })
+    drive(200, { speed = 70, phys = tp() })
+    drive(200, { speed = 70, phys = tp({ firstSeen = seen2 }) })
+    drive(400, { speed = 70, phys = tp({ forceBrakeLeft = 900, forceBrakeWhy = "moving" }) })
+    drive(200, { speed = 70, phys = tp(), contact = true })
+    drive(200, { speed = 70, phys = tp() })
+    drive(200, { speed = 70, phys = tp(), contact = true })
+    drive(9000, { speed = 70, phys = tp() })
+    -- 窗 3：visibility 鎖輪
+    drive(200, { speed = 70, phys = tp({ firstSeen = seen2 }) })
+    drive(400, { speed = 70, phys = tp({ forceBrakeLeft = 900, forceBrakeWhy = "visibility" }) })
+    drive(9000, { speed = 70, phys = tp() })
+    -- (vh) rs 10、halfL 2.3：近的 8 m（20.3）、遠的 40 m（52.3）；持續看到不再算；低速上升緣不算；車頭後方（d≤0）不算
+    local function sen(n, s) return { vehN = n, vehNearS = s, stamp = 1, ready = true } end
+    drive(200, { speed = 50, phys = tp(), sensor = sen(0) })
+    drive(200, { speed = 50, phys = tp(), sensor = sen(2, 20.3) })
+    drive(400, { speed = 50, phys = tp(), sensor = sen(3, 18) })
+    drive(200, { speed = 50, phys = tp(), sensor = sen(0) })
+    drive(200, { speed = 50, phys = tp(), sensor = sen(1, 52.3) })
+    drive(200, { speed = 5, phys = tp(), sensor = sen(0) })
+    drive(200, { speed = 5, phys = tp(), sensor = sen(1, 14) })
+    drive(200, { speed = 50, phys = tp(), sensor = sen(0) })
+    drive(200, { speed = 50, phys = tp(), sensor = sen(1, 11) })
+    -- (eng-T9) engine off 的 est／kso／erm 進摘要 eng（有值才寫；舊事件不變由 1020 (compat) 守）
+    D.event(0, "engine", { phase = "off", why = "engine", chg = 1, es = 3000, fu = 100, est = "ShuttingDown", kso = 209, erm = 16933 })
+    D.stop(0, "UI_MinidoracatAutoDrive_Arrived")
+    pump(120000)
+    local _, sum = sumLines(d0)
+    check(string.find(sum, '"est":"ShuttingDown","kso":209,"erm":16933}', 1, true) ~= nil,
+        "(eng-T9) summary eng carries est/kso/erm (" .. tostring(string.match(sum, '"eng":%b{}')) .. ")")
+    local function n(key) return tonumber(string.match(sum, '"' .. key .. '":([%d%.%-]+)')) end
+    checkEq(n("vfIn"), 5, "(V5) old vfIn still counts every qualifying entry")
+    checkEq(n("vfW"), 3, "(V5) vfW counts windows: same-sample and 0.4 s repeat entries fold in")
+    checkEq(n("vfWX"), 2, "(V5) vfWX: windows with contact/moving/visibility; blocked lock and vis assist do not fail")
+    check(string.find(sum, '"vfXk":{"c":1,"vv":1,"vm":1,"vb":1,"va":1}', 1, true) ~= nil,
+        "(V5) c vfXk counts each kind once per window (" .. tostring(string.match(sum, '"vfXk":%b{}')) .. ")")
+    local ws = string.match(sum, '"vfWs":(%b[])') or ""
+    checkEq(count(ws, "],["), 2, "(V5) vfWs keeps one entry per window (" .. ws .. ")")
+    check(string.find(ws, "^%[%[" .. t1 .. ",40[%.0]*,70[%.0]*%]") ~= nil, "(V5) vfWs entry = [ts, distance, ego km/h] (" .. ws .. ")")
+    checkEq(n("vhN"), 2, "(vh) vhN: rising edges ahead of the nose while following >=10 km/h")
+    checkEq(n("vhMin"), 8, "(vh) vhMin = vehNearS - rs - halfL")
+    checkEq(n("vhLt"), 1, "(vh) vhLt counts first-seen closer than 15 m")
+    check(#sum < U.CHUNK, "(1026g) summary still fits one chunk (" .. #sum .. ")")
+end
+
 -- 1010 所有送出的片段整段 ≤ CLIP_TOTAL_MAX（第一塊宣告的 len＝全文長度；伺服器只看這個）
 local maxLen = 0
 for i = 1, #sent do

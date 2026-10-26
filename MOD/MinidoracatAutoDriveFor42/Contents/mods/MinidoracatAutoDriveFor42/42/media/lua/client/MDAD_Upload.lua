@@ -108,6 +108,15 @@ local EXIT_BRAKE_MS = 2000
 -- 輔助，剖面 5.5／7.5、return、proof 都算進去，鎖輪也不分原因）。vfInTs＝前 VFS_TS_MAX 件的首見時間。
 -- ponytail: 同一窗內再來一筆首見共用同一個結果（最多計一次），要分開計再改成佇列。
 local VFS_IN_M, VFS_IN_KMH, VFS_OUT_MS, VFS_VAD_FULL, VFS_TS_MAX = 55, 60, 8000, 4, 4
+-- 1026g V5：vfIn／vfInX 舊欄位語意不動（記錄格式只能 additive），另記以窗計的版本：vfW＝首見落在沒開著的 VFS_OUT_MS 窗才 +1
+-- （同一筆樣本兩個停車條目、0.4 秒後再記一次都併進同一窗；正式服 vfInTs 123 筆有 46 筆是這種重複）；vfXk＝窗內各觸發種類各
+-- 計一次（c＝接觸、vv／vm／vb＝visibility／moving／blocked 鎖輪上升緣、va＝可視帳輔助頂滿）；vfWX＝出現 c、vv 或 vm 的窗數
+-- （10-27 判準的失敗只有這三種：blocked 停止線鎖輪是設計行為、vis 輔助只當參考）；vfWs＝前 VFS_TS_MAX 窗的 [首見 ts, 距離 m,
+-- 本車 km/h]（沒有片段也判得到 ≥70 km/h）。
+local VFX_KEYS = { "c", "vv", "vm", "vb", "va" }
+-- 1026g T14 他車首見離車頭（摘要 vhN／vhMin／vhLt；NC5）：跟線、≥10 km/h 時感知帶車輛格數 vehN 從 0 變正那筆，最近車輛格弧長
+-- sen.vehNearS − rs − 半車長＝首見時離車頭多遠（>0 才算）；vhLt＝其中 <VH_LATE_M 的次數（停車太近才進點雲）。
+local VH_LATE_M = 15
 -- 入彎超速明細（1017，摘要 aoi）最多幾筆；出彎偏差（exN／exDev）：出弧後 EX_M 內 |ld| 最大值 >EX_DEV 的出口，出口車速
 -- ≥EX_FAST_KMH 另計；期間有殭屍軟縫或期望車道相鄰兩筆跳 >EX_JUMP_M（換道）的出口不算。起步到 T40_M 的 ms（t40）。
 -- 入彎超速（arcOver／aoi）要超過彎帽 1.15 倍且超過彎帽＋AOI_MIN_KMH（1020b）：12 km/h 下限彎的 1.15 倍只多 1.8 km/h，落在
@@ -340,6 +349,10 @@ function U.begin(pn, now, header, profile, vehicle)
         -- 煞車學習拒收理由次數；EngineOff 的關卡（JSON 片段）
         -- 1020：路中停車首見時間（前 VFS_TS_MAX 件）；各路段 ms 與原版 GasTank 公式的期望扣量 {段: {held, fair}}（tripKpi）
         vfIn = 0, vfInX = 0, vfInT = nil, vfInTs = {}, aoi = {}, aoiN = 0,
+        -- 1026g V5：以窗計的路中停車首見（vfWT＝開著的窗起點、vfWf＝本窗已計過的觸發種類；見 VFX_KEYS 上方）
+        vfW = 0, vfWX = 0, vfWT = nil, vfWf = {}, vfXk = { c = 0, vv = 0, vm = 0, vb = 0, va = 0 }, vfWs = {},
+        -- 1026g T14：他車首見離車頭（VH_LATE_M 上方）；vhPrev＝上一筆的 vehN
+        vhN = 0, vhMin = nil, vhLt = 0, vhPrev = 0,
         -- 1020b 沒有圓角的頂點（Follower arcLookaheadMs 的 fallback／>90° 頂點）開始轉：fvoN＝次數，fvo＝前 AOI_MAX 筆
         -- [ts, 帽 km/h, 開始轉時車速 km/h, 折角 °]；fvoSeen＝已讀到的 phys.fvo.n（fstate 每趟新建，從 0 起）
         fvo = {}, fvoN = 0, fvoSeen = 0,
@@ -658,6 +671,15 @@ local function firstSeenKpi(u, phys, spd, now)
                     and finite(l) and l < u.halfW + 1 and l > -u.halfW - 1 then
                 u.vfIn, u.vfInT = u.vfIn + 1, now
                 if u.vfIn <= VFS_TS_MAX then u.vfInTs[u.vfIn] = jnum(now) end
+                -- 1026g V5：首見落在沒開著的窗才開新窗、+1（同一窗的重複首見不再計）
+                if u.vfWT == nil or now - u.vfWT > VFS_OUT_MS then
+                    u.vfW, u.vfWT = u.vfW + 1, now
+                    for i = 1, #VFX_KEYS do u.vfWf[VFX_KEYS[i]] = false end
+                    u.vfWf.x = false
+                    if u.vfW <= VFS_TS_MAX then
+                        u.vfWs[u.vfW] = "[" .. jnum(now) .. "," .. jround(d, 10) .. "," .. jround(v, 10) .. "]"
+                    end
+                end
             end
         end
     end
@@ -883,6 +905,52 @@ local function tripKpi(u, phys, mode, now, moved, dt, speed)
     if type(r) == "string" then u.blr[r] = (u.blr[r] or 0) + 1 end
 end
 
+-- 1026g V5：開著的路中停車首見窗內，各觸發種類各計一次（VFX_KEYS 上方）；hitEdge＝footprint 接觸上升緣、lockEdge＝鎖輪上升緣。
+local function vfMark(u, k)
+    if u.vfWf[k] then return end
+    u.vfWf[k] = true
+    u.vfXk[k] = u.vfXk[k] + 1
+    if (k == "c" or k == "vv" or k == "vm") and not u.vfWf.x then
+        u.vfWf.x = true
+        u.vfWX = u.vfWX + 1
+    end
+end
+local function vfWindowTick(u, now, hitEdge, lockEdge, fbw, phys)
+    if u.vfWT == nil then return end
+    if now - u.vfWT > VFS_OUT_MS then
+        u.vfWT = nil
+        return
+    end
+    if hitEdge then vfMark(u, "c") end
+    if lockEdge then
+        if fbw == "visibility" then vfMark(u, "vv")
+        elseif fbw == "moving" then vfMark(u, "vm")
+        elseif fbw == "blocked" then vfMark(u, "vb") end
+    end
+    if type(phys) == "table" and phys.visAssistWhy == "vis" and finite(phys.visAssistDecel)
+            and phys.visAssistDecel >= VFS_VAD_FULL then
+        vfMark(u, "va")
+    end
+end
+
+-- 1026g T14：他車首見離車頭（VH_LATE_M 上方）。rs 只在上升緣解析。
+local function vehFirstKpi(u, sensor, line, spd, mode)
+    local vn = type(sensor) == "table" and sensor.vehN or nil
+    if not finite(vn) then vn = 0 end
+    if vn > 0 and u.vhPrev == 0 and mode == "follow" and spd >= 10 and finite(sensor.vehNearS) then
+        local rs = tonumber(string.match(line, '"rs":([%-%d%.eE%+]+)'))
+        if finite(rs) then
+            local d = sensor.vehNearS - rs - u.halfL
+            if d > 0 then
+                u.vhN = u.vhN + 1
+                if u.vhMin == nil or d < u.vhMin then u.vhMin = d end
+                if d < VH_LATE_M then u.vhLt = u.vhLt + 1 end
+            end
+        end
+    end
+    u.vhPrev = vn
+end
+
 -- 算進 impact：次數、impZ（zHit）、觸發片段（ts＝撞擊那筆；下車煞車候選延後確認時也用撞擊那刻）。
 local function commitImpact(u, ts, zHit)
     u.impact = u.impact + 1
@@ -1012,6 +1080,8 @@ function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
             u.vfInX, u.vfInT = u.vfInX + 1, nil
         end
     end
+    vfWindowTick(u, now, fbHit and not u.prevFb, fbNow and not fbWas, fbw, phys) -- 1026g V5
+    vehFirstKpi(u, sensor, line, spd, mode) -- 1026g T14
     u.prevFb = fbHit
     -- 撞擊（含鎖輪中撞上）；同一次撞擊的連續幾筆只算一次。本筆或前一筆在鎖輪＝門檻 IMPACT_DECEL_LOCKED；
     -- 原始間隔超過 IMPACT_GAP_MAX_MS（中間沒取樣）不比。
@@ -1118,7 +1188,10 @@ function U.event(u, line, now, name, a)
     if name == "engine" and phase == "off" then
         u.eng = ',"eng":{"why":' .. jstr(a.why or "") .. ',"chg":' .. jround(a.chg, 1000) .. ',"es":' .. jround(a.es, 1)
             .. ',"fu":' .. jround(a.fu, 100) .. (finite(a.ecd) and (',"ecd":' .. jnum(a.ecd)) or "")
-            .. (finite(a.eq) and (',"eq":' .. jnum(a.eq)) or "") .. '}'
+            .. (finite(a.eq) and (',"eq":' .. jnum(a.eq)) or "")
+            -- 1026g T9：引擎狀態名稱、距本機關引擎請求 ms、距引擎進入 Running ms（有值才寫；片段有配額，摘要每趟都有）
+            .. (type(a.est) == "string" and (',"est":' .. jstr(a.est)) or "")
+            .. (finite(a.kso) and (',"kso":' .. jnum(a.kso)) or "") .. (finite(a.erm) and (',"erm":' .. jnum(a.erm)) or "") .. '}'
     end
     if name == "unstick" and phase == "start" then
         trigger(u, now, "unstick")
@@ -1241,10 +1314,16 @@ local function summaryText(u, now, reason, withMaps)
         .. ',"t40k":' .. jstr(u.stTow and "tow" or u.stU and "uturn" or u.stApr and "approach" or u.stRet and "return" or "plain")
         .. ',"blr":' .. mapJson(u.blr) .. (u.eng or "")
         .. (u.rpt and (',"rpt":' .. jstr(u.rpt)) or "")
-    -- 1020：路中停車首見時間（前 VFS_TS_MAX 件）、各路段 ms 與原版 GasTank 期望扣量（油量判準：實扣÷fair 期望的段比）；
+    -- 1020：路中停車首見時間（前 VFS_TS_MAX 件）、各路段 ms 與原版 GasTank 期望扣量（fuT／fuE 供 upload_report L 節印每分鐘
+    -- 扣量，只描述；換算判準改用片段 fu 的同步區間積分 α）；
     -- 1021：不算撞擊的拖車連結拉緊／小型動物段數（U.impactClass tow-slack／small-animal）
+    -- 1026g：以窗計的路中停車首見 vfW／vfWX／vfXk／vfWs（V5）、他車首見離車頭 vhN／vhMin／vhLt（T14）
     text = text .. ',"vfInTs":[' .. table.concat(u.vfInTs, ",") .. '],"fuT":' .. mapJson(u.fuT) .. ',"fuE":' .. fuelExpJson(u)
         .. ',"tsl":' .. u.tsl .. ',"sma":' .. u.sma
+        .. ',"vfW":' .. u.vfW .. ',"vfWX":' .. u.vfWX .. ',"vfXk":{"c":' .. u.vfXk.c .. ',"vv":' .. u.vfXk.vv
+        .. ',"vm":' .. u.vfXk.vm .. ',"vb":' .. u.vfXk.vb .. ',"va":' .. u.vfXk.va .. '}'
+        .. ',"vfWs":[' .. table.concat(u.vfWs, ",") .. ']'
+        .. ',"vhN":' .. u.vhN .. ',"vhMin":' .. jround(u.vhMin, 10) .. ',"vhLt":' .. u.vhLt
     if withMaps then
         text = text .. ',"ev":' .. mapJson(u.evc) .. ',"mode":' .. mapJson(u.modeMs)
             .. ',"cap":' .. mapJson(u.capMs) .. ',"loss":' .. lossJson(u.loss)
