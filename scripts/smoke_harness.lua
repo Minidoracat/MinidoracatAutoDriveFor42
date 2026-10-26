@@ -27381,6 +27381,8 @@ drive.scenarioChainKeep()
 --   (norm)  回授依 yawGain 正規化：k＝REF/yawGain 夾 [1, MAX]，前饋不乘。違規證明：k 固定 1 即紅。
 --   (align) 繞行未對正不加速：偏線 >0.35 或車頭對承諾線切線 >5° 時帽夾在目前車速。違規證明：恆對正即紅。
 --   (shy)   靠右留路邊距：右緣外 0.6m 內的路邊物把靠右目標往左收；壓進車身帶的障礙＝不收。違規證明：不收即紅。
+--   (shy-ramp) 1026e NC2：出彎常駐車道放回區段的路邊物留邊加 KEEP_RIGHT_RAMP_M（正式服過衝 0.44–0.74）；直路、放回走完、
+--           夠遠的樹不變。違規證明（temp/vp/nc2）：拿掉預算→放回那條紅；不看放回區段處處加→(shy) 4 條＋反面 3 條紅。
 --   (exit)  出口用自己的側移：被可視範圍截成陡出口、進入段等得起就延後承諾。違規證明：拿掉出口陡坡閘即紅。
 function drive.scenario0929j()
     scenario("0929j：引擎碰撞形狀、回授正規化、繞行未對正不加速、靠右留路邊距、出口陡坡延後")
@@ -27592,6 +27594,51 @@ function drive.scenario0929j()
         lastSNow = 0, roadBias = 0, sandBias = 3.75 }
     checkNear(MDAD.Drive.keepRightShy(capShy, 3.75), 4.78 - tune.KEEP_RIGHT_CLEAR_M - 1.24, 1e-9,
         "(shy) 靠右值超過 BIAS_MAX：用夾過的實際行駛線判車身帶，右緣外 0.54m 的樹幹照樣收")
+
+    -- (shy-ramp) 1026e NC2：出右彎後常駐車道從弧內側夾限（laneRoom 0）放回靠右，車追 ramp 正常過衝 0.44–0.74 m
+    -- （正式服德克丹 Highway 11 (4462.6,2809.6) 冬青 7 人 8 次，Mustang halfW 0.81，樹幹 r 0.15、在路緣外 0.6）。
+    -- 剖面：s 0–30 是弧（內側 room 0），之後 room 3.0（落點 2.4，keep 0.6）；放回 ramp 12×2.4≈28.8 m。
+    local function rampProf(roomArc)
+        local rp = { ready = true, n = 21, s = {}, x = {}, y = {}, segH = {}, laneRoomR = {}, laneRoomL = {},
+            laneRunStart = {}, laneRunEnd = {} }
+        local split = roomArc ~= 3.0
+        for k = 1, 21 do rp.s[k], rp.x[k], rp.y[k] = (k - 1) * 10, (k - 1) * 10, 0 end
+        for k = 1, 20 do
+            rp.segH[k], rp.laneRoomL[k] = 0, 3.0
+            rp.laneRoomR[k] = k <= 3 and roomArc or 3.0
+            if split and k <= 3 then rp.laneRunStart[k], rp.laneRunEnd[k] = 1, 3
+            elseif split then rp.laneRunStart[k], rp.laneRunEnd[k] = 4, 20
+            else rp.laneRunStart[k], rp.laneRunEnd[k] = 1, 20 end
+        end
+        return rp
+    end
+    local function rampShy(rp, hs, hy)
+        return { sensor = { ready = true, hardN = 1, hardS = { hs }, hardX = { hs + 0.6 }, hardY = { hy },
+            hardR = { 0.15 }, hardB = { 0 } }, profile = rp, vehicleProfile = { halfW = 0.81, halfL = 2.3 },
+            lastSNow = hs - 35, roadBias = 0, sandBias = 2.4 } -- 車在樹前 35 m（KEEP_RIGHT_LOOK_M 窗內）
+    end
+    local rampP = rampProf(0)
+    local laneAt55 = MDADFollower.laneBiasAt(rampP, 2.4, 6, 55)
+    checkTrue(laneAt55 > 2.2 and laneAt55 < 2.4 and MDADFollower.laneBiasAt(rampP, 2.4, 3, 30) == 0,
+        "(shy-ramp) 夾具：弧出口 s30 落點 0，s55 已放回到 " .. tostring(laneAt55))
+    -- 樹幹 l 4.1（face 3.95）：車身右緣 3.10、留邊 0.85＞0.6，舊制不收；放回區段要留 0.6＋RAMP_M
+    checkNear(MDAD.Drive.keepRightShy(rampShy(rampP, 55, 4.1), 2.4),
+        3.95 - tune.KEEP_RIGHT_CLEAR_M - tune.KEEP_RIGHT_RAMP_M - 0.81, 1e-9,
+        "(shy-ramp) 出彎放回區段的路邊樹幹：留邊含過衝預算 KEEP_RIGHT_RAMP_M（舊制只留 0.6、過衝 0.69 擦上）")
+    checkTrue(tune.KEEP_RIGHT_CLEAR_M + tune.KEEP_RIGHT_RAMP_M >= 0.74 + 0.6,
+        "(shy-ramp) 預算蓋過正式服量到的最大過衝 0.74 後仍留 ≥0.6")
+    -- 反面：同一棵樹放在直路（room 處處 3.0、落點沒有上升）＝舊制，不收（直路靠右不整體內移）
+    checkNear(MDAD.Drive.keepRightShy(rampShy(rampProf(3.0), 55, 4.1), 2.4), 2.4, 1e-12,
+        "(shy-ramp) 反面：直路同位置的樹幹不加預算、靠右不動")
+    -- 反面：直路貼近 0.6 以內的樹照舊只留 CLEAR（不多收）
+    checkNear(MDAD.Drive.keepRightShy(rampShy(rampProf(3.0), 55, 3.8), 2.4),
+        3.65 - tune.KEEP_RIGHT_CLEAR_M - 0.81, 1e-9, "(shy-ramp) 反面：直路的路邊樹照舊只留 KEEP_RIGHT_CLEAR_M")
+    -- 反面：放回走完很久之後（s 100，往回 RAMP_BACK_M 早已放回滿）照舊只留 CLEAR
+    checkNear(MDAD.Drive.keepRightShy(rampShy(rampP, 100, 3.8), 2.4),
+        3.65 - tune.KEEP_RIGHT_CLEAR_M - 0.81, 1e-9, "(shy-ramp) 反面：放回走完後的樹照舊只留 KEEP_RIGHT_CLEAR_M")
+    -- 反面：放回區段但樹離車身右緣 ≥ CLEAR＋RAMP（l 5.0）＝不收
+    checkNear(MDAD.Drive.keepRightShy(rampShy(rampP, 55, 5.0), 2.4), 2.4, 1e-12,
+        "(shy-ramp) 反面：放回區段但夠遠的樹不收")
 
     -- (exit) 出口陡坡延後
     checkTrue(armDrive(), "(exit) 啟動")
