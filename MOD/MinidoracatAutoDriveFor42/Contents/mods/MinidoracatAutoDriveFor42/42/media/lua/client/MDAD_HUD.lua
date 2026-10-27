@@ -89,7 +89,9 @@ local PERCEPTION_KEYS = {
     "UI_MinidoracatAutoDrive_Perception200",
 }
 local COLLAPSED_MD_KEY = "MDADHudCollapsed"
-local SPEED_BOX_X_MD_KEY, SPEED_BOX_Y_MD_KEY = "MDADHudSpeedBoxX", "MDADHudSpeedBoxY"
+-- 明細框拖過的位置：FSD 卡片（true）與四主題（false）各存一組，一般車拖過的位置不蓋掉特斯拉的側邊預設。
+local SPEED_BOX_MD = { [false] = { "MDADHudSpeedBoxX", "MDADHudSpeedBoxY" },
+    [true] = { "MDADHudSpeedBoxFsdX", "MDADHudSpeedBoxFsdY" } }
 -- 側掛主題的兩片側翼各自收合，各自存一格（只留左翼常駐是合法組合）。
 local WING_L_MD_KEY = "MDADHudWingL"
 local WING_R_MD_KEY = "MDADHudWingR"
@@ -2209,7 +2211,7 @@ function MDADHUDPanel:buildPinRows(n, vmax, sandMax, gearCap, cruise, target, wh
     self._pinRows, self._pinLineH, self._pinValueW = rows, lineH, valueW
     self._pinW = maximum(labelW + valueW + 30, textWidth(UIFont.Small, self._pinLegend) + pad * 2)
     self._pinH = lineH * (#rows + 1) + pad * 2 + 6
-    -- 預設停靠：對齊巡航上限欄、夾在面板寬內、貼面板上緣外（拖曳過就改用記住的位置）
+    -- 預設停靠：對齊巡航上限欄、夾在面板寬內、貼面板上緣外（拖曳過就改用記住的位置；FSD 卡片改放側邊，見 placeSpeedPin）
     local anchor = (self._capX or 0) + textWidth(UIFont.Small, self._capLabel or "") / 2
     self._pinX = math.max(0, math.min(self.width - self._pinW, math.floor(anchor - self._pinW / 2)))
     self._pinY = -self._pinH - 4
@@ -2288,7 +2290,8 @@ function MDADHUDPanel:placeSpeedPin()
     if not box.moving then
         local playerObj = getSpecificPlayer(self.playerNum)
         local md = playerObj and playerObj:getModData()
-        local sx, sy = md and md[SPEED_BOX_X_MD_KEY], md and md[SPEED_BOX_Y_MD_KEY]
+        local keys = SPEED_BOX_MD[self._fsd == true]
+        local sx, sy = md and md[keys[1]], md and md[keys[2]]
         if type(sx) == "number" and type(sy) == "number" then
             -- 記住的位置夾回畫面內（換解析度／分割畫面後不跑出去）
             local core = getCore and getCore()
@@ -2297,8 +2300,24 @@ function MDADHUDPanel:placeSpeedPin()
             box:setX(math.max(0, math.min(sw - self._pinW, sx)))
             box:setY(math.max(0, math.min(sh - self._pinH, sy)))
         else
-            box:setX(self:getAbsoluteX() + self._pinX)
-            box:setY(self:getAbsoluteY() + self._pinY - (self._diagShown and self._diagH + 2 or 0))
+            local pn = self.playerNum
+            local left, top = getPlayerScreenLeft(pn), getPlayerScreenTop(pn)
+            local right, bottom = left + getPlayerScreenWidth(pn), top + getPlayerScreenHeight(pn)
+            local px, py = self:getAbsoluteX(), self:getAbsoluteY()
+            local x, y = px + self._pinX, py + self._pinY - (self._diagShown and self._diagH + 2 or 0)
+            if self._fsd then
+                -- FSD 卡片已疊在儀表／充電卡上方，明細再往上疊會蓋到畫面中央的車：改放卡片右側、底邊對齊，
+                -- 右邊放不下放左側，兩側都放不下才退回上方。
+                local sideY = py + self.height - self._pinH
+                if px + self.width + 4 + self._pinW <= right then
+                    x, y = px + self.width + 4, sideY
+                elseif px - 4 - self._pinW >= left then
+                    x, y = px - 4 - self._pinW, sideY
+                end
+            end
+            -- 預設位置也夾回這位玩家的畫面（上下分割畫面時上方那個不夠高）；放得下就不動
+            box:setX(math.max(left, math.min(right - self._pinW, x)))
+            box:setY(math.max(top, math.min(bottom - self._pinH, y)))
         end
     end
     box:setWidth(self._pinW)
@@ -3322,7 +3341,10 @@ end
 function MDADHUDPanel:saveSpeedBox(x, y)
     local playerObj = getSpecificPlayer(self.playerNum)
     local md = playerObj and playerObj:getModData()
-    if md then md[SPEED_BOX_X_MD_KEY], md[SPEED_BOX_Y_MD_KEY] = x, y end
+    if md then
+        local keys = SPEED_BOX_MD[self._fsd == true]
+        md[keys[1]], md[keys[2]] = x, y
+    end
 end
 
 function MDADHUDPanel:onCollapse()

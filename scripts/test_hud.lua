@@ -1310,11 +1310,56 @@ do
     cc.visible, cc.y = true, 150
     tick()
 
+    -- 速度明細（1027a）：FSD 卡片已疊在儀表／充電卡上方，明細改放卡片右側（底邊對齊），右邊不夠放左側，兩側都不夠才
+    -- 退回上方；預設位置夾回畫面頂；FSD 拖過的位置另存一組，一般車拖過的位置不搬過來、也不被 FSD 的蓋掉。
+    local info = { 120, 120, nil, 18, "curve-coast", 25, 104 }
+    local realInfo = MDAD.Drive.speedInfo
+    MDAD.Drive.speedInfo = function() return info[1], info[2], info[3], info[4], info[5], info[6], info[7] end
+    local pinOpt = optionSets.MinidoracatAutoDrive:getOption("SpeedDetails")
+    pinOpt:setValue(true)
+    player._md.MDADHudSpeedBoxX, player._md.MDADHudSpeedBoxY = 40, 30 -- 一般車拖過的位置
+    cc.y = 760
+    tick()
+    local pin = panel.pinBox
+    check(pin and pin.visible and not panel._collapsed and pin.x == panel.x + panel.width + 4
+        and pin.y + pin.height == panel.y + panel.height,
+        "(fsd-pin) speed details sit right of the FSD card with bottoms aligned; a spot dragged on other cars is not used ("
+            .. tostring(pin and pin.x) .. "," .. tostring(pin and pin.y) .. ")")
+    local tsX = ts.x
+    ts.x = viewportWidth - ts.w - 2
+    tick()
+    check(pin.visible and pin.x == panel.x - 4 - pin.width and pin.y + pin.height == panel.y + panel.height,
+        "(fsd-pin-left) no room on the right: left of the card, bottoms aligned (" .. pin.x .. "," .. pin.y .. ")")
+    ts.x = 10
+    viewportWidth = ts.x + ts.w + 14
+    tick()
+    check(pin.visible and pin.y + pin.height + 4 == panel.y and pin.x >= panel.x
+        and pin.x + pin.width <= panel.x + panel.width,
+        "(fsd-pin-above) no room on either side: back above the card (" .. pin.x .. "," .. pin.y .. ")")
+    cc.y = 150
+    tick()
+    check(panel._collapsed and pin.visible and pin.y == 0 and panel.y - 4 - pin.height < 0,
+        "(fsd-pin-clamp) above a chip near the top: the default spot is clamped onto the screen (" .. pin.y .. ")")
+    viewportWidth, ts.x, cc.y = 1920, tsX, 760
+    tick()
+    pin.moving = true
+    pin:setX(300); pin:setY(200)
+    pin:onMouseUpOutside(0, 0)
+    tick()
+    check(pin.x == 300 and pin.y == 200 and player._md.MDADHudSpeedBoxFsdX == 300
+        and player._md.MDADHudSpeedBoxX == 40,
+        "(fsd-pin-drag) dragging on the FSD card remembers its own spot and leaves the other cars' spot alone")
+
     MinidoracatTeslaAPI = nil
     dash.visible = true
     tick()
     check(not panel._fsd and panel.capTip.fsd == nil and panel.themeButton:isVisible() and not panel._collapsed,
         "(fsd) other cars keep the four themes; a chip forced by the charge card does not follow the player out")
+    check(pin.x == 40 and pin.y == 30, "(fsd-pin-drag) other cars still use their own dragged spot")
+    player._md.MDADHudSpeedBoxX, player._md.MDADHudSpeedBoxY = nil, nil
+    player._md.MDADHudSpeedBoxFsdX, player._md.MDADHudSpeedBoxFsdY = nil, nil
+    pinOpt:setValue(false)
+    MDAD.Drive.speedInfo = realInfo
     state.active, state.token = true, "follow"
     MDADFSD, MDADScene, Vector3f, MDADOverlay.trail, MDADOverlay.scanPassive = nil, nil, nil, nil, nil
     MDAD.Drive.isActive = nil
@@ -1706,6 +1751,16 @@ do
     check(box and box.added and box.visible and box.y + box.height <= panel.y
         and box.x >= panel.x and box.x + box.width <= panel.x + panel.width,
         "pinned details are a separate box docked above the HUD")
+    check(box.x == panel.x + panel._pinX and box.y == panel.y - box.height - 4,
+        "four themes keep the old dock: above the HUD over the cruise column, 4px gap")
+    -- 預設停靠也夾回這位玩家的畫面（上下分割的上半畫面不夠高）；放得下就不動
+    local realTop = getPlayerScreenTop
+    getPlayerScreenTop = function() return panel.y - 50 end
+    panel:refresh(t0 + 4850)
+    check(box.y == panel.y - 50, "the default dock is clamped to the top of the player's screen (" .. box.y .. ")")
+    getPlayerScreenTop = realTop
+    panel:refresh(t0 + 4900)
+    check(box.y == panel.y - box.height - 4, "with room the default dock is not moved")
     box.drawTextRight = function() pinDraws = pinDraws + 1 end
     box:prerender()
     check(pinDraws == 10, "pinned details draw every row (" .. pinDraws .. ")")
