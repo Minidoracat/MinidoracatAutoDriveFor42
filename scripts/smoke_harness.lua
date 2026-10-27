@@ -34379,8 +34379,47 @@ function drive.scenarioSummonWhy()
     local r = Api.summonState(0)
     checkEq(r and r.code, "MODULE", "(WHY-stale) 停止碼 MODULE")
     checkEq(r and r.why, DKEY.NEED_MODULE, "(WHY-stale) why 是這一次的理由鍵，不是上一次的 building")
+    -- 伺服器只收 ^[%w_]+$、≤64 字元的字串 why，壞的不印、停止照常（第 3 輪審查 Claude；違規證明：過濾改成 why ~= nil＝
+    -- (WHY-bad) 紅）。換行是偽造 log 行的典型手法。
+    for i, bad in ipairs({ "x\n[MinidoracatAutoDriveFor42] summon end vid=1 code=ARRIVED", string.rep("a", 65), { 1 } }) do
+        local tag = "(WHY-bad" .. i .. ") "
+        local p, vv = drive.sumFix({ mp = true })
+        local ends = {}
+        clientFlag, serverFlag = false, true
+        Api.startSummon(p, vv, { onEnd = function(_, code) ends[#ends + 1] = code end })
+        nowMs = nowMs + 250
+        MDAD.Summon.tick()
+        local log = capturePrint(function()
+            fire("OnClientCommand", MOD_ID, MDAD.CMD_SUMMON, p,
+                { vehicleId = vv:getId(), active = false, code = "FAULT", why = bad })
+        end)
+        checkFalse(logHas(log, "why="), tag .. "壞的 why 不印")
+        checkNil(Api.summonInfo(vv), tag .. "停止照常處理")
+        checkEq(ends[1], "FAULT", tag .. "停止碼照收")
+    end
 end
 drive.scenarioSummonWhy()
+
+-- 停車姿態全部被擋時跑滿 SUMMON_SPOT_POSE_MAX 就回 nil（每幀成本上限；第 3 輪審查 Claude）。違規證明：拿掉姿態上限那個
+-- 出口＝(PC) 紅（會掃滿半徑 20 內所有候選）。
+function drive.scenarioSummonSpotPoseCap()
+    scenario("召喚停車點：姿態全部被擋時做滿 SUMMON_SPOT_POSE_MAX 次就停，不掃完整個半徑")
+    local Dr = MDAD.Drive
+    local T = Dr.debugTune()
+    local _, v = drive.sumFix({ px = 15 })
+    local sm = { mode = "target", playerNum = 0 }
+    checkTrue(Dr.summonBody(sm, v), "(PC) 車身量得到")
+    local realProbe, n = MDADSensor.probeNear, 0
+    MDADSensor.probeNear = function()
+        n = n + 1
+        return "hard"
+    end
+    local tx = Dr.summonSpot(sm, v, 0, 0, 15.5, 0.5, 44)
+    MDADSensor.probeNear = realProbe
+    checkNil(tx, "(PC) 全被擋：nil")
+    checkEq(n, T.SUMMON_SPOT_POSE_MAX, "(PC) 每個姿態第一個 probe 就擋：probeNear 次數＝SUMMON_SPOT_POSE_MAX")
+end
+drive.scenarioSummonSpotPoseCap()
 
 -- 前進／後退的推力在 SUMMON_DUMB_PEAK_KMH 歸零（E2E tesla-sum-1027-sp-g 每 tick 最高 3.9／4.1 km/h）。
 -- 違規證明：summonDumbStep 不帶 vCap＝(DP) 紅。

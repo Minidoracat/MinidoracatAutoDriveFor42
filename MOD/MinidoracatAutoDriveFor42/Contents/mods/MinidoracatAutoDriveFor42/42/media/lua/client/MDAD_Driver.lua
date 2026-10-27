@@ -18254,7 +18254,7 @@ function Drive.summonBody(sm, vehicle)
     if not ok or type(vp) ~= "table" or not finite(vp.halfL) or not finite(vp.halfW) or vp.halfL <= 0 or vp.halfW <= 0 then
         return false
     end
-    sm.halfL, sm.halfW, sm.vp, sm.vehicleProfile = vp.halfL, vp.halfW, vp, vp -- vehicleProfile：給 bodyCenter
+    sm.halfL, sm.halfW, sm.vehicleProfile = vp.halfL, vp.halfW, vp -- vehicleProfile：同 session 的名字，bodyCenter 也讀它
     sm.probe = MDADSensor.newState()
     return true
 end
@@ -18619,7 +18619,7 @@ function Drive.summonDumbBegin(player, sm, now)
         Drive.summonRelease(sm.playerNum, sm, code)
         return false
     end
-    local mass = sm.vp.mass
+    local mass = sm.vehicleProfile.mass
     sm.mass = (finite(mass) and mass >= MASS_VALID_LO and mass <= MASS_VALID_HI) and mass or MASS_FALLBACK
     sm.x0, sm.y0 = v:getX(), v:getY()
     sm.stallSince, sm.nextProbeMs, sm.zombie = 0, 0, false
@@ -18724,7 +18724,8 @@ function Drive.summonDumbStep(player, sm, now)
     else
         sm.stallSince = 0
     end
-    local a = MDADDynamics.summonPushAccel(along, TUNE.SUMMON_DUMB_KMH, sm.vp.wheelFriction, TUNE.SUMMON_DUMB_PEAK_KMH)
+    local a = MDADDynamics.summonPushAccel(along, TUNE.SUMMON_DUMB_KMH, sm.vehicleProfile.wheelFriction,
+        TUNE.SUMMON_DUMB_PEAK_KMH)
     if a > 0 then
         local mult = getGameTime():getMultiplier()
         if mult < MULT_MIN then mult = MULT_MIN elseif mult > MULT_MAX then mult = MULT_MAX end
