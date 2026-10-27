@@ -1238,7 +1238,8 @@ end
 -- v、vTgt 單位 km/h（v 可負：倒退中＝離目標更遠）；回 m/s²。
 -- vCap（選填，> vTgt）：實速超過 vTgt 後前饋線性淡出、到 vCap 歸零。沒有它時推力要到 vTgt＋K_R×wf／GAIN 才歸零（wf 2.0、
 -- 目標 1 km/h＝5 km/h）：輪子實際阻力比 K_R×wf 小時（滾動、路面、坡度）車會一路被推到 3–5 km/h（E2E tesla-sum-1027-sp-g
--- 前進／後退每 tick 取樣最高 3.9／4.1 km/h）。前進／後退帶 vCap；到我這裡／指定地點照舊（E2E 實測最高約 10 km/h）。
+-- 前進／後退每 tick 取樣最高 3.9／4.1 km/h）。前進／後退帶 vCap；到我這裡／指定地點不帶，照舊（同一輪每 tick 最高 come 12.0、
+-- target 10.4 km/h，open-issues 待評估）。
 D.SUMMON_A_MAX = 36
 D.SUMMON_GAIN = 3.6
 D.SUMMON_K_R = 7.2

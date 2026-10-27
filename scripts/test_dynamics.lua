@@ -1026,7 +1026,8 @@ do
     near(D.summonPushAccel(1, 1, nil, 1.5), KR, 1e-9, "vCap：到目標前照舊（滾阻項全給）")
     eq(D.summonPushAccel(1.5, 1, nil, 1.5), 0, "vCap：到 1.5 km/h 不推")
     eq(D.summonPushAccel(3, 1, nil, 1.5), 0, "vCap：超過 1.5 km/h 不推")
-    check(D.summonPushAccel(1.25, 1, nil, 1.5) < KR, "vCap：目標與上限之間前饋已在淡出")
+    near(D.summonPushAccel(1.25, 1, nil, 1.5), 0.5 * KR + D.SUMMON_GAIN * (1 - 1.25), 1e-9,
+        "vCap：目標與上限正中間，前饋剛好剩一半（線性淡出）")
     near(D.summonPushAccel(0.5, 1, nil, 1.5), D.summonPushAccel(0.5, 1), 1e-9, "vCap：低於目標時不影響")
     near(D.summonPushAccel(3, 1, nil, 0.5), D.summonPushAccel(3, 1), 1e-9, "vCap 不大於目標：忽略")
 end
