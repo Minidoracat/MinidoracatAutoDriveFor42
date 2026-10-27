@@ -1030,6 +1030,12 @@ do
         "vCap：目標與上限正中間，前饋剛好剩一半（線性淡出）")
     near(D.summonPushAccel(0.5, 1, nil, 1.5), D.summonPushAccel(0.5, 1), 1e-9, "vCap：低於目標時不影響")
     near(D.summonPushAccel(3, 1, nil, 0.5), D.summonPushAccel(3, 1), 1e-9, "vCap 不大於目標：忽略")
+    near(D.summonPushAccel(0.5, 1, nil, 1.5, 2), D.summonPushAccel(0.5, 1) + 2, 1e-9, "bias：加在前饋上")
+    near(D.summonPushAccel(1.25, 1, nil, 1.5, 2), 0.5 * (KR + 2) + D.SUMMON_GAIN * (1 - 1.25), 1e-9,
+        "bias：跟前饋一起照 vCap 淡出")
+    eq(D.summonPushAccel(1.5, 1, nil, 1.5, 10), 0, "bias：到 vCap 照樣不推")
+    near(D.summonPushAccel(0.5, 1, nil, 1.5, -100), D.SUMMON_GAIN * 0.5, 1e-9, "bias 負到底：前饋夾在 0，比例項照給")
+    near(D.summonPushAccel(0.5, 1, nil, 1.5, 0 / 0), D.summonPushAccel(0.5, 1), 1e-9, "bias NaN：忽略")
 end
 
 print("  " .. (assertions - base) .. " 項斷言")
