@@ -33930,19 +33930,24 @@ function drive.scenarioSummonZombieTelemetry()
     local s = Dr.debugSession(0)
     checkTrue(ev[1] and ev[1].phase == "start" and ev[1].mode == "come" and ev[1].vid == v:getId()
         and ev[1].kind == "direct", "(D1) summon start 事件（mode vid kind）")
+    -- 門檻全從 TUNE 讀（SUMMON_ZOMBIE_NEAR_M／KMH／MAX_MS），調參時測試跟著走。違規證明：KMH 改 5 或 MAX_MS 改 10000＝(ZC) 紅
+    local T = Dr.debugTune()
     s.sensor.zombieN, s.zombieWhy = 1, nil
-    s.sensor.zombieNearS = s.lastSNow + s.vehicleProfile.halfL + 30
-    checkEq(Dr.summonZombieCap(s, 10, nowMs), 10, "殭屍在 30m 外：不算推、不壓速")
+    s.sensor.zombieNearS = s.lastSNow + s.vehicleProfile.halfL + T.SUMMON_ZOMBIE_NEAR_M + 1
+    checkEq(Dr.summonZombieCap(s, 10, nowMs), 10, "(ZC) 殭屍在 NEAR_M 外 1m：不算推、不壓速")
     s.zombieWhy = "gap"
-    s.sensor.zombieNearS = s.lastSNow + s.vehicleProfile.halfL + 1
-    checkEq(Dr.summonZombieCap(s, 10, nowMs), 10, "軟縫閃得過：不算推")
+    s.sensor.zombieNearS = s.lastSNow + s.vehicleProfile.halfL + T.SUMMON_ZOMBIE_NEAR_M - 1
+    checkEq(Dr.summonZombieCap(s, 10, nowMs), 10, "(ZC) 軟縫閃得過：不算推")
     s.zombieWhy = nil
-    checkEq(Dr.summonZombieCap(s, 10, nowMs), 4, "車頭前 1m 有殭屍、軟縫沒處理：壓到 4 km/h")
-    for _ = 1, 61 do
+    checkEq(Dr.summonZombieCap(s, 10, nowMs), T.SUMMON_ZOMBIE_KMH, "(ZC) NEAR_M 內有殭屍、軟縫沒處理：壓到 SUMMON_ZOMBIE_KMH")
+    for _ = 1, math.ceil(T.SUMMON_ZOMBIE_MAX_MS / 250) - 1 do
         nowMs = nowMs + 250
         Dr.summonZombieCap(s, 10, nowMs)
     end
-    checkEq(s.summon.stopCode, "ZOMBIES", "推了 15 秒：ZOMBIES")
+    checkNil(s.summon.stopCode, "(ZC) 推不到 SUMMON_ZOMBIE_MAX_MS：還沒停")
+    nowMs = nowMs + 250
+    Dr.summonZombieCap(s, 10, nowMs)
+    checkEq(s.summon.stopCode, "ZOMBIES", "(ZC) 推滿 SUMMON_ZOMBIE_MAX_MS：ZOMBIES")
     drive.sumTick()
     checkFalse(Dr.isActive(0), "下一幀停")
     drive.sumTick() -- 停穩：送停止（要在伺服器輪詢前，否則 15 秒沒心跳先 TIMEOUT）
@@ -34400,10 +34405,10 @@ function drive.scenarioSummonWhy()
 end
 drive.scenarioSummonWhy()
 
--- 停車姿態全部被擋時跑滿 SUMMON_SPOT_POSE_MAX 就回 nil（每幀成本上限；第 3 輪審查 Claude）。違規證明：拿掉姿態上限那個
--- 出口＝(PC) 紅（會掃滿半徑 20 內所有候選）。
+-- 停車點每次 summonSpot 最多 SUMMON_SPOT_PROBE_MAX 個 probeNear 就回 nil（每幀成本上限；adsum-1028-d2-prof 最壞 277ms）。
+-- 違規證明：拿掉預算那個出口＝(PC) 紅（會掃滿半徑 20 內所有候選）。
 function drive.scenarioSummonSpotPoseCap()
-    scenario("召喚停車點：姿態全部被擋時做滿 SUMMON_SPOT_POSE_MAX 次就停，不掃完整個半徑")
+    scenario("召喚停車點：全被擋時做滿 SUMMON_SPOT_PROBE_MAX 個 probeNear 就停，不掃完整個半徑")
     local Dr = MDAD.Drive
     local T = Dr.debugTune()
     local _, v = drive.sumFix({ px = 15 })
@@ -34417,7 +34422,7 @@ function drive.scenarioSummonSpotPoseCap()
     local tx = Dr.summonSpot(sm, v, 0, 0, 15.5, 0.5, 44)
     MDADSensor.probeNear = realProbe
     checkNil(tx, "(PC) 全被擋：nil")
-    checkEq(n, T.SUMMON_SPOT_POSE_MAX, "(PC) 每個姿態第一個 probe 就擋：probeNear 次數＝SUMMON_SPOT_POSE_MAX")
+    checkEq(n, T.SUMMON_SPOT_PROBE_MAX, "(PC) 每個姿態第一個 probe 就擋：probeNear 次數＝SUMMON_SPOT_PROBE_MAX")
 end
 drive.scenarioSummonSpotPoseCap()
 

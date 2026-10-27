@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1028d"
+Drive.REV = "1028e"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -17936,8 +17936,8 @@ TUNE.SUMMON_ROUTE_WAIT_MS = 8000   -- 小地圖算路線（building／extracting
 TUNE.SUMMON_DIRECT_M = 40          -- 停車點在這麼近、直線預檢又過＝不用路網，兩點直線
 TUNE.SUMMON_SPOT_R = 20            -- 停車點搜尋半徑（格）
 TUNE.SUMMON_SPOT_MAX = 24          -- 停車點最多做幾次 E→T 直線預檢（姿態過了才算）
-TUNE.SUMMON_SPOT_POSE_MAX = 96     -- 停車姿態預檢上限（每次 1＋ceil(3/halfL) 個 probeNear：一般車 3、最短車身 7；
-                                   -- 每次 summonSpot 最壞 96 次姿態＋24 條直線，M1 GameProfiler 量）
+TUNE.SUMMON_SPOT_PROBE_MAX = 160   -- 每次 summonSpot 最多幾個 probeNear（姿態＋直線合計，每個約 0.4ms）。原本只限姿態 96 次，
+                                   -- 最壞 96 姿態＋24 條長直線＝277ms（adsum-1028-d2-prof GameProfiler）
 TUNE.SUMMON_TAIL_M = 20            -- 路網終點接到停車點的尾段上限（同 SNAP_MAX_M）
 TUNE.SUMMON_ROAD_GAP_M = 3         -- 到我這裡走路網：線尾截到離召喚者 halfL＋這個（Drive.summonShort）
 TUNE.SUMMON_END_EXT_M = 4          -- 線尾延過停車點這麼遠：Follower 在終點前 ARRIVE_M 內判到、車心停在停車點附近
@@ -18274,6 +18274,7 @@ function Drive.summonLineClear(sm, vehicle, ax, ay, bx, by, strict)
     while true do
         local st = MDADSensor.probeNear(sm.probe, vehicle, cell, ax + fx * t, ay + fy * t, fx, fy, -fy, fx,
             sm.halfW, sm.halfL)
+        sm.probeN = (sm.probeN or 0) + 1 -- summonSpot 的成本上限（SUMMON_SPOT_PROBE_MAX）
         if st == "hard" or st == "unloaded" or (strict and st ~= "clear") then return false end
         if t >= len then return true end
         t = t + step
@@ -18286,8 +18287,8 @@ end
 -- 先驗停車姿態（T 與 T 前 3m 的車身都要淨空，每 halfL 一個 probeNear），過了才驗 E→T 直線（同）；|P−E| ≤ maxLeg。
 -- 回 T, P（四個數）或 nil。召喚者在建築裡時，緊貼牆、車頭朝牆的候選很多，都在姿態那關被擋（E2E adsum-1028-b-s5diag：路網
 -- 線尾那次第 37 個候選才第一個可停）；姿態不佔直線預檢的額度，否則額度在牆邊用完、退回路網終點。
--- ponytail: 姿態最多 SUMMON_SPOT_POSE_MAX 次、直線最多 SUMMON_SPOT_MAX 次、半徑 SUMMON_SPOT_R，找不到就停在路網終點
--- （spot=road）；不繞牆或樹排（要繞得另做格子 A*）。
+-- ponytail: probeNear 最多 SUMMON_SPOT_PROBE_MAX 個、直線最多 SUMMON_SPOT_MAX 次、半徑 SUMMON_SPOT_R，找不到就停在路網終點
+-- （spot=road）；不繞牆或樹排（要繞得另做格子 A*）。summonFetch 一次最多叫兩次（直線模式失敗再做線尾），每次各自一份額度。
 function Drive.summonSpot(sm, vehicle, ex, ey, cx, cy, maxLeg)
     local cell = getCell()
     if not cell then return nil end
@@ -18297,7 +18298,8 @@ function Drive.summonSpot(sm, vehicle, ex, ey, cx, cy, maxLeg)
     local keep = sm.halfL + 1.5
     local band = sm.halfW + 1
     local gx0, gy0 = math.floor(cx), math.floor(cy)
-    local tries, poses = 0, 0
+    local tries = 0
+    sm.probeN = 0
     for r = 0, TUNE.SUMMON_SPOT_R do
         for gy = gy0 - r, gy0 + r do
             local edge = gy == gy0 - r or gy == gy0 + r
@@ -18331,13 +18333,12 @@ function Drive.summonSpot(sm, vehicle, ex, ey, cx, cy, maxLeg)
                         inBand = qx * qx + qy * qy < band * band
                     end
                     if not inBand and legX * legX + legY * legY <= maxLeg * maxLeg then
-                        poses = poses + 1
                         if Drive.summonLineClear(sm, vehicle, tx, ty, tx + fx * 3, ty + fy * 3, true) then
                             tries = tries + 1
                             if Drive.summonLineClear(sm, vehicle, ex, ey, tx, ty) then return tx, ty, pX, pY end
                             if tries >= TUNE.SUMMON_SPOT_MAX then return nil end
                         end
-                        if poses >= TUNE.SUMMON_SPOT_POSE_MAX then return nil end
+                        if sm.probeN >= TUNE.SUMMON_SPOT_PROBE_MAX then return nil end
                     end
                 end
                 gx = gx + ((edge or gx == gx0 + r) and 1 or 2 * r) -- 只走這一圈的邊
