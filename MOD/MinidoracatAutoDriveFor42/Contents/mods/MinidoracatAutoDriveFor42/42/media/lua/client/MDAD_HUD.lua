@@ -833,16 +833,17 @@ function HUD.teslaRect(playerNum)
 end
 
 -- 同一個選配 MOD 的充電卡（MinidoracatTeslaAPI.chargeCardRect(pn) → x, y, w, h, visible，座標系同 hudRect；
--- 舊版沒有這個函式）貼在它的儀表上方：開著就回卡片頂邊 y，FSD 卡片改疊在它上面（MDAD_FSD.lua）。否則 nil。
+-- 舊版沒有這個函式）貼在它的儀表上方：開著就回卡片頂邊 y（再加 x, w, h，速度明細貼它側邊用），FSD 卡片改疊在
+-- 它上面（MDAD_FSD.lua）。否則 nil。
 function HUD.chargeCardTop(playerNum)
     local api = MinidoracatTeslaAPI
     if type(api) ~= "table" or type(api.chargeCardRect) ~= "function" then return nil end
-    local ok, _, y, w, h, visible = pcall(api.chargeCardRect, playerNum)
-    if not ok or visible ~= true or type(y) ~= "number" or type(w) ~= "number" or type(h) ~= "number"
-            or w <= 0 or h <= 0 then
+    local ok, x, y, w, h, visible = pcall(api.chargeCardRect, playerNum)
+    if not ok or visible ~= true or type(x) ~= "number" or type(y) ~= "number" or type(w) ~= "number"
+            or type(h) ~= "number" or w <= 0 or h <= 0 then
         return nil
     end
-    return y
+    return y, x, w, h
 end
 
 local function effectivePolicy(name, playerNum, kind)
@@ -2306,13 +2307,18 @@ function MDADHUDPanel:placeSpeedPin()
             local px, py = self:getAbsoluteX(), self:getAbsoluteY()
             local x, y = px + self._pinX, py + self._pinY - (self._diagShown and self._diagH + 2 or 0)
             if self._fsd then
-                -- FSD 卡片已疊在儀表／充電卡上方，明細再往上疊會蓋到畫面中央的車：改放卡片右側、底邊對齊，
-                -- 右邊放不下放左側，兩側都放不下才退回上方。
-                local sideY = py + self.height - self._pinH
-                if px + self.width + 4 + self._pinW <= right then
-                    x, y = px + self.width + 4, sideY
-                elseif px - 4 - self._pinW >= left then
-                    x, y = px - 4 - self._pinW, sideY
+                -- FSD 卡片已疊在儀表／充電卡上方，明細再往上疊會蓋到畫面中央的車：改放卡片側邊、底邊對齊，
+                -- 右邊放不下放左側，兩側都放不下才退回上方。卡片收成晶片（充電卡開著）時晶片又矮又窄，改貼充電卡。
+                local ax, ay, aw, ah = px, py, self.width, self.height
+                if self._collapsed and self._ccY then
+                    local cy, cx, cw, ch = HUD.chargeCardTop(pn)
+                    if cy then ax, ay, aw, ah = cx, cy, cw, ch end
+                end
+                local sideY = ay + ah - self._pinH
+                if ax + aw + 4 + self._pinW <= right then
+                    x, y = ax + aw + 4, sideY
+                elseif ax - 4 - self._pinW >= left then
+                    x, y = ax - 4 - self._pinW, sideY
                 end
             end
             -- 預設位置也夾回這位玩家的畫面（上下分割畫面時上方那個不夠高）；放得下就不動

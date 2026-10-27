@@ -191,14 +191,12 @@ function F.layout(p, m)
     local half = floor(gap / 2)
     local colH = fontH * 3 + largeH + ctrlH + half * 3 + gap
     local sceneH = max(colH, floor(118 * S + 0.5))
-    -- 充電卡把錨點往上推，展開的卡片頂端會超出這位玩家的畫面：當場收成晶片（只改這次版面、不寫 modData＝玩家的
-    -- 收合選擇不變），充電卡關掉或有空間就展開回來。
-    local fullH = pad + sceneH + gap + ctrlH + pad
-    local cramped = p._ccY ~= nil
-        and p._ccY - floor(CARD_GAP * S + 0.5) - fullH < getPlayerScreenTop(p.playerNum) + 4
-    if cramped and not p._collapsed then
+    -- 充電卡開著就當場收成晶片（2026-10-27 使用者裁定：展開的卡片疊在充電卡上會蓋到畫面中央的車）。只改這次版面、
+    -- 不寫 modData＝玩家的收合選擇不變：原本就收合的不算被迫，充電卡關掉照舊收著；被迫的那次關掉就展開回來。
+    local forced = p._ccY ~= nil
+    if forced and not p._collapsed then
         p._collapsed, p._fForced = true, true
-    elseif not cramped and p._fForced then
+    elseif not forced and p._fForced then
         p._collapsed, p._fForced = false, nil
     end
     if p._collapsed then return F.sizePill(p) end

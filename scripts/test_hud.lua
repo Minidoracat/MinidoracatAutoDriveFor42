@@ -1291,34 +1291,47 @@ do
     tick()
     check(not panel._collapsed and panel.height == H, "(fsd-pill) expanding restores the card")
 
-    -- 儀表 MOD 的充電卡（chargeCardRect，舊版沒有）開著：卡片疊在它上方；放不下就當場收成晶片、不寫 modData，關掉就展開回來。
+    -- 儀表 MOD 的充電卡（chargeCardRect，舊版沒有）開著：卡片一律收成晶片疊在它上方（2026-10-27 使用者裁定），
+    -- 不寫 modData；關掉回到玩家原本的狀態（原本展開就展開、原本收合就收著）。
     local cc = { x = 700, y = 760, w = 520, h = 200, visible = true }
     local mdWas = player._md.MDADHudCollapsed
     MinidoracatTeslaAPI.chargeCardRect = function() return cc.x, cc.y, cc.w, cc.h, cc.visible end
     tick()
-    check(not panel._collapsed and panel.height == H and panel.y + H + 8 == cc.y and panel.x == ts.x,
-        "(fsd-charge) an open charge card pushes the FSD card above it (" .. panel.y .. ")")
-    cc.y = 150
-    tick()
-    check(panel._collapsed and panel.height < 40 and panel.y + panel.height + 8 == cc.y
+    check(panel._collapsed and panel._fForced and panel.height < 40 and panel.y + panel.height + 8 == cc.y
         and player._md.MDADHudCollapsed == mdWas,
-        "(fsd-charge-pill) no room above the charge card: a chip above it, the player's collapse choice untouched")
+        "(fsd-charge-pill) an open charge card folds the FSD card into a chip above it, the player's collapse choice untouched ("
+            .. panel.y .. ")")
+    click(panel.collapseButton)
+    tick()
+    check(panel._collapsed and panel._fForced and panel.height < 40,
+        "(fsd-charge-pill) tapping the forced chip keeps it a chip while the charge card is open")
     cc.visible = false
     tick()
-    check(not panel._collapsed and panel.height == H and panel.y + H + 8 == ts.y,
-        "(fsd-charge) closing the charge card puts the card back above the dashboard")
-    cc.visible, cc.y = true, 150
+    check(not panel._collapsed and not panel._fForced and panel.height == H and panel.y + H + 8 == ts.y,
+        "(fsd-charge) closing the charge card expands the card back above the dashboard")
+    click(panel.collapseButton)
     tick()
+    cc.visible = true
+    tick()
+    check(panel._collapsed and not panel._fForced and panel.y + panel.height + 8 == cc.y,
+        "(fsd-charge-pill) a card the player folded is not forced: it stays the player's chip above the charge card")
+    cc.visible = false
+    tick()
+    check(panel._collapsed and player._md.MDADHudCollapsed == true,
+        "(fsd-charge) closing the charge card leaves the player's folded card folded")
+    click(panel.collapseButton)
+    tick()
+    check(not panel._collapsed and player._md.MDADHudCollapsed == false, "(fsd-charge) the player expands it again")
 
-    -- 速度明細（1027a）：FSD 卡片已疊在儀表／充電卡上方，明細改放卡片右側（底邊對齊），右邊不夠放左側，兩側都不夠才
-    -- 退回上方；預設位置夾回畫面頂；FSD 拖過的位置另存一組，一般車拖過的位置不搬過來、也不被 FSD 的蓋掉。
+    -- 速度明細（1027a）：FSD 卡片已疊在儀表上方，明細改放卡片側邊（底邊對齊），右邊不夠放左側，兩側都不夠才退回上方；
+    -- 1027b：充電卡開著（卡片是晶片）改貼充電卡側邊。預設位置夾回畫面頂；FSD 拖過的位置另存一組，一般車拖過的位置
+    -- 不搬過來、也不被 FSD 的蓋掉。
     local info = { 120, 120, nil, 18, "curve-coast", 25, 104 }
     local realInfo = MDAD.Drive.speedInfo
     MDAD.Drive.speedInfo = function() return info[1], info[2], info[3], info[4], info[5], info[6], info[7] end
     local pinOpt = optionSets.MinidoracatAutoDrive:getOption("SpeedDetails")
     pinOpt:setValue(true)
     player._md.MDADHudSpeedBoxX, player._md.MDADHudSpeedBoxY = 40, 30 -- 一般車拖過的位置
-    cc.y = 760
     tick()
     local pin = panel.pinBox
     check(pin and pin.visible and not panel._collapsed and pin.x == panel.x + panel.width + 4
@@ -1336,11 +1349,27 @@ do
     check(pin.visible and pin.y + pin.height + 4 == panel.y and pin.x >= panel.x
         and pin.x + pin.width <= panel.x + panel.width,
         "(fsd-pin-above) no room on either side: back above the card (" .. pin.x .. "," .. pin.y .. ")")
+    viewportWidth, ts.x = 1920, tsX
+    cc.visible = true
+    tick()
+    check(panel._collapsed and pin.visible and pin.x == cc.x + cc.w + 4 and pin.y + pin.height == cc.y + cc.h,
+        "(fsd-pin-charge) chip over an open charge card: details sit right of the charge card, bottoms aligned ("
+            .. pin.x .. "," .. pin.y .. ")")
+    local ccX = cc.x
+    cc.x = viewportWidth - cc.w - 2
+    tick()
+    check(pin.x == cc.x - 4 - pin.width and pin.y + pin.height == cc.y + cc.h,
+        "(fsd-pin-charge) no room right of the charge card: left of it (" .. pin.x .. "," .. pin.y .. ")")
+    cc.x, ts.x = 10, 10
+    viewportWidth = cc.x + cc.w + 14
+    tick()
+    check(panel._collapsed and pin.y + pin.height + 4 == panel.y,
+        "(fsd-pin-charge) no room beside the charge card either: back above the chip (" .. pin.x .. "," .. pin.y .. ")")
     cc.y = 150
     tick()
     check(panel._collapsed and pin.visible and pin.y == 0 and panel.y - 4 - pin.height < 0,
         "(fsd-pin-clamp) above a chip near the top: the default spot is clamped onto the screen (" .. pin.y .. ")")
-    viewportWidth, ts.x, cc.y = 1920, tsX, 760
+    viewportWidth, ts.x, cc.x, cc.y = 1920, tsX, ccX, 760
     tick()
     pin.moving = true
     pin:setX(300); pin:setY(200)
