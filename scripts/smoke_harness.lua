@@ -34421,10 +34421,11 @@ function drive.scenarioSummonSpotPoseCap()
 end
 drive.scenarioSummonSpotPoseCap()
 
--- 前進／後退的推力在 SUMMON_DUMB_PEAK_KMH 歸零（E2E tesla-sum-1027-sp-g 每 tick 最高 3.9／4.1 km/h）。
--- 違規證明：summonDumbStep 不帶 vCap＝(DP) 紅。
+-- 召喚推力在「目標＋SUMMON_PUSH_OVER_KMH」歸零（E2E tesla-sum-1027-sp-g 前進／後退每 tick 最高 3.9／4.1 km/h；
+-- adsum-1028-c-s5 到我這裡 500ms 取樣 12.5 km/h，限速 10）。違規證明：summonDumbStep 不帶 vCap＝(DP) 紅；
+-- summonPush 不帶 vCap＝(PP) 紅。
 function drive.scenarioSummonDumbPeak()
-    scenario("召喚前進／後退：車速到 SUMMON_DUMB_PEAK_KMH 就不推，低於目標照推；倒車同")
+    scenario("召喚推力：車速到目標＋SUMMON_PUSH_OVER_KMH 就不推，低於目標照推；前進、倒車、到我這裡同")
     local Dr = MDAD.Drive
     local T = Dr.debugTune()
     for _, dir in ipairs({ 1, -1 }) do
@@ -34432,7 +34433,7 @@ function drive.scenarioSummonDumbPeak()
         local _, v = drive.sumFix({ px = dir > 0 and -6 or 6, py = 4 })
         clientFlag, serverFlag = false, false
         drive.sumStart({ mode = "dumb", dir = dir })
-        for _, kmh in ipairs({ T.SUMMON_DUMB_PEAK_KMH + 0.1, 3 }) do
+        for _, kmh in ipairs({ T.SUMMON_DUMB_KMH + T.SUMMON_PUSH_OVER_KMH + 0.1, 3 }) do
             v._speed = kmh * dir
             driveReset(v)
             drive.sumTick()
@@ -34444,6 +34445,11 @@ function drive.scenarioSummonDumbPeak()
         checkEq(v._imp.total, 1, tag .. "0.5 km/h：照推")
         Dr.summonStopLocal(0)
     end
+    local s = { maxSpeed = T.SUMMON_MAX_KMH, vehicleProfile = { wheelFriction = 2 }, runtimeMass = 1000 }
+    local over = T.SUMMON_MAX_KMH + T.SUMMON_PUSH_OVER_KMH + 0.1
+    checkEq(Dr.summonPush(s, over, T.SUMMON_MAX_KMH, 1), 0, "(PP) 到我這裡：超過限速＋0.5 不推")
+    checkEq(Dr.summonPush(s, over, 30, 1), 0, "(PP) 目標速度高於限速時以限速為準")
+    checkTrue(Dr.summonPush(s, T.SUMMON_MAX_KMH - 0.5, T.SUMMON_MAX_KMH, 1) > 0, "(PP) 低於限速照推")
 end
 drive.scenarioSummonDumbPeak()
 

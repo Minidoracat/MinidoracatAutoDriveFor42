@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1028c"
+Drive.REV = "1028d"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -17919,7 +17919,7 @@ end
 -- 伺服器 finish 收權限、熄火、回呼後送 SummonEnd（Drive.summonEndCmd）。本段只用 Drive／TUNE 欄位（主 chunk local 已滿）。
 TUNE.SUMMON_MAX_KMH = 10           -- 召喚限速（2026-10-27 主代理補定）
 TUNE.SUMMON_DUMB_KMH = 1           -- 前進／後退限速（實車手冊「基础召唤时，最高车速为 1 km/h」）
-TUNE.SUMMON_DUMB_PEAK_KMH = 1.5    -- 前進／後退推力在這個車速歸零（MDADDynamics.summonPushAccel 的 vCap）
+TUNE.SUMMON_PUSH_OVER_KMH = 0.5    -- 召喚推力在「目標＋這個」歸零（MDADDynamics.summonPushAccel 的 vCap；前進／後退＝1.5）
 TUNE.SUMMON_DUMB_MAX_M = 12        -- 前進／後退單次最多（走滿＝ARRIVED）
 TUNE.SUMMON_DUMB_CLEAR_M = 1       -- 倒車探測：後保桿往後這麼遠（前進用 probeNear：車身＋車頭前 1m）
 TUNE.SUMMON_DUMB_PROBE_MS = 250
@@ -18218,12 +18218,13 @@ function Drive.summonZombieCap(s, targetSpeed, now)
 end
 
 -- 縱向推力（沿車身中線、外力大小；MDADDynamics.summonPushAccel 的 m/s² 換算同 Drive.visAssistForce）。v 可負＝離目標更遠。
+-- 推力在目標＋SUMMON_PUSH_OVER_KMH 歸零：不帶時要到目標＋4 km/h（E2E adsum-1028-c-s5 500ms 取樣 12.5 km/h，限速 10）。
 function Drive.summonPush(s, speedKmh, targetSpeed, mult)
     if not finite(targetSpeed) then return 0 end
     local vTgt = targetSpeed
     if vTgt > s.maxSpeed then vTgt = s.maxSpeed end
     local vp = s.vehicleProfile
-    local a = MDADDynamics.summonPushAccel(speedKmh, vTgt, vp and vp.wheelFriction)
+    local a = MDADDynamics.summonPushAccel(speedKmh, vTgt, vp and vp.wheelFriction, vTgt + TUNE.SUMMON_PUSH_OVER_KMH)
     s.summonAccel = a
     if a <= 0 then return 0 end
     local mass = s.runtimeMass
@@ -18725,7 +18726,7 @@ function Drive.summonDumbStep(player, sm, now)
         sm.stallSince = 0
     end
     local a = MDADDynamics.summonPushAccel(along, TUNE.SUMMON_DUMB_KMH, sm.vehicleProfile.wheelFriction,
-        TUNE.SUMMON_DUMB_PEAK_KMH)
+        TUNE.SUMMON_DUMB_KMH + TUNE.SUMMON_PUSH_OVER_KMH)
     if a > 0 then
         local mult = getGameTime():getMultiplier()
         if mult < MULT_MIN then mult = MULT_MIN elseif mult > MULT_MAX then mult = MULT_MAX end
