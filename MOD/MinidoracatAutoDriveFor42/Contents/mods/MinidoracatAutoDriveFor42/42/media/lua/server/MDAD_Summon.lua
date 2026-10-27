@@ -282,6 +282,11 @@ function Summon.onCommand(player, args)
     if args.active == false then
         local code = args.code
         if type(code) ~= "string" or not MDAD.SUMMON_CODES[code] then code = "CANCELLED" end
+        -- 起步失敗的細分原因（客戶端 summonBegin；路線狀態或理由鍵）：只收短的英數字串、只印 log
+        local why = args.why
+        if type(why) == "string" and #why <= 64 and string.match(why, "^[%w_]+$") then
+            log("stop vid=" .. tostring(args.vehicleId) .. " by=" .. username .. " code=" .. code .. " why=" .. why)
+        end
         return Summon.finish(args.vehicleId, code, nil, player)
     end
     if sess.phase ~= "driving" then return false end

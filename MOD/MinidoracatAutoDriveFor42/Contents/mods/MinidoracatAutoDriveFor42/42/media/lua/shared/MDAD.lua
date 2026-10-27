@@ -47,7 +47,8 @@ MDAD.CMD_DIAG_UPLOAD = "DiagUpload"
 -- id, 車身中心 x, y, 速度 vx, vy, 前向 fx, fy, 半寬, 半長。
 MDAD.CMD_TRAFFIC = "Traffic"
 MDAD.RELAY_FIELDS = 9
--- 召喚（server/MDAD_Summon.lua 持有 session）：Summon＝client → server 心跳／停止 {vehicleId, active, code?}（只能續約或停止
+-- 召喚（server/MDAD_Summon.lua 持有 session）：Summon＝client → server 心跳／停止 {vehicleId, active, code?, why?}（why＝起步
+-- 失敗的細分原因，只印 log；只能續約或停止
 -- 自己的 session，**沒有從 client 開始召喚的指令**——開始只走伺服器 API MinidoracatAutoDriveAPI.startSummon）；
 -- SummonStart／SummonEnd＝server → client {vehicleId, to, mode, x, y, dir}（鍵同 startSummon opts）／{vehicleId, code, to}。
 MDAD.CMD_SUMMON = "Summon"
@@ -860,8 +861,8 @@ end
 --   伺服器／SP：stopSummon(vehicle, code)（code 預設 CANCELLED）→ boolean；summonInfo(vehicle) → {by, phase, startedMs,
 --     mode} 或 nil（phase：starting＝發動引擎／交權限中、driving＝召喚者的客戶端在開）。
 --   客戶端：canSummon(playerNum, vehicle?, opts?) → true｜false, 翻譯鍵（只用來灰掉介面，以伺服器為準）；
---     summonState(playerNum) → {vid, phase, code, dist, mode} 或 nil（phase：driving／stopping／ended，code 只在 ended 有值；
---     回的是本 MOD 的狀態表，唯讀）；
+--     summonState(playerNum) → {vid, phase, code, why, dist, mode} 或 nil（phase：driving／stopping／ended，code 只在 ended
+--     有值；why 只在起步就失敗時有值＝細分原因（主 MOD 的路線狀態或理由鍵），只供記錄、字彙不保證；回的是本 MOD 的狀態表，唯讀）；
 --     stopSummon(playerNum) → boolean；summonReach(playerNum) → 召喚者實際叫得動的半徑（格）＝min(summonRange(),
 --     本機保證載入距離)；summonReasonText(code) → 停止碼的顯示文字。
 --   兩端：summonRange() → 沙盒 SummonMaxDistance（格，0＝關閉）。
