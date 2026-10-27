@@ -34450,6 +34450,8 @@ function drive.scenarioSummonDumbPeak()
     checkEq(Dr.summonPush(s, over, T.SUMMON_MAX_KMH, 1), 0, "(PP) 到我這裡：超過限速＋0.5 不推")
     checkEq(Dr.summonPush(s, over, 30, 1), 0, "(PP) 目標速度高於限速時以限速為準")
     checkTrue(Dr.summonPush(s, T.SUMMON_MAX_KMH - 0.5, T.SUMMON_MAX_KMH, 1) > 0, "(PP) 低於限速照推")
+    checkEq(Dr.summonPush(s, 3 + T.SUMMON_PUSH_OVER_KMH + 0.1, 3, 1), 0,
+        "(PP) 低目標（彎道、到站減速）：上限是這一幀的目標＋0.5，不是限速＋0.5")
 end
 drive.scenarioSummonDumbPeak()
 
