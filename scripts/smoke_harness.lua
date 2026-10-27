@@ -34359,8 +34359,54 @@ function drive.scenarioSummonWhy()
         checkTrue(logHas(log, "code=NO_ROUTE why=" .. st), tag .. "伺服器 log 印出 why")
         checkEq(r and r.code, "NO_ROUTE", tag .. "停止碼仍是 NO_ROUTE")
     end
+    -- 先等路網（building），等的期間模組被拆：這一次是 driveGate 擋下（取路前），why 不能沿用上一次的 building
+    -- （第 3 輪審查 Codex；違規證明：summonBegin 不清 sm.why＝(WHY-stale) 紅）
+    local _, v = drive.sumFix({ px = 50, mp = true })
+    v._devices.MDADAutopilot._item = newItem(AUTO_T)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = true, SummonMaxDistance = 64 })
+    drive.nav.fromState = "building"
+    drive.sumStart()
+    for _ = 1, 4 do
+        nowMs = nowMs + 250
+        drive.sumTick()
+    end
+    checkTrue(MDAD.Drive.summons[0] ~= nil, "(WHY-stale) 先在等路網")
+    v._devices.MDADAutopilot._item = nil
+    for _ = 1, 8 do
+        nowMs = nowMs + 250
+        drive.sumTick()
+    end
+    local r = Api.summonState(0)
+    checkEq(r and r.code, "MODULE", "(WHY-stale) 停止碼 MODULE")
+    checkEq(r and r.why, DKEY.NEED_MODULE, "(WHY-stale) why 是這一次的理由鍵，不是上一次的 building")
 end
 drive.scenarioSummonWhy()
+
+-- 前進／後退的推力在 SUMMON_DUMB_PEAK_KMH 歸零（E2E tesla-sum-1027-sp-g 每 tick 最高 3.9／4.1 km/h）。
+-- 違規證明：summonDumbStep 不帶 vCap＝(DP) 紅。
+function drive.scenarioSummonDumbPeak()
+    scenario("召喚前進／後退：車速到 SUMMON_DUMB_PEAK_KMH 就不推，低於目標照推；倒車同")
+    local Dr = MDAD.Drive
+    local T = Dr.debugTune()
+    for _, dir in ipairs({ 1, -1 }) do
+        local tag = "(DP dir=" .. dir .. ") "
+        local _, v = drive.sumFix({ px = dir > 0 and -6 or 6, py = 4 })
+        clientFlag, serverFlag = false, false
+        drive.sumStart({ mode = "dumb", dir = dir })
+        for _, kmh in ipairs({ T.SUMMON_DUMB_PEAK_KMH + 0.1, 3 }) do
+            v._speed = kmh * dir
+            driveReset(v)
+            drive.sumTick()
+            checkEq(v._imp.total, 0, tag .. kmh .. " km/h：不推")
+        end
+        v._speed = 0.5 * dir
+        driveReset(v)
+        drive.sumTick()
+        checkEq(v._imp.total, 1, tag .. "0.5 km/h：照推")
+        Dr.summonStopLocal(0)
+    end
+end
+drive.scenarioSummonDumbPeak()
 
 -- =====================================================================
 -- 總結

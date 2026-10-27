@@ -1021,6 +1021,14 @@ do
     eq(D.summonPushAccel(0, 0), 0, "目標 0：0")
     eq(D.summonPushAccel(0, 1 / 0), 0, "目標 inf：0")
     near(D.summonPushAccel(0, 10, 0 / 0), D.summonPushAccel(0, 10), 1e-9, "抓地 NaN＝參考值")
+    -- vCap（前進／後退，E2E tesla-sum-1027-sp-g 每 tick 最高 3.9／4.1 km/h）：超過目標後前饋淡出、到 vCap 歸零
+    check(D.summonPushAccel(3, 1) > 0, "對照：沒有 vCap 時 3 km/h（目標 1）還在推")
+    near(D.summonPushAccel(1, 1, nil, 1.5), KR, 1e-9, "vCap：到目標前照舊（滾阻項全給）")
+    eq(D.summonPushAccel(1.5, 1, nil, 1.5), 0, "vCap：到 1.5 km/h 不推")
+    eq(D.summonPushAccel(3, 1, nil, 1.5), 0, "vCap：超過 1.5 km/h 不推")
+    check(D.summonPushAccel(1.25, 1, nil, 1.5) < KR, "vCap：目標與上限之間前饋已在淡出")
+    near(D.summonPushAccel(0.5, 1, nil, 1.5), D.summonPushAccel(0.5, 1), 1e-9, "vCap：低於目標時不影響")
+    near(D.summonPushAccel(3, 1, nil, 0.5), D.summonPushAccel(3, 1), 1e-9, "vCap 不大於目標：忽略")
 end
 
 print("  " .. (assertions - base) .. " 項斷言")

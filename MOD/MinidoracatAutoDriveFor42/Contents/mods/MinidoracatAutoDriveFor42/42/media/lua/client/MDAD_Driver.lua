@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1028b"
+Drive.REV = "1028c"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -17919,6 +17919,7 @@ end
 -- 伺服器 finish 收權限、熄火、回呼後送 SummonEnd（Drive.summonEndCmd）。本段只用 Drive／TUNE 欄位（主 chunk local 已滿）。
 TUNE.SUMMON_MAX_KMH = 10           -- 召喚限速（2026-10-27 主代理補定）
 TUNE.SUMMON_DUMB_KMH = 1           -- 前進／後退限速（實車手冊「基础召唤时，最高车速为 1 km/h」）
+TUNE.SUMMON_DUMB_PEAK_KMH = 1.5    -- 前進／後退推力在這個車速歸零（MDADDynamics.summonPushAccel 的 vCap）
 TUNE.SUMMON_DUMB_MAX_M = 12        -- 前進／後退單次最多（走滿＝ARRIVED）
 TUNE.SUMMON_DUMB_CLEAR_M = 1       -- 倒車探測：後保桿往後這麼遠（前進用 probeNear：車身＋車頭前 1m）
 TUNE.SUMMON_DUMB_PROBE_MS = 250
@@ -17935,7 +17936,8 @@ TUNE.SUMMON_ROUTE_WAIT_MS = 8000   -- 小地圖算路線（building／extracting
 TUNE.SUMMON_DIRECT_M = 40          -- 停車點在這麼近、直線預檢又過＝不用路網，兩點直線
 TUNE.SUMMON_SPOT_R = 20            -- 停車點搜尋半徑（格）
 TUNE.SUMMON_SPOT_MAX = 24          -- 停車點最多做幾次 E→T 直線預檢（姿態過了才算）
-TUNE.SUMMON_SPOT_POSE_MAX = 96     -- 停車姿態預檢上限（每次 3 個 probeNear；最壞 96×3＋24 條直線，M1 GameProfiler 量）
+TUNE.SUMMON_SPOT_POSE_MAX = 96     -- 停車姿態預檢上限（每次 1＋ceil(3/halfL) 個 probeNear：一般車 3、最短車身 7；
+                                   -- 每次 summonSpot 最壞 96 次姿態＋24 條直線，M1 GameProfiler 量）
 TUNE.SUMMON_TAIL_M = 20            -- 路網終點接到停車點的尾段上限（同 SNAP_MAX_M）
 TUNE.SUMMON_ROAD_GAP_M = 3         -- 到我這裡走路網：線尾截到離召喚者 halfL＋這個（Drive.summonShort）
 TUNE.SUMMON_END_EXT_M = 4          -- 線尾延過停車點這麼遠：Follower 在終點前 ARRIVE_M 內判到、車心停在停車點附近
@@ -18119,6 +18121,7 @@ end
 -- 每幀工作重試。其餘失敗立刻收：找不到路（noroad／failed／badargs…）＝NO_ROUTE；車身量不到、路線拿到了卻建不出剖面＝FAULT。
 Drive.SUMMON_ROUTE_PENDING = { idle = true, extracting = true, building = true }
 function Drive.summonBegin(player, sm, now)
+    sm.why = nil -- 這一次的取路原因；startSession 在取路前就被擋下時不沿用上一次的 building／extracting
     local reason = startSession(player, sm.playerNum, nil, sm)
     if reason == nil then
         if sm.job then
@@ -18279,7 +18282,7 @@ end
 
 -- 停車點（summon-design §3.3）：以 (cx,cy) 為中心由近到遠一圈一圈找地面層、室外、不在房間裡的格；到我這裡另外不停在
 -- 召喚者身上（≥ halfL＋1.5）、召喚者不在 E→P 帶內（免得被當行人停等）。T＝格心、P＝T 再往前 SUMMON_END_EXT_M（線尾）。
--- 先驗停車姿態（T 與 T 前 3m 的車身都要淨空，3 個 probeNear），過了才驗 E→T 直線（每 halfL 一個 probeNear）；|P−E| ≤ maxLeg。
+-- 先驗停車姿態（T 與 T 前 3m 的車身都要淨空，每 halfL 一個 probeNear），過了才驗 E→T 直線（同）；|P−E| ≤ maxLeg。
 -- 回 T, P（四個數）或 nil。召喚者在建築裡時，緊貼牆、車頭朝牆的候選很多，都在姿態那關被擋（E2E adsum-1028-b-s5diag：路網
 -- 線尾那次第 37 個候選才第一個可停）；姿態不佔直線預檢的額度，否則額度在牆邊用完、退回路網終點。
 -- ponytail: 姿態最多 SUMMON_SPOT_POSE_MAX 次、直線最多 SUMMON_SPOT_MAX 次、半徑 SUMMON_SPOT_R，找不到就停在路網終點
@@ -18721,7 +18724,7 @@ function Drive.summonDumbStep(player, sm, now)
     else
         sm.stallSince = 0
     end
-    local a = MDADDynamics.summonPushAccel(along, TUNE.SUMMON_DUMB_KMH, sm.vp.wheelFriction)
+    local a = MDADDynamics.summonPushAccel(along, TUNE.SUMMON_DUMB_KMH, sm.vp.wheelFriction, TUNE.SUMMON_DUMB_PEAK_KMH)
     if a > 0 then
         local mult = getGameTime():getMultiplier()
         if mult < MULT_MIN then mult = MULT_MIN elseif mult > MULT_MAX then mult = MULT_MAX end
