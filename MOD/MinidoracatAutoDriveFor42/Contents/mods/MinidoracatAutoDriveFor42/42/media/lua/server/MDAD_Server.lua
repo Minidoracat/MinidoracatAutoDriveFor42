@@ -51,7 +51,7 @@ end
 local function onDevice(player, args)
     if type(args) ~= "table" then return end
     if not MDAD.isFiniteInt(args.vehicleId) then return end
-    -- getVehicleById＝LuaManager.java:10247（原版伺服器端用例 VehicleCommands.lua:33）
+    -- getVehicleById＝LuaManager.java:10279（原版伺服器端用例 VehicleCommands.lua:33）
     local vehicle = getVehicleById(args.vehicleId)
     if not vehicle then return end
     local ok, reason = MDAD.applyDeviceChange(player, vehicle, args.kind, args.install, args.itemId)

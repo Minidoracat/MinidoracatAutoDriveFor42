@@ -282,7 +282,9 @@ local STEER_STRENGTH = 1.8     -- 主要調校旋鈕（過大＝甩尾、過小�
 local MASS_K = 0.00015         -- 每 (km/h)² 的質量係數
 local MASS_BASE = 0.7          -- 靜止基礎係數
 local SPEED_CAP_KMH = 60       -- 量級採計的速度上限（km/h）
-local IMPULSE_SCALE = 10       -- 質量→衝量的換算尺度（addImpulse 吃的是衝量不是力）
+-- 質量→施力的換算尺度。addImpulse 名為衝量，引擎實為下一個 0.01 秒物理子步的 applyCentralForce＋applyTorque
+-- （BaseVehicle.java:3351-3359），Δv 隨幀率變——所以施力都乘 mult/MULT_NORM 正規化
+local IMPULSE_SCALE = 10
 local MULT_NORM = 0.8          -- 60fps 的 getMultiplier 基準
 
 -- 刻意不加 downforce：addImpulse 只有一組向量，impulse 若帶垂直分量，
