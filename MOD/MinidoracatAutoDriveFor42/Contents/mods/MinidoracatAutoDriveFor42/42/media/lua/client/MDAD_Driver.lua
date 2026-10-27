@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1028a"
+Drive.REV = "1028b"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -17934,7 +17934,8 @@ TUNE.SUMMON_STILL_KMH = 0.3
 TUNE.SUMMON_ROUTE_WAIT_MS = 8000   -- 小地圖算路線（building／extracting）最多等這麼久，否則 NO_ROUTE
 TUNE.SUMMON_DIRECT_M = 40          -- 停車點在這麼近、直線預檢又過＝不用路網，兩點直線
 TUNE.SUMMON_SPOT_R = 20            -- 停車點搜尋半徑（格）
-TUNE.SUMMON_SPOT_MAX = 24          -- 停車點最多做幾次預檢
+TUNE.SUMMON_SPOT_MAX = 24          -- 停車點最多做幾次 E→T 直線預檢（姿態過了才算）
+TUNE.SUMMON_SPOT_POSE_MAX = 96     -- 停車姿態預檢上限（每次 3 個 probeNear；最壞 96×3＋24 條直線，M1 GameProfiler 量）
 TUNE.SUMMON_TAIL_M = 20            -- 路網終點接到停車點的尾段上限（同 SNAP_MAX_M）
 TUNE.SUMMON_ROAD_GAP_M = 3         -- 到我這裡走路網：線尾截到離召喚者 halfL＋這個（Drive.summonShort）
 TUNE.SUMMON_END_EXT_M = 4          -- 線尾延過停車點這麼遠：Follower 在終點前 ARRIVE_M 內判到、車心停在停車點附近
@@ -18278,8 +18279,11 @@ end
 
 -- 停車點（summon-design §3.3）：以 (cx,cy) 為中心由近到遠一圈一圈找地面層、室外、不在房間裡的格；到我這裡另外不停在
 -- 召喚者身上（≥ halfL＋1.5）、召喚者不在 E→P 帶內（免得被當行人停等）。T＝格心、P＝T 再往前 SUMMON_END_EXT_M（線尾）。
--- E→T 直線預檢、T 與 T 前 3m 的車身都要淨空；|P−E| ≤ maxLeg。回 T, P（四個數）或 nil。
--- ponytail: 最多 SUMMON_SPOT_MAX 次預檢、半徑 SUMMON_SPOT_R，找不到就停在路網終點（spot=road）。
+-- 先驗停車姿態（T 與 T 前 3m 的車身都要淨空，3 個 probeNear），過了才驗 E→T 直線（每 halfL 一個 probeNear）；|P−E| ≤ maxLeg。
+-- 回 T, P（四個數）或 nil。召喚者在建築裡時，緊貼牆、車頭朝牆的候選很多，都在姿態那關被擋（E2E adsum-1028-b-s5diag：路網
+-- 線尾那次第 37 個候選才第一個可停）；姿態不佔直線預檢的額度，否則額度在牆邊用完、退回路網終點。
+-- ponytail: 姿態最多 SUMMON_SPOT_POSE_MAX 次、直線最多 SUMMON_SPOT_MAX 次、半徑 SUMMON_SPOT_R，找不到就停在路網終點
+-- （spot=road）；不繞牆或樹排（要繞得另做格子 A*）。
 function Drive.summonSpot(sm, vehicle, ex, ey, cx, cy, maxLeg)
     local cell = getCell()
     if not cell then return nil end
@@ -18289,7 +18293,7 @@ function Drive.summonSpot(sm, vehicle, ex, ey, cx, cy, maxLeg)
     local keep = sm.halfL + 1.5
     local band = sm.halfW + 1
     local gx0, gy0 = math.floor(cx), math.floor(cy)
-    local tries = 0
+    local tries, poses = 0, 0
     for r = 0, TUNE.SUMMON_SPOT_R do
         for gy = gy0 - r, gy0 + r do
             local edge = gy == gy0 - r or gy == gy0 + r
@@ -18323,12 +18327,13 @@ function Drive.summonSpot(sm, vehicle, ex, ey, cx, cy, maxLeg)
                         inBand = qx * qx + qy * qy < band * band
                     end
                     if not inBand and legX * legX + legY * legY <= maxLeg * maxLeg then
-                        tries = tries + 1
-                        if Drive.summonLineClear(sm, vehicle, ex, ey, tx, ty)
-                                and Drive.summonLineClear(sm, vehicle, tx, ty, tx + fx * 3, ty + fy * 3, true) then
-                            return tx, ty, pX, pY
+                        poses = poses + 1
+                        if Drive.summonLineClear(sm, vehicle, tx, ty, tx + fx * 3, ty + fy * 3, true) then
+                            tries = tries + 1
+                            if Drive.summonLineClear(sm, vehicle, ex, ey, tx, ty) then return tx, ty, pX, pY end
+                            if tries >= TUNE.SUMMON_SPOT_MAX then return nil end
                         end
-                        if tries >= TUNE.SUMMON_SPOT_MAX then return nil end
+                        if poses >= TUNE.SUMMON_SPOT_POSE_MAX then return nil end
                     end
                 end
                 gx = gx + ((edge or gx == gx0 + r) and 1 or 2 * r) -- 只走這一圈的邊

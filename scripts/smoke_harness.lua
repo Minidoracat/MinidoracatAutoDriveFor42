@@ -34294,6 +34294,31 @@ function drive.scenarioSummonSpotStrict()
 end
 drive.scenarioSummonSpotStrict()
 
+-- 召喚者在建築裡（E2E adsum-1028-a-s5／-b-s5diag）：牆邊候選車頭朝牆、都卡在停車姿態；姿態不佔直線預檢額度，牆外 6m
+-- 以上仍找得到可停的點。違規證明：改回「先驗直線、每個候選都算一次額度」＝(SB) 紅（額度在牆邊用完、退回路網）。
+function drive.scenarioSummonSpotBudget()
+    scenario("召喚停車點：召喚者在建築裡、牆邊候選卡在停車姿態不佔直線額度，仍找到牆外可停的點")
+    local Dr = MDAD.Drive
+    drive.sumFix({ px = 33.5, py = 0.5 })
+    for y = -12, 12 do
+        drive.putSolid(32, y, "harness_summon_wall")
+        for x = 33, 40 do
+            local sq = drive.world[x * 100000 + y]
+            if sq then sq._indoor = true end
+        end
+    end
+    clientFlag, serverFlag = false, false
+    drive.sumStart()
+    local s = Dr.debugSession(0)
+    local sm = s and s.summon
+    checkTrue(sm ~= nil and sm.parkX ~= nil, "(SB) 找到牆外的停車點")
+    checkEq(drive.nav.fromCalls, 0, "(SB) 直線模式，沒退回路網")
+    checkTrue(sm ~= nil and sm.parkX ~= nil and sm.parkX <= 26,
+        "(SB) 停車姿態車頭前 3m＋車身淨空（離牆 >=6m），實得 x=" .. tostring(sm and sm.parkX))
+    Dr.summonStopLocal(0)
+end
+drive.scenarioSummonSpotBudget()
+
 -- 到我這裡走路網的線尾截到離召喚者 halfL＋SUMMON_ROAD_GAP_M（E2E adsum-1027-a-s3）。違規證明：summonShort 原樣回＝(SS) 紅。
 function drive.scenarioSummonShort()
     scenario("召喚路網線尾截短：截在離召喚者 keep 處、段屬性對齊、原表不變、本來就夠遠原樣回")
