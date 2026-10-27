@@ -51,7 +51,7 @@ end
 local function onDevice(player, args)
     if type(args) ~= "table" then return end
     if not MDAD.isFiniteInt(args.vehicleId) then return end
-    -- getVehicleById＝LuaManager.java:10247（原版伺服器端用例 VehicleCommands.lua:33）
+    -- getVehicleById＝LuaManager.java:10279（原版伺服器端用例 VehicleCommands.lua:33）
     local vehicle = getVehicleById(args.vehicleId)
     if not vehicle then return end
     local ok, reason = MDAD.applyDeviceChange(player, vehicle, args.kind, args.install, args.itemId)
@@ -138,6 +138,12 @@ HANDLERS[MDAD.CMD_DEVICE] = onDevice
 HANDLERS[MDAD.CMD_USAGE] = onUsage
 HANDLERS[MDAD.CMD_NAV_USAGE] = onNavUsage
 HANDLERS[MDAD.CMD_RECIPE_RESCAN] = onRecipeRescan
+-- 召喚的心跳／停止：實作在 MDAD_Summon.lua（載入晚於本檔，執行期才取用）。節流與 active=false 的即時放行照 Usage。
+HANDLERS[MDAD.CMD_SUMMON] = function(player, args)
+    local sm = MDAD.Summon
+    if type(sm) ~= "table" then return false end
+    return sm.onCommand(player, args)
+end
 -- 診斷上傳：實作在 MDAD_UploadServer.lua（同為 server 檔，載入晚於本檔，執行期才取用）。
 -- 客戶端節奏 ≥500ms／塊，但到達時刻會擠在一起，節流見 onClientCommand 的上傳漏桶。
 HANDLERS[MDAD.CMD_DIAG_UPLOAD] = function(player, args)
@@ -168,7 +174,7 @@ local function onClientCommand(module, command, player, args)
         end
         lastSweepMs = now
     end
-    local usageCommand = command == MDAD.CMD_USAGE or command == MDAD.CMD_NAV_USAGE
+    local usageCommand = command == MDAD.CMD_USAGE or command == MDAD.CMD_NAV_USAGE or command == MDAD.CMD_SUMMON
     -- active=false 必須即時處理；只有真的清到 actor 自己的 ACTIVE entry，才一併清
     -- 該 command timestamp，讓快速 off→on 不被舊 heartbeat 吃掉；空 off 不能繞 flood gate。
     local bypass = usageCommand and type(args) == "table" and args.active == false

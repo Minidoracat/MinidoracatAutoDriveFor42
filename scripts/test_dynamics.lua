@@ -1007,6 +1007,31 @@ do
     near(e, 189.5, 1e-9, "可負擔本來就高於下限時不受影響（2＋4×375/8＝189.5）")
 end
 
+scenario("summonPushAccel：召喚縱向推力（低於目標 >0、到了只剩滾阻項、上限 A_MAX、fail-closed）")
+do
+    local KR = D.SUMMON_K_R * D.SUMMON_FRICTION_REF
+    check(D.summonPushAccel(0, 10) > 0, "低於目標速度：推")
+    check(D.summonPushAccel(5, 10) > D.summonPushAccel(8, 10), "離目標越遠推越大")
+    check(D.summonPushAccel(10, 10) <= KR + 1e-9, "到目標速度：只剩滾阻項")
+    eq(D.summonPushAccel(20, 10), 0, "超速：不推（不倒推）")
+    check(D.summonPushAccel(-50, 10) <= D.SUMMON_A_MAX, "上限 A_MAX")
+    eq(D.summonPushAccel(-50, 10), D.SUMMON_A_MAX, "遠低於目標：夾到 A_MAX")
+    check(D.summonPushAccel(10, 10, 4) > D.summonPushAccel(10, 10, 1), "抓地大（滾阻／輪拖大）的車多補一點")
+    eq(D.summonPushAccel(0 / 0, 10), 0, "車速 NaN：0")
+    eq(D.summonPushAccel(0, 0), 0, "目標 0：0")
+    eq(D.summonPushAccel(0, 1 / 0), 0, "目標 inf：0")
+    near(D.summonPushAccel(0, 10, 0 / 0), D.summonPushAccel(0, 10), 1e-9, "抓地 NaN＝參考值")
+    -- vCap（前進／後退，E2E tesla-sum-1027-sp-g 每 tick 最高 3.9／4.1 km/h）：超過目標後前饋淡出、到 vCap 歸零
+    check(D.summonPushAccel(3, 1) > 0, "對照：沒有 vCap 時 3 km/h（目標 1）還在推")
+    near(D.summonPushAccel(1, 1, nil, 1.5), KR, 1e-9, "vCap：到目標前照舊（滾阻項全給）")
+    eq(D.summonPushAccel(1.5, 1, nil, 1.5), 0, "vCap：到 1.5 km/h 不推")
+    eq(D.summonPushAccel(3, 1, nil, 1.5), 0, "vCap：超過 1.5 km/h 不推")
+    near(D.summonPushAccel(1.25, 1, nil, 1.5), 0.5 * KR + D.SUMMON_GAIN * (1 - 1.25), 1e-9,
+        "vCap：目標與上限正中間，前饋剛好剩一半（線性淡出）")
+    near(D.summonPushAccel(0.5, 1, nil, 1.5), D.summonPushAccel(0.5, 1), 1e-9, "vCap：低於目標時不影響")
+    near(D.summonPushAccel(3, 1, nil, 0.5), D.summonPushAccel(3, 1), 1e-9, "vCap 不大於目標：忽略")
+end
+
 print("  " .. (assertions - base) .. " 項斷言")
 print()
 print("情境 " .. scenarios .. " 個、斷言 " .. assertions .. " 項")

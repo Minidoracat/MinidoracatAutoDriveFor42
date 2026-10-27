@@ -52,5 +52,7 @@
     "Sandbox_MinidoracatAutoDriveDiagnosticsUpload": "이 서버에서 자율주행 진단 데이터 수집",
     "Sandbox_MinidoracatAutoDriveDiagnosticsUpload_tooltip": "활성화하면 플레이어의 게임이 최근 몇 초간의 자율주행 데이터를 메모리에 보관하다가 문제가 생겼을 때만(끼임, 충돌, 긴급 제동, 문제 후 제어권 반환) 짧은 클립을 서버로 보내며, 주행마다 작은 요약도 보냅니다.\n플레이어 디스크에는 아무것도 기록하지 않습니다. 파일은 서버의 Zomboid/Lua/MinidoracatAutoDrive/Uploads/ 아래 플레이어별 폴더에 저장되며, index.txt에 모든 클립이 나열됩니다.\n플레이어는 MOD 설정에서 참여를 거부할 수 있습니다. 기본값은 비활성화입니다.\n관리자가 적용을 누르는 즉시 반영됩니다(다음 자율주행 시작부터).",
     "Sandbox_MinidoracatAutoDriveDiagnosticsUploadMaxMB": "진단 저장 용량 상한(MB)",
-    "Sandbox_MinidoracatAutoDriveDiagnosticsUploadMaxMB_tooltip": "업로드된 진단 클립에 서버가 쓸 수 있는 총 디스크 공간입니다. 가득 차면 서버에서 가장 오래된 클립부터 지웁니다. 플레이어당 최대 32개 클립을 보관합니다.\n주행 요약은 별도의 고정 8 MB 순환 공간을 사용합니다.\n서버 디스크의 여유 공간에 맞춰 설정하세요."
+    "Sandbox_MinidoracatAutoDriveDiagnosticsUploadMaxMB_tooltip": "업로드된 진단 클립에 서버가 쓸 수 있는 총 디스크 공간입니다. 가득 차면 서버에서 가장 오래된 클립부터 지웁니다. 플레이어당 최대 32개 클립을 보관합니다.\n주행 요약은 별도의 고정 8 MB 순환 공간을 사용합니다.\n서버 디스크의 여유 공간에 맞춰 설정하세요.",
+    "Sandbox_MinidoracatAutoDriveSummonMaxDistance": "호출 거리(칸)",
+    "Sandbox_MinidoracatAutoDriveSummonMaxDistance_tooltip": "자율주행 모듈이 설치된 차량을 호환 모드의 휴대폰 앱으로 불러올 수 있는 거리(칸)입니다. 0이면 호출을 끕니다.\n게임은 플레이어 주변 약 64칸 안에서만 차량 물리를 계산하므로(1920x1080보다 작은 화면에서는 더 짧음) 실제 범위는 둘 중 작은 값입니다.\n기본값 64."
 }

@@ -1428,6 +1428,7 @@ require "MDAD_Distributions"
 -- MDAD_Server 開頭是 `if isClient() then return end`：要在 clientFlag=false 時載入
 require "MDAD_Server"
 require "MDAD_Consumption"
+require "MDAD_Summon" -- 召喚的伺服器權威（同 MDAD_Server：clientFlag=false 時載入；serverFlag=true＝掛上 vehicle/crash 代套用）
 -- MDAD_Client 在載入期就會呼叫一次 registerNavGate()。此時 MinidoracatMiniMapAPI
 -- 刻意不存在，好讓「主 MOD 未安裝」這條路徑真的被走到；診斷訊息留給情境去斷言。
 local clientLoadLog = capturePrint(function() require "MDAD_Client" end)
@@ -33158,6 +33159,1306 @@ scenarioReasonKeys()
     check(vm == 90 and type(sand) == "number" and sand > 0 and target == nil,
         "(speed-info idle) 未自駕時仍回車輛極速與沙盒上限")
 end)()
+
+-- =====================================================================
+-- 召喚（summon-design §10.1、build-1027：mode come／target／dumb）
+-- =====================================================================
+-- getPlayerByOnlineID＝LuaManager.java:3940：伺服器以 onlineID 反查在線玩家（drive.online）
+function getPlayerByOnlineID(id)
+    for i = 1, #drive.online do
+        if drive.online[i]:getOnlineID() == id then return drive.online[i] end
+    end
+    return nil
+end
+-- 共用 fixture：召喚者 drive.sp（徒步、有座標）、車 drive.sv（補召喚用的 BaseVehicle 方法：_npid＝getNetPlayerId、
+-- authorizationServerOnSeat 只在 -1 時給、authorizationChanged、isRemovedFromWorld、hasPassenger、tryStartEngine、shutOff、
+-- crash）、草地世界（室外、不在房間）、nav API v13（requestRouteFrom／requestDetourFrom 由 drive.nav.from* 控制）。
+-- opts：px／py 召喚者位置（車在原點、車頭 +x）、mp＝多人（client／server 旗標在送收時切換）、range、engine=false＝熄火。
+function drive.sumFix(opts)
+    opts = opts or {}
+    clientFlag, serverFlag = false, true
+    MDAD.Drive.stop(0, nil)
+    MDAD.Summon.finishAll("CANCELLED")
+    MDAD.Drive.summonReset()
+    drive.sumMP, drive.sumUp = opts.mp == true, {}
+    clientFlag, serverFlag = drive.sumMP, false
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 120, RightLaneBias = 0,
+        SummonMaxDistance = opts.range or 64 })
+    drive.fillWorld(-30, 90, -30, 30)
+    for _, sq in pairs(drive.world) do
+        sq.isOutside = function() return sq._indoor ~= true end
+        sq.getRoom = function() if sq._indoor then return {} end return nil end
+    end
+    drive.cellVehicles = {}
+    drive.cell.getChunkMap = function() return { getWidthInTiles = function() return drive.cmW or 152 end } end
+    local p = drive.sp
+    if not p then
+        p = newPlayer({ num = 0, username = "summoner", onlineId = 1000 })
+        p.getX = function(self) return self._x end
+        p.getY = function(self) return self._y end
+        drive.sp = p
+    end
+    p._x, p._y, p._vehicle, p._dead, p._local = opts.px or 15, opts.py or 0, nil, false, true
+    players[0], players[1] = p, nil
+    activePlayers = 1
+    drive.online = { p }
+    local v = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }), engineRunning = opts.engine ~= false,
+        mass = 1200, speed = 0, x = 0, y = 0 })
+    v._npid, v._auth, v._started, v._shut, v._crash = -1, 0, 0, 0, 0
+    function v:hasPassenger() return self._pass == true or self._driver ~= nil end
+    function v:isRemovedFromWorld() return self._removed == true end
+    function v:getNetPlayerId() return self._npid end
+    function v:authorizationServerOnSeat(pl, enter)
+        self._auth = self._auth + 1
+        if enter and self._npid == -1 then self._npid = pl:getOnlineID() end
+    end
+    function v:authorizationChanged(chr)
+        self._auth = self._auth + 1
+        self._npid = chr and chr:getOnlineID() or -1
+    end
+    function v:getEngineState() return self._engine and "Running" or (self._estate or "Idle") end
+    function v:tryStartEngine(haveKey)
+        self._started, self._haveKey = self._started + 1, haveKey
+    end
+    function v:shutOff()
+        self._shut, self._engine = self._shut + 1, false
+    end
+    function v:getVehicleTowing() return self._towing end
+    function v:getVehicleTowedBy() return nil end
+    function v:crash(a, front)
+        self._crash, self._crashArgs = self._crash + 1, { a, front }
+    end
+    setHeading(v, 0)
+    drive.sv = v
+    installNavApi(13)
+    drive.sumApi()
+    resetStats()
+    driveReset(v)
+    return p, v
+end
+
+-- 目前的假 nav API 升成 v13：requestRouteFrom／requestDetourFrom／commitDetour（requestRoute 等照舊）
+function drive.sumApi()
+    local nav = drive.nav
+    nav.fromCalls, nav.fromRoute, nav.fromState, nav.fromTargets = 0, nil, "ok", {}
+    nav.detourFromCalls, nav.commitCalls = 0, 0
+    MinidoracatMiniMapAPI.navApiVersion = 13
+    MinidoracatMiniMapAPI.requestRouteFrom = function(pn, fx, fy, tx, ty)
+        nav.fromCalls = nav.fromCalls + 1
+        nav.fromTargets[#nav.fromTargets + 1] = tx .. "," .. ty
+        return nav.fromRoute, nav.fromState
+    end
+    MinidoracatMiniMapAPI.requestDetourFrom = function(pn, fx, fy, tx, ty, ax, ay, r, more, maxSnap)
+        nav.detourFromCalls = nav.detourFromCalls + 1
+        nav.lastDetourFrom = { fx = fx, fy = fy, tx = tx, ty = ty, ax = ax, ay = ay }
+        return nav.detour, nav.detourState or "ok"
+    end
+    MinidoracatMiniMapAPI.commitDetour = function()
+        nav.commitCalls = nav.commitCalls + 1
+        return true, "ok"
+    end
+end
+
+-- 伺服器那一側跑一次輪詢（MP 時換成伺服器旗標），再把伺服器送給客戶端的 SummonStart／SummonEnd 交給客戶端
+function drive.sumServer(ms)
+    nowMs = nowMs + (ms or 250)
+    clientFlag, serverFlag = false, drive.sumMP
+    MDAD.Summon.tick()
+    clientFlag, serverFlag = drive.sumMP, false
+    drive.sumDeliver()
+end
+
+-- MP：客戶端送出的 Summon 交給伺服器、伺服器送出的交給客戶端（各在自己的旗標下），直到兩邊都沒有新的
+function drive.sumDeliver()
+    if not drive.sumMP then return end
+    for _ = 1, 4 do
+        local up, down = {}, {}
+        for i = 1, #sentClient do up[#up + 1] = sentClient[i] end
+        for i = 1, #sentServer do down[#down + 1] = sentServer[i] end
+        clearList(sentClient)
+        clearList(sentServer)
+        if #up == 0 and #down == 0 then return end
+        drive.sumUp = drive.sumUp or {}
+        clientFlag, serverFlag = false, true
+        for i = 1, #up do
+            local c = up[i]
+            drive.sumUp[#drive.sumUp + 1] = c
+            fire("OnClientCommand", c.module, c.command, c.player, c.args)
+        end
+        clientFlag, serverFlag = true, false
+        for i = 1, #down do
+            local c = down[i]
+            fire("OnServerCommand", c.module, c.command, c.args)
+        end
+    end
+end
+
+-- 召喚者那一幀（OnPlayerUpdate）＋送收
+function drive.sumTick(n)
+    for _ = 1, n or 1 do
+        driveTick(drive.sp, drive.sv)
+        drive.sumDeliver()
+    end
+end
+
+-- 一輪完整掃描（同 drive.scanRound，換成召喚者與召喚車）
+function drive.sumRound()
+    nowMs = nowMs + 300
+    for _ = 1, 28 do drive.sumTick() end
+    for _ = 1, 128 do
+        local sc = MDAD.Drive.debugSession(0)
+        sc = sc ~= nil and sc.sensor or nil
+        if sc == nil or sc.scanning ~= true then break end
+        drive.sumTick()
+    end
+end
+
+-- 開始一趟召喚到客戶端接上（SP：伺服器輪詢直接呼叫 Driver；MP：SummonStart 經假網路），回 startSummon 的兩個回傳
+function drive.sumStart(opts)
+    clientFlag, serverFlag = false, drive.sumMP
+    local ok, why = MinidoracatAutoDriveAPI.startSummon(drive.sp, drive.sv, opts)
+    clientFlag, serverFlag = drive.sumMP, false
+    if ok then drive.sumServer() end
+    return ok, why
+end
+
+function drive.scenarioSummonGates()
+    scenario("召喚起步閘門（G1–G8）：伺服器 startSummon 的固定檢查順序、拒絕時零呼叫、等路線、遠端玩家")
+    local Api, Dr = MinidoracatAutoDriveAPI, MDAD.Drive
+    checkEq(Api.summonApiVersion, 1, "summonApiVersion＝1（三種召喚一起上）")
+    checkEq(Api.summonRange(), 64, "沙盒預設 64 格")
+    -- G2：召喚者坐在車上
+    local p, v = drive.sumFix()
+    local other = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }) })
+    p._vehicle = other
+    local ok, why = drive.sumStart({ startEngine = true })
+    checkFalse(ok, "(G2) 召喚者坐在車上：拒絕")
+    checkEq(why, "UI_MinidoracatAutoDrive_SummonOnFoot", "(G2) 原因 SummonOnFoot")
+    checkEq(v._started + v._auth + v._imp.total, 0, "(G2) 車上零呼叫（不發動、不給權限、不推）")
+    p._vehicle = nil
+    -- G3：駕駛座有人
+    v._driver = newPlayer({ num = 5, username = "someone" })
+    ok, why = drive.sumStart({ startEngine = true })
+    checkEq(why, "UI_MinidoracatAutoDrive_SummonOccupied", "(G3) 駕駛座有人：SummonOccupied")
+    checkEq(v._started + v._auth + v._imp.total, 0, "(G3) 車上零呼叫")
+    v._driver = nil
+    -- G4：熄火（不代發動）、電瓶沒電、缺模組——鍵和一般自駕完全相同
+    v._engine = false
+    ok, why = drive.sumStart()
+    checkEq(why, DKEY.ENGINE, "(G4) 熄火又沒要求代發動：EngineOff（同一般自駕）")
+    v._engine = true
+    v._part._item._uses = 0
+    ok, why = drive.sumStart()
+    checkEq(why, DKEY.ENGINE, "(G4) 電瓶沒電：EngineOff")
+    v._part._item._uses = 0.8
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = true, SummonMaxDistance = 64 })
+    ok, why = drive.sumStart()
+    checkEq(why, DKEY.NEED_MODULE, "(G4) 缺自駕模組：NeedModule")
+    setSandbox({ NeedItemForNav = true, NeedItemForAutoDrive = false, SummonMaxDistance = 64 })
+    ok, why = drive.sumStart()
+    checkEq(why, "UI_MinidoracatAutoDrive_NeedGPS", "(G4) 要導航裝置、召喚者與車上都沒有：NeedGPS")
+    ok, why = drive.sumStart({ mode = "dumb", dir = 1 })
+    checkTrue(ok, "(G4) 前進／後退不看導航裝置")
+    checkEq(v._started + v._auth, 0, "(G4) 被拒的各次都沒碰車")
+    -- G5：超過距離
+    p, v = drive.sumFix({ px = 70 })
+    ok, why = drive.sumStart()
+    checkEq(why, "UI_MinidoracatAutoDrive_SummonTooFar", "(G5) 70 格外：SummonTooFar")
+    checkEq(drive.nav.fromCalls, 0, "(G5) 沒問路線")
+    p._x = 10
+    ok, why = drive.sumStart({ mode = "target", x = 0, y = 80 })
+    checkEq(why, "UI_MinidoracatAutoDrive_SummonTooFar", "(G5) 指定地點離召喚者太遠：SummonTooFar")
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, SummonMaxDistance = 0 })
+    ok, why = drive.sumStart()
+    checkEq(why, "UI_MinidoracatAutoDrive_SummonOff", "(G5) 沙盒 0＝關閉")
+    ok, why = Api.startSummon(p, v, { mode = "dumb" })
+    checkEq(why, MDAD.KEY_SUMMON_INVALID, "(①) 前進／後退沒給 dir：格式錯")
+    ok, why = Api.startSummon(p, v, { mode = "target", x = 0 / 0, y = 1 })
+    checkEq(why, MDAD.KEY_SUMMON_INVALID, "(①) 指定地點 NaN：格式錯")
+    -- G1：正常起步（熄火＋代發動）
+    p, v = drive.sumFix({ px = 15, engine = false })
+    clientFlag, serverFlag = false, false
+    ok, why = Api.startSummon(p, v, { startEngine = true })
+    checkTrue(ok, "(G1) 站在車外 15m、車況齊全：startSummon 成功")
+    checkEq(v._started, 1, "(G1) 代為發動一次")
+    checkTrue(v._haveKey == true, "(G1) tryStartEngine(true)：沒有駕駛時 haveKey=false 會 NPE")
+    checkEq(Api.summonInfo(v) and Api.summonInfo(v).phase, "starting", "(G1) 先進 starting")
+    checkFalse(Dr.isActive(0), "(G1) 引擎還沒 Running：客戶端還沒開")
+    drive.sumServer()
+    checkFalse(Dr.isActive(0), "(G1) 引擎還在發動：不交接")
+    v._engine = true
+    drive.sumServer()
+    checkEq(Api.summonInfo(v) and Api.summonInfo(v).phase, "driving", "(G1) Running 後進 driving")
+    checkTrue(Dr.isActive(0), "(G1) 客戶端接上 session")
+    local s = Dr.debugSession(0)
+    checkTrue(s ~= nil and s.summon ~= nil and s.vehicle == v, "(G1) s.summon 有值、開的是召喚車")
+    checkEq(v._imp.total, 0, "(G1) 準備期間 imp.total==0")
+    checkEq(v._auth, 0, "(L9) 單人零次權限呼叫")
+    checkEq(s and s.maxSpeed, 10, "限速 TUNE.SUMMON_MAX_KMH＝10")
+    checkNil(s and s.usageArgs, "召喚不送 Usage（計費走 Summon 心跳）")
+    -- G8：遠端玩家觸發 OnPlayerUpdate：零呼叫
+    local remote = newPlayer({ num = 3, username = "far", remote = true })
+    driveReset(v)
+    driveTick(remote, v)
+    checkEq(v._imp.total + drive.calls.setRegulator, 0, "(G8) 遠端玩家的更新對車零呼叫")
+    -- G6：已經在自駕中（同一個 playerNum 正開著另一台車的一般自駕）：客戶端拒絕 BUSY，原 session 不變
+    p, v = drive.sumFix()
+    installNavApi(2) -- armDrive 的路線是 v2 形狀（沒有 segSurface）；開起來後再升 v13
+    checkTrue(armDrive(), "(G6) 一般自駕開起來")
+    drive.sumApi()
+    local before = Dr.debugSession(0)
+    clientFlag, serverFlag = false, false
+    ok = Api.startSummon(p, v)
+    checkTrue(ok, "(G6) 伺服器不知道客戶端在自駕：照常起步")
+    drive.sumServer()
+    checkTrue(Dr.debugSession(0) == before and before.summon == nil, "(G6) 原 session 不變")
+    checkEq(Api.summonState(0) and Api.summonState(0).code, "BUSY", "(G6) 客戶端回 BUSY")
+    checkNil(Api.summonInfo(v), "(G6) 伺服器收掉這趟召喚")
+    checkEq(v._imp.total, 0, "(G6) 召喚車沒被推")
+    MDAD.Drive.stop(0, nil)
+    -- G7：等不到路線（50m 走路網，主 MOD 一直 building）：SUMMON_ROUTE_WAIT_MS 後 NO_ROUTE，全程不推
+    p, v = drive.sumFix({ px = 50 })
+    drive.nav.fromState = "building"
+    ok = drive.sumStart()
+    checkTrue(ok, "(G7) 起步成功")
+    checkFalse(Dr.isActive(0), "(G7) 路線還在算：還沒有 session")
+    checkTrue(Dr.summons[0] ~= nil and Dr.summonN > 0, "(G7) 掛成等路線的每幀工作")
+    for _ = 1, 40 do
+        nowMs = nowMs + 250
+        drive.sumTick()
+    end
+    checkTrue(drive.nav.fromCalls > 1, "(G7) 等待中照 250ms 重問路線")
+    checkEq(v._imp.total, 0, "(G7) 全程 imp.total==0")
+    checkNil(Dr.summons[0], "(G7) 逾時放棄")
+    drive.sumServer()
+    local st = Api.summonState(0)
+    checkEq(st and st.code, "NO_ROUTE", "(G7) 停止碼 NO_ROUTE")
+    checkEq(st and st.phase, "ended", "(G7) 伺服器收尾後 phase=ended")
+    checkNil(Api.summonInfo(v), "(G7) 伺服器 session 清掉")
+    checkEq(Dr.summonN, 0, "(G7) 沒有殘留的每幀工作")
+end
+drive.scenarioSummonGates()
+
+function drive.scenarioSummonLease()
+    scenario("召喚伺服器租約（L1–L9）：交權限、拒絕、續約與到期、只有持有者能停、B 上車交給 B、偽造封包、計費、一車一約、撞擊代套用")
+    local Api, Sm = MinidoracatAutoDriveAPI, MDAD.Summon
+    -- L1：多人交權限＋SummonStart
+    local p, v = drive.sumFix({ mp = true })
+    local ok = drive.sumStart()
+    checkTrue(ok, "(L1) 多人起步成功")
+    checkEq(v._npid, 1000, "(L1) 權限交給召喚者（onlineID）")
+    checkTrue(MDAD.Drive.isActive(0), "(L1) SummonStart 送到、客戶端接上")
+    -- L7：計費
+    clientFlag, serverFlag = false, true
+    checkTrue(MDAD.isAutoUsageActive(v), "(L7) 召喚中 isAutoUsageActive＝true（沒有駕駛也計費）")
+    local pv = {}
+    Sm.collect(pv)
+    checkTrue(pv[v:getId()] == v, "(L7) Consumption 收得到召喚車")
+    -- L8：一車一約、一人一台
+    local ok2, why2 = Api.startSummon(p, v)
+    checkEq(why2, "UI_MinidoracatAutoDrive_SummonBusy", "(L8) 同一台車再叫一次：SummonBusy")
+    -- L6：偽造封包——格式錯、別人的車號、別人的身分都不動
+    local liar = newPlayer({ num = 7, username = "liar", onlineId = 2000 })
+    fire("OnClientCommand", MOD_ID, MDAD.CMD_SUMMON, liar, { vehicleId = v:getId(), active = false, code = "ARRIVED" })
+    checkTrue(Api.summonInfo(v) ~= nil, "(L4) 非持有者送停止：不理")
+    fire("OnClientCommand", MOD_ID, MDAD.CMD_SUMMON, p, { vehicleId = "x", active = false })
+    fire("OnClientCommand", MOD_ID, MDAD.CMD_SUMMON, p, { vehicleId = 0 / 0, active = false })
+    fire("OnClientCommand", MOD_ID, MDAD.CMD_SUMMON, p, { vehicleId = v:getId(), active = "no" })
+    checkTrue(Api.summonInfo(v) ~= nil, "(L6) 格式錯的封包：不理")
+    -- 撞擊代套用：持有者送 vehicle/crash（沒有駕駛）才套用
+    fire("OnClientCommand", "vehicle", "crash", liar, { vehicle = v:getId(), amount = 5, front = true })
+    checkEq(v._crash, 0, "(crash) 非持有者送的 crash 不套用")
+    fire("OnClientCommand", "vehicle", "crash", p, { vehicle = v:getId(), amount = 0 / 0, front = true })
+    checkEq(v._crash, 0, "(crash) 數值不對不套用")
+    fire("OnClientCommand", "vehicle", "crash", p, { vehicle = v:getId(), amount = 5, front = true })
+    checkEq(v._crash, 1, "(crash) 持有者送的 crash 代為套用（原版要 isDriver，召喚車沒有駕駛＝零車損）")
+    -- L3：續約與到期
+    clientFlag, serverFlag = true, false
+    for _ = 1, 3 do
+        nowMs = nowMs + 5000
+        drive.sumTick()
+        drive.sumServer()
+    end
+    checkTrue(Api.summonInfo(v) ~= nil, "(L3) 每 5 秒心跳：租約一直在")
+    local beats = 0
+    for i = 1, #(drive.sumUp or {}) do
+        local c = drive.sumUp[i]
+        if c.command == MDAD.CMD_SUMMON and c.args.active == true then beats = beats + 1 end
+    end
+    checkTrue(beats >= 3, "(L3) 客戶端送了心跳 Summon{active=true}")
+    -- 客戶端不見了（不再跑幀、不送心跳）：TTL 後 TIMEOUT，權限回 -1
+    for _ = 1, 70 do drive.sumServer(250) end
+    checkNil(Api.summonInfo(v), "(L3) 15 秒沒心跳：租約到期")
+    checkEq(v._npid, -1, "(L3) 到期交還權限（authorizationChanged(nil)）")
+    clientFlag, serverFlag = false, true
+    checkFalse(MDAD.isAutoUsageActive(v), "(L7) 到期後不再計費")
+    -- L5：B 坐上駕駛座：權限直接交給 B
+    p, v = drive.sumFix({ mp = true })
+    drive.sumStart()
+    local b = newPlayer({ num = 6, username = "bee", onlineId = 3000 })
+    v._driver = b
+    drive.sumServer()
+    checkNil(Api.summonInfo(v), "(L5) 有人坐上駕駛座：收掉")
+    checkEq(v._npid, 3000, "(L5) 權限交給 B（不是只交還給伺服器）")
+    checkEq(Api.summonState(0) and Api.summonState(0).code, "TAKEOVER", "(L5) 停止碼 TAKEOVER")
+    -- L4：持有者送停止才算
+    p, v = drive.sumFix({ mp = true })
+    drive.sumStart()
+    clientFlag, serverFlag = false, true
+    fire("OnClientCommand", MOD_ID, MDAD.CMD_SUMMON, p, { vehicleId = v:getId(), active = false, code = "NOT_A_CODE" })
+    checkNil(Api.summonInfo(v), "(L4) 持有者送停止：收掉")
+    checkEq(v._npid, -1, "(L4) 權限回 -1")
+    -- L2：拒絕（權限在別人手上、拖車）
+    p, v = drive.sumFix({ mp = true })
+    v._npid = 4000
+    local _, why = drive.sumStart()
+    checkEq(why, "UI_MinidoracatAutoDrive_SummonBusy", "(L2) 權限已在某個客戶端：SummonBusy")
+    v._npid, v._towing = -1, newVehicle({})
+    _, why = drive.sumStart()
+    checkEq(why, "UI_MinidoracatAutoDrive_SummonTowing", "(L2) 拖車：SummonTowing")
+    checkEq(v._auth, 0, "(L2) 被拒不碰權限")
+    -- onEnd 與熄火：召喚發動的引擎在結束時熄掉；onEnd 帶 (vehicle, code, player)
+    p, v = drive.sumFix({ mp = true, engine = false })
+    local ends = {}
+    clientFlag, serverFlag = false, true
+    Api.startSummon(p, v, { startEngine = true, onEnd = function(veh, code, pl) ends[#ends + 1] = { veh, code, pl } end })
+    checkEq(#ends, 0, "onEnd 不在 startSummon 裡同步呼叫")
+    v._engine = true
+    drive.sumServer()
+    clientFlag, serverFlag = false, true
+    checkTrue(Api.stopSummon(v, "CANCELLED"), "伺服器 stopSummon(vehicle, code)")
+    checkEq(#ends, 1, "onEnd 呼叫一次")
+    checkTrue(ends[1] and ends[1][1] == v and ends[1][2] == "CANCELLED" and ends[1][3] == p, "onEnd 帶 (vehicle, code, player)")
+    checkEq(v._shut, 1, "召喚發動的引擎在結束時熄掉")
+    -- 車上有乘客：不熄
+    p, v = drive.sumFix({ mp = true, engine = false })
+    clientFlag, serverFlag = false, true
+    Api.startSummon(p, v, { startEngine = true })
+    v._engine = true
+    drive.sumServer()
+    v._pass = true
+    drive.sumServer()
+    checkEq(Api.summonState(0) and Api.summonState(0).code, "OCCUPIED", "乘客上車：OCCUPIED")
+    checkEq(v._shut, 0, "車上有人：不熄火")
+    -- 引擎發動逾時
+    p, v = drive.sumFix({ engine = false })
+    clientFlag, serverFlag = false, false
+    Api.startSummon(p, v, { startEngine = true })
+    for _ = 1, 34 do drive.sumServer(250) end
+    checkNil(Api.summonInfo(v), "8 秒沒 Running：收掉")
+    checkEq(Api.summonState(0), nil, "客戶端從沒接上：沒有 summonState")
+end
+drive.scenarioSummonLease()
+
+-- 召喚 session 的每幀推力帳：lon＝沿車頭的分量（>0 往前）
+function drive.sumLon(v)
+    return v._imp.x * v._fwdX + v._imp.z * v._fwdY
+end
+
+function drive.scenarioSummonFrame()
+    scenario("召喚每幀（F1–F7）：每幀最多推一次、推力與轉向同一次、不寫定速與強制煞車、走路不算接手、防外來推力、結束零成本、多人等權限")
+    local Dr, Api = MDAD.Drive, MinidoracatAutoDriveAPI
+    local torque = {}
+    for _, h in ipairs({ 0.3, -0.3 }) do
+        local tag = "(h=" .. h .. ") "
+        local p, v = drive.sumFix({ px = 30, py = 0 })
+        setHeading(v, h)
+        clientFlag, serverFlag = false, false
+        drive.sumStart()
+        checkTrue(Dr.isActive(0), tag .. "接上")
+        drive.sumRound()
+        v._speed = 5 -- 側推隨前進速度（STEER_FULL_KMH）：靜止不橫推，要有速度才看得到轉向
+        driveReset(v)
+        local lonPos = 0
+        for _ = 1, 120 do
+            drive.sumTick()
+            if v._imp.frame == 1 and drive.sumLon(v) > 0 then lonPos = lonPos + 1 end
+        end
+        checkEq(drive.bad.impulse, 0, tag .. "(F1) 每幀最多一次 addImpulse")
+        checkEq(v._imp.total, 120, tag .. "(F1) 120 幀每幀都推（輪子煞住，靠推力走）")
+        checkEq(lonPos, 120, tag .. "(F2) 每次都有往前的縱向分量")
+        torque[h] = v._imp.torqueY or 0
+        checkEq(drive.calls.regulatorOn, 0, tag .. "(F3) 不開定速")
+        checkEq(drive.calls.forceBrake, 0, tag .. "(F3) 不用強制煞車")
+        checkTrue(Dr.isActive(0), tag .. "(F4) 召喚者不在車上不會被當成下車")
+        drive.keys.Forward, drive.keys.Left = true, true
+        drive.sumTick(30)
+        drive.keys.Forward, drive.keys.Left = nil, nil
+        local s = Dr.debugSession(0)
+        checkTrue(s ~= nil and s.mode ~= "yield", tag .. "(F4b) 召喚者按走路鍵 30 幀：沒有讓位／接手")
+        -- F5：其他 MOD 對召喚車 addImpulse 照樣被擋
+        local methods = __classmetatables[BaseVehicle.class].__index
+        local push = Vector3f.new():set(7777, 0, 0)
+        push._held = true
+        driveReset(v)
+        methods.addImpulse(v, push, push)
+        checkEq(v._imp.total, 0, tag .. "(F5) 防外來推力仍有效")
+    end
+    checkTrue(torque[0.3] * torque[-0.3] < 0, "(F2) 車頭偏左／偏右時轉向力矩反號（推力與轉向同一次呼叫）")
+    -- F6：結束後回到零成本
+    Dr.summonStopLocal(0)
+    drive.sv._speed = 0 -- 停穩才交還（SUMMON_STILL_KMH）
+    for _ = 1, 3 do drive.sumTick() end
+    drive.sumServer()
+    checkEq(Dr.summonN, 0, "(F6) 收尾後沒有每幀工作")
+    checkEq(Api.summonState(0) and Api.summonState(0).code, "CANCELLED", "(F6) 按停止：CANCELLED")
+    driveReset(nil)
+    fire("OnPlayerUpdate", drive.tripPlayer)
+    checkEq(drive.trip.n, 0, "(F6) 結束後 OnPlayerUpdate 零呼叫")
+    -- F7：多人權限還沒到不施力；到了下一幀開始推
+    local p, v = drive.sumFix({ px = 30, mp = true })
+    clientFlag, serverFlag = false, true
+    Api.startSummon(p, v)
+    nowMs = nowMs + 250
+    MDAD.Summon.tick()
+    v._npid = -1 -- 權限還在路上（VehicleUpdate 比 SummonStart 晚到）
+    clientFlag, serverFlag = true, false
+    drive.sumDeliver()
+    checkTrue(Dr.isActive(0), "(F7) SummonStart 到了")
+    driveReset(v)
+    for _ = 1, 40 do drive.sumTick() end
+    checkEq(v._imp.total, 0, "(F7) _npid=-1：不施力")
+    v._npid = 1000
+    drive.sumRound()
+    driveReset(v)
+    drive.sumTick()
+    checkEq(v._imp.total, 1, "(F7) 權限到了：下一幀開始推")
+    -- 權限一直沒到：SUMMON_AUTH_MS 後 AUTH
+    p, v = drive.sumFix({ px = 30, mp = true })
+    clientFlag, serverFlag = false, true
+    Api.startSummon(p, v)
+    nowMs = nowMs + 250
+    MDAD.Summon.tick()
+    v._npid = -1
+    clientFlag, serverFlag = true, false
+    drive.sumDeliver()
+    for _ = 1, 25 do
+        nowMs = nowMs + 250
+        drive.sumTick()
+    end
+    checkFalse(Dr.isActive(0), "(F7) 5 秒等不到權限：停")
+    checkEq(v._imp.total, 0, "(F7) 全程沒推")
+    for _ = 1, 3 do drive.sumTick() end
+    local up = drive.sumUp or {}
+    local last = up[#up]
+    checkTrue(last and last.args.active == false and last.args.code == "AUTH", "(F7) 送停止碼 AUTH")
+end
+drive.scenarioSummonFrame()
+
+function drive.scenarioSummonArrive()
+    scenario("召喚到達與換目標（A1–A3）：靠近召喚者就停、停後不再推、等停穩才交還；召喚者走開只換一次目標")
+    local Dr, Api = MDAD.Drive, MinidoracatAutoDriveAPI
+    -- A1：到達（多人：停穩後送一筆停止）
+    local p, v = drive.sumFix({ px = 30, mp = true })
+    drive.sumStart()
+    drive.sumRound()
+    v._x = 30 - 5 -- 車心離召喚者 5m（≤ halfL＋4.5）
+    v._speed = 2
+    drive.sumTick(2)
+    checkFalse(Dr.isActive(0), "(A1) 靠近召喚者：session 收掉")
+    driveReset(v)
+    drive.sumTick(30)
+    checkEq(v._imp.total, 0, "(A1) 之後 30 幀不再施力")
+    checkTrue(Api.summonInfo(v) ~= nil, "(A1) 車還在滑：先不交還")
+    checkEq(Api.summonState(0) and Api.summonState(0).phase, "stopping", "(A1) phase=stopping")
+    v._speed = 0
+    drive.sumTick()
+    local stops = 0
+    for i = 1, #(drive.sumUp or {}) do
+        local c = drive.sumUp[i]
+        if c.command == MDAD.CMD_SUMMON and c.args.active == false then stops = stops + 1 end
+    end
+    checkEq(stops, 1, "(A1) 停穩後送一筆停止")
+    checkNil(Api.summonInfo(v), "(A1) 伺服器收掉")
+    checkEq(Api.summonState(0) and Api.summonState(0).code, "ARRIVED", "(A1) ARRIVED")
+    checkEq(Api.summonState(0) and Api.summonState(0).phase, "ended", "(A1) phase=ended")
+    checkEq(v._npid, -1, "(A1) 權限交還")
+    -- A2：召喚者站在車頭前 1m：當幀不施力
+    p, v = drive.sumFix({ px = 30 })
+    clientFlag, serverFlag = false, false
+    drive.sumStart()
+    drive.sumRound()
+    p._x, p._y = 2.2 + 1, 0
+    driveReset(v)
+    drive.sumTick()
+    checkEq(v._imp.total, 0, "(A2) 召喚者站在車頭前：當幀停止施力")
+    -- A3：路網模式（50m），召喚者走開 10m：主 MOD 只多問一次新目標（節流）
+    p, v = drive.sumFix({ px = 50 })
+    local pts, surf, width = {}, {}, {}
+    for i = 0, 12 do
+        pts[#pts + 1], pts[#pts + 2] = i * 4 + 0.5, 0.5
+        if i > 0 then surf[#surf + 1], width[#width + 1] = "paved", 8 end
+    end
+    drive.nav.fromRoute = { pts = pts, len = 48, cost = 48, snapDist = 0.7, segSurface = surf, segWidth = width }
+    clientFlag, serverFlag = false, false
+    drive.sumStart()
+    checkTrue(Dr.isActive(0), "(A3) 路網模式接上")
+    local s = Dr.debugSession(0)
+    checkTrue(s and s.summon.baseRoute == drive.nav.fromRoute, "(A3) 用的是 requestRouteFrom 的路線")
+    drive.sumRound()
+    local function distinct()
+        local seen, n = {}, 0
+        for _, t in ipairs(drive.nav.fromTargets) do
+            if not seen[t] then seen[t], n = true, n + 1 end
+        end
+        return n
+    end
+    checkEq(distinct(), 1, "(A3) 起步後只問過同一個目標（不把每幀的玩家座標丟給主 MOD）")
+    p._y = 10
+    for _ = 1, 12 do
+        nowMs = nowMs + 250
+        drive.sumTick()
+    end
+    checkEq(distinct(), 2, "(A3) 走開 10m：只換一次目標")
+    Dr.summonStopLocal(0)
+end
+drive.scenarioSummonArrive()
+
+function drive.scenarioSummonExits()
+    scenario("召喚停止碼（X1–X9）：每種結束各自的碼，停止後 10 幀不再施力、每幀不變式不破")
+    local Dr, Api = MDAD.Drive, MinidoracatAutoDriveAPI
+    local cases = {
+        { "TAKEOVER", function(p, v) v._driver = newPlayer({ num = 4, username = "b" }) end },
+        { "BOARDED", function(p, v) p._vehicle = newVehicle({}) end },
+        { "DEAD", function(p, v) p._dead = true end },
+        { "ENGINE", function(p, v) v._engine = false end },
+        { "STUCK", function() Dr.stop(0, DKEY.STUCK) end },
+        { "FAR", function(p, v) p._x = 70 end },
+        { "CANCELLED", function() Api.stopSummon(0) end },
+        { "AUTH", function(p, v) v._npid = 4242 end, true },
+        { "GONE", function(p, v) v._removed = true end },
+        { "OCCUPIED", function(p, v) v._pass = true end },
+    }
+    for _, c in ipairs(cases) do
+        local code, act, mp = c[1], c[2], c[3]
+        local p, v = drive.sumFix({ px = 30, mp = mp })
+        if not mp then clientFlag, serverFlag = false, false end
+        drive.sumStart()
+        drive.sumRound()
+        act(p, v)
+        drive.sumTick()
+        checkFalse(Dr.isActive(0), "(" .. code .. ") session 收掉")
+        driveReset(v)
+        drive.sumTick(10)
+        checkEq(v._imp.total, 0, "(" .. code .. ") 停止後 10 幀不施力")
+        checkEq(drive.bad.impulse + drive.bad.pair + drive.bad.live, 0, "(" .. code .. ") 每幀不變式（單槽、向量池）")
+        p._dead = false
+        drive.sumServer()
+        local st = Api.summonState(0)
+        checkEq(st and st.code, code, "(" .. code .. ") 停止碼")
+        checkNil(Api.summonInfo(v), "(" .. code .. ") 伺服器 session 收掉")
+    end
+end
+drive.scenarioSummonExits()
+
+function drive.scenarioSummonTarget()
+    scenario("開到指定地點（target，build-1027 S9）：停車點在目標附近、室外；召喚者走動不換目標；車心到目標 3m 內＝ARRIVED")
+    local Dr, Api = MDAD.Drive, MinidoracatAutoDriveAPI
+    local p, v = drive.sumFix({ px = 5, py = 5 })
+    -- 目標周圍 2 格是室內：停車點要落在室外
+    for x = 28, 32 do
+        for y = -2, 2 do
+            local sq = drive.world[x * 100000 + y]
+            if sq then sq._indoor = true end
+        end
+    end
+    clientFlag, serverFlag = false, false
+    local ok = drive.sumStart({ mode = "target", x = 30.5, y = 0.5 })
+    checkTrue(ok and Dr.isActive(0), "起步並接上")
+    local s = Dr.debugSession(0)
+    local sm = s and s.summon
+    checkEq(sm and sm.mode, "target", "s.summon.mode＝target")
+    checkEq(Api.summonState(0) and Api.summonState(0).mode, "target", "summonState 帶 mode")
+    checkEq(Api.summonInfo(v) and Api.summonInfo(v).mode, "target", "summonInfo 帶 mode")
+    checkEq(drive.nav.fromCalls, 0, "30m、直線預檢通過：兩點直線，不問路網")
+    local px, py = sm and sm.parkX or 0, sm and sm.parkY or 0
+    local d = math.sqrt((px - 30.5) ^ 2 + (py - 0.5) ^ 2)
+    checkTrue(d >= 2.5 and d <= 5, "停車點離目標 2.5–5m（避開室內），實得 " .. string.format("%.2f", d))
+    local psq = drive.world[math.floor(px) * 100000 + math.floor(py)]
+    checkTrue(psq ~= nil and psq:isOutside() and psq:getRoom() == nil, "停車點在室外")
+    drive.sumRound()
+    local before = sm.route
+    p._x, p._y = -10, 20
+    for _ = 1, 20 do
+        nowMs = nowMs + 250
+        drive.sumTick()
+    end
+    checkTrue(Dr.isActive(0) and sm.route == before and drive.nav.fromCalls == 0, "召喚者走動：不換目標、不重算")
+    v._x, v._y = px, py
+    v._speed = 0
+    -- 車在 5 秒原地不動時已進脫困（unstick／settle）；脫困收尾回 follow 的下一幀判到
+    for _ = 1, 60 do
+        if not Dr.isActive(0) then break end
+        nowMs = nowMs + 100
+        drive.sumTick()
+    end
+    checkFalse(Dr.isActive(0), "到停車點：收掉")
+    drive.sumTick()
+    checkEq(Api.summonState(0) and Api.summonState(0).code, "ARRIVED", "ARRIVED")
+    checkTrue(math.sqrt((v._x - 30.5) ^ 2 + (v._y - 0.5) ^ 2) <= 5, "車停在目標 5m 內（S9）")
+    -- 目標超出召喚者範圍（客戶端 summonReach）：途中召喚者走遠＝FAR
+    p, v = drive.sumFix({ px = 5, py = 5 })
+    clientFlag, serverFlag = false, false
+    drive.sumStart({ mode = "target", x = 30.5, y = 0.5 })
+    drive.sumRound()
+    p._x, p._y = -40, 5
+    drive.sumTick()
+    checkFalse(Dr.isActive(0), "目標離召喚者超過範圍：停")
+    drive.sumServer()
+    checkEq(Api.summonState(0) and Api.summonState(0).code, "FAR", "FAR")
+    -- 遠目標走路網：requestRouteFrom 的終點固定是目標（不是召喚者）
+    p, v = drive.sumFix({ px = 30, py = 0 })
+    local pts, surf, width = {}, {}, {}
+    for i = 0, 15 do
+        pts[#pts + 1], pts[#pts + 2] = i * 4 + 0.5, 0.5
+        if i > 0 then surf[#surf + 1], width[#width + 1] = "paved", 8 end
+    end
+    drive.nav.fromRoute = { pts = pts, len = 60, cost = 60, snapDist = 0.7, segSurface = surf, segWidth = width }
+    clientFlag, serverFlag = false, false
+    drive.sumStart({ mode = "target", x = 60.5, y = 0.5 })
+    checkTrue(Dr.isActive(0), "60m：路網模式接上")
+    checkEq(drive.nav.fromTargets[1], "60.5,0.5", "requestRouteFrom 的終點＝目標")
+    Dr.summonStopLocal(0)
+end
+drive.scenarioSummonTarget()
+
+function drive.scenarioSummonDumb()
+    scenario("前進／後退（dumb，build-1027 S10）：不開 session、直線 1 km/h、走滿 12m＝ARRIVED、後方有障礙＝BLOCKED、頂住 3 秒、按停止")
+    local Dr, Api = MDAD.Drive, MinidoracatAutoDriveAPI
+    -- 前進：每幀一次、沿車頭、不轉向
+    local p, v = drive.sumFix({ px = -6, py = 4 })
+    clientFlag, serverFlag = false, false
+    local ok = drive.sumStart({ mode = "dumb", dir = 1 })
+    checkTrue(ok, "起步")
+    checkFalse(Dr.isActive(0), "不開駕駛 session")
+    checkTrue(Dr.summonN > 0, "掛成每幀工作")
+    checkEq(Api.summonState(0) and Api.summonState(0).mode, "dumb", "summonState 帶 mode")
+    driveReset(v)
+    local fwdN = 0
+    for _ = 1, 30 do
+        drive.sumTick()
+        if v._imp.frame == 1 and drive.sumLon(v) > 0 and math.abs(v._imp.torqueY or 0) < 1e-6 then fwdN = fwdN + 1 end
+    end
+    checkEq(drive.bad.impulse, 0, "每幀最多一次 addImpulse")
+    checkEq(fwdN, 30, "30 幀都往前推、零力矩")
+    -- 速度回饋：1 km/h 加滾阻補償 K_R×抓地（輪子被 park 煞住），遠超過就不推
+    v._speed = 10
+    driveReset(v)
+    drive.sumTick()
+    checkEq(v._imp.total, 0, "遠超過 1 km/h：不推")
+    -- 走滿 12m：ARRIVED（build-1027：dumb 走滿也回 ARRIVED）
+    v._speed, v._x = 1, 12.1
+    drive.sumTick()
+    checkEq(Dr.summons[0], nil, "走滿 12m：結束")
+    v._speed = 0
+    drive.sumTick()
+    checkEq(Api.summonState(0) and Api.summonState(0).code, "ARRIVED", "ARRIVED")
+    checkNil(Api.summonInfo(v), "伺服器收掉")
+    -- 倒車、後方 1.5m 有牆：BLOCKED，一次都沒推
+    p, v = drive.sumFix({ px = 6, py = 4 })
+    drive.putSolid(-4, 0, "harness_summon_wall")
+    clientFlag, serverFlag = false, false
+    drive.sumStart({ mode = "dumb", dir = -1 })
+    driveReset(v)
+    drive.sumTick(3)
+    checkEq(v._imp.total, 0, "後方有牆：不推")
+    checkEq(Api.summonState(0) and Api.summonState(0).code, "BLOCKED", "倒車碰到障礙：BLOCKED")
+    -- 倒車淨空：往後推
+    p, v = drive.sumFix({ px = 6, py = 4 })
+    clientFlag, serverFlag = false, false
+    drive.sumStart({ mode = "dumb", dir = -1 })
+    driveReset(v)
+    drive.sumTick()
+    checkTrue(v._imp.total == 1 and drive.sumLon(v) < 0, "倒車：沿車頭反向推")
+    -- 推了 3 秒還沒動：BLOCKED
+    for _ = 1, 14 do
+        nowMs = nowMs + 250
+        drive.sumTick()
+    end
+    drive.sumTick()
+    checkEq(Api.summonState(0) and Api.summonState(0).code, "BLOCKED", "頂住 3 秒：BLOCKED")
+    -- 前方有人：PLAYER；有殭屍頂住：ZOMBIES
+    p, v = drive.sumFix({ px = -6, py = 4 })
+    drive.putMoving(3, 0, { _class = "IsoPlayer", isDead = function() return false end,
+        getVehicle = function() return nil end })
+    clientFlag, serverFlag = false, false
+    drive.sumStart({ mode = "dumb", dir = 1 })
+    drive.sumTick()
+    checkEq(Api.summonState(0) and Api.summonState(0).code, "PLAYER", "前方有人：PLAYER")
+    p, v = drive.sumFix({ px = -6, py = 4 })
+    drive.putMoving(3, 0, { _class = "IsoZombie", isDead = function() return false end })
+    clientFlag, serverFlag = false, false
+    drive.sumStart({ mode = "dumb", dir = 1 })
+    for _ = 1, 14 do
+        nowMs = nowMs + 250
+        drive.sumTick()
+    end
+    drive.sumTick()
+    checkEq(Api.summonState(0) and Api.summonState(0).code, "ZOMBIES", "殭屍頂住 3 秒：ZOMBIES")
+    -- 按停止：CANCELLED（多人：停穩後送一筆）
+    p, v = drive.sumFix({ px = -6, py = 4, mp = true })
+    drive.sumStart({ mode = "dumb", dir = 1 })
+    checkEq(v._npid, 1000, "多人：權限給召喚者")
+    drive.sumTick()
+    checkTrue(Api.stopSummon(0), "客戶端 stopSummon(playerNum)")
+    driveReset(v)
+    drive.sumTick(5)
+    checkEq(v._imp.total, 0, "停止後不推")
+    checkEq(Api.summonState(0) and Api.summonState(0).code, "CANCELLED", "CANCELLED")
+    checkNil(Api.summonInfo(v), "伺服器收掉、權限交還")
+    checkEq(v._npid, -1, "權限回 -1")
+    checkEq(Dr.summonN, 0, "沒有殘留的每幀工作")
+end
+drive.scenarioSummonDumb()
+
+function drive.scenarioSummonZombieTelemetry()
+    scenario("召喚殭屍與遙測（D1）：帶內有殭屍壓到 4 km/h、一直有 15 秒＝ZOMBIES；開始／結束事件")
+    local Dr, Api = MDAD.Drive, MinidoracatAutoDriveAPI
+    local saved = { MDAD.HUD.telemetryEnabled, MDADDiagnostics.start, MDADDiagnostics.event, MDADDiagnostics.sample,
+        MDADDiagnostics.stop }
+    local ev = {}
+    MDAD.HUD.telemetryEnabled = function() return true end
+    MDADDiagnostics.start = function() return true end
+    MDADDiagnostics.sample = function() return true end
+    MDADDiagnostics.stop = function() return true end
+    MDADDiagnostics.event = function(_, name, a)
+        if name == "summon" then ev[#ev + 1] = a end
+    end
+    local p, v = drive.sumFix({ px = 30 })
+    clientFlag, serverFlag = false, false
+    drive.sumStart()
+    local s = Dr.debugSession(0)
+    checkTrue(ev[1] and ev[1].phase == "start" and ev[1].mode == "come" and ev[1].vid == v:getId()
+        and ev[1].kind == "direct", "(D1) summon start 事件（mode vid kind）")
+    -- 門檻全從 TUNE 讀（SUMMON_ZOMBIE_NEAR_M／KMH／MAX_MS），調參時測試跟著走。違規證明：KMH 改 5 或 MAX_MS 改 10000＝(ZC) 紅
+    local T = Dr.debugTune()
+    s.sensor.zombieN, s.zombieWhy = 1, nil
+    s.sensor.zombieNearS = s.lastSNow + s.vehicleProfile.halfL + T.SUMMON_ZOMBIE_NEAR_M + 1
+    checkEq(Dr.summonZombieCap(s, 10, nowMs), 10, "(ZC) 殭屍在 NEAR_M 外 1m：不算推、不壓速")
+    s.zombieWhy = "gap"
+    s.sensor.zombieNearS = s.lastSNow + s.vehicleProfile.halfL + T.SUMMON_ZOMBIE_NEAR_M - 1
+    checkEq(Dr.summonZombieCap(s, 10, nowMs), 10, "(ZC) 軟縫閃得過：不算推")
+    s.zombieWhy = nil
+    checkEq(Dr.summonZombieCap(s, 10, nowMs), T.SUMMON_ZOMBIE_KMH, "(ZC) NEAR_M 內有殭屍、軟縫沒處理：壓到 SUMMON_ZOMBIE_KMH")
+    for _ = 1, math.ceil(T.SUMMON_ZOMBIE_MAX_MS / 250) - 1 do
+        nowMs = nowMs + 250
+        Dr.summonZombieCap(s, 10, nowMs)
+    end
+    checkNil(s.summon.stopCode, "(ZC) 推不到 SUMMON_ZOMBIE_MAX_MS：還沒停")
+    nowMs = nowMs + 250
+    Dr.summonZombieCap(s, 10, nowMs)
+    checkEq(s.summon.stopCode, "ZOMBIES", "(ZC) 推滿 SUMMON_ZOMBIE_MAX_MS：ZOMBIES")
+    drive.sumTick()
+    checkFalse(Dr.isActive(0), "下一幀停")
+    drive.sumTick() -- 停穩：送停止（要在伺服器輪詢前，否則 15 秒沒心跳先 TIMEOUT）
+    drive.sumServer()
+    checkEq(Api.summonState(0) and Api.summonState(0).code, "ZOMBIES", "停止碼 ZOMBIES")
+    local e = ev[#ev]
+    checkTrue(e and e.phase == "end" and e.why == "ZOMBIES" and type(e.ms) == "number", "(D1) summon end 事件（why ms）")
+    s.sensor.zombieN = 0
+    MDAD.HUD.telemetryEnabled, MDADDiagnostics.start, MDADDiagnostics.event, MDADDiagnostics.sample,
+        MDADDiagnostics.stop = saved[1], saved[2], saved[3], saved[4], saved[5]
+end
+drive.scenarioSummonZombieTelemetry()
+
+-- 召喚者斷線（第 1 輪審查 Claude／Grok）：伺服器沒有斷線事件，onlineID 還會被新玩家重用（GameServer.java:2670-2698），
+-- 只能靠輪詢的 findPlayer（onlineID＋username）。違規證明：findPlayer 不比 username＝(LEFT-reuse) 紅；拿掉 LEFT 那行＝兩案都紅。
+function drive.scenarioSummonLeft()
+    scenario("召喚者斷線（LEFT）：onlineID 被新玩家重用或查無此人，下一輪輪詢就收、權限交還伺服器、onEnd 收到 nil 玩家")
+    local Api = MinidoracatAutoDriveAPI
+    for _, kind in ipairs({ "reuse", "gone" }) do
+        local tag = "(LEFT-" .. kind .. ") "
+        local p, v = drive.sumFix({ mp = true })
+        local ends = {}
+        clientFlag, serverFlag = false, true
+        local ok = Api.startSummon(p, v, { onEnd = function(veh, code, pl) ends[#ends + 1] = { veh, code, pl } end })
+        clientFlag, serverFlag = true, false
+        checkTrue(ok, tag .. "起步")
+        drive.sumServer()
+        checkEq(v._npid, 1000, tag .. "權限在召喚者")
+        if kind == "reuse" then
+            -- 新玩家拿到同一個 onlineID、站在召喚者原地（範圍內）：只有 username 分得出來
+            local nb = newPlayer({ num = 9, username = "newcomer", onlineId = 1000 })
+            nb.getX = function() return p._x end
+            nb.getY = function() return p._y end
+            drive.online = { nb }
+        else
+            drive.online = {}
+        end
+        drive.sumServer()
+        checkNil(Api.summonInfo(v), tag .. "一輪輪詢就收（不等 15 秒 TTL）")
+        checkEq(v._npid, -1, tag .. "權限交還伺服器（新玩家不繼承）")
+        checkTrue(ends[1] ~= nil and ends[1][2] == "LEFT" and ends[1][3] == nil, tag .. "onEnd 碼 LEFT、玩家 nil")
+        drive.online = { p }
+    end
+end
+drive.scenarioSummonLeft()
+
+-- 多人召喚的區域等待（第 1 輪審查 Claude）：沒有本機駕駛時 PassengerMap.isChunkLoaded 一律 false，引擎的 invalid chunk
+-- 永遠是 true（PassengerMap.java:42-67）。違規證明：拿掉 Drive.areaWait 的 s.summon and isClient() 分支＝(MPA) 紅。
+function drive.scenarioSummonAreaWait()
+    scenario("多人召喚的區域等待：引擎的 isInvalidChunkAhead／Behind 恆真也不等；Sensor 未載入前緣在車前 halfL＋SUMMON_AREA_M 內才等")
+    local Dr = MDAD.Drive
+    local T = Dr.debugTune()
+    local p, v = drive.sumFix({ px = 30, mp = true })
+    drive.sumStart()
+    checkTrue(Dr.isActive(0), "(MPA) 接上")
+    v.isInvalidChunkAhead = function() return true end
+    v.isInvalidChunkBehind = function() return true end
+    drive.sumRound()
+    local s = Dr.debugSession(0)
+    local waited = false
+    driveReset(v)
+    for _ = 1, 40 do
+        nowMs = nowMs + 100
+        drive.sumTick()
+        if s.areaWaitActive then waited = true end
+    end
+    checkFalse(waited, "(MPA) 引擎回 invalid chunk、Sensor 沒有未載入：不等")
+    checkTrue(v._imp.total > 0, "(MPA) 照常推（實得 " .. v._imp.total .. " 次）")
+    checkTrue(Dr.isActive(0), "(MPA) 還在召喚（沒有 AREA）")
+    -- 反向：Sensor 的未載入前緣在範圍內＝等；更遠＝不等
+    local keepU, keepUS, keepI = s.sensor.unloaded, s.sensor.unloadedS, s.intentShadow
+    local edge = s.lastSNow + s.vehicleProfile.halfL + T.SUMMON_AREA_M
+    s.intentShadow = "GO"
+    s.sensor.unloaded, s.sensor.unloadedS = true, edge - 1
+    Dr.areaWait(s, v, nowMs, 10, 0)
+    checkTrue(s.areaWaitActive, "(MPA) 未載入前緣在車前 halfL＋SUMMON_AREA_M 內：等")
+    s.sensor.unloadedS = edge + 1
+    Dr.areaWait(s, v, nowMs, 10, 0)
+    checkFalse(s.areaWaitActive, "(MPA) 未載入前緣更遠：不等")
+    s.sensor.unloaded, s.sensor.unloadedS, s.intentShadow = keepU, keepUS, keepI
+    v.isInvalidChunkAhead, v.isInvalidChunkBehind = nil, nil
+    Dr.summonStopLocal(0)
+end
+drive.scenarioSummonAreaWait()
+
+-- 多人引擎還沒同步（E2E vmsum-1027-b）：伺服器看到 Running 才送 SummonStart，但引擎狀態比指令晚到客戶端。
+-- 違規證明：summonBegin 的 engineWait 改 false＝(ES-come) 紅；拿掉 summonDumbStep 的 authUntil 等待＝(ES-dumb) 紅。
+function drive.scenarioSummonEngineSync()
+    scenario("召喚：多人引擎還沒同步，SummonStart 先到、本機引擎還沒轉，SUMMON_AUTH_MS 內等、不推不收；轉了照常推；一直沒轉才 ENGINE")
+    local Dr, Api = MDAD.Drive, MinidoracatAutoDriveAPI
+    local T = Dr.debugTune()
+    local function begin(opts, fix)
+        local p, v = drive.sumFix(fix)
+        clientFlag, serverFlag = false, true
+        Api.startSummon(p, v, opts)
+        driveReset(v) -- 會清送出佇列：要在伺服器輪詢前
+        v._engine = true
+        nowMs = nowMs + 250
+        MDAD.Summon.tick() -- 伺服器看到 Running：交權限、送 SummonStart
+        v._engine = false  -- 客戶端這邊引擎狀態還沒到
+        clientFlag, serverFlag = true, false
+        drive.sumDeliver()
+        return p, v
+    end
+    local function lastStop()
+        local up = drive.sumUp or {}
+        for i = #up, 1, -1 do
+            local c = up[i]
+            if c.command == MDAD.CMD_SUMMON and c.args.active == false then return c.args.code end
+        end
+        return nil
+    end
+    for _, m in ipairs({ { "come", { startEngine = true }, { px = 30, mp = true, engine = false } },
+        { "dumb", { mode = "dumb", dir = 1, startEngine = true }, { px = -6, py = 4, mp = true, engine = false } } }) do
+        local tag = "(ES-" .. m[1] .. ") "
+        local _, v = begin(m[2], m[3])
+        checkEq(v._npid, 1000, tag .. "權限已給召喚者")
+        checkTrue(Dr.summons[0] ~= nil, tag .. "SummonStart 收到、掛著等")
+        for _ = 1, 8 do
+            nowMs = nowMs + 250
+            drive.sumTick()
+        end
+        checkEq(v._imp.total, 0, tag .. "引擎還沒轉的 2 秒：不推")
+        checkTrue(Dr.summons[0] ~= nil and lastStop() == nil, tag .. "沒有收（沒送停止）")
+        v._engine = true
+        for _ = 1, 4 do
+            nowMs = nowMs + 250
+            drive.sumTick()
+        end
+        if m[1] == "come" then
+            checkTrue(Dr.isActive(0), tag .. "引擎轉了：開 session")
+            drive.sumRound()
+        end
+        driveReset(v)
+        drive.sumTick()
+        checkTrue(v._imp.total > 0, tag .. "引擎轉了：照常推")
+        Dr.summonStopLocal(0)
+        -- 一直沒轉：SUMMON_AUTH_MS 後 ENGINE，全程不推
+        _, v = begin(m[2], m[3])
+        local waited = 0
+        while waited <= T.SUMMON_AUTH_MS + 500 and Dr.summons[0] ~= nil do
+            nowMs = nowMs + 250
+            waited = waited + 250
+            drive.sumTick()
+        end
+        drive.sumTick(2)
+        checkTrue(waited >= T.SUMMON_AUTH_MS, tag .. "不提早放棄（等了 " .. waited .. "ms）")
+        checkEq(lastStop(), "ENGINE", tag .. "等滿 SUMMON_AUTH_MS：停止碼 ENGINE")
+        checkEq(v._imp.total, 0, tag .. "全程不推")
+    end
+end
+drive.scenarioSummonEngineSync()
+
+-- 前進／後退：玩家排在殭屍之後（第 1 輪審查 Claude／Codex blocking）：build-1027 §1「前方是玩家一律停」。
+-- 違規證明：summonDumbWho 遇到殭屍就 return＝(DW) 紅。
+function drive.scenarioSummonDumbWho()
+    scenario("召喚前進／後退：帶內殭屍排在玩家前面（不同格、同一格先列殭屍、倒車）仍是 PLAYER、零推力")
+    local Api = MinidoracatAutoDriveAPI
+    local function zombie()
+        return { _class = "IsoZombie", isDead = function() return false end }
+    end
+    local function player()
+        return { _class = "IsoPlayer", isDead = function() return false end, getVehicle = function() return nil end }
+    end
+    local cases = {
+        { "前方不同格", 1, function() drive.putMoving(2, 0, zombie()); drive.putMoving(3, 0, player()) end },
+        { "前方同一格、殭屍先列", 1, function() drive.putMoving(3, 0, zombie()); drive.putMoving(3, 0, player()) end },
+        { "倒車不同格", -1, function() drive.putMoving(-3, 0, zombie()); drive.putMoving(-4, 0, player()) end },
+    }
+    for _, c in ipairs(cases) do
+        local tag = "(DW " .. c[1] .. ") "
+        local _, v = drive.sumFix({ px = c[2] > 0 and -6 or 6, py = 4 })
+        c[3]()
+        clientFlag, serverFlag = false, false
+        drive.sumStart({ mode = "dumb", dir = c[2] })
+        driveReset(v)
+        drive.sumTick()
+        checkEq(Api.summonState(0) and Api.summonState(0).code, "PLAYER", tag .. "停止碼 PLAYER")
+        checkEq(v._imp.total, 0, tag .. "零推力")
+    end
+end
+drive.scenarioSummonDumbWho()
+
+-- 伺服器自己收權（第 2 輪審查 Codex）：改過的客戶端不跑 Driver、照送心跳，熄火／沒電／拆模組時伺服器下一輪輪詢就收。
+-- 違規證明：poll 拿掉引擎／電瓶那行＝(SR-engine)(SR-battery) 紅；拿掉模組那行＝(SR-module) 紅。
+function drive.scenarioSummonServerRevoke()
+    scenario("召喚伺服器自己收權：客戶端不跑 Driver、照送心跳，熄火／電瓶沒電／拆模組時下一輪輪詢就收、權限回 -1")
+    local Api = MinidoracatAutoDriveAPI
+    local cases = {
+        { "engine", "ENGINE", function(v) v._engine = false end },
+        { "battery", "ENGINE", function(v) v._part._item._uses = 0 end },
+        { "module", "MODULE", function(v) v._devices.MDADAutopilot._item = nil end },
+    }
+    for _, c in ipairs(cases) do
+        local tag = "(SR-" .. c[1] .. ") "
+        local p, v = drive.sumFix({ mp = true })
+        v._devices.MDADAutopilot._item = newItem(AUTO_T)
+        setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = true, SummonMaxDistance = 64 })
+        local ends = {}
+        clientFlag, serverFlag = false, true
+        checkTrue(Api.startSummon(p, v, { onEnd = function(_, code) ends[#ends + 1] = code end }), tag .. "起步")
+        nowMs = nowMs + 250
+        MDAD.Summon.tick()
+        clearList(sentServer)
+        checkEq(v._npid, 1000, tag .. "權限在召喚者")
+        c[3](v)
+        nowMs = nowMs + 1001
+        fire("OnClientCommand", MOD_ID, MDAD.CMD_SUMMON, p, { vehicleId = v:getId(), active = true })
+        nowMs = nowMs + 250
+        MDAD.Summon.tick()
+        checkNil(Api.summonInfo(v), tag .. "心跳照送也一輪輪詢就收")
+        checkEq(v._npid, -1, tag .. "權限交還伺服器")
+        checkEq(ends[1], c[2], tag .. "停止碼 " .. c[2])
+    end
+end
+drive.scenarioSummonServerRevoke()
+
+-- 召喚計費（第 2 輪審查 Codex）：真的觸發 EveryOneMinute 與 GasTank wrapper。違規證明：collect 不標 powerNav＝(BL-come)
+-- 每分鐘電紅；vehicleUsageModes 拿掉無駕駛分支＝(BL-come) 油耗紅；navOn 不排除 dumb＝(BL-dumb) 紅。
+function drive.scenarioSummonBilling()
+    scenario("召喚計費：車上 GPS 導航＝車付 nav＋auto；只有隨身 GPS＝隨身付 nav、車付 auto；前進／後退只扣 auto")
+    local Api = MinidoracatAutoDriveAPI
+    local cases = {
+        { "come", {}, true, RATE_NAV + RATE_AUTO, 0.87, 1.0 },
+        { "come-portable", {}, false, RATE_AUTO, 0.875, 0.994 },
+        { "dumb", { mode = "dumb", dir = 1 }, true, RATE_AUTO, 0.875, 1.0 },
+    }
+    for _, c in ipairs(cases) do
+        local tag = "(BL-" .. c[1] .. ") "
+        local p, v = drive.sumFix({ mp = true, px = c[1] == "dumb" and -6 or 15, py = c[1] == "dumb" and 4 or 0 })
+        if c[3] then v._devices.MDADGPS._item = newItem(GPS_T, { uses = 0.7, useDelta = 0.006 }) end
+        local portable = newItem(GPS_T, { uses = 1.0, useDelta = 0.006 })
+        p:getInventory():AddItem(portable)
+        setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, SummonMaxDistance = 64,
+            GPSPowerPercent = 100, AutoDrivePowerPercent = 100, GPSFuelPercent = 100, AutoDriveFuelPercent = 100 })
+        clientFlag, serverFlag = false, true
+        checkTrue(Api.startSummon(p, v, c[2]), tag .. "起步")
+        nowMs = nowMs + 250
+        MDAD.Summon.tick()
+        clearList(sentServer)
+        nowMs = nowMs + 1001
+        fire("OnClientCommand", MOD_ID, MDAD.CMD_SUMMON, p, { vehicleId = v:getId(), active = true })
+        v._part._item._uses = 0.5
+        drive.worldAge = (drive.worldAge or 100) + 1 / 60
+        fire("EveryOneMinute")
+        checkNear(v._part._item._uses, 0.5 - c[4], EPS, tag .. "車電每分鐘扣 " .. c[4])
+        checkNear(portable._uses, c[6], EPS, tag .. "隨身 GPS 電量")
+        drive.fuelBurn = 0.1
+        local gas = newGasPart(1.0, 1.0)
+        Vehicles.Update.GasTank(v, gas, 1)
+        checkNear(gas._amount, c[5], EPS, tag .. "油耗（原生 0.10L＋加成）")
+        Api.stopSummon(v, "CANCELLED")
+        MDAD.clearNavUsage(p)
+        p:getInventory():DoRemoveItem(portable)
+    end
+end
+drive.scenarioSummonBilling()
+
+-- 換目標時主 MOD 還在算（第 2 輪審查 Codex）：idle／extracting／building 不記失敗點，冷卻後同一位置照常再問；確定無路
+-- （noroad）才記點、召喚者沒走開就不再問。違規證明：暫時狀態也記點＝(RT-pending) 紅。
+function drive.scenarioSummonRetargetPending()
+    scenario("召喚換目標：主 MOD 還在算不記失敗點、冷卻後再問並收下新線；noroad 記點、召喚者不動就不再問")
+    local Dr = MDAD.Drive
+    local T = Dr.debugTune()
+    for _, kind in ipairs({ "pending", "noroad" }) do
+        local tag = "(RT-" .. kind .. ") "
+        local p, v = drive.sumFix({ px = 30 })
+        clientFlag, serverFlag = false, false
+        drive.sumStart()
+        checkTrue(Dr.isActive(0), tag .. "直線模式接上")
+        drive.sumRound()
+        local s = Dr.debugSession(0)
+        -- 召喚者走到 55m 外（超過 SUMMON_DIRECT_M、在 64 格範圍內）：換目標要問路網
+        p._x = 55
+        local pts, surf, width = {}, {}, {}
+        for i = 0, 13 do
+            pts[#pts + 1], pts[#pts + 2] = i * 4 + 0.5, 0.5
+            if i > 0 then surf[#surf + 1], width[#width + 1] = "paved", 8 end
+        end
+        drive.nav.fromRoute = { pts = pts, len = 52, cost = 52, snapDist = 0.7, segSurface = surf, segWidth = width }
+        drive.nav.fromState = kind == "pending" and "extracting" or "noroad"
+        local calls = drive.nav.fromCalls
+        for _ = 1, 4 do
+            nowMs = nowMs + 250
+            v._x = v._x + 0.5 -- 車有在前進（不進脫困）
+            drive.sumTick()
+        end
+        checkEq(drive.nav.fromCalls, calls + 1, tag .. "換目標問了一次")
+        checkTrue(Dr.isActive(0) and s.summon.baseRoute == nil, tag .. "失敗：留在舊直線")
+        drive.nav.fromState = "ok"
+        for _ = 1, (T.SUMMON_RETARGET_MS / 250) + 4 do
+            nowMs = nowMs + 250
+            v._x = v._x + 0.5
+            drive.sumTick()
+        end
+        if kind == "pending" then
+            checkTrue(drive.nav.fromCalls > calls + 1, tag .. "冷卻後同一位置再問")
+            checkTrue(s.summon.baseRoute == drive.nav.fromRoute, tag .. "收下路網新線")
+        else
+            checkEq(drive.nav.fromCalls, calls + 1, tag .. "召喚者沒走開：不再問")
+        end
+        Dr.summonStopLocal(0)
+    end
+end
+drive.scenarioSummonRetargetPending()
+
+-- 代為發動（第 2 輪審查 Claude）：發動中（Starting／RetryingStarting／StartingSuccess）結束也熄；引擎回 Idle 才重按、最多
+-- START_TRIES 次。違規證明：finish 只看 isEngineRunning＝(EST-Starting) 紅；重按不看 Idle＝(EST-retry) 紅。
+function drive.scenarioSummonEngineStart()
+    scenario("召喚代為發動：發動中結束也熄、Idle 不熄；引擎回 Idle 才重按、最多 START_TRIES 次、發動中不重按")
+    local Api, Sm = MinidoracatAutoDriveAPI, MDAD.Summon
+    local function begin()
+        local p, v = drive.sumFix({ mp = true, engine = false })
+        clientFlag, serverFlag = false, true
+        checkTrue(Api.startSummon(p, v, { startEngine = true }), "代為發動起步")
+        return p, v
+    end
+    for _, st in ipairs({ "Starting", "RetryingStarting", "StartingSuccess", "Idle" }) do
+        local _, v = begin()
+        v._estate = st
+        Api.stopSummon(v, "CANCELLED")
+        checkEq(v._shut, st == "Idle" and 0 or 1, "(EST-" .. st .. ") " .. (st == "Idle" and "沒在發動：不熄" or "發動中結束：熄"))
+    end
+    local _, v = begin()
+    for _ = 1, 34 do drive.sumServer(250) end
+    checkEq(v._started, Sm.START_TRIES, "(EST-retry) 一直 Idle：8 秒內共按 START_TRIES 次")
+    _, v = begin()
+    v._estate = "Starting"
+    for _ = 1, 34 do drive.sumServer(250) end
+    checkEq(v._started, 1, "(EST-retry) 一直在發動：不重按")
+end
+drive.scenarioSummonEngineStart()
+
+-- 停車姿態要淨空（第 1 輪審查 Codex）：第一個候選被別台車占著就往外找。違規證明：停車姿態不帶 strict＝(SP-strict) 紅。
+function drive.scenarioSummonSpotStrict()
+    scenario("召喚停車點：第一個候選被別台車占著不收、改停旁邊淨空的位置")
+    local Dr = MDAD.Drive
+    local _, v = drive.sumFix({ px = 5, py = 5 })
+    drive.putVehicle(30, 0, true)
+    clientFlag, serverFlag = false, false
+    drive.sumStart({ mode = "target", x = 30.5, y = 0.5 })
+    local s = Dr.debugSession(0)
+    local sm = s and s.summon
+    checkTrue(sm ~= nil and sm.parkX ~= nil, "(SP-strict) 找到停車點")
+    local d = sm and sm.parkX and math.sqrt((sm.parkX - 30.5) ^ 2 + (sm.parkY - 0.5) ^ 2) or 0
+    checkTrue(d >= 2, string.format("(SP-strict) 停車點離被占的格 %.2fm（不停在別台車上）", d))
+    Dr.summonStopLocal(0)
+    drive.clearVehicle(30, 0)
+end
+drive.scenarioSummonSpotStrict()
+
+-- 召喚者在建築裡（E2E adsum-1028-a-s5／-b-s5diag）：牆邊候選車頭朝牆、都卡在停車姿態；姿態不佔直線預檢額度，牆外 6m
+-- 以上仍找得到可停的點。違規證明：改回「先驗直線、每個候選都算一次額度」＝(SB) 紅（額度在牆邊用完、退回路網）。
+function drive.scenarioSummonSpotBudget()
+    scenario("召喚停車點：召喚者在建築裡、牆邊候選卡在停車姿態不佔直線額度，仍找到牆外可停的點")
+    local Dr = MDAD.Drive
+    drive.sumFix({ px = 33.5, py = 0.5 })
+    for y = -12, 12 do
+        drive.putSolid(32, y, "harness_summon_wall")
+        for x = 33, 40 do
+            local sq = drive.world[x * 100000 + y]
+            if sq then sq._indoor = true end
+        end
+    end
+    clientFlag, serverFlag = false, false
+    drive.sumStart()
+    local s = Dr.debugSession(0)
+    local sm = s and s.summon
+    checkTrue(sm ~= nil and sm.parkX ~= nil, "(SB) 找到牆外的停車點")
+    checkEq(drive.nav.fromCalls, 0, "(SB) 直線模式，沒退回路網")
+    checkTrue(sm ~= nil and sm.parkX ~= nil and sm.parkX <= 26,
+        "(SB) 停車姿態車頭前 3m＋車身淨空（離牆 >=6m），實得 x=" .. tostring(sm and sm.parkX))
+    Dr.summonStopLocal(0)
+end
+drive.scenarioSummonSpotBudget()
+
+-- 到我這裡走路網的線尾截到離召喚者 halfL＋SUMMON_ROAD_GAP_M（E2E adsum-1027-a-s3）。違規證明：summonShort 原樣回＝(SS) 紅。
+function drive.scenarioSummonShort()
+    scenario("召喚路網線尾截短：截在離召喚者 keep 處、段屬性對齊、原表不變、本來就夠遠原樣回")
+    local Dr = MDAD.Drive
+    local base = { pts = { 0.5, 0.5, 20.5, 0.5, 40.5, 0.5, 48.5, 0.5 }, segSurface = { "paved", "gravel", "dirt" },
+        segWidth = { 8, 7, 6 }, len = 48, cost = 96 }
+    local out = Dr.summonShort(base, 50, 0.5, 5.3)
+    local n = #out.pts
+    checkNear(math.sqrt((out.pts[n - 1] - 50) ^ 2 + (out.pts[n] - 0.5) ^ 2), 5.3, 0.01, "(SS) 線尾離召喚者＝keep")
+    checkEq(#out.segSurface, n / 2 - 1, "(SS) 段數＝點數－1")
+    checkEq(out.segSurface[3], "dirt", "(SS) 被截的那段保留原段屬性")
+    checkNear(out.len, 44.2, 0.01, "(SS) len 重算")
+    checkNear(out.cost, 96 * 44.2 / 48, 0.01, "(SS) cost 照比例")
+    checkEq(#base.pts, 8, "(SS) 原表不變")
+    checkTrue(Dr.summonShort(base, 60, 0.5, 5.3) == base, "(SS) 線尾本來就夠遠：原樣回")
+end
+drive.scenarioSummonShort()
+
+-- 起步失敗原因（第 2 輪審查 Claude；AGENTS.md「每種失敗要有自己的名字」）：還沒有 session，細分原因放 summonState().why、
+-- 隨停止送伺服器印 log。違規證明：summonSend 不帶 why＝(WHY) 紅。
+function drive.scenarioSummonWhy()
+    scenario("召喚起步失敗原因：noroad／building 逾時各自的 why 在 summonState 與伺服器 log")
+    local Api = MinidoracatAutoDriveAPI
+    for _, st in ipairs({ "noroad", "building" }) do
+        local tag = "(WHY-" .. st .. ") "
+        drive.sumFix({ px = 50, mp = true })
+        drive.nav.fromState = st
+        drive.sumStart()
+        local log = capturePrint(function()
+            for _ = 1, 40 do
+                nowMs = nowMs + 250
+                drive.sumTick()
+                if Api.summonState(0) and Api.summonState(0).phase == "ended" then break end
+            end
+        end)
+        local r = Api.summonState(0)
+        checkEq(r and r.why, st, tag .. "summonState().why")
+        checkTrue(logHas(log, "code=NO_ROUTE why=" .. st), tag .. "伺服器 log 印出 why")
+        checkEq(r and r.code, "NO_ROUTE", tag .. "停止碼仍是 NO_ROUTE")
+    end
+    -- 先等路網（building），等的期間模組被拆：這一次是 driveGate 擋下（取路前），why 不能沿用上一次的 building
+    -- （第 3 輪審查 Codex；違規證明：summonBegin 不清 sm.why＝(WHY-stale) 紅）
+    local _, v = drive.sumFix({ px = 50, mp = true })
+    v._devices.MDADAutopilot._item = newItem(AUTO_T)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = true, SummonMaxDistance = 64 })
+    drive.nav.fromState = "building"
+    drive.sumStart()
+    for _ = 1, 4 do
+        nowMs = nowMs + 250
+        drive.sumTick()
+    end
+    checkTrue(MDAD.Drive.summons[0] ~= nil, "(WHY-stale) 先在等路網")
+    v._devices.MDADAutopilot._item = nil
+    for _ = 1, 8 do
+        nowMs = nowMs + 250
+        drive.sumTick()
+    end
+    local r = Api.summonState(0)
+    checkEq(r and r.code, "MODULE", "(WHY-stale) 停止碼 MODULE")
+    checkEq(r and r.why, DKEY.NEED_MODULE, "(WHY-stale) why 是這一次的理由鍵，不是上一次的 building")
+    -- 伺服器只收 ^[%w_]+$、≤64 字元的字串 why，壞的不印、停止照常（第 3 輪審查 Claude；違規證明：過濾改成 why ~= nil＝
+    -- (WHY-bad) 紅）。換行是偽造 log 行的典型手法。
+    for i, bad in ipairs({ "x\n[MinidoracatAutoDriveFor42] summon end vid=1 code=ARRIVED", string.rep("a", 65), { 1 } }) do
+        local tag = "(WHY-bad" .. i .. ") "
+        local p, vv = drive.sumFix({ mp = true })
+        local ends = {}
+        clientFlag, serverFlag = false, true
+        Api.startSummon(p, vv, { onEnd = function(_, code) ends[#ends + 1] = code end })
+        nowMs = nowMs + 250
+        MDAD.Summon.tick()
+        local log = capturePrint(function()
+            fire("OnClientCommand", MOD_ID, MDAD.CMD_SUMMON, p,
+                { vehicleId = vv:getId(), active = false, code = "FAULT", why = bad })
+        end)
+        checkFalse(logHas(log, "why="), tag .. "壞的 why 不印")
+        checkNil(Api.summonInfo(vv), tag .. "停止照常處理")
+        checkEq(ends[1], "FAULT", tag .. "停止碼照收")
+    end
+end
+drive.scenarioSummonWhy()
+
+-- 停車點每次 summonSpot 最多 SUMMON_SPOT_PROBE_MAX 個 probeNear 就回 nil（每幀成本上限；adsum-1028-d2-prof 最壞 277ms）。
+-- 違規證明：拿掉預算那個出口＝(PC) 紅（會掃滿半徑 20 內所有候選）。
+function drive.scenarioSummonSpotPoseCap()
+    scenario("召喚停車點：全被擋時做滿 SUMMON_SPOT_PROBE_MAX 個 probeNear 就停，不掃完整個半徑")
+    local Dr = MDAD.Drive
+    local T = Dr.debugTune()
+    local _, v = drive.sumFix({ px = 15 })
+    local sm = { mode = "target", playerNum = 0 }
+    checkTrue(Dr.summonBody(sm, v), "(PC) 車身量得到")
+    local realProbe, n = MDADSensor.probeNear, 0
+    MDADSensor.probeNear = function()
+        n = n + 1
+        return "hard"
+    end
+    local tx = Dr.summonSpot(sm, v, 0, 0, 15.5, 0.5, 44)
+    MDADSensor.probeNear = realProbe
+    checkNil(tx, "(PC) 全被擋：nil")
+    checkEq(n, T.SUMMON_SPOT_PROBE_MAX, "(PC) 每個姿態第一個 probe 就擋：probeNear 次數＝SUMMON_SPOT_PROBE_MAX")
+end
+drive.scenarioSummonSpotPoseCap()
+
+-- 召喚推力在「目標＋SUMMON_PUSH_OVER_KMH」歸零（E2E tesla-sum-1027-sp-g 前進／後退每 tick 最高 3.9／4.1 km/h；
+-- adsum-1028-c-s5 到我這裡 500ms 取樣 12.5 km/h，限速 10）。違規證明：summonDumbStep 不帶 vCap＝(DP) 紅；
+-- summonPush 不帶 vCap＝(PP) 紅。
+function drive.scenarioSummonDumbPeak()
+    scenario("召喚推力：車速到目標＋SUMMON_PUSH_OVER_KMH 就不推，低於目標照推；前進、倒車、到我這裡同")
+    local Dr = MDAD.Drive
+    local T = Dr.debugTune()
+    for _, dir in ipairs({ 1, -1 }) do
+        local tag = "(DP dir=" .. dir .. ") "
+        local _, v = drive.sumFix({ px = dir > 0 and -6 or 6, py = 4 })
+        clientFlag, serverFlag = false, false
+        drive.sumStart({ mode = "dumb", dir = dir })
+        for _, kmh in ipairs({ T.SUMMON_DUMB_KMH + T.SUMMON_PUSH_OVER_KMH + 0.1, 3 }) do
+            v._speed = kmh * dir
+            driveReset(v)
+            drive.sumTick()
+            checkEq(v._imp.total, 0, tag .. kmh .. " km/h：不推")
+        end
+        v._speed = 0.5 * dir
+        driveReset(v)
+        drive.sumTick()
+        checkEq(v._imp.total, 1, tag .. "0.5 km/h：照推")
+        Dr.summonStopLocal(0)
+    end
+    local s = { maxSpeed = T.SUMMON_MAX_KMH, vehicleProfile = { wheelFriction = 2 }, runtimeMass = 1000 }
+    local over = T.SUMMON_MAX_KMH + T.SUMMON_PUSH_OVER_KMH + 0.1
+    checkEq(Dr.summonPush(s, over, T.SUMMON_MAX_KMH, 1), 0, "(PP) 到我這裡：超過限速＋0.5 不推")
+    checkEq(Dr.summonPush(s, over, 30, 1), 0, "(PP) 目標速度高於限速時以限速為準")
+    checkTrue(Dr.summonPush(s, T.SUMMON_MAX_KMH - 0.5, T.SUMMON_MAX_KMH, 1) > 0, "(PP) 低於限速照推")
+    checkEq(Dr.summonPush(s, 3 + T.SUMMON_PUSH_OVER_KMH + 0.1, 3, 1), 0,
+        "(PP) 低目標（彎道、到站減速）：上限是這一幀的目標＋0.5，不是限速＋0.5")
+end
+drive.scenarioSummonDumbPeak()
 
 -- =====================================================================
 -- 總結

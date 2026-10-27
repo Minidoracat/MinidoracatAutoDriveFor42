@@ -47,6 +47,21 @@ MDAD.CMD_DIAG_UPLOAD = "DiagUpload"
 -- id, 車身中心 x, y, 速度 vx, vy, 前向 fx, fy, 半寬, 半長。
 MDAD.CMD_TRAFFIC = "Traffic"
 MDAD.RELAY_FIELDS = 9
+-- 召喚（server/MDAD_Summon.lua 持有 session）：Summon＝client → server 心跳／停止 {vehicleId, active, code?, why?}（why＝起步
+-- 失敗的細分原因，只印 log；只能續約或停止
+-- 自己的 session，**沒有從 client 開始召喚的指令**——開始只走伺服器 API MinidoracatAutoDriveAPI.startSummon）；
+-- SummonStart／SummonEnd＝server → client {vehicleId, to, mode, x, y, dir}（鍵同 startSummon opts）／{vehicleId, code, to}。
+MDAD.CMD_SUMMON = "Summon"
+MDAD.CMD_SUMMON_START = "SummonStart"
+MDAD.CMD_SUMMON_END = "SummonEnd"
+-- 召喚的停止碼（每種失敗一個名字；AGENTS.md「每種失敗要有自己的名字」）。client 送來的 code 不在表內一律當 CANCELLED；
+-- 顯示文字是 UI_MinidoracatAutoDrive_SummonCode_<碼>（MinidoracatAutoDriveAPI.summonReasonText）。
+MDAD.SUMMON_CODES = {
+    ARRIVED = true, CANCELLED = true, TAKEOVER = true, OCCUPIED = true, BOARDED = true, DEAD = true, LEFT = true,
+    TIMEOUT = true, FAR = true, TOWING = true, AUTH = true, GONE = true, ENGINE = true, MODULE = true, NAV = true,
+    ENGINE_START = true, BLOCKED = true, STUCK = true, ZOMBIES = true, PLAYER = true, ANIMAL = true, AREA = true,
+    NO_ROUTE = true, ROUTE_FAR = true, FAULT = true, BUSY = true,
+}
 
 MDAD.FAIL_GENERIC = "UI_MinidoracatAutoDrive_InstallFailed"
 MDAD.FAIL_NO_BATTERY = "UI_MinidoracatAutoDrive_NoBattery"
@@ -284,6 +299,8 @@ local function playerIdentity(player)
     end
     return username, playerId
 end
+-- 召喚 session（server/MDAD_Summon.lua）與 usage 用同一份身分判準：server＝onlineID、SP＝playerNum。
+MDAD.playerIdentity = playerIdentity
 
 local function playerUsageKey(username, playerId)
     return tostring(#username) .. ":" .. username .. ":" .. tostring(playerId)
@@ -402,6 +419,9 @@ function MDAD.setAutoUsage(player, vehicle)
 end
 
 function MDAD.isAutoUsageActive(vehicle)
+    -- 召喚中的車沒有駕駛：計費改由伺服器自己的召喚 session 判（延後綁定；駕駛那條分支不動）
+    local sm = MDAD.Summon
+    if sm and sm.isActive(vehicle) then return true end
     if not vehicle then return false end
     local vehicleId = vehicle:getId()
     if not MDAD.isFiniteInt(vehicleId) then return false end
@@ -436,6 +456,10 @@ function MDAD.vehicleUsageModes(vehicle)
     if not vehicle then return false, false, nil end
     local driver = vehicle:getDriver()
     local navOn = driver ~= nil and MDAD.isNavUsageActive(driver, vehicle)
+    if driver == nil then
+        local sm = MDAD.Summon -- 召喚中靠車上 GPS 導航＝車付（server/MDAD_Summon.lua 的 Summon.navOn）
+        navOn = sm ~= nil and sm.navOn(vehicle) == true
+    end
     return navOn, MDAD.isAutoUsageActive(vehicle), driver
 end
 
@@ -822,6 +846,110 @@ function MinidoracatAutoDriveAPI.hasNavDevice(playerNum)
     local player = getSpecificPlayer(playerNum)
     if not player then return false end
     return hasNavDevice(player, playerNum, true) == true
+end
+
+-- ===== 召喚 API（summonApiVersion = 1；契約唯一來源就是這一段）=====
+-- 呼叫端偵測 type(MinidoracatAutoDriveAPI) == "table"、summonApiVersion 是 number 且 >= 1、要用的函式是 function。
+-- 版本只增不減，改語意就加版本。對外文字不點名呼叫端。三種召喚：mode="come"（到我這裡，預設）、"target"（開到指定地點，
+-- 帶地面座標 x, y）、"dumb"（前進／後退：直線、不轉向、不取路線；dir=1 前進、-1 倒車）。
+--   伺服器／SP：startSummon(player, vehicle, opts) → true｜false, 翻譯鍵。呼叫端要先驗過自己的權限（鑰匙、所有權）；
+--     opts.startEngine＝true 時由本 MOD 代為發動（呼叫端擔保有鑰匙）；opts.onEnd(vehicle, code, player)＝結束回呼，一定在
+--     startSummon 回傳之後、每趟一次（車已卸載＝GONE 時 vehicle 為 nil；召喚者已離線時 player 為 nil）。檢查順序固定：①格式
+--     ②召喚者（活著、徒步、身分）③沙盒距離（come／dumb 看車、
+--     target 另看目標）④車：沒人、沒拖、沒在動、沒人持有物理權限、沒在召喚、12V、模組、導航裝置（dumb 不看）⑤引擎在轉或
+--     startEngine ⑥寫入 session。
+--   伺服器／SP：stopSummon(vehicle, code)（code 預設 CANCELLED）→ boolean；summonInfo(vehicle) → {by, phase, startedMs,
+--     mode} 或 nil（phase：starting＝發動引擎／交權限中、driving＝召喚者的客戶端在開）。
+--   客戶端：canSummon(playerNum, vehicle?, opts?) → true｜false, 翻譯鍵（只用來灰掉介面，以伺服器為準）；
+--     summonState(playerNum) → {vid, phase, code, why, dist, mode} 或 nil（phase：driving／stopping／ended，code 只在 ended
+--     有值；why 只在起步就失敗時有值＝細分原因（主 MOD 的路線狀態或理由鍵），只供記錄、字彙不保證；回的是本 MOD 的狀態表，唯讀）；
+--     stopSummon(playerNum) → boolean；summonReach(playerNum) → 召喚者實際叫得動的半徑（格）＝min(summonRange(),
+--     本機保證載入距離)；summonReasonText(code) → 停止碼的顯示文字。
+--   兩端：summonRange() → 沙盒 SummonMaxDistance（格，0＝關閉）。
+-- 停止碼見 MDAD.SUMMON_CODES；起步失敗的鍵是 UI_MinidoracatAutoDrive_Summon*，以及沿用的 EngineOff／NeedModule／
+-- NeedGPS（或 NeedGPSOrWatch）／NavApiMissing。
+MinidoracatAutoDriveAPI.summonApiVersion = 1
+MDAD.SUMMON_RANGE_MAX = 64
+MDAD.KEY_SUMMON_INVALID = "UI_MinidoracatAutoDrive_SummonInvalid"
+
+function MDAD.summonRange()
+    local v = MDAD.sandbox("SummonMaxDistance", MDAD.SUMMON_RANGE_MAX)
+    if type(v) ~= "number" or v * 0 ~= 0 then return MDAD.SUMMON_RANGE_MAX end
+    v = math.floor(v)
+    if v < 0 then return 0 end
+    if v > MDAD.SUMMON_RANGE_MAX then return MDAD.SUMMON_RANGE_MAX end
+    return v
+end
+MinidoracatAutoDriveAPI.summonRange = MDAD.summonRange
+
+-- opts 的格式檢查（startSummon／canSummon 共用）：回 mode, x, y, dir；格式不對回 nil。
+function MDAD.summonOpts(opts)
+    if opts ~= nil and type(opts) ~= "table" then return nil end
+    local mode = opts and opts.mode
+    if mode == nil or mode == "come" then return "come" end
+    if mode == "target" then
+        local x, y = opts.x, opts.y
+        if type(x) ~= "number" or type(y) ~= "number" or x * 0 ~= 0 or y * 0 ~= 0 then return nil end
+        return mode, x, y
+    end
+    if mode == "dumb" and (opts.dir == 1 or opts.dir == -1) then return mode, nil, nil, opts.dir end
+    return nil
+end
+
+-- 召喚的導航裝置閘門（NeedItemForNav=true；dumb 不看）：召喚者身上有電的隨身 GPS／錶上的定位模組，或車上有電的 GPS，
+-- 任一即可（2026-10-27 使用者回答設計稿、主代理補定）。回 true｜false, 翻譯鍵。冷路徑（起步一次），不走快取。
+function MDAD.summonNavOk(player, vehicle)
+    if MDAD.sandbox("NeedItemForNav", false) ~= true then return true end
+    if MDAD.hasVehicleNavPower(vehicle) then return true end
+    if player and (MDAD.findChargedPortableGPS(player) or watchGpsActive(player)) then return true end
+    return false, MDAD.navDeviceReason()
+end
+
+-- 下面幾支是延後綁定的薄殼：伺服器實作在 server/MDAD_Summon.lua（MDAD.Summon），客戶端實作在 client/MDAD_Driver.lua
+-- （MDAD.Drive）。專用伺服器沒有 Drive、MP 客戶端沒有 Summon，缺的那邊回 false／nil。
+function MinidoracatAutoDriveAPI.startSummon(player, vehicle, opts)
+    local sm = MDAD.Summon
+    if not sm then return false, MDAD.KEY_SUMMON_INVALID end
+    return sm.start(player, vehicle, opts)
+end
+
+-- 數字＝客戶端 stopSummon(playerNum)；否則＝伺服器 stopSummon(vehicle, code)。SP 兩邊在同一個 Lua state，靠型別分流。
+function MinidoracatAutoDriveAPI.stopSummon(a, code)
+    if type(a) == "number" then
+        local d = MDAD.Drive
+        return d ~= nil and d.summonStopLocal(a) == true
+    end
+    local sm = MDAD.Summon
+    return sm ~= nil and sm.stop(a, code) == true
+end
+
+function MinidoracatAutoDriveAPI.summonInfo(vehicle)
+    local sm = MDAD.Summon
+    if not sm then return nil end
+    return sm.info(vehicle)
+end
+
+function MinidoracatAutoDriveAPI.canSummon(playerNum, vehicle, opts)
+    local d = MDAD.Drive
+    if not d then return false, MDAD.KEY_SUMMON_INVALID end
+    return d.canSummon(playerNum, vehicle, opts)
+end
+
+function MinidoracatAutoDriveAPI.summonState(playerNum)
+    local d = MDAD.Drive
+    if not d then return nil end
+    return d.summonState(playerNum)
+end
+
+function MinidoracatAutoDriveAPI.summonReach(playerNum)
+    local d = MDAD.Drive
+    if not d then return 0 end
+    return d.summonReach(playerNum)
+end
+
+function MinidoracatAutoDriveAPI.summonReasonText(code)
+    if not MDAD.SUMMON_CODES[code] then code = "CANCELLED" end
+    return getText("UI_MinidoracatAutoDrive_SummonCode_" .. code)
 end
 
 

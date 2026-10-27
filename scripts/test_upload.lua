@@ -480,7 +480,7 @@ scenario("server throttle: chunks sent 500ms apart but delivered 8 at a time are
 nowMs = nowMs + 3600000
 client = false
 MDAD.CMD_DEVICE, MDAD.CMD_USAGE = "Device", "Usage"
-MDAD.CMD_NAV_USAGE, MDAD.CMD_RECIPE_RESCAN = "NavUsage", "RecipeRescan"
+MDAD.CMD_NAV_USAGE, MDAD.CMD_RECIPE_RESCAN, MDAD.CMD_SUMMON = "NavUsage", "RecipeRescan", "Summon"
 function MDAD.isFiniteInt(n) return type(n) == "number" and n * 0 == 0 and n % 1 == 0 end
 loadFile("server/MDAD_Server.lua")
 client = true
