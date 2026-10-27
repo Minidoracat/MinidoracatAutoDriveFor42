@@ -33956,6 +33956,176 @@ function drive.scenarioSummonZombieTelemetry()
 end
 drive.scenarioSummonZombieTelemetry()
 
+-- 召喚者斷線（第 1 輪審查 Claude／Grok）：伺服器沒有斷線事件，onlineID 還會被新玩家重用（GameServer.java:2670-2698），
+-- 只能靠輪詢的 findPlayer（onlineID＋username）。違規證明：findPlayer 不比 username＝(LEFT-reuse) 紅；拿掉 LEFT 那行＝兩案都紅。
+function drive.scenarioSummonLeft()
+    scenario("召喚者斷線（LEFT）：onlineID 被新玩家重用或查無此人，下一輪輪詢就收、權限交還伺服器、onEnd 收到 nil 玩家")
+    local Api = MinidoracatAutoDriveAPI
+    for _, kind in ipairs({ "reuse", "gone" }) do
+        local tag = "(LEFT-" .. kind .. ") "
+        local p, v = drive.sumFix({ mp = true })
+        local ends = {}
+        clientFlag, serverFlag = false, true
+        local ok = Api.startSummon(p, v, { onEnd = function(veh, code, pl) ends[#ends + 1] = { veh, code, pl } end })
+        clientFlag, serverFlag = true, false
+        checkTrue(ok, tag .. "起步")
+        drive.sumServer()
+        checkEq(v._npid, 1000, tag .. "權限在召喚者")
+        if kind == "reuse" then
+            -- 新玩家拿到同一個 onlineID、站在召喚者原地（範圍內）：只有 username 分得出來
+            local nb = newPlayer({ num = 9, username = "newcomer", onlineId = 1000 })
+            nb.getX = function() return p._x end
+            nb.getY = function() return p._y end
+            drive.online = { nb }
+        else
+            drive.online = {}
+        end
+        drive.sumServer()
+        checkNil(Api.summonInfo(v), tag .. "一輪輪詢就收（不等 15 秒 TTL）")
+        checkEq(v._npid, -1, tag .. "權限交還伺服器（新玩家不繼承）")
+        checkTrue(ends[1] ~= nil and ends[1][2] == "LEFT" and ends[1][3] == nil, tag .. "onEnd 碼 LEFT、玩家 nil")
+        drive.online = { p }
+    end
+end
+drive.scenarioSummonLeft()
+
+-- 多人召喚的區域等待（第 1 輪審查 Claude）：沒有本機駕駛時 PassengerMap.isChunkLoaded 一律 false，引擎的 invalid chunk
+-- 永遠是 true（PassengerMap.java:42-67）。違規證明：拿掉 Drive.areaWait 的 s.summon and isClient() 分支＝(MPA) 紅。
+function drive.scenarioSummonAreaWait()
+    scenario("多人召喚的區域等待：引擎的 isInvalidChunkAhead／Behind 恆真也不等；Sensor 未載入前緣在車前 halfL＋SUMMON_AREA_M 內才等")
+    local Dr = MDAD.Drive
+    local T = Dr.debugTune()
+    local p, v = drive.sumFix({ px = 30, mp = true })
+    drive.sumStart()
+    checkTrue(Dr.isActive(0), "(MPA) 接上")
+    v.isInvalidChunkAhead = function() return true end
+    v.isInvalidChunkBehind = function() return true end
+    drive.sumRound()
+    local s = Dr.debugSession(0)
+    local waited = false
+    driveReset(v)
+    for _ = 1, 40 do
+        nowMs = nowMs + 100
+        drive.sumTick()
+        if s.areaWaitActive then waited = true end
+    end
+    checkFalse(waited, "(MPA) 引擎回 invalid chunk、Sensor 沒有未載入：不等")
+    checkTrue(v._imp.total > 0, "(MPA) 照常推（實得 " .. v._imp.total .. " 次）")
+    checkTrue(Dr.isActive(0), "(MPA) 還在召喚（沒有 AREA）")
+    -- 反向：Sensor 的未載入前緣在範圍內＝等；更遠＝不等
+    local keepU, keepUS, keepI = s.sensor.unloaded, s.sensor.unloadedS, s.intentShadow
+    local edge = s.lastSNow + s.vehicleProfile.halfL + T.SUMMON_AREA_M
+    s.intentShadow = "GO"
+    s.sensor.unloaded, s.sensor.unloadedS = true, edge - 1
+    Dr.areaWait(s, v, nowMs, 10, 0)
+    checkTrue(s.areaWaitActive, "(MPA) 未載入前緣在車前 halfL＋SUMMON_AREA_M 內：等")
+    s.sensor.unloadedS = edge + 1
+    Dr.areaWait(s, v, nowMs, 10, 0)
+    checkFalse(s.areaWaitActive, "(MPA) 未載入前緣更遠：不等")
+    s.sensor.unloaded, s.sensor.unloadedS, s.intentShadow = keepU, keepUS, keepI
+    v.isInvalidChunkAhead, v.isInvalidChunkBehind = nil, nil
+    Dr.summonStopLocal(0)
+end
+drive.scenarioSummonAreaWait()
+
+-- 多人引擎還沒同步（E2E vmsum-1027-b）：伺服器看到 Running 才送 SummonStart，但引擎狀態比指令晚到客戶端。
+-- 違規證明：summonBegin 的 engineWait 改 false＝(ES-come) 紅；拿掉 summonDumbStep 的 authUntil 等待＝(ES-dumb) 紅。
+function drive.scenarioSummonEngineSync()
+    scenario("召喚：多人引擎還沒同步，SummonStart 先到、本機引擎還沒轉，SUMMON_AUTH_MS 內等、不推不收；轉了照常推；一直沒轉才 ENGINE")
+    local Dr, Api = MDAD.Drive, MinidoracatAutoDriveAPI
+    local T = Dr.debugTune()
+    local function begin(opts, fix)
+        local p, v = drive.sumFix(fix)
+        clientFlag, serverFlag = false, true
+        Api.startSummon(p, v, opts)
+        driveReset(v) -- 會清送出佇列：要在伺服器輪詢前
+        v._engine = true
+        nowMs = nowMs + 250
+        MDAD.Summon.tick() -- 伺服器看到 Running：交權限、送 SummonStart
+        v._engine = false  -- 客戶端這邊引擎狀態還沒到
+        clientFlag, serverFlag = true, false
+        drive.sumDeliver()
+        return p, v
+    end
+    local function lastStop()
+        local up = drive.sumUp or {}
+        for i = #up, 1, -1 do
+            local c = up[i]
+            if c.command == MDAD.CMD_SUMMON and c.args.active == false then return c.args.code end
+        end
+        return nil
+    end
+    for _, m in ipairs({ { "come", { startEngine = true }, { px = 30, mp = true, engine = false } },
+        { "dumb", { mode = "dumb", dir = 1, startEngine = true }, { px = -6, py = 4, mp = true, engine = false } } }) do
+        local tag = "(ES-" .. m[1] .. ") "
+        local _, v = begin(m[2], m[3])
+        checkEq(v._npid, 1000, tag .. "權限已給召喚者")
+        checkTrue(Dr.summons[0] ~= nil, tag .. "SummonStart 收到、掛著等")
+        for _ = 1, 8 do
+            nowMs = nowMs + 250
+            drive.sumTick()
+        end
+        checkEq(v._imp.total, 0, tag .. "引擎還沒轉的 2 秒：不推")
+        checkTrue(Dr.summons[0] ~= nil and lastStop() == nil, tag .. "沒有收（沒送停止）")
+        v._engine = true
+        for _ = 1, 4 do
+            nowMs = nowMs + 250
+            drive.sumTick()
+        end
+        if m[1] == "come" then
+            checkTrue(Dr.isActive(0), tag .. "引擎轉了：開 session")
+            drive.sumRound()
+        end
+        driveReset(v)
+        drive.sumTick()
+        checkTrue(v._imp.total > 0, tag .. "引擎轉了：照常推")
+        Dr.summonStopLocal(0)
+        -- 一直沒轉：SUMMON_AUTH_MS 後 ENGINE，全程不推
+        _, v = begin(m[2], m[3])
+        local waited = 0
+        while waited <= T.SUMMON_AUTH_MS + 500 and Dr.summons[0] ~= nil do
+            nowMs = nowMs + 250
+            waited = waited + 250
+            drive.sumTick()
+        end
+        drive.sumTick(2)
+        checkTrue(waited >= T.SUMMON_AUTH_MS, tag .. "不提早放棄（等了 " .. waited .. "ms）")
+        checkEq(lastStop(), "ENGINE", tag .. "等滿 SUMMON_AUTH_MS：停止碼 ENGINE")
+        checkEq(v._imp.total, 0, tag .. "全程不推")
+    end
+end
+drive.scenarioSummonEngineSync()
+
+-- 前進／後退：玩家排在殭屍之後（第 1 輪審查 Claude／Codex blocking）：build-1027 §1「前方是玩家一律停」。
+-- 違規證明：summonDumbWho 遇到殭屍就 return＝(DW) 紅。
+function drive.scenarioSummonDumbWho()
+    scenario("召喚前進／後退：帶內殭屍排在玩家前面（不同格、同一格先列殭屍、倒車）仍是 PLAYER、零推力")
+    local Api = MinidoracatAutoDriveAPI
+    local function zombie()
+        return { _class = "IsoZombie", isDead = function() return false end }
+    end
+    local function player()
+        return { _class = "IsoPlayer", isDead = function() return false end, getVehicle = function() return nil end }
+    end
+    local cases = {
+        { "前方不同格", 1, function() drive.putMoving(2, 0, zombie()); drive.putMoving(3, 0, player()) end },
+        { "前方同一格、殭屍先列", 1, function() drive.putMoving(3, 0, zombie()); drive.putMoving(3, 0, player()) end },
+        { "倒車不同格", -1, function() drive.putMoving(-3, 0, zombie()); drive.putMoving(-4, 0, player()) end },
+    }
+    for _, c in ipairs(cases) do
+        local tag = "(DW " .. c[1] .. ") "
+        local _, v = drive.sumFix({ px = c[2] > 0 and -6 or 6, py = 4 })
+        c[3]()
+        clientFlag, serverFlag = false, false
+        drive.sumStart({ mode = "dumb", dir = c[2] })
+        driveReset(v)
+        drive.sumTick()
+        checkEq(Api.summonState(0) and Api.summonState(0).code, "PLAYER", tag .. "停止碼 PLAYER")
+        checkEq(v._imp.total, 0, tag .. "零推力")
+    end
+end
+drive.scenarioSummonDumbWho()
+
 -- =====================================================================
 -- 總結
 -- =====================================================================
