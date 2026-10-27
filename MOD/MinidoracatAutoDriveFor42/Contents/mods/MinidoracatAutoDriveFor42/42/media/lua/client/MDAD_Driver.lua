@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1028e"
+Drive.REV = "1028f"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -17919,6 +17919,8 @@ end
 -- 伺服器 finish 收權限、熄火、回呼後送 SummonEnd（Drive.summonEndCmd）。本段只用 Drive／TUNE 欄位（主 chunk local 已滿）。
 TUNE.SUMMON_MAX_KMH = 10           -- 召喚限速（2026-10-27 主代理補定）
 TUNE.SUMMON_DUMB_KMH = 1           -- 前進／後退限速（實車手冊「基础召唤时，最高车速为 1 km/h」）
+TUNE.SUMMON_DUMB_KI = 2.0         -- 前進／後退推力積分（m/s² 每 km/h 每秒；MDADDynamics.summonPushAccel 的 bias）。只有比例項時
+                                   -- 車速看阻力：原版車 0.30、Model Y 前進 0.9／後退 0.4 km/h（adsum-1028-d2-s10、integsum-1028-a）
 TUNE.SUMMON_PUSH_OVER_KMH = 0.5    -- 召喚推力在「目標＋這個」歸零（MDADDynamics.summonPushAccel 的 vCap；前進／後退＝1.5）
 TUNE.SUMMON_DUMB_MAX_M = 12        -- 前進／後退單次最多（走滿＝ARRIVED）
 TUNE.SUMMON_DUMB_CLEAR_M = 1       -- 倒車探測：後保桿往後這麼遠（前進用 probeNear：車身＋車頭前 1m）
@@ -18624,7 +18626,7 @@ function Drive.summonDumbBegin(player, sm, now)
     local mass = sm.vehicleProfile.mass
     sm.mass = (finite(mass) and mass >= MASS_VALID_LO and mass <= MASS_VALID_HI) and mass or MASS_FALLBACK
     sm.x0, sm.y0 = v:getX(), v:getY()
-    sm.stallSince, sm.nextProbeMs, sm.zombie = 0, 0, false
+    sm.stallSince, sm.nextProbeMs, sm.zombie, sm.bias, sm.biasAt = 0, 0, false, 0, nil
     sm.job = "dumb"
     Drive.summonN = Drive.summonN + 1
     if getDebug() then -- telemetry: n/a 前進／後退不開駕駛 session（結果在伺服器 log 與 summonState）
@@ -18726,8 +18728,19 @@ function Drive.summonDumbStep(player, sm, now)
     else
         sm.stallSince = 0
     end
-    local a = MDADDynamics.summonPushAccel(along, TUNE.SUMMON_DUMB_KMH, sm.vehicleProfile.wheelFriction,
-        TUNE.SUMMON_DUMB_KMH + TUNE.SUMMON_PUSH_OVER_KMH)
+    -- 積分項（只在車動著時累積：頂住東西時不越推越大，BLOCKED 前的推力和沒有積分時一樣）
+    local wf = sm.vehicleProfile.wheelFriction
+    if sm.biasAt and along >= TUNE.SUMMON_STILL_KMH then
+        local dt = now - sm.biasAt
+        if dt > 100 then dt = 100 end -- 卡頓不一次灌進去
+        local lim = MDADDynamics.SUMMON_K_R * ((finite(wf) and wf > 0) and wf or MDADDynamics.SUMMON_FRICTION_REF)
+        local b = sm.bias + TUNE.SUMMON_DUMB_KI * (TUNE.SUMMON_DUMB_KMH - along) * dt / 1000
+        if b > lim then b = lim elseif b < -lim then b = -lim end
+        sm.bias = b
+    end
+    sm.biasAt = now
+    local a = MDADDynamics.summonPushAccel(along, TUNE.SUMMON_DUMB_KMH, wf,
+        TUNE.SUMMON_DUMB_KMH + TUNE.SUMMON_PUSH_OVER_KMH, sm.bias)
     if a > 0 then
         local mult = getGameTime():getMultiplier()
         if mult < MULT_MIN then mult = MULT_MIN elseif mult > MULT_MAX then mult = MULT_MAX end

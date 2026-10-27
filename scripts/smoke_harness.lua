@@ -34460,6 +34460,51 @@ function drive.scenarioSummonDumbPeak()
 end
 drive.scenarioSummonDumbPeak()
 
+-- 前進／後退的積分項：車速一直低於目標時前饋往上補，前進、倒車同一套（integsum-1028-a Model Y 後退只有前進一半快、
+-- adsum-1028-d2-s10 原版車 0.30 km/h）；頂住不動時不累積（BLOCKED 前不越推越大）。違規證明：拿掉積分＝(DI) 紅。
+function drive.scenarioSummonDumbIntegral()
+    scenario("召喚前進／後退：車速低於目標時積分往上補、兩個方向相同；不動時不累積")
+    local Dr = MDAD.Drive
+    local T = Dr.debugTune()
+    local bias = {}
+    for _, dir in ipairs({ 1, -1 }) do
+        local tag = "(DI dir=" .. dir .. ") "
+        local _, v = drive.sumFix({ px = dir > 0 and -6 or 6, py = 4 })
+        clientFlag, serverFlag = false, false
+        drive.sumStart({ mode = "dumb", dir = dir })
+        v._speed = 0.4 * dir
+        nowMs = nowMs + 100
+        driveReset(v)
+        drive.sumTick()
+        local lon0 = math.abs(drive.sumLon(v))
+        for _ = 1, 29 do -- 再 2.9 秒，每步 100ms
+            nowMs = nowMs + 100
+            driveReset(v)
+            drive.sumTick()
+        end
+        local sm = Dr.summons[0]
+        bias[dir] = sm and sm.bias or 0
+        checkNear(bias[dir], T.SUMMON_DUMB_KI * 0.6 * 2.9, 0.15, tag .. "0.4 km/h 推 3 秒：bias＝KI×0.6×時間")
+        local lon1 = math.abs(drive.sumLon(v))
+        checkTrue(lon1 > lon0 * 1.1, tag .. "實際推力變大（" .. lon0 .. " -> " .. lon1 .. "）")
+        Dr.summonStopLocal(0)
+    end
+    checkNear(bias[1], bias[-1], 1e-9, "(DI) 前進、倒車同一個 bias")
+    local _, v = drive.sumFix({ px = -6, py = 4 })
+    clientFlag, serverFlag = false, false
+    drive.sumStart({ mode = "dumb", dir = 1 })
+    v._speed = 0
+    for _ = 1, 20 do
+        nowMs = nowMs + 100
+        driveReset(v)
+        drive.sumTick()
+    end
+    local sm = Dr.summons[0]
+    checkEq(sm and sm.bias, 0, "(DI) 頂住不動 2 秒：bias 不累積")
+    Dr.summonStopLocal(0)
+end
+drive.scenarioSummonDumbIntegral()
+
 -- =====================================================================
 -- 總結
 -- =====================================================================
