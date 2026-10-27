@@ -21,6 +21,8 @@ MDAD.Summon = Summon
 
 Summon.POLL_MS = 250
 Summon.START_MS = 8000      -- 代為發動等 Running 的上限（實測約 1.5 秒進 Running）
+Summon.RETRY_MS = 2000      -- 發動中引擎回到 Idle（上一次失敗、或剛熄火還在 ShuttingDown 時按的那次沒進 Starting）就重按
+Summon.START_TRIES = 3      -- 最多按幾次（每次 Idle→Starting 扣 0.025 電，同玩家轉鑰匙；E2E tesla-sum-1027-sp-c）
 Summon.MOVING_KMH = 0.8     -- 同原版 isStopped 的門檻（BaseVehicle.java:4259-4260）
 Summon.START_CHARGE = 0.1   -- tryStartEngine 在電瓶 ≤0.1 時只會發動失敗（BaseVehicle.java:7582-7586）
 
@@ -39,11 +41,11 @@ local KEY = {
 }
 Summon.KEY = KEY
 
-local sessions = {} -- vehicleId → { username, playerId, startedMs, beatAt, startUntil, phase, engineBy, mode, tx, ty, dir, onEnd }
+local sessions = {} -- vehicleId → { username, playerId, startedMs, beatAt, startUntil, tries, retryAt, phase, engineBy, mode, tx,
+--                     ty, dir, onEnd }
 local count = 0
 local nextPollMs = 0
 local pollIds = {} -- 輪詢時先抄下 id 再處理：finish 會刪表項，Kahlua 的 table 走 pairs 時不能改
-Summon.sessions = sessions -- 唯讀觀測（離線測試與除錯）
 
 local function log(msg)
     print("[" .. MDAD.MOD_ID .. "] summon " .. msg)
@@ -145,8 +147,8 @@ function Summon.start(player, vehicle, opts)
     local now = getTimestampMs()
     sessions[vid] = {
         username = username, playerId = playerId, startedMs = now, beatAt = now,
-        startUntil = now + Summon.START_MS, phase = "starting", engineBy = not running,
-        mode = mode, tx = tx, ty = ty, dir = dir, onEnd = onEnd,
+        startUntil = now + Summon.START_MS, tries = running and 0 or 1, retryAt = now + Summon.RETRY_MS,
+        phase = "starting", engineBy = not running, mode = mode, tx = tx, ty = ty, dir = dir, onEnd = onEnd,
     }
     count = count + 1
     nextPollMs = 0
@@ -172,7 +174,11 @@ function Summon.finish(vid, code, vehicle, player)
         if isServer() and vehicle:getNetPlayerId() == sess.playerId then
             vehicle:authorizationChanged(vehicle:getDriver())
         end
-        if sess.engineBy and vehicle:getDriver() == nil and not vehicle:hasPassenger() and vehicle:isEngineRunning() then
+        -- 發動中（Starting／RetryingStarting／StartingSuccess）也要熄：只看 isEngineRunning 的話，租約刪掉後引擎狀態機
+        -- 照樣轉進 Running，無人車自己怠速（VehicleEngine.java:424-434 shutOff 在任何狀態都轉進關閉流程）
+        local st = tostring(vehicle:getEngineState())
+        if sess.engineBy and vehicle:getDriver() == nil and not vehicle:hasPassenger()
+                and (vehicle:isEngineRunning() or st == "Starting" or st == "RetryingStarting" or st == "StartingSuccess") then
             vehicle:shutOff()
             shut = true
         end
@@ -225,10 +231,22 @@ local function poll(vid, sess, now)
     if sess.phase == "starting" then
         if vehicle:isEngineRunning() then return handover(vid, sess, vehicle, player, now) end
         if now >= sess.startUntil then return Summon.finish(vid, "ENGINE_START", vehicle, player) end
+        if sess.engineBy and now >= sess.retryAt and sess.tries < Summon.START_TRIES
+                and tostring(vehicle:getEngineState()) == "Idle" then
+            sess.tries, sess.retryAt = sess.tries + 1, now + Summon.RETRY_MS
+            vehicle:tryStartEngine(true)
+        end
         return
     end
     if isServer() and vehicle:getNetPlayerId() ~= sess.playerId then
         return Summon.finish(vid, "AUTH", vehicle, player)
+    end
+    -- 熄火、電瓶沒電、模組被拆：伺服器自己收（不靠客戶端 driveGate；改過的客戶端照送心跳也留不住權限）
+    if not vehicle:isEngineRunning() or not MDAD.isBatteryLive(vehicle) then
+        return Summon.finish(vid, "ENGINE", vehicle, player)
+    end
+    if MDAD.sandbox("NeedItemForAutoDrive", true) == true and not MDAD.isAutoInstalled(vehicle) then
+        return Summon.finish(vid, "MODULE", vehicle, player)
     end
     if now < sess.beatAt or now - sess.beatAt > MDAD.AUTO_USAGE_TTL_MS then
         return Summon.finish(vid, "TIMEOUT", vehicle, player)
@@ -268,7 +286,11 @@ function Summon.onCommand(player, args)
     end
     if sess.phase ~= "driving" then return false end
     sess.beatAt = getTimestampMs()
-    MDAD.setNavUsage(player) -- 召喚者身上的 GPS 由召喚者付（同 setAutoUsage 順手續期 nav）
+    -- 導航誰付（同駕駛：車上有電的 GPS＝車付，見 Summon.navOn；否則召喚者身上的 GPS）；前進／後退不導航
+    if sess.mode ~= "dumb" then
+        local vehicle = getVehicleById(args.vehicleId)
+        if not (vehicle and MDAD.hasVehicleNavPower(vehicle)) then MDAD.setNavUsage(player) end
+    end
     return true
 end
 
@@ -299,18 +321,39 @@ function Summon.isActive(vehicle)
     return MDAD.sandbox("NeedItemForAutoDrive", true) ~= true or MDAD.isAutoInstalled(vehicle)
 end
 
+-- 車上 GPS 算不算在導航（MDAD.vehicleUsageModes 的無駕駛分支、collect）：到我這裡／指定地點、車上有電的 GPS
+-- ＝車付導航電與 GPS 油耗加成（同駕駛時 navUsageSource 先認車機）；前進／後退不導航。
+function Summon.navOn(vehicle)
+    if not Summon.isActive(vehicle) then return false end
+    return sessions[vehicle:getId()].mode ~= "dumb" and MDAD.hasVehicleNavPower(vehicle)
+end
+
 -- Consumption 每遊戲分鐘只收「在線玩家所在的車」；召喚中的車沒人在上面，這裡補進去（扣這台車的 12V，同駕駛模式）
-function Summon.collect(powerVehicles)
+function Summon.collect(powerVehicles, powerNav)
     if count == 0 then return end
     for vid in pairs(sessions) do
         local vehicle = getVehicleById(vid)
-        if vehicle and Summon.isActive(vehicle) then powerVehicles[vid] = vehicle end
+        if vehicle and Summon.isActive(vehicle) then
+            powerVehicles[vid] = vehicle
+            if powerNav and Summon.navOn(vehicle) then powerNav[vid] = true end
+        end
     end
 end
 
--- 召喚中撞東西：持權限的召喚者客戶端照常送原版 vehicle/crash、damageObjects、damageFromHitChr（BaseVehicle.java:4648-4651
--- 等），但原版伺服器要 vehicle:isDriver(player) 才套用（server/Vehicles/VehicleCommands.lua:282-314），沒有駕駛＝撞了不扣損。
+-- 全部收掉（離線測試清場；回收掉幾個）。不另外把 sessions 掛出去：刪表項不走 finish 會漏交權限與 onEnd。
+function Summon.finishAll(code)
+    local ids, n = {}, 0
+    for vid in pairs(sessions) do ids[#ids + 1] = vid end
+    for i = 1, #ids do
+        if Summon.finish(ids[i], code) then n = n + 1 end
+    end
+    return n
+end
+
+-- 召喚中撞東西：持權限的召喚者客戶端照常送原版 vehicle/crash、damageObjects（BaseVehicle.java:4648-4651 等），但原版
+-- 伺服器要 vehicle:isDriver(player) 才套用（server/Vehicles/VehicleCommands.lua:282-314），沒有駕駛＝撞了不扣損。
 -- 送的人是這台車的召喚持有者、車上沒有駕駛時，照原版同一支方法代為套用（參數信任度同原版信任駕駛）。只在 MP。
+-- damageFromHitChr 引擎要本機駕駛才送（BaseVehicle.java:3856），召喚車實際不會來；留著是同一張原版指令表。
 local CRASH = { crash = true, damageObjects = true, damageFromHitChr = true }
 local function finiteNum(n) return type(n) == "number" and n * 0 == 0 end
 

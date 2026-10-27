@@ -33178,9 +33178,7 @@ function drive.sumFix(opts)
     opts = opts or {}
     clientFlag, serverFlag = false, true
     MDAD.Drive.stop(0, nil)
-    local ids = {}
-    for vid in pairs(MDAD.Summon.sessions) do ids[#ids + 1] = vid end
-    for i = 1, #ids do MDAD.Summon.finish(ids[i], "CANCELLED") end
+    MDAD.Summon.finishAll("CANCELLED")
     MDAD.Drive.summonReset()
     drive.sumMP, drive.sumUp = opts.mp == true, {}
     clientFlag, serverFlag = drive.sumMP, false
@@ -33218,6 +33216,7 @@ function drive.sumFix(opts)
         self._auth = self._auth + 1
         self._npid = chr and chr:getOnlineID() or -1
     end
+    function v:getEngineState() return self._engine and "Running" or (self._estate or "Idle") end
     function v:tryStartEngine(haveKey)
         self._started, self._haveKey = self._started + 1, haveKey
     end
@@ -33931,8 +33930,14 @@ function drive.scenarioSummonZombieTelemetry()
     local s = Dr.debugSession(0)
     checkTrue(ev[1] and ev[1].phase == "start" and ev[1].mode == "come" and ev[1].vid == v:getId()
         and ev[1].kind == "direct", "(D1) summon start 事件（mode vid kind）")
-    s.sensor.zombieN = 1
-    checkEq(Dr.summonZombieCap(s, 10, nowMs), 4, "帶內有殭屍：目標速度壓到 4 km/h")
+    s.sensor.zombieN, s.zombieWhy = 1, nil
+    s.sensor.zombieNearS = s.lastSNow + s.vehicleProfile.halfL + 30
+    checkEq(Dr.summonZombieCap(s, 10, nowMs), 10, "殭屍在 30m 外：不算推、不壓速")
+    s.zombieWhy = "gap"
+    s.sensor.zombieNearS = s.lastSNow + s.vehicleProfile.halfL + 1
+    checkEq(Dr.summonZombieCap(s, 10, nowMs), 10, "軟縫閃得過：不算推")
+    s.zombieWhy = nil
+    checkEq(Dr.summonZombieCap(s, 10, nowMs), 4, "車頭前 1m 有殭屍、軟縫沒處理：壓到 4 km/h")
     for _ = 1, 61 do
         nowMs = nowMs + 250
         Dr.summonZombieCap(s, 10, nowMs)

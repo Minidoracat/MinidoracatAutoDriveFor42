@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1027c"
+Drive.REV = "1027d"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -2514,13 +2514,14 @@ local function startSession(playerObj, playerNum, stage, summon)
     local vehicle = summon and summon.vehicle or playerObj:getVehicle()
     local reason = driveGate(playerObj, vehicle, playerNum, nil, summon ~= nil)
     if reason then return reason end
-    local route, tx, ty, why
+    local route, tx, ty
     if summon then
-        route, tx, ty, why = Drive.summonFetch(api, playerNum, summon, vehicle)
+        route, tx, ty = Drive.summonFetch(api, playerNum, summon, vehicle)
+        if not route and summon.why == "api" then return KEY_API end -- 其餘原因在 summon.why（Drive.summonBegin 分）
     else
         route, tx, ty = fetchRoute(api, playerNum)
     end
-    if not route then return why == "api" and KEY_API or KEY_ROUTE end
+    if not route then return KEY_ROUTE end
     if cachedSnapTrusted(api) and routeTooFar(route) then return KEY_ROUTE_FAR end
     local maxSpeed = summon and TUNE.SUMMON_MAX_KMH or maxSpeedKmh()
     -- One coherent profile is built before Follower. Geometry invalid is fatal
@@ -17922,7 +17923,8 @@ TUNE.SUMMON_DUMB_CLEAR_M = 1       -- 倒車探測：後保桿往後這麼遠（
 TUNE.SUMMON_DUMB_PROBE_MS = 250
 TUNE.SUMMON_DUMB_STALL_MS = 3000   -- 前進／後退推了這麼久還沒動＝頂到東西
 TUNE.SUMMON_ZOMBIE_KMH = 4         -- 殭屍擋路閃不過時的爬行上限（2026-10-27 使用者回答：≤4 km/h 推過去）
-TUNE.SUMMON_ZOMBIE_MAX_MS = 15000  -- 帶內一直有殭屍這麼久＝推太久，停 ZOMBIES
+TUNE.SUMMON_ZOMBIE_NEAR_M = 3      -- 帶內最近的殭屍離車頭這麼近、軟縫又沒處理＝在推（遠處的殭屍交給一般的殭屍檔與繞行）
+TUNE.SUMMON_ZOMBIE_MAX_MS = 15000  -- 推了這麼久＝推太久，停 ZOMBIES
 TUNE.SUMMON_AUTH_MS = 5000         -- 多人：SummonStart 之後等物理權限到本機的上限，逾時 AUTH
 TUNE.SUMMON_BEAT_MS = 5000         -- 心跳間隔（伺服器 TTL＝MDAD.AUTO_USAGE_TTL_MS）
 TUNE.SUMMON_OWED_MS = 5000         -- 結束後等車停穩再交還的上限
@@ -17932,6 +17934,7 @@ TUNE.SUMMON_DIRECT_M = 40          -- 停車點在這麼近、直線預檢又過
 TUNE.SUMMON_SPOT_R = 20            -- 停車點搜尋半徑（格）
 TUNE.SUMMON_SPOT_MAX = 24          -- 停車點最多做幾次預檢
 TUNE.SUMMON_TAIL_M = 20            -- 路網終點接到停車點的尾段上限（同 SNAP_MAX_M）
+TUNE.SUMMON_ROAD_GAP_M = 3         -- 到我這裡走路網：線尾截到離召喚者 halfL＋這個（Drive.summonShort）
 TUNE.SUMMON_END_EXT_M = 4          -- 線尾延過停車點這麼遠：Follower 在終點前 ARRIVE_M 內判到、車心停在停車點附近
 TUNE.SUMMON_ARRIVE_GAP_M = 4.5     -- 車心到召喚者 ≤ halfL＋這個＝到（軟停距 3m＋1.5m；召喚者本人會被當行人停等）
 TUNE.SUMMON_TARGET_ARRIVE_M = 3    -- 指定地點：車心到目標點這麼近＝到
@@ -18107,7 +18110,10 @@ function Drive.summon(player, vehicle, info)
     return Drive.summonBegin(player, sm, now)
 end
 
--- 開 session；路線還在算（KEY_ROUTE）就掛成每幀工作，SUMMON_ROUTE_WAIT_MS 內重試
+-- 開 session；主 MOD 還在算路線（sm.why＝idle／extracting／building），或多人引擎 Running 還沒同步到本機（KEY_ENGINE，
+-- SUMMON_AUTH_MS 內；伺服器等到 Running 才送 SummonStart，但引擎狀態比指令晚到，E2E vmsum-1027-b 1.6 秒就 ENGINE）就掛成
+-- 每幀工作重試。其餘失敗立刻收：找不到路（noroad／failed／badargs…）＝NO_ROUTE；車身量不到、路線拿到了卻建不出剖面＝FAULT。
+Drive.SUMMON_ROUTE_PENDING = { idle = true, extracting = true, building = true }
 function Drive.summonBegin(player, sm, now)
     local reason = startSession(player, sm.playerNum, nil, sm)
     if reason == nil then
@@ -18125,7 +18131,9 @@ function Drive.summonBegin(player, sm, now)
         end
         return true
     end
-    if reason == KEY_ROUTE and (not sm.job or now < sm.routeUntil) then
+    local routeWait = reason == KEY_ROUTE and Drive.SUMMON_ROUTE_PENDING[sm.why] == true
+    local engineWait = reason == KEY_ENGINE and now < sm.authUntil
+    if (routeWait or engineWait) and (not sm.job or now < sm.routeUntil) then
         if not sm.job then
             sm.job, sm.routeUntil = "route", now + TUNE.SUMMON_ROUTE_WAIT_MS
             Drive.summonN = Drive.summonN + 1
@@ -18133,7 +18141,13 @@ function Drive.summonBegin(player, sm, now)
         sm.routeNext = now + ROUTE_REFRESH_MS
         return true
     end
-    Drive.summonRelease(sm.playerNum, sm, Drive.summonCodeOf(reason))
+    local code = Drive.summonCodeOf(reason)
+    if reason == KEY_ROUTE and (sm.why == nil or sm.why == "body") then code = "FAULT" end
+    if getDebug() then -- telemetry: n/a 起步失敗時還沒有 session（結果在 summonState 與伺服器 log）
+        print(LOG .. "summon begin failed pn=" .. sm.playerNum .. " vid=" .. tostring(sm.vid) .. " reason="
+            .. tostring(reason) .. " why=" .. tostring(sm.why) .. " code=" .. code)
+    end
+    Drive.summonRelease(sm.playerNum, sm, code)
     return false
 end
 
@@ -18174,13 +18188,17 @@ function Drive.summonKeep(sm, player, now)
     return nil
 end
 
--- 殭屍擋路（2026-10-27 使用者回答）：能繞就繞（繞行與殭屍軟縫照常）；帶內有殭屍時速度壓到 SUMMON_ZOMBIE_KMH 推過去；
--- 帶內一直有殭屍 SUMMON_ZOMBIE_MAX_MS＝推太久，下一幀 ZOMBIES（Drive.summonKeep 讀 stopCode）。
+-- 殭屍擋路（2026-10-27 使用者回答）：能繞就繞（繞行與殭屍軟縫照常）；軟縫沒處理（找不到縫、閃避關閉）而最近一隻已在車頭
+-- 前 SUMMON_ZOMBIE_NEAR_M 內＝在推，速度壓到 SUMMON_ZOMBIE_KMH；連續推 SUMMON_ZOMBIE_MAX_MS＝推太久，下一幀 ZOMBIES
+-- （Drive.summonKeep 讀 stopCode）。帶內只是看得到（遠處、或軟縫已經閃過／貼著過）不算推，計時歸零。
 function Drive.summonZombieCap(s, targetSpeed, now)
     local sm, sen = s.summon, s.sensor
     local last = sm.zomAt
     sm.zomAt = now
-    if not sen or (sen.zombieN or 0) <= 0 then
+    local nearS = sen and (sen.zombieN or 0) > 0 and sen.zombieNearS
+    local soft = s.zombieWhy == "gap" or s.zombieWhy == "hold" or s.zombieWhy == "clear"
+    if soft or not finite(nearS)
+            or nearS - s.lastSNow - s.vehicleProfile.halfL > TUNE.SUMMON_ZOMBIE_NEAR_M then
         sm.zomMs = 0
         return targetSpeed
     end
@@ -18233,8 +18251,9 @@ function Drive.summonBody(sm, vehicle)
 end
 
 -- 車身沿 (ax,ay)→(bx,by) 每 halfL 一個姿態預檢（probeNear：車身＋車頭前 1m）：硬物或未載入＝不通；別台車放行（行駛中繞）。
+-- strict＝停車姿態：每個姿態都要 clear（別台車占著也不行，summon-design §3.3）。
 -- ponytail: 只驗直線，牆或建築擋住只會判堵、不會繞——要繞過建築得另做格子 A*。
-function Drive.summonLineClear(sm, vehicle, ax, ay, bx, by)
+function Drive.summonLineClear(sm, vehicle, ax, ay, bx, by, strict)
     local dx, dy = bx - ax, by - ay
     local len = sqrt(dx * dx + dy * dy)
     if len < 1e-3 then return true end
@@ -18245,7 +18264,7 @@ function Drive.summonLineClear(sm, vehicle, ax, ay, bx, by)
     while true do
         local st = MDADSensor.probeNear(sm.probe, vehicle, cell, ax + fx * t, ay + fy * t, fx, fy, -fy, fx,
             sm.halfW, sm.halfL)
-        if st == "hard" or st == "unloaded" then return false end
+        if st == "hard" or st == "unloaded" or (strict and st ~= "clear") then return false end
         if t >= len then return true end
         t = t + step
         if t > len then t = len end
@@ -18301,7 +18320,7 @@ function Drive.summonSpot(sm, vehicle, ex, ey, cx, cy, maxLeg)
                     if not inBand and legX * legX + legY * legY <= maxLeg * maxLeg then
                         tries = tries + 1
                         if Drive.summonLineClear(sm, vehicle, ex, ey, tx, ty)
-                                and Drive.summonLineClear(sm, vehicle, tx, ty, tx + fx * 3, ty + fy * 3) then
+                                and Drive.summonLineClear(sm, vehicle, tx, ty, tx + fx * 3, ty + fy * 3, true) then
                             return tx, ty, pX, pY
                         end
                         if tries >= TUNE.SUMMON_SPOT_MAX then return nil end
@@ -18342,27 +18361,74 @@ function Drive.summonAppend(base, x, y)
     return out
 end
 
+-- 到我這裡走路網：主 MOD 的線尾就是離召喚者最近的路面點，召喚者常常就站在路上。線尾截到離召喚者 keep 公尺處，召喚者
+-- 不在線上，Sensor 不會把他當行人繞過去（E2E adsum-1027-a-s3：線尾穿過召喚者，車繞開偏線 4.5m）。整條都在 keep 內、
+-- 或線尾本來就夠遠＝原樣回。冷路徑（換線時一次）。
+function Drive.summonShort(base, px, py, keep)
+    local src = base.pts
+    local n = #src
+    local k2 = keep * keep
+    local dx, dy = src[n - 1] - px, src[n] - py
+    if dx * dx + dy * dy >= k2 then return base end
+    local i = n - 3 -- 往回找第一個離召喚者 ≥ keep 的點（x 在奇數位）
+    while i >= 1 do
+        dx, dy = src[i] - px, src[i + 1] - py
+        if dx * dx + dy * dy >= k2 then break end
+        i = i - 2
+    end
+    if i < 1 then return base end
+    -- 點 i（夠遠）→ 點 i+2（太近）之間二分到剛好 keep
+    local ax, ay, bx, by = src[i], src[i + 1], src[i + 2], src[i + 3]
+    local lo, hi = 0, 1
+    for _ = 1, 16 do
+        local mid = (lo + hi) * 0.5
+        local x, y = ax + (bx - ax) * mid - px, ay + (by - ay) * mid - py
+        if x * x + y * y >= k2 then lo = mid else hi = mid end
+    end
+    local out = {}
+    for k, v in pairs(base) do out[k] = v end
+    local pts, surf, width = {}, {}, {}
+    for j = 1, i + 1 do pts[j] = src[j] end
+    pts[i + 2], pts[i + 3] = ax + (bx - ax) * lo, ay + (by - ay) * lo
+    local seg = (i + 1) / 2 -- 截完剩 seg 段
+    for j = 1, seg do surf[j], width[j] = base.segSurface[j], base.segWidth[j] end
+    local len = 0
+    for j = 1, i, 2 do
+        dx, dy = pts[j + 2] - pts[j], pts[j + 3] - pts[j + 1]
+        len = len + sqrt(dx * dx + dy * dy)
+    end
+    out.pts, out.segSurface, out.segWidth, out.len = pts, surf, width, len
+    out.cost = (finite(base.cost) and finite(base.len) and base.len > 0) and base.cost * len / base.len or len
+    return out
+end
+
 -- 路網路線 → 實際要開的線（同一顆主 MOD route 回同一顆，route identity 才代表換線）
 function Drive.summonTail(sm, vehicle, base)
     if base == sm.baseRoute and sm.route then return sm.route end
     sm.baseRoute = base
-    local pts = base.pts
+    local road = base
+    if sm.mode == "come" then road = Drive.summonShort(base, sm.qx, sm.qy, sm.halfL + TUNE.SUMMON_ROAD_GAP_M) end
+    local pts = road.pts
     local n = #pts
     local ex, ey = pts[n - 1], pts[n]
     local tx, ty, pX, pY = Drive.summonSpot(sm, vehicle, ex, ey, sm.qx, sm.qy, TUNE.SUMMON_TAIL_M)
     if tx then
-        sm.route, sm.parkX, sm.parkY = Drive.summonAppend(base, pX, pY), tx, ty
+        sm.route, sm.parkX, sm.parkY = Drive.summonAppend(road, pX, pY), tx, ty
     else
-        sm.route, sm.parkX, sm.parkY = base, ex, ey -- spot=road：停在路網上最近的點
+        sm.route, sm.parkX, sm.parkY = road, ex, ey -- spot=road：停在路網上
     end
     return sm.route
 end
 
 -- 取路線（起步與換目標）：停車點在 SUMMON_DIRECT_M 內、直線預檢過＝兩點直線；否則 nav API v13 requestRouteFrom 從車算到
--- 目標再接尾段。回 route, 停車點 x, y（或 nil, …, why；why＝"api"／主 MOD 的 state）。只有成功才改 sm 的路線欄位。
+-- 目標再接尾段。回 route, 停車點 x, y（或 nil）。失敗原因記在 sm.why（api／body／主 MOD 的 state），Drive.summonBegin 據此
+-- 分暫時（等）或放棄；主 MOD 的 state 另記 Drive.routeState（route phase=lost 帶）。只有成功才改 sm 的路線欄位。
 function Drive.summonFetch(api, playerNum, sm, vehicle)
-    if not Drive.summonApiOk(api) then return nil, nil, nil, "api" end
-    if not Drive.summonBody(sm, vehicle) then return nil, nil, nil, "body" end
+    sm.why = "api"
+    if not Drive.summonApiOk(api) then return nil end
+    sm.why = "body"
+    if not Drive.summonBody(sm, vehicle) then return nil end
+    sm.why = nil
     local qx, qy = sm.tx, sm.ty
     if sm.mode ~= "target" then
         local player = getSpecificPlayer(playerNum)
@@ -18378,27 +18444,42 @@ function Drive.summonFetch(api, playerNum, sm, vehicle)
         end
     end
     local base, state = api.requestRouteFrom(playerNum, vx, vy, qx, qy)
-    if not base or state ~= "ok" then return nil, nil, nil, state or "noroute" end
+    Drive.routeState[playerNum] = state or "nil"
+    if not base or state ~= "ok" then
+        sm.why = state or "nil"
+        return nil
+    end
     sm.qx, sm.qy, sm.baseRoute, sm.route = qx, qy, nil, nil
     return Drive.summonTail(sm, vehicle, base), sm.parkX, sm.parkY
 end
 
 -- 每 ROUTE_REFRESH_MS 的取路（onPlayerUpdate）：到我這裡在跟線中、召喚者離目標 ≥SUMMON_RETARGET_M、冷卻過了才換目標
 -- （判堵、脫困、繞行中不換：換線會清掉繞行與 ban 的進度）；路網模式照常問主 MOD（偏航重算、改道收下後的新線）。
+-- 換目標失敗（召喚者走到找不到路的地方）記下那一點：召喚者沒離開它 SUMMON_RETARGET_M 前不再試，那一輪也不用舊目標
+-- 重問（主 MOD 的 from 快取每位玩家只有一格，剛被失敗的新目標蓋掉，再問＝同步重跑一次 A*）。
 function Drive.summonRoute(api, playerNum, s, vehicle, now)
     local sm = s.summon
     if sm.mode == "come" and s.mode == "follow" and not s.blocked and not s.currentBlocked and not s.dodging
             and s.recoverWhy == nil and now >= sm.retgtMs then
         local player = getSpecificPlayer(playerNum)
-        local dx, dy = player:getX() - sm.qx, player:getY() - sm.qy
-        if dx * dx + dy * dy >= TUNE.SUMMON_RETARGET_M * TUNE.SUMMON_RETARGET_M then
+        local px, py = player:getX(), player:getY()
+        local r2 = TUNE.SUMMON_RETARGET_M * TUNE.SUMMON_RETARGET_M
+        local dx, dy = px - sm.qx, py - sm.qy
+        local fx, fy = px - (sm.failX or px - 1e4), py - (sm.failY or py)
+        if dx * dx + dy * dy >= r2 and fx * fx + fy * fy >= r2 then
             sm.retgtMs = now + TUNE.SUMMON_RETARGET_MS
             local route, tx, ty = Drive.summonFetch(api, playerNum, sm, vehicle)
-            if route then return route, tx, ty end
+            if route then
+                sm.failX, sm.failY = nil, nil
+                return route, tx, ty
+            end
+            sm.failX, sm.failY = px, py
+            return sm.route, sm.parkX, sm.parkY
         end
     end
     if sm.baseRoute then
         local base, state = api.requestRouteFrom(playerNum, vehicle:getX(), vehicle:getY(), sm.qx, sm.qy)
+        Drive.routeState[playerNum] = state or "nil"
         if not base or state ~= "ok" then return nil, sm.parkX, sm.parkY end
         return Drive.summonTail(sm, vehicle, base), sm.parkX, sm.parkY
     end
@@ -18515,8 +18596,6 @@ function Drive.summonDumbBegin(player, sm, now)
     local code = nil
     if v:getDriver() ~= nil then
         code = "TAKEOVER"
-    elseif not v:isEngineRunning() or not MDAD.isBatteryLive(v) then
-        code = "ENGINE"
     elseif MDAD.sandbox("NeedItemForAutoDrive", true) == true and not MDAD.isAutoInstalled(v) then
         code = "MODULE"
     elseif not Drive.summonBody(sm, v) then
@@ -18538,10 +18617,12 @@ function Drive.summonDumbBegin(player, sm, now)
     return true
 end
 
--- 前進／後退路徑上（車頭前或車尾後 1.5m 的車寬帶）有沒有人：玩家／動物／殭屍（召喚者自己站在車後也算）
+-- 前進／後退路徑上（車頭前或車尾後 1.5m 的車寬帶）有沒有人：玩家／動物優先（一看到就回），殭屍掃完整帶才回
+-- （帶內同時有殭屍與玩家＝PLAYER）；召喚者自己站在車後也算
 function Drive.summonDumbWho(v, cell, vx, vy, fx, fy, halfW, halfL)
     local z = v:getZ()
     z = z - z % 1
+    local zombie = nil
     for k = 0, 3 do
         local d = halfL + 0.5 * k
         for side = -1, 1 do
@@ -18555,12 +18636,12 @@ function Drive.summonDumbWho(v, cell, vx, vy, fx, fy, halfW, halfL)
                     local kind = MDADSensor.softKindOf(mo)
                     if kind == "player" then return "player" end
                     if kind == "animal" or kind == "small" then return "animal" end
-                    if instanceof(mo, "IsoZombie") and not mo:isDead() then return "zombie" end
+                    if instanceof(mo, "IsoZombie") and not mo:isDead() then zombie = "zombie" end
                 end
             end
         end
     end
-    return nil
+    return zombie
 end
 
 function Drive.summonDumbStep(player, sm, now)
@@ -18570,6 +18651,8 @@ function Drive.summonDumbStep(player, sm, now)
     local v = sm.vehicle
     if not keep then
         if not v:isEngineRunning() or not MDAD.isBatteryLive(v) then
+            -- 多人：引擎 Running 比 SummonStart 晚同步到本機（E2E vmsum-1027-b）；SUMMON_AUTH_MS 內等、不推
+            if now < sm.authUntil then return end
             keep = "ENGINE"
         elseif MDAD.sandbox("NeedItemForAutoDrive", true) == true and not MDAD.isAutoInstalled(v) then
             keep = "MODULE"
@@ -18597,14 +18680,21 @@ function Drive.summonDumbStep(player, sm, now)
     if now >= sm.nextProbeMs then
         sm.nextProbeMs = now + TUNE.SUMMON_DUMB_PROBE_MS
         local cell = getCell()
+        -- 探測框以車身中心（腳本質心偏移換到世界，同 bodyCenter）為準；fwd 的分量已讀出，借它當輸出向量
+        local cx, cy = vx, vy
+        local comX, comZ = sm.vp.centerOfMassX, sm.vp.centerOfMassZ
+        if finite(comX) and finite(comZ) and (comX ~= 0 or comZ ~= 0) then
+            v:getWorldPos(comX, 0, comZ, fwd)
+            if finite(fwd:x()) and finite(fwd:y()) then cx, cy = fwd:x(), fwd:y() end
+        end
         local st
         if dir > 0 then
-            st = MDADSensor.probeNear(sm.probe, v, cell, vx, vy, fx, fy, -fy, fx, sm.halfW, sm.halfL)
+            st = MDADSensor.probeNear(sm.probe, v, cell, cx, cy, fx, fy, -fy, fx, sm.halfW, sm.halfL)
         else
-            st = MDADSensor.probeRear(sm.probe, v, cell, vx, vy, fx, fy, -fy, fx, sm.halfW, sm.halfL,
+            st = MDADSensor.probeRear(sm.probe, v, cell, cx, cy, fx, fy, -fy, fx, sm.halfW, sm.halfL,
                 TUNE.SUMMON_DUMB_CLEAR_M)
         end
-        local who = st == "clear" and Drive.summonDumbWho(v, cell, vx, vy, fx * dir, fy * dir, sm.halfW, sm.halfL) or nil
+        local who = st == "clear" and Drive.summonDumbWho(v, cell, cx, cy, fx * dir, fy * dir, sm.halfW, sm.halfL) or nil
         if st ~= "clear" or who == "player" or who == "animal" then
             BaseVehicle.releaseVector3f(fwd)
             Drive.summonRelease(pn, sm, st ~= "clear" and "BLOCKED" or (who == "player" and "PLAYER" or "ANIMAL"))

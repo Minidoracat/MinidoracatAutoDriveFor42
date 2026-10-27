@@ -75,9 +75,9 @@ local function onEveryOneMinute()
         for i = 0, count - 1 do collectPlayer(getSpecificPlayer(i), minutes) end
     end
 
-    -- 召喚中的車沒有人在車上，上面的玩家迴圈收不到（MDAD_Summon.lua）
+    -- 召喚中的車沒有人在車上，上面的玩家迴圈收不到（MDAD_Summon.lua；靠車上 GPS 導航的也標 powerNav）
     local sm = MDAD.Summon
-    if sm then sm.collect(powerVehicles) end
+    if sm then sm.collect(powerVehicles, powerNav) end
     consumeCollectedVehicles(minutes)
     MDAD.pruneNavUsage()
     MDAD.pruneAutoUsage()

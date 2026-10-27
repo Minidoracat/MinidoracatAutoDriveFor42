@@ -49,7 +49,7 @@ MDAD.CMD_TRAFFIC = "Traffic"
 MDAD.RELAY_FIELDS = 9
 -- 召喚（server/MDAD_Summon.lua 持有 session）：Summon＝client → server 心跳／停止 {vehicleId, active, code?}（只能續約或停止
 -- 自己的 session，**沒有從 client 開始召喚的指令**——開始只走伺服器 API MinidoracatAutoDriveAPI.startSummon）；
--- SummonStart／SummonEnd＝server → client {vehicleId, to, mode, tx, ty, dir}／{vehicleId, code, to}。
+-- SummonStart／SummonEnd＝server → client {vehicleId, to, mode, x, y, dir}（鍵同 startSummon opts）／{vehicleId, code, to}。
 MDAD.CMD_SUMMON = "Summon"
 MDAD.CMD_SUMMON_START = "SummonStart"
 MDAD.CMD_SUMMON_END = "SummonEnd"
@@ -455,6 +455,10 @@ function MDAD.vehicleUsageModes(vehicle)
     if not vehicle then return false, false, nil end
     local driver = vehicle:getDriver()
     local navOn = driver ~= nil and MDAD.isNavUsageActive(driver, vehicle)
+    if driver == nil then
+        local sm = MDAD.Summon -- 召喚中靠車上 GPS 導航＝車付（server/MDAD_Summon.lua 的 Summon.navOn）
+        navOn = sm ~= nil and sm.navOn(vehicle) == true
+    end
     return navOn, MDAD.isAutoUsageActive(vehicle), driver
 end
 
@@ -848,14 +852,16 @@ end
 -- 版本只增不減，改語意就加版本。對外文字不點名呼叫端。三種召喚：mode="come"（到我這裡，預設）、"target"（開到指定地點，
 -- 帶地面座標 x, y）、"dumb"（前進／後退：直線、不轉向、不取路線；dir=1 前進、-1 倒車）。
 --   伺服器／SP：startSummon(player, vehicle, opts) → true｜false, 翻譯鍵。呼叫端要先驗過自己的權限（鑰匙、所有權）；
---     opts.startEngine＝true 時由本 MOD 代為發動（呼叫端擔保有鑰匙）；opts.onEnd(vehicle, code, player)＝結束回呼
---     （召喚者已離線時 player 為 nil）。檢查順序固定：①格式 ②召喚者（活著、徒步、身分）③沙盒距離（come／dumb 看車、
+--     opts.startEngine＝true 時由本 MOD 代為發動（呼叫端擔保有鑰匙）；opts.onEnd(vehicle, code, player)＝結束回呼，一定在
+--     startSummon 回傳之後、每趟一次（車已卸載＝GONE 時 vehicle 為 nil；召喚者已離線時 player 為 nil）。檢查順序固定：①格式
+--     ②召喚者（活著、徒步、身分）③沙盒距離（come／dumb 看車、
 --     target 另看目標）④車：沒人、沒拖、沒在動、沒人持有物理權限、沒在召喚、12V、模組、導航裝置（dumb 不看）⑤引擎在轉或
 --     startEngine ⑥寫入 session。
 --   伺服器／SP：stopSummon(vehicle, code)（code 預設 CANCELLED）→ boolean；summonInfo(vehicle) → {by, phase, startedMs,
 --     mode} 或 nil（phase：starting＝發動引擎／交權限中、driving＝召喚者的客戶端在開）。
 --   客戶端：canSummon(playerNum, vehicle?, opts?) → true｜false, 翻譯鍵（只用來灰掉介面，以伺服器為準）；
---     summonState(playerNum) → {vid, phase, code, dist, mode} 或 nil（phase：driving／stopping／ended，code 只在 ended 有值）；
+--     summonState(playerNum) → {vid, phase, code, dist, mode} 或 nil（phase：driving／stopping／ended，code 只在 ended 有值；
+--     回的是本 MOD 的狀態表，唯讀）；
 --     stopSummon(playerNum) → boolean；summonReach(playerNum) → 召喚者實際叫得動的半徑（格）＝min(summonRange(),
 --     本機保證載入距離)；summonReasonText(code) → 停止碼的顯示文字。
 --   兩端：summonRange() → 沙盒 SummonMaxDistance（格，0＝關閉）。
