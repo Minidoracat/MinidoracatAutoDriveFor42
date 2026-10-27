@@ -52,5 +52,7 @@
     "Sandbox_MinidoracatAutoDriveDiagnosticsUpload": "在本伺服器收集自動駕駛診斷",
     "Sandbox_MinidoracatAutoDriveDiagnosticsUpload_tooltip": "開啟後，玩家的遊戲會在記憶體保留最近幾秒的自駕資料，只有出狀況時（卡住、碰撞、緊急煞車、出問題後接手）才把前後片段送到伺服器，另外每趟附一份簡短摘要。\n不會寫入玩家硬碟。檔案存放在伺服器的 Zomboid/Lua/MinidoracatAutoDrive/Uploads/，每位玩家一個資料夾，index.txt 列出所有片段。\n玩家可在 MOD 選項選擇不參與。預設關閉。\n管理員按下 Apply 後生效（下一次啟動自駕起）。",
     "Sandbox_MinidoracatAutoDriveDiagnosticsUploadMaxMB": "診斷資料容量上限（MB）",
-    "Sandbox_MinidoracatAutoDriveDiagnosticsUploadMaxMB_tooltip": "伺服器存放診斷片段可使用的總磁碟空間。滿了會先清掉全伺服器最舊的片段；每位玩家最多保留 32 段。\n行程摘要另外固定使用 8 MB 輪流覆寫。\n請依伺服器磁碟剩餘空間設定。"
+    "Sandbox_MinidoracatAutoDriveDiagnosticsUploadMaxMB_tooltip": "伺服器存放診斷片段可使用的總磁碟空間。滿了會先清掉全伺服器最舊的片段；每位玩家最多保留 32 段。\n行程摘要另外固定使用 8 MB 輪流覆寫。\n請依伺服器磁碟剩餘空間設定。",
+    "Sandbox_MinidoracatAutoDriveSummonMaxDistance": "召喚距離（格）",
+    "Sandbox_MinidoracatAutoDriveSummonMaxDistance_tooltip": "玩家離裝了自動駕駛模組的車多遠以內，還能用相容 MOD 的手機 App 把車叫過來（格）。0＝關閉召喚。\n遊戲只在玩家周圍約 64 格內計算車輛物理（螢幕小於 1920x1080 時更近），實際範圍取兩者較小的那個。\n預設 64。"
 }

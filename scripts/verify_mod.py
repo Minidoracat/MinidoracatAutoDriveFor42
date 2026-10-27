@@ -1299,6 +1299,7 @@ SANDBOX_SPEC = {                            # key: (type, default, min, max)
     "AnimalSlowdown":       ("enum", "2", None, None),
     "ObstaclePolicy":       ("enum", "1", None, None),
     "RightLaneBias":        ("double", "1.0", "0.0", "2.0"),
+    "SummonMaxDistance":    ("integer", "64", "0", "64"),
     "TrafficRelay":         ("boolean", "true", None, None),
     "DebugOverlay":         ("boolean", "false", None, None),
     "DiagnosticsUpload":    ("boolean", "false", None, None),
