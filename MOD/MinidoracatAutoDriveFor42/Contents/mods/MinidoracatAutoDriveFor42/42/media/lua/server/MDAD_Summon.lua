@@ -167,7 +167,8 @@ function Summon.finish(vid, code, vehicle, player)
     if player == nil then player = findPlayer(sess) end
     local shut = false
     if vehicle then
-        -- 只在權限仍是召喚者時交還（AUTH＝已經被拿走，不碰）；B 坐上駕駛座時這一行把權限交給 B
+        -- 權限仍在召喚者手上才交還（不論停止碼；碼 AUTH 也可能是綁車 MOD 收回駕駛權時呼叫、權限還在召喚者）；
+        -- 已被別的客戶端拿走就不碰。B 坐上駕駛座時這一行把權限交給 B
         if isServer() and vehicle:getNetPlayerId() == sess.playerId then
             vehicle:authorizationChanged(vehicle:getDriver())
         end
@@ -199,7 +200,8 @@ local function handover(vid, sess, vehicle, player, now)
         if vehicle:getNetPlayerId() ~= sess.playerId then return Summon.finish(vid, "AUTH", vehicle, player) end
     end
     sess.phase, sess.beatAt = "driving", now
-    local info = { vehicleId = vid, to = sess.username, mode = sess.mode, tx = sess.tx, ty = sess.ty, dir = sess.dir }
+    -- 鍵同 startSummon 的 opts（客戶端用同一支 MDAD.summonOpts 驗）
+    local info = { vehicleId = vid, to = sess.username, mode = sess.mode, x = sess.tx, y = sess.ty, dir = sess.dir }
     if isServer() then
         sendServerCommand(player, MDAD.MOD_ID, MDAD.CMD_SUMMON_START, info)
     else

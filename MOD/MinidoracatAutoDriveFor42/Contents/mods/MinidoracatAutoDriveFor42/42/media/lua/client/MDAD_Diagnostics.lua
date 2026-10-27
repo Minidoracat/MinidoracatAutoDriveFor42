@@ -1579,7 +1579,7 @@ local NB_DEAD_H = 0.02 -- 遊戲小時（預設一天＝現實 1 小時時約 3 
 local function nearbyJson(pn, x, y, h, hl, hw)
     if not finite(x) or not finite(y) then return "" end
     local ok, out, near, akg, busy = pcall(function()
-        local own = getSpecificPlayer(pn):getVehicle()
+        local own = D.ownVehicle(pn)
         local cell = getCell()
         local z = math.floor(own and own:getZ() or 0)
         local tow = own and own:getVehicleTowing() or nil
@@ -2012,6 +2012,7 @@ end
 
 function D.start(pn, vehicle, profile)
     if sessions[pn] or uploads[pn] then D.stop(pn, "restart") end
+    D.vehicles[pn] = vehicle
     local now = nowMs()
     local fileOk = false
     if telemetryOn() then
@@ -2090,7 +2091,7 @@ local function impactHard(pn, x, y, h, halfL)
     if not finite(x) or not finite(y) or not finite(h) or type(MDADSensor) ~= "table"
             or type(MDADSensor.hardSpriteNear) ~= "function" then return nil end
     local ok, nm, cls, d = pcall(function()
-        local own = getSpecificPlayer(pn):getVehicle()
+        local own = D.ownVehicle(pn)
         local hl = finite(halfL) and halfL or 2.5
         return MDADSensor.hardSpriteNear(nil, getCell(), x + math.cos(h) * hl, y + math.sin(h) * hl,
             own and own:getZ() or 0, IMPACT_HARD_R)
@@ -2111,9 +2112,12 @@ local function partConds(v, out)
     out.n = c
     return c
 end
-local function ownVehicle(pn)
-    return getSpecificPlayer(pn):getVehicle()
+-- 遙測裡的「自己這台車」＝D.start 收到的車（召喚時召喚者不在車上，getVehicle() 是 nil）；沒記到才退回玩家所在的車
+D.vehicles = {}
+function D.ownVehicle(pn)
+    return D.vehicles[pn] or getSpecificPlayer(pn):getVehicle()
 end
+local ownVehicle = D.ownVehicle
 local function partIdAt(v, i)
     return v:getPartByIndex(i - 1):getId()
 end
@@ -2241,7 +2245,7 @@ function D.sample(pn, now, x, y, heading, speed, target, remaining, lat, err,
         if type(phys) == "table" and finite(phys.towClr) and finite(phys.towClrX) and finite(phys.towClrY) then
             a.tcl, a.tcx, a.tcy = math.floor(phys.towClr * 100 + 0.5) / 100, phys.towClrX, phys.towClrY
             local ok, nm, cls, d = pcall(function()
-                local own = getSpecificPlayer(pn):getVehicle()
+                local own = D.ownVehicle(pn)
                 return MDADSensor.hardSpriteNear(nil, getCell(), phys.towClrX, phys.towClrY, own and own:getZ() or 0, 1)
             end)
             if ok then a.tsp, a.tsc, a.tsd = nm, cls, round1(d) end
@@ -2283,6 +2287,7 @@ function D.fail(pn, detail)
 end
 
 function D.stop(pn, reason)
+    D.vehicles[pn] = nil
     local u = uploads[pn]
     if u then
         uploads[pn] = nil

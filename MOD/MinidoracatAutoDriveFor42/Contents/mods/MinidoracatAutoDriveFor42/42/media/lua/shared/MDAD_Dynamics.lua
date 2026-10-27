@@ -1229,3 +1229,23 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
         lastSrc, n - 1, 0)
     return count, filletN, fallbackN, true, reason
 end
+
+-- 召喚的縱向推力（Driver Drive.summonPush 換算成外力；summon-design §1.4）：車上沒有駕駛時 CarController 不跑，定速與強制煞車
+-- 都沒有作用，而 park() 每幀把輪子煞住（BaseVehicle.java:3365-3366、CarController.java:984-986）——車只能靠沿車身中線的外力
+-- 推著走、推力一歸零就自己煞停。a＝K_R×wheelFriction（抵消煞住的輪子）＋GAIN×(目標－實速)，夾在 [0, A_MAX]；目標 ≤0 不推。
+-- 係數來自 DummyDriver 實測：目標 10 km/h 時單人、多人都穩定在約 6 km/h，換算煞住的阻力約 14.4 m/s²，除以 Tesla 的
+-- wheelFriction 2.0 得 K_R；A_MAX＝實驗的 PUSHK 60（m/s²×0.6）。wheelFriction 讀不到時用 SUMMON_FRICTION_REF。
+-- v、vTgt 單位 km/h（v 可負：倒退中＝離目標更遠）；回 m/s²。
+D.SUMMON_A_MAX = 36
+D.SUMMON_GAIN = 3.6
+D.SUMMON_K_R = 7.2
+D.SUMMON_FRICTION_REF = 2.0
+function D.summonPushAccel(v, vTgt, wheelFriction)
+    if not D.finite(v) or not D.finite(vTgt) or vTgt <= 0 then return 0 end
+    local wf = wheelFriction
+    if not D.finite(wf) or wf <= 0 then wf = D.SUMMON_FRICTION_REF end
+    local a = D.SUMMON_K_R * wf + D.SUMMON_GAIN * (vTgt - v)
+    if a < 0 then return 0 end
+    if a > D.SUMMON_A_MAX then return D.SUMMON_A_MAX end
+    return a
+end
