@@ -329,6 +329,15 @@ do
     if ui and ui.API_MAJOR == 1 and ui.API_REVISION >= 1 and ui.Skin then
         FW = ui.Skin
     end
+    if ui and ui.API_MAJOR == 1 and type(ui.API_REVISION) == "number" and ui.API_REVISION >= 24
+            and ui.CAPABILITIES and ui.CAPABILITIES.whatsNew and ui.WhatsNew then
+        ui.WhatsNew.register({
+            modId = "MinidoracatAutoDriveFor42",
+            since = "0.34.0",
+            name = "UI_MinidoracatAutoDrive_Options",
+            text = "UI_MinidoracatAutoDrive_WhatsNew",
+        })
+    end
 end
 
 local modOptions = nil
