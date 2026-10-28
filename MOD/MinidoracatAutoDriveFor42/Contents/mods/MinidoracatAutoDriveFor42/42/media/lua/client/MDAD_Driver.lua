@@ -17918,11 +17918,14 @@ end
 -- 「前進／後退」不開 session：直線、不轉向、不取路線，由 Drive.summonDumbStep 每幀推。
 -- 結束一律經 Drive.summonRelease：等車停穩（|v|<SUMMON_STILL_KMH，最多 SUMMON_OWED_MS）才送 Summon{active=false, code}，
 -- 伺服器 finish 收權限、熄火、回呼後送 SummonEnd（Drive.summonEndCmd）。本段只用 Drive／TUNE 欄位（主 chunk local 已滿）。
-TUNE.SUMMON_MAX_KMH = 25           -- 到我這裡／開到指定地點的限速（2026-10-29 使用者：「召喚的移動速度不要太慢，不然就失去意義，
-                                   -- 不如走過去了」；理由與實測見 SUMMON_APPROACH_DECEL）
-TUNE.SUMMON_DUMB_KMH = 4           -- 前進／後退限速（同上：12m 約 15 秒內）
-TUNE.SUMMON_ARRIVE_KMH = 8         -- 接近包絡：開到到站邊界時最多這麼快（推力歸零後鎖輪滑停，停在召喚者前約 3m）
-TUNE.SUMMON_APPROACH_DECEL = 3     -- 接近包絡的計畫減速度（m/s²；要低於推力歸零、輪子 park() 煞住時實得的減速度）
+-- 召喚速度（2026-10-29 使用者：「召喚的移動速度不要太慢，不然就失去意義，不如走過去了」；E2E summon-sp case=bench 量：探針角色
+-- 走路 2.1、跑步 3.8、衝刺 4.8 格/秒）：按下到停好的平均要快過跑步、約走路 2 倍。固定開銷是代為發動約 1.7 秒、走路網再等路線
+-- 約 1 秒，30 格那趟最吃緊：限速 10 時平均 2.2 格/秒（adsum-speed-1029-base-bench），25 時 4.1（-a-bench，差一點到 2 倍）。
+TUNE.SUMMON_MAX_KMH = 30           -- 到我這裡／開到指定地點的限速
+TUNE.SUMMON_DUMB_KMH = 5           -- 前進／後退限速（12m 約 15 秒內；4 km/h 實測 12.9 秒，留給較重的車與倒車）
+TUNE.SUMMON_ARRIVE_KMH = 8         -- 接近包絡：開到到站邊界時最多這麼快（推力歸零後滑停 0.2m，停在召喚者前約 3m）
+TUNE.SUMMON_APPROACH_DECEL = 5     -- 接近包絡的計畫減速度（m/s²）。推力歸零、輪子 park() 煞住實得約 13（-a-bench 8 km/h 停 0.17 秒），
+                                   -- 取不到一半：草地、別的車型抓地較差也追得上
 TUNE.SUMMON_DUMB_KI = 2.0         -- 前進／後退推力積分（m/s² 每 km/h 每秒；MDADDynamics.summonPushAccel 的 bias）。只有比例項時
                                    -- 車速看阻力：原版車 0.30、Model Y 前進 0.9／後退 0.4 km/h（adsum-1028-d2-s10、integsum-1028-a）
 TUNE.SUMMON_PUSH_OVER_KMH = 0.5    -- 召喚推力在「目標＋這個」歸零（MDADDynamics.summonPushAccel 的 vCap；前進／後退＝1.5）
