@@ -8,7 +8,8 @@
 --   ③ 每 250ms 輪詢中止條件——伺服器沒有座位、斷線的 Lua 事件（OnEnterVehicle／OnExitVehicle／OnDisconnect 只在客戶端
 --      觸發），引擎也不會收回車外玩家的權限，onlineID 還會被新玩家重用，所以只能靠輪詢；
 --   ④ finish 是唯一出口：交還權限（authorizationChanged(getDriver())＝BaseVehicle.java:10130-10136：沒人＝Server、有人
---      坐駕駛座＝交給他；車還在動時延到 releases、等停住再交，見 RELEASE_MS）、熄掉召喚發動的引擎（車上有人不熄）、
+--      坐駕駛座＝交給他；車還在動時延到 releases、等停住再交，見 RELEASE_MS；召喚者離線或沒心跳時先交給附近一位玩家暫管，
+--      見 Summon.observer）、熄掉召喚發動的引擎（車上有人不熄）、
 --      呼叫 onEnd、送 SummonEnd。
 -- session 只存純量與呼叫端的回呼，不跨 tick 持有 Java 物件（同 MDAD_TrafficRelay）。
 -- SP 走同一份：沒有權限交接，SummonStart／SummonEnd 改成直接呼叫 client Driver（MDAD.Drive），客戶端的 Summon 心跳也直接
@@ -218,8 +219,10 @@ function Summon.finish(vid, code, vehicle, player)
                 -- authorizationChanged(旁觀者)＝他 Local（BaseVehicle.java:10130-10136）；收回走 releases（他不會自己交回）
                 vehicle:authorizationChanged(w)
                 if not releases[vid] then releaseN = releaseN + 1 end
+                -- 不動輪數從 -∞ 起算：權限推到他那端、他的第一包位置送回來要幾百 ms（VehicleManager 每 100 ms 推一次權限、
+                -- 單程延遲、第一包 Unreliable 可能掉），先數「沒動」會在舊位置提早收回；看到第一次位移才歸 0 照常數，一直沒動就等到期
                 releases[vid] = { playerId = w:getOnlineID(), username = w:getUsername(), x = vehicle:getX(), y = vehicle:getY(),
-                    stillN = 0, atMs = now, untilMs = now + Summon.RELEASE_MS }
+                    stillN = -math.huge, atMs = now, untilMs = now + Summon.RELEASE_MS }
                 log("handoff vid=" .. tostring(vid) .. " to=" .. tostring(w:getUsername()) .. " code=" .. code)
             elseif (sess.stillN or Summon.RELEASE_STILL_N) < Summon.RELEASE_STILL_N and player and vehicle:getDriver() == nil then
                 if not releases[vid] then releaseN = releaseN + 1 end
@@ -320,8 +323,9 @@ local function poll(vid, sess, now)
     end
 end
 
--- 等車停住再交還的權限（見 RELEASE_MS）：車沒了或別的客戶端已經拿走就不碰；召喚者離線或 onlineID 換人、有人坐上駕駛座、
--- 連 RELEASE_STILL_N 輪不動、到期＝交還（authorizationChanged(getDriver())：沒人＝伺服器、有駕駛＝他）
+-- 等車停住再交還的權限（見 RELEASE_MS）：持有者是召喚者（車還在動時收掉）或暫管的旁觀者（Summon.observer）。車沒了或別的
+-- 客戶端已經拿走就不碰；持有者離線或 onlineID 換人、有人坐上駕駛座、連 RELEASE_STILL_N 輪不動、到期＝交還
+-- （authorizationChanged(getDriver())：沒人＝伺服器、有駕駛＝他）
 local function pollReleases(now)
     for vid, rel in pairs(releases) do
         local vehicle = getVehicleById(vid)
