@@ -177,8 +177,10 @@ end
 -- 沒有駕駛的車每幀 checkShouldBeActive（BaseVehicle.java:3346-3347 只在 getDriver()==nil 時呼叫）見 Bullet 還帶著最後的車速就
 -- 把物理打開、繼續滑；權限一變（setNetPlayerAuthorization 把 timeSinceLastAuth 設 10），WorldSimulation.java:209-216 這 10 幀
 -- 套用 Bullet 的位置＝旁觀者車位往前跳（30 km/h 時約 2.4 m），伺服器只有召喚者最後送的位置，之後沒人再同步。原版駕駛被強殺
--- 時車上有駕駛、不走這條，三方一致（a-m4v 0.00 m）。交給旁觀者 LocalCollide（原版沒駕駛的車被別人撞時同一招，
--- authorizationServerCollide／WorldSimulation.java:186-197）：他那端把滑完的位置送上來，伺服器與其他人跟著他，停住後收回。
+-- 時車上有駕駛、不走這條，三方一致（a-m4v 0.00 m）。所以把權限交給一位旁觀者（他那端變 Local：物理照算、套用並送出位置），
+-- 他把滑完的位置送上來，伺服器與其他人跟著他，停住（或滿 RELEASE_MS）後由 releases 收回。原版沒駕駛的車被別人撞時也是交給
+-- 附近玩家算（LocalCollide），但 authorizationServerCollide(short, boolean) 從 Lua 呼叫會報「expected short, got Double」
+-- （adsum-m4-1029-c-m4：finish 中途丟錯、沒送 SummonEnd），所以用 authorizationChanged(旁觀者)。
 Summon.OBSERVER_M = 70
 function Summon.observer(vehicle, ownerId)
     local list = getOnlinePlayers()
@@ -213,9 +215,8 @@ function Summon.finish(vid, code, vehicle, player)
             local now = getTimestampMs()
             local w = vehicle:getDriver() == nil and (not player or code == "TIMEOUT") and Summon.observer(vehicle, sess.playerId)
             if w then
-                -- 同 vanilla 碰撞交權（authorizationServerCollide：先回伺服器、再給這位玩家 LocalCollide；同一 tick 只送最後狀態）
-                vehicle:authorizationChanged(nil)
-                vehicle:authorizationServerCollide(w:getOnlineID(), true)
+                -- authorizationChanged(旁觀者)＝他 Local（BaseVehicle.java:10130-10136）；收回走 releases（他不會自己交回）
+                vehicle:authorizationChanged(w)
                 if not releases[vid] then releaseN = releaseN + 1 end
                 releases[vid] = { playerId = w:getOnlineID(), username = w:getUsername(), x = vehicle:getX(), y = vehicle:getY(),
                     stillN = 0, atMs = now, untilMs = now + Summon.RELEASE_MS }

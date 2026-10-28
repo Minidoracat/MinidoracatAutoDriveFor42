@@ -33214,13 +33214,7 @@ function drive.sumFix(opts)
     end
     function v:authorizationChanged(chr)
         self._auth = self._auth + 1
-        self._npid, self._collide = chr and chr:getOnlineID() or -1, false
-    end
-    -- BaseVehicle.java:3958-3976：權限是 Local（某玩家、不是碰撞交權）時不動；collide＝給這位玩家 LocalCollide，否則回伺服器
-    function v:authorizationServerCollide(id, collide)
-        self._auth = self._auth + 1
-        if self._npid ~= -1 and not self._collide then return end
-        self._npid, self._collide = collide and id or -1, collide
+        self._npid = chr and chr:getOnlineID() or -1
     end
     function v:getEngineState() return self._engine and "Running" or (self._estate or "Idle") end
     function v:tryStartEngine(haveKey)
@@ -34258,7 +34252,7 @@ function drive.scenarioSummonReleaseWhenStill()
     checkEq(v._npid, 1000, "(RW-cap) 到期前一直在動：還沒交")
     poll(v, 1)
     checkEq(v._npid, -1, "(RW-cap) 滿 RELEASE_MS：交還")
-    -- 召喚者離線（LEFT）、附近有旁觀者：交給他 LocalCollide 暫管（他送上滑完的位置），停住後收回；沒有旁觀者＝直接回伺服器
+    -- 召喚者離線（LEFT）、附近有旁觀者：交給他暫管（authorizationChanged(他)，他送上滑完的位置），停住後收回；沒有旁觀者＝直接回伺服器
     -- （adsum-m4-1029-b-m4：直接回伺服器時旁觀者那端車位往前跳 1.6–2.4 m、之後不再同步；原版 a-m4v 0.00 m）
     local w = newPlayer({ num = 1, username = "watcher", onlineId = 2000 })
     w.getX = function(self) return self._x end
@@ -34272,7 +34266,6 @@ function drive.scenarioSummonReleaseWhenStill()
     poll(v, 0)
     checkNil(Api.summonInfo(v), "(RW-handoff) 召喚者離線：收掉")
     checkEq(v._npid, 2000, "(RW-handoff) 交給旁觀者暫管（不是直接回伺服器）")
-    checkTrue(v._collide == true, "(RW-handoff) 用碰撞交權 LocalCollide（他那端會自己交回）")
     poll(v, 1.5)
     checkEq(v._npid, 2000, "(RW-handoff) 旁觀者送上滑完的位置、還在動：不收")
     poll(v, 0)
