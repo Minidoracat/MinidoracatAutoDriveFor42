@@ -33934,7 +33934,10 @@ function drive.scenarioSummonZombieTelemetry()
     local T = Dr.debugTune()
     s.sensor.zombieN, s.zombieWhy = 1, nil
     s.sensor.zombieNearS = s.lastSNow + s.vehicleProfile.halfL + T.SUMMON_ZOMBIE_NEAR_M + 1
-    checkEq(Dr.summonZombieCap(s, 10, nowMs), 10, "(ZC) 殭屍在 NEAR_M 外 1m：不算推、不壓速")
+    checkEq(Dr.summonZombieCap(s, T.SUMMON_MAX_KMH, nowMs),
+        MDADDynamics.approachCapKmh(1, T.SUMMON_ZOMBIE_KMH, 0, T.SUMMON_APPROACH_DECEL),
+        "(ZC) 殭屍在 NEAR_M 外 1m：不算推（不計時），照接近包絡收（1029b）")
+    checkEq(s.summon.zomMs, 0, "(ZC) NEAR_M 外：推的計時歸零")
     s.zombieWhy = "gap"
     s.sensor.zombieNearS = s.lastSNow + s.vehicleProfile.halfL + T.SUMMON_ZOMBIE_NEAR_M - 1
     checkEq(Dr.summonZombieCap(s, 10, nowMs), 10, "(ZC) 軟縫閃得過：不算推")
@@ -34460,10 +34463,10 @@ function drive.scenarioSummonDumbPeak()
 end
 drive.scenarioSummonDumbPeak()
 
--- 接近包絡（1029a；限速 10 → TUNE.SUMMON_MAX_KMH）：到站邊界前用 approachCapKmh 收到 SUMMON_ARRIVE_KMH，減速度 SUMMON_APPROACH_DECEL。
+-- 接近包絡（1029a 起，限速由 10 提高到 TUNE.SUMMON_MAX_KMH 時加）：到站邊界前用 approachCapKmh 收到 SUMMON_ARRIVE_KMH，減速度 SUMMON_APPROACH_DECEL。
 -- 到我這裡量召喚者、指定地點量停車點；每幀跟線都經過它，而且壓到推力。殭屍在 SUMMON_ZOMBIE_NEAR_M 外同樣照包絡收到
 -- SUMMON_ZOMBIE_KMH；前進／後退帶內有殭屍時目標也壓到 SUMMON_ZOMBIE_KMH。違規證明：拿掉 stepFollow 那行呼叫＝(AP-wire)(AP-push)
--- 紅；包絡改回 targetSpeed＝(AP2)(AP5) 紅；殭屍帽拿掉包絡＝(ZE1) 紅；前進／後退不看 sm.zombie＝(DZ) 紅。
+-- 紅；包絡改回 targetSpeed＝(AP2)(AP5) 紅；殭屍帽拿掉包絡＝(ZE1) 紅；前進／後退不看 sm.zombie＝(DZ) 紅；不寫 capReason＝(CR) 紅。
 function drive.scenarioSummonApproach()
     scenario("召喚接近包絡：遠處照限速，到站邊界收到 SUMMON_ARRIVE_KMH，包絡照 SUMMON_APPROACH_DECEL；每幀跟線都套；殭屍同理")
     local Dr = MDAD.Drive
@@ -34474,7 +34477,9 @@ function drive.scenarioSummonApproach()
     local edge = hl + T.SUMMON_ARRIVE_GAP_M
     local function cap(px) p._x = px return Dr.summonApproachCap(s, v, T.SUMMON_MAX_KMH) end
     checkEq(cap(40), T.SUMMON_MAX_KMH, "(AP1) 召喚者 40m：照限速")
+    s.lastCapReason = nil
     checkNear(cap(edge), T.SUMMON_ARRIVE_KMH, 1e-6, "(AP2) 到站邊界：收到 SUMMON_ARRIVE_KMH")
+    checkEq(s.lastCapReason, "summon-approach", "(CR) 接近包絡壓到時 capReason＝summon-approach")
     checkTrue(cap(edge + 2) < cap(edge + 4) and cap(edge + 4) < T.SUMMON_MAX_KMH, "(AP3) 越近越低、單調")
     local d, c = 6, cap(edge + 6) / 3.6
     checkNear(c * c - (T.SUMMON_ARRIVE_KMH / 3.6) ^ 2, 2 * T.SUMMON_APPROACH_DECEL * d, 1e-6,
@@ -34512,15 +34517,17 @@ function drive.scenarioSummonApproach()
     -- 殭屍（軟縫沒處理）：NEAR_M 外照包絡收、NEAR_M 內壓到 SUMMON_ZOMBIE_KMH、軟縫處理中不管
     local zs = { summon = {}, sensor = { zombieN = 1 }, lastSNow = 0, vehicleProfile = { halfL = hl } }
     local function zcap(gap, why)
-        zs.sensor.zombieNearS, zs.zombieWhy = gap + hl, why
+        zs.sensor.zombieNearS, zs.zombieWhy, zs.lastCapReason = gap + hl, why, nil
         return Dr.summonZombieCap(zs, T.SUMMON_MAX_KMH, nowMs)
     end
     local MD = MDADDynamics
     checkNear(zcap(T.SUMMON_ZOMBIE_NEAR_M + 3), MD.approachCapKmh(3, T.SUMMON_ZOMBIE_KMH, 0, T.SUMMON_APPROACH_DECEL), 1e-6,
         "(ZE1) 殭屍在 NEAR_M 外 3m：照包絡收")
     checkTrue(zcap(T.SUMMON_ZOMBIE_NEAR_M + 3) < T.SUMMON_MAX_KMH, "(ZE1) 那個包絡低於限速")
+    checkEq(zs.lastCapReason, "summon-zombie", "(CR) 殭屍包絡壓到時 capReason＝summon-zombie")
     checkEq(zcap(T.SUMMON_ZOMBIE_NEAR_M + 40), T.SUMMON_MAX_KMH, "(ZE2) 殭屍 40m 外：照限速")
     checkEq(zcap(T.SUMMON_ZOMBIE_NEAR_M - 1), T.SUMMON_ZOMBIE_KMH, "(ZE3) NEAR_M 內：壓到 SUMMON_ZOMBIE_KMH")
+    checkEq(zs.lastCapReason, "summon-zombie", "(CR) NEAR_M 內壓到時 capReason＝summon-zombie")
     checkEq(zcap(T.SUMMON_ZOMBIE_NEAR_M + 3, "gap"), T.SUMMON_MAX_KMH, "(ZE4) 軟縫處理中：不管")
     -- 前進／後退：帶內有殭屍時目標壓到 SUMMON_ZOMBIE_KMH（介於 ZOMBIE＋0.5 與 DUMB＋0.5 之間的車速，有殭屍不推、沒有照推）
     local mid = (T.SUMMON_ZOMBIE_KMH + T.SUMMON_DUMB_KMH) / 2 + T.SUMMON_PUSH_OVER_KMH

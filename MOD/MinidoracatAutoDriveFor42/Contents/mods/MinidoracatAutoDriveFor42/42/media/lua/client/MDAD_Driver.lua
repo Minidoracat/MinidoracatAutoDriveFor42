@@ -18209,7 +18209,7 @@ end
 -- 殭屍擋路（2026-10-27 使用者回答）：能繞就繞（繞行與殭屍軟縫照常）；軟縫沒處理（找不到縫、閃避關閉）而最近一隻已在車頭
 -- 前 SUMMON_ZOMBIE_NEAR_M 內＝在推，速度壓到 SUMMON_ZOMBIE_KMH；連續推 SUMMON_ZOMBIE_MAX_MS＝推太久，下一幀 ZOMBIES
 -- （Drive.summonKeep 讀 stopCode）。帶內只是看得到（遠處、或軟縫已經閃過／貼著過）不算推，計時歸零。
--- 還在 NEAR_M 外時照接近包絡收（1029a）：限速 30 時鎖輪約 13 m/s² 收到 4 km/h 要約 2.6m，只在 NEAR_M 處一階壓速會帶著
+-- 還在 NEAR_M 外時照接近包絡收（1029b）：限速 30 時鎖輪約 13 m/s² 收到 4 km/h 要約 2.6m，只在 NEAR_M 處一階壓速會帶著
 -- 十幾 km/h 撞上（一般殭屍檔只看隻數，1–3 隻的帽 35 比限速高，不會先減速）。
 function Drive.summonZombieCap(s, targetSpeed, now)
     local sm, sen = s.summon, s.sensor
