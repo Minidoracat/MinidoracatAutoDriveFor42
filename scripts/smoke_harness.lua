@@ -33394,7 +33394,7 @@ function drive.scenarioSummonGates()
     checkTrue(s ~= nil and s.summon ~= nil and s.vehicle == v, "(G1) s.summon 有值、開的是召喚車")
     checkEq(v._imp.total, 0, "(G1) 準備期間 imp.total==0")
     checkEq(v._auth, 0, "(L9) 單人零次權限呼叫")
-    checkEq(s and s.maxSpeed, 10, "限速 TUNE.SUMMON_MAX_KMH＝10")
+    checkEq(s and s.maxSpeed, Dr.debugTune().SUMMON_MAX_KMH, "限速＝TUNE.SUMMON_MAX_KMH")
     checkNil(s and s.usageArgs, "召喚不送 Usage（計費走 Summon 心跳）")
     -- G8：遠端玩家觸發 OnPlayerUpdate：零呼叫
     local remote = newPlayer({ num = 3, username = "far", remote = true })
@@ -34438,7 +34438,7 @@ function drive.scenarioSummonDumbPeak()
         local _, v = drive.sumFix({ px = dir > 0 and -6 or 6, py = 4 })
         clientFlag, serverFlag = false, false
         drive.sumStart({ mode = "dumb", dir = dir })
-        for _, kmh in ipairs({ T.SUMMON_DUMB_KMH + T.SUMMON_PUSH_OVER_KMH + 0.1, 3 }) do
+        for _, kmh in ipairs({ T.SUMMON_DUMB_KMH + T.SUMMON_PUSH_OVER_KMH + 0.1, T.SUMMON_DUMB_KMH + 2 }) do
             v._speed = kmh * dir
             driveReset(v)
             drive.sumTick()
@@ -34460,6 +34460,44 @@ function drive.scenarioSummonDumbPeak()
 end
 drive.scenarioSummonDumbPeak()
 
+-- 接近包絡（1029a；限速 10 → TUNE.SUMMON_MAX_KMH）：到站邊界前用 approachCapKmh 收到 SUMMON_ARRIVE_KMH，減速度 SUMMON_APPROACH_DECEL。
+-- 到我這裡量召喚者、指定地點量停車點；每幀跟線都經過它。違規證明：拿掉 onPlayerUpdate 那行呼叫＝(AP-wire) 紅；
+-- 包絡改回 targetSpeed＝(AP2)(AP5) 紅。
+function drive.scenarioSummonApproach()
+    scenario("召喚接近包絡：遠處照限速，到站邊界收到 SUMMON_ARRIVE_KMH，包絡照 SUMMON_APPROACH_DECEL；每幀跟線都套")
+    local Dr = MDAD.Drive
+    local T = Dr.debugTune()
+    local p, v = drive.sumFix({ px = 40, py = 0 })
+    local hl = 2.3
+    local s = { summon = { mode = "come", playerNum = 0 }, vehicleProfile = { halfL = hl } }
+    local edge = hl + T.SUMMON_ARRIVE_GAP_M
+    local function cap(px) p._x = px return Dr.summonApproachCap(s, v, T.SUMMON_MAX_KMH) end
+    checkEq(cap(40), T.SUMMON_MAX_KMH, "(AP1) 召喚者 40m：照限速")
+    checkNear(cap(edge), T.SUMMON_ARRIVE_KMH, 1e-6, "(AP2) 到站邊界：收到 SUMMON_ARRIVE_KMH")
+    checkTrue(cap(edge + 2) < cap(edge + 4) and cap(edge + 4) < T.SUMMON_MAX_KMH, "(AP3) 越近越低、單調")
+    local d, c = 6, cap(edge + 6) / 3.6
+    checkNear(c * c - (T.SUMMON_ARRIVE_KMH / 3.6) ^ 2, 2 * T.SUMMON_APPROACH_DECEL * d, 1e-6,
+        "(AP5) 包絡＝v²＝v_到站²＋2·a·d（a＝SUMMON_APPROACH_DECEL）")
+    s.summon = { mode = "target", playerNum = 0, parkX = T.SUMMON_TARGET_ARRIVE_M, parkY = 0 }
+    checkNear(cap(40), T.SUMMON_ARRIVE_KMH, 1e-6, "(AP4) 指定地點量停車點，不量召喚者")
+    -- 每幀跟線都經過包絡
+    p._x = 30
+    clientFlag, serverFlag = false, false
+    drive.sumStart()
+    drive.sumRound()
+    local real, n = Dr.summonApproachCap, 0
+    Dr.summonApproachCap = function(...) n = n + 1 return real(...) end
+    v._speed = 5
+    drive.sumTick(10)
+    Dr.summonApproachCap = real
+    checkTrue(n >= 10, "(AP-wire) 跟線每幀都套接近包絡（" .. n .. " 次／10 幀）")
+    Dr.summonStopLocal(0)
+    v._speed = 0
+    drive.sumTick(3)
+    drive.sumServer()
+end
+drive.scenarioSummonApproach()
+
 -- 前進／後退的積分項：車速一直低於目標時前饋往上補，前進、倒車同一套（integsum-1028-a Model Y 後退只有前進一半快、
 -- adsum-1028-d2-s10 原版車 0.30 km/h）；頂住不動時不累積（BLOCKED 前不越推越大）。違規證明：拿掉積分＝(DI) 紅。
 function drive.scenarioSummonDumbIntegral()
@@ -34472,7 +34510,7 @@ function drive.scenarioSummonDumbIntegral()
         local _, v = drive.sumFix({ px = dir > 0 and -6 or 6, py = 4 })
         clientFlag, serverFlag = false, false
         drive.sumStart({ mode = "dumb", dir = dir })
-        v._speed = 0.4 * dir
+        v._speed = (T.SUMMON_DUMB_KMH - 0.6) * dir
         nowMs = nowMs + 100
         driveReset(v)
         drive.sumTick()
@@ -34484,7 +34522,7 @@ function drive.scenarioSummonDumbIntegral()
         end
         local sm = Dr.summons[0]
         bias[dir] = sm and sm.bias or 0
-        checkNear(bias[dir], T.SUMMON_DUMB_KI * 0.6 * 2.9, 0.15, tag .. "0.4 km/h 推 3 秒：bias＝KI×0.6×時間")
+        checkNear(bias[dir], T.SUMMON_DUMB_KI * 0.6 * 2.9, 0.15, tag .. "低目標 0.6 km/h 推 3 秒：bias＝KI×0.6×時間")
         local lon1 = math.abs(drive.sumLon(v))
         checkTrue(lon1 > lon0 * 1.1, tag .. "實際推力變大（" .. lon0 .. " -> " .. lon1 .. "）")
         Dr.summonStopLocal(0)

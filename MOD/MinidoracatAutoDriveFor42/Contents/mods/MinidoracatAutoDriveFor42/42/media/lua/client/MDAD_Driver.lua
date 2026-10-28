@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1028f"
+Drive.REV = "1029a"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -16588,8 +16588,9 @@ local function stepFollow(s, vehicle, playerNum, now)
                     targetSpeed = TUNE.UTURN_BLOCKED_KMH
                 end
             end
-            -- 召喚：殭屍擋路閃不過就壓到 SUMMON_ZOMBIE_KMH 爬過（Drive.summonZombieCap）；不寫定速（沒有駕駛時定速沒有作用）
-            if s.summon then targetSpeed = Drive.summonZombieCap(s, targetSpeed, now) end
+            -- 召喚：殭屍擋路閃不過就壓到 SUMMON_ZOMBIE_KMH 爬過（Drive.summonZombieCap）、接近到站邊界照接近包絡減速
+            -- （Drive.summonApproachCap）；不寫定速（沒有駕駛時定速沒有作用）
+            if s.summon then targetSpeed = Drive.summonApproachCap(s, vehicle, Drive.summonZombieCap(s, targetSpeed, now)) end
             regOn = s.summon and true or applySpeed(s, vehicle, targetSpeed)
             if not reached then
                 local av = speedKmh
@@ -17797,8 +17798,8 @@ local function onPlayerUpdate(player)
         return
     end
 
-    -- 召喚：靠近召喚者（或到了指定地點）就算抵達（Drive.summonArrived）；只在跟線時判，下一幀 arrive 收尾
-    if s.summon and s.mode == "follow" and Drive.summonArrived(s, vehicle, player) then
+    -- 召喚：靠近召喚者（或到了指定地點）就算抵達（Drive.summonArriveDist ≤0）；只在跟線時判，下一幀 arrive 收尾
+    if s.summon and s.mode == "follow" and Drive.summonArriveDist(s, vehicle, player) <= 0 then
         s.mode = "arrive"
         return
     end
@@ -17917,8 +17918,11 @@ end
 -- 「前進／後退」不開 session：直線、不轉向、不取路線，由 Drive.summonDumbStep 每幀推。
 -- 結束一律經 Drive.summonRelease：等車停穩（|v|<SUMMON_STILL_KMH，最多 SUMMON_OWED_MS）才送 Summon{active=false, code}，
 -- 伺服器 finish 收權限、熄火、回呼後送 SummonEnd（Drive.summonEndCmd）。本段只用 Drive／TUNE 欄位（主 chunk local 已滿）。
-TUNE.SUMMON_MAX_KMH = 10           -- 召喚限速（2026-10-27 主代理補定）
-TUNE.SUMMON_DUMB_KMH = 1           -- 前進／後退限速（實車手冊「基础召唤时，最高车速为 1 km/h」）
+TUNE.SUMMON_MAX_KMH = 25           -- 到我這裡／開到指定地點的限速（2026-10-29 使用者：「召喚的移動速度不要太慢，不然就失去意義，
+                                   -- 不如走過去了」；理由與實測見 SUMMON_APPROACH_DECEL）
+TUNE.SUMMON_DUMB_KMH = 4           -- 前進／後退限速（同上：12m 約 15 秒內）
+TUNE.SUMMON_ARRIVE_KMH = 8         -- 接近包絡：開到到站邊界時最多這麼快（推力歸零後鎖輪滑停，停在召喚者前約 3m）
+TUNE.SUMMON_APPROACH_DECEL = 3     -- 接近包絡的計畫減速度（m/s²；要低於推力歸零、輪子 park() 煞住時實得的減速度）
 TUNE.SUMMON_DUMB_KI = 2.0         -- 前進／後退推力積分（m/s² 每 km/h 每秒；MDADDynamics.summonPushAccel 的 bias）。只有比例項時
                                    -- 車速看阻力：原版車 0.30、Model Y 前進 0.9／後退 0.4 km/h（adsum-1028-d2-s10、integsum-1028-a）
 TUNE.SUMMON_PUSH_OVER_KMH = 0.5    -- 召喚推力在「目標＋這個」歸零（MDADDynamics.summonPushAccel 的 vCap；前進／後退＝1.5）
@@ -18234,20 +18238,31 @@ function Drive.summonPush(s, speedKmh, targetSpeed, mult)
     return a * mass * (mult / MULT_NORM) / (0.01 * 48 / MULT_NORM)
 end
 
--- 到了嗎（跟線中每幀）：到我這裡＝車心離召喚者 ≤ halfL＋SUMMON_ARRIVE_GAP_M（召喚者本人會被當行人停在他前方約 3m）；
--- 開到指定地點＝車心離停車點（目標旁找到的室外格；沒找到＝路網終點）≤ SUMMON_TARGET_ARRIVE_M。量的是世界直線距離，
--- 不是剩餘弧長（route-source.md）。
-function Drive.summonArrived(s, vehicle, player)
+-- 離到站邊界還有多遠（公尺；≤0＝到了）：到我這裡＝車心離召喚者 halfL＋SUMMON_ARRIVE_GAP_M（召喚者本人會被當行人停在他
+-- 前方約 3m）；開到指定地點＝車心離停車點（目標旁找到的室外格；沒找到＝路網終點）SUMMON_TARGET_ARRIVE_M。量的是世界
+-- 直線距離，不是剩餘弧長（route-source.md）：直線 ≤ 弧長，拿它算接近包絡只會更早減速。跟線中每幀判到站、算接近包絡。
+function Drive.summonArriveDist(s, vehicle, player)
     local sm = s.summon
     local vx, vy = vehicle:getX(), vehicle:getY()
+    local dx, dy, r
     if sm.mode == "target" then
-        local dx, dy = (sm.parkX or sm.tx) - vx, (sm.parkY or sm.ty) - vy
-        return dx * dx + dy * dy <= TUNE.SUMMON_TARGET_ARRIVE_M * TUNE.SUMMON_TARGET_ARRIVE_M
+        dx, dy, r = (sm.parkX or sm.tx) - vx, (sm.parkY or sm.ty) - vy, TUNE.SUMMON_TARGET_ARRIVE_M
+    else
+        dx, dy = player:getX() - vx, player:getY() - vy
+        r = (s.vehicleProfile and s.vehicleProfile.halfL or 2.3) + TUNE.SUMMON_ARRIVE_GAP_M
     end
-    local hl = s.vehicleProfile and s.vehicleProfile.halfL or 2.3
-    local r = hl + TUNE.SUMMON_ARRIVE_GAP_M
-    local dx, dy = player:getX() - vx, player:getY() - vy
-    return dx * dx + dy * dy <= r * r
+    return sqrt(dx * dx + dy * dy) - r
+end
+
+-- 接近包絡（2026-10-29 限速 10 → SUMMON_MAX_KMH 時加）：召喚車沒有煞車，減速只有推力歸零、輪子 park() 煞住這一種，到站時
+-- 推力一歸零就滑停。限速 10 時到站速度就是 10、滑停約 1m；限速提高後要在到站邊界前把速度收到 SUMMON_ARRIVE_KMH，否則滑停
+-- 距離跟著平方變長、停進召喚者 3m 內。包絡用 MDADDynamics.approachCapKmh（同一般接近帽），減速度 SUMMON_APPROACH_DECEL
+-- 低於鎖輪實得，推力歸零時一定追得上。
+function Drive.summonApproachCap(s, vehicle, targetSpeed)
+    local d = Drive.summonArriveDist(s, vehicle, getSpecificPlayer(s.summon.playerNum))
+    local cap = MDADDynamics.approachCapKmh(d, TUNE.SUMMON_ARRIVE_KMH, 0, TUNE.SUMMON_APPROACH_DECEL)
+    if targetSpeed > cap then return cap end
+    return targetSpeed
 end
 
 -- 車身大小與預檢用的 Sensor 狀態（冷路徑，每次召喚建一次）
