@@ -34277,6 +34277,30 @@ function drive.scenarioSummonReleaseWhenStill()
     drive.online = {}
     poll(v, 0)
     checkEq(v._npid, -1, "(RW-alone) 召喚者離線、附近沒有其他玩家：直接回伺服器")
+    -- 兩位旁觀者：交給離車最近的那位；暫管期間他也離線＝當場收回
+    local far = newPlayer({ num = 2, username = "far", onlineId = 3000 })
+    far.getX = function(self) return self._x end
+    far.getY = function(self) return self._y end
+    far._x, far._y, far._dead = 40, 0, false
+    _, v = begin("(RW-near) ")
+    drive.online = { drive.sp, far, w }
+    poll(v, 0)
+    poll(v, 2)
+    drive.online = { far, w }
+    poll(v, 0)
+    checkEq(v._npid, 2000, "(RW-near) 交給離車最近的旁觀者")
+    drive.online = { far }
+    poll(v, 1)
+    checkEq(v._npid, -1, "(RW-near) 暫管的人也離線：當場收回伺服器")
+    -- TIMEOUT（召喚者還在線、沒心跳）：同樣交給旁觀者，不交回召喚者
+    _, v = begin("(RW-timeout) ")
+    drive.online = { drive.sp, w }
+    poll(v, 0)
+    poll(v, 2)
+    nowMs = nowMs + MDAD.AUTO_USAGE_TTL_MS + 1
+    poll(v, 0)
+    checkNil(Api.summonInfo(v), "(RW-timeout) 沒心跳：收掉")
+    checkEq(v._npid, 2000, "(RW-timeout) 交給旁觀者暫管，不是召喚者")
     clientFlag, serverFlag = false, false
 end
 drive.scenarioSummonReleaseWhenStill()
