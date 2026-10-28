@@ -33198,7 +33198,7 @@ function drive.sumFix(opts)
         p.getY = function(self) return self._y end
         drive.sp = p
     end
-    p._x, p._y, p._vehicle, p._dead, p._local = opts.px or 15, opts.py or 0, nil, false, true
+    p._x, p._y, p._vehicle, p._dead, p._local, p._username = opts.px or 15, opts.py or 0, nil, false, true, "summoner"
     players[0], players[1] = p, nil
     activePlayers = 1
     drive.online = { p }
@@ -33394,7 +33394,7 @@ function drive.scenarioSummonGates()
     checkTrue(s ~= nil and s.summon ~= nil and s.vehicle == v, "(G1) s.summon 有值、開的是召喚車")
     checkEq(v._imp.total, 0, "(G1) 準備期間 imp.total==0")
     checkEq(v._auth, 0, "(L9) 單人零次權限呼叫")
-    checkEq(s and s.maxSpeed, 10, "限速 TUNE.SUMMON_MAX_KMH＝10")
+    checkEq(s and s.maxSpeed, Dr.debugTune().SUMMON_MAX_KMH, "限速＝TUNE.SUMMON_MAX_KMH")
     checkNil(s and s.usageArgs, "召喚不送 Usage（計費走 Summon 心跳）")
     -- G8：遠端玩家觸發 OnPlayerUpdate：零呼叫
     local remote = newPlayer({ num = 3, username = "far", remote = true })
@@ -33823,7 +33823,7 @@ end
 drive.scenarioSummonTarget()
 
 function drive.scenarioSummonDumb()
-    scenario("前進／後退（dumb，build-1027 S10）：不開 session、直線 1 km/h、走滿 12m＝ARRIVED、後方有障礙＝BLOCKED、頂住 3 秒、按停止")
+    scenario("前進／後退（dumb，build-1027 S10）：不開 session、直線 SUMMON_DUMB_KMH、走滿 12m＝ARRIVED、後方有障礙＝BLOCKED、頂住 3 秒、按停止")
     local Dr, Api = MDAD.Drive, MinidoracatAutoDriveAPI
     -- 前進：每幀一次、沿車頭、不轉向
     local p, v = drive.sumFix({ px = -6, py = 4 })
@@ -33841,11 +33841,11 @@ function drive.scenarioSummonDumb()
     end
     checkEq(drive.bad.impulse, 0, "每幀最多一次 addImpulse")
     checkEq(fwdN, 30, "30 幀都往前推、零力矩")
-    -- 速度回饋：1 km/h 加滾阻補償 K_R×抓地（輪子被 park 煞住），遠超過就不推
+    -- 速度回饋：SUMMON_DUMB_KMH 加滾阻補償 K_R×抓地（輪子被 park 煞住），遠超過就不推
     v._speed = 10
     driveReset(v)
     drive.sumTick()
-    checkEq(v._imp.total, 0, "遠超過 1 km/h：不推")
+    checkEq(v._imp.total, 0, "遠超過 SUMMON_DUMB_KMH：不推")
     -- 走滿 12m：ARRIVED（build-1027：dumb 走滿也回 ARRIVED）
     v._speed, v._x = 1, 12.1
     drive.sumTick()
@@ -33934,7 +33934,10 @@ function drive.scenarioSummonZombieTelemetry()
     local T = Dr.debugTune()
     s.sensor.zombieN, s.zombieWhy = 1, nil
     s.sensor.zombieNearS = s.lastSNow + s.vehicleProfile.halfL + T.SUMMON_ZOMBIE_NEAR_M + 1
-    checkEq(Dr.summonZombieCap(s, 10, nowMs), 10, "(ZC) 殭屍在 NEAR_M 外 1m：不算推、不壓速")
+    checkEq(Dr.summonZombieCap(s, T.SUMMON_MAX_KMH, nowMs),
+        MDADDynamics.approachCapKmh(1, T.SUMMON_ZOMBIE_KMH, 0, T.SUMMON_APPROACH_DECEL),
+        "(ZC) 殭屍在 NEAR_M 外 1m：不算推（不計時），照接近包絡收（1029b）")
+    checkEq(s.summon.zomMs, 0, "(ZC) NEAR_M 外：推的計時歸零")
     s.zombieWhy = "gap"
     s.sensor.zombieNearS = s.lastSNow + s.vehicleProfile.halfL + T.SUMMON_ZOMBIE_NEAR_M - 1
     checkEq(Dr.summonZombieCap(s, 10, nowMs), 10, "(ZC) 軟縫閃得過：不算推")
@@ -34164,6 +34167,94 @@ function drive.scenarioSummonServerRevoke()
     end
 end
 drive.scenarioSummonServerRevoke()
+
+-- 伺服器在車還在動時收掉（延後交還 1029c 起；連兩輪、上一輪基準、核對召喚者 1029d 起；adsum-speed-1029-h-mp M8 三方差約
+-- 2 m）：最近 RELEASE_STILL_N 輪內動過就把權限留在召喚者客戶端，連 RELEASE_STILL_N 輪不動、或滿 Summon.RELEASE_MS、或召喚者
+-- 離線／onlineID 換人才交還；一直沒動就當場交。基準是上一輪的車位（兩輪之間收掉的那次也比完整一個 POLL_MS；i-mp M8 收掉後
+-- 2 ms 就交還）。違規證明：finish 拿掉延後分支＝(RW-defer) 紅；pollReleases 不看位移只等到期＝(RW-still) 紅；tick 在
+-- count==0 時不看 releaseN＝(RW-still) 紅；基準改回收掉當下的車位＝(RW-mid) 紅；只要一輪不動就交＝(RW-defer) 紅；
+-- 不核對召喚者＝(RW-owner) 紅；進入端只看最近一輪＝(RW-gap) 紅。
+function drive.scenarioSummonReleaseWhenStill()
+    scenario("召喚伺服器收權：車還在動就等它停住（或到期、召喚者離線）再交權限，沒在動當場交")
+    local Api, S = MinidoracatAutoDriveAPI, MDAD.Summon
+    local function begin(tag)
+        local p, v = drive.sumFix({ mp = true })
+        setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, SummonMaxDistance = 64 })
+        clientFlag, serverFlag = false, true
+        checkTrue(Api.startSummon(p, v, {}), tag .. "起步")
+        nowMs = nowMs + 250
+        S.tick()
+        clearList(sentServer)
+        checkEq(v._npid, 1000, tag .. "權限在召喚者")
+        return p, v
+    end
+    local function poll(v, dx)
+        v._x = v._x + dx
+        nowMs = nowMs + S.POLL_MS
+        S.tick()
+    end
+    -- 在動：收掉後權限先不交，停住那一輪才交
+    local _, v = begin("(RW-defer) ")
+    poll(v, 0)
+    poll(v, 2)
+    checkTrue(Api.stopSummon(v, "CANCELLED"), "(RW-defer) 伺服器 stopSummon")
+    checkNil(Api.summonInfo(v), "(RW-defer) 租約當場收掉")
+    checkEq(v._npid, 1000, "(RW-defer) 車還在動：權限先留在召喚者（讓它停車、送出停住的位置）")
+    poll(v, 0.5)
+    checkEq(v._npid, 1000, "(RW-defer) 還在滑：不交")
+    poll(v, 0)
+    checkEq(v._npid, 1000, "(RW-defer) 只停了一輪（可能只是那段沒收到位置封包）：還不交")
+    poll(v, 0)
+    checkEq(v._npid, -1, "(RW-still) 連兩輪不動：交還伺服器")
+    -- 兩輪之間收掉：上一輪之後已經動了、收掉後下一輪剛好沒收到新位置，比的是上一輪的車位＝還在動，不交
+    _, v = begin("(RW-mid) ")
+    poll(v, 0)
+    poll(v, 2)
+    v._x, nowMs = v._x + 0.4, nowMs + 150
+    Api.stopSummon(v, "CANCELLED")
+    poll(v, 0)
+    checkEq(v._npid, 1000, "(RW-mid) 兩輪之間收掉：下一輪比上一輪的車位，還在動、不交")
+    poll(v, 0)
+    checkEq(v._npid, 1000, "(RW-mid) 第二輪：只算停了一輪，還不交（基準若是收掉當下的車位，這輪就已連兩輪＝交）")
+    poll(v, 0)
+    checkEq(v._npid, -1, "(RW-mid) 之後連兩輪不動：交還")
+    -- 召喚者離線（onlineID 可能被新玩家重用）：不等，下一輪就交
+    local p
+    p, v = begin("(RW-owner) ")
+    poll(v, 0)
+    poll(v, 2)
+    Api.stopSummon(v, "CANCELLED")
+    checkEq(v._npid, 1000, "(RW-owner) 收掉時還在動：先不交")
+    p._username = "someoneElse"
+    poll(v, 1)
+    checkEq(v._npid, -1, "(RW-owner) onlineID 對不上原召喚者：當場交還")
+    -- 最近一輪剛好沒收到位置（看起來沒動），但再前一輪還在動：照樣延後
+    _, v = begin("(RW-gap) ")
+    poll(v, 0)
+    poll(v, 2)
+    poll(v, 0)
+    Api.stopSummon(v, "CANCELLED")
+    checkEq(v._npid, 1000, "(RW-gap) 只靜了一輪就收掉：仍算在動，先不交")
+    poll(v, 0)
+    checkEq(v._npid, -1, "(RW-gap) 再一輪不動（連兩輪）：交還")
+    -- 沒在動：當場交
+    _, v = begin("(RW-now) ")
+    poll(v, 0)
+    poll(v, 0)
+    Api.stopSummon(v, "CANCELLED")
+    checkEq(v._npid, -1, "(RW-now) 車沒在動：當場交還")
+    -- 一直在動（客戶端沒停住）：滿 RELEASE_MS 照樣交
+    _, v = begin("(RW-cap) ")
+    poll(v, 0)
+    poll(v, 2)
+    Api.stopSummon(v, "CANCELLED")
+    for _ = 1, math.floor(S.RELEASE_MS / S.POLL_MS) - 1 do poll(v, 1) end
+    checkEq(v._npid, 1000, "(RW-cap) 到期前一直在動：還沒交")
+    poll(v, 1)
+    checkEq(v._npid, -1, "(RW-cap) 滿 RELEASE_MS：交還")
+    clientFlag, serverFlag = false, false
+end
+drive.scenarioSummonReleaseWhenStill()
 
 -- 召喚計費（第 2 輪審查 Codex）：真的觸發 EveryOneMinute 與 GasTank wrapper。違規證明：collect 不標 powerNav＝(BL-come)
 -- 每分鐘電紅；vehicleUsageModes 拿掉無駕駛分支＝(BL-come) 油耗紅；navOn 不排除 dumb＝(BL-dumb) 紅。
@@ -34438,7 +34529,7 @@ function drive.scenarioSummonDumbPeak()
         local _, v = drive.sumFix({ px = dir > 0 and -6 or 6, py = 4 })
         clientFlag, serverFlag = false, false
         drive.sumStart({ mode = "dumb", dir = dir })
-        for _, kmh in ipairs({ T.SUMMON_DUMB_KMH + T.SUMMON_PUSH_OVER_KMH + 0.1, 3 }) do
+        for _, kmh in ipairs({ T.SUMMON_DUMB_KMH + T.SUMMON_PUSH_OVER_KMH + 0.1, T.SUMMON_DUMB_KMH + 2 }) do
             v._speed = kmh * dir
             driveReset(v)
             drive.sumTick()
@@ -34460,6 +34551,96 @@ function drive.scenarioSummonDumbPeak()
 end
 drive.scenarioSummonDumbPeak()
 
+-- 接近包絡（1029a 起，限速由 10 提高到 TUNE.SUMMON_MAX_KMH 時加）：到站邊界前用 approachCapKmh 收到 SUMMON_ARRIVE_KMH，減速度 SUMMON_APPROACH_DECEL。
+-- 到我這裡量召喚者、指定地點量停車點；每幀跟線都經過它，而且壓到推力。殭屍在 SUMMON_ZOMBIE_NEAR_M 外同樣照包絡收到
+-- SUMMON_ZOMBIE_KMH；前進／後退帶內有殭屍時目標也壓到 SUMMON_ZOMBIE_KMH。違規證明：拿掉 stepFollow 那行呼叫＝(AP-wire)(AP-push)
+-- 紅；包絡改回 targetSpeed＝(AP2)(AP5) 紅；殭屍帽拿掉包絡＝(ZE1) 紅；前進／後退不看 sm.zombie＝(DZ) 紅；不寫 capReason＝(CR) 紅。
+function drive.scenarioSummonApproach()
+    scenario("召喚接近包絡：遠處照限速，到站邊界收到 SUMMON_ARRIVE_KMH，包絡照 SUMMON_APPROACH_DECEL；每幀跟線都套；殭屍同理")
+    local Dr = MDAD.Drive
+    local T = Dr.debugTune()
+    local p, v = drive.sumFix({ px = 40, py = 0 })
+    local hl = 2.3
+    local s = { summon = { mode = "come", playerNum = 0 }, vehicleProfile = { halfL = hl } }
+    local edge = hl + T.SUMMON_ARRIVE_GAP_M
+    local function cap(px) p._x = px return Dr.summonApproachCap(s, v, T.SUMMON_MAX_KMH) end
+    checkEq(cap(40), T.SUMMON_MAX_KMH, "(AP1) 召喚者 40m：照限速")
+    s.lastCapReason = nil
+    checkNear(cap(edge), T.SUMMON_ARRIVE_KMH, 1e-6, "(AP2) 到站邊界：收到 SUMMON_ARRIVE_KMH")
+    checkEq(s.lastCapReason, "summon-approach", "(CR) 接近包絡壓到時 capReason＝summon-approach")
+    checkTrue(cap(edge + 2) < cap(edge + 4) and cap(edge + 4) < T.SUMMON_MAX_KMH, "(AP3) 越近越低、單調")
+    local d, c = 6, cap(edge + 6) / 3.6
+    checkNear(c * c - (T.SUMMON_ARRIVE_KMH / 3.6) ^ 2, 2 * T.SUMMON_APPROACH_DECEL * d, 1e-6,
+        "(AP5) 包絡＝v²＝v_到站²＋2·a·d（a＝SUMMON_APPROACH_DECEL）")
+    s.summon = { mode = "target", playerNum = 0, parkX = T.SUMMON_TARGET_ARRIVE_M, parkY = 0 }
+    checkNear(cap(40), T.SUMMON_ARRIVE_KMH, 1e-6, "(AP4) 指定地點量停車點，不量召喚者")
+    -- 每幀跟線都經過包絡
+    p._x = 30
+    clientFlag, serverFlag = false, false
+    drive.sumStart()
+    drive.sumRound()
+    local real, n = Dr.summonApproachCap, 0
+    Dr.summonApproachCap = function(...) n = n + 1 return real(...) end
+    v._speed = 5
+    drive.sumTick(10)
+    Dr.summonApproachCap = real
+    checkTrue(n >= 10, "(AP-wire) 跟線每幀都套接近包絡（" .. n .. " 次／10 幀）")
+    -- 包絡真的接到推力：同一趟只改召喚者位置（站車旁＝不在前方帶內，Sensor 不當行人停），20 km/h 時遠處照推、近處不推
+    local ss = Dr.debugSession(0)
+    v._speed = 20
+    ss.summonAccel = nil
+    driveReset(v)
+    drive.sumTick()
+    checkTrue((ss.summonAccel or 0) > 0, "(AP-push) 召喚者 30m：20 km/h 照推（" .. tostring(ss.summonAccel) .. "）")
+    p._x, p._y = 0, ss.vehicleProfile.halfL + T.SUMMON_ARRIVE_GAP_M + 1
+    ss.summonAccel = nil
+    driveReset(v)
+    drive.sumTick()
+    checkEq(ss.summonAccel, 0, "(AP-push) 召喚者在車旁、離到站邊界 1m（包絡約 14 km/h）：20 km/h 不推")
+    p._y = 0
+    Dr.summonStopLocal(0)
+    v._speed = 0
+    drive.sumTick(3)
+    drive.sumServer()
+    -- 殭屍（軟縫沒處理）：NEAR_M 外照包絡收、NEAR_M 內壓到 SUMMON_ZOMBIE_KMH、軟縫處理中不管
+    local zs = { summon = {}, sensor = { zombieN = 1 }, lastSNow = 0, vehicleProfile = { halfL = hl } }
+    local function zcap(gap, why)
+        zs.sensor.zombieNearS, zs.zombieWhy, zs.lastCapReason = gap + hl, why, nil
+        return Dr.summonZombieCap(zs, T.SUMMON_MAX_KMH, nowMs)
+    end
+    local MD = MDADDynamics
+    checkNear(zcap(T.SUMMON_ZOMBIE_NEAR_M + 3), MD.approachCapKmh(3, T.SUMMON_ZOMBIE_KMH, 0, T.SUMMON_APPROACH_DECEL), 1e-6,
+        "(ZE1) 殭屍在 NEAR_M 外 3m：照包絡收")
+    checkTrue(zcap(T.SUMMON_ZOMBIE_NEAR_M + 3) < T.SUMMON_MAX_KMH, "(ZE1) 那個包絡低於限速")
+    checkEq(zs.lastCapReason, "summon-zombie", "(CR) 殭屍包絡壓到時 capReason＝summon-zombie")
+    checkEq(zcap(T.SUMMON_ZOMBIE_NEAR_M + 40), T.SUMMON_MAX_KMH, "(ZE2) 殭屍 40m 外：照限速")
+    checkEq(zcap(T.SUMMON_ZOMBIE_NEAR_M - 1), T.SUMMON_ZOMBIE_KMH, "(ZE3) NEAR_M 內：壓到 SUMMON_ZOMBIE_KMH")
+    checkEq(zs.lastCapReason, "summon-zombie", "(CR) NEAR_M 內壓到時 capReason＝summon-zombie")
+    checkEq(zcap(T.SUMMON_ZOMBIE_NEAR_M + 3, "gap"), T.SUMMON_MAX_KMH, "(ZE4) 軟縫處理中：不管")
+    -- 前進／後退：帶內有殭屍時目標壓到 SUMMON_ZOMBIE_KMH（介於 ZOMBIE＋0.5 與 DUMB＋0.5 之間的車速，有殭屍不推、沒有照推）
+    local mid = (T.SUMMON_ZOMBIE_KMH + T.SUMMON_DUMB_KMH) / 2 + T.SUMMON_PUSH_OVER_KMH
+    drive.sumFix({ px = -6, py = 4 })
+    clientFlag, serverFlag = false, false
+    drive.sumStart({ mode = "dumb", dir = 1 })
+    drive.sumTick()
+    local sm = Dr.summons[0]
+    v = drive.sv
+    v._speed = mid
+    sm.zombie = false
+    driveReset(v)
+    drive.sumTick()
+    checkEq(v._imp.total, 1, "(DZ) 沒有殭屍：" .. mid .. " km/h 照推")
+    sm.zombie = true
+    driveReset(v)
+    drive.sumTick()
+    checkEq(v._imp.total, 0, "(DZ) 帶內有殭屍：" .. mid .. " km/h 不推（目標 SUMMON_ZOMBIE_KMH）")
+    Dr.summonStopLocal(0)
+    v._speed = 0
+    drive.sumTick(3)
+    drive.sumServer()
+end
+drive.scenarioSummonApproach()
+
 -- 前進／後退的積分項：車速一直低於目標時前饋往上補，前進、倒車同一套（integsum-1028-a Model Y 後退只有前進一半快、
 -- adsum-1028-d2-s10 原版車 0.30 km/h）；頂住不動時不累積（BLOCKED 前不越推越大）。違規證明：拿掉積分＝(DI) 紅。
 function drive.scenarioSummonDumbIntegral()
@@ -34472,7 +34653,7 @@ function drive.scenarioSummonDumbIntegral()
         local _, v = drive.sumFix({ px = dir > 0 and -6 or 6, py = 4 })
         clientFlag, serverFlag = false, false
         drive.sumStart({ mode = "dumb", dir = dir })
-        v._speed = 0.4 * dir
+        v._speed = (T.SUMMON_DUMB_KMH - 0.6) * dir
         nowMs = nowMs + 100
         driveReset(v)
         drive.sumTick()
@@ -34484,7 +34665,7 @@ function drive.scenarioSummonDumbIntegral()
         end
         local sm = Dr.summons[0]
         bias[dir] = sm and sm.bias or 0
-        checkNear(bias[dir], T.SUMMON_DUMB_KI * 0.6 * 2.9, 0.15, tag .. "0.4 km/h 推 3 秒：bias＝KI×0.6×時間")
+        checkNear(bias[dir], T.SUMMON_DUMB_KI * 0.6 * 2.9, 0.15, tag .. "低目標 0.6 km/h 推 3 秒：bias＝KI×0.6×時間")
         local lon1 = math.abs(drive.sumLon(v))
         checkTrue(lon1 > lon0 * 1.1, tag .. "實際推力變大（" .. lon0 .. " -> " .. lon1 .. "）")
         Dr.summonStopLocal(0)

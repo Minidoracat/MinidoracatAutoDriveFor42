@@ -8,7 +8,8 @@
 --   ③ 每 250ms 輪詢中止條件——伺服器沒有座位、斷線的 Lua 事件（OnEnterVehicle／OnExitVehicle／OnDisconnect 只在客戶端
 --      觸發），引擎也不會收回車外玩家的權限，onlineID 還會被新玩家重用，所以只能靠輪詢；
 --   ④ finish 是唯一出口：交還權限（authorizationChanged(getDriver())＝BaseVehicle.java:10130-10136：沒人＝Server、有人
---      坐駕駛座＝交給他）、熄掉召喚發動的引擎（車上有人不熄）、呼叫 onEnd、送 SummonEnd。
+--      坐駕駛座＝交給他；車還在動時延到 releases、等停住再交，見 RELEASE_MS）、熄掉召喚發動的引擎（車上有人不熄）、
+--      呼叫 onEnd、送 SummonEnd。
 -- session 只存純量與呼叫端的回呼，不跨 tick 持有 Java 物件（同 MDAD_TrafficRelay）。
 -- SP 走同一份：沒有權限交接，SummonStart／SummonEnd 改成直接呼叫 client Driver（MDAD.Drive），客戶端的 Summon 心跳也直接
 -- 呼叫 Summon.onCommand（同 Driver reportAutoUsage 的 SP 分支）。
@@ -25,6 +26,15 @@ Summon.RETRY_MS = 2000      -- 發動中引擎回到 Idle（上一次失敗、�
 Summon.START_TRIES = 3      -- 最多按幾次（每次 Idle→Starting 扣 0.025 電，同玩家轉鑰匙；E2E tesla-sum-1027-sp-c）
 Summon.MOVING_KMH = 0.8     -- 同原版 isStopped 的門檻（BaseVehicle.java:4259-4260）
 Summon.START_CHARGE = 0.1   -- tryStartEngine 在電瓶 ≤0.1 時只會發動失敗（BaseVehicle.java:7582-7586）
+-- 伺服器在車還在動時收掉召喚（App 停止鈕、stopSummon、乘客上車、玩家死亡…）：權限先留在召喚者客戶端，讓它把車停住、
+-- 送出停住的位置，連續 RELEASE_STILL_N 次輪詢（每次間隔一整個 POLL_MS）位移都 < RELEASE_STILL_M、或滿 RELEASE_MS 才交還。
+-- 當場交還＝伺服器只有最後收到的那個位置，客戶端自己滑行停下的那段沒人送：限速 30 時三方差約 2 m（adsum-speed-1029-h-mp
+-- M8：A−伺服器 1.97、B−伺服器 1.21）。伺服器上沒駕駛的車讀到的車速是 0（SRV spd=0.00；BaseVehicle.getCurrentSpeedKmHour
+-- :4312-4320），所以用輪詢之間的位移判斷；客戶端在動時每 150 ms、靜止時趨向 300 ms 才送一次位置（updatePhysicsNetwork
+-- :4587-4600），只比一次會把「這段剛好沒收到封包」當成停住（i-mp M8 收掉後 2 ms 就交還），所以要連兩次。
+Summon.RELEASE_MS = 3000
+Summon.RELEASE_STILL_M = 0.05
+Summon.RELEASE_STILL_N = 2
 
 local KEY = {
     OFF = "UI_MinidoracatAutoDrive_SummonOff",
@@ -42,10 +52,14 @@ local KEY = {
 Summon.KEY = KEY
 
 local sessions = {} -- vehicleId → { username, playerId, startedMs, beatAt, startUntil, tries, retryAt, phase, engineBy, mode, tx,
---                     ty, dir, onEnd }
+--                     ty, dir, onEnd, px, py（上一輪車位）, stillN（連幾輪沒動） }
 local count = 0
 local nextPollMs = 0
-local pollIds = {} -- 輪詢時先抄下 id 再處理：finish 會刪表項，Kahlua 的 table 走 pairs 時不能改
+local releases = {} -- vehicleId → { playerId, username, x, y, stillN, atMs, untilMs }：已收掉、等車停住再交還權限
+local releaseN = 0
+-- 輪詢時先抄下 id 再處理：finish 會刪 sessions 的表項。Kahlua 的 pairs 走的是開頭抄下的鍵快照（KahluaTableImpl.java:152-172），
+-- 刪「目前這個鍵」安全，刪之後才會走到的鍵會走到 (key, nil)
+local pollIds = {}
 
 local function log(msg)
     print("[" .. MDAD.MOD_ID .. "] summon " .. msg)
@@ -170,9 +184,18 @@ function Summon.finish(vid, code, vehicle, player)
     local shut = false
     if vehicle then
         -- 權限仍在召喚者手上才交還（不論停止碼；碼 AUTH 也可能是綁車 MOD 收回駕駛權時呼叫、權限還在召喚者）；
-        -- 已被別的客戶端拿走就不碰。B 坐上駕駛座時這一行把權限交給 B
+        -- 已被別的客戶端拿走就不碰。B 坐上駕駛座時這一行把權限交給 B。沒人坐駕駛座、召喚者還在、最近 RELEASE_STILL_N 輪內
+        -- 車還動過＝等它停住再交（見 RELEASE_MS）；召喚者斷線或沒心跳時位置不會再動，連兩輪不動就交
         if isServer() and vehicle:getNetPlayerId() == sess.playerId then
-            vehicle:authorizationChanged(vehicle:getDriver())
+            if (sess.stillN or Summon.RELEASE_STILL_N) < Summon.RELEASE_STILL_N and player and vehicle:getDriver() == nil then
+                local now = getTimestampMs()
+                if not releases[vid] then releaseN = releaseN + 1 end
+                -- 基準用上一輪輪詢的車位、不動輪數接著算：stopSummon 在兩輪之間被呼叫時，下一輪比較的仍是完整一個 POLL_MS
+                releases[vid] = { playerId = sess.playerId, username = sess.username, x = sess.px, y = sess.py,
+                    stillN = sess.stillN, atMs = now, untilMs = now + Summon.RELEASE_MS }
+            else
+                vehicle:authorizationChanged(vehicle:getDriver())
+            end
         end
         -- 發動中（Starting／RetryingStarting／StartingSuccess）也要熄：只看 isEngineRunning 的話，租約刪掉後引擎狀態機
         -- 照樣轉進 Running，無人車自己怠速（VehicleEngine.java:424-434 shutOff 在任何狀態都轉進關閉流程）
@@ -220,6 +243,17 @@ end
 local function poll(vid, sess, now)
     local vehicle = getVehicleById(vid)
     if not vehicle or vehicle:isRemovedFromWorld() then return Summon.finish(vid, "GONE", vehicle) end
+    -- 連幾輪沒動（finish 據此決定要不要等車停住再交權限；伺服器讀到的車速是 0，只比一輪會把沒收到位置封包當成停住）。
+    -- 排在所有 finish 之前，這一輪收掉的都用這一輪的位移；第一個樣本當成沒在動
+    if sess.phase == "driving" then
+        local x, y = vehicle:getX(), vehicle:getY()
+        if sess.px and dist2(x, y, sess.px, sess.py) >= Summon.RELEASE_STILL_M * Summon.RELEASE_STILL_M then
+            sess.stillN = 0
+        else
+            sess.stillN = (sess.stillN or Summon.RELEASE_STILL_N - 1) + 1
+        end
+        sess.px, sess.py = x, y
+    end
     local player = findPlayer(sess)
     if not player then return Summon.finish(vid, "LEFT", vehicle) end
     if player:isDead() then return Summon.finish(vid, "DEAD", vehicle, player) end
@@ -253,11 +287,41 @@ local function poll(vid, sess, now)
     end
 end
 
+-- 等車停住再交還的權限（見 RELEASE_MS）：車沒了或別的客戶端已經拿走就不碰；召喚者離線或 onlineID 換人、有人坐上駕駛座、
+-- 連 RELEASE_STILL_N 輪不動、到期＝交還（authorizationChanged(getDriver())：沒人＝伺服器、有駕駛＝他）
+local function pollReleases(now)
+    for vid, rel in pairs(releases) do
+        local vehicle = getVehicleById(vid)
+        local done = not vehicle or vehicle:isRemovedFromWorld() or vehicle:getNetPlayerId() ~= rel.playerId
+        if not done then
+            local x, y = vehicle:getX(), vehicle:getY()
+            if dist2(x, y, rel.x, rel.y) < Summon.RELEASE_STILL_M * Summon.RELEASE_STILL_M then
+                rel.stillN = rel.stillN + 1
+            else
+                rel.stillN = 0
+            end
+            rel.x, rel.y = x, y
+            local owner = findPlayer(rel)
+            if rel.stillN >= Summon.RELEASE_STILL_N or now >= rel.untilMs or not owner or vehicle:getDriver() ~= nil then
+                vehicle:authorizationChanged(vehicle:getDriver())
+                log("release vid=" .. tostring(vid) .. " ms=" .. tostring(now - rel.atMs) .. " still=" .. rel.stillN
+                    .. " owner=" .. tostring(owner ~= nil))
+                done = true
+            end
+        end
+        if done then
+            releases[vid] = nil -- 刪的是 pairs 目前這個鍵（見 pollIds 的說明）
+            releaseN = releaseN - 1
+        end
+    end
+end
+
 function Summon.tick()
-    if count == 0 then return end
+    if count == 0 and releaseN == 0 then return end
     local now = getTimestampMs()
     if now < nextPollMs then return end
     nextPollMs = now + Summon.POLL_MS
+    if releaseN > 0 then pollReleases(now) end
     local n = 0
     for vid in pairs(sessions) do
         n = n + 1
@@ -346,12 +410,18 @@ function Summon.collect(powerVehicles, powerNav)
 end
 
 -- 全部收掉（離線測試清場；回收掉幾個）。不另外把 sessions 掛出去：刪表項不走 finish 會漏交權限與 onEnd。
+-- 等車停住的權限也當場交還（清場不等）。
 function Summon.finishAll(code)
     local ids, n = {}, 0
     for vid in pairs(sessions) do ids[#ids + 1] = vid end
     for i = 1, #ids do
         if Summon.finish(ids[i], code) then n = n + 1 end
     end
+    for vid, rel in pairs(releases) do
+        local vehicle = getVehicleById(vid)
+        if vehicle and vehicle:getNetPlayerId() == rel.playerId then vehicle:authorizationChanged(vehicle:getDriver()) end
+    end
+    releases, releaseN = {}, 0
     return n
 end
 

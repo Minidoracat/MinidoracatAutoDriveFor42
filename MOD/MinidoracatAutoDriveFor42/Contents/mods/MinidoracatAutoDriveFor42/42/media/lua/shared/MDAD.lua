@@ -859,7 +859,8 @@ end
 --     target 另看目標）④車：沒人、沒拖、沒在動、沒人持有物理權限、沒在召喚、12V、模組、導航裝置（dumb 不看）⑤引擎在轉或
 --     startEngine ⑥寫入 session。
 --   伺服器／SP：stopSummon(vehicle, code)（code 預設 CANCELLED）→ boolean；summonInfo(vehicle) → {by, phase, startedMs,
---     mode} 或 nil（phase：starting＝發動引擎／交權限中、driving＝召喚者的客戶端在開）。
+--     mode} 或 nil（phase：starting＝發動引擎／交權限中、driving＝召喚者的客戶端在開）。MP 下收掉時車還在動，物理權限
+--     留在召喚者客戶端等車停住（最多 Summon.RELEASE_MS＝3 秒）才交還，這段時間對同一台車 startSummon 回 SummonBusy。
 --   客戶端：canSummon(playerNum, vehicle?, opts?) → true｜false, 翻譯鍵（只用來灰掉介面，以伺服器為準）；
 --     summonState(playerNum) → {vid, phase, code, why, dist, mode} 或 nil（phase：driving／stopping／ended，code 只在 ended
 --     有值；why 只在起步就失敗時有值＝細分原因（主 MOD 的路線狀態或理由鍵），只供記錄、字彙不保證；回的是本 MOD 的狀態表，唯讀）；
