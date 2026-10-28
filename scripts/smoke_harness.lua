@@ -34168,11 +34168,13 @@ function drive.scenarioSummonServerRevoke()
 end
 drive.scenarioSummonServerRevoke()
 
--- 伺服器在車還在動時收掉（1029b；adsum-speed-1029-h-mp M8 三方差約 2 m）：權限留在召喚者客戶端，等兩次輪詢之間不再動、
--- 或滿 Summon.RELEASE_MS 才交還；沒在動就當場交。違規證明：finish 拿掉延後分支＝(RW-defer) 紅；pollReleases 不看位移
--- 只等到期＝(RW-still) 紅；tick 在 count==0 時不看 releaseN＝(RW-still) 紅。
+-- 伺服器在車還在動時收掉（1029c；adsum-speed-1029-h-mp M8 三方差約 2 m）：權限留在召喚者客戶端，連 RELEASE_STILL_N 輪
+-- 不動、或滿 Summon.RELEASE_MS、或召喚者離線／onlineID 換人才交還；沒在動就當場交。基準是上一輪的車位（兩輪之間收掉的
+-- 那次也比完整一個 POLL_MS；i-mp M8 收掉後 2 ms 就交還）。違規證明：finish 拿掉延後分支＝(RW-defer) 紅；pollReleases
+-- 不看位移只等到期＝(RW-still) 紅；tick 在 count==0 時不看 releaseN＝(RW-still) 紅；基準改回收掉當下的車位＝(RW-mid) 紅；
+-- 只要一輪不動就交＝(RW-defer) 紅；不核對召喚者＝(RW-owner) 紅。
 function drive.scenarioSummonReleaseWhenStill()
-    scenario("召喚伺服器收權：車還在動就等它停住（或到期）再交權限，沒在動當場交")
+    scenario("召喚伺服器收權：車還在動就等它停住（或到期、召喚者離線）再交權限，沒在動當場交")
     local Api, S = MinidoracatAutoDriveAPI, MDAD.Summon
     local function begin(tag)
         local p, v = drive.sumFix({ mp = true })
@@ -34200,7 +34202,31 @@ function drive.scenarioSummonReleaseWhenStill()
     poll(v, 0.5)
     checkEq(v._npid, 1000, "(RW-defer) 還在滑：不交")
     poll(v, 0)
-    checkEq(v._npid, -1, "(RW-still) 停住那一輪交還伺服器")
+    checkEq(v._npid, 1000, "(RW-defer) 只停了一輪（可能只是那段沒收到位置封包）：還不交")
+    poll(v, 0)
+    checkEq(v._npid, -1, "(RW-still) 連兩輪不動：交還伺服器")
+    -- 兩輪之間收掉：上一輪之後已經動了、收掉後下一輪剛好沒收到新位置，比的是上一輪的車位＝還在動，不交
+    _, v = begin("(RW-mid) ")
+    poll(v, 0)
+    poll(v, 2)
+    v._x, nowMs = v._x + 0.4, nowMs + 150
+    Api.stopSummon(v, "CANCELLED")
+    poll(v, 0)
+    checkEq(v._npid, 1000, "(RW-mid) 兩輪之間收掉：下一輪比上一輪的車位，還在動、不交")
+    poll(v, 0)
+    checkEq(v._npid, 1000, "(RW-mid) 第二輪：只算停了一輪，還不交（基準若是收掉當下的車位，這輪就已連兩輪＝交）")
+    poll(v, 0)
+    checkEq(v._npid, -1, "(RW-mid) 之後連兩輪不動：交還")
+    -- 召喚者離線（onlineID 可能被新玩家重用）：不等，下一輪就交
+    local p
+    p, v = begin("(RW-owner) ")
+    poll(v, 0)
+    poll(v, 2)
+    Api.stopSummon(v, "CANCELLED")
+    checkEq(v._npid, 1000, "(RW-owner) 收掉時還在動：先不交")
+    p._username = "someoneElse"
+    poll(v, 1)
+    checkEq(v._npid, -1, "(RW-owner) onlineID 對不上原召喚者：當場交還")
     -- 沒在動：當場交
     _, v = begin("(RW-now) ")
     poll(v, 0)
