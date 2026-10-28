@@ -214,7 +214,9 @@ function Summon.finish(vid, code, vehicle, player)
         -- 一位玩家暫管（見 Summon.observer），沒有旁觀者才直接交還伺服器
         if isServer() and vehicle:getNetPlayerId() == sess.playerId then
             local now = getTimestampMs()
-            local w = vehicle:getDriver() == nil and (not player or code == "TIMEOUT") and Summon.observer(vehicle, sess.playerId)
+            -- 拖掛中不交（authorizationChanged 只改這一台，拖車鏈會兩端分開算；召喚本來就拒絕拖車、途中掛上下一輪就 TOWING）
+            local w = vehicle:getDriver() == nil and (not player or code == "TIMEOUT") and not towing(vehicle)
+                and Summon.observer(vehicle, sess.playerId)
             if w then
                 -- authorizationChanged(旁觀者)＝他 Local（BaseVehicle.java:10130-10136）；收回走 releases（他不會自己交回）
                 vehicle:authorizationChanged(w)

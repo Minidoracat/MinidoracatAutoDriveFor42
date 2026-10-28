@@ -34280,6 +34280,17 @@ function drive.scenarioSummonReleaseWhenStill()
     drive.online = {}
     poll(v, 0)
     checkEq(v._npid, -1, "(RW-alone) 召喚者離線、附近沒有其他玩家：直接回伺服器")
+    -- 拖掛中召喚者離線：不交旁觀者（authorizationChanged 只改這一台，拖車鏈會分開算），直接回伺服器
+    _, v = begin("(RW-tow) ")
+    drive.online = { drive.sp, w }
+    poll(v, 0)
+    v._towing = { getId = function() return 99 end }
+    drive.online = { w }
+    v._x = v._x + 2
+    nowMs = nowMs + S.POLL_MS
+    S.tick()
+    checkEq(v._npid, -1, "(RW-tow) 拖掛中：不交旁觀者，直接回伺服器")
+    v._towing = nil
     -- 兩位旁觀者：交給離車最近的那位；暫管期間他也離線＝當場收回
     local far = newPlayer({ num = 2, username = "far", onlineId = 3000 })
     far.getX = function(self) return self._x end
