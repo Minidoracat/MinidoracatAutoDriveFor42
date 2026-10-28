@@ -34168,6 +34168,58 @@ function drive.scenarioSummonServerRevoke()
 end
 drive.scenarioSummonServerRevoke()
 
+-- 伺服器在車還在動時收掉（1029b；adsum-speed-1029-h-mp M8 三方差約 2 m）：權限留在召喚者客戶端，等兩次輪詢之間不再動、
+-- 或滿 Summon.RELEASE_MS 才交還；沒在動就當場交。違規證明：finish 拿掉延後分支＝(RW-defer) 紅；pollReleases 不看位移
+-- 只等到期＝(RW-still) 紅；tick 在 count==0 時不看 releaseN＝(RW-still) 紅。
+function drive.scenarioSummonReleaseWhenStill()
+    scenario("召喚伺服器收權：車還在動就等它停住（或到期）再交權限，沒在動當場交")
+    local Api, S = MinidoracatAutoDriveAPI, MDAD.Summon
+    local function begin(tag)
+        local p, v = drive.sumFix({ mp = true })
+        setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, SummonMaxDistance = 64 })
+        clientFlag, serverFlag = false, true
+        checkTrue(Api.startSummon(p, v, {}), tag .. "起步")
+        nowMs = nowMs + 250
+        S.tick()
+        clearList(sentServer)
+        checkEq(v._npid, 1000, tag .. "權限在召喚者")
+        return p, v
+    end
+    local function poll(v, dx)
+        v._x = v._x + dx
+        nowMs = nowMs + S.POLL_MS
+        S.tick()
+    end
+    -- 在動：收掉後權限先不交，停住那一輪才交
+    local _, v = begin("(RW-defer) ")
+    poll(v, 0)
+    poll(v, 2)
+    checkTrue(Api.stopSummon(v, "CANCELLED"), "(RW-defer) 伺服器 stopSummon")
+    checkNil(Api.summonInfo(v), "(RW-defer) 租約當場收掉")
+    checkEq(v._npid, 1000, "(RW-defer) 車還在動：權限先留在召喚者（讓它停車、送出停住的位置）")
+    poll(v, 0.5)
+    checkEq(v._npid, 1000, "(RW-defer) 還在滑：不交")
+    poll(v, 0)
+    checkEq(v._npid, -1, "(RW-still) 停住那一輪交還伺服器")
+    -- 沒在動：當場交
+    _, v = begin("(RW-now) ")
+    poll(v, 0)
+    poll(v, 0)
+    Api.stopSummon(v, "CANCELLED")
+    checkEq(v._npid, -1, "(RW-now) 車沒在動：當場交還")
+    -- 一直在動（客戶端沒停住）：滿 RELEASE_MS 照樣交
+    _, v = begin("(RW-cap) ")
+    poll(v, 0)
+    poll(v, 2)
+    Api.stopSummon(v, "CANCELLED")
+    for _ = 1, math.floor(S.RELEASE_MS / S.POLL_MS) - 1 do poll(v, 1) end
+    checkEq(v._npid, 1000, "(RW-cap) 到期前一直在動：還沒交")
+    poll(v, 1)
+    checkEq(v._npid, -1, "(RW-cap) 滿 RELEASE_MS：交還")
+    clientFlag, serverFlag = false, false
+end
+drive.scenarioSummonReleaseWhenStill()
+
 -- 召喚計費（第 2 輪審查 Codex）：真的觸發 EveryOneMinute 與 GasTank wrapper。違規證明：collect 不標 powerNav＝(BL-come)
 -- 每分鐘電紅；vehicleUsageModes 拿掉無駕駛分支＝(BL-come) 油耗紅；navOn 不排除 dumb＝(BL-dumb) 紅。
 function drive.scenarioSummonBilling()
