@@ -221,10 +221,11 @@ function Summon.finish(vid, code, vehicle, player)
                 -- authorizationChanged(旁觀者)＝他 Local（BaseVehicle.java:10130-10136）；收回走 releases（他不會自己交回）
                 vehicle:authorizationChanged(w)
                 if not releases[vid] then releaseN = releaseN + 1 end
-                -- 不動輪數從 -∞ 起算：權限推到他那端、他的第一包位置送回來要幾百 ms（VehicleManager 每 100 ms 推一次權限、
+                -- 不動輪數從很負的數起算：權限推到他那端、他的第一包位置送回來要幾百 ms（VehicleManager 每 100 ms 推一次權限、
                 -- 單程延遲、第一包 Unreliable 可能掉），先數「沒動」會在舊位置提早收回；看到第一次位移才歸 0 照常數，一直沒動就等到期
+                -- （哨兵用有限值，同 repo 不用 math.huge 的慣例）
                 releases[vid] = { playerId = w:getOnlineID(), username = w:getUsername(), x = vehicle:getX(), y = vehicle:getY(),
-                    stillN = -math.huge, atMs = now, untilMs = now + Summon.RELEASE_MS }
+                    stillN = -1e9, atMs = now, untilMs = now + Summon.RELEASE_MS }
                 log("handoff vid=" .. tostring(vid) .. " to=" .. tostring(w:getUsername()) .. " code=" .. code)
             elseif (sess.stillN or Summon.RELEASE_STILL_N) < Summon.RELEASE_STILL_N and player and vehicle:getDriver() == nil then
                 if not releases[vid] then releaseN = releaseN + 1 end

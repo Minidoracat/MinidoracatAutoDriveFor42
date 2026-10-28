@@ -34306,8 +34306,9 @@ function drive.scenarioSummonReleaseWhenStill()
     drive.online = { far }
     poll(v, 1)
     checkEq(v._npid, -1, "(RW-near) 暫管的人也離線：當場收回伺服器")
-    -- TIMEOUT（召喚者還在線、沒心跳）：同樣交給旁觀者，不交回召喚者
+    -- TIMEOUT（召喚者還在線、沒心跳）：同樣交給旁觀者，不交回召喚者（旁觀者放得比召喚者遠，才驗得到排除召喚者）
     _, v = begin("(RW-timeout) ")
+    w._x, w._y = 30, 0
     drive.online = { drive.sp, w }
     poll(v, 0)
     poll(v, 2)
