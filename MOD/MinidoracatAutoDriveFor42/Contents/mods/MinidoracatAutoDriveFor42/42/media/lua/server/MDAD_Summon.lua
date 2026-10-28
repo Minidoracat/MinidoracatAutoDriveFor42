@@ -52,7 +52,7 @@ local KEY = {
 Summon.KEY = KEY
 
 local sessions = {} -- vehicleId → { username, playerId, startedMs, beatAt, startUntil, tries, retryAt, phase, engineBy, mode, tx,
---                     ty, dir, onEnd, px, py（上一輪車位）, moving（上一輪到這輪有沒有在動） }
+--                     ty, dir, onEnd, px, py（上一輪車位）, stillN（連幾輪沒動） }
 local count = 0
 local nextPollMs = 0
 local releases = {} -- vehicleId → { playerId, username, x, y, stillN, atMs, untilMs }：已收掉、等車停住再交還權限
@@ -184,15 +184,15 @@ function Summon.finish(vid, code, vehicle, player)
     local shut = false
     if vehicle then
         -- 權限仍在召喚者手上才交還（不論停止碼；碼 AUTH 也可能是綁車 MOD 收回駕駛權時呼叫、權限還在召喚者）；
-        -- 已被別的客戶端拿走就不碰。B 坐上駕駛座時這一行把權限交給 B。沒人坐駕駛座、召喚者還在、上一輪輪詢車還在動
-        -- ＝等它停住再交（見 RELEASE_MS）；召喚者斷線或沒心跳時位置不會再動，連兩輪不動就交
+        -- 已被別的客戶端拿走就不碰。B 坐上駕駛座時這一行把權限交給 B。沒人坐駕駛座、召喚者還在、最近 RELEASE_STILL_N 輪內
+        -- 車還動過＝等它停住再交（見 RELEASE_MS）；召喚者斷線或沒心跳時位置不會再動，連兩輪不動就交
         if isServer() and vehicle:getNetPlayerId() == sess.playerId then
-            if sess.moving and player and vehicle:getDriver() == nil then
+            if (sess.stillN or Summon.RELEASE_STILL_N) < Summon.RELEASE_STILL_N and player and vehicle:getDriver() == nil then
                 local now = getTimestampMs()
                 if not releases[vid] then releaseN = releaseN + 1 end
-                -- 基準用上一輪輪詢的車位：stopSummon 在兩輪之間被呼叫時，下一輪比較的仍是完整一個 POLL_MS
+                -- 基準用上一輪輪詢的車位、不動輪數接著算：stopSummon 在兩輪之間被呼叫時，下一輪比較的仍是完整一個 POLL_MS
                 releases[vid] = { playerId = sess.playerId, username = sess.username, x = sess.px, y = sess.py,
-                    stillN = 0, atMs = now, untilMs = now + Summon.RELEASE_MS }
+                    stillN = sess.stillN, atMs = now, untilMs = now + Summon.RELEASE_MS }
             else
                 vehicle:authorizationChanged(vehicle:getDriver())
             end
@@ -243,11 +243,15 @@ end
 local function poll(vid, sess, now)
     local vehicle = getVehicleById(vid)
     if not vehicle or vehicle:isRemovedFromWorld() then return Summon.finish(vid, "GONE", vehicle) end
-    -- 上一輪到這輪有沒有在動（finish 據此決定要不要等車停住再交權限；伺服器讀到的車速是 0）。排在所有 finish 之前，
-    -- 這一輪收掉的都用這一輪的位移
+    -- 連幾輪沒動（finish 據此決定要不要等車停住再交權限；伺服器讀到的車速是 0，只比一輪會把沒收到位置封包當成停住）。
+    -- 排在所有 finish 之前，這一輪收掉的都用這一輪的位移；第一個樣本當成沒在動
     if sess.phase == "driving" then
         local x, y = vehicle:getX(), vehicle:getY()
-        sess.moving = sess.px ~= nil and dist2(x, y, sess.px, sess.py) >= Summon.RELEASE_STILL_M * Summon.RELEASE_STILL_M
+        if sess.px and dist2(x, y, sess.px, sess.py) >= Summon.RELEASE_STILL_M * Summon.RELEASE_STILL_M then
+            sess.stillN = 0
+        else
+            sess.stillN = (sess.stillN or Summon.RELEASE_STILL_N - 1) + 1
+        end
         sess.px, sess.py = x, y
     end
     local player = findPlayer(sess)

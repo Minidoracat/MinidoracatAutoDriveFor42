@@ -33198,7 +33198,7 @@ function drive.sumFix(opts)
         p.getY = function(self) return self._y end
         drive.sp = p
     end
-    p._x, p._y, p._vehicle, p._dead, p._local = opts.px or 15, opts.py or 0, nil, false, true
+    p._x, p._y, p._vehicle, p._dead, p._local, p._username = opts.px or 15, opts.py or 0, nil, false, true, "summoner"
     players[0], players[1] = p, nil
     activePlayers = 1
     drive.online = { p }
@@ -34168,11 +34168,12 @@ function drive.scenarioSummonServerRevoke()
 end
 drive.scenarioSummonServerRevoke()
 
--- 伺服器在車還在動時收掉（1029c；adsum-speed-1029-h-mp M8 三方差約 2 m）：權限留在召喚者客戶端，連 RELEASE_STILL_N 輪
--- 不動、或滿 Summon.RELEASE_MS、或召喚者離線／onlineID 換人才交還；沒在動就當場交。基準是上一輪的車位（兩輪之間收掉的
--- 那次也比完整一個 POLL_MS；i-mp M8 收掉後 2 ms 就交還）。違規證明：finish 拿掉延後分支＝(RW-defer) 紅；pollReleases
--- 不看位移只等到期＝(RW-still) 紅；tick 在 count==0 時不看 releaseN＝(RW-still) 紅；基準改回收掉當下的車位＝(RW-mid) 紅；
--- 只要一輪不動就交＝(RW-defer) 紅；不核對召喚者＝(RW-owner) 紅。
+-- 伺服器在車還在動時收掉（延後交還 1029c 起；連兩輪、上一輪基準、核對召喚者 1029d 起；adsum-speed-1029-h-mp M8 三方差約
+-- 2 m）：最近 RELEASE_STILL_N 輪內動過就把權限留在召喚者客戶端，連 RELEASE_STILL_N 輪不動、或滿 Summon.RELEASE_MS、或召喚者
+-- 離線／onlineID 換人才交還；一直沒動就當場交。基準是上一輪的車位（兩輪之間收掉的那次也比完整一個 POLL_MS；i-mp M8 收掉後
+-- 2 ms 就交還）。違規證明：finish 拿掉延後分支＝(RW-defer) 紅；pollReleases 不看位移只等到期＝(RW-still) 紅；tick 在
+-- count==0 時不看 releaseN＝(RW-still) 紅；基準改回收掉當下的車位＝(RW-mid) 紅；只要一輪不動就交＝(RW-defer) 紅；
+-- 不核對召喚者＝(RW-owner) 紅；進入端只看最近一輪＝(RW-gap) 紅。
 function drive.scenarioSummonReleaseWhenStill()
     scenario("召喚伺服器收權：車還在動就等它停住（或到期、召喚者離線）再交權限，沒在動當場交")
     local Api, S = MinidoracatAutoDriveAPI, MDAD.Summon
@@ -34227,6 +34228,15 @@ function drive.scenarioSummonReleaseWhenStill()
     p._username = "someoneElse"
     poll(v, 1)
     checkEq(v._npid, -1, "(RW-owner) onlineID 對不上原召喚者：當場交還")
+    -- 最近一輪剛好沒收到位置（看起來沒動），但再前一輪還在動：照樣延後
+    _, v = begin("(RW-gap) ")
+    poll(v, 0)
+    poll(v, 2)
+    poll(v, 0)
+    Api.stopSummon(v, "CANCELLED")
+    checkEq(v._npid, 1000, "(RW-gap) 只靜了一輪就收掉：仍算在動，先不交")
+    poll(v, 0)
+    checkEq(v._npid, -1, "(RW-gap) 再一輪不動（連兩輪）：交還")
     -- 沒在動：當場交
     _, v = begin("(RW-now) ")
     poll(v, 0)
