@@ -1238,8 +1238,8 @@ end
 -- v、vTgt 單位 km/h（v 可負：倒退中＝離目標更遠）；回 m/s²。
 -- vCap（選填，> vTgt）：實速超過 vTgt 後前饋線性淡出、到 vCap 歸零。沒有它時推力要到 vTgt＋K_R×wf／GAIN 才歸零（wf 2.0、
 -- 目標 1 km/h＝5 km/h）：輪子實際阻力比 K_R×wf 小時（滾動、路面、坡度）車會一路被推到 3–5 km/h（E2E tesla-sum-1027-sp-g
--- 前進／後退每 tick 取樣最高 3.9／4.1 km/h；到我這裡 12.0、指定地點 10.4，限速 10）。召喚一律帶 vCap＝目標＋0.5
--- （Driver TUNE.SUMMON_PUSH_OVER_KMH）。
+-- 前進／後退每 tick 取樣最高 3.9／4.1 km/h；到我這裡 12.0、指定地點 10.4，當時限速 10、前進／後退 1）。召喚一律帶 vCap＝目標＋0.5
+-- （Driver TUNE.SUMMON_PUSH_OVER_KMH；現行限速見 Driver TUNE.SUMMON_MAX_KMH／SUMMON_DUMB_KMH）。
 -- bias（選填，m/s²）：加在前饋上的學習值（前進／後退的積分項，Driver Drive.summonDumbStep）。只有比例項時穩態車速＝
 -- vTgt－(實際阻力－K_R×wf)／GAIN，GAIN 只有 3.6，阻力差 2 m/s² 就少 0.6 km/h：E2E adsum-1028-d2-s10 原版車前進 12m 143 秒
 -- （0.30 km/h）、integsum-1028-a Model Y 前進 0.9、後退 0.4 km/h。前饋加 bias 後再照 vCap 淡出，夾在 ≥0。

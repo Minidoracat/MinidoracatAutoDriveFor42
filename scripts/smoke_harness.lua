@@ -33823,7 +33823,7 @@ end
 drive.scenarioSummonTarget()
 
 function drive.scenarioSummonDumb()
-    scenario("前進／後退（dumb，build-1027 S10）：不開 session、直線 1 km/h、走滿 12m＝ARRIVED、後方有障礙＝BLOCKED、頂住 3 秒、按停止")
+    scenario("前進／後退（dumb，build-1027 S10）：不開 session、直線 SUMMON_DUMB_KMH、走滿 12m＝ARRIVED、後方有障礙＝BLOCKED、頂住 3 秒、按停止")
     local Dr, Api = MDAD.Drive, MinidoracatAutoDriveAPI
     -- 前進：每幀一次、沿車頭、不轉向
     local p, v = drive.sumFix({ px = -6, py = 4 })
@@ -33841,11 +33841,11 @@ function drive.scenarioSummonDumb()
     end
     checkEq(drive.bad.impulse, 0, "每幀最多一次 addImpulse")
     checkEq(fwdN, 30, "30 幀都往前推、零力矩")
-    -- 速度回饋：1 km/h 加滾阻補償 K_R×抓地（輪子被 park 煞住），遠超過就不推
+    -- 速度回饋：SUMMON_DUMB_KMH 加滾阻補償 K_R×抓地（輪子被 park 煞住），遠超過就不推
     v._speed = 10
     driveReset(v)
     drive.sumTick()
-    checkEq(v._imp.total, 0, "遠超過 1 km/h：不推")
+    checkEq(v._imp.total, 0, "遠超過 SUMMON_DUMB_KMH：不推")
     -- 走滿 12m：ARRIVED（build-1027：dumb 走滿也回 ARRIVED）
     v._speed, v._x = 1, 12.1
     drive.sumTick()
@@ -34461,10 +34461,11 @@ end
 drive.scenarioSummonDumbPeak()
 
 -- 接近包絡（1029a；限速 10 → TUNE.SUMMON_MAX_KMH）：到站邊界前用 approachCapKmh 收到 SUMMON_ARRIVE_KMH，減速度 SUMMON_APPROACH_DECEL。
--- 到我這裡量召喚者、指定地點量停車點；每幀跟線都經過它。違規證明：拿掉 onPlayerUpdate 那行呼叫＝(AP-wire) 紅；
--- 包絡改回 targetSpeed＝(AP2)(AP5) 紅。
+-- 到我這裡量召喚者、指定地點量停車點；每幀跟線都經過它，而且壓到推力。殭屍在 SUMMON_ZOMBIE_NEAR_M 外同樣照包絡收到
+-- SUMMON_ZOMBIE_KMH；前進／後退帶內有殭屍時目標也壓到 SUMMON_ZOMBIE_KMH。違規證明：拿掉 stepFollow 那行呼叫＝(AP-wire)(AP-push)
+-- 紅；包絡改回 targetSpeed＝(AP2)(AP5) 紅；殭屍帽拿掉包絡＝(ZE1) 紅；前進／後退不看 sm.zombie＝(DZ) 紅。
 function drive.scenarioSummonApproach()
-    scenario("召喚接近包絡：遠處照限速，到站邊界收到 SUMMON_ARRIVE_KMH，包絡照 SUMMON_APPROACH_DECEL；每幀跟線都套")
+    scenario("召喚接近包絡：遠處照限速，到站邊界收到 SUMMON_ARRIVE_KMH，包絡照 SUMMON_APPROACH_DECEL；每幀跟線都套；殭屍同理")
     local Dr = MDAD.Drive
     local T = Dr.debugTune()
     local p, v = drive.sumFix({ px = 40, py = 0 })
@@ -34491,6 +34492,53 @@ function drive.scenarioSummonApproach()
     drive.sumTick(10)
     Dr.summonApproachCap = real
     checkTrue(n >= 10, "(AP-wire) 跟線每幀都套接近包絡（" .. n .. " 次／10 幀）")
+    -- 包絡真的接到推力：同一趟只改召喚者位置（站車旁＝不在前方帶內，Sensor 不當行人停），20 km/h 時遠處照推、近處不推
+    local ss = Dr.debugSession(0)
+    v._speed = 20
+    ss.summonAccel = nil
+    driveReset(v)
+    drive.sumTick()
+    checkTrue((ss.summonAccel or 0) > 0, "(AP-push) 召喚者 30m：20 km/h 照推（" .. tostring(ss.summonAccel) .. "）")
+    p._x, p._y = 0, ss.vehicleProfile.halfL + T.SUMMON_ARRIVE_GAP_M + 1
+    ss.summonAccel = nil
+    driveReset(v)
+    drive.sumTick()
+    checkEq(ss.summonAccel, 0, "(AP-push) 召喚者在車旁、離到站邊界 1m（包絡約 14 km/h）：20 km/h 不推")
+    p._y = 0
+    Dr.summonStopLocal(0)
+    v._speed = 0
+    drive.sumTick(3)
+    drive.sumServer()
+    -- 殭屍（軟縫沒處理）：NEAR_M 外照包絡收、NEAR_M 內壓到 SUMMON_ZOMBIE_KMH、軟縫處理中不管
+    local zs = { summon = {}, sensor = { zombieN = 1 }, lastSNow = 0, vehicleProfile = { halfL = hl } }
+    local function zcap(gap, why)
+        zs.sensor.zombieNearS, zs.zombieWhy = gap + hl, why
+        return Dr.summonZombieCap(zs, T.SUMMON_MAX_KMH, nowMs)
+    end
+    local MD = MDADDynamics
+    checkNear(zcap(T.SUMMON_ZOMBIE_NEAR_M + 3), MD.approachCapKmh(3, T.SUMMON_ZOMBIE_KMH, 0, T.SUMMON_APPROACH_DECEL), 1e-6,
+        "(ZE1) 殭屍在 NEAR_M 外 3m：照包絡收")
+    checkTrue(zcap(T.SUMMON_ZOMBIE_NEAR_M + 3) < T.SUMMON_MAX_KMH, "(ZE1) 那個包絡低於限速")
+    checkEq(zcap(T.SUMMON_ZOMBIE_NEAR_M + 40), T.SUMMON_MAX_KMH, "(ZE2) 殭屍 40m 外：照限速")
+    checkEq(zcap(T.SUMMON_ZOMBIE_NEAR_M - 1), T.SUMMON_ZOMBIE_KMH, "(ZE3) NEAR_M 內：壓到 SUMMON_ZOMBIE_KMH")
+    checkEq(zcap(T.SUMMON_ZOMBIE_NEAR_M + 3, "gap"), T.SUMMON_MAX_KMH, "(ZE4) 軟縫處理中：不管")
+    -- 前進／後退：帶內有殭屍時目標壓到 SUMMON_ZOMBIE_KMH（介於 ZOMBIE＋0.5 與 DUMB＋0.5 之間的車速，有殭屍不推、沒有照推）
+    local mid = (T.SUMMON_ZOMBIE_KMH + T.SUMMON_DUMB_KMH) / 2 + T.SUMMON_PUSH_OVER_KMH
+    drive.sumFix({ px = -6, py = 4 })
+    clientFlag, serverFlag = false, false
+    drive.sumStart({ mode = "dumb", dir = 1 })
+    drive.sumTick()
+    local sm = Dr.summons[0]
+    v = drive.sv
+    v._speed = mid
+    sm.zombie = false
+    driveReset(v)
+    drive.sumTick()
+    checkEq(v._imp.total, 1, "(DZ) 沒有殭屍：" .. mid .. " km/h 照推")
+    sm.zombie = true
+    driveReset(v)
+    drive.sumTick()
+    checkEq(v._imp.total, 0, "(DZ) 帶內有殭屍：" .. mid .. " km/h 不推（目標 SUMMON_ZOMBIE_KMH）")
     Dr.summonStopLocal(0)
     v._speed = 0
     drive.sumTick(3)

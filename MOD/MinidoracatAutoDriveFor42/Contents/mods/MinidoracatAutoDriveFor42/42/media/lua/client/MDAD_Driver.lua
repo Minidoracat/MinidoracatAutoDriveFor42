@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1029a"
+Drive.REV = "1029b"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -17923,18 +17923,18 @@ end
 -- 約 1 秒，30 格那趟最吃緊：限速 10 時平均 2.2 格/秒（adsum-speed-1029-base-bench），25 時 4.1（-a-bench，差一點到 2 倍）。
 TUNE.SUMMON_MAX_KMH = 30           -- 到我這裡／開到指定地點的限速
 TUNE.SUMMON_DUMB_KMH = 5           -- 前進／後退限速（12m 約 15 秒內；4 km/h 實測 12.9 秒，留給較重的車與倒車）
-TUNE.SUMMON_ARRIVE_KMH = 8         -- 接近包絡：開到到站邊界時最多這麼快（推力歸零後滑停 0.2m，停在召喚者前約 3m）
+TUNE.SUMMON_ARRIVE_KMH = 8         -- 接近包絡：開到到站邊界時最多這麼快（推力歸零後滑停約 0.2m；E2E gap 約 4.3m）
 TUNE.SUMMON_APPROACH_DECEL = 5     -- 接近包絡的計畫減速度（m/s²）。推力歸零、輪子 park() 煞住實得約 13（-a-bench 8 km/h 停 0.17 秒），
                                    -- 取不到一半：草地、別的車型抓地較差也追得上
 TUNE.SUMMON_DUMB_KI = 2.0         -- 前進／後退推力積分（m/s² 每 km/h 每秒；MDADDynamics.summonPushAccel 的 bias）。只有比例項時
                                    -- 車速看阻力：原版車 0.30、Model Y 前進 0.9／後退 0.4 km/h（adsum-1028-d2-s10、integsum-1028-a）
-TUNE.SUMMON_PUSH_OVER_KMH = 0.5    -- 召喚推力在「目標＋這個」歸零（MDADDynamics.summonPushAccel 的 vCap；前進／後退＝1.5）
+TUNE.SUMMON_PUSH_OVER_KMH = 0.5    -- 召喚推力在「目標＋這個」歸零（MDADDynamics.summonPushAccel 的 vCap；前進／後退＝SUMMON_DUMB_KMH＋0.5）
 TUNE.SUMMON_DUMB_MAX_M = 12        -- 前進／後退單次最多（走滿＝ARRIVED）
 TUNE.SUMMON_DUMB_CLEAR_M = 1       -- 倒車探測：後保桿往後這麼遠（前進用 probeNear：車身＋車頭前 1m）
 TUNE.SUMMON_DUMB_PROBE_MS = 250
 TUNE.SUMMON_DUMB_STALL_MS = 3000   -- 前進／後退推了這麼久還沒動＝頂到東西
-TUNE.SUMMON_ZOMBIE_KMH = 4         -- 殭屍擋路閃不過時的爬行上限（2026-10-27 使用者回答：≤4 km/h 推過去）
-TUNE.SUMMON_ZOMBIE_NEAR_M = 3      -- 帶內最近的殭屍離車頭這麼近、軟縫又沒處理＝在推（遠處的殭屍交給一般的殭屍檔與繞行）
+TUNE.SUMMON_ZOMBIE_KMH = 4         -- 殭屍擋路閃不過時的爬行上限（2026-10-27 使用者回答：≤4 km/h 推過去）；前進／後退帶內有殭屍也用它
+TUNE.SUMMON_ZOMBIE_NEAR_M = 3      -- 帶內最近的殭屍離車頭這麼近、軟縫又沒處理＝在推；更遠時照接近包絡收到這裡剛好 SUMMON_ZOMBIE_KMH
 TUNE.SUMMON_ZOMBIE_MAX_MS = 15000  -- 推了這麼久＝推太久，停 ZOMBIES
 TUNE.SUMMON_AUTH_MS = 5000         -- 多人：SummonStart 之後等物理權限到本機的上限（逾時 AUTH），也是等引擎 Running 同步到本機
                                    -- 的上限（逾時 ENGINE；E2E vmsum-1027-b 實測晚 1.6 秒）
@@ -18209,20 +18209,35 @@ end
 -- 殭屍擋路（2026-10-27 使用者回答）：能繞就繞（繞行與殭屍軟縫照常）；軟縫沒處理（找不到縫、閃避關閉）而最近一隻已在車頭
 -- 前 SUMMON_ZOMBIE_NEAR_M 內＝在推，速度壓到 SUMMON_ZOMBIE_KMH；連續推 SUMMON_ZOMBIE_MAX_MS＝推太久，下一幀 ZOMBIES
 -- （Drive.summonKeep 讀 stopCode）。帶內只是看得到（遠處、或軟縫已經閃過／貼著過）不算推，計時歸零。
+-- 還在 NEAR_M 外時照接近包絡收（1029a）：限速 30 時鎖輪約 13 m/s² 收到 4 km/h 要約 2.6m，只在 NEAR_M 處一階壓速會帶著
+-- 十幾 km/h 撞上（一般殭屍檔只看隻數，1–3 隻的帽 35 比限速高，不會先減速）。
 function Drive.summonZombieCap(s, targetSpeed, now)
     local sm, sen = s.summon, s.sensor
     local last = sm.zomAt
     sm.zomAt = now
     local nearS = sen and (sen.zombieN or 0) > 0 and sen.zombieNearS
     local soft = s.zombieWhy == "gap" or s.zombieWhy == "hold" or s.zombieWhy == "clear"
-    if soft or not finite(nearS)
-            or nearS - s.lastSNow - s.vehicleProfile.halfL > TUNE.SUMMON_ZOMBIE_NEAR_M then
+    if soft or not finite(nearS) then
         sm.zomMs = 0
+        return targetSpeed
+    end
+    local gap = nearS - s.lastSNow - s.vehicleProfile.halfL
+    if gap > TUNE.SUMMON_ZOMBIE_NEAR_M then
+        sm.zomMs = 0
+        local cap = MDADDynamics.approachCapKmh(gap - TUNE.SUMMON_ZOMBIE_NEAR_M, TUNE.SUMMON_ZOMBIE_KMH, 0,
+            TUNE.SUMMON_APPROACH_DECEL)
+        if targetSpeed > cap then
+            s.lastCapReason = "summon-zombie"
+            return cap
+        end
         return targetSpeed
     end
     if last and now > last and now - last < 1000 then sm.zomMs = (sm.zomMs or 0) + (now - last) end
     if (sm.zomMs or 0) >= TUNE.SUMMON_ZOMBIE_MAX_MS then sm.stopCode = "ZOMBIES" end
-    if targetSpeed > TUNE.SUMMON_ZOMBIE_KMH then return TUNE.SUMMON_ZOMBIE_KMH end
+    if targetSpeed > TUNE.SUMMON_ZOMBIE_KMH then
+        s.lastCapReason = "summon-zombie"
+        return TUNE.SUMMON_ZOMBIE_KMH
+    end
     return targetSpeed
 end
 
@@ -18258,13 +18273,16 @@ function Drive.summonArriveDist(s, vehicle, player)
 end
 
 -- 接近包絡（2026-10-29 限速 10 → SUMMON_MAX_KMH 時加）：召喚車沒有煞車，減速只有推力歸零、輪子 park() 煞住這一種，到站時
--- 推力一歸零就滑停。限速 10 時到站速度就是 10、滑停約 1m；限速提高後要在到站邊界前把速度收到 SUMMON_ARRIVE_KMH，否則滑停
--- 距離跟著平方變長、停進召喚者 3m 內。包絡用 MDADDynamics.approachCapKmh（同一般接近帽），減速度 SUMMON_APPROACH_DECEL
--- 低於鎖輪實得，推力歸零時一定追得上。
+-- 推力一歸零就滑停（約 v²/26：10 km/h 0.3m、30 km/h 2.7m）。限速提高後要在到站邊界前把速度收到 SUMMON_ARRIVE_KMH，停車點
+-- 才會跟限速 10 時一樣在召喚者前約 4m。包絡用 MDADDynamics.approachCapKmh（同一般接近帽），減速度 SUMMON_APPROACH_DECEL
+-- 低於鎖輪實得，推力歸零時一定追得上。壓到時 capReason＝summon-approach（樣本 capReason）。
 function Drive.summonApproachCap(s, vehicle, targetSpeed)
     local d = Drive.summonArriveDist(s, vehicle, getSpecificPlayer(s.summon.playerNum))
     local cap = MDADDynamics.approachCapKmh(d, TUNE.SUMMON_ARRIVE_KMH, 0, TUNE.SUMMON_APPROACH_DECEL)
-    if targetSpeed > cap then return cap end
+    if targetSpeed > cap then
+        s.lastCapReason = "summon-approach"
+        return cap
+    end
     return targetSpeed
 end
 
@@ -18746,19 +18764,21 @@ function Drive.summonDumbStep(player, sm, now)
     else
         sm.stallSince = 0
     end
+    -- 帶內有殭屍：目標壓到 SUMMON_ZOMBIE_KMH（10-27 使用者「≤4 km/h 推過去」；1029a 起 SUMMON_DUMB_KMH 比它高）
+    local tgt = TUNE.SUMMON_DUMB_KMH
+    if sm.zombie and tgt > TUNE.SUMMON_ZOMBIE_KMH then tgt = TUNE.SUMMON_ZOMBIE_KMH end
     -- 積分項（只在車動著時累積：頂住東西時不越推越大，BLOCKED 前的推力和沒有積分時一樣）
     local wf = sm.vehicleProfile.wheelFriction
     if sm.biasAt and along >= TUNE.SUMMON_STILL_KMH then
         local dt = now - sm.biasAt
         if dt > 100 then dt = 100 end -- 卡頓不一次灌進去
         local lim = MDADDynamics.SUMMON_K_R * ((finite(wf) and wf > 0) and wf or MDADDynamics.SUMMON_FRICTION_REF)
-        local b = sm.bias + TUNE.SUMMON_DUMB_KI * (TUNE.SUMMON_DUMB_KMH - along) * dt / 1000
+        local b = sm.bias + TUNE.SUMMON_DUMB_KI * (tgt - along) * dt / 1000
         if b > lim then b = lim elseif b < -lim then b = -lim end
         sm.bias = b
     end
     sm.biasAt = now
-    local a = MDADDynamics.summonPushAccel(along, TUNE.SUMMON_DUMB_KMH, wf,
-        TUNE.SUMMON_DUMB_KMH + TUNE.SUMMON_PUSH_OVER_KMH, sm.bias)
+    local a = MDADDynamics.summonPushAccel(along, tgt, wf, tgt + TUNE.SUMMON_PUSH_OVER_KMH, sm.bias)
     if a > 0 then
         local mult = getGameTime():getMultiplier()
         if mult < MULT_MIN then mult = MULT_MIN elseif mult > MULT_MAX then mult = MULT_MAX end
