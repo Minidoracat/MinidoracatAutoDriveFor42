@@ -8,7 +8,8 @@
 --   ③ 每 250ms 輪詢中止條件——伺服器沒有座位、斷線的 Lua 事件（OnEnterVehicle／OnExitVehicle／OnDisconnect 只在客戶端
 --      觸發），引擎也不會收回車外玩家的權限，onlineID 還會被新玩家重用，所以只能靠輪詢；
 --   ④ finish 是唯一出口：交還權限（authorizationChanged(getDriver())＝BaseVehicle.java:10130-10136：沒人＝Server、有人
---      坐駕駛座＝交給他；車還在動時延到 releases、等停住再交，見 RELEASE_MS）、熄掉召喚發動的引擎（車上有人不熄）、
+--      坐駕駛座＝交給他；車還在動時延到 releases、等停住再交，見 RELEASE_MS；召喚者離線或沒心跳時先交給附近一位玩家暫管，
+--      見 Summon.observer）、熄掉召喚發動的引擎（車上有人不熄）、
 --      呼叫 onEnd、送 SummonEnd。
 -- session 只存純量與呼叫端的回呼，不跨 tick 持有 Java 物件（同 MDAD_TrafficRelay）。
 -- SP 走同一份：沒有權限交接，SummonStart／SummonEnd 改成直接呼叫 client Driver（MDAD.Drive），客戶端的 Summon 心跳也直接
@@ -172,6 +173,30 @@ function Summon.start(player, vehicle, opts)
     return true
 end
 
+-- 召喚者離線（LEFT）或沒心跳（TIMEOUT）時，暫管車子的旁觀者：離車 OBSERVER_M 內最近、活著、不是召喚者的線上玩家；沒有回 nil。
+-- 為什麼要交給旁觀者（adsum-m4-1029-b-m4，原版對照 adsum-m4-1029-a-m4v）：旁觀者那端車子是 Remote，插值收不到新位置後，
+-- 沒有駕駛的車每幀 checkShouldBeActive（BaseVehicle.java:3346-3347 只在 getDriver()==nil 時呼叫）見 Bullet 還帶著最後的車速就
+-- 把物理打開、繼續滑；權限一變（setNetPlayerAuthorization 把 timeSinceLastAuth 設 10），WorldSimulation.java:209-216 這 10 幀
+-- 套用 Bullet 的位置＝旁觀者車位往前跳（30 km/h 時約 2.4 m），伺服器只有召喚者最後送的位置，之後沒人再同步。原版駕駛被強殺
+-- 時車上有駕駛、不走這條，三方一致（a-m4v 0.00 m）。所以把權限交給一位旁觀者（他那端變 Local：物理照算、套用並送出位置），
+-- 他把滑完的位置送上來，伺服器與其他人跟著他，停住（或滿 RELEASE_MS）後由 releases 收回。原版沒駕駛的車被別人撞時也是交給
+-- 附近玩家算（LocalCollide），但 authorizationServerCollide(short, boolean) 從 Lua 呼叫會報「expected short, got Double」
+-- （adsum-m4-1029-c-m4：finish 中途丟錯、沒送 SummonEnd），所以用 authorizationChanged(旁觀者)。
+Summon.OBSERVER_M = 70
+function Summon.observer(vehicle, ownerId)
+    local list = getOnlinePlayers()
+    local best, bestD2 = nil, Summon.OBSERVER_M * Summon.OBSERVER_M
+    local vx, vy = vehicle:getX(), vehicle:getY()
+    for i = 0, list:size() - 1 do
+        local q = list:get(i)
+        if q and q:getOnlineID() ~= ownerId and not q:isDead() then
+            local d2 = dist2(q:getX(), q:getY(), vx, vy)
+            if d2 <= bestD2 then best, bestD2 = q, d2 end
+        end
+    end
+    return best
+end
+
 -- 唯一出口。vehicle／player 可省略（重新解析）。回 true＝真的收掉一個 session。
 function Summon.finish(vid, code, vehicle, player)
     local sess = sessions[vid]
@@ -185,10 +210,24 @@ function Summon.finish(vid, code, vehicle, player)
     if vehicle then
         -- 權限仍在召喚者手上才交還（不論停止碼；碼 AUTH 也可能是綁車 MOD 收回駕駛權時呼叫、權限還在召喚者）；
         -- 已被別的客戶端拿走就不碰。B 坐上駕駛座時這一行把權限交給 B。沒人坐駕駛座、召喚者還在、最近 RELEASE_STILL_N 輪內
-        -- 車還動過＝等它停住再交（見 RELEASE_MS）；召喚者斷線或沒心跳時位置不會再動，連兩輪不動就交
+        -- 車還動過＝等它停住再交（見 RELEASE_MS）。召喚者已離線（LEFT）或沒心跳（TIMEOUT）＝沒人會再送停住的位置：交給附近
+        -- 一位玩家暫管（見 Summon.observer），沒有旁觀者才直接交還伺服器
         if isServer() and vehicle:getNetPlayerId() == sess.playerId then
-            if (sess.stillN or Summon.RELEASE_STILL_N) < Summon.RELEASE_STILL_N and player and vehicle:getDriver() == nil then
-                local now = getTimestampMs()
+            local now = getTimestampMs()
+            -- 拖掛中不交（authorizationChanged 只改這一台，拖車鏈會兩端分開算；召喚本來就拒絕拖車、途中掛上下一輪就 TOWING）
+            local w = vehicle:getDriver() == nil and (not player or code == "TIMEOUT") and not towing(vehicle)
+                and Summon.observer(vehicle, sess.playerId)
+            if w then
+                -- authorizationChanged(旁觀者)＝他 Local（BaseVehicle.java:10130-10136）；收回走 releases（他不會自己交回）
+                vehicle:authorizationChanged(w)
+                if not releases[vid] then releaseN = releaseN + 1 end
+                -- 不動輪數從很負的數起算：權限推到他那端、他的第一包位置送回來要幾百 ms（VehicleManager 每 100 ms 推一次權限、
+                -- 單程延遲、第一包 Unreliable 可能掉），先數「沒動」會在舊位置提早收回；看到第一次位移才歸 0 照常數，一直沒動就等到期
+                -- （哨兵用有限值，同 repo 不用 math.huge 的慣例）
+                releases[vid] = { playerId = w:getOnlineID(), username = w:getUsername(), x = vehicle:getX(), y = vehicle:getY(),
+                    stillN = -1e9, atMs = now, untilMs = now + Summon.RELEASE_MS }
+                log("handoff vid=" .. tostring(vid) .. " to=" .. tostring(w:getUsername()) .. " code=" .. code)
+            elseif (sess.stillN or Summon.RELEASE_STILL_N) < Summon.RELEASE_STILL_N and player and vehicle:getDriver() == nil then
                 if not releases[vid] then releaseN = releaseN + 1 end
                 -- 基準用上一輪輪詢的車位、不動輪數接著算：stopSummon 在兩輪之間被呼叫時，下一輪比較的仍是完整一個 POLL_MS
                 releases[vid] = { playerId = sess.playerId, username = sess.username, x = sess.px, y = sess.py,
@@ -287,8 +326,9 @@ local function poll(vid, sess, now)
     end
 end
 
--- 等車停住再交還的權限（見 RELEASE_MS）：車沒了或別的客戶端已經拿走就不碰；召喚者離線或 onlineID 換人、有人坐上駕駛座、
--- 連 RELEASE_STILL_N 輪不動、到期＝交還（authorizationChanged(getDriver())：沒人＝伺服器、有駕駛＝他）
+-- 等車停住再交還的權限（見 RELEASE_MS）：持有者是召喚者（車還在動時收掉）或暫管的旁觀者（Summon.observer）。車沒了或別的
+-- 客戶端已經拿走就不碰；持有者離線或 onlineID 換人、有人坐上駕駛座、連 RELEASE_STILL_N 輪不動、到期＝交還
+-- （authorizationChanged(getDriver())：沒人＝伺服器、有駕駛＝他）
 local function pollReleases(now)
     for vid, rel in pairs(releases) do
         local vehicle = getVehicleById(vid)

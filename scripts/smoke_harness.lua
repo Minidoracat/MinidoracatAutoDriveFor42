@@ -34252,6 +34252,70 @@ function drive.scenarioSummonReleaseWhenStill()
     checkEq(v._npid, 1000, "(RW-cap) 到期前一直在動：還沒交")
     poll(v, 1)
     checkEq(v._npid, -1, "(RW-cap) 滿 RELEASE_MS：交還")
+    -- 召喚者離線（LEFT）、附近有旁觀者：交給他暫管（authorizationChanged(他)，他送上滑完的位置），停住後收回；沒有旁觀者＝直接回伺服器
+    -- （adsum-m4-1029-b-m4：直接回伺服器時旁觀者那端車位往前跳 1.6–2.4 m、之後不再同步；原版 a-m4v 0.00 m）
+    local w = newPlayer({ num = 1, username = "watcher", onlineId = 2000 })
+    w.getX = function(self) return self._x end
+    w.getY = function(self) return self._y end
+    w._x, w._y, w._dead = 5, 5, false
+    _, v = begin("(RW-handoff) ")
+    drive.online = { drive.sp, w }
+    poll(v, 0)
+    poll(v, 2)
+    drive.online = { w }
+    poll(v, 0)
+    checkNil(Api.summonInfo(v), "(RW-handoff) 召喚者離線：收掉")
+    checkEq(v._npid, 2000, "(RW-handoff) 交給旁觀者暫管（不是直接回伺服器）")
+    poll(v, 0)
+    poll(v, 0)
+    checkEq(v._npid, 2000, "(RW-handoff) 他的第一包位置還沒到（兩輪沒動）：不收（不在舊位置提早收回）")
+    poll(v, 1.5)
+    checkEq(v._npid, 2000, "(RW-handoff) 旁觀者送上滑完的位置、還在動：不收")
+    poll(v, 0)
+    poll(v, 0)
+    checkEq(v._npid, -1, "(RW-handoff) 停住：收回伺服器")
+    _, v = begin("(RW-alone) ")
+    poll(v, 0)
+    poll(v, 2)
+    drive.online = {}
+    poll(v, 0)
+    checkEq(v._npid, -1, "(RW-alone) 召喚者離線、附近沒有其他玩家：直接回伺服器")
+    -- 拖掛中召喚者離線：不交旁觀者（authorizationChanged 只改這一台，拖車鏈會分開算），直接回伺服器
+    _, v = begin("(RW-tow) ")
+    drive.online = { drive.sp, w }
+    poll(v, 0)
+    v._towing = { getId = function() return 99 end }
+    drive.online = { w }
+    v._x = v._x + 2
+    nowMs = nowMs + S.POLL_MS
+    S.tick()
+    checkEq(v._npid, -1, "(RW-tow) 拖掛中：不交旁觀者，直接回伺服器")
+    v._towing = nil
+    -- 兩位旁觀者：交給離車最近的那位；暫管期間他也離線＝當場收回
+    local far = newPlayer({ num = 2, username = "far", onlineId = 3000 })
+    far.getX = function(self) return self._x end
+    far.getY = function(self) return self._y end
+    far._x, far._y, far._dead = 40, 0, false
+    _, v = begin("(RW-near) ")
+    drive.online = { drive.sp, far, w }
+    poll(v, 0)
+    poll(v, 2)
+    drive.online = { far, w }
+    poll(v, 0)
+    checkEq(v._npid, 2000, "(RW-near) 交給離車最近的旁觀者")
+    drive.online = { far }
+    poll(v, 1)
+    checkEq(v._npid, -1, "(RW-near) 暫管的人也離線：當場收回伺服器")
+    -- TIMEOUT（召喚者還在線、沒心跳）：同樣交給旁觀者，不交回召喚者（旁觀者放得比召喚者遠，才驗得到排除召喚者）
+    _, v = begin("(RW-timeout) ")
+    w._x, w._y = 30, 0
+    drive.online = { drive.sp, w }
+    poll(v, 0)
+    poll(v, 2)
+    nowMs = nowMs + MDAD.AUTO_USAGE_TTL_MS + 1
+    poll(v, 0)
+    checkNil(Api.summonInfo(v), "(RW-timeout) 沒心跳：收掉")
+    checkEq(v._npid, 2000, "(RW-timeout) 交給旁觀者暫管，不是召喚者")
     clientFlag, serverFlag = false, false
 end
 drive.scenarioSummonReleaseWhenStill()
