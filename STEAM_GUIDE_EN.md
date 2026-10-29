@@ -106,6 +106,7 @@ Plus a screwdriver.
 [*] [b]Controls[/b]: direct controls on the HUD.
 [*] [b]Looks[/b]: metal, glass, family and side-wing themes; compact and collapsed layouts.
 [*] [b]Other mods' dashboards[/b]: when another mod replaces the vanilla dashboard, the panel attaches to that dashboard (the other mod must provide its position).
+[*] [b]Charging info card[/b]: in those vehicles, opening the other mod's charging info card folds the Autodrive card into a small chip; closing it restores the card (a card you had already folded stays folded).
 [/list]
 [b]Metal theme[/b]
 {{img:07-hud-theme-metal-en.jpg}}
@@ -244,6 +245,36 @@ Sandbox option "Animal slowdown": Off / Large animals / All animals, default Lar
 [*] [b]Animal never moves[/b]: hands back control.
 [/list]
 Animals selected by neither are ignored.
+=== 🧰 Summon: call your car from outside
+[list]
+[*] [b]How[/b]: standing outside, use a compatible mod's phone app to call a vehicle that has an Autopilot Module. Nobody needs to be inside.
+[*] [b]Come to me[/b]: drives to you and parks beside you, following you if you walk.
+[*] [b]Go to a spot[/b]: drives to near the point you pick on the map.
+[*] [b]Forward / Reverse[/b]: creeps straight ahead or back at 5 km/h for up to 12 meters, for getting in and out of parking spots.
+[/list]
+[h3]How it drives[/h3]
+[list]
+[*] [b]Speed[/b]: up to 30 km/h, slowing down before it stops.
+[*] [b]Route[/b]: drives straight over when close, follows roads when farther (needs MiniMap 0.53.0 or later; with an older MiniMap only Forward / Reverse works).
+[*] [b]Zombies[/b]: steers around them when it can, otherwise pushes through below 4 km/h and stops if that takes too long.
+[*] [b]Engine off[/b]: the app can start it for you; when the summon ends, an engine it started is switched off again (not if someone is inside).
+[*] [b]Power and fuel[/b]: charged like Autodrive; when navigating with the vehicle's GPS, that vehicle pays.
+[/list]
+[h3]When it stops[/h3]
+[list]
+[*] [b]Blocked[/b]: a person, animal, wall or another vehicle in the way.
+[*] [b]Someone gets in[/b]: someone takes a seat in it, or you get into another vehicle.
+[*] [b]Too far or offline[/b]: you leave the summon range or disconnect.
+[*] [b]Vehicle state[/b]: engine off, battery dead or the Autopilot Module removed.
+[*] [b]Tells you why[/b]: the app shows the reason when it stops.
+[/list]
+[h3]Multiplayer[/h3]
+[list]
+[*] [b]Only the summoner controls it[/b]: only the player who summoned can stop or keep the summon going.
+[*] [b]Summoner disconnects[/b]: a nearby player takes over until the car stops, so everyone sees it parked in the same place.
+[*] [b]Split screen[/b]: only the first player can summon.
+[*] [b]Summon range[/b]: sandbox "Summon range (tiles)" sets how far from the vehicle a player can summon it, default 64, 0 turns it off. The game only runs vehicle physics within about 64 tiles of the player (less on screens smaller than 1920x1080), so the actual range is the smaller of the two.
+[/list]
 === ⚙️ Settings, power & fuel, server diagnostics
 [h3]Settings screens[/h3]
 The "Autodrive" category in MiniMap's Map Display Settings:
