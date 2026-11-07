@@ -19793,6 +19793,18 @@ scenario("調頭＋blocked：遠處不倒車、近處才退、額度用盡不空
     driveTick(dp, dveh)
     checkEq(st.mode, "unstick", "(c4b) 退 0.5m 重探（短帶淨空）：仍在倒車（實得 " .. tostring(st.mode) .. "）")
     checkTrue(dveh._imp.total >= 1 and st.reverseForce > 0, "(c4b) 重探淨空幀施倒車衝量")
+    -- (rev-tow) 拖車倒車推力照牽引車＋掛車質量（2026-11-08 Dixie：KI5 M911＋M128van 只算牽引車，4 秒退 0.07m；
+    --   E2E revpush-m911-1108d）。同一幀位再推一次、只掛上同質量的 tow.mass＝推力兩倍。違規證明：拿掉加總＝倍率 1 紅。
+    local f0 = st.reverseForce
+    st.tow = { mass = st.runtimeMass, trailer = { getForwardVector = function(_, o) return dveh:getForwardVector(o) end,
+        getUpVectorDot = function() return 1 end } } -- 折角 0
+    nowMs = nowMs + 20
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    local fT = st.reverseForce
+    st.tow = nil
+    checkTrue(st.mode == "unstick" and f0 > 0 and math.abs(fT / f0 - 2) < 1e-6,
+        string.format("(rev-tow) 掛車質量＝牽引車：倒車推力兩倍（%.0f → %s）", f0, tostring(fT)))
     -- (rev-cap) 倒車限速：已經以 12 km/h 倒退（> UNSTICK_REVERSE_KMH 10）＝本幀不再施倒車衝量，滑回上限
     --   以下再推。違規證明：拿掉限速＝12 km/h 仍施力紅。
     dveh._speed = -12
@@ -26913,6 +26925,106 @@ function drive.scenarioExitNext()
     SandboxVars = oldSand
 end
 drive.scenarioExitNext()
+
+-- (exit-stay) 2026-11-08 Dixie 路口中線兩根路燈桿（KI5 M911＋半掛車南北兩向 StopStuck，E2E dlamp-m911-s／n-1108b）：繞過 A 的
+--   承諾線出口照舊回中線，承諾後才進可視範圍的 B 在回線 lane 上、線尾後只剩不到一段側移的跑道——出口收短到承諾時的長度
+--   也塞不下回線後再側移到 B 的縫，放手後在 B 前 steep 判堵。現制：Drive.exitStay 把承諾改成同一 offL 的停留（停留鏈接手）。
+--   fixture 同 (exit-next)，一檔、可視距離拉長讓承諾時的出口不被截短（不加長＝出口就是地板）；B 是單格硬物，放在線尾後、
+--   停留 lane 的另一側。違規證明（temp/vp_1108stay.py）：base（cea4c64）與「extendDodgeExit 不呼叫 Drive.exitStay」＝(exit-stay) 紅；
+--   拿掉回線塞得進的閘＝(exit-stay-far)／(exit-short) 紅；拿掉 stayAllowed 閘＝(exit-stay-side) 紅；拿掉「下一群在出口線尾之後」
+--   的閘＝(beside) 紅（下一群在出口旁、現行出口本來就讓得過的那型照舊交接）；拖車也問 shiftFits＝(exit-stay-tow) 紅
+--   （E2E dlamp-m911-n-fix-1108d：牽引車按陡坡比例回線後塞得進、出口不改，放手後候選全被 towFold 拒收→StopStuck）。
+function drive.scenarioExitStay()
+    scenario("1108：承諾後才看到回線 lane 上的下一群、回線後塞不進側移＝出口改停留")
+    local oldSand = SandboxVars
+    local oldPer, oldGear = MDAD.HUD.perceptionDistance, MDAD.Drive.getGear(0)
+    local oldEvent, oldSample = MDADDiagnostics.event, MDADDiagnostics.sample
+    local events = {}
+    MDADDiagnostics.event = function(_, name, a) events[#events + 1] = { name = name, a = a } end
+    MDADDiagnostics.sample = function() return true end
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 120, RightLaneBias = 0 })
+    MDAD.Drive.setGear(0, 1)
+    MDAD.HUD.perceptionDistance = function() return 120 end
+    local wasE = drive.frameMs(10)
+    local function extendEv()
+        for i = #events, 1, -1 do
+            local e = events[i]
+            if e.name == "dodge" and type(e.a) == "table" and e.a.phase == "extend" then return e.a end
+        end
+    end
+    -- A 在 x=34 l=0；承諾後在線尾後 gap 公尺、停留 lane 另一側放單格硬物 B。before(st)＝放 B 之前對 session 做的事
+    local function arm(gap, before)
+        events = {}
+        drive.fillWorld(-10, 200, -8, 8)
+        drive.putVehicleGeom(34, 0, 0, 1.8, 4.4, true)
+        local ok = armDrive()
+        setHeading(dveh, 0)
+        dveh._speed = 30
+        local st = MDAD.Drive.debugSession(0)
+        if st then st.diag = true end
+        for _ = 1, 3 do drive.frameMs(10); drive.scanRound(true) end
+        local fs = st and st.fstate
+        local info = { ok = ok and st ~= nil and st.dodging == true and not st.dodgeStay
+            and math.abs(fs.offD - fs.offC - st.dodgeExitMin) < 1e-6, -- 出口沒被加長：就是地板
+            c = fs and fs.offC, d = fs and fs.offD, offL = fs and fs.offL }
+        if info.ok then
+            if before then before(st) end
+            drive.putSolid(math.floor(info.d + gap), info.offL > 0 and -1 or 0, "harness_exitstay")
+            for _ = 1, 3 do drive.frameMs(10); drive.scanRound(true) end
+        end
+        return info, st
+    end
+    local iS, stS = arm(4)
+    local fsS, evS = stS.fstate, extendEv()
+    checkTrue(iS.ok and stS.dodging == true and stS.dodgeStay == true and stS.laneChained == true
+            and stS.stayLanePending == iS.offL and fsS.offL == iS.offL and fsS.offC == iS.c and fsS.offD < iS.d,
+        string.format("(exit-stay) B 在線尾後 4m、回線後塞不進側移：承諾改成 offL %s 的停留、線不再回線（d %.1f → %.1f、停留 %s）",
+            tostring(iS.offL), iS.d or -1, fsS.offD or -1, tostring(stS.dodgeStay)))
+    checkTrue(evS ~= nil and evS.why == "stay" and type(evS.blocker) == "number" and evS.blocker > iS.d and evS.offL == iS.offL
+            and evS.detail == "clear",
+        "(exit-stay) 事件 dodge phase=extend why=stay 帶下一群 b2（blocker）、停留 lane 看下一群（detail）（實得 "
+            .. tostring(evS and evS.why) .. " blocker " .. tostring(evS and evS.blocker) .. " detail " .. tostring(evS and evS.detail) .. "）")
+    MDAD.Drive.stop(0, nil)
+    -- 負案：B 遠到回線後塞得進側移＝照舊回線、不改停留
+    local iF, stF = arm(16)
+    checkTrue(iF.ok and stF.dodging == true and stF.dodgeStay == false and math.abs(stF.fstate.offD - iF.d) < 1e-6
+            and extendEv() == nil,
+        string.format("(exit-stay-far) B 在線尾後 16m：照舊回線（停留 %s、d %.1f → %.1f）", tostring(stF.dodgeStay), iF.d or -1,
+            stF.fstate.offD or -1))
+    MDAD.Drive.stop(0, nil)
+    -- 負案：鏈在常駐線另一側（stayAllowed side）＝不改停留，照舊回線（同 chainAhead：鏈上的停留只准往已鏈那一側再推）
+    local iD, stD = arm(4, function(st)
+        st.laneChained = true
+        MDADFollower.setLaneBias(st.fstate, st.fstate.offL > 0 and -1.5 or 1.5)
+    end)
+    checkTrue(iD.ok and stD.dodging == true and stD.dodgeStay == false and extendEv() == nil,
+        string.format("(exit-stay-side) 鏈在另一側：不改停留（停留 %s）", tostring(stD.dodgeStay)))
+    MDAD.Drive.stop(0, nil)
+    -- 拖車：不問牽引車的 shiftFits（拖車的瓶頸是掛車折角，Dixie 北上 dlamp-m911-n-fix-1108d）。st.tow 只帶 trailer（牽引車自己＝
+    -- 折角 0、T.state 讀得到；沒 L2／hitchZ＝towFold 不驗），只讓 exitStay 認得是拖車
+    local iN, stN = arm(10)
+    checkTrue(iN.ok and stN.dodgeStay == false and extendEv() == nil,
+        string.format("(exit-stay-tow) 非拖車、B 在線尾後 10m：牽引車回線後塞得進側移＝照舊回線（停留 %s）", tostring(stN.dodgeStay)))
+    MDAD.Drive.stop(0, nil)
+    local iT, stT = arm(10, function(st) st.tow = { trailer = dveh } end)
+    local evT = extendEv()
+    checkTrue(iT.ok and stT.dodgeStay == true and evT ~= nil and evT.why == "stay",
+        string.format("(exit-stay-tow) 拖車、同一位置：改停留（停留 %s、事件 %s）", tostring(stT.dodgeStay), tostring(evT and evT.why)))
+    stT.tow = nil
+    MDAD.Drive.stop(0, nil)
+    iT, stT = arm(30, function(st) st.tow = { trailer = dveh } end)
+    checkTrue(iT.ok and stT.dodgeStay == false and extendEv() == nil,
+        string.format("(exit-stay-tow-far) 拖車、B 在線尾後 30m（車速下的側移塞得進）：照舊回線（停留 %s）", tostring(stT.dodgeStay)))
+    stT.tow = nil
+    MDAD.Drive.stop(0, nil)
+    MDADDiagnostics.event, MDADDiagnostics.sample = oldEvent, oldSample
+    drive.frameMs(wasE)
+    MDAD.HUD.perceptionDistance = oldPer
+    MDAD.Drive.setGear(0, oldGear)
+    drive.fillWorld(-2, 70, -7, 7)
+    SandboxVars = oldSand
+end
+drive.scenarioExitStay()
 
 -- (rl-next) 1014b N9（正式服 0.29.1 Q07 clip-31：路網錯位把常駐線推進路肩樹列，繞過 A 的出口回到承諾時的 lane，
 --   出口後 4.3m 就是下一棵樹 → steep 判堵、倒車 8m、玩家接手）：停留 lane 一路淨空、下一群只擋回線 lane 時，

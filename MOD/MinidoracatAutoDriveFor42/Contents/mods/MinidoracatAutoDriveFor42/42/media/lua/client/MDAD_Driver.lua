@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1029i"
+Drive.REV = "1108b"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -2908,7 +2908,8 @@ local function startSession(playerObj, playerNum, stage, summon)
         lastOvEndS = 0,
         tmpOvEndS = 0,
         tmpOvX = {}, tmpOvY = {}, -- setOffset 直接採用工作表；舊承諾未釋放前不可寫入新候選
-        tmpOv2X = {}, tmpOv2Y = {}, -- 出口加長的第二張工作表（掃過才與 tmpOv 交換）
+        tmpOv2X = {}, tmpOv2Y = {}, -- 出口加長的第二張工作表（掃過才與 tmpOv 交換）；kinProof／towFold 的暫存線也寫這張
+        tmpOv3X = {}, tmpOv3Y = {}, -- 出口改停留（Drive.exitStay）時暫放現行承諾線：sweepStay 寫 tmpOv、內部證明寫 tmpOv2
         lastOvN = 0,        -- 最後成功候選的折線點數（setOffset 交表用）
         lastOvS0 = 0,
         blockHitX = nil,    -- sweep 真命中世界座標（detour 避讓圈直接用，不經弧長轉換）
@@ -10845,6 +10846,8 @@ function Drive.extendDodgeExit(s, sen, playerNum)
     local short = false
     if nextRoom then
         local floor = finite(s.dodgeExitMin) and s.dodgeExitMin or have
+        -- 收短到地板也塞不下回線後再側移：先試改成停留（Drive.exitStay），不行才照舊收短
+        if nextRoom < floor and Drive.exitStay(s, sen, playerNum, c + floor, nextB, nextL) then return true end
         if nextRoom < floor then nextRoom = floor end
         if nextRoom < room then room = nextRoom end
         short = have > room + TUNE.EXIT_SHORTEN_MIN_M
@@ -12485,6 +12488,67 @@ local function chainAhead(s, planN, a, b, c, d, offL, baseL, nb, tag, crawlDesig
     s.chainWhy = pre .. (L ~= nil and "look" or "look-fail")
     if L ~= nil then return true, la, lb, lc, ld_, L, lmg, lovN, lovS0, nb, "stay-look" end
     return nil
+end
+
+-- 承諾後才看到回線 lane 上的下一群、出口收短到地板也塞不下「回線→再側移到它的縫」（2026-11-08 Dixie 路口中線兩根路燈桿，
+-- KI5 M911＋半掛車南北兩向：承諾 offL 2.25 繞第一根時第二根在可視前緣外、chainAhead 記 clear-none；之後出口只能收短到
+-- 承諾時的長度 s.dodgeExitMin，照舊回中線，放手後離第二根約 5m、候選全被 towFold 拒收→判堵→倒車→StopStuck）：
+-- 把現行承諾改成同一 offL 的停留。判準同 chainAhead：回線後從 floorD（地板出口的線尾）切到下一群縫 nextL 塞得進
+-- （shiftFits）＝照舊回線；拖車不問 shiftFits（那是牽引車的陡坡比例，拖車的瓶頸是掛車折角：E2E dlamp-m911-n-fix-1108d
+-- 下一群 b2 207.8、線尾 203.9，牽引車按比例「塞得進」、出口不改，放手後候選照樣全被 towFold 拒收），下一群在線尾後、
+-- 收短到地板也不夠就改停留；停留 lane 不准停留（stayAllowed：鏈上換邊、整寬牆）＝照舊。停留 lane 上 c 之前的群不必再問
+-- （保持段已被守護驗過），c 之後的下一群交給停留鏈（提早釋放、續鏈、重錨）。
+-- 停留線從車位重建（sweepStay；現行線先換到第三張工作表，掃不過換回、舊線原封不動，同一位置前進 EXIT_EXTEND_RETRY_M 再試），
+-- 成功後的狀態同停留承諾（dodgeStay、stayLanePending、laneChained、帶心跟停留 lane），之後交給停留鏈。回 true＝已改停留。
+function Drive.exitStay(s, sen, playerNum, floorD, nextB, nextL)
+    local fs = s.fstate
+    local baseL, offL, c, rs = s.dodgeBaseL, fs.offL, fs.offC, s.lastSNow
+    -- 下一群的偏到位點在地板出口線尾之前＝現行出口本來就從它旁邊讓過（守護掃過到 d＋車身），交給下一群交接（1002t (beside)）
+    if not finite(nextB) or not finite(nextL) or nextB <= floorD
+            or (type(s.tow) ~= "table" and shiftFits(s, baseL, nextL, nextB - floorD - 1)) then
+        return false
+    end
+    local b = fs.offB
+    if b < rs + 1 then b = rs + 1 end -- 已在保持段：停留線的進入段就是車位→offL
+    local allowed, why = stayAllowed(s, sen, sen.hardN or 0, b, c, offL)
+    if not allowed then return false end
+    -- 現行承諾線（fs.ovX 與 tmpOv 是同一個陣列）先換到第三張表：sweepStay 寫 tmpOv、kinProof／towFold 寫 tmpOv2
+    local endS = s.tmpOvEndS -- sweepStay 會改寫；掃不過要連同工作表換回
+    s.tmpOvX, s.tmpOv3X = s.tmpOv3X, s.tmpOvX
+    s.tmpOvY, s.tmpOv3Y = s.tmpOv3Y, s.tmpOvY
+    local ok, margin, n, s0, dStay = sweepStay(s, fs.offA, b, c, offL, baseL, "exit-stay", s.dodgeNeed)
+    local coverEnd = dStay -- 停留沒有回線段：覆蓋只到線尾（同 commit 的 dodgeStay 分支）
+    if not ok or not MDADFollower.setOffset(fs, fs.offA, b, c, dStay, offL,
+            s.tmpOvX, s.tmpOvY, n, s0, s.tmpOvEndS, coverEnd) then
+        s.tmpOvX, s.tmpOv3X = s.tmpOv3X, s.tmpOvX
+        s.tmpOvY, s.tmpOv3Y = s.tmpOv3Y, s.tmpOvY
+        s.tmpOvEndS = endS
+        s.dodgeExtendFailS = rs
+        diagEvent(s, playerNum, "dodge", { phase = "extend", why = "stay-fail", c = c, rs = rs, m = margin,
+            blocker = nextB, l = nextL, offL = offL, detail = why, dbl = baseL })
+        if getDebug() then -- telemetry: dodge phase=extend why=stay-fail
+            print(string.format("%spn=%d dodge exit stay failed: offL=%.2f c=%.1f rs=%.1f next=%.1f,%.2f stay-lane=%s",
+                LOG, playerNum, offL, c, rs, nextB, nextL, tostring(why)))
+        end
+        return false
+    end
+    s.lastOvN, s.lastOvS0, s.lastOvEndS = n, s0, s.tmpOvEndS
+    s.dodgeStay, s.dodgeCrawl = true, true -- 停留承諾一律爬行分類（候選鏈 adopt 同款）
+    s.dodgeCommittedLength = s.dodgeEntryLength
+    s.stayLanePending = offL -- 過 b 才寫 laneBias（車還在進入段時不切）
+    s.laneChained, s.chainKeptLogged = true, nil
+    s.dodgeBandBias = nil -- 停留的帶心跟停留 lane
+    sen.scanBias = offL
+    s.dodgeMargin, s.dodgeMarginS = margin, nil -- 最緊點未知：下一個持平輪 guard-pass 重掃
+    s.dodgeGuardHardN, s.dodgeGuardBand = sen.hardN, sen.completedBandBias -- 停留線是在這張快照驗的
+    s.dodgeClrN, s.dodgeEnvN = 0, 0
+    diagEvent(s, playerNum, "dodge", { phase = "extend", why = "stay", c = c, d = dStay, rs = rs, m = margin,
+        blocker = nextB, l = nextL, offL = offL, detail = why, dbl = baseL })
+    if getDebug() then -- telemetry: dodge phase=extend why=stay（blocker／l＝回線 lane 上下一群的 b2／縫、detail＝停留 lane 看下一群）
+        print(string.format("%spn=%d dodge exit -> stay: offL=%.2f c=%.1f d=%.1f m=%.2f rs=%.1f next=%.1f,%.2f stay-lane=%s",
+            LOG, playerNum, offL, c, dStay, margin, rs, nextB, nextL, tostring(why)))
+    end
+    return true
 end
 
 -- 候選掃掠＋四層退路（plan／crawl 首候選／ban 迴圈／probe 四個呼叫點共用）：
@@ -14586,6 +14650,9 @@ local function stepUnstick(s, vehicle, playerNum, now)
     if mult > MULT_MAX then mult = MULT_MAX end
     local mass = s.runtimeMass
     if not finite(mass) or mass < 1 then mass = MASS_FALLBACK end
+    -- 拖車：牽引車經掛鉤推整組，推力照整組質量（2026-11-08 Dixie：KI5 M911＋M128van 只算牽引車＝4 秒退 0.07m；
+    -- E2E revpush-m911-1108d 同幀率加上掛車質量 5.8m）。掛車質量是掛上時讀的 tow.mass（MDADTrailer.attach）。
+    if s.tow and finite(s.tow.mass) and s.tow.mass > 0 then mass = mass + s.tow.mass end
     local fwd = BaseVehicle.allocVector3f()
     vehicle:getForwardVector(fwd)
     local fx, fy = fwd:x(), fwd:z()
