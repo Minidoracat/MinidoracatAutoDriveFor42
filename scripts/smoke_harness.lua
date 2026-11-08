@@ -13231,6 +13231,295 @@ function drive.scenarioDetourCommit()
 end
 drive.scenarioDetourCommit()
 
+-- 主 MOD 呼叫的參數快照（drive.sameArgs 比對用）：n＝實際傳了幾個（select("#")，分得出「沒傳」與「傳 nil」），表比內容
+function drive.argsOf(...)
+    local a = { n = select("#", ...) }
+    for i = 1, a.n do
+        local v = select(i, ...)
+        if type(v) == "table" then
+            local parts = {}
+            for k = 1, #v do parts[k] = tostring(v[k]) end
+            v = "{" .. table.concat(parts, ",") .. "}"
+        end
+        a[i] = v
+    end
+    return a
+end
+-- 每次呼叫的參數逐個相同（個數與每個值；moreAvoid 比內容）
+function drive.sameArgs(calls)
+    local a = calls[1]
+    if a == nil then return false end
+    for k = 2, #calls do
+        local b = calls[k]
+        if b.n ~= a.n then return false end
+        for i = 1, a.n do
+            if b[i] ~= a[i] then return false end
+        end
+    end
+    return true
+end
+
+-- (dp) 1108d nav API v14 改道分幀（addon-api 3.10 allowPending：大路網沒在當幀算完回 building，同參數再呼叫直到交付）：
+--   (dp-sync)    v14 當幀算完：傳第 10 參 true、照 v11 收下（後面各案的對照組）。
+--   (dp-same)    building 兩次後 ok：不是失敗（沒紅字、沒 detour 事件）、停住等、每次重呼叫的 10 個參數逐值相同，
+--                收下／commit／避讓圈／事件與 (dp-sync) 一致；dpend start／ok。違規證明：重呼叫不用第一次的參數＝紅；
+--                building 當拒收＝紅。
+--   (dp-timeout) 一直 building：等滿 DETOUR_PEND_MS 拒收 pend-timeout（不是 noroad）、紅字、dpend timeout；
+--   (dp-wait)    同一段等待不計停等預算、不 StopStuck。違規證明：拿掉時限＝紅；拿掉 detourWaitTick 的計時平移＝紅。
+--   (dp-hold)    還在算的那幀不跑控制（命令狀態 HOLD，同 build）。違規證明：detourWaitTick 不 hold＝紅。
+--   (dp-target)／(dp-stop) 等待中換目標、停止自駕：清掉待算（dpend drop）、之後不再問。違規證明：拿掉 drop＝紅。
+--   (dp-v13)     v13 不傳第 10 參、照舊同步收下。違規證明：版本閘寫成 >=13＝紅。
+--   (dp-stuck)   交還前改道等待：重呼叫不再扣額度、不再驗 near，等完收下、不交還。違規證明：重呼叫照驗＝紅（near 交還）。
+--   (dp-sticky)  cutover sticky 重問 building：照舊沿目前路線開（不換線）、每 tick 同參數重問、算完 commit 並 cutover。
+--                違規證明：pending 時照換線＝紅。
+--   拖車調頭見 (tt1-v14)、拖車轉角改道見 (tc-v14)、召喚 requestDetourFrom 見 drive.scenarioDetourPendingFrom。
+function drive.scenarioDetourPending()
+    scenario("改道分幀（1108d nav API v14）：building 停住同參數重問、逾時自己的名字、換目標／停止清掉、v13 不傳第 10 參、等待不計停等預算")
+    local nav = drive.nav
+    local Dr, T = MDAD.Drive, MDAD.Drive.debugTune()
+    local oldApi, oldRoute, oldEvent, oldAuto = MinidoracatMiniMapAPI, nav.route, MDADDiagnostics.event, MDAD.HUD.autoDetour
+    local oldTx, oldTy = nav.tx, nav.ty
+    local ev = {}
+    MDADDiagnostics.event = function(_, name, a)
+        if name == "dpend" or name == "detour" then ev[#ev + 1] = { name = name, a = a } end
+    end
+    local function evs(name, phase)
+        local out = {}
+        for _, e in ipairs(ev) do
+            if e.name == name and (phase == nil or e.a.phase == phase) then out[#out + 1] = e.a end
+        end
+        return out
+    end
+    local function meta(r)
+        r.segSurface, r.segWidth = {}, {}
+        for i = 1, #r.pts / 2 - 1 do r.segSurface[i], r.segWidth[i] = "paved", 10 end
+        return r
+    end
+    local function detourRoute(len, snap)
+        local r = meta({ pts = { 11, 0, 11, 12, 156, 12, 156, 0 } })
+        r.len, r.cost, r.avoidPenalty, r.snapDist = len, len, 0, snap
+        return r
+    end
+    local stub = { build = 0, calls = {} }
+    local function arm(version, auto)
+        installNavApi(2)
+        local api = MinidoracatMiniMapAPI
+        local stubReq = api.requestDetour
+        stub.build, stub.calls, nav.commitCalls, nav.pending = 0, {}, 0, nil
+        api.requestDetour = function(...)
+            local a = drive.argsOf(...)
+            stub.calls[#stub.calls + 1] = a
+            if a[10] == true and stub.build > 0 then
+                stub.build = stub.build - 1
+                return nil, "building"
+            end
+            local pn, tx, ty, ax, ay, r, more, maxSnap, defer = ...
+            local rr, st = stubReq(pn, tx, ty, ax, ay, r, more, maxSnap)
+            nav.pending = nil
+            if rr and st == "ok" then
+                if defer == true then nav.pending = rr else nav.route = rr end
+            end
+            return rr, st
+        end
+        api.commitDetour = function(pn, r)
+            nav.commitCalls = nav.commitCalls + 1
+            if pn ~= 0 or r ~= nav.pending then return false, "stale" end
+            nav.route, nav.pending = r, nil
+            return true, "ok"
+        end
+        MDAD.HUD.autoDetour = function() return auto == true end
+        checkTrue(armDrive(), "(dp) v" .. version .. " 啟動")
+        meta(nav.route)
+        api.navApiVersion = version
+        for _, y in ipairs({ -5, -4, -2, -1, 0, 1, 2, 4, 5 }) do drive.putSolid(20, y, "harness_wall_" .. y) end
+        dveh._x = 11
+        driveTick(dp, dveh)
+        drive.scanRound()
+        dveh._speed = 0
+        driveReset(dveh)
+        driveTick(dp, dveh)
+        stub.calls = {}
+        clearList(ev)
+        local s = Dr.debugSession(0)
+        if s then s.diag = true end
+        return s
+    end
+    local function tick(n)
+        for _ = 1, n or 1 do
+            nowMs = nowMs + 300
+            local s = Dr.debugSession(0)
+            if s then s.diag = true end
+            driveTick(dp, dveh)
+        end
+    end
+    local function tickUntil(pred, n)
+        for _ = 1, n do
+            if pred() then return true end
+            tick()
+        end
+        return pred()
+    end
+    local function teardown()
+        for _, y in ipairs({ -5, -4, -2, -1, 0, 1, 2, 4, 5 }) do drive.clearCell(20, y) end
+        Dr.stop(0, nil)
+    end
+
+    -- (dp-sync)
+    local s = arm(14)
+    local good = detourRoute(120, 1)
+    nav.detour = good
+    local ok, why = Dr.requestDetour(0)
+    local c1 = stub.calls[1] or {}
+    local sync = { ok = ok, ax = s.avoidX, ay = s.avoidY, long = s.avoidLong, pend = s.pendingDetour,
+        commit = nav.commitCalls, ev = evs("detour")[1] or {} }
+    checkTrue(ok == true and #stub.calls == 1 and c1.n == 10 and c1[10] == true and c1[9] == true
+            and nav.commitCalls == 1 and nav.route == good and s.detourWait == nil and #evs("dpend") == 0,
+        "(dp-sync) v14 當幀算完：傳 allowPending=true、照 v11 收下 commit、沒有待算（n=" .. tostring(c1.n) .. " why="
+        .. tostring(why) .. "）")
+    teardown()
+
+    -- (dp-same)
+    s = arm(14)
+    local good2 = detourRoute(120, 1)
+    nav.detour, stub.build = good2, 2
+    local halosBefore = #halos
+    ok, why = Dr.requestDetour(0)
+    local w = s.detourWait
+    local st0 = evs("dpend", "start")[1] or {}
+    checkTrue(ok == false and why == "pending" and w ~= nil and w.site == "detour" and #halos == halosBefore
+            and #evs("detour") == 0 and st0.kind == "detour" and nav.commitCalls == 0,
+        "(dp-same) building＝等待、不是失敗：沒紅字、沒 detour 事件、dpend start kind=detour（why=" .. tostring(why) .. "）")
+    dveh._y = 0.3 -- 等待中車位微動（溜車、同步拉回）：重呼叫仍用第一次的避讓圈與錨，不從目前車位重算
+    local realCtl, ctlN = MDADFollower.control, 0
+    MDADFollower.control = function(...)
+        ctlN = ctlN + 1
+        return realCtl(...)
+    end
+    tick()
+    MDADFollower.control = realCtl
+    checkTrue(s.detourWait == w and ctlN == 0 and s.commandControlState == "HOLD" and #stub.calls == 2,
+        "(dp-hold) 停住等：這幀重問一次、還在算就不跑跟線控制（同 build；control 呼叫 " .. tostring(ctlN) .. " 次）")
+    tickUntil(function() return s.detourWait == nil end, 10)
+    dveh._y = 0
+    local okEv, dEv = evs("dpend", "ok")[1] or {}, evs("detour")[1] or {}
+    checkTrue(#stub.calls == 3 and drive.sameArgs(stub.calls) and stub.calls[1][10] == true,
+        "(dp-same) building 兩次後 ok：三次呼叫的 10 個參數逐值相同（calls=" .. tostring(#stub.calls) .. "）")
+    checkTrue(s.pendingDetour == sync.pend and s.avoidX == sync.ax and s.avoidY == sync.ay and s.avoidLong == sync.long
+            and nav.commitCalls == sync.commit and nav.route == good2 and dEv.phase == sync.ev.phase
+            and dEv.why == sync.ev.why and dEv.len == sync.ev.len and dEv.ax == sync.ev.ax and dEv.avoidN == sync.ev.avoidN,
+        "(dp-same) 等完的收下（commit、避讓圈、detour 事件）與同步 ok 一致（why=" .. tostring(dEv.why) .. " commit="
+        .. tostring(nav.commitCalls) .. "）")
+    checkTrue(okEv.kind == "detour" and okEv.why == "ok" and okEv.attempt == 3 and okEv.ms == 600,
+        "(dp-same) dpend ok：呼叫 3 次、等了 600 ms（attempt=" .. tostring(okEv.attempt) .. " ms=" .. tostring(okEv.ms) .. "）")
+    tick()
+    s = Dr.debugSession(0)
+    checkTrue(s ~= nil and s.route == good2, "(dp-same) 下一幀 cutover 到替代線")
+    teardown()
+
+    -- (dp-timeout)／(dp-wait)
+    s = arm(14)
+    nav.detour, stub.build = detourRoute(120, 1), 1e9
+    checkTrue(s.waitTickMs > 0, "(dp-wait) 前置：堵住停等、預算在計（waitTickMs=" .. tostring(s.waitTickMs) .. "）")
+    local w0 = s.waitAccumMs
+    halosBefore = #halos
+    ok, why = Dr.requestDetour(0)
+    tickUntil(function() return s.detourWait == nil or not Dr.isActive(0) end, 80)
+    local toEv, dEv2 = evs("dpend", "timeout")[1] or {}, evs("detour")[1] or {}
+    checkTrue(why == "pending" and toEv.why == "pend-timeout" and toEv.kind == "detour" and type(toEv.ms) == "number"
+            and toEv.ms >= T.DETOUR_PEND_MS and toEv.ms < T.DETOUR_PEND_MS + 1000,
+        "(dp-timeout) 等滿 DETOUR_PEND_MS：dpend timeout why=pend-timeout（ms=" .. tostring(toEv.ms) .. "）")
+    checkTrue(dEv2.why == "pend-timeout" and haloKey(#halos) == noteReason("UI_MinidoracatAutoDrive_NoDetour")
+            and #halos == halosBefore + 1,
+        "(dp-timeout) 拒收名 pend-timeout（不是 noroad）、紅字 NoDetour（why=" .. tostring(dEv2.why) .. "）")
+    tick()
+    checkTrue(Dr.isActive(0) and s.waitAccumMs - w0 < 1500,
+        "(dp-wait) 停住等 " .. tostring(toEv.ms) .. " ms 不計停等預算、不 StopStuck（預算 " .. tostring(w0) .. " -> "
+        .. tostring(s.waitAccumMs) .. "）")
+    teardown()
+
+    -- (dp-target)
+    s = arm(14)
+    nav.detour, stub.build = detourRoute(120, 1), 1e9
+    Dr.requestDetour(0)
+    tick()
+    nav.tx, nav.ty = 150, 4
+    tick()
+    local n0 = #stub.calls
+    local dropEv = evs("dpend", "drop")[1] or {}
+    tick(3)
+    checkTrue(s.detourWait == nil and dropEv.why == "target" and #stub.calls == n0 and Dr.isActive(0),
+        "(dp-target) 等待中換目標：清掉待算（drop why=" .. tostring(dropEv.why) .. "）、之後不再問（calls "
+        .. tostring(n0) .. " -> " .. tostring(#stub.calls) .. "）")
+    nav.tx, nav.ty = oldTx, oldTy
+    teardown()
+
+    -- (dp-stop)
+    s = arm(14)
+    nav.detour, stub.build = detourRoute(120, 1), 1e9
+    Dr.requestDetour(0)
+    tick()
+    Dr.stop(0, nil)
+    n0 = #stub.calls
+    dropEv = evs("dpend", "drop")[1] or {}
+    tick(3)
+    checkTrue(s.detourWait == nil and dropEv.why == "stop" and #stub.calls == n0 and not Dr.isActive(0),
+        "(dp-stop) 等待中停止自駕：清掉待算（drop why=" .. tostring(dropEv.why) .. "）、之後不再問")
+    teardown()
+
+    -- (dp-v13)
+    s = arm(13)
+    local good3 = detourRoute(120, 1)
+    nav.detour, stub.build = good3, 2
+    ok = Dr.requestDetour(0)
+    c1 = stub.calls[1] or {}
+    checkTrue(ok == true and #stub.calls == 1 and c1.n == 9 and nav.commitCalls == 1 and nav.route == good3
+            and s.detourWait == nil,
+        "(dp-v13) v13：不傳第 10 參（n=" .. tostring(c1.n) .. "）、照舊同步收下")
+    teardown()
+
+    -- (dp-stuck)
+    s = arm(14, true)
+    nav.detour, stub.build = detourRoute(120, 1), 2
+    local r = Dr.stuckDetour(s, 0, true)
+    checkTrue(r == "pending" and s.stuckDetourN == 1 and s.detourWait ~= nil and s.detourWait.stuck == true,
+        "(dp-stuck) 交還前改道 building：回 pending（真值、不交還）、扣一次額度（r=" .. tostring(r) .. "）")
+    tickUntil(function() return s.detourWait == nil or not Dr.isActive(0) end, 10)
+    checkTrue(Dr.isActive(0) and s.stuckDetourN == 1 and s.pendingDetour == true and s.mode == "follow"
+            and s.waitAccumMs <= 300 and drive.sameArgs(stub.calls) and #stub.calls == 3,
+        "(dp-stuck) 等完照收：不交還、額度只扣一次、停等預算歸零（收下那幀照常控制，最多計一個 tick；N=" .. tostring(s.stuckDetourN) .. " active="
+        .. tostring(Dr.isActive(0)) .. " pend=" .. tostring(s.pendingDetour) .. " mode=" .. tostring(s.mode) .. " wait="
+        .. tostring(s.waitAccumMs) .. " calls=" .. tostring(#stub.calls) .. " same=" .. tostring(drive.sameArgs(stub.calls)) .. "）")
+    teardown()
+
+    -- (dp-sticky)
+    s = arm(14)
+    local acc = detourRoute(120, 1)
+    nav.detour = acc
+    Dr.requestDetour(0)
+    tick()
+    s = Dr.debugSession(0)
+    local recomputed = meta(newRoute(40, 0, 0, 4, 0))
+    recomputed.len, recomputed.cost, recomputed.avoidPenalty, recomputed.snapDist = 156, 156, 0, 1
+    nav.route = recomputed
+    local sticky = detourRoute(121, 1)
+    nav.detour, stub.build, stub.calls, nav.commitCalls = sticky, 2, {}, 0
+    tick()
+    local sw = s.detourWait
+    checkTrue(s.route == acc and sw ~= nil and sw.site == "sticky" and #stub.calls == 1,
+        "(dp-sticky) 主 MOD 重算穿回避讓圈、重問 building：照舊沿目前路線開（不換線）、記待算 sticky")
+    tick()
+    checkTrue(s.route == acc and #stub.calls == 2, "(dp-sticky) 下一 tick 重問、還在算照舊不換線")
+    tickUntil(function() return s.route == sticky end, 4)
+    checkTrue(s.route == sticky and nav.commitCalls == 1 and drive.sameArgs(stub.calls) and #stub.calls == 3
+            and s.detourWait == nil,
+        "(dp-sticky) 算完：commit 並 cutover 到替代線、三次參數相同（calls=" .. tostring(#stub.calls) .. "）")
+    teardown()
+
+    MDADDiagnostics.event, MDAD.HUD.autoDetour = oldEvent, oldAuto
+    MinidoracatMiniMapAPI, nav.route = oldApi, oldRoute
+end
+drive.scenarioDetourPending()
+
 -- (c5h) 同一趟多次改道帶舊避讓圈（1004f；E2E e1004e dixie9050w：第二次交還前改道只避新堵點，主 MOD 原路繞回第一處
 --   路障，detour 用完交還）：第二次 requestDetour 第 7 參附上第一次的圈（nav API v9），回來的線穿舊圈＝拒收 "again"
 --   （v8 主 MOD 忽略第 7 參時靠這一關），不穿＝收下、第一次的圈進歷史；換目標清歷史。
@@ -24194,6 +24483,34 @@ function drive.scenarioTowTurn()
         tickUntil(function() return not MDAD.Drive.isActive(0) end, 60)
         checkTrue(ok11 and drive.nav.detourCalls == 1 and commits == 0 and drive.nav.route == base,
             "(tt1-v11) 往後出發的線拒收：不 commit、快取仍是原線（commit=" .. tostring(commits) .. "）")
+        -- (tt1-v14) 1108d nav API v14 分幀：主 MOD 前兩次回 building＝停住不交還 TrailerRotate、同參數重問（site＝towturn），
+        --   算完照 v11 收下 commit、cutover 到繞行線。違規證明：towTurnaround 的 pending 回 false＝交還紅。
+        local c14, b14 = {}, 2
+        api.requestDetour = function(...)
+            c14[#c14 + 1] = drive.argsOf(...)
+            if select(10, ...) == true and b14 > 0 then
+                b14 = b14 - 1
+                return nil, "building"
+            end
+            if select(9, ...) ~= true then return wrapReq(...) end
+            local r, state = oldReq(...)
+            pending = r
+            return r, state
+        end
+        commits = 0
+        drive.nav.detour = fwd
+        api.navApiVersion = 5
+        ok11 = arm(behind(), -80, 0)
+        api.navApiVersion = 14
+        st = MDAD.Drive.debugSession(0)
+        if st then st.tow = towGeo end
+        tickUntil(function() return #c14 > 0 or not MDAD.Drive.isActive(0) end, 60)
+        local site14 = st and st.detourWait and st.detourWait.site
+        tickUntil(function() return st.route == fwd or not MDAD.Drive.isActive(0) end, 20)
+        checkTrue(ok11 and site14 == "towturn" and #c14 == 3 and drive.sameArgs(c14) and c14[1][10] == true
+                and commits == 1 and st.route == fwd and MDAD.Drive.isActive(0),
+            "(tt1-v14) 拖車調頭 building 兩次：停住不交還、三次同參數、算完 commit 並 cutover（site=" .. tostring(site14)
+            .. " calls=" .. tostring(#c14) .. " commit=" .. tostring(commits) .. "）")
         drive.nav.detour = nil
         api.requestDetour, api.commitDetour, api.navApiVersion = wrapReq, nil, 5
     end
@@ -24490,6 +24807,32 @@ function drive.scenarioTowCorner()
         local e = ev[1] or {}
         checkTrue(st ~= nil and e.why == "blocked" and commits == 0 and drive.nav.route == orig and st.rejectedRoute == nil,
             "(tc-v11) 剖面仍不可過＝拒收、不 commit、快取仍是原線、不記 rejectedRoute（why=" .. tostring(e.why) .. "）")
+        -- (tc-v14) 1108d nav API v14 分幀：前兩次 building＝車照目前路線（不交還、不換線）、同參數重問（site＝towcorner），
+        --   算完照 v11 收下 commit、cutover 到替代線。違規證明：等待中 stepFollow 那次也重問＝呼叫次數紅。
+        local c14, b14 = {}, 2
+        api.requestDetour = function(...)
+            c14[#c14 + 1] = drive.argsOf(...)
+            if select(10, ...) == true and b14 > 0 then
+                b14 = b14 - 1
+                return nil, "building"
+            end
+            if select(9, ...) ~= true then return wrapReq(...) end
+            local r, state = oldReq(...)
+            pending = r
+            return r, state
+        end
+        commits = 0
+        alt = arc(0)
+        drive.nav.detour = alt
+        st = arm(lanes(), 0, semi, 14)
+        tickUntil(function() return #c14 > 0 or not MDAD.Drive.isActive(0) end, 30)
+        local site14 = st and st.detourWait and st.detourWait.site
+        local orig14 = st and st.route
+        tickUntil(function() return st.route == alt or not MDAD.Drive.isActive(0) end, 60)
+        checkTrue(st ~= nil and site14 == "towcorner" and orig14 ~= alt and #c14 == 3 and drive.sameArgs(c14)
+                and c14[1][10] == true and commits == 1 and st.route == alt and MDAD.Drive.isActive(0),
+            "(tc-v14) 拖車轉角改道 building 兩次：照目前路線不交還、三次同參數、算完 commit 並 cutover（site="
+            .. tostring(site14) .. " calls=" .. tostring(#c14) .. " commit=" .. tostring(commits) .. "）")
         drive.nav.detour = nil
         api.requestDetour, api.commitDetour = wrapReq, nil
     end
@@ -35074,6 +35417,61 @@ function drive.scenarioSummonDumbIntegral()
     Dr.summonStopLocal(0)
 end
 drive.scenarioSummonDumbIntegral()
+
+-- (dp-from) 1108d 召喚改道 requestDetourFrom 分幀（nav API v14，addon-api 3.9b allowPending＝第 11 參）：building 兩次後 ok，
+--   起點用開查詢當下的車位（車在等待中移動，重呼叫的 fromX/fromY 不變＝主 MOD 才認得是同一題），11 個參數逐值相同，
+--   算完照收（commitDetour）。v13 不傳第 11 參。違規證明：重呼叫用目前車位＝紅；版本閘寫成 >=13＝(dp-from-v13) 紅。
+function drive.scenarioDetourPendingFrom()
+    scenario("召喚改道分幀（1108d nav API v14 requestDetourFrom）：起點固定在開查詢當下的車位、同參數重問、算完照收")
+    local Dr = MDAD.Drive
+    local nav = drive.nav
+    for _, ver in ipairs({ 14, 13 }) do
+        local tag = ver == 14 and "(dp-from) " or "(dp-from-v13) "
+        local _, v = drive.sumFix({ px = 50 })
+        local pts, surf, width = {}, {}, {}
+        for i = 0, 12 do
+            pts[#pts + 1], pts[#pts + 2] = i * 4 + 0.5, 0.5
+            if i > 0 then surf[#surf + 1], width[#width + 1] = "paved", 8 end
+        end
+        nav.fromRoute = { pts = pts, len = 48, cost = 48, snapDist = 0.7, segSurface = surf, segWidth = width }
+        clientFlag, serverFlag = false, false
+        drive.sumStart()
+        drive.sumRound()
+        local api = MinidoracatMiniMapAPI
+        api.navApiVersion = ver
+        local calls, build = {}, 2
+        api.requestDetourFrom = function(...)
+            calls[#calls + 1] = drive.argsOf(...)
+            if select(11, ...) == true and build > 0 then
+                build = build - 1
+                return nil, "building"
+            end
+            return nav.detour, "ok"
+        end
+        nav.detour = { pts = { 0.5, 0.5, 0.5, 6, 48.5, 6, 48.5, 0.5 }, len = 59, cost = 59, snapDist = 0.7,
+            avoidPenalty = 0, segSurface = { "paved", "paved", "paved" }, segWidth = { 8, 8, 8 } }
+        local s = Dr.debugSession(0)
+        checkTrue(s ~= nil and s.summon ~= nil and s.summon.baseRoute ~= nil, tag .. "前置：召喚走路網路線")
+        local x0 = v._x
+        local ok1, why1 = Dr.requestDetour(0, true)
+        local c1 = calls[1] or {}
+        if ver == 14 then
+            v._x = x0 + 0.7
+            local _, why2 = Dr.requestDetour(0, true)
+            v._x = x0 + 1.4
+            local ok3 = Dr.requestDetour(0, true)
+            checkTrue(why1 == "pending" and why2 == "pending" and ok3 == true and #calls == 3 and drive.sameArgs(calls)
+                    and c1.n == 11 and c1[11] == true and c1[2] == x0 and nav.commitCalls == 1 and s.pendingDetour == true,
+                tag .. "building 兩次：起點固定在開查詢當下的車位、11 個參數逐值相同、算完 commit 收下（calls="
+                .. tostring(#calls) .. " fx=" .. tostring(c1[2]) .. " x0=" .. tostring(x0) .. " ok3=" .. tostring(ok3) .. "）")
+        else
+            checkTrue(ok1 == true and #calls == 1 and c1.n == 10 and nav.commitCalls == 1 and s.detourWait == nil,
+                tag .. "v13：不傳第 11 參（n=" .. tostring(c1.n) .. "）、照舊同步收下（why=" .. tostring(why1) .. "）")
+        end
+        Dr.summonStopLocal(0)
+    end
+end
+drive.scenarioDetourPendingFrom()
 
 -- =====================================================================
 -- 總結
