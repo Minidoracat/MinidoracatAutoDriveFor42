@@ -70,7 +70,7 @@ Plus a screwdriver.
 [tr][td]Scrap Electronics, Electrical Wire[/td][td]Dismantle electronics (radios, TVs, walkie-talkies…); wire is also common in tool containers[/td][/tr]
 [tr][td]Radio Receiver[/td][td]Dismantle radios, walkie-talkies, manpack or ham radios (higher Electrical = better odds), or loot military electronics storage, the radio factory, engineer lockers, cyber cafés, school labs[/td][/tr]
 [tr][td]Amplifier[/td][td]Always from dismantling a Speaker; sometimes from radios, walkie-talkies and TVs[/td][/tr]
-[tr][td]Scanner Module[/td][td][b]Cannot be dismantled from anything; loot only[/b]: best in military electronics storage and the radio factory, then engineer lockers, cyber cafés, school labs; very rarely from foraging junk[/td][/tr]
+[tr][td]Scanner Module[/td][td][b]Cannot be dismantled from anything; loot only[/b]: best in military electronics storage and the radio factory, then engineer lockers, cyber cafés, school labs; often in the back of radio vans (LBMW Radio Van, Triple-N Van); very rarely from foraging junk[/td][/tr]
 [/table]
 === 🧰 Multi-target trips
 [list]
@@ -105,6 +105,8 @@ Plus a screwdriver.
 [*] [b]Shows[/b]: status, targets, speed, cruise cap, drive time, time left, gear, slowdown reason, power/fuel.
 [*] [b]Controls[/b]: direct controls on the HUD.
 [*] [b]Looks[/b]: metal, glass, family and side-wing themes; compact and collapsed layouts.
+[*] [b]HUD gone?[/b]: collapsing shrinks it to a small badge above the middle of the dashboard; press the ˄ on the badge to expand it. With the side-wing theme, use the arrows on each side. The panel only shows in the driver's seat, and not in a vehicle without an Autopilot Module while the sandbox option "Auto-drive requires an Autopilot Module" is on (default).
+[*] [b]Side wings replaced by the top layout[/b]: with the game's Font Size at 33px or 38px the wings don't fit beside the dashboard, so the HUD uses the metal top layout and the style button explains why; the default "Scale with window height" picks 33px or more on taller screens such as 2560×1600 or 4K. Set the font size to 26px or smaller to get the wings back. A screen that is too narrow also falls back to the top layout.
 [*] [b]Other mods' dashboards[/b]: when another mod replaces the vanilla dashboard, the panel attaches to that dashboard (the other mod must provide its position).
 [*] [b]Charging info card[/b]: in those vehicles, opening the other mod's charging info card folds the Autodrive card into a small chip; closing it restores the card (a card you had already folded stays folded).
 [/list]
@@ -145,7 +147,7 @@ Plus a screwdriver.
 [/list]
 [*] [b]Languages[/b]: Chinese, English, Japanese, Korean, Russian, Spanish, Portuguese (Brazil), Turkish, French, Polish and German; follow the game language or pick one.
 [*] [b]Classic[/b]: only speaks Chinese, English and Japanese, and uses English otherwise.
-[*] [b]On the HUD[/b]: toggle and volume.
+[*] [b]On the HUD[/b]: toggle and volume. The game's volume sliders don't affect the voice; if it is too quiet, lower the game and engine volume and raise your system volume.
 [/list]
 [h3]Solo auto-pause[/h3]
 [list]
@@ -292,7 +294,7 @@ Separate 0–500% power and extra-fuel settings for GPS and autodrive (default 5
 [list]
 [*] [b]Bends and detours cost no extra fuel[/b]: autodrive fuel is counted in the gear you would use at that speed, so slowing for bends or obstacles burns no more than driving yourself.
 [*] [b]Engine running[/b]: still charges the battery on net.
-[*] [b]Engine off[/b]: the GPS drains the battery.
+[*] [b]Engine off[/b]: while navigating from the driver's seat, an installed GPS drains the car battery (about 1.4% per in-game day by default); a carried GPS only drains its own battery, about 5.6 in-game hours while navigating by default.
 [/list]
 [h3]Server diagnostics[/h3]
 [list]

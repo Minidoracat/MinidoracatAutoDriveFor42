@@ -1482,13 +1482,17 @@ function MDADHUDPanel:layoutWings(scale, m)
     local leftFoldW = pad * 2 + 16 + speedValueW + gap + clockW + gap + ctrlW
     local rightFoldW = pad * 2 + textWidth(UIFont.Small, "MAX") + gap + ctrlW
     -- 側翼的高度是硬約束（與可見儀表板同高），寬度也先被儀表板本體吃掉一大塊。
-    -- 右翼三列排不進 wingH 就會把檔位列推到負 Y、底列掉出面板下緣（2026-09-12 以
-    -- 中文 4x 字高實測：wingH=103、檔位 y=-19、底列 77+44>103）；左翼被寬度逼著
+    -- 右翼三列排不進 wingH 就會把檔位列推到負 Y、底列掉出面板下緣；左翼被寬度逼著
     -- 摺起則等於整個 HUD 沒有主鈕可按。兩者任一成立就退回上掛金屬版面——那邊的
     -- 精簡單行階梯本來就會逐階讓出次要欄位，主鈕與收合入口一定留著。
+    -- 列與列之間（垂直）的間距 vgap 只在排不下時縮，最小 3px（2026-11-09 裁定）；排得下照舊＝gap，
+    -- 水平間距一律不動。42.21 原版儀表實機可見高 114px（E2E s3wings-*-1109c）：遊戲字高
+    -- 16／19／26 本來就放得下、33／38 縮到 3px 也放不下；只有可見高度落在「三列＋2×3」到
+    -- 「三列＋2×gap」之間才有差（26px 字＝102–105px，例如別的 MOD 換掉的儀表）。
     local wingRows = controlsOn and 3 or 2
-    if ctrlH * wingRows + gap * (wingRows - 1) > wingH
-            or leftOpenW + dashW + rightFoldW > maxW then
+    local vgap = math.min(gap, math.floor((wingH - ctrlH * wingRows) / (wingRows - 1)))
+    self._wingsFallback = vgap < 3 or leftOpenW + dashW + rightFoldW > maxW
+    if self._wingsFallback then
         self._style = STYLE_METAL
         self._wingRBlocked = false
         return self:layoutStacked(scale, m)
@@ -1557,10 +1561,10 @@ function MDADHUDPanel:layoutWings(scale, m)
         setButtonRect(self.wingButton, leftW - pad - ctrlW,
             math.floor((wingH - ctrlH) / 2), ctrlW, ctrlH)
     else
-        local rowH = math.floor((wingH - pad * 2 - gap) / 2)
+        local rowH = math.floor((wingH - pad * 2 - vgap) / 2)
         if rowH < ctrlH then rowH = ctrlH end
-        local topY = math.floor((wingH - rowH * 2 - gap) / 2)
-        local bottomY = topY + rowH + gap
+        local topY = math.floor((wingH - rowH * 2 - vgap) / 2)
+        local bottomY = topY + rowH + vgap
         self._dotX, self._dotY = pad, topY + math.floor((rowH - 8) / 2)
         self._statusX = pad + 16
         self._textY = topY + math.floor((rowH - fontH) / 2)
@@ -1584,7 +1588,7 @@ function MDADHUDPanel:layoutWings(scale, m)
         -- 左翼 chevron：下列巡航值與主鈕之間（改道鈕在上列狀態字後，兩者不撞）
         setButtonRect(self.wingButton, homeX - gap - ctrlW,
             bottomY + math.floor((rowH - ctrlH) / 2), ctrlW, ctrlH)
-        self._wingLDividerY = topY + rowH + math.floor(gap / 2)
+        self._wingLDividerY = topY + rowH + math.floor(vgap / 2)
     end
 
     -- 右翼：三列（檔位／策略＋電油／樣式・隱藏・語音＋音量），收合＝檔位字＋chevron
@@ -1597,7 +1601,7 @@ function MDADHUDPanel:layoutWings(scale, m)
     else
         local rows = controlsOn and 3 or 2
         local rowH = ctrlH
-        local blockH = rowH * rows + gap * (rows - 1)
+        local blockH = rowH * rows + vgap * (rows - 1)
         local rowY = math.floor((wingH - blockH) / 2)
         local x = rightX + pad + gearLabelW
         for i = 1, 4 do
@@ -1606,7 +1610,7 @@ function MDADHUDPanel:layoutWings(scale, m)
         end
         self._labelX = rightX + pad
         self._bottomTextY = rowY + math.floor((rowH - fontH) / 2)
-        local row2 = rowY + rowH + gap
+        local row2 = rowY + rowH + vgap
         setButtonRect(self.zombieButton, rightX + pad, row2, policyW, rowH)
         setButtonRect(self.corpseButton, rightX + pad + policyW + gap, row2, policyW, rowH)
         setButtonRect(self.autoButton, rightX + pad + (policyW + gap) * 2, row2, policyW, rowH)
@@ -1618,7 +1622,7 @@ function MDADHUDPanel:layoutWings(scale, m)
         end
         self._energyX = rightX + rightW - pad - energyW
         self._energyY = row2 + math.floor((rowH - fontH) / 2)
-        local row3 = row2 + rowH + gap
+        local row3 = row2 + rowH + vgap
         if controlsOn then
             setButtonRect(self.themeButton, rightX + pad, row3, ctrlW, ctrlH)
             setButtonRect(self.voiceButton, rightX + pad + ctrlW + gap, row3, ctrlW, ctrlH)
@@ -1627,7 +1631,7 @@ function MDADHUDPanel:layoutWings(scale, m)
         else
             setButtonRect(self.collapseButton, rightX + rightW - pad - ctrlW, row3, ctrlW, ctrlH)
         end
-        self._wingRDividerY = row2 - math.floor(gap / 2) - 1
+        self._wingRDividerY = row2 - math.floor(vgap / 2) - 1
     end
 
     self._detourW, self._detourH, self._detourGap = detourW, ctrlH, gap
@@ -1699,6 +1703,7 @@ end
 
 function MDADHUDPanel:applyLayout()
     self._style = optionIndex("HUDTheme", STYLE_METAL, STYLE_COUNT)
+    self._wingsFallback = false
     self._layout = optionIndex("HUDLayout", LAYOUT_FULL, 2)
     local scale = optionScale()
     self._unitText = getText("UI_MinidoracatAutoDrive_HUDSpeedUnit")
@@ -2999,8 +3004,10 @@ function MDADHUDPanel:updateButtons()
     setGlyph(self.detourButton, "detour", getText("UI_MinidoracatAutoDrive_HUDDetourButton"), optionScale())
     styleButton(self.detourButton, C.selected, C.amber, true)
     if modOptions then
+        -- 選了側掛卻因放不下退回金屬：說明原因與怎麼換回來（_wingsFallback 由 layoutWings 寫、applyLayout 清）
         self.themeButton.tooltip = getText("UI_MinidoracatAutoDrive_HUDTheme")
             .. ": " .. getText(THEME_KEYS[self._style] or THEME_KEYS[1])
+            .. (self._wingsFallback and ("\n" .. getText("UI_MinidoracatAutoDrive_HUDWingsFallback")) or "")
         setGlyph(self.themeButton, "palette", getText("UI_MinidoracatAutoDrive_HUDStyleButton"), optionScale())
         styleButton(self.themeButton, C.button, C.muted, true)
         setGlyph(self.voiceButton, self._voiceOn and "speaker_on" or "speaker_off",

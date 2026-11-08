@@ -979,6 +979,9 @@ local function newPlayer(opts)
     function p:getUseableVehicle() return self._useable end
     function p:getNearVehicle() return self._near end
     function p:getPrimaryHandItem() return self._hand end
+    -- 1109 Drive.handsBusy：IsoPlayer.isAiming（IsoPlayer.java:3813）／getVariableBoolean("isLoading")（裝彈中）
+    function p:isAiming() return self._aiming == true end
+    function p:getVariableBoolean(k) return k == "isLoading" and self._loading == true end
     -- 已學會的配方（IsoGameCharacter.getKnownRecipes()＝IsoGameCharacter.java:11531；
     -- learnRecipe(name, checkMetaRecipe) 就是往這條 list 加，:11583-11585）
     p._known = recipeWorld.newKnownList()
@@ -7048,14 +7051,17 @@ function drive.putSolid(x, y, name)
 end
 
 -- 城市路邊物件：分開模擬 collision／HitByCar／StopCar。引擎是 StopCar 才把
--- tile type 設成 isMoveAbleObject；tile 的 IsMoveAble 屬性本身不會。
-function drive.putSpriteObject(x, y, name, collision, hitByCar, stopCar)
+-- tile type 設成 isMoveAbleObject；tile 的 IsMoveAble 屬性本身不會。minDmg＝tile 的 MinimumCarSpeedDmg 字串
+-- （nil＝沒有這個屬性，引擎缺省 150；1109 起 classifySprite 依它判擋停細桿）。
+function drive.putSpriteObject(x, y, name, collision, hitByCar, stopCar, minDmg)
     local props = {
         has = function(_, key)
             if key == "HitByCar" then return hitByCar == true end
             if key == "StopCar" then return stopCar == true end
+            if key == "MinimumCarSpeedDmg" then return minDmg ~= nil end
             return false
         end,
+        get = function(_, key) if key == "MinimumCarSpeedDmg" then return minDmg end end,
     }
     local sprite = {
         shouldHaveCollision = function() return collision == true end,
@@ -7234,8 +7240,8 @@ checkEq(#halos, 0, "走廊淨空：無提示")
 
 -- ①a 真正無 physics body 的 HitByCar 小物：小郵箱／輪式垃圾桶已在 shipped
 -- 分類順序正確放行，不應產生 hard 或 soft 限速。
-drive.putSpriteObject(20, 0, "street_decoration_01_18", false, true, false)
-drive.putSpriteObject(22, 1, "trashcontainers_01_0", false, true, false)
+drive.putSpriteObject(20, 0, "street_decoration_01_18", false, true, false, "15") -- 原版 MinimumCarSpeedDmg 15
+drive.putSpriteObject(22, 1, "trashcontainers_01_0", false, true, false, "10") -- 原版 MinimumCarSpeedDmg 10
 drive.scanRound()
 driveReset(dveh)
 driveTick(dp, dveh)
@@ -16875,7 +16881,7 @@ scenario("Phase E：v4 strict metadata、adaptive getter cache、traction reset�
         end
         drive.clearVehicle(15, 0)
 
-        drive.putSpriteObject(8, 0, "fixtures_soft_regression", false, true, false)
+        drive.putSpriteObject(8, 0, "fixtures_soft_regression", false, true, false, "10")
         drive.scanRound()
         checkTrue(captured.sensor.softN > 0, "soft fixture enters the slowdown band")
         assertSensorHardCap(25, "soft", "soft obstacle")
@@ -21667,7 +21673,7 @@ function drive.scenarioPerceptionRange()
 
     -- ② (soft) 150m 外的三種軟訊號：收得到，但只做 approach envelope
     drive.putCorpse(150, 0)
-    drive.putSpriteObject(152, 1, "fixtures_soft_far", false, true, false)
+    drive.putSpriteObject(152, 1, "fixtures_soft_far", false, true, false, "10")
     drive.putVehicle(154, 0, false)
     drive.scanRound()
     checkTrue(st.sensor.corpseN > 0 and st.sensor.softN > 0 and st.sensor.movingVeh == true,
@@ -35843,6 +35849,61 @@ function drive.scenarioDetourPendingFrom()
     end
 end
 drive.scenarioDetourPendingFrom()
+
+-- 1109（B 站留言）：駕駛舉雙手槍械瞄準或裝彈時原版跳過 updateControls（IsoPlayer.java:4372-4388），forceBrake 閂鎖沒作用。
+--   (busy-brake) Drive.hardBrake 遇手上忙一律走不鎖輪（斷油＋中線外力、照常轉向），記 hbz；手槍（單手 HANDGUN）、
+--     沒有駕駛、低於 BUSY_NOLOCK_KMH、倒退中、dynamics-fault 照舊鎖輪。違規證明 temp/vp_aim.py（4 個變異全紅）：hardBrake
+--     拿掉 handsBusy＝前三條紅；不看主副手同一把＝「只拿在主手」那條紅；不看 isLoading＝裝彈那條紅；門檻改 0＝低速／倒退兩條紅。
+function drive.scenarioBusyBrake()
+    scenario("1109：駕駛舉槍／裝彈時硬煞改不鎖輪")
+    local Dr = MDAD.Drive
+    local function gun(two)
+        return { _class = "HandWeapon", isRanged = function() return true end,
+            isTwoHandWeapon = function() return two end }
+    end
+    local function driver(aim, load, primary, secondary)
+        return { isAiming = function() return aim end,
+            getVariableBoolean = function(_, k) return k == "isLoading" and load end,
+            getPrimaryHandItem = function() return primary end, getSecondaryHandItem = function() return secondary end }
+    end
+    local imp = {}
+    local function veh(d)
+        return { getDriver = function() return d end,
+            addImpulse = function(_, i) imp.n, imp.x, imp.z = (imp.n or 0) + 1, i:x(), i:z() end,
+            setForceBrake = function() imp.locked = true end }
+    end
+    local function sess()
+        return { runtimeMass = 1200, fstate = {}, vehicleProfile = {}, escScale = 1, parity = 1, forceBrakeUntil = 0 }
+    end
+    local fwdV = BaseVehicle.allocVector3f()
+    local function brake(d, why, kmh, steer)
+        local s = sess()
+        imp.n, imp.x, imp.z, imp.locked = 0, nil, nil, nil
+        local f = Dr.hardBrake(s, veh(d), 1000, why, kmh, 0.8, steer or 0, 0, fwdV, 0, 1)
+        return s, f
+    end
+    local rifle = gun(true)
+    local s, f = brake(driver(true, false, rifle, rifle), "blocked", 20)
+    checkTrue(f ~= nil and not imp.locked and s.forceBrakeUntil == 0 and (imp.z or 0) < 0,
+        "(busy-brake) 舉霰彈槍、停止線 20 km/h：不鎖輪，施車頭反向的中線外力")
+    checkTrue(s.handsBusy == "aim" and s.visAssistWhy == "blocked", "(busy-brake) telemetry hbz=aim、vaw=blocked")
+    s = brake(driver(false, true, nil, nil), "visibility", 50)
+    checkTrue(not imp.locked and s.handsBusy == "load", "(busy-brake) 裝彈中、可視硬煞 50 km/h：不鎖輪，hbz=load")
+    brake(driver(true, false, rifle, rifle), "contact", 30, 1)
+    checkTrue(not imp.locked and math.abs(imp.x or 0) > 0, "(busy-brake) 接觸硬煞也不鎖輪、照常轉向（同一 impulse 帶側推）")
+    local pistol = gun(false)
+    for _, c in ipairs({ { driver(true, false, pistol, nil), "blocked", 20, "舉手槍（單手，原版照跑 updateControls）" },
+            { driver(true, false, rifle, nil), "blocked", 20, "雙手武器只拿在主手（不是 FIREARM）" },
+            { nil, "blocked", 20, "沒有駕駛" },
+            { driver(true, false, rifle, rifle), "blocked", 2, "低於 BUSY_NOLOCK_KMH" },
+            { driver(true, false, rifle, rifle), "blocked", -10, "倒退中（外力沿車頭反向會加速倒退）" },
+            { driver(true, false, rifle, rifle), "dynamics-fault", 50, "dynamics-fault" } }) do
+        s = brake(c[1], c[2], c[3])
+        checkTrue(imp.locked == true and s.forceBrakeUntil > 0 and imp.n == 0, "(busy-brake) " .. c[4] .. "：照舊一秒鎖輪")
+    end
+    BaseVehicle.releaseVector3f(fwdV)
+end
+drive.scenarioBusyBrake()
 
 -- =====================================================================
 -- 總結

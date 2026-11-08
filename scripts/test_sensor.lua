@@ -76,6 +76,8 @@ IsoFlagType = {
     water = "water", solidfloor = "solidfloor", doorN = "doorN", doorW = "doorW",
     solidtrans = "solidtrans", WallN = "WallN", WallW = "WallW", WallNW = "WallNW",
     DoorWallN = "DoorWallN", DoorWallW = "DoorWallW", open = "open", -- closedDoor 的格級屬性（hardSpriteNear 門格）
+    -- 1109 細柱分類（scenarioThinPosts）：替身值不等於名稱字串（sensor.md〈已知坑〉），字串 has("collideN") 與旗標分得開
+    solid = "FLAG:solid", collideN = "FLAG:collideN", collideW = "FLAG:collideW",
 }
 IsoObjectType = { isMoveAbleObject = "isMoveAbleObject" }
 -- getClimateManager 故意不定義：契約說天氣 API 缺席時 rain 留 nil（下游視為濕）
@@ -1058,6 +1060,76 @@ local function scenarioHardSprite()
         "(door-near) 開著的門較近、真硬物較遠：回報硬物（got " .. tostring(nm) .. "/" .. tostring(cls) .. "/" .. tostring(d) .. "）")
 end
 
+-- 1109 細柱子（B 站「小电线杆」）：通用 HitByCar 分支以 MinimumCarSpeedDmg ≥ MDADSensor.THIN_STOP_KMH 收成細桿（引擎
+-- IsoObject.Collision 在車速 ≤ 該值時把車擋停），籬笆分支認名稱任何位置的 fencing_（門類 sprite 除外）。fixture 照真 tile
+-- 屬性（newtiledefinitions.tiles.txt／本機 MOD .tiles，2026-11-09）：旗標是載入後的 IsoFlagType（WallN／WallNTrans→collideN），
+-- 字串屬性另放；tile IsMoveAble 不模擬成 object type，只有 StopCar 給 isMoveAbleObject（IsoWorld.java:1045-1048）。
+-- 違規證明（temp/vp_thin/vp_thin.py）：門檻改 151＝(stop-*) 紅；改 5＝(smash-*) 紅；>= 改 >＝(edge-20) 紅；籬笆比對改回
+-- 開頭＝(mod-fence-wall) 紅；拿掉門類排除＝(mod-gate-*) 紅。
+local function scenarioThinPosts()
+    scenario("1109 細柱子：擋停門檻高的 HitByCar 物件收成細桿、MOD 籬笆走旗標判定、撞得飛的小物照舊")
+    local SHC = { solid = true, solidtrans = true, collideN = true, collideW = true } -- IsoSprite.shouldHaveCollision
+    local function classOf(name, flags, props, door)
+        local fset, coll = {}, false
+        for _, f in ipairs(flags) do
+            fset[IsoFlagType[f]] = true
+            if SHC[f] then coll = true end
+        end
+        local P = { has = function(_, k) return fset[k] == true or (type(k) == "string" and props[k] ~= nil) end,
+            get = function(_, k) return props[k] end }
+        local sprite = { getProperties = function() return P end, shouldHaveCollision = function() return coll end }
+        local typ = props.StopCar ~= nil and IsoObjectType.isMoveAbleObject or nil
+        local obj = { getSpriteName = function() return name end, getSprite = function() return sprite end,
+            getType = function() return typ end }
+        local sqf = {}
+        if door ~= nil then sqf[IsoFlagType.doorW], sqf[IsoFlagType.DoorWallW], sqf[IsoFlagType.open] = true, true, door == "open" end
+        local sq = { getObjects = function() return { size = function() return 1 end, get = function() return obj end } end,
+            getProperties = function() return { has = function(_, k) return sqf[k] == true end } end }
+        local _, cls = MDADSensor.hardSpriteNear(nil, { getGridSquare = function() return sq end }, 10.5, 10.5, 0, 0)
+        return cls
+    end
+    local function want(tag, got, exp) check(got == exp, tag .. "（got " .. tostring(got) .. "，want " .. tostring(exp) .. "）") end
+    -- 擋停門檻 ≥ THIN_STOP_KMH（缺省 150）＝細桿
+    want("(stop-recycle) 資源回收桶 trashcontainers_01_16（缺省 150）＝細桿",
+        classOf("trashcontainers_01_16", {}, { HitByCar = "", IsMoveAble = "", CustomName = "Recycle Bin" }), "thin")
+    want("(stop-carpentry) 玩家木牆角柱 carpentry_02_43＝細桿", classOf("carpentry_02_43", {}, { HitByCar = "", WallSE = "" }), "thin")
+    want("(stop-crafted) crafted_04_119＝細桿", classOf("crafted_04_119", {}, { HitByCar = "" }), "thin")
+    want("(stop-mod-post) MOD 柱子 melos_tiles_fencing_02_34 Post＝細桿",
+        classOf("melos_tiles_fencing_02_34", {}, { HitByCar = "", CustomName = "Post" }), "thin")
+    want("(stop-50) MinimumCarSpeedDmg 50（trelai_tiles_museum_32）＝細桿",
+        classOf("trelai_tiles_museum_32", {}, { HitByCar = "", MinimumCarSpeedDmg = "50" }), "thin")
+    want("(edge-20) 門檻邊界：MinimumCarSpeedDmg＝THIN_STOP_KMH＝細桿",
+        classOf("harness_post", {}, { HitByCar = "", MinimumCarSpeedDmg = tostring(MDADSensor.THIN_STOP_KMH) }), "thin")
+    -- 門檻以下：開車就撞飛，照舊不進點雲
+    want("(smash-cone) 交通錐（5）不是硬點",
+        classOf("street_decoration_01_26", {}, { HitByCar = "", IsMoveAble = "", MinimumCarSpeedDmg = "5" }), nil)
+    want("(smash-box) 紙箱（15）不是硬點",
+        classOf("street_decoration_01_18", {}, { HitByCar = "", IsMoveAble = "", MinimumCarSpeedDmg = "15" }), nil)
+    want("(smash-bin) 小垃圾桶（10）不是硬點",
+        classOf("trashcontainers_01_0", {}, { HitByCar = "", IsMoveAble = "", MinimumCarSpeedDmg = "10" }), nil)
+    want("(smash-mod-bin) MOD 垃圾桶（10，非豁免前綴＝SOFT）不是硬點",
+        classOf("Oujinjin's_Tiles_Trash_01_0", {}, { HitByCar = "", IsMoveAble = "", MinimumCarSpeedDmg = "10" }), nil)
+    want("(edge-19) 門檻下一格不是硬點",
+        classOf("harness_post", {}, { HitByCar = "", MinimumCarSpeedDmg = tostring(MDADSensor.THIN_STOP_KMH - 1) }), nil)
+    -- 不變：路燈、停車標誌（StopCar）、原版籬笆
+    want("(keep-lamp) 路燈 lighting_outdoor_01_16（StopCar）＝方塊",
+        classOf("lighting_outdoor_01_16", {}, { HitByCar = "", PhysicsShape = "Tree", StopCar = "" }), "hard")
+    want("(keep-stop) 停車標誌（StopCar、20）＝方塊",
+        classOf("street_decoration_01_0", {}, { HitByCar = "", IsMoveAble = "", MinimumCarSpeedDmg = "20", StopCar = "" }), "hard")
+    want("(keep-fence-post) 原版籬笆樁 fencing_01_0＝細桿", classOf("fencing_01_0", {}, { HitByCar = "" }), "thin")
+    want("(keep-fence-wall) 原版籬笆 fencing_01_8（WallN→collideN）＝薄牆",
+        classOf("fencing_01_8", { "collideN" }, { HitByCar = "", WallN = "" }), "wall")
+    want("(keep-debris) 原版地上碎片 fencing_damaged_01_168（無旗標、無 HitByCar）不是硬點",
+        classOf("fencing_damaged_01_168", {}, {}), nil)
+    -- MOD 籬笆（fencing_ 不在開頭）走同一套旗標判定；柵門留給門類
+    want("(mod-fence-wall) MOD 籬笆 melos_tiles_fencing_01_0（WallNTrans→collideN）＝薄牆，不是整格方塊",
+        classOf("melos_tiles_fencing_01_0", { "collideN" }, { HitByCar = "", WallNTrans = "", CustomName = "Fence" }), "wall")
+    want("(mod-gate-closed) MOD 柵門 melos_tiles_fencing_04_8（doorW＋HitByCar）關著＝門",
+        classOf("melos_tiles_fencing_04_8", { "doorW" }, { HitByCar = "", IsMoveAble = "" }, "closed"), "door")
+    want("(mod-gate-open) 同一扇柵門開著不是硬點",
+        classOf("melos_tiles_fencing_04_8", { "doorW" }, { HitByCar = "", IsMoveAble = "" }, "open"), nil)
+end
+
 -- =====================================================================
 -- 1026i E6：傾斜／翻覆車的俯視輪廓（MDADSensor.vehFootprint）。正式服 Riverside 一台車頭朝下立著的 SemiTrailerVan
 -- （objdump：up=(0.389,−0.921,0)、fwd=(0,0,−1)、ext 2.20×2.28×9.58、com.y 2.28）：舊四角只取局部 y＝0，看到的是
@@ -1244,6 +1316,7 @@ scenarioTrafficVelocity()
 scenarioDiagonalCoverage()
 scenarioAnimalsPlayers()
 scenarioHardSprite()
+scenarioThinPosts()
 scenarioTiltedOutline()
 
 closeScenario()

@@ -5,8 +5,10 @@ module Base
 	   Fish Audio 語音當第三種 classic，文本見 scripts/voice_lines_classic.json）。
 	   名稱 MDAD_Voice_<事件>_<語言>_<聲音>，MDAD_Voice.lua soundName 組字。
 	   鍵解析：GameSoundScript.java:29-39（category/is3D/master），clip 鍵 :57-77（file/volume）。
-	   is3D=false＝非空間音、master=Primary＝跟主音量；實際播放音量由 Lua 端
-	   emitter:setVolume(ref, v) 依 HUD 拉桿再乘。WAV 44.1kHz 16-bit mono。 */
+	   is3D=false＝非空間音。master=Primary 對這些 WAV 不起作用：檔案型聲音由 FMODSoundEmitter 放進
+	   FMODManager.channelGroupInGameNonBankSounds（FMODSoundEmitter.java:977，不在任何 VCA 底下），遊戲的音量滑桿都管不到，
+	   只乘 emitter、clip volume 與 GameSound.getUserVolume()（家族 e2e.md〈靜音與前景守護〉）。
+	   實際播放音量由 Lua 端 emitter:setVolume(ref, v) 依 HUD 拉桿決定，再乘系統音量。WAV 44.1kHz 16-bit mono。 */
 	sound MDAD_Voice_start_zh_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_start_zh_yui.wav, } }
 	sound MDAD_Voice_stop_zh_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_stop_zh_yui.wav, } }
 	sound MDAD_Voice_blocked_zh_yui { category = UI, is3D = false, master = Primary, clip { file = media/sound/MinidoracatAutoDrive/voice_blocked_zh_yui.wav, } }

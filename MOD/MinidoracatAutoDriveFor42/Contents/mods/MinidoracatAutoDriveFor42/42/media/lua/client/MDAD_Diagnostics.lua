@@ -1386,6 +1386,7 @@ local function encodePhys(phys)
     addNum("towUp", "tup")            -- 拖掛 upVectorDot（<0.8 原版拆掛）
     addNum("towDecel", "tda")         -- 施給掛車的減速度（m/s²；0929o 拖車減速分攤）
     addStr("towBrake", "tbw")          -- 拖車不鎖輪硬煞的理由（0929p Drive.hardBrake；空＝本幀沒走）
+    addStr("handsBusy", "hbz")         -- 1109：硬煞那幀駕駛手上忙（aim＝舉雙手槍械、load＝裝彈；鎖輪無效、改不鎖輪；空＝沒有）
     -- 1008 拖車樣本（MDADTrailer.sampleState，每筆取樣讀一次）：掛車車位相對牽引車的縱向（車頭正）／橫向（右正，同 nb）m、
     -- 掛車 km/h、兩掛點世界距離 m（同 tow lost 的 hd）
     addNum("towLon", "tlo")

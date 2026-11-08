@@ -169,7 +169,7 @@ local HARD_MAX = math.max(LAT_N * (MDADDynamics.PERCEPTION_HARD_MAX_M - SCAN_NEA
 local KEY_MUL = 100000
 
 local COST_NONE, COST_SOFT, COST_HARD = 0, 1, 2
-local COST_HARD_THIN = 3       -- 細桿硬障礙：無碰撞旗標、帶 HitByCar／CarSlowFactor 的籬笆 sprite（籬笆樁），格心 0 半徑（引擎不給形狀，但會把車擋停）
+local COST_HARD_THIN = 3       -- 細桿硬障礙：引擎不給形狀、但 HitByCar 會把車擋停的物件（籬笆樁、MinimumCarSpeedDmg ≥ THIN_STOP_KMH 的柱子），格心 0 半徑
 local COST_TREE = 4            -- 樹幹形狀（樹、室外路燈柱、PhysicsShape=Tree）：見 TRUNK_*
 local COST_DOOR = 5            -- 門／柵門 sprite（doorN／doorW）：開關狀態在格級屬性，由 closedDoor(square) 判
 local COST_WALL_N, COST_WALL_W, COST_WALL_NW = 6, 7, 8 -- 帶 collideN／collideW 的籬笆：格邊薄牆，見 WALL_*
@@ -354,7 +354,7 @@ end
 --------------------------------------------------------------------------------
 
 -- 回 COST_*：硬障礙依引擎的車輛碰撞形狀分成整格方塊（HARD）、樹幹（TREE）、格邊薄牆（WALL_*）；
--- THIN 只剩無碰撞旗標的籬笆 sprite（格心 0 半徑，保守留著）。
+-- THIN＝沒有碰撞形狀、但 HitByCar 會把車擋停的物件（無旗標籬笆、擋停門檻高的柱子；格心 0 半徑）。
 --
 -- 有碰撞的 sprite：shouldHaveCollision 只看 solid / solidtrans / WallN / WallNW / WallW / collideN /
 -- collideW（IsoSprite.java:2083-2093，**不含 solidfloor**）——地板 sprite 根本進不了這個分支，所以不需要
@@ -363,9 +363,8 @@ end
 --
 -- 無碰撞的 sprite：門框（doorN/doorW）是開口，不能當障礙。`isMoveAbleObject`
 -- 是引擎由 StopCar 設的 vehicle collision type（**不是** tile 的 IsMoveAble 屬性），
--- 仍算 SOFT。其後才處理 HitByCar：沒有 collision/StopCar 的
--- street_decoration／trashcontainers 小物可直接放行；實體郵筒、標誌等已在前兩關
--- 收編，不可因 prefix 被穿透。
+-- 仍算 SOFT。其後才處理 HitByCar：擋停門檻（MinimumCarSpeedDmg）≥ THIN_STOP_KMH 的收成細桿，
+-- 門檻以下的 street_decoration／trashcontainers 小物放行；實體郵筒、標誌等已在前兩關收編。
 -- 「這格是水」＝有水面 sprite **且沒有非水的實地板蓋在上面**。橋面格是三層疊的
 -- （水 blends_natural_02_x → 路面 blends_street → 橋板 industry_01_39），`getFloor()`
 -- 回**第一個**帶 solidfloor 的物件（IsoGridSquare.java:5025-5034）＝載入順序最底層
@@ -394,6 +393,13 @@ local function waterUnderfoot(square)
     return water and dry == nil, dry
 end
 
+-- 通用 HitByCar 物件「會把車擋停」的門檻（km/h）：IsoObject.Collision（IsoObject.java:1707-1755）在車速 ≤
+-- MinimumCarSpeedDmg（缺省 "150"）時施反向衝量並把車速歸 0，高於才撞壞物件、車照過。原版與本機 MOD（2026-11-09 掃
+-- 66 萬 tile，temp/bili-1108/thin_threshold_stats.py）走到通用分支的值只有 5（交通錐）、10（垃圾桶、花盆）、
+-- 15（紙箱、街頭廣告牌）、50、150：≤15 的開車就撞飛，照舊放行；50 以上在一般車速會擋停，收成細桿。16–50 間沒有
+-- tile，取 20＝原版停車標誌的值（它帶 StopCar 本來就是硬物）。
+MDADSensor.THIN_STOP_KMH = 20
+
 local function classifySprite(obj, name)
     local sprite = obj:getSprite()                     -- 用例 ISWorldObjectContextMenu.lua:1347
     if sprite == nil then return COST_NONE end
@@ -416,7 +422,9 @@ local function classifySprite(obj, name)
     -- fencing_damaged_01_168..171 等）車直接壓過、不掉速不扣車況，落到下面的通用判定（原版全部 COST_NONE；
     -- 帶 StopCar／PhysicsShape／門旗標的 MOD tile 照通用規則）。issue #7：勃蘭登堡整條街的地上碎片被當硬點 StopStuck。
     -- 燒掉的 IsoThumpable 一律換成普通 IsoObject（IsoGridSquare.java:6299-6308、6478-6486），不會帶 blockAllTheSquare。
-    if find(name, "fencing_", 1, true) == 1 then
+    -- 名稱任何位置含 fencing_ 都算（melos_tiles_fencing_*、pert_fencing_* 等 MOD tileset；2026-11-09 掃本機 MOD 沒有
+    -- 非籬笆 tile 因此改類）；門類 sprite（MOD 柵門帶 HitByCar）不進這裡，留給 COST_DOOR（原版 fencing_ 沒有門 tile）。
+    if find(name, "fencing_", 1, true) and not props:has(F_doorN) and not props:has(F_doorW) then
         if props:has(F_solid) or props:has(F_solidtrans) then return COST_HARD end
         local n, w = props:has(F_collideN), props:has(F_collideW)
         if n and w then return COST_WALL_NW end
@@ -463,6 +471,7 @@ local function classifySprite(obj, name)
     if find(name, "f_bushes_1_", 1, true) == 1 or props:has("Bush") then return COST_BUSH end
     if obj:getType() == T_moveable then return COST_SOFT end
     if props:has("HitByCar") then                      -- PropertyContainer.java:187（has(String) 過載）
+        if (tonumber(props:get("MinimumCarSpeedDmg")) or 150) >= MDADSensor.THIN_STOP_KMH then return COST_HARD_THIN end
         if find(name, "street_decoration", 1, true) == 1 then return COST_NONE end
         if find(name, "trashcontainers", 1, true) == 1 then return COST_NONE end
         return COST_SOFT

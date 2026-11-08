@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1108l"
+Drive.REV = "1109a"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -762,6 +762,9 @@ TUNE.BRAKE_ASSIST_NEED = 4.5 -- 需要的減速度（m/s²）超過一般硬煞�
 -- 拖車硬煞不鎖輪（0929p，使用者裁定；見 Drive.hardBrake）：這個速度以上改用兩節各自的中線外力
 TUNE.TOW_NOLOCK_KMH = 10
 TUNE.TOW_BRAKE_DECEL = 7.0 -- 兩節各自的外力減速度（m/s²，同 DODGE_ASSIST_MAX）；斷油的引擎煞車另外疊加
+-- 駕駛手上忙（舉雙手槍械瞄準／裝彈，Drive.handsBusy）時硬煞改不鎖輪的下限：鎖輪閂鎖沒作用，低到這裡才交給斷油滑停。
+-- 外力一幀最多減約 0.4 km/h（7 m/s²×1/60 s），門檻高於它就推不成倒退（不鎖輪路徑只對往前開的車施力）。
+TUNE.BUSY_NOLOCK_KMH = 3
 -- 自動掛回（1011a；Drive.rehitch*、MDADTrailer〈4. 自動掛回〉）：掛車只在客戶端消失時煞停、等它回來、倒過去讓引擎自己掛回。
 -- 倒車量級、掛點 8m 換速、側推增益與施力點照 2026-10-11 E2E（家族 scenarios.md〈replay〉rehitch；8/8 掛回的那組）。
 TUNE.REHITCH_MAX = 3            -- 每趟最多幾次
@@ -4223,6 +4226,24 @@ function Drive.detourBrake(s, vehicle, now)
     return commandForceBrake(s, vehicle, now, "unstick-dpend")
 end
 
+-- 駕駛手上忙（1109，B 站留言）：駕駛舉著雙手槍械（WeaponType FIREARM）瞄準、或裝彈中（isLoading）時，原版這一幀不呼叫
+-- updateControls（42.21 IsoPlayer.java:4372-4388），forceBrake 的一秒閂鎖只在那裡變成煞車（CarController.java:974-980）
+-- ＝鎖輪無效；定速、斷油、外力（updatePhysics）照跑。手槍是 HANDGUN、不擋。FIREARM 判法照 WeaponType.getWeaponType
+-- （WeaponType.java:63-100：主手遠程 HandWeapon、主副手同一把、雙手武器）。回 "load"／"aim"／nil（telemetry hbz）。
+-- E2E aimbrake-sp（base ee2d102）：停止線 20 km/h 鎖輪減速 5.3→4.1 m/s²、煞車燈不亮。
+function Drive.handsBusy(vehicle)
+    local d = vehicle.getDriver and vehicle:getDriver()
+    if d == nil then return nil end
+    if d:getVariableBoolean("isLoading") then return "load" end
+    if not d:isAiming() then return nil end
+    local w = d:getPrimaryHandItem()
+    if w ~= nil and instanceof(w, "HandWeapon") and w:isRanged() and w:isTwoHandWeapon()
+            and w == d:getSecondaryHandItem() then
+        return "aim"
+    end
+    return nil
+end
+
 -- 硬煞執行（0929p，使用者裁定）。一般車＝一秒鎖輪（commandForceBrake）。拖車 ≥TOW_NOLOCK_KMH 改不鎖輪：
 -- 牽引車鎖死時掛車（沒有煞車，CarController.updateTrailer:383-393）從後面推，E2E semi-long-mp（W900＋40 呎
 -- 貨櫃）鎖輪中整組只減 2.0 m/s²（滑行 1.7–1.9），方向也跟著沒了；不鎖輪的分攤外力實測 5–5.5。改成斷油（呼叫端
@@ -4266,6 +4287,10 @@ function Drive.hardBrake(s, vehicle, now, why, speedKmh, mult, steer, heading, f
     elseif not nolock and not s.currentBlocked and (why == "curve" or why == "rehitch") then
         nolock = true -- rehitch：自動掛回的煞停（1011a；s.tow 已收起，照拖車的門檻不鎖輪、照常轉向）
     end
+    -- 駕駛手上忙（1109）：鎖輪閂鎖沒作用（Drive.handsBusy），任何理由都改不鎖輪、照常轉向；低於 BUSY_NOLOCK_KMH 交給
+    -- 斷油滑停。dynamics-fault 照下方照舊鎖輪（外力換算用的質量不可信；鎖輪無效時只剩斷油）。
+    s.handsBusy = Drive.handsBusy(vehicle) -- telemetry hbz（本幀；stepFollow 每幀清）
+    if s.handsBusy then nolock, minKmh = true, TUNE.BUSY_NOLOCK_KMH end
     if not nolock or why == "dynamics-fault"
             or not (MDADDynamics.finite(speedKmh) and speedKmh >= minKmh) then
         commandForceBrake(s, vehicle, now, why)
@@ -8755,6 +8780,7 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     phys.visibilityHardKmh = s.visibilityHardKmh
     phys.visHold, phys.visRoundS, phys.visAssistDecel = s.visHold, s.visRoundS, s.visAssistDecel
     if finite(s.visAssistDecel) and s.visAssistDecel > 0 then phys.visAssistWhy = s.visAssistWhy end
+    phys.handsBusy = s.handsBusy -- 1109：硬煞那幀駕駛手上忙（aim／load＝鎖輪無效、改不鎖輪）
     if s.tow then
         phys.towPhi, phys.towUp, phys.towDecel, phys.towBrake = s.towPhi, s.towUp, s.towAssistDecel, s.towBrakeWhy
         -- 倒車脫困期間 T.guard 不跑、s.towPhi 凍結：改用 stepUnstick 每幀讀的折角（2026-10-10；不動 s.towPhi）
@@ -15554,7 +15580,7 @@ local function stepFollow(s, vehicle, playerNum, now)
     s.brakeImpulseThis, s.brakeAssistForce = false, 0
     -- 上一幀施的巡航減速輔助留給 updateTraction：本幀的 dv 是那一幀的物理結果（滑行學習要排除它）
     s.visAssistPrev, s.visAssistDecel, s.towAssistDecel, s.accelAssist = s.visAssistDecel, 0, 0, 0
-    s.towBrakeWhy, s.visAssistWhy = nil, nil
+    s.towBrakeWhy, s.visAssistWhy, s.handsBusy = nil, nil, nil
 
     -- 池向量：一顆當 forward／relPos 共用，一顆在 applySteering 內當 impulse。
     -- 這段中間沒有 early return，release 一定會執行。

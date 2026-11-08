@@ -3871,6 +3871,48 @@ do
     iconPanel:applyLayout()
     checkEq(iconPanel._style, 1, "restoring font size keeps the user's saved Metal selection")
 
+    -- (wings-gap) 2026-11-09 裁定：側翼三列排不下時只縮列與列之間的垂直間距，最小 3px。本 fixture 的儀表高 110
+    -- （可見 103）正好落在縮列距有差的區間：26px 列高 32，三列＋4／5px（標準／大）＝104／106 > 103，縮到 3px＝102 放得下。
+    -- 42.21 原版儀表實機可見 114（E2E s3wings-base-f3-1109b），那裡 26px 本來就放得下。33px（列高 39）三種縮放
+    -- 都退回，樣式鈕 tooltip 說明原因。16／19px 列距＝原本的 gap。
+    local scaleOption = optionSets.MinidoracatAutoDrive:getOption("HUDScale")
+    local oldScale = scaleOption:getValue()
+    viewportWidth = 2560
+    themeOption:setValue(4)
+    for _, small in ipairs({ 16, 19, 26, 33 }) do
+        useFontProfile(small, small + 10)
+        for s = 1, 3 do
+            scaleOption:setValue(s)
+            iconPanel:applyLayout(); iconPanel:refresh(nowMs)
+            local p, label = iconPanel, "(wings-gap) " .. small .. "px scale " .. s
+            local tip = (p.themeButton.tooltip or ""):find("UI_MinidoracatAutoDrive_HUDWingsFallback", 1, true)
+            if small == 33 then
+                check(p._style == 1 and tip ~= nil and p.y + p.height == dashboards[0].y + 7,
+                    label .. ": 39px rows cannot fit the 103px band; fall back to metal and explain it on the style button")
+            else
+                local rowH = p.gearButtons[1].height
+                local g1 = p.zombieButton.y - p.gearButtons[1].y - rowH
+                local g2 = p.themeButton.y - p.zombieButton.y - rowH
+                local full = math.max(3, math.floor(4 * ({ 0.75, 1.0, 1.25 })[s] + 0.5))
+                local want = small == 26 and 3 or full
+                -- 左翼：下列（主鈕）頂＝分隔線＋列距的後半，縮過的列距左右翼一致
+                local gL = p.actionButton.y - p._wingLDividerY
+                check(p._style == 4 and tip == nil and g1 == want and g2 == want
+                    and gL == want - math.floor(want / 2)
+                    and p.gearButtons[1].visible and p.volumeSlider.visible and p.actionButton.visible
+                    and outside(p) == 0 and p.height == dashboards[0].height - 7,
+                    label .. ": wings stay, row gap " .. g1 .. "/" .. g2 .. "/left " .. gL .. " (want " .. want
+                        .. "), every control inside the visible dashboard band")
+            end
+        end
+    end
+    -- 退回後玩家改選金屬：樣式鈕不再說「側掛放不下」
+    themeOption:setValue(1)
+    iconPanel:applyLayout(); iconPanel:refresh(nowMs)
+    check(not (iconPanel.themeButton.tooltip or ""):find("UI_MinidoracatAutoDrive_HUDWingsFallback", 1, true),
+        "(wings-gap) choosing metal after a wings fallback drops the fallback note")
+    scaleOption:setValue(oldScale)
+
     -- 英文完整主鈕比窄版剩餘空間長；原版 ISButton 不會自動裁切標題。
     local oldContinue, oldCancel = texts.UI_MinidoracatAutoDrive_HUDTripContinue,
         texts.UI_MinidoracatAutoDrive_HUDCancelPrep
