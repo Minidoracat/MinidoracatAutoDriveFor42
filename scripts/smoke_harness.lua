@@ -13281,7 +13281,7 @@ function drive.scenarioDetourPending()
     local oldTx, oldTy = nav.tx, nav.ty
     local ev = {}
     MDADDiagnostics.event = function(_, name, a)
-        if name == "dpend" or name == "detour" then ev[#ev + 1] = { name = name, a = a } end
+        if name == "dpend" or name == "detour" or name == "unstick" then ev[#ev + 1] = { name = name, a = a } end
     end
     local function evs(name, phase)
         local out = {}
@@ -13389,6 +13389,10 @@ function drive.scenarioDetourPending()
     checkTrue(ok == false and why == "pending" and w ~= nil and w.site == "detour" and #halos == halosBefore
             and #evs("detour") == 0 and st0.kind == "detour" and nav.commitCalls == 0,
         "(dp-same) building＝等待、不是失敗：沒紅字、沒 detour 事件、dpend start kind=detour（why=" .. tostring(why) .. "）")
+    -- (dp-once) 1108f：同一幀再走到同一個改道（例如停等預算出口又問交還前改道）不再問主 MOD。違規證明：拿掉 pollMs 閘＝紅。
+    local ok2, why2 = Dr.requestDetour(0)
+    checkTrue(ok2 == false and why2 == "pending" and #stub.calls == 1 and s.detourWait == w,
+        "(dp-once) 同一幀第二次呼叫：照回還在算、不再問主 MOD（calls=" .. tostring(#stub.calls) .. "）")
     dveh._y = 0.3 -- 等待中車位微動（溜車、同步拉回）：重呼叫仍用第一次的避讓圈與錨，不從目前車位重算
     local realCtl, ctlN = MDADFollower.control, 0
     MDADFollower.control = function(...)
@@ -13435,6 +13439,35 @@ function drive.scenarioDetourPending()
     checkTrue(Dr.isActive(0) and s.waitAccumMs - w0 < 1500,
         "(dp-wait) 停住等 " .. tostring(toEv.ms) .. " ms 不計停等預算、不 StopStuck（預算 " .. tostring(w0) .. " -> "
         .. tostring(s.waitAccumMs) .. "）")
+    teardown()
+
+    -- (dp-build) 1108f 審查 P2：停住等分幀改道時剖面跨幀重建（dynamicsDirty／換風格），build 分支與 detourWaitTick 不得把
+    --   同一段時間各推一次停等計時：建完 waitTickMs 不超過現在；等待結束（這裡拒收 far）後下一個停等幀照常累計。
+    --   違規證明：build 期間不推進待算的計時基準＝紅。
+    s = arm(14)
+    nav.detour, stub.build = detourRoute(60, 30), 1e9
+    Dr.requestDetour(0)
+    tick()
+    local keepBudget = T.REBUILD_BUDGET
+    T.REBUILD_BUDGET = 32 -- 每幀 32 ops：本 fixture 的剖面要好幾幀才建完
+    s.dynamicsDirty = true
+    local buildFrames = 0
+    tick()
+    while s.mode == "build" and buildFrames < 200 do
+        buildFrames = buildFrames + 1
+        tick()
+    end
+    T.REBUILD_BUDGET = keepBudget
+    local wtAfter = s.waitTickMs
+    checkTrue(buildFrames >= 2 and s.mode ~= "build" and s.detourWait ~= nil and wtAfter <= nowMs,
+        "(dp-build) 等待中跨 " .. tostring(buildFrames) .. " 幀重建：waitTickMs 不超過現在（" .. tostring(wtAfter)
+        .. " vs now " .. tostring(nowMs) .. "）")
+    stub.build = 0
+    tick()
+    local wb0 = s.waitAccumMs
+    tick(2)
+    checkTrue(s.detourWait == nil and Dr.isActive(0) and s.waitAccumMs - wb0 >= 300,
+        "(dp-build) 等待結束後停等預算照常累計（" .. tostring(wb0) .. " -> " .. tostring(s.waitAccumMs) .. "）")
     teardown()
 
     -- (dp-target)
@@ -13491,6 +13524,25 @@ function drive.scenarioDetourPending()
         .. tostring(s.waitAccumMs) .. " calls=" .. tostring(#stub.calls) .. " same=" .. tostring(drive.sameArgs(stub.calls)) .. "）")
     teardown()
 
+    -- (dp-settle) 1108f 審查 P2：倒車 settle 已逾時、車還在倒（|v|≥1）時交還前改道進分幀：等待期間要持續煞停（同 settle 的
+    --   unstick-stop）、每幀只問主 MOD 一次、settle-timeout 事件只記第一次。違規證明：moving 時不 hold＝紅。
+    s = arm(14, true)
+    nav.detour, stub.build = detourRoute(120, 1), 1e9
+    s.mode, s.settleUntil, s.unstickStartedAt = "settle", nowMs - 1, nowMs - 2000
+    s.unstickX, s.unstickY = dveh._x + 2, dveh._y
+    dveh._speed = -3
+    tick()
+    local c0, fb0, to0 = #stub.calls, drive.calls.forceBrake, #evs("unstick", "timeout")
+    checkTrue(s.detourWait ~= nil and s.detourWait.stuck == true and c0 == 1 and to0 == 1,
+        "(dp-settle) 前置：settle 逾時問交還前改道、分幀等待（calls=" .. tostring(c0) .. " timeout=" .. tostring(to0) .. "）")
+    tick(3)
+    local c3, fb3, to3 = #stub.calls, drive.calls.forceBrake, #evs("unstick", "timeout")
+    checkTrue(Dr.isActive(0) and s.detourWait ~= nil and c3 - c0 == 3 and to3 == 1 and fb3 - fb0 >= 3,
+        "(dp-settle) 等待中：每幀問一次（+" .. tostring(c3 - c0) .. "）、timeout 只記一次（" .. tostring(to3)
+        .. "）、持續煞停（forceBrake +" .. tostring(fb3 - fb0) .. "）")
+    dveh._speed = 0
+    teardown()
+
     -- (dp-sticky)
     s = arm(14)
     local acc = detourRoute(120, 1)
@@ -13513,6 +13565,32 @@ function drive.scenarioDetourPending()
     checkTrue(s.route == sticky and nav.commitCalls == 1 and drive.sameArgs(stub.calls) and #stub.calls == 3
             and s.detourWait == nil,
         "(dp-sticky) 算完：commit 並 cutover 到替代線、三次參數相同（calls=" .. tostring(#stub.calls) .. "）")
+    teardown()
+
+    -- (dp-sticky-far) 1108f 審查 P1：sticky 等待中車沿目前路線開過替代線的分岔點，交付的線 snapDist 還是開查詢當下量的；
+    --   交付時以目前車位到候選線的世界距離另驗，> SNAP_MAX_M＝拒收 pend-far（dpend far、d＝距離），不 cutover 到它。
+    --   違規證明：拿掉交付時的世界距離驗收＝紅。
+    s = arm(14)
+    acc = detourRoute(120, 1)
+    nav.detour = acc
+    Dr.requestDetour(0)
+    tick()
+    s = Dr.debugSession(0)
+    recomputed = meta(newRoute(40, 0, 0, 4, 0))
+    recomputed.len, recomputed.cost, recomputed.avoidPenalty, recomputed.snapDist = 156, 156, 0, 1
+    nav.route = recomputed
+    local south = meta({ pts = { 11, 0, 11, -12, 156, -12, 156, 0 } }) -- 一開頭就往南分岔
+    south.len, south.cost, south.avoidPenalty, south.snapDist = 121, 121, 0, 1
+    nav.detour, stub.build, stub.calls, nav.commitCalls = south, 2, {}, 0
+    tick(2)
+    checkTrue(s.detourWait ~= nil and s.detourWait.site == "sticky", "(dp-sticky-far) 前置：sticky 分幀等待中")
+    dveh._x, dveh._y = 100, 12 -- 等待期間沿替代線開到分岔點東邊 89m（離南支 24m）
+    tick()
+    local farEv = evs("dpend", "far")[1] or {}
+    checkTrue(s.route ~= south and nav.commitCalls == 0 and farEv.why == "pend-far" and type(farEv.d) == "number"
+            and math.abs(farEv.d - 24) < 0.5,
+        "(dp-sticky-far) 交付時離車 >SNAP_MAX_M＝拒收 pend-far、不 commit、不 cutover（d=" .. tostring(farEv.d) .. "）")
+    dveh._x, dveh._y = 11, 0
     teardown()
 
     MDADDiagnostics.event, MDAD.HUD.autoDetour = oldEvent, oldAuto
@@ -24506,7 +24584,11 @@ function drive.scenarioTowTurn()
         if st then st.tow = towGeo end
         tickUntil(function() return #c14 > 0 or not MDAD.Drive.isActive(0) end, 60)
         local site14 = st and st.detourWait and st.detourWait.site
-        tickUntil(function() return st.route == fwd or not MDAD.Drive.isActive(0) end, 20)
+        for _ = 1, 20 do -- 每幀推 20 ms（同一幀只問主 MOD 一次，1108f；本情境的 tickUntil 不推時間）
+            if st.route == fwd or not MDAD.Drive.isActive(0) then break end
+            nowMs = nowMs + 20
+            driveTick(dp, dveh)
+        end
         checkTrue(ok11 and site14 == "towturn" and #c14 == 3 and drive.sameArgs(c14) and c14[1][10] == true
                 and commits == 1 and st.route == fwd and MDAD.Drive.isActive(0),
             "(tt1-v14) 拖車調頭 building 兩次：停住不交還、三次同參數、算完 commit 並 cutover（site=" .. tostring(site14)
@@ -24833,6 +24915,22 @@ function drive.scenarioTowCorner()
                 and c14[1][10] == true and commits == 1 and st.route == alt and MDAD.Drive.isActive(0),
             "(tc-v14) 拖車轉角改道 building 兩次：照目前路線不交還、三次同參數、算完 commit 並 cutover（site="
             .. tostring(site14) .. " calls=" .. tostring(#c14) .. " commit=" .. tostring(commits) .. "）")
+        -- (tc-far) 1108f 審查 P1：等待期間車沿原線開過替代線的分岔點（圓弧從 (0,0) 往北繞，車已在 (30,0)）：交付時以目前
+        --   車位與車頭驗「從車頭方向出發」＝往後、拒收 back，不 commit、不 cutover。違規證明：交付時沿用開查詢當下的
+        --   車位與航向＝紅。
+        c14, b14, commits = {}, 2, 0
+        alt = arc(0)
+        drive.nav.detour = alt
+        st = arm(lanes(), 0, semi, 14)
+        tickUntil(function() return #c14 > 0 or not MDAD.Drive.isActive(0) end, 30)
+        local farWait = st and st.detourWait and st.detourWait.site
+        dveh._x = 30
+        tick(4)
+        local eFar = ev[#ev] or {}
+        checkTrue(farWait == "towcorner" and st.route ~= alt and commits == 0 and eFar.why == "back",
+            "(tc-far) 等待中開過分岔點：照目前車位與車頭驗、拒收 back、不 commit（why=" .. tostring(eFar.why)
+            .. " commit=" .. tostring(commits) .. "）")
+        dveh._x = 0
         drive.nav.detour = nil
         api.requestDetour, api.commitDetour = wrapReq, nil
     end
@@ -35456,9 +35554,9 @@ function drive.scenarioDetourPendingFrom()
         local ok1, why1 = Dr.requestDetour(0, true)
         local c1 = calls[1] or {}
         if ver == 14 then
-            v._x = x0 + 0.7
+            v._x, nowMs = x0 + 0.7, nowMs + 300 -- 每次重問隔一幀（同一幀只問主 MOD 一次，1108f）
             local _, why2 = Dr.requestDetour(0, true)
-            v._x = x0 + 1.4
+            v._x, nowMs = x0 + 1.4, nowMs + 300
             local ok3 = Dr.requestDetour(0, true)
             checkTrue(why1 == "pending" and why2 == "pending" and ok3 == true and #calls == 3 and drive.sameArgs(calls)
                     and c1.n == 11 and c1[11] == true and c1[2] == x0 and nav.commitCalls == 1 and s.pendingDetour == true,
