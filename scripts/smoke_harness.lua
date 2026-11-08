@@ -23873,9 +23873,10 @@ function drive.scenarioFilletSlide()
         dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = route.pts[k * 2 - 1], route.pts[k * 2], 0, 0, true
         dveh._engine, dveh._driver = true, dp
         dp._vehicle, dp._dead, dp._local = dveh, false, true
-        setHeading(dveh, hd[k] or hd[n - 1])
+        local last = #route.pts / 2
+        setHeading(dveh, hd[k] or hd[last - 1])
         drive.nav.route, drive.nav.state = route, "ok"
-        drive.nav.tx, drive.nav.ty = route.pts[n * 2 - 1], route.pts[n * 2]
+        drive.nav.tx, drive.nav.ty = route.pts[last * 2 - 1], route.pts[last * 2]
         local ok = MDAD.Drive.start(dp)
         for _ = 1, 400 do -- 長剖面＋弧要分很多幀建
             driveTick(dp, dveh)
@@ -24012,7 +24013,7 @@ function drive.scenarioFilletSlide()
         and st.profile ~= o1 and st.profile.fitFrom == near.fitFrom and st.profile.s[1] == near.s,
         "(slide-near) why=near、新剖面改走 cutover why=rewindow（clear " .. tostring(near and near.clear) .. "、cutover "
         .. tostring(lastCut().why) .. "、fitFrom " .. tostring(st.profile.fitFrom) .. "）")
-    checkTrue(MDAD.Drive.isActive(0) and st.mode == "follow" and st.rewindow == nil and st.rewindowProfile == nil,
+    checkTrue(MDAD.Drive.isActive(0) and st.mode == "follow" and st.rewindow == nil,
         "(slide-near) cutover 後照常跟線、旗標清掉（mode " .. tostring(st.mode) .. "）")
 
     -- (slide-rebuild) 離窗尾不到 CLEAR_M＋SLACK_M（SLACK 設成極大＝一開始就「來不及」）：照車位重建一窗走 cutover
@@ -24022,7 +24023,11 @@ function drive.scenarioFilletSlide()
     restoreTune()
     local rb = last("rebuild")
     local carS = st.lastSNow
+    -- 停等中換窗（1108g 複審）：cutover 換了弧長座標系，車沒真的前進 10 m 就不能清停等預算（記 0 的話新座標的車位≈144 m）
+    st.waitAccumMs = 5000
     for _ = 1, 4 do step() end
+    checkTrue(st.waitAccumMs >= 5000, "(slide-rebuild) 換窗 cutover 不把座標換算當前進、停等預算照留（" .. tostring(st.waitAccumMs) .. " ms）")
+    st.waitAccumMs = 0
     checkTrue(rb ~= nil and count("rebuild") == 1 and count("rewindow") == 1 and count("swap") == 0
         and lastCut().why == "rewindow" and st.profile.fitFrom == rb.fitFrom and st.profile.fitFrom > 1
         and st.profile.s[1] == 0,
@@ -24075,6 +24080,74 @@ function drive.scenarioFilletSlide()
     restoreTune()
     checkTrue(count("discard") == 1 and count("swap") == 0 and st.profile == o2 and st.slide == nil,
         "(slide-discard) 剖面重建後丟掉建到一半的新窗、不換（discard " .. count("discard") .. "）")
+
+    -- 背景候選的交付守門（1108g 複審）：BUDGET 1 讓候選停在建構中，手動建完後直接交給 filletSlideSwap／filletRewindow
+    T.FILLET_SLIDE_BUDGET = 1
+    checkTrue(arm(), "(slide-hold) 啟動")
+    driveTo(1900, function() return count("start") > 0 end)
+    restoreTune()
+    local cand = st.slide
+    checkTrue(cand ~= nil, "(slide-hold) 背景建構中")
+    while not MDADFollower.stepBuild(cand.profile, 1e9) do end
+    st.slide = nil
+    -- (slide-lanewide) 常駐偏移超過 LANE_M（停留鏈會把大 offL 寫進 laneBias）：回看範圍跟著放大，錨點不夠遠＝不無縫換、改走 cutover
+    local oldLane, prof0 = st.fstate.laneBias, st.profile
+    st.fstate.laneBias = 17
+    quiet(function() MDAD.Drive.filletSlideSwap(st, 0, cand, nowMs) end)
+    checkTrue(st.profile == prof0 and st.rewindow ~= nil and st.rewindow.profile == cand.profile and last("near") ~= nil,
+        "(slide-lanewide) 偏移 17m 時錨點在回看範圍內：不換表、改走 cutover")
+    -- (slide-pre) cutover 用預建剖面前再驗：動力待重建、基準 epoch 變、車不在新窗裡都不用
+    local cx, cy = dveh._x, dveh._y
+    checkTrue(MDAD.Drive.rewindowProfile(st, st.route, false, cx, cy) == cand.profile, "(slide-pre) 對照：條件都成立就用預建剖面")
+    st.dynamicsDirty = true
+    checkTrue(MDAD.Drive.rewindowProfile(st, st.route, false, cx, cy) == nil, "(slide-pre) 動力待重建（dynamicsDirty）就不用")
+    st.dynamicsDirty = false
+    st.rewindow.epoch = st.rewindow.epoch - 1
+    checkTrue(MDAD.Drive.rewindowProfile(st, st.route, false, cx, cy) == nil, "(slide-pre) 基準剖面 epoch 變了就不用")
+    st.rewindow.epoch = st.profile.epoch
+    local ff = cand.profile.fitFrom
+    cand.profile.fitFrom = 1e9
+    checkTrue(MDAD.Drive.rewindowProfile(st, st.route, false, cx, cy) == nil, "(slide-pre) 車不在新窗裡就不用")
+    cand.profile.fitFrom = ff
+    -- (slide-dpend) 改道等主 MOD 分幀中不交 cutover（會作廢那次等待）：丟掉候選
+    st.rewindow, st.fstate.laneBias = nil, oldLane
+    st.detourWait = { site = "detour" }
+    quiet(function() MDAD.Drive.filletRewindow(st, 0, cand, 10) end)
+    st.detourWait = nil
+    checkTrue(st.rewindow == nil and evs[#evs].why == "discard", "(slide-dpend) 等改道分幀時不交 cutover、丟掉候選")
+
+    -- (slide-yieldcand) 讓位丟掉建到一半的候選（玩家可能開到它的錨點之前，恢復後照車位重來）
+    T.FILLET_SLIDE_BUDGET = 1
+    checkTrue(arm(), "(slide-yieldcand) 啟動")
+    driveTo(1900, function() return count("start") > 0 end)
+    local hadCand = st.slide ~= nil
+    MDAD.HUD = setmetatable({ manualResumeMs = function() return 2000 end }, { __index = oldHud })
+    dveh._steering = 0.02
+    driveTick(dp, dveh)
+    dveh._steering = 0
+    MDAD.HUD = oldHud
+    restoreTune()
+    checkTrue(hadCand and st.mode == "yield" and st.slide == nil,
+        "(slide-yieldcand) 讓位時丟掉背景換窗的候選（mode " .. tostring(st.mode) .. "）")
+
+    -- (slide-arm) 來回路線：去程往東、回程往西、兩臂相距 5 m；車在回程後段才啟動，窗要從回程開（最近段，不是 20 m 內最早的去程），
+    --   投影在回程臂上（1108g 複審 P1）
+    local rt, rhd, half = { pts = {}, segSurface = {}, segWidth = {}, avoidPenalty = 0 }, {}, 200
+    for i = 1, half do rt.pts[#rt.pts + 1] = (i - 1) * STEP; rt.pts[#rt.pts + 1] = 0 end
+    for i = half, 1, -1 do rt.pts[#rt.pts + 1] = (i - 1) * STEP; rt.pts[#rt.pts + 1] = 5 end
+    for i = 1, #rt.pts / 2 - 1 do
+        rt.segSurface[i], rt.segWidth[i] = "paved", 12
+        rhd[i] = math.atan2(rt.pts[i * 2 + 2] - rt.pts[i * 2], rt.pts[i * 2 + 1] - rt.pts[i * 2 - 1])
+    end
+    rt.len, rt.cost = 2 * STEP * (half - 1) + 5, 2 * STEP * (half - 1) + 5
+    local saveRoute, saveHd = route, hd
+    route, hd = rt, rhd
+    checkTrue(arm(300), "(slide-arm) 啟動：車在回程第 300 點（去程同一處在 5 m 外）")
+    local ah = st.profile.segH[st.fstate.idx or 1] or 0
+    checkTrue(st.profile.fitFrom > half and math.cos(ah) < -0.9,
+        "(slide-arm) 窗從回程開、投影在回程臂（fitFrom " .. tostring(st.profile.fitFrom) .. "、投影段朝向 "
+        .. string.format("%.2f", ah) .. " rad）")
+    route, hd = saveRoute, saveHd
 
     -- (slide-at) 車在長路線後段才啟動（主 MOD 同目標的快取路線）：圓角窗從車後 BACK_M 建，車附近有弧沒有 fallback
     checkTrue(arm(305), "(slide-at) 啟動：車在第 305 點")

@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1108g"
+Drive.REV = "1108h"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -4598,13 +4598,12 @@ function Drive.headingOf(vehicle)
 end
 
 -- 車位到路線折線的最近世界距離（公尺）。讓位恢復判「車還在不在路上」用（1008；距離閘在讓位中不跑）；
--- 點列不足兩點回 0＝不判離路。第二回傳＝車所在的 route 段索引（1108g，圓角窗定位用）：離車 SNAP_MAX_M 內最早的一段，
--- 沒有就是最近段——路線來回經過同一處時取先到的那一臂。
+-- 點列不足兩點回 0＝不判離路。第二回傳＝最近段的 route 段索引（1108g，圓角窗定位用）。不取「SNAP_MAX_M 內最早的一段」：
+-- 來回路線的去程臂在 5 m 外時，窗會從去程開、Follower 的局部優先投影就鎖在去程（1108g 複審）。
 function Drive.routeDist(route, x, y)
     local pts = route and route.pts
     if type(pts) ~= "table" or #pts < 4 or not finite(x) or not finite(y) then return 0 end
-    local best, bi, first = nil, nil, nil
-    local snap2 = TUNE.SNAP_MAX_M * TUNE.SNAP_MAX_M
+    local best, bi = nil, nil
     for i = 1, #pts - 3, 2 do
         local ax, ay = pts[i], pts[i + 1]
         local ex, ey = pts[i + 2] - ax, pts[i + 3] - ay
@@ -4614,9 +4613,8 @@ function Drive.routeDist(route, x, y)
         local dx, dy = x - ax - t * ex, y - ay - t * ey
         local d2 = dx * dx + dy * dy
         if best == nil or d2 < best then best, bi = d2, (i + 1) / 2 end
-        if first == nil and d2 <= snap2 then first = (i + 1) / 2 end
     end
-    return sqrt(best), first or bi
+    return sqrt(best), bi
 end
 
 -- 起步／cutover 的圓角窗起點（1108g）：路線 source 點多於一窗、車又不在路線前段（主 MOD 同目標的快取路線——玩家手動開了一段
@@ -4777,8 +4775,18 @@ function Drive.filletSlideSwap(s, playerNum, sl, now)
     end
     local same = m - 1 -- 從錨點起相同的點數
     local idx = s.fstate.idx or 1
+    if idx <= d then -- 車在錨點之前（1108g 複審：候選建構中讓位倒回去）：候選不含車位，丟掉，下一輪照車位重來
+        Drive.filletSlideNote(s, playerNum, "discard", sl, nil)
+        return
+    end
+    -- 車道回看與前看的範圍跟著目前的常駐偏移放大（停留鏈可把超過 LANE_M 的 offL 寫進 laneBias；1108g 複審）
+    local lane = s.fstate.laneBias or 0
+    if lane < 0 then lane = -lane end
+    if lane < TUNE.FILLET_SLIDE_LANE_M then lane = TUNE.FILLET_SLIDE_LANE_M end
+    local reach = MDADFollower.LANE_BLEND_M * lane
     local clear = same >= 1 and os[d + same] - s.lastSNow or -1
-    if idx <= d or idx + 1 > d + same or clear < TUNE.FILLET_SLIDE_CLEAR_M then
+    if idx + 1 > d + same or clear < TUNE.FILLET_SLIDE_CLEAR_M + reach - TUNE.FILLET_SLIDE_BACK_M
+            or s.lastSNow - os[d + 1] < reach then
         Drive.filletRewindow(s, playerNum, sl, clear)
         return
     end
@@ -4790,12 +4798,31 @@ end
 
 -- 換窗改走 cutover（1108g）：建好的新剖面交給下一次取路，以同一條線 cutover（why=rewindow，見 onPlayerUpdate 的取路段）——
 -- 綁在舊剖面幾何上的狀態（感知快照、證明線、承諾、ban、車道）照 cutover 規則一次重設，不必逐點相同。剖面已 ready，
--- build 只佔一幀。clear＝換窗比對的相同範圍（rebuild 那條路沒比對＝nil）。
+-- build 只佔一幀。s.rewindow＝{profile, base, epoch}：cutover 時基準剖面、epoch 沒變、沒有待重建的動力、車在新窗裡才用 profile，
+-- 否則照車位同步建（讓位中開出窗的 s.rewindow＝{}）。改道等主 MOD 分幀中不交（cutover 會作廢那次等待），等完再重來。
+-- clear＝換窗比對的相同範圍（rebuild 那條路沒比對＝nil）。
 function Drive.filletRewindow(s, playerNum, sl, clear)
-    s.rewindow, s.rewindowProfile = true, sl.profile
+    if s.detourWait then
+        Drive.filletSlideNote(s, playerNum, "discard", sl, clear)
+        return
+    end
+    s.rewindow = { profile = sl.profile, base = sl.base, epoch = sl.epoch }
     s.pendingRouteWhy = s.pendingRouteWhy or "rewindow"
     s.nextRouteMs = 0
     Drive.filletSlideNote(s, playerNum, clear and "near" or "rewindow", sl, clear)
+end
+
+-- cutover 用不用 Drive.filletRewindow 預建的剖面（1108g 複審）：同一條線、基準剖面與 epoch 沒變、沒有待重建的動力（質量、
+-- 材質；cutover 會把 dynamicsDirty 清掉）、車還在新窗裡（最近段不在窗起點之前）才用，否則回 nil＝照車位同步建。
+-- 風格不必比：cutover 後跟線幀照 pendingStyle 重建。
+function Drive.rewindowProfile(s, route, versionChanged, x, y)
+    local rw = s.rewindow
+    local pre = rw and rw.profile
+    if not pre or route ~= s.route or versionChanged or s.reapproach or s.dynamicsDirty
+            or rw.base ~= s.profile or rw.epoch ~= s.profile.epoch then return nil end
+    local _, k = Drive.routeDist(s.profileRoute, x, y)
+    if not k or k < (pre.fitFrom or 1) then return nil end
+    return pre
 end
 
 -- route 事件 phase=slide（console 同一份）：why＝start／swap／near（相同範圍不夠長，改走 cutover）／anchor（車後找不到錨點）／
@@ -15590,6 +15617,9 @@ local function stepFollow(s, vehicle, playerNum, now)
         -- 目前沿線弧長：M4 感知與脫困額度重臂共用（sensor 缺席時脫困仍要用，
         -- 所以重臂判定放在 sensor 塊之外）
         s.lastSNow = s.profile.length - (remaining or 0)
+        -- cutover 換了弧長座標系：停等錨點換算成新座標系裡車現在的弧長（1108g 複審：同線換窗的車位不在 0、等過的改道線
+        -- 從開查詢那點起算，記 0 會把座標換算當成前進 10 m 以上、清掉停等預算）
+        if s.waitAnchorRebase then s.waitAnchorS, s.waitAnchorRebase = s.lastSNow, nil end
         -- 讓位恢復後第一個跟線幀（Follower 已在新車位重新定位）：記這次讓位的結果（1008：讓位期間沒有樣本，
         -- 正式服 0.23.0 片段 GTR (10594,10134) 恢復首幀投影仍是讓位前的游標）
         if s.resumeLogMs ~= nil then
@@ -17926,11 +17956,12 @@ local function onPlayerUpdate(player)
             end
         end
         if stickyWait then Drive.detourEnd(s, playerNum, "drop", "route") end
-        if route ~= s.route or versionChanged or s.reapproach or s.rewindow then
+        -- 換窗走 cutover（Drive.filletRewindow；讓位中開出窗也走這裡）：改道等主 MOD 分幀中先不換，等完再換（換了會作廢那次等待）
+        if route ~= s.route or versionChanged or s.reapproach or s.rewindow and not s.detourWait then
             if s.detourWait then Drive.detourEnd(s, playerNum, "drop", "route") end -- 換線：等的那條是舊線的改道
-            -- 換窗走 cutover（Drive.filletRewindow；讓位中開出窗也走這裡、沒有預建剖面）：同一條線就直接用背景建好的剖面
-            local pre = route == s.route and not versionChanged and not s.reapproach and s.rewindowProfile or nil
-            s.rewindow, s.rewindowProfile = nil, nil
+            -- 同一條線就直接用背景建好的剖面（Drive.rewindowProfile 驗過還能用）；不能用＝下面照車位同步建
+            local pre = Drive.rewindowProfile(s, route, versionChanged, vehicle:getX(), vehicle:getY())
+            s.rewindow = nil
             -- 自動掛回中（s.tow 收在 rh.tow）照舊依掛車改寫：掛回後沿這條線拖著走
             local profileRoute, approachM = Drive.profileRouteOf(route, s.tow or s.rehitch and s.rehitch.tow,
                 s.vehicleProfile,
@@ -18074,8 +18105,8 @@ local function onPlayerUpdate(player)
             s.softGentleS, s.softAnimalAnchorS = nil, nil -- 同上（弧長座標系換了）
             -- 同目標 route cutover **不清停等預算**（階段 2 主體 1：這正是舊制
             -- 40s+ 續命的其中一條逃逸路徑）；但下面 lastSNow 歸零＝換了弧長
-            -- 座標系，錨點必須跟著換算到新座標系（0），否則進度判定失效。
-            s.waitAnchorS = 0
+            -- 座標系，錨點必須跟著換算到新座標系：第一個跟線幀換成車在新剖面的弧長（waitAnchorRebase）
+            s.waitAnchorS, s.waitAnchorRebase = 0, true
             s.cornerLatch = false
             s.blockHitX, s.blockHitY = nil, nil
             s.planSig = -1 -- route 首輪 clear 也必 replan，讓 remapped ban 進 planner
@@ -18265,6 +18296,8 @@ local function onPlayerUpdate(player)
             end
             s.mode = "yield"
             if s.detourWait then Drive.detourEnd(s, playerNum, "drop", "yield") end -- 玩家接手：恢復時從頭判堵、改道
+            -- 背景換窗的候選是照讓位前的車位建的：玩家可能開到它的錨點之前（1108g 複審），恢復後照車位重來
+            s.slide, s.rewindow = nil, s.rewindow and {} or nil
             s.yieldResumeMs = resumeMs
             s.yieldSinceMs = now
             diagEvent(s, playerNum, "takeover", { phase = "yield", key = s.manualKey })
@@ -18311,7 +18344,7 @@ local function onPlayerUpdate(player)
         -- 先以同一條線照車位重建窗（cutover why=rewindow，保留 yield），重建後的恢復幀才放手恢復。
         if farK and farK < (s.profile.fitFrom or 1) then
             if not s.rewindow then
-                s.rewindow, s.nextRouteMs = true, 0
+                s.rewindow, s.nextRouteMs = {}, 0
                 s.pendingRouteWhy = s.pendingRouteWhy or "rewindow"
             end
             return
