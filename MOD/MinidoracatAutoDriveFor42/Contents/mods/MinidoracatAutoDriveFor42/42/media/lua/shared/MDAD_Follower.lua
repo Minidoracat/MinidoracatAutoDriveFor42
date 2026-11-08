@@ -983,7 +983,8 @@ end
 -- 對應 production 的 `if np < 2 then` 早退，不是假想輸入。
 -- window（選填，1108c 長路線圓角滑動窗，Driver 的 Drive.filletSlide）＝{ from＝route 的 source 索引, s0＝那一點的弧長 }：
 -- 剖面從 from 起建、s[1]＝s0，圓角窗從 from 起算（MDADDynamics.buildFilletPath 的 emitFrom）。只收 adaptive 剖面，
--- 不合法或建不出來回 nil, "window"。profile.fitEndIdx＝窗尾頂點的剖面索引（窗涵蓋到終點＝nil）。
+-- 不合法或建不出來回 nil, "window"。profile.fitEndIdx＝窗尾頂點的剖面索引（窗尾或輸出預算降級的第一個大角，較前者；
+-- 窗涵蓋到終點、預算也夠＝nil；MDADDynamics.buildFilletPath 第 6 回傳）。
 function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile, style, window)
     if type(route) ~= "table" then return nil, "badroute" end
     local pts = route.pts

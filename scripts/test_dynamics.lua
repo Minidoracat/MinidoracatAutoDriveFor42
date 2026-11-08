@@ -608,6 +608,31 @@ do
         end
     end
     eq(diff, nil, "(sw-same) 窗內離舊窗尾夠遠的段和整條建逐位元相同")
+    -- (sw-cap) 輸出預算在窗內就把大角降成 fallback（Real USA 實機：256 點窗的弧在第 137 點就停了）：窗尾改指第一個降級的角，
+    --   整條不到 256 點（不開窗）也一樣有窗尾；換窗的相同範圍與前看距離都以它為準（1108i）
+    local perArc = (full.n - n) / full.fn -- 每個弧多出的輸出點
+    local savedMax = D.FILLET_OUTPUT_MAX
+    D.FILLET_OUTPUT_MAX = D.FILLET_SOURCE_MAX + math.floor(perArc * 12.5)
+    local capped = build(nil)
+    local shortN = 200
+    local sp, ss2, sw2 = {}, {}, {}
+    for i = 1, shortN * 2 do sp[i] = zp[i] end
+    for i = 1, shortN - 1 do ss2[i], sw2[i] = zs[i], zw[i] end
+    local so = { p = {}, k = {} }
+    D.FILLET_OUTPUT_MAX = 100 + math.floor(perArc * 6.5)
+    so.n, so.fn, so.fb, so.valid, so.reason, so.endOut = D.buildFilletPath(sp, ss2, sw2, 1, 3, so.p, {}, {}, so.k, {}, {}, {})
+    D.FILLET_OUTPUT_MAX = savedMax
+    local function srcAt(o, pts, idx) -- 輸出點 idx 是第幾個 source 點（座標逐位元相等）
+        for k = 1, #pts / 2 do
+            if idx and o.p[idx * 2 - 1] == pts[k * 2 - 1] and o.p[idx * 2] == pts[k * 2] then return k end
+        end
+    end
+    local c = srcAt(capped, zp, capped.endOut)
+    check(c ~= nil and c % 10 == 0 and c < D.FILLET_SOURCE_MAX and capped.fn == c / 10 - 1,
+        "(sw-cap) 窗尾＝第一個被預算降級的角（第 " .. tostring(c) .. " 點、之前 " .. tostring(capped.fn) .. " 個弧）")
+    local sc = srcAt(so, sp, so.endOut)
+    check(so.reason == nil and sc ~= nil and sc % 10 == 0 and so.fn == sc / 10 - 1,
+        "(sw-cap) 不開窗的短路線預算不夠也有窗尾（第 " .. tostring(sc) .. " 點、" .. tostring(so.fn) .. " 個弧）")
     for _, bad in ipairs({ 0, n, 1.5, 0 / 0, math.huge, "5" }) do
         local o = build(bad)
         eq(tostring(o.valid) .. "/" .. tostring(o.reason), "false/window",

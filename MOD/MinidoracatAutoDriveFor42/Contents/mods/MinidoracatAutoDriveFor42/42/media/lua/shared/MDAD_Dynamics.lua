@@ -975,7 +975,9 @@ end
 -- emitFrom（選填，source 索引，預設 1）＝滑動窗起點（1108c）：只輸出 emitFrom 起的路線，只在
 -- [emitFrom, emitFrom+FILLET_SOURCE_MAX-1] 內找圓角。臂鏈從 emitFrom 往回最近的折點（沒有＝路線起點）算起，
 -- 和從路線起點整條建時同一個 from，所以窗內離窗尾夠遠的角，弧和整條建的逐位元相同（Driver 換窗靠這點保住弧長座標）；
--- emitFrom=1 與舊制完全相同。第 6 回傳＝窗尾頂點（第一個不找圓角的 source 點）在輸出中的索引；窗涵蓋到終點＝nil。
+-- emitFrom=1 與舊制完全相同。第 6 回傳＝窗尾頂點在輸出中的索引：第一個不找圓角的 source 點，或輸出預算把第一個大角降成
+-- fallback 的那個角（較前者；1108i，Real USA 實機 256 點窗的弧在第 137 點就因預算停了，之後 95 個角是 fallback）；
+-- 窗涵蓋到終點、預算也夠＝nil。預算降級之後的角和換窗後的新窗不同，Driver 換窗的相同範圍只到這裡。
 function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
         outPts, outSurface, outWidth, outKind, outSourceA, outSourceB, outRadius, emitFrom)
     if type(srcPts) ~= "table" or type(srcSurface) ~= "table" or type(srcWidth) ~= "table"
@@ -1116,7 +1118,7 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
     -- 前段弧照建、band 證明照常成立；後段折點由 curveV 折角限速與 sweep 管。
     -- 小折角的弧（1002u）排在大角之後：第一輪只算大角、小角先記 1 點；第二輪才用剩下的預算，
     -- 塞不下的小角退回 LINE（不標 fallback）——小弧再多也不會把後面的大角擠成爬行折點。
-    local predicted = 2
+    local predicted, capAt = 2, nil -- capAt＝第一個因預算降成 fallback 的大角（窗尾，見函式頭註解）
     for i = first + 1, n - 1 do
         local need = 1
         local theta = thetaA[i]
@@ -1127,6 +1129,7 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
                 fallbackCorner[i] = true
                 fallbackN = fallbackN + 1
                 need = 1
+                capAt = capAt or i
             end
         end
         predicted = predicted + need
@@ -1186,11 +1189,12 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
     end
     local covered = -1
     local count, lastSrc, endOut = 0, first, nil
+    local endAt = capAt or reason and fitN or nil -- 窗尾（函式頭註解）
     count = appendPoint(outPts, outSurface, outWidth, outKind, outSourceA, outSourceB,
         outRadius, count, srcPts[first * 2 - 1], srcPts[first * 2], 0, 0, 0, 0, 0, 0)
     for i = first + 1, n - 1 do
-        -- 窗尾頂點不找圓角，前一角的出臂也止於它，所以它一定照原樣輸出
-        if reason and i == fitN then endOut = count + 1 end
+        -- 窗尾頂點不找圓角（預算降級的角也是 fallback、照原樣輸出），前一角的出臂也止於它，所以它一定照原樣輸出
+        if i == endAt then endOut = count + 1 end
         local bx, by = srcPts[i * 2 - 1], srcPts[i * 2]
         local radius = radii[i]
         if radius then
