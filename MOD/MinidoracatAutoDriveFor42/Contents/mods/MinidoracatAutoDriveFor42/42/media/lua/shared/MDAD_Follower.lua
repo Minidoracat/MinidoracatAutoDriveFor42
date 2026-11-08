@@ -1037,7 +1037,7 @@ function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile, style, 
     -- Canonicalize consecutive duplicate points before any fillet math. The
     -- original route remains untouched and source-map entries retain raw segments.
     local buildPts, buildSurface, buildWidth, rawSourceMap = {}, {}, {}, {}
-    local fromRaw, emitFrom, fitEndIdx = nil, 1, nil
+    local fromRaw, emitFrom, fitEndIdx, srcEndIdx = nil, 1, nil, nil
     if window ~= nil then
         fromRaw = type(window) == "table" and window.from or nil
         if not isFinite(fromRaw) or fromRaw < 1 or fromRaw > sourceN - 1 or fromRaw % 1 ~= 0
@@ -1073,7 +1073,7 @@ function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile, style, 
         and isFinite(vehicleProfile.maxSpeed) and vehicleProfile.maxSpeed > 0
     if window ~= nil and (not filletAdaptive or emitFrom > buildN - 1) then return nil, "window" end
     if filletAdaptive then
-        n, filletN, filletFallbackN, filletBandValid, filletReason, fitEndIdx =
+        n, filletN, filletFallbackN, filletBandValid, filletReason, fitEndIdx, srcEndIdx =
             MDADDynamics.buildFilletPath(
                 buildPts, buildSurface, buildWidth, vehicleProfile.halfW, vehicleProfile.rMin,
                 pathPts, segSurface, segWidth, segKind, segSourceA, segSourceB, filletRadius, emitFrom)
@@ -1139,7 +1139,8 @@ function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile, style, 
         filletBandValid = filletBandValid == true,
         s0 = window and window.s0 or 0, -- s[1]（滑動窗剖面＝起點在舊剖面的弧長，見 begin 註解）
         fitFrom = fromRaw or 1, -- 圓角窗起點的 route source 索引
-        fitEndIdx = fitEndIdx, -- 窗尾頂點的剖面索引；nil＝窗涵蓋到終點
+        fitEndIdx = fitEndIdx, -- 窗尾頂點的剖面索引（source 窗尾或預算窗尾，較前者）；nil＝窗涵蓋到終點
+        srcEndIdx = srcEndIdx, -- source 窗尾頂點的剖面索引；nil＝沒開窗（Driver 在預算窗尾太短時改用它）
         wheelbase = filletAdaptive and vehicleProfile.wheelbase or 0,
         rMin = filletAdaptive and vehicleProfile.rMin or HAIRPIN_RMIN_DEFAULT,
         halfW = filletAdaptive and vehicleProfile.halfW or 0,

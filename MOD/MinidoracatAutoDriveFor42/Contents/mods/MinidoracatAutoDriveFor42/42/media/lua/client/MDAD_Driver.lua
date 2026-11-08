@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1108j"
+Drive.REV = "1108k"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -4690,6 +4690,13 @@ function Drive.filletSlide(s, playerNum, now)
     -- 改道等主 MOD 分幀中不換（換窗改走 cutover 會作廢那次等待）
     if p.ready ~= true or not endIdx or s.tow or s.summon or s.rewindow or s.detourWait or now < (s.slideRetryMs or 0)
             or not finite(s.lastSNow) then return end
+    -- 預算窗尾（密彎把輸出預算用完）短於 MIN_WIN_M：錨點與相同範圍的條件湊不出來，照它觸發只會停在 MIN_WIN 那道門、整趟
+    -- 不再換窗（1108j 審查）。改用 source 窗尾觸發（1108h 語意：開過預算窗尾後會有一段 fallback，換窗多半走 near→cutover）。
+    -- 剖面幾何在動力重建中不變，每份剖面算一次（同 slideNeed；每幀多讀 p.s 會吃掉 late-index 的讀取預算）
+    if p.slideEnd == nil then
+        p.slideEnd = p.srcEndIdx and p.s[endIdx] - p.s[1] < TUNE.FILLET_SLIDE_MIN_WIN_M and p.srcEndIdx or endIdx
+    end
+    endIdx = p.slideEnd
     local ahead = p.s[endIdx] - s.lastSNow
     if ahead > TUNE.FILLET_SLIDE_AHEAD_M then return end
     -- 窗外沒有要補弧的角＝換了也不會多出弧，不付 begin 的單幀成本。要補的角＝fallback 折點，或 FILLET_SMALL_RAD 以上的小角

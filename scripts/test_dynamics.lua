@@ -577,7 +577,7 @@ do
     end
     local function build(from)
         local o = { p = {}, k = {}, r = {} }
-        o.n, o.fn, o.fb, o.valid, o.reason, o.endOut = D.buildFilletPath(zp, zs, zw, 1, 3,
+        o.n, o.fn, o.fb, o.valid, o.reason, o.endOut, o.srcOut = D.buildFilletPath(zp, zs, zw, 1, 3,
             o.p, {}, {}, o.k, {}, {}, o.r, from)
         return o
     end
@@ -620,7 +620,7 @@ do
     for i = 1, shortN - 1 do ss2[i], sw2[i] = zs[i], zw[i] end
     local so = { p = {}, k = {} }
     D.FILLET_OUTPUT_MAX = 100 + math.floor(perArc * 6.5)
-    so.n, so.fn, so.fb, so.valid, so.reason, so.endOut = D.buildFilletPath(sp, ss2, sw2, 1, 3, so.p, {}, {}, so.k, {}, {}, {})
+    so.n, so.fn, so.fb, so.valid, so.reason, so.endOut, so.srcOut = D.buildFilletPath(sp, ss2, sw2, 1, 3, so.p, {}, {}, so.k, {}, {}, {})
     D.FILLET_OUTPUT_MAX = savedMax
     local function srcAt(o, pts, idx) -- 輸出點 idx 是第幾個 source 點（座標逐位元相等）
         for k = 1, #pts / 2 do
@@ -630,9 +630,12 @@ do
     local c = srcAt(capped, zp, capped.endOut)
     check(c ~= nil and c % 10 == 0 and c < D.FILLET_SOURCE_MAX and capped.fn == c / 10 - 1,
         "(sw-cap) 窗尾＝第一個被預算降級的角（第 " .. tostring(c) .. " 點、之前 " .. tostring(capped.fn) .. " 個弧）")
+    eq(srcAt(capped, zp, capped.srcOut), D.FILLET_SOURCE_MAX, "(sw-cap) 第 7 回傳＝source 窗尾（第 256 點），給 Driver 在預算窗尾太短時用")
+    eq(full.srcOut, full.endOut, "(sw-cap) 預算夠時兩個窗尾是同一點")
     local sc = srcAt(so, sp, so.endOut)
     check(so.reason == nil and sc ~= nil and sc % 10 == 0 and so.fn == sc / 10 - 1,
         "(sw-cap) 不開窗的短路線預算不夠也有窗尾（第 " .. tostring(sc) .. " 點、" .. tostring(so.fn) .. " 個弧）")
+    eq(so.srcOut, nil, "(sw-cap) 不開窗的短路線沒有 source 窗尾")
     -- (sw-capsame) 小角（15°）與大角（30°）交錯、預算在窗內用完：從錨點（第 125 點）起建的新窗，到舊窗窗尾的大角入口前
     --   和整條建逐位元相同——預算照順序分，錨點後每個角分到的只會更多（1108i；大角先分時，剩給小角的要看整窗的大角，
     --   錨點後的小角分得不同，Real USA 實機相同範圍在錨點後 300 m 就斷）
@@ -660,12 +663,19 @@ do
     for i = 1, mold.n do if mold.p[i * 2 - 1] == mp[249] and mold.p[i * 2] == mp[250] then mj = i break end end
     local same = 0
     while mj and mj + same <= mold.n and 1 + same <= mnew.n and mold.p[(mj + same) * 2 - 1] == mnew.p[same * 2 + 1]
-            and mold.p[(mj + same) * 2] == mnew.p[same * 2 + 2] and mold.k[mj + same] == mnew.k[same + 1] do
+            and mold.p[(mj + same) * 2] == mnew.p[same * 2 + 2] and mold.k[mj + same] == mnew.k[same + 1]
+            and mold.r[mj + same] == mnew.r[same + 1] do
         same = same + 1
     end
-    check(mEnd ~= nil and mEnd > 135 and mEnd < D.FILLET_SOURCE_MAX and mj ~= nil and mj + same >= mold.endOut - 6,
-        "(sw-capsame) 錨點起到舊窗尾（第 " .. tostring(mEnd) .. " 點）前逐點相同（同到舊輸出第 " .. tostring(mj and mj + same - 1)
-        .. " 點、窗尾在 " .. tostring(mold.endOut) .. "）")
+    -- 分家點（舊輸出第一個不同的點）到窗尾頂點之間只能是窗尾入臂的直段：新窗替窗尾的角建弧，入彎切點吞掉臂上的共線點，
+    --   舊窗最後一個弧必須在分家點之前結束
+    local armOnly = mj ~= nil and mj + same <= mold.endOut
+    for i = (mj or 1) + same, (mold.endOut or 0) - 1 do
+        if mold.k[i] == D.SEG_ARC then armOnly = false end
+    end
+    check(mEnd ~= nil and mEnd > 135 and mEnd < D.FILLET_SOURCE_MAX and armOnly,
+        "(sw-capsame) 錨點起到舊窗尾（第 " .. tostring(mEnd) .. " 點）入臂前逐點相同（座標、段種類、半徑；同到舊輸出第 "
+        .. tostring(mj and mj + same - 1) .. " 點、窗尾在 " .. tostring(mold.endOut) .. "）")
     for _, bad in ipairs({ 0, n, 1.5, 0 / 0, math.huge, "5" }) do
         local o = build(bad)
         eq(tostring(o.valid) .. "/" .. tostring(o.reason), "false/window",

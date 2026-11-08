@@ -24199,6 +24199,28 @@ function drive.scenarioFilletSlide()
         "(slide-yield) 放手後恢復、6 秒內沒交還（mode " .. tostring(st.mode) .. "）")
     MDAD.HUD = oldHud
 
+    -- (slide-capshort) 輸出預算在 source 窗內就用完、預算窗尾（約第 100 點、800 m）短於 MIN_WIN_M，但 source 窗（2 km）夠長：
+    --   改用 source 窗尾觸發，照樣會換窗（1108j 審查：照預算窗尾判 MIN_WIN 會整趟停在第一窗、之後全是 fallback）
+    do
+        local D = MDADDynamics
+        local tp, tk = {}, {}
+        local tn, tfn = D.buildFilletPath(route.pts, route.segSurface, route.segWidth, 1, 3, tp, {}, {}, tk, {}, {}, {})
+        local savedOut = D.FILLET_OUTPUT_MAX
+        D.FILLET_OUTPUT_MAX = D.FILLET_SOURCE_MAX + math.floor((tn - n) / tfn * 10.5)
+        local armed = arm()
+        local p0 = st and st.profile
+        local effLen = p0 and p0.fitEndIdx and p0.s[p0.fitEndIdx] - p0.s[1] or -1
+        local srcLen = p0 and p0.srcEndIdx and p0.s[p0.srcEndIdx] - p0.s[1] or -1
+        driveTo(1900, function() return count("swap") + count("near") + count("rewindow") > 0 end)
+        D.FILLET_OUTPUT_MAX = savedOut
+        checkTrue(armed and effLen > 0 and effLen < T.FILLET_SLIDE_MIN_WIN_M and srcLen >= T.FILLET_SLIDE_MIN_WIN_M,
+            "(slide-capshort) 預算窗尾 " .. string.format("%.0f", effLen) .. " m 短於 MIN_WIN、source 窗尾 "
+            .. string.format("%.0f", srcLen) .. " m")
+        checkTrue(count("start") + count("rebuild") >= 1 and count("swap") + count("near") + count("rewindow") >= 1,
+            "(slide-capshort) 照 source 窗尾觸發、開到 1.9 km 前有換窗（start " .. count("start") .. "、rebuild "
+            .. count("rebuild") .. "、swap " .. count("swap") .. "、near " .. count("near") .. "）")
+    end
+
     -- (slide-straight) 窗外沒有要補弧的角（直路）：不換窗、不付 begin 的單幀成本
     route, hd = build("flat")
     checkTrue(arm(), "(slide-straight) 啟動：406 點直路，窗只到第 256 點")
