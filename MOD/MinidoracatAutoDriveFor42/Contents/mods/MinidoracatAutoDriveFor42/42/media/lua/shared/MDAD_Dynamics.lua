@@ -65,12 +65,13 @@ D.FILLET_MAX_RAD = 100 * PI / 180
 D.FILLET_SEGMENT_SHARE = 0.45  -- two adjacent corners therefore consume <=90%
 D.ROAD_EDGE_MARGIN = 0.4
 D.FILLET_ANGLE_MAX_RAD = 2 * PI / 180
--- 容量：近處最多前 256 個 source 點參與圓角展開，這一窗最多輸出 2048 點。
+-- 容量：一窗最多 256 個 source 點參與圓角展開，這一窗最多輸出 2048 點。
 -- 0927 正式服長路線定罪：超過 source 上限不能整條放棄圓角；原始尾段逐點保留，
 -- 角度合格者標 fallback。尾段每點只加一點、不裁遠端；建構仍 O(輸出)。
 -- 1009 128／1024→256／2048：0.25.0 建線 21/77 次帶 filletReason=capacity，12.8 km 路線第 140／141 點的 48° S 錯位
 -- 成了無弧頂點、7.2m 卡車 12 km/h 擦路邊物。同路線實機（單機）：圓角 35→70、退化頂點 26→1；單幀建構 47→72 ms、
 -- 剖面點 1054→2043、背景重建 37–52→93–99 ms（分幀，最長幀 37.7→43.2 ms、幀時 p50 不變）。短路線不受影響。
+-- 1108c 起窗會跟著車滑（buildFilletPath 的 emitFrom、Driver 的 Drive.filletSlide）：Real USA 這類長路線不再只有前 256 點有弧。
 D.FILLET_SOURCE_MAX = 256
 D.FILLET_OUTPUT_MAX = 2048
 D.FILLET_ARC_MAX = 64
@@ -971,8 +972,12 @@ end
 -- corners retain the source vertex as SEG_FALLBACK. Adjacent 45% shares consume <=90%.
 -- Small corners (FILLET_SMALL_RAD..FILLET_MIN_RAD) also try an arc, cut-capped; if none
 -- fits they stay SEG_LINE (never fallback) and only use budget left after large corners.
+-- emitFrom（選填，source 索引，預設 1）＝滑動窗起點（1108c）：只輸出 emitFrom 起的路線，只在
+-- [emitFrom, emitFrom+FILLET_SOURCE_MAX-1] 內找圓角。臂鏈從 emitFrom 往回最近的折點（沒有＝路線起點）算起，
+-- 和從路線起點整條建時同一個 from，所以窗內離窗尾夠遠的角，弧和整條建的逐位元相同（Driver 換窗靠這點保住弧長座標）；
+-- emitFrom=1 與舊制完全相同。第 6 回傳＝窗尾頂點（第一個不找圓角的 source 點）在輸出中的索引；窗涵蓋到終點＝nil。
 function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
-        outPts, outSurface, outWidth, outKind, outSourceA, outSourceB, outRadius)
+        outPts, outSurface, outWidth, outKind, outSourceA, outSourceB, outRadius, emitFrom)
     if type(srcPts) ~= "table" or type(srcSurface) ~= "table" or type(srcWidth) ~= "table"
             or type(outPts) ~= "table" or type(outSurface) ~= "table"
             or type(outWidth) ~= "table" or type(outKind) ~= "table"
@@ -984,11 +989,13 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
             or #srcSurface ~= n - 1 or #srcWidth ~= n - 1 then
         return 0, 0, 0, false, "capacity"
     end
+    local first = emitFrom or 1
+    if not D.finite(first) or first < 1 or first > n - 1 or first % 1 ~= 0 then return 0, 0, 0, false, "window" end
     local fitN, outputMax = n, D.FILLET_OUTPUT_MAX
     local reason
-    if n > D.FILLET_SOURCE_MAX then
-        fitN = D.FILLET_SOURCE_MAX
-        outputMax = outputMax + n - D.FILLET_SOURCE_MAX
+    if n - first + 1 > D.FILLET_SOURCE_MAX then
+        fitN = first + D.FILLET_SOURCE_MAX - 1
+        outputMax = outputMax + (n - first + 1) - D.FILLET_SOURCE_MAX
         reason = "capacity"
     end
     -- 臂長預算（2026-09-01 定罪「過彎太慢／減速太早」）：tangent 消耗上限
@@ -1007,16 +1014,22 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
     local armIn, armOut, armFrom, armTo = {}, {}, {}, {}
     do
         local isBend = {}
-        for i = 2, fitN - 1 do
+        local function bendAt(i)
             local ix, iy, ox, oy, il, ol = cornerDirs(
                 srcPts[i * 2 - 3], srcPts[i * 2 - 2],
                 srcPts[i * 2 - 1], srcPts[i * 2],
                 srcPts[i * 2 + 1], srcPts[i * 2 + 2])
-            isBend[i] = il <= EPS or ol <= EPS
+            return il <= EPS or ol <= EPS
                 or cornerTheta(ix, iy, ox, oy) > D.FILLET_ANGLE_MAX_RAD
         end
-        local acc, from = 0, 1
-        for i = 2, fitN - 1 do
+        -- 滑動窗：入臂從窗首往回最近的折點（沒有＝路線起點）累積，和整條建時同一個 from、同一個 acc 起算點。
+        local armLo = first
+        while armLo > 1 and not bendAt(armLo) do armLo = armLo - 1 end
+        for i = armLo + 1, fitN - 1 do
+            isBend[i] = bendAt(i)
+        end
+        local acc, from = 0, armLo
+        for i = armLo + 1, fitN - 1 do
             local dx = srcPts[i * 2 - 1] - srcPts[i * 2 - 3]
             local dy = srcPts[i * 2] - srcPts[i * 2 - 2]
             acc = acc + sqrt(dx * dx + dy * dy)
@@ -1025,7 +1038,7 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
         end
         local to = fitN
         acc = 0
-        for i = fitN - 1, 2, -1 do
+        for i = fitN - 1, first + 1, -1 do
             local dx = srcPts[i * 2 + 1] - srcPts[i * 2 - 1]
             local dy = srcPts[i * 2 + 2] - srcPts[i * 2]
             acc = acc + sqrt(dx * dx + dy * dy)
@@ -1035,7 +1048,7 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
     end
     local radii, signA, tanS, fallbackCorner, thetaA = {}, {}, {}, {}, {}
     local filletN, fallbackN = 0, 0
-    for i = 2, n - 1 do
+    for i = first + 1, n - 1 do
         local ax, ay = srcPts[i * 2 - 3], srcPts[i * 2 - 2]
         local bx, by = srcPts[i * 2 - 1], srcPts[i * 2]
         local cx, cy = srcPts[i * 2 + 1], srcPts[i * 2 + 2]
@@ -1104,7 +1117,7 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
     -- 小折角的弧（1002u）排在大角之後：第一輪只算大角、小角先記 1 點；第二輪才用剩下的預算，
     -- 塞不下的小角退回 LINE（不標 fallback）——小弧再多也不會把後面的大角擠成爬行折點。
     local predicted = 2
-    for i = 2, n - 1 do
+    for i = first + 1, n - 1 do
         local need = 1
         local theta = thetaA[i]
         if theta and theta >= D.FILLET_MIN_RAD then
@@ -1118,7 +1131,7 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
         end
         predicted = predicted + need
     end
-    for i = 2, n - 1 do
+    for i = first + 1, n - 1 do
         local theta = thetaA[i]
         if theta and radii[i] and theta < D.FILLET_MIN_RAD then
             local extra = arcSteps(radii[i] * theta, theta)
@@ -1156,8 +1169,9 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
     -- 該點壓到 12 km/h）。以 source 弧長判定：取樣點落在前一弧出口 tangent 之前
     -- 或下一弧入口 tangent 之後就跳過。tangent ≤ 0.45×共線臂、臂在 >2° 折點歸零，
     -- 所以被吞的只可能是共線取樣點，真折點（含 fallback 角）永不被跳過。
-    local cum = { 0 }
-    for i = 2, n do
+    local cum = {}
+    cum[first] = 0
+    for i = first + 1, n do
         local dx = srcPts[i * 2 - 1] - srcPts[i * 2 - 3]
         local dy = srcPts[i * 2] - srcPts[i * 2 - 2]
         cum[i] = cum[i - 1] + sqrt(dx * dx + dy * dy)
@@ -1165,16 +1179,18 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
     local nextArc = {}
     do
         local k
-        for i = n - 1, 2, -1 do
+        for i = n - 1, first + 1, -1 do
             if radii[i] then k = i end
             nextArc[i] = k
         end
     end
     local covered = -1
-    local count, lastSrc = 0, 1
+    local count, lastSrc, endOut = 0, first, nil
     count = appendPoint(outPts, outSurface, outWidth, outKind, outSourceA, outSourceB,
-        outRadius, count, srcPts[1], srcPts[2], 0, 0, 0, 0, 0, 0)
-    for i = 2, n - 1 do
+        outRadius, count, srcPts[first * 2 - 1], srcPts[first * 2], 0, 0, 0, 0, 0, 0)
+    for i = first + 1, n - 1 do
+        -- 窗尾頂點不找圓角，前一角的出臂也止於它，所以它一定照原樣輸出
+        if reason and i == fitN then endOut = count + 1 end
         local bx, by = srcPts[i * 2 - 1], srcPts[i * 2]
         local radius = radii[i]
         if radius then
@@ -1227,7 +1243,7 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
         srcSurface[n - 1], srcWidth[n - 1],
         fallbackCorner[n - 1] and D.SEG_FALLBACK or D.SEG_LINE,
         lastSrc, n - 1, 0)
-    return count, filletN, fallbackN, true, reason
+    return count, filletN, fallbackN, true, reason, endOut
 end
 
 -- 召喚的縱向推力（Driver Drive.summonPush 換算成外力；summon-design §1.4）：車上沒有駕駛時 CarController 不跑，定速與強制煞車

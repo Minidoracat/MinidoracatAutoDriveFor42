@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1108b"
+Drive.REV = "1108c"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -89,6 +89,18 @@ local BUILD_BUDGET = 128       -- 每幀限速剖面建構點數上限（啟動�
 -- 是 1.6 秒空白。1024/幀＝典型路線 1-2 幀、1024 點上限 ≤5 幀。啟動／換路線仍用
 -- BUILD_BUDGET（車靜止或剛 HOLD，攤幀只影響起步延遲）。
 TUNE.REBUILD_BUDGET = 1024
+-- 長路線圓角滑動窗（1108c，Drive.filletSlide）：剖面只在 MDADDynamics.FILLET_SOURCE_MAX 個 source 點的窗內有圓角。
+-- 窗尾在車前 AHEAD_M 內、且新窗起點比舊窗起點前進至少 MIN_SRC 個 source 點時，從車後 ≥ BACK_M 的錨點起在背景建新剖面
+-- （每幀 BUDGET ops）；新舊剖面從錨點起逐點相同的距離要比車前 CLEAR_M 長才換上，不夠就 RETRY_MS 後再試。
+-- AHEAD_M 要大於從 120 km/h 收油到折點限速的距離（約 1.5 km），換窗前車就不會為舊窗尾的折點減速。
+-- CLEAR_M：感知掃描（Drive.updatePerception 夾在 PERCEPTION_HARD_MAX_M）、承諾線、證明線都綁在車前這段的幾何上，
+-- 換表時這段必須逐點相同；再大只會讓取樣密的路線（約 2.5m 一點以下）換不成窗。
+TUNE.FILLET_SLIDE_AHEAD_M = 2000
+TUNE.FILLET_SLIDE_MIN_SRC = 96
+TUNE.FILLET_SLIDE_BACK_M = 40
+TUNE.FILLET_SLIDE_CLEAR_M = MDADDynamics.PERCEPTION_HARD_MAX_M + 60
+TUNE.FILLET_SLIDE_BUDGET = 512
+TUNE.FILLET_SLIDE_RETRY_MS = 5000
 TUNE.MAX_SESSIONS = 4          -- 分割畫面本機玩家槽上限（getSpecificPlayer 0-3）
 -- 讓位後恢復自駕的等待時間改由 ESC／MiniMap「手動介入後」選項決定（HUD.manualResumeMs；
 -- 0＝介入即關閉，2026-09-06 使用者裁定預設不自動恢復）。恢復語音只在讓位持續夠久
@@ -4350,6 +4362,120 @@ function Drive.profileRouteOf(route, tow, vp, vx, vy, approach, heading)
     end
     if approach then return Drive.approachRoute(clean, vx, vy, heading, approach == "turn") end
     return clean, 0
+end
+
+-- 長路線圓角滑動窗（1108c；Real USA 這類長路線，TUNE.FILLET_SLIDE_*）：剖面只在一窗 source 點內有圓角，窗外的角是
+-- fallback 折點、照折點限速，而主 MOD 同目標的路線行駛中不重算，所以不換窗的話後段永遠沒有圓角。車接近窗尾時，
+-- 從車後一個舊剖面照原樣輸出的 source 頂點（兩側都是 LINE 段）起，在背景建新剖面（begin 的 window：s[1]＝錨點在舊剖面的弧長），
+-- 建好後逐點比對；從錨點起座標、弧長、段種類都相同的範圍超過車前 TUNE.FILLET_SLIDE_CLEAR_M 才換上。
+-- 弧長不變、索引平移：感知快照（hardS 是路線弧長）、承諾線、ban、證明線的弧長都照用，Sensor 改綁新表不重掃，
+-- 只有投影游標 fstate.idx 要減掉平移量。拖車改寫線（MDADTrailer.shape 自己排圓弧）與召喚不換窗。
+function Drive.filletSlide(s, playerNum, now)
+    local p, sl = s.profile, s.slide
+    if sl then
+        if sl.base ~= p or sl.route ~= s.profileRoute or sl.epoch ~= p.epoch or p.ready ~= true or s.tow then
+            s.slide = nil -- cutover、動力或風格重建、掛上拖車：新剖面的基準已經不是現在這份
+            Drive.filletSlideNote(s, playerNum, "discard", sl, nil)
+            return
+        end
+        if not MDADFollower.stepBuild(sl.profile, TUNE.FILLET_SLIDE_BUDGET) then return end
+        s.slide = nil
+        Drive.filletSlideSwap(s, playerNum, sl, now)
+        return
+    end
+    local endIdx = p.fitEndIdx
+    if p.ready ~= true or not endIdx or s.tow or s.summon or now < (s.slideRetryMs or 0)
+            or not finite(s.lastSNow) or p.s[endIdx] - s.lastSNow > TUNE.FILLET_SLIDE_AHEAD_M then return end
+    -- 窗外沒有 fallback 折點（直路、只剩小角）＝換了也不會多出弧，不付 begin 的單幀成本。剖面幾何在動力重建中不變，算一次記在剖面上。
+    local pts, kind, LINE = s.profileRoute.pts, p.segKind, MDADDynamics.SEG_LINE
+    if p.slideNeed == nil then
+        local FB = MDADDynamics.SEG_FALLBACK
+        p.slideNeed = false
+        for i = endIdx, p.n - 1 do
+            if kind[i] == FB then p.slideNeed = true break end
+        end
+    end
+    if not p.slideNeed then return end
+    -- 錨點：車後 ≥ BACK_M、兩側都是 LINE 段、座標就是 route 的 source 頂點（舊剖面照原樣輸出的點）
+    local j = s.fstate.idx or 1
+    if j > p.n - 1 then j = p.n - 1 end
+    local backS = s.lastSNow - TUNE.FILLET_SLIDE_BACK_M
+    while j > 1 and p.s[j] > backS do j = j - 1 end
+    local r
+    while j > 1 do
+        if kind[j - 1] == LINE and kind[j] == LINE then
+            local cand = p.segSourceB[j - 1] + 1
+            if pts[cand * 2 - 1] == p.x[j] and pts[cand * 2] == p.y[j] then r = cand break end
+        end
+        j = j - 1
+    end
+    if not r or r - p.fitFrom < TUNE.FILLET_SLIDE_MIN_SRC then
+        s.slideRetryMs = now + TUNE.FILLET_SLIDE_RETRY_MS
+        if not r then Drive.filletSlideNote(s, playerNum, "anchor", nil, nil) end
+        return
+    end
+    local t0 = getTimestampMs()
+    local np = MDADFollower.begin(s.profileRoute, s.maxSpeed, s.navVersion, s.vehicleProfile,
+        MDADFollower.STYLES[p.styleName], { from = r, s0 = p.s[j] })
+    if not np then
+        s.slideRetryMs = now + TUNE.FILLET_SLIDE_RETRY_MS
+        Drive.filletSlideNote(s, playerNum, "begin", nil, nil)
+        return
+    end
+    MDADVehicleProfile.configureFollower(np, s.vehicleProfile, s.runtimeMass, s.rain)
+    local caps = p.segCaps -- 舊剖面上次材質重建套的上限（動力重建段落記）；新剖面同樣套，學到的抓地不會被換窗抹掉
+    if caps then
+        MDADFollower.capSegmentLimits(np, caps[1], caps[2], caps[3], caps[4])
+        np.segCaps = caps -- 下一次換窗從這份剖面起建，同一組上限要接著傳
+    end
+    s.slide = { base = p, route = s.profileRoute, epoch = p.epoch, profile = np, j = j, r = r,
+        t0 = t0, bms = getTimestampMs() - t0 }
+    Drive.filletSlideNote(s, playerNum, "start", s.slide, nil)
+end
+
+-- 新剖面建好：從錨點起逐點比對（座標、弧長，段的種類與半徑），相同範圍夠長才換上；不夠＝RETRY_MS 後從新的錨點重來。
+function Drive.filletSlideSwap(s, playerNum, sl, now)
+    local o, np = s.profile, sl.profile
+    local d = sl.j - 1
+    local on, nn = o.n, np.n
+    local ox, oy, os, nx, ny, ns = o.x, o.y, o.s, np.x, np.y, np.s
+    local ok, nk, orad, nrad = o.segKind, np.segKind, o.filletRadius, np.filletRadius
+    local m = 1
+    while m <= nn and m + d <= on and ox[m + d] == nx[m] and oy[m + d] == ny[m] and os[m + d] == ns[m]
+            and (m == nn or m + d == on or (ok[m + d] == nk[m] and orad[m + d] == nrad[m])) do
+        m = m + 1
+    end
+    local same = m - 1 -- 從錨點起相同的點數
+    local idx = s.fstate.idx or 1
+    local clear = same >= 1 and os[d + same] - s.lastSNow or -1
+    if idx <= d or idx + 1 > d + same or clear < TUNE.FILLET_SLIDE_CLEAR_M then
+        s.slideRetryMs = now + TUNE.FILLET_SLIDE_RETRY_MS
+        Drive.filletSlideNote(s, playerNum, "near", sl, clear)
+        return
+    end
+    s.profile = np
+    if s.sensor and s.sensor.profile == o then s.sensor.profile = np end
+    s.fstate.idx = idx - d
+    Drive.filletSlideNote(s, playerNum, "swap", sl, clear)
+end
+
+-- route 事件 phase=slide（console 同一份）：why＝start／swap／near（相同範圍不夠長）／anchor（車後找不到錨點）／begin（建不出來）／discard。
+function Drive.filletSlideNote(s, playerNum, why, sl, clear)
+    local np = sl and sl.profile
+    local fitEnd = np and np.ready == true and np.fitEndIdx and np.s[np.fitEndIdx] or nil
+    local from, shift = sl and sl.r or nil, sl and sl.j - 1 or nil
+    local pts, bms, wms = np and np.n or nil, sl and sl.bms or nil, sl and getTimestampMs() - sl.t0 or nil
+    diagEvent(s, playerNum, "route", {
+        phase = "slide", why = why, rs = s.lastSNow, s = sl and sl.base.s[sl.j] or nil,
+        fitFrom = from, fitEnd = fitEnd, shift = shift, clear = clear, pts = pts, ms = bms, wms = wms,
+        filletN = np and np.filletN or nil, filletFallbackN = np and np.filletFallbackN or nil,
+    })
+    if getDebug() then
+        print(LOG .. "pn=" .. playerNum .. " fillet slide " .. why .. " rs=" .. tostring(s.lastSNow)
+            .. " from=" .. tostring(from) .. " fitEnd=" .. tostring(fitEnd) .. " shift=" .. tostring(shift)
+            .. " clear=" .. tostring(clear) .. " pts=" .. tostring(pts) .. " ms=" .. tostring(bms)
+            .. " wms=" .. tostring(wms))
+    end
 end
 
 -- 可見終點弧長：掃描終點與未載入格的近者。繞行 cap、全速證明與可視距離 cap
@@ -17622,7 +17748,10 @@ local function onPlayerUpdate(player)
         if material then
             MDADFollower.capSegmentLimits(
                 s.profile, s.safeAccel, s.safeBrake, s.safeLat, s.safeCoast)
+            -- 換窗（Drive.filletSlide）的新剖面要套同一組上限：configureFollower 之後這組上限就是這份剖面的全部收緊
+            s.profile.segCaps = { s.safeAccel, s.safeBrake, s.safeLat, s.safeCoast }
         else
+            s.profile.segCaps = nil
             local idx = s.fstate.idx or 1
             idx = idx - idx % 1
             if idx < 1 then idx = 1 elseif idx >= s.profile.n then idx = s.profile.n - 1 end
@@ -17658,6 +17787,8 @@ local function onPlayerUpdate(player)
             pts = s.profile.n, kind = s.profile.styleName,
         })
     end
+    -- 長路線圓角滑動窗：背景建下一窗、建好換上（只在跟線中；cutover／重建中的剖面由 Drive.filletSlide 自己丟掉）
+    if s.mode == "follow" and (s.slide or s.profile.fitEndIdx) then Drive.filletSlide(s, playerNum, now) end
 
     -- （detour 塊已移除；理由見 DETOUR 註解＝telemetry s030/s033）
 

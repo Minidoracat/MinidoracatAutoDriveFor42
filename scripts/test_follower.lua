@@ -1839,6 +1839,57 @@ do
     checkTrue(partial.n <= 200, "輸出超限：profile 點數不超過上限")
 end
 
+-- 1108c 長路線圓角滑動窗（begin 的 window，Driver 的 Drive.filletSlide）：新剖面從錨點起建、s[1]＝錨點在舊剖面的弧長，
+-- 重疊段座標與弧長逐位元相同（換窗只平移索引）。違規證明：geometryStep 的 s[1] 不吃 s0＝(win-s)／(win-same) 紅；
+-- fitEndIdx 沒帶出＝(win-end) 紅。
+scenario("1108c 滑動窗：begin 的 window——s[1]＝s0、窗尾索引、重疊段與舊剖面逐位元相同、不合法回 window")
+do
+    local vp = { valid = true, geometryValid = true, halfW = 1, rMin = 3,
+        wheelbase = 2.5, delta0Safe = 0.7, deltaVSafe = 0.25, maxSpeed = 120 }
+    -- 鋸齒路（同 test_dynamics 1108c）：2m 取樣、第 10、20…400 點折 30°、路寬 12，共 406 點
+    local route = { pts = { 0, 0 }, segSurface = {}, segWidth = {} }
+    local h, n = 15 * math.pi / 180, MDADDynamics.FILLET_SOURCE_MAX + 150
+    for k = 1, n - 1 do
+        if k % 10 == 0 then h = -h end
+        route.pts[k * 2 + 1] = route.pts[k * 2 - 1] + 2 * math.cos(h)
+        route.pts[k * 2 + 2] = route.pts[k * 2] + 2 * math.sin(h)
+        route.segSurface[k], route.segWidth[k] = "paved", 12
+    end
+    local function idxOf(p, raw)  -- 照原樣輸出的 source 點在剖面裡的索引
+        for i = 1, p.n do
+            if p.x[i] == route.pts[raw * 2 - 1] and p.y[i] == route.pts[raw * 2] then return i end
+        end
+    end
+    local old = F.begin(route, 120, 4, vp)
+    while not F.stepBuild(old, 4096) do end
+    checkEq(old.filletReason .. "/" .. old.fitFrom .. "/" .. old.s[1], "capacity/1/0", "(win) 不帶 window：舊制 capacity、fitFrom 1、s[1] 0")
+    checkEq(old.fitEndIdx, idxOf(old, MDADDynamics.FILLET_SOURCE_MAX), "(win-end) fitEndIdx 指窗尾頂點（第 256 點）")
+    local j = idxOf(old, 125)
+    local new = F.begin(route, 120, 4, vp, nil, { from = 125, s0 = old.s[j] })
+    while not F.stepBuild(new, 4096) do end
+    checkEq(new.s[1], old.s[j], "(win-s) s[1]＝錨點在舊剖面的弧長")
+    checkEq(new.fitFrom, 125, "(win) fitFrom＝窗首 source 索引")
+    checkEq(new.segSourceA[1], 125, "(win) 剖面第一段的 source 段＝第 125 段（band 證明找得到路寬）")
+    checkEq(new.fitEndIdx, idxOf(new, 125 + MDADDynamics.FILLET_SOURCE_MAX - 1), "(win-end) 窗尾＝第 380 點")
+    checkEq(new.x[new.n] .. "," .. new.y[new.n], route.pts[n * 2 - 1] .. "," .. route.pts[n * 2], "(win) 終點不截斷")
+    checkTrue(new.filletFallbackN == 3 and old.filletFallbackN == 15,
+        "(win) 窗往前滑，舊窗外 15 個 fallback 角剩 3 個（" .. old.filletFallbackN .. "→" .. new.filletFallbackN .. "）")
+    -- 從錨點到舊窗尾前最後一個角之前的直段中點（第 245 點）：座標與弧長逐位元相同
+    local stop, diff = idxOf(old, 245), nil
+    for m = 1, stop - j + 1 do
+        local f = j + m - 1
+        if new.x[m] ~= old.x[f] or new.y[m] ~= old.y[f] or new.s[m] ~= old.s[f] then diff = diff or m end
+    end
+    checkNil(diff, "(win-same) 重疊段座標與弧長逐位元相同")
+    for _, w in ipairs({ { from = 0, s0 = 0 }, { from = n, s0 = 0 }, { from = 1.5, s0 = 0 }, { from = 125 },
+            { from = 125, s0 = 0 / 0 }, "x" }) do
+        local p, why = F.begin(route, 120, 4, vp, nil, w)
+        checkEq(tostring(p) .. "/" .. tostring(why), "nil/window", "(win-bad) 不合法 window 回 nil, window")
+    end
+    local p2, why2 = F.begin(route, 120, 4, nil, nil, { from = 125, s0 = 10 })
+    checkEq(tostring(p2) .. "/" .. tostring(why2), "nil/window", "(win-bad) 非 adaptive 剖面不收 window")
+end
+
 -- =====================================================================
 -- 彎內側車道偏置餘裕（2026-09-02 s013：F350 右轉切進路口內側圍籬）
 -- =====================================================================

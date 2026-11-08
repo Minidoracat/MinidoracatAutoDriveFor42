@@ -727,7 +727,7 @@ local function geometryStep(p, i)
     p.curveV[i] = p.maxSpeedMs
     p.kappa[i] = 0
     if i == 1 then
-        p.s[1] = 0
+        p.s[1] = p.s0 or 0
         return
     end
     local segH, segLen = p.segH, p.segLen
@@ -980,7 +980,10 @@ end
 --   所有點重合（路徑長 0，投影／曲率／前視全部沒有意義）。
 -- 點數 1（#pts == 2）是 nav 真的會回的情況（A* 起錨後續節點全與前一點重合），
 -- 對應 production 的 `if np < 2 then` 早退，不是假想輸入。
-function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile, style)
+-- window（選填，1108c 長路線圓角滑動窗，Driver 的 Drive.filletSlide）＝{ from＝route 的 source 索引, s0＝那一點的弧長 }：
+-- 剖面從 from 起建、s[1]＝s0，圓角窗從 from 起算（MDADDynamics.buildFilletPath 的 emitFrom）。只收 adaptive 剖面，
+-- 不合法或建不出來回 nil, "window"。profile.fitEndIdx＝窗尾頂點的剖面索引（窗涵蓋到終點＝nil）。
+function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile, style, window)
     if type(route) ~= "table" then return nil, "badroute" end
     local pts = route.pts
     if type(pts) ~= "table" then return nil, "badroute" end
@@ -1032,6 +1035,12 @@ function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile, style)
     -- Canonicalize consecutive duplicate points before any fillet math. The
     -- original route remains untouched and source-map entries retain raw segments.
     local buildPts, buildSurface, buildWidth, rawSourceMap = {}, {}, {}, {}
+    local fromRaw, emitFrom, fitEndIdx = nil, 1, nil
+    if window ~= nil then
+        fromRaw = type(window) == "table" and window.from or nil
+        if not isFinite(fromRaw) or fromRaw < 1 or fromRaw > sourceN - 1 or fromRaw % 1 ~= 0
+                or not isFinite(window.s0) then return nil, "window" end
+    end
     do
         buildPts[1], buildPts[2] = pts[1], pts[2]
         local cn, lastX, lastY = 1, pts[1], pts[2]
@@ -1044,6 +1053,7 @@ function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile, style)
                 buildPts[cn * 2 - 1], buildPts[cn * 2] = nx, ny
                 lastX, lastY = nx, ny
             end
+            if i + 1 == fromRaw then emitFrom = cn end -- 重複點併到前一個建構點
         end
     end
     local buildN = #buildPts / 2
@@ -1059,12 +1069,14 @@ function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile, style)
         and isFinite(vehicleProfile.wheelbase) and vehicleProfile.wheelbase > 0
         and isFinite(vehicleProfile.delta0Safe) and isFinite(vehicleProfile.deltaVSafe)
         and isFinite(vehicleProfile.maxSpeed) and vehicleProfile.maxSpeed > 0
+    if window ~= nil and (not filletAdaptive or emitFrom > buildN - 1) then return nil, "window" end
     if filletAdaptive then
-        n, filletN, filletFallbackN, filletBandValid, filletReason =
+        n, filletN, filletFallbackN, filletBandValid, filletReason, fitEndIdx =
             MDADDynamics.buildFilletPath(
                 buildPts, buildSurface, buildWidth, vehicleProfile.halfW, vehicleProfile.rMin,
-                pathPts, segSurface, segWidth, segKind, segSourceA, segSourceB, filletRadius)
+                pathPts, segSurface, segWidth, segKind, segSourceA, segSourceB, filletRadius, emitFrom)
     end
+    if window ~= nil and n < 2 then return nil, "window" end
     -- 拖車改寫弧（Trailer.shape 的 segArcR，raw 段索引）：改寫線遠超圓角 source 容量，弧點照抄成 LINE＝Follower 看不到曲率、
     -- 沒有弧段前饋／切線追蹤／弧上即時帽，純追跡切弦內切（正式服 0.23.0 拖車轉角 ld 0.5–1.55m、curveKappa 恆 0）。
     -- 照抄的段 source 兩端同一 raw 段：標回 SEG_ARC、半徑＝規劃半徑。towArcR（剖面段索引→R，稀疏）只給 telemetry 分辨。
@@ -1123,6 +1135,9 @@ function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile, style)
         filletFallbackN = filletFallbackN,
         filletReason = filletReason,
         filletBandValid = filletBandValid == true,
+        s0 = window and window.s0 or 0, -- s[1]（滑動窗剖面＝起點在舊剖面的弧長，見 begin 註解）
+        fitFrom = fromRaw or 1, -- 圓角窗起點的 route source 索引
+        fitEndIdx = fitEndIdx, -- 窗尾頂點的剖面索引；nil＝窗涵蓋到終點
         wheelbase = filletAdaptive and vehicleProfile.wheelbase or 0,
         rMin = filletAdaptive and vehicleProfile.rMin or HAIRPIN_RMIN_DEFAULT,
         halfW = filletAdaptive and vehicleProfile.halfW or 0,

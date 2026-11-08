@@ -96,6 +96,8 @@ local EK = {
     -- route cutover：原始路線快照 src／srcW／srcS（離線重跑 fillet／band 用）。
     "filletN", "filletFallbackN", "filletBandValid", "filletReason",
     "src", "srcW", "srcS", "approach",
+    -- route slide（1108c 長路線圓角滑動窗，Drive.filletSlide）：新窗起點的 route source 索引、新窗尾弧長、剖面索引平移量
+    "fitFrom", "fitEnd", "shift",
     -- dyn（2026-09-04 issue #1）：dirty 來源與基準／線上值、重建耗時——舊 telemetry
     -- 只能從 confidence 歸零反推重建次數（下限），修後要能直接數。
     "cap", "safe", "ms",

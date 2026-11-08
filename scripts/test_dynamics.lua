@@ -563,6 +563,58 @@ do
     check(pairOk, "臂窗 nearestRawSeg：sourceA 與起點全窗最近段一致")
 end
 
+-- 1108c 長路線圓角滑動窗（buildFilletPath 的 emitFrom）：Driver 換窗靠「從錨點起和整條建的輸出逐位元相同」保住弧長座標。
+-- 違規證明：入臂從 emitFrom 起算、不往回找折點＝(sw-same) 紅；窗尾索引沒指到窗尾頂點＝(sw-end) 紅。
+scenario("1108c 滑動窗：emitFrom 起建、窗內弧與整條建逐位元相同、窗尾索引、不合法 emitFrom")
+do
+    -- 鋸齒路：2m 取樣，每 10 點（第 10、20…400 點）左右折 30°，路寬 12；共 406 點＞256
+    local zp, zs, zw = { 0, 0 }, {}, {}
+    local h, n = 15 * math.pi / 180, D.FILLET_SOURCE_MAX + 150
+    for k = 1, n - 1 do
+        if k % 10 == 0 then h = -h end
+        zp[k * 2 + 1], zp[k * 2 + 2] = zp[k * 2 - 1] + 2 * math.cos(h), zp[k * 2] + 2 * math.sin(h)
+        zs[k], zw[k] = 1, 12
+    end
+    local function build(from)
+        local o = { p = {}, k = {}, r = {} }
+        o.n, o.fn, o.fb, o.valid, o.reason, o.endOut = D.buildFilletPath(zp, zs, zw, 1, 3,
+            o.p, {}, {}, o.k, {}, {}, o.r, from)
+        return o
+    end
+    local function at(o, src)  -- source 點在輸出裡的索引（照原樣輸出的點座標逐位元相等）
+        for i = 1, o.n do
+            if o.p[i * 2 - 1] == zp[src * 2 - 1] and o.p[i * 2] == zp[src * 2] then return i end
+        end
+    end
+    local full, one, win = build(nil), build(1), build(125)
+    eq(full.reason, "capacity", "(sw-full) 整條建超過 256 點＝capacity")
+    eq(full.fn .. "/" .. full.fb, "25/15", "(sw-full) 窗內 25 個弧、窗外 15 個角 fallback")
+    local same1 = one.n == full.n and one.endOut == full.endOut
+    for i = 1, full.n * 2 do if one.p[i] ~= full.p[i] then same1 = false end end
+    check(same1, "(sw-one) emitFrom=1 與不帶參數逐位元相同")
+    eq(full.endOut, at(full, D.FILLET_SOURCE_MAX), "(sw-end) 第 6 回傳＝窗尾頂點（第 256 點）的輸出索引")
+    eq(win.endOut, at(win, 125 + D.FILLET_SOURCE_MAX - 1), "(sw-end) 窗從 125 起：窗尾是第 380 點")
+    eq(win.p[1] .. "," .. win.p[2], zp[249] .. "," .. zp[250], "(sw-start) 輸出從第 125 點起")
+    eq(win.fn .. "/" .. win.fb, "25/3", "(sw-win) 窗內 130–370 的 25 個角有弧，380 起 3 個 fallback")
+    -- 從第 125 點到舊窗尾前最後一個角（250，出臂被窗尾截短）之前的直段中點（第 245 點）：
+    -- 點、段種類、半徑逐位元相同（直段只有中點離兩角都超過切線長，照原樣輸出）
+    local j, stop, diff = at(full, 125), at(full, 245), nil
+    check(j ~= nil and stop ~= nil, "(sw-same) 兩個比對點都照原樣輸出")
+    for m = 1, (stop or 0) - (j or 0) + 1 do
+        local f = j + m - 1
+        if win.p[m * 2 - 1] ~= full.p[f * 2 - 1] or win.p[m * 2] ~= full.p[f * 2]
+                or (f < stop and (win.k[m] ~= full.k[f] or win.r[m] ~= full.r[f])) then
+            diff = diff or m
+        end
+    end
+    eq(diff, nil, "(sw-same) 窗內離舊窗尾夠遠的段和整條建逐位元相同")
+    for _, bad in ipairs({ 0, n, 1.5, 0 / 0, math.huge, "5" }) do
+        local o = build(bad)
+        eq(tostring(o.valid) .. "/" .. tostring(o.reason), "false/window",
+            "(sw-bad) emitFrom=" .. tostring(bad) .. " 回 window")
+    end
+end
+
 -- 1002u：10–20° 小折角也建弧（證明線不再把 15° 量成外接圓 R≈4m），但①切角（弧中點離頂點）≤ FILLET_SMALL_CUT_M，
 -- ②建不出來維持 LINE、不標 fallback（不爬行），③輸出預算先給大角、小弧只用剩下的。
 -- 違規證明：拿掉切角上限＝(1) 紅；小角建不出標 fallback＝(3) 紅；預算單趟照順序＝(4) 大角被擠成 fallback 紅。

@@ -23420,6 +23420,219 @@ function drive.scenarioExitKink()
 end
 drive.scenarioExitKink()
 
+-- (slide) 1108c 長路線圓角滑動窗（Drive.filletSlide；Real USA 長路線後段的角全是 fallback 折點）：剖面只在 FILLET_SOURCE_MAX
+--   個 source 點的窗內有圓角，車接近窗尾時從車後錨點在背景建下一窗，從錨點起相同的範圍夠長才換上。
+--   fixture：406 點鋸齒路（2m 取樣、每 10 點折 30°、路寬 12），車沿中心線逐點前進（30 km/h）。
+--   (slide)         start→swap：新剖面 s[1]＝錨點弧長、投影弧長連續、Sensor 綁新表沒重設、舊窗外的 fallback 角變少、事件欄位；
+--                   第二次換窗後窗涵蓋終點（fitEndIdx＝nil、零 fallback），之後不再換。
+--   (slide-near)    相同範圍不夠 CLEAR_M：why=near、不換、RETRY_MS 內不重建、之後照常重試。
+--   (slide-skip)    拖車、召喚不開始（對照：同一位置沒有拖車就開始）。
+--   (slide-discard) 背景建構中剖面重建（epoch 變）：why=discard、不換。
+--   違規證明（temp/vp_1108c.py）：換上不平移 fstate.idx＝(slide) 弧長連續紅；Sensor 不改綁＝(slide) gen 紅；
+--   不比 epoch＝(slide-discard) 紅；拿掉 tow／summon 守門＝(slide-skip) 紅。
+function drive.scenarioFilletSlide()
+    scenario("長路線圓角滑動窗：車接近窗尾時背景建下一窗，相同範圍夠長才換上（弧長不變、索引平移、Sensor 不重設）")
+    local T = MDAD.Drive.debugTune()
+    local oldSandbox, oldVeh, oldGet = SandboxVars, dveh, getSpecificPlayer
+    local oldApi = MinidoracatMiniMapAPI.navApiVersion
+    local oldRoute, oldTx, oldTy, oldState = drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
+    local oldWorld, oldGeo = drive.world, drive.vehGeo
+    local oldEvent, oldSample = MDADDiagnostics.event, MDADDiagnostics.sample
+    local oldClear, oldBudget = T.FILLET_SLIDE_CLEAR_M, T.FILLET_SLIDE_BUDGET
+    local wasMs = drive.frameMs(20)
+    local evs = {}
+    MDADDiagnostics.sample = function() return true end
+    MDADDiagnostics.event = function(_, name, a)
+        if name == "route" and type(a) == "table" and a.phase == "slide" then evs[#evs + 1] = a end
+    end
+    getSpecificPlayer = function(n) if n == 0 then return dp end end
+    MinidoracatMiniMapAPI.navApiVersion = 5
+    dveh = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }),
+        engineRunning = true, mass = 1600, speed = 0, maxSpeed = 100,
+        bodyW = 1.6, bodyL = 4.2, comX = 0, comZ = 0, profileFull = true,
+        enginePower = 3000, brakingForce = 100, wheelFriction = 1.5, tireFriction = 1.5 })
+    local route = { pts = { 0, 0 }, segSurface = {}, segWidth = {}, avoidPenalty = 0 }
+    local hd, h, n = {}, 15 * math.pi / 180, MDADDynamics.FILLET_SOURCE_MAX + 150
+    for k = 1, n - 1 do
+        if k % 10 == 0 then h = -h end
+        hd[k] = h
+        route.pts[k * 2 + 1] = route.pts[k * 2 - 1] + 2 * math.cos(h)
+        route.pts[k * 2 + 2] = route.pts[k * 2] + 2 * math.sin(h)
+        route.segSurface[k], route.segWidth[k] = "paved", 12
+    end
+    route.len, route.cost = 2 * (n - 1), 2 * (n - 1)
+    drive.fillWorld(-10, math.ceil(route.pts[n * 2 - 1]) + 10, -14, 14)
+    local st
+    local function arm(clearM)
+        MDAD.Drive.stop(0, nil)
+        T.FILLET_SLIDE_CLEAR_M = clearM
+        setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 60, RightLaneBias = 0 })
+        dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = 0, 0, 0, 0, true
+        dveh._engine, dveh._driver = true, dp
+        dp._vehicle, dp._dead, dp._local = dveh, false, true
+        setHeading(dveh, hd[1])
+        drive.nav.route, drive.nav.state = route, "ok"
+        drive.nav.tx, drive.nav.ty = route.pts[n * 2 - 1], route.pts[n * 2]
+        local ok = MDAD.Drive.start(dp)
+        for _ = 1, 300 do -- 406 點＋弧的剖面要分很多幀建
+            driveTick(dp, dveh)
+            st = MDAD.Drive.debugSession(0)
+            if st == nil or st.mode == "follow" then break end
+        end
+        if st then st.diag = true end
+        evs = {}
+        return ok and st ~= nil and st.mode == "follow" and st.profile.fitEndIdx ~= nil
+    end
+    local function at(k) -- 車擺到第 k 點、車頭朝第 k 段，跑一幀（2m／240ms＝30 km/h）
+        dveh._x, dveh._y, dveh._speed, dveh._stopped = route.pts[k * 2 - 1], route.pts[k * 2], 30, false
+        setHeading(dveh, hd[k] or hd[n - 1])
+        nowMs = nowMs + 240
+        driveTick(dp, dveh)
+    end
+    local function count(why)
+        local c = 0
+        for i = 1, #evs do if evs[i].why == why then c = c + 1 end end
+        return c
+    end
+    local function last(why) for i = #evs, 1, -1 do if evs[i].why == why then return evs[i] end end end
+
+    -- (slide) 正案：開到第 380 點，途中換兩次窗。第一次換窗後強制一次材質重建（safeLat 減半＝上限一定壓得到）：
+    -- 第二次換窗的新剖面要帶同一組上限（segCaps）、各段側向上限不高於它。
+    checkTrue(arm(100), "(slide) 啟動：406 點鋸齒路，剖面只在前 256 點有圓角（fitEndIdx 有值）")
+    local o0 = st.profile
+    local fb0 = o0.filletFallbackN
+    local swaps, jumpMax, firstSwap, senKept, capsOk = 0, 0, nil, true, nil
+    for k = 2, 380 do
+        local prev, rs, sen = st.profile, st.lastSNow, st.sensor
+        local ready0, stamp0 = sen.ready, sen.stamp
+        at(k)
+        if not MDAD.Drive.isActive(0) then break end
+        if st.profile ~= prev then
+            swaps = swaps + 1
+            local jump = math.abs(st.lastSNow - rs - 2)
+            if jump > jumpMax then jumpMax = jump end
+            -- Sensor.reset＝ready 歸 false、stamp 歸 0（換窗那一幀不可能重掃完一輪）
+            if not (ready0 == true and sen.ready == true and sen.stamp >= stamp0 and sen.profile == st.profile) then senKept = false end
+            firstSwap = firstSwap or { old = prev, new = st.profile, k = k, ev = last("swap") }
+            if swaps == 1 then
+                st.safeLat = st.safeLat * 0.5
+                st.dynamicsDirty, st.dynamicsCapMaterial = true, true
+            elseif swaps == 2 then
+                local caps, lat = prev.segCaps, 0
+                for i = 1, st.profile.n - 1 do if st.profile.segLat[i] > lat then lat = st.profile.segLat[i] end end
+                capsOk = caps ~= nil and st.profile.segCaps == caps and lat <= caps[3] + 1e-9
+            end
+        end
+    end
+    checkTrue(MDAD.Drive.isActive(0), "(slide) 全程沒交還（mode=" .. tostring(st and st.mode) .. "）")
+    checkTrue(swaps == 2 and count("swap") == 2, "(slide) 換了兩次窗（start " .. count("start") .. "、swap " .. count("swap")
+        .. "、near " .. count("near") .. "、anchor " .. count("anchor") .. "、discard " .. count("discard") .. "）")
+    checkTrue(jumpMax < 0.5, "(slide) 換窗那一幀投影弧長照樣只前進一步（偏差 " .. string.format("%.3f", jumpMax) .. "m）")
+    checkTrue(senKept, "(slide) Sensor 改綁新剖面、沒重設（換窗前後都 ready、stamp 沒歸零）")
+    checkTrue(capsOk == true, "(slide-caps) 換窗前做過材質重建：新剖面帶同一組上限、各段側向上限不高於它")
+    local f = firstSwap or { ev = {} }
+    local fe = f.ev or {}
+    checkTrue(f.new ~= nil and fe.shift ~= nil and f.new.s[1] == f.old.s[fe.shift + 1] and f.new.fitFrom == fe.fitFrom,
+        "(slide) 新剖面 s[1]＝錨點在舊剖面的弧長、fitFrom＝錨點（shift " .. tostring(fe.shift) .. "、from " .. tostring(fe.fitFrom) .. "）")
+    checkTrue(type(fe.clear) == "number" and fe.clear >= 100 and fe.pts == (f.new and f.new.n) and type(fe.ms) == "number"
+        and type(fe.fitEnd) == "number" and type(fe.s) == "number",
+        "(slide) swap 事件帶 clear／pts／ms／fitEnd／s（clear " .. tostring(fe.clear) .. "、pts " .. tostring(fe.pts) .. "）")
+    checkTrue(f.new ~= nil and f.new.filletFallbackN < fb0,
+        "(slide) 第一次換窗後舊窗外的 fallback 角變少（" .. fb0 .. "→" .. tostring(f.new and f.new.filletFallbackN) .. "）")
+    checkTrue(st.profile.fitEndIdx == nil and st.profile.filletFallbackN == 0,
+        "(slide) 第二次換窗後窗涵蓋終點、零 fallback（fallback " .. st.profile.filletFallbackN .. "）")
+    local logged = false
+    for i = 1, #drive.logs do if drive.logs[i]:find("fillet slide swap", 1, true) then logged = true end end
+    checkTrue(logged, "(slide) console 印同一筆 fillet slide swap")
+
+    -- (slide-near) 相同範圍不夠 CLEAR_M：不換、RETRY_MS 內不重建、之後照常重試
+    checkTrue(arm(5000), "(slide-near) 啟動")
+    local o1, nearK = st.profile, nil
+    for k = 2, 200 do
+        at(k)
+        if count("near") > 0 then nearK = nearK or k end
+        if nearK and k >= nearK + 3 then break end
+    end
+    local near, retryAt = last("near"), st.slideRetryMs
+    checkTrue(near ~= nil and st.profile == o1 and count("swap") == 0 and near.clear < 5000,
+        "(slide-near) why=near、剖面不換（clear " .. tostring(near and near.clear) .. "）")
+    local starts = count("start")
+    local k = (nearK or 200) + 4
+    local retrySet = retryAt ~= nil and retryAt > nowMs
+    while nowMs + 240 < (retryAt or 0) and k < 380 do at(k); k = k + 1 end
+    checkTrue(retrySet and count("start") == starts, "(slide-near) RETRY_MS 內不重建（near 設了之後的重試時間）")
+    for _ = 1, 3 do at(k); k = k + 1 end
+    checkEq(count("start"), starts + 1, "(slide-near) RETRY_MS 後照常重試")
+
+    -- (slide-skip) 拖車、召喚不開始；對照組：同一位置沒有拖車就開始
+    local function try(field)
+        st.slide, st.slideRetryMs = nil, 0
+        if field then st[field] = {} end
+        local saved = print
+        print = recordPrint -- 幀外直接呼叫：console 行照樣收進 drive.logs，不噴到測試輸出
+        MDAD.Drive.filletSlide(st, 0, nowMs)
+        print = saved
+        if field then st[field] = nil end
+        local began = st.slide ~= nil
+        st.slide = nil
+        return began
+    end
+    checkTrue(try(nil), "(slide-skip) 對照：沒有拖車、召喚就開始換窗")
+    checkTrue(not try("tow") and not try("summon"), "(slide-skip) 拖車、召喚不開始換窗")
+    -- (slide-caps) 舊剖面帶材質上限（壓在各段現值之下）：新剖面一開始建就套上同一組
+    local latMin = math.huge
+    for i = 1, st.profile.n - 1 do if st.profile.segLat[i] < latMin then latMin = st.profile.segLat[i] end end
+    local caps = { st.safeAccel, st.safeBrake, latMin * 0.5, st.safeCoast }
+    st.profile.segCaps, st.slide, st.slideRetryMs = caps, nil, 0
+    local saved = print
+    print = recordPrint
+    MDAD.Drive.filletSlide(st, 0, nowMs)
+    print = saved
+    local np, latMax = st.slide and st.slide.profile, 0
+    for i = 1, np and np.n - 1 or 0 do if np.segLat[i] > latMax then latMax = np.segLat[i] end end
+    checkTrue(np ~= nil and np.segCaps == caps and latMax > 0 and latMax <= caps[3] + 1e-9,
+        "(slide-caps) 新剖面套舊剖面的材質上限（側向 ≤ " .. string.format("%.3f", caps[3]) .. "、實得 " .. string.format("%.3f", latMax) .. "）")
+    st.profile.segCaps, st.slide = nil, nil
+
+    -- (slide-discard) 背景建構中剖面重建（epoch 變）：丟掉、不換
+    T.FILLET_SLIDE_BUDGET = 1
+    checkTrue(arm(100), "(slide-discard) 啟動")
+    local o2 = st.profile
+    k = 2
+    while count("start") == 0 and k < 200 do at(k); k = k + 1 end
+    checkTrue(st.slide ~= nil, "(slide-discard) 背景建構中")
+    st.dynamicsDirty = true
+    for _ = 1, 30 do
+        at(k); k = k + 1
+        if count("discard") > 0 then break end
+    end
+    checkTrue(count("discard") == 1 and count("swap") == 0 and st.profile == o2 and st.slide == nil,
+        "(slide-discard) 剖面重建後丟掉建到一半的新窗、不換（discard " .. count("discard") .. "）")
+
+    -- (slide-straight) 窗外沒有 fallback 折點（直路）：不換窗、不付 begin 的單幀成本
+    local flat, flatHd = { pts = {}, segSurface = {}, segWidth = {}, avoidPenalty = 0 }, {}
+    for i = 1, n do
+        flat.pts[i * 2 - 1], flat.pts[i * 2] = (i - 1) * 2, 0
+        if i < n then flat.segSurface[i], flat.segWidth[i], flatHd[i] = "paved", 12, 0 end
+    end
+    flat.len, flat.cost = 2 * (n - 1), 2 * (n - 1)
+    route, hd = flat, flatHd
+    checkTrue(arm(100), "(slide-straight) 啟動：406 點直路，窗只到第 256 點")
+    for i = 2, 300 do at(i) end
+    checkTrue(count("start") == 0 and st.profile.slideNeed == false,
+        "(slide-straight) 窗外沒有 fallback 折點：不換窗（start " .. count("start") .. "、slideNeed " .. tostring(st.profile.slideNeed) .. "）")
+
+    MDAD.Drive.stop(0, nil)
+    T.FILLET_SLIDE_CLEAR_M, T.FILLET_SLIDE_BUDGET = oldClear, oldBudget
+    MDADDiagnostics.event, MDADDiagnostics.sample = oldEvent, oldSample
+    drive.frameMs(wasMs)
+    drive.world, drive.vehGeo = oldWorld, oldGeo
+    MinidoracatMiniMapAPI.navApiVersion = oldApi
+    drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
+    SandboxVars, dveh, getSpecificPlayer = oldSandbox, oldVeh, oldGet
+end
+drive.scenarioFilletSlide()
+
 -- (ps) 0928i rc8 0086／0089：群已貼到車前（進入段不到 1m），舒適需求要的側移全因 steep 拒收，但車就這樣
 --   直走在物理檔也過得去（兩側各 0.1m）。舊制 blocked 一秒鎖輪；現制沿車的實際橫向直走、物理檔承諾。
 --   違規證明：拿掉直走候選＝(ps) blocked 紅。
