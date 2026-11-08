@@ -41,7 +41,7 @@
     "UI_MinidoracatAutoDrive_HUDOptions": "自動駕駛 HUD",
     "UI_MinidoracatAutoDrive_HUDOptionsDescription": "顯示於原版車輛儀表上方。主題與佈局變更會立即套用。",
     "UI_MinidoracatAutoDrive_Options": "Minidoracat 自動駕駛",
-    "UI_MinidoracatAutoDrive_WhatsNew": "繞過路邊樹木、回到車道時不再突然急煞；出彎和在彎裡貼著障礙物時，也比較不會擦到路邊。",
+    "UI_MinidoracatAutoDrive_WhatsNew": "修正：路中間連著兩個障礙時，繞過第一個後會卡在第二個前面；拖重掛車時倒車脫困也更有力。",
     "UI_MinidoracatAutoDrive_Section": "自動駕駛",
     "UI_MinidoracatAutoDrive_OptionsDescription": "自動駕駛的軌跡顯示、駕駛 HUD，以及可選的診斷紀錄。軌跡粗細只改變客戶端像素填充，不增加伺服器負擔；診斷紀錄預設關閉。軌跡與 HUD 變更會立即套用。",
     "UI_MinidoracatAutoDrive_ShowTrajectory": "顯示自動駕駛軌跡與導航線",

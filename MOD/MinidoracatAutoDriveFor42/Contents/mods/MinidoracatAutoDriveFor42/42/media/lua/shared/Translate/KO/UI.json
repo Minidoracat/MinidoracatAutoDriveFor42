@@ -41,7 +41,7 @@
     "UI_MinidoracatAutoDrive_HUDOptions": "자율주행 HUD",
     "UI_MinidoracatAutoDrive_HUDOptionsDescription": "기본 차량 계기판 위에 표시됩니다. 테마와 레이아웃 변경은 즉시 적용됩니다.",
     "UI_MinidoracatAutoDrive_Options": "Minidoracat Autodrive",
-    "UI_MinidoracatAutoDrive_WhatsNew": "길가 나무를 피한 뒤 급제동하지 않고, 커브에서 길가에 덜 긁힙니다.",
+    "UI_MinidoracatAutoDrive_WhatsNew": "수정: 도로 가운데 장애물이 연달아 있으면 첫 번째를 피한 뒤 두 번째 앞에서 멈추던 문제. 무거운 트레일러 후진 탈출도 강화.",
     "UI_MinidoracatAutoDrive_Section": "자율주행",
     "UI_MinidoracatAutoDrive_OptionsDescription": "자율주행 궤적, 운전 HUD, 선택적 진단 로그 설정입니다. 선 굵기는 클라이언트 픽셀 채우기만 바꾸며 서버 부하는 없습니다. 진단 로그는 기본적으로 꺼져 있습니다. 궤적과 HUD 변경은 즉시 적용됩니다.",
     "UI_MinidoracatAutoDrive_ShowTrajectory": "자율주행 궤적 및 내비게이션 경로 표시",

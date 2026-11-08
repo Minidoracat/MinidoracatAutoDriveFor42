@@ -41,7 +41,7 @@
     "UI_MinidoracatAutoDrive_HUDOptions": "HUD autopilota",
     "UI_MinidoracatAutoDrive_HUDOptionsDescription": "Wyświetlany nad oryginalną deską rozdzielczą pojazdu. Zmiany motywu i układu działają od razu.",
     "UI_MinidoracatAutoDrive_Options": "Minidoracat Autodrive",
-    "UI_MinidoracatAutoDrive_WhatsNew": "Koniec nagłego hamowania po ominięciu drzew przy drodze; mniej ocierania o przeszkody na zakrętach.",
+    "UI_MinidoracatAutoDrive_WhatsNew": "Poprawka: utykanie przed drugą przeszkodą tuż po ominięciu pierwszej; cofanie z ciężką przyczepą jest mocniejsze.",
     "UI_MinidoracatAutoDrive_Section": "Autopilot",
     "UI_MinidoracatAutoDrive_OptionsDescription": "Trajektoria autopilota, HUD kierowcy i opcjonalny dziennik diagnostyczny. Szerokość linii zmienia tylko rysowanie pikseli u klienta i nie obciąża serwera. Dzienniki diagnostyczne są domyślnie wyłączone. Zmiany trajektorii i HUD działają od razu.",
     "UI_MinidoracatAutoDrive_ShowTrajectory": "Pokaż trajektorię autopilota i linię nawigacji",

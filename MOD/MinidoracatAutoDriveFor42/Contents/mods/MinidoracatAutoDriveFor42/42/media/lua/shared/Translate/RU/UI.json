@@ -41,7 +41,7 @@
     "UI_MinidoracatAutoDrive_HUDOptions": "HUD автопилота",
     "UI_MinidoracatAutoDrive_HUDOptionsDescription": "Отображается над штатной приборной панелью машины. Изменения темы и компоновки применяются сразу.",
     "UI_MinidoracatAutoDrive_Options": "Minidoracat Autodrive",
-    "UI_MinidoracatAutoDrive_WhatsNew": "Больше нет резкого торможения после объезда деревьев у дороги; меньше задеваний в поворотах.",
+    "UI_MinidoracatAutoDrive_WhatsNew": "Исправлено: застревание перед вторым препятствием сразу после объезда первого; задний ход с тяжёлым прицепом стал сильнее.",
     "UI_MinidoracatAutoDrive_Section": "Автопилот",
     "UI_MinidoracatAutoDrive_OptionsDescription": "Настройки траектории автопилота, HUD водителя и необязательного диагностического журнала. Толщина линии влияет только на заливку пикселей у клиента и не нагружает сервер. Диагностические журналы по умолчанию выключены. Изменения траектории и HUD применяются сразу.",
     "UI_MinidoracatAutoDrive_ShowTrajectory": "Показывать траекторию автопилота и линию навигации",

@@ -41,7 +41,7 @@
     "UI_MinidoracatAutoDrive_HUDOptions": "自动驾驶 HUD",
     "UI_MinidoracatAutoDrive_HUDOptionsDescription": "显示在原版车辆仪表上方。主题与布局更改会立即生效。",
     "UI_MinidoracatAutoDrive_Options": "Minidoracat 自动驾驶",
-    "UI_MinidoracatAutoDrive_WhatsNew": "绕过路边树木、回到车道时不再突然急刹；出弯和在弯里贴着障碍物时，也比较不会擦到路边。",
+    "UI_MinidoracatAutoDrive_WhatsNew": "修正：路中间连着两个障碍时，绕过第一个后会卡在第二个前面；拖重挂车时倒车脱困也更有力。",
     "UI_MinidoracatAutoDrive_Section": "自动驾驶",
     "UI_MinidoracatAutoDrive_OptionsDescription": "自动驾驶的轨迹显示、驾驶 HUD，以及可选的诊断记录。轨迹粗细只改变客户端像素填充，不增加服务器负担；诊断记录默认关闭。轨迹与 HUD 更改会立即生效。",
     "UI_MinidoracatAutoDrive_ShowTrajectory": "显示自动驾驶轨迹与导航线",

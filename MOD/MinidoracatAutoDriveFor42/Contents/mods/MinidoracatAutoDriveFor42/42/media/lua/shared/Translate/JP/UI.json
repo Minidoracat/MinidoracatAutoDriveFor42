@@ -41,7 +41,7 @@
     "UI_MinidoracatAutoDrive_HUDOptions": "オートドライブ HUD",
     "UI_MinidoracatAutoDrive_HUDOptionsDescription": "標準の車両ダッシュボード上部に表示します。テーマとレイアウトの変更はすぐに反映されます。",
     "UI_MinidoracatAutoDrive_Options": "Minidoracat オートドライブ",
-    "UI_MinidoracatAutoDrive_WhatsNew": "路肩の木をよけた後の急ブレーキがなくなり、カーブで路肩にこすりにくくなりました。",
+    "UI_MinidoracatAutoDrive_WhatsNew": "修正：道の真ん中に障害物が2つ続くと、1つ目を避けた後2つ目の前で止まっていた問題。重いトレーラー牽引時のバック脱出も強化。",
     "UI_MinidoracatAutoDrive_Section": "オートドライブ",
     "UI_MinidoracatAutoDrive_OptionsDescription": "オートドライブの走行ライン、運転 HUD、および任意の診断ログ設定です。ラインの太さはクライアントのピクセル描画だけを変え、サーバー負荷は増やしません。診断ログは既定でオフです。走行ラインと HUD の変更はすぐに反映されます。",
     "UI_MinidoracatAutoDrive_ShowTrajectory": "オートドライブの走行ラインとナビルートを表示",

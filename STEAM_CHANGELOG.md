@@ -1,21 +1,14 @@
-[h1]Minidoracat MiniMap - AutoDrive for B42 42.21.0-0.35.0[/h1]
-[i]2026-10-29[/i]
+[h1]Minidoracat MiniMap - AutoDrive for B42 42.21.0-0.35.1[/h1]
+[i]2026-11-08[/i]
 
-[h3]📱 召喚：站在車外把車叫過來[/h3]
+[b]English summary[/b]
 [list]
-[*] 以前要自己走到車旁才能開車。現在可以用相容 MOD 的手機 App 把裝了自動駕駛模組的車叫過來，車上不用有人。
-[*] [b]到我這裡[/b]：車開到你身邊停好，你走動時會跟著改目標。
-[*] [b]開到指定地點[/b]：車開到你在地圖上點的位置附近。
-[*] [b]前進／後退[/b]：車以 5 km/h 直直往前或往後挪最多 12 公尺，方便進出停車格。
-[*] 最高 30 km/h，快到時先減速再停；近處直接開過去，遠一點沿道路走，前方有殭屍能閃就閃。
-[*] 路上有人、動物、牆或其他車擋住、有人坐上車、你走太遠或離線時，車會停下並告訴 App 原因。
-[*] 熄火的車可以請 App 代為發動，召喚結束後會熄掉（車上有人就不熄）；耗電、耗油和自動駕駛一樣。
-[*] 多人遊戲中召喚的人突然斷線，車會由附近的玩家接手停穩，大家看到的停車位置一致。
-[*] 服主可在沙盒「召喚距離（格）」設定離車多遠內能召喚（預設 64，設 0 關閉）。
+[*] Fixed: after dodging an obstacle in the middle of the road, the car no longer stops in front of a second one right behind it (such as two lamp posts on a junction's center line) and hands back control; it now stays on the dodging side until both are passed. Thanks to Nagasaki Soyo for the report.
+[*] Fixed: when stuck while towing a heavy trailer, the automatic reverse now counts the trailer's weight and actually backs out instead of barely moving and handing back control.
 [/list]
 
 [h3]🔧 修正[/h3]
 [list]
-[*] 坐在換掉原版儀表的車種時，打開該車的充電資訊卡，自動駕駛卡片和「速度明細」會一路疊高、蓋住畫面中央的車。現在充電資訊卡開著時，自動駕駛卡片會自動收成小晶片，關掉後恢復原樣。
-[*] 畫面不夠高（例如上下分割畫面）時，「速度明細」小視窗會超出畫面頂端。現在會放在畫面內。
+[*] 路中間前後兩個障礙靠得很近時，車繞過第一個、回到原車道後會停在第二個前面，倒車、改道都不成就交還操控。拖著掛車沿路中間開時最常遇到，例如路口中線上連著兩根路燈桿。現在發現回原車道後來不及再閃下一個時，會先留在繞行的那一側，過了下一個障礙再回來。感謝 Workshop 玩家 Nagasaki Soyo 回報。
+[*] 拖著較重的掛車卡住時，自動倒車幾乎退不動，接著就交還操控。現在倒車力道連掛車重量一起算，倒車速度上限不變。
 [/list]
