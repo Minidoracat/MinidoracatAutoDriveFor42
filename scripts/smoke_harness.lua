@@ -23842,13 +23842,15 @@ function drive.scenarioFilletSlide()
         enginePower = 3000, brakingForce = 100, wheelFriction = 1.5, tireFriction = 1.5 })
     local STEP, n = 8, MDADDynamics.FILLET_SOURCE_MAX + 150
     local deg = math.pi / 180
-    -- kind：zig＝每 10 點折 30°；small＝前 256 點直、之後每 10 點折 15°；flat＝直路。step＝取樣間距（預設 STEP）
+    -- kind：zig＝每 10 點折 30°；zigstop＝前 200 點同 zig、之後轉回正東直行；small＝前 256 點直、之後每 10 點折 15°；
+    -- flat＝直路。step＝取樣間距（預設 STEP）
     local function build(kind, step)
         step = step or STEP
         local r = { pts = { 0, 0 }, segSurface = {}, segWidth = {}, avoidPenalty = 0 }
-        local hds, h = {}, kind == "zig" and 15 * deg or kind == "small" and -7.5 * deg or 0
+        local hds, h = {}, (kind == "zig" or kind == "zigstop") and 15 * deg or kind == "small" and -7.5 * deg or 0
         for k = 1, n - 1 do
-            if k % 10 == 0 and (kind == "zig" or kind == "small" and k > 256) then h = -h end
+            if k % 10 == 0 and (kind == "zig" or kind == "zigstop" and k <= 200 or kind == "small" and k > 256) then h = -h end
+            if kind == "zigstop" and k == 201 then h = 0 end
             hds[k] = h
             r.pts[k * 2 + 1] = r.pts[k * 2 - 1] + step * math.cos(h)
             r.pts[k * 2 + 2] = r.pts[k * 2] + step * math.sin(h)
@@ -24219,6 +24221,26 @@ function drive.scenarioFilletSlide()
         checkTrue(count("start") + count("rebuild") >= 1 and count("swap") + count("near") + count("rewindow") >= 1,
             "(slide-capshort) 照 source 窗尾觸發、開到 1.9 km 前有換窗（start " .. count("start") .. "、rebuild "
             .. count("rebuild") .. "、swap " .. count("swap") .. "、near " .. count("near") .. "）")
+    end
+
+    -- (slide-capneed) 同上壓低預算，但第 200 點之後轉直（source 窗尾第 256 點之外全直）：預算窗尾到 source 窗尾之間的
+    --   110–200 點 fallback 角也要算「窗外要補弧」，照樣換窗（1108k 審查：只從觸發用的 source 窗尾掃會判成不用換）
+    do
+        local D = MDADDynamics
+        local savedRoute, savedHd = route, hd
+        route, hd = build("zigstop")
+        local tp, tk = {}, {}
+        local tn, tfn = D.buildFilletPath(savedRoute.pts, savedRoute.segSurface, savedRoute.segWidth, 1, 3, tp, {}, {}, tk, {}, {}, {})
+        local savedOut = D.FILLET_OUTPUT_MAX
+        D.FILLET_OUTPUT_MAX = D.FILLET_SOURCE_MAX + math.floor((tn - n) / tfn * 10.5)
+        local armed = arm()
+        driveTo(1900, function() return count("swap") + count("near") + count("rewindow") > 0 end)
+        D.FILLET_OUTPUT_MAX = savedOut
+        checkTrue(armed and st.profile ~= nil and count("start") + count("rebuild") >= 1
+            and count("swap") + count("near") + count("rewindow") >= 1,
+            "(slide-capneed) 預算窗尾到 source 窗尾之間還有 fallback 角：照樣換窗（start " .. count("start") .. "、rebuild "
+            .. count("rebuild") .. "、swap " .. count("swap") .. "、near " .. count("near") .. "）")
+        route, hd = savedRoute, savedHd
     end
 
     -- (slide-straight) 窗外沒有要補弧的角（直路）：不換窗、不付 begin 的單幀成本

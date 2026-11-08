@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1108k"
+Drive.REV = "1108l"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -4700,12 +4700,14 @@ function Drive.filletSlide(s, playerNum, now)
     local ahead = p.s[endIdx] - s.lastSNow
     if ahead > TUNE.FILLET_SLIDE_AHEAD_M then return end
     -- 窗外沒有要補弧的角＝換了也不會多出弧，不付 begin 的單幀成本。要補的角＝fallback 折點，或 FILLET_SMALL_RAD 以上的小角
-    -- （窗外標 LINE、進窗才試建小弧；1108g，舊制只認 fallback）。剖面幾何在動力重建中不變，算一次記在剖面上。
+    -- （窗外標 LINE、進窗才試建小弧；1108g，舊制只認 fallback）。從預算窗尾（fitEndIdx）掃、不是觸發用的 slideEnd：
+    -- 預算窗尾到 source 窗尾之間的角也沒弧（1108k 審查）。剖面幾何在動力重建中不變，算一次記在剖面上。
     if p.slideNeed == nil then
         local x, y, len = p.x, p.y, p.segLen
         local c = math.cos(MDADDynamics.FILLET_SMALL_RAD)
+        local from = p.fitEndIdx
         p.slideNeed = false
-        for i = endIdx > 1 and endIdx or 2, p.n - 1 do
+        for i = from > 1 and from or 2, p.n - 1 do
             local la, lb = len[i - 1], len[i]
             if la > 0 and lb > 0 and (x[i] - x[i - 1]) * (x[i + 1] - x[i]) + (y[i] - y[i - 1]) * (y[i + 1] - y[i])
                     <= c * la * lb then
