@@ -971,13 +971,13 @@ end
 -- as a driven polyline with <=1m chords and <=2° tangent error; infeasible/>90°
 -- corners retain the source vertex as SEG_FALLBACK. Adjacent 45% shares consume <=90%.
 -- Small corners (FILLET_SMALL_RAD..FILLET_MIN_RAD) also try an arc, cut-capped; if none
--- fits they stay SEG_LINE (never fallback) and only use budget left after large corners.
+-- fits they stay SEG_LINE (never fallback). Arcs take output budget in window order (1108i).
 -- emitFrom（選填，source 索引，預設 1）＝滑動窗起點（1108c）：只輸出 emitFrom 起的路線，只在
 -- [emitFrom, emitFrom+FILLET_SOURCE_MAX-1] 內找圓角。臂鏈從 emitFrom 往回最近的折點（沒有＝路線起點）算起，
 -- 和從路線起點整條建時同一個 from，所以窗內離窗尾夠遠的角，弧和整條建的逐位元相同（Driver 換窗靠這點保住弧長座標）；
--- emitFrom=1 與舊制完全相同。第 6 回傳＝窗尾頂點在輸出中的索引：第一個不找圓角的 source 點，或輸出預算把第一個大角降成
--- fallback 的那個角（較前者；1108i，Real USA 實機 256 點窗的弧在第 137 點就因預算停了，之後 95 個角是 fallback）；
--- 窗涵蓋到終點、預算也夠＝nil。預算降級之後的角和換窗後的新窗不同，Driver 換窗的相同範圍只到這裡。
+-- emitFrom=1 與舊制完全相同。第 6 回傳＝窗尾頂點在輸出中的索引：第一個不找圓角的 source 點，或第一個分不到輸出預算的角
+-- （大角降成 fallback、小角退回 LINE；較前者。1108i：Real USA 實機 256 點窗的弧在第 137 點就因預算停了，之後 95 個角是
+-- fallback）；窗涵蓋到終點、預算也夠＝nil。窗尾之後的角和換窗後的新窗不同，Driver 換窗的相同範圍只到這裡。
 function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
         outPts, outSurface, outWidth, outKind, outSourceA, outSourceB, outRadius, emitFrom)
     if type(srcPts) ~= "table" or type(srcSurface) ~= "table" or type(srcWidth) ~= "table"
@@ -1116,34 +1116,29 @@ function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
     -- 零長 → obb 警戒帽 18 km/h 常駐全程，直路也是）。超出預算不再整條放棄：
     -- 從超出的那個彎起降為 fallback 折點（各佔 1 點，剩餘角與終點的 1 點先保留），
     -- 前段弧照建、band 證明照常成立；後段折點由 curveV 折角限速與 sweep 管。
-    -- 小折角的弧（1002u）排在大角之後：第一輪只算大角、小角先記 1 點；第二輪才用剩下的預算，
-    -- 塞不下的小角退回 LINE（不標 fallback）——小弧再多也不會把後面的大角擠成爬行折點。
-    local predicted, capAt = 2, nil -- capAt＝第一個因預算降成 fallback 的大角（窗尾，見函式頭註解）
+    -- 大角、小折角（1002u）的弧照窗內順序同一趟分預算（1108i；1002u 原本大角先分、小弧只用剩下的）：分不到的大角標
+    -- fallback、小角退回 LINE（不標 fallback），第一個分不到的角＝窗尾（capAt，見函式頭註解）。換窗後的新窗從錨點起分，
+    -- 錨點之後每個角拿到的預算只會更多，所以舊窗窗尾之前兩窗的弧逐位元相同（Driver 無縫換窗靠這點）；大角先分時，
+    -- 剩下多少給小角要看整窗的大角，窗起點一換、錨點後的小角就分得不同（Real USA 實機：相同範圍在錨點後 300 m 就斷，
+    -- 只能走 near→cutover）。被擠掉的大角在窗尾之後，換窗在車到之前發生、由下一窗補弧。
+    local predicted, capAt = 2, nil
     for i = first + 1, n - 1 do
         local need = 1
         local theta = thetaA[i]
-        if theta and theta >= D.FILLET_MIN_RAD then
-            need = 1 + arcSteps(radii[i] * theta, theta)
-            if predicted + need + (n - 1 - i) > outputMax then
+        if theta and radii[i] then
+            local steps = arcSteps(radii[i] * theta, theta)
+            if predicted + 1 + steps + (n - 1 - i) > outputMax then
                 radii[i], signA[i], tanS[i] = nil, nil, nil
-                fallbackCorner[i] = true
-                fallbackN = fallbackN + 1
-                need = 1
+                if theta >= D.FILLET_MIN_RAD then
+                    fallbackCorner[i] = true
+                    fallbackN = fallbackN + 1
+                end
                 capAt = capAt or i
+            else
+                need = 1 + steps
             end
         end
         predicted = predicted + need
-    end
-    for i = first + 1, n - 1 do
-        local theta = thetaA[i]
-        if theta and radii[i] and theta < D.FILLET_MIN_RAD then
-            local extra = arcSteps(radii[i] * theta, theta)
-            if predicted + extra > outputMax then
-                radii[i], signA[i], tanS[i] = nil, nil, nil
-            else
-                predicted = predicted + extra
-            end
-        end
     end
 
     -- 臂長預算升級後 tangent 點可落在角的緊鄰段之外（共線臂上游），source

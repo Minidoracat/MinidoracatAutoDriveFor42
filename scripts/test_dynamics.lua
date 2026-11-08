@@ -633,6 +633,39 @@ do
     local sc = srcAt(so, sp, so.endOut)
     check(so.reason == nil and sc ~= nil and sc % 10 == 0 and so.fn == sc / 10 - 1,
         "(sw-cap) 不開窗的短路線預算不夠也有窗尾（第 " .. tostring(sc) .. " 點、" .. tostring(so.fn) .. " 個弧）")
+    -- (sw-capsame) 小角（15°）與大角（30°）交錯、預算在窗內用完：從錨點（第 125 點）起建的新窗，到舊窗窗尾的大角入口前
+    --   和整條建逐位元相同——預算照順序分，錨點後每個角分到的只會更多（1108i；大角先分時，剩給小角的要看整窗的大角，
+    --   錨點後的小角分得不同，Real USA 實機相同範圍在錨點後 300 m 就斷）
+    local mp, ms, mw, mh, sgn = { 0, 0 }, {}, {}, 0, 1
+    for k = 1, n - 1 do
+        if k % 10 == 0 then
+            local m = k / 10
+            mh = mh + sgn * math.rad(m % 2 == 1 and 15 or 30)
+            if m % 2 == 0 then sgn = -sgn end
+        end
+        mp[k * 2 + 1], mp[k * 2 + 2] = mp[k * 2 - 1] + 2 * math.cos(mh), mp[k * 2] + 2 * math.sin(mh)
+        ms[k], mw[k] = 1, 12
+    end
+    local function mbuild(from)
+        local o = { p = {}, k = {}, r = {} }
+        o.n, o.fn, o.fb, o.valid, o.reason, o.endOut = D.buildFilletPath(mp, ms, mw, 1, 3, o.p, {}, {}, o.k, {}, {}, o.r, from)
+        return o
+    end
+    local mfull = mbuild(nil)
+    D.FILLET_OUTPUT_MAX = D.FILLET_SOURCE_MAX + math.floor((mfull.n - n) / mfull.fn * 30) -- 窗尾約在第 170 點
+    local mold, mnew = mbuild(nil), mbuild(125)
+    D.FILLET_OUTPUT_MAX = savedMax
+    local mEnd = srcAt(mold, mp, mold.endOut)
+    local mj -- 第 125 點在舊輸出的索引（照原樣輸出、座標逐位元相等）
+    for i = 1, mold.n do if mold.p[i * 2 - 1] == mp[249] and mold.p[i * 2] == mp[250] then mj = i break end end
+    local same = 0
+    while mj and mj + same <= mold.n and 1 + same <= mnew.n and mold.p[(mj + same) * 2 - 1] == mnew.p[same * 2 + 1]
+            and mold.p[(mj + same) * 2] == mnew.p[same * 2 + 2] and mold.k[mj + same] == mnew.k[same + 1] do
+        same = same + 1
+    end
+    check(mEnd ~= nil and mEnd > 135 and mEnd < D.FILLET_SOURCE_MAX and mj ~= nil and mj + same >= mold.endOut - 6,
+        "(sw-capsame) 錨點起到舊窗尾（第 " .. tostring(mEnd) .. " 點）前逐點相同（同到舊輸出第 " .. tostring(mj and mj + same - 1)
+        .. " 點、窗尾在 " .. tostring(mold.endOut) .. "）")
     for _, bad in ipairs({ 0, n, 1.5, 0 / 0, math.huge, "5" }) do
         local o = build(bad)
         eq(tostring(o.valid) .. "/" .. tostring(o.reason), "false/window",
@@ -641,9 +674,9 @@ do
 end
 
 -- 1002u：10–20° 小折角也建弧（證明線不再把 15° 量成外接圓 R≈4m），但①切角（弧中點離頂點）≤ FILLET_SMALL_CUT_M，
--- ②建不出來維持 LINE、不標 fallback（不爬行），③輸出預算先給大角、小弧只用剩下的。
--- 違規證明：拿掉切角上限＝(1) 紅；小角建不出標 fallback＝(3) 紅；預算單趟照順序＝(4) 大角被擠成 fallback 紅。
-scenario("1002u 小折角圓角：切角上限、建不出維持 LINE、預算大角優先")
+-- ②建不出來維持 LINE、不標 fallback（不爬行），③輸出預算照窗內順序分（1108i 起；之前大角先分、小弧只用剩下的）。
+-- 違規證明：拿掉切角上限＝(1) 紅；小角建不出標 fallback＝(3) 紅；大角先分＝(4) 大角拿到弧、(sw-capsame) 錨點後的小角分得不同 紅。
+scenario("1002u 小折角圓角：切角上限、建不出維持 LINE、預算照順序分")
 do
     local function corner(deg, w, arm)
         local th = math.rad(deg)
@@ -671,7 +704,8 @@ do
     check(fn == 0 and fb == 0 and not sawFb, "(3) 15° 建不出弧維持 LINE（fn " .. fn .. "、fb " .. fb .. "）")
     fn, fb, _, sawFb = corner(25, 2.6, 60)
     check(fn == 0 and fb == 1 and sawFb, "(3) 同路寬 25° 照舊 fallback")
-    -- (4) 40 個 ±15° 小角（每個約 20 點）後接 60° 大角，輸出上限壓到 200：大角拿到弧、小角多出的退回 LINE
+    -- (4) 40 個 ±15° 小角（每個約 20 點）後接 60° 大角，輸出上限壓到 200：前面的小角先分到弧，分不到的小角退回 LINE、
+    --   60° 大角標 fallback；窗尾（第 6 回傳）＝第一個分不到的小角（換窗會在車到它之前補弧）
     local pts, ss, ww = { 0, 0 }, {}, {}
     local h, x, y = 0, 0, 0
     for k = 1, 41 do
@@ -686,7 +720,7 @@ do
     local savedMax = D.FILLET_OUTPUT_MAX
     D.FILLET_OUTPUT_MAX = 200
     local op, ok = {}, {}
-    local on, ofn, ofb, ovalid = D.buildFilletPath(pts, ss, ww, 1, 3, op, {}, {}, ok, {}, {}, {})
+    local on, ofn, ofb, ovalid, _, oend = D.buildFilletPath(pts, ss, ww, 1, 3, op, {}, {}, ok, {}, {}, {})
     D.FILLET_OUTPUT_MAX = savedMax
     local bigArc, keptBig = false, false
     for i = 1, on - 1 do
@@ -699,9 +733,14 @@ do
         if op[i * 2 - 1] == bigX and op[i * 2] == bigY then keptBig = true end
     end
     check(ovalid == true and on <= 200, "(4) 輸出 ≤ 上限（" .. on .. "）")
-    eq(ofb, 0, "(4) 大角沒被小弧擠成 fallback")
-    check(bigArc and not keptBig, "(4) 60° 大角建成弧")
-    check(ofn >= 2 and ofn < 41, "(4) 小弧用剩下的預算、超出的退回 LINE（弧 " .. ofn .. "）")
+    eq(ofb, 1, "(4) 分不到預算的 60° 大角標 fallback")
+    check(not bigArc and keptBig, "(4) 60° 大角留原頂點")
+    check(ofn >= 2 and ofn < 40, "(4) 前面的小角照順序分到弧、之後的退回 LINE（弧 " .. ofn .. "）")
+    local endSrc
+    for k = 1, #pts / 2 do
+        if oend and op[oend * 2 - 1] == pts[k * 2 - 1] and op[oend * 2] == pts[k * 2] then endSrc = k end
+    end
+    eq(endSrc, ofn + 2, "(4) 窗尾＝第一個分不到的小角（source " .. tostring(endSrc) .. "）")
 end
 
 scenario("hot scalar helpers do not retain per-call tables")
