@@ -24016,6 +24016,25 @@ function drive.scenarioFilletSlide()
     checkTrue(MDAD.Drive.isActive(0) and st.mode == "follow" and st.rewindow == nil,
         "(slide-near) cutover 後照常跟線、旗標清掉（mode " .. tostring(st.mode) .. "）")
 
+    -- (slide-dpwait) 已排的 rewindow 遇上改道等主 MOD 分幀：等完才 cutover（cutover 會作廢那次等待；1108h 複審）。
+    --   detourWaitTick 換成不做事，只留 s.detourWait 這個狀態，看取路那段的 cutover 條件
+    T.FILLET_SLIDE_CLEAR_M, T.FILLET_SLIDE_SLACK_M = 5000, -1e9
+    checkTrue(arm(), "(slide-dpwait) 啟動")
+    driveTo(1900, function() return count("near") > 0 end)
+    restoreTune()
+    local nCut, oldWaitTick = #cuts, MDAD.Drive.detourWaitTick
+    MDAD.Drive.detourWaitTick = function() return false end
+    st.detourWait = { site = "detour", t0 = nowMs, n = 1 } -- n：cutover 作廢等待時 detourNote 要印呼叫次數
+    for _ = 1, 4 do step() end
+    local heldCut, heldRw = #cuts, st.rewindow
+    st.detourWait = nil
+    MDAD.Drive.detourWaitTick = oldWaitTick
+    for _ = 1, 4 do step() end
+    checkTrue(count("near") == 1 and heldCut == nCut and heldRw ~= nil,
+        "(slide-dpwait) 等改道分幀中不 cutover、rewindow 留著（等待中 cutover " .. (heldCut - nCut) .. " 次）")
+    checkTrue(#cuts == nCut + 1 and lastCut().why == "rewindow" and st.rewindow == nil,
+        "(slide-dpwait) 等完照常 cutover why=rewindow（cutover " .. tostring(lastCut().why) .. "）")
+
     -- (slide-rebuild) 離窗尾不到 CLEAR_M＋SLACK_M（SLACK 設成極大＝一開始就「來不及」）：照車位重建一窗走 cutover
     checkTrue(arm(), "(slide-rebuild) 啟動")
     T.FILLET_SLIDE_SLACK_M = 1e9
