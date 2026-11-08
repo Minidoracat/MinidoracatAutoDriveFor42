@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1108b"
+Drive.REV = "1108d"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -472,6 +472,13 @@ TUNE.DETOUR_AVOID_R = 40       -- 以堵點為圓心的軟封鎖半徑（主 MOD
 TUNE.DETOUR_LEN_RATIO = 1.5    -- 替代路線長 ≤ 剩餘 × ratio + slack 才接受
 TUNE.DETOUR_LEN_SLACK = 200
 TUNE.AUTO_DETOUR_MS = 10000    -- 自動改道：停等累計此時長才要替代路線（或倒車重掃過一次又再堵＝BLOCK_RETRY_MS 即問）
+-- 主 MOD nav API v14 改道分幀（allowPending；大路網 Real USA 這類長程改道同步要數百 ms）：沒算完回 building，用第一次的
+-- 完整參數每 tick 重呼叫，等到 ok／其他失敗或這個時限（Drive.detourWaitTick、requestDetourRoute）。時限理由：主 MOD 實測
+-- 同步最久約 822 ms＝約 14 萬工作單位（每單位 5–7 µs）÷ 每 tick QUERY_TICK_WORK 600 ≈ 230 tick，30 fps 約 7.7 s；
+-- 每 tick 預算與背景路線查詢共用、低幀率再拉長，留約 2 倍。停住的呼叫點這段不計停等預算，逾時＝拒收 pend-timeout。
+TUNE.DETOUR_PEND_MS = 15000
+-- 停住等分幀改道時，車速 ≥ 這個值（km/h）就照常跑控制（煞停中、倒車中），不在半路放手；停住才只關 regulator 等。
+TUNE.DETOUR_HOLD_KMH = 1
 -- 交還前的最後一次改道（0928m 使用者裁定「遇大量障礙可改道」；Drive.stuckDetour）：每 session 最多 MAX 次，
 -- 同一處（NEAR_M 內）不重問；錨點離車超過 ANCHOR_M 或在車後就改以路線切線往前推
 TUNE.STUCK_DETOUR_MAX = 2
@@ -1392,22 +1399,62 @@ TUNE.DETOUR_HIST_MAX = 7 -- 記幾個先前的避讓圈（＋目前那圈＝主 
 -- 召喚（Drive.summons）：起點是車不是玩家，改問 nav API v13 requestDetourFrom（固定 deferCommit，同樣經 detourSettle 的
 -- commitDetour 收下）；目標用當初問路線的那一點、終點比對用小地圖那段原始路線（尾端接到停車點的那一截不算）。
 -- 直線模式沒有路網路線可比，不改道（照常走判堵／受困）。
-local function requestDetourRoute(api, playerNum, tx, ty, ax, ay, remaining, r, lenMax, refRoute, more, hard)
+-- nav API v14（Drive.detourPendOk）起最後一參 allowPending＝true（addon-api 3.9b／3.10）：大路網沒在當幀算完回 building，
+-- 這裡記成 s.detourWait（site＝呼叫點）、回 (nil, "pending")；之後同一呼叫點再呼叫（Drive.detourWaitTick 重呼叫原呼叫點，
+-- sticky 在 cutover 區塊每 tick 重問）就用第一次的完整參數（目標、避讓圈、moreAvoid 那張表、maxSnap、deferCommit；召喚另
+-- 有開查詢當下的車位）重呼叫，驗收也用第一次的 remaining／lenMax／refRoute／hard——交付的線起點是開查詢當下的位置，
+-- 驗收照同步拿到同一條線時的輸入。等滿 TUNE.DETOUR_PEND_MS＝拒收 pend-timeout。換了呼叫點＝主 MOD 照新參數重開，舊的
+-- 等待記 drop why=site。v13 以下或沒有 s：不傳該參數、照舊同步（主 MOD 回的 building＝引擎在建圖，照舊當拒收原因）。
+local function requestDetourRoute(api, playerNum, tx, ty, ax, ay, remaining, r, lenMax, refRoute, more, hard, s, site)
     local sm = Drive.summons[playerNum]
-    local route, state
+    r = r or TUNE.DETOUR_AVOID_R
+    local fx, fy, snap, defer
     if sm then
         if not sm.baseRoute then return nil, "direct" end
         if not Drive.summonApiOk(api) then return nil, "api" end
-        local v = sm.vehicle
-        route, state = api.requestDetourFrom(playerNum, v:getX(), v:getY(), sm.qx, sm.qy, ax, ay,
-            r or TUNE.DETOUR_AVOID_R, more, TUNE.SNAP_MAX_M)
-        refRoute = sm.baseRoute
+        fx, fy, tx, ty, refRoute = sm.vehicle:getX(), sm.vehicle:getY(), sm.qx, sm.qy, sm.baseRoute
     else
         if type(api.requestDetour) ~= "function" then return nil, "api" end
-        local v10 = type(api.navApiVersion) == "number" and api.navApiVersion >= 10
-        route, state = api.requestDetour(playerNum, tx, ty, ax, ay, r or TUNE.DETOUR_AVOID_R, more,
-            v10 and TUNE.SNAP_MAX_M or nil, Drive.detourDeferred(api) or nil)
+        snap = type(api.navApiVersion) == "number" and api.navApiVersion >= 10 and TUNE.SNAP_MAX_M or nil
+        defer = Drive.detourDeferred(api) or nil
     end
+    local w = s and s.detourWait
+    if w and w.site ~= site then
+        Drive.detourEnd(s, playerNum, "drop", "site")
+        w = nil
+    end
+    if w then
+        tx, ty, ax, ay, r, more, snap, defer, fx, fy = w.tx, w.ty, w.ax, w.ay, w.r, w.more, w.snap, w.defer, w.fx, w.fy
+        remaining, lenMax, refRoute, hard = w.remaining, w.lenMax, w.refRoute, w.hard
+    end
+    local pend = s ~= nil and Drive.detourPendOk(api, sm ~= nil)
+    local route, state
+    if sm and pend then
+        route, state = api.requestDetourFrom(playerNum, fx, fy, tx, ty, ax, ay, r, more, TUNE.SNAP_MAX_M, true)
+    elseif sm then
+        route, state = api.requestDetourFrom(playerNum, fx, fy, tx, ty, ax, ay, r, more, TUNE.SNAP_MAX_M)
+    elseif pend then
+        route, state = api.requestDetour(playerNum, tx, ty, ax, ay, r, more, snap, defer, true)
+    else
+        route, state = api.requestDetour(playerNum, tx, ty, ax, ay, r, more, snap, defer)
+    end
+    if w then w.n = w.n + 1 end
+    if pend and state == "building" then
+        local now = getTimestampMs()
+        if not w then
+            local v = s.vehicle
+            w = { site = site, t0 = now, accMs = now, n = 1, hold = site ~= "sticky" and site ~= "towcorner",
+                tx = tx, ty = ty, ax = ax, ay = ay, r = r, more = more, snap = snap, defer = defer, fx = fx, fy = fy,
+                remaining = remaining, lenMax = lenMax, refRoute = refRoute, hard = hard,
+                qx = fx or (v and v:getX()), qy = fy or (v and v:getY()) }
+            s.detourWait = w
+            Drive.detourNote(s, playerNum, w, "start", state)
+        end
+        if now - w.t0 < TUNE.DETOUR_PEND_MS then return nil, "pending" end
+        Drive.detourEnd(s, playerNum, "timeout", "pend-timeout")
+        return nil, "pend-timeout"
+    end
+    if w then Drive.detourEnd(s, playerNum, route and state == "ok" and "ok" or "fail", tostring(state)) end
     if not route or state ~= "ok" then return nil, state or "noroad" end
     -- 空線（1002h E2E rc50 0017：目標 46m 外判堵、主 MOD 回 ok 但 len 0）收下＝下一幀 cutover 建不出剖面、
     -- 直接 LostRoute 交還；當成沒有改道，照常走受困流程。
@@ -2244,6 +2291,7 @@ function Drive.stop(playerNum, reasonKey, voiceEvent, diagWhy)
     if s.uturn then
         Drive.uturnDone(s, playerNum, getTimestampMs(), "stop", reasonKey or diagWhy or voiceEvent or "manual")
     end
+    if s.detourWait then Drive.detourEnd(s, playerNum, "drop", "stop") end -- 等主 MOD 分幀改道中停止自駕（Drive.detourWaitTick）
     if not relook then
         diagStop(s, playerNum, reasonKey or diagWhy
             or (voiceEvent == "manual" and "takeover") or "manual")
@@ -2869,6 +2917,7 @@ local function startSession(playerObj, playerNum, stage, summon)
         avoidX = nil, avoidY = nil, -- 已接受的改道避讓圈（sticky：之後主 MOD 重算若穿回去再要一次）
         avoidHist = nil, detourAvoidN = nil, -- 同一趟先前的避讓圈（Drive.pushAvoidHist）／本次附給主 MOD 的圈數
         pendingDetour = false,  -- 改道已收下、主 MOD 快取已換線（v11 經 commit），等下一次 fetchRoute cutover
+        detourWait = nil,       -- 主 MOD 分幀還在算的改道（nav API v14；requestDetourRoute 建、Drive.detourEnd 收）
         -- RECOVER 單一進口（階段 2 主體 2）：why＝需求原因（nil＝無需求，
         -- 同時是舊 mode=="recover" 閂鎖的替代）；其餘三個是 suspect 探測留給
         -- dispatch 選動作用的純量，只有 why=="progress" 時有效。
@@ -3291,6 +3340,91 @@ function Drive.toggle(playerObj)
     end
 end
 
+-- nav API v14 改道分幀（addon-api 3.10 allowPending；requestDetourFrom 另查它存在）：不足＝不傳該參數、照舊同步。
+function Drive.detourPendOk(api, from)
+    return type(api.navApiVersion) == "number" and api.navApiVersion >= 14 and type(api.requestDetour) == "function"
+        and (not from or type(api.requestDetourFrom) == "function")
+end
+
+-- 分幀改道的事件 dpend（requestDetourRoute 的 s.detourWait）：phase＝start／ok／fail（主 MOD 回 ok 以外，why＝它回的狀態）
+-- ／timeout（why＝pend-timeout）／drop（why＝site 換呼叫點、target、route、yield、rehitch、stop，或呼叫點中途退出的原因）；
+-- kind＝呼叫點（detour 堵車與交還前改道、towturn、towback、towcorner、sticky）、ms＝從開查詢起算、attempt＝呼叫主 MOD 的次數、
+-- ax／ay 主避讓圈、qx／qy 開查詢當下的起點（召喚＝車位，交付的線從這裡起）、tx／ty 目標。
+function Drive.detourNote(s, playerNum, w, phase, why)
+    local ms = getTimestampMs() - w.t0
+    diagEvent(s, playerNum, "dpend", { phase = phase, kind = w.site, why = why, ms = ms, attempt = w.n,
+        ax = w.ax, ay = w.ay, qx = w.qx, qy = w.qy, tx = w.tx, ty = w.ty })
+    if getDebug() then -- telemetry: dpend 事件（phase kind why ms attempt ax ay qx qy tx ty）
+        print(LOG .. "detour pending pn=" .. playerNum .. " " .. phase .. " site=" .. tostring(w.site)
+            .. " why=" .. tostring(why) .. string.format(" ms=%.0f calls=%.0f", ms, w.n))
+    end
+end
+
+-- 收掉待算改道（有才記事件）。主 MOD 那一格的待算留著無妨：下次參數不同就丟掉重算（addon-api 3.10）。
+function Drive.detourEnd(s, playerNum, phase, why)
+    local w = s.detourWait
+    if w == nil then return end
+    s.detourWait = nil
+    Drive.detourNote(s, playerNum, w, phase, why)
+end
+
+-- 等主 MOD 分幀改道（onPlayerUpdate 讓位與自動掛回之後、倒車與跟線之前，有 s.detourWait 才呼叫）。回 true＝本幀到此為止。
+-- 行駛中的呼叫點照常控制、沿目前路線開：sticky 在 cutover 區塊每 tick 重問；towcorner 這裡重問（stepFollow 那次不問）。
+-- 停住的呼叫點（hold：detour、towturn、towback）這裡重呼叫原呼叫點——等完走它原本的後續（收下、拒收紅字、交還），
+-- 結果與同步拿到同一條線一致；還在算＝本幀不跑控制（同 build：關 regulator、不施力），停等預算與進度監督的計時往後推
+-- 同樣長度（等待不計入 StopStuck／交還）。車速 ≥ DETOUR_HOLD_KMH（還在煞停、倒車）照常控制，不在半路放手。
+-- 原呼叫點回了 pending 以外的結果、等待卻還在（中途退出：主 MOD 不見等）＝drop，不留沒人收的等待。
+function Drive.detourWaitTick(s, vehicle, playerNum, now)
+    local w = s.detourWait
+    if w.site == "sticky" then return false end
+    local why
+    if w.site == "towcorner" then
+        why = Drive.towCornerDetour(s, playerNum, vehicle, now, w.cfx, w.cfy, true)
+        if s.detourWait == w and why ~= "pending" then Drive.detourEnd(s, playerNum, "drop", tostring(why)) end
+        return false
+    end
+    local ok
+    if w.via == "turn" then
+        ok, why = Drive.towTurnaround(s, playerNum, vehicle, now, w.tfx, w.tfy)
+        if not ok then
+            Drive.stop(playerNum, MDADTrailer.KEY_ROTATE)
+            return true
+        end
+    elseif w.stuck then
+        local code = w.code
+        ok = Drive.stuckDetour(s, playerNum)
+        if not ok then
+            if code and s.summon then s.summon.code = Drive.summonBlockCode(s) end -- 同停等預算出口（召喚的 BLOCKED／ZOMBIES）
+            Drive.stop(playerNum, KEY_STUCK)
+            return true
+        end
+        why = ok
+    else
+        ok, why = Drive.requestDetour(playerNum, false, w.src)
+    end
+    if s.detourWait ~= w then return false end -- 有結果了（收下／拒收／逾時）：這幀照常控制
+    if why ~= "pending" then
+        Drive.detourEnd(s, playerNum, "drop", tostring(why))
+        return false
+    end
+    local kmh = vehicle:getCurrentSpeedKmHour()
+    if kmh >= TUNE.DETOUR_HOLD_KMH or kmh <= -TUNE.DETOUR_HOLD_KMH then
+        w.accMs = now -- 這幀控制照跑、計時照算
+        return false
+    end
+    local dt = now - w.accMs
+    w.accMs = now
+    if dt > 0 then
+        if s.waitTickMs > 0 then s.waitTickMs = s.waitTickMs + dt end
+        if s.progressSince > 0 then s.progressSince = s.progressSince + dt end
+        if s.progressUntil > 0 then s.progressUntil = s.progressUntil + dt end
+    end
+    vehicle:setRegulator(false)
+    if s.commandControlState ~= "HOLD" then Drive.invalidateCommandState(s, kmh, "HOLD") end
+    s.fstate.prevHeading = nil
+    return true
+end
+
 -- 改道（HUD「改道」鈕與自動改道共用）：只在 blocked 停等時有意義。以堵點
 -- （群最近擋線點 blockHitX/Y，缺則車位）為圓心向主 MOD 要替代路線並驗收
 -- （requestDetourRoute＋Drive.detourSettle）；成功＝主 MOD 快取已換線（v11 由 commit 換），這裡只記 sticky 避讓圈、
@@ -3308,6 +3442,11 @@ function Drive.requestDetour(playerNum, stuck, src)
     s.detourAvoidN, s.detourAx, s.detourAy = nil, nil, nil -- 本次附給主 MOD 的舊避讓圈數／避讓圈圓心（detourAttempt 寫；早退＝nil）
     s.detourRej, s.detourTT = nil, nil -- 本次 back 拒收的線與接調頭繞路的結果（detourAttempt 寫；只活到本函式記完事件）
     local ok, why, len = Drive.detourAttempt(s, playerNum, stuck)
+    if why == "pending" then -- 主 MOD 分幀還在算：不是失敗，不記 detour 事件（等完由 Drive.detourWaitTick 重呼叫本函式）
+        local w = s.detourWait
+        w.stuck, w.src = stuck, src
+        return false, why
+    end
     local v, vh, rej = s.vehicle, s.lastVehicleHeading, s.detourRej
     if not v or not MDADDynamics.finite(vh) then rej, vh = nil, 0 end
     local vx, vy = v and v:getX() or nil, v and v:getY() or nil
@@ -3344,56 +3483,78 @@ function Drive.rejectFields(p, route, vx, vy, fx, fy)
     return p
 end
 
+-- 主 MOD 分幀還在算（requestDetourRoute 回 pending，或接的拖車調頭回 pending）＝回 (false, "pending")，本次的輸入記在
+-- s.detourWait（dvx／dvy 車位、dvh 航向、dax／day 避讓圈、dmore 附的舊圈、rej back 拒收的線）；Drive.detourWaitTick 重呼叫時
+-- 不再驗前置條件、照第一次的輸入走完（同步時同一幀就有答案，車停著等）。
 function Drive.detourAttempt(s, playerNum, stuck)
-    if not stuck and not s.blocked and not s.currentBlocked then return false, "not-blocked" end
+    local w = s.detourWait
+    if w and w.via ~= "attempt" then w = nil end
+    if not w and not stuck and not s.blocked and not s.currentBlocked then return false, "not-blocked" end
     local api = navApi()
     if not api then return false, "api" end
     local playerObj = getSpecificPlayer(playerNum)
     local fin = MDADDynamics.finite -- 本檔的 local finite 定義在更後面（:1460+）
     if not playerObj or not fin(s.lastTx) or not fin(s.lastTy) then return false, "target" end
-    local vx, vy = s.vehicle:getX(), s.vehicle:getY()
-    local hx, hy = s.blockHitX, s.blockHitY
-    if not fin(hx) or not fin(hy) then hx, hy = vx, vy end
-    if stuck then
-        -- 堵點錨可能是舊 episode 的（遠處／車後）：交還前改道只認車前附近的，否則沿路線切線往前推
-        local h = s.profile and s.profile.segH[s.fstate.idx or 1] or nil
-        local ex, ey = hx - vx, hy - vy
-        if ex * ex + ey * ey > TUNE.STUCK_DETOUR_ANCHOR_M * TUNE.STUCK_DETOUR_ANCHOR_M
-                or (fin(h) and ex * cos(h) + ey * sin(h) < 0) then
-            hx, hy = vx, vy
+    local vx, vy, vh, ax, ay, remaining, more
+    if w then
+        vx, vy, vh, ax, ay, more, remaining = w.dvx, w.dvy, w.dvh, w.dax, w.day, w.dmore, w.drem
+    else
+        vx, vy = s.vehicle:getX(), s.vehicle:getY()
+        local hx, hy = s.blockHitX, s.blockHitY
+        if not fin(hx) or not fin(hy) then hx, hy = vx, vy end
+        if stuck then
+            -- 堵點錨可能是舊 episode 的（遠處／車後）：交還前改道只認車前附近的，否則沿路線切線往前推
+            local h = s.profile and s.profile.segH[s.fstate.idx or 1] or nil
+            local ex, ey = hx - vx, hy - vy
+            if ex * ex + ey * ey > TUNE.STUCK_DETOUR_ANCHOR_M * TUNE.STUCK_DETOUR_ANCHOR_M
+                    or (fin(h) and ex * cos(h) + ey * sin(h) < 0) then
+                hx, hy = vx, vy
+            end
         end
+        -- 避讓圈圓心＝堵點沿「車→堵點」方向再推 R（2026-09-02 s064 定罪：舊制以堵點
+        -- 為圓心、R=40，車在圈內 9-13m → 任何從本路出發的替代線第一段就穿圈
+        -- （avoidPenalty>0）→ 全部拒收 "through"，只剩起點在別條路的線又被 "far" 拒
+        -- → 永遠 nodetour）。推 R 後：圈的近緣貼堵點、車必在圈外，圈覆蓋堵點後方
+        -- 整段車陣（2R 深）。堵點與車重合（無錨）時沿路線切線推。
+        local dx, dy = hx - vx, hy - vy
+        local dn = sqrt(dx * dx + dy * dy)
+        if dn < 0.5 then
+            local h = s.profile and s.profile.segH[s.fstate.idx or 1] or nil
+            if fin(h) then dx, dy, dn = cos(h), sin(h), 1 else dx, dy, dn = 0, 0, 0 end
+        end
+        ax, ay = hx, hy
+        if dn > 0 then
+            ax = hx + dx / dn * TUNE.DETOUR_AVOID_R
+            ay = hy + dy / dn * TUNE.DETOUR_AVOID_R
+        end
+        remaining = s.profile and (s.profile.length - s.lastSNow) or nil
+        -- 同一趟先前判死的堵點一併避開（Drive.avoidMore；requestDetourRoute 拒收穿舊圈的線 "again"）
+        more = Drive.avoidMore(s, vx, vy, s.lastTx, s.lastTy, ax, ay, true)
+        vh = s.lastVehicleHeading
     end
-    -- 避讓圈圓心＝堵點沿「車→堵點」方向再推 R（2026-09-02 s064 定罪：舊制以堵點
-    -- 為圓心、R=40，車在圈內 9-13m → 任何從本路出發的替代線第一段就穿圈
-    -- （avoidPenalty>0）→ 全部拒收 "through"，只剩起點在別條路的線又被 "far" 拒
-    -- → 永遠 nodetour）。推 R 後：圈的近緣貼堵點、車必在圈外，圈覆蓋堵點後方
-    -- 整段車陣（2R 深）。堵點與車重合（無錨）時沿路線切線推。
-    local dx, dy = hx - vx, hy - vy
-    local dn = sqrt(dx * dx + dy * dy)
-    if dn < 0.5 then
-        local h = s.profile and s.profile.segH[s.fstate.idx or 1] or nil
-        if fin(h) then dx, dy, dn = cos(h), sin(h), 1 else dx, dy, dn = 0, 0, 0 end
-    end
-    local ax, ay = hx, hy
-    if dn > 0 then
-        ax = hx + dx / dn * TUNE.DETOUR_AVOID_R
-        ay = hy + dy / dn * TUNE.DETOUR_AVOID_R
-    end
-    local remaining = s.profile and (s.profile.length - s.lastSNow) or nil
-    -- 同一趟先前判死的堵點一併避開（Drive.avoidMore；requestDetourRoute 拒收穿舊圈的線 "again"）
-    local more = Drive.avoidMore(s, vx, vy, s.lastTx, s.lastTy, ax, ay, true)
     s.detourAvoidN = more and #more / 3 or nil
     s.detourAx, s.detourAy = ax, ay
-    local route, why, rejected = requestDetourRoute(api, playerNum, s.lastTx, s.lastTy, ax, ay, remaining, nil,
-        stuck and fin(remaining) and remaining * TUNE.STUCK_DETOUR_LEN_RATIO + TUNE.STUCK_DETOUR_LEN_SLACK or nil, s.route,
-        more)
-    -- 拖車只收從車頭方向出發的線（0929p E2E semi-long-mp block：改道線先往車後 4m 再 90° 轉進支路，
-    -- Follower 誤差 111° 未達調頭門檻、13 km/h 硬轉，掛車折 85° 脫開）；要調頭另走 Drive.towTurnaround。
-    local vh = s.lastVehicleHeading
-    if route and s.tow and fin(vh) and not Drive.routeLeavesForward(route, vx, vy, cos(vh), sin(vh)) then
-        route, why, rejected = nil, "back", route
+    local function park(rej) -- 分幀還在算：記下本次的輸入（s.detourWait 已由 requestDetourRoute 建好）
+        local pw = s.detourWait
+        pw.via, pw.dvx, pw.dvy, pw.dvh, pw.dax, pw.day, pw.dmore, pw.drem, pw.rej =
+            "attempt", vx, vy, vh, ax, ay, more, remaining, rej
+        return false, "pending"
     end
-    route, why, rejected = Drive.detourSettle(s, api, playerNum, route, why, rejected)
+    local route, why, rejected
+    if w and w.site == "towback" then
+        route, why, rejected = nil, "back", w.rej -- 主查詢已拒收 back，等的是接上的拖車調頭那一問
+    else
+        route, why, rejected = requestDetourRoute(api, playerNum, s.lastTx, s.lastTy, ax, ay, remaining, nil,
+            stuck and fin(remaining) and remaining * TUNE.STUCK_DETOUR_LEN_RATIO + TUNE.STUCK_DETOUR_LEN_SLACK or nil,
+            s.route, more, nil, s, "detour")
+        if why == "pending" then return park(nil) end
+        -- 拖車只收從車頭方向出發的線（0929p E2E semi-long-mp block：改道線先往車後 4m 再 90° 轉進支路，
+        -- Follower 誤差 111° 未達調頭門檻、13 km/h 硬轉，掛車折 85° 脫開）；要調頭另走 Drive.towTurnaround。
+        if route and s.tow and fin(vh) and not Drive.routeLeavesForward(route, vx, vy, cos(vh), sin(vh)) then
+            route, why, rejected = nil, "back", route
+        end
+        route, why, rejected = Drive.detourSettle(s, api, playerNum, route, why, rejected)
+    end
     -- 1026d NB1：拖車的替代線往車後（密集街廓被堵時最短替代線幾乎都先往回走）＝接拖車調頭繞路：車尾正後方圈＋
     -- 本堵點圈（同一個 ax,ay、DETOUR_AVOID_R）一起避，要一條從車頭方向出發、也不穿堵點的線（長度上限同調頭）。
     -- 舊制拒收 back 就沒有出口、停等到 WAIT_TIMEOUT 交還（正式服 1023b 新圖 14 趟 StopStuck／9 人）。
@@ -3403,6 +3564,7 @@ function Drive.detourAttempt(s, playerNum, stuck)
         s.detourRej = rejected
         local ok, tt, tlen = Drive.towTurnaround(s, playerNum, s.vehicle, getTimestampMs(), cos(vh), sin(vh),
             ax, ay, TUNE.DETOUR_AVOID_R)
+        if tt == "pending" then return park(rejected) end -- 調頭那一問在分幀算：重呼叫時直接回到這裡
         s.detourTT = tt
         if ok then
             if getDebug() then -- telemetry: detour 事件（why=towturn tt r1x r1y r2x r2y snapDist blen bdeg）
@@ -3472,29 +3634,48 @@ end
 -- 連同本趟判死的舊圈 Drive.avoidMore），回來的線穿它＝拒收（through／again），不得收「往前直穿堵點」的原線——
 -- 那等於判堵→改道→cutover 回同一處的迴圈；收下時這圈進 s.avoidHist（之後的改道與 sticky 重問照樣避開）。
 -- 事件 tow turn：kind=back（堵車改道接來的）；拒收且有算出線時帶被拒線前 2 點／snapDist／blen／bdeg（T11）。
+-- 主 MOD 分幀還在算＝回 (true, "pending")：呼叫端停住不交還；s.detourWait 記本次的車位與方向（tvx／tvy／tfx／tfy），
+-- site＝towturn（ROTATE，Drive.detourWaitTick 重呼叫本函式）或 towback（Drive.detourAttempt 接來的，重呼叫它）。
+-- 重呼叫時不再扣額度、不看等 cutover 的旗標，照第一次的輸入走完。
 function Drive.towTurnaround(s, playerNum, vehicle, now, fx, fy, bx, by, br)
-    if s.pendingRouteWhy == "towturn" then return now < (s.towTurnUntil or 0), "wait" end
-    if (s.towTurnTries or 0) >= TUNE.TOW_TURN_TRIES then return false, "max" end
-    s.towTurnTries = (s.towTurnTries or 0) + 1
+    local site = bx ~= nil and "towback" or "towturn"
+    local w = s.detourWait
+    if w and w.site ~= site then w = nil end
+    if not w then
+        if s.pendingRouteWhy == "towturn" then return now < (s.towTurnUntil or 0), "wait" end
+        if (s.towTurnTries or 0) >= TUNE.TOW_TURN_TRIES then return false, "max" end
+        s.towTurnTries = (s.towTurnTries or 0) + 1
+    end
     local api = navApi()
     local fin = MDADDynamics.finite -- 本檔的 local finite 定義在更後面
     if not api or not fin(s.lastTx) or not fin(s.lastTy) then return false, "api" end
-    local vx, vy = vehicle:getX(), vehicle:getY()
-    local back = TUNE.TOW_TURN_AVOID_R + TUNE.TOW_TURN_GAP_M
-    local ax, ay = vx - fx * back, vy - fy * back
-    local remaining = s.profile and (s.profile.length - s.lastSNow) or nil
-    local more = nil
-    if bx ~= nil then
-        more = { bx, by, br }
-        local hist = Drive.avoidMore(s, vx, vy, s.lastTx, s.lastTy, bx, by, true)
-        for k = 1, hist and #hist or 0 do
-            if #more >= 24 then break end -- 主 MOD moreAvoid 最多 8 圈
-            more[#more + 1] = hist[k]
+    local vx, vy, ax, ay, remaining, more
+    if w then
+        vx, vy, fx, fy, ax, ay, remaining, more = w.tvx, w.tvy, w.tfx, w.tfy, w.ax, w.ay, w.remaining, w.more
+    else
+        vx, vy = vehicle:getX(), vehicle:getY()
+        local back = TUNE.TOW_TURN_AVOID_R + TUNE.TOW_TURN_GAP_M
+        ax, ay = vx - fx * back, vy - fy * back
+        remaining = s.profile and (s.profile.length - s.lastSNow) or nil
+        if bx ~= nil then
+            more = { bx, by, br }
+            local hist = Drive.avoidMore(s, vx, vy, s.lastTx, s.lastTy, bx, by, true)
+            for k = 1, hist and #hist or 0 do
+                if #more >= 24 then break end -- 主 MOD moreAvoid 最多 8 圈
+                more[#more + 1] = hist[k]
+            end
         end
     end
     local route, why, rejected = requestDetourRoute(api, playerNum, s.lastTx, s.lastTy, ax, ay,
         remaining, TUNE.TOW_TURN_AVOID_R,
-        fin(remaining) and remaining * TUNE.TOW_TURN_LEN_RATIO + TUNE.TOW_TURN_LEN_SLACK or nil, s.route, more)
+        fin(remaining) and remaining * TUNE.TOW_TURN_LEN_RATIO + TUNE.TOW_TURN_LEN_SLACK or nil, s.route, more, nil,
+        s, site)
+    if why == "pending" then
+        w = s.detourWait
+        w.tvx, w.tvy, w.tfx, w.tfy = vx, vy, fx, fy
+        if site == "towturn" then w.via = "turn" end -- towback 由 Drive.detourAttempt 標 via
+        return true, "pending"
+    end
     if route and not Drive.routeLeavesForward(route, vx, vy, fx, fy) then
         route, why, rejected = nil, "back", route
     end
@@ -3540,77 +3721,103 @@ end
 -- 守「堵死時自動改道」選項（關著不問，同交還前改道 Drive.stuckDetour）。
 -- 收下＝下一幀 cutover why=towcorner；這期間若已停在轉角前，呼叫端等 cutover（≤TOW_TURN_WAIT_MS）不交還。
 -- 每幀呼叫：剖面沒換只比一次 identity，不配置。
-function Drive.towCornerDetour(s, playerNum, vehicle, now, fx, fy)
+-- 主 MOD 分幀還在算＝回 "pending"、車照目前路線開（stepFollow：停在轉角前也等、不交還）；s.detourWait 記本次的轉角集合、
+-- 車位與方向（cb／cvx／cvy／cfx／cfy／crear）。again＝Drive.detourWaitTick 的重呼叫：照第一次的輸入走完（不扣額度、不重驗
+-- 前置條件）；stepFollow 那次（again＝nil）在等待中不重問。其餘回傳＝事件的 why（ok 或拒收原因；沒問＝nil）。
+function Drive.towCornerDetour(s, playerNum, vehicle, now, fx, fy, again)
+    local w = s.detourWait
+    if w and w.site == "towcorner" then
+        if not again then return "pending" end
+    else
+        w = nil
+    end
     local pr = s.profileRoute
     local b = pr and pr.towBlocked
-    if b == nil or #b == 0 or s.towCornerSeen == pr then return end
-    s.towCornerSeen = pr
-    local sig = ""
-    for k = 1, #b do sig = sig .. string.format("%.1f,", b[k]) end
     local vx, vy, tx, ty = vehicle:getX(), vehicle:getY(), s.lastTx, s.lastTy
-    if s.towCornerSig == sig then
-        if s.towCornerRoute == s.route then return end -- 重建同一條線（版本變、重接）
-        local mx, my = vx - s.towCornerX, vy - s.towCornerY
-        local moved = sqrt(mx * mx + my * my)
-        if moved < TUNE.TOW_CORNER_REASK_M then
-            s.towCornerRoute = s.route
-            diagEvent(s, playerNum, "detour", { phase = "skip", kind = "towcorner", why = "same",
-                x = vx, y = vy, s = s.lastSNow, towN = #b / 2, moved = moved, attempt = s.towCornerTries })
-            return
-        end
-    end
-    s.towCornerRoute, s.towCornerSig, s.towCornerX, s.towCornerY = s.route, sig, vx, vy
-    local fin, rr, pad = MDADDynamics.finite, pr.towBlockedR, TUNE.TOW_CORNER_AVOID_PAD
-    local rp = s.route and s.route.pts
-    local ex, ey = rp and rp[#rp - 1], rp and rp[#rp]
-    local function covers(cx, cy, cr, px, py)
-        return fin(px) and fin(py) and (px - cx) * (px - cx) + (py - cy) * (py - cy) <= cr * cr
-    end
-    local ax, ay = b[1], b[2]
-    local r = (rr and fin(rr[1]) and rr[1] or 0) + pad
-    local why, skip, route, rejected, left, more, rearAvoid = nil, false, nil, nil, nil, nil, nil
+    local fin = MDADDynamics.finite
+    local ax, ay, r
+    local why, skip, ask, route, rejected, left, more, rearAvoid, hist, remaining, v9 =
+        nil, false, false, nil, nil, nil, nil, nil, nil, nil, true
     local api = navApi()
-    if not (type(MDAD.HUD) == "table" and type(MDAD.HUD.autoDetour) == "function" and MDAD.HUD.autoDetour() == true) then
-        why, skip = "off", true
-    elseif (s.towCornerTries or 0) >= TUNE.TOW_CORNER_TRIES then
-        why, skip = "max", true
-    elseif not api or type(api.requestDetour) ~= "function" then
-        why = "api"
-    elseif not fin(tx) or not fin(ty) or covers(ax, ay, r, tx, ty) or covers(ax, ay, r, ex, ey) then
-        why = "target"
-    elseif covers(ax, ay, r, vx, vy) then
-        why = "inside"
+    if w then
+        b, vx, vy, fx, fy, rearAvoid = w.cb, w.cvx, w.cvy, w.cfx, w.cfy, w.crear
+        ax, ay, r, more = w.ax, w.ay, w.r, w.more -- 其餘查詢參數由 requestDetourRoute 從 w 取回
+        if not api or type(api.requestDetour) ~= "function" then why = "api" else ask = true end
     else
-        s.towCornerTries = (s.towCornerTries or 0) + 1
-        local v9 = fin(api.navApiVersion) and api.navApiVersion >= 9
-        if v9 then
-            local back, rb = TUNE.TOW_TURN_AVOID_R + TUNE.TOW_TURN_GAP_M, TUNE.TOW_TURN_AVOID_R
-            local bx, by = vx - fx * back, vy - fy * back
-            if not covers(bx, by, rb, tx, ty) and not covers(bx, by, rb, ex, ey) then
-                more, rearAvoid = { bx, by, rb }, 1
+        if b == nil or #b == 0 or s.towCornerSeen == pr then return end
+        s.towCornerSeen = pr
+        local sig = ""
+        for k = 1, #b do sig = sig .. string.format("%.1f,", b[k]) end
+        if s.towCornerSig == sig then
+            if s.towCornerRoute == s.route then return end -- 重建同一條線（版本變、重接）
+            local mx, my = vx - s.towCornerX, vy - s.towCornerY
+            local moved = sqrt(mx * mx + my * my)
+            if moved < TUNE.TOW_CORNER_REASK_M then
+                s.towCornerRoute = s.route
+                diagEvent(s, playerNum, "detour", { phase = "skip", kind = "towcorner", why = "same",
+                    x = vx, y = vy, s = s.lastSNow, towN = #b / 2, moved = moved, attempt = s.towCornerTries })
+                return
             end
         end
-        local j = 1
-        for k = 3, #b - 1, 2 do
-            j = j + 1
-            local x, y = b[k], b[k + 1]
-            local cr = (rr and fin(rr[j]) and rr[j] or 0) + pad
-            if (more == nil or #more < 24) and not covers(x, y, cr, vx, vy)
-                    and not covers(x, y, cr, tx, ty) and not covers(x, y, cr, ex, ey) then
+        s.towCornerRoute, s.towCornerSig, s.towCornerX, s.towCornerY = s.route, sig, vx, vy
+        local rr, pad = pr.towBlockedR, TUNE.TOW_CORNER_AVOID_PAD
+        local rp = s.route and s.route.pts
+        local ex, ey = rp and rp[#rp - 1], rp and rp[#rp]
+        local function covers(cx, cy, cr, px, py)
+            return fin(px) and fin(py) and (px - cx) * (px - cx) + (py - cy) * (py - cy) <= cr * cr
+        end
+        ax, ay = b[1], b[2]
+        r = (rr and fin(rr[1]) and rr[1] or 0) + pad
+        if not (type(MDAD.HUD) == "table" and type(MDAD.HUD.autoDetour) == "function" and MDAD.HUD.autoDetour() == true) then
+            why, skip = "off", true
+        elseif (s.towCornerTries or 0) >= TUNE.TOW_CORNER_TRIES then
+            why, skip = "max", true
+        elseif not api or type(api.requestDetour) ~= "function" then
+            why = "api"
+        elseif not fin(tx) or not fin(ty) or covers(ax, ay, r, tx, ty) or covers(ax, ay, r, ex, ey) then
+            why = "target"
+        elseif covers(ax, ay, r, vx, vy) then
+            why = "inside"
+        else
+            ask = true
+            s.towCornerTries = (s.towCornerTries or 0) + 1
+            v9 = fin(api.navApiVersion) and api.navApiVersion >= 9
+            if v9 then
+                local back, rb = TUNE.TOW_TURN_AVOID_R + TUNE.TOW_TURN_GAP_M, TUNE.TOW_TURN_AVOID_R
+                local bx, by = vx - fx * back, vy - fy * back
+                if not covers(bx, by, rb, tx, ty) and not covers(bx, by, rb, ex, ey) then
+                    more, rearAvoid = { bx, by, rb }, 1
+                end
+            end
+            local j = 1
+            for k = 3, #b - 1, 2 do
+                j = j + 1
+                local x, y = b[k], b[k + 1]
+                local cr = (rr and fin(rr[j]) and rr[j] or 0) + pad
+                if (more == nil or #more < 24) and not covers(x, y, cr, vx, vy)
+                        and not covers(x, y, cr, tx, ty) and not covers(x, y, cr, ex, ey) then
+                    if more == nil then more = {} end
+                    more[#more + 1], more[#more + 2], more[#more + 3] = x, y, cr
+                end
+            end
+            hist = Drive.avoidMore(s, vx, vy, tx, ty, ax, ay, true)
+            for k = 1, hist and #hist or 0 do
                 if more == nil then more = {} end
-                more[#more + 1], more[#more + 2], more[#more + 3] = x, y, cr
+                if #more >= 24 then break end
+                more[#more + 1] = hist[k]
             end
+            remaining = s.profile and (s.profile.length - s.lastSNow) or nil
         end
-        local hist = Drive.avoidMore(s, vx, vy, tx, ty, ax, ay, true)
-        for k = 1, hist and #hist or 0 do
-            if more == nil then more = {} end
-            if #more >= 24 then break end
-            more[#more + 1] = hist[k]
-        end
-        local remaining = s.profile and (s.profile.length - s.lastSNow) or nil
+    end
+    if ask then
         route, why, rejected = requestDetourRoute(api, playerNum, tx, ty, ax, ay, remaining, r,
             fin(remaining) and remaining * TUNE.TOW_TURN_LEN_RATIO + TUNE.TOW_TURN_LEN_SLACK or nil, s.route,
-            v9 and more or nil, hist or {})
+            v9 and more or nil, hist or {}, s, "towcorner")
+        if why == "pending" then
+            w = s.detourWait
+            w.cb, w.cvx, w.cvy, w.cfx, w.cfy, w.crear = b, vx, vy, fx, fy, rearAvoid
+            return "pending"
+        end
         if route and not Drive.routeLeavesForward(route, vx, vy, fx, fy) then route, why, rejected = nil, "back", route end
         if route then
             local shaped = Drive.profileRouteOf(route, s.tow, s.vehicleProfile, vx, vy)
@@ -3631,12 +3838,13 @@ function Drive.towCornerDetour(s, playerNum, vehicle, now, fx, fy)
             .. (route and ("ok len=" .. tostring(route.len)) or ("rejected " .. tostring(why))
                 .. (left and left > 0 and (" left=" .. left) or "")))
     end
-    if not route then return end
+    if not route then return why end
     s.pendingDetour, s.pendingRouteWhy, s.nextRouteMs = true, "towcorner", 0
     s.towCornerUntil = now + TUNE.TOW_TURN_WAIT_MS
     local playerObj = getSpecificPlayer(playerNum)
     if playerObj then haloGood(playerObj, KEY_DETOUR) end
     voice("detour", playerNum)
+    return "ok"
 end
 
 --------------------------------------------------------------------------------
@@ -8840,29 +9048,39 @@ end
 -- 實際堵死多半先走倒車鏈、額度用完才在停等預算／倒車逾時交還——E2E rc13 12 個固定堵點案開著自動改道
 -- 仍 0 次改道。交還前若選項開著、本 session 額度未滿、不在上次問過的地方，就先要一條避開前方的替代
 -- 路線（繞遠上限放寬到拖車調頭同一套）；拿到＝重置停等預算繼續開，拿不到＝照常交還。
-function Drive.stuckDetour(s, playerNum)
-    local vx, vy = s.vehicle:getX(), s.vehicle:getY()
-    local px, py = s.stuckDetourX, s.stuckDetourY
-    -- 沒問就交還的三種原因各記一筆（phase＝skip，不觸發片段）：舊制靜默 return，正式服 0.18.2 開著自動改道的受困交還
-    -- 沒有任何改道紀錄，分不出是選項關、這趟額度用完，還是在上次問過的地方附近
-    local skip = nil
-    if not (type(MDAD.HUD) == "table" and type(MDAD.HUD.autoDetour) == "function"
-            and MDAD.HUD.autoDetour() == true) then
-        skip = "off"
-    elseif (s.stuckDetourN or 0) >= TUNE.STUCK_DETOUR_MAX then
-        skip = "max"
-    elseif finite(px) and finite(py) and (vx - px) * (vx - px) + (vy - py) * (vy - py)
-            < TUNE.STUCK_DETOUR_NEAR_M * TUNE.STUCK_DETOUR_NEAR_M then
-        skip = "near"
+-- 主 MOD 分幀還在算＝回 "pending"（真值：呼叫端照「拿到」return、不交還）；車停住等（Drive.detourWaitTick 重呼叫本函式，
+-- 不再扣額度、不再驗 off／max／near），等完拿到＝同上，拿不到＝它交還 KEY_STUCK。budget＝停等預算出口（召喚交還時
+-- 停止碼照那個出口給 Drive.summonBlockCode，等完才交還時同樣給）。
+function Drive.stuckDetour(s, playerNum, budget)
+    local w = s.detourWait
+    if not (w and w.via == "attempt" and w.stuck) then
+        local vx, vy = s.vehicle:getX(), s.vehicle:getY()
+        local px, py = s.stuckDetourX, s.stuckDetourY
+        -- 沒問就交還的三種原因各記一筆（phase＝skip，不觸發片段）：舊制靜默 return，正式服 0.18.2 開著自動改道的受困交還
+        -- 沒有任何改道紀錄，分不出是選項關、這趟額度用完，還是在上次問過的地方附近
+        local skip = nil
+        if not (type(MDAD.HUD) == "table" and type(MDAD.HUD.autoDetour) == "function"
+                and MDAD.HUD.autoDetour() == true) then
+            skip = "off"
+        elseif (s.stuckDetourN or 0) >= TUNE.STUCK_DETOUR_MAX then
+            skip = "max"
+        elseif finite(px) and finite(py) and (vx - px) * (vx - px) + (vy - py) * (vy - py)
+                < TUNE.STUCK_DETOUR_NEAR_M * TUNE.STUCK_DETOUR_NEAR_M then
+            skip = "near"
+        end
+        if skip then
+            diagEvent(s, playerNum, "detour", { phase = "skip", why = skip, x = vx, y = vy, s = s.lastSNow,
+                ms = s.waitAccumMs, attempt = s.episodeAttempts })
+            return false
+        end
+        s.stuckDetourN = (s.stuckDetourN or 0) + 1
+        s.stuckDetourX, s.stuckDetourY = vx, vy
     end
-    if skip then
-        diagEvent(s, playerNum, "detour", { phase = "skip", why = skip, x = vx, y = vy, s = s.lastSNow,
-            ms = s.waitAccumMs, attempt = s.episodeAttempts })
-        return false
+    local ok, why = Drive.requestDetour(playerNum, true) -- 事件由 requestDetour 記（phase＝stuck）
+    if why == "pending" then
+        if budget then s.detourWait.code = true end
+        return "pending"
     end
-    s.stuckDetourN = (s.stuckDetourN or 0) + 1
-    s.stuckDetourX, s.stuckDetourY = vx, vy
-    local ok = Drive.requestDetour(playerNum, true) -- 事件由 requestDetour 記（phase＝stuck）
     if not ok then return false end
     s.mode, s.recoverWhy = "follow", nil
     s.progressState, s.progressSince = "disarmed", 0
@@ -14790,6 +15008,7 @@ function Drive.rehitchArm(s, playerNum, vehicle, now)
     s.rehitch = { phase = "brake", t0 = now, tow = tow, x0 = x0 or vehicle:getX(), y0 = y0 or vehicle:getY() }
     s.tow, s.towPhi, s.towUp, s.towCap = nil, nil, nil, nil
     s.mode = "rehitch"
+    if s.detourWait then Drive.detourEnd(s, playerNum, "drop", "rehitch") end -- 等的改道是脫開前那台拖車的
     s.recoverWhy, s.recoverPulse, s.unstickSide = nil, false, nil
     vehicle:setRegulator(false)
     Drive.invalidateCommandState(s, vehicle:getCurrentSpeedKmHour(), "RECOVER")
@@ -16598,8 +16817,11 @@ local function stepFollow(s, vehicle, playerNum, now)
                 -- 路線上有過不去的轉角：得知當下先要一條避開的改道（Drive.towCornerDetour），沒有才照舊停在轉角前交還
                 Drive.towCornerDetour(s, playerNum, vehicle, now, fx, fy)
                 local towCap, towWhy = MDADTrailer.guard(s, vehicle, now, speedKmh)
-                if towWhy == "corner" and s.pendingRouteWhy == "towcorner" and now < (s.towCornerUntil or 0) then
-                    towCap, towWhy = 0, nil -- 已收下避開轉角的線、等下一幀 cutover：停住不交還
+                if towWhy == "corner" and (s.pendingRouteWhy == "towcorner" and now < (s.towCornerUntil or 0)
+                        or s.detourWait ~= nil and s.detourWait.site == "towcorner") then
+                    -- 已收下避開轉角的線、等下一幀 cutover，或主 MOD 還在分幀算那條線（上限 DETOUR_PEND_MS，
+                    -- Drive.detourWaitTick）：停住不交還
+                    towCap, towWhy = 0, nil
                 end
                 if towWhy then
                     vehicle:setRegulator(false)
@@ -16912,7 +17134,7 @@ local function stepFollow(s, vehicle, playerNum, now)
             Drive.stop(playerNum, Drive.KEY_PLAYER_STOP, "handback")
             return
         end
-        if Drive.stuckDetour(s, playerNum) then return end
+        if Drive.stuckDetour(s, playerNum, true) then return end
         if s.summon then s.summon.code = Drive.summonBlockCode(s) end -- 召喚：停等預算用完＝BLOCKED（或殭屍擋路 ZOMBIES）
         Drive.stop(playerNum, KEY_STUCK)
         return
@@ -17342,6 +17564,12 @@ local function onPlayerUpdate(player)
             s.towTurnTries, s.uturnLoopX, s.uturnLoopY = 0, nil, nil -- 新目標＝新的一趟
             s.towCornerTries, s.towCornerSig = 0, nil -- 新目標＝新的一趟（同集合不重問只限同一趟）
             s.rejectedRoute = nil
+            if s.detourWait then Drive.detourEnd(s, playerNum, "drop", "target") end -- 舊目標的分幀改道作廢
+        end
+        -- 停住等主 MOD 分幀改道（Drive.detourWaitTick 的 hold 呼叫點）時不換線：同步時答案當幀就到、輪不到這次取路；
+        -- 收下後 nextRouteMs 歸零照常 cutover，拒收或逾時後下一次取路照常（含 sticky 重問）。換目標已在上面作廢等待。
+        if route ~= s.route and s.detourWait ~= nil and s.detourWait.hold then
+            route = s.route
         end
         -- 被本 MOD 拒收的替代線（far／long／through）在 nav API v10 以下仍躺在主 MOD 快取裡（requestDetour
         -- 成功即覆寫；v11 起收下才 commit，拒收的不進快取），下一次取路會原樣拿回同一個 table——不得當成一般 cutover 收下
@@ -17407,28 +17635,41 @@ local function onPlayerUpdate(player)
         -- sticky 避讓：主 MOD 之後因偏航／冷卻自行重算（不帶 avoid）若又穿回堵點（目前這圈或同一趟先前判死的圈，
         -- Drive.avoidMore），立刻以同一圈再要一次替代線、舊圈一併附上，拿不到才照原線走（每次 cutover 最多一次）。
         -- 圈的半徑與長度上限跟當初要的同一套（堵車改道／拖車繞開調頭，s.avoidR／s.avoidTow）。
+        -- 主 MOD 分幀還在算（nav API v14，requestDetourRoute 回 pending）：照舊沿目前路線開（這次不換線），nextRouteMs＝now
+        -- 讓下一 tick 同參數重問（requestDetourRoute 用第一次的參數與驗收輸入），等到了再照上面切換或作廢避讓圈；
+        -- 主 MOD 的新線不再穿圈、或不再有新線（換線條件不成立）＝drop why=route，照同步時的規則走。
+        local stickyWait = s.detourWait ~= nil and s.detourWait.site == "sticky"
         if route ~= s.route and not targetChanged and not s.pendingDetour
                 and finite(s.avoidX) and finite(s.avoidY) then
             local more = Drive.avoidMore(s, vehicle:getX(), vehicle:getY(), tx, ty, s.avoidX, s.avoidY, false)
             if routeCrossesAvoid(route, s.avoidX, s.avoidY, s.avoidR or TUNE.DETOUR_AVOID_R)
                     or Drive.crossesAnyAvoid(route, more) then
+                stickyWait = false
                 local remaining = s.profile and (s.profile.length - s.lastSNow) or nil
-                local detour, _, rejected = Drive.detourSettle(s, api, playerNum, requestDetourRoute(api, playerNum,
-                    tx, ty, s.avoidX, s.avoidY,
+                local detour, why, rejected = requestDetourRoute(api, playerNum, tx, ty, s.avoidX, s.avoidY,
                     remaining, s.avoidR, s.avoidLong and finite(remaining)
                         and remaining * TUNE.STUCK_DETOUR_LEN_RATIO + TUNE.STUCK_DETOUR_LEN_SLACK
                         or s.avoidTow and finite(remaining)
-                        and remaining * TUNE.TOW_TURN_LEN_RATIO + TUNE.TOW_TURN_LEN_SLACK or nil, route, more))
-                if detour then
-                    route = detour
-                    s.pendingRouteWhy = s.avoidTow and "towturn" or "detour"
+                        and remaining * TUNE.TOW_TURN_LEN_RATIO + TUNE.TOW_TURN_LEN_SLACK or nil, route, more, nil,
+                    s, "sticky")
+                if why == "pending" then
+                    route = s.route
+                    s.nextRouteMs = now
                 else
-                    s.avoidX, s.avoidY, s.avoidR, s.avoidTow, s.avoidLong = nil, nil, nil, nil, nil
-                    -- 拒收紀錄由 Drive.detourSettle 記（v10 以下）
+                    detour, why, rejected = Drive.detourSettle(s, api, playerNum, detour, why, rejected)
+                    if detour then
+                        route = detour
+                        s.pendingRouteWhy = s.avoidTow and "towturn" or "detour"
+                    else
+                        s.avoidX, s.avoidY, s.avoidR, s.avoidTow, s.avoidLong = nil, nil, nil, nil, nil
+                        -- 拒收紀錄由 Drive.detourSettle 記（v10 以下）
+                    end
                 end
             end
         end
+        if stickyWait then Drive.detourEnd(s, playerNum, "drop", "route") end
         if route ~= s.route or versionChanged or s.reapproach then
+            if s.detourWait then Drive.detourEnd(s, playerNum, "drop", "route") end -- 換線：等的那條是舊線的改道
             -- 自動掛回中（s.tow 收在 rh.tow）照舊依掛車改寫：掛回後沿這條線拖著走
             local profileRoute, approachM = Drive.profileRouteOf(route, s.tow or s.rehitch and s.rehitch.tow,
                 s.vehicleProfile,
@@ -17751,6 +17992,7 @@ local function onPlayerUpdate(player)
                 return
             end
             s.mode = "yield"
+            if s.detourWait then Drive.detourEnd(s, playerNum, "drop", "yield") end -- 玩家接手：恢復時從頭判堵、改道
             s.yieldResumeMs = resumeMs
             s.yieldSinceMs = now
             diagEvent(s, playerNum, "takeover", { phase = "yield", key = s.manualKey })
@@ -17853,6 +18095,9 @@ local function onPlayerUpdate(player)
         if s.brakeTerminalFault then Drive.stop(playerNum, KEY_UNSUPPORTED) end
         return
     end
+
+    -- 主 MOD 分幀改道（Drive.detourWaitTick）：停住的呼叫點這裡重問、還在算就停著（不跑倒車與跟線、不計停等預算）
+    if s.detourWait ~= nil and Drive.detourWaitTick(s, vehicle, playerNum, now) then return end
 
     -- 樹叢阻力抵消（Drive.bushCancel）：跟線、繞行與倒車都要；讓位（玩家自己開）在上面就 return 了
     Drive.bushCancel(s, vehicle, now)
