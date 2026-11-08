@@ -41,15 +41,8 @@ description=[/list]
 description=🗺️ Whether a map mod supports navigation and autodrive depends on its author providing correct road data.
 description=📖 [b]Full details, settings and FAQ for every feature:[/b] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3817845953]AutoDrive Mod Guide: Devices, Trips, Driving Behavior & Road Requirements[/url]
 description=
-description=[h2]🔗 Minidoracat MiniMap series[/h2]
-description=[list]
-description=[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763913359]MiniMap[/url] (main mod, required) — image-based world map and minimap, search, navigation
-description=[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763914102]MOD Maps[/url] — map images and street-name translations for map mods
-description=[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3792675881]AutoDrive[/url] — GPS navigation and autonomous driving
-description=[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3768276209]Zones[/url] — custom server zones
-description=[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3765182411]MOD Compatibility[/url] — icons for third-party animals such as dogs and horses
-description=[/list]
-description=More mods: [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3809297109]Minidoracat Mods for B42 collection[/url]
+description=[h2]🔗 More Minidoracat mods[/h2]
+description=All my mods are in the [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3809297109]Minidoracat Mods for B42 collection[/url] — pick what you need.
 description=
 description=[h2]💬 Feedback & community[/h2]
 description=[list]

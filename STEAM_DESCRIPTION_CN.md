@@ -38,15 +38,8 @@
 🗺️ 地图 MOD 能否导航与自驾，取决于地图作者是否提供正确的道路数据。
 📖 [b]每项功能的详细说明、设置与常见问题：[/b][url=https://steamcommunity.com/sharedfiles/filedetails/?id=3817845856]自動駕駛 AutoDrive MOD 完整說明：裝置取得、行程、駕駛行為與道路需求[/url]（繁体中文）
 
-[h2]🔗 Minidoracat 小地图系列[/h2]
-[list]
-[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763913359]MiniMap[/url]（主 MOD，必装）——图片化世界地图与小地图、搜索、导航
-[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3763914102]MOD Maps[/url]——地图 MOD 的地图图片与路名翻译
-[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3792675881]AutoDrive[/url]——GPS 导航与自动驾驶
-[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3768276209]Zones[/url]——服务器自定义区域
-[*] [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3765182411]MOD Compatibility[/url]——狗、马等第三方动物图标
-[/list]
-其他作品：[url=https://steamcommunity.com/sharedfiles/filedetails/?id=3809297109]Minidoracat 全系列收藏[/url]
+[h2]🔗 Minidoracat 全系列[/h2]
+其他作品都在[url=https://steamcommunity.com/sharedfiles/filedetails/?id=3809297109]Minidoracat 全系列收藏[/url]，按需自选订阅。
 
 [h2]💬 反馈与交流[/h2]
 [list]
