@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1109c"
+Drive.REV = "1110a"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -15297,19 +15297,21 @@ end
 -- 會自動掛回）。s.rehitch＝這次掛回的狀態：進入時 s.tow 收進 rh.tow、s.tow＝nil——拖車防線、脫開檢查、倒車探測的掛車車身
 -- 都不碰已移出世界的舊物件；cutover 照舊用 rh.tow 改寫剖面路線、保留 rehitch 模式；讓位恢復後從 wait 重來。
 
--- 掛回各步的事件（tow phase=rh-arm／rh-stop／rh-found／rh-reverse／rh-attach／rh-done／rh-fail）與 console 行：ms＝脫開後、
+-- 掛回各步的事件（tow phase=rh-arm／rh-stop／rh-found／rh-reverse／rh-phys／rh-attach／rh-done／rh-fail）與 console 行：ms＝脫開後、
 -- attempt＝這趟第幾次、d＝rh-stop 停車處／rh-found 回來的掛車到脫開點的距離、hd／phi／lat＝最近一次量的兩掛點距離、折角、
 -- 牽引車掛點離掛車軸線的橫偏（MDADTrailer.hitchGap）、moved＝已倒車距離；rh-fail 另帶 why，後方探測不清時 x／y／kind。
+-- pon＝倒車時引擎把物理關著、本 MOD 打開的次數（42.22 等待重接；rh-phys＝第一次，沒有＝省略）。
 function Drive.rehitchNote(s, playerNum, vehicle, now, phase, d, why, x, y, kind)
     local rh = s.rehitch
     local speed = vehicle:getCurrentSpeedKmHour()
     diagEvent(s, playerNum, "tow", { phase = phase, why = why, ms = now - rh.t0, attempt = s.rehitchN, speed = speed,
-        d = d, hd = rh.hd, phi = rh.phi, lat = rh.lat, moved = rh.moved, x = x, y = y, kind = kind, vid = rh.tow.id })
-    if getDebug() then -- telemetry: tow phase=rh-*（why／ms／attempt／speed／d／hd／phi／lat／moved）
+        d = d, hd = rh.hd, phi = rh.phi, lat = rh.lat, moved = rh.moved, x = x, y = y, kind = kind, vid = rh.tow.id,
+        pon = rh.physOn })
+    if getDebug() then -- telemetry: tow phase=rh-*（why／ms／attempt／speed／d／hd／phi／lat／moved／pon）
         print(LOG .. "pn=" .. playerNum .. " rehitch " .. phase .. " why=" .. tostring(why) .. " ms=" .. tostring(now - rh.t0)
             .. " attempt=" .. tostring(s.rehitchN) .. " speed=" .. tostring(speed) .. " d=" .. tostring(d)
             .. " hd=" .. tostring(rh.hd) .. " phi=" .. tostring(rh.phi) .. " lat=" .. tostring(rh.lat)
-            .. " moved=" .. tostring(rh.moved))
+            .. " moved=" .. tostring(rh.moved) .. " pon=" .. tostring(rh.physOn))
     end
 end
 
@@ -15457,6 +15459,15 @@ function Drive.rehitchReverse(s, vehicle, playerNum, now, rh, speedKmh, mult, vx
         local imp = BaseVehicle.allocVector3f()
         imp:set(-back * fx - side * fy, 0, -back * fy + side * fx)
         out:set(-TUNE.REHITCH_TAIL_M * fx, 0, -TUNE.REHITCH_TAIL_M * fy)
+        -- 42.22：牽引車等著重接拖掛夥伴（BaseVehicle.isWaitingToReattachTowingPartner）時 CarController.shouldBeActive 一律回
+        -- false——掛車一離開客戶端，牽引車物理當場關掉（breakConstraint→constraintChanged），掛回前不會自己再開；掛車回來時離
+        -- 掛點超過引擎自己掛回的距離（canAttachTrailer，距離平方 <10），衝量推不動＝卡死。施衝量前打開物理：施了衝量那幾幀
+        -- isAtRest 為假，checkShouldBeActive 不會關回去；掛上後 constraintChanged 照常重算。42.21 這時物理本來就開著。
+        if jget(vehicle, "isPhysicsActive") == false then
+            vehicle:setPhysicsActive(true)
+            rh.physOn = (rh.physOn or 0) + 1
+            if rh.physOn == 1 then Drive.rehitchNote(s, playerNum, vehicle, now, "rh-phys") end
+        end
         Drive.addImpulse(vehicle, imp, out)
         BaseVehicle.releaseVector3f(imp)
     end

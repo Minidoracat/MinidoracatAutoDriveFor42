@@ -25845,6 +25845,23 @@ function drive.scenarioTowRehitch()
     checkTrue(im.total == 1 and im.x < 0 and im.z > 0 and math.abs(im.rx + T.REHITCH_TAIL_M) < 1e-9 and math.abs(im.rz) < 1e-9,
         "(rh-rev) 一個 impulse：往後推、側推朝對準點、施力點在車心後（x " .. tostring(im.x) .. "、z " .. tostring(im.z)
         .. "、rx " .. tostring(im.rx) .. "）")
+    -- (rh-phys) 1110a：42.22 牽引車等掛車重接時引擎把物理關著（推不動），施衝量前打開、第一次記 rh-phys；開著不碰；
+    --   又被關再開、不重記。違規證明：拿掉 rehitchReverse 的 setPhysicsActive 段＝紅。
+    local ph = { on = false, n = 0 }
+    dveh.isPhysicsActive = function() return ph.on end
+    dveh.setPhysicsActive = function(_, a) ph.on, ph.n = a, ph.n + 1 end
+    driveReset(dveh)
+    tick()
+    checkTrue(ph.on and ph.n == 1 and dveh._imp.total == 1 and count("rh-phys") == 1 and last("rh-phys").pon == 1,
+        "(rh-phys) 物理被引擎關著：施衝量前打開、記 rh-phys（開 " .. ph.n .. " 次、rh-phys " .. count("rh-phys") .. "）")
+    driveReset(dveh)
+    tick()
+    checkTrue(ph.n == 1 and dveh._imp.total == 1, "(rh-phys) 物理開著：不碰、照常施衝量（開 " .. ph.n .. " 次）")
+    ph.on = false
+    driveReset(dveh)
+    tick()
+    checkTrue(ph.on and ph.n == 2 and count("rh-phys") == 1, "(rh-phys) 又被關：再開、不重記 rh-phys（開 " .. ph.n .. " 次）")
+    dveh.isPhysicsActive, dveh.setPhysicsActive = nil, nil
     dveh._speed = -T.REHITCH_FAST_KMH - 1
     driveReset(dveh)
     tick()
@@ -25869,6 +25886,7 @@ function drive.scenarioTowRehitch()
         "(rh-done) 沒再斷：換新幾何、感測排除新掛車、回跟線（mode " .. tostring(st.mode) .. "）")
     checkTrue(voices[#voices] == "resume" and hasHalo("UI_MinidoracatAutoDrive_TrailerRehitched", "good"),
         "(rh-done) 播 resume 語音、綠字")
+    checkEq(last("rh-done").pon, 2, "(rh-phys) rh-done 帶 pon＝這趟打開物理的次數")
 
     -- 失敗出口：交還、HUD 停止原因同步中斷、lost 不重記
     local function failed(tag, why)

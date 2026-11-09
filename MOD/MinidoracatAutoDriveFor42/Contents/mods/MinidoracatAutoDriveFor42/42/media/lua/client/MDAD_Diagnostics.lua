@@ -235,6 +235,8 @@ local EK = {
     "r1x", "r1y", "r2x", "r2y", "blen", "bdeg", "tt",
     -- 1108d dpend（Driver Drive.detourNote，主 MOD nav v14 改道分幀）：開查詢當下的起點（召喚＝車位；交付的線從這裡起）
     "qx", "qy",
+    -- 1110a tow rh-*（Driver Drive.rehitchNote）：倒車掛回時引擎把牽引車物理關著（42.22 等待重接）、本 MOD 打開的次數
+    "pon",
 }
 
 local function logOnce(msg)
