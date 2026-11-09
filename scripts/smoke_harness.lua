@@ -13064,6 +13064,53 @@ local function scenarioDetour()
 end
 scenarioDetour()
 
+-- (once) 1109：自動改道與停等預算出口同一幀成立只問主 MOD 一次（E2E Knox Pass autodrive-mp stuck=1：倒車三次後寬帶
+--   判完那幀 waitAccumMs 已過 WAIT_TIMEOUT_MS——寬限 Drive.wideJudgePending 讓預算出口等到這幀——舊制先問 auto、同幀
+--   預算出口又問 stuck：主 MOD 算兩次、多記一筆事件、多扣一次交還前改道額度）。預算到期＝只走交還前改道
+--   （Drive.stuckDetour）；沒到期照舊自動改道（(c5d)）。違規證明：停等預算出口排回 autoDetourNow 之後＝紅。
+function drive.scenarioDetourOnce()
+    scenario("1109：自動改道與停等預算出口同一幀只問主 MOD 一次")
+    local oldAuto = MDAD.HUD.autoDetour
+    local oldEvent, oldSample = MDADDiagnostics.event, MDADDiagnostics.sample
+    local T, nav, ev = MDAD.Drive.debugTune(), drive.nav, {}
+    MDAD.HUD.autoDetour = function() return true end
+    checkTrue(armDrive(), "(once) 啟動")
+    for _, y in ipairs({ -5, -4, -2, -1, 0, 1, 2, 4, 5 }) do drive.putSolid(20, y, "harness_wall_" .. y) end
+    dveh._x = 11
+    driveTick(dp, dveh)
+    drive.scanRound()
+    dveh._speed = 0
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    drive.wideRounds(true) -- 寬帶判堵到最寬一級
+    local st = MDAD.Drive.debugSession(0)
+    -- 倒車過一次又被同一處堵住（同 (c5d)），倒車與停等已把預算吃到期、還在寬限內：這次嘗試的寬帶從第一級重判
+    st.episodeAttempts, st.waitAccumMs = 1, T.WAIT_TIMEOUT_MS + 500
+    MDADDiagnostics.sample = function() return true end
+    st.diag = true
+    MDADDiagnostics.event = function(pn, name, a, ...)
+        if name == "detour" and type(a) == "table" then ev[#ev + 1] = a end
+        return oldEvent(pn, name, a, ...)
+    end
+    nav.detour = { pts = { 11, 0, 11, 12, 156, 12, 156, 0 }, len = 120, cost = 120, avoidPenalty = 0, snapDist = 1 }
+    nav.detourCalls = 0
+    drive.wideRounds()
+    local e1 = ev[1] or {}
+    checkTrue(e1.attempt == 1 and type(e1.ms) == "number" and e1.ms >= T.WAIT_TIMEOUT_MS,
+        "(once) 前置：寬帶判完那幀停等預算已到期（attempt=" .. tostring(e1.attempt) .. " ms=" .. tostring(e1.ms) .. "）")
+    checkTrue(nav.detourCalls == 1 and #ev == 1 and e1.phase == "stuck" and e1.why == "ok" and st.stuckDetourN == 1
+            and MDAD.Drive.isActive(0),
+        "(once) 只問一次、走交還前改道、拿到繼續開（calls=" .. tostring(nav.detourCalls) .. " phases="
+        .. tostring(e1.phase) .. "," .. tostring(ev[2] and ev[2].phase) .. " n=" .. tostring(st.stuckDetourN) .. "）")
+    MDADDiagnostics.event, MDADDiagnostics.sample = oldEvent, oldSample
+    st.diag = false
+    MDAD.Drive.stop(0, nil)
+    for _, y in ipairs({ -5, -4, -2, -1, 0, 1, 2, 4, 5 }) do drive.clearCell(20, y) end
+    nav.detour = nil
+    MDAD.HUD.autoDetour = oldAuto
+end
+drive.scenarioDetourOnce()
+
 -- (c5v11) 1021c nav API v11：requestDetour 第 9 參 deferCommit＝true、驗收通過才 commitDetour——拒收的線不進主 MOD
 --   快取，小地圖藍線（＝快取，樁裡是 nav.route）維持車在走的那條；commit 失敗＝拒收 "commit"。v10 以下、或 v11 缺
 --   commitDetour＝不傳、拒收記 rejectedRoute（舊制）；舊制第一次 log 一次。樁照主 MOD 真語意：v10 忽略第 9 參照樣覆寫，

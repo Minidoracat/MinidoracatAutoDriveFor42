@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1109b"
+Drive.REV = "1109c"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -16629,6 +16629,10 @@ local function stepFollow(s, vehicle, playerNum, now)
         if Drive.startNearStall(s, now, avProgress) and not s.blockRetryDone then
             requestRecover(s, "start-near")
         end
+        -- 停等預算出口先定（1109c，Knox Pass E2E stuck=1）：下面的自動改道與 blocked-retry 都要 postAction==nil，預算已到期的
+        -- 那幀只走交還前改道（Drive.stuckDetour）。舊制排在兩者之後：寬帶判完那幀預算已過（Drive.wideJudgePending 的寬限），
+        -- 同幀先問 auto 又問 stuck，主 MOD 算兩次、多扣一次交還前改道額度。
+        if s.waitAccumMs >= TUNE.WAIT_TIMEOUT_MS and not Drive.wideJudgePending(s) then postAction = "wait" end
         -- 自動改道（ESC 選項，0928m 起預設開）：blocked-retry 之後仍在停等、累計超過
         -- AUTO_DETOUR_MS 才要替代路線；一個停等 episode 只試一次，失敗＝沒替代路，
         -- 剩下交給 WAIT_TIMEOUT 紅字。玩家按 HUD「改道」鈕走同一條 Drive.requestDetour。
@@ -16669,7 +16673,6 @@ local function stepFollow(s, vehicle, playerNum, now)
             -- 倒不了（soft fail）回到合法停等，只試一次防洗版。
             requestRecover(s, "blocked-retry")
         end
-        if s.waitAccumMs >= TUNE.WAIT_TIMEOUT_MS and not Drive.wideJudgePending(s) then postAction = "wait" end
         if s.softGiveUp and postAction == nil then postAction = "animal" end -- 動物爬行到上限仍擋著
 
         local skipProgressCompare = false
