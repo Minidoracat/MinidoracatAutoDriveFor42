@@ -1021,7 +1021,7 @@ local function scanCell(state, vehicle, cell, wx, wy, l)
     local box, wallN, wallW, trunk, thin, bush = hard, false, false, false, false, false
 
     if not hard then
-        local objs = square:getObjects()               -- IsoGridSquare.java:9635（回 PZArrayList）
+        local objs = square:getObjects()               -- 42.22.2 IsoGridSquare.java:9212（回 List，實體 ArrayList）
         local nObj = objs:size()                       -- 迭代慣例 ISButtonPrompt.lua:535-536
         local gate, gateNo = nil, nil                  -- Knox Pass 會開的門／不會開的原因（gateWillOpen；gate nil＝這格還沒問）
         local doorEdge = nil                           -- 關著的門在哪個格緣（closedDoorEdge；nil＝這格還沒讀）
