@@ -11948,7 +11948,10 @@ function drive.scenarioFsdPassive()
     ego.getForwardVector = function(_, o) o._x, o._y, o._z = 1, 0, 0 return o end
     local trailer = car(94, 100, 40)
     ego.getVehicleTowing = function() return trailer end
-    local vehs = { ego, trailer, car(120, 102, 30), car(105, 98, 0), car(80, 100, 0) }
+    -- 1110b：MP 沒駕駛、別的客戶端模擬的行進車（召喚車、別人拖的掛車）42.22 起車速讀 0、線速度照插值更新＝不算停著
+    local remote = car(112, 101, 0)
+    remote.getLinearVelocity = function(_, o) o._x, o._y, o._z = 0, 0, 8 return o end
+    local vehs = { ego, trailer, car(120, 102, 30), car(105, 98, 0), car(80, 100, 0), remote }
     local broken = false
     local fakeCell = {
         getZombieList = function() if broken then error("IndexOutOfBounds") end return list(zs) end,
@@ -11972,9 +11975,10 @@ function drive.scenarioFsdPassive()
         if w.zX[i] < 100 or w.zY[i] > 120 or near(w.zX[i], 104) then outside = true end
     end
     checkFalse(outside, "(fsd-passive-box) 後方、橫向框外、別層不收")
-    checkTrue(w.vN == 2 and near(w.vX[1], 105) and w.vStill[1] == true and near(w.vX[2], 120) and w.vStill[2] == false
-            and near(w.vHL[1], 2.3),
+    checkTrue(w.vN == 3 and near(w.vX[1], 105) and w.vStill[1] == true and near(w.vX[2], 112) and near(w.vX[3], 120)
+            and w.vStill[3] == false and near(w.vHL[1], 2.3),
         "(fsd-passive-veh) 車輛近→遠、排除自己／拖車／後方、停著看車速（" .. tostring(w.vN) .. "）")
+    checkEq(w.vStill[2], false, "(fsd-passive-remote) 車速讀 0 但線速度 8 m/s（42.22 遠端沒駕駛的行進車）：不算停著")
     broken = true
     MDADOverlay.scanPassive(0, ego, 5000)
     _, _, _, _, w = MDADOverlay.trail(0)

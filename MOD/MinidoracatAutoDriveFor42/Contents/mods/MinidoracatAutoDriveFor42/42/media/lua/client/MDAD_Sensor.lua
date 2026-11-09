@@ -877,6 +877,8 @@ local function vehVelocity(cv)
     if type(x) ~= "number" or x * 0 ~= 0 or type(z) ~= "number" or z * 0 ~= 0 then return nil end
     return x, z
 end
+-- FSD 卡片被動場景（MDAD_Overlay passiveStep）判停著用同一套：線速度與門檻。
+MDADSensor.vehVelocity, MDADSensor.VEL_KNOWN2 = vehVelocity, VEL_KNOWN2
 local function pushTraffic(state, cv, vs, vl)
     local n = state.wTrfN
     if n >= TRF_MAX then

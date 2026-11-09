@@ -470,7 +470,14 @@ local function passiveStep(st, w, vehicle, cell)
     for i = 1, vn do
         local v = vb.k[i]
         local kmh = v:getCurrentSpeedKmHour()
-        MDADSensor.pushSceneVeh(sc, v, vb.x[i], vb.y[i], kmh > -1 and kmh < 1)
+        local still = kmh > -1 and kmh < 1
+        if still then
+            -- 42.22 起 MP 下沒駕駛、由別的客戶端模擬的車（召喚車、別人拖的掛車）車速讀 0，線速度照插值更新：
+            -- 同 MDADSensor 靜止判定例外①，線速度 ≥1 m/s 就不算停著
+            local vx, vz = MDADSensor.vehVelocity(v)
+            still = vx == nil or vx * vx + vz * vz < MDADSensor.VEL_KNOWN2
+        end
+        MDADSensor.pushSceneVeh(sc, v, vb.x[i], vb.y[i], still)
     end
     for i = 1, st.zn do
         w.zX[i], w.zY[i], w.zK[i], w.zB[i] = b.x[i], b.y[i], b.k[i], false
