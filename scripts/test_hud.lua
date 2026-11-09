@@ -235,7 +235,12 @@ end
 function ISPanel:initialise() end
 function ISPanel:instantiate()
     if self.javaObject then return end
-    self.javaObject = true
+    -- UIElement.DrawText(font, text, x, y, zoom, …)（側翼縮小字走這支）：記下來給 (wings-zoom) 斷言
+    local owner = self
+    self.javaObject = { DrawText = function(_, font, text, x, y, zoom)
+        owner.zoomDraws = owner.zoomDraws or {}
+        owner.zoomDraws[#owner.zoomDraws + 1] = { text = text, x = x, y = y, zoom = zoom }
+    end }
     if self.createChildren then self:createChildren() end
 end
 function ISPanel:addChild(child)
@@ -271,6 +276,8 @@ function ISPanel:drawRect(x, y, w, h, a, r, g, b)
 end
 function ISPanel:drawRectBorder() self.borders = (self.borders or 0) + 1 end
 function ISPanel:drawText() self.textDraws = (self.textDraws or 0) + 1 end
+-- 原版 ISUIElement.drawText（ISUIElement.lua:1293）：HUD.zoomText 沒縮放時轉回它；這裡轉給實例所屬類別的 drawText
+ISUIElement = { drawText = function(self, ...) return getmetatable(self).__index.drawText(self, ...) end }
 
 ISButton = {}
 ISButton.__index = ISButton
@@ -1706,12 +1713,13 @@ do
     check(panel._statusText == "FOLLOW", "slow status waits before replacing the normal status")
     -- 巡航上限畫成立體按鈕：欄名／數值由按鈕畫，面板不重畫（否則按鈕底色蓋住面板的字）
     local capDraws, chipDraws = 0, 0
+    local panelDraw, chipDraw = panel.drawText, panel.capTip.drawText -- 實例欄位是 HUD.zoomText（側翼縮小字），用完放回
     panel.drawText = function(_, text) if text == panel._capText then capDraws = capDraws + 1 end end
     panel:prerender()
-    panel.drawText = nil
+    panel.drawText = panelDraw
     panel.capTip.drawText = function() chipDraws = chipDraws + 1 end
     panel.capTip:render()
-    panel.capTip.drawText = nil
+    panel.capTip.drawText = chipDraw
     check(capDraws == 0 and chipDraws == 2 and panel.capTip.valueText == panel._capText,
         "cruise-limit button draws its own label and value (" .. capDraws .. "/" .. chipDraws .. ")")
     panel:refresh(t0 + 2100)
@@ -2945,9 +2953,10 @@ do
     -- 狀態在上、行程在下、km/h 仍貼著現速，不會被兩行狀態欄拉走。
     local renderTexts, renderMeasures = getTextCalls, measureCalls
     local painted = {}
+    local panelDraw = panel.drawText
     panel.drawText = function(_, text, x, y) painted[#painted + 1] = { text = text, y = y } end
     panel:prerender()
-    panel.drawText = nil
+    panel.drawText = panelDraw
     local function paintedY(text)
         for i = 1, #painted do
             if painted[i].text == text then return painted[i].y end
@@ -3741,6 +3750,10 @@ do
             end
             return width
         end
+        -- TextManager.MeasureStringY（ISButton:render 以它置中標題；單行＝字高）
+        textManager.MeasureStringY = function(_, font)
+            return font == UIFont.Medium and mediumH or smallH
+        end
     end
     -- 「可見的子元件有幾個掉出面板」：一格斷言涵蓋全部控制，出事時看數字就知道規模。
     local function outside(p)
@@ -3781,12 +3794,14 @@ do
                             label .. ": the home button overlaps no other visible control")
                     end
                 end
+                -- 側翼縮小字（_tz）時字寬照縮後算，同 production textWidth
+                local function sw(s)
+                    local w = textManager:MeasureStringX(UIFont.Small, s)
+                    return iconPanel._tz and math.ceil(w * iconPanel._tz) or w
+                end
                 if iconPanel._capX then
-                    local capRight = math.max(
-                        iconPanel._capX
-                            + textManager:MeasureStringX(UIFont.Small, iconPanel._capLabel),
-                        iconPanel._capValueX
-                            + textManager:MeasureStringX(UIFont.Small, iconPanel._capText))
+                    local capRight = math.max(iconPanel._capX + sw(iconPanel._capLabel),
+                        iconPanel._capValueX + sw(iconPanel._capText))
                     check(capRight <= (hb.visible and hb.x or iconPanel.actionButton.x),
                         label .. ": cruise text never reaches the main button")
                 else
@@ -3799,16 +3814,14 @@ do
                 end
                 -- 預計剩餘（1005i）：有座標時整欄（欄名與最寬數值）接在行車時間欄之後、面板之內、不壓任何可見控制
                 if iconPanel._etaX then
-                    local fh = textManager:getFontHeight(UIFont.Small)
+                    local fh = iconPanel._fontH
                     local ex = iconPanel._etaX
-                    local er = math.max(ex + textManager:MeasureStringX(UIFont.Small, iconPanel._etaLabel),
-                        iconPanel._etaValueX + textManager:MeasureStringX(UIFont.Small,
-                            getText("UI_MinidoracatAutoDrive_HUDEtaMinutes", "999")))
+                    local er = math.max(ex + sw(iconPanel._etaLabel),
+                        iconPanel._etaValueX + sw(getText("UI_MinidoracatAutoDrive_HUDEtaMinutes", "999")))
                     local ey = math.min(iconPanel._etaLabelY, iconPanel._etaValueY)
                     local eb = math.max(iconPanel._etaLabelY, iconPanel._etaValueY) + fh
-                    local tr = math.max(
-                        iconPanel._timeX + textManager:MeasureStringX(UIFont.Small, iconPanel._timeLabel),
-                        iconPanel._timeValueX + textManager:MeasureStringX(UIFont.Small, "00:00:00"))
+                    local tr = math.max(iconPanel._timeX + sw(iconPanel._timeLabel),
+                        iconPanel._timeValueX + sw("00:00:00"))
                     local hits = 0
                     for i = 1, #iconPanel.children do
                         local c = iconPanel.children[i]
@@ -3852,66 +3865,141 @@ do
         and iconPanel.actionButton.visible and iconPanel.gearButtons[1].visible,
         "CH 1x wings still fit the visible dashboard band with both wings open")
 
-    -- 4x 的側翼三列（44×3＋間距）放不進 103px 的可見儀表板：退回上掛，不得出現
-    -- 負 Y 的檔位列，也不得把底列壓進儀表板。多了回家鈕後 4x 金屬完整版超過 1904，
-    -- 會再退一階成精簡單行（拉桿隱藏）；只驗看得到的控制。
+    -- 側翼縮小字（1109b，使用者選 A）：三列排不進可見儀表高時，側翼的 Small 字縮到剛好排得下（列高＝字高＋6），
+    -- 不退回金屬。4x（38px）在本 fixture 的 103px 可見帶縮成 25px。
     useFontProfile(38, 45)
     themeOption:setValue(4)
     iconPanel:applyLayout()
-    checkEq(iconPanel._style, 1,
-        "CH 4x wings hand over to the top-mounted layout when the dashboard band is too short")
-    check(iconPanel.gearButtons[1].y >= 0
+    check(iconPanel._style == 4 and iconPanel._tz ~= nil and iconPanel.gearButtons[1].y >= 0
+        and outside(iconPanel) == 0 and iconPanel.y == dashboards[0].y + 7
+        and iconPanel.height == dashboards[0].height - 7,
+        "CH 4x wings shrink their text to fit the 103px band instead of handing over to the top layout")
+    -- 畫面太窄（左翼展開＋儀表＋摺起的右翼都放不下）才退回：上掛金屬貼在儀表板上方，不得壓進儀表板
+    viewportWidth = 900
+    iconPanel:applyLayout()
+    checkEq(iconPanel._style, 1, "CH 4x wings hand over to the top-mounted layout on a screen too narrow for them")
+    check(iconPanel._tz == nil and iconPanel.gearButtons[1].y >= 0
         and (not iconPanel.volumeSlider.visible
             or iconPanel.volumeSlider.y + iconPanel.volumeSlider.height <= iconPanel.height)
         and iconPanel.y + iconPanel.height == dashboards[0].y + 7,
-        "CH 4x wings fallback docks above the dashboard instead of overflowing it")
+        "CH 4x wings fallback docks above the dashboard at full font size instead of overflowing it")
     click(iconPanel.themeButton)
     checkEq(themeOption:getValue(), 1, "fallback keeps the saved Wings-to-Metal cycle")
     useFontProfile(19, 29)
+    viewportWidth = 1920
     iconPanel:applyLayout()
     checkEq(iconPanel._style, 1, "restoring font size keeps the user's saved Metal selection")
 
-    -- (wings-gap) 2026-11-09 裁定：側翼三列排不下時只縮列與列之間的垂直間距，最小 3px。本 fixture 的儀表高 110
-    -- （可見 103）正好落在縮列距有差的區間：26px 列高 32，三列＋4／5px（標準／大）＝104／106 > 103，縮到 3px＝102 放得下。
-    -- 42.21 原版儀表實機可見 114（E2E s3wings-base-f3-1109b），那裡 26px 本來就放得下。33px（列高 39）三種縮放
-    -- 都退回，樣式鈕 tooltip 說明原因。16／19px 列距＝原本的 gap。
+    -- (wings-zoom) 本 fixture 的儀表高 110（可見 103）；42.21 原版儀表實機可見 114（E2E s3wings-*-1109c），
+    -- 原版那段另在下面 (wings-zoom-114) 換儀表高驗。三列（列距＝gap）排得下就照原字（_tz nil、列距＝gap）；
+    -- 排不下就縮成 fitH＝floor((可見高－2×gap)／3)－6，列距照舊＝gap、全部控制在可見帶內、樣式鈕不說退回。
     local scaleOption = optionSets.MinidoracatAutoDrive:getOption("HUDScale")
     local oldScale = scaleOption:getValue()
+    local SCALES = { 0.75, 1.0, 1.25 }
+    local function setDashH(d, h)
+        d.height = h
+        d.backgroundTex = { getWidth = function() return 512 end, getHeight = function() return h end }
+    end
+    local function fallbackTip(p)
+        return (p.themeButton.tooltip or ""):find("UI_MinidoracatAutoDrive_HUDWingsFallback", 1, true) ~= nil
+    end
+    local function checkZoomed(p, small, s, band, label)
+        local gap = math.max(3, math.floor(4 * SCALES[s] + 0.5))
+        local rowFull = math.max(small + 6, math.floor(22 * SCALES[s] + 0.5))
+        local fits = rowFull * 3 + gap * 2 <= band
+        local fitH = math.floor((band - gap * 2) / 3) - 6
+        local rowH = p.gearButtons[1].height
+        local g1 = p.zombieButton.y - p.gearButtons[1].y - rowH
+        local g2 = p.themeButton.y - p.zombieButton.y - rowH
+        check(p._style == 4 and not fallbackTip(p) and g1 == gap and g2 == gap
+            and (fits and p._tz == nil and p._fontH == small or not fits and p._tz == fitH / small and p._fontH == fitH)
+            and p.gearButtons[1].visible and p.volumeSlider.visible and p.actionButton.visible
+            and outside(p) == 0 and p.height == band,
+            label .. ": wings stay, text " .. p._fontH .. "px (want " .. (fits and small or fitH) .. "), row gap "
+                .. g1 .. "/" .. g2 .. " (want " .. gap .. "), every control inside the " .. band .. "px band")
+    end
     viewportWidth = 2560
     themeOption:setValue(4)
-    for _, small in ipairs({ 16, 19, 26, 33 }) do
+    for _, small in ipairs({ 16, 19, 26, 33, 38 }) do
         useFontProfile(small, small + 10)
         for s = 1, 3 do
             scaleOption:setValue(s)
             iconPanel:applyLayout(); iconPanel:refresh(nowMs)
-            local p, label = iconPanel, "(wings-gap) " .. small .. "px scale " .. s
-            local tip = (p.themeButton.tooltip or ""):find("UI_MinidoracatAutoDrive_HUDWingsFallback", 1, true)
-            if small == 33 then
-                check(p._style == 1 and tip ~= nil and p.y + p.height == dashboards[0].y + 7,
-                    label .. ": 39px rows cannot fit the 103px band; fall back to metal and explain it on the style button")
-            else
-                local rowH = p.gearButtons[1].height
-                local g1 = p.zombieButton.y - p.gearButtons[1].y - rowH
-                local g2 = p.themeButton.y - p.zombieButton.y - rowH
-                local full = math.max(3, math.floor(4 * ({ 0.75, 1.0, 1.25 })[s] + 0.5))
-                local want = small == 26 and 3 or full
-                -- 左翼：下列（主鈕）頂＝分隔線＋列距的後半，縮過的列距左右翼一致
-                local gL = p.actionButton.y - p._wingLDividerY
-                check(p._style == 4 and tip == nil and g1 == want and g2 == want
-                    and gL == want - math.floor(want / 2)
-                    and p.gearButtons[1].visible and p.volumeSlider.visible and p.actionButton.visible
-                    and outside(p) == 0 and p.height == dashboards[0].height - 7,
-                    label .. ": wings stay, row gap " .. g1 .. "/" .. g2 .. "/left " .. gL .. " (want " .. want
-                        .. "), every control inside the visible dashboard band")
-            end
+            checkZoomed(iconPanel, small, s, 103, "(wings-zoom) " .. small .. "px scale " .. s)
         end
     end
+    -- (wings-zoom-114) 42.21 原版儀表（貼圖 121、可見 114）：33／38px 不退回，縮成 30／29／28px（縮放小／標準／大）
+    setDashH(dashboards[0], 121)
+    for _, small in ipairs({ 33, 38 }) do
+        useFontProfile(small, small + 10)
+        for s = 1, 3 do
+            scaleOption:setValue(s)
+            iconPanel:applyLayout(); iconPanel:refresh(nowMs)
+            checkZoomed(iconPanel, small, s, 114, "(wings-zoom-114) " .. small .. "px scale " .. s)
+        end
+    end
+    -- 縮小字實際以 UIElement.DrawText 的 zoom 參數畫；按鈕標題照縮後的寬高重新置中（ISButton:render 用原寬高置中）
+    scaleOption:setValue(2)
+    iconPanel:applyLayout()
+    local z = iconPanel._tz
+    iconPanel.zoomDraws = nil
+    iconPanel:drawText("abc", 10, 20, 1, 1, 1, 1, UIFont.Small)
+    local ab = iconPanel.actionButton
+    local abDraws = {}
+    ab.javaObject = { DrawText = function(_, _, text, x, y, zoom) abDraws[#abDraws + 1] = { x = x, y = y, zoom = zoom } end }
+    ab:drawText(ab.title, 5, 7, 1, 1, 1, 1, UIFont.Small)
+    ab.javaObject = nil
+    local tw = textManager:MeasureStringX(UIFont.Small, ab.title)
+    check(z == 29 / 38 and iconPanel.zoomDraws and iconPanel.zoomDraws[1].zoom == z and iconPanel.zoomDraws[1].x == 10
+        and abDraws[1] and abDraws[1].zoom == z and math.abs(abDraws[1].x - (5 + tw * (1 - z) / 2)) < 1e-6,
+        "(wings-zoom-114) 38px draws wing text at zoom 29/38 and recentres button titles by the shrunk width")
+    -- 明細框、診斷行是獨立頂層框，字照原尺寸畫：行高用原字高（38），不跟側翼縮成 29
+    local function nfmt(v) return tostring(v) end
+    iconPanel:buildPinRows(nfmt, 120, 120, nil, 70, 60, "-", nil, 90, 100, "120", 120, nil, "-", nil, nil, 70)
+    local oldDiagOn = MDAD.HUD.diagLine
+    MDAD.HUD.diagLine = function() return true end
+    iconPanel:refreshDiagLine("follow", 60, "curve-coast")
+    MDAD.HUD.diagLine = oldDiagOn
+    check(iconPanel._pinLineH == 38 + 1 and iconPanel._diagH == 38 + 4
+        and iconPanel._diagW == textManager:MeasureStringX(UIFont.Small, iconPanel._diagText) + 8,
+        "(wings-zoom-114) speed details and the diag line keep the full 38px text while the wings shrink to 29px")
+    -- 分割畫面：每個面板各自一份縮放。P2 的儀表夠高（不縮），排完它 P1 照舊縮、畫字照舊用 P1 的倍率
+    local oldDash1H = dashboards[1].height
+    setDashH(dashboards[1], 200)
+    local p2 = MDAD.HUD.Panel:new(1)
+    p2:initialise(); p2:instantiate()
+    p2:applyLayout()
+    iconPanel.zoomDraws = nil
+    iconPanel:drawText("abc", 0, 0, 1, 1, 1, 1, UIFont.Small)
+    p2:drawText("abc", 0, 0, 1, 1, 1, 1, UIFont.Small)
+    check(p2._style == 4 and p2._tz == nil and p2._fontH == 38 and iconPanel._tz == z and iconPanel._fontH == 29
+        and iconPanel.zoomDraws and iconPanel.zoomDraws[1].zoom == z and p2.zoomDraws == nil,
+        "(wings-zoom-split) a second player's tall dashboard keeps full-size text without unshrinking player 1")
+    setDashH(dashboards[1], oldDash1H)
+    -- (wings-fallback) 縮小字之後只剩兩種會退回金屬，樣式鈕 tooltip 說明原因：
+    -- 畫面太窄（寬度），或儀表矮到縮到遊戲最小字 16px 也排不下三列（例：別的 MOD 的矮儀表）。
+    -- 儀表高 71（可見 64）：縮放「小」時 13px 字就排得下三列，最小 16px 的下限讓它退回而不是縮到看不清。
+    useFontProfile(19, 29)
+    viewportWidth = 900
+    iconPanel:applyLayout(); iconPanel:refresh(nowMs)
+    check(iconPanel._style == 1 and fallbackTip(iconPanel) and iconPanel._tz == nil,
+        "(wings-fallback) a screen too narrow for the wings falls back to metal and explains it on the style button")
+    viewportWidth = 2560
+    setDashH(dashboards[0], 71)
+    for s = 1, 3 do
+        scaleOption:setValue(s)
+        iconPanel:applyLayout(); iconPanel:refresh(nowMs)
+        check(iconPanel._style == 1 and fallbackTip(iconPanel) and iconPanel._tz == nil
+            and iconPanel._fontH == 19 and iconPanel.y + iconPanel.height == dashboards[0].y + 7,
+            "(wings-fallback) scale " .. s .. ": a 64px dashboard is too short even at 16px text; metal at full font")
+    end
+    setDashH(dashboards[0], 110)
     -- 退回後玩家改選金屬：樣式鈕不再說「側掛放不下」
     themeOption:setValue(1)
     iconPanel:applyLayout(); iconPanel:refresh(nowMs)
-    check(not (iconPanel.themeButton.tooltip or ""):find("UI_MinidoracatAutoDrive_HUDWingsFallback", 1, true),
-        "(wings-gap) choosing metal after a wings fallback drops the fallback note")
+    check(not fallbackTip(iconPanel), "(wings-fallback) choosing metal after a wings fallback drops the fallback note")
     scaleOption:setValue(oldScale)
+    viewportWidth = 1920
 
     -- 英文完整主鈕比窄版剩餘空間長；原版 ISButton 不會自動裁切標題。
     local oldContinue, oldCancel = texts.UI_MinidoracatAutoDrive_HUDTripContinue,

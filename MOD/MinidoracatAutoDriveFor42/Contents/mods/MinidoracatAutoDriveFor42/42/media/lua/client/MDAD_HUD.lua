@@ -744,8 +744,28 @@ local function scaled(value, scale)
     return math.floor(value * scale + 0.5)
 end
 
-local function textWidth(font, text)
-    return getTextManager():MeasureStringX(font, text or "")
+-- z＝側翼 Small 字的縮放倍率（面板的 _tz，只在側掛三列放不下時有值）；量 Small 字的版面一律傳 self._tz。
+local function textWidth(font, text, z)
+    local w = getTextManager():MeasureStringX(font, text or "")
+    if z then return math.ceil(w * z) end
+    return w
+end
+
+-- 側翼縮小字（1109b）：面板與它的按鈕、拉桿把 drawText 換成這支，Small 字照所屬面板的 _tz 縮放繪製。
+-- 每個面板各自一份倍率（分割畫面兩位玩家一個坐原版車、一個坐 Tesla 時互不影響）。ISButton:render 用未縮放的
+-- 寬高置中標題（ISButton.lua:196-240），這裡照縮後的寬高補回置中；isCollapsed 照原版 ISUIElement:drawText 不畫。
+function HUD.zoomText(self, str, x, y, r, g, b, a, font)
+    local owner = self.zoomOwner
+    local z = owner and owner._tz
+    if not z or (font and font ~= UIFont.Small) or self.javaObject == nil or self.isCollapsed then
+        return ISUIElement.drawText(self, str, x, y, r, g, b, a, font)
+    end
+    if self.title == str and not self.titleLeft then
+        local tm = getTextManager()
+        x = x + tm:MeasureStringX(UIFont.Small, str) * (1 - z) / 2
+        y = y + tm:MeasureStringY(UIFont.Small, str) * (1 - z) / 2
+    end
+    self.javaObject:DrawText(UIFont.Small, str, x, y, z, r, g, b, a)
 end
 
 local function maximum(a, b)
@@ -964,6 +984,7 @@ local function makeButton(parent, title, callback, class)
     local button = (class or ISButton):new(0, 0, 10, 10, title, parent, callback)
     button:initialise()
     button.font = UIFont.Small
+    button.zoomOwner, button.drawText = parent, HUD.zoomText
     styleButton(button, C.button, C.text, true)
     parent:addChild(button)
     return button
@@ -1278,6 +1299,8 @@ function MDADHUDPanel:createChildren()
     self._capChip = false
     if self.pinBox then self.pinBox:setVisible(false) end
     self.volumeSlider = MDADHUDSlider:new(self)
+    self.volumeSlider.zoomOwner, self.volumeSlider.drawText = self, HUD.zoomText
+    self.zoomOwner, self.drawText = self, HUD.zoomText
     self.volumeSlider:initialise()
     self:addChild(self.volumeSlider)
     self:applyLayout()
@@ -1348,7 +1371,10 @@ end
 local function measure(self, scale)
     local tm = getTextManager()
     local m = {}
-    m.fontH = tm:getFontHeight(UIFont.Small)
+    -- 側翼縮小字時 fontH＝縮後字高（版面用）；_smallH 留原字高給獨立頂層框（明細、診斷行）
+    local smallH = tm:getFontHeight(UIFont.Small)
+    self._smallH = smallH
+    m.fontH = self._tz and math.floor(smallH * self._tz + 0.5) or smallH
     self._fontH = m.fontH
     m.mediumH = tm:getFontHeight(UIFont.Medium)
     m.pad = maximum(6, scaled(8, scale))
@@ -1356,29 +1382,29 @@ local function measure(self, scale)
     m.ctrlH = maximum(m.fontH + 6, scaled(22, scale))
     local statusW = 0
     for i = 1, #STATUS_WIDTH_KEYS do
-        statusW = maximum(statusW, textWidth(UIFont.Small, getText(STATUS_WIDTH_KEYS[i], 10)))
+        statusW = maximum(statusW, textWidth(UIFont.Small, getText(STATUS_WIDTH_KEYS[i], 10), self._tz))
     end
     m.statusTextW = statusW
-    m.blockedW = textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDStatusBlocked"))
+    m.blockedW = textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDStatusBlocked"), self._tz)
     m.detourW = maximum(scaled(40, scale),
-        textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDDetourButton")) + 12)
+        textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDDetourButton"), self._tz) + 12)
     m.speedValueW = textWidth(UIFont.Medium, "120")
-    m.unitW = textWidth(UIFont.Small, self._unitText)
-    m.capLabelW = textWidth(UIFont.Small, self._capLabel) + 6 -- 立體按鈕左右各 3px 內距
-    m.capValueW = textWidth(UIFont.Small, "120")
+    m.unitW = textWidth(UIFont.Small, self._unitText, self._tz)
+    m.capLabelW = textWidth(UIFont.Small, self._capLabel, self._tz) + 6 -- 立體按鈕左右各 3px 內距
+    m.capValueW = textWidth(UIFont.Small, "120", self._tz)
     m.actionW = maximum(scaled(58, scale), maximum(
-        textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_Start")),
-        maximum(textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_Stop")),
-            textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDCancelPrep")))) + 16)
+        textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_Start"), self._tz),
+        maximum(textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_Stop"), self._tz),
+            textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDCancelPrep"), self._tz))) + 16)
     -- 行程計數欄固定以 "16/16" 保留寬度（addon-api §6.2 首版上限 16 站），站數變動不推幾何。
     -- 行程模式的四個主鈕文案（開始行程／繼續行程／繼續自駕／手動前往）也不得被裁；
     -- 沒有行程時不量這四個行程動作。
-    m.tripCounterW = textWidth(UIFont.Small, "16/16")
+    m.tripCounterW = textWidth(UIFont.Small, "16/16", self._tz)
     -- 長句先退成目標名稱；約十二個全形字的預算跟隨遊戲字型。
     m.tripLineW = maximum(scaled(220, scale), m.fontH * 12)
     if self._hasTrip then
         for _, key in pairs(TRIP_ACTION_KEYS) do
-            m.actionW = maximum(m.actionW, textWidth(UIFont.Small, getText(key)) + 16)
+            m.actionW = maximum(m.actionW, textWidth(UIFont.Small, getText(key), self._tz) + 16)
         end
     end
     -- 接續藥丸：glyph（三節點）＋短字，寬度自成一格——圖示模式把策略藥丸收成方鈕，
@@ -1389,47 +1415,47 @@ local function measure(self, scale)
     m.contW = 0
     if self._contAvail then
         m.contW = 6 + m.contGlyphW + m.nodeGap + maximum(
-            textWidth(UIFont.Small, getText(CONT_AUTO_KEY)),
-            textWidth(UIFont.Small, getText(CONT_STEP_KEY))) + 6
+            textWidth(UIFont.Small, getText(CONT_AUTO_KEY), self._tz),
+            textWidth(UIFont.Small, getText(CONT_STEP_KEY), self._tz)) + 6
     end
     m.contGap = m.contW > 0 and (m.contW + m.gap) or 0
     -- 回家鈕：有 house 圖示＝方鈕，沒有＝文字寬；沒有 v8 API 時寬度為 0（完全不佔位）。
     m.homeW = 0
     if self._homeAvail then
         m.homeW = icon("house") and m.ctrlH or maximum(scaled(44, scale),
-            textWidth(UIFont.Small, getText("UI_MinidoracatMiniMap_GoHome")) + 12)
+            textWidth(UIFont.Small, getText("UI_MinidoracatMiniMap_GoHome"), self._tz) + 12)
     end
     m.homeGap = m.homeW > 0 and (m.homeW + m.gap) or 0
-    m.gearW = maximum(scaled(34, scale), textWidth(UIFont.Small, "MAX") + 12)
-    m.gearLabelW = textWidth(UIFont.Small, self._gearLabel) + m.gap
+    m.gearW = maximum(scaled(34, scale), textWidth(UIFont.Small, "MAX", self._tz) + 12)
+    m.gearLabelW = textWidth(UIFont.Small, self._gearLabel, self._tz) + m.gap
     local forcedText = getText("UI_MinidoracatAutoDrive_HUDForcedOff")
     m.policyW = maximum(scaled(70, scale), maximum(
-        textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDZombie") .. " " .. forcedText),
-        maximum(textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDCorpse") .. " " .. forcedText),
-            maximum(textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDAuto") .. " " .. forcedText),
-                maximum(textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDAnimal") .. " " .. forcedText),
-                    textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDSpeed") .. " " .. forcedText))))) + 14)
-    m.energyW = textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDEnergy", 100, 100))
+        textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDZombie") .. " " .. forcedText, self._tz),
+        maximum(textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDCorpse") .. " " .. forcedText, self._tz),
+            maximum(textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDAuto") .. " " .. forcedText, self._tz),
+                maximum(textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDAnimal") .. " " .. forcedText, self._tz),
+                    textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDSpeed") .. " " .. forcedText, self._tz))))) + 14)
+    m.energyW = textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDEnergy", 100, 100), self._tz)
     -- 行車時間欄（0908d）：欄名固定、數值另存一格，兩者分開量測。數值一律以
     -- "00:00:00" 保留最寬字串：跨過一小時、位數變動或 100h+ 都不推動任何幾何，
     -- 秒數每 250ms 變一次也只是重畫同一格。
-    m.clockW = textWidth(UIFont.Small, "00:00:00")
-    m.timeLabelW = textWidth(UIFont.Small, self._timeLabel)
+    m.clockW = textWidth(UIFont.Small, "00:00:00", self._tz)
+    m.timeLabelW = textWidth(UIFont.Small, self._timeLabel, self._tz)
     -- 預計剩餘欄（1005i）：欄名與數值分開量；數值以最寬的寫法保留（約 999 分／不到 1 分），估計值跳動不推動幾何。
-    m.etaLabelW = textWidth(UIFont.Small, self._etaLabel)
+    m.etaLabelW = textWidth(UIFont.Small, self._etaLabel, self._tz)
     m.etaValueW = maximum(
-        textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDEtaMinutes", "999")),
-        textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDEtaUnder")))
+        textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDEtaMinutes", "999"), self._tz),
+        textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDEtaUnder"), self._tz))
     -- 控制鈕寬：三顆同寬、取最長標題（樣式／隱藏／展開／語音 開／語音 關）
     local voiceLabel = getText("UI_MinidoracatAutoDrive_HUDVoice")
     m.ctrlW = maximum(scaled(44, scale), maximum(
-        maximum(textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDStyleButton")),
-            maximum(textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDHideButton")),
-                textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDShowButton")))),
-        maximum(textWidth(UIFont.Small, voiceLabel .. " " .. getText("UI_MinidoracatAutoDrive_HUDOn")),
-            textWidth(UIFont.Small, voiceLabel .. " " .. getText("UI_MinidoracatAutoDrive_HUDOff")))) + 12)
+        maximum(textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDStyleButton"), self._tz),
+            maximum(textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDHideButton"), self._tz),
+                textWidth(UIFont.Small, getText("UI_MinidoracatAutoDrive_HUDShowButton"), self._tz))),
+        maximum(textWidth(UIFont.Small, voiceLabel .. " " .. getText("UI_MinidoracatAutoDrive_HUDOn"), self._tz),
+            textWidth(UIFont.Small, voiceLabel .. " " .. getText("UI_MinidoracatAutoDrive_HUDOff"), self._tz))) + 12)
     if iconsOn() then m.ctrlW, m.policyW = m.ctrlH, m.ctrlH end
-    m.valueW = textWidth(UIFont.Small, "100") + 4
+    m.valueW = textWidth(UIFont.Small, "100", self._tz) + 4
     m.sliderW = maximum(scaled(84, scale), SLIDER_KNOB * 3 + m.valueW)
     m.controlsOn = modOptions ~= nil
     m.policyN = m.controlsOn and 5 or 2 -- 殭屍／屍體＋自動改道／閃避動物／速度明細（無 ModOptions 時不顯示）
@@ -1480,21 +1506,32 @@ function MDADHUDPanel:layoutWings(scale, m)
         maximum(policyW * policyN + gap * policyN + m.contGap + energyW,
             (controlsOn and (ctrlW * 3 + gap * 3 + sliderW) or ctrlW)))
     local leftFoldW = pad * 2 + 16 + speedValueW + gap + clockW + gap + ctrlW
-    local rightFoldW = pad * 2 + textWidth(UIFont.Small, "MAX") + gap + ctrlW
+    local rightFoldW = pad * 2 + textWidth(UIFont.Small, "MAX", self._tz) + gap + ctrlW
     -- 側翼的高度是硬約束（與可見儀表板同高），寬度也先被儀表板本體吃掉一大塊。
-    -- 右翼三列排不進 wingH 就會把檔位列推到負 Y、底列掉出面板下緣；左翼被寬度逼著
+    -- 右翼三列排不進 wingH 就會把檔位列推到負 Y、底列掉出面板下緣（2026-09-12 以
+    -- 中文 4x 字高實測：wingH=103、檔位 y=-19、底列 77+44>103）；左翼被寬度逼著
     -- 摺起則等於整個 HUD 沒有主鈕可按。兩者任一成立就退回上掛金屬版面——那邊的
     -- 精簡單行階梯本來就會逐階讓出次要欄位，主鈕與收合入口一定留著。
-    -- 列與列之間（垂直）的間距 vgap 只在排不下時縮，最小 3px（2026-11-09 裁定）；排得下照舊＝gap，
-    -- 水平間距一律不動。42.21 原版儀表實機可見高 114px（E2E s3wings-*-1109c）：遊戲字高
-    -- 16／19／26 本來就放得下、33／38 縮到 3px 也放不下；只有可見高度落在「三列＋2×3」到
-    -- 「三列＋2×gap」之間才有差（26px 字＝102–105px，例如別的 MOD 換掉的儀表）。
     local wingRows = controlsOn and 3 or 2
-    local vgap = math.min(gap, math.floor((wingH - ctrlH * wingRows) / (wingRows - 1)))
-    self._wingsFallback = vgap < 3 or leftOpenW + dashW + rightFoldW > maxW
+    -- 三列（列距＝gap）排不進可見儀表高時，側翼的 Small 字縮到剛好排得下的字高（列高＝字高＋6），
+    -- 重新量一次再排（1109b 使用者選 A）。最小縮到 16px（遊戲最小的字體大小），再矮的儀表才退回。
+    -- 42.21 原版儀表可見 114：33／38px 都縮成 29px。
+    if not self._tz and ctrlH * wingRows + gap * (wingRows - 1) > wingH then
+        local fitH = math.floor((wingH - gap * (wingRows - 1)) / wingRows) - 6
+        if fitH >= 16 and fitH < fontH then
+            self._tz = fitH / fontH
+            return self:layoutWings(scale, measure(self, scale))
+        end
+    end
+    self._wingsFallback = ctrlH * wingRows + gap * (wingRows - 1) > wingH
+        or leftOpenW + dashW + rightFoldW > maxW
     if self._wingsFallback then
         self._style = STYLE_METAL
         self._wingRBlocked = false
+        if self._tz then
+            self._tz = nil
+            m = measure(self, scale)
+        end
         return self:layoutStacked(scale, m)
     end
     local foldL, foldR = self._wingL == true, self._wingR == true
@@ -1561,10 +1598,10 @@ function MDADHUDPanel:layoutWings(scale, m)
         setButtonRect(self.wingButton, leftW - pad - ctrlW,
             math.floor((wingH - ctrlH) / 2), ctrlW, ctrlH)
     else
-        local rowH = math.floor((wingH - pad * 2 - vgap) / 2)
+        local rowH = math.floor((wingH - pad * 2 - gap) / 2)
         if rowH < ctrlH then rowH = ctrlH end
-        local topY = math.floor((wingH - rowH * 2 - vgap) / 2)
-        local bottomY = topY + rowH + vgap
+        local topY = math.floor((wingH - rowH * 2 - gap) / 2)
+        local bottomY = topY + rowH + gap
         self._dotX, self._dotY = pad, topY + math.floor((rowH - 8) / 2)
         self._statusX = pad + 16
         self._textY = topY + math.floor((rowH - fontH) / 2)
@@ -1588,7 +1625,7 @@ function MDADHUDPanel:layoutWings(scale, m)
         -- 左翼 chevron：下列巡航值與主鈕之間（改道鈕在上列狀態字後，兩者不撞）
         setButtonRect(self.wingButton, homeX - gap - ctrlW,
             bottomY + math.floor((rowH - ctrlH) / 2), ctrlW, ctrlH)
-        self._wingLDividerY = topY + rowH + math.floor(vgap / 2)
+        self._wingLDividerY = topY + rowH + math.floor(gap / 2)
     end
 
     -- 右翼：三列（檔位／策略＋電油／樣式・隱藏・語音＋音量），收合＝檔位字＋chevron
@@ -1601,7 +1638,7 @@ function MDADHUDPanel:layoutWings(scale, m)
     else
         local rows = controlsOn and 3 or 2
         local rowH = ctrlH
-        local blockH = rowH * rows + vgap * (rows - 1)
+        local blockH = rowH * rows + gap * (rows - 1)
         local rowY = math.floor((wingH - blockH) / 2)
         local x = rightX + pad + gearLabelW
         for i = 1, 4 do
@@ -1610,7 +1647,7 @@ function MDADHUDPanel:layoutWings(scale, m)
         end
         self._labelX = rightX + pad
         self._bottomTextY = rowY + math.floor((rowH - fontH) / 2)
-        local row2 = rowY + rowH + vgap
+        local row2 = rowY + rowH + gap
         setButtonRect(self.zombieButton, rightX + pad, row2, policyW, rowH)
         setButtonRect(self.corpseButton, rightX + pad + policyW + gap, row2, policyW, rowH)
         setButtonRect(self.autoButton, rightX + pad + (policyW + gap) * 2, row2, policyW, rowH)
@@ -1622,7 +1659,7 @@ function MDADHUDPanel:layoutWings(scale, m)
         end
         self._energyX = rightX + rightW - pad - energyW
         self._energyY = row2 + math.floor((rowH - fontH) / 2)
-        local row3 = row2 + rowH + vgap
+        local row3 = row2 + rowH + gap
         if controlsOn then
             setButtonRect(self.themeButton, rightX + pad, row3, ctrlW, ctrlH)
             setButtonRect(self.voiceButton, rightX + pad + ctrlW + gap, row3, ctrlW, ctrlH)
@@ -1631,7 +1668,7 @@ function MDADHUDPanel:layoutWings(scale, m)
         else
             setButtonRect(self.collapseButton, rightX + rightW - pad - ctrlW, row3, ctrlW, ctrlH)
         end
-        self._wingRDividerY = row2 - math.floor(vgap / 2) - 1
+        self._wingRDividerY = row2 - math.floor(gap / 2) - 1
     end
 
     self._detourW, self._detourH, self._detourGap = detourW, ctrlH, gap
@@ -1703,7 +1740,7 @@ end
 
 function MDADHUDPanel:applyLayout()
     self._style = optionIndex("HUDTheme", STYLE_METAL, STYLE_COUNT)
-    self._wingsFallback = false
+    self._wingsFallback, self._tz = false, nil
     self._layout = optionIndex("HUDLayout", LAYOUT_FULL, 2)
     local scale = optionScale()
     self._unitText = getText("UI_MinidoracatAutoDrive_HUDSpeedUnit")
@@ -1754,7 +1791,7 @@ function MDADHUDPanel:layoutStacked(scale, m)
     local capRowW = maximum(scaled(48, scale), capLabelW + gap + m.capValueW + gap)
     local actionW, gearW, gearLabelW, policyW = m.actionW, m.gearW, m.gearLabelW, m.policyW
     local energyW = m.energyW + gap
-    local cycleW = maximum(scaled(44, scale), textWidth(UIFont.Small, "MAX") + 14)
+    local cycleW = maximum(scaled(44, scale), textWidth(UIFont.Small, "MAX", self._tz) + 14)
     local ctrlW, valueW, sliderW, controlsOn, policyN = m.ctrlW, m.valueW, m.sliderW, m.controlsOn, m.policyN
     -- 極窄分割畫面連狀態文字都省掉時，精簡單行的行車時間欄一併歸零，
     -- 保留巡航上限與必要操作控制。
@@ -2165,7 +2202,8 @@ function MDADHUDPanel:refreshDiagLine(token, target, reason)
     local function n(v) return type(v) == "number" and v * 0 == 0 and string.format("%d", math.floor(v + 0.5)) or "--" end
     self._diagText = (reason or "-") .. " " .. n(target) .. "/" .. n(self._kmh) .. " " .. (token or "idle")
         .. " " .. tostring(Drive.REV or "?")
-    self._diagH = (self._fontH or 16) + 4
+    -- 診斷框與明細框是獨立頂層框，字照原尺寸畫：不跟側翼的縮小字（_tz、_fontH），用原字高 _smallH
+    self._diagH = (self._smallH or 16) + 4
     self._diagW = textWidth(UIFont.Small, self._diagText) + 8
 end
 
@@ -2212,13 +2250,13 @@ function MDADHUDPanel:buildPinRows(n, vmax, sandMax, gearCap, cruise, target, wh
         valueW = maximum(valueW, textWidth(UIFont.Small, r[2]))
     end
     self._pinLegend = getText("UI_MinidoracatAutoDrive_HUDSpeedLegend")
-    local lineH = (self._fontH or 16) + 1
+    local lineH = (self._smallH or 16) + 1
     local pad = 8
     self._pinRows, self._pinLineH, self._pinValueW = rows, lineH, valueW
     self._pinW = maximum(labelW + valueW + 30, textWidth(UIFont.Small, self._pinLegend) + pad * 2)
     self._pinH = lineH * (#rows + 1) + pad * 2 + 6
     -- 預設停靠：對齊巡航上限欄、夾在面板寬內、貼面板上緣外（拖曳過就改用記住的位置；FSD 卡片改放側邊，見 placeSpeedPin）
-    local anchor = (self._capX or 0) + textWidth(UIFont.Small, self._capLabel or "") / 2
+    local anchor = (self._capX or 0) + textWidth(UIFont.Small, self._capLabel or "", self._tz) / 2
     self._pinX = math.max(0, math.min(self.width - self._pinW, math.floor(anchor - self._pinW / 2)))
     self._pinY = -self._pinH - 4
 end
@@ -2366,7 +2404,7 @@ end
 function MDADHUDPanel:placeDetourButton()
     local show = self._detourAllowed == true and self._blocked == true
     if show then
-        local x = self._statusX + textWidth(UIFont.Small, self._statusText) + self._detourGap
+        local x = self._statusX + textWidth(UIFont.Small, self._statusText, self._tz) + self._detourGap
         if x + self._detourW + self._detourGap > self._speedX then show = false end
         if show then
             setButtonRect(self.detourButton, x, self._detourY, self._detourW, self._detourH)
@@ -2378,7 +2416,7 @@ function MDADHUDPanel:placeDetourButton()
     local tip = self._detourAllowed == true and statusTipText ~= nil
     if tip then
         setButtonRect(self.statusTip, self._statusX, self._textY,
-            textWidth(UIFont.Small, self._statusText), self._fontH or 16)
+            textWidth(UIFont.Small, self._statusText, self._tz), self._fontH or 16)
         self.statusTip.tooltip = statusTipText
     end
     self.statusTip:setVisible(tip)
@@ -2386,8 +2424,8 @@ function MDADHUDPanel:placeDetourButton()
     local capTip = self._detourAllowed == true and self._speedTip ~= nil and self._capX ~= nil
     if capTip then
         local x0 = math.min(self._capX, self._capValueX)
-        local x1 = math.max(self._capX + textWidth(UIFont.Small, self._capLabel),
-            self._capValueX + textWidth(UIFont.Small, self._capText))
+        local x1 = math.max(self._capX + textWidth(UIFont.Small, self._capLabel, self._tz),
+            self._capValueX + textWidth(UIFont.Small, self._capText, self._tz))
         local y0 = math.min(self._capLabelY, self._capValueY)
         local y1 = math.max(self._capLabelY, self._capValueY) + (self._fontH or 16)
         local padX, padY = 3, 1 -- capLabelW 已多留 CAP_PAD，右側不會壓到下一欄
@@ -2405,8 +2443,8 @@ function MDADHUDPanel:placeDetourButton()
     -- 預計剩餘欄（欄名＋數值）整塊滑過看還剩多遠；欄位讓掉（收合、摺左翼、精簡單行放不下）或沒有估計就不放
     local etaTip = self._etaX ~= nil and self._etaTip ~= nil
     if etaTip then
-        local x1 = math.max(self._etaX + textWidth(UIFont.Small, self._etaLabel),
-            self._etaValueX + textWidth(UIFont.Small, self._etaText))
+        local x1 = math.max(self._etaX + textWidth(UIFont.Small, self._etaLabel, self._tz),
+            self._etaValueX + textWidth(UIFont.Small, self._etaText, self._tz))
         local y0 = math.min(self._etaLabelY, self._etaValueY)
         local y1 = math.max(self._etaLabelY, self._etaValueY) + (self._fontH or 16)
         setButtonRect(self.etaTip, self._etaX, y0, x1 - self._etaX, y1 - y0)
@@ -2610,7 +2648,7 @@ function MDADHUDPanel:placeTripText()
             avail = math.min(avail, self.detourButton.x - self._detourGap - x)
         end
     else
-        x = self._statusX + textWidth(UIFont.Small, self._statusText) + self._detourGap
+        x = self._statusX + textWidth(UIFont.Small, self._statusText, self._tz) + self._detourGap
         if self.detourButton:isVisible() then
             x = self.detourButton.x + self.detourButton.width + self._detourGap
         end
@@ -2619,11 +2657,11 @@ function MDADHUDPanel:placeTripText()
     end
     if avail <= 0 then return end
     local text = full
-    if textWidth(UIFont.Small, text) > avail then
+    if textWidth(UIFont.Small, text, self._tz) > avail then
         text = self._tripShort
-        if not text or textWidth(UIFont.Small, text) > avail then
+        if not text or textWidth(UIFont.Small, text, self._tz) > avail then
             text = self._tripCounter
-            if not text or textWidth(UIFont.Small, text) > avail then return end
+            if not text or textWidth(UIFont.Small, text, self._tz) > avail then return end
         end
     end
     self._tripText, self._tripTextX = text, x
@@ -2949,7 +2987,7 @@ function MDADHUDPanel:updateButtons()
             or "UI_MinidoracatAutoDrive_Stop")
         or "UI_MinidoracatAutoDrive_Start"))
     local actionTitle = fullAction
-    if textWidth(UIFont.Small, fullAction) > self.actionButton.width - 12 then
+    if textWidth(UIFont.Small, fullAction, self._tz) > self.actionButton.width - 12 then
         local shortKey = "UI_MinidoracatAutoDrive_HUDActionStart"
         if self._active then
             shortKey = self._prep and "UI_MinidoracatAutoDrive_HUDActionCancel"
