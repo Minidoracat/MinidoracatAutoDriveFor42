@@ -75,10 +75,10 @@ end
 
 -- ── 腳本注入 ────────────────────────────────────────────────────────────────
 
--- VehiclePartItem 的網路同步把 part index 當 byte 寫，且續讀那筆沒有 & 255
--- （VehiclePartItem.java:21 `for (int partIndex = bb.getByte() & 255; partIndex != -1;
---   partIndex = bb.getByte())`），index > 127 會被讀成負數 → getPartByIndex 回 null。
--- 所以加完兩個槽之後 part 總數必須 <= 128（最大索引 127）。
+-- VehiclePartItem 的網路同步把 part index 當 byte 寫。舊版續讀那筆沒有 & 255，index > 127 會被讀成負數
+-- → getPartByIndex 回 null，所以加完兩個槽之後 part 總數必須 <= 128（最大索引 127）。42.21 已改成
+-- `& 255`、終止碼 255（VehiclePartItem.java:21），但 2026-11-09 使用者裁定仍維持 128：要放寬先列出所有
+-- 以 byte 寫零件索引的封包，再跑 MP 裝拆、重連、重啟伺服器 E2E。
 local MAX_PARTS = 128
 
 -- 模組限定名稱，避免與其他 template 同名；以 script identity 記錄本次 Lua runtime 注入。
