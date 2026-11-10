@@ -26232,9 +26232,13 @@ drive.scenarioManualHint()
 --   (bf-over) getUpVectorDot 低於 OVERTURN_DOT 持續 OVERTURN_MS：VehicleOverturned 交還、why=overturned；
 --     (bf-bump) 不到 OVERTURN_MS、(bf-tilt) 傾斜但高於門檻：不交還。
 --   (bf-noapi) 引擎沒有 getDebugZ／getUpVectorDot：不判、照常駕駛。
+--   (bf-sample) 真 Driver 取樣把相對樓層的物理高度與朝上程度交給 Diagnostics（phys.physZ／upDot）。
+--   (bf-clock) 系統時間往回跳：下一幀就重量、計時從現在重算，照樣在 SINK_MS 內交還。
 --   違規證明：拿掉 onPlayerUpdate 的 physFault 呼叫＝(bf-sunk)(bf-over) 紅；深度不減樓層＝(bf-basement) 紅；不看 hasFloor＝
 --   (bf-nofloor) 紅；低於一層也要方格＝(bf-deep) 紅；SINK_MS 設 0＝(bf-blip) 紅；OVERTURN_MS 設 0＝(bf-bump) 紅；
---   OVERTURN_DOT 設 0.8＝(bf-tilt) 紅；SINK_DEPTH_M 設 0.2＝(bf-edge) 紅；交還鍵兩種對調＝(bf-sunk) 紅。
+--   OVERTURN_DOT 設 0.8＝(bf-tilt) 紅；SINK_DEPTH_M 設 0.2＝(bf-edge) 紅；交還鍵兩種對調＝(bf-sunk) 紅；
+--   collectPhys 不寫 physZ／upDot＝(bf-sample) 紅；節流不認時間倒退、倒退不清計時＝(bf-clock) 紅；先 Drive.stop 才記事件＝
+--   (bf-order) 紅；翻正不清翻覆計時＝(bf-over-blip) 紅。行程模式的交還原因見 (t14b)。
 function drive.scenarioBodyFault()
     scenario("1110c 車身異常交還：自己的車低於地板或翻覆時停止輸出、以專屬原因交還")
     local Dr, T, DG = MDAD.Drive, MDAD.Drive.debugTune(), MDADDiagnostics
@@ -26242,11 +26246,13 @@ function drive.scenarioBodyFault()
     local sShould, sSample = DG.shouldSample, DG.sample
     local oldSandbox = SandboxVars
     local oldRoute, oldTx, oldTy, oldState = drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
-    local ev, s0 = {}, nil
+    local ev, s0, seq = {}, nil, "" -- seq：state-error 事件（E）與 Diagnostics.stop（S）的先後
     MDAD.HUD.telemetryEnabled = function() return true end
     DG.start = function() return true end
-    DG.stop = function() end
-    DG.event = function(_, name, a) if name == "state-error" and type(a) == "table" then ev[#ev + 1] = a end end
+    DG.stop = function() seq = seq .. "S" end
+    DG.event = function(_, name, a)
+        if name == "state-error" and type(a) == "table" then ev[#ev + 1] = a; seq = seq .. "E" end
+    end
     DG.shouldSample, DG.sample = function() return false end, function() return true end
     drive.fillWorld(-10, 620, -12, 12)
     drive.putRoad(-10, 620, -3, 3)
@@ -26273,7 +26279,7 @@ function drive.scenarioBodyFault()
         setHeading(dveh, 0)
         dp._vehicle, dveh._driver = dveh, dp
         clearList(halos)
-        ev = {}
+        ev, seq = {}, ""
         checkTrue(Dr.start(dp), "(bf) 啟動")
         run(300)
         s0 = Dr.debugSession(0)
@@ -26291,6 +26297,33 @@ function drive.scenarioBodyFault()
     run(3000)
     still("(bf-ok) 正立、原點在地板上 3 秒：照常駕駛")
 
+    local seenPz, seenUp
+    DG.shouldSample = function() return true end
+    DG.sample = function(...)
+        for i = 1, select("#", ...) do
+            local a = select(i, ...)
+            if type(a) == "table" then
+                if a.physZ ~= nil then seenPz = a.physZ end
+                if a.upDot ~= nil then seenUp = a.upDot end
+            end
+        end
+        return true
+    end
+    dveh._pz, dveh._up = 0.134, 0.972
+    run(300)
+    DG.shouldSample, DG.sample = function() return false end, function() return true end
+    checkTrue(seenPz == 0.13 and seenUp == 0.97,
+        "(bf-sample) 取樣帶相對樓層的物理高度與朝上程度（physZ " .. tostring(seenPz) .. "、upDot " .. tostring(seenUp) .. "）")
+
+    startAt()
+    dveh._pz = -0.5
+    run(300) -- 已經開始計時
+    nowMs = nowMs - 60000 -- 系統時間往回跳 60 秒（校時）
+    run(1100)
+    checkTrue(not Dr.isActive(0) and halo(SUNK) and ev[1] ~= nil and ev[1].ms >= 500 and ev[1].ms < 1100,
+        "(bf-clock) 時間往回跳 60 秒後掉到地板下：照樣在 1.1 秒內交還（ms " .. tostring(ev[1] and ev[1].ms) .. "）")
+    nowMs = nowMs + 60000
+
     dveh._pz = -0.5
     run(1100) -- 字面值（不跟 TUNE 走）：量測每 250 ms、持續 500 ms 才交還，最慢 750 ms
     local e = ev[1]
@@ -26299,6 +26332,7 @@ function drive.scenarioBodyFault()
     checkTrue(#ev == 1 and e.why == "sunk" and e.pz == -0.5 and e.vup == 1 and e.ms >= 500 and e.x == 20 and e.y == 0,
         "(bf-sunk) state-error why=sunk 帶 pz／vup／ms／車位（why " .. tostring(e and e.why) .. "、pz " .. tostring(e and e.pz)
         .. "、ms " .. tostring(e and e.ms) .. "）")
+    checkEq(string.sub(seq, 1, 2), "ES", "(bf-order) 先記 state-error 才停 session（Diagnostics.stop 之後的事件會被丟掉）")
     local total = dveh._imp.total
     run(500)
     checkEq(dveh._imp.total, total, "(bf-sunk) 交還後不再對車施力")
@@ -26351,6 +26385,16 @@ function drive.scenarioBodyFault()
             and e.vup == 0.3 and e.ms >= 1500 and dveh._regulator == false,
         "(bf-over) 翻覆持續 OVERTURN_MS：VehicleOverturned 紅字交還、state-error why=overturned（why "
         .. tostring(e and e.why) .. "、vup " .. tostring(e and e.vup) .. "、ms " .. tostring(e and e.ms) .. "）")
+
+    startAt()
+    dveh._up = 0.3
+    run(1000)
+    dveh._up = 1
+    run(500)
+    checkNil(s0.overSince, "(bf-over-blip) 翻正後翻覆計時清掉")
+    dveh._up = 0.3
+    run(1000)
+    still("(bf-over-blip) 兩次各 1 秒的傾倒、中間翻正過：不累計、不交還")
 
     startAt()
     local gz, gu = dveh.getDebugZ, dveh.getUpVectorDot
@@ -32764,6 +32808,18 @@ checkEq(M.releases, 1, "(t14) 放棄時交還 claim，不留 orphan")
 checkEq(M.lastRelease, "failed", "(t14) 交還原因是失敗，不是到站")
 checkEq(M.stops[1].status, "pending", "(t14) 始終沒有假報抵達")
 checkEq(drive.voiceCount("arrive"), 0, "(t14) 始終沒有成功語音")
+
+-- ⑭b 1110c：車身異常交還（VehicleSunk／VehicleOverturned）在行程模式以 failed 交還，不是 unavailable（行程不會被當成
+--   「裝置失效暫停」）。違規證明：TRIP.RELEASE 拿掉這兩鍵＝紅。
+for _, key in ipairs({ MDAD.Drive.KEY_SUNK, MDAD.Drive.KEY_OVERTURNED }) do
+    ready(true)
+    setTrip("draft")
+    checkTrue(MDAD.Drive.continueItinerary(0), "(t14b) 出發")
+    pump()
+    M.lastRelease = nil
+    MDAD.Drive.stop(0, key)
+    checkEq(M.lastRelease, "failed", "(t14b) " .. key .. "：行程以 failed 交還")
+end
 
 -- ⑮ 回報回了我們不認得的成功值：「回了 true」不能證明 claim 已經交割。
 -- ⑮a token 其實還在我們手上 → 不准當成已收尾，維持 arrive 有界重試，也不冒稱抵達。

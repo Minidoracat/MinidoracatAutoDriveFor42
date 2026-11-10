@@ -594,8 +594,9 @@ finishClip = function(u, now)
     end
     -- 1110c：固定列（首行、檔頭、路線點列）之後的列改成離觸發時刻由近到遠送，首行標 "ord":"near"；讀者照 ts 穩定排序還原。
     -- 上傳一次一塊、由前往後送：越靠近觸發的列越先到，斷線時收到的是觸發前後連續的一段（正式服一例：車掉到地板下後
-    -- 6 秒玩家斷線，由舊到新送的片段只到 4 塊＝起步 2 秒，觸發前後全缺）。m＝窗前事件接窗內列，整體照時間排；
-    -- 觸發前那一側往回取時，同一個 ts 的幾列照原順序一起放（還原後同 ts 的先後不變）。
+    -- 6 秒玩家斷線，由舊到新送的片段只到 4 塊＝起步 2 秒，觸發前後全缺）。m＝窗前事件接窗內列。列是照追加順序收的，
+    -- 時間不保證遞增（同一幀裡事件用呼叫當下的時間、之後才寫的樣本用幀首的時間）：先照 ts 穩定排序（幾乎已排好，插入排序
+    -- 接近線性；同 ts 維持追加順序），和讀者排回來的順序一致。觸發前那一側往回取時，同一個 ts 的幾列照原順序一起放。
     local mLine, mTs, mN = {}, {}, 0
     k = startK
     while k <= u.evN do
@@ -610,6 +611,17 @@ finishClip = function(u, now)
         if i <= fullN or keep[i] then
             mN = mN + 1; mLine[mN], mTs[mN] = cap.lines[i], cap.ts[i]
         end
+        i = i + 1
+    end
+    i = 2
+    while i <= mN do
+        local line, ts = mLine[i], mTs[i]
+        local j = i - 1
+        while j >= 1 and mTs[j] > ts do
+            mLine[j + 1], mTs[j + 1] = mLine[j], mTs[j]
+            j = j - 1
+        end
+        mLine[j + 1], mTs[j + 1] = line, ts
         i = i + 1
     end
     local b = 1

@@ -8644,8 +8644,13 @@ end
 -- 低於地板＝原點比樓層地板低 TUNE.SINK_DEPTH_M 以上，而且那一格有地板（同 JavaPatch W65）；低於一層以上不看方格
 -- （車在讀不到方格的地方往下掉時那一格是 nil）。讀不到高度／朝上程度＝那一項不判。
 -- 出口：條件消失（守衛把車放回地面、車自己翻正）就清計時、照常駕駛。
+-- 時間是系統牆鐘（getTimestampMs）：往回跳超過一個量測週期（校時）就當下重量、計時從現在重算，不等舊時間追上。
 function Drive.physFault(s, playerNum, vehicle, now)
-    if now < (s.physNextMs or 0) then return false end
+    local nextMs = s.physNextMs or 0
+    if now < nextMs then
+        if nextMs - now <= TUNE.PHYS_CHECK_MS then return false end
+        s.sinkSince, s.overSince = nil, nil
+    end
     s.physNextMs = now + TUNE.PHYS_CHECK_MS
     local rel, up, level = Drive.bodyState(vehicle)
     local sunk = false

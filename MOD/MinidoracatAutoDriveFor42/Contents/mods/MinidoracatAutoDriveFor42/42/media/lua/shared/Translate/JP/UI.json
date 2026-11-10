@@ -321,6 +321,8 @@
     "UI_MinidoracatAutoDrive_HUDStatusStop_trailer": "トレーラーで中断",
     "UI_MinidoracatAutoDrive_HUDStatusStop_trailerSync": "同期切れで中断",
     "UI_MinidoracatAutoDrive_HUDStatusStop_engine": "エンジン停止で中断",
+    "UI_MinidoracatAutoDrive_HUDStatusStop_sunk": "車両落下で中断",
+    "UI_MinidoracatAutoDrive_HUDStatusStop_overturned": "横転で中断",
     "UI_MinidoracatAutoDrive_HUDStatusStop_device": "装置不良で中断",
     "UI_MinidoracatAutoDrive_HUDStatusStop_other": "強制中断",
     "UI_MinidoracatAutoDrive_HUDStopAgo": "%1 分前に中断",

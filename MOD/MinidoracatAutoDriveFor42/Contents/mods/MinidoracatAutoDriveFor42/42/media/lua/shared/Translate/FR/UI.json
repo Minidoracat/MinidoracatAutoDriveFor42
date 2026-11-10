@@ -321,6 +321,8 @@
     "UI_MinidoracatAutoDrive_HUDStatusStop_trailer": "Arrêt : remorque",
     "UI_MinidoracatAutoDrive_HUDStatusStop_trailerSync": "Arrêt : désynchro",
     "UI_MinidoracatAutoDrive_HUDStatusStop_engine": "Arrêt : moteur éteint",
+    "UI_MinidoracatAutoDrive_HUDStatusStop_sunk": "Arrêt : sous le sol",
+    "UI_MinidoracatAutoDrive_HUDStatusStop_overturned": "Arrêt : retourné",
     "UI_MinidoracatAutoDrive_HUDStatusStop_device": "Arrêt : appareil",
     "UI_MinidoracatAutoDrive_HUDStatusStop_other": "Arrêt forcé",
     "UI_MinidoracatAutoDrive_HUDStopAgo": "Arrêté il y a %1 min",

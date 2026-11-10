@@ -321,6 +321,8 @@
     "UI_MinidoracatAutoDrive_HUDStatusStop_trailer": "Detenido: remolque",
     "UI_MinidoracatAutoDrive_HUDStatusStop_trailerSync": "Detenido: sincronía",
     "UI_MinidoracatAutoDrive_HUDStatusStop_engine": "Detenido: motor apagado",
+    "UI_MinidoracatAutoDrive_HUDStatusStop_sunk": "Detenido: bajo el suelo",
+    "UI_MinidoracatAutoDrive_HUDStatusStop_overturned": "Detenido: volcado",
     "UI_MinidoracatAutoDrive_HUDStatusStop_device": "Detenido: dispositivo",
     "UI_MinidoracatAutoDrive_HUDStatusStop_other": "Detención forzada",
     "UI_MinidoracatAutoDrive_HUDStopAgo": "Detenido hace %1 min",

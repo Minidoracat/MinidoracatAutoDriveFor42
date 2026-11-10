@@ -321,6 +321,8 @@
     "UI_MinidoracatAutoDrive_HUDStatusStop_trailer": "정지: 트레일러",
     "UI_MinidoracatAutoDrive_HUDStatusStop_trailerSync": "정지: 동기화 끊김",
     "UI_MinidoracatAutoDrive_HUDStatusStop_engine": "정지: 엔진 꺼짐",
+    "UI_MinidoracatAutoDrive_HUDStatusStop_sunk": "정지: 지면 아래",
+    "UI_MinidoracatAutoDrive_HUDStatusStop_overturned": "정지: 전복",
     "UI_MinidoracatAutoDrive_HUDStatusStop_device": "정지: 장치",
     "UI_MinidoracatAutoDrive_HUDStatusStop_other": "강제 정지",
     "UI_MinidoracatAutoDrive_HUDStopAgo": "%1분 전 정지",

@@ -321,6 +321,8 @@
     "UI_MinidoracatAutoDrive_HUDStatusStop_trailer": "Стоп: прицеп",
     "UI_MinidoracatAutoDrive_HUDStatusStop_trailerSync": "Стоп: рассинхрон",
     "UI_MinidoracatAutoDrive_HUDStatusStop_engine": "Стоп: двигатель выкл.",
+    "UI_MinidoracatAutoDrive_HUDStatusStop_sunk": "Стоп: под землёй",
+    "UI_MinidoracatAutoDrive_HUDStatusStop_overturned": "Стоп: переворот",
     "UI_MinidoracatAutoDrive_HUDStatusStop_device": "Стоп: устройство",
     "UI_MinidoracatAutoDrive_HUDStatusStop_other": "Принудительный стоп",
     "UI_MinidoracatAutoDrive_HUDStopAgo": "Остановлен %1 мин назад",

@@ -321,6 +321,8 @@
     "UI_MinidoracatAutoDrive_HUDStatusStop_trailer": "Durdu: römork",
     "UI_MinidoracatAutoDrive_HUDStatusStop_trailerSync": "Durdu: senkron",
     "UI_MinidoracatAutoDrive_HUDStatusStop_engine": "Durdu: motor kapalı",
+    "UI_MinidoracatAutoDrive_HUDStatusStop_sunk": "Durdu: zemin altı",
+    "UI_MinidoracatAutoDrive_HUDStatusStop_overturned": "Durdu: devrildi",
     "UI_MinidoracatAutoDrive_HUDStatusStop_device": "Durdu: cihaz",
     "UI_MinidoracatAutoDrive_HUDStatusStop_other": "Zorla durduruldu",
     "UI_MinidoracatAutoDrive_HUDStopAgo": "%1 dk önce durdu",

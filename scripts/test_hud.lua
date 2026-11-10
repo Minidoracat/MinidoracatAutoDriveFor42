@@ -1551,6 +1551,19 @@ panel:refresh(nowMs)
 check(panel._statusText == "STOP DEVICE" and panel.statusTip.tooltip == "NEED GPS OR WATCH SENTENCE\nJUST NOW",
     "watch-aware GPS reason: forced stop shows the device label and the full sentence ("
         .. tostring(panel._statusText) .. " / " .. tostring(panel.statusTip.tooltip) .. ")")
+-- 1110c 自己的車低於地板／翻覆的交還：各有自己的短標籤（不退 other），完整原因句進 tooltip。
+-- 違規證明：HUD.STOP_KEYS 拿掉 VehicleSunk 那列＝紅；兩列指到同一個標籤＝紅。
+texts.UI_MinidoracatAutoDrive_HUDStatusStop_sunk = "STOP SUNK"
+texts.UI_MinidoracatAutoDrive_HUDStatusStop_overturned = "STOP OVERTURNED"
+texts.UI_MinidoracatAutoDrive_VehicleSunk = "SUNK SENTENCE"
+state.stopKey, state.stopAgoMs = "UI_MinidoracatAutoDrive_VehicleSunk", 1000
+panel:refresh(nowMs)
+check(panel._statusText == "STOP SUNK" and panel.statusTip.tooltip == "SUNK SENTENCE\nJUST NOW",
+    "body fault: a sunk handback shows its own label and the full sentence ("
+        .. tostring(panel._statusText) .. " / " .. tostring(panel.statusTip.tooltip) .. ")")
+state.stopKey = "UI_MinidoracatAutoDrive_VehicleOverturned"
+panel:refresh(nowMs)
+checkEq(panel._statusText, "STOP OVERTURNED", "body fault: an overturned handback shows its own label")
 state.stopKey, state.stopAgoMs = nil, nil
 state.startReason = "UI_MinidoracatAutoDrive_NeedGPSOrWatch"
 panel:refresh(nowMs)

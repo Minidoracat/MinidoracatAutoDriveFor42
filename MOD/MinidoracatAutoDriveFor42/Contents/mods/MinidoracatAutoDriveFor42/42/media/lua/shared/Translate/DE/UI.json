@@ -321,6 +321,8 @@
     "UI_MinidoracatAutoDrive_HUDStatusStop_trailer": "Halt: Anhänger",
     "UI_MinidoracatAutoDrive_HUDStatusStop_trailerSync": "Halt: Sync-Fehler",
     "UI_MinidoracatAutoDrive_HUDStatusStop_engine": "Halt: Motor aus",
+    "UI_MinidoracatAutoDrive_HUDStatusStop_sunk": "Halt: unter Boden",
+    "UI_MinidoracatAutoDrive_HUDStatusStop_overturned": "Halt: umgekippt",
     "UI_MinidoracatAutoDrive_HUDStatusStop_device": "Halt: Gerät",
     "UI_MinidoracatAutoDrive_HUDStatusStop_other": "Zwangsstopp",
     "UI_MinidoracatAutoDrive_HUDStopAgo": "Vor %1 Min. angehalten",

@@ -178,6 +178,9 @@ HUD.STOP_KEYS = {
     -- 掛車只是同步中斷（tow lost alive=false、自動掛回沒成功；1011a）：tooltip 的完整原因句教玩家倒車回去掛
     UI_MinidoracatAutoDrive_TrailerSyncLost = "UI_MinidoracatAutoDrive_HUDStatusStop_trailerSync",
     UI_MinidoracatAutoDrive_EngineOff = "UI_MinidoracatAutoDrive_HUDStatusStop_engine",
+    -- 1110c 自己的車低於地板／翻覆（Drive.physFault）
+    UI_MinidoracatAutoDrive_VehicleSunk = "UI_MinidoracatAutoDrive_HUDStatusStop_sunk",
+    UI_MinidoracatAutoDrive_VehicleOverturned = "UI_MinidoracatAutoDrive_HUDStatusStop_overturned",
     UI_MinidoracatAutoDrive_NeedGPS = "UI_MinidoracatAutoDrive_HUDStatusStop_device",
     UI_MinidoracatAutoDrive_NeedGPSOrWatch = "UI_MinidoracatAutoDrive_HUDStatusStop_device",
     UI_MinidoracatAutoDrive_NeedModule = "UI_MinidoracatAutoDrive_HUDStatusStop_device",
@@ -240,6 +243,8 @@ local STATUS_WIDTH_KEYS = {
     "UI_MinidoracatAutoDrive_HUDStatusStop_trailer",
     "UI_MinidoracatAutoDrive_HUDStatusStop_trailerSync",
     "UI_MinidoracatAutoDrive_HUDStatusStop_engine",
+    "UI_MinidoracatAutoDrive_HUDStatusStop_sunk",
+    "UI_MinidoracatAutoDrive_HUDStatusStop_overturned",
     "UI_MinidoracatAutoDrive_HUDStatusStop_device",
     "UI_MinidoracatAutoDrive_HUDStatusStop_other",
 }

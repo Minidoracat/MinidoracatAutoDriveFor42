@@ -1671,8 +1671,9 @@ end
 
 -- 1110c：自己的車低於地板／翻覆的交還出 fault 片段；片段首行 at 帶觸發當下的航向、物理高度（相對樓層）、車身朝上程度；
 -- 固定列之後的列離觸發時刻由近到遠（首行 "ord":"near"），只收到第一塊也涵蓋觸發前後。
---   違規證明：STOP_KIND 拿掉 VehicleSunk＝(sunk) 紅；at 不帶 pz＝(at) 紅；照舊由舊到新送＝(near)(cut) 紅；
---   只看一側（先送完觸發前或觸發後那一側）＝(both) 紅；觸發前那一側同 ts 的列倒著放＝(same-ts) 紅。
+--   違規證明：STOP_KIND 拿掉 VehicleSunk＝(sunk) 紅；at 不帶 pz＝(at) 紅；encodePhys 不寫 pz／vup＝(at) 樣本那條紅；
+--   照舊由舊到新送＝(near)(cut) 紅；只看一側（先送完觸發前或觸發後那一側）＝(both) 紅；觸發前那一側同 ts 的列倒著放＝
+--   (same-ts) 紅；合併前不照 ts 排序＝(skew) 紅。
 scenario("1110c sunk/overturned handback clips; clip head carries heading, physics height, up; lines go out nearest the trigger first")
 do
     nowMs = nowMs + 3600000
@@ -1684,7 +1685,13 @@ do
     D.event(0, "dodge", { phase = "commit" })
     D.event(0, "dodge", { phase = "release" })
     local low = { phys = { capReason = "profile", frameMs = 16, physZ = -0.52, upDot = 0.36 }, heading = 1.234 }
-    drive(6000, low)
+    drive(4000, low)
+    -- 同一幀裡事件用呼叫當下的時間、之後才寫的樣本用幀首的時間：追加順序是 e@N+1 → s@N（時間倒著）
+    local skew = nowMs + 200
+    nowMs = skew + 1
+    D.event(0, "dodge", { phase = "skew" })
+    nowMs = skew - 100
+    drive(1900, low)
     local trig = nowMs
     D.stop(0, "UI_MinidoracatAutoDrive_VehicleSunk")
     pump(120000)
@@ -1699,8 +1706,12 @@ do
     check(string.find(head, '"ord":"near"', 1, true) ~= nil, "(near) clip head marks the line order")
     check(string.find(lines[2] or "", '"t":"h"', 1, true) ~= nil and string.find(lines[3] or "", '"src":"7,8;9,10"', 1, true) ~= nil,
         "(near) header and route source stay right after the head")
-    check(string.find(text, '"pz":-0.52,"vup":0.36', 1, true) ~= nil, "(at) samples carry pz and vup")
-    local prevD, mono, posCommit, posRelease = -1, true, nil, nil
+    local sPz = 0
+    for i = 2, #lines do
+        if string.find(lines[i], '"t":"s"', 1, true) and string.find(lines[i], '"pz":-0.52,"vup":0.36', 1, true) then sPz = sPz + 1 end
+    end
+    check(sPz >= 20, "(at) sample lines carry pz and vup (" .. sPz .. " of them)")
+    local prevD, mono, posCommit, posRelease, posSkew, posSkewS = -1, true, nil, nil, nil, nil
     for i = 4, #lines do
         local ts = tonumber(string.match(lines[i], '"ts":(%d+)'))
         local d = ts and math.abs(ts - trig) or -1
@@ -1708,9 +1719,13 @@ do
         prevD = d
         if string.find(lines[i], '"phase":"commit"', 1, true) then posCommit = i end
         if string.find(lines[i], '"phase":"release"', 1, true) then posRelease = i end
+        if string.find(lines[i], '"phase":"skew"', 1, true) then posSkew = i end
+        if ts == skew and string.find(lines[i], '"t":"s"', 1, true) then posSkewS = i end
     end
     check(#lines > 40 and mono, "(near) after the fixed lines every line is no closer to the trigger than the one before")
     check(posCommit and posRelease and posCommit + 1 == posRelease, "(same-ts) two events with the same ts keep their order")
+    check(posSkew and posSkewS and posSkew + 1 == posSkewS,
+        "(skew) an event stamped 1 ms after the sample that follows it goes out first (it is nearer the trigger)")
     check(string.find(lines[#lines] or "", '"n":"dyn"', 1, true) ~= nil, "(near) the pre-window event is the farthest line and goes last")
     -- 只收到第一塊（玩家斷線）：收到的樣本是觸發前連續的一段，一筆不缺
     check(#text > 2 * U.CHUNK, "(cut) the clip spans more than two chunks (" .. #text .. ")")

@@ -321,6 +321,8 @@
     "UI_MinidoracatAutoDrive_HUDStatusStop_trailer": "Stop: przyczepa",
     "UI_MinidoracatAutoDrive_HUDStatusStop_trailerSync": "Stop: brak synchronizacji",
     "UI_MinidoracatAutoDrive_HUDStatusStop_engine": "Stop: silnik wył.",
+    "UI_MinidoracatAutoDrive_HUDStatusStop_sunk": "Stop: pod ziemią",
+    "UI_MinidoracatAutoDrive_HUDStatusStop_overturned": "Stop: przewrócony",
     "UI_MinidoracatAutoDrive_HUDStatusStop_device": "Stop: urządzenie",
     "UI_MinidoracatAutoDrive_HUDStatusStop_other": "Wymuszony stop",
     "UI_MinidoracatAutoDrive_HUDStopAgo": "Zatrzymano %1 min temu",

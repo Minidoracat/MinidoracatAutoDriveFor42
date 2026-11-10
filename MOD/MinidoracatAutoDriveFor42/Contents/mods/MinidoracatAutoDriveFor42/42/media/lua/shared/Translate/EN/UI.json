@@ -321,6 +321,8 @@
     "UI_MinidoracatAutoDrive_HUDStatusStop_trailer": "Stopped: trailer",
     "UI_MinidoracatAutoDrive_HUDStatusStop_trailerSync": "Trailer out of sync",
     "UI_MinidoracatAutoDrive_HUDStatusStop_engine": "Stopped: engine off",
+    "UI_MinidoracatAutoDrive_HUDStatusStop_sunk": "Stopped: sunk",
+    "UI_MinidoracatAutoDrive_HUDStatusStop_overturned": "Stopped: rolled over",
     "UI_MinidoracatAutoDrive_HUDStatusStop_device": "Stopped: device",
     "UI_MinidoracatAutoDrive_HUDStatusStop_other": "Force-stopped",
     "UI_MinidoracatAutoDrive_HUDStopAgo": "Stopped %1 min ago",
