@@ -2402,6 +2402,73 @@ do
     check(#sum < U.CHUNK, "(1026g) summary still fits one chunk (" .. #sum .. ")")
 end
 
+-- 1110f 片段配額分兩本帳：pri ≤ 2（交還、撞擊、接觸、掛車）只和同樣重要的片段比；其餘和全部片段比。
+--   舊制每趟 6 段、每小時 8 段不分種類：額度被 brake／offset 用完後，交還當下的 stuck／fault 片段整段不錄。
+--   違規證明：重要片段照舊和全部比＝(quota-drive)(quota-hour) 紅；重要片段不設每趟上限＝(quota-hi-drive) 紅；
+--   重要片段不設每小時上限＝(quota-hi-hour) 紅；重要片段不算進全部那本帳＝(quota-low) 紅；
+--   門檻改 pri ≤ 1＝(quota-hour) 紅；改 pri ≤ 3＝(quota-pri3) 紅。
+scenario("1110f clip quota: important clips are not crowded out by low-priority ones, and still have their own caps")
+do
+    local BRAKE = { forceBrakeLeft = 900, forceBrakeWhy = "return" }
+    local function fresh()
+        nowMs = nowMs + 3600000
+        pump(900000)
+        S._reset()
+        for k in pairs(files) do if string.find(k, ROOT, 1, true) == 1 then files[k] = nil end end
+    end
+    local function kinds()
+        local t, rows = {}, indexRows("C")
+        for i = 1, #rows do
+            local kind = field(rows[i], 7)
+            t[kind] = (t[kind] or 0) + 1
+        end
+        return t, #rows
+    end
+    -- 每 70 秒一次（過同種 60 秒冷卻、前一段也收窗了）
+    local function lowBrake() drive(1000, { phys = BRAKE }); drive(70000) end
+    local function hiContact() drive(200, { contact = true }); drive(70000) end
+    -- (quota-drive) 同一趟 6 段 brake 用完每趟額度，stuck 交還仍有片段
+    fresh()
+    start()
+    for _ = 1, 7 do lowBrake() end
+    -- pri 3（改道請求）不算重要片段：每趟額度用完後不開新片段
+    D.event(0, "detour", { phase = "auto", why = "noroad", ms = 12000 })
+    drive(70000)
+    D.stop(0, "UI_MinidoracatAutoDrive_StopStuck")
+    pump(900000)
+    local t, n = kinds()
+    checkEq(t.brake, 6, "(quota-drive) low-priority clips still stop at 6 per drive")
+    checkEq(t.detour, nil, "(quota-pri3) a pri-3 clip is not exempt")
+    checkEq(t.stuck, 1, "(quota-drive) the stuck handback still gets its clip after 6 brake clips")
+    -- (quota-hour) 同一小時：再 2 段 brake 滿 8 段（含 stuck 那段共 9 段），第 3 段 brake 不收，contact 仍收
+    start()
+    for _ = 1, 3 do lowBrake() end
+    drive(200, { contact = true })
+    drive(8000)
+    D.stop(0, "button")
+    pump(900000)
+    t, n = kinds()
+    checkEq(t.brake, 7, "(quota-low) low-priority clips count every clip toward 8 per hour (6 brake + stuck, so one more)")
+    checkEq(t.contact, 1, "(quota-hour) a contact clip is still recorded when the hour is used up by brake clips")
+    -- (quota-hi-drive) 重要片段自己的每趟上限：7 次 contact 只有 6 段，之後 stuck 交還也沒有新片段
+    fresh()
+    start()
+    for _ = 1, 7 do hiContact() end
+    D.stop(0, "UI_MinidoracatAutoDrive_StopStuck")
+    pump(900000)
+    t, n = kinds()
+    checkEq(n, 6, "(quota-hi-drive) important clips keep their own 6-per-drive cap (" .. tostring(t.contact) .. " contact, " .. tostring(t.stuck) .. " stuck)")
+    -- (quota-hi-hour) 同一小時再一趟：重要片段最多再 2 段（每小時 8），brake 也不收（全部那本帳已滿 8）
+    start()
+    for _ = 1, 3 do hiContact() end
+    lowBrake()
+    D.stop(0, "button")
+    pump(900000)
+    t, n = kinds()
+    checkEq(t.contact, 8, "(quota-hi-hour) important clips keep their own 8-per-hour cap")
+    checkEq(t.brake, nil, "(quota-low) important clips also use up the all-clips hour, so no brake clip")
+end
+
 -- 1110e 佇列依優先級排：還沒開始送的訊息 pri 小的先送、同 pri 先進先出；已經開始送的那一則不被插斷。
 --   違規證明：照舊接在尾端＝(q-sum)(q-pri) 紅；插到進行中那一則前面＝(q-whole) 紅；同 pri 後到的排前面＝(q-fifo) 紅；
 --   只讓摘要插隊（片段之間照舊先進先出）＝(q-pri) 紅；只和最後一則比一次（if 取代 while）＝(q-pri) 紅。

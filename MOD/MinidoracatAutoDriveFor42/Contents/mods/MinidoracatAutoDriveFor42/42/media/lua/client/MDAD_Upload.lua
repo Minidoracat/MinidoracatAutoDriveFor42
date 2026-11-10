@@ -167,7 +167,7 @@ local STOP_KIND = {
 }
 
 local outbox = {}      -- pn → { msgs..., n }
-local hourly = {}      -- pn → clip 時戳（最近一小時）
+local hourly = {}      -- pn → clip 時戳（最近一小時，全部片段）；pn + 4 → 只算 pri ≤ 2 的片段（1110f）
 local noticed = {}     -- pn → 本次遊戲已提示
 local nextSendMs = 0
 local msgSeq = 0
@@ -297,7 +297,7 @@ function U.begin(pn, now, header, profile, vehicle)
         drive = now, startTs = now, header = header, routeLine = nil,
         ring = {}, ringTs = {}, ringHead = 0, ringN = 0,
         ev = {}, evTs = {}, evHead = 0, evN = 0,
-        cap = nil, clips = 0, lastAnomaly = -1e18, stallSince = nil,
+        cap = nil, clips = 0, clipsHi = 0, lastAnomaly = -1e18, stallSince = nil,
         cooldown = {}, prevFbOn = false, prevFb = false,
         lastTs = nil, lastX = nil, lastY = nil, x0 = nil, y0 = nil, lastRem = nil,
         dist = 0, maxLat = 0, stallMs = 0,
@@ -413,9 +413,10 @@ local function incident(u, kind, ts)
     u.inc[u.incN] = { kind, ts, u.lastX, u.lastY }
 end
 
-local function hourlyOk(pn, now)
-    local list = hourly[pn]
-    if not list then list = {}; hourly[pn] = list end
+-- key＝pn（全部片段）或 pn + 4（pri ≤ 2 的片段）
+local function hourlyOk(key, now)
+    local list = hourly[key]
+    if not list then list = {}; hourly[key] = list end
     local keep, k = {}, 0
     local i = 1
     while i <= #list do
@@ -425,7 +426,7 @@ local function hourlyOk(pn, now)
         end
         i = i + 1
     end
-    hourly[pn] = keep
+    hourly[key] = keep
     return k < CLIPS_PER_HOUR
 end
 
@@ -456,9 +457,12 @@ local function trigger(u, now, kind, at)
         U.upgrade(a, cap, now, pri, kind)
         return
     end
+    -- 配額分兩本帳（1110f）：pri ≤ 2（交還、撞擊、接觸、掛車）只和同樣重要的片段比，額度不會被 brake／offset 這類片段佔掉；
+    -- 其餘照舊和全部片段比（重要片段也算在內）。同種冷卻不變。
+    local hi = pri <= 2
     local last = u.cooldown[kind]
-    if u.clips >= CLIPS_PER_DRIVE or (last and now >= last and now - last < KIND_COOLDOWN_MS)
-            or not hourlyOk(u.pn, now) then
+    if (hi and u.clipsHi or u.clips) >= CLIPS_PER_DRIVE or (last and now >= last and now - last < KIND_COOLDOWN_MS)
+            or not hourlyOk(hi and u.pn + 4 or u.pn, now) then
         if cap then U.upgrade(a, cap, now, pri, kind) end
         return
     end
@@ -510,7 +514,13 @@ local function trigger(u, now, kind, at)
     u.cap = cap
     u.clips = u.clips + 1
     local list = hourly[u.pn]
+    if not list then list = {}; hourly[u.pn] = list end
     list[#list + 1] = now
+    if hi then
+        u.clipsHi = u.clipsHi + 1
+        list = hourly[u.pn + 4]
+        list[#list + 1] = now
+    end
 end
 U.trigger = trigger
 
