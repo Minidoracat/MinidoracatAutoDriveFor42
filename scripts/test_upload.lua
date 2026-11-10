@@ -1227,15 +1227,24 @@ do
     t = tally()
     checkEq(t["contact@1110e"], 1, "(keep-tie) it replaced the older clip of the same priority")
     checkEq(t["stuck@1110e"], 31, "(keep-tie) pri-1 clips untouched")
-    -- 被拒的 13 段各宣告 1,000,000 字元（每小時額度 12,000,000）：有扣額度的話，下面那段同樣大小的 contact 就收不下
+    -- 被拒的 21 段各宣告 1,000,000 字元（每小時額度 20,000,000）：有扣額度的話，下面那段同樣大小的 contact 就收不下
     local function big(kind, pri)
         rid = rid + 1
         nowMs = nowMs + 1000
         return S.receive(player0, { id = rid, q = 1, n = 100, k = "clip", len = 1000000, kind = kind, pri = pri,
             rev = "1110e", data = "x" })
     end
-    for _ = 1, 13 do big("brake", 4) end
+    for _ = 1, 21 do big("brake", 4) end
     check(big("contact", 2), "(keep-budget) refused clips do not use up the hourly budget")
+    -- 1110f 伺服器每小時字元額度要裝得下客戶端一小時最多能送到的片段：兩本帳各 CLIPS_PER_HOUR 段，加上一小時積在 outbox
+    -- 的 4 段（OUTBOX_MAX 4,000,000），每段最多 CLIP_MAX。裝不下的話，後來的重要片段過了客戶端額度卻被伺服器整段拒收
+    -- （審查抓到；舊值 12,000,000＝8＋4 段）。違規證明：額度改回 12,000,000 或只算 16 段的 17,000,000＝(budget) 紅。
+    nowMs = nowMs + 3600000
+    local fit, want = 0, 2 * U.CLIPS_PER_HOUR + 4
+    for _ = 1, want do
+        if big("stuck", 1) then fit = fit + 1 end
+    end
+    checkEq(fit, want, "(budget) an hour of the client's maximum clip count plus a full outbox fits the server's hourly budget")
 end
 
 -- 1004e 越野推力 KPI：推力夠不夠要看自己的紀錄。想加速＝目標−實速 ≥6、前進、沒強制煞車；相鄰兩筆都想加速且同地表才算一對。
@@ -2405,8 +2414,8 @@ end
 -- 1110f 片段配額分兩本帳：pri ≤ 2（交還、撞擊、接觸、掛車）只和同樣重要的片段比；其餘和全部片段比。
 --   舊制每趟 6 段、每小時 8 段不分種類：額度被 brake／offset 用完後，交還當下的 stuck／fault 片段整段不錄。
 --   違規證明：重要片段照舊和全部比＝(quota-drive)(quota-hour) 紅；重要片段不設每趟上限＝(quota-hi-drive) 紅；
---   重要片段不設每小時上限＝(quota-hi-hour) 紅；重要片段不算進全部那本帳＝(quota-low) 紅；
---   門檻改 pri ≤ 1＝(quota-hour) 紅；改 pri ≤ 3＝(quota-pri3) 紅。
+--   重要片段不設每小時上限＝(quota-hi-hour) 紅；重要片段不算進全部那本帳：每小時那一半＝(quota-low) 紅、
+--   每趟那一半（u.clips 只算低優先）＝(quota-drive-all) 紅；門檻改 pri ≤ 1＝(quota-hour) 紅；改 pri ≤ 3＝(quota-pri3) 紅。
 scenario("1110f clip quota: important clips are not crowded out by low-priority ones, and still have their own caps")
 do
     local BRAKE = { forceBrakeLeft = 900, forceBrakeWhy = "return" }
@@ -2440,7 +2449,7 @@ do
     checkEq(t.brake, 6, "(quota-drive) low-priority clips still stop at 6 per drive")
     checkEq(t.detour, nil, "(quota-pri3) a pri-3 clip is not exempt")
     checkEq(t.stuck, 1, "(quota-drive) the stuck handback still gets its clip after 6 brake clips")
-    -- (quota-hour) 同一小時：再 2 段 brake 滿 8 段（含 stuck 那段共 9 段），第 3 段 brake 不收，contact 仍收
+    -- (quota-hour) 同一小時：全部那本帳已有 7 段（6 brake＋stuck），再 1 段 brake 就滿 8，第 2、3 段 brake 不收，contact 仍收
     start()
     for _ = 1, 3 do lowBrake() end
     drive(200, { contact = true })
@@ -2467,6 +2476,16 @@ do
     t, n = kinds()
     checkEq(t.contact, 8, "(quota-hi-hour) important clips keep their own 8-per-hour cap")
     checkEq(t.brake, nil, "(quota-low) important clips also use up the all-clips hour, so no brake clip")
+    -- (quota-drive-all) 重要片段也算進全部那本帳的每趟額度：同一趟 5 段 contact 之後，brake 只收 1 段（這小時還有空間）
+    fresh()
+    start()
+    for _ = 1, 5 do hiContact() end
+    for _ = 1, 2 do lowBrake() end
+    D.stop(0, "button")
+    pump(900000)
+    t, n = kinds()
+    checkEq(t.brake, 1, "(quota-drive-all) important clips count toward the all-clips 6 per drive")
+    checkEq(count(files[ROOT .. "summary-1.log"] or "", '"clips":6'), 1, "(quota-drive-all) the summary counts every clip of the drive")
 end
 
 -- 1110e 佇列依優先級排：還沒開始送的訊息 pri 小的先送、同 pri 先進先出；已經開始送的那一則不被插斷。

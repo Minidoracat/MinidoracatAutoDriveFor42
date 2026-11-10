@@ -132,7 +132,7 @@ local OFF_CLIP_MS = 5000
 U.PRE_MS, U.CHUNK, U.CLIP_MAX, U.TOW_SYNC_MS = PRE_MS, CHUNK, CLIP_MAX, TOW_SYNC_MS
 U.SMALL_ANIMAL_KG, U.IMPACT_TOUCH_PAD, U.IMPACT_HALF_L = 20, 0.8, IMPACT_HALF_L -- 1021 small-animal（上方撞擊分類）
 U.CLIP_EV_MAX, U.THIN_AFTER_MS, U.THIN_GAP_MS = CLIP_EV_MAX, THIN_AFTER_MS, THIN_GAP_MS
-U.CLIP_TOTAL_MAX = CLIP_TOTAL_MAX
+U.CLIP_TOTAL_MAX, U.CLIPS_PER_HOUR = CLIP_TOTAL_MAX, CLIPS_PER_HOUR
 U.OFF_MIN_MS, U.OFF_CLIP_MS, U.PRE_THIN_BEFORE_MS = OFF_MIN_MS, OFF_CLIP_MS, PRE_THIN_BEFORE_MS
 
 -- 片段優先級：數字越小越重要（伺服器每人 32 段滿了先覆蓋數字大的）。
@@ -513,8 +513,9 @@ local function trigger(u, now, kind, at)
     if cap.full then cap.fullN = cap.n end
     u.cap = cap
     u.clips = u.clips + 1
+    -- 全部那本帳：重要片段不看它的結果，但照樣修剪並確保表存在（不然只開重要片段時舊時戳一直留著）
+    if hi then hourlyOk(u.pn, now) end
     local list = hourly[u.pn]
-    if not list then list = {}; hourly[u.pn] = list end
     list[#list + 1] = now
     if hi then
         u.clipsHi = u.clipsHi + 1
