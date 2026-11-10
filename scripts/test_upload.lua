@@ -2051,8 +2051,9 @@ do
     check(clip, "(xb-late) impact clip trig = the hit time, not the 2 s confirmation")
     -- (xb-at) 1110d：延後確認的撞擊，片段首行的狀態是撞擊那一筆（50 km/h），不是兩秒後確認時的最新樣本（20 km/h）。
     --   違規證明：候選不存當下狀態（trigger 不收 at）＝紅。
+    -- 數字格式不釘死：這支測試跑 Lua 5.4（整數值印成 50.0），遊戲的 Kahlua 印成 50——比對「50 後面不是數字」
     local _, xbText = clipByTrig(hit)
-    check(string.find(string.match(xbText, "^[^\n]+") or "", '"at":{"spd":50.0,', 1, true) ~= nil,
+    check(string.match(string.match(xbText, "^[^\n]+") or "", '"at":{"spd":50[%.,]') ~= nil,
         "(xb-at) a late-confirmed impact: the clip head shows the state at the hit, not at the confirmation")
     -- (xb-merge) 同一件事併進還開著的 detour 片段：升級成 impact，trig2 與 at 都是撞擊那一筆。
     --   違規證明：U.upgrade 讀最新樣本（不讀候選存的那份）＝紅。
@@ -2070,7 +2071,7 @@ do
     _, xbText = clipByTrig(detourTs)
     xbText = string.match(xbText, "^[^\n]+") or ""
     check(string.find(xbText, '"kind":"impact"', 1, true) ~= nil and string.find(xbText, '"trig2":' .. hit, 1, true) ~= nil
-            and string.find(xbText, '"at":{"spd":50.0,', 1, true) ~= nil,
+            and string.match(xbText, '"at":{"spd":50[%.,]') ~= nil,
         "(xb-merge) a late-confirmed impact upgrading an open detour clip: trig2 and at are the hit's (" .. xbText .. ")")
     imp, _, xbk = one("(xb-geared)", function()
         drive(3000, { speed = 80, phys = gear(4) })
