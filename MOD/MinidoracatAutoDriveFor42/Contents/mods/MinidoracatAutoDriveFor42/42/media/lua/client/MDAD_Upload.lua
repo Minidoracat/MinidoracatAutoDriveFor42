@@ -536,8 +536,12 @@ local function enqueueMsg(pn, msg)
     msg.off = 0
     msg.q = 0
     msg.total = math.floor((#msg.text + CHUNK - 1) / CHUNK)
+    -- 還沒開始送的訊息依 pri 排、同 pri 先進先出（1110e）：新事故的片段不排在舊的低優先片段後面，摘要（pri 0）排到自己
+    -- 那段片段前面。已經開始送的不動（伺服器一次只收一段，各塊不能被別則插斷）。
+    local at = box.n + 1
+    while at > 1 and box[at - 1].off == 0 and box[at - 1].pri > msg.pri do at = at - 1 end
+    table.insert(box, at, msg)
     box.n = box.n + 1
-    box[box.n] = msg
     box.chars = box.chars + #msg.text
     return true
 end

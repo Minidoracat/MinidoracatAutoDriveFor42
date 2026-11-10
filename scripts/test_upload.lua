@@ -2376,6 +2376,57 @@ do
     check(#sum < U.CHUNK, "(1026g) summary still fits one chunk (" .. #sum .. ")")
 end
 
+-- 1110e 佇列依優先級排：還沒開始送的訊息 pri 小的先送、同 pri 先進先出；已經開始送的那一則不被插斷。
+--   違規證明：照舊接在尾端＝(q-sum)(q-pri) 紅；插到進行中那一則前面＝(q-whole) 紅；同 pri 後到的排前面＝(q-fifo) 紅。
+scenario("1110e outbox order: priority first among unsent messages, never interrupting the one in flight")
+do
+    nowMs = nowMs + 3600000
+    pump(900000)
+    checkEq(U.pending(0), 0, "(q) outbox empty before the scenario")
+    local s0 = #sent
+    -- 第一趟：接觸後 1 秒就下車 → 同一刻排進片段 A（contact，pri 2）與摘要 A（pri 0）
+    start()
+    drive(40000)
+    drive(200, { contact = true })
+    drive(1000)
+    D.stop(0, "exit")
+    local guard = 0
+    while (#sent == s0 or sent[#sent].args.k ~= "clip") and guard < 100 do pump(100); guard = guard + 1 end
+    checkEq(sent[s0 + 1].args.k, "sum", "(q-sum) the summary goes out before its own clip")
+    local idA, nA = sent[#sent].args.id, sent[#sent].args.n
+    check(sent[#sent].args.k == "clip" and sent[#sent].args.q == 1 and nA >= 3, "(q) clip A is in flight with chunks left (" .. tostring(nA) .. ")")
+    -- 片段 A 送到一半（這段不跑 U.tick）：第二趟 stuck 交還（片段 B pri 1＋摘要 B），第三趟只有摘要 C
+    local sB = #sent
+    start()
+    nowMs = nowMs + 200
+    sample()
+    D.stop(0, "UI_MinidoracatAutoDrive_StopStuck")
+    start()
+    nowMs = nowMs + 200
+    sample()
+    D.stop(0, "exit")
+    pump(900000)
+    checkEq(U.pending(0), 0, "(q) everything sent")
+    local order, ids, whole, seenOther = {}, {}, true, false
+    local k = sB + 1
+    while k <= #sent do
+        local a = sent[k].args
+        if a.id == idA then
+            if seenOther then whole = false end
+        else
+            seenOther = true
+            if a.q == 1 then
+                order[#order + 1] = a.k .. (a.kind and (":" .. a.kind) or "")
+                ids[#ids + 1] = a.id
+            end
+        end
+        k = k + 1
+    end
+    check(whole and sent[sB + 1].args.id == idA, "(q-whole) the clip in flight finishes before anything newer is sent")
+    checkEq(table.concat(order, " "), "sum sum clip:stuck", "(q-pri) then the summaries, then the stuck clip")
+    check(ids[1] ~= nil and ids[2] ~= nil and ids[1] < ids[2], "(q-fifo) same priority keeps arrival order")
+end
+
 -- 1010 所有送出的片段整段 ≤ CLIP_TOTAL_MAX（第一塊宣告的 len＝全文長度；伺服器只看這個）
 local maxLen = 0
 for i = 1, #sent do
