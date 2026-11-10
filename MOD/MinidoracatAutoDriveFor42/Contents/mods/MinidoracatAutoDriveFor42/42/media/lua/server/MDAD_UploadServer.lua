@@ -28,9 +28,10 @@ local SUM_FILES = 8
 local SUM_FILE_MAX = 1048576
 local HOUR_MS = 3600000
 -- 每人每小時字元額度：要裝得下客戶端一小時最多能送到的片段，否則後來的重要片段過了客戶端額度卻被這裡整段拒收。
--- ＝一小時最多開的段數（1110f 起兩本帳各 CLIPS_PER_HOUR 8 段＝16 段）＋上一小時積在 outbox 的（OUTBOX_MAX 4,000,000≈4 段），
--- 每段最多 CLIP_MAX；舊值 12,000,000 是 8＋4 段。客戶端的段數上限或 OUTBOX_MAX 再放寬時這裡要跟著算。
-local HOUR_BUDGET = 20000000
+-- ＝一小時最多開的段數（1110f 起兩本帳各 CLIPS_PER_HOUR 8 段＝16 段）＋上一小時積在 outbox 的（OUTBOX_MAX 4,000,000≈4 段）
+-- ＋1 段餘裕（摘要也扣這份額度、每趟一則最多 10,000 字元；窗開始時還在擷取的那一段），每段最多 CLIP_MAX。舊值 12,000,000
+-- 是 8＋4 段、沒有餘裕。客戶端的段數上限或 OUTBOX_MAX 再放寬時這裡要跟著算（test_upload (budget) 會紅）。
+local HOUR_BUDGET = 21000000
 local STALE_MS = 300000
 local MB = 1048576
 local KINDS = { stuck = true, fault = true, contact = true, impact = true, takeover = true,

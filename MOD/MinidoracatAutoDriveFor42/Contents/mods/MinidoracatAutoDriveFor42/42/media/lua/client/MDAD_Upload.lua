@@ -132,7 +132,7 @@ local OFF_CLIP_MS = 5000
 U.PRE_MS, U.CHUNK, U.CLIP_MAX, U.TOW_SYNC_MS = PRE_MS, CHUNK, CLIP_MAX, TOW_SYNC_MS
 U.SMALL_ANIMAL_KG, U.IMPACT_TOUCH_PAD, U.IMPACT_HALF_L = 20, 0.8, IMPACT_HALF_L -- 1021 small-animal（上方撞擊分類）
 U.CLIP_EV_MAX, U.THIN_AFTER_MS, U.THIN_GAP_MS = CLIP_EV_MAX, THIN_AFTER_MS, THIN_GAP_MS
-U.CLIP_TOTAL_MAX, U.CLIPS_PER_HOUR = CLIP_TOTAL_MAX, CLIPS_PER_HOUR
+U.CLIP_TOTAL_MAX, U.CLIPS_PER_HOUR, U.OUTBOX_MAX = CLIP_TOTAL_MAX, CLIPS_PER_HOUR, OUTBOX_MAX
 U.OFF_MIN_MS, U.OFF_CLIP_MS, U.PRE_THIN_BEFORE_MS = OFF_MIN_MS, OFF_CLIP_MS, PRE_THIN_BEFORE_MS
 
 -- 片段優先級：數字越小越重要（伺服器每人 32 段滿了先覆蓋數字大的）。
@@ -459,10 +459,13 @@ local function trigger(u, now, kind, at)
     end
     -- 配額分兩本帳（1110f）：pri ≤ 2（交還、撞擊、接觸、掛車）只和同樣重要的片段比，額度不會被 brake／offset 這類片段佔掉；
     -- 其餘照舊和全部片段比（重要片段也算在內）。同種冷卻不變。
+    -- 每小時的帳用「現在」記與修剪（qNow）：延後確認的撞擊（有 at）的 now 是幾秒前的撞擊時刻，hourlyOk 會把這幾秒內
+    -- 記的帳當成時鐘倒退而刪掉，全部那本帳就少算（審查抓到）。
     local hi = pri <= 2
+    local qNow = at and nowMs() or now
     local last = u.cooldown[kind]
     if (hi and u.clipsHi or u.clips) >= CLIPS_PER_DRIVE or (last and now >= last and now - last < KIND_COOLDOWN_MS)
-            or not hourlyOk(hi and u.pn + 4 or u.pn, now) then
+            or not hourlyOk(hi and u.pn + 4 or u.pn, qNow) then
         if cap then U.upgrade(a, cap, now, pri, kind) end
         return
     end
@@ -514,13 +517,13 @@ local function trigger(u, now, kind, at)
     u.cap = cap
     u.clips = u.clips + 1
     -- 全部那本帳：重要片段不看它的結果，但照樣修剪並確保表存在（不然只開重要片段時舊時戳一直留著）
-    if hi then hourlyOk(u.pn, now) end
+    if hi then hourlyOk(u.pn, qNow) end
     local list = hourly[u.pn]
-    list[#list + 1] = now
+    list[#list + 1] = qNow
     if hi then
         u.clipsHi = u.clipsHi + 1
         list = hourly[u.pn + 4]
-        list[#list + 1] = now
+        list[#list + 1] = qNow
     end
 end
 U.trigger = trigger

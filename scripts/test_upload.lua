@@ -1227,24 +1227,26 @@ do
     t = tally()
     checkEq(t["contact@1110e"], 1, "(keep-tie) it replaced the older clip of the same priority")
     checkEq(t["stuck@1110e"], 31, "(keep-tie) pri-1 clips untouched")
-    -- 被拒的 21 段各宣告 1,000,000 字元（每小時額度 20,000,000）：有扣額度的話，下面那段同樣大小的 contact 就收不下
+    -- 被拒的 22 段各宣告 1,000,000 字元（每小時額度 21,000,000）：有扣額度的話，下面那段同樣大小的 contact 就收不下
     local function big(kind, pri)
         rid = rid + 1
         nowMs = nowMs + 1000
         return S.receive(player0, { id = rid, q = 1, n = 100, k = "clip", len = 1000000, kind = kind, pri = pri,
             rev = "1110e", data = "x" })
     end
-    for _ = 1, 21 do big("brake", 4) end
+    for _ = 1, 22 do big("brake", 4) end
     check(big("contact", 2), "(keep-budget) refused clips do not use up the hourly budget")
     -- 1110f 伺服器每小時字元額度要裝得下客戶端一小時最多能送到的片段：兩本帳各 CLIPS_PER_HOUR 段，加上一小時積在 outbox
-    -- 的 4 段（OUTBOX_MAX 4,000,000），每段最多 CLIP_MAX。裝不下的話，後來的重要片段過了客戶端額度卻被伺服器整段拒收
-    -- （審查抓到；舊值 12,000,000＝8＋4 段）。違規證明：額度改回 12,000,000 或只算 16 段的 17,000,000＝(budget) 紅。
+    -- 的（OUTBOX_MAX／CLIP_MAX＝4 段），再留 1 段餘裕（摘要、窗開始時還在擷取的那段），每段最多 CLIP_MAX。裝不下的話，後來的
+    -- 重要片段過了客戶端額度卻被伺服器整段拒收（審查抓到；舊值 12,000,000＝8＋4 段）。超過仍然要拒收。
+    --   違規證明：額度改回 12,000,000、只算 16 段的 17,000,000＝(budget) 紅；額度無上限＝(budget-cap) 紅。
     nowMs = nowMs + 3600000
-    local fit, want = 0, 2 * U.CLIPS_PER_HOUR + 4
+    local fit, want = 0, 2 * U.CLIPS_PER_HOUR + math.ceil(U.OUTBOX_MAX / S.CLIP_MAX) + 1
     for _ = 1, want do
         if big("stuck", 1) then fit = fit + 1 end
     end
     checkEq(fit, want, "(budget) an hour of the client's maximum clip count plus a full outbox fits the server's hourly budget")
+    check(not big("stuck", 1), "(budget-cap) the hourly budget still refuses what goes past it")
 end
 
 -- 1004e 越野推力 KPI：推力夠不夠要看自己的紀錄。想加速＝目標−實速 ≥6、前進、沒強制煞車；相鄰兩筆都想加速且同地表才算一對。
@@ -2486,6 +2488,35 @@ do
     t, n = kinds()
     checkEq(t.brake, 1, "(quota-drive-all) important clips count toward the all-clips 6 per drive")
     checkEq(count(files[ROOT .. "summary-1.log"] or "", '"clips":6'), 1, "(quota-drive-all) the summary counts every clip of the drive")
+    -- (quota-late) 延後確認的撞擊用撞擊那刻當 now：每小時的帳要用確認當下記與修剪，否則撞擊之後、確認之前開的片段
+    -- 會被當成時鐘倒退而從帳上刪掉，低優先片段就多開（審查抓到）。大樣本讓片段一開就 full，下一個事故才會各開一段。
+    --   違規證明：帳照舊用撞擊時刻（qNow＝now）＝(quota-late) 紅。
+    fresh()
+    start()
+    for _ = 1, 5 do lowBrake() end
+    D.stop(0, "button")
+    pump(300000)
+    local FAT = string.rep("x", 6000)
+    local function fat(tn) return { capReason = FAT, frameMs = 16, transmissionNumber = tn, forceBrakeLeft = 0 } end
+    start()
+    drive(31000, { speed = 80, phys = fat(4) })
+    drive(200, { speed = 50, phys = fat(0) })          -- 撞擊候選（空檔掉速），2 秒後才確認
+    drive(200, { speed = 50, phys = fat(0) })
+    D.event(0, "detour", { phase = "auto", why = "noroad", ms = 12000 })
+    drive(200, { speed = 50, phys = fat(0) })
+    D.event(0, "unstick", { phase = "start" })
+    drive(3000, { speed = 20, phys = fat(0) })         -- 過了 EXIT_BRAKE_MS：撞擊成立，全部那本帳＝5＋detour＋unstick＋impact＝8
+    D.stop(0, "button")
+    pump(300000)
+    t, n = kinds()
+    check(t.detour == 1 and t.unstick == 1 and t.impact == 1 and t.brake == 5,
+        "(quota-late) setup: detour and unstick clips opened between the hit and its confirmation (" .. n .. " clips)")
+    start()
+    lowBrake()
+    D.stop(0, "button")
+    pump(300000)
+    t, n = kinds()
+    checkEq(t.brake, 5, "(quota-late) clips opened between a hit and its late confirmation stay on the hourly ledger")
 end
 
 -- 1110e 佇列依優先級排：還沒開始送的訊息 pri 小的先送、同 pri 先進先出；已經開始送的那一則不被插斷。
