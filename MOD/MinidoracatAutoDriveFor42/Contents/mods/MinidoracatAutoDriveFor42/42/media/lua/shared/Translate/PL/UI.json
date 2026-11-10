@@ -207,6 +207,8 @@
     "UI_MinidoracatAutoDrive_PlayerBlockStop": "Inny gracz blokuje tor jazdy przed tobą i od dłuższego czasu się nie rusza. Autopilot oddał sterowanie — przejmij kierownicę.",
     "UI_MinidoracatAutoDrive_AnimalBlockStop": "Zwierzę wciąż blokuje tor jazdy przed tobą i nie zeszło z drogi mimo powolnego podjeżdżania. Autopilot oddał sterowanie — przejmij kierownicę.",
     "UI_MinidoracatAutoDrive_TrailerLost": "Przyczepa się odczepiła. Autopilot zatrzymany.",
+    "UI_MinidoracatAutoDrive_VehicleSunk": "Pojazd wpadł pod ziemię. Autopilot zatrzymany.",
+    "UI_MinidoracatAutoDrive_VehicleOverturned": "Pojazd się przewrócił. Autopilot zatrzymany.",
     "UI_MinidoracatAutoDrive_TrailerRehitch": "Przyczepa się rozsynchronizowała. Cofam, żeby ją doczepić.",
     "UI_MinidoracatAutoDrive_TrailerRehitched": "Przyczepa znów doczepiona. Jedziemy dalej.",
     "UI_MinidoracatAutoDrive_TrailerSyncLost": "Przyczepa na chwilę zniknęła przez synchronizację w trybie wieloosobowym — nie odczepiła się. Cofnij się tam, gdzie była: gdy znów się pojawi, podjedź bliżej, a doczepi się sama. Potem ponownie włącz autopilota.",

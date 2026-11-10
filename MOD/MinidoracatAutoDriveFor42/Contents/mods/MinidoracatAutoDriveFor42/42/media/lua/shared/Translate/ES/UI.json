@@ -207,6 +207,8 @@
     "UI_MinidoracatAutoDrive_PlayerBlockStop": "Otro jugador bloquea la línea de conducción por delante y lleva un rato sin moverse. La conducción automática te devolvió el control: toma el mando.",
     "UI_MinidoracatAutoDrive_AnimalBlockStop": "Un animal sigue bloqueando la línea de conducción por delante y no se apartó tras avanzar despacio un rato. La conducción automática te devolvió el control: toma el mando.",
     "UI_MinidoracatAutoDrive_TrailerLost": "El remolque se soltó. La conducción automática se detuvo.",
+    "UI_MinidoracatAutoDrive_VehicleSunk": "El vehículo cayó bajo el suelo. La conducción automática se detuvo.",
+    "UI_MinidoracatAutoDrive_VehicleOverturned": "El vehículo volcó. La conducción automática se detuvo.",
     "UI_MinidoracatAutoDrive_TrailerRehitch": "El remolque se desincronizó. Retrocedo para engancharlo de nuevo.",
     "UI_MinidoracatAutoDrive_TrailerRehitched": "Remolque enganchado de nuevo. Seguimos el viaje.",
     "UI_MinidoracatAutoDrive_TrailerSyncLost": "El remolque desapareció un momento por la sincronización del multijugador; no se soltó. Retrocede hasta donde estaba: cuando vuelva a aparecer, acércate y se enganchará solo. Luego vuelve a activar la conducción automática.",

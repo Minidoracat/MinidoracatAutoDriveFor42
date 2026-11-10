@@ -207,6 +207,8 @@
     "UI_MinidoracatAutoDrive_PlayerBlockStop": "다른 플레이어가 앞 주행선을 막은 채 한동안 움직이지 않습니다. 자율주행이 제어권을 넘겼습니다. 직접 운전하세요.",
     "UI_MinidoracatAutoDrive_AnimalBlockStop": "동물이 앞 주행선을 계속 막고 있으며, 한동안 천천히 다가가도 비키지 않습니다. 자율주행이 제어권을 넘겼습니다. 직접 운전하세요.",
     "UI_MinidoracatAutoDrive_TrailerLost": "트레일러가 분리되었습니다. 자율주행이 멈췄습니다.",
+    "UI_MinidoracatAutoDrive_VehicleSunk": "차량이 지면 아래로 떨어졌습니다. 자율주행이 멈췄습니다.",
+    "UI_MinidoracatAutoDrive_VehicleOverturned": "차량이 전복되었습니다. 자율주행이 멈췄습니다.",
     "UI_MinidoracatAutoDrive_TrailerRehitch": "트레일러 동기화가 끊겼습니다. 후진해서 다시 연결합니다.",
     "UI_MinidoracatAutoDrive_TrailerRehitched": "트레일러를 다시 연결했습니다. 계속 갑니다.",
     "UI_MinidoracatAutoDrive_TrailerSyncLost": "멀티플레이 동기화 때문에 트레일러가 잠시 사라졌을 뿐, 분리된 것은 아닙니다. 방금 위치로 후진하세요. 트레일러가 다시 나타나면 가까이 가면 자동으로 연결됩니다. 그다음 자율주행을 다시 켜세요.",

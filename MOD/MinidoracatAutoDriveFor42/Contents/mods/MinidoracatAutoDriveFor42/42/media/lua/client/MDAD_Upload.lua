@@ -161,6 +161,9 @@ local STOP_KIND = {
     -- 引擎沒在轉或電瓶沒電（1012；Driver KEY_ENGINE）：車輛狀態讓自駕做不下去，與 UnsupportedVehicle 同歸 fault。
     -- 0.28.x 正式服兩天 15 趟以它結束（一台半聯結車 5 分鐘內 10 趟）、沒有一段片段。
     UI_MinidoracatAutoDrive_EngineOff = "fault",
+    -- 自己的車低於地板／翻覆（1110c；Driver Drive.physFault）：同歸 fault
+    UI_MinidoracatAutoDrive_VehicleSunk = "fault",
+    UI_MinidoracatAutoDrive_VehicleOverturned = "fault",
 }
 
 local outbox = {}      -- pn → { msgs..., n }
@@ -395,11 +398,11 @@ local function push(u, line, ts, isEv)
     if not cap.full then
         if not isEv then cap.lastS = ts end
         cap.n = cap.n + 1
-        cap.lines[cap.n] = line
+        cap.lines[cap.n], cap.ts[cap.n] = line, ts
         cap.chars = cap.chars + len
     elseif isEv and cap.evChars + len <= CLIP_EV_MAX then
         cap.n = cap.n + 1
-        cap.lines[cap.n] = line
+        cap.lines[cap.n], cap.ts[cap.n] = line, ts
         cap.evChars, cap.evN = cap.evChars + len, cap.evN + 1
     end
 end
@@ -447,9 +450,12 @@ local function trigger(u, now, kind)
     end
     if cap then finishClip(u, now) end
     u.cooldown[kind] = now
+    -- lines／ts＝收進片段的列與各自的時間（finishClip 照離觸發時刻的遠近排送出順序）；h／pz／vup＝觸發當下的航向、
+    -- 物理高度相對樓層、車身朝上程度（1110c）
     cap = { kind = kind, pri = pri, t0 = now, x = u.lastX, y = u.lastY,
         spd = u.sSpd, tgt = u.sTgt, mode = u.sMode, lat = u.sLat, rem = u.sRem, cr = u.sCap, fbw = u.sFbw,
-        lines = {}, n = 0, chars = 0, full = false, lastS = nil, evChars = 0, evN = 0 }
+        h = u.sH, pz = u.sPz, vup = u.sUp,
+        lines = {}, ts = {}, n = 0, chars = 0, full = false, lastS = nil, evChars = 0, evN = 0 }
     -- ring 由舊到新排：從最新往回找事前窗的起點（ts ≥ t0-PRE_MS）。早於 t0-PRE_THIN_BEFORE_MS 的樣本與上一筆收進的樣本
     -- （較新那筆）間隔 <THIN_GAP_MS 就跳過（5Hz；事件全收）。10Hz 大樣本讓事前窗本身仍超過 CLIP_MAX 時捨最舊的
     -- （片段總長才有上限，整段另由 finishClip 夾在 CLIP_TOTAL_MAX）。wStart＝實際收進的第一列時間：更早的事件改走 finishClip 的窗前事件。
@@ -478,8 +484,9 @@ local function trigger(u, now, kind)
     k = first
     while k <= u.ringN do
         if keep[k] then
+            local j = (idx + k - 1 + RING_N) % RING_N + 1
             cap.n = cap.n + 1
-            cap.lines[cap.n] = u.ring[(idx + k - 1 + RING_N) % RING_N + 1]
+            cap.lines[cap.n], cap.ts[cap.n] = u.ring[j], u.ringTs[j]
         end
         k = k + 1
     end
@@ -531,14 +538,15 @@ finishClip = function(u, now)
         at = ',"at":{"spd":' .. jround(cap.spd, 10) .. ',"tgt":' .. jround(cap.tgt, 10)
             .. ',"mode":' .. jstr(cap.mode or "") .. ',"lat":' .. jround(cap.lat, 100)
             .. ',"rem":' .. jround(cap.rem, 1)
-            .. ',"cap":' .. jstr(cap.cr or "") .. ',"fbw":' .. jstr(cap.fbw or "") .. '}'
+            .. ',"cap":' .. jstr(cap.cr or "") .. ',"fbw":' .. jstr(cap.fbw or "")
+            .. ',"h":' .. jround(cap.h, 100) .. ',"pz":' .. jround(cap.pz, 100) .. ',"vup":' .. jround(cap.vup, 100) .. '}'
     end
     local function headOf(evx)
         return '{"t":"clip","v":1,"kind":' .. jstr(cap.kind) .. ',"pri":' .. cap.pri
             .. ',"trig":' .. jnum(cap.t0) .. ',"end":' .. jnum(now)
             .. ',"drive":' .. jnum(u.drive) .. ',"pre":' .. PRE_MS
             .. ',"x":' .. jnum(cap.x) .. ',"y":' .. jnum(cap.y) .. at
-            .. ',"full":' .. (cap.full and "true" or "false") .. ',"evx":' .. evx .. '}'
+            .. ',"full":' .. (cap.full and "true" or "false") .. ',"evx":' .. evx .. ',"ord":"near"}'
     end
     local header = type(u.header) == "string" and u.header or nil
     -- 路線點列與整趟事件只補事前窗之前的（窗內的已在取樣序列裡）。
@@ -584,20 +592,43 @@ finishClip = function(u, now)
         end
         k = k - 1
     end
+    -- 1110c：固定列（首行、檔頭、路線點列）之後的列改成離觸發時刻由近到遠送，首行標 "ord":"near"；讀者照 ts 穩定排序還原。
+    -- 上傳一次一塊、由前往後送：越靠近觸發的列越先到，斷線時收到的是觸發前後連續的一段（正式服一例：車掉到地板下後
+    -- 6 秒玩家斷線，由舊到新送的片段只到 4 塊＝起步 2 秒，觸發前後全缺）。m＝窗前事件接窗內列，整體照時間排；
+    -- 觸發前那一側往回取時，同一個 ts 的幾列照原順序一起放（還原後同 ts 的先後不變）。
+    local mLine, mTs, mN = {}, {}, 0
     k = startK
     while k <= u.evN do
         local j = (u.evHead - u.evN + k - 1 + EVLOG_N) % EVLOG_N + 1
         if u.evTs[j] < cap.wStart and u.ev[j] ~= u.routeLine then
-            n = n + 1; parts[n] = u.ev[j]
+            mN = mN + 1; mLine[mN], mTs[mN] = u.ev[j], u.evTs[j]
         end
         k = k + 1
     end
     i = lo
     while i <= cap.n do
         if i <= fullN or keep[i] then
-            n = n + 1; parts[n] = cap.lines[i]
+            mN = mN + 1; mLine[mN], mTs[mN] = cap.lines[i], cap.ts[i]
         end
         i = i + 1
+    end
+    local b = 1
+    while b <= mN and mTs[b] < cap.t0 do b = b + 1 end
+    local a = b - 1
+    while a >= 1 or b <= mN do
+        if a >= 1 and (b > mN or cap.t0 - mTs[a] <= mTs[b] - cap.t0) then
+            local a0 = a
+            while a0 > 1 and mTs[a0 - 1] == mTs[a] do a0 = a0 - 1 end
+            local q = a0
+            while q <= a do
+                n = n + 1; parts[n] = mLine[q]
+                q = q + 1
+            end
+            a = a0 - 1
+        else
+            n = n + 1; parts[n] = mLine[b]
+            b = b + 1
+        end
     end
     enqueueMsg(u.pn, {
         k = "clip", kind = cap.kind, pri = cap.pri, trig = cap.t0, x = cap.x, y = cap.y,
@@ -962,6 +993,9 @@ function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
     if finite(speed) then lastSpeed[u.pn] = speed < 0 and -speed or speed end
     -- 片段檔頭的出事當下狀態（trigger 取這幾格；本幀觸發的就是本幀值）
     u.sSpd, u.sTgt, u.sMode, u.sLat, u.sRem = speed, target, mode, lat, remaining
+    u.sH = heading
+    u.sPz, u.sUp = nil, nil
+    if type(phys) == "table" then u.sPz, u.sUp = phys.physZ, phys.upDot end
     u.sCap = type(phys) == "table" and phys.capReason or nil
     u.sCtl = type(phys) == "table" and phys.controlState or nil
     local fbl0 = type(phys) == "table" and phys.forceBrakeLeft or nil

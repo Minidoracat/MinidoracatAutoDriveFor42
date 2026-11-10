@@ -38,12 +38,20 @@ TDIR = os.path.expandvars(r"%USERPROFILE%\Zomboid\Lua\MinidoracatAutoDrive\Telem
 # ---------- 載入 ----------
 
 def load_file(path):
+    """回 (clip, hdr, recs)。recs 一律照 ts 排（穩定排序）：1110c 起上傳片段的列是離觸發近的先送（首行 ord=near）。
+    片段另記 _cut（最後一行斷掉或檔尾沒有換行＝伺服器沒收齊）與 _len（字元數）。"""
     clip = hdr = None
     recs = []
-    for line in open(path, encoding="utf-8", errors="replace"):
+    with open(path, encoding="utf-8", errors="replace", newline="") as fh:
+        text = fh.read()
+    cut = not text.endswith("\n")
+    for line in text.split("\n"):
+        if not line.strip():
+            continue
         try:
             o = json.loads(line)
         except ValueError:
+            cut = True
             continue
         t = o.get("t")
         if t == "clip":
@@ -52,6 +60,9 @@ def load_file(path):
             hdr = o
         elif t in ("s", "e") and isinstance(o.get("ts"), (int, float)):
             recs.append(o)
+    if clip is not None:
+        clip["_cut"], clip["_len"] = cut, len(text)
+    recs.sort(key=lambda r: r["ts"])
     return clip, hdr or {}, recs
 
 
@@ -101,7 +112,7 @@ KEYS = [("spd", "spd", 1), ("tgt", "tgt", 1), ("ftg", "ftg", 1), ("des", "des", 
         ("rs", "rs", 1), ("rem", "rem", 1), ("lat", "lat", 2), ("el", "el", 2), ("ld", "ld", 2), ("rb", "rb", 2),
         ("err", "err", 2), ("st", "st", 2), ("sff", "sff", 2), ("ast", "ast", 2), ("sk", "sk", 2), ("tn", "tn", ""),
         ("fbl", "fbl", 0), ("fbw", "fbw", ""), ("hbr", "hbr", ""), ("holdReason", "hold", ""),
-        ("curveKappa", "ck", 3), ("curveCap", "cc", 1), ("stateError", "stateError", ""),
+        ("curveKappa", "ck", 3), ("curveCap", "cc", 1), ("stateError", "stateError", ""), ("pz", "pz", 2), ("vup", "vup", 2),
         ("ib", "ib", None), ("fbt", "fbt", None), ("fb", "fb", None), ("bl", "bl", None), ("dg", "dg", None),
         ("lc", "lc", None), ("ra", "ra", None), ("rh", "rh", None), ("po", "po", None),
         ("curveHardActive", "ch", None)]
@@ -142,7 +153,14 @@ def header(dv):
           f"parts={dv['parts']} t0={dv['t0']} opts={h.get('opts')}")
     if dv["clip"]:
         c = dv["clip"]
-        print(f"   clip kind={c.get('kind')} trig at t={(c.get('trig', dv['t0']) - dv['t0']) / 1000:.2f}")
+        trig = c.get("trig", dv["t0"])
+        print(f"   clip kind={c.get('kind')} trig at t={(trig - dv['t0']) / 1000:.2f} at={json.dumps(c.get('at'), ensure_ascii=False)}")
+        if c.get("_cut"):
+            rows = dv["rows"]
+            span = (f"樣本涵蓋觸發 {(rows[0]['ts'] - trig) / 1000:+.1f} 到 {(rows[-1]['ts'] - trig) / 1000:+.1f} 秒"
+                    if rows else "沒有任何樣本")
+            print(f"   !! 片段不完整（伺服器只收到 {c.get('_len')} 字元，最後一行斷掉或沒有換行）：{span}；"
+                  f"缺的部分看首行 at 與同趟摘要")
 
 
 def rel(dv, ts):
@@ -235,7 +253,7 @@ FIRST = [
     ("impact", lambda r: r["t"] == "e" and r.get("n") == "impact"),
     ("blocked", lambda r: (r.get("n") == "blocked") if r["t"] == "e" else bool(r.get("bl"))),
     ("forceBrake", lambda r: r["t"] == "s" and (bool(r.get("fbt")) or (r.get("fbl") or 0) > 0)),
-    ("state-error", lambda r: r["t"] == "s" and bool(r.get("stateError"))),
+    ("state-error", lambda r: (r.get("n") == "state-error") if r["t"] == "e" else bool(r.get("stateError"))),
     ("teleport", lambda r: r["t"] == "e" and r.get("n") == "teleport"),
 ]
 
@@ -471,6 +489,23 @@ def self_test():
         check(f["impact"]["ts"] == T + 11000 and f["teleport"]["ts"] == T + 12000, "impact／teleport 事件")
         win = [r["ts"] - T for r, _ in pre_window(dv, f["impact"], 5)]
         check(win[0] == 6000 and win[-1] == 11000 and 9000 not in win, "前 5 秒窗口：含觸發那筆、不含 5 秒前與 replan")
+
+        # 1110c 上傳片段：列離觸發近的先送（不照時間）、伺服器只收到前半（最後一行斷掉）
+        pc = os.path.join(d, "clip-01.log")
+        body = [dict(t="clip", kind="fault", trig=T + 5000, ord="near", at=dict(spd=3, pz=-0.5)),
+                dict(t="h", ts=T, drive=T, rev="t2"),
+                s(4800, pz=-0.4), dict(t="e", ts=T + 4900, n="lane", phase="a"), dict(t="e", ts=T + 4900, n="lane", phase="b"),
+                dict(t="e", ts=T + 5000, n="state-error", why="sunk"), s(4600), s(4400)]
+        with open(pc, "w", encoding="utf-8", newline="") as fh:
+            fh.write("".join(json.dumps(o) + "\n" for o in body) + '{"t":"s","ts":' + str(T + 4200) + ',"x":1')
+        cdv = drives([pc])[0]
+        check([r["ts"] - T for r in cdv["recs"]] == [4400, 4600, 4800, 4900, 4900, 5000],
+              "片段的列不照時間排：載入後照 ts 排回來、斷掉的最後一行不收")
+        check([r.get("phase") for r in cdv["recs"] if r.get("n") == "lane"] == ["a", "b"], "同一個 ts 的事件維持檔內先後")
+        check(cdv["clip"]["_cut"] is True and firsts(cdv)["state-error"]["ts"] == T + 5000,
+              "最後一行斷掉＝_cut；state-error 事件算進 first")
+        check(drives([p1])[0]["clip"] is None and load_file(put("clip-02.log", body))[0]["_cut"] is False,
+              "完整的片段 _cut 為假；本機 session 沒有 clip")
     print(f"self-test：{len(bad)} 項失敗")
     return 1 if bad else 0
 

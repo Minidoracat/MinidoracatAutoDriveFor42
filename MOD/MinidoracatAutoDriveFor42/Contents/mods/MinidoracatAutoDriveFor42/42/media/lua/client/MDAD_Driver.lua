@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1110b"
+Drive.REV = "1110c"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -442,6 +442,14 @@ TUNE.AREA_WAIT_MAX_MS = 30000
 -- 離線過遠（0928a；clip-01：讓位期間玩家開到路線外 98m，恢復時仍追舊路線）：車離路線超過 SNAP_MAX_M
 -- 持續這麼久（主 MOD 偏航重算冷卻 3s 之後）仍沒有新路線接上，以 RouteTooFar 交還，不越野追線。
 TUNE.ROUTE_FAR_MS = 4000
+-- 車身異常（1110c，2026-11-10 使用者裁定；Drive.physFault）：自己的車低於地板或翻覆＝停止輸出、以專屬原因交還。
+-- 低於地板的深度同 JavaPatch W65（MdcVehicleSinkGuard.SINK_DEPTH：車頭著地的拖車約 0.1 m）；持續 SINK_MS 才算（單次量測不交還）。
+-- 翻覆＝getUpVectorDot 低於 OVERTURN_DOT（傾斜超過 60°）持續 OVERTURN_MS：撞擊彈跳的瞬間傾斜不算。每 PHYS_CHECK_MS 量一次。
+TUNE.PHYS_CHECK_MS = 250
+TUNE.SINK_DEPTH_M = 0.25
+TUNE.SINK_MS = 500
+TUNE.OVERTURN_DOT = 0.5
+TUNE.OVERTURN_MS = 1500
 -- RETURN 待命滑行核對的車身寬帶餘裕（同 Corridor FOOTPRINT_PAD＝原生 polyPlusRadius 0.15，
 -- BaseVehicle.java:4146；見 Drive.returnCoastClear）
 TUNE.RETURN_COAST_PAD = 0.15
@@ -1078,6 +1086,9 @@ Drive.KEY_AREA_STOP = "UI_MinidoracatAutoDrive_AreaLoadStop"
 Drive.KEY_PLAYER_STOP = "UI_MinidoracatAutoDrive_PlayerBlockStop"
 -- 動物一直擋在行駛線上、爬行 ANIMAL_CRAWL_MAX_MS 仍沒讓開的交還理由（Drive.softStopCap）
 Drive.KEY_ANIMAL_STOP = "UI_MinidoracatAutoDrive_AnimalBlockStop"
+-- 自己的車低於地板／翻覆的交還理由（Drive.physFault；1110c）
+Drive.KEY_SUNK = "UI_MinidoracatAutoDrive_VehicleSunk"
+Drive.KEY_OVERTURNED = "UI_MinidoracatAutoDrive_VehicleOverturned"
 
 -- 診斷輸出（只在 getDebug() 為真時存在）。實機回報「按了關閉但車還在跑」時，唯一能
 -- 分辨「session 沒關」與「只是慣性滑行」的證據就是這幾行；跟線那行必須節流，每幀
@@ -1217,6 +1228,7 @@ TRIP.RELEASE = {
     [KEY_LOST] = "noroad", [KEY_ROUTE] = "noroad", [KEY_ROUTE_FAR] = "noroad",
     [KEY_STUCK] = "failed", [KEY_UNSUPPORTED] = "failed", [Drive.KEY_AREA_STOP] = "failed",
     [Drive.KEY_PLAYER_STOP] = "failed", [Drive.KEY_ANIMAL_STOP] = "failed",
+    [Drive.KEY_SUNK] = "failed", [Drive.KEY_OVERTURNED] = "failed",
 }
 -- playerNum → 開始／備路意圖（token=nil 時尚未 acquire；claim 前對車零控制輸出）
 TRIP.preps = {}
@@ -8617,6 +8629,56 @@ function Drive.startBehind(s, vx, vy)
     return math.floor(-((vx - x1) * math.cos(h) + (vy - y1) * math.sin(h)) * 100 + 0.5) / 100
 end
 
+-- 車身物理狀態（1110c）：物理原點相對所在樓層的高度（樓層單位，×2.44949＝m；停在地面約 0.1–0.4）、車身朝上程度
+-- （getUpVectorDot，1＝正立）、樓層。getZ 在車低於地板時是 0：BaseVehicle.update 每幀先 setZ(0)，物理高度那一層有方格且
+-- 有地板才改（BaseVehicle.java:3402-3410）——所以高度要讀 getDebugZ（＝原點高度 ÷ 2.44949，BaseVehicle.java:4207-4209）。
+-- 讀不到的項回 nil（舊版引擎、測試假車）。
+function Drive.bodyState(vehicle)
+    local pz, up, z = jget(vehicle, "getDebugZ"), jget(vehicle, "getUpVectorDot"), jget(vehicle, "getZ")
+    local level = finite(z) and math.floor(z) or nil
+    return (finite(pz) and level) and pz - level or nil, finite(up) and up or nil, level
+end
+
+-- 自己的車低於地板或翻覆（1110c，2026-11-10 使用者裁定）：回 true＝已交還（Drive.stop 只關 regulator、不鎖輪不施力）。
+-- 正式服 0.35.3 一例：車掉到地板下 32 m、側翻，自駕看到的 getZ 仍是 0、照常輸出到玩家斷線。
+-- 低於地板＝原點比樓層地板低 TUNE.SINK_DEPTH_M 以上，而且那一格有地板（同 JavaPatch W65）；低於一層以上不看方格
+-- （車在讀不到方格的地方往下掉時那一格是 nil）。讀不到高度／朝上程度＝那一項不判。
+-- 出口：條件消失（守衛把車放回地面、車自己翻正）就清計時、照常駕駛。
+function Drive.physFault(s, playerNum, vehicle, now)
+    if now < (s.physNextMs or 0) then return false end
+    s.physNextMs = now + TUNE.PHYS_CHECK_MS
+    local rel, up, level = Drive.bodyState(vehicle)
+    local sunk = false
+    if rel and rel * 2.44949 < -TUNE.SINK_DEPTH_M then
+        sunk = rel < -1
+        if not sunk then
+            local x, y = vehicle:getX(), vehicle:getY()
+            local sq = getCell():getGridSquare(math.floor(x), math.floor(y), level)
+            sunk = sq ~= nil and sq:hasFloor() == true
+        end
+    end
+    s.sinkSince = sunk and (s.sinkSince or now) or nil
+    s.overSince = (up and up < TUNE.OVERTURN_DOT) and (s.overSince or now) or nil
+    local why, since = nil, nil
+    if s.sinkSince and now - s.sinkSince >= TUNE.SINK_MS then
+        why, since = "sunk", s.sinkSince
+    elseif s.overSince and now - s.overSince >= TUNE.OVERTURN_MS then
+        why, since = "overturned", s.overSince
+    end
+    if not why then return false end
+    local speed = jget(vehicle, "getCurrentSpeedKmHour")
+    diagEvent(s, playerNum, "state-error", {
+        why = why, pz = rel and math.floor(rel * 100 + 0.5) / 100 or nil, vup = up and math.floor(up * 100 + 0.5) / 100 or nil,
+        x = vehicle:getX(), y = vehicle:getY(), speed = finite(speed) and speed or nil, ms = now - since, mode = s.mode,
+    })
+    if getDebug() then -- telemetry: state-error why=sunk／overturned（pz／vup／x／y／speed／ms／mode）
+        print(LOG .. "pn=" .. playerNum .. " body fault " .. why .. " pz=" .. tostring(rel) .. " up=" .. tostring(up)
+            .. " mode=" .. tostring(s.mode) .. " t=" .. now)
+    end
+    Drive.stop(playerNum, why == "sunk" and Drive.KEY_SUNK or Drive.KEY_OVERTURNED)
+    return true
+end
+
 local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     local phys = {}
     local po = jget(vehicle, "isDoingOffroad")
@@ -8637,6 +8699,10 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     -- 1017：油量 %（原版儀表同一支，BaseVehicle.java:9293-9296；MP 是伺服器同步來的值），油耗回報直接看每段扣多少
     local fu = jget(vehicle, "getRemainingFuelPercentage")
     if finite(fu) then phys.fuelPercent = math.floor(fu * 100 + 0.5) / 100 end
+    -- 1110c：物理高度相對樓層（樓層單位）與車身朝上程度（Drive.bodyState；getZ 在車低於地板時仍是 0）
+    local pz, up = Drive.bodyState(vehicle)
+    if pz then phys.physZ = math.floor(pz * 100 + 0.5) / 100 end
+    if up then phys.upDot = math.floor(up * 100 + 0.5) / 100 end
     if finite(expL) then phys.expectedLane = expL end
     if finite(latDev) then phys.latDev = latDev end
     phys.residentBias, phys.zombieLane = s.residentBias, s.zombieLane
@@ -17699,6 +17765,7 @@ local function onPlayerUpdate(player)
     local now = getTimestampMs()
     Drive.etaTick(s, now) -- 預計剩餘時間：每幀計時；換路線／重建後重算計畫表（arrive 收尾也照走）
     Drive.anomTick(s, vehicle, now) -- 接手提示的異常計時（1020e；讀上一幀的控制狀態，排在接手判定之前）
+    if Drive.physFault(s, playerNum, vehicle, now) then return end -- 1110c：車低於地板或翻覆＝停止輸出、專屬原因交還
     if s.brakeTerminalFault then
         Drive.stop(playerNum, KEY_UNSUPPORTED)
         return
@@ -18641,6 +18708,7 @@ Drive.SUMMON_KEY_CODE = {
     [KEY_ROUTE] = "NO_ROUTE", [KEY_API] = "NO_ROUTE", [KEY_ROUTE_FAR] = "ROUTE_FAR", [KEY_UNSUPPORTED] = "FAULT",
     [KEY_NOT_DRIVER] = "TAKEOVER", [Drive.KEY_AREA_STOP] = "AREA", [Drive.KEY_PLAYER_STOP] = "PLAYER",
     [Drive.KEY_ANIMAL_STOP] = "ANIMAL", [Drive.KEY_SUMMON_TOWING] = "TOWING",
+    [Drive.KEY_SUNK] = "FAULT", [Drive.KEY_OVERTURNED] = "FAULT",
     ["UI_MinidoracatAutoDrive_NeedGPS"] = "NAV", ["UI_MinidoracatAutoDrive_NeedGPSOrWatch"] = "NAV",
 }
 function Drive.summonCodeOf(reasonKey, diagWhy)

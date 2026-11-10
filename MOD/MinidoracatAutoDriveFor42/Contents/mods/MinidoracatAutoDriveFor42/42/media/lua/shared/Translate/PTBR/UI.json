@@ -207,6 +207,8 @@
     "UI_MinidoracatAutoDrive_PlayerBlockStop": "Outro jogador está bloqueando a linha de direção à frente e não se move há um tempo. A direção automática devolveu o controle: assuma a direção.",
     "UI_MinidoracatAutoDrive_AnimalBlockStop": "Um animal continua bloqueando a linha de direção à frente e não saiu do caminho mesmo após avançar devagar por um tempo. A direção automática devolveu o controle: assuma a direção.",
     "UI_MinidoracatAutoDrive_TrailerLost": "O reboque se soltou. A direção automática parou.",
+    "UI_MinidoracatAutoDrive_VehicleSunk": "O veículo caiu abaixo do chão. A direção automática parou.",
+    "UI_MinidoracatAutoDrive_VehicleOverturned": "O veículo capotou. A direção automática parou.",
     "UI_MinidoracatAutoDrive_TrailerRehitch": "O reboque dessincronizou. Dando ré para engatar de novo.",
     "UI_MinidoracatAutoDrive_TrailerRehitched": "Reboque engatado de novo. Seguindo viagem.",
     "UI_MinidoracatAutoDrive_TrailerSyncLost": "O reboque sumiu por um instante por causa da sincronização do multijogador; ele não se soltou. Dê ré até onde ele estava: quando reaparecer, chegue perto e ele engata sozinho. Depois ligue a direção automática de novo.",

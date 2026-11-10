@@ -207,6 +207,8 @@
     "UI_MinidoracatAutoDrive_PlayerBlockStop": "前方有其他玩家擋住行駛線，等了一陣子仍未離開，自動駕駛已交還。請接手駕駛。",
     "UI_MinidoracatAutoDrive_AnimalBlockStop": "前方的動物一直擋在行駛線上，慢慢前進了一段牠仍沒讓開，自動駕駛已交還。請接手駕駛。",
     "UI_MinidoracatAutoDrive_TrailerLost": "掛車已脫開，自動駕駛已停止。",
+    "UI_MinidoracatAutoDrive_VehicleSunk": "車輛掉到地面下了，自動駕駛已停止。",
+    "UI_MinidoracatAutoDrive_VehicleOverturned": "車輛翻覆了，自動駕駛已停止。",
     "UI_MinidoracatAutoDrive_TrailerRehitch": "掛車同步中斷，自動倒車回去接它。",
     "UI_MinidoracatAutoDrive_TrailerRehitched": "掛車接回來了，繼續行程。",
     "UI_MinidoracatAutoDrive_TrailerSyncLost": "掛車因多人連線同步暫時消失，不是斷鉤。倒車回到剛才的位置，掛車出現後靠近就會自動掛回，再啟動自動駕駛即可。",

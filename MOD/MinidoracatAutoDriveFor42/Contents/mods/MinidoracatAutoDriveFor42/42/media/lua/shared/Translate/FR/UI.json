@@ -207,6 +207,8 @@
     "UI_MinidoracatAutoDrive_PlayerBlockStop": "Un autre joueur bloque la trajectoire devant et n'a pas bougé depuis un moment. La conduite auto vous rend la main — veuillez prendre le relais.",
     "UI_MinidoracatAutoDrive_AnimalBlockStop": "Un animal continue de bloquer la trajectoire devant et ne s'est toujours pas écarté après un moment d'avance au pas. La conduite auto vous rend la main — veuillez prendre le relais.",
     "UI_MinidoracatAutoDrive_TrailerLost": "La remorque s'est détachée. Conduite auto arrêtée.",
+    "UI_MinidoracatAutoDrive_VehicleSunk": "Le véhicule est tombé sous le sol. Conduite auto arrêtée.",
+    "UI_MinidoracatAutoDrive_VehicleOverturned": "Le véhicule s'est retourné. Conduite auto arrêtée.",
     "UI_MinidoracatAutoDrive_TrailerRehitch": "La remorque s'est désynchronisée. Je recule pour la réatteler.",
     "UI_MinidoracatAutoDrive_TrailerRehitched": "Remorque réattelée. On continue.",
     "UI_MinidoracatAutoDrive_TrailerSyncLost": "La remorque a disparu un instant à cause de la synchronisation multijoueur — elle ne s'est pas détachée. Reculez jusqu'à l'endroit où elle était : quand elle réapparaît, approchez-vous et elle se réattelle toute seule. Relancez ensuite la conduite auto.",

@@ -207,6 +207,8 @@
     "UI_MinidoracatAutoDrive_PlayerBlockStop": "前方有其他玩家挡住行驶线，等了一阵子仍未离开，自动驾驶已交还。请接手驾驶。",
     "UI_MinidoracatAutoDrive_AnimalBlockStop": "前方的动物一直挡在行驶线上，慢慢前进了一段它仍没让开，自动驾驶已交还。请接手驾驶。",
     "UI_MinidoracatAutoDrive_TrailerLost": "挂车已脱开，自动驾驶已停止。",
+    "UI_MinidoracatAutoDrive_VehicleSunk": "车辆掉到地面下了，自动驾驶已停止。",
+    "UI_MinidoracatAutoDrive_VehicleOverturned": "车辆翻倒了，自动驾驶已停止。",
     "UI_MinidoracatAutoDrive_TrailerRehitch": "挂车同步中断，自动倒车回去接它。",
     "UI_MinidoracatAutoDrive_TrailerRehitched": "挂车接回来了，继续行程。",
     "UI_MinidoracatAutoDrive_TrailerSyncLost": "挂车因多人联机同步暂时消失，并不是脱钩。倒车回到刚才的位置，挂车出现后靠近就会自动挂回，再启动自动驾驶即可。",

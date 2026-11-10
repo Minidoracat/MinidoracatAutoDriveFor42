@@ -237,6 +237,9 @@ local EK = {
     "qx", "qy",
     -- 1110a tow rh-*（Driver Drive.rehitchNote）：倒車掛回時引擎把牽引車物理關著（42.22 等待重接）、本 MOD 打開的次數
     "pon",
+    -- 1110c state-error why=sunk／overturned（Driver Drive.physFault）：物理高度相對樓層（樓層單位）、本車朝上程度
+    -- （vup：tow lost 的 up 是掛車的，不共用）
+    "pz", "vup",
 }
 
 local function logOnce(msg)
@@ -1288,6 +1291,8 @@ local function encodePhys(phys)
     addNum("transmissionNumber", "tn")
     addNum("regulatorSpeed", "rgs")
     addNum("fuelPercent", "fu")
+    addNum("physZ", "pz")             -- 1110c：物理原點相對所在樓層的高度（樓層單位，×2.44949＝m；低於約 −0.1＝低於地板）
+    addNum("upDot", "vup")            -- 1110c：本車 getUpVectorDot（1＝正立；掛車的是 tup）
     addNum("expectedLane", "el")
     addNum("latDev", "ld")
     -- 1004a：常駐線與軟縫 lane——el 偏離 rsd 時看得出是誰持有（lc 鏈、dg 繞行、ra 回線、zln 殭屍軟縫）

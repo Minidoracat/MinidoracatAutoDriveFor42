@@ -1178,6 +1178,10 @@ local function newVehicle(opts)
     end
     function v:isEngineRunning() return self._engine end
     function v:getZ() return self._z end
+    -- BaseVehicle.getDebugZ（物理原點高度 ÷ 2.44949，BaseVehicle.java:4207-4209）／getUpVectorDot（:4330-4335）：
+    -- 預設 nil＝讀不到（Drive.bodyState 那一項不判、樣本不寫）；scenarioBodyFault 才給值
+    function v:getDebugZ() return self._pz end
+    function v:getUpVectorDot() return self._up end
     -- BaseVehicle.getScriptName（遷移／稽核日誌拿它標出是哪一款車）
     function v:getScriptName() return self._script:getFullName() end
     -- BaseVehicle.isInArea(areaId, chr)＝BaseVehicle.java:8225
@@ -6879,6 +6883,9 @@ function drive.mkSquare(x, y)
     -- 假格預設無地板物件（回 nil）＝非水。要造水面就把 _floor 換成帶
     -- hasProperty 的假物件。
     sq.getFloor = function() return sq._floor or nil end
+    -- IsoGridSquare.hasFloor（IsoGridSquare.java:3511）：假格預設有地板（_floor 只管水面判定的地板物件），
+    -- 要造沒地板的格就設 _noFloor（Drive.physFault）
+    sq.hasFloor = function() return sq._noFloor ~= true end
     -- 0905s：production 的水面判定改逐物件看 sprite 旗標（waterUnderfoot），地板也是
     -- getObjects 的一員（IsoGridSquare.getFloor 就是從 objects 找）：假格把 _floor 排在
     -- index 0 一起吐出；_floor 以 drive.floorObj 建（帶 getSprite/getProperties）。
@@ -26215,6 +26222,152 @@ function drive.scenarioManualHint()
     drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
 end
 drive.scenarioManualHint()
+-- 1110c 車身異常交還（Drive.physFault，2026-11-10 使用者裁定）：自己的車低於地板或翻覆＝停止輸出、專屬原因交還。
+--   (bf-ok) 正立、原點在地板上：照常駕駛。
+--   (bf-sunk) 原點低於地板超過 SINK_DEPTH_M、那一格有地板、持續 SINK_MS：VehicleSunk 紅字交還、state-error why=sunk
+--     （pz／vup／ms）、regulator 關、之後不再施力。(bf-edge) 低於地板但不到 SINK_DEPTH_M：不交還。
+--   (bf-blip) 不到 SINK_MS 就回到地面：不交還、計時清掉。
+--   (bf-nofloor) 那一格沒有地板、深度不到一層：不交還。(bf-deep) 低於一層以上、讀不到方格：照樣交還。
+--   (bf-basement) 車在地下一層（getZ −1）、原點在那層地板上：不交還。
+--   (bf-over) getUpVectorDot 低於 OVERTURN_DOT 持續 OVERTURN_MS：VehicleOverturned 交還、why=overturned；
+--     (bf-bump) 不到 OVERTURN_MS、(bf-tilt) 傾斜但高於門檻：不交還。
+--   (bf-noapi) 引擎沒有 getDebugZ／getUpVectorDot：不判、照常駕駛。
+--   違規證明：拿掉 onPlayerUpdate 的 physFault 呼叫＝(bf-sunk)(bf-over) 紅；深度不減樓層＝(bf-basement) 紅；不看 hasFloor＝
+--   (bf-nofloor) 紅；低於一層也要方格＝(bf-deep) 紅；SINK_MS 設 0＝(bf-blip) 紅；OVERTURN_MS 設 0＝(bf-bump) 紅；
+--   OVERTURN_DOT 設 0.8＝(bf-tilt) 紅；SINK_DEPTH_M 設 0.2＝(bf-edge) 紅；交還鍵兩種對調＝(bf-sunk) 紅。
+function drive.scenarioBodyFault()
+    scenario("1110c 車身異常交還：自己的車低於地板或翻覆時停止輸出、以專屬原因交還")
+    local Dr, T, DG = MDAD.Drive, MDAD.Drive.debugTune(), MDADDiagnostics
+    local sStart, sEvent, sStop, sTel = DG.start, DG.event, DG.stop, MDAD.HUD.telemetryEnabled
+    local sShould, sSample = DG.shouldSample, DG.sample
+    local oldSandbox = SandboxVars
+    local oldRoute, oldTx, oldTy, oldState = drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
+    local ev, s0 = {}, nil
+    MDAD.HUD.telemetryEnabled = function() return true end
+    DG.start = function() return true end
+    DG.stop = function() end
+    DG.event = function(_, name, a) if name == "state-error" and type(a) == "table" then ev[#ev + 1] = a end end
+    DG.shouldSample, DG.sample = function() return false end, function() return true end
+    drive.fillWorld(-10, 620, -12, 12)
+    drive.putRoad(-10, 620, -3, 3)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 60, RightLaneBias = 0 })
+    drive.nav.route = { pts = { 0, 0, 600, 0 }, segSurface = { "paved" }, segWidth = { 6 }, len = 600, cost = 600,
+        avoidPenalty = 0 }
+    drive.nav.tx, drive.nav.ty, drive.nav.state = 600, 0, "ok"
+    local SUNK, OVER = "UI_MinidoracatAutoDrive_VehicleSunk", "UI_MinidoracatAutoDrive_VehicleOverturned"
+    local sq = drive.world[20 * 100000 + 0]
+    local function run(ms)
+        local stop = nowMs + ms
+        while nowMs < stop do
+            nowMs = nowMs + 50
+            driveTick(dp, dveh)
+        end
+    end
+    -- 每案一顆新 session：車在 (20,0)、正立、原點在地板上 0.1 層
+    local function startAt(z)
+        Dr.stop(0, nil)
+        dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = 20, 0, 20, 0, false
+        dveh._z, dveh._pz, dveh._up = z or 0, (z or 0) + 0.1, 1
+        sq._noFloor = nil
+        drive.world[20 * 100000 + 0] = sq
+        setHeading(dveh, 0)
+        dp._vehicle, dveh._driver = dveh, dp
+        clearList(halos)
+        ev = {}
+        checkTrue(Dr.start(dp), "(bf) 啟動")
+        run(300)
+        s0 = Dr.debugSession(0)
+    end
+    local function halo(key)
+        for i = 1, #halos do if halos[i].text == key and halos[i].kind == "bad" then return true end end
+        return false
+    end
+    -- 負案：同一個 session 還在開、沒有任何 state-error
+    local function still(label)
+        checkTrue(s0 ~= nil and Dr.debugSession(0) == s0 and #ev == 0 and not halo(SUNK) and not halo(OVER), label)
+    end
+
+    startAt()
+    run(3000)
+    still("(bf-ok) 正立、原點在地板上 3 秒：照常駕駛")
+
+    dveh._pz = -0.5
+    run(1100) -- 字面值（不跟 TUNE 走）：量測每 250 ms、持續 500 ms 才交還，最慢 750 ms
+    local e = ev[1]
+    checkTrue(not Dr.isActive(0) and halo(noteReason(SUNK)) and not halo(OVER) and dveh._regulator == false,
+        "(bf-sunk) 原點低於地板 1.2 m：VehicleSunk 紅字交還、regulator 關")
+    checkTrue(#ev == 1 and e.why == "sunk" and e.pz == -0.5 and e.vup == 1 and e.ms >= 500 and e.x == 20 and e.y == 0,
+        "(bf-sunk) state-error why=sunk 帶 pz／vup／ms／車位（why " .. tostring(e and e.why) .. "、pz " .. tostring(e and e.pz)
+        .. "、ms " .. tostring(e and e.ms) .. "）")
+    local total = dveh._imp.total
+    run(500)
+    checkEq(dveh._imp.total, total, "(bf-sunk) 交還後不再對車施力")
+
+    startAt()
+    dveh._pz = -0.22 / 2.44949
+    run(2000)
+    still("(bf-edge) 低於地板 0.22 m（不到 SINK_DEPTH_M）：不交還")
+    dveh._pz = -0.28 / 2.44949
+    run(1100)
+    checkTrue(not Dr.isActive(0) and halo(SUNK), "(bf-edge) 低於地板 0.28 m：交還")
+
+    startAt()
+    dveh._pz = -0.5
+    run(300)
+    dveh._pz = 0.1
+    run(2000)
+    still("(bf-blip) 低於地板 0.3 秒就回到地面：不交還")
+    checkNil(s0.sinkSince, "(bf-blip) 回到地面後計時清掉")
+
+    startAt()
+    sq._noFloor = true
+    dveh._pz = -0.5
+    run(2000)
+    still("(bf-nofloor) 那一格沒有地板、深度不到一層：不交還")
+    sq._noFloor = nil
+
+    startAt()
+    drive.world[20 * 100000 + 0] = nil
+    dveh._pz = -1.5
+    run(1100)
+    checkTrue(not Dr.isActive(0) and halo(SUNK) and ev[1] ~= nil and ev[1].why == "sunk",
+        "(bf-deep) 低於地板一層以上、讀不到方格：照樣交還")
+    drive.world[20 * 100000 + 0] = sq
+
+    startAt(-1)
+    run(2000)
+    still("(bf-basement) 車在地下一層、原點在那層地板上（getDebugZ −0.9）：不交還")
+
+    startAt()
+    dveh._up = 0.6
+    run(3000)
+    still("(bf-tilt) 傾斜 53°（朝上 0.6，高於 OVERTURN_DOT）：不交還")
+    dveh._up = 0.3
+    run(1200)
+    still("(bf-bump) 朝上 0.3 但只有 1.2 秒（不到 OVERTURN_MS）：不交還")
+    run(900)
+    e = ev[1]
+    checkTrue(not Dr.isActive(0) and halo(noteReason(OVER)) and not halo(SUNK) and #ev == 1 and e.why == "overturned"
+            and e.vup == 0.3 and e.ms >= 1500 and dveh._regulator == false,
+        "(bf-over) 翻覆持續 OVERTURN_MS：VehicleOverturned 紅字交還、state-error why=overturned（why "
+        .. tostring(e and e.why) .. "、vup " .. tostring(e and e.vup) .. "、ms " .. tostring(e and e.ms) .. "）")
+
+    startAt()
+    local gz, gu = dveh.getDebugZ, dveh.getUpVectorDot
+    dveh.getDebugZ, dveh.getUpVectorDot = nil, nil
+    dveh._pz, dveh._up = -5, -1
+    run(3000)
+    still("(bf-noapi) 引擎沒有 getDebugZ／getUpVectorDot：不判、照常駕駛")
+    dveh.getDebugZ, dveh.getUpVectorDot = gz, gu
+
+    Dr.stop(0, nil)
+    dveh._z, dveh._pz, dveh._up = 0, nil, nil
+    DG.start, DG.event, DG.stop, MDAD.HUD.telemetryEnabled = sStart, sEvent, sStop, sTel
+    DG.shouldSample, DG.sample = sShould, sSample
+    SandboxVars = oldSandbox
+    drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
+end
+drive.scenarioBodyFault()
 -- (thr) 1008 拖車倒車的折角門檻（MDADTrailer.canReverse）：舊制折角已超過 REVERSE_HITCH_MAX 時 stepUnstick 把 dist2 設成
 --   「倒夠了」，0 位移 settle→success、3 次額度幾秒燒完（正式服 0.23.0 片段每次 7–19 ms）。
 --   (thr-start) 起手折角已超限：不倒（rear-blocked rear=hitch、phi）、不吃額度、回停等（blockRetryDone）；連三次額度仍 0。

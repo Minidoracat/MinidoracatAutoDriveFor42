@@ -240,11 +240,12 @@ checkEq(count(clip, '"t":"h"'), 1, "header included once")
 checkEq(count(clip, '"src":"1,2;3,4"'), 1, "route source included once")
 checkEq(count(clip, '"n":"dyn"'), 1, "whole-drive event before window kept")
 checkEq(count(clip, '"n":"replan"'), 1, "replan only inside the window")
+-- 1110c：片段裡的列不照時間排（離觸發近的先送），窗的範圍看最小／最大 ts
 local firstTs, lastTs = nil, nil
 for ts in string.gmatch(clip, '{"t":"s","ts":(%d+)') do
     ts = tonumber(ts)
-    firstTs = firstTs or ts
-    lastTs = ts
+    if not firstTs or ts < firstTs then firstTs = ts end
+    if not lastTs or ts > lastTs then lastTs = ts end
 end
 check(firstTs and firstTs >= tContact - U.PRE_MS and firstTs <= tContact - U.PRE_MS + 200,
     "pre window starts 30s before the contact")
@@ -1274,12 +1275,14 @@ local function clipByTrig(trig)
     end
     return nil, ""
 end
+-- 1110c：片段裡的列是離觸發近的先送，這裡照 ts 排回時間順序（讀者一律這樣還原）
 local function sampleTs(text)
     local out = {}
     for line in string.gmatch(text, "[^\n]+") do
         local ts = string.match(line, '^{"t":"s","ts":(%d+)')
         if ts then out[#out + 1] = tonumber(ts) end
     end
+    table.sort(out)
     return out
 end
 -- [lo, hi) 內相鄰樣本的最小間隔與筆數
@@ -1664,6 +1667,91 @@ do
     D.stop(0, "UI_MinidoracatAutoDrive_NotDriver")
     pump(60000)
     checkEq(#clipsOf(d0), 0, "(eng-neg) an unmapped stop key raises no clip")
+end
+
+-- 1110c：自己的車低於地板／翻覆的交還出 fault 片段；片段首行 at 帶觸發當下的航向、物理高度（相對樓層）、車身朝上程度；
+-- 固定列之後的列離觸發時刻由近到遠（首行 "ord":"near"），只收到第一塊也涵蓋觸發前後。
+--   違規證明：STOP_KIND 拿掉 VehicleSunk＝(sunk) 紅；at 不帶 pz＝(at) 紅；照舊由舊到新送＝(near)(cut) 紅；
+--   只看一側（先送完觸發前或觸發後那一側）＝(both) 紅；觸發前那一側同 ts 的列倒著放＝(same-ts) 紅。
+scenario("1110c sunk/overturned handback clips; clip head carries heading, physics height, up; lines go out nearest the trigger first")
+do
+    nowMs = nowMs + 3600000
+    start()
+    local d0 = nowMs
+    D.event(0, "route", { phase = "cutover", src = "7,8;9,10", srcW = "5", srcS = "asphalt" })
+    D.event(0, "dyn", { phase = "dirty", why = "key" })
+    drive(35000) -- 超過 PRE_MS：路線點列與 dyn 落在窗前（路線＝固定列，dyn＝離觸發最遠、最後才送）
+    D.event(0, "dodge", { phase = "commit" })
+    D.event(0, "dodge", { phase = "release" })
+    local low = { phys = { capReason = "profile", frameMs = 16, physZ = -0.52, upDot = 0.36 }, heading = 1.234 }
+    drive(6000, low)
+    local trig = nowMs
+    D.stop(0, "UI_MinidoracatAutoDrive_VehicleSunk")
+    pump(120000)
+    local rows = clipsOf(d0)
+    checkEq(#rows, 1, "(sunk) VehicleSunk handback: one clip")
+    checkEq(field(rows[1] or "", 7), "fault", "(sunk) kind fault")
+    local _, text = clipByTrig(trig)
+    local lines = {}
+    for line in string.gmatch(text, "[^\n]+") do lines[#lines + 1] = line end
+    local head = lines[1] or ""
+    check(string.find(head, '"h":1.23,"pz":-0.52,"vup":0.36}', 1, true) ~= nil, "(at) clip head carries heading, pz, vup (" .. head .. ")")
+    check(string.find(head, '"ord":"near"', 1, true) ~= nil, "(near) clip head marks the line order")
+    check(string.find(lines[2] or "", '"t":"h"', 1, true) ~= nil and string.find(lines[3] or "", '"src":"7,8;9,10"', 1, true) ~= nil,
+        "(near) header and route source stay right after the head")
+    check(string.find(text, '"pz":-0.52,"vup":0.36', 1, true) ~= nil, "(at) samples carry pz and vup")
+    local prevD, mono, posCommit, posRelease = -1, true, nil, nil
+    for i = 4, #lines do
+        local ts = tonumber(string.match(lines[i], '"ts":(%d+)'))
+        local d = ts and math.abs(ts - trig) or -1
+        if d < prevD then mono = false end
+        prevD = d
+        if string.find(lines[i], '"phase":"commit"', 1, true) then posCommit = i end
+        if string.find(lines[i], '"phase":"release"', 1, true) then posRelease = i end
+    end
+    check(#lines > 40 and mono, "(near) after the fixed lines every line is no closer to the trigger than the one before")
+    check(posCommit and posRelease and posCommit + 1 == posRelease, "(same-ts) two events with the same ts keep their order")
+    check(string.find(lines[#lines] or "", '"n":"dyn"', 1, true) ~= nil, "(near) the pre-window event is the farthest line and goes last")
+    -- 只收到第一塊（玩家斷線）：收到的樣本是觸發前連續的一段，一筆不缺
+    check(#text > 2 * U.CHUNK, "(cut) the clip spans more than two chunks (" .. #text .. ")")
+    local cut = string.match(string.sub(text, 1, U.CHUNK), "^(.*)\n") or ""
+    local got, all = sampleTs(cut), sampleTs(text)
+    local inRange = 0
+    for i = 1, #all do if got[1] and all[i] >= got[1] then inRange = inRange + 1 end end
+    check(#got >= 5 and got[#got] == all[#all], "(cut) the first chunk reaches the last sample before the trigger")
+    checkEq(inRange, #got, "(cut) the first chunk holds a gap-free run of samples up to the trigger")
+    -- 觸發前後都有列（contact，窗在觸發後繼續）：兩側交錯，第一塊同時有觸發前與觸發後的樣本
+    nowMs = nowMs + 3600000
+    start()
+    drive(20000)
+    local t2 = nowMs + 200
+    drive(200, { contact = true })
+    drive(8000)
+    D.stop(0, "arrive")
+    pump(120000)
+    local _, text2 = clipByTrig(t2)
+    local n2, both = 0, true
+    prevD = -1
+    for line in string.gmatch(text2, "[^\n]+") do
+        n2 = n2 + 1
+        local ts = n2 > 2 and tonumber(string.match(line, '"ts":(%d+)')) or nil
+        if ts then
+            if math.abs(ts - t2) < prevD then both = false end
+            prevD = math.abs(ts - t2)
+        end
+    end
+    check(n2 > 60 and both, "(both) with lines on both sides of the trigger, each line is no closer than the one before")
+    got = sampleTs(string.match(string.sub(text2, 1, U.CHUNK), "^(.*)\n") or "")
+    check(#got >= 5 and got[1] < t2 and got[#got] > t2,
+        "(both) the first chunk has samples before and after the trigger (" .. tostring(got[1] and got[1] - t2) .. ".."
+        .. tostring(got[#got] and got[#got] - t2) .. ")")
+    nowMs = nowMs + 3600000
+    start()
+    d0 = nowMs
+    drive(3000)
+    D.stop(0, "UI_MinidoracatAutoDrive_VehicleOverturned")
+    pump(60000)
+    checkEq(field(clipsOf(d0)[1] or "", 7), "fault", "(over) VehicleOverturned handback: a fault clip")
 end
 
 -- 1012 摘要 tko／tkoA：takeover yield／manual 那刻最近一筆取樣的狀態（key spd tgt mode rem cap ctl）與距上一個異常（同 takeover

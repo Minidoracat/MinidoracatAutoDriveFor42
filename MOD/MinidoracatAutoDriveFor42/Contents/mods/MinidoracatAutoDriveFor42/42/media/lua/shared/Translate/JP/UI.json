@@ -207,6 +207,8 @@
     "UI_MinidoracatAutoDrive_PlayerBlockStop": "前方で他のプレイヤーが走行ラインをふさいだまま、しばらく待っても動きません。自動運転は操作を返しました。運転を引き継いでください。",
     "UI_MinidoracatAutoDrive_AnimalBlockStop": "前方の動物が走行ラインをふさいだまま、ゆっくり進んでもどきません。自動運転は操作を返しました。運転を引き継いでください。",
     "UI_MinidoracatAutoDrive_TrailerLost": "トレーラーが外れたため、自動運転を停止しました。",
+    "UI_MinidoracatAutoDrive_VehicleSunk": "車両が地面の下に落ちたため、自動運転を停止しました。",
+    "UI_MinidoracatAutoDrive_VehicleOverturned": "車両が横転したため、自動運転を停止しました。",
     "UI_MinidoracatAutoDrive_TrailerRehitch": "トレーラーが同期切れになりました。バックして連結し直します。",
     "UI_MinidoracatAutoDrive_TrailerRehitched": "トレーラーを連結し直しました。運転を続けます。",
     "UI_MinidoracatAutoDrive_TrailerSyncLost": "マルチプレイの同期でトレーラーが一時的に消えただけで、外れてはいません。さっきの位置までバックし、トレーラーが現れたら近づけば自動で連結されます。その後、自動運転を再開してください。",

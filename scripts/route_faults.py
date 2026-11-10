@@ -47,6 +47,7 @@ JOG_MAX_M, JOG_CLEAR_M, JOG_ARM_RATIO, SPIKE_M = 4.5, 2.4, 4, 2  # 對齊 MDADFo
 
 
 def recs(path):
+    """1110c 起上傳片段的列是離觸發近的先送：首行與檔頭留在最前，其餘照 ts 排回時間順序（穩定排序）。"""
     out = []
     with open(path, encoding="utf-8", errors="replace") as fh:
         for line in fh:
@@ -54,6 +55,7 @@ def recs(path):
                 out.append(json.loads(line))
             except ValueError:
                 pass
+    out.sort(key=lambda o: (1, o.get("ts") or 0) if o.get("t") in ("s", "e") else (0, 0))
     return out
 
 

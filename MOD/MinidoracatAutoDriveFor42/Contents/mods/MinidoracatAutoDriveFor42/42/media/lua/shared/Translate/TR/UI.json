@@ -207,6 +207,8 @@
     "UI_MinidoracatAutoDrive_PlayerBlockStop": "Öndeki sürüş çizgisini başka bir oyuncu kapatıyor ve bir süredir kıpırdamadı. Otomatik Sürüş kontrolü size bıraktı — lütfen siz devralın.",
     "UI_MinidoracatAutoDrive_AnimalBlockStop": "Bir hayvan öndeki sürüş çizgisini kapatmaya devam ediyor; araç bir süre ağır ağır ilerlemesine rağmen hayvan hâlâ kenara çekilmedi. Otomatik Sürüş kontrolü size bıraktı — lütfen siz devralın.",
     "UI_MinidoracatAutoDrive_TrailerLost": "Römork koptu. Otomatik Sürüş durdu.",
+    "UI_MinidoracatAutoDrive_VehicleSunk": "Araç zeminin altına düştü. Otomatik Sürüş durdu.",
+    "UI_MinidoracatAutoDrive_VehicleOverturned": "Araç devrildi. Otomatik Sürüş durdu.",
     "UI_MinidoracatAutoDrive_TrailerRehitch": "Römork senkronu koptu. Yeniden bağlamak için geri gidiyorum.",
     "UI_MinidoracatAutoDrive_TrailerRehitched": "Römork yeniden bağlandı. Yola devam.",
     "UI_MinidoracatAutoDrive_TrailerSyncLost": "Römork çok oyunculu senkronizasyon yüzünden kısa süreliğine kayboldu; kopmadı. Az önceki yerine geri gidin: römork yeniden göründüğünde yaklaşın, kendiliğinden bağlanır. Sonra Otomatik Sürüş'ü yeniden başlatın.",

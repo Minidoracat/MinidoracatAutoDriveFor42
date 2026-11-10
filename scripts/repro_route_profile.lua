@@ -52,10 +52,10 @@ local function split(s, sep)
     return out
 end
 
--- session 模式：最後一個 route cutover 事件的 src 三欄＋header profile
+-- session 模式：ts 最大的 route cutover 事件的 src 三欄＋header profile（1110c 起上傳片段的列不照時間排，不能取檔內最後一個）
 local function routeFromSession(path)
     local fh = assert(io.open(path, "rb"))
-    local route, vp
+    local route, vp, routeTs
     for line in fh:lines() do
         if line:find('"t":"h"', 1, true) then
             vp = {
@@ -68,7 +68,9 @@ local function routeFromSession(path)
                 deltaVSafe = tonumber(line:match('"deltaVSafe":([%d%.eE%-]+)')),
                 maxSpeed = tonumber(line:match('"maxSpeed":([%d%.eE%-]+)')),
             }
-        elseif line:find('"n":"route"', 1, true) and line:find('"src":"', 1, true) then
+        elseif line:find('"n":"route"', 1, true) and line:find('"src":"', 1, true)
+                and (tonumber(line:match('"ts":(%d+)')) or 0) >= (routeTs or 0) then
+            routeTs = tonumber(line:match('"ts":(%d+)')) or 0
             local src = line:match('"src":"([^"]*)"')
             local srcW = line:match('"srcW":"([^"]*)"') or ""
             local srcS = line:match('"srcS":"([^"]*)"') or ""
