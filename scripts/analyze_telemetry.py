@@ -154,9 +154,12 @@ def header(dv):
     if dv["clip"]:
         c = dv["clip"]
         trig = c.get("trig", dv["t0"])
-        print(f"   clip kind={c.get('kind')} trig at t={(trig - dv['t0']) / 1000:.2f} at={json.dumps(c.get('at'), ensure_ascii=False)}")
+        # trig2（1110d）＝片段被更重要的事故升級的時間：kind、at、送出順序都以它為準，trig 仍是開窗那次
+        up = f" trig2 at t={(c['trig2'] - dv['t0']) / 1000:.2f}（kind 與 at 是這一次的）" if c.get("trig2") else ""
+        print(f"   clip kind={c.get('kind')} trig at t={(trig - dv['t0']) / 1000:.2f}{up} at={json.dumps(c.get('at'), ensure_ascii=False)}")
         if c.get("_cut"):
             rows = dv["rows"]
+            trig = c.get("trig2") or trig
             span = (f"樣本涵蓋觸發 {(rows[0]['ts'] - trig) / 1000:+.1f} 到 {(rows[-1]['ts'] - trig) / 1000:+.1f} 秒"
                     if rows else "沒有任何樣本")
             print(f"   !! 片段不完整（伺服器只收到 {c.get('_len')} 字元，最後一行斷掉或沒有換行）：{span}；"

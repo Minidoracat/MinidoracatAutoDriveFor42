@@ -8629,10 +8629,12 @@ function Drive.startBehind(s, vx, vy)
     return math.floor(-((vx - x1) * math.cos(h) + (vy - y1) * math.sin(h)) * 100 + 0.5) / 100
 end
 
--- 車身物理狀態（1110c）：物理原點相對所在樓層的高度（樓層單位，×2.44949＝m；停在地面約 0.1–0.4）、車身朝上程度
--- （getUpVectorDot，1＝正立）、樓層。getZ 在車低於地板時是 0：BaseVehicle.update 每幀先 setZ(0)，物理高度那一層有方格且
--- 有地板才改（BaseVehicle.java:3402-3410）——所以高度要讀 getDebugZ（＝原點高度 ÷ 2.44949，BaseVehicle.java:4207-4209）。
--- 讀不到的項回 nil（舊版引擎、測試假車）。
+-- 車身物理狀態（1110c）：物理原點相對所在樓層的高度（樓層單位，×2.44949＝m）、車身朝上程度（getUpVectorDot，1＝正立）、
+-- 樓層（floor(getZ())，和 JavaPatch W65 同一個基準）。getZ 不能直接當高度：BaseVehicle.update 每幀先 setZ(0)，再算
+-- zi＝floor(原點高度÷2.44949＋0.05)，zi 那一層有方格、而且那一格或它下面一格有地板物件才 setZ(zi)
+-- （BaseVehicle.java:3402-3410）——車掉到地板下、底下沒有樓層時 getZ 留在 0。高度讀 getDebugZ
+-- （＝原點高度 ÷ 2.44949，BaseVehicle.java:4207-4209）。底下有地下室樓層的地方 getZ 會跟著變成 −1，這種掉落判不出來
+-- （W65 也一樣）。讀不到的項回 nil（舊版引擎、測試假車）。
 function Drive.bodyState(vehicle)
     local pz, up, z = jget(vehicle, "getDebugZ"), jget(vehicle, "getUpVectorDot"), jget(vehicle, "getZ")
     local level = finite(z) and math.floor(z) or nil
@@ -8657,8 +8659,8 @@ function Drive.physFault(s, playerNum, vehicle, now)
     if rel and rel * 2.44949 < -TUNE.SINK_DEPTH_M then
         sunk = rel < -1
         if not sunk then
-            local x, y = vehicle:getX(), vehicle:getY()
-            local sq = getCell():getGridSquare(math.floor(x), math.floor(y), level)
+            local cell = getCell()
+            local sq = cell and cell:getGridSquare(math.floor(vehicle:getX()), math.floor(vehicle:getY()), level)
             sunk = sq ~= nil and sq:hasFloor() == true
         end
     end

@@ -1673,7 +1673,7 @@ end
 -- 固定列之後的列離觸發時刻由近到遠（首行 "ord":"near"），只收到第一塊也涵蓋觸發前後。
 --   違規證明：STOP_KIND 拿掉 VehicleSunk＝(sunk) 紅；at 不帶 pz＝(at) 紅；encodePhys 不寫 pz／vup＝(at) 樣本那條紅；
 --   照舊由舊到新送＝(near)(cut) 紅；只看一側（先送完觸發前或觸發後那一側）＝(both) 紅；觸發前那一側同 ts 的列倒著放＝
---   (same-ts) 紅；合併前不照 ts 排序＝(skew) 紅。
+--   (same-ts) 紅；合併前不照 ts 排序＝(skew) 紅；升級不換基準（cap.near）或不換 at＝(merge) 紅。
 scenario("1110c sunk/overturned handback clips; clip head carries heading, physics height, up; lines go out nearest the trigger first")
 do
     nowMs = nowMs + 3600000
@@ -1767,6 +1767,32 @@ do
     D.stop(0, "UI_MinidoracatAutoDrive_VehicleOverturned")
     pump(60000)
     checkEq(field(clipsOf(d0)[1] or "", 7), "fault", "(over) VehicleOverturned handback: a fault clip")
+    -- 交還併進還開著的 contact 片段（升級成 fault）：kind 是 fault、trig 仍是 contact 那刻、trig2＝交還那刻；
+    -- 首行 at 與送出順序都以交還那刻為準（先送出去的是交還前幾秒，不是 contact 前後）
+    nowMs = nowMs + 3600000
+    start()
+    drive(20000)
+    t2 = nowMs + 200
+    drive(200, { contact = true })
+    drive(3000, low)
+    local t3 = nowMs
+    D.stop(0, "UI_MinidoracatAutoDrive_VehicleSunk")
+    pump(120000)
+    _, text2 = clipByTrig(t2)
+    head = string.match(text2, "^[^\n]+") or ""
+    check(string.find(head, '"kind":"fault"', 1, true) ~= nil and string.find(head, '"trig2":' .. t3, 1, true) ~= nil
+            and string.find(head, '"pz":-0.52,"vup":0.36}', 1, true) ~= nil,
+        "(merge) a handback merged into an open contact clip: kind fault, trig2 and at are the handback's (" .. head .. ")")
+    n2, both, prevD = 0, true, -1
+    for line in string.gmatch(text2, "[^\n]+") do
+        n2 = n2 + 1
+        local ts = n2 > 2 and tonumber(string.match(line, '"ts":(%d+)')) or nil
+        if ts then
+            if math.abs(ts - t3) < prevD then both = false end
+            prevD = math.abs(ts - t3)
+        end
+    end
+    check(n2 > 60 and both, "(merge) lines go out nearest the handback first, not nearest the contact")
 end
 
 -- 1012 摘要 tko／tkoA：takeover yield／manual 那刻最近一筆取樣的狀態（key spd tgt mode rem cap ctl）與距上一個異常（同 takeover

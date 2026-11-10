@@ -431,6 +431,17 @@ end
 
 local finishClip -- 定義在下方（trigger 要先收掉 full 的片段）
 
+-- 既有片段被更重要的事故升級（1110d）：種類、優先級之外，首行的車位與當下狀態（at）、送出順序的基準也換成這次事故
+-- （cap.near；首行 "trig2"＝這次的時間）。trig 仍是開窗那次，片段的身分與事後窗不變。不換的話，交還併進十幾秒前開的
+-- contact 片段時，先送出去的是舊事故前後，首行 at 也是舊事故那刻的狀態。同級或較不重要的事故不動。
+function U.upgrade(u, cap, now, pri, kind)
+    if pri >= cap.pri then return end
+    cap.pri, cap.kind, cap.near = pri, kind, now
+    cap.x, cap.y = u.lastX, u.lastY
+    cap.spd, cap.tgt, cap.mode, cap.lat, cap.rem, cap.cr, cap.fbw = u.sSpd, u.sTgt, u.sMode, u.sLat, u.sRem, u.sCap, u.sFbw
+    cap.h, cap.pz, cap.vup = u.sH, u.sPz, u.sUp
+end
+
 -- 出事：已在擷取就併入（升級優先級、延長事後窗）；否則從 ring 取事前 PRE_MS 開新片段。full 的片段只剩事件在收：
 -- 配額允許開新片段時先收掉它、新片段照常帶事前窗與樣本（舊制 full 當場收窗，下一個事故本來就有自己的片段）。
 local function trigger(u, now, kind)
@@ -439,13 +450,13 @@ local function trigger(u, now, kind)
     local pri = PRI[kind] or 4
     local cap = u.cap
     if cap and not cap.full then
-        if pri < cap.pri then cap.pri, cap.kind = pri, kind end
+        U.upgrade(u, cap, now, pri, kind)
         return
     end
     local last = u.cooldown[kind]
     if u.clips >= CLIPS_PER_DRIVE or (last and now >= last and now - last < KIND_COOLDOWN_MS)
             or not hourlyOk(u.pn, now) then
-        if cap and pri < cap.pri then cap.pri, cap.kind = pri, kind end
+        if cap then U.upgrade(u, cap, now, pri, kind) end
         return
     end
     if cap then finishClip(u, now) end
@@ -546,7 +557,8 @@ finishClip = function(u, now)
             .. ',"trig":' .. jnum(cap.t0) .. ',"end":' .. jnum(now)
             .. ',"drive":' .. jnum(u.drive) .. ',"pre":' .. PRE_MS
             .. ',"x":' .. jnum(cap.x) .. ',"y":' .. jnum(cap.y) .. at
-            .. ',"full":' .. (cap.full and "true" or "false") .. ',"evx":' .. evx .. ',"ord":"near"}'
+            .. ',"full":' .. (cap.full and "true" or "false") .. ',"evx":' .. evx .. ',"ord":"near"'
+            .. (cap.near and ',"trig2":' .. jnum(cap.near) or "") .. '}'
     end
     local header = type(u.header) == "string" and u.header or nil
     -- 路線點列與整趟事件只補事前窗之前的（窗內的已在取樣序列裡）。
@@ -624,11 +636,12 @@ finishClip = function(u, now)
         mLine[j + 1], mTs[j + 1] = line, ts
         i = i + 1
     end
+    local t0 = cap.near or cap.t0 -- 由近到遠的基準：升級過的片段以升級那次事故為準
     local b = 1
-    while b <= mN and mTs[b] < cap.t0 do b = b + 1 end
+    while b <= mN and mTs[b] < t0 do b = b + 1 end
     local a = b - 1
     while a >= 1 or b <= mN do
-        if a >= 1 and (b > mN or cap.t0 - mTs[a] <= mTs[b] - cap.t0) then
+        if a >= 1 and (b > mN or t0 - mTs[a] <= mTs[b] - t0) then
             local a0 = a
             while a0 > 1 and mTs[a0 - 1] == mTs[a] do a0 = a0 - 1 end
             local q = a0
