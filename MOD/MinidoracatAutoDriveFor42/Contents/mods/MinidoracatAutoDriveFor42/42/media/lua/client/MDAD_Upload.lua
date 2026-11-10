@@ -434,6 +434,7 @@ local finishClip -- 定義在下方（trigger 要先收掉 full 的片段）
 -- 既有片段被更重要的事故升級（1110d）：種類、優先級之外，首行的車位與當下狀態（at）、送出順序的基準也換成這次事故
 -- （cap.near；首行 "trig2"＝這次的時間）。trig 仍是開窗那次，片段的身分與事後窗不變。不換的話，交還併進十幾秒前開的
 -- contact 片段時，先送出去的是舊事故前後，首行 at 也是舊事故那刻的狀態。同級或較不重要的事故不動。
+-- a＝事故當下的狀態來源：通常就是 u（最新一筆樣本）；延後確認的撞擊給候選那一筆存下來的 u.xbAt（欄位同名）。
 function U.upgrade(u, cap, now, pri, kind)
     if pri >= cap.pri then return end
     cap.pri, cap.kind, cap.near = pri, kind, now
@@ -444,28 +445,30 @@ end
 
 -- 出事：已在擷取就併入（升級優先級、延長事後窗）；否則從 ring 取事前 PRE_MS 開新片段。full 的片段只剩事件在收：
 -- 配額允許開新片段時先收掉它、新片段照常帶事前窗與樣本（舊制 full 當場收窗，下一個事故本來就有自己的片段）。
-local function trigger(u, now, kind)
+-- at（選用）＝now 那一刻存下來的狀態；沒給就用最新一筆樣本（now 就是現在的一般情況）。
+local function trigger(u, now, kind, at)
+    local a = at or u
     u.lastAnomaly = now
     incident(u, kind, now)
     local pri = PRI[kind] or 4
     local cap = u.cap
     if cap and not cap.full then
-        U.upgrade(u, cap, now, pri, kind)
+        U.upgrade(a, cap, now, pri, kind)
         return
     end
     local last = u.cooldown[kind]
     if u.clips >= CLIPS_PER_DRIVE or (last and now >= last and now - last < KIND_COOLDOWN_MS)
             or not hourlyOk(u.pn, now) then
-        if cap then U.upgrade(u, cap, now, pri, kind) end
+        if cap then U.upgrade(a, cap, now, pri, kind) end
         return
     end
     if cap then finishClip(u, now) end
     u.cooldown[kind] = now
     -- lines／ts＝收進片段的列與各自的時間（finishClip 照離觸發時刻的遠近排送出順序）；h／pz／vup＝觸發當下的航向、
     -- 物理高度相對樓層、車身朝上程度（1110c）
-    cap = { kind = kind, pri = pri, t0 = now, x = u.lastX, y = u.lastY,
-        spd = u.sSpd, tgt = u.sTgt, mode = u.sMode, lat = u.sLat, rem = u.sRem, cr = u.sCap, fbw = u.sFbw,
-        h = u.sH, pz = u.sPz, vup = u.sUp,
+    cap = { kind = kind, pri = pri, t0 = now, x = a.lastX, y = a.lastY,
+        spd = a.sSpd, tgt = a.sTgt, mode = a.sMode, lat = a.sLat, rem = a.sRem, cr = a.sCap, fbw = a.sFbw,
+        h = a.sH, pz = a.sPz, vup = a.sUp,
         lines = {}, ts = {}, n = 0, chars = 0, full = false, lastS = nil, evChars = 0, evN = 0 }
     -- ring 由舊到新排：從最新往回找事前窗的起點（ts ≥ t0-PRE_MS）。早於 t0-PRE_THIN_BEFORE_MS 的樣本與上一筆收進的樣本
     -- （較新那筆）間隔 <THIN_GAP_MS 就跳過（5Hz；事件全收）。10Hz 大樣本讓事前窗本身仍超過 CLIP_MAX 時捨最舊的
@@ -993,11 +996,11 @@ local function vehFirstKpi(u, sensor, line, spd, mode)
     u.vhPrev = vn
 end
 
--- 算進 impact：次數、impZ（zHit）、觸發片段（ts＝撞擊那筆；下車煞車候選延後確認時也用撞擊那刻）。
-local function commitImpact(u, ts, zHit)
+-- 算進 impact：次數、impZ（zHit）、觸發片段（ts＝撞擊那筆；下車煞車候選延後確認時也用撞擊那刻，at＝那一筆存下來的狀態）。
+local function commitImpact(u, ts, zHit, at)
     u.impact = u.impact + 1
     if zHit then u.impZ = u.impZ + 1 end
-    trigger(u, ts, "impact")
+    trigger(u, ts, "impact", at)
 end
 
 -- 取樣：line 已由 MDAD_Diagnostics 編好（與本機紀錄同一字串，不重複編碼）。cls＝這筆若在撞擊段內，
@@ -1153,15 +1156,18 @@ function U.sample(u, line, now, x, y, speed, target, mode, remaining, lat,
         local zHit = (zd and zd <= zw) or (pz and pz <= zw) or false
         if exitBrakeLike(phys) and u.xbPend == nil then
             u.xbPend, u.xbZ = now, zHit -- 下車煞車候選：EXIT_BRAKE_MS 內以 exit 結束＝不算（U.finish）
+            -- 延後確認時片段首行要的是這一筆的狀態，不是兩秒後的（1110d）
+            u.xbAt = { lastX = u.lastX, lastY = u.lastY, sSpd = u.sSpd, sTgt = u.sTgt, sMode = u.sMode, sLat = u.sLat,
+                sRem = u.sRem, sCap = u.sCap, sFbw = u.sFbw, sH = u.sH, sPz = u.sPz, sUp = u.sUp }
         else
             commitImpact(u, now, zHit)
         end
     end
     -- 下車煞車候選過了 EXIT_BRAKE_MS 還在開＝不是下車，照常算撞擊
     if u.xbPend ~= nil and now - u.xbPend > EXIT_BRAKE_MS then
-        local ts = u.xbPend
-        u.xbPend = nil
-        commitImpact(u, ts, u.xbZ)
+        local ts, at = u.xbPend, u.xbAt
+        u.xbPend, u.xbAt = nil, nil
+        commitImpact(u, ts, u.xbZ, at)
     end
     u.prevImpLike = imp == true
     u.prevImpactSpd = finite(speed) and spd or nil
@@ -1383,9 +1389,9 @@ function U.finish(u, now, reason)
         if reason == "exit" and now - u.xbPend <= EXIT_BRAKE_MS then
             u.xbk = u.xbk + 1
         else
-            commitImpact(u, u.xbPend, u.xbZ)
+            commitImpact(u, u.xbPend, u.xbZ, u.xbAt)
         end
-        u.xbPend = nil
+        u.xbPend, u.xbAt = nil, nil
     end
     if kind then
         trigger(u, now, kind)

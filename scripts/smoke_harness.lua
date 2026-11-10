@@ -26232,8 +26232,8 @@ drive.scenarioManualHint()
 --   (bf-over) getUpVectorDot 低於 OVERTURN_DOT 持續 OVERTURN_MS：VehicleOverturned 交還、why=overturned；
 --     (bf-bump) 不到 OVERTURN_MS、(bf-tilt) 傾斜但高於門檻：不交還。
 --   (bf-noapi) 引擎沒有 getDebugZ／getUpVectorDot：不判、照常駕駛。
---   (bf-sample) 真 Driver 取樣把相對樓層的物理高度與朝上程度交給 Diagnostics（phys.physZ／upDot）。
---   (bf-clock) 系統時間往回跳：下一幀就重量、計時從現在重算，照樣在 SINK_MS 內交還。
+--   (bf-sample) 真 Driver 取樣把相對樓層的物理高度與朝上程度交給 Diagnostics（phys.physZ／upDot；車在一樓、getDebugZ 1.134＝0.13）。
+--   (bf-clock) 系統時間往回跳：下一幀就重量、計時從現在重算，照樣在 1.1 秒內交還。
 --   違規證明：拿掉 onPlayerUpdate 的 physFault 呼叫＝(bf-sunk)(bf-over) 紅；深度不減樓層＝(bf-basement) 紅；不看 hasFloor＝
 --   (bf-nofloor) 紅；低於一層也要方格＝(bf-deep) 紅；SINK_MS 設 0＝(bf-blip) 紅；OVERTURN_MS 設 0＝(bf-bump) 紅；
 --   OVERTURN_DOT 設 0.8＝(bf-tilt) 紅；SINK_DEPTH_M 設 0.2＝(bf-edge) 紅；交還鍵兩種對調＝(bf-sunk) 紅；
@@ -26309,7 +26309,7 @@ function drive.scenarioBodyFault()
         end
         return true
     end
-    dveh._pz, dveh._up = 0.134, 0.972
+    dveh._z, dveh._pz, dveh._up = 1, 1.134, 0.972 -- 車在一樓：樣本要的是相對樓層的高度，不是 getDebugZ 原值
     run(300)
     DG.shouldSample, DG.sample = function() return false end, function() return true end
     checkTrue(seenPz == 0.13 and seenUp == 0.97,
@@ -26324,6 +26324,7 @@ function drive.scenarioBodyFault()
         "(bf-clock) 時間往回跳 60 秒後掉到地板下：照樣在 1.1 秒內交還（ms " .. tostring(ev[1] and ev[1].ms) .. "）")
     nowMs = nowMs + 60000
 
+    startAt()
     dveh._pz = -0.5
     run(1100) -- 字面值（不跟 TUNE 走）：量測每 250 ms、持續 500 ms 才交還，最慢 750 ms
     local e = ev[1]

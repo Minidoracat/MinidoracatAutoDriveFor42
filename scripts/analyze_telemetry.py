@@ -372,7 +372,7 @@ def clip_row(path):
     evs = [r for r in recs if r["t"] == "e"]
     if not clip or not rows:
         return None
-    trig = clip.get("trig") or rows[-1]["ts"]
+    trig = clip.get("trig2") or clip.get("trig") or rows[-1]["ts"]  # trig2（1110d）＝升級這段片段的事故：kind／at 是它的
     opts = dict(p.split("=", 1) for p in (hdr.get("opts") or "").split(";") if "=" in p)
     pre = [r for r in rows if trig - 5000 <= r["ts"] <= trig]
     post = [r for r in rows if trig < r["ts"] <= trig + 3000]
@@ -509,6 +509,11 @@ def self_test():
               "最後一行斷掉＝_cut；state-error 事件算進 first")
         check(drives([p1])[0]["clip"] is None and load_file(put("clip-02.log", body))[0]["_cut"] is False,
               "完整的片段 _cut 為假；本機 session 沒有 clip")
+        # 1110d 升級過的片段（trig2）：分流摘要的事故窗口以 trig2 為準（照 trig 會漏掉交還前後的樣本與事件）
+        up = [dict(t="clip", kind="fault", trig=T - 20000, trig2=T + 5000, ord="near", at=dict(spd=3)),
+              dict(t="h", ts=T, drive=T, rev="t2"),
+              s(4800), dict(t="e", ts=T + 5000, n="state-error", why="sunk"), s(4600), s(4400)]
+        check("state-error:sunk" in (clip_row(put("clip-03.log", up)) or ""), "clip_row 的事故窗口以 trig2 為準")
     print(f"self-test：{len(bad)} 項失敗")
     return 1 if bad else 0
 

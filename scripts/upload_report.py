@@ -409,8 +409,11 @@ def load_clips(root, since_ms=None):
         rows = sorted((r for r in recs if r["t"] == "s"), key=lambda r: r["ts"])
         evs = [r for r in recs if r["t"] == "e"]
         prof = hdr.get("profile") or {}
+        # trig＝事故時間：片段被更重要的事故升級過（首行 trig2，1110d）時 kind／at 是升級那次的，各節的事故窗口跟著它算；
+        # 窗口過濾（上面）仍看片段開始的 trig
         C.append(dict(f=os.path.relpath(f, root).replace(os.sep, "/"), u=os.path.basename(os.path.dirname(f)),
-                      kind=clip.get("kind"), trig=clip.get("trig"), drive=clip.get("drive"), at=clip.get("at") or {},
+                      kind=clip.get("kind"), trig=clip.get("trig2") or clip.get("trig"), drive=clip.get("drive"),
+                      at=clip.get("at") or {},
                       rev=hdr.get("rev"), build=hdr.get("build"), veh=str(prof.get("scriptName"))[5:], prof=prof,
                       opts=opts_of(hdr.get("opts")), rows=rows, evs=evs,
                       src=any("src" in e for e in evs if e.get("n") == "route")))
@@ -1284,6 +1287,14 @@ def self_test():
                   for ln in out.getvalue().splitlines()),
               "A 印出不含小動物／拖車拉緊的 impact／千 km 與扣掉的件數（事件 cls 已是 small-animal 的 u2 不扣）")
         check(res["B"]["clips"] == 35, "窗口：trig < since 的片段不算")
+        with tempfile.TemporaryDirectory() as d2:
+            os.makedirs(os.path.join(d2, "zz"))
+            with open(os.path.join(d2, "zz", "clip-01.log"), "w", encoding="utf-8", newline="") as fh:
+                fh.write("".join(json.dumps(o) + "\n" for o in (
+                    dict(t="clip", kind="fault", trig=T, trig2=T + 15000, drive=T, at={"spd": 3}),
+                    dict(t="h", rev="2", build="b-2", drive=T, opts="", profile=prof),
+                    dict(t="s", ts=T + 14000, x=0, y=0))))
+            check(load_clips(d2, T)[0]["trig"] == T + 15000, "升級過的片段（trig2）：事故時間取 trig2，窗口過濾仍看 trig")
         check(a["b-2"]["rpt"] == {"raw": 3, "unknown": 17} and any("RoadPatch rpt unknown:17, raw:3" in ln
                                                                      for ln in out.getvalue().splitlines()),
               "A RoadPatch rpt 計數（缺＝unknown）")
