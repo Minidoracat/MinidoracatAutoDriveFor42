@@ -1210,6 +1210,32 @@ do
     t = tally()
     checkEq(t["stuck@1008a"], 16, "(same) same rev everywhere: pri-1 clips kept")
     checkEq(t["brake@1008a"], 15, "(same) the lowest-priority clip is replaced")
+    -- 1110e 槽滿而且同版裡最不重要的那段仍比新片段重要：不收、不扣每小時額度；同級照舊換掉最舊的。
+    --   客戶端改成重要的片段先送之後，晚到的低優先片段原本會把剛收下的重要片段擠掉（審查抓到）。
+    --   違規證明：拿掉這個判斷＝(keep) 紅；`<` 改 `<=`＝(keep-tie) 紅；先扣額度再判＝(keep-budget) 紅；不分版本＝上面 (rev) 紅。
+    S._reset()
+    for k in pairs(files) do if string.find(k, ROOT, 1, true) == 1 then files[k] = nil end end
+    nowMs = nowMs + 3600000
+    for _ = 1, 31 do msg("stuck", 1, "1110e") end
+    msg("brake", 4, "1110e")
+    check(msg("contact", 2, "1110e"), "(keep) the new contact clip takes the brake clip's slot")
+    check(not msg("brake", 4, "1110e"), "(keep) a later, less important clip is refused when everything stored outranks it")
+    t = tally()
+    checkEq(t["contact@1110e"], 1, "(keep) the contact clip is still stored")
+    checkEq(t["stuck@1110e"], 31, "(keep) no pri-1 clip was given up for it")
+    check(msg("contact", 2, "1110e"), "(keep-tie) same priority still gets in")
+    t = tally()
+    checkEq(t["contact@1110e"], 1, "(keep-tie) it replaced the older clip of the same priority")
+    checkEq(t["stuck@1110e"], 31, "(keep-tie) pri-1 clips untouched")
+    -- 被拒的 13 段各宣告 1,000,000 字元（每小時額度 12,000,000）：有扣額度的話，下面那段同樣大小的 contact 就收不下
+    local function big(kind, pri)
+        rid = rid + 1
+        nowMs = nowMs + 1000
+        return S.receive(player0, { id = rid, q = 1, n = 100, k = "clip", len = 1000000, kind = kind, pri = pri,
+            rev = "1110e", data = "x" })
+    end
+    for _ = 1, 13 do big("brake", 4) end
+    check(big("contact", 2), "(keep-budget) refused clips do not use up the hourly budget")
 end
 
 -- 1004e 越野推力 KPI：推力夠不夠要看自己的紀錄。想加速＝目標−實速 ≥6、前進、沒強制煞車；相鄰兩筆都想加速且同地表才算一對。
@@ -2377,12 +2403,15 @@ do
 end
 
 -- 1110e 佇列依優先級排：還沒開始送的訊息 pri 小的先送、同 pri 先進先出；已經開始送的那一則不被插斷。
---   違規證明：照舊接在尾端＝(q-sum)(q-pri) 紅；插到進行中那一則前面＝(q-whole) 紅；同 pri 後到的排前面＝(q-fifo) 紅。
+--   違規證明：照舊接在尾端＝(q-sum)(q-pri) 紅；插到進行中那一則前面＝(q-whole) 紅；同 pri 後到的排前面＝(q-fifo) 紅；
+--   只讓摘要插隊（片段之間照舊先進先出）＝(q-pri) 紅；只和最後一則比一次（if 取代 while）＝(q-pri) 紅。
 scenario("1110e outbox order: priority first among unsent messages, never interrupting the one in flight")
 do
     nowMs = nowMs + 3600000
     pump(900000)
     checkEq(U.pending(0), 0, "(q) outbox empty before the scenario")
+    S._reset()
+    for k in pairs(files) do if string.find(k, ROOT, 1, true) == 1 then files[k] = nil end end
     local s0 = #sent
     -- 第一趟：接觸後 1 秒就下車 → 同一刻排進片段 A（contact，pri 2）與摘要 A（pri 0）
     start()
@@ -2395,36 +2424,40 @@ do
     checkEq(sent[s0 + 1].args.k, "sum", "(q-sum) the summary goes out before its own clip")
     local idA, nA = sent[#sent].args.id, sent[#sent].args.n
     check(sent[#sent].args.k == "clip" and sent[#sent].args.q == 1 and nA >= 3, "(q) clip A is in flight with chunks left (" .. tostring(nA) .. ")")
-    -- 片段 A 送到一半（這段不跑 U.tick）：第二趟 stuck 交還（片段 B pri 1＋摘要 B），第三趟只有摘要 C
+    -- 片段 A 送到一半（這段不跑 U.tick）再來三趟，交還原因的片段依序是 route（pri 3）、trailer（pri 2）、stuck（pri 1）：
+    -- stuck 要越過兩則還沒送的片段，三份摘要要越過全部片段
     local sB = #sent
-    start()
-    nowMs = nowMs + 200
-    sample()
-    D.stop(0, "UI_MinidoracatAutoDrive_StopStuck")
-    start()
-    nowMs = nowMs + 200
-    sample()
-    D.stop(0, "exit")
+    local stops = { "UI_MinidoracatAutoDrive_LostRoute", "UI_MinidoracatAutoDrive_TrailerRotate", "UI_MinidoracatAutoDrive_StopStuck" }
+    for i = 1, #stops do
+        start()
+        nowMs = nowMs + 200
+        sample()
+        D.stop(0, stops[i])
+    end
     pump(900000)
     checkEq(U.pending(0), 0, "(q) everything sent")
-    local order, ids, whole, seenOther = {}, {}, true, false
+    local order, ids, whole, seenOther, restA = {}, {}, true, false, 0
     local k = sB + 1
     while k <= #sent do
         local a = sent[k].args
         if a.id == idA then
+            restA = restA + 1
             if seenOther then whole = false end
         else
             seenOther = true
             if a.q == 1 then
                 order[#order + 1] = a.k .. (a.kind and (":" .. a.kind) or "")
-                ids[#ids + 1] = a.id
+                if a.k == "sum" then ids[#ids + 1] = a.id end
             end
         end
         k = k + 1
     end
-    check(whole and sent[sB + 1].args.id == idA, "(q-whole) the clip in flight finishes before anything newer is sent")
-    checkEq(table.concat(order, " "), "sum sum clip:stuck", "(q-pri) then the summaries, then the stuck clip")
-    check(ids[1] ~= nil and ids[2] ~= nil and ids[1] < ids[2], "(q-fifo) same priority keeps arrival order")
+    check(whole and sent[sB + 1].args.id == idA and restA == nA - 1,
+        "(q-whole) the clip in flight is sent to its end before anything newer (" .. restA .. " of " .. (nA - 1) .. ")")
+    checkEq(table.concat(order, " "), "sum sum sum clip:stuck clip:trailer clip:route",
+        "(q-pri) then the summaries, then clips by priority")
+    check(#ids == 3 and ids[1] < ids[2] and ids[2] < ids[3], "(q-fifo) same priority keeps arrival order")
+    checkEq(#indexRows("C"), 4, "(q) the server stored all four clips")
 end
 
 -- 1010 所有送出的片段整段 ≤ CLIP_TOTAL_MAX（第一塊宣告的 len＝全文長度；伺服器只看這個）

@@ -313,12 +313,17 @@ local function beginClip(user, args, t)
     local len = args.len
     if not isInt(len, 1, CLIP_MAX) or len > args.n * CHUNK_MAX then return nil end
     if not KINDS[args.kind] or not isInt(args.pri, 1, 9) then return nil end
-    if not budgetOk(user, t, len) then return nil end
     local folder = folderFor(user)
     local fo = folders[folder]
-    local slot = pickSlot(fo, folder, nil, cell(args.rev, 32))
+    local rev = cell(args.rev, 32)
+    local slot = pickSlot(fo, folder, nil, rev)
     if not slot then return nil end
-    if fo.slots[slot] then clearSlot(fo, folder, slot) end
+    -- 槽滿而且同版裡最不重要的那段仍比這段重要：不收（1110e）。原本照樣覆蓋；客戶端改成重要的片段先送之後，晚到的
+    -- 低優先片段會把剛收下的重要片段擠掉。別版的片段照舊先被覆蓋；不收的不扣每小時額度。
+    local old = fo.slots[slot]
+    if old and old.pri < args.pri and (rev == "" or old.rev == rev) then return nil end
+    if not budgetOk(user, t, len) then return nil end
+    if old then clearSlot(fo, folder, slot) end
     local cap = capBytes()
     while total + len > cap do
         if not evictOldest(folder, slot) then break end
