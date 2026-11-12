@@ -286,7 +286,8 @@ local navUsage = {}
 local autoUsage = {}
 
 local function playerIdentity(player)
-    if not player then return nil, nil end
+    -- 駕駛可能不是玩家（NPC MOD 的 IsoZombie 殼）：getUsername 只有 IsoPlayer 有（IsoPlayer.java:6451）
+    if not player or not instanceof(player, "IsoPlayer") then return nil, nil end
     local username = player:getUsername()
     local playerId
     if isServer() then

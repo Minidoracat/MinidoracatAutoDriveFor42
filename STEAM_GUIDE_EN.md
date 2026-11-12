@@ -63,6 +63,7 @@ Plus a screwdriver.
 [tr][th]Item[/th][th]Parts[/th][/tr]
 [tr][td]GPS Navigator[/td][td]Scrap Electronics ×4, Radio Receiver ×1, Electrical Wire ×1[/td][/tr]
 [tr][td]Autopilot Module[/td][td]GPS Navigator ×1, Scrap Electronics ×6, Scanner Module ×1, Amplifier ×1, Electrical Wire ×2[/td][/tr]
+[tr][td]Scanner Module[/td][td]Scrap Electronics ×4, Radio Receiver ×1, Electrical Wire ×1 (needs Electrical 6; no recipe to learn)[/td][/tr]
 [/table]
 [h3]Where the parts come from[/h3]
 [table]
@@ -70,7 +71,7 @@ Plus a screwdriver.
 [tr][td]Scrap Electronics, Electrical Wire[/td][td]Dismantle electronics (radios, TVs, walkie-talkies…); wire is also common in tool containers[/td][/tr]
 [tr][td]Radio Receiver[/td][td]Dismantle radios, walkie-talkies, manpack or ham radios (higher Electrical = better odds), or loot military electronics storage, the radio factory, engineer lockers, cyber cafés, school labs[/td][/tr]
 [tr][td]Amplifier[/td][td]Always from dismantling a Speaker; sometimes from radios, walkie-talkies and TVs[/td][/tr]
-[tr][td]Scanner Module[/td][td][b]Cannot be dismantled from anything; loot only[/b]: best in military electronics storage and the radio factory, then engineer lockers, cyber cafés, school labs; often in the back of radio vans (LBMW Radio Van, Triple-N Van); very rarely from foraging junk[/td][/tr]
+[tr][td]Scanner Module[/td][td][b]Cannot be dismantled from anything[/b]; craft it (table above) or loot it: best in military electronics storage and the radio factory, then engineer lockers, cyber cafés, school labs; often in the back of radio vans (LBMW Radio Van, Triple-N Van); very rarely from foraging junk[/td][/tr]
 [/table]
 === 🧰 Multi-target trips
 [list]

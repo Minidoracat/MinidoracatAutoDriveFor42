@@ -931,6 +931,7 @@ end
 local function newPlayer(opts)
     opts = opts or {}
     local p = {
+        _class = "IsoPlayer",
         _inv = newInventory(),
         _perk = opts.electricity or 0,
         _vehicle = nil,
@@ -36183,6 +36184,38 @@ function drive.scenarioBusyBrake()
     BaseVehicle.releaseVector3f(fwdV)
 end
 drive.scenarioBusyBrake()
+
+-- (npc-driver) 1112a 駕駛不是 IsoPlayer（Project A-Life 的 NPC 是 IsoZombie 殼，BaseVehicle.getDriver 回 IsoGameCharacter）：
+--   getUsername 只有 IsoPlayer 有，油箱 wrapper 每次更新都報 "Object tried to call nil in playerIdentity"（Workshop 討論串
+--   564798922323772162／564798922323824627）。違規證明：拿掉 playerIdentity 的 instanceof＝三條都紅。
+function drive.scenarioNpcDriver()
+    scenario("非玩家駕駛（1112a）：油箱 wrapper 不報錯、照原版扣油、不加收，也不沿用玩家留下的自駕 registry")
+    clientFlag, serverFlag = false, true
+    setSandbox({ NeedItemForAutoDrive = true, GPSFuelPercent = 100, AutoDriveFuelPercent = 100 })
+    local owner = newPlayer({ num = 0, username = "npc-owner", remote = true })
+    local v = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.5 }), engineRunning = true, driver = owner })
+    owner._vehicle = v
+    v._devices.MDADGPS._item = newItem(GPS_T, { uses = 0.7, useDelta = 0.006 })
+    v._devices.MDADAutopilot._item = newItem(AUTO_T)
+    checkTrue(MDAD.setNavUsage(owner) and MDAD.setAutoUsage(owner, v), "(npc-driver) 對照：玩家駕駛時兩份 registry 成立")
+    v._driver = { _class = "IsoZombie" } -- 沒有 getUsername／getOnlineID／getPlayerNum
+    local ok, navOn, autoOn = pcall(MDAD.vehicleUsageModes, v)
+    checkTrue(ok and navOn == false and autoOn == false, "(npc-driver) vehicleUsageModes 不報錯，導航與自駕都不算")
+    drive.fuelBurn = 0.1
+    local gas = newGasPart(1.0, 1.0)
+    ok = pcall(Vehicles.Update.GasTank, v, gas, 1)
+    checkTrue(ok, "(npc-driver) 油箱 wrapper 不報錯")
+    checkNear(gas._amount, 0.9, EPS, "(npc-driver) NPC 開的車只扣原版 0.10L，不加收")
+    v._driver = owner
+    checkFalse(MDAD.isAutoUsageActive(v), "(npc-driver) NPC 坐過駕駛座＝換座，玩家留下的自駕 registry 已失效")
+    checkTrue(MDAD.setAutoUsage(owner, v), "(npc-driver) 玩家坐回駕駛座可重新啟用")
+    gas = newGasPart(1.0, 1.0)
+    Vehicles.Update.GasTank(v, gas, 1)
+    checkNear(gas._amount, 0.87, EPS, "(npc-driver) 玩家坐回駕駛座：加收照舊（GPS 5%＋自駕 25%）")
+    MDAD.clearAutoUsage(owner, v:getId())
+    MDAD.clearNavUsage(owner)
+end
+drive.scenarioNpcDriver()
 
 -- =====================================================================
 -- 總結

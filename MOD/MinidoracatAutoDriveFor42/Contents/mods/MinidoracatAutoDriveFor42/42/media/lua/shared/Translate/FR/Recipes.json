@@ -1,4 +1,5 @@
 {
     "CraftGPSNavigator": "Fabriquer un navigateur GPS",
-    "CraftAutopilotModule": "Fabriquer un module de pilote automatique"
+    "CraftAutopilotModule": "Fabriquer un module de pilote automatique",
+    "MDADCraftScannerModule": "Fabriquer un module de scanner"
 }

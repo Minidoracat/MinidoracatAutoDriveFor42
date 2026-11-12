@@ -57,7 +57,9 @@
                            對表、專屬手冊的 ItemType／OnCreate／LearnedRecipes 與兩個
                            成品的 Researchablerecipes 必須是精確的短名清單。整條鏈的每一種漂移
                            都是靜默失敗：引擎把查不到的配方名照抄進表，玩家永遠學不到，
-                           console 也不留訊息（「做得出來但零產出」的成因）
+                           console 也不留訊息（「做得出來但零產出」的成因）。
+                           另對三條配方的 OnTest（沙盒閘門）；調頻器配方不得
+                           NeedToBeLearn，SkillRequired 與唯一產出對表
  15. Phase 1 telemetry 靜態契約 — 新模組檔、HUD 選項／reader、翻譯鍵必須存在；
                            聚焦測試檔列入閘門但只檢查存在、不執行（主流程才跑）
 15b. telemetry 事件鍵 ⊆ EK — encodeEvent 只輸出 EK 白名單的鍵，其餘靜默丟掉；Driver 的
@@ -1355,6 +1357,17 @@ RECIPE_LEARN_SPEC = {          # 配方短名: (SkillRequired, AutoLearnAny, Res
     "CraftGPSNavigator":    ("Electricity:3", "Electricity:6", "3"),
     "CraftAutopilotModule": ("Electricity:6", "Electricity:8", "6"),
 }
+# 沙盒閘門對表（1112a）：OnTest 接錯函式＝關掉開關的伺服器照樣做得出來，或被另一個開關誤鎖。
+RECIPE_ONTEST_SPEC = {
+    "CraftGPSNavigator":      "MDAD_Recipe.canCraftGPS",
+    "CraftAutopilotModule":   "MDAD_Recipe.canCraftAutopilot",
+    "MDADCraftScannerModule": "MDAD_Recipe.canCraftAutopilot",
+}
+# 不用學的配方（1112a 調頻器）: (SkillRequired, 唯一產出)。它沒有手冊、研究、AutoLearn 任何學習管道，
+# 加上 NeedToBeLearn = true 就永遠學不到（ScriptManager.java:1043-1048 只在 console 印一行）。
+FREE_RECIPE_SPEC = {
+    "MDADCraftScannerModule": ("Electricity:6", "Base.ScannerModule"),
+}
 RESEARCHABLE_SPEC = {          # 成品 fullType: Researchablerecipes 的精確值
     "MinidoracatAutoDrive.GPSNavigator":    "CraftGPSNavigator",
     "MinidoracatAutoDrive.AutopilotModule": "CraftGPSNavigator;CraftAutopilotModule",
@@ -1394,8 +1407,29 @@ for m in MEDIA_DIRS:
                 if field_get(rfields, field) != expect:
                     bad_learn.append(f"{rel}: {want_name} 的 {field} = "
                                      f"{field_show(rfields, field)}，規格是 {expect}")
-    fail("配方學習閘門（module Base／NeedToBeLearn／技能對表）", bad_learn) if bad_learn \
-        else ok(f"配方學習閘門（{len(RECIPE_LEARN_SPEC)} 配方）")
+    for want_name, want_test in sorted(RECIPE_ONTEST_SPEC.items()):
+        for mod, rbody, rel in [(mod, rbody, rel) for mod, name, rbody, rel in recipes if name == want_name]:
+            got = field_get(parse_fields(rbody), "OnTest")
+            if got != want_test:
+                bad_learn.append(f"{rel}: {want_name} 的 OnTest = {got!r}，規格是 {want_test}（沙盒閘門接錯）")
+    for want_name, (skill, output) in sorted(FREE_RECIPE_SPEC.items()):
+        found = [(mod, rbody, rel) for mod, name, rbody, rel in recipes if name == want_name]
+        if len(found) != 1:
+            bad_learn.append(f"craftRecipe {want_name} 宣告了 {len(found)} 次，規格是 1 次")
+        for mod, rbody, rel in found:
+            rfields = parse_fields(rbody)
+            if field_get(rfields, "NeedToBeLearn").lower() == "true":
+                bad_learn.append(f"{rel}: {want_name} 不得 NeedToBeLearn（沒有任何學習管道，玩家永遠學不到）")
+            if field_get(rfields, "SkillRequired") != skill:
+                bad_learn.append(f"{rel}: {want_name} 的 SkillRequired = "
+                                 f"{field_show(rfields, 'SkillRequired')}，規格是 {skill}")
+            # 引擎逐一載入所有 outputs 區塊並累加（CraftRecipe.java:508-510），所以全部都算
+            items = [t.strip() for blk in re.findall(r"(?i)\boutputs\s*\{([^{}]*)\}", rbody)
+                     for t in blk.split(",") if t.strip()]
+            if items != [f"item 1 {output}"]:
+                bad_learn.append(f"{rel}: {want_name} 的 outputs = {items}，規格是只有 item 1 {output}")
+    fail("配方學習閘門（module Base／NeedToBeLearn／技能對表／OnTest／不用學配方）", bad_learn) if bad_learn \
+        else ok(f"配方學習閘門（{len(RECIPE_ONTEST_SPEC)} 配方）")
 
     # 14b. 專屬手冊（唯一雜誌來源）＋ 兩個成品的研究來源
     bad_src = []

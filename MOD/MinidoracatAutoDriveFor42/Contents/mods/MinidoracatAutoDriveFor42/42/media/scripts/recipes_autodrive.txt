@@ -95,4 +95,32 @@ module Base
             item 1 MinidoracatAutoDrive.AutopilotModule,
         }
     }
+
+    /*
+        調頻器（原版 Base.ScannerModule）：自駕模組唯一拆不到、原版也沒有配方的材料（1112a）。
+        配方名帶 MDAD 前綴：產出的是原版物品，別的 MOD 很可能也在 module Base 用 CraftScannerModule 這個名字。
+        不用學（沒有 NeedToBeLearn）：電工 6 就能做，和自駕模組的製作門檻同級；沙盒沿用「允許製作自動駕駛模組」。
+        不走手冊：已讀過手冊的角色在 LiteratureCooldown（預設 90 天）內重讀不會再學新配方（ISReadABook.lua:342）。
+    */
+    craftRecipe MDADCraftScannerModule
+    {
+        timedAction = MakingElectrical,
+        time = 150,
+        SkillRequired = Electricity:6,
+        OnTest = MDAD_Recipe.canCraftAutopilot,
+        Tags = AnySurfaceCraft,
+        category = Electrical,
+        xpAward = Electricity:10,
+        inputs
+        {
+            item 1 tags[base:screwdriver] mode:keep flags[NoBrokenItems],
+            item 4 [Base.ElectronicsScrap] flags[NoBrokenItems],
+            item 1 [Base.RadioReceiver] flags[NoBrokenItems],
+            item 1 [Base.ElectricWire] flags[NoBrokenItems],
+        }
+        outputs
+        {
+            item 1 Base.ScannerModule,
+        }
+    }
 }

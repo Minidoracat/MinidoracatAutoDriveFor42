@@ -1,4 +1,5 @@
 {
     "CraftGPSNavigator": "Создать GPS-навигатор",
-    "CraftAutopilotModule": "Создать модуль автопилота"
+    "CraftAutopilotModule": "Создать модуль автопилота",
+    "MDADCraftScannerModule": "Создать модуль сканера"
 }

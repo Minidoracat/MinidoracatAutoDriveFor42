@@ -1,4 +1,5 @@
 {
     "CraftGPSNavigator": "制作 GPS 导航仪",
-    "CraftAutopilotModule": "制作自动驾驶模块"
+    "CraftAutopilotModule": "制作自动驾驶模块",
+    "MDADCraftScannerModule": "制作调频器"
 }
