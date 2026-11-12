@@ -41,7 +41,7 @@
     "UI_MinidoracatAutoDrive_HUDOptions": "HUD de conducción automática",
     "UI_MinidoracatAutoDrive_HUDOptionsDescription": "Se muestra sobre el salpicadero original del vehículo. Los cambios de tema y diseño se aplican de inmediato.",
     "UI_MinidoracatAutoDrive_Options": "Minidoracat Autodrive",
-    "UI_MinidoracatAutoDrive_WhatsNew": "Esquiva postes finos y cubos; frena al apuntar. Yui y Clásica más fuertes; alas con letra grande.",
+    "UI_MinidoracatAutoDrive_WhatsNew": "Nuevo: Módulo escáner fabricable. Se detiene si el coche se hunde o vuelca. Corregido error con PNJ.",
     "UI_MinidoracatAutoDrive_Section": "Conducción automática",
     "UI_MinidoracatAutoDrive_OptionsDescription": "Ajustes de trayectoria de la conducción automática, HUD del conductor y registro de diagnóstico opcional. El grosor de línea solo cambia el relleno de píxeles del cliente y no añade carga al servidor. Los registros de diagnóstico están desactivados por defecto. Los cambios de trayectoria y HUD se aplican de inmediato.",
     "UI_MinidoracatAutoDrive_ShowTrajectory": "Mostrar trayectoria de conducción automática y línea de navegación",

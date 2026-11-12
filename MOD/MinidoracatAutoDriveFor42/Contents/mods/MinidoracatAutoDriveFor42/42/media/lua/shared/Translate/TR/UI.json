@@ -41,7 +41,7 @@
     "UI_MinidoracatAutoDrive_HUDOptions": "Otomatik Sürüş HUD'u",
     "UI_MinidoracatAutoDrive_HUDOptionsDescription": "Orijinal araç gösterge panelinin üstünde görünür. Tema ve düzen değişiklikleri hemen uygulanır.",
     "UI_MinidoracatAutoDrive_Options": "Minidoracat Autodrive",
-    "UI_MinidoracatAutoDrive_WhatsNew": "İnce direklerden kaçar; nişan alırken frenler. Yui ve Klasik daha yüksek; büyük yazıda yan kanatlar.",
+    "UI_MinidoracatAutoDrive_WhatsNew": "Yeni: Tarayıcı Modülü üretilebilir. Araç yere batarsa veya devrilirse durur. NPC sürücü hatası düzeltildi.",
     "UI_MinidoracatAutoDrive_Section": "Otomatik Sürüş",
     "UI_MinidoracatAutoDrive_OptionsDescription": "Otomatik sürüş yörüngesi, sürücü HUD'u ve isteğe bağlı tanılama günlüğü ayarları. Çizgi kalınlığı yalnızca istemcideki piksel dolgusunu değiştirir ve sunucuya yük eklemez. Tanılama günlükleri varsayılan olarak kapalıdır. Yörünge ve HUD değişiklikleri hemen uygulanır.",
     "UI_MinidoracatAutoDrive_ShowTrajectory": "Otomatik sürüş yörüngesini ve navigasyon çizgisini göster",

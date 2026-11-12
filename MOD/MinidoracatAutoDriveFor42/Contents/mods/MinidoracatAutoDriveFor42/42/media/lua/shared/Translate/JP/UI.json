@@ -41,7 +41,7 @@
     "UI_MinidoracatAutoDrive_HUDOptions": "オートドライブ HUD",
     "UI_MinidoracatAutoDrive_HUDOptionsDescription": "標準の車両ダッシュボード上部に表示します。テーマとレイアウトの変更はすぐに反映されます。",
     "UI_MinidoracatAutoDrive_Options": "Minidoracat オートドライブ",
-    "UI_MinidoracatAutoDrive_WhatsNew": "修正：細い柱やゴミ箱で止まる問題、銃を構えると急ブレーキが弱まる問題。Yui とクラシックの音量アップ、大きい文字でもサイドウィング。",
+    "UI_MinidoracatAutoDrive_WhatsNew": "新規：スキャナーモジュールを作成可能に（電気工学 6）。車が地面の下に落ちた時や横転時は自動運転を停止。NPC 運転時のエラーを修正。",
     "UI_MinidoracatAutoDrive_Section": "オートドライブ",
     "UI_MinidoracatAutoDrive_OptionsDescription": "オートドライブの走行ライン、運転 HUD、および任意の診断ログ設定です。ラインの太さはクライアントのピクセル描画だけを変え、サーバー負荷は増やしません。診断ログは既定でオフです。走行ラインと HUD の変更はすぐに反映されます。",
     "UI_MinidoracatAutoDrive_ShowTrajectory": "オートドライブの走行ラインとナビルートを表示",

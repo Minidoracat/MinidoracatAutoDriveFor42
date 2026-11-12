@@ -41,7 +41,7 @@
     "UI_MinidoracatAutoDrive_HUDOptions": "Autopilot-HUD",
     "UI_MinidoracatAutoDrive_HUDOptionsDescription": "Wird über dem normalen Fahrzeug-Armaturenbrett angezeigt. Änderungen an Design und Layout gelten sofort.",
     "UI_MinidoracatAutoDrive_Options": "Minidoracat Autodrive",
-    "UI_MinidoracatAutoDrive_WhatsNew": "Weicht dünnen Pfosten aus; bremst auch beim Zielen. Yui/Klassisch lauter; Flügel bei großer Schrift.",
+    "UI_MinidoracatAutoDrive_WhatsNew": "Neu: Scannermodul herstellbar. Stoppt, wenn das Auto versinkt oder kippt. NPC-Fehler behoben.",
     "UI_MinidoracatAutoDrive_Section": "Autopilot",
     "UI_MinidoracatAutoDrive_OptionsDescription": "Autopilot-Trajektorie, Fahrer-HUD und optionales Diagnoseprotokoll. Die Linienbreite ändert nur die Pixelfüllung auf dem Client und belastet den Server nicht. Diagnoseprotokolle sind standardmäßig aus. Änderungen an Trajektorie und HUD gelten sofort.",
     "UI_MinidoracatAutoDrive_ShowTrajectory": "Autopilot-Trajektorie und Navigationslinie anzeigen",

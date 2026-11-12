@@ -41,7 +41,7 @@
     "UI_MinidoracatAutoDrive_HUDOptions": "HUD de conduite auto",
     "UI_MinidoracatAutoDrive_HUDOptionsDescription": "Affiché au-dessus du tableau de bord d'origine du véhicule. Les changements de thème et de disposition s'appliquent immédiatement.",
     "UI_MinidoracatAutoDrive_Options": "Minidoracat Autodrive",
-    "UI_MinidoracatAutoDrive_WhatsNew": "Évite poteaux fins et bacs ; freine en visant. Yui et Classique plus fortes ; ailes en grande police.",
+    "UI_MinidoracatAutoDrive_WhatsNew": "Nouveau : Module de scanner fabricable. Arrêt si l'auto s'enfonce ou capote. Erreur PNJ corrigée.",
     "UI_MinidoracatAutoDrive_Section": "Conduite auto",
     "UI_MinidoracatAutoDrive_OptionsDescription": "Réglages de la trajectoire de conduite auto, du HUD conducteur et du journal de diagnostic facultatif. L'épaisseur de ligne ne change que le remplissage de pixels côté client et n'ajoute aucune charge au serveur. Les journaux de diagnostic sont désactivés par défaut. Les changements de trajectoire et de HUD s'appliquent immédiatement.",
     "UI_MinidoracatAutoDrive_ShowTrajectory": "Afficher la trajectoire de conduite auto et la ligne de navigation",

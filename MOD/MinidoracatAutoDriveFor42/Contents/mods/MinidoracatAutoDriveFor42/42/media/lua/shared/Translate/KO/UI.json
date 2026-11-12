@@ -41,7 +41,7 @@
     "UI_MinidoracatAutoDrive_HUDOptions": "자율주행 HUD",
     "UI_MinidoracatAutoDrive_HUDOptionsDescription": "기본 차량 계기판 위에 표시됩니다. 테마와 레이아웃 변경은 즉시 적용됩니다.",
     "UI_MinidoracatAutoDrive_Options": "Minidoracat Autodrive",
-    "UI_MinidoracatAutoDrive_WhatsNew": "수정: 가는 기둥·수거함에 걸리던 문제, 총을 겨누면 급제동이 약해지던 문제. Yui·클래식 음성 볼륨 업, 큰 글꼴에서도 양쪽 날개.",
+    "UI_MinidoracatAutoDrive_WhatsNew": "신규: 스캐너 모듈 제작 가능(전기공학 6). 차가 땅 밑으로 빠지거나 뒤집히면 자율주행 정지. NPC 운전 시 오류 수정.",
     "UI_MinidoracatAutoDrive_Section": "자율주행",
     "UI_MinidoracatAutoDrive_OptionsDescription": "자율주행 궤적, 운전 HUD, 선택적 진단 로그 설정입니다. 선 굵기는 클라이언트 픽셀 채우기만 바꾸며 서버 부하는 없습니다. 진단 로그는 기본적으로 꺼져 있습니다. 궤적과 HUD 변경은 즉시 적용됩니다.",
     "UI_MinidoracatAutoDrive_ShowTrajectory": "자율주행 궤적 및 내비게이션 경로 표시",

@@ -41,7 +41,7 @@
     "UI_MinidoracatAutoDrive_HUDOptions": "自動駕駛 HUD",
     "UI_MinidoracatAutoDrive_HUDOptionsDescription": "顯示於原版車輛儀表上方。主題與佈局變更會立即套用。",
     "UI_MinidoracatAutoDrive_Options": "Minidoracat 自動駕駛",
-    "UI_MinidoracatAutoDrive_WhatsNew": "修正：細柱子、資源回收桶撞上就卡住；舉槍瞄準時緊急煞車變弱。Yui 與經典語音調大聲，大字體也能用側掛雙翼。",
+    "UI_MinidoracatAutoDrive_WhatsNew": "新增：調頻器可以自己合成（電工 6 級）。車掉到地面下或翻覆時，自動駕駛會停手並說明原因。修正 NPC 開車時一直跳錯誤。",
     "UI_MinidoracatAutoDrive_Section": "自動駕駛",
     "UI_MinidoracatAutoDrive_OptionsDescription": "自動駕駛的軌跡顯示、駕駛 HUD，以及可選的診斷紀錄。軌跡粗細只改變客戶端像素填充，不增加伺服器負擔；診斷紀錄預設關閉。軌跡與 HUD 變更會立即套用。",
     "UI_MinidoracatAutoDrive_ShowTrajectory": "顯示自動駕駛軌跡與導航線",

@@ -41,7 +41,7 @@
     "UI_MinidoracatAutoDrive_HUDOptions": "HUD autopilota",
     "UI_MinidoracatAutoDrive_HUDOptionsDescription": "Wyświetlany nad oryginalną deską rozdzielczą pojazdu. Zmiany motywu i układu działają od razu.",
     "UI_MinidoracatAutoDrive_Options": "Minidoracat Autodrive",
-    "UI_MinidoracatAutoDrive_WhatsNew": "Omija cienkie słupki i kosze; hamuje awaryjnie przy celowaniu. Yui i Klasyczny głośniej; skrzydła przy dużej czcionce.",
+    "UI_MinidoracatAutoDrive_WhatsNew": "Nowość: Moduł skanera do wytworzenia. Stop, gdy auto zapadnie się lub przewróci. Naprawiono błąd z NPC.",
     "UI_MinidoracatAutoDrive_Section": "Autopilot",
     "UI_MinidoracatAutoDrive_OptionsDescription": "Trajektoria autopilota, HUD kierowcy i opcjonalny dziennik diagnostyczny. Szerokość linii zmienia tylko rysowanie pikseli u klienta i nie obciąża serwera. Dzienniki diagnostyczne są domyślnie wyłączone. Zmiany trajektorii i HUD działają od razu.",
     "UI_MinidoracatAutoDrive_ShowTrajectory": "Pokaż trajektorię autopilota i linię nawigacji",

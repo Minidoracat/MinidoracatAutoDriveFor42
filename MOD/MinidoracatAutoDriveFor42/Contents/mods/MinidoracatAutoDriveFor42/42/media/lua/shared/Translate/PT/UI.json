@@ -41,7 +41,7 @@
     "UI_MinidoracatAutoDrive_HUDOptions": "HUD da direção automática",
     "UI_MinidoracatAutoDrive_HUDOptionsDescription": "Exibido acima do painel de instrumentos original do veículo. Mudanças de tema e layout são aplicadas imediatamente.",
     "UI_MinidoracatAutoDrive_Options": "Minidoracat Autodrive",
-    "UI_MinidoracatAutoDrive_WhatsNew": "Desvia de postes finos e lixeiras; freia ao mirar. Yui e Clássica mais altas; asas com fonte grande.",
+    "UI_MinidoracatAutoDrive_WhatsNew": "Novo: Módulo de Leitor fabricável. Para se o carro afundar ou capotar. Corrigido erro com NPC.",
     "UI_MinidoracatAutoDrive_Section": "Direção automática",
     "UI_MinidoracatAutoDrive_OptionsDescription": "Configurações da trajetória da direção automática, HUD do motorista e log de diagnóstico opcional. A largura da linha só muda o preenchimento de pixels no cliente e não adiciona carga ao servidor. Os logs de diagnóstico vêm desligados por padrão. Mudanças de trajetória e HUD são aplicadas imediatamente.",
     "UI_MinidoracatAutoDrive_ShowTrajectory": "Mostrar trajetória da direção automática e linha de navegação",

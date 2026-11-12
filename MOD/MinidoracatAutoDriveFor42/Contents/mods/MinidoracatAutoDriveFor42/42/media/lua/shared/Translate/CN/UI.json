@@ -41,7 +41,7 @@
     "UI_MinidoracatAutoDrive_HUDOptions": "自动驾驶 HUD",
     "UI_MinidoracatAutoDrive_HUDOptionsDescription": "显示在原版车辆仪表上方。主题与布局更改会立即生效。",
     "UI_MinidoracatAutoDrive_Options": "Minidoracat 自动驾驶",
-    "UI_MinidoracatAutoDrive_WhatsNew": "修正：细柱子、资源回收桶撞上就卡住；举枪瞄准时紧急刹车变弱。Yui 与经典语音调大声，大字体也能用侧挂双翼。",
+    "UI_MinidoracatAutoDrive_WhatsNew": "新增：调频器可以自己合成（电工 6 级）。车掉到地面下或翻覆时，自动驾驶会停手并说明原因。修正 NPC 开车时一直跳错误。",
     "UI_MinidoracatAutoDrive_Section": "自动驾驶",
     "UI_MinidoracatAutoDrive_OptionsDescription": "自动驾驶的轨迹显示、驾驶 HUD，以及可选的诊断记录。轨迹粗细只改变客户端像素填充，不增加服务器负担；诊断记录默认关闭。轨迹与 HUD 更改会立即生效。",
     "UI_MinidoracatAutoDrive_ShowTrajectory": "显示自动驾驶轨迹与导航线",
