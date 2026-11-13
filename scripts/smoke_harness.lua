@@ -34803,6 +34803,63 @@ function drive.scenarioCornerCut()
             checkTrue(false, "(cut-kin)/(cut-cover) 前置：commit fixture 沒有承諾（" .. desc() .. "）")
         end
     end
+    -- (cut-diag) 1114e：cut none 帶逐條候選摘要 c1..c4 與轉角點雲 hp／hpn——實機 MP 的 console 沒有 debug 行，這是判斷
+    --   「這台車真的過不去」還是「驗線有缺陷」的唯一依據。
+    do
+        local s1 = arm()
+        snap(s1, POSTS, { band = 8, half = 7 })
+        clearEv()
+        Dr.cornerCutPlan(s1, dveh, 0)
+        local n1 = cutEv("none")[1]
+        checkTrue(n1 ~= nil and n1.why == "cover" and type(n1.c1) == "string" and n1.c1:find("^cover lin=") ~= nil
+                and n1.c1:find("T=", 1, true) ~= nil and n1.c1:find("nocov=plan+physical", 1, true) ~= nil
+                and n1.hpn == #POSTS and type(n1.hp) == "string" and n1.hp:find("52.0,-6.0,0.15", 1, true) ~= nil
+                and n1.l ~= nil,
+            "(cut-diag) cut none 帶 c1（理由、lin／lout、T、沒覆蓋的檔位）與點雲 hp（c1=" .. tostring(n1 and n1.c1)
+                .. " hpn=" .. tostring(n1 and n1.hpn) .. "）")
+        -- 掃掠失敗：在承諾那條掃過的線中段擺一根柱（直接問驗線），摘要要有失敗檔位、重疊深度、障礙點、車身取樣點
+        local s2 = arm()
+        snap(s2, POSTS)
+        Dr.cornerCutPlan(s2, dveh, 0)
+        local cc = s2.cornerCut
+        s2.cornerCut, s2.pendingRouteWhy = nil, nil
+        if cc then
+            local mid = math.floor(cc.swn / 2)
+            local px, py = cc.swx[mid], cc.swy[mid]
+            local pts2 = {}
+            for _, q in ipairs(POSTS) do pts2[#pts2 + 1] = q end
+            pts2[#pts2 + 1] = { px, py }
+            snap(s2, pts2)
+            local g = gOf(s2)
+            local why = Dr.cornerCutTry(s2, g, cc.lin, cc.lout, cc.wIn, cc.wOut)
+            local note = Dr.cutCandNote(why, g, cc.lin, cc.lout)
+            checkTrue(why == "sweep" and note:find("^sweep lin=") ~= nil and note:find("tier=physical ov=", 1, true) ~= nil
+                    and note:find(string.format("hit=%.2f,%.2f", px, py), 1, true) ~= nil
+                    and note:find(" at=", 1, true) ~= nil and note:find(" r=", 1, true) ~= nil,
+                "(cut-diag) 掃掠失敗的摘要：檔位、重疊深度、障礙點＝線上那根柱、車身取樣點（" .. note .. "）")
+        else
+            checkTrue(false, "(cut-diag) 前置：commit fixture 沒有承諾（" .. desc() .. "）")
+        end
+    end
+    -- (cut-lp) 1114e：進場從車的實際橫向起。車停在內側 2.5m（y=−2.5，停留 lane 那型）；1114d 前 P_in 釘在中心線 (40,0)、斜接到
+    --   入臂偏移線（掃掠從車在斜線上的垂足 (41,−0.5) 起），斜線上 (43,−0.9) 擺一根柱（在格網入臂窗外）：舊制撞柱＝sweep，
+    --   新制改線第一點＝車位、沿內側直線過去＝承諾（cut none 的 l＝車的橫向）。
+    do
+        local s1 = arm()
+        dveh._y = -2.5
+        local pts2 = { { 43, -0.9 } }
+        for _, q in ipairs(POSTS) do pts2[#pts2 + 1] = q end
+        snap(s1, pts2)
+        clearEv()
+        Dr.cornerCutPlan(s1, dveh, 0)
+        local c1, pl = s1.cornerCut, cutEv("plan")[1]
+        checkTrue(c1 ~= nil and math.abs(c1.cx[1] - 40) < 1e-6 and math.abs(c1.cy[1] + 2.5) < 1e-6
+                and pl ~= nil and math.abs((pl.l or 0) + 2.5) < 1e-6,
+            "(cut-lp) 車在內側 2.5m：改線第一點＝車位、承諾（" .. (c1 and string.format("P_in=%.2f,%.2f T=%.2f,%.2f lin=%.2f",
+                c1.cx[1], c1.cy[1], c1.tx, c1.ty, c1.lin) or ("none " .. tostring(cutEv("none")[1] and cutEv("none")[1].c1)))
+                .. "）")
+        dveh._y = 0
+    end
     -- (cut-cover) zoneCovered 對折點外角：4m 路的 fallback 直角，外角扇形 (63,2) 兩段的垂足都落在段外＝沒掃過
     do
         local s1 = arm()
