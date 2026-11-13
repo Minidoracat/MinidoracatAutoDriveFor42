@@ -34791,6 +34791,285 @@ function drive.scenarioCornerCut()
 end
 drive.scenarioCornerCut()
 
+-- 1114c 轉角版 chainAhead（design-raven 第 5 步；obstacles.md〈延後〉cut）：Drive.cutDefer 在承諾前攔「出口落在轉角區、出口後
+--   下一群塞不進、改線格網有解」的候選。L 型路線同 scenarioCornerCut（K=(60,0) 左轉北上、路寬 15／9），點雲用同一組 POSTS（格網有內側解）。
+--   (cd-defer)  車在動：延後 why=cut（dodge defer、cut trap why=defer、停點＝b 前一個判堵停止線）、回 clear、a 不變。
+--   (cd-start)  車停著但離停點遠（停點帽 ≥ MIN_EXEC）：照樣延後（往停點開）。
+--   (cd-stop)   車停在停點（帽 < MIN_EXEC）：判堵 detail=cut、blockS＝b、blockSteepM −1；(cd-block) 已判堵＝判堵。
+--   (cd-lane)   下一群從車那時的 lane 問：停留＝offL、c 之後；一般繞行＝回線 lane、d 之後。
+--   出口（照承諾、不記事件）：(cd-fits) 塞得進、(cd-wall) 整寬牆（10-13）、(cd-clear) 淨空、(cd-zone) 出口不在轉角區、
+--     (cd-grid) 格網無解、(cd-tried) 這次嘗試已在 K 試過改線（換嘗試才再攔）、(cd-brake) 煞不住、(cd-owner) 拖車／持有改線／停車政策。
+--   (cd-chain) 整合：真 Sensor＋真候選鏈＋真判堵階梯；只把「出口後下一群」換成塞不進的形狀（cutDefer 期間 MDADCorridor.plan 回指定值——
+--     真世界湊不出圓角陷阱：兩道門近到會被合成一群、鏈直接繞過兩道）。現制（cornerCutTried 預設＝第 5 步不攔）同一輪就承諾；
+--     新制延後 → 停在停點判堵 detail=cut → 開到停止線武裝寬帶 → 寬帶那一輪 replan 結尾 cut plan（判堵錨不在區內時退用出口點）。
+--   違規證明（temp/s1114-cut/vp/）：拿掉 replan 掛點、不查轉角區、不查 cornerCutTried、煞不住也延後、停住不轉判堵、cornerCutPlan 不退用出口點，各自紅。
+function drive.scenarioCutDefer()
+    scenario("1114c：轉角版 chainAhead——承諾會把車帶進轉角窄門之間時延後、停下判堵交給轉角改線")
+    local Dr = MDAD.Drive
+    local oldSandbox, oldVeh, oldApi = SandboxVars, dveh, MinidoracatMiniMapAPI
+    installNavApi(4)
+    local oldRoute, oldTx, oldTy, oldState = drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
+    local sand = { NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 }
+    setSandbox(sand)
+    local oldKeep = Dr.keepRightTarget
+    Dr.keepRightTarget = function() return 0 end
+    local oldEvent, oldSample, events = MDADDiagnostics.event, MDADDiagnostics.sample, {}
+    MDADDiagnostics.event = function(_, name, a) events[#events + 1] = { name = name, a = a } end
+    MDADDiagnostics.sample = function() return true end
+    dveh = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }), scriptName = "Base.CarNormal",
+        engineRunning = true, mass = 1200, speed = 0, maxSpeed = 80, bodyW = 1.8, bodyL = 4.5, wheelZ = 1.4,
+        comX = 0, comZ = 0, profileFull = true, enginePower = 3000, brakingForce = 80,
+        wheelFriction = 1.7, tireFriction = 1.5 })
+    drive.fillWorld(-10, 100, -110, 20)
+    local function lroute(kx, w1, w2)
+        local pts, nIn = {}, kx / 4
+        for i = 0, nIn do pts[#pts + 1] = i * 4; pts[#pts + 1] = 0 end
+        for i = 1, 25 do pts[#pts + 1] = kx; pts[#pts + 1] = -i * 4 end
+        local r = { pts = pts, segSurface = {}, segWidth = {} }
+        for i = 1, #pts / 2 - 1 do r.segSurface[i], r.segWidth[i] = "paved", i <= nIn and w1 or w2 end
+        return r
+    end
+    local function arm(x, spd, kx, w1, w2)
+        Dr.stop(0, nil)
+        kx = kx or 60
+        drive.nav.route = lroute(kx, w1 or 15, w2 or 9)
+        drive.nav.tx, drive.nav.ty, drive.nav.state = kx, -100, "ok"
+        dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = x, 0, spd, 0, spd == 0
+        dveh._engine, dveh._driver = true, dp
+        dp._vehicle, dp._dead, dp._local = dveh, false, true
+        setHeading(dveh, 0)
+        local okStart = Dr.start(dp)
+        local st = Dr.debugSession(0)
+        if not okStart or not st then
+            checkTrue(false, "(cd) 前置：啟動失敗（" .. table.concat(drive.logs, " | "):sub(-600) .. "）")
+            error("cut defer fixture start failed")
+        end
+        for _ = 1, 20 do
+            if st.profile and st.profile.ready then break end
+            driveTick(dp, dveh)
+        end
+        st.diag = true
+        return st
+    end
+    -- 完成快照直接填（同 scenarioCornerCut 的 snap，但不判堵、不武裝寬帶：cutDefer 跑在承諾前）
+    local function snap(st, list)
+        local sen, p = st.sensor, st.profile
+        for _, k in ipairs({ "hardX", "hardY", "hardR", "hardB", "hardS", "hardL", "hardLc", "hardW" }) do
+            sen[k] = sen[k] or {}
+        end
+        for i, q in ipairs(list) do
+            local best, bs, bl = nil, nil, nil
+            for j = 1, p.n - 1 do
+                local L = p.segLen[j]
+                if L > 1e-9 then
+                    local tx, ty = math.cos(p.segH[j]), math.sin(p.segH[j])
+                    local dx, dy = q[1] - p.x[j], q[2] - p.y[j]
+                    local t = math.max(0, math.min(L, dx * tx + dy * ty))
+                    local d2 = (dx - tx * t) ^ 2 + (dy - ty * t) ^ 2
+                    if best == nil or d2 < best then best, bs, bl = d2, p.s[j] + t, -dx * ty + dy * tx end
+                end
+            end
+            sen.hardX[i], sen.hardY[i], sen.hardR[i], sen.hardB[i] = q[1], q[2], 0.15, 0
+            sen.hardS[i], sen.hardL[i], sen.hardLc[i], sen.hardW[i] = bs, bl, bl, 0.15
+        end
+        sen.hardN, sen.ready, sen.hardOverflow = #list, true, false
+        sen.corridorHalf, sen.completedBandBias = 7, 0
+        sen.scanS, sen.scanEndS, sen.unloaded = st.lastSNow - 5, st.lastSNow + 100, false
+        st.blocked, st.pendingRouteWhy, st.pendingDetour, st.reapproach = false, nil, false, nil
+    end
+    local function clearEv() for i = #events, 1, -1 do events[i] = nil end end
+    local function ev(name, phase)
+        for _, e in ipairs(events) do
+            if e.name == name and (phase == nil or e.a.phase == phase) then return e.a end
+        end
+        return nil
+    end
+    local function nEv(name)
+        local n = 0
+        for _, e in ipairs(events) do if e.name == name then n = n + 1 end end
+        return n
+    end
+    local POSTS = { { 52, 0 }, { 52, -6 }, { 59, -10 }, { 51, -10 } }
+    local realPlan, planArgs = MDADCorridor.plan, nil
+    -- 出口後下一群的形狀（cutDefer 的那次 Corridor.plan）：trap＝離出口 3m、要側移 4m（塞不進）；fits＝40m 外、側移 1m
+    local function shape(kind)
+        return function(_, _, _, _, _, preferL, _, _, _, _, _, _, minS)
+            planArgs = { preferL = preferL, minS = minS }
+            if kind == "trap" then return "dodge", minS + 1, minS + 3, minS + 6, minS + 10, preferL - 4 end
+            if kind == "fits" then return "dodge", minS + 40, minS + 42, minS + 45, minS + 50, preferL - 1 end
+            if kind == "wall" then return "blocked", minS + 1, minS + 1, minS + 3, minS + 3, 0 end -- 同 plan 整寬牆的回傳形狀
+            return "clear"
+        end
+    end
+    -- 直接問 Drive.cutDefer（承諾前那一刻）：stay＝停留承諾（出口＝c、lane＝offL），否則一般繞行（出口＝d、回線 lane）
+    local function ask(st, kind, a, b, c, d, offL, stay)
+        st.dodgeStay = stay ~= false
+        MDADCorridor.plan = shape(kind)
+        planArgs = nil
+        clearEv()
+        local ok, m, a2 = pcall(Dr.cutDefer, st, dveh, 0, "dodge", a, b, c, d, offL)
+        MDADCorridor.plan = realPlan
+        if not ok then error(m) end
+        return m, a2
+    end
+    local function untouched(label, m, a2)
+        checkTrue(m == "dodge" and a2 == 30 and #events == 0, label .. "：照承諾、不記事件（m=" .. tostring(m)
+            .. " 事件 " .. #events .. "）")
+    end
+
+    -- (cd-defer)／(cd-lane) 停留：車 30 km/h 在 x=20，候選 b=46、出口 c=52（剖面上離 K 約 8.5m＜臂長）
+    local st = arm(20, 30)
+    snap(st, POSTS)
+    local halfL = st.vehicleProfile.halfL
+    local bStop = 46 - Dr.blockStopDist(st) + halfL
+    local m, a2 = ask(st, "trap", 30, 46, 52, 58, -3)
+    local df, tr = ev("dodge", "defer"), ev("cut", "trap")
+    checkTrue(m == "clear" and a2 == 30 and df ~= nil and df.why == "cut" and math.abs((df.b or 0) - bStop) < 1e-6
+            and tr ~= nil and tr.why == "defer" and tr.kx == 60 and tr.ky == 0 and (tr.nc or 0) >= 1
+            and st.dodgeDeferS == df.b and (st.dodgeDeferCap or -1) > 0 and st.cutDefer ~= nil,
+        "(cd-defer) 車在動、陷阱型：延後 why=cut、停點＝b 前一個判堵停止線（b=" .. tostring(df and df.b) .. " 期望 "
+            .. string.format("%.2f", bStop) .. " cap=" .. tostring(st.dodgeDeferCap) .. " trap=" .. tostring(tr and tr.why) .. "）")
+    checkTrue(planArgs ~= nil and planArgs.preferL == -3 and planArgs.minS == 52,
+        "(cd-lane) 停留承諾：下一群從 offL、c 之後問（" .. tostring(planArgs and planArgs.preferL) .. ", "
+            .. tostring(planArgs and planArgs.minS) .. "）")
+    -- (cd-lane) 一般繞行：出口 d=52、回線 lane（Drive.dodgeHomeL）
+    st = arm(20, 30)
+    snap(st, POSTS)
+    m = ask(st, "trap", 30, 46, 48, 52, -3, false)
+    checkTrue(m == "clear" and planArgs ~= nil and planArgs.preferL == Dr.dodgeHomeL(st) and planArgs.minS == 52,
+        "(cd-lane) 一般繞行：下一群從回線 lane、d 之後問（m=" .. tostring(m) .. " " .. tostring(planArgs and planArgs.preferL)
+            .. ", " .. tostring(planArgs and planArgs.minS) .. "）")
+    -- (cd-start) 停著、離停點遠：延後（往停點開）
+    st = arm(20, 0)
+    snap(st, POSTS)
+    m = ask(st, "trap", 30, 46, 52, 58, -3)
+    checkTrue(m == "clear" and ev("dodge", "defer") ~= nil,
+        "(cd-start) 停著但離停點 16m：延後、不判堵（m=" .. tostring(m) .. "）")
+    -- (cd-stop) 停在停點：判堵 detail=cut
+    st = arm(36, 0)
+    snap(st, POSTS)
+    m, a2 = ask(st, "trap", 30, 46, 52, 58, -3)
+    tr = ev("cut", "trap")
+    checkTrue(m == "blocked" and a2 == 46 and st.dodgeBlockReason == "cut" and st.blockSteepM == -1
+            and tr ~= nil and tr.why == "block" and ev("dodge", "defer") == nil,
+        "(cd-stop) 停在延後停點：判堵 detail=cut、blockS＝b、標準倒車（m=" .. tostring(m) .. " a=" .. tostring(a2)
+            .. " reason=" .. tostring(st.dodgeBlockReason) .. "）")
+    -- (cd-block) 已判堵：判堵（不延後，免得判堵／延後逐輪翻）
+    st = arm(20, 30)
+    snap(st, POSTS)
+    st.blocked = true
+    m = ask(st, "trap", 30, 46, 52, 58, -3)
+    checkTrue(m == "blocked" and ev("dodge", "defer") == nil, "(cd-block) 已判堵：維持判堵（m=" .. tostring(m) .. "）")
+
+    -- 出口：照承諾
+    st = arm(20, 30)
+    snap(st, POSTS)
+    untouched("(cd-fits) 下一群塞得進", ask(st, "fits", 30, 46, 52, 58, -3))
+    untouched("(cd-wall) 下一群整寬牆（10-13 不管）", ask(st, "wall", 30, 46, 52, 58, -3))
+    untouched("(cd-clear) 出口後淨空", ask(st, "clear", 30, 46, 52, 58, -3))
+    untouched("(cd-zone) 出口 c=32 離轉角 28m", ask(st, "trap", 30, 31, 32, 34, -3))
+    st.cornerCutTried = { x = 60, y = 0, lvl = 2, att = st.episodeAttempts }
+    untouched("(cd-tried) 這次嘗試已在 K 試過改線（任一寬帶級）", ask(st, "trap", 30, 46, 52, 58, -3))
+    st.cornerCutTried.att = st.episodeAttempts - 1
+    m = ask(st, "trap", 30, 46, 52, 58, -3)
+    checkEq(m, "clear", "(cd-tried) 換一次嘗試：照樣攔")
+    st.cornerCutTried, st.cornerCut = nil, { kx = 60, ky = 0 }
+    untouched("(cd-owner) 已持有改線", ask(st, "trap", 30, 46, 52, 58, -3))
+    st.cornerCut, st.tow = nil, {}
+    untouched("(cd-owner) 拖車", ask(st, "trap", 30, 46, 52, 58, -3))
+    st.tow = nil
+    sand.ObstaclePolicy = 2
+    setSandbox(sand)
+    untouched("(cd-owner) 停車政策", ask(st, "trap", 30, 46, 52, 58, -3))
+    sand.ObstaclePolicy = nil
+    setSandbox(sand)
+    do -- (cd-grid) 內側封死：格網無解
+        local wall = {}
+        for _, q in ipairs(POSTS) do wall[#wall + 1] = q end
+        for x = 36, 59 do for y = -20, -1 do wall[#wall + 1] = { x, y } end end
+        local s1 = arm(20, 30)
+        snap(s1, wall)
+        untouched("(cd-grid) 內側封死、格網無解", ask(s1, "trap", 30, 46, 52, 58, -3))
+    end
+    -- (cd-brake) 60 km/h、車頭到 b 只剩 7.75m：煞不住＝照承諾（不帶速硬煞進去）
+    st = arm(36, 60)
+    snap(st, POSTS)
+    untouched("(cd-brake) 煞不住", ask(st, "trap", 30, 46, 52, 58, -3))
+
+    -- (cd-chain) 整合：K=(48,0)、路寬 9；路心柱 (24,0)（候選出口 d 落在轉角前、不觸發延過折點），外側封住（y 2..10），車 20 km/h 從 x=2 開過來
+    do
+        drive.fillWorld(-10, 100, -110, 20)
+        drive.putRoad(-10, 52, -4, 4)
+        drive.putRoad(44, 52, -110, 4)
+        drive.putSolid(24, 0, "cd_g1")
+        for x = 30, 72 do for y = 2, 10 do drive.putSolid(x, y, "cd_out") end end
+        local wasMs = drive.frameMs(10)
+        local realCD = Dr.cutDefer
+        Dr.cutDefer = function(...)
+            MDADCorridor.plan = shape("trap")
+            local ok, rm, ra = pcall(realCD, ...)
+            MDADCorridor.plan = realPlan
+            if not ok then error(rm) end
+            return rm, ra
+        end
+        -- 現制：第 5 步不攔（這次嘗試已試過 K）＝同一輪承諾
+        local s0 = arm(2, 20, 48, 9, 9)
+        s0.cornerCutTried = { x = 48, y = 0, lvl = 1, att = s0.episodeAttempts }
+        clearEv()
+        drive.scanRound(true)
+        local com0 = ev("dodge", "commit")
+        checkTrue(s0.dodging == true and com0 ~= nil and ev("cut", "trap") == nil,
+            "(cd-chain) 現制：候選鏈同一輪承諾（tier=" .. tostring(com0 and com0.tier) .. " offL=" .. tostring(com0 and com0.offL)
+                .. " c=" .. tostring(com0 and com0.c) .. " d=" .. tostring(com0 and com0.d) .. "）")
+        -- 新制：延後
+        local s1 = arm(2, 20, 48, 9, 9)
+        clearEv()
+        drive.scanRound(true)
+        local df1, tr1 = ev("dodge", "defer"), ev("cut", "trap")
+        checkTrue(s1.dodging ~= true and df1 ~= nil and df1.why == "cut" and tr1 ~= nil and tr1.why == "defer"
+                and tr1.kx == 48 and tr1.ky == 0 and s1.blocked ~= true,
+            "(cd-chain) 新制：同一個候選改成延後 why=cut（停點 b=" .. tostring(df1 and df1.b) .. " pm=" .. tostring(s1.planMode) .. "）")
+        -- 車停在延後停點：判堵 detail=cut
+        local stopX = (df1 and df1.b or 30) - s1.vehicleProfile.halfL - 0.2
+        dveh._x, dveh._speed, dveh._stopped = stopX, 0, true
+        clearEv()
+        drive.scanRound(true)
+        local bl1, tr2 = ev("blocked"), ev("cut", "trap")
+        checkTrue(s1.blocked == true and bl1 ~= nil and bl1.detail == "cut" and tr2 ~= nil and tr2.why == "block",
+            "(cd-chain) 停在停點：判堵 detail=cut（x=" .. string.format("%.1f", stopX) .. " detail=" .. tostring(bl1 and bl1.detail) .. "）")
+        -- 開到判堵停止線：武裝寬帶、寬帶那一輪 replan 結尾試改線
+        local hx = s1.blockHitX or 24.5
+        dveh._x = hx - Dr.blockStopDist(s1) + 0.5
+        clearEv()
+        for _ = 1, 4 do
+            drive.scanRound(true)
+            if ev("cut", "plan") then break end
+        end
+        local plan1, none1 = ev("cut", "plan"), ev("cut", "none")
+        checkTrue(s1.wideArmed == true and plan1 ~= nil and plan1.kx == 48 and plan1.ky == 0,
+            "(cd-chain) 停止線武裝寬帶、寬帶判堵後試轉角改線（cut plan K=" .. tostring(plan1 and plan1.kx) .. ","
+                .. tostring(plan1 and plan1.ky) .. " 結果 " .. tostring((ev("cut", "commit") and "commit")
+                or (none1 and ("none " .. tostring(none1.why))) or "無") .. "）")
+        -- 試過之後同一次嘗試不再攔：照承諾或判堵階梯
+        if none1 then
+            clearEv()
+            drive.scanRound(true)
+            checkEq(nEv("cut"), 0, "(cd-chain) 改線試過（none）後同一次嘗試不再攔、不再試")
+        end
+        Dr.cutDefer = realCD
+        drive.frameMs(wasMs)
+        drive.fillWorld(-10, 100, -110, 20)
+    end
+    MDADCorridor.plan = realPlan
+    Dr.stop(0, nil)
+    MDADDiagnostics.event, MDADDiagnostics.sample = oldEvent, oldSample
+    Dr.keepRightTarget = oldKeep
+    drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
+    SandboxVars, dveh, MinidoracatMiniMapAPI = oldSandbox, oldVeh, oldApi
+    drive.fillWorld(-2, 70, -7, 7)
+end
+drive.scenarioCutDefer()
+
 local function scenarioReasonKeys()
 scenario("理由鍵覆蓋：每個分支都跑到，且四語 UI.json 都有對應翻譯")
 
