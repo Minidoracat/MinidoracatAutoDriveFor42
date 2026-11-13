@@ -34566,7 +34566,7 @@ function drive.scenarioCornerCut()
         -- 一般帶判堵→停止線武裝寬帶→寬帶那一輪：前面情境留下的 Sensor 節奏不同，最多 3 輪等到寬帶判堵或改線事件
         for _ = 1, 3 do
             drive.scanRound(true)
-            if #cutEv() > 0 then break end
+            if #cutEv("plan") > 0 then break end -- 一般帶判堵那輪會先記 cut skip why=wide（1114d），等到改線真的跑
         end
         local wide, commit1 = nil, cutEv("commit")[1]
         for _, e in ipairs(events) do
@@ -34682,25 +34682,62 @@ function drive.scenarioCornerCut()
         checkTrue(mono and prev > s1.vehicleProfile.rMin * T.KIN_PROOF_RMIN_K + 1,
             "(cut-rmono) T 的圓角半徑隨淨空 w 單調不減、寬了就大於 rMin（R=" .. table.concat(rs, ",") .. "）")
     end
-    -- (cut-owner)／(cut-move)：都不試、不記事件
-    local function noCut(label, setup)
+    -- (cut-owner)／(cut-move)／(cut-skip)：都不試；錨在轉角附近，每種早退各記一筆 cut skip kind=plan、why＝自己的名字（1114d）
+    local function noCut(label, why, setup)
         local s1 = arm()
         snap(s1, POSTS)
         setup(s1)
         clearEv()
         Dr.cornerCutPlan(s1, dveh, 0)
-        checkTrue(#cutEv() == 0 and s1.cornerCut == nil and s1.pendingRouteWhy == nil and s1.cornerCutTried == nil,
-            label .. "：不試（事件 " .. #cutEv() .. "）")
+        local sk = cutEv("skip")
+        checkTrue(#cutEv() == 1 and sk[1] ~= nil and sk[1].kind == "plan" and sk[1].why == why and sk[1].kx == 60
+                and sk[1].ky == 0 and sk[1].arm ~= nil and s1.cornerCut == nil and s1.pendingRouteWhy == nil
+                and s1.cornerCutTried == nil,
+            label .. "：不試、記 cut skip why=" .. why .. "（事件 " .. #cutEv() .. " why=" .. tostring(sk[1] and sk[1].why) .. "）")
+        Dr.cornerCutPlan(s1, dveh, 0)
+        checkEq(#cutEv(), 1, label .. "：同一嘗試同一級同一理由只記一筆")
     end
-    noCut("(cut-owner) 承諾中的繞行", function(s1) s1.dodging = true end)
-    noCut("(cut-owner) RETURN 持有回線段", function(s1)
+    noCut("(cut-owner) 承諾中的繞行", "owner-dodge", function(s1) s1.dodging = true end)
+    noCut("(cut-owner) RETURN 持有回線段", "owner-return", function(s1)
         s1.returnActive, s1.returnHold, s1.returnCrawlExact, s1.returnEndS = true, false, false, s1.lastSNow + 10
     end)
-    noCut("(cut-owner) ROTATE", function(s1) s1.fstate.rotating = true end)
-    noCut("(cut-owner) 拖車", function(s1) s1.tow = {} end)
-    noCut("(cut-move) 車速 ≥ WIDE_SCAN_KMH", function() dveh._speed = T.WIDE_SCAN_KMH end)
-    noCut("(cut-move) 寬帶沒武裝／不是寬帶完整快照", function(s1) s1.sensor.wideDone = false end)
-    noCut("(cut-move) 已有別的路線改寫待辦（改道）", function(s1) s1.pendingDetour = true end)
+    noCut("(cut-owner) ROTATE", "owner-rotate", function(s1) s1.fstate.rotating = true end)
+    noCut("(cut-owner) 拖車", "tow", function(s1) s1.tow = {} end)
+    noCut("(cut-move) 車速 ≥ WIDE_SCAN_KMH", "moving", function() dveh._speed = T.WIDE_SCAN_KMH end)
+    noCut("(cut-move) 寬帶沒武裝／不是寬帶完整快照", "wide", function(s1) s1.sensor.wideDone = false end)
+    noCut("(cut-move) 已有別的路線改寫待辦（改道）", "pending", function(s1) s1.pendingDetour = true end)
+    noCut("(cut-skip) 錨沿入臂在臂長外 1m", "zone", function(s1)
+        s1.blockHitX = 60 - Dr.cutArm(s1.vehicleProfile.rMin * T.KIN_PROOF_RMIN_K, math.pi / 2, s1.bodyReach) - 1
+    end)
+    noCut("(cut-skip) 錨在臂內但橫向出帶（|v|＞帶半寬 14）", "zone", function(s1) s1.blockHitX, s1.blockHitY = 55, 14.5 end)
+    do -- 直路判堵（附近沒有 ≥45° 轉角）：不記 skip
+        local s1 = arm()
+        snap(s1, POSTS)
+        s1.blockHitX, s1.blockHitY = 10, 0
+        clearEv()
+        Dr.cornerCutPlan(s1, dveh, 0)
+        checkEq(#cutEv(), 0, "(cut-skip) 錨離轉角 50m：不是改線的案、不記事件")
+    end
+    -- (cut-zone) 正式服 rc-prod-1114 R1 重建（1114c E2E fix 0/6、整趟沒有 cut 事件）：路線 src 與 VanAmbulance（rMin 2.919、
+    --   bodyReach 2.970）、判堵錨＝門口燈柱 (5226.5,15411.5)、車停 (5231.6,15407.6)。燈柱沿入臂 8.5m、側偏 6.5m：直線 10.7m＞臂長 9.46m，
+    --   1114c 的直線半徑判定接不到；照設計「錨落在 [K−Zin, K+Zout]」沿臂投影＝在區內。
+    do
+        local pts = { 5329.279838896522, 15404.950256476883, 5217.996896724235, 15404.996279199038, 5217.960219749391, 15457.999972473253 }
+        local R0, reach = 2.9188300488318126, 0.8500310182571411 + 2.1200270652770996
+        local zarm = Dr.cutArm(R0, math.pi / 2, reach)
+        local i, _, kd, armR, why = Dr.cornerZoneOf(pts, 5226.5, 15411.5, 5231.6, 15407.6, R0, reach, 12)
+        checkTrue(i == 2 and why == nil and kd > zarm + 1 and math.abs(armR - zarm) < 0.05,
+            "(cut-zone) RC 門口燈柱：直線距離 " .. string.format("%.2f", kd or -1) .. "＞臂長 " .. string.format("%.2f", zarm)
+                .. "，沿入臂投影在區內（why=" .. tostring(why) .. "）")
+        i, _, _, _, why = Dr.cornerZoneOf(pts, 5226.5, 15413, 5231.6, 15407.6, R0, reach, 7)
+        checkTrue(i == 2 and why == "zone", "(cut-zone) 同一點、帶半寬 7（側偏 8＞7）：出區、回 why=zone（" .. tostring(why) .. "）")
+        i, _, _, _, why = Dr.cornerZoneOf(pts, 5217.96 + zarm + 1, 15405, 5231.6, 15407.6, R0, reach, 12)
+        checkTrue(i == 2 and why == "zone", "(cut-zone) 沿入臂在臂長外 1m：出區（" .. tostring(why) .. "）")
+        i, _, _, _, why = Dr.cornerZoneOf(pts, 5218, 15412, 5218, 15425, R0, reach, 12)
+        checkTrue(i == 2 and why == "arm", "(cut-zone) 錨在出臂區內、車已過 K：why=arm（" .. tostring(why) .. "）")
+        i = Dr.cornerZoneOf(pts, 5300, 15405, 5320, 15405, R0, reach, 12)
+        checkEq(i, nil, "(cut-zone) 離轉角 82m：附近沒有轉角＝nil")
+    end
     -- (cut-once)：內側封死＝找不到；同 (K, 級, 嘗試) 不再試，嘗試／級變了才再試
     do
         local wall = {}
@@ -34718,7 +34755,10 @@ function drive.scenarioCornerCut()
             "(cut-once) 內側封死：cut none why=grid（" .. desc() .. "）")
         clearEv()
         Dr.cornerCutPlan(s1, dveh, 0)
-        local again = #cutEv()
+        local again = #cutEv("plan") + #cutEv("none")
+        local againSkip = cutEv("skip")[1]
+        checkTrue(againSkip ~= nil and againSkip.why == "tried", "(cut-once) 第二次記 cut skip why=tried（"
+            .. tostring(againSkip and againSkip.why) .. "）")
         s1.episodeAttempts = s1.episodeAttempts + 1
         Dr.cornerCutPlan(s1, dveh, 0)
         local afterAtt = #cutEv("plan")
@@ -34734,7 +34774,7 @@ function drive.scenarioCornerCut()
         Dr.cornerCutPlan(s1, dveh, 0)
         local diff = {}
         for k, v in pairs(s1) do
-            if before[k] ~= v and k ~= "cornerCutTried" and k ~= "cutScratch" and k ~= "sweepCount"
+            if before[k] ~= v and k ~= "cornerCutTried" and k ~= "cutScratch" and k ~= "cutSkipSeen" and k ~= "sweepCount"
                     and k ~= "sfP1" and k ~= "sfP2" and k ~= "sfP3" and k ~= "sfP4" and k ~= "sf0Tag" and k ~= "sf0Ph"
                     and k ~= "sf0X" and k ~= "sf0Y" and k ~= "sweepHitBody" and k ~= "sweepLogAt" then
                 diff[#diff + 1] = k
@@ -34912,9 +34952,13 @@ function drive.scenarioCutDefer()
         if not ok then error(m) end
         return m, a2
     end
-    local function untouched(label, m, a2)
-        checkTrue(m == "dodge" and a2 == 30 and #events == 0, label .. "：照承諾、不記事件（m=" .. tostring(m)
-            .. " 事件 " .. #events .. "）")
+    -- 不攔＝照承諾；出口附近有轉角時記一筆 cut skip kind=defer why＝早退名（1114d），附近沒有轉角（why=nil）＝不記事件
+    local function untouched(label, why, m, a2)
+        local sk = ev("cut", "skip")
+        local okEv = why == nil and #events == 0
+            or (#events == 1 and sk ~= nil and sk.kind == "defer" and sk.why == why and sk.kx == 60 and sk.arm ~= nil)
+        checkTrue(m == "dodge" and a2 == 30 and okEv, label .. "：照承諾、skip why=" .. tostring(why) .. "（m=" .. tostring(m)
+            .. " 事件 " .. #events .. " why=" .. tostring(sk and sk.why) .. "）")
     end
 
     -- (cd-defer)／(cd-lane) 停留：車 30 km/h 在 x=20，候選 b=46、出口 c=52（剖面上離 K 約 8.5m＜臂長）
@@ -34964,23 +35008,26 @@ function drive.scenarioCutDefer()
     -- 出口：照承諾
     st = arm(20, 30)
     snap(st, POSTS)
-    untouched("(cd-fits) 下一群塞得進", ask(st, "fits", 30, 46, 52, 58, -3))
-    untouched("(cd-wall) 下一群整寬牆（10-13 不管）", ask(st, "wall", 30, 46, 52, 58, -3))
-    untouched("(cd-clear) 出口後淨空", ask(st, "clear", 30, 46, 52, 58, -3))
-    untouched("(cd-zone) 出口 c=32 離轉角 28m", ask(st, "trap", 30, 31, 32, 34, -3))
+    untouched("(cd-fits) 下一群塞得進", "next-fits", ask(st, "fits", 30, 46, 52, 58, -3))
+    untouched("(cd-wall) 下一群整寬牆（10-13 不管）", "next-blocked", ask(st, "wall", 30, 46, 52, 58, -3))
+    untouched("(cd-clear) 出口後淨空", "next-clear", ask(st, "clear", 30, 46, 52, 58, -3))
+    untouched("(cd-zone) 出口 c=46 沿入臂離 K 14m（臂長 10.2）", "zone", ask(st, "trap", 30, 40, 46, 48, -3))
+    m, a2 = ask(st, "trap", 10, 20, 24, 26, -3)
+    checkTrue(m == "dodge" and a2 == 10 and #events == 0, "(cd-zone) 出口 c=24 離轉角 36m（附近沒有轉角）：照承諾、不記事件（m="
+        .. tostring(m) .. " 事件 " .. #events .. "）")
     st.cornerCutTried = { x = 60, y = 0, lvl = 2, att = st.episodeAttempts }
-    untouched("(cd-tried) 這次嘗試已在 K 試過改線（任一寬帶級）", ask(st, "trap", 30, 46, 52, 58, -3))
+    untouched("(cd-tried) 這次嘗試已在 K 試過改線（任一寬帶級）", "tried", ask(st, "trap", 30, 46, 52, 58, -3))
     st.cornerCutTried.att = st.episodeAttempts - 1
     m = ask(st, "trap", 30, 46, 52, 58, -3)
     checkEq(m, "clear", "(cd-tried) 換一次嘗試：照樣攔")
     st.cornerCutTried, st.cornerCut = nil, { kx = 60, ky = 0 }
-    untouched("(cd-owner) 已持有改線", ask(st, "trap", 30, 46, 52, 58, -3))
+    untouched("(cd-owner) 已持有改線", "held", ask(st, "trap", 30, 46, 52, 58, -3))
     st.cornerCut, st.tow = nil, {}
-    untouched("(cd-owner) 拖車", ask(st, "trap", 30, 46, 52, 58, -3))
+    untouched("(cd-owner) 拖車", "tow", ask(st, "trap", 30, 46, 52, 58, -3))
     st.tow = nil
     sand.ObstaclePolicy = 2
     setSandbox(sand)
-    untouched("(cd-owner) 停車政策", ask(st, "trap", 30, 46, 52, 58, -3))
+    untouched("(cd-owner) 停車政策", "policy", ask(st, "trap", 30, 46, 52, 58, -3))
     sand.ObstaclePolicy = nil
     setSandbox(sand)
     do -- (cd-grid) 內側封死：格網無解
@@ -34989,12 +35036,12 @@ function drive.scenarioCutDefer()
         for x = 36, 59 do for y = -20, -1 do wall[#wall + 1] = { x, y } end end
         local s1 = arm(20, 30)
         snap(s1, wall)
-        untouched("(cd-grid) 內側封死、格網無解", ask(s1, "trap", 30, 46, 52, 58, -3))
+        untouched("(cd-grid) 內側封死、格網無解", "grid", ask(s1, "trap", 30, 46, 52, 58, -3))
     end
     -- (cd-brake) 60 km/h、車頭到 b 只剩 7.75m：煞不住＝照承諾（不帶速硬煞進去）
     st = arm(36, 60)
     snap(st, POSTS)
-    untouched("(cd-brake) 煞不住", ask(st, "trap", 30, 46, 52, 58, -3))
+    untouched("(cd-brake) 煞不住", "brake", ask(st, "trap", 30, 46, 52, 58, -3))
 
     -- (cd-chain) 整合：K=(48,0)、路寬 9；路心柱 (24,0)（候選出口 d 落在轉角前、不觸發延過折點），外側封住（y 2..10），車 20 km/h 從 x=2 開過來
     do
@@ -35054,7 +35101,9 @@ function drive.scenarioCutDefer()
         if none1 then
             clearEv()
             drive.scanRound(true)
-            checkEq(nEv("cut"), 0, "(cd-chain) 改線試過（none）後同一次嘗試不再攔、不再試")
+            checkEq(nEv("cut") - #(function() local o = {} for _, e in ipairs(events) do
+                if e.name == "cut" and e.a.phase == "skip" then o[#o + 1] = e end end return o end)(), 0,
+                "(cd-chain) 改線試過（none）後同一次嘗試不再攔、不再試（只剩 cut skip）")
         end
         Dr.cutDefer = realCD
         drive.frameMs(wasMs)
