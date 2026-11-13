@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1114f"
+Drive.REV = "1114g"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -659,7 +659,9 @@ TUNE.CORNER_STOP_DIST = 8      -- corner 下的煞停線（普通 blocked 10m）
 -- 區長由 rMin×KIN_PROOF_RMIN_K 的切線長＋bodyReach 推（不設常數）；以下只有角度、格網與重套容差。
 TUNE.CORNER_CUT_MIN_RAD = math.pi / 4 -- 路線頂點折角 ≥ 此值（且 < 髮夾上限）才算轉角
 TUNE.CORNER_CUT_STEP_M = 0.5          -- 兩臂平移格網步長
-TUNE.CORNER_CUT_MAX = 4               -- 送世界掃掠的候選上限（實際掃了才算；同一硬點已打掉的近似候選不算，見 CORNER_CUT_SAME_M）
+-- 送世界掃掠的候選上限（實際掃了才算；同一硬點已打掉的近似候選不算，見 CORNER_CUT_SAME_M）。1114g 只收 plan 檔後 4→8：
+-- rc-prod-1114 R1 停點 (5231.0,15402.4)、CarNormal 實測車身，成本最低的 lout 0 幾條都在 plan 檔撞入臂燈柱，第 5–6 條才過（smoke (rc-plan)）
+TUNE.CORNER_CUT_MAX = 8
 TUNE.CORNER_CUT_POOL = 16             -- 格網依成本篩出的候選池（cornerCutPlan 依序試到掃滿 CORNER_CUT_MAX 或池盡）
 TUNE.CORNER_CUT_SAME_M = 0.25         -- 候選線離已打掉前一條的硬點沒有遠過這個量（m）＝同一原因，略過不掃
 TUNE.CORNER_CUT_PAIRS = 400           -- 格網對數上限（超過截斷，事件 np 記試了幾對）
@@ -9484,6 +9486,9 @@ function Drive.unstickExtraM(s)
         extra = TUNE.UNSTICK_DODGE_EXTRA_M * s.episodeAttempts
     end
     if s.blocked and finite(s.blockSteepM) and s.blockSteepM > extra then extra = s.blockSteepM end
+    -- 轉角改線進場長不夠（cut none room，Drive.cornerCutPlan 記上一次嘗試的差額）：退回轉角前停點（1114g）
+    local cr = s.cutRunway
+    if s.blocked and cr and cr.att == s.episodeAttempts - 1 and cr.m > extra then extra = cr.m end
     if extra > 0 and finite(s.lastRouteErr) and s.lastRouteErr > TUNE.UNSTICK_EXTRA_ALIGN_RAD then extra = 0 end
     return extra
 end
@@ -14060,6 +14065,16 @@ function Drive.cutPassed(c, vx, vy)
     return (vx - c.bx) * c.ox + (vy - c.by) * c.oy > 0
 end
 
+-- 改線段速度帽（1114g）：持有改線、車還沒過 B＝目標不超過承諾時算的 c.cap（Drive.cornerCutPlan；掃掠淨距換的速度），
+-- 判堵、繞行、守護各模式都套（rc-prod-1114 R1 1114f car-c：判堵後的接近包絡把車在圓角出口加到 19.8 km/h）。過 B 由
+-- Drive.cornerCutFor／cornerCutPlan 丟改線，帽跟著解除。
+function Drive.cutCap(s, targetSpeed, vx, vy)
+    local c = s.cornerCut
+    if not c or not finite(c.cap) or Drive.cutPassed(c, vx, vy) or targetSpeed <= c.cap then return targetSpeed end
+    s.lastCapReason = "cut"
+    return c.cap
+end
+
 function Drive.cornerCutDrop(s, playerNum, why)
     local c = s.cornerCut
     s.cornerCut = nil
@@ -14138,7 +14153,10 @@ end
 
 -- 一條格網候選的驗線（Drive.cornerCutPlan 用；冷路徑、每停點每級最多 CORNER_CUT_MAX 次）。g＝這個轉角的幾何。
 -- 回 nil, cut（過）或拒收理由：room（臂上沒地方拼、或終點落在改線段）／kin（任一圓角 R < rMin×KIN_PROOF_RMIN_K 或 fallback 折點）
--- ／cover（掃掠段不在完成快照的帶內）／sweep（plan、physical 兩檔世界掃掠都撞）／wall（出臂下一群整寬擋死，09-02「出口後仍擋線＝不鑽」）。
+-- ／cover（掃掠段不在完成快照的帶內）／sweep（plan 檔世界掃掠撞）／wall（出臂下一群整寬擋死，09-02「出口後仍擋線＝不鑽」）。
+-- 只收 plan 檔（1114g）：cutover 後新剖面由一般規劃器（plan 檔 needHalf）接手、沒有繞行那種持有者；physical 檔的改線一上路就被
+-- 規劃器以 plan 檔判擋——rc-prod-1114 R1 1114f 5 次 commit 全是 physical：car-a cutover 後立刻在出臂第二道門判堵、停在圓角中
+-- 再起 −12.25 寬帶繞行擦燈柱，car-c 同輪起停留繞行、判堵放掉後 19 km/h 擦同一根燈柱。
 function Drive.cornerCutTry(s, g, lin, lout, win, wout)
     local sen, vp = s.sensor, s.vehicleProfile
     local sn, cs = g.ix * g.oy - g.iy * g.ox, g.ix * g.ox + g.iy * g.oy
@@ -14292,44 +14310,35 @@ function Drive.cornerCutTry(s, g, lin, lout, win, wout)
     g.swept = true
     local lS0 = s.lastSNow
     local lS1 = lS0 + len
-    local physBase = MDADVehicleProfile.sweepBase(vp.halfW, "physical")
-    local covered, tier = false, nil
-    for pass = 1, 2 do
-        local nb = pass == 1 and s.sweepBase or physBase
-        local tname = pass == 1 and "plan" or "physical"
-        local _, _, pad = sweepGeom(s, nb)
-        if Drive.zoneCovered(s, lx, ly, ln, pad) then
-            covered = true
-            local okS, mS, _, _, skS, oxS, oyS = sweepLine(s, lx, ly, ln, lS0, lS1, lS0, lS0, lS1, lS1, 0, "cut", nb, 1,
-                false, false)
-            if okS then
-                tier = tname
-                break
-            end
-            g.hTier, g.hm, g.hx, g.hy = tname, mS, oxS, oyS
-            if finite(skS) then
-                local kq = math.floor((skS - lS0) / step + 0.5) + 1
-                if kq < 1 then kq = 1 elseif kq > ln then kq = ln end
-                g.sx, g.sy = lx[kq], ly[kq]
-            end
-            if pass == 2 and finite(oxS) and finite(oyS) then
-                local dm = nil
-                for q = 1, ln do
-                    local dx, dy = lx[q] - oxS, ly[q] - oyS
-                    local d2 = dx * dx + dy * dy
-                    if dm == nil or d2 < dm then dm = d2 end
-                end
-                if not g.fails then g.fails = {} end
-                g.fails[#g.fails + 1] = { x = oxS, y = oyS, d = sqrt(dm) }
-            end
-        else
-            g.nocov = g.nocov and (g.nocov .. "+" .. tname) or tname
-        end
+    local nb = s.sweepBase
+    local _, _, pad = sweepGeom(s, nb)
+    if not Drive.zoneCovered(s, lx, ly, ln, pad) then
+        g.nocov = "plan"
+        return "cover"
     end
-    if not covered then return "cover" end
-    if not tier then return "sweep" end
-    -- 掃過的那條線留在候選上（cutover 後新剖面要與它逐點一致：承諾線＝掃過的線；smoke (cut-equiv)）
-    c.tier, c.swn, c.swx, c.swy = tier, ln, {}, {}
+    local okS, mS, _, _, skS, oxS, oyS = sweepLine(s, lx, ly, ln, lS0, lS1, lS0, lS0, lS1, lS1, 0, "cut", nb, 1,
+        false, false)
+    if not okS then
+        g.hTier, g.hm, g.hx, g.hy = "plan", mS, oxS, oyS
+        if finite(skS) then
+            local kq = math.floor((skS - lS0) / step + 0.5) + 1
+            if kq < 1 then kq = 1 elseif kq > ln then kq = ln end
+            g.sx, g.sy = lx[kq], ly[kq]
+        end
+        if finite(oxS) and finite(oyS) then
+            local dm = nil
+            for q = 1, ln do
+                local dx, dy = lx[q] - oxS, ly[q] - oyS
+                local d2 = dx * dx + dy * dy
+                if dm == nil or d2 < dm then dm = d2 end
+            end
+            if not g.fails then g.fails = {} end
+            g.fails[#g.fails + 1] = { x = oxS, y = oyS, d = sqrt(dm) }
+        end
+        return "sweep"
+    end
+    -- 掃過的那條線留在候選上（cutover 後新剖面要與它逐點一致：承諾線＝掃過的線；smoke (cut-equiv)）；m＝這條線的掃掠淨距（速度帽）
+    c.tier, c.m, c.swn, c.swx, c.swy = "plan", mS, ln, {}, {}
     for q = 1, ln do c.swx[q], c.swy[q] = lx[q], ly[q] end
     -- 出臂下一群：出臂窗尾（u′＝T 後 zarm）投影回剖面的弧長之後，以改線出臂（剖面上 l≈l_out）當行駛基準線問 Corridor.plan，
     -- 整寬牆（blocked）＝不收。點雲用同一份完成快照（擋線判定照舊用形狀位置 hardLc／hardW）。
@@ -14650,8 +14659,19 @@ function Drive.cornerCutPlan(s, vehicle, playerNum)
     local sweeps = (s.sweepCount or 0) - sweeps0
     if not cut then
         local hp, hpn = Drive.cutHardDump(s, kx, ky, math.max(-uC, 2 * zarm) + 3)
+        -- 進場長不夠（room）＝車已過轉角前停點（Drive.cutStopNote 同一個 uStop）：差額交下一次倒車多退（Drive.unstickExtraM），
+        -- 退回停點再試（1114g；rc-prod-1114 R1 1114f van-a：第一次判堵已過第一道門，倒車兩次停在 K 前 6.1／9.6 m）
+        local runway = nil
+        if why == "room" then
+            runway = uC + zarm + MDADSensor.CORRIDOR_HALF - s.needHalf
+            if runway > 0 then
+                s.cutRunway = { att = att, m = math.min(runway, TUNE.UNSTICK_STEEP_MAX_M) }
+            else
+                runway = nil
+            end
+        end
         diagEvent(s, playerNum, "cut", { phase = "none", why = why, kx = kx, ky = ky, lvl = lvl, np = np, nc = nc,
-            sweeps = sweeps, wms = Drive.replanElapsed(s), ms = ms, l = lP, nsk = nsk > 0 and nsk or nil,
+            sweeps = sweeps, wms = Drive.replanElapsed(s), ms = ms, l = lP, nsk = nsk > 0 and nsk or nil, steep = runway,
             c1 = notes[1], c2 = notes[2], c3 = notes[3], c4 = notes[4], hp = hp, hpn = hpn })
         if getDebug() then -- telemetry: cut none 事件
             print(string.format("%spn=%d corner cut none: K=(%.1f,%.1f) why=%s cand=%d pairs=%d", LOG, playerNum,
@@ -14660,12 +14680,18 @@ function Drive.cornerCutPlan(s, vehicle, playerNum)
         return
     end
     cut.lvl = lvl
+    -- 改線段速度帽（1114g；Drive.cutCap）：掃掠淨距 m 照繞行同一套換速度（clearanceCapKmh、爬行地板 crawlFloorKmh），側向分量取
+    -- 折角一半的正弦。rc-prod-1114 R1 1114f car-c：判堵（22 m 外路牌）把目標從 14.7 抬到 19.3 km/h，車在圓角出口內切 0.9 m 擦燈柱。
+    local aLat = finite(s.safeLat) and s.safeLat > 0 and s.safeLat or 0
+    cut.cap = math.max(MDADDynamics.crawlFloorKmh(cut.m, TUNE.DODGE_COMMIT_MIN_KMH, TUNE.DODGE_CRAWL_MID_KMH,
+        TUNE.DODGE_CRAWL_MID_MARGIN_M), MDADDynamics.clearanceCapKmh(cut.m, TUNE.DODGE_CLEARANCE_RESERVE, 0.3, aLat,
+        math.sin(adh * 0.5)))
     s.cornerCut = cut
     s.pendingRouteWhy, s.nextRouteMs = "cut", 0
     local w = math.min(cut.wIn, cut.wOut)
     diagEvent(s, playerNum, "cut", { phase = "commit", kx = kx, ky = ky, tx = cut.tx, ty = cut.ty, lin = cut.lin,
         lout = cut.lout, w = w < MDADCorridor.CUT_BIG and w or nil, r = cut.r, tier = cut.tier, lvl = lvl, np = np,
-        nc = nc, sweeps = sweeps, wms = Drive.replanElapsed(s), ms = ms })
+        nc = nc, sweeps = sweeps, wms = Drive.replanElapsed(s), ms = ms, m = cut.m, cap = cut.cap })
     if getDebug() then -- telemetry: cut commit 事件
         print(string.format("%spn=%d corner cut commit: K=(%.1f,%.1f) T=(%.1f,%.1f) lin=%.2f lout=%.2f r=%s tier=%s",
             LOG, playerNum, kx, ky, cut.tx, cut.ty, cut.lin, cut.lout, tostring(cut.r), cut.tier))
@@ -17418,6 +17444,7 @@ local function stepFollow(s, vehicle, playerNum, now)
         targetSpeed = Drive.lagGuardCap(s, targetSpeed, vx, vy)
         -- 停下之後的窄線爬行（Drive.proofTightCap；Drive.proofTightArm 在承諾時武裝）
         targetSpeed = Drive.proofTightCap(s, targetSpeed, vx, vy, playerNum)
+        targetSpeed = Drive.cutCap(s, targetSpeed, vx, vy) -- 改線段速度帽（1114g）
 
         -- 起步近物限速（TUNE.START_GUARD_*；調頭／回線／繞行各有自己的淨距體系，不疊）
         s.startNearCap = nil
@@ -19022,7 +19049,7 @@ local function onPlayerUpdate(player)
             s.pendingDetour = false
             s.routeGen = s.routeGen + 1
             Drive.disarmWide(s) -- 武裝點是舊路線的弧長
-            s.cutDefer, s.cutSkipSeen, s.cutStop = nil, nil, nil -- 轉角版 chainAhead 記的出口點、cut skip 去重、轉角停止線都是舊路線上的
+            s.cutDefer, s.cutSkipSeen, s.cutStop, s.cutRunway = nil, nil, nil, nil -- 轉角版 chainAhead 記的出口點、cut skip 去重、轉角停止線、進場差額都是舊路線上的
             local oldMode, oldProgress, oldUntil = s.mode, s.progressState, s.progressUntil
             local preservingRecovery = not targetChanged
                 and (oldMode == "unstick" or oldMode == "settle"

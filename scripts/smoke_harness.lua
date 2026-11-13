@@ -34818,7 +34818,7 @@ function drive.scenarioCornerCut()
         Dr.cornerCutPlan(s1, dveh, 0)
         local n1 = cutEv("none")[1]
         checkTrue(n1 ~= nil and n1.why == "cover" and type(n1.c1) == "string" and n1.c1:find("^cover lin=") ~= nil
-                and n1.c1:find("T=", 1, true) ~= nil and n1.c1:find("nocov=plan+physical", 1, true) ~= nil
+                and n1.c1:find("T=", 1, true) ~= nil and n1.c1:find("nocov=plan", 1, true) ~= nil
                 and n1.hpn == #POSTS and type(n1.hp) == "string" and n1.hp:find("52.0,-6.0,0.15", 1, true) ~= nil
                 and n1.l ~= nil,
             "(cut-diag) cut none 帶 c1（理由、lin／lout、T、沒覆蓋的檔位）與點雲 hp（c1=" .. tostring(n1 and n1.c1)
@@ -34839,7 +34839,7 @@ function drive.scenarioCornerCut()
             local g = gOf(s2)
             local why = Dr.cornerCutTry(s2, g, cc.lin, cc.lout, cc.wIn, cc.wOut)
             local note = Dr.cutCandNote(why, g, cc.lin, cc.lout)
-            checkTrue(why == "sweep" and note:find("^sweep lin=") ~= nil and note:find("tier=physical ov=", 1, true) ~= nil
+            checkTrue(why == "sweep" and note:find("^sweep lin=") ~= nil and note:find("tier=plan ov=", 1, true) ~= nil
                     and note:find(string.format("hit=%.2f,%.2f", px, py), 1, true) ~= nil
                     and note:find(" at=", 1, true) ~= nil and note:find(" r=", 1, true) ~= nil,
                 "(cut-diag) 掃掠失敗的摘要：檔位、重疊深度、障礙點＝線上那根柱、車身取樣點（" .. note .. "）")
@@ -35428,6 +35428,101 @@ function drive.scenarioCutRC()
         checkTrue(s1.cutStop == nil and sk ~= nil and sk.kind == "stop" and sk.why == "past"
                 and Dr.blockStopDist(s1) == T.BLOCK_STOP_DIST,
             "(rc-exit) 車已過停點：不拉停止線、cut skip kind=stop why=past（" .. tostring(sk and sk.why) .. "）")
+    end
+    -- 1114g：rc-prod-1114 R1 1114f 的兩次接觸與 van-a。車身照 CarNormal 實測（bodyW 1.62、bodyL 4.74：halfW 0.81、halfL 2.37）。
+    local function finite(v) return type(v) == "number" and v * 0 == 0 end
+    local carV = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }), scriptName = "Base.CarNormal",
+        engineRunning = true, mass = 1200, speed = 0, maxSpeed = 80, bodyW = 1.62, bodyL = 4.74, wheelZ = 1.4,
+        comX = 0, comZ = 0, profileFull = true, enginePower = 3000, brakingForce = 80,
+        wheelFriction = 1.7, tireFriction = 1.5 })
+    local function gRC(s1)
+        local pts = s1.profileRoute.pts
+        local R0 = s1.vehicleProfile.rMin * T.KIN_PROOF_RMIN_K
+        local i, dh = Dr.cornerZoneOf(pts, AX, AY, dveh._x, dveh._y, R0, s1.bodyReach, 12)
+        local ox, oy = SRC[5] - KX, SRC[6] - KY
+        local lo = math.sqrt(ox * ox + oy * oy)
+        ox, oy = ox / lo, oy / lo
+        local adh = math.abs(dh)
+        local vx, vy = dveh._x, dveh._y
+        return { kx = KX, ky = KY, ix = ix, iy = iy, ox = ox, oy = oy, R0 = R0, zarm = Dr.cutArm(R0, adh, s1.bodyReach),
+            uC = (vx - KX) * ix + (vy - KY) * iy, lP = (vx - KX) * -iy + (vy - KY) * ix, vx = vx, vy = vy, adh = adh,
+            inW = 15, outW = 9 }, i, dh
+    end
+    do -- (rc-plan) car-a／car-c 的停點 (5231.0,15402.4)：只收 plan 檔
+        local oldD = dveh
+        dveh = carV
+        local s1 = arm(5231.0, 15402.4)
+        snap(s1, true)
+        clearEv()
+        Dr.cornerCutPlan(s1, dveh, 0)
+        local cm, n1 = cutEv("commit")[1], cutEv("none")[1]
+        checkTrue(cm ~= nil and cm.tier == "plan" and finite(cm.m) and cm.m >= 0,
+            "(rc-plan) 實機停點、實測車身：改線以 plan 檔承諾（1114f 是 physical lin −2 lout −0.5；" .. (cm and string.format(
+                "T=%.1f,%.1f lin=%.1f lout=%.1f tier=%s m=%.2f", cm.tx, cm.ty, cm.lin, cm.lout, tostring(cm.tier), cm.m or -1)
+                or ("none " .. tostring(n1 and n1.why) .. " " .. tostring(n1 and n1.c1))) .. "）")
+        -- (rc-a) 1114f car-b／car-c／van-b 承諾的那條（lin −2、lout −0.5、physical；這裡同一個停點、實測車身，舊制同樣收它）：plan 檔撞
+        -- ＝不收。cutover 後一般規劃器以 plan 檔 needHalf 判這條線：car-c 起停留繞行、判堵放掉後擦燈柱 (5220.5,15412.5)；car-a 的
+        -- lin −2.5 lout 0 同型（出臂 x 5218 離第二道門警示牌 1.5 m，cutover 後立刻判堵、停在圓角中）
+        s1.cornerCut, s1.pendingRouteWhy, s1.cornerCutTried = nil, nil, nil
+        local g, iK, dh = gRC(s1)
+        local nc = Dr.cutGrid(s1, s1.profileRoute.pts, iK, dh, 400)
+        local sc, win, wout = Dr.cutScratchOf(s1), nil, nil
+        for q = 1, nc do
+            if math.abs(sc.lin[q] + 2) < 1e-6 and math.abs(sc.lout[q] + 0.5) < 1e-6 then win, wout = sc.win[q], sc.wout[q] end
+        end
+        local why = win and Dr.cornerCutTry(s1, g, -2, -0.5, win, wout)
+        checkTrue(why == "sweep" and g.hTier == "plan",
+            "(rc-a) 1114f 承諾的那條 lin −2 lout −0.5：plan 檔撞＝拒收（" .. tostring(why) .. " hit=" .. tostring(g.hx) .. ","
+                .. tostring(g.hy) .. " win=" .. tostring(win) .. "）")
+        -- (rc-cap) 改線段速度帽：承諾帶 m／cap，持有改線、車還沒過 B 時目標壓到 cap（記 capReason cut），過 B 不壓
+        if cm then
+            s1.cornerCut = { cap = cm.cap, bx = 5218.5, by = KY + 20, ox = g.ox, oy = g.oy }
+            local t1 = Dr.cutCap(s1, 40, 5220, 15410)
+            local r1 = s1.lastCapReason
+            local t2 = Dr.cutCap(s1, 40, 5218.5, KY + 21)
+            checkTrue(finite(cm.cap) and cm.cap <= T.DODGE_CRAWL_MID_KMH + 1e-6 and t1 == cm.cap and r1 == "cut" and t2 == 40,
+                "(rc-cap) 承諾帶速度帽 cap=" .. tostring(cm.cap) .. "（m=" .. tostring(cm.m) .. "），B 前壓到帽、過 B 不壓（"
+                    .. tostring(t1) .. "/" .. tostring(r1) .. "/" .. tostring(t2) .. "）")
+            s1.cornerCut = nil
+        end
+        dveh = oldD
+    end
+    do -- (rc-cap-hook) stepFollow 套改線段速度帽：承諾、cutover 後跟線每幀都問 Drive.cutCap（可視帽等更低的帽照樣先綁）
+        local oldD = dveh
+        dveh = carV
+        local s1 = arm(5231.0, 15402.4)
+        snap(s1, true)
+        Dr.cornerCutPlan(s1, dveh, 0)
+        local held, n, orig = s1.cornerCut ~= nil, 0, Dr.cutCap
+        Dr.cutCap = function(...)
+            n = n + 1
+            return orig(...)
+        end
+        for _ = 1, 6 do
+            nowMs = nowMs + 50
+            dveh._speed, dveh._stopped = 12, false
+            driveTick(dp, dveh)
+        end
+        Dr.cutCap = orig
+        checkTrue(held and n > 0 and s1.cornerCut ~= nil, "(rc-cap-hook) cutover 後跟線套改線段速度帽（held=" .. tostring(held)
+            .. " 呼叫 " .. n .. " 次）")
+        dveh = oldD
+    end
+    do -- (rc-runway) van-a 倒車後 (5224.0,15410.2)、K 前 6 m：cut none room 記差額，下一次倒車多退（Drive.unstickExtraM）
+        local s1 = arm(5224.0, 15410.2, 2.4)
+        snap(s1, true)
+        clearEv()
+        Dr.cornerCutPlan(s1, dveh, 0)
+        local n1 = cutEv("none")[1]
+        local cr = s1.cutRunway
+        s1.episodeAttempts, s1.lastRouteErr = s1.episodeAttempts + 1, 0
+        local ex = Dr.unstickExtraM(s1)
+        s1.episodeAttempts = s1.episodeAttempts + 1
+        local ex2 = Dr.unstickExtraM(s1)
+        checkTrue(n1 ~= nil and n1.why == "room" and finite(n1.steep) and n1.steep > 0 and cr ~= nil
+                and math.abs(ex - math.min(n1.steep, T.UNSTICK_STEEP_MAX_M)) < 1e-6 and ex2 == 0,
+            "(rc-runway) room：cut none steep＝" .. tostring(n1 and n1.steep) .. "、下一次倒車多退 " .. tostring(ex)
+                .. "、再下一次不再加（" .. tostring(ex2) .. "；" .. tostring(n1 and n1.why) .. "）")
     end
     Dr.stop(0, nil)
     MDADDiagnostics.event, MDADDiagnostics.sample = oldEvent, oldSample
