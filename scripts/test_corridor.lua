@@ -985,6 +985,69 @@ do
 end
 
 -- =====================================================================
+scenario("轉角改線格網 cornerCut（1017j）：只取內側、成本排序、截斷、零配置")
+do
+    -- 合成 L 型：K=(0,0)，入彎臂往東 (1,0)、左轉出彎臂往 −y（PZ 世界 y 向南＝往北）。內側＝l<0（入臂的 −y、出臂的 −x）。
+    local function newSc()
+        return { u1 = {}, v1 = {}, u2 = {}, v2 = {}, lin = {}, lout = {}, cost = {}, win = {}, wout = {} }
+    end
+    local NEED, LIM, STEP, ARM, ZONE = 1.4, 12, 0.5, 9, 40
+    local function run(px, py, pr, inner, maxPairs, sc)
+        sc = sc or newSc()
+        local n = #px
+        local found, tried, trunc = C.cornerCut(px, py, pr, n, 0, 0, 1, 0, 0, -1, inner or -1, NEED, LIM, LIM, STEP,
+            ARM, ARM, ZONE, maxPairs or 400, 4, sc)
+        return found, tried, trunc, sc
+    end
+    -- (ok) 入臂原線上 u=−6 一根柱、內側 4.5m 再一根（r 0.15）＝內側一道門：可行 l_in ∈ [−2.95, −1.55]
+    local px, py, pr = { -6, -6 }, { 0, -4.5 }, { 0.15, 0.15 }
+    local found, tried, trunc, sc = run(px, py, pr, -1, 1000)
+    checkTrue(found >= 1, "(ok) 內側一道門：找得到候選（found=" .. found .. "）")
+    checkNear(sc.lin[1], -2.0, EPS, "(ok) 第一名的入臂平移＝離原線最近的可行內側格（−2.0）")
+    checkNear(sc.lout[1], 0, EPS, "(ok) 第一名的出臂不平移（T 只往入臂內側移）")
+    checkNear(sc.win[1], 2.35, EPS, "(ok) 入臂內側淨空＝到內側柱 2.5 扣半徑 0.15")
+    checkNear(sc.wout[1], 5.85, EPS, "(ok) 出臂窗（T 後 2..11m）內側那根柱離出臂線 6m 扣半徑")
+    for q = 1, found do
+        checkTrue(sc.lin[q] <= 0 and sc.lout[q] <= 0, "(ok) 第 " .. q .. " 名只在內側（lin=" .. sc.lin[q] .. " lout=" .. sc.lout[q] .. "）")
+        if q > 1 then checkTrue(sc.cost[q] >= sc.cost[q - 1], "(ok) 成本由小到大（第 " .. q .. " 名）") end
+    end
+    checkTrue(not trunc and tried == 624, "(ok) 25×25−1 對全試、不截斷（tried=" .. tried .. "）")
+    -- (wall) 內側整片封死（入臂原線上一排、內側象限每 1m 一點）＋外側也封：0 條
+    local wx, wy, wr = {}, {}, {}
+    local function put(x, y) wx[#wx + 1], wy[#wy + 1], wr[#wr + 1] = x, y, 0.15 end
+    for x = -20, -1 do put(x, 0) end
+    for x = -20, -1 do for y = -20, -1 do put(x, y) end end
+    found = run(wx, wy, wr)
+    checkEq(found, 0, "(outer) 內側封死、外側空著：只取內側＝0 條（10-13 外側繞急彎照舊不做）")
+    -- 同一份點雲當右轉（內側變成 +y／+x，那一側是空的）＝找得到：上面的 0 條是「只取內側」造成的，不是格網壞掉
+    found = run(wx, wy, wr, 1)
+    checkTrue(found >= 1, "(outer) 對照：同一點雲換成右轉（內側＝空的那邊）就有候選（found=" .. found .. "）")
+    for x = -20, 20 do for y = 1, 20 do put(x, y) end end
+    for y = -20, 20 do put(1, y) end
+    found = run(wx, wy, wr)
+    checkEq(found, 0, "(wall) 內外都封死：0 條")
+    -- (pairs) 格網 625−1 對、上限 400：試滿 400 就截斷並回報
+    found, tried, trunc = run({}, {}, {}, -1, 400)
+    checkTrue(trunc == true and tried == 400 and found == 4,
+        "(pairs) 截斷在 CORNER_CUT_PAIRS（tried=" .. tried .. " trunc=" .. tostring(trunc) .. "）、仍保留前 4 名")
+    -- 壞輸入＝0 條（fail-closed）
+    found = C.cornerCut({ 0 / 0 }, { 0 }, { 0.1 }, 1, 0, 0, 1, 0, 0, -1, -1, NEED, LIM, LIM, STEP, ARM, ARM, ZONE, 400, 4, newSc())
+    checkEq(found, 0, "NaN 點＝0 條")
+    found = C.cornerCut(px, py, pr, 2, 0, 0, 1, 0, 1, 0, -1, NEED, LIM, LIM, STEP, ARM, ARM, ZONE, 400, 4, newSc())
+    checkEq(found, 0, "兩臂平行（不是轉角）＝0 條")
+    -- (zero-alloc)
+    local zsc = newSc()
+    run(px, py, pr, -1, 400, zsc)
+    collectgarbage("collect")
+    collectgarbage("stop")
+    local kb0 = collectgarbage("count")
+    for _ = 1, 200 do run(px, py, pr, -1, 400, zsc) end
+    local kb1 = collectgarbage("count")
+    collectgarbage("restart")
+    checkTrue(kb1 - kb0 < 8, "(zero-alloc) 200 次呼叫記憶體成長 < 8KB（實得 " .. string.format("%.1f", kb1 - kb0) .. "）")
+end
+
+-- =====================================================================
 closeScenario()
 print()
 print("情境 " .. scenarios .. " 個、斷言 " .. assertions .. " 項")
