@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1114a"
+Drive.REV = "1114b"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -372,6 +372,9 @@ TUNE.FOLLOW_LATERAL_M = 0.3       -- 前車車身離我方車身橫向這麼近�
 -- FOLLOW_LATERAL_M：6m 路對向車淨距約 1.2，放寬會讓會車首見那輪煞一下、把停著讓我方的對向車當前車。
 -- （1114a 正式服：95 km/h 貼著 65 km/h 的同向車超過去）
 TUNE.FOLLOW_PASS_M = 1.5
+-- 正在跟的同向車橫向偏出 FOLLOW_PASS_M 後還照跟多久（它還在前方時）：前車繞障礙偏開幾秒又切回來時不搶著加速超過去；
+-- 真的換到隔壁車道的，晚這麼久才超（1114b E2E：前車繞殭屍偏開約 3 秒、降到 11 km/h，後車 1 秒後加速到 55–66 km/h，切回時差 0.70m）
+TUNE.FOLLOW_SIDE_HOLD_MS = 6000
 -- 前車速度差分與單輪保持（1017b D1，Drive.followLead）：差分基線短於 MIN 不換錨點、長於 MAX 作廢；前車單輪沒選到時
 -- 照上一輪外推最多 HOLD_MS；lead-lost 事件同一台最多每 NOTE_MS 一筆（逐輪閃爍不灌事件）
 TUNE.FOLLOW_DIFF_MIN_S = 0.2
@@ -6258,10 +6261,23 @@ function Drive.trafficScan(s, now, speedKmh)
                 end
                 if s0 > rs and l0 < lane + halfW + fl and l1 > lane - halfW - fl then
                     if li == nil or gap < liGap then li, liGap = i, gap end
+                    if sen.trfId[i] == s.trfSideId then s.trfSideId = nil end -- 回到線上：下次偏開重新計時
                 elseif mine then
-                    lostWhy = s0 > rs and "lateral" or "s0"
-                    -- 丟失當下兩車車身的橫向淨距（lead-lost 事件 l）：復盤看 FOLLOW_PASS_M 夠不夠
-                    s.trfLostClear = l0 >= lane and l0 - lane - halfW or lane - halfW - l1
+                    -- 兩車車身的橫向淨距（lead-side／lead-lost 事件 l）：復盤看 FOLLOW_PASS_M 夠不夠
+                    local clear = l0 >= lane and l0 - lane - halfW or lane - halfW - l1
+                    -- 正在跟的同向車偏開（繞東西、讓路）但還在前方：照它的即時位置再跟 FOLLOW_SIDE_HOLD_MS，
+                    -- 這段時間內切回來就接著跟；到期仍在旁邊才當它換了車道、放掉（1114b）
+                    if s0 > rs and vs and vs > TUNE.TRAFFIC_ONCOMING_MPS
+                            and (s.trfSideId ~= s.trfLeadId or now - s.trfSideT <= TUNE.FOLLOW_SIDE_HOLD_MS) then
+                        if s.trfSideId ~= s.trfLeadId then
+                            s.trfSideId, s.trfSideT = s.trfLeadId, now
+                            diagEvent(s, s.playerNum, "traffic", { phase = "lead-side", d = gap, l = clear, speed = vs * 3.6 })
+                        end
+                        if li == nil or gap < liGap then li, liGap = i, gap end
+                    else
+                        lostWhy = s0 > rs and "lateral" or "s0"
+                        s.trfLostClear = clear
+                    end
                 end
             end
         end

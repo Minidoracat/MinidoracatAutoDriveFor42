@@ -23438,12 +23438,31 @@ function drive.scenarioFollowLead()
     st.trfLeadId = nil
     round(711, st.lastSNow + halfL + 30, vReal, { clear = 2.2 })
     checkEq(st.trfLeadGap, nil, "(fl-side) 隔壁車道（淨距 2.2m）：不算前車")
-    -- 跟著的那台往旁邊讓到淨距 2.2：lead-lost why=lateral，事件 l＝丟失當下的車身橫向淨距
-    round(710, st.lastSNow + halfL + 30, vReal, { clear = 0.6 })
-    round(710, st.lastSNow + halfL + 30, vReal, { clear = 2.2 })
+    -- (fl-swerve) 1114b：正在跟的同向車偏開到淨距 2.2（繞東西）：照即時位置再跟 FOLLOW_SIDE_HOLD_MS，切回來接著跟、下次偏開重新計時；
+    --   到期仍在旁邊才 lead-lost why=lateral（事件 l＝車身橫向淨距）。沒在往前走的不保持（橫越車已經過去了）。
+    local function lead710(clear) return round(710, st.lastSNow + halfL + 30, vReal, { clear = clear }) end
+    lead710(0.6)
+    c, why = lead710(2.2)
+    ev = events[#events].a
+    checkTrue(st.trfLeadGap ~= nil and why == "moving" and c < 70 and ev.phase == "lead-side" and math.abs(ev.l - 2.2) < 0.01,
+        "(fl-swerve) 跟著的車偏開：照跟、記 lead-side（gap=" .. tostring(st.trfLeadGap) .. " phase=" .. tostring(ev.phase) .. " l=" .. tostring(ev.l) .. "）")
+    for _ = 1, 12 do lead710(2.2) end
+    checkTrue(st.trfLeadGap ~= nil and math.abs(st.trfLeadGap - 30) < 3, "(fl-swerve) 偏開 3 秒仍照即時車距跟（gap=" .. tostring(st.trfLeadGap) .. "）")
+    lead710(0.6)
+    nEv = #events
+    for _ = 1, 20 do lead710(2.2) end
+    checkTrue(st.trfLeadGap ~= nil and #events == nEv + 1 and events[#events].a.phase == "lead-side",
+        "(fl-swerve) 切回來再偏開：重新計時（5 秒後仍跟、只多一筆 lead-side）")
+    for _ = 1, 6 do lead710(2.2) end
     ev = events[#events].a
     checkTrue(ev.phase == "lead-lost" and ev.why == "lateral" and math.abs(ev.l - 2.2) < 0.01,
-        "(fl-side) lead-lost why=lateral 帶車身橫向淨距（l=" .. tostring(ev.l) .. "）")
+        "(fl-swerve) 超過 FOLLOW_SIDE_HOLD_MS 仍在旁邊：lead-lost why=lateral 帶 l（phase=" .. tostring(ev.phase) .. " l=" .. tostring(ev.l) .. "）")
+    for _ = 1, 5 do lead710(2.2) end
+    checkEq(st.trfLeadGap, nil, "(fl-swerve) 到期後放掉（可以超）")
+    st.trfLeadId = nil
+    round(714, st.lastSNow + halfL + 30, 0)
+    round(714, st.lastSNow + halfL + 30, 0, { clear = 2.2 })
+    checkTrue(st.trfSideId ~= 714, "(fl-swerve) 沒在往前走的車偏開：不保持")
     st.trfLeadId = nil
     round(712, st.lastSNow + halfL + 30, nil, { clear = 0.6 })
     checkEq(st.trfLeadGap, nil, "(fl-side) 速度未知（首見，可能是對向）：照舊只看 FOLLOW_LATERAL_M，不為它減速")
