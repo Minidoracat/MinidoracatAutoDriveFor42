@@ -23359,7 +23359,8 @@ function drive.scenarioFollowLead()
             sen.trfN = 1
             sen.trfNativeN = opts.relay and 0 or 1
             sen.trfS0[1], sen.trfS1[1] = leadS, leadS + 4.6
-            sen.trfL0[1], sen.trfL1[1] = lane - 0.9, lane + 0.9
+            local l0 = lane + (opts.clear and 0.9 + opts.clear or -0.9)
+            sen.trfL0[1], sen.trfL1[1] = l0, l0 + 1.8
             sen.trfVs[1], sen.trfVl[1] = vs, 0
             sen.trfT[1], sen.trfId[1] = opts.relay and now or now - 20, id
         end
@@ -23429,6 +23430,26 @@ function drive.scenarioFollowLead()
         "(fl-short) 錨點留在第一輪：差分基線 0.35 秒（vd=" .. tostring(st.trfLeadVd) .. "）")
     round(703, leadS + 15, vRep, { relay = true })
     checkEq(st.trfLeadVd, nil, "(fl-short) 同一台換來源（原生→轉送）差分作廢")
+    -- (fl-side) 1114a 正式服：拖車走中線、同向慢車在右車道（車身淨距不到一個車道），舊制淨距 >0.3 就不算前車＝95 km/h 貼著超過去
+    st.trfLeadId = nil
+    c, why = round(710, st.lastSNow + halfL + 30, vReal, { clear = 0.6 })
+    checkTrue(st.trfLeadGap ~= nil and why == "moving" and c < 70,
+        "(fl-side) 同向慢車車身淨距 0.6m：算前車、照跟（gap=" .. tostring(st.trfLeadGap) .. " cap=" .. tostring(c) .. "）")
+    st.trfLeadId = nil
+    round(711, st.lastSNow + halfL + 30, vReal, { clear = 2.2 })
+    checkEq(st.trfLeadGap, nil, "(fl-side) 隔壁車道（淨距 2.2m）：不算前車")
+    -- 跟著的那台往旁邊讓到淨距 2.2：lead-lost why=lateral，事件 l＝丟失當下的車身橫向淨距
+    round(710, st.lastSNow + halfL + 30, vReal, { clear = 0.6 })
+    round(710, st.lastSNow + halfL + 30, vReal, { clear = 2.2 })
+    ev = events[#events].a
+    checkTrue(ev.phase == "lead-lost" and ev.why == "lateral" and math.abs(ev.l - 2.2) < 0.01,
+        "(fl-side) lead-lost why=lateral 帶車身橫向淨距（l=" .. tostring(ev.l) .. "）")
+    st.trfLeadId = nil
+    round(712, st.lastSNow + halfL + 30, nil, { clear = 0.6 })
+    checkEq(st.trfLeadGap, nil, "(fl-side) 速度未知（首見，可能是對向）：照舊只看 FOLLOW_LATERAL_M，不為它減速")
+    st.trfLeadId = nil
+    round(713, st.lastSNow + halfL + 30, 0, { clear = 0.6 })
+    checkEq(st.trfLeadGap, nil, "(fl-side) 沒在往前走（停下讓車的對向車、橫越車）：照舊只看 FOLLOW_LATERAL_M")
     MDADDiagnostics.event = oldEvent
     MDAD.Drive.stop(0, nil)
     MDAD.Drive.setGear(0, oldGear)

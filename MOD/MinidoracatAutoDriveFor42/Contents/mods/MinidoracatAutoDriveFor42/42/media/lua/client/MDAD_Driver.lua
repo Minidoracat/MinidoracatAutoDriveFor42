@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1112a"
+Drive.REV = "1114a"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -367,6 +367,11 @@ TUNE.FOLLOW_STOP_M = 5            -- 跟車：車頭到前車車尾小於此值�
 TUNE.FOLLOW_MIN_M = 6             -- 跟車距離＝MIN＋前車速度×TIME
 TUNE.FOLLOW_TIME_S = 1.0
 TUNE.FOLLOW_LATERAL_M = 0.3       -- 前車車身離我方車身橫向這麼近以內才算擋在行駛線上
+-- 同向行進的車（沿路線速度 > TRAFFIC_ONCOMING_MPS）：車身淨距不到這個值就不從旁邊超過去、照跟。隔壁車道（4m 車道、1.8m 車身
+-- ＝淨距 2.2）不算，壓著同一條車道的（拖車走中線對右車道的車＝0.2–1.1）都算。速度未知的首見車、停下讓車的對向車、橫越車照舊用
+-- FOLLOW_LATERAL_M：6m 路對向車淨距約 1.2，放寬會讓會車首見那輪煞一下、把停著讓我方的對向車當前車。
+-- （1114a 正式服：95 km/h 貼著 65 km/h 的同向車超過去）
+TUNE.FOLLOW_PASS_M = 1.5
 -- 前車速度差分與單輪保持（1017b D1，Drive.followLead）：差分基線短於 MIN 不換錨點、長於 MAX 作廢；前車單輪沒選到時
 -- 照上一輪外推最多 HOLD_MS；lead-lost 事件同一台最多每 NOTE_MS 一筆（逐輪閃爍不灌事件）
 TUNE.FOLLOW_DIFF_MIN_S = 0.2
@@ -6244,7 +6249,7 @@ function Drive.trafficScan(s, now, speedKmh)
                 -- 前車：承諾線持有 lane 時看承諾線（繞行線上的同向慢車也要跟）；橫向速度外推到我方
                 -- 抵達它那一刻（路口橫越車還沒壓進行駛線就先算前車）
                 local lane = owned and Drive.plannedLaneAt(s, at) or MDADFollower.laneBiasAt(p, current, idx, at)
-                local fl = TUNE.FOLLOW_LATERAL_M
+                local fl = (vs and vs > TUNE.TRAFFIC_ONCOMING_MPS) and TUNE.FOLLOW_PASS_M or TUNE.FOLLOW_LATERAL_M
                 local vl = sen.trfVl[i]
                 if finite(vl) and gap > 0 then
                     local t = gap / (vSelf > 1 and vSelf or 1)
@@ -6255,6 +6260,8 @@ function Drive.trafficScan(s, now, speedKmh)
                     if li == nil or gap < liGap then li, liGap = i, gap end
                 elseif mine then
                     lostWhy = s0 > rs and "lateral" or "s0"
+                    -- 丟失當下兩車車身的橫向淨距（lead-lost 事件 l）：復盤看 FOLLOW_PASS_M 夠不夠
+                    s.trfLostClear = l0 >= lane and l0 - lane - halfW or lane - halfW - l1
                 end
             end
         end
@@ -6426,7 +6433,7 @@ function Drive.followLead(s, now, vSelf, li, why)
             s.trfLeadNoteMs = now
             diagEvent(s, s.playerNum, "traffic", { phase = "lead-lost", why = why, d = s.trfLeadSeenGap,
                 speed = s.trfLeadSeenV * 3.6, dt = dt, hold = hold, vn = sen.vehN or 0, mv = sen.movingVeh == true,
-                kind = s.trfLeadSrc == 0 and "near" or "relay" })
+                kind = s.trfLeadSrc == 0 and "near" or "relay", l = why == "lateral" and s.trfLostClear or nil })
             if getDebug() then
                 print(string.format("%spn=%d traffic lead-lost why=%s d=%.1f v=%.1f dt=%d hold=%s vn=%d mv=%s",
                     LOG, s.playerNum or 0, why, s.trfLeadSeenGap, s.trfLeadSeenV * 3.6, dt, tostring(hold),
