@@ -34577,6 +34577,12 @@ function drive.scenarioCornerCut()
                 .. tostring(wide and wide.ka) .. "）")
         checkTrue(commit1 ~= nil and s1.pendingRouteWhy == "cut" and s1.cornerCut ~= nil and s1.blocked == true,
             "(cut-replan) 同一輪 replan 結尾試改線、承諾（判堵照舊，下一幀換線；" .. desc() .. "）")
+        local stopEv = cutEv("stop")[1]
+        for _, e in ipairs(cutEv("skip")) do
+            if e.kind == "stop" then stopEv = stopEv or e end
+        end
+        checkTrue(stopEv ~= nil, "(cut-replan) replan 判堵出口跑了轉角停止線（1114f Drive.cutStopNote：cut stop 或 skip kind=stop；"
+            .. tostring(stopEv and (stopEv.phase .. " " .. tostring(stopEv.why or stopEv.d))) .. "）")
         local rg0 = s1.routeGen
         nowMs = nowMs + 50
         driveTick(dp, dveh)
@@ -35175,6 +35181,262 @@ function drive.scenarioCutDefer()
     drive.fillWorld(-2, 70, -7, 7)
 end
 drive.scenarioCutDefer()
+
+-- 1114f rc-prod-1114 R1 轉角重建（1114e 清走廊 fix 6 輪：5 輪第一次試改線就 cut none room、倒車後再試 cut none sweep，4 條候選
+--   全撞同一根 (5221.5,15403.5)）：路線 src 與寬 15／9、點雲＝car-a 兩次 cut none 的 hp 聯集（152 點，r 照原值）、
+--   判堵錨＝出臂第一道門柱 (5215.5,15412.5)（car-a 第一次判堵 blocked why=plan 的 x／y，車在 (5277.6,15402.1) 66 km/h、橫向 +2.9）。
+--   (rc-stop)  判堵錨在轉角區：cut stop、停止線拉到轉角前停點；舊制停止線 10m＝車沿入臂到不了錨 10m 內、開進轉角才停（實機停
+--              (5220.6,15407.4)）。沿入臂（車的橫向）解「到錨世界距＝停止線」的第一點當停點。
+--   (rc-room)  實機停點（K 前 2.5m、已在圓角上）試改線＝cut none room（1114e 的失敗型照樣重現：問題在停點，不在驗線）。
+--   (rc-cut)   新停點試改線：承諾、改線掃過門柱縫（cutover why=cut）。
+--   (rc-same)  倒車後的位置 (5226.8,15402.3)：第一條撞 (5221.5,15403.5) 後，離那根沒有遠過 CORNER_CUT_SAME_M 的候選不掃、
+--              不佔 CORNER_CUT_MAX 名額，池（CORNER_CUT_POOL）裡較遠的候選掃過承諾（1114e：4 條全撞同一根＝cut none sweep）。
+--   (rc-exit)  出口：在 K 試過改線、換嘗試、車已過停點（cut skip kind=stop why=past）都回原停止線。
+--   違規證明（temp/s1114-cut/vp/）：blockStopDist 不用 cutStop、cutStopNote 不查轉角區、不查試過、拿掉同 hit 略過，各自紅。
+function drive.scenarioCutRC()
+    scenario("1114f：rc-prod-1114 R1 轉角重建——判堵錨在出臂門柱時停止線拉到轉角前、改線候選不重複撞同一根")
+    local Dr = MDAD.Drive
+    local T = Dr.debugTune()
+    local oldSandbox, oldVeh, oldApi = SandboxVars, dveh, MinidoracatMiniMapAPI
+    installNavApi(4)
+    local oldRoute, oldTx, oldTy, oldState = drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    local oldKeep = Dr.keepRightTarget
+    Dr.keepRightTarget = function() return 0 end
+    local oldEvent, oldSample, events = MDADDiagnostics.event, MDADDiagnostics.sample, {}
+    MDADDiagnostics.event = function(_, name, a) events[#events + 1] = { name = name, a = a } end
+    MDADDiagnostics.sample = function() return true end
+    dveh = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }), scriptName = "Base.CarNormal",
+        engineRunning = true, mass = 1200, speed = 0, maxSpeed = 80, bodyW = 1.8, bodyL = 4.5, wheelZ = 1.4,
+        comX = 0, comZ = 0, profileFull = true, enginePower = 3000, brakingForce = 80,
+        wheelFriction = 1.7, tireFriction = 1.5 })
+    drive.fillWorld(5195, 5335, 15390, 15462)
+    local SRC = { 5329.279838896522, 15404.950256476883, 5217.996896724235, 15404.996279199038, 5217.960219749391,
+        15457.999972473253 }
+    local KX, KY, AX, AY = SRC[3], SRC[4], 5215.5, 15412.5
+    local HPS =
+        "5204.5,15422.5,0.70;5204.6,15417.6,0.15;5205.5,15422.5,0.70;5205.5,15423.5,0.70;5205.8,15424.0,0.26;"..
+        "5206.2,15424.0,0.26;5206.5,15413.5,0.70;5206.5,15414.5,0.70;5206.5,15422.5,0.70;5206.5,15423.5,0.70;"..
+        "5206.8,15424.0,0.26;5207.2,15424.0,0.26;5207.5,15416.5,0.70;5207.5,15417.5,0.70;5207.5,15418.5,0.70;"..
+        "5207.6,15419.6,0.15;5207.8,15424.0,0.26;5208.2,15424.0,0.26;5208.5,15406.5,0.70;5208.5,15407.5,0.70;"..
+        "5208.5,15418.5,0.70;5208.8,15424.0,0.26;5209.0,15414.2,0.26;5209.0,15414.8,0.26;5209.0,15415.2,0.26;"..
+        "5209.0,15415.8,0.26;5209.0,15417.2,0.26;5209.0,15417.8,0.26;5209.0,15418.2,0.26;5209.0,15418.8,0.26;"..
+        "5209.0,15419.2,0.26;5209.0,15419.8,0.26;5209.0,15420.2,0.26;5209.0,15420.8,0.26;5209.0,15421.2,0.26;"..
+        "5209.0,15421.8,0.26;5209.0,15422.2,0.26;5209.0,15422.8,0.26;5209.0,15423.2,0.26;5209.0,15423.8,0.26;"..
+        "5209.2,15414.0,0.26;5209.2,15415.0,0.26;5209.2,15423.0,0.26;5209.2,15424.0,0.26;5209.5,15403.5,0.70;"..
+        "5209.5,15404.5,0.70;5209.5,15405.5,0.70;5209.5,15406.5,0.70;5209.5,15407.5,0.70;5209.5,15408.5,0.70;"..
+        "5209.5,15409.5,0.70;5209.5,15410.5,0.70;5209.5,15411.5,0.70;5209.5,15412.5,0.70;5209.5,15413.5,0.70;"..
+        "5209.8,15414.0,0.26;5209.8,15415.0,0.26;5209.8,15423.0,0.26;5209.8,15424.0,0.26;5210.2,15414.0,0.26;"..
+        "5210.2,15415.0,0.26;5210.2,15423.0,0.26;5210.2,15424.0,0.26;5210.5,15413.5,0.70;5210.5,15417.5,0.70;"..
+        "5210.5,15418.5,0.70;5210.5,15419.5,0.70;5210.5,15420.5,0.70;5210.5,15421.5,0.70;5210.8,15414.0,0.26;"..
+        "5210.8,15415.0,0.26;5210.8,15423.0,0.26;5210.8,15424.0,0.26;5211.2,15414.0,0.26;5211.2,15415.0,0.26;"..
+        "5211.2,15423.0,0.26;5211.2,15424.0,0.26;5211.5,15413.5,0.70;5211.5,15417.5,0.70;5211.5,15421.5,0.70;"..
+        "5211.8,15414.0,0.26;5211.8,15415.0,0.26;5211.8,15423.0,0.26;5211.8,15424.0,0.26;5212.2,15414.0,0.26;"..
+        "5212.2,15415.0,0.26;5212.2,15423.0,0.26;5212.2,15424.0,0.26;5212.5,15413.5,0.70;5212.5,15417.5,0.70;"..
+        "5212.5,15421.5,0.70;5212.8,15414.0,0.26;5212.8,15415.0,0.26;5212.8,15423.0,0.26;5212.8,15424.0,0.26;"..
+        "5213.2,15414.0,0.26;5213.2,15415.0,0.26;5213.2,15423.0,0.26;5213.2,15424.0,0.26;5213.5,15413.5,0.70;"..
+        "5213.5,15417.5,0.70;5213.5,15420.5,0.70;5213.5,15421.5,0.70;5213.8,15414.0,0.26;5213.8,15415.0,0.26;"..
+        "5213.8,15423.0,0.26;5213.8,15424.0,0.26;5214.2,15414.0,0.26;5214.2,15415.0,0.26;5214.2,15423.0,0.26;"..
+        "5214.2,15424.0,0.26;5214.5,15403.5,0.70;5214.5,15413.5,0.70;5214.5,15417.5,0.70;5214.5,15419.5,0.70;"..
+        "5214.5,15420.5,0.70;5214.8,15414.0,0.26;5214.8,15415.0,0.26;5214.8,15423.0,0.26;5214.8,15424.0,0.26;"..
+        "5215.2,15414.0,0.26;5215.2,15415.0,0.26;5215.2,15423.0,0.26;5215.2,15424.0,0.26;5215.5,15412.5,0.70;"..
+        "5215.5,15413.5,0.70;5215.8,15414.0,0.26;5215.8,15415.0,0.26;5215.8,15423.0,0.26;5215.8,15424.0,0.26;"..
+        "5216.0,15416.2,0.26;5216.0,15416.8,0.26;5216.0,15420.2,0.26;5216.0,15420.8,0.26;5216.0,15421.2,0.26;"..
+        "5216.0,15421.8,0.26;5216.0,15422.2,0.26;5216.0,15422.8,0.26;5216.0,15423.2,0.26;5216.0,15423.8,0.26;"..
+        "5216.5,15417.5,0.70;5216.5,15419.5,0.70;5216.5,15424.5,0.70;5217.5,15403.5,0.70;5220.5,15412.5,0.70;"..
+        "5220.5,15424.5,0.70;5221.5,15403.5,0.70;5226.5,15411.5,0.70;5226.5,15417.5,0.70;5226.5,15418.5,0.70;"..
+        "5226.5,15419.5,0.70;5226.5,15420.5,0.70;"..
+        ""
+    local HP = {}
+    for x, y, r in HPS:gmatch("([%d%.%-]+),([%d%.%-]+),([%d%.]+)") do HP[#HP + 1] = { tonumber(x), tonumber(y), tonumber(r) } end
+    local function arm(x, y, hd)
+        Dr.stop(0, nil)
+        drive.nav.route = { pts = { SRC[1], SRC[2], SRC[3], SRC[4], SRC[5], SRC[6] }, segSurface = { "paved", "paved" },
+            segWidth = { 15, 9 } }
+        drive.nav.tx, drive.nav.ty, drive.nav.state = 5218, 15458, "ok"
+        dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = x, y, 0, 0, true
+        dveh._engine, dveh._driver = true, dp
+        dp._vehicle, dp._dead, dp._local = dveh, false, true
+        setHeading(dveh, hd or math.pi)
+        local okStart = Dr.start(dp)
+        local st = Dr.debugSession(0)
+        if not okStart or not st then
+            checkTrue(false, "(rc) 前置：啟動失敗（" .. table.concat(drive.logs, " | "):sub(-600) .. "）")
+            error("rc fixture start failed")
+        end
+        for _ = 1, 20 do
+            if st.profile and st.profile.ready then break end
+            driveTick(dp, dveh)
+        end
+        st.diag = true
+        return st
+    end
+    local function projectSL(st, x, y)
+        local p, best, bs, bl = st.profile, nil, nil, nil
+        for j = 1, p.n - 1 do
+            local L = p.segLen[j]
+            if L > 1e-9 then
+                local tx, ty = math.cos(p.segH[j]), math.sin(p.segH[j])
+                local dx, dy = x - p.x[j], y - p.y[j]
+                local t = math.max(0, math.min(L, dx * tx + dy * ty))
+                local d2 = (dx - tx * t) ^ 2 + (dy - ty * t) ^ 2
+                if best == nil or d2 < best then best, bs, bl = d2, p.s[j] + t, -dx * ty + dy * tx end
+            end
+        end
+        return bs, bl
+    end
+    -- 判堵快照：點雲、錨＝門柱；wide＝停點寬帶已判完（第一級、帶半寬 12）且已武裝
+    local function snap(st, wide)
+        local sen = st.sensor
+        for _, k in ipairs({ "hardX", "hardY", "hardR", "hardB", "hardS", "hardL", "hardLc", "hardW" }) do
+            sen[k] = sen[k] or {}
+        end
+        for i, q in ipairs(HP) do
+            local s0, l0 = projectSL(st, q[1], q[2])
+            sen.hardX[i], sen.hardY[i], sen.hardR[i], sen.hardB[i] = q[1], q[2], q[3], 0
+            sen.hardS[i], sen.hardL[i], sen.hardLc[i], sen.hardW[i] = s0, l0, l0, q[3]
+        end
+        sen.hardN = #HP
+        sen.ready, sen.wideDone, sen.wideDoneLevel, sen.hardOverflow = true, wide == true, 1, false
+        sen.corridorHalf, sen.completedBandBias = wide and 12 or 7, 0
+        sen.scanS, sen.scanEndS, sen.unloaded = st.lastSNow - 5, st.lastSNow + 120, false
+        st.blocked, st.wideArmed = true, wide == true
+        st.wideArmedS, st.wideArmedX, st.wideArmedY = wide and st.lastSNow or nil, nil, nil
+        st.blockHitX, st.blockHitY = AX, AY
+        st.blockS = projectSL(st, AX, AY)
+        st.pendingRouteWhy, st.pendingDetour, st.reapproach = nil, false, nil
+        dveh._speed = 0
+    end
+    local function cutEv(phase)
+        local out = {}
+        for _, e in ipairs(events) do
+            if e.name == "cut" and (phase == nil or e.a.phase == phase) then out[#out + 1] = e.a end
+        end
+        return out
+    end
+    local function clearEv() for i = #events, 1, -1 do events[i] = nil end end
+    -- 沿入臂（橫向 l、從 u0 往 K）第一個到錨世界距 ≤ d 的點；入臂上到不了＝nil（車開進轉角才停）
+    local ix, iy = KX - SRC[1], KY - SRC[2]
+    local li = math.sqrt(ix * ix + iy * iy)
+    ix, iy = ix / li, iy / li
+    local function along(u, l) return KX + u * ix - l * iy, KY + u * iy + l * ix end
+    local function stopU(u0, l, d)
+        for k = 0, math.floor(-u0 * 10) do
+            local u = u0 + k * 0.1
+            local x, y = along(u, l)
+            if math.sqrt((x - AX) ^ 2 + (y - AY) ^ 2) <= d then return u end
+        end
+        return nil
+    end
+    local lC = (5277.6 - KX) * -iy + (15402.1 - KY) * ix
+    local uS -- (rc-stop) 解出的停點
+    do -- (rc-stop)
+        local s1 = arm(5277.6, 15402.1)
+        snap(s1, false)
+        local d0 = Dr.blockStopDist(s1)
+        clearEv()
+        Dr.cutStopNote(s1, dveh, 0)
+        local d1 = Dr.blockStopDist(s1)
+        local ev = cutEv("stop")[1]
+        local u0 = (5277.6 - KX) * ix + (15402.1 - KY) * iy
+        local uOld = stopU(u0, lC, d0)
+        uS = stopU(u0, lC, d1)
+        local uWant = ev and ev.u
+        checkTrue(uOld == nil and ev ~= nil and d1 > d0 and uS ~= nil and uWant ~= nil and math.abs(uS - uWant) < 0.3,
+            "(rc-stop) 錨在出臂門柱：cut stop、停止線 " .. string.format("%.1f→%.1f", d0, d1) .. "，車停在入臂 u="
+                .. tostring(uS and string.format("%.1f", uS)) .. "（目標 " .. tostring(uWant and string.format("%.1f", uWant))
+                .. "；舊停止線入臂上到不了＝開進轉角）")
+        -- (rc-exit) 在 K 試過改線＝回原停止線；換嘗試也回
+        s1.cornerCutTried = { x = KX, y = KY, lvl = 1, att = s1.episodeAttempts }
+        local dT = Dr.blockStopDist(s1)
+        s1.cornerCutTried = nil
+        s1.episodeAttempts = s1.episodeAttempts + 1
+        local dA = Dr.blockStopDist(s1)
+        s1.episodeAttempts = s1.episodeAttempts - 1
+        s1.cornerCutTried = { x = KX, y = KY, lvl = 1, att = s1.episodeAttempts }
+        s1.blockHitX, s1.blockHitY = 5220.5, 15412.5 -- 試過之後錨換成同一個轉角的另一根柱：不再記停止線
+        Dr.cutStopNote(s1, dveh, 0)
+        local csT = s1.cutStop
+        s1.blockHitX, s1.blockHitY, s1.cornerCutTried = AX, AY, nil
+        checkTrue(dT == d0 and dA == d0 and csT == nil, "(rc-exit) 試過改線、換嘗試：停止線回 " .. d0 .. "（tried=" .. dT
+            .. " att=" .. dA .. " 試過後換錨 cutStop=" .. tostring(csT) .. "）")
+        -- (rc-exit) 錨不在轉角區（入臂外 20m、側偏 15m）、拖車：不拉停止線
+        s1.blockHitX, s1.blockHitY = 5240, 15420
+        Dr.cutStopNote(s1, dveh, 0)
+        local dZ, csZ = Dr.blockStopDist(s1), s1.cutStop
+        s1.blockHitX, s1.blockHitY = AX, AY
+        s1.tow = { trailLen = 0, L2 = 0 }
+        Dr.cutStopNote(s1, dveh, 0)
+        local dW, csW = Dr.blockStopDist(s1), s1.cutStop
+        s1.tow = nil
+        local og = Dr.cutGrid
+        Dr.cutGrid = function() return 0 end -- 格網無解（內側封死）
+        clearEv()
+        Dr.cutStopNote(s1, dveh, 0)
+        Dr.cutGrid = og
+        local skG, csG = cutEv("skip")[1], s1.cutStop
+        checkTrue(csZ == nil and dZ == d0 and csW == nil and dW == d0 and csG == nil and skG ~= nil and skG.kind == "stop"
+                and skG.why == "grid",
+            "(rc-exit) 錨出區、拖車（Drive.cutFreeWhy）、格網無解（cut skip kind=stop why=grid）：不拉停止線（zone=" .. dZ
+                .. " tow=" .. dW .. " grid=" .. tostring(skG and skG.why) .. "）")
+    end
+    do -- (rc-room) 實機停點
+        local s1 = arm(5220.6, 15407.4, 0.75 * math.pi)
+        snap(s1, true)
+        clearEv()
+        Dr.cornerCutPlan(s1, dveh, 0)
+        local n1 = cutEv("none")[1]
+        checkTrue(n1 ~= nil and n1.why == "room" and s1.cornerCut == nil,
+            "(rc-room) 實機停點 (5220.6,15407.4)：cut none room（" .. tostring(n1 and n1.why) .. " " .. tostring(n1 and n1.c1) .. "）")
+    end
+    do -- (rc-cut) 新停點
+        local x, y = along(uS or -15, lC)
+        local s1 = arm(x, y)
+        snap(s1, true)
+        clearEv()
+        Dr.cornerCutPlan(s1, dveh, 0)
+        local cm, n1 = cutEv("commit")[1], cutEv("none")[1]
+        checkTrue(cm ~= nil and s1.cornerCut ~= nil and s1.pendingRouteWhy == "cut",
+            "(rc-cut) 停在轉角前 (" .. string.format("%.1f,%.1f", x, y) .. ")：改線承諾（" .. (cm and string.format(
+                "T=%.1f,%.1f lin=%.1f lout=%.1f tier=%s", cm.tx, cm.ty, cm.lin, cm.lout, tostring(cm.tier))
+                or ("none " .. tostring(n1 and n1.why) .. " " .. tostring(n1 and n1.c1) .. " | " .. tostring(n1 and n1.c2)))
+                .. "）")
+    end
+    do -- (rc-same) 倒車後的位置
+        local s1 = arm(5226.8, 15402.3)
+        snap(s1, true)
+        clearEv()
+        Dr.cornerCutPlan(s1, dveh, 0)
+        local n1, cm = cutEv("none")[1], cutEv("commit")[1]
+        local hits = {}
+        if n1 then
+            for _, c in ipairs({ n1.c1, n1.c2, n1.c3, n1.c4 }) do
+                local h = c and c:match("hit=([%d%.]+,[%d%.]+)")
+                if h then hits[#hits + 1] = h end
+            end
+        end
+        checkTrue(cm ~= nil and s1.pendingRouteWhy == "cut",
+            "(rc-same) 倒車後：撞過 (5221.5,15403.5) 的近似候選不再佔掃掠名額、池裡較遠的候選承諾（" .. (cm and string.format(
+                "T=%.1f,%.1f lin=%.1f lout=%.1f", cm.tx, cm.ty, cm.lin, cm.lout) or ("none why=" .. tostring(n1 and n1.why)
+                .. " nsk=" .. tostring(n1 and n1.nsk) .. " hits=" .. table.concat(hits, "|"))) .. "）")
+        -- (rc-exit) 車已過停點：不拉停止線、記 cut skip kind=stop why=past
+        s1.wideArmed, s1.sensor.wideDone = false, false
+        s1.cornerCutTried, s1.cutSkipSeen, s1.cornerCut, s1.pendingRouteWhy = nil, nil, nil, nil
+        clearEv()
+        Dr.cutStopNote(s1, dveh, 0)
+        local sk = cutEv("skip")[1]
+        checkTrue(s1.cutStop == nil and sk ~= nil and sk.kind == "stop" and sk.why == "past"
+                and Dr.blockStopDist(s1) == T.BLOCK_STOP_DIST,
+            "(rc-exit) 車已過停點：不拉停止線、cut skip kind=stop why=past（" .. tostring(sk and sk.why) .. "）")
+    end
+    Dr.stop(0, nil)
+    MDADDiagnostics.event, MDADDiagnostics.sample = oldEvent, oldSample
+    Dr.keepRightTarget = oldKeep
+    drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
+    SandboxVars, dveh, MinidoracatMiniMapAPI = oldSandbox, oldVeh, oldApi
+    drive.fillWorld(-2, 70, -7, 7)
+end
+drive.scenarioCutRC()
 
 local function scenarioReasonKeys()
 scenario("理由鍵覆蓋：每個分支都跑到，且四語 UI.json 都有對應翻譯")

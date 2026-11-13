@@ -199,6 +199,9 @@ local EK = {
     "b2", "o2", -- 1114c：cut trap（轉角版 chainAhead）出口後下一群的偏到位弧長與縫 lane（kx ky nc np d l b rs 共用既有鍵）
     "arm", -- 1114d：cut skip 的轉角臂長（kind why kx ky kd lvl attempt 共用既有鍵）
     "c1", "c2", "c3", "c4", "hp", "hpn", -- 1114e：cut none 的逐條候選摘要（Drive.cutCandNote）與轉角點雲（Drive.cutHardDump）
+    -- 1114f：cut none 被「同一個硬點已打掉較近那條」略過、沒掃的候選數（Drive.cornerCutTry same）；cut stop（轉角停止線）共用
+    -- kx ky kd arm d l u attempt
+    "nsk",
     -- 1012 起步先原地轉：uturn enter／done 的起步段旗標、enter 當幀 |航向誤差| rad（uturn room 用既有 rear／len／probe）
     "start", "ae",
     -- 1013a route ready：起步沒接越野接線的原因碼（far／near／behind／side／tow／other）、車頭與最近段夾角 rad、車到最近點 m

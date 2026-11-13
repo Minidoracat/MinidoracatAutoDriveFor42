@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1114e"
+Drive.REV = "1114f"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -659,7 +659,9 @@ TUNE.CORNER_STOP_DIST = 8      -- corner 下的煞停線（普通 blocked 10m）
 -- 區長由 rMin×KIN_PROOF_RMIN_K 的切線長＋bodyReach 推（不設常數）；以下只有角度、格網與重套容差。
 TUNE.CORNER_CUT_MIN_RAD = math.pi / 4 -- 路線頂點折角 ≥ 此值（且 < 髮夾上限）才算轉角
 TUNE.CORNER_CUT_STEP_M = 0.5          -- 兩臂平移格網步長
-TUNE.CORNER_CUT_MAX = 4               -- 格網篩出、送世界掃掠的候選上限
+TUNE.CORNER_CUT_MAX = 4               -- 送世界掃掠的候選上限（實際掃了才算；同一硬點已打掉的近似候選不算，見 CORNER_CUT_SAME_M）
+TUNE.CORNER_CUT_POOL = 16             -- 格網依成本篩出的候選池（cornerCutPlan 依序試到掃滿 CORNER_CUT_MAX 或池盡）
+TUNE.CORNER_CUT_SAME_M = 0.25         -- 候選線離已打掉前一條的硬點沒有遠過這個量（m）＝同一原因，略過不掃
 TUNE.CORNER_CUT_PAIRS = 400           -- 格網對數上限（超過截斷，事件 np 記試了幾對）
 TUNE.CORNER_CUT_SNAP_M = 2            -- 重算的路線仍經過原轉角（頂點 2m 內、兩臂同向）才重套改線
 TUNE.CORNER_CUT_DUMP_N = 240         -- cut none 附帶的轉角點雲上限（Drive.cutHardDump；離線重建驗線用）
@@ -7419,10 +7421,17 @@ end
 -- （0929p）：掛車軸沿 tractrix 落後牽引車約 L2 的尺度，離線 L2 9.5／trailLen 14.5 的貨櫃要車心離群 ≥24m
 -- 才掃得過寬帶繞行（E2E semi-long-mp block：停在 10m 線、倒車 7m 仍 steep → 改道 → 急彎折斷）；
 -- 小掛車（trailLen 6.9）10m 就夠，多留的只是提早停。
+-- 轉角停止線（1114f，Drive.cutStopNote 寫 s.cutStop）：判堵錨在轉角區、改線格網有解、這次嘗試還沒在 K 試過改線時，停止線拉到
+-- 「錨到轉角前停點」的距離——錨在出臂上時，直線距離的停止線會讓車一路開進轉角才停，改線沒有進場空間（rc-prod-1114 R1 cut none room）。
 function Drive.blockStopDist(s)
     local d = s.cornerLatch and TUNE.CORNER_STOP_DIST or TUNE.BLOCK_STOP_DIST
     local tw = s.tow
     if type(tw) == "table" and finite(tw.trailLen) and finite(tw.L2) then d = d + tw.trailLen + 0.5 * tw.L2 end
+    local cs = s.cutStop
+    if cs and cs.d > d and cs.att == s.episodeAttempts and cs.x == s.blockHitX and cs.y == s.blockHitY then
+        local tr = s.cornerCutTried
+        if not (tr and tr.att == cs.att and math.abs(tr.x - cs.kx) < 1 and math.abs(tr.y - cs.ky) < 1) then d = cs.d end
+    end
     return d
 end
 
@@ -14265,6 +14274,22 @@ function Drive.cornerCutTry(s, g, lin, lout, win, wout)
             acc, k = acc + L, k + 1
         end
     end
+    -- 候選多樣性（1114f）：前面的候選在硬點 H 掃掠失敗過，這條線離 H 沒有比失敗那條遠 TUNE.CORNER_CUT_SAME_M 以上＝同一個原因，
+    -- 不再掃（回 same、不佔掃掠名額）。rc-prod-1114 R1：格網依成本取的 4 條都是 lin 0～−1、lout 0～−0.5，全撞同一根 (5221.5,15403.5)。
+    local fails = g.fails
+    if fails then
+        for f = 1, #fails do
+            local F = fails[f]
+            local dm = nil
+            for q = 1, ln do
+                local dx, dy = lx[q] - F.x, ly[q] - F.y
+                local d2 = dx * dx + dy * dy
+                if dm == nil or d2 < dm then dm = d2 end
+            end
+            if dm and sqrt(dm) <= F.d + TUNE.CORNER_CUT_SAME_M then return "same" end
+        end
+    end
+    g.swept = true
     local lS0 = s.lastSNow
     local lS1 = lS0 + len
     local physBase = MDADVehicleProfile.sweepBase(vp.halfW, "physical")
@@ -14286,6 +14311,16 @@ function Drive.cornerCutTry(s, g, lin, lout, win, wout)
                 local kq = math.floor((skS - lS0) / step + 0.5) + 1
                 if kq < 1 then kq = 1 elseif kq > ln then kq = ln end
                 g.sx, g.sy = lx[kq], ly[kq]
+            end
+            if pass == 2 and finite(oxS) and finite(oyS) then
+                local dm = nil
+                for q = 1, ln do
+                    local dx, dy = lx[q] - oxS, ly[q] - oyS
+                    local d2 = dx * dx + dy * dy
+                    if dm == nil or d2 < dm then dm = d2 end
+                end
+                if not g.fails then g.fails = {} end
+                g.fails[#g.fails + 1] = { x = oxS, y = oyS, d = sqrt(dm) }
             end
         else
             g.nocov = g.nocov and (g.nocov .. "+" .. tname) or tname
@@ -14391,7 +14426,7 @@ end
 
 -- 轉角 K（剖面路線點列第 iK 點、有號折角 dh）的兩臂單位方向、臂長與改線格網（Corridor.cornerCut，候選寫進 s.cutScratch）。
 -- 回 nc, np, ix, iy, ox, oy, zarm, adh。
-function Drive.cutGrid(s, pts, iK, dh)
+function Drive.cutGrid(s, pts, iK, dh, maxOut)
     local sen = s.sensor
     local kx, ky = pts[2 * iK - 1], pts[2 * iK]
     local ix, iy = kx - pts[2 * iK - 3], ky - pts[2 * iK - 2]
@@ -14403,7 +14438,7 @@ function Drive.cutGrid(s, pts, iK, dh)
     local lim = (sen.corridorHalf or MDADSensor.CORRIDOR_HALF) - s.needHalf
     local nc, np = MDADCorridor.cornerCut(sen.hardX, sen.hardY, sen.hardR, sen.hardN, kx, ky, ix, iy, ox, oy,
         dh > 0 and 1 or -1, s.needHalf, lim, lim, TUNE.CORNER_CUT_STEP_M, zarm, zarm, 2 * zarm + lim,
-        TUNE.CORNER_CUT_PAIRS, TUNE.CORNER_CUT_MAX, Drive.cutScratchOf(s))
+        TUNE.CORNER_CUT_PAIRS, maxOut or TUNE.CORNER_CUT_MAX, Drive.cutScratchOf(s))
     return nc, np, ix, iy, ox, oy, zarm, adh
 end
 
@@ -14478,6 +14513,62 @@ function Drive.cutDefer(s, vehicle, playerNum, mode, a, b, c, d, offL)
     return "clear", a
 end
 
+-- 轉角停止線（1114f；第 5 步「在轉角區前停下改線」接到判堵接近這條路）：replan 判堵出口每輪更新判堵錨後呼叫。錨在轉角區
+-- （Drive.cornerZoneOf，車在入彎臂上）、Drive.cutFreeWhy 成立、這次嘗試還沒在 K 試過改線、K 的改線格網有解，而且車還在停點之前時，
+-- 記 s.cutStop＝{錨, K, 嘗試, d}：d＝錨到「轉角前停點」的直線距離，停點＝入臂上 u＝−(臂長＋一般帶半寬−needHalf)、車的現橫向——
+-- 格網裡最內側的出臂平移（lout＝−(帶半寬−needHalf)）在那裡還有 cornerCutTry 要的進場長（臂長−bodyReach）。Drive.blockStopDist
+-- 取 max(原停止線, d)，車就停在轉角前、在那裡武裝寬帶、寬帶那一輪 cornerCutPlan 試改線。
+-- 原因：錨（最近擋線點）常是出臂上的門柱，直線距離 BLOCK_STOP_DIST 的停止線讓車沿入臂一路開到 K 旁才停，改線一律 room
+-- （rc-prod-1114 R1 清走廊 1114e：5 輪 cut none room，車停在 K 前 2.5 m；唯一成功的 van-b 是 d 15.5 m 時試到的）。
+-- 出口：在 K 試過改線（任一寬帶級）後 blockStopDist 不再用它（車已停住、寬帶武裝點不動，判堵階梯照舊：倒車、改道、交還）；
+-- 錨不在區內、車已過停點、格網無解（記 cut skip kind=stop why=past／grid）、換線（cutover 清）都回原停止線。
+function Drive.cutStopNote(s, vehicle, playerNum)
+    local hx, hy, route, cs = s.blockHitX, s.blockHitY, s.profileRoute, s.cutStop
+    if not finite(hx) or not finite(hy) or type(route) ~= "table" or type(route.pts) ~= "table" or Drive.cutFreeWhy(s) then
+        s.cutStop = nil
+        return
+    end
+    local att = s.episodeAttempts
+    if cs and cs.x == hx and cs.y == hy and cs.att == att then return end
+    local sen, vp = s.sensor, s.vehicleProfile
+    local pts, vx, vy = route.pts, vehicle:getX(), vehicle:getY()
+    local iK, dh, kd, arm, zwhy = Drive.cornerZoneOf(pts, hx, hy, vx, vy, vp.rMin * TUNE.KIN_PROOF_RMIN_K, s.bodyReach,
+        sen.corridorHalf or MDADSensor.CORRIDOR_HALF)
+    if not iK or zwhy then
+        s.cutStop = nil
+        return
+    end
+    local kx, ky = pts[2 * iK - 1], pts[2 * iK]
+    local tr = s.cornerCutTried
+    if tr and tr.att == att and math.abs(tr.x - kx) < 1 and math.abs(tr.y - ky) < 1 then
+        s.cutStop = nil
+        return
+    end
+    local same = cs and cs.kx == kx and cs.ky == ky and cs.att == att
+    if not same and Drive.cutGrid(s, pts, iK, dh) < 1 then
+        s.cutStop = nil
+        Drive.cutSkip(s, playerNum, "stop", "grid", kx, ky, kd, arm)
+        return
+    end
+    local ix, iy = kx - pts[2 * iK - 3], ky - pts[2 * iK - 2]
+    local li = sqrt(ix * ix + iy * iy)
+    ix, iy = ix / li, iy / li
+    local uC, lC = (vx - kx) * ix + (vy - ky) * iy, (vx - kx) * -iy + (vy - ky) * ix
+    local uStop = -(arm + MDADSensor.CORRIDOR_HALF - s.needHalf)
+    if uC > uStop then
+        s.cutStop = nil
+        Drive.cutSkip(s, playerNum, "stop", "past", kx, ky, kd, arm)
+        return
+    end
+    local px, py = kx + uStop * ix - lC * iy, ky + uStop * iy + lC * ix
+    local d = sqrt((hx - px) * (hx - px) + (hy - py) * (hy - py))
+    s.cutStop = { x = hx, y = hy, kx = kx, ky = ky, att = att, d = d }
+    if not same then
+        diagEvent(s, playerNum, "cut", { phase = "stop", kx = kx, ky = ky, kd = kd, arm = arm, d = d, l = lC, u = uStop,
+            attempt = att })
+    end
+end
+
 -- 停點掛點（replan 的判堵出口與 corner-latched 早退各呼叫一次）：只在停點寬帶判堵（blockedAtStop、寬帶完整快照、幾乎停住）、
 -- Drive.cutFreeWhy 成立時跑；每個 (K, 寬帶級, episodeAttempts) 最多試一次（s.cornerCutTried），一次只持有一個改線（車過 B 才放）。
 -- 找到＝寫 s.cornerCut、pendingRouteWhy="cut"（下一幀既有 cutover 換線）；找不到＝記 cut none、判堵階梯照舊。
@@ -14522,7 +14613,7 @@ function Drive.cornerCutPlan(s, vehicle, playerNum)
     end
     s.cornerCutTried = { x = kx, y = ky, lvl = lvl, att = att }
     local t0, sweeps0 = getTimestampMs(), s.sweepCount or 0
-    local nc, np, ix, iy, ox, oy, zarm, adh = Drive.cutGrid(s, pts, iK, dh)
+    local nc, np, ix, iy, ox, oy, zarm, adh = Drive.cutGrid(s, pts, iK, dh, TUNE.CORNER_CUT_POOL)
     local sc = Drive.cutScratchOf(s)
     local uC = (vx - kx) * ix + (vy - ky) * iy
     local lP = (vx - kx) * -iy + (vy - ky) * ix -- 車在入臂的橫向（法向 (−iy, ix)，同格網的 l）
@@ -14533,22 +14624,34 @@ function Drive.cornerCutPlan(s, vehicle, playerNum)
         vx = vx, vy = vy, adh = adh, inW = finite(sw and sw[iK - 1]) and sw[iK - 1] or 0,
         outW = finite(sw and sw[iK]) and sw[iK] or 0 }
     local rank = { room = 1, kin = 2, cover = 3, sweep = 4, wall = 5 }
-    local why, cut, notes = "grid", nil, {}
+    local why, cut, notes, nn, nsk, swept = "grid", nil, {}, 0, 0, 0
     for q = 1, nc do
+        g.swept = false
         local w, c = Drive.cornerCutTry(s, g, sc.lin[q], sc.lout[q], sc.win[q], sc.wout[q])
         if c then
             cut = c
             break
         end
-        notes[q] = Drive.cutCandNote(w, g, sc.lin[q], sc.lout[q])
-        if why == "grid" or rank[w] > rank[why] then why = w end
+        if w == "same" then
+            nsk = nsk + 1
+        else
+            if nn < 4 then
+                nn = nn + 1
+                notes[nn] = Drive.cutCandNote(w, g, sc.lin[q], sc.lout[q])
+            end
+            if why == "grid" or rank[w] > rank[why] then why = w end
+        end
+        if g.swept then
+            swept = swept + 1
+            if swept >= TUNE.CORNER_CUT_MAX then break end
+        end
     end
     local ms = getTimestampMs() - t0
     local sweeps = (s.sweepCount or 0) - sweeps0
     if not cut then
         local hp, hpn = Drive.cutHardDump(s, kx, ky, math.max(-uC, 2 * zarm) + 3)
         diagEvent(s, playerNum, "cut", { phase = "none", why = why, kx = kx, ky = ky, lvl = lvl, np = np, nc = nc,
-            sweeps = sweeps, wms = Drive.replanElapsed(s), ms = ms, l = lP,
+            sweeps = sweeps, wms = Drive.replanElapsed(s), ms = ms, l = lP, nsk = nsk > 0 and nsk or nil,
             c1 = notes[1], c2 = notes[2], c3 = notes[3], c4 = notes[4], hp = hp, hpn = hpn })
         if getDebug() then -- telemetry: cut none 事件
             print(string.format("%spn=%d corner cut none: K=(%.1f,%.1f) why=%s cand=%d pairs=%d", LOG, playerNum,
@@ -15779,6 +15882,7 @@ local function replan(s, vehicle, playerNum)
     -- 與 Corridor.plan 同一個 minS（車尾）：車後的擋線點不是這次 blocked 的原因。車位 lat 傳進去：下一輪斜切保持會帶車
     -- 直走過、不擋車位那條線的點不當錨（1026b S1，見 resolveBlockAnchor）
     resolveBlockAnchor(s, sen, vehicle, true, s.lastSNow - s.vehicleProfile.halfL, nil, nil, s.lastLatSigned)
+    Drive.cutStopNote(s, vehicle, playerNum) -- 錨在轉角區＝停止線拉到轉角前（1114f，Drive.blockStopDist）
     s.planMode = "blocked"
     -- 判堵這一輪有候選只因落在沒掃過的那一側被拒：維持判堵，下一輪換帶心補掃（候選鏈的延後分支見 bandNavRequest）
     Drive.bandNavRequest(s)
@@ -18918,7 +19022,7 @@ local function onPlayerUpdate(player)
             s.pendingDetour = false
             s.routeGen = s.routeGen + 1
             Drive.disarmWide(s) -- 武裝點是舊路線的弧長
-            s.cutDefer, s.cutSkipSeen = nil, nil -- 轉角版 chainAhead 記的出口點、cut skip 去重都是舊路線上的
+            s.cutDefer, s.cutSkipSeen, s.cutStop = nil, nil, nil -- 轉角版 chainAhead 記的出口點、cut skip 去重、轉角停止線都是舊路線上的
             local oldMode, oldProgress, oldUntil = s.mode, s.progressState, s.progressUntil
             local preservingRecovery = not targetChanged
                 and (oldMode == "unstick" or oldMode == "settle"
