@@ -206,6 +206,7 @@ local EK = {
     "comp", "mo", -- 1114k：cut commit 的圓角追線落後前饋（m，右正、往彎外；0＝前饋過頭那條掃不過）與前饋過頭那條線的掃掠淨距
     "fresh", "rcv", -- 1114l：cut commit 這次把判堵階梯歸零了沒（同一個 K 第一次承諾＝true）、承諾當下作廢的恢復請求原因（Drive.cutLadderReset）
     "rw", -- 1114n：cut none why=route 的拼不上理由（Drive.cutArmsAt 結構預檢：bend-in／bend-out／end）
+    "fr", "msx", "ab", -- 1114q：改線規劃分幀——cut plan／none／commit／abort 用了幾幀、單幀最大 ms；cut abort 這個 K／這次嘗試第幾次被打斷
     -- 1012 起步先原地轉：uturn enter／done 的起步段旗標、enter 當幀 |航向誤差| rad（uturn room 用既有 rear／len／probe）
     "start", "ae",
     -- 1013a route ready：起步沒接越野接線的原因碼（far／near／behind／side／tow／other）、車頭與最近段夾角 rad、車到最近點 m

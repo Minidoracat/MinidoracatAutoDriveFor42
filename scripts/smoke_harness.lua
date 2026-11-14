@@ -13188,6 +13188,30 @@ function drive.scenarioCutPendingGate()
     ok = ok and round("cut", 1, T.WAIT_TIMEOUT_MS + 500)
     checkTrue(ok and nav.detourCalls == 0 and n("detour") == 0 and st.recoverWhy == nil,
         "(gate-wait) 改線已承諾：停等預算到期不走交還前改道、不交還（" .. desc() .. "）")
+    -- (gate-job) 1114q：改線規劃分幀進行中（s.cutJob；這裡把推進與有效檢查樁成不動＝工作一直掛著）同三個閘
+    do
+        local Dr = MDAD.Drive
+        local oldStep, oldWhy = Dr.cutJobStep, Dr.cutJobWhy
+        Dr.cutJobStep, Dr.cutJobWhy = function() end, function() return nil end
+        local function jround(att, wait)
+            local r = round(nil, att, wait)
+            st.cornerCut = nil
+            return r
+        end
+        st.cutJob = { kx = 11, ky = 0, att = 0 }
+        ok = ok and jround(0, T.BLOCK_RETRY_MS + 200)
+        checkTrue(ok and st.cutJob ~= nil and st.recoverWhy == nil and st.mode ~= "unstick" and n("unstick", "start") == 0,
+            "(gate-job-retry) 改線規劃分幀中：停等過 BLOCK_RETRY 不請求倒車（" .. desc() .. "）")
+        st.cutJob = { kx = 11, ky = 0, att = 1 }
+        ok = ok and jround(1, T.BLOCK_RETRY_MS + 200)
+        checkTrue(ok and nav.detourCalls == 0 and n("detour") == 0,
+            "(gate-job-auto) 改線規劃分幀中：倒車過一次又堵、過 BLOCK_RETRY 不問自動改道（" .. desc() .. "）")
+        ok = ok and jround(1, T.WAIT_TIMEOUT_MS + 500)
+        checkTrue(ok and nav.detourCalls == 0 and n("detour") == 0 and st.recoverWhy == nil,
+            "(gate-job-wait) 改線規劃分幀中：停等預算到期不走交還前改道、不交還（" .. desc() .. "）")
+        st.cutJob = nil
+        Dr.cutJobStep, Dr.cutJobWhy = oldStep, oldWhy
+    end
     ok = ok and round(nil, 0, T.BLOCK_RETRY_MS + 200)
     checkTrue(ok and (st.recoverWhy == "blocked-retry" or n("unstick", "start") > 0),
         "(gate-exit) 換線後：停等過 BLOCK_RETRY 照常請求倒車（" .. desc() .. "）")
@@ -36528,6 +36552,193 @@ function drive.scenarioCutRC()
                 "(rc-recommit-target) 換目標：清掉這個 K 已歸零過的記號（" .. tostring(s2.cutFreshK) .. "）")
         end
         dveh = oldD
+    end
+    -- (rc-split) 1114q 改線規劃分幀：CUT_FRAME_MS 0（假時鐘：起始幀只做格網、之後每幀一條候選）與一次算完（FRAME_MS 極大）
+    --   在 RC 點雲三個停點（rc-same 承諾＋同 hit 略過、rc-plan 承諾、rc-room none room）結果逐位元相同：none／commit 事件
+    --   全部欄位（除 fr／msx）、s.cornerCut 整張表、cornerCutTried、cutFreshK、cutRunway、階梯狀態；plan／none／commit 各記一次。
+    --   (rc-split-abort) 每個中止理由各自一個 cut abort why、清掉 tried、不記 plan／none／commit；snap＝當場照新快照重來。
+    --   (rc-split-cap)   同 K／同嘗試連續 CUT_ABORT_MAX 次被打斷，下一次一次算完（fr 1）。
+    --   (rc-split-tick)  stepFollow 每幀接著做：driveTick 推進到結束。
+    --   (rc-split-cost)  格網（Drive.cutGrid，cutStopNote／cutDefer 同一套）的 os.clock 成本（印出，判準外的量測）。
+    do
+        local wasF = T.CUT_FRAME_MS
+        local function fmt(v, depth)
+            if type(v) == "number" then return string.format("%.17g", v) end
+            if type(v) ~= "table" then return tostring(v) end
+            if (depth or 0) > 3 then return "{...}" end
+            local ks = {}
+            for k in pairs(v) do ks[#ks + 1] = tostring(k) end
+            table.sort(ks)
+            local o = {}
+            for _, k in ipairs(ks) do
+                local val = v[k]
+                if val == nil then val = v[tonumber(k)] end
+                if k ~= "fr" and k ~= "msx" and type(val) ~= "function" then o[#o + 1] = k .. "=" .. fmt(val, (depth or 0) + 1) end
+            end
+            return "{" .. table.concat(o, ",") .. "}"
+        end
+        local function run(x, y, hd, fms)
+            T.CUT_FRAME_MS = fms
+            local s1 = arm(x, y, hd)
+            snap(s1, true)
+            clearEv()
+            local oldFin, js = Dr.cutJobFinish, nil
+            Dr.cutJobFinish = function(s2, pn) -- 結束當下工作的候選收集狀態（同 hit 略過、掃了幾條、驗到第幾條）
+                local j = s2.cutJob
+                js = { nsk = j.nsk, swept = j.swept, q = j.q, why = j.why, notes = j.notes, nn = j.nn, sweeps = j.sweeps, stop = j.stop }
+                return oldFin(s2, pn)
+            end
+            Dr.cornerCutPlan(s1, dveh, 0)
+            local k = 0
+            while s1.cutJob and k < 200 do
+                -- 分幀之間格網暫存會被 cutStopNote／cutDefer 的格網蓋掉：工作要用自己抄的候選
+                local sc = Dr.cutScratchOf(s1)
+                for q = 1, #sc.lin do sc.lin[q], sc.lout[q], sc.win[q], sc.wout[q] = 7.5, -7.5, 0, 0 end
+                Dr.cutJobStep(s1, dveh, 0)
+                k = k + 1
+            end
+            Dr.cutJobFinish = oldFin
+            local fin = cutEv("commit")[1] or cutEv("none")[1]
+            local st = fmt({ fin = fin, cut = s1.cornerCut, tried = s1.cornerCutTried, fresh = s1.cutFreshK, rw = s1.cutRunway,
+                wait = s1.waitAccumMs, att = s1.episodeAttempts, pend = s1.pendingRouteWhy, ex = s1.unstickExtraM, job = js })
+            local core = fmt({ fin = fin, cut = s1.cornerCut, tried = s1.cornerCutTried, fresh = s1.cutFreshK, rw = s1.cutRunway,
+                wait = s1.waitAccumMs, att = s1.episodeAttempts, pend = s1.pendingRouteWhy, ex = s1.unstickExtraM })
+            return st, fin, #cutEv("plan"), #cutEv("commit") + #cutEv("none"), #cutEv("abort"), cutEv("plan")[1], core
+        end
+        local oneShot = {}
+        for _, P in ipairs({ { "same", 5226.8, 15402.3, nil }, { "plan", 5231.0, 15402.4, nil },
+                { "room", 5220.6, 15407.4, 0.75 * math.pi } }) do
+            local a, fa, pa, ea, xa, _, ac = run(P[2], P[3], P[4], 1e9)
+            local b, fb, pb, eb, xb, plb = run(P[2], P[3], P[4], 0)
+            oneShot[P[1]], oneShot[P[1] .. "Core"] = a, ac
+            print(string.format("[rc-split] %s：分幀 fr=%s（一次算完 fr=%s）%s", P[1], tostring(fb and fb.fr), tostring(fa and fa.fr),
+                tostring(fa and fa.phase .. " " .. tostring(fa.why or ""))))
+            checkTrue(fa ~= nil and fb ~= nil and a == b,
+                "(rc-split) " .. P[1] .. "：分幀與一次算完逐位元相同（\n  一次 " .. a .. "\n  分幀 " .. b .. "）")
+            checkTrue(fa and fa.fr == 1 and fb and fb.fr and fb.fr > 2 and plb and plb.fr == fb.fr,
+                "(rc-split) " .. P[1] .. "：一次算完 fr 1、分幀 fr>2 且 plan 同記 fr（" .. tostring(fa and fa.fr) .. "／"
+                .. tostring(fb and fb.fr) .. "）")
+            checkTrue(pa == 1 and pb == 1 and ea == 1 and eb == 1 and xa == 0 and xb == 0,
+                "(rc-split) " .. P[1] .. "：plan／結果各記一次、不記 abort（" .. pa .. "/" .. ea .. "/" .. xa .. "；" .. pb .. "/"
+                .. eb .. "/" .. xb .. "）")
+            checkTrue(fb and fb.msx ~= nil and fb.ms ~= nil, "(rc-split) " .. P[1] .. "：結果帶 msx 與 ms（合計）")
+        end
+        local cov = tostring(oneShot.same:find("phase=commit", 1, true) ~= nil) .. tostring((tonumber(oneShot.same:match("nsk=(%d+),q=")) or 0) > 0)
+            .. tostring(oneShot.plan:find("phase=commit", 1, true) ~= nil) .. tostring(oneShot.room:find("why=room", 1, true) ~= nil)
+        checkEq(cov, "truetruetruetrue", "(rc-split) 三個停點涵蓋承諾＋同 hit 略過（job nsk>0）、承諾、none room")
+        -- 中止
+        local function pend()
+            T.CUT_FRAME_MS = 0
+            local s1 = arm(5231.0, 15402.4)
+            snap(s1, true)
+            clearEv()
+            Dr.cornerCutPlan(s1, dveh, 0)
+            Dr.cutJobStep(s1, dveh, 0)
+            return s1
+        end
+        local cases = {
+            { "move", function() dveh._x = dveh._x + 0.4 end },
+            { "move", function() setHeading(dveh, math.pi + 0.1) end },
+            { "target", function(s1) s1.targetGen = (s1.targetGen or 0) + 1 end },
+            { "route", function(s1) s1.routeGen = (s1.routeGen or 0) + 1 end },
+            { "attempt", function(s1) s1.episodeAttempts = s1.episodeAttempts + 1 end },
+            { "yield", function(s1) s1.mode = "yield" end },
+            { "clear", function(s1) s1.blocked = false end },
+            { "free", function(s1) s1.tow = {} end },
+        }
+        for _, C in ipairs(cases) do
+            local s1 = pend()
+            local job = s1.cutJob
+            local ok0 = job ~= nil and job.fr == 2 and s1.cornerCutTried ~= nil
+            Dr.cornerCutPlan(s1, dveh, 0) -- 還有效：原工作照留、不重來
+            ok0 = ok0 and s1.cutJob == job and #cutEv("abort") == 0
+            C[2](s1)
+            Dr.cutJobStep(s1, dveh, 0)
+            local ab = cutEv("abort")
+            checkTrue(ok0 and #ab == 1 and ab[1].why == C[1] and ab[1].ab == 1 and ab[1].fr == 2 and s1.cutJob == nil
+                and s1.cornerCutTried == nil and #cutEv("plan") == 0 and #cutEv("commit") + #cutEv("none") == 0,
+                "(rc-split-abort) " .. C[1] .. "：cut abort why=" .. C[1] .. "、清 tried、不記結果（abort="
+                .. tostring(ab[1] and ab[1].why) .. " n=" .. #ab .. " job=" .. tostring(s1.cutJob) .. "）")
+            s1.tow = nil
+        end
+        do -- snap：當場照新快照重來，結果同一次算完；連續 CUT_ABORT_MAX 次＝下一次一次算完
+            local function swap(s1)
+                local sen, c = s1.sensor, {}
+                for i = 1, sen.hardN do c[i] = sen.hardX[i] end
+                sen.hardX = c
+            end
+            local s1 = pend()
+            swap(s1)
+            Dr.cutJobStep(s1, dveh, 0)
+            local ab = cutEv("abort")
+            checkTrue(#ab == 1 and ab[1].why == "snap" and s1.cutJob ~= nil and s1.cutJob.hx == s1.sensor.hardX
+                and s1.cutJob.fr == 1 and s1.cornerCutTried ~= nil,
+                "(rc-split-abort) snap：cut abort why=snap、當場照新快照起新工作（" .. tostring(ab[1] and ab[1].why) .. "）")
+            local k = 0
+            while s1.cutJob and k < 200 do
+                Dr.cutJobStep(s1, dveh, 0)
+                k = k + 1
+            end
+            local fin = cutEv("commit")[1]
+            local st = fmt({ fin = fin, cut = s1.cornerCut, tried = s1.cornerCutTried, fresh = s1.cutFreshK, rw = s1.cutRunway,
+                wait = s1.waitAccumMs, att = s1.episodeAttempts, pend = s1.pendingRouteWhy, ex = s1.unstickExtraM })
+            checkTrue(st == oneShot.planCore and s1.cutAbort == nil,
+                "(rc-split-abort) snap 重來的結果同一次算完、結束清掉打斷計數（\n  " .. st .. "\n  " .. oneShot.planCore .. "）")
+            s1 = pend()
+            local seq = {}
+            for _ = 1, T.CUT_ABORT_MAX do
+                swap(s1)
+                Dr.cutJobStep(s1, dveh, 0)
+                local a2 = cutEv("abort")
+                seq[#seq + 1] = tostring(a2[#a2] and a2[#a2].ab)
+            end
+            fin = cutEv("commit")[1]
+            checkTrue(table.concat(seq, ",") == "1,2,3" and s1.cutJob == nil and fin and fin.fr == 1 and #cutEv("plan") == 1,
+                "(rc-split-cap) 連續 " .. T.CUT_ABORT_MAX .. " 次 snap 打斷後一次算完（ab=" .. table.concat(seq, ",") .. " job="
+                .. tostring(s1.cutJob) .. " fr=" .. tostring(fin and fin.fr) .. "）")
+        end
+        do -- (rc-split-tick) stepFollow 接著做
+            local s1 = pend()
+            local fr0, k = s1.cutJob and s1.cutJob.fr or -1, 0
+            local oldStep, calls = Dr.cutJobStep, 0
+            Dr.cutJobStep = function(...) calls = calls + 1 return oldStep(...) end
+            driveTick(dp, dveh)
+            local fr1 = s1.cutJob and s1.cutJob.fr or (cutEv("commit")[1] or cutEv("none")[1] or {}).fr
+            Dr.cutJobStep = oldStep
+            checkTrue(fr0 == 2 and calls == 1 and fr1 == 3,
+                "(rc-split-tick) 一個跟線幀接著做一幀（fr " .. tostring(fr0) .. "→" .. tostring(fr1) .. "、呼叫 " .. calls
+                .. " 次、abort " .. #cutEv("abort") .. "）")
+        end
+        do -- (rc-split-yield) 玩家一碰方向盤（進讓位那幀，不跑 stepFollow）：分幀工作當場作廢、記 cut abort why=yield
+            local s1 = pend()
+            local oldHud = MDAD.HUD
+            MDAD.HUD = setmetatable({ manualResumeMs = function() return 2000 end }, { __index = oldHud })
+            dveh._steering = 0.02
+            driveTick(dp, dveh)
+            dveh._steering = 0
+            MDAD.HUD = oldHud
+            local ab = cutEv("abort")
+            checkTrue(s1.mode == "yield" and s1.cutJob == nil and #ab == 1 and ab[1].why == "yield" and s1.cornerCutTried == nil,
+                "(rc-split-yield) 讓位當幀丟掉分幀工作（mode " .. tostring(s1.mode) .. " job " .. tostring(s1.cutJob) .. " abort "
+                .. tostring(ab[1] and ab[1].why) .. "）")
+        end
+        do -- (rc-split-cost)
+            local s1 = arm(5231.0, 15402.4)
+            snap(s1, true)
+            local pts = s1.profileRoute.pts
+            local iK, dh = Dr.cornerZoneOf(pts, AX, AY, 5231.0, 15402.4, s1.vehicleProfile.rMin * T.KIN_PROOF_RMIN_K, s1.bodyReach, 12)
+            checkTrue(iK ~= nil, "(rc-split-cost) 前置：找得到轉角")
+            iK, dh = iK or 2, dh or math.pi / 2
+            for _, mo in ipairs({ 8, T.CORNER_CUT_POOL }) do
+                local c0 = os.clock()
+                local nc, np = 0, 0
+                for _ = 1, 20 do nc, np = Dr.cutGrid(s1, pts, iK, dh, mo) end
+                print(string.format("[rc-split-cost] cutGrid maxOut=%d np=%d nc=%d：%.2f ms／次（宿主 Lua，os.clock）", mo, np, nc,
+                    (os.clock() - c0) * 1000 / 20))
+                checkTrue(np > 0 and nc > 0, "(rc-split-cost) 格網有對（np " .. np .. "）")
+            end
+        end
+        T.CUT_FRAME_MS = wasF
     end
     Dr.stop(0, nil)
     MDADDiagnostics.event, MDADDiagnostics.sample = oldEvent, oldSample
