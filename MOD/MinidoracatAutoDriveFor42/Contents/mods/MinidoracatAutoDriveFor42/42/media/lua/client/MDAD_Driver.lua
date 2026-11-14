@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1114n"
+Drive.REV = "1114o"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -13090,7 +13090,7 @@ local function sweepStay(s, a, b, c, offL, baseL, tag, needBase, truncate)
     if dStay > prof.length then dStay = prof.length end
     -- 停留線（沒有出口、鏈住 offL）蓋過剖面停點＝車帶著 offL 到終點：偏移在到站圈外就先不收（1114h，Drive.endArriveTol）。
     -- 記 s.endFitHit：候選鏈這條全掃不過時 sweepWithFallbacks 關掉到站守門（s.endFitOff）照舊再掃（裁定 B）；
-    -- 承諾中的出口轉停留（Drive.exitStay）不收＝照原承諾線（有出口）走。
+    -- 承諾中的出口轉停留（Drive.exitStay）不看這道守門＝同 main（1114o 使用者裁定）。
     if not s.endFitOff then
         local stopS, laneEnd, tol = Drive.endArriveTol(prof, baseL)
         if c + tail >= stopS and math.abs(offL - laneEnd) > tol then
@@ -13271,7 +13271,12 @@ function Drive.exitStay(s, sen, playerNum, floorD, nextB, nextL)
     local endS = s.tmpOvEndS -- sweepStay 會改寫；掃不過要連同工作表換回
     s.tmpOvX, s.tmpOv3X = s.tmpOv3X, s.tmpOvX
     s.tmpOvY, s.tmpOv3Y = s.tmpOv3Y, s.tmpOvY
+    -- 到站守門（sweepStay 的 Drive.endArriveTol）在這裡不看（1114o，使用者 2026-11-14 裁定：轉角以外的行為不變、挪不進終點就
+    -- 照舊＝main）：停留線蓋過停點、偏移在到站圈外也照 main 改停留。呼叫完當場還原，成功與失敗路徑都經過這一行。
+    local fitOff = s.endFitOff
+    s.endFitOff = true
     local ok, margin, n, s0, dStay = sweepStay(s, fs.offA, b, c, offL, baseL, "exit-stay", s.dodgeNeed)
+    s.endFitOff = fitOff
     local coverEnd = dStay -- 停留沒有回線段：覆蓋只到線尾（同 commit 的 dodgeStay 分支）
     if not ok or not MDADFollower.setOffset(fs, fs.offA, b, c, dStay, offL,
             s.tmpOvX, s.tmpOvY, n, s0, s.tmpOvEndS, coverEnd) then

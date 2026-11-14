@@ -28301,7 +28301,8 @@ function drive.scenarioExitStay()
     local iS, stS = arm(4)
     local fsS, evS = stS.fstate, extendEv()
     checkTrue(iS.ok and stS.dodging == true and stS.dodgeStay == true and stS.laneChained == true
-            and stS.stayLanePending == iS.offL and fsS.offL == iS.offL and fsS.offC == iS.c and fsS.offD < iS.d,
+            and stS.stayLanePending == iS.offL and fsS.offL == iS.offL and fsS.offC == iS.c and fsS.offD < iS.d
+            and stS.endFitOff == false,
         string.format("(exit-stay) B 在線尾後 4m、回線後塞不進側移：承諾改成 offL %s 的停留、線不再回線（d %.1f → %.1f、停留 %s）",
             tostring(iS.offL), iS.d or -1, fsS.offD or -1, tostring(stS.dodgeStay)))
     checkTrue(evS ~= nil and evS.why == "stay" and type(evS.blocker) == "number" and evS.blocker > iS.d and evS.offL == iS.offL
@@ -28341,6 +28342,75 @@ function drive.scenarioExitStay()
         string.format("(exit-stay-tow-far) 拖車、B 在線尾後 30m（車速下的側移塞得進）：照舊回線（停留 %s）", tostring(stT.dodgeStay)))
     stT.tow = nil
     MDAD.Drive.stop(0, nil)
+    -- (exit-stay-end) 1114o（使用者 2026-11-14 裁定：轉角以外的行為不變、挪不進終點就照舊＝main）：出口改停留不看到站守門。
+    --   路線 44 m 就結束（停點 40）、A 寬 2.4（offL 超過到站容許 3 m）：承諾後回線 lane 有下一群、收到地板仍塞不下，停留線
+    --   （c 到 c＋尾段）蓋過停點、偏移在到站圈外——1114h～1114n 的 sweepStay 到站守門拒收（stay-fail、照原出口收短），main 照樣改停留。
+    --   直接問 Drive.exitStay（承諾是真的 replan 承諾；下一群用 nextB／nextL 傳入＝exitNextRoom 的回傳）。s.endFitOff 呼叫完要還原：
+    --   成功與 sweepStay 失敗（停留 lane 上擺一格硬物）兩條路都驗。違規證明：exitStay 不關到站守門＝紅；不還原 endFitOff＝紅。
+    do
+        events = {}
+        MDAD.Drive.stop(0, nil)
+        drive.fillWorld(-10, 200, -8, 8)
+        drive.putVehicleGeom(34, 0, 0, 2.4, 4.4, true)
+        dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = 0, 0, 30, 0, false
+        dveh._engine, dveh._driver = true, dp
+        dveh._part._item._uses = 0.8
+        dp._vehicle, dp._dead, dp._local = dveh, false, true
+        setHeading(dveh, 0)
+        drive.nav.tx, drive.nav.ty, drive.nav.state = 44, 0, "ok"
+        drive.nav.route = newRoute(12, 0, 0, 4, 0)
+        local okA = MDAD.Drive.start(dp)
+        for _ = 1, 2 do driveTick(dp, dveh) end
+        driveReset(dveh)
+        local st = MDAD.Drive.debugSession(0)
+        if st then st.diag = true end
+        for _ = 1, 3 do drive.frameMs(10); drive.scanRound(true) end
+        local why = "start"
+        local okE, okRestore, okFail = false, false, false
+        if okA and st and st.dodging and not st.dodgeStay then
+            local fs, vp = st.fstate, st.vehicleProfile
+            local c, offL = fs.offC, fs.offL
+            local stopS, laneEnd, tol = MDAD.Drive.endArriveTol(st.profile, st.dodgeBaseL)
+            local covers = c + vp.halfL + 0.5 >= stopS and math.abs(offL - laneEnd) > tol
+            local nextL = offL > 0 and -3 or 3
+            st.endFitOff = false
+            local r = MDAD.Drive.exitStay(st, st.sensor, 0, c + 1, c + 3, nextL)
+            local ev = extendEv()
+            okE = covers and r == true and st.dodgeStay == true and ev ~= nil and ev.why == "stay"
+            okRestore = st.endFitOff == false
+            why = string.format("c %.1f offL %.2f 停點 %.1f 容許 %.2f 蓋過＋超出 %s、exitStay %s 事件 %s endFitOff %s", c, offL, stopS,
+                tol, tostring(covers), tostring(r), tostring(ev and ev.why), tostring(st.endFitOff))
+        end
+        checkTrue(okE and okRestore, "(exit-stay-end) 接近終點、停留線蓋過停點且偏移超出到站容許：照 main 改停留（" .. why .. "）")
+        MDAD.Drive.stop(0, nil)
+        -- sweepStay 失敗路徑：同一承諾，停留 lane 上擺硬物＝stay-fail，endFitOff 照樣還原
+        events = {}
+        drive.nav.route = newRoute(12, 0, 0, 4, 0)
+        dveh._x, dveh._y, dveh._speed, dveh._stopped = 0, 0, 30, false
+        setHeading(dveh, 0)
+        okA = MDAD.Drive.start(dp)
+        for _ = 1, 2 do driveTick(dp, dveh) end
+        driveReset(dveh)
+        st = MDAD.Drive.debugSession(0)
+        for _ = 1, 3 do drive.frameMs(10); drive.scanRound(true) end
+        if okA and st and st.dodging and not st.dodgeStay then
+            local fs = st.fstate
+            local c, offL = fs.offC, fs.offL
+            drive.putSolid(math.floor(c + 0.5), math.floor(offL + 0.5), "harness_exitstay_end")
+            for _ = 1, 3 do drive.frameMs(10); drive.scanRound(true) end
+            if st.dodging and not st.dodgeStay then
+                st.endFitOff = false
+                local r = MDAD.Drive.exitStay(st, st.sensor, 0, c + 1, c + 3, offL > 0 and -3 or 3)
+                okFail = r == false and st.endFitOff == false
+                why = "exitStay " .. tostring(r) .. " endFitOff " .. tostring(st.endFitOff)
+            else
+                why = "前置：放硬物後承諾沒了（dodging " .. tostring(st.dodging) .. "）"
+            end
+            drive.clearCell(math.floor(c + 0.5), math.floor(offL + 0.5))
+        end
+        checkTrue(okFail, "(exit-stay-end) 停留線掃不過：照舊不改停留、endFitOff 還原（" .. why .. "）")
+        MDAD.Drive.stop(0, nil)
+    end
     MDADDiagnostics.event, MDADDiagnostics.sample = oldEvent, oldSample
     drive.frameMs(wasE)
     MDAD.HUD.perceptionDistance = oldPer
