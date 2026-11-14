@@ -989,7 +989,7 @@ scenario("轉角改線格網 cornerCut（1017j）：只取內側、成本排序�
 do
     -- 合成 L 型：K=(0,0)，入彎臂往東 (1,0)、左轉出彎臂往 −y（PZ 世界 y 向南＝往北）。內側＝l<0（入臂的 −y、出臂的 −x）。
     local function newSc()
-        return { u1 = {}, v1 = {}, u2 = {}, v2 = {}, lin = {}, lout = {}, cost = {}, win = {}, wout = {} }
+        return { u1 = {}, v1 = {}, u2 = {}, v2 = {}, rr = {}, lin = {}, lout = {}, cost = {}, win = {}, wout = {} }
     end
     local NEED, LIM, STEP, ARM, ZONE = 1.4, 12, 0.5, 9, 40
     local function run(px, py, pr, inner, maxPairs, sc)
@@ -1045,6 +1045,81 @@ do
     local kb1 = collectgarbage("count")
     collectgarbage("restart")
     checkTrue(kb1 - kb0 < 8, "(zero-alloc) 200 次呼叫記憶體成長 < 8KB（實得 " .. string.format("%.1f", kb1 - kb0) .. "）")
+    -- (zone) 1114m：每一對只走 K 周圍 zoneR 內壓緊的點。區外加 2000 個點、區內同一份點雲：結果逐位不變（舊制每一對走全部 hn 點）；
+    --   隨機點雲與逐點走全部點的參考實作逐位相同。缺 sc.rr＝0 條（fail-closed）。
+    --   違規證明：壓緊時漏寫 rr（沿用全域索引 p）＝(zone-ref) 紅。
+    local function refCut(hx, hy, hr, hn, kx, ky, ix, iy, ox, oy, inner, needHalf, limIn, limOut, step, armIn, armOut,
+            zoneR, maxPairs, maxOut)
+        local u1, v1, u2, v2, out = {}, {}, {}, {}, {}
+        for p = 1, hn do
+            local dx, dy = hx[p] - kx, hy[p] - ky
+            if dx * dx + dy * dy <= zoneR * zoneR then
+                u1[p], v1[p], u2[p], v2[p] = dx * ix + dy * iy, -dx * iy + dy * ix, dx * ox + dy * oy, -dx * oy + dy * ox
+            else
+                u1[p], v1[p], u2[p], v2[p] = 1e9, 0, 1e9, 0
+            end
+        end
+        local sn, cs = ix * oy - iy * ox, ix * ox + iy * oy
+        local iMax, jMax, tried = math.floor(limIn / step + 1e-9), math.floor(limOut / step + 1e-9), 0
+        for k = 1, iMax + jMax do
+            for i = math.max(0, k - jMax), math.min(iMax, k) do
+                if tried >= maxPairs then return out, tried end
+                tried = tried + 1
+                local lin, lout = inner * i * step, inner * (k - i) * step
+                local ut = (lout - lin * cs) / -sn
+                local upt = lin * sn + ut * cs
+                local win, wout, ok = 1e9, 1e9, true
+                for p = 1, hn do
+                    local r = hr[p]
+                    if u1[p] >= ut - armIn and u1[p] <= ut + needHalf then
+                        local d = v1[p] - lin
+                        if math.abs(d) < r + needHalf then ok = false; break end
+                        if d * inner > 0 and math.abs(d) - r < win then win = math.abs(d) - r end
+                    end
+                    if u2[p] >= upt - needHalf and u2[p] <= upt + armOut then
+                        local d = v2[p] - lout
+                        if math.abs(d) < r + needHalf then ok = false; break end
+                        if d * inner > 0 and math.abs(d) - r < wout then wout = math.abs(d) - r end
+                    end
+                end
+                if ok then
+                    out[#out + 1] = { lin = lin, lout = lout, win = win, wout = wout,
+                        cost = math.abs(lin) + math.abs(lout) + math.sqrt(ut * ut + lin * lin), q = #out }
+                end
+            end
+        end
+        return out, tried
+    end
+    local seed = 12345
+    local function rnd() seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648 end
+    local bad = 0
+    for trial = 1, 30 do
+        local qx, qy, qr = {}, {}, {}
+        for p = 1, 60 + trial * 10 do
+            qx[p], qy[p], qr[p] = (rnd() - 0.7) * 80, (rnd() - 0.6) * 80, 0.15 + rnd() * 0.6
+        end
+        local f1, t1, _, s1 = run(qx, qy, qr, -1, 400)
+        local ref, t2 = refCut(qx, qy, qr, #qx, 0, 0, 1, 0, 0, -1, -1, NEED, LIM, LIM, STEP, ARM, ARM, ZONE, 400, 4)
+        table.sort(ref, function(a, b) if a.cost ~= b.cost then return a.cost < b.cost end return a.q < b.q end)
+        local same = t1 == t2 and f1 == math.min(4, #ref)
+        for q = 1, f1 do
+            local e = ref[q]
+            if not e or e.lin ~= s1.lin[q] or e.lout ~= s1.lout[q] or e.win ~= s1.win[q] or e.wout ~= s1.wout[q]
+                    or e.cost ~= s1.cost[q] then same = false end
+        end
+        if not same then bad = bad + 1 end
+    end
+    checkEq(bad, 0, "(zone-ref) 30 份隨機點雲（含區外點）與逐點走全部點的參考實作逐位相同")
+    local fx, fy, fr = { px[1], px[2] }, { py[1], py[2] }, { pr[1], pr[2] }
+    for p = 1, 2000 do fx[#fx + 1], fy[#fy + 1], fr[#fr + 1] = 200 + p, -300, 0.15 end
+    local fA, tA, _, sA = run(px, py, pr, -1, 1000)
+    local fB, tB, _, sB = run(fx, fy, fr, -1, 1000)
+    checkTrue(fA == fB and tA == tB and sA.lin[1] == sB.lin[1] and sA.win[1] == sB.win[1] and sA.wout[1] == sB.wout[1],
+        "(zone) 區外多 2000 點：結果不變（found " .. fA .. "/" .. fB .. "）")
+    local noRr = newSc()
+    noRr.rr = nil
+    checkEq(C.cornerCut(px, py, pr, 2, 0, 0, 1, 0, 0, -1, -1, NEED, LIM, LIM, STEP, ARM, ARM, ZONE, 400, 4, noRr), 0,
+        "(zone) 缺 sc.rr＝0 條（fail-closed）")
 end
 
 -- =====================================================================

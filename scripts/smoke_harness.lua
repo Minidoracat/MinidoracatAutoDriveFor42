@@ -34772,6 +34772,48 @@ function drive.scenarioCornerCut()
         checkTrue(mono and prev > s1.vehicleProfile.rMin * T.KIN_PROOF_RMIN_K + 1,
             "(cut-rmono) T 的圓角半徑隨淨空 w 單調不減、寬了就大於 rMin（R=" .. table.concat(rs, ",") .. "）")
     end
+    -- (cut-comp-tail) 1114m（Claude 審查 residual）：前饋（comp）弧後漸出 CUT_COMP_TAIL_M 要整段在掃掠線內——大圓角（R 約 6.5 m 以上，
+    --   臂長＋bodyReach − R ＜ 6）時弧尾＋漸出超過出臂窗尾＋bodyReach（舊制掃掠只到那裡，漸出那段偏移沒驗）。空點雲、路寬加到 30、
+    --   車退到 x 20（進場夠長，圓角才放得大），淨空由小到大找第一個弧尾＋漸出超過窗尾的候選。違規證明：拿掉掃掠線延長＝紅。
+    do
+        local s1 = arm(20)
+        local wide = lroute()
+        for i = 1, #wide.segWidth do wide.segWidth[i] = 30 end
+        drive.nav.route = wide
+        nowMs = nowMs + 400
+        driveTick(dp, dveh)
+        tickUntilReady(s1)
+        snap(s1, {})
+        local g = gOf(s1)
+        g.inW, g.outW = 30, 30
+        local c1, log = nil, {}
+        for _, w in ipairs({ 9, 12, 15, 20, 25 }) do
+            local _, cw = Dr.cornerCutTry(s1, g, -2.5, -2.5, w, w)
+            if cw then
+                log[#log + 1] = string.format("w%g r%.2f 窗尾%.2f 弧尾%.2f", w, cw.r or -1, cw.swWin, cw.arcE)
+                if cw.arcE > -1e8 and cw.swWin < cw.arcE + T.CUT_COMP_TAIL_M then
+                    c1 = cw
+                    break
+                end
+            end
+        end
+        local okT = c1 ~= nil and c1.swEnd >= math.min(c1.arcE + T.CUT_COMP_TAIL_M, c1.swCum) - 1e-9 and c1.swEnd > c1.swWin
+        checkTrue(okT, "(cut-comp-tail) 大圓角：掃掠線蓋到弧尾＋漸出（" .. table.concat(log, "；")
+            .. (c1 and string.format("；掃到 %.2f／全長 %.2f", c1.swEnd, c1.swCum) or "；沒有弧尾超過窗尾的候選") .. "）")
+    end
+    -- (cut-wall) 出臂窗尾之後的整寬牆（Drive.cutOutWall，1114m 從 cornerCutTry 拆出）＝不收（why=wall）；同一條線拿掉牆就收。
+    --   牆在出臂 y −30（掃掠線尾之後，掃掠與覆蓋都碰不到）橫跨整個帶寬。違規證明：拿掉 wall 檢查＝紅（1017j 起就沒有測試鎖它）。
+    do
+        local s1 = arm()
+        local wallPts = {}
+        for q = 0, 56 do wallPts[#wallPts + 1] = { 46 + q * 0.5, -30 } end
+        snap(s1, wallPts)
+        local whyW = Dr.cornerCutTry(s1, gOf(s1), -2.5, -2.5, 9, 9)
+        snap(s1, {})
+        local whyO, cO = Dr.cornerCutTry(s1, gOf(s1), -2.5, -2.5, 9, 9)
+        checkTrue(whyW == "wall" and whyO == nil and cO ~= nil, "(cut-wall) 出臂整寬牆＝wall、沒牆＝收（有牆 "
+            .. tostring(whyW) .. "、沒牆 " .. tostring(whyO) .. "）")
+    end
     -- (cut-owner)／(cut-move)／(cut-skip)：都不試；錨在轉角附近，每種早退各記一筆 cut skip kind=plan、why＝自己的名字（1114d）
     local function noCut(label, why, setup)
         local s1 = arm()
@@ -34950,6 +34992,186 @@ function drive.scenarioCornerCut()
                 .. "）")
         dveh._y = 0
     end
+    -- (cut-lp-grid) 1114m（Claude 審查）：車停在 4 m 格點前 0.5 m、內側 2.5 m（車後 0.05–2 m 內就有路線頂點：路網點密、偏航重算後
+    --   接回路網那一點）。舊制 P_in（車的實際橫向）接回車後 0.5 m 的中心線頂點＝大折角、P_in 的圓角吃不到 rMin，每條候選 kin；
+    --   新制往回找到 lo→P_in 斜接角 ≤ FILLET_SMALL_RAD 的頂點。違規證明：cornerCutRoute 恢復「第一個 u < uP−0.05 的頂點」＝紅。
+    do
+        local s1 = arm(40.5)
+        dveh._y = -2.5
+        local pts2 = { { 43, -0.9 } }
+        for _, q in ipairs(POSTS) do pts2[#pts2 + 1] = q end
+        snap(s1, pts2)
+        clearEv()
+        Dr.cornerCutPlan(s1, dveh, 0)
+        local c1 = s1.cornerCut
+        local ang, loX = nil, nil
+        if c1 then
+            local full = Dr.cornerCutRoute(s1.profileRoute, c1)
+            local i0 = full and full.cutI0
+            if i0 and i0 > 1 then
+                loX = full.pts[2 * i0 - 3]
+                ang = math.atan(math.abs(c1.cy[1] - full.pts[2 * i0 - 2]), c1.cx[1] - loX)
+            end
+        end
+        checkTrue(c1 ~= nil and math.abs(c1.cx[1] - 40.5) < 1e-6 and math.abs(c1.cy[1] + 2.5) < 1e-6 and ang ~= nil
+                and ang <= MDADDynamics.FILLET_SMALL_RAD + 1e-9,
+            "(cut-lp-grid) 車在格點前 0.5 m、內側 2.5 m：照樣承諾、接線頂點往回到斜接角 ≤ 10°（" .. (c1 and string.format(
+                "P_in=%.2f,%.2f lo x=%s 角 %s°", c1.cx[1], c1.cy[1], tostring(loX), tostring(ang and ang * 180 / math.pi))
+                or ("none " .. tostring(cutEv("none")[1] and cutEv("none")[1].c1))) .. "）")
+        dveh._y = 0
+    end
+    -- (cut-route) 1114m（Claude 審查）：每種拼不上各自的名字、只有 room 交下一次倒車多退。出臂到 (60,−20) 就是終點（< uM 下限
+    --   3·臂長）：cornerCutPlan＝cut none why=route（c1 帶 rw=end）、不記進場差額（舊制記成 room、多退最多 8 m）；cutStopNote＝cut skip
+    --   kind=stop why=end、不拉轉角停止線（Drive.cutArmsWhy）。違規證明：cornerCutTry 拼不上照舊回 room＝紅。
+    do
+        local s1 = arm()
+        local rs = lroute()
+        local p, ss, sw = {}, {}, {}
+        for i = 1, 2 * 21 do p[i] = rs.pts[i] end
+        for i = 1, 20 do ss[i], sw[i] = rs.segSurface[i], rs.segWidth[i] end
+        drive.nav.route = { pts = p, segSurface = ss, segWidth = sw }
+        drive.nav.tx, drive.nav.ty = 60, -20
+        nowMs = nowMs + 400
+        driveTick(dp, dveh)
+        tickUntilReady(s1)
+        snap(s1, POSTS)
+        clearEv()
+        Dr.cornerCutPlan(s1, dveh, 0)
+        local n1 = cutEv("none")[1]
+        checkTrue(n1 ~= nil and n1.why == "route" and n1.steep == nil and s1.cutRunway == nil and type(n1.c1) == "string"
+                and n1.c1:find("rw=end", 1, true) ~= nil,
+            "(cut-route) 出臂在 uM 前就是終點：cut none why=route（rw=end）、不交倒車多退（why=" .. tostring(n1 and n1.why)
+                .. " steep=" .. tostring(n1 and n1.steep) .. " c1=" .. tostring(n1 and n1.c1) .. "）")
+        s1.cornerCutTried, s1.cutStop = nil, nil
+        clearEv()
+        Dr.cutStopNote(s1, dveh, 0)
+        local sk = cutEv("skip")[1]
+        checkTrue(s1.cutStop == nil and sk ~= nil and sk.kind == "stop" and sk.why == "end",
+            "(cut-route) 同一個轉角：不拉轉角停止線、cut skip kind=stop why=end（" .. tostring(sk and sk.why) .. "）")
+        drive.nav.tx, drive.nav.ty = 60, -100
+    end
+    -- (cut-stop-held) 1114m（Claude 審查 residual）：持有改線、還沒過完＝不拉轉角停止線（cornerCutPlan 不會試，停止線拉了也沒有改線），
+    --   記 cut skip kind=stop why=held；已過完＝就地 drop passed、照常判停止線。
+    do
+        local s1 = arm()
+        snap(s1, POSTS)
+        s1.cornerCut = { kx = 60, ky = 0, ox = 0, oy = -1, passU = 50 }
+        clearEv()
+        Dr.cutStopNote(s1, dveh, 0)
+        local sk = cutEv("skip")[1]
+        local heldOk = s1.cutStop == nil and sk ~= nil and sk.kind == "stop" and sk.why == "held" and s1.cornerCut ~= nil
+        s1.cornerCut = { kx = 60, ky = 0, ox = 0, oy = -1, passU = -100 }
+        clearEv()
+        Dr.cutStopNote(s1, dveh, 0)
+        local dp1 = cutEv("drop")[1]
+        checkTrue(heldOk and dp1 ~= nil and dp1.why == "passed" and s1.cornerCut == nil
+                and (s1.cutStop ~= nil or cutEv("skip")[1] ~= nil),
+            "(cut-stop-held) 持有改線不拉停止線（skip held=" .. tostring(heldOk) .. "）；過完＝drop passed 後照常（drop="
+                .. tostring(dp1 and dp1.why) .. " stop=" .. tostring(s1.cutStop ~= nil) .. "）")
+    end
+    -- (cut-pend) 1114m（Codex 審查）：真的 cornerCutPlan 承諾（pendingRouteWhy＝cut）之後，cutover 前後各種收尾。每案 pendingRouteWhy
+    --   不留 cut（判堵階梯三道閘只認它，留著＝不倒車、不改道、不交還）、該丟的改線丟掉。
+    --   (pend-target) 換目標、主 MOD 這次還回舊線（不 cutover）：當場 drop target；新目標的線之後到了也不重套。
+    --   (pend-same)   同目標新路線 identity、經過 K：cutover why=cut、照樣套改線。
+    --   (pend-nok)    新路線不經過 K：drop route；之後同一嘗試路線又經過 K，任一寬帶級都 skip tried（不在 1／2 級之間交替）。
+    --   (pend-splice) 經過 K 但出臂 12 m 後轉彎（uM 內）：拼不上＝drop route。
+    --   (pend-yield)  玩家接手（讓位待命）：同一幀照樣 cutover、pendingRouteWhy 清掉、改線照樣持有。
+    --   違規證明：換目標不當場丟＝(pend-target) 紅；route drop 不記 all＝(pend-nok) 紅。
+    do
+        local function committed()
+            local s1 = arm()
+            snap(s1, POSTS)
+            Dr.cornerCutPlan(s1, dveh, 0)
+            return s1, s1.cornerCut
+        end
+        local function tick(ms)
+            nowMs = nowMs + (ms or 50)
+            driveTick(dp, dveh)
+        end
+        local function seg(pts, w)
+            local r = { pts = pts, segSurface = {}, segWidth = {} }
+            for i = 1, #pts / 2 - 1 do r.segSurface[i], r.segWidth[i] = "paved", w end
+            return r
+        end
+        -- (pend-target)
+        local s1, c1 = committed()
+        clearEv()
+        drive.nav.tx, drive.nav.ty = 60, -96
+        drive.nav.route = s1.route
+        tick()
+        local d1 = cutEv("drop")[1]
+        local okA = c1 ~= nil and s1.cornerCut == nil and d1 ~= nil and d1.why == "target" and s1.pendingRouteWhy ~= "cut"
+        clearEv()
+        drive.nav.route = lroute(60, -96)
+        tick(400)
+        checkTrue(okA and s1.cornerCut == nil and cutEv("apply")[1] == nil and s1.pendingRouteWhy == nil
+                and c1 ~= nil and not hasVertexNear(s1.profileRoute, c1.tx, c1.ty),
+            "(pend-target) 換目標、主 MOD 還回舊線：當場 drop target，新目標的線到了也不重套（drop=" .. tostring(d1 and d1.why)
+                .. " held=" .. tostring(s1.cornerCut ~= nil) .. " pending=" .. tostring(s1.pendingRouteWhy) .. " apply="
+                .. tostring(cutEv("apply")[1] ~= nil) .. "）")
+        drive.nav.tx, drive.nav.ty = 60, -100
+        -- (pend-same)
+        s1, c1 = committed()
+        clearEv()
+        drive.nav.route = lroute()
+        tick()
+        local ap = cutEv("apply")[1]
+        checkTrue(c1 ~= nil and s1.pendingRouteWhy == nil and ap ~= nil and ap.why == "cut" and s1.cornerCut == c1
+                and hasVertexNear(s1.profileRoute, c1.tx, c1.ty),
+            "(pend-same) 同目標新路線經過 K：cutover why=cut、照樣套（apply=" .. tostring(ap and ap.why) .. " pending="
+                .. tostring(s1.pendingRouteWhy) .. "）")
+        -- (pend-nok)
+        s1, c1 = committed()
+        clearEv()
+        drive.nav.route = seg({ 0, 0, 40, 0, 40, -100, 60, -100 }, 9)
+        tick()
+        local dn, tr = cutEv("drop")[1], s1.cornerCutTried
+        local okN = c1 ~= nil and dn ~= nil and dn.why == "route" and s1.cornerCut == nil and s1.pendingRouteWhy == nil
+            and tr ~= nil and tr.all == true
+        drive.nav.route = lroute()
+        tick(400)
+        tickUntilReady(s1)
+        snap(s1, POSTS, { lvl = 2 })
+        clearEv()
+        Dr.cornerCutPlan(s1, dveh, 0)
+        local skN = cutEv("skip")[1]
+        checkTrue(okN and skN ~= nil and skN.why == "tried" and cutEv("plan")[1] == nil and s1.cornerCut == nil,
+            "(pend-nok) 新路線不經過 K：drop route；同一嘗試路線又經過 K、寬帶第 2 級＝skip tried（drop=" .. tostring(dn and dn.why)
+                .. " all=" .. tostring(tr and tr.all) .. " skip=" .. tostring(skN and skN.why) .. "）")
+        -- (pend-splice)
+        s1, c1 = committed()
+        clearEv()
+        local ps = {}
+        for i = 0, 15 do ps[#ps + 1] = i * 4; ps[#ps + 1] = 0 end
+        for _, q in ipairs({ { 60, -4 }, { 60, -8 }, { 60, -12 }, { 63, -24 }, { 63, -100 } }) do
+            ps[#ps + 1] = q[1]; ps[#ps + 1] = q[2]
+        end
+        drive.nav.route = seg(ps, 9)
+        tick()
+        local dsp = cutEv("drop")[1]
+        checkTrue(c1 ~= nil and dsp ~= nil and dsp.why == "route" and s1.cornerCut == nil and s1.pendingRouteWhy == nil,
+            "(pend-splice) 出臂 12 m 後轉彎：拼不上＝drop route、pending 清掉（drop=" .. tostring(dsp and dsp.why) .. "）")
+        -- (pend-yield)：玩家按住方向盤（剖面重建的幾幀 mode＝build，建好才進讓位）
+        s1, c1 = committed()
+        clearEv()
+        local oldHud = MDAD.HUD
+        MDAD.HUD = setmetatable({ manualResumeMs = function() return 2000 end }, { __index = oldHud })
+        drive.keys.Left = true
+        tick()
+        local pend1 = s1.pendingRouteWhy
+        for _ = 1, 20 do
+            if s1.mode == "yield" then break end
+            tick()
+        end
+        drive.keys.Left = nil
+        MDAD.HUD = oldHud
+        checkTrue(c1 ~= nil and pend1 == nil and s1.mode == "yield" and s1.pendingRouteWhy == nil and s1.cornerCut == c1
+                and cutEv("apply")[1] ~= nil,
+            "(pend-yield) 玩家接手：同一幀照樣 cutover、pending 清掉、改線持有（第一幀 pending=" .. tostring(pend1) .. " mode="
+                .. tostring(s1.mode) .. " pending=" .. tostring(s1.pendingRouteWhy) .. "）")
+        Dr.stop(0, nil)
+        drive.nav.route = lroute()
+    end
     -- (cut-cover) zoneCovered 對折點外角：4m 路的 fallback 直角，外角扇形 (63,2) 兩段的垂足都落在段外＝沒掃過
     do
         local s1 = arm()
@@ -34968,6 +35190,36 @@ function drive.scenarioCornerCut()
         checkTrue(fb and outer == false and inner == true and legacy == true,
             "(cut-cover) 折點外角扇形不算帶內（舊 lineBandCovers 夾段端點會算）；內側照算（fb=" .. tostring(fb) .. " outer="
                 .. tostring(outer) .. " inner=" .. tostring(inner) .. " legacy=" .. tostring(legacy) .. "）")
+    end
+    -- (cut-cover-order) 1114m 降成本：zoneCovered 每個取樣從上一個取樣蓋到的那段開始繞一圈找；結果要與取樣順序無關——沿剖面
+    --   中心線（覆蓋下界 s0 後 0.6 m 起 30 m，過 K 的圓角）同一串點正走、倒走都蓋到，也等於逐點（沿切線的兩點短線）判的 AND。
+    --   倒走時最後幾個取樣只落在最前一段（segLo，s0 所在的段）：繞圈漏掉那段＝紅。路線用三點（入臂一整段），segLo 才夠長、取樣落得進去。
+    do
+        local s1 = arm()
+        drive.nav.route = { pts = { 0, 0, 60, 0, 60, -100 }, segSurface = { "paved", "paved" }, segWidth = { 15, 9 } }
+        nowMs = nowMs + 400
+        driveTick(dp, dveh)
+        tickUntilReady(s1)
+        snap(s1, {})
+        local prof = s1.profile
+        local fx, fy, rx, ry, n, segs, last = {}, {}, {}, {}, 0, 0, nil
+        local each = true
+        for q = 0, 60 do
+            local sq = math.min(s1.sensor.scanS, s1.lastSNow) - s1.bodyReach + 0.6 + q * 0.5
+            local j = MDADFollower.segIndexAt(prof, sq)
+            local h = prof.segH[j]
+            local x, y = prof.x[j] + math.cos(h) * (sq - prof.s[j]), prof.y[j] + math.sin(h) * (sq - prof.s[j])
+            n = n + 1
+            fx[n], fy[n] = x, y
+            if j ~= last then segs, last = segs + 1, j end
+            if not Dr.zoneCovered(s1, { x, x + math.cos(h) * 0.01 }, { y, y + math.sin(h) * 0.01 }, 2, 0.1) then
+                each = false
+            end
+        end
+        for q = 1, n do rx[n + 1 - q], ry[n + 1 - q] = fx[q], fy[q] end
+        local fwd, rev = Dr.zoneCovered(s1, fx, fy, n, 0.1), Dr.zoneCovered(s1, rx, ry, n, 0.1)
+        checkTrue(segs >= 3 and each and fwd and rev, "(cut-cover-order) 剖面中心線 " .. n .. " 點跨 " .. segs .. " 段（要 ≥3）：逐點 "
+            .. tostring(each) .. "、正走 " .. tostring(fwd) .. "、倒走 " .. tostring(rev) .. "（三者都要 true）")
     end
     Dr.stop(0, nil)
     MDADDiagnostics.event, MDADDiagnostics.sample = oldEvent, oldSample
@@ -35167,8 +35419,14 @@ function drive.scenarioCutDefer()
     st.cornerCutTried.att = st.episodeAttempts - 1
     m = ask(st, "trap", 30, 46, 52, 58, -3)
     checkEq(m, "clear", "(cd-tried) 換一次嘗試：照樣攔")
-    st.cornerCutTried, st.cornerCut = nil, { kx = 60, ky = 0 }
-    untouched("(cd-owner) 已持有改線", "held", ask(st, "trap", 30, 46, 52, 58, -3))
+    st.cornerCutTried, st.cornerCut = nil, { kx = 60, ky = 0, ox = 0, oy = -1, passU = 40 }
+    untouched("(cd-owner) 已持有改線（還沒過完）", "held", ask(st, "trap", 30, 46, 52, 58, -3))
+    -- (cd-passed) 1114m：持有的改線已過完（車心出臂座標 > passU）＝就地 drop passed、照常攔（舊制 held 跳過同一趟後面的轉角陷阱）
+    st.cornerCut = { kx = 60, ky = 0, ox = 0, oy = -1, passU = -5 }
+    m = ask(st, "trap", 30, 46, 52, 58, -3)
+    local dropP = ev("cut", "drop")
+    checkTrue(m == "clear" and st.cornerCut == nil and dropP ~= nil and dropP.why == "passed" and ev("cut", "trap") ~= nil,
+        "(cd-passed) 持有的改線已過完：drop passed、照常延後（m=" .. tostring(m) .. " drop=" .. tostring(dropP and dropP.why) .. "）")
     st.cornerCut, st.tow = nil, {}
     untouched("(cd-owner) 拖車", "tow", ask(st, "trap", 30, 46, 52, 58, -3))
     st.tow = nil
@@ -35189,6 +35447,56 @@ function drive.scenarioCutDefer()
     st = arm(36, 60)
     snap(st, POSTS)
     untouched("(cd-brake) 煞不住", "brake", ask(st, "trap", 30, 46, 52, 58, -3))
+    -- (cd-brake-stop) 1114m：車頭已過延後停點 bStop（b 前一個停止線）但還煞得住 b（陷阱較晚才看到）：停點挪到現在煞得住的最近處，
+    --   接近帽 > 0、Drive.deferHardKmh 不鎖輪（舊制停點在車後＝帽 0、硬帽 0＝dodge-defer 一秒鎖輪）。車 x=38、20 km/h、b=46。
+    st = arm(38, 20)
+    snap(st, POSTS)
+    do
+        local hl = st.vehicleProfile.halfL
+        local bS0 = 46 - Dr.blockStopDist(st) + hl
+        m = ask(st, "trap", 30, 46, 52, 58, -3)
+        local df = ev("dodge", "defer")
+        local hard = Dr.deferHardKmh(st, 20)
+        checkTrue(bS0 < st.lastSNow + hl and m == "clear" and df ~= nil and df.b <= 46 and df.b >= st.lastSNow + hl
+                and (st.dodgeDeferCap or 0) > 0 and hard > 0,
+            "(cd-brake-stop) 過了 b 前停止線（" .. string.format("%.2f", bS0) .. "＜車頭 " .. string.format("%.2f", st.lastSNow + hl)
+                .. "）、煞得住 b：停點挪到 " .. tostring(df and df.b) .. "、帽 " .. tostring(st.dodgeDeferCap) .. "、硬帽 "
+                .. tostring(hard) .. "（m=" .. tostring(m) .. "）")
+    end
+    -- (cd-arms) 1114m：Drive.cornerCutRoute 一定拼不上的轉角不延後（Drive.cutArmsWhy）——出臂在 3·臂長內就結束（end）、出臂上
+    --   另有轉彎（bend-out）、入臂上停點到 K 之間另有轉彎（bend-in）
+    do
+        local function armsRoute(pts)
+            Dr.stop(0, nil)
+            local r = { pts = pts, segSurface = {}, segWidth = {} }
+            for i = 1, #pts / 2 - 1 do r.segSurface[i], r.segWidth[i] = "paved", 15 end
+            return r
+        end
+        local cases = {
+            { "end", { 0, 0, 20, 0, 40, 0, 60, 0, 60, -20 } },
+            { "bend-out", { 0, 0, 20, 0, 40, 0, 60, 0, 60, -12, 63, -24, 63, -100 } },
+            { "bend-in", { 0, 0, 20, 0, 40, 0, 48, 1.5, 52, 0, 60, 0, 60, -100 } },
+        }
+        for _, cs in ipairs(cases) do
+            drive.nav.route = armsRoute(cs[2])
+            drive.nav.tx, drive.nav.ty, drive.nav.state = cs[2][#cs[2] - 1], cs[2][#cs[2]], "ok"
+            dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = 20, 0, 30, 0, false
+            setHeading(dveh, 0)
+            Dr.start(dp)
+            local s1 = Dr.debugSession(0)
+            for _ = 1, 20 do
+                if s1 and s1.profile and s1.profile.ready then break end
+                driveTick(dp, dveh)
+            end
+            s1.diag = true
+            snap(s1, POSTS)
+            local sk
+            m = ask(s1, "trap", 30, 46, 52, 58, -3)
+            sk = ev("cut", "skip")
+            checkTrue(m == "dodge" and sk ~= nil and sk.why == cs[1] and ev("cut", "trap") == nil,
+                "(cd-arms) " .. cs[1] .. "：拼不上的轉角不延後（m=" .. tostring(m) .. " skip=" .. tostring(sk and sk.why) .. "）")
+        end
+    end
 
     -- (cd-chain) 整合：K=(48,0)、路寬 9；路心柱 (24,0)（候選出口 d 落在轉角前、不觸發延過折點），外側封住（y 2..10），車 20 km/h 從 x=2 開過來
     do
@@ -35649,6 +35957,18 @@ function drive.scenarioCutRC()
             checkTrue(math.abs(pHit - (uB + 3.3 + hl)) < 1e-6 and math.abs(pPre - (uB + hl)) < 1e-6,
                 "(rc-pass) 淨距最小點在 B 後 3 m：放帽點蓋到車尾過它（" .. string.format("%.2f／%.2f", pHit, uB + 3.3 + hl)
                     .. "）；在 B 前照 B（" .. string.format("%.2f／%.2f", pPre, uB + hl) .. "）")
+            -- (rc-pass-comp) 1114m（Codex 審查）：前饋線（車實際追的那條）掃掠的最小點較晚＝放帽點照它；承諾時兩條線的最小點都進 passU。
+            --   違規證明：cutPassU 只看 base 線的 mi＝紅。
+            local fake2 = { hardX = {}, hardY = {}, hardR = { 0.3, 0.3 } }
+            fake2.hardX[1], fake2.hardY[1] = at(uB + 1)
+            fake2.hardX[2], fake2.hardY[2] = at(uB + 4)
+            local pBoth = Dr.cutPassU(c, uB, fake2, 1, hl, 2)
+            local pRev = Dr.cutPassU(c, uB, fake2, 2, hl, 1)
+            checkTrue(math.abs(pBoth - (uB + 4.3 + hl)) < 1e-6 and math.abs(pRev - pBoth) < 1e-9
+                    and c.comp ~= 0 and c.miO ~= nil
+                    and math.abs(c.passU - Dr.cutPassU(c, uB, s1.sensor, c.miS, hl, c.miO)) < 1e-9,
+                "(rc-pass-comp) 前饋線最小點在 B 後 4 m、base 線在 1 m：放帽點照較晚的（" .. string.format("%.2f／%.2f", pBoth,
+                    uB + 4.3 + hl) .. "）；承諾的 passU 兩條線都算（miS " .. tostring(c.miS) .. " miO " .. tostring(c.miO) .. "）")
             local x0, y0 = at(uB - 3)
             Dr.cutCap(s1, 40, x0, y0)
             local crawlHeld = Dr.crawlIntentArg(s1)
@@ -35767,6 +36087,22 @@ function drive.scenarioCutRC()
                 and math.abs(span - arcLen) < 0.15 * arcLen,
             "(rc-comp) cutover 後 Follower 套上前饋、範圍蓋滿 T 的圓角（compL " .. tostring(fs.compL) .. "、範圍 " .. tostring(span)
                 .. "／r·θ " .. tostring(arcLen) .. "）")
+        -- (rc-comp-arc) 1114m（Claude 審查）：compA..compB 真的是剖面上 T 的那段連續弧（不是從 compA/compB 自己推的自洽量）：
+        --   compA＝弧首點的 s、compB＝弧尾點的 s，弧內每段 SEG_ARC、前後一段不是。違規證明：cornerCutNote 弦長少累加一段＝紅。
+        do
+            local prof, arcOk = s1.profile, false
+            local SA = MDADDynamics.SEG_ARC
+            if finite(fs.compA) and finite(fs.compB) and type(prof.segKind) == "table" then
+                local kA = MDADFollower.segIndexAt(prof, fs.compA + 1e-6)
+                local kB = MDADFollower.segIndexAt(prof, fs.compB - 1e-6)
+                local kM = MDADFollower.segIndexAt(prof, (fs.compA + fs.compB) / 2)
+                arcOk = prof.segKind[kA] == SA and prof.segKind[kB] == SA and prof.segKind[kM] == SA
+                    and math.abs(prof.s[kA] - fs.compA) < 1e-3 and math.abs(prof.s[kB + 1] - fs.compB) < 1e-3
+                    and (kA == 1 or prof.segKind[kA - 1] ~= SA) and prof.segKind[kB + 1] ~= SA
+            end
+            checkTrue(arcOk, "(rc-comp-arc) 前饋範圍＝剖面上 T 的連續弧（compA " .. tostring(fs.compA) .. "、compB "
+                .. tostring(fs.compB) .. "）")
+        end
         local mid = finite(fs.compA) and (fs.compA + fs.compB) / 2 or 0
         local eMid = Dr.plannedLaneAt(s1, mid)
         local ePre = Dr.plannedLaneAt(s1, mid - (span or 0) / 2 - T.CUT_COMP_RAMP_M - 0.5)
@@ -35932,6 +36268,15 @@ function drive.scenarioCutRC()
                 "(rc-recommit-same) 同一個 K 再承諾不歸零（fresh " .. tostring(c1 and c1.fresh) .. "→" .. tostring(c2 and c2.fresh)
                     .. " att=" .. tostring(s2.episodeAttempts) .. " wait=" .. tostring(s2.waitAccumMs) .. " skip="
                     .. tostring(c2 == nil and cutEv("skip")[1] and cutEv("skip")[1].why) .. "）")
+            -- (rc-recommit-tol) 1114m（Claude 審查）：同一個 K 用 1 m 容差（同 cornerCutTried）。重取路線 K 差 0.06 m、跨 %.1f 捨入邊界
+            --   （5218.0→5218.1）：不再歸零；差 1.5 m＝別的轉角：歸零。違規證明：恢復 %.1f 字串全等＝紅。
+            s2.episodeAttempts = 2
+            local fTol = Dr.cutLadderReset(s2, KX + 0.06, KY)
+            local attTol = s2.episodeAttempts
+            local fFar = Dr.cutLadderReset(s2, KX + 1.5, KY)
+            checkTrue(fTol == false and attTol == 2 and fFar == true and s2.episodeAttempts == 0,
+                "(rc-recommit-tol) K 差 0.06 m 跨捨入邊界＝同一個 K 不歸零（fresh " .. tostring(fTol) .. " att " .. tostring(attTol)
+                    .. "）；差 1.5 m＝歸零（" .. tostring(fFar) .. "）")
             -- (rc-recommit-target) 換目標＝新的一趟：同一個 K 的承諾又能歸零一次
             local oldTy = drive.nav.ty
             drive.nav.ty = oldTy - 1
@@ -36075,6 +36420,26 @@ function drive.scenarioEndArrive()
             "(fit) 出口超過終點的承諾線：停點處偏移在到站圈內、ef＝fit（實得 ef " .. tostring(cm and cm.ef)
             .. "、c " .. tostring(cm and cm.c) .. "、d " .. tostring(cm and cm.d) .. "、停點 lane "
             .. tostring(cm and laneAt(stopS, cm.c, cm.d - cm.c, cm.offL, cm.dbl)) .. "）")
+        -- (keep-main) 1114m（Claude 審查「shapeProfile 的呼叫者逐一確認」）：不在候選鏈裡、沒有退路的兩個形塑預算照原形狀（同 main）——
+        --   replan 的延後預算（Drive.deferShape：到站形狀縮短出口會讓那裡判覆蓋、不記 coverage 延後，鏈全滅就從延後變判堵）、交接預檢
+        --   （Drive.handoffReady 的預覽：覆蓋較早成立＝比 main 早交接）。違規證明：deferShape 不關到站形狀、handoffReady 預覽不關，各自紅。
+        do
+            local mP, aP, bP, cP, dP, oP = Dr.planDodge(st, 0, 0)
+            local okK, why = false, "plan=" .. tostring(mP)
+            if mP == "dodge" then
+                local _, _, _, _, dFit = Dr.debugShape(0, aP, bP, cP, dP, oP)
+                st.endFitOff = true
+                local _, _, _, _, dOrig = Dr.debugShape(0, aP, bP, cP, dP, oP)
+                st.endFitOff = false
+                local dDef = Dr.deferShape(st, aP, bP, cP, dP, oP, 0)
+                Dr.handoffReady(st)
+                local pv = st.dodgePreview
+                okK = dFit ~= dOrig and dDef == dOrig and st.endFitOff == false and pv ~= nil and pv.endFitOff == true
+                why = "d 到站 " .. tostring(dFit) .. "／原 " .. tostring(dOrig) .. "／延後預算 " .. tostring(dDef) .. "、預覽 endFitOff "
+                    .. tostring(pv and pv.endFitOff)
+            end
+            checkTrue(okK, "(keep-main) 延後預算與交接預覽照原形狀（" .. why .. "）")
+        end
         if cm and st.dodging then
             local fs = st.fstate
             fs.offD = fs.offC + 8
@@ -36103,6 +36468,84 @@ function drive.scenarioEndArrive()
         else
             checkTrue(false, "(stay) 啟動")
         end
+    end
+    -- (plain) 1114m（Codex 審查）：一般繞行（沒有改線）出口在終點前走完＝到站形狀不碰：ef 缺、承諾的 c／d 與關掉到站形狀（endFitOff）
+    --   塑出的同一組。同一個直路長群、路線拉長到 200 m。違規證明：endFit 不看「出口在終點前」一律縮＝紅。
+    do
+        drive.fillWorld(-5, 220, -14, 14)
+        drive.putRoad(-5, 220, -12, 12)
+        for x = 30, 44 do
+            for y = -3, 3 do drive.putSolid(x, y, "harness_block") end
+        end
+        local sp = startAt({ 0.5, 0.5, 200, 0.5 }, 20, 12, 0.5, 0)
+        local cmP = sp and roundsToCommit(12) or nil
+        local same = false
+        if cmP and sp.dodging then
+            sp.endFitOff = true
+            local ok1, _, _, c1, d1 = Dr.debugShape(0, cmP.a, cmP.b, cmP.c, cmP.d, cmP.offL)
+            sp.endFitOff = false
+            local ok2, _, _, c2, d2 = Dr.debugShape(0, cmP.a, cmP.b, cmP.c, cmP.d, cmP.offL)
+            same = ok1 and ok2 and c1 == c2 and d1 == d2
+        end
+        checkTrue(cmP ~= nil and cmP.ef == nil and finite(cmP.d) and cmP.d < sp.profile.length and same,
+            "(plain) 一般繞行出口在終點前走完：ef 缺、到站形狀與原形狀同一組（ef " .. tostring(cmP and cmP.ef) .. "、d "
+            .. tostring(cmP and cmP.d) .. "、長 " .. tostring(sp and sp.profile and sp.profile.length) .. "、同形 " .. tostring(same) .. "）")
+        Dr.stop(0, nil)
+    end
+    -- (demote-fell) 1114m（Claude 審查）：判堵後的降檔複審（demotePlan）跟候選鏈同一條退路——到站形狀掃不過＝照原形狀再掃。
+    --   直路長群（y −3..3）、路線只到 x 52（51.5 m）：降檔縫（爬行設計出口）超過終點、到站形狀掃得過＝承諾且 endFitHit（前置）；
+    --   在兩形狀橫向差最大處、到站形狀的線上擺一格硬物（原形狀離它 ≥ 2 m）：舊制 demotePlan 沒有退路＝不承諾（main 會承諾的降檔縫
+    --   被新拒收），新制退回原形狀承諾。
+    --   違規證明：拿掉 demotePlan 的退回原形狀＝紅。
+    do
+        drive.fillWorld(-5, 90, -14, 14)
+        drive.putRoad(-5, 90, -12, 12)
+        for x = 30, 44 do
+            for y = -3, 3 do drive.putSolid(x, y, "harness_block") end
+        end
+        local sd = startAt({ 0.5, 0.5, 52, 0.5 }, 20, 12, 0.5, 0)
+        local okD, why = false, "start"
+        if sd then
+            drive.scanRound(true)
+            local sen, hl = sd.sensor, sd.vehicleProfile.halfL
+            local mq, aq, bq, cq, dq, oq = MDADCorridor.plan(sen.hardS, sen.hardL, sen.hardN, sd.squeezeNeed,
+                sen.corridorHalf or MDADSensor.CORRIDOR_HALF, 0, sen.hardR, 0, sen.roadLo, sen.roadHi, true, sd.hardBase,
+                sd.lastSNow - hl, sen.corridorInner, sen.hardLc, sen.hardW)
+            if mq == "dodge" then
+                local okF, _, _, cF, dF = Dr.debugShape(0, aq, bq, cq, dq, oq)
+                sd.endFitOff = true
+                local okO, _, _, cO, dO = Dr.debugShape(0, aq, bq, cq, dq, oq)
+                sd.endFitOff = false
+                -- 兩形狀橫向差最大的那個弧長（到站形狀的出口段內）擺柱、柱心在到站形狀的線上
+                local sAt, lF, lO = nil, 0, 0
+                local sEndF = math.min(dF, sd.profile.length)
+                for q = 0, 80 do
+                    local sq = cF + (sEndF - cF) * q / 80
+                    local f1, o1 = laneAt(sq, cF, dF - cF, oq, 0), laneAt(sq, cO, dO - cO, oq, 0)
+                    if sAt == nil or math.abs(o1 - f1) > math.abs(lO - lF) then sAt, lF, lO = sq, f1, o1 end
+                end
+                if okF and okO and sAt and math.abs(lO - lF) > 1.9 then
+                    -- 格心落在到站形狀的線往原形狀反側 0.1–1.1 m（格子 1 m，格心＝格角＋0.5）：到站形狀撞、原形狀離 ≥ 2 m
+                    local sg = lO > lF and 1 or -1
+                    local yF = 0.5 + lF
+                    local gx, gy = math.floor(sAt + 0.5), math.floor(yF - sg * 0.6)
+                    local r0 = Dr.debugDemotePlan(0, 0)
+                    local ef0 = sd.endFitHit
+                    drive.putSolid(gx, gy, "harness_fitpost")
+                    drive.scanRound(true)
+                    local r = Dr.debugDemotePlan(0, 0)
+                    okD = r0 == true and ef0 == true and r == true
+                    why = string.format("無柱 demote %s endFitHit %s；lF %.2f lO %.2f s %.1f 柱 (%d,%d) demote %s", tostring(r0),
+                        tostring(ef0), lF, lO, sAt, gx, gy, tostring(r))
+                else
+                    why = string.format("前置：兩形狀分不開（lF %.2f lO %.2f）", lF, lO)
+                end
+            else
+                why = "前置：squeeze plan=" .. tostring(mq)
+            end
+        end
+        checkTrue(okD, "(demote-fell) 降檔縫到站形狀掃不過：退回原形狀照樣承諾（" .. why .. "）")
+        Dr.stop(0, nil)
     end
 
     -- rc-prod-1114 終點段重建

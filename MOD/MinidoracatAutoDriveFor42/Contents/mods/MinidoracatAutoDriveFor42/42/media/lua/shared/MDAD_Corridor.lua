@@ -570,9 +570,10 @@ end
 --       （越過 T 一個 needHalf：車身轉過 T 時前後角會擺到兩臂延長線外側）內
 --       每個硬點都要離偏移線 ≥ 半徑＋needHalf（同 laneFree 的判法，位置用世界座標投影到兩臂的局部座標）。
 --       淨空寬 w＝窗內「內側」硬點到偏移線的最近距離扣半徑（圓角只往內切；沒有點＝BIG）。
---     只看 K 周圍 zoneR 內的點（每點各投影一次到兩臂：2·hn 次），格網依 i+j 由小到大走，試滿 maxPairs 對就截斷。
---     依成本（|l_in|＋|l_out|＋|T−K|）由小到大保留前 maxOut 條，寫進 sc.lin／lout／cost／win／wout（呼叫端預配）；
---       sc.u1／v1／u2／v2 是逐點投影的暫存（容量 ≥ hn）。
+--     只看 K 周圍 zoneR 內的點：先逐點投影一次到兩臂（hn 次），區內的點壓緊寫進 sc.u1／v1／u2／v2／rr（容量 ≥ hn），每一對只走
+--     這些點（區外的點本來就落不進兩臂窗；1114m 前每一對走全部 hn 點，實機 hn 500、400 對＝cut commit ms 40–55）。
+--     格網依 i+j 由小到大走，試滿 maxPairs 對就截斷。
+--     依成本（|l_in|＋|l_out|＋|T−K|）由小到大保留前 maxOut 條，寫進 sc.lin／lout／cost／win／wout（呼叫端預配）。
 --     回 found, tried, truncated。只篩候選、不否決：能不能過由 Driver 的世界掃掠決定。
 --     **零 table 配置**；任一輸入壞掉＝0 條（fail-closed）。
 local CUT_BIG = 1e9
@@ -580,7 +581,7 @@ MDADCorridor.CUT_BIG = CUT_BIG
 local function isNum(v) return type(v) == "number" and v * 0 == 0 end
 function MDADCorridor.cornerCut(hx, hy, hr, hn, kx, ky, ix, iy, ox, oy, inner, needHalf,
         limIn, limOut, step, armIn, armOut, zoneR, maxPairs, maxOut, sc)
-    if type(hx) ~= "table" or type(hy) ~= "table" or type(sc) ~= "table"
+    if type(hx) ~= "table" or type(hy) ~= "table" or type(sc) ~= "table" or type(sc.rr) ~= "table"
             or not isNum(hn) or hn < 0 or floor(hn) ~= hn
             or not isFinitePos(step) or not isFinitePos(zoneR) or not isFinitePos(needHalf)
             or not isNum(maxPairs) or maxPairs < 1 or not isNum(maxOut) or maxOut < 1
@@ -589,22 +590,25 @@ function MDADCorridor.cornerCut(hx, hy, hr, hn, kx, ky, ix, iy, ox, oy, inner, n
                 and isNum(limIn) and isNum(limOut) and isNum(armIn) and isNum(armOut)) then
         return 0, 0, false
     end
-    local u1, v1, u2, v2 = sc.u1, sc.v1, sc.u2, sc.v2
+    local u1, v1, u2, v2, rr = sc.u1, sc.v1, sc.u2, sc.v2, sc.rr
     local oLin, oLout, oCost, oWin, oWout = sc.lin, sc.lout, sc.cost, sc.win, sc.wout
     -- 兩臂夾角：sn＝cross(入, 出)（左轉 <0）、cs＝內積；|sn| 太小＝不是轉角
     local sn, cs = ix * oy - iy * ox, ix * ox + iy * oy
     if (sn < 0 and -sn or sn) < 0.2 then return 0, 0, false end
     local z2 = zoneR * zoneR
+    local zn = 0
     for p = 1, hn do
         local x, y = hx[p], hy[p]
         if type(x) ~= "number" or x * 0 ~= 0 or type(y) ~= "number" or y * 0 ~= 0 then return 0, 0, false end
         local dx, dy = x - kx, y - ky
         if dx * dx + dy * dy <= z2 then
             -- 局部座標：u 沿臂、v＝右法向 (−dy, dx)
-            u1[p], v1[p] = dx * ix + dy * iy, -dx * iy + dy * ix
-            u2[p], v2[p] = dx * ox + dy * oy, -dx * oy + dy * ox
-        else
-            u1[p], v1[p], u2[p], v2[p] = CUT_BIG, 0, CUT_BIG, 0
+            zn = zn + 1
+            u1[zn], v1[zn] = dx * ix + dy * iy, -dx * iy + dy * ix
+            u2[zn], v2[zn] = dx * ox + dy * oy, -dx * oy + dy * ox
+            local r = hr and hr[p] or OBS_HALF
+            if type(r) ~= "number" or r ~= r or r < 0 then r = OBS_HALF end
+            rr[zn] = r
         end
     end
     local iMax = floor(limIn / step + 1e-9)
@@ -628,9 +632,8 @@ function MDADCorridor.cornerCut(hx, hy, hr, hn, kx, ky, ix, iy, ox, oy, inner, n
             local upt = lin * sn + ut * cs
             local inLo, inHi, outLo, outHi = ut - armIn, ut + needHalf, upt - needHalf, upt + armOut
             local win, wout, ok = CUT_BIG, CUT_BIG, true
-            for p = 1, hn do
-                local r = hr and hr[p] or OBS_HALF
-                if type(r) ~= "number" or r ~= r or r < 0 then r = OBS_HALF end
+            for p = 1, zn do
+                local r = rr[p]
                 local u = u1[p]
                 if u >= inLo and u <= inHi then
                     local d = v1[p] - lin
