@@ -35191,7 +35191,8 @@ drive.scenarioCutDefer()
 --   (rc-room)  實機停點（K 前 2.5m、已在圓角上）試改線＝cut none room（1114e 的失敗型照樣重現：問題在停點，不在驗線）。
 --   (rc-cut)   新停點試改線：承諾、改線掃過門柱縫（cutover why=cut）。
 --   (rc-same)  倒車後的位置 (5226.8,15402.3)：第一條撞 (5221.5,15403.5) 後，離那根沒有遠過 CORNER_CUT_SAME_M 的候選不掃、
---              不佔 CORNER_CUT_MAX 名額，池（CORNER_CUT_POOL）裡較遠的候選掃過承諾（1114e：4 條全撞同一根＝cut none sweep）。
+--              不佔 CORNER_CUT_MAX 名額，池（CORNER_CUT_POOL）裡較遠的候選掃得到（1114e：4 條全撞同一根＝cut none sweep）。1114j 起
+--              那條較遠的（lin −2.5）加圓角落後包絡也撞同一根＝cut none，斷言改鎖「名額掃到較遠那條」。
 --   (rc-exit)  出口：在 K 試過改線、換嘗試、車已過停點（cut skip kind=stop why=past）都回原停止線。
 --   違規證明（temp/s1114-cut/vp/）：blockStopDist 不用 cutStop、cutStopNote 不查轉角區、不查試過、拿掉同 hit 略過，各自紅。
 function drive.scenarioCutRC()
@@ -35416,10 +35417,16 @@ function drive.scenarioCutRC()
                 if h then hits[#hits + 1] = h end
             end
         end
-        checkTrue(cm ~= nil and s1.pendingRouteWhy == "cut",
-            "(rc-same) 倒車後：撞過 (5221.5,15403.5) 的近似候選不再佔掃掠名額、池裡較遠的候選承諾（" .. (cm and string.format(
+        -- 1114j：池裡較遠的那條（lin −2.5，舊制 m 0.006 收下）加圓角落後包絡＝lag 檔撞同一根（包絡弧前漸變段車身尾往外甩），沒有承諾；
+        -- 這裡鎖的是多樣性本身：近似候選略過（nsk）、掃掠名額留給池裡較遠的線（c1..c4 有 lin −2.5 那條）。
+        local far = false
+        for _, c in ipairs({ n1 and n1.c1, n1 and n1.c2, n1 and n1.c3, n1 and n1.c4 }) do
+            if c and c:find("lin=-2.50", 1, true) then far = true end
+        end
+        checkTrue(cm ~= nil and s1.pendingRouteWhy == "cut" or (n1 ~= nil and (n1.nsk or 0) >= 4 and far),
+            "(rc-same) 倒車後：撞過 (5221.5,15403.5) 的近似候選不再佔掃掠名額、名額掃到池裡較遠的候選（" .. (cm and string.format(
                 "T=%.1f,%.1f lin=%.1f lout=%.1f", cm.tx, cm.ty, cm.lin, cm.lout) or ("none why=" .. tostring(n1 and n1.why)
-                .. " nsk=" .. tostring(n1 and n1.nsk) .. " hits=" .. table.concat(hits, "|"))) .. "）")
+                .. " nsk=" .. tostring(n1 and n1.nsk) .. " far=" .. tostring(far) .. " hits=" .. table.concat(hits, "|"))) .. "）")
         -- (rc-exit) 車已過停點：不拉停止線、記 cut skip kind=stop why=past
         s1.wideArmed, s1.sensor.wideDone = false, false
         s1.cornerCutTried, s1.cutSkipSeen, s1.cornerCut, s1.pendingRouteWhy = nil, nil, nil, nil
@@ -35539,7 +35546,7 @@ function drive.scenarioCutRC()
         Dr.cornerCutPlan(s1, dveh, 0)
         local cm, c = cutEv("commit")[1], s1.cornerCut
         checkTrue(cm ~= nil and c ~= nil and finite(cm.m) and cm.m >= T.NUDGE_WIDEN_M and finite(cm.thin)
-                and cm.thin < T.NUDGE_WIDEN_M and cm.sweeps <= T.CORNER_CUT_MAX,
+                and cm.thin < T.NUDGE_WIDEN_M and cm.sweeps <= 2 * T.CORNER_CUT_MAX, -- 1114j：每條線本身＋落後包絡各掃一次
             "(rc-thin) car-c 停點：第一條掃過的貼縫（m " .. tostring(cm and cm.thin) .. "）被池裡較寬的換掉（m "
                 .. tostring(cm and cm.m) .. "、lin " .. tostring(cm and cm.lin) .. " lout " .. tostring(cm and cm.lout)
                 .. "、掃掠 " .. tostring(cm and cm.sweeps) .. "）")
@@ -35613,6 +35620,98 @@ function drive.scenarioCutRC()
         checkTrue(c ~= nil and lifted == 0 and bound > 0 and not s1.dodging,
             "(rc-minexec) 逐幀：改線帽 5、沒有繞行持有，目標不被 MIN_EXEC 抬（min-exec " .. lifted .. " 幀、cut " .. bound .. " 幀）")
         Dr.keepRightTarget = oldK
+        dveh = oldD
+    end
+    -- 1114j（attack-the-premise）：掃過的改線≠車實際走的線。rc-prod-1114 R1 cutclr4/5/6 十八場在 T 的圓角內 ld 最小 −0.49～−0.875
+    --   （1114g/h el≈+0.63 靠右碰巧抵回 l＝0；1114i 釘 0 後 lat −0.5～−0.6、van-a／van-b 擦燈柱 (5220.5,15412.5)、car-b 卡死）。
+    --   離線閉環（temp/s1114-cut/exp_cut_lag.lua，test_follower 同款 plant）在同樣 18 條改線上只量到 0.1–0.2——harness 沒有車輛運動、
+    --   plant 量不到，所以改用實測包絡掃（Drive.cutEnvelope）。
+    --   (rc-lag-env)  包絡線：弧內往彎內平移 lag、弧前 RAMP、弧後 TAIL 線性漸變、之外不動。
+    --   (rc-lag-side) Drive.cutNearSide：最近距離與側別（右法向側＝1）。
+    --   (rc-lag)      1114h／1114i 實機承諾的線（car-c 停點 lin −2.5／lout −0.5、van-a 停點 lin −3／lout −0.5）加實測落後＝lag 檔撞
+    --                 (5220.5,15412.5)；同一條線不掃包絡（CUT_LAG_M＝0）照舊收——紅的就是落後包絡。
+    --   (rc-lag-van)  van-a 停點整套規劃：lag 檔打掉 lout −0.5 那群後，出臂移到燈柱東側的線不被當 same 略過，有承諾、包絡淨距 ≥ 0。
+    do
+        local sc0 = { lx = {}, ly = {}, lsq = {}, ltx = {}, lty = {}, ex = {}, ey = {} }
+        for q = 1, 25 do sc0.lx[q], sc0.ly[q], sc0.lsq[q], sc0.ltx[q], sc0.lty[q] = q - 1, 0, q - 1, 1, 0 end
+        Dr.cutEnvelope(sc0, 25, 0.8, -1, 10, 14)
+        -- 取樣 q 在 s＝q−1；期望 y（RAMP 2、TAIL 6）：s≤8＝0、s9＝−0.4、s10–14＝−0.8、s17＝−0.4、s≥20＝0
+        local want = { [1] = 0, [9] = 0, [10] = -0.4, [11] = -0.8, [13] = -0.8, [15] = -0.8, [18] = -0.4, [21] = 0, [25] = 0 }
+        local bad = {}
+        for q, yw in pairs(want) do
+            if math.abs(sc0.ey[q] - yw) > 1e-9 or math.abs(sc0.ex[q] - sc0.lx[q]) > 1e-9 then
+                bad[#bad + 1] = string.format("s%d %.3f/%.3f", q - 1, sc0.ey[q], yw)
+            end
+        end
+        checkTrue(#bad == 0 and T.CUT_LAG_RAMP_M == 2 and T.CUT_LAG_TAIL_M == 6,
+            "(rc-lag-env) 弧 [10,14] 內往彎內（左＝y 負）0.8、弧前 2 m／弧後 6 m 漸變、之外不動（" .. table.concat(bad, " ") .. "）")
+        local dR, sR = Dr.cutNearSide(sc0, 25, 5, 1.5)
+        local dL, sL = Dr.cutNearSide(sc0, 25, 7, -2)
+        checkTrue(math.abs(dR - 1.5) < 1e-6 and sR == 1 and math.abs(dL - 2) < 1e-6 and sL == -1,
+            "(rc-lag-side) 右法向側（y 正）＝1、左＝−1（" .. tostring(dR) .. "/" .. sR .. "、" .. tostring(dL) .. "/" .. sL .. "）")
+    end
+    do
+        local oldD, oldLag = dveh, T.CUT_LAG_M
+        local vanV = newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }), scriptName = "Base.VanAmbulance",
+            engineRunning = true, mass = 1129, speed = 0, maxSpeed = 70, bodyW = 1.70, bodyL = 4.24, wheelZ = 1.28,
+            comX = 0, comZ = 0, profileFull = true, enginePower = 3000, brakingForce = 80,
+            wheelFriction = 1.7, tireFriction = 1.5 })
+        local function tryLine(veh, x, y, hd, lin, lout)
+            dveh = veh
+            local s1 = arm(x, y, hd)
+            snap(s1, true)
+            local g, iK, dh = gRC(s1)
+            local nc = Dr.cutGrid(s1, s1.profileRoute.pts, iK, dh, T.CORNER_CUT_PAIRS)
+            local sc = Dr.cutScratchOf(s1)
+            for q = 1, nc do
+                if math.abs(sc.lin[q] - lin) < 1e-6 and math.abs(sc.lout[q] - lout) < 1e-6 then
+                    local why, c = Dr.cornerCutTry(s1, g, lin, lout, sc.win[q], sc.wout[q])
+                    return why, c, g
+                end
+            end
+            return "grid", nil, g
+        end
+        local rows = {
+            { "h car-c", carV, 5231.3515625, 15402.34375, 3.1104093843688467, -2.5, -0.5 },
+            { "i van-a", vanV, 5230.8515625, 15402.4375, 3.1010451552816036, -3, -0.5 },
+        }
+        for _, r in ipairs(rows) do
+            local why, c, g = tryLine(r[2], r[3], r[4], r[5], r[6], r[7])
+            T.CUT_LAG_M = 0
+            local why0, c0, g0 = tryLine(r[2], r[3], r[4], r[5], r[6], r[7])
+            T.CUT_LAG_M = oldLag
+            checkTrue(why == "sweep" and c == nil and g.hTier == "lag" and finite(g.hx) and math.abs(g.hx - 5220.5) < 0.6
+                    and math.abs(g.hy - 15412.5) < 0.6 and why0 == nil and c0 ~= nil and c0.m >= 0,
+                "(rc-lag) " .. r[1] .. " 實機承諾的線 lin " .. r[6] .. "／lout " .. r[7] .. "：加實測落後＝lag 檔撞燈柱（"
+                    .. tostring(why) .. " " .. Dr.cutCandNote(why, g, r[6], r[7]) .. "）；不掃包絡照舊收（"
+                    .. tostring(why0) .. " m " .. tostring(c0 and c0.m) .. "）")
+            -- 包絡蓋滿整個 T 的圓角：掃掠線上 [aS, aE] 的長度＝圓角弧長 r·θ（θ＝T 前後兩段的夾角，取自候選折線；弦長略短，容 15%）
+            local arcLen, span = nil, nil
+            if c0 then
+                for j = 2, c0.cn - 1 do
+                    if c0.ck[j - 1] == 2 then
+                        local h1 = math.atan(c0.cy[j] - c0.cy[j - 1], c0.cx[j] - c0.cx[j - 1])
+                        local h2 = math.atan(c0.cy[j + 1] - c0.cy[j], c0.cx[j + 1] - c0.cx[j])
+                        local th = math.abs((h2 - h1 + math.pi) % (2 * math.pi) - math.pi)
+                        arcLen = c0.r * th
+                    end
+                end
+                span = finite(g0.aS) and finite(g0.aE) and g0.aE - g0.aS or nil
+            end
+            checkTrue(arcLen ~= nil and span ~= nil and math.abs(span - arcLen) < 0.15 * arcLen,
+                "(rc-lag) " .. r[1] .. " 包絡範圍蓋滿 T 的圓角（" .. tostring(span) .. "／r·θ " .. tostring(arcLen) .. "）")
+        end
+        dveh = vanV
+        local s1 = arm(5230.8515625, 15402.4375, 3.1010451552816036)
+        snap(s1, true)
+        clearEv()
+        Dr.cornerCutPlan(s1, dveh, 0)
+        local cm, c = cutEv("commit")[1], s1.cornerCut
+        checkTrue(cm ~= nil and c ~= nil and finite(cm.m) and cm.m >= 0 and cm.lout <= -4,
+            "(rc-lag-van) van-a 停點：lag 檔打掉 lout −0.5 那群後，燈柱東側的出臂線有承諾（lin " .. tostring(cm and cm.lin)
+                .. " lout " .. tostring(cm and cm.lout) .. " m " .. tostring(cm and cm.m) .. "；none "
+                .. tostring(cutEv("none")[1] and cutEv("none")[1].c1) .. "）")
+        s1.cornerCut, s1.pendingRouteWhy = nil, nil
         dveh = oldD
     end
     Dr.stop(0, nil)
