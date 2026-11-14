@@ -34641,9 +34641,10 @@ function drive.scenarioCornerCut()
         checkTrue(apply ~= nil and apply.why == "deviation" and hasVertexNear(st.profileRoute, c.tx, c.ty)
                 and st.cornerCut == c,
             "(cut-reapply) 同目標偏航重算：重套改線（apply why=" .. tostring(apply and apply.why) .. "）")
-        -- (cut-drop) 車過 B：下一次重算丟棄
+        -- (cut-drop) 車過完改線（1114i：車尾過 B 與掃掠淨距最小點＝出臂座標過 c.passU）：下一次重算丟棄
         clearEv()
-        dveh._x, dveh._y = c.bx, c.by - 2
+        dveh._x = c.kx + (c.passU + 2) * c.ox - c.lout * c.oy
+        dveh._y = c.ky + (c.passU + 2) * c.oy + c.lout * c.ox
         setHeading(dveh, -math.pi / 2)
         drive.nav.route = lroute()
         nowMs = nowMs + 400
@@ -35474,14 +35475,14 @@ function drive.scenarioCutRC()
         checkTrue(why == "sweep" and g.hTier == "plan",
             "(rc-a) 1114f 承諾的那條 lin −2 lout −0.5：plan 檔撞＝拒收（" .. tostring(why) .. " hit=" .. tostring(g.hx) .. ","
                 .. tostring(g.hy) .. " win=" .. tostring(win) .. "）")
-        -- (rc-cap) 改線段速度帽：承諾帶 m／cap，持有改線、車還沒過 B 時目標壓到 cap（記 capReason cut），過 B 不壓
+        -- (rc-cap) 改線段速度帽：承諾帶 m／cap，持有改線、車還沒過完（出臂座標 ≤ passU）時目標壓到 cap（記 capReason cut），過完不壓
         if cm then
-            s1.cornerCut = { cap = cm.cap, bx = 5218.5, by = KY + 20, ox = g.ox, oy = g.oy }
+            s1.cornerCut = { cap = cm.cap, kx = KX, ky = KY, ox = g.ox, oy = g.oy, passU = 20 }
             local t1 = Dr.cutCap(s1, 40, 5220, 15410)
             local r1 = s1.lastCapReason
             local t2 = Dr.cutCap(s1, 40, 5218.5, KY + 21)
-            checkTrue(finite(cm.cap) and cm.cap <= T.DODGE_CRAWL_MID_KMH + 1e-6 and t1 == cm.cap and r1 == "cut" and t2 == 40,
-                "(rc-cap) 承諾帶速度帽 cap=" .. tostring(cm.cap) .. "（m=" .. tostring(cm.m) .. "），B 前壓到帽、過 B 不壓（"
+            checkTrue(finite(cm.cap) and cm.cap > 0 and t1 == cm.cap and r1 == "cut" and t2 == 40,
+                "(rc-cap) 承諾帶速度帽 cap=" .. tostring(cm.cap) .. "（m=" .. tostring(cm.m) .. "），過完前壓到帽、過完不壓（"
                     .. tostring(t1) .. "/" .. tostring(r1) .. "/" .. tostring(t2) .. "）")
             s1.cornerCut = nil
         end
@@ -35523,6 +35524,96 @@ function drive.scenarioCutRC()
                 and math.abs(ex - math.min(n1.steep, T.UNSTICK_STEEP_MAX_M)) < 1e-6 and ex2 == 0,
             "(rc-runway) room：cut none steep＝" .. tostring(n1 and n1.steep) .. "、下一次倒車多退 " .. tostring(ex)
                 .. "、再下一次不再加（" .. tostring(ex2) .. "；" .. tostring(n1 and n1.why) .. "）")
+    end
+    -- 1114i：rc-prod-1114 R1 1114h car-c（唯一接觸）。停點照實機 (5231.35,15402.34)、航向 3.1104、實測車身。
+    --   (rc-thin)    候選池照一般繞行的拓寬標準：掃過但 m < NUDGE_WIDEN_M＝記下往下找，採 m 最大的（實機 m 0.02；舊制第一條就收）。
+    --   (rc-pass)    速度帽放到車尾過 B 與掃掠淨距最小點（c.passU）；1114g 車心過 B 就放。
+    --   (rc-minexec) 改線持有、帽低於 MIN_EXEC：歸 CRAWL（Drive.crawlIntentArg），GO 的 MIN_EXEC 地板不抬（實機停留放掉後帽 5→8）。
+    --   (rc-lane)    cutover 後常駐線＝掃過的改線（l＝0）：入臂留下的靠右 0.374 不帶進新剖面（實機 el 0.374、起停留繞行 −0.5）。
+    do
+        local oldD, oldK = dveh, Dr.keepRightTarget
+        dveh = carV
+        local s1 = arm(5231.3515625, 15402.34375, 3.1104093843688467)
+        snap(s1, true)
+        clearEv()
+        Dr.cornerCutPlan(s1, dveh, 0)
+        local cm, c = cutEv("commit")[1], s1.cornerCut
+        checkTrue(cm ~= nil and c ~= nil and finite(cm.m) and cm.m >= T.NUDGE_WIDEN_M and finite(cm.thin)
+                and cm.thin < T.NUDGE_WIDEN_M and cm.sweeps <= T.CORNER_CUT_MAX,
+            "(rc-thin) car-c 停點：第一條掃過的貼縫（m " .. tostring(cm and cm.thin) .. "）被池裡較寬的換掉（m "
+                .. tostring(cm and cm.m) .. "、lin " .. tostring(cm and cm.lin) .. " lout " .. tostring(cm and cm.lout)
+                .. "、掃掠 " .. tostring(cm and cm.sweeps) .. "）")
+        if c then
+            local bx, by = c.cx[c.cn - 1], c.cy[c.cn - 1]
+            local uB = (bx - c.kx) * c.ox + (by - c.ky) * c.oy
+            local hl = s1.vehicleProfile.halfL
+            local function at(u) return c.kx + u * c.ox - c.lout * c.oy, c.ky + u * c.oy + c.lout * c.ox end
+            local x1, y1 = at(uB + 1)
+            local tA = Dr.cutCap(s1, 40, x1, y1)
+            local x2, y2 = at(c.passU + 0.1)
+            local tB = Dr.cutCap(s1, 40, x2, y2)
+            checkTrue(c.passU >= uB + hl - 1e-6 and tA == c.cap and tB == 40,
+                "(rc-pass) 車心過 B 1 m（車尾還沒過）照壓帽、過 passU 才放（passU " .. string.format("%.2f", c.passU)
+                    .. "、B " .. string.format("%.2f", uB) .. "、halfL " .. hl .. "；" .. tostring(tA) .. "/" .. tostring(tB) .. "）")
+            -- (rc-pass) 掃掠淨距最小點（Drive.cutPassU 的 mi）在 B 之後：放帽點蓋到車尾過那個點；在 B 之前：照 B。這個停點的掃掠
+            -- 只到出臂窗尾＋bodyReach（在 B 之前），點雲湊不出「最小點在 B 後」，直接給 cutPassU 一個出臂上 B 後 3 m、r 0.3 的點。
+            local fake = { hardX = {}, hardY = {}, hardR = { 0.3 } }
+            fake.hardX[1], fake.hardY[1] = at(uB + 3)
+            local pHit = Dr.cutPassU(c, uB, fake, 1, hl)
+            fake.hardX[1], fake.hardY[1] = at(uB - 3)
+            local pPre = Dr.cutPassU(c, uB, fake, 1, hl)
+            checkTrue(math.abs(pHit - (uB + 3.3 + hl)) < 1e-6 and math.abs(pPre - (uB + hl)) < 1e-6,
+                "(rc-pass) 淨距最小點在 B 後 3 m：放帽點蓋到車尾過它（" .. string.format("%.2f／%.2f", pHit, uB + 3.3 + hl)
+                    .. "）；在 B 前照 B（" .. string.format("%.2f／%.2f", pPre, uB + hl) .. "）")
+            local x0, y0 = at(uB - 3)
+            Dr.cutCap(s1, 40, x0, y0)
+            local crawlHeld = Dr.crawlIntentArg(s1)
+            local capHeld = s1.cutCapKmh
+            local sv = c.cap
+            c.cap = 5
+            Dr.cutCap(s1, 40, x0, y0)
+            local crawl5 = Dr.crawlIntentArg(s1)
+            c.cap = sv
+            Dr.cutCap(s1, 40, x2, y2)
+            local crawlOff = Dr.crawlIntentArg(s1)
+            checkTrue(crawl5 == true and crawlOff == false and capHeld == c.cap
+                    and crawlHeld == (c.cap < MDADDynamics.MIN_EXEC_KMH),
+                "(rc-minexec) 改線持有、帽 5＜MIN_EXEC：歸 CRAWL（GO 的 MIN_EXEC 地板不抬）；過完不歸（" .. tostring(crawl5) .. "/"
+                    .. tostring(crawlOff) .. "）")
+        end
+        -- (rc-lane) cutover：靠右目標 0.374（實機 laneBias=1、路寬 15）帶進來的話常駐線不是掃過的改線
+        Dr.keepRightTarget = function() return 0.374 end
+        s1.sandBias = 0.374
+        for _ = 1, 6 do
+            nowMs = nowMs + 50
+            dveh._speed, dveh._stopped = 0, true
+            driveTick(dp, dveh)
+        end
+        local lbCut = s1.fstate.laneBias
+        drive.scanRound(true)
+        local lbRound, held = s1.residentBias, s1.cutHeld
+        checkTrue(c ~= nil and s1.cornerCut == c and held == true and finite(lbCut) and math.abs(lbCut) < 1e-9
+                and finite(lbRound) and math.abs(lbRound) < 1e-9,
+            "(rc-lane) cutover 後常駐線＝掃過的改線 l＝0（cutover laneBias " .. tostring(lbCut) .. "、掃描輪 resident "
+                .. tostring(lbRound) .. "、held " .. tostring(held) .. "）")
+        -- (rc-minexec) 逐幀：car-c 承諾的帽 5、沒有繞行持有（停留已被判堵放掉）、車 5 km/h 跟線：目標不得被 MIN_EXEC 抬到 8
+        local lifted, bound = 0, 0
+        if c then
+            local sv = c.cap
+            c.cap = 5
+            for _ = 1, 30 do
+                nowMs = nowMs + 50
+                dveh._speed, dveh._stopped = 5, false
+                driveTick(dp, dveh)
+                if s1.lastCapReason == "min-exec" then lifted = lifted + 1 end
+                if s1.lastCapReason == "cut" then bound = bound + 1 end
+            end
+            c.cap = sv
+        end
+        checkTrue(c ~= nil and lifted == 0 and bound > 0 and not s1.dodging,
+            "(rc-minexec) 逐幀：改線帽 5、沒有繞行持有，目標不被 MIN_EXEC 抬（min-exec " .. lifted .. " 幀、cut " .. bound .. " 幀）")
+        Dr.keepRightTarget = oldK
+        dveh = oldD
     end
     Dr.stop(0, nil)
     MDADDiagnostics.event, MDADDiagnostics.sample = oldEvent, oldSample

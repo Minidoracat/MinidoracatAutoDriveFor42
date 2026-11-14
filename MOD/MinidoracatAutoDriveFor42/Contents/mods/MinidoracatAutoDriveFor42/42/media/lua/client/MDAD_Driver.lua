@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1114h"
+Drive.REV = "1114i"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -6877,12 +6877,15 @@ function Drive.waitHoldArg(s, blockedStop)
 end
 
 -- classifyIntent 的 squeeze 參數（CRAWL：GO 的 MIN_EXEC 地板不抬）：貼縫爬行、軟障礙爬行、繞行接近包絡持續低於
--- MIN_EXEC、停下之後窄線爬行帽低於 MIN_EXEC（Drive.proofTightCap，1006p——不歸 CRAWL 會被抬回 8 km/h）。
+-- MIN_EXEC、停下之後窄線爬行帽低於 MIN_EXEC（Drive.proofTightCap，1006p——不歸 CRAWL 會被抬回 8 km/h）、改線段速度帽
+-- 低於 MIN_EXEC（Drive.cutCap，1114i；rc-prod-1114 R1 1114h car-c：停留繞行被判堵放掉後 dodgeCrawl 失效，帽 5 被抬到 8、
+-- 車在 r 4.58 的圓角內切 0.6–0.9 m 擦門柱）。
 function Drive.crawlIntentArg(s)
     return s.dodgeCrawl == true or s.softCrawl == true
         or (s.dodging and (s.dodgeEnvN or 0) >= 2
             and finite(s.dodgeApproachCap) and s.dodgeApproachCap < MDADDynamics.MIN_EXEC_KMH)
         or (finite(s.proofTightCap) and s.proofTightCap < MDADDynamics.MIN_EXEC_KMH)
+        or (finite(s.cutCapKmh) and s.cutCapKmh < MDADDynamics.MIN_EXEC_KMH)
 end
 
 -- 這幀的 WAIT 只來自動物停等（沒有停止線／繞行延後／起步近物／回線待命／可視上限／會車停等）：
@@ -14153,24 +14156,42 @@ function Drive.cutScratchOf(s)
     return sc
 end
 
--- 車已經過改線的 B（出臂偏移直線的尾端，沿出臂方向量）。
-function Drive.cutPassed(c, vx, vy)
-    return (vx - c.bx) * c.ox + (vy - c.by) * c.oy > 0
+-- 改線的「過完」點（1114i；出臂座標，從 K 沿 o 量）：車尾過 B（出臂偏移直線的尾端 uB），也過改線掃掠淨距最小的那個硬點
+-- （sen 的第 mi 點，出臂座標＋半徑；Drive.cornerCutTry 掃掠的第 8 回傳）。回車心要超過的值（＋halfL）。1114g 只看車心過 B：B 在出臂
+-- 第二道門 (y≈15424.5) 旁，車心過 B 時車尾還在門柱旁。掃掠只到出臂窗尾＋bodyReach，通常在 B 之前；窗尾越過 B 時由最小點蓋到。
+function Drive.cutPassU(c, uB, sen, mi, halfL)
+    local u = uB
+    if mi and finite(sen.hardX[mi]) and finite(sen.hardY[mi]) then
+        local uH = (sen.hardX[mi] - c.kx) * c.ox + (sen.hardY[mi] - c.ky) * c.oy + (sen.hardR[mi] or 0)
+        if uH > u then u = uH end
+    end
+    return u + halfL
 end
 
--- 改線段速度帽（1114g）：持有改線、車還沒過 B＝目標不超過承諾時算的 c.cap（Drive.cornerCutPlan；掃掠淨距換的速度），
--- 判堵、繞行、守護各模式都套（rc-prod-1114 R1 1114f car-c：判堵後的接近包絡把車在圓角出口加到 19.8 km/h）。過 B 由
--- Drive.cornerCutFor／cornerCutPlan 丟改線，帽跟著解除。
+-- 車已經過完改線（1114i）：車心沿出臂座標超過 c.passU（Drive.cutPassU）。丟改線（cut drop passed）與放速度帽共用。
+function Drive.cutPassed(c, vx, vy)
+    return (vx - c.kx) * c.ox + (vy - c.ky) * c.oy > c.passU
+end
+
+-- 改線段速度帽（1114g）：持有改線、車還沒過完（Drive.cutPassed）＝目標不超過承諾時算的 c.cap（Drive.cornerCutPlan；掃掠淨距換的
+-- 速度），判堵、繞行、守護各模式都套（rc-prod-1114 R1 1114f car-c：判堵後的接近包絡把車在圓角出口加到 19.8 km/h）。
+-- s.cutCapKmh／s.cutHeld＝這一幀改線還持有（帽低於 MIN_EXEC 時 Drive.crawlIntentArg 歸 CRAWL、GO 的 MIN_EXEC 地板不抬，
+-- 同 proofTightCap；常駐 lane 釘在改線上，見 stepFollow 掃描輪）。過完由 Drive.cornerCutFor／cornerCutPlan 丟改線。
 function Drive.cutCap(s, targetSpeed, vx, vy)
     local c = s.cornerCut
-    if not c or not finite(c.cap) or Drive.cutPassed(c, vx, vy) or targetSpeed <= c.cap then return targetSpeed end
+    if not c or not finite(c.cap) or Drive.cutPassed(c, vx, vy) then
+        s.cutCapKmh, s.cutHeld = nil, false
+        return targetSpeed
+    end
+    s.cutCapKmh, s.cutHeld = c.cap, true
+    if targetSpeed <= c.cap then return targetSpeed end
     s.lastCapReason = "cut"
     return c.cap
 end
 
 function Drive.cornerCutDrop(s, playerNum, why)
     local c = s.cornerCut
-    s.cornerCut = nil
+    s.cornerCut, s.cutCapKmh, s.cutHeld = nil, nil, false
     if c then diagEvent(s, playerNum, "cut", { phase = "drop", why = why, kx = c.kx, ky = c.ky }) end
 end
 
@@ -14297,7 +14318,7 @@ function Drive.cornerCutTry(s, g, lin, lout, win, wout)
     cx[m], cy[m], ck[m - 1] = g.kx + uM * g.ox, g.ky + uM * g.oy, 4
     local c = { kx = g.kx, ky = g.ky, ix = g.ix, iy = g.iy, ox = g.ox, oy = g.oy, uP = uP, uM = uM,
         cn = m, cx = cx, cy = cy, ck = ck, wIn = win, wOut = wout, lin = lin, lout = lout,
-        tx = cx[tm], ty = cy[tm], bx = cx[m - 1], by = cy[m - 1] }
+        tx = cx[tm], ty = cy[tm] }
     local full = Drive.cornerCutRoute(s.profileRoute, c)
     if not full then return "room" end
     -- 局部窗：改線折線前後各延到下一個 >3° 的頂點（共線臂鏈不切斷，圓角的臂長預算＝begin 建整條路線時的同一份）
@@ -14409,7 +14430,7 @@ function Drive.cornerCutTry(s, g, lin, lout, win, wout)
         g.nocov = "plan"
         return "cover"
     end
-    local okS, mS, _, _, skS, oxS, oyS = sweepLine(s, lx, ly, ln, lS0, lS1, lS0, lS0, lS1, lS1, 0, "cut", nb, 1,
+    local okS, mS, _, _, skS, oxS, oyS, miS = sweepLine(s, lx, ly, ln, lS0, lS1, lS0, lS0, lS1, lS1, 0, "cut", nb, 1,
         false, false)
     if not okS then
         g.hTier, g.hm, g.hx, g.hy = "plan", mS, oxS, oyS
@@ -14433,6 +14454,7 @@ function Drive.cornerCutTry(s, g, lin, lout, win, wout)
     -- 掃過的那條線留在候選上（cutover 後新剖面要與它逐點一致：承諾線＝掃過的線；smoke (cut-equiv)）；m＝這條線的掃掠淨距（速度帽）
     c.tier, c.m, c.swn, c.swx, c.swy = "plan", mS, ln, {}, {}
     for q = 1, ln do c.swx[q], c.swy[q] = lx[q], ly[q] end
+    c.passU = Drive.cutPassU(c, uB, sen, miS, vp.halfL)
     -- 出臂下一群：出臂窗尾（u′＝T 後 zarm）投影回剖面的弧長之後，以改線出臂（剖面上 l≈l_out）當行駛基準線問 Corridor.plan，
     -- 整寬牆（blocked）＝不收。點雲用同一份完成快照（擋線判定照舊用形狀位置 hardLc／hardW）。
     local prof = s.profile
@@ -14726,15 +14748,21 @@ function Drive.cornerCutPlan(s, vehicle, playerNum)
         vx = vx, vy = vy, adh = adh, inW = finite(sw and sw[iK - 1]) and sw[iK - 1] or 0,
         outW = finite(sw and sw[iK]) and sw[iK] or 0 }
     local rank = { room = 1, kin = 2, cover = 3, sweep = 4, wall = 5 }
-    local why, cut, notes, nn, nsk, swept = "grid", nil, {}, 0, 0, 0
+    local why, cut, notes, nn, nsk, swept, thin = "grid", nil, {}, 0, 0, 0, nil
     for q = 1, nc do
         g.swept = false
         local w, c = Drive.cornerCutTry(s, g, sc.lin[q], sc.lout[q], sc.win[q], sc.wout[q])
         if c then
-            cut = c
-            break
-        end
-        if w == "same" then
+            -- 貼縫照一般繞行的拓寬標準（TUNE.NUDGE_WIDEN_M：貼縫追線的落後實測 0.25–0.4）：掃過但 m 小於它＝記下、往池裡（成本序）
+            -- 找更寬的，到 m 夠了或掃掠名額用完為止，採 m 最大的那條；不否決通行（1114i；rc-prod-1114 R1 1114h car-c 承諾 m 0.02
+            -- 那條、圓角內切 0.6–0.9 m 擦門柱）。m 是掃掠結果、掃之前不知道，所以不進格網成本。
+            if not cut then
+                cut = c
+            elseif c.m > cut.m then
+                thin, cut = thin or cut.m, c
+            end
+            if c.m >= TUNE.NUDGE_WIDEN_M then break end
+        elseif w == "same" then
             nsk = nsk + 1
         else
             if nn < 4 then
@@ -14784,7 +14812,8 @@ function Drive.cornerCutPlan(s, vehicle, playerNum)
     local w = math.min(cut.wIn, cut.wOut)
     diagEvent(s, playerNum, "cut", { phase = "commit", kx = kx, ky = ky, tx = cut.tx, ty = cut.ty, lin = cut.lin,
         lout = cut.lout, w = w < MDADCorridor.CUT_BIG and w or nil, r = cut.r, tier = cut.tier, lvl = lvl, np = np,
-        nc = nc, sweeps = sweeps, wms = Drive.replanElapsed(s), ms = ms, m = cut.m, cap = cut.cap })
+        nc = nc, sweeps = sweeps, wms = Drive.replanElapsed(s), ms = ms, m = cut.m, cap = cut.cap,
+        thin = thin }) -- 1114i：先掃過但貼縫、被較寬的換掉的那條的 m（沒換＝缺）
     if getDebug() then -- telemetry: cut commit 事件
         print(string.format("%spn=%d corner cut commit: K=(%.1f,%.1f) T=(%.1f,%.1f) lin=%.2f lout=%.2f r=%s tier=%s",
             LOG, playerNum, kx, ky, cut.tx, cut.ty, cut.lin, cut.lout, tostring(cut.r), cut.tier))
@@ -16919,6 +16948,10 @@ local function stepFollow(s, vehicle, playerNum, now)
                 if not s.sensor.wideDone then
                     s.sandBias = s.sandBias + (Drive.keepRightTarget(s) - s.sandBias) * TUNE.ROAD_EMA
                 end
+                -- 改線持有、車還沒過完（s.cutHeld，Drive.cutCap）：常駐線＝掃過的改線（新剖面 l＝0），不靠右、不路面對中（1114i；
+                -- rc-prod-1114 R1 1114h car-c：cutover 後常駐線是入臂留下的靠右 0.37，規劃器以那條判擋、起停留繞行 offL −0.5，
+                -- 車離開掃過的改線往圓角內側走）。放開後 sandBias 照 EMA 走回靠右目標。
+                if s.cutHeld then s.sandBias, s.roadBias = 0, 0 end
                 local nb = s.sandBias + s.roadBias
                 if nb > TUNE.BIAS_MAX then nb = TUNE.BIAS_MAX
                 elseif nb < -TUNE.BIAS_MAX then nb = -TUNE.BIAS_MAX end
@@ -19221,6 +19254,7 @@ local function onPlayerUpdate(player)
             s.trafficLane, s.trafficPlan = nil, nil -- 換弧長座標系：錯車側移從新路線常駐線重來
             s.trfLeadGap, s.trfOnGap, s.trfOnWant, s.trfOnYield = nil, nil, nil, false
             s.trfLeadId = nil -- 前車辨識與保持綁舊路線弧長（Drive.followLead 的出口之一）
+            if s.cornerCut then s.sandBias = 0 end -- 套了改線：常駐線＝掃過的改線（見掃描輪 s.cutHeld）
             MDADFollower.setLaneBias(s.fstate, s.sandBias)
             Drive.transitionRelease(s, playerNum, "route", nil) -- 保持的 lane 是舊路線座標
             if s.sensor then s.sensor.scanBias = s.sandBias end
