@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1114o"
+Drive.REV = "1114p"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -11596,28 +11596,43 @@ function Drive.extendDodgeExit(s, sen, playerNum)
         if cov < room then room = cov end
         if room < have + TUNE.EXIT_EXTEND_MIN_M then return false end
     end
-    -- 加長不得把線在停點處的偏移推出到站圈（1114h，Drive.endFit 以 b＝c 只縮出口）：縮到比現有出口短＝不加長（出口：照舊線）
-    local _, fitRoom = Drive.endFit(prof, c, c, room, fs.offL, s.dodgeBaseL)
-    if not fitRoom then return false end
-    if fitRoom < room then
-        room = fitRoom
-        if not short and room < have + TUNE.EXIT_EXTEND_MIN_M then return false end
+    -- 到站夾（1114h，Drive.endFit 以 b＝c 只縮出口）：加長後出口超過終點、停點處偏移出到站圈時，出口縮到 e（停點處剛好回到圈內）。
+    -- 只有加長會碰到：收短時 c＋room ≤ offD−2 ＜ 路線長−3（上面 offD ≥ 路線長−1 已早退），endFit 一定原樣（1114p 補測 (ext-short-end)）。
+    -- 使用者 2026-11-14 裁定「挪得進就挪、回線段照樣掃過；挪不進就照 main」（1114p）：
+    --   e ≥ 現有出口＋EXTEND_MIN＝加長到 e；現有出口 ≤ e ＜ 現有出口＋EXTEND_MIN＝不加長（現行線停點處已在圈內，照 room 加長反而出圈）；
+    --   endFit 回 nil（保持段尾貼著停點，縮到 1 m 都放不下）或 e ＜ 現有出口（現行線本來就出圈，夾不回來）＝挪不進＝照 main 加長到 room；
+    --   縮到 e 的線掃不過＝照 main 的 room 再掃一次。
+    local mainRoom = room
+    if not short then
+        local _, fitRoom = Drive.endFit(prof, c, c, room, fs.offL, s.dodgeBaseL)
+        if fitRoom and fitRoom < room and fitRoom >= have then
+            if fitRoom < have + TUNE.EXIT_EXTEND_MIN_M then return false end
+            room = fitRoom
+        end
     end
-    local d2 = c + room
-    local coverEnd = math.min(d2 + 1, prof.length)
-    local n, s0, reason, covered = MDADFollower.buildOffsetLine(prof, rs, fs.offA, fs.offB, c, d2,
-        fs.offL, s.dodgeBaseL, s.tmpOv2X, s.tmpOv2Y, nil, nil, nil, s.dodgeStartL)
-    local ok, margin, mi = false, 0, nil
-    if n >= 2 and reason == "ok" and covered >= coverEnd - 1e-6 then
-        -- 不收表：表是現行承諾線的（同一個陣列），加長掃不過時舊線要原封不動。1002r 前這裡收表，
-        -- 每次加長失敗都把現行線的逐點淨距清掉，而補掃每條線只有一次（E2E rc55 0001：33m 進入段、
-        -- 出口 3.8m，下一群擋住加長、每 2m 試一次，表清空後整段吃整線帽 10 km/h 爬 80m）。
-        local okS, mS, _, _, _, _, _, miS = sweepLine(s, s.tmpOv2X, s.tmpOv2Y, n, s0, covered,
-            fs.offA, fs.offB, c, d2, fs.offL, "extend", s.dodgeNeed, 1, true, false)
-        ok, margin, mi = okS, mS, miS
+    local d2, coverEnd, n, s0, covered, ok, margin, mi
+    for _ = 1, 2 do
+        d2 = c + room
+        coverEnd = math.min(d2 + 1, prof.length)
+        local reason
+        n, s0, reason, covered = MDADFollower.buildOffsetLine(prof, rs, fs.offA, fs.offB, c, d2,
+            fs.offL, s.dodgeBaseL, s.tmpOv2X, s.tmpOv2Y, nil, nil, nil, s.dodgeStartL)
+        ok, margin, mi = false, 0, nil
+        if n >= 2 and reason == "ok" and covered >= coverEnd - 1e-6 then
+            -- 不收表：表是現行承諾線的（同一個陣列），加長掃不過時舊線要原封不動。1002r 前這裡收表，
+            -- 每次加長失敗都把現行線的逐點淨距清掉，而補掃每條線只有一次（E2E rc55 0001：33m 進入段、
+            -- 出口 3.8m，下一群擋住加長、每 2m 試一次，表清空後整段吃整線帽 10 km/h 爬 80m）。
+            local okS, mS, _, _, _, _, _, miS = sweepLine(s, s.tmpOv2X, s.tmpOv2Y, n, s0, covered,
+                fs.offA, fs.offB, c, d2, fs.offL, "extend", s.dodgeNeed, 1, true, false)
+            ok, margin, mi = okS, mS, miS
+        end
+        if ok and MDADFollower.setOffset(fs, fs.offA, fs.offB, c, d2, fs.offL,
+                s.tmpOv2X, s.tmpOv2Y, n, s0, covered, coverEnd) then break end
+        ok = false
+        if room == mainRoom then break end
+        room = mainRoom -- 到站夾的那條掃不過＝照 main 的長度再試
     end
-    if not ok or not MDADFollower.setOffset(fs, fs.offA, fs.offB, c, d2, fs.offL,
-            s.tmpOv2X, s.tmpOv2Y, n, s0, covered, coverEnd) then
+    if not ok then
         s.dodgeExtendFailS = rs
         return false
     end

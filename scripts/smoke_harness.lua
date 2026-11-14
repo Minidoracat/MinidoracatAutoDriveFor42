@@ -36708,6 +36708,163 @@ function drive.scenarioEndArrive()
             checkTrue(false, "(stay) 啟動")
         end
     end
+    -- (ext-*) 1114p：Drive.extendDodgeExit 的到站夾（Drive.endFit 以 b＝c）照使用者 2026-11-14 裁定「挪得進就挪、回線段照樣掃過；挪不進就照
+    --   main」。同一個直路長群（路線 61.5、停點 57.5、offL 5.25），每案重開一趟、真的 replan 承諾後改承諾線的 c／d 再直接呼叫：
+    --   (ext-fit)       情形 1：加長到 room 會出圈＝縮到 e：停點處偏移在圈內、新出口有重新掃掠、出口長＝e、空間帽重算。
+    --   (ext-fit-fail)  情形 1 掃不過：e 那條線取樣尾（往回線側 0.3 m）注入一個硬點、照 room 的線離它夠遠＝照 main 加長到 room。
+    --                   違規證明：掃不過不退 room＝不加長（舊制）紅。
+    --   (ext-nil)       情形 2：保持段尾貼著停點（c＝停點−0.2，endFit 回 nil）＝照 main 加長到 room。違規證明：nil 照舊不加長＝紅。
+    --   (ext-fit-past)  e ＜ 現有出口（c 56、出口 4，e≈3.3：現行線本來就出圈，夾不回來）＝挪不進＝照 main 加長到 room。
+    --                   違規證明：拿掉「e ≥ 現有出口」＝縮到比現有短＝不加長（舊制）紅。
+    --   (ext-short-end) 情形 2／3 的收短版本：收短時 c＋room ＜ offD−2 ＜ 路線長−3，endFit 一定原樣（舊制問了也不改＝情形 3 不存在），
+    --                   1114p 只在加長路徑問。offD 推到路線長−1.5、下一群（Drive.exitNextRoom 換成定值）逼到 room 10：endFit 不被呼叫
+    --                   （spy）；收短的線照樣經 sweepLine（要求覆蓋與帶），這條掃不過（帶）＝不採用、現行線不動、記 dodgeExtendFailS。
+    --                   違規證明：收短也問 endFit（舊制）＝呼叫次數紅。
+    do
+        local function extArm(cAt, have)
+            local s2 = startAt({ 0.5, 0.5, 62, 0.5 }, 20, 12, 0.5, 0)
+            local c2 = s2 and roundsToCommit(12)
+            if not (c2 and s2.dodging) then return nil end
+            local fs = s2.fstate
+            if cAt then fs.offC = cAt end
+            fs.offD = fs.offC + have
+            s2.sensor.scanEndS = 95
+            s2.dodgeExtendFailS = nil
+            return s2
+        end
+        local function lineAt(fs, sAt) -- 承諾線（fs.ov*，OV_STEP 取樣）在弧長 sAt 的世界點
+            local k = math.floor((sAt - fs.ovS0) / MDADFollower.OV_STEP) + 1
+            if k < 1 then k = 1 elseif k > fs.ovN then k = fs.ovN end
+            return fs.ovX[k], fs.ovY[k]
+        end
+        -- (ext-fit)
+        local s2 = extArm(nil, 8)
+        local okF, why, px, py = false, "前置：承諾", nil, nil
+        local stopS2, eFit = nil, nil
+        if s2 then
+            local fs, prof = s2.fstate, s2.profile
+            local c, offL, dbl = fs.offC, fs.offL, s2.dodgeBaseL
+            stopS2 = Dr.endArriveTol(prof, dbl)
+            local _, e = Dr.endFit(prof, c, c, 1e6, offL, dbl)
+            eFit = e
+            local sw0, cap0 = s2.sweepCount or 0, s2.dodgeSpaceBaseCap
+            s2.dodgeSpaceBaseCap = -1
+            local okE = Dr.extendDodgeExit(s2, s2.sensor, 0)
+            local lE = laneAt(stopS2, c, fs.offD - c, offL, dbl)
+            okF = okE == true and e ~= nil and math.abs(fs.offD - (c + e)) < 1e-6 and math.abs(s2.dodgeExitLength - e) < 1e-6
+                and math.abs(lE) <= lim + 1e-6 and (s2.sweepCount or 0) > sw0 and s2.dodgeSpaceBaseCap ~= -1
+            why = string.format("加長 %s、e %s、d %.2f、停點 lane %.3f、掃掠 %d→%d、空間帽 %s→%s", tostring(okE), tostring(e), fs.offD,
+                lE, sw0, s2.sweepCount or 0, tostring(cap0), tostring(s2.dodgeSpaceBaseCap))
+            -- (ext-fit-fail) 用的硬點：e 那條線的取樣尾（路線終點附近，e 線在那裡已收到容許內、room 線還偏得遠）、往回線側
+            --   （世界 y 往路線 y 0.5）移 0.3 m
+            if okF then
+                px, py = lineAt(fs, 1e9)
+                local _, hy = lineAt(fs, c - 1)
+                py = py + (hy > 0.5 and -0.3 or 0.3)
+            end
+        end
+        checkTrue(okF, "(ext-fit) 情形 1：縮到 e、停點處偏移在圈內、重新掃掠、空間帽重算（" .. why .. "）")
+        -- (ext-fit-fail)
+        s2 = extArm(nil, 8)
+        local okX = false
+        why = "前置：承諾或 (ext-fit) 的硬點"
+        if s2 and px then
+            local fs, sen = s2.fstate, s2.sensor
+            local c = fs.offC
+            local i = (sen.hardN or 0) + 1
+            sen.hardX[i], sen.hardY[i], sen.hardR[i], sen.hardB[i] = px, py, 0.15, 0
+            sen.hardS[i], sen.hardL[i] = px - 0.5, py - 0.5
+            if sen.hardLc then sen.hardLc[i] = py - 0.5 end
+            if sen.hardW then sen.hardW[i] = 0.15 end
+            sen.hardN = i
+            local sw0 = s2.sweepCount or 0
+            local okE = Dr.extendDodgeExit(s2, sen, 0)
+            okX = okE == true and fs.offD > c + eFit + 1 and (s2.sweepCount or 0) >= sw0 + 2
+            why = string.format("加長 %s、d %.2f（e 線尾 %.2f）、掃掠 %d→%d、硬點 (%.2f,%.2f)", tostring(okE), fs.offD, c + eFit, sw0,
+                s2.sweepCount or 0, px, py)
+        end
+        checkTrue(okX, "(ext-fit-fail) 情形 1 縮到 e 的線掃不過：照 main 加長到 room（" .. why .. "）")
+        -- (ext-nil)
+        local okN = false
+        why = "前置：承諾"
+        s2 = extArm(nil, 2)
+        if s2 then
+            local fs, prof = s2.fstate, s2.profile
+            local stopS = Dr.endArriveTol(prof, s2.dodgeBaseL)
+            fs.offC = stopS - 0.2
+            fs.offD = fs.offC + 2
+            local c = fs.offC
+            local c2 = Dr.endFit(prof, c, c, 30, fs.offL, s2.dodgeBaseL)
+            local okE = Dr.extendDodgeExit(s2, s2.sensor, 0)
+            okN = c2 == nil and okE == true and fs.offD > prof.length
+            why = string.format("endFit %s、加長 %s、d %.2f／路線長 %.2f", tostring(c2), tostring(okE), fs.offD, prof.length)
+        end
+        checkTrue(okN, "(ext-nil) 情形 2 保持段尾貼著停點、挪不進：照 main 加長到 room（" .. why .. "）")
+        -- (ext-fit-past)
+        local okP = false
+        why = "前置：承諾"
+        s2 = extArm(56, 4)
+        if s2 then
+            local fs, prof = s2.fstate, s2.profile
+            local c = fs.offC
+            local _, e = Dr.endFit(prof, c, c, 30, fs.offL, s2.dodgeBaseL)
+            local okE = Dr.extendDodgeExit(s2, s2.sensor, 0)
+            okP = e ~= nil and e < 4 and okE == true and fs.offD > c + 4 + 4 - 1e-6
+            why = string.format("e %s、加長 %s、d %.2f（c %.1f）", tostring(e), tostring(okE), fs.offD, c)
+        end
+        checkTrue(okP, "(ext-fit-past) e ＜ 現有出口（夾不回來）＝挪不進：照 main 加長到 room（" .. why .. "）")
+        -- (ext-short-end)
+        local okS = false
+        why = "前置：承諾"
+        s2 = extArm(46, 10)
+        if s2 then
+            local fs, prof = s2.fstate, s2.profile
+            local c = fs.offC
+            fs.offD = prof.length - 1.5
+            s2.dodgeExitMin = 1
+            local oldNext, oldFit, fitCalls = Dr.exitNextRoom, Dr.endFit, 0
+            Dr.exitNextRoom = function() return 10, c + 13.5, s2.dodgeBaseL + 3 end
+            Dr.endFit = function(...)
+                fitCalls = fitCalls + 1
+                return oldFit(...)
+            end
+            local sw0 = s2.sweepCount or 0
+            local okE = Dr.extendDodgeExit(s2, s2.sensor, 0)
+            Dr.exitNextRoom, Dr.endFit = oldNext, oldFit
+            -- 收短到 c＋10（短於現有 15.5、c＋10 ≤ 路線長−3）：endFit 不問；這條線回到 l 0，快照的帶跟著繞行 lane（scanBias），
+            -- sweepLine 的帶檢查（lineBandCovers）不過＝不採用：現行線原封不動、記 dodgeExtendFailS
+            okS = fitCalls == 0 and c + 10 <= prof.length - 3 and (s2.sweepCount or 0) >= sw0 and okE == false
+                and math.abs(fs.offD - (prof.length - 1.5)) < 1e-9 and s2.dodgeExtendFailS == s2.lastSNow
+                and s2.dodgeBuildReason == "band"
+            why = string.format("endFit 呼叫 %d、收短 %s、d %.2f（現行 %.2f）、失敗理由 %s", fitCalls, tostring(okE), fs.offD,
+                prof.length - 1.5, tostring(s2.dodgeBuildReason))
+        end
+        checkTrue(okS, "(ext-short-end) 收短路徑不問到站夾；收短的線經 sweepLine（要求覆蓋與帶）掃不過＝不採用、現行線不動（"
+            .. why .. "）")
+        -- 同一收短、快照的帶放寬到蓋住回線（completedBandBias＝offL/2、corridorHalf 9）：掃得過＝採用、出口＝10、空間帽重算
+        local okS2 = false
+        why = "前置：承諾"
+        s2 = extArm(46, 10)
+        if s2 then
+            local fs, prof, sen = s2.fstate, s2.profile, s2.sensor
+            local c = fs.offC
+            fs.offD = prof.length - 1.5
+            s2.dodgeExitMin = 1
+            sen.completedBandBias, sen.corridorHalf = fs.offL * 0.5, 9
+            local oldNext = Dr.exitNextRoom
+            Dr.exitNextRoom = function() return 10, c + 13.5, s2.dodgeBaseL + 3 end
+            local sw0 = s2.sweepCount or 0
+            s2.dodgeSpaceBaseCap = -1
+            local okE = Dr.extendDodgeExit(s2, sen, 0)
+            Dr.exitNextRoom = oldNext
+            okS2 = okE == true and math.abs(fs.offD - (c + 10)) < 1e-6 and math.abs(s2.dodgeExitLength - 10) < 1e-6
+                and (s2.sweepCount or 0) > sw0 and s2.dodgeSpaceBaseCap ~= -1
+            why = string.format("收短 %s、d %.2f（c＋10＝%.2f）、掃掠 %d→%d、空間帽 %s、理由 %s", tostring(okE), fs.offD, c + 10, sw0,
+                s2.sweepCount or 0, tostring(s2.dodgeSpaceBaseCap), tostring(s2.dodgeBuildReason))
+        end
+        checkTrue(okS2, "(ext-short-end) 收短的線掃得過＝採用（照 main）、重新掃掠、空間帽重算（" .. why .. "）")
+        Dr.stop(0, nil)
+    end
     -- (plain) 1114m（Codex 審查）：一般繞行（沒有改線）出口在終點前走完＝到站形狀不碰：ef 缺、承諾的 c／d 與關掉到站形狀（endFitOff）
     --   塑出的同一組。同一個直路長群、路線拉長到 200 m。違規證明：endFit 不看「出口在終點前」一律縮＝紅。
     do
