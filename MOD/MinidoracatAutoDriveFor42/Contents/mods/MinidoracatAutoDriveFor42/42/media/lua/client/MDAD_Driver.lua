@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1114k"
+Drive.REV = "1114l"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -9095,6 +9095,8 @@ end
 local function requestRecover(s, why, pulse)
     local rank = TUNE.RECOVER_RANK[why]
     if rank == nil then return end
+    -- 改線已承諾、下一幀 cutover 換線（1114l；Drive.cutLadderReset）：這一堵局改用新線，不在舊線上起倒車／側推
+    if s.pendingRouteWhy == "cut" then return end
     if s.recoverWhy ~= nil
             and (TUNE.RECOVER_RANK[s.recoverWhy] or 0) >= rank then
         return
@@ -14868,15 +14870,33 @@ function Drive.cornerCutPlan(s, vehicle, playerNum)
         math.sin(adh * 0.5)))
     s.cornerCut = cut
     s.pendingRouteWhy, s.nextRouteMs = "cut", 0
+    local fresh, rcv = Drive.cutLadderReset(s, kx, ky)
     local w = math.min(cut.wIn, cut.wOut)
     diagEvent(s, playerNum, "cut", { phase = "commit", kx = kx, ky = ky, tx = cut.tx, ty = cut.ty, lin = cut.lin,
         lout = cut.lout, w = w < MDADCorridor.CUT_BIG and w or nil, r = cut.r, tier = cut.tier, lvl = lvl, np = np,
         nc = nc, sweeps = sweeps, wms = Drive.replanElapsed(s), ms = ms, m = cut.m, cap = cut.cap, comp = cut.comp,
-        mo = cut.mo }) -- 1114k comp：圓角追線落後前饋（右正、往彎外；0＝前饋過頭那條掃不過），mo：前饋過頭那條的淨距
+        mo = cut.mo, fresh = fresh, rcv = rcv }) -- 1114k comp：圓角追線落後前饋（右正、往彎外；0＝前饋過頭那條掃不過），mo：前饋過頭那條的淨距
     if getDebug() then -- telemetry: cut commit 事件
         print(string.format("%spn=%d corner cut commit: K=(%.1f,%.1f) T=(%.1f,%.1f) lin=%.2f lout=%.2f r=%s tier=%s",
             LOG, playerNum, kx, ky, cut.tx, cut.ty, cut.lin, cut.lout, tostring(cut.r), cut.tier))
     end
+end
+
+-- 改線承諾＝這一堵局改用新線（1114l；rc-prod-1114 R1 1114k car-b／van-c：第 2 次倒車後承諾，同一幀 blocked-retry 照舊請求倒車，
+-- 帶著 room 留下的進場差額又退 4／8.4 m，離新線 3.9 m、倒車額度用完 detour through 卡死）。同一輪判堵階梯留下的恢復請求作廢
+-- （車還在滑時請求會待命到停妥才倒車，cutover 也會把它保留下來），room 的進場差額與 steep 差額清掉；承諾到 cutover 之間
+-- requestRecover、自動改道、停等預算出口都不動（pendingRouteWhy＝"cut"，cutover 當幀必換線並清掉它）。同一個 K 第一次承諾時
+-- 階梯從乾淨狀態重來（停等預算、倒車額度歸零）：cutover 後新剖面若又判堵，照一般階梯倒車、改道、交還。同一個 K 再承諾
+-- （cutover 拼不上 drop 後同一點又改線）不再歸零，額度與預算照算＝迴圈有出口。回 fresh（這次歸零了）、作廢的恢復請求原因。
+function Drive.cutLadderReset(s, kx, ky)
+    local rcv = s.recoverWhy
+    s.recoverWhy, s.recoverPulse = nil, false
+    s.cutRunway, s.blockSteepM, s.unstickExtraM = nil, -1, 0
+    local key = string.format("%.1f,%.1f", kx, ky)
+    if s.cutFreshK == key then return false, rcv end
+    s.cutFreshK = key
+    s.waitAccumMs, s.episodeAttempts, s.blockRetryDone = 0, 0, false
+    return true, rcv
 end
 
 -- cutover 時要不要重套改線（profileRouteOf 第 8 參）：換目標、改道請求（含拖車改道）、拖車、車已過 B＝丟掉（cut drop）；
@@ -17860,7 +17880,10 @@ local function stepFollow(s, vehicle, playerNum, now)
         -- 停等預算出口先定（1109c，Knox Pass E2E stuck=1）：下面的自動改道與 blocked-retry 都要 postAction==nil，預算已到期的
         -- 那幀只走交還前改道（Drive.stuckDetour）。舊制排在兩者之後：寬帶判完那幀預算已過（Drive.wideJudgePending 的寬限），
         -- 同幀先問 auto 又問 stuck，主 MOD 算兩次、多扣一次交還前改道額度。
-        if s.waitAccumMs >= TUNE.WAIT_TIMEOUT_MS and not Drive.wideJudgePending(s) then postAction = "wait" end
+        -- 改線已承諾（1114l）：預算出口等 cutover 換完線再判（同 K 再承諾不歸零預算，到期照走這裡）
+        if s.waitAccumMs >= TUNE.WAIT_TIMEOUT_MS and not Drive.wideJudgePending(s) and s.pendingRouteWhy ~= "cut" then
+            postAction = "wait"
+        end
         -- 自動改道（ESC 選項，0928m 起預設開）：blocked-retry 之後仍在停等、累計超過
         -- AUTO_DETOUR_MS 才要替代路線；一個停等 episode 只試一次，失敗＝沒替代路，
         -- 剩下交給 WAIT_TIMEOUT 紅字。玩家按 HUD「改道」鈕走同一條 Drive.requestDetour。
@@ -17875,7 +17898,7 @@ local function stepFollow(s, vehicle, playerNum, now)
         -- 只有寬帶重判用得到；舊制等待額度早已累滿，倒車一結束下一幀就再倒（E2E 0929u 連倒三次、
         -- 中間一輪寬帶都沒跑就 StopStuck）。
         local autoDetourNow = s.blocked and not s.detourTried and s.recoverWhy == nil
-            and postAction == nil and s.intentShadow == "WAIT"
+            and postAction == nil and s.intentShadow == "WAIT" and s.pendingRouteWhy ~= "cut"
             and (not s.wideArmed or s.wideJudged == s.episodeAttempts)
             and (s.waitAccumMs >= TUNE.AUTO_DETOUR_MS
                 or (s.episodeAttempts >= 1 and s.waitAccumMs >= TUNE.BLOCK_RETRY_MS))
@@ -19116,6 +19139,7 @@ local function onPlayerUpdate(player)
             s.avoidX, s.avoidY, s.avoidR, s.avoidTow, s.pendingDetour = nil, nil, nil, nil, false
             s.avoidHist = nil -- 新目標＝新的一趟，先前判死的堵點不再算
             s.avoidLong, s.stuckDetourN, s.stuckDetourX, s.stuckDetourY = nil, 0, nil, nil -- 新目標＝新的改道額度
+            s.cutFreshK = nil -- 新目標＝新的一趟：轉角改線承諾的階梯歸零額度重新算（Drive.cutLadderReset）
             s.towTurnTries, s.uturnLoopX, s.uturnLoopY = 0, nil, nil -- 新目標＝新的一趟
             s.towCornerTries, s.towCornerSig = 0, nil -- 新目標＝新的一趟（同集合不重問只限同一趟）
             s.rejectedRoute = nil

@@ -13123,6 +13123,89 @@ function drive.scenarioDetourOnce()
 end
 drive.scenarioDetourOnce()
 
+-- (cut-gate) 1114l：改線承諾到 cutover 之間（pendingRouteWhy＝"cut"，下一幀換線）判堵階梯不動——rc-prod-1114 R1 1114k car-b／van-c：
+--   第 2 次倒車後承諾，同一幀 blocked-retry 照舊請求倒車，cutover 保留請求、建好剖面就倒，離新線 3.9 m、額度用完 detour through 卡死。
+--   同 (once) 的牆前判堵（寬帶判到最寬一級），route 取線推遠＝這幾輪不 cutover：
+--   (gate-retry)  倒車額度 0、預算過 BLOCK_RETRY：不請求倒車（blocked-retry 走 requestRecover）。
+--   (gate-auto)   倒車過一次、預算過 BLOCK_RETRY：不問自動改道。
+--   (gate-wait)   預算過 WAIT_TIMEOUT：不走停等預算出口（交還前改道／交還）。
+--   (gate-exit)   換線後（pendingRouteWhy 清掉）同樣兩種狀態：照常請求倒車、照常走預算出口＝階梯從換線那刻重新開始，不會永遠不倒車。
+--   違規證明（temp/s1114-cut/vp/）：requestRecover／自動改道／預算出口各拿掉 pendingRouteWhy 的閘＝各自紅。
+function drive.scenarioCutPendingGate()
+    scenario("1114l：改線承諾到 cutover 之間判堵階梯不起倒車、不改道、不交還，換線後照常")
+    local oldAuto = MDAD.HUD.autoDetour
+    local oldEvent, oldSample = MDADDiagnostics.event, MDADDiagnostics.sample
+    local T, nav, ev = MDAD.Drive.debugTune(), drive.nav, {}
+    MDAD.HUD.autoDetour = function() return true end
+    checkTrue(armDrive(), "(cut-gate) 啟動")
+    for _, y in ipairs({ -5, -4, -2, -1, 0, 1, 2, 4, 5 }) do drive.putSolid(20, y, "harness_wall_" .. y) end
+    dveh._x = 11
+    driveTick(dp, dveh)
+    drive.scanRound()
+    dveh._speed = 0
+    driveReset(dveh)
+    driveTick(dp, dveh)
+    drive.wideRounds(true)
+    local st = MDAD.Drive.debugSession(0)
+    MDADDiagnostics.sample = function() return true end
+    st.diag = true
+    MDADDiagnostics.event = function(pn, name, a, ...)
+        if type(a) == "table" and (name == "detour" or name == "unstick") then ev[#ev + 1] = { name = name, a = a } end
+        return oldEvent(pn, name, a, ...)
+    end
+    nav.detour = { pts = { 11, 0, 11, 12, 156, 12, 156, 0 }, len = 120, cost = 120, avoidPenalty = 0, snapDist = 1 }
+    local function n(name, phase)
+        local k = 0
+        for _, e in ipairs(ev) do
+            if e.name == name and (phase == nil or e.a.phase == phase) then k = k + 1 end
+        end
+        return k
+    end
+    -- 一種判堵狀態跑一輪：pending＝改線已承諾（這幾輪不取線）；換線後改線照樣持有（cut held，passU 在很遠＝還沒過完），
+    -- 閘門只認 pendingRouteWhy、不認持有。回 本輪後還在不在跑
+    local function round(pending, att, wait)
+        st.pendingRouteWhy, st.nextRouteMs = pending, pending and nowMs + 600000 or st.nextRouteMs
+        st.cornerCut = { cap = 5, kx = 11, ky = 0, ox = 1, oy = 0, passU = 1000 }
+        st.episodeAttempts, st.waitAccumMs, st.blockRetryDone, st.recoverWhy = att, wait, false, nil
+        st.detourTried = false
+        for i = #ev, 1, -1 do ev[i] = nil end
+        nav.detourCalls = 0
+        dveh._speed = 0
+        drive.wideRounds(true)
+        return MDAD.Drive.isActive(0) and MDAD.Drive.debugSession(0) == st
+    end
+    local function desc()
+        return "recover=" .. tostring(st.recoverWhy) .. " mode=" .. tostring(st.mode) .. " unstick=" .. n("unstick", "start")
+            .. " detour=" .. n("detour") .. " calls=" .. tostring(nav.detourCalls) .. " blocked=" .. tostring(st.blocked)
+            .. " intent=" .. tostring(st.intentShadow)
+    end
+    local ok = round("cut", 0, T.BLOCK_RETRY_MS + 200)
+    checkTrue(ok and st.blocked and st.recoverWhy == nil and st.mode ~= "unstick" and n("unstick", "start") == 0,
+        "(gate-retry) 改線已承諾：停等過 BLOCK_RETRY 不請求倒車（" .. desc() .. "）")
+    ok = ok and round("cut", 1, T.BLOCK_RETRY_MS + 200)
+    checkTrue(ok and nav.detourCalls == 0 and n("detour") == 0,
+        "(gate-auto) 改線已承諾：倒車過一次又堵、過 BLOCK_RETRY 不問自動改道（" .. desc() .. "）")
+    ok = ok and round("cut", 1, T.WAIT_TIMEOUT_MS + 500)
+    checkTrue(ok and nav.detourCalls == 0 and n("detour") == 0 and st.recoverWhy == nil,
+        "(gate-wait) 改線已承諾：停等預算到期不走交還前改道、不交還（" .. desc() .. "）")
+    ok = ok and round(nil, 0, T.BLOCK_RETRY_MS + 200)
+    checkTrue(ok and (st.recoverWhy == "blocked-retry" or n("unstick", "start") > 0),
+        "(gate-exit) 換線後：停等過 BLOCK_RETRY 照常請求倒車（" .. desc() .. "）")
+    if ok and st.mode ~= "follow" then
+        st.mode, st.recoverWhy = "follow", nil
+    end
+    ok = ok and round(nil, 1, T.WAIT_TIMEOUT_MS + 500)
+    checkTrue(nav.detourCalls == 1 and n("detour", "stuck") == 1,
+        "(gate-exit) 換線後：停等預算到期照常走交還前改道（" .. desc() .. "）")
+    MDADDiagnostics.event, MDADDiagnostics.sample = oldEvent, oldSample
+    st.diag = false
+    MDAD.Drive.stop(0, nil)
+    for _, y in ipairs({ -5, -4, -2, -1, 0, 1, 2, 4, 5 }) do drive.clearCell(20, y) end
+    nav.detour = nil
+    MDAD.HUD.autoDetour = oldAuto
+end
+drive.scenarioCutPendingGate()
+
 -- (c5v11) 1021c nav API v11：requestDetour 第 9 參 deferCommit＝true、驗收通過才 commitDetour——拒收的線不進主 MOD
 --   快取，小地圖藍線（＝快取，樁裡是 nav.route）維持車在走的那條；commit 失敗＝拒收 "commit"。v10 以下、或 v11 缺
 --   commitDetour＝不傳、拒收記 rejectedRoute（舊制）；舊制第一次 log 一次。樁照主 MOD 真語意：v10 忽略第 9 參照樣覆寫，
@@ -35775,6 +35858,91 @@ function drive.scenarioCutRC()
             "(rc-comp-clamp) lin −3／lout −0.5：無柱 comp " .. tostring(c0 and c0.comp) .. "；彎外 2.33 m 一根柱＝減半（"
                 .. tostring(res[1] and res[1].why) .. " " .. tostring(res[1] and res[1].comp) .. "）；2.23 m＝0 照樣承諾（"
                 .. tostring(res[2] and res[2].why) .. " " .. tostring(res[2] and res[2].comp) .. "）")
+        dveh = oldD
+    end
+    -- 1114l：rc-prod-1114 R1 1114k car-b／van-c。第一次判堵已過停點（cut none room）→ 倒車兩次 → 第 2 次倒車後在 (5228.68,15401.81)
+    -- 承諾改線，同一幀 blocked-retry 照舊請求倒車（帶 room 的進場差額退 4／8.4 m），cutover 保留恢復請求、建好剖面就倒，離新線 3.9 m、
+    -- 倒車額度用完 detour through 卡死。
+    --   (rc-recommit)       承諾當下：待命的恢復請求作廢、room 差額／steep 差額清掉；這個 K 第一次承諾＝停等預算與倒車額度歸零。
+    --   (rc-recommit-tick)  下一幀 cutover：不保留恢復（mode 不是 unstick），剖面建好、車停著 30 幀也不起倒車。
+    --   (rc-recommit-same)  同一個 K 再承諾（cutover 拼不上 drop 後同一點又改線）不歸零：額度、預算照算＝迴圈有出口。
+    --   (rc-recommit-target) 換目標＝新的一趟：這個 K 已歸零過的記號清掉。
+    --   承諾到 cutover 之間的階梯閘門與換線後階梯照常：見 drive.scenarioCutPendingGate（要真的判堵世界）。
+    --   違規證明（temp/s1114-cut/vp/）：承諾不清恢復請求、不清進場差額、不歸零、同 K 照樣歸零、換目標不清記號，各自紅。
+    do
+        local oldD = dveh
+        dveh = carV
+        local s1 = arm(5228.6796875, 15401.8125)
+        snap(s1, true)
+        s1.episodeAttempts, s1.waitAccumMs, s1.blockRetryDone = 2, T.BLOCK_RETRY_MS + 200, true
+        s1.recoverWhy, s1.recoverPulse = "blocked-retry", false -- 車還在滑：請求待命到停妥才倒車
+        s1.cutRunway, s1.blockSteepM, s1.unstickExtraM = { att = 1, m = 9.77 }, 3.2, 4
+        clearEv()
+        Dr.cornerCutPlan(s1, dveh, 0)
+        local cm = cutEv("commit")[1]
+        checkTrue(cm ~= nil and cm.fresh == true and cm.rcv == "blocked-retry" and s1.recoverWhy == nil
+                and s1.cutRunway == nil and s1.blockSteepM == -1 and s1.unstickExtraM == 0 and s1.episodeAttempts == 0
+                and s1.waitAccumMs == 0 and s1.blockRetryDone == false,
+            "(rc-recommit) car-b 第 2 次倒車後的承諾：作廢待命的倒車請求、清進場差額、階梯歸零（commit="
+                .. tostring(cm and (cm.lin .. "/" .. cm.lout .. " fresh=" .. tostring(cm.fresh) .. " rcv=" .. tostring(cm.rcv)))
+                .. " recover=" .. tostring(s1.recoverWhy) .. " runway=" .. tostring(s1.cutRunway) .. " steep="
+                .. tostring(s1.blockSteepM) .. " att=" .. tostring(s1.episodeAttempts) .. " wait=" .. tostring(s1.waitAccumMs)
+                .. (cm and "" or (" none=" .. tostring(cutEv("none")[1] and cutEv("none")[1].why) .. " skip="
+                    .. tostring(cutEv("skip")[1] and cutEv("skip")[1].why) .. " c1=" .. tostring(cutEv("none")[1] and cutEv("none")[1].c1)))
+                .. "）")
+        local function evN(name, phase)
+            local n = 0
+            for _, e in ipairs(events) do
+                if e.name == name and (phase == nil or e.a.phase == phase) then n = n + 1 end
+            end
+            return n
+        end
+        if cm then
+            -- 下一幀 cutover（承諾已把 nextRouteMs 歸零），車停著 30 幀
+            local rg0 = s1.routeGen
+            clearEv()
+            for _ = 1, 30 do
+                nowMs = nowMs + 50
+                dveh._speed, dveh._stopped = 0, true
+                driveTick(dp, dveh)
+                if Dr.debugSession(0) ~= s1 then break end
+            end
+            checkTrue(Dr.debugSession(0) == s1 and s1.routeGen == rg0 + 1 and s1.pendingRouteWhy == nil
+                    and s1.mode ~= "unstick" and evN("unstick", "start") == 0,
+                "(rc-recommit-tick) 下一幀 cutover why=cut、不保留倒車、停著 30 幀不起倒車（rg " .. rg0 .. "→"
+                    .. tostring(s1.routeGen) .. " mode=" .. tostring(s1.mode) .. " unstick=" .. evN("unstick", "start") .. "）")
+        end
+        -- 第二個 session：同一個 K 承諾兩次
+        do
+            local s2 = arm(5228.6796875, 15401.8125)
+            snap(s2, true)
+            s2.episodeAttempts, s2.waitAccumMs = 2, T.BLOCK_RETRY_MS + 200
+            clearEv()
+            Dr.cornerCutPlan(s2, dveh, 0)
+            local c1 = cutEv("commit")[1]
+            -- (rc-recommit-same) 同 K 再承諾：cutover 拼不上 drop 後同一點又改線＝不歸零（額度照算、預算照算）
+            s2.cornerCut, s2.pendingRouteWhy, s2.cornerCutTried = nil, nil, nil
+            snap(s2, true)
+            s2.episodeAttempts, s2.waitAccumMs = 2, T.BLOCK_RETRY_MS + 200
+            clearEv()
+            Dr.cornerCutPlan(s2, dveh, 0)
+            local c2 = cutEv("commit")[1]
+            checkTrue(c1 ~= nil and c1.fresh == true and c2 ~= nil and c2.fresh == false and s2.episodeAttempts == 2
+                    and s2.waitAccumMs == T.BLOCK_RETRY_MS + 200 and s2.recoverWhy == nil,
+                "(rc-recommit-same) 同一個 K 再承諾不歸零（fresh " .. tostring(c1 and c1.fresh) .. "→" .. tostring(c2 and c2.fresh)
+                    .. " att=" .. tostring(s2.episodeAttempts) .. " wait=" .. tostring(s2.waitAccumMs) .. " skip="
+                    .. tostring(c2 == nil and cutEv("skip")[1] and cutEv("skip")[1].why) .. "）")
+            -- (rc-recommit-target) 換目標＝新的一趟：同一個 K 的承諾又能歸零一次
+            local oldTy = drive.nav.ty
+            drive.nav.ty = oldTy - 1
+            s2.nextRouteMs = 0
+            nowMs = nowMs + 50
+            dveh._speed, dveh._stopped = 0, true
+            driveTick(dp, dveh)
+            drive.nav.ty = oldTy
+            checkTrue(Dr.debugSession(0) == s2 and s2.cutFreshK == nil,
+                "(rc-recommit-target) 換目標：清掉這個 K 已歸零過的記號（" .. tostring(s2.cutFreshK) .. "）")
+        end
         dveh = oldD
     end
     Dr.stop(0, nil)
