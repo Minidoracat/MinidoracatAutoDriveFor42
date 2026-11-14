@@ -35533,6 +35533,279 @@ function drive.scenarioCutRC()
 end
 drive.scenarioCutRC()
 
+-- 1114h 終點到站形狀（Drive.endArriveTol／Drive.endFit；裁定 B：挪不進照舊承諾）。rc-prod-1114 R1 1114g 6/6 過了轉角後，
+-- 寬帶繞行 offL −12.5 的群一路延到終點後（car-a c 162.6＞路線長 161.5），線到終點還在 −12.5，車停在離目標 12 m、調頭迴圈 StopStuck。
+--   (unit)  Drive.endFit：出口在終點前走完／偏移在容許內＝原樣；否則先縮出口、不夠才挪 c、挪到 b 再縮；縮到 1 m 都放不下＝nil；
+--           每個非 nil 結果的停點處 |lane| ≤ √(ARRIVE_M² − COAST_STOP_M²)。
+--   (fit)   直路長群（x 30–44 全寬 ±3.5、路線長 61.5）：承諾線出口超過終點，停點處偏移在到站圈內、ef＝fit。
+--           違規證明：endFit 恆回原值＝停點偏移 3.83 紅、ef 缺紅。
+--   (ext)   同一條承諾線把出口切短再呼叫 Drive.extendDodgeExit（可視前緣推到 95）：加長後停點偏移仍在到站圈內。
+--           違規證明（只拿掉加長的 endFit 夾）：d 80.6、停點偏移 3.83 紅。
+--   (stay)  停留線蓋過停點、offL 在到站圈外：到站守門不收；關掉守門（endFitOff，sweepWithFallbacks 的第二輪）照掃收下。
+--           違規證明：拿掉 sweepStay 的到站守門即紅。
+--   (rc-end) rc-prod-1114 終點段重建：世界＝固定世界的 objdump（temp/e2e-pull-rcobj/e2e-rc1114-objcorner，x 5205–5240、
+--           y 15410–15462；有碰撞旗標、樹、燈柱、灌木、巨石、樹樁照原格，燈柱照實機點雲給格心 r 0.7；路面照 OBJMAP 的 '_'／'v'，
+--           世界車已由 replay clear= 清走），真 Sensor、真候選鏈＋寬帶判堵。路線＝出臂 (5218.0,15405.0)→(5217.96,15458.0)，
+--           車停在實機 car-a 判堵停點 (5218.6,15420.2) 朝南，錨＝路牌 (5218.5,15429.5)。終點在檢查站柵欄圍起的那格旁（x 5218 的
+--           collideW 從 y 15453 到 15457），回 l≈0 的線一定掃到；lane B（燈柱 5226.5／5227.5 東）車尾過 y 15444.5 的燈柱後只剩
+--           約 6.4 m 要橫移約 10 m，到站形狀掃不過；lane A（樓東牆格心 r 0.7 與燈柱之間）只剩 1.6 m＜車寬。裁定 B：退回原形狀
+--           承諾（＝1114g 行為，offL −12.5、ef＝fell）。違規證明：sweepWithFallbacks 不退回原形狀＝兩級寬帶都判堵、沒有承諾，紅。
+function drive.scenarioEndArrive()
+    scenario("1114h：繞行出口超過路線終點——停點處偏移要在到站圈內，放不下照舊承諾")
+    local Dr = MDAD.Drive
+    local F = MDADFollower
+    local lim = math.sqrt(F.ARRIVE_M * F.ARRIVE_M - F.COAST_STOP_M * F.COAST_STOP_M)
+    local function sm(t)
+        if t < 0 then t = 0 elseif t > 1 then t = 1 end
+        return t * t * (3 - 2 * t)
+    end
+    local function finite(v) return type(v) == "number" and v == v and v ~= math.huge and v ~= -math.huge end
+    local function laneAt(sAt, c, e, offL, laneEnd) return offL + (laneEnd - offL) * sm((sAt - c) / e) end
+    local oldSandbox, oldVeh, oldApi = SandboxVars, dveh, MinidoracatMiniMapAPI
+    installNavApi(4)
+    local oldRoute, oldTx, oldTy, oldState = drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 40, RightLaneBias = 0 })
+    local oldKeep = Dr.keepRightTarget
+    Dr.keepRightTarget = function() return 0 end
+    local oldEvent, oldSample, events = MDADDiagnostics.event, MDADDiagnostics.sample, {}
+    MDADDiagnostics.event = function(_, name, a) events[#events + 1] = { name = name, a = a } end
+    MDADDiagnostics.sample = function() return true end
+    local function newCar()
+        return newVehicle({ battery = newItem("Base.CarBattery", { uses = 0.8 }), scriptName = "Base.CarNormal",
+            engineRunning = true, mass = 1200, speed = 0, maxSpeed = 80, bodyW = 1.62, bodyL = 4.74, wheelZ = 1.4,
+            comX = 0, comZ = 0, profileFull = true, enginePower = 3000, brakingForce = 80,
+            wheelFriction = 1.7, tireFriction = 1.5 })
+    end
+    -- 停著的車接上路線、等剖面好；回 session
+    local function startAt(pts, width, x, y, heading)
+        Dr.stop(0, nil)
+        for i = #events, 1, -1 do events[i] = nil end
+        dveh = newCar()
+        drive.nav.route = { pts = pts, segSurface = { "paved" }, segWidth = { width } }
+        drive.nav.tx, drive.nav.ty, drive.nav.state = pts[#pts - 1], pts[#pts], "ok"
+        dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = x, y, 0, 0, true
+        dveh._engine, dveh._driver = true, dp
+        dp._vehicle, dp._dead, dp._local = dveh, false, true
+        setHeading(dveh, heading)
+        local okStart = Dr.start(dp)
+        local st = Dr.debugSession(0)
+        if st then st.diag = true end
+        for _ = 1, 20 do
+            if st and st.profile and st.profile.ready then break end
+            driveTick(dp, dveh)
+        end
+        return okStart and st or nil
+    end
+    local function commitEv()
+        for _, e in ipairs(events) do
+            if e.name == "dodge" and e.a.phase == "commit" then return e.a end
+        end
+        return nil
+    end
+    local function roundsToCommit(n)
+        for _ = 1, n do
+            drive.scanRound(true)
+            if commitEv() then return commitEv() end
+        end
+        return nil
+    end
+
+    -- 直路長群：路面 ±12、路線 (0.5,0.5)→(62,0.5)、x 30–44 × y −3..3 整片硬物
+    drive.fillWorld(-5, 90, -14, 14)
+    drive.putRoad(-5, 90, -12, 12)
+    for x = 30, 44 do
+        for y = -3, 3 do drive.putSolid(x, y, "harness_block") end
+    end
+    local st = startAt({ 0.5, 0.5, 62, 0.5 }, 20, 12, 0.5, 0)
+    checkTrue(st ~= nil and st.profile and st.profile.ready, "(fit) 啟動、剖面就緒")
+    if st and st.profile and st.profile.ready then
+        local prof = st.profile
+        local stopS, laneEnd, tol = Dr.endArriveTol(prof, 0)
+        checkTrue(math.abs(stopS - (prof.length - F.COAST_STOP_M)) < 1e-9 and math.abs(laneEnd) < 1e-9
+                and math.abs(tol - lim) < 1e-9 and math.abs(lim - 3) < 1e-9,
+            "(unit) 停點＝終點前 COAST_STOP_M、容許 √(ARRIVE_M²−COAST_STOP_M²)＝3（停點 " .. tostring(stopS)
+            .. "、lane " .. tostring(laneEnd) .. "、容許 " .. tostring(tol) .. "）")
+        local function fitOk(label, b, c, e, offL, eMin, wantC, wantE)
+            local c2, e2 = Dr.endFit(prof, b, c, e, offL, 0, eMin)
+            local good
+            if wantC == nil then
+                good = c2 == nil
+            else
+                good = c2 ~= nil and math.abs(c2 - wantC) < 1e-3 and math.abs(e2 - wantE) < 1e-3
+                    and (c2 + e2 <= prof.length or math.abs(laneAt(stopS, c2, e2, offL, 0)) <= lim + 1e-6)
+                    and c2 >= b - 1e-9 and e2 >= 1 - 1e-9
+            end
+            checkTrue(good, "(unit) " .. label .. "（實得 c " .. tostring(c2) .. "、出口 " .. tostring(e2) .. "）")
+        end
+        -- t：停點處要走完的回線時間比例（offL 5.25、容許 3：smoothstep 值 1 − 3/5.25）
+        local y = 1 - 3 / 5.25
+        local t = 0.5 - math.sin(math.asin(1 - 2 * y) / 3)
+        fitOk("出口在終點前走完＝原樣", 27.5, 30, 20, 5.25, nil, 30, 20)
+        fitOk("偏移在容許內＝原樣", 27.5, 45.5, 35, 2.5, nil, 45.5, 35)
+        fitOk("先縮出口、保持段不動", 27.5, 45.5, 35, 5.25, 10, 45.5, (stopS - 45.5) / t)
+        fitOk("c 過停點：縮到不陡最短出口還不夠才挪 c", 27.5, 60, 35, 5.25, 10, stopS - t * 10, 10)
+        fitOk("挪到 b 還不夠：照 b 縮出口", 56, 60, 35, 5.25, 10, 56, (stopS - 56) / t)
+        fitOk("縮到 1 m 都放不下＝nil", stopS - 0.2, 60, 35, 5.25, 10, nil, nil)
+        fitOk("b 傳 c（加長用）：只縮出口", 45.5, 45.5, 35, 5.25, nil, 45.5, (stopS - 45.5) / t)
+
+        local cm = roundsToCommit(12)
+        checkTrue(cm ~= nil and cm.ef == "fit" and finite(cm.c) and finite(cm.d) and cm.d > prof.length
+                and math.abs(laneAt(stopS, cm.c, cm.d - cm.c, cm.offL, cm.dbl)) <= lim + 1e-6,
+            "(fit) 出口超過終點的承諾線：停點處偏移在到站圈內、ef＝fit（實得 ef " .. tostring(cm and cm.ef)
+            .. "、c " .. tostring(cm and cm.c) .. "、d " .. tostring(cm and cm.d) .. "、停點 lane "
+            .. tostring(cm and laneAt(stopS, cm.c, cm.d - cm.c, cm.offL, cm.dbl)) .. "）")
+        if cm and st.dodging then
+            local fs = st.fstate
+            fs.offD = fs.offC + 8
+            st.sensor.scanEndS = 95
+            st.dodgeExtendFailS = nil
+            local okE = Dr.extendDodgeExit(st, st.sensor, 0)
+            local lE = laneAt(stopS, fs.offC, fs.offD - fs.offC, fs.offL, st.dodgeBaseL)
+            checkTrue(okE == true and fs.offD > prof.length and math.abs(lE) <= lim + 1e-6,
+                "(ext) 出口加長超過終點：停點處偏移仍在到站圈內（加長 " .. tostring(okE) .. "、d " .. tostring(fs.offD)
+                .. "、停點 lane " .. tostring(lE) .. "）")
+        else
+            checkTrue(false, "(ext) 需要 (fit) 的承諾線")
+        end
+        Dr.stop(0, nil)
+        st = startAt({ 0.5, 0.5, 62, 0.5 }, 20, 12, 0.5, 0)
+        if st then
+            drive.scanRound(true)
+            st.sensor.scanEndS = 95 -- 可視前緣推過終點（同 (ext)）：只驗到站守門，不驗可視
+            local okG = Dr.debugSweepStay(0, 13, 26, 56, 5.25)
+            st.endFitOff = true
+            local okOff = Dr.debugSweepStay(0, 13, 26, 56, 5.25)
+            st.endFitOff = false
+            checkTrue(okG == false and okOff == true,
+                "(stay) 停留線蓋過停點、offL 5.25 在到站圈外：守門不收、關掉守門照掃收下（守門 " .. tostring(okG)
+                .. "、關掉 " .. tostring(okOff) .. "）")
+        else
+            checkTrue(false, "(stay) 啟動")
+        end
+    end
+
+    -- rc-prod-1114 終點段重建
+    local OBJS =
+        "fencing_01_51|collideW|:9,10 9,12 16,16 9,17 9,19 16,20 9,21 16,21 16,22 16,23 5,26 5,29 5,29 5,31 22,31 15,32 "..
+        "22,32 5,33 15,33 22,33 5,35 5,37 5,39 5,41 5,43 15,44 15,45 15,46 12,52 12,53 12,54 12,55 12,56 12,57;"..
+        "street_decoration_01_29|collideW|:9,10 9,11 9,12 9,13 5,25 5,26 5,27 5,28 5,29 5,30 5,31 14,31 22,31 5,32 14,32 "..
+        "22,32 5,33 14,33 22,33 5,34 5,35 9,35 10,35 5,36 5,37 10,37 5,38 5,39 5,40 5,41 5,42 5,43 5,44 14,44 14,45 "..
+        "14,46 17,53 18,53 17,54 18,54 17,55 18,55 17,56 18,56 17,57 18,57;f_bushes_1_11|bush|:5,11 8,15 39,16 5,17 "..
+        "37,17 40,17 6,19 8,21 8,23;fencing_01_50|collideW|:9,11 9,13 9,18 9,20 9,22 5,25 5,27 5,28 5,30 5,32 5,34 5,36 "..
+        "5,38 5,40 5,42 5,44;lighting_outdoor_01_16||:26,11 15,12 20,12 16,24 20,24 9,31 10,31 26,31 27,31 9,44 26,44 "..
+        "27,44 12,59 17,59 18,59 23,59;f_bushes_1_4|bush|:27,12;fencing_01_48|collideN|:35,12 37,12 39,12 35,13 37,13 "..
+        "39,13 12,14 14,14 10,15 12,15 14,15 10,23 11,23 12,23 13,23 14,23 15,23 7,24 9,24 10,24 11,24 12,24 13,24 14,24 "..
+        "15,24 16,31 17,31 18,31 19,31 20,31 21,31 15,47 16,47 17,47 18,47 19,47 20,47 11,52 12,58 17,58 18,58;"..
+        "fencing_01_49|collideN|:36,12 38,12 40,12 36,13 38,13 40,13 10,14 11,14 13,14 15,14 11,15 13,15 15,15 6,24 8,24;"..
+        "e_virginiapine_1_2||T:38,12 40,12 5,46 6,49 5,50 8,51;e_redmaple_1_2||T:39,12 7,49 6,50 7,50 5,51 6,51 5,52 "..
+        "5,53 6,53 7,53 7,54;boulders_33|solidtrans|:6,13 6,47 6,54;e_canadianhemlockJUMBOXL_1_0|solid|T:9,13 38,16;"..
+        "carpentry_02_13|collideN|:10,13 11,13 12,13 13,13 14,13 15,13 9,31 10,31 11,31 12,31 13,31 9,33 10,33 11,33 "..
+        "12,33 13,33 8,44 9,44 10,44 9,46 10,46;e_virginiapine_1_1||T:39,13;boulders_32|solidtrans|:6,14 6,48 6,55;"..
+        "fencing_01_52|collideN+collideW|:9,14 9,15 9,23 5,24 15,31;e_stumps_JUMBOXL_10||:35,15 33,16;"..
+        "boulders_34|solidtrans|:7,16 32,22;boulders_19|solidtrans|:7,17 5,22;"..
+        "walls_commercial_01_50|collideN+collideW|:10,17;furniture_storage_02_17|solidtrans|:10,17 10,17;"..
+        "walls_commercial_01_49|collideN|:11,17 12,17 13,17;walls_exterior_house_01_52|collideW|:14,17 26,17 26,18 14,19 "..
+        "26,19 14,20 26,20 6,58 6,59 6,60 6,61 38,61 6,62;location_community_police_01_0|collideW|:16,17 16,19;"..
+        "boulders_16|solidtrans|:7,18 5,23;boulders_17|solidtrans|:8,18 6,23;walls_commercial_01_48|collideW|:10,18 "..
+        "10,19 10,20;furniture_storage_02_16|solidtrans|:10,18;e_redmapleJUMBOXL_1_0|solid|T:7,19;"..
+        "furniture_shelving_01_25|solidtrans|:10,19;fencing_01_60|collideN+collideW|:37,19;fencing_01_57|collideN|:38,19 "..
+        "39,19 40,19;furniture_shelving_01_24|solidtrans|:10,20;furniture_storage_02_18|solidtrans|:13,20;"..
+        "fencing_01_58|collideW|:37,20 37,21 37,22 37,23 37,24 37,25 37,26 37,27 37,28 37,29 37,30 37,31 37,32 37,33 "..
+        "37,34 37,35 37,36 37,37 37,38 37,39 37,40 37,41 37,42 37,43 37,44 37,45 37,46 37,47 37,48 37,49 37,50 37,51 "..
+        "37,52 37,53 37,54 37,55 37,56 37,57 37,58 37,59 37,60 37,61 37,62;walls_exterior_house_01_53|collideN|:10,21 "..
+        "11,21 12,21 13,21 39,45;walls_interior_house_04_82|collideN+collideW|:39,21;"..
+        "appliances_refrigeration_01_29|solidtrans|:39,21;walls_interior_house_04_81|collideN|:40,21;"..
+        "boulders_18|solidtrans|:6,22;walls_interior_house_04_80|collideW|:39,22 39,25 39,26;"..
+        "walls_interior_house_04_88|collideW|:39,23 39,24;e_stumps_JUMBOXL_14||:35,26 34,31 35,53;"..
+        "walls_interior_house_02_18|collideN+collideW|:39,27;walls_interior_house_02_17|collideN|:40,27;"..
+        "walls_interior_house_02_16|collideW|:39,28 39,29 39,30 39,32 39,33;street_roadsigns_01_2|solidtrans|:17,29;"..
+        "street_roadsigns_01_3|solidtrans|:18,29;street_decoration_01_28|collideN|:14,30 15,30 16,30 17,30 18,30 19,30 "..
+        "20,30 21,30 14,47 15,47 16,47 17,47 18,47 19,47 20,47 12,58 17,58 18,58;"..
+        "walls_interior_house_02_24|collideW|:39,31;furniture_seating_indoor_01_20|solidtrans|:40,31;"..
+        "e_stumps_JUMBOXL_15||:35,34 34,47 34,50 34,57;walls_interior_bathroom_01_2|collideN+collideW|:39,34 40,34;"..
+        "walls_exterior_house_01_6|collideN+collideW|:14,35;location_business_office_generic_01_49|solidtrans|:14,35;"..
+        "walls_exterior_house_01_13|collideN|:15,35 16,35 20,35 21,35 16,42;walls_exterior_house_01_5|collideN|:17,35 "..
+        "18,35 19,35 22,35 14,42 17,42 18,42 19,42 20,42 21,42 22,42 5,56 6,56 7,56 8,56 9,56;"..
+        "location_business_office_generic_01_6|solidtrans|:19,35;vegetation_indoor_01_8|solidtrans|:22,35;"..
+        "walls_exterior_house_01_4|collideW|:23,35 14,38 23,38 14,39 23,39 14,40 23,40 14,41 23,41;"..
+        "walls_interior_bathroom_01_8|collideW|:39,35 39,36;walls_exterior_house_01_12|collideW|:14,36 23,36 14,37 23,37;"..
+        "location_business_office_generic_01_14|solidtrans|:22,36;"..
+        "location_business_office_generic_01_0|solidtrans|:17,37 14,39 39,40;e_stumps_JUMBOXL_8||:35,37 34,41 33,59;"..
+        "walls_interior_bathroom_01_0|collideW|:39,37 40,37;location_business_office_generic_01_1|solidtrans|:14,38;"..
+        "location_business_office_generic_01_13|solidtrans|:22,38;walls_interior_house_01_38|collideN+collideW|:39,38;"..
+        "walls_interior_house_01_37|collideN|:40,38;walls_interior_house_01_36|collideW|:39,39 39,41 39,42 39,43 39,44;"..
+        "trashcontainers_01_17|solidtrans|:14,40;walls_interior_bathroom_01_18|collideN+collideW|:19,40;"..
+        "walls_interior_bathroom_01_17|collideN|:20,40 21,40 22,40;fixtures_bathroom_01_57|collideW|:21,40 22,40 22,40;"..
+        "fixtures_bathroom_01_4|solidtrans|:21,40 22,40;walls_interior_house_01_44|collideW|:39,40;"..
+        "furniture_storage_01_49|solidtrans|:39,41;trashcontainers_01_10|solid|:17,42;trashcontainers_01_11|solid|:18,42;"..
+        "furniture_storage_01_42|solidtrans|:39,42;furniture_storage_01_46|solidtrans|:39,43;"..
+        "street_decoration_01_63|solidtrans|:9,45;walls_exterior_house_01_61|collideN|:40,45;e_redmaple_1_3||T:6,52 7,55;"..
+        "walls_exterior_house_01_54|collideN+collideW|:38,56;location_shop_generic_01_15|solidtrans|:40,57 40,62;"..
+        "walls_exterior_house_02_17|collideN|:5,58;location_shop_generic_01_14|solidtrans|:40,58;"..
+        "location_shop_generic_01_13|solidtrans|:40,59;boulders_55||:34,60;walls_commercial_01_37|collideN|:10,61 10,62;"..
+        "walls_commercial_01_36|collideW|:11,61 11,62;"..
+        ""
+    local ROAD =
+        "10,10,40;11,10,40;12,10,26;13,16,25;14,16,26;15,16,26;16,9,15;16,17,26;17,15,15;17,17,21;18,14,21;19,15,15;"..
+        "19,17,21;20,15,15;20,17,21;20,38,40;21,14,15;21,17,26;21,38,38;22,10,15;22,17,26;22,38,38;23,17,26;23,38,38;"..
+        "24,16,27;24,30,30;24,38,38;25,6,31;25,38,38;26,6,31;26,38,38;27,6,31;27,38,38;28,6,31;28,38,38;29,6,16;29,19,31;"..
+        "29,38,38;30,6,13;30,22,31;30,38,38;31,6,8;31,23,31;31,38,38;32,6,13;32,16,21;32,23,31;32,38,38;33,6,8;33,16,21;"..
+        "33,23,31;33,38,38;34,6,31;34,38,38;35,6,8;35,11,13;35,24,31;35,38,38;36,6,13;36,24,31;36,38,38;37,6,9;37,11,13;"..
+        "37,24,31;37,38,38;38,6,13;38,24,31;38,38,38;39,6,13;39,24,31;39,38,38;40,6,13;40,24,31;40,38,38;41,6,13;"..
+        "41,24,31;41,38,38;42,6,13;42,15,15;42,23,31;42,38,38;43,6,31;43,38,38;44,6,7;44,11,13;44,16,31;44,38,38;45,5,8;"..
+        "45,10,13;45,16,31;45,38,38;46,6,8;46,11,13;46,16,31;46,38,40;47,7,13;47,21,31;47,38,40;48,7,31;48,38,40;49,8,31;"..
+        "49,38,40;50,8,31;50,38,40;51,9,31;51,38,40;52,10,10;52,13,27;52,38,40;53,10,11;53,13,16;53,19,27;53,38,40;"..
+        "54,10,16;54,19,25;54,27,27;54,38,40;55,10,16;55,19,25;55,38,40;56,10,11;56,13,16;56,19,25;57,5,11;57,13,16;"..
+        "57,19,25;58,7,11;58,13,16;58,19,25;59,7,25;60,7,25;61,7,9;61,12,25;62,7,9;62,12,25;"..
+        ""
+    local function flagObj(x, y, name, flags, collide, class)
+        local props = { has = function(_, key) return flags[key] == true end, get = function() return nil end }
+        local sprite = { shouldHaveCollision = function() return collide == true end,
+            getProperties = function() return props end }
+        local sq = drive.world[x * 100000 + y] or drive.mkSquare(x, y)
+        sq._objs[#sq._objs + 1] = { _class = class, getSpriteName = function() return name end,
+            getSprite = function() return sprite end, getProperties = function() return props end,
+            getType = function() return nil end }
+    end
+    drive.fillWorld(5195, 5245, 15395, 15470)
+    drive.putRoad(5214, 5232, 15398, 15409)
+    for ry, x0, x1 in ROAD:gmatch("(%d+),(%d+),(%d+)") do
+        drive.putRoad(5200 + tonumber(x0), 5200 + tonumber(x1), 15400 + tonumber(ry), 15400 + tonumber(ry))
+    end
+    -- OBJS：「sprite|旗標（+ 分隔）|T＝樹:x,y x,y …;」，座標減 (5200,15400)
+    for sp, fl, cl, xs in OBJS:gmatch("([^|;]+)|([^|]*)|(%a?):([^;]*);") do
+        local flags, collide = {}, false
+        for f in fl:gmatch("[^+]+") do
+            flags[f] = true
+            if f ~= "bush" then collide = true end
+        end
+        -- 燈柱：實機遙測是格心 r 0.7（hp 點雲、blocked 的 x／y）；objdump 的 flagsOf 沒印它的碰撞旗標，照實機點雲給 solidtrans
+        if sp:find("^lighting_outdoor") then flags.solidtrans, collide = true, true end
+        for x, oy in xs:gmatch("(%d+),(%d+)") do
+            flagObj(5200 + tonumber(x), 15400 + tonumber(oy), sp, flags, collide, cl == "T" and "IsoTree" or nil)
+        end
+    end
+    st = startAt({ 5217.996896724235, 15404.996279199038, 5217.960219749391, 15457.999972473253 }, 9,
+        5218.6, 15420.2, math.pi / 2)
+    checkTrue(st ~= nil and st.profile and st.profile.ready, "(rc-end) 啟動、剖面就緒")
+    local cm = st and roundsToCommit(12) or nil
+    local nBlocked = 0
+    for _, e in ipairs(events) do if e.name == "blocked" then nBlocked = nBlocked + 1 end end
+    checkTrue(cm ~= nil and cm.ef == "fell" and finite(cm.offL) and cm.offL < -10 and finite(cm.c)
+            and cm.c > st.profile.length - F.COAST_STOP_M,
+        "(rc-end) 終點到不了：到站形狀掃不過，退回原形狀承諾（＝1114g，offL ≈ −12.5、ef＝fell；實得 commit "
+        .. tostring(cm ~= nil) .. "、ef " .. tostring(cm and cm.ef) .. "、offL " .. tostring(cm and cm.offL)
+        .. "、c " .. tostring(cm and cm.c) .. "、blocked " .. nBlocked .. "）")
+
+    Dr.stop(0, nil)
+    MDADDiagnostics.event, MDADDiagnostics.sample = oldEvent, oldSample
+    Dr.keepRightTarget = oldKeep
+    drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
+    SandboxVars, dveh, MinidoracatMiniMapAPI = oldSandbox, oldVeh, oldApi
+    drive.fillWorld(-2, 70, -7, 7)
+end
+drive.scenarioEndArrive()
+
 local function scenarioReasonKeys()
 scenario("理由鍵覆蓋：每個分支都跑到，且四語 UI.json 都有對應翻譯")
 

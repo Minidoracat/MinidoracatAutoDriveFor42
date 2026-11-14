@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1114g"
+Drive.REV = "1114h"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -11169,6 +11169,48 @@ function Drive.towHold(s)
     return finite(tl) and tl > 0 and tl or 0
 end
 
+-- 終點到站的橫向容許（1114h）：到站＝Follower 的 reached（沿線剩餘 ≤ ARRIVE_M 且離最末點直線 ≤ ARRIVE_M，到站判定不動），
+-- 車停在剖面停點（終點前 COAST_STOP_M）時就要在到站圈內＝停點處 |lane| ≤ √(ARRIVE_M² − COAST_STOP_M²)（3 m）。
+-- 常駐 lane 在終點本來就超過它（例：靠右偏置）時不比常駐更差即可。回 (停點弧長, 終點的常駐 lane, 容許偏差)。
+function Drive.endArriveTol(profile, baseL)
+    local len = profile.length
+    local stopS = len - MDADFollower.COAST_STOP_M
+    if stopS < 0 then stopS = 0 end
+    local laneEnd = MDADFollower.laneBiasAt(profile, baseL, MDADFollower.segIndexAt(profile, len), len)
+    if not finite(laneEnd) then laneEnd = 0 end
+    local lim = math.sqrt(MDADFollower.ARRIVE_M * MDADFollower.ARRIVE_M
+        - MDADFollower.COAST_STOP_M * MDADFollower.COAST_STOP_M)
+    local tol = lim - (laneEnd < 0 and -laneEnd or laneEnd)
+    return stopS, laneEnd, tol > 0 and tol or 0
+end
+
+-- 出口超過路線終點的繞行線在終點的偏移要在到站圈內（1114h；rc-prod-1114 R1 1114g 6/6：寬帶繞行 offL −12.5 的群一路延到
+-- 終點後（car-a c 162.6＞路線長 161.5），線到終點還在 −12.5，車停在離目標 12 m、調頭迴圈 StopStuck）。保持段＋出口 [c, c+exitLen]
+-- 沒在停點前回到容許內時，先縮出口、保持段不動（群一路延到 c，回線越晚越不會掃回群旁）：縮到不陡的最短出口 eMin
+-- （shapeProfile 的 exitKin/SHIFT_MIN_RATIO；nil＝1 m）還不夠才把 c 往前挪；挪到 b 還不夠就照 b 把出口縮到放得下（變陡，
+-- 空間帽照常壓速）。回 (c, exitLen)；縮到 1 m 以下都放不下（停點在 b 前約一公尺內）＝nil＝呼叫端照原形狀（裁定 B）。
+-- 出口在終點前走完、或偏移本來就在容許內＝原樣。改過的回線一樣由 sweepLine 世界掃掠驗（覆蓋要求照舊鉗到路線長）。
+-- b 傳 c＝不准挪保持段、只准縮出口（承諾後的出口加長 Drive.extendDodgeExit）。
+function Drive.endFit(profile, b, c, exitLen, offL, baseL, eMin)
+    if c + exitLen <= profile.length then return c, exitLen end
+    local stopS, laneEnd, tol = Drive.endArriveTol(profile, baseL)
+    local dl = offL - laneEnd
+    if dl < 0 then dl = -dl end
+    if dl <= tol then return c, exitLen end
+    local y = 1 - tol / dl -- 停點處要走完的回線比例（smoothstep 值）
+    local t = 0.5 - math.sin(math.asin(1 - 2 * y) / 3) -- smoothstep 反函數
+    local e = (stopS - c) / t -- 保持段不動時放得下的最長出口
+    if e >= exitLen then return c, exitLen end
+    if not finite(eMin) or eMin < 1 then eMin = 1 end
+    if eMin > exitLen then eMin = exitLen end
+    if e >= eMin then return c, e end
+    local c2 = stopS - t * eMin
+    if c2 >= b then return c2, eMin end
+    e = (stopS - b) / t
+    if not (e >= 1) then return nil end
+    return b, e
+end
+
 local function shapeProfile(s, profile, a, b, c, d, offL, baseL, crawlDesign)
     -- 拖車（0929p）：保持段延長到掛車尾也過了群（牽引車照原本的 c 回線時掛車還在障礙旁、內切掃到它）；
     -- 掛車實際走的軌跡另由 sweepLine 逐點驗。
@@ -11392,12 +11434,24 @@ local function shapeProfile(s, profile, a, b, c, d, offL, baseL, crawlDesign)
     -- 出口陡坡（同進入段的運動學比例 SHIFT_MIN_RATIO）：被可視範圍／承諾窗截短成陡坡、而車再往前開就放得下
     -- （折點給的長度夠）、進入段也等得起時延後承諾（replan 的 exit 延後）；等不起照舊承諾，不新增否決
     -- （0909b R2：近距離短出口只要世界掃掠過就收）。
+    local exitWant = nil -- 不陡的最短出口（Drive.endFit 縮出口的下限）
     if exitDl > 0 and crawlK > 0 then
         local exitKin = math.sqrt(6 * exitDl / crawlK)
         local want = exitKin / TUNE.SHIFT_MIN_RATIO -- 不陡的最短出口；等到這麼長就好，不必等到巡航設計長
+        exitWant = want
         if exitLen * TUNE.SHIFT_MIN_RATIO < exitKin and want <= exitGeom
                 and b - (s.lastSNow + (want - exitLen)) - 1 >= entryLen then
             s.dodgeWindowShort = true
+        end
+    end
+    -- 終點到站（1114h，Drive.endFit）：出口超過路線終點時，停點處的偏移要在到站圈內＝縮出口／挪保持段。改了形狀記
+    -- s.endFitHit：這條候選連退路都掃不過時，sweepWithFallbacks 關掉到站形狀（s.endFitOff）照原形狀再掃一次。放不下（nil）＝
+    -- 照原形狀（裁定 B：挪不進照舊承諾）。每輪都放不下／都掃不過：每輪同樣退回原形狀＝1114g 行為，不新增否決也不新增迴圈。
+    if not s.endFitOff then
+        local cFit, eFit = Drive.endFit(profile, b, c, exitLen, offL, baseL, exitWant)
+        if cFit and (cFit ~= c or eFit ~= exitLen) then
+            c, exitLen = cFit, eFit
+            s.endFitHit = true
         end
     end
     -- shape 只記固定基準；最終 physical/stay 分類在 fallback 後才知道。
@@ -11527,6 +11581,13 @@ function Drive.extendDodgeExit(s, sen, playerNum)
         local cov = visibleEndS(sen, rs) - 1 - s.bodyReach - c
         if cov < room then room = cov end
         if room < have + TUNE.EXIT_EXTEND_MIN_M then return false end
+    end
+    -- 加長不得把線在停點處的偏移推出到站圈（1114h，Drive.endFit 以 b＝c 只縮出口）：縮到比現有出口短＝不加長（出口：照舊線）
+    local _, fitRoom = Drive.endFit(prof, c, c, room, fs.offL, s.dodgeBaseL)
+    if not fitRoom then return false end
+    if fitRoom < room then
+        room = fitRoom
+        if not short and room < have + TUNE.EXIT_EXTEND_MIN_M then return false end
     end
     local d2 = c + room
     local coverEnd = math.min(d2 + 1, prof.length)
@@ -13010,6 +13071,16 @@ local function sweepStay(s, a, b, c, offL, baseL, tag, needBase, truncate)
     end
     local dStay = c + tail
     if dStay > prof.length then dStay = prof.length end
+    -- 停留線（沒有出口、鏈住 offL）蓋過剖面停點＝車帶著 offL 到終點：偏移在到站圈外就先不收（1114h，Drive.endArriveTol）。
+    -- 記 s.endFitHit：候選鏈這條全掃不過時 sweepWithFallbacks 關掉到站守門（s.endFitOff）照舊再掃（裁定 B）；
+    -- 承諾中的出口轉停留（Drive.exitStay）不收＝照原承諾線（有出口）走。
+    if not s.endFitOff then
+        local stopS, laneEnd, tol = Drive.endArriveTol(prof, baseL)
+        if c + tail >= stopS and math.abs(offL - laneEnd) > tol then
+            s.endFitHit = true
+            return false, 99, 0, 0, dStay, c
+        end
+    end
     if dStay <= c + 0.5 or b <= rs + 0.5 then return false, 99, 0, 0, dStay, c end
     -- 停留線目標＝offL 是掃掠驗過的絕對 lane：targetKeep 0 只夾物理餘裕（留 keep 會把線從
     -- room 邊再拉 0.6，(kerb) 那道縫就被自己吃掉）
@@ -13226,7 +13297,7 @@ end
 --   失敗時只回 false，首次失敗的 (hitS, ph, hps, hx, hy) 與 shape 後的 a,b,c,d 寫進
 --   s.fbFail（重用的小表；replan 的 190-local 閘門容不下十欄 tuple）。
 -- a..d 傳原始（未 shape）值；crawlDesign 傳給 shapeProfile。
-local function sweepWithFallbacks(s, planN, a, b, c, d, offL, baseL, tag, nb, physBase, crawlDesign)
+function Drive.sweepFallbacksOnce(s, planN, a, b, c, d, offL, baseL, tag, nb, physBase, crawlDesign)
     local sen = s.sensor
     local sa, sb, sc, sd, shapeOk = shapeProfile(s, s.profile, a, b, c, d, offL, baseL, crawlDesign)
     -- 貼縫拓寬（TUNE.NUDGE_WIDEN_M）：掃過但淨距貼底時往遠離最近點側移一格再掃，更寬就換
@@ -13365,6 +13436,28 @@ local function sweepWithFallbacks(s, planN, a, b, c, d, offL, baseL, tag, nb, ph
         end
     end
     return false
+end
+
+-- 候選掃掠入口（1114h 終點到站退路）：先掃到站形狀（shapeProfile 的 Drive.endFit 改過出口、停留蓋過停點的到站守門），
+-- 改過形狀的這條連四層退路都過不了＝關掉到站形狀、照原形狀再掃一次（主代理 1114h 裁定 B：挪不進照舊承諾＝1114g 行為；
+-- 終點本身到不了時寧可過了群停在終點附近，也不停在群前）。s.endFitMode＝最後一次成功掃掠的形狀來源：fit＝到站形狀、
+-- fell＝退回原形狀、nil＝沒碰到終點約束；adopt 當場抄進 s.dodgeEndFit（dodge commit 的 ef）。
+local function sweepWithFallbacks(s, planN, a, b, c, d, offL, baseL, tag, nb, physBase, crawlDesign)
+    s.endFitHit, s.endFitOff, s.endFitMode = false, false, nil
+    local ok, ra, rb, rc, rd, ro, mg, ovN, ovS0, nbU, var = Drive.sweepFallbacksOnce(
+        s, planN, a, b, c, d, offL, baseL, tag, nb, physBase, crawlDesign)
+    if ok then
+        s.endFitMode = s.endFitHit and "fit" or nil
+        return ok, ra, rb, rc, rd, ro, mg, ovN, ovS0, nbU, var
+    end
+    if not s.endFitHit then return false end
+    s.endFitOff = true
+    ok, ra, rb, rc, rd, ro, mg, ovN, ovS0, nbU, var = Drive.sweepFallbacksOnce(
+        s, planN, a, b, c, d, offL, baseL, tag, nb, physBase, crawlDesign)
+    s.endFitOff = false
+    if not ok then return false end
+    s.endFitMode = "fell"
+    return ok, ra, rb, rc, rd, ro, mg, ovN, ovS0, nbU, var
 end
 
 -- 繞行候選線對殭屍的最小淨距（N2，1013d；正式服 Q01 clip-17：殭屍承諾前 1.8 秒就站在進入段，承諾線離牠 0.78m、60 km/h
@@ -15197,6 +15290,7 @@ local function replan(s, vehicle, playerNum)
         s.planDeferWhy = nil
         if s.zomRec then s.zomRec.on, s.zomRec.n = false, 0 end -- 殭屍偏好的記錄每輪重來（Drive.zombieSweep）
         s.chainWhy = nil -- 1017 遙測 chain：本輪候選鏈走到的停留分支（chainAhead）
+        s.dodgeEndFit = nil -- 1114h 遙測 ef：沒經 adopt 的承諾＝缺
         if mode == "dodge" then
             local _, _, _, dS, okS0 = shapeProfile(s, s.profile, a, b, c, d, offL, baseL)
             local why = nil
@@ -15276,6 +15370,7 @@ local function replan(s, vehicle, playerNum)
                 -- 指派而非只設 true：換縫找更寬時同一輪可能先採納窄的（爬行）再換寬的（Drive.thinNote）
                 s.dodgeCrawl = nbUsed < s.sweepBase - 1e-6 or s.dodgeStay
                 s.dodgeTier = variant and (tier .. "-" .. variant) or tier
+                s.dodgeEndFit = s.endFitMode -- 採納的這次 sweepWithFallbacks 的到站形狀來源（dodge commit 的 ef）
                 s.lastOvN, s.lastOvS0, s.lastOvEndS = ovN, ovS0, s.tmpOvEndS
             end
             -- adoptIf(tier, ok, ...)：成功即採納回 true；失敗資訊在 s.fbFail
@@ -15735,7 +15830,9 @@ local function replan(s, vehicle, playerNum)
                 -- 1017：本輪第一條被殭屍擋下的候選的 min(彎帽, 餘裕帽)（Drive.zombieCap0）；被承諾那條在 chainAhead 走到的分支
                 zc0 = s.zomRec and s.zomRec.n > 0 and s.zomRec.c0 or nil, chain = s.chainWhy,
                 dbl = s.dodgeBaseL, -- 出口回的 lane（Drive.dodgeHomeL，承諾時凍結；1014b N9）
-                dbs = Drive.dodgeHomeSrc(s) }) -- 1026g T13：dbl 是哪一種 lane（ret／chain／trans／zombie／traffic／tow／keep／center／other）
+                dbs = Drive.dodgeHomeSrc(s), -- 1026g T13：dbl 是哪一種 lane（ret／chain／trans／zombie／traffic／tow／keep／center／other）
+                -- 1114h 終點到站形狀（sweepWithFallbacks）：fit＝出口改到停點前到站圈內、fell＝改了掃不過退回原形狀（到不了站）、缺＝沒碰到
+                ef = s.dodgeEndFit })
             Drive.proofTightArm(s, playerNum) -- 停下之後的窄線爬行（TUNE.PROOF_TIGHT_KMH）
             if getDebug() then -- telemetry: dodge commit 事件（cap 分解同欄）
                 -- cap 分解一行印清楚（2026-09-04 實機三段 8／15／14 km/h 繞行，console
