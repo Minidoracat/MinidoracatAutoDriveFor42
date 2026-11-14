@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1114q"
+Drive.REV = "1114r"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -667,15 +667,6 @@ TUNE.CORNER_CUT_SAME_M = 0.25         -- 候選線離已打掉前一條的硬點
 TUNE.CORNER_CUT_PAIRS = 400           -- 格網對數上限（超過截斷，事件 np 記試了幾對）
 TUNE.CORNER_CUT_SNAP_M = 2            -- 重算的路線仍經過原轉角（頂點 2m 內、兩臂同向）才重套改線
 TUNE.CORNER_CUT_DUMP_N = 240         -- cut none 附帶的轉角點雲上限（Drive.cutHardDump；離線重建驗線用）
--- 改線規劃分幀（1114q；Drive.cornerCutPlan／cutJobStep）：每幀驗候選用到 FRAME_MS 就停、下一幀接著做（起始幀含格網）。
--- 1114n R1 實機：格網加前置約 11 ms（car-d cut none room 的 ms 11），每條掃掠候選約 3–7 ms（commit ms 25–55、掃掠 5–10）；
--- 15 ms 停＝單幀最多約 15＋一條候選 ≈ 22 ms（判準 30）。被打斷（cut abort）的 K／嘗試累計 ABORT_MAX 次後下一次一次算完。
--- MOVE_M／YAW_RAD＝分幀期間車位、航向的容許（車停著；超過＝快照的車位已不是這個車位）。
-TUNE.CUT_FRAME_MS = 15
-TUNE.CUT_ABORT_MAX = 3
-TUNE.CUT_JOB_MOVE_M = 0.3
-TUNE.CUT_JOB_YAW_RAD = 3 / 57.29577951308232
-TUNE.CUT_WHY_RANK = { route = 1, short = 1, dest = 1, room = 2, kin = 3, cover = 4, sweep = 5, wall = 6 } -- cut none 取最後段的理由
 -- 改線圓角的追線落後前饋（1114k；Drive.cornerCutTry／cutCompApply、MDADFollower.setComp）：車在 T 的圓角實際走在期望線彎內側。
 -- rc-prod-1114 R1 cutclr4/5/6 十八場（r 3.3–4.6、5–10 km/h、CarNormal／VanAmbulance）圓角內 ld（lat−el）最小 −0.49～−0.875、
 -- 與 r 無明顯關係；出弧 2 m 仍 −0.3～−0.45、4 m −0.25。兩群：1114g/h el 0.63–0.69（cutover 後靠右 EMA，碰巧）→ lat 最小
@@ -9104,9 +9095,8 @@ end
 local function requestRecover(s, why, pulse)
     local rank = TUNE.RECOVER_RANK[why]
     if rank == nil then return end
-    -- 改線已承諾、下一幀 cutover 換線（1114l；Drive.cutLadderReset），或改線規劃分幀進行中（1114q）：這一堵局等改線結果，
-    -- 不在舊線上起倒車／側推
-    if Drive.cutBusy(s) then return end
+    -- 改線已承諾、下一幀 cutover 換線（1114l；Drive.cutLadderReset）：這一堵局改用新線，不在舊線上起倒車／側推
+    if s.pendingRouteWhy == "cut" then return end
     if s.recoverWhy ~= nil
             and (TUNE.RECOVER_RANK[s.recoverWhy] or 0) >= rank then
         return
@@ -14964,17 +14954,8 @@ end
 -- 錨（或轉角版 chainAhead 記的出口點）附近有轉角卻沒跑＝記 cut skip kind=plan：wide／overflow／empty／Drive.cutFreeWhy 的理由
 -- ／moving／stop／held／zone／arm／tried。附近沒有轉角＝不記（直路判堵不洗事件）。
 -- 寬帶武裝時機、BLOCKED_CORNER 分類與閂鎖都不動。
--- 分幀（1114q，使用者 2026-11-14 裁定「實測仍超過 30 ms 才做」；1114n R1 cut commit ms 25–55、12 輪 10 輪 >30）：格網之後的
--- 候選逐條驗線包成 s.cutJob（Drive.cutJobStep），每幀用到 TUNE.CUT_FRAME_MS 就停、下一幀 stepFollow 接著做；結果與一次算完相同
--- （同一快照、同一份候選順序與 g 狀態，見 Drive.cutJobWhy 的出口）。進行中判堵階梯不動（Drive.cutBusy）。
 -- ponytail: 只取內側（10-13 外側繞急彎照舊拒收）、拖車排除（有自己的 T.shape）。
 function Drive.cornerCutPlan(s, vehicle, playerNum)
-    local job = s.cutJob
-    if job then
-        local jw = Drive.cutJobWhy(s, vehicle, job)
-        if not jw then return end -- 進行中、快照與車位都沒變：下一幀 stepFollow 接著做
-        Drive.cutJobAbort(s, playerNum, jw)
-    end
     local sen, vp, route = s.sensor, s.vehicleProfile, s.profileRoute
     local hx, hy = s.blockHitX, s.blockHitY
     if not s.blocked or not sen.ready or type(route) ~= "table" or type(route.pts) ~= "table"
@@ -15023,136 +15004,46 @@ function Drive.cornerCutPlan(s, vehicle, playerNum)
     local sc = Drive.cutScratchOf(s)
     local uC = (vx - kx) * ix + (vy - ky) * iy
     local lP = (vx - kx) * -iy + (vy - ky) * ix -- 車在入臂的橫向（法向 (−iy, ix)，同格網的 l）
+    diagEvent(s, playerNum, "cut", { phase = "plan", kx = kx, ky = ky, ka = adh * TUNE.DEG_PER_RAD, lvl = lvl,
+        attempt = att, np = np, nc = nc, d = -uC, l = lP })
     local sw = route.segWidth
     local g = { kx = kx, ky = ky, ix = ix, iy = iy, ox = ox, oy = oy, zarm = zarm, uC = uC, lP = lP, R0 = R0,
         vx = vx, vy = vy, adh = adh, inW = finite(sw and sw[iK - 1]) and sw[iK - 1] or 0,
         outW = finite(sw and sw[iK]) and sw[iK] or 0 }
-    -- 候選抄進工作（格網暫存會被 cutStopNote／cutDefer 的格網蓋掉）；連續被打斷 CUT_ABORT_MAX 次（同 K、同嘗試）＝這次一次算完
-    job = { g = g, nc = nc, np = np, q = 1, lin = {}, lout = {}, win = {}, wout = {}, why = "grid", nn = 0, notes = {}, nsk = 0,
-        swept = 0, kx = kx, ky = ky, lvl = lvl, att = att, uC = uC, lP = lP, zarm = zarm, adh = adh, sweeps = 0, ms = 0, msx = 0,
-        fr = 0, wms = Drive.replanElapsed(s), rg = s.routeGen, tg = s.targetGen, hx = sen.hardX, hn = sen.hardN,
-        rsa = sen.roundStartedAt, px = vx, py = vy, hd = Drive.headingOf(vehicle) }
-    for q = 1, nc do job.lin[q], job.lout[q], job.win[q], job.wout[q] = sc.lin[q], sc.lout[q], sc.win[q], sc.wout[q] end
-    local ab = s.cutAbort
-    job.oneShot = ab ~= nil and ab.att == att and math.abs(ab.x - kx) < 1 and math.abs(ab.y - ky) < 1
-        and ab.n >= TUNE.CUT_ABORT_MAX
-    job.sweeps = (s.sweepCount or 0) - sweeps0 -- 格網不掃，照算（0）
-    s.cutJob = job
-    Drive.cutJobStep(s, vehicle, playerNum, t0)
-end
-
--- 改線規劃進行中（分幀的 s.cutJob）或已承諾待 cutover（pendingRouteWhy="cut"）：判堵階梯的請求方（requestRecover 全部、自動改道、
--- 停等預算出口）都不動（1114l／1114q）。停等累計（waitAccumMs）照常累加：規劃結束是 none 時下一幀照累計值照舊走階梯（分幀只多
--- 幾幀），是 commit 時 Drive.cutLadderReset 照 1114l 規則歸零。
-function Drive.cutBusy(s)
-    return s.pendingRouteWhy == "cut" or s.cutJob ~= nil
-end
-
--- 分幀改線規劃還能不能接著做（1114q）：回 nil＝能；否則回中止理由（cut abort 的 why）——route（換線）、target（換目標）、
--- attempt（episodeAttempts 變了）、snap（完成快照換了：Sensor 換表或換輪）、move（車位移超過 CUT_JOB_MOVE_M 或航向超過
--- CUT_JOB_YAW_RAD）、yield（玩家接手）、clear（不再判堵）、free（Drive.cutFreeWhy 不成立：持有者、拖車、待辦改寫…）。
-function Drive.cutJobWhy(s, vehicle, job)
-    local sen = s.sensor
-    if s.routeGen ~= job.rg then return "route" end
-    if s.targetGen ~= job.tg then return "target" end
-    if s.episodeAttempts ~= job.att then return "attempt" end
-    if sen.hardX ~= job.hx or sen.hardN ~= job.hn or sen.roundStartedAt ~= job.rsa then return "snap" end
-    local dx, dy = vehicle:getX() - job.px, vehicle:getY() - job.py
-    local dhd = Drive.headingOf(vehicle) - job.hd
-    if dhd > math.pi then dhd = dhd - 2 * math.pi elseif dhd < -math.pi then dhd = dhd + 2 * math.pi end
-    if dx * dx + dy * dy > TUNE.CUT_JOB_MOVE_M * TUNE.CUT_JOB_MOVE_M or dhd > TUNE.CUT_JOB_YAW_RAD
-            or dhd < -TUNE.CUT_JOB_YAW_RAD then return "move" end
-    if s.mode == "yield" then return "yield" end
-    if not s.blocked then return "clear" end
-    if Drive.cutFreeWhy(s) then return "free" end
-    return nil
-end
-
--- 丟掉半成品（1114q）：cut abort（why、ab＝這個 K／這次嘗試第幾次被打斷、fr／msx 到目前），這次的 cornerCutTried 清掉
--- （規劃沒做完不算試過：下一次 replan 判堵出口、或 snap 時 Drive.cutJobStep 當場重來）。同 K、同嘗試連續被打斷
--- CUT_ABORT_MAX 次後下一次一次算完（不分幀）＝重來有上限。
-function Drive.cutJobAbort(s, playerNum, why)
-    local job = s.cutJob
-    s.cutJob = nil
-    if not job then return end
-    local tr = s.cornerCutTried
-    if tr and tr.att == job.att and math.abs(tr.x - job.kx) < 1 and math.abs(tr.y - job.ky) < 1 then s.cornerCutTried = nil end
-    local ab = s.cutAbort
-    if not (ab and ab.att == job.att and math.abs(ab.x - job.kx) < 1 and math.abs(ab.y - job.ky) < 1) then
-        ab = { x = job.kx, y = job.ky, att = job.att, n = 0 }
-        s.cutAbort = ab
-    end
-    ab.n = ab.n + 1
-    diagEvent(s, playerNum, "cut", { phase = "abort", why = why, kx = job.kx, ky = job.ky, lvl = job.lvl, attempt = job.att,
-        ab = ab.n, fr = job.fr, msx = job.msx, nc = job.nc })
-end
-
--- 分幀改線規劃的一幀（1114q）：t0＝cornerCutPlan 當幀（含格網的計時起點，不查中止）；其餘幀由 stepFollow 每幀呼叫，先查
--- Drive.cutJobWhy，snap（快照換了）＝丟掉當場照新快照重來（Drive.cornerCutPlan 的前提照查），其他理由＝丟掉。候選照順序驗，
--- 本幀用到 CUT_FRAME_MS 就停（非起始幀至少驗一條＝一定有進度）；oneShot＝不看預算。驗完（候選用完、收到 comp≠0 的線、
--- 掃滿 CORNER_CUT_MAX）＝Drive.cutJobFinish。
-function Drive.cutJobStep(s, vehicle, playerNum, t0)
-    local job = s.cutJob
-    if not job then return end
-    if not t0 then
-        local jw = Drive.cutJobWhy(s, vehicle, job)
-        if jw then
-            Drive.cutJobAbort(s, playerNum, jw)
-            if jw == "snap" then Drive.cornerCutPlan(s, vehicle, playerNum) end
-            return
-        end
-        t0 = getTimestampMs()
-    end
-    local first, sw0, g = job.fr == 0, s.sweepCount or 0, job.g
-    local rank = TUNE.CUT_WHY_RANK
-    local n = 0
-    while job.q <= job.nc and not job.stop do
-        if not job.oneShot and (n > 0 or first) and getTimestampMs() - t0 >= TUNE.CUT_FRAME_MS then break end
-        local q = job.q
+    local rank = { route = 1, short = 1, dest = 1, room = 2, kin = 3, cover = 4, sweep = 5, wall = 6 }
+    local why, cut, notes, nn, nsk, swept = "grid", nil, {}, 0, 0, 0
+    for q = 1, nc do
         g.swept = false
-        local w, c = Drive.cornerCutTry(s, g, job.lin[q], job.lout[q], job.win[q], job.wout[q])
+        local w, c = Drive.cornerCutTry(s, g, sc.lin[q], sc.lout[q], sc.win[q], sc.wout[q])
         if c then
             -- 照成本序收第一條前饋套得上（comp≠0）的線；過了但前饋過頭那條掃不過（comp 0）的先記著、往下找，找不到才收它（1114k）。
             -- 不再往池裡找 m 更寬的（1114i 的貼縫找更寬）：池裡較寬的常是出臂大平移的線——rc-prod-1114 R1 1114j 承諾的崗亭東側線
             -- lin −0.5／lout −4.5 過得了掃掠（m 0.39），cutover 後 5/6 卡死或擦柱；1114g/h 收成本序第一條（西側線）＋碰巧 el +0.63，
             -- 11/12 場 0 接觸。m 只換速度帽。
-            if not job.cut or (job.cut.comp == 0 and c.comp ~= 0) then job.cut = c end
-            if c.comp ~= 0 then job.stop = true end
+            if not cut or (cut.comp == 0 and c.comp ~= 0) then cut = c end
+            if c.comp ~= 0 then break end
         elseif w == "same" then
-            job.nsk = job.nsk + 1
+            nsk = nsk + 1
         else
-            if job.nn < 4 then
-                job.nn = job.nn + 1
-                job.notes[job.nn] = Drive.cutCandNote(w, g, job.lin[q], job.lout[q])
+            if nn < 4 then
+                nn = nn + 1
+                notes[nn] = Drive.cutCandNote(w, g, sc.lin[q], sc.lout[q])
             end
-            if job.why == "grid" or rank[w] > rank[job.why] then job.why = w end
+            if why == "grid" or rank[w] > rank[why] then why = w end
         end
-        if not job.stop and g.swept then
-            job.swept = job.swept + 1
-            if job.swept >= TUNE.CORNER_CUT_MAX then job.stop = true end
+        if g.swept then
+            swept = swept + 1
+            if swept >= TUNE.CORNER_CUT_MAX then break end
         end
-        job.q, n = q + 1, n + 1
     end
-    local dt = getTimestampMs() - t0
-    job.ms, job.fr, job.sweeps = job.ms + dt, job.fr + 1, job.sweeps + (s.sweepCount or 0) - sw0
-    if dt > job.msx then job.msx = dt end
-    if job.q > job.nc or job.stop then Drive.cutJobFinish(s, playerNum) end
-end
-
--- 分幀改線規劃結束（1114q）：cut plan 與 none／commit 各記一次（fr＝用了幾幀、msx＝單幀最大 ms、ms＝各幀合計、wms＝起始幀的
--- replan 牆鐘），之後同 1114p 的 none（room 的進場差額）／commit（速度帽、cutover 待辦、Drive.cutLadderReset）。
-function Drive.cutJobFinish(s, playerNum)
-    local job = s.cutJob
-    s.cutJob, s.cutAbort = nil, nil
-    local kx, ky, lvl, att, uC, zarm, cut = job.kx, job.ky, job.lvl, job.att, job.uC, job.zarm, job.cut
-    diagEvent(s, playerNum, "cut", { phase = "plan", kx = kx, ky = ky, ka = job.adh * TUNE.DEG_PER_RAD, lvl = lvl,
-        attempt = att, np = job.np, nc = job.nc, d = -uC, l = job.lP, fr = job.fr })
+    local ms = getTimestampMs() - t0
+    local sweeps = (s.sweepCount or 0) - sweeps0
     if not cut then
         local hp, hpn = Drive.cutHardDump(s, kx, ky, math.max(-uC, 2 * zarm) + 3)
         -- 進場長不夠（room）＝車已過轉角前停點（Drive.cutStopNote 同一個 uStop）：差額交下一次倒車多退（Drive.unstickExtraM），
         -- 退回停點再試（1114g；rc-prod-1114 R1 1114f van-a：第一次判堵已過第一道門，倒車兩次停在 K 前 6.1／9.6 m）
         local runway = nil
-        if job.why == "room" then
+        if why == "room" then
             runway = uC + zarm + MDADSensor.CORRIDOR_HALF - s.needHalf
             if runway > 0 then
                 s.cutRunway = { att = att, m = math.min(runway, TUNE.UNSTICK_STEEP_MAX_M) }
@@ -15160,14 +15051,12 @@ function Drive.cutJobFinish(s, playerNum)
                 runway = nil
             end
         end
-        local notes = job.notes
-        diagEvent(s, playerNum, "cut", { phase = "none", why = job.why, kx = kx, ky = ky, lvl = lvl, np = job.np, nc = job.nc,
-            sweeps = job.sweeps, wms = job.wms, ms = job.ms, msx = job.msx, fr = job.fr, l = job.lP,
-            nsk = job.nsk > 0 and job.nsk or nil, steep = runway, c1 = notes[1], c2 = notes[2], c3 = notes[3], c4 = notes[4],
-            hp = hp, hpn = hpn })
+        diagEvent(s, playerNum, "cut", { phase = "none", why = why, kx = kx, ky = ky, lvl = lvl, np = np, nc = nc,
+            sweeps = sweeps, wms = Drive.replanElapsed(s), ms = ms, l = lP, nsk = nsk > 0 and nsk or nil, steep = runway,
+            c1 = notes[1], c2 = notes[2], c3 = notes[3], c4 = notes[4], hp = hp, hpn = hpn })
         if getDebug() then -- telemetry: cut none 事件
             print(string.format("%spn=%d corner cut none: K=(%.1f,%.1f) why=%s cand=%d pairs=%d", LOG, playerNum,
-                kx, ky, job.why, job.nc, job.np))
+                kx, ky, why, nc, np))
         end
         return
     end
@@ -15177,15 +15066,15 @@ function Drive.cutJobFinish(s, playerNum)
     local aLat = finite(s.safeLat) and s.safeLat > 0 and s.safeLat or 0
     cut.cap = math.max(MDADDynamics.crawlFloorKmh(cut.m, TUNE.DODGE_COMMIT_MIN_KMH, TUNE.DODGE_CRAWL_MID_KMH,
         TUNE.DODGE_CRAWL_MID_MARGIN_M), MDADDynamics.clearanceCapKmh(cut.m, TUNE.DODGE_CLEARANCE_RESERVE, 0.3, aLat,
-        math.sin(job.adh * 0.5)))
+        math.sin(adh * 0.5)))
     s.cornerCut = cut
     s.pendingRouteWhy, s.nextRouteMs = "cut", 0
     local fresh, rcv = Drive.cutLadderReset(s, kx, ky)
     local w = math.min(cut.wIn, cut.wOut)
     diagEvent(s, playerNum, "cut", { phase = "commit", kx = kx, ky = ky, tx = cut.tx, ty = cut.ty, lin = cut.lin,
-        lout = cut.lout, w = w < MDADCorridor.CUT_BIG and w or nil, r = cut.r, tier = cut.tier, lvl = lvl, np = job.np,
-        nc = job.nc, sweeps = job.sweeps, wms = job.wms, ms = job.ms, msx = job.msx, fr = job.fr, m = cut.m, cap = cut.cap,
-        comp = cut.comp, mo = cut.mo, fresh = fresh, rcv = rcv }) -- 1114k comp：圓角追線落後前饋（右正、往彎外；0＝前饋過頭那條掃不過），mo：前饋過頭那條的淨距
+        lout = cut.lout, w = w < MDADCorridor.CUT_BIG and w or nil, r = cut.r, tier = cut.tier, lvl = lvl, np = np,
+        nc = nc, sweeps = sweeps, wms = Drive.replanElapsed(s), ms = ms, m = cut.m, cap = cut.cap, comp = cut.comp,
+        mo = cut.mo, fresh = fresh, rcv = rcv }) -- 1114k comp：圓角追線落後前饋（右正、往彎外；0＝前饋過頭那條掃不過），mo：前饋過頭那條的淨距
     if getDebug() then -- telemetry: cut commit 事件
         print(string.format("%spn=%d corner cut commit: K=(%.1f,%.1f) T=(%.1f,%.1f) lin=%.2f lout=%.2f r=%s tier=%s",
             LOG, playerNum, kx, ky, cut.tx, cut.ty, cut.lin, cut.lout, tostring(cut.r), cut.tier))
@@ -17119,8 +17008,6 @@ local function stepFollow(s, vehicle, playerNum, now)
     end
     s.jerkBypassReason = nil
     local vx, vy = vehicle:getX(), vehicle:getY()
-    -- 分幀的改線規劃接著做（1114q；起始幀在 replan 的判堵出口，這裡在 replan 之前：同一幀不會做兩次）
-    if s.cutJob then Drive.cutJobStep(s, vehicle, playerNum) end
     local mult = getGameTime():getMultiplier()
     s.frameMs = mult * SECONDS_PER_MULT * 1000 -- 未夾的引擎幀時（telemetry fdt）
     if mult < MULT_MIN then mult = MULT_MIN end
@@ -18197,8 +18084,8 @@ local function stepFollow(s, vehicle, playerNum, now)
         -- 停等預算出口先定（1109c，Knox Pass E2E stuck=1）：下面的自動改道與 blocked-retry 都要 postAction==nil，預算已到期的
         -- 那幀只走交還前改道（Drive.stuckDetour）。舊制排在兩者之後：寬帶判完那幀預算已過（Drive.wideJudgePending 的寬限），
         -- 同幀先問 auto 又問 stuck，主 MOD 算兩次、多扣一次交還前改道額度。
-        -- 改線已承諾（1114l）或規劃分幀中（1114q）：預算出口等 cutover 換完線、或規劃結束再判（同 K 再承諾不歸零預算，到期照走這裡）
-        if s.waitAccumMs >= TUNE.WAIT_TIMEOUT_MS and not Drive.wideJudgePending(s) and not Drive.cutBusy(s) then
+        -- 改線已承諾（1114l）：預算出口等 cutover 換完線再判（同 K 再承諾不歸零預算，到期照走這裡）
+        if s.waitAccumMs >= TUNE.WAIT_TIMEOUT_MS and not Drive.wideJudgePending(s) and s.pendingRouteWhy ~= "cut" then
             postAction = "wait"
         end
         -- 自動改道（ESC 選項，0928m 起預設開）：blocked-retry 之後仍在停等、累計超過
@@ -18215,7 +18102,7 @@ local function stepFollow(s, vehicle, playerNum, now)
         -- 只有寬帶重判用得到；舊制等待額度早已累滿，倒車一結束下一幀就再倒（E2E 0929u 連倒三次、
         -- 中間一輪寬帶都沒跑就 StopStuck）。
         local autoDetourNow = s.blocked and not s.detourTried and s.recoverWhy == nil
-            and postAction == nil and s.intentShadow == "WAIT" and not Drive.cutBusy(s)
+            and postAction == nil and s.intentShadow == "WAIT" and s.pendingRouteWhy ~= "cut"
             and (not s.wideArmed or s.wideJudged == s.episodeAttempts)
             and (s.waitAccumMs >= TUNE.AUTO_DETOUR_MS
                 or (s.episodeAttempts >= 1 and s.waitAccumMs >= TUNE.BLOCK_RETRY_MS))
@@ -19920,7 +19807,6 @@ local function onPlayerUpdate(player)
             end
             s.mode = "yield"
             if s.detourWait then Drive.detourEnd(s, playerNum, "drop", "yield") end -- 玩家接手：恢復時從頭判堵、改道
-            if s.cutJob then Drive.cutJobAbort(s, playerNum, "yield") end -- 1114q：分幀的改線規劃作廢（讓位幀不跑 stepFollow）
             -- 背景換窗的候選是照讓位前的車位建的：玩家可能開到它的錨點之前（1108g 複審），恢復後照車位重來
             s.slide, s.rewindow = nil, s.rewindow and {} or nil
             s.yieldResumeMs = resumeMs
