@@ -5641,6 +5641,75 @@ do
     end
 end
 
+-- =====================================================================
+-- 1114k 追線落後前饋（MDADFollower.setComp／compAt／clearComp）：Driver 轉角改線持有時在 T 的圓角往彎外疊的側移。
+-- 形狀＝[a, b] 內 l、弧前 ramp／弧後 tail 線性漸變；疊在常駐 laneBias 與繞行 offL 之上（offL 不吃掉它）；是「設定」：
+-- resetControl 不清、clearComp 清。
+-- =====================================================================
+scenario("1114k 追線落後前饋：形狀、疊在 laneBias／offL 之上、resetControl 不清")
+do
+    local p = buildRoute(straight(21, 5), MAXV)
+    local st = F.newState()
+    checkFalse(F.setComp(st, 0.5, 50, 40, 2, 6), "setComp：b < a 拒收")
+    checkTrue(F.setComp(st, 0.5, 40, 50, 2, 6), "setComp：合法")
+    checkNear(F.compAt(st, 37), 0, 1e-12, "弧前 3 m（漸入外）＝0")
+    checkNear(F.compAt(st, 39), 0.25, 1e-12, "弧前 1 m＝一半")
+    checkNear(F.compAt(st, 45), 0.5, 1e-12, "弧內＝l")
+    checkNear(F.compAt(st, 53), 0.25, 1e-12, "弧後 3 m（tail 6）＝一半")
+    checkNear(F.compAt(st, 57), 0, 1e-12, "弧後 7 m＝0")
+    F.resetControl(st)
+    checkNear(F.compAt(st, 45), 0.5, 1e-12, "resetControl（脫困）不清前饋")
+    F.clearComp(st)
+    checkNear(F.compAt(st, 45), 0, 1e-12, "clearComp 清掉")
+    -- 前視點整段都在前饋範圍內：前饋 0.5 ≡ 常駐 laneBias 0.5（直路、不夾）
+    local a1, a2 = F.newState(), F.newState()
+    F.setLaneBias(a1, 0.5)
+    F.setComp(a2, 0.5, 0, 100, 2, 6)
+    local s1 = F.control(p, a1, 30, 0, 0, 20, DT)
+    local s2 = F.control(p, a2, 30, 0, 0, 20, DT)
+    checkTrue(math.abs(s1) > 1e-3 and math.abs(s1 - s2) < 1e-9,
+        string.format("前饋 0.5 ≡ 常駐 0.5 的前視點（steer %.4f／%.4f）", s1, s2))
+    -- 繞行保持段 offL −1 上疊前饋 0.5 ≡ offL −0.5：繞行／停留不吃掉前饋
+    local b1, b2 = F.newState(), F.newState()
+    b1.offA, b1.offB, b1.offC, b1.offD, b1.offL = 5, 10, 90, 95, -1
+    b2.offA, b2.offB, b2.offC, b2.offD, b2.offL = 5, 10, 90, 95, -0.5
+    F.setComp(b1, 0.5, 0, 100, 2, 6)
+    local t1 = F.control(p, b1, 30, -0.5, 0, 20, DT)
+    local t2 = F.control(p, b2, 30, -0.5, 0, 20, DT)
+    checkTrue(math.abs(t1 - t2) < 1e-9,
+        string.format("繞行 offL −1＋前饋 0.5 ≡ offL −0.5（steer %.4f／%.4f）", t1, t2))
+    -- exact line 的前視點平移（compShift）與切線追蹤的斜率（compTurn）
+    local c1 = F.newState()
+    F.setComp(c1, 0.5, 40, 50, 2, 6)
+    local sx, sy = F.compShift(c1, 45, 0, 10, 0)
+    local nx, ny = F.compShift(c1, 30, 0, 10, 0)
+    checkTrue(math.abs(sx - 10) < 1e-12 and math.abs(sy - 0.5) < 1e-12 and nx == 10 and ny == 0,
+        string.format("compShift：東行右法向（y 正）平移前饋、範圍外不動（%.3f,%.3f／%.3f,%.3f）", sx, sy, nx, ny))
+    local tx1, ty1 = F.compTurn(c1, 38, 1, 0)
+    local want = math.atan(0.375, 1.5)
+    checkTrue(math.abs(math.atan(ty1, tx1) - want) < 1e-9,
+        string.format("compTurn：漸入段 0→0.375（1.5 m）轉進 %.4f rad（實得 %.4f）", want, math.atan(ty1, tx1)))
+    -- 弧上切線追蹤時確實轉進前饋斜率：同一車位，前饋漸入段蓋住預視點時 err 與沒前饋不同
+    local wA = 2 * (12 * (1 - math.cos(math.pi / 4)) + 0.656 + 0.4)
+    local pa = F.begin({ pts = { 0, -40, 0, 0, 40, 0 }, segSurface = { "paved", "paved" }, segWidth = { wA, wA } }, 120, 4,
+        { valid = true, geometryValid = true, halfW = 0.656, rMin = 2.26, wheelbase = 1.985, delta0Safe = 0.72,
+            deltaVSafe = 0.24, maxSpeed = 120 })
+    while not pa.ready do F.stepBuild(pa, 4096) end
+    local kArc = nil
+    for k = 1, pa.n - 1 do
+        if pa.segKind[k] == MDADDynamics.SEG_ARC then kArc = k break end
+    end
+    local e0, e1 = nil, nil
+    if kArc then
+        local d1, d2 = F.newState(), F.newState()
+        F.setComp(d2, -0.6, pa.s[kArc] + 2.5, pa.s[kArc] + 6, 2, 6)
+        _, _, _, _, e0 = F.control(pa, d1, pa.x[kArc], pa.y[kArc], pa.segH[kArc], 10, DT)
+        _, _, _, _, e1 = F.control(pa, d2, pa.x[kArc], pa.y[kArc], pa.segH[kArc], 10, DT)
+    end
+    checkTrue(kArc ~= nil and type(e0) == "number" and type(e1) == "number" and math.abs(e1 - e0) > 1e-4,
+        string.format("弧上切線追蹤轉進前饋斜率（err %s／%s）", tostring(e0), tostring(e1)))
+end
+
 closeScenario()
 print()
 print("情境 " .. scenarios .. " 個、斷言 " .. assertions .. " 項")

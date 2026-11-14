@@ -2190,6 +2190,15 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
             lt = bias + (offL - bias) * t
         end
     end
+    -- 追線落後前饋（1114k，MDADFollower.setComp）：疊在上面算出的 lane／繞行 offL／exact line 之上，不被它們蓋掉。
+    -- control 的 local 槽已到 Kahlua 上限 190：這裡不開新 local（exact line 的前視點平移交 MDADFollower.compShift）。
+    if state.compL ~= nil then
+        if ovUsed then
+            tx, ty = MDADFollower.compShift(state, sEff, profile.segH[j], tx, ty)
+        else
+            lt = lt + MDADFollower.compAt(state, sEff)
+        end
+    end
     if not ovUsed and lt ~= 0 then
         local h = profile.segH[j]
         tx = tx - sin(h) * lt
@@ -2334,6 +2343,10 @@ function MDADFollower.control(profile, state, x, y, heading, speed, dt)
             vx, vy = cos(hq), sin(hq)
             tangentOn = true
             state.laneTangent = true
+        end
+        -- 追線落後前饋的斜率（1114k）：同常駐車道斜率，切線轉進漸入／漸出段的橫向斜率（取在預視點再往前 TANGENT_SLOPE_LEAD_S 秒）
+        if tangentOn and state.compL ~= nil then
+            vx, vy = MDADFollower.compTurn(state, q + aspeed * MS_PER_KMH * TANGENT_SLOPE_LEAD_S, vx, vy)
         end
     end
     state.laneHold = arcK == nil and state.laneTangent -- 出口後車道 ramp 續追中（laneRampHold；Driver 樣本 lth）
@@ -3106,6 +3119,48 @@ function MDADFollower.setLaneBias(state, bias)
     if not isFinite(bias) then bias = 0 end
     state.laneBias = bias
     return true
+end
+
+-- 追線落後前饋（1114k；Driver 轉角改線持有時設）：剖面弧長 [a, b]（T 的圓角）內在期望線上再疊 l（公尺，右正；彎外那側），
+-- 弧前 ramp、弧後 tail 公尺線性漸入漸出、之外 0。疊在常駐 bias／繞行 offL／exact line 之上（繞行、停留不吃掉它），
+-- 前視點、弧段切線的車道斜率、Driver 期望線（el）同一條曲線。跟 laneBias 一樣是「設定」：resetState／resetControl 不清，
+-- 由 Driver 在 cutover／丟改線時 setComp／clearComp。
+function MDADFollower.setComp(state, l, a, b, ramp, tail)
+    if type(state) ~= "table" or not isFinite(l) or not isFinite(a) or not isFinite(b) or b < a
+            or not isFinite(ramp) or ramp <= 0 or not isFinite(tail) or tail <= 0 then
+        return false
+    end
+    state.compL, state.compA, state.compB, state.compRamp, state.compTail = l, a, b, ramp, tail
+    return true
+end
+
+function MDADFollower.clearComp(state)
+    if type(state) == "table" then state.compL = nil end
+end
+
+-- 弧長 sAt 處的前饋側移（沒設＝0）
+function MDADFollower.compAt(state, sAt)
+    local l = type(state) == "table" and state.compL or nil
+    if l == nil or not isFinite(sAt) then return 0 end
+    local a, b, w = state.compA, state.compB, 1
+    if sAt < a then w = 1 - (a - sAt) / state.compRamp elseif sAt > b then w = 1 - (sAt - b) / state.compTail end
+    if w <= 0 then return 0 end
+    return l * w
+end
+
+-- exact line 的前視點 (tx, ty) 沿段向 h 的右法向平移 sAt 處的前饋（control 用；control 的 local 槽已滿，拆出來）
+function MDADFollower.compShift(state, sAt, h, tx, ty)
+    local c = MDADFollower.compAt(state, sAt)
+    if c == 0 then return tx, ty end
+    return tx - sin(h) * c, ty + cos(h) * c
+end
+
+-- 切線追蹤的方向 (vx, vy) 轉進前饋在 q 處的橫向斜率（q 到 q＋TANGENT_PREVIEW_M；同常駐車道斜率的做法）
+function MDADFollower.compTurn(state, q, vx, vy)
+    local d = atan2(MDADFollower.compAt(state, q + TANGENT_PREVIEW_M) - MDADFollower.compAt(state, q), TANGENT_PREVIEW_M)
+    if d == 0 then return vx, vy end
+    local ca, sa = cos(d), sin(d)
+    return vx * ca - vy * sa, vx * sa + vy * ca
 end
 
 -- ownOvX/ownOvY＝state 自有的前視折線槽；resetState 會把 ovX/ovY 指回它們。

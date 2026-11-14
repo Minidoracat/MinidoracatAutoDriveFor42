@@ -203,6 +203,7 @@ local EK = {
     -- kx ky kd arm d l u attempt
     "nsk",
     "ef", -- 1114h：dodge commit 的終點到站形狀來源（fit／fell；Driver sweepWithFallbacks）
+    "comp", "mo", -- 1114k：cut commit 的圓角追線落後前饋（m，右正、往彎外；0＝前饋過頭那條掃不過）與前饋過頭那條線的掃掠淨距
     -- 1012 起步先原地轉：uturn enter／done 的起步段旗標、enter 當幀 |航向誤差| rad（uturn room 用既有 rear／len／probe）
     "start", "ae",
     -- 1013a route ready：起步沒接越野接線的原因碼（far／near／behind／side／tow／other）、車頭與最近段夾角 rad、車到最近點 m

@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1114j"
+Drive.REV = "1114k"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -667,13 +667,14 @@ TUNE.CORNER_CUT_SAME_M = 0.25         -- 候選線離已打掉前一條的硬點
 TUNE.CORNER_CUT_PAIRS = 400           -- 格網對數上限（超過截斷，事件 np 記試了幾對）
 TUNE.CORNER_CUT_SNAP_M = 2            -- 重算的路線仍經過原轉角（頂點 2m 內、兩臂同向）才重套改線
 TUNE.CORNER_CUT_DUMP_N = 240         -- cut none 附帶的轉角點雲上限（Drive.cutHardDump；離線重建驗線用）
--- 改線圓角的追線落後包絡（1114j；Drive.cutEnvelope）：車在 T 的圓角實際走在期望線內側。rc-prod-1114 R1 cutclr4/5/6 十八場（r 3.3–4.6、
--- 5–10 km/h、CarNormal／VanAmbulance）在圓角內 ld（lat−el）最小 −0.49～−0.875、與 r 無明顯關係；1114g/h 的 el≈+0.63（靠右）剛好把車
--- 抵回掃過的 l＝0 線（lat −0.07～−0.11），1114i 把常駐線釘 0 後 lat −0.5～−0.6、兩場擦燈柱。離線 plant（test_follower 同款 K0.18
--- τ0.35）只重現 0.1–0.2——離線閉環量不到，只能照實測包絡掃。
-TUNE.CUT_LAG_M = 0.8                  -- 圓角內往彎內的落後包絡（m）：掃線本身與「圓角內再往彎內 0.8 m」兩條線（Drive.cornerCutTry）
-TUNE.CUT_LAG_RAMP_M = 2              -- 圓角前的包絡漸變長（m）：前視提早轉入（實測 ld 在弧前約 1 m 才開始往內）
-TUNE.CUT_LAG_TAIL_M = 6              -- 圓角後的包絡漸變長（m）：出弧後落後慢慢收（實測出弧 2 m 仍 −0.3～−0.45、4 m −0.25）
+-- 改線圓角的追線落後前饋（1114k；Drive.cornerCutTry／cutCompApply、MDADFollower.setComp）：車在 T 的圓角實際走在期望線彎內側。
+-- rc-prod-1114 R1 cutclr4/5/6 十八場（r 3.3–4.6、5–10 km/h、CarNormal／VanAmbulance）圓角內 ld（lat−el）最小 −0.49～−0.875、
+-- 與 r 無明顯關係；出弧 2 m 仍 −0.3～−0.45、4 m −0.25。兩群：1114g/h el 0.63–0.69（cutover 後靠右 EMA，碰巧）→ lat 最小
+-- −0.07～−0.11、11/12 場 0 接觸；1114i el 0 → lat −0.49～−0.6、兩場擦燈柱。兩群連線 lat≈0.69·el−0.53：el 0.65 → lat≈−0.08。
+-- 離線 plant（test_follower 同款）只重現 0.1–0.2，前饋量只能照實測。1114j 改成掃落後包絡、拒收西側線，實機承諾崗亭東側線＝5/6 卡死。
+TUNE.CUT_COMP_M = 0.65                -- 圓角內期望線往彎外疊的量（m）：取 1114g/h 實機 0 接觸那群的 el（往彎外，不是靠右）
+TUNE.CUT_COMP_RAMP_M = 2              -- 弧前漸入長（m）：實測 ld 在弧前約 1 m 開始往內
+TUNE.CUT_COMP_TAIL_M = 6              -- 弧後漸出長（m）：實測出弧 4 m 還有 −0.25
 local CURVE_LEAD = 8           -- 過渡段要在折點前多遠完成（公尺）：進彎前把側移
                                -- 做完、彎中全程保持目標線——過渡線切折角掃到彎
                                -- 外側障礙是 2026-08-29 路口七連殺的幾何根因
@@ -4464,7 +4465,8 @@ local function laneBiasOf(s)
 end
 
 -- 期望行駛線＝laneBias（過該段路面餘裕，與 follower 前視／線建同一張表）＋
--- （繞行中）smoothstep 側偏。抽出只為遙測 el／ld 與甩出判定共用，語意逐位元不變。
+-- （繞行中）smoothstep 側偏＋轉角改線圓角的追線落後前饋（1114k，MDADFollower.compAt；疊在最上面，繞行／停留不吃掉）。
+-- 遙測 el／ld、甩出判定、目前車身判擋共用。
 local function expectedLaneOf(s)
     local expL = MDADFollower.laneBiasAt(s.profile, laneBiasOf(s), s.fstate.idx, s.lastSNow, s.fstate.laneKeep)
     local offL = s.fstate.offL
@@ -4480,7 +4482,7 @@ local function expectedLaneOf(s)
             expL = expL + (offL - expL) * t
         end
     end
-    return expL
+    return expL + MDADFollower.compAt(s.fstate, s.lastSNow)
 end
 
 -- NaN／非數值收口（與 MDAD_Diagnostics 的 finite 同語意；不用 math.huge）
@@ -6017,7 +6019,7 @@ function Drive.plannedLaneAt(s, sq)
         t = t * t * (3 - 2 * t)
         lane = lane + (offL - lane) * t
     end
-    return lane
+    return lane + MDADFollower.compAt(fs, sq) -- 改線圓角的追線落後前饋（1114k，同 expectedLaneOf）
 end
 
 -- 繞行承諾前的會車檢查：對向車會在我方佔用繞行 lane（弧長 a..d）的期間出現在那段、且車身
@@ -14164,31 +14166,25 @@ function Drive.cutScratchOf(s)
     return sc
 end
 
--- 改線掃掠線的落後包絡線（1114j）：sc 的 ln 個取樣點（lx／ly、弧長 lsq、切向 ltx／lty）在 T 的圓角 [sA, sB] 內往彎內（sgnIn：彎內那側
--- 的 l 號，右法向 (−ty, tx) 為正）平移 lag，弧前 TUNE.CUT_LAG_RAMP_M、弧後 TUNE.CUT_LAG_TAIL_M 線性漸變、之外不動；寫進 sc.ex／sc.ey。
-function Drive.cutEnvelope(sc, ln, lag, sgnIn, sA, sB)
-    local ramp, tail = TUNE.CUT_LAG_RAMP_M, TUNE.CUT_LAG_TAIL_M
+-- 改線掃掠線的前饋偏移線（1114k）：sc 的 ln 個取樣點（lx／ly、弧長 lsq、切向 ltx／lty）在 T 的圓角 [sA, sB] 內平移 l（右法向
+-- (−ty, tx) 為正），弧前 TUNE.CUT_COMP_RAMP_M、弧後 TUNE.CUT_COMP_TAIL_M 線性漸變、之外不動（同 MDADFollower.compAt 的形狀）；
+-- 寫進 sc.ex／sc.ey。
+function Drive.cutEnvelope(sc, ln, l, sA, sB)
+    local ramp, tail = TUNE.CUT_COMP_RAMP_M, TUNE.CUT_COMP_TAIL_M
     local lx, ly, lsq, ltx, lty, ex, ey = sc.lx, sc.ly, sc.lsq, sc.ltx, sc.lty, sc.ex, sc.ey
     for q = 1, ln do
         local sq, w = lsq[q], 1
         if sq < sA then w = 1 - (sA - sq) / ramp elseif sq > sB then w = 1 - (sq - sB) / tail end
         if w < 0 then w = 0 end
-        local l = sgnIn * lag * w
-        ex[q], ey[q] = lx[q] - lty[q] * l, ly[q] + ltx[q] * l
+        local o = l * w
+        ex[q], ey[q] = lx[q] - lty[q] * o, ly[q] + ltx[q] * o
     end
 end
 
--- 改線掃掠線（sc 的 ln 個取樣點）到 (px, py) 的最近距離與那一側（1：右法向側，−1：左；切向 ltx／lty）。候選多樣性 same 用（1114j）。
-function Drive.cutNearSide(sc, ln, px, py)
-    local lx, ly, best, bq = sc.lx, sc.ly, nil, 1
-    for q = 1, ln do
-        local dx, dy = px - lx[q], py - ly[q]
-        local d2 = dx * dx + dy * dy
-        if best == nil or d2 < best then best, bq = d2, q end
-    end
-    if best == nil then return nil, 0 end
-    local cr = -sc.lty[bq] * (px - lx[bq]) + sc.ltx[bq] * (py - ly[bq])
-    return sqrt(best), cr >= 0 and 1 or -1
+-- 轉角彎內那側的 l 號（1114k；右正）：入臂方向 (ix, iy)、出臂方向 (ox, oy)，PZ 世界 y 向南。西行轉南（左轉）＝彎內在左＝−1；
+-- 東行轉南（右轉）＝彎內在右＝1。前饋往彎外＝乘 −1（右轉時靠右是彎內，不能拿靠右當前饋方向）。
+function Drive.cutInSign(ix, iy, ox, oy)
+    return ix * oy - iy * ox > 0 and 1 or -1
 end
 
 -- 改線的「過完」點（1114i；出臂座標，從 K 沿 o 量）：車尾過 B（出臂偏移直線的尾端 uB），也過改線掃掠淨距最小的那個硬點
@@ -14227,6 +14223,7 @@ end
 function Drive.cornerCutDrop(s, playerNum, why)
     local c = s.cornerCut
     s.cornerCut, s.cutCapKmh, s.cutHeld = nil, nil, false
+    MDADFollower.clearComp(s.fstate) -- 追線落後前饋跟著改線走（1114k）
     if c then diagEvent(s, playerNum, "cut", { phase = "drop", why = why, kx = c.kx, ky = c.ky }) end
 end
 
@@ -14395,7 +14392,7 @@ function Drive.cornerCutTry(s, g, lin, lout, win, wout)
         end
     end
     c.r, g.tR = rT, rT
-    -- T 的圓角＝最近 T 的那段弧所在的連續弧段（buildFilletPath 一個圓角切成多段 chord）：落後包絡的範圍（Drive.cutEnvelope）
+    -- T 的圓角＝最近 T 的那段弧所在的連續弧段（buildFilletPath 一個圓角切成多段 chord）：追線落後前饋的範圍（Drive.cutEnvelope）
     local kB = kA
     if kA then
         while kA > 1 and okd[kA - 1] == MDADDynamics.SEG_ARC do kA = kA - 1 end
@@ -14450,16 +14447,19 @@ function Drive.cornerCutTry(s, g, lin, lout, win, wout)
             acc, k = acc + L, k + 1
         end
     end
-    -- 候選多樣性（1114f）：前面的候選在硬點 H 掃掠失敗過，這條線從同一側經過 H、離 H 沒有比失敗那條遠 TUNE.CORNER_CUT_SAME_M 以上
-    -- ＝同一個原因，不再掃（回 same、不佔掃掠名額）。rc-prod-1114 R1：格網依成本取的 4 條都是 lin 0～−1、lout 0～−0.5，全撞同一根
-    -- (5221.5,15403.5)。側別（1114j）：落後包絡是單邊的（往彎內），從 H 另一側經過的線離 H 近也不是同一個原因（smoke (rc-lag)：
-    -- van 停點 lag 檔撞 (5220.5,15412.5) 後，出臂移到燈柱東側的那幾條被當 same 略過、cut none）。
+    -- 候選多樣性（1114f）：前面的候選在硬點 H 掃掠失敗過，這條線離 H 沒有比失敗那條遠 TUNE.CORNER_CUT_SAME_M 以上＝同一個原因，
+    -- 不再掃（回 same、不佔掃掠名額）。rc-prod-1114 R1：格網依成本取的 4 條都是 lin 0～−1、lout 0～−0.5，全撞同一根 (5221.5,15403.5)。
     local fails = g.fails
     if fails then
         for f = 1, #fails do
             local F = fails[f]
-            local d, side = Drive.cutNearSide(sc, ln, F.x, F.y)
-            if d and side == F.side and d <= F.d + TUNE.CORNER_CUT_SAME_M then return "same" end
+            local dm = nil
+            for q = 1, ln do
+                local dx, dy = lx[q] - F.x, ly[q] - F.y
+                local d2 = dx * dx + dy * dy
+                if dm == nil or d2 < dm then dm = d2 end
+            end
+            if dm and sqrt(dm) <= F.d + TUNE.CORNER_CUT_SAME_M then return "same" end
         end
     end
     g.swept = true
@@ -14467,49 +14467,54 @@ function Drive.cornerCutTry(s, g, lin, lout, win, wout)
     local lS1 = lS0 + len
     local nb = s.sweepBase
     local _, _, pad = sweepGeom(s, nb)
-    -- 掃的是車實際會走的帶（1114j，attack-the-premise）：改線持有時常駐線＝掃過的線（l＝0，掃描輪 s.cutHeld），但車在 T 的圓角實際
-    -- 落在線的彎內側最多 TUNE.CUT_LAG_M（實測），所以掃兩條：線本身（plan 檔）與圓角內往彎內平移 lag 的包絡線（lag 檔），兩條都過才收、
-    -- m 取小的。1114h 只掃 l＝0：常駐靠右 0.63 碰巧把落後抵掉（car-c 停留把常駐線拉回 −0.11 那場擦門柱）；1114i 釘 0 後兩場擦燈柱、
-    -- 一場卡死（smoke (rc-lag)）。
-    local sgnIn = sn > 0 and 1 or -1 -- 彎內那側的 l 號（右正；左轉 sn<0＝彎內在左）
-    if not aS then aS, aE = -1e9, -1e9 end
-    g.aS, g.aE = aS, aE -- 包絡的圓角範圍（掃掠線弧長；smoke (rc-lag) 驗它蓋滿整個 T 的圓角）
-    local okS, mS, skS, oxS, oyS, miS, tier, lx2, ly2
-    for pass = 1, 2 do
-        tier, lx2, ly2 = "plan", lx, ly
-        if pass == 2 then
-            Drive.cutEnvelope(sc, ln, TUNE.CUT_LAG_M, sgnIn, aS, aE)
-            tier, lx2, ly2 = "lag", sc.ex, sc.ey
-        end
-        if not Drive.zoneCovered(s, lx2, ly2, ln, pad) then
-            g.nocov = tier
-            return "cover"
-        end
-        local m2, mi2, _
-        okS, m2, _, _, skS, oxS, oyS, mi2 = sweepLine(s, lx2, ly2, ln, lS0, lS1, lS0, lS0, lS1, lS1, 0, "cut", nb, 1,
-            false, false)
-        if not okS then
-            mS = m2
-            break
-        end
-        if mS == nil or m2 < mS then mS, miS = m2, mi2 end
+    if not Drive.zoneCovered(s, lx, ly, ln, pad) then
+        g.nocov = "plan"
+        return "cover"
     end
+    local okS, mS, _, _, skS, oxS, oyS, miS = sweepLine(s, lx, ly, ln, lS0, lS1, lS0, lS0, lS1, lS1, 0, "cut", nb, 1,
+        false, false)
     if not okS then
-        g.hTier, g.hm, g.hx, g.hy = tier, mS, oxS, oyS
+        g.hTier, g.hm, g.hx, g.hy = "plan", mS, oxS, oyS
         if finite(skS) then
             local kq = math.floor((skS - lS0) / step + 0.5) + 1
             if kq < 1 then kq = 1 elseif kq > ln then kq = ln end
-            g.sx, g.sy = lx2[kq], ly2[kq]
+            g.sx, g.sy = lx[kq], ly[kq]
         end
         if finite(oxS) and finite(oyS) then
-            local d, side = Drive.cutNearSide(sc, ln, oxS, oyS)
+            local dm = nil
+            for q = 1, ln do
+                local dx, dy = lx[q] - oxS, ly[q] - oyS
+                local d2 = dx * dx + dy * dy
+                if dm == nil or d2 < dm then dm = d2 end
+            end
             if not g.fails then g.fails = {} end
-            g.fails[#g.fails + 1] = { x = oxS, y = oyS, d = d, side = side }
+            g.fails[#g.fails + 1] = { x = oxS, y = oyS, d = sqrt(dm) }
         end
         return "sweep"
     end
-    -- 掃過的那條線留在候選上（cutover 後新剖面要與它逐點一致：承諾線＝掃過的線；smoke (cut-equiv)）；m＝線本身與落後包絡兩次掃掠淨距的小者（速度帽）
-    c.tier, c.m, c.swn, c.swx, c.swy = "plan", mS, ln, {}, {}
+    -- 追線落後前饋（1114k）：車在 T 的圓角實際落在期望線彎內側 0.5–0.8 m（rc-prod-1114 R1 十八場），所以改線持有時期望線在圓角
+    -- 往彎外疊 TUNE.CUT_COMP_M（MDADFollower.setComp，cutover 時由 Drive.cutCompApply 套上）、實際軌跡≈掃過的這條線。前饋過頭
+    -- （車沒落後：更慢、別的車型）車就走在「往彎外偏 comp」那條線上：照同樣的漸入漸出掃它，掃不過把 comp 減半、再不過＝0（不拒收；
+    -- comp 0＝1114i 那型會往彎內切 0.5 m，cut commit 的 comp 會記下）。m 取兩條的小者（速度帽）。
+    if not aS then aS, aE = -1e9, -1e9 end
+    g.aS, g.aE = aS, aE -- 前饋的圓角範圍（掃掠線弧長；smoke (rc-comp) 驗它蓋滿整個 T 的圓角）
+    local comp, mo, sgnOut = 0, nil, -Drive.cutInSign(g.ix, g.iy, g.ox, g.oy)
+    if aS > -1e8 and TUNE.CUT_COMP_M > 0 then
+        for f = 1, 2 do
+            local l = sgnOut * TUNE.CUT_COMP_M * (f == 1 and 1 or 0.5)
+            Drive.cutEnvelope(sc, ln, l, aS, aE)
+            if Drive.zoneCovered(s, sc.ex, sc.ey, ln, pad) then
+                local okO, mO = sweepLine(s, sc.ex, sc.ey, ln, lS0, lS1, lS0, lS0, lS1, lS1, 0, "cut", nb, 1, false, false)
+                if okO then
+                    comp, mo = l, mO
+                    break
+                end
+            end
+        end
+    end
+    -- 掃過的那條線留在候選上（cutover 後新剖面要與它逐點一致：承諾線＝掃過的線；smoke (cut-equiv)）；m＝這條線與前饋過頭那條的
+    -- 掃掠淨距小者（速度帽）
+    c.tier, c.m, c.comp, c.mo, c.swn, c.swx, c.swy = "plan", mo and mo < mS and mo or mS, comp, mo, ln, {}, {}
     for q = 1, ln do c.swx[q], c.swy[q] = lx[q], ly[q] end
     c.passU = Drive.cutPassU(c, uB, sen, miS, vp.halfL)
     -- 出臂下一群：出臂窗尾（u′＝T 後 zarm）投影回剖面的弧長之後，以改線出臂（剖面上 l≈l_out）當行駛基準線問 Corridor.plan，
@@ -14805,20 +14810,17 @@ function Drive.cornerCutPlan(s, vehicle, playerNum)
         vx = vx, vy = vy, adh = adh, inW = finite(sw and sw[iK - 1]) and sw[iK - 1] or 0,
         outW = finite(sw and sw[iK]) and sw[iK] or 0 }
     local rank = { room = 1, kin = 2, cover = 3, sweep = 4, wall = 5 }
-    local why, cut, notes, nn, nsk, swept, thin = "grid", nil, {}, 0, 0, 0, nil
+    local why, cut, notes, nn, nsk, swept = "grid", nil, {}, 0, 0, 0
     for q = 1, nc do
         g.swept = false
         local w, c = Drive.cornerCutTry(s, g, sc.lin[q], sc.lout[q], sc.win[q], sc.wout[q])
         if c then
-            -- 貼縫照一般繞行的拓寬標準（TUNE.NUDGE_WIDEN_M）：掃過但 m 小於它＝記下、往池裡（成本序）找更寬的，到 m 夠了或掃掠名額
-            -- 用完為止，採 m 最大的那條；不否決通行（1114i；rc-prod-1114 R1 1114h car-c 承諾 m 0.02 那條擦門柱）。圓角的追線落後已由
-            -- Drive.cornerCutTry 的落後包絡掃過（1114j），m 是兩條的小者。m 是掃掠結果、掃之前不知道，所以不進格網成本。
-            if not cut then
-                cut = c
-            elseif c.m > cut.m then
-                thin, cut = thin or cut.m, c
-            end
-            if c.m >= TUNE.NUDGE_WIDEN_M then break end
+            -- 照成本序收第一條前饋套得上（comp≠0）的線；過了但前饋過頭那條掃不過（comp 0）的先記著、往下找，找不到才收它（1114k）。
+            -- 不再往池裡找 m 更寬的（1114i 的貼縫找更寬）：池裡較寬的常是出臂大平移的線——rc-prod-1114 R1 1114j 承諾的崗亭東側線
+            -- lin −0.5／lout −4.5 過得了掃掠（m 0.39），cutover 後 5/6 卡死或擦柱；1114g/h 收成本序第一條（西側線）＋碰巧 el +0.63，
+            -- 11/12 場 0 接觸。m 只換速度帽。
+            if not cut or (cut.comp == 0 and c.comp ~= 0) then cut = c end
+            if c.comp ~= 0 then break end
         elseif w == "same" then
             nsk = nsk + 1
         else
@@ -14869,8 +14871,8 @@ function Drive.cornerCutPlan(s, vehicle, playerNum)
     local w = math.min(cut.wIn, cut.wOut)
     diagEvent(s, playerNum, "cut", { phase = "commit", kx = kx, ky = ky, tx = cut.tx, ty = cut.ty, lin = cut.lin,
         lout = cut.lout, w = w < MDADCorridor.CUT_BIG and w or nil, r = cut.r, tier = cut.tier, lvl = lvl, np = np,
-        nc = nc, sweeps = sweeps, wms = Drive.replanElapsed(s), ms = ms, m = cut.m, cap = cut.cap,
-        thin = thin }) -- 1114i：先掃過但貼縫、被較寬的換掉的那條的 m（沒換＝缺）
+        nc = nc, sweeps = sweeps, wms = Drive.replanElapsed(s), ms = ms, m = cut.m, cap = cut.cap, comp = cut.comp,
+        mo = cut.mo }) -- 1114k comp：圓角追線落後前饋（右正、往彎外；0＝前饋過頭那條掃不過），mo：前饋過頭那條的淨距
     if getDebug() then -- telemetry: cut commit 事件
         print(string.format("%spn=%d corner cut commit: K=(%.1f,%.1f) T=(%.1f,%.1f) lin=%.2f lout=%.2f r=%s tier=%s",
             LOG, playerNum, kx, ky, cut.tx, cut.ty, cut.lin, cut.lout, tostring(cut.r), cut.tier))
@@ -14896,7 +14898,9 @@ function Drive.cornerCutFor(s, playerNum, vehicle, targetChanged)
 end
 
 -- cutover 建完剖面（begin 之後、stepBuild 之前）：套了改線＝記 cut apply（r＝新剖面在 T 的圓角半徑、rd＝與驗線時的差：圓角容量是
--- 整條路線共用，長路線上可能不同——以新剖面的正規判堵為準，不另修）；拼不上＝drop why=route。
+-- 整條路線共用，長路線上可能不同——以新剖面的正規判堵為準，不另修）；拼不上＝drop why=route。T 的圓角（最近 T 的弧段所在的連續弧段）
+-- 在新剖面的弧長範圍記在候選上（u.compA／compB；剖面 s 還沒建，照 pts 弦長從 s0 累加＝stepBuild 的同一個 s），cutover 後
+-- Drive.cutCompApply 用它套追線落後前饋（1114k）。
 function Drive.cornerCutNote(s, playerNum, profile, why)
     local u = Drive.cutUsed
     Drive.cutUsed = nil
@@ -14906,15 +14910,40 @@ function Drive.cornerCutNote(s, playerNum, profile, why)
     end
     if type(u) ~= "table" or type(profile) ~= "table" then return end
     local pp, kind, rad = profile.pts, profile.segKind, profile.filletRadius
-    local r, best = nil, nil
-    for k = 1, (profile.n or 0) - 1 do
+    local n = profile.n or 0
+    local r, best, kA = nil, nil, nil
+    for k = 1, n - 1 do
         if kind[k] == MDADDynamics.SEG_ARC then
             local dx, dy = pp[2 * k - 1] - u.tx, pp[2 * k] - u.ty
-            if best == nil or dx * dx + dy * dy < best then best, r = dx * dx + dy * dy, rad[k] end
+            if best == nil or dx * dx + dy * dy < best then best, r, kA = dx * dx + dy * dy, rad[k], k end
         end
+    end
+    u.compA, u.compB = nil, nil
+    if kA then
+        local kB = kA
+        while kA > 1 and kind[kA - 1] == MDADDynamics.SEG_ARC do kA = kA - 1 end
+        while kB < n - 1 and kind[kB + 1] == MDADDynamics.SEG_ARC do kB = kB + 1 end
+        local acc = finite(profile.s0) and profile.s0 or 0
+        for k = 1, kB do
+            if k == kA then u.compA = acc end
+            local dx, dy = pp[2 * k + 1] - pp[2 * k - 1], pp[2 * k + 2] - pp[2 * k]
+            acc = acc + sqrt(dx * dx + dy * dy)
+        end
+        u.compB = acc
     end
     diagEvent(s, playerNum, "cut", { phase = "apply", why = why, kx = u.kx, ky = u.ky, r = r,
         rd = r and u.r and math.abs(r - u.r) or nil })
+end
+
+-- cutover（resetState 之後）：持有改線＝在 Follower 套追線落後前饋（c.comp，Drive.cornerCutTry 掃過的量；T 的圓角 c.compA..compB，
+-- Drive.cornerCutNote），沒有改線或量為 0＝清掉（1114k）。前饋是「設定」，換路線、脫困都不清，丟改線（Drive.cornerCutDrop）才清。
+function Drive.cutCompApply(s)
+    local c, fs = s.cornerCut, s.fstate
+    if c and finite(c.comp) and c.comp ~= 0 and finite(c.compA) and finite(c.compB) then
+        MDADFollower.setComp(fs, c.comp, c.compA, c.compB, TUNE.CUT_COMP_RAMP_M, TUNE.CUT_COMP_TAIL_M)
+    else
+        MDADFollower.clearComp(fs)
+    end
 end
 
 local function replan(s, vehicle, playerNum)
@@ -16868,9 +16897,9 @@ local function stepFollow(s, vehicle, playerNum, now)
         -- 的 dev）仍對 target，剛 commit 時 lineLat≈車位不會假完成。其餘走既有側偏剖面期望線。
         local expL = expectedLaneOf(s)
         if (s.dodging or s.returnActive) and finite(lineLat) then
-            expL = lineLat
+            expL = lineLat + MDADFollower.compAt(s.fstate, s.lastSNow) -- 前饋疊在 exact line 上（1114k，同 Follower 前視點）
         elseif s.returnActive then
-            expL = s.returnLaneTarget
+            expL = s.returnLaneTarget + MDADFollower.compAt(s.fstate, s.lastSNow)
         end
         local latDev = latSigned - expL
         s.diagExpL, s.diagLatDev = expL, latDev
@@ -17007,8 +17036,8 @@ local function stepFollow(s, vehicle, playerNum, now)
                 end
                 -- 改線持有、車還沒過完（s.cutHeld，Drive.cutCap）：常駐線＝掃過的改線（新剖面 l＝0），不靠右、不路面對中（1114i；
                 -- rc-prod-1114 R1 1114h car-c：cutover 後常駐線是入臂留下的靠右 0.37，規劃器以那條判擋、起停留繞行 offL −0.5，
-                -- 車離開掃過的改線往圓角內側走）。放開後 sandBias 照 EMA 走回靠右目標。車在圓角內仍會往彎內落後 0.5–0.8 m：
-                -- 那份由 Drive.cornerCutTry 的落後包絡掃過（1114j），不靠常駐線抵。
+                -- 車離開掃過的改線往圓角內側走）。放開後 sandBias 照 EMA 走回靠右目標。車在 T 的圓角會往彎內落後 0.5–0.8 m：
+                -- 由圓角的追線落後前饋（1114k，MDADFollower.setComp，疊在常駐線與繞行之上）抵，不靠常駐線。
                 if s.cutHeld then s.sandBias, s.roadBias = 0, 0 end
                 local nb = s.sandBias + s.roadBias
                 if nb > TUNE.BIAS_MAX then nb = TUNE.BIAS_MAX
@@ -19313,6 +19342,7 @@ local function onPlayerUpdate(player)
             s.trfLeadGap, s.trfOnGap, s.trfOnWant, s.trfOnYield = nil, nil, nil, false
             s.trfLeadId = nil -- 前車辨識與保持綁舊路線弧長（Drive.followLead 的出口之一）
             if s.cornerCut then s.sandBias = 0 end -- 套了改線：常駐線＝掃過的改線（見掃描輪 s.cutHeld）
+            Drive.cutCompApply(s) -- 圓角的追線落後前饋（1114k）：有改線才套，沒有就清
             MDADFollower.setLaneBias(s.fstate, s.sandBias)
             Drive.transitionRelease(s, playerNum, "route", nil) -- 保持的 lane 是舊路線座標
             if s.sensor then s.sensor.scanBias = s.sandBias end
