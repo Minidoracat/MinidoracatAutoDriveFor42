@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1123b"
+Drive.REV = "1123c"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -387,7 +387,9 @@ TUNE.KEEP_RIGHT_FALLBACK_M = 1.0  -- 靠右行駛：路寬未知（v2/v3 路線�
 -- 右緣外 KEEP_RIGHT_CLEAR_M 以內的硬物（形狀世界座標投影回路線，不用取樣點），把靠右目標往左收到留出這段
 -- 距離，不過中線（下限 0）。車身右緣內側的硬物是繞行的事，這裡不管。
 TUNE.KEEP_RIGHT_CLEAR_M = 0.6
-TUNE.KEEP_RIGHT_LOOK_M = 50
+-- 1123b 50→75：85 km/h 時 50 m 只有 2.1 秒，弧上外漂預算收的常駐線（EMA 時常數約 1 秒）在彎中才開始移，車跟不上
+-- （E2E mdadarc1123-tree 期望線收到 1.55、車身仍在 1.9–2.3，ld 0.39–0.69）；75 m 讓收線在進彎前的直路上做完。
+TUNE.KEEP_RIGHT_LOOK_M = 75
 -- 1026e（NC2）：出右彎後常駐車道從弧內側夾限放回靠右（clampLane 的 ramp），車追 ramp 正常過衝 0.44–0.74 m
 -- （正式服 1023b 新圖 a2 15 件 contact，14 件 lth 沒開＝laneRampHold 沒延續到弧離開前視窗之後），大於 CLEAR 0.6。
 -- 路邊硬物所在弧長的常駐落點比它前 RAMP_BACK_M 處往右多 ≥RAMP_RISE_M＝它在放回區段（或剛放回完），留邊加
