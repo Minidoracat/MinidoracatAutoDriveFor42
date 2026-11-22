@@ -16,7 +16,7 @@ https://steamcommunity.com/sharedfiles/filedetails/?id=3792675881
 [/olist]
 {{img:01-autodrive-hud-voice.jpg}}
 [list]
-[*] [b]Personal settings[/b]: the "Minidoracat Autodrive" page in ESC → Options → Mods, or MiniMap gear → Autodrive (HUD theme, layout, scale and voice volume too).
+[*] [b]Personal settings[/b]: the "Minidoracat Autodrive" page in ESC → Options → Mods, or MiniMap gear → Autodrive (HUD theme, layout, scale and voice volume too). In a Tesla Collection car, "FSD card opacity (Tesla)" makes the FSD card above the dashboard 80% or 60% opaque so it hides less of the road.
 [*] [b]Server rules[/b]: sandbox options.
 [/list]
 === 🧰 Devices and recipes

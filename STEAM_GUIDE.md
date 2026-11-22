@@ -16,7 +16,7 @@ https://steamcommunity.com/sharedfiles/filedetails/?id=3792675881
 [/olist]
 {{img:01-autodrive-hud-route.jpg}}
 [list]
-[*] [b]個人設定[/b]：ESC →「選項」→「MOD」的「Minidoracat 自動駕駛」頁，或小地圖設定（齒輪）的「自動駕駛」分類；兩邊都能改 HUD 主題、佈局、縮放與語音音量。
+[*] [b]個人設定[/b]：ESC →「選項」→「MOD」的「Minidoracat 自動駕駛」頁，或小地圖設定（齒輪）的「自動駕駛」分類；兩邊都能改 HUD 主題、佈局、縮放與語音音量。坐 Tesla Collection 的車時，「FSD 卡片不透明度（Tesla）」可以把儀表上方的 FSD 卡片調成 80% 或 60%，少擋一點後面的路。
 [*] [b]伺服器規則[/b]：在沙盒設定。
 [/list]
 === 🧰 裝置與配方
