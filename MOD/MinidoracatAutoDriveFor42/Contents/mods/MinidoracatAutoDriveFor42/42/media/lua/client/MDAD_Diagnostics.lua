@@ -254,6 +254,9 @@ local EK = {
     -- 1110c state-error why=sunk／overturned（Driver Drive.physFault）：物理高度相對樓層（樓層單位）、本車朝上程度
     -- （vup：tow lost 的 up 是掛車的，不共用）
     "pz", "vup",
+    -- 1123b shy phase=arc（Driver Drive.keepArcNote）：弧上外漂預算 m、該弧最大側向加速度 m/s²、收完的靠右目標；
+    -- tilt phase=end（Drive.tiltHold）：停輸出期間最低朝上程度
+    "kra", "alat", "want", "vmin",
 }
 
 local function logOnce(msg)
@@ -1484,6 +1487,7 @@ local function encodePhys(phys)
     addBool("lowFps", "lfs") -- 0929c：卡頓降速狀態（只在為真時寫）
     addNum("fbNorm", "fbk")        -- 0929j：回授依轉向增益正規化的倍率（1＝未放大）
     addNum("armExt", "arx")        -- 1005：高速力臂延伸倍率 K（力臂×K、側推÷K；1＝未延伸，省略）
+    addNum("keepArc", "kra")       -- 1123b：常駐線被弧上外漂預算收時那個硬點的預算 m（Drive.keepRightShy；沒有＝省略）
     addNum("xtOut", "xto")         -- 1012d：弧上往彎外偏的 cross-track 外漂倍率（MDADDynamics.arcOutwardScale；1＝未加權，省略）
     addBool("dodgeAlignHold", "dah") -- 0929j：繞行未對正、帽夾在目前車速（只在為真時寫）
     -- 0904j 鏈式停留：lc＝常駐 lane 暫時＝停留 offL；dodgeTier 帶 -stay／-nudge／-physical

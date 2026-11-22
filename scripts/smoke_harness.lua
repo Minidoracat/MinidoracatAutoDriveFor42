@@ -26497,6 +26497,9 @@ function drive.scenarioBodyFault()
     run(2000)
     still("(bf-basement) 車在地下一層、原點在那層地板上（getDebugZ −0.9）：不交還")
 
+    -- 這段量的是翻覆交還（physFault）本身：傾斜停輸出的累計上限（Drive.tiltHold，見 drive.scenarioTiltHold）放到不會先到
+    local tiltMax = T.TILT_HOLD_MAX_MS
+    T.TILT_HOLD_MAX_MS = 1e9
     startAt()
     dveh._up = 0.6
     run(3000)
@@ -26510,6 +26513,7 @@ function drive.scenarioBodyFault()
             and e.vup == 0.3 and e.ms >= 1500 and dveh._regulator == false,
         "(bf-over) 翻覆持續 OVERTURN_MS：VehicleOverturned 紅字交還、state-error why=overturned（why "
         .. tostring(e and e.why) .. "、vup " .. tostring(e and e.vup) .. "、ms " .. tostring(e and e.ms) .. "）")
+    T.TILT_HOLD_MAX_MS = tiltMax
 
     startAt()
     dveh._up = 0.3
@@ -26537,6 +26541,163 @@ function drive.scenarioBodyFault()
     drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
 end
 drive.scenarioBodyFault()
+-- 1123b 傾斜停止輸出（Drive.tiltHold；正式服 1114r Silverado 擦樹後 vup 0.81 時 AVOID 飽和側推，0.11 秒內翻覆）：
+--   (tilt-hold) 朝上低於 TILT_HOLD_DOT：當幀起不推（impulse 不增）、regulator 關、tilt start（vup／attempt），不交還。
+--   (tilt-end)  回到門檻以上連續 TILT_CLEAR_MS：tilt end（ms／vmin）、之後照常輸出。(tilt-blip) 不到 TILT_CLEAR_MS 又傾斜＝同一段。
+--   (tilt-max)  累計 TILT_HOLD_MAX_MS：state-error why=tilted detail=time、VehicleOverturned 交還。
+--   (tilt-loop) 沿線前進不到 UNSTICK_PROGRESS 就第 TILT_HOLD_MAX_N 次進入：detail=loop 交還；(tilt-progress) 中間開過 ≥10 m＝重算。
+--   (tilt-unstick) 倒車中傾斜：回 follow。(tilt-over) 翻覆（<OVERTURN_DOT）照舊由 physFault 先交還、why=overturned。
+--   (tilt-clock) 停輸出中牆鐘往回跳：從現在重算，不立刻交還。
+--   違規證明（temp/vp/tilt）：拿掉 onPlayerUpdate 的 tiltHold 呼叫＝(tilt-hold) 紅；不清 tiltClear＝(tilt-blip) 紅；
+--   進入不數前進距離＝(tilt-progress) 紅；倒退不重算＝(tilt-clock) 紅。
+function drive.scenarioTiltHold()
+    scenario("1123b 車身傾斜停止輸出：傾斜中不推不給油，回正後照讓位恢復，太久或原地反覆就以翻覆交還")
+    local Dr, DG = MDAD.Drive, MDADDiagnostics
+    local sStart, sEvent, sStop, sTel = DG.start, DG.event, DG.stop, MDAD.HUD.telemetryEnabled
+    local sShould, sSample = DG.shouldSample, DG.sample
+    local oldSandbox = SandboxVars
+    local oldRoute, oldTx, oldTy, oldState = drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
+    local errs, tilts, s0 = {}, {}, nil
+    MDAD.HUD.telemetryEnabled = function() return true end
+    DG.start = function() return true end
+    DG.stop = function() end
+    DG.event = function(_, name, a)
+        if name == "state-error" and type(a) == "table" then errs[#errs + 1] = a end
+        if name == "tilt" and type(a) == "table" then tilts[#tilts + 1] = a end
+    end
+    DG.shouldSample, DG.sample = function() return false end, function() return true end
+    drive.fillWorld(-10, 620, -12, 12)
+    drive.putRoad(-10, 620, -3, 3)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 60, RightLaneBias = 0 })
+    drive.nav.route = { pts = { 0, 0, 600, 0 }, segSurface = { "paved" }, segWidth = { 6 }, len = 600, cost = 600,
+        avoidPenalty = 0 }
+    drive.nav.tx, drive.nav.ty, drive.nav.state = 600, 0, "ok"
+    local OVER = "UI_MinidoracatAutoDrive_VehicleOverturned"
+    local function run(ms)
+        local stop = nowMs + ms
+        while nowMs < stop do
+            nowMs = nowMs + 50
+            driveTick(dp, dveh)
+        end
+    end
+    local function startAt()
+        Dr.stop(0, nil)
+        dveh._x, dveh._y, dveh._speed, dveh._steering, dveh._stopped = 20, 0, 20, 0, false
+        dveh._z, dveh._pz, dveh._up = 0, 0.1, 1
+        setHeading(dveh, 0)
+        dp._vehicle, dveh._driver = dveh, dp
+        clearList(halos)
+        errs, tilts = {}, {}
+        checkTrue(Dr.start(dp), "(tilt) 啟動")
+        run(300)
+        s0 = Dr.debugSession(0)
+    end
+    local function halo(key)
+        for i = 1, #halos do if halos[i].text == key and halos[i].kind == "bad" then return true end end
+        return false
+    end
+    local function alive() return s0 ~= nil and Dr.debugSession(0) == s0 and #errs == 0 and not halo(OVER) end
+
+    startAt()
+    run(500)
+    local total = dveh._imp.total
+    checkTrue(total > 0, "(tilt) 夾具：正立時照常施力")
+    dveh._up = 0.85
+    run(50)
+    total = dveh._imp.total
+    run(1000)
+    local t1 = tilts[1]
+    checkTrue(alive() and dveh._imp.total == total and dveh._regulator == false and #tilts == 1 and t1.phase == "start"
+            and t1.vup == 0.85 and t1.attempt == 1, "(tilt-hold) 朝上 0.85：不再施力、regulator 關、tilt start vup 0.85 attempt 1、"
+        .. "不交還（tilt " .. #tilts .. " 筆）")
+    dveh._up = 0.95
+    run(150)
+    dveh._up = 0.8
+    run(100)
+    checkTrue(#tilts == 1 and s0.tiltSince ~= nil and s0.tiltMin == 0.8,
+        "(tilt-blip) 回正 0.15 秒（不到 TILT_CLEAR_MS）又傾斜：同一段、不另記（最低 " .. tostring(s0.tiltMin) .. "）")
+    dveh._up = 1
+    run(200)
+    checkTrue(#tilts == 1 and s0.tiltSince ~= nil, "(tilt-blip) 再回正 0.2 秒：回正計時從這次重算、還沒恢復")
+    run(200)
+    local t2 = tilts[2]
+    checkTrue(alive() and t2 ~= nil and t2.phase == "end" and t2.vmin == 0.8 and t2.ms >= 1300 and s0.tiltSince == nil,
+        "(tilt-end) 回正 0.3 秒：tilt end（ms " .. tostring(t2 and t2.ms) .. "、vmin " .. tostring(t2 and t2.vmin) .. "）")
+    total = dveh._imp.total
+    run(1000)
+    checkTrue(dveh._imp.total > total, "(tilt-end) 恢復後照常施力")
+
+    startAt()
+    dveh._up = 0.85
+    run(2900)
+    checkTrue(alive(), "(tilt-max) 2.9 秒：還在停輸出、不交還")
+    run(300)
+    local e = errs[1]
+    checkTrue(not Dr.isActive(0) and halo(noteReason(OVER)) and e ~= nil and e.why == "tilted" and e.detail == "time"
+            and e.vup == 0.85 and e.ms >= 3000, "(tilt-max) 累計 TILT_HOLD_MAX_MS：state-error why=tilted detail=time、翻覆交還（"
+        .. tostring(e and e.why) .. "／" .. tostring(e and e.detail) .. "）")
+
+    startAt()
+    for _ = 1, 2 do
+        dveh._up = 0.85
+        run(100)
+        dveh._up = 1
+        run(400)
+    end
+    checkTrue(alive() and #tilts == 4, "(tilt-loop) 原地兩次：照常恢復（tilt " .. #tilts .. " 筆）")
+    dveh._up = 0.85
+    run(100)
+    e = errs[1]
+    checkTrue(not Dr.isActive(0) and e ~= nil and e.why == "tilted" and e.detail == "loop" and e.attempt == 3,
+        "(tilt-loop) 沿線前進不到 UNSTICK_PROGRESS 就第三次：detail=loop 交還（" .. tostring(e and e.detail) .. "）")
+
+    startAt()
+    dveh._up = 0.85
+    run(100)
+    dveh._up = 1
+    run(400)
+    dveh._x = dveh._x + 15
+    run(200)
+    for _ = 1, 2 do
+        dveh._up = 0.85
+        run(100)
+        dveh._up = 1
+        run(400)
+    end
+    checkTrue(alive() and s0.tiltN == 2, "(tilt-progress) 第一次之後沿線開過 15 m：重算、第三次進入不交還（計數 "
+        .. tostring(s0.tiltN) .. "）")
+
+    startAt()
+    s0.mode = "unstick"
+    dveh._up = 0.85
+    run(50)
+    checkTrue(s0.mode == "follow" and s0.recoverWhy == nil, "(tilt-unstick) 倒車中傾斜：回 follow、清倒車診斷")
+
+    startAt()
+    dveh._up = 0.85
+    run(1000)
+    nowMs = nowMs - 60000
+    run(2000)
+    checkTrue(alive(), "(tilt-clock) 牆鐘往回跳 60 秒：從現在重算，2 秒後還沒交還")
+    run(1100)
+    checkTrue(not Dr.isActive(0) and errs[1] ~= nil and errs[1].why == "tilted", "(tilt-clock) 重算後滿 3 秒照樣交還")
+    nowMs = nowMs + 60000
+
+    startAt()
+    dveh._up = 0.3
+    run(2100)
+    e = errs[1]
+    checkTrue(not Dr.isActive(0) and #errs == 1 and e.why == "overturned" and #tilts == 1,
+        "(tilt-over) 翻覆：停輸出之外照舊由 physFault 交還、why=overturned（" .. tostring(e and e.why) .. "）")
+
+    Dr.stop(0, nil)
+    dveh._z, dveh._pz, dveh._up = 0, nil, nil
+    DG.start, DG.event, DG.stop, MDAD.HUD.telemetryEnabled = sStart, sEvent, sStop, sTel
+    DG.shouldSample, DG.sample = sShould, sSample
+    SandboxVars = oldSandbox
+    drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
+end
+drive.scenarioTiltHold()
 -- (thr) 1008 拖車倒車的折角門檻（MDADTrailer.canReverse）：舊制折角已超過 REVERSE_HITCH_MAX 時 stepUnstick 把 dist2 設成
 --   「倒夠了」，0 位移 settle→success、3 次額度幾秒燒完（正式服 0.23.0 片段每次 7–19 ms）。
 --   (thr-start) 起手折角已超限：不倒（rear-blocked rear=hitch、phi）、不吃額度、回停等（blockRetryDone）；連三次額度仍 0。
@@ -29200,6 +29361,129 @@ function drive.scenario0929j()
     SandboxVars = oldSand
 end
 drive.scenario0929j()
+
+-- 1123b 弧上外漂預算（Drive.arcOutBudget，正式服 1114r Silverado 雙輪 85 km/h 在 R≈97 左彎擦樹翻車；樹幹 l 3.76、r 0.15，
+--   當時車身右緣外 0.63＞CLEAR 0.6＝不收）：
+--   (arc-left)  左彎（航向遞減、彎外＝+l）50 m 處、計畫 85 km/h：留邊 CLEAR＋ARC_S2·v²/R、kra 寫進 session。
+--   (arc-right) 右彎同位置（彎內）、(arc-line) 直路：不加。(arc-slow) 計畫 30 km/h 不加、40 km/h 加一半。
+--   (arc-entry) 進弧 12.5 m＝半權；(arc-exit) 出弧 12.5 m＝半權；(arc-pre) 進弧前不加；(arc-s) 先遇到反向弧＝不加。
+--   (arc-cap) 預算上限 RAMP_M；(arc-ramp) 與放回預算取大不相加；(arc-tow) 拖車不加；(arc-narrow) 收到負值夾 0。
+--   (arc-conv) 照 EMA 反覆收斂、不振盪；(arc-note) 同一個硬點只記一次 shy phase=arc。
+--   違規證明（temp/vp/arc）：拿掉 arcOutBudget 呼叫＝(arc-left) 紅；不看彎向＝(arc-right) 紅；相加不取大＝(arc-ramp) 紅；
+--   不看拖車＝(arc-tow) 紅。
+function drive.scenarioArcShy()
+    scenario("1123b 弧上外漂預算：左彎外側路邊物的靠右留邊加 ARC_S2·v²/R")
+    local Dr, tune, ARC = MDAD.Drive, MDAD.Drive.debugTune(), MDADDynamics.SEG_ARC
+    local HW, R, V85 = 1.0, 97, 85 / 3.6
+    -- pieces：{長度 m, 彎向（−1＝航向遞減、1＝遞增、0＝直線）}；每 2 m 一段、半徑 R；回剖面與 s→(x, y, 航向) 查表
+    local function arcProf(pieces, vKmh)
+        local p = { ready = true, s = { 0 }, x = { 0 }, y = { 0 }, segH = {}, segKind = {}, filletRadius = {}, v = {} }
+        local x, y, h, k = 0, 0, 0, 1
+        for _, pc in ipairs(pieces) do
+            for _ = 1, pc[1] / 2 do
+                local hc = h + pc[2] / R -- 弦的航向＝弧中點航向（2 m 弧轉 2/R）
+                x, y = x + 2 * math.cos(hc), y + 2 * math.sin(hc)
+                p.segH[k], p.segKind[k] = hc, pc[2] ~= 0 and ARC or MDADDynamics.SEG_LINE
+                p.filletRadius[k] = pc[2] ~= 0 and R or nil
+                h = h + 2 * pc[2] / R
+                k = k + 1
+                p.s[k], p.x[k], p.y[k] = (k - 1) * 2, x, y
+            end
+        end
+        p.n = k
+        for i = 1, k do p.v[i] = (vKmh or 85) / 3.6 end
+        return p
+    end
+    -- 弧長 hs 處、橫向 l 的樹幹（r 0.15）；車在樹前 35 m、常駐靠右 lane
+    local function shyAt(p, hs, l, lane)
+        local j = MDADFollower.segIndexAt(p, hs)
+        local hh, ds = p.segH[j], hs - p.s[j]
+        local bx, by = p.x[j] + ds * math.cos(hh), p.y[j] + ds * math.sin(hh)
+        return { sensor = { ready = true, hardN = 1, hardS = { hs }, hardX = { bx - l * math.sin(hh) },
+            hardY = { by + l * math.cos(hh) }, hardR = { 0.15 }, hardB = { 0 } }, profile = p,
+            vehicleProfile = { halfW = HW, halfL = 3.0 }, lastSNow = hs - 35, roadBias = 0, sandBias = lane }
+    end
+    -- 當時的幾何：樹幹 face 3.61、常駐落點 1.98＝車身右緣外 0.63
+    local LANE, FACE = 1.98, 3.61
+    local function run(p, hs, lane, face, s)
+        s = s or shyAt(p, hs, (face or FACE) + 0.15, lane or LANE)
+        return Dr.keepRightShy(s, lane or LANE), s
+    end
+    local function want(budget, face) return (face or FACE) - tune.KEEP_RIGHT_CLEAR_M - budget - HW end
+    local full = tune.KEEP_RIGHT_ARC_S2 * V85 * V85 / R
+    local left = arcProf({ { 50, 0 }, { 60, -1 }, { 60, 0 } })
+    local got, s = run(left, 100)
+    checkNear(got, want(full), 1e-6, string.format("(arc-left) 左彎 50 m、85 km/h：留邊 CLEAR＋%.2f（舊制 0.63＞0.6 不收）", full))
+    checkNear(s.keepArc or -1, full, 1e-6, "(arc-left) 預算寫進 s.keepArc（遙測 kra）")
+    checkTrue(full > 0.6 and full < tune.KEEP_RIGHT_RAMP_M, "(arc-left) 本案預算 " .. string.format("%.3f", full)
+        .. "：介於 0.6 與 RAMP_M 之間（0.63＋外漂 0.64 的擦樹當時，留邊會到 1.29）")
+    got, s = run(arcProf({ { 50, 0 }, { 60, 1 }, { 60, 0 } }), 100)
+    checkNear(got, LANE, 1e-12, "(arc-right) 右彎同位置（彎內側）：不加、靠右不動")
+    checkNil(s.keepArc, "(arc-right) 沒有 kra")
+    checkNear(run(arcProf({ { 170, 0 } }), 100), LANE, 1e-12, "(arc-line) 直路同位置：不加")
+    checkNear(run(arcProf({ { 50, 0 }, { 60, -1 }, { 60, 0 } }, 30), 100), LANE, 1e-12, "(arc-slow) 計畫 30 km/h：不加")
+    local v40 = 40 / 3.6
+    checkNear(run(arcProf({ { 50, 0 }, { 60, -1 }, { 60, 0 } }, 40), 100), want(0.5 * tune.KEEP_RIGHT_ARC_S2 * v40 * v40 / R),
+        1e-6, "(arc-slow) 計畫 40 km/h：半權")
+    checkNear(run(left, 62.5), want(0.5 * full), 1e-6, "(arc-entry) 進弧 12.5 m：半權")
+    checkNear(run(left, 122.5), want(0.5 * full), 1e-6, "(arc-exit) 出弧 12.5 m：半權")
+    checkNear(run(left, 150), LANE, 1e-12, "(arc-exit) 出弧 40 m（超過 RAMP_BACK_M）：不加")
+    checkNear(run(left, 40), LANE, 1e-12, "(arc-pre) 進弧前 10 m：不加")
+    -- S 彎：左彎接右彎，樹在右彎出口 5 m（往回先遇到右彎）
+    checkNear(run(arcProf({ { 50, 0 }, { 40, -1 }, { 30, 1 }, { 60, 0 } }), 125), LANE, 1e-12,
+        "(arc-s) 往回先遇到反向弧：不加（S 彎不併段）")
+    local s2 = tune.KEEP_RIGHT_ARC_S2
+    tune.KEEP_RIGHT_ARC_S2 = 1
+    checkNear(run(left, 100), want(tune.KEEP_RIGHT_RAMP_M), 1e-6, "(arc-cap) 預算上限 KEEP_RIGHT_RAMP_M")
+    tune.KEEP_RIGHT_ARC_S2 = s2
+    -- 放回區段：弧前到進弧 10 m 是夾限（room 0），之後 room 3.0；進弧 22 m（弧預算 0.88 權＜RAMP_M）
+    local rp = arcProf({ { 50, 0 }, { 60, -1 }, { 60, 0 } })
+    rp.laneRoomR, rp.laneRoomL, rp.laneRunStart, rp.laneRunEnd = {}, {}, {}, {}
+    for k = 1, rp.n - 1 do
+        local inner = rp.s[k] < 60
+        rp.laneRoomL[k], rp.laneRoomR[k] = 3.0, inner and 0 or 3.0
+        rp.laneRunStart[k], rp.laneRunEnd[k] = inner and 1 or 31, inner and 30 or rp.n - 1
+    end
+    local hr = 72
+    local laneR = MDADFollower.laneBiasAt(rp, LANE, MDADFollower.segIndexAt(rp, hr), hr)
+    local faceR = laneR + HW + 0.63
+    tune.KEEP_RIGHT_ARC_S2 = 0
+    local rampOnly = run(rp, hr, LANE, faceR)
+    tune.KEEP_RIGHT_ARC_S2 = s2
+    got, s = run(rp, hr, LANE, faceR)
+    checkTrue(laneR >= 0.5 and math.abs(rampOnly - want(tune.KEEP_RIGHT_RAMP_M, faceR)) < 1e-6,
+        string.format("(arc-ramp) 夾具：放回區段（落點 %.2f）只有放回預算＝留 CLEAR＋RAMP_M", laneR))
+    checkNear(got, rampOnly, 1e-9, "(arc-ramp) 弧預算 0.61＜放回 0.75：取大不相加（相加會再收 0.61）")
+    checkNil(s.keepArc, "(arc-ramp) 放回預算定案時沒有 kra")
+    s = shyAt(left, 100, FACE + 0.15, LANE)
+    s.tow = {}
+    checkNear(run(left, 100, LANE, FACE, s), LANE, 1e-12, "(arc-tow) 拖車：不加（拖車走中線另有弧外拉）")
+    checkNear(run(left, 100, 0.5, 2.2), 0, 1e-12, "(arc-narrow) 收到負值：夾 0（不往左越過中線）")
+    -- (arc-conv) 常駐線照 ROAD_EMA 走向收完的目標：單調收斂、不振盪
+    s = shyAt(left, 100, FACE + 0.15, LANE)
+    local prev, mono = LANE, true
+    for _ = 1, 200 do
+        local t = Dr.keepRightShy(s, LANE)
+        s.sandBias = s.sandBias + (t - s.sandBias) * tune.ROAD_EMA
+        if s.sandBias > prev + 1e-12 then mono = false end
+        prev = s.sandBias
+    end
+    checkTrue(mono and math.abs(s.sandBias - want(full)) < 0.01,
+        string.format("(arc-conv) 反覆 200 輪：單調收到 %.3f（目標 %.3f）", s.sandBias, want(full)))
+    -- (arc-note) 事件：同一個硬點只記一次
+    local sEvent, evs = MDADDiagnostics.event, {}
+    MDADDiagnostics.event = function(_, name, a) if name == "shy" then evs[#evs + 1] = a end end
+    s.diag = true
+    Dr.keepArcNote(s, 0)
+    Dr.keepRightShy(s, LANE)
+    Dr.keepArcNote(s, 0)
+    MDADDiagnostics.event = sEvent
+    local e = evs[1]
+    checkTrue(#evs == 1 and e.phase == "arc" and math.abs(e.kra - full) < 1e-6 and e.gap ~= nil and e.alat ~= nil
+        and e.want ~= nil and e.x == s.sensor.hardX[1], "(arc-note) shy phase=arc 帶 kra／gap／alat／want，同一個硬點只記一次（"
+        .. #evs .. " 筆）")
+end
+drive.scenarioArcShy()
 
 -- 0929o（Workshop 兩則回報：拖 40 呎貨櫃走走停停、開車燈更慢）：
 --   (tow-assist) 拖車也有不鎖輪減速：牽引車照舊（runtimeMass），掛車依自己的質量分到同一減速度，方向跟
