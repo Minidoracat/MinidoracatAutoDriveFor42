@@ -26619,13 +26619,38 @@ function drive.scenarioTiltHold()
     dveh._up = 1
     run(200)
     checkTrue(#tilts == 1 and s0.tiltSince ~= nil, "(tilt-blip) 再回正 0.2 秒：回正計時從這次重算、還沒恢復")
+    s0.dodging = true -- 停輸出期間不改持有權；恢復時 resumeReset 要清掉
+    local sReset, resets = MDADSensor.reset, 0
+    MDADSensor.reset = function(...) resets = resets + 1 return sReset(...) end
     run(200)
+    MDADSensor.reset = sReset
     local t2 = tilts[2]
     checkTrue(alive() and t2 ~= nil and t2.phase == "end" and t2.vmin == 0.8 and t2.ms >= 1300 and s0.tiltSince == nil,
         "(tilt-end) 回正 0.3 秒：tilt end（ms " .. tostring(t2 and t2.ms) .. "、vmin " .. tostring(t2 and t2.vmin) .. "）")
+    checkTrue(s0.dodging == false and resets >= 1, "(tilt-end) 恢復走 resumeReset：清繞行承諾、感知重掃（reset "
+        .. resets .. " 次）")
     total = dveh._imp.total
     run(1000)
     checkTrue(dveh._imp.total > total, "(tilt-end) 恢復後照常施力")
+
+    -- (tilt-yield) 停輸出中被讓位接手：恢復重設一併清掉傾斜狀態（放手後不接著停、不把讓位時間算進停輸出）
+    startAt()
+    dveh._up = 0.85
+    run(100)
+    checkTrue(s0.tiltSince ~= nil, "(tilt-yield) 夾具：停輸出中")
+    dveh._up = 1
+    Dr.resumeReset(s0, dveh)
+    checkTrue(s0.tiltSince == nil and s0.tiltClear == nil and s0.tiltMin == nil, "(tilt-yield) resumeReset 清傾斜狀態")
+
+    -- (tilt-sample) 停輸出的幀照樣取樣、控制狀態 HOLD（vup 曲線是調門檻的依據）
+    startAt()
+    dveh._up = 0.85
+    local samples = 0
+    DG.shouldSample, DG.sample = function() return true end, function() samples = samples + 1 return true end
+    run(500)
+    DG.shouldSample, DG.sample = function() return false end, function() return true end
+    checkTrue(samples >= 5 and Dr.controlState(0) == "HOLD", "(tilt-sample) 停輸出 0.5 秒：每幀取樣（" .. samples
+        .. " 筆）、controlState HOLD（" .. tostring(Dr.controlState(0)) .. "）")
 
     startAt()
     dveh._up = 0.85
@@ -29376,9 +29401,9 @@ function drive.scenarioArcShy()
     local Dr, tune, ARC = MDAD.Drive, MDAD.Drive.debugTune(), MDADDynamics.SEG_ARC
     local HW, R, V85 = 1.0, 97, 85 / 3.6
     -- pieces：{長度 m, 彎向（−1＝航向遞減、1＝遞增、0＝直線）}；每 2 m 一段、半徑 R；回剖面與 s→(x, y, 航向) 查表
-    local function arcProf(pieces, vKmh)
+    local function arcProf(pieces, vKmh, h0)
         local p = { ready = true, s = { 0 }, x = { 0 }, y = { 0 }, segH = {}, segKind = {}, filletRadius = {}, v = {} }
-        local x, y, h, k = 0, 0, 0, 1
+        local x, y, h, k = 0, 0, h0 or 0, 1
         for _, pc in ipairs(pieces) do
             for _ = 1, pc[1] / 2 do
                 local hc = h + pc[2] / R -- 弦的航向＝弧中點航向（2 m 弧轉 2/R）
@@ -29482,6 +29507,45 @@ function drive.scenarioArcShy()
     checkTrue(#evs == 1 and e.phase == "arc" and math.abs(e.kra - full) < 1e-6 and e.gap ~= nil and e.alat ~= nil
         and e.want ~= nil and e.x == s.sensor.hardX[1], "(arc-note) shy phase=arc 帶 kra／gap／alat／want，同一個硬點只記一次（"
         .. #evs .. " 筆）")
+    -- (arc-gear) 剖面 prof.v 不含檔位上限（弧上＝sqrt(aLat·R)，v²/R 恆等於側向極限）：預算照檔位上限夾（審查 H1）
+    s = shyAt(left, 100, FACE + 0.15, LANE)
+    s.gearCap = 30
+    checkNear(Dr.keepRightShy(s, LANE), LANE, 1e-12, "(arc-gear) 30 檔：剖面 85 km/h 也不加")
+    s = shyAt(left, 100, FACE + 0.15, LANE)
+    s.gearCap = 70
+    local v70 = 70 / 3.6
+    checkNear(Dr.keepRightShy(s, LANE), want(tune.KEEP_RIGHT_ARC_S2 * v70 * v70 / R), 1e-6,
+        "(arc-gear) 70 檔：預算照 70 km/h 算（不是剖面的 85）")
+    -- (arc-wrap) 起始航向 3.1 的左彎（航向跨 ±π）：照樣算左彎
+    checkNear(run(arcProf({ { 50, 0 }, { 60, -1 }, { 60, 0 } }, nil, 3.1), 100), want(full), 1e-6,
+        "(arc-wrap) 航向跨 ±π 的左彎：照樣加")
+    -- (arc-far) 50–75 m 的硬點只收有弧預算的（KEEP_RIGHT_ARC_LOOK_M）；直路上的照舊只看 50 m
+    s = shyAt(left, 100, FACE + 0.15, LANE)
+    s.lastSNow = 40
+    checkNear(Dr.keepRightShy(s, LANE), want(full), 1e-6, "(arc-far) 弧上的樹在 60 m：照樣收（進彎前的直路上收完）")
+    local line = arcProf({ { 170, 0 } })
+    local tight = LANE + HW + 0.3
+    s = shyAt(line, 100, tight + 0.15, LANE)
+    s.lastSNow = 40
+    checkNear(Dr.keepRightShy(s, LANE), LANE, 1e-12, "(arc-far) 直路上 60 m 的路邊物：不收（照舊只看 KEEP_RIGHT_LOOK_M）")
+    s.lastSNow = 65
+    checkNear(Dr.keepRightShy(s, LANE), want(0, tight), 1e-6, "(arc-far) 同一個到 35 m：照舊收")
+    -- (arc-far-band) 50 m 外車身帶內的硬點（彎後路中停車）不取消彎上的收線；50 m 內的照舊整輪不收
+    local function addHard(s, p, hs, l)
+        local j = MDADFollower.segIndexAt(p, hs)
+        local hh, ds = p.segH[j], hs - p.s[j]
+        local sen = s.sensor
+        sen.hardN = sen.hardN + 1
+        sen.hardS[sen.hardN], sen.hardR[sen.hardN], sen.hardB[sen.hardN] = hs, 0.15, 0
+        sen.hardX[sen.hardN] = p.x[j] + ds * math.cos(hh) - l * math.sin(hh)
+        sen.hardY[sen.hardN] = p.y[j] + ds * math.sin(hh) + l * math.cos(hh)
+    end
+    s = shyAt(left, 100, FACE + 0.15, LANE)
+    s.lastSNow = 40
+    addHard(s, left, 95, LANE)
+    checkNear(Dr.keepRightShy(s, LANE), want(full), 1e-6, "(arc-far-band) 55 m 處車身帶內有硬點：彎上的樹照樣收")
+    addHard(s, left, 70, LANE)
+    checkNear(Dr.keepRightShy(s, LANE), LANE, 1e-12, "(arc-far-band) 30 m 處車身帶內有硬點：照舊整輪不收（繞行的事）")
 end
 drive.scenarioArcShy()
 

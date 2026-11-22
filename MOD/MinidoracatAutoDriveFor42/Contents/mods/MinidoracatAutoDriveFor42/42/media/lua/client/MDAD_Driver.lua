@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1123c"
+Drive.REV = "1123d"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -387,9 +387,12 @@ TUNE.KEEP_RIGHT_FALLBACK_M = 1.0  -- 靠右行駛：路寬未知（v2/v3 路線�
 -- 右緣外 KEEP_RIGHT_CLEAR_M 以內的硬物（形狀世界座標投影回路線，不用取樣點），把靠右目標往左收到留出這段
 -- 距離，不過中線（下限 0）。車身右緣內側的硬物是繞行的事，這裡不管。
 TUNE.KEEP_RIGHT_CLEAR_M = 0.6
--- 1123b 50→75：85 km/h 時 50 m 只有 2.1 秒，弧上外漂預算收的常駐線（EMA 時常數約 1 秒）在彎中才開始移，車跟不上
--- （E2E mdadarc1123-tree 期望線收到 1.55、車身仍在 1.9–2.3，ld 0.39–0.69）；75 m 讓收線在進彎前的直路上做完。
-TUNE.KEEP_RIGHT_LOOK_M = 75
+TUNE.KEEP_RIGHT_LOOK_M = 50
+-- 弧上外漂預算的前視（1123d）：85 km/h 時 50 m 只有 2.1 秒，收的常駐線（EMA 時常數約 1 秒）在彎中才開始移，車已在側向極限、
+-- 跟不上（E2E mdadarc1123-tree：期望線收到 1.55、車身仍在 1.9–2.3，ld 0.39–0.69）。50 m 外只看有弧預算的硬點、不參與
+-- 「已在車身帶內就整輪不收」（全域拉長會讓彎後路中停車把彎上的收線一起取消，審查 H2）。
+-- shortcut: 固定 75 m（85 km/h 約 3.2 秒），感知 160/200 m 組態、車速更高時不夠，要改成依速度。
+TUNE.KEEP_RIGHT_ARC_LOOK_M = 75
 -- 1026e（NC2）：出右彎後常駐車道從弧內側夾限放回靠右（clampLane 的 ramp），車追 ramp 正常過衝 0.44–0.74 m
 -- （正式服 1023b 新圖 a2 15 件 contact，14 件 lth 沒開＝laneRampHold 沒延續到弧離開前視窗之後），大於 CLEAR 0.6。
 -- 路邊硬物所在弧長的常駐落點比它前 RAMP_BACK_M 處往右多 ≥RAMP_RISE_M＝它在放回區段（或剛放回完），留邊加
@@ -1848,6 +1851,7 @@ local function controlStateOf(s)
     local mode = s.mode
     if mode == "arrive" then return "ARRIVE" end
     if mode == "yield" then return "YIELD" end
+    if s.tiltSince then return "HOLD" end -- 傾斜停輸出（Drive.tiltHold）
     if mode == "unstick" or mode == "settle"
             or s.progressState == "gear-reset"
             or s.recoverWhy ~= nil then return "RECOVER" end
@@ -5986,9 +5990,12 @@ function Drive.keepRightShy(s, target)
     local rawNow, rawReach = cur + rb, (target > cur and target or cur) + rb
     if rawNow > bm then rawNow = bm elseif rawNow < -bm then rawNow = -bm end
     if rawReach > bm then rawReach = bm elseif rawReach < -bm then rawReach = -bm end
-    local s0, s1 = s.lastSNow - (vp.halfL or 0), s.lastSNow + TUNE.KEEP_RIGHT_LOOK_M
+    -- 弧上外漂預算另看到 KEEP_RIGHT_ARC_LOOK_M（far）：只收有弧預算的硬點、不參與「已在車身帶內就整輪不收」
+    local sNear = s.lastSNow + TUNE.KEEP_RIGHT_LOOK_M
+    local s0, s1 = s.lastSNow - (vp.halfL or 0), s.lastSNow + math.max(TUNE.KEEP_RIGHT_LOOK_M, TUNE.KEEP_RIGHT_ARC_LOOK_M)
     local best, bestArc, bestI, bestGap, bestL, bestLat = target, 0, nil, nil, nil, nil
     local towing = s.tow ~= nil
+    local vcap = finite(s.gearCap) and s.gearCap > 0 and s.gearCap / 3.6 or nil -- 剖面 prof.v 不含檔位上限
     for i = 1, sen.hardN do
         local hs = sen.hardS[i]
         if finite(hs) and hs >= s0 and hs <= s1 then
@@ -6002,7 +6009,8 @@ function Drive.keepRightShy(s, target)
                 local l = (sen.hardX[i] - prof.x[j] - ds * ch) * -sh + (sen.hardY[i] - prof.y[j] - ds * sh) * ch
                 local face = l - rad
                 local edgeNow = MDADFollower.laneBiasAt(prof, rawNow, j, hs) + vp.halfW
-                if face < edgeNow and l + rad > edgeNow - 2 * vp.halfW then return target end
+                local far = hs > sNear
+                if not far and face < edgeNow and l + rad > edgeNow - 2 * vp.halfW then return target end
                 local laneHere = MDADFollower.laneBiasAt(prof, rawReach, j, hs)
                 local clear = TUNE.KEEP_RIGHT_CLEAR_M
                 local gap = face - laneHere - vp.halfW
@@ -6011,16 +6019,16 @@ function Drive.keepRightShy(s, target)
                     local sb = hs - TUNE.KEEP_RIGHT_RAMP_BACK_M
                     if sb < 0 then sb = 0 end
                     local extra = 0
-                    if laneHere - MDADFollower.laneBiasAt(prof, rawReach, MDADFollower.segIndexAt(prof, sb), sb)
+                    if not far and laneHere - MDADFollower.laneBiasAt(prof, rawReach, MDADFollower.segIndexAt(prof, sb), sb)
                             >= TUNE.KEEP_RIGHT_RAMP_RISE_M then
                         extra = TUNE.KEEP_RIGHT_RAMP_M
                     end
                     -- 左彎弧上的外漂預算（1123b），與放回預算取大
                     local arc, alat = 0, nil
-                    if not towing then arc, alat = Drive.arcOutBudget(prof, j, hs) end
+                    if not towing then arc, alat = Drive.arcOutBudget(prof, j, hs, vcap) end
                     if arc > extra then extra = arc else arc = 0 end
                     clear = clear + extra
-                    if gap < clear then
+                    if gap < clear and (arc > 0 or not far) then
                         local want = face - clear - vp.halfW - rb
                         if want < best then
                             best, bestArc, bestI, bestGap, bestL, bestLat = want, arc, i, gap, l, alat
@@ -6040,8 +6048,9 @@ end
 
 -- 左彎弧上的彎外漂留邊預算（常數註解見 TUNE.KEEP_RIGHT_ARC_S2；Drive.keepRightShy 對過粗篩的硬點每輪呼叫，冷路徑）：硬點弧長 hs
 -- （剖面段 j）往回 RAMP_BACK_M 內最近的 SEG_ARC 段，航向遞減（彎心在 −l 側；判法同 Drive.towArcRuns）才算，先遇到反向弧＝0
--- （S 彎不併段）；同向相連的併成一段。回 預算 m, 該段最大側向加速度 m/s²。
-function Drive.arcOutBudget(prof, j, hs)
+-- （S 彎不併段）；同向相連的併成一段。vcap（m/s，檔位上限；nil＝不夾）夾剖面速度：prof.v 弧上＝sqrt(aLat·R) 不含檔位，
+-- 不夾的話 v²/R 恆等於車的側向極限、跟檔位無關（審查 H1）。回 預算 m, 該段最大側向加速度 m/s²。
+function Drive.arcOutBudget(prof, j, hs, vcap)
     local kind, fr, sh, ss, v, n, ARC = prof.segKind, prof.filletRadius, prof.segH, prof.s, prof.v, prof.n, MDADDynamics.SEG_ARC
     if type(kind) ~= "table" or type(fr) ~= "table" or type(v) ~= "table" or not finite(n) then return 0 end
     local back = TUNE.KEEP_RIGHT_RAMP_BACK_M
@@ -6060,6 +6069,7 @@ function Drive.arcOutBudget(prof, j, hs)
     local alat, vmax = 0, 0
     for k = b, e do
         local vk = v[k]
+        if vcap and finite(vk) and vk > vcap then vk = vcap end
         if finite(vk) then
             if vk > vmax then vmax = vk end
             local a = vk * vk / fr[k]
@@ -17356,7 +17366,7 @@ local function stepFollow(s, vehicle, playerNum, now)
                 end
                 if not s.sensor.wideDone then
                     s.sandBias = s.sandBias + (Drive.keepRightTarget(s) - s.sandBias) * TUNE.ROAD_EMA
-                    Drive.keepArcNote(s, playerNum)
+                    if s.cutHeld then s.keepArc = nil else Drive.keepArcNote(s, playerNum) end -- 改線持有不靠右（下一段）
                 end
                 -- 改線持有、車還沒過完（s.cutHeld，Drive.cutCap）：常駐線＝掃過的改線（新剖面 l＝0），不靠右、不路面對中（1114i；
                 -- rc-prod-1114 R1 1114h car-c：cutover 後常駐線是入臂留下的靠右 0.37，規劃器以那條判擋、起停留繞行 offL −0.5，
@@ -19214,29 +19224,36 @@ function Drive.resumeReset(s, vehicle)
     s.progressSince = 0
     s.resumeProgressPhase, s.resumeProgressUntil = nil, 0
     s.routeFarSince = 0 -- 讓位前的離線計時不帶過來（Drive.routeFarWatch）
+    s.tiltSince, s.tiltClear, s.tiltMin = nil, nil, nil -- 傾斜停輸出中被讓位接手：放手後不接著停、不把讓位時間算進停輸出
 end
 
 -- 車身傾斜時停止輸出（1123b；常數註解見 TUNE.TILT_HOLD_DOT）。正式服 1114r Silverado 擦樹後 vup 回到 0.81 時規劃器照常承諾繞行、
 -- AVOID 飽和側推 f 65086（彎中常值 12k–31k），0.11 秒內 vup 0.74→−0.05 翻覆；Drive.physFault 要 vup<0.5 持續 1.5 秒，太晚。
 -- 每幀讀朝上程度（讀不到＝不判），回 true＝本幀不輸出（呼叫端 return）。不改持有權（車可能在跟線、繞行承諾、RETURN、判堵停等
 -- 或倒車中），只停輸出；進入比照讓位：關 regulator、作廢指令狀態、丟分幀改道、清倒車診斷，倒車中回 follow。恢復比照讓位恢復
--- （Drive.resumeReset），恢復那幀也不輸出。牆鐘往回跳就從現在重算。
+-- （Drive.resumeReset），恢復那幀也不輸出。停輸出的幀照樣取樣（sampleRecovery；vup 曲線是調門檻的依據）。牆鐘往回跳就從現在重算。
 function Drive.tiltHold(s, vehicle, playerNum, now)
     local up = jget(vehicle, "getUpVectorDot")
     local tilted = finite(up) and up < TUNE.TILT_HOLD_DOT
     local held = s.tiltSince ~= nil
     if not held and not tilted then return false end
+    local speed = jget(vehicle, "getCurrentSpeedKmHour")
+    local vx, vy = vehicle:getX(), vehicle:getY()
     if tilted then
         s.tiltClear = nil
         if held then
             if now < s.tiltSince then s.tiltSince = now end
             if up < s.tiltMin then s.tiltMin = up end
             if now - s.tiltSince >= TUNE.TILT_HOLD_MAX_MS then return Drive.tiltStop(s, vehicle, playerNum, now, "time") end
+            sampleRecovery(s, vehicle, playerNum, now, vx, vy, finite(speed) and speed or 0)
             return true
         end
-        -- 沿線前進不到 UNSTICK_PROGRESS 又進來＝同一處被推斜的循環（計數同倒車脫困的重置距離）
-        local rs, n = s.lastSNow, s.tiltN or 0
-        if n == 0 or not finite(rs) or not finite(s.tiltS0) or rs - s.tiltS0 >= UNSTICK_PROGRESS then n, s.tiltS0 = 0, rs end
+        -- 離上次進入點（世界座標；弧長跨換線不可比）不到 UNSTICK_PROGRESS 又進來＝同一處被推斜的循環（同倒車脫困的重置距離）
+        local n, x0, y0 = s.tiltN or 0, s.tiltX0, s.tiltY0
+        if n == 0 or not finite(x0) or not finite(y0)
+                or (vx - x0) * (vx - x0) + (vy - y0) * (vy - y0) >= UNSTICK_PROGRESS * UNSTICK_PROGRESS then
+            n, s.tiltX0, s.tiltY0 = 0, vx, vy
+        end
         n = n + 1
         s.tiltN, s.tiltSince, s.tiltMin = n, now, up
         vehicle:setRegulator(false)
@@ -19245,26 +19262,30 @@ function Drive.tiltHold(s, vehicle, playerNum, now)
         s.recoverWhy, s.recoverPulse = nil, false
         if s.mode == "unstick" or s.mode == "settle" then s.mode = "follow" end
         local rel = Drive.bodyState(vehicle)
-        local speed = jget(vehicle, "getCurrentSpeedKmHour")
         diagEvent(s, playerNum, "tilt", { phase = "start", vup = math.floor(up * 100 + 0.5) / 100,
             pz = rel and math.floor(rel * 100 + 0.5) / 100 or nil, speed = finite(speed) and speed or nil,
-            mode = s.mode, attempt = n })
-        if getDebug() then -- telemetry: tilt phase=start（vup／pz／speed／mode／attempt）
+            mode = s.mode, attempt = n, x = vx, y = vy })
+        if getDebug() then -- telemetry: tilt phase=start（vup／pz／speed／mode／attempt／x／y）
             print(LOG .. "pn=" .. playerNum .. " tilt hold start up=" .. tostring(up) .. " pz=" .. tostring(rel)
                 .. " speed=" .. tostring(speed) .. " mode=" .. tostring(s.mode) .. " n=" .. n)
         end
         if n >= TUNE.TILT_HOLD_MAX_N then return Drive.tiltStop(s, vehicle, playerNum, now, "loop") end
+        sampleRecovery(s, vehicle, playerNum, now, vx, vy, finite(speed) and speed or 0)
         return true
     end
     local c = s.tiltClear
-    if c == nil or now < c then s.tiltClear = now return true end
-    if now - c < TUNE.TILT_CLEAR_MS then return true end
-    diagEvent(s, playerNum, "tilt", { phase = "end", ms = now - s.tiltSince, vmin = math.floor(s.tiltMin * 100 + 0.5) / 100 })
-    if getDebug() then -- telemetry: tilt phase=end（ms／vmin）
-        print(LOG .. "pn=" .. playerNum .. " tilt hold end ms=" .. (now - s.tiltSince) .. " min=" .. tostring(s.tiltMin))
+    if c == nil or now < c then s.tiltClear = now c = now end
+    if now - c < TUNE.TILT_CLEAR_MS then
+        sampleRecovery(s, vehicle, playerNum, now, vx, vy, finite(speed) and speed or 0)
+        return true
     end
-    s.tiltSince, s.tiltClear, s.tiltMin = nil, nil, nil
-    Drive.resumeReset(s, vehicle)
+    diagEvent(s, playerNum, "tilt", { phase = "end", ms = now - s.tiltSince, vmin = math.floor(s.tiltMin * 100 + 0.5) / 100,
+        x = vx, y = vy, speed = finite(speed) and speed or nil })
+    if getDebug() then -- telemetry: tilt phase=end（ms／vmin／x／y／speed）
+        print(LOG .. "pn=" .. playerNum .. " tilt hold end ms=" .. (now - s.tiltSince) .. " min=" .. tostring(s.tiltMin)
+            .. " speed=" .. tostring(speed))
+    end
+    Drive.resumeReset(s, vehicle) -- 內含清 tiltSince／tiltClear／tiltMin
     return true
 end
 
