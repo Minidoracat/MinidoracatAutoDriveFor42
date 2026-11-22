@@ -1203,6 +1203,22 @@ do
     check(panel.gearButtons[state.gear]._fOn and same(panel.gearButtons[state.gear].backgroundColor, T.track)
         and panel.zombieButton._fOn and same(panel.zombieButton.textureColor, T.accent),
         "(fsd) selected style and enabled policies use the accent (plus an underline in render)")
+    -- 1123：卡片不透明度只縮底色（卡片、場景、路面、按鈕底），文字與強調色不變淡；改回 100% 還原
+    do
+        local opt = optionSets.MinidoracatAutoDrive:getOption("FSDOpacity")
+        local bgA, textA, accentA = T.bg.a, T.text.a, T.accent.a
+        local function near(a, b) return math.abs(a - b) < 1e-6 end
+        opt:setValue(3)
+        tick()
+        check(near(T.bg.a, bgA * 0.6) and near(T.scene.a, 0.6) and near(T.road.a, 0.6)
+            and near(panel.actionButton.backgroundColor.a, 0.6)
+            and T.text.a == textA and T.accent.a == accentA and T.curb.a == 1 and panel.actionButton.textColor.a == textA,
+            "(fsd-opacity) 60% fades card, scene, road and button backgrounds only (bg " .. T.bg.a .. ")")
+        opt:setValue(1)
+        tick()
+        check(near(T.bg.a, bgA) and near(T.scene.a, 1) and near(panel.actionButton.backgroundColor.a, 1),
+            "(fsd-opacity) back to 100% restores the original alphas")
+    end
     local snap = MDADScene.get(0, nowMs)
     check(snap and snap.version == 1 and snap.pathN == 2 and snap.pathX[1] == 0 and snap.pathY[1] == 2
         and snap.pathY[2] == 40 and snap.pathDodge[2] == true and snap.roadN == 2 and snap.roadLX[1] == -3
@@ -2136,7 +2152,7 @@ do
         check(esc ~= nil and type(tick.default) == "boolean" and tick.default == esc.default,
             "tick " .. i .. " (" .. id .. ") has an explicit default equal to the ESC default")
     end
-    checkEq(#section.combos, 11, "MiniMap section has eight setting combos plus three HUD combos")
+    checkEq(#section.combos, 12, "MiniMap section has eight setting combos plus four HUD combos")
     for i, combo in ipairs(section.combos) do
         local id = combo.label:gsub("^UI_MinidoracatAutoDrive_", "")
         local esc = options:getOption(id)
@@ -2151,8 +2167,11 @@ do
         and section.combos[11].label == "UI_MinidoracatAutoDrive_HUDScale"
         and section.combos[11].items[1] == "UI_MinidoracatAutoDrive_HUDScale75"
         and section.combos[9].default == 1 and section.combos[10].default == 1
-        and section.combos[11].default == 2,
-        "HUD theme/layout/scale combos follow the existing combos with defaults 1/1/2")
+        and section.combos[11].default == 2
+        and section.combos[12].label == "UI_MinidoracatAutoDrive_FSDOpacity"
+        and #section.combos[12].items == 3 and section.combos[12].default == 1
+        and section.combos[12].tooltip == "UI_MinidoracatAutoDrive_FSDOpacity_tooltip",
+        "HUD theme/layout/scale/FSD-opacity combos follow the existing combos with defaults 1/1/2/1")
 end
 -- 診斷行（1010，DiagLine 預設關）：開著時 HUD 上方一行「限速理由碼 目標/實速 狀態 rev」，refresh 算好、prerender 零
 -- getter／零翻譯／零量測；獨立頂層框貼面板上緣外側，四個主題都不碰面板，停靠的速度明細框在它上面。

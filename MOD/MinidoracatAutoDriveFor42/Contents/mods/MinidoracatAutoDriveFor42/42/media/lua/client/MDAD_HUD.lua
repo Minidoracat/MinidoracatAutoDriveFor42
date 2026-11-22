@@ -745,6 +745,11 @@ local function optionScale()
     return SCALES[optionIndex("HUDScale", 2, 3)] or 1.0
 end
 
+-- FSD 卡片不透明度（1＝100%、2＝80%、3＝60%；換算表在 MDADFSD.OPACITY），MDAD_FSD refresh 讀
+function HUD.fsdOpacityIndex()
+    return optionIndex("FSDOpacity", 1, 3)
+end
+
 local function scaled(value, scale)
     return math.floor(value * scale + 0.5)
 end
@@ -3603,6 +3608,11 @@ if PZAPI and PZAPI.ModOptions then
     scale:addItem("UI_MinidoracatAutoDrive_HUDScale75", false)
     scale:addItem("UI_MinidoracatAutoDrive_HUDScale100", true)
     scale:addItem("UI_MinidoracatAutoDrive_HUDScale125", false)
+    local fsdOpacity = modOptions:addComboBox("FSDOpacity", "UI_MinidoracatAutoDrive_FSDOpacity",
+        "UI_MinidoracatAutoDrive_FSDOpacity_tooltip")
+    fsdOpacity:addItem("UI_MinidoracatAutoDrive_FSDOpacity100", true)
+    fsdOpacity:addItem("UI_MinidoracatAutoDrive_FSDOpacity80", false)
+    fsdOpacity:addItem("UI_MinidoracatAutoDrive_FSDOpacity60", false)
     function modOptions:apply()
         applyAllOptions()
     end
@@ -3699,10 +3709,10 @@ local function registerMiniMapSettings()
             and api.settingsApiVersion >= 1
             and type(api.registerSettingsSection) == "function") then return end
     if miniMapSettingsApi >= api.settingsApiVersion then return end
-    -- HUD 外觀三個 combo：set 走 setClientOption（apply＋save），與 ESC 套用、HUD 主題鈕同一路徑。
-    local function hudCombo(id, items, default)
+    -- HUD 外觀四個 combo：set 走 setClientOption（apply＋save），與 ESC 套用、HUD 主題鈕同一路徑。
+    local function hudCombo(id, items, default, tooltip)
         local n = #items
-        return { label = "UI_MinidoracatAutoDrive_" .. id, items = items, default = default,
+        return { label = "UI_MinidoracatAutoDrive_" .. id, items = items, default = default, tooltip = tooltip,
             get = function() return optionIndex(id, default, n) end,
             set = function(value)
                 if type(value) ~= "number" or value ~= math.floor(value)
@@ -3814,6 +3824,11 @@ local function registerMiniMapSettings()
                 "UI_MinidoracatAutoDrive_HUDScale100",
                 "UI_MinidoracatAutoDrive_HUDScale125",
             }, 2),
+            hudCombo("FSDOpacity", {
+                "UI_MinidoracatAutoDrive_FSDOpacity100",
+                "UI_MinidoracatAutoDrive_FSDOpacity80",
+                "UI_MinidoracatAutoDrive_FSDOpacity60",
+            }, 1, "UI_MinidoracatAutoDrive_FSDOpacity_tooltip"),
         },
     }
     if api.settingsApiVersion >= 2 then

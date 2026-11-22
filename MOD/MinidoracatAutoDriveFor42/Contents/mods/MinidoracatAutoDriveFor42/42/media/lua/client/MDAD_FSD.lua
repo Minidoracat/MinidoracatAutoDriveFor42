@@ -32,6 +32,16 @@ local T = {
     parkedSide = rgb(104, 113, 123), parkedTop = rgb(124, 134, 145),
 }
 F.COLORS = T
+-- 卡片不透明度（2026-11-23 使用者裁定只做 FSD 卡片）：只縮底色（卡片底、場景底、路面、按鈕底），文字、圖示、
+-- 路徑與場景裡的物件不變淡。BASE_A＝100% 時的 alpha；選項在 HUD（FSDOpacity），refresh 每 250ms 讀一次。
+local BASE_A = { bg = T.bg.a, scene = T.scene.a, road = T.road.a, surface = T.surface.a, track = T.track.a }
+F.OPACITY = { 1, 0.8, 0.6 }
+F._opacity = 1 -- 重新載入時 T 剛重建＝100%
+function F.setOpacity(o)
+    if o == F._opacity then return end
+    F._opacity = o
+    for k, a in pairs(BASE_A) do T[k].a = a * o end
+end
 
 -- 透視：前方 y 公尺的縮放 w＝D0/(D0+y)；畫面 y 從自車往上壓縮到 FAR，橫向乘 w。NEAR＝自車後方也畫到的距離，
 -- YMIN 防除以 0。KF＝橫向相對縱向的放大（路面看起來比 1:1 寬，同原廠視覺）。
@@ -304,7 +314,8 @@ local function classify(p, token, arrived)
 end
 
 function F.refresh(p, token, now)
-    local pn, drive = p.playerNum, MDAD.Drive
+    local pn, drive, hud = p.playerNum, MDAD.Drive, MDAD.HUD
+    F.setOpacity(F.OPACITY[type(hud.fsdOpacityIndex) == "function" and hud.fsdOpacityIndex() or 1] or 1)
     local arrived = not p._active and type(drive.hudArrive) == "function" and drive.hudArrive(pn, p.vehicle) ~= nil
     local st = classify(p, token, arrived)
     p._fState = st
