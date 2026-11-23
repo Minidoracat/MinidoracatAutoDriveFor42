@@ -4659,6 +4659,7 @@ local DKEY = {
     NOT_DRIVER = "UI_MinidoracatAutoDrive_NotDriver",
     ENGINE = "UI_MinidoracatAutoDrive_EngineOff",
     UNSUPPORTED = "UI_MinidoracatAutoDrive_UnsupportedVehicle",
+    BRAKE = "UI_MinidoracatAutoDrive_BrakeFault",
     MANUAL = "UI_MinidoracatAutoDrive_ManualOverride",
     ARRIVED = "UI_MinidoracatAutoDrive_Arrived",
     START = "UI_MinidoracatAutoDrive_Start",
@@ -6627,6 +6628,25 @@ do
     checkEq(dp._modData.MDADGear, 4, "檔位寫進 player modData（跨 session 持久）")
     gearOpt.command(gearOpt.arg1)
     checkEq(MDAD.Drive.getGear(0), 1, "瘋狂再切：繞回輕鬆")
+    dp._modData.MDADGear = nil
+    -- 檔位名帶速度參數（1123e）：getText 換成留參數的版本，片文字與切檔綠字都要帶「數字＋單位」，MAX 綠字不帶；
+    -- 有 HUD.speedLabel 時用它的字（英制「31 mph」）。違規證明：cycleGearSlice 或檔位片不傳 Drive.gearArg＝這裡紅。
+    local realGetText = getText
+    getText = function(k, a) if a ~= nil then return k .. "|" .. tostring(a) end return k end
+    driveReset(dveh)
+    ISVehicleMenu.showRadialMenu(dp)
+    gearOpt = drive.menus[0].slices[3]
+    checkEq(gearOpt.text, "UI_MinidoracatAutoDrive_GearSlice|UI_MinidoracatAutoDrive_GearSport|70 km/h",
+        "檔位片文字帶檔位名與速度")
+    gearOpt.command(gearOpt.arg1)
+    checkEq(halos[#halos].text, "UI_MinidoracatAutoDrive_GearInsane", "切到 MAX：綠字不帶速度參數")
+    gearOpt.command(gearOpt.arg1)
+    checkEq(halos[#halos].text, "UI_MinidoracatAutoDrive_GearChill|30 km/h", "切到輕鬆：綠字帶 30 km/h")
+    MDAD.HUD.speedLabel = function(kmh) return (kmh == 50 and "31" or "?") .. " mph" end
+    gearOpt.command(gearOpt.arg1)
+    checkEq(halos[#halos].text, "UI_MinidoracatAutoDrive_GearStandard|31 mph", "有 HUD.speedLabel 時用它的字（英制）")
+    MDAD.HUD.speedLabel = nil
+    getText = realGetText
     dp._modData.MDADGear = nil
 end
 driveReset(dveh)
@@ -19271,7 +19291,7 @@ scenario("Phase E：v4 strict metadata、adaptive getter cache、traction reset�
     drive.nav.route = v4Route("paved", 10)
     driveReset(zeroBrakeVeh)
     checkFalse(MDAD.Drive.start(dp), "finite zero brakingForce rejects startup")
-    checkEq(haloKey(), DKEY.UNSUPPORTED, "zero brakingForce reports unsupported vehicle")
+    checkEq(haloKey(), DKEY.BRAKE, "zero brakingForce reports the brake fault, not unsupported vehicle")
 
     dveh = oldVeh
     oldVeh._driver, dp._vehicle = dp, oldVeh
@@ -19298,7 +19318,7 @@ scenario("Phase E：v4 strict metadata、adaptive getter cache、traction reset�
     driveReset(hotVeh)
     driveTick(dp, hotVeh)
     checkFalse(MDAD.Drive.isActive(0), "learned uncontrollable brake bound visibly stops")
-    checkEq(haloKey(), DKEY.UNSUPPORTED, "learned zero brake reports unsupported vehicle")
+    checkEq(haloKey(), DKEY.BRAKE, "learned zero brake reports the brake fault, not unsupported vehicle")
     checkTrue(drive.calls.forceBrake >= 1,
         "uncontrollable brake fault still attempts narrow best-effort forceBrake")
     local savedSensor, savedCorridor = MDADSensor, MDADCorridor
@@ -26541,6 +26561,85 @@ function drive.scenarioBodyFault()
     drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
 end
 drive.scenarioBodyFault()
+-- 1123e 煞車力接近零的專屬交還（Drive.KEY_BRAKE，2026-11-23 使用者核准；玩家回報別的 MOD 把履帶車的 brakingForce 改成 0.0025）：
+--   (brk-read) 讀數 0.0025 過得了啟動守門（>0），第一次算動力上限就交還：BrakeFault 紅字（不是 UnsupportedVehicle）、
+--     state-error why=brake 帶 cap／safe／mode、regulator 關。(brk-order) 先記事件才停 session。
+--   (brk-ok) 讀數 80：照常駕駛 3 秒、沒有 state-error、沒有紅字。
+--   違規證明（temp/vp_1123e.py）：dynamics-fault 一律交還 KEY_UNSUPPORTED＝(brk-read) 紅；不記 state-error＝(brk-read)(brk-order) 紅。
+--   門檻放太寬（safeBrake <= 50）＝每台車都交還，整份 smoke 從前面的情境就大量紅，輪不到 (brk-ok) 單獨咬。
+--   讀數 0 的啟動守門與線上估計型在上面的 zero brakingForce／learned zero brake；行程模式的交還原因見 (t14b)。
+function drive.scenarioBrakeFault()
+    scenario("1123e 煞車力接近零：以專屬原因 BrakeFault 交還，不再說車身幾何資料不完整")
+    local Dr, DG = MDAD.Drive, MDADDiagnostics
+    local sStart, sEvent, sStop, sTel = DG.start, DG.event, DG.stop, MDAD.HUD.telemetryEnabled
+    local sShould, sSample = DG.shouldSample, DG.sample
+    local oldSandbox, oldVeh = SandboxVars, dveh
+    local oldRoute, oldTx, oldTy, oldState = drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state
+    local ev, seq = {}, ""
+    MDAD.HUD.telemetryEnabled = function() return true end
+    DG.start = function() return true end
+    DG.stop = function() seq = seq .. "S" end
+    DG.event = function(_, name, a)
+        if name == "state-error" and type(a) == "table" then ev[#ev + 1] = a; seq = seq .. "E" end
+    end
+    DG.shouldSample, DG.sample = function() return false end, function() return true end
+    drive.fillWorld(-10, 620, -12, 12)
+    drive.putRoad(-10, 620, -3, 3)
+    setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 60, RightLaneBias = 0 })
+    drive.nav.route = { pts = { 0, 0, 600, 0 }, segSurface = { "paved" }, segWidth = { 6 }, len = 600, cost = 600,
+        avoidPenalty = 0 }
+    drive.nav.tx, drive.nav.ty, drive.nav.state = 600, 0, "ok"
+    -- 每案一台新車：只差 getBrakingForce 讀數
+    local function try(force)
+        local veh = newVehicle({
+            battery = newItem("Base.CarBattery", { uses = 0.8 }),
+            engineRunning = true, mass = 1200, speed = 20, maxSpeed = 90,
+            bodyW = 2.0, bodyL = 5.2, profileFull = true, brakingForce = force,
+        })
+        Dr.stop(0, nil)
+        dveh = veh
+        veh._x, veh._y = 20, 0
+        setHeading(veh, 0)
+        veh._driver, dp._vehicle = dp, veh
+        clearList(halos)
+        ev, seq = {}, ""
+        local started = Dr.start(dp)
+        local stop = nowMs + 3000
+        while nowMs < stop do
+            nowMs = nowMs + 50
+            driveTick(dp, veh)
+        end
+        return started, veh
+    end
+    local function bad(key)
+        for i = 1, #halos do if halos[i].kind == "bad" and halos[i].text == key then return true end end
+        return false
+    end
+
+    local started, veh = try(80)
+    checkTrue(started and Dr.isActive(0) and #ev == 0 and not bad(DKEY.BRAKE) and not bad(DKEY.UNSUPPORTED),
+        "(brk-ok) 煞車力讀數 80：照常駕駛 3 秒、沒有 state-error（事件 " .. #ev .. "）")
+
+    started, veh = try(0.0025)
+    local e = ev[1]
+    checkTrue(started, "(brk-read) 讀數 0.0025 過得了啟動守門")
+    checkTrue(not Dr.isActive(0) and bad(DKEY.BRAKE) and not bad(DKEY.UNSUPPORTED) and veh._regulator == false,
+        "(brk-read) 第一次算動力上限就交還：BrakeFault 紅字、不是 UnsupportedVehicle、regulator 關")
+    checkTrue(#ev == 1 and e.why == "brake" and type(e.cap) == "number" and e.cap <= 0.05
+            and type(e.safe) == "number" and e.safe <= 0.05 and e.mode ~= nil,
+        "(brk-read) state-error why=brake 帶 cap／safe／mode（事件 " .. #ev .. "、why " .. tostring(e and e.why)
+        .. "、cap " .. tostring(e and e.cap) .. "、safe " .. tostring(e and e.safe) .. "、mode " .. tostring(e and e.mode) .. "）")
+    checkEq(string.sub(seq, 1, 2), "ES", "(brk-order) 先記 state-error 才停 session（Diagnostics.stop 之後的事件會被丟掉）")
+
+    Dr.stop(0, nil)
+    dveh = oldVeh
+    oldVeh._driver, dp._vehicle = dp, oldVeh
+    DG.start, DG.event, DG.stop, MDAD.HUD.telemetryEnabled = sStart, sEvent, sStop, sTel
+    DG.shouldSample, DG.sample = sShould, sSample
+    SandboxVars = oldSandbox
+    drive.nav.route, drive.nav.tx, drive.nav.ty, drive.nav.state = oldRoute, oldTx, oldTy, oldState
+end
+drive.scenarioBrakeFault()
 -- 1123b 傾斜停止輸出（Drive.tiltHold；正式服 1114r Silverado 擦樹後 vup 0.81 時 AVOID 飽和側推，0.11 秒內翻覆）：
 --   (tilt-hold) 朝上低於 TILT_HOLD_DOT：當幀起不推（impulse 不增）、regulator 關、tilt start（vup／attempt），不交還。
 --   (tilt-end)  回到門檻以上連續 TILT_CLEAR_MS：tilt end（ms／vmin）、之後照常輸出。(tilt-blip) 不到 TILT_CLEAR_MS 又傾斜＝同一段。
@@ -33352,9 +33451,9 @@ checkEq(M.lastRelease, "failed", "(t14) 交還原因是失敗，不是到站")
 checkEq(M.stops[1].status, "pending", "(t14) 始終沒有假報抵達")
 checkEq(drive.voiceCount("arrive"), 0, "(t14) 始終沒有成功語音")
 
--- ⑭b 1110c：車身異常交還（VehicleSunk／VehicleOverturned）在行程模式以 failed 交還，不是 unavailable（行程不會被當成
---   「裝置失效暫停」）。違規證明：TRIP.RELEASE 拿掉這兩鍵＝紅。
-for _, key in ipairs({ MDAD.Drive.KEY_SUNK, MDAD.Drive.KEY_OVERTURNED }) do
+-- ⑭b 1110c：車身異常交還（VehicleSunk／VehicleOverturned）與 1123e 煞車力接近零（BrakeFault）在行程模式以 failed 交還，
+--   不是 unavailable（行程不會被當成「裝置失效暫停」）。違規證明：TRIP.RELEASE 拿掉這幾鍵＝紅。
+for _, key in ipairs({ MDAD.Drive.KEY_SUNK, MDAD.Drive.KEY_OVERTURNED, MDAD.Drive.KEY_BRAKE }) do
     ready(true)
     setTrip("draft")
     checkTrue(MDAD.Drive.continueItinerary(0), "(t14b) 出發")
@@ -37489,6 +37588,7 @@ local EXPECT_KEYS = {
     "UI_MinidoracatAutoDrive_NotDriver",
     "UI_MinidoracatAutoDrive_EngineOff",
     "UI_MinidoracatAutoDrive_UnsupportedVehicle",
+    "UI_MinidoracatAutoDrive_BrakeFault",
     "UI_MinidoracatAutoDrive_ManualOverride",
     "UI_MinidoracatAutoDrive_Arrived",
     "UI_MinidoracatAutoDrive_LostRoute",

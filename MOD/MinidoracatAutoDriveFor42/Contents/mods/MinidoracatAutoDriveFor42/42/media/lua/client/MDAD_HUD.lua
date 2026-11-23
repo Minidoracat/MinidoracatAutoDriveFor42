@@ -97,6 +97,7 @@ local WING_L_MD_KEY = "MDADHudWingL"
 local WING_R_MD_KEY = "MDADHudWingR"
 local SCALES = { 0.75, 1.0, 1.25 }
 local GEAR_SHORT = { "30", "50", "70", "MAX" }
+HUD.GEAR_MPH = { "19", "31", "43", "MAX" } -- 英制顯示：30／50／70 km/h 換算後取整（test_hud 鎖）
 local VOICE_VOLUME_DEFAULT = 70
 local VOICE_VOLUME_STEP = 5
 local SLIDER_KNOB = 12
@@ -181,6 +182,8 @@ HUD.STOP_KEYS = {
     -- 1110c 自己的車低於地板／翻覆（Drive.physFault）
     UI_MinidoracatAutoDrive_VehicleSunk = "UI_MinidoracatAutoDrive_HUDStatusStop_sunk",
     UI_MinidoracatAutoDrive_VehicleOverturned = "UI_MinidoracatAutoDrive_HUDStatusStop_overturned",
+    -- 煞車力讀數接近零（沒裝煞車、被其他 MOD 接管；Drive.KEY_BRAKE）
+    UI_MinidoracatAutoDrive_BrakeFault = "UI_MinidoracatAutoDrive_HUDStatusStop_brake",
     UI_MinidoracatAutoDrive_NeedGPS = "UI_MinidoracatAutoDrive_HUDStatusStop_device",
     UI_MinidoracatAutoDrive_NeedGPSOrWatch = "UI_MinidoracatAutoDrive_HUDStatusStop_device",
     UI_MinidoracatAutoDrive_NeedModule = "UI_MinidoracatAutoDrive_HUDStatusStop_device",
@@ -245,6 +248,7 @@ local STATUS_WIDTH_KEYS = {
     "UI_MinidoracatAutoDrive_HUDStatusStop_engine",
     "UI_MinidoracatAutoDrive_HUDStatusStop_sunk",
     "UI_MinidoracatAutoDrive_HUDStatusStop_overturned",
+    "UI_MinidoracatAutoDrive_HUDStatusStop_brake",
     "UI_MinidoracatAutoDrive_HUDStatusStop_device",
     "UI_MinidoracatAutoDrive_HUDStatusStop_other",
 }
@@ -410,14 +414,30 @@ function HUD.etaText(seconds, prev)
     return getText("UI_MinidoracatAutoDrive_HUDEtaMinutes", string.format("%d", m > 999 and 999 or m)), m
 end
 
--- 預計剩餘欄的滑鼠提示（1005j）：沿路線還剩多遠。四捨五入到 10 公尺，滿 1 公里改用公里取一位小數；沒有距離回 nil。
-function HUD.etaTipText(meters)
+-- 沿路線還剩多遠的顯示值：回「數值字串, 單位序」（1 km、2 m、3 mi、4 ft）；沒有距離回 nil。
+-- 公制四捨五入到 10 公尺、滿 1 公里一位小數；英制滿 0.1 英里一位小數、以下四捨五入到 50 英尺。
+function HUD.distParts(meters, imperial)
     if type(meters) ~= "number" or meters * 0 ~= 0 or meters < 0 then return nil end
-    local r = math.floor(meters / 10 + 0.5) * 10
-    if r >= 1000 then
-        return getText("UI_MinidoracatAutoDrive_HUDEtaTipKm", string.format("%.1f", meters / 1000))
+    if imperial then
+        local mi = meters / 1609.344
+        if mi >= 0.095 then return string.format("%.1f", mi), 3 end
+        return string.format("%d", math.floor(meters * 3.28084 / 50 + 0.5) * 50), 4
     end
-    return getText("UI_MinidoracatAutoDrive_HUDEtaTipM", string.format("%d", r))
+    local r = math.floor(meters / 10 + 0.5) * 10
+    if r >= 1000 then return string.format("%.1f", meters / 1000), 1 end
+    return string.format("%d", r), 2
+end
+
+HUD.DIST_KEYS = {
+    "UI_MinidoracatAutoDrive_HUDEtaTipKm", "UI_MinidoracatAutoDrive_HUDEtaTipM",
+    "UI_MinidoracatAutoDrive_HUDEtaTipMi", "UI_MinidoracatAutoDrive_HUDEtaTipFt",
+}
+
+-- 預計剩餘欄的滑鼠提示（1005j）：沿路線還剩多遠；沒有距離回 nil。
+function HUD.etaTipText(meters, imperial)
+    local text, unit = HUD.distParts(meters, imperial)
+    if not text then return nil end
+    return getText(HUD.DIST_KEYS[unit], text)
 end
 
 local function optionIndex(id, default, maximum)
@@ -434,6 +454,35 @@ local function optionBool(id, default)
     local value = option and option:getValue()
     if type(value) ~= "boolean" then return default end
     return value
+end
+
+-- 顯示單位（Units 選項：1 公制預設、2 英制）。只改顯示；Driver、telemetry、診斷行、沙盒一律 km/h。
+-- 倍率與單位字存在面板自己的 _spK／_unitText（applyLayout 更新），不放模組共用變數。
+HUD.MPH = 0.621371
+function HUD.imperial() return optionIndex("Units", 1, 2) == 2 end
+function HUD.speedInt(kmh, k) return string.format("%d", math.floor(kmh * k + 0.5)) end
+-- 給沒有面板的呼叫端（Driver 檔位提示）：「30 km/h」「19 mph」
+function HUD.speedLabel(kmh)
+    local imp = HUD.imperial()
+    return HUD.speedInt(kmh, imp and HUD.MPH or 1) .. " "
+        .. getText(imp and "UI_MinidoracatAutoDrive_HUDSpeedUnitMph" or "UI_MinidoracatAutoDrive_HUDSpeedUnit")
+end
+-- 現速欄的顯示值。prev、cap 只有英制傳：70 km/h＝43.496 mph 正好在取整邊界，離上一輪顯示值不到 0.8 就不換字；
+-- 離巡航上限不到 0.6 就顯示成上限的讀數（不然取整到 44 會黏住，畫面變成「44 mph／上限 43」），已經顯示上限讀數時
+-- 要離開 0.8 才換（帶邊也要遲滯：車速剛好在上限＋0.8 附近抖時，沒有遲滯會每次 refresh 換字）
+function HUD.speedShown(v, prev, cap)
+    local r = roundPositive(v)
+    if r == 0 or not (prev or cap) then return r end
+    local a = v < 0 and -v or v
+    if cap then
+        local e, c = a - cap, roundPositive(cap)
+        local band = prev == c and 0.8 or 0.6
+        if e < band and e > -band then return c end
+    end
+    if not prev then return r end
+    local d = a - prev
+    if d < 0.8 and d > -0.8 then return prev end
+    return r
 end
 
 local function trajectoryVisible()
@@ -1207,6 +1256,7 @@ function MDADHUDPanel:new(playerNum)
     o._statusText = ""
     o._clockText = "--:--"
     o._unitText = ""
+    o._imperial, o._spK, o._gearShort = false, 1, GEAR_SHORT
     o._capLabel = ""
     o._timeLabel = ""
     o._gearLabel = ""
@@ -1272,7 +1322,7 @@ function MDADHUDPanel:createChildren()
     for i = 1, 4 do
         local button = makeButton(self, GEAR_SHORT[i], MDADHUDPanel.onGear)
         button.internal = i
-        button.tooltip = getText(GEAR_TOOLTIPS[i])
+        -- tooltip 帶單位參數，由 applyLayout 設（本函式結尾會呼叫）
         self.gearButtons[i] = button
     end
     self.cycleButton = makeButton(self, GEAR_SHORT[3], MDADHUDPanel.onCycleGear)
@@ -1753,7 +1803,18 @@ function MDADHUDPanel:applyLayout()
     self._wingsFallback, self._tz = false, nil
     self._layout = optionIndex("HUDLayout", LAYOUT_FULL, 2)
     local scale = optionScale()
-    self._unitText = getText("UI_MinidoracatAutoDrive_HUDSpeedUnit")
+    self._imperial = HUD.imperial()
+    self._spK = self._imperial and HUD.MPH or 1
+    self._speedN = nil
+    self._unitText = getText(self._imperial and "UI_MinidoracatAutoDrive_HUDSpeedUnitMph"
+        or "UI_MinidoracatAutoDrive_HUDSpeedUnit")
+    self._gearShort = self._imperial and HUD.GEAR_MPH or GEAR_SHORT
+    for i = 1, 4 do
+        local g = self._gearShort
+        self.gearButtons[i]:setTitle(g[i])
+        self.gearButtons[i].tooltip = i < 4 and getText(GEAR_TOOLTIPS[i], g[i] .. " " .. self._unitText)
+            or getText(GEAR_TOOLTIPS[i], g[1], g[2], g[3])
+    end
     self._capLabel = getText("UI_MinidoracatAutoDrive_HUDCruiseCap")
     self._timeLabel = getText("UI_MinidoracatAutoDrive_HUDDriveTime")
     self._etaLabel = getText("UI_MinidoracatAutoDrive_HUDEta")
@@ -2166,15 +2227,18 @@ function MDADHUDPanel:refreshSpeedTip(token, cruise, now)
                 category, atVehicle = nil, ceiling ~= cruise
             end
         end
-        local function n(v) return type(v) == "number" and v >= 0 and string.format("%d", math.floor(v + 0.5)) or "--" end
+        local spK = self._spK
+        local function n(v) return type(v) == "number" and v >= 0 and string.format("%d", math.floor(v * spK + 0.5)) or "--" end
         local why = getText(category and ("UI_MinidoracatAutoDrive_SlowWhy_" .. category)
             or atVehicle and "UI_MinidoracatAutoDrive_SlowWhy_vehicle"
             or (driving and "UI_MinidoracatAutoDrive_SlowWhy_none" or "UI_MinidoracatAutoDrive_SlowWhy_idle"))
         local vehText = n(vmax)
         if realV ~= vmax then vehText = getText("UI_MinidoracatAutoDrive_HUDSpeedVehicleReal", n(vmax), n(realV)) end
         local serverText = serverL and n(serverL) or getText("UI_MinidoracatAutoDrive_HUDSpeedServerNone")
-        self._speedTip = getText("UI_MinidoracatAutoDrive_HUDSpeedTip", vehText, n(sandMax), n(gearCap), n(cruise),
-            n(target), why, n(curveCap), n(visCap), serverText) .. "\n" .. getText("UI_MinidoracatAutoDrive_HUDSpeedPinOn")
+        local unit = " " .. self._unitText
+        self._speedTip = getText("UI_MinidoracatAutoDrive_HUDSpeedTip", vehText .. unit, n(sandMax), n(gearCap),
+            n(cruise) .. unit, n(target) .. unit, why, n(curveCap), n(visCap), serverText)
+            .. "\n" .. getText("UI_MinidoracatAutoDrive_HUDSpeedPinOn")
         if self._speedPin then self:buildPinRows(n, vmax, sandMax, gearCap, cruise, target, why, category, curveCap, visCap,
             vehText, realV, serverL, serverText, factorCap, factorReason, ceiling) end
     end
@@ -2871,12 +2935,15 @@ function MDADHUDPanel:refresh(now)
     self._corpseOn = corpseOn == true
     self._statusColor = statusColor(token, reason)
     self._kmh = vehicle:getCurrentSpeedKmHour() -- 診斷行要帶號實速（倒車為負），現速欄取絕對值
-    self._speedText = tostring(roundPositive(self._kmh))
+    -- 貼上限只在自駕中：手動駕駛時現速照實顯示
+    self._speedN = HUD.speedShown(self._kmh * self._spK, self._imperial and self._speedN or nil,
+        self._imperial and self._active and cap and cap * self._spK or nil)
+    self._speedText = tostring(self._speedN)
     -- 極窄精簡單行會把現速欄整欄讓給主鈕；沒有座標就沒有單位要對齊。
     if self._speedX then
         self._unitX = self._speedX + textWidth(UIFont.Medium, self._speedText) + 3
     end
-    self._capText = cap and tostring(roundPositive(cap)) or "--"
+    self._capText = cap and tostring(roundPositive(cap * self._spK)) or "--"
     local battery = clampPercent(vehicle:getBatteryCharge(), 100)
     local fuel = clampPercent(vehicle:getRemainingFuelPercentage(), 1)
     self._energyText = getText("UI_MinidoracatAutoDrive_HUDEnergy", battery, fuel)
@@ -2888,7 +2955,7 @@ function MDADHUDPanel:refresh(now)
     if self._active then etaSec, etaDist = Drive.etaSeconds(self.playerNum) end
     local etaText, etaMin = HUD.etaText(etaSec, self._etaMin)
     self._etaText, self._etaMin, self._etaDist = etaText or "--", etaMin, etaDist
-    self._etaTip = etaText and HUD.etaTipText(etaDist) or nil
+    self._etaTip = etaText and HUD.etaTipText(etaDist, self._imperial) or nil
     self._blocked = token == "blocked"
     self:refreshSpeedTip(token, cap, now)
     self._lowFpsTip = nil
@@ -2921,7 +2988,7 @@ function MDADHUDPanel:updateButtons()
         styleButton(self.gearButtons[i], i == self._gear and selectedBg or C.button,
             i == self._gear and selectedText or C.text, true)
     end
-    self.cycleButton:setTitle(GEAR_SHORT[self._gear] or "--")
+    self.cycleButton:setTitle(self._gearShort[self._gear] or "--")
     self.cycleButton.tooltip = self.gearButtons[self._gear].tooltip
     styleButton(self.cycleButton, selectedBg, selectedText, true)
 
@@ -3164,7 +3231,7 @@ function MDADHUDPanel:renderWings()
         end
     end
     if self._wingRFolded then
-        self:drawText(GEAR_SHORT[self._gear] or "--", self._gearBadgeX, self._gearBadgeY,
+        self:drawText(self._gearShort[self._gear] or "--", self._gearBadgeX, self._gearBadgeY,
             C.amber.r, C.amber.g, C.amber.b, C.amber.a, UIFont.Small)
         return
     end
@@ -3608,18 +3675,21 @@ if PZAPI and PZAPI.ModOptions then
     scale:addItem("UI_MinidoracatAutoDrive_HUDScale75", false)
     scale:addItem("UI_MinidoracatAutoDrive_HUDScale100", true)
     scale:addItem("UI_MinidoracatAutoDrive_HUDScale125", false)
-    local fsdOpacity = modOptions:addComboBox("FSDOpacity", "UI_MinidoracatAutoDrive_FSDOpacity",
-        "UI_MinidoracatAutoDrive_FSDOpacity_tooltip")
-    fsdOpacity:addItem("UI_MinidoracatAutoDrive_FSDOpacity100", true)
-    fsdOpacity:addItem("UI_MinidoracatAutoDrive_FSDOpacity80", false)
-    fsdOpacity:addItem("UI_MinidoracatAutoDrive_FSDOpacity60", false)
+    -- 不開區塊 local（主 chunk 槽數，見下方 protectOptionsBackup 的註解）
+    modOptions:addComboBox("FSDOpacity", "UI_MinidoracatAutoDrive_FSDOpacity", "UI_MinidoracatAutoDrive_FSDOpacity_tooltip")
+    modOptions:getOption("FSDOpacity"):addItem("UI_MinidoracatAutoDrive_FSDOpacity100", true)
+    modOptions:getOption("FSDOpacity"):addItem("UI_MinidoracatAutoDrive_FSDOpacity80", false)
+    modOptions:getOption("FSDOpacity"):addItem("UI_MinidoracatAutoDrive_FSDOpacity60", false)
+    modOptions:addComboBox("Units", "UI_MinidoracatAutoDrive_Units", "UI_MinidoracatAutoDrive_Units_tooltip")
+    modOptions:getOption("Units"):addItem("UI_MinidoracatAutoDrive_UnitsMetric", true)
+    modOptions:getOption("Units"):addItem("UI_MinidoracatAutoDrive_UnitsImperial", false)
     function modOptions:apply()
         applyAllOptions()
     end
     -- 原版缺陷：主選單沒有 MOD 建選項時按套用，Lua/ModOptions.ini 會被清成 0 byte，進遊戲設定全回預設。
     -- UI 框架 rev 23 從自己的備份（Lua/MinidoracatUI/ModOptions_MinidoracatAutoDrive.ini）補回本 MOD 的值；
     -- 必須在選項全部加完之後、MainOptions:create 的 load 之前跑（本段在檔案載入時執行，早於它）。
-    -- 掛在 HUD 表上呼叫而非區塊 local：主 chunk local 槽只剩 4（區塊 local 也佔槽）。
+    -- 掛在 HUD 表上呼叫而非區塊 local：主 chunk local 槽只剩 5（區塊 local 也佔槽）。
     function HUD.protectOptionsBackup()
         local UI = MinidoracatUI and MinidoracatUI.v1
         if UI and UI.API_MAJOR == 1 and type(UI.API_REVISION) == "number" and UI.API_REVISION >= 23
@@ -3829,6 +3899,10 @@ local function registerMiniMapSettings()
                 "UI_MinidoracatAutoDrive_FSDOpacity80",
                 "UI_MinidoracatAutoDrive_FSDOpacity60",
             }, 1, "UI_MinidoracatAutoDrive_FSDOpacity_tooltip"),
+            hudCombo("Units", {
+                "UI_MinidoracatAutoDrive_UnitsMetric",
+                "UI_MinidoracatAutoDrive_UnitsImperial",
+            }, 1, "UI_MinidoracatAutoDrive_Units_tooltip"),
         },
     }
     if api.settingsApiVersion >= 2 then

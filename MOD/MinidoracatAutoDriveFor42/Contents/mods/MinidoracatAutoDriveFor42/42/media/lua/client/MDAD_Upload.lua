@@ -164,6 +164,8 @@ local STOP_KIND = {
     -- 自己的車低於地板／翻覆（1110c；Driver Drive.physFault）：同歸 fault
     UI_MinidoracatAutoDrive_VehicleSunk = "fault",
     UI_MinidoracatAutoDrive_VehicleOverturned = "fault",
+    -- 煞車力讀數接近零（1123e；Driver Drive.KEY_BRAKE）：同歸 fault
+    UI_MinidoracatAutoDrive_BrakeFault = "fault",
 }
 
 local outbox = {}      -- pn → { msgs..., n }

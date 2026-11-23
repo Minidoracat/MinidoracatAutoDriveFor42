@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1123d"
+Drive.REV = "1123e"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -1073,6 +1073,14 @@ local GEAR_KEYS = {
     "UI_MinidoracatAutoDrive_GearSport",
     "UI_MinidoracatAutoDrive_GearInsane",
 }
+-- 檔位名稱 %1 的速度字（「30 km/h」；英制顯示選項時「19 mph」，HUD.speedLabel）；MAX 檔沒有參數回 nil
+function Drive.gearArg(g)
+    local cap = GEAR_CAPS[g]
+    if not cap or cap < 0 then return nil end
+    local hud = MDAD.HUD
+    if hud and type(hud.speedLabel) == "function" then return hud.speedLabel(cap) end
+    return cap .. " km/h"
+end
 local GEAR_DEFAULT = 3         -- 未設定→運動 70＝舊版固定上限，升級不無聲降速
 local GEAR_MD_KEY = "MDADGear"
 local PREF_ZOMBIE_MD = "MDADZombieSlow" -- player modData：false＝這位玩家不為殭屍減速
@@ -1138,6 +1146,8 @@ Drive.KEY_ANIMAL_STOP = "UI_MinidoracatAutoDrive_AnimalBlockStop"
 -- 自己的車低於地板／翻覆的交還理由（Drive.physFault；1110c）
 Drive.KEY_SUNK = "UI_MinidoracatAutoDrive_VehicleSunk"
 Drive.KEY_OVERTURNED = "UI_MinidoracatAutoDrive_VehicleOverturned"
+-- 煞車力讀數接近零的拒絕／交還理由：沒裝煞車（啟動守門）、其他 MOD 接管煞車把讀數改到幾乎是零（safeBrake 下限）
+Drive.KEY_BRAKE = "UI_MinidoracatAutoDrive_BrakeFault"
 
 -- 診斷輸出（只在 getDebug() 為真時存在）。實機回報「按了關閉但車還在跑」時，唯一能
 -- 分辨「session 沒關」與「只是慣性滑行」的證據就是這幾行；跟線那行必須節流，每幀
@@ -1158,8 +1168,8 @@ local function haloBad(playerObj, key, arg)
     return text
 end
 
-local function haloGood(playerObj, key)
-    local text = getText(key)
+local function haloGood(playerObj, key, arg)
+    local text = arg ~= nil and getText(key, arg) or getText(key)
     if Drive.summons[playerObj:getPlayerNum()] then return end
     HaloTextHelper.addGoodText(playerObj, text)
     if MDADDiagnostics and MDADDiagnostics.toast then MDADDiagnostics.toast(text, "good") end
@@ -1277,7 +1287,7 @@ TRIP.RELEASE = {
     [KEY_LOST] = "noroad", [KEY_ROUTE] = "noroad", [KEY_ROUTE_FAR] = "noroad",
     [KEY_STUCK] = "failed", [KEY_UNSUPPORTED] = "failed", [Drive.KEY_AREA_STOP] = "failed",
     [Drive.KEY_PLAYER_STOP] = "failed", [Drive.KEY_ANIMAL_STOP] = "failed",
-    [Drive.KEY_SUNK] = "failed", [Drive.KEY_OVERTURNED] = "failed",
+    [Drive.KEY_SUNK] = "failed", [Drive.KEY_OVERTURNED] = "failed", [Drive.KEY_BRAKE] = "failed",
 }
 -- playerNum → 開始／備路意圖（token=nil 時尚未 acquire；claim 前對車零控制輸出）
 TRIP.preps = {}
@@ -2697,7 +2707,7 @@ local function startSession(playerObj, playerNum, stage, summon)
     if type(vehicleProfile.brakingForce) == "number"
             and vehicleProfile.brakingForce * 0 == 0
             and vehicleProfile.brakingForce <= 0 then
-        return KEY_UNSUPPORTED
+        return Drive.KEY_BRAKE
     end
     -- 拖掛車（MDAD_Trailer）：量不到掛車幾何、或掛在車頭前方就拒絕（attach 回翻譯鍵）；量得到＝質量併入、
     -- 彎道預算打折、轉角換成外拉大彎的車頭路線（Follower 只看到改寫後的線；cutover 仍以原 route identity 比對）。
@@ -8574,7 +8584,7 @@ local function updateTraction(s, now, speedKmh, heading, headingError, latDev)
         safeAccel, safeBrake, safeLat, safeCoast
     MDADFollower.setRuntimeLimits(
         s.fstate, safeAccel, safeBrake, safeLat, safeCoast)
-    if safeBrake <= 0.05 then s.dynamicsFault = true end
+    if safeBrake <= 0.05 then s.dynamicsFault, s.brakeFault = true, true end
     -- material 重建判定（2026-09-04 issue #1 定罪 A/C）：線上估計從 prior 出發、
     -- 20 秒內單調滑向 lower（總行程 10-40%），舊門檻 2% 讓一次收斂就重建 5-20 次
     -- ——每次都是十幾幀掛 N。門檻改 20%（floor 照舊）：一次收斂最多 1-2 次；近端
@@ -19009,7 +19019,15 @@ local function stepFollow(s, vehicle, playerNum, now)
 
     if postAction == "dynamics-fault" then
         vehicle:setRegulator(false)
-        Drive.stop(playerNum, KEY_UNSUPPORTED)
+        -- 煞車力算出來接近零（s.brakeFault）有自己的原因鍵；cap≤0.05＝讀數型、cap 正常而 safe≤0.05＝線上估計型
+        if s.brakeFault then
+            diagEvent(s, playerNum, "state-error", { why = "brake", cap = s.priorBrake, safe = s.safeBrake, mode = s.mode })
+            if getDebug() then -- telemetry: state-error why=brake（cap／safe／mode）
+                print(LOG .. "pn=" .. playerNum .. " brake fault prior=" .. tostring(s.priorBrake)
+                    .. " safe=" .. tostring(s.safeBrake))
+            end
+        end
+        Drive.stop(playerNum, s.brakeFault and Drive.KEY_BRAKE or KEY_UNSUPPORTED)
         return
     end
     -- 停等總預算耗盡是最高優先的終局（紅字交還玩家），蓋過任何恢復需求。
@@ -20211,7 +20229,7 @@ end
 local function cycleGearSlice(playerObj)
     if not playerObj then return end
     local g = Drive.cycleGear(playerObj:getPlayerNum())
-    haloGood(playerObj, GEAR_KEYS[g])
+    haloGood(playerObj, GEAR_KEYS[g], Drive.gearArg(g))
 end
 
 local originalShowRadialMenu = ISVehicleMenu.showRadialMenu
@@ -20238,7 +20256,7 @@ function ISVehicleMenu.showRadialMenu(playerObj)
     menu:addSlice(getText(labelKey), autoDriveTexture(), Drive.toggle, playerObj)
     -- 檔位片（同一次 open 補在自駕片之後）：片文字帶當前檔位，點了循環到下一檔
     local g = Drive.getGear(playerObj:getPlayerNum())
-    menu:addSlice(getText("UI_MinidoracatAutoDrive_GearSlice", getText(GEAR_KEYS[g])),
+    menu:addSlice(getText("UI_MinidoracatAutoDrive_GearSlice", getText(GEAR_KEYS[g], Drive.gearArg(g) or "")),
         autoDriveTexture(), cycleGearSlice, playerObj)
 end
 

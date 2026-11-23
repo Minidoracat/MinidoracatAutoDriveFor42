@@ -132,7 +132,7 @@ Plus a screwdriver.
 [*] [b]Drive timer[/b]: real time, including waits and recovery.
 [*] [b]Reset[/b]: kept until the next successful start; not saved.
 [*] [b]Time left[/b]: while autodriving, about how many minutes are left to the destination (the next target on a trip), in real time; the last minute reads "< 1 min".
-[*] [b]Distance left[/b]: hover it for the distance left along the route (in metres under 1 km).
+[*] [b]Distance left[/b]: hover it for the distance left along the route (in metres under 1 km; miles and feet with Imperial units).
 [*] [b]Estimate[/b]: starts from the route's bends and your cruise limit and adjusts to how fast this trip actually goes; waits, detours and reroutes recalculate it.
 [*] [b]Can run slower[/b]: stretches with many zombies to dodge.
 [*] [b]Compact layout[/b]: the first column to give way when space runs out.
@@ -164,6 +164,7 @@ Plus a screwdriver.
 [*] [b]30 / 50 / 70 km/h[/b]: drive comfortably.
 [*] [b]MAX[/b]: corners and dodges faster with later lift-off, capped by vehicle and sandbox limits.
 [*] [b]Safety[/b]: safety checks are unchanged.
+[*] [b]Units[/b]: for mph and miles, set "Speed and distance units" to Imperial in the ESC mod options or the MiniMap gear's Autodrive category. The gear buttons then read 19 / 31 / 43; only the display changes, not the driving speed.
 [/list]
 [h3]Take over anytime[/h3]
 [list]

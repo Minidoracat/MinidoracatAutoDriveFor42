@@ -93,6 +93,7 @@ local texts = {
     UI_MinidoracatAutoDrive_HUDStatusNoNav = "NO NAV",
     UI_MinidoracatAutoDrive_HUDStatusNotReady = "NOT READY",
     UI_MinidoracatAutoDrive_HUDSpeedUnit = "km/h",
+    UI_MinidoracatAutoDrive_HUDSpeedUnitMph = "mph",
     UI_MinidoracatAutoDrive_HUDCruiseCap = "CRUISE LIMIT",
     UI_MinidoracatAutoDrive_HUDGear = "MODE",
     UI_MinidoracatAutoDrive_HUDEnergy = "BAT %1%% FUEL %2%%",
@@ -102,6 +103,8 @@ local texts = {
     UI_MinidoracatAutoDrive_HUDEtaUnder = "< 1 min",
     UI_MinidoracatAutoDrive_HUDEtaTipKm = "%1 km to go",
     UI_MinidoracatAutoDrive_HUDEtaTipM = "%1 m to go",
+    UI_MinidoracatAutoDrive_HUDEtaTipMi = "%1 mi to go",
+    UI_MinidoracatAutoDrive_HUDEtaTipFt = "%1 ft to go",
     UI_MinidoracatAutoDrive_HUDZombie = "Z",
     UI_MinidoracatAutoDrive_HUDCorpse = "C",
     UI_MinidoracatAutoDrive_HUDOn = "ON",
@@ -1219,6 +1222,44 @@ do
         check(near(T.bg.a, bgA) and near(T.scene.a, 1) and near(panel.actionButton.backgroundColor.a, 1),
             "(fsd-opacity) back to 100% restores the original alphas")
     end
+    -- 1123e 顯示單位（Units 選項）：卡片的單位字、剩餘路程與「減速到」跟著換；切回公制還原。
+    -- 違規證明：F.refresh 的 distText 不帶 p._imperial＝(fsd-units) 距離紅；「減速到」不乘 p._spK＝(fsd-units-slow) 紅。
+    do
+        local opts = optionSets.MinidoracatAutoDrive
+        local savedEta, savedDist, savedCap, savedInfo = state.eta, state.etaDist, state.cap, MDAD.Drive.speedInfo
+        texts.UI_MinidoracatAutoDrive_FsdSlowTo = "%1>%2"
+        texts.UI_MinidoracatAutoDrive_HUDStatusSlow_curve = "CORNER"
+        MDAD.Drive.speedInfo = function() return 120, 120, nil, 18.4, "curve-coast", 25, 104 end
+        state.eta, state.etaDist, state.cap = 600, 3000, 70
+        tick()
+        nowMs = nowMs + 2100
+        tick()
+        check(panel._fUnit == "km/h CRUISE LIMIT" and string.find(tostring(panel._fEta), "3.0 km", 1, true) ~= nil,
+            "(fsd-units) metric: km/h cap label and kilometres left (" .. tostring(panel._fUnit) .. " / " .. tostring(panel._fEta) .. ")")
+        checkEq(panel._fWhy, "CORNER>18 km/h", "(fsd-units-slow) metric: slowing to the target in km/h")
+        check(MDADFSD.distText(994) == "990 m" and MDADFSD.distText(152, true) == "500 ft"
+            and MDADFSD.distText(153, true) == "0.1 mi" and MDADFSD.distText(nil, true) == nil,
+            "(fsd-units) distance text: metres by default, feet below 0.1 mi and miles from there when imperial")
+        opts:getOption("Units"):setValue(2)
+        opts:apply()
+        tick()
+        check(panel._fUnit == "mph CRUISE LIMIT" and string.find(tostring(panel._fEta), "1.9 mi", 1, true) ~= nil
+            and panel._capText == "43",
+            "(fsd-units) imperial: mph cap label, 70 km/h shown as 43, miles left (" .. tostring(panel._fUnit) .. " / "
+                .. tostring(panel._fEta) .. " / " .. tostring(panel._capText) .. ")")
+        checkEq(panel._fWhy, "CORNER>11 mph", "(fsd-units-slow) imperial: slowing to the target in mph")
+        opts:getOption("Units"):setValue(1)
+        opts:apply()
+        state.eta, state.etaDist, state.cap, MDAD.Drive.speedInfo = savedEta, savedDist, savedCap, savedInfo
+        texts.UI_MinidoracatAutoDrive_FsdSlowTo = nil
+        texts.UI_MinidoracatAutoDrive_HUDStatusSlow_curve = "Corner: slower"
+        nowMs = nowMs + 2000
+        tick()
+        nowMs = nowMs + 1100 -- 降速短原因要恢復滿 1 秒才換回
+        tick()
+        check(panel._fUnit == "km/h CRUISE LIMIT" and panel._fState == "engaged",
+            "(fsd-units) back to metric restores km/h (" .. tostring(panel._fUnit) .. " / " .. tostring(panel._fState) .. ")")
+    end
     local snap = MDADScene.get(0, nowMs)
     check(snap and snap.version == 1 and snap.pathN == 2 and snap.pathX[1] == 0 and snap.pathY[1] == 2
         and snap.pathY[2] == 40 and snap.pathDodge[2] == true and snap.roadN == 2 and snap.roadLX[1] == -3
@@ -1580,6 +1621,14 @@ check(panel._statusText == "STOP SUNK" and panel.statusTip.tooltip == "SUNK SENT
 state.stopKey = "UI_MinidoracatAutoDrive_VehicleOverturned"
 panel:refresh(nowMs)
 checkEq(panel._statusText, "STOP OVERTURNED", "body fault: an overturned handback shows its own label")
+-- 1123e 煞車力接近零的交還：自己的短標籤與完整句（不退 other）。違規證明：HUD.STOP_KEYS 拿掉 BrakeFault 那列＝紅。
+texts.UI_MinidoracatAutoDrive_HUDStatusStop_brake = "STOP BRAKES"
+texts.UI_MinidoracatAutoDrive_BrakeFault = "BRAKE SENTENCE"
+state.stopKey = "UI_MinidoracatAutoDrive_BrakeFault"
+panel:refresh(nowMs)
+check(panel._statusText == "STOP BRAKES" and panel.statusTip.tooltip == "BRAKE SENTENCE\nJUST NOW",
+    "brake fault: a near-zero braking force handback shows its own label and the full sentence ("
+        .. tostring(panel._statusText) .. " / " .. tostring(panel.statusTip.tooltip) .. ")")
 state.stopKey, state.stopAgoMs = nil, nil
 state.startReason = "UI_MinidoracatAutoDrive_NeedGPSOrWatch"
 panel:refresh(nowMs)
@@ -1737,7 +1786,7 @@ do
     state.token, state.cap = "follow", 120
     local t0 = nowMs
     panel:refresh(t0)
-    check(panel.capTip.visible and tostring(panel.capTip.tooltip):sub(1, 30) == "120|120|--|120|18|CURVE|25|104",
+    check(panel.capTip.visible and tostring(panel.capTip.tooltip):sub(1, 45) == "120 km/h|120|--|120 km/h|18 km/h|CURVE|25|104",
         "cruise-limit hover shows the speed breakdown (" .. tostring(panel.capTip.tooltip) .. ")")
     check(panel._statusText == "FOLLOW", "slow status waits before replacing the normal status")
     -- 巡航上限畫成立體按鈕：欄名／數值由按鈕畫，面板不重畫（否則按鈕底色蓋住面板的字）
@@ -2152,7 +2201,7 @@ do
         check(esc ~= nil and type(tick.default) == "boolean" and tick.default == esc.default,
             "tick " .. i .. " (" .. id .. ") has an explicit default equal to the ESC default")
     end
-    checkEq(#section.combos, 12, "MiniMap section has eight setting combos plus four HUD combos")
+    checkEq(#section.combos, 13, "MiniMap section has eight setting combos plus five HUD combos")
     for i, combo in ipairs(section.combos) do
         local id = combo.label:gsub("^UI_MinidoracatAutoDrive_", "")
         local esc = options:getOption(id)
@@ -2235,6 +2284,131 @@ do
     MDAD.Drive.speedInfo, vehicle._speed, MDAD.Drive.REV = savedInfo, savedSpeed, savedRev
     state.active, state.token = savedActive, savedToken
     player._md.MDADHudSpeedBoxX, player._md.MDADHudSpeedBoxY = savedBoxX, savedBoxY
+    panel:refresh(nowMs)
+end
+-- 顯示單位（1123e，Units 選項；2026-11-23 使用者核准，玩家要 mph）：英制只換顯示——現速、巡航上限、檔位鈕與提示、速度明細、
+-- 剩餘路程；診斷行照舊 km/h。切回公制全部還原。70 km/h＝43.496 mph 在取整邊界：現速欄有 0.8 的遲滯。
+-- 違規證明：refresh 的現速不乘 _spK＝(units-speed) 紅；applyLayout 不換 _gearShort＝(units-gear) 紅；refreshSpeedTip 的 n() 不乘
+-- ＝(units-tip) 紅；診斷行跟著換算＝(units-diag) 紅；speedShown 拿掉遲滯＝(units-hyst) 紅；distParts 英尺不取 50＝(units-dist) 紅；
+-- GEAR_MPH 寫錯一格＝(units-gear) 換算紅；speedShown 不貼巡航上限、帶邊沒遲滯、refresh 沒把上限傳進去或手動時也傳＝(units-cap) 紅。
+do
+    local H = MDAD.HUD
+    local units, esc = registeredMiniMapSection.combos[13], options:getOption("Units")
+    check(units.label == "UI_MinidoracatAutoDrive_Units" and #units.items == 2 and units.default == 1
+        and units.items[1] == "UI_MinidoracatAutoDrive_UnitsMetric" and units.items[2] == "UI_MinidoracatAutoDrive_UnitsImperial"
+        and units.tooltip == "UI_MinidoracatAutoDrive_Units_tooltip" and esc ~= nil and esc.default == 1
+        and H.imperial() == false,
+        "(units-opt) the units combo is the last HUD combo, defaults to metric and shares the ESC option")
+    for i, kmh in ipairs({ 30, 50, 70 }) do
+        checkEq(H.GEAR_MPH[i], string.format("%d", math.floor(kmh * H.MPH + 0.5)),
+            "(units-gear) gear " .. i .. " mph label is the rounded conversion of " .. kmh .. " km/h")
+    end
+    local tipFmt = H.etaTipText
+    checkEq(tipFmt(nil, true), nil, "(units-dist) no distance gives no tooltip")
+    checkEq(tipFmt(4, true), "0 ft to go", "(units-dist) feet round to the nearest 50")
+    checkEq(tipFmt(100, true), "350 ft to go", "(units-dist) 328 ft shows as 350 ft")
+    checkEq(tipFmt(152, true), "500 ft to go", "(units-dist) just under 0.095 mi stays in feet")
+    checkEq(tipFmt(153, true), "0.1 mi to go", "(units-dist) what would round to 0.1 mi switches to miles")
+    checkEq(tipFmt(16093.44, true), "10.0 mi to go", "(units-dist) miles keep one decimal")
+    checkEq(tipFmt(995, false), "1.0 km to go", "(units-dist) metric is unchanged when the flag is false")
+    check(H.speedShown(43.4, nil) == 43 and H.speedShown(43.6, 43) == 43 and H.speedShown(43.4, 44) == 44
+        and H.speedShown(44.4, 43) == 44 and H.speedShown(0.3, 5) == 0 and H.speedShown(-12.2, nil) == 12,
+        "(units-hyst) the shown speed keeps the last value within 0.8, moves beyond it, and still reaches 0")
+    -- E2E units-sp 1123：換主題後第一筆 43.6 取整成 44 就黏住，畫面「44 mph／上限 43」
+    check(H.speedShown(43.62, nil, 43.496) == 43 and H.speedShown(43.62, 44, 43.496) == 43
+        and H.speedShown(44.4, 43, 43.496) == 44 and H.speedShown(42.6, 43, 43.496) == 43
+        and H.speedShown(30.6, nil, 43.496) == 31 and H.speedShown(0.2, 43, 43.496) == 0,
+        "(units-cap) near the cruise limit the shown speed reads the limit; elsewhere it rounds as before")
+    -- 帶邊也有遲滯（進 0.6、出 0.8）：車速在上限＋0.75 附近抖時不能每次 refresh 換字
+    check(H.speedShown(44.25, 44, 43.496) == 44 and H.speedShown(44.25, 43, 43.496) == 43
+        and H.speedShown(44.05, 44, 43.496) == 43,
+        "(units-cap) the limit band has hysteresis: enter within 0.6, leave beyond 0.8")
+
+    local savedInfo, savedSpeed, savedRev = MDAD.Drive.speedInfo, vehicle._speed, MDAD.Drive.REV
+    local sActive, sToken, sCap, sGear, sEta, sDist = state.active, state.token, state.cap, state.gear, state.eta, state.etaDist
+    local savedChill = texts.UI_MinidoracatAutoDrive_GearChill
+    texts.UI_MinidoracatAutoDrive_GearChill = "CHILL (%1)"
+    texts.UI_MinidoracatAutoDrive_GearInsane_tooltip = "MAX %1/%2/%3"
+    MDAD.Drive.speedInfo = function() return 120, 120, nil, 18.4, "curve-coast", 25, 104 end
+    MDAD.Drive.REV = "9999z"
+    state.active, state.token, state.cap, state.gear, state.eta, state.etaDist = true, "follow", 70, 1, 600, 3000
+    vehicle._speed = 70
+    options:apply()
+    panel:refresh(nowMs)
+    check(panel._unitText == "km/h" and panel._speedText == "70" and panel._capText == "70"
+        and panel.gearButtons[1].title == "30" and panel.gearButtons[3].title == "70" and panel.cycleButton.title == "30"
+        and panel.gearButtons[1].tooltip == "CHILL (30 km/h)" and panel.etaTip.tooltip == "3.0 km to go",
+        "(units-metric) metric baseline: km/h, 30/50/70 gear keys, kilometres left (" .. tostring(panel._unitText) .. " "
+            .. tostring(panel._speedText) .. "/" .. tostring(panel._capText) .. " " .. tostring(panel.gearButtons[1].tooltip)
+            .. " " .. tostring(panel.etaTip.tooltip) .. ")")
+
+    local saves = optionSaveCalls
+    check(units.set(2) and esc:getValue() == 2 and units.get() == 2 and H.imperial() == true and optionSaveCalls == saves + 1
+        and not units.set(3) and esc:getValue() == 2,
+        "(units-opt) the MiniMap combo writes and persists the shared option; an invalid index is refused")
+    panel:refresh(nowMs)
+    check(panel._unitText == "mph" and panel._speedText == "43" and panel._capText == "43",
+        "(units-speed) imperial: 70 km/h shows as 43 mph for the speed and the cruise limit (" .. tostring(panel._unitText)
+            .. " " .. tostring(panel._speedText) .. "/" .. tostring(panel._capText) .. ")")
+    check(panel.gearButtons[1].title == "19" and panel.gearButtons[2].title == "31" and panel.gearButtons[3].title == "43"
+        and panel.gearButtons[4].title == "MAX" and panel.cycleButton.title == "19"
+        and panel.gearButtons[1].tooltip == "CHILL (19 mph)" and panel.cycleButton.tooltip == "CHILL (19 mph)",
+        "(units-gear) imperial: gear keys read 19/31/43/MAX and the tooltip names the mph cap ("
+            .. tostring(panel.gearButtons[1].title) .. " " .. tostring(panel.gearButtons[1].tooltip) .. ")")
+    check(string.find(tostring(panel.capTip.tooltip), "75 mph|75|--|43 mph|11 mph|CURVE|16|65", 1, true) == 1,
+        "(units-tip) imperial: every number in the speed breakdown is converted (" .. tostring(panel.capTip.tooltip) .. ")")
+    checkEq(panel.etaTip.tooltip, "1.9 mi to go", "(units-dist) imperial: the estimate tooltip shows miles left")
+    vehicle._speed = 70.3 -- 43.68 mph：離巡航上限 0.19，顯示上限的讀數
+    panel._speedN = nil
+    panel:refresh(nowMs)
+    checkEq(panel._speedText .. "/" .. panel._capText, "43/43", "(units-cap) 43.68 mph at a 43 mph limit reads 43, not 44")
+    checkEq(panel.gearButtons[4].tooltip, "MAX 19/31/43", "(units-gear) the MAX tooltip gets the three gear speeds as separate arguments")
+    state.active, state.idleCap = false, 70 -- 手動駕駛（停用態上限同樣 70＝43 mph）：現速照實取整，不貼上限
+    panel._speedN = nil
+    panel:refresh(nowMs)
+    checkEq(panel._speedText .. "/" .. panel._capText, "44/43", "(units-cap) with autodrive off 43.68 mph rounds to 44")
+    state.active, state.idleCap = true, 30
+    panel._speedN = nil
+    panel:refresh(nowMs)
+    state.cap = 100 -- 62 mph：離上限遠，只剩遲滯
+    panel:refresh(nowMs)
+    checkEq(panel._speedText, "43", "(units-hyst) 43.68 mph keeps showing 43")
+    vehicle._speed = 71.5 -- 44.43 mph
+    panel:refresh(nowMs)
+    checkEq(panel._speedText, "44", "(units-hyst) 44.43 mph moves to 44")
+    vehicle._speed = 70.3
+    panel:refresh(nowMs)
+    checkEq(panel._speedText, "44", "(units-hyst) back at 43.68 mph it keeps showing 44")
+    state.cap = 70
+    local tick = registeredMiniMapSection.ticks[11]
+    tick.set(true)
+    panel:refresh(nowMs)
+    checkEq(panel._diagText, "curve-coast 18/70 follow 9999z", "(units-diag) the diag line stays in km/h")
+    tick.set(false)
+    vehicle._speed = 60 -- 37.28 mph：和上限 43 分得開的讀數
+    panel:refresh(nowMs)
+    local drawn = {}
+    local panelDraw = panel.drawText -- 實例欄位（HUD.zoomText），用完放回
+    panel.drawText = function(_, text) drawn[tostring(text)] = true end
+    panel:prerender()
+    panel.drawText = panelDraw
+    check(drawn["mph"] == true and drawn["km/h"] == nil and drawn["37"] == true,
+        "(units-speed) imperial: the panel paints the mph unit next to the converted speed")
+
+    check(units.set(1) and H.imperial() == false, "(units-opt) switching back to metric")
+    vehicle._speed = 70
+    panel:refresh(nowMs)
+    check(panel._unitText == "km/h" and panel._speedText == "70" and panel._capText == "70"
+        and panel.gearButtons[1].title == "30" and panel.cycleButton.title == "30"
+        and panel.gearButtons[1].tooltip == "CHILL (30 km/h)" and panel.etaTip.tooltip == "3.0 km to go"
+        and string.find(tostring(panel.capTip.tooltip), "120 km/h|120|--|70 km/h|18 km/h|CURVE|25|104", 1, true) == 1,
+        "(units-metric) back to metric restores every label (" .. tostring(panel._speedText) .. " "
+            .. tostring(panel.capTip.tooltip) .. ")")
+    texts.UI_MinidoracatAutoDrive_GearChill = savedChill
+    texts.UI_MinidoracatAutoDrive_GearInsane_tooltip = nil
+    MDAD.Drive.speedInfo, vehicle._speed, MDAD.Drive.REV = savedInfo, savedSpeed, savedRev
+    state.active, state.token, state.cap, state.gear, state.eta, state.etaDist = sActive, sToken, sCap, sGear, sEta, sDist
+    options:apply()
     panel:refresh(nowMs)
 end
 check(registeredMiniMapSection.ticks[2].label == "UI_MinidoracatAutoDrive_VoiceEnabled"

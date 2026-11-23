@@ -135,11 +135,11 @@ local function fits(s, w)
     return s ~= nil and textW(UIFont.Small, s) <= w
 end
 
--- 沿路線還剩多遠：滿 1 公里一位小數 km，否則四捨五入到 10 m。
-function F.distText(m)
-    if type(m) ~= "number" or m * 0 ~= 0 or m < 0 then return nil end
-    if m >= 1000 then return string.format("%.1f km", m / 1000) end
-    return string.format("%d m", floor(m / 10 + 0.5) * 10)
+-- 沿路線還剩多遠：數值與進位規則同 HUD 的滑鼠提示（HUD.distParts），這裡只接短單位字。
+F.DIST_UNIT = { "km", "m", "mi", "ft" }
+function F.distText(m, imperial)
+    local text, unit = MDAD.HUD.distParts(m, imperial)
+    return text and (text .. " " .. F.DIST_UNIT[unit]) or nil
 end
 
 local function hideAll(p)
@@ -330,7 +330,8 @@ function F.refresh(p, token, now)
         if AMBER[token] then whyC = T.warn end
         local target = p._targetKmh
         if p._slowCategory and type(target) == "number" and target * 0 == 0 then
-            local slow = getText("UI_MinidoracatAutoDrive_FsdSlowTo", p._statusText, string.format("%d", floor(target + 0.5)))
+            local slow = getText("UI_MinidoracatAutoDrive_FsdSlowTo", p._statusText,
+                string.format("%d", floor(target * p._spK + 0.5)) .. " " .. p._unitText)
             if fits(slow, cw) then why = slow end
         end
     elseif st == "assist" then
@@ -363,7 +364,7 @@ function F.refresh(p, token, now)
     p._fUnit = p._unitText .. " " .. p._capLabel
     -- 預計抵達：剩幾分 | 幾 km | 目的地 | 第 N/M 站；放不下依序丟站數、目的地。分隔字用 ASCII（Kahlua 字面值只收 ASCII，verify 擋）。
     local eta = p._active and p._etaMin ~= nil and p._etaText or nil
-    local dist = eta and F.distText(p._etaDist) or nil
+    local dist = eta and F.distText(p._etaDist, p._imperial) or nil
     local counter = p._tripTotal and p._tripTotal > 1 and p._tripCounter or nil
     local function join(a, b) return a and b and (a .. " | " .. b) or a or b end
     local short = join(eta, dist)

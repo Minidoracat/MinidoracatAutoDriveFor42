@@ -1804,6 +1804,13 @@ do
     D.stop(0, "UI_MinidoracatAutoDrive_VehicleOverturned")
     pump(60000)
     checkEq(field(clipsOf(d0)[1] or "", 7), "fault", "(over) VehicleOverturned handback: a fault clip")
+    nowMs = nowMs + 3600000
+    start()
+    d0 = nowMs
+    drive(3000)
+    D.stop(0, "UI_MinidoracatAutoDrive_BrakeFault")
+    pump(60000)
+    checkEq(field(clipsOf(d0)[1] or "", 7), "fault", "(brake) BrakeFault handback: a fault clip")
     -- 交還併進還開著的 contact 片段（升級成 fault）：kind 是 fault、trig 仍是 contact 那刻、trig2＝交還那刻；
     -- 首行 at 與送出順序都以交還那刻為準（先送出去的是交還前幾秒，不是 contact 前後）
     nowMs = nowMs + 3600000
