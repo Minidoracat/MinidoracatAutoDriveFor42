@@ -344,7 +344,7 @@ do
             and ui.CAPABILITIES and ui.CAPABILITIES.whatsNew and ui.WhatsNew then
         ui.WhatsNew.register({
             modId = "MinidoracatAutoDriveFor42",
-            since = "0.37.0",
+            since = "0.38.0",
             name = "UI_MinidoracatAutoDrive_Options",
             text = "UI_MinidoracatAutoDrive_WhatsNew",
         })
