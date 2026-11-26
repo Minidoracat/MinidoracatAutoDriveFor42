@@ -267,6 +267,7 @@ Animals selected by neither are ignored.
 [h3]When it stops[/h3]
 [list]
 [*] [b]Blocked[/b]: a person, animal, wall or another vehicle in the way.
+[*] [b]Someone else's safehouse[/b]: it stops outside a safehouse you can't enter (not yours and you're not a member), and Go to a spot inside one won't start. A car already parked inside can still be called out; admins, members or servers that allow entering are not affected.
 [*] [b]Someone gets in[/b]: someone takes a seat in it, or you get into another vehicle.
 [*] [b]Too far or offline[/b]: you leave the summon range or disconnect.
 [*] [b]Vehicle state[/b]: engine off, battery dead or the Autopilot Module removed.
