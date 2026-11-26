@@ -20652,7 +20652,7 @@ end
 function Drive.summonShDepth(sm, x, y, fx, fy, upd)
     local list = sm.shList
     if not sm.shIn then
-        local d, r = Drive.summonShSum(list, x, y, fx, fy, sm.shHL, sm.shHW)
+        local d, r = Drive.summonShSum(list, x, y, fx, fy, sm.shHL, sm.shHW, nil)
         return d, r, 0, nil
     end
     local d, r = 0, nil
@@ -20771,7 +20771,7 @@ function Drive.summonShHit(sm, v)
         repeat
             t = t + step
             if t > len then t = len end
-            d, r, o, ro = Drive.summonShDepth(sm, cx + ux * t, cy + uy * t, fx, fy)
+            d, r, o, ro = Drive.summonShDepth(sm, cx + ux * t, cy + uy * t, fx, fy, nil)
             hit = (d > lim and r) or (o > limO and ro) or nil
         until hit or t >= len
         need = t
@@ -21116,7 +21116,7 @@ function Drive.summonTail(sm, vehicle, base)
     local pts = road.pts
     local n = #pts
     local ex, ey = pts[n - 1], pts[n]
-    local tx, ty, pX, pY = Drive.summonSpot(sm, vehicle, ex, ey, sm.qx, sm.qy, TUNE.SUMMON_TAIL_M)
+    local tx, ty, pX, pY = Drive.summonSpot(sm, vehicle, ex, ey, sm.qx, sm.qy, TUNE.SUMMON_TAIL_M, nil)
     if tx then
         sm.route, sm.parkX, sm.parkY = Drive.summonAppend(road, pX, pY), tx, ty
     else
