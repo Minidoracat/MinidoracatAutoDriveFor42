@@ -60,7 +60,7 @@ MDAD.SUMMON_CODES = {
     ARRIVED = true, CANCELLED = true, TAKEOVER = true, OCCUPIED = true, BOARDED = true, DEAD = true, LEFT = true,
     TIMEOUT = true, FAR = true, TOWING = true, AUTH = true, GONE = true, ENGINE = true, MODULE = true, NAV = true,
     ENGINE_START = true, BLOCKED = true, STUCK = true, ZOMBIES = true, PLAYER = true, ANIMAL = true, AREA = true,
-    NO_ROUTE = true, ROUTE_FAR = true, FAULT = true, BUSY = true,
+    NO_ROUTE = true, ROUTE_FAR = true, FAULT = true, BUSY = true, SAFEHOUSE = true,
 }
 
 MDAD.FAIL_GENERIC = "UI_MinidoracatAutoDrive_InstallFailed"
@@ -849,7 +849,7 @@ function MinidoracatAutoDriveAPI.hasNavDevice(playerNum)
     return hasNavDevice(player, playerNum, true) == true
 end
 
--- ===== 召喚 API（summonApiVersion = 1；契約唯一來源就是這一段）=====
+-- ===== 召喚 API（summonApiVersion = 2；契約唯一來源就是這一段）=====
 -- 呼叫端偵測 type(MinidoracatAutoDriveAPI) == "table"、summonApiVersion 是 number 且 >= 1、要用的函式是 function。
 -- 版本只增不減，改語意就加版本。對外文字不點名呼叫端。三種召喚：mode="come"（到我這裡，預設）、"target"（開到指定地點，
 -- 帶地面座標 x, y）、"dumb"（前進／後退：直線、不轉向、不取路線；dir=1 前進、-1 倒車）。
@@ -857,8 +857,9 @@ end
 --     opts.startEngine＝true 時由本 MOD 代為發動（呼叫端擔保有鑰匙）；opts.onEnd(vehicle, code, player)＝結束回呼，一定在
 --     startSummon 回傳之後、每趟一次（車已卸載＝GONE 時 vehicle 為 nil；召喚者已離線時 player 為 nil）。檢查順序固定：①格式
 --     ②召喚者（活著、徒步、身分）③沙盒距離（come／dumb 看車、
---     target 另看目標）④車：沒人、沒拖、沒在動、沒人持有物理權限、沒在召喚、12V、模組、導航裝置（dumb 不看）⑤引擎在轉或
---     startEngine ⑥寫入 session。
+--     target 另看目標）③b target 的目標在召喚者不能進的安全屋（SummonSafehouse；v2）④車：沒人、沒拖、沒在動、沒人持有
+--     物理權限、沒在召喚、12V、模組、導航裝置（dumb 不看）⑤引擎在轉或 startEngine ⑥寫入 session。
+--     行進中車身會壓進召喚者不能進的安全屋＝在線外停、碼 SAFEHOUSE（v2；三種召喚都適用）。
 --   伺服器／SP：stopSummon(vehicle, code)（code 預設 CANCELLED）→ boolean；summonInfo(vehicle) → {by, phase, startedMs,
 --     mode} 或 nil（phase：starting＝發動引擎／交權限中、driving＝召喚者的客戶端在開）。MP 下收掉時車還在動，物理權限
 --     留在召喚者客戶端等車停住（最多 Summon.RELEASE_MS＝3 秒）才交還，這段時間對同一台車 startSummon 回 SummonBusy。
@@ -870,9 +871,29 @@ end
 --   兩端：summonRange() → 沙盒 SummonMaxDistance（格，0＝關閉）。
 -- 停止碼見 MDAD.SUMMON_CODES；起步失敗的鍵是 UI_MinidoracatAutoDrive_Summon*，以及沿用的 EngineOff／NeedModule／
 -- NeedGPS（或 NeedGPSOrWatch）／NavApiMissing。
-MinidoracatAutoDriveAPI.summonApiVersion = 1
+MinidoracatAutoDriveAPI.summonApiVersion = 2
 MDAD.SUMMON_RANGE_MAX = 64
 MDAD.KEY_SUMMON_INVALID = "UI_MinidoracatAutoDrive_SummonInvalid"
+MDAD.KEY_SUMMON_SAFEHOUSE = "UI_MinidoracatAutoDrive_SummonSafehouse"
+
+-- (x, y) 落在 player 不能進的安全屋＝true（2026-11-26；startSummon ③b 與客戶端 canSummon 共用）。權限照原版
+-- SafeHouse.isSafehouseAllowTrepass（SafeHouse.java:224-243：管理員能力、SafehouseAllowTrepass、屋主在線時停用、戰爭都在內）；
+-- 它對 nil 格回 true＝放行（:224-228），所以屋內的格子沒載入時這裡當成不能進，第二回傳 true 標出這種（log 分得出）。
+-- 單機沒有安全屋＝清單空、回 false。
+function MDAD.summonSafehouseAt(player, x, y)
+    local list = SafeHouse and SafeHouse.getSafehouseList and SafeHouse.getSafehouseList()
+    local n = list and list:size() or 0
+    for i = 0, n - 1 do
+        local h = list:get(i)
+        if x >= h:getX() and x < h:getX2() and y >= h:getY() and y < h:getY2() then -- 含起點不含終點（SafeHouse.java:628-634）
+            local cell = getCell()
+            local sq = cell and cell:getGridSquare(math.floor(x), math.floor(y), 0)
+            if not sq then return true, true end
+            return not SafeHouse.isSafehouseAllowTrepass(sq, player), false
+        end
+    end
+    return false
+end
 
 function MDAD.summonRange()
     local v = MDAD.sandbox("SummonMaxDistance", MDAD.SUMMON_RANGE_MAX)

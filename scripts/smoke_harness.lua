@@ -37652,6 +37652,27 @@ function getPlayerByOnlineID(id)
     end
     return nil
 end
+-- SafeHouse.getSafehouseList()＝SafeHouse.java:652（ArrayList）；isSafehouseAllowTrepass(sq, player)＝:224-243（nil 格或 nil 玩家
+-- 回 true＝放行，同引擎）。drive.shHouses＝假安全屋 {x, y, w, h, allow}（allow＝true 召喚者能進；含起點不含終點）；
+-- drive.shListN＝getSafehouseList 呼叫數。格子座標由 drive.sumFix 補上 getX／getY。
+drive.shHouses, drive.shListN = {}, 0
+function SafeHouse.getSafehouseList()
+    drive.shListN = drive.shListN + 1
+    local hs = drive.shHouses
+    return { size = function() return #hs end, get = function(_, i)
+        local h = hs[i + 1]
+        return { getX = function() return h.x end, getY = function() return h.y end,
+            getX2 = function() return h.x + h.w end, getY2 = function() return h.y + h.h end }
+    end }
+end
+function SafeHouse.isSafehouseAllowTrepass(sq, player)
+    if sq == nil or player == nil then return true end
+    local x, y = sq:getX(), sq:getY()
+    for _, h in ipairs(drive.shHouses) do
+        if x >= h.x and x < h.x + h.w and y >= h.y and y < h.y + h.h then return h.allow == true end
+    end
+    return true
+end
 -- 共用 fixture：召喚者 drive.sp（徒步、有座標）、車 drive.sv（補召喚用的 BaseVehicle 方法：_npid＝getNetPlayerId、
 -- authorizationServerOnSeat 只在 -1 時給、authorizationChanged、isRemovedFromWorld、hasPassenger、tryStartEngine、shutOff、
 -- crash）、草地世界（室外、不在房間）、nav API v13（requestRouteFrom／requestDetourFrom 由 drive.nav.from* 控制）。
@@ -37667,10 +37688,14 @@ function drive.sumFix(opts)
     setSandbox({ NeedItemForNav = false, NeedItemForAutoDrive = false, AutoDriveMaxSpeed = 120, RightLaneBias = 0,
         SummonMaxDistance = opts.range or 64 })
     drive.fillWorld(-30, 90, -30, 30)
-    for _, sq in pairs(drive.world) do
+    for k, sq in pairs(drive.world) do
         sq.isOutside = function() return sq._indoor ~= true end
         sq.getRoom = function() if sq._indoor then return {} end return nil end
+        local gx = math.floor((k + 50000) / 100000) -- 鍵＝x*100000+y，|y|<50000
+        local gy = k - gx * 100000
+        sq.getX, sq.getY = function() return gx end, function() return gy end
     end
+    drive.shHouses = {}
     drive.cellVehicles = {}
     drive.cell.getChunkMap = function() return { getWidthInTiles = function() return drive.cmW or 152 end } end
     local p = drive.sp
@@ -37807,7 +37832,7 @@ end
 function drive.scenarioSummonGates()
     scenario("召喚起步閘門（G1–G8）：伺服器 startSummon 的固定檢查順序、拒絕時零呼叫、等路線、遠端玩家")
     local Api, Dr = MinidoracatAutoDriveAPI, MDAD.Drive
-    checkEq(Api.summonApiVersion, 1, "summonApiVersion＝1（三種召喚一起上）")
+    checkEq(Api.summonApiVersion, 2, "summonApiVersion＝2（1126a 起：③b 目標在不能進的安全屋、停止碼 SAFEHOUSE）")
     checkEq(Api.summonRange(), 64, "沙盒預設 64 格")
     -- G2：召喚者坐在車上
     local p, v = drive.sumFix()
@@ -39231,6 +39256,497 @@ function drive.scenarioSummonDumbIntegral()
     Dr.summonStopLocal(0)
 end
 drive.scenarioSummonDumbIntegral()
+
+-- 召喚者不能進的安全屋（1126a；E2E adsh-1126a 重現進得去）：伺服器 ③b 拒 target 目標在屋內（格子沒載入也拒）、canSummon 同鍵
+-- 且快取；每幀守門（Drive.summonSafehouse）沿車速掃到煞停距離、碼 SAFEHOUSE；棘輪只擋往裡開；起步在屋裡＝出屋模式（起點屋用起步
+-- 車頭方向、多 1m 才擋；其他屋照常）；名單舊就重問；停車點不壓屋。
+-- 違規證明：拿掉 start 那行＝(SH-srv) 紅；summonKeep 不呼叫守門＝(SH-dumb)(SH-come) 紅；去掉 v²/2a＝(SH-come) 紅；base
+-- 固定 0＝(SH-narrow) 紅、固定用現在深度＝(SH-ratchet) 紅；命中不重問＝(SH-stale) 紅；summonLineClear 不查屋＝(SH-spot) 紅；SUMMON_CODES 不加＝(SH-mp) 紅；
+-- 掃描截 20m 或名單半徑固定 24＝(SH-weak) 紅；步長固定＝(SH-slip) 紅；步長缺口用整個 PAD＝(SH-slip-mid) 紅；無效幾何用替代尺寸或
+-- 不套腳本重心＝(SH-long) 紅；停車預檢不套重心＝(SH-com) 紅；沒有出屋模式＝(SH-turn) 紅；出屋判定含 PAD＝(SH-pad) 紅；出屋判定用導航
+-- 尺寸＝(SH-narrow) 紅；出屋模式比車心深度＝(SH-corner)(SH-slide) 紅；出屋模式不分起點屋＝(SH-two) 紅；其他屋用起步車頭方向＝(SH-two-turn) 紅；
+-- 起點屋不分屋比＝(SH-two-home) 紅；屋內出發的直線不放寬或不標起點屋，或完全不查起點屋＝(SH-out-direct) 紅；預測也更新起點屋最淺＝(SH-out-fast) 紅；
+-- 出屋時把其他屋的深度併進新基準＝(SH-exit-b) 紅；名單空後重認起點屋＝(SH-empty-mid) 紅；出屋模式起點屋不預測或沒有寬限＝(SH-ratchet) 紅；
+-- end 欄位不看碼＝(SH-stale-end) 紅；超距檢查排在屋後＝(SH-pre) 紅；命中不讀車速＝(SH-push) 紅；kind 不看 unl 或沒有 _in＝(SH-kind) 紅。
+function drive.scenarioSummonSafehouse()
+    scenario("召喚不進不能進的安全屋（1126a）：target 目標在屋內起步就拒、行進中預測煞停 SAFEHOUSE、棘輪、停車點避開")
+    local Dr, Api = MDAD.Drive, MinidoracatAutoDriveAPI
+    local KEY = "UI_MinidoracatAutoDrive_SummonSafehouse"
+    -- (SH-sat) 車身深度：軸對齊、貼邊＝0、45°
+    local R = { { x = 0, y = 0, w = 10, h = 10 } }
+    checkNear(Dr.summonShSum(R, -1.8, 5, 1, 0, 2.3, 1), 0.5, 1e-9, "(SH-sat) 車頭壓進 0.5m")
+    checkEq(Dr.summonShSum(R, -2.3, 5, 1, 0, 2.3, 1), 0, "(SH-sat) 車頭剛好貼邊＝0")
+    checkEq(Dr.summonShSum(R, 12.3, 5, -1, 0, 2.3, 1), 0, "(SH-sat) 車頭貼 x+w 那一邊＝0")
+    checkNear(Dr.summonShSum(R, -1.5, 5, math.sqrt(0.5), math.sqrt(0.5), 2, 1), 2.1213203 - 1.5, 1e-6,
+        "(SH-sat) 45°：車角壓進 0.62m（用車心點會是 0）")
+    -- (SH-decel) 減速度照煞車力縮放
+    checkEq(Dr.summonShDecel({ vehicleProfile = { brakingForce = 80, mass = 1000 } }), 8, "(SH-decel) 一般車取上限 8")
+    checkNear(Dr.summonShDecel({ vehicleProfile = { brakingForce = 40, mass = 1000 } }), 6, 1e-9, "(SH-decel) 煞車力一半＝6")
+    checkEq(Dr.summonShDecel({ vehicleProfile = { brakingForce = 0, mass = 1000 } }), 0.5, "(SH-decel) 煞車力 0＝下限 0.5")
+    checkEq(Dr.summonShDecel({ vehicleProfile = {} }), 8, "(SH-decel) 讀不到＝8")
+
+    -- (SH-srv) 伺服器 ③b：target 目標在不能進的屋內
+    local p, v = drive.sumFix({ px = -6, py = 4 })
+    drive.shHouses = { { x = 8, y = -5, w = 6, h = 10 } }
+    clientFlag, serverFlag = false, false
+    local ok, why = drive.sumStart({ mode = "target", x = 10.5, y = 0.5 })
+    checkTrue(ok == false and why == KEY, "(SH-srv) 目標在屋內：拒絕、SummonSafehouse（實得 " .. tostring(why) .. "）")
+    checkTrue(v._auth == 0 and v._started == 0 and not Dr.isActive(0), "(SH-srv) 被拒：對車零呼叫")
+    ok, why = drive.sumStart({ mode = "target", x = 14.5, y = 0.5 })
+    checkTrue(ok == true, "(SH-srv) 目標在屋外（x+w 那一格）：放行")
+    Dr.summonStopLocal(0)
+    p, v = drive.sumFix({ px = -6, py = 4 })
+    drive.shHouses = { { x = 70, y = -5, w = 6, h = 10 } }
+    ok, why = drive.sumStart({ mode = "target", x = 72.5, y = 0.5 })
+    checkEq(why, "UI_MinidoracatAutoDrive_SummonTooFar", "(SH-srv) 同時超距：③ 先，TooFar")
+    drive.shHouses = { { x = 8, y = -5, w = 6, h = 10 } }
+    v._pass = true
+    ok, why = drive.sumStart({ mode = "target", x = 10.5, y = 0.5 })
+    checkEq(why, KEY, "(SH-srv) 同時車上有人：③b 在 ④ 前，SummonSafehouse")
+    v._pass = nil
+    drive.shHouses[1].allow = true
+    ok = drive.sumStart({ mode = "target", x = 10.5, y = 0.5 })
+    checkTrue(ok == true, "(SH-srv) 召喚者是成員：放行")
+    Dr.summonStopLocal(0)
+    p, v = drive.sumFix({ px = -6, py = 4 })
+    drive.shHouses = { { x = 8, y = -5, w = 6, h = 10, allow = true } }
+    drive.world[10 * 100000 + 0] = nil
+    ok, why = drive.sumStart({ mode = "target", x = 10.5, y = 0.5 })
+    checkTrue(ok == false and why == KEY, "(SH-srv) 屋內目標格沒載入：當不能進（引擎對 nil 格放行）")
+    -- (SH-pre) canSummon 同鍵、500ms 快取
+    p, v = drive.sumFix({ px = -6, py = 4 })
+    drive.shHouses = { { x = 8, y = -5, w = 6, h = 10 } }
+    nowMs = nowMs + 1000
+    local okc, whyc = Api.canSummon(0, v, { mode = "target", x = 10.5, y = 0.5 })
+    checkTrue(okc == false and whyc == KEY, "(SH-pre) canSummon：SummonSafehouse")
+    local n0 = drive.shListN
+    Api.canSummon(0, v, { mode = "target", x = 10.5, y = 0.5 })
+    checkEq(drive.shListN, n0, "(SH-pre) 500ms 內同一點：不再讀安全屋清單")
+    nowMs = nowMs + 600
+    Api.canSummon(0, v, { mode = "target", x = 10.5, y = 0.5 })
+    checkTrue(drive.shListN > n0, "(SH-pre) 過期：重讀")
+    p, v = drive.sumFix({ px = -6, py = 4 })
+    drive.shHouses = { { x = 8, y = -5, w = 6, h = 10 } }
+    v._x = 80
+    nowMs = nowMs + 1000
+    okc, whyc = Api.canSummon(0, v, { mode = "target", x = 10.5, y = 0.5 })
+    checkEq(whyc, "UI_MinidoracatAutoDrive_SummonTooFar", "(SH-pre) 車超距、目標在屋內：同伺服器先回 TooFar")
+
+    -- (SH-dumb) 前進／後退：屋在車頭（車尾）外 3.7m（車身＋PAD 2.3），5 km/h 掃描約 0.56m
+    for _, dir in ipairs({ 1, -1 }) do
+        local tag = "(SH-dumb dir=" .. dir .. ") "
+        p, v = drive.sumFix({ px = dir > 0 and -6 or 6, py = 4 })
+        drive.shHouses = { dir > 0 and { x = 6, y = -5, w = 6, h = 10 } or { x = -12, y = -5, w = 6, h = 10 } }
+        clientFlag, serverFlag = false, false
+        drive.sumStart({ mode = "dumb", dir = dir })
+        v._speed = 5 * dir
+        v._x = 2.9 * dir
+        drive.sumTick()
+        checkTrue(Dr.summons[0] ~= nil, tag .. "離線 0.24m：照開")
+        v._x = 3.3 * dir
+        drive.sumTick()
+        checkEq(Dr.summons[0], nil, tag .. "會壓進 0.16m：停")
+        v._speed = 0
+        drive.sumTick()
+        checkEq(Api.summonState(0) and Api.summonState(0).code, "SAFEHOUSE", tag .. "碼 SAFEHOUSE")
+    end
+    -- (SH-empty) 沒有不能進的屋：不讀車速
+    p, v = drive.sumFix({ px = -6, py = 4 })
+    drive.shHouses = { { x = 6, y = -5, w = 6, h = 10, allow = true } }
+    clientFlag, serverFlag = false, false
+    drive.sumStart({ mode = "dumb", dir = 1 })
+    v._speed, v._x = 5, 3.3
+    driveReset(v)
+    drive.sumTick(3)
+    checkTrue(Dr.summons[0] ~= nil, "(SH-empty) 召喚者是成員：照開")
+    checkEq(drive.calls.getLinearVelocity, 0, "(SH-empty) 名單空：零 getLinearVelocity")
+    Dr.summonStopLocal(0)
+    -- (SH-empty-mid) 起步附近沒有不能進的屋，途中車停在屋裡時被撤權：名單第一次出現這間屋，不算起步在屋裡、直接擋
+    p, v = drive.sumFix({ px = -6, py = 4 })
+    drive.shHouses = {}
+    clientFlag, serverFlag = false, false
+    drive.sumStart({ mode = "dumb", dir = 1 })
+    v._speed = 0
+    drive.sumTick()
+    drive.shHouses = { { x = -1, y = -5, w = 10, h = 10 } }
+    nowMs = nowMs + 600
+    drive.sumTick()
+    checkEq(Dr.summons[0], nil, "(SH-empty-mid) 途中被撤權的屋：不給出屋寬限，擋")
+    -- (SH-ratchet) 車身起始壓在屋內 1.3m（屋從 x=1 起）
+    p, v = drive.sumFix({ px = 6, py = 4 })
+    drive.shHouses = { { x = 1, y = -5, w = 10, h = 10 } }
+    clientFlag, serverFlag = false, false
+    drive.sumStart({ mode = "dumb", dir = -1 })
+    v._speed = -5
+    for _, x in ipairs({ 0, -0.5, -1.0 }) do
+        v._x = x
+        nowMs = nowMs + 100
+        drive.sumTick()
+    end
+    checkTrue(Dr.summons[0] ~= nil, "(SH-ratchet) 往外開：不擋")
+    v._speed, v._x = 0, 0.5
+    nowMs = nowMs + 100
+    drive.sumTick()
+    checkEq(Dr.summons[0], nil, "(SH-ratchet) 退到 0.3m 後又被推回 1.8m（多過 1m）：擋（基準是這趟最淺）")
+    p, v = drive.sumFix({ px = -6, py = 4 })
+    drive.shHouses = { { x = 1, y = -5, w = 10, h = 10 } }
+    clientFlag, serverFlag = false, false
+    drive.sumStart({ mode = "dumb", dir = 1 })
+    v._speed = 5
+    drive.sumTick()
+    checkTrue(Dr.summons[0] ~= nil, "(SH-ratchet) 起始在屋內、往裡開：掃描 0.56m 沒超過 1m 寬限，第一幀不擋")
+    v._x = 0.4
+    nowMs = nowMs + 100
+    drive.sumTick()
+    checkTrue(Dr.summons[0] ~= nil, "(SH-ratchet) 往裡 0.4m（掃描端 0.96m）：照開")
+    v._x = 0.5
+    nowMs = nowMs + 100
+    drive.sumTick()
+    checkEq(Dr.summons[0], nil, "(SH-ratchet) 往裡 0.5m（掃描端 1.06m，超過 1m 寬限）：擋")
+    -- (SH-stale) 名單舊時命中：重問，權限已改成可進＝照開
+    p, v = drive.sumFix({ px = -6, py = 4 })
+    drive.shHouses = { { x = 6, y = -5, w = 6, h = 10 } }
+    clientFlag, serverFlag = false, false
+    drive.sumStart({ mode = "dumb", dir = 1 })
+    v._speed = 5
+    drive.sumTick()
+    drive.shHouses[1].allow = true
+    nowMs = nowMs + 100
+    v._x = 3.3
+    drive.sumTick()
+    checkTrue(Dr.summons[0] ~= nil, "(SH-stale) 剛被加進成員：重問後照開")
+    Dr.summonStopLocal(0)
+    -- (SH-side) 平行屋邊 1m 開過：不擋
+    p, v = drive.sumFix({ px = -6, py = 4 })
+    drive.shHouses = { { x = -10, y = 2, w = 40, h = 10 } }
+    clientFlag, serverFlag = false, false
+    drive.sumStart({ mode = "dumb", dir = 1 })
+    v._speed = 5
+    for _, x in ipairs({ 1, 3, 5 }) do
+        v._x = x
+        nowMs = nowMs + 100
+        drive.sumTick()
+    end
+    checkTrue(Dr.summons[0] ~= nil, "(SH-side) 側邊 1m 平行開過：不擋")
+    Dr.summonStopLocal(0)
+    -- (SH-unl) 名單標出格子沒載入的屋（結束事件 kind＝unloaded）
+    p, v = drive.sumFix({ px = -6, py = 4 })
+    drive.shHouses = { { x = 6, y = -5, w = 6, h = 10, allow = true } }
+    local L = Dr.summonShList(p, 3.3, 0, 30)
+    checkEq(#L, 0, "(SH-unl) 成員、格子在：不列")
+    drive.world[6 * 100000 + 0] = nil
+    L = Dr.summonShList(p, 3.3, 0, 30)
+    checkTrue(L[1] and L[1].unl == true, "(SH-unl) 屋內最近一格沒載入：列入且標 unl")
+    drive.shHouses[1].allow = nil
+    drive.world[6 * 100000 + 0] = { getX = function() return 6 end, getY = function() return 0 end }
+    L = Dr.summonShList(p, 3.3, 0, 30)
+    checkTrue(L[1] and L[1].unl == nil, "(SH-unl) 沒權限、格子在：不標 unl")
+    -- (SH-long) 車長 14m 超出 VehicleProfile 範圍（被換成 4.4m 替代值、不給 bodyCenter）、腳本重心往前 2m：守門照引擎用腳本外框與
+    -- 重心，車頭在 9m
+    p, v = drive.sumFix({ px = -6, py = 4 })
+    v:getScript():getExtents():set(1.8, 1, 14)
+    v:getScript():getCenterOfMassOffset():set(0, 0, 2)
+    drive.shHouses = { { x = 9.5, y = -5, w = 6, h = 10 } }
+    clientFlag, serverFlag = false, false
+    drive.sumStart({ mode = "dumb", dir = 1 })
+    v._speed = 5
+    drive.sumTick()
+    checkEq(Dr.summons[0], nil, "(SH-long) 屋在 9.5m：停（用替代 4.4m 或車心在原點都會漏）")
+    -- (SH-slip) 側滑 45°、10 km/h：車角在步長 1m 的兩個姿態之間擦過屋角，縮步長才看得到
+    p, v = drive.sumFix({ px = -6, py = -4 })
+    v._x, v._y = 2.3, -1.0 -- 車身含 PAD：x∈[0,4.6]、y∈[-2,0]
+    drive.shHouses = { { x = -10, y = 0.2, w = 10.5, h = 10 } }
+    clientFlag, serverFlag = false, false
+    drive.sumStart({ mode = "dumb", dir = 1 })
+    v._speed, v._vlat = 7.071, 7.071
+    drive.sumTick()
+    checkEq(Dr.summons[0], nil, "(SH-slip) 側滑擦過屋角：停")
+    v._vlat = nil
+    -- (SH-turn) 平行停在屋的外框裡（車心離邊 1m）、轉 5° 再轉到 60° 開出：車尾外甩讓車身深度變大（60° 時多 1.3m），不算往裡開
+    p, v = drive.sumFix({ px = -6, py = -4 })
+    drive.shHouses = { { x = -10, y = 0, w = 40, h = 14 } }
+    v._y = 1
+    clientFlag, serverFlag = false, false
+    drive.sumStart({ mode = "dumb", dir = 1 })
+    v._speed = 5
+    drive.sumTick()
+    local c5, s5 = math.cos(math.rad(5)), math.sin(math.rad(5))
+    v._x, v._y, v._fwdX, v._fwdY = 1, 0.95, c5, -s5
+    nowMs = nowMs + 100
+    drive.sumTick()
+    checkTrue(Dr.summons[0] ~= nil, "(SH-turn) 起步在屋裡、轉出 5°：不擋")
+    v._x, v._y, v._fwdX, v._fwdY = 1.5, 0.8, 0.5, -math.sqrt(0.75)
+    nowMs = nowMs + 100
+    drive.sumTick()
+    checkTrue(Dr.summons[0] ~= nil, "(SH-turn) 轉到 60°：不擋")
+    v._x, v._y, v._fwdX, v._fwdY = 3, -3, 1, 0
+    nowMs = nowMs + 100
+    drive.sumTick()
+    v._y = -0.5
+    nowMs = nowMs + 100
+    drive.sumTick()
+    checkEq(Dr.summons[0], nil, "(SH-turn) 車身出屋後回到一般模式：再壓回 0.5m 就擋")
+    -- 以下直接驗 Drive.summonShHit（不經召喚流程）：車身半長 2.2、半寬 0.9（shRL/shRW），各加 PAD 0.1
+    local function shSm(rects)
+        return { shList = rects, shHL = 2.3, shHW = 1.0, shRL = 2.2, shRW = 0.9, shComX = 0, shComZ = 0, vehicleProfile = {} }
+    end
+    -- (SH-pad) 實車身離屋邊 0.06m、只有 PAD 壓到：不是出屋模式；車頭朝外轉 5°、車尾真壓進 0.09m 就擋
+    p, v = drive.sumFix({ px = -6, py = 4 })
+    local hs = shSm({ { x = -10, y = 0, w = 40, h = 14 } })
+    v._x, v._y, v._fwdX, v._fwdY, v._speed = 0, -0.96, 1, 0, 0
+    checkFalse(Dr.summonShHit(hs, v), "(SH-pad) 只有 PAD 壓到：不擋")
+    checkEq(hs.shIn, false, "(SH-pad) 只差 PAD：不算起步在屋裡")
+    v._y, v._fwdX, v._fwdY = -1.0, c5, -s5
+    checkTrue(Dr.summonShHit(hs, v), "(SH-pad) 轉出 5°、車尾真壓進 0.09m：擋")
+    -- (SH-corner) 車側壓進屋角外框 0.4m、沿屋邊開過：車身深度沒變，不擋（比車心會誤擋）
+    hs = shSm({ { x = 0, y = -20, w = 20, h = 20 } })
+    v._x, v._y, v._fwdX, v._fwdY, v._speed = -1.5, 0.5, 1, 0, 0
+    checkFalse(Dr.summonShHit(hs, v), "(SH-corner) 起步：不擋")
+    checkEq(hs.shIn, true, "(SH-corner) 實車身壓進 0.4m：出屋模式")
+    v._x, v._speed = 2, 5
+    checkFalse(Dr.summonShHit(hs, v), "(SH-corner) 沿屋邊開過屋角：不擋")
+    -- (SH-slide) 屋角外起步、車頭不轉，沿屋邊平移滑進 1.1m：車心深度變淺（更像在外），車身變深 1.08m＝擋
+    hs = shSm({ { x = 0, y = 0, w = 10, h = 10 } })
+    v._x, v._y, v._speed = -1, -0.8, 0
+    checkFalse(Dr.summonShHit(hs, v), "(SH-slide) 起步：不擋")
+    v._x, v._y = -1.02, 0.3
+    checkTrue(Dr.summonShHit(hs, v), "(SH-slide) 平移滑進：擋")
+    -- (SH-two) 起步在屋 A 的外框裡、30 km/h 沿屋邊開向前方的屋 B：B 照一般預測，車頭停在 B 外
+    hs = shSm({ { x = -30, y = 0, w = 40, h = 14 }, { x = 12, y = -6, w = 18, h = 20 } })
+    v._x, v._y, v._speed = 0, 1, 0
+    checkFalse(Dr.summonShHit(hs, v), "(SH-two) 起步：不擋")
+    v._x, v._speed = 3.9, 30
+    checkFalse(Dr.summonShHit(hs, v), "(SH-two) 掃描端離 B 0.33m：照開")
+    v._x = 4.6
+    checkTrue(Dr.summonShHit(hs, v) and hs.shX == 12, "(SH-two) 掃描端壓進 B 0.37m：擋，命中 B")
+    checkEq(hs.shKind, "trespass_in", "(SH-two) kind trespass_in")
+    -- (SH-two-turn) 起步在屋 A 的外框裡，原地轉 60° 讓車頭伸進旁邊的屋 B（不是起點屋）0.49m：B 用現在的車頭方向量＝擋
+    hs = shSm({ { x = -30, y = 0, w = 40, h = 14 }, { x = -5, y = -8, w = 15, h = 7 } })
+    v._x, v._y, v._fwdX, v._fwdY, v._speed = 0, 1, 1, 0, 0
+    checkFalse(Dr.summonShHit(hs, v), "(SH-two-turn) 起步：不擋")
+    v._fwdX, v._fwdY = 0.5, -math.sqrt(0.75)
+    checkTrue(Dr.summonShHit(hs, v) and hs.shX == -5, "(SH-two-turn) 車頭轉進 B：擋，命中 B")
+    v._fwdX, v._fwdY = 1, 0
+    -- (SH-out-fast) 起點屋深處 30 km/h 倒車出屋：預測端很淺，但起點屋的最淺只認目前姿態（預測也更新會讓下一幀誤擋）
+    hs = shSm({ { x = 1, y = -5, w = 10, h = 10 } })
+    v._x, v._y, v._speed = 3, 0, -30
+    checkFalse(Dr.summonShHit(hs, v), "(SH-out-fast) 起步：不擋")
+    v._x = 2.9
+    checkFalse(Dr.summonShHit(hs, v), "(SH-out-fast) 往外 0.1m：不擋")
+    -- (SH-kind) 起點屋格子沒載入、往裡 1.1m：kind unloaded_in
+    hs = shSm({ { x = 1, y = -5, w = 10, h = 10, unl = true } })
+    v._x, v._y, v._speed = 0, 0, 0
+    checkFalse(Dr.summonShHit(hs, v), "(SH-kind) 起步：不擋")
+    v._x = 1.1
+    checkTrue(Dr.summonShHit(hs, v), "(SH-kind) 往裡 1.1m：擋")
+    checkEq(hs.shKind, "unloaded_in", "(SH-kind) kind unloaded_in")
+    -- (SH-slip-mid) 側滑 45°、10 km/h：車角真壓進屋角 0.01m 的位置落在缺口 0.1m 的兩個細步正中間（步長只用 PAD 會漏）
+    hs = shSm({ { x = 0.3221 - 10.5, y = 0.1021, w = 10.5, h = 10 } })
+    v._x, v._y, v._speed, v._vlat = 2.3, -1.0, 7.071, 7.071
+    checkTrue(Dr.summonShHit(hs, v), "(SH-slip-mid) 擦過屋角：擋")
+    v._vlat = nil
+    -- (SH-narrow) 窄車（腳本寬 0.28m，導航半寬有 0.4 下限）車心離屋邊 0.30m 平行停：實車身在屋外，不是出屋模式
+    p, v = drive.sumFix({ px = -6, py = -4 })
+    v:getScript():getExtents():set(0.28, 1, 4.4)
+    drive.shHouses = { { x = -10, y = 0, w = 40, h = 14 } }
+    v._y = -0.30
+    clientFlag, serverFlag = false, false
+    drive.sumStart({ mode = "dumb", dir = 1 })
+    v._speed = 0
+    drive.sumTick()
+    local sn = Dr.summons[0]
+    checkTrue(sn ~= nil and sn.shIn == false and sn.shHW > sn.shRW + 0.3,
+        "(SH-narrow) 只有導航外框壓到：不擋、不算起步在屋裡（實得 shIn " .. tostring(sn and sn.shIn) .. "）")
+    Dr.summonStopLocal(0)
+    -- (SH-two-home) 車身跨在相隔 1m 的兩間屋之間（兩間都是起點屋、各壓 1.8m）：往 B 平移 1.2m，深度和不變但 B 多壓 1.2m＝擋
+    hs = shSm({ { x = -20, y = -5, w = 19.5, h = 10 }, { x = 0.5, y = -5, w = 20, h = 10 } })
+    v._x, v._y, v._fwdX, v._fwdY, v._speed = 0, 0, 1, 0, 0
+    checkFalse(Dr.summonShHit(hs, v), "(SH-two-home) 起步：不擋")
+    checkEq(hs.shIn, true, "(SH-two-home) 兩間都是起點屋")
+    v._x = 0.9
+    checkFalse(Dr.summonShHit(hs, v), "(SH-two-home) 往 B 0.9m：還在 1m 內")
+    v._x = 1.2
+    checkTrue(Dr.summonShHit(hs, v) and hs.shX == 0.5, "(SH-two-home) 往 B 1.2m：擋，命中 B")
+    -- (SH-exit-b) 車頭往前方的屋 B、車尾離開起點屋 A 的那一幀：B 已壓 0.2m（超過自己的棘輪），不能併進一般模式的新基準
+    hs = shSm({ { x = -20, y = -5, w = 19.5, h = 10 }, { x = 3.85, y = -5, w = 10, h = 10 } })
+    v._x, v._speed = -3, 0
+    checkFalse(Dr.summonShHit(hs, v), "(SH-exit-b) 起步在 A：不擋")
+    v._x = 1.5
+    checkFalse(Dr.summonShHit(hs, v), "(SH-exit-b) 還在 A、B 外：不擋")
+    v._x = 1.75
+    checkTrue(Dr.summonShHit(hs, v), "(SH-exit-b) 出 A 同時 B 壓 0.2m：擋")
+    checkEq(hs.shIn, false, "(SH-exit-b) 已回一般模式")
+    -- (SH-mp) 多人：伺服器收的碼與顯示文字
+    p, v = drive.sumFix({ px = -6, py = 4, mp = true })
+    drive.shHouses = { { x = 6, y = -5, w = 6, h = 10 } }
+    drive.sumStart({ mode = "dumb", dir = 1 })
+    v._speed, v._x = 5, 3.3
+    drive.sumTick()
+    v._speed = 0
+    drive.sumTick(3)
+    checkEq(Api.summonState(0) and Api.summonState(0).code, "SAFEHOUSE", "(SH-mp) SummonEnd 帶 SAFEHOUSE")
+    checkNil(Api.summonInfo(v), "(SH-mp) 伺服器收掉")
+    checkEq(Api.summonReasonText("SAFEHOUSE"), "UI_MinidoracatAutoDrive_SummonCode_SAFEHOUSE", "(SH-mp) 顯示文字取對鍵")
+
+    -- (SH-come) 到我這裡（跟線 session）：30 km/h 掃約 5.47m；結束事件帶屋與預測距離
+    local saved = { MDAD.HUD.telemetryEnabled, MDADDiagnostics.start, MDADDiagnostics.event, MDADDiagnostics.sample,
+        MDADDiagnostics.stop }
+    local ev = {}
+    MDAD.HUD.telemetryEnabled = function() return true end
+    MDADDiagnostics.start = function() return true end
+    MDADDiagnostics.sample = function() return true end
+    MDADDiagnostics.stop = function() return true end
+    MDADDiagnostics.event = function(_, name, a)
+        if name == "summon" then ev[#ev + 1] = a end
+    end
+    p, v = drive.sumFix({ px = 30 })
+    clientFlag, serverFlag = false, false
+    drive.sumStart()
+    drive.sumRound()
+    local s = Dr.debugSession(0)
+    local hl = s and s.vehicleProfile.halfL or 2.2
+    drive.shHouses = { { x = 14, y = -30, w = 6, h = 60 } } -- 路上新出現的屋（名單過期後才看得到）
+    nowMs = nowMs + 600
+    v._speed = 30
+    v._x = 14 - hl - 0.1 - 5.47 - 0.25
+    drive.sumTick()
+    checkTrue(Dr.isActive(0), "(SH-come) 掃描端離線 0.25m：照開")
+    v._x = 14 - hl - 0.1 - 5.47 + 0.25
+    drive.sumTick()
+    checkFalse(Dr.isActive(0), "(SH-come) 掃描端壓進 0.25m：停")
+    v._speed = 0
+    drive.sumTick()
+    drive.sumServer()
+    checkEq(Api.summonState(0) and Api.summonState(0).code, "SAFEHOUSE", "(SH-come) 碼 SAFEHOUSE")
+    local e = ev[#ev]
+    checkTrue(e and e.phase == "end" and e.why == "SAFEHOUSE" and e.hitX == 14 and e.w == 6 and e.len == 60
+        and math.abs((e.need or 0) - 5.47) < 0.02 and math.abs((e.speed or 0) - 30) < 0.01,
+        "(SH-come) end 事件帶 hitX w len need speed")
+    -- (SH-push) 被推進屋 0.6m（已超過棘輪）：need＝0，speed 照實際車速
+    p, v = drive.sumFix({ px = 30 })
+    clientFlag, serverFlag = false, false
+    drive.sumStart()
+    drive.sumRound()
+    drive.shHouses = { { x = 14, y = -30, w = 6, h = 60 } }
+    nowMs = nowMs + 600
+    v._speed, v._x = 30, 0
+    drive.sumTick()
+    checkTrue(Dr.isActive(0), "(SH-push) 屋在 14m 外：照開")
+    v._x = 14 - hl + 0.5
+    nowMs = nowMs + 100
+    drive.sumTick()
+    v._speed = 0
+    drive.sumTick()
+    drive.sumServer()
+    e = ev[#ev]
+    checkTrue(e and e.why == "SAFEHOUSE" and e.need == 0 and math.abs((e.speed or 0) - 30) < 0.01 and e.kind == "trespass",
+        "(SH-push) need 0、speed 30、kind trespass（實得 need " .. tostring(e and e.need) .. " speed "
+        .. tostring(e and e.speed) .. " kind " .. tostring(e and e.kind) .. "）")
+    -- (SH-stale-end) 舊名單暫定命中、重問後放行，之後一般結束：end 不帶被推翻的命中
+    p, v = drive.sumFix({ px = 30 })
+    clientFlag, serverFlag = false, false
+    drive.sumStart()
+    drive.sumRound()
+    drive.shHouses = { { x = 14, y = -30, w = 6, h = 60 } }
+    nowMs = nowMs + 600
+    v._speed, v._x = 30, 0
+    drive.sumTick()
+    drive.shHouses[1].allow = true
+    nowMs = nowMs + 100
+    v._x = 14 - hl - 0.1 - 5.47 + 0.25
+    drive.sumTick()
+    checkTrue(Dr.isActive(0), "(SH-stale-end) 重問後放行：照開")
+    Dr.summonStopLocal(0)
+    e = ev[#ev]
+    checkTrue(e and e.phase == "end" and e.why ~= "SAFEHOUSE" and e.hitY == nil and e.need == nil and e.kind == nil,
+        "(SH-stale-end) end 不帶屋欄位（實得 why " .. tostring(e and e.why) .. " hitY " .. tostring(e and e.hitY) .. "）")
+    -- (SH-weak) 弱煞車（a＝1）：30 km/h 要掃 36m，名單半徑與掃描都跟著放大（舊版截 20m、名單 24m）
+    p, v = drive.sumFix({ px = 30 })
+    clientFlag, serverFlag = false, false
+    drive.sumStart()
+    drive.sumRound()
+    s = Dr.debugSession(0)
+    drive.shHouses = { { x = 35, y = -30, w = 6, h = 60 } }
+    nowMs = nowMs + 600
+    v._speed, v._x = 30, 0
+    drive.sumTick()
+    checkTrue(Dr.isActive(0), "(SH-weak) 一般煞車：屋在 35m 外照開")
+    s.summon.shDecel, s.summon.shR = 1, nil
+    nowMs = nowMs + 600
+    drive.sumTick()
+    checkFalse(Dr.isActive(0), "(SH-weak) a＝1：掃到 35m 外的屋就停")
+    Dr.summonStopLocal(0)
+    MDAD.HUD.telemetryEnabled, MDADDiagnostics.start, MDADDiagnostics.event, MDADDiagnostics.sample,
+        MDADDiagnostics.stop = saved[1], saved[2], saved[3], saved[4], saved[5]
+
+    -- (SH-spot) 開到指定地點：目標在屋外 1.5 格，停車姿態（停車點到前方 3m）不壓屋
+    p, v = drive.sumFix({ px = 5, py = 5 })
+    drive.shHouses = { { x = 22, y = -30, w = 6, h = 60 } }
+    clientFlag, serverFlag = false, false
+    ok = drive.sumStart({ mode = "target", x = 20.5, y = 0.5 })
+    s = Dr.debugSession(0)
+    local sm = s and s.summon
+    local clear = false
+    if ok and sm and sm.parkX then
+        local d = math.sqrt(sm.parkX * sm.parkX + sm.parkY * sm.parkY)
+        local fx, fy = sm.parkX / d, sm.parkY / d
+        clear = Dr.summonShSum(drive.shHouses, sm.parkX, sm.parkY, fx, fy, sm.halfL, sm.halfW) == 0
+            and Dr.summonShSum(drive.shHouses, sm.parkX + fx * 3, sm.parkY + fy * 3, fx, fy, sm.halfL, sm.halfW) == 0
+    end
+    checkTrue(clear, "(SH-spot) 停車姿態不壓屋（parkX " .. tostring(sm and sm.parkX) .. "）")
+    Dr.summonStopLocal(0)
+    -- (SH-com) 重心往右偏 0.7m：停車姿態的車身中心照 bodyCenter 偏，貼著屋邊的目標點不能當停車點
+    p, v = drive.sumFix({ px = 5, py = 5 })
+    v:getScript():getCenterOfMassOffset():set(0.7, 0.5, 0)
+    drive.shHouses = { { x = -30, y = -32, w = 120, h = 30 } } -- y∈[-32,-2)
+    clientFlag, serverFlag = false, false
+    ok = drive.sumStart({ mode = "target", x = 20.5, y = -0.5 })
+    s = Dr.debugSession(0)
+    sm = s and s.summon
+    clear = false
+    if ok and sm and sm.parkX then
+        local d = math.sqrt(sm.parkX * sm.parkX + sm.parkY * sm.parkY)
+        local fx, fy = sm.parkX / d, sm.parkY / d
+        clear = true
+        for _, t in ipairs({ 0, 3 }) do
+            if Dr.summonShSum(drive.shHouses, sm.parkX + fx * t + fy * 0.7, sm.parkY + fy * t - fx * 0.7, fx, fy,
+                    sm.shHL, sm.shHW) > 0 then
+                clear = false
+            end
+        end
+    end
+    checkTrue(clear, "(SH-com) 停車姿態（套重心）不壓屋（park " .. tostring(sm and sm.parkX) .. "," .. tostring(sm and sm.parkY) .. "）")
+    Dr.summonStopLocal(0)
+    -- (SH-out-direct) 車停在不能進的屋裡（實車身壓著）、召喚者在屋外 15m、路網找不到路：往外開的直線不算壓屋，照樣用直線叫出來
+    p, v = drive.sumFix({ px = 15, py = 0 })
+    drive.shHouses = { { x = -12, y = -6, w = 14, h = 12 } } -- x∈[-12,2)
+    drive.nav.fromState = "noroad"
+    clientFlag, serverFlag = false, false
+    drive.sumStart()
+    for _ = 1, 4 do
+        nowMs = nowMs + 250
+        drive.sumTick()
+    end
+    s = Dr.debugSession(0)
+    sm = s and s.summon
+    checkTrue(Dr.summons[0] ~= nil and sm ~= nil and sm.parkX ~= nil and sm.baseRoute == nil,
+        "(SH-out-direct) 屋內出發、往外的直線：用直線召喚（停車點 " .. tostring(sm and sm.parkX) .. "）")
+    Dr.summonStopLocal(0)
+    -- 反例：召喚者在屋的另一頭，直線越開越深：不選直線，路網也沒有＝NO_ROUTE
+    p, v = drive.sumFix({ px = 20, py = 0 })
+    drive.shHouses = { { x = -2, y = -6, w = 14, h = 12 } } -- x∈[-2,12)
+    drive.nav.fromState = "noroad"
+    clientFlag, serverFlag = false, false
+    drive.sumStart()
+    for _ = 1, 40 do
+        nowMs = nowMs + 250
+        drive.sumTick()
+        if Dr.summons[0] == nil then break end
+    end
+    checkEq(Dr.summons[0], nil, "(SH-out-direct) 直線要穿過屋：不選直線，找不到路就結束")
+    drive.nav.fromState = "ok"
+end
+drive.scenarioSummonSafehouse()
 
 -- (dp-from) 1108d 召喚改道 requestDetourFrom 分幀（nav API v14，addon-api 3.9b allowPending＝第 11 參）：building 兩次後 ok，
 --   起點用開查詢當下的車位（車在等待中移動，重呼叫的 fromX/fromY 不變＝主 MOD 才認得是同一題），11 個參數逐值相同，

@@ -402,6 +402,7 @@
     "UI_MinidoracatAutoDrive_SummonOnFoot": "呼び出すには車から降りてください。",
     "UI_MinidoracatAutoDrive_SummonEngineFail": "エンジンをかけられません：バッテリー残量が少なすぎます。",
     "UI_MinidoracatAutoDrive_SummonSplitScreen": "マルチプレイでは、最初のローカルプレイヤーだけが呼び出せます。",
+    "UI_MinidoracatAutoDrive_SummonSafehouse": "その場所は入れないセーフハウスの中です。",
     "UI_MinidoracatAutoDrive_SummonCode_ARRIVED": "到着しました",
     "UI_MinidoracatAutoDrive_SummonCode_CANCELLED": "キャンセルしました",
     "UI_MinidoracatAutoDrive_SummonCode_TAKEOVER": "誰かが運転席に座りました",
@@ -427,5 +428,6 @@
     "UI_MinidoracatAutoDrive_SummonCode_NO_ROUTE": "ルートが見つかりません",
     "UI_MinidoracatAutoDrive_SummonCode_ROUTE_FAR": "道路から遠すぎます",
     "UI_MinidoracatAutoDrive_SummonCode_FAULT": "自動運転でエラーが起きました",
-    "UI_MinidoracatAutoDrive_SummonCode_BUSY": "別の自動運転が動作中です"
+    "UI_MinidoracatAutoDrive_SummonCode_BUSY": "別の自動運転が動作中です",
+    "UI_MinidoracatAutoDrive_SummonCode_SAFEHOUSE": "入れないセーフハウスが進路上にあります"
 }

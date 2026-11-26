@@ -402,6 +402,7 @@
     "UI_MinidoracatAutoDrive_SummonOnFoot": "호출하려면 차에서 내리세요.",
     "UI_MinidoracatAutoDrive_SummonEngineFail": "시동을 걸 수 없습니다. 배터리가 너무 약합니다.",
     "UI_MinidoracatAutoDrive_SummonSplitScreen": "멀티플레이에서는 첫 번째 로컬 플레이어만 호출할 수 있습니다.",
+    "UI_MinidoracatAutoDrive_SummonSafehouse": "그 위치는 들어갈 수 없는 안전가옥 안에 있습니다.",
     "UI_MinidoracatAutoDrive_SummonCode_ARRIVED": "도착했습니다",
     "UI_MinidoracatAutoDrive_SummonCode_CANCELLED": "취소했습니다",
     "UI_MinidoracatAutoDrive_SummonCode_TAKEOVER": "누군가 운전석에 앉았습니다",
@@ -427,5 +428,6 @@
     "UI_MinidoracatAutoDrive_SummonCode_NO_ROUTE": "경로를 찾을 수 없습니다",
     "UI_MinidoracatAutoDrive_SummonCode_ROUTE_FAR": "도로에서 너무 멉니다",
     "UI_MinidoracatAutoDrive_SummonCode_FAULT": "자율주행 오류",
-    "UI_MinidoracatAutoDrive_SummonCode_BUSY": "다른 자율주행이 진행 중입니다"
+    "UI_MinidoracatAutoDrive_SummonCode_BUSY": "다른 자율주행이 진행 중입니다",
+    "UI_MinidoracatAutoDrive_SummonCode_SAFEHOUSE": "들어갈 수 없는 안전가옥이 길을 막고 있습니다"
 }

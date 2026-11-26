@@ -402,6 +402,7 @@
     "UI_MinidoracatAutoDrive_SummonOnFoot": "Выйдите из машины, чтобы вызвать.",
     "UI_MinidoracatAutoDrive_SummonEngineFail": "Не удаётся завести двигатель: аккумулятор слишком разряжен.",
     "UI_MinidoracatAutoDrive_SummonSplitScreen": "В сетевой игре вызывать может только первый локальный игрок.",
+    "UI_MinidoracatAutoDrive_SummonSafehouse": "Это место внутри убежища, куда вам нельзя входить.",
     "UI_MinidoracatAutoDrive_SummonCode_ARRIVED": "Прибыла",
     "UI_MinidoracatAutoDrive_SummonCode_CANCELLED": "Отменено",
     "UI_MinidoracatAutoDrive_SummonCode_TAKEOVER": "Кто-то сел за руль",
@@ -427,5 +428,6 @@
     "UI_MinidoracatAutoDrive_SummonCode_NO_ROUTE": "Маршрут не найден",
     "UI_MinidoracatAutoDrive_SummonCode_ROUTE_FAR": "Слишком далеко от дороги",
     "UI_MinidoracatAutoDrive_SummonCode_FAULT": "Ошибка автопилота",
-    "UI_MinidoracatAutoDrive_SummonCode_BUSY": "Уже работает другой автопилот"
+    "UI_MinidoracatAutoDrive_SummonCode_BUSY": "Уже работает другой автопилот",
+    "UI_MinidoracatAutoDrive_SummonCode_SAFEHOUSE": "На пути убежище, куда вам нельзя входить"
 }

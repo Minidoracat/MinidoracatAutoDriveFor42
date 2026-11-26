@@ -402,6 +402,7 @@
     "UI_MinidoracatAutoDrive_SummonOnFoot": "Çağırmak için araçtan in.",
     "UI_MinidoracatAutoDrive_SummonEngineFail": "Motor çalıştırılamıyor: akü çok zayıf.",
     "UI_MinidoracatAutoDrive_SummonSplitScreen": "Çok oyunculu modda yalnızca ilk yerel oyuncu çağırabilir.",
+    "UI_MinidoracatAutoDrive_SummonSafehouse": "O yer giremeyeceğin bir sığınağın içinde.",
     "UI_MinidoracatAutoDrive_SummonCode_ARRIVED": "Vardı",
     "UI_MinidoracatAutoDrive_SummonCode_CANCELLED": "İptal edildi",
     "UI_MinidoracatAutoDrive_SummonCode_TAKEOVER": "Biri sürücü koltuğuna oturdu",
@@ -427,5 +428,6 @@
     "UI_MinidoracatAutoDrive_SummonCode_NO_ROUTE": "Rota bulunamadı",
     "UI_MinidoracatAutoDrive_SummonCode_ROUTE_FAR": "Yoldan çok uzak",
     "UI_MinidoracatAutoDrive_SummonCode_FAULT": "Otopilot hatası",
-    "UI_MinidoracatAutoDrive_SummonCode_BUSY": "Başka bir otopilot çalışıyor"
+    "UI_MinidoracatAutoDrive_SummonCode_BUSY": "Başka bir otopilot çalışıyor",
+    "UI_MinidoracatAutoDrive_SummonCode_SAFEHOUSE": "Yolda giremeyeceğin bir sığınak var"
 }

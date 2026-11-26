@@ -402,6 +402,7 @@
     "UI_MinidoracatAutoDrive_SummonOnFoot": "Zum Herbeirufen aus dem Fahrzeug aussteigen.",
     "UI_MinidoracatAutoDrive_SummonEngineFail": "Der Motor lässt sich nicht starten: Die Batterie ist zu schwach.",
     "UI_MinidoracatAutoDrive_SummonSplitScreen": "Im Mehrspieler kann nur der erste lokale Spieler herbeirufen.",
+    "UI_MinidoracatAutoDrive_SummonSafehouse": "Dieser Ort liegt in einem Unterschlupf, den du nicht betreten darfst.",
     "UI_MinidoracatAutoDrive_SummonCode_ARRIVED": "Angekommen",
     "UI_MinidoracatAutoDrive_SummonCode_CANCELLED": "Abgebrochen",
     "UI_MinidoracatAutoDrive_SummonCode_TAKEOVER": "Jemand hat sich ans Steuer gesetzt",
@@ -427,5 +428,6 @@
     "UI_MinidoracatAutoDrive_SummonCode_NO_ROUTE": "Keine Route gefunden",
     "UI_MinidoracatAutoDrive_SummonCode_ROUTE_FAR": "Zu weit von der Straße",
     "UI_MinidoracatAutoDrive_SummonCode_FAULT": "Autopilot-Fehler",
-    "UI_MinidoracatAutoDrive_SummonCode_BUSY": "Ein anderer Autopilot läuft bereits"
+    "UI_MinidoracatAutoDrive_SummonCode_BUSY": "Ein anderer Autopilot läuft bereits",
+    "UI_MinidoracatAutoDrive_SummonCode_SAFEHOUSE": "Ein Unterschlupf, den du nicht betreten darfst, liegt im Weg"
 }

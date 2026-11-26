@@ -402,6 +402,7 @@
     "UI_MinidoracatAutoDrive_SummonOnFoot": "Bájate del vehículo para llamarlo.",
     "UI_MinidoracatAutoDrive_SummonEngineFail": "No se puede arrancar el motor: la batería está muy baja.",
     "UI_MinidoracatAutoDrive_SummonSplitScreen": "En multijugador, solo el primer jugador local puede llamar al vehículo.",
+    "UI_MinidoracatAutoDrive_SummonSafehouse": "Ese punto está dentro de un refugio al que no puedes entrar.",
     "UI_MinidoracatAutoDrive_SummonCode_ARRIVED": "Llegó",
     "UI_MinidoracatAutoDrive_SummonCode_CANCELLED": "Cancelado",
     "UI_MinidoracatAutoDrive_SummonCode_TAKEOVER": "Alguien tomó el asiento del conductor",
@@ -427,5 +428,6 @@
     "UI_MinidoracatAutoDrive_SummonCode_NO_ROUTE": "No se encontró ruta",
     "UI_MinidoracatAutoDrive_SummonCode_ROUTE_FAR": "Demasiado lejos del camino",
     "UI_MinidoracatAutoDrive_SummonCode_FAULT": "Error del piloto automático",
-    "UI_MinidoracatAutoDrive_SummonCode_BUSY": "Ya hay otro piloto automático en marcha"
+    "UI_MinidoracatAutoDrive_SummonCode_BUSY": "Ya hay otro piloto automático en marcha",
+    "UI_MinidoracatAutoDrive_SummonCode_SAFEHOUSE": "Hay un refugio al que no puedes entrar en el camino"
 }

@@ -402,6 +402,7 @@
     "UI_MinidoracatAutoDrive_SummonOnFoot": "要下车才能召唤。",
     "UI_MinidoracatAutoDrive_SummonEngineFail": "引擎发动不了：电瓶电量太低。",
     "UI_MinidoracatAutoDrive_SummonSplitScreen": "多人联机时只有第一位本机玩家能召唤。",
+    "UI_MinidoracatAutoDrive_SummonSafehouse": "那个地点在你不能进入的安全屋里。",
     "UI_MinidoracatAutoDrive_SummonCode_ARRIVED": "已抵达",
     "UI_MinidoracatAutoDrive_SummonCode_CANCELLED": "已取消",
     "UI_MinidoracatAutoDrive_SummonCode_TAKEOVER": "有人坐上驾驶座",
@@ -427,5 +428,6 @@
     "UI_MinidoracatAutoDrive_SummonCode_NO_ROUTE": "找不到路线",
     "UI_MinidoracatAutoDrive_SummonCode_ROUTE_FAR": "离道路太远",
     "UI_MinidoracatAutoDrive_SummonCode_FAULT": "自动驾驶发生错误",
-    "UI_MinidoracatAutoDrive_SummonCode_BUSY": "正在进行其他自动驾驶"
+    "UI_MinidoracatAutoDrive_SummonCode_BUSY": "正在进行其他自动驾驶",
+    "UI_MinidoracatAutoDrive_SummonCode_SAFEHOUSE": "前方是你不能进入的安全屋"
 }

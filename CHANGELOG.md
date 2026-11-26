@@ -12,6 +12,14 @@
 
 格式基於 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/)，版本號遵循 `{PZ版本}-{主版本}.{次版本}.{修訂}` 格式。
 
+## [Unreleased]
+
+### 修正
+
+- **召喚會在你不能進入的安全屋前停下**：「到我這裡」「開到指定地點」「前進／後退」途中，車快要開進你不能進入的安全屋（不是你的、你也不是成員）時，會先停在外面，提示「前方是你不能進入的安全屋」；指定地點選在這種安全屋裡，召喚直接不出發，提示「那個地點在你不能進入的安全屋裡」。挑停車位置時也會避開這種安全屋；附近找不到合適的停車位置時，車會在安全屋外停下。原本就停在別人安全屋裡的車，仍然可以召喚出來。管理員、安全屋成員，或伺服器設定允許進入別人安全屋時，照常召喚。
+
+> 技術要點：權限照原版安全屋規則判斷，沒有安裝其他安全屋 MOD 的伺服器也適用。新增停止碼 `SAFEHOUSE` 與起步拒絕鍵 `SummonSafehouse`（16 種語言），`summonApiVersion` 升為 2；照 v1 契約用 `summonApiVersion >= 1` 偵測的呼叫端不必修改。召喚結束的診斷事件 `summon phase=end` 遇到這種停止時多帶 `hitX`／`hitY`／`w`／`len`（安全屋範圍）、`need`（預測距離）、`speed`、`m`（壓入深度）、`kind`（`trespass` 沒有權限、`unloaded` 屋內格子沒載入；後綴 `_in`＝起步時車已在屋內）。翻譯包需補 `UI_MinidoracatAutoDrive_SummonSafehouse` 與 `UI_MinidoracatAutoDrive_SummonCode_SAFEHOUSE`。
+
 ## [42.22.2-0.38.0] - 2026-11-23
 
 ### 新增

@@ -402,6 +402,7 @@
     "UI_MinidoracatAutoDrive_SummonOnFoot": "Wysiądź z pojazdu, aby przywołać.",
     "UI_MinidoracatAutoDrive_SummonEngineFail": "Nie można uruchomić silnika: akumulator jest za słaby.",
     "UI_MinidoracatAutoDrive_SummonSplitScreen": "W trybie wieloosobowym tylko pierwszy lokalny gracz może przywołać pojazd.",
+    "UI_MinidoracatAutoDrive_SummonSafehouse": "To miejsce jest w kryjówce, do której nie możesz wejść.",
     "UI_MinidoracatAutoDrive_SummonCode_ARRIVED": "Na miejscu",
     "UI_MinidoracatAutoDrive_SummonCode_CANCELLED": "Anulowano",
     "UI_MinidoracatAutoDrive_SummonCode_TAKEOVER": "Ktoś zajął miejsce kierowcy",
@@ -427,5 +428,6 @@
     "UI_MinidoracatAutoDrive_SummonCode_NO_ROUTE": "Nie znaleziono trasy",
     "UI_MinidoracatAutoDrive_SummonCode_ROUTE_FAR": "Za daleko od drogi",
     "UI_MinidoracatAutoDrive_SummonCode_FAULT": "Błąd autopilota",
-    "UI_MinidoracatAutoDrive_SummonCode_BUSY": "Trwa inna jazda autopilotem"
+    "UI_MinidoracatAutoDrive_SummonCode_BUSY": "Trwa inna jazda autopilotem",
+    "UI_MinidoracatAutoDrive_SummonCode_SAFEHOUSE": "Na drodze jest kryjówka, do której nie możesz wejść"
 }

@@ -402,6 +402,7 @@
     "UI_MinidoracatAutoDrive_SummonOnFoot": "Get out of the vehicle to summon.",
     "UI_MinidoracatAutoDrive_SummonEngineFail": "The engine cannot be started: the battery is too low.",
     "UI_MinidoracatAutoDrive_SummonSplitScreen": "In multiplayer, only the first local player can summon.",
+    "UI_MinidoracatAutoDrive_SummonSafehouse": "That spot is inside a safehouse you can't enter.",
     "UI_MinidoracatAutoDrive_SummonCode_ARRIVED": "Arrived",
     "UI_MinidoracatAutoDrive_SummonCode_CANCELLED": "Cancelled",
     "UI_MinidoracatAutoDrive_SummonCode_TAKEOVER": "Someone took the driver's seat",
@@ -427,5 +428,6 @@
     "UI_MinidoracatAutoDrive_SummonCode_NO_ROUTE": "No route found",
     "UI_MinidoracatAutoDrive_SummonCode_ROUTE_FAR": "Too far from the road",
     "UI_MinidoracatAutoDrive_SummonCode_FAULT": "Autodrive error",
-    "UI_MinidoracatAutoDrive_SummonCode_BUSY": "Another autodrive is running"
+    "UI_MinidoracatAutoDrive_SummonCode_BUSY": "Another autodrive is running",
+    "UI_MinidoracatAutoDrive_SummonCode_SAFEHOUSE": "A safehouse you can't enter is in the way"
 }

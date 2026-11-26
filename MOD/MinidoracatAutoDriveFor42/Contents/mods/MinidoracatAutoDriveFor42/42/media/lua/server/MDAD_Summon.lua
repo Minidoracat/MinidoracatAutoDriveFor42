@@ -49,6 +49,7 @@ local KEY = {
     ENGINE = "UI_MinidoracatAutoDrive_EngineOff",
     MODULE = "UI_MinidoracatAutoDrive_NeedModule",
     API = "UI_MinidoracatAutoDrive_NavApiMissing",
+    SAFEHOUSE = MDAD.KEY_SUMMON_SAFEHOUSE,
 }
 Summon.KEY = KEY
 
@@ -132,6 +133,15 @@ function Summon.start(player, vehicle, opts)
     if dist2(px, py, vehicle:getX(), vehicle:getY()) > r * r
             or (mode == "target" and dist2(px, py, tx, ty) > r * r) then
         return false, KEY.TOO_FAR
+    end
+    -- ③b 開到指定地點：目標在召喚者不能進的安全屋（2026-11-26；行進中壓線由召喚者客戶端 Drive.summonSafehouse 擋）
+    if mode == "target" then
+        local sh, unl = MDAD.summonSafehouseAt(player, tx, ty)
+        if sh then
+            log("refuse by=" .. username .. " code=SAFEHOUSE why=" .. (unl and "unloaded" or "trespass")
+                .. string.format(" at=%.1f,%.1f", tx, ty))
+            return false, KEY.SAFEHOUSE
+        end
     end
     -- ④ 車
     if vehicle:getDriver() ~= nil or vehicle:hasPassenger() then return false, KEY.OCCUPIED end

@@ -402,6 +402,7 @@
     "UI_MinidoracatAutoDrive_SummonOnFoot": "Saia do veículo para chamá-lo.",
     "UI_MinidoracatAutoDrive_SummonEngineFail": "Não é possível ligar o motor: a bateria está fraca demais.",
     "UI_MinidoracatAutoDrive_SummonSplitScreen": "No multijogador, só o primeiro jogador local pode chamar o veículo.",
+    "UI_MinidoracatAutoDrive_SummonSafehouse": "Esse local fica dentro de um abrigo onde você não pode entrar.",
     "UI_MinidoracatAutoDrive_SummonCode_ARRIVED": "Chegou",
     "UI_MinidoracatAutoDrive_SummonCode_CANCELLED": "Cancelado",
     "UI_MinidoracatAutoDrive_SummonCode_TAKEOVER": "Alguém assumiu o banco do motorista",
@@ -427,5 +428,6 @@
     "UI_MinidoracatAutoDrive_SummonCode_NO_ROUTE": "Nenhuma rota encontrada",
     "UI_MinidoracatAutoDrive_SummonCode_ROUTE_FAR": "Longe demais da estrada",
     "UI_MinidoracatAutoDrive_SummonCode_FAULT": "Erro do piloto automático",
-    "UI_MinidoracatAutoDrive_SummonCode_BUSY": "Outro piloto automático está em andamento"
+    "UI_MinidoracatAutoDrive_SummonCode_BUSY": "Outro piloto automático está em andamento",
+    "UI_MinidoracatAutoDrive_SummonCode_SAFEHOUSE": "Há um abrigo onde você não pode entrar no caminho"
 }

@@ -402,6 +402,7 @@
     "UI_MinidoracatAutoDrive_SummonOnFoot": "Descendez du véhicule pour l'appeler.",
     "UI_MinidoracatAutoDrive_SummonEngineFail": "Impossible de démarrer le moteur : batterie trop faible.",
     "UI_MinidoracatAutoDrive_SummonSplitScreen": "En multijoueur, seul le premier joueur local peut appeler le véhicule.",
+    "UI_MinidoracatAutoDrive_SummonSafehouse": "Cet endroit est dans un refuge où vous ne pouvez pas entrer.",
     "UI_MinidoracatAutoDrive_SummonCode_ARRIVED": "Arrivé",
     "UI_MinidoracatAutoDrive_SummonCode_CANCELLED": "Annulé",
     "UI_MinidoracatAutoDrive_SummonCode_TAKEOVER": "Quelqu'un a pris le volant",
@@ -427,5 +428,6 @@
     "UI_MinidoracatAutoDrive_SummonCode_NO_ROUTE": "Aucun itinéraire trouvé",
     "UI_MinidoracatAutoDrive_SummonCode_ROUTE_FAR": "Trop loin de la route",
     "UI_MinidoracatAutoDrive_SummonCode_FAULT": "Erreur du pilote automatique",
-    "UI_MinidoracatAutoDrive_SummonCode_BUSY": "Un autre pilote automatique est en cours"
+    "UI_MinidoracatAutoDrive_SummonCode_BUSY": "Un autre pilote automatique est en cours",
+    "UI_MinidoracatAutoDrive_SummonCode_SAFEHOUSE": "Un refuge où vous ne pouvez pas entrer bloque le passage"
 }

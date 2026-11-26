@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1123e"
+Drive.REV = "1126d"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -20306,6 +20306,19 @@ TUNE.SUMMON_TARGET_ARRIVE_M = 3    -- 指定地點：車心到目標點這麼近
 TUNE.SUMMON_RETARGET_M = 8         -- 召喚者離目前目標這麼遠才換目標（同小地圖 REBUILD_MOVE_DIST）
 TUNE.SUMMON_RETARGET_MS = 3000     -- 換目標冷卻（同小地圖 REBUILD_COOLDOWN_MS）
 TUNE.SUMMON_AREA_M = 16            -- 多人：前方這麼遠內有未載入格才等（Drive.areaWait）
+-- 召喚者不能進的安全屋（Drive.summonSafehouse；2026-11-26）
+TUNE.SUMMON_SH_DECEL = 8          -- 預測煞停的減速度上限（m/s²）：park() 實得約 13 取六成。用 5 時窄巷 T 字路口正對屋牆會誤停
+TUNE.SUMMON_SH_BF_K = 150         -- 煞車力換減速度 a＝K×brakingForce／質量（Follower 單點實測 253 的六成；線性是推測），夾在下限與上限間
+TUNE.SUMMON_SH_DECEL_MIN = 0.5    -- 煞車力讀到 0 時的下限（滾動阻力量級，推測）
+TUNE.SUMMON_SH_REACT_S = 0.1      -- 反應時間（一幀加卡頓）
+TUNE.SUMMON_SH_MARGIN_M = 0.3     -- 掃描距離的固定餘裕
+TUNE.SUMMON_SH_PAD = 0.1          -- 車身外擴（同安全屋 MOD）
+TUNE.SUMMON_SH_STEP_M = 1         -- 掃描步長（順著車頭走時小於車身＝姿態連成一片；側滑時縮短，Drive.summonShHit）
+TUNE.SUMMON_SH_VMAX_KMH = 35      -- 名單半徑用的最高車速（召喚限速 30＋餘裕；Drive.summonShRadius）
+TUNE.SUMMON_SH_CACHE_MS = 500     -- 名單快取（同安全屋 MOD）
+TUNE.SUMMON_SH_DEEPER = 0.05      -- 比這趟最淺的壓入深度多這麼多才算往裡開（同安全屋 MOD）
+TUNE.SUMMON_SH_IN_SLACK_M = 1      -- 出屋模式：起點屋比這趟最淺多這麼多才擋（E2E adsh-1126c outturn：起步 0.3 km/h 的車速方向是雜訊，
+                                   -- 門檻 0.05 時預測 0.3m 就誤停；倒車調頭也會前後挪動）。預測照常，30 km/h 往裡開在越過這條線前停
 Drive.KEY_SUMMON_TOWING = "UI_MinidoracatAutoDrive_SummonTowing"
 Drive.KEY_SUMMON_SPLIT = "UI_MinidoracatAutoDrive_SummonSplitScreen"
 Drive.summonResults = {} -- playerNum → { vid, phase, code, why, dist, mode }（summonState 回的就是這張）
@@ -20381,9 +20394,13 @@ function Drive.canSummon(playerNum, vehicle, opts)
     if mode == "target" and (tx - px) * (tx - px) + (ty - py) * (ty - py) > reach * reach then
         return false, "UI_MinidoracatAutoDrive_SummonTooFar"
     end
+    if vehicle then
+        local dx, dy = vehicle:getX() - px, vehicle:getY() - py
+        if dx * dx + dy * dy > reach * reach then return false, "UI_MinidoracatAutoDrive_SummonTooFar" end
+    end
+    -- 同伺服器 startSummon：③範圍（目標與車）→ ③b 目標在不能進的安全屋 → ④車
+    if mode == "target" and Drive.summonShPre(playerNum, player, tx, ty) then return false, MDAD.KEY_SUMMON_SAFEHOUSE end
     if not vehicle then return true end
-    local dx, dy = vehicle:getX() - px, vehicle:getY() - py
-    if dx * dx + dy * dy > reach * reach then return false, "UI_MinidoracatAutoDrive_SummonTooFar" end
     if vehicle:getDriver() ~= nil or vehicle:hasPassenger() then return false, "UI_MinidoracatAutoDrive_SummonOccupied" end
     if vehicle:getVehicleTowing() ~= nil or vehicle:getVehicleTowedBy() ~= nil then return false, Drive.KEY_SUMMON_TOWING end
     local kmh = vehicle:getCurrentSpeedKmHour()
@@ -20555,7 +20572,241 @@ function Drive.summonKeep(sm, player, now)
         sm.nextBeatMs = now + TUNE.SUMMON_BEAT_MS
         Drive.summonSend(player, sm.vid, true)
     end
-    return nil
+    return Drive.summonSafehouse(sm, player, now)
+end
+
+-- 召喚者不能進的安全屋（2026-11-26 使用者裁定改本 MOD 擋；E2E adsh-1126a 重現：前進／後退、到我這裡、開到指定地點都把空車開進
+-- 別人的安全屋，安全屋 MOD 的擋車只看本機駕駛）。單一關卡在 Drive.summonKeep 尾端：車身（腳本外框＋SUMMON_SH_PAD）沿實際車速方向
+-- 掃到煞停距離（反應＋v²/2a＋餘裕），會壓進召喚者不能進的安全屋就以 SAFEHOUSE 結束，車靠 park() 自己煞住；跟線、繞行、倒車脫困、
+-- 到站滑停、前進／後退都經過這裡。棘輪：sm.shBase＝這趟壓在屋內最淺的深度，只擋比它更深（不能用「現在深度」當基準，低速斜切會
+-- 每幀滲一點）。這趟第一次檢查時實車身（腳本外框、不含 PAD）已壓在屋裡（sm.shIn；原版安全屋範圍含建築外 2 格，SafeHouse.java:87-95，
+-- 車道上常見）＝出屋模式，那幾間是起點屋（sm.shHome＝各自的最淺深度）：深度改用起步時的車頭方向（sm.shFx/shFy）量，轉出時車尾外甩
+-- 不算往裡開；每間比自己的最淺多 SUMMON_SH_IN_SLACK_M 才擋（低速車速方向是雜訊、調頭會前後挪）。其他屋照一般棘輪（sm.shBaseO）。
+-- 實車身離開起點屋後回到一般模式，棘輪＝起點屋殘留的 PAD 深度＋其他屋的棘輪。只在這趟第一次檢查時認起點屋。
+-- 安全屋 MOD 在名單變化時重記最淺位置，這裡不重記：召喚中途權限翻轉＝寧可停。權限照原版 SafeHouse.isSafehouseAllowTrepass，沒裝安全屋 MOD 也擋。
+-- 開到指定地點的目標在屋內由伺服器起步就拒（startSummon ③b）；停車點不選壓到屋的姿態（Drive.summonSpot／summonLineClear）。
+function Drive.summonSafehouse(sm, player, now)
+    if not sm.halfL then return nil end -- 還在等路線、車身沒量
+    local v = sm.vehicle
+    local fresh = false
+    if not sm.shList or now - sm.shAt >= TUNE.SUMMON_SH_CACHE_MS or now < sm.shAt then
+        sm.shList, sm.shAt, fresh = Drive.summonShList(player, v:getX(), v:getY(), Drive.summonShRadius(sm)), now, true
+    end
+    if not sm.shList[1] then
+        -- 起步附近沒有屋＝一般模式；途中名單變空也不再給出屋例外（之後才出現的屋若用當下車位認起點屋，途中撤權的屋會拿到寬限）
+        sm.shBase, sm.shBaseO, sm.shIn = 0, 0, false
+        return nil
+    end
+    local hit = Drive.summonShHit(sm, v)
+    if hit and not fresh then -- 名單是舊的：可能剛被加進成員、格子剛載入，重問一次再定
+        sm.shList, sm.shAt = Drive.summonShList(player, v:getX(), v:getY(), Drive.summonShRadius(sm)), now
+        hit = sm.shList[1] ~= nil and Drive.summonShHit(sm, v)
+    end
+    if not hit then
+        sm.shX = nil
+        return nil
+    end
+    return "SAFEHOUSE"
+end
+
+-- 名單半徑（每趟算一次）：車身中心（重心）到最遠角＋重心偏移＋最高車速的整段煞停掃描＋快取期間最多走的距離＋1。
+-- VMAX 以內的掃描不截短：弱煞車的車掃得遠，半徑跟著大（a＝0.5 時約 100 格）；名單外的屋這一幀不可能壓到。超過半徑才截（異常車速）。
+function Drive.summonShRadius(sm)
+    if sm.shR then return sm.shR end
+    local v, a = TUNE.SUMMON_SH_VMAX_KMH / 3.6, Drive.summonShDecel(sm)
+    sm.shR = sqrt(sm.shHL * sm.shHL + sm.shHW * sm.shHW) + math.abs(sm.shComX) + math.abs(sm.shComZ)
+        + v * TUNE.SUMMON_SH_REACT_S + v * v / (2 * a) + TUNE.SUMMON_SH_MARGIN_M + v * TUNE.SUMMON_SH_CACHE_MS / 1000 + 1
+    return sm.shR
+end
+
+-- (x, y) 周圍 near 內、player 不能進的安全屋矩形 {x, y, w, h, unl}（冷路徑，回新表）。權限問屋內離 (x, y) 最近的一格；格子沒載入＝
+-- 當不能進（引擎對 nil 格回 true＝放行，SafeHouse.java:224-228），unl＝true 讓結束事件分得出是哪一種。
+function Drive.summonShList(player, x, y, near)
+    local out = {}
+    local list = SafeHouse and SafeHouse.getSafehouseList and SafeHouse.getSafehouseList()
+    local n = list and list:size() or 0
+    if n == 0 then return out end
+    local cell = getCell()
+    for i = 0, n - 1 do
+        local h = list:get(i)
+        local x1, y1, x2, y2 = h:getX(), h:getY(), h:getX2(), h:getY2()
+        local dx = x < x1 and x1 - x or (x > x2 and x - x2 or 0)
+        local dy = y < y1 and y1 - y or (y > y2 and y - y2 or 0)
+        if dx * dx + dy * dy < near * near then
+            local qx, qy = math.floor(x), math.floor(y)
+            if qx < x1 then qx = x1 elseif qx >= x2 then qx = x2 - 1 end
+            if qy < y1 then qy = y1 elseif qy >= y2 then qy = y2 - 1 end
+            local sq = cell and cell:getGridSquare(qx, qy, 0)
+            if not sq or not SafeHouse.isSafehouseAllowTrepass(sq, player) then
+                out[#out + 1] = { x = x1, y = y1, w = x2 - x1, h = y2 - y1, unl = sq == nil or nil }
+            end
+        end
+    end
+    return out
+end
+
+-- 守門比的深度，回 d, r, o, ro：d 進棘輪 sm.shBase，o 進 sm.shBaseO。一般：d＝全部屋的深度和、o＝0。
+-- 出屋模式（sm.shIn）：d＝起點屋各自比自己這趟最淺深度（sm.shHome[key]）多壓的量取最大（分屋比：同時壓兩間起點屋時，退出一間
+-- 不能抵銷壓進另一間），深度用起步時的車頭方向量（只量平移，轉出時車尾外甩不算）；upd＝目前姿態，順手更新各屋最淺。
+-- o＝其他屋照一般量。
+function Drive.summonShDepth(sm, x, y, fx, fy, upd)
+    local list = sm.shList
+    if not sm.shIn then
+        local d, r = Drive.summonShSum(list, x, y, fx, fy, sm.shHL, sm.shHW)
+        return d, r, 0, nil
+    end
+    local d, r = 0, nil
+    for i = 1, #list do
+        local h = list[i]
+        if h.home then
+            local k = h.x * 100000 + h.y
+            local dk, bk = Drive.summonShOne(h, x, y, sm.shFx, sm.shFy, sm.shHL, sm.shHW), sm.shHome[k]
+            if upd and dk < bk then bk = dk; sm.shHome[k] = dk end
+            if dk - bk > d then d, r = dk - bk, h end
+        end
+    end
+    local o, ro = Drive.summonShSum(list, x, y, fx, fy, sm.shHL, sm.shHW, false)
+    return d, r, o, ro
+end
+
+-- 車身（中心 cx,cy；車頭 fx,fy 已正規化；半長 hl、半寬 hw）壓進矩形 r 的深度：SAT 四軸取最小（同安全屋 MOD），沒壓到或剛好
+-- 貼邊＝0（矩形含起點不含終點）。
+function Drive.summonShOne(r, cx, cy, fx, fy, hl, hw)
+    local afx, afy = math.abs(fx), math.abs(fy) -- 車身側向軸 (-fy, fx) 的絕對值就是 (afy, afx)
+    local hx, hy = r.w / 2, r.h / 2
+    local dx, dy = cx - (r.x + hx), cy - (r.y + hy)
+    local o = hx + hl * afx + hw * afy - math.abs(dx)
+    if o <= 0 then return 0 end
+    local o2 = hy + hl * afy + hw * afx - math.abs(dy)
+    local o3 = hl + hx * afx + hy * afy - math.abs(dx * fx + dy * fy)
+    local o4 = hw + hx * afy + hy * afx - math.abs(dy * fx - dx * fy)
+    if o2 <= 0 or o3 <= 0 or o4 <= 0 then return 0 end
+    if o2 < o then o = o2 end
+    if o3 < o then o = o3 end
+    if o4 < o then o = o4 end
+    return o
+end
+
+-- rects 的深度和與第一塊壓到的矩形。home：nil＝全部；true／false＝只算 r.home 是／不是 true 的。
+function Drive.summonShSum(rects, cx, cy, fx, fy, hl, hw, home)
+    local sum, hit = 0, nil
+    for i = 1, #rects do
+        local r = rects[i]
+        if home == nil or (r.home == true) == home then
+            local o = Drive.summonShOne(r, cx, cy, fx, fy, hl, hw)
+            if o > 0 then sum, hit = sum + o, hit or r end
+        end
+    end
+    return sum, hit
+end
+
+-- 車身中心＝腳本重心的世界位置（同 VehiclePoly.init，VehiclePoly.java:52-86；尺寸超限時 bodyCenter 不給，這裡照用腳本值），
+-- 與正規化的車頭方向。守門與停車點預檢共用。
+function Drive.summonShPose(sm, v)
+    local vec = BaseVehicle.allocVector3f()
+    local cx, cy
+    local okW, wp = pcall(jindex, v, "getWorldPos")
+    if okW and type(wp) == "function" and pcall(wp, v, sm.shComX, 0, sm.shComZ, vec) then cx, cy = vec:x(), vec:y() end
+    if not finite(cx) or not finite(cy) then cx, cy = v:getX(), v:getY() end
+    v:getForwardVector(vec)
+    local fx, fy = vec:x(), vec:z()
+    BaseVehicle.releaseVector3f(vec)
+    local fl = sqrt(fx * fx + fy * fy)
+    if fl < 1e-6 then fx, fy = 1, 0 else fx, fy = fx / fl, fy / fl end
+    return cx, cy, fx, fy
+end
+
+-- 這一幀會不會往不能進的安全屋裡開（順手更新棘輪 sm.shBase／shBaseO）：會＝true，並把命中的屋、預測距離（0＝現在就更深）、
+-- 車速、深度寫進 sm.sh*，給 Drive.summonNoteEnd 帶出。只在名單非空時呼叫（才讀車速）。
+function Drive.summonShHit(sm, v)
+    local cx, cy, fx, fy = Drive.summonShPose(sm, v)
+    local vx, vy = 0, 0
+    local vec = BaseVehicle.allocVector3f()
+    local okLookup, fn = pcall(jindex, v, "getLinearVelocity")
+    if okLookup and type(fn) == "function" and pcall(fn, v, vec) then vx, vy = vec:x(), vec:z() end
+    BaseVehicle.releaseVector3f(vec)
+    if not finite(vx) or not finite(vy) then vx, vy = 0, 0 end
+    local spd = sqrt(vx * vx + vy * vy)
+    local list = sm.shList
+    if sm.shIn == nil then -- 這趟第一次檢查（summonSafehouse 第一次一定建名單）：實車身（腳本外框、不含 PAD）壓到的屋＝起點屋
+        sm.shIn, sm.shFx, sm.shFy, sm.shHome = false, fx, fy, {}
+        for i = 1, #list do
+            local r = list[i]
+            if Drive.summonShOne(r, cx, cy, fx, fy, sm.shRL, sm.shRW) > 0 then -- 起點屋的最淺＝起步時含 PAD 的深度
+                sm.shIn, sm.shHome[r.x * 100000 + r.y] = true, Drive.summonShOne(r, cx, cy, fx, fy, sm.shHL, sm.shHW)
+            end
+        end
+    end
+    if sm.shIn then
+        for i = 1, #list do list[i].home = sm.shHome[list[i].x * 100000 + list[i].y] ~= nil end -- 名單每次重建，重標起點屋
+        if Drive.summonShSum(list, cx, cy, fx, fy, sm.shRL, sm.shRW, true) <= 0 then
+            -- 實車身出了起點屋：一般模式的棘輪＝起點屋殘留的 PAD 深度＋其他屋原本的棘輪（其他屋這時已壓進的量不能併成新額度）
+            sm.shIn, sm.shBase = false, Drive.summonShSum(list, cx, cy, fx, fy, sm.shHL, sm.shHW, true) + (sm.shBaseO or 0)
+        end
+    end
+    local d, r, o, ro = Drive.summonShDepth(sm, cx, cy, fx, fy, true)
+    local base, baseO = sm.shBase, sm.shBaseO
+    if sm.shIn or d <= 0 then base = 0 elseif base == nil or d < base then base = d end -- 出屋模式的 d 已是比最淺多的量
+    if o <= 0 then baseO = 0 elseif baseO == nil or o < baseO then baseO = o end
+    sm.shBase, sm.shBaseO = base, baseO
+    local lim, limO = base + (sm.shIn and TUNE.SUMMON_SH_IN_SLACK_M or TUNE.SUMMON_SH_DEEPER), baseO + TUNE.SUMMON_SH_DEEPER
+    local hit = (d > lim and r) or (o > limO and ro) or nil
+    local need = 0
+    if not hit and spd * 3.6 >= TUNE.SUMMON_STILL_KMH then
+        local a = Drive.summonShDecel(sm)
+        local len = spd * TUNE.SUMMON_SH_REACT_S + spd * spd / (2 * a) + TUNE.SUMMON_SH_MARGIN_M
+        local cap = Drive.summonShRadius(sm) -- 名單外的屋本來就看不到；讀到異常大的車速時不多掃
+        if len > cap then len = cap end
+        local ux, uy = vx / spd, vy / spd
+        -- 側滑（車速與量深度的車頭方向夾 θ）時車角在相鄰兩個姿態間留三角缺口，深 step×sin2θ/2：縮步長到缺口不超過
+        -- PAD－DEEPER（缺口裡的真壓入在兩側姿態仍要超過 DEEPER 才觸發）。出屋模式兩個方向取大的。
+        local s2 = 2 * math.abs(ux * fy - uy * fx) * math.abs(ux * fx + uy * fy)
+        if sm.shIn then
+            local s2h = 2 * math.abs(ux * sm.shFy - uy * sm.shFx) * math.abs(ux * sm.shFx + uy * sm.shFy)
+            if s2h > s2 then s2 = s2h end
+        end
+        local step, gap = TUNE.SUMMON_SH_STEP_M, TUNE.SUMMON_SH_PAD - TUNE.SUMMON_SH_DEEPER
+        if gap > 0 and s2 * step > 2 * gap then step = 2 * gap / s2 end
+        local t = 0
+        repeat
+            t = t + step
+            if t > len then t = len end
+            d, r, o, ro = Drive.summonShDepth(sm, cx + ux * t, cy + uy * t, fx, fy)
+            hit = (d > lim and r) or (o > limO and ro) or nil
+        until hit or t >= len
+        need = t
+    end
+    if not hit then return false end
+    sm.shX, sm.shY, sm.shW, sm.shH = hit.x, hit.y, hit.w, hit.h
+    sm.shNeed, sm.shKmh, sm.shM = need, spd * 3.6, hit == ro and o or d
+    sm.shKind = (hit.unl and "unloaded" or "trespass") .. (sm.shIn and "_in" or "")
+    return true
+end
+
+-- 預測煞停的減速度：照煞車力縮放（park() 把 getBrakingForce() 直接給 Bullet，CarController.java:983-986；零件壞了煞車力就小，
+-- BaseVehicle.java:9167-9181），讀不到用 SUMMON_SH_DECEL。每趟算一次。
+function Drive.summonShDecel(sm)
+    if sm.shDecel then return sm.shDecel end
+    local a = TUNE.SUMMON_SH_DECEL
+    local vp = sm.vehicleProfile
+    local bf, mass = vp and vp.brakingForce, vp and vp.mass
+    if finite(bf) and finite(mass) and mass > 0 then
+        a = TUNE.SUMMON_SH_BF_K * bf / mass
+        if a > TUNE.SUMMON_SH_DECEL then a = TUNE.SUMMON_SH_DECEL end
+        if a < TUNE.SUMMON_SH_DECEL_MIN then a = TUNE.SUMMON_SH_DECEL_MIN end
+    end
+    sm.shDecel = a
+    return a
+end
+
+-- canSummon 的「目標在不能進的安全屋」預檢（canSummon 可在熱路徑呼叫）：同一點 SUMMON_SH_CACHE_MS 內沿用上次結果
+Drive.shPre = {} -- playerNum → { x, y, at, hit }
+function Drive.summonShPre(playerNum, player, x, y)
+    local c, now = Drive.shPre[playerNum], getTimestampMs()
+    if c and c.x == x and c.y == y and now >= c.at and now - c.at < TUNE.SUMMON_SH_CACHE_MS then return c.hit end
+    local hit = MDAD.summonSafehouseAt(player, x, y)
+    Drive.shPre[playerNum] = { x = x, y = y, at = now, hit = hit }
+    return hit
 end
 
 -- 殭屍擋路（2026-10-27 使用者回答）：能繞就繞（繞行與殭屍軟縫照常）；軟縫沒處理（找不到縫、閃避關閉）而最近一隻已在車頭
@@ -20646,6 +20897,29 @@ function Drive.summonBody(sm, vehicle)
         return false
     end
     sm.halfL, sm.halfW, sm.vehicleProfile = vp.halfL, vp.halfW, vp -- vehicleProfile：同 session 的名字，bodyCenter 也讀它
+    -- 安全屋守門的車身（含 PAD）與重心：照引擎 VehiclePoly（腳本外框＋腳本重心）。尺寸超出範圍時 VehicleProfile 換成 4.4×1.8 的
+    -- 替代值、重心可能歸零（geometryValid＝false），包不住實車，改用腳本值
+    -- 出屋判定用實車身（sm.shRL/shRW＝腳本外框原值）：導航尺寸有下限（窄車半寬 0.4），扣 PAD 反推會把屋外的窄車算進屋
+    local hl, hw, comX, comZ, rl, rw = vp.halfL, vp.halfW, 0, 0, nil, nil
+    local okS, ext, com = pcall(function()
+        local sc = vehicle:getScript()
+        return sc:getExtents(), sc:getCenterOfMassOffset()
+    end)
+    if okS then
+        if ext then
+            local ex, ez = ext:x(), ext:z()
+            if finite(ez) and ez > 0 then rl = ez / 2 end
+            if finite(ex) and ex > 0 then rw = ex / 2 end
+            if vp.geometryValid ~= true then
+                if rl and rl > hl then hl = rl end
+                if rw and rw > hw then hw = rw end
+            end
+        end
+        local cx, cz = com and com:x(), com and com:z()
+        if finite(cx) and finite(cz) then comX, comZ = cx, cz end
+    end
+    sm.shHL, sm.shHW, sm.shComX, sm.shComZ = hl + TUNE.SUMMON_SH_PAD, hw + TUNE.SUMMON_SH_PAD, comX, comZ
+    sm.shRL, sm.shRW = rl or hl, rw or hw
     sm.probe = MDADSensor.newState()
     return true
 end
@@ -20660,9 +20934,27 @@ function Drive.summonLineClear(sm, vehicle, ax, ay, bx, by, strict)
     local fx, fy = dx / len, dy / len
     local cell = getCell()
     local step = sm.halfL
+    -- 停車姿態與 E→T 直線不壓召喚者不能進的安全屋（名單由 Drive.summonSpot 建）；車身中心套腳本重心（本地 +x＝(fy,−fx)）。
+    -- 直線從車位起、車身已壓到的屋（r.in0，出屋）：只要不比起點深（往外或沿邊開）；停車姿態照樣不能壓。
+    local sh, comX, comZ = sm.shSpot and sm.shSpot[1] and sm.shSpot, sm.shComX, sm.shComZ
     local t = 0
     while true do
-        local st = MDADSensor.probeNear(sm.probe, vehicle, cell, ax + fx * t, ay + fy * t, fx, fy, -fy, fx,
+        local px, py = ax + fx * t, ay + fy * t
+        if sh then
+            local hx, hy = px + fx * comZ + fy * comX, py + fy * comZ - fx * comX
+            for i = 1, #sh do
+                local r = sh[i]
+                local d = Drive.summonShOne(r, hx, hy, fx, fy, sm.shHL, sm.shHW)
+                if strict or not r.in0 then
+                    if d > 0 then return false end
+                elseif t == 0 then
+                    r.d0 = d
+                elseif d > r.d0 + 1e-6 then
+                    return false
+                end
+            end
+        end
+        local st = MDADSensor.probeNear(sm.probe, vehicle, cell, px, py, fx, fy, -fy, fx,
             sm.halfW, sm.halfL)
         sm.probeN = (sm.probeN or 0) + 1 -- summonSpot 的成本上限（SUMMON_SPOT_PROBE_MAX）
         if st == "hard" or st == "unloaded" or (strict and st ~= "clear") then return false end
@@ -20679,12 +20971,20 @@ end
 -- 線尾那次第 37 個候選才第一個可停）；姿態不佔直線預檢的額度，否則額度在牆邊用完、退回路網終點。
 -- ponytail: probeNear 最多 SUMMON_SPOT_PROBE_MAX 個、直線最多 SUMMON_SPOT_MAX 次、半徑 SUMMON_SPOT_R，找不到就停在路網終點
 -- （spot=road）；不繞牆或樹排（要繞得另做格子 A*）。summonFetch 一次最多叫兩次（直線模式失敗再做線尾），每次各自一份額度。
-function Drive.summonSpot(sm, vehicle, ex, ey, cx, cy, maxLeg)
+function Drive.summonSpot(sm, vehicle, ex, ey, cx, cy, maxLeg, fromCar)
     local cell = getCell()
     if not cell then return nil end
     local come = sm.mode == "come"
     local player = getSpecificPlayer(sm.playerNum)
     local px, py = player:getX(), player:getY()
+    sm.shSpot = Drive.summonShList(player, ex, ey, maxLeg + Drive.summonShRadius(sm)) -- 候選姿態與直線都在 E 的 maxLeg 內
+    if fromCar and sm.shSpot[1] then -- E＝車位：實車身已壓到的屋標 in0（出屋的直線，Drive.summonLineClear）
+        local x, y, fx, fy = Drive.summonShPose(sm, vehicle)
+        for i = 1, #sm.shSpot do
+            local r = sm.shSpot[i]
+            r.in0 = Drive.summonShOne(r, x, y, fx, fy, sm.shRL, sm.shRW) > 0 or nil
+        end
+    end
     local keep = sm.halfL + 1.5
     local band = sm.halfW + 1
     local gx0, gy0 = math.floor(cx), math.floor(cy)
@@ -20841,7 +21141,7 @@ function Drive.summonFetch(api, playerNum, sm, vehicle)
     end
     local vx, vy = vehicle:getX(), vehicle:getY()
     if (qx - vx) * (qx - vx) + (qy - vy) * (qy - vy) <= TUNE.SUMMON_DIRECT_M * TUNE.SUMMON_DIRECT_M then
-        local tx, ty, pX, pY = Drive.summonSpot(sm, vehicle, vx, vy, qx, qy, TUNE.SUMMON_DIRECT_M + TUNE.SUMMON_END_EXT_M)
+        local tx, ty, pX, pY = Drive.summonSpot(sm, vehicle, vx, vy, qx, qy, TUNE.SUMMON_DIRECT_M + TUNE.SUMMON_END_EXT_M, true)
         if tx then
             sm.qx, sm.qy, sm.baseRoute = qx, qy, nil
             sm.route, sm.parkX, sm.parkY = Drive.summonLine(vx, vy, pX, pY), tx, ty
@@ -20895,8 +21195,11 @@ end
 -- 結束事件（Drive.stop 與 arrive 收尾在 diagStop 之前呼叫）
 function Drive.summonNoteEnd(s, playerNum)
     local sm = s.summon
+    local sh = sm.code == "SAFEHOUSE" and sm.shX ~= nil -- 只帶確認擋下的那一次（重問後放行的暫定命中不算）
     diagEvent(s, playerNum, "summon", { phase = "end", why = sm.code or "CANCELLED", vid = sm.vid, d = sm.dist,
-        ms = getTimestampMs() - sm.startedMs })
+        ms = getTimestampMs() - sm.startedMs, hitX = sh and sm.shX or nil, hitY = sh and sm.shY or nil,
+        w = sh and sm.shW or nil, len = sh and sm.shH or nil, need = sh and sm.shNeed or nil,
+        speed = sh and sm.shKmh or nil, m = sh and sm.shM or nil, kind = sh and sm.shKind or nil })
     if getDebug() then -- telemetry: summon end 事件（why vid d ms）
         print(LOG .. "summon end pn=" .. playerNum .. " vid=" .. tostring(sm.vid) .. " code=" .. tostring(sm.code))
     end
