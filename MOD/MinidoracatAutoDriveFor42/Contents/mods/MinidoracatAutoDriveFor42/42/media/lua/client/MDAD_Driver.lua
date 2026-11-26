@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1126d"
+Drive.REV = "1126f"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -405,7 +405,8 @@ TUNE.KEEP_RIGHT_RAMP_RISE_M = 0.5
 -- 弧上往彎外漂沒有預算。左彎（航向遞減＝彎心在 −l 側，彎外＝靠右那側）的路邊硬物，留邊加 ARC_S2×v²/R（v、R＝該弧剖面
 -- 計畫速度與圓角半徑；正式服 483 段片段 ≥55 km/h 外漂÷側向加速度 p90 0.12–0.18 s²，本案 0.118），上限 RAMP_M；進弧後
 -- RAMP_BACK_M 爬滿、出弧後同長退完；計畫速 ARC_KMH0 以下 0、到 ARC_KMH1 爬滿（<40 km/h 實測中位數切內）。與放回區段預算
--- 取大不相加；有掛車不加。只收常駐線，不壓速（R97 要壓到外漂 <0.3 m 得降到 56–61 km/h）。
+-- 取大；弧起點前也在放回（S 彎，1126 P158）時相加，進弧 RAMP_BACK_M 後線性退回取大（Drive.shyBudget）；有掛車不加。
+-- 只收常駐線，不壓速（R97 要壓到外漂 <0.3 m 得降到 56–61 km/h）。
 TUNE.KEEP_RIGHT_ARC_S2 = 0.12
 TUNE.KEEP_RIGHT_ARC_KMH0 = 30
 TUNE.KEEP_RIGHT_ARC_KMH1 = 50
@@ -5109,7 +5110,8 @@ function Drive.softKeepSide(s, pS, pL, predN, sFrom, sTo, want, why, threatS, th
     if w ~= nil and ((why == "gap" and (want - threatL) * (w - threatL) < 0)
                 or why == "nogap" or why == "least" or why == "curve")
             and w >= aLo - TUNE.SOFT_HARD_JITTER_M and w <= aHi + TUNE.SOFT_HARD_JITTER_M
-            and (nLo == nil or (w > nLo and w < nHi)) then
+            and (nLo == nil or (w > nLo and w < nHi))
+            and (s.softArcCap == nil or w <= s.softArcCap) then -- 彎外留邊是實體上限，不給取樣跳動的容許（Drive.arcBandCap）
         local clear = true
         for i = 1, predN do
             local zs = pS[i]
@@ -5354,8 +5356,10 @@ end
 -- 穿越夾在中間的硬物。帶緣再讓出 SOFT_HARD_JITTER_M（1002t）：hardL 記的是命中那條取樣柱的 l，同一格牆隨取樣
 -- 相位在一格內跳動（正式服 0.17.0 clip-02：−2.97／−2.54／−2.02），貼著帶緣選的 lane（只留 0.057m）下一輪就落進
 -- 牆的擋線帶 → 硬規劃從車旁判堵、52 km/h 鎖輪。讓出的量不蓋過車身現在的位置（帶不因此收成空）。
+-- 彎外硬點另照常駐線的留邊收帶上緣（Drive.arcBandCap，1126 P06）。
 function Drive.softBand(s, sen, resident, latNow, sFrom, sTo, keep)
     local aLo, aHi = resident - TUNE.ZOMBIE_LANE_DELTA, resident + TUNE.ZOMBIE_LANE_DELTA
+    s.softArcKra, s.softArcCap = nil, nil
     local idx = s.fstate.idx
     local roomR, roomL = s.profile.laneRoomR, s.profile.laneRoomL
     local rr, rl = 99, -99
@@ -5387,6 +5391,8 @@ function Drive.softBand(s, sen, resident, latNow, sFrom, sTo, keep)
                 local e = lo - jit
                 if e < origin then e = origin end
                 if e < aHi then aHi = e end
+                local cap = Drive.arcBandCap(s, sen, i, hs, resident, aHi)
+                if cap then aHi = cap end
             elseif origin >= hi then
                 local e = hi + jit
                 if e > origin then e = origin end
@@ -5397,6 +5403,31 @@ function Drive.softBand(s, sen, resident, latNow, sFrom, sTo, keep)
         end
     end
     return aLo, aHi, rr < 99
+end
+
+-- 軟縫可行帶上緣的彎外留邊（1126 P06：殭屍縫把線推過常駐線的弧上留邊、擦彎外冬青）：+l 側硬點 i 在左彎弧上有外漂預算時，
+-- 帶上緣不超過常駐線同一把尺 face − KEEP_RIGHT_CLEAR_M − 預算（Drive.shyBudget）− halfW；下限常駐值（常駐線本身不判出帶外），
+-- 也不跟車身現在的橫向放寬（車在弧上外漂時 softBand 的 origin 夾會讓帶跟著外移）。比 aHi 緊才回，否則 nil；
+-- 收到時記 s.softArcKra／s.softArcCap（zombie plan 事件 kra／want）。不壓速、只收選縫範圍（09-25「閃不過就直接撞」）。
+function Drive.arcBandCap(s, sen, i, hs, resident, aHi)
+    local prof, vp = s.profile, s.vehicleProfile
+    if s.tow ~= nil or type(prof) ~= "table" or prof.ready ~= true or type(vp) ~= "table" or not finite(vp.halfW)
+            or not finite(resident) or not finite(s.lastSNow) then
+        return nil
+    end
+    local j = MDADFollower.segIndexAt(prof, hs)
+    local l, rad = Drive.hardFace(prof, sen, i, j, hs)
+    if not l then return nil end
+    local base = l - rad - TUNE.KEEP_RIGHT_CLEAR_M - vp.halfW
+    if base - 2 * TUNE.KEEP_RIGHT_RAMP_M >= aHi then return nil end -- 預算最大也收不到
+    local vcap = finite(s.gearCap) and s.gearCap > 0 and s.gearCap / 3.6 or nil
+    local extra, _, _, _, arcRaw = Drive.shyBudget(prof, j, hs, s.keepReach, hs > s.lastSNow + TUNE.KEEP_RIGHT_LOOK_M, false, vcap, nil)
+    if arcRaw <= 0 then return nil end
+    local cap = base - extra
+    if cap < resident then cap = resident end
+    if cap >= aHi then return nil end
+    s.softArcKra, s.softArcCap = extra, cap
+    return cap
 end
 
 -- 大型動物與玩家佔位兩側另加的舒適餘裕（TUNE.SOFT_COMFORT_M）；其他種類 0
@@ -5652,6 +5683,7 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
         end
     end
     s.zomBlindN, s.zomBlindGen = nb, s.routeGen
+    s.softArcKra, s.softArcCap = nil, nil -- 本輪沒跑 Drive.softBand（hold／clear）＝zombie plan 事件不帶 kra／want
     if s.zombieAvoidRouteGen == s.routeGen and finite(s.zombieAvoidUntilS)
             and finite(s.zombieAvoidS) and finite(s.zombieAvoidLane)
             and rs < s.zombieAvoidUntilS and s.zombieAvoidS < rs + MDADSensor.SCAN_NEAR then
@@ -5801,11 +5833,13 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
                 s.zombieKeep0 = true
             else
                 want, why, nextCap, aLo, aHi, slowLo, slowHi = w1, y1, n1, lo1, hi1, sl1, sh1
+                s.softArcKra, s.softArcCap = s.softArcKra1, s.softArcCap1 -- 彎外留邊跟著①的帶一起還原
             end
         elseif why == "gap" or not roomKnown then
             break
         end
         w1, y1, n1, lo1, hi1, sl1, sh1 = want, why, nextCap, aLo, aHi, slowLo, slowHi
+        s.softArcKra1, s.softArcCap1 = s.softArcKra, s.softArcCap
         s.softKeepTry = 0
         end -- for keepTry
         s.softKeepTry = s.zombieKeep0 and 0 or nil
@@ -5902,10 +5936,11 @@ zombieLaneOf = function(s, resident, now, playerNum, speedKmh)
         if s.zombieKeep0 then pts = "keep0" .. pts end
         -- 1008：lat＝車身、tl＝最近威脅 l、rb／rl＝車身／舊 laneBias 速率的可及量、ns＝近威脅限側基準（body 車身／keep 沿用
         -- 上一輪走向；遠威脅缺）、rej＝沒縫但舊模型會選到縫（reach 可及量拒／side 不跨同群拒）
+        -- kra／want：可行帶上緣被彎外留邊收（Drive.arcBandCap，1126）時的預算與收到的上緣
         diagEvent(s, playerNum, "zombie", { phase = "plan", why = why,
             l = cur, offL = want, s = threatS, rs = rs, a = aLo, b = aHi, hn = sen.zomN, detail = pts,
             lat = latNow, tl = threatL, rb = rb, rl = rl, ns = nSrc, rej = rej,
-            sFrom = sFrom, sTo = sTo }) -- 2026-10-10：選縫視窗（弧長；console zombie lane 的 win）
+            sFrom = sFrom, sTo = sTo, kra = s.softArcKra, want = s.softArcCap }) -- 2026-10-10：選縫視窗（弧長；console zombie lane 的 win）
     end
     if getDebug() and (sen.zomN > 0 or s.zombieLane ~= nil) then -- telemetry: 樣本 zwh／zwt／zln／zombieLaneCap＋zombie plan 事件
         -- 前三個軟避讓點（殭屍一點、屍體兩端）相對車位的 (s−rs, l)；
@@ -5963,8 +5998,10 @@ end
 -- 靠右 1m 時兩車淨距 0.2m——玩家看到的「還是走在中線上」。窄路由 Follower 的 laneRoom 夾限收回。
 function Drive.keepRightTarget(s)
     local ratio = s.laneRatio
-    s.keepArc = nil
-    if not finite(ratio) or ratio <= 0 then return 0 end
+    if not finite(ratio) or ratio <= 0 then
+        s.keepArc, s.keepRamp, s.keepReach = nil, nil, nil
+        return 0
+    end
     local w
     local p, idx = s.profile, s.fstate.idx
     if type(p) == "table" and type(p.segWidth) == "table" and finite(idx) then
@@ -5990,7 +6027,8 @@ end
 -- 而不收，整排擦著過。
 function Drive.keepRightShy(s, target)
     local sen, prof, vp = s.sensor, s.profile, s.vehicleProfile
-    s.keepArc = nil
+    local hadArc = s.keepArc
+    s.keepArc, s.keepRamp, s.keepReach = nil, nil, nil
     if not finite(target) or target <= 0 or type(sen) ~= "table" or not sen.ready
             or type(prof) ~= "table" or prof.ready ~= true or type(vp) ~= "table"
             or not finite(vp.halfW) or not finite(s.lastSNow) then return target end
@@ -6000,48 +6038,44 @@ function Drive.keepRightShy(s, target)
     local rawNow, rawReach = cur + rb, (target > cur and target or cur) + rb
     if rawNow > bm then rawNow = bm elseif rawNow < -bm then rawNow = -bm end
     if rawReach > bm then rawReach = bm elseif rawReach < -bm then rawReach = -bm end
+    -- 收之前的靠右落點（未收）：軟縫帶與繞行出口判 S 彎相加（Drive.shyBudget）用；拿收完的會在收斂後失去 rise 而振盪
+    s.keepReach = rawReach
     -- 弧上外漂預算另看到 KEEP_RIGHT_ARC_LOOK_M（far）：只收有弧預算的硬點、不參與「已在車身帶內就整輪不收」
     local sNear = s.lastSNow + TUNE.KEEP_RIGHT_LOOK_M
     local s0, s1 = s.lastSNow - (vp.halfL or 0), s.lastSNow + math.max(TUNE.KEEP_RIGHT_LOOK_M, TUNE.KEEP_RIGHT_ARC_LOOK_M)
-    local best, bestArc, bestI, bestGap, bestL, bestLat = target, 0, nil, nil, nil, nil
+    local best, bestArc, bestI, bestGap, bestL, bestLat, bestRamp = target, 0, nil, nil, nil, nil, 0
     local towing = s.tow ~= nil
     local vcap = finite(s.gearCap) and s.gearCap > 0 and s.gearCap / 3.6 or nil -- 剖面 prof.v 不含檔位上限
     for i = 1, sen.hardN do
         local hs = sen.hardS[i]
         if finite(hs) and hs >= s0 and hs <= s1 then
             local j = MDADFollower.segIndexAt(prof, hs)
-            local h, ds = prof.segH[j], hs - prof.s[j]
-            if finite(h) and finite(ds) then
-                local sh, ch = sin(h), cos(h)
-                local bh = sen.hardB and sen.hardB[i] or 0
-                local rad = (type(bh) == "number" and bh > 0) and bh * (math.abs(sh) + math.abs(ch))
-                    or (sen.hardR[i] or 0) -- 方塊取它在路線橫向的半寬
-                local l = (sen.hardX[i] - prof.x[j] - ds * ch) * -sh + (sen.hardY[i] - prof.y[j] - ds * sh) * ch
+            local l, rad = Drive.hardFace(prof, sen, i, j, hs)
+            if l then
                 local face = l - rad
                 local edgeNow = MDADFollower.laneBiasAt(prof, rawNow, j, hs) + vp.halfW
                 local far = hs > sNear
-                if not far and face < edgeNow and l + rad > edgeNow - 2 * vp.halfW then return target end
-                local laneHere = MDADFollower.laneBiasAt(prof, rawReach, j, hs)
-                local clear = TUNE.KEEP_RIGHT_CLEAR_M
-                local gap = face - laneHere - vp.halfW
-                if face >= edgeNow and gap < clear + TUNE.KEEP_RIGHT_RAMP_M then
-                    -- 放回區段（這裡的常駐落點比 RAMP_BACK_M 前往右多 ≥RAMP_RISE_M）：留邊含過衝預算（1026e NC2）
-                    local sb = hs - TUNE.KEEP_RIGHT_RAMP_BACK_M
-                    if sb < 0 then sb = 0 end
-                    local extra = 0
-                    if not far and laneHere - MDADFollower.laneBiasAt(prof, rawReach, MDADFollower.segIndexAt(prof, sb), sb)
-                            >= TUNE.KEEP_RIGHT_RAMP_RISE_M then
-                        extra = TUNE.KEEP_RIGHT_RAMP_M
+                if not far and face < edgeNow and l + rad > edgeNow - 2 * vp.halfW then
+                    -- 上一輪還有弧預算收線、這一輪被整輪不收打斷：記下打斷的硬點（Drive.keepArcNote 記 shy phase=skip，1126 P158；
+                    -- 同一段收線（同一個 kra 硬點）內每個打斷點只記一次，s.keepSkipSeen 在換 kra 硬點時清）
+                    local key = hadArc and sen.hardX[i] * 100000 + sen.hardY[i]
+                    if key and not (s.keepSkipSeen and s.keepSkipSeen[key]) then
+                        s.keepSkipSeen = s.keepSkipSeen or {}
+                        s.keepSkipSeen[key] = true
+                        s.keepSkipX, s.keepSkipY, s.keepSkipS, s.keepSkipNew = sen.hardX[i], sen.hardY[i], hs, true
                     end
-                    -- 左彎弧上的外漂預算（1123b），與放回預算取大
-                    local arc, alat = 0, nil
-                    if not towing then arc, alat = Drive.arcOutBudget(prof, j, hs, vcap) end
-                    if arc > extra then extra = arc else arc = 0 end
-                    clear = clear + extra
+                    return target
+                end
+                local laneHere = MDADFollower.laneBiasAt(prof, rawReach, j, hs)
+                local gap = face - laneHere - vp.halfW
+                -- 粗篩：留邊最多 CLEAR＋2×RAMP_M（S 彎相加）
+                if face >= edgeNow and gap < TUNE.KEEP_RIGHT_CLEAR_M + 2 * TUNE.KEEP_RIGHT_RAMP_M then
+                    local extra, arc, alat, ramp = Drive.shyBudget(prof, j, hs, rawReach, far, towing, vcap, laneHere)
+                    local clear = TUNE.KEEP_RIGHT_CLEAR_M + extra
                     if gap < clear and (arc > 0 or not far) then
                         local want = face - clear - vp.halfW - rb
                         if want < best then
-                            best, bestArc, bestI, bestGap, bestL, bestLat = want, arc, i, gap, l, alat
+                            best, bestArc, bestI, bestGap, bestL, bestLat, bestRamp = want, arc, i, gap, l, alat, ramp
                         end
                     end
                 end
@@ -6052,14 +6086,68 @@ function Drive.keepRightShy(s, target)
     if bestArc > 0 then
         s.keepArc, s.keepArcX, s.keepArcY = bestArc, sen.hardX[bestI], sen.hardY[bestI]
         s.keepArcS, s.keepArcL, s.keepArcGap, s.keepArcLat, s.keepArcWant = sen.hardS[bestI], bestL, bestGap, bestLat, best
+        if bestRamp > 0 then s.keepRamp = bestRamp end
     end
     return best
+end
+
+-- 硬點 i 在剖面段 j（弧長 hs）的路線橫向 l 與沿路線橫向的半寬 rad（方塊取投影半寬；Drive.keepRightShy／Drive.softBand／
+-- Drive.exitArcRoom 共用）。段航向不是數＝nil。
+function Drive.hardFace(prof, sen, i, j, hs)
+    local h, ds = prof.segH[j], hs - prof.s[j]
+    if not finite(h) or not finite(ds) then return nil end
+    local sh, ch = sin(h), cos(h)
+    local bh = sen.hardB and sen.hardB[i] or 0
+    local rad = (type(bh) == "number" and bh > 0) and bh * (math.abs(sh) + math.abs(ch)) or (sen.hardR[i] or 0)
+    return (sen.hardX[i] - prof.x[j] - ds * ch) * -sh + (sen.hardY[i] - prof.y[j] - ds * sh) * ch, rad
+end
+
+-- 彎外硬點（剖面段 j、弧長 hs）在 KEEP_RIGHT_CLEAR_M 之外的留邊預算（Drive.keepRightShy 每個過粗篩的硬點、Drive.softBand／
+-- Drive.exitArcRoom 只在硬點可能收得到時呼叫；冷路徑）。reach＝未收的靠右落點（s.keepReach，nil＝不判放回）、far＝超過 LOOK_M。
+-- 放回預算 RAMP_M（近處、RAMP_BACK_M 內落點升 ≥RAMP_RISE_M，1026e NC2）與左彎弧上外漂預算（Drive.arcOutBudget，1123b）取大；
+-- 弧起點前 RAMP_BACK_M 到硬點落點升 ≥RAMP_RISE_M（S 彎：右弧內側夾限放回接左弧，1126 P158）時兩者相加——放回帶進的橫向速度
+-- 與弧上外漂是兩個來源。相加只在進弧 RAMP_BACK_M 內全額、到 2×RAMP_BACK_M 線性退完（放回的橫向速度在進弧段就用完；不退的話
+-- 長左彎整段多收 RAMP_M），相加比取大小就取大。laneHere＝reach 在 hs 的落點（呼叫端算過就傳，省一次 laneBiasAt）。
+-- 回 extra, arc（kra 歸因：弧預算沒定案＝0）, alat, ramp（相加的放回量，0＝沒相加）, arcRaw（實際弧預算；近處放回較大時 arc＝0
+-- 但 arcRaw 仍是正的——軟縫與繞行出口看這個判「有沒有彎外外漂」）。
+function Drive.shyBudget(prof, j, hs, reach, far, towing, vcap, laneHere)
+    local back, rise = TUNE.KEEP_RIGHT_RAMP_BACK_M, TUNE.KEEP_RIGHT_RAMP_RISE_M
+    if not laneHere then laneHere = finite(reach) and MDADFollower.laneBiasAt(prof, reach, j, hs) or nil end
+    local extra = 0
+    if laneHere and not far then
+        local sb = hs - back
+        if sb < 0 then sb = 0 end
+        if laneHere - MDADFollower.laneBiasAt(prof, reach, MDADFollower.segIndexAt(prof, sb), sb) >= rise then
+            extra = TUNE.KEEP_RIGHT_RAMP_M
+        end
+    end
+    local arc, alat, a0 = 0, nil, nil
+    if not towing then arc, alat, a0 = Drive.arcOutBudget(prof, j, hs, vcap) end
+    local ramp = 0
+    if arc > 0 and laneHere and finite(a0) then
+        local w = 2 - (hs - a0) / back
+        if w > 1 then w = 1 end
+        local sb = a0 - back
+        if sb < 0 then sb = 0 end
+        if w > 0 and laneHere - MDADFollower.laneBiasAt(prof, reach, MDADFollower.segIndexAt(prof, sb), sb) >= rise then
+            ramp = TUNE.KEEP_RIGHT_RAMP_M * w
+        end
+    end
+    local arcRaw = arc
+    if ramp > 0 and arc + ramp > extra then
+        extra = arc + ramp
+    elseif arc > extra then
+        extra, ramp = arc, 0
+    else
+        arc, ramp = 0, 0
+    end
+    return extra, arc, alat, ramp, arcRaw
 end
 
 -- 左彎弧上的彎外漂留邊預算（常數註解見 TUNE.KEEP_RIGHT_ARC_S2；Drive.keepRightShy 對過粗篩的硬點每輪呼叫，冷路徑）：硬點弧長 hs
 -- （剖面段 j）往回 RAMP_BACK_M 內最近的 SEG_ARC 段，航向遞減（彎心在 −l 側；判法同 Drive.towArcRuns）才算，先遇到反向弧＝0
 -- （S 彎不併段）；同向相連的併成一段。vcap（m/s，檔位上限；nil＝不夾）夾剖面速度：prof.v 弧上＝sqrt(aLat·R) 不含檔位，
--- 不夾的話 v²/R 恆等於車的側向極限、跟檔位無關（審查 H1）。回 預算 m, 該段最大側向加速度 m/s²。
+-- 不夾的話 v²/R 恆等於車的側向極限、跟檔位無關（審查 H1）。回 預算 m, 該段最大側向加速度 m/s², 弧起點弧長（預算 0 時省略）。
 function Drive.arcOutBudget(prof, j, hs, vcap)
     local kind, fr, sh, ss, v, n, ARC = prof.segKind, prof.filletRadius, prof.segH, prof.s, prof.v, prof.n, MDADDynamics.SEG_ARC
     if type(kind) ~= "table" or type(fr) ~= "table" or type(v) ~= "table" or not finite(n) then return 0 end
@@ -6098,7 +6186,7 @@ function Drive.arcOutBudget(prof, j, hs, vcap)
     if wv > 1 then wv = 1 elseif wv <= 0 then return 0, alat end
     local budget = TUNE.KEEP_RIGHT_ARC_S2 * alat
     if budget > TUNE.KEEP_RIGHT_RAMP_M then budget = TUNE.KEEP_RIGHT_RAMP_M end
-    return budget * ws * wv, alat
+    return budget * ws * wv, alat, s0
 end
 
 -- 剖面段 i 是不是有半徑的 SEG_ARC、往哪彎：−1＝航向遞減（彎心在 −l 側）、1＝遞增、0＝不是弧（同 Drive.towArcRuns 的 dh）
@@ -6110,17 +6198,26 @@ function Drive.arcSign(i, kind, fr, sh, n, ARC)
     return dh < 0 and -1 or (dh > 0 and 1 or 0)
 end
 
--- 弧上外漂預算收了常駐線的那個硬點（s.keepArc，Drive.keepRightShy 寫）換了就記一筆 shy phase=arc（同一個硬點只記一次）
+-- 弧上外漂預算收了常駐線的那個硬點（s.keepArc，Drive.keepRightShy 寫）換了就記一筆 shy phase=arc（同一個硬點只記一次；krr＝S 彎
+-- 相加的放回量）；收線被整輪不收打斷就記一筆 shy phase=skip（打斷的硬點，同一個只記一次）
 function Drive.keepArcNote(s, playerNum)
+    if s.keepSkipNew then
+        s.keepSkipNew = nil
+        diagEvent(s, playerNum, "shy", { phase = "skip", x = s.keepSkipX, y = s.keepSkipY, s = s.keepSkipS })
+        if getDebug() then -- telemetry: shy phase=skip（x／y／s）
+            print(string.format("%spn=%d keep-right arc shy skipped by body-band point x=%.1f y=%.1f s=%.1f", LOG, playerNum,
+                s.keepSkipX, s.keepSkipY, s.keepSkipS or 0))
+        end
+    end
     local x, y = s.keepArcX, s.keepArcY
     if not s.keepArc or (x == s.keepArcEvX and y == s.keepArcEvY) then return end
-    s.keepArcEvX, s.keepArcEvY = x, y
+    s.keepArcEvX, s.keepArcEvY, s.keepSkipSeen = x, y, nil -- 新的一段收線：打斷點重新記
     diagEvent(s, playerNum, "shy", { phase = "arc", x = x, y = y, s = s.keepArcS, l = s.keepArcL, gap = s.keepArcGap,
-        kra = s.keepArc, alat = s.keepArcLat, want = s.keepArcWant })
-    if getDebug() then -- telemetry: shy phase=arc（x／y／s／l／gap／kra／alat／want）
-        print(string.format("%spn=%d keep-right arc shy x=%.1f y=%.1f s=%.1f l=%.2f gap=%.2f budget=%.2f alat=%.2f want=%.2f",
+        kra = s.keepArc, alat = s.keepArcLat, want = s.keepArcWant, krr = s.keepRamp })
+    if getDebug() then -- telemetry: shy phase=arc（x／y／s／l／gap／kra／alat／want／krr）
+        print(string.format("%spn=%d keep-right arc shy x=%.1f y=%.1f s=%.1f l=%.2f gap=%.2f budget=%.2f alat=%.2f want=%.2f ramp=%s",
             LOG, playerNum, x, y, s.keepArcS or 0, s.keepArcL or 0, s.keepArcGap or 0, s.keepArc, s.keepArcLat or 0,
-            s.keepArcWant or 0))
+            s.keepArcWant or 0, tostring(s.keepRamp)))
     end
 end
 
@@ -9028,6 +9125,7 @@ local function collectPhys(s, vehicle, fx, fy, expL, latDev)
     if finite(s.fbNorm) and s.fbNorm > 1 then phys.fbNorm = s.fbNorm end
     if finite(s.armExt) and s.armExt > 1 then phys.armExt = s.armExt end
     phys.keepArc = s.keepArc -- 1123b：常駐線被弧上外漂預算收的那個硬點的預算（kra；沒有＝nil）
+    phys.keepRamp, phys.keepWant = s.keepArc and s.keepRamp, s.keepArc and s.keepArcWant -- 1126：krr／krw
     if finite(s.fstate.xtOut) and s.fstate.xtOut > 1 then phys.xtOut = s.fstate.xtOut end
     if s.dodgeAlignHold == true then phys.dodgeAlignHold = true end
     phys.routeHeadingError, phys.kinkExitS = s.lastRouteErr, s.fstate.kinkExitS
@@ -11577,6 +11675,8 @@ local function shapeProfile(s, profile, a, b, c, d, offL, baseL, crawlDesign)
             s.dodgeWindowShort = true
         end
     end
+    -- 彎外留邊（1126 P146）只夾承諾後的出口加長（Drive.extendDodgeExit）：承諾時就縮出口會讓出口空間帽壓整段繞行
+    -- （oracle 審查 I1：側移 2 m 出口 8 m 約 13 km/h，0928f「出口太短降到 10 km/h」重現；10-04 不加速度帽），P146 是加長造成的。
     -- 終點到站（1114h，Drive.endFit）：出口超過路線終點時，停點處的偏移要在到站圈內＝縮出口／挪保持段。改了形狀記
     -- s.endFitHit：這條候選連退路都掃不過時，sweepWithFallbacks 關掉到站形狀（s.endFitOff）照原形狀再掃一次。放不下（nil）＝
     -- 照原形狀（裁定 B：挪不進照舊承諾）。每輪都放不下／都掃不過：每輪同樣退回原形狀＝1114g 行為，不新增否決也不新增迴圈。
@@ -11675,6 +11775,46 @@ function Drive.exitNextRoom(s, sen, c, speedKmh)
     return b2 - s.bodyReach - one - c, b2, o2
 end
 
+-- 繞行出口在左彎弧上的彎外留邊（1126 P146：出口加長五次把轉回段拉過彎外燈柱，燈柱處出口線位約 1.0、加上弧上外漂擦柱）：
+-- 出口 (c, c＋room] 內、offL 比回線落點 base 偏 +l 時，+l 側（回線後仍在車身外）有左彎外漂預算的硬點處，出口線位
+-- （buildOffsetLine 的 smoothstep：base＋(offL−base)·sm((d−hs)/(d−c))）不超過常駐線同一把尺 cap＝face − KEEP_RIGHT_CLEAR_M
+-- − 預算（Drive.shyBudget）− halfW。縮到剛好（smoothstep 反函數，同 Drive.endFit），cap 不高於 base＝縮到硬點處已回線（hs − c）。
+-- 回縮後的 room（原樣＝不限），收到時記 s.exitArcKra／Cap／X／Y。拖車、沒有感測或剖面＝原樣。只給 Drive.extendDodgeExit
+-- 夾加長（不加長＝不變慢）；承諾時的出口不夾（見 shapeProfile 的說明）。
+function Drive.exitArcRoom(s, c, room, offL, baseL)
+    local sen, prof, vp = s.sensor, s.profile, s.vehicleProfile
+    if s.tow ~= nil or type(sen) ~= "table" or not sen.ready or type(sen.hardS) ~= "table" or type(prof) ~= "table"
+            or prof.ready ~= true or type(vp) ~= "table" or not finite(vp.halfW) or not finite(c) or not finite(room)
+            or room <= 0 or not finite(offL) or not finite(baseL) or not finite(s.lastSNow) then
+        return room
+    end
+    local vcap = finite(s.gearCap) and s.gearCap > 0 and s.gearCap / 3.6 or nil
+    local near, out = s.lastSNow + TUNE.KEEP_RIGHT_LOOK_M, room
+    for i = 1, sen.hardN or 0 do
+        local hs = sen.hardS[i]
+        if finite(hs) and hs > c and hs < c + out then
+            local j = MDADFollower.segIndexAt(prof, hs)
+            local base = MDADFollower.laneBiasAt(prof, baseL, j, hs)
+            local l, rad = Drive.hardFace(prof, sen, i, j, hs)
+            local top = l and l - rad - TUNE.KEEP_RIGHT_CLEAR_M - vp.halfW
+            -- 只看回線後仍在車身外側（+l）的硬點：回線軌跡左側的點不給往右的上限（審查：彎內 l −4 的樹會被誤當彎外）
+            if top and offL > base and l - rad - vp.halfW > base and top - 2 * TUNE.KEEP_RIGHT_RAMP_M < offL then
+                local extra, _, _, _, arcRaw = Drive.shyBudget(prof, j, hs, s.keepReach, hs > near, false, vcap, nil)
+                local cap = top - extra
+                if arcRaw > 0 and cap < offL then
+                    local q, lim = (cap - base) / (offL - base), hs - c
+                    if q > 0 then lim = lim / (1 - (0.5 - math.sin(math.asin(1 - 2 * q) / 3))) end
+                    if lim < out then
+                        out = lim
+                        s.exitArcKra, s.exitArcCap, s.exitArcX, s.exitArcY = extra, cap, sen.hardX[i], sen.hardY[i]
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
 -- 承諾後出口加長（0928f；E2E rc2–rc4：40–70m 外就看到障礙、出口被當下的可視範圍截到 2–6m，
 -- 空間帽 0 → 整段繞行最後降到 10 km/h；10/89 筆承諾是這型）。車還沒到出口時，可視範圍跟著車前進；
 -- 前緣容得下更長的出口就用同一組 a/b/c/offL、同一個起始 lane 重建整條線（進入段與保持段
@@ -11706,6 +11846,7 @@ function Drive.extendDodgeExit(s, sen, playerNum)
         if nextRoom < room then room = nextRoom end
         short = have > room + TUNE.EXIT_SHORTEN_MIN_M
     end
+    local arcWhy = nil
     if not short then
         if have >= room - TUNE.EXIT_EXTEND_MIN_M then return false end
         local peak = turnPeakS(prof, c, rs + TUNE.DODGE_OV_SPAN + 6)
@@ -11713,7 +11854,27 @@ function Drive.extendDodgeExit(s, sen, playerNum)
         if rs + TUNE.DODGE_OV_SPAN - c < room then room = rs + TUNE.DODGE_OV_SPAN - c end
         local cov = visibleEndS(sen, rs) - 1 - s.bodyReach - c
         if cov < room then room = cov end
-        if room < have + TUNE.EXIT_EXTEND_MIN_M then return false end
+        if room < have + TUNE.EXIT_EXTEND_MIN_M then return false end -- 本來就不夠加長：不歸因彎外留邊
+        -- 彎外留邊（1126 P146，Drive.exitArcRoom）：加長不把出口轉回段拉過彎外硬點；夾到不夠加長＝不加長，
+        -- 不設 dodgeExtendFailS（不是掃不過；同一次承諾內每個硬點只記一次 arc-hold，s.exitArcHeld 在 commit 時清）
+        local arcRoom = Drive.exitArcRoom(s, c, room, fs.offL, s.dodgeBaseL)
+        if arcRoom < room then
+            room, arcWhy = arcRoom, "arc"
+            if room < have + TUNE.EXIT_EXTEND_MIN_M then
+                local key = s.exitArcX * 100000 + s.exitArcY
+                if not (s.exitArcHeld and s.exitArcHeld[key]) then
+                    s.exitArcHeld = s.exitArcHeld or {}
+                    s.exitArcHeld[key] = true
+                    diagEvent(s, playerNum, "dodge", { phase = "extend", why = "arc-hold", c = c, d = fs.offD, len = room,
+                        rs = rs, x = s.exitArcX, y = s.exitArcY, kra = s.exitArcKra, want = s.exitArcCap })
+                    if getDebug() then -- telemetry: dodge phase=extend why=arc-hold（x／y／kra／want／len）
+                        print(string.format("%spn=%d dodge exit held by arc margin: c=%.1f exit %.1f room %.1f hard=%.1f,%.1f budget=%.2f cap=%.2f",
+                            LOG, playerNum, c, have, room, s.exitArcX, s.exitArcY, s.exitArcKra, s.exitArcCap))
+                    end
+                end
+                return false
+            end
+        end
     end
     -- 到站夾（1114h，Drive.endFit 以 b＝c 只縮出口）：加長後出口超過終點、停點處偏移出到站圈時，出口縮到 e（停點處剛好回到圈內）。
     -- 只有加長會碰到：收短時 c＋room ≤ offD−2 ＜ 路線長−3（上面 offD ≥ 路線長−1 已早退），endFit 一定原樣（1114p 補測 (ext-short-end)）。
@@ -11784,11 +11945,13 @@ function Drive.extendDodgeExit(s, sen, playerNum)
         s.dodgeSpaceBaseCap = math.min(spaceCap(s.dodgeEntryLength), spaceCap(room))
     end
     diagEvent(s, playerNum, "dodge", { phase = "extend", c = c, d = d2, len = room, m = margin, rs = rs,
-        why = short and "short" or (nextRoom and "next" or nil), blocker = nextB, l = nextL, dbl = s.dodgeBaseL })
-    if getDebug() then -- telemetry: dodge phase=extend（why short／next、blocker＝下一群 b2、l＝那群縫 lane）
-        print(string.format("%spn=%d dodge exit %s: c=%.1f d %.1f -> %.1f (exit %.1f -> %.1f) m=%.2f rs=%.1f next=%s,%s",
+        why = short and "short" or arcWhy or (nextRoom and "next" or nil), blocker = nextB, l = nextL, dbl = s.dodgeBaseL,
+        x = arcWhy and s.exitArcX or nil, y = arcWhy and s.exitArcY or nil, kra = arcWhy and s.exitArcKra or nil,
+        want = arcWhy and s.exitArcCap or nil })
+    if getDebug() then -- telemetry: dodge phase=extend（why short／arc／next、blocker＝下一群 b2、l＝那群縫 lane、arc 的 x／y／kra／want）
+        print(string.format("%spn=%d dodge exit %s: c=%.1f d %.1f -> %.1f (exit %.1f -> %.1f) m=%.2f rs=%.1f next=%s,%s arc=%s",
             LOG, playerNum, short and "shortened" or "extended", c, c + have, d2, have, room, margin, rs,
-            tostring(nextB), tostring(nextL)))
+            tostring(nextB), tostring(nextL), tostring(arcWhy and s.exitArcKra)))
     end
     return true
 end
@@ -16291,6 +16454,7 @@ local function replan(s, vehicle, playerNum)
                 dbs = Drive.dodgeHomeSrc(s), -- 1026g T13：dbl 是哪一種 lane（ret／chain／trans／zombie／traffic／tow／keep／center／other）
                 -- 1114h 終點到站形狀（sweepWithFallbacks）：fit＝出口改到停點前到站圈內、fell＝改了掃不過退回原形狀（到不了站）、缺＝沒碰到
                 ef = s.dodgeEndFit })
+            s.exitArcHeld = nil -- 新承諾：arc-hold 去重重來
             Drive.proofTightArm(s, playerNum) -- 停下之後的窄線爬行（TUNE.PROOF_TIGHT_KMH）
             if getDebug() then -- telemetry: dodge commit 事件（cap 分解同欄）
                 -- cap 分解一行印清楚（2026-09-04 實機三段 8／15／14 km/h 繞行，console
@@ -17376,7 +17540,11 @@ local function stepFollow(s, vehicle, playerNum, now)
                 end
                 if not s.sensor.wideDone then
                     s.sandBias = s.sandBias + (Drive.keepRightTarget(s) - s.sandBias) * TUNE.ROAD_EMA
-                    if s.cutHeld then s.keepArc = nil else Drive.keepArcNote(s, playerNum) end -- 改線持有不靠右（下一段）
+                    if s.cutHeld then -- 改線持有不靠右（下一段）；收線的弧／放回狀態一起清（不讓軟縫與出口用到舊的相加）
+                        s.keepArc, s.keepRamp, s.keepReach = nil, nil, nil
+                    else
+                        Drive.keepArcNote(s, playerNum)
+                    end
                 end
                 -- 改線持有、車還沒過完（s.cutHeld，Drive.cutCap）：常駐線＝掃過的改線（新剖面 l＝0），不靠右、不路面對中（1114i；
                 -- rc-prod-1114 R1 1114h car-c：cutover 後常駐線是入臂留下的靠右 0.37，規劃器以那條判擋、起停留繞行 offL −0.5，

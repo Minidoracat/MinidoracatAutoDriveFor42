@@ -255,8 +255,8 @@ local EK = {
     -- （vup：tow lost 的 up 是掛車的，不共用）
     "pz", "vup",
     -- 1123b shy phase=arc（Driver Drive.keepArcNote）：弧上外漂預算 m、該弧最大側向加速度 m/s²、收完的靠右目標；
-    -- tilt phase=end（Drive.tiltHold）：停輸出期間最低朝上程度
-    "kra", "alat", "want", "vmin",
+    -- tilt phase=end（Drive.tiltHold）：停輸出期間最低朝上程度；1126 krr＝S 彎相加的放回量 m（Drive.shyBudget）
+    "kra", "alat", "want", "vmin", "krr",
 }
 
 local function logOnce(msg)
@@ -1488,6 +1488,8 @@ local function encodePhys(phys)
     addNum("fbNorm", "fbk")        -- 0929j：回授依轉向增益正規化的倍率（1＝未放大）
     addNum("armExt", "arx")        -- 1005：高速力臂延伸倍率 K（力臂×K、側推÷K；1＝未延伸，省略）
     addNum("keepArc", "kra")       -- 1123b：常駐線被弧上外漂預算收時那個硬點的預算 m（Drive.keepRightShy；沒有＝省略）
+    addNum("keepRamp", "krr")      -- 1126：kra 裡 S 彎相加的放回量 m（Drive.shyBudget；沒相加＝省略）
+    addNum("keepWant", "krw")      -- 1126：kra 收完的靠右目標 m（沒有 kra＝省略）
     addNum("xtOut", "xto")         -- 1012d：弧上往彎外偏的 cross-track 外漂倍率（MDADDynamics.arcOutwardScale；1＝未加權，省略）
     addBool("dodgeAlignHold", "dah") -- 0929j：繞行未對正、帽夾在目前車速（只在為真時寫）
     -- 0904j 鏈式停留：lc＝常駐 lane 暫時＝停留 offL；dodgeTier 帶 -stay／-nudge／-physical

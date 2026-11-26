@@ -29491,10 +29491,14 @@ drive.scenario0929j()
 --   (arc-left)  左彎（航向遞減、彎外＝+l）50 m 處、計畫 85 km/h：留邊 CLEAR＋ARC_S2·v²/R、kra 寫進 session。
 --   (arc-right) 右彎同位置（彎內）、(arc-line) 直路：不加。(arc-slow) 計畫 30 km/h 不加、40 km/h 加一半。
 --   (arc-entry) 進弧 12.5 m＝半權；(arc-exit) 出弧 12.5 m＝半權；(arc-pre) 進弧前不加；(arc-s) 先遇到反向弧＝不加。
---   (arc-cap) 預算上限 RAMP_M；(arc-ramp) 與放回預算取大不相加；(arc-tow) 拖車不加；(arc-narrow) 收到負值夾 0。
+--   (arc-cap) 預算上限 RAMP_M；(arc-ramp) 弧起點前 RAMP_BACK_M 內落點升（S 彎：放回接左弧，1126 P158）＝與放回預算相加；
+--   (arc-deep) 進弧 35 m 相加 0.6 權、60 m 退回取大；(sb-sum)／(xa-sum) 相加預算經 keepReach 進軟縫上緣與出口夾；
+--   (arc-max) 只有硬點前放回、弧起點前沒升＝取大不相加；(arc-coarse) 留邊在 CLEAR＋RAMP 與 CLEAR＋2·RAMP 之間的照樣收；
+--   (arc-conv2) 相加照 EMA 收斂不振盪；(arc-skip) 弧預算收線被整輪不收打斷記一筆 shy phase=skip；
+--   (arc-tow) 拖車不加；(arc-narrow) 收到負值夾 0。
 --   (arc-conv) 照 EMA 反覆收斂、不振盪；(arc-note) 同一個硬點只記一次 shy phase=arc。
---   違規證明（temp/vp/arc）：拿掉 arcOutBudget 呼叫＝(arc-left) 紅；不看彎向＝(arc-right) 紅；相加不取大＝(arc-ramp) 紅；
---   不看拖車＝(arc-tow) 紅。
+--   違規證明（temp/vp/arc）：拿掉 arcOutBudget 呼叫＝(arc-left) 紅；不看彎向＝(arc-right) 紅；一律相加＝(arc-max) 紅；
+--   一律取大＝(arc-ramp) 紅；粗篩照舊 CLEAR＋RAMP＝(arc-coarse) 紅；不看拖車＝(arc-tow) 紅。
 function drive.scenarioArcShy()
     scenario("1123b 弧上外漂預算：左彎外側路邊物的靠右留邊加 ARC_S2·v²/R")
     local Dr, tune, ARC = MDAD.Drive, MDAD.Drive.debugTune(), MDADDynamics.SEG_ARC
@@ -29575,10 +29579,78 @@ function drive.scenarioArcShy()
     local rampOnly = run(rp, hr, LANE, faceR)
     tune.KEEP_RIGHT_ARC_S2 = s2
     got, s = run(rp, hr, LANE, faceR)
-    checkTrue(laneR >= 0.5 and math.abs(rampOnly - want(tune.KEEP_RIGHT_RAMP_M, faceR)) < 1e-6,
-        string.format("(arc-ramp) 夾具：放回區段（落點 %.2f）只有放回預算＝留 CLEAR＋RAMP_M", laneR))
-    checkNear(got, rampOnly, 1e-9, "(arc-ramp) 弧預算 0.61＜放回 0.75：取大不相加（相加會再收 0.61）")
-    checkNil(s.keepArc, "(arc-ramp) 放回預算定案時沒有 kra")
+    local arcR = Dr.arcOutBudget(rp, MDADFollower.segIndexAt(rp, hr), hr)
+    checkTrue(laneR >= 0.5 and math.abs(rampOnly - want(tune.KEEP_RIGHT_RAMP_M, faceR)) < 1e-6 and arcR > 0.3,
+        string.format("(arc-ramp) 夾具：放回區段（落點 %.2f）只有放回預算＝留 CLEAR＋RAMP_M；弧預算 %.2f", laneR, arcR))
+    checkNear(got, math.max(0, want(arcR + tune.KEEP_RIGHT_RAMP_M, faceR)), 1e-9,
+        "(arc-ramp) 弧起點前是夾限、硬點處已放回（S 彎）：弧預算與放回預算相加（取大會少收 " .. string.format("%.2f", arcR) .. "）")
+    checkTrue(math.abs((s.keepArc or -1) - arcR) < 1e-9 and s.keepRamp == tune.KEEP_RIGHT_RAMP_M,
+        "(arc-ramp) kra＝弧預算、krr＝放回量（" .. tostring(s.keepArc) .. "／" .. tostring(s.keepRamp) .. "）")
+    -- (arc-coarse) 留邊 1.5（舊粗篩 CLEAR＋RAMP 1.35 外）：相加後要留 CLEAR＋弧＋放回，照樣收
+    local faceC = laneR + HW + 1.5
+    checkNear(run(rp, hr, LANE, faceC), want(arcR + tune.KEEP_RIGHT_RAMP_M, faceC), 1e-9,
+        "(arc-coarse) 留邊 1.5 在舊粗篩外：照相加的留邊收")
+    -- (arc-conv2) 相加的收線照 EMA 反覆收斂、不振盪（keepReach 用未收的落點，收完不會失去 rise）
+    s = shyAt(rp, hr, faceR + 0.15, LANE)
+    local prev2, mono2 = LANE, true
+    for _ = 1, 200 do
+        local t = Dr.keepRightShy(s, LANE)
+        s.sandBias = s.sandBias + (t - s.sandBias) * tune.ROAD_EMA
+        if s.sandBias > prev2 + 1e-12 then mono2 = false end
+        prev2 = s.sandBias
+    end
+    local tgt2 = math.max(0, want(arcR + tune.KEEP_RIGHT_RAMP_M, faceR))
+    checkTrue(mono2 and math.abs(s.sandBias - tgt2) < 0.01,
+        string.format("(arc-conv2) 相加反覆 200 輪：單調收到 %.3f（目標 %.3f）", s.sandBias, tgt2))
+    -- (arc-deep) 長左彎（弧 50–170、弧前到 s60 夾限）：進弧 35 m 相加 0.6 權、60 m 退回取大（oracle 審查 I2：不退的話整段多收 RAMP_M）
+    local dp = arcProf({ { 50, 0 }, { 120, -1 }, { 30, 0 } })
+    dp.laneRoomR, dp.laneRoomL, dp.laneRunStart, dp.laneRunEnd = {}, {}, {}, {}
+    for k = 1, dp.n - 1 do
+        local inner = dp.s[k] < 60
+        dp.laneRoomL[k], dp.laneRoomR[k] = 3.0, inner and 0 or 3.0
+        dp.laneRunStart[k], dp.laneRunEnd[k] = inner and 1 or 31, inner and 30 or dp.n - 1
+    end
+    for _, c in ipairs({ { 85, 0.6 }, { 110, 0 } }) do
+        local hd = c[1]
+        local laneD = MDADFollower.laneBiasAt(dp, LANE, MDADFollower.segIndexAt(dp, hd), hd)
+        local faceD = laneD + HW + 0.63
+        local arcD = Dr.arcOutBudget(dp, MDADFollower.segIndexAt(dp, hd), hd)
+        got, s = run(dp, hd, LANE, faceD)
+        checkTrue(arcD > 0 and math.abs(got - want(arcD + c[2] * tune.KEEP_RIGHT_RAMP_M, faceD)) < 1e-9
+            and (c[2] > 0) == (s.keepRamp ~= nil),
+            string.format("(arc-deep) 進弧 %d m：放回 %.1f 權（留邊 %.3f、期望 %.3f、krr %s）", hd - 50, c[2],
+                faceD - HW - got, faceD - HW - want(arcD + c[2] * tune.KEEP_RIGHT_RAMP_M, faceD), tostring(s.keepRamp)))
+    end
+    -- (sb-sum)／(xa-sum) 相加預算（arc-ramp 夾具）經 s.keepReach 進軟縫上緣與繞行出口夾
+    local rs1 = shyAt(rp, hr, faceR + 0.15, LANE)
+    rs1.keepReach = LANE
+    checkNear(Dr.arcBandCap(rs1, rs1.sensor, 1, hr, -5, 5) or -1, want(arcR + tune.KEEP_RIGHT_RAMP_M, faceR), 1e-9,
+        "(sb-sum) 軟縫上緣照相加預算收")
+    rs1 = shyAt(rp, hr, faceR + 0.15, LANE)
+    rs1.keepReach = LANE
+    local xr1 = Dr.exitArcRoom(rs1, hr - 20, 60, 4, LANE)
+    checkTrue(xr1 < 60 and math.abs((rs1.exitArcKra or -1) - (arcR + tune.KEEP_RIGHT_RAMP_M)) < 1e-9,
+        string.format("(xa-sum) 出口照相加預算縮（60→%.2f、kra %s）", xr1, tostring(rs1.exitArcKra)))
+    -- (arc-max) 夾限只在弧裡（s 60–80）、樹在 92：硬點前放回成立，弧起點前（s 25）沒升＝取大不相加
+    local mp = arcProf({ { 50, 0 }, { 60, -1 }, { 60, 0 } })
+    mp.laneRoomR, mp.laneRoomL, mp.laneRunStart, mp.laneRunEnd = {}, {}, {}, {}
+    for k = 1, mp.n - 1 do
+        local inner = mp.s[k] >= 60 and mp.s[k] < 80
+        mp.laneRoomL[k], mp.laneRoomR[k] = 3.0, inner and 0 or 3.0
+        mp.laneRunStart[k] = inner and 31 or (mp.s[k] < 60 and 1 or 41)
+        mp.laneRunEnd[k] = inner and 40 or (mp.s[k] < 60 and 30 or mp.n - 1)
+    end
+    local hm = 92
+    local laneM = MDADFollower.laneBiasAt(mp, LANE, MDADFollower.segIndexAt(mp, hm), hm)
+    local lane25 = MDADFollower.laneBiasAt(mp, LANE, MDADFollower.segIndexAt(mp, 25), 25)
+    local lane67 = MDADFollower.laneBiasAt(mp, LANE, MDADFollower.segIndexAt(mp, 67), 67)
+    local faceM = laneM + HW + 0.63
+    local arcM = Dr.arcOutBudget(mp, MDADFollower.segIndexAt(mp, hm), hm)
+    checkTrue(laneM - lane67 >= tune.KEEP_RIGHT_RAMP_RISE_M and laneM - lane25 < tune.KEEP_RIGHT_RAMP_RISE_M and arcM > 0,
+        string.format("(arc-max) 夾具：落點 s25 %.2f／s67 %.2f／s92 %.2f，弧預算 %.2f", lane25, lane67, laneM, arcM))
+    got, s = run(mp, hm, LANE, faceM)
+    checkNear(got, want(math.max(arcM, tune.KEEP_RIGHT_RAMP_M), faceM), 1e-9, "(arc-max) 弧起點前沒升：取大不相加")
+    checkNil(s.keepRamp, "(arc-max) 沒相加＝沒有 krr")
     s = shyAt(left, 100, FACE + 0.15, LANE)
     s.tow = {}
     checkNear(run(left, 100, LANE, FACE, s), LANE, 1e-12, "(arc-tow) 拖車：不加（拖車走中線另有弧外拉）")
@@ -29645,6 +29717,95 @@ function drive.scenarioArcShy()
     checkNear(Dr.keepRightShy(s, LANE), want(full), 1e-6, "(arc-far-band) 55 m 處車身帶內有硬點：彎上的樹照樣收")
     addHard(s, left, 70, LANE)
     checkNear(Dr.keepRightShy(s, LANE), LANE, 1e-12, "(arc-far-band) 30 m 處車身帶內有硬點：照舊整輪不收（繞行的事）")
+    -- (arc-skip) 上一輪弧預算收線、這一輪被車身帶內的硬點整輪不收：記一筆 shy phase=skip（同一個硬點只記一次）
+    s.keepArc = full
+    Dr.keepRightShy(s, LANE)
+    local sEv2, evs2 = MDADDiagnostics.event, {}
+    MDADDiagnostics.event = function(_, name, a) if name == "shy" then evs2[#evs2 + 1] = a end end
+    s.diag = true
+    Dr.keepArcNote(s, 0)
+    s.keepArc = full
+    Dr.keepRightShy(s, LANE)
+    Dr.keepArcNote(s, 0)
+    MDADDiagnostics.event = sEv2
+    checkTrue(#evs2 == 1 and evs2[1].phase == "skip" and evs2[1].x == s.sensor.hardX[s.sensor.hardN],
+        "(arc-skip) 整輪不收打斷弧預算收線：記 shy phase=skip 帶打斷的硬點，同一個只記一次（" .. #evs2 .. " 筆）")
+    -- (sb-*) 1126 P06（Lancer 閃殭屍擦彎外冬青）：軟縫可行帶上緣照常駐線的彎外留邊收（Drive.arcBandCap）。左彎 100 m 處、l 3.76 的樹：
+    --   (sb-arc) 常駐 1.0：上緣收到 face−CLEAR−預算−halfW、kra 記下；(sb-drift) 車身外漂到 2.3（仍在樹的擋線帶左側）：上緣不跟著放寬；
+    --   (sb-floor) 常駐 1.98（留邊已不夠）：上緣收到常駐值為止；(sb-right) 右彎同位置：不收（舊制 lo−jitter）。
+    --   違規證明（temp/vp/shy1126）：拿掉 arcBandCap 呼叫＝(sb-arc)／(sb-drift)／(sb-floor) 紅；不夾常駐值＝(sb-floor) 紅。
+    local function sbAt(p, resident, lat)
+        local s = shyAt(p, 100, FACE + 0.15, LANE)
+        s.sensor.hardL = { FACE + 0.15 }
+        s.sensor.roadLo, s.sensor.roadHi = -3, 6
+        s.fstate, s.needHalf = { idx = 1 }, HW + 0.02
+        local aLo, aHi = Dr.softBand(s, s.sensor, resident, lat, 70, 130, 0)
+        return s, aLo, aHi
+    end
+    local lo = FACE + 0.15 - (HW + 0.02) - 0.15
+    local sb, _, aHiB = sbAt(left, 1.0, 1.0)
+    checkTrue(math.abs(aHiB - want(full)) < 1e-9 and math.abs((sb.softArcKra or -1) - full) < 1e-9,
+        string.format("(sb-arc) 常駐 1.0：上緣 %.3f＝常駐留邊 %.3f（舊制 %.3f）、kra %s", aHiB, want(full),
+            lo - tune.SOFT_HARD_JITTER_M, tostring(sb.softArcKra)))
+    _, _, aHiB = sbAt(left, 1.0, 2.3)
+    checkNear(aHiB, want(full), 1e-9, "(sb-drift) 車身外漂到 2.3：上緣不跟著車身放寬（舊制帶緣夾在車身 2.3）")
+    _, _, aHiB = sbAt(left, LANE, LANE)
+    checkNear(aHiB, LANE, 1e-9, "(sb-floor) 常駐 1.98 已比留邊外：上緣收到常駐值為止（常駐線本身不判出帶外）")
+    sb, _, aHiB = sbAt(arcProf({ { 50, 0 }, { 60, 1 }, { 60, 0 } }), 1.0, 1.0)
+    checkTrue(math.abs(aHiB - (lo - tune.SOFT_HARD_JITTER_M)) < 1e-9 and sb.softArcKra == nil,
+        string.format("(sb-right) 右彎（樹在彎內側）：照舊 lo−jitter %.3f（實得 %.3f）", lo - tune.SOFT_HARD_JITTER_M, aHiB))
+    -- (xa-*) 1126 P146（M998 繞行出口加長擦彎外燈柱）：出口縮到硬點處的出口線位剛好等於常駐留邊（Drive.exitArcRoom）。
+    --   (xa-cap) offL 2.5、回線 0.5、c 80、出口 60：縮短後 hs 100 處的 smoothstep 線位＝cap；(xa-base) cap 低於回線落點＝縮到硬點處回線完；
+    --   (xa-none) 右彎、往 −l 繞（offL＜回線）、硬點在出口外、拖車：原樣。
+    --   違規證明（temp/vp/shy1126）：反函數分母寫成 t（不是 1−t）＝(xa-cap) 紅。
+    local function sm(base, offL, c, room, hs)
+        local u = (c + room - hs) / room
+        if u < 0 then u = 0 elseif u > 1 then u = 1 end
+        return base + (offL - base) * u * u * (3 - 2 * u)
+    end
+    local xs = shyAt(left, 100, FACE + 0.15, LANE)
+    local xr = Dr.exitArcRoom(xs, 80, 60, 2.5, 0.5)
+    checkTrue(xr < 60 and xr > 20 and math.abs(sm(0.5, 2.5, 80, xr, 100) - want(full)) < 1e-6
+        and math.abs((xs.exitArcKra or -1) - full) < 1e-9 and xs.exitArcX == xs.sensor.hardX[1],
+        string.format("(xa-cap) 出口 60→%.2f：硬點處線位 %.3f＝cap %.3f、kra %s", xr, sm(0.5, 2.5, 80, xr, 100), want(full),
+            tostring(xs.exitArcKra)))
+    xs = shyAt(left, 100, FACE + 0.15, LANE)
+    checkNear(Dr.exitArcRoom(xs, 80, 60, 2.5, want(full) + 0.1), 20, 1e-9, "(xa-base) cap 低於回線落點：縮到硬點處回線完（hs−c）")
+    checkNear(Dr.exitArcRoom(shyAt(arcProf({ { 50, 0 }, { 60, 1 }, { 60, 0 } }), 100, FACE + 0.15, LANE), 80, 60, 2.5, 0.5), 60, 1e-12,
+        "(xa-none) 右彎：原樣")
+    checkNear(Dr.exitArcRoom(shyAt(left, 100, FACE + 0.15, LANE), 80, 60, -2.5, 0.5), 60, 1e-12, "(xa-none) 往 −l 繞：原樣")
+    checkNear(Dr.exitArcRoom(shyAt(left, 100, FACE + 0.15, LANE), 80, 15, 2.5, 0.5), 15, 1e-12, "(xa-none) 硬點在出口外：原樣")
+    xs = shyAt(left, 100, FACE + 0.15, LANE)
+    xs.tow = {}
+    checkNear(Dr.exitArcRoom(xs, 80, 60, 2.5, 0.5), 60, 1e-12, "(xa-none) 拖車：原樣")
+    -- 違規證明（temp/vp/shy1126r）：拿掉判側＝(xa-side) 紅；保留舊縫不看 softArcCap＝(sb-keep) 紅；兩處消費者改看 arc（不看
+    --   arcRaw）＝(sb-max)／(xa-max) 紅；arc-hold 只比上一個座標＝(xa-int hold) 紅；相加不隨進弧深度退＝(arc-deep) 紅。
+    -- (xa-side) 審查 blocking：回線軌跡左側（−l，彎內）的樹不給往右的上限——l −4 的樹舊制會把出口縮到 20
+    checkNear(Dr.exitArcRoom(shyAt(left, 100, -4, LANE), 80, 60, 2.5, 0.5), 60, 1e-12, "(xa-side) 彎內 l −4 的樹：原樣")
+    -- (sb-keep) 審查：換邊遲滯保留舊縫（帶緣 + SOFT_HARD_JITTER_M 容許）不越過彎外留邊上限 s.softArcCap
+    local function keepW(cap)
+        local ks = sbAt(left, 1.0, 1.0)
+        ks.softArcCap = cap
+        ks.zombieSideW, ks.zombieSideS, ks.zombieLane = want(full) + 0.3, 100, 1
+        local _, kWhy = Dr.softKeepSide(ks, {}, {}, 0, 70, 130, 1.0, "nogap", 100, 0, -3, want(full), 1)
+        return kWhy
+    end
+    checkTrue(tune.SOFT_HARD_JITTER_M > 0.3 and keepW(nil) == "gap" and keepW(want(full)) == "nogap",
+        "(sb-keep) 舊縫超出弧上限 0.3：沒上限照舊保留、有上限不保留（" .. tostring(keepW(nil)) .. "／"
+        .. tostring(keepW(want(full))) .. "）")
+    -- (sb-max)／(xa-max) 審查：近處放回較大（arc-max 夾具，kra 歸因 arc＝0）時，軟縫上緣與出口照樣用合併預算收
+    local jm = MDADFollower.segIndexAt(mp, hm)
+    local eM, aM, _, _, rM = Dr.shyBudget(mp, jm, hm, LANE, false, false, nil)
+    checkTrue(aM == 0 and rM > 0 and math.abs(eM - math.max(arcM, tune.KEEP_RIGHT_RAMP_M)) < 1e-9,
+        string.format("(sb-max) 夾具：extra %.2f、arc %.2f、arcRaw %.2f", eM, aM, rM))
+    local ms = shyAt(mp, hm, faceM + 0.15, LANE)
+    ms.keepReach = LANE
+    checkNear(Dr.arcBandCap(ms, ms.sensor, 1, hm, 0, 5) or -1, want(eM, faceM), 1e-9, "(sb-max) 軟縫上緣用合併預算收（舊制 nil）")
+    ms = shyAt(mp, hm, faceM + 0.15, LANE)
+    ms.keepReach = LANE
+    local xm = Dr.exitArcRoom(ms, hm - 20, 60, 4, LANE)
+    checkTrue(xm < 60 and math.abs((ms.exitArcKra or -1) - eM) < 1e-9,
+        string.format("(xa-max) 出口照合併預算縮（60→%.2f、kra %s；舊制原樣）", xm, tostring(ms.exitArcKra)))
 end
 drive.scenarioArcShy()
 
@@ -37310,6 +37471,59 @@ function drive.scenarioEndArrive()
                 s2.sweepCount or 0, tostring(s2.dodgeSpaceBaseCap), tostring(s2.dodgeBuildReason))
         end
         checkTrue(okS2, "(ext-short-end) 收短的線掃得過＝採用（照 main）、重新掃掠、空間帽重算（" .. why .. "）")
+        -- (xa-int) 1126 P146：彎外留邊（Drive.exitArcRoom，換成定值）夾加長。夾到仍夠加長＝加長到夾的長度、extend 事件 why=arc 帶
+        --   x／kra；夾到不夠加長＝不加長、不記 dodgeExtendFailS（不是掃不過）、why=arc-hold 同一個硬點只記一次。
+        --   違規證明：不接 exitArcRoom＝(xa-int) 兩案紅；arc-hold 記 dodgeExtendFailS＝(xa-int hold) 紅。
+        local oldArc, sEvX, evX = Dr.exitArcRoom, MDADDiagnostics.event, {}
+        local xt = Dr.debugTune()
+        MDADDiagnostics.event = function(sess, name, a, ...)
+            if name == "dodge" and a.phase == "extend" then evX[#evX + 1] = a end
+            return sEvX(sess, name, a, ...)
+        end
+        local okA, okH = false, false
+        why = "前置：承諾"
+        s2 = extArm(nil, 8)
+        if s2 then
+            local fs = s2.fstate
+            local c, have = fs.offC, fs.offD - fs.offC
+            local cap = have + xt.EXIT_EXTEND_MIN_M + 1
+            s2.diag = true
+            Dr.exitArcRoom = function(s, _, room)
+                s.exitArcKra, s.exitArcCap, s.exitArcX, s.exitArcY = 0.7, 1.1, 50, 3
+                return math.min(room, cap)
+            end
+            local okE = Dr.extendDodgeExit(s2, s2.sensor, 0)
+            local e = evX[#evX]
+            okA = okE == true and fs.offD > c + have + 1e-6 and fs.offD <= c + cap + 1e-6
+                and e ~= nil and e.why == "arc" and e.kra == 0.7 and e.x == 50
+            why = string.format("加長 %s、出口 %.2f→%.2f（夾 %.2f）、事件 %s", tostring(okE), have, fs.offD - c, cap,
+                tostring(e and e.why))
+        end
+        checkTrue(okA, "(xa-int) 彎外留邊夾到仍夠加長：加長到夾的長度、事件 why=arc（" .. why .. "）")
+        evX = {}
+        why = "前置：承諾"
+        s2 = extArm(nil, 8)
+        if s2 then
+            local fs = s2.fstate
+            local d0, have = fs.offD, fs.offD - fs.offC
+            s2.diag = true
+            local seq, nCall = { 50, 51, 50 }, 0
+            Dr.exitArcRoom = function(s)
+                nCall = nCall + 1
+                s.exitArcKra, s.exitArcCap, s.exitArcX, s.exitArcY = 0.7, 1.1, seq[nCall] or 50, 3
+                return have
+            end
+            local ok1 = Dr.extendDodgeExit(s2, s2.sensor, 0)
+            local ok2 = Dr.extendDodgeExit(s2, s2.sensor, 0)
+            Dr.extendDodgeExit(s2, s2.sensor, 0)
+            -- 硬點 A→B→A：同一次承諾內 A 不重送（審查：只比上一個座標會重送）
+            okH = ok1 == false and ok2 == false and s2.dodgeExtendFailS == nil and fs.offD == d0 and #evX == 2
+                and evX[1].why == "arc-hold" and evX[1].kra == 0.7 and evX[2].x == 51
+            why = string.format("加長 %s／%s、failS %s、d %.2f→%.2f、事件 %d 筆 %s", tostring(ok1), tostring(ok2),
+                tostring(s2.dodgeExtendFailS), d0, fs.offD, #evX, tostring(evX[1] and evX[1].why))
+        end
+        Dr.exitArcRoom, MDADDiagnostics.event = oldArc, sEvX
+        checkTrue(okH, "(xa-int hold) 夾到不夠加長：不加長、不記 dodgeExtendFailS、同一次承諾每個硬點只記一次 arc-hold（" .. why .. "）")
         Dr.stop(0, nil)
     end
     -- (plain) 1114m（Codex 審查）：一般繞行（沒有改線）出口在終點前走完＝到站形狀不碰：ef 缺、承諾的 c／d 與關掉到站形狀（endFitOff）
