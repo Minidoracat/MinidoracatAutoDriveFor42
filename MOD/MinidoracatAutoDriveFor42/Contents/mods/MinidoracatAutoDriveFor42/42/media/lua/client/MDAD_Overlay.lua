@@ -94,7 +94,8 @@ local function clearSlot(slot)
     trailN[slot], w.rN, w.zN, w.vN = 0, 0, 0, 0
 end
 
-function MDADOverlay.clearTrail(playerNum)
+function MDADOverlay.clearTrail(...)
+    local playerNum = ...
     local slot = slotOf(playerNum)
     if slot then
         clearSlot(slot)

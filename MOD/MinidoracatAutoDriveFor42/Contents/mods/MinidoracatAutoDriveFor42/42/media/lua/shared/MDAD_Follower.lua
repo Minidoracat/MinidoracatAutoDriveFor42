@@ -687,7 +687,8 @@ end
 
 -- 弧長 sAt 的累計計畫秒數（段內照同一套加速／等速／減速），只讀 planTimes 填好的 out。hint＝呼叫端已知的段索引
 -- （Driver 傳投影游標 fstate.idx）：涵蓋 sAt 就直接用，否則在 out.s 上二分。
-function MDADFollower.planTimeAt(out, sAt, hint)
+function MDADFollower.planTimeAt(out, sAt, ...)
+    local hint = ...
     if type(out) ~= "table" or not isFinite(sAt) or not isFinite(out.n) or out.n < 2 then return nil end
     local ts, ss, n = out.t, out.s, out.n
     local i = isFinite(hint) and math.floor(hint) or 0
@@ -709,7 +710,8 @@ end
 -- 段 segI 上常駐 laneBias 實際能落到的值（Driver 期望線／遙測 el 與 control 同一
 -- 張表）。profile 未 ready 或無表＝原值。keep＝離路緣保留（nil＝LANE_BIAS_KEEP；false＝不夾，斜切保持）；會車時
 -- Driver 設 state.laneKeep＝0（貼到路緣錯車，1001b），control 與期望線必須傳同一個值。
-function MDADFollower.laneBiasAt(profile, bias, segI, sAt, keep)
+function MDADFollower.laneBiasAt(profile, bias, segI, ...)
+    local sAt, keep = ...
     if type(profile) ~= "table" or profile.laneRoomR == nil
             or not isFinite(bias) or not isFinite(segI) then return bias end
     segI = segI - segI % 1
@@ -986,7 +988,8 @@ end
 -- 剖面從 from 起建、s[1]＝s0，圓角窗從 from 起算（MDADDynamics.buildFilletPath 的 emitFrom）。只收 adaptive 剖面，
 -- 不合法或建不出來回 nil, "window"。profile.fitEndIdx＝窗尾頂點的剖面索引（窗尾或輸出預算降級的第一個大角，較前者；
 -- 窗涵蓋到終點、預算也夠＝nil；MDADDynamics.buildFilletPath 第 6 回傳）。
-function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile, style, window)
+function MDADFollower.begin(route, maxSpeed, navVersion, vehicleProfile, style, ...)
+    local window = ...
     if type(route) ~= "table" then return nil, "badroute" end
     local pts = route.pts
     if type(pts) ~= "table" then return nil, "badroute" end
@@ -2820,7 +2823,8 @@ end
 -- LANE_BIAS_KEEP（RETURN 目標是常駐 lane 的落點，路途中收窄要與 control 落在同一格，
 -- 否則 clear 釋放那一刻往內跳）；停留線傳 0（offL 是掃掠驗過的絕對 lane，只夾物理餘裕）。
 function MDADFollower.buildOffsetLine(profile, s0, a, b, c, d, l, bias, outX, outY,
-        returnLaneStart, returnLaneTarget, returnLaneEnd, startLane, targetKeep)
+        returnLaneStart, returnLaneTarget, returnLaneEnd, startLane, ...)
+    local targetKeep = ...
     if type(profile) ~= "table" or profile.ready ~= true then return 0, 0, "invalid", 0 end
     if not (isFinite(s0) and isFinite(a) and isFinite(d) and isFinite(l)) then
         return 0, 0, "invalid", 0
@@ -2967,7 +2971,8 @@ end
 -- targetKeep（第 9 參）同 buildOffsetLine 第 15 參：RETURN 目標省略（留 keep，與 control
 -- 同格）；crawl-exact（目標＝車現在的橫向、沿現偏移直行）傳 0，只夾物理餘裕。
 function MDADFollower.buildReturnLine(profile, s0, s1, laneStart, laneTarget,
-        outX, outY, tailM, targetKeep)
+        outX, outY, tailM, ...)
+    local targetKeep = ...
     if type(profile) ~= "table" or profile.ready ~= true
             or not isFinite(s0) or not isFinite(s1) or s1 <= s0
             or not isFinite(laneStart) or not isFinite(laneTarget) then

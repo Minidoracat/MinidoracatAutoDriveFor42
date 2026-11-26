@@ -10,10 +10,12 @@
   1. luac -p 語法        — 需要 PATH 有 luac；沒有則列為 SKIP 而非 PASS
  1b. 每個函式的累計 local — Debug 用固定 200 格記錄宣告；含離開作用域的變數，預算 190
  1c. 呼叫自己的 Lua 函式時固定參數傳齊 — Kahlua 不替少傳的固定參數補 nil，陣列建構式最後一項是呼叫或 ... 之後
-                         少傳的參數讀到堆疊殘值（KahluaThread.java:604-613,839-859、LuaCallFrame.java:96-109；
-                         2026-10-31 Builder 宣傳片情境 cellsX(4, 8, 1) 的 z 收到 2）。既有的少傳記在
-                         scripts/kahlua_args_baseline.txt，只有比它多才 FAIL；沒有 baseline 時 WARN（不擋），
-                         python scripts/verify_mod.py --rebase-args 建一份。檢查本身每次先用內建 fixture 自驗
+                        少傳的參數讀到堆疊殘值（KahluaThread.java:604-613,839-859、LuaCallFrame.java:96-109；
+                        2026-10-31 Builder 宣傳片情境 cellsX(4, 8, 1) 的 z 收到 2）。覆寫原版表上的函式時，固定參數
+                        也不能多於原版呼叫點傳的最少個數（讀遊戲的 media/lua，找不到 PZ_PATH 時這部分 SKIP；
+                        Tesla 覆寫 canPlaceMoveableInternal 多一個參數，2026-11-26）。既有的少傳記在
+                        scripts/kahlua_args_baseline.txt，只有比它多才 FAIL；沒有 baseline 時 WARN（不擋），
+                        python scripts/verify_mod.py --rebase-args 建一份。檢查本身每次先用內建 fixture 自驗
   2. BOM / CRLF          — 有 BOM 或 CRLF 的翻譯檔會被引擎「靜默忽略」
   3. 翻譯鍵集一致          — 缺鍵的語系會顯示原始 key
   4. 裸 % 檢查           — 42.20.1 起 formatted() 遇裸 % 崩潰；只允許 %1-%9 與 %%
@@ -92,6 +94,7 @@ import sys
 import tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PZ_PATH = os.environ.get("PZ_PATH", r"D:\SteamLibrary\steamapps\common\ProjectZomboid")
 
 passed, failed, skipped, warned = [], [], [], []
 
@@ -218,12 +221,15 @@ if __name__ == "__main__" and "--self-test-lua-limits" in sys.argv:
     sys.exit(0)
 
 
+LONG_OPEN, WORD = re.compile(r"(--)?\[(=*)\["), re.compile(r"\w+")
+
+
 def lua_clean(src):
     """註解換成空白、字串內容換成底線（長度與換行不變），之後才能用樣式找呼叫。"""
     out, i, n = [], 0, len(src)
     while i < n:
         c = src[i]
-        long_open = re.match(r"(--)?\[(=*)\[", src[i:]) if c in "-[" else None
+        long_open = LONG_OPEN.match(src, i) if c in "-[" else None
         if long_open:
             end = src.find("]" + long_open.group(2) + "]", i)
             end = n if end < 0 else end + len(long_open.group(2)) + 2
@@ -268,7 +274,7 @@ def call_args(text, open_at):
             count += 1
             start = i + 1
         elif c.isalpha() or c == "_":
-            word = re.match(r"\w+", text[i:]).group(0)
+            word = WORD.match(text, i).group(0)
             if word == "function" or (block > 0 and word in ("if", "do", "repeat")):
                 block += 1
             elif block > 0 and word in ("end", "until"):
@@ -305,22 +311,27 @@ def expands(arg):
     return not (arg[0] == "(" and first_zero == n - 1)
 
 
-def short_calls(lua_roots, extra=()):
+def short_calls(lua_roots, extra=(), vanilla=None):
     """lua_roots（各 MOD 的 42/media/lua）裡，傳的引數比定義的固定參數少的呼叫。回 [(key, 位置說明)]，
     key＝檔|函式|傳幾個<要幾個（檔是相對 media/lua 的路徑）。Builder scripts/verify_local.py 2026-11-19 起的做法搬來：
     MOD 的根表＝頂層 `X = X or {}`／`X = {}` 宣告的全域。呼叫照「哪個模組的哪個函式」對定義：`Queue.cancel(`、
     `Root.Queue.cancel(`、`local Q = Root.Queue` 之後的 `Q.cancel(` 都對 `Root.Queue = Queue` 那個檔的那一個（照名稱對、
-    同名取最少的做法，別的模組有同名而參數較少的函式時會漏）。別名照呼叫的位置找：看得到、最近宣告的那個
-    `local 名稱 = …`，`local A, B = R.A, R.B` 這種平行指派也認。沒前綴的呼叫對同檔最近、還在範圍內的 local 函式，
-    `local f = Check.safehouse` 這種別名跟著對；`self:f(` 對同檔的方法；認不出接收者的 `obj:f(` 照方法名對（同名取
-    最少的），`x.f(` 不看（別人的表或欄位裡的函式：`ArrayList.new()`、`UI.Button.new`）。
+    同名取最少的做法，別的模組有同名而參數較少的函式時會漏）。模組也可以用 `Root.X = Root.X or {}`（或 `= {}`）登記；
+    掛在根表本身的函式（`function Root.f(`）一樣跨檔對。別名照呼叫的位置找：看得到、最近宣告的那個
+    `local 名稱 = …`，`local A, B = R.A, R.B` 這種平行指派也認；右邊可以是 `A and A.g`（取 and 最後一項）或
+    `A.g or B.h`（每一個都算，取最少的），`or {}`／`or nil`／`or false` 略過，含呼叫或索引的不認。沒前綴的呼叫對同檔最近、
+    還在範圍內的 local 函式，`local f = Check.safehouse` 這種別名跟著對；`self:f(` 對同檔的方法；認不出接收者的
+    `obj:f(` 照方法名對（同名取最少的），`x.f(` 不看（別人的表或欄位裡的函式：`ArrayList.new()`、`UI.Button.new`）。
     最後一個引數是 ... 的不報；是單獨一個呼叫的（會展開成好幾個值）當一個算、照報，key 的 < 換成 ~、後面接那個
     呼叫的函式名（換成別的函式就不算 baseline 裡那一筆）。
     定義只認 `function A.b(…)`、`function A:b(…)`、`local function b(…)`、`A.b = function(…)`（表建構式裡的欄位不算）；
-    `pcall(f, …)` 當成呼叫 f。extra＝另外要看的檔（自驗 fixture）：當成 MOD 的檔掃，key 的檔是相對 REPO。"""
+    `pcall(f, …)` 當成呼叫 f。extra＝另外要看的檔（自驗 fixture）：當成 MOD 的檔掃，key 的檔是相對 REPO。
+    vanilla＝遊戲的 media/lua：MOD 覆寫原版表上的函式（表不是 MOD 自己的，原版有同一個函式）時，固定參數個數不能多於
+    原版呼叫點傳的最少個數，key＝檔|表.函式|原版幾個<要幾個。原版的呼叫照接收者對：`表:f(`、定義那個函式的檔裡的
+    `self:f(`，原版只有一個表定義這個名字時任何接收者都算；最後一個引數是 ... 或呼叫的不算。"""
     name_re = r"[A-Za-z_]\w*"
     chain_re = rf"{name_re}(?:\.{name_re})*"
-    texts, base_of, defs, def_parens, roots, mods, aliases = {}, {}, {}, set(), {}, {}, {}
+    texts, base_of, defs, def_parens, roots, mods, regs, aliases = {}, {}, {}, set(), {}, {}, {}, {}
 
     def split_top(src):
         out, depth, cur = [], 0, ""
@@ -335,6 +346,22 @@ def short_calls(lua_roots, extra=()):
 
     def fixed(params):
         return len([p for p in (q.strip() for q in params.split(",")) if p and p != "..."])
+
+    def targets(expr):
+        """別名右邊可能是哪幾串名字（a.b 這種）；認不出（含呼叫、索引、別的運算）回 None。"""
+        out = []
+        for part in re.split(r"\s+or\s+", expr.strip()):
+            last = re.split(r"\s+and\s+", part.strip())[-1].strip()
+            if re.fullmatch(r"\{\s*\}|nil|false", last):
+                continue
+            if not re.fullmatch(chain_re, last):
+                return None
+            out.append(last)
+        return out or None
+
+    def single(expr):
+        t = targets(expr)
+        return t[0] if t and len(t) == 1 else None
 
     def scope_end(text, pos):
         """local 函式看得到的範圍：到縮排比它淺的下一行（外層區塊收尾）為止；頂層的到檔尾。"""
@@ -365,10 +392,12 @@ def short_calls(lua_roots, extra=()):
         aliases[path] = [(m.end(1), scope_end(text, m.end(1)), n.strip(), e)
                          for m in re.finditer(rf"(?:^|;)([ \t]*)local\s+({name_re}(?:\s*,\s*{name_re})*)\s*=\s*([^;\n]+)", text, re.M)
                          for n, e in zip(m.group(2).split(","), split_top(m.group(3)))]
-        roots[path] = root_names | {a[2] for a in aliases[path] if a[3] in root_names}
+        roots[path] = root_names | {a[2] for a in aliases[path] if single(a[3]) in root_names}
         root = "|".join(sorted(roots[path]))
         mods[path] = {t: x for x, t in re.findall(rf"^[ \t]*(?:{root})\.({name_re})\s*=\s*({name_re})[ \t]*$", text, re.M)} \
             if root else {}
+        regs[path] = set(re.findall(rf"^[ \t]*(?:{root})\.({name_re})\s*=\s*(?:(?:{root})\.\1\s+or\s+)?\{{", text, re.M)) \
+            if root else set()
         for m in re.finditer(rf"(local\s+)?\bfunction\s+({chain_re})(?::({name_re}))?\s*\(([^)]*)\)", text):
             local, dotted, method, params = m.groups()
             def_parens.add((path, text.index("(", m.start(2))))
@@ -384,28 +413,37 @@ def short_calls(lua_roots, extra=()):
                 add(dotted.rsplit(".", 1)[1], path, m.start(), dotted.rsplit(".", 1)[0], "dot", params, False)
             else:
                 add(dotted, path, m.start(), None, "bare", params, bool(local))
-    modkeys = {x for path in texts for x in mods[path].values()}
+    modkeys = {x for path in texts for x in mods[path].values()} | {x for path in texts for x in regs[path]}
 
     def alias_of(path, name, at):
         """at 這個位置看得到、最近宣告的 `local name = 運算式` 那一筆（位置, 範圍結尾, 名稱, 運算式）；沒有回 None。"""
         seen = [a for a in aliases[path] if a[2] == name and a[0] < at < a[1]]
         return max(seen) if seen else None
 
-    def is_root(path, name, at):
+    def root_of(path, name, at):
+        """at 這個位置的 name 指的是哪一個 MOD 根表（回全域名）；不是根表回 None。"""
         a = alias_of(path, name, at)
-        return a[3] in root_names if a else name in root_names
+        if a is None:
+            return name if name in root_names else None
+        r = single(a[3])
+        return r if r in root_names else None
 
     def modkey(path, chain, at):
-        """at 這個位置，a.b 這種接收者指的是哪個模組（根表.X 的 X）；認不出回 None。
+        """at 這個位置，a.b 這種接收者指的是哪個模組（根表.X 的 X；根表本身是 ^全域名）；認不出回 None。
         別名的右邊照它宣告的位置解析（之後同名的變數換了別的東西，不影響先前取好的）。"""
         comps = chain.split(".")
-        if len(comps) == 2 and is_root(path, comps[0], at):
+        if len(comps) == 2 and root_of(path, comps[0], at):
             return comps[1] if comps[1] in modkeys else None
         if len(comps) == 1:
+            r = root_of(path, chain, at)
+            if r:
+                return "^" + r
             a = alias_of(path, chain, at)
-            m = a and re.fullmatch(rf"({name_re})\.({name_re})(?:\s+or\s+\{{\s*\}})?", a[3])
-            if m and is_root(path, m.group(1), a[0]):
-                return m.group(2) if m.group(2) in modkeys else None
+            t = a and targets(a[3])
+            if t and all(x.count(".") == 1 for x in t):
+                keys = {modkey(path, x, a[0]) for x in t}
+                if len(keys) == 1 and None not in keys:
+                    return keys.pop()
             return mods[path].get(chain) or (chain if a is None and chain in modkeys else None)
         return None
 
@@ -441,14 +479,15 @@ def short_calls(lua_roots, extra=()):
                 here = [d for d in named if d["form"] == "bare" and d["path"] == path]
                 scoped = [d for d in here if d["local"] and d["pos"] < m.start() < d["end"]]
                 alias = alias_of(path, name, m.start())
-                alias = alias if alias and re.fullmatch(rf"{name_re}(?:\.{name_re})+", alias[3]) else None
+                funcs = alias and targets(alias[3])
+                funcs = funcs if funcs and all("." in x for x in funcs) else None
                 if scoped:
                     cands = [max(scoped, key=lambda d: d["pos"])]
                 elif [d for d in here if not d["local"]]:   # 先宣告、後面才 `f = function` 的
                     cands = [d for d in here if not d["local"]]
-                elif alias:
-                    key = modkey(path, alias[3].rpartition(".")[0], alias[0])
-                    cands = of_module(alias[3].rsplit(".", 1)[1], key) if key else []
+                elif funcs:
+                    cands = [d for x in funcs for key in [modkey(path, x.rpartition(".")[0], alias[0])] if key
+                             for d in of_module(x.rsplit(".", 1)[1], key)]
                     sep = "."
                 else:
                     cands = [d for d in named if d["form"] == "bare" and not d["local"]]
@@ -484,10 +523,57 @@ def short_calls(lua_roots, extra=()):
                 hits.append((f"{rel}|{name}|{count}{'~' if tail else '<'}{need}" + (f"|{callee}" if tail else ""),
                              f"{rel}:{line}  {name} 傳 {count} 個{'（最後一個是呼叫，它回幾個值要自己看）' if tail else ''}、"
                              f"定義 {need} 個（{os.path.basename(d['path'])}:{d['line']}）"))
+
+    # 覆寫原版表上的函式：原版自己的呼叫點上面那段看不到（Tesla canPlaceMoveableInternal，2026-11-26）
+    over = {}
+    for name, ds in defs.items():
+        for d in ds:
+            if d["form"] == "bare" or "." in d["table"]:
+                continue
+            a = alias_of(d["path"], d["table"], d["pos"])
+            t = single(a[3]) if a else d["table"]
+            if t and "." not in t and t not in root_names and not modkey(d["path"], d["table"], d["pos"]):
+                over.setdefault((t, name), []).append(d)
+    if not (over and vanilla):
+        return hits
+    pat = re.compile(rf"([.:])({'|'.join(sorted({f for _, f in over}))})\s*(\(|=\s*function\b)")
+    vdefs, vcalls = {}, []   # 函式名 → {表: {定義它的檔}}；(函式名, 接收者, 檔, 行, 換算成 . 呼叫的引數個數)
+    for path in iter_files(vanilla, {".lua"}):
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+        if not pat.search(text):
+            continue
+        text = lua_clean(text)
+        for m in pat.finditer(text):
+            sep, name, kind = m.groups()
+            rcv = receiver(text, m.start())
+            if kind != "(" or re.search(rf"\bfunction\s+{chain_re}\s*$", text[max(0, m.start() - 160):m.start()]):
+                vdefs.setdefault(name, {}).setdefault(rcv, set()).add(path)
+                continue
+            got = call_args(text, m.end() - 1)
+            if got and got[2] != "..." and not expands(got[2]):
+                vcalls.append((name, rcv, path, text.count("\n", 0, m.start()) + 1, got[0] + (sep == ":")))
+    for (t, name), ds in sorted(over.items()):
+        tables = vdefs.get(name, {})
+        if t not in tables:
+            continue   # 原版沒有這個函式：MOD 自己加的方法
+        got = [c for c in vcalls if c[0] == name and (c[1] == t or (c[1] == "self" and c[2] in tables[t]) or len(tables) == 1)]
+        if not got:
+            continue
+        low = min(got, key=lambda c: c[4])
+        for d in ds:
+            colon = d["form"] == "colon"
+            if d["need"] + colon > low[4]:
+                rel = os.path.relpath(d["path"], base_of[d["path"]]).replace(os.sep, "/")
+                fn = f"{t}{':' if colon else '.'}{name}"
+                hits.append((f"{rel}|{fn}|原版{low[4] - colon}<{d['need']}",
+                             f"{rel}:{d['line']}  覆寫 {fn} 固定 {d['need']} 個參數，原版呼叫最少只傳 {low[4] - colon} 個"
+                             f"（{os.path.relpath(low[2], vanilla).replace(os.sep, '/')}:{low[3]}）"))
     return hits
 
 
-# 1c 的自驗 fixture：行尾 --! 的行要被報成少傳，其他行不能報；驚嘆號後面接的字是尾端呼叫那一筆 key 最後記的函式名。
+# 1c 的自驗 fixture：行尾 --! 的行要被報成少傳，其他行不能報；驚嘆號後面接的字是尾端呼叫那一筆 key 最後記的函式名，
+# 覆寫原版函式那一筆是 key 最後的「原版幾個<要幾個」（ARGS_FIXTURE_VANILLA 當成遊戲的 media/lua）。
 ARGS_FIXTURE_DEFS = """FixRoot = FixRoot or {}
 local Queue = {}
 FixRoot.Queue = Queue
@@ -507,6 +593,13 @@ local Mode = {}
 FixRoot.PlanMode = Mode
 function Mode.selectRect(a, b, c, d, e) end
 function Mode:pick(a, b) end
+function FixRoot.request(p, cmd, args) end
+FixRoot.Sentry = FixRoot.Sentry or {}
+local S = FixRoot.Sentry
+function S.canArm(p, v, remote) end
+local Ch = {}
+FixRoot.Charge = Ch
+function Ch.powerUntil(chg, now, gen) end
 """
 ARGS_FIXTURE_CALLS = """local B = FixRoot
 local Q, L = B.Queue, B.PlanLibrary -- 平行指派的別名
@@ -547,24 +640,70 @@ B.PlanMode:pick(1) --!
 B.PlanMode:pick(1, 2)
 B.PlanMode.pick(B.PlanMode, 1, 2)
 one(1, 2)
+B.request(p, cmd) --!
+FixRoot.request(p, cmd, args)
+B.Sentry.canArm(p, v) --!
+local S2 = B.Sentry
+S2.canArm(p, v, true)
+S2.canArm(p) --!
+local pu = B.Charge and B.Charge.powerUntil
+pu(chg, now) --!
+pu(chg, now, gen)
+local either = B.Charge.powerUntil or B.Check.item -- 兩個都可能，取最少的 3 個
+either(1, 2) --!
+either(1, 2, 3)
+local Cs = B and B.Cursor
+Cs.send(p) --!
+local hx = can and U.impactLike(x) or false -- 右邊有呼叫：不認
+hx(1)
+function FixVan:place(ch, sq, item, force) end --!原版3<4
+function FixVan:other(a, ...) end
+FixVan.go = function(self, ch, sq, item) end
+local P = FixVan
+P.other2 = function(self, a, b) end --!原版2<3
+function FixVan:mine(a, b, c, d) end
+local Own = {}
+function Own:place(a, b, c, d, e) end
 """
+ARGS_FIXTURE_VANILLA = {"shared/FixVan.lua": """FixVan = ISBaseObject:derive("FixVan")
+function FixVan:place(ch, sq, item, force) end
+function FixVan:go(ch, sq, item)
+    self:place(ch, sq, item, true)
+    self:place(ch, sq, item)
+    -- self:place(ch)
+    print("self:place(ch)")
+end
+function FixVan:other(a) end
+function FixVan:other2(a) end
+""", "client/Use.lua": """local v = FixVan:new()
+v:go(1, 2, 3)
+v:other2(1)
+FixVan.other(v, 1)
+thing:place(1)
+function Elsewhere:place(a) self:place(1) end
+"""}
 
 
 def self_test_args():
     """用 ARGS_FIXTURE_* 驗 short_calls：標 --! 的行要報（尾端呼叫要記對函式名）、其他行不報。回錯誤說明或 None。"""
     with tempfile.TemporaryDirectory(dir=REPO) as directory:
         defs_path, calls_path = os.path.join(directory, "defs.lua"), os.path.join(directory, "calls.lua")
-        for path, body in ((defs_path, ARGS_FIXTURE_DEFS), (calls_path, ARGS_FIXTURE_CALLS)):
+        bodies = {defs_path: ARGS_FIXTURE_DEFS, calls_path: ARGS_FIXTURE_CALLS}
+        vanilla = os.path.join(directory, "vanilla")
+        bodies.update({os.path.join(vanilla, *rel.split("/")): body for rel, body in ARGS_FIXTURE_VANILLA.items()})
+        for path, body in bodies.items():
+            os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w", encoding="utf-8", newline="\n") as fh:
                 fh.write(body)
         calls = os.path.relpath(calls_path, REPO).replace(os.sep, "/")
         want = {i: m.group(1) for i, line in enumerate(ARGS_FIXTURE_CALLS.splitlines(), 1)
                 for m in [re.search(r"--!(\S*)", line)] if m}
         seen = {}
-        for key, where in short_calls([], [defs_path, calls_path]):
+        for key, where in short_calls([], [defs_path, calls_path], vanilla):
             if not key.startswith(calls + "|"):
                 return f"fixture 的定義檔被報：{where}"
-            seen[int(where.split("  ")[0].rsplit(":", 1)[1])] = key.rsplit("|", 1)[1] if "~" in key else ""
+            seen[int(where.split("  ")[0].rsplit(":", 1)[1])] = \
+                key.rsplit("|", 1)[1] if "~" in key or "|原版" in key else ""
     if seen != want:
         return f"fixture 標的 {sorted(want.items())}，實際報的 {sorted(seen.items())}"
     return None
@@ -612,7 +751,12 @@ if _err:
     fail(_t, [f"檢查本身壞了：{_err}"])
 else:
     _now = {}
-    for _key, _where in short_calls([os.path.join(m, "lua") for m in MEDIA_DIRS if os.path.isdir(os.path.join(m, "lua"))]):
+    _vanilla = os.path.join(PZ_PATH, "media", "lua")
+    if not os.path.isdir(_vanilla):
+        skip("覆寫原版函式的固定參數（第 1c 項的一部分）", f"找不到 {_vanilla}（設定 PZ_PATH）")
+        _vanilla = None
+    for _key, _where in short_calls([os.path.join(m, "lua") for m in MEDIA_DIRS if os.path.isdir(os.path.join(m, "lua"))],
+                                    vanilla=_vanilla):
         _now.setdefault(_key, []).append(_where)
     _total = sum(len(v) for v in _now.values())
     if "--rebase-args" in sys.argv:
@@ -637,8 +781,8 @@ else:
         _bad = [w + (f"（這個檔同樣的呼叫 baseline 只有 {_base[k]} 處）" if k in _base else "")
                 for k in sorted(_now) if len(_now[k]) > _base.get(k, 0) for w in _now[k]]
         if _bad:
-            fail(_t, _bad + ["少的補 nil 傳齊，或把選用參數改成 ... 接（local a, b = ...）；"
-                             "確定呼叫的是 Java 方法才 python scripts/verify_mod.py --rebase-args"])
+            fail(_t, _bad + ["少的補 nil 傳齊，或把選用參數改成 ... 接（local a, b = ...）；覆寫原版函式時，原版有人"
+                             "不傳的參數改成 ... 接、原樣轉給原版；確定呼叫的是 Java 方法才 python scripts/verify_mod.py --rebase-args"])
         else:
             ok(f"{_t}（新增 0 處；既有 {_total} 處記在 baseline）")
 
@@ -1300,7 +1444,6 @@ else:
 # 依 TextManager 的規則找出各語言實際載入的 .fnt（EN/fonts.txt 疊上該語言的 fonts.txt；語言或字級資料夾
 # 沒有該檔就退回 EN），取六種 UI 字型與各字級的交集；MOD 自帶 media/fonts 時以 MOD 的為準。
 # CN 缺的漢字是原版字型本身的限制（原版簡中介面一樣缺），不計。出處與替代字見 pitfalls.md「原版字型缺很多常用符號」。
-PZ_PATH = os.environ.get("PZ_PATH", r"D:\SteamLibrary\steamapps\common\ProjectZomboid")
 GLYPH_UI_FONTS = ("Small", "Medium", "Large", "NewSmall", "NewMedium", "NewLarge")
 # 替代字候選：只提示該語言字型畫得出的（CH／CN／JP／KO 有 ￩￪￫￬￭ 與 －～「」，EN 等西文字型沒有；2026-11-26 對原版 .fnt
 # 逐字查，ModLang 截圖確認）。Print Media 的 _info 正文多一個 > 會讓第二段之後被丟，所以 CJK 的箭頭先提 ￫。

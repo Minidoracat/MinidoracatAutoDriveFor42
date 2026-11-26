@@ -704,7 +704,8 @@ MDADCorridor.ZOMBIE_PREFER = ZOMBIE_PREFER
 
 -- prefer（選填）＝離殭屍區間邊多留的距離，預設 ZOMBIE_PREFER；逐群換邊要貼緣時傳 0。
 function MDADCorridor.softZombieLane(zomS, zomL, zomN, sFrom, sTo, halfW, base, prev,
-        aLo, aHi, lambda, tmpLo, tmpHi, prefer)
+        aLo, aHi, lambda, tmpLo, tmpHi, ...)
+    local prefer = ...
     if type(prefer) ~= "number" or prefer * 0 ~= 0 or prefer < 0 then prefer = ZOMBIE_PREFER end
     if type(zomS) ~= "table" or type(zomL) ~= "table" or type(tmpLo) ~= "table"
             or type(tmpHi) ~= "table" then return nil end

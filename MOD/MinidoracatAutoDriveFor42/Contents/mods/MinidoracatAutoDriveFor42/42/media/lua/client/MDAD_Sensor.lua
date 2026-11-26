@@ -2108,7 +2108,8 @@ end
 -- 調頭前檢查左右）。與走廊掃描共用 sprite 成本快取；**不碰 working 欄位**，
 -- 掃描輪進行中呼叫也安全。r=3 → 最多 37 格，一次性成本。cx／cy 可指定圓心（Driver Drive.uturnRoom：倒車後的車位），
 -- 缺＝車心。被擋時第 2、3 回傳＝命中點（別台車＝車心、格＝格心；參數不全＝nil；1013c uturn room 事件 hx／hy）。
-function MDADSensor.probeAround(state, vehicle, cell, radius, cx, cy)
+function MDADSensor.probeAround(state, vehicle, cell, radius, ...)
+    local cx, cy = ...
     if type(state) ~= "table" or not vehicle or not cell then return true end
     if not flagsBound then bindFlags() end
     cx, cy = cx or vehicle:getX(), cy or vehicle:getY()

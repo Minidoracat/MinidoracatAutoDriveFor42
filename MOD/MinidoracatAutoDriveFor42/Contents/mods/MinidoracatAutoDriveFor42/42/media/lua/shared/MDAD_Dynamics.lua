@@ -783,7 +783,8 @@ end
 
 -- first＝第一個保留點（其自身折角已在車下，不計）；last＝最後要量的頂點（含）。
 -- 省略／非法值保守取整線。
-function D.polylineKappaMax(xs, ys, n, first, last)
+function D.polylineKappaMax(xs, ys, n, ...)
+    local first, last = ...
     if type(xs) ~= "table" or type(ys) ~= "table" or not D.finite(n) then return 0 end
     n = n - n % 1
     if n < 3 then return 0 end
@@ -980,7 +981,8 @@ end
 -- fallback）；窗涵蓋到終點、預算也夠＝nil。窗尾之後的角和換窗後的新窗不同，Driver 換窗的相同範圍只到這裡。第 7 回傳＝
 -- source 窗尾頂點（第一個不找圓角的 source 點）在輸出中的索引，沒開窗＝nil（預算窗尾太短時 Driver 改用它觸發換窗）。
 function D.buildFilletPath(srcPts, srcSurface, srcWidth, halfW, rMin,
-        outPts, outSurface, outWidth, outKind, outSourceA, outSourceB, outRadius, emitFrom)
+        outPts, outSurface, outWidth, outKind, outSourceA, outSourceB, outRadius, ...)
+    local emitFrom = ...
     if type(srcPts) ~= "table" or type(srcSurface) ~= "table" or type(srcWidth) ~= "table"
             or type(outPts) ~= "table" or type(outSurface) ~= "table"
             or type(outWidth) ~= "table" or type(outKind) ~= "table"
@@ -1265,7 +1267,8 @@ D.SUMMON_A_MAX = 36
 D.SUMMON_GAIN = 3.6
 D.SUMMON_K_R = 7.2
 D.SUMMON_FRICTION_REF = 2.0
-function D.summonPushAccel(v, vTgt, wheelFriction, vCap, bias)
+function D.summonPushAccel(v, vTgt, wheelFriction, vCap, ...)
+    local bias = ...
     if not D.finite(v) or not D.finite(vTgt) or vTgt <= 0 then return 0 end
     local wf = wheelFriction
     if not D.finite(wf) or wf <= 0 then wf = D.SUMMON_FRICTION_REF end
