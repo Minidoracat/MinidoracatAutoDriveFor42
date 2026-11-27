@@ -44,7 +44,7 @@ MDAD.Drive = Drive
 -- 改動 bump 一次（日期＋字母序）。復盤時先對 header rev 再下判斷——兩次
 -- 「實測跑到修前版」的教訓。發版時與 mod.info modversion 對齊語意由發版
 -- 流程把關；此戳只服務開發期辨識。
-Drive.REV = "1127a"
+Drive.REV = "1128a"
 -- 召喚（本檔尾「召喚」段）：playerNum → 進行中的召喚（session 的 s.summon 是同一張表）；summonN＝要每幀推進的召喚工作數
 -- （前進／後退、等路線、等車停穩後交還），0＝onPlayerUpdate 一次整數比較就過。
 Drive.summons = {}
@@ -350,6 +350,7 @@ TUNE.ONCOMING_DESIGN_KMH = 25     -- 借對向車道繞行的過渡段設計速�
 TUNE.ONCOMING_INTRUDE_M = 0.5     -- 路寬未知時：車身左緣壓過路面中線超過這麼多才算借對向車道
 TUNE.ONCOMING_PASS_M = 2.4        -- 對向車道被吃掉後剩不到這麼寬（一台車＋餘裕）＝借對向車道
 TUNE.EXIT_EXTEND_MIN_M = 4        -- 承諾後出口加長：至少長這麼多才重建（Drive.extendDodgeExit）
+TUNE.EXIT_ARC_MIN_FRAC = 0.6     -- 承諾時出口彎外留邊（shapeProfile 的 Drive.exitArcRoom）最多縮到原長的這個比例（P33 1128a；再短出口空間帽壓整段）
 TUNE.EXIT_EXTEND_RETRY_M = 5      -- 加長掃不過：車再前進這麼多才重試
 TUNE.EXIT_SHORTEN_MIN_M = 2      -- 下一群擋回線 lane 時出口收短：至少短這麼多才重建（Drive.exitNextRoom／extendDodgeExit）
 -- 出口轉場塞不進緊接的小折點前（c 後 2m 內）時，偏移照樣通過這個折點、出口放到它之後（shapeProfile）。
@@ -1929,6 +1930,7 @@ local function releaseDodge(s)
     s.dodgeGuardFailed = false -- 物理重驗已判死（持平輪不得以「信任承諾」推翻）
     s.guardHitS, s.guardHitPhase = nil, nil -- 守護命中點及剖面階段；X/Y 隨 S 一起失效
     s.dodgeTier = nil -- 承諾來自哪一檔（telemetry dodge commit 事件）
+    s.dodgeExitNeed = nil -- 物理承諾的出口檔位（Drive.extendDodgeExit 掃加長用；P33 1128a）
     s.dodgeTight = false
     s.dodgeNeed = s.sweepBase
     s.dodgeKappa = 0
@@ -6109,7 +6111,7 @@ end
 -- 與弧上外漂是兩個來源。相加只在進弧 RAMP_BACK_M 內全額、到 2×RAMP_BACK_M 線性退完（放回的橫向速度在進弧段就用完；不退的話
 -- 長左彎整段多收 RAMP_M），相加比取大小就取大。laneHere＝reach 在 hs 的落點（呼叫端算過就傳，省一次 laneBiasAt）。
 -- 回 extra, arc（kra 歸因：弧預算沒定案＝0）, alat, ramp（相加的放回量，0＝沒相加）, arcRaw（實際弧預算；近處放回較大時 arc＝0
--- 但 arcRaw 仍是正的——軟縫與繞行出口看這個判「有沒有彎外外漂」）。
+-- 但 arcRaw 仍是正的——軟縫看這個判「有沒有彎外外漂」；繞行出口 Drive.exitArcRoom 看 alat＝有沒有左彎弧）。
 function Drive.shyBudget(prof, j, hs, reach, far, towing, vcap, laneHere)
     local back, rise = TUNE.KEEP_RIGHT_RAMP_BACK_M, TUNE.KEEP_RIGHT_RAMP_RISE_M
     if not laneHere then laneHere = finite(reach) and MDADFollower.laneBiasAt(prof, reach, j, hs) or nil end
@@ -10312,6 +10314,9 @@ function Drive.sweepHit(s, sen, tag, a, b, c, offL, sk, wx, wy, i, ox, oy, clear
     elseif phase == 2 then s.sfP2 = (s.sfP2 or 0) + 1
     elseif phase == 3 then s.sfP3 = (s.sfP3 or 0) + 1
     else s.sfP4 = (s.sfP4 or 0) + 1 end
+    -- xpr：這次掃掠帶出口檔位、命中的點套了出口 pad、用本檔 pad 會過（clearance 對的是出口 pad）＝出口檔位擋下（P33 1128a）
+    local scr = Drive.sweepScratch
+    if scr.xpDiff and i and scr.xp[i] and clearance > -scr.xpDiff then s.exitPadN = (s.exitPadN or 0) + 1 end
     if s.sf0Tag == nil then s.sf0Tag, s.sf0Ph, s.sf0X, s.sf0Y = tostring(tag or "?"), phase, ox, oy end
     if getDebug() then -- telemetry: blocked 事件 p1..p4／tag0 ph0 hx0 hy0（逐條明細只在 console）
         local key = tostring(tag or "?") .. offL
@@ -10349,11 +10354,15 @@ end
 -- 索引塊（每 TUNE.SWEEP_BLOCK_N 個連號點一塊）：塊內點的世界外框、兩種 pad 的最大半徑、最大方塊半邊。Sensor 依掃描
 -- 順序收點，連號點在世界上相鄰；整塊都在剔除距離外就跳過整塊。跳過的點逐點剔除本來也會剔掉（外框＋塊內最大
 -- 半徑是逐點剔除距離的上界，餘裕取塊首當下的值、塊內只會變小），塊內仍照索引順序逐點驗——首次命中、minI、淨距表不變。
-Drive.sweepScratch = { rrPhys = {}, rrPad = {}, bh = {},
+Drive.sweepScratch = { rrPhys = {}, rrPad = {}, bh = {}, xp = {},
     bx0 = {}, bx1 = {}, by0 = {}, by1 = {}, bPhys = {}, bPad = {}, bBh = {} }
 local function sweepLine(s, lx, ly, ln, lS0, lS1,
         a, b, c, d, offL, tag, needBase, startK, requireLoaded, collectClearance)
     local sen = s.sensor
+    -- 出口檔位（P33，1128a）：sweepCandidate／Drive.extendDodgeExit 在呼叫前一行寫 s.sweepExitNeed／s.sweepExitBase（回線 lane），
+    -- 這裡取用即清（只給緊接的這一次）
+    local exitNeed, exitBase = s.sweepExitNeed, s.sweepExitBase
+    s.sweepExitNeed, s.sweepExitBase = nil, nil
     local clr = collectClearance and s.dodgeClr or nil
     local clrKeepS = nil
     if clr then
@@ -10382,13 +10391,35 @@ local function sweepLine(s, lx, ly, ln, lS0, lS1,
         return false, 99, visibleEndS(sen, s.lastSNow), 4, lS1, nil, nil
     end
     local halfW, halfL, pad = sweepGeom(s, needBase)
+    -- 物理複驗不帶著出口一起放寬（P33 1128a：主擋物路燈重疊 0.055 就把整條線降成物理 pad，出口彎外的樹 0.09 m 過關）：
+    -- 出口段（c＋車身前伸 ＜ hardS ≤ d）、在回線 lane 往 offL 那一側的硬點照出口檔位的 pad 驗，主擋物照 needBase。只會比 pad 大。
+    -- 回線 lane 另一側的點：出口線永遠夾在回線 lane 與 offL 之間、不比回線 lane 本身近，照舊（smoke (ip)：出口回到 lane 0 時
+    -- 經過另一側的下一台車 0.25 m，回線 lane 本身也一樣近＝下一輪規劃的事）；d 之後已回到回線 lane，同理。側別看硬點世界座標
+    -- 在剖面段上的橫向（Drive.hardFace，＝掃掠用的位置），不看找縫用的取樣 hardL。
+    local padX = exitNeed and exitNeed - halfW or nil
+    if padX and padX <= pad then padX = nil end
+    local exitFrom = padX and finite(s.bodyReach) and finite(exitBase) and type(sen.hardS) == "table"
+        and c + s.bodyReach or nil
+    -- xpr（dodge commit／blocked）：命中的是套了出口檔位、用本檔 pad 會過的點才算（Drive.sweepHit 讀）
+    Drive.sweepScratch.xpDiff = exitFrom and padX - pad or nil
     -- 橫向同理（1006，E2E 1006xe fencepass）：一般帶以行駛線為心掃，Corridor.plan 卻以 nav 線對稱出候選——車靠右時遠側
     -- 那條帶沒掃過、被當成淨空，承諾貼邊線穿過整排籬笆。候選（含停留、出口加長）掃過的車身＋pad 要在完成快照的帶內；
     -- 拒收當建線失敗（相位 3、錨在 b），候選鏈照常換縫，全滅時 replan 讓下一輪換帶心補掃（nav 線或中點，Drive.bandNavRequest）。
-    if requireLoaded and not Drive.lineBandCovers(s, lx, ly, ln, lS0, lS1, pad, 1, 0) then
-        s.dodgeBuildReason = "band"
-        s.bandRejectN = (s.bandRejectN or 0) + 1
-        return false, 99, b, 3, b, nil, nil
+    -- 出口檔位：出口段起（c＋車身前伸）的線另以 padX 驗帶（帶外沒收進快照的硬點不會進下面的逐點驗）；本檔 pad 的帶過、出口 pad
+    -- 的帶不過＝出口檔位擋下，同算 xpr（s.exitPadN）。
+    local exitK = exitFrom and math.floor((exitFrom - lS0) / MDADFollower.OV_STEP) + 1
+    if requireLoaded then
+        local bandOk = Drive.lineBandCovers(s, lx, ly, ln, lS0, lS1, pad, 1, 0)
+        if bandOk and exitK and exitK <= ln
+                and not Drive.lineBandCovers(s, lx, ly, ln, lS0, lS1, padX, exitK < 1 and 1 or exitK, 0) then
+            bandOk = false
+            s.exitPadN = (s.exitPadN or 0) + 1
+        end
+        if not bandOk then
+            s.dodgeBuildReason = "band"
+            s.bandRejectN = (s.bandRejectN or 0) + 1
+            return false, 99, b, 3, b, nil, nil
+        end
     end
     local hn = sen.hardN
     if hn == 0 then return true, 9 end
@@ -10414,19 +10445,28 @@ local function sweepLine(s, lx, ly, ln, lS0, lS1,
     s.sweepCount = (s.sweepCount or 0) + 1 -- replan 牆鐘遙測的掃掠數（stepFollow 在 replan 前歸零）
     -- 半徑一律 ≥ SWEEP_PHYS_PAD > 0（sweepGeom 夾底、sweepRadius 補償後不低於物理 pad），內迴圈不必取絕對值。
     local sc = Drive.sweepScratch
-    local rrPhysT, rrPadT, bhT = sc.rrPhys, sc.rrPad, sc.bh
+    local rrPhysT, rrPadT, bhT, xpT = sc.rrPhys, sc.rrPad, sc.bh, sc.xp
     local comp = TUNE.SWEEP_QUANT_COMP
     local bx0, bx1, by0, by1, bPhys, bPad, bBh = sc.bx0, sc.bx1, sc.by0, sc.by1, sc.bPhys, sc.bPad, sc.bBh
     local BN = TUNE.SWEEP_BLOCK_N
     local nBlk, inBlk = 0, BN
     for i = 1, hn do
         local bh = hb and hb[i] or 0
+        local padI, xpI = pad, false
+        local hsI = exitFrom and sen.hardS[i]
+        if hsI and finite(hsI) and hsI > exitFrom and hsI <= d then
+            local j = MDADFollower.segIndexAt(s.profile, hsI)
+            local lf = Drive.hardFace(s.profile, sen, i, j, hsI)
+            local base = MDADFollower.laneBiasAt(s.profile, exitBase, j, hsI)
+            if lf and (lf - base) * (offL - base) > 0 then padI, xpI = padX, true end
+        end
+        xpT[i] = xpI
         if type(bh) == "number" and bh > 0 then
-            bhT[i], rrPhysT[i], rrPadT[i] = bh, SWEEP_PHYS_PAD, pad
+            bhT[i], rrPhysT[i], rrPadT[i] = bh, SWEEP_PHYS_PAD, padI
         else
             bhT[i] = 0
             rrPhysT[i] = MDADDynamics.sweepRadius(hr[i], SWEEP_PHYS_PAD, SWEEP_PHYS_PAD, comp)
-            rrPadT[i] = MDADDynamics.sweepRadius(hr[i], pad, SWEEP_PHYS_PAD, comp)
+            rrPadT[i] = MDADDynamics.sweepRadius(hr[i], padI, SWEEP_PHYS_PAD, comp)
         end
         local x, y = hx[i], hy[i]
         if inBlk == BN then
@@ -11675,16 +11715,31 @@ local function shapeProfile(s, profile, a, b, c, d, offL, baseL, crawlDesign)
             s.dodgeWindowShort = true
         end
     end
-    -- 彎外留邊（1126 P146）只夾承諾後的出口加長（Drive.extendDodgeExit）：承諾時就縮出口會讓出口空間帽壓整段繞行
-    -- （oracle 審查 I1：側移 2 m 出口 8 m 約 13 km/h，0928f「出口太短降到 10 km/h」重現；10-04 不加速度帽），P146 是加長造成的。
+    -- 彎外留邊（1126 P146 只夾承諾後的加長；1128a P33 起承諾時也夾）：見下方 endFit 區塊內的 Drive.exitArcRoom。
     -- 終點到站（1114h，Drive.endFit）：出口超過路線終點時，停點處的偏移要在到站圈內＝縮出口／挪保持段。改了形狀記
     -- s.endFitHit：這條候選連退路都掃不過時，sweepWithFallbacks 關掉到站形狀（s.endFitOff）照原形狀再掃一次。放不下（nil）＝
     -- 照原形狀（裁定 B：挪不進照舊承諾）。每輪都放不下／都掃不過：每輪同樣退回原形狀＝1114g 行為，不新增否決也不新增迴圈。
+    s.shapeArc, s.shapeArcLen0 = nil, nil
     if not s.endFitOff then
         local cFit, eFit = Drive.endFit(profile, b, c, exitLen, offL, baseL, exitWant)
         if cFit and (cFit ~= c or eFit ~= exitLen) then
             c, exitLen = cFit, eFit
             s.endFitHit = true
+        end
+        -- 承諾時的出口彎外留邊（P33 1128a：出口 28.9 m 的轉回段離左彎彎外的樹 0.09 m）：同加長那把尺（Drive.exitArcRoom）只縮不加長，
+        -- 最多縮到 max(原長×EXIT_ARC_MIN_FRAC, 不陡的最短出口)——再短出口空間帽會把整段繞行壓慢（1126f oracle I1、0928f）。
+        -- 放在延後判定之後（縮短不觸發 exit 延後）、endFitOff 區塊內（deferShape／handoffReady 照原形狀；夾過掃不過或要降檔才過＝
+        -- sweepWithFallbacks／demotePlan 以 s.exitArcOff 照原形狀再掃，記 s.exitArcHit）。s.shapeArc＝arc／floor（夾到地板、留邊不足額）。
+        local arcLen = not s.exitArcOff and Drive.exitArcRoom(s, c, exitLen, offL, baseL) or exitLen
+        if arcLen < exitLen then
+            local floor = exitLen * TUNE.EXIT_ARC_MIN_FRAC
+            if exitWant and exitWant > floor then floor = exitWant end
+            if floor < 1 then floor = 1 end -- 出口至少 1 m（原長 1–1.7 m、exitWant 很小時 0.6 倍會低於 1）
+            if floor < exitLen then
+                s.shapeArc, s.shapeArcLen0, s.exitArcHit = arcLen < floor and "floor" or "arc", exitLen, true
+                s.exitArcLen0 = exitLen -- 退回原形狀（fell）時 xa0 用：退路的 shapeProfile 會清 shapeArcLen0
+                exitLen = arcLen < floor and floor or arcLen
+            end
         end
     end
     -- shape 只記固定基準；最終 physical/stay 分類在 fallback 後才知道。
@@ -11775,12 +11830,13 @@ function Drive.exitNextRoom(s, sen, c, speedKmh)
     return b2 - s.bodyReach - one - c, b2, o2
 end
 
--- 繞行出口在左彎弧上的彎外留邊（1126 P146：出口加長五次把轉回段拉過彎外燈柱，燈柱處出口線位約 1.0、加上弧上外漂擦柱）：
--- 出口 (c, c＋room] 內、offL 比回線落點 base 偏 +l 時，+l 側（回線後仍在車身外）有左彎外漂預算的硬點處，出口線位
--- （buildOffsetLine 的 smoothstep：base＋(offL−base)·sm((d−hs)/(d−c))）不超過常駐線同一把尺 cap＝face − KEEP_RIGHT_CLEAR_M
+-- 繞行出口在左彎弧上的彎外留邊（1126 P146：出口加長五次把轉回段拉過彎外燈柱，燈柱處出口線位約 1.0、加上弧上外漂擦柱；
+-- 1128a P33：承諾時的出口 28.9 m 轉回段離彎外的樹 0.09 m）：出口 (c, c＋room] 內、offL 比回線落點 base 偏 +l 時，+l 側（回線後
+-- 仍在車身外）、25 m 內有左彎弧（shyBudget 的 alat 有值；弧速 ≤30 km/h 預算為 0 也算——P33 是線本身貼樹、不是外漂）的硬點處，
+-- 出口線位（buildOffsetLine 的 smoothstep：base＋(offL−base)·sm((d−hs)/(d−c))）不超過常駐線同一把尺 cap＝face − KEEP_RIGHT_CLEAR_M
 -- − 預算（Drive.shyBudget）− halfW。縮到剛好（smoothstep 反函數，同 Drive.endFit），cap 不高於 base＝縮到硬點處已回線（hs − c）。
--- 回縮後的 room（原樣＝不限），收到時記 s.exitArcKra／Cap／X／Y。拖車、沒有感測或剖面＝原樣。只給 Drive.extendDodgeExit
--- 夾加長（不加長＝不變慢）；承諾時的出口不夾（見 shapeProfile 的說明）。
+-- 回縮後的 room（原樣＝不限），收到時記 s.exitArcKra／Cap／X／Y。拖車、沒有感測或剖面＝原樣。Drive.extendDodgeExit 夾加長、
+-- shapeProfile 夾承諾時的出口（後者有地板 EXIT_ARC_MIN_FRAC）；兩處同一個閘，承諾時夾短的出口不會被加長拉回去。
 function Drive.exitArcRoom(s, c, room, offL, baseL)
     local sen, prof, vp = s.sensor, s.profile, s.vehicleProfile
     if s.tow ~= nil or type(sen) ~= "table" or not sen.ready or type(sen.hardS) ~= "table" or type(prof) ~= "table"
@@ -11799,9 +11855,9 @@ function Drive.exitArcRoom(s, c, room, offL, baseL)
             local top = l and l - rad - TUNE.KEEP_RIGHT_CLEAR_M - vp.halfW
             -- 只看回線後仍在車身外側（+l）的硬點：回線軌跡左側的點不給往右的上限（審查：彎內 l −4 的樹會被誤當彎外）
             if top and offL > base and l - rad - vp.halfW > base and top - 2 * TUNE.KEEP_RIGHT_RAMP_M < offL then
-                local extra, _, _, _, arcRaw = Drive.shyBudget(prof, j, hs, s.keepReach, hs > near, false, vcap, nil)
+                local extra, _, alat = Drive.shyBudget(prof, j, hs, s.keepReach, hs > near, false, vcap, nil)
                 local cap = top - extra
-                if arcRaw > 0 and cap < offL then
+                if alat and cap < offL then
                     local q, lim = (cap - base) / (offL - base), hs - c
                     if q > 0 then lim = lim / (1 - (0.5 - math.sin(math.asin(1 - 2 * q) / 3))) end
                     if lim < out then
@@ -11890,8 +11946,10 @@ function Drive.extendDodgeExit(s, sen, playerNum)
             room = fitRoom
         end
     end
-    local d2, coverEnd, n, s0, covered, ok, margin, mi
+    local d2, coverEnd, n, s0, covered, ok, margin, mi, hxX, hyX
+    local xp0 = s.exitPadN or 0 -- 加長被出口檔位擋下（Drive.sweepHit 計數）＝why=exit-pad（P33 1128a）
     for _ = 1, 2 do
+        hxX, hyX = nil, nil -- 每次嘗試重算（建線失敗的那次不是 exit-pad）
         d2 = c + room
         coverEnd = math.min(d2 + 1, prof.length)
         local reason
@@ -11902,9 +11960,13 @@ function Drive.extendDodgeExit(s, sen, playerNum)
             -- 不收表：表是現行承諾線的（同一個陣列），加長掃不過時舊線要原封不動。1002r 前這裡收表，
             -- 每次加長失敗都把現行線的逐點淨距清掉，而補掃每條線只有一次（E2E rc55 0001：33m 進入段、
             -- 出口 3.8m，下一群擋住加長、每 2m 試一次，表清空後整段吃整線帽 10 km/h 爬 80m）。
-            local okS, mS, _, _, _, _, _, miS = sweepLine(s, s.tmpOv2X, s.tmpOv2Y, n, s0, covered,
+            s.sweepExitNeed, s.sweepExitBase = s.dodgeExitNeed, s.dodgeBaseL -- 物理承諾：加長的出口照承諾時的出口檔位驗（P33 1128a）
+            local okS, mS, _, _, _, hxS, hyS, miS = sweepLine(s, s.tmpOv2X, s.tmpOv2Y, n, s0, covered,
                 fs.offA, fs.offB, c, d2, fs.offL, "extend", s.dodgeNeed, 1, true, false)
             ok, margin, mi = okS, mS, miS
+            -- 只記最後一次嘗試是不是被出口檔位擋下（到站那條被擋、main 長度另有原因或建線失敗＝不是 exit-pad；迴圈頭清）
+            if not okS and (s.exitPadN or 0) > xp0 then hxX, hyX = hxS or false, hyS end
+            s.exitPadN = xp0 -- 計數是 replan 那一輪的（dodge commit／blocked 的 xpr），不混進加長
         end
         if ok and MDADFollower.setOffset(fs, fs.offA, fs.offB, c, d2, fs.offL,
                 s.tmpOv2X, s.tmpOv2Y, n, s0, covered, coverEnd) then break end
@@ -11914,6 +11976,13 @@ function Drive.extendDodgeExit(s, sen, playerNum)
     end
     if not ok then
         s.dodgeExtendFailS = rs
+        if hxX ~= nil and not s.exitPadHeld then
+            -- 物理承諾的出口檔位擋下加長（本檔 pad 會過）：出口維持現長、吃出口空間帽，事件給復盤原因（同一次承諾記一筆，
+            -- s.exitPadHeld 在 commit 時清；len＝這次試的出口長，不是現行出口）
+            s.exitPadHeld = true
+            diagEvent(s, playerNum, "dodge", { phase = "extend", why = "exit-pad", len = room, c = c, rs = rs,
+                x = hxX or nil, y = hyX })
+        end
         return false
     end
     s.tmpOvX, s.tmpOv2X = s.tmpOv2X, s.tmpOvX
@@ -13291,7 +13360,9 @@ end
 
 -- Candidate sweep and commitment consume the same complete preallocated line.
 -- shape／建線／覆蓋失敗不回命中點（hx／hy＝nil，同 sweepLine 早退與 Drive.towFold）；相位與弧長照給（corner 分類照判）。
-local function sweepCandidate(s, shapeOk, a, b, c, d, offL, baseL, tag, needBase)
+-- exitNb＝出口檔位（物理複驗與其後的拓寬、進入段拉長、微調傳 s.sweepExitNb；承諾後的出口加長改由 s.dodgeExitNeed 帶；
+-- nil＝整條線同 needBase，見 sweepLine 的 padX）。
+local function sweepCandidate(s, shapeOk, a, b, c, d, offL, baseL, tag, needBase, exitNb)
     if not shapeOk then return 0, 0, false, 99, b, 3, b, nil, nil end
     local ovN, ovS0, buildReason, lastCovered = MDADFollower.buildOffsetLine(
         s.profile, s.lastSNow, a, b, c, d, offL, baseL, s.tmpOvX, s.tmpOvY,
@@ -13312,6 +13383,7 @@ local function sweepCandidate(s, shapeOk, a, b, c, d, offL, baseL, tag, needBase
         return 0, ovS0, false, 99, b, 3, b, nil, nil
     end
     s.tmpOvEndS = lastCovered
+    s.sweepExitNeed, s.sweepExitBase = exitNb, baseL
     local ok, margin, hardS, phase, sampleS, hitX, hitY, hitI = sweepLine(
         s, s.tmpOvX, s.tmpOvY, ovN, ovS0, lastCovered,
         a, b, c, d, offL, tag, needBase, nil, true)
@@ -13535,8 +13607,10 @@ local function chainAhead(s, planN, a, b, c, d, offL, baseL, nb, tag, crawlDesig
         s.chainWhy = pre .. "stay-fail"
         return nil
     end
+    local arcHit = s.exitArcHit -- 下一群的停留 lane 不是這條候選的出口：它的留邊夾不觸發 sweepWithFallbacks 第二輪
     local L, la, lb, lc, ld_, lmg, lovN, lovS0 = stayLaneForNext(
         s, planN, a, b, c, d, offL, baseL, nb, tag, crawlDesign, sc, b2, o2)
+    s.exitArcHit = arcHit
     s.chainWhy = pre .. (L ~= nil and "look" or "look-fail")
     if L ~= nil then return true, la, lb, lc, ld_, L, lmg, lovN, lovS0, nb, "stay-look" end
     return nil
@@ -13618,6 +13692,7 @@ end
 -- a..d 傳原始（未 shape）值；crawlDesign 傳給 shapeProfile。
 function Drive.sweepFallbacksOnce(s, planN, a, b, c, d, offL, baseL, tag, nb, physBase, crawlDesign)
     local sen = s.sensor
+    s.sweepExitNb = nil -- 出口檔位：只在物理複驗（②）起才有值，之後的拓寬、進入段拉長、微調沿用；adopt 抄進 s.dodgeExitNeed
     local sa, sb, sc, sd, shapeOk = shapeProfile(s, s.profile, a, b, c, d, offL, baseL, crawlDesign)
     -- 貼縫拓寬（TUNE.NUDGE_WIDEN_M）：掃過但淨距貼底時往遠離最近點側移一格再掃，更寬就換
     local function widen(wa, wb, wc, wd, wo, wmg, wovN, wovS0, wnb, variant, wi)
@@ -13628,7 +13703,7 @@ function Drive.sweepFallbacksOnce(s, planN, a, b, c, d, offL, baseL, tag, nb, ph
             local offW = wo + dir * TUNE.NUDGE_STEP_M
             local xa, xb, xc, xd, shapeW = shapeProfile(s, s.profile, a, b, c, d, offW, baseL, crawlDesign)
             local ovNw, ovS0w, okW, mgW = sweepCandidate(
-                s, shapeW, xa, xb, xc, xd, offW, baseL, tag .. "-widen", wnb)
+                s, shapeW, xa, xb, xc, xd, offW, baseL, tag .. "-widen", wnb, s.sweepExitNb)
             if okW and mgW > wmg then
                 return true, xa, xb, xc, xd, offW, mgW, ovNw, ovS0w, wnb, variant and (variant .. "-widen") or "widen"
             end
@@ -13652,7 +13727,8 @@ function Drive.sweepFallbacksOnce(s, planN, a, b, c, d, offL, baseL, tag, nb, ph
         local ya, yb, yc, yd, shapeY = shapeProfile(s, s.profile, a, b, c, d, xo, baseL, crawlDesign)
         s.entryStretch = false
         if shapeY and ya < xa - 1 then
-            local ovNy, ovS0y, okY, mgY = sweepCandidate(s, shapeY, ya, yb, yc, yd, xo, baseL, tag .. "-stretch", xnb)
+            local ovNy, ovS0y, okY, mgY = sweepCandidate(s, shapeY, ya, yb, yc, yd, xo, baseL, tag .. "-stretch", xnb,
+                s.sweepExitNb)
             if okY and mgY >= xmg - 0.02 then
                 return true, ya, yb, yc, yd, xo, mgY, ovNy, ovS0y, xnb, variant and (variant .. "-stretch") or "stretch"
             end
@@ -13679,10 +13755,13 @@ function Drive.sweepFallbacksOnce(s, planN, a, b, c, d, offL, baseL, tag, nb, ph
     end
     if shapeOk then
         local okH, ha, hb, hc, hd, ho, mgH, ovNH, ovS0H, hnb, hv = homeStay(sa, sb, sc, offL, nb, tag)
-        if okH then return true, ha, hb, hc, hd, ho, mgH, ovNH, ovS0H, hnb, hv end
+        if okH then
+            if s.fbKeepTier then return false end -- sweepWithFallbacks 第二輪：停留＝不要
+            return true, ha, hb, hc, hd, ho, mgH, ovNH, ovS0H, hnb, hv
+        end
     end
     local ovN, ovS0, ok, mg, hitS, ph, hps, hx, hy, hi = sweepCandidate(
-        s, shapeOk, sa, sb, sc, sd, offL, baseL, tag, nb)
+        s, shapeOk, sa, sb, sc, sd, offL, baseL, tag, nb, nil)
     if ok then
         local okC, ca, cb, cc, cd, co, cmg, covN, covS0, cnb, cv = chainAhead(
             s, planN, a, b, c, d, offL, baseL, nb, tag, crawlDesign, sa, sb, sc, sd)
@@ -13702,12 +13781,16 @@ function Drive.sweepFallbacksOnce(s, planN, a, b, c, d, offL, baseL, tag, nb, ph
     if not shapeOk then return false end
     local used = nb
     if mg < TUNE.PHYS_RECHECK_M and nb > physBase + 1e-6 then
+        if s.fbKeepTier then return false end -- 第二輪：物理複驗起的結果都是降檔（微調用 used＝物理、停留）
         do
             local okH, ha, hb, hc, hd, ho, mgH, ovNH, ovS0H, hnb, hv = homeStay(sa, sb, sc, offL, physBase, tag .. "-phys")
             if okH then return true, ha, hb, hc, hd, ho, mgH, ovNH, ovS0H, hnb, hv end
         end
+        -- 主擋物放寬到物理檔，出口段的硬點照 min(本檔, 巡航) 驗（P33 1128a：整條線一起降成物理 pad，出口彎外的樹 0.09 m 過關）
+        local xnb = nb < s.sweepBase and nb or s.sweepBase
+        if xnb > physBase + 1e-6 then s.sweepExitNb = xnb end
         local ovN2, ovS02, ok2, mg2, hitS2, ph2, hps2, hx2, hy2, hi2 = sweepCandidate(
-            s, shapeOk, sa, sb, sc, sd, offL, baseL, tag .. "-phys", physBase)
+            s, shapeOk, sa, sb, sc, sd, offL, baseL, tag .. "-phys", physBase, s.sweepExitNb)
         if ok2 then return stretch(widen(sa, sb, sc, sd, offL, mg2, ovN2, ovS02, physBase, "physical", hi2)) end
         used = physBase
         mg, ph, hps, hi = mg2, ph2, hps2, hi2
@@ -13721,23 +13804,28 @@ function Drive.sweepFallbacksOnce(s, planN, a, b, c, d, offL, baseL, tag, nb, ph
         local na, nb2, nc, nd, shapeN = shapeProfile(s, s.profile, a, b, c, d, offN, baseL, crawlDesign)
         if shapeN then
             local okH, ha, hb, hc, hd, ho, mgH, ovNH, ovS0H, hnb, hv = homeStay(na, nb2, nc, offN, used, tag .. "-nudge")
-            if okH then return true, ha, hb, hc, hd, ho, mgH, ovNH, ovS0H, hnb, hv end
+            if okH then
+                if s.fbKeepTier then return false end
+                return true, ha, hb, hc, hd, ho, mgH, ovNH, ovS0H, hnb, hv
+            end
         end
         local ovN3, ovS03, ok3, mg3 = sweepCandidate(
-            s, shapeN, na, nb2, nc, nd, offN, baseL, tag .. "-nudge", used)
+            s, shapeN, na, nb2, nc, nd, offN, baseL, tag .. "-nudge", used, s.sweepExitNb)
         if ok3 then return stretch(true, na, nb2, nc, nd, offN, mg3, ovN3, ovS03, used, "nudge") end
         -- nudge 的 shapeProfile 同樣會改寫 spaceCap／designSpeed／shapeReason；失敗後
         -- 下一步 stay 採原 offL，必先復原原線暫存（widen 同款）。
         shapeProfile(s, s.profile, a, b, c, d, offL, baseL, crawlDesign)
     end
     -- 鏈式停留：只有回線段撞到（縫本身過得去）才有意義
-    if ph == 4 then
+    if ph == 4 and not s.fbKeepTier then
         local allowed, why, b2, o2 = stayAllowed(s, sen, planN, sb, sc, offL)
         if allowed then
             s.stayNextB = nil
             if why == "dodge" then
+                local arcHit = s.exitArcHit -- 下一群的停留 lane 不是這條候選的出口：它的留邊夾不觸發第二輪
                 local L, la, lb, lc, ld_, lmg, lovN, lovS0 = stayLaneForNext(
                     s, planN, a, b, c, d, offL, baseL, used, tag, crawlDesign, sc, b2, o2)
+                s.exitArcHit = arcHit
                 if L ~= nil then return true, la, lb, lc, ld_, L, lmg, lovN, lovS0, used, "stay-look" end
                 -- 下一群塞不進、也沒有可收的 lane：停留照走，但速度要對下一群煞停（2026-09-04
                 -- s015：停留 −1.75 cap 27.8 走到 c、B 在 4m 後要 +3.75 側移 → 27 km/h 撞進 blocked
@@ -13757,25 +13845,57 @@ function Drive.sweepFallbacksOnce(s, planN, a, b, c, d, offL, baseL, tag, nb, ph
     return false
 end
 
--- 候選掃掠入口（1114h 終點到站退路）：先掃到站形狀（shapeProfile 的 Drive.endFit 改過出口、停留蓋過停點的到站守門），
--- 改過形狀的這條連四層退路都過不了＝關掉到站形狀、照原形狀再掃一次（主代理 1114h 裁定 B：挪不進照舊承諾＝1114g 行為；
--- 終點本身到不了時寧可過了群停在終點附近，也不停在群前）。s.endFitMode＝最後一次成功掃掠的形狀來源：fit＝到站形狀、
--- fell＝退回原形狀、nil＝沒碰到終點約束；adopt 當場抄進 s.dodgeEndFit（dodge commit 的 ef）。
+-- 候選掃掠入口（1114h 終點到站退路）：先掃到站形狀（shapeProfile 的 Drive.endFit 改過出口、停留蓋過停點的到站守門）與
+-- 出口彎外留邊（shapeProfile 的 Drive.exitArcRoom，P33 1128a），改過形狀的這條連四層退路都過不了＝關掉改過的那個（到站形狀
+-- s.endFitOff 連同留邊；只有留邊 s.exitArcOff，停留的到站守門照舊）照原形狀再掃一次（主代理 1114h 裁定 B：挪不進照舊承諾＝1114g
+-- 行為；終點本身到不了時寧可過了群停在終點附近，也不停在群前）。留邊只為多留邊、不是必要條件：夾短的線要降檔（物理／爬行）或改
+-- 停留才過、原形狀在本檔過得去＝照原形狀（1128a 審查：否則為了留邊把巡航回線換成爬行或沿彎外停留）。
+-- s.endFitMode＝最後一次成功掃掠的到站形狀來源：fit＝到站形狀、fell＝退回原形狀、nil＝沒碰到終點約束；adopt 當場抄進
+-- s.dodgeEndFit（dodge commit 的 ef）。s.exitArcMode＝fell（夾過的出口退回原形狀）或 nil（dodge commit 的 xa）。
+function Drive.fallbackDegraded(nbU, nb, var)
+    return nbU < nb - 1e-6 or type(var) == "string" and string.sub(var, 1, 4) == "stay"
+end
 local function sweepWithFallbacks(s, planN, a, b, c, d, offL, baseL, tag, nb, physBase, crawlDesign)
     s.endFitHit, s.endFitOff, s.endFitMode = false, false, nil
+    s.exitArcHit, s.exitArcOff, s.exitArcMode, s.fbKeepTier = false, false, nil, false
+    local why0, nextB0 = s.chainWhy, s.stayNextB
     local ok, ra, rb, rc, rd, ro, mg, ovN, ovS0, nbU, var = Drive.sweepFallbacksOnce(
         s, planN, a, b, c, d, offL, baseL, tag, nb, physBase, crawlDesign)
     if ok then
+        if s.exitArcHit and not s.endFitHit and Drive.fallbackDegraded(nbU, nb, var) then
+            -- 第一輪的計數（第三輪同一條線會再算一次；第二輪丟掉時一併丟掉它的）；鏈狀態每輪從進來時的值起算
+            local xp, kin, band, p1, p2, p3, p4 = s.exitPadN, s.kinRejectN, s.bandRejectN, s.sfP1, s.sfP2, s.sfP3, s.sfP4
+            local t0, ph0, x0, y0, fold = s.sf0Tag, s.sf0Ph, s.sf0X, s.sf0Y, s.towFoldDeg
+            s.chainWhy, s.stayNextB = why0, nextB0
+            -- 第二輪只要本檔、不停留的結果：走到物理複驗／停留就整輪放棄（s.fbKeepTier，sweepFallbacksOnce 看）
+            s.exitArcOff, s.fbKeepTier = true, true
+            local ok2, ra2, rb2, rc2, rd2, ro2, mg2, ovN2, ovS02, nbU2, var2 = Drive.sweepFallbacksOnce(
+                s, planN, a, b, c, d, offL, baseL, tag, nb, physBase, crawlDesign)
+            s.exitArcOff, s.fbKeepTier = false, false
+            if ok2 and not Drive.fallbackDegraded(nbU2, nb, var2) then
+                s.exitArcMode = "fell"
+                s.endFitMode = s.endFitHit and "fit" or nil
+                return ok2, ra2, rb2, rc2, rd2, ro2, mg2, ovN2, ovS02, nbU2, var2
+            end
+            -- 換回夾短的那條（第二輪覆寫了 tmpOv／shape 暫存；同幀同點雲＝同一條線，同 Drive.thinAdopt）
+            s.chainWhy, s.stayNextB, s.endFitHit = why0, nextB0, false
+            s.sf0Tag, s.sf0Ph, s.sf0X, s.sf0Y, s.towFoldDeg = t0, ph0, x0, y0, fold
+            ok, ra, rb, rc, rd, ro, mg, ovN, ovS0, nbU, var = Drive.sweepFallbacksOnce(
+                s, planN, a, b, c, d, offL, baseL, tag, nb, physBase, crawlDesign)
+            s.exitPadN, s.kinRejectN, s.bandRejectN, s.sfP1, s.sfP2, s.sfP3, s.sfP4 = xp, kin, band, p1, p2, p3, p4
+            if not ok then return false end
+        end
         s.endFitMode = s.endFitHit and "fit" or nil
         return ok, ra, rb, rc, rd, ro, mg, ovN, ovS0, nbU, var
     end
-    if not s.endFitHit then return false end
-    s.endFitOff = true
+    if not s.endFitHit and not s.exitArcHit then return false end
+    s.endFitOff, s.exitArcOff = s.endFitHit, true
     ok, ra, rb, rc, rd, ro, mg, ovN, ovS0, nbU, var = Drive.sweepFallbacksOnce(
         s, planN, a, b, c, d, offL, baseL, tag, nb, physBase, crawlDesign)
-    s.endFitOff = false
+    s.endFitOff, s.exitArcOff = false, false
     if not ok then return false end
-    s.endFitMode = "fell"
+    s.endFitMode = s.endFitHit and "fell" or nil
+    s.exitArcMode = s.exitArcHit and "fell" or nil
     return ok, ra, rb, rc, rd, ro, mg, ovN, ovS0, nbU, var
 end
 
@@ -13959,7 +14079,7 @@ function Drive.debugSweepCandidate(playerNum, a, b, c, d, offL)
     local s = sessions[playerNum]
     if not s or not s.sensor or not s.sensor.ready then return nil end
     local _, _, ok, _, _, phase, _, hitX, hitY = sweepCandidate(s, true, a, b, c, d, offL, laneBiasOf(s),
-        "debug", s.sweepBase)
+        "debug", s.sweepBase, nil)
     return ok, phase, hitX, hitY
 end
 -- 測試鉤（harness 鎖停留線的運動學證明）：對當前 session 的點雲直接掃一條停留線（rs→b 換到 offL、平行到 c），回 ok。
@@ -14070,8 +14190,9 @@ end
 -- refineComfort=true（2026-09-02 使用者「能走路面就別走草地」）：複審不是 ban
 -- 重試，first-safe 後在同側找額外餘裕／偏回路面帶。降檔縫一律標 dodgeCrawl
 -- reserve 豁免＋intent CRAWL；速度仍由 clearance 連續縮放）。blockL＝擋線基準（laneBias），baseL＝回線 lane。
--- 終點到站形狀（1114h，shapeProfile 的 Drive.endFit）同候選鏈（sweepWithFallbacks）：改過形狀的這條掃不過＝關掉到站形狀照原形狀
--- 再掃一次（裁定 B：挪不進照舊承諾，1114m 前這裡少了這條退路＝main 會承諾的降檔縫被新拒收）。
+-- 終點到站形狀（1114h，shapeProfile 的 Drive.endFit）與出口彎外留邊（1128a，Drive.exitArcRoom）同候選鏈（sweepWithFallbacks）：
+-- 改過形狀的這條掃不過＝關掉改過的那個照原形狀再掃一次（裁定 B：挪不進照舊承諾，1114m 前這裡少了這條退路＝main 會承諾的降檔縫
+-- 被新拒收）。降檔複審本來就是爬行檔，不做候選鏈那條「夾短要降檔才過」的重試。
 local function demotePlan(s, sen, planN, prefer, blockL, baseL, playerNum)
     for tier = 1, 2 do
         local nu = tier == 1 and s.squeezeNeed
@@ -14086,19 +14207,24 @@ local function demotePlan(s, sen, planN, prefer, blockL, baseL, playerNum)
             local a0, b0, c0, d0, shapeQ = aq, bq, cq, dq, nil
             local tag = tier == 1 and "crawl" or "probe"
             s.endFitHit, s.endFitOff, s.endFitMode = false, false, nil
+            s.exitArcHit, s.exitArcOff, s.exitArcMode = false, false, nil
             aq, bq, cq, dq, shapeQ = shapeProfile(s, s.profile, a0, b0, c0, d0, oq, baseL, true)
-            local ovN, ovS0, okQ, mgQ = sweepCandidate(s, shapeQ, aq, bq, cq, dq, oq, baseL, tag, nb)
-            if not okQ and s.endFitHit then
-                s.endFitOff = true
+            local ovN, ovS0, okQ, mgQ = sweepCandidate(s, shapeQ, aq, bq, cq, dq, oq, baseL, tag, nb, nil)
+            if not okQ and (s.endFitHit or s.exitArcHit) then
+                s.endFitOff, s.exitArcOff = s.endFitHit, true
                 aq, bq, cq, dq, shapeQ = shapeProfile(s, s.profile, a0, b0, c0, d0, oq, baseL, true)
-                ovN, ovS0, okQ, mgQ = sweepCandidate(s, shapeQ, aq, bq, cq, dq, oq, baseL, tag, nb)
-                s.endFitOff = false
-                if okQ then s.endFitMode = "fell" end
+                ovN, ovS0, okQ, mgQ = sweepCandidate(s, shapeQ, aq, bq, cq, dq, oq, baseL, tag, nb, nil)
+                s.endFitOff, s.exitArcOff = false, false
+                if okQ and s.endFitHit then s.endFitMode = "fell" end
+                if okQ and s.exitArcHit then s.exitArcMode = "fell" end
             elseif okQ and s.endFitHit then
                 s.endFitMode = "fit"
             end
             if okQ then
                 s.dodgeEndFit = s.endFitMode -- dodge commit 的 ef（同候選鏈 adopt 抄 s.endFitMode；1114n）
+                s.dodgeArcMode = s.exitArcMode or s.shapeArc -- dodge commit 的 xa／xa0
+                s.dodgeArcLen0 = s.exitArcMode == "fell" and s.exitArcLen0 or s.shapeArcLen0
+                s.dodgeExitNeed = nil -- 末段全線物理不分出口檔位（P33 1128a 使用者裁定）
                 s.dodgeMargin, s.dodgeMarginS = mgQ, nil
                 s.dodgeClrN, s.dodgeEnvN = 0, 0
                 s.dodgeCrawl = true
@@ -15456,6 +15582,7 @@ local function replan(s, vehicle, playerNum)
     s.dodgeDeferCap = s.dodgeHandoffHold and 0 or -1
     s.dodgeDeferS = nil
     s.steepDeficitM, s.kinRejectN, s.towFoldDeg, s.bandRejectN, s.bandNavWhy = -1, 0, nil, 0, nil
+    s.exitPadN = 0 -- 本輪掃掠命中套了出口 pad、本檔 pad 會過的點數（Drive.sweepHit；dodge commit／blocked 事件 xpr；P33 1128a）
     s.sfP1, s.sfP2, s.sfP3, s.sfP4, s.sf0Tag = 0, 0, 0, 0, nil -- 候選鏈摘要（Drive.sweepHit 累計；blocked 事件 p1..p4／tag0…）
     local sen = s.sensor
     if not sen.ready then return end
@@ -15992,6 +16119,14 @@ local function replan(s, vehicle, playerNum)
                 s.dodgeCrawl = nbUsed < s.sweepBase - 1e-6 or s.dodgeStay
                 s.dodgeTier = variant and (tier .. "-" .. variant) or tier
                 s.dodgeEndFit = s.endFitMode -- 採納的這次 sweepWithFallbacks 的到站形狀來源（dodge commit 的 ef）
+                -- 出口彎外留邊（P33 1128a）：xa＝arc／floor／fell、xa0＝夾前出口長；物理承諾的出口檔位給 Drive.extendDodgeExit
+                if s.dodgeStay then
+                    s.dodgeArcMode, s.dodgeArcLen0, s.dodgeExitNeed = nil, nil, nil
+                else
+                    s.dodgeArcMode = s.exitArcMode or s.shapeArc
+                    s.dodgeArcLen0 = s.exitArcMode == "fell" and s.exitArcLen0 or s.shapeArcLen0
+                    s.dodgeExitNeed = s.sweepExitNb
+                end
                 s.lastOvN, s.lastOvS0, s.lastOvEndS = ovN, ovS0, s.tmpOvEndS
             end
             -- adoptIf(tier, ok, ...)：成功即採納回 true；失敗資訊在 s.fbFail
@@ -16453,8 +16588,14 @@ local function replan(s, vehicle, playerNum)
                 dbl = s.dodgeBaseL, -- 出口回的 lane（Drive.dodgeHomeL，承諾時凍結；1014b N9）
                 dbs = Drive.dodgeHomeSrc(s), -- 1026g T13：dbl 是哪一種 lane（ret／chain／trans／zombie／traffic／tow／keep／center／other）
                 -- 1114h 終點到站形狀（sweepWithFallbacks）：fit＝出口改到停點前到站圈內、fell＝改了掃不過退回原形狀（到不了站）、缺＝沒碰到
-                ef = s.dodgeEndFit })
-            s.exitArcHeld = nil -- 新承諾：arc-hold 去重重來
+                ef = s.dodgeEndFit,
+                -- P33 1128a 出口彎外留邊：xa＝arc（夾短）／floor（夾到地板、留邊不足額）／fell（夾過掃不過、照原形狀）、xa0＝夾前出口長；
+                -- x／y／kra／want＝決定夾長的那個硬點與預算、出口線位上限（Drive.exitArcRoom；xa＝fell 時是第一次掃的那個）
+                xa = s.dodgeArcMode, xa0 = s.dodgeArcLen0,
+                x = s.dodgeArcMode and s.exitArcX or nil, y = s.dodgeArcMode and s.exitArcY or nil,
+                kra = s.dodgeArcMode and s.exitArcKra or nil, want = s.dodgeArcMode and s.exitArcCap or nil,
+                xpr = (s.exitPadN or 0) > 0 and s.exitPadN or nil }) -- 出口檔位擋下的命中與帶拒收數（Drive.sweepHit、sweepLine）
+            s.exitArcHeld, s.exitPadHeld = nil, nil -- 新承諾：arc-hold／exit-pad 去重重來
             Drive.proofTightArm(s, playerNum) -- 停下之後的窄線爬行（TUNE.PROOF_TIGHT_KMH）
             if getDebug() then -- telemetry: dodge commit 事件（cap 分解同欄）
                 -- cap 分解一行印清楚（2026-09-04 實機三段 8／15／14 km/h 繞行，console
@@ -16655,6 +16796,7 @@ local function replan(s, vehicle, playerNum)
             corner = s.cornerLatch, detail = s.dodgeBlockReason,
             blocker = s.dodgeDeadendS, shape = s.dodgeShapeReason,
             kin = s.kinRejectN > 0 and s.kinRejectN or nil, -- 本輪被運動學證明拒收的候選數（Drive.kinProof）
+            xpr = (s.exitPadN or 0) > 0 and s.exitPadN or nil, -- 出口檔位擋下的命中數（Drive.sweepHit；P33 1128a）
             fold = s.towFoldDeg, -- 本輪被掛車折角預檢拒收的候選中最大預估折角（°；Drive.towFold）
             band = s.bandRejectN > 0 and s.bandRejectN or nil, -- 本輪落在沒掃過那一側被拒收的候選數（sweepLine band）
             bsel = s.bandNavWhy, -- 本輪補掃帶心選法（Drive.bandNavRequest；none＝中點也蓋不住、cap＝延後到上限）
@@ -16696,6 +16838,7 @@ local function replan(s, vehicle, playerNum)
             wms = Drive.replanElapsed(s), sweeps = s.sweepCount,
             attempt = s.episodeAttempts, detail = s.dodgeBlockReason, shape = s.dodgeShapeReason,
             kin = s.kinRejectN > 0 and s.kinRejectN or nil, fold = s.towFoldDeg,
+            xpr = (s.exitPadN or 0) > 0 and s.exitPadN or nil,
             band = s.bandRejectN > 0 and s.bandRejectN or nil, bsel = s.bandNavWhy,
             bdn = (s.bandDeferN or 0) > 0 and s.bandDeferN or nil,
             hitPhase = s.dodgeBlockReason == "sweep" and s.fbFail and s.fbFail.ph or nil,

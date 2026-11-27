@@ -14575,6 +14575,151 @@ end
 scenarioNudge()
 end
 
+-- 1128a P33（正式服 GTR 繞路燈後出口轉回段擦左彎彎外的樹）：predicate 級（debugShape／debugSweepFallbacks 直接餵候選）。
+--   (pa-clamp) 承諾時出口照 Drive.exitArcRoom（換成定值）縮：縮到 80%＝d 跟著縮、shapeArc arc；(pa-floor) 縮到 30%＝停在
+--   max(60%, 不陡的最短出口)、shapeArc floor；(pa-want) 承諾窗截短的出口＝地板取 exitWant；(pa-off) endFitOff（deferShape／
+--   handoffReady 的原形狀）＝不縮。
+--   (pa-fell) 縮短的出口剛走完就回到 lane 0、撞上那裡的細桿；原長出口在那裡還在 −1 過得去（停留線另被同側約束拒）：
+--   照原形狀承諾、exitArcMode fell、xa0＝原長；(pa-degr) 同組不擋停留＝縮短的線只剩停留接得住、原形狀本檔過＝照原形狀；
+--   (pa-keep) 原形狀也要降檔＝換回夾短那條（第三輪重掃）。(pb-exit)／(pb-tail)／(pb-face) 的幾何見情境內註解；承諾後出口加長
+--   與降檔複審、採納見 scenarioEndArrive 的 (pb-ext／pb-ext-pad／pb-ext-band)、(demote-arc)、(adopt-x)。
+--   違規證明（temp/vp/p33/mk.py）：shapeProfile 不呼叫 exitArcRoom＝(pa-clamp)／(pa-floor)／(pa-fell)／(pa-degr) 紅；地板不取
+--   exitWant＝(pa-want) 紅；退路不看 exitArcHit＝(pa-fell) 紅；不做「要降檔才過」的重試＝(pa-degr) 紅；第三輪不重掃＝(pa-keep)
+--   紅；物理複驗不傳 s.sweepExitNb＝(pb-exit) 紅；界線改成 hardS＞c＝(pb-tail) 紅；側別改回 hardL＝(pb-face) 紅；不分回線 lane
+--   兩側＝(ip) 紅；加長不寫 mailbox＝(pb-ext) 紅；拿掉 exit-pad 事件或 xpr 不看淨距＝(pb-ext-pad) 紅；拿掉出口段帶檢查＝
+--   (pb-ext-band) 紅；demotePlan 退路只看 endFitHit＝(demote-arc) 紅；adopt 不抄 xa／xa0／dodgeExitNeed＝(adopt-x) 紅；閘改回
+--   arcRaw＝(xa-slow) 紅。
+function drive.scenarioP33Exit()
+    scenario("1128a P33：繞行出口承諾時彎外留邊、物理複驗不帶著出口放寬")
+    local Dr = MDAD.Drive
+    drive.fillWorld(-10, 120, -8, 8)
+    checkTrue(armDrive(), "(p33) 啟動")
+    driveReset(dveh)
+    drive.scanRound()
+    local s = Dr.debugSession(0)
+    local oldArc = Dr.exitArcRoom
+    local ok0, _, _, c0, d0 = Dr.debugShape(0, 2, 10, 20, 40, -4)
+    local L0 = d0 - c0
+    local frac = 0.8
+    Dr.exitArcRoom = function(_, _, room) return room * frac end
+    local ok1, _, _, c1, d1 = Dr.debugShape(0, 2, 10, 20, 40, -4)
+    checkTrue(ok0 and ok1 and c1 == c0 and math.abs(d1 - (c0 + 0.8 * L0)) < 1e-6 and s.shapeArc == "arc"
+        and s.shapeArcLen0 == L0 and s.exitArcHit == true,
+        string.format("(pa-clamp) 出口 %.2f→%.2f（期望 %.2f）、shapeArc %s", L0, d1 - c1, 0.8 * L0, tostring(s.shapeArc)))
+    frac = 0.3
+    local _, _, _, c2, d2 = Dr.debugShape(0, 2, 10, 20, 40, -4)
+    checkTrue(d2 - c2 >= 0.6 * L0 - 1e-6 and d2 - c2 < L0 and s.shapeArc == "floor",
+        string.format("(pa-floor) 縮到 30%%：停在 %.2f（≥60%% %.2f）、shapeArc %s", d2 - c2, 0.6 * L0, tostring(s.shapeArc)))
+    -- (pa-want) 被承諾窗截短的出口（c 84：原長 3.9 m）：0.6 倍 2.34 比不陡的最短出口（exitWant 約 3.0）短＝地板取 exitWant
+    frac = 1
+    local _, _, _, cW0, dW0 = Dr.debugShape(0, 2, 10, 84, 104, -4)
+    frac = 0.01
+    local _, _, _, cW, dW = Dr.debugShape(0, 2, 10, 84, 104, -4)
+    local LW0 = dW0 - cW0
+    checkTrue(dW - cW > 0.6 * LW0 + 0.3 and dW - cW < LW0 and s.shapeArc == "floor", string.format(
+        "(pa-want) 截短出口 %.2f：地板取不陡的最短出口 %.2f（＞60%% %.2f）、shapeArc %s", LW0, dW - cW, 0.6 * LW0,
+        tostring(s.shapeArc)))
+    -- (pa-floor1) 出口地板至少 1 m：側移 0.25 的短出口（c 86.5：原長 1.4 m、不陡的最短出口不到 1 m）縮到 1.0，不是 0.6 倍的 0.84。
+    --   違規證明：拿掉 floor < 1 的下限＝紅。（oracle 複核附件）
+    do
+        frac = 1
+        local _, _, _, cL0, dL0 = Dr.debugShape(0, 2, 10, 86.5, 106.5, -0.25)
+        frac = 0.01
+        local _, _, _, cL, dL = Dr.debugShape(0, 2, 10, 86.5, 106.5, -0.25)
+        checkTrue(dL0 - cL0 > 1 and dL0 - cL0 < 1.6 and math.abs((dL - cL) - 1) < 1e-6 and s.shapeArc == "floor", string.format(
+            "(pa-floor1) 短出口 %.2f：地板 1 m（%.2f、shapeArc %s）", dL0 - cL0, dL - cL, tostring(s.shapeArc)))
+    end
+    frac = 0.3
+    s.endFitOff = true
+    local _, _, _, c3, d3 = Dr.debugShape(0, 2, 10, 20, 40, -4)
+    s.endFitOff = false
+    checkTrue(d3 - c3 == L0 and s.shapeArc == nil, "(pa-off) endFitOff：原長 " .. (d3 - c3) .. "、shapeArc " .. tostring(s.shapeArc))
+    -- 細桿放在縮短出口剛走完（d＋1.5）、回線 lane（fstate.laneBias）上方 0–1 m 的格心：縮短的線已回線＝撞；原長的線還在 offL 側
+    frac = 0.6
+    local _, _, _, cF, dF = Dr.debugShape(0, 2, 10, 20, 40, -4)
+    local baseF = s.fstate.laneBias or 0
+    drive.putPost(math.floor(dF) + 1, math.floor(baseF + 0.5))
+    -- 停留線（offL −4 不收）會先接住縮短出口：鏈上常駐 −2、車位 0 在它 +l 側、候選在 −l 側＝同側約束拒停留，只剩原長出口
+    driveReset(dveh)
+    drive.scanRound()
+    local chained, resident = s.laneChained, s.residentBias
+    s.laneChained, s.residentBias = true, -2
+    local okF, _, vF = Dr.debugSweepFallbacks(0, 2, 10, 20, 40, -4, "p33f")
+    local modeF, len0F = s.exitArcMode, s.exitArcLen0
+    s.laneChained, s.residentBias = chained, resident
+    -- (pa-degr) 同一組、不擋停留：縮短的線要靠停留（降檔）才過、原形狀在本檔過得去＝照原形狀、fell（1128a 審查：留邊不換成降檔）
+    local okD, _, vD = Dr.debugSweepFallbacks(0, 2, 10, 20, 40, -4, "p33d")
+    local modeD = s.exitArcMode
+    Dr.exitArcRoom = oldArc
+    checkTrue(okF == true and modeF == "fell" and len0F == L0, string.format(
+        "(pa-fell) 縮短的出口掃不過：照原形狀承諾、xa0＝原長（%s／%s／%s；原長 %.1f、xa0 %s、縮短 %.1f、回線 %.2f）", tostring(okF),
+        tostring(vF), tostring(modeF), L0, tostring(len0F), dF - cF, baseF))
+    checkTrue(okD == true and modeD == "fell" and not (type(vD) == "string" and string.sub(vD, 1, 4) == "stay"), string.format(
+        "(pa-degr) 縮短的線只剩停留接得住：照原形狀、不停留（%s／%s／%s）", tostring(okD), tostring(vD), tostring(modeD)))
+    -- (pb-*) 主擋物細桿在 hold 段 s 14.5、l −4.5，線（offL＝−4.5＋halfW＋0.1）在它上方掃掠淨距 0.10（巡航 pad 0.2 不過、物理 0.05 過）。
+    --   (pb-exit) 第二根在出口段 s 30.5、l −1.5（回線 lane 0 與 offL 之間＝出口往回線途中迎面靠近它），掃掠淨距約 0.14：
+    --   物理過、出口檔位（巡航 0.2）不過。(pb-tail) 第二根改在 s 21.5、l −4.5（c 20 之後、車身前伸 3.1 內＝群尾）＝照舊 physical。
+    local offL = -4.5 + s.vehicleProfile.halfW + 0.1
+    local function pb(x, y, hook)
+        drive.fillWorld(-10, 120, -8, 8)
+        drive.putPost(14, -5)
+        drive.putPost(x, y)
+        driveReset(dveh)
+        drive.scanRound()
+        if hook then hook(s.sensor) end
+        s.exitPadN = 0
+        return Dr.debugSweepFallbacks(0, 2, 10, 20, 70, offL, "p33b")
+    end
+    local okE, roE, vE = pb(30, -2)
+    local xpE = s.exitPadN
+    checkTrue(string.sub(tostring(vE), 1, 8) ~= "physical" and xpE > 0, string.format(
+        "(pb-exit) 出口段 s 30.5 的細桿：不以 physical 承諾、xpr 記到（%s／%s／%s、xpr %s）", tostring(okE), tostring(roE),
+        tostring(vE), tostring(xpE)))
+    local okT, roT, vT = pb(21, -5)
+    checkTrue(okT == true and string.sub(tostring(vT), 1, 8) == "physical" and s.exitPadN == 0, string.format(
+        "(pb-tail) 同一根在 s 21.5（c 之後、車身前伸內＝群尾）：照舊 physical、xpr 0（%s／%s／%s、xpr %s）", tostring(okT),
+        tostring(roT), tostring(vT), tostring(s.exitPadN)))
+    -- (pb-face) 同 (pb-exit)，但把出口那根的找縫取樣 hardL 翻到回線 lane 另一側（格心與取樣點分居兩側）：側別看世界座標
+    --   （Drive.hardFace）＝照樣套出口檔位。違規證明：側別改回 sen.hardL＝紅。
+    local okF2, roF2, vF2 = pb(30, -2, function(sen)
+        for i = 1, sen.hardN do
+            if sen.hardS[i] > 25 then
+                sen.hardL[i] = -sen.hardL[i]
+                if sen.hardLc then sen.hardLc[i] = sen.hardL[i] end
+            end
+        end
+    end)
+    checkTrue(string.sub(tostring(vF2), 1, 8) ~= "physical" and s.exitPadN > 0, string.format(
+        "(pb-face) 取樣橫向翻到另一側：照世界座標套出口檔位（%s／%s／%s、xpr %s）", tostring(okF2), tostring(roF2),
+        tostring(vF2), tostring(s.exitPadN)))
+    -- (pa-keep) 夾短的線以 physical 過、原形狀也只有 physical（主擋物在保持段，跟出口無關）＝不換：第三輪重掃把 tmpOv／shape 暫存
+    --   換回夾短那條（回傳的 d、s.shapeArc、tmpOv 線尾 s.tmpOvEndS＝d＋1 都是夾短的），exitArcMode 不是 fell。
+    --   違規證明：第三輪不重掃（沿用第一輪的回傳值）＝tmpOv 線尾是原形狀的＝紅。（oracle 完成前審核附件）
+    do
+        drive.fillWorld(-10, 120, -8, 8)
+        drive.putPost(14, -5)
+        driveReset(dveh)
+        drive.scanRound()
+        s.sfP1, s.sfP2, s.sfP3, s.sfP4 = 0, 0, 0, 0
+        local _, _, _, _, _, _, c0K, d0K = Dr.debugSweepFallbacks(0, 2, 10, 20, 70, offL, "p33k0")
+        local sf0 = s.sfP1 + s.sfP2 + s.sfP3 + s.sfP4 -- 單輪（不夾）的候選鏈失敗數
+        s.sfP1, s.sfP2, s.sfP3, s.sfP4 = 0, 0, 0, 0
+        Dr.exitArcRoom = function(_, _, room) return room * 0.8 end
+        local okK, _, vK, _, _, _, cK, dK = Dr.debugSweepFallbacks(0, 2, 10, 20, 70, offL, "p33k")
+        local sfK = s.sfP1 + s.sfP2 + s.sfP3 + s.sfP4
+        -- (pa-keep-cnt) 第二輪丟掉、第三輪重掃後，計數還原成第一輪的值（不是三輪相加）。違規證明：拿掉第三輪後的計數還原＝紅。
+        checkTrue(sf0 > 0 and sfK == sf0, string.format("(pa-keep-cnt) 三輪後候選鏈失敗數＝單輪（%d／%d）", sf0, sfK))
+        local arcK, modeK, endK = s.shapeArc, s.exitArcMode, s.tmpOvEndS
+        Dr.exitArcRoom = oldArc
+        checkTrue(okK == true and string.sub(tostring(vK), 1, 8) == "physical" and arcK == "arc" and modeK == nil
+            and math.abs((dK - cK) - 0.8 * (d0K - c0K)) < 1e-6 and math.abs(endK - (dK + 1)) < 1e-6, string.format(
+            "(pa-keep) 原形狀也要降檔：換回夾短那條（%s／%s、出口 %.2f→%.2f、shapeArc %s、mode %s、線尾 %.2f＝d＋1 %.2f）",
+            tostring(okK), tostring(vK), d0K - c0K, dK - cK, tostring(arcK), tostring(modeK), endK, dK + 1))
+    end
+    drive.fillWorld(-2, 70, -7, 7) -- 同 scenarioNudge 收尾的世界（下一個情境 (st) 接著用）
+end
+drive.scenarioP33Exit()
+
 -- (st) 窄縫進入段用滿跑道（1004g TUNE.ENTRY_STRETCH_MAX；E2E h1004f dixie9050w：唯一的縫物理淨距 0.16、彎上 11.45m 塞
 --   6.3m 側移、車到 b 有 19.9m 跑道沒用，轉向延遲落後 0.16–0.2 擦到）：B（+1.9）與 C（−2.6）夾一條縫，爬行設計的候選
 --   −0.40 物理淨距 <0.3 → 同一條 offL 以兩倍長的進入段重建、淨距不變＝換（variant 加 -stretch）；同組幾何把縫放寬到
@@ -29806,6 +29951,14 @@ function drive.scenarioArcShy()
     local xm = Dr.exitArcRoom(ms, hm - 20, 60, 4, LANE)
     checkTrue(xm < 60 and math.abs((ms.exitArcKra or -1) - eM) < 1e-9,
         string.format("(xa-max) 出口照合併預算縮（60→%.2f、kra %s；舊制原樣）", xm, tostring(ms.exitArcKra)))
+    -- (xa-slow) 1128a P33：弧速 ＜30 km/h（25 檔）時弧預算＝0，但硬點仍在左彎弧上＝照樣縮到 cap＝face−CLEAR−halfW（舊制只看 arcRaw＞0＝原樣）。
+    --   offL 3.0（原長出口在硬點處線位 2.35＞cap 2.01）。違規證明：exitArcRoom 的閘改回 arcRaw＞0＝紅。
+    local xw = shyAt(left, 100, FACE + 0.15, LANE)
+    xw.gearCap = 25
+    local xrw = Dr.exitArcRoom(xw, 80, 60, 3.0, 0.5)
+    checkTrue(xrw < 60 and math.abs(sm(0.5, 3.0, 80, xrw, 100) - want(0)) < 1e-6 and xw.exitArcKra == 0,
+        string.format("(xa-slow) 25 檔左彎：出口 60→%.2f、硬點處線位 %.3f＝cap %.3f（預算 0）、kra %s", xrw,
+            sm(0.5, 3.0, 80, xrw, 100), want(0), tostring(xw.exitArcKra)))
 end
 drive.scenarioArcShy()
 
@@ -37372,6 +37525,94 @@ function drive.scenarioEndArrive()
             end
         end
         checkTrue(okF, "(ext-fit) 情形 1：縮到 e、停點處偏移在圈內、重新掃掠、空間帽重算（" .. why .. "）")
+        -- (pb-ext) 承諾的出口檔位傳到出口加長（P33 1128a）：s.dodgeExitNeed 有值（大於承諾檔）＝加長那次掃掠帶出口檔位
+        --   （sweepLine 記 Drive.sweepScratch.xpDiff）；nil＝不帶。違規證明：extendDodgeExit 不寫 mailbox＝紅。
+        do
+            local scr, okP, whyP = Dr.sweepScratch, false, "前置：承諾"
+            local s3 = extArm(nil, 8)
+            if s3 then
+                s3.dodgeExitNeed = s3.vehicleProfile.halfW + 0.6
+                scr.xpDiff = nil
+                Dr.extendDodgeExit(s3, s3.sensor, 0)
+                local d1 = scr.xpDiff
+                local s4 = extArm(nil, 8)
+                if s4 then
+                    s4.dodgeExitNeed, scr.xpDiff = nil, 123
+                    Dr.extendDodgeExit(s4, s4.sensor, 0)
+                    okP = d1 ~= nil and d1 > 0 and scr.xpDiff == nil
+                    whyP = string.format("帶檔位 xpDiff %s、不帶 %s", tostring(d1), tostring(scr.xpDiff))
+                end
+            end
+            checkTrue(okP, "(pb-ext) 加長照承諾的出口檔位掃（" .. whyP .. "）")
+            -- (pb-ext-pad) 行為：加長線出口段、offL 外側一根細桿（s＝c＋車身前伸＋1、車身側緣到桿心 gap）。gap 0.45：本檔 pad 0.29 過、出口 pad 0.6
+            --   不過＝帶檔位不加長（舊線不動、記 dodgeExtendFailS、發 why=exit-pad、xpr 計數還原）、不帶照樣加長；gap 0.10＝物理就撞＝不發 exit-pad。
+            --   違規證明：拿掉 exit-pad 事件區塊；Drive.sweepHit 的 xpr 不看 clearance＝紅。（oracle 完成前審核附件）
+            local evs, origEv = {}, MDADDiagnostics.event
+            local function hookEv() MDADDiagnostics.event = function(_, name, a) if name == "dodge" and type(a) == "table" then evs[#evs + 1] = a end end end
+            local function padEv() for _, e in ipairs(evs) do if e.why == "exit-pad" then return e end end return nil end
+            local function run(need, gap)
+                local sx = extArm(nil, 8)
+                if not sx then return nil end
+                local fs, sen = sx.fstate, sx.sensor
+                local i = (sen.hardN or 0) + 1
+                local hs, hl = fs.offC + sx.bodyReach + 1.0, fs.offL + sx.vehicleProfile.halfW + gap
+                sen.hardX[i], sen.hardY[i], sen.hardR[i], sen.hardB[i] = hs + 0.5, hl + 0.5, 0.15, 0
+                sen.hardS[i], sen.hardL[i] = hs, hl
+                if sen.hardLc then sen.hardLc[i] = hl end
+                if sen.hardW then sen.hardW[i] = 0.15 end
+                sen.hardN = i
+                sx.dodgeExitNeed = need and sx.vehicleProfile.halfW + need or nil
+                sx.exitPadN, sx.diag = 7, true
+                local d0 = fs.offD
+                evs = {}
+                hookEv()
+                local ok = Dr.extendDodgeExit(sx, sen, 0)
+                local ev1, fail1, dd1 = padEv(), sx.dodgeExtendFailS, fs.offD - d0
+                -- 同一次承諾再被出口檔位擋下（跳過重試間距）：不再發 exit-pad（s.exitPadHeld）
+                local evR = nil
+                if not ok and ev1 then
+                    evs = {}
+                    sx.dodgeExtendFailS = nil
+                    Dr.extendDodgeExit(sx, sen, 0)
+                    evR = padEv() ~= nil
+                end
+                MDADDiagnostics.event = origEv
+                return ok, dd1, ev1, sx.exitPadN, fail1, hs + 0.5, hl + 0.5, evR
+            end
+            local okN, dN, evN = run(nil, 0.45)
+            local okP2, dP, evP, nP, failP, hx, hy, againP = run(0.6, 0.45)
+            checkTrue(againP == false, "(pb-ext-dedup) 同一次承諾再被出口檔位擋下：exit-pad 只記一筆（第二次 " .. tostring(againP) .. "）")
+            local okH, dH, evH, nH = run(0.6, 0.10)
+            checkTrue(okN == true and dN > 4 and evN == nil and okP2 == false and dP == 0 and evP ~= nil and evP.x == hx and evP.y == hy
+                and nP == 7 and failP ~= nil and okH == false and evH == nil and nH == 7,
+                string.format("(pb-ext-pad) 不帶檔位加長 %s／+%s；帶檔位 %s／+%s、exit-pad %s、xpr %s；物理就撞 %s、exit-pad %s、xpr %s",
+                    tostring(okN), tostring(dN), tostring(okP2), tostring(dP), tostring(evP ~= nil), tostring(nP), tostring(okH),
+                    tostring(evH ~= nil), tostring(nH)))
+            -- (pb-ext-band) 加長線出口段的帶檢查用出口 pad：完成快照的帶緣放在 offL 外側 halfW＋0.575（本檔物理 pad 的帶過、出口 pad
+            --   0.6 的帶不過）＝帶檔位不加長、發 exit-pad（帶拒收沒有命中點，x 缺）；不帶照樣加長。
+            --   違規證明：拿掉 sweepLine 出口段的 padX 帶檢查＝紅。
+            local bandRes = {}
+            for _, need in ipairs({ 0.6, false }) do
+                local sx = extArm(nil, 8)
+                if sx then
+                    local fs, sen = sx.fstate, sx.sensor
+                    local sg = fs.offL > (sx.dodgeBaseL or 0) and 1 or -1
+                    sen.corridorHalf = 10
+                    sen.completedBandBias = fs.offL + sg * (sx.vehicleProfile.halfW + 0.575) - sg * 10
+                    sx.dodgeExitNeed = need and sx.vehicleProfile.halfW + need or nil
+                    evs = {}
+                    hookEv()
+                    local ok = Dr.extendDodgeExit(sx, sen, 0)
+                    MDADDiagnostics.event = origEv
+                    local ev = padEv()
+                    bandRes[#bandRes + 1] = { ok = ok, pad = ev ~= nil and ev.x == nil }
+                end
+            end
+            local bW, bN = bandRes[1] or {}, bandRes[2] or {}
+            checkTrue(bW.ok == false and bW.pad == true and bN.ok == true and bN.pad == false, string.format(
+                "(pb-ext-band) 出口段帶檢查用出口 pad：帶檔位 %s／exit-pad %s；不帶 %s／%s", tostring(bW.ok), tostring(bW.pad),
+                tostring(bN.ok), tostring(bN.pad)))
+        end
         -- (ext-fit-fail)
         s2 = extArm(nil, 8)
         local okX = false
@@ -37605,6 +37846,80 @@ function drive.scenarioEndArrive()
             end
         end
         checkTrue(okD, "(demote-fell) 降檔縫到站形狀掃不過：退回原形狀照樣承諾（" .. why .. "）")
+        Dr.stop(0, nil)
+    end
+    -- (demote-arc) 1128a（oracle 完成前審核）：降檔複審的出口彎外留邊也走退路——夾短（0.6）的爬行縫掃不過＝照原形狀承諾、xa=fell、
+    --   xa0＝原長。直路長群、路線到 x 88（不碰到站形狀）；先各問一次（原形狀／夾短）拿兩條實際承諾線，在兩線相距最遠的取樣點、
+    --   夾短那條線往原形狀反側 0.3 m 的格心擺一根細桿。違規證明：demotePlan 的退路只看 endFitHit＝紅。
+    do
+        drive.fillWorld(-5, 90, -14, 14)
+        drive.putRoad(-5, 90, -12, 12)
+        for x = 30, 44 do
+            for y = -3, 3 do drive.putSolid(x, y, "harness_block") end
+        end
+        local sd = startAt({ 0.5, 0.5, 88, 0.5 }, 20, 12, 0.5, 0)
+        local okA, whyA = false, "前置：start"
+        local oldArc = Dr.exitArcRoom
+        local function demote(frac)
+            if frac then Dr.exitArcRoom = function(_, _, room) return room * frac end end
+            local r = Dr.debugDemotePlan(0, 0)
+            Dr.exitArcRoom = oldArc
+            return r
+        end
+        if sd then
+            drive.scanRound(true)
+            local rO = demote(nil)
+            local ox, oy, oN, oS0 = {}, {}, sd.lastOvN or 0, sd.lastOvS0
+            for k = 1, oN do ox[k], oy[k] = sd.tmpOvX[k], sd.tmpOvY[k] end
+            local rC = demote(0.6)
+            local modeC, len0C = sd.dodgeArcMode, sd.dodgeArcLen0
+            local bk, bd = nil, 0
+            if rO and rC and modeC == "arc" and sd.lastOvS0 == oS0 then
+                for k = 1, math.min(oN, sd.lastOvN) do
+                    local dx, dy = sd.tmpOvX[k] - ox[k], sd.tmpOvY[k] - oy[k]
+                    if dx * dx + dy * dy > bd then bk, bd = k, dx * dx + dy * dy end
+                end
+            end
+            if bk and bd > 4 then
+                local px, py = sd.tmpOvX[bk], sd.tmpOvY[bk]
+                local sg = oy[bk] > py and -1 or 1 -- 原形狀線在夾短線的哪一側：柱往反側擺
+                drive.putPost(math.floor(px), math.floor(py + sg * 0.3))
+                drive.scanRound(true)
+                local r = demote(0.6)
+                local mA, lA = sd.dodgeArcMode, sd.dodgeArcLen0
+                okA = r == true and mA == "fell" and lA == len0C
+                whyA = string.format("柱 (%.1f,%.1f) 兩線差 %.2f；demote %s xa %s xa0 %s（夾短時 xa0 %s）", px, py, math.sqrt(bd),
+                    tostring(r), tostring(sd.dodgeArcMode), tostring(sd.dodgeArcLen0), tostring(len0C))
+            else
+                whyA = string.format("前置：原形狀 %s、夾短 %s xa %s、兩線差 %.2f", tostring(rO), tostring(rC), tostring(modeC),
+                    math.sqrt(bd))
+            end
+        end
+        checkTrue(okA, "(demote-arc) 降檔縫夾短的出口掃不過：退回原形狀照樣承諾（" .. whyA .. "）")
+        Dr.stop(0, nil)
+    end
+    -- (adopt-x) 1128a（oracle 完成前審核）：候選鏈採納（adopt）把出口留邊與出口檔位帶進承諾——xa／xa0 進 dodge commit、
+    --   s.sweepExitNb 進 s.dodgeExitNeed（給出口加長）。夾 0.8 走真 replan 承諾；出口檔位以包住 Drive.sweepFallbacksOnce 設值模擬
+    --   物理複驗。違規證明：adopt 不抄 xa／xa0 或 dodgeExitNeed＝紅。
+    do
+        drive.fillWorld(-5, 90, -14, 14)
+        drive.putRoad(-5, 90, -12, 12)
+        for x = 30, 44 do
+            for y = -3, 3 do drive.putSolid(x, y, "harness_block") end
+        end
+        local oldArc, oldFb = Dr.exitArcRoom, Dr.sweepFallbacksOnce
+        local function pass(sx, ok, ...)
+            if ok then sx.sweepExitNb = 1.23 end
+            return ok, ...
+        end
+        Dr.exitArcRoom = function(_, _, room) return room * 0.8 end
+        Dr.sweepFallbacksOnce = function(sx, ...) return pass(sx, oldFb(sx, ...)) end
+        local sx = startAt({ 0.5, 0.5, 62, 0.5 }, 20, 12, 0.5, 0)
+        local cm = sx and roundsToCommit(12)
+        Dr.exitArcRoom, Dr.sweepFallbacksOnce = oldArc, oldFb
+        checkTrue(cm ~= nil and cm.xa == "arc" and finite(cm.xa0) and cm.xa0 > (cm.len or 0) and sx.dodgeExitNeed == 1.23,
+            string.format("(adopt-x) 承諾帶出口留邊與出口檔位（xa %s xa0 %s len %s、dodgeExitNeed %s）", tostring(cm and cm.xa),
+                tostring(cm and cm.xa0), tostring(cm and cm.len), tostring(sx and sx.dodgeExitNeed)))
         Dr.stop(0, nil)
     end
 

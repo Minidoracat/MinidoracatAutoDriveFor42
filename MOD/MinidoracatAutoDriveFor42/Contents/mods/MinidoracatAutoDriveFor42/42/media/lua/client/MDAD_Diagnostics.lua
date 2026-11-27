@@ -203,6 +203,7 @@ local EK = {
     -- kx ky kd arm d l u attempt
     "nsk",
     "ef", -- 1114h：dodge commit 的終點到站形狀來源（fit／fell；Driver sweepWithFallbacks）
+    "xa", "xa0", "xpr", -- 1128a P33：dodge commit 的出口彎外留邊（arc／floor／fell）、夾前出口長；出口檔位擋下（本檔會過）的掃掠命中數（commit／blocked）
     "comp", "mo", -- 1114k：cut commit 的圓角追線落後前饋（m，右正、往彎外；0＝前饋過頭那條掃不過）與前饋過頭那條線的掃掠淨距
     "fresh", "rcv", -- 1114l：cut commit 這次把判堵階梯歸零了沒（同一個 K 第一次承諾＝true）、承諾當下作廢的恢復請求原因（Drive.cutLadderReset）
     "rw", -- 1114n：cut none why=route 的拼不上理由（Drive.cutArmsAt 結構預檢：bend-in／bend-out／end）
