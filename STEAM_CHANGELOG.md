@@ -1,19 +1,17 @@
-[h1]Minidoracat MiniMap - AutoDrive for B42 42.22.2-0.38.2[/h1]
-[i]2026-11-27[/i]
+[h1]Minidoracat MiniMap - AutoDrive for B42 42.22.2-0.38.3[/h1]
+[i]2026-11-28[/i]
 
 [b]English summary[/b]
 [list]
-[*] AutoDrive keeps further from street lights, trees and lamp posts on the outside of left curves, including S-bends, zombie dodges and the return to the lane after passing an obstacle.
-[*] Fixed: in rare cases the check around the car before a U-turn could look at the wrong spot, and turning off "Show autodrive trajectory and navigation line" might not clear the line for every player.
+[*] After going around an obstacle just before a left curve, AutoDrive now returns to its lane sooner and no longer scrapes trees or street lights on the outside of the curve.
+[*] When the gap past an obstacle is tight, the return to the lane still keeps the normal distance from things on the outside of the curve.
 [/list]
 
 [h3]🔧 修正[/h3]
 [list]
-[*] [b]左彎外側的路燈、樹、燈柱更不容易擦到[/b]：0.37.0 起，自駕在左彎會離彎外的路邊物遠一點，但還有幾種情況會擦撞。
+[*] [b]繞過障礙物後轉回車道時，不再擦到左彎外側的樹或路燈[/b]：在左彎前繞過路邊障礙物（例如路燈）後，轉回車道的那一段原本可能貼著彎道外側的樹開過去。
 [list]
-[*] 先右彎、緊接著左彎（S 彎）時，車會收得更靠內，避免出第一個彎時的擺動加上第二個彎的外甩一起把車帶到路邊。
-[*] 在左彎閃殭屍時，不再為了閃殭屍把車推到彎外的樹或燈柱旁；閃不開時會照原本的規則直接撞過殭屍，不去擦路邊物。
-[*] 繞過障礙物後回到車道的那一段，不再被拉長到彎外的路邊物旁邊。
+[*] 繞行一開始就會把轉回車道的那段收短、提早回到車道；收短之後反而過不去，或得改成更慢、更貼的走法才過得去時，照原本的路線繞。這一段的速度可能比以前稍慢。
+[*] 障礙物之間的縫很窄、只能貼著過時，轉回車道那一段仍會和彎道外側的東西保持一般的距離，不再跟著一起貼過去。
 [/list]
-[*] [b]調頭前的周圍檢查與軌跡清除更可靠[/b]：少數情況下，調頭前檢查車子周圍有沒有東西時可能量錯位置；關掉選項「顯示自動駕駛軌跡與導航線」時，也可能沒把所有玩家的線清乾淨。兩者都已修正。
 [/list]

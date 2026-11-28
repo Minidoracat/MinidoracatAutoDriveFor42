@@ -83,6 +83,7 @@
 新增檢查時：同步把對應的坑記進 AGENTS.md 踩坑錄，並依「踩坑進化協議」回流到
 pz-mod-template（見 AGENTS.md）。
 """
+from collections import Counter
 from datetime import date
 import json
 import os
@@ -320,15 +321,18 @@ def short_calls(lua_roots, extra=(), vanilla=None):
     掛在根表本身的函式（`function Root.f(`）一樣跨檔對。別名照呼叫的位置找：看得到、最近宣告的那個
     `local 名稱 = …`，`local A, B = R.A, R.B` 這種平行指派也認；右邊可以是 `A and A.g`（取 and 最後一項）或
     `A.g or B.h`（每一個都算，取最少的），`or {}`／`or nil`／`or false` 略過，含呼叫或索引的不認。沒前綴的呼叫對同檔最近、
-    還在範圍內的 local 函式，`local f = Check.safehouse` 這種別名跟著對；`self:f(` 對同檔的方法；認不出接收者的
-    `obj:f(` 照方法名對（同名取最少的），`x.f(` 不看（別人的表或欄位裡的函式：`ArrayList.new()`、`UI.Button.new`）。
+    還在範圍內的 local 函式，`local f = Check.safehouse` 這種別名跟著對；`self:f(` 對同檔的方法；接收者是原版全域表的
+    `ISToolTip:f(` 只對 MOD 覆寫在那個表上的 f；其他認不出接收者的 `obj:f(` 照方法名對（同名取最少的；沒有原版 Lua 時
+    分不出原版全域表，這一種不看，只會少報），`x.f(` 不看（別人的表或欄位裡的函式：`ArrayList.new()`、`UI.Button.new`）。
     最後一個引數是 ... 的不報；是單獨一個呼叫的（會展開成好幾個值）當一個算、照報，key 的 < 換成 ~、後面接那個
     呼叫的函式名（換成別的函式就不算 baseline 裡那一筆）。
     定義只認 `function A.b(…)`、`function A:b(…)`、`local function b(…)`、`A.b = function(…)`（表建構式裡的欄位不算）；
-    `pcall(f, …)` 當成呼叫 f。extra＝另外要看的檔（自驗 fixture）：當成 MOD 的檔掃，key 的檔是相對 REPO。
+    `pcall(f, …)` 當成呼叫 f。extra＝另外要看的檔（自驗 fixture，放在同一個資料夾）：當成 MOD 的檔掃，key 的檔是相對那個資料夾。
     vanilla＝遊戲的 media/lua：MOD 覆寫原版表上的函式（表不是 MOD 自己的，原版有同一個函式）時，固定參數個數不能多於
     原版呼叫點傳的最少個數，key＝檔|表.函式|原版幾個<要幾個。原版的呼叫照接收者對：`表:f(`、定義那個函式的檔裡的
-    `self:f(`，原版只有一個表定義這個名字時任何接收者都算；最後一個引數是 ... 或呼叫的不算。"""
+    `self:f(`，原版只有一個表定義這個名字時任何接收者都算；最後一個引數是 ... 或呼叫的不算。
+    計時動作（`X = ISBaseTimedAction:derive(…)` 或它的子類別，MOD 與原版的 derive 都看）的 `new` 那幾筆照報、key 不變，
+    位置說明多一句：多人客戶端只把 new 的固定參數送到伺服器，不能照一般做法改成 ...（AnyCar 2026-11-27）。"""
     name_re = r"[A-Za-z_]\w*"
     chain_re = rf"{name_re}(?:\.{name_re})*"
     texts, base_of, defs, def_parens, roots, mods, regs, aliases = {}, {}, {}, set(), {}, {}, {}, {}
@@ -379,7 +383,7 @@ def short_calls(lua_roots, extra=(), vanilla=None):
             "path": path, "line": text.count("\n", 0, pos) + 1, "pos": pos, "table": table, "form": form,
             "need": fixed(params), "local": local, "end": scope_end(text, pos) if local else len(text)})
 
-    files = [(f, root) for root in lua_roots for f in iter_files(root, {".lua"})] + [(f, REPO) for f in extra]
+    files = [(f, root) for root in lua_roots for f in iter_files(root, {".lua"})] + [(f, os.path.dirname(f)) for f in extra]
     for path, root in files:
         with open(path, encoding="utf-8", errors="replace") as fh:
             texts[path] = lua_clean(fh.read())
@@ -458,7 +462,12 @@ def short_calls(lua_roots, extra=(), vanilla=None):
         return None if not m or head[:m.start()].rstrip()[-1:] in (".", ":") else m.group(1)
 
     keywords = {"if", "and", "or", "not", "return", "while", "until", "elseif", "in", "function", "for", "do", "then", "else", "end", "local"}
-    hits = []
+    hits, timed_new = [], []   # timed_new：(hits 的位置, 表名)，函式名是 new 的冒號定義，annotate() 再看是不是計時動作
+    vraw = []                  # (路徑, 原文)：原版 Lua 只讀一次
+    for path in (iter_files(vanilla, {".lua"}) if vanilla else ()):
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            vraw.append((path, fh.read()))
+    vglobals = {g for _, t in vraw for g in re.findall(rf"^({name_re})\s*=(?!=)", t, re.M)} - root_names
     for path, text in texts.items():
         rel = os.path.relpath(path, base_of[path]).replace(os.sep, "/")
         for m in re.finditer(rf"([.:]?)\b({name_re})\s*\(", text):
@@ -500,9 +509,12 @@ def short_calls(lua_roots, extra=(), vanilla=None):
                     cands = mine
                 elif chain and [d for d in mine if d["table"] == chain]:
                     cands = [d for d in mine if d["table"] == chain]
-                elif sep == ":":   # 認不出是誰的方法呼叫：照方法名，同名取最少的
+                elif sep == ":" and chain in vglobals and not alias_of(path, chain, m.start()):
+                    # 原版全域表（ISToolTip:new()）：只對 MOD 覆寫在這個表上的方法，不照方法名對到別人的
+                    cands = [d for d in named if d["form"] == "colon" and d["table"] == chain]
+                elif sep == ":" and vanilla:   # 認不出是誰的方法呼叫：照方法名，同名取最少的
                     cands = [d for d in named if d["form"] == "colon"]
-                else:              # 別人的表或欄位裡的函式
+                else:   # 別人的表或欄位裡的函式；沒有原版 Lua 時分不出原版全域表，上一支也不跑（只會少報，不會比 baseline 多）
                     cands = []
             if not cands or last == "...":
                 continue
@@ -523,6 +535,32 @@ def short_calls(lua_roots, extra=(), vanilla=None):
                 hits.append((f"{rel}|{name}|{count}{'~' if tail else '<'}{need}" + (f"|{callee}" if tail else ""),
                              f"{rel}:{line}  {name} 傳 {count} 個{'（最後一個是呼叫，它回幾個值要自己看）' if tail else ''}、"
                              f"定義 {need} 個（{os.path.basename(d['path'])}:{d['line']}）"))
+                if name == "new" and d["form"] == "colon":
+                    a = alias_of(d["path"], d["table"], d["pos"])
+                    t = (single(a[3]) if a else None) or d["table"]
+                    if chain in (t, d["table"], "self"):   # ISToolTip:new() 照方法名對到別的 new 時不算
+                        timed_new.append((len(hits) - 1, t))
+
+    def annotate():
+        """計時動作的 new 那幾筆在位置說明加一句（key 不變，baseline 照舊對得上）。"""
+        if not timed_new:
+            return hits
+        derive = re.compile(rf"^[ \t]*(?:local\s+)?({name_re})\s*=\s*({chain_re})\s*:\s*derive\s*\(", re.M)
+        parents = {}
+        for _, text in vraw:
+            parents.update(derive.findall(text))
+        for text in texts.values():
+            parents.update(derive.findall(text))
+        for i, t in timed_new:
+            seen = set()
+            while t and t not in seen and t != "ISBaseTimedAction":
+                seen.add(t)
+                t = parents.get(t)
+            if t == "ISBaseTimedAction":
+                key, where = hits[i]
+                hits[i] = (key, where + "；這是計時動作的 new：多人客戶端只把 new 的固定參數送到伺服器（NetTimedAction.java:41-51），"
+                                        "不能改成 ...；new 裡先檢查型別、complete 在伺服器重新檢查，再 --rebase-args")
+        return hits
 
     # 覆寫原版表上的函式：原版自己的呼叫點上面那段看不到（Tesla canPlaceMoveableInternal，2026-11-26）
     over = {}
@@ -535,12 +573,10 @@ def short_calls(lua_roots, extra=(), vanilla=None):
             if t and "." not in t and t not in root_names and not modkey(d["path"], d["table"], d["pos"]):
                 over.setdefault((t, name), []).append(d)
     if not (over and vanilla):
-        return hits
+        return annotate()
     pat = re.compile(rf"([.:])({'|'.join(sorted({f for _, f in over}))})\s*(\(|=\s*function\b)")
     vdefs, vcalls = {}, []   # 函式名 → {表: {定義它的檔}}；(函式名, 接收者, 檔, 行, 換算成 . 呼叫的引數個數)
-    for path in iter_files(vanilla, {".lua"}):
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            text = fh.read()
+    for path, text in vraw:
         if not pat.search(text):
             continue
         text = lua_clean(text)
@@ -569,7 +605,9 @@ def short_calls(lua_roots, extra=(), vanilla=None):
                 hits.append((f"{rel}|{fn}|原版{low[4] - colon}<{d['need']}",
                              f"{rel}:{d['line']}  覆寫 {fn} 固定 {d['need']} 個參數，原版呼叫最少只傳 {low[4] - colon} 個"
                              f"（{os.path.relpath(low[2], vanilla).replace(os.sep, '/')}:{low[3]}）"))
-    return hits
+                if name == "new" and colon:
+                    timed_new.append((len(hits) - 1, t))
+    return annotate()
 
 
 # 1c 的自驗 fixture：行尾 --! 的行要被報成少傳，其他行不能報；驚嘆號後面接的字是尾端呼叫那一筆 key 最後記的函式名，
@@ -600,6 +638,9 @@ function S.canArm(p, v, remote) end
 local Ch = {}
 FixRoot.Charge = Ch
 function Ch.powerUntil(chg, now, gen) end
+FixTimed = ISBaseTimedAction:derive("FixTimed")
+function FixTimed:new(ch, extra) end
+function ISToolTipFix:setName(a, b) end
 """
 ARGS_FIXTURE_CALLS = """local B = FixRoot
 local Q, L = B.Queue, B.PlanLibrary -- 平行指派的別名
@@ -664,6 +705,11 @@ P.other2 = function(self, a, b) end --!原版2<3
 function FixVan:mine(a, b, c, d) end
 local Own = {}
 function Own:place(a, b, c, d, e) end
+FixTimed:new(ch) --! 計時動作：照報、說明多一句
+ISToolTipFix:new() -- 原版全域表：不照方法名對到 FixTimed:new
+ISToolTipFix:setName(1) --! 原版全域表上 MOD 覆寫的方法照報（跨檔）
+tip:new() --! 認不出接收者：照方法名對到 FixTimed:new，照報、不加說明
+function ISTimedSub:new(ch, sq, extra) end --!原版1<3 計時動作（原版子類別的子類別）
 """
 ARGS_FIXTURE_VANILLA = {"shared/FixVan.lua": """FixVan = ISBaseObject:derive("FixVan")
 function FixVan:place(ch, sq, item, force) end
@@ -681,12 +727,19 @@ v:other2(1)
 FixVan.other(v, 1)
 thing:place(1)
 function Elsewhere:place(a) self:place(1) end
+""", "shared/TimedSub.lua": """ISTimedFix = ISBaseTimedAction:derive("ISTimedFix")
+function ISTimedFix:new(ch) end
+ISTimedSub = ISTimedFix:derive("ISTimedSub")
+function ISTimedSub:new(ch, sq) end
+local a = ISTimedSub:new(ch)
+ISToolTipFix = ISPanel:derive("ISToolTipFix")
 """}
 
 
 def self_test_args():
-    """用 ARGS_FIXTURE_* 驗 short_calls：標 --! 的行要報（尾端呼叫要記對函式名）、其他行不報。回錯誤說明或 None。"""
-    with tempfile.TemporaryDirectory(dir=REPO) as directory:
+    """用 ARGS_FIXTURE_* 驗 short_calls：標 --! 的行要報（尾端呼叫要記對函式名）、其他行不報；寫「計時動作」的行說明要多那一句。
+    回錯誤說明或 None。放系統暫存目錄：不在 repo 裡留下中斷時的殘檔，唯讀的 repo 也能跑。"""
+    with tempfile.TemporaryDirectory() as directory:
         defs_path, calls_path = os.path.join(directory, "defs.lua"), os.path.join(directory, "calls.lua")
         bodies = {defs_path: ARGS_FIXTURE_DEFS, calls_path: ARGS_FIXTURE_CALLS}
         vanilla = os.path.join(directory, "vanilla")
@@ -695,17 +748,26 @@ def self_test_args():
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w", encoding="utf-8", newline="\n") as fh:
                 fh.write(body)
-        calls = os.path.relpath(calls_path, REPO).replace(os.sep, "/")
-        want = {i: m.group(1) for i, line in enumerate(ARGS_FIXTURE_CALLS.splitlines(), 1)
-                for m in [re.search(r"--!(\S*)", line)] if m}
-        seen = {}
-        for key, where in short_calls([], [defs_path, calls_path], vanilla):
-            if not key.startswith(calls + "|"):
+        lines = ARGS_FIXTURE_CALLS.splitlines()
+        want = {i: m.group(1) for i, line in enumerate(lines, 1) for m in [re.search(r"--!(\S*)", line)] if m}
+        want_timed = {i for i, line in enumerate(lines, 1) if "計時動作" in line}
+        seen, seen_timed = {}, set()
+        with_vanilla = short_calls([], [defs_path, calls_path], vanilla)
+        for key, where in with_vanilla:
+            if not key.startswith("calls.lua|"):
                 return f"fixture 的定義檔被報：{where}"
-            seen[int(where.split("  ")[0].rsplit(":", 1)[1])] = \
-                key.rsplit("|", 1)[1] if "~" in key or "|原版" in key else ""
+            line = int(where.split("  ")[0].rsplit(":", 1)[1])
+            seen[line] = key.rsplit("|", 1)[1] if "~" in key or "|原版" in key else ""
+            if "計時動作的 new" in where:
+                seen_timed.add(line)
+        # 沒有原版 Lua 的機器報的要是有原版時的子集，否則拿有原版時建的 baseline 去比會多出 FAIL
+        extra_keys = Counter(k for k, _ in short_calls([], [defs_path, calls_path])) - Counter(k for k, _ in with_vanilla)
     if seen != want:
         return f"fixture 標的 {sorted(want.items())}，實際報的 {sorted(seen.items())}"
+    if seen_timed != want_timed:
+        return f"計時動作的 new 應該在第 {sorted(want_timed)} 行加說明，實際是 {sorted(seen_timed)}"
+    if extra_keys:
+        return f"沒有原版 Lua 時多報了 {sorted(extra_keys)}"
     return None
 
 
@@ -753,18 +815,25 @@ else:
     _now = {}
     _vanilla = os.path.join(PZ_PATH, "media", "lua")
     if not os.path.isdir(_vanilla):
-        skip("覆寫原版函式的固定參數（第 1c 項的一部分）", f"找不到 {_vanilla}（設定 PZ_PATH）")
+        skip("覆寫原版函式、認不出接收者的方法呼叫（第 1c 項的一部分）", f"找不到 {_vanilla}（設定 PZ_PATH）")
         _vanilla = None
     for _key, _where in short_calls([os.path.join(m, "lua") for m in MEDIA_DIRS if os.path.isdir(os.path.join(m, "lua"))],
                                     vanilla=_vanilla):
         _now.setdefault(_key, []).append(_where)
     _total = sum(len(v) for v in _now.values())
-    if "--rebase-args" in sys.argv:
+    if "--rebase-args" in sys.argv and not _vanilla:
+        fail(_t, ["--rebase-args 要讀原版 Lua（設定 PZ_PATH）：沒有原版時報得比較少，建出來的 baseline 到有遊戲的機器會 FAIL"])
+    elif "--rebase-args" in sys.argv:
+        _head = ["# 既有的「固定參數少傳」呼叫（scripts/verify_mod.py 第 1c 項）。只會變少：改掉一處就重跑\n",
+                 "# python scripts/verify_mod.py --rebase-args。不要為了讓新的呼叫通過而重跑：少的補 nil 傳齊，\n",
+                 "# 或把選用參數改成 ... 接。只有確定呼叫的是 Java 方法，或最後一個引數的呼叫確定每條路都回夠多個值\n",
+                 "# （key 裡是 ~，後面是那個呼叫的函式名）才加進來。\n"]
+        _notes = []   # repo 自己寫的 # 說明（例：為什麼某幾筆留著）重寫時保留
+        if os.path.isfile(_base_path):
+            with open(_base_path, encoding="utf-8") as fh:
+                _notes = [l if l.endswith("\n") else l + "\n" for l in fh if l.startswith("#") and l not in _head]
         with open(_base_path, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write("# 既有的「固定參數少傳」呼叫（scripts/verify_mod.py 第 1c 項）。只會變少：改掉一處就重跑\n"
-                     "# python scripts/verify_mod.py --rebase-args。不要為了讓新的呼叫通過而重跑：少的補 nil 傳齊，\n"
-                     "# 或把選用參數改成 ... 接。只有確定呼叫的是 Java 方法，或最後一個引數的呼叫確定每條路都回夠多個值\n"
-                     "# （key 裡是 ~，後面是那個呼叫的函式名）才加進來。\n")
+            fh.write("".join(_head + _notes))
             for _key in sorted(_now):
                 fh.write(f"{len(_now[_key])}\t{_key}\n")
         ok(f"{_t}（baseline 重寫，{_total} 處）")
@@ -782,9 +851,13 @@ else:
                 for k in sorted(_now) if len(_now[k]) > _base.get(k, 0) for w in _now[k]]
         if _bad:
             fail(_t, _bad + ["少的補 nil 傳齊，或把選用參數改成 ... 接（local a, b = ...）；覆寫原版函式時，原版有人"
-                             "不傳的參數改成 ... 接、原樣轉給原版；確定呼叫的是 Java 方法才 python scripts/verify_mod.py --rebase-args"])
+                             "不傳的參數改成 ... 接、原樣轉給原版；計時動作的 new 例外（多人只送固定參數，見該行說明）；"
+                             "確定呼叫的是 Java 方法才 python scripts/verify_mod.py --rebase-args"])
         else:
-            ok(f"{_t}（新增 0 處；既有 {_total} 處記在 baseline）")
+            # 沒有原版 Lua 時少報的是沒檢查，不是改掉了
+            _stale = sum(max(0, n - len(_now.get(k, ()))) for k, n in _base.items()) if _vanilla else 0
+            ok(f"{_t}（新增 0 處；既有 {_total} 處記在 baseline"
+               + (f"；baseline 多記 {_stale} 處已不再報，python scripts/verify_mod.py --rebase-args 可縮小）" if _stale else "）"))
 
 # ---- 2. BOM / CRLF ----
 bad = []
